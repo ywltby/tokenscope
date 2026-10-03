@@ -25,6 +25,8 @@ rustc-ice-*.txt
 .claude/
 .DS_Store
 Thumbs.db
+# ZCode 工具忽略文件（内容自动同步自 .gitignore，属工具产物）
+.zcodeignore
 
 # ── GUI（Tauri + Vue）───────────────────────────────────
 frontend/node_modules/
