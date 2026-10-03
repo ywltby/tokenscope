@@ -8,7 +8,7 @@ use comfy_table::{ContentArrangement, Table};
 
 use crate::aggregate::GroupBy;
 use crate::model::AgentKind;
-use crate::report::{SourceReport, SummaryReport};
+use crate::report::{EventList, SourceReport, SummaryReport};
 
 pub fn table(report: &SummaryReport) -> String {
     let by_label = match report.by {
@@ -93,6 +93,49 @@ fn source_footer(s: &SourceReport) -> String {
         }
     }
     f
+}
+
+/// 明细表（CLI events 子命令）。
+pub fn events_table(list: &EventList) -> String {
+    let mut t = Table::new();
+    t.load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec![
+            "时间",
+            "Agent",
+            "模型",
+            "项目",
+            "输入",
+            "输出",
+            "缓存写",
+            "缓存读",
+            "费用$",
+        ]);
+    for r in &list.rows {
+        let cost = match r.cost_usd {
+            Some(c) => fmt_cost(c),
+            None => "unknown".to_string(),
+        };
+        t.add_row(vec![
+            r.ts.clone(),
+            r.agent.to_string(),
+            r.model.clone(),
+            r.project.clone(),
+            fmt_thousands(r.input),
+            fmt_thousands(r.output),
+            fmt_thousands(r.cache_write),
+            fmt_thousands(r.cache_read),
+            cost,
+        ]);
+    }
+    let mut out = t.to_string();
+    out.push('\n');
+    out.push_str(&format!(
+        "共 {} 条（时间倒序）· 显示前 {} 条",
+        list.total,
+        list.rows.len()
+    ));
+    out
 }
 
 fn fmt_cost(v: f64) -> String {

@@ -22,6 +22,39 @@ pub enum Command {
         #[command(subcommand)]
         cmd: PricingCmd,
     },
+    /// 浏览逐请求明细（时间倒序，可按模型/项目/日过滤）
+    Events {
+        /// 只看指定 agent（默认全部）
+        #[arg(long, value_enum)]
+        agent: Option<AgentArg>,
+        /// 只看最近 N 个自然日
+        #[arg(long)]
+        days: Option<u32>,
+        /// 按模型精确过滤
+        #[arg(long = "model", value_name = "MODEL")]
+        model: Option<String>,
+        /// 按项目精确过滤
+        #[arg(long = "project", value_name = "NAME")]
+        project: Option<String>,
+        /// 按自然日过滤（YYYY-MM-DD，按解析时区）
+        #[arg(long = "day", value_name = "YYYY-MM-DD")]
+        day: Option<String>,
+        /// 返回条数上限（默认 200，最大 1000）
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+        /// 输出 JSON
+        #[arg(long)]
+        json: bool,
+        /// 聚合/展示时区：local=本机，或 IANA 名；缺省 Asia/Shanghai
+        #[arg(long = "tz", value_name = "TZ")]
+        tz: Option<String>,
+        #[arg(long = "claude-dir", value_name = "PATH")]
+        claude_dir: Option<PathBuf>,
+        #[arg(long = "codex-dir", value_name = "PATH")]
+        codex_dir: Option<PathBuf>,
+        #[arg(long)]
+        refresh: bool,
+    },
     /// 汇总用量（当前支持 Claude Code 与 Codex，默认合并全部已装 agent）
     Summary {
         /// 聚合维度（默认按日）
@@ -94,8 +127,73 @@ pub enum PricingCmd {
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Pricing { cmd } => run_pricing(cmd),
+        Command::Events {
+            agent,
+            days,
+            model,
+            project,
+            day,
+            limit,
+            json,
+            tz,
+            claude_dir,
+            codex_dir,
+            refresh,
+        } => run_events(EventsArgs {
+            agent,
+            days,
+            model,
+            project,
+            day,
+            limit,
+            json,
+            tz,
+            claude_dir,
+            codex_dir,
+            refresh,
+        }),
         Command::Summary { .. } => run_summary(cli),
     }
+}
+
+pub struct EventsArgs {
+    pub agent: Option<AgentArg>,
+    pub days: Option<u32>,
+    pub model: Option<String>,
+    pub project: Option<String>,
+    pub day: Option<String>,
+    pub limit: usize,
+    pub json: bool,
+    pub tz: Option<String>,
+    pub claude_dir: Option<PathBuf>,
+    pub codex_dir: Option<PathBuf>,
+    pub refresh: bool,
+}
+
+fn run_events(a: EventsArgs) -> anyhow::Result<()> {
+    let opts = crate::report::SummaryOptions {
+        by: GroupBy::Day,
+        agent: a.agent.map(|x| x.kind()),
+        days: a.days,
+        claude_dir: a.claude_dir,
+        codex_dir: a.codex_dir,
+        refresh: a.refresh,
+        tz: a.tz,
+        ..Default::default()
+    };
+    let filter = crate::report::EventFilter {
+        model: a.model,
+        project: a.project,
+        day: a.day,
+        limit: Some(a.limit),
+    };
+    let list = crate::report::list_events(&opts, &filter)?;
+    if a.json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+    } else {
+        println!("{}", crate::render::events_table(&list));
+    }
+    Ok(())
 }
 
 fn run_pricing(cmd: PricingCmd) -> anyhow::Result<()> {

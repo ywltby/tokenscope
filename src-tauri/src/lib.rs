@@ -14,6 +14,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::summarize,
+            commands::list_events,
             commands::source_status,
             commands::cache_stats,
             commands::refresh_cache,

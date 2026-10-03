@@ -7,9 +7,10 @@ use tokenscope::model::AgentKind;
 use tokenscope::openrouter;
 use tokenscope::pricing::Pricing;
 use tokenscope::report::{
-    CacheInfo, SourceStatus, SummaryOptions, SummaryReport, cache_stats as cache_stats_impl,
-    openrouter_file_path, pricing_file_path, rebuild_cache as rebuild_cache_impl,
-    source_status as source_status_impl, summary,
+    CacheInfo, EventFilter, EventList, SourceStatus, SummaryOptions, SummaryReport,
+    cache_stats as cache_stats_impl, list_events as list_events_impl, openrouter_file_path,
+    pricing_file_path, rebuild_cache as rebuild_cache_impl, source_status as source_status_impl,
+    summary,
 };
 
 pub fn parse_by(by: &str) -> Result<GroupBy, String> {
@@ -48,6 +49,33 @@ pub fn summarize(
         ..Default::default()
     };
     summary(&opts).map_err(|e| e.to_string())
+}
+
+/// 逐请求明细（M7）：与 summary 共用采集与去重路径。
+#[tauri::command]
+pub fn list_events(
+    agent: Option<String>,
+    days: Option<u32>,
+    model: Option<String>,
+    project: Option<String>,
+    day: Option<String>,
+    limit: Option<usize>,
+    tz: Option<String>,
+) -> Result<EventList, String> {
+    let opts = SummaryOptions {
+        by: GroupBy::Day,
+        agent: parse_agent(agent.as_deref())?,
+        days,
+        tz,
+        ..Default::default()
+    };
+    let filter = EventFilter {
+        model,
+        project,
+        day,
+        limit,
+    };
+    list_events_impl(&opts, &filter).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

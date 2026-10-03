@@ -11,6 +11,7 @@ import {
 } from "../types";
 
 const props = defineProps<{ report: SummaryReport }>();
+const emit = defineEmits<{ (e: "row-click", key: string): void }>();
 
 /// Naive UI 表格行类型是 Record<string, unknown>，统一经 unknown 转 Group。
 const asGroup = (row: object): Group => row as unknown as Group;
@@ -77,6 +78,10 @@ const rows = computed<Group[]>(() => props.report.groups);
 const rowKey = (row: object): string => asGroup(row).key;
 const rowClass = (row: object): string =>
   asGroup(row).key === "合计" ? "total-row" : "";
+const rowProps = (row: object) => ({
+  style: "cursor: pointer",
+  onclick: () => emit("row-click", asGroup(row).key),
+});
 
 const sourceLines = computed(() =>
   props.report.sources.map((s) => ({
@@ -95,10 +100,12 @@ const sourceLines = computed(() =>
       :data="rows"
       :row-key="rowKey"
       :row-class-name="rowClass"
+      :row-props="rowProps"
       size="small"
       :bordered="true"
       :single-line="false"
     />
+    <div style="font-size: 12px; opacity: 0.6; margin-top: 4px">点击行可下钻到请求明细。</div>
     <div v-if="report.totals.unknown_pricing" style="font-size: 12px; opacity: 0.7; margin-top: 6px">
       † 部分用量来自无价格模型，费用仅含已计价部分（unknown 用量见合计行明细）。
     </div>

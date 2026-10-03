@@ -3,21 +3,26 @@ import { ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import {
   NAlert,
+  NCard,
   NRadioButton,
   NRadioGroup,
   NSelect,
   NSpin,
+  NTag,
 } from "naive-ui";
 import {
   AGENT_LABEL,
   type AgentFilter,
   type Dim,
+  type EventDrill,
+  type EventList,
   type SourceStatus,
   type SummaryReport,
 } from "../types";
 import SummaryCards from "../components/SummaryCards.vue";
 import UsageTable from "../components/UsageTable.vue";
 import TrendChart from "../components/TrendChart.vue";
+import EventTable from "../components/EventTable.vue";
 
 const props = defineProps<{ refreshKey: number }>();
 
@@ -28,6 +33,9 @@ const tz = ref<string>("Asia/Shanghai");
 const report = ref<SummaryReport | null>(null);
 const loading = ref(false);
 const sourceStatus = ref<SourceStatus[]>([]);
+const drill = ref<EventDrill | null>(null);
+const events = ref<EventList | null>(null);
+const eventsLoading = ref(false);
 
 const dimOptions: { label: string; value: Dim }[] = [
   { label: "按日", value: "day" },
@@ -73,7 +81,41 @@ async function loadSources(): Promise<void> {
   sourceStatus.value = await invoke<SourceStatus[]>("source_status");
 }
 
-watch([by, agent, days, () => props.refreshKey], refresh, { immediate: true });
+async function loadEvents(): Promise<void> {
+  eventsLoading.value = true;
+  try {
+    events.value = await invoke<EventList>("list_events", {
+      agent: agent.value,
+      days: days.value === 0 ? null : days.value,
+      model: drill.value?.type === "model" ? drill.value.key : null,
+      project: drill.value?.type === "project" ? drill.value.key : null,
+      day: drill.value?.type === "day" ? drill.value.key : null,
+      limit: 200,
+      tz: tz.value,
+    });
+  } finally {
+    eventsLoading.value = false;
+  }
+}
+
+function onSummaryRowClick(key: string): void {
+  if (by.value === "agent") {
+    // Agent 行：切换顶部 agent 过滤，不进入明细下钻
+    agent.value = key === "claude-code" ? "claude" : key === "codex" ? "codex" : "all";
+    drill.value = null;
+    return;
+  }
+  drill.value = { type: by.value as "day" | "model" | "project", key };
+}
+
+function clearDrill(): void {
+  drill.value = null;
+}
+
+const drillLabel = (d: EventDrill): string => `${d.type}: ${d.key}`;
+
+watch([by, agent, days, tz, () => props.refreshKey], refresh, { immediate: true });
+watch([by, agent, days, tz, drill, () => props.refreshKey], loadEvents, { immediate: true });
 void loadSources();
 </script>
 
@@ -116,7 +158,26 @@ void loadSources();
           :by="report.by"
           style="margin-top: 12px"
         />
-        <UsageTable :report="report" style="margin-top: 12px" />
+        <UsageTable :report="report" style="margin-top: 12px" @row-click="onSummaryRowClick" />
+        <NCard v-if="events" size="small" style="margin-top: 12px">
+          <template #header>
+            请求明细
+            <NTag
+              v-if="drill"
+              size="small"
+              closable
+              type="info"
+              style="margin-left: 8px"
+              @close="clearDrill"
+            >
+              {{ drillLabel(drill) }}
+            </NTag>
+          </template>
+          <EventTable
+            :list="events"
+            :filter-label="drill ? drillLabel(drill) : '无（显示最新 200 条）'"
+          />
+        </NCard>
       </template>
     </NSpin>
   </div>

@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::aggregate::{GroupBy, aggregate, filter_days, resolve_tz};
 use crate::cache::{Cache, CacheStats, mtime_ms};
 use crate::dedupe::dedupe_events;
-use crate::model::{AgentKind, UsageEvent};
+use crate::model::{AgentKind, TokenCounts, UsageEvent};
 use crate::pricing::Pricing;
 use crate::render;
 use crate::source::claude::ClaudeSource;
@@ -173,7 +173,16 @@ pub fn rebuild_cache(cache_dir: Option<PathBuf>) -> Result<CacheInfo> {
     cache_stats(cache_dir)
 }
 
-pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
+/// 采集产物：去重后事件 + 逐源统计 + 价格表 + 警告。summary / list_events 共用。
+struct Collected {
+    events: Vec<UsageEvent>,
+    sources: Vec<SourceReport>,
+    pricing: Pricing,
+    warnings: Vec<String>,
+}
+
+/// 共用采集路径（M7）：价格加载 → 缓存增量采集 → 全局去重 → 回填统计。
+fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
     let pricing_path = pricing_file_path(opts.pricing_path.as_ref());
     let openrouter_path = openrouter_file_path(opts.openrouter_path.as_ref());
     let (pricing, mut warnings) = Pricing::load(Some(&pricing_path), Some(&openrouter_path));
@@ -248,7 +257,7 @@ pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
     }
 
     // 全局去重（跨文件、按 agent 规则），并回填 per-agent 的丢弃数与事件数。
-    let (mut events, dropped) = dedupe_events(all_events);
+    let (events, dropped) = dedupe_events(all_events);
     for s in &mut sources {
         s.stats.duplicates_dropped = dropped
             .iter()
@@ -257,6 +266,21 @@ pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
             .unwrap_or(0);
         s.stats.events = events.iter().filter(|e| e.agent == s.agent).count() as u64;
     }
+    Ok(Collected {
+        events,
+        sources,
+        pricing,
+        warnings,
+    })
+}
+
+pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
+    let Collected {
+        mut events,
+        sources,
+        pricing,
+        warnings,
+    } = collect_all(opts)?;
 
     let (tz, tz_label) = resolve_tz(opts.tz.as_deref())?;
     if let Some(n) = opts.days {
@@ -271,6 +295,92 @@ pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
         sources,
         warnings,
         generated_at: jiff::Zoned::now().with_time_zone(tz).to_string(),
+    })
+}
+
+/// 明细过滤条件（M7）：在 SummaryOptions 的 agent/days/tz 之上叠加行级过滤。
+#[derive(Debug, Default, Clone)]
+pub struct EventFilter {
+    pub model: Option<String>,
+    pub project: Option<String>,
+    /// 自然日（解析时区的 YYYY-MM-DD）。
+    pub day: Option<String>,
+    /// 返回条数上限：None = 200，最大 1000。
+    pub limit: Option<usize>,
+}
+
+/// 一条去重后的用量明细（展示行）。
+#[derive(Debug, Clone, Serialize)]
+pub struct EventRow {
+    /// 解析时区下的 "YYYY-MM-DD HH:MM:SS"（存储仍 UTC，见 cache.rs）。
+    pub ts: String,
+    pub agent: &'static str,
+    pub model: String,
+    pub session_id: String,
+    pub project: String,
+    pub input: u64,
+    pub output: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+    /// None = 模型无价格（unknown），不按 0。
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventList {
+    pub rows: Vec<EventRow>,
+    /// 过滤后、截断前的总条数。
+    pub total: u64,
+    pub warnings: Vec<String>,
+}
+
+/// 逐请求明细（M7）：与 summary 共用 collect_all 采集与去重路径，数字同源。
+pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventList> {
+    let Collected {
+        mut events,
+        pricing,
+        warnings,
+        ..
+    } = collect_all(opts)?;
+    let (tz, _) = resolve_tz(opts.tz.as_deref())?;
+    if let Some(n) = opts.days {
+        events = filter_days(events, &tz, n);
+    }
+    if let Some(day) = &filter.day {
+        events.retain(|e| e.ts.to_zoned(tz.clone()).date().to_string() == *day);
+    }
+    if let Some(m) = &filter.model {
+        events.retain(|e| &e.model == m);
+    }
+    if let Some(pr) = &filter.project {
+        events.retain(|e| &e.project == pr);
+    }
+    events.sort_by_key(|e| std::cmp::Reverse(e.ts));
+    let total = events.len() as u64;
+    let limit = filter.limit.unwrap_or(200).min(1000);
+    let rows = events
+        .into_iter()
+        .take(limit)
+        .map(|e| {
+            let cost_usd = pricing.cost(&e.model, &TokenCounts::from_event(&e));
+            EventRow {
+                ts: e.ts.to_zoned(tz.clone()).strftime("%F %T").to_string(),
+                agent: e.agent.as_str(),
+                model: e.model,
+                session_id: e.session_id,
+                project: e.project,
+                input: e.input_tokens,
+                output: e.output_tokens,
+                cache_write: e.cache_write_tokens,
+                cache_read: e.cache_read_tokens,
+                cost_usd,
+            }
+        })
+        .collect();
+    Ok(EventList {
+        rows,
+        total,
+        warnings,
     })
 }
 
@@ -551,6 +661,97 @@ cache_read = 0.0
             ..base
         });
         assert!(bad.is_err(), "非法时区应为参数错误");
+    }
+
+    #[test]
+    fn test_list_events_filters() {
+        let base = SummaryOptions {
+            claude_dir: Some(fixture("claude", "basic")),
+            codex_dir: Some(fixture("codex", "basic")),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            tz: Some("Asia/Shanghai".to_string()),
+            ..Default::default()
+        };
+        // 全量：去重后 7 行（与汇总 requests 一致），按时间倒序
+        let (all_ok, list) = {
+            let l = list_events(&base, &EventFilter::default()).unwrap();
+            (l.total == 7, l)
+        };
+        assert!(all_ok, "total={}", list.total);
+        assert_eq!(list.rows.len(), 7);
+        assert_eq!(list.warnings.len(), 0);
+        let tss: Vec<&str> = list.rows.iter().map(|r| r.ts.as_str()).collect();
+        let mut sorted = tss.clone();
+        sorted.sort();
+        sorted.reverse();
+        assert_eq!(tss, sorted, "必须按时间倒序");
+
+        // 模型过滤：gpt-5.6-sol 2 行
+        let l = list_events(
+            &base,
+            &EventFilter {
+                model: Some("gpt-5.6-sol".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(l.total, 2);
+        assert!(l.rows.iter().all(|r| r.model == "gpt-5.6-sol"));
+
+        // 项目过滤：proj-beta 1 行（codex e3）
+        let l = list_events(
+            &base,
+            &EventFilter {
+                project: Some("beta".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(l.total, 1);
+
+        // 日过滤：2026-07-17（本地日）= claude msg-1 + codex e1 = 2 行
+        let l = list_events(
+            &base,
+            &EventFilter {
+                day: Some("2026-07-17".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(l.total, 2);
+
+        // limit 截断与 total 语义
+        let l = list_events(
+            &base,
+            &EventFilter {
+                limit: Some(3),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(l.rows.len(), 3);
+        assert_eq!(l.total, 7);
+
+        // unknown 费用：grok-4.5-build 行 cost=None（fixture 用 hy3:free？不，
+        // claude fixture 的 unknown 模型是 tencent/hy3:free）
+        let unknown: Vec<&EventRow> = list.rows.iter().filter(|r| r.cost_usd.is_none()).collect();
+        assert!(!unknown.is_empty(), "tencent/hy3:free 行应为 unknown 费用");
+        assert!(unknown.iter().all(|r| r.model == "tencent/hy3:free"));
+    }
+
+    #[test]
+    fn test_list_events_dedupe_consistent_with_summary() {
+        // 明细与汇总同源：total（过滤后）== 汇总同过滤的 requests。
+        let base = SummaryOptions {
+            claude_dir: Some(fixture("claude", "basic")),
+            codex_dir: Some(fixture("codex", "basic")),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            tz: Some("Asia/Shanghai".to_string()),
+            ..Default::default()
+        };
+        let l = list_events(&base, &EventFilter::default()).unwrap();
+        let s = summary(&base).unwrap();
+        assert_eq!(l.total as u64, s.totals.requests);
     }
 
     #[test]

@@ -76,6 +76,30 @@ export interface PricingView {
   warnings: string[];
 }
 
+export interface EventRow {
+  ts: string;
+  agent: string;
+  model: string;
+  session_id: string;
+  project: string;
+  input: number;
+  output: number;
+  cache_write: number;
+  cache_read: number;
+  cost_usd?: number | null;
+}
+
+export interface EventList {
+  rows: EventRow[];
+  total: number;
+  warnings: string[];
+}
+
+export interface EventDrill {
+  type: "day" | "model" | "project";
+  key: string;
+}
+
 export type Dim = "day" | "model" | "project" | "agent";
 export type AgentFilter = "all" | "claude" | "codex";
 
