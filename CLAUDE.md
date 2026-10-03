@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 设计方向（M1–M4 已按此落地；后续里程碑沿用）
 
-- **只读原则**：TokenScope 只读取各 agent 的本地数据目录，绝不写入、移动或清理它们；自身缓存（SQLite `~/.tokenscope/cache.db`，按文件指纹增量失效、故障自动降级全量扫描）与外置价格表（`~/.tokenscope/pricing.toml`）只写 TokenScope 自己的数据目录 `~/.tokenscope/`。
+- **只读原则**：TokenScope 只读取各 agent 的本地数据目录，绝不写入、移动或清理它们；自身缓存（SQLite `~/.tokenscope/cache.db`，按文件指纹增量失效、故障自动降级全量扫描）、外置价格表（`~/.tokenscope/pricing.toml`）与 OpenRouter 价格快照（`~/.tokenscope/pricing-openrouter.json`，显式同步、统计永不联网）只写 TokenScope 自己的数据目录 `~/.tokenscope/`。
 - **适配器架构**：每个 agent 一个 source 适配器，职责是「发现日志文件 → 解析为统一用量事件」。agent 特有的 JSONL / JSON / SQLite 细节全部封在适配器内；对外只产出统一的 `UsageEvent`（时间戳、agent、模型、输入 / 输出 / 缓存 token、会话与项目标识）。
 - **分层**：`source`（发现+解析）→ `model`（归一化事件）→ `aggregate`（聚合）→ `render`（输出）。层间只经 model 类型交互；新增 agent = 新适配器 + 合成 fixture 测试，聚合与渲染层零改动。
 - **时间口径**：日志内时间戳多为 UTC，解析后统一转本地时区（Asia/Shanghai）再按自然日聚合；跨日界、同一请求去重规则属于必须先写成不变量的部分。

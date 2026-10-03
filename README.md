@@ -10,7 +10,7 @@
 - **明暗双模式**：默认跟随系统，可手动切换并记忆
 - **托盘常驻**：关闭窗口只是缩到托盘，托盘菜单或左键单击恢复，退出走托盘菜单
 - **SQLite 缓存**：`~/.tokenscope/cache.db` 按文件指纹增量失效，缓存故障自动退回全量扫描（缓存是纯优化，日志才是事实源）
-- **外置价格表**：`~/.tokenscope/pricing.toml` 同前缀覆盖内置，GUI 设置页一键打开编辑，保存即生效
+- **价格表三层合并**：内置表兜底，一键同步 OpenRouter 466+ 模型价格（含显示名），外置 `~/.tokenscope/pricing.toml` 补充覆盖（本地优先），GUI 设置页可视化管理
 - **同源 CLI**：`tokenscope` 命令与 GUI 走同一条 Rust 数据管线，脚本化与核对两用
 
 ## 当前支持
@@ -42,6 +42,7 @@ tokenscope summary --days 7             # 最近 7 个自然日
 tokenscope summary --json               # 机器可读输出（逐源统计，含坏行/去重计数）
 tokenscope summary --claude-dir <path> --codex-dir <path>   # 覆盖扫描目录
 tokenscope summary --refresh            # 强制全量重解析并重建缓存
+tokenscope pricing sync                 # 同步 OpenRouter 价格快照（466+ 模型）
 ```
 
 ## 统计口径
@@ -50,7 +51,7 @@ tokenscope summary --refresh            # 强制全量重解析并重建缓存
 - **归一化**：Codex 的 `input_tokens` 含缓存（`total = input + output`、`cached ⊆ input`），入账时拆为剔除缓存 input + cache_read，与 Claude 口径对齐。
 - **时间**：日志内 UTC 时间戳统一转 Asia/Shanghai 后按自然日落日。
 - **健壮性**：子代理（sidechain）、`<synthetic>` 行、零分量占位行与缺字段的坏行一律跳过并计数，不静默入账；agent 目录缺失只警告不报错。
-- **计价**：内置价格表（USD / 百万 token，快照自 cc-switch `model_pricing` 2026-10-03，最长前缀匹配）可被外置 TOML 覆盖；无价格模型的用量单独列为 unknown，不按 0 吞掉。
+- **计价**：三层来源按优先级合并——本地外置 `pricing.toml` > OpenRouter 同步快照 > 内置表，层内最长前缀匹配（模型名自动归一化，兼容 `vendor/` 前缀与点/横线版本号写法）；`:free` 等变体与基名隔离计价；无价格模型的用量单独列为 unknown，不按 0 吞掉。
 
 ## 开发
 

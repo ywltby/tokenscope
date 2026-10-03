@@ -1,6 +1,6 @@
 # M5：OpenRouter 价格同步（主源）+ 本地补充（本地优先）
 
-- 状态：**已确认（用户 2026-10-04 拍板：主用 openrouter.ai/api/v1/models，配合本地价格补充，本地价格优先）**
+- 状态：**已完成（2026-10-04），GUI 同步按钮冒烟待用户安装确认**
 - 创建：2026-10-04
 
 ## 目标
@@ -64,3 +64,20 @@
 - OpenRouter 字段演进（pricing 新键/类型变化）→ serde 宽松解析 + 同步失败显式报错，不影响统计。
 - 归一化把不同官方命名汇合（点/横线）→ 以"同模型不同写法"为设计意图；如遇真实冲突，以外置表裁决。
 - ureq + rustls 首次编译增量时间 → 一次性成本。
+
+## 验收记录（2026-10-04）
+
+1. 全量门禁：`cargo fmt --check`、`cargo clippy --workspace --all-targets`（0 警告）、`cargo test --workspace`（65 测试：根 crate 57 + e2e 6 + tauri 2）、`vue-tsc`、`pnpm build` 全绿。
+2. 真实同步：`tokenscope pricing sync` 拉取 **466 条**写快照；`anthropic/claude-sonnet-4.5`（3/15/0.3/3.75）与 `x-ai/grok-4.5`（2/6/0.3/0）×1e6 后与官方牌价逐项一致。
+3. 同步后真实日志全部模型入价：unknown input 从 17,381,581 降至 4,725,136（仅剩 `nvidia/nemotron-…:free` 等快照外模型）。
+4. **变体隔离**（实现期发现的边界）：免费 `tencent/hy3:free` 曾经最长前缀误套付费基名 `tencent/hy3`（0.0825/Mtok）——修正为带 `:变体` 的查询只匹配同变体条目，基名价格不外溢，宁 unknown 不误价；免费变体本身若在快照中有条目则精确命中 0 价。
+5. 层级优先级 fixture 固化：外置 > openrouter > 内置（同前缀层级裁决，跨层不比前缀长度）；层内最长前缀不变；`gpt-5.2-20260101` 经 openrouter（7.0）压过内置（1.75）。
+6. 离线安全：快照缺失静默、损坏警告并忽略该层；e2e 助手统一钉住不存在的快照路径，测试不再依赖真实 `~/.tokenscope` 状态。
+7. `tauri build` 产出 NSIS 4.27 MiB；GUI「同步 OpenRouter 价格」按钮冒烟留用户确认。
+
+## 实现要点
+
+- `normalize_model_id`：lowercase + 剥 `vendor/` + `.`→`-`，键与查询同函数，点/横线命名汇合（`claude-sonnet-4.5` ↔ `claude-sonnet-4-5-20250929`）。
+- `Pricing` 从两层（内置+外置）变为三层合并表，`Entry.tier` 参与查找排序：`(u8::MAX - tier, prefix_len)` 取最大——注意 `Reverse(tier)` 方向会写反（实测踩过）。
+- OpenRouter pricing 字段实测存在 `null` 与空串（免费/残缺条目），serde 全 `Option<String>` + 解析回退 0。
+- 聚合层每事件一次查找（~500 条 × 2.7 万事件线性扫描）实测无感知延迟，暂不优化。
