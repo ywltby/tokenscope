@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **TokenScope** —— 本地 AI agent 使用量统计工具。Rust 编写：扫描各 AI 编程工具落在本地的会话日志，解析为统一的用量事件，统计 token 用量、请求数、缓存命中与估算花费，支持按 agent / 模型 / 项目 / 时间段聚合查看。对标 [cc-switch](https://github.com/farion1231/cc-switch) 的 Usage Statistics 功能，但做成独立工具，且覆盖更多 agent（cc-switch 目前支持 Claude Code、Codex、Gemini CLI、Grok Build、OpenCode、Pi、MiniMax Code 的用量统计）。
 
-**当前状态：greenfield。** 仓库目前只有约定文件（本文件、AGENTS.md、.editorconfig、.gitattributes、.gitignore、rustfmt.toml）与 LICENSE / README，尚无 Cargo 工程。本机已装 cc-switch（`~/.cc-switch`，含 `cc-switch.db` 与 `model-pricing.json`），且存在真实可测的 Claude Code（`~/.claude/projects/<项目slug>/*.jsonl`）与 Codex（`~/.codex/sessions/<年>/…`）日志，首批适配器可就地实测、与 cc-switch 统计口径对照。
+**当前状态：greenfield，尚未建立 Cargo 工程**（滚动状态以 `docs/plans/README.md` 总账为准，本文件不追写）。本机已装 cc-switch（`~/.cc-switch`，含 `cc-switch.db` 与 `model-pricing.json`），且存在真实可测的 Claude Code（`~/.claude/projects/<项目slug>/*.jsonl`）与 Codex（`~/.codex/sessions/<年>/…`）日志，首批适配器可就地实测、与 cc-switch 统计口径对照。**本机 Claude Code 经 cc-switch 路由到非 Anthropic 模型（模型串任意，如 `grok-4.5-build`），解析与计价不得假设模型名形态。**
 
 ## 设计方向（未实现；首个功能 plan 落地前可再议）
 
@@ -22,8 +22,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Rust 环境（本机现状）
 
-- **本机尚未安装 Rust 工具链**（2026-10-03 确认：无 rustup / cargo / rustc）。开工第一步：`winget install Rustlang.Rustup`（或官网 rustup-init.exe），装好后把实际 stable 版本回写到这里。
-- 工具链用 rustup 默认 **stable**，Cargo 工程用 **edition 2024**；不引入 nightly-only 特性。
+- **rustup 默认 stable 工具链，Rust 1.99.0**（cargo/rustc 1.99.0，`stable-x86_64-pc-windows-msvc`，含 clippy 与 rustfmt；2026-10-03 安装确认）。升级工具链后回写此处。
+- Cargo 工程用 **edition 2024**；不引入 nightly-only 特性。
 - 本仓是可执行应用，**Cargo.lock 入库**（勿 gitignore）。
 - 格式化以仓库根 `rustfmt.toml` 为准（钉 `newline_style = "Unix"`，与 .gitattributes / .editorconfig 一致）。
 
@@ -41,6 +41,7 @@ cargo run -- <args>                # 本地试跑
 ```
 
 - 终端是 **Windows PowerShell**：多条命令分开执行或用 `;`，**不要用 `&&`**。
+- Bash 工具里 cargo 若不在 PATH（会话早于安装启动），用绝对路径 `/c/Users/admin/.cargo/bin/cargo.exe` 调用。
 - 搜索文件名和代码优先使用 `rg` 或 `git grep`。
 - 解析 JSONL / JSON 一律走 serde 等真实解析库；禁止脆弱的字符串拼接与文本替换。
 
@@ -53,7 +54,7 @@ cargo run -- <args>                # 本地试跑
 
 ## 协作约定
 
-- **先计划后执行**：新增功能 / 跨文件改动，先在 `docs/plans/` 写计划并等用户确认再动手（目录随首个 plan 创建）。可跳过 plan 直接修复的仅限：程序报错、测试红灯、文案拼写、格式化。用户说"直接改"则跳过。
+- **先计划后执行**：新增功能 / 跨文件改动，先在 `docs/plans/active/` 写计划并等用户确认再动手。可跳过 plan 直接修复的仅限：程序报错、测试红灯、文案拼写、格式化。用户说"直接改"则跳过。
 - **先写不变量，再写代码**：涉及聚合口径、时间边界、去重规则时，先列出必须保持的不变量再动手。
 - **文件统一 UTF-8**；写中文文档/文案后回读校验，不要用 PowerShell 内联脚本写中文。
 - 若用户的问题基于错误前提，**明确指出**——你是协作者，不是执行机器。
