@@ -39,6 +39,27 @@ export interface SourceStatus {
   files: number;
 }
 
+export interface CacheInfo {
+  path: string;
+  files: number;
+  events: number;
+}
+
+export interface PricingEntry {
+  prefix: string;
+  input: number;
+  output: number;
+  cache_write: number;
+  cache_read: number;
+  source: string;
+}
+
+export interface PricingView {
+  path: string;
+  entries: PricingEntry[];
+  warnings: string[];
+}
+
 export type Dim = "day" | "model" | "project" | "agent";
 export type AgentFilter = "all" | "claude" | "codex";
 

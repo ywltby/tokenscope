@@ -1,9 +1,14 @@
 //! Tauri commands：参数校验 + 调用 report 管线，零业务逻辑。
 
+use serde::Serialize;
+use tauri_plugin_opener::OpenerExt;
 use tokenscope::aggregate::GroupBy;
 use tokenscope::model::AgentKind;
+use tokenscope::pricing::Pricing;
 use tokenscope::report::{
-    SourceStatus, SummaryOptions, SummaryReport, source_status as source_status_impl, summary,
+    CacheInfo, SourceStatus, SummaryOptions, SummaryReport, cache_stats as cache_stats_impl,
+    pricing_file_path, rebuild_cache as rebuild_cache_impl, source_status as source_status_impl,
+    summary,
 };
 
 pub fn parse_by(by: &str) -> Result<GroupBy, String> {
@@ -37,6 +42,7 @@ pub fn summarize(
         days,
         claude_dir: None,
         codex_dir: None,
+        ..Default::default()
     };
     summary(&opts).map_err(|e| e.to_string())
 }
@@ -44,6 +50,51 @@ pub fn summarize(
 #[tauri::command]
 pub fn source_status() -> Result<Vec<SourceStatus>, String> {
     source_status_impl(None, None).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn cache_stats() -> Result<CacheInfo, String> {
+    cache_stats_impl(None).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn refresh_cache() -> Result<CacheInfo, String> {
+    rebuild_cache_impl(None).map_err(|e| e.to_string())
+}
+
+/// 设置页价格表视图：完整条目 + 外置文件路径 + 解析警告。
+#[derive(Serialize)]
+pub struct PricingView {
+    pub path: String,
+    pub entries: Vec<tokenscope::pricing::PricingEntry>,
+    pub warnings: Vec<String>,
+}
+
+#[tauri::command]
+pub fn pricing_entries() -> Result<PricingView, String> {
+    let path = pricing_file_path(None);
+    let (pricing, warnings) = Pricing::load(Some(&path));
+    Ok(PricingView {
+        path: path.display().to_string(),
+        entries: pricing.entries(),
+        warnings,
+    })
+}
+
+/// 打开（必要时先创建模板）外置价格文件；返回实际路径。
+#[tauri::command]
+pub fn open_pricing_file(app: tauri::AppHandle) -> Result<String, String> {
+    let path = pricing_file_path(None);
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, tokenscope::pricing::PRICING_TEMPLATE).map_err(|e| e.to_string())?;
+    }
+    app.opener()
+        .open_path(path.display().to_string(), None::<&str>)
+        .map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
 }
 
 #[cfg(test)]

@@ -11,9 +11,14 @@ use tauri::{
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::summarize,
             commands::source_status,
+            commands::cache_stats,
+            commands::refresh_cache,
+            commands::pricing_entries,
+            commands::open_pricing_file,
         ])
         .setup(|app| {
             setup_tray(app.handle())?;
