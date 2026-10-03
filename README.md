@@ -1,6 +1,6 @@
 # TokenScope
 
-本地 AI agent 使用量统计工具。Rust 编写，只读扫描各 AI 编程工具落在本地的会话日志，统计 token 用量与请求数，按 agent / 模型 / 项目 / 时间段聚合查看。对标 [cc-switch](https://github.com/farion1231/cc-switch) 的 Usage Statistics，作为独立工具覆盖更多 agent。
+本地 AI agent 使用量统计工具。Rust + Tauri 2 桌面应用（Vue 3 前端），只读扫描各 AI 编程工具落在本地的会话日志，统计 token 用量与请求数，按 agent / 模型 / 项目 / 时间段聚合查看，支持明暗双模式与托盘常驻。对标 [cc-switch](https://github.com/farion1231/cc-switch) 的 Usage Statistics，作为独立工具覆盖更多 agent。另附 CLI（`tokenscope` 命令）供脚本化使用，与 GUI 数字同源。
 
 ## 当前支持
 
@@ -11,6 +11,10 @@
 | Gemini CLI / OpenCode 等 | 规划中 | — |
 
 ## 使用
+
+GUI（推荐）：`pnpm --dir frontend tauri dev` 开发运行，`pnpm --dir frontend tauri build` 产出 NSIS 安装包。启动后即驻留托盘，关闭窗口只是缩到托盘，托盘菜单可恢复窗口或退出。
+
+CLI 与 GUI 数据同源（共用 Rust report 管线）：
 
 ```powershell
 tokenscope summary                      # 合并全部已装 agent，按日汇总（Asia/Shanghai 落日界）

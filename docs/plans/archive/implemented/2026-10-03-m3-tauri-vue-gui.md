@@ -100,3 +100,20 @@ pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport>
 - `tauri build` 首次编译依赖多、NSIS 首次下载工具链，耗时长（本机可接受，仅影响首次）。
 - Tauri/ECharts 版本迭代快 → 锁定 lockfile，升级单独 plan。
 - WebView2 版本差异 → 本机 154 已满足 Tauri 2 最低要求，无需分发 bootstrap。
+
+## 验收记录（2026-10-03）
+
+1. `cargo fmt --check`、`cargo clippy --workspace --all-targets`、`cargo test --workspace` 全绿（43 测试：根 crate 35 + tauri commands 2 + e2e 6）；`vue-tsc --noEmit` 0 错误；`pnpm build` 通过。
+2. CLI 回归 PASS：`summary --agent claude --json` 采集统计与 M1/M2 记录逐项一致（19 文件 / 30,743 行 / 3,741 事件 / 去重 8,620 / 坏行 0），CLI 与 GUI 共用 report 管线后数字同源。
+3. `tauri build` 产出 `target/release/tokenscope-tauri.exe` 与 NSIS 安装包 `TokenScope_0.1.0_x64-setup.exe`（2.67 MiB，4m07s 完成首次 release 编译）。
+4. **待用户确认**：安装后的 GUI 交互冒烟（agent/维度/天数联动、ECharts 渲染、暗色切换、托盘常驻与关窗缩托盘、退出）。
+5. 只读不变量：Tauri commands 仅做参数转换并调用 report 管线，无任何写路径。
+
+## 实现要点与环境踩坑
+
+- report 管线抽为 `src/report.rs`（SummaryOptions → SummaryReport），CLI `run()` 与 Tauri `summarize` 共用；render 层改为直接吃 `SummaryReport`。
+- 托盘：`tauri` features `tray-icon`；启动即建托盘，主窗口 CloseRequested → hide + prevent_close，托盘菜单「显示主窗口/退出」，左键单击恢复窗口。
+- **TypeScript 7 与 vue-tsc 不兼容**（ERR_PACKAGE_PATH_NOT_EXPORTED），前端钉 `typescript@^5.9`，勿升级。
+- **Tauri CLI 只向下搜索 src-tauri**：`tauri icon` 等命令须从仓库根调 `frontend/node_modules/.bin/tauri`，在 frontend 目录内跑找不到配置。
+- Naive UI NSelect 的 value 不接受 null（用 0 作"全部"哨兵）；表格行渲染统一经 `as unknown as Group` 转换。
+- 首版前端 bundle 2.5MB（echarts+naive-ui 全量引入），桌面应用可接受，代码分割留待后续。

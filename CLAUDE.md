@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **分层**：`source`（发现+解析）→ `model`（归一化事件）→ `aggregate`（聚合）→ `render`（输出）。层间只经 model 类型交互；新增 agent = 新适配器 + 合成 fixture 测试，聚合与渲染层零改动。
 - **时间口径**：日志内时间戳多为 UTC，解析后统一转本地时区（Asia/Shanghai）再按自然日聚合；跨日界、同一请求去重规则属于必须先写成不变量的部分。
 - **费用估算**：按可配置价格表计算；默认内置常见模型定价，允许用户覆盖（cc-switch 的 `model-pricing.json` 可作参照格式）。无价格的模型明确显示"未知"，不得按 0 静默吞掉。
-- **输出**：先做 CLI（终端表格 + JSON）；TUI / 趋势图是否做、怎么做，由后续 plan 决定。
+- **输出（用户已拍板）**：**Tauri 2 + Vue 3 桌面 GUI 是主产品形态**（Naive UI、明暗双模式、托盘常驻、关窗缩托盘）；CLI（终端表格 + JSON）保留为辅助薄壳，用于脚本化与回归对照。两端共用 `report.rs` 管线，数字必须同源。
 - **候选 agent**：首批 Claude Code、Codex（本机有真实日志）；后续 Gemini CLI、OpenCode、Copilot、Cursor 等，接入顺序以 plan 为准。
 
 ## Rust 环境（本机现状）
@@ -32,13 +32,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 仓库根 `C:\Users\admin\Desktop\项目\tokenscope` 下：
 
 ```powershell
-cargo build                        # 构建
+cargo build                        # 构建（workspace：根 crate + src-tauri）
 cargo fmt                          # 格式化（提交前必须跑过，--check 必须干净）
 cargo clippy --all-targets         # 静态检查（提交前必须干净）
 cargo test                         # 全部测试
 cargo test usage_event             # 按名过滤单个测试
-cargo run -- <args>                # 本地试跑
+cargo run -- summary --by model    # CLI 本地试跑
 ```
+
+GUI（前端在 `frontend/`，Tauri 壳在 `src-tauri/`；CLI 装于 frontend devDependencies）：
+
+```powershell
+pnpm --dir frontend install        # 前端依赖（首次）
+pnpm --dir frontend typecheck      # vue-tsc 类型检查（提交前必须干净）
+pnpm --dir frontend build          # 前端产物（提交前必须通过）
+pnpm --dir frontend tauri dev      # 开发窗口（会弹出 GUI）
+pnpm --dir frontend tauri build    # 生产构建（NSIS 安装包，首次较慢）
+```
+
+- 前端 TypeScript 钉 TypeScript 5.x（vue-tsc 与 TS 7 不兼容，勿升级）；Naive UI 组件库、ECharts 图表（直接用 echarts，未包 vue-echarts）。
+- Tauri CLI 从仓库根调用可执行 `frontend/node_modules/.bin/tauri`（CLI 只向下搜索 src-tauri，`tauri icon` 等命令在 frontend 目录跑找不到配置）。
 
 - 终端是 **Windows PowerShell**：多条命令分开执行或用 `;`，**不要用 `&&`**。
 - Bash 工具里 cargo 若不在 PATH（会话早于安装启动），用绝对路径 `/c/Users/admin/.cargo/bin/cargo.exe` 调用。
