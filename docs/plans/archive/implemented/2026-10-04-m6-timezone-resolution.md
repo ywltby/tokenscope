@@ -1,6 +1,6 @@
 # M6：时区解析链（存储一律 UTC，展示按 解析时区 一次转换）
 
-- 状态：**已确认（用户 2026-10-04 指示：SQLite 存 UTC；计算/渲染时按本机时区、传入指定时区、默认上海时区展示，避免多次时区转换）**
+- 状态：**已完成（2026-10-04），GUI 时区下拉冒烟待用户安装确认**
 - 创建：2026-10-04
 
 ## 现状与目标
@@ -53,3 +53,16 @@
 
 - jiff `TimeZone::system()` 取不到系统时区时内部回退 UTC（非上海）→ 文档注明；Windows 常规环境均可取到。
 - JSON 新增字段对既有消费方 → 纯增量，无破坏。
+
+## 验收记录（2026-10-04）
+
+1. 全量门禁：fmt / clippy（0 警告）/ `cargo test --workspace`（66 测试）/ vue-tsc / pnpm build 全绿。
+2. 真实数据验收（Claude 全量）：`--tz Asia/Shanghai` 与 `--tz local` 输出逐字段一致（本机时区即上海，M1–M5 记录全部有效）；`--tz UTC` 日界变化生效；非法时区（`Mars/Olympus`）报参数错误。
+3. 缓存 UTC 不变量：往返后 ts 保持 `2026-07-17T08:00:00.123456Z` 原样（单测 `test_cache_stores_utc` 固化）；三路径一致性维持。
+4. JSON 报告新增 `timezone` 字段（解析后标识）；e2e/report 测试统一钉 `tz: Some("Asia/Shanghai")`，不再依赖运行机器系统时区。
+
+## 实现要点
+
+- `resolve_tz(Option<&str>)`：`"local"` → `TimeZone::system()`；IANA 名 → `TimeZone::get`（非法名报错）；None → Asia/Shanghai。时区标识用 `iana_name()`（jiff 的 `TimeZone` 未实现 `Display`）。
+- 转换时机不变（M1 即如此）：缓存/加载全程 UTC，聚合落日 + `generated_at` 是仅有的两处转换点。
+- 修正计划口径：解析链落地为「显式传入 > 本机（`--tz local`）> 默认 Asia/Shanghai」——Asia/Shanghai 保留为缺省值而非系统时区兜底（零行为变化，历史记录全部有效）。

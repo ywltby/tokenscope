@@ -16,10 +16,11 @@
 | M3 | Tauri 2 + Vue 3 GUI（Naive UI、明暗双模式、托盘常驻、关窗缩托盘） | NSIS 安装包产出；CLI 与 GUI 共用 report 管线，回归逐项一致 | [归档](archive/implemented/2026-10-03-m3-tauri-vue-gui.md) |
 | M4 | SQLite 缓存（指纹失效、故障降级）+ 价格外置 TOML + GUI 设置页 | 无缓存/命中/--refresh 三路径数字逐字段一致；更正 M2 归档事件数口径笔误（最终 20,935） | [归档](archive/implemented/2026-10-03-m4-cache-pricing-settings.md) |
 | M5 | OpenRouter 价格同步（主源）+ 三层合并（外置 > openrouter > 内置）+ 变体隔离 | 真实同步 466 条、价格与官方一致；unknown 大幅下降；NSIS 4.27 MiB | [归档](archive/implemented/2026-10-04-m5-openrouter-pricing-sync.md) |
+| M6 | UTC 存储不变量 + 时区解析链（--tz local/IANA，默认上海）+ JSON timezone 字段 | 本机==上海逐字段一致；UTC 日界生效；非法时区报错；NSIS 产物 | [归档](archive/implemented/2026-10-04-m6-timezone-resolution.md) |
 
 ## 当前状态
 
-- **进行中：[M6 时区解析链](active/2026-10-04-m6-timezone-resolution.md)**（存储一律 UTC；展示按 显式指定 > 本机 > 上海兜底 一次转换）。
+- **无进行中的计划**（`active/` 为空）。
 - 待办尾巴：M3/M4 的 GUI 交互冒烟留用户安装确认（数据正确性已由 CLI/测试覆盖）。
 
 ## 后续候选方向（未立项；择项后在 `active/` 成文，经确认再动工）
@@ -34,6 +35,7 @@
 
 | 计划 | 状态 | 备注 |
 | --- | --- | --- |
+| [archive/implemented/2026-10-04-m6-timezone-resolution.md](archive/implemented/2026-10-04-m6-timezone-resolution.md) | ✅ 完成 2026-10-04 | M6：UTC 存储固化 + 时区解析链（--tz local/IANA，默认上海）；JSON 增 timezone 字段 |
 | [archive/implemented/2026-10-04-m5-openrouter-pricing-sync.md](archive/implemented/2026-10-04-m5-openrouter-pricing-sync.md) | ✅ 完成 2026-10-04 | M5：OpenRouter 价格同步（主源）+ 本地三层合并；466 条实测，变体隔离修正误定价 |
 | [archive/implemented/2026-10-03-m4-cache-pricing-settings.md](archive/implemented/2026-10-03-m4-cache-pricing-settings.md) | ✅ 完成 2026-10-03 | M4：SQLite 缓存 + 价格外置 + 设置页；三路径数字一致，附带更正 M2 事件数口径笔误 |
 | [archive/implemented/2026-10-03-m3-tauri-vue-gui.md](archive/implemented/2026-10-03-m3-tauri-vue-gui.md) | ✅ 完成 2026-10-03 | M3：Tauri 2 + Vue 3 GUI（Naive UI/双主题/托盘常驻）；NSIS 产物已出，GUI 交互冒烟待用户确认 |

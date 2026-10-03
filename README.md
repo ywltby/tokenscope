@@ -43,13 +43,14 @@ tokenscope summary --json               # 机器可读输出（逐源统计，�
 tokenscope summary --claude-dir <path> --codex-dir <path>   # 覆盖扫描目录
 tokenscope summary --refresh            # 强制全量重解析并重建缓存
 tokenscope pricing sync                 # 同步 OpenRouter 价格快照（466+ 模型）
+tokenscope summary --tz UTC             # 指定聚合时区（local=本机；缺省 Asia/Shanghai）
 ```
 
 ## 统计口径
 
 - **去重**：Claude Code 会话日志约 70% 的行是同一消息的流式重写，按 `(sessionId, message.id)` 去重保留最后一条；Codex 会把同一请求的用量原样重发，按 `(session, 用量五元组)` 去重保留首条。去重在全局统一执行，无缓存 / 缓存命中 / `--refresh` 三条路径数字一致。
 - **归一化**：Codex 的 `input_tokens` 含缓存（`total = input + output`、`cached ⊆ input`），入账时拆为剔除缓存 input + cache_read，与 Claude 口径对齐。
-- **时间**：日志内 UTC 时间戳统一转 Asia/Shanghai 后按自然日落日。
+- **时间**：缓存与存储一律 UTC（RFC3339）；聚合与展示按解析出的单一时区一次性转换——默认 Asia/Shanghai，可显式指定本机时区（`--tz local` / GUI 下拉）或任意 IANA 时区（`--tz UTC` 等），避免多次转换。
 - **健壮性**：子代理（sidechain）、`<synthetic>` 行、零分量占位行与缺字段的坏行一律跳过并计数，不静默入账；agent 目录缺失只警告不报错。
 - **计价**：三层来源按优先级合并——本地外置 `pricing.toml` > OpenRouter 同步快照 > 内置表，层内最长前缀匹配（模型名自动归一化，兼容 `vendor/` 前缀与点/横线版本号写法）；`:free` 等变体与基名隔离计价；无价格模型的用量单独列为 unknown，不按 0 吞掉。
 
