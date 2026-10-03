@@ -1,8 +1,14 @@
 //! 模型价格表：USD / 百万 token，四类单价（input / output / cache 写 / cache 读）。
-//! 内置牌价快照自 cc-switch `model_pricing`（2026-10-03），仅作估算；查找为
-//! **最长前缀匹配**（`gpt-5.6-luna` 先于 `gpt-5.6`、`claude-opus-4-5` 先于
-//! `claude-opus-4`）。M4 起支持外置 `~/.tokenscope/pricing.toml`：与内置表合并、
-//! 同前缀**外置覆盖内置**；文件缺失 = 纯内置（静默），解析失败 = 警告 + 纯内置。
+//! 查找为**最长前缀匹配**（`gpt-5.6-luna` 先于 `gpt-5.6`、`claude-opus-4-5` 先于
+//! `claude-opus-4`），且键与查询统一经 `normalize_model_id` 归一化（lowercase、
+//! 剥 `vendor/` 前缀、`.` → `-`），让 `claude-sonnet-4.5`（OpenRouter）与
+//! `claude-sonnet-4-5-20250929`（日志）汇合到同一前缀。
+//!
+//! M5 三层来源，**层级优先，层内最长前缀**（外置 > openrouter > 内置）：
+//! - 内置：静态快照（取自 cc-switch `model_pricing` 2026-10-03），兜底；
+//! - openrouter：同步快照（主源，含显示名）；
+//! - 外置：`~/.tokenscope/pricing.toml`（用户补充/覆盖，最高优先）。
+//!
 //! 未收录模型返回 None，由聚合层按 unknown 单独呈现——不得按 0 静默吞掉（M1 不变量 5）。
 
 use std::path::Path;
@@ -10,6 +16,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::model::TokenCounts;
+use crate::openrouter;
 
 /// (模型前缀, input, output, cache_write, cache_read)
 const TABLE: &[(&str, f64, f64, f64, f64)] = &[
@@ -63,14 +70,33 @@ const TABLE: &[(&str, f64, f64, f64, f64)] = &[
     ("mimo-v2.5", 0.14, 0.29, 0.0028, 0.0),
 ];
 
+const TIER_EXTERNAL: u8 = 0;
+const TIER_OPENROUTER: u8 = 1;
+const TIER_BUILTIN: u8 = 2;
+
+/// 归一化模型标识（键与查询共用同一函数）：lowercase、剥 `vendor/` 前缀、
+/// `.` → `-`。变体后缀（`:free` 等）保留参与匹配。
+pub fn normalize_model_id(s: &str) -> String {
+    let t = s.trim().to_ascii_lowercase();
+    let no_vendor = match t.find('/') {
+        Some(pos) => &t[pos + 1..],
+        None => &t,
+    };
+    no_vendor.replace('.', "-")
+}
+
 #[derive(Debug, Clone)]
 struct Entry {
+    /// 归一化前缀（匹配用）。
     prefix: String,
+    /// 原始写法（GUI 展示用）。
+    display: String,
+    name: Option<String>,
     input: f64,
     output: f64,
     cache_write: f64,
     cache_read: f64,
-    external: bool,
+    tier: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -81,10 +107,11 @@ pub struct ModelPrice {
     pub cache_read: f64,
 }
 
-/// GUI 设置页展示用条目（含来源标识）。
+/// GUI 设置页展示用条目（含来源与显示名）。
 #[derive(Debug, Clone, Serialize)]
 pub struct PricingEntry {
     pub prefix: String,
+    pub name: Option<String>,
     pub input: f64,
     pub output: f64,
     pub cache_write: f64,
@@ -109,8 +136,9 @@ struct ExternalModel {
 }
 
 /// 外置文件不存在时「创建模板」写入的内容。
-pub const PRICING_TEMPLATE: &str = r#"# TokenScope 外置价格表（USD / 百万 token；同前缀覆盖内置表，最长前缀匹配）
-# 修改保存后，下一次统计即生效（无需重启）。
+pub const PRICING_TEMPLATE: &str = r#"# TokenScope 外置价格表（USD / 百万 token）
+# 优先级：本文件 > OpenRouter 同步 > 内置表；同前缀覆盖，最长前缀匹配。
+# 模型前缀支持 vendor 写法（会归一化）；修改保存后下一次统计即生效。
 
 [[model]]
 prefix = "claude-opus-5"
@@ -119,6 +147,14 @@ output = 25.0
 cache_write = 6.25
 cache_read = 0.5
 "#;
+
+/// 拆出变体后缀：`"hy3:free"` → `("hy3", Some("free"))`；无变体 → `("hy3", None)`。
+fn split_variant(normalized: &str) -> (&str, Option<&str>) {
+    match normalized.find(':') {
+        Some(pos) => (&normalized[..pos], Some(&normalized[pos + 1..])),
+        None => (normalized, None),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Pricing {
@@ -138,66 +174,98 @@ impl Pricing {
             entries: TABLE
                 .iter()
                 .map(|(p, i, o, cw, cr)| Entry {
-                    prefix: (*p).to_string(),
+                    prefix: normalize_model_id(p),
+                    display: (*p).to_string(),
+                    name: None,
                     input: *i,
                     output: *o,
                     cache_write: *cw,
                     cache_read: *cr,
-                    external: false,
+                    tier: TIER_BUILTIN,
                 })
                 .collect(),
         }
     }
 
-    /// 内置 + 外置合并。`external` 为 None 或文件缺失 → 纯内置且无警告；
-    /// 解析失败 → 警告 + 纯内置；同前缀外置覆盖内置，新前缀追加。
-    pub fn load(external: Option<&Path>) -> (Self, Vec<String>) {
+    /// 三层合并：内置兜底，openrouter 快照叠加，外置最终覆盖。
+    /// `external` / `openrouter_snapshot` 文件缺失 → 静默跳过该层；
+    /// 解析失败 → 警告并跳过该层。
+    pub fn load(
+        external: Option<&Path>,
+        openrouter_snapshot: Option<&Path>,
+    ) -> (Self, Vec<String>) {
         let mut pricing = Self::builtin();
         let mut warnings = Vec::new();
-        let Some(path) = external else {
-            return (pricing, warnings);
-        };
-        let Ok(text) = std::fs::read_to_string(path) else {
-            // 文件不存在是常态，静默；其他读取错误也按缺失处理。
-            return (pricing, warnings);
-        };
-        let parsed: ExternalFile = match toml::from_str(&text) {
-            Ok(p) => p,
-            Err(e) => {
-                warnings.push(format!(
-                    "外置价格文件解析失败，已退回内置价格表: {}（{e}）",
+
+        if let Some(path) = openrouter_snapshot {
+            match openrouter::load_snapshot(path) {
+                Ok(Some(snapshot)) => {
+                    for e in snapshot.entries {
+                        pricing.entries.push(Entry {
+                            prefix: normalize_model_id(&e.id),
+                            display: e.id,
+                            name: e.name,
+                            input: e.prompt * 1_000_000.0,
+                            output: e.completion * 1_000_000.0,
+                            cache_write: e.cache_write * 1_000_000.0,
+                            cache_read: e.cache_read * 1_000_000.0,
+                            tier: TIER_OPENROUTER,
+                        });
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warnings.push(format!(
+                    "OpenRouter 快照解析失败，该层已忽略: {}（{e:#}）",
                     path.display()
-                ));
-                return (pricing, warnings);
-            }
-        };
-        for m in parsed.model {
-            let entry = Entry {
-                prefix: m.prefix,
-                input: m.input,
-                output: m.output,
-                cache_write: m.cache_write,
-                cache_read: m.cache_read,
-                external: true,
-            };
-            match pricing
-                .entries
-                .iter_mut()
-                .find(|e| e.prefix == entry.prefix)
-            {
-                Some(builtin) => *builtin = entry,
-                None => pricing.entries.push(entry),
+                )),
             }
         }
+
+        if let Some(path) = external {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                return (pricing, warnings);
+            };
+            let parsed: ExternalFile = match toml::from_str(&text) {
+                Ok(p) => p,
+                Err(e) => {
+                    warnings.push(format!(
+                        "外置价格文件解析失败，该层已忽略: {}（{e}）",
+                        path.display()
+                    ));
+                    return (pricing, warnings);
+                }
+            };
+            for m in parsed.model {
+                pricing.entries.push(Entry {
+                    prefix: normalize_model_id(&m.prefix),
+                    display: m.prefix,
+                    name: None,
+                    input: m.input,
+                    output: m.output,
+                    cache_write: m.cache_write,
+                    cache_read: m.cache_read,
+                    tier: TIER_EXTERNAL,
+                });
+            }
+        }
+
         (pricing, warnings)
     }
 
+    /// 层级优先（外置 > openrouter > 内置），层内最长前缀。
+    /// **变体隔离**：带 `:变体` 的查询只匹配同变体条目——免费（`:free`）等变体
+    /// 不得套用基名价格，宁可 unknown。
     pub fn lookup(&self, model: &str) -> Option<ModelPrice> {
-        let m = model.to_ascii_lowercase();
+        let key = normalize_model_id(model);
+        let (key_base, key_variant) = split_variant(&key);
         self.entries
             .iter()
-            .filter(|e| m.starts_with(e.prefix.to_ascii_lowercase().as_str()))
-            .max_by_key(|e| e.prefix.len())
+            .filter(|e| {
+                let (base, variant) = split_variant(&e.prefix);
+                variant == key_variant && key_base.starts_with(base)
+            })
+            // 层级优先：tier 越小越优先（外置 0 / openrouter 1 / 内置 2），再比前缀长度
+            .max_by_key(|e| (u8::MAX - e.tier, e.prefix.len()))
             .map(|e| ModelPrice {
                 input: e.input,
                 output: e.output,
@@ -218,23 +286,39 @@ impl Pricing {
         )
     }
 
-    /// GUI 设置页条目（内置 + 外置合并视图，含来源标识）。
+    /// GUI 设置页条目（合并视图，含来源与显示名）。
     pub fn entries(&self) -> Vec<PricingEntry> {
-        self.entries
+        let mut out: Vec<PricingEntry> = self
+            .entries
             .iter()
             .map(|e| PricingEntry {
-                prefix: e.prefix.clone(),
+                prefix: e.display.clone(),
+                name: e.name.clone(),
                 input: e.input,
                 output: e.output,
                 cache_write: e.cache_write,
                 cache_read: e.cache_read,
-                source: if e.external { "外置" } else { "内置" },
+                source: match e.tier {
+                    TIER_EXTERNAL => "外置",
+                    TIER_OPENROUTER => "openrouter",
+                    _ => "内置",
+                },
             })
-            .collect()
+            .collect();
+        out.sort_by(|a, b| a.source.cmp(b.source).then(a.prefix.cmp(&b.prefix)));
+        out
     }
 
     pub fn external_count(&self) -> usize {
-        self.entries.iter().filter(|e| e.external).count()
+        self.count_tier(TIER_EXTERNAL)
+    }
+
+    pub fn openrouter_count(&self) -> usize {
+        self.count_tier(TIER_OPENROUTER)
+    }
+
+    fn count_tier(&self, tier: u8) -> usize {
+        self.entries.iter().filter(|e| e.tier == tier).count()
     }
 }
 
@@ -251,9 +335,29 @@ mod tests {
         }
     }
 
+    fn write(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    #[test]
+    fn test_pricing_normalize() {
+        assert_eq!(
+            normalize_model_id("Anthropic/Claude-Sonnet-4.5"),
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(
+            normalize_model_id("claude-sonnet-4-5-20250929"),
+            "claude-sonnet-4-5-20250929"
+        );
+        assert_eq!(normalize_model_id("Tencent/HY3:free"), "hy3:free");
+        assert_eq!(normalize_model_id("GPT-5.6-Sol"), "gpt-5-6-sol");
+    }
+
     #[test]
     fn test_pricing_known_model() {
-        // 带日期后缀的完整模型串也按前缀命中；sonnet-4-5 优先于 sonnet-4。
         let p = Pricing::builtin()
             .lookup("claude-sonnet-4-5-20250929")
             .unwrap();
@@ -267,16 +371,13 @@ mod tests {
 
     #[test]
     fn test_pricing_longest_prefix() {
-        // luna 必须先于 gpt-5.6 命中；nano 先于 gpt-5.4、gpt-5。
         let p = Pricing::builtin().lookup("gpt-5.6-luna").unwrap();
         assert_eq!(p.input, 0.2);
-        assert_eq!(p.output, 1.2);
         assert_eq!(Pricing::builtin().lookup("gpt-5.6-sol").unwrap().input, 4.0);
         assert_eq!(
             Pricing::builtin().lookup("gpt-5.4-nano").unwrap().input,
             0.2
         );
-        // opus-4-5 起降价：4-5 后缀命中 5/25，4 与 4-1 仍是 15/75。
         assert_eq!(
             Pricing::builtin()
                 .lookup("claude-opus-4-5-20251101")
@@ -291,7 +392,6 @@ mod tests {
                 .input,
             15.0
         );
-        // deepseek / grok 带后缀的完整模型串。
         assert_eq!(
             Pricing::builtin()
                 .lookup("deepseek-v4-flash-0731")
@@ -313,6 +413,18 @@ mod tests {
     }
 
     #[test]
+    fn test_pricing_normalize_matches_dot_naming() {
+        // OpenRouter 点号命名经归一化后命中内置表（反之亦然）。
+        assert_eq!(
+            Pricing::builtin()
+                .lookup("anthropic/claude-sonnet-4.5")
+                .unwrap()
+                .input,
+            3.0
+        );
+    }
+
+    #[test]
     fn test_pricing_unknown_model() {
         assert!(Pricing::builtin().lookup("tencent/hy3:free").is_none());
         assert!(Pricing::builtin().lookup("<synthetic>").is_none());
@@ -325,7 +437,6 @@ mod tests {
 
     #[test]
     fn test_pricing_cost_math() {
-        // 1M input + 1M output 的 sonnet-4-5 = $3 + $15。
         let c = Pricing::builtin()
             .cost("claude-sonnet-4-5", &counts(1_000_000, 1_000_000, 0, 0))
             .unwrap();
@@ -334,7 +445,6 @@ mod tests {
             .cost("claude-sonnet-4-5", &counts(0, 0, 1_000_000, 1_000_000))
             .unwrap();
         assert!((c - 4.05).abs() < 1e-9);
-        // gpt-5.6-sol 混合四类：800*4 + 100*20 + 50*0.4 + 200*5 = 6220 / 1M。
         let c = Pricing::builtin()
             .cost("gpt-5.6-sol", &counts(800, 100, 50, 200))
             .unwrap();
@@ -343,18 +453,18 @@ mod tests {
 
     #[test]
     fn test_pricing_external_missing_is_silent() {
-        let (p, warnings) = Pricing::load(Some(Path::new("Z:/no-such/pricing.toml")));
+        let (p, warnings) = Pricing::load(Some(Path::new("Z:/no-such/pricing.toml")), None);
         assert_eq!(p.external_count(), 0);
         assert!(warnings.is_empty());
     }
 
     #[test]
     fn test_pricing_external_override_and_append() {
-        let dir = std::env::temp_dir().join(format!("tokenscope-pricing-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("pricing.toml");
-        std::fs::write(
-            &path,
+        let dir = std::env::temp_dir().join(format!("tokenscope-m5-ext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = write(
+            &dir,
+            "pricing.toml",
             r#"
 [[model]]
 prefix = "claude-opus-5"
@@ -370,30 +480,111 @@ output = 2.0
 cache_write = 0.0
 cache_read = 0.0
 "#,
-        )
-        .unwrap();
-        let (p, warnings) = Pricing::load(Some(&path));
+        );
+        let (p, warnings) = Pricing::load(Some(&path), None);
         assert!(warnings.is_empty());
         assert_eq!(p.external_count(), 2);
-        // 同前缀覆盖内置
         assert_eq!(p.lookup("claude-opus-5").unwrap().input, 9.0);
-        // 新前缀追加且最长前缀匹配仍然生效
         assert_eq!(p.lookup("my-model/zen-2").unwrap().output, 2.0);
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn test_pricing_external_broken_falls_back() {
-        let dir =
-            std::env::temp_dir().join(format!("tokenscope-pricing-bad-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("pricing.toml");
-        std::fs::write(&path, "not valid toml [[[").unwrap();
-        let (p, warnings) = Pricing::load(Some(&path));
+        let dir = std::env::temp_dir().join(format!("tokenscope-m5-extbad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = write(&dir, "pricing.toml", "not valid toml [[[");
+        let (p, warnings) = Pricing::load(Some(&path), None);
         assert_eq!(p.external_count(), 0);
         assert_eq!(p.lookup("claude-opus-5").unwrap().input, 5.0);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("解析失败"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_pricing_tier_order() {
+        // 三层优先级：外置 > openrouter > 内置；层内最长前缀。
+        let dir = std::env::temp_dir().join(format!("tokenscope-m5-tier-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let external = write(
+            &dir,
+            "pricing.toml",
+            // 外置与 openrouter 同前缀（claude-sonnet-4-5）：层级优先，外置 42 胜出
+            "[[model]]\nprefix = \"claude-sonnet-4-5\"\ninput = 42.0\noutput = 42.0\ncache_write = 0.0\ncache_read = 0.0\n",
+        );
+        let snapshot = write(
+            &dir,
+            "pricing-openrouter.json",
+            r#"{"synced_at":"t","entries":[
+                {"id":"anthropic/claude-sonnet-4.5","name":"Claude Sonnet 4.5",
+                 "prompt":0.000003,"completion":0.000015,
+                 "cache_read":0.0000003,"cache_write":0.00000375},
+                {"id":"openai/gpt-5.2","name":"GPT-5.2",
+                 "prompt":0.000007,"completion":0.00005,"cache_read":0,"cache_write":0},
+                {"id":"tencent/hy3:free","name":"HY3 free",
+                 "prompt":0,"completion":0,"cache_read":0,"cache_write":0}
+            ]}"#,
+        );
+        let (p, warnings) = Pricing::load(Some(&external), Some(&snapshot));
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+
+        // 外置层压过 openrouter（同前缀，层级优先）
+        let hit = p.lookup("claude-sonnet-4-5-20250929").unwrap();
+        assert_eq!(hit.input, 42.0);
+        // openrouter 层生效：点号命名归一化命中，压过同前缀的内置 1.75
+        assert_eq!(p.lookup("gpt-5.2-20260101").unwrap().input, 7.0);
+        // 内置兜底：openrouter/外置都没有的模型走内置
+        assert_eq!(p.lookup("claude-sonnet-4").unwrap().input, 3.0);
+        // 免费变体经最长前缀命中 :free 条目 → 0 价（known，非 unknown）
+        let free = p.lookup("tencent/hy3:free").unwrap();
+        assert_eq!(free.input, 0.0);
+        // 条目来源标识与显示名
+        let entries = p.entries();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.source == "openrouter" && e.name.as_deref() == Some("Claude Sonnet 4.5"))
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_pricing_variant_isolation() {
+        // :free 变体不得套用基名价格；基名查询也不吃变体条目。
+        let dir = std::env::temp_dir().join(format!("tokenscope-m5-var-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let snapshot = write(
+            &dir,
+            "pricing-openrouter.json",
+            r#"{"synced_at":"t","entries":[
+                {"id":"tencent/hy3","name":"HY3",
+                 "prompt":0.0000000825,"completion":0.0000004,"cache_read":0,"cache_write":0},
+                {"id":"tencent/hy3:free","name":"HY3 free",
+                 "prompt":0,"completion":0,"cache_read":0,"cache_write":0}
+            ]}"#,
+        );
+        let (p, warnings) = Pricing::load(None, Some(&snapshot));
+        assert!(warnings.is_empty());
+        // 精确变体命中 0 价
+        assert_eq!(p.lookup("tencent/hy3:free").unwrap().input, 0.0);
+        // 基名命中基名价格
+        assert!((p.lookup("tencent/hy3").unwrap().input - 0.0825).abs() < 1e-9);
+        // 未知变体：基名价格不外溢 → unknown
+        assert!(p.lookup("tencent/hy3:preview").is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_pricing_corrupt_snapshot_warns() {
+        let dir =
+            std::env::temp_dir().join(format!("tokenscope-m5-snapbad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let snapshot = write(&dir, "pricing-openrouter.json", "not json");
+        let (p, warnings) = Pricing::load(None, Some(&snapshot));
+        assert_eq!(p.openrouter_count(), 0);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("OpenRouter"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

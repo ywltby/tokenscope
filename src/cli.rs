@@ -17,6 +17,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// 模型价格表管理
+    Pricing {
+        #[command(subcommand)]
+        cmd: PricingCmd,
+    },
     /// 汇总用量（当前支持 Claude Code 与 Codex，默认合并全部已装 agent）
     Summary {
         /// 聚合维度（默认按日）
@@ -77,7 +82,34 @@ impl AgentArg {
     }
 }
 
+#[derive(Debug, Subcommand)]
+pub enum PricingCmd {
+    /// 从 OpenRouter 同步价格快照到 ~/.tokenscope/pricing-openrouter.json
+    Sync,
+}
+
 pub fn run(cli: Cli) -> anyhow::Result<()> {
+    match cli.command {
+        Command::Pricing { cmd } => run_pricing(cmd),
+        Command::Summary { .. } => run_summary(cli),
+    }
+}
+
+fn run_pricing(cmd: PricingCmd) -> anyhow::Result<()> {
+    match cmd {
+        PricingCmd::Sync => {
+            let path = crate::report::openrouter_file_path(None);
+            let report = crate::openrouter::sync(&path)?;
+            println!(
+                "已同步 {} 个模型价格 → {}（{}）",
+                report.count, report.path, report.synced_at
+            );
+            Ok(())
+        }
+    }
+}
+
+fn run_summary(cli: Cli) -> anyhow::Result<()> {
     let Command::Summary {
         by,
         agent,
@@ -86,7 +118,10 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         claude_dir,
         codex_dir,
         refresh,
-    } = cli.command;
+    } = cli.command
+    else {
+        unreachable!("run_summary 只接收 summary 子命令");
+    };
     let opts = SummaryOptions {
         by: by.into(),
         agent: agent.map(|a| a.kind()),
@@ -95,6 +130,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         codex_dir,
         cache_dir: None,
         pricing_path: None,
+        openrouter_path: None,
         refresh,
     };
     let report = summary(&opts)?;
@@ -130,7 +166,10 @@ mod tests {
             json,
             days,
             ..
-        } = &cli.command;
+        } = &cli.command
+        else {
+            unreachable!("应解析出 summary 子命令");
+        };
         assert_eq!(*by, ByArg::Day);
         assert_eq!(*agent, None);
         assert!(!json);
@@ -163,7 +202,10 @@ mod tests {
             claude_dir,
             codex_dir,
             refresh,
-        } = &cli.command;
+        } = &cli.command
+        else {
+            unreachable!("应解析出 summary 子命令");
+        };
         assert_eq!(*by, ByArg::Model);
         assert!(!refresh);
         assert_eq!(*agent, Some(AgentArg::Codex));

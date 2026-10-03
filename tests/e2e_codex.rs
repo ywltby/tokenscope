@@ -28,6 +28,8 @@ fn codex_report(by: GroupBy) -> SummaryReport {
         by,
         agent: Some(AgentKind::Codex),
         codex_dir: Some(fixture("codex", "basic")),
+        // 固定指向不存在的快照，e2e 断言不依赖真实 ~/.tokenscope 状态
+        openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
         ..Default::default()
     })
     .unwrap()
@@ -39,6 +41,7 @@ fn both_report(by: GroupBy) -> SummaryReport {
         by,
         claude_dir: Some(fixture("claude", "basic")),
         codex_dir: Some(fixture("codex", "basic")),
+        openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
         ..Default::default()
     })
     .unwrap()

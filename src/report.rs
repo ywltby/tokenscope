@@ -30,6 +30,8 @@ pub struct SummaryOptions {
     pub cache_dir: Option<PathBuf>,
     /// 外置价格文件路径（None = `~/.tokenscope/pricing.toml`；测试注入用）。
     pub pricing_path: Option<PathBuf>,
+    /// OpenRouter 快照文件路径（None = `~/.tokenscope/pricing-openrouter.json`；测试注入用）。
+    pub openrouter_path: Option<PathBuf>,
     /// 强制全量重解析并重建缓存。
     pub refresh: bool,
 }
@@ -78,6 +80,13 @@ pub fn cache_file_path(cache_dir: Option<&PathBuf>) -> PathBuf {
 }
 
 /// 外置价格**文件**路径：传入即用；None = `~/.tokenscope/pricing.toml`。
+pub fn openrouter_file_path(snapshot_file: Option<&PathBuf>) -> PathBuf {
+    snapshot_file
+        .cloned()
+        .or_else(|| data_dir().ok().map(|d| d.join("pricing-openrouter.json")))
+        .unwrap_or_else(|| PathBuf::from("pricing-openrouter.json"))
+}
+
 pub fn pricing_file_path(pricing_file: Option<&PathBuf>) -> PathBuf {
     pricing_file
         .cloned()
@@ -162,7 +171,8 @@ pub fn rebuild_cache(cache_dir: Option<PathBuf>) -> Result<CacheInfo> {
 
 pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
     let pricing_path = pricing_file_path(opts.pricing_path.as_ref());
-    let (pricing, mut warnings) = Pricing::load(Some(&pricing_path));
+    let openrouter_path = openrouter_file_path(opts.openrouter_path.as_ref());
+    let (pricing, mut warnings) = Pricing::load(Some(&pricing_path), Some(&openrouter_path));
     let (cache, mut cache_warnings) = open_cache(opts);
     warnings.append(&mut cache_warnings);
 
@@ -333,6 +343,8 @@ mod tests {
             codex_dir: Some(fixture("codex", "basic")),
             cache_dir: cache,
             pricing_path: pricing,
+            // 固定指向不存在的快照，测试不依赖真实 ~/.tokenscope 状态
+            openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
             refresh,
             ..Default::default()
         }
@@ -429,6 +441,7 @@ mod tests {
             claude_dir: Some(src_dir.clone()),
             cache_dir: Some(dir.join("cache")),
             pricing_path: Some(dir.join("no-pricing.toml")),
+            openrouter_path: Some(dir.join("no-snapshot.json")),
             ..Default::default()
         };
         let first = summary(&mk_opts()).unwrap();
