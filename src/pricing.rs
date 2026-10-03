@@ -310,13 +310,15 @@ impl Pricing {
         self.entries
             .iter()
             .map(|e| {
-                let openrouter = or_by_prefix.get(e.prefix.as_str()).map(|o| OpenRouterPrice {
-                    input: o.input,
-                    output: o.output,
-                    cache_write: o.cache_write,
-                    cache_read: o.cache_read,
-                    name: o.name.clone(),
-                });
+                let openrouter = or_by_prefix
+                    .get(e.prefix.as_str())
+                    .map(|o| OpenRouterPrice {
+                        input: o.input,
+                        output: o.output,
+                        cache_write: o.cache_write,
+                        cache_read: o.cache_read,
+                        name: o.name.clone(),
+                    });
                 PricingEntry {
                     prefix: e.display.clone(),
                     name: e.name.clone(),
@@ -577,14 +579,20 @@ cache_read = 0.0
             .iter()
             .find(|e| e.source == "内置" && e.prefix == "claude-sonnet-4-5")
             .expect("内置 sonnet-4-5 行应存在");
-        let or = sonnet_builtin.openrouter.as_ref().expect("同前缀 openrouter 条目应挂上对照价");
+        let or = sonnet_builtin
+            .openrouter
+            .as_ref()
+            .expect("同前缀 openrouter 条目应挂上对照价");
         assert!((or.input - 3.0).abs() < 1e-9);
         assert_eq!(or.name.as_deref(), Some("Claude Sonnet 4.5"));
         let doubao = entries
             .iter()
             .find(|e| e.source == "内置" && e.prefix == "doubao-seed-2-0")
             .expect("内置 doubao 行应存在");
-        assert!(doubao.openrouter.is_none(), "openrouter 无对应模型 → None（前端显示未知价格）");
+        assert!(
+            doubao.openrouter.is_none(),
+            "openrouter 无对应模型 → None（前端显示未知价格）"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

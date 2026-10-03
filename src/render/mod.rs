@@ -149,6 +149,7 @@ mod tests {
             &Pricing::default(),
         );
         let report = SummaryReport {
+            timezone: "Asia/Shanghai".into(),
             by: agg.by,
             groups: agg.groups,
             totals: agg.totals,
