@@ -227,9 +227,8 @@ mod tests {
     #[test]
     fn test_filter_days() {
         let old = event("2020-01-01T00:00:00.000Z", "m", 1, 1);
-        let now_ts = jiff::Timestamp::now()
-            .checked_sub(jiff::Span::new().hours(1))
-            .unwrap();
+        // 直接用 now：now - 1h 在本地午夜后一小时内会落到昨天，属测试自身的时间依赖缺陷。
+        let now_ts = jiff::Timestamp::now();
         let mut recent = event("2026-01-01T00:00:00.000Z", "m", 1, 1);
         recent.ts = now_ts;
         let kept = filter_days(vec![old, recent], &tz(), 1);
