@@ -1,0 +1,14 @@
+#!/bin/sh
+# TokenScope 提交门禁（启用：git config core.hooksPath .githooks）
+set -e
+# rustup 默认安装位置兜底：Git Bash / 某些钩子环境可能不继承用户 PATH
+PATH="$HOME/.cargo/bin:$PATH"
+export PATH
+echo "[pre-commit] cargo fmt --check"
+cargo fmt --all -- --check
+echo "[pre-commit] cargo clippy"
+cargo clippy --workspace --all-targets --quiet
+echo "[pre-commit] frontend typecheck"
+pnpm --dir frontend typecheck
+echo "[pre-commit] frontend format:check"
+pnpm --dir frontend format:check
