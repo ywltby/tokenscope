@@ -1,6 +1,6 @@
 # M3：Tauri 2 + Vue 3 桌面 GUI
 
-- 状态：**待用户确认，未动工**
+- 状态：**已确认，动工中**（2026-10-03 用户拍板：Naive UI、明暗双模式、CLI 保留、托盘常驻）
 - 创建：2026-10-03
 
 ## 背景与目标
@@ -36,7 +36,8 @@ tokenscope/                 # 仍是核心 lib + CLI bin（Cargo workspace root�
 
 - Tauri 2（`tauri = "2"`、`@tauri-apps/api` v2、`@tauri-apps/cli` v2 devDep）；应用标识 `io.github.ywltby.tokenscope`，窗口标题 `TokenScope`。
 - Vue 3.5 + Vite + TypeScript（strict）；组件库 **Naive UI**（Vue3 原生、TS 优先、内置暗色主题）；图表 **ECharts + vue-echarts**。
-- 若用户偏好 Element Plus / 自绘样式，在确认时提出即可替换，不影响其他部分。
+- 用户已拍板 Naive UI；**明暗双模式**：NConfigProvider + darkTheme，顶栏切换并持久化到 localStorage，默认跟随系统。
+- **托盘常驻（用户要求）**：`tauri` features `tray-icon` + `image-png`；应用启动即创建托盘图标；主窗口关闭 → 隐藏到托盘（prevent_close）；托盘菜单「显示主窗口 / 退出」，单击托盘图标恢复窗口。
 
 ## CLI / GUI 共用管线（新增 report.rs）
 
@@ -70,7 +71,7 @@ pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport>
 ## 非目标（后续里程碑）
 
 - 价格表外置配置 / models.dev 导入（M4，GUI 设置页一并做）
-- 托盘、开机自启、自动更新、多窗口、逐请求明细视图
+- 开机自启、自动更新、多窗口、逐请求明细视图、单实例互斥
 - frontend 单测框架（M3 以 `vue-tsc` 类型检查 + `pnpm build` + 手工冒烟为准，vitest 留给 M4 评估）
 
 ## 任务清单（代码位置 / 测试名 / 验证命令）
@@ -82,6 +83,7 @@ pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport>
 | 3 | `summarize` / `source_status` commands | `src-tauri/src/commands.rs` | `test_tauri_commands_` | `cargo test -p tokenscope-tauri` |
 | 4 | Dashboard：过滤/维度/卡片/明细表 | `frontend/src/views/Dashboard.vue` 等 | 类型检查 | `pnpm --dir frontend typecheck && pnpm --dir frontend build` |
 | 5 | ECharts 趋势图联动 | `frontend/src/components/TrendChart.vue` | 类型检查 | 同上 |
+| 5b | 托盘常驻 + 关窗缩托盘 | `src-tauri/src/lib.rs` | `test_tray_setup_`（编译期配置 + 手工冒烟） | `cargo build -p tokenscope-tauri` + 冒烟清单 |
 | 6 | 生产构建产物 | `src-tauri/tauri.conf.json` | — | `pnpm --dir frontend tauri build` 产出 exe/msi，安装启动冒烟 |
 | 7 | 文档回写（CLAUDE.md 设计方向改为「GUI 主形态 + CLI 辅助」、README、.gitignore） | — | — | 人工核对 |
 
