@@ -24,6 +24,7 @@ export interface SourceStat {
 }
 
 export interface SummaryReport {
+  timezone: string;
   generated_at: string;
   sources: SourceStat[];
   by: string;

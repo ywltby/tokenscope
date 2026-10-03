@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::aggregate::{GroupBy, aggregate, filter_days, local_tz};
+use crate::aggregate::{GroupBy, aggregate, filter_days, resolve_tz};
 use crate::cache::{Cache, CacheStats, mtime_ms};
 use crate::dedupe::dedupe_events;
 use crate::model::{AgentKind, UsageEvent};
@@ -32,6 +32,8 @@ pub struct SummaryOptions {
     pub pricing_path: Option<PathBuf>,
     /// OpenRouter 快照文件路径（None = `~/.tokenscope/pricing-openrouter.json`；测试注入用）。
     pub openrouter_path: Option<PathBuf>,
+    /// 聚合与展示时区：None = 默认 Asia/Shanghai；"local" = 本机；其余按 IANA 名。
+    pub tz: Option<String>,
     /// 强制全量重解析并重建缓存。
     pub refresh: bool,
 }
@@ -45,6 +47,8 @@ pub struct SourceReport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryReport {
+    /// 解析后的时区标识（M6）。
+    pub timezone: String,
     pub by: &'static str,
     pub groups: Vec<crate::aggregate::Group>,
     pub totals: crate::aggregate::Group,
@@ -254,12 +258,13 @@ pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
         s.stats.events = events.iter().filter(|e| e.agent == s.agent).count() as u64;
     }
 
-    let tz = local_tz();
+    let (tz, tz_label) = resolve_tz(opts.tz.as_deref())?;
     if let Some(n) = opts.days {
         events = filter_days(events, &tz, n);
     }
     let agg = aggregate(&events, opts.by, &tz, &pricing);
     Ok(SummaryReport {
+        timezone: tz_label,
         by: agg.by,
         groups: agg.groups,
         totals: agg.totals,
@@ -345,6 +350,7 @@ mod tests {
             pricing_path: pricing,
             // 固定指向不存在的快照，测试不依赖真实 ~/.tokenscope 状态
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            tz: Some("Asia/Shanghai".to_string()),
             refresh,
             ..Default::default()
         }
@@ -442,6 +448,7 @@ mod tests {
             cache_dir: Some(dir.join("cache")),
             pricing_path: Some(dir.join("no-pricing.toml")),
             openrouter_path: Some(dir.join("no-snapshot.json")),
+            tz: Some("Asia/Shanghai".to_string()),
             ..Default::default()
         };
         let first = summary(&mk_opts()).unwrap();
@@ -505,6 +512,45 @@ cache_read = 0.0
         let expected = (1000.0 * 99.0 + 200.0 * 99.0 + 6220.0) / 1_000_000.0;
         assert!((r.groups[0].cost_usd - expected).abs() < 1e-9);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_report_tz_resolution() {
+        // 缺省 = Asia/Shanghai；显式 UTC 改变解析标识；非法名 = 参数错误。
+        let base = SummaryOptions {
+            by: GroupBy::Day,
+            claude_dir: Some(fixture("claude", "basic")),
+            codex_dir: Some(fixture("codex", "basic")),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            ..Default::default()
+        };
+        let sh = summary(&SummaryOptions {
+            tz: Some("Asia/Shanghai".into()),
+            ..base.clone()
+        })
+        .unwrap();
+        assert_eq!(sh.timezone, "Asia/Shanghai");
+        assert_eq!(sh.groups[0].key, "2026-07-17");
+
+        let utc = summary(&SummaryOptions {
+            tz: Some("UTC".into()),
+            ..base.clone()
+        })
+        .unwrap();
+        assert_eq!(utc.timezone, "UTC");
+
+        let local = summary(&SummaryOptions {
+            tz: Some("local".into()),
+            ..base.clone()
+        })
+        .unwrap();
+        assert!(!local.timezone.is_empty());
+
+        let bad = summary(&SummaryOptions {
+            tz: Some("Mars/Olympus".into()),
+            ..base
+        });
+        assert!(bad.is_err(), "非法时区应为参数错误");
     }
 
     #[test]

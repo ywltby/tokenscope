@@ -36,6 +36,7 @@ pub fn summarize(
     by: String,
     days: Option<u32>,
     agent: Option<String>,
+    tz: Option<String>,
 ) -> Result<SummaryReport, String> {
     let opts = SummaryOptions {
         by: parse_by(&by)?,
@@ -43,6 +44,7 @@ pub fn summarize(
         days,
         claude_dir: None,
         codex_dir: None,
+        tz,
         ..Default::default()
     };
     summary(&opts).map_err(|e| e.to_string())

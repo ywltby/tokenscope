@@ -9,9 +9,26 @@ use serde::Serialize;
 use crate::model::{TokenCounts, UsageEvent};
 use crate::pricing::Pricing;
 
-/// 仓库统一聚合时区（M1 不变量 4）：Asia/Shanghai，无夏令时。
-pub fn local_tz() -> TimeZone {
-    TimeZone::get("Asia/Shanghai").expect("时区常量固定且合法")
+/// 时区解析（M6）：显式传入 > 本机系统（`--tz local`）> 默认 Asia/Shanghai。
+/// 存储层永远持有 UTC（见 cache.rs），全链路只在此解析一次。
+pub fn resolve_tz(explicit: Option<&str>) -> anyhow::Result<(TimeZone, String)> {
+    let label = |tz: &TimeZone, fallback: &str| -> String {
+        tz.iana_name().unwrap_or(fallback).to_string()
+    };
+    match explicit {
+        Some(name) if name.eq_ignore_ascii_case("local") => {
+            let tz = TimeZone::system();
+            Ok((tz.clone(), label(&tz, "local")))
+        }
+        Some(name) => {
+            let tz = TimeZone::get(name).map_err(|e| anyhow::anyhow!("未知时区 {name:?}: {e}"))?;
+            Ok((tz, name.to_string()))
+        }
+        None => {
+            let tz = TimeZone::get("Asia/Shanghai").expect("仓库默认时区常量且合法");
+            Ok((tz, "Asia/Shanghai".to_string()))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

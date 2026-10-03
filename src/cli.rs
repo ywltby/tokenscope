@@ -45,6 +45,9 @@ pub enum Command {
         /// 强制全量重解析并重建缓存
         #[arg(long)]
         refresh: bool,
+        /// 聚合/展示时区：local=本机，或 IANA 名（如 Asia/Shanghai）；缺省 Asia/Shanghai
+        #[arg(long = "tz", value_name = "TZ")]
+        tz: Option<String>,
     },
 }
 
@@ -118,6 +121,7 @@ fn run_summary(cli: Cli) -> anyhow::Result<()> {
         claude_dir,
         codex_dir,
         refresh,
+        tz,
     } = cli.command
     else {
         unreachable!("run_summary 只接收 summary 子命令");
@@ -132,6 +136,7 @@ fn run_summary(cli: Cli) -> anyhow::Result<()> {
         pricing_path: None,
         openrouter_path: None,
         refresh,
+        tz,
     };
     let report = summary(&opts)?;
     for w in &report.warnings {
@@ -183,6 +188,8 @@ mod tests {
             "summary",
             "--by",
             "model",
+            "--tz",
+            "UTC",
             "--agent",
             "codex",
             "--json",
@@ -202,11 +209,13 @@ mod tests {
             claude_dir,
             codex_dir,
             refresh,
+            tz,
         } = &cli.command
         else {
             unreachable!("应解析出 summary 子命令");
         };
         assert_eq!(*by, ByArg::Model);
+        assert_eq!(tz.as_deref(), Some("UTC"));
         assert!(!refresh);
         assert_eq!(*agent, Some(AgentArg::Codex));
         assert!(json);

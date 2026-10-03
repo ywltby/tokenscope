@@ -24,6 +24,7 @@ const props = defineProps<{ refreshKey: number }>();
 const by = ref<Dim>("day");
 const agent = ref<AgentFilter>("all");
 const days = ref<number>(0);
+const tz = ref<string>("Asia/Shanghai");
 const report = ref<SummaryReport | null>(null);
 const loading = ref(false);
 const sourceStatus = ref<SourceStatus[]>([]);
@@ -48,6 +49,12 @@ const dayOptions: { label: string; value: number }[] = [
   { label: "近 90 天", value: 90 },
 ];
 
+const tzOptions: { label: string; value: string }[] = [
+  { label: "本机时区", value: "local" },
+  { label: "Asia/Shanghai", value: "Asia/Shanghai" },
+  { label: "UTC", value: "UTC" },
+];
+
 async function refresh(): Promise<void> {
   loading.value = true;
   try {
@@ -55,6 +62,7 @@ async function refresh(): Promise<void> {
       by: by.value,
       agent: agent.value,
       days: days.value === 0 ? null : days.value,
+      tz: tz.value,
     });
   } finally {
     loading.value = false;
@@ -97,6 +105,7 @@ void loadSources();
         />
       </NRadioGroup>
       <NSelect v-model:value="days" :options="dayOptions" size="small" style="width: 130px" />
+      <NSelect v-model:value="tz" :options="tzOptions" size="small" style="width: 160px" />
     </div>
     <NSpin :show="loading">
       <template v-if="report">

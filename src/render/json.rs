@@ -13,6 +13,7 @@ struct SourceStat<'a> {
 
 #[derive(Serialize)]
 struct Report<'a> {
+    timezone: &'a str,
     generated_at: &'a str,
     sources: Vec<SourceStat<'a>>,
     by: &'a str,
@@ -23,6 +24,7 @@ struct Report<'a> {
 
 pub fn to_json(report: &SummaryReport) -> Result<String> {
     let r = Report {
+        timezone: &report.timezone,
         generated_at: &report.generated_at,
         sources: report
             .sources
@@ -66,6 +68,7 @@ mod tests {
         let tz = TimeZone::get("Asia/Shanghai").unwrap();
         let agg = aggregate(&events, GroupBy::Day, &tz, &Pricing::default());
         let report = SummaryReport {
+            timezone: "Asia/Shanghai".into(),
             by: agg.by,
             groups: agg.groups,
             totals: agg.totals,

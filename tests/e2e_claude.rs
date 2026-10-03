@@ -62,6 +62,7 @@ fn test_e2e_summary_json() {
         serde_json::from_str(&claude_report(GroupBy::Day).to_json().unwrap()).unwrap();
 
     assert_eq!(v["sources"][0]["agent"], "claude-code");
+    assert_eq!(v["timezone"], "Asia/Shanghai");
     assert_eq!(v["by"], "day");
     let groups = v["groups"].as_array().unwrap();
     assert_eq!(groups.len(), 2);
