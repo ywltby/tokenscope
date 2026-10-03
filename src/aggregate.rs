@@ -153,6 +153,7 @@ mod tests {
             agent: AgentKind::ClaudeCode,
             model: model.into(),
             session_id: "s".into(),
+            record_id: String::new(),
             project: "proj-a".into(),
             input_tokens: input,
             output_tokens: output,
@@ -168,7 +169,7 @@ mod tests {
             event("2026-07-17T15:59:59.000Z", "m", 1, 1),
             event("2026-07-17T16:00:00.000Z", "m", 10, 10),
         ];
-        let agg = aggregate(&events, GroupBy::Day, &tz(), &Pricing);
+        let agg = aggregate(&events, GroupBy::Day, &tz(), &Pricing::default());
         // 末行为合计
         assert_eq!(agg.groups.len(), 3);
         assert_eq!(agg.groups[0].key, "2026-07-17");
@@ -189,7 +190,7 @@ mod tests {
                 e
             },
         ];
-        let agg = aggregate(&events, GroupBy::Model, &tz(), &Pricing);
+        let agg = aggregate(&events, GroupBy::Model, &tz(), &Pricing::default());
         assert_eq!(agg.groups.len(), 3); // grok、claude、合计
         assert_eq!(agg.groups[0].key, "claude-sonnet-4-5");
         assert_eq!(agg.groups[0].tokens.input, 5);
@@ -199,7 +200,7 @@ mod tests {
         assert_eq!(agg.groups[1].unknown_tokens.input, 1);
         assert_eq!(agg.totals.unknown_tokens.input, 1);
 
-        let agg = aggregate(&events, GroupBy::Project, &tz(), &Pricing);
+        let agg = aggregate(&events, GroupBy::Project, &tz(), &Pricing::default());
         assert_eq!(agg.groups.len(), 3);
         assert_eq!(agg.groups[0].key, "proj-a");
         assert_eq!(agg.groups[0].tokens.input, 3);
@@ -212,7 +213,7 @@ mod tests {
         let mut e2 = event("2026-07-17T08:01:00.000Z", "m", 2, 2);
         e2.agent = AgentKind::Codex;
         let events = [event("2026-07-17T08:00:00.000Z", "m", 1, 1), e2];
-        let agg = aggregate(&events, GroupBy::Agent, &tz(), &Pricing);
+        let agg = aggregate(&events, GroupBy::Agent, &tz(), &Pricing::default());
         assert_eq!(agg.groups.len(), 3); // claude-code、codex、合计
         assert_eq!(agg.groups[0].key, "claude-code");
         assert_eq!(agg.groups[0].requests, 1);

@@ -47,12 +47,12 @@ fn both_report(by: GroupBy) -> SummaryReport {
 #[test]
 fn test_e2e_codex_collection() {
     let col = codex_basic();
-    // 2 文件 16 行：4 事件（同请求重发去重 1）；跳过 零分量 1 / 无模型 1、
-    // 忽略 usage_record 1、坏行 2。
+    // 2 文件 16 行：5 个未去重事件（同请求重发 1 由全局 dedupe 处理）；
+    // 跳过 零分量 1 / 无模型 1、忽略 usage_record 1、坏行 2。
     assert_eq!(col.stats.files_scanned, 2);
     assert_eq!(col.stats.lines_seen, 16);
-    assert_eq!(col.stats.events, 4);
-    assert_eq!(col.stats.duplicates_dropped, 1);
+    assert_eq!(col.stats.events, 5);
+    assert_eq!(col.stats.duplicates_dropped, 0);
     assert_eq!(col.stats.skipped_zero_usage, 1);
     assert_eq!(col.stats.skipped_no_model, 1);
     assert_eq!(col.stats.ignored_token_usage_record, 1);

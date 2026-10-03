@@ -4,7 +4,7 @@ use jiff::Timestamp;
 use serde::Serialize;
 
 /// 已接入的 agent 种类；新增适配器时在此扩枚举。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize)]
 pub enum AgentKind {
     #[default]
     ClaudeCode,
@@ -20,7 +20,8 @@ impl AgentKind {
     }
 }
 
-/// 一条 assistant 消息的用量（去重后），agent 无关的归一形态。
+/// 一条用量事件，agent 无关的归一形态（M4 起为**未去重**事件，去重在全局
+/// dedupe 步骤按 agent 规则执行）。
 #[derive(Debug, Clone)]
 pub struct UsageEvent {
     pub ts: Timestamp,
@@ -28,6 +29,9 @@ pub struct UsageEvent {
     pub model: String,
     pub session_id: String,
     pub project: String,
+    /// agent 原生日志标识（Claude 的 message.id；Codex 无此标识记空串），
+    /// 供全局去重使用。
+    pub record_id: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_write_tokens: u64,
@@ -86,6 +90,7 @@ mod tests {
         UsageEvent {
             ts: "2026-07-17T08:00:00.000Z".parse().unwrap(),
             agent: AgentKind::ClaudeCode,
+            record_id: String::new(),
             model: "m".into(),
             session_id: "s".into(),
             project: "p".into(),

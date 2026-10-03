@@ -56,6 +56,7 @@ mod tests {
             agent: AK::ClaudeCode,
             model: "tencent/hy3:free".into(),
             session_id: "s".into(),
+            record_id: String::new(),
             project: "p".into(),
             input_tokens: 100,
             output_tokens: 50,
@@ -63,7 +64,7 @@ mod tests {
             cache_read_tokens: 0,
         }];
         let tz = TimeZone::get("Asia/Shanghai").unwrap();
-        let agg = aggregate(&events, GroupBy::Day, &tz, &Pricing);
+        let agg = aggregate(&events, GroupBy::Day, &tz, &Pricing::default());
         let report = SummaryReport {
             by: agg.by,
             groups: agg.groups,

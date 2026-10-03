@@ -36,11 +36,11 @@ fn claude_report(by: GroupBy) -> SummaryReport {
 #[test]
 fn test_e2e_summary_table() {
     let col = basic();
-    // 采集口径：2 个 jsonl、11 行、3 个事件（去重丢 2、坏行 3、跳过 sidechain 1 / synthetic 1）。
+    // 采集口径：2 个 jsonl、11 行、5 个未去重事件（M4 起去重上移到 report 层）。
     assert_eq!(col.stats.files_scanned, 2);
     assert_eq!(col.stats.lines_seen, 11);
-    assert_eq!(col.stats.events, 3);
-    assert_eq!(col.stats.duplicates_dropped, 2);
+    assert_eq!(col.stats.events, 5);
+    assert_eq!(col.stats.duplicates_dropped, 0);
     assert_eq!(col.stats.bad_lines, 3);
     assert_eq!(col.stats.skipped_sidechain, 1);
     assert_eq!(col.stats.skipped_synthetic, 1);

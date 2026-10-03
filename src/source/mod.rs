@@ -1,18 +1,21 @@
-//! source 层契约：各 agent 适配器把本地日志采集为归一化的 `Collection`。
-//! 适配器必须只读（M1 不变量 1），采集统计随事件一并返回供渲染层展示。
+//! source 层契约：各 agent 适配器把本地日志解析为归一化事件。
+//! 适配器必须只读（M1 不变量 1）。M4 起：
+//! - 事件为**未去重**形态，跨文件去重统一由 `crate::dedupe` 在 report 管线执行；
+//! - 发现与解析拆为 `discover` / `parse_file` 两个能力，供缓存按文件指纹增量失效。
 
 pub mod claude;
 pub mod codex;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::Serialize;
 
 use crate::model::{AgentKind, UsageEvent};
 
-/// 一次采集的观测计数；坏行 / 去重 / 跳过口径见 M1/M2 plan 不变量。
-/// Codex 专属计数器为 0 时不序列化，保证单 agent 报告与 M1 输出一致。
+/// 一次采集的观测计数；坏行 / 去重 / 跳过口径见 M1/M2/M4 plan 不变量。
+/// Codex 专属计数器为 0 时不序列化；`duplicates_dropped` 自 M4 起由全局去重
+/// 步骤统计并回填，source 层恒为 0。
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct CollectStats {
     pub files_scanned: u64,
@@ -28,6 +31,19 @@ pub struct CollectStats {
     #[serde(skip_serializing_if = "is_zero")]
     pub ignored_token_usage_record: u64,
     pub events: u64,
+}
+
+impl CollectStats {
+    /// 累加单个文件的解析统计（files_scanned 与 events 由调用方维护）。
+    pub fn add_file(&mut self, f: &FileParse) {
+        self.lines_seen += f.stats.lines_seen;
+        self.bad_lines += f.stats.bad_lines;
+        self.skipped_sidechain += f.stats.skipped_sidechain;
+        self.skipped_synthetic += f.stats.skipped_synthetic;
+        self.skipped_zero_usage += f.stats.skipped_zero_usage;
+        self.skipped_no_model += f.stats.skipped_no_model;
+        self.ignored_token_usage_record += f.stats.ignored_token_usage_record;
+    }
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -47,7 +63,79 @@ pub struct Collection {
     pub warnings: Vec<String>,
 }
 
+/// 单文件解析产物（缓存存取的基本单位）。
+#[derive(Debug, Default, Clone)]
+pub struct FileParse {
+    pub stats: CollectStats,
+    pub events: Vec<UsageEvent>,
+}
+
 pub trait Source {
     fn agent(&self) -> AgentKind;
-    fn collect(&self) -> Result<Collection>;
+
+    /// 扫描根目录（缺失警告与缓存展示用）。
+    fn root(&self) -> &Path;
+
+    /// 发现全部 jsonl（目录缺失返回空表），按路径排序保证稳定顺序。
+    fn discover(&self) -> Vec<PathBuf>;
+
+    /// 解析单个文件（不做跨文件去重；读取失败返回带警告的空产物）。
+    fn parse_file(&self, path: &Path) -> FileParse;
+
+    /// 便捷全量采集：发现 + 逐文件解析，未全局去重（目录缺失 → 警告 + 空结果）。
+    fn collect(&self) -> Result<Collection> {
+        let mut stats = CollectStats::default();
+        let mut warnings = Vec::new();
+        let mut events = Vec::new();
+        if !self.root().is_dir() {
+            warnings.push(format!(
+                "{} 目录不存在：{}",
+                match self.agent() {
+                    AgentKind::ClaudeCode => "Claude",
+                    AgentKind::Codex => "Codex",
+                },
+                self.root().display()
+            ));
+            return Ok(Collection {
+                agent: self.agent(),
+                events,
+                stats,
+                warnings,
+            });
+        }
+        for path in self.discover() {
+            stats.files_scanned += 1;
+            let parsed = self.parse_file(&path);
+            stats.add_file(&parsed);
+            events.extend(parsed.events);
+        }
+        stats.events = events.len() as u64;
+        Ok(Collection {
+            agent: self.agent(),
+            events,
+            stats,
+            warnings,
+        })
+    }
+}
+
+/// 递归收集 root 下全部 jsonl，按路径排序（Claude/Codex 共用）。
+pub(crate) fn walk_jsonl(root: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut children: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    children.sort();
+    for child in children {
+        if child.is_dir() {
+            walk_jsonl(&child, out);
+        } else if is_jsonl(&child) {
+            out.push(child);
+        }
+    }
+}
+
+pub(crate) fn read_text(path: &Path) -> Result<String, std::io::Error> {
+    // lossy 容错：个别非法字节不应让整份文件失败，垃圾行由坏行计数接住。
+    std::fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned())
 }

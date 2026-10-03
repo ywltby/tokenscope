@@ -134,6 +134,7 @@ mod tests {
             agent: AgentKind::ClaudeCode,
             model: "tencent/hy3:free".into(),
             session_id: "s".into(),
+            record_id: String::new(),
             project: "p".into(),
             input_tokens: 1234567,
             output_tokens: 42,
@@ -141,8 +142,12 @@ mod tests {
             cache_read_tokens: 5,
         }];
         let tz = TimeZone::get("Asia/Shanghai").unwrap();
-        let agg =
-            crate::aggregate::aggregate(&events, crate::aggregate::GroupBy::Day, &tz, &Pricing);
+        let agg = crate::aggregate::aggregate(
+            &events,
+            crate::aggregate::GroupBy::Day,
+            &tz,
+            &Pricing::default(),
+        );
         let report = SummaryReport {
             by: agg.by,
             groups: agg.groups,

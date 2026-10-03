@@ -37,6 +37,9 @@ pub enum Command {
         /// 覆盖 Codex sessions 目录（默认 ~/.codex/sessions）
         #[arg(long = "codex-dir", value_name = "PATH")]
         codex_dir: Option<PathBuf>,
+        /// 强制全量重解析并重建缓存
+        #[arg(long)]
+        refresh: bool,
     },
 }
 
@@ -82,6 +85,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         days,
         claude_dir,
         codex_dir,
+        refresh,
     } = cli.command;
     let opts = SummaryOptions {
         by: by.into(),
@@ -89,6 +93,9 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         days,
         claude_dir,
         codex_dir,
+        cache_dir: None,
+        pricing_path: None,
+        refresh,
     };
     let report = summary(&opts)?;
     for w in &report.warnings {
@@ -155,8 +162,10 @@ mod tests {
             days,
             claude_dir,
             codex_dir,
+            refresh,
         } = &cli.command;
         assert_eq!(*by, ByArg::Model);
+        assert!(!refresh);
         assert_eq!(*agent, Some(AgentArg::Codex));
         assert!(json);
         assert_eq!(*days, Some(7));

@@ -1,5 +1,7 @@
 pub mod aggregate;
+pub mod cache;
 pub mod cli;
+pub mod dedupe;
 pub mod model;
 pub mod pricing;
 pub mod render;
