@@ -15,10 +15,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **只读原则**：TokenScope 只读取各 agent 的本地数据目录，绝不写入、移动或清理它们；自身缓存（SQLite `~/.tokenscope/cache.db`，按文件指纹增量失效、故障自动降级全量扫描）、外置价格表（`~/.tokenscope/pricing.toml`）与 OpenRouter 价格快照（`~/.tokenscope/pricing-openrouter.json`，显式同步、统计永不联网）只写 TokenScope 自己的数据目录 `~/.tokenscope/`。
 - **适配器架构**：每个 agent 一个 source 适配器，职责是「发现日志文件 → 解析为统一用量事件」。agent 特有的 JSONL / JSON / SQLite 细节全部封在适配器内；对外只产出统一的 `UsageEvent`（时间戳、agent、模型、输入 / 输出 / 缓存 token、会话与项目标识）。
 - **分层**：`source`（发现+解析）→ `model`（归一化事件）→ `aggregate`（聚合）→ `render`（输出）。层间只经 model 类型交互；新增 agent = 新适配器 + 合成 fixture 测试，聚合与渲染层零改动。
-- **时间口径**：日志内时间戳多为 UTC，解析后统一转本地时区（Asia/Shanghai）再按自然日聚合；跨日界、同一请求去重规则属于必须先写成不变量的部分。
+- **时间口径（M6）**：存储层（SQLite）一律 UTC RFC3339 原样持有，全链路只做一次时区转换；聚合/展示时区按解析链取值——显式传入（`--tz`/GUI 下拉，`local`=本机）> 默认 Asia/Shanghai，跨日界与去重规则属于必须先写成不变量的部分。
 - **费用估算**：按可配置价格表计算；默认内置常见模型定价，允许用户覆盖（cc-switch 的 `model-pricing.json` 可作参照格式）。无价格的模型明确显示"未知"，不得按 0 静默吞掉。
 - **输出（用户已拍板）**：**Tauri 2 + Vue 3 桌面 GUI 是主产品形态**（Naive UI、明暗双模式、托盘常驻、关窗缩托盘）；CLI（终端表格 + JSON）保留为辅助薄壳，用于脚本化与回归对照。两端共用 `report.rs` 管线，数字必须同源。
-- **候选 agent**：首批 Claude Code、Codex（本机有真实日志）；后续 Gemini CLI、OpenCode、Copilot、Cursor 等，接入顺序以 plan 为准。
+- **候选 agent（用户 2026-10-04 排期决策）**：当前**专注 Claude Code 与 Codex**（本机有真实日志可实测）；Gemini CLI、OpenCode 等其他工具暂缓排期——待安装使用或拿到样例日志、经用户明确排期后再立项（详见 `docs/plans/README.md`）。
 
 ## Rust 环境（本机现状）
 
@@ -45,6 +45,7 @@ GUI（前端在 `frontend/`，Tauri 壳在 `src-tauri/`；CLI 装于 frontend de
 ```powershell
 pnpm --dir frontend install        # 前端依赖（首次）
 pnpm --dir frontend typecheck      # vue-tsc 类型检查（提交前必须干净）
+pnpm --dir frontend format:check   # Prettier 风格检查（提交前必须干净；format 为写入）
 pnpm --dir frontend build          # 前端产物（提交前必须通过）
 pnpm --dir frontend tauri dev      # 开发窗口（会弹出 GUI）
 pnpm --dir frontend tauri build    # 生产构建（NSIS 安装包，首次较慢）
@@ -52,6 +53,7 @@ pnpm --dir frontend tauri build    # 生产构建（NSIS 安装包，首次较�
 
 - 前端 TypeScript 钉 TypeScript 5.x（vue-tsc 与 TS 7 不兼容，勿升级）；Naive UI 组件库、ECharts 图表（直接用 echarts，未包 vue-echarts）。
 - Tauri CLI 从仓库根调用可执行 `frontend/node_modules/.bin/tauri`（CLI 只向下搜索 src-tauri，`tauri icon` 等命令在 frontend 目录跑找不到配置）。
+- **格式化分工**：Rust 用 `cargo fmt`（`rustfmt.toml` 钉 LF）；前端用 Prettier（`frontend/.prettierrc.json`，双引号/分号/2 空格/printWidth 100）。**提交钩子**（`.githooks/pre-commit`，克隆后执行一次 `git config core.hooksPath .githooks` 启用）会自动跑 fmt --check + clippy + 前端 typecheck + format:check。
 
 - 终端是 **Windows PowerShell**：多条命令分开执行或用 `;`，**不要用 `&&`**。
 - Bash 工具里 cargo 若不在 PATH（会话早于安装启动），用绝对路径 `/c/Users/admin/.cargo/bin/cargo.exe` 调用。
@@ -78,7 +80,7 @@ pnpm --dir frontend tauri build    # 生产构建（NSIS 安装包，首次较�
 ## 提交流程
 
 - **默认自动提交推送**：完成任何文件修改后，除非用户明确说"不 commit / 暂不提交 / 先别提交 / 不要 push"等同义要求，或存在验证失败/未解决阻断，自动执行验证 → commit → push，不再等待用户额外提醒。文档修改也算一批文件修改。
-- 完成修改后：先自查（`cargo fmt --check` + `cargo clippy` + `cargo test` 全绿；尚无 Cargo 工程时以实际存在的检查为准）→ `git add`（优先具体文件名，避免目录级 add）→ `git commit` → `git push`，**严格串行执行，禁止并行**。
+- 完成修改后：先自查（`cargo fmt --check` + `cargo clippy` + `cargo test` + 前端 `typecheck`/`format:check` 全绿；pre-commit 钩子会再自动跑一遍）→ `git add`（优先具体文件名，避免目录级 add）→ `git commit` → `git push`，**严格串行执行，禁止并行**。
 - commit message 遵循 **Conventional Commits 且必须有中文正文**，说明改了什么、为什么、影响范围（例：`feat(解析): 接入 Claude Code 会话日志适配器`）。
 - 一个 commit 只解决一类问题。
 - **严禁 `--no-verify`**；严禁未授权 push 到非当前分支。

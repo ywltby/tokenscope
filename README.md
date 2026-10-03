@@ -78,9 +78,12 @@ cargo test                         # 全部测试
 
 # 前端（TypeScript 钉 5.x，勿升 7——vue-tsc 尚不兼容 TS 7）
 pnpm --dir frontend typecheck      # vue-tsc 类型检查
+pnpm --dir frontend format         # Prettier 格式化（format:check 为检查）
 pnpm --dir frontend build          # 生产构建
 pnpm --dir frontend tauri dev      # 桌面应用开发运行
 ```
+
+提交钩子：`git config core.hooksPath .githooks` 启用后，每次 commit 自动跑 Rust fmt/clippy 与前端 typecheck/format:check。
 
 ## License
 
