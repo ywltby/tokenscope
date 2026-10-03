@@ -1,0 +1,8 @@
+# 编辑器层统一：新建/保存即符合仓库规范，与 .gitattributes 互补。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true

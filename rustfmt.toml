@@ -1,0 +1,3 @@
+# rustfmt 默认规则之上仅钉换行：全仓 LF，与 .gitattributes / .editorconfig 一致；
+# 避免 Windows 上 Auto 模式按平台把新文件写成 CRLF，造成跨平台换行 churn。
+newline_style = "Unix"

@@ -1,0 +1,5 @@
+# 全仓文本检出钉 LF：rustfmt（rustfmt.toml 钉 newline_style=Unix）与字节敏感的
+# fixture/快照测试都按 LF 产出；本机 core.autocrlf=true，不钉时克隆/检出会把
+# 文件变成 CRLF，导致格式化反复改写、快照测试环境性失败。
+# 二进制文件由 text=auto 自动跳过；仅影响检出，不改仓库内容。
+* text=auto eol=lf
