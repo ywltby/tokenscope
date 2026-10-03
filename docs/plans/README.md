@@ -7,5 +7,5 @@
 
 | 计划 | 状态 | 备注 |
 | --- | --- | --- |
-| [active/2026-10-03-m2-codex-adapter-pricing.md](active/2026-10-03-m2-codex-adapter-pricing.md) | 待确认 | M2：Codex 适配器 + 多 agent 汇总 + 价格表扩充 |
+| [archive/implemented/2026-10-03-m2-codex-adapter-pricing.md](archive/implemented/2026-10-03-m2-codex-adapter-pricing.md) | ✅ 完成 2026-10-03 | M2：Codex 适配器 + 多 agent 汇总 + 价格表扩充；验收期发现同请求重发并修正口径，cc 对照 38/39 一致 |
 | [archive/implemented/2026-10-03-m1-claude-code-adapter.md](archive/implemented/2026-10-03-m1-claude-code-adapter.md) | ✅ 完成 2026-10-03 | M1：Cargo 骨架 + Claude Code 统计闭环；与 cc-switch 对照 15 天中 10 天全指标一致 |

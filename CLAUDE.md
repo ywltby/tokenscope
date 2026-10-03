@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **TokenScope** —— 本地 AI agent 使用量统计工具。Rust 编写：扫描各 AI 编程工具落在本地的会话日志，解析为统一的用量事件，统计 token 用量、请求数、缓存命中与估算花费，支持按 agent / 模型 / 项目 / 时间段聚合查看。对标 [cc-switch](https://github.com/farion1231/cc-switch) 的 Usage Statistics 功能，但做成独立工具，且覆盖更多 agent（cc-switch 目前支持 Claude Code、Codex、Gemini CLI、Grok Build、OpenCode、Pi、MiniMax Code 的用量统计）。
 
-**当前状态：M1 已落地**——单 crate `tokenscope`（edition 2024），Claude Code 统计闭环可用（`tokenscope summary`，用法见 README；验收与 cc-switch 对照记录见 `docs/plans/archive/implemented/2026-10-03-m1-claude-code-adapter.md`）。Codex 及其他适配器、价格表外置、缓存落盘未实现；滚动状态以 `docs/plans/README.md` 总账为准，本文件不追写。本机已装 cc-switch（`~/.cc-switch`，含 `cc-switch.db` 与 `model-pricing.json`），其 `usage_daily_rollups` 可作统计口径对照源。**本机 Claude Code 经 cc-switch 路由到非 Anthropic 模型（模型串任意，如 `grok-4.5-build`），解析与计价不得假设模型名形态。**
+**当前状态：M1/M2 已落地**——单 crate `tokenscope`（edition 2024），Claude Code 与 Codex 统计闭环可用（`tokenscope summary`，多 agent 合并 + `--agent` 过滤，用法见 README；验收与 cc-switch 对照记录见 `docs/plans/archive/implemented/`）。价格表外置、缓存落盘、其余 agent 适配器未实现；滚动状态以 `docs/plans/README.md` 总账为准，本文件不追写。本机已装 cc-switch（`~/.cc-switch`，含 `cc-switch.db` 与 `model-pricing.json`），其 `usage_daily_rollups` 可作统计口径对照源。**本机 Claude Code 经 cc-switch 路由到非 Anthropic 模型（模型串任意，如 `grok-4.5-build`），解析与计价不得假设模型名形态。**
 
 ## 设计方向（M1 已按此落地；后续里程碑沿用）
 
