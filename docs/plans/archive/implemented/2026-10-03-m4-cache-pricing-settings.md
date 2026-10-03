@@ -1,6 +1,6 @@
 # M4：缓存落盘（SQLite + 增量失效）+ 价格表外置 + GUI 设置页
 
-- 状态：**已确认（用户 2026-10-03 指示"继续推进 M4"，方向即 M3 收尾对齐项）**
+- 状态：**已完成（2026-10-03），设置页交互冒烟待用户安装确认**
 - 创建：2026-10-03
 
 ## 目标
@@ -78,3 +78,20 @@ CREATE INDEX IF NOT EXISTS idx_events_file ON events(file_id);
 - rusqlite bundled 首次编译增量编译时间 → 一次性成本，可接受。
 - tauri-plugin-opener 权限/版本摩擦 → 失败则退化为 `std::process::Command` 打开默认编辑器（Windows 先行）。
 - CLI 与 GUI 并发访问 cache.db → WAL + busy_timeout + 锁冲突降级全量扫描。
+
+## 验收记录（2026-10-03）
+
+1. 全量门禁：`cargo fmt --check`、`cargo clippy --workspace --all-targets`（0 警告）、`cargo test --workspace`（56 测试：根 crate 48 + e2e 6 + tauri commands 2）、`vue-tsc`、`pnpm build` 全绿。
+2. **三路径一致性**：fixture 单测与真实数据（claude/codex 各自 cold → warm → `--refresh` 三跑）JSON 逐字段完全相等；多源合计 24,676（= 3,741 + 20,935）；缓存零降级警告。
+3. 回归：claude 与 M1-M3 记录逐项一致（19 文件/30,743 行/3,741 事件/去重 8,620）；codex 47 文件/151,750 行/20,935 事件/去重 3,012/坏行 20/零分量 279。
+   - **附带更正**：M2 归档记录曾把"去重候选 23,947"写作最终事件数；真实最终事件 = 23,947 − 3,012 = **20,935**（M4 复核三路径时发现并已在 M2 记录中更正；cc-switch 对照用 token 总和，不受影响）。
+4. 故障注入：坏 `cache.db` → 警告 + 数字仍正确（单测）；坏 `pricing.toml` → 警告 + 内置价格（单测）；外置同前缀覆盖与新前缀追加生效（单测）。
+5. `tauri build` 产出 NSIS 安装包（3.50 MiB）；设置页（来源状态/缓存状态/重建缓存/价格表/打开价格文件）交互冒烟留用户安装确认。
+6. 只读不变量：对 agent 目录零写入；TokenScope 仅写 `~/.tokenscope/`（cache.db + pricing.toml）。
+
+## 实现要点
+
+- 去重自 source 适配器上移到全局 `src/dedupe.rs`（`UsageEvent` 新增 `record_id` 承载 Claude message.id；Codex 键由归一化字段重建），保证三条采集路径数字同源——这是缓存正确性的前提。
+- 缓存按文件指纹 `(size, mtime_ms)` 整文件失效（不做字节级追加，避免部分行问题）；消失文件行由 `purge_missing` 清除，事件行靠外键级联。
+- 外置价格 `pricing.toml`：同前缀覆盖内置、新前缀追加，查找仍是最长前缀；`Pricing` 从无状态常量变为运行时合并表（`builtin()` / `load()`）。
+- GUI 设置页三卡：数据来源（复用 source_status）、解析缓存（cache_stats + 重建）、价格表（pricing_entries + opener 打开/创建模板）。
