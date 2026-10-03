@@ -15,7 +15,7 @@ use anyhow::Result;
 use jiff::Timestamp;
 use serde::Deserialize;
 
-use super::{CollectStats, Collection, Source};
+use super::{CollectStats, Collection, Source, is_jsonl};
 use crate::model::{AgentKind, UsageEvent};
 
 pub const SYNTHETIC_MODEL: &str = "<synthetic>";
@@ -150,11 +150,6 @@ fn collect_jsonl(dir: &Path, project: &str, out: &mut Vec<(String, PathBuf)>) {
             out.push((project.to_string(), child));
         }
     }
-}
-
-fn is_jsonl(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("jsonl"))
 }
 
 fn ingest_text(

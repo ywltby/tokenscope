@@ -7,12 +7,14 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentKind {
     ClaudeCode,
+    Codex,
 }
 
 impl AgentKind {
     pub fn as_str(self) -> &'static str {
         match self {
             AgentKind::ClaudeCode => "claude-code",
+            AgentKind::Codex => "codex",
         }
     }
 }

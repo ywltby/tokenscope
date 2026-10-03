@@ -14,6 +14,7 @@ pub enum GroupBy {
     Day,
     Model,
     Project,
+    Agent,
 }
 
 impl GroupBy {
@@ -22,6 +23,7 @@ impl GroupBy {
             GroupBy::Day => "day",
             GroupBy::Model => "model",
             GroupBy::Project => "project",
+            GroupBy::Agent => "agent",
         }
     }
 
@@ -31,12 +33,14 @@ impl GroupBy {
             GroupBy::Day => "日期",
             GroupBy::Model => "模型",
             GroupBy::Project => "项目",
+            GroupBy::Agent => "Agent",
         }
     }
 }
 
 /// 一个分组的累计：requests / token 四类 / 已计价费用 / 无价格模型的 token（不变量 5：
 /// 未收录模型的用量单独可见，费用只含已计价部分，不得按 0 静默吞掉）。
+/// `agents` 仅在多 agent 数据时填充（单 agent 报告保持 M1 输出不变）。
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct Group {
     pub key: String,
@@ -45,6 +49,8 @@ pub struct Group {
     pub cost_usd: f64,
     pub unknown_pricing: bool,
     pub unknown_tokens: TokenCounts,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,11 +67,15 @@ pub fn aggregate(
     pricing: &Pricing,
 ) -> Aggregated {
     let mut map: BTreeMap<String, Group> = BTreeMap::new();
+    // 多 agent 数据才填充 groups[].agents，单 agent 报告与 M1 输出保持一致。
+    let first_agent = events.first().map(|e| e.agent);
+    let multi_agent = first_agent.is_some_and(|f| events.iter().any(|e| e.agent != f));
     for e in events {
         let key = match by {
             GroupBy::Day => e.ts.to_zoned(tz.clone()).date().to_string(),
             GroupBy::Model => e.model.clone(),
             GroupBy::Project => e.project.clone(),
+            GroupBy::Agent => e.agent.as_str().to_string(),
         };
         let g = map.entry(key.clone()).or_insert_with(|| Group {
             key,
@@ -73,6 +83,9 @@ pub fn aggregate(
         });
         g.requests += 1;
         g.tokens.add_event(e);
+        if multi_agent && !g.agents.contains(&e.agent.as_str()) {
+            g.agents.push(e.agent.as_str());
+        }
         match pricing.cost(&e.model, &TokenCounts::from_event(e)) {
             Some(c) => g.cost_usd += c,
             None => {
@@ -92,6 +105,11 @@ pub fn aggregate(
         totals.cost_usd += g.cost_usd;
         totals.unknown_pricing |= g.unknown_pricing;
         totals.unknown_tokens.add(&g.unknown_tokens);
+        for a in &g.agents {
+            if !totals.agents.contains(a) {
+                totals.agents.push(a);
+            }
+        }
     }
     groups.push(totals.clone());
     Aggregated {
@@ -157,7 +175,7 @@ mod tests {
     #[test]
     fn test_aggregate_by_model_and_project() {
         let events = [
-            event("2026-07-17T08:00:00.000Z", "grok-4.5-build", 1, 1),
+            event("2026-07-17T08:00:00.000Z", "tencent/hy3:free", 1, 1),
             event("2026-07-17T08:01:00.000Z", "claude-sonnet-4-5", 2, 2),
             {
                 let mut e = event("2026-07-17T08:02:00.000Z", "claude-sonnet-4-5", 3, 3);
@@ -170,7 +188,7 @@ mod tests {
         assert_eq!(agg.groups[0].key, "claude-sonnet-4-5");
         assert_eq!(agg.groups[0].tokens.input, 5);
         assert!(!agg.groups[0].unknown_pricing);
-        assert_eq!(agg.groups[1].key, "grok-4.5-build");
+        assert_eq!(agg.groups[1].key, "tencent/hy3:free");
         assert!(agg.groups[1].unknown_pricing);
         assert_eq!(agg.groups[1].unknown_tokens.input, 1);
         assert_eq!(agg.totals.unknown_tokens.input, 1);
@@ -181,6 +199,22 @@ mod tests {
         assert_eq!(agg.groups[0].tokens.input, 3);
         assert_eq!(agg.groups[1].key, "proj-b");
         assert_eq!(agg.groups[1].tokens.input, 3);
+    }
+
+    #[test]
+    fn test_aggregate_by_agent() {
+        let mut e2 = event("2026-07-17T08:01:00.000Z", "m", 2, 2);
+        e2.agent = AgentKind::Codex;
+        let events = [event("2026-07-17T08:00:00.000Z", "m", 1, 1), e2];
+        let agg = aggregate(&events, GroupBy::Agent, &tz(), &Pricing);
+        assert_eq!(agg.groups.len(), 3); // claude-code、codex、合计
+        assert_eq!(agg.groups[0].key, "claude-code");
+        assert_eq!(agg.groups[0].requests, 1);
+        assert_eq!(agg.groups[1].key, "codex");
+        assert_eq!(agg.groups[1].requests, 1);
+        assert_eq!(agg.groups[0].agents, ["claude-code"]);
+        assert_eq!(agg.totals.requests, 2);
+        assert_eq!(agg.totals.agents, ["claude-code", "codex"]);
     }
 
     #[test]

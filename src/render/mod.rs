@@ -6,12 +6,14 @@ use comfy_table::presets::UTF8_FULL;
 use comfy_table::{ContentArrangement, Table};
 
 use crate::aggregate::{Aggregated, GroupBy};
-use crate::source::CollectStats;
+use crate::model::AgentKind;
+use crate::source::Collection;
 
-pub fn table(agg: &Aggregated, stats: &CollectStats) -> String {
+pub fn table(agg: &Aggregated, cols: &[Collection]) -> String {
     let by_label = match agg.by {
         "day" => GroupBy::Day.label(),
         "model" => GroupBy::Model.label(),
+        "agent" => GroupBy::Agent.label(),
         _ => GroupBy::Project.label(),
     };
     let mut t = Table::new();
@@ -52,20 +54,43 @@ pub fn table(agg: &Aggregated, stats: &CollectStats) -> String {
     }
     let mut out = t.to_string();
     out.push('\n');
-    out.push_str(&format!(
-        "文件 {} · 行 {} · 事件 {} · 去重丢弃 {} · 坏行 {} · 跳过 sidechain {} / synthetic {}",
-        stats.files_scanned,
-        stats.lines_seen,
-        stats.events,
-        stats.duplicates_dropped,
-        stats.bad_lines,
-        stats.skipped_sidechain,
-        stats.skipped_synthetic,
-    ));
+    // 单源保持 M1 脚注格式；多源逐源一行。
+    if cols.len() == 1 {
+        out.push_str(&source_footer(&cols[0]));
+    } else {
+        let lines: Vec<String> = cols
+            .iter()
+            .map(|c| format!("{}: {}", c.agent.as_str(), source_footer(c)))
+            .collect();
+        out.push_str(&lines.join("\n"));
+    }
     if agg.totals.unknown_pricing {
         out.push_str("\n† 部分用量来自无价格模型，费用仅含已计价部分（未知用量见 --json）");
     }
     out
+}
+
+fn source_footer(c: &Collection) -> String {
+    let s = &c.stats;
+    let mut f = format!(
+        "文件 {} · 行 {} · 事件 {} · 去重丢弃 {} · 坏行 {}",
+        s.files_scanned, s.lines_seen, s.events, s.duplicates_dropped, s.bad_lines,
+    );
+    match c.agent {
+        AgentKind::ClaudeCode => {
+            f.push_str(&format!(
+                " · 跳过 sidechain {} / synthetic {}",
+                s.skipped_sidechain, s.skipped_synthetic,
+            ));
+        }
+        AgentKind::Codex => {
+            f.push_str(&format!(
+                " · 跳过 零分量 {} / 无模型 {} · 忽略 usage_record {}",
+                s.skipped_zero_usage, s.skipped_no_model, s.ignored_token_usage_record,
+            ));
+        }
+    }
+    f
 }
 
 fn fmt_cost(v: f64) -> String {
@@ -104,7 +129,7 @@ mod tests {
         let events = vec![UsageEvent {
             ts: "2026-07-17T08:00:00.000Z".parse().unwrap(),
             agent: AgentKind::ClaudeCode,
-            model: "grok-4.5-build".into(),
+            model: "tencent/hy3:free".into(),
             session_id: "s".into(),
             project: "p".into(),
             input_tokens: 1234567,
@@ -123,8 +148,15 @@ mod tests {
             skipped_sidechain: 0,
             skipped_synthetic: 0,
             events: 1,
+            ..crate::source::CollectStats::default()
         };
-        let out = table(&agg, &stats);
+        let col = crate::source::Collection {
+            agent: AgentKind::ClaudeCode,
+            events: Vec::new(),
+            stats,
+            warnings: Vec::new(),
+        };
+        let out = table(&agg, std::slice::from_ref(&col));
         assert!(out.contains("2026-07-17"), "应包含日期分组：{out}");
         assert!(out.contains("1,234,567"), "千分位格式：{out}");
         assert!(out.contains('†'), "未知计价标记：{out}");

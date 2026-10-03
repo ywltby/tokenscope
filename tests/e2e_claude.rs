@@ -36,7 +36,7 @@ fn test_e2e_summary_table() {
     assert!(col.warnings.is_empty());
 
     let agg = aggregate(&col.events, GroupBy::Day, &tz(), &Pricing);
-    let out = render::table(&agg, &col.stats);
+    let out = render::table(&agg, std::slice::from_ref(&col));
     assert!(out.contains("2026-07-17"), "缺日期分组：{out}");
     assert!(out.contains("2026-07-18"), "UTC 16:01 应落本地次日：{out}");
     assert!(out.contains("1,000"), "缺输入 token：{out}");
@@ -51,15 +51,14 @@ fn test_e2e_summary_json() {
     let agg = aggregate(&col.events, GroupBy::Day, &tz, &Pricing);
     let out = render::json::to_json(
         &agg,
-        col.agent,
-        &col.stats,
+        std::slice::from_ref(&col),
         &col.warnings,
         "2026-10-03T00:00:00+08:00",
     )
     .unwrap();
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
 
-    assert_eq!(v["agent"], "claude-code");
+    assert_eq!(v["sources"][0]["agent"], "claude-code");
     assert_eq!(v["by"], "day");
     let groups = v["groups"].as_array().unwrap();
     assert_eq!(groups.len(), 2);
@@ -93,14 +92,15 @@ fn test_e2e_summary_json() {
     assert_eq!(t["unknown_tokens"]["input"], 100);
     assert!((t["cost_usd"].as_f64().unwrap() - 0.02955).abs() < 1e-9);
 
-    assert_eq!(v["stats"]["duplicates_dropped"], 2);
-    assert_eq!(v["stats"]["bad_lines"], 3);
-    assert_eq!(v["stats"]["skipped_sidechain"], 1);
-    assert_eq!(v["stats"]["skipped_synthetic"], 1);
+    assert_eq!(v["sources"][0]["stats"]["duplicates_dropped"], 2);
+    assert_eq!(v["sources"][0]["stats"]["bad_lines"], 3);
+    assert_eq!(v["sources"][0]["stats"]["skipped_sidechain"], 1);
+    assert_eq!(v["sources"][0]["stats"]["skipped_synthetic"], 1);
 
     // 模型维度
     let agg_m = aggregate(&col.events, GroupBy::Model, &tz, &Pricing);
-    let out_m = render::json::to_json(&agg_m, col.agent, &col.stats, &col.warnings, "t").unwrap();
+    let out_m =
+        render::json::to_json(&agg_m, std::slice::from_ref(&col), &col.warnings, "t").unwrap();
     let vm: serde_json::Value = serde_json::from_str(&out_m).unwrap();
     let keys: Vec<&str> = vm["groups"]
         .as_array()
@@ -108,7 +108,7 @@ fn test_e2e_summary_json() {
         .iter()
         .map(|g| g["key"].as_str().unwrap())
         .collect();
-    assert_eq!(keys, ["claude-sonnet-4-5-20250929", "grok-4.5-build"]);
+    assert_eq!(keys, ["claude-sonnet-4-5-20250929", "tencent/hy3:free"]);
     let known = &vm["groups"][0];
     assert_eq!(known["requests"], 2);
     assert_eq!(known["tokens"]["input"], 1100);
@@ -117,7 +117,8 @@ fn test_e2e_summary_json() {
 
     // 项目维度
     let agg_p = aggregate(&col.events, GroupBy::Project, &tz, &Pricing);
-    let out_p = render::json::to_json(&agg_p, col.agent, &col.stats, &col.warnings, "t").unwrap();
+    let out_p =
+        render::json::to_json(&agg_p, std::slice::from_ref(&col), &col.warnings, "t").unwrap();
     let vp: serde_json::Value = serde_json::from_str(&out_p).unwrap();
     let keys: Vec<&str> = vp["groups"]
         .as_array()
