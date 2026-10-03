@@ -39,8 +39,6 @@ cargo clippy --all-targets
 cargo test
 ```
 
-工程约定见 [CLAUDE.md](CLAUDE.md)，计划与状态总账见 [docs/plans/README.md](docs/plans/README.md)。对 `~/.claude` 等agent 目录严格只读。
-
 ## License
 
 [MIT](LICENSE)
