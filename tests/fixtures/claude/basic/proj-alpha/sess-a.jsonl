@@ -1,0 +1,3 @@
+{"type":"user","timestamp":"2026-07-17T15:50:00.000Z","sessionId":"s-a","message":{"role":"user"}}
+{"type":"assistant","timestamp":"2026-07-17T15:59:00.000Z","sessionId":"s-a","isSidechain":false,"message":{"id":"msg-1","model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":1000,"output_tokens":200,"cache_creation_input_tokens":5000,"cache_read_input_tokens":10000}}}
+{"type":"assistant","timestamp":"2026-07-17T16:01:00.000Z","sessionId":"s-a","message":{"id":"msg-2","model":"grok-4.5-build","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}

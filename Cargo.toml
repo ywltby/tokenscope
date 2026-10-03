@@ -1,0 +1,15 @@
+[package]
+name = "tokenscope"
+version = "0.1.0"
+edition = "2024"
+description = "本地 AI agent 使用量统计工具（对标 cc-switch Usage Statistics 的独立实现）"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+comfy-table = "7"
+dirs = "6"
+jiff = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
