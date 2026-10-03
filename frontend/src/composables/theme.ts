@@ -8,9 +8,7 @@ const STORAGE_KEY = "tokenscope-theme";
 function initial(): ThemeMode {
   const saved = localStorage.getItem(STORAGE_KEY);
   if (saved === "light" || saved === "dark") return saved;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches
-    ? "dark"
-    : "light";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 const mode = ref<ThemeMode>(initial());

@@ -112,12 +112,28 @@ function fmtPrice(v: number): string {
 }
 
 const priceColumns = computed<DataTableColumn[]>(() => [
-  { title: "显示名", key: "name", minWidth: 180, ellipsis: { tooltip: true }, render: (r) => asEntry(r).name ?? "" },
+  {
+    title: "显示名",
+    key: "name",
+    minWidth: 180,
+    ellipsis: { tooltip: true },
+    render: (r) => asEntry(r).name ?? "",
+  },
   { title: "模型前缀", key: "prefix", minWidth: 220 },
   { title: "输入$", key: "input", align: "right", render: (r) => priceCell(r, (e) => e.input) },
   { title: "输出$", key: "output", align: "right", render: (r) => priceCell(r, (e) => e.output) },
-  { title: "缓存写$", key: "cache_write", align: "right", render: (r) => priceCell(r, (e) => e.cache_write) },
-  { title: "缓存读$", key: "cache_read", align: "right", render: (r) => priceCell(r, (e) => e.cache_read) },
+  {
+    title: "缓存写$",
+    key: "cache_write",
+    align: "right",
+    render: (r) => priceCell(r, (e) => e.cache_write),
+  },
+  {
+    title: "缓存读$",
+    key: "cache_read",
+    align: "right",
+    render: (r) => priceCell(r, (e) => e.cache_read),
+  },
   {
     title: "来源",
     key: "source",
@@ -127,7 +143,12 @@ const priceColumns = computed<DataTableColumn[]>(() => [
         {
           size: "small",
           bordered: false,
-          type: asEntry(r).source === "外置" ? "success" : asEntry(r).source === "openrouter" ? "info" : "default",
+          type:
+            asEntry(r).source === "外置"
+              ? "success"
+              : asEntry(r).source === "openrouter"
+                ? "info"
+                : "default",
         },
         { default: () => asEntry(r).source },
       ),
@@ -179,8 +200,13 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
             </div>
           </template>
           <div style="font-size: 12px; opacity: 0.6; margin-bottom: 8px">
-            优先级：外置（{{ pricing?.external_count ?? 0 }} 条）> OpenRouter（{{ pricing?.openrouter_count ?? 0 }} 条）> 内置；层内最长前缀匹配。
-            <template v-if="pricing?.synced_at">OpenRouter 上次同步：{{ pricing.synced_at }}</template>
+            优先级：外置（{{ pricing?.external_count ?? 0 }} 条）> OpenRouter（{{
+              pricing?.openrouter_count ?? 0
+            }}
+            条）> 内置；层内最长前缀匹配。
+            <template v-if="pricing?.synced_at"
+              >OpenRouter 上次同步：{{ pricing.synced_at }}</template
+            >
             <template v-else>尚未同步 OpenRouter（同步前仅内置 + 外置生效）。</template>
           </div>
           <NAlert

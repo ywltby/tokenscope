@@ -1,14 +1,7 @@
 <script setup lang="ts">
 import { computed, h } from "vue";
 import { NCollapse, NCollapseItem, NDataTable, type DataTableColumn } from "naive-ui";
-import {
-  AGENT_LABEL,
-  STAT_KEYS,
-  fmtCost,
-  fmtNum,
-  type Group,
-  type SummaryReport,
-} from "../types";
+import { AGENT_LABEL, STAT_KEYS, fmtCost, fmtNum, type Group, type SummaryReport } from "../types";
 
 const props = defineProps<{ report: SummaryReport }>();
 const emit = defineEmits<{ (e: "row-click", key: string): void }>();
@@ -36,7 +29,10 @@ const columns = computed<DataTableColumn[]>(() => {
     align: "right",
     render: (row) => fmtNum(Number((row as Record<string, unknown>)[key] ?? 0)),
   });
-  const token = (title: string, path: "input" | "output" | "cache_write" | "cache_read"): DataTableColumn => ({
+  const token = (
+    title: string,
+    path: "input" | "output" | "cache_write" | "cache_read",
+  ): DataTableColumn => ({
     title,
     key: `tokens.${path}`,
     align: "right",
@@ -76,8 +72,7 @@ const columns = computed<DataTableColumn[]>(() => {
 
 const rows = computed<Group[]>(() => props.report.groups);
 const rowKey = (row: object): string => asGroup(row).key;
-const rowClass = (row: object): string =>
-  asGroup(row).key === "合计" ? "total-row" : "";
+const rowClass = (row: object): string => (asGroup(row).key === "合计" ? "total-row" : "");
 const rowProps = (row: object) => ({
   style: "cursor: pointer",
   onclick: () => emit("row-click", asGroup(row).key),
@@ -86,9 +81,9 @@ const rowProps = (row: object) => ({
 const sourceLines = computed(() =>
   props.report.sources.map((s) => ({
     agent: AGENT_LABEL[s.agent] ?? s.agent,
-    parts: STAT_KEYS.filter((k) => (s.stats[k.key] ?? 0) > 0 || k.key === "files_scanned" || k.key === "events").map(
-      (k) => `${k.label} ${fmtNum(s.stats[k.key] ?? 0)}`,
-    ),
+    parts: STAT_KEYS.filter(
+      (k) => (s.stats[k.key] ?? 0) > 0 || k.key === "files_scanned" || k.key === "events",
+    ).map((k) => `${k.label} ${fmtNum(s.stats[k.key] ?? 0)}`),
   })),
 );
 </script>
@@ -106,13 +101,21 @@ const sourceLines = computed(() =>
       :single-line="false"
     />
     <div style="font-size: 12px; opacity: 0.6; margin-top: 4px">点击行可下钻到请求明细。</div>
-    <div v-if="report.totals.unknown_pricing" style="font-size: 12px; opacity: 0.7; margin-top: 6px">
+    <div
+      v-if="report.totals.unknown_pricing"
+      style="font-size: 12px; opacity: 0.7; margin-top: 6px"
+    >
       † 部分用量来自无价格模型，费用仅含已计价部分（unknown 用量见合计行明细）。
     </div>
     <NCollapse style="margin-top: 8px">
       <NCollapseItem title="来源采集统计" name="sources">
-        <div v-for="s in sourceLines" :key="s.agent" style="font-size: 12px; opacity: 0.8; line-height: 1.9">
-          <strong>{{ s.agent }}</strong>：{{ s.parts.join(" · ") }}
+        <div
+          v-for="s in sourceLines"
+          :key="s.agent"
+          style="font-size: 12px; opacity: 0.8; line-height: 1.9"
+        >
+          <strong>{{ s.agent }}</strong
+          >：{{ s.parts.join(" · ") }}
         </div>
         <div v-if="report.warnings.length" style="font-size: 12px; color: #d97706">
           {{ report.warnings.join("；") }}

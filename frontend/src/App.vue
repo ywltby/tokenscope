@@ -33,7 +33,10 @@ watch(page, (p) => {
     <NGlobalStyle />
     <NMessageProvider>
       <NLayout style="height: 100vh">
-        <NLayoutHeader bordered style="padding: 12px 20px; display: flex; align-items: center; gap: 16px">
+        <NLayoutHeader
+          bordered
+          style="padding: 12px 20px; display: flex; align-items: center; gap: 16px"
+        >
           <strong style="font-size: 18px">TokenScope</strong>
           <NRadioGroup v-model:value="page" size="small">
             <NRadioButton value="summary" label="汇总" />

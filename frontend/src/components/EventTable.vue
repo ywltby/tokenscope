@@ -47,7 +47,11 @@ const columns = computed<DataTableColumn[]>(() => [
     render: (r) => {
       const c = asRow(r).cost_usd;
       if (c == null) {
-        return h(NTag, { size: "small", bordered: false, type: "warning" }, { default: () => "未知" });
+        return h(
+          NTag,
+          { size: "small", bordered: false, type: "warning" },
+          { default: () => "未知" },
+        );
       }
       return fmtPrice(c);
     },
@@ -76,7 +80,8 @@ const rowKey = (r: object): string => {
       virtual-scroll
     />
     <div style="font-size: 12px; opacity: 0.6; margin-top: 4px">
-      共 {{ fmtNum(props.list.total) }} 条（时间倒序）· 显示前 {{ fmtNum(props.list.rows.length) }} 条
+      共 {{ fmtNum(props.list.total) }} 条（时间倒序）· 显示前
+      {{ fmtNum(props.list.rows.length) }} 条
       <template v-if="props.filterLabel">· 筛选：{{ props.filterLabel }}</template>
     </div>
   </div>

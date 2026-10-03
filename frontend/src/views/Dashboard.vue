@@ -1,15 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  NAlert,
-  NCard,
-  NRadioButton,
-  NRadioGroup,
-  NSelect,
-  NSpin,
-  NTag,
-} from "naive-ui";
+import { NAlert, NCard, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from "naive-ui";
 import {
   AGENT_LABEL,
   type AgentFilter,
@@ -131,20 +123,10 @@ void loadSources();
     </NAlert>
     <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 12px">
       <NRadioGroup v-model:value="agent" size="small">
-        <NRadioButton
-          v-for="o in agentOptions"
-          :key="o.value"
-          :value="o.value"
-          :label="o.label"
-        />
+        <NRadioButton v-for="o in agentOptions" :key="o.value" :value="o.value" :label="o.label" />
       </NRadioGroup>
       <NRadioGroup v-model:value="by" size="small">
-        <NRadioButton
-          v-for="o in dimOptions"
-          :key="o.value"
-          :value="o.value"
-          :label="o.label"
-        />
+        <NRadioButton v-for="o in dimOptions" :key="o.value" :value="o.value" :label="o.label" />
       </NRadioGroup>
       <NSelect v-model:value="days" :options="dayOptions" size="small" style="width: 130px" />
       <NSelect v-model:value="tz" :options="tzOptions" size="small" style="width: 160px" />
