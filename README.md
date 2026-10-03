@@ -6,12 +6,14 @@
 
 - **多 agent 统计**：默认合并全部已装 agent，也可单看某个（当前 Claude Code + Codex，更多适配器规划中）
 - **多维度聚合**：按日 / 模型 / 项目 / agent 分组，时间范围过滤（全部 / 近 7 / 30 / 90 天）
+- **逐请求明细**：点击汇总行即下钻到去重后的请求级明细（时间 / 模型 / 项目 / 四类 token / 费用），CLI 同步提供 `events` 子命令
 - **Dashboard**：概览卡片、按日堆叠趋势图（ECharts）、明细表、来源采集统计
 - **明暗双模式**：默认跟随系统，可手动切换并记忆
 - **托盘常驻**：关闭窗口只是缩到托盘，托盘菜单或左键单击恢复，退出走托盘菜单
 - **SQLite 缓存**：`~/.tokenscope/cache.db` 按文件指纹增量失效，缓存故障自动退回全量扫描（缓存是纯优化，日志才是事实源）
 - **价格表三层合并**：内置表兜底，一键同步 OpenRouter 466+ 模型价格（含显示名），外置 `~/.tokenscope/pricing.toml` 补充覆盖（本地优先），GUI 设置页可视化管理
 - **同源 CLI**：`tokenscope` 命令与 GUI 走同一条 Rust 数据管线，脚本化与核对两用
+- **时区可配**：存储一律 UTC，展示按解析链（显式指定 > 本机 > 默认 Asia/Shanghai）一次转换
 
 ## 当前支持
 
@@ -44,6 +46,8 @@ tokenscope summary --claude-dir <path> --codex-dir <path>   # 覆盖扫描目录
 tokenscope summary --refresh            # 强制全量重解析并重建缓存
 tokenscope pricing sync                 # 同步 OpenRouter 价格快照（466+ 模型）
 tokenscope summary --tz UTC             # 指定聚合时区（local=本机；缺省 Asia/Shanghai）
+tokenscope events --agent codex --days 7 --limit 200    # 逐请求明细（时间倒序）
+tokenscope events --model gpt-5.6-sol --day 2026-10-04  # 按模型/自然日过滤
 ```
 
 ## 统计口径

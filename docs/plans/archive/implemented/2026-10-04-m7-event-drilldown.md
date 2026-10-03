@@ -1,6 +1,6 @@
 # M7：逐请求明细视图（汇总 → 下钻）
 
-- 状态：**已确认（用户 2026-10-04 指示"继续推进plan"；按候选清单推进，选型理由见下）**
+- 状态：**已完成（2026-10-04），GUI 下钻冒烟待用户安装确认**
 - 创建：2026-10-04
 
 ## 选型说明（为何不是 Gemini/OpenCode 适配器）
@@ -48,3 +48,18 @@
 
 - 行点击与表格刷新的状态耦合 → 明细筛选状态独立持有，清除按钮显式复位。
 - limit 截断导致"看到的和 ≠ 总和"→ 明细区明示"共 N 条，显示前 X 条"。
+
+## 验收记录（2026-10-04）
+
+1. 全量门禁：fmt / clippy（0 警告）/ `cargo test --workspace`（67 测试：根 crate 61 + e2e 6）/ vue-tsc / pnpm build 全绿。
+2. 真实数据总额核对：全量明细 `total` = 汇总 requests = 3,741（claude）；抽 `2026-08-02` 日，明细四类 token 求和与汇总行逐项一致（9 行 vs 9 请求）；codex 同请求重发行不出现在明细（去重一致）。
+3. limit 语义：`--limit 50` 返回 50 行、`total` 24,676（过滤后、截断前）；时间倒序校验通过。
+4. CLI：`tokenscope events [--agent/--days/--model/--project/--day/--limit/--json/--tz]`，表格与 JSON 双输出；unknown 费用显示"未知"（JSON 为 null）。
+5. GUI：汇总表行可点击下钻（日期/模型/项目行→明细筛选，Agent 行→切换 agent 过滤），明细卡片带筛选标签与"清除"关闭；冒烟留用户确认。
+6. `tauri build` NSIS 产物正常。
+
+## 实现要点
+
+- `collect_all` 自 summary 抽出（价格加载 → 缓存增量 → 全局去重 → 统计回填），summary 与 list_events 共用——明细与汇总数字同源是本里程碑的架构目标。
+- `EventRow.ts` 以解析时区格式化 `%F %T`（存储仍 UTC，M6 原则延续）；`cost_usd` 为 `Option<f64>`，无价格模型序列化为 null。
+- 过滤顺序：days → day → model → project → 倒序 → limit（默认 200，上限 1000）；`total` 为过滤后、截断前条数。
