@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref, watch } from "vue";
+import { computed, h, onMounted, ref, watch, type VNode } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import {
   NAlert,
@@ -11,6 +11,7 @@ import {
   NSpin,
   NStatistic,
   NTag,
+  NTooltip,
   useMessage,
   type DataTableColumn,
 } from "naive-ui";
@@ -85,33 +86,38 @@ watch(
   () => void loadAll(),
 );
 
+/// 单价悬浮提示：来源 + OpenRouter 同前缀对照价（无对应模型标注未知价格）。
+function priceCell(r: object, pick: (e: PricingEntry) => number): VNode {
+  const e = asEntry(r);
+  const or = e.openrouter;
+  const orLine = or
+    ? `OpenRouter：输入 ${fmtPrice(or.input)} · 输出 ${fmtPrice(or.output)} · 缓存写 ${fmtPrice(or.cache_write)} · 缓存读 ${fmtPrice(or.cache_read)}`
+    : "OpenRouter：未知价格（无对应模型）";
+  return h(NTooltip, null, {
+    trigger: () => h("span", { style: "cursor: help" }, fmtPrice(pick(e))),
+    default: () =>
+      h("div", { style: "font-size: 12px; line-height: 1.8" }, [
+        h("div", `来源：${e.source}`),
+        h("div", orLine),
+        or?.name ? h("div", { style: "opacity: 0.7" }, `模型：${or.name}`) : null,
+      ]),
+  });
+}
+
+function fmtPrice(v: number): string {
+  if (v === 0) return "0";
+  if (v < 0.001) return v.toFixed(6);
+  if (v < 1) return v.toFixed(4);
+  return v.toFixed(2);
+}
+
 const priceColumns = computed<DataTableColumn[]>(() => [
   { title: "显示名", key: "name", minWidth: 180, ellipsis: { tooltip: true }, render: (r) => asEntry(r).name ?? "" },
   { title: "模型前缀", key: "prefix", minWidth: 220 },
-  {
-    title: "输入$",
-    key: "input",
-    align: "right",
-    render: (r) => asEntry(r).input.toFixed(3),
-  },
-  {
-    title: "输出$",
-    key: "output",
-    align: "right",
-    render: (r) => asEntry(r).output.toFixed(3),
-  },
-  {
-    title: "缓存写$",
-    key: "cache_write",
-    align: "right",
-    render: (r) => asEntry(r).cache_write.toFixed(3),
-  },
-  {
-    title: "缓存读$",
-    key: "cache_read",
-    align: "right",
-    render: (r) => asEntry(r).cache_read.toFixed(3),
-  },
+  { title: "输入$", key: "input", align: "right", render: (r) => priceCell(r, (e) => e.input) },
+  { title: "输出$", key: "output", align: "right", render: (r) => priceCell(r, (e) => e.output) },
+  { title: "缓存写$", key: "cache_write", align: "right", render: (r) => priceCell(r, (e) => e.cache_write) },
+  { title: "缓存读$", key: "cache_read", align: "right", render: (r) => priceCell(r, (e) => e.cache_read) },
   {
     title: "来源",
     key: "source",
@@ -130,7 +136,8 @@ const priceColumns = computed<DataTableColumn[]>(() => [
 
 /// Naive UI 表格行类型是 Record<string, unknown>，统一经 unknown 转换。
 const asEntry = (r: object): PricingEntry => r as unknown as PricingEntry;
-const rowKey = (r: object): string => asEntry(r).prefix;
+// 同前缀可能同时存在内置/openrouter/外置行，键必须含来源
+const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}`;
 </script>
 
 <template>

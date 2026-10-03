@@ -45,6 +45,14 @@ export interface CacheInfo {
   events: number;
 }
 
+export interface OpenRouterPrice {
+  input: number;
+  output: number;
+  cache_write: number;
+  cache_read: number;
+  name?: string | null;
+}
+
 export interface PricingEntry {
   prefix: string;
   name?: string | null;
@@ -53,6 +61,8 @@ export interface PricingEntry {
   cache_write: number;
   cache_read: number;
   source: string;
+  /** 同前缀 OpenRouter 条目价格；null = OpenRouter 无对应模型 */
+  openrouter?: OpenRouterPrice | null;
 }
 
 export interface PricingView {

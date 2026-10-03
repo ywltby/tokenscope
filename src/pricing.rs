@@ -107,6 +107,16 @@ pub struct ModelPrice {
     pub cache_read: f64,
 }
 
+/// GUI 悬浮对照用：该前缀在 OpenRouter 层的价格（无对应模型则 None）。
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenRouterPrice {
+    pub input: f64,
+    pub output: f64,
+    pub cache_write: f64,
+    pub cache_read: f64,
+    pub name: Option<String>,
+}
+
 /// GUI 设置页展示用条目（含来源与显示名）。
 #[derive(Debug, Clone, Serialize)]
 pub struct PricingEntry {
@@ -117,6 +127,8 @@ pub struct PricingEntry {
     pub cache_write: f64,
     pub cache_read: f64,
     pub source: &'static str,
+    /// 同前缀 OpenRouter 条目价格；None = OpenRouter 无对应模型。
+    pub openrouter: Option<OpenRouterPrice>,
 }
 
 /// 外置 pricing.toml 的反序列化结构。
@@ -286,27 +298,41 @@ impl Pricing {
         )
     }
 
-    /// GUI 设置页条目（合并视图，含来源与显示名）。
+    /// GUI 设置页条目（合并视图，含来源、显示名与同前缀 OpenRouter 对照价）。
     pub fn entries(&self) -> Vec<PricingEntry> {
-        let mut out: Vec<PricingEntry> = self
+        // openrouter 层按归一化前缀索引，供非 openrouter 行对照（精确同前缀）。
+        let or_by_prefix: std::collections::HashMap<&str, &Entry> = self
             .entries
             .iter()
-            .map(|e| PricingEntry {
-                prefix: e.display.clone(),
-                name: e.name.clone(),
-                input: e.input,
-                output: e.output,
-                cache_write: e.cache_write,
-                cache_read: e.cache_read,
-                source: match e.tier {
-                    TIER_EXTERNAL => "外置",
-                    TIER_OPENROUTER => "openrouter",
-                    _ => "内置",
-                },
-            })
+            .filter(|e| e.tier == TIER_OPENROUTER)
+            .map(|e| (e.prefix.as_str(), e))
             .collect();
-        out.sort_by(|a, b| a.source.cmp(b.source).then(a.prefix.cmp(&b.prefix)));
-        out
+        self.entries
+            .iter()
+            .map(|e| {
+                let openrouter = or_by_prefix.get(e.prefix.as_str()).map(|o| OpenRouterPrice {
+                    input: o.input,
+                    output: o.output,
+                    cache_write: o.cache_write,
+                    cache_read: o.cache_read,
+                    name: o.name.clone(),
+                });
+                PricingEntry {
+                    prefix: e.display.clone(),
+                    name: e.name.clone(),
+                    input: e.input,
+                    output: e.output,
+                    cache_write: e.cache_write,
+                    cache_read: e.cache_read,
+                    source: match e.tier {
+                        TIER_EXTERNAL => "外置",
+                        TIER_OPENROUTER => "openrouter",
+                        _ => "内置",
+                    },
+                    openrouter,
+                }
+            })
+            .collect()
     }
 
     pub fn external_count(&self) -> usize {
@@ -546,6 +572,19 @@ cache_read = 0.0
                 .iter()
                 .any(|e| e.source == "openrouter" && e.name.as_deref() == Some("Claude Sonnet 4.5"))
         );
+        // 悬浮对照：openrouter 行自带对照价；无对应模型的行标注 None
+        let sonnet_builtin = entries
+            .iter()
+            .find(|e| e.source == "内置" && e.prefix == "claude-sonnet-4-5")
+            .expect("内置 sonnet-4-5 行应存在");
+        let or = sonnet_builtin.openrouter.as_ref().expect("同前缀 openrouter 条目应挂上对照价");
+        assert!((or.input - 3.0).abs() < 1e-9);
+        assert_eq!(or.name.as_deref(), Some("Claude Sonnet 4.5"));
+        let doubao = entries
+            .iter()
+            .find(|e| e.source == "内置" && e.prefix == "doubao-seed-2-0")
+            .expect("内置 doubao 行应存在");
+        assert!(doubao.openrouter.is_none(), "openrouter 无对应模型 → None（前端显示未知价格）");
         std::fs::remove_dir_all(&dir).ok();
     }
 

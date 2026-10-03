@@ -75,6 +75,10 @@
 6. 离线安全：快照缺失静默、损坏警告并忽略该层；e2e 助手统一钉住不存在的快照路径，测试不再依赖真实 `~/.tokenscope` 状态。
 7. `tauri build` 产出 NSIS 4.27 MiB；GUI「同步 OpenRouter 价格」按钮冒烟留用户确认。
 
+## 后续增量（2026-10-04，用户追加）
+
+设置页价格表单价悬浮显示对照信息：来源 + 同前缀 OpenRouter 对照价（无对应模型标注"未知价格"）。后端在 `PricingEntry.openrouter` 挂同前缀 openrouter 层价格；前端 `NTooltip` 包四个单价列，并修复同前缀跨来源行的 rowKey 冲突。实测例：内置 `deepseek-v4-flash`（0.3）与 OpenRouter（0.028）差异悬浮可见——实际计价按层级走 OpenRouter，需要内置价时写入 `pricing.toml` 即可（本地优先）。
+
 ## 实现要点
 
 - `normalize_model_id`：lowercase + 剥 `vendor/` + `.`→`-`，键与查询同函数，点/横线命名汇合（`claude-sonnet-4.5` ↔ `claude-sonnet-4-5-20250929`）。
