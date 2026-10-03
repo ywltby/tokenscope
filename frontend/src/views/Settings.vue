@@ -31,6 +31,7 @@ const cache = ref<CacheInfo | null>(null);
 const pricing = ref<PricingView | null>(null);
 const loading = ref(false);
 const rebuilding = ref(false);
+const syncing = ref(false);
 
 async function loadAll(): Promise<void> {
   loading.value = true;
@@ -55,6 +56,19 @@ async function rebuild(): Promise<void> {
   }
 }
 
+async function syncOpenRouter(): Promise<void> {
+  syncing.value = true;
+  try {
+    const r = await invoke<{ count: number; synced_at: string }>("sync_pricing_openrouter");
+    msg.success(`已同步 ${r.count} 个模型价格`);
+    pricing.value = await invoke<PricingView>("pricing_entries");
+  } catch (e) {
+    msg.error(`同步失败：${e}`);
+  } finally {
+    syncing.value = false;
+  }
+}
+
 async function openPricing(): Promise<void> {
   try {
     const p = await invoke<string>("open_pricing_file");
@@ -72,6 +86,7 @@ watch(
 );
 
 const priceColumns = computed<DataTableColumn[]>(() => [
+  { title: "显示名", key: "name", minWidth: 180, ellipsis: { tooltip: true }, render: (r) => asEntry(r).name ?? "" },
   { title: "模型前缀", key: "prefix", minWidth: 220 },
   {
     title: "输入$",
@@ -103,7 +118,11 @@ const priceColumns = computed<DataTableColumn[]>(() => [
     render: (r) =>
       h(
         NTag,
-        { size: "small", bordered: false, type: asEntry(r).source === "外置" ? "success" : "default" },
+        {
+          size: "small",
+          bordered: false,
+          type: asEntry(r).source === "外置" ? "success" : asEntry(r).source === "openrouter" ? "info" : "default",
+        },
         { default: () => asEntry(r).source },
       ),
   },
@@ -145,8 +164,18 @@ const rowKey = (r: object): string => asEntry(r).prefix;
       <NGi span="2">
         <NCard title="模型价格表" size="small">
           <template #header-extra>
-            <NButton size="small" @click="openPricing">打开 / 创建外置价格文件</NButton>
+            <div style="display: flex; gap: 8px">
+              <NButton size="small" type="primary" :loading="syncing" @click="syncOpenRouter">
+                同步 OpenRouter 价格
+              </NButton>
+              <NButton size="small" @click="openPricing">打开 / 创建外置价格文件</NButton>
+            </div>
           </template>
+          <div style="font-size: 12px; opacity: 0.6; margin-bottom: 8px">
+            优先级：外置（{{ pricing?.external_count ?? 0 }} 条）> OpenRouter（{{ pricing?.openrouter_count ?? 0 }} 条）> 内置；层内最长前缀匹配。
+            <template v-if="pricing?.synced_at">OpenRouter 上次同步：{{ pricing.synced_at }}</template>
+            <template v-else>尚未同步 OpenRouter（同步前仅内置 + 外置生效）。</template>
+          </div>
           <NAlert
             v-for="(w, i) in pricing?.warnings ?? []"
             :key="i"

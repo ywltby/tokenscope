@@ -19,6 +19,7 @@ pub fn run() {
             commands::refresh_cache,
             commands::pricing_entries,
             commands::open_pricing_file,
+            commands::sync_pricing_openrouter,
         ])
         .setup(|app| {
             setup_tray(app.handle())?;

@@ -4,11 +4,12 @@ use serde::Serialize;
 use tauri_plugin_opener::OpenerExt;
 use tokenscope::aggregate::GroupBy;
 use tokenscope::model::AgentKind;
+use tokenscope::openrouter;
 use tokenscope::pricing::Pricing;
 use tokenscope::report::{
     CacheInfo, SourceStatus, SummaryOptions, SummaryReport, cache_stats as cache_stats_impl,
-    pricing_file_path, rebuild_cache as rebuild_cache_impl, source_status as source_status_impl,
-    summary,
+    openrouter_file_path, pricing_file_path, rebuild_cache as rebuild_cache_impl,
+    source_status as source_status_impl, summary,
 };
 
 pub fn parse_by(by: &str) -> Result<GroupBy, String> {
@@ -62,10 +63,14 @@ pub fn refresh_cache() -> Result<CacheInfo, String> {
     rebuild_cache_impl(None).map_err(|e| e.to_string())
 }
 
-/// 设置页价格表视图：完整条目 + 外置文件路径 + 解析警告。
+/// 设置页价格表视图：完整条目 + 内置/外置路径与同步状态 + 解析警告。
 #[derive(Serialize)]
 pub struct PricingView {
     pub path: String,
+    pub openrouter_path: String,
+    pub synced_at: Option<String>,
+    pub openrouter_count: usize,
+    pub external_count: usize,
     pub entries: Vec<tokenscope::pricing::PricingEntry>,
     pub warnings: Vec<String>,
 }
@@ -73,12 +78,32 @@ pub struct PricingView {
 #[tauri::command]
 pub fn pricing_entries() -> Result<PricingView, String> {
     let path = pricing_file_path(None);
-    let (pricing, warnings) = Pricing::load(Some(&path));
+    let snapshot = openrouter_file_path(None);
+    let (pricing, warnings) = Pricing::load(Some(&path), Some(&snapshot));
+    let synced_at = tokenscope::openrouter::load_snapshot(&snapshot)
+        .ok()
+        .flatten()
+        .map(|s| s.synced_at);
     Ok(PricingView {
         path: path.display().to_string(),
+        openrouter_path: snapshot.display().to_string(),
+        synced_at,
+        openrouter_count: pricing.openrouter_count(),
+        external_count: pricing.external_count(),
         entries: pricing.entries(),
         warnings,
     })
+}
+
+/// 同步 OpenRouter 价格快照（网络操作，阻塞线程池执行）。
+#[tauri::command]
+pub async fn sync_pricing_openrouter() -> Result<tokenscope::openrouter::SyncReport, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let path = openrouter_file_path(None);
+        openrouter::sync(&path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 打开（必要时先创建模板）外置价格文件；返回实际路径。

@@ -47,6 +47,7 @@ export interface CacheInfo {
 
 export interface PricingEntry {
   prefix: string;
+  name?: string | null;
   input: number;
   output: number;
   cache_write: number;
@@ -56,6 +57,10 @@ export interface PricingEntry {
 
 export interface PricingView {
   path: string;
+  openrouter_path: string;
+  synced_at?: string | null;
+  openrouter_count: number;
+  external_count: number;
   entries: PricingEntry[];
   warnings: string[];
 }
