@@ -4,8 +4,9 @@ use jiff::Timestamp;
 use serde::Serialize;
 
 /// 已接入的 agent 种类；新增适配器时在此扩枚举。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum AgentKind {
+    #[default]
     ClaudeCode,
     Codex,
 }

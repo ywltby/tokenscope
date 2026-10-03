@@ -1,0 +1,73 @@
+/// 与 Rust 侧 SummaryReport / Group / CollectStats 逐字段对应的类型。
+/// 注意：Codex 专属计数器为 0 时 Rust 端会省略字段，读取用 `?? 0`。
+
+export interface TokenCounts {
+  input: number;
+  output: number;
+  cache_write: number;
+  cache_read: number;
+}
+
+export interface Group {
+  key: string;
+  requests: number;
+  tokens: TokenCounts;
+  cost_usd: number;
+  unknown_pricing: boolean;
+  unknown_tokens: TokenCounts;
+  agents?: string[];
+}
+
+export interface SourceStat {
+  agent: "claude-code" | "codex";
+  stats: Record<string, number>;
+}
+
+export interface SummaryReport {
+  generated_at: string;
+  sources: SourceStat[];
+  by: string;
+  groups: Group[];
+  totals: Group;
+  warnings: string[];
+}
+
+export interface SourceStatus {
+  agent: string;
+  dir: string;
+  exists: boolean;
+  files: number;
+}
+
+export type Dim = "day" | "model" | "project" | "agent";
+export type AgentFilter = "all" | "claude" | "codex";
+
+export const AGENT_LABEL: Record<string, string> = {
+  "claude-code": "Claude Code",
+  codex: "Codex",
+  claude: "Claude Code",
+  all: "全部",
+};
+
+export const STAT_KEYS: { key: string; label: string }[] = [
+  { key: "files_scanned", label: "文件" },
+  { key: "lines_seen", label: "行" },
+  { key: "events", label: "事件" },
+  { key: "duplicates_dropped", label: "去重丢弃" },
+  { key: "bad_lines", label: "坏行" },
+  { key: "skipped_sidechain", label: "跳过 sidechain" },
+  { key: "skipped_synthetic", label: "跳过 synthetic" },
+  { key: "skipped_zero_usage", label: "跳过零分量" },
+  { key: "skipped_no_model", label: "跳过无模型" },
+  { key: "ignored_token_usage_record", label: "忽略 usage_record" },
+];
+
+export function fmtNum(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+export function fmtCost(v: number): string {
+  if (v === 0) return "0.00";
+  if (v < 0.01) return v.toFixed(6);
+  return v.toFixed(2);
+}

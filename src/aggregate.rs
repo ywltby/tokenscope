@@ -9,8 +9,14 @@ use serde::Serialize;
 use crate::model::{TokenCounts, UsageEvent};
 use crate::pricing::Pricing;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 仓库统一聚合时区（M1 不变量 4）：Asia/Shanghai，无夏令时。
+pub fn local_tz() -> TimeZone {
+    TimeZone::get("Asia/Shanghai").expect("时区常量固定且合法")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GroupBy {
+    #[default]
     Day,
     Model,
     Project,

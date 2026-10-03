@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "TokenScope 主窗口默认能力（数据均由 Rust commands 提供，无需额外权限）",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

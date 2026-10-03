@@ -35,7 +35,7 @@ fn is_zero(v: &u64) -> bool {
 }
 
 /// jsonl 扩展名判断，供各适配器的发现逻辑共用。
-pub(crate) fn is_jsonl(path: &Path) -> bool {
+pub fn is_jsonl(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("jsonl"))
 }

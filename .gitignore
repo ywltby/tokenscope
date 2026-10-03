@@ -25,3 +25,9 @@ rustc-ice-*.txt
 .claude/
 .DS_Store
 Thumbs.db
+
+# ── GUI（Tauri + Vue）───────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+# Tauri 构建时生成的 schema 与平台文件
+src-tauri/gen/

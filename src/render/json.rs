@@ -3,8 +3,7 @@
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::aggregate::Aggregated;
-use crate::source::Collection;
+use crate::report::SummaryReport;
 
 #[derive(Serialize)]
 struct SourceStat<'a> {
@@ -14,7 +13,7 @@ struct SourceStat<'a> {
 
 #[derive(Serialize)]
 struct Report<'a> {
-    generated_at: String,
+    generated_at: &'a str,
     sources: Vec<SourceStat<'a>>,
     by: &'a str,
     groups: &'a [crate::aggregate::Group],
@@ -22,28 +21,23 @@ struct Report<'a> {
     warnings: &'a [String],
 }
 
-/// `generated_at` 由调用方传入（RFC3339，带本地时区偏移），便于测试。
-pub fn to_json(
-    agg: &Aggregated,
-    cols: &[Collection],
-    warnings: &[String],
-    generated_at: &str,
-) -> Result<String> {
-    let report = Report {
-        generated_at: generated_at.to_string(),
-        sources: cols
+pub fn to_json(report: &SummaryReport) -> Result<String> {
+    let r = Report {
+        generated_at: &report.generated_at,
+        sources: report
+            .sources
             .iter()
-            .map(|c| SourceStat {
-                agent: c.agent.as_str(),
-                stats: &c.stats,
+            .map(|s| SourceStat {
+                agent: s.agent.as_str(),
+                stats: &s.stats,
             })
             .collect(),
-        by: agg.by,
-        groups: &agg.groups[..agg.groups.len() - 1], // 合并行单列在 totals，不在 groups 里重复
-        totals: &agg.totals,
-        warnings,
+        by: report.by,
+        groups: &report.groups[..report.groups.len() - 1], // 合并行单列在 totals，不在 groups 里重复
+        totals: &report.totals,
+        warnings: &report.warnings,
     };
-    Ok(serde_json::to_string_pretty(&report)?)
+    Ok(serde_json::to_string_pretty(&r)?)
 }
 
 #[cfg(test)]
@@ -52,6 +46,7 @@ mod tests {
     use crate::aggregate::{GroupBy, aggregate};
     use crate::model::{AgentKind as AK, UsageEvent};
     use crate::pricing::Pricing;
+    use crate::report::{SourceReport, SummaryReport};
     use jiff::tz::TimeZone;
 
     #[test]
@@ -69,22 +64,21 @@ mod tests {
         }];
         let tz = TimeZone::get("Asia/Shanghai").unwrap();
         let agg = aggregate(&events, GroupBy::Day, &tz, &Pricing);
-        let col = Collection {
-            agent: AK::ClaudeCode,
-            events: Vec::new(),
-            stats: crate::source::CollectStats {
-                events: 1,
-                ..Default::default()
-            },
+        let report = SummaryReport {
+            by: agg.by,
+            groups: agg.groups,
+            totals: agg.totals,
+            sources: vec![SourceReport {
+                agent: AK::ClaudeCode,
+                stats: crate::source::CollectStats {
+                    events: 1,
+                    ..Default::default()
+                },
+            }],
             warnings: vec!["w".to_string()],
+            generated_at: "2026-10-03T12:00:00+08:00".into(),
         };
-        let out = to_json(
-            &agg,
-            std::slice::from_ref(&col),
-            &col.warnings,
-            "2026-10-03T12:00:00+08:00",
-        )
-        .unwrap();
+        let out = to_json(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["sources"][0]["agent"], "claude-code");
         assert_eq!(v["sources"][0]["stats"]["events"], 1);

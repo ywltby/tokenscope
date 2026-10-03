@@ -1,16 +1,17 @@
-//! 渲染层：终端表格输出。JSON 输出在 `json` 子模块。
+//! 渲染层：终端表格输出。JSON 输出在 `json` 子模块，两者都吃 report 层的
+//! `SummaryReport`（CLI 与 GUI 数字同源）。
 
 pub mod json;
 
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{ContentArrangement, Table};
 
-use crate::aggregate::{Aggregated, GroupBy};
+use crate::aggregate::GroupBy;
 use crate::model::AgentKind;
-use crate::source::Collection;
+use crate::report::{SourceReport, SummaryReport};
 
-pub fn table(agg: &Aggregated, cols: &[Collection]) -> String {
-    let by_label = match agg.by {
+pub fn table(report: &SummaryReport) -> String {
+    let by_label = match report.by {
         "day" => GroupBy::Day.label(),
         "model" => GroupBy::Model.label(),
         "agent" => GroupBy::Agent.label(),
@@ -29,8 +30,8 @@ pub fn table(agg: &Aggregated, cols: &[Collection]) -> String {
             "合计",
             "费用$",
         ]);
-    for (i, g) in agg.groups.iter().enumerate() {
-        let is_total = i + 1 == agg.groups.len();
+    for (i, g) in report.groups.iter().enumerate() {
+        let is_total = i + 1 == report.groups.len();
         let cost = if g.unknown_pricing {
             format!("{}†", fmt_cost(g.cost_usd))
         } else {
@@ -55,38 +56,39 @@ pub fn table(agg: &Aggregated, cols: &[Collection]) -> String {
     let mut out = t.to_string();
     out.push('\n');
     // 单源保持 M1 脚注格式；多源逐源一行。
-    if cols.len() == 1 {
-        out.push_str(&source_footer(&cols[0]));
+    if report.sources.len() == 1 {
+        out.push_str(&source_footer(&report.sources[0]));
     } else {
-        let lines: Vec<String> = cols
+        let lines: Vec<String> = report
+            .sources
             .iter()
-            .map(|c| format!("{}: {}", c.agent.as_str(), source_footer(c)))
+            .map(|s| format!("{}: {}", s.agent.as_str(), source_footer(s)))
             .collect();
         out.push_str(&lines.join("\n"));
     }
-    if agg.totals.unknown_pricing {
+    if report.totals.unknown_pricing {
         out.push_str("\n† 部分用量来自无价格模型，费用仅含已计价部分（未知用量见 --json）");
     }
     out
 }
 
-fn source_footer(c: &Collection) -> String {
-    let s = &c.stats;
+fn source_footer(s: &SourceReport) -> String {
+    let st = &s.stats;
     let mut f = format!(
         "文件 {} · 行 {} · 事件 {} · 去重丢弃 {} · 坏行 {}",
-        s.files_scanned, s.lines_seen, s.events, s.duplicates_dropped, s.bad_lines,
+        st.files_scanned, st.lines_seen, st.events, st.duplicates_dropped, st.bad_lines,
     );
-    match c.agent {
+    match s.agent {
         AgentKind::ClaudeCode => {
             f.push_str(&format!(
                 " · 跳过 sidechain {} / synthetic {}",
-                s.skipped_sidechain, s.skipped_synthetic,
+                st.skipped_sidechain, st.skipped_synthetic,
             ));
         }
         AgentKind::Codex => {
             f.push_str(&format!(
                 " · 跳过 零分量 {} / 无模型 {} · 忽略 usage_record {}",
-                s.skipped_zero_usage, s.skipped_no_model, s.ignored_token_usage_record,
+                st.skipped_zero_usage, st.skipped_no_model, st.ignored_token_usage_record,
             ));
         }
     }
@@ -124,6 +126,7 @@ mod tests {
     fn test_render_table() {
         use crate::model::{AgentKind, UsageEvent};
         use crate::pricing::Pricing;
+        use crate::report::{SourceReport, SummaryReport};
         use jiff::tz::TimeZone;
 
         let events = vec![UsageEvent {
@@ -140,23 +143,27 @@ mod tests {
         let tz = TimeZone::get("Asia/Shanghai").unwrap();
         let agg =
             crate::aggregate::aggregate(&events, crate::aggregate::GroupBy::Day, &tz, &Pricing);
-        let stats = crate::source::CollectStats {
-            files_scanned: 1,
-            lines_seen: 9,
-            bad_lines: 0,
-            duplicates_dropped: 3,
-            skipped_sidechain: 0,
-            skipped_synthetic: 0,
-            events: 1,
-            ..crate::source::CollectStats::default()
-        };
-        let col = crate::source::Collection {
-            agent: AgentKind::ClaudeCode,
-            events: Vec::new(),
-            stats,
+        let report = SummaryReport {
+            by: agg.by,
+            groups: agg.groups,
+            totals: agg.totals,
+            sources: vec![SourceReport {
+                agent: AgentKind::ClaudeCode,
+                stats: crate::source::CollectStats {
+                    files_scanned: 1,
+                    lines_seen: 9,
+                    bad_lines: 0,
+                    duplicates_dropped: 3,
+                    skipped_sidechain: 0,
+                    skipped_synthetic: 0,
+                    events: 1,
+                    ..crate::source::CollectStats::default()
+                },
+            }],
             warnings: Vec::new(),
+            generated_at: "t".into(),
         };
-        let out = table(&agg, std::slice::from_ref(&col));
+        let out = table(&report);
         assert!(out.contains("2026-07-17"), "应包含日期分组：{out}");
         assert!(out.contains("1,234,567"), "千分位格式：{out}");
         assert!(out.contains('†'), "未知计价标记：{out}");

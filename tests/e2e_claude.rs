@@ -1,25 +1,36 @@
-//! 端到端：合成 fixture 目录 → 发现 → 解析 → 聚合 → 表格 / JSON。
+//! 端到端：合成 fixture 目录 → report 管线 → 表格 / JSON。
 //! 数字期望全部为手算固定值，与 M1 plan 不变量一一对应。
 
-use jiff::tz::TimeZone;
-use tokenscope::aggregate::{GroupBy, aggregate};
-use tokenscope::pricing::Pricing;
-use tokenscope::render;
+use std::path::PathBuf;
+
+use tokenscope::aggregate::GroupBy;
+use tokenscope::model::AgentKind;
+use tokenscope::report::{SummaryOptions, SummaryReport, summary};
 use tokenscope::source::claude::ClaudeSource;
 use tokenscope::source::{Collection, Source};
 
-fn fixture(p: &str) -> std::path::PathBuf {
+fn fixture(agent: &str, p: &str) -> PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/claude")
+        .join("tests/fixtures")
+        .join(agent)
         .join(p)
 }
 
 fn basic() -> Collection {
-    ClaudeSource::new(fixture("basic")).collect().unwrap()
+    ClaudeSource::new(fixture("claude", "basic"))
+        .collect()
+        .unwrap()
 }
 
-fn tz() -> TimeZone {
-    TimeZone::get("Asia/Shanghai").unwrap()
+/// 只走 Claude 源的 report 管线（agent 过滤，codex 目录不会触达）。
+fn claude_report(by: GroupBy) -> SummaryReport {
+    summary(&SummaryOptions {
+        by,
+        agent: Some(AgentKind::ClaudeCode),
+        claude_dir: Some(fixture("claude", "basic")),
+        ..Default::default()
+    })
+    .unwrap()
 }
 
 #[test]
@@ -35,8 +46,7 @@ fn test_e2e_summary_table() {
     assert_eq!(col.stats.skipped_synthetic, 1);
     assert!(col.warnings.is_empty());
 
-    let agg = aggregate(&col.events, GroupBy::Day, &tz(), &Pricing);
-    let out = render::table(&agg, std::slice::from_ref(&col));
+    let out = claude_report(GroupBy::Day).to_table();
     assert!(out.contains("2026-07-17"), "缺日期分组：{out}");
     assert!(out.contains("2026-07-18"), "UTC 16:01 应落本地次日：{out}");
     assert!(out.contains("1,000"), "缺输入 token：{out}");
@@ -46,17 +56,8 @@ fn test_e2e_summary_table() {
 
 #[test]
 fn test_e2e_summary_json() {
-    let col = basic();
-    let tz = tz();
-    let agg = aggregate(&col.events, GroupBy::Day, &tz, &Pricing);
-    let out = render::json::to_json(
-        &agg,
-        std::slice::from_ref(&col),
-        &col.warnings,
-        "2026-10-03T00:00:00+08:00",
-    )
-    .unwrap();
-    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&claude_report(GroupBy::Day).to_json().unwrap()).unwrap();
 
     assert_eq!(v["sources"][0]["agent"], "claude-code");
     assert_eq!(v["by"], "day");
@@ -98,10 +99,8 @@ fn test_e2e_summary_json() {
     assert_eq!(v["sources"][0]["stats"]["skipped_synthetic"], 1);
 
     // 模型维度
-    let agg_m = aggregate(&col.events, GroupBy::Model, &tz, &Pricing);
-    let out_m =
-        render::json::to_json(&agg_m, std::slice::from_ref(&col), &col.warnings, "t").unwrap();
-    let vm: serde_json::Value = serde_json::from_str(&out_m).unwrap();
+    let vm: serde_json::Value =
+        serde_json::from_str(&claude_report(GroupBy::Model).to_json().unwrap()).unwrap();
     let keys: Vec<&str> = vm["groups"]
         .as_array()
         .unwrap()
@@ -116,10 +115,8 @@ fn test_e2e_summary_json() {
     assert_eq!(unknown["unknown_pricing"], true);
 
     // 项目维度
-    let agg_p = aggregate(&col.events, GroupBy::Project, &tz, &Pricing);
-    let out_p =
-        render::json::to_json(&agg_p, std::slice::from_ref(&col), &col.warnings, "t").unwrap();
-    let vp: serde_json::Value = serde_json::from_str(&out_p).unwrap();
+    let vp: serde_json::Value =
+        serde_json::from_str(&claude_report(GroupBy::Project).to_json().unwrap()).unwrap();
     let keys: Vec<&str> = vp["groups"]
         .as_array()
         .unwrap()

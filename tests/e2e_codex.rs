@@ -1,15 +1,15 @@
-//! 端到端：Codex fixture 目录 → 发现 → 解析 → 聚合 → 表格 / JSON，以及
+//! 端到端：Codex fixture 目录 → report 管线 → 表格 / JSON，以及
 //! Claude + Codex 双 agent 合并。数字期望全部为手算固定值，与 M2 plan 不变量对应。
 
-use jiff::tz::TimeZone;
-use tokenscope::aggregate::{GroupBy, aggregate};
-use tokenscope::pricing::Pricing;
-use tokenscope::render;
-use tokenscope::source::claude::ClaudeSource;
+use std::path::PathBuf;
+
+use tokenscope::aggregate::GroupBy;
+use tokenscope::model::AgentKind;
+use tokenscope::report::{SummaryOptions, SummaryReport, summary};
 use tokenscope::source::codex::CodexSource;
 use tokenscope::source::{Collection, Source};
 
-fn fixture(agent: &str, p: &str) -> std::path::PathBuf {
+fn fixture(agent: &str, p: &str) -> PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(agent)
@@ -22,14 +22,26 @@ fn codex_basic() -> Collection {
         .unwrap()
 }
 
-fn claude_basic() -> Collection {
-    ClaudeSource::new(fixture("claude", "basic"))
-        .collect()
-        .unwrap()
+/// 只走 Codex 源的 report 管线（agent 过滤，claude 目录不会触达）。
+fn codex_report(by: GroupBy) -> SummaryReport {
+    summary(&SummaryOptions {
+        by,
+        agent: Some(AgentKind::Codex),
+        codex_dir: Some(fixture("codex", "basic")),
+        ..Default::default()
+    })
+    .unwrap()
 }
 
-fn tz() -> TimeZone {
-    TimeZone::get("Asia/Shanghai").unwrap()
+/// 双 agent 合并管线。
+fn both_report(by: GroupBy) -> SummaryReport {
+    summary(&SummaryOptions {
+        by,
+        claude_dir: Some(fixture("claude", "basic")),
+        codex_dir: Some(fixture("codex", "basic")),
+        ..Default::default()
+    })
+    .unwrap()
 }
 
 #[test]
@@ -60,11 +72,8 @@ fn test_e2e_codex_collection() {
 
 #[test]
 fn test_e2e_codex_json() {
-    let col = codex_basic();
-    let tz = tz();
-    let agg = aggregate(&col.events, GroupBy::Day, &tz, &Pricing);
-    let out = render::json::to_json(&agg, std::slice::from_ref(&col), &col.warnings, "t").unwrap();
-    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let r = codex_report(GroupBy::Day);
+    let v: serde_json::Value = serde_json::from_str(&r.to_json().unwrap()).unwrap();
 
     assert_eq!(v["sources"][0]["agent"], "codex");
     assert_eq!(v["by"], "day");
@@ -96,10 +105,8 @@ fn test_e2e_codex_json() {
     assert!((t["cost_usd"].as_f64().unwrap() - 7425.0 / 1_000_000.0).abs() < 1e-9);
 
     // 模型维度：BTreeMap 序。
-    let agg_m = aggregate(&col.events, GroupBy::Model, &tz, &Pricing);
-    let out_m =
-        render::json::to_json(&agg_m, std::slice::from_ref(&col), &col.warnings, "t").unwrap();
-    let vm: serde_json::Value = serde_json::from_str(&out_m).unwrap();
+    let vm: serde_json::Value =
+        serde_json::from_str(&codex_report(GroupBy::Model).to_json().unwrap()).unwrap();
     let keys: Vec<&str> = vm["groups"]
         .as_array()
         .unwrap()
@@ -113,19 +120,15 @@ fn test_e2e_codex_json() {
     assert_eq!(sol["tokens"]["cache_read"], 200);
 
     // agent 维度
-    let agg_a = aggregate(&col.events, GroupBy::Agent, &tz, &Pricing);
-    let out_a =
-        render::json::to_json(&agg_a, std::slice::from_ref(&col), &col.warnings, "t").unwrap();
-    let va: serde_json::Value = serde_json::from_str(&out_a).unwrap();
+    let va: serde_json::Value =
+        serde_json::from_str(&codex_report(GroupBy::Agent).to_json().unwrap()).unwrap();
     assert_eq!(va["groups"][0]["key"], "codex");
     assert_eq!(va["groups"][0]["requests"], 4);
 }
 
 #[test]
 fn test_e2e_codex_table() {
-    let col = codex_basic();
-    let agg = aggregate(&col.events, GroupBy::Day, &tz(), &Pricing);
-    let out = render::table(&agg, std::slice::from_ref(&col));
+    let out = codex_report(GroupBy::Day).to_table();
     assert!(out.contains("2026-07-17"), "{out}");
     assert!(out.contains("2026-07-18"), "{out}");
     assert!(out.contains("跳过 零分量 1 / 无模型 1"), "{out}");
@@ -137,46 +140,32 @@ fn test_e2e_codex_table() {
 
 #[test]
 fn test_e2e_multi_agent_merge() {
-    let cc = claude_basic();
-    let cx = codex_basic();
-    let cols = [cc, cx];
-    let mut events = Vec::new();
-    for c in &cols {
-        events.extend(c.events.iter().cloned());
-    }
-    assert_eq!(events.len(), 7);
-
-    // agent 维度：3 + 4，合计行覆盖两个 agent。
-    let agg = aggregate(&events, GroupBy::Agent, &tz(), &Pricing);
-    assert_eq!(agg.groups.len(), 3);
-    assert_eq!(agg.groups[0].key, "claude-code");
-    assert_eq!(agg.groups[0].requests, 3);
-    assert_eq!(agg.groups[1].key, "codex");
-    assert_eq!(agg.groups[1].requests, 4);
-    assert_eq!(agg.totals.requests, 7);
-    assert_eq!(agg.totals.agents, ["claude-code", "codex"]);
+    let r = both_report(GroupBy::Agent);
+    assert_eq!(r.sources.len(), 2);
+    assert_eq!(r.groups.len(), 3); // claude-code、codex、合计
+    assert_eq!(r.groups[0].key, "claude-code");
+    assert_eq!(r.groups[0].requests, 3);
+    assert_eq!(r.groups[1].key, "codex");
+    assert_eq!(r.groups[1].requests, 4);
+    assert_eq!(r.totals.requests, 7);
+    assert_eq!(r.totals.agents, ["claude-code", "codex"]);
 
     // 日维度合并：claude 07-17 1 条 + codex 07-17 1 条 = 2；07-18 = 2 + 3 = 5。
-    let agg_d = aggregate(&events, GroupBy::Day, &tz(), &Pricing);
-    assert_eq!(agg_d.groups.len(), 3);
-    assert_eq!(agg_d.groups[0].key, "2026-07-17");
-    assert_eq!(agg_d.groups[0].requests, 2);
-    assert_eq!(agg_d.groups[1].requests, 5);
+    let d = both_report(GroupBy::Day);
+    assert_eq!(d.groups.len(), 3);
+    assert_eq!(d.groups[0].key, "2026-07-17");
+    assert_eq!(d.groups[0].requests, 2);
+    assert_eq!(d.groups[1].requests, 5);
     // 多 agent 数据填充 agents 字段。
-    assert_eq!(agg_d.groups[0].agents, ["claude-code", "codex"]);
+    assert_eq!(d.groups[0].agents, ["claude-code", "codex"]);
 
     // 多 agent 表格脚注逐源一行。
-    let out = render::table(&agg_d, &cols);
+    let out = d.to_table();
     assert!(out.contains("claude-code: 文件 2"), "{out}");
     assert!(out.contains("codex: 文件 2"), "{out}");
 
     // 多 agent JSON 带 agents 字段。
-    let warnings: Vec<String> = cols
-        .iter()
-        .flat_map(|c| c.warnings.iter().cloned())
-        .collect();
-    let out_j = render::json::to_json(&agg_d, &cols, &warnings, "t").unwrap();
-    let v: serde_json::Value = serde_json::from_str(&out_j).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&d.to_json().unwrap()).unwrap();
     assert_eq!(v["sources"].as_array().unwrap().len(), 2);
     assert_eq!(
         v["groups"][0]["agents"],

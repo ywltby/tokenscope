@@ -1,18 +1,12 @@
-//! clap 入口与命令装配。main.rs 只做薄壳，逻辑在此便于库级测试。
+//! clap 入口与命令装配。main.rs 只做薄壳，数据管线在 report.rs（CLI/GUI 共用）。
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use jiff::tz::TimeZone;
 
-use crate::aggregate::{GroupBy, aggregate, filter_days};
-use crate::model::{AgentKind, UsageEvent};
-use crate::pricing::Pricing;
-use crate::render;
-use crate::source::Collection;
-use crate::source::Source;
-use crate::source::claude::ClaudeSource;
-use crate::source::codex::CodexSource;
+use crate::aggregate::GroupBy;
+use crate::model::AgentKind;
+use crate::report::{SummaryOptions, summary};
 
 #[derive(Debug, Parser)]
 #[command(name = "tokenscope", version, about = "本地 AI agent 使用量统计", long_about = None)]
@@ -89,44 +83,21 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         claude_dir,
         codex_dir,
     } = cli.command;
-    let want = agent.map(|a| a.kind());
-    let mut cols: Vec<Collection> = Vec::new();
-    if want.is_none_or(|k| k == AgentKind::ClaudeCode) {
-        let root = match claude_dir {
-            Some(p) => p,
-            None => ClaudeSource::default_root()?,
-        };
-        cols.push(ClaudeSource::new(root).collect()?);
-    }
-    if want.is_none_or(|k| k == AgentKind::Codex) {
-        let root = match codex_dir {
-            Some(p) => p,
-            None => CodexSource::default_root()?,
-        };
-        cols.push(CodexSource::new(root).collect()?);
-    }
-    let warnings: Vec<String> = cols
-        .iter()
-        .flat_map(|c| c.warnings.iter().cloned())
-        .collect();
-    for w in &warnings {
+    let opts = SummaryOptions {
+        by: by.into(),
+        agent: agent.map(|a| a.kind()),
+        days,
+        claude_dir,
+        codex_dir,
+    };
+    let report = summary(&opts)?;
+    for w in &report.warnings {
         eprintln!("[warn] {w}");
     }
-    let mut events: Vec<UsageEvent> = Vec::new();
-    for c in &cols {
-        events.extend(c.events.iter().cloned());
-    }
-    let tz = TimeZone::get("Asia/Shanghai")?;
-    let events = match days {
-        Some(n) => filter_days(events, &tz, n),
-        None => events,
-    };
-    let agg = aggregate(&events, by.into(), &tz, &Pricing);
-    let generated_at = jiff::Zoned::now().with_time_zone(tz.clone()).to_string();
     let out = if json {
-        render::json::to_json(&agg, &cols, &warnings, &generated_at)?
+        report.to_json()?
     } else {
-        render::table(&agg, &cols)
+        report.to_table()
     };
     println!("{out}");
     Ok(())
