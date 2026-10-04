@@ -18,6 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **时间口径（M6）**：存储层（SQLite）一律 UTC RFC3339 原样持有，全链路只做一次时区转换；聚合/展示时区按解析链取值——显式传入（`--tz`/GUI 下拉，`local`=本机）> 默认 Asia/Shanghai，跨日界与去重规则属于必须先写成不变量的部分。
 - **费用估算**：按可配置价格表计算；默认内置常见模型定价，允许用户覆盖（cc-switch 的 `model-pricing.json` 可作参照格式）。无价格的模型明确显示"未知"，不得按 0 静默吞掉。
 - **输出（用户已拍板）**：**Tauri 2 + Vue 3 桌面 GUI 是主产品形态**（Naive UI、明暗双模式、托盘常驻、关窗缩托盘）；CLI（终端表格 + JSON）保留为辅助薄壳，用于脚本化与回归对照。两端共用 `report.rs` 管线，数字必须同源。
+- **GUI 主线程纪律**：Tauri v2 的同步 command 在主线程执行；扫描/解析/缓存/网络等重活一律 `async` + `spawn_blocking` 丢后台线程池，主线程零阻塞（启动卡顿的根因与修法）。
 - **候选 agent（用户 2026-10-04 排期决策）**：当前**专注 Claude Code 与 Codex**（本机有真实日志可实测）；Gemini CLI、OpenCode 等其他工具暂缓排期——待安装使用或拿到样例日志、经用户明确排期后再立项（详见 `docs/plans/README.md`）。
 
 ## Rust 环境（本机现状）

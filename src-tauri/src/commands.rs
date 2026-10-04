@@ -32,8 +32,11 @@ pub fn parse_agent(agent: Option<&str>) -> Result<Option<AgentKind>, String> {
     }
 }
 
+/// **主线程纪律（用户反馈启动卡顿的根因）**：Tauri v2 的同步 command 在
+/// 主线程执行，扫描/解析/缓存/网络等重活一律 `async` + `spawn_blocking`
+/// 丢到后台线程池，GUI 主线程零阻塞。
 #[tauri::command]
-pub fn summarize(
+pub async fn summarize(
     by: String,
     days: Option<u32>,
     agent: Option<String>,
@@ -48,12 +51,12 @@ pub fn summarize(
         tz,
         ..Default::default()
     };
-    summary(&opts).map_err(|e| e.to_string())
+    run_blocking(move || summary(&opts)).await
 }
 
 /// 逐请求明细（M7）：与 summary 共用采集与去重路径。
 #[tauri::command]
-pub fn list_events(
+pub async fn list_events(
     agent: Option<String>,
     days: Option<u32>,
     model: Option<String>,
@@ -75,22 +78,34 @@ pub fn list_events(
         day,
         limit,
     };
-    list_events_impl(&opts, &filter).map_err(|e| e.to_string())
+    run_blocking(move || list_events_impl(&opts, &filter)).await
 }
 
 #[tauri::command]
-pub fn source_status() -> Result<Vec<SourceStatus>, String> {
-    source_status_impl(None, None).map_err(|e| e.to_string())
+pub async fn source_status() -> Result<Vec<SourceStatus>, String> {
+    run_blocking(move || source_status_impl(None, None)).await
 }
 
 #[tauri::command]
-pub fn cache_stats() -> Result<CacheInfo, String> {
-    cache_stats_impl(None).map_err(|e| e.to_string())
+pub async fn cache_stats() -> Result<CacheInfo, String> {
+    run_blocking(move || cache_stats_impl(None)).await
 }
 
 #[tauri::command]
-pub fn refresh_cache() -> Result<CacheInfo, String> {
-    rebuild_cache_impl(None).map_err(|e| e.to_string())
+pub async fn refresh_cache() -> Result<CacheInfo, String> {
+    run_blocking(move || rebuild_cache_impl(None)).await
+}
+
+/// 后台线程池执行阻塞任务并统一错误映射。
+async fn run_blocking<T, F>(f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("后台任务失败: {e}"))?
+        .map_err(|e| e.to_string())
 }
 
 /// 设置页价格表视图：完整条目 + 内置/外置路径与同步状态 + 解析警告。
@@ -106,23 +121,26 @@ pub struct PricingView {
 }
 
 #[tauri::command]
-pub fn pricing_entries() -> Result<PricingView, String> {
-    let path = pricing_file_path(None);
-    let snapshot = openrouter_file_path(None);
-    let (pricing, warnings) = Pricing::load(Some(&path), Some(&snapshot));
-    let synced_at = tokenscope::openrouter::load_snapshot(&snapshot)
-        .ok()
-        .flatten()
-        .map(|s| s.synced_at);
-    Ok(PricingView {
-        path: path.display().to_string(),
-        openrouter_path: snapshot.display().to_string(),
-        synced_at,
-        openrouter_count: pricing.openrouter_count(),
-        external_count: pricing.external_count(),
-        entries: pricing.entries(),
-        warnings,
+pub async fn pricing_entries() -> Result<PricingView, String> {
+    run_blocking(move || {
+        let path = pricing_file_path(None);
+        let snapshot = openrouter_file_path(None);
+        let (pricing, warnings) = Pricing::load(Some(&path), Some(&snapshot));
+        let synced_at = tokenscope::openrouter::load_snapshot(&snapshot)
+            .ok()
+            .flatten()
+            .map(|s| s.synced_at);
+        Ok(PricingView {
+            path: path.display().to_string(),
+            openrouter_path: snapshot.display().to_string(),
+            synced_at,
+            openrouter_count: pricing.openrouter_count(),
+            external_count: pricing.external_count(),
+            entries: pricing.entries(),
+            warnings,
+        })
     })
+    .await
 }
 
 /// 同步 OpenRouter 价格快照（网络操作，阻塞线程池执行）。
