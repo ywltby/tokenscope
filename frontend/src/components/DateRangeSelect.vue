@@ -132,16 +132,18 @@ const hasDraft = computed(() => draftFrom.value != null);
 <style scoped>
 .shortcut-row {
   display: inline-flex;
-  border: 1px solid rgba(128, 128, 128, 0.3);
-  border-radius: 6px;
+  /* 与下方日期输入框同高同浅边框，视觉对齐 */
+  border: 1px solid rgba(128, 128, 128, 0.18);
+  border-radius: 3px;
   overflow: hidden;
 }
 .shortcut-btn {
+  height: 34px;
   border: none;
   border-radius: 0;
 }
 /* 相邻快捷项之间的细分隔线 */
 .shortcut-btn + .shortcut-btn {
-  border-left: 1px solid rgba(128, 128, 128, 0.3);
+  border-left: 1px solid rgba(128, 128, 128, 0.18);
 }
 </style>
