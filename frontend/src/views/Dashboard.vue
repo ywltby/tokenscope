@@ -132,35 +132,38 @@ void loadSources();
       <NSelect v-model:value="tz" :options="tzOptions" size="small" style="width: 160px" />
     </div>
     <NSpin :show="loading">
-      <template v-if="report">
-        <SummaryCards :totals="report.totals" />
-        <TrendChart
-          v-if="report.by === 'day' || report.groups.length > 2"
-          :groups="report.groups.filter((g) => g.key !== '合计')"
-          :by="report.by"
-          style="margin-top: 12px"
-        />
-        <UsageTable :report="report" style="margin-top: 12px" @row-click="onSummaryRowClick" />
-        <NCard v-if="events" size="small" style="margin-top: 12px">
-          <template #header>
-            请求明细
-            <NTag
-              v-if="drill"
-              size="small"
-              closable
-              type="info"
-              style="margin-left: 8px"
-              @close="clearDrill"
-            >
-              {{ drillLabel(drill) }}
-            </NTag>
-          </template>
-          <EventTable
-            :list="events"
-            :filter-label="drill ? drillLabel(drill) : '无（显示最新 200 条）'"
+      <!-- 最小高度保证加载转圈居中于可视区，避免空内容时贴顶被遮挡 -->
+      <div style="min-height: 380px">
+        <template v-if="report">
+          <SummaryCards :totals="report.totals" />
+          <TrendChart
+            v-if="report.by === 'day' || report.groups.length > 2"
+            :groups="report.groups.filter((g) => g.key !== '合计')"
+            :by="report.by"
+            style="margin-top: 12px"
           />
-        </NCard>
-      </template>
+          <UsageTable :report="report" style="margin-top: 12px" @row-click="onSummaryRowClick" />
+          <NCard v-if="events" size="small" style="margin-top: 12px">
+            <template #header>
+              请求明细
+              <NTag
+                v-if="drill"
+                size="small"
+                closable
+                type="info"
+                style="margin-left: 8px"
+                @close="clearDrill"
+              >
+                {{ drillLabel(drill) }}
+              </NTag>
+            </template>
+            <EventTable
+              :list="events"
+              :filter-label="drill ? drillLabel(drill) : '无（显示最新 200 条）'"
+            />
+          </NCard>
+        </template>
+      </div>
     </NSpin>
   </div>
 </template>

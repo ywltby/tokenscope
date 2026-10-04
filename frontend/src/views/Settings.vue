@@ -163,73 +163,76 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
 
 <template>
   <NSpin :show="loading">
-    <NGrid :cols="2" :x-gap="12" :y-gap="12" item-responsive responsive="screen">
-      <NGi span="1">
-        <NCard title="数据来源" size="small">
-          <div v-for="s in sources" :key="s.agent" style="margin-bottom: 12px">
-            <NStatistic
-              :label="AGENT_LABEL[s.agent] ?? s.agent"
-              :value="s.exists ? `${fmtNum(s.files)} 个会话文件` : '未安装'"
-            />
-            <div style="font-size: 12px; opacity: 0.6">{{ s.dir }}</div>
-            <NAlert v-if="!s.exists" type="warning" style="margin-top: 6px">
-              目录不存在，该来源将没有统计。
-            </NAlert>
-          </div>
-        </NCard>
-      </NGi>
-      <NGi span="1">
-        <NCard title="解析缓存" size="small">
-          <NStatistic label="缓存文件" :value="cache ? fmtNum(cache.files) : '—'" />
-          <NStatistic label="缓存事件" :value="cache ? fmtNum(cache.events) : '—'" />
-          <div style="font-size: 12px; opacity: 0.6; margin: 6px 0">{{ cache?.path }}</div>
-          <div style="font-size: 12px; opacity: 0.6; margin-bottom: 10px">
-            缓存是纯优化：任何故障都会自动退回全量扫描，统计数字不受影响。
-          </div>
-          <NButton size="small" :loading="rebuilding" @click="rebuild">重建缓存</NButton>
-        </NCard>
-      </NGi>
-      <NGi span="2">
-        <NCard title="模型价格表" size="small">
-          <template #header-extra>
-            <div style="display: flex; gap: 8px">
-              <NButton size="small" type="primary" :loading="syncing" @click="syncOpenRouter">
-                同步 OpenRouter 价格
-              </NButton>
-              <NButton size="small" @click="openPricing">打开 / 创建外置价格文件</NButton>
+    <!-- 最小高度保证加载转圈居中于可视区 -->
+    <div style="min-height: 380px">
+      <NGrid :cols="2" :x-gap="12" :y-gap="12" item-responsive responsive="screen">
+        <NGi span="1">
+          <NCard title="数据来源" size="small">
+            <div v-for="s in sources" :key="s.agent" style="margin-bottom: 12px">
+              <NStatistic
+                :label="AGENT_LABEL[s.agent] ?? s.agent"
+                :value="s.exists ? `${fmtNum(s.files)} 个会话文件` : '未安装'"
+              />
+              <div style="font-size: 12px; opacity: 0.6">{{ s.dir }}</div>
+              <NAlert v-if="!s.exists" type="warning" style="margin-top: 6px">
+                目录不存在，该来源将没有统计。
+              </NAlert>
             </div>
-          </template>
-          <div style="font-size: 12px; opacity: 0.6; margin-bottom: 8px">
-            优先级：外置（{{ pricing?.external_count ?? 0 }} 条）> OpenRouter（{{
-              pricing?.openrouter_count ?? 0
-            }}
-            条）> 内置；层内最长前缀匹配。
-            <template v-if="pricing?.synced_at"
-              >OpenRouter 上次同步：{{ pricing.synced_at }}</template
+          </NCard>
+        </NGi>
+        <NGi span="1">
+          <NCard title="解析缓存" size="small">
+            <NStatistic label="缓存文件" :value="cache ? fmtNum(cache.files) : '—'" />
+            <NStatistic label="缓存事件" :value="cache ? fmtNum(cache.events) : '—'" />
+            <div style="font-size: 12px; opacity: 0.6; margin: 6px 0">{{ cache?.path }}</div>
+            <div style="font-size: 12px; opacity: 0.6; margin-bottom: 10px">
+              缓存是纯优化：任何故障都会自动退回全量扫描，统计数字不受影响。
+            </div>
+            <NButton size="small" :loading="rebuilding" @click="rebuild">重建缓存</NButton>
+          </NCard>
+        </NGi>
+        <NGi span="2">
+          <NCard title="模型价格表" size="small">
+            <template #header-extra>
+              <div style="display: flex; gap: 8px">
+                <NButton size="small" type="primary" :loading="syncing" @click="syncOpenRouter">
+                  同步 OpenRouter 价格
+                </NButton>
+                <NButton size="small" @click="openPricing">打开 / 创建外置价格文件</NButton>
+              </div>
+            </template>
+            <div style="font-size: 12px; opacity: 0.6; margin-bottom: 8px">
+              优先级：外置（{{ pricing?.external_count ?? 0 }} 条）> OpenRouter（{{
+                pricing?.openrouter_count ?? 0
+              }}
+              条）> 内置；层内最长前缀匹配。
+              <template v-if="pricing?.synced_at"
+                >OpenRouter 上次同步：{{ pricing.synced_at }}</template
+              >
+              <template v-else>尚未同步 OpenRouter（同步前仅内置 + 外置生效）。</template>
+            </div>
+            <NAlert
+              v-for="(w, i) in pricing?.warnings ?? []"
+              :key="i"
+              type="warning"
+              style="margin-bottom: 8px"
             >
-            <template v-else>尚未同步 OpenRouter（同步前仅内置 + 外置生效）。</template>
-          </div>
-          <NAlert
-            v-for="(w, i) in pricing?.warnings ?? []"
-            :key="i"
-            type="warning"
-            style="margin-bottom: 8px"
-          >
-            {{ w }}
-          </NAlert>
-          <div style="font-size: 12px; opacity: 0.6; margin-bottom: 8px">
-            {{ pricing?.path }}（TOML；同前缀覆盖内置，最长前缀匹配；保存后下次统计生效）
-          </div>
-          <NDataTable
-            :columns="priceColumns"
-            :data="pricing?.entries ?? []"
-            :row-key="rowKey"
-            size="small"
-            :max-height="420"
-            virtual-scroll
-          />
-        </NCard>
-      </NGi>
-    </NGrid>
+              {{ w }}
+            </NAlert>
+            <div style="font-size: 12px; opacity: 0.6; margin-bottom: 8px">
+              {{ pricing?.path }}（TOML；同前缀覆盖内置，最长前缀匹配；保存后下次统计生效）
+            </div>
+            <NDataTable
+              :columns="priceColumns"
+              :data="pricing?.entries ?? []"
+              :row-key="rowKey"
+              size="small"
+              :max-height="420"
+              virtual-scroll
+            />
+          </NCard>
+        </NGi>
+      </NGrid>
+    </div>
   </NSpin>
 </template>
