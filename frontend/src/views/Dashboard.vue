@@ -37,7 +37,7 @@ const dimOptions: { label: string; value: Dim }[] = [
 ];
 
 const agentOptions: { label: string; value: AgentFilter }[] = [
-  { label: "全部 Agent", value: "all" },
+  { label: "全部", value: "all" },
   { label: "Claude Code", value: "claude" },
   { label: "Codex", value: "codex" },
 ];
@@ -121,15 +121,25 @@ void loadSources();
     >
       {{ AGENT_LABEL[s.agent] ?? s.agent }} 数据目录不存在（{{ s.dir }}），该来源将没有统计。
     </NAlert>
-    <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 12px">
-      <NRadioGroup v-model:value="agent" size="small">
-        <NRadioButton v-for="o in agentOptions" :key="o.value" :value="o.value" :label="o.label" />
-      </NRadioGroup>
-      <NRadioGroup v-model:value="by" size="small">
-        <NRadioButton v-for="o in dimOptions" :key="o.value" :value="o.value" :label="o.label" />
-      </NRadioGroup>
-      <NSelect v-model:value="days" :options="dayOptions" size="small" style="width: 130px" />
-      <NSelect v-model:value="tz" :options="tzOptions" size="small" style="width: 160px" />
+    <!-- 筛选两行：第一行 agent 工具，第二行筛选条件 -->
+    <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px">
+      <div>
+        <NRadioGroup v-model:value="agent" size="small">
+          <NRadioButton
+            v-for="o in agentOptions"
+            :key="o.value"
+            :value="o.value"
+            :label="o.label"
+          />
+        </NRadioGroup>
+      </div>
+      <div style="display: flex; align-items: center; gap: 16px">
+        <NRadioGroup v-model:value="by" size="small">
+          <NRadioButton v-for="o in dimOptions" :key="o.value" :value="o.value" :label="o.label" />
+        </NRadioGroup>
+        <NSelect v-model:value="days" :options="dayOptions" size="small" style="width: 130px" />
+        <NSelect v-model:value="tz" :options="tzOptions" size="small" style="width: 160px" />
+      </div>
     </div>
     <NSpin :show="loading">
       <!-- 最小高度保证加载转圈居中于可视区，避免空内容时贴顶被遮挡 -->
