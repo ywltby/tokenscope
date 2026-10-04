@@ -12,7 +12,7 @@
 - **托盘常驻**：关闭窗口只是缩到托盘，托盘菜单或左键单击恢复，退出走托盘菜单
 - **桌面体验**：单实例互斥（二次启动唤起已有窗口）、窗口尺寸/位置记忆、开机自启（设置页开关）
 - **SQLite 缓存**：`~/.tokenscope/cache.db` 按文件指纹增量失效，缓存故障自动退回全量扫描（缓存是纯优化，日志才是事实源）
-- **价格表三层合并**：内置表兜底，一键同步 OpenRouter 466+ 模型价格（含显示名），外置 `~/.tokenscope/pricing.toml` 补充覆盖（本地优先），GUI 设置页可视化管理
+- **价格表四层合并**：本地外置 `pricing.toml`（最高优先）> models.dev 同步（默认主源，7900+ 模型）> OpenRouter 同步（备份，460+ 模型）> 内置表兜底；GUI 设置页一键同步双源并可视化管理
 - **同源 CLI**：`tokenscope` 命令与 GUI 走同一条 Rust 数据管线，脚本化与核对两用
 - **时区可配**：存储一律 UTC，展示按解析链（显式指定 > 本机 > 默认 Asia/Shanghai）一次转换
 
@@ -45,7 +45,7 @@ tokenscope summary --days 7             # 最近 7 个自然日
 tokenscope summary --json               # 机器可读输出（逐源统计，含坏行/去重计数）
 tokenscope summary --claude-dir <path> --codex-dir <path>   # 覆盖扫描目录
 tokenscope summary --refresh            # 强制全量重解析并重建缓存
-tokenscope pricing sync                 # 同步 OpenRouter 价格快照（466+ 模型）
+tokenscope pricing sync                 # 同步在线价格（models.dev 主源 + OpenRouter 备份）
 tokenscope summary --tz UTC             # 指定聚合时区（local=本机；缺省 Asia/Shanghai）
 tokenscope events --agent codex --days 7 --limit 200    # 逐请求明细（时间倒序）
 tokenscope events --model gpt-5.6-sol --day 2026-10-04  # 按模型/自然日过滤

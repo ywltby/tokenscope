@@ -1,6 +1,6 @@
 # M9：models.dev 主源 + OpenRouter 备份（四层价格合并）
 
-- 状态：**已确认（用户 2026-10-04 拍板：接 models.dev 且默认用它；OpenRouter 保留作备份；本地仍覆盖）**
+- 状态：**已完成（2026-10-04），GUI 双源同步冒烟待用户确认**
 - 创建：2026-10-04
 
 ## 目标
@@ -56,3 +56,18 @@
 
 - models.dev 无成本字段模型较多 → 跳过策略已在设计固化；快照体积（~1-2MB）可接受。
 - 归一化同键跨 provider 价格不一致 → 排序取一 + 外置可裁决，文档注明。
+
+## 验收记录（2026-10-04）
+
+1. 全量门禁：fmt / clippy（0 警告）/ `cargo test --workspace`（71 测试：根 crate 64 + e2e 6 + tauri commands…）/ vue-tsc / pnpm build 全绿。
+2. 真实双源同步：`tokenscope pricing sync` 一次同步 **models.dev 7,957 条 + OpenRouter 466 条**，各自独立快照与时间戳。
+3. **unknown 完全清零**：同步后真实日志 unknown input 4,725,136 → 0（doubao 系经 models.dev 层转正；hy3:free 被 models.dev 免费条目精确命中，变体隔离保持）。合计费用 1,650.77 → 1,156.64（models.dev 对主力模型给出更低牌价，层级设计如此；价差悬浮可见，可被外置覆盖）。
+4. 四层裁决 fixture 固化：外置 > models.dev > openrouter > 内置；单源快照损坏/缺失不影响其余层（modelsdev/openrouter 各有坏快照单测）。
+5. `tauri build` NSIS 产物正常；GUI 双源状态展示与同步按钮冒烟留用户确认。
+
+## 实现要点
+
+- `modelsdev.rs` 与 openrouter.rs 同构：api.json 解析（BTreeMap provider→models，跳过无 cost 条目防 0 价误报；同归一化键去重保留排序靠前者）→ 瘦身快照。
+- `Pricing::load` 签名扩为三快照（external/modelsdev/openrouter），tier 常量扩展为四层；查找仍 `(u8::MAX - tier, prefix_len)` 取最大。
+- models.dev cost 单位与项目口径一致（USD/Mtok），无需换算——比 OpenRouter 层更直接。
+- tauri sync 命令返回统一 `SyncOutcome` 数组（source/count/path/synced_at），前端不再区分源类型。

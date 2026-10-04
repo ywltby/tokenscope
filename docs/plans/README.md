@@ -19,10 +19,11 @@
 | M6 | UTC 存储不变量 + 时区解析链（--tz local/IANA，默认上海）+ JSON timezone 字段 | 本机==上海逐字段一致；UTC 日界生效；非法时区报错；NSIS 产物 | [归档](archive/implemented/2026-10-04-m6-timezone-resolution.md) |
 | M7 | 逐请求明细（CLI events + GUI 行点击下钻）+ collect_all 共用路径 | 真实数据总额核对一致（3,741=3,741；日明细 token 求和一致） | [归档](archive/implemented/2026-10-04-m7-event-drilldown.md) |
 | M8 | 桌面体验：单实例互斥、窗口状态记忆、开机自启（设置页开关） | NSIS 4.38 MiB；三项能力待用户安装冒烟 | [归档](archive/implemented/2026-10-04-m8-desktop-experience.md) |
+| M9 | models.dev 主源 + OpenRouter 备份（四层价格合并） | 双源真实同步 7,957+466 条；unknown 清零；doubao/hy3:free 转正 | [归档](archive/implemented/2026-10-04-m9-modelsdev-source.md) |
 
 ## 当前状态
 
-- **进行中：[M9 models.dev 主源](active/2026-10-04-m9-modelsdev-source.md)**（四层价格合并：外置 > models.dev > OpenRouter > 内置）。
+- **无进行中的计划**（`active/` 为空）。
 - GUI 冒烟进行中（用户 dev 模式实测反馈；会话内已修复：主线程阻塞、转圈居中、筛选两行、agent 图标分段控件、暗色图标隐形、分段控件宽度等，均独立 fix 提交）。
 - 待办尾巴：M3/M4 的 GUI 交互冒烟留用户安装确认（数据正确性已由 CLI/测试覆盖）。
 
@@ -40,6 +41,7 @@
 
 | 计划 | 状态 | 备注 |
 | --- | --- | --- |
+| [archive/implemented/2026-10-04-m9-modelsdev-source.md](archive/implemented/2026-10-04-m9-modelsdev-source.md) | ✅ 完成 2026-10-04 | M9：models.dev 主源 + OpenRouter 备份（四层合并）；真实同步 7,957+466 条，unknown 清零 |
 | [archive/implemented/2026-10-04-m8-desktop-experience.md](archive/implemented/2026-10-04-m8-desktop-experience.md) | ✅ 完成 2026-10-04 | M8：单实例互斥 + 窗口状态记忆 + 开机自启；时区选择迁入设置页 |
 | [archive/implemented/2026-10-04-m7-event-drilldown.md](archive/implemented/2026-10-04-m7-event-drilldown.md) | ✅ 完成 2026-10-04 | M7：逐请求明细视图（CLI events + GUI 下钻）；真实数据总额核对一致 |
 | [archive/implemented/2026-10-04-m6-timezone-resolution.md](archive/implemented/2026-10-04-m6-timezone-resolution.md) | ✅ 完成 2026-10-04 | M6：UTC 存储固化 + 时区解析链（--tz local/IANA，默认上海）；JSON 增 timezone 字段 |
