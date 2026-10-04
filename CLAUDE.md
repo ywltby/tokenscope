@@ -58,6 +58,7 @@ pnpm --dir frontend tauri build    # 生产构建（NSIS 安装包，首次较�
 
 - 终端是 **Windows PowerShell**：多条命令分开执行或用 `;`，**不要用 `&&`**。
 - Bash 工具里 cargo 若不在 PATH（会话早于安装启动），用绝对路径 `/c/Users/admin/.cargo/bin/cargo.exe` 调用。
+- **crates.io 需走本地代理**（用户 2026-10-04 指示）：cargo/pnpm 联网操作前设置 `HTTP_PROXY`/`HTTPS_PROXY=http://127.0.0.1:7897`，否则 registry 更新超时（tauri dev 亦同——改依赖后需带代理重启 dev）。
 - 搜索文件名和代码优先使用 `rg` 或 `git grep`。
 - 解析 JSONL / JSON 一律走 serde 等真实解析库；禁止脆弱的字符串拼接与文本替换。
 
