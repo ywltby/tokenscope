@@ -1,6 +1,7 @@
 //! Tauri commands：参数校验 + 调用 report 管线，零业务逻辑。
 
 use serde::Serialize;
+use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_opener::OpenerExt;
 use tokenscope::aggregate::GroupBy;
 use tokenscope::model::AgentKind;
@@ -94,6 +95,37 @@ pub async fn cache_stats() -> Result<CacheInfo, String> {
 #[tauri::command]
 pub async fn refresh_cache() -> Result<CacheInfo, String> {
     run_blocking(move || rebuild_cache_impl(None)).await
+}
+
+/// 开机自启状态（M8；写系统自启动项属用户显式操作，默认关闭）。
+#[tauri::command]
+pub async fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
+    run_blocking(move || {
+        app.autolaunch()
+            .is_enabled()
+            .map_err(|e| anyhow::anyhow!("读取自启状态失败: {e}"))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    run_blocking(move || {
+        let launch = app.autolaunch();
+        if enabled {
+            launch
+                .enable()
+                .map_err(|e| anyhow::anyhow!("开启自启失败: {e}"))?;
+        } else {
+            launch
+                .disable()
+                .map_err(|e| anyhow::anyhow!("关闭自启失败: {e}"))?;
+        }
+        launch
+            .is_enabled()
+            .map_err(|e| anyhow::anyhow!("读取自启状态失败: {e}"))
+    })
+    .await
 }
 
 /// 后台线程池执行阻塞任务并统一错误映射。

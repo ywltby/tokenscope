@@ -16,13 +16,14 @@ import UsageTable from "../components/UsageTable.vue";
 import TrendChart from "../components/TrendChart.vue";
 import EventTable from "../components/EventTable.vue";
 import AgentIcon from "../components/AgentIcon.vue";
+import { useTimezone } from "../composables/timezone";
 
 const props = defineProps<{ refreshKey: number }>();
 
 const by = ref<Dim>("day");
 const agent = ref<AgentFilter>("all");
 const days = ref<number>(0);
-const tz = ref<string>("Asia/Shanghai");
+const { tz } = useTimezone();
 const report = ref<SummaryReport | null>(null);
 const loading = ref(false);
 const sourceStatus = ref<SourceStatus[]>([]);
@@ -48,12 +49,6 @@ const dayOptions: { label: string; value: number }[] = [
   { label: "近 7 天", value: 7 },
   { label: "近 30 天", value: 30 },
   { label: "近 90 天", value: 90 },
-];
-
-const tzOptions: { label: string; value: string }[] = [
-  { label: "本机时区", value: "local" },
-  { label: "Asia/Shanghai", value: "Asia/Shanghai" },
-  { label: "UTC", value: "UTC" },
 ];
 
 async function refresh(): Promise<void> {
@@ -122,7 +117,7 @@ void loadSources();
     >
       {{ AGENT_LABEL[s.agent] ?? s.agent }} 数据目录不存在（{{ s.dir }}），该来源将没有统计。
     </NAlert>
-    <!-- 筛选两行：第一行 agent 工具，第二行筛选条件 -->
+    <!-- 筛选两行：第一行 agent 工具，第二行筛选条件（时区在设置页） -->
     <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px">
       <div class="agent-row">
         <NTooltip v-for="o in agentOptions" :key="o.value">
@@ -145,7 +140,6 @@ void loadSources();
           <NRadioButton v-for="o in dimOptions" :key="o.value" :value="o.value" :label="o.label" />
         </NRadioGroup>
         <NSelect v-model:value="days" :options="dayOptions" size="small" style="width: 130px" />
-        <NSelect v-model:value="tz" :options="tzOptions" size="small" style="width: 160px" />
       </div>
     </div>
     <NSpin :show="loading">

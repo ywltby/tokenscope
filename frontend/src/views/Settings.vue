@@ -8,8 +8,10 @@ import {
   NDataTable,
   NGrid,
   NGi,
+  NSelect,
   NSpin,
   NStatistic,
+  NSwitch,
   NTag,
   NTooltip,
   useMessage,
@@ -23,6 +25,7 @@ import {
   type PricingView,
   type SourceStatus,
 } from "../types";
+import { TZ_OPTIONS, useTimezone } from "../composables/timezone";
 
 const props = defineProps<{ refreshKey: number }>();
 const msg = useMessage();
@@ -32,6 +35,9 @@ const cache = ref<CacheInfo | null>(null);
 const pricing = ref<PricingView | null>(null);
 const loading = ref(false);
 const rebuilding = ref(false);
+const { tz } = useTimezone();
+const autostart = ref<boolean | null>(null);
+const autostartBusy = ref(false);
 const syncing = ref(false);
 
 async function loadAll(): Promise<void> {
@@ -80,7 +86,26 @@ async function openPricing(): Promise<void> {
   }
 }
 
-onMounted(loadAll);
+async function loadAutostart(): Promise<void> {
+  autostart.value = await invoke<boolean>("autostart_status");
+}
+
+async function setAutostart(enabled: boolean): Promise<void> {
+  autostartBusy.value = true;
+  try {
+    autostart.value = await invoke<boolean>("autostart_set", { enabled });
+    msg.success(enabled ? "已开启开机自启" : "已关闭开机自启");
+  } catch (e) {
+    msg.error(String(e));
+  } finally {
+    autostartBusy.value = false;
+  }
+}
+
+onMounted(() => {
+  void loadAll();
+  void loadAutostart();
+});
 watch(
   () => props.refreshKey,
   () => void loadAll(),
@@ -166,6 +191,32 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
     <!-- 最小高度保证加载转圈居中于可视区 -->
     <div style="min-height: 380px">
       <NGrid :cols="2" :x-gap="12" :y-gap="12" item-responsive responsive="screen">
+        <NGi span="1">
+          <NCard title="桌面体验" size="small">
+            <div style="margin-bottom: 12px">
+              <NStatistic label="聚合/展示时区" :value="tz === 'local' ? '本机时区' : tz" />
+              <div style="font-size: 12px; opacity: 0.6; margin: 4px 0 8px">
+                存储/计算一律 UTC，仅展示按此时区一次转换。
+              </div>
+              <NSelect v-model:value="tz" :options="TZ_OPTIONS" size="small" style="width: 200px" />
+            </div>
+            <div>
+              <NStatistic
+                label="开机自启"
+                :value="autostart == null ? '—' : autostart ? '已开启' : '已关闭'"
+              />
+              <div style="font-size: 12px; opacity: 0.6; margin: 4px 0 8px">
+                开机后自动启动并驻留托盘。
+              </div>
+              <NSwitch
+                :value="autostart === true"
+                :disabled="autostart == null || autostartBusy"
+                :loading="autostartBusy"
+                @update:value="setAutostart"
+              />
+            </div>
+          </NCard>
+        </NGi>
         <NGi span="1">
           <NCard title="数据来源" size="small">
             <div v-for="s in sources" :key="s.agent" style="margin-bottom: 12px">
