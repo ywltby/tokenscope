@@ -169,9 +169,13 @@ fn split_variant(normalized: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// 前缀索引：归一化前缀（字节串，避免多字节切片 panic）→ 同前缀全部条目。
+/// 查找时只枚举查询串自身的 ~30 个前缀做哈希命中，复杂度与表大小无关。
+type PrefixIndex = std::collections::HashMap<Vec<u8>, Vec<Entry>>;
+
 #[derive(Debug, Clone)]
 pub struct Pricing {
-    entries: Vec<Entry>,
+    by_prefix: PrefixIndex,
 }
 
 impl Default for Pricing {
@@ -183,21 +187,33 @@ impl Default for Pricing {
 impl Pricing {
     /// 纯内置表。
     pub fn builtin() -> Self {
-        Self {
-            entries: TABLE
-                .iter()
-                .map(|(p, i, o, cw, cr)| Entry {
-                    prefix: normalize_model_id(p),
-                    display: (*p).to_string(),
-                    name: None,
-                    input: *i,
-                    output: *o,
-                    cache_write: *cw,
-                    cache_read: *cr,
-                    tier: TIER_BUILTIN,
-                })
-                .collect(),
+        let mut pricing = Self {
+            by_prefix: PrefixIndex::new(),
+        };
+        for (p, i, o, cw, cr) in TABLE {
+            pricing.add_entry(Entry {
+                prefix: normalize_model_id(p),
+                display: (*p).to_string(),
+                name: None,
+                input: *i,
+                output: *o,
+                cache_write: *cw,
+                cache_read: *cr,
+                tier: TIER_BUILTIN,
+            });
         }
+        pricing
+    }
+
+    fn add_entry(&mut self, e: Entry) {
+        self.by_prefix
+            .entry(e.prefix.as_bytes().to_vec())
+            .or_default()
+            .push(e);
+    }
+
+    fn all_entries(&self) -> impl Iterator<Item = &Entry> {
+        self.by_prefix.values().flatten()
     }
 
     /// 四层合并：内置兜底，openrouter/models.dev 快照叠加，外置最终覆盖。
@@ -214,7 +230,7 @@ impl Pricing {
             match crate::modelsdev::load_snapshot(path) {
                 Ok(Some(snapshot)) => {
                     for e in snapshot.entries {
-                        pricing.entries.push(Entry {
+                        pricing.add_entry(Entry {
                             prefix: normalize_model_id(&e.id),
                             display: e.id,
                             name: e.name,
@@ -238,7 +254,7 @@ impl Pricing {
             match openrouter::load_snapshot(path) {
                 Ok(Some(snapshot)) => {
                     for e in snapshot.entries {
-                        pricing.entries.push(Entry {
+                        pricing.add_entry(Entry {
                             prefix: normalize_model_id(&e.id),
                             display: e.id,
                             name: e.name,
@@ -273,7 +289,7 @@ impl Pricing {
                 }
             };
             for m in parsed.model {
-                pricing.entries.push(Entry {
+                pricing.add_entry(Entry {
                     prefix: normalize_model_id(&m.prefix),
                     display: m.prefix,
                     name: None,
@@ -289,26 +305,39 @@ impl Pricing {
         (pricing, warnings)
     }
 
-    /// 层级优先（外置 > openrouter > 内置），层内最长前缀。
+    /// 层级优先（外置 > models.dev > openrouter > 内置），层内最长前缀。
     /// **变体隔离**：带 `:变体` 的查询只匹配同变体条目——免费（`:free`）等变体
     /// 不得套用基名价格，宁可 unknown。
+    ///
+    /// 热路径（每事件一次 × 数千条目）：前缀在加载时已归一化，这里零分配；
+    /// 首字节不等直接跳过，把线性扫描的实际比较量压到两位数。
     pub fn lookup(&self, model: &str) -> Option<ModelPrice> {
         let key = normalize_model_id(model);
-        let (key_base, key_variant) = split_variant(&key);
-        self.entries
-            .iter()
-            .filter(|e| {
-                let (base, variant) = split_variant(&e.prefix);
-                variant == key_variant && key_base.starts_with(base)
-            })
-            // 层级优先：tier 越小越优先（外置 0 / openrouter 1 / 内置 2），再比前缀长度
-            .max_by_key(|e| (u8::MAX - e.tier, e.prefix.len()))
-            .map(|e| ModelPrice {
-                input: e.input,
-                output: e.output,
-                cache_write: e.cache_write,
-                cache_read: e.cache_read,
-            })
+        let (_, key_variant) = split_variant(&key);
+        // 枚举查询串（含变体后缀）自身的前缀（≤30 个）做哈希命中；
+        // 变体隔离由显式校验保证：条目变体必须与查询变体完全一致。
+        let bytes = key.as_bytes();
+        let mut best: Option<(&Entry, (u8, usize))> = None;
+        for k in (1..=bytes.len()).rev() {
+            if let Some(group) = self.by_prefix.get(&bytes[..k]) {
+                for e in group {
+                    let (_, variant) = split_variant(&e.prefix);
+                    if variant != key_variant {
+                        continue;
+                    }
+                    let rank = (u8::MAX - e.tier, k);
+                    if best.is_none_or(|(_, b_rank)| rank > b_rank) {
+                        best = Some((e, rank));
+                    }
+                }
+            }
+        }
+        best.map(|(e, _)| ModelPrice {
+            input: e.input,
+            output: e.output,
+            cache_write: e.cache_write,
+            cache_read: e.cache_read,
+        })
     }
 
     /// 返回 None 表示模型未收录（unknown），不是 0 费用。
@@ -327,13 +356,11 @@ impl Pricing {
     pub fn entries(&self) -> Vec<PricingEntry> {
         // openrouter 层按归一化前缀索引，供非 openrouter 行对照（精确同前缀）。
         let or_by_prefix: std::collections::HashMap<&str, &Entry> = self
-            .entries
-            .iter()
+            .all_entries()
             .filter(|e| e.tier == TIER_OPENROUTER)
             .map(|e| (e.prefix.as_str(), e))
             .collect();
-        self.entries
-            .iter()
+        self.all_entries()
             .map(|e| {
                 let openrouter = or_by_prefix
                     .get(e.prefix.as_str())
@@ -375,7 +402,7 @@ impl Pricing {
     }
 
     fn count_tier(&self, tier: u8) -> usize {
-        self.entries.iter().filter(|e| e.tier == tier).count()
+        self.all_entries().filter(|e| e.tier == tier).count()
     }
 }
 
