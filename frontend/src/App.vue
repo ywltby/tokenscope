@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { dateZhCN, zhCN } from "naive-ui";
 import {
   darkTheme,
   NConfigProvider,
@@ -29,7 +30,7 @@ watch(page, (p) => {
 </script>
 
 <template>
-  <NConfigProvider :theme="theme">
+  <NConfigProvider :theme="theme" :locale="zhCN" :date-locale="dateZhCN">
     <NGlobalStyle />
     <NMessageProvider>
       <NLayout style="height: 100vh">

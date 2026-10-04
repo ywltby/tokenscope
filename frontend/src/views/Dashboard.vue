@@ -1,17 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  NAlert,
-  NButton,
-  NCard,
-  NDatePicker,
-  NRadioButton,
-  NRadioGroup,
-  NSpin,
-  NTag,
-  NTooltip,
-} from "naive-ui";
+import { NAlert, NButton, NCard, NRadioButton, NRadioGroup, NSpin, NTag, NTooltip } from "naive-ui";
 import {
   AGENT_LABEL,
   type AgentFilter,
@@ -26,6 +16,7 @@ import UsageTable from "../components/UsageTable.vue";
 import TrendChart from "../components/TrendChart.vue";
 import EventTable from "../components/EventTable.vue";
 import AgentIcon from "../components/AgentIcon.vue";
+import DateRangeSelect from "../components/DateRangeSelect.vue";
 import { useTimezone } from "../composables/timezone";
 
 const props = defineProps<{ refreshKey: number }>();
@@ -48,26 +39,19 @@ const dimOptions: { label: string; value: Dim }[] = [
   { label: "按应用", value: "agent" },
 ];
 
-const agentOptions: { label: string; value: AgentFilter; icon: string }[] = [
-  { label: "全部", value: "all", icon: "all" },
-  { label: "Claude Code", value: "claude", icon: "claude" },
-  { label: "Codex", value: "codex", icon: "openai" },
-];
-
-// 区间快捷项（参考 cc-switch）；null = 全部时间
-const rangeShortcuts: Record<string, () => [number, number]> = {
-  近7天: () => [Date.now() - 7 * 86400e3, Date.now()],
-  近30天: () => [Date.now() - 30 * 86400e3, Date.now()],
-  近90天: () => [Date.now() - 90 * 86400e3, Date.now()],
-};
-
-/// 区间毫秒 → 解析时区下的 YYYY-MM-DD（避免前端再引时区库：local 用本地
-/// 格式化，固定偏移时区按偏移折算；Asia/Shanghai +8 无夏令时）
+/// 区间毫秒 → 解析时区下的 YYYY-MM-DD（local 用本地格式化；固定偏移时区
+/// 按偏移折算，Asia/Shanghai +8 无夏令时）
 function fmtDate(ms: number): string {
   if (tz.value === "local") return new Date(ms).toLocaleDateString("sv-SE");
   const offsetH = tz.value === "UTC" ? 0 : 8;
   return new Date(ms + offsetH * 3600e3).toISOString().slice(0, 10);
 }
+
+const agentOptions: { label: string; value: AgentFilter; icon: string }[] = [
+  { label: "全部", value: "all", icon: "all" },
+  { label: "Claude Code", value: "claude", icon: "claude" },
+  { label: "Codex", value: "codex", icon: "openai" },
+];
 
 async function refresh(): Promise<void> {
   loading.value = true;
@@ -160,14 +144,7 @@ void loadSources();
         <NRadioGroup v-model:value="by" size="small">
           <NRadioButton v-for="o in dimOptions" :key="o.value" :value="o.value" :label="o.label" />
         </NRadioGroup>
-        <NDatePicker
-          v-model:value="range"
-          type="daterange"
-          clearable
-          size="small"
-          :shortcuts="rangeShortcuts"
-          style="width: 260px"
-        />
+        <DateRangeSelect v-model:value="range" />
       </div>
     </div>
     <NSpin :show="loading">
