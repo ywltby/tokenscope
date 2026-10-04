@@ -685,6 +685,8 @@ cache_read = 0.0
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            // 钉住不存在的 models.dev 快照，测试不依赖真实 ~/.tokenscope 状态
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
             tz: Some("Asia/Shanghai".to_string()),
             ..Default::default()
         };
