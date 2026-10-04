@@ -188,15 +188,21 @@ void loadSources();
 
 <style scoped>
 .agent-row {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 8px;
+  overflow: hidden;
 }
 .agent-btn {
   width: 40px;
   height: 40px;
   padding: 0;
-  border-radius: 8px;
-  border: 1px solid rgba(128, 128, 128, 0.3);
+  border: none;
+  border-radius: 0;
+}
+/* 相邻格之间的细分隔线，整体仍是一个元素 */
+.agent-btn + .agent-btn {
+  border-left: 1px solid rgba(128, 128, 128, 0.3);
 }
 </style>
