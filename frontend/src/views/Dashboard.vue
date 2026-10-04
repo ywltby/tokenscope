@@ -189,6 +189,7 @@ void loadSources();
 <style scoped>
 .agent-row {
   display: inline-flex;
+  align-self: flex-start; /* 纵向 flex 容器默认 stretch 会把外框拉满整行 */
   align-items: center;
   border: 1px solid rgba(128, 128, 128, 0.3);
   border-radius: 8px;
