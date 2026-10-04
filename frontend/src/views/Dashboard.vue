@@ -31,6 +31,10 @@ const sourceStatus = ref<SourceStatus[]>([]);
 const drill = ref<EventDrill | null>(null);
 const events = ref<EventList | null>(null);
 const eventsLoading = ref(false);
+// 启动提速（用户 2026-10-04）：先渲染上次视图快照，再后台刷新替换
+const stale = ref(false);
+const cachedAt = ref<string | null>(null);
+let runSeq = 0;
 
 const dimOptions: { label: string; value: Dim }[] = [
   { label: "按日", value: "day" },
@@ -54,9 +58,10 @@ const agentOptions: { label: string; value: AgentFilter; icon: string }[] = [
 ];
 
 async function refresh(): Promise<void> {
+  const seq = ++runSeq;
   loading.value = true;
   try {
-    report.value = await invoke<SummaryReport>("summarize", {
+    const fresh = await invoke<SummaryReport>("summarize", {
       by: by.value,
       agent: agent.value,
       days: null,
@@ -64,8 +69,14 @@ async function refresh(): Promise<void> {
       to: range.value ? fmtDate(range.value[1]) : null,
       tz: tz.value,
     });
+    if (seq !== runSeq) return; // 已有更新的查询，丢弃旧响应
+    report.value = fresh;
+    stale.value = false;
+    void invoke("view_cache_save", {
+      value: { report: fresh, events: events.value, saved_at: new Date().toISOString() },
+    });
   } finally {
-    loading.value = false;
+    if (seq === runSeq) loading.value = false;
   }
 }
 
@@ -74,9 +85,10 @@ async function loadSources(): Promise<void> {
 }
 
 async function loadEvents(): Promise<void> {
+  const seq = ++runSeq;
   eventsLoading.value = true;
   try {
-    events.value = await invoke<EventList>("list_events", {
+    const list = await invoke<EventList>("list_events", {
       agent: agent.value,
       from: range.value ? fmtDate(range.value[0]) : null,
       to: range.value ? fmtDate(range.value[1]) : null,
@@ -86,10 +98,34 @@ async function loadEvents(): Promise<void> {
       limit: 200,
       tz: tz.value,
     });
+    if (seq !== runSeq) return;
+    events.value = list;
+    void invoke("view_cache_save", {
+      value: { report: report.value, events: list, saved_at: new Date().toISOString() },
+    });
   } finally {
-    eventsLoading.value = false;
+    if (seq === runSeq) eventsLoading.value = false;
   }
 }
+
+async function loadViewCache(): Promise<void> {
+  try {
+    const cached = await invoke<{
+      report: SummaryReport;
+      events: EventList;
+      saved_at: string;
+    } | null>("view_cache_load");
+    if (cached?.report && !report.value) {
+      report.value = cached.report;
+      events.value = cached.events;
+      cachedAt.value = cached.saved_at;
+      stale.value = true;
+    }
+  } catch {
+    // 视图缓存损坏：静默忽略，走正常加载
+  }
+}
+void loadViewCache();
 
 function onSummaryRowClick(key: string): void {
   if (by.value === "agent") {
@@ -147,9 +183,16 @@ void loadSources();
         <DateRangeSelect v-model:value="range" />
       </div>
     </div>
-    <NSpin :show="loading">
+    <!-- 有数据时不再全屏灰罩：数据原地更新，右上角提示刷新中 -->
+    <NSpin :show="loading && !report">
       <!-- 最小高度保证加载转圈居中于可视区，避免空内容时贴顶被遮挡 -->
       <div style="min-height: 380px">
+        <div v-if="report" style="display: flex; justify-content: flex-end; margin-bottom: 8px">
+          <NTag v-if="stale" size="small" type="warning" :bordered="false">
+            缓存数据（{{ cachedAt ?? "" }}）· 后台刷新中
+          </NTag>
+          <NTag v-else-if="loading" size="small" type="info" :bordered="false">刷新中…</NTag>
+        </div>
         <template v-if="report">
           <SummaryCards :totals="report.totals" />
           <TrendChart

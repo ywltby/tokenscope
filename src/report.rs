@@ -98,6 +98,10 @@ pub fn openrouter_file_path(snapshot_file: Option<&PathBuf>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("pricing-openrouter.json"))
 }
 
+pub fn view_cache_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("view-cache.json"))
+}
+
 pub fn modelsdev_file_path(snapshot_file: Option<&PathBuf>) -> PathBuf {
     snapshot_file
         .cloned()

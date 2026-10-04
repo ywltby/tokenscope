@@ -1,5 +1,6 @@
 //! Tauri commands：参数校验 + 调用 report 管线，零业务逻辑。
 
+use anyhow::Context;
 use serde::Serialize;
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_opener::OpenerExt;
@@ -12,7 +13,7 @@ use tokenscope::report::{
     CacheInfo, EventFilter, EventList, SourceStatus, SummaryOptions, SummaryReport,
     cache_stats as cache_stats_impl, list_events as list_events_impl, modelsdev_file_path,
     openrouter_file_path, pricing_file_path, rebuild_cache as rebuild_cache_impl,
-    source_status as source_status_impl, summary,
+    source_status as source_status_impl, summary, view_cache_path,
 };
 
 pub fn parse_by(by: &str) -> Result<GroupBy, String> {
@@ -106,6 +107,38 @@ pub async fn cache_stats() -> Result<CacheInfo, String> {
 #[tauri::command]
 pub async fn refresh_cache() -> Result<CacheInfo, String> {
     run_blocking(move || rebuild_cache_impl(None)).await
+}
+
+/// 上次视图快照（M10 后启动提速）：原样存取前端渲染结果，零类型耦合。
+/// 坏文件 → None 静默忽略。
+#[tauri::command]
+pub async fn view_cache_load() -> Result<Option<serde_json::Value>, String> {
+    run_blocking(move || {
+        let path = view_cache_path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("读视图缓存失败: {}", path.display()))?;
+        serde_json::from_str(&text)
+            .map(Some)
+            .with_context(|| format!("视图缓存解析失败: {}", path.display()))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn view_cache_save(value: serde_json::Value) -> Result<(), String> {
+    run_blocking(move || {
+        let path = view_cache_path()?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("创建目录失败: {}", dir.display()))?;
+        }
+        let json = serde_json::to_string_pretty(&value)?;
+        std::fs::write(&path, json).with_context(|| format!("写视图缓存失败: {}", path.display()))
+    })
+    .await
 }
 
 /// 开机自启状态（M8；写系统自启动项属用户显式操作，默认关闭）。
