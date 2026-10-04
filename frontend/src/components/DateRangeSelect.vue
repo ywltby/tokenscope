@@ -24,16 +24,18 @@ function todayStart(): number {
   return d.getTime();
 }
 
-const shortcuts: { label: string; days: number }[] = [
-  { label: "当天", days: 1 },
-  { label: "7d", days: 7 },
-  { label: "14d", days: 14 },
-  { label: "30d", days: 30 },
+const shortcuts: { label: string; range: () => [number, number] }[] = [
+  { label: "当天", range: () => [todayStart(), todayStart() + DAY - 1] },
+  { label: "24h", range: () => [todayStart() - DAY, todayStart() + DAY - 1] },
+  { label: "7d", range: () => [todayStart() - 6 * DAY, todayStart() + DAY - 1] },
+  { label: "14d", range: () => [todayStart() - 13 * DAY, todayStart() + DAY - 1] },
+  { label: "30d", range: () => [todayStart() - 29 * DAY, todayStart() + DAY - 1] },
 ];
 
-function applyShortcut(days: number): void {
-  draftFrom.value = todayStart() - (days - 1) * DAY;
-  draftTo.value = todayStart() + DAY - 1;
+function applyShortcut(sc: { label: string; range: () => [number, number] }): void {
+  const [from, to] = sc.range();
+  draftFrom.value = from;
+  draftTo.value = to;
   followToday.value = false;
 }
 
@@ -77,10 +79,11 @@ function confirm(): void {
   show.value = false;
 }
 
-const panelStyle = { width: "420px", padding: "12px" };
-const shortcutActive = (days: number): boolean => {
+const panelStyle = { width: "300px", padding: "12px" };
+const shortcutActive = (sc: { range: () => [number, number] }): boolean => {
   if (draftFrom.value == null || draftTo.value == null) return false;
-  return draftTo.value - draftFrom.value + 1 === days * DAY;
+  const [from, to] = sc.range();
+  return draftFrom.value === from && draftTo.value === to;
 };
 const hasDraft = computed(() => draftFrom.value != null);
 </script>
@@ -93,13 +96,13 @@ const hasDraft = computed(() => draftFrom.value != null);
       </NButton>
     </template>
     <div :style="panelStyle">
-      <div style="display: flex; gap: 6px; margin-bottom: 12px">
+      <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px">
         <NButton
           v-for="sc in shortcuts"
           :key="sc.label"
           size="tiny"
-          :type="shortcutActive(sc.days) ? 'primary' : 'default'"
-          @click="applyShortcut(sc.days)"
+          :type="shortcutActive(sc) ? 'primary' : 'default'"
+          @click="applyShortcut(sc)"
         >
           {{ sc.label }}
         </NButton>
