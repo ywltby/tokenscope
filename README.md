@@ -1,19 +1,18 @@
 # TokenScope
 
-本地 AI agent 使用量统计的桌面工具：只读扫描各 AI 编程工具落在本地的会话日志，统计 token 用量、请求数与估算费用。Rust（Tauri 2）+ Vue 3 前端，另附与 GUI 数字同源的 CLI。对标 [cc-switch](https://github.com/farion1231/cc-switch) 的 Usage Statistics，作为独立工具覆盖更多 agent。
+本地 AI agent 使用量统计的桌面工具：只读扫描各 AI 编程工具落在本地的会话日志，统计 token 用量、请求数与估算费用。Rust（Tauri 2）+ Vue 3 前端。对标 [cc-switch](https://github.com/farion1231/cc-switch) 的 Usage Statistics，作为独立工具覆盖更多 agent。
 
 ## 功能
 
 - **多 agent 统计**：默认合并全部已装 agent，也可单看某个（当前 Claude Code + Codex，更多适配器规划中）
 - **多维度聚合**：按日 / 模型 / 项目 / 应用分组；时间支持预设与**自定义区间**（日期区间选择器 / `--from`+`--to`）
-- **逐请求明细**：点击汇总行即下钻到去重后的请求级明细（时间 / 模型 / 项目 / 四类 token / 费用），CLI 同步提供 `events` 子命令
+- **逐请求明细**：点击汇总行即下钻到去重后的请求级明细（时间 / 模型 / 项目 / 四类 token / 费用）
 - **Dashboard**：概览卡片、按日堆叠趋势图（ECharts）、明细表、来源采集统计
 - **明暗双模式**：默认跟随系统，可手动切换并记忆
 - **托盘常驻**：关闭窗口只是缩到托盘，托盘菜单或左键单击恢复，退出走托盘菜单
 - **桌面体验**：单实例互斥（二次启动唤起已有窗口）、窗口尺寸/位置记忆、开机自启（设置页开关）
 - **SQLite 缓存**：`~/.tokenscope/cache.db` 按文件指纹增量失效，缓存故障自动退回全量扫描（缓存是纯优化，日志才是事实源）
 - **价格表四层合并**：本地外置 `pricing.toml`（最高优先）> models.dev 同步（默认主源，7900+ 模型）> OpenRouter 同步（备份，460+ 模型）> 内置表兜底；GUI 设置页一键同步双源并可视化管理
-- **同源 CLI**：`tokenscope` 命令与 GUI 走同一条 Rust 数据管线，脚本化与核对两用
 - **时区可配**：存储一律 UTC，展示按解析链（显式指定 > 本机 > 默认 Asia/Shanghai）一次转换
 
 ## 当前支持
@@ -35,23 +34,6 @@ pnpm --dir frontend install        # 首次安装前端依赖
                                     # target/release/bundle/nsis/TokenScope_*_x64-setup.exe
 ```
 
-### CLI
-
-```powershell
-tokenscope summary                      # 合并全部已装 agent，按日汇总（Asia/Shanghai 落日界）
-tokenscope summary --agent codex        # 只统计指定 agent（claude|codex）
-tokenscope summary --by agent           # 按 agent 分组（--by day|model|project|agent）
-tokenscope summary --days 7             # 最近 7 个自然日
-tokenscope summary --json               # 机器可读输出（逐源统计，含坏行/去重计数）
-tokenscope summary --claude-dir <path> --codex-dir <path>   # 覆盖扫描目录
-tokenscope summary --refresh            # 强制全量重解析并重建缓存
-tokenscope pricing sync                 # 同步在线价格（models.dev 主源 + OpenRouter 备份）
-tokenscope summary --tz UTC             # 指定聚合时区（local=本机；缺省 Asia/Shanghai）
-tokenscope summary --from 2026-10-01 --to 2026-10-04    # 自定义时间区间（闭区间）
-tokenscope events --agent codex --days 7 --limit 200    # 逐请求明细（时间倒序）
-tokenscope events --model gpt-5.6-sol --day 2026-10-04  # 按模型/自然日过滤
-```
-
 ## 统计口径
 
 - **去重**：Claude Code 会话日志约 70% 的行是同一消息的流式重写，按 `(sessionId, message.id)` 去重保留最后一条；Codex 会把同一请求的用量原样重发，按 `(session, 用量五元组)` 去重保留首条。去重在全局统一执行，无缓存 / 缓存命中 / `--refresh` 三条路径数字一致。
@@ -62,10 +44,10 @@ tokenscope events --model gpt-5.6-sol --day 2026-10-04  # 按模型/自然日过
 
 ## 开发
 
-Rust workspace（核心库 + CLI + Tauri 壳）加 Vue 3 前端（Vite / Naive UI / ECharts / pnpm）：
+Rust workspace（核心库 + Tauri 壳）加 Vue 3 前端（Vite / Naive UI / ECharts / pnpm）：
 
 ```
-src/          核心库：source 适配器 → dedupe → cache → aggregate → pricing → render；report 管线为 CLI/GUI 共用入口
+src/          核心库：source 适配器 → dedupe → cache → aggregate → pricing；report 管线为 GUI 数据入口
 src-tauri/    Tauri 2 壳：窗口/托盘 + commands（参数转换，零业务逻辑）
 frontend/     Vue 3 应用：Dashboard 与设置页
 tests/        e2e 与合成 fixture（真实日志永不入库）

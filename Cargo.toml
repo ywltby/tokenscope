@@ -6,12 +6,12 @@ description = "本地 AI agent 使用量统计工具（对标 cc-switch Usage St
 license = "MIT"
 
 [workspace]
-members = ["src-tauri"]
+# src-tauri 独立构建（自带 target 目录）：GUI 与 CLI 可执行文件同名
+# tokenscope.exe 而互不覆盖
+exclude = ["src-tauri"]
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-comfy-table = "7"
 dirs = "6"
 jiff = "0.2"
 log = "0.4.34"

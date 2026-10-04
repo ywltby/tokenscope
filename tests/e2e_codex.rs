@@ -78,69 +78,58 @@ fn test_e2e_codex_collection() {
 #[test]
 fn test_e2e_codex_json() {
     let r = codex_report(GroupBy::Day);
-    let v: serde_json::Value = serde_json::from_str(&r.to_json().unwrap()).unwrap();
-
-    assert_eq!(v["sources"][0]["agent"], "codex");
-    assert_eq!(v["by"], "day");
-    let groups = v["groups"].as_array().unwrap();
-    assert_eq!(groups.len(), 2);
+    assert_eq!(r.sources[0].agent, AgentKind::Codex);
+    assert_eq!(r.by, "day");
+    let groups = &r.groups;
+    // groups 含末尾合计行
+    assert_eq!(groups.len(), 3);
 
     // 07-17：仅 15:59Z（本地 23:59）一条；费用 gpt-5.6-sol 800*4+100*20+50*0.4+200*5 = 6220/1M。
     let d1 = &groups[0];
-    assert_eq!(d1["key"], "2026-07-17");
-    assert_eq!(d1["requests"], 1);
-    assert_eq!(d1["tokens"]["input"], 800);
-    assert_eq!(d1["tokens"]["output"], 100);
-    assert_eq!(d1["tokens"]["cache_write"], 50);
-    assert_eq!(d1["tokens"]["cache_read"], 200);
-    assert!((d1["cost_usd"].as_f64().unwrap() - 6220.0 / 1_000_000.0).abs() < 1e-12);
-    assert_eq!(d1["unknown_pricing"], false);
+    assert_eq!(d1.key, "2026-07-17");
+    assert_eq!(d1.requests, 1);
+    assert_eq!(d1.tokens.input, 800);
+    assert_eq!(d1.tokens.output, 100);
+    assert_eq!(d1.tokens.cache_write, 50);
+    assert_eq!(d1.tokens.cache_read, 200);
+    assert!((d1.cost_usd - 6220.0 / 1_000_000.0).abs() < 1e-12);
+    assert!(!d1.unknown_pricing);
 
     // 07-18：16:01Z/16:06Z 落本地次日 + 次日 02:00Z。
     let d2 = &groups[1];
-    assert_eq!(d2["key"], "2026-07-18");
-    assert_eq!(d2["requests"], 3);
-    assert_eq!(d2["tokens"]["input"], 10 + 5 + 80);
-    assert_eq!(d2["tokens"]["output"], 5 + 3 + 50);
+    assert_eq!(d2.key, "2026-07-18");
+    assert_eq!(d2.requests, 3);
+    assert_eq!(d2.tokens.input, 10 + 5 + 80);
+    assert_eq!(d2.tokens.output, 5 + 3 + 50);
     // gpt-5.6-sol 140 + gpt-5.5 115 + gpt-5.4 950（/1M）。
-    assert!((d2["cost_usd"].as_f64().unwrap() - 1205.0 / 1_000_000.0).abs() < 1e-9);
+    assert!((d2.cost_usd - 1205.0 / 1_000_000.0).abs() < 1e-9);
 
-    let t = &v["totals"];
-    assert_eq!(t["requests"], 4);
-    assert!((t["cost_usd"].as_f64().unwrap() - 7425.0 / 1_000_000.0).abs() < 1e-9);
+    let t = &r.totals;
+    assert_eq!(t.requests, 4);
+    assert!((t.cost_usd - 7425.0 / 1_000_000.0).abs() < 1e-9);
 
-    // 模型维度：BTreeMap 序。
-    let vm: serde_json::Value =
-        serde_json::from_str(&codex_report(GroupBy::Model).to_json().unwrap()).unwrap();
-    let keys: Vec<&str> = vm["groups"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|g| g["key"].as_str().unwrap())
-        .collect();
-    assert_eq!(keys, ["gpt-5.4", "gpt-5.5", "gpt-5.6-sol"]);
-    let sol = &vm["groups"][2];
-    assert_eq!(sol["requests"], 2);
-    assert_eq!(sol["tokens"]["input"], 810);
-    assert_eq!(sol["tokens"]["cache_read"], 200);
+    // 模型维度：BTreeMap 序（末行为合计）。
+    let rm = codex_report(GroupBy::Model);
+    let keys: Vec<&str> = rm.groups.iter().map(|g| g.key.as_str()).collect();
+    assert_eq!(keys, ["gpt-5.4", "gpt-5.5", "gpt-5.6-sol", "合计"]);
+    let sol = &rm.groups[2];
+    assert_eq!(sol.requests, 2);
+    assert_eq!(sol.tokens.input, 810);
+    assert_eq!(sol.tokens.cache_read, 200);
 
     // agent 维度
-    let va: serde_json::Value =
-        serde_json::from_str(&codex_report(GroupBy::Agent).to_json().unwrap()).unwrap();
-    assert_eq!(va["groups"][0]["key"], "codex");
-    assert_eq!(va["groups"][0]["requests"], 4);
+    let ra = codex_report(GroupBy::Agent);
+    assert_eq!(ra.groups[0].key, "codex");
+    assert_eq!(ra.groups[0].requests, 4);
 }
 
 #[test]
-fn test_e2e_codex_table() {
-    let out = codex_report(GroupBy::Day).to_table();
-    assert!(out.contains("2026-07-17"), "{out}");
-    assert!(out.contains("2026-07-18"), "{out}");
-    assert!(out.contains("跳过 零分量 1 / 无模型 1"), "{out}");
-    assert!(out.contains("忽略 usage_record 1"), "{out}");
-    // 单 agent 报告不带源前缀（M1 格式）。
-    assert!(!out.contains("codex: 文件"), "{out}");
-    assert!(!out.contains('†'), "全部模型已计价：{out}");
+fn test_e2e_codex_report_shape() {
+    let r = codex_report(GroupBy::Day);
+    assert_eq!(r.by, "day");
+    // 单 agent 报告：sources 仅一行且无 agents 标注（多 agent 才填充）。
+    assert_eq!(r.sources.len(), 1);
+    assert!(r.groups.iter().all(|g| g.agents.is_empty()));
 }
 
 #[test]
@@ -164,13 +153,8 @@ fn test_e2e_multi_agent_merge() {
     // 多 agent 数据填充 agents 字段。
     assert_eq!(d.groups[0].agents, ["claude-code", "codex"]);
 
-    // 多 agent 表格脚注逐源一行。
-    let out = d.to_table();
-    assert!(out.contains("claude-code: 文件 2"), "{out}");
-    assert!(out.contains("codex: 文件 2"), "{out}");
-
-    // 多 agent JSON 带 agents 字段。
-    let v: serde_json::Value = serde_json::from_str(&d.to_json().unwrap()).unwrap();
+    // 多 agent JSON 带 agents 字段与逐源统计（GUI invoke 同构）。
+    let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
     assert_eq!(v["sources"].as_array().unwrap().len(), 2);
     assert_eq!(
         v["groups"][0]["agents"],

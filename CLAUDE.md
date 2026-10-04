@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目目标
 
-**TokenScope** —— 本地 AI agent 使用量统计工具。Rust 编写：扫描各 AI 编程工具落在本地的会话日志，解析为统一的用量事件，统计 token 用量、请求数、缓存命中与估算花费，支持按 agent / 模型 / 项目 / 时间段聚合查看。对标 [cc-switch](https://github.com/farion1231/cc-switch) 的 Usage Statistics 功能，但做成独立工具，且覆盖更多 agent（cc-switch 目前支持 Claude Code、Codex、Gemini CLI、Grok Build、OpenCode、Pi、MiniMax Code 的用量统计）。
+**TokenScope** —— 本地 AI agent 使用量统计工具。Rust + Tauri 2 桌面应用（Vue 3 前端）：扫描各 AI 编程工具落在本地的会话日志，解析为统一的用量事件，统计 token 用量、请求数、缓存命中与估算花费，支持按应用 / agent / 模型 / 项目 / 时间段聚合查看。对标 [cc-switch](https://github.com/farion1231/cc-switch) 的 Usage Statistics 功能，但做成独立工具，且覆盖更多 agent（cc-switch 目前支持 Claude Code、Codex、Gemini CLI、Grok Build、OpenCode、Pi、MiniMax Code 的用量统计）。
 
-**当前状态：M1–M4 已落地**——Tauri 2 + Vue 3 桌面 GUI（主形态）+ 同源 CLI，Claude Code 与 Codex 统计闭环、SQLite 缓存与外置价格表可用；各里程碑交付与验收见 `docs/plans/`（里程碑总览与滚动状态以 `docs/plans/README.md` 为准，本文件不追写）。本机已装 cc-switch（`~/.cc-switch`，含 `cc-switch.db` 与 `model-pricing.json`），其 `usage_daily_rollups` 可作统计口径对照源。**本机 Claude Code 经 cc-switch 路由到非 Anthropic 模型（模型串任意，如 `grok-4.5-build`），解析与计价不得假设模型名形态。**
+**当前状态：M1–M11 已落地**——Tauri 2 + Vue 3 桌面 GUI（唯一形态），双 agent 统计、四层价格合并（models.dev 主源 + OpenRouter 备份 + 外置 + 内置）、SQLite 缓存、时间区间筛选、逐请求明细、单实例/窗口记忆/自启可用；各里程碑交付与验收见 `docs/plans/`（里程碑总览与滚动状态以 `docs/plans/README.md` 为准，本文件不追写）。本机已装 cc-switch（`~/.cc-switch`，含 `cc-switch.db` 与 `model-pricing.json`），其 `usage_daily_rollups` 可作统计口径对照源。**本机 Claude Code 经 cc-switch 路由到非 Anthropic 模型（模型串任意，如 `grok-4.5-build`），解析与计价不得假设模型名形态。**
 
 ## 设计方向（M1–M4 已按此落地；后续里程碑沿用）
 
@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **分层**：`source`（发现+解析）→ `model`（归一化事件）→ `aggregate`（聚合）→ `render`（输出）。层间只经 model 类型交互；新增 agent = 新适配器 + 合成 fixture 测试，聚合与渲染层零改动。
 - **时间口径（M6）**：存储层（SQLite）一律 UTC RFC3339 原样持有，全链路只做一次时区转换；聚合/展示时区按解析链取值——显式传入（`--tz`/GUI 下拉，`local`=本机）> 默认 Asia/Shanghai，跨日界与去重规则属于必须先写成不变量的部分。
 - **费用估算**：按可配置价格表计算；默认内置常见模型定价，允许用户覆盖（cc-switch 的 `model-pricing.json` 可作参照格式）。无价格的模型明确显示"未知"，不得按 0 静默吞掉。
-- **输出（用户已拍板）**：**Tauri 2 + Vue 3 桌面 GUI 是主产品形态**（Naive UI、明暗双模式、托盘常驻、关窗缩托盘）；CLI（终端表格 + JSON）保留为辅助薄壳，用于脚本化与回归对照。两端共用 `report.rs` 管线，数字必须同源。
+- **输出（用户已拍板）**：**Tauri 2 + Vue 3 桌面 GUI 是唯一产品形态**（Naive UI、明暗双模式、托盘常驻、关窗缩托盘）。CLI 已于 2026-10-04 移除（用户决策）：`report.rs` 管线保留，数据经 serde 直达前端。
 - **GUI 主线程纪律**：Tauri v2 的同步 command 在主线程执行；扫描/解析/缓存/网络等重活一律 `async` + `spawn_blocking` 丢后台线程池，主线程零阻塞（启动卡顿的根因与修法）。
 - **候选 agent（用户 2026-10-04 排期决策）**：当前**专注 Claude Code 与 Codex**（本机有真实日志可实测）；Gemini CLI、OpenCode 等其他工具暂缓排期——待安装使用或拿到样例日志、经用户明确排期后再立项（详见 `docs/plans/README.md`）。
 
@@ -38,10 +38,9 @@ cargo fmt                          # 格式化（提交前必须跑过，--check
 cargo clippy --all-targets         # 静态检查（提交前必须干净）
 cargo test                         # 全部测试
 cargo test usage_event             # 按名过滤单个测试
-cargo run -- summary --by model    # CLI 本地试跑
 ```
 
-GUI（前端在 `frontend/`，Tauri 壳在 `src-tauri/`；CLI 装于 frontend devDependencies）：
+GUI（前端在 `frontend/`，Tauri 壳在 `src-tauri/`；Tauri CLI 装于 frontend devDependencies）：
 
 ```powershell
 pnpm --dir frontend install        # 前端依赖（首次）

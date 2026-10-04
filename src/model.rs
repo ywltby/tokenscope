@@ -7,7 +7,9 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize)]
 pub enum AgentKind {
     #[default]
+    #[serde(rename = "claude-code")]
     ClaudeCode,
+    #[serde(rename = "codex")]
     Codex,
 }
 

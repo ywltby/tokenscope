@@ -1,5 +1,7 @@
+[workspace]
+
 [package]
-name = "tokenscope-tauri"
+name = "tokenscope-app"
 version = "0.1.0"
 edition = "2024"
 description = "TokenScope 桌面应用壳（Tauri 2 + Vue 3）"
@@ -8,6 +10,11 @@ license = "MIT"
 [lib]
 name = "tokenscope_tauri_lib"
 crate-type = ["rlib"]
+
+# GUI 进程名 tokenscope.exe（与 CLI 同名，分属不同 target 目录互不覆盖）
+[[bin]]
+name = "tokenscope"
+path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -23,3 +30,6 @@ tauri-plugin-single-instance = "2.5.2"
 tauri-plugin-autostart = "2.7.0"
 log = "0.4.34"
 jiff = "0.2.37"
+
+# 独立于根 workspace（根已 exclude 本目录）：GUI 进程名为 tokenscope.exe，
+# 与根 target 下的 CLI tokenscope.exe 分属不同目录，互不覆盖。

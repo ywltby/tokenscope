@@ -15,7 +15,6 @@ use crate::cache::{Cache, CacheStats, mtime_ms};
 use crate::dedupe::dedupe_events;
 use crate::model::{AgentKind, TokenCounts, UsageEvent};
 use crate::pricing::Pricing;
-use crate::render;
 use crate::source::claude::ClaudeSource;
 use crate::source::codex::CodexSource;
 use crate::source::{CollectStats, Source};
@@ -62,18 +61,6 @@ pub struct SummaryReport {
     pub sources: Vec<SourceReport>,
     pub warnings: Vec<String>,
     pub generated_at: String,
-}
-
-impl SummaryReport {
-    /// 终端表格（CLI）。
-    pub fn to_table(&self) -> String {
-        render::table(self)
-    }
-
-    /// 机器可读 JSON（CLI --json 与 Tauri summarize 共用）。
-    pub fn to_json(&self) -> Result<String> {
-        render::json::to_json(self)
-    }
 }
 
 /// TokenScope 自有数据目录（M4）：`~/.tokenscope`。
@@ -555,8 +542,8 @@ mod tests {
         assert_eq!(r.groups.len(), 3); // 07-17、07-18、合计
         assert_eq!(r.groups[0].agents, ["claude-code", "codex"]);
         assert!(r.generated_at.contains('+'), "generated_at 带时区偏移");
-        let j = r.to_json().unwrap();
-        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(v["sources"].as_array().unwrap().len(), 2);
     }
 
