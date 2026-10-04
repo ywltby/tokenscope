@@ -4235,6 +4235,7 @@ name = "tokenscope-tauri"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "jiff",
  "log",
  "serde",
  "serde_json",

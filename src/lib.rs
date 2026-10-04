@@ -9,4 +9,5 @@ pub mod openrouter;
 pub mod pricing;
 pub mod render;
 pub mod report;
+pub mod settings;
 pub mod source;

@@ -4,16 +4,19 @@
 //! 剥 `vendor/` 前缀、`.` → `-`），让 `claude-sonnet-4.5`（OpenRouter）与
 //! `claude-sonnet-4-5-20250929`（日志）汇合到同一前缀。
 //!
-//! M5 三层来源，**层级优先，层内最长前缀**（外置 > openrouter > 内置）：
+//! M9 四层来源，**层级优先，层内最长前缀**（外置 > models.dev > openrouter > 内置）：
 //! - 内置：静态快照（取自 cc-switch `model_pricing` 2026-10-03），兜底；
-//! - openrouter：同步快照（主源，含显示名）；
+//! - openrouter：同步快照（备份，含显示名）；
+//! - models.dev：同步快照（M9 主源，含显示名）；
 //! - 外置：`~/.tokenscope/pricing.toml`（用户补充/覆盖，最高优先）。
 //!
 //! 未收录模型返回 None，由聚合层按 unknown 单独呈现——不得按 0 静默吞掉（M1 不变量 5）。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use anyhow::Context;
+
+use serde::{Deserialize, Serialize};
 
 use crate::model::TokenCounts;
 use crate::openrouter;
@@ -173,6 +176,73 @@ fn split_variant(normalized: &str) -> (&str, Option<&str>) {
 /// 查找时只枚举查询串自身的 ~30 个前缀做哈希命中，复杂度与表大小无关。
 type PrefixIndex = std::collections::HashMap<Vec<u8>, Vec<Entry>>;
 
+/// 价格索引快照（M11）：四层合并结果的持久化形态。
+/// 加载它即可跳过双快照解析与合并（扁平结构，毫秒级）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PricingIndex {
+    /// 三源签名（路径+大小+mtime），用于判断是否需要重建。
+    pub sig: String,
+    pub synced_at: String,
+    pub entries: Vec<IndexEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexEntry {
+    /// 归一化前缀。
+    pub prefix: String,
+    pub display: String,
+    pub name: Option<String>,
+    pub tier: u8,
+    pub input: f64,
+    pub output: f64,
+    pub cache_write: f64,
+    pub cache_read: f64,
+}
+
+pub fn save_index(path: &Path, index: &PricingIndex) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
+    }
+    let json = serde_json::to_string_pretty(index)?;
+    std::fs::write(path, json).with_context(|| format!("写价格索引失败: {}", path.display()))?;
+    Ok(())
+}
+
+pub fn load_index(path: &Path) -> anyhow::Result<Option<PricingIndex>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("读价格索引失败: {}", path.display()))?;
+    serde_json::from_str(&text)
+        .map(Some)
+        .with_context(|| format!("价格索引解析失败: {}", path.display()))
+}
+
+/// 进程内缓存：签名一致则直接复用，避免每次调用重读快照。
+static PRICE_CACHE: std::sync::Mutex<Option<(String, std::sync::Arc<Pricing>)>> =
+    std::sync::Mutex::new(None);
+
+fn source_sig(paths: &[Option<PathBuf>]) -> String {
+    let mut parts = Vec::new();
+    for p in paths {
+        match p {
+            Some(path) => {
+                let meta = std::fs::metadata(path).ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let mtime = meta
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                parts.push(format!("{}:{}:{}", path.display(), size, mtime));
+            }
+            None => parts.push("-".to_string()),
+        }
+    }
+    parts.join("|")
+}
+
 #[derive(Debug, Clone)]
 pub struct Pricing {
     by_prefix: PrefixIndex,
@@ -214,6 +284,47 @@ impl Pricing {
 
     fn all_entries(&self) -> impl Iterator<Item = &Entry> {
         self.by_prefix.values().flatten()
+    }
+
+    /// 导出索引快照（同步后/重建后写入，供下次启动快速加载）。
+    pub fn to_index(&self, sig: String, synced_at: String) -> PricingIndex {
+        PricingIndex {
+            sig,
+            synced_at,
+            entries: self
+                .all_entries()
+                .map(|e| IndexEntry {
+                    prefix: e.prefix.clone(),
+                    display: e.display.clone(),
+                    name: e.name.clone(),
+                    tier: e.tier,
+                    input: e.input,
+                    output: e.output,
+                    cache_write: e.cache_write,
+                    cache_read: e.cache_read,
+                })
+                .collect(),
+        }
+    }
+
+    /// 从索引恢复（扁平结构，跳过双快照解析与合并）。
+    pub fn from_index(index: &PricingIndex) -> Self {
+        let mut pricing = Self {
+            by_prefix: PrefixIndex::new(),
+        };
+        for e in &index.entries {
+            pricing.add_entry(Entry {
+                prefix: e.prefix.clone(),
+                display: e.display.clone(),
+                name: e.name.clone(),
+                input: e.input,
+                output: e.output,
+                cache_write: e.cache_write,
+                cache_read: e.cache_read,
+                tier: e.tier,
+            });
+        }
+        pricing
     }
 
     /// 四层合并：内置兜底，openrouter/models.dev 快照叠加，外置最终覆盖。
@@ -403,6 +514,37 @@ impl Pricing {
 
     fn count_tier(&self, tier: u8) -> usize {
         self.all_entries().filter(|e| e.tier == tier).count()
+    }
+
+    /// 带进程内缓存的加载（M11）：三源签名一致直接复用，否则重建并写索引文件。
+    /// 返回 (Pricing, 警告, 是否命中缓存)。
+    pub fn load_cached(
+        external: Option<&Path>,
+        modelsdev_snapshot: Option<&Path>,
+        openrouter_snapshot: Option<&Path>,
+        index_path: &Path,
+    ) -> (std::sync::Arc<Pricing>, Vec<String>, bool) {
+        let paths = [
+            external.map(Path::to_path_buf),
+            modelsdev_snapshot.map(Path::to_path_buf),
+            openrouter_snapshot.map(Path::to_path_buf),
+        ];
+        let sig = source_sig(&paths);
+        let mut guard = PRICE_CACHE.lock().unwrap();
+        if let Some((cached_sig, cached)) = guard.as_ref()
+            && cached_sig == &sig
+        {
+            return (cached.clone(), Vec::new(), true);
+        }
+        let (pricing, mut warnings) = Self::load(external, modelsdev_snapshot, openrouter_snapshot);
+        // 重建后写索引快照，供下次进程启动快速加载。
+        let index = pricing.to_index(sig.clone(), jiff::Zoned::now().to_string());
+        if let Err(e) = save_index(index_path, &index) {
+            warnings.push(format!("价格索引写入失败（不影响统计）: {e:#}"));
+        }
+        let arc = std::sync::Arc::new(pricing);
+        *guard = Some((sig, arc.clone()));
+        (arc, warnings, false)
     }
 }
 

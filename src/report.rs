@@ -102,6 +102,12 @@ pub fn view_cache_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("view-cache.json"))
 }
 
+pub fn pricing_index_path(_pricing_file: Option<&PathBuf>) -> PathBuf {
+    data_dir()
+        .map(|d| d.join("pricing-index.json"))
+        .unwrap_or_else(|_| PathBuf::from("pricing-index.json"))
+}
+
 pub fn modelsdev_file_path(snapshot_file: Option<&PathBuf>) -> PathBuf {
     snapshot_file
         .cloned()
@@ -195,7 +201,7 @@ pub fn rebuild_cache(cache_dir: Option<PathBuf>) -> Result<CacheInfo> {
 struct Collected {
     events: Vec<UsageEvent>,
     sources: Vec<SourceReport>,
-    pricing: Pricing,
+    pricing: std::sync::Arc<crate::pricing::Pricing>,
     warnings: Vec<String>,
 }
 
@@ -204,10 +210,13 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
     let pricing_path = pricing_file_path(opts.pricing_path.as_ref());
     let openrouter_path = openrouter_file_path(opts.openrouter_path.as_ref());
     let modelsdev_path = modelsdev_file_path(opts.modelsdev_path.as_ref());
-    let (pricing, mut warnings) = Pricing::load(
+    let index_path = pricing_index_path(opts.pricing_path.as_ref());
+    // M11：签名一致时复用进程内缓存/索引文件，仅签名变化才重解析双快照。
+    let (pricing, mut warnings, _cache_hit) = Pricing::load_cached(
         Some(&pricing_path),
         Some(&modelsdev_path),
         Some(&openrouter_path),
+        &index_path,
     );
     let (cache, mut cache_warnings) = open_cache(opts);
     warnings.append(&mut cache_warnings);

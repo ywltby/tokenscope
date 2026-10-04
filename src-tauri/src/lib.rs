@@ -42,11 +42,14 @@ pub fn run() {
             commands::sync_pricing_openrouter,
             commands::autostart_status,
             commands::autostart_set,
+            commands::settings_get,
+            commands::settings_set_price_auto_sync,
         ])
         .setup(|app| {
             restore_window_state(app.handle())?;
             setup_tray(app.handle())?;
             start_window_state_saver(app.handle());
+            start_price_auto_sync();
             Ok(())
         })
         // 关闭主窗口 = 缩到托盘（用户要求），真正退出走托盘菜单；
@@ -179,7 +182,65 @@ fn start_window_state_saver(app: &tauri::AppHandle) {
     });
 }
 
-// ── 托盘 ─────────────────────────────────────────────────
+// ── 价格定时同步（M11）──────────────────────────────────
+// 默认开启、每 24h 检查一次：距上次成功同步 ≥24h 则后台同步双源并重建
+// 索引。轮询而非精确定时（系统休眠会漂移）；关闭开关后完全不联网。
+const PRICE_SYNC_INTERVAL_HOURS: i64 = 24;
+
+fn start_price_auto_sync() {
+    std::thread::spawn(move || {
+        // 首查延迟 2 分钟，避开启动瞬间的磁盘与网络竞争。
+        std::thread::sleep(std::time::Duration::from_secs(120));
+        loop {
+            let settings_path = tokenscope::settings::settings_path()
+                .unwrap_or_else(|_| std::path::PathBuf::from("settings.json"));
+            let auto = tokenscope::settings::load(&settings_path)
+                .map(|s| s.price_auto_sync)
+                .unwrap_or(true);
+            let modelsdev_snapshot = tokenscope::report::modelsdev_file_path(None);
+            let due = last_sync_age_hours(&modelsdev_snapshot)
+                .map(|hours| hours >= PRICE_SYNC_INTERVAL_HOURS)
+                .unwrap_or(true);
+            if auto && due {
+                log::info!("价格自动同步开始（距上次同步 ≥ {PRICE_SYNC_INTERVAL_HOURS}h）");
+                match tokenscope::modelsdev::sync(&tokenscope::report::modelsdev_file_path(None)) {
+                    Ok(r) => log::info!("models.dev 自动同步成功: {} 条 → {}", r.count, r.path),
+                    Err(e) => tokenscope::logging::log_error("models.dev 自动同步失败", &e),
+                }
+                match tokenscope::openrouter::sync(&tokenscope::report::openrouter_file_path(None))
+                {
+                    Ok(r) => log::info!("OpenRouter 自动同步成功: {} 条 → {}", r.count, r.path),
+                    Err(e) => tokenscope::logging::log_error("OpenRouter 自动同步失败", &e),
+                }
+                // 同步后重建索引，供下次启动快速加载
+                let _ = tokenscope::pricing::Pricing::load_cached(
+                    Some(&tokenscope::report::pricing_file_path(None)),
+                    Some(&tokenscope::report::modelsdev_file_path(None)),
+                    Some(&tokenscope::report::openrouter_file_path(None)),
+                    &tokenscope::report::pricing_index_path(None),
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    });
+}
+
+/// 距快照记录的上次同步的小时数（无快照/解析失败 → Err，视为立即同步）。
+fn last_sync_age_hours(modelsdev_snapshot: &std::path::Path) -> Result<i64, String> {
+    use jiff::Timestamp;
+    let snapshot = tokenscope::modelsdev::load_snapshot(modelsdev_snapshot)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "从未同步".to_string())?;
+    let last = snapshot
+        .synced_at
+        .parse::<Timestamp>()
+        .map_err(|e| format!("synced_at 解析失败: {e}"))?;
+    let now = Timestamp::now();
+    let secs = now.as_second() - last.as_second();
+    Ok(secs / 3600)
+}
+
+// ── 托盘 ─────────────────────────────────────────────────// ── 托盘 ─────────────────────────────────────────────────
 
 /// 启动即创建托盘图标；左键单击恢复主窗口。
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {

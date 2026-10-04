@@ -39,6 +39,8 @@ const rebuilding = ref(false);
 const { tz } = useTimezone();
 const autostart = ref<boolean | null>(null);
 const autostartBusy = ref(false);
+const autoSync = ref<boolean | null>(null);
+const autoSyncBusy = ref(false);
 
 async function loadAll(): Promise<void> {
   loading.value = true;
@@ -102,9 +104,27 @@ async function setAutostart(enabled: boolean): Promise<void> {
   }
 }
 
+async function loadAutoSync(): Promise<void> {
+  const settings = await invoke<{ price_auto_sync: boolean }>("settings_get");
+  autoSync.value = settings.price_auto_sync;
+}
+
+async function setAutoSync(enabled: boolean): Promise<void> {
+  autoSyncBusy.value = true;
+  try {
+    autoSync.value = await invoke<boolean>("settings_set_price_auto_sync", { enabled });
+    msg.success(enabled ? "已开启自动同步（每 24h）" : "已关闭自动同步");
+  } catch (e) {
+    msg.error(String(e));
+  } finally {
+    autoSyncBusy.value = false;
+  }
+}
+
 onMounted(() => {
   void loadAll();
   void loadAutostart();
+  void loadAutoSync();
 });
 watch(
   () => props.refreshKey,
@@ -275,6 +295,23 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
             >
               {{ w }}
             </NAlert>
+            <div
+              style="
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                margin-bottom: 8px;
+              "
+            >
+              <span style="font-size: 13px; opacity: 0.8">自动同步价格（每 24h）</span>
+              <NSwitch
+                :value="autoSync === true"
+                :disabled="autoSync == null || autoSyncBusy"
+                :loading="autoSyncBusy"
+                @update:value="setAutoSync"
+              />
+            </div>
             <div style="font-size: 12px; opacity: 0.6; margin-bottom: 8px">
               {{ pricing?.path }}（TOML；本地价格最高优先，保存后下次统计生效）
             </div>

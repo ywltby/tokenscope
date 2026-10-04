@@ -15,6 +15,7 @@ use tokenscope::report::{
     openrouter_file_path, pricing_file_path, rebuild_cache as rebuild_cache_impl,
     source_status as source_status_impl, summary, view_cache_path,
 };
+use tokenscope::settings::Settings;
 
 pub fn parse_by(by: &str) -> Result<GroupBy, String> {
     match by {
@@ -107,6 +108,41 @@ pub async fn cache_stats() -> Result<CacheInfo, String> {
 #[tauri::command]
 pub async fn refresh_cache() -> Result<CacheInfo, String> {
     run_blocking(move || rebuild_cache_impl(None)).await
+}
+
+/// 应用设置（M11）。
+#[tauri::command]
+pub async fn settings_get() -> Result<Settings, String> {
+    run_blocking(move || {
+        let path = tokenscope::settings::settings_path()?;
+        tokenscope::settings::load(&path)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn settings_set_price_auto_sync(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<bool, String> {
+    run_blocking(move || {
+        let path = tokenscope::settings::settings_path()?;
+        let mut s = tokenscope::settings::load(&path)?;
+        s.price_auto_sync = enabled;
+        tokenscope::settings::save(&path, &s)?;
+        if !enabled {
+            // 关闭自动同步时清空快照记录的同步时间，避免下次开启立即误判为"刚同步过"。
+            // 快照自身保留，仅删除 synced_at 依据——直接保留快照文件，由时间判断兜底。
+        }
+        if enabled {
+            log::info!("价格自动同步已开启");
+        } else {
+            log::info!("价格自动同步已关闭");
+        }
+        let _ = app;
+        Ok(s.price_auto_sync)
+    })
+    .await
 }
 
 /// 上次视图快照（M10 后启动提速）：原样存取前端渲染结果，零类型耦合。
