@@ -66,6 +66,7 @@ $env:TOKENSCOPE_REAL_PERF = "1"; cargo test --release --test perf_real_data -- -
 ```
 
   本机基准（release）：冷启动全量解析 1.2 GB 约 5.5 s，热启动（缓存命中）约 0.1–0.2 s。collect_all 各阶段耗时已落 `~/.tokenscope/logs/`（价格加载 / 逐 agent 采集 / 去重 / 聚合），启动慢先看日志。
+- **日志规约（2026-10-05 完善，改代码时维持这个分工）**：落盘 `~/.tokenscope/logs/`（每日滚动），默认 info，`RUST_LOG=debug` 提级。**info** = 生命周期里程碑（GUI 初始化完成）、影响行为的决策（缓存降级、同步开始/结果、自启与开关切换）、关键路径端到端耗时（汇总/明细/价格表加载/缓存重建，含参数摘要）；**warn** = 降级与可恢复异常（缓存打开/读取/写入失败按次聚合、设置读取失败、视图快照损坏、同步部分失败）；**error** = 命令失败（`run_blocking` 统一落错误链 + 堆栈）与自动同步失败。**debug** = 高频低价值（自动同步每小时轮询决策、逐命令耗时、视图快照存取、价格索引重建）。**禁止**逐文件/逐行/逐窗口事件刷屏日志；新功能先想清楚"排障时需要看到什么"，再决定级别。
 
 - 终端是 **Windows PowerShell**：多条命令分开执行或用 `;`，**不要用 `&&`**。
 - cargo 不在 PATH（终端会话早于 rustup 安装启动，报 `cargo ... program not found`；注册表用户 PATH 已含 `%USERPROFILE%\.cargo\bin`）：**重开终端即恢复**；当前窗口可临时修 `$env:Path = "$env:USERPROFILE\.cargo\bin;" + $env:Path`；Bash 工具里用绝对路径 `/c/Users/admin/.cargo/bin/cargo.exe` 调用。

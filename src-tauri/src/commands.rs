@@ -59,7 +59,7 @@ pub async fn summarize(
         to,
         ..Default::default()
     };
-    run_blocking(move || summary(&opts)).await
+    run_blocking("summarize", move || summary(&opts)).await
 }
 
 /// 逐请求明细（M7）：与 summary 共用采集与去重路径。
@@ -92,28 +92,39 @@ pub async fn list_events(
         day,
         limit,
     };
-    run_blocking(move || list_events_impl(&opts, &filter)).await
+    run_blocking("list_events", move || list_events_impl(&opts, &filter)).await
 }
 
 #[tauri::command]
 pub async fn source_status() -> Result<Vec<SourceStatus>, String> {
-    run_blocking(move || source_status_impl(None, None)).await
+    run_blocking("source_status", move || source_status_impl(None, None)).await
 }
 
 #[tauri::command]
 pub async fn cache_stats() -> Result<CacheInfo, String> {
-    run_blocking(move || cache_stats_impl(None)).await
+    run_blocking("cache_stats", move || cache_stats_impl(None)).await
 }
 
 #[tauri::command]
 pub async fn refresh_cache() -> Result<CacheInfo, String> {
-    run_blocking(move || rebuild_cache_impl(None)).await
+    run_blocking("refresh_cache", move || {
+        let t = std::time::Instant::now();
+        let info = rebuild_cache_impl(None)?;
+        log::info!(
+            "缓存重建完成：{} 文件 / {} 事件，{} ms",
+            info.files,
+            info.events,
+            t.elapsed().as_millis()
+        );
+        Ok(info)
+    })
+    .await
 }
 
 /// 应用设置（M11）。
 #[tauri::command]
 pub async fn settings_get() -> Result<Settings, String> {
-    run_blocking(move || {
+    run_blocking("settings_get", move || {
         let path = tokenscope::settings::settings_path()?;
         tokenscope::settings::load(&path)
     })
@@ -125,7 +136,7 @@ pub async fn settings_set_price_auto_sync(
     app: tauri::AppHandle,
     enabled: bool,
 ) -> Result<bool, String> {
-    run_blocking(move || {
+    run_blocking("settings_set_price_auto_sync", move || {
         let path = tokenscope::settings::settings_path()?;
         let mut s = tokenscope::settings::load(&path)?;
         s.price_auto_sync = enabled;
@@ -149,30 +160,46 @@ pub async fn settings_set_price_auto_sync(
 /// 坏文件 → None 静默忽略。
 #[tauri::command]
 pub async fn view_cache_load() -> Result<Option<serde_json::Value>, String> {
-    run_blocking(move || {
+    run_blocking("view_cache_load", move || {
         let path = view_cache_path()?;
         if !path.exists() {
+            log::debug!("视图快照不存在（首次启动）");
             return Ok(None);
         }
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("读视图缓存失败: {}", path.display()))?;
-        serde_json::from_str(&text)
-            .map(Some)
-            .with_context(|| format!("视图缓存解析失败: {}", path.display()))
+        // 坏文件按契约降级为 None（前端静默走正常加载），但必须留日志。
+        match serde_json::from_str(&text) {
+            Ok(v) => {
+                log::info!("视图快照加载：{}（{} 字节）", path.display(), text.len());
+                Ok(Some(v))
+            }
+            Err(e) => {
+                log::warn!(
+                    "视图快照解析失败，忽略并走正常加载: {} ({e})",
+                    path.display()
+                );
+                Ok(None)
+            }
+        }
     })
     .await
 }
 
 #[tauri::command]
 pub async fn view_cache_save(value: serde_json::Value) -> Result<(), String> {
-    run_blocking(move || {
+    run_blocking("view_cache_save", move || {
+        let t = std::time::Instant::now();
         let path = view_cache_path()?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("创建目录失败: {}", dir.display()))?;
         }
         let json = serde_json::to_string_pretty(&value)?;
-        std::fs::write(&path, json).with_context(|| format!("写视图缓存失败: {}", path.display()))
+        let json_len = json.len();
+        std::fs::write(&path, json).with_context(|| format!("写视图缓存失败: {}", path.display()))?;
+        log::debug!("视图快照保存：{} 字节，{} ms", json_len, t.elapsed().as_millis());
+        Ok(())
     })
     .await
 }
@@ -180,7 +207,7 @@ pub async fn view_cache_save(value: serde_json::Value) -> Result<(), String> {
 /// 开机自启状态（M8；写系统自启动项属用户显式操作，默认关闭）。
 #[tauri::command]
 pub async fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
-    run_blocking(move || {
+    run_blocking("autostart_status", move || {
         app.autolaunch()
             .is_enabled()
             .map_err(|e| anyhow::anyhow!("读取自启状态失败: {e}"))
@@ -190,7 +217,7 @@ pub async fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
 
 #[tauri::command]
 pub async fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
-    run_blocking(move || {
+    run_blocking("autostart_set", move || {
         let launch = app.autolaunch();
         if enabled {
             launch
@@ -201,6 +228,7 @@ pub async fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<bool,
                 .disable()
                 .map_err(|e| anyhow::anyhow!("关闭自启失败: {e}"))?;
         }
+        log::info!("开机自启已{}", if enabled { "开启" } else { "关闭" });
         launch
             .is_enabled()
             .map_err(|e| anyhow::anyhow!("读取自启状态失败: {e}"))
@@ -208,16 +236,35 @@ pub async fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<bool,
     .await
 }
 
-/// 后台线程池执行阻塞任务并统一错误映射。
-async fn run_blocking<T, F>(f: F) -> Result<T, String>
+/// 后台线程池执行阻塞任务并统一错误映射与日志：
+/// 失败必落日志（错误链 + 堆栈，排障不依赖前端弹窗）；成功计 debug 耗时。
+async fn run_blocking<T, F>(name: &'static str, f: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> anyhow::Result<T> + Send + 'static,
 {
-    tauri::async_runtime::spawn_blocking(f)
-        .await
-        .map_err(|e| format!("后台任务失败: {e}"))?
-        .map_err(|e| e.to_string())
+    let t = std::time::Instant::now();
+    let joined = tauri::async_runtime::spawn_blocking(f).await;
+    let outcome = match joined {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("命令 {name} 后台任务崩溃（{} ms）: {e}", t.elapsed().as_millis());
+            return Err(format!("后台任务失败: {e}"));
+        }
+    };
+    match outcome {
+        Ok(v) => {
+            log::debug!("命令 {name} 完成，{} ms", t.elapsed().as_millis());
+            Ok(v)
+        }
+        Err(e) => {
+            tokenscope::logging::log_error(
+                &format!("命令 {name} 失败（{} ms）", t.elapsed().as_millis()),
+                &e,
+            );
+            Err(e.to_string())
+        }
+    }
 }
 
 /// 设置页价格表视图：完整条目 + 各源路径与同步状态 + 解析警告。
@@ -237,7 +284,8 @@ pub struct PricingView {
 
 #[tauri::command]
 pub async fn pricing_entries() -> Result<PricingView, String> {
-    run_blocking(move || {
+    run_blocking("pricing_entries", move || {
+        let t = std::time::Instant::now();
         let path = pricing_file_path(None);
         let snapshot = openrouter_file_path(None);
         let modelsdev = modelsdev_file_path(None);
@@ -250,7 +298,7 @@ pub async fn pricing_entries() -> Result<PricingView, String> {
             .ok()
             .flatten()
             .map(|s| s.synced_at);
-        Ok(PricingView {
+        let view = PricingView {
             path: path.display().to_string(),
             modelsdev_path: modelsdev.display().to_string(),
             modelsdev_synced_at,
@@ -261,7 +309,16 @@ pub async fn pricing_entries() -> Result<PricingView, String> {
             external_count: pricing.external_count(),
             entries: pricing.entries(),
             warnings,
-        })
+        };
+        log::info!(
+            "价格表加载：models.dev {} / OpenRouter {} / 外置 {}，共 {} 条，{} ms（设置页）",
+            view.modelsdev_count,
+            view.openrouter_count,
+            view.external_count,
+            view.entries.len(),
+            t.elapsed().as_millis()
+        );
+        Ok(view)
     })
     .await
 }
@@ -279,6 +336,8 @@ pub struct SyncOutcome {
 #[tauri::command]
 pub async fn sync_pricing_openrouter() -> Result<Vec<SyncOutcome>, String> {
     tauri::async_runtime::spawn_blocking(|| {
+        let t = std::time::Instant::now();
+        log::info!("手动同步价格双源开始");
         let mut reports = Vec::new();
         let mut failures = Vec::new();
         match modelsdev::sync(&modelsdev_file_path(None)) {
@@ -312,8 +371,14 @@ pub async fn sync_pricing_openrouter() -> Result<Vec<SyncOutcome>, String> {
             }
         }
         if failures.is_empty() {
+            log::info!("手动同步价格双源完成，{} ms", t.elapsed().as_millis());
             Ok(reports)
         } else {
+            log::warn!(
+                "手动同步价格双源部分失败，{} ms: {}",
+                t.elapsed().as_millis(),
+                failures.join("；")
+            );
             Err(failures.join("；"))
         }
     })

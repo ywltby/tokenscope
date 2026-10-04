@@ -128,10 +128,13 @@ fn make_source(kind: AgentKind, dir: &Option<PathBuf>) -> Result<Box<dyn Source>
 }
 
 /// 缓存开关解析：返回 Ok(None) 表示放弃缓存（含原因，调用方告警）。
+/// 任何降级路径都同步 warn 落日志——纯优化失效必须可追溯。
 fn open_cache(opts: &SummaryOptions) -> (Option<Cache>, Vec<String>) {
     let mut warnings = Vec::new();
     if opts.cache_dir.is_none() && data_dir().is_err() {
-        warnings.push("无法定位数据目录，已退回全量扫描（不使用缓存）".to_string());
+        let msg = "无法定位数据目录，已退回全量扫描（不使用缓存）";
+        log::warn!("缓存降级: {msg}");
+        warnings.push(msg.to_string());
         return (None, warnings);
     }
     let path = cache_file_path(opts.cache_dir.as_ref());
@@ -140,13 +143,17 @@ fn open_cache(opts: &SummaryOptions) -> (Option<Cache>, Vec<String>) {
             if opts.refresh
                 && let Err(e) = c.clear()
             {
-                warnings.push(format!("缓存重置失败，已退回全量扫描: {e}"));
+                let msg = format!("缓存重置失败，已退回全量扫描: {e}");
+                log::warn!("缓存降级: {msg}");
+                warnings.push(msg);
                 return (None, warnings);
             }
             (Some(c), warnings)
         }
         Err(e) => {
-            warnings.push(format!("缓存打开失败，已退回全量扫描: {e:#}"));
+            let msg = format!("缓存打开失败，已退回全量扫描: {e:#}");
+            log::warn!("缓存降级: {msg}");
+            warnings.push(msg);
             (None, warnings)
         }
     }
@@ -257,6 +264,8 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
         let mut reparsed = 0u32;
         let mut parse_ms_total = 0u128;
         let mut store_ms_total = 0u128;
+        let mut lookup_errs = 0u32;
+        let mut store_errs = 0u32;
         for file in &files {
             let path_str = file.display().to_string();
             keep_paths.push(path_str.clone());
@@ -267,7 +276,10 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
             {
                 match c.lookup_file(&path_str, kind, size, mt) {
                     Ok(hit) => cached = hit.map(|cf| cf.parse),
-                    Err(e) => warnings.push(format!("缓存读取失败（该文件全量解析）: {e:#}")),
+                    Err(e) => {
+                        lookup_errs += 1;
+                        warnings.push(format!("缓存读取失败（该文件全量解析）: {e:#}"));
+                    }
                 }
             }
             let parse = match cached {
@@ -285,6 +297,7 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
                         let mt = mtime_ms(file).unwrap_or(0);
                         let t = std::time::Instant::now();
                         if let Err(e) = c.store_file(&path_str, kind, size, mt, &p) {
+                            store_errs += 1;
                             warnings.push(format!("缓存写入失败（不影响统计）: {e:#}"));
                         }
                         store_ms_total += t.elapsed().as_millis();
@@ -307,6 +320,19 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
             events.len(),
             t_agent.elapsed().as_millis()
         );
+        // 缓存错误只聚合一行 warn（逐文件明细已进 warnings 随报告返回前端）。
+        if lookup_errs > 0 {
+            log::warn!(
+                "采集 {}: {lookup_errs} 个文件缓存读取失败，均已回退全量解析",
+                kind.as_str()
+            );
+        }
+        if store_errs > 0 {
+            log::warn!(
+                "采集 {}: {store_errs} 个文件缓存写入失败（不影响统计）",
+                kind.as_str()
+            );
+        }
         sources.push(SourceReport { agent: kind, stats });
         all_events.extend(events);
     }
@@ -356,6 +382,7 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
 }
 
 pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
+    let t = std::time::Instant::now();
     let Collected {
         mut events,
         sources,
@@ -373,6 +400,16 @@ pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
         agg.groups.len(),
         agg.totals.requests,
         t_agg.elapsed().as_millis()
+    );
+    log::info!(
+        "汇总完成：by={} agent={} 天数={:?} 区间={:?}..{:?} 时区={}，{} ms",
+        agg.by,
+        opts.agent.as_ref().map(|k| k.as_str()).unwrap_or("all"),
+        opts.days,
+        opts.from,
+        opts.to,
+        tz_label,
+        t.elapsed().as_millis()
     );
     Ok(SummaryReport {
         timezone: tz_label,
@@ -423,6 +460,7 @@ pub struct EventList {
 
 /// 逐请求明细（M7）：与 summary 共用 collect_all 采集与去重路径，数字同源。
 pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventList> {
+    let t = std::time::Instant::now();
     let Collected {
         mut events,
         pricing,
@@ -445,7 +483,7 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
     events.sort_by_key(|e| std::cmp::Reverse(e.ts));
     let total = events.len() as u64;
     let limit = filter.limit.unwrap_or(200).min(1000);
-    let rows = events
+    let rows: Vec<EventRow> = events
         .into_iter()
         .take(limit)
         .map(|e| {
@@ -464,6 +502,15 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
             }
         })
         .collect();
+    log::info!(
+        "明细完成：筛选 模型={:?} 项目={:?} 日={:?}，返回 {} 行 / 共 {} 条，{} ms",
+        filter.model,
+        filter.project,
+        filter.day,
+        rows.len(),
+        total,
+        t.elapsed().as_millis()
+    );
     Ok(EventList {
         rows,
         total,

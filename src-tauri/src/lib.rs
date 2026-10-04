@@ -17,6 +17,7 @@ use tauri_plugin_autostart::MacosLauncher;
 pub fn run() {
     // WorkerGuard 与进程同生命周期（run 阻塞至退出）。
     let _log_guard = tokenscope::logging::init("gui");
+    let t_boot = std::time::Instant::now();
     log::info!("TokenScope 启动（GUI）");
     tauri::Builder::default()
         // 单实例必须最先注册：二次启动走回调唤起已有窗口，不新建实例。
@@ -45,11 +46,12 @@ pub fn run() {
             commands::settings_get,
             commands::settings_set_price_auto_sync,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             restore_window_state(app.handle())?;
             setup_tray(app.handle())?;
             start_window_state_saver(app.handle());
             start_price_auto_sync();
+            log::info!("GUI 初始化完成（窗口状态/托盘/自同步线程），{} ms", t_boot.elapsed().as_millis());
             Ok(())
         })
         // 关闭主窗口 = 缩到托盘（用户要求），真正退出走托盘菜单；
@@ -194,15 +196,26 @@ fn start_price_auto_sync() {
         loop {
             let settings_path = tokenscope::settings::settings_path()
                 .unwrap_or_else(|_| std::path::PathBuf::from("settings.json"));
-            let auto = tokenscope::settings::load(&settings_path)
-                .map(|s| s.price_auto_sync)
-                .unwrap_or(true);
+            let auto = match tokenscope::settings::load(&settings_path) {
+                Ok(s) => s.price_auto_sync,
+                Err(e) => {
+                    // 读取失败按默认开启处理，但必须可见（坏配置不该无声吞掉）。
+                    log::warn!("设置读取失败，价格自动同步按默认开启处理: {e:#}");
+                    true
+                }
+            };
             let modelsdev_snapshot = tokenscope::report::modelsdev_file_path(None);
-            let due = last_sync_age_hours(&modelsdev_snapshot)
-                .map(|hours| hours >= PRICE_SYNC_INTERVAL_HOURS)
-                .unwrap_or(true);
+            let (due, age_note) = match last_sync_age_hours(&modelsdev_snapshot) {
+                Ok(hours) => (hours >= PRICE_SYNC_INTERVAL_HOURS, format!("{hours}h")),
+                Err(reason) => (true, format!("未知（{reason}）")),
+            };
+            log::debug!(
+                "价格同步轮询：auto={auto} 距上次同步={age_note}（阈值 {PRICE_SYNC_INTERVAL_HOURS}h）→ {}",
+                if auto && due { "同步" } else { "跳过" }
+            );
             if auto && due {
-                log::info!("价格自动同步开始（距上次同步 ≥ {PRICE_SYNC_INTERVAL_HOURS}h）");
+                let t = std::time::Instant::now();
+                log::info!("价格自动同步开始（距上次同步 {age_note}）");
                 match tokenscope::modelsdev::sync(&tokenscope::report::modelsdev_file_path(None)) {
                     Ok(r) => log::info!("models.dev 自动同步成功: {} 条 → {}", r.count, r.path),
                     Err(e) => tokenscope::logging::log_error("models.dev 自动同步失败", &e),
@@ -212,13 +225,22 @@ fn start_price_auto_sync() {
                     Ok(r) => log::info!("OpenRouter 自动同步成功: {} 条 → {}", r.count, r.path),
                     Err(e) => tokenscope::logging::log_error("OpenRouter 自动同步失败", &e),
                 }
-                // 同步后重建索引，供下次启动快速加载
-                let _ = tokenscope::pricing::Pricing::load_cached(
+                // 同步后重建索引，供下次启动快速加载；失败不影响已落盘的快照。
+                let t_index = std::time::Instant::now();
+                let (_, index_warnings, _) = tokenscope::pricing::Pricing::load_cached(
                     Some(&tokenscope::report::pricing_file_path(None)),
                     Some(&tokenscope::report::modelsdev_file_path(None)),
                     Some(&tokenscope::report::openrouter_file_path(None)),
                     &tokenscope::report::pricing_index_path(None),
                 );
+                for w in &index_warnings {
+                    log::warn!("价格索引重建警告: {w}");
+                }
+                log::debug!(
+                    "价格索引重建完成，{} ms",
+                    t_index.elapsed().as_millis()
+                );
+                log::info!("价格自动同步完成，{} ms", t.elapsed().as_millis());
             }
             std::thread::sleep(std::time::Duration::from_secs(3600));
         }
