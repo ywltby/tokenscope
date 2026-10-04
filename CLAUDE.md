@@ -48,12 +48,18 @@ pnpm --dir frontend install        # 前端依赖（首次）
 pnpm --dir frontend typecheck      # vue-tsc 类型检查（提交前必须干净）
 pnpm --dir frontend format:check   # Prettier 风格检查（提交前必须干净；format 为写入）
 pnpm --dir frontend build          # 前端产物（提交前必须通过）
-pnpm --dir frontend tauri dev      # 开发窗口（会弹出 GUI）
-pnpm --dir frontend tauri build    # 生产构建（NSIS 安装包，首次较慢）
+```
+
+GUI（Tauri CLI 在仓库根调用——CLI 只向下搜索 src-tauri，在 frontend 目录执行会找不到配置）：
+
+```powershell
+.rontend
+ode_modules\.bin	auri dev     # 开发窗口（会弹出 GUI）
+.rontend
+ode_modules\.bin	auri build   # 生产构建（NSIS 安装包，首次较慢）
 ```
 
 - 前端 TypeScript 钉 TypeScript 5.x（vue-tsc 与 TS 7 不兼容，勿升级）；Naive UI 组件库、ECharts 图表（直接用 echarts，未包 vue-echarts）。
-- Tauri CLI 从仓库根调用可执行 `frontend/node_modules/.bin/tauri`（CLI 只向下搜索 src-tauri，`tauri icon` 等命令在 frontend 目录跑找不到配置）。
 - **格式化分工**：Rust 用 `cargo fmt`（`rustfmt.toml` 钉 LF）；前端用 Prettier（`frontend/.prettierrc.json`，双引号/分号/2 空格/printWidth 100）。**提交钩子**（`.githooks/pre-commit`，克隆后执行一次 `git config core.hooksPath .githooks` 启用）会自动跑 fmt --check + clippy + test + 前端 typecheck + format:check。
 
 - 终端是 **Windows PowerShell**：多条命令分开执行或用 `;`，**不要用 `&&`**。

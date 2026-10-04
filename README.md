@@ -30,8 +30,10 @@
 
 ```powershell
 pnpm --dir frontend install        # 首次安装前端依赖
-pnpm --dir frontend tauri dev      # 开发运行
-pnpm --dir frontend tauri build    # 生产构建，产出 NSIS 安装包
+.rontend
+ode_modules\.bin	auri dev    # 开发运行（必须在仓库根执行）
+.rontend
+ode_modules\.bin	auri build  # 生产构建，产出 NSIS 安装包
                                     # target/release/bundle/nsis/TokenScope_*_x64-setup.exe
 ```
 
