@@ -15,6 +15,7 @@ import SummaryCards from "../components/SummaryCards.vue";
 import UsageTable from "../components/UsageTable.vue";
 import TrendChart from "../components/TrendChart.vue";
 import EventTable from "../components/EventTable.vue";
+import AgentIcon from "../components/AgentIcon.vue";
 
 const props = defineProps<{ refreshKey: number }>();
 
@@ -36,10 +37,10 @@ const dimOptions: { label: string; value: Dim }[] = [
   { label: "按 Agent", value: "agent" },
 ];
 
-const agentOptions: { label: string; value: AgentFilter }[] = [
-  { label: "全部", value: "all" },
-  { label: "Claude Code", value: "claude" },
-  { label: "Codex", value: "codex" },
+const agentOptions: { label: string; value: AgentFilter; icon: string }[] = [
+  { label: "全部", value: "all", icon: "all" },
+  { label: "Claude Code", value: "claude", icon: "claude" },
+  { label: "Codex", value: "codex", icon: "openai" },
 ];
 
 const dayOptions: { label: string; value: number }[] = [
@@ -123,15 +124,21 @@ void loadSources();
     </NAlert>
     <!-- 筛选两行：第一行 agent 工具，第二行筛选条件 -->
     <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px">
-      <div>
-        <NRadioGroup v-model:value="agent" size="small">
-          <NRadioButton
-            v-for="o in agentOptions"
-            :key="o.value"
-            :value="o.value"
-            :label="o.label"
-          />
-        </NRadioGroup>
+      <div class="agent-row">
+        <NTooltip v-for="o in agentOptions" :key="o.value">
+          <template #trigger>
+            <NButton
+              quaternary
+              class="agent-btn"
+              :type="agent === o.value ? 'primary' : 'default'"
+              :aria-label="o.label"
+              @click="agent = o.value"
+            >
+              <AgentIcon :name="o.icon" :size="20" />
+            </NButton>
+          </template>
+          {{ o.label }}
+        </NTooltip>
       </div>
       <div style="display: flex; align-items: center; gap: 16px">
         <NRadioGroup v-model:value="by" size="small">
@@ -167,13 +174,55 @@ void loadSources();
                 {{ drillLabel(drill) }}
               </NTag>
             </template>
+
+            <style scoped>
+              .agent-row {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+              }
+              .agent-btn {
+                width: 40px;
+                height: 40px;
+                padding: 0;
+                border-radius: 8px;
+              }
+            </style>
             <EventTable
               :list="events"
               :filter-label="drill ? drillLabel(drill) : '无（显示最新 200 条）'"
             />
           </NCard>
         </template>
+
+        <style scoped>
+          .agent-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+          }
+          .agent-btn {
+            width: 40px;
+            height: 40px;
+            padding: 0;
+            border-radius: 8px;
+          }
+        </style>
       </div>
     </NSpin>
   </div>
 </template>
+
+<style scoped>
+.agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.agent-btn {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 8px;
+}
+</style>
