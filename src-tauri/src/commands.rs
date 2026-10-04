@@ -43,6 +43,8 @@ pub async fn summarize(
     days: Option<u32>,
     agent: Option<String>,
     tz: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
 ) -> Result<SummaryReport, String> {
     let opts = SummaryOptions {
         by: parse_by(&by)?,
@@ -51,12 +53,16 @@ pub async fn summarize(
         claude_dir: None,
         codex_dir: None,
         tz,
+        from,
+        to,
         ..Default::default()
     };
     run_blocking(move || summary(&opts)).await
 }
 
 /// 逐请求明细（M7）：与 summary 共用采集与去重路径。
+// 参数面由 IPC 契约决定（每个筛选项一个 invoke 参数），非设计膨胀。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn list_events(
     agent: Option<String>,
@@ -66,12 +72,16 @@ pub async fn list_events(
     day: Option<String>,
     limit: Option<usize>,
     tz: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
 ) -> Result<EventList, String> {
     let opts = SummaryOptions {
         by: GroupBy::Day,
         agent: parse_agent(agent.as_deref())?,
         days,
         tz,
+        from,
+        to,
         ..Default::default()
     };
     let filter = EventFilter {

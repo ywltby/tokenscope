@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use jiff::tz::TimeZone;
 use serde::Serialize;
 
 use crate::aggregate::{GroupBy, aggregate, filter_days, resolve_tz};
@@ -36,6 +37,10 @@ pub struct SummaryOptions {
     pub modelsdev_path: Option<PathBuf>,
     /// 聚合与展示时区：None = 默认 Asia/Shanghai；"local" = 本机；其余按 IANA 名。
     pub tz: Option<String>,
+    /// 自然日区间下界（YYYY-MM-DD，解析时区，闭区间；与 days 互斥）。
+    pub from: Option<String>,
+    /// 自然日区间上界（YYYY-MM-DD，解析时区，闭区间；与 days 互斥）。
+    pub to: Option<String>,
     /// 强制全量重解析并重建缓存。
     pub refresh: bool,
 }
@@ -297,9 +302,7 @@ pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
     } = collect_all(opts)?;
 
     let (tz, tz_label) = resolve_tz(opts.tz.as_deref())?;
-    if let Some(n) = opts.days {
-        events = filter_days(events, &tz, n);
-    }
+    events = apply_time_filter(events, opts, &tz)?;
     let agg = aggregate(&events, opts.by, &tz, &pricing);
     Ok(SummaryReport {
         timezone: tz_label,
@@ -396,6 +399,41 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
         total,
         warnings,
     })
+}
+
+/// 统一时间过滤（M10）：days（预设近 N 天）与 from/to（闭区间自然日）二选一，
+/// 日期按解析时区解释。
+fn apply_time_filter(
+    mut events: Vec<UsageEvent>,
+    opts: &SummaryOptions,
+    tz: &TimeZone,
+) -> Result<Vec<UsageEvent>> {
+    use jiff::civil::Date;
+    if opts.days.is_some() && (opts.from.is_some() || opts.to.is_some()) {
+        anyhow::bail!("--days 与 --from/--to 互斥，二选一");
+    }
+    if let Some(n) = opts.days {
+        return Ok(filter_days(events, tz, n));
+    }
+    if opts.from.is_none() && opts.to.is_none() {
+        return Ok(events);
+    }
+    let parse = |s: &str| -> Result<Date> {
+        s.parse::<Date>()
+            .map_err(|e| anyhow::anyhow!("日期格式应为 YYYY-MM-DD: {s:?}（{e}）"))
+    };
+    let from = opts.from.as_deref().map(parse).transpose()?;
+    let to = opts.to.as_deref().map(parse).transpose()?;
+    if let (Some(f), Some(t)) = (from, to)
+        && f > t
+    {
+        anyhow::bail!("起始日期晚于结束日期: {f} > {t}");
+    }
+    events.retain(|e| {
+        let d = e.ts.to_zoned(tz.clone()).date();
+        from.is_none_or(|f| d >= f) && to.is_none_or(|t| d <= t)
+    });
+    Ok(events)
 }
 
 fn file_size(path: &std::path::Path) -> Option<u64> {
@@ -638,6 +676,72 @@ cache_read = 0.0
         let expected = (1000.0 * 99.0 + 200.0 * 99.0 + 6220.0) / 1_000_000.0;
         assert!((r.groups[0].cost_usd - expected).abs() < 1e-9);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_apply_time_filter_range() {
+        let tz = jiff::tz::TimeZone::get("Asia/Shanghai").unwrap();
+        let mk = |ts: &str| UsageEvent {
+            ts: ts.parse().unwrap(),
+            agent: AgentKind::ClaudeCode,
+            model: "m".into(),
+            session_id: "s".into(),
+            project: "p".into(),
+            record_id: String::new(),
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
+        };
+        let events = vec![
+            mk("2026-08-01T10:00:00Z"),
+            mk("2026-08-02T12:00:00Z"),
+            mk("2026-08-13T23:00:00Z"),
+        ];
+        let opts = |from: Option<String>, to: Option<String>| SummaryOptions {
+            from,
+            to,
+            tz: Some("Asia/Shanghai".to_string()),
+            ..Default::default()
+        };
+        // 闭区间含端点（上海时区：08-01T10:00Z = 当日 18:00）
+        let r = apply_time_filter(
+            events.clone(),
+            &opts(Some("2026-08-01".into()), Some("2026-08-01".into())),
+            &tz,
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1);
+        // 只给 from / 只给 to
+        assert_eq!(
+            apply_time_filter(events.clone(), &opts(Some("2026-08-02".into()), None), &tz)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            apply_time_filter(events.clone(), &opts(None, Some("2026-08-01".into())), &tz)
+                .unwrap()
+                .len(),
+            1
+        );
+        // from > to 报错；days 互斥报错；非法日期报错
+        assert!(
+            apply_time_filter(
+                events.clone(),
+                &opts(Some("2026-08-13".into()), Some("2026-08-01".into())),
+                &tz
+            )
+            .is_err()
+        );
+        let both = SummaryOptions {
+            days: Some(7),
+            from: Some("2026-08-01".into()),
+            ..opts(None, None)
+        };
+        assert!(apply_time_filter(events.clone(), &both, &tz).is_err());
+        let bad = opts(Some("2026/08/01".into()), None);
+        assert!(apply_time_filter(events.clone(), &bad, &tz).is_err());
     }
 
     #[test]

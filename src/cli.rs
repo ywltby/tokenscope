@@ -48,6 +48,12 @@ pub enum Command {
         /// 聚合/展示时区：local=本机，或 IANA 名；缺省 Asia/Shanghai
         #[arg(long = "tz", value_name = "TZ")]
         tz: Option<String>,
+        /// 起始自然日（YYYY-MM-DD，解析时区，闭区间；与 --days 互斥）
+        #[arg(long = "from", value_name = "YYYY-MM-DD")]
+        from: Option<String>,
+        /// 结束自然日（YYYY-MM-DD，解析时区，闭区间；与 --days 互斥）
+        #[arg(long = "to", value_name = "YYYY-MM-DD")]
+        to: Option<String>,
         #[arg(long = "claude-dir", value_name = "PATH")]
         claude_dir: Option<PathBuf>,
         #[arg(long = "codex-dir", value_name = "PATH")]
@@ -69,6 +75,12 @@ pub enum Command {
         /// 只统计最近 N 个自然日（Asia/Shanghai 落日界，含今天）
         #[arg(long)]
         days: Option<u32>,
+        /// 起始自然日（YYYY-MM-DD，解析时区，闭区间；与 --days 互斥）
+        #[arg(long = "from", value_name = "YYYY-MM-DD")]
+        from: Option<String>,
+        /// 结束自然日（YYYY-MM-DD，解析时区，闭区间；与 --days 互斥）
+        #[arg(long = "to", value_name = "YYYY-MM-DD")]
+        to: Option<String>,
         /// 覆盖 Claude projects 目录（默认 ~/.claude/projects）
         #[arg(long = "claude-dir", value_name = "PATH")]
         claude_dir: Option<PathBuf>,
@@ -136,6 +148,8 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             limit,
             json,
             tz,
+            from,
+            to,
             claude_dir,
             codex_dir,
             refresh,
@@ -148,6 +162,8 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             limit,
             json,
             tz,
+            from,
+            to,
             claude_dir,
             codex_dir,
             refresh,
@@ -165,6 +181,8 @@ pub struct EventsArgs {
     pub limit: usize,
     pub json: bool,
     pub tz: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
     pub claude_dir: Option<PathBuf>,
     pub codex_dir: Option<PathBuf>,
     pub refresh: bool,
@@ -179,6 +197,8 @@ fn run_events(a: EventsArgs) -> anyhow::Result<()> {
         codex_dir: a.codex_dir,
         refresh: a.refresh,
         tz: a.tz,
+        from: a.from,
+        to: a.to,
         ..Default::default()
     };
     let filter = crate::report::EventFilter {
@@ -235,6 +255,8 @@ fn run_summary(cli: Cli) -> anyhow::Result<()> {
         codex_dir,
         refresh,
         tz,
+        from,
+        to,
     } = cli.command
     else {
         unreachable!("run_summary 只接收 summary 子命令");
@@ -251,6 +273,8 @@ fn run_summary(cli: Cli) -> anyhow::Result<()> {
         modelsdev_path: None,
         refresh,
         tz,
+        from,
+        to,
     };
     let report = summary(&opts)?;
     for w in &report.warnings {
@@ -324,6 +348,7 @@ mod tests {
             codex_dir,
             refresh,
             tz,
+            ..
         } = &cli.command
         else {
             unreachable!("应解析出 summary 子命令");

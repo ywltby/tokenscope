@@ -1,7 +1,17 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { NAlert, NCard, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from "naive-ui";
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NDatePicker,
+  NRadioButton,
+  NRadioGroup,
+  NSpin,
+  NTag,
+  NTooltip,
+} from "naive-ui";
 import {
   AGENT_LABEL,
   type AgentFilter,
@@ -22,7 +32,7 @@ const props = defineProps<{ refreshKey: number }>();
 
 const by = ref<Dim>("day");
 const agent = ref<AgentFilter>("all");
-const days = ref<number>(0);
+const range = ref<[number, number] | null>(null);
 const { tz } = useTimezone();
 const report = ref<SummaryReport | null>(null);
 const loading = ref(false);
@@ -44,12 +54,20 @@ const agentOptions: { label: string; value: AgentFilter; icon: string }[] = [
   { label: "Codex", value: "codex", icon: "openai" },
 ];
 
-const dayOptions: { label: string; value: number }[] = [
-  { label: "全部时间", value: 0 },
-  { label: "近 7 天", value: 7 },
-  { label: "近 30 天", value: 30 },
-  { label: "近 90 天", value: 90 },
-];
+// 区间快捷项（参考 cc-switch）；null = 全部时间
+const rangeShortcuts: Record<string, () => [number, number]> = {
+  近7天: () => [Date.now() - 7 * 86400e3, Date.now()],
+  近30天: () => [Date.now() - 30 * 86400e3, Date.now()],
+  近90天: () => [Date.now() - 90 * 86400e3, Date.now()],
+};
+
+/// 区间毫秒 → 解析时区下的 YYYY-MM-DD（避免前端再引时区库：local 用本地
+/// 格式化，固定偏移时区按偏移折算；Asia/Shanghai +8 无夏令时）
+function fmtDate(ms: number): string {
+  if (tz.value === "local") return new Date(ms).toLocaleDateString("sv-SE");
+  const offsetH = tz.value === "UTC" ? 0 : 8;
+  return new Date(ms + offsetH * 3600e3).toISOString().slice(0, 10);
+}
 
 async function refresh(): Promise<void> {
   loading.value = true;
@@ -57,7 +75,9 @@ async function refresh(): Promise<void> {
     report.value = await invoke<SummaryReport>("summarize", {
       by: by.value,
       agent: agent.value,
-      days: days.value === 0 ? null : days.value,
+      days: null,
+      from: range.value ? fmtDate(range.value[0]) : null,
+      to: range.value ? fmtDate(range.value[1]) : null,
       tz: tz.value,
     });
   } finally {
@@ -74,7 +94,8 @@ async function loadEvents(): Promise<void> {
   try {
     events.value = await invoke<EventList>("list_events", {
       agent: agent.value,
-      days: days.value === 0 ? null : days.value,
+      from: range.value ? fmtDate(range.value[0]) : null,
+      to: range.value ? fmtDate(range.value[1]) : null,
       model: drill.value?.type === "model" ? drill.value.key : null,
       project: drill.value?.type === "project" ? drill.value.key : null,
       day: drill.value?.type === "day" ? drill.value.key : null,
@@ -102,8 +123,8 @@ function clearDrill(): void {
 
 const drillLabel = (d: EventDrill): string => `${d.type}: ${d.key}`;
 
-watch([by, agent, days, tz, () => props.refreshKey], refresh, { immediate: true });
-watch([by, agent, days, tz, drill, () => props.refreshKey], loadEvents, { immediate: true });
+watch([by, agent, range, tz, () => props.refreshKey], refresh, { immediate: true });
+watch([by, agent, range, tz, drill, () => props.refreshKey], loadEvents, { immediate: true });
 void loadSources();
 </script>
 
@@ -139,7 +160,14 @@ void loadSources();
         <NRadioGroup v-model:value="by" size="small">
           <NRadioButton v-for="o in dimOptions" :key="o.value" :value="o.value" :label="o.label" />
         </NRadioGroup>
-        <NSelect v-model:value="days" :options="dayOptions" size="small" style="width: 130px" />
+        <NDatePicker
+          v-model:value="range"
+          type="daterange"
+          clearable
+          size="small"
+          :shortcuts="rangeShortcuts"
+          style="width: 260px"
+        />
       </div>
     </div>
     <NSpin :show="loading">
