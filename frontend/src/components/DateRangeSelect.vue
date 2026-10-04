@@ -138,7 +138,13 @@ const hasDraft = computed(() => draftFrom.value != null);
   overflow: hidden;
 }
 .shortcut-btn {
+  width: 34px;
   height: 34px;
+  padding: 0;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   border-radius: 0;
 }
