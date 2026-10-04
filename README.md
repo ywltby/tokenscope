@@ -30,10 +30,8 @@
 
 ```powershell
 pnpm --dir frontend install        # 首次安装前端依赖
-.rontend
-ode_modules\.bin	auri dev    # 开发运行（必须在仓库根执行）
-.rontend
-ode_modules\.bin	auri build  # 生产构建，产出 NSIS 安装包
+.\frontend\node_modules\.bin\tauri dev    # 开发运行（必须在仓库根执行）
+.\frontend\node_modules\.bin\tauri build  # 生产构建，产出 NSIS 安装包
                                     # target/release/bundle/nsis/TokenScope_*_x64-setup.exe
 ```
 
@@ -84,7 +82,10 @@ cargo test                         # 全部测试
 pnpm --dir frontend typecheck      # vue-tsc 类型检查
 pnpm --dir frontend format         # Prettier 格式化（format:check 为检查）
 pnpm --dir frontend build          # 生产构建
-pnpm --dir frontend tauri dev      # 桌面应用开发运行
+
+# Tauri CLI 在仓库根调用（CLI 只向下搜索 src-tauri，在 frontend 目录执行会找不到配置）
+.\frontend\node_modules\.bin\tauri dev      # 桌面应用开发运行
+.\frontend\node_modules\.bin\tauri build    # 生产构建（NSIS 安装包）
 ```
 
 提交钩子：`git config core.hooksPath .githooks` 启用后，每次 commit 自动跑 Rust fmt/clippy 与前端 typecheck/format:check。

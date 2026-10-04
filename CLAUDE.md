@@ -53,10 +53,8 @@ pnpm --dir frontend build          # 前端产物（提交前必须通过）
 GUI（Tauri CLI 在仓库根调用——CLI 只向下搜索 src-tauri，在 frontend 目录执行会找不到配置）：
 
 ```powershell
-.rontend
-ode_modules\.bin	auri dev     # 开发窗口（会弹出 GUI）
-.rontend
-ode_modules\.bin	auri build   # 生产构建（NSIS 安装包，首次较慢）
+.\frontend\node_modules\.bin\tauri dev     # 开发窗口（会弹出 GUI）
+.\frontend\node_modules\.bin\tauri build   # 生产构建（NSIS 安装包，首次较慢）
 ```
 
 - 前端 TypeScript 钉 TypeScript 5.x（vue-tsc 与 TS 7 不兼容，勿升级）；Naive UI 组件库、ECharts 图表（直接用 echarts，未包 vue-echarts）。
