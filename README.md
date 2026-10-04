@@ -5,7 +5,7 @@
 ## 功能
 
 - **多 agent 统计**：默认合并全部已装 agent，也可单看某个（当前 Claude Code + Codex，更多适配器规划中）
-- **多维度聚合**：按日 / 模型 / 项目 / 应用分组，时间范围过滤（全部 / 近 7 / 30 / 90 天）
+- **多维度聚合**：按日 / 模型 / 项目 / 应用分组；时间支持预设与**自定义区间**（日期区间选择器 / `--from`+`--to`）
 - **逐请求明细**：点击汇总行即下钻到去重后的请求级明细（时间 / 模型 / 项目 / 四类 token / 费用），CLI 同步提供 `events` 子命令
 - **Dashboard**：概览卡片、按日堆叠趋势图（ECharts）、明细表、来源采集统计
 - **明暗双模式**：默认跟随系统，可手动切换并记忆
@@ -47,6 +47,7 @@ tokenscope summary --claude-dir <path> --codex-dir <path>   # 覆盖扫描目录
 tokenscope summary --refresh            # 强制全量重解析并重建缓存
 tokenscope pricing sync                 # 同步在线价格（models.dev 主源 + OpenRouter 备份）
 tokenscope summary --tz UTC             # 指定聚合时区（local=本机；缺省 Asia/Shanghai）
+tokenscope summary --from 2026-10-01 --to 2026-10-04    # 自定义时间区间（闭区间）
 tokenscope events --agent codex --days 7 --limit 200    # 逐请求明细（时间倒序）
 tokenscope events --model gpt-5.6-sol --day 2026-10-04  # 按模型/自然日过滤
 ```
