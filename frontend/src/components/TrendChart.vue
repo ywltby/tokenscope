@@ -4,6 +4,14 @@ import * as echarts from "echarts";
 import { useTheme } from "../composables/theme";
 import { fmtNum, type Group } from "../types";
 
+/// 数值轴紧凑刻度（token 数：万/亿）
+function fmtCompact(v: number): string {
+  const a = Math.abs(v);
+  if (a >= 1e8) return `${Number((v / 1e8).toFixed(1))}亿`;
+  if (a >= 1e4) return `${Number((v / 1e4).toFixed(0))}万`;
+  return String(v);
+}
+
 const props = defineProps<{ groups: Group[]; by: string }>();
 const { mode } = useTheme();
 
@@ -18,9 +26,12 @@ function render(): void {
     chart.dispose();
     chart = null;
   }
-  chart = echarts.init(el.value, dark ? "dark" : undefined);
-  const groups = props.groups.slice(0, 40);
+  const groups = props.groups;
   const isDay = props.by === "day";
+  // 非日维度为横向条形：按条目数动态撑高，保证每个项目一行且标签完整
+  const height = isDay ? 320 : Math.max(320, groups.length * 34 + 70);
+  el.value.style.height = `${height}px`;
+  chart = echarts.init(el.value, dark ? "dark" : undefined);
   const seriesNames = ["input", "output", "cache_write", "cache_read"] as const;
   const seriesLabels: Record<(typeof seriesNames)[number], string> = {
     input: "输入",
@@ -40,18 +51,20 @@ function render(): void {
       ? { type: "category", data: groups.map((g) => g.key) }
       : {
           type: "value",
-          axisLabel: { formatter: (v: number) => fmtNum(v) },
+          axisLabel: { formatter: (v: number) => fmtCompact(v) },
         },
     yAxis: isDay
       ? {
           type: "value",
-          axisLabel: { formatter: (v: number) => fmtNum(v) },
+          axisLabel: { formatter: (v: number) => fmtCompact(v) },
         }
       : {
           type: "category",
+          // 按用量降序；interval 0 强制每个项目都显示名称
           data: [...groups]
             .sort((a, b) => b.tokens.input + b.tokens.output - (a.tokens.input + a.tokens.output))
             .map((g) => g.key),
+          axisLabel: { interval: 0, width: 220, overflow: "truncate" },
         },
     series: seriesNames.map((name) => ({
       name: seriesLabels[name],
