@@ -175,39 +175,12 @@ void loadSources();
               </NTag>
             </template>
 
-            <style scoped>
-              .agent-row {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-              }
-              .agent-btn {
-                width: 40px;
-                height: 40px;
-                padding: 0;
-                border-radius: 8px;
-              }
-            </style>
             <EventTable
               :list="events"
               :filter-label="drill ? drillLabel(drill) : '无（显示最新 200 条）'"
             />
           </NCard>
         </template>
-
-        <style scoped>
-          .agent-row {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-          }
-          .agent-btn {
-            width: 40px;
-            height: 40px;
-            padding: 0;
-            border-radius: 8px;
-          }
-        </style>
       </div>
     </NSpin>
   </div>
