@@ -1,6 +1,6 @@
 # M11：价格索引预计算 + 定时自动同步
 
-- 状态：**已确认（用户 2026-10-04 指示：双快照解析后台算好；增加定时同步价格能力）**
+- 状态：**已完成（2026-10-04），GUI 自动同步冒烟待用户确认**
 - 创建：2026-10-04
 
 ## 背景（用户反馈）
@@ -49,3 +49,19 @@
 
 - 索引文件损坏 → 告警并从快照重建（与快照降级策略一致）。
 - 系统休眠导致定时器漂移 → 每小时轮询检查"距上次同步"而非精确定时。
+
+## 验收记录（2026-10-04）
+
+1. 全量门禁：fmt / clippy（0 警告）/ `cargo test --workspace`（73 测试：根 crate 69 + e2e 6... 含 settings 4 个新单测）/ vue-tsc / pnpm build 全绿。
+2. 索引持久化验收：CLI `summary` 一次运行后 `~/.tokenscope/pricing-index.json` 生成（8,467 条，层级分布 models.dev 7,957 / openrouter 466 / 内置 43 / 外置 1）；二次运行索引命中 0.86s。
+3. 进程内缓存：三源签名一致时 `Pricing` 以 Arc 复用，summary/list_events 零重复解析。
+4. 自动同步线程：GUI 启动 2 分钟首查、每小时轮询、距上次同步 ≥24h 触发双源同步并重建索引（日志留痕）；settings.json 持久化开关（默认开）。
+5. 设置页：价格卡新增自动同步开关（settings_get / settings_set_price_auto_sync）。
+6. `tauri build` NSIS 4.77 MiB；GUI 自动同步冒烟留用户确认。
+
+## 实现要点
+
+- 索引键为归一化前缀字节串（避免多字节切片 panic）；索引内容即四层合并结果，加载即得最终查找表。
+- `Pricing::load_cached` 返回 Arc<Pricing> + 命中标记；进程内缓存用 `static Mutex<Option<(sig, Arc<Pricing>)>>`。
+- 自动同步轮询（每小时）而非精确定时（休眠漂移）；同步失败仅日志，不影响 GUI。
+- 排障记录：本轮两处 python replace 静默失败（fmt 重排锚点不匹配）导致接线未生效，改为 Edit 精确修改后修复——**代码接线类改动停止使用 python 字符串替换**。
