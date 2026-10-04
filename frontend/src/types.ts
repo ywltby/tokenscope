@@ -68,8 +68,11 @@ export interface PricingEntry {
 
 export interface PricingView {
   path: string;
+  modelsdev_path: string;
+  modelsdev_synced_at?: string | null;
+  modelsdev_count: number;
   openrouter_path: string;
-  synced_at?: string | null;
+  openrouter_synced_at?: string | null;
   openrouter_count: number;
   external_count: number;
   entries: PricingEntry[];

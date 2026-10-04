@@ -199,13 +199,28 @@ fn run_events(a: EventsArgs) -> anyhow::Result<()> {
 fn run_pricing(cmd: PricingCmd) -> anyhow::Result<()> {
     match cmd {
         PricingCmd::Sync => {
-            let path = crate::report::openrouter_file_path(None);
-            let report = crate::openrouter::sync(&path)?;
-            println!(
-                "已同步 {} 个模型价格 → {}（{}）",
-                report.count, report.path, report.synced_at
-            );
-            Ok(())
+            let mut failures = Vec::new();
+            let md = crate::modelsdev::sync(&crate::report::modelsdev_file_path(None));
+            let or = crate::openrouter::sync(&crate::report::openrouter_file_path(None));
+            match md {
+                Ok(r) => println!(
+                    "models.dev：已同步 {} 条 → {}（{}）",
+                    r.count, r.path, r.synced_at
+                ),
+                Err(e) => failures.push(format!("models.dev 同步失败: {e:#}")),
+            }
+            match or {
+                Ok(r) => println!(
+                    "OpenRouter：已同步 {} 条 → {}（{}）",
+                    r.count, r.path, r.synced_at
+                ),
+                Err(e) => failures.push(format!("OpenRouter 同步失败: {e:#}")),
+            }
+            if failures.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(failures.join("；")))
+            }
         }
     }
 }
@@ -233,6 +248,7 @@ fn run_summary(cli: Cli) -> anyhow::Result<()> {
         cache_dir: None,
         pricing_path: None,
         openrouter_path: None,
+        modelsdev_path: None,
         refresh,
         tz,
     };

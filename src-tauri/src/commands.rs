@@ -5,13 +5,14 @@ use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_opener::OpenerExt;
 use tokenscope::aggregate::GroupBy;
 use tokenscope::model::AgentKind;
+use tokenscope::modelsdev;
 use tokenscope::openrouter;
 use tokenscope::pricing::Pricing;
 use tokenscope::report::{
     CacheInfo, EventFilter, EventList, SourceStatus, SummaryOptions, SummaryReport,
-    cache_stats as cache_stats_impl, list_events as list_events_impl, openrouter_file_path,
-    pricing_file_path, rebuild_cache as rebuild_cache_impl, source_status as source_status_impl,
-    summary,
+    cache_stats as cache_stats_impl, list_events as list_events_impl, modelsdev_file_path,
+    openrouter_file_path, pricing_file_path, rebuild_cache as rebuild_cache_impl,
+    source_status as source_status_impl, summary,
 };
 
 pub fn parse_by(by: &str) -> Result<GroupBy, String> {
@@ -140,12 +141,15 @@ where
         .map_err(|e| e.to_string())
 }
 
-/// 设置页价格表视图：完整条目 + 内置/外置路径与同步状态 + 解析警告。
+/// 设置页价格表视图：完整条目 + 各源路径与同步状态 + 解析警告。
 #[derive(Serialize)]
 pub struct PricingView {
     pub path: String,
+    pub modelsdev_path: String,
+    pub modelsdev_synced_at: Option<String>,
+    pub modelsdev_count: usize,
     pub openrouter_path: String,
-    pub synced_at: Option<String>,
+    pub openrouter_synced_at: Option<String>,
     pub openrouter_count: usize,
     pub external_count: usize,
     pub entries: Vec<tokenscope::pricing::PricingEntry>,
@@ -157,15 +161,23 @@ pub async fn pricing_entries() -> Result<PricingView, String> {
     run_blocking(move || {
         let path = pricing_file_path(None);
         let snapshot = openrouter_file_path(None);
-        let (pricing, warnings) = Pricing::load(Some(&path), Some(&snapshot));
-        let synced_at = tokenscope::openrouter::load_snapshot(&snapshot)
+        let modelsdev = modelsdev_file_path(None);
+        let (pricing, warnings) = Pricing::load(Some(&path), Some(&modelsdev), Some(&snapshot));
+        let openrouter_synced_at = tokenscope::openrouter::load_snapshot(&snapshot)
+            .ok()
+            .flatten()
+            .map(|s| s.synced_at);
+        let modelsdev_synced_at = tokenscope::modelsdev::load_snapshot(&modelsdev)
             .ok()
             .flatten()
             .map(|s| s.synced_at);
         Ok(PricingView {
             path: path.display().to_string(),
+            modelsdev_path: modelsdev.display().to_string(),
+            modelsdev_synced_at,
+            modelsdev_count: pricing.modelsdev_count(),
             openrouter_path: snapshot.display().to_string(),
-            synced_at,
+            openrouter_synced_at,
             openrouter_count: pricing.openrouter_count(),
             external_count: pricing.external_count(),
             entries: pricing.entries(),
@@ -175,12 +187,44 @@ pub async fn pricing_entries() -> Result<PricingView, String> {
     .await
 }
 
-/// 同步 OpenRouter 价格快照（网络操作，阻塞线程池执行）。
+/// 双源同步结果（统一形态，前端不区分具体源类型）。
+#[derive(Serialize)]
+pub struct SyncOutcome {
+    pub source: &'static str,
+    pub count: u64,
+    pub path: String,
+    pub synced_at: String,
+}
+
+/// 同步双在线源（models.dev 主源 + OpenRouter 备份）；单源失败不影响另一源。
 #[tauri::command]
-pub async fn sync_pricing_openrouter() -> Result<tokenscope::openrouter::SyncReport, String> {
+pub async fn sync_pricing_openrouter() -> Result<Vec<SyncOutcome>, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        let path = openrouter_file_path(None);
-        openrouter::sync(&path).map_err(|e| e.to_string())
+        let mut reports = Vec::new();
+        let mut failures = Vec::new();
+        match modelsdev::sync(&modelsdev_file_path(None)) {
+            Ok(r) => reports.push(SyncOutcome {
+                source: "models.dev",
+                count: r.count,
+                path: r.path,
+                synced_at: r.synced_at,
+            }),
+            Err(e) => failures.push(format!("models.dev: {e:#}")),
+        }
+        match openrouter::sync(&openrouter_file_path(None)) {
+            Ok(r) => reports.push(SyncOutcome {
+                source: "OpenRouter",
+                count: r.count,
+                path: r.path,
+                synced_at: r.synced_at,
+            }),
+            Err(e) => failures.push(format!("OpenRouter: {e:#}")),
+        }
+        if failures.is_empty() {
+            Ok(reports)
+        } else {
+            Err(failures.join("；"))
+        }
     })
     .await
     .map_err(|e| e.to_string())?

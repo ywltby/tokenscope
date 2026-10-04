@@ -32,6 +32,8 @@ pub struct SummaryOptions {
     pub pricing_path: Option<PathBuf>,
     /// OpenRouter 快照文件路径（None = `~/.tokenscope/pricing-openrouter.json`；测试注入用）。
     pub openrouter_path: Option<PathBuf>,
+    /// models.dev 快照文件路径（None = `~/.tokenscope/pricing-modelsdev.json`；测试注入用）。
+    pub modelsdev_path: Option<PathBuf>,
     /// 聚合与展示时区：None = 默认 Asia/Shanghai；"local" = 本机；其余按 IANA 名。
     pub tz: Option<String>,
     /// 强制全量重解析并重建缓存。
@@ -89,6 +91,13 @@ pub fn openrouter_file_path(snapshot_file: Option<&PathBuf>) -> PathBuf {
         .cloned()
         .or_else(|| data_dir().ok().map(|d| d.join("pricing-openrouter.json")))
         .unwrap_or_else(|| PathBuf::from("pricing-openrouter.json"))
+}
+
+pub fn modelsdev_file_path(snapshot_file: Option<&PathBuf>) -> PathBuf {
+    snapshot_file
+        .cloned()
+        .or_else(|| data_dir().ok().map(|d| d.join("pricing-modelsdev.json")))
+        .unwrap_or_else(|| PathBuf::from("pricing-modelsdev.json"))
 }
 
 pub fn pricing_file_path(pricing_file: Option<&PathBuf>) -> PathBuf {
@@ -185,7 +194,12 @@ struct Collected {
 fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
     let pricing_path = pricing_file_path(opts.pricing_path.as_ref());
     let openrouter_path = openrouter_file_path(opts.openrouter_path.as_ref());
-    let (pricing, mut warnings) = Pricing::load(Some(&pricing_path), Some(&openrouter_path));
+    let modelsdev_path = modelsdev_file_path(opts.modelsdev_path.as_ref());
+    let (pricing, mut warnings) = Pricing::load(
+        Some(&pricing_path),
+        Some(&modelsdev_path),
+        Some(&openrouter_path),
+    );
     let (cache, mut cache_warnings) = open_cache(opts);
     warnings.append(&mut cache_warnings);
 
@@ -460,6 +474,7 @@ mod tests {
             pricing_path: pricing,
             // 固定指向不存在的快照，测试不依赖真实 ~/.tokenscope 状态
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
             tz: Some("Asia/Shanghai".to_string()),
             refresh,
             ..Default::default()
@@ -558,6 +573,7 @@ mod tests {
             cache_dir: Some(dir.join("cache")),
             pricing_path: Some(dir.join("no-pricing.toml")),
             openrouter_path: Some(dir.join("no-snapshot.json")),
+            modelsdev_path: Some(dir.join("no-modelsdev.json")),
             tz: Some("Asia/Shanghai".to_string()),
             ..Default::default()
         };
@@ -752,6 +768,39 @@ cache_read = 0.0
         let l = list_events(&base, &EventFilter::default()).unwrap();
         let s = summary(&base).unwrap();
         assert_eq!(l.total as u64, s.totals.requests);
+    }
+
+    #[test]
+    fn test_report_modelsdev_layer() {
+        // models.dev 层兜住 openrouter 缺的 doubao；快照缺失时回内置/unknown。
+        let dir = tmp_dir("modelsdev");
+        let snapshot = dir.join("pricing-modelsdev.json");
+        std::fs::write(
+            &snapshot,
+            r#"{"synced_at":"t","entries":[
+                {"id":"volcengine/doubao-seed-2-0-pro-260215","name":"Doubao Pro",
+                 "input":0.47,"output":2.37,"cache_read":0.09,"cache_write":0.0},
+                {"id":"tencent/hy3:free","name":"HY3 free",
+                 "input":0,"output":0,"cache_read":0,"cache_write":0}
+            ]}"#,
+        )
+        .unwrap();
+        let base = SummaryOptions {
+            claude_dir: Some(fixture("claude", "basic")),
+            codex_dir: Some(fixture("codex", "basic")),
+            cache_dir: Some(dir.join("cache")),
+            pricing_path: Some(dir.join("no-pricing.toml")),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            modelsdev_path: Some(snapshot),
+            tz: Some("Asia/Shanghai".to_string()),
+            ..Default::default()
+        };
+        let r = summary(&base).unwrap();
+        assert!(
+            r.totals.unknown_tokens.total() == 0,
+            "doubao 经 models.dev 层入价: {r:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

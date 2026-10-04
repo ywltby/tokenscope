@@ -71,8 +71,9 @@ const TABLE: &[(&str, f64, f64, f64, f64)] = &[
 ];
 
 const TIER_EXTERNAL: u8 = 0;
-const TIER_OPENROUTER: u8 = 1;
-const TIER_BUILTIN: u8 = 2;
+const TIER_MODELSDEV: u8 = 1;
+const TIER_OPENROUTER: u8 = 2;
+const TIER_BUILTIN: u8 = 3;
 
 /// 归一化模型标识（键与查询共用同一函数）：lowercase、剥 `vendor/` 前缀、
 /// `.` → `-`。变体后缀（`:free` 等）保留参与匹配。
@@ -199,15 +200,39 @@ impl Pricing {
         }
     }
 
-    /// 三层合并：内置兜底，openrouter 快照叠加，外置最终覆盖。
-    /// `external` / `openrouter_snapshot` 文件缺失 → 静默跳过该层；
-    /// 解析失败 → 警告并跳过该层。
+    /// 四层合并：内置兜底，openrouter/models.dev 快照叠加，外置最终覆盖。
+    /// 各快照文件缺失 → 静默跳过该层；解析失败 → 警告并跳过该层。
     pub fn load(
         external: Option<&Path>,
+        modelsdev_snapshot: Option<&Path>,
         openrouter_snapshot: Option<&Path>,
     ) -> (Self, Vec<String>) {
         let mut pricing = Self::builtin();
         let mut warnings = Vec::new();
+
+        if let Some(path) = modelsdev_snapshot {
+            match crate::modelsdev::load_snapshot(path) {
+                Ok(Some(snapshot)) => {
+                    for e in snapshot.entries {
+                        pricing.entries.push(Entry {
+                            prefix: normalize_model_id(&e.id),
+                            display: e.id,
+                            name: e.name,
+                            input: e.input,
+                            output: e.output,
+                            cache_write: e.cache_write,
+                            cache_read: e.cache_read,
+                            tier: TIER_MODELSDEV,
+                        });
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warnings.push(format!(
+                    "models.dev 快照解析失败，该层已忽略: {}（{e:#}）",
+                    path.display()
+                )),
+            }
+        }
 
         if let Some(path) = openrouter_snapshot {
             match openrouter::load_snapshot(path) {
@@ -343,6 +368,10 @@ impl Pricing {
 
     pub fn openrouter_count(&self) -> usize {
         self.count_tier(TIER_OPENROUTER)
+    }
+
+    pub fn modelsdev_count(&self) -> usize {
+        self.count_tier(TIER_MODELSDEV)
     }
 
     fn count_tier(&self, tier: u8) -> usize {
@@ -481,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_pricing_external_missing_is_silent() {
-        let (p, warnings) = Pricing::load(Some(Path::new("Z:/no-such/pricing.toml")), None);
+        let (p, warnings) = Pricing::load(Some(Path::new("Z:/no-such/pricing.toml")), None, None);
         assert_eq!(p.external_count(), 0);
         assert!(warnings.is_empty());
     }
@@ -509,7 +538,7 @@ cache_write = 0.0
 cache_read = 0.0
 "#,
         );
-        let (p, warnings) = Pricing::load(Some(&path), None);
+        let (p, warnings) = Pricing::load(Some(&path), None, None);
         assert!(warnings.is_empty());
         assert_eq!(p.external_count(), 2);
         assert_eq!(p.lookup("claude-opus-5").unwrap().input, 9.0);
@@ -522,7 +551,7 @@ cache_read = 0.0
         let dir = std::env::temp_dir().join(format!("tokenscope-m5-extbad-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = write(&dir, "pricing.toml", "not valid toml [[[");
-        let (p, warnings) = Pricing::load(Some(&path), None);
+        let (p, warnings) = Pricing::load(Some(&path), None, None);
         assert_eq!(p.external_count(), 0);
         assert_eq!(p.lookup("claude-opus-5").unwrap().input, 5.0);
         assert_eq!(warnings.len(), 1);
@@ -554,7 +583,7 @@ cache_read = 0.0
                  "prompt":0,"completion":0,"cache_read":0,"cache_write":0}
             ]}"#,
         );
-        let (p, warnings) = Pricing::load(Some(&external), Some(&snapshot));
+        let (p, warnings) = Pricing::load(Some(&external), None, Some(&snapshot));
         assert!(warnings.is_empty(), "warnings: {warnings:?}");
 
         // 外置层压过 openrouter（同前缀，层级优先）
@@ -611,7 +640,7 @@ cache_read = 0.0
                  "prompt":0,"completion":0,"cache_read":0,"cache_write":0}
             ]}"#,
         );
-        let (p, warnings) = Pricing::load(None, Some(&snapshot));
+        let (p, warnings) = Pricing::load(None, None, Some(&snapshot));
         assert!(warnings.is_empty());
         // 精确变体命中 0 价
         assert_eq!(p.lookup("tencent/hy3:free").unwrap().input, 0.0);
@@ -628,7 +657,7 @@ cache_read = 0.0
             std::env::temp_dir().join(format!("tokenscope-m5-snapbad-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let snapshot = write(&dir, "pricing-openrouter.json", "not json");
-        let (p, warnings) = Pricing::load(None, Some(&snapshot));
+        let (p, warnings) = Pricing::load(None, None, Some(&snapshot));
         assert_eq!(p.openrouter_count(), 0);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("OpenRouter"));

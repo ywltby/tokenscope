@@ -33,12 +33,12 @@ const msg = useMessage();
 const sources = ref<SourceStatus[]>([]);
 const cache = ref<CacheInfo | null>(null);
 const pricing = ref<PricingView | null>(null);
+const syncing = ref(false);
 const loading = ref(false);
 const rebuilding = ref(false);
 const { tz } = useTimezone();
 const autostart = ref<boolean | null>(null);
 const autostartBusy = ref(false);
-const syncing = ref(false);
 
 async function loadAll(): Promise<void> {
   loading.value = true;
@@ -63,11 +63,11 @@ async function rebuild(): Promise<void> {
   }
 }
 
-async function syncOpenRouter(): Promise<void> {
+async function syncPricing(): Promise<void> {
   syncing.value = true;
   try {
-    const r = await invoke<{ count: number; synced_at: string }>("sync_pricing_openrouter");
-    msg.success(`已同步 ${r.count} 个模型价格`);
+    const reports = await invoke<{ source: string; count: number }[]>("sync_pricing_openrouter");
+    msg.success(reports.map((r) => `${r.source} ${r.count} 条`).join("，"));
     pricing.value = await invoke<PricingView>("pricing_entries");
   } catch (e) {
     msg.error(`同步失败：${e}`);
@@ -246,21 +246,26 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
           <NCard title="模型价格表" size="small">
             <template #header-extra>
               <div style="display: flex; gap: 8px">
-                <NButton size="small" type="primary" :loading="syncing" @click="syncOpenRouter">
-                  同步 OpenRouter 价格
+                <NButton size="small" type="primary" :loading="syncing" @click="syncPricing">
+                  同步在线价格
                 </NButton>
                 <NButton size="small" @click="openPricing">打开 / 创建外置价格文件</NButton>
               </div>
             </template>
             <div style="font-size: 12px; opacity: 0.6; margin-bottom: 8px">
-              优先级：外置（{{ pricing?.external_count ?? 0 }} 条）> OpenRouter（{{
-                pricing?.openrouter_count ?? 0
+              优先级：外置（{{ pricing?.external_count ?? 0 }} 条）> models.dev（{{
+                pricing?.modelsdev_count ?? 0
               }}
-              条）> 内置；层内最长前缀匹配。
-              <template v-if="pricing?.synced_at"
-                >OpenRouter 上次同步：{{ pricing.synced_at }}</template
+              条）> OpenRouter（{{ pricing?.openrouter_count ?? 0 }} 条）> 内置；层内最长前缀匹配。
+              <template v-if="pricing?.modelsdev_synced_at">
+                models.dev 上次同步：{{ pricing.modelsdev_synced_at }}；</template
               >
-              <template v-else>尚未同步 OpenRouter（同步前仅内置 + 外置生效）。</template>
+              <template v-if="pricing?.openrouter_synced_at"
+                >OpenRouter 上次同步：{{ pricing.openrouter_synced_at }}</template
+              >
+              <template v-if="!pricing?.modelsdev_synced_at && !pricing?.openrouter_synced_at"
+                >尚未同步在线源（同步前仅内置 + 外置生效）。</template
+              >
             </div>
             <NAlert
               v-for="(w, i) in pricing?.warnings ?? []"
@@ -271,7 +276,7 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
               {{ w }}
             </NAlert>
             <div style="font-size: 12px; opacity: 0.6; margin-bottom: 8px">
-              {{ pricing?.path }}（TOML；同前缀覆盖内置，最长前缀匹配；保存后下次统计生效）
+              {{ pricing?.path }}（TOML；本地价格最高优先，保存后下次统计生效）
             </div>
             <NDataTable
               :columns="priceColumns"
