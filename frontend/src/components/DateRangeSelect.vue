@@ -96,11 +96,12 @@ const hasDraft = computed(() => draftFrom.value != null);
       </NButton>
     </template>
     <div :style="panelStyle">
-      <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px">
+      <div class="shortcut-row" style="margin-bottom: 12px">
         <NButton
           v-for="sc in shortcuts"
           :key="sc.label"
           size="tiny"
+          class="shortcut-btn"
           :type="shortcutActive(sc) ? 'primary' : 'default'"
           @click="applyShortcut(sc)"
         >
@@ -127,3 +128,20 @@ const hasDraft = computed(() => draftFrom.value != null);
     </div>
   </NPopover>
 </template>
+
+<style scoped>
+.shortcut-row {
+  display: flex;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.shortcut-btn {
+  border: none;
+  border-radius: 0;
+}
+/* 相邻快捷项之间的细分隔线 */
+.shortcut-btn + .shortcut-btn {
+  border-left: 1px solid rgba(128, 128, 128, 0.3);
+}
+</style>
