@@ -58,6 +58,14 @@ GUI（Tauri CLI 在仓库根调用——CLI 只向下搜索 src-tauri，在 fron
 
 - 前端 TypeScript 钉 TypeScript 5.x（vue-tsc 与 TS 7 不兼容，勿升级）；Naive UI 组件库、ECharts 图表（直接用 echarts，未包 vue-echarts）。
 - **格式化分工**：Rust 用 `cargo fmt`（`rustfmt.toml` 钉 LF）；前端用 Prettier（`frontend/.prettierrc.json`，双引号/分号/2 空格/printWidth 100）。**提交钩子**（`.githooks/pre-commit`，克隆后执行一次 `git config core.hooksPath .githooks` 启用）会自动跑 fmt --check + clippy + test + 前端 typecheck + format:check。
+- **测试密闭性（2026-10-05 事故修复，必须遵守）**：任何测试（单元/e2e）构造 `SummaryOptions` 时，`cache_dir` 与 `pricing_index` **必须注入临时目录**，禁止落回默认 `~/.tokenscope`——否则测试会把用户真实缓存 purge 成 fixture，GUI 每次启动都全量冷扫描（用户 1.2 GB 日志，分钟级加载）。新测试评审时先看这两项。
+- **真实数据性能验收/缓存预热**（`#[ignore]`，需显式环境变量，会全量解析本机 `~/.claude`、`~/.codex` 并重建 `~/.tokenscope/cache.db`）：
+
+```powershell
+$env:TOKENSCOPE_REAL_PERF = "1"; cargo test --release --test perf_real_data -- --ignored --nocapture
+```
+
+  本机基准（release）：冷启动全量解析 1.2 GB 约 5.5 s，热启动（缓存命中）约 0.1–0.2 s。collect_all 各阶段耗时已落 `~/.tokenscope/logs/`（价格加载 / 逐 agent 采集 / 去重 / 聚合），启动慢先看日志。
 
 - 终端是 **Windows PowerShell**：多条命令分开执行或用 `;`，**不要用 `&&`**。
 - cargo 不在 PATH（终端会话早于 rustup 安装启动，报 `cargo ... program not found`；注册表用户 PATH 已含 `%USERPROFILE%\.cargo\bin`）：**重开终端即恢复**；当前窗口可临时修 `$env:Path = "$env:USERPROFILE\.cargo\bin;" + $env:Path`；Bash 工具里用绝对路径 `/c/Users/admin/.cargo/bin/cargo.exe` 调用。

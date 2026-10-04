@@ -22,12 +22,22 @@ fn basic() -> Collection {
         .unwrap()
 }
 
+/// 密闭性（2026-10-05 修复）：缓存/索引一律进临时目录。此前默认落真实
+/// `~/.tokenscope/cache.db`，测试套件每跑一遍就把用户缓存 purge 成 fixture，
+/// GUI 每次启动都全量冷扫描（分钟级加载）。
+fn hermetic_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("tokenscope-e2e-claude-{}", std::process::id()))
+}
+
 /// 只走 Claude 源的 report 管线（agent 过滤，codex 目录不会触达）。
 fn claude_report(by: GroupBy) -> SummaryReport {
+    let dir = hermetic_dir();
     summary(&SummaryOptions {
         by,
         agent: Some(AgentKind::ClaudeCode),
         claude_dir: Some(fixture("claude", "basic")),
+        cache_dir: Some(dir.join("cache")),
+        pricing_index: Some(dir.join("pricing-index.json")),
         // 固定指向不存在的快照，测试不依赖真实 ~/.tokenscope 状态
         openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
         modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),

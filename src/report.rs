@@ -34,6 +34,10 @@ pub struct SummaryOptions {
     pub openrouter_path: Option<PathBuf>,
     /// models.dev 快照文件路径（None = `~/.tokenscope/pricing-modelsdev.json`；测试注入用）。
     pub modelsdev_path: Option<PathBuf>,
+    /// 价格索引快照路径（None = `~/.tokenscope/pricing-index.json`；测试注入用）。
+    /// 密闭性修复（2026-10-05）：此前索引路径恒指真实数据目录，测试会把
+    /// 测试签名的索引写进用户目录，导致 GUI 每次启动都重建索引。
+    pub pricing_index: Option<PathBuf>,
     /// 聚合与展示时区：None = 默认 Asia/Shanghai；"local" = 本机；其余按 IANA 名。
     pub tz: Option<String>,
     /// 自然日区间下界（YYYY-MM-DD，解析时区，闭区间；与 days 互斥）。
@@ -89,10 +93,11 @@ pub fn view_cache_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("view-cache.json"))
 }
 
-pub fn pricing_index_path(_pricing_file: Option<&PathBuf>) -> PathBuf {
-    data_dir()
-        .map(|d| d.join("pricing-index.json"))
-        .unwrap_or_else(|_| PathBuf::from("pricing-index.json"))
+pub fn pricing_index_path(index_file: Option<&PathBuf>) -> PathBuf {
+    index_file
+        .cloned()
+        .or_else(|| data_dir().ok().map(|d| d.join("pricing-index.json")))
+        .unwrap_or_else(|| PathBuf::from("pricing-index.json"))
 }
 
 pub fn modelsdev_file_path(snapshot_file: Option<&PathBuf>) -> PathBuf {
@@ -193,17 +198,29 @@ struct Collected {
 }
 
 /// 共用采集路径（M7）：价格加载 → 缓存增量采集 → 全局去重 → 回填统计。
+/// 各阶段 INFO 计时落日志（用户排障依据；粒度 = 每 agent 一行，不逐文件刷屏）。
 fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
+    let t_total = std::time::Instant::now();
     let pricing_path = pricing_file_path(opts.pricing_path.as_ref());
     let openrouter_path = openrouter_file_path(opts.openrouter_path.as_ref());
     let modelsdev_path = modelsdev_file_path(opts.modelsdev_path.as_ref());
-    let index_path = pricing_index_path(opts.pricing_path.as_ref());
+    let index_path = pricing_index_path(opts.pricing_index.as_ref());
     // M11：签名一致时复用进程内缓存/索引文件，仅签名变化才重解析双快照。
-    let (pricing, mut warnings, _cache_hit) = Pricing::load_cached(
+    let t_pricing = std::time::Instant::now();
+    let (pricing, mut warnings, cache_hit) = Pricing::load_cached(
         Some(&pricing_path),
         Some(&modelsdev_path),
         Some(&openrouter_path),
         &index_path,
+    );
+    log::info!(
+        "价格加载：{}，{:.0} ms",
+        if cache_hit {
+            "进程内缓存命中"
+        } else {
+            "重建（快照/索引）"
+        },
+        t_pricing.elapsed().as_millis()
     );
     let (cache, mut cache_warnings) = open_cache(opts);
     warnings.append(&mut cache_warnings);
@@ -217,6 +234,7 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
         None => vec![AgentKind::ClaudeCode, AgentKind::Codex],
     };
     for kind in kinds {
+        let t_agent = std::time::Instant::now();
         let dir = match kind {
             AgentKind::ClaudeCode => &opts.claude_dir,
             AgentKind::Codex => &opts.codex_dir,
@@ -235,6 +253,10 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
                 src.root().display()
             ));
         }
+        let mut cached_hits = 0u32;
+        let mut reparsed = 0u32;
+        let mut parse_ms_total = 0u128;
+        let mut store_ms_total = 0u128;
         for file in &files {
             let path_str = file.display().to_string();
             keep_paths.push(path_str.clone());
@@ -249,15 +271,23 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
                 }
             }
             let parse = match cached {
-                Some(p) => p,
+                Some(p) => {
+                    cached_hits += 1;
+                    p
+                }
                 None => {
+                    let t = std::time::Instant::now();
                     let p = src.parse_file(file);
+                    parse_ms_total += t.elapsed().as_millis();
+                    reparsed += 1;
                     if let Some(c) = &cache {
                         let size = file_size(file).unwrap_or(0);
                         let mt = mtime_ms(file).unwrap_or(0);
+                        let t = std::time::Instant::now();
                         if let Err(e) = c.store_file(&path_str, kind, size, mt, &p) {
                             warnings.push(format!("缓存写入失败（不影响统计）: {e:#}"));
                         }
+                        store_ms_total += t.elapsed().as_millis();
                     }
                     p
                 }
@@ -266,17 +296,43 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
             events.extend(parse.events);
         }
         stats.files_scanned = files.len() as u64;
+        log::info!(
+            "采集 {}: 文件 {}（缓存命中 {} / 重解析 {}），解析 {} ms，写缓存 {} ms，解析层事件 {}，累计 {} ms",
+            kind.as_str(),
+            files.len(),
+            cached_hits,
+            reparsed,
+            parse_ms_total,
+            store_ms_total,
+            events.len(),
+            t_agent.elapsed().as_millis()
+        );
         sources.push(SourceReport { agent: kind, stats });
         all_events.extend(events);
     }
-    if let Some(c) = &cache
-        && let Err(e) = c.purge_missing(&keep_paths)
-    {
-        warnings.push(format!("缓存清理失败（不影响统计）: {e:#}"));
+    if let Some(c) = &cache {
+        let t = std::time::Instant::now();
+        match c.purge_missing(&keep_paths) {
+            Ok(n) => {
+                if n > 0 {
+                    log::info!("缓存清理：{} 条过期行，{} ms", n, t.elapsed().as_millis());
+                }
+            }
+            Err(e) => warnings.push(format!("缓存清理失败（不影响统计）: {e:#}")),
+        }
     }
 
     // 全局去重（跨文件、按 agent 规则），并回填 per-agent 的丢弃数与事件数。
+    let t_dedupe = std::time::Instant::now();
+    let before = all_events.len();
     let (events, dropped) = dedupe_events(all_events);
+    log::info!(
+        "去重：{} → {}（丢弃 {}），{} ms",
+        before,
+        events.len(),
+        dropped.iter().map(|(_, n)| n).sum::<u64>(),
+        t_dedupe.elapsed().as_millis()
+    );
     for s in &mut sources {
         s.stats.duplicates_dropped = dropped
             .iter()
@@ -285,6 +341,12 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
             .unwrap_or(0);
         s.stats.events = events.iter().filter(|e| e.agent == s.agent).count() as u64;
     }
+    log::info!(
+        "采集完成：事件 {}，警告 {}，总计 {} ms",
+        events.len(),
+        warnings.len(),
+        t_total.elapsed().as_millis()
+    );
     Ok(Collected {
         events,
         sources,
@@ -303,7 +365,15 @@ pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
 
     let (tz, tz_label) = resolve_tz(opts.tz.as_deref())?;
     events = apply_time_filter(events, opts, &tz)?;
+    let t_agg = std::time::Instant::now();
     let agg = aggregate(&events, opts.by, &tz, &pricing);
+    log::info!(
+        "聚合（{}）：{} 组 / {} 请求，{} ms",
+        agg.by,
+        agg.groups.len(),
+        agg.totals.requests,
+        t_agg.elapsed().as_millis()
+    );
     Ok(SummaryReport {
         timezone: tz_label,
         by: agg.by,
@@ -504,11 +574,20 @@ mod tests {
     }
 
     fn opts(cache: Option<PathBuf>, pricing: Option<PathBuf>, refresh: bool) -> SummaryOptions {
+        // 密闭性（2026-10-05 修复）：cache=None 也绝不落回真实 ~/.tokenscope——
+        // 此前默认路径会把 fixture 写进用户 cache.db 并 purge 掉全部真实行，
+        // 导致 GUI 每次启动都全量冷扫描（1.2 GB 日志，分钟级加载）。
+        let cache_dir =
+            Some(cache.unwrap_or_else(|| {
+                tmp_dir(&format!("hermetic-{:?}", std::thread::current().id()))
+            }));
+        let pricing_index = cache_dir.as_ref().map(|d| d.join("pricing-index.json"));
         SummaryOptions {
             by: GroupBy::Day,
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
-            cache_dir: cache,
+            cache_dir,
+            pricing_index,
             pricing_path: pricing,
             // 固定指向不存在的快照，测试不依赖真实 ~/.tokenscope 状态
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
@@ -609,6 +688,7 @@ mod tests {
             agent: Some(AgentKind::ClaudeCode),
             claude_dir: Some(src_dir.clone()),
             cache_dir: Some(dir.join("cache")),
+            pricing_index: Some(dir.join("pricing-index.json")),
             pricing_path: Some(dir.join("no-pricing.toml")),
             openrouter_path: Some(dir.join("no-snapshot.json")),
             modelsdev_path: Some(dir.join("no-modelsdev.json")),
@@ -747,11 +827,16 @@ cache_read = 0.0
     #[test]
     fn test_report_tz_resolution() {
         // 缺省 = Asia/Shanghai；显式 UTC 改变解析标识；非法名 = 参数错误。
+        let hermetic = tmp_dir("tz");
         let base = SummaryOptions {
             by: GroupBy::Day,
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
+            cache_dir: Some(hermetic.join("cache")),
+            pricing_index: Some(hermetic.join("pricing-index.json")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
+            tz: Some("Asia/Shanghai".to_string()),
             ..Default::default()
         };
         let sh = summary(&SummaryOptions {
@@ -785,9 +870,12 @@ cache_read = 0.0
 
     #[test]
     fn test_list_events_filters() {
+        let hermetic = tmp_dir("list-events");
         let base = SummaryOptions {
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
+            cache_dir: Some(hermetic.join("cache")),
+            pricing_index: Some(hermetic.join("pricing-index.json")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
             // 钉住不存在的 models.dev 快照，测试不依赖真实 ~/.tokenscope 状态
             modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
@@ -864,10 +952,14 @@ cache_read = 0.0
     #[test]
     fn test_list_events_dedupe_consistent_with_summary() {
         // 明细与汇总同源：total（过滤后）== 汇总同过滤的 requests。
+        let hermetic = tmp_dir("dedupe-consistent");
         let base = SummaryOptions {
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
+            cache_dir: Some(hermetic.join("cache")),
+            pricing_index: Some(hermetic.join("pricing-index.json")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
             tz: Some("Asia/Shanghai".to_string()),
             ..Default::default()
         };
@@ -895,6 +987,7 @@ cache_read = 0.0
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
             cache_dir: Some(dir.join("cache")),
+            pricing_index: Some(dir.join("pricing-index.json")),
             pricing_path: Some(dir.join("no-pricing.toml")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
             modelsdev_path: Some(snapshot),
