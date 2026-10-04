@@ -15,7 +15,8 @@ use tauri::{
 use tauri_plugin_autostart::MacosLauncher;
 
 pub fn run() {
-    init_logging();
+    // WorkerGuard 与进程同生命周期（run 阻塞至退出）。
+    let _log_guard = tokenscope::logging::init("gui");
     log::info!("TokenScope 启动（GUI）");
     tauri::Builder::default()
         // 单实例必须最先注册：二次启动走回调唤起已有窗口，不新建实例。
@@ -75,24 +76,6 @@ type SharedState = Arc<Mutex<Option<window_state::WindowState>>>;
 
 fn window_state_shared() -> SharedState {
     Arc::new(Mutex::new(None))
-}
-
-/// 日志落 `~/.tokenscope/logs/`（每日滚动）；安装目录只含程序本体。
-fn init_logging() {
-    let Ok(dir) = tokenscope::report::data_dir().map(|d| d.join("logs")) else {
-        return;
-    };
-    let appender = tracing_appender::rolling::daily(&dir, "tokenscope.log");
-    let (writer, guard) = tracing_appender::non_blocking(appender);
-    // WorkerGuard 需与进程同生命周期，否则缓冲日志丢失。
-    std::mem::forget(guard);
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_ansi(false)
-        .with_writer(writer)
-        .init();
 }
 
 fn restore_window_state(app: &tauri::AppHandle) -> tauri::Result<()> {

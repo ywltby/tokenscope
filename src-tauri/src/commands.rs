@@ -213,7 +213,7 @@ pub async fn sync_pricing_openrouter() -> Result<Vec<SyncOutcome>, String> {
                 });
             }
             Err(e) => {
-                log::warn!("models.dev 同步失败: {e:#}");
+                tokenscope::logging::log_error("models.dev 同步失败", &e);
                 failures.push(format!("models.dev: {e:#}"));
             }
         }
@@ -228,7 +228,7 @@ pub async fn sync_pricing_openrouter() -> Result<Vec<SyncOutcome>, String> {
                 });
             }
             Err(e) => {
-                log::warn!("OpenRouter 同步失败: {e:#}");
+                tokenscope::logging::log_error("OpenRouter 同步失败", &e);
                 failures.push(format!("OpenRouter: {e:#}"));
             }
         }

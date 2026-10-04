@@ -4219,10 +4219,14 @@ dependencies = [
  "comfy-table",
  "dirs 6.0.0",
  "jiff",
+ "log",
  "rusqlite",
  "serde",
  "serde_json",
  "toml 1.1.6+spec-1.1.0",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
  "ureq",
 ]
 
@@ -4240,9 +4244,6 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tokenscope",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
 ]
 
 [[package]]
