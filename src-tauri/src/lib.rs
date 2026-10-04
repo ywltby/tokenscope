@@ -15,9 +15,12 @@ use tauri::{
 use tauri_plugin_autostart::MacosLauncher;
 
 pub fn run() {
+    init_logging();
+    log::info!("TokenScope 启动（GUI）");
     tauri::Builder::default()
         // 单实例必须最先注册：二次启动走回调唤起已有窗口，不新建实例。
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            log::info!("检测到二次启动，唤起已有窗口");
             show_main(app);
         }))
         .plugin(tauri_plugin_opener::init())
@@ -74,12 +77,30 @@ fn window_state_shared() -> SharedState {
     Arc::new(Mutex::new(None))
 }
 
+/// 日志落 `~/.tokenscope/logs/`（每日滚动）；安装目录只含程序本体。
+fn init_logging() {
+    let Ok(dir) = tokenscope::report::data_dir().map(|d| d.join("logs")) else {
+        return;
+    };
+    let appender = tracing_appender::rolling::daily(&dir, "tokenscope.log");
+    let (writer, guard) = tracing_appender::non_blocking(appender);
+    // WorkerGuard 需与进程同生命周期，否则缓冲日志丢失。
+    std::mem::forget(guard);
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_writer(writer)
+        .init();
+}
+
 fn restore_window_state(app: &tauri::AppHandle) -> tauri::Result<()> {
     let path = window_state::state_path().ok();
     let loaded = path.as_deref().and_then(|p| match window_state::load(p) {
         Ok(ws) => ws,
         Err(e) => {
-            eprintln!("[warn] 窗口状态读取失败，使用默认尺寸: {e:#}");
+            log::warn!("窗口状态读取失败，使用默认尺寸: {e:#}");
             None
         }
     });
@@ -147,7 +168,7 @@ fn save_window_state_now(window: &tauri::WebviewWindow) {
         && let Ok(path) = window_state::state_path()
         && let Err(e) = window_state::save(&path, ws)
     {
-        eprintln!("[warn] 窗口状态保存失败: {e:#}");
+        log::warn!("窗口状态保存失败: {e:#}");
     }
     dirty_flag(app).store(false, Ordering::Relaxed);
 }
@@ -167,7 +188,7 @@ fn start_window_state_saver(app: &tauri::AppHandle) {
                 continue;
             };
             if let Err(e) = window_state::save(&path, &ws) {
-                eprintln!("[warn] 窗口状态保存失败: {e:#}");
+                log::warn!("窗口状态保存失败: {e:#}");
             }
         }
     });

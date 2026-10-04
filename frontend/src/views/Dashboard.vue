@@ -35,7 +35,7 @@ const dimOptions: { label: string; value: Dim }[] = [
   { label: "按日", value: "day" },
   { label: "按模型", value: "model" },
   { label: "按项目", value: "project" },
-  { label: "按 Agent", value: "agent" },
+  { label: "按应用", value: "agent" },
 ];
 
 const agentOptions: { label: string; value: AgentFilter; icon: string }[] = [

@@ -56,7 +56,7 @@ impl GroupBy {
             GroupBy::Day => "日期",
             GroupBy::Model => "模型",
             GroupBy::Project => "项目",
-            GroupBy::Agent => "Agent",
+            GroupBy::Agent => "应用",
         }
     }
 }

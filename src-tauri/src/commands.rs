@@ -203,22 +203,34 @@ pub async fn sync_pricing_openrouter() -> Result<Vec<SyncOutcome>, String> {
         let mut reports = Vec::new();
         let mut failures = Vec::new();
         match modelsdev::sync(&modelsdev_file_path(None)) {
-            Ok(r) => reports.push(SyncOutcome {
-                source: "models.dev",
-                count: r.count,
-                path: r.path,
-                synced_at: r.synced_at,
-            }),
-            Err(e) => failures.push(format!("models.dev: {e:#}")),
+            Ok(r) => {
+                log::info!("models.dev 同步成功: {} 条", r.count);
+                reports.push(SyncOutcome {
+                    source: "models.dev",
+                    count: r.count,
+                    path: r.path,
+                    synced_at: r.synced_at,
+                });
+            }
+            Err(e) => {
+                log::warn!("models.dev 同步失败: {e:#}");
+                failures.push(format!("models.dev: {e:#}"));
+            }
         }
         match openrouter::sync(&openrouter_file_path(None)) {
-            Ok(r) => reports.push(SyncOutcome {
-                source: "OpenRouter",
-                count: r.count,
-                path: r.path,
-                synced_at: r.synced_at,
-            }),
-            Err(e) => failures.push(format!("OpenRouter: {e:#}")),
+            Ok(r) => {
+                log::info!("OpenRouter 同步成功: {} 条", r.count);
+                reports.push(SyncOutcome {
+                    source: "OpenRouter",
+                    count: r.count,
+                    path: r.path,
+                    synced_at: r.synced_at,
+                });
+            }
+            Err(e) => {
+                log::warn!("OpenRouter 同步失败: {e:#}");
+                failures.push(format!("OpenRouter: {e:#}"));
+            }
         }
         if failures.is_empty() {
             Ok(reports)
