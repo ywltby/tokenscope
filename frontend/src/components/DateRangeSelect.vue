@@ -131,7 +131,7 @@ const hasDraft = computed(() => draftFrom.value != null);
 
 <style scoped>
 .shortcut-row {
-  display: flex;
+  display: inline-flex;
   border: 1px solid rgba(128, 128, 128, 0.3);
   border-radius: 6px;
   overflow: hidden;
