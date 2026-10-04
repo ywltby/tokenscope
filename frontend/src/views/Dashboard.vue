@@ -197,5 +197,6 @@ void loadSources();
   height: 40px;
   padding: 0;
   border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.3);
 }
 </style>
