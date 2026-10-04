@@ -8,6 +8,8 @@ echo "[pre-commit] cargo fmt --check"
 cargo fmt --all -- --check
 echo "[pre-commit] cargo clippy"
 cargo clippy --workspace --all-targets --quiet
+echo "[pre-commit] cargo test"
+cargo test --workspace --quiet
 echo "[pre-commit] frontend typecheck"
 pnpm --dir frontend typecheck
 echo "[pre-commit] frontend format:check"
