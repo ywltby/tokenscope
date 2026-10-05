@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { NButton, NCheckbox, NDatePicker, NPopover } from "naive-ui";
-import { addDays, calendarToMs, todayInTz, tzDate } from "../lib/dates";
+import { addDays, calendarToMs, msToUtcCalendar, todayInTz } from "../lib/dates";
 
 /**
  * ccs 风格的日期区间选择（M10；C3 修复 F07）：
@@ -97,13 +97,15 @@ const label = computed<string>(() => {
 const draftFromMs = computed<number | null>({
   get: () => (draftFrom.value ? calendarToMs(draftFrom.value) : null),
   set: (ms) => {
-    draftFrom.value = ms == null ? null : tzDate(ms, props.tz);
+    // 审阅 Task 1：picker 毫秒是 UTC 零点锚的 UI 桥接值，setter 用同一
+    // UTC 日历语义还原——统计时区不得重解释（负偏移时会变前一天）。
+    draftFrom.value = ms == null ? null : msToUtcCalendar(ms);
   },
 });
 const draftToMs = computed<number | null>({
   get: () => (draftTo.value ? calendarToMs(draftTo.value) : null),
   set: (ms) => {
-    draftTo.value = ms == null ? null : tzDate(ms, props.tz);
+    draftTo.value = ms == null ? null : msToUtcCalendar(ms);
   },
 });
 

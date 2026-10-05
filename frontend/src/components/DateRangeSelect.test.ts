@@ -18,7 +18,20 @@ vi.mock("naive-ui", async (importOriginal) => {
       return () => h("div", { class: "popover-stub" }, [slots.trigger?.(), slots.default?.()]);
     },
   });
-  return { ...actual, NPopover: NPopoverStub };
+  // NDatePicker stub：渲染 input 并透传 update:value（模拟用户点选日期）。
+  const NDatePickerStub = dc({
+    name: "NDatePicker",
+    props: { value: { type: Number, default: null } },
+    emits: ["update:value"],
+    setup(props) {
+      return () =>
+        h("input", {
+          class: "datepicker-stub",
+          value: props.value,
+        });
+    },
+  });
+  return { ...actual, NPopover: NPopoverStub, NDatePicker: NDatePickerStub };
 });
 
 const NPopoverStub = { name: "NPopover" };
@@ -109,6 +122,36 @@ describe("today_uses_selected_timezone（Task 6）", () => {
       .find((b) => b.text() === "确定")!
       .trigger("click");
     expect(w.emitted("update:value")!.at(-1)![0]).toEqual(["2026-10-06", "2026-10-06"]);
+  });
+
+  it("picker round-trip 负偏移时区：UTC 零点锚毫秒不得变成前一天", async () => {
+    // Task 1（审阅）：setter 用 tzDate(ms, tz) 把 UTC 零点锚重解释成统计
+    // 时区日期——负偏移时区（纽约）下 10-05 会变 10-04。
+    const w = mountRange(null, "America/New_York");
+    await open(w);
+    // 直接经 NDatePicker stub 的 v-model 更新毫秒值（模拟用户点选）。
+    const dp = w.findComponent({ name: "NDatePicker" });
+    expect(dp).toBeDefined();
+    dp!.vm.$emit("update:value", Date.UTC(2026, 9, 5));
+    await flushPromises();
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "确定")!
+      .trigger("click");
+    expect(w.emitted("update:value")!.at(-1)![0]).toEqual(["2026-10-05", "2026-10-05"]);
+  });
+
+  it("picker round-trip 正偏移时区：上海同样保持用户所选日期", async () => {
+    const w = mountRange(null, "Asia/Shanghai");
+    await open(w);
+    const dp = w.findComponent({ name: "NDatePicker" });
+    dp!.vm.$emit("update:value", Date.UTC(2026, 9, 5));
+    await flushPromises();
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "确定")!
+      .trigger("click");
+    expect(w.emitted("update:value")!.at(-1)![0]).toEqual(["2026-10-05", "2026-10-05"]);
   });
 
   it("快捷范围是日历字符串（近7天 = 今天减 6 个自然日）", async () => {

@@ -24,3 +24,11 @@ export function calendarToMs(dateStr: string): number {
   const [y, m, d] = dateStr.split("-").map(Number);
   return Date.UTC(y, m - 1, d);
 }
+
+/// 毫秒 → UTC 锚定日历日期（YYYY-MM-DD）。
+/// 与 `calendarToMs` 互为逆运算：calendarToMs 用 UTC 零点锚定日历字符串，
+/// 这里用 UTC 日历提取还原——picker 的 UI 毫秒值只承担桥接语义，
+/// 不得用统计时区重解释（审阅 Task 1）。
+export function msToUtcCalendar(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
