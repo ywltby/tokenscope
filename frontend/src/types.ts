@@ -45,6 +45,18 @@ export interface SourceStatus {
   state: string;
 }
 
+/** Task 2：定价可用性状态（结构化 DTO，横幅据 needs_sync 渲染） */
+export interface PricingStatus {
+  modelsdevAvailable: boolean;
+  modelsdevCount: number;
+  modelsdevSyncedAt?: string | null;
+  openrouterAvailable: boolean;
+  externalCount: number;
+  hasAnyPricing: boolean;
+  needsSync: boolean;
+  warnings: string[];
+}
+
 /** C1：单一来源配置（enabled + 显式目录覆盖） */
 export interface SourceConfig {
   enabled: boolean;

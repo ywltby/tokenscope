@@ -15,6 +15,7 @@ import {
   type GlobalTheme,
 } from "naive-ui";
 import { useTheme } from "./composables/theme";
+import PricingStatusBanner from "./components/PricingStatusBanner.vue";
 import Dashboard from "./views/Dashboard.vue";
 import Settings from "./views/Settings.vue";
 
@@ -47,6 +48,10 @@ watch(page, (p) => {
           <span style="font-size: 12px; opacity: 0.65">暗色</span>
           <NSwitch :value="mode === 'dark'" size="small" @update:value="toggle" />
         </NLayoutHeader>
+        <!-- Task 3：首次启动无 models.dev 缓存时的全局同步横幅 -->
+        <div style="padding: 12px 20px 0">
+          <PricingStatusBanner />
+        </div>
         <NLayoutContent style="padding: 16px 20px">
           <Dashboard v-if="page === 'summary'" :refresh-key="refreshKey" />
           <Settings v-else :refresh-key="refreshKey" />
