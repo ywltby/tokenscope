@@ -197,8 +197,13 @@ pub async fn view_cache_save(value: serde_json::Value) -> Result<(), String> {
         }
         let json = serde_json::to_string_pretty(&value)?;
         let json_len = json.len();
-        std::fs::write(&path, json).with_context(|| format!("写视图缓存失败: {}", path.display()))?;
-        log::debug!("视图快照保存：{} 字节，{} ms", json_len, t.elapsed().as_millis());
+        std::fs::write(&path, json)
+            .with_context(|| format!("写视图缓存失败: {}", path.display()))?;
+        log::debug!(
+            "视图快照保存：{} 字节，{} ms",
+            json_len,
+            t.elapsed().as_millis()
+        );
         Ok(())
     })
     .await
@@ -248,7 +253,10 @@ where
     let outcome = match joined {
         Ok(r) => r,
         Err(e) => {
-            log::error!("命令 {name} 后台任务崩溃（{} ms）: {e}", t.elapsed().as_millis());
+            log::error!(
+                "命令 {name} 后台任务崩溃（{} ms）: {e}",
+                t.elapsed().as_millis()
+            );
             return Err(format!("后台任务失败: {e}"));
         }
     };

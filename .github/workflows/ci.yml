@@ -1,0 +1,66 @@
+# 计划 A5（F09）：质量门禁显式覆盖 根库 + Tauri 壳 + 前端。
+# 两者是独立 workspace（根 Cargo.toml exclude src-tauri），必须分别执行；
+# 任一步失败立即停止（每步独立 step），不允许"顺序执行但带病通过"。
+# tauri build 属发布验收（计划 D5），不进常规 CI。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust (stable, rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend deps
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: 根库 cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: 根库 cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 根库 cargo test
+        run: cargo test --workspace
+
+      - name: 壳 cargo fmt --check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: 壳 cargo clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: 壳 cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: frontend typecheck
+        run: pnpm --dir frontend typecheck
+
+      - name: frontend format:check
+        run: pnpm --dir frontend format:check
+
+      - name: frontend test
+        run: pnpm --dir frontend test
+
+      - name: frontend build
+        run: pnpm --dir frontend build

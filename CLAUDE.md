@@ -57,7 +57,7 @@ GUI（Tauri CLI 在仓库根调用——CLI 只向下搜索 src-tauri，在 fron
 ```
 
 - 前端 TypeScript 钉 TypeScript 5.x（vue-tsc 与 TS 7 不兼容，勿升级）；Naive UI 组件库、ECharts 图表（直接用 echarts，未包 vue-echarts）。
-- **格式化分工**：Rust 用 `cargo fmt`（`rustfmt.toml` 钉 LF）；前端用 Prettier（`frontend/.prettierrc.json`，双引号/分号/2 空格/printWidth 100）。**提交钩子**（`.githooks/pre-commit`，克隆后执行一次 `git config core.hooksPath .githooks` 启用）会自动跑 fmt --check + clippy + test + 前端 typecheck + format:check。
+- **格式化分工**：Rust 用 `cargo fmt`（`rustfmt.toml` 钉 LF）；前端用 Prettier（`frontend/.prettierrc.json`，双引号/分号/2 空格/printWidth 100）。**提交钩子**（`.githooks/pre-commit`，克隆后执行一次 `git config core.hooksPath .githooks` 启用，计划 A5 后）会自动跑：根库 fmt/clippy/test + **壳（src-tauri）fmt/clippy/test**（两个独立 manifest，根命令不覆盖壳）+ 前端 typecheck + format:check + **test（vitest）**。CI（`.github/workflows/ci.yml`）在 push/PR 上跑同一门禁（clippy 加 `-D warnings`，另含前端 build）；`tauri build` 属发布验收不进 CI。
 - **测试密闭性（2026-10-05 事故修复，必须遵守）**：任何测试（单元/e2e）构造 `SummaryOptions` 时，`cache_dir` 与 `pricing_index` **必须注入临时目录**，禁止落回默认 `~/.tokenscope`——否则测试会把用户真实缓存 purge 成 fixture，GUI 每次启动都全量冷扫描（用户 1.2 GB 日志，分钟级加载）。新测试评审时先看这两项。
 - **真实数据性能验收/缓存预热**（`#[ignore]`，需显式环境变量，会全量解析本机 `~/.claude`、`~/.codex` 并重建 `~/.tokenscope/cache.db`）：
 

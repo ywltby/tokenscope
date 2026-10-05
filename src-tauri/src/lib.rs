@@ -51,7 +51,10 @@ pub fn run() {
             setup_tray(app.handle())?;
             start_window_state_saver(app.handle());
             start_price_auto_sync();
-            log::info!("GUI 初始化完成（窗口状态/托盘/自同步线程），{} ms", t_boot.elapsed().as_millis());
+            log::info!(
+                "GUI 初始化完成（窗口状态/托盘/自同步线程），{} ms",
+                t_boot.elapsed().as_millis()
+            );
             Ok(())
         })
         // 关闭主窗口 = 缩到托盘（用户要求），真正退出走托盘菜单；
@@ -236,10 +239,7 @@ fn start_price_auto_sync() {
                 for w in &index_warnings {
                     log::warn!("价格索引重建警告: {w}");
                 }
-                log::debug!(
-                    "价格索引重建完成，{} ms",
-                    t_index.elapsed().as_millis()
-                );
+                log::debug!("价格索引重建完成，{} ms", t_index.elapsed().as_millis());
                 log::info!("价格自动同步完成，{} ms", t.elapsed().as_millis());
             }
             std::thread::sleep(std::time::Duration::from_secs(3600));
