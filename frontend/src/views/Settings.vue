@@ -59,6 +59,7 @@ async function loadAll(): Promise<void> {
 // C1：来源配置草稿（编辑后按行保存）
 const drafts = ref<Record<string, { enabled: boolean; dir: string }>>({});
 const savingSource = ref<string | null>(null);
+const sourceSaveError = ref<string | null>(null);
 
 async function loadDrafts(): Promise<void> {
   const s = await invoke<Record<string, unknown>>("settings_get");
@@ -71,6 +72,7 @@ async function loadDrafts(): Promise<void> {
 
 async function saveSource(agent: string): Promise<void> {
   savingSource.value = agent;
+  sourceSaveError.value = null;
   try {
     const d = drafts.value[agent];
     await invoke("source_config_set", {
@@ -79,6 +81,9 @@ async function saveSource(agent: string): Promise<void> {
       dir: d.dir.trim() === "" ? null : d.dir.trim(),
     });
     await loadSources();
+  } catch (e) {
+    // Task 2：后端返回的重叠等配置错误必须可见，保留用户当前输入以便修改。
+    sourceSaveError.value = `${AGENT_LABEL[agent] ?? agent}: ${e instanceof Error ? e.message : String(e)}`;
   } finally {
     savingSource.value = null;
   }
@@ -308,8 +313,12 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
                 :placeholder="`默认目录：${s.dir}`"
                 @update:value="(v: string) => (drafts[s.agent]!.dir = v)"
               />
+              <NAlert v-if="sourceSaveError" type="error" style="margin: 6px 0">
+                {{ sourceSaveError }}
+              </NAlert>
               <div style="font-size: 12px; opacity: 0.6; margin-top: 4px">
-                留空使用默认目录；停用后该来源完全不参与统计。保存后回到汇总页生效。
+                留空使用默认目录；停用后该来源完全不参与统计。两个来源不能指向同一目录。
+                保存后回到汇总页生效。
               </div>
             </div>
           </NCard>

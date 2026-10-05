@@ -280,6 +280,31 @@ fn collect_flighted(opts: &SummaryOptions) -> Result<Arc<CollectionSnapshot>> {
     collect_flighted_with(opts, &|generation| collect_inner(opts, generation))
 }
 
+/// Task 2：来源包装器——discover 结果已被防御性去重（固定文件清单）。
+struct DedupSource {
+    inner: Box<dyn Source>,
+    keep: Vec<PathBuf>,
+    errors: Vec<String>,
+}
+
+impl Source for DedupSource {
+    fn agent(&self) -> AgentKind {
+        self.inner.agent()
+    }
+
+    fn root(&self) -> &std::path::Path {
+        self.inner.root()
+    }
+
+    fn discover_with_errors(&self) -> (Vec<PathBuf>, Vec<String>) {
+        (self.keep.clone(), self.errors.clone())
+    }
+
+    fn parse_file(&self, path: &std::path::Path) -> crate::source::FileParse {
+        self.inner.parse_file(path)
+    }
+}
+
 /// 可注入 leader 工作的单飞实现（测试注入失败/panic 闭包）。
 fn collect_flighted_with(
     opts: &SummaryOptions,
@@ -362,12 +387,39 @@ fn collect_flighted_with(
     }
 }
 
+/// Task 2：路径规范化——canonicalize 优先；不存在时用绝对路径 +
+/// 组件清理（剥离 `.` 与空组件）作为稳定 fallback（大小写保留，
+/// Windows 大小写不敏感重叠由后扫描方的精确键比对兜底）。
+pub(crate) fn normalize_path(p: &std::path::Path) -> PathBuf {
+    match p.canonicalize() {
+        Ok(c) => c,
+        Err(_) => {
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(p)
+            };
+            let mut out = PathBuf::new();
+            for comp in abs.components() {
+                match comp {
+                    std::path::Component::CurDir => {}
+                    other => out.push(other.as_os_str()),
+                }
+            }
+            out
+        }
+    }
+}
+
 fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSnapshot> {
     let kinds: Vec<AgentKind> = match opts.agent {
         Some(k) => vec![k],
         None => vec![AgentKind::ClaudeCode, AgentKind::Codex],
     };
     let mut sources: Vec<Box<dyn Source>> = Vec::new();
+    // Task 2：跨 agent 已见的规范化文件路径——同一文件最多进入一次统计。
+    let mut seen_files: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut overlap_warned = false;
     for kind in kinds {
         if !opts.enabled(kind == AgentKind::ClaudeCode) {
             continue; // C1：停用的来源零采集、零告警，状态由 source_status 呈现
@@ -378,7 +430,33 @@ fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSna
         };
         sources.push(make_source(kind, dir)?);
     }
-    let collected = collect_all_with_sources(sources, opts, generation)?;
+    let collected = {
+        // 防御性去重：包装每个 source 的 discover 结果，剔除跨 agent 已见
+        // 的规范化文件路径（旧配置/符号链接/外部改动仍被保护）。
+        let mut wrapped: Vec<Box<dyn Source>> = Vec::new();
+        for src in sources {
+            let (files, errors) = src.discover_with_errors();
+            let mut keep = Vec::new();
+            for f in files {
+                let norm = normalize_path(&f);
+                if seen_files.insert(norm.clone()) {
+                    keep.push(f);
+                } else if !overlap_warned {
+                    overlap_warned = true;
+                    log::warn!(
+                        "来源目录重叠：{} 同时被多个 agent 扫描，重复文件只统计一次",
+                        norm.display()
+                    );
+                }
+            }
+            wrapped.push(Box::new(DedupSource {
+                inner: src,
+                keep,
+                errors,
+            }) as Box<dyn Source>);
+        }
+        collect_all_with_sources(wrapped, opts, generation)?
+    };
     Ok(CollectionSnapshot {
         generation: collected.generation,
         events: collected.events,

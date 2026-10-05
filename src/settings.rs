@@ -88,6 +88,28 @@ pub fn load(path: &Path) -> Result<Settings> {
     Ok(s)
 }
 
+/// Task 2：来源目录重叠校验——两个启用的 agent 指向同一规范化目录时
+/// 拒绝保存（采集层仍有防御性去重兜底旧配置/符号链接）。
+pub fn validate_no_overlap(
+    claude_dir: Option<&str>,
+    codex_dir: Option<&str>,
+) -> Result<(), String> {
+    let norm = |s: Option<&str>| -> Option<String> {
+        s.filter(|d| !d.trim().is_empty()).map(|d| {
+            crate::report::normalize_path(std::path::Path::new(d))
+                .to_string_lossy()
+                .to_lowercase()
+        })
+    };
+    match (norm(claude_dir), norm(codex_dir)) {
+        (Some(c), Some(x)) if c == x => Err(
+            "Claude 与 Codex 来源目录指向同一位置，会导致重复统计；请为两者配置不同目录"
+                .to_string(),
+        ),
+        _ => Ok(()),
+    }
+}
+
 /// D3/R06：自动同步的允许判定——设置读取失败时返回 false（默认离线）。
 /// 关闭自动同步的用户意图绝不能因设置损坏被悄悄重置成联网。
 pub fn auto_sync_allowed(s: &Result<Settings, anyhow::Error>) -> bool {

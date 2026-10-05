@@ -169,7 +169,33 @@ pub(crate) fn source_config_set_impl(
         other => return Err(anyhow::anyhow!("未知 agent: {other}")),
     };
     let mut s = tokenscope::settings::load(path)?;
-    let cfg = tokenscope::settings::SourceConfig { enabled, dir };
+    let cfg = tokenscope::settings::SourceConfig {
+        enabled,
+        dir: dir.clone(),
+    };
+    // Task 2：保存前按"保存后的全量配置"校验重叠（仅校验两个启用的来源）。
+    {
+        let other_dir = if claude {
+            s.sources.codex.as_ref().filter(|c| c.enabled)
+        } else {
+            s.sources.claude.as_ref().filter(|c| c.enabled)
+        };
+        if enabled && let Some(other) = other_dir {
+            tokenscope::settings::validate_no_overlap(
+                if claude {
+                    Some(dir.as_deref().unwrap_or(""))
+                } else {
+                    other.dir.as_deref()
+                },
+                if claude {
+                    other.dir.as_deref()
+                } else {
+                    Some(dir.as_deref().unwrap_or(""))
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        }
+    }
     if claude {
         s.sources.claude = Some(cfg.clone());
     } else {
@@ -584,6 +610,28 @@ mod tests {
         assert!(matches!(parse_by("project"), Ok(GroupBy::Project)));
         assert!(matches!(parse_by("agent"), Ok(GroupBy::Agent)));
         assert!(parse_by("week").is_err());
+    }
+
+    #[test]
+    fn test_source_config_set_overlap_rejected() {
+        // Task 2：两个启用的 agent 指向同一目录 → 保存被拒绝。
+        let dir = std::env::temp_dir().join(format!("tokenscope-t2-ovl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"price_auto_sync":true}"#).unwrap();
+        // 先保存 claude 配置
+        source_config_set_impl(&path, "claude", true, Some("C:/shared/logs".into())).unwrap();
+        // codex 同目录 → 拒绝
+        let r = source_config_set_impl(&path, "codex", true, Some("C:/shared/logs".into()));
+        assert!(r.is_err(), "重叠目录必须拒绝保存");
+        // 文件内容保留（claude 配置仍在，codex 未写入）
+        let s = tokenscope::settings::load(&path).unwrap();
+        assert!(s.sources.claude.as_ref().unwrap().enabled);
+        assert!(s.sources.codex.is_none(), "被拒绝的配置不得写入");
+        // 停用的来源不参与重叠校验
+        source_config_set_impl(&path, "codex", false, Some("C:/shared/logs".into())).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
