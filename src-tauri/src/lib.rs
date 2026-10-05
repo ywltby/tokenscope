@@ -36,6 +36,7 @@ pub fn run() {
             commands::view_cache_load,
             commands::view_cache_save,
             commands::source_status,
+            commands::source_config_set,
             commands::cache_stats,
             commands::refresh_cache,
             commands::pricing_entries,

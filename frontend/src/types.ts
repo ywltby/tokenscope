@@ -36,8 +36,17 @@ export interface SummaryReport {
 export interface SourceStatus {
   agent: string;
   dir: string;
+  enabled: boolean;
   exists: boolean;
   files: number;
+  /** C1 四态：disabled / missing / empty / ready */
+  state: string;
+}
+
+/** C1：单一来源配置（enabled + 显式目录覆盖） */
+export interface SourceConfig {
+  enabled: boolean;
+  dir?: string | null;
 }
 
 export interface CacheInfo {

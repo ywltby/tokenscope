@@ -223,13 +223,24 @@ void loadSources();
 
 <template>
   <div>
+    <!-- C1：来源四态可见（停用/目录不存在/无日志/正常），不再静默缺席 -->
     <NAlert
-      v-for="s in sourceStatus.filter((x) => !x.exists)"
+      v-for="s in sourceStatus.filter((x) => x.state !== 'ready')"
       :key="s.agent"
-      type="warning"
+      :type="s.state === 'disabled' ? 'default' : 'warning'"
       style="margin-bottom: 12px"
     >
-      {{ AGENT_LABEL[s.agent] ?? s.agent }} 数据目录不存在（{{ s.dir }}），该来源将没有统计。
+      <template v-if="s.state === 'disabled'">
+        {{ AGENT_LABEL[s.agent] ?? s.agent }} 已在设置中停用，不参与统计。
+      </template>
+      <template v-else-if="s.state === 'missing'">
+        {{ AGENT_LABEL[s.agent] ?? s.agent }} 数据目录不存在（{{
+          s.dir
+        }}）。可在设置页配置正确目录。
+      </template>
+      <template v-else>
+        {{ AGENT_LABEL[s.agent] ?? s.agent }} 目录存在但没有发现会话日志（{{ s.dir }}）。
+      </template>
     </NAlert>
     <!-- 筛选两行：第一行 agent 工具，第二行筛选条件（时区在设置页） -->
     <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px">

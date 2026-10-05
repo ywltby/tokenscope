@@ -46,6 +46,20 @@ pub struct SummaryOptions {
     pub to: Option<String>,
     /// 强制全量重解析并重建缓存。
     pub refresh: bool,
+    /// C1：来源启停（GUI 从设置注入；None = 启用）。停用的来源完全不采集，
+    /// 也不出现在来源统计里。
+    pub claude_enabled: Option<bool>,
+    pub codex_enabled: Option<bool>,
+}
+
+impl SummaryOptions {
+    fn enabled(&self, claude: bool) -> bool {
+        if claude {
+            self.claude_enabled != Some(false)
+        } else {
+            self.codex_enabled != Some(false)
+        }
+    }
 }
 
 /// 单个来源的采集统计（GUI 表格脚注与 JSON 共用）。
@@ -213,6 +227,9 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
     };
     let mut sources: Vec<Box<dyn Source>> = Vec::new();
     for kind in kinds {
+        if !opts.enabled(kind == AgentKind::ClaudeCode) {
+            continue; // C1：停用的来源零采集、零告警，状态由 source_status 呈现
+        }
         let dir = match kind {
             AgentKind::ClaudeCode => &opts.claude_dir,
             AgentKind::Codex => &opts.codex_dir,
@@ -615,32 +632,50 @@ fn file_size(path: &std::path::Path) -> Option<u64> {
 }
 
 /// 各 agent 来源状态（GUI 设置页；只读统计 jsonl 数量）。
+/// state（C1）：disabled=已停用；missing=目录不存在；empty=无日志；
+/// ready=正常。四态可区分是"首用纠正路径"的基础（计划 3.3.2）。
 #[derive(Debug, Serialize)]
 pub struct SourceStatus {
     pub agent: AgentKind,
     pub dir: String,
+    pub enabled: bool,
     pub exists: bool,
     pub files: u64,
+    pub state: &'static str,
 }
 
-pub fn source_status(
-    claude_dir: Option<PathBuf>,
-    codex_dir: Option<PathBuf>,
-) -> Result<Vec<SourceStatus>> {
+pub fn source_status(settings: &crate::settings::Settings) -> Result<Vec<SourceStatus>> {
     let mut out = Vec::new();
-    for (kind, dir) in [
-        (AgentKind::ClaudeCode, claude_dir),
-        (AgentKind::Codex, codex_dir),
-    ] {
+    for claude in [true, false] {
+        let kind = if claude {
+            AgentKind::ClaudeCode
+        } else {
+            AgentKind::Codex
+        };
+        let cfg = settings.source_config(claude);
+        let dir: Option<PathBuf> = cfg.dir.map(PathBuf::from);
         let root = match dir {
             Some(p) => p,
             None => make_source(kind, &None)?.root().to_path_buf(),
         };
+        let exists = root.is_dir();
+        let files = count_jsonl(&root);
+        let state = if !cfg.enabled {
+            "disabled"
+        } else if !exists {
+            "missing"
+        } else if files == 0 {
+            "empty"
+        } else {
+            "ready"
+        };
         out.push(SourceStatus {
             agent: kind,
             dir: root.display().to_string(),
-            exists: root.is_dir(),
-            files: count_jsonl(&root),
+            enabled: cfg.enabled,
+            exists,
+            files,
+            state,
         });
     }
     Ok(out)
@@ -1109,16 +1144,51 @@ cache_read = 0.0
 
     #[test]
     fn test_source_status() {
-        let st = source_status(
-            Some(fixture("claude", "basic")),
-            Some(fixture("codex", "no-such-dir")),
-        )
-        .unwrap();
+        // C1：四态可区分（ready/missing/disabled）+ 目录配置生效。
+        let mut s = crate::settings::Settings::default();
+        s.sources.claude = Some(crate::settings::SourceConfig {
+            enabled: true,
+            dir: Some(fixture("claude", "basic").display().to_string()),
+        });
+        s.sources.codex = Some(crate::settings::SourceConfig {
+            enabled: false,
+            dir: Some(fixture("codex", "no-such-dir").display().to_string()),
+        });
+        let st = source_status(&s).unwrap();
         assert_eq!(st.len(), 2);
-        assert!(st[0].exists);
+        assert_eq!(st[0].state, "ready");
         assert_eq!(st[0].files, 2);
-        assert!(!st[1].exists);
-        assert_eq!(st[1].files, 0);
+        assert_eq!(st[1].state, "disabled", "停用优先于目录状态");
+        // 未配置 → 默认目录多半不存在 → missing（不依赖具体家目录，只验状态字段存在）。
+        let st = source_status(&crate::settings::Settings::default()).unwrap();
+        assert!(st.iter().all(|x| x.enabled));
+        assert!(st.iter().all(|x| !x.state.is_empty()));
+    }
+
+    #[test]
+    fn test_disabled_source_skipped() {
+        // C1：停用来源零采集——events、来源统计、缓存清理都不触达。
+        let dir = tmp_dir("disabled");
+        let mut s = crate::settings::Settings::default();
+        let opts = SummaryOptions {
+            agent: None,
+            claude_dir: Some(fixture("claude", "basic")),
+            codex_dir: Some(fixture("codex", "basic")),
+            cache_dir: Some(dir.join("cache")),
+            pricing_index: Some(dir.join("idx.json")),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
+            tz: Some("Asia/Shanghai".to_string()),
+            claude_enabled: Some(true),
+            codex_enabled: Some(false),
+            ..Default::default()
+        };
+        let _ = &mut s;
+        let r = summary(&opts).unwrap();
+        assert_eq!(r.totals.requests, 3, "只剩 claude 的 3 条");
+        assert_eq!(r.sources.len(), 1);
+        assert_eq!(r.sources[0].agent, AgentKind::ClaudeCode);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

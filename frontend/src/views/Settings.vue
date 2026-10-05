@@ -11,6 +11,7 @@ import {
   NSelect,
   NSpin,
   NStatistic,
+  NInput,
   NSwitch,
   NTag,
   NTooltip,
@@ -48,9 +49,42 @@ async function loadAll(): Promise<void> {
     sources.value = await invoke<SourceStatus[]>("source_status");
     cache.value = await invoke<CacheInfo>("cache_stats");
     pricing.value = await invoke<PricingView>("pricing_entries");
+    await loadDrafts();
   } finally {
     loading.value = false;
   }
+}
+
+// C1：来源配置草稿（编辑后按行保存）
+const drafts = ref<Record<string, { enabled: boolean; dir: string }>>({});
+const savingSource = ref<string | null>(null);
+
+async function loadDrafts(): Promise<void> {
+  const s = await invoke<Record<string, unknown>>("settings_get");
+  const src = (s.sources ?? {}) as Record<string, { enabled?: boolean; dir?: string | null }>;
+  drafts.value = {
+    claude: { enabled: src.claude?.enabled ?? true, dir: src.claude?.dir ?? "" },
+    codex: { enabled: src.codex?.enabled ?? true, dir: src.codex?.dir ?? "" },
+  };
+}
+
+async function saveSource(agent: string): Promise<void> {
+  savingSource.value = agent;
+  try {
+    const d = drafts.value[agent];
+    await invoke("source_config_set", {
+      agent,
+      enabled: d.enabled,
+      dir: d.dir.trim() === "" ? null : d.dir.trim(),
+    });
+    await loadSources();
+  } finally {
+    savingSource.value = null;
+  }
+}
+
+async function loadSources(): Promise<void> {
+  sources.value = await invoke<SourceStatus[]>("source_status");
 }
 
 async function rebuild(): Promise<void> {
@@ -239,15 +273,43 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
         </NGi>
         <NGi span="1">
           <NCard title="数据来源" size="small">
-            <div v-for="s in sources" :key="s.agent" style="margin-bottom: 12px">
-              <NStatistic
-                :label="AGENT_LABEL[s.agent] ?? s.agent"
-                :value="s.exists ? `${fmtNum(s.files)} 个会话文件` : '未安装'"
+            <div v-for="s in sources" :key="s.agent" style="margin-bottom: 16px">
+              <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px">
+                <strong>{{ AGENT_LABEL[s.agent] ?? s.agent }}</strong>
+                <NSwitch
+                  :value="drafts[s.agent]?.enabled ?? true"
+                  size="small"
+                  @update:value="(v: boolean) => (drafts[s.agent]!.enabled = v)"
+                />
+                <span style="font-size: 12px; opacity: 0.6">
+                  {{
+                    s.state === "ready"
+                      ? `${fmtNum(s.files)} 个会话文件`
+                      : s.state === "disabled"
+                        ? "已停用"
+                        : s.state === "missing"
+                          ? "目录不存在"
+                          : "无日志"
+                  }}
+                </span>
+                <span style="flex: 1"></span>
+                <NButton
+                  size="tiny"
+                  :loading="savingSource === s.agent"
+                  @click="saveSource(s.agent)"
+                >
+                  保存
+                </NButton>
+              </div>
+              <NInput
+                :value="drafts[s.agent]?.dir ?? ''"
+                size="small"
+                :placeholder="`默认目录：${s.dir}`"
+                @update:value="(v: string) => (drafts[s.agent]!.dir = v)"
               />
-              <div style="font-size: 12px; opacity: 0.6">{{ s.dir }}</div>
-              <NAlert v-if="!s.exists" type="warning" style="margin-top: 6px">
-                目录不存在，该来源将没有统计。
-              </NAlert>
+              <div style="font-size: 12px; opacity: 0.6; margin-top: 4px">
+                留空使用默认目录；停用后该来源完全不参与统计。保存后回到汇总页生效。
+              </div>
             </div>
           </NCard>
         </NGi>

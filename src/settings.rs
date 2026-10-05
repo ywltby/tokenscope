@@ -8,21 +8,66 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// 单一来源配置（C1）：稳定 ID = 结构字段（claude/codex），不引入字符串 ID。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SourceConfig {
+    /// 停用后完全不采集该来源（统计与状态页均可见"已停用"）。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 显式目录；None = 工具默认根（~/.claude/projects、~/.codex/sessions）。
+    #[serde(default)]
+    pub dir: Option<String>,
+}
+
+impl Default for SourceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: None,
+        }
+    }
+}
+
+/// 各来源的覆盖配置；None = 全默认（启用 + 默认目录）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct AgentSources {
+    #[serde(default)]
+    pub claude: Option<SourceConfig>,
+    #[serde(default)]
+    pub codex: Option<SourceConfig>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
     /// 定时自动同步在线价格（默认开启，每 24h）。
     #[serde(default = "default_true")]
     pub price_auto_sync: bool,
+    /// C1：来源目录与启停配置（缺省 = 全启用 + 默认目录）。
+    #[serde(default)]
+    pub sources: AgentSources,
 }
 
 fn default_true() -> bool {
     true
 }
 
+impl Settings {
+    /// 取某来源的有效配置（未配置 → 全默认）。
+    pub fn source_config(&self, claude: bool) -> SourceConfig {
+        let c = if claude {
+            &self.sources.claude
+        } else {
+            &self.sources.codex
+        };
+        c.clone().unwrap_or_default()
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             price_auto_sync: true,
+            sources: AgentSources::default(),
         }
     }
 }
@@ -68,9 +113,31 @@ mod tests {
         let path = tmp("roundtrip");
         let s = Settings {
             price_auto_sync: false,
+            sources: crate::settings::AgentSources {
+                claude: Some(SourceConfig {
+                    enabled: false,
+                    dir: Some("D:/logs/claude".into()),
+                }),
+                codex: None,
+            },
         };
         save(&path, &s).unwrap();
         assert_eq!(load(&path).unwrap(), s);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn test_source_config_defaults_and_lookup() {
+        // C1（test_source_config_roundtrip 的默认侧）：未配置 → 启用 + 默认目录。
+        let s = Settings::default();
+        let c = s.source_config(true);
+        assert!(c.enabled);
+        assert!(c.dir.is_none());
+        // 旧版 settings.json（无 sources 字段）→ 向前兼容回默认。
+        let path = tmp("legacy");
+        std::fs::write(&path, r#"{"price_auto_sync": true}"#).unwrap();
+        let s = load(&path).unwrap();
+        assert!(s.source_config(false).enabled);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

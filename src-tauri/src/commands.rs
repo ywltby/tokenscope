@@ -48,12 +48,15 @@ pub async fn summarize(
     from: Option<String>,
     to: Option<String>,
 ) -> Result<SummaryReport, String> {
+    let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings()?;
     let opts = SummaryOptions {
         by: parse_by(&by)?,
         agent: parse_agent(agent.as_deref())?,
         days,
-        claude_dir: None,
-        codex_dir: None,
+        claude_dir,
+        codex_dir,
+        claude_enabled: Some(claude_enabled),
+        codex_enabled: Some(codex_enabled),
         tz,
         from,
         to,
@@ -77,10 +80,15 @@ pub async fn list_events(
     from: Option<String>,
     to: Option<String>,
 ) -> Result<EventList, String> {
+    let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings()?;
     let opts = SummaryOptions {
         by: GroupBy::Day,
         agent: parse_agent(agent.as_deref())?,
         days,
+        claude_dir,
+        codex_dir,
+        claude_enabled: Some(claude_enabled),
+        codex_enabled: Some(codex_enabled),
         tz,
         from,
         to,
@@ -97,7 +105,70 @@ pub async fn list_events(
 
 #[tauri::command]
 pub async fn source_status() -> Result<Vec<SourceStatus>, String> {
-    run_blocking("source_status", move || source_status_impl(None, None)).await
+    run_blocking("source_status", move || {
+        source_status_impl(&load_settings_or_default())
+    })
+    .await
+}
+
+/// C1：读设置并解析为各来源的有效配置（目录覆盖 + 启停）。
+#[allow(clippy::type_complexity)]
+fn source_settings() -> Result<
+    (
+        Option<std::path::PathBuf>,
+        Option<std::path::PathBuf>,
+        bool,
+        bool,
+    ),
+    String,
+> {
+    let s = load_settings_or_default();
+    let c = s.source_config(true);
+    let x = s.source_config(false);
+    Ok((
+        c.dir.map(std::path::PathBuf::from),
+        x.dir.map(std::path::PathBuf::from),
+        c.enabled,
+        x.enabled,
+    ))
+}
+
+fn load_settings_or_default() -> tokenscope::settings::Settings {
+    tokenscope::settings::settings_path()
+        .ok()
+        .and_then(|p| tokenscope::settings::load(&p).ok())
+        .unwrap_or_default()
+}
+
+/// C1：保存单一来源配置（启停 + 目录覆盖；dir=None 回默认目录）。
+#[tauri::command]
+pub async fn source_config_set(
+    agent: String,
+    enabled: bool,
+    dir: Option<String>,
+) -> Result<tokenscope::settings::SourceConfig, String> {
+    run_blocking("source_config_set", move || {
+        let claude = match agent.as_str() {
+            "claude" => true,
+            "codex" => false,
+            other => return Err(anyhow::anyhow!("未知 agent: {other}")),
+        };
+        let path = tokenscope::settings::settings_path()?;
+        let mut s = tokenscope::settings::load(&path).unwrap_or_default();
+        let cfg = tokenscope::settings::SourceConfig { enabled, dir };
+        if claude {
+            s.sources.claude = Some(cfg.clone());
+        } else {
+            s.sources.codex = Some(cfg.clone());
+        }
+        tokenscope::settings::save(&path, &s)?;
+        log::info!(
+            "来源配置已保存：{agent} enabled={enabled} dir={:?}",
+            cfg.dir
+        );
+        Ok(cfg)
+    })
+    .await
 }
 
 #[tauri::command]
