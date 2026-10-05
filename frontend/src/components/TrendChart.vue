@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import * as echarts from "echarts";
 import { useTheme } from "../composables/theme";
 import { fmtNum, type Group } from "../types";
+import { buildBarChartData } from "../lib/chartData";
 
 /// 数值轴紧凑刻度（token 数：万/亿）
 function fmtCompact(v: number): string {
@@ -32,13 +33,8 @@ function render(): void {
   const height = isDay ? 320 : Math.max(320, groups.length * 34 + 70);
   el.value.style.height = `${height}px`;
   chart = echarts.init(el.value, dark ? "dark" : undefined);
-  const seriesNames = ["input", "output", "cache_write", "cache_read"] as const;
-  const seriesLabels: Record<(typeof seriesNames)[number], string> = {
-    input: "输入",
-    output: "输出",
-    cache_write: "缓存写",
-    cache_read: "缓存读",
-  };
+  // F03（计划 A4）：分类轴与全部 series 由同一份排序结果生成，标签与数值不错位
+  const { categories, series } = buildBarChartData(groups, props.by);
   chart.setOption({
     backgroundColor: "transparent",
     tooltip: {
@@ -48,7 +44,7 @@ function render(): void {
     legend: { top: 0 },
     grid: { left: 8, right: 8, top: 32, bottom: 8, containLabel: true },
     xAxis: isDay
-      ? { type: "category", data: groups.map((g) => g.key) }
+      ? { type: "category", data: categories }
       : {
           type: "value",
           axisLabel: { formatter: (v: number) => fmtCompact(v) },
@@ -60,19 +56,17 @@ function render(): void {
         }
       : {
           type: "category",
-          // 按用量降序；interval 0 强制每个项目都显示名称
-          data: [...groups]
-            .sort((a, b) => b.tokens.input + b.tokens.output - (a.tokens.input + a.tokens.output))
-            .map((g) => g.key),
+          // interval 0 强制每个项目都显示名称
+          data: categories,
           axisLabel: { interval: 0, width: 220, overflow: "truncate" },
         },
-    series: seriesNames.map((name) => ({
-      name: seriesLabels[name],
+    series: series.map((s) => ({
+      name: s.name,
       type: "bar",
       stack: "tokens",
       // by != day 时换为普通并列条形，取值函数相同
       barMaxWidth: 36,
-      data: groups.map((g) => g.tokens[name]),
+      data: s.values,
     })),
   });
 }
