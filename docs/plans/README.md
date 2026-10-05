@@ -25,7 +25,7 @@
 
 ## 当前状态
 
-- **执行中计划**：[产品与技术评估及改进路线](active/2026-10-05-product-review-and-roadmap.md)（2026-10-05，分支 `docs/product-review-plan`）。**A、B 阶段已完成**（P0 修复 + 测试入口 + 双 manifest 门禁与 CI；统计口径修复与权威说明 `docs/stats-semantics.md`、部分计价、缓存正确性、黄金对账——红→绿记录见计划文末执行记录）；C 阶段（多来源产品闭环与可解释展示）待启动。
+- **执行中计划**：[产品与技术评估及改进路线](active/2026-10-05-product-review-and-roadmap.md)（2026-10-05，分支 `docs/product-review-plan`）。**A、B 阶段已完成，C 阶段完成 C1/C3/C4**（P0 修复、门禁与 CI、统计口径 `docs/stats-semantics.md`、部分计价、缓存正确性、黄金对账、日期控件与快照查询身份修复、来源目录配置——详见计划文末执行记录）；**C2（项目身份）/C5（费用解释 UI）待做**，D 阶段待启动。
 - GUI 冒烟进行中（用户 dev 模式实测反馈；会话内已修复：主线程阻塞、转圈居中、筛选两行、agent 图标分段控件、暗色图标隐形、分段控件宽度、图表全条目显示等，均独立 fix 提交）。
 - **启动慢根因修复（2026-10-05）**：测试套件此前把真实 `~/.tokenscope/cache.db` purge 成 fixture（cache_dir/pricing_index 未密闭注入），GUI 每次启动被迫全量冷扫描 1.2 GB 日志。已修复：测试全部注入临时目录（两轮哈希校验密闭）、`collect_all` 分阶段耗时落日志、新增 `#[ignore]` 真实数据冷/热计时工具（release 实测冷 5.5 s / 热 0.12 s，数字一致）。
 - 待办尾巴：M3/M4 的 GUI 交互冒烟留用户安装确认（数据正确性已由 CLI/测试覆盖）。
