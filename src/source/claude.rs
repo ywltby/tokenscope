@@ -90,11 +90,16 @@ impl Source for ClaudeSource {
         &self.root
     }
 
-    fn discover(&self) -> Vec<PathBuf> {
+    fn discover_with_errors(&self) -> (Vec<PathBuf>, Vec<String>) {
+        // 根目录缺失由调用方统一告警（"目录不存在"），不在此重复记异常。
+        if !self.root.is_dir() {
+            return (Vec::new(), Vec::new());
+        }
         let mut out = Vec::new();
-        walk_jsonl(&self.root, &mut out);
+        let mut errors = Vec::new();
+        walk_jsonl(&self.root, &mut out, &mut errors);
         out.sort();
-        out
+        (out, errors)
     }
 
     fn parse_file(&self, path: &Path) -> FileParse {
@@ -103,8 +108,9 @@ impl Source for ClaudeSource {
         let project = self.project_of(path);
         match read_text(path) {
             Ok(text) => ingest_text(&text, &project, &mut stats, &mut events),
-            // 读取失败：计一个坏行，不中断整体扫描。
-            Err(_) => stats.bad_lines += 1,
+            // 读取失败（B4）：计 io_errors、返回空产物——报告层据此跳过
+            // 成功缓存并告警，不与"坏行"（内容问题）混计。
+            Err(_) => stats.io_errors += 1,
         }
         stats.events = events.len() as u64;
         FileParse { stats, events }

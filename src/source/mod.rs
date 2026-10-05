@@ -15,7 +15,8 @@ use crate::model::{AgentKind, UsageEvent};
 
 /// 一次采集的观测计数；坏行 / 去重 / 跳过口径见 M1/M2/M4 plan 不变量。
 /// Codex 专属计数器为 0 时不序列化；`duplicates_dropped` 自 M4 起由全局去重
-/// 步骤统计并回填，source 层恒为 0。
+/// 步骤统计并回填，source 层恒为 0。`io_errors` 是文件级读取失败数（B4）：
+/// 读取失败的文件不写成功缓存，且在来源统计中可见。
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct CollectStats {
     pub files_scanned: u64,
@@ -30,6 +31,8 @@ pub struct CollectStats {
     pub skipped_no_model: u64,
     #[serde(skip_serializing_if = "is_zero")]
     pub ignored_token_usage_record: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub io_errors: u64,
     pub events: u64,
 }
 
@@ -43,6 +46,7 @@ impl CollectStats {
         self.skipped_zero_usage += f.stats.skipped_zero_usage;
         self.skipped_no_model += f.stats.skipped_no_model;
         self.ignored_token_usage_record += f.stats.ignored_token_usage_record;
+        self.io_errors += f.stats.io_errors;
     }
 }
 
@@ -76,10 +80,17 @@ pub trait Source {
     /// 扫描根目录（缺失警告与缓存展示用）。
     fn root(&self) -> &Path;
 
-    /// 发现全部 jsonl（目录缺失返回空表），按路径排序保证稳定顺序。
-    fn discover(&self) -> Vec<PathBuf>;
+    /// 发现全部 jsonl，按路径排序保证稳定顺序（B4）：子目录不可读等
+    /// 发现期异常以诊断字符串返回，不再静默吞掉——"只统计到部分数据"
+    /// 必须对调用方可见。
+    fn discover_with_errors(&self) -> (Vec<PathBuf>, Vec<String>);
 
-    /// 解析单个文件（不做跨文件去重；读取失败返回带警告的空产物）。
+    /// 兼容便捷入口：只要文件列表。
+    fn discover(&self) -> Vec<PathBuf> {
+        self.discover_with_errors().0
+    }
+
+    /// 解析单个文件（不做跨文件去重；读取失败计 `io_errors` 并返回空产物）。
     fn parse_file(&self, path: &Path) -> FileParse;
 
     /// 便捷全量采集：发现 + 逐文件解析，未全局去重（目录缺失 → 警告 + 空结果）。
@@ -103,7 +114,9 @@ pub trait Source {
                 warnings,
             });
         }
-        for path in self.discover() {
+        let (files, discovery_errors) = self.discover_with_errors();
+        warnings.extend(discovery_errors);
+        for path in files {
             stats.files_scanned += 1;
             let parsed = self.parse_file(&path);
             stats.add_file(&parsed);
@@ -120,15 +133,20 @@ pub trait Source {
 }
 
 /// 递归收集 root 下全部 jsonl，按路径排序（Claude/Codex 共用）。
-pub(crate) fn walk_jsonl(root: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
+/// 不可读的目录（含"同名文件占位"等异常）记入 errors，不中断其余遍历。
+pub(crate) fn walk_jsonl(root: &Path, out: &mut Vec<PathBuf>, errors: &mut Vec<String>) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(e) => {
+            errors.push(format!("无法读取目录 {}：{e}", root.display()));
+            return;
+        }
     };
     let mut children: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
     children.sort();
     for child in children {
         if child.is_dir() {
-            walk_jsonl(&child, out);
+            walk_jsonl(&child, out, errors);
         } else if is_jsonl(&child) {
             out.push(child);
         }

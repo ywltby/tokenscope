@@ -124,6 +124,7 @@ export const STAT_KEYS: { key: string; label: string }[] = [
   { key: "skipped_zero_usage", label: "跳过零分量" },
   { key: "skipped_no_model", label: "跳过无模型" },
   { key: "ignored_token_usage_record", label: "忽略 usage_record" },
+  { key: "io_errors", label: "读取失败" },
 ];
 
 export function fmtNum(n: number): string {

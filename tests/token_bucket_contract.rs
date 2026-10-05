@@ -2,6 +2,7 @@
 //! 展示四桶（非缓存输入/输出/缓存写/缓存读）互斥且守恒：
 //! - Codex：展示总量必须等于日志 raw total（raw input 含 cached 与 cache_write）；
 //! - Claude：四桶一一对应 Anthropic usage 的四个独立字段，不得合并或挪列。
+//!
 //! 期望值全部独立手算；适用日志版本见 docs/stats-semantics.md。
 
 use std::path::PathBuf;

@@ -207,6 +207,26 @@ struct Collected {
 /// 共用采集路径（M7）：价格加载 → 缓存增量采集 → 全局去重 → 回填统计。
 /// 各阶段 INFO 计时落日志（用户排障依据；粒度 = 每 agent 一行，不逐文件刷屏）。
 fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
+    let kinds: Vec<AgentKind> = match opts.agent {
+        Some(k) => vec![k],
+        None => vec![AgentKind::ClaudeCode, AgentKind::Codex],
+    };
+    let mut sources: Vec<Box<dyn Source>> = Vec::new();
+    for kind in kinds {
+        let dir = match kind {
+            AgentKind::ClaudeCode => &opts.claude_dir,
+            AgentKind::Codex => &opts.codex_dir,
+        };
+        sources.push(make_source(kind, dir)?);
+    }
+    collect_all_with_sources(sources, opts)
+}
+
+/// 可注入来源的采集实现（测试用 MockSource 走同一管线）。
+fn collect_all_with_sources(
+    sources: Vec<Box<dyn Source>>,
+    opts: &SummaryOptions,
+) -> Result<Collected> {
     let t_total = std::time::Instant::now();
     let pricing_path = pricing_file_path(opts.pricing_path.as_ref());
     let openrouter_path = openrouter_file_path(opts.openrouter_path.as_ref());
@@ -232,24 +252,19 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
     let (cache, mut cache_warnings) = open_cache(opts);
     warnings.append(&mut cache_warnings);
 
-    let mut sources: Vec<SourceReport> = Vec::new();
+    let mut reports: Vec<SourceReport> = Vec::new();
     let mut all_events: Vec<UsageEvent> = Vec::new();
-    let mut keep_paths: Vec<String> = Vec::new();
 
-    let kinds: Vec<AgentKind> = match opts.agent {
-        Some(k) => vec![k],
-        None => vec![AgentKind::ClaudeCode, AgentKind::Codex],
-    };
-    for kind in kinds {
+    for src in sources {
+        let kind = src.agent();
         let t_agent = std::time::Instant::now();
-        let dir = match kind {
-            AgentKind::ClaudeCode => &opts.claude_dir,
-            AgentKind::Codex => &opts.codex_dir,
-        };
-        let src = make_source(kind, dir)?;
         let mut stats = CollectStats::default();
         let mut events: Vec<UsageEvent> = Vec::new();
-        let files = src.discover();
+        let (files, discovery_errors) = src.discover_with_errors();
+        // B4：发现期异常必须可见；发现失败的来源不参与缓存清理。
+        for e in &discovery_errors {
+            warnings.push(e.clone());
+        }
         if files.is_empty() && !src.root().is_dir() {
             warnings.push(format!(
                 "{} 目录不存在：{}",
@@ -260,15 +275,17 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
                 src.root().display()
             ));
         }
+        let mut agent_keep: Vec<String> = Vec::new();
         let mut cached_hits = 0u32;
         let mut reparsed = 0u32;
         let mut parse_ms_total = 0u128;
         let mut store_ms_total = 0u128;
         let mut lookup_errs = 0u32;
         let mut store_errs = 0u32;
+        let mut unstable = 0u32;
         for file in &files {
             let path_str = file.display().to_string();
-            keep_paths.push(path_str.clone());
+            agent_keep.push(path_str.clone());
             let mut cached: Option<crate::source::FileParse> = None;
             if !opts.refresh
                 && let (Some(c), Some(size), Ok(mt)) =
@@ -288,19 +305,39 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
                     p
                 }
                 None => {
+                    // B4：解析前取指纹，解析后复核——追加中的文件不写"成功"
+                    // 缓存（否则旧数据配上新指纹，此后永远命中陈旧内容）。
+                    let fp_before = if cache.is_some() {
+                        Some((file_size(file), mtime_ms(file).ok()))
+                    } else {
+                        None
+                    };
                     let t = std::time::Instant::now();
                     let p = src.parse_file(file);
                     parse_ms_total += t.elapsed().as_millis();
                     reparsed += 1;
                     if let Some(c) = &cache {
-                        let size = file_size(file).unwrap_or(0);
-                        let mt = mtime_ms(file).unwrap_or(0);
-                        let t = std::time::Instant::now();
-                        if let Err(e) = c.store_file(&path_str, kind, size, mt, &p) {
-                            store_errs += 1;
-                            warnings.push(format!("缓存写入失败（不影响统计）: {e:#}"));
+                        let fp_after = (file_size(file), mtime_ms(file).ok());
+                        let stable = fp_before == Some(fp_after);
+                        if !stable {
+                            unstable += 1;
+                            warnings
+                                .push(format!("采集期间文件变化，本轮不计入缓存: {}", path_str));
+                        } else if p.stats.io_errors > 0 {
+                            warnings.push(format!(
+                                "文件读取失败，本轮不缓存（不影响统计）: {}",
+                                path_str
+                            ));
+                        } else {
+                            let size = fp_after.0.unwrap_or(0);
+                            let mt = fp_after.1.unwrap_or(0);
+                            let t = std::time::Instant::now();
+                            if let Err(e) = c.store_file(&path_str, kind, size, mt, &p) {
+                                store_errs += 1;
+                                warnings.push(format!("缓存写入失败（不影响统计）: {e:#}"));
+                            }
+                            store_ms_total += t.elapsed().as_millis();
                         }
-                        store_ms_total += t.elapsed().as_millis();
                     }
                     p
                 }
@@ -333,19 +370,35 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
                 kind.as_str()
             );
         }
-        sources.push(SourceReport { agent: kind, stats });
-        all_events.extend(events);
-    }
-    if let Some(c) = &cache {
-        let t = std::time::Instant::now();
-        match c.purge_missing(&keep_paths) {
-            Ok(n) => {
-                if n > 0 {
-                    log::info!("缓存清理：{} 条过期行，{} ms", n, t.elapsed().as_millis());
-                }
-            }
-            Err(e) => warnings.push(format!("缓存清理失败（不影响统计）: {e:#}")),
+        if unstable > 0 {
+            log::warn!(
+                "采集 {}: {unstable} 个文件采集期间持续变化，本轮未入缓存",
+                kind.as_str()
+            );
         }
+        // B5/F06：清理只作用于本来源；发现失败绝不清理（无法区分"已删除"
+        // 与"暂时读不到"）。
+        if let Some(c) = &cache
+            && discovery_errors.is_empty()
+            && src.root().is_dir()
+        {
+            let t = std::time::Instant::now();
+            match c.purge_agent(kind, &agent_keep) {
+                Ok(n) => {
+                    if n > 0 {
+                        log::info!(
+                            "缓存清理（{}）：{} 条过期行，{} ms",
+                            kind.as_str(),
+                            n,
+                            t.elapsed().as_millis()
+                        );
+                    }
+                }
+                Err(e) => warnings.push(format!("缓存清理失败（不影响统计）: {e:#}")),
+            }
+        }
+        reports.push(SourceReport { agent: kind, stats });
+        all_events.extend(events);
     }
 
     // 全局去重（跨文件、按 agent 规则），并回填 per-agent 的丢弃数与事件数。
@@ -359,7 +412,7 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
         dropped.iter().map(|(_, n)| n).sum::<u64>(),
         t_dedupe.elapsed().as_millis()
     );
-    for s in &mut sources {
+    for s in &mut reports {
         s.stats.duplicates_dropped = dropped
             .iter()
             .find(|(a, _)| *a == s.agent)
@@ -375,7 +428,7 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
     );
     Ok(Collected {
         events,
-        sources,
+        sources: reports,
         pricing,
         warnings,
     })
@@ -1063,5 +1116,101 @@ cache_read = 0.0
         assert_eq!(st[0].files, 2);
         assert!(!st[1].exists);
         assert_eq!(st[1].files, 0);
+    }
+}
+
+/// B4 测试：解析期间文件被追加 → 指纹复核失败 → 不写成功缓存。
+/// （独立测试模块，避免与上方 tests 的助手命名冲突。）
+#[cfg(test)]
+mod collect_stability_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("tokenscope-b4-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    struct AppendMock {
+        root: PathBuf,
+        file: PathBuf,
+    }
+
+    impl Source for AppendMock {
+        fn agent(&self) -> AgentKind {
+            AgentKind::Codex
+        }
+
+        fn root(&self) -> &Path {
+            &self.root
+        }
+
+        fn discover_with_errors(&self) -> (Vec<PathBuf>, Vec<String>) {
+            (vec![self.file.clone()], Vec::new())
+        }
+
+        fn parse_file(&self, path: &Path) -> crate::source::FileParse {
+            // 模拟"解析期间日志被源工具追加"：解析中追加一行，返回的是
+            // 追加前内容的解析结果。
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            writeln!(f, r#"{{"appended":true}}"#).unwrap();
+            let stats = CollectStats {
+                lines_seen: 1,
+                events: 1,
+                ..CollectStats::default()
+            };
+            crate::source::FileParse {
+                stats,
+                events: vec![UsageEvent {
+                    ts: "2026-07-17T15:00:00Z".parse().unwrap(),
+                    agent: AgentKind::Codex,
+                    model: "m".into(),
+                    session_id: "s".into(),
+                    project: "p".into(),
+                    record_id: String::new(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                }],
+            }
+        }
+    }
+
+    #[test]
+    fn test_append_during_parse_not_cached_as_complete() {
+        let dir = tmp_dir("append-stability");
+        let root = dir.join("codex");
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("rollout-x.jsonl");
+        std::fs::write(&file, "{}\n").unwrap();
+        let opts = SummaryOptions {
+            agent: Some(AgentKind::Codex),
+            cache_dir: Some(dir.join("cache")),
+            pricing_index: Some(dir.join("idx.json")),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
+            tz: Some("Asia/Shanghai".to_string()),
+            ..Default::default()
+        };
+        let sources: Vec<Box<dyn Source>> = vec![Box::new(AppendMock {
+            root: root.clone(),
+            file: file.clone(),
+        })];
+        let c = collect_all_with_sources(sources, &opts).unwrap();
+        assert_eq!(c.events.len(), 1, "解析结果正常入账");
+        assert!(
+            c.warnings.iter().any(|w| w.contains("本轮不计入缓存")),
+            "应有文件变化警告: {:?}",
+            c.warnings
+        );
+        // 关键断言：不稳定文件绝不能配上"追加后"的指纹写成成功缓存——
+        // 否则此后永远命中这份缺尾数据。
+        let info = cache_stats(opts.cache_dir.clone()).unwrap();
+        assert_eq!(info.files, 0, "采集期间变化的文件不得入缓存");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
