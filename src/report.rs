@@ -223,7 +223,7 @@ struct Collected {
 
 /// D1：采集快照（不可变共享）——并发同参查询复用同一次采集，
 /// 事件/来源/警告/价格表一份冻结，各查询自行做时间与行级过滤。
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct CollectionSnapshot {
     generation: u64,
     events: Vec<UsageEvent>,
@@ -234,7 +234,11 @@ struct CollectionSnapshot {
 
 /// 单飞槽：key → (互斥结果, 条件变量)。None = 空闲。
 type FlightCell = Arc<(Mutex<Option<Result<CollectionSnapshot, String>>>, Condvar)>;
-static INFLIGHT: Mutex<Option<(String, FlightCell)>> = Mutex::new(None);
+
+/// 占用中的航班表（Task 1）：key → cell。按 key 管理——不同参数的采集
+/// 可并发进行，同参跟随者共享同一航班；清理时以 cell 指针身份核对。
+static INFLIGHT: std::sync::LazyLock<Mutex<std::collections::HashMap<String, FlightCell>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 static COLLECT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// 采集键：只含影响**采集**的参数（by/tz/from/to/days 是采集后的过滤，
@@ -270,49 +274,92 @@ fn wait_flight(cell: &FlightCell) -> Result<Arc<CollectionSnapshot>> {
 }
 
 /// 单飞入口：领队采集并发布快照；同参跟随者等待复用。
-/// 领队 panic 由 NotifyDrop 兜底唤醒等待者（标记失败），不会悬挂。
+/// Task 1（RAII）：成功、错误、panic 三条路径都发布结果并释放槽位——
+/// 失败必须可重试，等待者必须拿到真实错误而非悬挂。
 fn collect_flighted(opts: &SummaryOptions) -> Result<Arc<CollectionSnapshot>> {
+    collect_flighted_with(opts, &|generation| collect_inner(opts, generation))
+}
+
+/// 可注入 leader 工作的单飞实现（测试注入失败/panic 闭包）。
+fn collect_flighted_with(
+    opts: &SummaryOptions,
+    leader: &dyn Fn(u64) -> Result<CollectionSnapshot>,
+) -> Result<Arc<CollectionSnapshot>> {
     let key = collection_key(opts);
-    let mut guard = INFLIGHT.lock().unwrap();
-    if let Some((k, cell)) = guard.as_ref()
-        && *k == key
-    {
-        let cell = cell.clone();
-        drop(guard);
+    // entry 分支一次性决定身份：插入者 = 领队，命中者 = 跟随者。
+    let (cell, is_leader): (FlightCell, bool) = {
+        let mut g = INFLIGHT.lock().unwrap();
+        match g.entry(key.clone()) {
+            std::collections::hash_map::Entry::Occupied(e) => (e.get().clone(), false),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let c: FlightCell = Arc::new((Mutex::new(None), Condvar::new()));
+                e.insert(c.clone());
+                (c, true)
+            }
+        }
+    };
+    if !is_leader {
         return wait_flight(&cell);
     }
-    let cell: FlightCell = Arc::new((Mutex::new(None), Condvar::new()));
-    *guard = Some((key, cell.clone()));
-    drop(guard);
 
-    struct NotifyDrop(FlightCell);
-    impl Drop for NotifyDrop {
-        fn drop(&mut self) {
-            let mut r = self.0.0.lock().unwrap();
-            if r.is_none() {
-                *r = Some(Err("采集线程异常退出".to_string()));
-            }
-            self.0.1.notify_all();
+    /// RAII 守卫：显式 publish 成功/错误；Drop 兜底 panic 路径并清槽。
+    /// 锁顺序固定为先 cell 后 INFLIGHT，且不在持有 INFLIGHT 时等 cell。
+    struct FlightGuard {
+        key: String,
+        cell: FlightCell,
+        published: bool,
+    }
+    impl FlightGuard {
+        fn publish_ok(&mut self, snap: CollectionSnapshot) {
+            let mut r = self.cell.0.lock().unwrap();
+            *r = Some(Ok(snap));
+            self.cell.1.notify_all();
+            self.published = true;
+        }
+
+        fn publish_error(&mut self, msg: String) {
+            let mut r = self.cell.0.lock().unwrap();
+            *r = Some(Err(msg));
+            self.cell.1.notify_all();
+            self.published = true;
         }
     }
-    let _notify = NotifyDrop(cell.clone());
+    impl Drop for FlightGuard {
+        fn drop(&mut self) {
+            if !self.published {
+                let mut r = self.cell.0.lock().unwrap();
+                if r.is_none() {
+                    *r = Some(Err("采集线程异常退出".to_string()));
+                }
+                self.cell.1.notify_all();
+            }
+            // 释放槽位：仅当仍是本航班（旧 leader 不能清理被顶替的槽）。
+            let mut g = INFLIGHT.lock().unwrap();
+            if g.get(&self.key).is_some_and(|c| Arc::ptr_eq(c, &self.cell)) {
+                g.remove(&self.key);
+            }
+        }
+    }
+
+    let mut guard = FlightGuard {
+        key,
+        cell: cell.clone(),
+        published: false,
+    };
     let generation = COLLECT_GENERATION.fetch_add(1, Ordering::Relaxed);
-    let snapshot = collect_inner(opts, generation)?;
-    {
-        let mut r = cell.0.lock().unwrap();
-        *r = Some(Ok(snapshot.clone()));
-        cell.1.notify_all();
+    match leader(generation) {
+        Ok(snapshot) => {
+            guard.publish_ok(snapshot.clone());
+            drop(guard);
+            Ok(Arc::new(snapshot))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            guard.publish_error(msg.clone());
+            drop(guard);
+            Err(anyhow::anyhow!(msg))
+        }
     }
-    // 清理飞行槽（若仍为本航班；被不同 key 顶替则不动）。
-    let mut g = INFLIGHT.lock().unwrap();
-    if let Some((k, c)) = g.as_ref()
-        && Arc::ptr_eq(c, &cell)
-    {
-        *g = None;
-    }
-    drop(g);
-    drop(_notify);
-    Ok(Arc::new(snapshot))
 }
 
 fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSnapshot> {
@@ -1376,6 +1423,120 @@ cache_read = 0.0
             .collect();
         assert_eq!(flat, expect);
         std::fs::remove_dir_all(&hermetic).ok();
+    }
+
+    /// Task 1 红测试：失败航班必须可重试、唤醒全部等待者、panic 清槽。
+    /// leader 工作经闭包注入（生产路径传真实 collect_inner）。
+    #[test]
+    fn test_failed_flight_is_retryable() {
+        let dir = tmp_dir("flight-retry");
+        let opts = opts(Some(dir.join("cache")), None, false);
+        let calls = std::sync::Arc::new(AtomicU64::new(0));
+        let calls2 = calls.clone();
+        let leader = move |_gen: u64| -> Result<CollectionSnapshot> {
+            calls2.fetch_add(1, Ordering::Relaxed);
+            Err(anyhow::anyhow!("boom"))
+        };
+        let r1 = collect_flighted_with(&opts, &leader);
+        assert!(r1.is_err());
+        assert!(
+            r1.unwrap_err().to_string().contains("boom"),
+            "真实错误必须透传"
+        );
+        let r2 = collect_flighted_with(&opts, &leader);
+        assert!(r2.is_err(), "失败后同参请求必须重新执行而非复用失败结果");
+        assert!(r2.unwrap_err().to_string().contains("boom"));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            2,
+            "失败航班必须可重试（leader 跑两次）"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_failed_flight_wakes_all_waiters() {
+        let dir = tmp_dir("flight-wake");
+        let opts = opts(Some(dir.join("cache")), None, false);
+        TEST_COLLECT_DELAY_MS.store(200, Ordering::Relaxed);
+        let calls = std::sync::Arc::new(AtomicU64::new(0));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let b = barrier.clone();
+            let o = opts.clone();
+            let c = calls.clone();
+            handles.push(std::thread::spawn(move || {
+                b.wait();
+                let leader = move |_gen: u64| -> Result<CollectionSnapshot> {
+                    c.fetch_add(1, Ordering::Relaxed);
+                    // 重叠窗口由闭包自身制造（延迟旋钮在真实采集路径上，
+                    // 注入闭包的失败路径不经过它）。1s 保证并行测试负载下
+                    // 三个线程都进入单飞。
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                    Err(anyhow::anyhow!("boom"))
+                };
+                collect_flighted_with(&o, &leader)
+            }));
+        }
+        let mut errs = Vec::new();
+        for h in handles {
+            errs.push(
+                h.join()
+                    .unwrap()
+                    .err()
+                    .expect("应返回错误而非悬挂")
+                    .to_string(),
+            );
+        }
+        assert!(
+            errs.iter().all(|e| e.contains("boom")),
+            "全部等待者都应被唤醒并拿到真实错误: {errs:?}"
+        );
+        let n = calls.load(Ordering::Relaxed);
+        assert!(n == 1, "重叠窗口内 leader 只跑一次: {n}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_panicked_flight_wakes_waiter_and_clears_slot() {
+        let dir = tmp_dir("flight-panic");
+        let opts = opts(Some(dir.join("cache")), None, false);
+        // 领队线程：睡 200ms 后 panic（保证主线程成为跟随者）。
+        let o1 = opts.clone();
+        let leader = std::thread::spawn(move || {
+            let leader_fn = |_gen: u64| -> Result<CollectionSnapshot> {
+                // 先注册航班（立即）再睡：保证主线程成为跟随者。
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                panic!("采集炸了");
+            };
+            let _ = collect_flighted_with(&o1, &leader_fn);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // 主线程作为跟随者加入同一航班 → 领队 panic 后应被唤醒并拿到错误。
+        let ok_fn = |_gen: u64| -> Result<CollectionSnapshot> {
+            panic!("跟随者闭包不应被调用");
+        };
+        let follower = collect_flighted_with(&opts, &ok_fn);
+        assert!(
+            follower.is_err() && follower.unwrap_err().to_string().contains("异常退出"),
+            "panic 必须唤醒等待者"
+        );
+        leader.join().unwrap_err();
+        // 槽位已清空：后续同参请求可重新执行（成功闭包这次成为领队）。
+        let ok2 = |_gen: u64| -> Result<CollectionSnapshot> {
+            Ok(CollectionSnapshot {
+                generation: 9,
+                events: Vec::new(),
+                sources: Vec::new(),
+                warnings: Vec::new(),
+                pricing: std::sync::Arc::new(crate::pricing::Pricing::default()),
+            })
+        };
+        let r = collect_flighted_with(&opts, &ok2);
+        assert!(r.is_ok(), "panic 清槽后必须可重试: {r:?}");
+        assert_eq!(r.unwrap().generation, 9);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
