@@ -40,7 +40,7 @@ const columns = computed<DataTableColumn[]>(() => {
     align: "right",
     render: (row) => fmtNum(asGroup(row).tokens[path]),
   });
-  return [
+  const cols: DataTableColumn[] = [
     first,
     num("请求", "requests"),
     token("输入", "input"),
@@ -70,6 +70,20 @@ const columns = computed<DataTableColumn[]>(() => {
       },
     },
   ];
+  // C5：未计价 token 单列可追溯（无价格模型 / 部分计价的缺价分项）。
+  if (props.report.totals.unknown_pricing) {
+    cols.push({
+      title: "未知†",
+      key: "unknown_tokens",
+      align: "right",
+      render: (row) => {
+        const u = asGroup(row).unknown_tokens;
+        const n = u.input + u.output + u.cache_write + u.cache_read;
+        return n > 0 ? h("span", { style: "opacity: 0.75" }, fmtNum(n)) : "—";
+      },
+    });
+  }
+  return cols;
 });
 
 const rows = computed<Group[]>(() => props.report.groups);
@@ -107,7 +121,8 @@ const sourceLines = computed(() =>
       v-if="report.totals.unknown_pricing"
       style="font-size: 12px; opacity: 0.7; margin-top: 6px"
     >
-      † 部分用量来自无价格模型，费用仅含已计价部分（unknown 用量见合计行明细）。
+      † 费用为估算，仅含已计价部分：无价格模型的全部用量、或价格快照缺分项价
+      （如缓存价未知）时该分项的用量，均不计入费用，其 token 数见"未知†"列。
     </div>
     <NCollapse style="margin-top: 8px">
       <NCollapseItem title="来源采集统计" name="sources">

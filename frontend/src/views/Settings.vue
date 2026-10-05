@@ -176,7 +176,10 @@ function priceCell(r: object, pick: (e: PricingEntry) => number): VNode {
     trigger: () => h("span", { style: "cursor: help" }, fmtPrice(pick(e))),
     default: () =>
       h("div", { style: "font-size: 12px; line-height: 1.8" }, [
-        h("div", `来源：${e.source}`),
+        h(
+          "div",
+          `来源：${e.source}${e.incomplete ? "（不完整：部分分项价格未知，按 0 展示但未计费）" : ""}`,
+        ),
         h("div", orLine),
         or?.name ? h("div", { style: "opacity: 0.7" }, `模型：${or.name}`) : null,
       ]),
