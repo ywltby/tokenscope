@@ -31,10 +31,16 @@ const sourceStatus = ref<SourceStatus[]>([]);
 const drill = ref<EventDrill | null>(null);
 const events = ref<EventList | null>(null);
 const eventsLoading = ref(false);
+// F01（计划 A2）：汇总与明细各自持有请求代次——曾共用一个 runSeq，两个
+// immediate watcher 依次启动使后者作废前者，首屏永远转圈或停在旧快照。
+let summarySeq = 0;
+let eventsSeq = 0;
+// 失败必须可见并可重试（计划 ipc_error_visible），不再无声吞异常。
+const summaryError = ref<string | null>(null);
+const eventsError = ref<string | null>(null);
 // 启动提速（用户 2026-10-04）：先渲染上次视图快照，再后台刷新替换
 const stale = ref(false);
 const cachedAt = ref<string | null>(null);
-let runSeq = 0;
 
 const dimOptions: { label: string; value: Dim }[] = [
   { label: "按日", value: "day" },
@@ -58,8 +64,9 @@ const agentOptions: { label: string; value: AgentFilter; icon: string }[] = [
 ];
 
 async function refresh(): Promise<void> {
-  const seq = ++runSeq;
+  const seq = ++summarySeq;
   loading.value = true;
+  summaryError.value = null;
   try {
     const fresh = await invoke<SummaryReport>("summarize", {
       by: by.value,
@@ -69,14 +76,16 @@ async function refresh(): Promise<void> {
       to: range.value ? fmtDate(range.value[1]) : null,
       tz: tz.value,
     });
-    if (seq !== runSeq) return; // 已有更新的查询，丢弃旧响应
+    if (seq !== summarySeq) return; // 已有更新的查询，丢弃旧响应
     report.value = fresh;
     stale.value = false;
     void invoke("view_cache_save", {
       value: { report: fresh, events: events.value, saved_at: new Date().toISOString() },
     });
+  } catch (e) {
+    if (seq === summarySeq) summaryError.value = e instanceof Error ? e.message : String(e);
   } finally {
-    if (seq === runSeq) loading.value = false;
+    if (seq === summarySeq) loading.value = false;
   }
 }
 
@@ -85,8 +94,9 @@ async function loadSources(): Promise<void> {
 }
 
 async function loadEvents(): Promise<void> {
-  const seq = ++runSeq;
+  const seq = ++eventsSeq;
   eventsLoading.value = true;
+  eventsError.value = null;
   try {
     const list = await invoke<EventList>("list_events", {
       agent: agent.value,
@@ -98,13 +108,15 @@ async function loadEvents(): Promise<void> {
       limit: 200,
       tz: tz.value,
     });
-    if (seq !== runSeq) return;
+    if (seq !== eventsSeq) return;
     events.value = list;
     void invoke("view_cache_save", {
       value: { report: report.value, events: list, saved_at: new Date().toISOString() },
     });
+  } catch (e) {
+    if (seq === eventsSeq) eventsError.value = e instanceof Error ? e.message : String(e);
   } finally {
-    if (seq === runSeq) eventsLoading.value = false;
+    if (seq === eventsSeq) eventsLoading.value = false;
   }
 }
 
@@ -128,6 +140,12 @@ async function loadViewCache(): Promise<void> {
 void loadViewCache();
 
 function onSummaryRowClick(key: string): void {
+  // 合计行不是真实维度值，不得生成字面“合计”过滤（计划 total_row_clears_drill）。
+  if (key === "合计") {
+    if (by.value === "agent") agent.value = "all";
+    drill.value = null;
+    return;
+  }
   if (by.value === "agent") {
     // Agent 行：切换顶部 agent 过滤，不进入明细下钻
     agent.value = key === "claude-code" ? "claude" : key === "codex" ? "codex" : "all";
@@ -183,6 +201,15 @@ void loadSources();
         <DateRangeSelect v-model:value="range" />
       </div>
     </div>
+    <!-- 失败可见并可重试（计划 A2）：保留已有数据展示，不整体灰罩 -->
+    <NAlert v-if="summaryError" type="error" style="margin-bottom: 12px">
+      汇总加载失败：{{ summaryError }}
+      <NButton size="tiny" style="margin-left: 8px" @click="refresh">重试</NButton>
+    </NAlert>
+    <NAlert v-if="eventsError" type="error" style="margin-bottom: 12px">
+      明细加载失败：{{ eventsError }}
+      <NButton size="tiny" style="margin-left: 8px" @click="loadEvents">重试</NButton>
+    </NAlert>
     <!-- 有数据时不再全屏灰罩：数据原地更新，右上角提示刷新中 -->
     <NSpin :show="loading && !report">
       <!-- 最小高度保证加载转圈居中于可视区，避免空内容时贴顶被遮挡 -->

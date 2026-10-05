@@ -9,7 +9,9 @@
     "typecheck": "vue-tsc --noEmit",
     "tauri": "tauri",
     "format": "prettier --write \"src/**/*.{ts,vue,json}\"",
-    "format:check": "prettier --check \"src/**/*.{ts,vue,json}\""
+    "format:check": "prettier --check \"src/**/*.{ts,vue,json}\"",
+    "test": "vitest --run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.1",
@@ -20,9 +22,12 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.1",
     "@vitejs/plugin-vue": "^6.0.9",
+    "@vue/test-utils": "^2.5.1",
+    "happy-dom": "^20.14.5",
     "prettier": "^3.9.9",
     "typescript": "^5.9.2",
     "vite": "^8.3.2",
+    "vitest": "^5.0.3",
     "vue-tsc": "^3.3.12"
   }
 }
