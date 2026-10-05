@@ -899,7 +899,7 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
         .map(|(e, _s, cursor)| {
             // B3：部分计价模型的明细行展示已计价小计（unknown 分项随总计披露）。
             let cost_usd = pricing
-                .estimate(&e.model, &TokenCounts::from_event(&e))
+                .estimate(&e.model, &TokenCounts::from_event(&e), e.ts)
                 .map(|est| est.cost);
             EventRow {
                 ts: e.ts.to_zoned(tz.clone()).strftime("%F %T").to_string(),
@@ -1583,6 +1583,78 @@ cache_read = 0.4
         let expect: Vec<String> = full.rows.iter().map(|r| r.cursor.clone()).collect();
         assert_eq!(flat, expect);
         std::fs::remove_dir_all(&hermetic).ok();
+    }
+
+    #[test]
+    fn test_event_pricing_uses_event_timestamp() {
+        // Task 4A：费用估算使用历史事件时间与规则时区——同一模型两个事件
+        // 落在不同峰谷档时明细费用必须不同；若读当前墙上时钟则两者恒同价。
+        let dir = tmp_dir("event-pricing-ts");
+        let proj = dir.join("proj-t");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess-t.jsonl"),
+            concat!(
+                r#"{"type":"assistant","timestamp":"2026-01-05T13:00:00.000Z","sessionId":"s-t","isSidechain":false,"message":{"id":"msg-2","model":"timed-model","usage":{"input_tokens":1000000,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-01-05T11:00:00.000Z","sessionId":"s-t","isSidechain":false,"message":{"id":"msg-1","model":"timed-model","usage":{"input_tokens":1000000,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let toml = dir.join("pricing.toml");
+        std::fs::write(
+            &toml,
+            r#"[[model]]
+prefix = "timed-model"
+input = 2.0
+output = 0.0
+cache_write = 0.0
+cache_read = 0.0
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+
+[[model.schedule.period]]
+start_time = "10:00"
+end_time = "12:00"
+input = 10.0
+output = 0.0
+cache_write = 0.0
+cache_read = 0.0
+"#,
+        )
+        .unwrap();
+        let cache = dir.join("cache");
+        let opts = SummaryOptions {
+            by: GroupBy::Day,
+            claude_dir: Some(dir.clone()),
+            codex_dir: Some(PathBuf::from("Z:/no-such-codex")),
+            cache_dir: Some(cache.clone()),
+            pricing_index: Some(cache.join("pricing-index.json")),
+            pricing_path: Some(toml),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/or.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/md.json")),
+            tz: Some("UTC".to_string()),
+            refresh: true,
+            ..Default::default()
+        };
+        let filter = EventFilter::default();
+        let list = list_events(&opts, &filter).unwrap();
+        assert_eq!(list.rows.len(), 2);
+        // ts 降序：13:00 UTC（窗外 → 基础 2.0）在前；11:00 UTC（峰时 → 10.0）在后。
+        assert!(
+            (list.rows[0].cost_usd.unwrap() - 2.0).abs() < 1e-9,
+            "rows: {:?}",
+            list.rows
+        );
+        assert!(
+            (list.rows[1].cost_usd.unwrap() - 10.0).abs() < 1e-9,
+            "rows: {:?}",
+            list.rows
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Task 1 红测试：失败航班必须可重试、唤醒全部等待者、panic 清槽。

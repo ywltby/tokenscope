@@ -100,7 +100,7 @@ pub struct PriceSegment {
     pub prices: PriceRates,
 }
 
-/// 通用价格计划：基础价 + 零个或多个有界分段。
+/// 通用价格计划：基础价 + 零个或多个有界分段 + 零个或多个峰谷时间规则。
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PricePlan {
     #[serde(default)]
@@ -110,34 +110,49 @@ pub struct PricePlan {
     pub base: PriceRates,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub segments: Vec<PriceSegment>,
+    /// Task 4A：峰谷时间规则。请求时间命中规则时，其价格作为分段之后的
+    /// 回退层（segment ?? schedule/period ?? base）；多条规则同时命中时
+    /// 各自计价取最高，不从不同规则逐项拼价。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schedules: Vec<PriceSchedule>,
 }
 
-/// 校验价格计划：非负价格、区间有序不重叠、有上限分段后不得再有分段。
+/// 峰谷时间规则（Task 4A）：规则时区下的左闭右开时间窗 + 价格覆盖。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PriceSchedule {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// IANA 时区名（如 "Asia/Shanghai"）；None = UTC。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub periods: Vec<SchedulePeriod>,
+    /// 规则级价格（无 period 命中时作为该规则的基础覆盖）。
+    pub prices: PriceRates,
+    /// 规则内可选上下文分段（缺省时沿用 plan.segments）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<PriceSegment>,
+}
+
+/// 一段时间窗 + 价格覆盖：`[start_time, end_time)` 本地规则时区，
+/// "HH:MM"；weekdays None = 每天星期限制。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SchedulePeriod {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub start_time: String,
+    pub end_time: String,
+    /// 星期限制（规范化小写三字母 mon/tue/wed/thu/fri/sat/sun）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekdays: Option<Vec<String>>,
+    pub prices: PriceRates,
+}
+
+/// 分段区间不变量：有序、不重叠、无空洞、无上限段必须最后。
 /// 返回 Err = 不可计价的规则（调用方跳过并给出诊断，不猜测）。
-pub fn validate_price_plan(plan: &PricePlan) -> Result<(), String> {
-    let mut groups: Vec<(String, &PriceRates)> = vec![("base".to_string(), &plan.base)];
-    groups.extend(
-        plan.segments
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (format!("分段 {i}"), &s.prices)),
-    );
-    for (name, r) in groups {
-        for (comp, v) in [
-            ("input", r.input),
-            ("output", r.output),
-            ("cache_write", r.cache_write),
-            ("cache_read", r.cache_read),
-        ] {
-            if let Some(v) = v
-                && v < 0.0
-            {
-                return Err(format!("{name} 分项 {comp} 价格为负: {v}"));
-            }
-        }
-    }
+pub(crate) fn validate_segment_rules(segments: &[PriceSegment]) -> Result<(), String> {
     let mut prev_max: Option<u64> = None;
-    for (i, s) in plan.segments.iter().enumerate() {
+    for (i, s) in segments.iter().enumerate() {
         if s.max_tokens.is_some_and(|m| m <= s.min_tokens) {
             return Err(format!(
                 "分段 {i}: max_tokens({:?}) 必须大于 min_tokens({})",
@@ -170,21 +185,76 @@ pub fn validate_price_plan(plan: &PricePlan) -> Result<(), String> {
     Ok(())
 }
 
+/// 校验价格计划：非负价格、区间有序不重叠、有上限分段后不得再有分段。
+/// 返回 Err = 不可计价的规则（调用方跳过并给出诊断，不猜测）。
+pub fn validate_price_plan(plan: &PricePlan) -> Result<(), String> {
+    let mut groups: Vec<(String, &PriceRates)> = vec![("base".to_string(), &plan.base)];
+    groups.extend(
+        plan.segments
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (format!("分段 {i}"), &s.prices)),
+    );
+    for (name, r) in groups {
+        for (comp, v) in [
+            ("input", r.input),
+            ("output", r.output),
+            ("cache_write", r.cache_write),
+            ("cache_read", r.cache_read),
+        ] {
+            if let Some(v) = v
+                && v < 0.0
+            {
+                return Err(format!("{name} 分项 {comp} 价格为负: {v}"));
+            }
+        }
+    }
+    validate_segment_rules(&plan.segments)
+}
+
 /// 选择唯一满足 min <= basis < max 的分段（不做最近档位猜测）。
 pub fn select_segment(plan: &PricePlan, basis_value: u64) -> Option<&PriceSegment> {
-    plan.segments
+    select_segment_in(&plan.segments, basis_value)
+}
+
+/// 在给定分段集合中选择唯一命中段（Task 4A：时间规则可自带分段）。
+fn select_segment_in(segments: &[PriceSegment], basis_value: u64) -> Option<&PriceSegment> {
+    segments
         .iter()
         .find(|s| basis_value >= s.min_tokens && s.max_tokens.is_none_or(|m| basis_value < m))
 }
 
-/// 逐字段执行"分段显式值 > 基础值"。
-pub fn effective_rates(plan: &PricePlan, selected: Option<&PriceSegment>) -> PriceRates {
+/// 逐字段执行"分段显式值 > 时间规则值 > 基础值"（Task 4A 加入时间层）。
+pub fn effective_rates(
+    plan: &PricePlan,
+    schedule_prices: Option<&PriceRates>,
+    selected: Option<&PriceSegment>,
+) -> PriceRates {
     let seg = selected.map(|s| &s.prices);
+    let time = schedule_prices;
+    let layer =
+        |seg_v: Option<f64>, time_v: Option<f64>, base_v: Option<f64>| seg_v.or(time_v).or(base_v);
     PriceRates {
-        input: seg.and_then(|s| s.input).or(plan.base.input),
-        output: seg.and_then(|s| s.output).or(plan.base.output),
-        cache_write: seg.and_then(|s| s.cache_write).or(plan.base.cache_write),
-        cache_read: seg.and_then(|s| s.cache_read).or(plan.base.cache_read),
+        input: layer(
+            seg.and_then(|s| s.input),
+            time.and_then(|r| r.input),
+            plan.base.input,
+        ),
+        output: layer(
+            seg.and_then(|s| s.output),
+            time.and_then(|r| r.output),
+            plan.base.output,
+        ),
+        cache_write: layer(
+            seg.and_then(|s| s.cache_write),
+            time.and_then(|r| r.cache_write),
+            plan.base.cache_write,
+        ),
+        cache_read: layer(
+            seg.and_then(|s| s.cache_read),
+            time.and_then(|r| r.cache_read),
+            plan.base.cache_read,
+        ),
     }
 }
 
@@ -206,12 +276,123 @@ fn tie_rank(e: &Entry, mode: MatchMode) -> (u8, u8, usize, &str) {
     (u8::MAX - e.tier, full, e.prefix.len(), e.display.as_str())
 }
 
+/// "HH:MM" → 当日秒数；非法返回 None。
+fn parse_hhmm(s: &str) -> Option<i64> {
+    let (h, m) = s.trim().split_once(':')?;
+    let h: i64 = h.parse().ok()?;
+    let m: i64 = m.parse().ok()?;
+    if !(0..24).contains(&h) || !(0..60).contains(&m) {
+        return None;
+    }
+    Some(h * 3600 + m * 60)
+}
+
+/// jiff Weekday → 规范化三字母标记（与外置 TOML/索引存储一致）。
+fn weekday_tag(w: jiff::civil::Weekday) -> &'static str {
+    use jiff::civil::Weekday::*;
+    match w {
+        Monday => "mon",
+        Tuesday => "tue",
+        Wednesday => "wed",
+        Thursday => "thu",
+        Friday => "fri",
+        Saturday => "sat",
+        Sunday => "sun",
+    }
+}
+
+/// 外置 weekday 写法 → 规范化三字母；非法显式报错。
+fn normalize_weekday(s: &str) -> Result<String, String> {
+    let t = s.trim().to_ascii_lowercase();
+    match t.as_str() {
+        "mon" | "monday" => Ok("mon".into()),
+        "tue" | "tuesday" => Ok("tue".into()),
+        "wed" | "wednesday" => Ok("wed".into()),
+        "thu" | "thursday" => Ok("thu".into()),
+        "fri" | "friday" => Ok("fri".into()),
+        "sat" | "saturday" => Ok("sat".into()),
+        "sun" | "sunday" => Ok("sun".into()),
+        other => Err(format!("非法 weekday: {other:?}")),
+    }
+}
+
+/// 请求时间命中的时间规则变体（Task 4A）：每个命中规则返回
+/// （规则, 命中的 period 或 None = 规则级默认价）。规则时区非法等
+/// 在加载时已校验，此处防御性跳过。
+fn matching_time_rules(
+    plan: &PricePlan,
+    at: jiff::Timestamp,
+) -> Vec<(&PriceSchedule, Option<&SchedulePeriod>)> {
+    let mut out = Vec::new();
+    for sched in &plan.schedules {
+        let tz = match sched.timezone.as_deref() {
+            Some(name) => match jiff::tz::TimeZone::get(name) {
+                Ok(tz) => tz,
+                Err(_) => continue,
+            },
+            None => jiff::tz::TimeZone::UTC,
+        };
+        let zoned = at.to_zoned(tz);
+        let tod =
+            (zoned.hour() as i64) * 3600 + (zoned.minute() as i64) * 60 + (zoned.second() as i64);
+        let wd = weekday_tag(zoned.weekday());
+        let mut hit = false;
+        for p in &sched.periods {
+            if let Some(days) = &p.weekdays
+                && !days.iter().any(|d| d == wd)
+            {
+                continue;
+            }
+            let (Some(start), Some(end)) = (parse_hhmm(&p.start_time), parse_hhmm(&p.end_time))
+            else {
+                continue;
+            };
+            if tod >= start && tod < end {
+                out.push((sched, Some(p)));
+                hit = true;
+            }
+        }
+        if !hit {
+            out.push((sched, None));
+        }
+    }
+    out
+}
+
 /// 对单个候选项按本次请求条件计价（Task 2A：从 estimate 抽出，候选比较
 /// 与最终计价共用同一函数，保证 breakdown 与总价同源）。
-fn estimate_entry(e: &Entry, basis_value: u64, t: &TokenCounts) -> CostEstimate {
+/// Task 4A：time_rule = 命中的（规则, 可选 period）；None = 默认档。
+/// 单条规则整体参与计价，不从不同规则逐项拼价。
+fn estimate_entry(
+    e: &Entry,
+    basis_value: u64,
+    t: &TokenCounts,
+    time_rule: Option<(&PriceSchedule, Option<&SchedulePeriod>)>,
+) -> CostEstimate {
     let plan = &e.plan;
-    let selected = select_segment(plan, basis_value);
-    let rates = effective_rates(plan, selected);
+    // 分段：时间规则自带分段优先，否则计划分段。
+    // 时间层价格：period 价格逐字段回退到规则级价格（period ?? schedule）。
+    let (selected, time_prices) = match time_rule {
+        Some((sched, period)) => {
+            let selected = if sched.segments.is_empty() {
+                select_segment(plan, basis_value)
+            } else {
+                select_segment_in(&sched.segments, basis_value)
+            };
+            let time_prices = match period {
+                Some(p) => PriceRates {
+                    input: p.prices.input.or(sched.prices.input),
+                    output: p.prices.output.or(sched.prices.output),
+                    cache_write: p.prices.cache_write.or(sched.prices.cache_write),
+                    cache_read: p.prices.cache_read.or(sched.prices.cache_read),
+                },
+                None => sched.prices,
+            };
+            (selected, Some(time_prices))
+        }
+        None => (select_segment(plan, basis_value), None),
+    };
+    let rates = effective_rates(plan, time_prices.as_ref(), selected);
     // 默认完整；缺价分项按 token 置为 partial。
     let mut est = CostEstimate {
         complete: true,
@@ -276,6 +457,12 @@ pub struct MatchedCandidate {
     pub candidate_count: usize,
     /// 选择原因：本请求条件下候选中最高费用（保守估算）。
     pub reason: String,
+    /// 命中的峰谷时间档标签（Task 4A；None = 未命中/无时间规则）。
+    pub schedule_label: Option<String>,
+    /// 命中时间档的规则时区（Task 4A）。
+    pub schedule_timezone: Option<String>,
+    /// 参与裁决的请求时间（Task 4A：历史事件时间，RFC3339）。
+    pub request_at: Option<String>,
 }
 
 /// 分项计价结果（B3）：cost 为已计价分项小计；unknown 记录无法计价分项的
@@ -372,14 +559,12 @@ struct ExternalSegment {
     cache_read: Option<f64>,
 }
 
-/// 峰谷时间规则（Task 4A 实现；Task 4 仅解析 + 拒绝含它的条目）。
-/// 字段暂未被读取——Task 4A 接入计价后移除 expect。
-#[expect(dead_code)]
+/// 外置峰谷时间规则（Task 4A）。
 #[derive(Debug, Default, serde::Deserialize)]
 struct ExternalSchedule {
     #[serde(default)]
     label: Option<String>,
-    /// IANA 时区名（如 "Asia/Shanghai"）；缺省 = 事件本地时区。
+    /// IANA 时区名（如 "Asia/Shanghai"）；缺省 = UTC。
     #[serde(default)]
     timezone: Option<String>,
     #[serde(default)]
@@ -398,9 +583,7 @@ struct ExternalSchedule {
     segment: Vec<ExternalSegment>,
 }
 
-/// 一段时间窗口 + 价格覆盖（Task 4A 实现）。
-/// 字段暂未被读取——Task 4A 接入计价后移除 expect。
-#[expect(dead_code)]
+/// 外置一段时间窗口 + 价格覆盖（Task 4A）。
 #[derive(Debug, Default, serde::Deserialize)]
 struct ExternalPeriod {
     /// "HH:MM"（本地规则时区），左闭右开 [start, end)。
@@ -438,9 +621,127 @@ fn parse_external_application(s: Option<&str>) -> Result<Option<PricingApplicati
     }
 }
 
+/// 外置分段 → PriceSegment（basis/application 必须与条目一致）。
+fn external_segment(
+    s: &ExternalSegment,
+    basis: Option<PricingBasis>,
+    application: Option<PricingApplication>,
+) -> Result<PriceSegment, String> {
+    let seg_basis = parse_external_basis(s.basis.as_deref())?;
+    if seg_basis.is_some() && seg_basis != basis {
+        return Err(format!(
+            "分段 {} 的 basis 与条目不一致（{:?} vs {:?}）",
+            s.min_tokens, s.basis, s.basis
+        ));
+    }
+    let seg_application = parse_external_application(s.application.as_deref())?;
+    if seg_application.is_some() && seg_application != application {
+        return Err(format!(
+            "分段 {} 的 application 与条目不一致（{:?} vs {:?}）",
+            s.min_tokens, s.application, s.application
+        ));
+    }
+    Ok(PriceSegment {
+        label: s.label.clone(),
+        min_tokens: s.min_tokens,
+        max_tokens: s.max_tokens,
+        prices: PriceRates {
+            input: s.input,
+            output: s.output,
+            cache_write: s.cache_write,
+            cache_read: s.cache_read,
+        },
+    })
+}
+
+/// 外置时间规则 → PriceSchedule（Task 4A）：时区、HH:MM 窗口、星期与
+/// 价格合法性在此校验；非法规则整体跳过（调用方给诊断），不猜测价格。
+fn external_schedule_plan(
+    s: &ExternalSchedule,
+    basis: Option<PricingBasis>,
+    application: Option<PricingApplication>,
+) -> Result<PriceSchedule, String> {
+    if let Some(name) = &s.timezone {
+        jiff::tz::TimeZone::get(name).map_err(|e| format!("时间规则时区非法 {name:?}: {e}"))?;
+    }
+    let mut periods = Vec::with_capacity(s.period.len());
+    for p in &s.period {
+        let start = parse_hhmm(&p.start_time)
+            .ok_or_else(|| format!("时间窗 start_time 非法: {:?}", p.start_time))?;
+        let end = parse_hhmm(&p.end_time)
+            .ok_or_else(|| format!("时间窗 end_time 非法: {:?}", p.end_time))?;
+        if start >= end {
+            return Err(format!(
+                "时间窗 [{}, {}) 非法（须 start < end，同日窗口）",
+                p.start_time, p.end_time
+            ));
+        }
+        let weekdays = p
+            .weekdays
+            .as_ref()
+            .map(|days| {
+                days.iter()
+                    .map(|d| normalize_weekday(d))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        periods.push(SchedulePeriod {
+            label: None,
+            start_time: p.start_time.clone(),
+            end_time: p.end_time.clone(),
+            weekdays,
+            prices: PriceRates {
+                input: p.input,
+                output: p.output,
+                cache_write: p.cache_write,
+                cache_read: p.cache_read,
+            },
+        });
+    }
+    let mut segments = Vec::with_capacity(s.segment.len());
+    for seg in &s.segment {
+        segments.push(external_segment(seg, basis, application)?);
+    }
+    let sched = PriceSchedule {
+        label: s.label.clone(),
+        timezone: s.timezone.clone(),
+        periods,
+        prices: PriceRates {
+            input: s.input,
+            output: s.output,
+            cache_write: s.cache_write,
+            cache_read: s.cache_read,
+        },
+        segments,
+    };
+    // 规则内价格不得为负；规则分段须满足区间不变量。
+    for r in [&sched.prices]
+        .into_iter()
+        .chain(sched.periods.iter().map(|p| &p.prices))
+        .chain(sched.segments.iter().map(|g| &g.prices))
+    {
+        for (comp, v) in [
+            ("input", r.input),
+            ("output", r.output),
+            ("cache_write", r.cache_write),
+            ("cache_read", r.cache_read),
+        ] {
+            if let Some(v) = v
+                && v < 0.0
+            {
+                return Err(format!("时间规则分项 {comp} 价格为负: {v}"));
+            }
+        }
+    }
+    validate_segment_rules(&sched.segments)?;
+    Ok(sched)
+}
+
 /// 外置条目 → PricePlan（Task 4）：四类价可选、分段走统一校验，
 /// 任何非法规则拒绝整条并给出诊断（不静默回退到基础价）。
-fn external_model_plan(m: &ExternalModel) -> Result<PricePlan, String> {
+/// Task 4A：时间规则解析失败只跳过该规则（诊断随 Vec 返回），条目其余
+/// 部分仍生效。
+fn external_model_plan(m: &ExternalModel) -> Result<(PricePlan, Vec<String>), String> {
     let basis = parse_external_basis(m.basis.as_deref())?;
     let application = parse_external_application(m.application.as_deref())?;
     let base = PriceRates {
@@ -451,41 +752,25 @@ fn external_model_plan(m: &ExternalModel) -> Result<PricePlan, String> {
     };
     let mut segments = Vec::with_capacity(m.segment.len());
     for s in &m.segment {
-        // 分段级 basis/application 必须与条目一致（当前模型单一 basis）。
-        let seg_basis = parse_external_basis(s.basis.as_deref())?;
-        if seg_basis.is_some() && seg_basis != basis {
-            return Err(format!(
-                "分段 {} 的 basis 与条目不一致（{:?} vs {:?}）",
-                s.min_tokens, s.basis, m.basis
-            ));
+        segments.push(external_segment(s, basis, application)?);
+    }
+    let mut rule_warnings = Vec::new();
+    let mut schedules = Vec::new();
+    for s in &m.schedule {
+        match external_schedule_plan(s, basis, application) {
+            Ok(sched) => schedules.push(sched),
+            Err(err) => rule_warnings.push(err),
         }
-        let seg_application = parse_external_application(s.application.as_deref())?;
-        if seg_application.is_some() && seg_application != application {
-            return Err(format!(
-                "分段 {} 的 application 与条目不一致（{:?} vs {:?}）",
-                s.min_tokens, s.application, m.application
-            ));
-        }
-        segments.push(PriceSegment {
-            label: s.label.clone(),
-            min_tokens: s.min_tokens,
-            max_tokens: s.max_tokens,
-            prices: PriceRates {
-                input: s.input,
-                output: s.output,
-                cache_write: s.cache_write,
-                cache_read: s.cache_read,
-            },
-        });
     }
     let plan = PricePlan {
         basis,
         application,
         base,
         segments,
+        schedules,
     };
     validate_price_plan(&plan)?;
-    Ok(plan)
+    Ok((plan, rule_warnings))
 }
 
 /// 外置文件不存在时「创建模板」写入的内容。
@@ -804,6 +1089,7 @@ impl Pricing {
                             application: Some(PricingApplication::WholeRequest),
                             base,
                             segments: segments.clone(),
+                            schedules: Vec::new(),
                         };
                         let plan = match validate_price_plan(&plan) {
                             Ok(()) => plan,
@@ -817,6 +1103,7 @@ impl Pricing {
                                     application: Some(PricingApplication::WholeRequest),
                                     base,
                                     segments: Vec::new(),
+                                    schedules: Vec::new(),
                                 }
                             }
                         };
@@ -879,6 +1166,7 @@ impl Pricing {
                                     cache_read: None,
                                 },
                                 segments,
+                                schedules: Vec::new(),
                             },
                             tier: TIER_OPENROUTER,
                         });
@@ -907,24 +1195,20 @@ impl Pricing {
                 }
             };
             for m in parsed.model {
-                // Task 4A 前置：含时间规则的条目整条忽略（解析结构已就绪，
-                // 计价语义在 Task 4A 落地），不得静默按基础价计价。
-                if !m.schedule.is_empty() {
-                    warnings.push(format!(
-                        "外置条目 {} 含时间规则（schedule），当前版本尚未支持，整条已忽略",
-                        m.prefix
-                    ));
-                    continue;
-                }
                 let display = m.prefix.clone();
                 match external_model_plan(&m) {
-                    Ok(plan) => pricing.add_entry(Entry {
-                        prefix: match_key(&m.prefix),
-                        display,
-                        name: None,
-                        plan,
-                        tier: TIER_EXTERNAL,
-                    }),
+                    Ok((plan, rule_warnings)) => {
+                        for w in rule_warnings {
+                            warnings.push(format!("外置条目 {display}: {w}"));
+                        }
+                        pricing.add_entry(Entry {
+                            prefix: match_key(&m.prefix),
+                            display,
+                            name: None,
+                            plan,
+                            tier: TIER_EXTERNAL,
+                        });
+                    }
                     Err(err) => warnings.push(format!("外置条目 {display} 已忽略: {err}")),
                 }
             }
@@ -1028,10 +1312,18 @@ impl Pricing {
     /// 分项计价（B3）：已知分项计价求和；未知分项（None）的 token 进
     /// unknown 且 complete=false——缺价格 ≠ 0 价格。
     /// Task 2A：先按末段键收集候选，再对每个候选用**本次请求条件**
-    /// （basis token 与分段规则）计算总费用，取最高者作为保守估算；
-    /// 并列按来源优先级 > 完整匹配 > 前缀更长 > 原始键打破。
+    /// （basis token、分段规则与事件时间）计算总费用，取最高者作为保守
+    /// 估算；并列按来源优先级 > 完整匹配 > 前缀更长 > 原始键打破。
     /// 禁止跨候选拼价：四类单价全部来自最终选中的同一个候选。
-    pub fn estimate(&self, model: &str, t: &TokenCounts) -> Option<CostEstimate> {
+    /// Task 4A：`at` 是**历史事件时间**（调用方必须传事件 timestamp，
+    /// 不得用当前墙上时钟替代）；候选的峰谷规则按它换算命中档，
+    /// 同候选多条规则命中时各自计价取最高。
+    pub fn estimate(
+        &self,
+        model: &str,
+        t: &TokenCounts,
+        at: jiff::Timestamp,
+    ) -> Option<CostEstimate> {
         let cands = self.collect_candidates(model);
         if cands.is_empty() {
             return None;
@@ -1040,21 +1332,30 @@ impl Pricing {
         // cache_read），整笔请求切换档位；输出不参与档位选择（不变量 2）。
         let basis_value = t.prompt_tokens();
         let cand_count = cands.len();
-        let mut best: Option<(CostEstimate, MatchMode, &Entry)> = None;
+        let mut best: Option<(CostEstimate, MatchMode, &Entry, Option<&PriceSchedule>)> = None;
         for (e, mode) in cands {
-            let est = estimate_entry(e, basis_value, t);
+            // 候选内变体择优：默认档 + 每个命中时间规则（整规则一套价）；
+            // 费用并列时保守保留默认档。
+            let mut vbest = (estimate_entry(e, basis_value, t, None), None);
+            for (sched, period) in matching_time_rules(&e.plan, at) {
+                let est = estimate_entry(e, basis_value, t, Some((sched, period)));
+                if est.cost > vbest.0.cost {
+                    vbest = (est, Some(sched));
+                }
+            }
+            let (est, sched) = vbest;
             let take = match &best {
                 None => true,
-                Some((b, bm, be)) => {
+                Some((b, bm, be, _)) => {
                     est.cost > b.cost
                         || (est.cost == b.cost && tie_rank(e, mode) > tie_rank(be, *bm))
                 }
             };
             if take {
-                best = Some((est, mode, e));
+                best = Some((est, mode, e, sched));
             }
         }
-        let (mut est, mode, e) = best.unwrap();
+        let (mut est, mode, e, sched) = best.unwrap();
         est.matched = Some(MatchedCandidate {
             raw_key: e.display.clone(),
             channel: e.display.split_once('/').map(|(c, _)| c.to_string()),
@@ -1063,6 +1364,9 @@ impl Pricing {
             match_mode: mode,
             candidate_count: cand_count,
             reason: "candidates_highest_cost".to_string(),
+            schedule_label: sched.and_then(|s| s.label.clone()),
+            schedule_timezone: sched.and_then(|s| s.timezone.clone()),
+            request_at: Some(at.to_string()),
         });
         Some(est)
     }
@@ -1174,6 +1478,11 @@ impl Pricing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 测试用固定"事件时间"（历史时刻，绝不读当前墙上时钟）。
+    fn at() -> jiff::Timestamp {
+        "2026-01-05T10:00:00Z".parse().unwrap()
+    }
 
     fn counts(input: u64, output: u64, cw: u64, cr: u64) -> TokenCounts {
         TokenCounts {
@@ -1467,6 +1776,7 @@ mod tests {
         PricePlan {
             basis: Some(PricingBasis::PromptTokens),
             application: Some(PricingApplication::WholeRequest),
+            schedules: Vec::new(),
             base: PriceRates {
                 input: Some(3.0),
                 output: Some(15.0),
@@ -1634,6 +1944,7 @@ mod tests {
                 cache_write: Some(3.75),
                 cache_read: Some(0.3),
             },
+            schedules: Vec::new(),
             segments: vec![PriceSegment {
                 label: Some("input-only".into()),
                 min_tokens: 200_000,
@@ -1647,7 +1958,7 @@ mod tests {
             }],
         };
         let seg = select_segment(&plan, 300_000).unwrap();
-        let r = effective_rates(&plan, Some(seg));
+        let r = effective_rates(&plan, None, Some(seg));
         assert_eq!(r.input, Some(6.0));
         assert_eq!(r.output, Some(15.0), "分段缺 output → 沿用基础");
         assert_eq!(r.cache_write, Some(0.0), "显式 0 不回退");
@@ -1661,7 +1972,7 @@ mod tests {
             segments: vec![],
             ..Default::default()
         };
-        let r2 = effective_rates(&plan2, None);
+        let r2 = effective_rates(&plan2, None, None);
         assert_eq!(r2.input, Some(3.0));
         assert_eq!(r2.output, None, "无基础价 → unknown");
     }
@@ -1684,11 +1995,17 @@ mod tests {
             cache_read: cr,
         };
         // 低于阈值 → 基础价：200_000 前的 (100, 0, 0, 50)。
-        let e1 = p.estimate("tiered-model", &counts(100, 0, 0, 50)).unwrap();
+        let e1 = p
+            .estimate("tiered-model", &counts(100, 0, 0, 50), at())
+            .unwrap();
         assert!((e1.cost - (100.0 * 3.0 + 50.0 * 15.0) / 1e6).abs() < 1e-12);
         // 恰好等于阈值 200_000 → 命中 long 段：prompt = 200_000。
         let e2 = p
-            .estimate("tiered-model", &counts(100_000, 50_000, 50_000, 1_000))
+            .estimate(
+                "tiered-model",
+                &counts(100_000, 50_000, 50_000, 1_000),
+                at(),
+            )
             .unwrap();
         assert!(
             (e2.cost - (100_000.0 * 6.0 + 1_000.0 * 22.5 + 50_000.0 * 7.5 + 50_000.0 * 0.6) / 1e6)
@@ -1697,7 +2014,7 @@ mod tests {
         );
         // 1_000_000 → ultra 段。
         let e3 = p
-            .estimate("tiered-model", &counts(1_000_000, 0, 0, 10))
+            .estimate("tiered-model", &counts(1_000_000, 0, 0, 10), at())
             .unwrap();
         assert!((e3.cost - (1_000_000.0 * 9.0 + 10.0 * 30.0) / 1e6).abs() < 1e-9);
     }
@@ -1715,6 +2032,7 @@ mod tests {
                 basis: Some(PricingBasis::PromptTokens),
                 application: Some(PricingApplication::WholeRequest),
                 base: PriceRates::default(),
+                schedules: Vec::new(),
                 segments: vec![PriceSegment {
                     label: Some(">200K".into()),
                     min_tokens: 200_000,
@@ -1729,14 +2047,16 @@ mod tests {
             },
             tier: TIER_MODELSDEV,
         });
-        let e = p.estimate("no-base-model", &counts(100, 10, 0, 0)).unwrap();
+        let e = p
+            .estimate("no-base-model", &counts(100, 10, 0, 0), at())
+            .unwrap();
         assert!(!e.complete, "缺价且未命中分段 → 不完整，不得当免费");
         assert_eq!(e.unknown.input, 100);
         assert_eq!(e.unknown.output, 10);
         assert_eq!(e.cost, 0.0);
         // 命中分段后正常计价。
         let e2 = p
-            .estimate("no-base-model", &counts(200_000, 0, 0, 0))
+            .estimate("no-base-model", &counts(200_000, 0, 0, 0), at())
             .unwrap();
         assert!(e2.complete, "命中分段且有价 → 完整");
         assert!((e2.cost - 200_000.0 * 6.0 / 1e6).abs() < 1e-12);
@@ -1789,6 +2109,7 @@ mod tests {
             .estimate(
                 "nano-gpt/qwen/qwen3.8-27b-obliterated:thinking",
                 &counts(1_000_000, 0, 0, 0),
+                at(),
             )
             .unwrap();
         let m = est.matched.as_ref().expect("命中必须有元数据");
@@ -1805,6 +2126,7 @@ mod tests {
             .estimate(
                 "other-channel/qwen/qwen3.8-27b-obliterated:thinking",
                 &counts(1_000_000, 0, 0, 0),
+                at(),
             )
             .unwrap();
         assert_eq!(
@@ -1850,11 +2172,13 @@ mod tests {
             },
             tier: TIER_OPENROUTER,
         });
-        let est = p2.estimate("chan-a/mix", &counts(50_000, 0, 0, 0)).unwrap();
+        let est = p2
+            .estimate("chan-a/mix", &counts(50_000, 0, 0, 0), at())
+            .unwrap();
         assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-a/mix");
         assert!((est.cost - 50_000.0 * 8.0 / 1e6).abs() < 1e-9);
         let est = p2
-            .estimate("chan-a/mix", &counts(200_000, 0, 0, 0))
+            .estimate("chan-a/mix", &counts(200_000, 0, 0, 0), at())
             .unwrap();
         assert_eq!(
             est.matched.as_ref().unwrap().raw_key,
@@ -1887,7 +2211,11 @@ mod tests {
             });
         }
         let est = p3
-            .estimate("qwen3.8-27b-obliterated:thinking", &counts(1_000, 0, 0, 0))
+            .estimate(
+                "qwen3.8-27b-obliterated:thinking",
+                &counts(1_000, 0, 0, 0),
+                at(),
+            )
             .unwrap();
         let m = est.matched.as_ref().unwrap();
         assert_eq!(m.matched_key, "qwen3-8-27b-obliterated:thinking");
@@ -1896,13 +2224,13 @@ mod tests {
         // 4) 有边界前缀：`qwen3.8-27b` 命中 `qwen3.8-27b-instruct`，
         //    不得命中 `qwen3.8-27b2`。
         let est = p3
-            .estimate("qwen3.8-27b-instruct", &counts(1_000, 0, 0, 0))
+            .estimate("qwen3.8-27b-instruct", &counts(1_000, 0, 0, 0), at())
             .unwrap();
         let m = est.matched.as_ref().unwrap();
         assert_eq!(m.matched_key, "qwen3-8-27b");
         assert_eq!(m.match_mode, MatchMode::Prefix);
         assert!(
-            p3.estimate("qwen3.8-27b2", &counts(1_000, 0, 0, 0))
+            p3.estimate("qwen3.8-27b2", &counts(1_000, 0, 0, 0), at())
                 .is_none(),
             "无词元边界的前缀不得命中"
         );
@@ -1963,16 +2291,16 @@ mod tests {
         assert!(warnings[0].contains("bad-seg"));
         // 272000 → 基础档；272001 → 高档。
         let est = p
-            .estimate("prov/tiered", &counts(272_000, 0, 0, 0))
+            .estimate("prov/tiered", &counts(272_000, 0, 0, 0), at())
             .unwrap();
         assert!((est.cost - 272_000.0 * 4.0 / 1e6).abs() < 1e-9);
         let est = p
-            .estimate("prov/tiered", &counts(272_001, 0, 0, 0))
+            .estimate("prov/tiered", &counts(272_001, 0, 0, 0), at())
             .unwrap();
         assert!((est.cost - 272_001.0 * 8.0 / 1e6).abs() < 1e-9);
         // 非法分段的条目仍按基础价计价。
         let est = p
-            .estimate("prov/bad-seg", &counts(100_000, 0, 0, 0))
+            .estimate("prov/bad-seg", &counts(100_000, 0, 0, 0), at())
             .unwrap();
         assert!((est.cost - 100_000.0 * 1.0 / 1e6).abs() < 1e-9);
         std::fs::remove_dir_all(&dir).ok();
@@ -2014,25 +2342,31 @@ mod tests {
         let (p, warnings) = Pricing::load(None, None, Some(&snap));
         assert!(warnings.is_empty(), "warnings: {warnings:?}");
         // 271999 → 基础档（4 USD/Mtok）。
-        let est = p.estimate("prov/long", &counts(271_999, 0, 0, 0)).unwrap();
+        let est = p
+            .estimate("prov/long", &counts(271_999, 0, 0, 0), at())
+            .unwrap();
         assert!((est.cost - 271_999.0 * 4.0 / 1e6).abs() < 1e-9);
         // 272000 → 第一档（6 USD/Mtok，inclusive 下界）。
-        let est = p.estimate("prov/long", &counts(272_000, 0, 0, 0)).unwrap();
+        let est = p
+            .estimate("prov/long", &counts(272_000, 0, 0, 0), at())
+            .unwrap();
         assert!((est.cost - 272_000.0 * 6.0 / 1e6).abs() < 1e-9);
         // 999_999 → 仍第一档。
-        let est = p.estimate("prov/long", &counts(999_999, 0, 0, 0)).unwrap();
+        let est = p
+            .estimate("prov/long", &counts(999_999, 0, 0, 0), at())
+            .unwrap();
         assert!((est.cost - 999_999.0 * 6.0 / 1e6).abs() < 1e-9);
         // 1_000_000 → 第二档（8 USD/Mtok）；cache_read 第二档缺价 →
         // unknown 不按 0（分项 token 为 0 时不影响完整性）。
         let est = p
-            .estimate("prov/long", &counts(1_000_000, 0, 0, 0))
+            .estimate("prov/long", &counts(1_000_000, 0, 0, 0), at())
             .unwrap();
         assert!((est.cost - 1_000_000.0 * 8.0 / 1e6).abs() < 1e-9);
         assert!(est.complete);
         // 第二档带 cache_read token：第一档有价（0.6 USD/Mtok），第二档缺价
         // → 部分 unknown。
         let est = p
-            .estimate("prov/long", &counts(1_000_000, 0, 500, 0))
+            .estimate("prov/long", &counts(1_000_000, 0, 500, 0), at())
             .unwrap();
         assert!(!est.complete, "高档缺缓存读价 → 部分计价");
         assert_eq!(est.unknown.cache_write, 500);
@@ -2045,7 +2379,7 @@ mod tests {
         assert!(fixture_pricing().lookup("<synthetic>").is_none());
         assert!(
             fixture_pricing()
-                .estimate("qwen-x", &counts(1, 1, 0, 0))
+                .estimate("qwen-x", &counts(1, 1, 0, 0), at())
                 .is_none()
         );
     }
@@ -2091,7 +2425,11 @@ mod tests {
 
         // 部分计价：input/output 已知，cache 未知 → cost 只含已知部分。
         let est = p
-            .estimate("prov/partial", &counts(1_000_000, 1_000_000, 500, 700))
+            .estimate(
+                "prov/partial",
+                &counts(1_000_000, 1_000_000, 500, 700),
+                at(),
+            )
             .unwrap();
         assert!((est.cost - 3.0).abs() < 1e-9, "只计已知分项: {est:?}");
         assert!(!est.complete);
@@ -2102,7 +2440,7 @@ mod tests {
 
         // 显式零：缓存分项按 0 计价，complete=true。
         let est = p
-            .estimate("prov/free-cache", &counts(1_000_000, 0, 500, 700))
+            .estimate("prov/free-cache", &counts(1_000_000, 0, 500, 700), at())
             .unwrap();
         assert!((est.cost - 1.0).abs() < 1e-9);
         assert!(est.complete, "显式 0 不是未知: {est:?}");
@@ -2192,7 +2530,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = partial_pricing_fixture(&dir);
         let est = p
-            .estimate("prov/partial", &counts(1_000_000, 1_000_000, 0, 0))
+            .estimate("prov/partial", &counts(1_000_000, 1_000_000, 0, 0), at())
             .unwrap();
         assert!(est.complete, "零 token 的未知分项不影响完整性: {est:?}");
         assert_eq!(est.unknown.total(), 0);
@@ -2207,7 +2545,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = partial_pricing_fixture(&dir);
         let est = p
-            .estimate("prov/partial", &counts(1_000_000, 1_000_000, 500, 700))
+            .estimate(
+                "prov/partial",
+                &counts(1_000_000, 1_000_000, 500, 700),
+                at(),
+            )
             .unwrap();
         assert!(!est.complete, "正 token 的未知分项必须标记部分计价");
         assert_eq!(est.unknown.cache_write, 500);
@@ -2285,20 +2627,223 @@ mod tests {
     #[test]
     fn test_pricing_cost_math() {
         let est = fixture_pricing()
-            .estimate("claude-sonnet-4-5", &counts(1_000_000, 1_000_000, 0, 0))
+            .estimate(
+                "claude-sonnet-4-5",
+                &counts(1_000_000, 1_000_000, 0, 0),
+                at(),
+            )
             .unwrap();
         assert!((est.cost - 18.0).abs() < 1e-9);
         assert!(est.complete);
         let est = fixture_pricing()
-            .estimate("claude-sonnet-4-5", &counts(0, 0, 1_000_000, 1_000_000))
+            .estimate(
+                "claude-sonnet-4-5",
+                &counts(0, 0, 1_000_000, 1_000_000),
+                at(),
+            )
             .unwrap();
         assert!((est.cost - 4.05).abs() < 1e-9);
         let est = fixture_pricing()
-            .estimate("gpt-5.6-sol", &counts(800, 100, 50, 200))
+            .estimate("gpt-5.6-sol", &counts(800, 100, 50, 200), at())
             .unwrap();
         // 纯价格数学：桶值直接给定（不经适配器）。
         // Task 4 校正后：800*4 + 100*20 + 50*5.0(写) + 200*0.4(读)。
         assert!((est.cost - 5530.0 / 1_000_000.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_pricing_time_condition_candidate() {
+        // Task 4A：峰谷时间规则参与候选最高费用裁决；历史事件按事件时间
+        // 与规则时区换算，绝不读当前墙上时钟。
+        let mut p = Pricing::empty();
+        // 渠道 A：无时间规则，固定 input 8.0。
+        p.add_entry(Entry {
+            prefix: match_key("chan-a/timed"),
+            display: "chan-a/timed".into(),
+            name: None,
+            plan: PricePlan {
+                base: PriceRates {
+                    input: Some(8.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            tier: TIER_OPENROUTER,
+        });
+        // 渠道 B：UTC 峰时窗 08:00-20:00（工作日）input 20.0；规则级基线 2.0。
+        p.add_entry(Entry {
+            prefix: match_key("chan-b/timed"),
+            display: "chan-b/timed".into(),
+            name: None,
+            plan: PricePlan {
+                base: PriceRates::default(),
+                schedules: vec![PriceSchedule {
+                    label: Some("peak".into()),
+                    timezone: Some("UTC".into()),
+                    periods: vec![SchedulePeriod {
+                        start_time: "08:00".into(),
+                        end_time: "20:00".into(),
+                        weekdays: Some(
+                            ["mon", "tue", "wed", "thu", "fri"]
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect(),
+                        ),
+                        prices: PriceRates {
+                            input: Some(20.0),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }],
+                    prices: PriceRates {
+                        input: Some(2.0),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            tier: TIER_OPENROUTER,
+        });
+        let counts1m = counts(1_000_000, 0, 0, 0);
+        // 2026-01-05 是周一：12:00 UTC 在峰时窗内 → B 20.0 > A 8.0 → B。
+        let monday_noon: jiff::Timestamp = "2026-01-05T12:00:00Z".parse().unwrap();
+        let est = p.estimate("chan-a/timed", &counts1m, monday_noon).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-b/timed");
+        assert!((est.cost - 20.0).abs() < 1e-9);
+        let m = est.matched.as_ref().unwrap();
+        assert_eq!(m.schedule_label.as_deref(), Some("peak"));
+        assert_eq!(m.schedule_timezone.as_deref(), Some("UTC"));
+        assert_eq!(m.request_at.as_deref(), Some("2026-01-05T12:00:00Z"));
+        // 同日 23:00 UTC（非高峰）→ B 规则级基线 2.0 < A 8.0 → A。
+        let monday_night: jiff::Timestamp = "2026-01-05T23:00:00Z".parse().unwrap();
+        let est = p.estimate("chan-a/timed", &counts1m, monday_night).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-a/timed");
+        assert!((est.cost - 8.0).abs() < 1e-9);
+        // 周六（2026-01-10）12:00 UTC：峰时窗有星期限制 → 不命中 → B 2.0 → A。
+        let saturday: jiff::Timestamp = "2026-01-10T12:00:00Z".parse().unwrap();
+        let est = p.estimate("chan-a/timed", &counts1m, saturday).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-a/timed");
+
+        // 声明时区生效：Asia/Shanghai（UTC+8）本地峰时窗 = UTC 00:00-12:00。
+        let mut p2 = Pricing::empty();
+        for (raw, sched) in [
+            (
+                "chan-c/tz",
+                Some(PriceSchedule {
+                    label: Some("peak".into()),
+                    timezone: Some("Asia/Shanghai".into()),
+                    periods: vec![SchedulePeriod {
+                        start_time: "08:00".into(),
+                        end_time: "20:00".into(),
+                        weekdays: None,
+                        prices: PriceRates {
+                            input: Some(30.0),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }],
+                    prices: PriceRates {
+                        input: Some(1.0),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            ),
+            ("chan-d/tz", None),
+        ] {
+            p2.add_entry(Entry {
+                prefix: match_key(raw),
+                display: raw.to_string(),
+                name: None,
+                plan: PricePlan {
+                    base: PriceRates {
+                        input: Some(9.0),
+                        ..Default::default()
+                    },
+                    schedules: sched.into_iter().collect(),
+                    ..Default::default()
+                },
+                tier: TIER_OPENROUTER,
+            });
+        }
+        // 周一 04:00 UTC = 上海 12:00 → 峰时 30.0 > 9.0 → C。
+        let est = p2
+            .estimate(
+                "chan-c/tz",
+                &counts1m,
+                "2026-01-05T04:00:00Z".parse().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-c/tz");
+        assert!((est.cost - 30.0).abs() < 1e-9);
+        // 周一 20:00 UTC = 上海周二 04:00（窗外）→ 规则级 1.0 < 9.0 → D。
+        let est = p2
+            .estimate(
+                "chan-c/tz",
+                &counts1m,
+                "2026-01-05T20:00:00Z".parse().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-d/tz");
+        assert!((est.cost - 9.0).abs() < 1e-9);
+
+        // 同渠道重叠窗口：按当前条件取更贵的完整规则（不逐项拼价）。
+        let mut p3 = Pricing::empty();
+        p3.add_entry(Entry {
+            prefix: match_key("chan-e/ov"),
+            display: "chan-e/ov".into(),
+            name: None,
+            plan: PricePlan {
+                base: PriceRates::default(),
+                schedules: vec![PriceSchedule {
+                    label: Some("double".into()),
+                    timezone: Some("UTC".into()),
+                    periods: vec![
+                        SchedulePeriod {
+                            start_time: "08:00".into(),
+                            end_time: "20:00".into(),
+                            weekdays: None,
+                            prices: PriceRates {
+                                input: Some(5.0),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                        SchedulePeriod {
+                            start_time: "10:00".into(),
+                            end_time: "18:00".into(),
+                            weekdays: None,
+                            prices: PriceRates {
+                                input: Some(12.0),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    ],
+                    prices: PriceRates::default(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            tier: TIER_OPENROUTER,
+        });
+        // 12:00 两窗同时命中 → 取更贵规则 12.0。
+        let est = p3.estimate("chan-e/ov", &counts1m, monday_noon).unwrap();
+        assert!((est.cost - 12.0).abs() < 1e-9);
+        assert_eq!(
+            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            Some("double")
+        );
+        // 09:00 只命中第一窗 → 5.0。
+        let est = p3
+            .estimate(
+                "chan-e/ov",
+                &counts1m,
+                "2026-01-05T09:00:00Z".parse().unwrap(),
+            )
+            .unwrap();
+        assert!((est.cost - 5.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2396,7 +2941,7 @@ cache_write = 0.0
 cache_read = 0.0
 
 [[model.schedule]]
-timezone = "Asia/Shanghai"
+timezone = "Mars/Olympus"
 
 [[model.schedule.period]]
 start_time = "00:00"
@@ -2414,16 +2959,24 @@ cache_read = 0.0
         assert!(warnings.iter().any(|w| w.contains("overlap-seg")));
         assert!(warnings.iter().any(|w| w.contains("gap-seg")));
         assert!(warnings.iter().any(|w| w.contains("with-schedule")));
-        // 非法条目不得静默生效。
+        // 非法条目不得静默生效；时间规则非法只跳过规则，条目仍按基础价生效。
         assert!(p.lookup("bad-basis").is_none());
         assert!(p.lookup("neg-price").is_none());
         assert!(p.lookup("overlap-seg").is_none());
         assert!(p.lookup("gap-seg").is_none());
-        assert!(p.lookup("with-schedule").is_none());
+        let est = p
+            .estimate("with-schedule", &counts(1_000, 0, 0, 0), at())
+            .unwrap();
+        assert!(est.complete, "时间规则被跳过 → 按基础价完整计价");
+        assert!((est.cost - 1_000.0 * 1.0 / 1e6).abs() < 1e-12);
         // 合法条目带分段生效：272000 基础档、272001 高档。
-        let est = p.estimate("gpt-5.6", &counts(272_000, 0, 0, 0)).unwrap();
+        let est = p
+            .estimate("gpt-5.6", &counts(272_000, 0, 0, 0), at())
+            .unwrap();
         assert!((est.cost - 272_000.0 * 4.0 / 1e6).abs() < 1e-9);
-        let est = p.estimate("gpt-5.6", &counts(272_001, 0, 0, 0)).unwrap();
+        let est = p
+            .estimate("gpt-5.6", &counts(272_001, 0, 0, 0), at())
+            .unwrap();
         assert!((est.cost - 272_001.0 * 8.0 / 1e6).abs() < 1e-9);
         let m = est.matched.as_ref().unwrap();
         assert_eq!(m.source, "external");
@@ -2584,7 +3137,7 @@ cache_read = 0.0
         assert!((p.lookup("tencent/hy3").unwrap().plan.base.input.unwrap() - 0.0825).abs() < 1e-9);
         // 未知变体：回退到基名价格（variant fallback 显式标记，非静默）
         let est = p
-            .estimate("tencent/hy3:preview", &counts(1_000_000, 0, 0, 0))
+            .estimate("tencent/hy3:preview", &counts(1_000_000, 0, 0, 0), at())
             .unwrap();
         assert!(
             (est.cost - 0.0825).abs() < 1e-9,
@@ -2606,7 +3159,7 @@ cache_read = 0.0
         );
         let (p2, _) = Pricing::load(None, None, Some(&snapshot2));
         assert!(
-            p2.estimate("tencent/hy3:preview", &counts(1, 0, 0, 0))
+            p2.estimate("tencent/hy3:preview", &counts(1, 0, 0, 0), at())
                 .is_none()
         );
         std::fs::remove_dir_all(&dir).ok();

@@ -113,7 +113,7 @@ pub fn aggregate(
         if multi_agent && !g.agents.contains(&e.agent.as_str()) {
             g.agents.push(e.agent.as_str());
         }
-        match pricing.estimate(&e.model, &TokenCounts::from_event(e)) {
+        match pricing.estimate(&e.model, &TokenCounts::from_event(e), e.ts) {
             Some(est) => {
                 g.cost_usd += est.cost;
                 // B3：部分计价（分项缺价格）不按 0——未知分项的 token 单列，

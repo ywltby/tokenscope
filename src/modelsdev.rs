@@ -421,7 +421,13 @@ mod tests {
             cache_write: 0,
             cache_read: 0,
         };
-        let est = p.estimate("openai/gpt-5.6", &tc).unwrap();
+        let est = p
+            .estimate(
+                "openai/gpt-5.6",
+                &tc,
+                "2026-01-05T10:00:00Z".parse().unwrap(),
+            )
+            .unwrap();
         assert!(
             (est.cost - 272_000.0 * 4.0 / 1e6).abs() < 1e-9,
             "272000 仍命中基础档"
@@ -432,7 +438,13 @@ mod tests {
             cache_write: 0,
             cache_read: 0,
         };
-        let est = p.estimate("openai/gpt-5.6", &tc).unwrap();
+        let est = p
+            .estimate(
+                "openai/gpt-5.6",
+                &tc,
+                "2026-01-05T10:00:00Z".parse().unwrap(),
+            )
+            .unwrap();
         assert!(
             (est.cost - 272_001.0 * 8.0 / 1e6).abs() < 1e-9,
             "272001 命中高档"
