@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { NAlert, NButton, NCard, NRadioButton, NRadioGroup, NSpin, NTag, NTooltip } from "naive-ui";
 import {
@@ -32,6 +32,9 @@ const sourceStatus = ref<SourceStatus[]>([]);
 const drill = ref<EventDrill | null>(null);
 const events = ref<EventList | null>(null);
 const eventsLoading = ref(false);
+// D1 游标分页：「加载更多」状态
+const moreLoading = ref(false);
+const hasMore = computed(() => !!events.value && events.value.rows.length < events.value.total);
 // F01（计划 A2）：汇总与明细各自持有请求代次——曾共用一个 runSeq，两个
 // immediate watcher 依次启动使后者作废前者，首屏永远转圈或停在旧快照。
 let summarySeq = 0;
@@ -140,11 +143,14 @@ async function loadSources(): Promise<void> {
   sourceStatus.value = await invoke<SourceStatus[]>("source_status");
 }
 
-async function loadEvents(): Promise<void> {
+async function loadEvents(append = false): Promise<void> {
   const seq = ++eventsSeq;
-  eventsLoading.value = true;
+  if (!append) eventsLoading.value = true;
+  moreLoading.value = append;
   eventsError.value = null;
   try {
+    // D1 游标：追加载取时以已加载末行为锚（ts|record_id 严格小于语义）。
+    const last = append ? events.value?.rows.at(-1) : undefined;
     const list = await invoke<EventList>("list_events", {
       agent: agent.value,
       from: range.value ? fmtDate(range.value[0]) : null,
@@ -153,17 +159,29 @@ async function loadEvents(): Promise<void> {
       project: drill.value?.type === "project" ? drill.value.key : null,
       day: drill.value?.type === "day" ? drill.value.key : null,
       limit: 200,
+      before: last ? `${last.ts}|${last.record_id}` : null,
       tz: tz.value,
     });
     if (seq !== eventsSeq) return;
-    events.value = list;
-    eventsKey.value = currentFilters();
+    if (append && events.value) {
+      events.value = { ...list, rows: [...events.value.rows, ...list.rows] };
+    } else {
+      events.value = list;
+      eventsKey.value = currentFilters();
+    }
     saveSnapshot();
   } catch (e) {
     if (seq === eventsSeq) eventsError.value = e instanceof Error ? e.message : String(e);
   } finally {
-    if (seq === eventsSeq) eventsLoading.value = false;
+    if (seq === eventsSeq) {
+      eventsLoading.value = false;
+      moreLoading.value = false;
+    }
   }
+}
+
+function loadMoreEvents(): void {
+  void loadEvents(true);
 }
 
 async function loadViewCache(): Promise<void> {
@@ -217,7 +235,9 @@ function manualRefresh(): void {
 const drillLabel = (d: EventDrill): string => `${d.type}: ${d.key}`;
 
 watch([by, agent, range, tz, () => props.refreshKey], refresh, { immediate: true });
-watch([by, agent, range, tz, drill, () => props.refreshKey], loadEvents, { immediate: true });
+watch([by, agent, range, tz, drill, () => props.refreshKey], () => void loadEvents(), {
+  immediate: true,
+});
 void loadSources();
 </script>
 
@@ -275,7 +295,7 @@ void loadSources();
     </NAlert>
     <NAlert v-if="eventsError" type="error" style="margin-bottom: 12px">
       明细加载失败：{{ eventsError }}
-      <NButton size="tiny" style="margin-left: 8px" @click="loadEvents">重试</NButton>
+      <NButton size="tiny" style="margin-left: 8px" @click="loadEvents()">重试</NButton>
     </NAlert>
     <!-- 有数据时不再全屏灰罩：数据原地更新，右上角提示刷新中 -->
     <NSpin :show="loading && !report">
@@ -314,6 +334,9 @@ void loadSources();
             <EventTable
               :list="events"
               :filter-label="drill ? drillLabel(drill) : '无（显示最新 200 条）'"
+              :more="hasMore"
+              :more-loading="moreLoading"
+              @load-more="loadMoreEvents"
             />
           </NCard>
         </template>

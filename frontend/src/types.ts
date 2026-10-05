@@ -94,6 +94,8 @@ export interface PricingView {
 
 export interface EventRow {
   ts: string;
+  /** D1 游标第二分量（Claude = message.id；Codex 为空） */
+  record_id: string;
   agent: string;
   model: string;
   session_id: string;
@@ -148,4 +150,11 @@ export function fmtCost(v: number): string {
   if (v === 0) return "0.00";
   if (v < 0.01) return v.toFixed(6);
   return v.toFixed(2);
+}
+
+/// C2：明细/表格的项目展示名 = 路径末段（完整身份见原值）。
+/// 正反斜杠都容忍；无分隔符（slug、"(根目录)"）原样返回。
+export function projectLabel(path: string): string {
+  const segs = path.split(/[\\/]/).filter((s) => s.length > 0);
+  return segs.length > 0 ? segs[segs.length - 1] : path;
 }

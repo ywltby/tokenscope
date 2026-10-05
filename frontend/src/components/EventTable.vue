@@ -1,9 +1,17 @@
 <script setup lang="ts">
 import { computed, h } from "vue";
-import { NDataTable, NTag, type DataTableColumn } from "naive-ui";
-import { AGENT_LABEL, fmtNum, type EventList } from "../types";
+import { NButton, NDataTable, NTag, NTooltip, type DataTableColumn } from "naive-ui";
+import { AGENT_LABEL, fmtNum, projectLabel, type EventList } from "../types";
 
-const props = defineProps<{ list: EventList; filterLabel: string }>();
+const props = defineProps<{
+  list: EventList;
+  filterLabel: string;
+  /** D1 游标分页：还有未加载的行 */
+  more?: boolean;
+  moreLoading?: boolean;
+}>();
+const emit = defineEmits<{ (e: "load-more"): void }>();
+const remaining = () => props.list.total - props.list.rows.length;
 
 function fmtPrice(v: number): string {
   if (v === 0) return "0";
@@ -25,7 +33,21 @@ const columns = computed<DataTableColumn[]>(() => [
     minWidth: 180,
     ellipsis: { tooltip: true },
   },
-  { title: "项目", key: "project", minWidth: 100, ellipsis: { tooltip: true } },
+  {
+    title: "项目",
+    key: "project",
+    minWidth: 100,
+    // C2：明细项目显示末段（身份是完整路径），悬浮可见完整值。
+    render: (r) => {
+      const p = asRow(r).project;
+      const label = projectLabel(p);
+      if (label === p) return label;
+      return h(NTooltip, null, {
+        trigger: () => h("span", { style: "cursor: help" }, label),
+        default: () => p,
+      });
+    },
+  },
   { title: "输入", key: "input", align: "right", render: (r) => fmtNum(asRow(r).input) },
   { title: "输出", key: "output", align: "right", render: (r) => fmtNum(asRow(r).output) },
   {
@@ -80,9 +102,14 @@ const rowKey = (r: object): string => {
       virtual-scroll
     />
     <div style="font-size: 12px; opacity: 0.6; margin-top: 4px">
-      共 {{ fmtNum(props.list.total) }} 条（时间倒序）· 显示前
+      共 {{ fmtNum(props.list.total) }} 条（时间倒序）· 已加载
       {{ fmtNum(props.list.rows.length) }} 条
       <template v-if="props.filterLabel">· 筛选：{{ props.filterLabel }}</template>
+    </div>
+    <div v-if="props.more" style="text-align: center; margin-top: 6px">
+      <NButton size="tiny" :loading="props.moreLoading" @click="emit('load-more')">
+        加载更多（还剩 {{ fmtNum(remaining()) }} 条）
+      </NButton>
     </div>
   </div>
 </template>

@@ -244,6 +244,58 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     expect(state(w)["stale"]).toBe(false);
   });
 
+  it("events_load_more_pagination：游标追加载取，不重不漏且游标正确", async () => {
+    const row = (ts: string, rid: string) => ({
+      ts,
+      record_id: rid,
+      agent: "codex",
+      model: "m",
+      session_id: "s",
+      project: "p",
+      input: 1,
+      output: 1,
+      cache_write: 0,
+      cache_read: 0,
+      cost_usd: 0,
+    });
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "summarize") return Promise.resolve(summaryA);
+      if (cmd === "list_events") {
+        const before = (args?.before as string | null) ?? null;
+        if (!before) {
+          return Promise.resolve({
+            rows: [row("2026-10-02 10:00:00", "b"), row("2026-10-01 09:00:00", "a")],
+            total: 3,
+            warnings: [],
+          });
+        }
+        return Promise.resolve({
+          rows: [row("2026-09-30 08:00:00", "z")],
+          total: 3,
+          warnings: [],
+        });
+      }
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect((state(w)["events"] as EventList).rows.length).toBe(2);
+    expect(state(w)["hasMore"]).toBe(true);
+    (state(w)["loadMoreEvents"] as () => void)();
+    await flushPromises();
+    const ev = state(w)["events"] as EventList;
+    expect(ev.rows.length).toBe(3);
+    expect(ev.rows.map((r) => r.record_id)).toEqual(["b", "a", "z"]);
+    const call = invokeMock.mock.calls.filter((c) => c[0] === "list_events").at(-1)![1] as Record<
+      string,
+      unknown
+    >;
+    expect(call.before).toBe("2026-10-01 09:00:00|a");
+    expect(state(w)["hasMore"]).toBe(false);
+  });
+
   it("refresh_preserves_filters：手动刷新以当前筛选重跑且筛选不动", async () => {
     mockOk();
     const w = mountDashboard();
