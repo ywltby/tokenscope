@@ -22,6 +22,9 @@ use crate::model::TokenCounts;
 use crate::openrouter;
 
 /// (模型前缀, input, output, cache_write, cache_read)
+/// Task 4：gpt/grok 家族的缓存两列此前互换（读价 0.1×input 被填进
+/// cache_write 列）——已按 models.dev 权威快照与 OpenAI prompt-caching
+/// 文档（写 1.25×、读 0.1×）校正；grok-4.5/4.6/4.7 等无权威证据的行保持。
 const TABLE: &[(&str, f64, f64, f64, f64)] = &[
     // Claude
     ("claude-opus-5", 5.0, 25.0, 6.25, 0.5),
@@ -35,29 +38,29 @@ const TABLE: &[(&str, f64, f64, f64, f64)] = &[
     ("claude-haiku-4-5", 1.0, 5.0, 1.25, 0.1),
     ("claude-3-5-haiku", 0.8, 4.0, 1.0, 0.08),
     // GPT
-    ("gpt-6-astra", 10.0, 50.0, 1.0, 12.5),
-    ("gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25),
-    ("gpt-5.6-terra", 2.0, 12.0, 0.2, 2.5),
-    ("gpt-5.6", 4.0, 20.0, 0.4, 5.0),
-    ("gpt-5.5", 5.0, 30.0, 0.5, 0.0),
-    ("gpt-5.4-nano", 0.2, 1.25, 0.02, 0.0),
-    ("gpt-5.4-mini", 0.75, 4.5, 0.075, 0.0),
-    ("gpt-5.4", 2.5, 15.0, 0.25, 0.0),
-    ("gpt-5.3-codex", 1.75, 14.0, 0.175, 0.0),
-    ("gpt-5.2", 1.75, 14.0, 0.175, 0.0),
-    ("gpt-5.1", 1.25, 10.0, 0.125, 0.0),
-    ("gpt-5-mini", 0.25, 2.0, 0.025, 0.0),
-    ("gpt-5-nano", 0.05, 0.4, 0.005, 0.0),
-    ("gpt-5", 1.25, 10.0, 0.125, 0.0),
+    ("gpt-6-astra", 10.0, 50.0, 12.5, 1.0),
+    ("gpt-5.6-luna", 0.2, 1.2, 0.25, 0.02),
+    ("gpt-5.6-terra", 2.0, 12.0, 2.5, 0.2),
+    ("gpt-5.6", 4.0, 20.0, 5.0, 0.4),
+    ("gpt-5.5", 5.0, 30.0, 0.0, 0.5),
+    ("gpt-5.4-nano", 0.2, 1.25, 0.0, 0.02),
+    ("gpt-5.4-mini", 0.75, 4.5, 0.0, 0.075),
+    ("gpt-5.4", 2.5, 15.0, 0.0, 0.25),
+    ("gpt-5.3-codex", 1.75, 14.0, 0.0, 0.175),
+    ("gpt-5.2", 1.75, 14.0, 0.0, 0.175),
+    ("gpt-5.1", 1.25, 10.0, 0.0, 0.125),
+    ("gpt-5-mini", 0.25, 2.0, 0.0, 0.025),
+    ("gpt-5-nano", 0.05, 0.4, 0.0, 0.005),
+    ("gpt-5", 1.25, 10.0, 0.0, 0.125),
     // Grok
     ("grok-4.5", 2.0, 6.0, 0.3, 0.0),
     ("grok-4.6", 2.0, 6.0, 0.5, 0.0),
     ("grok-4.7", 2.0, 6.0, 0.5, 0.0),
-    ("grok-4.20", 1.25, 2.5, 0.2, 0.0),
+    ("grok-4.20", 1.25, 2.5, 0.0, 0.2),
     ("grok-4-1-fast", 0.2, 0.5, 0.05, 0.0),
-    ("grok-4", 3.0, 15.0, 0.75, 0.0),
-    ("grok-3-mini", 0.25, 0.5, 0.075, 0.0),
-    ("grok-3", 3.0, 15.0, 0.75, 0.0),
+    ("grok-4", 3.0, 15.0, 0.0, 0.75),
+    ("grok-3-mini", 0.25, 0.5, 0.0, 0.075),
+    ("grok-3", 3.0, 15.0, 0.0, 0.75),
     ("grok-code-fast", 1.0, 2.0, 0.2, 0.0),
     // DeepSeek
     ("deepseek-v4-flash", 0.3, 1.2, 0.006, 0.0),
@@ -470,6 +473,17 @@ impl Pricing {
                     if variant != key_variant {
                         continue;
                     }
+                    // 词元边界：前缀后必须到串尾或分隔符，"gpt-50" 不得
+                    // 命中 "gpt-5"（不同模型）。
+                    let rest = &key[k..];
+                    if !rest.is_empty()
+                        && !rest.starts_with('-')
+                        && !rest.starts_with('.')
+                        && !rest.starts_with('/')
+                        && !rest.starts_with(':')
+                    {
+                        continue;
+                    }
                     let rank = (u8::MAX - e.tier, k);
                     if best.is_none_or(|(_, b_rank)| rank > b_rank) {
                         best = Some((e, rank));
@@ -720,6 +734,87 @@ mod tests {
     }
 
     #[test]
+    fn test_builtin_price_columns_are_not_swapped() {
+        // Task 4（P1）：内置表 (prefix, input, output, cache_write, cache_read)，
+        // gpt/grok 家族此前把缓存读价填进了缓存写列。逐字段直接断言
+        // ModelPrice（不经费用反推），证据 = models.dev 权威快照 + OpenAI
+        // prompt-caching 文档（写 1.25×、读 0.1×）。
+        let gpt56 = Pricing::builtin().lookup("gpt-5.6-sol").unwrap();
+        assert_eq!(gpt56.input, Some(4.0));
+        assert_eq!(gpt56.output, Some(20.0));
+        assert_eq!(gpt56.cache_write, Some(5.0), "缓存写 = 1.25×input");
+        assert_eq!(gpt56.cache_read, Some(0.4), "缓存读 = 0.1×input");
+        let luna = Pricing::builtin().lookup("gpt-5.6-luna").unwrap();
+        assert_eq!(luna.cache_write, Some(0.25));
+        assert_eq!(luna.cache_read, Some(0.02));
+        let gpt55 = Pricing::builtin().lookup("gpt-5.5").unwrap();
+        assert_eq!(gpt55.cache_write, Some(0.0), "GPT-5.6 之前无写计费");
+        assert_eq!(gpt55.cache_read, Some(0.5), "读价在第三列被填反过");
+        let grok4 = Pricing::builtin().lookup("grok-4").unwrap();
+        assert_eq!(grok4.cache_write, Some(0.0));
+        assert_eq!(grok4.cache_read, Some(0.75));
+        // Claude 家族顺序一直正确（对照 aihubmix/claude-opus-4-5）。
+        let opus = Pricing::builtin().lookup("claude-opus-4-5").unwrap();
+        assert_eq!(opus.cache_write, Some(6.25));
+        assert_eq!(opus.cache_read, Some(0.5));
+    }
+
+    #[test]
+    fn test_builtin_gpt_cache_read_write_values() {
+        // 费率结构防线：无写计费家族 cr = 0.1×input 且 cw = 0；
+        // 5.6+ 家族 cw = 1.25×input 且 cr = 0.1×input。
+        let no_write = [
+            ("gpt-5.5", 5.0),
+            ("gpt-5.4", 2.5),
+            ("gpt-5.3-codex", 1.75),
+            ("gpt-5.2", 1.75),
+            ("gpt-5.1", 1.25),
+            ("gpt-5", 1.25),
+            ("gpt-5-mini", 0.25),
+            ("gpt-5-nano", 0.05),
+        ];
+        for (prefix, input) in no_write {
+            let p = Pricing::builtin().lookup(prefix).unwrap();
+            assert_eq!(p.cache_write, Some(0.0), "{prefix} 无写计费");
+            assert!(
+                p.cache_read.is_some_and(|v| (v - 0.1 * input).abs() < 1e-9),
+                "{prefix} 缓存读 = 0.1×input"
+            );
+        }
+        for (prefix, input) in [
+            ("gpt-5.6", 4.0),
+            ("gpt-5.6-luna", 0.2),
+            ("gpt-5.6-terra", 2.0),
+        ] {
+            let p = Pricing::builtin().lookup(prefix).unwrap();
+            assert!(
+                p.cache_write
+                    .is_some_and(|v| (v - 1.25 * input).abs() < 1e-9),
+                "{prefix} 写 = 1.25×input"
+            );
+            assert!(
+                p.cache_read.is_some_and(|v| (v - 0.1 * input).abs() < 1e-9),
+                "{prefix} 读 = 0.1×input"
+            );
+        }
+    }
+
+    #[test]
+    fn test_builtin_lookup_longest_prefix_boundary() {
+        // Task 4：前缀命中必须有词元边界——"gpt-50" 不得命中 "gpt-5"。
+        assert!(Pricing::builtin().lookup("gpt-50").is_none());
+        assert!(Pricing::builtin().lookup("gpt-50-mini").is_none());
+        // 合法前缀不受影响（分隔符后缀仍命中）。
+        assert!(Pricing::builtin().lookup("gpt-5.6-sol").is_some());
+        assert!(
+            Pricing::builtin()
+                .lookup("claude-sonnet-4-5-20250929")
+                .is_some()
+        );
+        assert!(Pricing::builtin().lookup("grok-4.20-0309").is_some());
+    }
+
+    #[test]
     fn test_pricing_unknown_model() {
         assert!(Pricing::builtin().lookup("tencent/hy3:free").is_none());
         assert!(Pricing::builtin().lookup("<synthetic>").is_none());
@@ -871,8 +966,9 @@ mod tests {
         let est = Pricing::builtin()
             .estimate("gpt-5.6-sol", &counts(800, 100, 50, 200))
             .unwrap();
-        // 纯价格数学：桶值直接给定（不经适配器），800*4+100*20+50*0.4+200*5。
-        assert!((est.cost - 6220.0 / 1_000_000.0).abs() < 1e-12);
+        // 纯价格数学：桶值直接给定（不经适配器）。
+        // Task 4 校正后：800*4 + 100*20 + 50*5.0(写) + 200*0.4(读)。
+        assert!((est.cost - 5530.0 / 1_000_000.0).abs() < 1e-12);
     }
 
     #[test]

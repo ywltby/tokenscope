@@ -76,7 +76,7 @@ fn test_partial_cost_totals() {
     let d2 = r.groups.iter().find(|g| g.key == "2026-07-18").unwrap();
     assert!(d2.unknown_pricing, "快照缺 cache 键 = 部分计价");
     assert!(
-        (d2.cost_usd - 1085.0 / 1_000_000.0).abs() < 1e-9,
+        (d2.cost_usd - 1091.0 / 1_000_000.0).abs() < 1e-9,
         "d2.cost={}",
         d2.cost_usd
     );
@@ -84,7 +84,7 @@ fn test_partial_cost_totals() {
     assert_eq!(d2.unknown_tokens.total(), 0);
 
     // 合计 = 分组之和；unknown 同样汇总（仅 d1 的快照缺键分项）。
-    assert!((r.totals.cost_usd - (950.0 + 1085.0) / 1_000_000.0).abs() < 1e-9);
+    assert!((r.totals.cost_usd - (950.0 + 1091.0) / 1_000_000.0).abs() < 1e-9);
     assert!(r.totals.unknown_pricing);
     assert_eq!(r.totals.unknown_tokens.cache_write, 50);
     assert_eq!(r.totals.unknown_tokens.cache_read, 200);

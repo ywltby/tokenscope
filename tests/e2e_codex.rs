@@ -99,7 +99,8 @@ fn test_e2e_codex_json() {
     // groups 含末尾合计行
     assert_eq!(groups.len(), 3);
 
-    // 07-17：仅 15:59Z（本地 23:59）一条；费用 gpt-5.6-sol 750*4+100*20+50*0.4+200*5 = 6020/1M。
+    // 07-17：仅 15:59Z（本地 23:59）一条；费用 gpt-5.6-sol 750*4+100*20+50*5.0+200*0.4 = 5330/1M
+    //（Task 4：内置表缓存两列校正——cw=1.25×input、cr=0.1×input）。
     let d1 = &groups[0];
     assert_eq!(d1.key, "2026-07-17");
     assert_eq!(d1.requests, 1);
@@ -107,7 +108,7 @@ fn test_e2e_codex_json() {
     assert_eq!(d1.tokens.output, 100);
     assert_eq!(d1.tokens.cache_write, 50);
     assert_eq!(d1.tokens.cache_read, 200);
-    assert!((d1.cost_usd - 6020.0 / 1_000_000.0).abs() < 1e-12);
+    assert!((d1.cost_usd - 5330.0 / 1_000_000.0).abs() < 1e-12);
     assert!(!d1.unknown_pricing);
 
     // 07-18：16:01Z/16:06Z 落本地次日 + 次日 02:00Z。
@@ -116,12 +117,13 @@ fn test_e2e_codex_json() {
     assert_eq!(d2.requests, 3);
     assert_eq!(d2.tokens.input, 10 + 5 + 80);
     assert_eq!(d2.tokens.output, 5 + 3 + 50);
-    // gpt-5.6-sol 140 + gpt-5.5 115 + gpt-5.4 950（/1M）。
-    assert!((d2.cost_usd - 1205.0 / 1_000_000.0).abs() < 1e-9);
+    // gpt-5.6-sol 140 + gpt-5.5 116 + gpt-5.4 955（/1M；Task 4 表校正后
+    // 缓存读价 0.5/0.25 计入 e4/e6 的 cr 2/20）。
+    assert!((d2.cost_usd - 1211.0 / 1_000_000.0).abs() < 1e-9);
 
     let t = &r.totals;
     assert_eq!(t.requests, 4);
-    assert!((t.cost_usd - 7225.0 / 1_000_000.0).abs() < 1e-9);
+    assert!((t.cost_usd - 6541.0 / 1_000_000.0).abs() < 1e-9);
 
     // 模型维度：BTreeMap 序（末行为合计）。
     let rm = codex_report(GroupBy::Model);
