@@ -373,6 +373,19 @@ pub struct PricingView {
     pub warnings: Vec<String>,
 }
 
+/// Task 2：定价可用性状态（全局横幅数据源；与 pricing_entries 同路径解析）。
+#[tauri::command]
+pub async fn pricing_status() -> Result<tokenscope::pricing::PricingStatus, String> {
+    run_blocking("pricing_status", move || {
+        Ok(tokenscope::pricing::pricing_status(
+            Some(&pricing_file_path(None)),
+            Some(&modelsdev_file_path(None)),
+            Some(&openrouter_file_path(None)),
+        ))
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn pricing_entries() -> Result<PricingView, String> {
     run_blocking("pricing_entries", move || {
@@ -501,6 +514,68 @@ pub async fn open_pricing_file(app: tauri::AppHandle) -> Result<String, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pricing_status_missing_modelsdev_snapshot() {
+        // Task 2：无 models.dev 快照 → needs_sync=true（首次启动横幅依据）。
+        let dir = std::env::temp_dir().join(format!("tokenscope-ps-miss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = tokenscope::pricing::pricing_status(
+            None,
+            Some(&dir.join("no-md.json")),
+            Some(&dir.join("no-or.json")),
+        );
+        assert!(!st.modelsdev_available);
+        assert!(st.needs_sync);
+        assert!(!st.has_any_pricing);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_pricing_status_uses_cached_modelsdev_snapshot() {
+        // Task 2：本地快照在位 → 离线可用，横幅不出现。
+        let dir = std::env::temp_dir().join(format!("tokenscope-ps-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let md = dir.join("pricing-modelsdev.json");
+        std::fs::write(
+            &md,
+            r#"{"v":2,"synced_at":"2026-10-05T00:00:00Z","entries":[
+                {"id":"prov/x","name":null,"input":1.0,"output":2.0}
+            ]}"#,
+        )
+        .unwrap();
+        let st = tokenscope::pricing::pricing_status(None, Some(&md), None);
+        assert!(st.modelsdev_available);
+        assert_eq!(st.modelsdev_count, 1);
+        assert_eq!(
+            st.modelsdev_synced_at.as_deref(),
+            Some("2026-10-05T00:00:00Z")
+        );
+        assert!(!st.needs_sync, "离线快照可用时不提示同步");
+        assert!(st.has_any_pricing);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_pricing_status_invalid_snapshot_is_degraded() {
+        // Task 2：快照损坏 → 主源降级 + 警告，needs_sync=true。
+        let dir = std::env::temp_dir().join(format!("tokenscope-ps-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let md = dir.join("pricing-modelsdev.json");
+        std::fs::write(&md, "not json").unwrap();
+        let st = tokenscope::pricing::pricing_status(None, Some(&md), None);
+        assert!(!st.modelsdev_available);
+        assert!(st.needs_sync);
+        assert!(
+            st.warnings.iter().any(|w| w.contains("主源不可用")),
+            "损坏快照必须有诊断: {:?}",
+            st.warnings
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn test_parse_by_valid() {

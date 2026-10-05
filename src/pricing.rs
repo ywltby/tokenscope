@@ -196,6 +196,68 @@ pub fn load_index(path: &Path) -> anyhow::Result<Option<PricingIndex>> {
 }
 
 /// 进程内缓存：签名一致则直接复用，避免每次调用重读快照。
+/// Task 2：定价可用性状态（结构化 DTO，前端据此渲染横幅，不解析文本）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PricingStatus {
+    pub modelsdev_available: bool,
+    pub modelsdev_count: usize,
+    pub modelsdev_synced_at: Option<String>,
+    pub openrouter_available: bool,
+    pub external_count: usize,
+    pub has_any_pricing: bool,
+    pub needs_sync: bool,
+    pub warnings: Vec<String>,
+}
+
+/// 计算定价状态：与 `Pricing::load` / 设置页共用同一路径解析与快照规则，
+/// 不会出现设置页显示可用而汇总页认为不可用的分叉。
+pub fn pricing_status(
+    external: Option<&Path>,
+    modelsdev_snapshot: Option<&Path>,
+    openrouter_snapshot: Option<&Path>,
+) -> PricingStatus {
+    let mut warnings = Vec::new();
+    let (md_available, md_count, md_synced_at) =
+        match modelsdev_snapshot.map(crate::modelsdev::load_snapshot) {
+            Some(Ok(Some(s))) => {
+                let n = s.entries.len();
+                (n > 0, n, Some(s.synced_at))
+            }
+            Some(Ok(None)) => (false, 0, None),
+            Some(Err(e)) => {
+                warnings.push(format!("models.dev 快照解析失败（主源不可用）: {e:#}"));
+                (false, 0, None)
+            }
+            None => (false, 0, None),
+        };
+    let or_available = match openrouter_snapshot.map(crate::openrouter::load_snapshot) {
+        Some(Ok(Some(s))) => !s.entries.is_empty(),
+        Some(Ok(None)) => false,
+        Some(Err(e)) => {
+            warnings.push(format!("OpenRouter 快照解析失败（补充源不可用）: {e:#}"));
+            false
+        }
+        None => false,
+    };
+    let (pricing, load_warnings) = Pricing::load(external, modelsdev_snapshot, openrouter_snapshot);
+    for w in load_warnings {
+        warnings.push(w);
+    }
+    let external_count = pricing.external_count();
+    let has_any_pricing = md_available || or_available || external_count > 0;
+    PricingStatus {
+        modelsdev_available: md_available,
+        modelsdev_count: md_count,
+        modelsdev_synced_at: md_synced_at,
+        openrouter_available: or_available,
+        external_count,
+        has_any_pricing,
+        needs_sync: !md_available,
+        warnings,
+    }
+}
+
 /// 进程内价格缓存条目：签名 → (价格表, 重建时诊断)。
 type PriceCacheEntry = (String, std::sync::Arc<Pricing>, Vec<String>);
 static PRICE_CACHE: std::sync::Mutex<Option<PriceCacheEntry>> = std::sync::Mutex::new(None);

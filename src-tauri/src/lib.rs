@@ -40,6 +40,7 @@ pub fn run() {
             commands::cache_stats,
             commands::refresh_cache,
             commands::pricing_entries,
+            commands::pricing_status,
             commands::open_pricing_file,
             commands::sync_pricing_openrouter,
             commands::autostart_status,
