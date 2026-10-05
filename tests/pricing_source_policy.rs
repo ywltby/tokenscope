@@ -105,8 +105,8 @@ cache_read = 0.0
     let (p, w) = Pricing::load(Some(&toml), Some(&md), None);
     assert!(w.is_empty());
     let hit = p.lookup("prov/x").unwrap();
-    assert_eq!(hit.input, Some(99.0), "外置覆盖 models.dev");
-    assert_eq!(hit.output, Some(199.0));
+    assert_eq!(hit.plan.base.input, Some(99.0), "外置覆盖 models.dev");
+    assert_eq!(hit.plan.base.output, Some(199.0));
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -125,8 +125,8 @@ fn test_modelsdev_overrides_openrouter() {
     let (p, w) = Pricing::load(None, Some(&md), Some(&or));
     assert!(w.is_empty(), "warnings: {:?}", w);
     let hit = p.lookup("prov/y").unwrap();
-    assert_eq!(hit.input, Some(1.0), "models.dev 覆盖 OpenRouter");
-    assert_eq!(hit.output, Some(2.0));
+    assert_eq!(hit.plan.base.input, Some(1.0), "models.dev 覆盖 OpenRouter");
+    assert_eq!(hit.plan.base.output, Some(2.0));
     // OpenRouter 独有条目仍可用（补充源）。
     assert!(p.lookup("prov/only-or").is_none(), "此 fixture 无独立条目");
     std::fs::remove_dir_all(&dir).ok();

@@ -65,6 +65,12 @@ impl TokenCounts {
         }
     }
 
+    /// Task 1（分段计价）：prompt token 度量 = 非缓存输入 + 缓存写 + 缓存读
+    /// （输出不参与上下文档位选择——不变量 2）。
+    pub fn prompt_tokens(&self) -> u64 {
+        self.input + self.cache_write + self.cache_read
+    }
+
     pub fn add_event(&mut self, e: &UsageEvent) {
         self.input += e.input_tokens;
         self.output += e.output_tokens;

@@ -44,21 +44,145 @@ struct Entry {
     /// 原始写法（GUI 展示用）。
     display: String,
     name: Option<String>,
-    /// B3（F04）：None = 该分项价格未知（如快照缺键），**不按 0 计**；
-    /// 显式 Some(0.0) 才是真免费。
-    input: Option<f64>,
-    output: Option<f64>,
-    cache_write: Option<f64>,
-    cache_read: Option<f64>,
+    /// Task 1：基础价 + 可选分段（flat 四价读取时包装成无分段计划）。
+    pub plan: PricePlan,
     tier: u8,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct ModelPrice {
+/// Task 1：四类单价的规范载体（每项 Option，None = 未知/沿用；
+/// serde 字段缺省为 None——分段/基础价缺键即沿用，不静默为 0）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct PriceRates {
     pub input: Option<f64>,
     pub output: Option<f64>,
     pub cache_write: Option<f64>,
     pub cache_read: Option<f64>,
+}
+
+/// 计价依据（Task 1）：当前来源统一 PromptTokens；其余为将来复用保留。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PricingBasis {
+    #[serde(rename = "prompt_tokens")]
+    PromptTokens,
+    #[serde(rename = "input_tokens")]
+    InputTokens,
+    #[serde(rename = "output_tokens")]
+    OutputTokens,
+    #[serde(rename = "total_tokens")]
+    TotalTokens,
+}
+
+/// 档位应用方式（Task 1）：整笔请求切换档位；marginal 为将来扩展点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PricingApplication {
+    #[serde(rename = "whole_request")]
+    WholeRequest,
+}
+
+/// 有界分段：`[min_tokens, max_tokens)`，max None = 无上限。
+/// prices 各项 None = 沿用基础价（显式 Some(0.0) 才是真免费）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PriceSegment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub min_tokens: u64,
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
+    pub prices: PriceRates,
+}
+
+/// 通用价格计划：基础价 + 零个或多个有界分段。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PricePlan {
+    #[serde(default)]
+    pub basis: Option<PricingBasis>,
+    #[serde(default)]
+    pub application: Option<PricingApplication>,
+    pub base: PriceRates,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<PriceSegment>,
+}
+
+/// 校验价格计划：非负价格、区间有序不重叠、有上限分段后不得再有分段。
+/// 返回 Err = 不可计价的规则（调用方跳过并给出诊断，不猜测）。
+pub fn validate_price_plan(plan: &PricePlan) -> Result<(), String> {
+    let mut groups: Vec<(String, &PriceRates)> = vec![("base".to_string(), &plan.base)];
+    groups.extend(
+        plan.segments
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (format!("分段 {i}"), &s.prices)),
+    );
+    for (name, r) in groups {
+        for (comp, v) in [
+            ("input", r.input),
+            ("output", r.output),
+            ("cache_write", r.cache_write),
+            ("cache_read", r.cache_read),
+        ] {
+            if let Some(v) = v
+                && v < 0.0
+            {
+                return Err(format!("{name} 分项 {comp} 价格为负: {v}"));
+            }
+        }
+    }
+    let mut prev_max: Option<u64> = None;
+    for (i, s) in plan.segments.iter().enumerate() {
+        if s.max_tokens.is_some_and(|m| m <= s.min_tokens) {
+            return Err(format!(
+                "分段 {i}: max_tokens({:?}) 必须大于 min_tokens({})",
+                s.max_tokens, s.min_tokens
+            ));
+        }
+        match prev_max {
+            Some(pm) => {
+                if s.min_tokens < pm {
+                    return Err(format!(
+                        "分段 {i}: min_tokens({}) 与上一分段重叠（上一段上限 {pm}）",
+                        s.min_tokens
+                    ));
+                }
+                if s.min_tokens > pm {
+                    return Err(format!(
+                        "分段 {i}: min_tokens({}) 与上一分段上限 {pm} 存在空洞",
+                        s.min_tokens
+                    ));
+                }
+            }
+            // 上一段无上限：其后不允许再有分段（非单调/覆盖不明）。
+            None if i > 0 => {
+                return Err(format!("分段 {i}: 上一分段无上限，其后不允许再有分段"));
+            }
+            None => {}
+        }
+        prev_max = s.max_tokens;
+    }
+    Ok(())
+}
+
+/// 选择唯一满足 min <= basis < max 的分段（不做最近档位猜测）。
+pub fn select_segment(plan: &PricePlan, basis_value: u64) -> Option<&PriceSegment> {
+    plan.segments
+        .iter()
+        .find(|s| basis_value >= s.min_tokens && s.max_tokens.is_none_or(|m| basis_value < m))
+}
+
+/// 逐字段执行"分段显式值 > 基础值"。
+pub fn effective_rates(plan: &PricePlan, selected: Option<&PriceSegment>) -> PriceRates {
+    let seg = selected.map(|s| &s.prices);
+    PriceRates {
+        input: seg.and_then(|s| s.input).or(plan.base.input),
+        output: seg.and_then(|s| s.output).or(plan.base.output),
+        cache_write: seg.and_then(|s| s.cache_write).or(plan.base.cache_write),
+        cache_read: seg.and_then(|s| s.cache_read).or(plan.base.cache_read),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelPrice {
+    pub plan: PricePlan,
 }
 
 /// 分项计价结果（B3）：cost 为已计价分项小计；unknown 记录无法计价分项的
@@ -169,6 +293,9 @@ pub struct IndexEntry {
     pub display: String,
     pub name: Option<String>,
     pub tier: u8,
+    /// Task 1：分段价格计划（None = 旧索引扁平四价，读取时包装为无分段计划）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<PricePlan>,
     pub input: Option<f64>,
     pub output: Option<f64>,
     pub cache_write: Option<f64>,
@@ -328,10 +455,11 @@ impl Pricing {
                     display: e.display.clone(),
                     name: e.name.clone(),
                     tier: e.tier,
-                    input: e.input,
-                    output: e.output,
-                    cache_write: e.cache_write,
-                    cache_read: e.cache_read,
+                    plan: Some(e.plan.clone()),
+                    input: e.plan.base.input,
+                    output: e.plan.base.output,
+                    cache_write: e.plan.base.cache_write,
+                    cache_read: e.plan.base.cache_read,
                 })
                 .collect(),
         }
@@ -343,14 +471,20 @@ impl Pricing {
             by_prefix: PrefixIndex::new(),
         };
         for e in &index.entries {
+            let plan = e.plan.clone().unwrap_or_else(|| PricePlan {
+                base: PriceRates {
+                    input: e.input,
+                    output: e.output,
+                    cache_write: e.cache_write,
+                    cache_read: e.cache_read,
+                },
+                ..Default::default()
+            });
             pricing.add_entry(Entry {
                 prefix: e.prefix.clone(),
                 display: e.display.clone(),
                 name: e.name.clone(),
-                input: e.input,
-                output: e.output,
-                cache_write: e.cache_write,
-                cache_read: e.cache_read,
+                plan,
                 tier: e.tier,
             });
         }
@@ -376,10 +510,15 @@ impl Pricing {
                             prefix: normalize_model_id(&e.id),
                             display: e.id,
                             name: e.name,
-                            input: e.input,
-                            output: e.output,
-                            cache_write: e.cache_write,
-                            cache_read: e.cache_read,
+                            plan: PricePlan {
+                                base: PriceRates {
+                                    input: e.input,
+                                    output: e.output,
+                                    cache_write: e.cache_write,
+                                    cache_read: e.cache_read,
+                                },
+                                ..Default::default()
+                            },
                             tier: TIER_MODELSDEV,
                         });
                     }
@@ -403,10 +542,15 @@ impl Pricing {
                             // OpenRouter API 只暴露 prompt/completion 两价
                             //（Task 7.4：缺价保留 None），缓存分项按未知
                             // 处理（诚实于数据面，R05 → C5 解释）。
-                            input: e.prompt.map(|v| v * 1_000_000.0),
-                            output: e.completion.map(|v| v * 1_000_000.0),
-                            cache_write: None,
-                            cache_read: None,
+                            plan: PricePlan {
+                                base: PriceRates {
+                                    input: e.prompt.map(|v| v * 1_000_000.0),
+                                    output: e.completion.map(|v| v * 1_000_000.0),
+                                    cache_write: None,
+                                    cache_read: None,
+                                },
+                                ..Default::default()
+                            },
                             tier: TIER_OPENROUTER,
                         });
                     }
@@ -440,10 +584,15 @@ impl Pricing {
                     name: None,
                     // 外置文件四键俱全（模板即如此）；缺键=serde 默认 0，
                     // 即用户显式声明 0（区别于快照缺键的"未知"）。
-                    input: Some(m.input),
-                    output: Some(m.output),
-                    cache_write: Some(m.cache_write),
-                    cache_read: Some(m.cache_read),
+                    plan: PricePlan {
+                        base: PriceRates {
+                            input: Some(m.input),
+                            output: Some(m.output),
+                            cache_write: Some(m.cache_write),
+                            cache_read: Some(m.cache_read),
+                        },
+                        ..Default::default()
+                    },
                     tier: TIER_EXTERNAL,
                 });
             }
@@ -491,10 +640,7 @@ impl Pricing {
             }
         }
         best.map(|(e, _)| ModelPrice {
-            input: e.input,
-            output: e.output,
-            cache_write: e.cache_write,
-            cache_read: e.cache_read,
+            plan: e.plan.clone(),
         })
     }
 
@@ -502,7 +648,13 @@ impl Pricing {
     /// 分项计价（B3）：已知分项计价求和；未知分项（None）的 token 进
     /// unknown 且 complete=false——缺价格 ≠ 0 价格。
     pub fn estimate(&self, model: &str, t: &TokenCounts) -> Option<CostEstimate> {
-        let p = self.lookup(model)?;
+        let mp = self.lookup(model)?;
+        let plan = &mp.plan;
+        // Task 1（分段计价）：basis = prompt token（input + cache_write +
+        // cache_read），整笔请求切换档位；输出不参与档位选择（不变量 2）。
+        let basis_value = t.prompt_tokens();
+        let selected = select_segment(plan, basis_value);
+        let rates = effective_rates(plan, selected);
         let mut est = CostEstimate {
             cost: 0.0,
             unknown: TokenCounts::default(),
@@ -518,10 +670,14 @@ impl Pricing {
             }
             None => {}
         };
-        line(p.input, t.input, &mut est.unknown.input);
-        line(p.output, t.output, &mut est.unknown.output);
-        line(p.cache_write, t.cache_write, &mut est.unknown.cache_write);
-        line(p.cache_read, t.cache_read, &mut est.unknown.cache_read);
+        line(rates.input, t.input, &mut est.unknown.input);
+        line(rates.output, t.output, &mut est.unknown.output);
+        line(
+            rates.cache_write,
+            t.cache_write,
+            &mut est.unknown.cache_write,
+        );
+        line(rates.cache_read, t.cache_read, &mut est.unknown.cache_read);
         est.cost /= 1_000_000.0;
         Some(est)
     }
@@ -539,23 +695,23 @@ impl Pricing {
                 let openrouter = or_by_prefix
                     .get(e.prefix.as_str())
                     .map(|o| OpenRouterPrice {
-                        input: o.input.unwrap_or(0.0),
-                        output: o.output.unwrap_or(0.0),
-                        cache_write: o.cache_write.unwrap_or(0.0),
-                        cache_read: o.cache_read.unwrap_or(0.0),
+                        input: o.plan.base.input.unwrap_or(0.0),
+                        output: o.plan.base.output.unwrap_or(0.0),
+                        cache_write: o.plan.base.cache_write.unwrap_or(0.0),
+                        cache_read: o.plan.base.cache_read.unwrap_or(0.0),
                         name: o.name.clone(),
                     });
                 PricingEntry {
                     prefix: e.display.clone(),
                     name: e.name.clone(),
-                    input: e.input.unwrap_or(0.0),
-                    output: e.output.unwrap_or(0.0),
-                    cache_write: e.cache_write.unwrap_or(0.0),
-                    cache_read: e.cache_read.unwrap_or(0.0),
-                    incomplete: e.input.is_none()
-                        || e.output.is_none()
-                        || e.cache_write.is_none()
-                        || e.cache_read.is_none(),
+                    input: e.plan.base.input.unwrap_or(0.0),
+                    output: e.plan.base.output.unwrap_or(0.0),
+                    cache_write: e.plan.base.cache_write.unwrap_or(0.0),
+                    cache_read: e.plan.base.cache_read.unwrap_or(0.0),
+                    incomplete: e.plan.base.input.is_none()
+                        || e.plan.base.output.is_none()
+                        || e.plan.base.cache_write.is_none()
+                        || e.plan.base.cache_read.is_none(),
                     source: match e.tier {
                         TIER_EXTERNAL => "外置",
                         TIER_MODELSDEV => "models.dev",
@@ -669,30 +825,42 @@ mod tests {
         let p = fixture_pricing()
             .lookup("claude-sonnet-4-5-20250929")
             .unwrap();
-        assert_eq!(p.input, Some(3.0));
-        assert_eq!(p.output, Some(15.0));
+        assert_eq!(p.plan.base.input, Some(3.0));
+        assert_eq!(p.plan.base.output, Some(15.0));
         let p = fixture_pricing()
             .lookup("Claude-Sonnet-4-20250514")
             .unwrap();
-        assert_eq!(p.input, Some(3.0));
+        assert_eq!(p.plan.base.input, Some(3.0));
     }
 
     #[test]
     fn test_pricing_longest_prefix() {
         let p = fixture_pricing().lookup("gpt-5.6-luna").unwrap();
-        assert_eq!(p.input, Some(0.2));
+        assert_eq!(p.plan.base.input, Some(0.2));
         assert_eq!(
-            fixture_pricing().lookup("gpt-5.6-sol").unwrap().input,
+            fixture_pricing()
+                .lookup("gpt-5.6-sol")
+                .unwrap()
+                .plan
+                .base
+                .input,
             Some(4.0)
         );
         assert_eq!(
-            fixture_pricing().lookup("gpt-5.4-nano").unwrap().input,
+            fixture_pricing()
+                .lookup("gpt-5.4-nano")
+                .unwrap()
+                .plan
+                .base
+                .input,
             Some(0.2)
         );
         assert_eq!(
             fixture_pricing()
                 .lookup("claude-opus-4-5-20251101")
                 .unwrap()
+                .plan
+                .base
                 .input,
             Some(5.0)
         );
@@ -700,6 +868,8 @@ mod tests {
             fixture_pricing()
                 .lookup("claude-opus-4-20250514")
                 .unwrap()
+                .plan
+                .base
                 .input,
             Some(15.0)
         );
@@ -707,17 +877,26 @@ mod tests {
             fixture_pricing()
                 .lookup("deepseek-v4-flash-0731")
                 .unwrap()
+                .plan
+                .base
                 .input,
             Some(0.3)
         );
         assert_eq!(
-            fixture_pricing().lookup("grok-4.5-build").unwrap().input,
+            fixture_pricing()
+                .lookup("grok-4.5-build")
+                .unwrap()
+                .plan
+                .base
+                .input,
             Some(2.0)
         );
         assert_eq!(
             fixture_pricing()
                 .lookup("grok-4-1-fast-reasoning")
                 .unwrap()
+                .plan
+                .base
                 .input,
             Some(0.2)
         );
@@ -730,6 +909,8 @@ mod tests {
             fixture_pricing()
                 .lookup("anthropic/claude-sonnet-4.5")
                 .unwrap()
+                .plan
+                .base
                 .input,
             Some(3.0)
         );
@@ -742,23 +923,35 @@ mod tests {
         // ModelPrice（不经费用反推），证据 = models.dev 权威快照 + OpenAI
         // prompt-caching 文档（写 1.25×、读 0.1×）。
         let gpt56 = fixture_pricing().lookup("gpt-5.6-sol").unwrap();
-        assert_eq!(gpt56.input, Some(4.0));
-        assert_eq!(gpt56.output, Some(20.0));
-        assert_eq!(gpt56.cache_write, Some(5.0), "缓存写 = 1.25×input");
-        assert_eq!(gpt56.cache_read, Some(0.4), "缓存读 = 0.1×input");
+        assert_eq!(gpt56.plan.base.input, Some(4.0));
+        assert_eq!(gpt56.plan.base.output, Some(20.0));
+        assert_eq!(
+            gpt56.plan.base.cache_write,
+            Some(5.0),
+            "缓存写 = 1.25×input"
+        );
+        assert_eq!(gpt56.plan.base.cache_read, Some(0.4), "缓存读 = 0.1×input");
         let luna = fixture_pricing().lookup("gpt-5.6-luna").unwrap();
-        assert_eq!(luna.cache_write, Some(0.25));
-        assert_eq!(luna.cache_read, Some(0.02));
+        assert_eq!(luna.plan.base.cache_write, Some(0.25));
+        assert_eq!(luna.plan.base.cache_read, Some(0.02));
         let gpt55 = fixture_pricing().lookup("gpt-5.5").unwrap();
-        assert_eq!(gpt55.cache_write, Some(0.0), "GPT-5.6 之前无写计费");
-        assert_eq!(gpt55.cache_read, Some(0.5), "读价在第三列被填反过");
+        assert_eq!(
+            gpt55.plan.base.cache_write,
+            Some(0.0),
+            "GPT-5.6 之前无写计费"
+        );
+        assert_eq!(
+            gpt55.plan.base.cache_read,
+            Some(0.5),
+            "读价在第三列被填反过"
+        );
         let grok4 = fixture_pricing().lookup("grok-4").unwrap();
-        assert_eq!(grok4.cache_write, Some(0.0));
-        assert_eq!(grok4.cache_read, Some(0.75));
+        assert_eq!(grok4.plan.base.cache_write, Some(0.0));
+        assert_eq!(grok4.plan.base.cache_read, Some(0.75));
         // Claude 家族顺序一直正确（对照 aihubmix/claude-opus-4-5）。
         let opus = fixture_pricing().lookup("claude-opus-4-5").unwrap();
-        assert_eq!(opus.cache_write, Some(6.25));
-        assert_eq!(opus.cache_read, Some(0.5));
+        assert_eq!(opus.plan.base.cache_write, Some(6.25));
+        assert_eq!(opus.plan.base.cache_read, Some(0.5));
     }
 
     #[test]
@@ -777,9 +970,12 @@ mod tests {
         ];
         for (prefix, input) in no_write {
             let p = fixture_pricing().lookup(prefix).unwrap();
-            assert_eq!(p.cache_write, Some(0.0), "{prefix} 无写计费");
+            assert_eq!(p.plan.base.cache_write, Some(0.0), "{prefix} 无写计费");
             assert!(
-                p.cache_read.is_some_and(|v| (v - 0.1 * input).abs() < 1e-9),
+                p.plan
+                    .base
+                    .cache_read
+                    .is_some_and(|v| (v - 0.1 * input).abs() < 1e-9),
                 "{prefix} 缓存读 = 0.1×input"
             );
         }
@@ -790,12 +986,17 @@ mod tests {
         ] {
             let p = fixture_pricing().lookup(prefix).unwrap();
             assert!(
-                p.cache_write
+                p.plan
+                    .base
+                    .cache_write
                     .is_some_and(|v| (v - 1.25 * input).abs() < 1e-9),
                 "{prefix} 写 = 1.25×input"
             );
             assert!(
-                p.cache_read.is_some_and(|v| (v - 0.1 * input).abs() < 1e-9),
+                p.plan
+                    .base
+                    .cache_read
+                    .is_some_and(|v| (v - 0.1 * input).abs() < 1e-9),
                 "{prefix} 读 = 0.1×input"
             );
         }
@@ -850,14 +1051,299 @@ mod tests {
                 prefix: normalize_model_id(prefix),
                 display: prefix.to_string(),
                 name: None,
-                input: Some(i),
-                output: Some(o),
-                cache_write: cw,
-                cache_read: cr,
+                plan: PricePlan {
+                    base: PriceRates {
+                        input: Some(i),
+                        output: Some(o),
+                        cache_write: cw,
+                        cache_read: cr,
+                    },
+                    ..Default::default()
+                },
                 tier: TIER_MODELSDEV,
             });
         }
         p
+    }
+
+    /// Task 1 fixture：三段上下文价格计划（Claude 1M 长上下文样式）。
+    fn tiered_plan() -> PricePlan {
+        PricePlan {
+            basis: Some(PricingBasis::PromptTokens),
+            application: Some(PricingApplication::WholeRequest),
+            base: PriceRates {
+                input: Some(3.0),
+                output: Some(15.0),
+                cache_write: Some(3.75),
+                cache_read: Some(0.3),
+            },
+            segments: vec![
+                PriceSegment {
+                    label: Some("long".into()),
+                    min_tokens: 200_000,
+                    max_tokens: Some(1_000_000),
+                    prices: PriceRates {
+                        input: Some(6.0),
+                        output: Some(22.5),
+                        cache_write: Some(7.5),
+                        cache_read: Some(0.6),
+                    },
+                },
+                PriceSegment {
+                    label: Some("ultra".into()),
+                    min_tokens: 1_000_000,
+                    max_tokens: None,
+                    prices: PriceRates {
+                        input: Some(9.0),
+                        output: Some(30.0),
+                        cache_write: Some(11.25),
+                        cache_read: Some(0.9),
+                    },
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_pricing_segment_selection_boundaries() {
+        let plan = tiered_plan();
+        // 下界、界内、上界前、最后一档。
+        assert!(select_segment(&plan, 0).is_none(), "低于第一段 → 基础价");
+        assert!(select_segment(&plan, 200_000).is_some(), "[min, max) 左闭");
+        assert!(select_segment(&plan, 999_999).is_some());
+        assert_eq!(
+            select_segment(&plan, 1_000_000).unwrap().label.as_deref(),
+            Some("ultra")
+        );
+        assert_eq!(
+            select_segment(&plan, 1_000_001).unwrap().label.as_deref(),
+            Some("ultra"),
+            "无上限段覆盖之后所有 basis 值"
+        );
+        // 计划 fixture：三段 [0,100000) [100000,272001) [272001,None)。
+        let plan3 = PricePlan {
+            base: PriceRates {
+                input: Some(1.0),
+                ..Default::default()
+            },
+            segments: vec![
+                PriceSegment {
+                    label: Some("short".into()),
+                    min_tokens: 0,
+                    max_tokens: Some(100_000),
+                    prices: PriceRates {
+                        input: Some(2.0),
+                        ..Default::default()
+                    },
+                },
+                PriceSegment {
+                    label: Some("mid".into()),
+                    min_tokens: 100_000,
+                    max_tokens: Some(272_001),
+                    prices: PriceRates {
+                        input: Some(4.0),
+                        ..Default::default()
+                    },
+                },
+                PriceSegment {
+                    label: Some("long".into()),
+                    min_tokens: 272_001,
+                    max_tokens: None,
+                    prices: PriceRates {
+                        input: Some(8.0),
+                        ..Default::default()
+                    },
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            select_segment(&plan3, 0).unwrap().label.as_deref(),
+            Some("short"),
+            "下界 0 命中第一段"
+        );
+        assert_eq!(
+            select_segment(&plan3, 99_999).unwrap().label.as_deref(),
+            Some("short")
+        );
+        assert_eq!(
+            select_segment(&plan3, 100_000).unwrap().label.as_deref(),
+            Some("mid"),
+            "边界 100000 只命中后一段"
+        );
+        assert_eq!(
+            select_segment(&plan3, 272_000).unwrap().label.as_deref(),
+            Some("mid")
+        );
+        assert_eq!(
+            select_segment(&plan3, 272_001).unwrap().label.as_deref(),
+            Some("long"),
+            "272001 命中最后一档"
+        );
+        assert_eq!(
+            select_segment(&plan3, u64::MAX).unwrap().label.as_deref(),
+            Some("long"),
+            "最后一档覆盖其后所有值"
+        );
+    }
+
+    #[test]
+    fn test_pricing_segment_validation_rejects_bad_rules() {
+        let mut plan = tiered_plan();
+        // 重叠：第二段 min 低于第一段 max。
+        plan.segments[1].min_tokens = 500_000;
+        assert!(validate_price_plan(&plan).is_err());
+        // 反向：max <= min。
+        let mut plan = tiered_plan();
+        plan.segments[0].max_tokens = Some(100_000);
+        assert!(validate_price_plan(&plan).is_err());
+        // 空洞：第二段 min > 第一段 max。
+        let mut plan = tiered_plan();
+        plan.segments[1].min_tokens = 2_000_000;
+        assert!(validate_price_plan(&plan).is_err());
+        // 非单调：分段乱序（无上限段在前）。
+        let mut plan = tiered_plan();
+        plan.segments.swap(0, 1);
+        assert!(validate_price_plan(&plan).is_err());
+        // 无上限段后不允许再有分段。
+        let mut plan = tiered_plan();
+        plan.segments.push(PriceSegment {
+            label: Some("after".into()),
+            min_tokens: 2_000_000,
+            max_tokens: None,
+            prices: PriceRates::default(),
+        });
+        assert!(validate_price_plan(&plan).is_err());
+        // 负价格。
+        let mut plan = tiered_plan();
+        plan.base.input = Some(-1.0);
+        assert!(validate_price_plan(&plan).is_err());
+        // 分段内负价格同样拒绝。
+        let mut plan = tiered_plan();
+        plan.segments[0].prices.cache_read = Some(-0.5);
+        assert!(validate_price_plan(&plan).is_err());
+        // 合法计划通过。
+        assert!(validate_price_plan(&tiered_plan()).is_ok());
+    }
+
+    #[test]
+    fn test_pricing_segment_effective_rates_fallback() {
+        // 分段只覆盖 input：output/cache 回退基础价；显式 0 不回退。
+        let plan = PricePlan {
+            basis: Some(PricingBasis::PromptTokens),
+            application: Some(PricingApplication::WholeRequest),
+            base: PriceRates {
+                input: Some(3.0),
+                output: Some(15.0),
+                cache_write: Some(3.75),
+                cache_read: Some(0.3),
+            },
+            segments: vec![PriceSegment {
+                label: Some("input-only".into()),
+                min_tokens: 200_000,
+                max_tokens: None,
+                prices: PriceRates {
+                    input: Some(6.0),
+                    output: None,           // 沿用基础 15.0
+                    cache_write: Some(0.0), // 显式免费，不回退
+                    cache_read: None,
+                },
+            }],
+        };
+        let seg = select_segment(&plan, 300_000).unwrap();
+        let r = effective_rates(&plan, Some(seg));
+        assert_eq!(r.input, Some(6.0));
+        assert_eq!(r.output, Some(15.0), "分段缺 output → 沿用基础");
+        assert_eq!(r.cache_write, Some(0.0), "显式 0 不回退");
+        assert_eq!(r.cache_read, Some(0.3));
+        // 基础价也缺失的分量 → None（估算时进 unknown）。
+        let plan2 = PricePlan {
+            base: PriceRates {
+                input: Some(3.0),
+                ..Default::default()
+            },
+            segments: vec![],
+            ..Default::default()
+        };
+        let r2 = effective_rates(&plan2, None);
+        assert_eq!(r2.input, Some(3.0));
+        assert_eq!(r2.output, None, "无基础价 → unknown");
+    }
+
+    #[test]
+    fn test_pricing_segment_estimate_end_to_end() {
+        // 无来源入口时 estimate 走分段：basis = prompt = input + cw + cr。
+        let mut p = Pricing::empty();
+        p.add_entry(Entry {
+            prefix: normalize_model_id("tiered-model"),
+            display: "tiered-model".into(),
+            name: None,
+            plan: tiered_plan(),
+            tier: TIER_MODELSDEV,
+        });
+        let counts = |input: u64, cw: u64, cr: u64, output: u64| TokenCounts {
+            input,
+            output,
+            cache_write: cw,
+            cache_read: cr,
+        };
+        // 低于阈值 → 基础价：200_000 前的 (100, 0, 0, 50)。
+        let e1 = p.estimate("tiered-model", &counts(100, 0, 0, 50)).unwrap();
+        assert!((e1.cost - (100.0 * 3.0 + 50.0 * 15.0) / 1e6).abs() < 1e-12);
+        // 恰好等于阈值 200_000 → 命中 long 段：prompt = 200_000。
+        let e2 = p
+            .estimate("tiered-model", &counts(100_000, 50_000, 50_000, 1_000))
+            .unwrap();
+        assert!(
+            (e2.cost - (100_000.0 * 6.0 + 1_000.0 * 22.5 + 50_000.0 * 7.5 + 50_000.0 * 0.6) / 1e6)
+                .abs()
+                < 1e-9
+        );
+        // 1_000_000 → ultra 段。
+        let e3 = p
+            .estimate("tiered-model", &counts(1_000_000, 0, 0, 10))
+            .unwrap();
+        assert!((e3.cost - (1_000_000.0 * 9.0 + 10.0 * 30.0) / 1e6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_pricing_segment_no_rate_is_unknown_not_zero() {
+        // 无基础价且未命中分段：token 进 unknown（complete=false），
+        // 不按 0 计费（不变量 5/6）。
+        let mut p = Pricing::empty();
+        p.add_entry(Entry {
+            prefix: normalize_model_id("no-base-model"),
+            display: "no-base-model".into(),
+            name: None,
+            plan: PricePlan {
+                basis: Some(PricingBasis::PromptTokens),
+                application: Some(PricingApplication::WholeRequest),
+                base: PriceRates::default(),
+                segments: vec![PriceSegment {
+                    label: Some(">200K".into()),
+                    min_tokens: 200_000,
+                    max_tokens: None,
+                    prices: PriceRates {
+                        input: Some(6.0),
+                        output: Some(22.5),
+                        cache_write: Some(7.5),
+                        cache_read: Some(0.6),
+                    },
+                }],
+            },
+            tier: TIER_MODELSDEV,
+        });
+        let e = p.estimate("no-base-model", &counts(100, 10, 0, 0)).unwrap();
+        assert!(!e.complete, "缺价且未命中分段 → 不完整，不得当免费");
+        assert_eq!(e.unknown.input, 100);
+        assert_eq!(e.unknown.output, 10);
+        assert_eq!(e.cost, 0.0);
+        // 命中分段后正常计价。
+        let e2 = p
+            .estimate("no-base-model", &counts(200_000, 0, 0, 0))
+            .unwrap();
+        assert!(e2.complete, "命中分段且有价 → 完整");
+        assert!((e2.cost - 200_000.0 * 6.0 / 1e6).abs() < 1e-12);
     }
 
     #[test]
@@ -1152,8 +1638,14 @@ cache_read = 0.0
         let (p, warnings) = Pricing::load(Some(&path), None, None);
         assert!(warnings.is_empty());
         assert_eq!(p.external_count(), 2);
-        assert_eq!(p.lookup("claude-opus-5").unwrap().input, Some(9.0));
-        assert_eq!(p.lookup("my-model/zen-2").unwrap().output, Some(2.0));
+        assert_eq!(
+            p.lookup("claude-opus-5").unwrap().plan.base.input,
+            Some(9.0)
+        );
+        assert_eq!(
+            p.lookup("my-model/zen-2").unwrap().plan.base.output,
+            Some(2.0)
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1202,14 +1694,17 @@ cache_read = 0.0
 
         // 外置层压过 openrouter（同前缀，层级优先）
         let hit = p.lookup("claude-sonnet-4-5-20250929").unwrap();
-        assert_eq!(hit.input, Some(42.0));
+        assert_eq!(hit.plan.base.input, Some(42.0));
         // openrouter 层生效：点号命名归一化命中（无内置兜底，独立计价）
-        assert_eq!(p.lookup("gpt-5.2-20260101").unwrap().input, Some(7.0));
+        assert_eq!(
+            p.lookup("gpt-5.2-20260101").unwrap().plan.base.input,
+            Some(7.0)
+        );
         // Task 1：外置/openrouter 都没有的模型 → unknown（无编译期兜底）
         assert!(p.lookup("claude-sonnet-4").is_none());
         // 免费变体经最长前缀命中 :free 条目 → 0 价（known，非 unknown）
         let free = p.lookup("tencent/hy3:free").unwrap();
-        assert_eq!(free.input, Some(0.0));
+        assert_eq!(free.plan.base.input, Some(0.0));
         // 条目来源标识与显示名
         let entries = p.entries();
 
@@ -1252,9 +1747,12 @@ cache_read = 0.0
         let (p, warnings) = Pricing::load(None, None, Some(&snapshot));
         assert!(warnings.is_empty());
         // 精确变体命中 0 价
-        assert_eq!(p.lookup("tencent/hy3:free").unwrap().input, Some(0.0));
+        assert_eq!(
+            p.lookup("tencent/hy3:free").unwrap().plan.base.input,
+            Some(0.0)
+        );
         // 基名命中基名价格
-        assert!((p.lookup("tencent/hy3").unwrap().input.unwrap() - 0.0825).abs() < 1e-9);
+        assert!((p.lookup("tencent/hy3").unwrap().plan.base.input.unwrap() - 0.0825).abs() < 1e-9);
         // 未知变体：基名价格不外溢 → unknown
         assert!(p.lookup("tencent/hy3:preview").is_none());
         std::fs::remove_dir_all(&dir).ok();
