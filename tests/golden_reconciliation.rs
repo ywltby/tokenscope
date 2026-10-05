@@ -17,7 +17,7 @@ fn tmp_dir(tag: &str) -> PathBuf {
 }
 
 /// 构造黄金数据集（两来源各一文件；数字与手算表见测试内注释）。
-fn setup(dir: &PathBuf) -> SummaryOptions {
+fn setup(dir: &std::path::Path) -> SummaryOptions {
     let claude_dir = dir.join("claude");
     // Claude 项目身份取文件父目录名（与 ~/.claude/projects/<slug> 一致）。
     let claude_proj = claude_dir.join("alpha");
