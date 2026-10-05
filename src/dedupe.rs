@@ -7,15 +7,19 @@ use std::collections::{HashMap, HashSet};
 use crate::model::{AgentKind, UsageEvent};
 
 /// Claude：同 `(session, message.id)` 保留时间戳最晚的一条（相同则保行序靠后）。
-/// Codex：同 `(session, 用量五元组)` 保留首条（同请求重发逐字相同，首条即请求
-/// 完成时刻；原始五元组可由归一化字段重建：raw_input = input + cache_read）。
+/// Codex：同 `(session, model, 用量五元组)` 保留首条（同请求重发逐字相同——
+/// 必然同模型（同一 turn_context），首条即请求完成时刻；原始五元组可由
+/// 归一化字段重建：raw_input = input + cache_read + cache_write）。
+/// B2（R01）：键加入 model——不同模型同用量的真实请求不再误合并；
+/// 同模型同用量的两个真实请求仍无法与重播区分，保守合并（限制见
+/// docs/stats-semantics.md §3.2）。
 ///
 /// 返回去重后事件（保持原相对顺序）与各 agent 的丢弃数（只列非零项）。
 pub fn dedupe_events(events: Vec<UsageEvent>) -> (Vec<UsageEvent>, Vec<(AgentKind, u64)>) {
     let mut keep = vec![true; events.len()];
     let mut dropped: HashMap<AgentKind, u64> = HashMap::new();
     let mut claude_best: HashMap<(String, String), usize> = HashMap::new();
-    let mut codex_seen: HashSet<(String, u64, u64, u64, u64)> = HashSet::new();
+    let mut codex_seen: HashSet<(String, String, u64, u64, u64, u64)> = HashSet::new();
 
     for (i, e) in events.iter().enumerate() {
         match e.agent {
@@ -40,6 +44,7 @@ pub fn dedupe_events(events: Vec<UsageEvent>) -> (Vec<UsageEvent>, Vec<(AgentKin
             AgentKind::Codex => {
                 let key = (
                     e.session_id.clone(),
+                    e.model.clone(),
                     e.input_tokens,
                     e.output_tokens,
                     e.cache_write_tokens,
@@ -279,6 +284,109 @@ mod tests {
     fn test_dedupe_empty() {
         let (kept, dropped) = dedupe_events(Vec::new());
         assert!(kept.is_empty());
+        assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn test_codex_replay_deduped() {
+        // B2 双向 fixture 之重播侧：重播跨越"文件批次"边界仍去重（缓存合并
+        // 场景：两个文件批次先后合并，同请求重发不能因分批而双计）。
+        let batch_a = vec![event(E {
+            agent: AgentKind::Codex,
+            ts: "2026-07-17T15:59:00Z",
+            session: "s1",
+            input: 750,
+            output: 100,
+            cw: 50,
+            cr: 200,
+            ..Default::default()
+        })];
+        let batch_b = vec![event(E {
+            agent: AgentKind::Codex,
+            ts: "2026-07-17T16:08:00Z",
+            session: "s1",
+            input: 750,
+            output: 100,
+            cw: 50,
+            cr: 200,
+            ..Default::default()
+        })];
+        let mut all = batch_a;
+        all.extend(batch_b);
+        let (kept, dropped) = dedupe_events(all);
+        assert_eq!(kept.len(), 1, "跨批次重播只计一条");
+        assert_eq!(dropped, vec![(AgentKind::Codex, 1)]);
+    }
+
+    #[test]
+    fn test_dedupe_cross_day() {
+        // B2：同会话重播跨本地日界（07-17 23:59Z 与次日 00:01Z 的请求），
+        // 去重键不含日期——跨日重播仍合并，不因日界双计。
+        let events = vec![
+            event(E {
+                agent: AgentKind::Codex,
+                ts: "2026-07-17T15:59:00Z",
+                session: "s1",
+                input: 100,
+                output: 10,
+                ..Default::default()
+            }),
+            event(E {
+                agent: AgentKind::Codex,
+                ts: "2026-07-17T16:01:00Z",
+                session: "s1",
+                input: 100,
+                output: 10,
+                ..Default::default()
+            }),
+        ];
+        let (kept, dropped) = dedupe_events(events);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(dropped, vec![(AgentKind::Codex, 1)]);
+    }
+
+    #[test]
+    fn test_codex_distinct_requests_equal_usage() {
+        // B2 双向 fixture 之"不同请求同用量"侧（R01）。
+        let same_model = vec![
+            event(E {
+                agent: AgentKind::Codex,
+                ts: "2026-07-17T15:59:00Z",
+                session: "s1",
+                input: 100,
+                output: 10,
+                ..Default::default()
+            }),
+            event(E {
+                agent: AgentKind::Codex,
+                ts: "2026-07-17T16:00:00Z",
+                session: "s1",
+                input: 100,
+                output: 10,
+                ..Default::default()
+            }),
+        ];
+        // 同模型同用量：与重播不可区分（事件无请求身份），保守合并。
+        // 已知限制，显式钉住；证据与替代方案见 docs/stats-semantics.md §3.2。
+        let (kept, dropped) = dedupe_events(same_model);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(dropped, vec![(AgentKind::Codex, 1)]);
+
+        // 不同模型同用量：B2 起键含 model，两条真实请求都保留（修复前误合并）。
+        let mut a = event(E {
+            agent: AgentKind::Codex,
+            ts: "2026-07-17T15:59:00Z",
+            session: "s1",
+            input: 100,
+            output: 10,
+            ..Default::default()
+        });
+        a.model = "gpt-5.6-sol".into();
+        let mut b = a.clone();
+        b.model = "gpt-5.5".into();
+        b.ts = "2026-07-17T16:00:00Z".parse().unwrap();
+        let (kept, dropped) = dedupe_events(vec![a, b]);
+        assert_eq!(kept.len(), 2, "跨模型同用量不得合并");
         assert!(dropped.is_empty());
     }
 }

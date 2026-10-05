@@ -1,10 +1,17 @@
 //! Codex 适配器：扫描 `~/.codex/sessions/**/*.jsonl`（rollout 文件，append-only）。
 //!
-//! 口径（依据本机 47 文件全量实测，见 docs/plans 的 M2 计划与 M4 重构）：
+//! 口径（依据本机 47 文件全量实测 + 上游权威语义，见 docs/stats-semantics.md）：
 //! - 只取 `event_msg`/`token_count` 的 `info.last_token_usage`；`token_usage_record`
 //!   是累计回显，一律忽略并计数（双计防线）；
-//! - 语义：`total = input + output` 且 `cached ⊆ input`；归一化
-//!   `input = input - cached`、`cache_read = cached`、`cache_write = cache_write`；
+//! - 语义（R02 已查证）：OpenAI Responses 的 `input_tokens` 是总量桶，
+//!   `input_tokens_details.cached_tokens` 与 `cache_write_tokens` 均为其子集
+//!   （官方文档示例 15000 = 12000 cached + 3000 cache_write + 0 未缓存）；
+//!   Codex CLI 0.145.0 起才把 cache_write 透传为 `cache_write_input_tokens`，
+//!   订阅流服务端恒返 0。归一化：`input = raw - cached - cache_write`、
+//!   `cache_read = cached`、`cache_write = cache_write`，展示总量守恒
+//!   `input+output+cw+cr = raw_total`；
+//! - `cached + cache_write > input` 属未知字段组合（如未经查证的第三方
+//!   provider 映射），按坏行计数不入账，不猜测语义；
 //! - 零分量占位行（只升 total）跳过计数；分量非零但 total 不符按坏行计数；
 //! - 模型按时间序最近的 `turn_context` 归属，遇 `session_meta` 重置；
 //! - 同请求重发的去重自 M4 起上移到全局 dedupe 步骤（按 `(session, 用量五元组)`
@@ -215,8 +222,10 @@ fn ingest_token_count(
         stats.skipped_zero_usage += 1;
         return;
     }
-    // 口径校验：total = input + output；cached ⊆ input。不符不入账。
-    if total != input + output || cached > input {
+    // 口径校验（R02）：total = input + output；cached 与 cache_write 均是
+    // input 的子集。cached + cache_write > input 属未查证的字段组合，
+    // 不猜测语义，按坏行计数暴露。
+    if total != input + output || cached + cache_write > input {
         stats.bad_lines += 1;
         return;
     }
@@ -240,7 +249,7 @@ fn ingest_token_count(
         session_id: state.session_id.clone(),
         project,
         record_id: String::new(),
-        input_tokens: input - cached,
+        input_tokens: input - cached - cache_write,
         output_tokens: output,
         cache_write_tokens: cache_write,
         cache_read_tokens: cached,
@@ -301,16 +310,61 @@ mod tests {
         ]);
         assert_eq!(col.events.len(), 1);
         let e = &col.events[0];
-        // 归一化：input 剔除缓存，cached 归 cache_read。
-        assert_eq!(e.input_tokens, 800);
+        // 归一化（R02）：raw input 含 cached 与 cache_write，两者全部剔出；
+        // 展示总量守恒：750+100+50+200 = 1100 = raw total。
+        assert_eq!(e.input_tokens, 750);
         assert_eq!(e.output_tokens, 100);
         assert_eq!(e.cache_write_tokens, 50);
         assert_eq!(e.cache_read_tokens, 200);
+        assert_eq!(
+            e.input_tokens + e.output_tokens + e.cache_write_tokens + e.cache_read_tokens,
+            1100
+        );
         assert_eq!(e.model, "gpt-5.6-sol");
         assert_eq!(e.project, "alpha");
         assert_eq!(e.session_id, "sess-a");
         assert_eq!(e.record_id, "");
         assert_eq!(col.stats.bad_lines, 0);
+    }
+
+    #[test]
+    fn test_codex_cache_write_semantics() {
+        // R02（B1）：官方文档示例——input_tokens 是总量桶，cached 与
+        // cache_write 均为其子集；展示总量必须等于 raw total（修复前
+        // cache_write 被重复计一次，展示总量多出 cw）。
+        let col = collect_lines(&[
+            meta("sess-a", "C:/work/alpha"),
+            ctx("gpt-5.6-sol", "C:/work/alpha"),
+            // 全量命中写缓存：raw input 15000 = cached 12000 + cw 3000 + 0
+            tc("2026-07-17T15:59:00.000Z", 15000, 100, 12000, 3000, 15100),
+        ]);
+        assert_eq!(col.events.len(), 1);
+        let e = &col.events[0];
+        assert_eq!(e.input_tokens, 0);
+        assert_eq!(e.cache_read_tokens, 12000);
+        assert_eq!(e.cache_write_tokens, 3000);
+        assert_eq!(e.output_tokens, 100);
+        assert_eq!(
+            e.input_tokens + e.cache_read_tokens + e.cache_write_tokens + e.output_tokens,
+            15100,
+            "展示总量 == raw total（互斥桶守恒）"
+        );
+        // 旧版日志（<0.145.0）无 cache_write 字段：serde 缺省 0，退化为
+        // input = raw - cached，与历史行为一致。
+        let old = collect_lines(&[
+            meta("sess-b", "C:/work/alpha"),
+            ctx("gpt-5.6-sol", "C:/work/alpha"),
+            tc("2026-07-17T16:00:00.000Z", 1000, 100, 200, 0, 1100),
+        ]);
+        assert_eq!(old.events[0].input_tokens, 800);
+        // cached + cache_write > input：未知字段组合，坏行计数不入账。
+        let bad = collect_lines(&[
+            meta("sess-c", "C:/work/alpha"),
+            ctx("gpt-5.6-sol", "C:/work/alpha"),
+            tc("2026-07-17T16:01:00.000Z", 100, 100, 90, 50, 200),
+        ]);
+        assert!(bad.events.is_empty());
+        assert_eq!(bad.stats.bad_lines, 1);
     }
 
     #[test]

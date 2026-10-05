@@ -800,8 +800,9 @@ cache_read = 0.0
         let o = opts(Some(dir.join("cache")), Some(pricing), false);
         let r = summary(&o).unwrap();
         // 07-17 组：sonnet-4-5 input 1000 / output 200 / cw 5000 / cr 10000，
-        // 外置价后费用 = (1000*99 + 200*99) / 1M；另有 codex gpt-5.6-sol 6220/1M。
-        let expected = (1000.0 * 99.0 + 200.0 * 99.0 + 6220.0) / 1_000_000.0;
+        // 外置价后费用 = (1000*99 + 200*99) / 1M；另有 codex gpt-5.6-sol 6020/1M
+        //（B1 语义修复：raw 1000 = 750 未缓存 + 200 读 + 50 写）。
+        let expected = (1000.0 * 99.0 + 200.0 * 99.0 + 6020.0) / 1_000_000.0;
         assert!((r.groups[0].cost_usd - expected).abs() < 1e-9);
         std::fs::remove_dir_all(&dir).ok();
     }

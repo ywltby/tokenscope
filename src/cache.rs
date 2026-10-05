@@ -26,7 +26,10 @@ pub struct CacheStats {
     pub events: u64,
 }
 
-const SCHEMA_VERSION: &str = "1";
+/// 解析语义版本（B5 前置/B1 依赖）：版本不符的缓存必须整体失效——否则
+/// 解析规则升级后旧缓存继续供数（R04）。递增记录：v2 = Codex cache_write
+/// 语义修复（input = raw − cached − cache_write）。
+const SCHEMA_VERSION: &str = "2";
 
 fn fingerprint(size: u64, mtime_ms: i64) -> (i64, i64) {
     // u64 → i64 存库；实际文件大小远小于 i64 上限。
@@ -88,6 +91,26 @@ impl Cache {
             );
             CREATE INDEX IF NOT EXISTS idx_events_file ON events(file_id);",
         )?;
+        // 解析版本不符 → 旧缓存整体失效（清空后按当前规则重建）。
+        // 此前版本号只写不查（R04）：解析规则升级后旧缓存继续供数。
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        if stored.as_deref() != Some(SCHEMA_VERSION) {
+            if stored.is_some() {
+                log::warn!(
+                    "缓存解析版本变化（{:?} → {SCHEMA_VERSION}），清空重建",
+                    stored
+                );
+            }
+            conn.execute("DELETE FROM events", [])?;
+            conn.execute("DELETE FROM files", [])?;
+        }
         conn.execute(
             "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
