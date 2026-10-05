@@ -1,6 +1,6 @@
 # Review Findings Remediation Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **状态（2026-10-06）：Task 1–6 全部完成**（红→绿，提交号见文末执行记录）；**Task 7 自动化部分完成**（tauri build 4.83 MiB），真机场景（安装/升级/托盘/DPI 等）按用户 2026-10-05 决策后延至外部验收批次——计划保持 active，外部验收完成后再归档。
 
 **Goal:** 修复两个现有计划审阅中发现的分页漏行、来源目录重叠、定价部分同步状态错误和前端验收缺口，并同步产品文档与 D5 验收证据。
 
@@ -323,4 +323,18 @@ git commit -m "test(并发): 消除单飞 panic 测试竞态"
 - [ ] 旧索引不会恢复内置价格；CLAUDE、代码注释和 D5 文档统一为三层策略。
 - [ ] 单飞 panic 测试无调度竞态。
 - [ ] Rust、Tauri、前端完整门禁通过。
-- [ ] D5 真机验收有逐项证据，计划状态与实际一致。
+- [ ] D5 真机验收有逐项证据，计划状态与实际一致。（→ 后延至外部验收批次）
+
+## 执行记录（2026-10-06，分支 docs/product-review-plan）
+
+| 任务 | 结果 | 提交 |
+| --- | --- | --- |
+| Task 1 分页游标键 | 完全相同 timestamp + 空 record_id 两行同键丢行 → 稳定排序后组内序号 tie-breaker + serde_json 不透明游标（deny_unknown_fields，分隔符免疫）；重复读取顺序稳定 | `1e2ce51` |
+| Task 2 来源重叠 | normalize_path（canonicalize + 组件清理兜底）；配置层 validate_no_overlap 拒绝保存 + Settings.vue 显示错误；采集层 DedupSource 跨 agent 去重 + 重叠告警 + 发现诊断透传；test_source_overlap 三件套 | `c66826e` |
+| Task 3 状态传播 | Banner 同步成功/失败都刷新 pricing_status；部分成功横幅收敛但补充源失败原因独立可见；pricing_status 失败可重试提示（不静默空 DOM）；Settings 派发 pricing-status-changed；测试 7 件套 | `7a7ee1d` |
+| Task 4 前端集成 | App.test.ts（needsSync 横幅可见性，真实接线）；picker 毫秒桥接 round-trip 回归；statsView 清理内置样例 | `5c98301` |
+| Task 5 策略文档 | CLAUDE.md/定价注释/测试名统一三层语义；legacy_index_v2 含内置条目失效重建测试（并行竞态经 CACHE_TEST_LOCK 修复）；D5 5.3 去内置字样；release-blockers Task 4 标记 superseded | `3cf4d8c` |
+| Task 6 单飞竞态 | panic 测试 sleep(50ms) 换 channel 信号顺序（registered → follower 进入 wait → go → panic），领队阻塞 go 上不提前清槽；测试 3 连跑稳定 | `58c3487` |
+| Task 7 D5 验收 | tauri build 4.83 MiB 产出；真机场景（安装/升级/托盘/DPI/断网时序）后延至外部验收批次（用户决策） | `本次提交` |
+
+完成定义勾选：分页不重不漏 ✅；重叠不重复统计 ✅；部分同步状态正确 ✅；Banner/App/Settings/日期回归 ✅；旧索引不恢复内置 + 文档统一 ✅；单飞竞态消除 ✅；门禁全绿（根库 106 + 壳 10 + 前端 41 测试，clippy -D warnings）✅；D5 真机验收后延（已登记 todo）。
