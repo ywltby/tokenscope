@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { NButton, NCheckbox, NDatePicker, NPopover } from "naive-ui";
+import { addDays, calendarToMs, todayInTz, tzDate } from "../lib/dates";
 
 /**
  * ccs 风格的日期区间选择（M10；C3 修复 F07）：
@@ -11,40 +12,39 @@ import { NButton, NCheckbox, NDatePicker, NPopover } from "naive-ui";
  *   "近2天"，不与滚动小时窗口混称）；
  * 日期粒度（存储/过滤均为自然日，换算由 Dashboard 按解析时区完成）。
  */
-const props = defineProps<{ value: [number, number] | null }>();
-const emit = defineEmits<{ (e: "update:value", v: [number, number] | null): void }>();
+// Task 6：对外契约 = 统计时区下的日历字符串（YYYY-MM-DD），不再传
+// 本机零点毫秒（本机时区与统计时区不同会导致"今天"错日）。
+const props = defineProps<{ value: [string, string] | null; tz: string }>();
+const emit = defineEmits<{ (e: "update:value", v: [string, string] | null): void }>();
 
-const DAY = 86400e3;
 const show = ref(false);
-const draftFrom = ref<number | null>(null);
-const draftTo = ref<number | null>(null);
+const draftFrom = ref<string | null>(null);
+const draftTo = ref<string | null>(null);
 const followToday = ref(false);
 
-function todayStart(): number {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
+function todayStr(): string {
+  return todayInTz(props.tz);
 }
 
-const shortcuts: { label: string; range: () => [number, number] }[] = [
-  { label: "当天", range: () => [todayStart(), todayStart() + DAY - 1] },
+const shortcuts: { label: string; range: () => [string, string] }[] = [
+  { label: "当天", range: () => [todayStr(), todayStr()] },
   // 自然日口径：昨天 + 今天两个自然日（后端过滤为自然日闭区间）。
-  { label: "近2天", range: () => [todayStart() - DAY, todayStart() + DAY - 1] },
-  { label: "近7天", range: () => [todayStart() - 6 * DAY, todayStart() + DAY - 1] },
-  { label: "近14天", range: () => [todayStart() - 13 * DAY, todayStart() + DAY - 1] },
-  { label: "近30天", range: () => [todayStart() - 29 * DAY, todayStart() + DAY - 1] },
+  { label: "近2天", range: () => [addDays(todayStr(), -1), todayStr()] },
+  { label: "近7天", range: () => [addDays(todayStr(), -6), todayStr()] },
+  { label: "近14天", range: () => [addDays(todayStr(), -13), todayStr()] },
+  { label: "近30天", range: () => [addDays(todayStr(), -29), todayStr()] },
 ];
 
-function applyShortcut(sc: { label: string; range: () => [number, number] }): void {
+function applyShortcut(sc: { label: string; range: () => [string, string] }): void {
   const [from, to] = sc.range();
   draftFrom.value = from;
   draftTo.value = to;
   followToday.value = false;
 }
 
-function fmtShort(ms: number): string {
-  const d = new Date(ms);
-  return `${d.getMonth() + 1}/${d.getDate()}`;
+function fmtShort(dateStr: string): string {
+  const [, m, d] = dateStr.split("-");
+  return `${Number(m)}/${Number(d)}`;
 }
 
 // 受控开关：打开时草稿同步自当前值；取消/确定经 show 关闭。
@@ -54,7 +54,7 @@ watch(show, (open) => {
     draftFrom.value = props.value[0];
     draftTo.value = props.value[1];
     // 结束日为今天视为"跟随今天"勾选态
-    followToday.value = draftTo.value >= todayStart();
+    followToday.value = draftTo.value >= todayStr();
   } else {
     draftFrom.value = null;
     draftTo.value = null;
@@ -67,7 +67,7 @@ function confirm(): void {
     emit("update:value", null);
   } else if (followToday.value) {
     // 结束日跟随今天：自然日粒度下等价于"从起始日至今（含未来）"
-    emit("update:value", [draftFrom.value, todayStart() + DAY - 1]);
+    emit("update:value", [draftFrom.value, todayStr()]);
   } else if (draftTo.value == null) {
     emit("update:value", [draftFrom.value, draftFrom.value]);
   } else {
@@ -86,14 +86,29 @@ function clear(): void {
 const label = computed<string>(() => {
   const v = props.value;
   if (!v) return "全部时间";
-  if (v[1] >= todayStart() && v[0] < todayStart()) return `${fmtShort(v[0])} ~ 今天`;
+  if (v[1] >= todayStr() && v[0] < todayStr()) return `${fmtShort(v[0])} ~ 今天`;
   return fmtShort(v[0]) === fmtShort(v[1])
     ? fmtShort(v[0])
     : `${fmtShort(v[0])} ~ ${fmtShort(v[1])}`;
 });
 
+// NDatePicker 以毫秒为输入：日历字符串 ↔ UTC 零点毫秒的桥接（仅组件
+// 输入，不携带统计语义——统计语义是字符串本身）。
+const draftFromMs = computed<number | null>({
+  get: () => (draftFrom.value ? calendarToMs(draftFrom.value) : null),
+  set: (ms) => {
+    draftFrom.value = ms == null ? null : tzDate(ms, props.tz);
+  },
+});
+const draftToMs = computed<number | null>({
+  get: () => (draftTo.value ? calendarToMs(draftTo.value) : null),
+  set: (ms) => {
+    draftTo.value = ms == null ? null : tzDate(ms, props.tz);
+  },
+});
+
 const panelStyle = { width: "300px", padding: "12px" };
-const shortcutActive = (sc: { range: () => [number, number] }): boolean => {
+const shortcutActive = (sc: { range: () => [string, string] }): boolean => {
   if (draftFrom.value == null || draftTo.value == null) return false;
   const [from, to] = sc.range();
   return draftFrom.value === from && draftTo.value === to;
@@ -127,10 +142,10 @@ const shortcutActive = (sc: { range: () => [number, number] }): boolean => {
         </NButton>
       </div>
       <div style="font-size: 12px; opacity: 0.65; margin-bottom: 4px">开始日期</div>
-      <NDatePicker v-model:value="draftFrom" type="date" clearable placeholder="开始日期" />
+      <NDatePicker v-model:value="draftFromMs" type="date" clearable placeholder="开始日期" />
       <div style="font-size: 12px; opacity: 0.65; margin: 10px 0 4px">结束日期</div>
       <NDatePicker
-        v-model:value="draftTo"
+        v-model:value="draftToMs"
         type="date"
         clearable
         :disabled="followToday"

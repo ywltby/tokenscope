@@ -26,13 +26,12 @@ const NPopoverStub = { name: "NPopover" };
 import DateRangeSelect from "./DateRangeSelect.vue";
 import { tzDate } from "../lib/dates";
 
-const DAY = 86400e3;
-// 固定"今天"：2026-08-05 上海时间 10:00（= 08-05T02:00Z）。
-const NOW = Date.UTC(2026, 7, 5, 2, 0, 0);
-const todayStart = Date.UTC(2026, 7, 4, 16, 0, 0); // 上海 08-05 00:00
+// 固定"现在"：2026-10-05T17:00:00Z —— 上海已是 10-06 凌晨、UTC 还是 10-05、
+// 纽约是 10-05 下午：同一个时刻在三个时区是三个"今天"。
+const NOW = Date.UTC(2026, 9, 5, 17, 0, 0);
 
-function mountRange(value: [number, number] | null) {
-  return mount(DateRangeSelect, { props: { value } });
+function mountRange(value: [string, string] | null, tz = "Asia/Shanghai") {
+  return mount(DateRangeSelect, { props: { value, tz } });
 }
 
 async function open(w: ReturnType<typeof mountRange>): Promise<void> {
@@ -43,6 +42,68 @@ async function open(w: ReturnType<typeof mountRange>): Promise<void> {
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW });
 });
+
+/// Task 6：快捷项按所选统计时区解释"今天"。
+describe("today_uses_selected_timezone（Task 6）", () => {
+  it("UTC 时区的当天 = UTC 日历今天（而非本机零点毫秒换算）", async () => {
+    const w = mountRange(null, "UTC");
+    await open(w);
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "当天")!
+      .trigger("click");
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "确定")!
+      .trigger("click");
+    const emitted = w.emitted("update:value")!.at(-1)![0];
+    expect(emitted).toEqual(["2026-10-05", "2026-10-05"]);
+  });
+
+  it("上海时区的当天 = 上海日历今天（此刻已是 10-06）", async () => {
+    const w = mountRange(null, "Asia/Shanghai");
+    await open(w);
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "当天")!
+      .trigger("click");
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "确定")!
+      .trigger("click");
+    expect(w.emitted("update:value")!.at(-1)![0]).toEqual(["2026-10-06", "2026-10-06"]);
+  });
+
+  it("date_range_dst_boundary：纽约 DST 切换日按当日实际偏移取日历值", async () => {
+    // 2026-03-08T07:00:00Z：美东春令时切换时刻刚过，NY = 03-08。
+    vi.useFakeTimers({ now: Date.UTC(2026, 2, 8, 7, 0, 0) });
+    const w = mountRange(null, "America/New_York");
+    await open(w);
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "当天")!
+      .trigger("click");
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "确定")!
+      .trigger("click");
+    expect(w.emitted("update:value")!.at(-1)![0]).toEqual(["2026-03-08", "2026-03-08"]);
+  });
+
+  it("快捷范围是日历字符串（近7天 = 今天减 6 个自然日）", async () => {
+    const w = mountRange(null, "UTC");
+    await open(w);
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "近7天")!
+      .trigger("click");
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "确定")!
+      .trigger("click");
+    expect(w.emitted("update:value")!.at(-1)![0]).toEqual(["2026-09-29", "2026-10-05"]);
+  });
+});
 // fake timers 与 flushPromises 混用时恢复真实定时器
 afterEach(() => {
   vi.useRealTimers();
@@ -50,7 +111,7 @@ afterEach(() => {
 
 describe("DateRangeSelect（C3/F07）", () => {
   it("date_range_cancel_reopen：取消不提交，重开后草稿重新同步自当前值", async () => {
-    const value: [number, number] = [todayStart - 6 * DAY, todayStart + DAY - 1];
+    const value: [string, string] = ["2026-09-29", "2026-10-05"];
     const w = mountRange(value);
     // 第一次打开：点了"近2天"快捷，但随后取消。
     await open(w);
@@ -76,7 +137,7 @@ describe("DateRangeSelect（C3/F07）", () => {
   });
 
   it("date_range_clear_all：清除入口可达，确定后回全部时间", async () => {
-    const w = mountRange([todayStart - 29 * DAY, todayStart + DAY - 1]);
+    const w = mountRange(["2026-09-06", "2026-10-05"]);
     await open(w);
     // 清除按钮存在且可用（修复前：清空起始日后确定被禁用，分支不可达）。
     const clear = w.findAll("button").find((b) => b.text() === "清除");

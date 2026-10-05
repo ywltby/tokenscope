@@ -18,13 +18,12 @@ import EventTable from "../components/EventTable.vue";
 import AgentIcon from "../components/AgentIcon.vue";
 import DateRangeSelect from "../components/DateRangeSelect.vue";
 import { useTimezone } from "../composables/timezone";
-import { tzDate } from "../lib/dates";
 
 const props = defineProps<{ refreshKey: number }>();
 
 const by = ref<Dim>("day");
 const agent = ref<AgentFilter>("all");
-const range = ref<[number, number] | null>(null);
+const range = ref<[string, string] | null>(null);
 const { tz } = useTimezone();
 const report = ref<SummaryReport | null>(null);
 const loading = ref(false);
@@ -48,7 +47,8 @@ const eventsError = ref<string | null>(null);
 type SnapshotFilters = {
   by: Dim;
   agent: AgentFilter;
-  range: [number, number] | null;
+  /** v3：统计时区日历字符串 */
+  range: [string, string] | null;
   drill: EventDrill | null;
   tz: string;
 };
@@ -71,11 +71,7 @@ const dimOptions: { label: string; value: Dim }[] = [
   { label: "按应用", value: "agent" },
 ];
 
-/// 区间毫秒 → 解析时区下的 YYYY-MM-DD（C3：Intl 按所选时区当日实际偏移，
-/// DST 正确；修复前非 UTC 一律按 +8 折算）。
-function fmtDate(ms: number): string {
-  return tzDate(ms, tz.value);
-}
+// Task 6：日期控件直接传统计时区日历字符串，无需毫秒换算。
 
 const agentOptions: { label: string; value: AgentFilter; icon: string }[] = [
   { label: "全部", value: "all", icon: "all" },
@@ -92,8 +88,8 @@ async function refresh(): Promise<void> {
       by: by.value,
       agent: agent.value,
       days: null,
-      from: range.value ? fmtDate(range.value[0]) : null,
-      to: range.value ? fmtDate(range.value[1]) : null,
+      from: range.value?.[0] ?? null,
+      to: range.value?.[1] ?? null,
       tz: tz.value,
     });
     if (seq !== summarySeq) return; // 已有更新的查询，丢弃旧响应
@@ -130,7 +126,7 @@ function saveSnapshot(): void {
     ek.range?.[1] === k.range?.[1];
   if (!coherent) return;
   const payload: SnapshotPayload = {
-    v: 2,
+    v: 3,
     saved_at: new Date().toISOString(),
     filters: k,
     report: report.value,
@@ -153,8 +149,8 @@ async function loadEvents(append = false): Promise<void> {
     const last = append ? events.value?.rows.at(-1) : undefined;
     const list = await invoke<EventList>("list_events", {
       agent: agent.value,
-      from: range.value ? fmtDate(range.value[0]) : null,
-      to: range.value ? fmtDate(range.value[1]) : null,
+      from: range.value?.[0] ?? null,
+      to: range.value?.[1] ?? null,
       model: drill.value?.type === "model" ? drill.value.key : null,
       project: drill.value?.type === "project" ? drill.value.key : null,
       day: drill.value?.type === "day" ? drill.value.key : null,
@@ -187,8 +183,8 @@ function loadMoreEvents(): void {
 async function loadViewCache(): Promise<void> {
   try {
     const cached = await invoke<SnapshotPayload | null>("view_cache_load");
-    // 只接受 v2 快照（携带查询身份）；旧格式/损坏一律走正常加载。
-    if (!cached || cached.v !== 2 || !cached.report || !cached.filters) return;
+    // 只接受 v3 快照（range 为日历字符串）；旧格式/损坏一律走正常加载。
+    if (!cached || cached.v !== 3 || !cached.report || !cached.filters) return;
     // 连同筛选一起恢复：数据与筛选必然同口径（保存时已做过一致性检查）。
     by.value = cached.filters.by;
     agent.value = cached.filters.agent;
@@ -284,7 +280,7 @@ void loadSources();
         <NRadioGroup v-model:value="by" size="small">
           <NRadioButton v-for="o in dimOptions" :key="o.value" :value="o.value" :label="o.label" />
         </NRadioGroup>
-        <DateRangeSelect v-model:value="range" />
+        <DateRangeSelect v-model:value="range" :tz="tz" />
         <NButton size="small" secondary @click="manualRefresh">刷新</NButton>
       </div>
     </div>

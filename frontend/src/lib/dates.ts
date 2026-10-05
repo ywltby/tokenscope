@@ -6,3 +6,21 @@ export function tzDate(ms: number, tz: string): string {
   if (tz === "local") return new Date(ms).toLocaleDateString("sv-SE");
   return new Intl.DateTimeFormat("sv-SE", { timeZone: tz }).format(new Date(ms));
 }
+
+/// 指定时区的"今天"（YYYY-MM-DD 日历值）。
+export function todayInTz(tz: string): string {
+  return new Intl.DateTimeFormat("sv-SE", { timeZone: tz }).format(new Date());
+}
+
+/// 日历日加减 n 天（纯日历运算，不经本机时刻，DST 安全）。
+export function addDays(dateStr: string, n: number): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const t = Date.UTC(y, m - 1, d) + n * 86400e3;
+  return new Date(t).toISOString().slice(0, 10);
+}
+
+/// 日历字符串 → NDatePicker 所需毫秒（锚定 UTC 零点，仅作组件输入）。
+export function calendarToMs(dateStr: string): number {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return Date.UTC(y, m - 1, d);
+}

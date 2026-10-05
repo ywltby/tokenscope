@@ -189,7 +189,7 @@ describe("Dashboard 查询编排", () => {
 describe("Dashboard 视图快照与刷新（C4/F08）", () => {
   function snapshotPayload() {
     return {
-      v: 2,
+      v: 3,
       saved_at: "2026-10-05T00:00:00Z",
       filters: {
         by: "model",
@@ -229,7 +229,7 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     expect(state(w)["stale"]).toBe(false);
   });
 
-  it("view_cache_query_mismatch：旧格式快照（无 v）不得当新数据展示", async () => {
+  it("view_cache_query_mismatch：v2 旧快照（ms range）不得当新数据展示", async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "view_cache_load")
         return Promise.resolve({ report: summaryA, events, saved_at: "x" });
