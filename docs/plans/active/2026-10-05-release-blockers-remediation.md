@@ -429,7 +429,7 @@ pnpm --dir frontend build
 | Task 1 单飞 RAII | 修复 `?` 早退导致失败航班占据槽位不可重试；FlightGuard（publish_ok/publish_error/Drop 兜底 panic）+ 单飞槽改 HashMap 按 key 管理（不同参数可并发、同参共享，修复跨 key 顶替竞态）；leader 工作可注入。test_failed_flight_is_retryable / wakes_all_waiters / panicked_wakes_waiter_and_clears_slot 红→绿 | `bacb56f` |
 | Task 2 完整精度游标 | EventRow.cursor（完整精度 UTC + record_id 不透明串），前端原样回传；同秒亚秒不丢行、空 record_id 靠亚秒决序。test_events_pagination_same_second_subsecond / empty_record_id_tie_break 红→绿 | `66e5576` |
 | Task 3 v1 快照兼容 | v1 非零缓存价保留（此前一律抹成未知），0 → 未知；v2 严格区分不变。三个命名测试红→绿 | `19e25d1` |
-| Task 4 内置表校正 | models.dev 权威快照审计确认 gpt/grok 家族 18 行缓存写/读两列互换（openai/gpt-5.6 cw=5.0/cr=0.4 直接证据）；逐行校正 + 费率结构防线测试 + lookup 词元边界（gpt-50 不命中 gpt-5）；e2e/cost_math/partial 手算期望重算 | `2975c3e` |
+| Task 4 内置表校正 | ⚠️ **已被 2026-10-06 定价来源策略 superseded**：内置价格表已整体移除（见 pricing-source-policy 计划 Task 1），逐行校正与费率结构防线转由测试 fixture 承载；lookup 词元边界（gpt-50 不命中 gpt-5）保留在生产 lookup 中 | `2975c3e` → superseded |
 | Task 5 完整性判定 | 未知分项仅 tokens>0 才置 complete=false（零 token 未知不打 †）；partial_cost_totals 的 d2 断言随新语义翻转 | `1850d18` |
 | Task 6 统计时区日期 | 控件契约改日历字符串 + tz prop；快捷项按所选时区解释"今天"（Intl 实际偏移，DST 安全）；Dashboard 直传字符串；快照 v3。today_uses_selected_timezone / dst_boundary 红→绿 | `273b625` |
 | Task 7 失败安全 | 7.1 损坏设置报错不覆盖（keeps_file）；7.2 四类文件统一原子写 + 唯一临时名（并发不串档 + rename 失败清理）；7.3 双 provider 独立 SYNC_LOCK + sync_with 可注入 mock（单源失败不覆盖另一源）；7.4 OpenRouter 缺价 None / 负价拒绝 | `18efcda` |

@@ -4,11 +4,12 @@
 //! 剥 `vendor/` 前缀、`.` → `-`），让 `claude-sonnet-4.5`（OpenRouter）与
 //! `claude-sonnet-4-5-20250929`（日志）汇合到同一前缀。
 //!
-//! M9 四层来源，**层级优先，层内最长前缀**（外置 > models.dev > openrouter > 内置）：
-//! - 内置：静态快照（取自 cc-switch `model_pricing` 2026-10-03），兜底；
-//! - openrouter：同步快照（备份，含显示名）；
-//! - models.dev：同步快照（M9 主源，含显示名）；
-//! - 外置：`~/.tokenscope/pricing.toml`（用户补充/覆盖，最高优先）。
+//! Task 1（2026-10-06）三层来源，**层级优先，层内最长前缀**
+//! （外置 > models.dev > OpenRouter；编译期内置表已移除，未收录模型始终
+//! unknown，无任何静态 fallback）：
+//! - 外置：`~/.tokenscope/pricing.toml`（用户补充/覆盖，最高优先）；
+//! - models.dev：主源（在线同步 / 本地快照离线兜底，含显示名）；
+//! - OpenRouter：补充源（在线同步 / 本地快照，含显示名）。
 //!
 //! 未收录模型返回 None，由聚合层按 unknown 单独呈现——不得按 0 静默吞掉（M1 不变量 5）。
 
@@ -356,7 +357,7 @@ impl Pricing {
         pricing
     }
 
-    /// 四层合并：内置兜底，openrouter/models.dev 快照叠加，外置最终覆盖。
+    /// 三层合并（Task 1）：openrouter/models.dev 快照叠加在空表上，外置最终覆盖。
     /// 各快照文件缺失 → 静默跳过该层；解析失败 → 警告并跳过该层。
     pub fn load(
         external: Option<&Path>,
@@ -451,7 +452,7 @@ impl Pricing {
         (pricing, warnings)
     }
 
-    /// 层级优先（外置 > models.dev > openrouter > 内置），层内最长前缀。
+    /// 层级优先（外置 > models.dev > OpenRouter），层内最长前缀。
     /// **变体隔离**：带 `:变体` 的查询只匹配同变体条目——免费（`:free`）等变体
     /// 不得套用基名价格，宁可 unknown。
     ///
@@ -724,7 +725,7 @@ mod tests {
 
     #[test]
     fn test_pricing_normalize_matches_dot_naming() {
-        // OpenRouter 点号命名经归一化后命中内置表（反之亦然）。
+        // OpenRouter 点号命名经归一化后命中 fixture 表（反之亦然）。
         assert_eq!(
             fixture_pricing()
                 .lookup("anthropic/claude-sonnet-4.5")
@@ -735,8 +736,8 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_price_columns_are_not_swapped() {
-        // Task 4（P1）：内置表 (prefix, input, output, cache_write, cache_read)，
+    fn test_fixture_price_columns_are_not_swapped() {
+        // Task 4（P1）：价格表 (prefix, input, output, cache_write, cache_read)，
         // gpt/grok 家族此前把缓存读价填进了缓存写列。逐字段直接断言
         // ModelPrice（不经费用反推），证据 = models.dev 权威快照 + OpenAI
         // prompt-caching 文档（写 1.25×、读 0.1×）。
@@ -761,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_gpt_cache_read_write_values() {
+    fn test_fixture_gpt_cache_read_write_values() {
         // 费率结构防线：无写计费家族 cr = 0.1×input 且 cw = 0；
         // 5.6+ 家族 cw = 1.25×input 且 cr = 0.1×input。
         let no_write = [
@@ -801,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_lookup_longest_prefix_boundary() {
+    fn test_fixture_lookup_longest_prefix_boundary() {
         // Task 4：前缀命中必须有词元边界——"gpt-50" 不得命中 "gpt-5"。
         assert!(fixture_pricing().lookup("gpt-50").is_none());
         assert!(fixture_pricing().lookup("gpt-50-mini").is_none());
@@ -1034,6 +1035,40 @@ mod tests {
     }
 
     #[test]
+    fn test_legacy_index_v2_with_builtin_entries_is_invalidated() {
+        let _g = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Task 5（审阅计划）：版本 2 的旧索引可能含"内置"来源条目——
+        // 启动加载必须按版本失效重建，结果只含三层来源、不出现"内置"。
+        // （写一个 v2 索引，带旧内置条目，断言重建后三层语义。）
+        let dir = std::env::temp_dir().join(format!("tokenscope-t5-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let idx = dir.join("pricing-index.json");
+        let legacy = serde_json::json!({
+            "v": 2,
+            "sig": "stale-sig-that-will-not-match",
+            "synced_at": "2026-10-05T00:00:00Z",
+            "entries": [
+                { "prefix": "legacy/builtin-model", "display": "legacy/builtin-model",
+                  "name": null, "tier": 3, "input": 1.0, "output": 2.0,
+                  "cache_write": 0.0, "cache_read": 0.0 }
+            ]
+        });
+        std::fs::write(&idx, serde_json::to_string(&legacy).unwrap()).unwrap();
+        *PRICE_CACHE.lock().unwrap() = None;
+        // 签名不可能匹配 stale-sig → 重建；且 INDEX_VERSION=3 使 v2 索引失效。
+        let (p, _, _) = Pricing::load_cached(None, None, None, &idx);
+        assert!(
+            p.lookup("legacy/builtin-model").is_none(),
+            "旧索引中的内置条目不得被恢复"
+        );
+        assert!(p.lookup("claude-sonnet-4-5").is_none(), "无来源 → unknown");
+        // 清空进程内缓存，避免污染并行的同签名测试（restart_hit）。
+        *PRICE_CACHE.lock().unwrap() = None;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn test_pricing_index_restart_hit() {
         // D2/F10 接线：索引文件签名一致 → 跳过双快照解析直接恢复。
         let dir = std::env::temp_dir().join(format!("tokenscope-b3-idx-{}", std::process::id()));
@@ -1127,7 +1162,7 @@ cache_read = 0.0
 
     #[test]
     fn test_pricing_tier_order() {
-        // 三层优先级：外置 > openrouter > 内置；层内最长前缀。
+        // 三层优先级：外置 > OpenRouter > models.dev（fixture 为主源）；层内最长前缀。
         let dir = std::env::temp_dir().join(format!("tokenscope-m5-tier-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let external = write(

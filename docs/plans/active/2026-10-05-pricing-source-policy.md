@@ -260,5 +260,7 @@ pnpm --dir frontend build
 | Task 4 设置页与文档 | 来源标签映射（models.dev/OpenRouter/外置，无内置）；优先级文案改三层 + 离线快照说明；主源缺失 NAlert 提示；priceSourceLine 三态测试；口径文档费用章节更新 | `229b0c2` |
 | Task 5 验收 | 完整门禁绿（根库 104 + 壳 9 + 前端 35 测试、clippy -D warnings 双 manifest、前端 build）；tauri build 4.82 MiB。额外断言映射：旧索引失效（INDEX_VERSION 3 + 重启命中测试）、离线快照计价（pricing_status cached + modelsdev_layer）、无快照横幅（banner visible）、同步失败保旧快照（sync_provider_retry_independent）、无来源全 unknown（unknown_model_without_sources）。真机时序验收随 D5 批次执行 | `本次提交` |
 
+**审阅后续（2026-10-06 review-findings-remediation）**：旧索引迁移补测（v2 含内置条目启动即失效重建，无内置条目恢复）——见该计划 Task 5。
+
 完成定义核对：无生产 TIER_BUILTIN/builtin()/静态 fallback ✅；models.dev 来源可单独识别（标签 + 状态 DTO + 日志）✅；首启横幅可见/可同步/失败可重试 ✅；离线快照可用 ✅；索引迁移与三门禁通过 ✅；真机证据随 D5 批次（后延，用户决策）。
 
