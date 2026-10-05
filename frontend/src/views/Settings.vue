@@ -226,9 +226,9 @@ const priceColumns = computed<DataTableColumn[]>(() => [
           type:
             asEntry(r).source === "外置"
               ? "success"
-              : asEntry(r).source === "openrouter"
+              : asEntry(r).source === "models.dev"
                 ? "info"
-                : "default",
+                : "warning",
         },
         { default: () => asEntry(r).source },
       ),
@@ -237,7 +237,7 @@ const priceColumns = computed<DataTableColumn[]>(() => [
 
 /// Naive UI 表格行类型是 Record<string, unknown>，统一经 unknown 转换。
 const asEntry = (r: object): PricingEntry => r as unknown as PricingEntry;
-// 同前缀可能同时存在内置/openrouter/外置行，键必须含来源
+// 同前缀可能同时存在 models.dev/openrouter/外置行，键必须含来源
 const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}`;
 </script>
 
@@ -339,17 +339,26 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
               优先级：外置（{{ pricing?.external_count ?? 0 }} 条）> models.dev（{{
                 pricing?.modelsdev_count ?? 0
               }}
-              条）> OpenRouter（{{ pricing?.openrouter_count ?? 0 }} 条）> 内置；层内最长前缀匹配。
+              条，主源）> OpenRouter（{{ pricing?.openrouter_count ?? 0 }} 条，补充源）；
+              层内最长前缀匹配，未收录模型按未知价格处理（无内置兜底）。本地 models.dev
+              快照是离线缓存：断网时继续按上次同步数据计价。
               <template v-if="pricing?.modelsdev_synced_at">
                 models.dev 上次同步：{{ pricing.modelsdev_synced_at }}；</template
               >
               <template v-if="pricing?.openrouter_synced_at"
                 >OpenRouter 上次同步：{{ pricing.openrouter_synced_at }}</template
               >
-              <template v-if="!pricing?.modelsdev_synced_at && !pricing?.openrouter_synced_at"
-                >尚未同步在线源（同步前仅内置 + 外置生效）。</template
-              >
             </div>
+            <!-- Task 4：主源缺失或损坏 → 状态/路径/需要同步提示 -->
+            <NAlert
+              v-if="pricing && (pricing.modelsdev_count === 0 || !pricing.modelsdev_synced_at)"
+              type="warning"
+              style="margin-bottom: 8px"
+            >
+              主源（models.dev）尚未就绪{{ pricing.modelsdev_synced_at ? "或数据为空" : "" }}：
+              {{ pricing.modelsdev_path }}。点击上方「同步在线价格」获取定价；
+              当前未覆盖模型的费用将显示为未知。
+            </NAlert>
             <NAlert
               v-for="(w, i) in pricing?.warnings ?? []"
               :key="i"

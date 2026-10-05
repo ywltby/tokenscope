@@ -17,6 +17,22 @@ describe("priceSourceLine（pricing_match_source_visible）", () => {
     expect(priceSourceLine(e)).toBe("来源：内置");
   });
 
+  it("来源标签三态（Task 4）：models.dev 与 OpenRouter 可区分且无内置", () => {
+    const mk = (source: string): PricingEntry =>
+      ({
+        prefix: "x",
+        input: 1,
+        output: 2,
+        cache_write: 0,
+        cache_read: 0,
+        incomplete: false,
+        source,
+      }) as PricingEntry;
+    expect(priceSourceLine(mk("外置"))).toBe("来源：外置");
+    expect(priceSourceLine(mk("models.dev"))).toBe("来源：models.dev");
+    expect(priceSourceLine(mk("OpenRouter"))).toBe("来源：OpenRouter");
+  });
+
   it("不完整条目必须可见（部分分项价未知按 0 展示但未计费）", () => {
     const e = {
       prefix: "x",
