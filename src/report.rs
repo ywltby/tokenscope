@@ -1622,19 +1622,31 @@ cache_read = 0.4
     fn test_panicked_flight_wakes_waiter_and_clears_slot() {
         let dir = tmp_dir("flight-panic");
         let opts = opts(Some(dir.join("cache")), None, false);
-        // 领队线程：睡 200ms 后 panic（保证主线程成为跟随者）。
+        // Task 6：channel 信号消除 sleep 竞态——
+        // (1) 领队闭包被调用 = 已注册航班 → 发 registered；
+        // (2) 主线程收到后，由独立定时线程在宽裕时间窗后发 go（此时主线程
+        //     已作为跟随者阻塞在 wait_flight，领队阻塞在 go 上不会提前清槽）；
+        // (3) 领队收到 go 才 panic → 守卫发布错误 + 清槽 → 跟随者唤醒。
+        let (registered_tx, registered_rx) = std::sync::mpsc::channel::<()>();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
         let o1 = opts.clone();
         let leader = std::thread::spawn(move || {
             let leader_fn = |_gen: u64| -> Result<CollectionSnapshot> {
-                // 先注册航班（立即）再睡：保证主线程成为跟随者。
-                std::thread::sleep(std::time::Duration::from_millis(200));
+                registered_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
                 panic!("采集炸了");
             };
             let _ = collect_flighted_with(&o1, &leader_fn);
         });
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        // 主线程作为跟随者加入同一航班 → 领队 panic 后应被唤醒并拿到错误。
-        let ok_fn = |_gen: u64| -> Result<CollectionSnapshot> {
+        registered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("领队必须先注册航班");
+        // 独立线程发 go：主测试线程此刻正以跟随者身份进入 wait_flight。
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            go_tx.send(()).unwrap();
+        });
+        let ok_fn = move |_gen: u64| -> Result<CollectionSnapshot> {
             panic!("跟随者闭包不应被调用");
         };
         let follower = collect_flighted_with(&opts, &ok_fn);
