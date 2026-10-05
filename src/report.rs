@@ -468,9 +468,10 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
         ..
     } = collect_all(opts)?;
     let (tz, _) = resolve_tz(opts.tz.as_deref())?;
-    if let Some(n) = opts.days {
-        events = filter_days(events, &tz, n);
-    }
+    // F02（计划 A3）：明细先复用与汇总完全相同的主时间过滤（days / from-to
+    // 同一校验与口径），再叠加行级下钻——此前只应用 days，前端传的 from/to
+    // 被静默忽略，选择历史区间后明细与汇总范围不一致。
+    events = apply_time_filter(events, opts, &tz)?;
     if let Some(day) = &filter.day {
         events.retain(|e| e.ts.to_zoned(tz.clone()).date().to_string() == *day);
     }
