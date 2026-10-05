@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, h } from "vue";
 import { NCollapse, NCollapseItem, NDataTable, type DataTableColumn } from "naive-ui";
-import { AGENT_LABEL, STAT_KEYS, fmtCost, fmtNum, type Group, type SummaryReport } from "../types";
+import { AGENT_LABEL, fmtCost, fmtNum, type Group, type SummaryReport } from "../types";
+import { buildSourceLines } from "../lib/statsView";
 
 const props = defineProps<{ report: SummaryReport }>();
 const emit = defineEmits<{ (e: "row-click", key: string): void }>();
@@ -95,11 +96,9 @@ const rowProps = (row: object) => ({
 });
 
 const sourceLines = computed(() =>
-  props.report.sources.map((s) => ({
+  buildSourceLines(props.report.sources).map((s) => ({
     agent: AGENT_LABEL[s.agent] ?? s.agent,
-    parts: STAT_KEYS.filter(
-      (k) => (s.stats[k.key] ?? 0) > 0 || k.key === "files_scanned" || k.key === "events",
-    ).map((k) => `${k.label} ${fmtNum(s.stats[k.key] ?? 0)}`),
+    parts: s.parts,
   })),
 );
 </script>

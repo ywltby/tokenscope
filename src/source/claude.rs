@@ -296,6 +296,30 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_nested_project_identity() {
+        // Task 8（R03/C2）：嵌套目录的项目身份 = 相对根路径——"a/sub" 与
+        // "sub" 可区分，同名父目录不再误合并；真实平铺 slug 布局行为不变。
+        let dir = std::env::temp_dir().join(format!("tokenscope-t8-nest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let nested = dir.join("a").join("sub");
+        let flat = dir.join("sub2");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&flat).unwrap();
+        let line = r#"{"type":"assistant","timestamp":"2026-07-17T08:00:00.000Z","sessionId":"s","message":{"id":"m","model":"m","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+        std::fs::write(nested.join("n.jsonl"), line).unwrap();
+        std::fs::write(flat.join("f.jsonl"), line).unwrap();
+        let col = ClaudeSource::new(&dir).collect().unwrap();
+        let mut projects: Vec<&str> = col.events.iter().map(|e| e.project.as_str()).collect();
+        projects.sort();
+        assert_eq!(
+            projects,
+            ["a\\sub", "sub2"],
+            "嵌套与平铺身份可区分（Windows 路径分隔符）"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn test_synthetic_skipped() {
         let line = r#"{"type":"assistant","timestamp":"2026-07-17T08:00:00.000Z","sessionId":"s1","message":{"id":"m1","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}"#;
         let col = collect_text(line);

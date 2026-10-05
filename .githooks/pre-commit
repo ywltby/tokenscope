@@ -9,13 +9,13 @@ export PATH
 echo "[pre-commit] 根库 cargo fmt --check"
 cargo fmt --all -- --check
 echo "[pre-commit] 根库 cargo clippy"
-cargo clippy --workspace --all-targets --quiet
+cargo clippy --workspace --all-targets -- -D warnings
 echo "[pre-commit] 根库 cargo test"
 cargo test --workspace --quiet
 echo "[pre-commit] 壳 cargo fmt --check"
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 echo "[pre-commit] 壳 cargo clippy"
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --quiet
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 echo "[pre-commit] 壳 cargo test"
 cargo test --manifest-path src-tauri/Cargo.toml --quiet
 echo "[pre-commit] frontend typecheck"

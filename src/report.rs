@@ -1653,6 +1653,17 @@ cache_read = 0.0
         assert_eq!(st[0].state, "ready");
         assert_eq!(st[0].files, 2);
         assert_eq!(st[1].state, "disabled", "停用优先于目录状态");
+        // Task 8（source_empty_error_ready_states）：存在但无日志 → empty。
+        let empty_dir = tmp_dir("empty-src");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        let mut s2 = crate::settings::Settings::default();
+        s2.sources.claude = Some(crate::settings::SourceConfig {
+            enabled: true,
+            dir: Some(empty_dir.display().to_string()),
+        });
+        let st2 = source_status(&s2).unwrap();
+        assert_eq!(st2[0].state, "empty", "目录存在但无 jsonl → empty");
+        std::fs::remove_dir_all(&empty_dir).ok();
         // 未配置 → 默认目录多半不存在 → missing（不依赖具体家目录，只验状态字段存在）。
         let st = source_status(&crate::settings::Settings::default()).unwrap();
         assert!(st.iter().all(|x| x.enabled));

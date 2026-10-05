@@ -28,7 +28,10 @@ Anthropic Messages API 的 usage 四字段本身就是互斥桶，逐一映射�
 | `usage.cache_read_input_tokens` | 缓存读 | 计 0.1× 价格 |
 
 只取 `type=assistant` 且含 `message.usage` 的行；sidechain（子 agent）
-与 `isApiErrorMessage`/合成行按既有口径排除并计数。去重身份 = 
+与合成行（`model == "<synthetic>"`）按既有口径排除并计数。
+**`isApiErrorMessage` 不在排除口径内**（代码未读取该字段）：API 错误行
+通常不带 usage，经"缺 usage"路径跳过；若未来出现带 usage 的错误行会
+入账——口径变更需先行确认并更新本文件。去重身份 = 
 `(session_id, message.id)`，保时间戳最晚一条（流式重发取终值）。
 
 ### 2.2 Codex（`~/.codex/sessions/**/*.jsonl`，rollout 格式）
@@ -103,14 +106,36 @@ model 纳入键：**跨模型**的同用量请求不再误合并；重播必然�
 `src/dedupe.rs`：重播保首条、跨批次/跨日仍去重、agent 间隔离。
 `tests/e2e_events_range.rs` 等端到端测试保证去重与汇总/明细同源。
 
+### 3.4 项目身份（C2/R03）
+
+- Claude：文件父目录**相对根路径**（真实 `projects/<slug>/` 布局下即
+  slug 本身）；嵌套目录 `a/sub` 与 `sub` 可区分；
+- Codex：**完整 cwd**（basename 同名不同路径不合并）；
+- 展示名（`Group.label`）= 路径末段，完整身份保留下钻匹配；
+- **跨工具同名项目不自动合并**（test_project_alias_cross_agent）：
+  Claude slug 与 Codex cwd 是独立身份，展示名相同属预期；关联需显式
+  别名机制（未立项）。
+
+## 3.5 分页游标（D1/Task 2）
+
+- 明细游标 = **完整精度 UTC 时间戳 + record_id** 的不透明串
+ （`EventRow.cursor`），前端原样回传、不得从展示字符串反解；
+- `(ts, record_id)` 元组严格小于语义，同秒亚秒不丢行、空 record_id
+  靠亚秒决序；`total` 恒为过滤后全量（不含游标截断）。
+
 ## 4. 费用（估算）
 
 - 费用为**估算**：模型前缀匹配价格表（外置 pricing.toml > models.dev >
   OpenRouter > 内置），按四桶分别计价后求和。前缀命中不等于实际供应商
   账单（第三方路由、折扣、订阅额度、税费均未覆盖）；UI 标注「估算」。
 - **缺价格 ≠ 零价格**：完全无价格的模型，事件费用不计入且 tokens 进入
-  `unknown_tokens`，`unknown_pricing = true`（表格 `†` 标记）。部分分项
-  缺价格的模型处理见计划 B3（分项未知不按 0 计）。
+  `unknown_tokens`，`unknown_pricing = true`（表格 `†` 标记）。
+- **部分计价（B3/Task 5）**：价格分项未知（快照缺键/OpenRouter 缺价）
+  时，该分项按未知处理；**仅当该分项实际产生 token（> 0）才标记
+  `complete = false`**——零 token 的未知分项不打 †；未知 token 数单列
+  "未知†"列。
+- **缓存失败（不变量 9）**：缓存任何故障降级全量扫描并告警；解析版本
+  不符自动清库；测试密闭（不触碰真实 `~/.tokenscope`）。
 - 价格快照与外置文件的来源、条数、同步时间在设置页可见。
 
 ## 5. 时间与时区
