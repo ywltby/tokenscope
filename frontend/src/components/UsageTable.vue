@@ -22,6 +22,8 @@ const columns = computed<DataTableColumn[]>(() => {
     key: "key",
     minWidth: 140,
     ellipsis: { tooltip: true },
+    // C2：项目身份是完整路径，展示用 label（末段），悬浮可见完整 key。
+    render: (row) => h("span", asGroup(row).label ?? asGroup(row).key),
   };
   const num = (title: string, key: string): DataTableColumn => ({
     title,

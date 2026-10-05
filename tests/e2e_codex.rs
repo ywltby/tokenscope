@@ -81,7 +81,8 @@ fn test_e2e_codex_collection() {
     let e1 = &col.events[0];
     assert_eq!(e1.model, "gpt-5.6-sol");
     assert_eq!(e1.session_id, "sess-a");
-    assert_eq!(e1.project, "alpha");
+    // C2：项目身份 = 完整 cwd（fixture 里是反斜杠写法）。
+    assert_eq!(e1.project, r"C:\work\alpha");
     // B1 语义修复：raw input 1000 = 750 未缓存 + 200 读 + 50 写。
     assert_eq!(e1.input_tokens, 750);
     assert_eq!(e1.output_tokens, 100);

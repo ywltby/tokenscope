@@ -29,7 +29,8 @@ export function buildBarChartData(groups: Group[], by: string): BarChartData {
           (a, b) => b.tokens.input + b.tokens.output - (a.tokens.input + a.tokens.output),
         );
   return {
-    categories: ordered.map((g) => g.key),
+    // C2：项目维度分类显示用展示名（末段），完整路径经 key 保留。
+    categories: ordered.map((g) => g.label ?? g.key),
     series: SERIES.map((s) => ({
       name: s.label,
       values: ordered.map((g) => g.tokens[s.name]),

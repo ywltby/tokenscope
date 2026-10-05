@@ -150,10 +150,12 @@ fn test_golden_summary_events_parity() {
         ..opts.clone()
     })
     .unwrap();
-    assert_eq!(p.groups[0].key, "alpha");
-    assert_eq!(p.groups[0].requests, 2);
-    assert_eq!(p.groups[1].key, "beta");
-    assert_eq!(p.groups[1].requests, 3);
+    // C2：项目身份 = 完整 cwd（codex）/ 相对目录（claude）；label 为展示名。
+    assert_eq!(p.groups[0].key, "C:/work/beta");
+    assert_eq!(p.groups[0].label.as_deref(), Some("beta"));
+    assert_eq!(p.groups[0].requests, 3);
+    assert_eq!(p.groups[1].key, "alpha");
+    assert_eq!(p.groups[1].requests, 2);
     let a = summary(&SummaryOptions {
         by: GroupBy::Agent,
         ..opts.clone()

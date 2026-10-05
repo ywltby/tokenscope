@@ -28,8 +28,9 @@ pub struct CacheStats {
 
 /// 解析语义版本（B5 前置/B1 依赖）：版本不符的缓存必须整体失效——否则
 /// 解析规则升级后旧缓存继续供数（R04）。递增记录：v2 = Codex cache_write
-/// 语义修复（input = raw − cached − cache_write）。
-const SCHEMA_VERSION: &str = "2";
+/// 语义修复（input = raw − cached − cache_write）；v3 = Codex 项目身份改
+/// 完整 cwd（C2/R03）+ Claude 项目相对路径。
+const SCHEMA_VERSION: &str = "3";
 
 fn fingerprint(size: u64, mtime_ms: i64) -> (i64, i64) {
     // u64 → i64 存库；实际文件大小远小于 i64 上限。

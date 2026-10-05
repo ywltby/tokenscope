@@ -67,6 +67,9 @@ impl GroupBy {
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct Group {
     pub key: String,
+    /// C2：展示名（Project 维度 = 路径末段；其他维度 None，展示用 key）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub requests: u64,
     pub tokens: TokenCounts,
     pub cost_usd: f64,
@@ -101,6 +104,7 @@ pub fn aggregate(
             GroupBy::Agent => e.agent.as_str().to_string(),
         };
         let g = map.entry(key.clone()).or_insert_with(|| Group {
+            label: project_label(&by, &key),
             key,
             ..Group::default()
         });
@@ -126,6 +130,18 @@ pub fn aggregate(
         }
     }
     let mut groups: Vec<Group> = map.into_values().collect();
+    /// Project 维度的展示名 = 路径末段（正反斜杠都容忍）；其他维度 None。
+    fn project_label(by: &GroupBy, key: &str) -> Option<String> {
+        if *by != GroupBy::Project {
+            return None;
+        }
+        Some(
+            key.rsplit(['/', '\\'])
+                .find(|s| !s.is_empty())
+                .unwrap_or(key)
+                .to_string(),
+        )
+    }
     let mut totals = Group {
         key: "合计".to_string(),
         ..Group::default()

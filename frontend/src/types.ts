@@ -10,6 +10,8 @@ export interface TokenCounts {
 
 export interface Group {
   key: string;
+  /** C2：展示名（项目维度 = 路径末段）；缺省展示 key */
+  label?: string | null;
   requests: number;
   tokens: TokenCounts;
   cost_usd: number;

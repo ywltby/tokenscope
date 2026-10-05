@@ -69,14 +69,23 @@ impl ClaudeSource {
     }
 
     /// 项目名 = projects 下第一级目录名；根下散放的 jsonl 记为 "(根目录)"。
+    /// 项目身份 = 相对根的父目录路径（C2/R03）：真实布局（projects/<slug>/
+    /// *.jsonl）下即 slug 本身、行为不变；自定义目录树嵌套时 "a/sub" 与
+    /// "sub" 可区分，不再因父目录同名误合并。
     fn project_of(&self, path: &Path) -> String {
-        match path.parent() {
-            Some(p) if p == self.root => "(根目录)".to_string(),
-            Some(p) => p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "(根目录)".to_string()),
-            None => "(根目录)".to_string(),
+        let parent = match path.parent() {
+            Some(p) if p == self.root => return "(根目录)".to_string(),
+            Some(p) => p,
+            None => return "(根目录)".to_string(),
+        };
+        let rel = parent
+            .strip_prefix(&self.root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| parent.display().to_string());
+        if rel.is_empty() {
+            "(根目录)".to_string()
+        } else {
+            rel
         }
     }
 }

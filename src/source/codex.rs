@@ -14,6 +14,8 @@
 //!   provider 映射），按坏行计数不入账，不猜测语义；
 //! - 零分量占位行（只升 total）跳过计数；分量非零但 total 不符按坏行计数；
 //! - 模型按时间序最近的 `turn_context` 归属，遇 `session_meta` 重置；
+//! - 项目身份 = 完整 cwd（C2/R03：basename 同名不同路径会误合并），
+//!   展示名由聚合层派生；
 //! - 同请求重发的去重自 M4 起上移到全局 dedupe 步骤（按 `(session, 用量五元组)`
 //!   保首条），本层原样产出事件（record_id 为空）。
 
@@ -243,10 +245,12 @@ fn ingest_token_count(
         stats.bad_lines += 1;
         return;
     }
+    // C2（R03）：项目身份 = 完整 cwd（不同路径的同名目录不再误合并）；
+    // 展示名（basename）由聚合层派生为 Group.label。
     let project = state
         .cwd
-        .as_deref()
-        .and_then(basename)
+        .clone()
+        .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "(未知)".to_string());
     events.push(UsageEvent {
         ts,
@@ -260,15 +264,6 @@ fn ingest_token_count(
         cache_write_tokens: cache_write,
         cache_read_tokens: cached,
     });
-}
-
-fn basename(path: &str) -> Option<String> {
-    Some(
-        Path::new(path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.to_string()),
-    )
 }
 
 #[cfg(test)]
@@ -327,7 +322,7 @@ mod tests {
             1100
         );
         assert_eq!(e.model, "gpt-5.6-sol");
-        assert_eq!(e.project, "alpha");
+        assert_eq!(e.project, "C:/work/alpha");
         assert_eq!(e.session_id, "sess-a");
         assert_eq!(e.record_id, "");
         assert_eq!(col.stats.bad_lines, 0);
@@ -393,7 +388,7 @@ mod tests {
         let models: Vec<&str> = col.events.iter().map(|e| e.model.as_str()).collect();
         assert_eq!(models, ["gpt-5.6-sol", "gpt-5.5", "gpt-5.4"]);
         let projects: Vec<&str> = col.events.iter().map(|e| e.project.as_str()).collect();
-        assert_eq!(projects, ["alpha", "beta", "beta"]);
+        assert_eq!(projects, ["C:/work/alpha", "C:/work/beta", "C:/work/beta"]);
         let sessions: Vec<&str> = col.events.iter().map(|e| e.session_id.as_str()).collect();
         assert_eq!(sessions, ["sess-a", "sess-b", "sess-b"]);
     }
@@ -440,6 +435,23 @@ mod tests {
         ]);
         assert!(col.events.is_empty());
         assert_eq!(col.stats.ignored_token_usage_record, 1);
+    }
+
+    #[test]
+    fn test_project_same_basename_distinct() {
+        // C2（R03）：不同路径的同名目录是两个项目（修复前按 basename 合并）。
+        let col = collect_lines(&[
+            meta("s1", "C:/work/alpha"),
+            ctx("m", "C:/work/alpha"),
+            tc("2026-07-17T15:59:00.000Z", 10, 5, 0, 0, 15),
+            meta("s2", "D:/other/alpha"),
+            ctx("m", "D:/other/alpha"),
+            tc("2026-07-17T16:00:00.000Z", 10, 5, 0, 0, 15),
+        ]);
+        let projects: Vec<&str> = col.events.iter().map(|e| e.project.as_str()).collect();
+        assert_eq!(projects, ["C:/work/alpha", "D:/other/alpha"]);
+        // 展示名同名（聚合层派生 label），身份不同。
+        assert_eq!(projects.len(), 2);
     }
 
     #[test]
