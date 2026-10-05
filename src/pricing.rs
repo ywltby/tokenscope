@@ -21,65 +21,9 @@ use serde::{Deserialize, Serialize};
 use crate::model::TokenCounts;
 use crate::openrouter;
 
-/// (模型前缀, input, output, cache_write, cache_read)
-/// Task 4：gpt/grok 家族的缓存两列此前互换（读价 0.1×input 被填进
-/// cache_write 列）——已按 models.dev 权威快照与 OpenAI prompt-caching
-/// 文档（写 1.25×、读 0.1×）校正；grok-4.5/4.6/4.7 等无权威证据的行保持。
-const TABLE: &[(&str, f64, f64, f64, f64)] = &[
-    // Claude
-    ("claude-opus-5", 5.0, 25.0, 6.25, 0.5),
-    ("claude-opus-4-5", 5.0, 25.0, 6.25, 0.5),
-    ("claude-opus-4", 15.0, 75.0, 18.75, 1.5),
-    ("claude-sonnet-5", 2.0, 10.0, 2.5, 0.2),
-    ("claude-sonnet-4-5", 3.0, 15.0, 3.75, 0.3),
-    ("claude-sonnet-4", 3.0, 15.0, 3.75, 0.3),
-    ("claude-3-7-sonnet", 3.0, 15.0, 3.75, 0.3),
-    ("claude-3-5-sonnet", 3.0, 15.0, 3.75, 0.3),
-    ("claude-haiku-4-5", 1.0, 5.0, 1.25, 0.1),
-    ("claude-3-5-haiku", 0.8, 4.0, 1.0, 0.08),
-    // GPT
-    ("gpt-6-astra", 10.0, 50.0, 12.5, 1.0),
-    ("gpt-5.6-luna", 0.2, 1.2, 0.25, 0.02),
-    ("gpt-5.6-terra", 2.0, 12.0, 2.5, 0.2),
-    ("gpt-5.6", 4.0, 20.0, 5.0, 0.4),
-    ("gpt-5.5", 5.0, 30.0, 0.0, 0.5),
-    ("gpt-5.4-nano", 0.2, 1.25, 0.0, 0.02),
-    ("gpt-5.4-mini", 0.75, 4.5, 0.0, 0.075),
-    ("gpt-5.4", 2.5, 15.0, 0.0, 0.25),
-    ("gpt-5.3-codex", 1.75, 14.0, 0.0, 0.175),
-    ("gpt-5.2", 1.75, 14.0, 0.0, 0.175),
-    ("gpt-5.1", 1.25, 10.0, 0.0, 0.125),
-    ("gpt-5-mini", 0.25, 2.0, 0.0, 0.025),
-    ("gpt-5-nano", 0.05, 0.4, 0.0, 0.005),
-    ("gpt-5", 1.25, 10.0, 0.0, 0.125),
-    // Grok
-    ("grok-4.5", 2.0, 6.0, 0.3, 0.0),
-    ("grok-4.6", 2.0, 6.0, 0.5, 0.0),
-    ("grok-4.7", 2.0, 6.0, 0.5, 0.0),
-    ("grok-4.20", 1.25, 2.5, 0.0, 0.2),
-    ("grok-4-1-fast", 0.2, 0.5, 0.05, 0.0),
-    ("grok-4", 3.0, 15.0, 0.0, 0.75),
-    ("grok-3-mini", 0.25, 0.5, 0.0, 0.075),
-    ("grok-3", 3.0, 15.0, 0.0, 0.75),
-    ("grok-code-fast", 1.0, 2.0, 0.2, 0.0),
-    // DeepSeek
-    ("deepseek-v4-flash", 0.3, 1.2, 0.006, 0.0),
-    ("deepseek-v4-pro", 1.32, 3.96, 0.044, 0.0),
-    ("deepseek-v3.2", 0.28, 0.42, 0.028, 0.0),
-    ("deepseek-v3.1", 0.55, 1.67, 0.055, 0.0),
-    // Kimi / Doubao / MiMo
-    ("kimi-k2.5", 0.6, 3.0, 0.1, 0.0),
-    ("doubao-seed-2-0-lite", 0.08, 0.5, 0.017, 0.0),
-    ("doubao-seed-2-0", 0.47, 2.37, 0.09, 0.0),
-    ("doubao-seed-2-1-pro", 0.84, 4.2, 0.17, 0.0),
-    ("mimo-v2.5-pro", 0.435, 0.87, 0.0036, 0.0),
-    ("mimo-v2.5", 0.14, 0.29, 0.0028, 0.0),
-];
-
 const TIER_EXTERNAL: u8 = 0;
 const TIER_MODELSDEV: u8 = 1;
 const TIER_OPENROUTER: u8 = 2;
-const TIER_BUILTIN: u8 = 3;
 
 /// 归一化模型标识（键与查询共用同一函数）：lowercase、剥 `vendor/` 前缀、
 /// `.` → `-`。变体后缀（`:free` 等）保留参与匹配。
@@ -169,7 +113,8 @@ struct ExternalModel {
 
 /// 外置文件不存在时「创建模板」写入的内容。
 pub const PRICING_TEMPLATE: &str = r#"# TokenScope 外置价格表（USD / 百万 token）
-# 优先级：本文件 > OpenRouter 同步 > 内置表；同前缀覆盖，最长前缀匹配。
+# 优先级：本文件 > models.dev（主源）> OpenRouter（补充源）；
+# 同前缀覆盖，最长前缀匹配。未收录模型按未知价格处理（不猜测）。
 # 模型前缀支持 vendor 写法（会归一化）；修改保存后下一次统计即生效。
 
 [[model]]
@@ -214,7 +159,7 @@ fn default_index_v1() -> u8 {
 }
 
 /// 索引格式当前版本。
-pub const INDEX_VERSION: u8 = 2;
+pub const INDEX_VERSION: u8 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -281,30 +226,18 @@ pub struct Pricing {
 }
 
 impl Default for Pricing {
+    /// Task 1：默认空表——没有显式来源时不会偷偷给价（不变量 1）。
     fn default() -> Self {
-        Self::builtin()
+        Self::empty()
     }
 }
 
 impl Pricing {
-    /// 纯内置表。
-    pub fn builtin() -> Self {
-        let mut pricing = Self {
+    /// 空价格表（无任何来源时的起点）。
+    pub fn empty() -> Self {
+        Self {
             by_prefix: PrefixIndex::new(),
-        };
-        for (p, i, o, cw, cr) in TABLE {
-            pricing.add_entry(Entry {
-                prefix: normalize_model_id(p),
-                display: (*p).to_string(),
-                name: None,
-                input: Some(*i),
-                output: Some(*o),
-                cache_write: Some(*cw),
-                cache_read: Some(*cr),
-                tier: TIER_BUILTIN,
-            });
         }
-        pricing
     }
 
     fn add_entry(&mut self, e: Entry) {
@@ -368,7 +301,8 @@ impl Pricing {
         modelsdev_snapshot: Option<&Path>,
         openrouter_snapshot: Option<&Path>,
     ) -> (Self, Vec<String>) {
-        let mut pricing = Self::builtin();
+        // Task 1：三层来源从空表叠加，没有任何编译期 fallback。
+        let mut pricing = Self::empty();
         let mut warnings = Vec::new();
 
         if let Some(path) = modelsdev_snapshot {
@@ -561,8 +495,8 @@ impl Pricing {
                         || e.cache_read.is_none(),
                     source: match e.tier {
                         TIER_EXTERNAL => "外置",
-                        TIER_OPENROUTER => "openrouter",
-                        _ => "内置",
+                        TIER_MODELSDEV => "models.dev",
+                        _ => "OpenRouter",
                     },
                     openrouter,
                 }
@@ -669,12 +603,12 @@ mod tests {
 
     #[test]
     fn test_pricing_known_model() {
-        let p = Pricing::builtin()
+        let p = fixture_pricing()
             .lookup("claude-sonnet-4-5-20250929")
             .unwrap();
         assert_eq!(p.input, Some(3.0));
         assert_eq!(p.output, Some(15.0));
-        let p = Pricing::builtin()
+        let p = fixture_pricing()
             .lookup("Claude-Sonnet-4-20250514")
             .unwrap();
         assert_eq!(p.input, Some(3.0));
@@ -682,43 +616,43 @@ mod tests {
 
     #[test]
     fn test_pricing_longest_prefix() {
-        let p = Pricing::builtin().lookup("gpt-5.6-luna").unwrap();
+        let p = fixture_pricing().lookup("gpt-5.6-luna").unwrap();
         assert_eq!(p.input, Some(0.2));
         assert_eq!(
-            Pricing::builtin().lookup("gpt-5.6-sol").unwrap().input,
+            fixture_pricing().lookup("gpt-5.6-sol").unwrap().input,
             Some(4.0)
         );
         assert_eq!(
-            Pricing::builtin().lookup("gpt-5.4-nano").unwrap().input,
+            fixture_pricing().lookup("gpt-5.4-nano").unwrap().input,
             Some(0.2)
         );
         assert_eq!(
-            Pricing::builtin()
+            fixture_pricing()
                 .lookup("claude-opus-4-5-20251101")
                 .unwrap()
                 .input,
             Some(5.0)
         );
         assert_eq!(
-            Pricing::builtin()
+            fixture_pricing()
                 .lookup("claude-opus-4-20250514")
                 .unwrap()
                 .input,
             Some(15.0)
         );
         assert_eq!(
-            Pricing::builtin()
+            fixture_pricing()
                 .lookup("deepseek-v4-flash-0731")
                 .unwrap()
                 .input,
             Some(0.3)
         );
         assert_eq!(
-            Pricing::builtin().lookup("grok-4.5-build").unwrap().input,
+            fixture_pricing().lookup("grok-4.5-build").unwrap().input,
             Some(2.0)
         );
         assert_eq!(
-            Pricing::builtin()
+            fixture_pricing()
                 .lookup("grok-4-1-fast-reasoning")
                 .unwrap()
                 .input,
@@ -730,7 +664,7 @@ mod tests {
     fn test_pricing_normalize_matches_dot_naming() {
         // OpenRouter 点号命名经归一化后命中内置表（反之亦然）。
         assert_eq!(
-            Pricing::builtin()
+            fixture_pricing()
                 .lookup("anthropic/claude-sonnet-4.5")
                 .unwrap()
                 .input,
@@ -744,22 +678,22 @@ mod tests {
         // gpt/grok 家族此前把缓存读价填进了缓存写列。逐字段直接断言
         // ModelPrice（不经费用反推），证据 = models.dev 权威快照 + OpenAI
         // prompt-caching 文档（写 1.25×、读 0.1×）。
-        let gpt56 = Pricing::builtin().lookup("gpt-5.6-sol").unwrap();
+        let gpt56 = fixture_pricing().lookup("gpt-5.6-sol").unwrap();
         assert_eq!(gpt56.input, Some(4.0));
         assert_eq!(gpt56.output, Some(20.0));
         assert_eq!(gpt56.cache_write, Some(5.0), "缓存写 = 1.25×input");
         assert_eq!(gpt56.cache_read, Some(0.4), "缓存读 = 0.1×input");
-        let luna = Pricing::builtin().lookup("gpt-5.6-luna").unwrap();
+        let luna = fixture_pricing().lookup("gpt-5.6-luna").unwrap();
         assert_eq!(luna.cache_write, Some(0.25));
         assert_eq!(luna.cache_read, Some(0.02));
-        let gpt55 = Pricing::builtin().lookup("gpt-5.5").unwrap();
+        let gpt55 = fixture_pricing().lookup("gpt-5.5").unwrap();
         assert_eq!(gpt55.cache_write, Some(0.0), "GPT-5.6 之前无写计费");
         assert_eq!(gpt55.cache_read, Some(0.5), "读价在第三列被填反过");
-        let grok4 = Pricing::builtin().lookup("grok-4").unwrap();
+        let grok4 = fixture_pricing().lookup("grok-4").unwrap();
         assert_eq!(grok4.cache_write, Some(0.0));
         assert_eq!(grok4.cache_read, Some(0.75));
         // Claude 家族顺序一直正确（对照 aihubmix/claude-opus-4-5）。
-        let opus = Pricing::builtin().lookup("claude-opus-4-5").unwrap();
+        let opus = fixture_pricing().lookup("claude-opus-4-5").unwrap();
         assert_eq!(opus.cache_write, Some(6.25));
         assert_eq!(opus.cache_read, Some(0.5));
     }
@@ -779,7 +713,7 @@ mod tests {
             ("gpt-5-nano", 0.05),
         ];
         for (prefix, input) in no_write {
-            let p = Pricing::builtin().lookup(prefix).unwrap();
+            let p = fixture_pricing().lookup(prefix).unwrap();
             assert_eq!(p.cache_write, Some(0.0), "{prefix} 无写计费");
             assert!(
                 p.cache_read.is_some_and(|v| (v - 0.1 * input).abs() < 1e-9),
@@ -791,7 +725,7 @@ mod tests {
             ("gpt-5.6-luna", 0.2),
             ("gpt-5.6-terra", 2.0),
         ] {
-            let p = Pricing::builtin().lookup(prefix).unwrap();
+            let p = fixture_pricing().lookup(prefix).unwrap();
             assert!(
                 p.cache_write
                     .is_some_and(|v| (v - 1.25 * input).abs() < 1e-9),
@@ -807,24 +741,68 @@ mod tests {
     #[test]
     fn test_builtin_lookup_longest_prefix_boundary() {
         // Task 4：前缀命中必须有词元边界——"gpt-50" 不得命中 "gpt-5"。
-        assert!(Pricing::builtin().lookup("gpt-50").is_none());
-        assert!(Pricing::builtin().lookup("gpt-50-mini").is_none());
+        assert!(fixture_pricing().lookup("gpt-50").is_none());
+        assert!(fixture_pricing().lookup("gpt-50-mini").is_none());
         // 合法前缀不受影响（分隔符后缀仍命中）。
-        assert!(Pricing::builtin().lookup("gpt-5.6-sol").is_some());
+        assert!(fixture_pricing().lookup("gpt-5.6-sol").is_some());
         assert!(
-            Pricing::builtin()
+            fixture_pricing()
                 .lookup("claude-sonnet-4-5-20250929")
                 .is_some()
         );
-        assert!(Pricing::builtin().lookup("grok-4.20-0309").is_some());
+        assert!(fixture_pricing().lookup("grok-4.20-0309").is_some());
+    }
+
+    /// Task 1：内置表已删除——测试用 fixture 表替代（tier 走 models.dev，
+    /// 语义与主源一致；覆盖旧测试引用的全部模型）。
+    fn fixture_pricing() -> Pricing {
+        let mut p = Pricing::empty();
+        for (prefix, i, o, cw, cr) in [
+            ("claude-opus-5", 5.0, 25.0, Some(6.25), Some(0.5)),
+            ("claude-opus-4-5", 5.0, 25.0, Some(6.25), Some(0.5)),
+            ("claude-opus-4", 15.0, 75.0, Some(18.75), Some(1.5)),
+            ("claude-sonnet-4-5", 3.0, 15.0, Some(3.75), Some(0.3)),
+            ("claude-sonnet-4", 3.0, 15.0, Some(3.75), Some(0.3)),
+            ("deepseek-v4-flash", 0.3, 1.2, Some(0.006), Some(0.0)),
+            ("grok-4.5", 2.0, 6.0, Some(0.3), None),
+            ("grok-4-1-fast", 0.2, 0.5, Some(0.05), None),
+            ("gpt-5.6", 4.0, 20.0, Some(5.0), Some(0.4)),
+            ("gpt-5.6-luna", 0.2, 1.2, Some(0.25), Some(0.02)),
+            ("gpt-5.6-terra", 2.0, 12.0, Some(2.5), Some(0.2)),
+            ("gpt-5.5", 5.0, 30.0, Some(0.0), Some(0.5)),
+            ("gpt-5.4-nano", 0.2, 1.25, Some(0.0), Some(0.02)),
+            ("gpt-5.4", 2.5, 15.0, Some(0.0), Some(0.25)),
+            ("gpt-5.3-codex", 1.75, 14.0, Some(0.0), Some(0.175)),
+            ("gpt-5.2", 1.75, 14.0, Some(0.0), Some(0.175)),
+            ("gpt-5.1", 1.25, 10.0, Some(0.0), Some(0.125)),
+            ("gpt-5-mini", 0.25, 2.0, Some(0.0), Some(0.025)),
+            ("gpt-5-nano", 0.05, 0.4, Some(0.0), Some(0.005)),
+            ("gpt-5", 1.25, 10.0, Some(0.0), Some(0.125)),
+            ("grok-4", 3.0, 15.0, Some(0.0), Some(0.75)),
+            ("grok-4.20", 1.25, 2.5, Some(0.0), Some(0.2)),
+            ("grok-3-mini", 0.25, 0.5, Some(0.0), Some(0.075)),
+            ("grok-3", 3.0, 15.0, Some(0.0), Some(0.75)),
+        ] {
+            p.add_entry(Entry {
+                prefix: normalize_model_id(prefix),
+                display: prefix.to_string(),
+                name: None,
+                input: Some(i),
+                output: Some(o),
+                cache_write: cw,
+                cache_read: cr,
+                tier: TIER_MODELSDEV,
+            });
+        }
+        p
     }
 
     #[test]
     fn test_pricing_unknown_model() {
-        assert!(Pricing::builtin().lookup("tencent/hy3:free").is_none());
-        assert!(Pricing::builtin().lookup("<synthetic>").is_none());
+        assert!(fixture_pricing().lookup("tencent/hy3:free").is_none());
+        assert!(fixture_pricing().lookup("<synthetic>").is_none());
         assert!(
-            Pricing::builtin()
+            fixture_pricing()
                 .estimate("qwen-x", &counts(1, 1, 0, 0))
                 .is_none()
         );
@@ -1014,16 +992,16 @@ mod tests {
 
     #[test]
     fn test_pricing_cost_math() {
-        let est = Pricing::builtin()
+        let est = fixture_pricing()
             .estimate("claude-sonnet-4-5", &counts(1_000_000, 1_000_000, 0, 0))
             .unwrap();
         assert!((est.cost - 18.0).abs() < 1e-9);
         assert!(est.complete);
-        let est = Pricing::builtin()
+        let est = fixture_pricing()
             .estimate("claude-sonnet-4-5", &counts(0, 0, 1_000_000, 1_000_000))
             .unwrap();
         assert!((est.cost - 4.05).abs() < 1e-9);
-        let est = Pricing::builtin()
+        let est = fixture_pricing()
             .estimate("gpt-5.6-sol", &counts(800, 100, 50, 200))
             .unwrap();
         // 纯价格数学：桶值直接给定（不经适配器）。
@@ -1070,13 +1048,16 @@ cache_read = 0.0
     }
 
     #[test]
-    fn test_pricing_external_broken_falls_back() {
+    fn test_pricing_external_broken_no_fallback() {
         let dir = std::env::temp_dir().join(format!("tokenscope-m5-extbad-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = write(&dir, "pricing.toml", "not valid toml [[[");
         let (p, warnings) = Pricing::load(Some(&path), None, None);
         assert_eq!(p.external_count(), 0);
-        assert_eq!(p.lookup("claude-opus-5").unwrap().input, Some(5.0));
+        assert!(
+            p.lookup("claude-opus-5").is_none(),
+            "坏外置后无任何兜底来源 → 未知"
+        );
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("解析失败"));
         std::fs::remove_dir_all(&dir).ok();
@@ -1112,39 +1093,34 @@ cache_read = 0.0
         // 外置层压过 openrouter（同前缀，层级优先）
         let hit = p.lookup("claude-sonnet-4-5-20250929").unwrap();
         assert_eq!(hit.input, Some(42.0));
-        // openrouter 层生效：点号命名归一化命中，压过同前缀的内置 1.75
+        // openrouter 层生效：点号命名归一化命中（无内置兜底，独立计价）
         assert_eq!(p.lookup("gpt-5.2-20260101").unwrap().input, Some(7.0));
-        // 内置兜底：openrouter/外置都没有的模型走内置
-        assert_eq!(p.lookup("claude-sonnet-4").unwrap().input, Some(3.0));
+        // Task 1：外置/openrouter 都没有的模型 → unknown（无编译期兜底）
+        assert!(p.lookup("claude-sonnet-4").is_none());
         // 免费变体经最长前缀命中 :free 条目 → 0 价（known，非 unknown）
         let free = p.lookup("tencent/hy3:free").unwrap();
         assert_eq!(free.input, Some(0.0));
         // 条目来源标识与显示名
         let entries = p.entries();
+
         assert!(
             entries
                 .iter()
-                .any(|e| e.source == "openrouter" && e.name.as_deref() == Some("Claude Sonnet 4.5"))
+                .any(|e| e.source == "OpenRouter" && e.name.as_deref() == Some("Claude Sonnet 4.5"))
         );
-        // 悬浮对照：openrouter 行自带对照价；无对应模型的行标注 None
-        let sonnet_builtin = entries
+        // 悬浮对照：外置行的同前缀 openrouter 对照价仍然挂接
+        let sonnet_ext = entries
             .iter()
-            .find(|e| e.source == "内置" && e.prefix == "claude-sonnet-4-5")
-            .expect("内置 sonnet-4-5 行应存在");
-        let or = sonnet_builtin
+            .find(|e| e.source == "外置" && e.prefix == "claude-sonnet-4-5")
+            .expect("外置 sonnet-4-5 行应存在");
+        let or = sonnet_ext
             .openrouter
             .as_ref()
             .expect("同前缀 openrouter 条目应挂上对照价");
         assert!((or.input - 3.0).abs() < 1e-9);
         assert_eq!(or.name.as_deref(), Some("Claude Sonnet 4.5"));
-        let doubao = entries
-            .iter()
-            .find(|e| e.source == "内置" && e.prefix == "doubao-seed-2-0")
-            .expect("内置 doubao 行应存在");
-        assert!(
-            doubao.openrouter.is_none(),
-            "openrouter 无对应模型 → None（前端显示未知价格）"
-        );
+        // Task 1：不再有"内置"来源行
+        assert!(entries.iter().all(|e| e.source != "内置"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

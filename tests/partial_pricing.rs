@@ -74,24 +74,26 @@ fn test_partial_cost_totals() {
     // 07-18 组：gpt-5.6-sol 走快照层（缺 cache 键 → 部分计价，†）已知部分
     // 20/1M；gpt-5.5（115/1M）与 gpt-5.4（950/1M）由内置层完整兜底。
     let d2 = r.groups.iter().find(|g| g.key == "2026-07-18").unwrap();
-    // Task 5：e2 的未知分项（快照缺 cache 价）token 为 0 → 不再标记部分计价；
-    // e4/e6 走内置层完整价。test_partial_unknown_tokens_are_reported_without_zero_mark。
-    assert!(!d2.unknown_pricing, "零 token 未知分项不得打 †");
+    // Task 1 后无内置兜底：e2 走快照（缺 cache 价但 0 token → 完整），
+    // e4/e6（gpt-5.5/5.4）无任何来源 → 全 unknown。
+    assert!(d2.unknown_pricing);
     assert!(
-        (d2.cost_usd - 1091.0 / 1_000_000.0).abs() < 1e-9,
+        (d2.cost_usd - 20.0 / 1_000_000.0).abs() < 1e-9,
         "d2.cost={}",
         d2.cost_usd
     );
-    // e2 的 cache 分项 token 为 0，故 unknown token 计数为 0 但 ‌† 仍生效。
-    assert_eq!(d2.unknown_tokens.total(), 0);
+    assert_eq!(d2.unknown_tokens.input, 85);
+    assert_eq!(d2.unknown_tokens.output, 53);
+    assert_eq!(d2.unknown_tokens.cache_read, 22);
+    assert_eq!(d2.unknown_tokens.cache_write, 0);
 
     // 合计 = 分组之和；unknown 同样汇总（仅 d1 的快照缺键分项）。
-    assert!((r.totals.cost_usd - (950.0 + 1091.0) / 1_000_000.0).abs() < 1e-9);
+    assert!((r.totals.cost_usd - (950.0 + 20.0) / 1_000_000.0).abs() < 1e-9);
     assert!(r.totals.unknown_pricing);
     assert_eq!(r.totals.unknown_tokens.cache_write, 50);
-    assert_eq!(r.totals.unknown_tokens.cache_read, 200);
-    assert_eq!(r.totals.unknown_tokens.input, 0);
-    assert_eq!(r.totals.unknown_tokens.output, 0);
+    assert_eq!(r.totals.unknown_tokens.cache_read, 222);
+    assert_eq!(r.totals.unknown_tokens.input, 85);
+    assert_eq!(r.totals.unknown_tokens.output, 53);
 
     // 明细同源：行费用 = 已计价小计。
     let l = list_events(&opts, &EventFilter::default()).unwrap();

@@ -1091,6 +1091,13 @@ input = 99.0
 output = 99.0
 cache_write = 0.0
 cache_read = 0.0
+
+[[model]]
+prefix = "gpt-5.6"
+input = 4.0
+output = 20.0
+cache_write = 5.0
+cache_read = 0.4
 "#,
         )
         .unwrap();
@@ -1098,7 +1105,7 @@ cache_read = 0.0
         let r = summary(&o).unwrap();
         // 07-17 组：sonnet-4-5 input 1000 / output 200 / cw 5000 / cr 10000，
         // 外置价后费用 = (1000*99 + 200*99) / 1M；另有 codex gpt-5.6-sol 5330/1M
-        //（B1 桶语义 + Task 4 表校正：750*4 + 100*20 + 50*5.0 + 200*0.4）。
+        //（B1 桶语义 + 外置 gpt-5.6 价：750*4 + 100*20 + 50*5.0 + 200*0.4）。
         let expected = (1000.0 * 99.0 + 200.0 * 99.0 + 5330.0) / 1_000_000.0;
         assert!((r.groups[0].cost_usd - expected).abs() < 1e-9);
         std::fs::remove_dir_all(&dir).ok();
@@ -1288,11 +1295,9 @@ cache_read = 0.0
         assert_eq!(l.rows.len(), 3);
         assert_eq!(l.total, 7);
 
-        // unknown 费用：grok-4.5-build 行 cost=None（fixture 用 hy3:free？不，
-        // claude fixture 的 unknown 模型是 tencent/hy3:free）
+        // Task 1：该测试无任何定价来源 → 全部行 cost=None（unknown 语义）。
         let unknown: Vec<&EventRow> = list.rows.iter().filter(|r| r.cost_usd.is_none()).collect();
-        assert!(!unknown.is_empty(), "tencent/hy3:free 行应为 unknown 费用");
-        assert!(unknown.iter().all(|r| r.model == "tencent/hy3:free"));
+        assert_eq!(unknown.len(), list.rows.len(), "无来源时全部未知");
     }
 
     #[test]
@@ -1325,7 +1330,15 @@ cache_read = 0.0
                 {"id":"volcengine/doubao-seed-2-0-pro-260215","name":"Doubao Pro",
                  "input":0.47,"output":2.37,"cache_read":0.09,"cache_write":0.0},
                 {"id":"tencent/hy3:free","name":"HY3 free",
-                 "input":0,"output":0,"cache_read":0,"cache_write":0}
+                 "input":0,"output":0,"cache_read":0,"cache_write":0},
+                {"id":"anthropic/claude-sonnet-4-5","name":"Sonnet",
+                 "input":3.0,"output":15.0,"cache_read":0.3,"cache_write":3.75},
+                {"id":"openai/gpt-5.6","name":"GPT-5.6",
+                 "input":4.0,"output":20.0,"cache_read":0.4,"cache_write":5.0},
+                {"id":"openai/gpt-5.5","name":"GPT-5.5",
+                 "input":5.0,"output":30.0,"cache_read":0.5,"cache_write":0.0},
+                {"id":"openai/gpt-5.4","name":"GPT-5.4",
+                 "input":2.5,"output":15.0,"cache_read":0.25,"cache_write":0.0}
             ]}"#,
         )
         .unwrap();

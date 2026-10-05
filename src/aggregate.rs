@@ -235,11 +235,13 @@ mod tests {
         assert_eq!(agg.groups.len(), 3); // grok、claude、合计
         assert_eq!(agg.groups[0].key, "claude-sonnet-4-5");
         assert_eq!(agg.groups[0].tokens.input, 5);
-        assert!(!agg.groups[0].unknown_pricing);
+        // Task 1：默认空价格表 → 所有模型 unknown（无编译期兜底）。
+        assert!(agg.groups[0].unknown_pricing);
+        assert_eq!(agg.groups[0].unknown_tokens.input, 5);
         assert_eq!(agg.groups[1].key, "tencent/hy3:free");
         assert!(agg.groups[1].unknown_pricing);
         assert_eq!(agg.groups[1].unknown_tokens.input, 1);
-        assert_eq!(agg.totals.unknown_tokens.input, 1);
+        assert_eq!(agg.totals.unknown_tokens.input, 6);
 
         let agg = aggregate(&events, GroupBy::Project, &tz(), &Pricing::default());
         assert_eq!(agg.groups.len(), 3);

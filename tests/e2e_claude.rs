@@ -32,12 +32,28 @@ fn hermetic_dir() -> PathBuf {
 /// 只走 Claude 源的 report 管线（agent 过滤，codex 目录不会触达）。
 fn claude_report(by: GroupBy) -> SummaryReport {
     let dir = hermetic_dir();
+    // Task 1：内置表已删除——外置 TOML 提供与旧内置同值的 sonnet 价。
+    let pricing = dir.join("pricing.toml");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &pricing,
+        r#"
+[[model]]
+prefix = "claude-sonnet-4-5"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_read = 0.3
+"#,
+    )
+    .unwrap();
     summary(&SummaryOptions {
         by,
         agent: Some(AgentKind::ClaudeCode),
         claude_dir: Some(fixture("claude", "basic")),
         cache_dir: Some(dir.join("cache")),
         pricing_index: Some(dir.join("pricing-index.json")),
+        pricing_path: Some(pricing),
         // 固定指向不存在的快照，测试不依赖真实 ~/.tokenscope 状态
         openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
         modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
