@@ -96,6 +96,8 @@ export interface EventRow {
   ts: string;
   /** D1 游标第二分量（Claude = message.id；Codex 为空） */
   record_id: string;
+  /** Task 2：不透明游标（完整精度 UTC 时间戳 + record_id），翻页原样回传 */
+  cursor: string;
   agent: string;
   model: string;
   session_id: string;

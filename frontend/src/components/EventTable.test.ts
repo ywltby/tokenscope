@@ -9,6 +9,7 @@ function row(over: Partial<EventRow> = {}): EventRow {
   return {
     ts: "2026-10-05 10:00:00",
     record_id: "m1",
+    cursor: "2026-10-05T10:00:00Z|m1",
     agent: "codex",
     model: "gpt-x",
     session_id: "s",

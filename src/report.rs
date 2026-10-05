@@ -688,6 +688,9 @@ pub struct EventRow {
     pub ts: String,
     /// D1：游标第二分量（Claude = message.id；Codex 为空，靠 ts 唯一）。
     pub record_id: String,
+    /// Task 2：不透明游标（完整精度 UTC 时间戳 + record_id），翻页原样回传；
+    /// 前端不得从展示字符串反解。
+    pub cursor: String,
     pub agent: &'static str,
     pub model: String,
     pub session_id: String,
@@ -735,18 +738,12 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
     events.sort_by(|a, b| b.ts.cmp(&a.ts).then(b.record_id.cmp(&a.record_id)));
     // D1：total = 主过滤 + 下钻后的全量（不含游标截断），翻页时恒定。
     let total = events.len() as u64;
-    // 游标翻页——(ts, record_id) 元组严格小于上一页末行，不重不漏。
-    // ts 为显示格式（解析时区），按同一时区回转 UTC 再比较。
+    // Task 2：游标为完整精度 UTC 时间戳 + record_id 的不透明串，
+    // (ts, record_id) 元组严格小于上一页末行，不重不漏（同秒亚秒不丢行）。
     if let Some(cur) = &filter.before {
-        let (ts_str, rid) = parse_cursor(cur)?;
-        let dt: jiff::civil::DateTime = ts_str
-            .parse()
-            .map_err(|e| anyhow::anyhow!("游标时间戳非法: {e}"))?;
-        let cur_ts = dt
-            .to_zoned(tz.clone())
-            .map_err(|e| anyhow::anyhow!("游标时区换算失败: {e}"))?;
-        let cur_ts = cur_ts.timestamp();
-        events.retain(|e| (e.ts, e.record_id.clone()) < (cur_ts, rid.clone()));
+        let (cur_ts, rid) = parse_cursor(cur)?;
+        let cur = (cur_ts, rid);
+        events.retain(|e| (e.ts, e.record_id.clone()) < cur);
     }
     let limit = filter.limit.unwrap_or(200).min(1000);
     let rows: Vec<EventRow> = events
@@ -760,6 +757,7 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
             EventRow {
                 ts: e.ts.to_zoned(tz.clone()).strftime("%F %T").to_string(),
                 record_id: e.record_id.clone(),
+                cursor: format!("{}|{}", e.ts, e.record_id),
                 agent: e.agent.as_str(),
                 model: e.model,
                 session_id: e.session_id,
@@ -823,12 +821,16 @@ fn apply_time_filter(
     Ok(events)
 }
 
-/// 游标格式 "ts|record_id"；ts 为显示格式（YYYY-MM-DD HH:MM:SS，解析时区）。
-fn parse_cursor(s: &str) -> Result<(String, String)> {
+/// 游标格式 "完整精度UTC时间戳|record_id"（EventRow.cursor 原样回传）。
+fn parse_cursor(s: &str) -> Result<(jiff::Timestamp, String)> {
     let (ts, rid) = s
         .split_once('|')
         .ok_or_else(|| anyhow::anyhow!("游标格式应为 ts|record_id: {s:?}"))?;
-    Ok((ts.to_string(), rid.to_string()))
+    Ok((
+        ts.parse()
+            .map_err(|e| anyhow::anyhow!("游标时间戳非法: {e}"))?,
+        rid.to_string(),
+    ))
 }
 
 fn file_size(path: &std::path::Path) -> Option<u64> {
@@ -1404,23 +1406,14 @@ cache_read = 0.0
                 break;
             }
             assert!(page.rows.len() <= 3);
-            pages.push(
-                page.rows
-                    .iter()
-                    .map(|r| format!("{} {}", r.ts, r.record_id))
-                    .collect(),
-            );
+            pages.push(page.rows.iter().map(|r| r.cursor.clone()).collect());
             seen += page.rows.len();
             let last = page.rows.last().unwrap();
-            cursor = Some(format!("{}|{}", last.ts, last.record_id));
+            cursor = Some(last.cursor.clone());
         }
         assert_eq!(seen, 7, "翻页覆盖全量");
         let flat: Vec<String> = pages.into_iter().flatten().collect();
-        let expect: Vec<String> = full
-            .rows
-            .iter()
-            .map(|r| format!("{} {}", r.ts, r.record_id))
-            .collect();
+        let expect: Vec<String> = full.rows.iter().map(|r| r.cursor.clone()).collect();
         assert_eq!(flat, expect);
         std::fs::remove_dir_all(&hermetic).ok();
     }
@@ -1536,6 +1529,111 @@ cache_read = 0.0
         let r = collect_flighted_with(&opts, &ok2);
         assert!(r.is_ok(), "panic 清槽后必须可重试: {r:?}");
         assert_eq!(r.unwrap().generation, 9);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Task 2 fixture：同秒亚秒 + 空 record_id 的 codex 事件（去重前 3 条）。
+    fn subsecond_fixture(dir: &std::path::Path) -> SummaryOptions {
+        let codex_dir = dir.join("codex");
+        let day = codex_dir.join("2026").join("07").join("17");
+        std::fs::create_dir_all(&day).unwrap();
+        let mut lines = String::from(concat!(
+            r#"{"timestamp":"2026-07-17T14:59:00.000Z","type":"session_meta","payload":{"id":"sp","session_id":"sp","cwd":"C:/w/p"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-17T14:59:10.000Z","type":"turn_context","payload":{"model":"m","cwd":"C:/w/p"}}"#,
+            "\n",
+        ));
+        // 同一秒内两条（.500 与 .200，排序键仅亚秒不同）+ 更早一条；record_id 全空。
+        for (i, ts) in [
+            "2026-07-17T15:00:00.500Z",
+            "2026-07-17T15:00:00.200Z",
+            "2026-07-17T14:59:59.900Z",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let input = 10 - i as u64;
+            lines.push_str(
+                format!(
+                    r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":{input},"output_tokens":1,"cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":{}}}}}}}}}"#,
+                    input + 1
+                )
+                .as_str(),
+            );
+            lines.push('\n');
+        }
+        std::fs::write(day.join("rollout-p.jsonl"), lines).unwrap();
+        SummaryOptions {
+            agent: Some(AgentKind::Codex),
+            claude_dir: Some(dir.join("no-claude")),
+            codex_dir: Some(codex_dir),
+            cache_dir: Some(dir.join("cache")),
+            pricing_index: Some(dir.join("idx.json")),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
+            tz: Some("Asia/Shanghai".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_events_pagination_same_second_subsecond() {
+        // Task 2（P1）：页边界落在同一秒内时，展示秒级游标会丢掉同秒内
+        // 更晚（排序更靠后）的事件——游标必须携带完整精度 UTC 时间戳。
+        let dir = tmp_dir("subsecond");
+        let opts = subsecond_fixture(&dir);
+        let mut seen: Vec<(String, u64)> = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = list_events(
+                &opts,
+                &EventFilter {
+                    limit: Some(1),
+                    before: cursor.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            if page.rows.is_empty() {
+                break;
+            }
+            let r = &page.rows[0];
+            seen.push((r.cursor.clone(), r.input));
+            cursor = Some(r.cursor.clone());
+        }
+        assert_eq!(seen.len(), 3, "翻页必须覆盖全量且不丢同秒事件: {seen:?}");
+        assert_eq!(seen[0].1, 10, "亚秒 .500 先于 .200（时间倒序）");
+        assert_eq!(seen[1].1, 9, "同秒 .200 不得被秒级游标丢弃");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_events_pagination_empty_record_id_tie_break() {
+        // Task 2：空 record_id（Codex 全部如此）在同秒内靠完整精度 ts 决序。
+        let dir = tmp_dir("empty-rid");
+        let opts = subsecond_fixture(&dir);
+        let page1 = list_events(
+            &opts,
+            &EventFilter {
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(page1.rows.len(), 2);
+        // 两行 record_id 均为空，但 cursor 必须可区分（完整精度 ts）。
+        assert_ne!(page1.rows[0].cursor, page1.rows[1].cursor);
+        let cursor = &page1.rows[1].cursor;
+        let page2 = list_events(
+            &opts,
+            &EventFilter {
+                limit: Some(2),
+                before: Some(cursor.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(page2.rows.len(), 1, "空 record_id 事件不得因游标歧义丢失");
         std::fs::remove_dir_all(&dir).ok();
     }
 

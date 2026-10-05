@@ -248,6 +248,7 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     const row = (ts: string, rid: string) => ({
       ts,
       record_id: rid,
+      cursor: `${ts}T00:00:00.000Z|${rid}`,
       agent: "codex",
       model: "m",
       session_id: "s",
@@ -292,7 +293,7 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
       string,
       unknown
     >;
-    expect(call.before).toBe("2026-10-01 09:00:00|a");
+    expect(call.before).toBe("2026-10-01 09:00:00T00:00:00.000Z|a");
     expect(state(w)["hasMore"]).toBe(false);
   });
 

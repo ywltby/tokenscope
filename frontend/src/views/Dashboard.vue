@@ -159,7 +159,7 @@ async function loadEvents(append = false): Promise<void> {
       project: drill.value?.type === "project" ? drill.value.key : null,
       day: drill.value?.type === "day" ? drill.value.key : null,
       limit: 200,
-      before: last ? `${last.ts}|${last.record_id}` : null,
+      before: last ? last.cursor : null,
       tz: tz.value,
     });
     if (seq !== eventsSeq) return;
