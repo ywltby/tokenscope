@@ -1037,30 +1037,43 @@ mod tests {
     #[test]
     fn test_legacy_index_v2_with_builtin_entries_is_invalidated() {
         let _g = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Task 5（审阅计划）：版本 2 的旧索引可能含"内置"来源条目——
-        // 启动加载必须按版本失效重建，结果只含三层来源、不出现"内置"。
-        // （写一个 v2 索引，带旧内置条目，断言重建后三层语义。）
+        // Task 3（审阅）：旧索引测试曾用必然不匹配的 stale-sig——重建可能
+        // 是签名失配而非版本失效（假阳性）。现改用生产签名函数构造 v2
+        // 索引：签名与当前 load_cached 完全一致，仅版本过期，从而证明
+        // 重建只由版本检查触发。
         let dir = std::env::temp_dir().join(format!("tokenscope-t5-legacy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let idx = dir.join("pricing-index.json");
+        // 生产同款签名：load_cached(None, None, None, _) 的三源签名。
+        let sig = source_sig(&[None, None, None]);
         let legacy = serde_json::json!({
             "v": 2,
-            "sig": "stale-sig-that-will-not-match",
+            "sig": sig,
             "synced_at": "2026-10-05T00:00:00Z",
             "entries": [
-                { "prefix": "legacy/builtin-model", "display": "legacy/builtin-model",
+                { "prefix": "legacy-builtin-model", "display": "legacy-builtin-model",
                   "name": null, "tier": 3, "input": 1.0, "output": 2.0,
                   "cache_write": 0.0, "cache_read": 0.0 }
             ]
         });
         std::fs::write(&idx, serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        // 第一步：证明 fixture 有效——若只有签名检查，旧条目会被命中。
+        let restored = load_index(&idx).unwrap().unwrap();
+        assert_eq!(restored.sig, sig, "签名必须与生产计算一致");
+        let via_from_index = Pricing::from_index(&restored);
+        assert!(
+            via_from_index.lookup("legacy-builtin-model").is_some(),
+            "fixture 有效性：无视版本检查时旧内置条目会被命中"
+        );
+
+        // 第二步：当前实现因版本过期重建，旧条目不存在。
         *PRICE_CACHE.lock().unwrap() = None;
-        // 签名不可能匹配 stale-sig → 重建；且 INDEX_VERSION=3 使 v2 索引失效。
         let (p, _, _) = Pricing::load_cached(None, None, None, &idx);
         assert!(
-            p.lookup("legacy/builtin-model").is_none(),
-            "旧索引中的内置条目不得被恢复"
+            p.lookup("legacy-builtin-model").is_none(),
+            "版本失效必须阻止旧内置条目恢复"
         );
         assert!(p.lookup("claude-sonnet-4-5").is_none(), "无来源 → unknown");
         // 清空进程内缓存，避免污染并行的同签名测试（restart_hit）。
