@@ -39,6 +39,77 @@ struct ApiCost {
     cache_read: Option<f64>,
     #[serde(default)]
     cache_write: Option<f64>,
+    /// Task 2：上下文分段价格（只接受 tier.type = "context"）。
+    #[serde(default)]
+    tiers: Vec<ApiTier>,
+    /// Task 2：旧字段兼容——仅在没有等价 tiers 时作为 200K 高档。
+    #[serde(default)]
+    context_over_200k: Option<ApiTierRates>,
+}
+
+/// models.dev 单档四类价格（tiers[] 元素与 context_over_200k 共用形状）。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct ApiTierRates {
+    #[serde(default)]
+    pub(crate) input: Option<f64>,
+    #[serde(default)]
+    pub(crate) output: Option<f64>,
+    #[serde(default)]
+    pub(crate) cache_read: Option<f64>,
+    #[serde(default)]
+    pub(crate) cache_write: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ApiTier {
+    #[serde(default)]
+    input: Option<f64>,
+    #[serde(default)]
+    output: Option<f64>,
+    #[serde(default)]
+    cache_read: Option<f64>,
+    #[serde(default)]
+    cache_write: Option<f64>,
+    tier: ApiTierDescriptor,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ApiTierDescriptor {
+    #[serde(rename = "type")]
+    kind: String,
+    size: f64,
+}
+
+impl ApiTier {
+    fn rates(&self) -> ApiTierRates {
+        ApiTierRates {
+            input: self.input,
+            output: self.output,
+            cache_read: self.cache_read,
+            cache_write: self.cache_write,
+        }
+    }
+}
+
+/// 快照中的规范分段（Task 2）：`[min_tokens, max_tokens)` 左闭右开，
+/// max None = 无上限；models.dev 的 `size = S`（短档覆盖 prompt <= S）
+/// 已在同步时转换为 `min = S + 1`，两来源不共用未转换的边界。
+/// 分项缺键 = 未知（沿用基础价由计价层负责）；显式 0 = 免费。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotSegment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub min_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    #[serde(default)]
+    pub input: Option<f64>,
+    #[serde(default)]
+    pub output: Option<f64>,
+    #[serde(default)]
+    pub cache_read: Option<f64>,
+    #[serde(default)]
+    pub cache_write: Option<f64>,
 }
 
 /// 快照条目：cost 已是 USD/百万 token，直接入库。
@@ -54,12 +125,17 @@ pub struct SnapshotEntry {
     pub output: Option<f64>,
     pub cache_read: Option<f64>,
     pub cache_write: Option<f64>,
+    /// Task 2：上下文分段（v3 快照起写入；v1/v2 旧快照缺省为空 = 仅基础价）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<SnapshotSegment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
-    /// 快照格式版本：v2 起分项可空（缺键=未知）；v1 的缓存分项被 0 填充
-    /// 已损失信息，加载时按未知保守处理，等待下一次同步升级。
+    /// 快照格式版本：v2 起分项可空（缺键=未知）；v3 起带上下文分段
+    /// （tiers/context_over_200k）。v1 的缓存分项被 0 填充已损失信息，
+    /// 加载时按未知保守处理，等待下一次同步升级；旧快照一律可按
+    /// "只有基础价格"离线读取，不伪造分段。
     #[serde(default = "default_snapshot_v1")]
     pub v: u8,
     pub synced_at: String,
@@ -115,6 +191,10 @@ pub(crate) fn sync_with(
             let Some(cost) = m.cost else {
                 continue; // 无 cost（免费/非 LLM/占位）不入快照
             };
+            let (segments, warnings) = convert_tiers(&cost.tiers, cost.context_over_200k.as_ref());
+            for w in &warnings {
+                log::warn!("models.dev {provider}/{model_id}: {w}");
+            }
             entries.push(SnapshotEntry {
                 id: format!("{provider}/{model_id}"),
                 name: m.name.or(entry.name.clone()),
@@ -122,6 +202,7 @@ pub(crate) fn sync_with(
                 output: cost.output,
                 cache_read: cost.cache_read,
                 cache_write: cost.cache_write,
+                segments,
             });
         }
     }
@@ -135,7 +216,7 @@ pub(crate) fn sync_with(
     let synced_at = jiff::Zoned::now().to_string();
     let count = entries.len() as u64;
     let snapshot = Snapshot {
-        v: 2,
+        v: 3,
         synced_at: synced_at.clone(),
         entries,
     };
@@ -150,6 +231,68 @@ pub(crate) fn sync_with(
         path: snapshot_path.display().to_string(),
         synced_at,
     })
+}
+
+/// models.dev tiers/context_over_200k → 规范分段（Task 2）。
+///
+/// 规则：
+/// - 只接受 `tier.type = "context"`，其他类型忽略并留 warning；
+/// - size 按升序连续成档：基础价覆盖到第一个 size，tier 价格从
+///   `size + 1` 开始直到下一个 tier 的 `size`（含），最后一档无上限；
+/// - 同一 size 重复时保留确定性的一项（排序后首个）并留 warning；
+/// - `context_over_200k` 仅在没有等价 tiers（无 size=200000 档）时生效，
+///   冲突时优先 tiers 并留 warning，不重复计价；
+/// - 非法 size（负数/非整数）跳过并留 warning；
+/// - 缺失价格字段保留 None，显式 0 保持免费。
+pub(crate) fn convert_tiers(
+    tiers: &[ApiTier],
+    over200k: Option<&ApiTierRates>,
+) -> (Vec<SnapshotSegment>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut sized: Vec<(u64, ApiTierRates)> = Vec::new();
+    for t in tiers {
+        if t.tier.kind != "context" {
+            warnings.push(format!("忽略非 context 类型 tier（type={}）", t.tier.kind));
+            continue;
+        }
+        let s = t.tier.size;
+        if !s.is_finite() || s < 0.0 || s.fract() != 0.0 {
+            warnings.push(format!("tier size 非法（{s}），该档跳过"));
+            continue;
+        }
+        sized.push((s as u64, t.rates()));
+    }
+    sized.sort_by_key(|(s, _)| *s); // 稳定排序：同 size 保留 API 顺序首个
+    let mut deduped: Vec<(u64, ApiTierRates)> = Vec::new();
+    for (s, rates) in sized {
+        if deduped.last().is_some_and(|(ps, _)| *ps == s) {
+            warnings.push(format!("重复 tier size {s}，保留首个"));
+            continue;
+        }
+        deduped.push((s, rates));
+    }
+    if let Some(over) = over200k {
+        if deduped.is_empty() {
+            deduped.push((200_000, over.clone()));
+        } else if !deduped.iter().any(|(s, _)| *s == 200_000) {
+            warnings.push("context_over_200k 与 tiers 冲突，优先 tiers".to_string());
+        }
+        // 等价档（size=200000）已存在时静默去重，不重复计价。
+    }
+    let segments = deduped
+        .iter()
+        .enumerate()
+        .map(|(i, (s, r))| SnapshotSegment {
+            label: Some(format!(">{s}")),
+            min_tokens: s + 1,
+            max_tokens: deduped.get(i + 1).map(|(ns, _)| ns + 1),
+            input: r.input,
+            output: r.output,
+            cache_read: r.cache_read,
+            cache_write: r.cache_write,
+        })
+        .collect();
+    (segments, warnings)
 }
 
 /// 读快照：缺失 → Ok(None)；损坏 → Err（调用方警告并忽略该层）。
@@ -199,13 +342,17 @@ mod tests {
             .into_iter()
             .flat_map(|(provider, entry)| {
                 entry.models.into_iter().filter_map(move |(id, m)| {
-                    m.cost.map(|c| SnapshotEntry {
-                        id: format!("{provider}/{id}"),
-                        name: m.name.or(entry.name.clone()),
-                        input: c.input,
-                        output: c.output,
-                        cache_read: c.cache_read,
-                        cache_write: c.cache_write,
+                    m.cost.map(|c| {
+                        let (segments, _) = convert_tiers(&c.tiers, c.context_over_200k.as_ref());
+                        SnapshotEntry {
+                            id: format!("{provider}/{id}"),
+                            name: m.name.or(entry.name.clone()),
+                            input: c.input,
+                            output: c.output,
+                            cache_read: c.cache_read,
+                            cache_write: c.cache_write,
+                            segments,
+                        }
                     })
                 })
             })
@@ -227,6 +374,143 @@ mod tests {
     }
 
     #[test]
+    fn test_modelsdev_tier() {
+        // Task 2：真实响应形状——tiers（context 类型）与 context_over_200k
+        // 必须保留到快照并参与计价；models.dev 语义 size = S 表示短档覆盖
+        // prompt <= S，高档从 S+1 开始（272000 基础档、272001 高档）。
+        let dir = std::env::temp_dir().join(format!("tokenscope-tier-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pricing-modelsdev.json");
+        let body = r#"{
+            "openai": {"models": {
+                "gpt-5.6": {"name": "GPT-5.6", "cost": {
+                    "input": 4, "output": 20, "cache_read": 0.4, "cache_write": 5,
+                    "tiers": [{
+                        "input": 8, "output": 30, "cache_read": 0.8, "cache_write": 10,
+                        "tier": {"type": "context", "size": 272000}
+                    }],
+                    "context_over_200k": {"input": 8, "output": 30, "cache_read": 0.8, "cache_write": 10}
+                }}
+            }}
+        }"#;
+        let report = sync_with(&path, || {
+            Ok(serde_json::from_str::<BTreeMap<String, ApiEntry>>(body).unwrap())
+        })
+        .unwrap();
+        assert_eq!(report.count, 1);
+        let snapshot = load_snapshot(&path).unwrap().unwrap();
+        let e = &snapshot.entries[0];
+        assert_eq!(e.id, "openai/gpt-5.6");
+        assert_eq!(
+            e.segments.len(),
+            1,
+            "tiers 与 context_over_200k 等价 → 去重为一档"
+        );
+        let seg = &e.segments[0];
+        assert_eq!(seg.min_tokens, 272_001, "size 272000 → 高档从 272001 开始");
+        assert_eq!(seg.max_tokens, None);
+        assert_eq!(seg.input, Some(8.0));
+        assert_eq!(seg.cache_read, Some(0.8));
+        // 端到端：快照 → Pricing → 272000 基础档 / 272001 高档。
+        let (p, warnings) = crate::pricing::Pricing::load(None, Some(&path), None);
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+        let tc = crate::model::TokenCounts {
+            input: 272_000,
+            output: 0,
+            cache_write: 0,
+            cache_read: 0,
+        };
+        let est = p.estimate("openai/gpt-5.6", &tc).unwrap();
+        assert!(
+            (est.cost - 272_000.0 * 4.0 / 1e6).abs() < 1e-9,
+            "272000 仍命中基础档"
+        );
+        let tc = crate::model::TokenCounts {
+            input: 272_001,
+            output: 0,
+            cache_write: 0,
+            cache_read: 0,
+        };
+        let est = p.estimate("openai/gpt-5.6", &tc).unwrap();
+        assert!(
+            (est.cost - 272_001.0 * 8.0 / 1e6).abs() < 1e-9,
+            "272001 命中高档"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_modelsdev_tier_conversion_rules() {
+        // 多个 size 升序连续成档；基础价覆盖到第一个 size。
+        let tiers = vec![
+            tier_of("context", 272000.0, 8.0),
+            tier_of("context", 100000.0, 6.0),
+        ];
+        let (segments, warnings) = convert_tiers(&tiers, None);
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].min_tokens, 100_001);
+        assert_eq!(segments[0].max_tokens, Some(272_001));
+        assert_eq!(segments[1].min_tokens, 272_001);
+        assert_eq!(segments[1].max_tokens, None);
+
+        // 非 context 类型被忽略并留下 warning。
+        let tiers = vec![tier_of("time", 100000.0, 6.0)];
+        let (segments, warnings) = convert_tiers(&tiers, None);
+        assert!(segments.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("time"));
+
+        // 重复 size：保留第一个，其余 warning。
+        let tiers = vec![
+            tier_of("context", 272000.0, 8.0),
+            tier_of("context", 272000.0, 9.0),
+        ];
+        let (segments, warnings) = convert_tiers(&tiers, None);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].input, Some(8.0), "保留首个");
+        assert_eq!(warnings.len(), 1);
+
+        // context_over_200k 仅在没有等价 tiers 时生效。
+        let over = ApiTierRates {
+            input: Some(8.0),
+            output: Some(30.0),
+            cache_read: Some(0.8),
+            cache_write: Some(10.0),
+        };
+        let (segments, warnings) = convert_tiers(&[], Some(&over));
+        assert!(warnings.is_empty());
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].min_tokens, 200_001);
+        assert_eq!(segments[0].max_tokens, None);
+        // tiers 存在但无 200000 档 → 冲突，优先 tiers 并 warning。
+        let tiers = vec![tier_of("context", 100000.0, 6.0)];
+        let (segments, warnings) = convert_tiers(&tiers, Some(&over));
+        assert_eq!(segments.len(), 1, "只用 tiers，不重复计价");
+        assert_eq!(segments[0].min_tokens, 100_001);
+        assert_eq!(warnings.len(), 1, "冲突必须留 warning");
+
+        // 非法 size（非整数/负数）跳过并 warning。
+        let tiers = vec![
+            tier_of("context", 272000.5, 8.0),
+            tier_of("context", -1.0, 9.0),
+        ];
+        let (segments, warnings) = convert_tiers(&tiers, None);
+        assert!(segments.is_empty());
+        assert_eq!(warnings.len(), 2);
+    }
+
+    /// 构造单档 tier fixture（input 单价即可区分档位）。
+    fn tier_of(kind: &str, size: f64, input: f64) -> ApiTier {
+        serde_json::from_value(serde_json::json!({
+            "input": input, "output": 30.0, "cache_read": 0.8, "cache_write": 10.0,
+            "tier": {"type": kind, "size": size}
+        }))
+        .unwrap()
+    }
+
+    #[test]
     fn test_modelsdev_snapshot_roundtrip() {
         let dir = std::env::temp_dir().join(format!("tokenscope-m9-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -242,6 +526,7 @@ mod tests {
                 output: Some(2.37),
                 cache_read: Some(0.09),
                 cache_write: Some(0.0),
+                segments: Vec::new(),
             }],
         };
         std::fs::write(&path, serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();

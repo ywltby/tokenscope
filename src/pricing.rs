@@ -604,19 +604,56 @@ impl Pricing {
             match crate::modelsdev::load_snapshot(path) {
                 Ok(Some(snapshot)) => {
                     for e in snapshot.entries {
+                        // Task 2：快照分段（models.dev size 语义已在同步时
+                        // 转换为规范 [min, max)）→ PriceSegment。非法规则
+                        // 防御性丢弃分段只留基础价，并给出诊断。
+                        let segments = e
+                            .segments
+                            .iter()
+                            .map(|s| PriceSegment {
+                                label: s.label.clone(),
+                                min_tokens: s.min_tokens,
+                                max_tokens: s.max_tokens,
+                                prices: PriceRates {
+                                    input: s.input,
+                                    output: s.output,
+                                    cache_write: s.cache_write,
+                                    cache_read: s.cache_read,
+                                },
+                            })
+                            .collect::<Vec<_>>();
+                        let base = PriceRates {
+                            input: e.input,
+                            output: e.output,
+                            cache_write: e.cache_write,
+                            cache_read: e.cache_read,
+                        };
+                        let plan = PricePlan {
+                            basis: Some(PricingBasis::PromptTokens),
+                            application: Some(PricingApplication::WholeRequest),
+                            base,
+                            segments: segments.clone(),
+                        };
+                        let plan = match validate_price_plan(&plan) {
+                            Ok(()) => plan,
+                            Err(err) => {
+                                warnings.push(format!(
+                                    "models.dev 条目 {} 分段规则非法（{err}），仅保留基础价",
+                                    e.id
+                                ));
+                                PricePlan {
+                                    basis: Some(PricingBasis::PromptTokens),
+                                    application: Some(PricingApplication::WholeRequest),
+                                    base,
+                                    segments: Vec::new(),
+                                }
+                            }
+                        };
                         pricing.add_entry(Entry {
                             prefix: match_key(&e.id),
                             display: e.id,
                             name: e.name,
-                            plan: PricePlan {
-                                base: PriceRates {
-                                    input: e.input,
-                                    output: e.output,
-                                    cache_write: e.cache_write,
-                                    cache_read: e.cache_read,
-                                },
-                                ..Default::default()
-                            },
+                            plan,
                             tier: TIER_MODELSDEV,
                         });
                     }
@@ -1681,6 +1718,70 @@ mod tests {
     }
 
     #[test]
+    fn test_pricing_modelsdev_tier() {
+        // Task 2：快照分段 → PricePlan；合法规则参与计价，非法规则防御性
+        // 丢弃分段只留基础价并给出诊断。
+        use crate::modelsdev::{Snapshot, SnapshotEntry, SnapshotSegment};
+        let dir = std::env::temp_dir().join(format!("tokenscope-pmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let snap = dir.join("pricing-modelsdev.json");
+        let seg = |min: u64, max: Option<u64>, input: f64| SnapshotSegment {
+            label: Some(format!(">{min}")),
+            min_tokens: min,
+            max_tokens: max,
+            input: Some(input),
+            output: Some(input * 4.0),
+            cache_read: Some(input / 10.0),
+            cache_write: Some(input * 1.25),
+        };
+        let snapshot = Snapshot {
+            v: 3,
+            synced_at: "t".into(),
+            entries: vec![
+                SnapshotEntry {
+                    id: "prov/tiered".into(),
+                    name: None,
+                    input: Some(4.0),
+                    output: Some(20.0),
+                    cache_read: Some(0.4),
+                    cache_write: Some(5.0),
+                    segments: vec![seg(272_001, None, 8.0)],
+                },
+                // 反向区间：非法 → 仅保留基础价 + warning
+                SnapshotEntry {
+                    id: "prov/bad-seg".into(),
+                    name: None,
+                    input: Some(1.0),
+                    output: Some(2.0),
+                    cache_read: None,
+                    cache_write: None,
+                    segments: vec![seg(100_000, Some(50_000), 9.0)],
+                },
+            ],
+        };
+        std::fs::write(&snap, serde_json::to_string(&snapshot).unwrap()).unwrap();
+        let (p, warnings) = Pricing::load(None, Some(&snap), None);
+        assert_eq!(warnings.len(), 1, "warnings: {warnings:?}");
+        assert!(warnings[0].contains("bad-seg"));
+        // 272000 → 基础档；272001 → 高档。
+        let est = p
+            .estimate("prov/tiered", &counts(272_000, 0, 0, 0))
+            .unwrap();
+        assert!((est.cost - 272_000.0 * 4.0 / 1e6).abs() < 1e-9);
+        let est = p
+            .estimate("prov/tiered", &counts(272_001, 0, 0, 0))
+            .unwrap();
+        assert!((est.cost - 272_001.0 * 8.0 / 1e6).abs() < 1e-9);
+        // 非法分段的条目仍按基础价计价。
+        let est = p
+            .estimate("prov/bad-seg", &counts(100_000, 0, 0, 0))
+            .unwrap();
+        assert!((est.cost - 100_000.0 * 1.0 / 1e6).abs() < 1e-9);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn test_pricing_unknown_model() {
         assert!(fixture_pricing().lookup("tencent/hy3:free").is_none());
         assert!(fixture_pricing().lookup("<synthetic>").is_none());
@@ -1712,6 +1813,7 @@ mod tests {
                     output: Some(2.0),
                     cache_read: None,
                     cache_write: None,
+                    segments: Vec::new(),
                 },
                 // 显式 0（如旧版 OpenAI 模型无写入计费）
                 SnapshotEntry {
@@ -1721,6 +1823,7 @@ mod tests {
                     output: Some(2.0),
                     cache_read: Some(0.0),
                     cache_write: Some(0.0),
+                    segments: Vec::new(),
                 },
             ],
         };
@@ -1813,6 +1916,7 @@ mod tests {
                 output: Some(2.0),
                 cache_read: None,
                 cache_write: None,
+                segments: Vec::new(),
             }],
         };
         std::fs::write(&snap, serde_json::to_string(&snapshot).unwrap()).unwrap();
