@@ -1,6 +1,6 @@
 # 发布阻断问题修复实施计划
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **状态（2026-10-05）：Task 1–8 全部完成**（每任务独立提交，红→绿记录见文末执行记录）；**Task 9 自动化验收通过**（完整门禁绿、真实数据密闭哈希一致、perf 工具冷 6.2s/热 0.15s、tauri build 产出 4.82 MiB）。**D5 真机验收（安装/升级/托盘/DPI 等）按用户决策后延**——计划保持 active，待外部验收批次完成后归档。
 
 **Goal:** 修复会话 `3288887b-f153-4f91-951c-3d24a909d7ac` 审查中确认的 6 个 P1 问题和影响发布可靠性的 P2 问题，使 TokenScope 达到可重复验收、失败可恢复、费用可解释的发布候选状态。
 
@@ -422,3 +422,18 @@ pnpm --dir frontend build
 - D5 真机验收完成并记录证据；
 - 每个工作流一个主题一个 commit，最后由主 agent 做一次集成审查和最终提交/推送。
 
+## 执行记录（2026-10-05，分支 docs/product-review-plan）
+
+| 任务 | 结果 | 提交 |
+| --- | --- | --- |
+| Task 1 单飞 RAII | 修复 `?` 早退导致失败航班占据槽位不可重试；FlightGuard（publish_ok/publish_error/Drop 兜底 panic）+ 单飞槽改 HashMap 按 key 管理（不同参数可并发、同参共享，修复跨 key 顶替竞态）；leader 工作可注入。test_failed_flight_is_retryable / wakes_all_waiters / panicked_wakes_waiter_and_clears_slot 红→绿 | `bacb56f` |
+| Task 2 完整精度游标 | EventRow.cursor（完整精度 UTC + record_id 不透明串），前端原样回传；同秒亚秒不丢行、空 record_id 靠亚秒决序。test_events_pagination_same_second_subsecond / empty_record_id_tie_break 红→绿 | `66e5576` |
+| Task 3 v1 快照兼容 | v1 非零缓存价保留（此前一律抹成未知），0 → 未知；v2 严格区分不变。三个命名测试红→绿 | `19e25d1` |
+| Task 4 内置表校正 | models.dev 权威快照审计确认 gpt/grok 家族 18 行缓存写/读两列互换（openai/gpt-5.6 cw=5.0/cr=0.4 直接证据）；逐行校正 + 费率结构防线测试 + lookup 词元边界（gpt-50 不命中 gpt-5）；e2e/cost_math/partial 手算期望重算 | `2975c3e` |
+| Task 5 完整性判定 | 未知分项仅 tokens>0 才置 complete=false（零 token 未知不打 †）；partial_cost_totals 的 d2 断言随新语义翻转 | `1850d18` |
+| Task 6 统计时区日期 | 控件契约改日历字符串 + tz prop；快捷项按所选时区解释"今天"（Intl 实际偏移，DST 安全）；Dashboard 直传字符串；快照 v3。today_uses_selected_timezone / dst_boundary 红→绿 | `273b625` |
+| Task 7 失败安全 | 7.1 损坏设置报错不覆盖（keeps_file）；7.2 四类文件统一原子写 + 唯一临时名（并发不串档 + rename 失败清理）；7.3 双 provider 独立 SYNC_LOCK + sync_with 可注入 mock（单源失败不覆盖另一源）；7.4 OpenRouter 缺价 None / 负价拒绝 | `18efcda` |
+| Task 8 测试与文档 | 补 project_alias_cross_agent / claude_nested_project_identity / empty 态 / statsView 纯函数两测试；口径文档修正 isApiErrorMessage 表述（代码不读取）并补项目身份/游标/部分计价/缓存失败口径；钩子 clippy -D warnings（双 manifest） | `8c40fb5` |
+| Task 9 自动化验收 | 完整门禁绿（根库 104 + 壳 6 + 前端 30 测试，clippy -D warnings 双 manifest 干净）；正常套件前后 ~/.tokenscope 哈希逐字节一致；TOKENSCOPE_REAL_PERF=1 显式运行冷 6.2s / 热 0.15s（21,055 请求 $1312.70）；tauri build 4.82 MiB。真机验收项后延（用户决策） | `本次提交` |
+
+完成定义核对：6 个 P1 全部有红→绿回归记录 ✅；关键 P2 失败安全测试通过、无新增默认联网/数据丢失 ✅；测试密闭 ✅；三门禁全绿 ✅；D5 真机验收**后延待用户**（非阻塞代码项）。
