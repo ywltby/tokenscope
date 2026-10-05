@@ -88,6 +88,15 @@ pub fn load(path: &Path) -> Result<Settings> {
     Ok(s)
 }
 
+/// D3/R06：自动同步的允许判定——设置读取失败时返回 false（默认离线）。
+/// 关闭自动同步的用户意图绝不能因设置损坏被悄悄重置成联网。
+pub fn auto_sync_allowed(s: &Result<Settings, anyhow::Error>) -> bool {
+    match s {
+        Ok(s) => s.price_auto_sync,
+        Err(_) => false,
+    }
+}
+
 pub fn save(path: &Path, s: &Settings) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
@@ -124,6 +133,18 @@ mod tests {
         save(&path, &s).unwrap();
         assert_eq!(load(&path).unwrap(), s);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn test_sync_disabled_on_invalid_settings() {
+        // D3：设置损坏 → 自动同步按离线处理，不悄悄恢复联网。
+        assert!(auto_sync_allowed(&Ok(Settings::default())));
+        assert!(!auto_sync_allowed(&Err(anyhow::anyhow!("bad json"))));
+        let off = Settings {
+            price_auto_sync: false,
+            ..Default::default()
+        };
+        assert!(!auto_sync_allowed(&Ok(off)));
     }
 
     #[test]

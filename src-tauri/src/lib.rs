@@ -200,14 +200,12 @@ fn start_price_auto_sync() {
         loop {
             let settings_path = tokenscope::settings::settings_path()
                 .unwrap_or_else(|_| std::path::PathBuf::from("settings.json"));
-            let auto = match tokenscope::settings::load(&settings_path) {
-                Ok(s) => s.price_auto_sync,
-                Err(e) => {
-                    // 读取失败按默认开启处理，但必须可见（坏配置不该无声吞掉）。
-                    log::warn!("设置读取失败，价格自动同步按默认开启处理: {e:#}");
-                    true
-                }
-            };
+            // D3/R06：设置异常 → 离线（关闭自动同步的用户意图不能被重置成联网）。
+            let loaded = tokenscope::settings::load(&settings_path);
+            let auto = tokenscope::settings::auto_sync_allowed(&loaded);
+            if let Err(e) = &loaded {
+                log::warn!("设置读取失败，价格自动同步本轮按离线处理: {e:#}");
+            }
             let modelsdev_snapshot = tokenscope::report::modelsdev_file_path(None);
             let (due, age_note) = match last_sync_age_hours(&modelsdev_snapshot) {
                 Ok(hours) => (hours >= PRICE_SYNC_INTERVAL_HOURS, format!("{hours}h")),

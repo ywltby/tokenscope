@@ -468,15 +468,20 @@ pub async fn sync_pricing_openrouter() -> Result<Vec<SyncOutcome>, String> {
 }
 
 /// 打开（必要时先创建模板）外置价格文件；返回实际路径。
+/// D4：建模板涉及磁盘 IO，一律后台执行（主线程纪律）。
 #[tauri::command]
-pub fn open_pricing_file(app: tauri::AppHandle) -> Result<String, String> {
+pub async fn open_pricing_file(app: tauri::AppHandle) -> Result<String, String> {
     let path = pricing_file_path(None);
-    if !path.exists() {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let path = run_blocking("open_pricing_file", move || {
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, tokenscope::pricing::PRICING_TEMPLATE)?;
         }
-        std::fs::write(&path, tokenscope::pricing::PRICING_TEMPLATE).map_err(|e| e.to_string())?;
-    }
+        Ok(path)
+    })
+    .await?;
     app.opener()
         .open_path(path.display().to_string(), None::<&str>)
         .map_err(|e| e.to_string())?;

@@ -105,7 +105,7 @@ pub fn sync(snapshot_path: &Path) -> Result<SyncReport> {
         std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
     }
     let json = serde_json::to_string_pretty(&snapshot)?;
-    std::fs::write(snapshot_path, json)
+    crate::fsutil::atomic_write(snapshot_path, json.as_bytes())
         .with_context(|| format!("写快照失败: {}", snapshot_path.display()))?;
     Ok(SyncReport {
         count,

@@ -196,6 +196,10 @@ pub struct PricingIndex {
     /// 索引格式版本：B3 起分项可空（v2）；版本不符的旧索引按失效重建。
     #[serde(default = "default_index_v1")]
     pub v: u8,
+    /// D2：重建时的诊断（快照缺失/解析失败等）随索引持久化——
+    /// 缓存命中也要让用户看见降级状态，不能“命中即无声”。
+    #[serde(default)]
+    pub warnings: Vec<String>,
     /// 三源签名（路径+大小+mtime），用于判断是否需要重建。
     pub sig: String,
     pub synced_at: String,
@@ -243,8 +247,9 @@ pub fn load_index(path: &Path) -> anyhow::Result<Option<PricingIndex>> {
 }
 
 /// 进程内缓存：签名一致则直接复用，避免每次调用重读快照。
-static PRICE_CACHE: std::sync::Mutex<Option<(String, std::sync::Arc<Pricing>)>> =
-    std::sync::Mutex::new(None);
+/// 进程内价格缓存条目：签名 → (价格表, 重建时诊断)。
+type PriceCacheEntry = (String, std::sync::Arc<Pricing>, Vec<String>);
+static PRICE_CACHE: std::sync::Mutex<Option<PriceCacheEntry>> = std::sync::Mutex::new(None);
 
 fn source_sig(paths: &[Option<PathBuf>]) -> String {
     let mut parts = Vec::new();
@@ -310,9 +315,10 @@ impl Pricing {
     }
 
     /// 导出索引快照（同步后/重建后写入，供下次启动快速加载）。
-    pub fn to_index(&self, sig: String, synced_at: String) -> PricingIndex {
+    pub fn to_index(&self, sig: String, synced_at: String, warnings: Vec<String>) -> PricingIndex {
         PricingIndex {
             v: INDEX_VERSION,
+            warnings,
             sig,
             synced_at,
             entries: self
@@ -576,29 +582,34 @@ impl Pricing {
         ];
         let sig = source_sig(&paths);
         let mut guard = PRICE_CACHE.lock().unwrap();
-        if let Some((cached_sig, cached)) = guard.as_ref()
+        // D2：命中也返回持久化的诊断——降级状态必须随结果持续可见。
+        if let Some((cached_sig, cached, cached_warnings)) = guard.as_ref()
             && cached_sig == &sig
         {
-            return (cached.clone(), Vec::new(), true);
+            return (cached.clone(), cached_warnings.clone(), true);
         }
         // 索引文件命中（D2/F10 接线）：签名与格式版本一致 → 免解析双快照，
-        // 毫秒级恢复完整价格表（含分项可空语义）。
+        // 毫秒级恢复完整价格表（含分项可空语义与重建时诊断）。
         if let Ok(Some(index)) = load_index(index_path)
             && index.v == INDEX_VERSION
             && index.sig == sig
         {
             let arc = std::sync::Arc::new(Self::from_index(&index));
-            *guard = Some((sig, arc.clone()));
-            return (arc, Vec::new(), true);
+            *guard = Some((sig, arc.clone(), index.warnings.clone()));
+            return (arc, index.warnings, true);
         }
         let (pricing, mut warnings) = Self::load(external, modelsdev_snapshot, openrouter_snapshot);
         // 重建后写索引快照，供下次进程启动快速加载。
-        let index = pricing.to_index(sig.clone(), jiff::Zoned::now().to_string());
+        let index = pricing.to_index(
+            sig.clone(),
+            jiff::Zoned::now().to_string(),
+            warnings.clone(),
+        );
         if let Err(e) = save_index(index_path, &index) {
             warnings.push(format!("价格索引写入失败（不影响统计）: {e:#}"));
         }
         let arc = std::sync::Arc::new(pricing);
-        *guard = Some((sig, arc.clone()));
+        *guard = Some((sig, arc.clone(), warnings.clone()));
         (arc, warnings, false)
     }
 }
@@ -777,6 +788,56 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// 全局 PRICE_CACHE 是共享态，三个索引/缓存测试必须串行。
+    static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_pricing_warning_survives_cache_hit() {
+        // D2：缓存命中也要携带诊断——降级状态随结果持续可见（不变量 11）。
+        let dir = std::env::temp_dir().join(format!("tokenscope-d2-warn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 坏外置文件 → 加载警告
+        let bad = dir.join("pricing.toml");
+        std::fs::write(&bad, "not valid toml [[[").unwrap();
+        let idx = dir.join("pricing-index.json");
+        let _g = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_, w1, hit1) = Pricing::load_cached(Some(&bad), None, None, &idx);
+        assert!(!hit1);
+        assert!(!w1.is_empty(), "重建路径应有警告");
+        // 进程内缓存命中：警告不丢
+        let (_, w2, hit2) = Pricing::load_cached(Some(&bad), None, None, &idx);
+        assert!(hit2);
+        assert_eq!(w2, w1, "缓存命中的警告必须保持");
+        // 模拟重启（清进程缓存）：索引命中，警告随索引持久化
+        *PRICE_CACHE.lock().unwrap() = None;
+        let (_, w3, hit3) = Pricing::load_cached(Some(&bad), None, None, &idx);
+        assert!(hit3, "索引应命中");
+        assert_eq!(w3, w1, "索引命中的警告必须保持");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_pricing_version_invalidates_index() {
+        // D2：版本不符的旧索引按失效重建（不因签名相同而命中）。
+        let dir = std::env::temp_dir().join(format!("tokenscope-d2-ver-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let idx = dir.join("pricing-index.json");
+        let _g = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *PRICE_CACHE.lock().unwrap() = None;
+        let (_, _, _) = Pricing::load_cached(None, None, None, &idx);
+        *PRICE_CACHE.lock().unwrap() = None;
+        // 篡改版本号为 1（旧格式）
+        let mut index: PricingIndex =
+            serde_json::from_str(&std::fs::read_to_string(&idx).unwrap()).unwrap();
+        index.v = 1;
+        std::fs::write(&idx, serde_json::to_string(&index).unwrap()).unwrap();
+        let (_, _, hit) = Pricing::load_cached(None, None, None, &idx);
+        assert!(!hit, "版本不符必须重建");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn test_pricing_index_restart_hit() {
         // D2/F10 接线：索引文件签名一致 → 跳过双快照解析直接恢复。
@@ -784,6 +845,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let idx = dir.join("pricing-index.json");
+        let _g = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (p1, _, hit1) = Pricing::load_cached(None, None, None, &idx);
         assert!(!hit1, "首次必重建");
         // 清空进程内缓存，模拟重启：签名一致 → 索引命中。
