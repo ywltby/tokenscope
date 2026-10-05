@@ -127,8 +127,9 @@ pub(crate) fn sync_with(
     }
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     entries.dedup_by(|a, b| {
-        // 归一化后同键（跨 provider 转发同一模型）：保留排序靠前者
-        crate::pricing::normalize_model_id(&a.id) == crate::pricing::normalize_model_id(&b.id)
+        // Task 2A：跨 provider 的同名模型保留为独立候选（渠道元数据在
+        // 原始键中，估算按请求条件取最高费用），只去重完全相同的 id。
+        a.id == b.id
     });
 
     let synced_at = jiff::Zoned::now().to_string();

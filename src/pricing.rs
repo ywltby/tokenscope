@@ -1,11 +1,12 @@
 //! 模型价格表：USD / 百万 token，四类单价（input / output / cache 写 / cache 读）。
-//! 查找为**最长前缀匹配**（`gpt-5.6-luna` 先于 `gpt-5.6`、`claude-opus-4-5` 先于
-//! `claude-opus-4`），且键与查询统一经 `normalize_model_id` 归一化（lowercase、
-//! 剥 `vendor/` 前缀、`.` → `-`），让 `claude-sonnet-4.5`（OpenRouter）与
-//! `claude-sonnet-4-5-20250929`（日志）汇合到同一前缀。
+//! 键与查询统一经 `normalize_model_id` 归一化（lowercase、`.` → `-`，保留
+//! `vendor/` 渠道信息），再取最后一个 `/` 之后的行为匹配键（`match_key`）。
+//! 匹配分阶段（Task 2A）：先完整匹配（含 variant → 无 variant 回退），完整
+//! 匹配无结果时再做有边界前缀匹配（`gpt-5` 不得命中 `gpt-50`）；同一末段
+//! 键可对应多个渠道/来源候选，估算时按本次请求条件逐一计算总费用，取最高
+//! 者作为保守估算（并列按来源优先级 > 完整匹配 > 前缀更长 > 原始键）。
 //!
-//! Task 1（2026-10-06）三层来源，**层级优先，层内最长前缀**
-//! （外置 > models.dev > OpenRouter；编译期内置表已移除，未收录模型始终
+//! Task 1（2026-10-06）三层来源（编译期内置表已移除，未收录模型始终
 //! unknown，无任何静态 fallback）：
 //! - 外置：`~/.tokenscope/pricing.toml`（用户补充/覆盖，最高优先）；
 //! - models.dev：主源（在线同步 / 本地快照离线兜底，含显示名）；
@@ -26,15 +27,22 @@ const TIER_EXTERNAL: u8 = 0;
 const TIER_MODELSDEV: u8 = 1;
 const TIER_OPENROUTER: u8 = 2;
 
-/// 归一化模型标识（键与查询共用同一函数）：lowercase、剥 `vendor/` 前缀、
-/// `.` → `-`。变体后缀（`:free` 等）保留参与匹配。
+/// 归一化模型标识（键与查询共用同一函数）：lowercase、`.` → `-`。
+/// 保留 `vendor/` 渠道信息（Task 2A：渠道是候选元数据，不剥前缀）；
+/// 变体后缀（`:free` 等）保留参与匹配。
 pub fn normalize_model_id(s: &str) -> String {
-    let t = s.trim().to_ascii_lowercase();
-    let no_vendor = match t.find('/') {
-        Some(pos) => &t[pos + 1..],
-        None => &t,
-    };
-    no_vendor.replace('.', "-")
+    s.trim().to_ascii_lowercase().replace('.', "-")
+}
+
+/// 匹配键：归一化后取最后一个 `/` 之后的行为准（Task 2A 候选键）。
+/// `nano-gpt/qwen/qwen3.8-27b:thinking` → `qwen3.8-27b:thinking`——
+/// 不同渠道的同名模型汇入同一候选组，由估算按费用裁决。
+fn match_key(raw: &str) -> String {
+    let norm = normalize_model_id(raw);
+    match norm.rfind('/') {
+        Some(i) => norm[i + 1..].to_string(),
+        None => norm,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -180,18 +188,106 @@ pub fn effective_rates(plan: &PricePlan, selected: Option<&PriceSegment>) -> Pri
     }
 }
 
+/// 来源标识（稳定 ID，序列化用；展示层本地化在 GUI）。
+fn tier_name(tier: u8) -> &'static str {
+    match tier {
+        TIER_EXTERNAL => "external",
+        TIER_MODELSDEV => "models.dev",
+        _ => "openrouter",
+    }
+}
+
+/// 并列 tie-break（Task 2A）：来源优先级 > 完整匹配 > 前缀更长 > 原始键。
+fn tie_rank(e: &Entry, mode: MatchMode) -> (u8, u8, usize, &str) {
+    let full = u8::from(matches!(
+        mode,
+        MatchMode::Full | MatchMode::FullVariantFallback
+    ));
+    (u8::MAX - e.tier, full, e.prefix.len(), e.display.as_str())
+}
+
+/// 对单个候选项按本次请求条件计价（Task 2A：从 estimate 抽出，候选比较
+/// 与最终计价共用同一函数，保证 breakdown 与总价同源）。
+fn estimate_entry(e: &Entry, basis_value: u64, t: &TokenCounts) -> CostEstimate {
+    let plan = &e.plan;
+    let selected = select_segment(plan, basis_value);
+    let rates = effective_rates(plan, selected);
+    // 默认完整；缺价分项按 token 置为 partial。
+    let mut est = CostEstimate {
+        complete: true,
+        ..Default::default()
+    };
+    let mut line = |price: Option<f64>, tokens: u64, unknown: &mut u64| match price {
+        Some(p) => est.cost += tokens as f64 * p,
+        // Task 5：未知分项仅在实际产生 token 时才标记不完整——
+        // 零 token 的未知分项不影响完整性（不变量 5）。
+        None if tokens > 0 => {
+            est.complete = false;
+            *unknown += tokens;
+        }
+        None => {}
+    };
+    line(rates.input, t.input, &mut est.unknown.input);
+    line(rates.output, t.output, &mut est.unknown.output);
+    line(
+        rates.cache_write,
+        t.cache_write,
+        &mut est.unknown.cache_write,
+    );
+    line(rates.cache_read, t.cache_read, &mut est.unknown.cache_read);
+    est.cost /= 1_000_000.0;
+    est
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelPrice {
     pub plan: PricePlan,
 }
 
+/// 候选匹配方式（Task 2A）：完整匹配优先于前缀；variant 回退必须显式标记。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchMode {
+    /// 完整匹配（键含 variant 时要求与查询完全一致）。
+    Full,
+    /// 完整匹配 + variant 回退：条目无 variant，查询 variant 被舍弃。
+    FullVariantFallback,
+    /// 有边界前缀匹配（条目 variant 与查询一致）。
+    Prefix,
+    /// 有边界前缀匹配 + variant 回退。
+    PrefixVariantFallback,
+}
+
+/// 请求最终命中的候选元数据（Task 2A）：可序列化，供 breakdown/日志解释
+/// "选的是谁、从哪来、怎么匹配、为何是它"。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MatchedCandidate {
+    /// 原始完整模型键（来源侧写法，如 `nano-gpt/qwen/qwen3.8-27b:thinking`）。
+    pub raw_key: String,
+    /// 渠道：原始键第一个 `/` 之前的部分；无斜杠 = None。
+    pub channel: Option<String>,
+    /// 来源：external / models.dev / openrouter。
+    pub source: String,
+    /// 命中的归一化匹配键（末段）。
+    pub matched_key: String,
+    /// 匹配方式。
+    pub match_mode: MatchMode,
+    /// 候选总数（同一末段键参与比价的条目数）。
+    pub candidate_count: usize,
+    /// 选择原因：本请求条件下候选中最高费用（保守估算）。
+    pub reason: String,
+}
+
 /// 分项计价结果（B3）：cost 为已计价分项小计；unknown 记录无法计价分项的
 /// token（缺价格 ≠ 0 价格）；complete = false 表示部分计价。
-#[derive(Debug, Clone, Copy, Default)]
+/// Task 2A：含 `Vec` 元数据后从 Copy 改为 Clone。
+#[derive(Debug, Clone, Default)]
 pub struct CostEstimate {
     pub cost: f64,
     pub unknown: TokenCounts,
     pub complete: bool,
+    /// 最终命中候选（None = 理论上不出现：estimate 返回 None 表示未收录）。
+    pub matched: Option<MatchedCandidate>,
 }
 
 /// GUI 悬浮对照用：该前缀在 OpenRouter 层的价格（无对应模型则 None）。
@@ -284,7 +380,9 @@ fn default_index_v1() -> u8 {
 }
 
 /// 索引格式当前版本。
-pub const INDEX_VERSION: u8 = 3;
+/// Task 2A：v4——匹配键改为末段模型名（保留渠道候选元数据）；旧索引按
+/// 版本失效走重建，不从旧单一归一化键推断渠道。
+pub const INDEX_VERSION: u8 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -507,7 +605,7 @@ impl Pricing {
                 Ok(Some(snapshot)) => {
                     for e in snapshot.entries {
                         pricing.add_entry(Entry {
-                            prefix: normalize_model_id(&e.id),
+                            prefix: match_key(&e.id),
                             display: e.id,
                             name: e.name,
                             plan: PricePlan {
@@ -536,7 +634,7 @@ impl Pricing {
                 Ok(Some(snapshot)) => {
                     for e in snapshot.entries {
                         pricing.add_entry(Entry {
-                            prefix: normalize_model_id(&e.id),
+                            prefix: match_key(&e.id),
                             display: e.id,
                             name: e.name,
                             // OpenRouter API 只暴露 prompt/completion 两价
@@ -579,7 +677,7 @@ impl Pricing {
             };
             for m in parsed.model {
                 pricing.add_entry(Entry {
-                    prefix: normalize_model_id(&m.prefix),
+                    prefix: match_key(&m.prefix),
                     display: m.prefix,
                     name: None,
                     // 外置文件四键俱全（模板即如此）；缺键=serde 默认 0，
@@ -601,84 +699,137 @@ impl Pricing {
         (pricing, warnings)
     }
 
-    /// 层级优先（外置 > models.dev > OpenRouter），层内最长前缀。
-    /// **变体隔离**：带 `:变体` 的查询只匹配同变体条目——免费（`:free`）等变体
-    /// 不得套用基名价格，宁可 unknown。
+    /// 层级优先（外置 > models.dev > OpenRouter），并列时完整匹配优先、
+    /// 前缀更长优先、原始键字典序（Task 2A tie-break，不含请求条件）。
+    /// **计费入口是 `estimate`**：它按本次请求条件对候选逐一并取最高费用；
+    /// `lookup` 仅用于无请求上下文的快速判定（测试/预热）。
     ///
-    /// 热路径（每事件一次 × 数千条目）：前缀在加载时已归一化，这里零分配；
-    /// 首字节不等直接跳过，把线性扫描的实际比较量压到两位数。
+    /// 热路径（每事件一次 × 数千条目）：匹配键在加载时已归一化为末段，
+    /// 这里零分配枚举查询末段自身的前缀（≤30 个）做哈希命中。
     pub fn lookup(&self, model: &str) -> Option<ModelPrice> {
-        let key = normalize_model_id(model);
-        let (_, key_variant) = split_variant(&key);
-        // 枚举查询串（含变体后缀）自身的前缀（≤30 个）做哈希命中；
-        // 变体隔离由显式校验保证：条目变体必须与查询变体完全一致。
-        let bytes = key.as_bytes();
-        let mut best: Option<(&Entry, (u8, usize))> = None;
-        for k in (1..=bytes.len()).rev() {
+        let cands = self.collect_candidates(model);
+        let best =
+            cands
+                .into_iter()
+                .fold(None::<(&Entry, MatchMode)>, |acc, (e, m)| match acc {
+                    Some((be, bm)) if tie_rank(be, bm) >= tie_rank(e, m) => Some((be, bm)),
+                    _ => Some((e, m)),
+                })?;
+        Some(ModelPrice {
+            plan: best.0.plan.clone(),
+        })
+    }
+
+    /// 候选收集（Task 2A，分阶段回退，阶段内不混匹配方式）：
+    /// 1) 完整匹配（含 variant，键完全一致）；
+    /// 2) 完整匹配 variant 回退（查询带 variant 但条目只有基名）；
+    /// 3) 有边界前缀匹配（条目 variant 必须与查询一致）；
+    /// 4) 有边界前缀 + variant 回退。
+    ///
+    /// 前缀必须停在词元边界：`qwen3.8-27b` 可命中 `qwen3.8-27b-instruct`，
+    /// 不得命中 `qwen3.8-27b2`。免费（`:free`）等变体条目只在查询 variant
+    /// 完全一致时命中，基名价格对变体查询的套用仅发生在显式标记的回退段。
+    fn collect_candidates(&self, model: &str) -> Vec<(&Entry, MatchMode)> {
+        let leaf = match_key(model);
+        let (base, variant) = split_variant(&leaf);
+        let mut cands: Vec<(&Entry, MatchMode)> = Vec::new();
+
+        // 1) 完整匹配（含 variant）。
+        if let Some(group) = self.by_prefix.get(leaf.as_bytes()) {
+            cands.extend(group.iter().map(|e| (e, MatchMode::Full)));
+        }
+        if !cands.is_empty() {
+            return cands;
+        }
+        // 2) 完整匹配 variant 回退（查询带 variant、条目只有基名）。
+        if variant.is_some()
+            && let Some(group) = self.by_prefix.get(base.as_bytes())
+        {
+            cands.extend(group.iter().map(|e| (e, MatchMode::FullVariantFallback)));
+        }
+        if !cands.is_empty() {
+            return cands;
+        }
+        // 3) 有边界前缀匹配（变体一致；变体携带的条目只会精确命中）。
+        let bytes = leaf.as_bytes();
+        for k in (1..bytes.len()).rev() {
             if let Some(group) = self.by_prefix.get(&bytes[..k]) {
                 for e in group {
-                    let (_, variant) = split_variant(&e.prefix);
-                    if variant != key_variant {
+                    let (_, evar) = split_variant(&e.prefix);
+                    if evar != variant {
                         continue;
                     }
-                    // 词元边界：前缀后必须到串尾或分隔符，"gpt-50" 不得
-                    // 命中 "gpt-5"（不同模型）。
-                    let rest = &key[k..];
-                    if !rest.is_empty()
-                        && !rest.starts_with('-')
-                        && !rest.starts_with('.')
-                        && !rest.starts_with('/')
-                        && !rest.starts_with(':')
-                    {
-                        continue;
-                    }
-                    let rank = (u8::MAX - e.tier, k);
-                    if best.is_none_or(|(_, b_rank)| rank > b_rank) {
-                        best = Some((e, rank));
+                    let rest = &leaf[k..];
+                    if rest.starts_with('-') || rest.starts_with(':') {
+                        cands.push((e, MatchMode::Prefix));
                     }
                 }
             }
         }
-        best.map(|(e, _)| ModelPrice {
-            plan: e.plan.clone(),
-        })
+        if !cands.is_empty() {
+            return cands;
+        }
+        // 4) 前缀 + variant 回退（对基名做有边界前缀，条目必须无 variant）。
+        if variant.is_some() {
+            let bbytes = base.as_bytes();
+            for k in (1..bbytes.len()).rev() {
+                if let Some(group) = self.by_prefix.get(&bbytes[..k]) {
+                    for e in group {
+                        let (_, evar) = split_variant(&e.prefix);
+                        if evar.is_some() {
+                            continue;
+                        }
+                        let rest = &base[k..];
+                        if rest.starts_with('-') || rest.starts_with(':') {
+                            cands.push((e, MatchMode::PrefixVariantFallback));
+                        }
+                    }
+                }
+            }
+        }
+        cands
     }
 
     /// 返回 None 表示模型未收录（unknown），不是 0 费用。
     /// 分项计价（B3）：已知分项计价求和；未知分项（None）的 token 进
     /// unknown 且 complete=false——缺价格 ≠ 0 价格。
+    /// Task 2A：先按末段键收集候选，再对每个候选用**本次请求条件**
+    /// （basis token 与分段规则）计算总费用，取最高者作为保守估算；
+    /// 并列按来源优先级 > 完整匹配 > 前缀更长 > 原始键打破。
+    /// 禁止跨候选拼价：四类单价全部来自最终选中的同一个候选。
     pub fn estimate(&self, model: &str, t: &TokenCounts) -> Option<CostEstimate> {
-        let mp = self.lookup(model)?;
-        let plan = &mp.plan;
+        let cands = self.collect_candidates(model);
+        if cands.is_empty() {
+            return None;
+        }
         // Task 1（分段计价）：basis = prompt token（input + cache_write +
         // cache_read），整笔请求切换档位；输出不参与档位选择（不变量 2）。
         let basis_value = t.prompt_tokens();
-        let selected = select_segment(plan, basis_value);
-        let rates = effective_rates(plan, selected);
-        let mut est = CostEstimate {
-            cost: 0.0,
-            unknown: TokenCounts::default(),
-            complete: true,
-        };
-        let mut line = |price: Option<f64>, tokens: u64, unknown: &mut u64| match price {
-            Some(p) => est.cost += tokens as f64 * p,
-            // Task 5：未知分项仅在实际产生 token 时才标记不完整——
-            // 零 token 的未知分项不影响完整性（不变量 5）。
-            None if tokens > 0 => {
-                est.complete = false;
-                *unknown += tokens;
+        let cand_count = cands.len();
+        let mut best: Option<(CostEstimate, MatchMode, &Entry)> = None;
+        for (e, mode) in cands {
+            let est = estimate_entry(e, basis_value, t);
+            let take = match &best {
+                None => true,
+                Some((b, bm, be)) => {
+                    est.cost > b.cost
+                        || (est.cost == b.cost && tie_rank(e, mode) > tie_rank(be, *bm))
+                }
+            };
+            if take {
+                best = Some((est, mode, e));
             }
-            None => {}
-        };
-        line(rates.input, t.input, &mut est.unknown.input);
-        line(rates.output, t.output, &mut est.unknown.output);
-        line(
-            rates.cache_write,
-            t.cache_write,
-            &mut est.unknown.cache_write,
-        );
-        line(rates.cache_read, t.cache_read, &mut est.unknown.cache_read);
-        est.cost /= 1_000_000.0;
+        }
+        let (mut est, mode, e) = best.unwrap();
+        est.matched = Some(MatchedCandidate {
+            raw_key: e.display.clone(),
+            channel: e.display.split_once('/').map(|(c, _)| c.to_string()),
+            source: tier_name(e.tier).to_string(),
+            matched_key: e.prefix.clone(),
+            match_mode: mode,
+            candidate_count: cand_count,
+            reason: "candidates_highest_cost".to_string(),
+        });
         Some(est)
     }
 
@@ -808,16 +959,27 @@ mod tests {
 
     #[test]
     fn test_pricing_normalize() {
+        // Task 2A：归一化保留 vendor/ 渠道信息，匹配键另取末段。
         assert_eq!(
             normalize_model_id("Anthropic/Claude-Sonnet-4.5"),
-            "claude-sonnet-4-5"
+            "anthropic/claude-sonnet-4-5"
         );
         assert_eq!(
             normalize_model_id("claude-sonnet-4-5-20250929"),
             "claude-sonnet-4-5-20250929"
         );
-        assert_eq!(normalize_model_id("Tencent/HY3:free"), "hy3:free");
+        assert_eq!(normalize_model_id("Tencent/HY3:free"), "tencent/hy3:free");
         assert_eq!(normalize_model_id("GPT-5.6-Sol"), "gpt-5-6-sol");
+        // 末段提取：最后一个 `/` 之后。
+        assert_eq!(
+            match_key("nano-gpt/qwen/qwen3.8-27b:thinking"),
+            "qwen3-8-27b:thinking"
+        );
+        assert_eq!(
+            match_key("anthropic/claude-sonnet-4.5"),
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(match_key("claude-sonnet-4-5"), "claude-sonnet-4-5");
     }
 
     #[test]
@@ -1346,6 +1508,178 @@ mod tests {
         assert!((e2.cost - 200_000.0 * 6.0 / 1e6).abs() < 1e-12);
     }
 
+    /// Task 2A fixture：同末段模型名的两个渠道候选（A 贵、B 便宜）。
+    fn candidate_pricing() -> Pricing {
+        let mut p = Pricing::empty();
+        for (raw, i, o, cw, cr) in [
+            (
+                "nano-gpt/qwen/qwen3.8-27b-obliterated:thinking",
+                8.0,
+                40.0,
+                10.0,
+                0.8,
+            ),
+            (
+                "other-channel/qwen/qwen3.8-27b-obliterated:thinking",
+                2.0,
+                10.0,
+                2.5,
+                0.2,
+            ),
+        ] {
+            p.add_entry(Entry {
+                prefix: match_key(raw),
+                display: raw.to_string(),
+                name: None,
+                plan: PricePlan {
+                    base: PriceRates {
+                        input: Some(i),
+                        output: Some(o),
+                        cache_write: Some(cw),
+                        cache_read: Some(cr),
+                    },
+                    ..Default::default()
+                },
+                tier: TIER_OPENROUTER,
+            });
+        }
+        p
+    }
+
+    #[test]
+    fn test_pricing_candidate_selection() {
+        // 1) 两个渠道末段完整相同，候选都能被找到；本请求条件下最高费用
+        //    的渠道 A 胜出（保守估算），元数据可解释选择原因。
+        let p = candidate_pricing();
+        let est = p
+            .estimate(
+                "nano-gpt/qwen/qwen3.8-27b-obliterated:thinking",
+                &counts(1_000_000, 0, 0, 0),
+            )
+            .unwrap();
+        let m = est.matched.as_ref().expect("命中必须有元数据");
+        assert_eq!(m.candidate_count, 2, "两个渠道都进入候选");
+        assert_eq!(m.raw_key, "nano-gpt/qwen/qwen3.8-27b-obliterated:thinking");
+        assert_eq!(m.channel.as_deref(), Some("nano-gpt"));
+        assert_eq!(m.source, "openrouter");
+        assert_eq!(m.match_mode, MatchMode::Full);
+        assert_eq!(m.reason, "candidates_highest_cost");
+        assert_eq!(m.matched_key, "qwen3-8-27b-obliterated:thinking");
+        assert!((est.cost - 8.0).abs() < 1e-9);
+        // 查询另一渠道：同一候选组，仍是 A 胜出。
+        let est = p
+            .estimate(
+                "other-channel/qwen/qwen3.8-27b-obliterated:thinking",
+                &counts(1_000_000, 0, 0, 0),
+            )
+            .unwrap();
+        assert_eq!(
+            est.matched.as_ref().unwrap().raw_key,
+            "nano-gpt/qwen/qwen3.8-27b-obliterated:thinking"
+        );
+
+        // 2) 候选按请求条件（basis token + 分段）逐一计价后裁决：
+        //    小请求平价贵者胜，大请求分段渠道反超。
+        let mut p2 = Pricing::empty();
+        p2.add_entry(Entry {
+            prefix: match_key("chan-a/mix"),
+            display: "chan-a/mix".into(),
+            name: None,
+            plan: PricePlan {
+                base: PriceRates {
+                    input: Some(8.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            tier: TIER_OPENROUTER,
+        });
+        p2.add_entry(Entry {
+            prefix: match_key("chan-b/mix"),
+            display: "chan-b/mix".into(),
+            name: None,
+            plan: PricePlan {
+                base: PriceRates {
+                    input: Some(2.0),
+                    ..Default::default()
+                },
+                segments: vec![PriceSegment {
+                    label: Some(">100K".into()),
+                    min_tokens: 100_000,
+                    max_tokens: None,
+                    prices: PriceRates {
+                        input: Some(20.0),
+                        ..Default::default()
+                    },
+                }],
+                ..Default::default()
+            },
+            tier: TIER_OPENROUTER,
+        });
+        let est = p2.estimate("chan-a/mix", &counts(50_000, 0, 0, 0)).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-a/mix");
+        assert!((est.cost - 50_000.0 * 8.0 / 1e6).abs() < 1e-9);
+        let est = p2
+            .estimate("chan-a/mix", &counts(200_000, 0, 0, 0))
+            .unwrap();
+        assert_eq!(
+            est.matched.as_ref().unwrap().raw_key,
+            "chan-b/mix",
+            "大请求时分段渠道更贵 → 保守取 B"
+        );
+        assert!((est.cost - 200_000.0 * 20.0 / 1e6).abs() < 1e-9);
+
+        // 3) 完整匹配优先于前缀匹配（分阶段：完整命中时前缀不参与）。
+        let mut p3 = Pricing::empty();
+        for (key, disp) in [
+            (
+                "qwen3-8-27b-obliterated:thinking",
+                "qwen3.8-27b-obliterated:thinking",
+            ),
+            ("qwen3-8-27b", "qwen3.8-27b"),
+        ] {
+            p3.add_entry(Entry {
+                prefix: key.to_string(),
+                display: disp.to_string(),
+                name: None,
+                plan: PricePlan {
+                    base: PriceRates {
+                        input: Some(3.0),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                tier: TIER_OPENROUTER,
+            });
+        }
+        let est = p3
+            .estimate("qwen3.8-27b-obliterated:thinking", &counts(1_000, 0, 0, 0))
+            .unwrap();
+        let m = est.matched.as_ref().unwrap();
+        assert_eq!(m.matched_key, "qwen3-8-27b-obliterated:thinking");
+        assert_eq!(m.match_mode, MatchMode::Full);
+
+        // 4) 有边界前缀：`qwen3.8-27b` 命中 `qwen3.8-27b-instruct`，
+        //    不得命中 `qwen3.8-27b2`。
+        let est = p3
+            .estimate("qwen3.8-27b-instruct", &counts(1_000, 0, 0, 0))
+            .unwrap();
+        let m = est.matched.as_ref().unwrap();
+        assert_eq!(m.matched_key, "qwen3-8-27b");
+        assert_eq!(m.match_mode, MatchMode::Prefix);
+        assert!(
+            p3.estimate("qwen3.8-27b2", &counts(1_000, 0, 0, 0))
+                .is_none(),
+            "无词元边界的前缀不得命中"
+        );
+
+        // 5) 命中元数据可序列化（tooltip/breakdown 载体）。
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"matched_key\":\"qwen3-8-27b\""));
+        assert!(json.contains("\"match_mode\":\"prefix\""));
+        assert!(json.contains("\"source\":\"openrouter\""));
+    }
+
     #[test]
     fn test_pricing_unknown_model() {
         assert!(fixture_pricing().lookup("tencent/hy3:free").is_none());
@@ -1667,7 +2001,9 @@ cache_read = 0.0
 
     #[test]
     fn test_pricing_tier_order() {
-        // 三层优先级：外置 > OpenRouter > models.dev（fixture 为主源）；层内最长前缀。
+        // 三层候选并存（外置 > OpenRouter > models.dev）。lookup 按
+        // tie-break（来源优先级）取层级高者；estimate 按本次请求费用取
+        // 最高者——此处外置 42 > openrouter 3，两种口径都选外置。
         let dir = std::env::temp_dir().join(format!("tokenscope-m5-tier-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let external = write(
@@ -1731,7 +2067,9 @@ cache_read = 0.0
 
     #[test]
     fn test_pricing_variant_isolation() {
-        // :free 变体不得套用基名价格；基名查询也不吃变体条目。
+        // Task 2A：变体条目只在 variant 完全一致时精确命中；查询 variant
+        // 无同变体条目时回退到基名价格，但匹配方式必须显式标记 fallback。
+        // `:free` 条目永远不得在回退段命中其他变体（回退只对无 variant 条目）。
         let dir = std::env::temp_dir().join(format!("tokenscope-m5-var-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let snapshot = write(
@@ -1753,9 +2091,35 @@ cache_read = 0.0
         );
         // 基名命中基名价格
         assert!((p.lookup("tencent/hy3").unwrap().plan.base.input.unwrap() - 0.0825).abs() < 1e-9);
-        // 未知变体：基名价格不外溢 → unknown
-        assert!(p.lookup("tencent/hy3:preview").is_none());
+        // 未知变体：回退到基名价格（variant fallback 显式标记，非静默）
+        let est = p
+            .estimate("tencent/hy3:preview", &counts(1_000_000, 0, 0, 0))
+            .unwrap();
+        assert!(
+            (est.cost - 0.0825).abs() < 1e-9,
+            "无同变体条目 → 按基名价格估算"
+        );
+        let matched = est.matched.expect("命中候选必须有元数据");
+        assert_eq!(matched.match_mode, MatchMode::FullVariantFallback);
+        assert_eq!(matched.raw_key, "tencent/hy3");
+        // 只有 :free 条目时，其他变体不吃免费价（回退段仅接受无 variant 条目）
+        let dir2 = std::env::temp_dir().join(format!("tokenscope-m5-var2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir2);
+        let snapshot2 = write(
+            &dir2,
+            "pricing-openrouter.json",
+            r#"{"synced_at":"t","entries":[
+                {"id":"tencent/hy3:free","name":"HY3 free",
+                 "prompt":0,"completion":0,"cache_read":0,"cache_write":0}
+            ]}"#,
+        );
+        let (p2, _) = Pricing::load(None, None, Some(&snapshot2));
+        assert!(
+            p2.estimate("tencent/hy3:preview", &counts(1, 0, 0, 0))
+                .is_none()
+        );
         std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&dir2).ok();
     }
 
     #[test]
