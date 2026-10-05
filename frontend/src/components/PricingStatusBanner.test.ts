@@ -107,8 +107,69 @@ describe("PricingStatusBanner（Task 3）", () => {
     const sync = w.findAll("button").find((b) => b.text().includes("立即同步"));
     await sync!.trigger("click");
     await flushPromises();
-    expect(w.text()).toContain("同步失败");
     expect(w.text()).toContain("network down");
     expect(w.text()).toContain("尚未获取定价");
+  });
+
+  it("部分成功（主源 OK/补充源失败）→ 横幅消失但显示补充源失败原因", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pricing_status") return Promise.resolve(statusNeedsSync);
+      if (cmd === "sync_pricing_openrouter")
+        return Promise.reject(new Error("OpenRouter: network down"));
+      return Promise.resolve(null);
+    });
+    const w = mount(PricingStatusBanner);
+    await flushPromises();
+    expect(w.text()).toContain("尚未获取定价");
+    // 同步后状态刷新为主源可用（pricing_status 换为 OK，sync 仍失败）
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pricing_status") return Promise.resolve(statusOk);
+      if (cmd === "sync_pricing_openrouter")
+        return Promise.reject(new Error("OpenRouter: network down"));
+      return Promise.resolve(null);
+    });
+    const sync = w.findAll("button").find((b) => b.text().includes("立即同步"));
+    await sync!.trigger("click");
+    await flushPromises();
+    expect(w.text()).not.toContain("尚未获取定价");
+    expect(w.text()).toContain("OpenRouter: network down");
+  });
+
+  it("pricing_status 读取失败 → 可重试提示而非静默空 DOM", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pricing_status") return Promise.reject(new Error("ipc broken"));
+      return Promise.resolve(null);
+    });
+    const w = mount(PricingStatusBanner);
+    await flushPromises();
+    expect(w.text()).toContain("定价状态读取失败");
+    expect(w.text()).toContain("ipc broken");
+    // 重试成功后恢复
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pricing_status") return Promise.resolve(statusOk);
+      return Promise.resolve(null);
+    });
+    const retry = w.findAll("button").find((b) => b.text().includes("重试"));
+    await retry!.trigger("click");
+    await flushPromises();
+    expect(w.text()).not.toContain("定价状态读取失败");
+  });
+
+  it("监听 pricing-status-changed：设置页同步后横幅重新读取状态", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pricing_status") return Promise.resolve(statusNeedsSync);
+      return Promise.resolve(null);
+    });
+    const w = mount(PricingStatusBanner);
+    await flushPromises();
+    expect(w.text()).toContain("尚未获取定价");
+    // 设置页（另一组件）派发事件 + 状态已被其刷新为可用
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pricing_status") return Promise.resolve(statusOk);
+      return Promise.resolve(null);
+    });
+    window.dispatchEvent(new Event("pricing-status-changed"));
+    await flushPromises();
+    expect(w.text()).not.toContain("尚未获取定价");
   });
 });

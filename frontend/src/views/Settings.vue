@@ -110,11 +110,17 @@ async function syncPricing(): Promise<void> {
   try {
     const reports = await invoke<{ source: string; count: number }[]>("sync_pricing_openrouter");
     msg.success(reports.map((r) => `${r.source} ${r.count} 条`).join("，"));
-    pricing.value = await invoke<PricingView>("pricing_entries");
   } catch (e) {
+    // 部分失败也要刷新：主源已写盘的数据立即可见（审阅 Task 3）。
     msg.error(`同步失败：${e}`);
   } finally {
-    syncing.value = false;
+    // 成功与部分失败两条路径都重新读取价格视图 + 通知全局横幅刷新。
+    try {
+      pricing.value = await invoke<PricingView>("pricing_entries");
+    } finally {
+      window.dispatchEvent(new Event("pricing-status-changed"));
+      syncing.value = false;
+    }
   }
 }
 
