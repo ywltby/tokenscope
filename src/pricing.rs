@@ -96,19 +96,30 @@ struct Entry {
     /// 原始写法（GUI 展示用）。
     display: String,
     name: Option<String>,
-    input: f64,
-    output: f64,
-    cache_write: f64,
-    cache_read: f64,
+    /// B3（F04）：None = 该分项价格未知（如快照缺键），**不按 0 计**；
+    /// 显式 Some(0.0) 才是真免费。
+    input: Option<f64>,
+    output: Option<f64>,
+    cache_write: Option<f64>,
+    cache_read: Option<f64>,
     tier: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ModelPrice {
-    pub input: f64,
-    pub output: f64,
-    pub cache_write: f64,
-    pub cache_read: f64,
+    pub input: Option<f64>,
+    pub output: Option<f64>,
+    pub cache_write: Option<f64>,
+    pub cache_read: Option<f64>,
+}
+
+/// 分项计价结果（B3）：cost 为已计价分项小计；unknown 记录无法计价分项的
+/// token（缺价格 ≠ 0 价格）；complete = false 表示部分计价。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CostEstimate {
+    pub cost: f64,
+    pub unknown: TokenCounts,
+    pub complete: bool,
 }
 
 /// GUI 悬浮对照用：该前缀在 OpenRouter 层的价格（无对应模型则 None）。
@@ -130,6 +141,8 @@ pub struct PricingEntry {
     pub output: f64,
     pub cache_write: f64,
     pub cache_read: f64,
+    /// B3：任一分项价格未知（展示层按 0 显示但必须可见“不完整”）。
+    pub incomplete: bool,
     pub source: &'static str,
     /// 同前缀 OpenRouter 条目价格；None = OpenRouter 无对应模型。
     pub openrouter: Option<OpenRouterPrice>,
@@ -180,11 +193,21 @@ type PrefixIndex = std::collections::HashMap<Vec<u8>, Vec<Entry>>;
 /// 加载它即可跳过双快照解析与合并（扁平结构，毫秒级）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PricingIndex {
+    /// 索引格式版本：B3 起分项可空（v2）；版本不符的旧索引按失效重建。
+    #[serde(default = "default_index_v1")]
+    pub v: u8,
     /// 三源签名（路径+大小+mtime），用于判断是否需要重建。
     pub sig: String,
     pub synced_at: String,
     pub entries: Vec<IndexEntry>,
 }
+
+fn default_index_v1() -> u8 {
+    1
+}
+
+/// 索引格式当前版本。
+pub const INDEX_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -193,10 +216,10 @@ pub struct IndexEntry {
     pub display: String,
     pub name: Option<String>,
     pub tier: u8,
-    pub input: f64,
-    pub output: f64,
-    pub cache_write: f64,
-    pub cache_read: f64,
+    pub input: Option<f64>,
+    pub output: Option<f64>,
+    pub cache_write: Option<f64>,
+    pub cache_read: Option<f64>,
 }
 
 pub fn save_index(path: &Path, index: &PricingIndex) -> anyhow::Result<()> {
@@ -265,10 +288,10 @@ impl Pricing {
                 prefix: normalize_model_id(p),
                 display: (*p).to_string(),
                 name: None,
-                input: *i,
-                output: *o,
-                cache_write: *cw,
-                cache_read: *cr,
+                input: Some(*i),
+                output: Some(*o),
+                cache_write: Some(*cw),
+                cache_read: Some(*cr),
                 tier: TIER_BUILTIN,
             });
         }
@@ -289,6 +312,7 @@ impl Pricing {
     /// 导出索引快照（同步后/重建后写入，供下次启动快速加载）。
     pub fn to_index(&self, sig: String, synced_at: String) -> PricingIndex {
         PricingIndex {
+            v: INDEX_VERSION,
             sig,
             synced_at,
             entries: self
@@ -369,10 +393,12 @@ impl Pricing {
                             prefix: normalize_model_id(&e.id),
                             display: e.id,
                             name: e.name,
-                            input: e.prompt * 1_000_000.0,
-                            output: e.completion * 1_000_000.0,
-                            cache_write: e.cache_write * 1_000_000.0,
-                            cache_read: e.cache_read * 1_000_000.0,
+                            // OpenRouter API 只暴露 prompt/completion 两价，
+                            // 缓存分项按未知处理（诚实于数据面，R05 → C5 解释）。
+                            input: Some(e.prompt * 1_000_000.0),
+                            output: Some(e.completion * 1_000_000.0),
+                            cache_write: None,
+                            cache_read: None,
                             tier: TIER_OPENROUTER,
                         });
                     }
@@ -404,10 +430,12 @@ impl Pricing {
                     prefix: normalize_model_id(&m.prefix),
                     display: m.prefix,
                     name: None,
-                    input: m.input,
-                    output: m.output,
-                    cache_write: m.cache_write,
-                    cache_read: m.cache_read,
+                    // 外置文件四键俱全（模板即如此）；缺键=serde 默认 0，
+                    // 即用户显式声明 0（区别于快照缺键的"未知"）。
+                    input: Some(m.input),
+                    output: Some(m.output),
+                    cache_write: Some(m.cache_write),
+                    cache_read: Some(m.cache_read),
                     tier: TIER_EXTERNAL,
                 });
             }
@@ -452,15 +480,28 @@ impl Pricing {
     }
 
     /// 返回 None 表示模型未收录（unknown），不是 0 费用。
-    pub fn cost(&self, model: &str, t: &TokenCounts) -> Option<f64> {
+    /// 分项计价（B3）：已知分项计价求和；未知分项（None）的 token 进
+    /// unknown 且 complete=false——缺价格 ≠ 0 价格。
+    pub fn estimate(&self, model: &str, t: &TokenCounts) -> Option<CostEstimate> {
         let p = self.lookup(model)?;
-        Some(
-            (t.input as f64 * p.input
-                + t.output as f64 * p.output
-                + t.cache_write as f64 * p.cache_write
-                + t.cache_read as f64 * p.cache_read)
-                / 1_000_000.0,
-        )
+        let mut est = CostEstimate {
+            cost: 0.0,
+            unknown: TokenCounts::default(),
+            complete: true,
+        };
+        let mut line = |price: Option<f64>, tokens: u64, unknown: &mut u64| match price {
+            Some(p) => est.cost += tokens as f64 * p,
+            None => {
+                est.complete = false;
+                *unknown += tokens;
+            }
+        };
+        line(p.input, t.input, &mut est.unknown.input);
+        line(p.output, t.output, &mut est.unknown.output);
+        line(p.cache_write, t.cache_write, &mut est.unknown.cache_write);
+        line(p.cache_read, t.cache_read, &mut est.unknown.cache_read);
+        est.cost /= 1_000_000.0;
+        Some(est)
     }
 
     /// GUI 设置页条目（合并视图，含来源、显示名与同前缀 OpenRouter 对照价）。
@@ -476,19 +517,23 @@ impl Pricing {
                 let openrouter = or_by_prefix
                     .get(e.prefix.as_str())
                     .map(|o| OpenRouterPrice {
-                        input: o.input,
-                        output: o.output,
-                        cache_write: o.cache_write,
-                        cache_read: o.cache_read,
+                        input: o.input.unwrap_or(0.0),
+                        output: o.output.unwrap_or(0.0),
+                        cache_write: o.cache_write.unwrap_or(0.0),
+                        cache_read: o.cache_read.unwrap_or(0.0),
                         name: o.name.clone(),
                     });
                 PricingEntry {
                     prefix: e.display.clone(),
                     name: e.name.clone(),
-                    input: e.input,
-                    output: e.output,
-                    cache_write: e.cache_write,
-                    cache_read: e.cache_read,
+                    input: e.input.unwrap_or(0.0),
+                    output: e.output.unwrap_or(0.0),
+                    cache_write: e.cache_write.unwrap_or(0.0),
+                    cache_read: e.cache_read.unwrap_or(0.0),
+                    incomplete: e.input.is_none()
+                        || e.output.is_none()
+                        || e.cache_write.is_none()
+                        || e.cache_read.is_none(),
                     source: match e.tier {
                         TIER_EXTERNAL => "外置",
                         TIER_OPENROUTER => "openrouter",
@@ -535,6 +580,16 @@ impl Pricing {
             && cached_sig == &sig
         {
             return (cached.clone(), Vec::new(), true);
+        }
+        // 索引文件命中（D2/F10 接线）：签名与格式版本一致 → 免解析双快照，
+        // 毫秒级恢复完整价格表（含分项可空语义）。
+        if let Ok(Some(index)) = load_index(index_path)
+            && index.v == INDEX_VERSION
+            && index.sig == sig
+        {
+            let arc = std::sync::Arc::new(Self::from_index(&index));
+            *guard = Some((sig, arc.clone()));
+            return (arc, Vec::new(), true);
         }
         let (pricing, mut warnings) = Self::load(external, modelsdev_snapshot, openrouter_snapshot);
         // 重建后写索引快照，供下次进程启动快速加载。
@@ -587,54 +642,57 @@ mod tests {
         let p = Pricing::builtin()
             .lookup("claude-sonnet-4-5-20250929")
             .unwrap();
-        assert_eq!(p.input, 3.0);
-        assert_eq!(p.output, 15.0);
+        assert_eq!(p.input, Some(3.0));
+        assert_eq!(p.output, Some(15.0));
         let p = Pricing::builtin()
             .lookup("Claude-Sonnet-4-20250514")
             .unwrap();
-        assert_eq!(p.input, 3.0);
+        assert_eq!(p.input, Some(3.0));
     }
 
     #[test]
     fn test_pricing_longest_prefix() {
         let p = Pricing::builtin().lookup("gpt-5.6-luna").unwrap();
-        assert_eq!(p.input, 0.2);
-        assert_eq!(Pricing::builtin().lookup("gpt-5.6-sol").unwrap().input, 4.0);
+        assert_eq!(p.input, Some(0.2));
+        assert_eq!(
+            Pricing::builtin().lookup("gpt-5.6-sol").unwrap().input,
+            Some(4.0)
+        );
         assert_eq!(
             Pricing::builtin().lookup("gpt-5.4-nano").unwrap().input,
-            0.2
+            Some(0.2)
         );
         assert_eq!(
             Pricing::builtin()
                 .lookup("claude-opus-4-5-20251101")
                 .unwrap()
                 .input,
-            5.0
+            Some(5.0)
         );
         assert_eq!(
             Pricing::builtin()
                 .lookup("claude-opus-4-20250514")
                 .unwrap()
                 .input,
-            15.0
+            Some(15.0)
         );
         assert_eq!(
             Pricing::builtin()
                 .lookup("deepseek-v4-flash-0731")
                 .unwrap()
                 .input,
-            0.3
+            Some(0.3)
         );
         assert_eq!(
             Pricing::builtin().lookup("grok-4.5-build").unwrap().input,
-            2.0
+            Some(2.0)
         );
         assert_eq!(
             Pricing::builtin()
                 .lookup("grok-4-1-fast-reasoning")
                 .unwrap()
                 .input,
-            0.2
+            Some(0.2)
         );
     }
 
@@ -646,7 +704,7 @@ mod tests {
                 .lookup("anthropic/claude-sonnet-4.5")
                 .unwrap()
                 .input,
-            3.0
+            Some(3.0)
         );
     }
 
@@ -656,25 +714,103 @@ mod tests {
         assert!(Pricing::builtin().lookup("<synthetic>").is_none());
         assert!(
             Pricing::builtin()
-                .cost("qwen-x", &counts(1, 1, 0, 0))
+                .estimate("qwen-x", &counts(1, 1, 0, 0))
                 .is_none()
         );
     }
 
     #[test]
+    fn test_pricing_missing_component_not_free() {
+        // B3（F04）：models.dev cost 缺键 = 分项未知，不按 0——
+        // 非零缓存 token 不得被当成免费；显式 0 才是真免费。
+        use crate::modelsdev::{Snapshot, SnapshotEntry};
+        let dir = std::env::temp_dir().join(format!("tokenscope-b3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let snap = dir.join("pricing-modelsdev.json");
+        let snapshot = Snapshot {
+            v: 2,
+            synced_at: "t".into(),
+            entries: vec![
+                // 缺 cache_write/cache_read 键（serde None）
+                SnapshotEntry {
+                    id: "prov/partial".into(),
+                    name: None,
+                    input: Some(1.0),
+                    output: Some(2.0),
+                    cache_read: None,
+                    cache_write: None,
+                },
+                // 显式 0（如旧版 OpenAI 模型无写入计费）
+                SnapshotEntry {
+                    id: "prov/free-cache".into(),
+                    name: None,
+                    input: Some(1.0),
+                    output: Some(2.0),
+                    cache_read: Some(0.0),
+                    cache_write: Some(0.0),
+                },
+            ],
+        };
+        std::fs::write(&snap, serde_json::to_string(&snapshot).unwrap()).unwrap();
+        let (p, w) = Pricing::load(None, Some(&snap), None);
+        assert!(w.is_empty());
+
+        // 部分计价：input/output 已知，cache 未知 → cost 只含已知部分。
+        let est = p
+            .estimate("prov/partial", &counts(1_000_000, 1_000_000, 500, 700))
+            .unwrap();
+        assert!((est.cost - 3.0).abs() < 1e-9, "只计已知分项: {est:?}");
+        assert!(!est.complete);
+        assert_eq!(est.unknown.input, 0);
+        assert_eq!(est.unknown.output, 0);
+        assert_eq!(est.unknown.cache_write, 500);
+        assert_eq!(est.unknown.cache_read, 700);
+
+        // 显式零：缓存分项按 0 计价，complete=true。
+        let est = p
+            .estimate("prov/free-cache", &counts(1_000_000, 0, 500, 700))
+            .unwrap();
+        assert!((est.cost - 1.0).abs() < 1e-9);
+        assert!(est.complete, "显式 0 不是未知: {est:?}");
+        assert_eq!(est.unknown.total(), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_pricing_index_restart_hit() {
+        // D2/F10 接线：索引文件签名一致 → 跳过双快照解析直接恢复。
+        let dir = std::env::temp_dir().join(format!("tokenscope-b3-idx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let idx = dir.join("pricing-index.json");
+        let (p1, _, hit1) = Pricing::load_cached(None, None, None, &idx);
+        assert!(!hit1, "首次必重建");
+        // 清空进程内缓存，模拟重启：签名一致 → 索引命中。
+        *PRICE_CACHE.lock().unwrap() = None;
+        let (p2, w2, hit2) = Pricing::load_cached(None, None, None, &idx);
+        assert!(hit2, "索引文件应命中");
+        assert!(w2.is_empty());
+        assert_eq!(p2.all_entries().count(), p1.all_entries().count());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn test_pricing_cost_math() {
-        let c = Pricing::builtin()
-            .cost("claude-sonnet-4-5", &counts(1_000_000, 1_000_000, 0, 0))
+        let est = Pricing::builtin()
+            .estimate("claude-sonnet-4-5", &counts(1_000_000, 1_000_000, 0, 0))
             .unwrap();
-        assert!((c - 18.0).abs() < 1e-9);
-        let c = Pricing::builtin()
-            .cost("claude-sonnet-4-5", &counts(0, 0, 1_000_000, 1_000_000))
+        assert!((est.cost - 18.0).abs() < 1e-9);
+        assert!(est.complete);
+        let est = Pricing::builtin()
+            .estimate("claude-sonnet-4-5", &counts(0, 0, 1_000_000, 1_000_000))
             .unwrap();
-        assert!((c - 4.05).abs() < 1e-9);
-        let c = Pricing::builtin()
-            .cost("gpt-5.6-sol", &counts(800, 100, 50, 200))
+        assert!((est.cost - 4.05).abs() < 1e-9);
+        let est = Pricing::builtin()
+            .estimate("gpt-5.6-sol", &counts(800, 100, 50, 200))
             .unwrap();
-        assert!((c - 6220.0 / 1_000_000.0).abs() < 1e-12);
+        // 纯价格数学：桶值直接给定（不经适配器），800*4+100*20+50*0.4+200*5。
+        assert!((est.cost - 6220.0 / 1_000_000.0).abs() < 1e-12);
     }
 
     #[test]
@@ -710,8 +846,8 @@ cache_read = 0.0
         let (p, warnings) = Pricing::load(Some(&path), None, None);
         assert!(warnings.is_empty());
         assert_eq!(p.external_count(), 2);
-        assert_eq!(p.lookup("claude-opus-5").unwrap().input, 9.0);
-        assert_eq!(p.lookup("my-model/zen-2").unwrap().output, 2.0);
+        assert_eq!(p.lookup("claude-opus-5").unwrap().input, Some(9.0));
+        assert_eq!(p.lookup("my-model/zen-2").unwrap().output, Some(2.0));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -722,7 +858,7 @@ cache_read = 0.0
         let path = write(&dir, "pricing.toml", "not valid toml [[[");
         let (p, warnings) = Pricing::load(Some(&path), None, None);
         assert_eq!(p.external_count(), 0);
-        assert_eq!(p.lookup("claude-opus-5").unwrap().input, 5.0);
+        assert_eq!(p.lookup("claude-opus-5").unwrap().input, Some(5.0));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("解析失败"));
         std::fs::remove_dir_all(&dir).ok();
@@ -757,14 +893,14 @@ cache_read = 0.0
 
         // 外置层压过 openrouter（同前缀，层级优先）
         let hit = p.lookup("claude-sonnet-4-5-20250929").unwrap();
-        assert_eq!(hit.input, 42.0);
+        assert_eq!(hit.input, Some(42.0));
         // openrouter 层生效：点号命名归一化命中，压过同前缀的内置 1.75
-        assert_eq!(p.lookup("gpt-5.2-20260101").unwrap().input, 7.0);
+        assert_eq!(p.lookup("gpt-5.2-20260101").unwrap().input, Some(7.0));
         // 内置兜底：openrouter/外置都没有的模型走内置
-        assert_eq!(p.lookup("claude-sonnet-4").unwrap().input, 3.0);
+        assert_eq!(p.lookup("claude-sonnet-4").unwrap().input, Some(3.0));
         // 免费变体经最长前缀命中 :free 条目 → 0 价（known，非 unknown）
         let free = p.lookup("tencent/hy3:free").unwrap();
-        assert_eq!(free.input, 0.0);
+        assert_eq!(free.input, Some(0.0));
         // 条目来源标识与显示名
         let entries = p.entries();
         assert!(
@@ -812,9 +948,9 @@ cache_read = 0.0
         let (p, warnings) = Pricing::load(None, None, Some(&snapshot));
         assert!(warnings.is_empty());
         // 精确变体命中 0 价
-        assert_eq!(p.lookup("tencent/hy3:free").unwrap().input, 0.0);
+        assert_eq!(p.lookup("tencent/hy3:free").unwrap().input, Some(0.0));
         // 基名命中基名价格
-        assert!((p.lookup("tencent/hy3").unwrap().input - 0.0825).abs() < 1e-9);
+        assert!((p.lookup("tencent/hy3").unwrap().input.unwrap() - 0.0825).abs() < 1e-9);
         // 未知变体：基名价格不外溢 → unknown
         assert!(p.lookup("tencent/hy3:preview").is_none());
         std::fs::remove_dir_all(&dir).ok();

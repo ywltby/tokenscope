@@ -541,7 +541,10 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
         .into_iter()
         .take(limit)
         .map(|e| {
-            let cost_usd = pricing.cost(&e.model, &TokenCounts::from_event(&e));
+            // B3：部分计价模型的明细行展示已计价小计（unknown 分项随总计披露）。
+            let cost_usd = pricing
+                .estimate(&e.model, &TokenCounts::from_event(&e))
+                .map(|est| est.cost);
             EventRow {
                 ts: e.ts.to_zoned(tz.clone()).strftime("%F %T").to_string(),
                 agent: e.agent.as_str(),
@@ -1077,7 +1080,7 @@ cache_read = 0.0
         let snapshot = dir.join("pricing-modelsdev.json");
         std::fs::write(
             &snapshot,
-            r#"{"synced_at":"t","entries":[
+            r#"{"v":2,"synced_at":"t","entries":[
                 {"id":"volcengine/doubao-seed-2-0-pro-260215","name":"Doubao Pro",
                  "input":0.47,"output":2.37,"cache_read":0.09,"cache_write":0.0},
                 {"id":"tencent/hy3:free","name":"HY3 free",

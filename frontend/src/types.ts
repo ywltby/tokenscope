@@ -62,6 +62,8 @@ export interface PricingEntry {
   cache_write: number;
   cache_read: number;
   source: string;
+  /** B3：任一分项价格未知（设置页按 0 展示但标记不完整；完整解释 UI 属 C5） */
+  incomplete?: boolean;
   /** 同前缀 OpenRouter 条目价格；null = OpenRouter 无对应模型 */
   openrouter?: OpenRouterPrice | null;
 }
