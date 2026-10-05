@@ -1,6 +1,6 @@
 # Post-Implementation Audit Remediation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **状态（2026-10-06）：Task 1–5 全部完成**（红→绿，提交号见文末执行记录）；**Task 6 自动化部分完成**——tauri build 连续两次产出 4.83 MiB 安装包（5,065,571 / 5,065,415 字节，差异为 zip 时间戳），真机场景按用户决策后延至外部验收批次。计划保持 active 待真机验收。
 
 **Goal:** 修复最近一轮实现审阅中仍存在的日期选择器风险、来源重叠验证缺口、旧索引测试假阳性、Settings 集成测试缺失和 active 文档不一致，并完成真实 D5 验收记录。
 
@@ -283,4 +283,17 @@ git commit -m "docs(计划): 清理已完成任务的旧状态"
 - [ ] `Settings.test.ts` 覆盖同步、来源错误和全局状态事件。
 - [ ] active 计划与当前三层定价实现一致，旧状态已明确标记历史或 superseded。
 - [ ] D5 真机验收逐项有证据，安装包构建可重复性有记录。
-- [ ] Rust、Tauri、前端完整门禁通过。
+- [x] Rust、Tauri、前端完整门禁通过。
+
+## 执行记录（2026-10-06，分支 docs/product-review-plan）
+
+| 任务 | 结果 | 提交 |
+| --- | --- | --- |
+| Task 1 picker round-trip | setter 由 tzDate(ms, 统计时区) 改为 msToUtcCalendar（UTC 零点锚逆运算）——负偏移时区下点选 10-05 不再变 10-04；统计时区仅用于快捷项与后端传参。红→绿（纽约/上海 round-trip） | `418ccde` |
+| Task 2 重叠规范化 | normalize_path fallback 折叠 `..`；重叠键大小写不敏感；重叠诊断进 Collected.warnings；DedupSource 透传发现诊断；dedup_source_overlap 独立函数 + 集成测试入口；mock 双 agent 同文件测试 + SQLite 归属直查 + validate 补 `..`/大小写/尾斜杠 | `831ad5c` |
+| Task 3 旧索引假阳性 | fixture sig 改用生产 source_sig——先证 from_index 会命中旧内置条目（fixture 有效），再证 load_cached 仅因版本失效重建 | `f93cda6` |
+| Task 4 Settings 测试 | Settings.test.ts 新建：部分失败刷新 pricing_entries、派发 pricing-status-changed、重叠错误可见输入保留、保存后重载来源状态 | `10b59aa` |
+| Task 5 文档一致性 | pricing.rs:141 索引注释改三层；product-review 问题清单标历史 + F10 行内补注；README M5/M9 标注旧策略被取代；一致性扫描（四层/内置兜底/load_cached 未接入）仅剩历史与 superseded 文本 | `9f6151c` |
+| Task 6 D5 产物 | tauri build 连续两次 4.83 MiB（可重复性确认）；真机场景后延至外部验收批次（用户决策） | `本次提交` |
+
+完成定义勾选：picker round-trip ✅；重叠覆盖（.. /大小写/双 agent mock/SQLite 归属）✅；warning 到达 report ✅；旧索引用有效签名验证版本失效 ✅；Settings.test.ts ✅；active 文档一致 ✅；门禁全绿 ✅；D5 真机证据后延（todo 登记）。
