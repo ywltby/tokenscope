@@ -5,6 +5,8 @@
 //! 扫描并告警，数字必须与无缓存一致。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Result;
 use jiff::tz::TimeZone;
@@ -212,15 +214,108 @@ pub fn rebuild_cache(cache_dir: Option<PathBuf>) -> Result<CacheInfo> {
 
 /// 采集产物：去重后事件 + 逐源统计 + 价格表 + 警告。summary / list_events 共用。
 struct Collected {
+    generation: u64,
     events: Vec<UsageEvent>,
     sources: Vec<SourceReport>,
     pricing: std::sync::Arc<crate::pricing::Pricing>,
     warnings: Vec<String>,
 }
 
-/// 共用采集路径（M7）：价格加载 → 缓存增量采集 → 全局去重 → 回填统计。
-/// 各阶段 INFO 计时落日志（用户排障依据；粒度 = 每 agent 一行，不逐文件刷屏）。
-fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
+/// D1：采集快照（不可变共享）——并发同参查询复用同一次采集，
+/// 事件/来源/警告/价格表一份冻结，各查询自行做时间与行级过滤。
+#[derive(Clone)]
+struct CollectionSnapshot {
+    generation: u64,
+    events: Vec<UsageEvent>,
+    sources: Vec<SourceReport>,
+    warnings: Vec<String>,
+    pricing: std::sync::Arc<crate::pricing::Pricing>,
+}
+
+/// 单飞槽：key → (互斥结果, 条件变量)。None = 空闲。
+type FlightCell = Arc<(Mutex<Option<Result<CollectionSnapshot, String>>>, Condvar)>;
+static INFLIGHT: Mutex<Option<(String, FlightCell)>> = Mutex::new(None);
+static COLLECT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 采集键：只含影响**采集**的参数（by/tz/from/to/days 是采集后的过滤，
+/// 不参与——汇总与明细同参并发时必须合并为一次采集）。
+fn collection_key(opts: &SummaryOptions) -> String {
+    format!(
+        "agent={:?}|cd={:?}|xd={:?}|ce={:?}|xe={:?}|refresh={}|cache={:?}|pp={:?}|or={:?}|md={:?}|idx={:?}",
+        opts.agent,
+        opts.claude_dir,
+        opts.codex_dir,
+        opts.claude_enabled,
+        opts.codex_enabled,
+        opts.refresh,
+        opts.cache_dir,
+        opts.pricing_path,
+        opts.openrouter_path,
+        opts.modelsdev_path,
+        opts.pricing_index
+    )
+}
+
+fn wait_flight(cell: &FlightCell) -> Result<Arc<CollectionSnapshot>> {
+    let mut r = cell.0.lock().unwrap();
+    loop {
+        if let Some(res) = r.as_ref() {
+            return match res {
+                Ok(s) => Ok(Arc::new(s.clone())),
+                Err(e) => Err(anyhow::anyhow!(e.clone())),
+            };
+        }
+        r = cell.1.wait(r).unwrap();
+    }
+}
+
+/// 单飞入口：领队采集并发布快照；同参跟随者等待复用。
+/// 领队 panic 由 NotifyDrop 兜底唤醒等待者（标记失败），不会悬挂。
+fn collect_flighted(opts: &SummaryOptions) -> Result<Arc<CollectionSnapshot>> {
+    let key = collection_key(opts);
+    let mut guard = INFLIGHT.lock().unwrap();
+    if let Some((k, cell)) = guard.as_ref()
+        && *k == key
+    {
+        let cell = cell.clone();
+        drop(guard);
+        return wait_flight(&cell);
+    }
+    let cell: FlightCell = Arc::new((Mutex::new(None), Condvar::new()));
+    *guard = Some((key, cell.clone()));
+    drop(guard);
+
+    struct NotifyDrop(FlightCell);
+    impl Drop for NotifyDrop {
+        fn drop(&mut self) {
+            let mut r = self.0.0.lock().unwrap();
+            if r.is_none() {
+                *r = Some(Err("采集线程异常退出".to_string()));
+            }
+            self.0.1.notify_all();
+        }
+    }
+    let _notify = NotifyDrop(cell.clone());
+    let generation = COLLECT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let snapshot = collect_inner(opts, generation)?;
+    {
+        let mut r = cell.0.lock().unwrap();
+        *r = Some(Ok(snapshot.clone()));
+        cell.1.notify_all();
+    }
+    // 清理飞行槽（若仍为本航班；被不同 key 顶替则不动）。
+    let mut g = INFLIGHT.lock().unwrap();
+    if let Some((k, c)) = g.as_ref()
+        && Arc::ptr_eq(c, &cell)
+    {
+        *g = None;
+    }
+    drop(g);
+    drop(_notify);
+    Ok(Arc::new(snapshot))
+}
+
+fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSnapshot> {
     let kinds: Vec<AgentKind> = match opts.agent {
         Some(k) => vec![k],
         None => vec![AgentKind::ClaudeCode, AgentKind::Codex],
@@ -236,13 +331,37 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
         };
         sources.push(make_source(kind, dir)?);
     }
-    collect_all_with_sources(sources, opts)
+    let collected = collect_all_with_sources(sources, opts, generation)?;
+    Ok(CollectionSnapshot {
+        generation: collected.generation,
+        events: collected.events,
+        sources: collected.sources,
+        warnings: collected.warnings,
+        pricing: collected.pricing,
+    })
+}
+
+/// 共用采集路径（M7）：价格加载 → 缓存增量采集 → 全局去重 → 回填统计。
+/// 各阶段 INFO 计时落日志（用户排障依据；粒度 = 每 agent 一行，不逐文件刷屏）。
+fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
+    let snap = collect_flighted(opts)?;
+    Ok(Collected {
+        generation: snap.generation,
+        events: snap.events.clone(),
+        sources: snap.sources.clone(),
+        pricing: snap.pricing.clone(),
+        warnings: snap.warnings.clone(),
+    })
 }
 
 /// 可注入来源的采集实现（测试用 MockSource 走同一管线）。
+#[cfg(test)]
+static TEST_COLLECT_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+
 fn collect_all_with_sources(
     sources: Vec<Box<dyn Source>>,
     opts: &SummaryOptions,
+    generation: u64,
 ) -> Result<Collected> {
     let t_total = std::time::Instant::now();
     let pricing_path = pricing_file_path(opts.pricing_path.as_ref());
@@ -268,6 +387,13 @@ fn collect_all_with_sources(
     );
     let (cache, mut cache_warnings) = open_cache(opts);
     warnings.append(&mut cache_warnings);
+    #[cfg(test)]
+    {
+        let d = TEST_COLLECT_DELAY_MS.load(Ordering::Relaxed);
+        if d > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(d));
+        }
+    }
 
     let mut reports: Vec<SourceReport> = Vec::new();
     let mut all_events: Vec<UsageEvent> = Vec::new();
@@ -444,6 +570,7 @@ fn collect_all_with_sources(
         t_total.elapsed().as_millis()
     );
     Ok(Collected {
+        generation,
         events,
         sources: reports,
         pricing,
@@ -454,6 +581,7 @@ fn collect_all_with_sources(
 pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
     let t = std::time::Instant::now();
     let Collected {
+        generation: _,
         mut events,
         sources,
         pricing,
@@ -501,6 +629,9 @@ pub struct EventFilter {
     pub day: Option<String>,
     /// 返回条数上限：None = 200，最大 1000。
     pub limit: Option<usize>,
+    /// D1 稳定游标：`"ts|record_id"`（上一页最后一行），取严格小于该
+    /// (ts, record_id) 元组的行——同时间戳靠 record_id 决序，翻页不重不漏。
+    pub before: Option<String>,
 }
 
 /// 一条去重后的用量明细（展示行）。
@@ -508,6 +639,8 @@ pub struct EventFilter {
 pub struct EventRow {
     /// 解析时区下的 "YYYY-MM-DD HH:MM:SS"（存储仍 UTC，见 cache.rs）。
     pub ts: String,
+    /// D1：游标第二分量（Claude = message.id；Codex 为空，靠 ts 唯一）。
+    pub record_id: String,
     pub agent: &'static str,
     pub model: String,
     pub session_id: String,
@@ -532,6 +665,7 @@ pub struct EventList {
 pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventList> {
     let t = std::time::Instant::now();
     let Collected {
+        generation: _,
         mut events,
         pricing,
         warnings,
@@ -551,8 +685,22 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
     if let Some(pr) = &filter.project {
         events.retain(|e| &e.project == pr);
     }
-    events.sort_by_key(|e| std::cmp::Reverse(e.ts));
+    events.sort_by(|a, b| b.ts.cmp(&a.ts).then(b.record_id.cmp(&a.record_id)));
+    // D1：total = 主过滤 + 下钻后的全量（不含游标截断），翻页时恒定。
     let total = events.len() as u64;
+    // 游标翻页——(ts, record_id) 元组严格小于上一页末行，不重不漏。
+    // ts 为显示格式（解析时区），按同一时区回转 UTC 再比较。
+    if let Some(cur) = &filter.before {
+        let (ts_str, rid) = parse_cursor(cur)?;
+        let dt: jiff::civil::DateTime = ts_str
+            .parse()
+            .map_err(|e| anyhow::anyhow!("游标时间戳非法: {e}"))?;
+        let cur_ts = dt
+            .to_zoned(tz.clone())
+            .map_err(|e| anyhow::anyhow!("游标时区换算失败: {e}"))?;
+        let cur_ts = cur_ts.timestamp();
+        events.retain(|e| (e.ts, e.record_id.clone()) < (cur_ts, rid.clone()));
+    }
     let limit = filter.limit.unwrap_or(200).min(1000);
     let rows: Vec<EventRow> = events
         .into_iter()
@@ -564,6 +712,7 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
                 .map(|est| est.cost);
             EventRow {
                 ts: e.ts.to_zoned(tz.clone()).strftime("%F %T").to_string(),
+                record_id: e.record_id.clone(),
                 agent: e.agent.as_str(),
                 model: e.model,
                 session_id: e.session_id,
@@ -625,6 +774,14 @@ fn apply_time_filter(
         from.is_none_or(|f| d >= f) && to.is_none_or(|t| d <= t)
     });
     Ok(events)
+}
+
+/// 游标格式 "ts|record_id"；ts 为显示格式（YYYY-MM-DD HH:MM:SS，解析时区）。
+fn parse_cursor(s: &str) -> Result<(String, String)> {
+    let (ts, rid) = s
+        .split_once('|')
+        .ok_or_else(|| anyhow::anyhow!("游标格式应为 ts|record_id: {s:?}"))?;
+    Ok((ts.to_string(), rid.to_string()))
 }
 
 fn file_size(path: &std::path::Path) -> Option<u64> {
@@ -1143,6 +1300,85 @@ cache_read = 0.0
     }
 
     #[test]
+    fn test_parallel_queries_single_collection() {
+        // D1：同参并发查询合并为一次采集（generation 相同 = 同一份快照）。
+        let dir = tmp_dir("single-flight");
+        let opts = opts(Some(dir.join("cache")), None, false);
+        TEST_COLLECT_DELAY_MS.store(300, Ordering::Relaxed);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let b = barrier.clone();
+                let o = opts.clone();
+                std::thread::spawn(move || {
+                    b.wait();
+                    collect_all(&o).unwrap()
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        TEST_COLLECT_DELAY_MS.store(0, Ordering::Relaxed);
+        assert_eq!(
+            results[0].generation, results[1].generation,
+            "并发同参必须复用同一采集快照"
+        );
+        assert_eq!(results[0].events.len(), results[1].events.len());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_events_pagination_parity() {
+        // D1：稳定游标翻页不重不漏，且 total 恒为过滤后全量。
+        let hermetic = tmp_dir("pagination");
+        let base = SummaryOptions {
+            claude_dir: Some(fixture("claude", "basic")),
+            codex_dir: Some(fixture("codex", "basic")),
+            cache_dir: Some(hermetic.join("cache")),
+            pricing_index: Some(hermetic.join("idx.json")),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
+            tz: Some("Asia/Shanghai".to_string()),
+            ..Default::default()
+        };
+        let full = list_events(&base, &EventFilter::default()).unwrap();
+        assert_eq!(full.rows.len(), 7);
+        let mut pages: Vec<Vec<String>> = Vec::new();
+        let mut seen = 0usize;
+        let mut cursor: Option<String> = None;
+        loop {
+            let f = EventFilter {
+                limit: Some(3),
+                before: cursor.clone(),
+                ..Default::default()
+            };
+            let page = list_events(&base, &f).unwrap();
+            assert_eq!(page.total, 7, "total 恒为过滤后全量");
+            if page.rows.is_empty() {
+                break;
+            }
+            assert!(page.rows.len() <= 3);
+            pages.push(
+                page.rows
+                    .iter()
+                    .map(|r| format!("{} {}", r.ts, r.record_id))
+                    .collect(),
+            );
+            seen += page.rows.len();
+            let last = page.rows.last().unwrap();
+            cursor = Some(format!("{}|{}", last.ts, last.record_id));
+        }
+        assert_eq!(seen, 7, "翻页覆盖全量");
+        let flat: Vec<String> = pages.into_iter().flatten().collect();
+        let expect: Vec<String> = full
+            .rows
+            .iter()
+            .map(|r| format!("{} {}", r.ts, r.record_id))
+            .collect();
+        assert_eq!(flat, expect);
+        std::fs::remove_dir_all(&hermetic).ok();
+    }
+
+    #[test]
     fn test_source_status() {
         // C1：四态可区分（ready/missing/disabled）+ 目录配置生效。
         let mut s = crate::settings::Settings::default();
@@ -1273,7 +1509,7 @@ mod collect_stability_tests {
             root: root.clone(),
             file: file.clone(),
         })];
-        let c = collect_all_with_sources(sources, &opts).unwrap();
+        let c = collect_all_with_sources(sources, &opts, 0).unwrap();
         assert_eq!(c.events.len(), 1, "解析结果正常入账");
         assert!(
             c.warnings.iter().any(|w| w.contains("本轮不计入缓存")),
@@ -1284,6 +1520,89 @@ mod collect_stability_tests {
         // 否则此后永远命中这份缺尾数据。
         let info = cache_stats(opts.cache_dir.clone()).unwrap();
         assert_eq!(info.files, 0, "采集期间变化的文件不得入缓存");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 计数 Mock：统计 parse_file 调用次数（no_reparse 验证）。
+    struct CountingMock {
+        root: PathBuf,
+        file: PathBuf,
+        parses: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Source for CountingMock {
+        fn agent(&self) -> AgentKind {
+            AgentKind::Codex
+        }
+
+        fn root(&self) -> &Path {
+            &self.root
+        }
+
+        fn discover_with_errors(&self) -> (Vec<PathBuf>, Vec<String>) {
+            (vec![self.file.clone()], Vec::new())
+        }
+
+        fn parse_file(&self, _path: &Path) -> crate::source::FileParse {
+            self.parses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let stats = CollectStats {
+                lines_seen: 1,
+                events: 1,
+                ..CollectStats::default()
+            };
+            crate::source::FileParse {
+                stats,
+                events: vec![UsageEvent {
+                    ts: "2026-07-17T15:00:00Z".parse().unwrap(),
+                    agent: AgentKind::Codex,
+                    model: "m".into(),
+                    session_id: "s".into(),
+                    project: "p".into(),
+                    record_id: String::new(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                }],
+            }
+        }
+    }
+
+    #[test]
+    fn test_filter_switch_no_reparse() {
+        // D4：筛选切换后同参采集走缓存命中，不重复解析（缓存纯优化）。
+        let dir = tmp_dir("no-reparse");
+        let root = dir.join("codex");
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("rollout-x.jsonl");
+        std::fs::write(&file, "{ }").unwrap();
+        let parses = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let opts = SummaryOptions {
+            agent: Some(AgentKind::Codex),
+            cache_dir: Some(dir.join("cache")),
+            pricing_index: Some(dir.join("idx.json")),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
+            tz: Some("Asia/Shanghai".to_string()),
+            ..Default::default()
+        };
+        let mk_sources = || {
+            vec![Box::new(CountingMock {
+                root: root.clone(),
+                file: file.clone(),
+                parses: parses.clone(),
+            }) as Box<dyn Source>]
+        };
+        collect_all_with_sources(mk_sources(), &opts, 0).unwrap();
+        let after_first = parses.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(after_first, 1);
+        collect_all_with_sources(mk_sources(), &opts, 1).unwrap();
+        assert_eq!(
+            parses.load(std::sync::atomic::Ordering::Relaxed),
+            after_first,
+            "第二次采集必须缓存命中，不得重复解析"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

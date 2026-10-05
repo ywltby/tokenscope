@@ -76,6 +76,7 @@ pub async fn list_events(
     project: Option<String>,
     day: Option<String>,
     limit: Option<usize>,
+    before: Option<String>,
     tz: Option<String>,
     from: Option<String>,
     to: Option<String>,
@@ -99,6 +100,7 @@ pub async fn list_events(
         project,
         day,
         limit,
+        before,
     };
     run_blocking("list_events", move || list_events_impl(&opts, &filter)).await
 }
