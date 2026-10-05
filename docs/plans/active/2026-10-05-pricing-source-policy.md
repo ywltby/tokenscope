@@ -1,6 +1,6 @@
 # 定价来源策略调整实施计划
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **状态（2026-10-06）：Task 1–5 全部完成**——内置价格表已移除，三层来源 + 首启同步横幅 + 设置页解释落地；完整门禁与 tauri build 通过；真机验收项（横幅/断网/同步时序）随 D5 外部验收批次执行（用户决策后延）。执行记录见文末。
 
 **Goal:** 移除编译期内置价格表，以 models.dev 为主要定价来源、以本地 models.dev 快照作为离线兜底，并在首次启动没有价格缓存时给用户明确的联网同步提示。
 
@@ -249,4 +249,16 @@ pnpm --dir frontend build
 - 离线 models.dev 快照可继续工作；
 - 索引版本迁移、Rust、壳和前端门禁全部通过；
 - 真机验收证据写入 `docs/plans/d5-acceptance-checklist.md`。
+
+## 执行记录（2026-10-06，分支 docs/product-review-plan）
+
+| 任务 | 结果 | 提交 |
+| --- | --- | --- |
+| Task 1 移除内置层 | TABLE/TIER_BUILTIN/builtin() 删除；default=空表；load 三层叠加；来源标签 外置/models.dev/OpenRouter；INDEX_VERSION→3（含内置旧索引失效，test_source_labels 断言编译期版本）；策略五件套测试 + 受影响测试迁移（pricing 单测 fixture_pricing、e2e 外置 TOML、partial_pricing d2 无兜底重算、aggregate 空表语义、external_broken 无兜底断言） | `7732625` |
+| Task 2 PricingStatus | 结构化 DTO + pricing_status 命令（与 pricing_entries 同路径解析）；missing/cached/invalid_degraded 三测试。v1/v2 快照兼容测试此前已交付 | `d1c963b` |
+| Task 3 全局横幅 | PricingStatusBanner（needsSync 结构化字段驱动）+ App 接入；立即同步 → 刷新状态；失败保留横幅 + 原因。红基线：computed 误写 snake_case needs_sync（可见性测试暴露）→ 四测试绿 | `bce36e3` |
+| Task 4 设置页与文档 | 来源标签映射（models.dev/OpenRouter/外置，无内置）；优先级文案改三层 + 离线快照说明；主源缺失 NAlert 提示；priceSourceLine 三态测试；口径文档费用章节更新 | `229b0c2` |
+| Task 5 验收 | 完整门禁绿（根库 104 + 壳 9 + 前端 35 测试、clippy -D warnings 双 manifest、前端 build）；tauri build 4.82 MiB。额外断言映射：旧索引失效（INDEX_VERSION 3 + 重启命中测试）、离线快照计价（pricing_status cached + modelsdev_layer）、无快照横幅（banner visible）、同步失败保旧快照（sync_provider_retry_independent）、无来源全 unknown（unknown_model_without_sources）。真机时序验收随 D5 批次执行 | `本次提交` |
+
+完成定义核对：无生产 TIER_BUILTIN/builtin()/静态 fallback ✅；models.dev 来源可单独识别（标签 + 状态 DTO + 日志）✅；首启横幅可见/可同步/失败可重试 ✅；离线快照可用 ✅；索引迁移与三门禁通过 ✅；真机证据随 D5 批次（后延，用户决策）。
 
