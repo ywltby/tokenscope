@@ -670,21 +670,44 @@ impl Pricing {
             match openrouter::load_snapshot(path) {
                 Ok(Some(snapshot)) => {
                     for e in snapshot.entries {
+                        // Task 3：OpenRouter overrides（USD/token，inclusive
+                        // 下界：prompt >= min 即命中）→ 规范分段 [min,
+                        // next_min) 并 ×1e6 统一为 USD/百万 token；基础价
+                        // 覆盖最低阈值以下。基础价维持 prompt/completion
+                        // 两价口径（缓存分项按未知，R05 → C5）。
+                        let segments = e
+                            .overrides
+                            .iter()
+                            .enumerate()
+                            .map(|(i, o)| {
+                                let conv = |v: Option<f64>| v.map(|p| p * 1_000_000.0);
+                                PriceSegment {
+                                    label: Some(format!("≥{}", o.min_prompt_tokens)),
+                                    min_tokens: o.min_prompt_tokens,
+                                    max_tokens: e.overrides.get(i + 1).map(|n| n.min_prompt_tokens),
+                                    prices: PriceRates {
+                                        input: conv(o.prompt),
+                                        output: conv(o.completion),
+                                        cache_write: conv(o.cache_write),
+                                        cache_read: conv(o.cache_read),
+                                    },
+                                }
+                            })
+                            .collect::<Vec<_>>();
                         pricing.add_entry(Entry {
                             prefix: match_key(&e.id),
                             display: e.id,
                             name: e.name,
-                            // OpenRouter API 只暴露 prompt/completion 两价
-                            //（Task 7.4：缺价保留 None），缓存分项按未知
-                            // 处理（诚实于数据面，R05 → C5 解释）。
                             plan: PricePlan {
+                                basis: Some(PricingBasis::PromptTokens),
+                                application: Some(PricingApplication::WholeRequest),
                                 base: PriceRates {
                                     input: e.prompt.map(|v| v * 1_000_000.0),
                                     output: e.completion.map(|v| v * 1_000_000.0),
                                     cache_write: None,
                                     cache_read: None,
                                 },
-                                ..Default::default()
+                                segments,
                             },
                             tier: TIER_OPENROUTER,
                         });
@@ -1778,6 +1801,67 @@ mod tests {
             .estimate("prov/bad-seg", &counts(100_000, 0, 0, 0))
             .unwrap();
         assert!((est.cost - 100_000.0 * 1.0 / 1e6).abs() < 1e-9);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_pricing_openrouter_override() {
+        // Task 3：OpenRouter override 按 inclusive 下界命中——
+        // 271999 基础价，272000 即命中第一档，1000000 命中第二档。
+        use crate::openrouter::{Snapshot, SnapshotEntry, SnapshotOverride};
+        let dir = std::env::temp_dir().join(format!("tokenscope-por-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let snap = dir.join("pricing-openrouter.json");
+        let ov = |min: u64, prompt: &str, cr: Option<f64>| SnapshotOverride {
+            min_prompt_tokens: min,
+            prompt: Some(prompt.parse().unwrap()),
+            completion: Some(prompt.parse().unwrap()),
+            cache_read: cr,
+            cache_write: None,
+        };
+        let snapshot = Snapshot {
+            v: 2,
+            synced_at: "t".into(),
+            entries: vec![SnapshotEntry {
+                id: "prov/long".into(),
+                name: None,
+                prompt: Some(0.000004),
+                completion: Some(0.00002),
+                cache_read: None,
+                cache_write: None,
+                overrides: vec![
+                    ov(272_000, "0.000006", Some(0.0000006)),
+                    ov(1_000_000, "0.000008", None),
+                ],
+            }],
+        };
+        std::fs::write(&snap, serde_json::to_string(&snapshot).unwrap()).unwrap();
+        let (p, warnings) = Pricing::load(None, None, Some(&snap));
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+        // 271999 → 基础档（4 USD/Mtok）。
+        let est = p.estimate("prov/long", &counts(271_999, 0, 0, 0)).unwrap();
+        assert!((est.cost - 271_999.0 * 4.0 / 1e6).abs() < 1e-9);
+        // 272000 → 第一档（6 USD/Mtok，inclusive 下界）。
+        let est = p.estimate("prov/long", &counts(272_000, 0, 0, 0)).unwrap();
+        assert!((est.cost - 272_000.0 * 6.0 / 1e6).abs() < 1e-9);
+        // 999_999 → 仍第一档。
+        let est = p.estimate("prov/long", &counts(999_999, 0, 0, 0)).unwrap();
+        assert!((est.cost - 999_999.0 * 6.0 / 1e6).abs() < 1e-9);
+        // 1_000_000 → 第二档（8 USD/Mtok）；cache_read 第二档缺价 →
+        // unknown 不按 0（分项 token 为 0 时不影响完整性）。
+        let est = p
+            .estimate("prov/long", &counts(1_000_000, 0, 0, 0))
+            .unwrap();
+        assert!((est.cost - 1_000_000.0 * 8.0 / 1e6).abs() < 1e-9);
+        assert!(est.complete);
+        // 第二档带 cache_read token：第一档有价（0.6 USD/Mtok），第二档缺价
+        // → 部分 unknown。
+        let est = p
+            .estimate("prov/long", &counts(1_000_000, 0, 500, 0))
+            .unwrap();
+        assert!(!est.complete, "高档缺缓存读价 → 部分计价");
+        assert_eq!(est.unknown.cache_write, 500);
         std::fs::remove_dir_all(&dir).ok();
     }
 

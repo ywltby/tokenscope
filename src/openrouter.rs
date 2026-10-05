@@ -30,6 +30,44 @@ struct ApiPricing {
     input_cache_read: Option<String>,
     #[serde(default)]
     input_cache_write: Option<String>,
+    /// Task 3：条件价格覆盖（长上下文等）。时间条件条目（utc_start/utc_end）
+    /// 在 Task 4A 落地前跳过并留 warning，不猜测其适用条件。
+    #[serde(default)]
+    overrides: Vec<ApiOverride>,
+}
+
+/// 条件价格覆盖条目：价格字段内联（USD/token 串），条件字段可选。
+#[derive(Debug, Default, Deserialize)]
+struct ApiOverride {
+    #[serde(default)]
+    min_prompt_tokens: Option<f64>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    completion: Option<String>,
+    #[serde(default)]
+    input_cache_read: Option<String>,
+    #[serde(default)]
+    input_cache_write: Option<String>,
+    #[serde(default)]
+    utc_start: Option<String>,
+    #[serde(default)]
+    utc_end: Option<String>,
+}
+
+/// 快照中的条件价格档（Task 3）：USD/token 原单位，导入计价层 ×1e6。
+/// 上游语义：prompt tokens >= min_prompt_tokens 即命中（inclusive 下界）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotOverride {
+    pub min_prompt_tokens: u64,
+    #[serde(default)]
+    pub prompt: Option<f64>,
+    #[serde(default)]
+    pub completion: Option<f64>,
+    #[serde(default)]
+    pub cache_read: Option<f64>,
+    #[serde(default)]
+    pub cache_write: Option<f64>,
 }
 
 /// 快照条目：只保留计价所需字段（单位：USD / token）。
@@ -43,12 +81,23 @@ pub struct SnapshotEntry {
     pub completion: Option<f64>,
     pub cache_read: Option<f64>,
     pub cache_write: Option<f64>,
+    /// Task 3：条件价格档（升序、去重后）；v2 快照起写入，旧快照缺省为空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<SnapshotOverride>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// 快照格式版本：v2 起带条件价格档（overrides）；旧快照缺 v 字段
+    /// 按 v1 读取（仅基础价，兼容不伪造分段）。
+    #[serde(default = "default_snapshot_v1")]
+    pub v: u8,
     pub synced_at: String,
     pub entries: Vec<SnapshotEntry>,
+}
+
+fn default_snapshot_v1() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -112,6 +161,60 @@ pub(crate) fn sync_with(
     let mut entries: Vec<SnapshotEntry> = Vec::new();
     for m in body.data {
         let p = m.pricing.unwrap_or_default();
+        // Task 3：条件价格 overrides → 快照档（升序、同阈值去重、脏数据跳过）。
+        let mut overrides: Vec<SnapshotOverride> = Vec::new();
+        for o in &p.overrides {
+            let mut skip = |reason: String| {
+                warnings.push(format!("{}: override 已跳过: {reason}", m.id));
+            };
+            if o.utc_start.is_some() || o.utc_end.is_some() {
+                skip("含时间条件（utc_start/utc_end），暂不支持".into());
+                continue;
+            }
+            let Some(min) = o
+                .min_prompt_tokens
+                .filter(|v| v.is_finite() && *v >= 0.0 && v.fract() == 0.0)
+            else {
+                skip(format!(
+                    "min_prompt_tokens 非法或缺失: {:?}",
+                    o.min_prompt_tokens
+                ));
+                continue;
+            };
+            let rates = [
+                parse_price(&o.prompt),
+                parse_price(&o.completion),
+                parse_price(&o.input_cache_read),
+                parse_price(&o.input_cache_write),
+            ];
+            if let Some(Err(reason)) = rates.iter().find(|r| r.is_err()) {
+                skip(reason.clone());
+                continue;
+            }
+            let [prompt, completion, cache_read, cache_write] = rates.map(|r| r.unwrap());
+            overrides.push(SnapshotOverride {
+                min_prompt_tokens: min as u64,
+                prompt,
+                completion,
+                cache_read,
+                cache_write,
+            });
+        }
+        overrides.sort_by_key(|o| o.min_prompt_tokens);
+        let mut deduped: Vec<SnapshotOverride> = Vec::new();
+        for o in overrides {
+            if deduped
+                .last()
+                .is_some_and(|prev| prev.min_prompt_tokens == o.min_prompt_tokens)
+            {
+                warnings.push(format!(
+                    "{}: 重复 min_prompt_tokens {}，保留首个",
+                    m.id, o.min_prompt_tokens
+                ));
+                continue;
+            }
+            deduped.push(o);
+        }
         let parsed = (|| -> Result<SnapshotEntry, String> {
             Ok(SnapshotEntry {
                 id: m.id.clone(),
@@ -120,6 +223,7 @@ pub(crate) fn sync_with(
                 completion: parse_price(&p.completion)?,
                 cache_read: parse_price(&p.input_cache_read)?,
                 cache_write: parse_price(&p.input_cache_write)?,
+                overrides: deduped,
             })
         })();
         match parsed {
@@ -131,7 +235,7 @@ pub(crate) fn sync_with(
         }
     }
     for w in &warnings {
-        log::warn!("OpenRouter 同步拒绝脏条目: {w}");
+        log::warn!("OpenRouter 同步丢弃数据: {w}");
     }
     let _ = rejected;
     entries.sort_by(|a, b| a.id.cmp(&b.id));
@@ -140,6 +244,7 @@ pub(crate) fn sync_with(
     let synced_at = jiff::Zoned::now().to_string();
     let count = entries.len() as u64;
     let snapshot = Snapshot {
+        v: 2,
         synced_at: synced_at.clone(),
         entries,
     };
@@ -259,12 +364,57 @@ mod tests {
     }
 
     #[test]
+    fn test_openrouter_override() {
+        // Task 3：pricing.overrides（min_prompt_tokens 条件价）必须整组
+        // 保留到快照；乱序升序化，同阈值保留首个，脏数据跳过并留 warning。
+        let dir = std::env::temp_dir().join(format!("tokenscope-or-ov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pricing-openrouter.json");
+        let body = r#"{"data":[{
+            "id":"prov/long","name":"Long",
+            "pricing":{
+                "prompt":"0.000004","completion":"0.00002",
+                "overrides":[
+                    {"min_prompt_tokens":1000000,"prompt":"0.000008","completion":"0.00003",
+                     "input_cache_read":"0.0000008","input_cache_write":"0.00001"},
+                    {"min_prompt_tokens":272000,"prompt":"0.000006","completion":"0.000025",
+                     "input_cache_read":"","input_cache_write":null},
+                    {"min_prompt_tokens":272000,"prompt":"0.000099","completion":"0.000099"},
+                    {"min_prompt_tokens":150000,"prompt":"-0.000001","completion":"0.00001"},
+                    {"min_prompt_tokens":100000,"utc_start":"1630","utc_end":"1900",
+                     "prompt":"0.000001","completion":"0.000001"},
+                    {"prompt":"0.000005","completion":"0.000005"}
+                ]
+            }
+        }]}"#;
+        let report = sync_with(&path, || {
+            Ok(serde_json::from_str::<ApiResponse>(body).unwrap())
+        })
+        .unwrap();
+        assert_eq!(report.count, 1, "基础价干净 → 条目保留");
+        let snap = load_snapshot(&path).unwrap().unwrap();
+        let e = &snap.entries[0];
+        assert_eq!(e.overrides.len(), 2, "负价/时间条件/缺阈值/重复档被剔除");
+        // 乱序 → 升序；重复 272000 保留首个；空串/null = 未知。
+        assert_eq!(e.overrides[0].min_prompt_tokens, 272_000);
+        assert_eq!(e.overrides[0].prompt, Some(0.000006));
+        assert_eq!(e.overrides[0].cache_read, None, "空串 = 未知");
+        assert_eq!(e.overrides[0].cache_write, None, "null = 未知");
+        assert_eq!(e.overrides[1].min_prompt_tokens, 1_000_000);
+        assert_eq!(e.overrides[1].cache_read, Some(0.0000008));
+        assert_eq!(e.overrides[1].cache_write, Some(0.00001));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn test_openrouter_snapshot_roundtrip() {
         let dir = std::env::temp_dir().join(format!("tokenscope-m5-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = write_fixture(&dir);
         let snapshot = Snapshot {
+            v: 2,
             synced_at: "2026-10-04T00:00:00+08:00".into(),
             entries: vec![SnapshotEntry {
                 id: "x-ai/grok-4.5".into(),
@@ -273,6 +423,7 @@ mod tests {
                 completion: Some(6e-6),
                 cache_read: Some(3e-7),
                 cache_write: Some(0.0),
+                overrides: Vec::new(),
             }],
         };
         std::fs::write(&path, serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();
