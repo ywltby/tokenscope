@@ -150,8 +150,10 @@ pub fn load_snapshot(snapshot_path: &Path) -> Result<Option<Snapshot>> {
             "models.dev 快照为 v1 格式（缓存分项曾被 0 填充），按未知保守处理；重新同步后恢复精确"
         );
         for e in &mut snapshot.entries {
-            e.cache_read = None;
-            e.cache_write = None;
+            // 非零值是真实价格（price() 只把缺失键填 0），保留；
+            // 0 无法区分真免费与 0 填充 → 按未知保守处理。v2 严格区分。
+            e.cache_read = e.cache_read.filter(|v| *v != 0.0);
+            e.cache_write = e.cache_write.filter(|v| *v != 0.0);
         }
         snapshot.v = 2;
     }
@@ -233,6 +235,74 @@ mod tests {
             "volcengine/doubao-seed-2-0-pro-260215"
         );
         assert_eq!(loaded.v, 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_modelsdev_v1_preserves_nonzero_cache_prices() {
+        // Task 3：v1 的非零缓存价是真实数据（price() 只把缺失填 0），必须保留。
+        let dir = std::env::temp_dir().join(format!("tokenscope-t3-nz-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pricing-modelsdev.json");
+        std::fs::write(
+            &path,
+            r#"{"synced_at":"t","entries":[
+                {"id":"prov/x","name":null,"input":1.0,"output":2.0,"cache_read":0.09,"cache_write":3.75}
+            ]}"#,
+        )
+        .unwrap();
+        let loaded = load_snapshot(&path).unwrap().unwrap();
+        assert_eq!(
+            loaded.entries[0].cache_read,
+            Some(0.09),
+            "非零缓存读必须保留"
+        );
+        assert_eq!(
+            loaded.entries[0].cache_write,
+            Some(3.75),
+            "非零缓存写必须保留"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_modelsdev_v1_zero_cache_prices_become_unknown() {
+        // Task 3：v1 的 0 无法区分真免费与 0 填充 → 按未知保守处理。
+        let dir = std::env::temp_dir().join(format!("tokenscope-t3-z-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pricing-modelsdev.json");
+        std::fs::write(
+            &path,
+            r#"{"synced_at":"t","entries":[
+                {"id":"prov/x","name":null,"input":1.0,"output":2.0,"cache_read":0.0,"cache_write":0.0}
+            ]}"#,
+        )
+        .unwrap();
+        let loaded = load_snapshot(&path).unwrap().unwrap();
+        assert_eq!(loaded.entries[0].cache_read, None);
+        assert_eq!(loaded.entries[0].cache_write, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_modelsdev_v2_keeps_explicit_zero_prices() {
+        // Task 3：v2 严格区分——显式 Some(0.0) 是真免费，不降级。
+        let dir = std::env::temp_dir().join(format!("tokenscope-t3-v2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pricing-modelsdev.json");
+        std::fs::write(
+            &path,
+            r#"{"v":2,"synced_at":"t","entries":[
+                {"id":"prov/x","name":null,"input":1.0,"output":2.0,"cache_read":0.0,"cache_write":0.0}
+            ]}"#,
+        )
+        .unwrap();
+        let loaded = load_snapshot(&path).unwrap().unwrap();
+        assert_eq!(loaded.entries[0].cache_read, Some(0.0));
+        assert_eq!(loaded.entries[0].cache_write, Some(0.0));
         std::fs::remove_dir_all(&dir).ok();
     }
 
