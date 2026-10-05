@@ -1,7 +1,7 @@
 # TokenScope 产品与技术评估及改进计划
 
 - 创建日期：2026-10-05
-- 状态：**执行中**——**A、B、C 阶段已完成**（见文末执行记录），D 阶段待启动
+- 状态：**代码与自动化部分全部完成（A/B/C/D1–D4）**；D5 已备签字式验收清单并验证安装包构建，真机验收待用户执行（见文末执行记录）
 - 评估基线：`b79539a`，并复核评估期间新增的 `6fe5159`。下文代码行号以 `6fe5159` 为主，后续实施按符号重新定位。
 - 定位：面向个人开发者的本地、多 Agent 工具用量观察器；不是代理网关、计费系统或云端监控平台。
 - 适用范围：Claude Code、Codex；不改变其他 Agent 暂缓排期的既有决定。
@@ -323,6 +323,18 @@ CI/脚本应在每步失败时停止，不仅顺序执行命令；任何一步�
 | C1 来源目录配置/启停/重新检测 | settings 增加 AgentSources/SourceConfig（旧 settings.json 向前兼容）；summary/list_events 注入目录与启停；source_status 四态（ready/missing/empty/disabled）；source_config_set 命令；Settings.vue 数据来源卡（启停+目录+按行保存）；Dashboard 告警按四态呈现 | `f072fd5` |
 | C2 稳定项目身份 | Codex 项目身份改完整 cwd（test_project_same_basename_distinct：C:/work/alpha 与 D:/other/alpha 不再合并）；Claude 项目身份改相对根路径（真实 slug 布局行为不变、嵌套可分）；Group.label 展示名（表格首列/图表分类显末段，完整身份保留下钻匹配）；缓存 v3 自动失效 | `c6e57fb` |
 | C5 费用解释 UI | UsageTable 出现"未知†"列（按行未计价 token，全计价时隐藏）；脚注覆盖无价格模型与部分计价两种来源；设置页价格表来源行标注"不完整"（B3 incomplete）；排除项/读取失败已随 B4 来源统计可见 | `216686b` |
+
+### D 阶段：运行生命周期和可发布验收（D1–D4 ✅；D5 验收清单就绪，真机验收待用户，2026-10-05）
+
+| 任务 | 结果 | 提交 |
+| --- | --- | --- |
+| D1 合并并发采集 | 采集快照（不可变共享）+ 单飞协调：同参并发查询只采集一次（generation 可观测），领队 panic 不悬挂等待者；明细稳定游标分页 `before=ts|record_id` 不重不漏且 total 恒定；test_parallel_queries_single_collection / test_events_pagination_parity | `a9dde66` |
+| D2 价格索引诊断保持 | 进程缓存与索引快照都携带重建时警告，命中也可见降级状态（不变量 11）；版本不符索引自动重建；重启命中已于 B3 接通。test_pricing_warning_survives_cache_hit / test_pricing_version_invalidates_index | `bc69f45` |
+| D3 原子保存/离线安全 | fsutil::atomic_write（临时文件+fsync+同卷 rename）用于双快照；设置读取失败默认**离线**（R06 关闭意图不被重置联网）。test_atomic_snapshot_failure_keeps_old / test_sync_disabled_on_invalid_settings | `bc69f45` |
+| D4 主线程残余 IO | open_pricing_file 后台化（最后一个主线程磁盘 IO 命令）；test_filter_switch_no_reparse（CountingMock 验证筛选切换零重复解析） | `bc69f45` |
+| D5 发布验收 | [签字式验收清单](d5-acceptance-checklist.md)（构建/安装升级/桌面体验/真机抽查/隐私离线 五节）；`tauri build` 验证产出 `TokenScope_0.1.0_x64-setup.exe`（4.82 MiB）。**真机逐项验收待用户执行**——计划边界：不自动授权安装/发布 | `本次提交` |
+
+D 阶段说明：逐源重试的"独立性"为结构性保障（双源各自 match 包裹、单源失败不影响另一源，command 与自动线程两处一致），未做网络 mock 测试——列入 D5 真机 5.3/5.4 项验证。
 
 **C 阶段退出条件核对**：不读教程也能纠正数据目录（C1 四态 + 配置）✅；标签与实际查询一致（C3/C4）✅；用户知道何时更新、遗漏什么（B4 统计行 + C1 四态 + 来源采集统计折叠面板）✅；费用为何只是估算、未知在哪（C5 未知†列 + 脚注 + 设置页不完整标注）✅；主筛选/明细/快照不各自表达不同口径（C4 一致性检查）✅。剩余遗留：C4 的明细分页游标随 D1 采集快照一并交付（已在 D 阶段任务中）。
 
