@@ -39,6 +39,24 @@ let eventsSeq = 0;
 // 失败必须可见并可重试（计划 ipc_error_visible），不再无声吞异常。
 const summaryError = ref<string | null>(null);
 const eventsError = ref<string | null>(null);
+// C4（F08）：快照必须携带查询身份——修复前 report 与 events 来自各自
+// 的请求，保存时可能混搭不同筛选的两代数据，恢复时筛选已重置而数据
+// 还是旧口径。eventsKey 记录明细当前所属的筛选上下文，两者一致才落盘。
+type SnapshotFilters = {
+  by: Dim;
+  agent: AgentFilter;
+  range: [number, number] | null;
+  drill: EventDrill | null;
+  tz: string;
+};
+type SnapshotPayload = {
+  v: number;
+  saved_at: string;
+  filters: SnapshotFilters;
+  report: SummaryReport;
+  events: EventList;
+};
+const eventsKey = ref<SnapshotFilters | null>(null);
 // 启动提速（用户 2026-10-04）：先渲染上次视图快照，再后台刷新替换
 const stale = ref(false);
 const cachedAt = ref<string | null>(null);
@@ -78,14 +96,44 @@ async function refresh(): Promise<void> {
     if (seq !== summarySeq) return; // 已有更新的查询，丢弃旧响应
     report.value = fresh;
     stale.value = false;
-    void invoke("view_cache_save", {
-      value: { report: fresh, events: events.value, saved_at: new Date().toISOString() },
-    });
+    saveSnapshot();
   } catch (e) {
     if (seq === summarySeq) summaryError.value = e instanceof Error ? e.message : String(e);
   } finally {
     if (seq === summarySeq) loading.value = false;
   }
+}
+
+function currentFilters(): SnapshotFilters {
+  return {
+    by: by.value,
+    agent: agent.value,
+    range: range.value ? [...range.value] : null,
+    drill: drill.value ? { ...drill.value } : null,
+    tz: tz.value,
+  };
+}
+
+function saveSnapshot(): void {
+  if (!report.value || !events.value || !eventsKey.value) return;
+  // 明细与汇总的筛选上下文不一致（例如刚切换 agent、明细还是旧的）：
+  // 宁可保留上一份一致的快照，也不落盘混代数据。
+  const k = currentFilters();
+  const ek = eventsKey.value;
+  const coherent =
+    ek.agent === k.agent &&
+    ek.tz === k.tz &&
+    ek.range?.[0] === k.range?.[0] &&
+    ek.range?.[1] === k.range?.[1];
+  if (!coherent) return;
+  const payload: SnapshotPayload = {
+    v: 2,
+    saved_at: new Date().toISOString(),
+    filters: k,
+    report: report.value,
+    events: events.value,
+  };
+  void invoke("view_cache_save", { value: payload });
 }
 
 async function loadSources(): Promise<void> {
@@ -109,9 +157,8 @@ async function loadEvents(): Promise<void> {
     });
     if (seq !== eventsSeq) return;
     events.value = list;
-    void invoke("view_cache_save", {
-      value: { report: report.value, events: list, saved_at: new Date().toISOString() },
-    });
+    eventsKey.value = currentFilters();
+    saveSnapshot();
   } catch (e) {
     if (seq === eventsSeq) eventsError.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -121,17 +168,20 @@ async function loadEvents(): Promise<void> {
 
 async function loadViewCache(): Promise<void> {
   try {
-    const cached = await invoke<{
-      report: SummaryReport;
-      events: EventList;
-      saved_at: string;
-    } | null>("view_cache_load");
-    if (cached?.report && !report.value) {
-      report.value = cached.report;
-      events.value = cached.events;
-      cachedAt.value = cached.saved_at;
-      stale.value = true;
-    }
+    const cached = await invoke<SnapshotPayload | null>("view_cache_load");
+    // 只接受 v2 快照（携带查询身份）；旧格式/损坏一律走正常加载。
+    if (!cached || cached.v !== 2 || !cached.report || !cached.filters) return;
+    // 连同筛选一起恢复：数据与筛选必然同口径（保存时已做过一致性检查）。
+    by.value = cached.filters.by;
+    agent.value = cached.filters.agent;
+    range.value = cached.filters.range ? [...cached.filters.range] : null;
+    drill.value = cached.filters.drill ? { ...cached.filters.drill } : null;
+    tz.value = cached.filters.tz;
+    eventsKey.value = cached.filters;
+    report.value = cached.report;
+    events.value = cached.events;
+    cachedAt.value = cached.saved_at;
+    stale.value = true;
   } catch {
     // 视图缓存损坏：静默忽略，走正常加载
   }
@@ -156,6 +206,12 @@ function onSummaryRowClick(key: string): void {
 
 function clearDrill(): void {
   drill.value = null;
+}
+
+// C4：手动刷新——以当前筛选重跑两条查询，筛选状态不动。
+function manualRefresh(): void {
+  void refresh();
+  void loadEvents();
 }
 
 const drillLabel = (d: EventDrill): string => `${d.type}: ${d.key}`;
@@ -198,6 +254,7 @@ void loadSources();
           <NRadioButton v-for="o in dimOptions" :key="o.value" :value="o.value" :label="o.label" />
         </NRadioGroup>
         <DateRangeSelect v-model:value="range" />
+        <NButton size="small" secondary @click="manualRefresh">刷新</NButton>
       </div>
     </div>
     <!-- 失败可见并可重试（计划 A2）：保留已有数据展示，不整体灰罩 -->

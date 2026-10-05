@@ -185,3 +185,81 @@ describe("Dashboard 查询编排", () => {
     expect(state(w)["drill"]).toBeNull();
   });
 });
+
+describe("Dashboard 视图快照与刷新（C4/F08）", () => {
+  function snapshotPayload() {
+    return {
+      v: 2,
+      saved_at: "2026-10-05T00:00:00Z",
+      filters: {
+        by: "model",
+        agent: "claude",
+        range: null,
+        drill: { type: "model", key: "claude-sonnet-4-5" },
+        tz: "Asia/Shanghai",
+      },
+      report: summaryA,
+      events,
+    };
+  }
+
+  it("view_cache_query_mismatch：v2 快照连同筛选一起恢复，口径一致", async () => {
+    let resolveSummary!: (v: SummaryReport) => void;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") return Promise.resolve(snapshotPayload());
+      // 挂起后台刷新：先验证"缓存数据"展示态，再放行
+      if (cmd === "summarize") return new Promise((r) => (resolveSummary = r));
+      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    // 筛选被恢复（数据与口径必然一致）
+    expect(state(w)["agent"]).toBe("claude");
+    expect(state(w)["by"]).toBe("model");
+    expect((state(w)["drill"] as { key: string } | null)?.key).toBe("claude-sonnet-4-5");
+    // 数据以"缓存数据"过期标记展示，等待后台刷新
+    expect(state(w)["report"]).not.toBeNull();
+    expect(state(w)["stale"]).toBe(true);
+    expect(w.text()).toContain("缓存数据");
+    resolveSummary(summaryA);
+    await flushPromises();
+    // 后台刷新落地后过期标记清除
+    expect(state(w)["stale"]).toBe(false);
+  });
+
+  it("view_cache_query_mismatch：旧格式快照（无 v）不得当新数据展示", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load")
+        return Promise.resolve({ report: summaryA, events, saved_at: "x" });
+      if (cmd === "summarize") return Promise.resolve(summaryA);
+      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    // 旧快照整体忽略：数据来自新查询（stale 不被置位）
+    expect(state(w)["stale"]).toBe(false);
+  });
+
+  it("refresh_preserves_filters：手动刷新以当前筛选重跑且筛选不动", async () => {
+    mockOk();
+    const w = mountDashboard();
+    await flushPromises();
+    state(w)["agent"] = "claude";
+    await nextTick();
+    await flushPromises();
+    const calls = invokeMock.mock.calls.filter((c) => c[0] === "summarize");
+    const before = calls.length;
+    const refresh = w.findAll("button").find((b) => b.text() === "刷新");
+    expect(refresh).toBeDefined();
+    await refresh!.trigger("click");
+    await flushPromises();
+    const after = invokeMock.mock.calls.filter((c) => c[0] === "summarize");
+    expect(after.length).toBeGreaterThan(before);
+    expect(after.at(-1)![1]).toMatchObject({ agent: "claude" });
+    expect(state(w)["agent"]).toBe("claude");
+  });
+});
