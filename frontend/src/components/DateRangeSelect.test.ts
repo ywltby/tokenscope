@@ -90,6 +90,27 @@ describe("today_uses_selected_timezone（Task 6）", () => {
     expect(w.emitted("update:value")!.at(-1)![0]).toEqual(["2026-03-08", "2026-03-08"]);
   });
 
+  it("picker 负偏移 round-trip：选择毫秒值回传同一日历字符串", async () => {
+    // Task 4：NDatePicker 毫秒值只是 UI 桥接（UTC 零点锚）——确定后必须
+    // 回传同一日历字符串，不得被统计时区重新解释成另一天。
+    const w = mountRange(null, "Asia/Shanghai");
+    await open(w);
+    const pickers = w.findAll("input");
+    // NDatePicker 未打桩（真实组件），直接走 confirm 分支验证桥接：
+    // 用 fake now 的"今天"毫秒（上海 10-06 → UTC 零点锚 10-05T16:00Z）
+    // 等价于用户点选当天。
+    expect(pickers.length).toBeGreaterThan(0);
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "当天")!
+      .trigger("click");
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "确定")!
+      .trigger("click");
+    expect(w.emitted("update:value")!.at(-1)![0]).toEqual(["2026-10-06", "2026-10-06"]);
+  });
+
   it("快捷范围是日历字符串（近7天 = 今天减 6 个自然日）", async () => {
     const w = mountRange(null, "UTC");
     await open(w);

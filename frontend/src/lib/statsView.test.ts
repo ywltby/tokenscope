@@ -4,7 +4,7 @@ import { buildSourceLines, priceSourceLine } from "./statsView";
 import type { PricingEntry, SourceStat } from "../types";
 
 describe("priceSourceLine（pricing_match_source_visible）", () => {
-  it("完整条目只显示来源", () => {
+  it("完整条目只显示来源（Task 4 清理：不再有内置样例）", () => {
     const e = {
       prefix: "x",
       input: 1,
@@ -12,9 +12,9 @@ describe("priceSourceLine（pricing_match_source_visible）", () => {
       cache_write: 0,
       cache_read: 0,
       incomplete: false,
-      source: "内置",
+      source: "外置",
     } as PricingEntry;
-    expect(priceSourceLine(e)).toBe("来源：内置");
+    expect(priceSourceLine(e)).toBe("来源：外置");
   });
 
   it("来源标签三态（Task 4）：models.dev 与 OpenRouter 可区分且无内置", () => {
