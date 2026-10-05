@@ -323,20 +323,180 @@ struct ExternalFile {
     model: Vec<ExternalModel>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+/// Task 4：四类价格字段可选——区分"未填写"（None，沿用/未知）与显式 0（免费）。
+#[derive(Debug, Default, serde::Deserialize)]
 struct ExternalModel {
     prefix: String,
-    input: f64,
-    output: f64,
-    cache_write: f64,
-    cache_read: f64,
+    /// 计价依据：prompt_tokens（默认）| input_tokens | output_tokens |
+    /// total_tokens。当前版本只实现 prompt_tokens，其余显式拒绝（不静默
+    /// 改变计价含义）。
+    #[serde(default)]
+    basis: Option<String>,
+    /// 档位应用方式：whole_request（默认）。marginal 等留作将来扩展。
+    #[serde(default)]
+    application: Option<String>,
+    #[serde(default)]
+    input: Option<f64>,
+    #[serde(default)]
+    output: Option<f64>,
+    #[serde(default)]
+    cache_write: Option<f64>,
+    #[serde(default)]
+    cache_read: Option<f64>,
+    #[serde(default)]
+    segment: Vec<ExternalSegment>,
+    /// Task 4A：峰谷时间规则。Task 4 阶段仅解析——含时间规则的条目整条
+    /// 忽略并给出诊断，避免用户误以为自定义价格已生效。
+    #[serde(default)]
+    schedule: Vec<ExternalSchedule>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct ExternalSegment {
+    #[serde(default)]
+    label: Option<String>,
+    min_tokens: u64,
+    #[serde(default)]
+    max_tokens: Option<u64>,
+    #[serde(default)]
+    basis: Option<String>,
+    #[serde(default)]
+    application: Option<String>,
+    #[serde(default)]
+    input: Option<f64>,
+    #[serde(default)]
+    output: Option<f64>,
+    #[serde(default)]
+    cache_write: Option<f64>,
+    #[serde(default)]
+    cache_read: Option<f64>,
+}
+
+/// 峰谷时间规则（Task 4A 实现；Task 4 仅解析 + 拒绝含它的条目）。
+/// 字段暂未被读取——Task 4A 接入计价后移除 expect。
+#[expect(dead_code)]
+#[derive(Debug, Default, serde::Deserialize)]
+struct ExternalSchedule {
+    #[serde(default)]
+    label: Option<String>,
+    /// IANA 时区名（如 "Asia/Shanghai"）；缺省 = 事件本地时区。
+    #[serde(default)]
+    timezone: Option<String>,
+    #[serde(default)]
+    period: Vec<ExternalPeriod>,
+    /// 规则级价格覆盖（period 未给价时沿用）。
+    #[serde(default)]
+    input: Option<f64>,
+    #[serde(default)]
+    output: Option<f64>,
+    #[serde(default)]
+    cache_write: Option<f64>,
+    #[serde(default)]
+    cache_read: Option<f64>,
+    /// 规则内可选上下文分段（Task 4A）。
+    #[serde(default)]
+    segment: Vec<ExternalSegment>,
+}
+
+/// 一段时间窗口 + 价格覆盖（Task 4A 实现）。
+/// 字段暂未被读取——Task 4A 接入计价后移除 expect。
+#[expect(dead_code)]
+#[derive(Debug, Default, serde::Deserialize)]
+struct ExternalPeriod {
+    /// "HH:MM"（本地规则时区），左闭右开 [start, end)。
+    start_time: String,
+    end_time: String,
+    /// 可选星期限制（如 ["mon","tue"]）；缺省 = 每天。
+    #[serde(default)]
+    weekdays: Option<Vec<String>>,
+    #[serde(default)]
+    input: Option<f64>,
+    #[serde(default)]
+    output: Option<f64>,
+    #[serde(default)]
+    cache_write: Option<f64>,
+    #[serde(default)]
+    cache_read: Option<f64>,
+}
+
+/// 支持的计价依据/应用方式白名单（Task 4：未知值显式拒绝）。
+fn parse_external_basis(s: Option<&str>) -> Result<Option<PricingBasis>, String> {
+    match s {
+        None | Some("prompt_tokens") => Ok(Some(PricingBasis::PromptTokens)),
+        Some(other) => Err(format!(
+            "不支持的 basis: {other:?}（当前支持 prompt_tokens）"
+        )),
+    }
+}
+
+fn parse_external_application(s: Option<&str>) -> Result<Option<PricingApplication>, String> {
+    match s {
+        None | Some("whole_request") => Ok(Some(PricingApplication::WholeRequest)),
+        Some(other) => Err(format!(
+            "不支持的 application: {other:?}（当前支持 whole_request）"
+        )),
+    }
+}
+
+/// 外置条目 → PricePlan（Task 4）：四类价可选、分段走统一校验，
+/// 任何非法规则拒绝整条并给出诊断（不静默回退到基础价）。
+fn external_model_plan(m: &ExternalModel) -> Result<PricePlan, String> {
+    let basis = parse_external_basis(m.basis.as_deref())?;
+    let application = parse_external_application(m.application.as_deref())?;
+    let base = PriceRates {
+        input: m.input,
+        output: m.output,
+        cache_write: m.cache_write,
+        cache_read: m.cache_read,
+    };
+    let mut segments = Vec::with_capacity(m.segment.len());
+    for s in &m.segment {
+        // 分段级 basis/application 必须与条目一致（当前模型单一 basis）。
+        let seg_basis = parse_external_basis(s.basis.as_deref())?;
+        if seg_basis.is_some() && seg_basis != basis {
+            return Err(format!(
+                "分段 {} 的 basis 与条目不一致（{:?} vs {:?}）",
+                s.min_tokens, s.basis, m.basis
+            ));
+        }
+        let seg_application = parse_external_application(s.application.as_deref())?;
+        if seg_application.is_some() && seg_application != application {
+            return Err(format!(
+                "分段 {} 的 application 与条目不一致（{:?} vs {:?}）",
+                s.min_tokens, s.application, m.application
+            ));
+        }
+        segments.push(PriceSegment {
+            label: s.label.clone(),
+            min_tokens: s.min_tokens,
+            max_tokens: s.max_tokens,
+            prices: PriceRates {
+                input: s.input,
+                output: s.output,
+                cache_write: s.cache_write,
+                cache_read: s.cache_read,
+            },
+        });
+    }
+    let plan = PricePlan {
+        basis,
+        application,
+        base,
+        segments,
+    };
+    validate_price_plan(&plan)?;
+    Ok(plan)
 }
 
 /// 外置文件不存在时「创建模板」写入的内容。
 pub const PRICING_TEMPLATE: &str = r#"# TokenScope 外置价格表（USD / 百万 token）
-# 优先级：本文件 > models.dev（主源）> OpenRouter（补充源）；
-# 同前缀覆盖，最长前缀匹配。未收录模型按未知价格处理（不猜测）。
-# 模型前缀支持 vendor 写法（会归一化）；修改保存后下一次统计即生效。
+# 优先级：本文件 > models.dev（主源）> OpenRouter（补充源）。
+# 同名模型多渠道并存时，按本次请求的 prompt token 等条件逐候选计价取
+# 最高费用（保守估算）。未收录模型按未知价格处理（不猜测）。
+# 模型键支持 vendor 写法（匹配取最后一个 / 之后的模型名）；修改保存后
+# 下一次统计即生效。
+#
+# 基础价格（四类字段均可选：缺省 = 沿用/未知；显式 0 = 免费）：
 
 [[model]]
 prefix = "claude-opus-5"
@@ -344,6 +504,17 @@ input = 5.0
 output = 25.0
 cache_write = 6.25
 cache_read = 0.5
+
+# 上下文分段（可选）：[min_tokens, max_tokens) 左闭右开，末档不写
+# max_tokens 表示无上限。分段缺某类价格时沿用基础价。
+
+# [[model.segment]]
+# label = ">272K"
+# min_tokens = 272001
+# input = 8.0
+# output = 30.0
+# cache_write = 10.0
+# cache_read = 0.8
 "#;
 
 /// 拆出变体后缀：`"hy3:free"` → `("hy3", Some("free"))`；无变体 → `("hy3", None)`。
@@ -736,23 +907,26 @@ impl Pricing {
                 }
             };
             for m in parsed.model {
-                pricing.add_entry(Entry {
-                    prefix: match_key(&m.prefix),
-                    display: m.prefix,
-                    name: None,
-                    // 外置文件四键俱全（模板即如此）；缺键=serde 默认 0，
-                    // 即用户显式声明 0（区别于快照缺键的"未知"）。
-                    plan: PricePlan {
-                        base: PriceRates {
-                            input: Some(m.input),
-                            output: Some(m.output),
-                            cache_write: Some(m.cache_write),
-                            cache_read: Some(m.cache_read),
-                        },
-                        ..Default::default()
-                    },
-                    tier: TIER_EXTERNAL,
-                });
+                // Task 4A 前置：含时间规则的条目整条忽略（解析结构已就绪，
+                // 计价语义在 Task 4A 落地），不得静默按基础价计价。
+                if !m.schedule.is_empty() {
+                    warnings.push(format!(
+                        "外置条目 {} 含时间规则（schedule），当前版本尚未支持，整条已忽略",
+                        m.prefix
+                    ));
+                    continue;
+                }
+                let display = m.prefix.clone();
+                match external_model_plan(&m) {
+                    Ok(plan) => pricing.add_entry(Entry {
+                        prefix: match_key(&m.prefix),
+                        display,
+                        name: None,
+                        plan,
+                        tier: TIER_EXTERNAL,
+                    }),
+                    Err(err) => warnings.push(format!("外置条目 {display} 已忽略: {err}")),
+                }
             }
         }
 
@@ -2125,6 +2299,135 @@ mod tests {
         // 纯价格数学：桶值直接给定（不经适配器）。
         // Task 4 校正后：800*4 + 100*20 + 50*5.0(写) + 200*0.4(读)。
         assert!((est.cost - 5530.0 / 1_000_000.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_pricing_external_segment() {
+        // Task 4：外置 TOML 分段语法。合法条目带分段生效；非法 basis、负价、
+        // 重叠区间、空洞（未封尾）与未支持的时间规则各自给出诊断且不影响
+        // 同文件其他条目。
+        let dir = std::env::temp_dir().join(format!("tokenscope-ext-seg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = write(
+            &dir,
+            "pricing.toml",
+            r#"
+[[model]]
+prefix = "gpt-5.6"
+basis = "prompt_tokens"
+application = "whole_request"
+input = 4.0
+output = 20.0
+cache_write = 5.0
+cache_read = 0.4
+
+[[model.segment]]
+label = ">272K"
+min_tokens = 272001
+input = 8.0
+output = 30.0
+cache_write = 10.0
+cache_read = 0.8
+
+[[model]]
+prefix = "bad-basis"
+basis = "audio_seconds"
+input = 1.0
+output = 1.0
+cache_write = 0.0
+cache_read = 0.0
+
+[[model]]
+prefix = "neg-price"
+input = -1.0
+output = 1.0
+cache_write = 0.0
+cache_read = 0.0
+
+[[model]]
+prefix = "overlap-seg"
+input = 1.0
+output = 1.0
+cache_write = 0.0
+cache_read = 0.0
+
+[[model.segment]]
+min_tokens = 100000
+max_tokens = 200000
+input = 2.0
+output = 2.0
+cache_write = 0.0
+cache_read = 0.0
+
+[[model.segment]]
+min_tokens = 150000
+input = 3.0
+output = 3.0
+cache_write = 0.0
+cache_read = 0.0
+
+[[model]]
+prefix = "gap-seg"
+input = 1.0
+output = 1.0
+cache_write = 0.0
+cache_read = 0.0
+
+[[model.segment]]
+min_tokens = 100000
+max_tokens = 200000
+input = 2.0
+output = 2.0
+cache_write = 0.0
+cache_read = 0.0
+
+[[model.segment]]
+min_tokens = 300000
+input = 3.0
+output = 3.0
+cache_write = 0.0
+cache_read = 0.0
+
+[[model]]
+prefix = "with-schedule"
+input = 1.0
+output = 1.0
+cache_write = 0.0
+cache_read = 0.0
+
+[[model.schedule]]
+timezone = "Asia/Shanghai"
+
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "08:00"
+input = 0.5
+output = 0.5
+cache_write = 0.0
+cache_read = 0.0
+"#,
+        );
+        let (p, warnings) = Pricing::load(Some(&path), None, None);
+        assert_eq!(warnings.len(), 5, "warnings: {warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("bad-basis")));
+        assert!(warnings.iter().any(|w| w.contains("neg-price")));
+        assert!(warnings.iter().any(|w| w.contains("overlap-seg")));
+        assert!(warnings.iter().any(|w| w.contains("gap-seg")));
+        assert!(warnings.iter().any(|w| w.contains("with-schedule")));
+        // 非法条目不得静默生效。
+        assert!(p.lookup("bad-basis").is_none());
+        assert!(p.lookup("neg-price").is_none());
+        assert!(p.lookup("overlap-seg").is_none());
+        assert!(p.lookup("gap-seg").is_none());
+        assert!(p.lookup("with-schedule").is_none());
+        // 合法条目带分段生效：272000 基础档、272001 高档。
+        let est = p.estimate("gpt-5.6", &counts(272_000, 0, 0, 0)).unwrap();
+        assert!((est.cost - 272_000.0 * 4.0 / 1e6).abs() < 1e-9);
+        let est = p.estimate("gpt-5.6", &counts(272_001, 0, 0, 0)).unwrap();
+        assert!((est.cost - 272_001.0 * 8.0 / 1e6).abs() < 1e-9);
+        let m = est.matched.as_ref().unwrap();
+        assert_eq!(m.source, "external");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
