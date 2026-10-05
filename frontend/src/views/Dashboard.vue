@@ -18,6 +18,7 @@ import EventTable from "../components/EventTable.vue";
 import AgentIcon from "../components/AgentIcon.vue";
 import DateRangeSelect from "../components/DateRangeSelect.vue";
 import { useTimezone } from "../composables/timezone";
+import { tzDate } from "../lib/dates";
 
 const props = defineProps<{ refreshKey: number }>();
 
@@ -49,12 +50,10 @@ const dimOptions: { label: string; value: Dim }[] = [
   { label: "按应用", value: "agent" },
 ];
 
-/// 区间毫秒 → 解析时区下的 YYYY-MM-DD（local 用本地格式化；固定偏移时区
-/// 按偏移折算，Asia/Shanghai +8 无夏令时）
+/// 区间毫秒 → 解析时区下的 YYYY-MM-DD（C3：Intl 按所选时区当日实际偏移，
+/// DST 正确；修复前非 UTC 一律按 +8 折算）。
 function fmtDate(ms: number): string {
-  if (tz.value === "local") return new Date(ms).toLocaleDateString("sv-SE");
-  const offsetH = tz.value === "UTC" ? 0 : 8;
-  return new Date(ms + offsetH * 3600e3).toISOString().slice(0, 10);
+  return tzDate(ms, tz.value);
 }
 
 const agentOptions: { label: string; value: AgentFilter; icon: string }[] = [

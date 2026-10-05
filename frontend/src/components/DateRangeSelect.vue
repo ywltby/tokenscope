@@ -3,10 +3,13 @@ import { computed, ref, watch } from "vue";
 import { NButton, NCheckbox, NDatePicker, NPopover } from "naive-ui";
 
 /**
- * ccs 风格的日期区间选择（M10）：
- * 触发器显示当前选择；面板内为快捷条（当天/7d/14d/30d）+ 起止日期
- * + 「结束日跟随今天」+ 取消/确定。日期粒度（存储/过滤均为自然日，
- * 时区换算由 Dashboard 按解析时区完成），故未含 ccs 的时分列。
+ * ccs 风格的日期区间选择（M10；C3 修复 F07）：
+ * - 弹层受控（:show 双向绑定）——修复前 show 未绑定，取消/确定关不掉、
+ *   打开时的草稿同步 watch 永不触发；
+ * - 「清除」显式入口（修复前清空起始日后确定被禁用，"全部时间"不可达）；
+ * - 快捷条全部按自然日口径命名（原 "24h" 实为昨天+今天两个自然日，更名
+ *   "近2天"，不与滚动小时窗口混称）；
+ * 日期粒度（存储/过滤均为自然日，换算由 Dashboard 按解析时区完成）。
  */
 const props = defineProps<{ value: [number, number] | null }>();
 const emit = defineEmits<{ (e: "update:value", v: [number, number] | null): void }>();
@@ -16,7 +19,6 @@ const show = ref(false);
 const draftFrom = ref<number | null>(null);
 const draftTo = ref<number | null>(null);
 const followToday = ref(false);
-const label = ref("全部时间");
 
 function todayStart(): number {
   const d = new Date();
@@ -26,10 +28,11 @@ function todayStart(): number {
 
 const shortcuts: { label: string; range: () => [number, number] }[] = [
   { label: "当天", range: () => [todayStart(), todayStart() + DAY - 1] },
-  { label: "24h", range: () => [todayStart() - DAY, todayStart() + DAY - 1] },
-  { label: "7d", range: () => [todayStart() - 6 * DAY, todayStart() + DAY - 1] },
-  { label: "14d", range: () => [todayStart() - 13 * DAY, todayStart() + DAY - 1] },
-  { label: "30d", range: () => [todayStart() - 29 * DAY, todayStart() + DAY - 1] },
+  // 自然日口径：昨天 + 今天两个自然日（后端过滤为自然日闭区间）。
+  { label: "近2天", range: () => [todayStart() - DAY, todayStart() + DAY - 1] },
+  { label: "近7天", range: () => [todayStart() - 6 * DAY, todayStart() + DAY - 1] },
+  { label: "近14天", range: () => [todayStart() - 13 * DAY, todayStart() + DAY - 1] },
+  { label: "近30天", range: () => [todayStart() - 29 * DAY, todayStart() + DAY - 1] },
 ];
 
 function applyShortcut(sc: { label: string; range: () => [number, number] }): void {
@@ -44,6 +47,7 @@ function fmtShort(ms: number): string {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
+// 受控开关：打开时草稿同步自当前值；取消/确定经 show 关闭。
 watch(show, (open) => {
   if (!open) return;
   if (props.value) {
@@ -61,23 +65,32 @@ watch(show, (open) => {
 function confirm(): void {
   if (draftFrom.value == null) {
     emit("update:value", null);
-    label.value = "全部时间";
   } else if (followToday.value) {
     // 结束日跟随今天：自然日粒度下等价于"从起始日至今（含未来）"
     emit("update:value", [draftFrom.value, todayStart() + DAY - 1]);
-    label.value = `${fmtShort(draftFrom.value)} ~ 今天`;
   } else if (draftTo.value == null) {
     emit("update:value", [draftFrom.value, draftFrom.value]);
-    label.value = fmtShort(draftFrom.value);
   } else {
     emit("update:value", [draftFrom.value, draftTo.value]);
-    label.value =
-      fmtShort(draftFrom.value) === fmtShort(draftTo.value)
-        ? fmtShort(draftFrom.value)
-        : `${fmtShort(draftFrom.value)} ~ ${fmtShort(draftTo.value)}`;
   }
   show.value = false;
 }
+
+function clear(): void {
+  draftFrom.value = null;
+  draftTo.value = null;
+  followToday.value = false;
+}
+
+// 触发器标签从 props 派生（修复前是 ref，只在 confirm 更新，外部重置会失同步）。
+const label = computed<string>(() => {
+  const v = props.value;
+  if (!v) return "全部时间";
+  if (v[1] >= todayStart() && v[0] < todayStart()) return `${fmtShort(v[0])} ~ 今天`;
+  return fmtShort(v[0]) === fmtShort(v[1])
+    ? fmtShort(v[0])
+    : `${fmtShort(v[0])} ~ ${fmtShort(v[1])}`;
+});
 
 const panelStyle = { width: "300px", padding: "12px" };
 const shortcutActive = (sc: { range: () => [number, number] }): boolean => {
@@ -85,11 +98,16 @@ const shortcutActive = (sc: { range: () => [number, number] }): boolean => {
   const [from, to] = sc.range();
   return draftFrom.value === from && draftTo.value === to;
 };
-const hasDraft = computed(() => draftFrom.value != null);
 </script>
 
 <template>
-  <NPopover trigger="click" :show-arrow="false" placement="bottom-start">
+  <NPopover
+    trigger="click"
+    :show="show"
+    :show-arrow="false"
+    placement="bottom-start"
+    @update:show="show = $event"
+  >
     <template #trigger>
       <NButton size="small" secondary>
         <span style="margin-right: 4px">📅</span>{{ label }}
@@ -121,9 +139,16 @@ const hasDraft = computed(() => draftFrom.value != null);
       <div style="margin-top: 8px">
         <NCheckbox v-model:checked="followToday">结束日跟随今天</NCheckbox>
       </div>
-      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px">
-        <NButton size="small" @click="show = false">取消</NButton>
-        <NButton size="small" type="primary" :disabled="!hasDraft" @click="confirm">确定</NButton>
+      <div style="display: flex; justify-content: space-between; margin-top: 14px">
+        <!-- 清除入口（F07）：一键回"全部时间"，确定时提交 null -->
+        <NButton v-if="draftFrom != null || draftTo != null" size="small" quaternary @click="clear">
+          清除
+        </NButton>
+        <span v-else></span>
+        <span style="display: inline-flex; gap: 8px">
+          <NButton size="small" @click="show = false">取消</NButton>
+          <NButton size="small" type="primary" @click="confirm">确定</NButton>
+        </span>
       </div>
     </div>
   </NPopover>
