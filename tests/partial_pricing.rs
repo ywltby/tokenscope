@@ -74,7 +74,9 @@ fn test_partial_cost_totals() {
     // 07-18 组：gpt-5.6-sol 走快照层（缺 cache 键 → 部分计价，†）已知部分
     // 20/1M；gpt-5.5（115/1M）与 gpt-5.4（950/1M）由内置层完整兜底。
     let d2 = r.groups.iter().find(|g| g.key == "2026-07-18").unwrap();
-    assert!(d2.unknown_pricing, "快照缺 cache 键 = 部分计价");
+    // Task 5：e2 的未知分项（快照缺 cache 价）token 为 0 → 不再标记部分计价；
+    // e4/e6 走内置层完整价。test_partial_unknown_tokens_are_reported_without_zero_mark。
+    assert!(!d2.unknown_pricing, "零 token 未知分项不得打 †");
     assert!(
         (d2.cost_usd - 1091.0 / 1_000_000.0).abs() < 1e-9,
         "d2.cost={}",

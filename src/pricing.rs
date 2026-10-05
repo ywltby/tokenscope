@@ -511,10 +511,13 @@ impl Pricing {
         };
         let mut line = |price: Option<f64>, tokens: u64, unknown: &mut u64| match price {
             Some(p) => est.cost += tokens as f64 * p,
-            None => {
+            // Task 5：未知分项仅在实际产生 token 时才标记不完整——
+            // 零 token 的未知分项不影响完整性（不变量 5）。
+            None if tokens > 0 => {
                 est.complete = false;
                 *unknown += tokens;
             }
+            None => {}
         };
         line(p.input, t.input, &mut est.unknown.input);
         line(p.output, t.output, &mut est.unknown.output);
@@ -930,6 +933,61 @@ mod tests {
         std::fs::write(&idx, serde_json::to_string(&index).unwrap()).unwrap();
         let (_, _, hit) = Pricing::load_cached(None, None, None, &idx);
         assert!(!hit, "版本不符必须重建");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Task 5 fixture：partial 模型（input/output 有价，cache 分项未知）。
+    fn partial_pricing_fixture(dir: &std::path::Path) -> Pricing {
+        use crate::modelsdev::{Snapshot, SnapshotEntry};
+        let snap = dir.join("pricing-modelsdev.json");
+        let snapshot = Snapshot {
+            v: 2,
+            synced_at: "t".into(),
+            entries: vec![SnapshotEntry {
+                id: "prov/partial".into(),
+                name: None,
+                input: Some(1.0),
+                output: Some(2.0),
+                cache_read: None,
+                cache_write: None,
+            }],
+        };
+        std::fs::write(&snap, serde_json::to_string(&snapshot).unwrap()).unwrap();
+        let (p, w) = Pricing::load(None, Some(&snap), None);
+        assert!(w.is_empty());
+        p
+    }
+
+    #[test]
+    fn test_zero_token_unknown_price_is_complete() {
+        // Task 5（P1）：未知分项 token 为 0 时不得标记不完整——
+        // 修复前 cw/cr 缺价 + 0 用量也会打 † 。
+        let dir = std::env::temp_dir().join(format!("tokenscope-t5-z-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = partial_pricing_fixture(&dir);
+        let est = p
+            .estimate("prov/partial", &counts(1_000_000, 1_000_000, 0, 0))
+            .unwrap();
+        assert!(est.complete, "零 token 的未知分项不影响完整性: {est:?}");
+        assert_eq!(est.unknown.total(), 0);
+        assert!((est.cost - 3.0).abs() < 1e-9);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_positive_token_unknown_price_is_partial() {
+        let dir = std::env::temp_dir().join(format!("tokenscope-t5-p-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = partial_pricing_fixture(&dir);
+        let est = p
+            .estimate("prov/partial", &counts(1_000_000, 1_000_000, 500, 700))
+            .unwrap();
+        assert!(!est.complete, "正 token 的未知分项必须标记部分计价");
+        assert_eq!(est.unknown.cache_write, 500);
+        assert_eq!(est.unknown.cache_read, 700);
+        assert!((est.cost - 3.0).abs() < 1e-9, "费用仅含已计价部分");
         std::fs::remove_dir_all(&dir).ok();
     }
 
