@@ -393,18 +393,27 @@ fn collect_flighted_with(
 pub(crate) fn normalize_path(p: &std::path::Path) -> PathBuf {
     match p.canonicalize() {
         Ok(c) => c,
+        // Task 2（审阅）：fallback 折叠 `.`、`..` 与空组件——`a\..\shared`
+        // 与 `a\shared` 规范化到同一路径（目录不存在时 canonicalize 失败）。
         Err(_) => {
             let abs = if p.is_absolute() {
                 p.to_path_buf()
             } else {
                 std::env::current_dir().unwrap_or_default().join(p)
             };
-            let mut out = PathBuf::new();
+            let mut stack: Vec<std::ffi::OsString> = Vec::new();
             for comp in abs.components() {
                 match comp {
                     std::path::Component::CurDir => {}
-                    other => out.push(other.as_os_str()),
+                    std::path::Component::ParentDir => {
+                        stack.pop();
+                    }
+                    other => stack.push(other.as_os_str().to_os_string()),
                 }
+            }
+            let mut out = PathBuf::new();
+            for s in stack {
+                out.push(s);
             }
             out
         }
@@ -417,9 +426,6 @@ fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSna
         None => vec![AgentKind::ClaudeCode, AgentKind::Codex],
     };
     let mut sources: Vec<Box<dyn Source>> = Vec::new();
-    // Task 2：跨 agent 已见的规范化文件路径——同一文件最多进入一次统计。
-    let mut seen_files: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    let mut overlap_warned = false;
     for kind in kinds {
         if !opts.enabled(kind == AgentKind::ClaudeCode) {
             continue; // C1：停用的来源零采集、零告警，状态由 source_status 呈现
@@ -430,33 +436,7 @@ fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSna
         };
         sources.push(make_source(kind, dir)?);
     }
-    let collected = {
-        // 防御性去重：包装每个 source 的 discover 结果，剔除跨 agent 已见
-        // 的规范化文件路径（旧配置/符号链接/外部改动仍被保护）。
-        let mut wrapped: Vec<Box<dyn Source>> = Vec::new();
-        for src in sources {
-            let (files, errors) = src.discover_with_errors();
-            let mut keep = Vec::new();
-            for f in files {
-                let norm = normalize_path(&f);
-                if seen_files.insert(norm.clone()) {
-                    keep.push(f);
-                } else if !overlap_warned {
-                    overlap_warned = true;
-                    log::warn!(
-                        "来源目录重叠：{} 同时被多个 agent 扫描，重复文件只统计一次",
-                        norm.display()
-                    );
-                }
-            }
-            wrapped.push(Box::new(DedupSource {
-                inner: src,
-                keep,
-                errors,
-            }) as Box<dyn Source>);
-        }
-        collect_all_with_sources(wrapped, opts, generation)?
-    };
+    let collected = collect_all_with_sources(sources, opts, generation)?;
     Ok(CollectionSnapshot {
         generation: collected.generation,
         events: collected.events,
@@ -483,11 +463,69 @@ fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
 #[cfg(test)]
 static TEST_COLLECT_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 
+/// Task 2（审阅）：跨 agent 来源重叠去重——同一规范化文件（大小写不敏感
+/// 比较键）只保留先扫描者，并返回可诊断 warning（进 Collected.warnings
+/// 而非只写日志）。原始路径保留用于文件 IO。
+fn dedup_source_overlap(sources: Vec<Box<dyn Source>>) -> (Vec<Box<dyn Source>>, Vec<String>) {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut wrapped: Vec<Box<dyn Source>> = Vec::new();
+    for src in sources {
+        let (files, errors) = src.discover_with_errors();
+        let mut keep = Vec::new();
+        for f in files {
+            let norm = normalize_path(&f);
+            let key = norm.to_string_lossy().to_lowercase();
+            if seen.insert(key) {
+                keep.push(f);
+            } else {
+                let w = format!(
+                    "来源目录重叠：{} 同时被多个 agent 扫描，重复文件只统计一次",
+                    norm.display()
+                );
+                if !warnings.contains(&w) {
+                    warnings.push(w.clone());
+                }
+                log::warn!("{w}");
+            }
+        }
+        wrapped.push(Box::new(DedupSource {
+            inner: src,
+            keep,
+            errors,
+        }));
+    }
+    (wrapped, warnings)
+}
+
+/// 供集成测试注入 mock source（Task 2）。
+#[doc(hidden)]
+pub struct CollectedView {
+    pub events: Vec<UsageEvent>,
+    pub warnings: Vec<String>,
+}
+
+/// 供集成测试注入 mock source（Task 2）——走与生产完全相同的重叠去重。
+#[doc(hidden)]
+pub fn collect_all_with_sources_for_test(
+    sources: Vec<Box<dyn Source>>,
+    opts: &SummaryOptions,
+) -> Result<CollectedView> {
+    let c = collect_all_with_sources(sources, opts, 0)?;
+    Ok(CollectedView {
+        events: c.events,
+        warnings: c.warnings,
+    })
+}
+
 fn collect_all_with_sources(
     sources: Vec<Box<dyn Source>>,
     opts: &SummaryOptions,
     generation: u64,
 ) -> Result<Collected> {
+    // Task 2（审阅）：跨 agent 来源重叠去重——同文件只统计一次，
+    // 重叠诊断进 Collected.warnings（而非只写日志）。
+    let (sources, mut overlap_warnings) = dedup_source_overlap(sources);
     let t_total = std::time::Instant::now();
     let pricing_path = pricing_file_path(opts.pricing_path.as_ref());
     let openrouter_path = openrouter_file_path(opts.openrouter_path.as_ref());
@@ -512,6 +550,7 @@ fn collect_all_with_sources(
     );
     let (cache, mut cache_warnings) = open_cache(opts);
     warnings.append(&mut cache_warnings);
+    warnings.append(&mut overlap_warnings);
     #[cfg(test)]
     {
         let d = TEST_COLLECT_DELAY_MS.load(Ordering::Relaxed);

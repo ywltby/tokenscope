@@ -159,6 +159,17 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_no_overlap_parent_and_case_aliases() {
+        // Task 2（审阅）：`..` 组件折叠 + 大小写不敏感——等价目录必须识别。
+        // 注意：validate 不触达文件系统（保存前校验），走 fallback 规范化。
+        assert!(validate_no_overlap(Some(r"a\b\..\shared"), Some(r"a\shared")).is_err());
+        assert!(validate_no_overlap(Some("C:/Shared/Logs"), Some("c:/shared/logs")).is_err());
+        assert!(validate_no_overlap(Some("a/shared/"), Some("a/shared")).is_err());
+        // 不同目录不误报。
+        assert!(validate_no_overlap(Some("a/one"), Some("a/two")).is_ok());
+    }
+
+    #[test]
     fn test_sync_disabled_on_invalid_settings() {
         // D3：设置损坏 → 自动同步按离线处理，不悄悄恢复联网。
         assert!(auto_sync_allowed(&Ok(Settings::default())));
