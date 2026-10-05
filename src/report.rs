@@ -736,20 +736,50 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
         events.retain(|e| &e.project == pr);
     }
     events.sort_by(|a, b| b.ts.cmp(&a.ts).then(b.record_id.cmp(&a.record_id)));
+    // Task 1：为相同 (ts, record_id) 的事件分配确定性组内序号（稳定排序后
+    // 按位编号）——完全相同 timestamp + 空 record_id 不再共享游标。
+    let mut tie: Vec<u64> = Vec::with_capacity(events.len());
+    let mut prev: Option<(&jiff::Timestamp, &str)> = None;
+    let mut seq: u64 = 0;
+    for e in &events {
+        let same = prev.is_some_and(|(pts, prid)| *pts == e.ts && prid == e.record_id);
+        seq = if same { seq + 1 } else { 0 };
+        tie.push(seq);
+        prev = Some((&e.ts, e.record_id.as_str()));
+    }
+    // 每行的游标 = serde_json 序列化的不透明串（完整精度 ts + rid + seq），
+    // record_id 含分隔符也不会破坏解析。
+    let mut rows: Vec<(UsageEvent, u64, String)> = events
+        .into_iter()
+        .zip(tie)
+        .map(|(e, s)| {
+            let cursor = serde_json::to_string(&PageCursor {
+                ts: e.ts.to_string(),
+                rid: e.record_id.clone(),
+                seq: s,
+            })
+            .unwrap_or_default();
+            (e, s, cursor)
+        })
+        .collect();
     // D1：total = 主过滤 + 下钻后的全量（不含游标截断），翻页时恒定。
-    let total = events.len() as u64;
-    // Task 2：游标为完整精度 UTC 时间戳 + record_id 的不透明串，
-    // (ts, record_id) 元组严格小于上一页末行，不重不漏（同秒亚秒不丢行）。
+    let total = rows.len() as u64;
+    // 游标过滤：排序为 ts/rid 降序、组内 seq 升序——下一页 = 排序位次
+    // 严格位于游标之后的事件（ts 更小；同 ts 且 rid 更小；同 ts 同 rid
+    // 且组内序号更大）。
     if let Some(cur) = &filter.before {
-        let (cur_ts, rid) = parse_cursor(cur)?;
-        let cur = (cur_ts, rid);
-        events.retain(|e| (e.ts, e.record_id.clone()) < cur);
+        let (cur_ts, cur_rid, cur_seq) = parse_cursor(cur)?;
+        rows.retain(|(e, s, _)| {
+            e.ts < cur_ts
+                || (e.ts == cur_ts
+                    && (e.record_id < cur_rid || (e.record_id == cur_rid && *s > cur_seq)))
+        });
     }
     let limit = filter.limit.unwrap_or(200).min(1000);
-    let rows: Vec<EventRow> = events
+    let rows: Vec<EventRow> = rows
         .into_iter()
         .take(limit)
-        .map(|e| {
+        .map(|(e, _s, cursor)| {
             // B3：部分计价模型的明细行展示已计价小计（unknown 分项随总计披露）。
             let cost_usd = pricing
                 .estimate(&e.model, &TokenCounts::from_event(&e))
@@ -757,7 +787,7 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
             EventRow {
                 ts: e.ts.to_zoned(tz.clone()).strftime("%F %T").to_string(),
                 record_id: e.record_id.clone(),
-                cursor: format!("{}|{}", e.ts, e.record_id),
+                cursor,
                 agent: e.agent.as_str(),
                 model: e.model,
                 session_id: e.session_id,
@@ -821,16 +851,23 @@ fn apply_time_filter(
     Ok(events)
 }
 
-/// 游标格式 "完整精度UTC时间戳|record_id"（EventRow.cursor 原样回传）。
-fn parse_cursor(s: &str) -> Result<(jiff::Timestamp, String)> {
-    let (ts, rid) = s
-        .split_once('|')
-        .ok_or_else(|| anyhow::anyhow!("游标格式应为 ts|record_id: {s:?}"))?;
-    Ok((
-        ts.parse()
-            .map_err(|e| anyhow::anyhow!("游标时间戳非法: {e}"))?,
-        rid.to_string(),
-    ))
+/// Task 1：不透明游标（serde_json 序列化）——缺字段、非法时间戳、
+/// 未知字段一律拒绝，record_id 中的分隔符不再破坏解析。
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PageCursor {
+    ts: String,
+    rid: String,
+    seq: u64,
+}
+
+fn parse_cursor(s: &str) -> Result<(jiff::Timestamp, String, u64)> {
+    let c: PageCursor =
+        serde_json::from_str(s).map_err(|e| anyhow::anyhow!("游标格式非法: {e}"))?;
+    let ts: jiff::Timestamp =
+        c.ts.parse()
+            .map_err(|e| anyhow::anyhow!("游标时间戳非法: {e}"))?;
+    Ok((ts, c.rid, c.seq))
 }
 
 fn file_size(path: &std::path::Path) -> Option<u64> {
@@ -1646,6 +1683,88 @@ cache_read = 0.4
         )
         .unwrap();
         assert_eq!(page2.rows.len(), 1, "空 record_id 事件不得因游标歧义丢失");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Task 1 fixture：两条事件 UTC timestamp 逐字相同、record_id 均为空、
+    /// token 数不同——游标必须靠稳定 tie-breaker 区分。
+    fn identical_ts_fixture(dir: &std::path::Path) -> SummaryOptions {
+        let codex_dir = dir.join("codex");
+        let day = codex_dir.join("2026").join("07").join("17");
+        std::fs::create_dir_all(&day).unwrap();
+        let mut lines = String::from(concat!(
+            r#"{"timestamp":"2026-07-17T14:59:00.000Z","type":"session_meta","payload":{"id":"se","session_id":"se","cwd":"C:/w/e"}}"#,
+            "
+",
+            r#"{"timestamp":"2026-07-17T14:59:10.000Z","type":"turn_context","payload":{"model":"m","cwd":"C:/w/e"}}"#,
+            "
+",
+            r#"{"timestamp":"2026-07-17T15:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"output_tokens":1,"cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":11}}}}"#,
+            "
+",
+            r#"{"timestamp":"2026-07-17T15:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20,"output_tokens":2,"cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":22}}}}"#,
+            "
+",
+            r#"{"timestamp":"2026-07-17T15:00:01.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":30,"output_tokens":3,"cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":33}}}}"#,
+            "
+",
+        ));
+        let _ = &mut lines;
+        std::fs::write(day.join("rollout-e.jsonl"), lines).unwrap();
+        SummaryOptions {
+            agent: Some(AgentKind::Codex),
+            claude_dir: Some(dir.join("no-claude")),
+            codex_dir: Some(codex_dir),
+            cache_dir: Some(dir.join("cache")),
+            pricing_index: Some(dir.join("idx.json")),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
+            tz: Some("Asia/Shanghai".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_events_pagination_exact_timestamp_empty_record_id() {
+        // Task 1（P1）：完全相同 timestamp + 空 record_id → 旧游标两行同键，
+        // 页边界第二行丢失或游标重复。修复后两条都出现且 cursor 不同，
+        // 重复读取 cursor 顺序稳定。
+        let dir = tmp_dir("identical-ts");
+        let opts = identical_ts_fixture(&dir);
+        let mut seen: Vec<u64> = Vec::new();
+        let mut cursors: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = list_events(
+                &opts,
+                &EventFilter {
+                    limit: Some(1),
+                    before: cursor.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            if page.rows.is_empty() {
+                break;
+            }
+            let r = &page.rows[0];
+            seen.push(r.input);
+            cursors.push(r.cursor.clone());
+            cursor = Some(r.cursor.clone());
+        }
+        // 时间倒序：input 30 先出；同键两行按稳定排序保留原始顺序（10、20），
+        // 两行都必须出现且不丢行。
+        assert_eq!(seen, [30, 10, 20], "同 timestamp 两行都必须出现: {seen:?}");
+        assert!(
+            cursors[1] != cursors[2],
+            "同键两行的 cursor 必须不同: {cursors:?}"
+        );
+        // 稳定性：重复查询（无游标）得到的 cursor 序列一致。
+        let again = list_events(&opts, &EventFilter::default()).unwrap();
+        let again_cursors: Vec<String> = again.rows.iter().map(|r| r.cursor.clone()).collect();
+        let first_pass: Vec<String> =
+            vec![cursors[0].clone(), cursors[1].clone(), cursors[2].clone()];
+        assert_eq!(again_cursors, first_pass, "cursor 顺序必须稳定");
         std::fs::remove_dir_all(&dir).ok();
     }
 
