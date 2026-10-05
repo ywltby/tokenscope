@@ -1477,8 +1477,7 @@ cache_read = 0.0
             errs.push(
                 h.join()
                     .unwrap()
-                    .err()
-                    .expect("应返回错误而非悬挂")
+                    .expect_err("应返回错误而非悬挂")
                     .to_string(),
             );
         }

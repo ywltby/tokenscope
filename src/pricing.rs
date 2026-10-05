@@ -234,7 +234,8 @@ pub fn save_index(path: &Path, index: &PricingIndex) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
     }
     let json = serde_json::to_string_pretty(index)?;
-    std::fs::write(path, json).with_context(|| format!("写价格索引失败: {}", path.display()))?;
+    crate::fsutil::atomic_write(path, json.as_bytes())
+        .with_context(|| format!("写价格索引失败: {}", path.display()))?;
     Ok(())
 }
 
@@ -402,10 +403,11 @@ impl Pricing {
                             prefix: normalize_model_id(&e.id),
                             display: e.id,
                             name: e.name,
-                            // OpenRouter API 只暴露 prompt/completion 两价，
-                            // 缓存分项按未知处理（诚实于数据面，R05 → C5 解释）。
-                            input: Some(e.prompt * 1_000_000.0),
-                            output: Some(e.completion * 1_000_000.0),
+                            // OpenRouter API 只暴露 prompt/completion 两价
+                            //（Task 7.4：缺价保留 None），缓存分项按未知
+                            // 处理（诚实于数据面，R05 → C5 解释）。
+                            input: e.prompt.map(|v| v * 1_000_000.0),
+                            output: e.completion.map(|v| v * 1_000_000.0),
                             cache_write: None,
                             cache_read: None,
                             tier: TIER_OPENROUTER,

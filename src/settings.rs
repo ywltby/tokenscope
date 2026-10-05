@@ -102,7 +102,8 @@ pub fn save(path: &Path, s: &Settings) -> Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
     }
     let json = serde_json::to_string_pretty(s)?;
-    std::fs::write(path, json).with_context(|| format!("写设置失败: {}", path.display()))?;
+    crate::fsutil::atomic_write(path, json.as_bytes())
+        .with_context(|| format!("写设置失败: {}", path.display()))?;
     Ok(())
 }
 

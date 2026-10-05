@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 pub const API_URL: &str = "https://openrouter.ai/api/v1/models";
 
 #[derive(Debug, Deserialize)]
-struct ApiModel {
+pub(crate) struct ApiModel {
     id: String,
     #[serde(default)]
     name: Option<String>,
@@ -33,14 +33,16 @@ struct ApiPricing {
 }
 
 /// 快照条目：只保留计价所需字段（单位：USD / token）。
+/// Task 7.4：prompt/completion 缺价保留为 None（未知 ≠ 0）；
+/// 负价条目在同步时拒绝（脏数据不入快照）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotEntry {
     pub id: String,
     pub name: Option<String>,
-    pub prompt: f64,
-    pub completion: f64,
-    pub cache_read: f64,
-    pub cache_write: f64,
+    pub prompt: Option<f64>,
+    pub completion: Option<f64>,
+    pub cache_read: Option<f64>,
+    pub cache_write: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,12 +58,33 @@ pub struct SyncReport {
     pub synced_at: String,
 }
 
-fn parse_price(s: &str) -> f64 {
-    s.trim().parse::<f64>().unwrap_or(0.0)
+/// Task 7.4：解析价格串；None 表示字段缺失（未知），非负数值才有效。
+/// 返回 Err 表示负价（脏数据，由调用方拒绝该条目）。
+fn parse_price(v: &Option<String>) -> Result<Option<f64>, String> {
+    let Some(s) = v else {
+        return Ok(None);
+    };
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let n: f64 = s.parse().map_err(|e| format!("价格串非法 {s:?}: {e}"))?;
+    if n < 0.0 {
+        return Err(format!("负价 {n}"));
+    }
+    Ok(Some(n))
 }
 
-/// 拉取 OpenRouter 模型清单并写快照（覆盖旧文件）。
+/// 拉取 OpenRouter 模型清单并写快照（原子替换；同 provider 串行）。
 pub fn sync(snapshot_path: &Path) -> Result<SyncReport> {
+    let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    sync_with(snapshot_path, fetch_openrouter)
+}
+
+/// Task 7.3：同一 provider 的同步互斥锁（手动/自动两条入口共用）。
+pub static SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn fetch_openrouter() -> Result<ApiResponse> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(30)))
         .build()
@@ -71,27 +94,46 @@ pub fn sync(snapshot_path: &Path) -> Result<SyncReport> {
         .header("User-Agent", "tokenscope")
         .call()
         .with_context(|| format!("请求 OpenRouter 失败: {API_URL}"))?;
-    let body: ApiResponse = response
+    response
         .body_mut()
         .read_json()
-        .context("解析 OpenRouter 响应失败")?;
+        .context("解析 OpenRouter 响应失败")
+}
 
-    let mut entries: Vec<SnapshotEntry> = body
-        .data
-        .into_iter()
-        .map(|m| {
-            let p = m.pricing.unwrap_or_default();
-            let price = |v: &Option<String>| v.as_deref().map(parse_price).unwrap_or(0.0);
-            SnapshotEntry {
-                id: m.id,
-                name: m.name,
-                prompt: price(&p.prompt),
-                completion: price(&p.completion),
-                cache_read: price(&p.input_cache_read),
-                cache_write: price(&p.input_cache_write),
+/// 可注入 fetch 的同步实现（测试 mock，不请求真实服务）。
+pub(crate) fn sync_with(
+    snapshot_path: &Path,
+    fetch: impl FnOnce() -> Result<ApiResponse>,
+) -> Result<SyncReport> {
+    let body: ApiResponse = fetch()?;
+
+    let mut rejected = 0u64;
+    let mut warnings: Vec<String> = Vec::new();
+    let mut entries: Vec<SnapshotEntry> = Vec::new();
+    for m in body.data {
+        let p = m.pricing.unwrap_or_default();
+        let parsed = (|| -> Result<SnapshotEntry, String> {
+            Ok(SnapshotEntry {
+                id: m.id.clone(),
+                name: m.name.clone(),
+                prompt: parse_price(&p.prompt)?,
+                completion: parse_price(&p.completion)?,
+                cache_read: parse_price(&p.input_cache_read)?,
+                cache_write: parse_price(&p.input_cache_write)?,
+            })
+        })();
+        match parsed {
+            Ok(e) => entries.push(e),
+            Err(reason) => {
+                rejected += 1;
+                warnings.push(format!("{}: {reason}", m.id));
             }
-        })
-        .collect();
+        }
+    }
+    for w in &warnings {
+        log::warn!("OpenRouter 同步拒绝脏条目: {w}");
+    }
+    let _ = rejected;
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     entries.dedup_by(|a, b| a.id == b.id);
 
@@ -114,9 +156,10 @@ pub fn sync(snapshot_path: &Path) -> Result<SyncReport> {
     })
 }
 
+/// 同步响应体（Task 7.3：sync_with 可注入，类型对同 crate 测试可见）。
 #[derive(Debug, Deserialize)]
-struct ApiResponse {
-    data: Vec<ApiModel>,
+pub(crate) struct ApiResponse {
+    pub(crate) data: Vec<ApiModel>,
 }
 
 /// 读快照：文件缺失 → Ok(None)（静默）；损坏 → Err（调用方警告并忽略）。
@@ -154,15 +197,65 @@ mod tests {
         let api: ApiResponse = serde_json::from_str(body).unwrap();
         assert_eq!(api.data.len(), 3);
         let p = &api.data[0].pricing.as_ref().unwrap();
-        assert!((parse_price(p.prompt.as_deref().unwrap_or("0")) * 1e6 - 3.0).abs() < 1e-9);
+        // Task 7.4：数值正常解析；缺失/空串 → None（未知 ≠ 0）。
         assert!(
-            (parse_price(p.input_cache_read.as_deref().unwrap_or("0")) * 1e6 - 0.3).abs() < 1e-9
+            parse_price(&p.prompt)
+                .unwrap()
+                .is_some_and(|v| (v * 1e6 - 3.0).abs() < 1e-9)
         );
-        // null / 空串 / 缺失字段安全回退 0
-        assert_eq!(parse_price(""), 0.0);
+        assert!(
+            parse_price(&p.input_cache_read)
+                .unwrap()
+                .is_some_and(|v| (v * 1e6 - 0.3).abs() < 1e-9)
+        );
+        assert_eq!(parse_price(&None).unwrap(), None, "缺失字段 = 未知");
         let broken = &api.data[2].pricing.as_ref().unwrap();
-        let price = |v: &Option<String>| v.as_deref().map(parse_price).unwrap_or(0.0);
-        assert_eq!(price(&broken.prompt) + price(&broken.completion), 0.0);
+        assert_eq!(parse_price(&broken.prompt).unwrap(), None, "空串 = 未知");
+        assert_eq!(
+            parse_price(&broken.completion).unwrap(),
+            None,
+            "null = 未知"
+        );
+    }
+
+    #[test]
+    fn test_openrouter_missing_price_is_unknown() {
+        // Task 7.4：缺价字段经 sync_with 保留为 None（不静默变 0）。
+        let dir = std::env::temp_dir().join(format!("tokenscope-t74-miss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pricing-openrouter.json");
+        let body = r#"{"data":[{"id":"prov/no-price","name":"NP"}]}"#;
+        let report = sync_with(&path, || {
+            Ok(serde_json::from_str::<ApiResponse>(body).unwrap())
+        })
+        .unwrap();
+        assert_eq!(report.count, 1);
+        let snap = load_snapshot(&path).unwrap().unwrap();
+        assert_eq!(snap.entries[0].prompt, None, "缺价 = 未知");
+        assert_eq!(snap.entries[0].completion, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_openrouter_negative_price_is_rejected() {
+        // Task 7.4：负价条目拒绝（不入快照），其余条目正常。
+        let dir = std::env::temp_dir().join(format!("tokenscope-t74-neg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pricing-openrouter.json");
+        let body = r#"{"data":[
+            {"id":"prov/neg","name":"Neg","pricing":{"prompt":"-0.001","completion":"0.002"}},
+            {"id":"prov/ok","name":"Ok","pricing":{"prompt":"0.001","completion":"0.002"}}
+        ]}"#;
+        let report = sync_with(&path, || {
+            Ok(serde_json::from_str::<ApiResponse>(body).unwrap())
+        })
+        .unwrap();
+        assert_eq!(report.count, 1, "负价条目被拒绝");
+        let snap = load_snapshot(&path).unwrap().unwrap();
+        assert_eq!(snap.entries[0].id, "prov/ok");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -176,10 +269,10 @@ mod tests {
             entries: vec![SnapshotEntry {
                 id: "x-ai/grok-4.5".into(),
                 name: Some("xAI: Grok 4.5".into()),
-                prompt: 2e-6,
-                completion: 6e-6,
-                cache_read: 3e-7,
-                cache_write: 0.0,
+                prompt: Some(2e-6),
+                completion: Some(6e-6),
+                cache_read: Some(3e-7),
+                cache_write: Some(0.0),
             }],
         };
         std::fs::write(&path, serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();

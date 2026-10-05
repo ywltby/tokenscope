@@ -3,6 +3,7 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 
@@ -13,12 +14,15 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         .parent()
         .with_context(|| format!("目标无父目录: {}", path.display()))?;
     std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
+    // Task 7.2：唯一后缀（进程号 + 写计数），并发写不同目标不串档。
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let tmp = dir.join(format!(
-        ".{}.tmp-{}",
+        ".{}.tmp-{}-{}",
         path.file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "tokenscope".to_string()),
-        std::process::id()
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     let keep_old = || {
         let _ = std::fs::remove_file(&tmp);
@@ -62,6 +66,45 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"v2");
         // 无残留临时文件
         assert!(std::fs::read_dir(&dir).unwrap().count() == 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_atomic_write_concurrent_targets_do_not_truncate() {
+        // Task 7.2：并发写同目录不同文件（唯一临时名）——各自内容完整。
+        let dir = tmp_dir("concurrent");
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let d = dir.clone();
+            handles.push(std::thread::spawn(move || {
+                for round in 0..20 {
+                    let content = format!("file-{i}-round-{round}");
+                    atomic_write(&d.join(format!("f{i}.json")), content.as_bytes()).unwrap();
+                    let got = std::fs::read_to_string(d.join(format!("f{i}.json"))).unwrap();
+                    assert_eq!(got, content, "不得被其他写者的临时文件串档");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_atomic_write_rename_failure_cleans_tmp() {
+        // Task 7.2：rename 失败（目标是非空目录）→ 报错 + 临时文件清理。
+        let dir = tmp_dir("rename-fail");
+        let target = dir.join("occupied");
+        std::fs::create_dir_all(target.join("inner")).unwrap();
+        assert!(atomic_write(&target, b"x").is_err());
+        // 无残留临时文件
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "临时文件必须清理: {leftovers:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

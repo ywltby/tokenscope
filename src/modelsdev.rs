@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 pub const API_URL: &str = "https://models.dev/api.json";
 
 #[derive(Debug, Deserialize)]
-struct ApiEntry {
+pub(crate) struct ApiEntry {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -77,8 +77,16 @@ pub struct SyncReport {
     pub synced_at: String,
 }
 
-/// 拉取 models.dev 并写快照（跳过无 cost 的模型；同键去重保留排序靠前者）。
+/// 拉取 models.dev 并写快照（原子替换；同 provider 串行）。
 pub fn sync(snapshot_path: &Path) -> Result<SyncReport> {
+    let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    sync_with(snapshot_path, fetch_modelsdev)
+}
+
+/// Task 7.3：同一 provider 的同步互斥锁（手动/自动两条入口共用）。
+pub static SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn fetch_modelsdev() -> Result<BTreeMap<String, ApiEntry>> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(60)))
         .build()
@@ -88,10 +96,18 @@ pub fn sync(snapshot_path: &Path) -> Result<SyncReport> {
         .header("User-Agent", "tokenscope")
         .call()
         .with_context(|| format!("请求 models.dev 失败: {API_URL}"))?;
-    let body: BTreeMap<String, ApiEntry> = response
+    response
         .body_mut()
         .read_json()
-        .context("解析 models.dev 响应失败")?;
+        .context("解析 models.dev 响应失败")
+}
+
+/// 可注入 fetch 的同步实现（测试 mock，不请求真实服务）。
+pub(crate) fn sync_with(
+    snapshot_path: &Path,
+    fetch: impl FnOnce() -> Result<BTreeMap<String, ApiEntry>>,
+) -> Result<SyncReport> {
+    let body: BTreeMap<String, ApiEntry> = fetch()?;
 
     let mut entries: Vec<SnapshotEntry> = Vec::new();
     for (provider, entry) in body {
@@ -326,6 +342,52 @@ mod tests {
         assert_eq!(loaded.entries[0].input, Some(1.0));
         assert_eq!(loaded.entries[0].cache_read, None, "v1 缓存分项按未知");
         assert_eq!(loaded.entries[0].cache_write, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_sync_provider_retry_independent() {
+        // Task 7.3：单源失败不覆盖另一源旧快照；两 provider 互不阻塞
+        //（各自独立锁 + 独立 fetch mock，不请求真实服务）。
+        let dir = std::env::temp_dir().join(format!("tokenscope-t73-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let md_path = dir.join("pricing-modelsdev.json");
+        let or_path = dir.join("pricing-openrouter.json");
+        // 旧快照在位
+        std::fs::write(&md_path, r#"{"v":2,"synced_at":"old","entries":[]}"#).unwrap();
+        std::fs::write(&or_path, r#"{"synced_at":"old","entries":[]}"#).unwrap();
+
+        // models.dev 失败（网络错）+ OpenRouter 成功
+        let md_err = sync_with(&md_path, || Err(anyhow::anyhow!("network down")));
+        assert!(md_err.is_err());
+        let or_ok = crate::openrouter::sync_with(&or_path, || {
+            Ok(serde_json::from_str(
+                r#"{"data":[{"id":"prov/ok","pricing":{"prompt":"0.001","completion":"0.002"}}]}"#,
+            )
+            .unwrap())
+        });
+        assert!(or_ok.is_ok(), "models.dev 失败不得拖垮 OpenRouter");
+
+        // models.dev 旧快照原样保留；OpenRouter 已更新
+        let md = load_snapshot(&md_path).unwrap().unwrap();
+        assert_eq!(md.synced_at, "old");
+        let or = crate::openrouter::load_snapshot(&or_path).unwrap().unwrap();
+        assert_ne!(or.synced_at, "old");
+
+        // 反向：OpenRouter 失败不影响 models.dev 成功写入
+        let or_err =
+            crate::openrouter::sync_with(&or_path, || Err(anyhow::anyhow!("network down")));
+        assert!(or_err.is_err());
+        let md_ok = sync_with(&md_path, || {
+            Ok(serde_json::from_str(
+                r#"{"anthropic":{"models":{"claude-x":{"name":null,"cost":{"input":1.0,"output":2.0}}}}}"#,
+            )
+            .unwrap())
+        });
+        assert!(md_ok.is_ok(), "OpenRouter 失败不得拖垮 models.dev");
+        let md2 = load_snapshot(&md_path).unwrap().unwrap();
+        assert_ne!(md2.synced_at, "old");
         std::fs::remove_dir_all(&dir).ok();
     }
 

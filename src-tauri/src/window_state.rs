@@ -39,7 +39,8 @@ pub fn save(path: &Path, ws: &WindowState) -> Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
     }
     let json = serde_json::to_string_pretty(ws)?;
-    std::fs::write(path, json).with_context(|| format!("写窗口状态失败: {}", path.display()))?;
+    tokenscope::fsutil::atomic_write(path, json.as_bytes())
+        .with_context(|| format!("写窗口状态失败: {}", path.display()))?;
     Ok(())
 }
 

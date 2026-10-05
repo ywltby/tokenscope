@@ -150,27 +150,37 @@ pub async fn source_config_set(
     dir: Option<String>,
 ) -> Result<tokenscope::settings::SourceConfig, String> {
     run_blocking("source_config_set", move || {
-        let claude = match agent.as_str() {
-            "claude" => true,
-            "codex" => false,
-            other => return Err(anyhow::anyhow!("未知 agent: {other}")),
-        };
         let path = tokenscope::settings::settings_path()?;
-        let mut s = tokenscope::settings::load(&path).unwrap_or_default();
-        let cfg = tokenscope::settings::SourceConfig { enabled, dir };
-        if claude {
-            s.sources.claude = Some(cfg.clone());
-        } else {
-            s.sources.codex = Some(cfg.clone());
-        }
-        tokenscope::settings::save(&path, &s)?;
-        log::info!(
-            "来源配置已保存：{agent} enabled={enabled} dir={:?}",
-            cfg.dir
-        );
-        Ok(cfg)
+        source_config_set_impl(&path, &agent, enabled, dir)
     })
     .await
+}
+
+/// Task 7.1：损坏设置直接报错——绝不 unwrap_or_default 后覆盖用户文件。
+pub(crate) fn source_config_set_impl(
+    path: &std::path::Path,
+    agent: &str,
+    enabled: bool,
+    dir: Option<String>,
+) -> anyhow::Result<tokenscope::settings::SourceConfig> {
+    let claude = match agent {
+        "claude" => true,
+        "codex" => false,
+        other => return Err(anyhow::anyhow!("未知 agent: {other}")),
+    };
+    let mut s = tokenscope::settings::load(path)?;
+    let cfg = tokenscope::settings::SourceConfig { enabled, dir };
+    if claude {
+        s.sources.claude = Some(cfg.clone());
+    } else {
+        s.sources.codex = Some(cfg.clone());
+    }
+    tokenscope::settings::save(path, &s)?;
+    log::info!(
+        "来源配置已保存：{agent} enabled={enabled} dir={:?}",
+        cfg.dir
+    );
+    Ok(cfg)
 }
 
 #[tauri::command]
@@ -499,6 +509,25 @@ mod tests {
         assert!(matches!(parse_by("project"), Ok(GroupBy::Project)));
         assert!(matches!(parse_by("agent"), Ok(GroupBy::Agent)));
         assert!(parse_by("week").is_err());
+    }
+
+    #[test]
+    fn test_source_config_set_invalid_settings_keeps_file() {
+        // Task 7.1：损坏设置直接报错，绝不 unwrap_or_default 后覆盖用户文件。
+        let dir = std::env::temp_dir().join(format!("tokenscope-t71-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let corrupt = r#"{"price_auto_sync": true, "broken""#;
+        std::fs::write(&path, corrupt).unwrap();
+        let r = source_config_set_impl(&path, "claude", false, None);
+        assert!(r.is_err(), "损坏设置必须报错");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            corrupt,
+            "用户文件必须原样保留"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
