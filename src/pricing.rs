@@ -138,7 +138,7 @@ fn split_variant(normalized: &str) -> (&str, Option<&str>) {
 /// 查找时只枚举查询串自身的 ~30 个前缀做哈希命中，复杂度与表大小无关。
 type PrefixIndex = std::collections::HashMap<Vec<u8>, Vec<Entry>>;
 
-/// 价格索引快照（M11）：四层合并结果的持久化形态。
+/// 价格索引快照：三层合并结果的持久化形态（Task 1 起无内置层）。
 /// 加载它即可跳过双快照解析与合并（扁平结构，毫秒级）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PricingIndex {
