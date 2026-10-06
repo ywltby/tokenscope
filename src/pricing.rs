@@ -811,6 +811,26 @@ pub struct PricingEntry {
 struct ExternalFile {
     #[serde(default)]
     model: Vec<ExternalModel>,
+    /// 语义策略（缓存读取定价解析计划 Task 3）：只改写匹配候选缺失的
+    /// cache_read 声明，不生成新候选、不覆盖明确数值。
+    #[serde(default)]
+    model_policy: Vec<ExternalModelPolicy>,
+}
+
+/// `[[model_policy]]`：对末段匹配的候选（可选 channel/source 限定）的
+/// Unknown cache_read 显式声明沿用输入价。
+#[derive(Debug, Default, serde::Deserialize)]
+struct ExternalModelPolicy {
+    prefix: String,
+    /// 渠道限定（display 第一个 `/` 之前）；省略 = 匹配所有同末段候选。
+    #[serde(default)]
+    channel: Option<String>,
+    /// 来源限定：external / models.dev / openrouter。
+    #[serde(default)]
+    source: Option<String>,
+    /// 当前仅支持 "same_as_input"；其他值显式告警并忽略该策略。
+    #[serde(default)]
+    cache_read: Option<String>,
 }
 
 /// Task 4：四类价格字段可选——区分"未填写"（None，沿用/未知）与显式 0（免费）。
@@ -1099,6 +1119,16 @@ cache_read = 0.5
 # output = 30.0
 # cache_write = 10.0
 # cache_read = 0.8
+#
+# 语义策略（可选）：为价格快照缺 cache_read 的候选显式声明
+# 「缓存读按输入价计费」。只改写缺失值，不覆盖已有数字/显式 0；
+# channel 省略 = 匹配所有同末段候选；没有候选命中时给出 warning
+# （不静默制造价格、不生成新候选）。
+#
+# [[model_policy]]
+# prefix = "gpt-5.4"
+# channel = "zenmux"
+# cache_read = "same_as_input"
 "#;
 
 /// 拆出变体后缀：`"hy3:free"` → `("hy3", Some("free"))`；无变体 → `("hy3", None)`。
@@ -1515,9 +1545,74 @@ impl Pricing {
                     Err(err) => warnings.push(format!("外置条目 {display} 已忽略: {err}")),
                 }
             }
+            pricing.apply_model_policies(&parsed.model_policy, &mut warnings);
         }
 
         (pricing, warnings)
+    }
+
+    /// 应用 [[model_policy]]（Task 3）：只把匹配候选的 Unknown cache_read
+    /// 改写为声明值；已有明确数字/显式 0 不覆盖；无命中给出 warning，
+    /// 不静默制造价格、不生成新候选。
+    fn apply_model_policies(
+        &mut self,
+        policies: &[ExternalModelPolicy],
+        warnings: &mut Vec<String>,
+    ) {
+        for pol in policies {
+            let spec = match pol.cache_read.as_deref() {
+                Some("same_as_input") => RateSpec::SameAsInput,
+                Some(other) => {
+                    warnings.push(format!(
+                        "外置 model_policy {:?}: 不支持的 cache_read 值 {other:?}（仅支持 \"same_as_input\"），策略已忽略",
+                        pol.prefix
+                    ));
+                    continue;
+                }
+                None => {
+                    warnings.push(format!(
+                        "外置 model_policy {:?}: 未声明 cache_read，策略已忽略",
+                        pol.prefix
+                    ));
+                    continue;
+                }
+            };
+            let key = match_key(&pol.prefix);
+            let mut hits = 0usize;
+            let mut skipped_explicit = 0usize;
+            if let Some(group) = self.by_prefix.get_mut(key.as_bytes()) {
+                for e in group {
+                    if let Some(ch) = &pol.channel
+                        && e.display.split_once('/').map(|(c, _)| c) != Some(ch.as_str())
+                    {
+                        continue;
+                    }
+                    if let Some(src) = &pol.source
+                        && tier_name(e.tier) != src.as_str()
+                    {
+                        continue;
+                    }
+                    hits += 1;
+                    if e.plan.base.cache_read == RateSpec::Unknown {
+                        e.plan.base.cache_read = spec;
+                        log::info!("model_policy 生效：{} cache_read 沿用输入价", e.display);
+                    } else {
+                        skipped_explicit += 1;
+                    }
+                }
+            }
+            if hits == 0 {
+                warnings.push(format!(
+                    "外置 model_policy {:?}: 没有命中任何候选（模型未收录或 channel/source 限定过严），未生成价格",
+                    pol.prefix
+                ));
+            } else if skipped_explicit > 0 {
+                log::debug!(
+                    "model_policy {:?}: {skipped_explicit} 个候选已有明确 cache_read，未被覆盖",
+                    pol.prefix
+                );
+            }
+        }
     }
 
     /// 层级优先（外置 > models.dev > OpenRouter），并列时完整匹配优先、
@@ -4146,6 +4241,126 @@ output = 10.0
         assert_eq!(plan.base.input, RateSpec::Fixed(2.0));
         assert_eq!(plan.base.output, RateSpec::Unknown);
         assert_eq!(plan.base.cache_read, RateSpec::Unknown);
+    }
+
+    #[test]
+    fn test_model_policy_applies_same_as_input_without_overriding_explicit() {
+        // 计划 Task 3：model_policy 只改写候选缺失的 cache_read 声明；
+        // 已有明确数字/显式 0 的候选不得被覆盖；不生成新候选。
+        let dir = std::env::temp_dir().join(format!("tokenscope-policy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let snap = write(
+            &dir,
+            "pricing-modelsdev.json",
+            r#"{"v":3,"synced_at":"t","entries":[
+                {"id":"zenmux/gpt-5.4","name":null,"input":4.0,"output":20.0},
+                {"id":"cortecs/gpt-5.4","name":"C","input":3.0,"output":18.0,"cache_read":0.3},
+                {"id":"openai/gpt-5.4","name":null,"input":2.5,"output":15.0,"cache_read":0.0}
+            ]}"#,
+        );
+        let toml = write(
+            &dir,
+            "pricing.toml",
+            r#"
+[[model_policy]]
+prefix = "gpt-5.4"
+cache_read = "same_as_input"
+"#,
+        );
+        let (p, warnings) = Pricing::load(Some(&toml), Some(&snap), None);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // zenmux（缺 cache_read）被策略声明为沿用输入价；本请求下它是最高
+        // 费用候选 → 主估算完整，cache_read 单价 = 该候选输入价 4.0。
+        let est = p
+            .estimate("gpt-5.4", &counts(1_000, 0, 0, 100_000), at())
+            .unwrap();
+        assert!(est.complete, "策略应用后 zenmux 必须完整可计价");
+        let cr = est
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheRead)
+            .unwrap();
+        assert_eq!(cr.unit_price, Some(4.0));
+        assert_eq!(cr.rate_kind, RateKind::SameAsInput);
+        // cortecs 的显式 0.3 与 openai 的显式 0（免费）未被覆盖
+        let entries = p.entries();
+        let cortecs = entries
+            .iter()
+            .find(|e| e.channel.as_deref() == Some("cortecs"))
+            .unwrap();
+        assert_eq!(cortecs.cache_read, Some(0.3));
+        let openai = entries
+            .iter()
+            .find(|e| e.channel.as_deref() == Some("openai"))
+            .unwrap();
+        assert_eq!(openai.cache_read, Some(0.0), "显式 0 不得被策略覆盖");
+        // 策略不生成新候选（外置条目数为 0）
+        assert_eq!(p.external_count(), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_model_policy_channel_filter_and_miss_warning() {
+        let dir = std::env::temp_dir().join(format!("tokenscope-policy2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let snap = write(
+            &dir,
+            "pricing-modelsdev.json",
+            r#"{"v":3,"synced_at":"t","entries":[
+                {"id":"zenmux/gpt-5.4","name":null,"input":4.0,"output":20.0}
+            ]}"#,
+        );
+        let toml = write(
+            &dir,
+            "pricing.toml",
+            r#"
+[[model_policy]]
+prefix = "gpt-5.4"
+channel = "nope"
+cache_read = "same_as_input"
+"#,
+        );
+        let (p, warnings) = Pricing::load(Some(&toml), Some(&snap), None);
+        // 限定过严 → 明确告警，不静默制造价格
+        assert!(
+            warnings
+                .iter()
+                .any(|x| x.contains("model_policy") && x.contains("没有命中")),
+            "{warnings:?}"
+        );
+        let est = p
+            .estimate("gpt-5.4", &counts(1_000, 0, 0, 100_000), at())
+            .unwrap();
+        assert!(!est.complete, "未命中策略 → cache_read 仍未知");
+        assert_eq!(est.unknown.cache_read, 100_000);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_model_policy_invalid_value_warns() {
+        let dir = std::env::temp_dir().join(format!("tokenscope-policy3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = write(
+            &dir,
+            "pricing.toml",
+            r#"
+[[model_policy]]
+prefix = "some-model"
+cache_read = "free"
+"#,
+        );
+        let (p, warnings) = Pricing::load(Some(&toml), None, None);
+        assert_eq!(p.external_count(), 0);
+        assert!(
+            warnings
+                .iter()
+                .any(|x| x.contains("不支持的 cache_read 值")),
+            "{warnings:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
