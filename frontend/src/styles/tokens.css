@@ -65,6 +65,8 @@
 
   /* 玻璃拟态：blur(20px) 让背景透出 */
   --ts-glass-blur: blur(20px) saturate(180%);
+  /* 浮层（菜单、tooltip）：85% elevated + 16px 模糊（DESIGN.md §2） */
+  --ts-glass-blur-popover: blur(16px) saturate(150%);
   --ts-glass-stroke: rgba(255, 255, 255, 0.55);
   --ts-glass-highlight: rgba(255, 255, 255, 0.8);
 

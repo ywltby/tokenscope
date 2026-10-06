@@ -3,7 +3,9 @@
 // Task 7：费用悬浮提示——纯函数 formatCostBreakdown 的排版断言
 //（NDataTable 虚拟滚动在测试环境不渲染行，与既有用例同口径）。
 import { describe, expect, it } from "vitest";
+import { nextTick } from "vue";
 import { mount } from "@vue/test-utils";
+import type { VNode } from "vue";
 import EventTable from "./EventTable.vue";
 import { projectLabel, type EventCostBreakdown, type EventList, type EventRow } from "../types";
 import { formatCostBreakdownRows, formatCostBreakdownText } from "../lib/costBreakdown";
@@ -220,5 +222,66 @@ describe("EventTable 表格语义（设计系统 Task 5）", () => {
     expect(chip.text()).toContain("model: gpt-x");
     await chip.trigger("click");
     expect(w.emitted("clear-filter")).toHaveLength(1);
+  });
+});
+
+// 设计系统 Task 6：费用明细玻璃浮层——触发路径、浮层视觉、分段结构。
+describe("EventTable 费用浮层（设计系统 Task 6）", () => {
+  /// 取费用列 render 的 VNode（NTooltip）——行级渲染在测试环境不可达，
+  /// 与既有用例同口径直接调列渲染函数。
+  function tooltipVnode(w: ReturnType<typeof mount>): VNode {
+    const cols = (
+      w.vm as unknown as { columns: { key: string; render?: (r: object) => unknown }[] }
+    ).columns;
+    const cost = cols.find((c) => c.key === "cost_usd")!;
+    const bdRow = row({ cost_usd: 2.206008, cost_breakdown: highTierBd() });
+    return cost.render!(bdRow) as VNode;
+  }
+
+  it("触发器支持 click/hover/focus 打开、Escape 关闭，aria-expanded 随开合翻转", async () => {
+    const w = mount(EventTable, {
+      props: {
+        list: list([row({ cost_usd: 2.206008, cost_breakdown: highTierBd() })], 1),
+        filterLabel: "",
+      },
+    });
+    const vnode = tooltipVnode(w);
+    const trigger = (vnode.children as Record<string, () => VNode>).trigger();
+    const p = trigger.props as Record<string, unknown>;
+    expect(p.tabindex).toBe(0);
+    expect(p.role).toBe("button");
+    expect(p["aria-expanded"]).toBe(false);
+    for (const h of ["onClick", "onFocus", "onMouseenter", "onMouseleave", "onBlur", "onKeydown"]) {
+      expect(typeof p[h], `${h} 处理器存在`).toBe("function");
+    }
+    // click 打开 → aria-expanded/show 翻转
+    (p.onClick as () => void)();
+    await nextTick();
+    const reopened = tooltipVnode(w);
+    expect((reopened.props as Record<string, unknown>).show).toBe(true);
+    const trigger2 = (reopened.children as Record<string, () => VNode>).trigger();
+    expect((trigger2.props as Record<string, unknown>)["aria-expanded"]).toBe(true);
+    // Escape 关闭
+    ((trigger2.props as Record<string, unknown>).onKeydown as (e: { key: string }) => void)({
+      key: "Escape",
+    });
+    await nextTick();
+    expect((tooltipVnode(w).props as Record<string, unknown>).show).toBe(false);
+  });
+
+  it("浮层视觉：480px 上限 + 16px 玻璃模糊 + 公式区实色衬底", () => {
+    const w = mount(EventTable, {
+      props: {
+        list: list([row({ cost_usd: 2.206008, cost_breakdown: highTierBd() })], 1),
+        filterLabel: "",
+      },
+    });
+    const vnode = tooltipVnode(w);
+    const style = String((vnode.props as Record<string, unknown>).style);
+    expect(style).toContain("max-width: 480px");
+    expect(style).toContain("var(--ts-glass-blur-popover)");
+    const content = (vnode.children as Record<string, () => VNode>).default();
+    expect(JSON.stringify(content)).toContain("bd-formula");
+    expect(JSON.stringify(content)).toContain("ts-card-solid");
   });
 });

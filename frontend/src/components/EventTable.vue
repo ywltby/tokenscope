@@ -121,7 +121,10 @@ const columns = computed<DataTableColumn[]>(() => [
           trigger: "manual",
           placement: "left",
           show: open,
-          style: "max-width: 480px",
+          // 任务 6：elevated 玻璃浮层——480px 上限 + 16px 模糊 + 12px 圆角
+          //（背景色来自 naiveTheme Tooltip.color = --ts-surface-elevated 85%）
+          style:
+            "max-width: 480px; backdrop-filter: var(--ts-glass-blur-popover); -webkit-backdrop-filter: var(--ts-glass-blur-popover); border-radius: var(--ts-radius-popover);",
           onClickoutside: closeIt,
         },
         {
@@ -146,35 +149,52 @@ const columns = computed<DataTableColumn[]>(() => [
               },
               fmtPrice(c as number),
             ),
-          default: () =>
-            h(
-              "div",
-              { class: "cost-tooltip" },
-              formatCostBreakdownRows(bd).map((row2) => {
-                if (row2.divider) return h("div", { class: "bd-divider" });
-                if (row2.detail != null) {
-                  return h(
-                    "div",
-                    { class: ["bd-row", row2.unknown ? "bd-unknown" : ""] },
-                    `${row2.label} ${row2.detail}`,
-                  );
-                }
+          default: () => {
+            // 事实 → 公式 → 结果 → 来源：divider 分段渲染，公式段（第 2 段）
+            // 套 .ts-card-solid 实色衬底保证可读性（DESIGN.md §5 费用明细）。
+            const rows = formatCostBreakdownRows(bd);
+            const segments: (typeof rows)[] = [];
+            let cur: typeof rows = [];
+            for (const r of rows) {
+              if (r.divider) {
+                segments.push(cur);
+                cur = [];
+              } else {
+                cur.push(r);
+              }
+            }
+            segments.push(cur);
+            const renderRow = (row2: (typeof rows)[number]) => {
+              if (row2.detail != null) {
                 return h(
                   "div",
-                  {
-                    class: [
-                      "bd-row",
-                      row2.unknown ? "bd-unknown" : "",
-                      row2.total ? "bd-total" : "",
-                    ],
-                  },
-                  [
-                    h("span", { class: "bd-label" }, row2.label),
-                    h("span", { class: "bd-value ts-num" }, row2.value ?? ""),
-                  ],
+                  { class: ["bd-row", row2.unknown ? "bd-unknown" : ""] },
+                  `${row2.label} ${row2.detail}`,
                 );
-              }),
-            ),
+              }
+              return h(
+                "div",
+                {
+                  class: ["bd-row", row2.unknown ? "bd-unknown" : "", row2.total ? "bd-total" : ""],
+                },
+                [
+                  h("span", { class: "bd-label" }, row2.label),
+                  h("span", { class: "bd-value ts-num" }, row2.value ?? ""),
+                ],
+              );
+            };
+            return h(
+              "div",
+              { class: "cost-tooltip" },
+              segments.map((seg, si) =>
+                h(
+                  "div",
+                  { class: si === 1 ? "bd-formula ts-card-solid" : undefined },
+                  seg.map(renderRow),
+                ),
+              ),
+            );
+          },
         },
       );
     },
@@ -313,9 +333,10 @@ const rowKey = (r: object): string => {
   font-weight: 700;
 }
 
-.bd-divider {
-  height: 1px;
-  background: var(--ts-separator);
+/* 公式区实色衬底（.ts-card-solid 提供背景），数字等宽右对齐 */
+.bd-formula {
+  padding: var(--ts-space-2) var(--ts-space-3);
   margin: var(--ts-space-1) 0;
+  border-radius: var(--ts-radius-control);
 }
 </style>
