@@ -445,6 +445,46 @@ describe("Dashboard 页头与通知（设计系统 Task 3）", () => {
     expect(w.emitted("go-settings")).toBeTruthy();
   });
 
+  it("多个来源异常合并为一条可展开通知（任务 7：多条合并）", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "summarize") return Promise.resolve(summaryA);
+      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "source_status")
+        return Promise.resolve([
+          {
+            agent: "codex",
+            dir: "C:/codex",
+            enabled: true,
+            exists: false,
+            files: 0,
+            state: "missing",
+          },
+          {
+            agent: "claude-code",
+            dir: "C:/claude",
+            enabled: true,
+            exists: true,
+            files: 0,
+            state: "empty",
+          },
+        ]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    // 收起时：一条合并通知，不铺开逐条明细
+    expect(w.text()).toContain("2 个来源异常");
+    expect(w.text()).not.toContain("数据目录不存在");
+    const notice = w.findAll(".ts-notice").find((n) => n.text().includes("个来源异常"))!;
+    const toggle = notice.findAll("button").find((b) => b.text().includes("详情"));
+    expect(toggle).toBeDefined();
+    await toggle!.trigger("click");
+    // 展开后逐条明细可见
+    expect(w.text()).toContain("数据目录不存在");
+    expect(w.text()).toContain("没有发现会话日志");
+  });
+
   it("汇总加载失败渲染为可重试内联通知（非 NAlert）", async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "view_cache_load") return Promise.resolve(null);

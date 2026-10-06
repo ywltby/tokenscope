@@ -3,17 +3,13 @@ import { computed, h, onMounted, ref, watch, type VNode } from "vue";
 import { priceSourceLine } from "../lib/statsView";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  NAlert,
   NButton,
-  NCard,
   NCollapse,
   NCollapseItem,
   NDataTable,
-  NGrid,
-  NGi,
+  NInput,
   NSelect,
   NSpin,
-  NInput,
   NSwitch,
   NTag,
   NTooltip,
@@ -212,7 +208,7 @@ function priceCell(r: object, pick: (e: PricingEntry) => number | null): VNode {
     trigger: () =>
       h(
         "span",
-        { style: unknown ? "cursor: help; color: #f0a020" : "cursor: help" },
+        { style: unknown ? "cursor: help; color: var(--ts-warning)" : "cursor: help" },
         fmtPriceOrUnknown(pick(e)),
       ),
     default: () =>
@@ -306,209 +302,344 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
   <NSpin :show="loading">
     <!-- 最小高度保证加载转圈居中于可视区 -->
     <div style="min-height: 380px">
-      <NGrid :cols="2" :x-gap="12" :y-gap="12" item-responsive responsive="screen">
-        <NGi span="1">
-          <NCard title="应用" size="small">
-            <div style="margin-bottom: 12px">
-              <div class="stat-row">
-                <span class="stat-label">聚合/展示时区</span>
-                <span class="stat-value">{{ tz === "local" ? "本机时区" : tz }}</span>
-              </div>
-              <div class="help-line">存储/计算一律 UTC，仅展示按此时区一次转换。</div>
-              <NSelect v-model:value="tz" :options="TZ_OPTIONS" size="small" style="width: 200px" />
+      <!-- 任务 7：macOS 系统设置式分组——组标题在卡片外，每组一张 .ts-card -->
+      <section class="settings-group">
+        <h2 class="group-title">应用</h2>
+        <section class="ts-card settings-card">
+          <div class="setting-row">
+            <div class="setting-main">
+              <div class="setting-label">聚合/展示时区</div>
+              <div class="setting-help">存储/计算一律 UTC，仅展示按此时区一次转换。</div>
             </div>
-            <div>
-              <div class="stat-row">
-                <span class="stat-label">开机自启</span>
-                <span class="stat-value">{{
-                  autostart == null ? "—" : autostart ? "已开启" : "已关闭"
-                }}</span>
-              </div>
-              <div class="help-line">开机后自动启动并驻留托盘。</div>
+            <div class="setting-control">
+              <NSelect
+                v-model:value="tz"
+                :options="TZ_OPTIONS"
+                size="small"
+                style="width: 200px"
+                aria-label="聚合/展示时区"
+              />
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-main">
+              <div class="setting-label">开机自启</div>
+              <div class="setting-help">开机后自动启动并驻留托盘。</div>
+            </div>
+            <div class="setting-control">
               <NSwitch
                 :value="autostart === true"
                 :disabled="autostart == null || autostartBusy"
                 :loading="autostartBusy"
+                aria-label="开机自启"
                 @update:value="setAutostart"
               />
             </div>
-          </NCard>
-        </NGi>
-        <NGi span="1">
-          <NCard title="数据源" size="small">
-            <div v-for="s in sources" :key="s.agent" style="margin-bottom: 16px">
-              <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px">
-                <strong>{{ AGENT_LABEL[s.agent] ?? s.agent }}</strong>
-                <NSwitch
-                  :value="drafts[sourceIdOf(s.agent)]?.enabled ?? true"
-                  size="small"
-                  @update:value="(v: boolean) => setSourceEnabled(sourceIdOf(s.agent), v)"
-                />
-                <span style="font-size: 12px; opacity: 0.6">
-                  {{
-                    s.state === "ready"
-                      ? `${fmtNum(s.files)} 个会话文件`
-                      : s.state === "disabled"
-                        ? "已停用"
-                        : s.state === "missing"
-                          ? "目录不存在"
-                          : "无日志"
-                  }}
-                </span>
-                <span style="flex: 1"></span>
-                <NButton
-                  size="tiny"
-                  :loading="savingSource === sourceIdOf(s.agent)"
-                  @click="saveSource(s.agent)"
-                >
-                  保存
-                </NButton>
-              </div>
-              <NInput
-                :value="drafts[sourceIdOf(s.agent)]?.dir ?? ''"
+          </div>
+        </section>
+      </section>
+
+      <section class="settings-group">
+        <h2 class="group-title">数据源</h2>
+        <section class="ts-card settings-card">
+          <div
+            v-for="(s, i) in sources"
+            :key="s.agent"
+            class="source-block"
+            :class="{ 'has-divider': i > 0 }"
+          >
+            <div class="source-head">
+              <strong>{{ AGENT_LABEL[s.agent] ?? s.agent }}</strong>
+              <NSwitch
+                :value="drafts[sourceIdOf(s.agent)]?.enabled ?? true"
                 size="small"
-                :placeholder="`默认目录：${s.dir}`"
-                @update:value="(v: string) => setSourceDir(sourceIdOf(s.agent), v)"
+                :aria-label="`${AGENT_LABEL[s.agent] ?? s.agent} 启用`"
+                @update:value="(v: boolean) => setSourceEnabled(sourceIdOf(s.agent), v)"
               />
-              <NAlert v-if="sourceErrors[sourceIdOf(s.agent)]" type="error" style="margin: 6px 0">
-                {{ sourceErrors[sourceIdOf(s.agent)] }}
-              </NAlert>
-              <div style="font-size: 12px; opacity: 0.6; margin-top: 4px">
-                留空使用默认目录；停用后该来源完全不参与统计。两个来源不能指向同一目录。
-                保存后回到汇总页生效。
+              <span class="source-state">
+                {{
+                  s.state === "ready"
+                    ? `${fmtNum(s.files)} 个会话文件`
+                    : s.state === "disabled"
+                      ? "已停用"
+                      : s.state === "missing"
+                        ? "目录不存在"
+                        : "无日志"
+                }}
+              </span>
+              <span class="flex-fill"></span>
+              <NButton
+                size="tiny"
+                :loading="savingSource === sourceIdOf(s.agent)"
+                @click="saveSource(s.agent)"
+              >
+                保存
+              </NButton>
+            </div>
+            <NInput
+              :value="drafts[sourceIdOf(s.agent)]?.dir ?? ''"
+              size="small"
+              :placeholder="`默认目录：${s.dir}`"
+              @update:value="(v: string) => setSourceDir(sourceIdOf(s.agent), v)"
+            />
+            <div v-if="sourceErrors[sourceIdOf(s.agent)]" class="ts-notice source-error">
+              <svg
+                class="ts-notice-icon is-error"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                aria-hidden="true"
+              >
+                <circle cx="12" cy="12" r="9" />
+                <path d="m9 9 6 6M15 9l-6 6" />
+              </svg>
+              <span class="ts-notice-content">{{ sourceErrors[sourceIdOf(s.agent)] }}</span>
+            </div>
+            <div class="setting-help">
+              留空使用默认目录；停用后该来源完全不参与统计。两个来源不能指向同一目录。
+              保存后回到汇总页生效。
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="settings-group">
+        <h2 class="group-title">缓存</h2>
+        <section class="ts-card settings-card">
+          <div class="setting-row">
+            <div class="setting-main">
+              <div class="setting-label">缓存文件</div>
+            </div>
+            <span class="setting-value ts-num">{{ cache ? fmtNum(cache.files) : "—" }}</span>
+          </div>
+          <div class="setting-row">
+            <div class="setting-main">
+              <div class="setting-label">缓存事件</div>
+            </div>
+            <span class="setting-value ts-num">{{ cache ? fmtNum(cache.events) : "—" }}</span>
+          </div>
+          <div class="setting-help">
+            缓存是纯优化：任何故障都会自动退回全量扫描，统计数字不受影响。
+          </div>
+          <NCollapse class="tech-collapse">
+            <NCollapseItem title="技术详情" name="tech">
+              <div class="tech-line">缓存路径：{{ cache?.path ?? "—" }}</div>
+              <div class="tech-line">models.dev 快照：{{ pricing?.modelsdev_path ?? "—" }}</div>
+              <div class="tech-line">OpenRouter 快照：{{ pricing?.openrouter_path ?? "—" }}</div>
+              <div class="tech-line">外置价格文件：{{ pricing?.path ?? "—" }}</div>
+              <div class="tech-line">
+                models.dev 上次同步：{{ pricing?.modelsdev_synced_at ?? "—" }}
               </div>
-            </div>
-          </NCard>
-        </NGi>
-        <NGi span="1">
-          <NCard title="缓存" size="small">
-            <div class="stat-row">
-              <span class="stat-label">缓存文件</span>
-              <span class="stat-value ts-num">{{ cache ? fmtNum(cache.files) : "—" }}</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">缓存事件</span>
-              <span class="stat-value ts-num">{{ cache ? fmtNum(cache.events) : "—" }}</span>
-            </div>
-            <div class="help-line">
-              缓存是纯优化：任何故障都会自动退回全量扫描，统计数字不受影响。
-            </div>
-            <NCollapse class="tech-collapse">
-              <NCollapseItem title="技术详情" name="tech">
-                <div class="tech-line">缓存路径：{{ cache?.path ?? "—" }}</div>
-                <div class="tech-line">models.dev 快照：{{ pricing?.modelsdev_path ?? "—" }}</div>
-                <div class="tech-line">OpenRouter 快照：{{ pricing?.openrouter_path ?? "—" }}</div>
-                <div class="tech-line">外置价格文件：{{ pricing?.path ?? "—" }}</div>
-                <div class="tech-line">
-                  models.dev 上次同步：{{ pricing?.modelsdev_synced_at ?? "—" }}
-                </div>
-                <div class="tech-line">
-                  OpenRouter 上次同步：{{ pricing?.openrouter_synced_at ?? "—" }}
-                </div>
-              </NCollapseItem>
-            </NCollapse>
-            <NButton size="small" :loading="rebuilding" @click="rebuild">重建缓存</NButton>
-          </NCard>
-        </NGi>
-        <NGi span="2">
-          <NCard title="价格" size="small">
-            <template #header-extra>
-              <div style="display: flex; gap: 8px">
-                <NButton size="small" type="primary" :loading="syncing" @click="syncPricing">
-                  同步在线价格
-                </NButton>
-                <NButton size="small" @click="openPricing">打开 / 创建外置价格文件</NButton>
+              <div class="tech-line">
+                OpenRouter 上次同步：{{ pricing?.openrouter_synced_at ?? "—" }}
               </div>
-            </template>
-            <div style="font-size: 12px; opacity: 0.6; margin-bottom: 8px">
-              优先级：外置（{{ pricing?.external_count ?? 0 }} 条）> models.dev（{{
-                pricing?.modelsdev_count ?? 0
-              }}
-              条，主源）> OpenRouter（{{ pricing?.openrouter_count ?? 0 }} 条，补充源）；
-              层内最长前缀匹配，未收录模型按未知价格处理（无内置兜底）。本地快照是
-              离线缓存：断网时继续按上次同步数据计价；同步时间与快照路径见"缓存"组的技术详情。
-            </div>
-            <!-- Task 4：主源缺失或损坏 → 状态/路径/需要同步提示 -->
-            <NAlert
-              v-if="pricing && (pricing.modelsdev_count === 0 || !pricing.modelsdev_synced_at)"
-              type="warning"
-              style="margin-bottom: 8px"
+            </NCollapseItem>
+          </NCollapse>
+          <NButton size="small" :loading="rebuilding" @click="rebuild">重建缓存</NButton>
+        </section>
+      </section>
+
+      <section class="settings-group">
+        <h2 class="group-title">价格</h2>
+        <section class="ts-card settings-card">
+          <div class="price-actions">
+            <NButton size="small" type="primary" :loading="syncing" @click="syncPricing">
+              同步在线价格
+            </NButton>
+            <NButton size="small" @click="openPricing">打开 / 创建外置价格文件</NButton>
+          </div>
+          <div class="setting-help">
+            优先级：外置（{{ pricing?.external_count ?? 0 }} 条）> models.dev（{{
+              pricing?.modelsdev_count ?? 0
+            }}
+            条，主源）> OpenRouter（{{ pricing?.openrouter_count ?? 0 }} 条，补充源）；
+            层内最长前缀匹配，未收录模型按未知价格处理（无内置兜底）。本地快照是
+            离线缓存：断网时继续按上次同步数据计价；同步时间与快照路径见"缓存"组的技术详情。
+          </div>
+          <!-- 任务 7：主源缺失/损坏与快照警告 = .ts-notice（不再用高饱和 NAlert） -->
+          <div
+            v-if="pricing && (pricing.modelsdev_count === 0 || !pricing.modelsdev_synced_at)"
+            class="ts-notice price-notice"
+            role="alert"
+          >
+            <svg
+              class="ts-notice-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
             >
+              <path d="M12 3.5 21 19.5H3z" />
+              <path d="M12 10v4" />
+              <path d="M12 17h.01" />
+            </svg>
+            <span class="ts-notice-content">
               主源（models.dev）尚未就绪{{ pricing.modelsdev_synced_at ? "或数据为空" : "" }}：
               {{ pricing.modelsdev_path }}。点击上方「同步在线价格」获取定价；
               当前未覆盖模型的费用将显示为未知。
-            </NAlert>
-            <NAlert
-              v-for="(w, i) in pricing?.warnings ?? []"
-              :key="i"
-              type="warning"
-              style="margin-bottom: 8px"
+            </span>
+          </div>
+          <div v-for="(w, i) in pricing?.warnings ?? []" :key="i" class="ts-notice price-notice">
+            <svg
+              class="ts-notice-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
             >
-              {{ w }}
-            </NAlert>
-            <div
-              style="
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                gap: 12px;
-                margin-bottom: 8px;
-              "
-            >
-              <span style="font-size: 13px; opacity: 0.8">自动同步价格（每 24h）</span>
+              <path d="M12 3.5 21 19.5H3z" />
+              <path d="M12 10v4" />
+              <path d="M12 17h.01" />
+            </svg>
+            <span class="ts-notice-content">{{ w }}</span>
+          </div>
+          <div class="setting-row">
+            <div class="setting-main">
+              <div class="setting-label">自动同步价格（每 24h）</div>
+            </div>
+            <div class="setting-control">
               <NSwitch
                 :value="autoSync === true"
                 :disabled="autoSync == null || autoSyncBusy"
                 :loading="autoSyncBusy"
+                aria-label="自动同步价格"
                 @update:value="setAutoSync"
               />
             </div>
-            <div style="font-size: 12px; opacity: 0.6; margin-bottom: 8px">
-              {{ pricing?.path }}（TOML；本地价格最高优先，保存后下次统计生效）
-            </div>
-            <NDataTable
-              :columns="priceColumns"
-              :data="pricing?.entries ?? []"
-              :row-key="rowKey"
-              size="small"
-              :max-height="420"
-              virtual-scroll
-            />
-          </NCard>
-        </NGi>
-      </NGrid>
+          </div>
+          <div class="setting-help">
+            {{ pricing?.path }}（TOML；本地价格最高优先，保存后下次统计生效）
+          </div>
+          <NDataTable
+            :columns="priceColumns"
+            :data="pricing?.entries ?? []"
+            :row-key="rowKey"
+            size="small"
+            :bordered="false"
+            :max-height="420"
+            virtual-scroll
+          />
+        </section>
+      </section>
     </div>
   </NSpin>
 </template>
 <style scoped>
-.stat-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--ts-space-3);
-  margin-bottom: var(--ts-space-2);
+/* 任务 7：macOS 系统设置式分组——组标题在卡片外（13px/600 次要色） */
+.settings-group {
+  margin-bottom: var(--ts-space-5);
+}
+.settings-group:last-child {
+  margin-bottom: 0;
 }
 
-.stat-label {
+.group-title {
   font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
   color: var(--ts-text-secondary);
+  margin: 0 0 var(--ts-space-2);
 }
 
-.stat-value {
+/* 设置项行：左标签 + 右控件，行间发丝线 */
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ts-space-4);
+  padding: var(--ts-space-3) 0;
+  border-bottom: 1px solid var(--ts-separator);
+}
+
+.setting-main {
+  min-width: 0;
+}
+
+.setting-label {
+  font-size: 14px;
+  color: var(--ts-text);
+}
+
+.setting-control {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.setting-value {
   font-size: 14px;
   font-weight: 600;
   color: var(--ts-text);
 }
 
-.help-line {
+.setting-help {
   font-size: 12px;
   line-height: 1.5;
   color: var(--ts-text-muted);
   margin: var(--ts-space-1) 0 var(--ts-space-2);
 }
 
+/* 数据源行块：块间发丝线 */
+.source-block {
+  padding: var(--ts-space-2) 0;
+}
+.source-block.has-divider {
+  border-top: 1px solid var(--ts-separator);
+}
+
+.source-head {
+  display: flex;
+  align-items: center;
+  gap: var(--ts-space-2);
+  margin-bottom: var(--ts-space-2);
+}
+
+.source-head strong {
+  font-size: 14px;
+  color: var(--ts-text);
+}
+
+.source-state {
+  font-size: 12px;
+  color: var(--ts-text-muted);
+}
+
+.flex-fill {
+  flex: 1;
+}
+
+.source-error {
+  margin: var(--ts-space-2) 0;
+}
+
+.source-error .ts-notice-icon.is-error {
+  color: var(--ts-error);
+}
+
+.price-actions {
+  display: flex;
+  gap: var(--ts-space-2);
+  margin-bottom: var(--ts-space-2);
+}
+
+.price-notice {
+  margin-bottom: var(--ts-space-2);
+}
+
+.price-notice .ts-notice-icon {
+  color: var(--ts-warning);
+}
+
 .tech-collapse {
-  margin-top: var(--ts-space-2);
+  margin: var(--ts-space-2) 0;
 }
 
 .tech-line {

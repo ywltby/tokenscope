@@ -92,6 +92,17 @@ const statusPill = computed<{ cls: string; text: string }>(() => {
   if (summaryError.value) return { cls: "ts-pill-warning", text: "刷新失败 · 显示上次数据" };
   return { cls: "ts-pill-success", text: "已更新" };
 });
+
+// 任务 7：来源异常通知——单条直接展示，多条合并为一条可展开通知。
+const problemSources = computed(() => sourceStatus.value.filter((x) => x.state !== "ready"));
+const showSourceDetails = ref(false);
+function sourceNoticeText(s: SourceStatus): string {
+  if (s.state === "disabled")
+    return `${AGENT_LABEL[s.agent] ?? s.agent} 已在设置中停用，不参与统计。`;
+  if (s.state === "missing")
+    return `${AGENT_LABEL[s.agent] ?? s.agent} 数据目录不存在（${s.dir}）。`;
+  return `${AGENT_LABEL[s.agent] ?? s.agent} 目录存在但没有发现会话日志（${s.dir}）。`;
+}
 async function refresh(): Promise<void> {
   const seq = ++summarySeq;
   loading.value = true;
@@ -282,41 +293,68 @@ void loadSources();
         @update:value="(v: string) => (tz = v)"
       />
     </div>
-    <!-- 任务 3：异常与来源四态 = 内联通知条（玻璃底、状态图标、文字操作） -->
-    <div
-      v-for="s in sourceStatus.filter((x) => x.state !== 'ready')"
-      :key="s.agent"
-      class="ts-notice source-notice"
-    >
-      <svg
-        class="ts-notice-icon"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.5"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M12 3.5 21 19.5H3z" />
-        <path d="M12 10v4" />
-        <path d="M12 17h.01" />
-      </svg>
-      <span class="ts-notice-content">
-        <template v-if="s.state === 'disabled'">
-          {{ AGENT_LABEL[s.agent] ?? s.agent }} 已在设置中停用，不参与统计。
-        </template>
-        <template v-else-if="s.state === 'missing'">
-          {{ AGENT_LABEL[s.agent] ?? s.agent }} 数据目录不存在（{{ s.dir }}）。
-        </template>
-        <template v-else>
-          {{ AGENT_LABEL[s.agent] ?? s.agent }} 目录存在但没有发现会话日志（{{ s.dir }}）。
-        </template>
-      </span>
-      <button type="button" class="ts-notice-action ts-focusable" @click="emit('go-settings')">
-        去设置 ›
-      </button>
-    </div>
+    <!-- 任务 3/7：异常与来源四态 = 内联通知条；多条来源异常合并为一条可展开 -->
+    <template v-if="problemSources.length === 1">
+      <div class="ts-notice source-notice">
+        <svg
+          class="ts-notice-icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M12 3.5 21 19.5H3z" />
+          <path d="M12 10v4" />
+          <path d="M12 17h.01" />
+        </svg>
+        <span class="ts-notice-content">{{ sourceNoticeText(problemSources[0]) }}</span>
+        <button
+          v-if="problemSources[0].state !== 'disabled'"
+          type="button"
+          class="ts-notice-action ts-focusable"
+          @click="emit('go-settings')"
+        >
+          去设置 ›
+        </button>
+      </div>
+    </template>
+    <template v-else-if="problemSources.length > 1">
+      <div class="ts-notice source-notice">
+        <svg
+          class="ts-notice-icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M12 3.5 21 19.5H3z" />
+          <path d="M12 10v4" />
+          <path d="M12 17h.01" />
+        </svg>
+        <span class="ts-notice-content">
+          {{ problemSources.length }} 个来源异常，统计可能不完整。
+        </span>
+        <button
+          type="button"
+          class="ts-notice-action ts-focusable"
+          :aria-expanded="showSourceDetails"
+          @click="showSourceDetails = !showSourceDetails"
+        >
+          详情
+        </button>
+      </div>
+      <div v-if="showSourceDetails" class="source-details">
+        <div v-for="s in problemSources" :key="s.agent" class="source-detail-line">
+          {{ sourceNoticeText(s) }}
+        </div>
+      </div>
+    </template>
     <!-- 失败可见并可重试（计划 A2）：保留已有数据展示，不整体灰罩 -->
     <div v-if="summaryError" class="ts-notice source-notice">
       <svg
@@ -443,6 +481,21 @@ void loadSources();
 
 .source-notice {
   margin-bottom: var(--ts-space-3);
+}
+
+/* 合并通知展开后的逐条明细 */
+.source-details {
+  margin: calc(-1 * var(--ts-space-2)) 0 var(--ts-space-3);
+  padding: var(--ts-space-2) var(--ts-space-3);
+  border-left: 2px solid var(--ts-separator-strong);
+  border-radius: var(--ts-radius-control);
+  background: var(--ts-surface-solid);
+}
+
+.source-detail-line {
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--ts-text-secondary);
 }
 
 .source-notice .ts-notice-icon {

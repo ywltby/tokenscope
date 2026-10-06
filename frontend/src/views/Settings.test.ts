@@ -392,3 +392,52 @@ describe("Settings 分组与状态（设计系统 Task 7）", () => {
     expect(w.text()).toContain("技术详情");
   });
 });
+
+describe("Settings macOS 分组结构（设计系统 Task 7）", () => {
+  it("每组一张 .ts-card，组标题（.group-title）在卡片外", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    const titles = w.findAll(".group-title").map((t) => t.text());
+    expect(titles).toEqual(["应用", "数据源", "缓存", "价格"]);
+    const cards = w.findAll("section.ts-card");
+    expect(cards.length).toBe(4);
+    for (const t of w.findAll(".group-title")) {
+      expect(t.element.closest("section.ts-card"), "组标题必须在卡片外").toBeNull();
+    }
+  });
+
+  it("设置项为左标签右控件行（.setting-row），行间发丝线", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    const rows = w.findAll(".setting-row");
+    // 至少：时区、自启、缓存文件、缓存事件、自动同步价格
+    expect(rows.length).toBeGreaterThanOrEqual(5);
+    const tzRow = rows.find((r) => r.text().includes("聚合/展示时区"));
+    expect(tzRow).toBeDefined();
+    expect(tzRow!.find(".setting-label").exists()).toBe(true);
+    // 行控件在右侧容器
+    expect(tzRow!.find(".setting-control").exists()).toBe(true);
+  });
+
+  it("主源未就绪与快照警告渲染为 .ts-notice（不再使用 NAlert）", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pricing_entries")
+        return Promise.resolve({
+          ...pricingView,
+          modelsdev_count: 0,
+          modelsdev_synced_at: null,
+          warnings: ["OpenRouter 快照损坏，已跳过 3 条"],
+        });
+      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const notices = w.findAll(".ts-notice");
+    expect(notices.some((n) => n.text().includes("主源（models.dev）尚未就绪"))).toBe(true);
+    expect(notices.some((n) => n.text().includes("OpenRouter 快照损坏"))).toBe(true);
+    expect(w.find(".n-alert").exists()).toBe(false);
+  });
+});
