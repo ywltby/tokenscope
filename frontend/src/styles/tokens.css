@@ -229,6 +229,8 @@ body {
 
 /* 分段控件 */
 .ts-segmented {
+  position: relative; /* thumb 是 absolute 子元素：锚点必须是底槽自身，
+    否则会以 sticky 导航栏定位而错位到窗口左上角 */
   display: inline-flex;
   gap: 2px;
   background: var(--ts-fill);

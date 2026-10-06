@@ -120,4 +120,18 @@ describe("主题偏好（设计系统 Task 1）", () => {
     const dark = chartTokens("dark").series.map((s) => s.color);
     expect(light).not.toEqual(dark);
   });
+
+  it("分段控件底槽必须 relative：thumb 是 absolute 子元素，锚点丢失会错位到吸顶导航", async () => {
+    await import("../styles/tokens.css");
+    const css = [...document.querySelectorAll("style")]
+      .map((s) => s.textContent ?? "")
+      .join(String.fromCharCode(10));
+    const start = css.indexOf(".ts-segmented {");
+    expect(start, "必须存在 .ts-segmented 规则").toBeGreaterThanOrEqual(0);
+    const body = css.slice(start, css.indexOf("}", start));
+    // 回归：缺 position: relative 时，absolute 滑块以 sticky 导航栏为包含块，
+    // 页面/主题两个滑块全部叠到窗口左上角（盖住品牌图标）。
+    expect(body).toContain("position: relative");
+    expect(css).toContain(".ts-segmented-thumb");
+  });
 });
