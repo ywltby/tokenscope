@@ -92,7 +92,11 @@ const themeOptions: { value: ThemePreference; label: string }[] = [
             <PricingStatusBanner />
           </div>
           <main class="app-content">
-            <Dashboard v-if="page === 'summary'" :refresh-key="refreshKey" />
+            <Dashboard
+              v-if="page === 'summary'"
+              :refresh-key="refreshKey"
+              @go-settings="page = 'settings'"
+            />
             <Settings v-else :refresh-key="refreshKey" />
           </main>
         </div>

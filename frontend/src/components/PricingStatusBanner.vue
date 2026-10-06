@@ -62,46 +62,74 @@ const bannerText = "尚未获取定价，需要联网同步价格；当前费用
 </script>
 
 <template>
-  <div v-if="!statusFailed && visible" class="pricing-banner ts-glass" role="alert">
-    <div class="banner-body">
-      <span>{{ bannerText }}</span>
-      <NButton size="tiny" type="primary" :loading="syncing" @click="syncNow"> 立即同步 </NButton>
-    </div>
+  <!-- 任务 3：全局横幅 = 内联通知条（.ts-notice 玻璃配方 + 状态图标 + 文字操作） -->
+  <div v-if="!statusFailed && visible" class="ts-notice pricing-notice" role="alert">
+    <svg
+      class="ts-notice-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 3.5 21 19.5H3z" />
+      <path d="M12 10v4" />
+      <path d="M12 17h.01" />
+    </svg>
+    <span class="ts-notice-content">{{ bannerText }}</span>
+    <NButton size="tiny" type="primary" :loading="syncing" @click="syncNow"> 立即同步 </NButton>
   </div>
   <!-- Task 3/审阅修复：部分同步失败原因独立展示——主源已可用横幅收敛后仍可见 -->
-  <div v-if="syncError" class="pricing-banner ts-glass is-warning" role="alert">
-    <div class="banner-body text-small">
+  <div v-if="syncError" class="ts-notice pricing-notice is-error" role="alert">
+    <svg
+      class="ts-notice-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="9" />
+      <path d="m9 9 6 6M15 9l-6 6" />
+    </svg>
+    <span class="ts-notice-content text-small">
       同步部分失败：{{ syncError }}（可重试；主源已可用时费用仍会正常显示）
-    </div>
+    </span>
   </div>
   <!-- pricing_status 读取失败 → 可重试提示而非静默空 DOM（审阅不变量 4） -->
-  <div v-else-if="statusFailed" class="pricing-banner ts-glass is-error" role="alert">
-    <div class="banner-body">
-      <span>定价状态读取失败，可重试：{{ statusError }}</span>
-      <NButton size="tiny" :loading="syncing" @click="refreshStatus">重试</NButton>
-    </div>
+  <div v-else-if="statusFailed" class="ts-notice pricing-notice is-error" role="alert">
+    <svg
+      class="ts-notice-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="9" />
+      <path d="m9 9 6 6M15 9l-6 6" />
+    </svg>
+    <span class="ts-notice-content">定价状态读取失败，可重试：{{ statusError }}</span>
+    <NButton size="tiny" :loading="syncing" @click="refreshStatus">重试</NButton>
   </div>
 </template>
 
 <style scoped>
-.pricing-banner {
+.pricing-notice {
   margin-bottom: var(--ts-space-3);
-  border-radius: var(--ts-radius);
-  border-left: 3px solid var(--ts-warning);
-  color: var(--ts-text);
 }
 
-.pricing-banner.is-error {
-  border-left-color: var(--ts-error);
+/* 状态只表达同步状态：警告/错误用图标着色，容器保持中性玻璃 */
+.pricing-notice .ts-notice-icon {
+  color: var(--ts-warning);
 }
 
-.banner-body {
-  display: flex;
-  align-items: center;
-  gap: var(--ts-space-3);
-  flex-wrap: wrap;
-  padding: var(--ts-space-2) var(--ts-space-3);
-  font-size: 13px;
+.pricing-notice.is-error .ts-notice-icon {
+  color: var(--ts-error);
 }
 
 .text-small {

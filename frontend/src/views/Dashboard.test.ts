@@ -186,23 +186,24 @@ describe("Dashboard 查询编排", () => {
   });
 });
 
-describe("Dashboard 视图快照与刷新（C4/F08）", () => {
-  function snapshotPayload() {
-    return {
-      v: 3,
-      saved_at: "2026-10-05T00:00:00Z",
-      filters: {
-        by: "model",
-        agent: "claude",
-        range: null,
-        drill: { type: "model", key: "claude-sonnet-4-5" },
-        tz: "Asia/Shanghai",
-      },
-      report: summaryA,
-      events,
-    };
-  }
+// v3 快照样例（模块级：多个 describe 共用）
+function snapshotPayload() {
+  return {
+    v: 3,
+    saved_at: "2026-10-05T00:00:00Z",
+    filters: {
+      by: "model",
+      agent: "claude",
+      range: null,
+      drill: { type: "model", key: "claude-sonnet-4-5" },
+      tz: "Asia/Shanghai",
+    },
+    report: summaryA,
+    events,
+  };
+}
 
+describe("Dashboard 视图快照与刷新（C4/F08）", () => {
   it("view_cache_query_mismatch：v2 快照连同筛选一起恢复，口径一致", async () => {
     let resolveSummary!: (v: SummaryReport) => void;
     invokeMock.mockImplementation((cmd: string) => {
@@ -364,5 +365,99 @@ describe("Dashboard 来源筛选（设计系统 Task 2，图标 + 文字分段�
     await items[2].trigger("click");
     await flushPromises();
     expect(state(w)["agent"]).toBe("codex");
+  });
+});
+
+describe("Dashboard 页头与通知（设计系统 Task 3）", () => {
+  it("大标题 + 时区/日期摘要在左，状态胶囊与刷新在标题行右侧", async () => {
+    mockOk();
+    const w = mountDashboard();
+    await flushPromises();
+    expect(w.find(".page-title").text()).toBe("用量汇总");
+    const head = w.find(".page-head");
+    expect(head.find(".page-sub").text()).toContain("统计时区");
+    const pill = head.find(".ts-status-pill");
+    expect(pill.exists()).toBe(true);
+    expect(pill.text()).toContain("已更新");
+    expect(head.findAll("button").some((b) => b.text() === "刷新")).toBe(true);
+  });
+
+  it("stale 快照 → 标题行警告胶囊；后台刷新落地 → 成功胶囊", async () => {
+    let resolveSummary!: (v: SummaryReport) => void;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") return Promise.resolve(snapshotPayload());
+      if (cmd === "summarize") return new Promise((r) => (resolveSummary = r));
+      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    const pill = w.find(".page-head .ts-status-pill");
+    expect(pill.classes()).toContain("ts-pill-warning");
+    expect(pill.text()).toContain("缓存数据");
+    resolveSummary(summaryA);
+    await flushPromises();
+    expect(w.find(".page-head .ts-status-pill").classes()).toContain("ts-pill-success");
+  });
+
+  it("筛选顺序固定：来源 → 聚合维度 → 日期 → 时区", async () => {
+    mockOk();
+    const w = mountDashboard();
+    await flushPromises();
+    const src = w.find('[aria-label="数据来源"]').element;
+    const dim = w.find('[aria-label="聚合维度"]').element;
+    const range = w.findComponent({ name: "DateRangeSelect" }).element;
+    const tz = w.find(".tz-select").element;
+    const FOLLOWING = Node.DOCUMENT_POSITION_FOLLOWING;
+    expect(src.compareDocumentPosition(dim) & FOLLOWING).toBeTruthy();
+    expect(dim.compareDocumentPosition(range) & FOLLOWING).toBeTruthy();
+    expect(range.compareDocumentPosition(tz) & FOLLOWING).toBeTruthy();
+  });
+
+  it("来源异常渲染为内联通知，去设置动作发出 go-settings", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "summarize") return Promise.resolve(summaryA);
+      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "source_status")
+        return Promise.resolve([
+          {
+            agent: "codex",
+            dir: "C:/codex",
+            enabled: true,
+            exists: false,
+            files: 0,
+            state: "missing",
+          },
+        ]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    const notice = w.find(".ts-notice");
+    expect(notice.exists()).toBe(true);
+    expect(notice.text()).toContain("Codex 数据目录不存在");
+    expect(notice.find(".ts-notice-icon").exists()).toBe(true);
+    const action = notice.findAll("button, a").find((n) => n.text().includes("去设置"));
+    expect(action).toBeDefined();
+    await action!.trigger("click");
+    expect(w.emitted("go-settings")).toBeTruthy();
+  });
+
+  it("汇总加载失败渲染为可重试内联通知（非 NAlert）", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "summarize") return Promise.reject(new Error("boom"));
+      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    const notices = w.findAll(".ts-notice");
+    expect(notices.length).toBeGreaterThan(0);
+    expect(notices.some((n) => n.text().includes("汇总加载失败"))).toBe(true);
+    expect(w.find(".n-alert").exists()).toBe(false);
   });
 });

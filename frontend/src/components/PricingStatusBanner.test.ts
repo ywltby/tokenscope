@@ -174,17 +174,18 @@ describe("PricingStatusBanner（Task 3）", () => {
   });
 });
 
-describe("PricingStatusBanner 视觉（设计系统 Task 2）", () => {
-  it("横幅使用玻璃表面、语义告警色与 alert 角色", async () => {
+describe("PricingStatusBanner 视觉（设计系统 Task 3）", () => {
+  it("横幅使用内联通知条结构、状态图标与 alert 角色", async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pricing_status") return Promise.resolve(statusNeedsSync);
       return Promise.resolve(null);
     });
     const w = mount(PricingStatusBanner);
     await flushPromises();
-    const glass = w.find(".ts-glass");
-    expect(glass.exists()).toBe(true);
-    expect(glass.classes()).toContain("pricing-banner");
+    const notice = w.find(".ts-notice");
+    expect(notice.exists()).toBe(true);
+    expect(notice.find(".ts-notice-icon").exists()).toBe(true);
+    expect(notice.findAll("button").some((b) => b.text().includes("立即同步"))).toBe(true);
     expect(w.find('[role="alert"]').exists()).toBe(true);
   });
 });

@@ -125,9 +125,10 @@ const shortcutActive = (sc: { range: () => [string, string] }): boolean => {
     @update:show="show = $event"
   >
     <template #trigger>
-      <NButton size="small" secondary class="range-trigger ts-focusable">
+      <!-- 任务 3：与分段控件同族——32px、--ts-fill 底、无描边、8px 圆角 -->
+      <button type="button" class="range-trigger ts-focusable">
         <span class="range-trigger-label">{{ label }}</span>
-      </NButton>
+      </button>
     </template>
     <div class="range-panel ts-glass">
       <div class="shortcut-row">
@@ -175,8 +176,26 @@ const shortcutActive = (sc: { range: () => [string, string] }): boolean => {
 .range-panel {
   width: 300px;
   padding: var(--ts-space-3);
-  border-radius: var(--ts-radius-lg);
+  border-radius: var(--ts-radius-popover);
   background-color: var(--ts-surface-elevated);
+}
+
+/* 触发按钮与筛选行分段控件同一族（DESIGN.md §5 筛选栏） */
+.range-trigger {
+  height: 32px;
+  padding: 0 var(--ts-space-3);
+  border: none;
+  border-radius: var(--ts-radius-control);
+  background: var(--ts-fill);
+  color: var(--ts-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+.range-trigger:hover {
+  color: var(--ts-text);
 }
 
 .range-trigger-label {
@@ -185,8 +204,7 @@ const shortcutActive = (sc: { range: () => [string, string] }): boolean => {
 
 .shortcut-row {
   display: inline-flex;
-  /* 与下方日期输入框同高同浅边框，视觉对齐 */
-  border: 1px solid var(--ts-border);
+  border: 1px solid var(--ts-separator);
   border-radius: var(--ts-radius-control);
   overflow: hidden;
   margin-bottom: var(--ts-space-3);
@@ -204,7 +222,7 @@ const shortcutActive = (sc: { range: () => [string, string] }): boolean => {
 }
 /* 相邻快捷项之间的细分隔线 */
 .shortcut-btn + .shortcut-btn {
-  border-left: 1px solid var(--ts-border);
+  border-left: 1px solid var(--ts-separator);
 }
 
 .field-label {

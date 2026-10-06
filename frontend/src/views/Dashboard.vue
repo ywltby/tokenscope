@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { NAlert, NButton, NCard, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from "naive-ui";
+import { NButton, NCard, NSelect, NSpin, NTag } from "naive-ui";
 import {
   AGENT_LABEL,
   type AgentFilter,
@@ -21,6 +21,8 @@ import { TZ_OPTIONS, useTimezone } from "../composables/timezone";
 import { todayInTz } from "../lib/dates";
 
 const props = defineProps<{ refreshKey: number }>();
+/// 任务 3：来源异常通知的「去设置 ›」动作——由应用壳切换到设置页。
+const emit = defineEmits<{ (e: "go-settings"): void }>();
 
 const by = ref<Dim>("day");
 const agent = ref<AgentFilter>("all");
@@ -82,6 +84,14 @@ const agentOptions: { label: string; value: AgentFilter; icon: string }[] = [
   { label: "Claude Code", value: "claude", icon: "claude" },
   { label: "Codex", value: "codex", icon: "openai" },
 ];
+
+// 任务 3：标题行状态胶囊——stale / 刷新中 / 刷新失败 / 已更新四态可见。
+const statusPill = computed<{ cls: string; text: string }>(() => {
+  if (stale.value) return { cls: "ts-pill-warning", text: "缓存数据 · 后台刷新中" };
+  if (loading.value || !report.value) return { cls: "ts-pill-info", text: "刷新中…" };
+  if (summaryError.value) return { cls: "ts-pill-warning", text: "刷新失败 · 显示上次数据" };
+  return { cls: "ts-pill-success", text: "已更新" };
+});
 async function refresh(): Promise<void> {
   const seq = ++summarySeq;
   loading.value = true;
@@ -242,42 +252,26 @@ void loadSources();
 
 <template>
   <div>
-    <!-- C1：来源四态可见（停用/目录不存在/无日志/正常），不再静默缺席 -->
-    <NAlert
-      v-for="s in sourceStatus.filter((x) => x.state !== 'ready')"
-      :key="s.agent"
-      :type="s.state === 'disabled' ? 'default' : 'warning'"
-      style="margin-bottom: 12px"
-    >
-      <template v-if="s.state === 'disabled'">
-        {{ AGENT_LABEL[s.agent] ?? s.agent }} 已在设置中停用，不参与统计。
-      </template>
-      <template v-else-if="s.state === 'missing'">
-        {{ AGENT_LABEL[s.agent] ?? s.agent }} 数据目录不存在（{{
-          s.dir
-        }}）。可在设置页配置正确目录。
-      </template>
-      <template v-else>
-        {{ AGENT_LABEL[s.agent] ?? s.agent }} 目录存在但没有发现会话日志（{{ s.dir }}）。
-      </template>
-    </NAlert>
-    <!-- 页面标题行：先回答"覆盖什么时间"，右侧保留刷新动作 -->
+    <!-- 页面标题行：先回答"覆盖什么时间"，右侧状态胶囊 + 刷新动作 -->
     <div class="page-head">
-      <div>
+      <div class="head-left">
         <h1 class="page-title">用量汇总</h1>
         <div class="page-sub">
           统计时区 {{ tzLabel }} · 今天 {{ todayLabel
           }}<template v-if="drill"> · 已筛选 {{ drillLabel(drill) }}</template>
         </div>
       </div>
-      <NButton size="small" secondary class="ts-focusable" @click="manualRefresh">刷新</NButton>
+      <div class="head-right">
+        <span class="ts-pill ts-status-pill" :class="statusPill.cls" role="status">{{
+          statusPill.text
+        }}</span>
+        <NButton size="small" secondary class="ts-focusable" @click="manualRefresh">刷新</NButton>
+      </div>
     </div>
     <!-- 筛选行：来源 → 维度 → 日期 → 时区 → 刷新（窄窗口自动换行） -->
     <div class="filter-row">
       <SegmentedControl v-model="agent" :options="agentOptions" aria-label="数据来源" />
-      <NRadioGroup v-model:value="by" size="small" aria-label="聚合维度">
-        <NRadioButton v-for="o in dimOptions" :key="o.value" :value="o.value" :label="o.label" />
-      </NRadioGroup>
+      <SegmentedControl v-model="by" :options="dimOptions" aria-label="聚合维度" />
       <DateRangeSelect v-model:value="range" :tz="tz" />
       <NSelect
         :value="tz"
@@ -288,25 +282,80 @@ void loadSources();
         @update:value="(v: string) => (tz = v)"
       />
     </div>
+    <!-- 任务 3：异常与来源四态 = 内联通知条（玻璃底、状态图标、文字操作） -->
+    <div
+      v-for="s in sourceStatus.filter((x) => x.state !== 'ready')"
+      :key="s.agent"
+      class="ts-notice source-notice"
+    >
+      <svg
+        class="ts-notice-icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M12 3.5 21 19.5H3z" />
+        <path d="M12 10v4" />
+        <path d="M12 17h.01" />
+      </svg>
+      <span class="ts-notice-content">
+        <template v-if="s.state === 'disabled'">
+          {{ AGENT_LABEL[s.agent] ?? s.agent }} 已在设置中停用，不参与统计。
+        </template>
+        <template v-else-if="s.state === 'missing'">
+          {{ AGENT_LABEL[s.agent] ?? s.agent }} 数据目录不存在（{{ s.dir }}）。
+        </template>
+        <template v-else>
+          {{ AGENT_LABEL[s.agent] ?? s.agent }} 目录存在但没有发现会话日志（{{ s.dir }}）。
+        </template>
+      </span>
+      <button type="button" class="ts-notice-action ts-focusable" @click="emit('go-settings')">
+        去设置 ›
+      </button>
+    </div>
     <!-- 失败可见并可重试（计划 A2）：保留已有数据展示，不整体灰罩 -->
-    <NAlert v-if="summaryError" type="error" style="margin-bottom: 12px">
-      汇总加载失败：{{ summaryError }}
-      <NButton size="tiny" style="margin-left: 8px" @click="refresh">重试</NButton>
-    </NAlert>
-    <NAlert v-if="eventsError" type="error" style="margin-bottom: 12px">
-      明细加载失败：{{ eventsError }}
-      <NButton size="tiny" style="margin-left: 8px" @click="loadEvents()">重试</NButton>
-    </NAlert>
-    <!-- 有数据时不再全屏灰罩：数据原地更新，右上角提示刷新中 -->
+    <div v-if="summaryError" class="ts-notice source-notice">
+      <svg
+        class="ts-notice-icon is-error"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        aria-hidden="true"
+      >
+        <circle cx="12" cy="12" r="9" />
+        <path d="m9 9 6 6M15 9l-6 6" />
+      </svg>
+      <span class="ts-notice-content">汇总加载失败：{{ summaryError }}</span>
+      <button type="button" class="ts-notice-action ts-focusable" @click="refresh">重试</button>
+    </div>
+    <div v-if="eventsError" class="ts-notice source-notice">
+      <svg
+        class="ts-notice-icon is-error"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        aria-hidden="true"
+      >
+        <circle cx="12" cy="12" r="9" />
+        <path d="m9 9 6 6M15 9l-6 6" />
+      </svg>
+      <span class="ts-notice-content">明细加载失败：{{ eventsError }}</span>
+      <button type="button" class="ts-notice-action ts-focusable" @click="loadEvents()">
+        重试
+      </button>
+    </div>
+    <!-- 有数据时不再全屏灰罩：数据原地更新，标题行胶囊提示刷新中 -->
     <NSpin :show="loading && !report">
       <!-- 最小高度保证加载转圈居中于可视区，避免空内容时贴顶被遮挡 -->
       <div style="min-height: 380px">
-        <div v-if="report" style="display: flex; justify-content: flex-end; margin-bottom: 8px">
-          <NTag v-if="stale" size="small" type="warning" :bordered="false">
-            缓存数据（{{ cachedAt ?? "" }}）· 后台刷新中
-          </NTag>
-          <NTag v-else-if="loading" size="small" type="info" :bordered="false">刷新中…</NTag>
-        </div>
         <!-- 设计系统 Task 7：空数据状态明确可见，并给出下一步指引 -->
         <div v-if="report && report.groups.length === 0" class="empty-state" role="status">
           <div class="empty-title">暂无数据</div>
@@ -320,10 +369,9 @@ void loadSources();
             v-if="report.by === 'day' || report.groups.length > 2"
             :groups="report.groups.filter((g) => g.key !== '合计')"
             :by="report.by"
-            style="margin-top: 12px"
           />
-          <UsageTable :report="report" style="margin-top: 12px" @row-click="onSummaryRowClick" />
-          <NCard v-if="events" size="small" style="margin-top: 12px">
+          <UsageTable :report="report" @row-click="onSummaryRowClick" />
+          <NCard v-if="events" size="small">
             <template #header>
               请求明细
               <NTag
@@ -354,8 +402,8 @@ void loadSources();
 
 <style scoped>
 .empty-state {
-  border: 1px dashed var(--ts-border-strong);
-  border-radius: var(--ts-radius-lg);
+  border: 1px dashed var(--ts-separator-strong);
+  border-radius: var(--ts-radius-card);
   background: var(--ts-surface-solid);
   padding: var(--ts-space-8) var(--ts-space-6);
   text-align: center;
@@ -375,16 +423,26 @@ void loadSources();
 
 .page-head {
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: var(--ts-space-3);
-  margin-bottom: var(--ts-space-3);
+  gap: var(--ts-space-4);
+  margin-bottom: var(--ts-space-4);
 }
 
+.head-right {
+  display: flex;
+  align-items: center;
+  gap: var(--ts-space-2);
+  flex-shrink: 0;
+}
+
+/* DESIGN.md §3：页面大标题 28px/700，字距 -0.02em */
 .page-title {
-  font-size: 22px;
+  font-family: var(--ts-font-display);
+  font-size: 28px;
   font-weight: 700;
-  line-height: 1.25;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
   margin: 0;
   color: var(--ts-text);
 }
@@ -394,6 +452,26 @@ void loadSources();
   line-height: 1.4;
   color: var(--ts-text-muted);
   margin-top: var(--ts-space-1);
+}
+
+.source-notice {
+  margin-bottom: var(--ts-space-3);
+}
+
+.source-notice .ts-notice-icon {
+  color: var(--ts-warning);
+}
+
+.source-notice .ts-notice-icon.is-error {
+  color: var(--ts-error);
+}
+
+.source-notice .ts-notice-action {
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  padding: 0;
 }
 
 .filter-row {
