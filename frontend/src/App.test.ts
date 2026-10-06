@@ -234,6 +234,65 @@ describe("App 关闭确认（关闭确认与配置文件计划 Task 3）", () =>
     expect(w.find(".stub-NModal").exists()).toBe(false);
   });
 
+  it("R07：close_resolve 失败 → 弹窗保持打开显示原因，重试成功后关闭", async () => {
+    mockApp(statusOk);
+    const w = mount(App);
+    await flushPromises();
+    closeEvent.fns.at(-1)!();
+    await flushPromises();
+    invokeMock.mockClear();
+    // 第一次提交失败
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "close_resolve") return Promise.reject(new Error("写配置失败"));
+      return Promise.resolve(null);
+    });
+    const dialog = w.find(".stub-NModal");
+    const minimize = dialog.findAll("button").find((b) => b.text().includes("最小化到托盘"));
+    await minimize!.trigger("click");
+    await flushPromises();
+    // 弹窗保持打开，原因可见
+    expect(w.find(".stub-NModal").exists()).toBe(true);
+    expect(w.text()).toContain("关闭操作失败");
+    expect(w.text()).toContain("写配置失败");
+    // 重试成功 → 关闭
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "close_resolve") return Promise.resolve(null);
+      return Promise.resolve(null);
+    });
+    const minimize2 = w
+      .find(".stub-NModal")
+      .findAll("button")
+      .find((b) => b.text().includes("最小化到托盘"));
+    await minimize2!.trigger("click");
+    await flushPromises();
+    expect(w.find(".stub-NModal").exists()).toBe(false);
+  });
+
+  it("R07：提交进行中不重复 invoke（防重复提交）", async () => {
+    mockApp(statusOk);
+    const w = mount(App);
+    await flushPromises();
+    closeEvent.fns.at(-1)!();
+    await flushPromises();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    invokeMock.mockClear();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "close_resolve") return gate;
+      return Promise.resolve(null);
+    });
+    const dialog = w.find(".stub-NModal");
+    const minimize = dialog.findAll("button").find((b) => b.text().includes("最小化到托盘"));
+    // pending 期间按钮禁用：再次点击不再派发
+    await minimize!.trigger("click");
+    await minimize!.trigger("click");
+    release();
+    await flushPromises();
+    expect(invokeMock.mock.calls.filter((c) => c[0] === "close_resolve").length).toBe(1);
+  });
+
   it("unmount 时取消 close-requested 监听", async () => {
     mockApp(statusOk);
     closeEvent.unlisten.mockClear();

@@ -68,12 +68,27 @@ onMounted(() => {
 });
 onBeforeUnmount(() => unlistenClose?.());
 
-function onCloseResolve(v: { minimize: boolean; remember: boolean }): void {
-  closeDialogOpen.value = false;
-  void invoke("close_resolve", { minimize: v.minimize, remember: v.remember });
+// R07：关闭决定异步执行——失败（写记忆配置/隐藏/退出前错误）时弹窗
+// 保持打开并显示原因，用户可重试或取消；成功后由窗口动作结束。
+const closeSubmitting = ref(false);
+const closeSubmitError = ref<string | null>(null);
+
+async function onCloseResolve(v: { minimize: boolean; remember: boolean }): Promise<void> {
+  if (closeSubmitting.value) return; // 防重复提交
+  closeSubmitting.value = true;
+  closeSubmitError.value = null;
+  try {
+    await invoke("close_resolve", { minimize: v.minimize, remember: v.remember });
+    closeDialogOpen.value = false;
+  } catch (e) {
+    closeSubmitError.value = `关闭操作失败，请重试或取消：${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    closeSubmitting.value = false;
+  }
 }
 
 function onCloseCancel(): void {
+  if (closeSubmitting.value) return;
   closeDialogOpen.value = false;
 }
 </script>
@@ -134,6 +149,8 @@ function onCloseCancel(): void {
         <!-- 关闭确认弹窗：未记忆默认动作时由后端触发 -->
         <CloseConfirmDialog
           :open="closeDialogOpen"
+          :submitting="closeSubmitting"
+          :error="closeSubmitError"
           @resolve="onCloseResolve"
           @cancel="onCloseCancel"
         />

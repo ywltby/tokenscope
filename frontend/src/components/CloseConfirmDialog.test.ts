@@ -53,6 +53,33 @@ describe("CloseConfirmDialog（关闭确认与配置文件计划 Task 3）", () 
     expect(w.emitted("resolve")!.at(-1)![0]).toEqual({ minimize: false, remember: true });
   });
 
+  it("R07：错误与 submitting 经 props 展示，按钮禁用", async () => {
+    const w = mount(CloseConfirmDialog, {
+      props: { open: true, submitting: true, error: "关闭操作失败，请重试或取消：boom" },
+    });
+    expect(w.text()).toContain("关闭操作失败");
+    expect(w.find('[role="alert"]').exists()).toBe(true);
+    // submitting 时提交按钮全部禁用
+    for (const text of ["最小化到托盘", "直接退出", "取消"]) {
+      const btn = findBtn(w, text)!;
+      expect(
+        btn.attributes("disabled") !== undefined ||
+          btn.classes().some((c) => c.includes("disabled")),
+        `${text} 在 submitting 时必须禁用`,
+      ).toBe(true);
+    }
+  });
+
+  it("R07：submitting 复位后按钮恢复可用", async () => {
+    const w = mount(CloseConfirmDialog, { props: { open: true, submitting: true } });
+    await w.setProps({ submitting: false, error: null });
+    const btn = findBtn(w, "最小化到托盘")!;
+    expect(
+      btn.attributes("disabled") === undefined &&
+        !btn.classes().some((c) => c.includes("disabled")),
+    ).toBe(true);
+  });
+
   it("取消 → cancel 且不带 resolve", async () => {
     const w = mount(CloseConfirmDialog, { props: { open: true } });
     await findBtn(w, "取消")!.trigger("click");

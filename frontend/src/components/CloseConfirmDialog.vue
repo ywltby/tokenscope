@@ -5,13 +5,22 @@
 import { ref, watch } from "vue";
 import { NButton, NCheckbox, NModal } from "naive-ui";
 
-const props = defineProps<{ open: boolean }>();
+const props = defineProps<{
+  open: boolean;
+  /** R07：App 侧提交进行中（禁用按钮防重复） */
+  submitting?: boolean;
+  /** R07：提交失败原因（显示在弹窗内，弹窗保持打开可重试） */
+  error?: string | null;
+}>();
 const emit = defineEmits<{
   (e: "resolve", v: { minimize: boolean; remember: boolean }): void;
   (e: "cancel"): void;
 }>();
 
 const remember = ref(false);
+// R07：提交由 App 异步执行（写记忆配置可能失败）——失败时弹窗保持
+// 打开并显示原因（error prop），用户可重试或取消；submitting prop
+// 在 pending 期间禁用提交按钮防重复。
 // 每次打开都从未勾选开始：记忆是否保留由设置页管理，弹窗不残留上次选择。
 watch(
   () => props.open,
@@ -37,16 +46,39 @@ function resolve(minimize: boolean): void {
     <div class="close-dialog" role="dialog" aria-modal="true" aria-label="关闭 TokenScope">
       <div class="close-title">关闭 TokenScope</div>
       <div class="close-desc">要最小化到托盘继续统计，还是直接退出程序？</div>
-      <NCheckbox v-model:checked="remember" class="close-remember">
+      <NCheckbox v-model:checked="remember" class="close-remember" :disabled="submitting">
         记住我的选择，以后不再询问（可在设置页修改）
       </NCheckbox>
+      <div v-if="error" class="close-error" role="alert">
+        <svg
+          class="ts-notice-icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="9" />
+          <path d="m9 9 6 6M15 9l-6 6" />
+        </svg>
+        <span>{{ error }}</span>
+      </div>
       <div class="close-actions">
-        <NButton size="small" @click="emit('cancel')">取消</NButton>
+        <NButton size="small" :disabled="submitting" @click="emit('cancel')">取消</NButton>
         <span class="close-actions-spacer" />
-        <NButton size="small" type="primary" secondary @click="resolve(true)">
+        <NButton
+          size="small"
+          type="primary"
+          secondary
+          :disabled="submitting"
+          @click="resolve(true)"
+        >
           最小化到托盘
         </NButton>
-        <NButton size="small" type="error" secondary @click="resolve(false)">直接退出</NButton>
+        <NButton size="small" type="error" secondary :disabled="submitting" @click="resolve(false)">
+          直接退出
+        </NButton>
       </div>
     </div>
   </NModal>
@@ -82,6 +114,25 @@ function resolve(minimize: boolean): void {
 
 .close-remember {
   margin-top: var(--ts-space-4);
+}
+
+.close-error {
+  display: flex;
+  align-items: center;
+  gap: var(--ts-space-2);
+  margin-top: var(--ts-space-3);
+  padding: var(--ts-space-2) var(--ts-space-3);
+  border-radius: var(--ts-radius-control);
+  background: rgba(215, 0, 21, 0.08);
+  color: var(--ts-error);
+  font-size: 12px;
+  line-height: 1.5;
+}
+:root[data-theme="dark"] .close-error {
+  background: rgba(255, 105, 97, 0.12);
+}
+.close-error .ts-notice-icon {
+  color: var(--ts-error);
 }
 
 .close-actions {
