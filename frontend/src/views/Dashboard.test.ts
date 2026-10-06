@@ -186,10 +186,10 @@ describe("Dashboard 查询编排", () => {
   });
 });
 
-// v3 快照样例（模块级：多个 describe 共用）
+// v4 快照样例（模块级：多个 describe 共用）
 function snapshotPayload() {
   return {
-    v: 3,
+    v: 4,
     saved_at: "2026-10-05T00:00:00Z",
     filters: {
       by: "model",
@@ -204,7 +204,7 @@ function snapshotPayload() {
 }
 
 describe("Dashboard 视图快照与刷新（C4/F08）", () => {
-  it("view_cache_query_mismatch：v2 快照连同筛选一起恢复，口径一致", async () => {
+  it("view_cache_query_mismatch：v4 快照连同筛选一起恢复，口径一致", async () => {
     let resolveSummary!: (v: SummaryReport) => void;
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "view_cache_load") return Promise.resolve(snapshotPayload());
@@ -228,6 +228,46 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     await flushPromises();
     // 后台刷新落地后过期标记清除
     expect(state(w)["stale"]).toBe(false);
+  });
+
+  it("v3 旧快照（混代风险）被忽略，走正常加载", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") {
+        const p = snapshotPayload();
+        return Promise.resolve({ ...p, v: 3 });
+      }
+      if (cmd === "summarize") return Promise.resolve(summaryA);
+      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    // v3 被忽略：筛选不得被恢复
+    expect(state(w)["agent"]).toBe("all");
+    expect(state(w)["stale"]).toBe(false);
+  });
+
+  it("late_snapshot_cannot_replace_fresh_report：晚到缓存不得覆盖新结果", async () => {
+    let resolveCache!: (v: unknown) => void;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load")
+        return new Promise((r) => {
+          resolveCache = r;
+        });
+      if (cmd === "summarize") return Promise.resolve(summaryB); // 新汇总 99 先落地
+      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect((state(w)["report"] as SummaryReport).groups[0].key).toBe("2026-10-02");
+    // 旧缓存（10）此时才到：必须被丢弃
+    resolveCache(snapshotPayload());
+    await flushPromises();
+    expect((state(w)["report"] as SummaryReport).groups[0].key).toBe("2026-10-02");
+    expect(state(w)["stale"]).toBe(false); // 新结果落地后缓存不再接管
   });
 
   it("view_cache_query_mismatch：v2 旧快照（ms range）不得当新数据展示", async () => {
@@ -347,6 +387,114 @@ describe("Dashboard 状态（设计系统 Task 7）", () => {
     await flushPromises();
     expect(w.text()).toContain("暂无数据");
     expect(w.text()).toContain("调整时间范围");
+  });
+});
+
+describe("视图快照查询身份（R04）", () => {
+  function deferred<T>(): [Promise<T>, (v: T) => void] {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return [promise, resolve];
+  }
+
+  it("snapshot_waits_for_matching_summary_and_events：筛选不一致不落盘", async () => {
+    const [sumAll, resolveSumAll] = deferred<SummaryReport>();
+    const [evAll, resolveEvAll] = deferred<EventList>();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "summarize") {
+        // 第一轮（all）挂起；切 claude 后的第二轮正常返回
+        return invokeMock.mock.calls.filter((c) => c[0] === "summarize").length === 1
+          ? sumAll
+          : Promise.resolve(summaryB);
+      }
+      if (cmd === "list_events") {
+        return invokeMock.mock.calls.filter((c) => c[0] === "list_events").length === 1
+          ? evAll
+          : Promise.resolve(events);
+      }
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    // 切 claude：触发第二轮查询（第一轮 all 汇总仍挂起）
+    state(w)["agent"] = "claude";
+    await flushPromises();
+    // claude 明细先回（此时汇总键仍是挂起的 all）→ 不得落盘
+    resolveEvAll(events);
+    await flushPromises();
+    // all 汇总随后才回（其捕获键 agent=all，与 claude 明细键不一致）→ 不得落盘
+    resolveSumAll(summaryA);
+    await flushPromises();
+    const saves = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save");
+    for (const call of saves) {
+      const p = call[1] as { value: { filters: { agent: string } } };
+      expect(p.value.filters.agent).toBe("claude"); // 只允许同口径保存
+    }
+    // 之后 claude 汇总落地（summaryB 已在第二轮返回）→ 允许同口径保存
+    expect(saves.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("failed_refresh_does_not_save_mixed_snapshot：汇总失败不落盘", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "summarize") return Promise.reject(new Error("boom"));
+      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    const saves = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save");
+    expect(saves.length).toBe(0); // 汇总失败时明细不得单独落盘
+    expect(state(w)["summaryError"]).toBe("boom");
+  });
+
+  it("stale_failure_shows_retry_state：旧数据 + 刷新失败 = 失败态（非后台刷新中）", async () => {
+    let fail = true;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") return Promise.resolve(snapshotPayload());
+      if (cmd === "summarize")
+        return fail ? Promise.reject(new Error("net down")) : Promise.resolve(summaryA);
+      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    // 恢复后后台刷新失败：stale + error
+    const pill = w.find(".page-head .ts-status-pill");
+    expect(pill.classes()).toContain("ts-pill-warning");
+    expect(pill.text()).toContain("刷新失败");
+    expect(w.text()).toContain("net down");
+    // 重试成功 → 已更新
+    fail = false;
+    const retry = w.findAll("button").find((b) => b.text() === "重试");
+    await retry!.trigger("click");
+    await flushPromises();
+    expect(w.find(".page-head .ts-status-pill").text()).toContain("已更新");
+  });
+
+  it("unmounted_dashboard_cannot_overwrite_new_snapshot：卸载实例的晚到响应不落盘", async () => {
+    const [sumAll, resolveSumAll] = deferred<SummaryReport>();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "summarize") return sumAll;
+      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    w.unmount();
+    // 卸载后旧实例的汇总才返回：不得更新状态，也不得触发保存
+    resolveSumAll(summaryA);
+    await flushPromises();
+    const saves = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save");
+    expect(saves.length).toBe(0);
   });
 });
 

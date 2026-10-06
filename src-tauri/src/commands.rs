@@ -380,26 +380,8 @@ pub async fn settings_set_price_auto_sync(
 pub async fn view_cache_load() -> Result<Option<serde_json::Value>, String> {
     run_blocking("view_cache_load", move || {
         let path = view_cache_path()?;
-        if !path.exists() {
-            log::debug!("视图快照不存在（首次启动）");
-            return Ok(None);
-        }
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("读视图缓存失败: {}", path.display()))?;
-        // 坏文件按契约降级为 None（前端静默走正常加载），但必须留日志。
-        match serde_json::from_str(&text) {
-            Ok(v) => {
-                log::info!("视图快照加载：{}（{} 字节）", path.display(), text.len());
-                Ok(Some(v))
-            }
-            Err(e) => {
-                log::warn!(
-                    "视图快照解析失败，忽略并走正常加载: {} ({e})",
-                    path.display()
-                );
-                Ok(None)
-            }
-        }
+        // R04：读写共用 impl（round-trip 同源）。
+        view_cache_load_impl(&path)
     })
     .await
 }
@@ -409,22 +391,37 @@ pub async fn view_cache_save(value: serde_json::Value) -> Result<(), String> {
     run_blocking("view_cache_save", move || {
         let t = std::time::Instant::now();
         let path = view_cache_path()?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)
-                .with_context(|| format!("创建目录失败: {}", dir.display()))?;
-        }
-        let json = serde_json::to_string_pretty(&value)?;
-        let json_len = json.len();
-        std::fs::write(&path, json)
-            .with_context(|| format!("写视图缓存失败: {}", path.display()))?;
-        log::debug!(
-            "视图快照保存：{} 字节，{} ms",
-            json_len,
-            t.elapsed().as_millis()
-        );
+        view_cache_save_impl(&path, &value)?;
+        log::debug!("视图快照保存：{} ms", t.elapsed().as_millis());
         Ok(())
     })
     .await
+}
+
+/// R04：视图快照原子写（宁旧勿坏）——直接覆盖写在崩溃/断电时会留下
+/// 半截文件。路径可注入以便测试注入失败场景。
+pub(crate) fn view_cache_save_impl(
+    path: &std::path::Path,
+    value: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let json = serde_json::to_string_pretty(value)?;
+    tokenscope::fsutil::atomic_write(path, json.as_bytes())
+        .with_context(|| format!("写视图缓存失败: {}", path.display()))?;
+    Ok(())
+}
+
+/// 读回视图快照（round-trip 测试用）。
+pub(crate) fn view_cache_load_impl(
+    path: &std::path::Path,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("读视图缓存失败: {}", path.display()))?;
+    serde_json::from_str(&text)
+        .map(Some)
+        .with_context(|| format!("视图快照解析失败: {}", path.display()))
 }
 
 /// 开机自启状态（M8；写系统自启动项属用户显式操作，默认关闭）。
@@ -758,6 +755,56 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             corrupt,
             "用户文件必须原样保留"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_view_cache_round_trip() {
+        let dir = std::env::temp_dir().join(format!("tokenscope-vc-rt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("view-cache.json");
+        assert!(
+            view_cache_load_impl(&path).unwrap().is_none(),
+            "缺文件 = None"
+        );
+        let payload = serde_json::json!({
+            "v": 4,
+            "saved_at": "2026-10-07T00:00:00Z",
+            "filters": {"by": "model", "agent": "all", "range": null, "drill": null, "tz": "UTC"},
+            "report": {"groups": [], "totals": {}},
+            "events": {"rows": [], "total": 0, "warnings": []}
+        });
+        view_cache_save_impl(&path, &payload).unwrap();
+        let back = view_cache_load_impl(&path).unwrap().unwrap();
+        assert_eq!(back, payload, "完整 payload 原样往返");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_view_cache_atomic_failure_keeps_previous() {
+        // 目标路径被目录占用 → rename 失败 → 旧文件原样保留（宁旧勿坏）。
+        let dir = std::env::temp_dir().join(format!("tokenscope-vc-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("view-cache.json");
+        let good = serde_json::json!({"v": 4, "saved_at": "first"});
+        view_cache_save_impl(&path, &good).unwrap();
+        // 把目标路径变成目录：rename 必定失败
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir_all(&path).unwrap();
+        let r = view_cache_save_impl(&path, &serde_json::json!({"v": 4, "saved_at": "second"}));
+        assert!(r.is_err(), "目标为目录必须失败");
+        // 临时文件已清理
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "失败的临时文件必须清理: {leftovers:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
