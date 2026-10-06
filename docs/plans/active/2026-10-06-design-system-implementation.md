@@ -1,228 +1,247 @@
-# TokenScope 视觉设计系统落地实施计划
+# TokenScope Apple Glass 视觉设计落地实施计划
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** 按根目录 `DESIGN.md` 将 TokenScope Vue/Naive UI 界面统一为可读、可访问的冷色玻璃仪表盘，并在浅色、深色和不同窗口尺寸下保持一致的费用与用量信息层级。
+**Goal:** 按第二版 `DESIGN.md` 将 TokenScope 重构为 Apple Big Sur / Monterey 风格的玻璃拟态桌面界面，在浅色、深色和自动主题下保持清晰的信息层级与费用可追溯性。
 
-**Architecture:** 先建立集中式 CSS 语义 token、Naive UI 主题覆盖和 ECharts 主题适配器，再按“应用壳 → 汇总指标 → 图表 → 表格/费用明细 → 设置与状态 → 验收”的顺序迁移现有组件。视觉改造只改变布局、样式和交互呈现；统计公式、价格选择、后端 breakdown、缓存和数据加载流程保持不变。
+**Architecture:** 先建立唯一的 CSS 语义 token、公共 `.ts-card` / `.ts-segmented` / `.ts-notice` 样式、Naive UI 主题覆盖和 ECharts 主题适配器，再按应用壳、汇总布局、指标卡、图表、表格、费用浮层、设置页和视觉验收逐层迁移。前端只消费现有后端数据和费用 breakdown，不重新计算价格、不改变统计公式、不改变缓存和日期逻辑。
 
-**Tech Stack:** Vue 3、TypeScript 5、Naive UI、ECharts 6、Vitest、Vite/Tauri 2；本地字体和 CSS `backdrop-filter`，不增加在线字体或新的 UI 框架。
+**Tech Stack:** Vue 3、TypeScript 5、Naive UI、ECharts 6、Vitest、Vite/Tauri 2；本机系统字体、CSS `backdrop-filter`、CSS media query；不引入在线字体和新的 UI 框架。
 
 ---
 
-## 设计基线与不可变约束
+## 执行前的硬约束
 
-- 实现前必须通读 `DESIGN.md`；本文是执行顺序，冲突时以用户明确需求和业务数据口径为准。
-- 只使用语义 token，组件中不新增散落的颜色、阴影、圆角和间距常量。
-- 玻璃只用于导航、工具栏、状态横幅、菜单和 tooltip；表格主体、图表绘图区、费用公式区使用不透明或高不透明度表面。
-- 不引入 emoji 图标、紫色渐变、霓虹发光、整页透明或大面积阴影。
-- 不修改 `src/`、`src-tauri/`、价格匹配、分段计费、统计公式、日期时区和缓存逻辑。
-- 不把“未知价格”变成 0，不隐藏首次无缓存、旧缓存、部分同步或请求级计价来源。
-- 现有并行 agent 的改动不得被覆盖；开始每个任务前先确认 `git status`，只编辑任务列出的文件。
+- 实现前必须阅读根目录 `DESIGN.md`，本文只负责把第二版规范拆成可执行任务。
+- 第二版视觉方向是 Apple Glass：`#F5F5F7/#0F0F11` 画布、系统蓝、静态三团柔光、半透明玻璃和实色数据区。不得沿用第一版的石墨灰/青色方案。
+- 玻璃透明度不得低于 70%，模糊不得超过 20px；不支持 `backdrop-filter` 时退化到 95% 不透明表面。
+- 所有卡片统一为 `.ts-card`：14px 圆角、20px 内边距、统一描边/顶部高光/阴影；禁止在卡片内再套另一种带边框卡片。
+- 表格、图表绘图区、费用公式区使用 `--ts-surface-solid` 或等价高不透明表面，不能依赖透明背景保证可读性。
+- 不使用 emoji、紫色渐变、彩虹配色、移动渐变、装饰背景图案或发光边缘。
+- 未知价格、部分数据、旧缓存和错误必须可见；不能把未知费用显示为 0。
+- 不修改 Rust 价格匹配、分段/峰谷计算、统计公式、缓存、日期时区和后端 breakdown。
+- 每个任务开始前检查 `git status`，不得覆盖其他 agent 的未提交文件；提交时只暂存任务列出的路径。
 
-## 执行顺序
-
-### Task 1: 建立视觉 token、全局样式和主题适配层
+## 任务 0：建立第二版规范差异清单
 
 **Files:**
 
-- Create: `frontend/src/styles/tokens.css`
-- Create: `frontend/src/styles/naiveTheme.ts`
-- Create: `frontend/src/styles/chartTheme.ts`
+- Read: `DESIGN.md`
+- Read: `frontend/src/App.vue`
+- Read: `frontend/src/views/Dashboard.vue`
+- Read: `frontend/src/views/Settings.vue`
+- Read: `frontend/src/components/*.vue`
+- Read: `frontend/src/composables/theme.ts`
+- Create: `docs/plans/active/2026-10-06-design-system-visual-gap.md`
+
+**Step 1: 记录当前实现基线。**
+
+列出当前已存在的 token、inline style、Naive UI 默认主题、ECharts 初始化方式、主题偏好存储和组件状态，不凭旧计划中的执行记录判断已完成内容。
+
+**Step 2: 按 DESIGN.md 建立差异表。**
+
+至少覆盖：三团柔光、吸顶导航、三段主题控件、统一卡片、分段控件、标题行状态胶囊、指标比例条、表格无竖线、内联通知、设置页分组、tooltip 键盘路径和 1280×820/980×620 布局。
+
+**Step 3: 运行现有前端基线。**
+
+运行：`pnpm --dir frontend typecheck`、`pnpm --dir frontend format:check`、`pnpm --dir frontend test`。
+
+记录失败项和与本计划无关的并行改动，不修改这些失败项来制造“基线通过”。
+
+**Step 4: 提交差异清单。**
+
+提交信息：`docs(界面): 记录第二版视觉差异`。
+
+## 任务 1：实现 Apple Glass 基础 token、柔光画布和主题适配
+
+**Files:**
+
+- Create or replace: `frontend/src/styles/tokens.css`
+- Create or replace: `frontend/src/styles/naiveTheme.ts`
+- Create or replace: `frontend/src/styles/chartTheme.ts`
 - Modify: `frontend/src/main.ts`
 - Modify: `frontend/src/App.vue`
 - Modify: `frontend/src/composables/theme.ts`
-- Test: `frontend/src/composables/theme.test.ts`（若文件不存在则创建）
+- Test: `frontend/src/composables/theme.test.ts`
 
-**Step 1: 写主题和 token 的失败测试。**
+**Step 1: 写失败测试。**
 
-覆盖以下行为：默认跟随系统；显式浅色/深色持久化；系统主题变化只影响 `system` 偏好；解析后的主题值只可能是 `light` 或 `dark`；token 样式表能被应用入口加载。
+覆盖 `light | dark | system` 偏好、旧 `tokenscope-theme` 值兼容、系统主题变更、解析后的 `data-theme`、主题控件的可访问名称和 reduced-motion 媒体查询。
 
-**Step 2: 运行定向测试确认失败。**
+**Step 2: 写第二版 token。**
 
-运行：`pnpm --dir frontend vitest run src/composables/theme.test.ts`
+严格录入 `DESIGN.md` 的 `--ts-canvas`、`--ts-surface`、`--ts-surface-solid`、`--ts-surface-elevated`、`--ts-glass`、`--ts-fill`、`--ts-segment-thumb`、separator、text、accent、状态色和四类图表色。补充 `--ts-ambient-1/2/3`、`--ts-glass-stroke`、`--ts-glass-highlight`、4/8/12/16/20/24/32 间距、8/6/14/12/999 圆角和 160–240ms 动效 token。
 
-预期：新增的 system 偏好或 token 导入断言失败，不能因为测试没有执行而跳过。
+**Step 3: 实现画布柔光。**
 
-**Step 3: 实现 token 文件。**
+在全局 body 或应用根节点加入左上蓝、右上青、底部浅绿三团固定静态椭圆柔光；单团不透明度不超过 20%，不动画、不随滚动、不使用紫色。内容滚动时必须能让吸顶玻璃看到背后的画布和内容。
 
-在 `tokens.css` 定义 `--ts-canvas`、`--ts-surface`、`--ts-surface-solid`、`--ts-surface-elevated`、边框、正文、辅助文字、青色强调、成功/警告/错误/信息色，以及 4/8/12/16/24/32 间距、6/8/12 圆角、focus ring、玻璃模糊和过渡时长。浅色与深色值必须以 `DESIGN.md` 表格为准；为不支持 `backdrop-filter` 的系统提供实色降级。
+**Step 4: 实现卡片和降级样式。**
 
-**Step 4: 实现 Naive UI 和 ECharts 适配。**
+提供 `.ts-card`、`.ts-card-solid`、`.ts-glass`、`.ts-segmented`、`.ts-notice`、`.ts-status-pill`、focus ring 和 `prefers-reduced-motion` 规则。卡片使用 14px 圆角、20px 内边距、顶部 inset 高光、统一描边和阴影；`@supports not (backdrop-filter: blur(1px))` 时切换到 95% 实色。
 
-在 `naiveTheme.ts` 集中设置 body、card、border、text、primary、button、input、table、tooltip、popover、alert、tabs 的颜色和圆角。`chartTheme.ts` 固定 token 系列顺序、图表背景、网格、坐标轴、文字和 tooltip 颜色，禁止直接使用 ECharts 默认调色板。
+**Step 5: 接入 Naive UI 和 ECharts。**
 
-**Step 5: 改造主题 composable 和应用入口。**
+`naiveTheme.ts` 只负责把同一套 token 映射到 NCard、NButton、NInput、NSelect、NDataTable、NTooltip、NPopover、NAlert 等组件；`chartTheme.ts` 只负责图表颜色、文字、分隔线和 tooltip。禁止复制另一套近似颜色。
 
-将主题偏好扩展为 `light | dark | system`，保留现有 `tokenscope-theme` 存储键的兼容性。`useTheme` 暴露 `preference`、解析后的 `mode`、切换/设置方法；`App.vue` 只消费解析后的 mode，并把主题覆盖和全局 CSS 传入 `NConfigProvider`。主题切换不能产生首帧明显闪烁。
-
-**Step 6: 运行测试与类型检查。**
+**Step 6: 运行测试并提交。**
 
 运行：`pnpm --dir frontend vitest run src/composables/theme.test.ts`、`pnpm --dir frontend typecheck`、`pnpm --dir frontend format:check`。
 
-预期：全部通过；若并行 agent 的未完成文件导致 typecheck 失败，记录错误并停止提交，不要绕过门禁。
+提交信息：`feat(界面): 建立 Apple Glass 视觉基础层`。
 
-**Step 7: 提交。**
-
-`git add frontend/src/styles frontend/src/main.ts frontend/src/App.vue frontend/src/composables/theme.ts frontend/src/composables/theme.test.ts`；提交信息：`feat(界面): 建立统一主题与视觉 token`。
-
-### Task 2: 重做应用壳、顶部导航、横幅和汇总页工具栏
+## 任务 2：重做 52px 吸顶导航和统一分段控件
 
 **Files:**
 
 - Modify: `frontend/src/App.vue`
+- Modify: `frontend/src/components/AgentIcon.vue`
 - Modify: `frontend/src/views/Dashboard.vue`
-- Modify: `frontend/src/components/PricingStatusBanner.vue`
-- Modify: `frontend/src/components/DateRangeSelect.vue`
 - Test: `frontend/src/App.test.ts`
-- Test: `frontend/src/components/PricingStatusBanner.test.ts`
+
+**Step 1: 写失败测试。**
+
+断言导航有 sticky 定位、品牌图标和 TokenScope 文本；页面切换与主题切换均为 `role="radiogroup"`；主题有浅色/深色/自动三项；来源项为图标 + 文字而非纯图标方块；左右方向键可以在分段组内切换。
+
+**Step 2: 实现导航。**
+
+导航高度约 52px，采用 `.ts-glass`，底边为发丝线；左侧品牌 15px/600，中部汇总/设置分段控件，右侧浅色/深色/自动三段控件。不得使用原生 select 或只有“暗色”文字加 switch 的旧布局。
+
+**Step 3: 实现通用 segmented。**
+
+底槽使用 `--ts-fill`、8px 圆角、2px 内边距、高度 32px；选中块使用 `--ts-segment-thumb` 和 6px 圆角，200ms 平移。来源选项必须保留 Claude Code/Codex 的图标和文字，命中区至少 32px。
+
+**Step 4: 运行 App 测试并提交。**
+
+运行：`pnpm --dir frontend vitest run src/App.test.ts`。
+
+提交信息：`feat(界面): 重做吸顶导航与分段控件`。
+
+## 任务 3：按第二版线框重排 Dashboard 标题、筛选和通知
+
+**Files:**
+
+- Modify: `frontend/src/views/Dashboard.vue`
+- Modify: `frontend/src/components/DateRangeSelect.vue`
+- Modify: `frontend/src/components/PricingStatusBanner.vue`
+- Test: `frontend/src/views/Dashboard.test.ts`
 - Test: `frontend/src/components/DateRangeSelect.test.ts`
+- Test: `frontend/src/components/PricingStatusBanner.test.ts`
 
-**Step 1: 为布局和状态写失败测试。**
+**Step 1: 写失败测试。**
 
-断言：页面有可识别的汇总/设置 tab；主题控件能读出当前浅色、深色或跟随系统；价格横幅在无缓存、部分同步、旧缓存和同步中仍有清晰文字；日期选择仍保留草稿、取消和确认语义；横幅不遮挡内容。
+覆盖页面大标题、时区/日期摘要、标题行右侧刷新和状态胶囊；筛选顺序固定为来源 → 聚合维度 → 日期 → 时区；数据源异常为内联通知；日期确认/取消和时区口径不变。
 
-**Step 2: 实现应用壳。**
+**Step 2: 实现页面头部。**
 
-使用 56px 左右的玻璃导航栏、简洁 TokenScope 字标、带选中底色的 tab、带文字的主题选择器。移除 inline style 和 emoji 日历图标，替换为现有线性图标或文字按钮。全局内容左右边距 24px，窗口接近 980px 时降为 16px。
+页面大标题 28px/700，副标题显示 `Asia/Shanghai · 今天 YYYY-MM-DD`；刷新按钮和“已更新/刷新中/缓存数据”胶囊在标题行右侧，不另起一行。内容最大宽度 1200px 居中，宽度 ≤1100px 时边距降为 20px。
 
-**Step 3: 实现汇总页标题和筛选行。**
+**Step 3: 实现筛选栏。**
 
-在 Dashboard 顶部增加页面标题、当前日期/时区摘要和刷新动作；筛选顺序固定为来源 → 维度 → 日期 → 时区 → 刷新，空间不足时换行。保留现有请求参数、刷新 key、错误信息和数据保留行为。
+所有控件高度 32px、`--ts-fill` 底色、无描边、8px 圆角，视觉上属于同一族；宽度不足时整组换行。日期控件去掉 emoji，使用线性图标或文字。保留现有刷新、错误和数据保留逻辑。
 
-**Step 4: 迁移横幅和日期选择器样式。**
+**Step 4: 实现内联通知。**
 
-状态横幅使用玻璃表面、语义状态色和明确行动；同步按钮不可用时仍说明原因。日期选择器使用统一控件高度、圆角和 focus ring，弹窗使用 elevated surface；不改日期字符串和时区转换逻辑。
+价格未同步、数据源目录不存在、部分同步、旧缓存和未知模型使用 `.ts-notice`：玻璃底、12px 圆角、左侧状态图标、一行结论、右侧文字操作；多条信息合并为一条并可展开。不得使用整块高饱和 Alert 背景。
 
-**Step 5: 运行定向测试和格式检查。**
+**Step 5: 运行测试并提交。**
 
-运行：`pnpm --dir frontend vitest run src/App.test.ts src/components/PricingStatusBanner.test.ts src/components/DateRangeSelect.test.ts`、`pnpm --dir frontend typecheck`、`pnpm --dir frontend format:check`。
+运行：`pnpm --dir frontend vitest run src/views/Dashboard.test.ts src/components/DateRangeSelect.test.ts src/components/PricingStatusBanner.test.ts`。
 
-**Step 6: 提交。**
+提交信息：`feat(界面): 重排汇总页头部与通知状态`。
 
-提交信息：`feat(界面): 重构应用壳与筛选工具栏`。
-
-### Task 3: 重做 SummaryCards 的指标层级
+## 任务 4：重构单张指标卡和分项比例条
 
 **Files:**
 
 - Modify: `frontend/src/components/SummaryCards.vue`
-- Modify: `frontend/src/types.ts`（仅在现有字段不足以表达显示状态时）
-- Test: `frontend/src/components/SummaryCards.test.ts`（创建）
+- Test: `frontend/src/components/SummaryCards.test.ts`
 
 **Step 1: 写失败测试。**
 
-覆盖：估算费用、总 token、请求数、缓存命中率位于统一读数条；零值显示 0；未知价格显示未知标记且不显示为 0；极小非零金额不被格式化为 `$0.00`；缓存命中率继续使用现有 `cache_read / (input + cache_read)` 公式。
+覆盖主费用、三个次读数、比例条分段、全部为零、无数据、未知价格、极小金额和命中率 tooltip。明确断言命中率继续使用 `cache_read / (input + cache_read)`，不把公式重新铺在卡片正文。
 
-**Step 2: 重排模板。**
+**Step 2: 实现统一 `.ts-card`。**
 
-将当前“巨大英雄卡 + 四张彩色卡 + 独立命中率卡”改为一个统一指标 strip，再接一个轻量 token 分项行。费用旁显示“估算”，单位独立对齐；输入、输出、缓存写入、缓存命中使用低饱和语义色和文字，不使用 emoji 或彩虹卡片。
+卡片标题使用 17px/600；左侧估算费用 44px/600，下方显示 `USD · 估算值，非账单`；右侧总 token、请求数、缓存命中率 26px/600，中间使用 separator 发丝线。费用数字使用主文字色，不染蓝色。
 
-**Step 3: 应用数字和状态样式。**
+**Step 3: 实现警告胶囊和比例条。**
 
-所有数字启用 tabular lining nums，核心读数 30–36px，辅助信息不低于 12px。未知、加载中、无数据和零值使用不同的文本状态；不要通过整体 opacity 隐藏未知信息。
+含未计价 token 时在费用旁显示“含未计价 token”警告胶囊。底部加入高度 6px、圆角 3px 的输入/输出/缓存写/缓存命中比例条和一行色点图例；四类颜色只来自 chart tokens。全部为零时显示空槽，无数据显示 `—`，零、未知、加载中分开表达。
 
-**Step 4: 运行测试。**
+**Step 4: 迁移公式说明到 tooltip。**
+
+缓存命中率说明通过 hover 和 focus 打开 tooltip，正文只保留结论；tooltip 关闭仍不影响读数。
+
+**Step 5: 运行测试并提交。**
 
 运行：`pnpm --dir frontend vitest run src/components/SummaryCards.test.ts src/views/Dashboard.test.ts`。
 
-预期：既有统计断言继续通过，新增显示状态断言通过。
+提交信息：`feat(界面): 重构汇总指标卡与比例条`。
 
-**Step 5: 提交。**
-
-提交信息：`feat(界面): 重构用量指标层级`。
-
-### Task 4: 迁移趋势图到统一图表主题并补充可访问摘要
+## 任务 5：把趋势图、聚合表和请求表放入统一卡片
 
 **Files:**
 
 - Modify: `frontend/src/components/TrendChart.vue`
-- Modify: `frontend/src/lib/chartData.ts`（只补显示元数据，不改变聚合结果）
-- Test: `frontend/src/lib/chartData.test.ts`
-- Test: `frontend/src/components/TrendChart.test.ts`（创建）
-
-**Step 1: 写失败测试。**
-
-断言：四类 token 始终按固定顺序和固定语义色输出；长模型名有完整 tooltip；空数据、单类别、类别很多时都有明确状态；图表数据能生成等价的文字摘要或表格入口。
-
-**Step 2: 接入 `chartTheme.ts`。**
-
-初始化 ECharts 时注入主题配置，关闭默认 palette。网格线、坐标轴、tooltip 和图例从 CSS/主题 token 派生；浅色/深色切换时销毁并重建或更新实例，不能残留旧主题。
-
-**Step 3: 控制图表高度和类别溢出。**
-
-保留足够的类别，不用 `max(320, groups * 34 + 70)` 无限撑高页面；类别多时采用滚动、缩放或分页，并在界面上说明当前范围。长标签省略但 hover/focus 可见完整值。
-
-**Step 4: 增加可访问摘要。**
-
-在图表标题区域提供“查看数据表/摘要”入口；键盘用户可以获得日期、模型、四类 token 和总量文本。图表颜色必须有图例和文字，不得只靠颜色。
-
-**Step 5: 运行测试并提交。**
-
-运行：`pnpm --dir frontend vitest run src/lib/chartData.test.ts src/components/TrendChart.test.ts`、`pnpm --dir frontend typecheck`。
-
-提交信息：`feat(界面): 统一趋势图主题与可访问摘要`。
-
-### Task 5: 重做聚合表和请求明细表
-
-**Files:**
-
 - Modify: `frontend/src/components/UsageTable.vue`
 - Modify: `frontend/src/components/EventTable.vue`
+- Modify: `frontend/src/lib/chartData.ts`
+- Test: `frontend/src/components/TrendChart.test.ts`
 - Test: `frontend/src/components/UsageTable.test.ts`
 - Test: `frontend/src/components/EventTable.test.ts`
 
 **Step 1: 写失败测试。**
 
-覆盖：数字列右对齐和 tabular nums；长模型/项目名可通过 focus/click 获取完整值；行详情可用 Enter/Space 展开；表格主体没有重网格；虚拟滚动和当前行 key 行为不变。
+覆盖统一卡片头部“标题 + 可选副标题 + 右侧操作”；图表绘图区透明；四类系列颜色和顺序固定；表格无竖线、无外框、40px 行高；数字列右对齐；长内容可 focus 查看；行 Enter/Space 展开；图表类别多时不静默丢失。
 
-**Step 2: 迁移表格表面。**
+**Step 2: 重构 TrendChart。**
 
-关闭重边框网格，使用 `--ts-surface-solid`、轻行分隔和 hover 背景；保留 Naive UI 的排序、分页/虚拟滚动能力。表头简短且有明确单位，金额列使用估算语义。
+图表放入 `.ts-card`，绘图区背景透明；网格线使用 separator，坐标轴不画轴线，坐标文字 12px muted，柱子顶部圆角 4px，堆叠柱只让最上段带圆角。图例放卡片头部右侧，使用圆点样式。主题切换时更新/重建实例，不能残留旧主题。
 
-**Step 3: 补键盘和复制路径。**
+**Step 3: 保留可访问摘要和类别完整性。**
 
-模型、项目、渠道和路径列使用省略显示，tooltip 同时支持 hover/focus；可展开行必须有按钮语义、aria-expanded 和明确 focus ring。不能以 title 属性作为唯一辅助方式。
+继续提供“数据摘要”入口，输出日期、模型和四类 token 的文字等价物；类别过多时滚动或缩放，不能静默截断。长模型名仅视觉省略，tooltip 展示全名。
 
-**Step 4: 运行定向测试并提交。**
+**Step 4: 重构表格。**
 
-运行：`pnpm --dir frontend vitest run src/components/UsageTable.test.ts src/components/EventTable.test.ts`。
+表格与卡片之间不加第二层边框；移除竖线和外框，只保留 separator 发丝线；表头 12px/500，无底色；行高 40px；hover 只改变 `--ts-fill-hover`；可点击行显示 `›`；合计行上方使用 stronger separator。保留虚拟滚动、排序、行 key 和现有数据行为。
 
-提交信息：`feat(界面): 优化聚合与请求明细表格`。
+**Step 5: 运行测试并提交。**
 
-### Task 6: 落实请求级费用明细 tooltip
+运行：`pnpm --dir frontend vitest run src/components/TrendChart.test.ts src/components/UsageTable.test.ts src/components/EventTable.test.ts src/lib/chartData.test.ts`。
+
+提交信息：`feat(界面): 统一趋势图与数据表卡片`。
+
+## 任务 6：实现 Apple Glass 费用明细浮层
 
 **Files:**
 
 - Modify: `frontend/src/components/EventTable.vue`
 - Modify: `frontend/src/lib/costBreakdown.ts`
-- Modify: `frontend/src/types.ts`（仅补充已有后端 breakdown 的展示类型）
-- Test: `frontend/src/lib/costBreakdown.test.ts`（创建或补充）
+- Modify: `frontend/src/types.ts`（仅补展示类型）
+- Test: `frontend/src/lib/costBreakdown.test.ts`
 - Test: `frontend/src/components/EventTable.test.ts`
 
-**Step 1: 先写失败测试。**
+**Step 1: 写失败测试。**
 
-覆盖：输入/输出/缓存各项显示 token × 单价 ÷ 1M 和小计；显示匹配模型、价格来源、候选渠道、匹配层级、命中的分段/峰谷条件；完全未知时显示无法估算；tooltip 触发器支持 hover、focus、click、Escape 和点击外部关闭。
+覆盖 hover/focus/click 三种打开方式、Escape/外部点击关闭、边缘自动翻转、最大宽度 480px，以及输入/输出/缓存的 token × 单价 ÷ 1M 公式行和来源行。
 
 **Step 2: 只消费后端 breakdown。**
 
-检查并统一 `costBreakdown.ts` 的展示模型，让前端不重新选择价格、不重复计算峰谷或分段价格。缺失字段使用“暂无数据”，不能猜测服务器实际渠道；明确区分服务器响应模型/路由与保守估算候选。
+显示匹配模型、价格来源、候选渠道、完整/前缀匹配、命中的分段阈值和峰谷条件。区分服务器实际响应模型/路由与保守估算候选；字段缺失显示“暂无数据”，完全未知显示“无法估算”，不得由前端猜单价。
 
-**Step 3: 实现 elevated tooltip。**
+**Step 3: 实现浮层视觉。**
 
-最大宽度 480px，按“事实 → 公式 → 结果 → 来源”排列；公式区使用不透明背景，等宽数字右对齐。小额非零费用不能被显示为 0；tooltip 靠近窗口边缘时自动翻转，键盘和鼠标均可关闭。
+浮层使用 85% elevated glass + 16px blur；公式区套 `.ts-card-solid`；按“事实 → 公式 → 结果 → 来源”排列，数字使用等宽 tabular 对齐，小额非零金额不能显示为 `$0.00`。
 
-**Step 4: 运行费用相关测试。**
+**Step 4: 运行测试并提交。**
 
 运行：`pnpm --dir frontend vitest run src/lib/costBreakdown.test.ts src/components/EventTable.test.ts`。
 
-同时检查 Rust 已输出 breakdown 的字段名和序列化兼容性；若发现字段不足，创建单独后端计划，不在本计划中修改价格逻辑。
+提交信息：`feat(界面): 重做费用明细玻璃浮层`。
 
-**Step 5: 提交。**
-
-提交信息：`feat(界面): 完善请求费用明细展示`。
-
-### Task 7: 重做设置页和所有数据状态
+## 任务 7：重做 macOS 风格设置页和状态系统
 
 **Files:**
 
@@ -234,95 +253,74 @@
 
 **Step 1: 写失败测试。**
 
-覆盖设置页分组结构、来源身份与同步状态分离、首次无缓存横幅、部分同步错误、旧缓存提示、无数据和加载中的局部状态。同步成功后横幅与设置页状态必须一致。
+覆盖应用/数据源/缓存/价格四组、每组单卡片、组标题在卡片外、设置项“左标签 + 右控件”、行间 separator、技术详情折叠、来源身份中性色和同步状态语义色。
 
-**Step 2: 重排设置页。**
+**Step 2: 实现设置页。**
 
-按“应用、数据源、缓存、价格”分组；移除不必要的大号 `NStatistic`；技术路径、同步时间和错误详情放到可展开区域。外置/models.dev/OpenRouter 标签使用中性色，成功/警告/错误只表达状态。
+按 macOS 系统设置组织卡片；取消不必要的大号 NStatistic；技术路径、同步时间和错误详情放可展开的“技术详情”。所有设置卡片使用同一 `.ts-card`，不混用另一套 NCard 外观。
 
-**Step 3: 统一 Dashboard 状态。**
+**Step 3: 收敛所有状态。**
 
-为 loading、stale、empty、partial、error、no-price 建立一致的文案、图标和色彩。刷新时保留已有数据，仅局部显示加载；不增加全屏遮罩。保留现有错误和定价同步动作。
+loading、stale、empty、partial、error、no-price 统一使用标题行状态胶囊或 `.ts-notice`。加载保留旧数据，不加全屏 spinner；空状态居中显示一句结论和一句下一步建议；多条通知合并并可展开。
 
 **Step 4: 运行测试并提交。**
 
 运行：`pnpm --dir frontend vitest run src/views/Settings.test.ts src/components/PricingStatusBanner.test.ts src/views/Dashboard.test.ts`。
 
-提交信息：`feat(界面): 统一设置页与数据状态`。
+提交信息：`feat(界面): 统一设置页与状态提示`。
 
-### Task 8: 响应式、无障碍和视觉回归验收
+## 任务 8：视觉回归、响应式和无障碍验收
 
 **Files:**
 
-- Modify: 受影响的 Vue 组件和 `frontend/src/styles/tokens.css`
-- Create: `docs/plans/active/2026-10-06-design-system-visual-qa.md`（记录截图和已知差异；若项目已有视觉 QA 文档则合并）
+- Modify: 受影响的 Vue/CSS 文件
+- Create or update: `docs/plans/active/2026-10-06-design-system-visual-qa.md`
 - Test: 相关 Vitest 测试；必要时新增 `frontend/src/accessibility.test.ts`
 
-**Step 1: 运行完整前端门禁。**
+**Step 1: 运行完整门禁。**
 
 运行：`pnpm --dir frontend typecheck`、`pnpm --dir frontend format:check`、`pnpm --dir frontend test`、`pnpm --dir frontend build`。
 
 预期：全部通过；不得使用 `--no-verify`。
 
-**Step 2: 做桌面尺寸检查。**
+**Step 2: 验收窗口、滚动和玻璃层次。**
 
-分别检查 1280×820 和 980×620，确认首屏层级、筛选换行、表格横向溢出、tooltip 翻转和刷新按钮可见。再检查 100%、125%、150% 缩放。
+在 1280×820 和 980×620 检查：内容最大宽度 1200px、导航 52px 吸顶、滚动内容从导航下方经过时能看到模糊层、卡片 14px 圆角/20px 内边距、筛选整组换行、表格不产生页面横向滚动。
 
-**Step 3: 做主题和状态矩阵检查。**
+**Step 3: 验收主题和状态矩阵。**
 
-浅色/深色各检查：正常数据、无数据、加载中、旧缓存、部分价格、未知价格、极小非零金额、长模型名和长渠道名。确认文字对比度、focus ring、图例和数据摘要可读。
+浅色、深色、自动三种主题偏好下检查正常数据、无缓存、旧缓存、部分价格、未知模型、极小非零金额、长模型名和长渠道名。确认画布柔光静止，玻璃不低于 70% 不透明，表格/图表/公式区保持实色可读。
 
-**Step 4: 做键盘路径检查。**
+**Step 4: 验收键盘和缩放。**
 
-只用键盘完成页面切换、筛选、日期确认/取消、刷新、费用 tooltip 展开/关闭、表格详情展开和设置保存。检查 Escape、Tab 顺序和 aria-expanded/aria-label。
+在 100%、125%、150% 缩放下，只用键盘完成页面切换、来源/维度/主题分段切换、日期确认/取消、刷新、tooltip 打开/关闭、表格详情展开和设置保存。确认 2px focus ring、Tab 顺序、左右方向键、Escape 和 aria 属性。
 
-**Step 5: 运行 Rust 回归检查。**
+**Step 5: 验收图表与费用证据。**
 
-因为本计划不应改变后端，至少运行 `cargo fmt --check`、`cargo clippy --all-targets`、`cargo test` 和 `cargo test --manifest-path src-tauri/Cargo.toml`，确认视觉迁移没有误改数据层。
+逐项比对图例、数据摘要、聚合表和请求明细；确认费用浮层显示后端 breakdown 的模型、单价、来源、候选渠道、分段/峰谷条件，未知价格不伪装为 0。
 
-**Step 6: 分任务提交后做最终提交。**
+**Step 6: 做 Rust 回归并记录截图。**
 
-先确认 `git diff` 只包含设计系统相关文件，再由维护者执行完整 pre-commit。提交信息：`feat(界面): 落地 TokenScope 玻璃仪表盘设计`。
+运行 `cargo fmt --check`、`cargo clippy --all-targets`、`cargo test` 和 `cargo test --manifest-path src-tauri/Cargo.toml`。将每个尺寸/主题/关键状态的截图或可复现步骤记录到视觉 QA 文档。
+
+**Step 7: 最终提交。**
+
+确认 `git diff` 只包含本设计系统范围，运行完整 pre-commit 后提交：`feat(界面): 落地 Apple Glass 设计规范`。
 
 ## 完成定义
 
-计划完成必须同时满足：
-
-1. 所有界面颜色、间距、圆角和阴影来自集中 token；没有新增散落硬编码视觉值。
-2. 浅色、深色和系统主题在应用壳、Naive UI、ECharts、tooltip、表格和状态横幅中一致。
-3. 汇总页首屏先呈现估算费用、总 token、请求数、缓存命中率，再呈现分项、趋势和明细。
-4. 费用明细可通过 hover、focus、click 访问，并展示匹配模型、单价、来源、候选渠道及分段/峰谷条件；未知价格不伪装成 0。
-5. 统计公式、价格计算、缓存、日期及时区、后端 breakdown 没有改变。
-6. 1280×820、980×620、三种缩放比例、两种主题和所有关键状态通过视觉与自动化验收。
-7. `pnpm --dir frontend typecheck`、`format:check`、`test`、`build`，以及根库和 Tauri 壳的 Rust 门禁全部通过。
+1. `DESIGN.md` 第二版中的 Apple Glass 规则全部有对应实现：三团柔光、52px sticky glass nav、统一 `.ts-card`、`.ts-segmented`、`.ts-notice`、三段主题控件和实色数据区。
+2. 浅色、深色、自动主题的 token、Naive UI、ECharts、tooltip、表格和状态横幅一致，且支持无 blur 降级。
+3. 汇总首屏按线框显示标题/状态、筛选、单张指标卡（费用 + 三项读数 + 比例条）、趋势、聚合和请求明细。
+4. 费用 tooltip 通过 hover、focus、click 可访问，展示后端 breakdown 的事实、公式、结果和来源。
+5. 统计公式、计价规则、缓存、日期时区和后端字段未改变。
+6. 1280×820、980×620、100/125/150% 缩放、浅/深/自动主题和 loading/stale/empty/partial/error/no-price 状态完成真实视觉验收。
+7. 前端 `typecheck`、`format:check`、`test`、`build`，根库与 Tauri 壳 Rust 门禁全部通过。
 
 ## 风险与回滚
 
-- **Naive UI 默认主题覆盖不完整：** 先以 CSS token 覆盖关键表面，再补 `themeOverrides`；若某组件版本不支持透明背景，使用实色降级，不升级 Naive UI。
-- **ECharts 实例残留旧主题：** 监听解析后的主题值，先 `dispose` 再按保留的业务数据重建；不改变 `chartData` 聚合。
-- **玻璃效果导致低对比度或性能下降：** 只在少数壳层使用 blur，表格和图表保持实色；在不支持 blur 时自动降级。
-- **前端类型错误来自并行工作：** 记录具体文件和错误，等待责任 agent 修复后再跑门禁；禁止修改无关文件或使用 `--no-verify`。
-- **视觉改造误伤数据语义：** 每个任务都先补显示层测试，所有统计/价格输入输出保持原有快照和测试结果。
-
-## 执行记录（2026-10-06）
-
-| Task | 内容 | 提交 | 结果 |
-| --- | --- | --- | --- |
-| 1 | tokens.css 语义 token（浅/深两套 + @supports 实色降级 + reduced-motion）、naiveTheme.ts / chartTheme.ts 适配器、主题偏好 light\|dark\|system（兼容旧存储键）、App 接线 data-theme | 61ec0ac | theme.test.ts 7 项 + 全量前端测试通过 |
-| 2 | 56px 玻璃导航 + tab 页切换 + 带标签主题选择器；Dashboard 页面标题/时区摘要/筛选行（来源→维度→日期→时区→刷新）；横幅玻璃化 + alert 角色；日期选择器去 emoji、elevated 弹层 | 124fc6a | App/Banner/DateRangeSelect 28 项通过 |
-| 3 | SummaryCards 统一指标读数条 + 轻量分项行；未知† 不伪装 0；极小金额保留；命中率公式不变 | df68b19 | SummaryCards.test.ts 6 项 + Dashboard 回归通过 |
-| 4 | TrendChart 接入 chartTokens（禁默认调色板）、高度封顶 560 + dataZoom、完整键 tooltip、可访问文字摘要；chartData 增 fullLabels/摘要/状态（不改变聚合） | 5a85189 | chartData/TrendChart 10 项通过 |
-| 5 | 聚合表/明细表：轻行分隔（去重网格）、数字列 tabular、费用列"估算"表头、未知列警告色（去 opacity）、行 Enter/Space 键盘下钻、模型/项目列可聚焦取完整值 | 9aafb51 | UsageTable/EventTable 语义测试通过 |
-| 6 | 费用 tooltip 重构为"事实→公式→结果→来源"行模型；manual trigger 支持 hover/focus/click + Escape + 点击外部关闭；完全未知显示"无法估算"；缺字段"暂无数据" | aa498ea | costBreakdown.test.ts 8 项 + EventTable 更新通过 |
-| 7 | 设置页按 应用/数据源/缓存/价格 分组；NStatistic 换紧凑行；技术路径/同步时间收进"技术详情"折叠；来源身份标签中性色；Dashboard 空状态文案 | 4c50e7d | Settings/Dashboard/Banner 33 项通过 |
-| 8 | accessibility.test.ts（tablist/aria-label/role=img/aria-expanded）；完整门禁；视觉 QA 记录文档 | c84bc4e | 见下 |
-
-### Task 8 门禁结果
-
-- 前端：typecheck ✅ / format:check ✅ / vitest 14 文件 107 用例 ✅ / build ✅
-- Rust 回归（确认后端零改动）：fmt ✅ / clippy -D warnings ✅ / test 152 ✅ / src-tauri 10 ✅
-
-### 待办（保持计划 active 的原因）
-
-- 真机视觉走查未执行：1280×820 / 980×620 / 三档缩放 / 双主题矩阵 / 键盘全路径，
-  清单见 `docs/plans/active/2026-10-06-design-system-visual-qa.md` §2。完成后本计划方可归档。
+- **玻璃过度发灰：** 检查导航是否 sticky、背景是否有三团柔光、玻璃不透明度是否达到 70%；必要时先提高不透明度，不改变数据区实色规则。
+- **Naive UI 与公共卡片出现两套外观：** 优先让 NCard 通过主题覆盖复用 `.ts-card` token；无法覆盖时统一改用公共 class，禁止局部自定义第三种卡片。
+- **ECharts 主题切换残留：** 监听解析后的主题并 dispose/rebuild，业务 `chartData` 不变。
+- **透明度影响对比度：** 表格、图表绘图区、公式区立即退回 `--ts-surface-solid`；不通过降低文字 opacity 补救。
+- **并行 agent 造成类型或门禁失败：** 记录具体文件和错误，等待责任 agent 修复；禁止修改无关文件和使用 `--no-verify`。
