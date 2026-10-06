@@ -2,11 +2,13 @@
 // 通用分段控件（苹果风格）：radiogroup + 方向键导航 + 选中块平移动画。
 // 用于页面切换、来源过滤、聚合维度、主题选择等"多选一"场景。
 import { ref, watch, onMounted, nextTick } from "vue";
+import AgentIcon from "./AgentIcon.vue";
 
 export interface SegmentOption<T extends string> {
   value: T;
   label: string;
-  icon?: string; // 可选图标（来源按钮用）
+  /** 可选图标：AgentIcon 品牌图标名（来源筛选"图标 + 文字"用） */
+  icon?: string;
 }
 
 const props = defineProps<{
@@ -80,7 +82,9 @@ function onKeydown(e: KeyboardEvent) {
       :tabindex="modelValue === opt.value ? 0 : -1"
       @click="select(opt.value)"
     >
-      <span v-if="opt.icon" class="seg-icon" :aria-hidden="true">{{ opt.icon }}</span>
+      <span v-if="opt.icon" class="seg-icon" :aria-hidden="true">
+        <AgentIcon :name="opt.icon" :size="16" />
+      </span>
       <span>{{ opt.label }}</span>
     </button>
   </div>

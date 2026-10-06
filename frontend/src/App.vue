@@ -58,7 +58,25 @@ const themeOptions: { value: ThemePreference; label: string }[] = [
     <NMessageProvider>
       <div class="app-shell">
         <header class="app-nav ts-glass">
-          <span class="brand">◉ TokenScope</span>
+          <span class="brand">
+            <!-- 品牌标记：表盘/示波器意象的线性图标（DESIGN.md §3 禁 emoji 图标） -->
+            <svg
+              class="brand-mark"
+              viewBox="0 0 24 24"
+              width="18"
+              height="18"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              aria-hidden="true"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 12 17.2 6.8" />
+              <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none" />
+            </svg>
+            TokenScope
+          </span>
           <SegmentedControl v-model="page" :options="pageOptions" aria-label="页面切换" />
           <div class="spacer" />
           <SegmentedControl

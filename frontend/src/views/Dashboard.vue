@@ -1,17 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  NAlert,
-  NButton,
-  NCard,
-  NRadioButton,
-  NRadioGroup,
-  NSelect,
-  NSpin,
-  NTag,
-  NTooltip,
-} from "naive-ui";
+import { NAlert, NButton, NCard, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from "naive-ui";
 import {
   AGENT_LABEL,
   type AgentFilter,
@@ -25,7 +15,7 @@ import SummaryCards from "../components/SummaryCards.vue";
 import UsageTable from "../components/UsageTable.vue";
 import TrendChart from "../components/TrendChart.vue";
 import EventTable from "../components/EventTable.vue";
-import AgentIcon from "../components/AgentIcon.vue";
+import SegmentedControl from "../components/SegmentedControl.vue";
 import DateRangeSelect from "../components/DateRangeSelect.vue";
 import { TZ_OPTIONS, useTimezone } from "../composables/timezone";
 import { todayInTz } from "../lib/dates";
@@ -92,7 +82,6 @@ const agentOptions: { label: string; value: AgentFilter; icon: string }[] = [
   { label: "Claude Code", value: "claude", icon: "claude" },
   { label: "Codex", value: "codex", icon: "openai" },
 ];
-
 async function refresh(): Promise<void> {
   const seq = ++summarySeq;
   loading.value = true;
@@ -285,22 +274,7 @@ void loadSources();
     </div>
     <!-- 筛选行：来源 → 维度 → 日期 → 时区 → 刷新（窄窗口自动换行） -->
     <div class="filter-row">
-      <div class="agent-row" role="group" aria-label="数据来源">
-        <NTooltip v-for="o in agentOptions" :key="o.value">
-          <template #trigger>
-            <NButton
-              quaternary
-              class="agent-btn"
-              :type="agent === o.value ? 'primary' : 'default'"
-              :aria-label="o.label"
-              @click="agent = o.value"
-            >
-              <AgentIcon :name="o.icon" :size="20" />
-            </NButton>
-          </template>
-          {{ o.label }}
-        </NTooltip>
-      </div>
+      <SegmentedControl v-model="agent" :options="agentOptions" aria-label="数据来源" />
       <NRadioGroup v-model:value="by" size="small" aria-label="聚合维度">
         <NRadioButton v-for="o in dimOptions" :key="o.value" :value="o.value" :label="o.label" />
       </NRadioGroup>
@@ -432,25 +406,5 @@ void loadSources();
 
 .tz-select {
   width: 160px;
-}
-
-.agent-row {
-  display: inline-flex;
-  align-self: flex-start; /* 纵向 flex 容器默认 stretch 会把外框拉满整行 */
-  align-items: center;
-  border: 1px solid var(--ts-border);
-  border-radius: var(--ts-radius);
-  overflow: hidden;
-}
-.agent-btn {
-  width: 40px;
-  height: 40px;
-  padding: 0;
-  border: none;
-  border-radius: 0;
-}
-/* 相邻格之间的细分隔线，整体仍是一个元素 */
-.agent-btn + .agent-btn {
-  border-left: 1px solid var(--ts-border);
 }
 </style>

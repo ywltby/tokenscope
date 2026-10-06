@@ -45,6 +45,7 @@ vi.mock("./views/Settings.vue", () => ({
 
 import App from "./App.vue";
 import PricingStatusBanner from "./components/PricingStatusBanner.vue";
+import { useTheme } from "./composables/theme";
 
 const statusNeedsSync = {
   modelsdevAvailable: false,
@@ -139,5 +140,35 @@ describe("App 应用壳（设计系统 Task 2，苹果风格分段控件）", ()
       banner.compareDocumentPosition(content) & Node.DOCUMENT_POSITION_FOLLOWING,
       "横幅必须在内容之前",
     ).toBeTruthy();
+  });
+
+  it("导航为吸顶玻璃层，品牌是线性图标 + 文字（DESIGN.md §5）", async () => {
+    mockApp(statusOk);
+    const w = mount(App);
+    await flushPromises();
+    const nav = w.find("header.app-nav");
+    expect(nav.exists()).toBe(true);
+    expect(nav.classes()).toContain("ts-glass");
+    const brand = nav.find(".brand");
+    expect(brand.text()).toContain("TokenScope");
+    // 品牌标记必须是 SVG 图标，不允许字符/emoji 充当图标
+    expect(brand.find("svg").exists()).toBe(true);
+  });
+
+  it("分段组内左右方向键可切换选中项", async () => {
+    mockApp(statusOk);
+    const w = mount(App);
+    await flushPromises();
+    // theme.ts 是模块级单例：前一用例可能把偏好改成 dark，先复位 system
+    useTheme().setPreference("system");
+    await flushPromises();
+    const themeItems = w.findAll('[role="radiogroup"]')[1].findAll('[role="radio"]');
+    expect(themeItems[2].attributes("aria-checked")).toBe("true");
+    await themeItems[2].trigger("keydown", { key: "ArrowLeft" });
+    await flushPromises();
+    expect(themeItems[1].attributes("aria-checked")).toBe("true");
+    await themeItems[1].trigger("keydown", { key: "ArrowRight" });
+    await flushPromises();
+    expect(themeItems[2].attributes("aria-checked")).toBe("true");
   });
 });
