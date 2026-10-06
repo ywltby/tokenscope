@@ -90,3 +90,47 @@ describe("App 集成（Task 4）", () => {
     expect(w.findComponent(PricingStatusBanner).exists()).toBe(true);
   });
 });
+
+describe("App 应用壳（设计系统 Task 2）", () => {
+  beforeEach(() => {
+    localStorage.removeItem("tokenscope-theme");
+  });
+
+  it("汇总/设置 tab 可识别且选中态可见", async () => {
+    mockApp(statusOk);
+    const w = mount(App);
+    await flushPromises();
+    const tabs = w.findAll('[role="tab"]');
+    expect(tabs.map((t) => t.text())).toEqual(["汇总", "设置"]);
+    expect(tabs[0].attributes("aria-selected")).toBe("true");
+    await tabs[1].trigger("click");
+    expect(tabs[1].attributes("aria-selected")).toBe("true");
+    expect(w.find(".stub-settings").exists()).toBe(true);
+  });
+
+  it("主题选择器可读出当前偏好并驱动 data-theme", async () => {
+    mockApp(statusOk);
+    const w = mount(App);
+    await flushPromises();
+    const sel = w.find("select.theme-select-control");
+    expect(sel.exists(), "主题选择器存在").toBe(true);
+    const el = sel.element as HTMLSelectElement;
+    expect(el.value, "选择器读出当前偏好").toBe("system");
+    expect(document.documentElement.dataset.theme, "data-theme 跟随解析值").toBe("light");
+    await sel.setValue("dark");
+    expect(document.documentElement.dataset.theme, "data-theme 切换为 dark").toBe("dark");
+    expect(localStorage.getItem("tokenscope-theme")).toBe("dark");
+  });
+
+  it("横幅渲染在内容之前（不遮挡主体）", async () => {
+    mockApp(statusNeedsSync);
+    const w = mount(App);
+    await flushPromises();
+    const banner = w.find(".banner-slot").element;
+    const content = w.find(".app-content").element;
+    expect(
+      banner.compareDocumentPosition(content) & Node.DOCUMENT_POSITION_FOLLOWING,
+      "横幅必须在内容之前",
+    ).toBeTruthy();
+  });
+});

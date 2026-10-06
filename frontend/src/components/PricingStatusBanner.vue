@@ -4,9 +4,11 @@
 //   新状态收敛，补充源失败原因仍可见）；
 // - pricing_status 读取失败显示可重试提示，不再静默清空隐藏所有诊断；
 // - 监听设置页派发的 pricing-status-changed 事件，跨组件刷新状态。
+// 设计系统 Task 2：玻璃表面 + 语义状态色（左边框）+ alert 角色；
+// 文案与编排逻辑保持不变。
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { NAlert, NButton } from "naive-ui";
+import { NButton } from "naive-ui";
 import type { PricingStatus } from "../types";
 
 const status = ref<PricingStatus | null>(null);
@@ -60,28 +62,49 @@ const bannerText = "尚未获取定价，需要联网同步价格；当前费用
 </script>
 
 <template>
-  <NAlert
-    v-if="!statusFailed && visible"
-    type="warning"
-    style="margin-bottom: 12px"
-    :closable="false"
-  >
-    <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
+  <div v-if="!statusFailed && visible" class="pricing-banner ts-glass" role="alert">
+    <div class="banner-body">
       <span>{{ bannerText }}</span>
       <NButton size="tiny" type="primary" :loading="syncing" @click="syncNow"> 立即同步 </NButton>
     </div>
-  </NAlert>
+  </div>
   <!-- Task 3/审阅修复：部分同步失败原因独立展示——主源已可用横幅收敛后仍可见 -->
-  <NAlert v-if="syncError" type="warning" style="margin-bottom: 12px" :closable="false">
-    <div style="font-size: 12px">
+  <div v-if="syncError" class="pricing-banner ts-glass is-warning" role="alert">
+    <div class="banner-body text-small">
       同步部分失败：{{ syncError }}（可重试；主源已可用时费用仍会正常显示）
     </div>
-  </NAlert>
+  </div>
   <!-- pricing_status 读取失败 → 可重试提示而非静默空 DOM（审阅不变量 4） -->
-  <NAlert v-else-if="statusFailed" type="error" style="margin-bottom: 12px" :closable="false">
-    <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
+  <div v-else-if="statusFailed" class="pricing-banner ts-glass is-error" role="alert">
+    <div class="banner-body">
       <span>定价状态读取失败，可重试：{{ statusError }}</span>
       <NButton size="tiny" :loading="syncing" @click="refreshStatus">重试</NButton>
     </div>
-  </NAlert>
+  </div>
 </template>
+
+<style scoped>
+.pricing-banner {
+  margin-bottom: var(--ts-space-3);
+  border-radius: var(--ts-radius);
+  border-left: 3px solid var(--ts-warning);
+  color: var(--ts-text);
+}
+
+.pricing-banner.is-error {
+  border-left-color: var(--ts-error);
+}
+
+.banner-body {
+  display: flex;
+  align-items: center;
+  gap: var(--ts-space-3);
+  flex-wrap: wrap;
+  padding: var(--ts-space-2) var(--ts-space-3);
+  font-size: 13px;
+}
+
+.text-small {
+  font-size: 12px;
+}
+</style>

@@ -109,7 +109,6 @@ const draftToMs = computed<number | null>({
   },
 });
 
-const panelStyle = { width: "300px", padding: "12px" };
 const shortcutActive = (sc: { range: () => [string, string] }): boolean => {
   if (draftFrom.value == null || draftTo.value == null) return false;
   const [from, to] = sc.range();
@@ -126,12 +125,12 @@ const shortcutActive = (sc: { range: () => [string, string] }): boolean => {
     @update:show="show = $event"
   >
     <template #trigger>
-      <NButton size="small" secondary>
-        <span style="margin-right: 4px">📅</span>{{ label }}
+      <NButton size="small" secondary class="range-trigger ts-focusable">
+        <span class="range-trigger-label">{{ label }}</span>
       </NButton>
     </template>
-    <div :style="panelStyle">
-      <div class="shortcut-row" style="margin-bottom: 12px">
+    <div class="range-panel ts-glass">
+      <div class="shortcut-row">
         <NButton
           v-for="sc in shortcuts"
           :key="sc.label"
@@ -143,9 +142,9 @@ const shortcutActive = (sc: { range: () => [string, string] }): boolean => {
           {{ sc.label }}
         </NButton>
       </div>
-      <div style="font-size: 12px; opacity: 0.65; margin-bottom: 4px">开始日期</div>
+      <div class="field-label">开始日期</div>
       <NDatePicker v-model:value="draftFromMs" type="date" clearable placeholder="开始日期" />
-      <div style="font-size: 12px; opacity: 0.65; margin: 10px 0 4px">结束日期</div>
+      <div class="field-label field-label-gap">结束日期</div>
       <NDatePicker
         v-model:value="draftToMs"
         type="date"
@@ -153,16 +152,16 @@ const shortcutActive = (sc: { range: () => [string, string] }): boolean => {
         :disabled="followToday"
         placeholder="结束日期"
       />
-      <div style="margin-top: 8px">
+      <div class="follow-row">
         <NCheckbox v-model:checked="followToday">结束日跟随今天</NCheckbox>
       </div>
-      <div style="display: flex; justify-content: space-between; margin-top: 14px">
+      <div class="actions-row">
         <!-- 清除入口（F07）：一键回"全部时间"，确定时提交 null -->
         <NButton v-if="draftFrom != null || draftTo != null" size="small" quaternary @click="clear">
           清除
         </NButton>
         <span v-else></span>
-        <span style="display: inline-flex; gap: 8px">
+        <span class="actions-group">
           <NButton size="small" @click="show = false">取消</NButton>
           <NButton size="small" type="primary" @click="confirm">确定</NButton>
         </span>
@@ -172,12 +171,25 @@ const shortcutActive = (sc: { range: () => [string, string] }): boolean => {
 </template>
 
 <style scoped>
+/* 弹层：elevated 玻璃表面（NPopover 浮层内容） */
+.range-panel {
+  width: 300px;
+  padding: var(--ts-space-3);
+  border-radius: var(--ts-radius-lg);
+  background-color: var(--ts-surface-elevated);
+}
+
+.range-trigger-label {
+  margin-right: var(--ts-space-1);
+}
+
 .shortcut-row {
   display: inline-flex;
   /* 与下方日期输入框同高同浅边框，视觉对齐 */
-  border: 1px solid rgba(128, 128, 128, 0.18);
-  border-radius: 3px;
+  border: 1px solid var(--ts-border);
+  border-radius: var(--ts-radius-control);
   overflow: hidden;
+  margin-bottom: var(--ts-space-3);
 }
 .shortcut-btn {
   width: 34px;
@@ -192,6 +204,28 @@ const shortcutActive = (sc: { range: () => [string, string] }): boolean => {
 }
 /* 相邻快捷项之间的细分隔线 */
 .shortcut-btn + .shortcut-btn {
-  border-left: 1px solid rgba(128, 128, 128, 0.18);
+  border-left: 1px solid var(--ts-border);
+}
+
+.field-label {
+  font-size: 12px;
+  color: var(--ts-text-muted);
+  margin-bottom: var(--ts-space-1);
+}
+.field-label-gap {
+  margin-top: var(--ts-space-3);
+}
+
+.follow-row {
+  margin-top: var(--ts-space-2);
+}
+.actions-row {
+  display: flex;
+  justify-content: space-between;
+  margin-top: var(--ts-space-4);
+}
+.actions-group {
+  display: inline-flex;
+  gap: var(--ts-space-2);
 }
 </style>

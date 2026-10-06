@@ -173,3 +173,18 @@ describe("PricingStatusBanner（Task 3）", () => {
     expect(w.text()).not.toContain("尚未获取定价");
   });
 });
+
+describe("PricingStatusBanner 视觉（设计系统 Task 2）", () => {
+  it("横幅使用玻璃表面、语义告警色与 alert 角色", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pricing_status") return Promise.resolve(statusNeedsSync);
+      return Promise.resolve(null);
+    });
+    const w = mount(PricingStatusBanner);
+    await flushPromises();
+    const glass = w.find(".ts-glass");
+    expect(glass.exists()).toBe(true, "状态横幅必须使用玻璃表面");
+    expect(glass.classes()).toContain("pricing-banner");
+    expect(w.find('[role="alert"]').exists()).toBe(true);
+  });
+});

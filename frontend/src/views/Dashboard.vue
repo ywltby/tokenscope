@@ -1,7 +1,17 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { NAlert, NButton, NCard, NRadioButton, NRadioGroup, NSpin, NTag, NTooltip } from "naive-ui";
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NRadioButton,
+  NRadioGroup,
+  NSelect,
+  NSpin,
+  NTag,
+  NTooltip,
+} from "naive-ui";
 import {
   AGENT_LABEL,
   type AgentFilter,
@@ -17,7 +27,8 @@ import TrendChart from "../components/TrendChart.vue";
 import EventTable from "../components/EventTable.vue";
 import AgentIcon from "../components/AgentIcon.vue";
 import DateRangeSelect from "../components/DateRangeSelect.vue";
-import { useTimezone } from "../composables/timezone";
+import { TZ_OPTIONS, useTimezone } from "../composables/timezone";
+import { todayInTz } from "../lib/dates";
 
 const props = defineProps<{ refreshKey: number }>();
 
@@ -25,6 +36,9 @@ const by = ref<Dim>("day");
 const agent = ref<AgentFilter>("all");
 const range = ref<[string, string] | null>(null);
 const { tz } = useTimezone();
+// 设计系统 Task 2：标题行的日期/时区摘要（随 tz 响应式更新）。
+const todayLabel = computed(() => todayInTz(tz.value));
+const tzLabel = computed(() => TZ_OPTIONS.find((o) => o.value === tz.value)?.label ?? tz.value);
 const report = ref<SummaryReport | null>(null);
 const loading = ref(false);
 const sourceStatus = ref<SourceStatus[]>([]);
@@ -258,9 +272,20 @@ void loadSources();
         {{ AGENT_LABEL[s.agent] ?? s.agent }} 目录存在但没有发现会话日志（{{ s.dir }}）。
       </template>
     </NAlert>
-    <!-- 筛选两行：第一行 agent 工具，第二行筛选条件（时区在设置页） -->
-    <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px">
-      <div class="agent-row">
+    <!-- 页面标题行：先回答"覆盖什么时间"，右侧保留刷新动作 -->
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">用量汇总</h1>
+        <div class="page-sub">
+          统计时区 {{ tzLabel }} · 今天 {{ todayLabel
+          }}<template v-if="drill"> · 已筛选 {{ drillLabel(drill) }}</template>
+        </div>
+      </div>
+      <NButton size="small" secondary class="ts-focusable" @click="manualRefresh">刷新</NButton>
+    </div>
+    <!-- 筛选行：来源 → 维度 → 日期 → 时区 → 刷新（窄窗口自动换行） -->
+    <div class="filter-row">
+      <div class="agent-row" role="group" aria-label="数据来源">
         <NTooltip v-for="o in agentOptions" :key="o.value">
           <template #trigger>
             <NButton
@@ -276,13 +301,18 @@ void loadSources();
           {{ o.label }}
         </NTooltip>
       </div>
-      <div style="display: flex; align-items: center; gap: 16px">
-        <NRadioGroup v-model:value="by" size="small">
-          <NRadioButton v-for="o in dimOptions" :key="o.value" :value="o.value" :label="o.label" />
-        </NRadioGroup>
-        <DateRangeSelect v-model:value="range" :tz="tz" />
-        <NButton size="small" secondary @click="manualRefresh">刷新</NButton>
-      </div>
+      <NRadioGroup v-model:value="by" size="small" aria-label="聚合维度">
+        <NRadioButton v-for="o in dimOptions" :key="o.value" :value="o.value" :label="o.label" />
+      </NRadioGroup>
+      <DateRangeSelect v-model:value="range" :tz="tz" />
+      <NSelect
+        :value="tz"
+        :options="TZ_OPTIONS"
+        size="small"
+        class="tz-select"
+        aria-label="统计时区"
+        @update:value="(v: string) => (tz = v)"
+      />
     </div>
     <!-- 失败可见并可重试（计划 A2）：保留已有数据展示，不整体灰罩 -->
     <NAlert v-if="summaryError" type="error" style="margin-bottom: 12px">
@@ -342,12 +372,47 @@ void loadSources();
 </template>
 
 <style scoped>
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--ts-space-3);
+  margin-bottom: var(--ts-space-3);
+}
+
+.page-title {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 0;
+  color: var(--ts-text);
+}
+
+.page-sub {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ts-text-muted);
+  margin-top: var(--ts-space-1);
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ts-space-3);
+  margin-bottom: var(--ts-space-3);
+}
+
+.tz-select {
+  width: 160px;
+}
+
 .agent-row {
   display: inline-flex;
   align-self: flex-start; /* 纵向 flex 容器默认 stretch 会把外框拉满整行 */
   align-items: center;
-  border: 1px solid rgba(128, 128, 128, 0.3);
-  border-radius: 8px;
+  border: 1px solid var(--ts-border);
+  border-radius: var(--ts-radius);
   overflow: hidden;
 }
 .agent-btn {
@@ -359,6 +424,6 @@ void loadSources();
 }
 /* 相邻格之间的细分隔线，整体仍是一个元素 */
 .agent-btn + .agent-btn {
-  border-left: 1px solid rgba(128, 128, 128, 0.3);
+  border-left: 1px solid var(--ts-border);
 }
 </style>

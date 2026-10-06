@@ -251,3 +251,20 @@ describe("tzDate（C3：区间日期按解析时区换算）", () => {
     expect(tzDate(Date.UTC(2026, 0, 15, 17, 0), "America/New_York")).toBe("2026-01-15");
   });
 });
+
+describe("DateRangeSelect 视觉（设计系统 Task 2）", () => {
+  it("触发按钮不使用 emoji 图标，标签语义保留", () => {
+    const w = mountRange(null);
+    const btn = w.find("button");
+    expect(btn.text()).not.toMatch(/\p{Extended_Pictographic}/u);
+    expect(btn.text()).toContain("全部时间");
+  });
+
+  it("弹层面板使用 elevated 玻璃表面", async () => {
+    const w = mountRange(null);
+    await open(w);
+    const panel = w.find(".range-panel");
+    expect(panel.exists()).toBe(true);
+    expect(panel.classes()).toContain("ts-glass");
+  });
+});
