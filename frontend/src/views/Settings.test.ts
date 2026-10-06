@@ -179,3 +179,87 @@ describe("Settings 来源配置（Task 4）", () => {
     ).toBe(true);
   });
 });
+
+import type { PricingEntry } from "../types";
+import {
+  fmtPriceOrUnknown,
+  formatRates,
+  formatSchedule,
+  formatSegmentRange,
+  formatTieredPricing,
+} from "../lib/tieredPrice";
+
+describe("Settings 分段价格展示（Task 8）", () => {
+  const tiered: PricingEntry = {
+    prefix: "nano-gpt/qwen/tiered-view",
+    name: "Tiered View",
+    channel: "nano-gpt",
+    input: 4.0,
+    output: 20.0,
+    cache_write: 0.0,
+    cache_read: null,
+    source: "外置",
+    incomplete: true,
+    basis: "prompt_tokens",
+    has_tiered_pricing: true,
+    segments: [
+      {
+        label: ">272K",
+        min_tokens: 272001,
+        max_tokens: null,
+        prices: { input: 8.0, output: 30.0, cache_write: null, cache_read: null },
+      },
+    ],
+    schedules: [
+      {
+        label: "peak",
+        timezone: "UTC",
+        periods: [
+          {
+            start_time: "12:00",
+            end_time: "14:00",
+            weekdays: ["mon", "fri"],
+            prices: { input: 30.0 },
+          },
+        ],
+      },
+    ],
+  };
+  const plain: PricingEntry = {
+    prefix: "plain-model",
+    input: 1.0,
+    output: 2.0,
+    cache_write: 0.25,
+    cache_read: 0.02,
+    source: "models.dev",
+    has_tiered_pricing: false,
+  };
+
+  it("缺失分项显示未知，显式 0 显示 $0", () => {
+    expect(fmtPriceOrUnknown(null)).toBe("未知");
+    expect(fmtPriceOrUnknown(0)).toBe("$0");
+    expect(fmtPriceOrUnknown(0.4)).toBe("$0.4000");
+    expect(fmtPriceOrUnknown(8)).toBe("$8.00");
+  });
+
+  it("分段范围与单价行展开；未知分项可见", () => {
+    expect(formatSegmentRange(tiered.segments![0])).toBe(">272K：[272,001, ∞)");
+    expect(formatRates(tiered.segments![0].prices)).toContain("输入 $8.00");
+    expect(formatRates(tiered.segments![0].prices)).toContain("缓存读 未知");
+  });
+
+  it("峰谷规则展示标签、时区、时段与星期限制", () => {
+    const line = formatSchedule(tiered.schedules![0]);
+    expect(line).toContain("peak（UTC）");
+    expect(line).toContain("12:00–14:00");
+    expect(line).toContain("mon,fri");
+  });
+
+  it("档位展开包含依据/分段/峰谷；普通条目为空保持现有布局", () => {
+    const lines = formatTieredPricing(tiered);
+    expect(lines.some((l) => l.includes("计价依据：prompt_tokens"))).toBe(true);
+    expect(lines.some((l) => l.includes("分段 >272K"))).toBe(true);
+    expect(lines.some((l) => l.includes("峰谷 peak"))).toBe(true);
+    expect(formatTieredPricing(plain)).toEqual([]);
+  });
+});

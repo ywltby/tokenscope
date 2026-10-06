@@ -77,16 +77,58 @@ export interface OpenRouterPrice {
   name?: string | null;
 }
 
+/** Task 8：价格计划视图（与后端 PricePlan 对齐）。 */
+export interface PriceRatesView {
+  input?: number | null;
+  output?: number | null;
+  cache_write?: number | null;
+  cache_read?: number | null;
+}
+
+export interface PriceSegmentView {
+  label?: string | null;
+  min_tokens: number;
+  /** null = 无上限 */
+  max_tokens?: number | null;
+  prices: PriceRatesView;
+}
+
+export interface SchedulePeriodView {
+  start_time: string;
+  end_time: string;
+  /** 规范化三字母（mon/tue/...）；null = 每天 */
+  weekdays?: string[] | null;
+  prices: PriceRatesView;
+}
+
+export interface PriceScheduleView {
+  label?: string | null;
+  /** IANA 时区；null = UTC */
+  timezone?: string | null;
+  periods: SchedulePeriodView[];
+  /** 规则级价格（无 period 命中时的基线覆盖） */
+  prices?: PriceRatesView;
+}
+
 export interface PricingEntry {
   prefix: string;
   name?: string | null;
-  input: number;
-  output: number;
-  cache_write: number;
-  cache_read: number;
+  /** 渠道（原始键第一个 / 之前）；null = 无 vendor 前缀 */
+  channel?: string | null;
+  /** 四类基础单价：null = 未知（显示"未知"），0 = 免费 */
+  input: number | null;
+  output: number | null;
+  cache_write: number | null;
+  cache_read: number | null;
   source: string;
-  /** B3：任一分项价格未知（设置页按 0 展示但标记不完整；完整解释 UI 属 C5） */
+  /** B3：任一分项价格未知（设置页显示"未知"并标记不完整） */
   incomplete?: boolean;
+  /** 计价依据（"prompt_tokens" 等）；null = 未声明 */
+  basis?: string | null;
+  segments?: PriceSegmentView[];
+  schedules?: PriceScheduleView[];
+  /** 有分段或峰谷规则（设置页据此渲染档位展开） */
+  has_tiered_pricing?: boolean;
   /** 同前缀 OpenRouter 条目价格；null = OpenRouter 无对应模型 */
   openrouter?: OpenRouterPrice | null;
 }

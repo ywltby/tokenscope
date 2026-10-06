@@ -567,17 +567,33 @@ pub struct OpenRouterPrice {
 }
 
 /// GUI 设置页展示用条目（含来源与显示名）。
+/// Task 8：携带完整 PricePlan 视图——计价依据、上下文分段、峰谷时间规则；
+/// 四类单价 Option 化区分"未知"与显式 0（缺失分项显示"未知"，0 显示 $0）。
 #[derive(Debug, Clone, Serialize)]
 pub struct PricingEntry {
+    /// 原始完整模型键（展示用）。
     pub prefix: String,
     pub name: Option<String>,
-    pub input: f64,
-    pub output: f64,
-    pub cache_write: f64,
-    pub cache_read: f64,
-    /// B3：任一分项价格未知（展示层按 0 显示但必须可见“不完整”）。
+    /// 渠道：原始键第一个 `/` 之前的部分；无斜杠 = None。
+    pub channel: Option<String>,
+    /// 四类基础单价：None = 未知，Some(0) = 免费。
+    pub input: Option<f64>,
+    pub output: Option<f64>,
+    pub cache_write: Option<f64>,
+    pub cache_read: Option<f64>,
+    /// B3：任一分项价格未知（展示层必须可见"不完整"）。
     pub incomplete: bool,
     pub source: &'static str,
+    /// 计价依据（None = 未声明，按 prompt_tokens 理解）。
+    pub basis: Option<PricingBasis>,
+    /// 上下文分段（规范 [min, max)）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<PriceSegment>,
+    /// 峰谷时间规则。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schedules: Vec<PriceSchedule>,
+    /// 有分段或时间规则（前端据此渲染档位展开）。
+    pub has_tiered_pricing: bool,
     /// 同前缀 OpenRouter 条目价格；None = OpenRouter 无对应模型。
     pub openrouter: Option<OpenRouterPrice>,
 }
@@ -1472,10 +1488,11 @@ impl Pricing {
                 PricingEntry {
                     prefix: e.display.clone(),
                     name: e.name.clone(),
-                    input: e.plan.base.input.unwrap_or(0.0),
-                    output: e.plan.base.output.unwrap_or(0.0),
-                    cache_write: e.plan.base.cache_write.unwrap_or(0.0),
-                    cache_read: e.plan.base.cache_read.unwrap_or(0.0),
+                    channel: e.display.split_once('/').map(|(c, _)| c.to_string()),
+                    input: e.plan.base.input,
+                    output: e.plan.base.output,
+                    cache_write: e.plan.base.cache_write,
+                    cache_read: e.plan.base.cache_read,
                     incomplete: e.plan.base.input.is_none()
                         || e.plan.base.output.is_none()
                         || e.plan.base.cache_write.is_none()
@@ -1485,6 +1502,10 @@ impl Pricing {
                         TIER_MODELSDEV => "models.dev",
                         _ => "OpenRouter",
                     },
+                    basis: e.plan.basis,
+                    segments: e.plan.segments.clone(),
+                    schedules: e.plan.schedules.clone(),
+                    has_tiered_pricing: !e.plan.segments.is_empty() || !e.plan.schedules.is_empty(),
                     openrouter,
                 }
             })
@@ -2728,6 +2749,115 @@ mod tests {
         // 纯价格数学：桶值直接给定（不经适配器）。
         // Task 4 校正后：800*4 + 100*20 + 50*5.0(写) + 200*0.4(读)。
         assert!((est.cost - 5530.0 / 1_000_000.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_pricing_entries_segments() {
+        // Task 8：设置页条目携带原始键/渠道/来源/依据/分段/峰谷视图；
+        // 缺失分项 = None（前端显示"未知"），显式 0 保留为 0。
+        let mut p = Pricing::empty();
+        // 分段条目：基础价缺 cache_read（None），显式 0 的 cache_write。
+        p.add_entry(Entry {
+            prefix: match_key("nano-gpt/qwen/tiered-view"),
+            display: "nano-gpt/qwen/tiered-view".into(),
+            name: Some("Tiered View".into()),
+            plan: PricePlan {
+                basis: Some(PricingBasis::PromptTokens),
+                application: Some(PricingApplication::WholeRequest),
+                base: PriceRates {
+                    input: Some(4.0),
+                    output: Some(20.0),
+                    cache_write: Some(0.0),
+                    cache_read: None,
+                },
+                segments: vec![PriceSegment {
+                    label: Some(">272K".into()),
+                    min_tokens: 272_001,
+                    max_tokens: None,
+                    prices: PriceRates {
+                        input: Some(8.0),
+                        ..Default::default()
+                    },
+                }],
+                schedules: vec![PriceSchedule {
+                    label: Some("peak".into()),
+                    timezone: Some("UTC".into()),
+                    periods: vec![SchedulePeriod {
+                        start_time: "12:00".into(),
+                        end_time: "14:00".into(),
+                        weekdays: Some(vec!["mon".into(), "fri".into()]),
+                        prices: PriceRates {
+                            input: Some(30.0),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+            },
+            tier: TIER_EXTERNAL,
+        });
+        // 普通条目：无分段无时间规则。
+        p.add_entry(Entry {
+            prefix: match_key("plain-model"),
+            display: "plain-model".into(),
+            name: None,
+            plan: PricePlan {
+                base: PriceRates {
+                    input: Some(1.0),
+                    output: Some(2.0),
+                    cache_write: Some(0.25),
+                    cache_read: Some(0.02),
+                },
+                ..Default::default()
+            },
+            tier: TIER_MODELSDEV,
+        });
+        let entries = p.entries();
+        let t = entries
+            .iter()
+            .find(|e| e.prefix == "nano-gpt/qwen/tiered-view")
+            .unwrap();
+        assert_eq!(t.source, "外置");
+        assert_eq!(t.channel.as_deref(), Some("nano-gpt"));
+        assert_eq!(t.name.as_deref(), Some("Tiered View"));
+        assert_eq!(t.basis, Some(PricingBasis::PromptTokens));
+        assert!(t.has_tiered_pricing);
+        assert_eq!(t.segments.len(), 1);
+        assert_eq!(
+            (t.segments[0].min_tokens, t.segments[0].max_tokens),
+            (272_001, None)
+        );
+        assert_eq!(t.segments[0].label.as_deref(), Some(">272K"));
+        assert_eq!(t.segments[0].prices.input, Some(8.0));
+        assert_eq!(t.schedules.len(), 1);
+        let period = &t.schedules[0].periods[0];
+        assert_eq!(
+            (period.start_time.as_str(), period.end_time.as_str()),
+            ("12:00", "14:00")
+        );
+        assert_eq!(
+            period.weekdays.as_ref().map(|w| w.len()),
+            Some(2),
+            "星期限制随规则透出"
+        );
+        // 基础价视图：显式 0 保留、缺失 = None（不折叠成 0）。
+        assert_eq!(t.cache_write, Some(0.0));
+        assert_eq!(t.cache_read, None);
+        assert!(t.incomplete);
+        // 普通条目：保持现有布局语义（无分段/时间规则、四价齐全）。
+        let pl = entries.iter().find(|e| e.prefix == "plain-model").unwrap();
+        assert!(!pl.has_tiered_pricing);
+        assert!(pl.segments.is_empty() && pl.schedules.is_empty());
+        assert_eq!(pl.channel, None);
+        assert_eq!((pl.input, pl.cache_read), (Some(1.0), Some(0.02)));
+        // 序列化：segments/schedules 可见，未知分项为 null。
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("\"min_tokens\":272001"));
+        assert!(json.contains("\"cache_read\":null"));
+        assert!(json.contains("\"cache_write\":0.0"));
+        let json_pl = serde_json::to_string(&pl).unwrap();
+        assert!(!json_pl.contains("segments"), "无分段条目跳过分段字段");
     }
 
     #[test]

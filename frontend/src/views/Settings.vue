@@ -28,6 +28,7 @@ import {
   type SourceStatus,
 } from "../types";
 import { TZ_OPTIONS, useTimezone } from "../composables/timezone";
+import { fmtPriceOrUnknown, formatTieredPricing } from "../lib/tieredPrice";
 
 const props = defineProps<{ refreshKey: number }>();
 const msg = useMessage();
@@ -178,14 +179,20 @@ watch(
 );
 
 /// 单价悬浮提示：来源 + OpenRouter 同前缀对照价（无对应模型标注未知价格）。
-function priceCell(r: object, pick: (e: PricingEntry) => number): VNode {
+function priceCell(r: object, pick: (e: PricingEntry) => number | null): VNode {
   const e = asEntry(r);
   const or = e.openrouter;
   const orLine = or
-    ? `OpenRouter：输入 ${fmtPrice(or.input)} · 输出 ${fmtPrice(or.output)} · 缓存写 ${fmtPrice(or.cache_write)} · 缓存读 ${fmtPrice(or.cache_read)}`
+    ? `OpenRouter：输入 ${fmtPriceOrUnknown(or.input)} · 输出 ${fmtPriceOrUnknown(or.output)} · 缓存写 ${fmtPriceOrUnknown(or.cache_write)} · 缓存读 ${fmtPriceOrUnknown(or.cache_read)}`
     : "OpenRouter：未知价格（无对应模型）";
+  const unknown = pick(e) == null;
   return h(NTooltip, null, {
-    trigger: () => h("span", { style: "cursor: help" }, fmtPrice(pick(e))),
+    trigger: () =>
+      h(
+        "span",
+        { style: unknown ? "cursor: help; color: #f0a020" : "cursor: help" },
+        fmtPriceOrUnknown(pick(e)),
+      ),
     default: () =>
       h("div", { style: "font-size: 12px; line-height: 1.8" }, [
         h("div", priceSourceLine(e)),
@@ -195,11 +202,32 @@ function priceCell(r: object, pick: (e: PricingEntry) => number): VNode {
   });
 }
 
-function fmtPrice(v: number): string {
-  if (v === 0) return "0";
-  if (v < 0.001) return v.toFixed(6);
-  if (v < 1) return v.toFixed(4);
-  return v.toFixed(2);
+/// Task 8：模型前缀列——有分段/峰谷规则时悬浮展开档位明细。
+function prefixCell(r: object): VNode {
+  const e = asEntry(r);
+  const lines = formatTieredPricing(e);
+  if (!lines.length) return h("span", e.prefix);
+  return h(
+    NTooltip,
+    { style: "max-width: 460px" },
+    {
+      trigger: () =>
+        h("span", { style: "cursor: help" }, [
+          e.prefix,
+          h(
+            NTag,
+            { size: "tiny", bordered: false, type: "info", style: "margin-left: 6px" },
+            { default: () => "分段" },
+          ),
+        ]),
+      default: () =>
+        h(
+          "div",
+          { style: "font-size: 12px; line-height: 1.8; white-space: normal" },
+          lines.map((t) => h("div", t)),
+        ),
+    },
+  );
 }
 
 const priceColumns = computed<DataTableColumn[]>(() => [
@@ -210,7 +238,12 @@ const priceColumns = computed<DataTableColumn[]>(() => [
     ellipsis: { tooltip: true },
     render: (r) => asEntry(r).name ?? "",
   },
-  { title: "模型前缀", key: "prefix", minWidth: 220 },
+  {
+    title: "模型前缀",
+    key: "prefix",
+    minWidth: 220,
+    render: (r) => prefixCell(r),
+  },
   { title: "输入$", key: "input", align: "right", render: (r) => priceCell(r, (e) => e.input) },
   { title: "输出$", key: "output", align: "right", render: (r) => priceCell(r, (e) => e.output) },
   {
