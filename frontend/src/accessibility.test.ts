@@ -7,6 +7,12 @@ import { defineComponent, h } from "vue";
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
+// App 挂载即监听 close-requested：mock 掉事件模块（真实 listen 依赖
+// Tauri 运行时，happy-dom 无 __TAURI_INTERNALS__）。
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(() => Promise.resolve(() => {})),
+}));
+
 vi.mock("naive-ui", async (importOriginal) => {
   const { defineComponent: dc } = await import("vue");
   const actual = await importOriginal<typeof import("naive-ui")>();

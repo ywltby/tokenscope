@@ -7,9 +7,18 @@ import { defineComponent, h } from "vue";
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
+// close-requested 事件监听打桩：保留回调引用供测试手动触发。
+const closeEvent = vi.hoisted(() => ({ fns: [] as (() => void)[], unlisten: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn((_event: string, cb: () => void) => {
+    closeEvent.fns.push(cb);
+    return Promise.resolve(closeEvent.unlisten);
+  }),
+}));
+
 // 布局类组件打桩：只验证 App 的接线（横幅 + 页面切换），不渲染 Naive UI 内部。
 vi.mock("naive-ui", async (importOriginal) => {
-  const { defineComponent: dc } = await import("vue");
+  const { defineComponent: dc, h } = await import("vue");
   const actual = await importOriginal<typeof import("naive-ui")>();
   const passthrough = (name: string) =>
     dc({
@@ -18,6 +27,14 @@ vi.mock("naive-ui", async (importOriginal) => {
         return () => h("div", { class: `stub-${name}` }, slots.default?.());
       },
     });
+  // NModal 受 show 控制渲染（真实组件 teleport，测试不可达内容）。
+  const NModalStub = dc({
+    name: "NModal",
+    props: { show: { type: Boolean, default: false } },
+    setup(props, { slots }) {
+      return () => (props.show ? h("div", { class: "stub-NModal" }, slots.default?.()) : null);
+    },
+  });
   return {
     ...actual,
     NLayout: passthrough("NLayout"),
@@ -25,6 +42,7 @@ vi.mock("naive-ui", async (importOriginal) => {
     NLayoutContent: passthrough("NLayoutContent"),
     NMessageProvider: passthrough("NMessageProvider"),
     NConfigProvider: passthrough("NConfigProvider"),
+    NModal: NModalStub,
   };
 });
 
@@ -170,5 +188,58 @@ describe("App 应用壳（设计系统 Task 2，苹果风格分段控件）", ()
     await themeItems[1].trigger("keydown", { key: "ArrowRight" });
     await flushPromises();
     expect(themeItems[2].attributes("aria-checked")).toBe("true");
+  });
+});
+
+describe("App 关闭确认（关闭确认与配置文件计划 Task 3）", () => {
+  it("close-requested 事件打开弹窗；resolve 调 close_resolve 并关闭", async () => {
+    mockApp(statusOk);
+    const w = mount(App);
+    await flushPromises();
+    // 初始（未收到关闭请求）不渲染弹窗内容
+    expect(w.find(".stub-NModal").exists()).toBe(false);
+    closeEvent.fns.at(-1)!();
+    await flushPromises();
+    const dialog = w.find(".stub-NModal");
+    expect(dialog.exists()).toBe(true);
+    expect(dialog.text()).toContain("关闭 TokenScope");
+    // 点「最小化到托盘」→ close_resolve 参数正确，弹窗关闭
+    invokeMock.mockClear();
+    const minimize = dialog.findAll("button").find((b) => b.text().includes("最小化到托盘"));
+    await minimize!.trigger("click");
+    await flushPromises();
+    expect(invokeMock).toHaveBeenCalledWith("close_resolve", {
+      minimize: true,
+      remember: false,
+    });
+    expect(w.find(".stub-NModal").exists()).toBe(false);
+  });
+
+  it("弹窗打开期间忽略重复 close-requested；取消不调 close_resolve", async () => {
+    mockApp(statusOk);
+    const w = mount(App);
+    await flushPromises();
+    closeEvent.fns.at(-1)!();
+    closeEvent.fns.at(-1)!();
+    await flushPromises();
+    expect(w.find(".stub-NModal").exists()).toBe(true);
+    invokeMock.mockClear();
+    const cancel = w
+      .find(".stub-NModal")
+      .findAll("button")
+      .find((b) => b.text().includes("取消"));
+    await cancel!.trigger("click");
+    await flushPromises();
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(w.find(".stub-NModal").exists()).toBe(false);
+  });
+
+  it("unmount 时取消 close-requested 监听", async () => {
+    mockApp(statusOk);
+    closeEvent.unlisten.mockClear();
+    const w = mount(App);
+    await flushPromises();
+    w.unmount();
+    expect(closeEvent.unlisten).toHaveBeenCalled();
   });
 });

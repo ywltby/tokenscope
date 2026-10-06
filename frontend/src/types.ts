@@ -228,6 +228,9 @@ export interface EventDrill {
 export type Dim = "day" | "model" | "project" | "agent";
 export type AgentFilter = "all" | "claude" | "codex";
 
+/// 关闭窗口默认动作（settings.toml close_action；缺省 null = 每次询问）。
+export type CloseAction = "minimize" | "quit";
+
 /**
  * 来源 ID 归一化（Task 8 修复）：source_status 序列化的 agent 值
  * （"claude-code"）→ 来源 ID（"claude"，与 settings_get /

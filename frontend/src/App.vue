@@ -2,7 +2,7 @@
 // 应用壳（设计系统 Task 2，苹果风格）：吸顶玻璃导航 + 分段控件页面/主题
 // 切换 + 滚动容器。视觉改造不改数据流：回到汇总页仍强制刷新一次（设置页
 // 可能重建了缓存）。
-import { computed, ref, watch, watchEffect } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from "vue";
 import {
   dateZhCN,
   zhCN,
@@ -12,10 +12,13 @@ import {
   NMessageProvider,
   type GlobalTheme,
 } from "naive-ui";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useTheme, type ThemePreference } from "./composables/theme";
 import { naiveThemeOverrides } from "./styles/naiveTheme";
 import SegmentedControl from "./components/SegmentedControl.vue";
 import PricingStatusBanner from "./components/PricingStatusBanner.vue";
+import CloseConfirmDialog from "./components/CloseConfirmDialog.vue";
 import Dashboard from "./views/Dashboard.vue";
 import Settings from "./views/Settings.vue";
 
@@ -45,6 +48,34 @@ const themeOptions: { value: ThemePreference; label: string }[] = [
   { value: "dark", label: "☾" },
   { value: "system", label: "自动" },
 ];
+
+// ── 关闭确认弹窗（关闭确认与配置文件计划 Task 3）──────────────
+// 后端在未记忆默认动作时拦截关窗并 emit close-requested；这里弹窗
+// 询问（最小化/退出/取消 + 记忆勾选），决定经 close_resolve 回传。
+const closeDialogOpen = ref(false);
+let unlistenClose: (() => void) | null = null;
+onMounted(() => {
+  listen("close-requested", () => {
+    // 弹窗已开时忽略重复关闭请求（防止事件叠加）
+    if (!closeDialogOpen.value) closeDialogOpen.value = true;
+  })
+    .then((un) => {
+      unlistenClose = un;
+    })
+    .catch(() => {
+      // 非 Tauri 环境（浏览器预览/测试）没有事件系统：静默跳过
+    });
+});
+onBeforeUnmount(() => unlistenClose?.());
+
+function onCloseResolve(v: { minimize: boolean; remember: boolean }): void {
+  closeDialogOpen.value = false;
+  void invoke("close_resolve", { minimize: v.minimize, remember: v.remember });
+}
+
+function onCloseCancel(): void {
+  closeDialogOpen.value = false;
+}
 </script>
 
 <template>
@@ -100,6 +131,12 @@ const themeOptions: { value: ThemePreference; label: string }[] = [
             <Settings v-else :refresh-key="refreshKey" />
           </main>
         </div>
+        <!-- 关闭确认弹窗：未记忆默认动作时由后端触发 -->
+        <CloseConfirmDialog
+          :open="closeDialogOpen"
+          @resolve="onCloseResolve"
+          @cancel="onCloseCancel"
+        />
       </div>
     </NMessageProvider>
   </NConfigProvider>
