@@ -33,6 +33,39 @@ function bd(over: Partial<EventCostBreakdown> = {}): EventCostBreakdown {
   };
 }
 
+/** same_as_input fixture：cache_read 显式沿用输入价（单价已由后端解析）。 */
+function sameAsInputBd(): EventCostBreakdown {
+  const base = bd();
+  return {
+    ...base,
+    lines: base.lines.map((l) =>
+      l.kind === "cache_read"
+        ? { ...l, unit_price: 8, subtotal: 0.04, priced: true, rate_kind: "same_as_input" as const }
+        : { ...l, rate_kind: "fixed" as const },
+    ),
+    cost_usd: 2.246008,
+    unknown: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    complete: true,
+  };
+}
+
+/** 排除诊断 fixture：完整候选胜出但有 2 个不完整候选被排除。 */
+function excludedBd(): EventCostBreakdown {
+  const base = bd();
+  return {
+    ...base,
+    matched: {
+      ...base.matched,
+      reason: "highest_complete_cost",
+      complete_candidate_count: 1,
+      incomplete_candidate_count: 2,
+      incomplete_candidates_excluded: 2,
+    },
+    excluded_candidate_warning:
+      "有 2 个候选因缺少价格未参与主估算（zenmux/gpt-5.4、peak/gpt-5.4）；若其缺失分项有价，实际最高费用可能更高",
+  };
+}
+
 const text = (b: EventCostBreakdown) => formatCostBreakdownText(b);
 const rows = (b: EventCostBreakdown) => formatCostBreakdownRows(b);
 
@@ -106,11 +139,52 @@ describe("costBreakdown 行模型（设计系统 Task 6）", () => {
     const t = text(bd());
     expect(t).toContain("计价来源 外置价格表");
     expect(t).toContain("完整匹配");
-    expect(t).toContain("候选 2 条，按本请求条件取最高费用（保守估算，非服务器实际路由）");
+    expect(t).toContain("候选 2 条（完整 ?/不完整 ?），在完整候选中取最高费用");
   });
 
   it("未知标记只出现在缺价相关行（unknown 行可被高亮渲染）", () => {
     const r = rows(bd()).filter((x) => x.unknown);
     expect(r.map((x) => x.label)).toEqual(["缓存读", "未计价"]);
+  });
+});
+
+describe("costBreakdown 三态与排除诊断（缓存读取定价解析计划 Task 5）", () => {
+  it("same_as_input 公式行标注「输入价」且单价为解析后的实际数值", () => {
+    const t = text(sameAsInputBd());
+    expect(t).toContain("缓存读 5,000 × 输入价 $8.00/M = $0.04");
+    expect(t).not.toContain("缺少单价");
+  });
+
+  it("显式 0 仍是普通固定价 $0，不显示未知标记", () => {
+    const b = bd();
+    const rows = formatCostBreakdownRows({
+      ...b,
+      lines: b.lines.map((l) =>
+        l.kind === "cache_read"
+          ? { ...l, unit_price: 0, subtotal: 0, priced: true, rate_kind: "fixed" as const }
+          : { ...l, rate_kind: "fixed" as const },
+      ),
+      unknown: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+      complete: true,
+    });
+    const cr = rows.find((r) => r.label === "缓存读");
+    expect(cr!.value).toContain("$0/M");
+    expect(cr!.unknown).toBeUndefined();
+  });
+
+  it("完整候选胜出时来源区显示两阶段选择与排除提示", () => {
+    const t = text(excludedBd());
+    expect(t).toContain("完整 1/不完整 2");
+    expect(t).toContain("估算范围：有 2 个候选因缺少价格未参与主估算");
+    expect(t).toContain("zenmux/gpt-5.4");
+  });
+
+  it("部分候选回退时说明「均不完整」", () => {
+    const b = bd();
+    const t = text({
+      ...b,
+      matched: { ...b.matched, reason: "highest_partial_cost" },
+    });
+    expect(t).toContain("均不完整");
   });
 });

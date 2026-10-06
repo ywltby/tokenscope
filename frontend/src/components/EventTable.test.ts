@@ -120,7 +120,7 @@ describe("EventTable 费用悬浮（Task 7）", () => {
     expect(t).toContain("计价来源 外置价格表");
     expect(t).toContain("渠道 nano-gpt");
     expect(t).toContain("完整匹配");
-    expect(t).toContain("候选 2 条，按本请求条件取最高费用（保守估算，非服务器实际路由）");
+    expect(t).toContain("候选 2 条（完整 ?/不完整 ?），在完整候选中取最高费用");
   });
 
   it("请求时间、时间档及时区可见；无峰谷规则时明确说明", () => {

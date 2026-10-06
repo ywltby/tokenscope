@@ -85,9 +85,13 @@ function formulaRows(lines: CostLine[]): BreakdownRow[] {
         unknown: l.tokens > 0,
       };
     }
+    // same_as_input：单价来自同层输入价（unit_price 已由后端解析为实际数值），
+    // 与普通固定价区分显示（缓存读取定价解析计划 Task 5）。
+    const unit =
+      l.rate_kind === "same_as_input" ? `输入价 ${fmtUnit(l.unit_price)}` : fmtUnit(l.unit_price);
     return {
       label: KIND_LABEL[l.kind],
-      value: `${fmtNum(l.tokens)} × ${fmtUnit(l.unit_price)}/M = ${fmtMoney(l.subtotal)}`,
+      value: `${fmtNum(l.tokens)} × ${unit}/M = ${fmtMoney(l.subtotal)}`,
     };
   });
 }
@@ -118,14 +122,21 @@ function resultRows(bd: EventCostBreakdown): BreakdownRow[] {
 
 function sourceRows(bd: EventCostBreakdown): BreakdownRow[] {
   const m = bd.matched;
-  return [
+  const selection =
+    m.reason === "highest_partial_cost"
+      ? `候选 ${m.candidate_count} 条（均不完整），取已知费用最高者；未计价 token 见未知行`
+      : `候选 ${m.candidate_count} 条（完整 ${m.complete_candidate_count ?? "?"}/不完整 ${
+          m.incomplete_candidate_count ?? "?"
+        }），在完整候选中取最高费用（保守估算，非服务器实际路由）`;
+  const rows: BreakdownRow[] = [
     { label: "计价来源", value: SOURCE_LABEL[m.source] ?? m.source },
     { label: "匹配方式", value: MATCH_LABEL[m.match_mode] ?? m.match_mode },
-    {
-      label: "候选选择",
-      detail: `候选 ${m.candidate_count} 条，按本请求条件取最高费用（保守估算，非服务器实际路由）`,
-    },
+    { label: "候选选择", detail: selection },
   ];
+  if (bd.excluded_candidate_warning) {
+    rows.push({ label: "估算范围", detail: bd.excluded_candidate_warning, unknown: true });
+  }
+  return rows;
 }
 
 /** 事实 → 公式 → 结果 → 来源，组间 divider。 */

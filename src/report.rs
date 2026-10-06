@@ -818,6 +818,9 @@ pub struct EventCostBreakdown {
     pub unknown: TokenCounts,
     /// false = 部分计价（存在非零 token 的缺价分项）。
     pub complete: bool,
+    /// 完整候选胜出但有不完整候选被排除时的提示（非本公式 unknown，
+    /// 而是"其他候选缺价、未参与主估算"的不确定性披露）。
+    pub excluded_candidate_warning: Option<String>,
 }
 
 /// 一条去重后的用量明细（展示行）。
@@ -936,6 +939,7 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
                 cost_usd: est.cost,
                 unknown: est.unknown,
                 complete: est.complete,
+                excluded_candidate_warning: est.excluded_candidate_warning,
             });
             EventRow {
                 ts: e.ts.to_zoned(tz.clone()).strftime("%F %T").to_string(),
@@ -1620,6 +1624,76 @@ cache_read = 0.4
         let expect: Vec<String> = full.rows.iter().map(|r| r.cursor.clone()).collect();
         assert_eq!(flat, expect);
         std::fs::remove_dir_all(&hermetic).ok();
+    }
+
+    #[test]
+    fn test_event_gpt54_complete_candidate_wins() {
+        // 计划 Task 6 Step 1（gpt-5.4 类真实场景）：三个同末段渠道候选——
+        // zenmux 贵但缺 cache_read、cortecs 完整、openai 完整且缓存读免费。
+        // 带 cache_read token 的请求必须选中完整候选中最高者（cortecs? 由
+        // 请求条件决定），被排除的不完整候选随 breakdown 披露。
+        let dir = tmp_dir("event-gpt54");
+        let proj = dir.join("proj-g54");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess-g54.jsonl"),
+            concat!(
+                r#"{"type":"assistant","timestamp":"2026-01-05T15:00:00.000Z","sessionId":"s-g54","isSidechain":false,"message":{"id":"msg-1","model":"gpt-5.4","usage":{"input_tokens":100000,"output_tokens":50000,"cache_creation_input_tokens":0,"cache_read_input_tokens":300000}}}"#,
+                "
+",
+            ),
+        )
+        .unwrap();
+        let md = dir.join("pricing-modelsdev.json");
+        std::fs::write(
+            &md,
+            r#"{"v":3,"synced_at":"2026-01-05T00:00:00Z","entries":[
+                {"id":"zenmux/gpt-5.4","name":null,"input":4.0,"output":20.0},
+                {"id":"cortecs/gpt-5.4","name":null,"input":3.0,"output":18.0,"cache_read":0.3},
+                {"id":"openai/gpt-5.4","name":null,"input":2.5,"output":15.0,"cache_read":0.25}
+            ]}"#,
+        )
+        .unwrap();
+        let cache = dir.join("cache");
+        let opts = SummaryOptions {
+            by: GroupBy::Day,
+            claude_dir: Some(dir.clone()),
+            codex_dir: Some(PathBuf::from("Z:/no-such-codex")),
+            cache_dir: Some(cache.clone()),
+            pricing_index: Some(cache.join("pricing-index.json")),
+            pricing_path: Some(dir.join("no-pricing.toml")),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/or.json")),
+            modelsdev_path: Some(md),
+            tz: Some("UTC".to_string()),
+            refresh: true,
+            ..Default::default()
+        };
+        let list = list_events(&opts, &EventFilter::default()).unwrap();
+        assert_eq!(list.rows.len(), 1);
+        let row = &list.rows[0];
+        let bd = row.cost_breakdown.as_ref().expect("gpt-5.4 必须有明细");
+        // 完整候选：cortecs (0.3+0.9+0.09 = 1.29) 与 openai (0.25+0.75+0.075
+        // = 1.075) → cortecs 最高；zenmux（缺 cache_read，partial 1.4）被排除。
+        assert_eq!(bd.matched.channel.as_deref(), Some("cortecs"));
+        assert_eq!(bd.matched.reason, "highest_complete_cost");
+        assert!(bd.complete, "完整候选胜出 → 无 unknown");
+        assert_eq!(bd.unknown.cache_read, 0);
+        assert!((bd.cost_usd - 1.29).abs() < 1e-9);
+        assert!((row.cost_usd.unwrap() - bd.cost_usd).abs() < 1e-12);
+        assert_eq!(bd.matched.incomplete_candidates_excluded, 1);
+        let warn = bd
+            .excluded_candidate_warning
+            .as_deref()
+            .expect("排除的不完整候选必须披露");
+        assert!(warn.contains("zenmux/gpt-5.4"), "{warn}");
+        // 明细行：cache_read 单价来自 cortecs 0.3。
+        let cr = bd
+            .lines
+            .iter()
+            .find(|l| l.kind == crate::pricing::CostLineKind::CacheRead)
+            .unwrap();
+        assert_eq!((cr.tokens, cr.unit_price), (300_000, Some(0.3)));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

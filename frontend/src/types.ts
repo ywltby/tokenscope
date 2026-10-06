@@ -149,6 +149,9 @@ export interface PricingView {
 /** Task 5/6：请求级费用明细 DTO（与后端 EventCostBreakdown 对齐）。 */
 export type CostLineKind = "input" | "output" | "cache_write" | "cache_read";
 
+/** 单价来源（缓存读取定价解析计划 Task 5）：fixed / same_as_input / unknown。 */
+export type RateKind = "fixed" | "same_as_input" | "unknown";
+
 export interface CostLine {
   kind: CostLineKind;
   tokens: number;
@@ -156,6 +159,8 @@ export interface CostLine {
   unit_price: number | null;
   subtotal: number;
   priced: boolean;
+  /** 单价来源；same_as_input 时 unit_price 已是解析后的实际数值 */
+  rate_kind?: RateKind;
 }
 
 export type MatchMode = "full" | "full_variant_fallback" | "prefix" | "prefix_variant_fallback";
@@ -169,12 +174,18 @@ export interface MatchedCandidate {
   matched_key: string;
   match_mode: MatchMode;
   candidate_count: number;
-  /** 候选中最高费用（保守估算） */
+  /** 候选中最高费用（保守估算）：highest_complete_cost / highest_partial_cost */
   reason: string;
   schedule_label: string | null;
   schedule_timezone: string | null;
   /** 历史事件时间（RFC3339） */
   request_at: string | null;
+  /** 完整候选数（两阶段选择诊断） */
+  complete_candidate_count?: number;
+  /** 不完整候选数 */
+  incomplete_candidate_count?: number;
+  /** 被排除未参与主估算的不完整候选数 */
+  incomplete_candidates_excluded?: number;
 }
 
 export interface EventCostBreakdown {
@@ -193,6 +204,8 @@ export interface EventCostBreakdown {
     cache_read: number;
   };
   complete: boolean;
+  /** 有不完整候选被排除时的提示（非本公式 unknown） */
+  excluded_candidate_warning?: string | null;
 }
 
 export interface EventRow {
