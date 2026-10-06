@@ -393,31 +393,77 @@ fn estimate_entry(
         None => (select_segment(plan, basis_value), None),
     };
     let rates = effective_rates(plan, time_prices.as_ref(), selected);
-    // 默认完整；缺价分项按 token 置为 partial。
-    let mut est = CostEstimate {
-        complete: true,
-        ..Default::default()
-    };
-    let mut line = |price: Option<f64>, tokens: u64, unknown: &mut u64| match price {
-        Some(p) => est.cost += tokens as f64 * p,
-        // Task 5：未知分项仅在实际产生 token 时才标记不完整——
-        // 零 token 的未知分项不影响完整性（不变量 5）。
-        None if tokens > 0 => {
-            est.complete = false;
-            *unknown += tokens;
+    // Task 5：逐分项生成明细行；cost 为各行小计之和（顺序固定，确定性的
+    // 浮点求和）。未知分项仅在实际产生 token 时才标记不完整——零 token
+    // 的未知分项不影响完整性（不变量 5）。
+    let mut cost = 0.0;
+    let mut complete = true;
+    let mut unknown = TokenCounts::default();
+    let mut lines = Vec::with_capacity(4);
+    for (kind, tokens, price, unknown_slot) in [
+        (
+            CostLineKind::Input,
+            t.input,
+            rates.input,
+            &mut unknown.input,
+        ),
+        (
+            CostLineKind::Output,
+            t.output,
+            rates.output,
+            &mut unknown.output,
+        ),
+        (
+            CostLineKind::CacheWrite,
+            t.cache_write,
+            rates.cache_write,
+            &mut unknown.cache_write,
+        ),
+        (
+            CostLineKind::CacheRead,
+            t.cache_read,
+            rates.cache_read,
+            &mut unknown.cache_read,
+        ),
+    ] {
+        match price {
+            Some(p) => {
+                let subtotal = tokens as f64 * p / 1_000_000.0;
+                cost += subtotal;
+                lines.push(CostLine {
+                    kind,
+                    tokens,
+                    unit_price: Some(p),
+                    subtotal,
+                    priced: true,
+                });
+            }
+            None => {
+                if tokens > 0 {
+                    complete = false;
+                    *unknown_slot = tokens;
+                }
+                lines.push(CostLine {
+                    kind,
+                    tokens,
+                    unit_price: None,
+                    subtotal: 0.0,
+                    priced: false,
+                });
+            }
         }
-        None => {}
-    };
-    line(rates.input, t.input, &mut est.unknown.input);
-    line(rates.output, t.output, &mut est.unknown.output);
-    line(
-        rates.cache_write,
-        t.cache_write,
-        &mut est.unknown.cache_write,
-    );
-    line(rates.cache_read, t.cache_read, &mut est.unknown.cache_read);
-    est.cost /= 1_000_000.0;
-    est
+    }
+    CostEstimate {
+        cost,
+        unknown,
+        complete,
+        matched: None,
+        basis_value,
+        // 未声明 basis 的计划按规范口径即 prompt_tokens（Task 4 数据模型）。
+        basis: Some(plan.basis.unwrap_or(PricingBasis::PromptTokens)),
+        segment_label: selected.and_then(|s| s.label.clone()),
+        lines,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -465,16 +511,49 @@ pub struct MatchedCandidate {
     pub request_at: Option<String>,
 }
 
+/// 单个分项的费用明细行（Task 5）：token 数、单价与小计同源，
+/// `priced = false` 表示该分项无最终单价（token 进 unknown，不按 0 计费）。
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CostLine {
+    pub kind: CostLineKind,
+    pub tokens: u64,
+    /// USD / 百万 token；None = 该分项缺价。
+    pub unit_price: Option<f64>,
+    /// tokens × unit_price / 1e6（未计价时为 0，不计入总价）。
+    pub subtotal: f64,
+    pub priced: bool,
+}
+
+/// 四类计价分项。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostLineKind {
+    Input,
+    Output,
+    CacheWrite,
+    CacheRead,
+}
+
 /// 分项计价结果（B3）：cost 为已计价分项小计；unknown 记录无法计价分项的
 /// token（缺价格 ≠ 0 价格）；complete = false 表示部分计价。
 /// Task 2A：含 `Vec` 元数据后从 Copy 改为 Clone。
-#[derive(Debug, Clone, Default)]
+/// Task 5：请求级 breakdown——basis 值/依据、命中分段、四行明细与
+/// 候选元数据随同一结果返回；聚合与明细复用，前端不重算。
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CostEstimate {
     pub cost: f64,
     pub unknown: TokenCounts,
     pub complete: bool,
     /// 最终命中候选（None = 理论上不出现：estimate 返回 None 表示未收录）。
     pub matched: Option<MatchedCandidate>,
+    /// 档位选择的依据值（prompt_tokens = input + cache_write + cache_read）。
+    pub basis_value: u64,
+    /// 计价依据（None = 未声明，按 prompt_tokens 理解）。
+    pub basis: Option<PricingBasis>,
+    /// 命中分段的标签（None = 未命中分段/无分段 → 基础价）。
+    pub segment_label: Option<String>,
+    /// 四类分项明细（顺序固定 input/output/cache_write/cache_read）。
+    pub lines: Vec<CostLine>,
 }
 
 /// GUI 悬浮对照用：该前缀在 OpenRouter 层的价格（无对应模型则 None）。
@@ -2649,6 +2728,199 @@ mod tests {
         // 纯价格数学：桶值直接给定（不经适配器）。
         // Task 4 校正后：800*4 + 100*20 + 50*5.0(写) + 200*0.4(读)。
         assert!((est.cost - 5530.0 / 1_000_000.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_pricing_cost_breakdown() {
+        // Task 5：统一估算器输出请求级 breakdown——四行明细与总价同源；
+        // 阈值边界、部分缺价、峰谷与分段条件切换、重复估算确定性。
+        let rates = |i: f64, o: f64, cw: f64, cr: f64| PriceRates {
+            input: Some(i),
+            output: Some(o),
+            cache_write: Some(cw),
+            cache_read: Some(cr),
+        };
+        let mut p = Pricing::empty();
+        // 渠道 fixed：固定四价，无分段无时间规则。
+        p.add_entry(Entry {
+            prefix: match_key("chan-fixed/bd"),
+            display: "chan-fixed/bd".into(),
+            name: None,
+            plan: PricePlan {
+                base: rates(8.0, 4.0, 1.0, 0.5),
+                ..Default::default()
+            },
+            tier: TIER_OPENROUTER,
+        });
+        // 渠道 tiered：基础 2/1/0.5/缺 + >272001 段（只覆盖 input/output，
+        // cache 回退基础，cache_read 全程缺价）。
+        p.add_entry(Entry {
+            prefix: match_key("chan-tiered/bd"),
+            display: "chan-tiered/bd".into(),
+            name: None,
+            plan: PricePlan {
+                basis: Some(PricingBasis::PromptTokens),
+                base: PriceRates {
+                    input: Some(2.0),
+                    output: Some(1.0),
+                    cache_write: Some(0.5),
+                    cache_read: None,
+                },
+                segments: vec![PriceSegment {
+                    label: Some(">272K".into()),
+                    min_tokens: 272_001,
+                    max_tokens: None,
+                    prices: PriceRates {
+                        input: Some(10.0),
+                        output: Some(5.0),
+                        cache_write: None,
+                        cache_read: None,
+                    },
+                }],
+                ..Default::default()
+            },
+            tier: TIER_OPENROUTER,
+        });
+        // 渠道 peak：基础 1/2/缺/缺 + 工作日 12:00-14:00 UTC 峰时 input 30。
+        p.add_entry(Entry {
+            prefix: match_key("chan-peak/bd"),
+            display: "chan-peak/bd".into(),
+            name: None,
+            plan: PricePlan {
+                base: PriceRates {
+                    input: Some(1.0),
+                    output: Some(2.0),
+                    cache_write: None,
+                    cache_read: None,
+                },
+                schedules: vec![PriceSchedule {
+                    label: Some("peak".into()),
+                    timezone: Some("UTC".into()),
+                    periods: vec![SchedulePeriod {
+                        start_time: "12:00".into(),
+                        end_time: "14:00".into(),
+                        weekdays: Some(
+                            ["mon", "tue", "wed", "thu", "fri"]
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect(),
+                        ),
+                        prices: PriceRates {
+                            input: Some(30.0),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            tier: TIER_OPENROUTER,
+        });
+        fn line_of(est: &CostEstimate, kind: CostLineKind) -> &CostLine {
+            est.lines.iter().find(|l| l.kind == kind).unwrap()
+        }
+        let monday = "2026-01-05"; // 周一
+        let noon: jiff::Timestamp = format!("{monday}T13:00:00Z").parse().unwrap();
+        let afternoon: jiff::Timestamp = format!("{monday}T15:00:00Z").parse().unwrap();
+
+        // 场景 1：峰时 + 低于阈值。候选总价 fixed=1.02（完整）、
+        // tiered=0.255（cache_read 缺）、peak=3.1（cache 两项缺）→ peak 胜出。
+        let tc = counts(100_000, 50_000, 10_000, 20_000);
+        let est = p.estimate("chan-fixed/bd", &tc, noon).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-peak/bd");
+        assert!((est.cost - 3.1).abs() < 1e-9);
+        assert!(!est.complete, "峰时候选缺缓存价 → 部分计价");
+        assert_eq!(est.unknown.cache_write, 10_000);
+        assert_eq!(est.unknown.cache_read, 20_000);
+        assert_eq!(est.basis_value, 130_000, "basis = input+cw+cr");
+        assert_eq!(est.basis, Some(PricingBasis::PromptTokens));
+        assert_eq!(
+            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            Some("peak")
+        );
+        assert_eq!(est.segment_label, None);
+        // 四行明细：input 峰价 30、output 规则回退基础 2、缓存两项未计价。
+        let li = line_of(&est, CostLineKind::Input);
+        assert_eq!((li.tokens, li.unit_price), (100_000, Some(30.0)));
+        assert!((li.subtotal - 3.0).abs() < 1e-9);
+        let lo = line_of(&est, CostLineKind::Output);
+        assert_eq!((lo.tokens, lo.unit_price), (50_000, Some(2.0)));
+        assert!((lo.subtotal - 0.1).abs() < 1e-9);
+        for kind in [CostLineKind::CacheWrite, CostLineKind::CacheRead] {
+            let l = line_of(&est, kind);
+            assert!(!l.priced && l.unit_price.is_none() && l.subtotal == 0.0);
+        }
+        assert_eq!(est.lines.len(), 4);
+
+        // 场景 2：非峰时同请求 → fixed 1.02 完整计价胜出。
+        let est = p.estimate("chan-fixed/bd", &tc, afternoon).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-fixed/bd");
+        assert!(est.complete);
+        assert_eq!(est.unknown, TokenCounts::default());
+        let li = line_of(&est, CostLineKind::Input);
+        assert_eq!((li.tokens, li.unit_price), (100_000, Some(8.0)));
+        let lcr = line_of(&est, CostLineKind::CacheRead);
+        assert_eq!(
+            (lcr.tokens, lcr.unit_price, lcr.priced),
+            (20_000, Some(0.5), true)
+        );
+        assert!((lcr.subtotal - 20_000.0 * 0.5 / 1e6).abs() < 1e-12);
+
+        // 场景 3：恰好超过阈值 272001 → tiered 高档（input 10/output 5，
+        // cache_write 回退 0.5，cache_read 缺价）胜过 fixed 的高价。
+        let tc_hi = counts(272_001, 1_000, 0, 0);
+        let est = p.estimate("chan-fixed/bd", &tc_hi, afternoon).unwrap();
+        // fixed = 272001*8 + 1000*4 = 2.180008；tiered = 272001*10 + 1000*5 = 2.72501。
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-tiered/bd");
+        assert_eq!(est.segment_label.as_deref(), Some(">272K"));
+        assert!((est.cost - 2.72501).abs() < 1e-9);
+        assert_eq!(est.basis_value, 272_001);
+        let li = line_of(&est, CostLineKind::Input);
+        assert_eq!(li.unit_price, Some(10.0));
+        // 低于阈值 272000 → tiered 基础价 2 便宜不过 fixed 8 → fixed 胜。
+        let tc_edge = counts(272_000, 1_000, 0, 0);
+        let est = p.estimate("chan-fixed/bd", &tc_edge, afternoon).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-fixed/bd");
+        assert_eq!(est.segment_label, None);
+
+        // 场景 4：分段只覆盖部分价格字段——tiered 命中高档时 cache_write
+        // 回退基础 0.5 而非 0/未知。
+        let tc_cw = counts(272_001, 0, 1_000, 0);
+        let est = p.estimate("chan-tiered/bd", &tc_cw, afternoon).unwrap();
+        let l = line_of(&est, CostLineKind::CacheWrite);
+        assert_eq!(
+            (l.unit_price, l.priced),
+            (Some(0.5), true),
+            "分段缺 cache → 回退基础价"
+        );
+
+        // 场景 5：完全缺价候选（无基础无分段命中）——所有 token 进 unknown。
+        let mut p2 = Pricing::empty();
+        p2.add_entry(Entry {
+            prefix: match_key("chan-none/bd"),
+            display: "chan-none/bd".into(),
+            name: None,
+            plan: PricePlan::default(),
+            tier: TIER_OPENROUTER,
+        });
+        let est = p2
+            .estimate("chan-none/bd", &counts(1_000, 2_000, 0, 0), afternoon)
+            .unwrap();
+        assert_eq!(est.cost, 0.0);
+        assert!(!est.complete);
+        assert_eq!(est.unknown.input, 1_000);
+        assert_eq!(est.unknown.output, 2_000);
+        assert!(est.lines.iter().all(|l| !l.priced));
+
+        // 场景 6：同一请求估算两次 → breakdown 与总价完全相同（纯函数）。
+        let a = p.estimate("chan-fixed/bd", &tc, noon).unwrap();
+        let b = p.estimate("chan-fixed/bd", &tc, noon).unwrap();
+        assert_eq!(a, b);
+        // breakdown 行可序列化（Task 6/7 的 DTO 载体）。
+        let json = serde_json::to_string(&a.lines).unwrap();
+        assert!(json.contains("\"kind\":\"input\""));
+        assert!(json.contains("\"priced\":true"));
     }
 
     #[test]

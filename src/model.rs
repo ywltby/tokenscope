@@ -47,7 +47,7 @@ impl UsageEvent {
 }
 
 /// 四类 token 的累计计数，聚合与费用计算共用。
-#[derive(Debug, Default, Clone, Copy, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct TokenCounts {
     pub input: u64,
     pub output: u64,
