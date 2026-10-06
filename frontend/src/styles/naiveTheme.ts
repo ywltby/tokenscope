@@ -6,6 +6,9 @@ import type { ThemeMode } from "../composables/theme";
 
 interface TsPalette {
   canvas: string;
+  /** 玻璃卡片底色（半透明，与 tokens.css --ts-surface 同步） */
+  surfaceGlass: string;
+  /** 实色数据区（表格），与 tokens.css --ts-surface-solid 同步 */
   surface: string;
   elevated: string;
   fill: string;
@@ -29,6 +32,7 @@ interface TsPalette {
 const PALETTES: Record<ThemeMode, TsPalette> = {
   light: {
     canvas: "#F5F5F7",
+    surfaceGlass: "rgba(255, 255, 255, 0.75)",
     surface: "#FFFFFF",
     elevated: "#FFFFFF",
     fill: "rgba(118, 118, 128, 0.12)",
@@ -49,6 +53,7 @@ const PALETTES: Record<ThemeMode, TsPalette> = {
   },
   dark: {
     canvas: "#0F0F11",
+    surfaceGlass: "rgba(28, 28, 30, 0.75)",
     surface: "#1C1C1E",
     elevated: "#2C2C2E",
     fill: "rgba(118, 118, 128, 0.24)",
@@ -76,8 +81,10 @@ export function naiveThemeOverrides(mode: ThemeMode): GlobalThemeOverrides {
   const isDark = mode === "dark";
   return {
     common: {
-      bodyColor: c.canvas,
-      cardColor: c.surface,
+      // 画布透明：body 的氛围光斑由 tokens.css 绘制，NGlobalStyle 不得盖掉
+      bodyColor: "transparent",
+      // NCard 走玻璃底色（模糊由 .ts-card 提供）；表格仍用实色 surface 保证可读
+      cardColor: c.surfaceGlass,
       modalColor: c.elevated,
       popoverColor: c.elevated,
       tableColor: c.surface,

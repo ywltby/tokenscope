@@ -1,5 +1,5 @@
 /**
- * TokenScope 语义视觉 token（DESIGN.md 第二版，苹果风格）。
+ * TokenScope 语义视觉 token（DESIGN.md 第二版，Glassmorphism 玻璃拟态）。
  * 浅色为默认（:root），深色挂在 html[data-theme="dark"]。
  * 组件与样式只允许消费这里的语义变量，禁止散落十六进制值；
  * Naive UI / ECharts 适配器（naiveTheme.ts / chartTheme.ts）与本文同步维护。
@@ -9,8 +9,9 @@
 
   /* 表面与画布 */
   --ts-canvas: #f5f5f7;
-  --ts-surface: #ffffff;
-  --ts-surface-elevated: #ffffff;
+  --ts-surface: rgba(255, 255, 255, 0.75);
+  --ts-surface-solid: #ffffff;
+  --ts-surface-elevated: rgba(255, 255, 255, 0.85);
   --ts-glass: rgba(255, 255, 255, 0.72);
   --ts-fill: rgba(118, 118, 128, 0.12);
   --ts-fill-hover: rgba(118, 118, 128, 0.08);
@@ -62,12 +63,19 @@
   /* 焦点环：2px 高对比轮廓 */
   --ts-focus-ring: 0 0 0 2px var(--ts-canvas), 0 0 0 4px var(--ts-accent);
 
-  /* 玻璃（仅吸顶导航） */
-  --ts-glass-blur: blur(24px) saturate(180%);
+  /* 玻璃拟态：blur(20px) 让背景透出 */
+  --ts-glass-blur: blur(20px) saturate(180%);
+  --ts-glass-stroke: rgba(255, 255, 255, 0.55);
+  --ts-glass-highlight: rgba(255, 255, 255, 0.8);
+
+  /* 背景氛围光斑（静态、低饱和，只为让玻璃有内容可模糊） */
+  --ts-ambient-1: rgba(0, 113, 227, 0.14);
+  --ts-ambient-2: rgba(90, 200, 250, 0.12);
+  --ts-ambient-3: rgba(52, 199, 89, 0.08);
 
   /* 阴影 */
-  --ts-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 16px rgba(0, 0, 0, 0.04);
-  --ts-shadow-elevated: 0 8px 32px rgba(0, 0, 0, 0.12);
+  --ts-shadow-card: 0 8px 32px rgba(0, 0, 0, 0.08);
+  --ts-shadow-elevated: 0 12px 48px rgba(0, 0, 0, 0.15);
   --ts-shadow-segment-thumb: 0 1px 3px rgba(0, 0, 0, 0.12);
 
   /* 动效：160–240ms，缓动 cubic-bezier(0.25, 0.1, 0.25, 1) */
@@ -88,8 +96,9 @@
   color-scheme: dark;
 
   --ts-canvas: #0f0f11;
-  --ts-surface: #1c1c1e;
-  --ts-surface-elevated: #2c2c2e;
+  --ts-surface: rgba(28, 28, 30, 0.75);
+  --ts-surface-solid: #1c1c1e;
+  --ts-surface-elevated: rgba(44, 44, 46, 0.85);
   --ts-glass: rgba(28, 28, 30, 0.72);
   --ts-fill: rgba(118, 118, 128, 0.24);
   --ts-fill-hover: rgba(118, 118, 128, 0.16);
@@ -118,18 +127,27 @@
   --ts-chart-cache-read: #8e949c;
 
   --ts-focus-ring: 0 0 0 2px var(--ts-canvas), 0 0 0 4px var(--ts-accent);
-  --ts-shadow-card: none;
-  --ts-shadow-elevated: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --ts-glass-stroke: rgba(255, 255, 255, 0.1);
+  --ts-glass-highlight: rgba(255, 255, 255, 0.08);
+  --ts-ambient-1: rgba(10, 132, 255, 0.18);
+  --ts-ambient-2: rgba(100, 210, 255, 0.1);
+  --ts-ambient-3: rgba(48, 209, 88, 0.06);
+  --ts-shadow-card: 0 8px 32px rgba(0, 0, 0, 0.4);
+  --ts-shadow-elevated: 0 12px 48px rgba(0, 0, 0, 0.6);
   --ts-shadow-segment-thumb: none;
 }
 
 /* 不支持 backdrop-filter 的系统：玻璃退化实色，布局与对比度不变 */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   :root {
-    --ts-glass: var(--ts-surface);
+    --ts-glass: rgba(255, 255, 255, 0.95);
+    --ts-surface: rgba(255, 255, 255, 0.95);
+    --ts-surface-elevated: #ffffff;
   }
   :root[data-theme="dark"] {
-    --ts-glass: var(--ts-surface);
+    --ts-glass: rgba(28, 28, 30, 0.95);
+    --ts-surface: rgba(28, 28, 30, 0.95);
+    --ts-surface-elevated: #2c2c2e;
   }
 }
 
@@ -141,14 +159,27 @@
   }
 }
 
-/* 全局画布 + 基础排版 */
+/*
+ * 全局画布：三团静态柔光（蓝 / 青 / 暖橙）固定在视口上，给玻璃卡片"可模糊的东西"。
+ * 不动画、不跟随滚动；饱和度克制，截图与长时间阅读不刺眼。禁止紫色。
+ */
 body {
   font-family: var(--ts-font);
   color: var(--ts-text);
-  background: var(--ts-canvas);
+  background-color: var(--ts-canvas);
+  background-image: var(--ts-canvas-aurora);
+  background-attachment: fixed;
   transition:
     background-color var(--ts-motion) var(--ts-ease),
     color var(--ts-motion) var(--ts-ease);
+}
+
+/* 柔光层只引用 --ts-ambient-*，明暗两套值在上方 token 区维护 */
+:root {
+  --ts-canvas-aurora:
+    radial-gradient(ellipse 60% 50% at 12% 8%, var(--ts-ambient-1), transparent 70%),
+    radial-gradient(ellipse 50% 45% at 92% 22%, var(--ts-ambient-2), transparent 70%),
+    radial-gradient(ellipse 55% 50% at 60% 100%, var(--ts-ambient-3), transparent 70%);
 }
 
 /* 精确数字：token 数、金额、百分比统一 tabular lining */
@@ -162,23 +193,36 @@ body {
   font-variant-numeric: tabular-nums lining-nums;
 }
 
-/* 玻璃吸顶导航栏 */
+/* 玻璃吸顶导航栏：内容滚过时透出模糊 */
 .ts-glass {
   background: var(--ts-glass);
   -webkit-backdrop-filter: var(--ts-glass-blur);
   backdrop-filter: var(--ts-glass-blur);
   border-bottom: 1px solid var(--ts-separator);
+  box-shadow: inset 0 -1px 0 var(--ts-glass-stroke);
 }
 
-/* 卡片：浅色靠阴影分层，深色靠描边 + 亮度 */
+/*
+ * 玻璃卡片：半透明 + 背景模糊 + 顶部高光内描边 + 柔和投影。
+ * 可读性兜底：卡片内的表格 / 图表绘图区 / 费用公式用 .ts-card-solid 实色衬底。
+ */
 .ts-card {
+  position: relative;
   background: var(--ts-surface);
+  -webkit-backdrop-filter: var(--ts-glass-blur);
+  backdrop-filter: var(--ts-glass-blur);
+  border: 1px solid var(--ts-glass-stroke);
   border-radius: var(--ts-radius-card);
   padding: var(--ts-space-5);
-  box-shadow: var(--ts-shadow-card);
+  box-shadow:
+    inset 0 1px 0 var(--ts-glass-highlight),
+    var(--ts-shadow-card);
 }
-:root[data-theme="dark"] .ts-card {
-  border: 1px solid var(--ts-separator);
+
+/* 卡片内的高密度数据区：实色衬底，保证数字与长文本对比度 */
+.ts-card-solid {
+  background: var(--ts-surface-solid);
+  border-radius: var(--ts-radius-control);
 }
 
 /* 分段控件 */
@@ -268,12 +312,14 @@ body {
   padding: var(--ts-space-3) var(--ts-space-4);
   border-radius: var(--ts-radius-popover);
   background: var(--ts-surface);
-  box-shadow: var(--ts-shadow-card);
+  -webkit-backdrop-filter: var(--ts-glass-blur);
+  backdrop-filter: var(--ts-glass-blur);
+  border: 1px solid var(--ts-glass-stroke);
+  box-shadow:
+    inset 0 1px 0 var(--ts-glass-highlight),
+    var(--ts-shadow-card);
   font-size: 13px;
   line-height: 1.45;
-}
-:root[data-theme="dark"] .ts-notice {
-  border: 1px solid var(--ts-separator);
 }
 .ts-notice-icon {
   flex-shrink: 0;

@@ -728,7 +728,16 @@ A：优先级：组件 scoped style < Naive themeOverrides < 组件 props。用 
 A：`nextTick(updateThumb)` 确保 DOM 更新后再计算位置；窗口 resize 时需要重新计算。
 
 **Q：深色模式描边看不见？**
-A：深色卡片描边用 `var(--ts-separator)`（白色 8% 不透明度），不用 `border: none`。
+A：`.ts-card` 已统一用 `var(--ts-glass-stroke)` 描边 + `--ts-glass-highlight` 顶部高光，组件里不要再单独写深色描边。
+
+**Q：玻璃卡片里的表格/图表看着发虚？**
+A：卡片本体是半透明玻璃（`--ts-surface` 75%）。表格主体、ECharts 绘图区、费用公式区必须包一层 `.ts-card-solid`（实色 `--ts-surface-solid`）；Naive DataTable 的 `thColor/tdColor` 已在 `naiveTheme.ts` 指向实色，不要改回透明。
+
+**Q：玻璃没效果、看起来像灰条？**
+A：玻璃依赖 `body` 上的固定柔光（`--ts-canvas-aurora`）。不要在 App 壳、`.app-content` 或页面根节点上加不透明背景色，否则会挡住柔光。
+
+**Q：卡片能不能再嵌套一层 `.ts-card`？**
+A：不能。`backdrop-filter` 嵌套会叠加模糊、拖慢渲染，内部分区一律用 `.ts-card-solid` 或发丝线 `--ts-separator`。
 
 **Q：比例条宽度加起来不是 100%？**
 A：浮点误差，用 `toFixed(2)` 并确保最后一段 `flex: 1` 或宽度 `calc(100% - 已用宽度)`。
