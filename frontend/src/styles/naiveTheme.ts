@@ -154,7 +154,9 @@ export function naiveThemeOverrides(mode: ThemeMode): GlobalThemeOverrides {
       },
     },
     DataTable: {
-      borderColor: "transparent",
+      // 任务 5：无竖线无外框（bordered=false + single-line 默认），
+      // 行间保留 separator 发丝线（DESIGN.md §5 表格）
+      borderColor: c.separator,
       borderRadius: "0",
       thColor: c.surface,
       tdColor: c.surface,

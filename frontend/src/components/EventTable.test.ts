@@ -202,4 +202,23 @@ describe("EventTable 表格语义（设计系统 Task 5）", () => {
     const model = cols.find((x) => x.key === "model");
     expect(model!.ellipsis).toBeTruthy();
   });
+
+  it("卡片化：外层 .ts-card + 卡头「请求明细」，提示行不再用 opacity 压低", () => {
+    const w = mount(EventTable, { props: { list: list([row()], 1), filterLabel: "" } });
+    expect(w.find("section.ts-card").exists()).toBe(true);
+    expect(w.find(".card-title").text()).toContain("请求明细");
+    expect(w.find(".table-hint").exists()).toBe(true);
+    expect(w.html()).not.toContain("opacity: 0.6");
+  });
+
+  it("下钻筛选在卡头显示为可关闭筛选标签，关闭 emit clear-filter", async () => {
+    const w = mount(EventTable, {
+      props: { list: list([row()], 1), filterLabel: "model: gpt-x", filterClosable: true },
+    });
+    const chip = w.find(".filter-chip");
+    expect(chip.exists()).toBe(true);
+    expect(chip.text()).toContain("model: gpt-x");
+    await chip.trigger("click");
+    expect(w.emitted("clear-filter")).toHaveLength(1);
+  });
 });

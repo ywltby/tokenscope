@@ -24,7 +24,15 @@ const columns = computed<DataTableColumn[]>(() => {
     minWidth: 140,
     ellipsis: { tooltip: true },
     // C2：项目身份是完整路径，展示用 label（末段），悬浮可见完整 key。
-    render: (row) => h("span", asGroup(row).label ?? asGroup(row).key),
+    // 任务 5：可点击行右侧 › 指示（合计行不可点，不带）。
+    render: (row) => {
+      const g = asGroup(row);
+      const isTotal = g.key === "合计";
+      return h("span", { class: "dim-cell" }, [
+        g.label ?? g.key,
+        ...(isTotal ? [] : [h("span", { class: "drill-arrow", "aria-hidden": "true" }, " ›")]),
+      ]);
+    },
   };
   // 设计系统 Task 5：数字列右对齐 + tabular lining 数字
   const num = (title: string, key: string): DataTableColumn => ({
@@ -97,9 +105,11 @@ const columns = computed<DataTableColumn[]>(() => {
 const rows = computed<Group[]>(() => props.report.groups);
 const rowKey = (row: object): string => asGroup(row).key;
 const rowClass = (row: object): string => (asGroup(row).key === "合计" ? "total-row" : "");
-// 设计系统 Task 5：行可聚焦，Enter/Space 与点击等价下钻（键盘路径）。
+// 设计系统 Task 5：行可聚焦，Enter/Space 与点击等价下钻（键盘路径）；
+// ts-focusable 提供 2px 焦点环。
 const rowProps = (row: object) => ({
   style: "cursor: pointer",
+  class: "ts-focusable",
   tabindex: 0,
   role: "button",
   "aria-label": `查看 ${asGroup(row).key} 的请求明细`,
@@ -124,7 +134,10 @@ const sourceLines = computed(() =>
 </script>
 
 <template>
-  <div>
+  <section class="ts-card usage-card">
+    <div class="card-head">
+      <span class="card-title">聚合</span>
+    </div>
     <NDataTable
       :columns="columns"
       :data="rows"
@@ -150,10 +163,33 @@ const sourceLines = computed(() =>
         </div>
       </NCollapseItem>
     </NCollapse>
-  </div>
+  </section>
 </template>
 
 <style scoped>
+/* 卡头：标题 17px/600（DESIGN.md §5 卡片头部） */
+.card-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ts-space-3);
+  margin-bottom: var(--ts-space-2);
+}
+.card-title {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ts-text);
+}
+
+/* 可点击行右侧 › 指示（辅助信息，不承载唯一信息） */
+.drill-arrow {
+  color: var(--ts-text-muted);
+}
+
+/* 合计行上方一条 stronger separator（DESIGN.md §5 表格） */
+:deep(.total-row td) {
+  border-top: 1px solid var(--ts-separator-strong);
+}
 .total-row strong {
   font-weight: 700;
 }

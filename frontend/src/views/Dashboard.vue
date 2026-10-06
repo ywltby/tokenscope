@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { NButton, NCard, NSelect, NSpin, NTag } from "naive-ui";
+import { NButton, NSelect, NSpin } from "naive-ui";
 import {
   AGENT_LABEL,
   type AgentFilter,
@@ -371,29 +371,16 @@ void loadSources();
             :by="report.by"
           />
           <UsageTable :report="report" @row-click="onSummaryRowClick" />
-          <NCard v-if="events" size="small">
-            <template #header>
-              请求明细
-              <NTag
-                v-if="drill"
-                size="small"
-                closable
-                type="info"
-                style="margin-left: 8px"
-                @close="clearDrill"
-              >
-                {{ drillLabel(drill) }}
-              </NTag>
-            </template>
-
-            <EventTable
-              :list="events"
-              :filter-label="drill ? drillLabel(drill) : '无（显示最新 200 条）'"
-              :more="hasMore"
-              :more-loading="moreLoading"
-              @load-more="loadMoreEvents"
-            />
-          </NCard>
+          <EventTable
+            v-if="events"
+            :list="events"
+            :filter-label="drill ? drillLabel(drill) : '无（显示最新 200 条）'"
+            :filter-closable="!!drill"
+            :more="hasMore"
+            :more-loading="moreLoading"
+            @load-more="loadMoreEvents"
+            @clear-filter="clearDrill"
+          />
         </template>
       </div>
     </NSpin>
@@ -484,5 +471,13 @@ void loadSources();
 
 .tz-select {
   width: 160px;
+}
+
+/* 任务 5：卡片区块间距统一 20px（卡片间 20px，DESIGN.md §4） */
+:deep(section.ts-card) {
+  margin-bottom: var(--ts-space-5);
+}
+:deep(section.ts-card:last-child) {
+  margin-bottom: 0;
 }
 </style>

@@ -106,4 +106,23 @@ describe("UsageTable 表格语义（设计系统 Task 5）", () => {
     });
     expect(w.emitted("row-click")).toBeTruthy();
   });
+
+  it("卡片化：外层 .ts-card，行有可见焦点路径（ts-focusable）", () => {
+    const w = mount(UsageTable, { props: { report: report([group("m1")], false) } });
+    expect(w.find("section.ts-card").exists()).toBe(true);
+    const rp = exposed(w).rowProps(group("m1"));
+    expect(String(rp.class)).toContain("ts-focusable");
+  });
+
+  it("可点击行右侧带 › 指示，合计行不带", () => {
+    const w = mount(UsageTable, { props: { report: report([group("m1")], false) } });
+    const cols = exposed(w).columns;
+    const first = cols[0];
+    const normal = first.render!(group("m1")) as { children?: unknown[] };
+    const total = first.render!(group("合计")) as { children?: unknown[] };
+    const hasArrow = (v: { children?: unknown[] }): boolean =>
+      JSON.stringify(v.children ?? "").includes("›");
+    expect(hasArrow(normal)).toBe(true);
+    expect(hasArrow(total)).toBe(false);
+  });
 });

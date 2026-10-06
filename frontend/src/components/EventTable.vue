@@ -10,8 +10,10 @@ const props = defineProps<{
   /** D1 游标分页：还有未加载的行 */
   more?: boolean;
   moreLoading?: boolean;
+  /** 任务 5：下钻筛选标签可关闭（由 Dashboard 传当前是否处于下钻态） */
+  filterClosable?: boolean;
 }>();
-const emit = defineEmits<{ (e: "load-more"): void }>();
+const emit = defineEmits<{ (e: "load-more"): void; (e: "clear-filter"): void }>();
 /// 设计系统 Task 6：当前展开的费用 tooltip（行 cursor 作为键）。
 const openKey = ref<string | null>(null);
 const remaining = () => props.list.total - props.list.rows.length;
@@ -192,7 +194,21 @@ const rowKey = (r: object): string => {
 </script>
 
 <template>
-  <div>
+  <section class="ts-card events-card">
+    <div class="card-head">
+      <span class="card-title">请求明细</span>
+      <!-- 任务 5：下钻筛选标签（可关闭，键盘可达） -->
+      <button
+        v-if="filterClosable && props.filterLabel"
+        type="button"
+        class="filter-chip ts-focusable"
+        :aria-label="`清除筛选 ${props.filterLabel}`"
+        @click="emit('clear-filter')"
+      >
+        {{ props.filterLabel }}
+        <span aria-hidden="true" class="chip-close">×</span>
+      </button>
+    </div>
     <NDataTable
       :columns="columns"
       :data="props.list.rows"
@@ -202,20 +218,66 @@ const rowKey = (r: object): string => {
       :max-height="380"
       virtual-scroll
     />
-    <div style="font-size: 12px; opacity: 0.6; margin-top: 4px">
+    <div class="table-hint">
       共 {{ fmtNum(props.list.total) }} 条（时间倒序）· 已加载
       {{ fmtNum(props.list.rows.length) }} 条
       <template v-if="props.filterLabel">· 筛选：{{ props.filterLabel }}</template>
     </div>
-    <div v-if="props.more" style="text-align: center; margin-top: 6px">
+    <div v-if="props.more" class="load-more-row">
       <NButton size="tiny" :loading="props.moreLoading" @click="emit('load-more')">
         加载更多（还剩 {{ fmtNum(remaining()) }} 条）
       </NButton>
     </div>
-  </div>
+  </section>
 </template>
 
 <style scoped>
+/* 卡头：标题 17px/600 + 右侧筛选标签（DESIGN.md §5 卡片头部） */
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--ts-space-3);
+  margin-bottom: var(--ts-space-2);
+  flex-wrap: wrap;
+}
+.card-title {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ts-text);
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ts-space-1);
+  border: none;
+  background: var(--ts-accent-soft);
+  color: var(--ts-accent);
+  font: inherit;
+  font-size: 12px;
+  border-radius: var(--ts-radius-pill);
+  padding: 2px var(--ts-space-2);
+  cursor: pointer;
+}
+
+.chip-close {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.table-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ts-text-muted);
+  margin-top: var(--ts-space-1);
+}
+
+.load-more-row {
+  text-align: center;
+  margin-top: var(--ts-space-2);
+}
+
 .cost-tooltip {
   font-size: 12px;
   line-height: 1.7;
@@ -253,7 +315,7 @@ const rowKey = (r: object): string => {
 
 .bd-divider {
   height: 1px;
-  background: var(--ts-border);
+  background: var(--ts-separator);
   margin: var(--ts-space-1) 0;
 }
 </style>

@@ -19,6 +19,7 @@ function fmtCompact(v: number): string {
 
 const props = defineProps<{ groups: Group[]; by: string }>();
 const { mode } = useTheme();
+const legendItems = computed(() => chartTokens(mode.value).series);
 
 const el = ref<HTMLDivElement | null>(null);
 let chart: echarts.ECharts | null = null;
@@ -88,8 +89,8 @@ function render(): void {
       valueFormatter: (v: unknown) => fmtNum(Number(v ?? 0)),
       formatter: tooltipFormatter,
     },
-    legend: { top: 0, textStyle: { color: t.legendText } },
-    grid: { left: 8, right: 16, top: 32, bottom: 8, containLabel: true },
+    // 图例移至卡片头部（HTML 圆点图例），画布内不再渲染
+    grid: { left: 8, right: 16, top: 16, bottom: 8, containLabel: true },
     xAxis: isDay.value
       ? {
           type: "category",
@@ -122,13 +123,18 @@ function render(): void {
           },
         },
     dataZoom,
-    series: series.map((s) => ({
+    // 堆叠柱只让最上段（最后一个系列）带圆角：日维度柱顶 [4,4,0,0]，
+    // 非日维度横向条尾 [0,4,4,0]（DESIGN.md §5 图表）
+    series: series.map((s, i) => ({
       name: s.name,
       type: "bar",
       stack: "tokens",
       // by != day 时换为普通并列条形，取值函数相同
       barMaxWidth: 36,
       data: s.values,
+      ...(i === series.length - 1
+        ? { itemStyle: { borderRadius: isDay.value ? [4, 4, 0, 0] : [0, 4, 4, 0] } }
+        : {}),
     })),
   });
 }
@@ -150,10 +156,17 @@ watch(() => [props.groups, props.by, mode.value], render);
 </script>
 
 <template>
-  <section class="trend-chart">
+  <section class="ts-card trend-card">
     <div class="chart-head">
       <span class="chart-title">{{ titleText }}</span>
       <span class="chart-state">{{ stateText }}</span>
+      <!-- 圆点图例（与图表系列同源 token，DESIGN.md §5 图表） -->
+      <div class="chart-legend" aria-hidden="true">
+        <span v-for="s in legendItems" :key="s.key" class="legend-item">
+          <span class="legend-dot" :style="{ background: s.color }" />
+          <span class="legend-label">{{ s.label }}</span>
+        </span>
+      </div>
       <button
         type="button"
         class="summary-toggle ts-focusable"
@@ -182,11 +195,14 @@ watch(() => [props.groups, props.by, mode.value], render);
   align-items: baseline;
   gap: var(--ts-space-3);
   margin-bottom: var(--ts-space-2);
+  flex-wrap: wrap;
 }
 
+/* 卡片标题 17px/600（DESIGN.md §3） */
 .chart-title {
-  font-size: 15px;
-  font-weight: 650;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--ts-text);
 }
 
@@ -195,26 +211,51 @@ watch(() => [props.groups, props.by, mode.value], render);
   color: var(--ts-text-muted);
 }
 
-.summary-toggle {
+.chart-legend {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ts-space-3);
   margin-left: auto;
-  border: 1px solid var(--ts-border);
-  background: var(--ts-surface-solid);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ts-space-1);
+  font-size: 12px;
+  color: var(--ts-text-secondary);
+}
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.legend-label {
+  white-space: nowrap;
+}
+
+/* 头部操作：fill 底、无描边、控件圆角（与筛选栏同族） */
+.summary-toggle {
+  border: none;
+  background: var(--ts-fill);
   color: var(--ts-text-secondary);
   font: inherit;
   font-size: 12px;
   border-radius: var(--ts-radius-control);
-  padding: 2px var(--ts-space-2);
+  padding: var(--ts-space-1) var(--ts-space-2);
   cursor: pointer;
 }
 
 .summary-toggle:hover {
   color: var(--ts-text);
-  border-color: var(--ts-border-strong);
 }
 
 .chart-summary {
-  border: 1px solid var(--ts-border);
-  border-radius: var(--ts-radius);
+  border: 1px solid var(--ts-separator);
+  border-radius: var(--ts-radius-control);
   background: var(--ts-surface-solid);
   padding: var(--ts-space-2) var(--ts-space-3);
   margin-bottom: var(--ts-space-2);

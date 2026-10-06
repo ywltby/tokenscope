@@ -96,3 +96,39 @@ describe("TrendChart（设计系统 Task 4）", () => {
     expect(dispose).toHaveBeenCalled();
   });
 });
+
+describe("TrendChart 卡片化（设计系统 Task 5）", () => {
+  it("外层 .ts-card，图例移到卡片头部（HTML 圆点图例），画布内不再渲染图例", async () => {
+    const w = mount(TrendChart, { props: { groups: [group("a", 1)], by: "day" } });
+    await flushPromises();
+    expect(w.find("section.ts-card").exists()).toBe(true);
+    const legend = w.find(".chart-legend");
+    expect(legend.exists()).toBe(true);
+    expect(legend.findAll(".legend-item").length).toBe(4);
+    const opt = setOption.mock.calls[0][0] as { legend?: unknown };
+    expect(opt.legend).toBeUndefined();
+    w.unmount();
+  });
+
+  it("堆叠柱仅最上段系列带圆角：日维度柱顶 [4,4,0,0]，非日维度条尾 [0,4,4,0]", async () => {
+    const wDay = mount(TrendChart, { props: { groups: [group("a", 1)], by: "day" } });
+    await flushPromises();
+    const optDay = setOption.mock.calls[0][0] as {
+      series: { itemStyle?: { borderRadius?: number[] } }[];
+    };
+    expect(optDay.series).toHaveLength(4);
+    expect(optDay.series[3].itemStyle?.borderRadius).toEqual([4, 4, 0, 0]);
+    for (const s of optDay.series.slice(0, 3)) {
+      expect(s.itemStyle?.borderRadius).toBeUndefined();
+    }
+    wDay.unmount();
+
+    const wModel = mount(TrendChart, { props: { groups: [group("a", 1)], by: "model" } });
+    await flushPromises();
+    const optModel = setOption.mock.calls.at(-1)![0] as {
+      series: { itemStyle?: { borderRadius?: number[] } }[];
+    };
+    expect(optModel.series[3].itemStyle?.borderRadius).toEqual([0, 4, 4, 0]);
+    wModel.unmount();
+  });
+});
