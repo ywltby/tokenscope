@@ -2,16 +2,23 @@
 // 关闭确认弹窗（关闭确认与配置文件计划 Task 3）：窗口关闭按钮在未记忆
 // 默认动作时触发（后端拦截并 emit close-requested）。取消/Escape/点击
 // 遮罩 = 不关闭；勾选记忆后由后端 close_resolve 持久化（设置页可改回）。
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import { NButton, NCheckbox, NModal } from "naive-ui";
 
-defineProps<{ open: boolean }>();
+const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{
   (e: "resolve", v: { minimize: boolean; remember: boolean }): void;
   (e: "cancel"): void;
 }>();
 
 const remember = ref(false);
+// 每次打开都从未勾选开始：记忆是否保留由设置页管理，弹窗不残留上次选择。
+watch(
+  () => props.open,
+  (v) => {
+    if (v) remember.value = false;
+  },
+);
 
 function resolve(minimize: boolean): void {
   emit("resolve", { minimize, remember: remember.value });

@@ -59,4 +59,16 @@ describe("CloseConfirmDialog（关闭确认与配置文件计划 Task 3）", () 
     expect(w.emitted("cancel")).toHaveLength(1);
     expect(w.emitted("resolve")).toBeUndefined();
   });
+
+  it("重开弹窗时记忆勾选复位（真机走查发现的瑕疵）", async () => {
+    const w = mount(CloseConfirmDialog, { props: { open: true } });
+    await w.find(".n-checkbox").trigger("click");
+    await findBtn(w, "最小化到托盘")!.trigger("click");
+    expect(w.emitted("resolve")!.at(-1)![0]).toEqual({ minimize: true, remember: true });
+    // 关闭 → 重开：勾选态必须复位，不得残留上一次选择
+    await w.setProps({ open: false });
+    await w.setProps({ open: true });
+    await findBtn(w, "直接退出")!.trigger("click");
+    expect(w.emitted("resolve")!.at(-1)![0]).toEqual({ minimize: false, remember: false });
+  });
 });
