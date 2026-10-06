@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::{
-    Manager,
+    Emitter, Manager,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -47,6 +47,9 @@ pub fn run() {
             commands::autostart_set,
             commands::settings_get,
             commands::settings_set_price_auto_sync,
+            commands::settings_set_close_action,
+            commands::close_resolve,
+            commands::open_settings_file,
         ])
         .setup(move |app| {
             restore_window_state(app.handle())?;
@@ -59,15 +62,30 @@ pub fn run() {
             );
             Ok(())
         })
-        // 关闭主窗口 = 缩到托盘（用户要求），真正退出走托盘菜单；
-        // 关窗时机顺带落盘一次窗口状态。
+        // 关闭行为三态（关闭确认与配置文件计划）：配置了默认动作（设置页或
+        // 弹窗记忆）则直接执行；未配置 → prevent_close + emit close-requested，
+        // 由前端弹窗询问（最小化/退出/取消 + 记忆勾选）。关窗时机顺带落盘
+        // 一次窗口状态。
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 if let Some(w) = window.get_webview_window("main") {
                     save_window_state_now(&w);
                 }
-                let _ = window.hide();
-                api.prevent_close();
+                match commands::close_decision_from(&commands::load_settings_or_default()) {
+                    commands::CloseDecision::Minimize => {
+                        let _ = window.hide();
+                        api.prevent_close();
+                    }
+                    commands::CloseDecision::Quit => {
+                        log::info!("窗口关闭：按设置直接退出");
+                        window.app_handle().exit(0);
+                    }
+                    commands::CloseDecision::Ask => {
+                        // 前端未就绪时事件无人接收：窗口保持打开（不静默退出）。
+                        let _ = window.emit("close-requested", ());
+                        api.prevent_close();
+                    }
+                }
             }
             tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) => {
                 if let Some(w) = window.get_webview_window("main") {

@@ -2,6 +2,7 @@
 
 use anyhow::Context;
 use serde::Serialize;
+use tauri::Manager;
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_opener::OpenerExt;
 use tokenscope::aggregate::GroupBy;
@@ -15,7 +16,7 @@ use tokenscope::report::{
     openrouter_file_path, pricing_file_path, rebuild_cache as rebuild_cache_impl,
     source_status as source_status_impl, summary, view_cache_path,
 };
-use tokenscope::settings::Settings;
+use tokenscope::settings::{CloseAction, Settings};
 
 pub fn parse_by(by: &str) -> Result<GroupBy, String> {
     match by {
@@ -135,11 +136,119 @@ fn source_settings() -> Result<
     ))
 }
 
-fn load_settings_or_default() -> tokenscope::settings::Settings {
+pub(crate) fn load_settings_or_default() -> tokenscope::settings::Settings {
     tokenscope::settings::settings_path()
         .ok()
         .and_then(|p| tokenscope::settings::load(&p).ok())
         .unwrap_or_default()
+}
+
+// ── 关闭行为三态（关闭确认与配置文件计划）──────────────────
+
+/// 窗口关闭请求的处置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseDecision {
+    /// 按设置最小化到托盘（隐藏窗口，进程驻留）。
+    Minimize,
+    /// 按设置直接退出进程。
+    Quit,
+    /// 未配置默认动作 → 通知前端弹窗询问。
+    Ask,
+}
+
+/// 纯函数：由设置解析关闭决策（lib.rs 的 CloseRequested 处理器消费）。
+pub fn close_decision_from(s: &Settings) -> CloseDecision {
+    match s.close_action {
+        Some(CloseAction::Minimize) => CloseDecision::Minimize,
+        Some(CloseAction::Quit) => CloseDecision::Quit,
+        None => CloseDecision::Ask,
+    }
+}
+
+/// 设置页「关闭窗口时」：每次询问（None）/ 最小化到托盘 / 直接退出。
+#[tauri::command]
+pub async fn settings_set_close_action(action: Option<String>) -> Result<Option<String>, String> {
+    run_blocking("settings_set_close_action", move || {
+        let path = tokenscope::settings::settings_path()?;
+        settings_set_close_action_impl(&path, action)
+    })
+    .await
+}
+
+/// 损坏设置直接报错——绝不覆盖用户文件（沿用 Task 7.1 不变量）。
+pub(crate) fn settings_set_close_action_impl(
+    path: &std::path::Path,
+    action: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    let parsed = match action.as_deref() {
+        None => None,
+        Some("minimize") => Some(CloseAction::Minimize),
+        Some("quit") => Some(CloseAction::Quit),
+        Some(other) => return Err(anyhow::anyhow!("未知关闭动作: {other}")),
+    };
+    let mut s = tokenscope::settings::load(path)?;
+    s.close_action = parsed;
+    tokenscope::settings::save(path, &s)?;
+    log::info!("关闭窗口默认动作已设置: {:?}", parsed);
+    Ok(action)
+}
+
+/// 关闭确认弹窗的用户决定：remember=true 先持久化默认动作（写盘前重读
+/// 最新设置，只改 close_action 一个字段），再隐藏窗口或退出。
+#[tauri::command]
+pub async fn close_resolve(
+    app: tauri::AppHandle,
+    minimize: bool,
+    remember: bool,
+) -> Result<(), String> {
+    if remember {
+        run_blocking("close_resolve", move || {
+            let path = tokenscope::settings::settings_path()?;
+            persist_close_action(&path, minimize)
+        })
+        .await?;
+    }
+    if minimize {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.hide();
+            log::info!(
+                "窗口关闭：最小化到托盘{}",
+                if remember { "（已记忆）" } else { "" }
+            );
+        }
+    } else {
+        log::info!("窗口关闭：用户选择直接退出");
+        app.exit(0);
+    }
+    Ok(())
+}
+
+fn persist_close_action(path: &std::path::Path, minimize: bool) -> anyhow::Result<()> {
+    let mut s = tokenscope::settings::load(path)?;
+    s.close_action = Some(if minimize {
+        CloseAction::Minimize
+    } else {
+        CloseAction::Quit
+    });
+    tokenscope::settings::save(path, &s)
+}
+
+/// 打开（必要时先创建）设置配置文件；返回实际路径。
+/// 首建经 ensure_toml：无遗留 → 全字段注释模板；有遗留 json → 先迁移，
+/// 避免"打开空模板后旧设置被遮蔽"。
+#[tauri::command]
+pub async fn open_settings_file(app: tauri::AppHandle) -> Result<String, String> {
+    let path = tokenscope::settings::settings_path().map_err(|e| e.to_string())?;
+    let path = run_blocking("open_settings_file", move || {
+        tokenscope::settings::ensure_toml(&path)?;
+        Ok(path)
+    })
+    .await?;
+    app.opener()
+        .open_path(path.display().to_string(), None::<&str>)
+        .map_err(|e| e.to_string())?;
+    log::info!("已打开设置配置文件: {}", path.display());
+    Ok(path.display().to_string())
 }
 
 /// C1：保存单一来源配置（启停 + 目录覆盖；dir=None 回默认目录）。
@@ -663,5 +772,112 @@ mod tests {
         );
         assert_eq!(parse_agent(Some("codex")).unwrap(), Some(AgentKind::Codex));
         assert!(parse_agent(Some("gemini")).is_err());
+    }
+
+    #[test]
+    fn test_close_decision_from_settings() {
+        // 关闭三态：未配置 = 询问；配置了默认动作 = 直接执行。
+        assert!(matches!(
+            close_decision_from(&Settings::default()),
+            CloseDecision::Ask
+        ));
+        let s = Settings {
+            close_action: Some(CloseAction::Minimize),
+            ..Default::default()
+        };
+        assert!(matches!(close_decision_from(&s), CloseDecision::Minimize));
+        let s = Settings {
+            close_action: Some(CloseAction::Quit),
+            ..Default::default()
+        };
+        assert!(matches!(close_decision_from(&s), CloseDecision::Quit));
+    }
+
+    #[test]
+    fn test_settings_set_close_action_impl() {
+        let dir = std::env::temp_dir().join(format!("tokenscope-close-set-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        // minimize → 落盘
+        let out = settings_set_close_action_impl(&path, Some("minimize".into())).unwrap();
+        assert_eq!(out.as_deref(), Some("minimize"));
+        assert_eq!(
+            tokenscope::settings::load(&path).unwrap().close_action,
+            Some(CloseAction::Minimize)
+        );
+        // quit → 落盘
+        settings_set_close_action_impl(&path, Some("quit".into())).unwrap();
+        assert_eq!(
+            tokenscope::settings::load(&path).unwrap().close_action,
+            Some(CloseAction::Quit)
+        );
+        // None = 恢复每次询问
+        settings_set_close_action_impl(&path, None).unwrap();
+        assert_eq!(
+            tokenscope::settings::load(&path).unwrap().close_action,
+            None
+        );
+        // 非法值：报错且文件原样保留
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(settings_set_close_action_impl(&path, Some("tray".into())).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_persist_close_action_merges_without_touching_other_fields() {
+        // 记忆勾选：只写 close_action，其他字段（price_auto_sync/sources）保留；
+        // minimize=true → Minimize，false → Quit。
+        let dir =
+            std::env::temp_dir().join(format!("tokenscope-close-persist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, "price_auto_sync = false\n").unwrap();
+        persist_close_action(&path, true).unwrap();
+        let s = tokenscope::settings::load(&path).unwrap();
+        assert_eq!(s.close_action, Some(CloseAction::Minimize));
+        assert!(!s.price_auto_sync, "已有字段必须保留");
+        persist_close_action(&path, false).unwrap();
+        assert_eq!(
+            tokenscope::settings::load(&path).unwrap().close_action,
+            Some(CloseAction::Quit)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_ensure_toml_migrates_legacy_or_writes_template() {
+        // open_settings_file 首建语义：
+        // a) 无遗留 → 写全字段注释模板（解析即默认值）；
+        // b) 有遗留 json → load+save 迁移（值保留、json 改名 .bak）；
+        // c) toml 已在位 → 原样不动。
+        let dir =
+            std::env::temp_dir().join(format!("tokenscope-ensure-toml-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        // c) 已存在：不改内容
+        std::fs::write(&path, "price_auto_sync = false\n").unwrap();
+        tokenscope::settings::ensure_toml(&path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "price_auto_sync = false\n"
+        );
+        // a) 空目录 → 模板
+        std::fs::remove_file(&path).unwrap();
+        tokenscope::settings::ensure_toml(&path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            tokenscope::settings::SETTINGS_TEMPLATE
+        );
+        // b) 遗留 json → 迁移
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(dir.join("settings.json"), r#"{"price_auto_sync": false}"#).unwrap();
+        tokenscope::settings::ensure_toml(&path).unwrap();
+        assert!(!tokenscope::settings::load(&path).unwrap().price_auto_sync);
+        assert!(dir.join("settings.json.bak").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

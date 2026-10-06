@@ -181,6 +181,26 @@ pub fn auto_sync_allowed(s: &Result<Settings, anyhow::Error>) -> bool {
     }
 }
 
+/// 确保设置文件以 toml 形态在位（open_settings_file 首建用）：
+/// 已存在 → 原样不动；缺失但有遗留 json → load 导入 + save 迁移（值保留、
+/// json 改名 .bak）；都缺失 → 写入全字段注释模板（解析即默认值）。
+pub fn ensure_toml(path: &Path) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    let had_legacy = legacy_json_path(path).is_some_and(|p| p.exists());
+    if had_legacy {
+        let s = load(path)?;
+        return save(path, &s);
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
+    }
+    crate::fsutil::atomic_write(path, SETTINGS_TEMPLATE.as_bytes())
+        .with_context(|| format!("写设置模板失败: {}", path.display()))?;
+    Ok(())
+}
+
 pub fn save(path: &Path, s: &Settings) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
