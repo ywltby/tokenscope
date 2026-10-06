@@ -334,8 +334,8 @@ pub fn validate_price_plan(plan: &PricePlan) -> Result<(), String> {
             .map(|(i, s)| (format!("分段 {i}"), &s.prices)),
     );
     for (name, r) in groups {
-        if let Some((comp, v)) = negative_rate(r) {
-            return Err(format!("{name} 分项 {comp} 价格为负: {v}"));
+        if let Some((comp, v)) = invalid_rate(r) {
+            return Err(format!("{name} 分项 {comp} 价格非法（须为有限非负）: {v}"));
         }
         if let Some(comp) = same_as_input_violation(r) {
             return Err(format!(
@@ -346,8 +346,16 @@ pub fn validate_price_plan(plan: &PricePlan) -> Result<(), String> {
     validate_segment_rules(&plan.segments)
 }
 
-/// 价格组内负值检查（Fixed 才是数值；Unknown/SameAsInput 无数值语义）。
-fn negative_rate(r: &PriceRates) -> Option<(&'static str, f64)> {
+/// 合法单价条件（R06 统一口径）：有限且非负。所有来源（外置/在线解析/
+/// 本地快照/当前版索引恢复）共用；NaN/inf/-inf 与负价同等非法。
+fn valid_rate_value(v: f64) -> bool {
+    v.is_finite() && v >= 0.0
+}
+
+/// 价格组内非法数值检查（Fixed 才是数值；Unknown/SameAsInput 无数值语义）。
+/// 非法 = 非有限（NaN/±inf）或负。调用方必须拒绝所在候选条目——不得把
+/// 非法显式值改成 Unknown（会悄悄恢复基础价并伪装 complete）。
+fn invalid_rate(r: &PriceRates) -> Option<(&'static str, f64)> {
     for (comp, spec) in [
         ("input", r.input),
         ("output", r.output),
@@ -355,12 +363,32 @@ fn negative_rate(r: &PriceRates) -> Option<(&'static str, f64)> {
         ("cache_read", r.cache_read),
     ] {
         if let RateSpec::Fixed(v) = spec
-            && v < 0.0
+            && !valid_rate_value(v)
         {
             return Some((comp, v));
         }
     }
     None
+}
+
+/// R06：计划内任一费率组含非法数值 → true（base/分段/时间规则/时段全覆盖）。
+fn plan_rates_invalid(plan: &Option<PricePlan>) -> bool {
+    let Some(plan) = plan else {
+        return false;
+    };
+    invalid_rate(&plan.base).is_some()
+        || plan
+            .segments
+            .iter()
+            .any(|sg| invalid_rate(&sg.prices).is_some())
+        || plan.schedules.iter().any(|sc| {
+            invalid_rate(&sc.prices).is_some()
+                || sc.periods.iter().any(|p| invalid_rate(&p.prices).is_some())
+                || sc
+                    .segments
+                    .iter()
+                    .any(|sg| invalid_rate(&sg.prices).is_some())
+        })
 }
 
 /// SameAsInput 白名单：仅 cache_read 可声明沿用输入价。
@@ -1063,8 +1091,8 @@ fn external_schedule_plan(
         .chain(sched.periods.iter().map(|p| &p.prices))
         .chain(sched.segments.iter().map(|g| &g.prices))
     {
-        if let Some((comp, v)) = negative_rate(r) {
-            return Err(format!("时间规则分项 {comp} 价格为负: {v}"));
+        if let Some((comp, v)) = invalid_rate(r) {
+            return Err(format!("时间规则分项 {comp} 价格非法（须为有限非负）: {v}"));
         }
         if let Some(comp) = same_as_input_violation(r) {
             return Err(format!(
@@ -1436,6 +1464,21 @@ impl Pricing {
                             segments: segments.clone(),
                             schedules: Vec::new(),
                         };
+                        // R06：显式数值非法（NaN/inf/负）→ 拒绝整条候选，
+                        // 不得借"降级保留基础价"恢复非法值；分段**结构**错误
+                        // 在数值合法的前提下才降级为仅基础价（既有契约）。
+                        if invalid_rate(&plan.base).is_some()
+                            || plan
+                                .segments
+                                .iter()
+                                .any(|sg| invalid_rate(&sg.prices).is_some())
+                        {
+                            warnings.push(format!(
+                                "models.dev 条目 {} 存在非法单价（须为有限非负），该条目已拒绝",
+                                e.id
+                            ));
+                            continue;
+                        }
                         let plan = match validate_price_plan(&plan) {
                             Ok(()) => plan,
                             Err(err) => {
@@ -1499,32 +1542,46 @@ impl Pricing {
                                 }
                             })
                             .collect::<Vec<_>>();
+                        let or_plan = PricePlan {
+                            basis: Some(PricingBasis::PromptTokens),
+                            application: Some(PricingApplication::WholeRequest),
+                            // R01：快照中的数值缓存价保留（×1e6 统一
+                            // USD/M），缺失保持 Unknown，显式 0 = 免费。
+                            base: PriceRates {
+                                input: RateSpec::fixed_or_unknown(
+                                    e.prompt.map(|v| v * 1_000_000.0),
+                                ),
+                                output: RateSpec::fixed_or_unknown(
+                                    e.completion.map(|v| v * 1_000_000.0),
+                                ),
+                                cache_write: RateSpec::fixed_or_unknown(
+                                    e.cache_write.map(|v| v * 1_000_000.0),
+                                ),
+                                cache_read: RateSpec::fixed_or_unknown(
+                                    e.cache_read.map(|v| v * 1_000_000.0),
+                                ),
+                            },
+                            segments,
+                            schedules: Vec::new(),
+                        };
+                        // R06：显式数值非法（含换算后非有限）→ 拒绝整条
+                        if invalid_rate(&or_plan.base).is_some()
+                            || or_plan
+                                .segments
+                                .iter()
+                                .any(|sg| invalid_rate(&sg.prices).is_some())
+                        {
+                            warnings.push(format!(
+                                "OpenRouter 条目 {} 存在非法单价（须为有限非负），该条目已拒绝",
+                                e.id
+                            ));
+                            continue;
+                        }
                         pricing.add_entry(Entry {
                             prefix: match_key(&e.id),
                             display: e.id,
                             name: e.name,
-                            plan: PricePlan {
-                                basis: Some(PricingBasis::PromptTokens),
-                                application: Some(PricingApplication::WholeRequest),
-                                // R01：快照中的数值缓存价保留（×1e6 统一
-                                // USD/M），缺失保持 Unknown，显式 0 = 免费。
-                                base: PriceRates {
-                                    input: RateSpec::fixed_or_unknown(
-                                        e.prompt.map(|v| v * 1_000_000.0),
-                                    ),
-                                    output: RateSpec::fixed_or_unknown(
-                                        e.completion.map(|v| v * 1_000_000.0),
-                                    ),
-                                    cache_write: RateSpec::fixed_or_unknown(
-                                        e.cache_write.map(|v| v * 1_000_000.0),
-                                    ),
-                                    cache_read: RateSpec::fixed_or_unknown(
-                                        e.cache_read.map(|v| v * 1_000_000.0),
-                                    ),
-                                },
-                                segments,
-                                schedules: Vec::new(),
-                            },
+                            plan: or_plan,
                             tier: TIER_OPENROUTER,
                         });
                     }
@@ -1968,6 +2025,31 @@ impl Pricing {
             && index.v == INDEX_VERSION
             && index.sig == sig
         {
+            // R06：当前版索引若携带非法数值（历史脏产物），不静默接受——
+            // 视为失效，按来源重建并写回干净索引。
+            let has_invalid = index.entries.iter().any(|e| plan_rates_invalid(&e.plan));
+            if has_invalid {
+                log::warn!("价格索引含非法单价条目，按来源重建");
+                // 释放锁后走重建路径（含回写干净索引）；下方正常重建逻辑
+                // 会再占锁覆盖缓存——这里直接复用其结果即可。
+                drop(guard);
+                let (pricing, mut warnings) =
+                    Self::load(external, modelsdev_snapshot, openrouter_snapshot);
+                let index = pricing.to_index(
+                    sig.clone(),
+                    jiff::Zoned::now().to_string(),
+                    warnings.clone(),
+                );
+                if let Err(e) = save_index(index_path, &index) {
+                    warnings.push(format!("价格索引写入失败（不影响统计）: {e:#}"));
+                }
+                let arc = std::sync::Arc::new(pricing);
+                PRICE_CACHE
+                    .lock()
+                    .unwrap()
+                    .replace((sig, arc.clone(), warnings.clone()));
+                return (arc, warnings, false);
+            }
             let arc = std::sync::Arc::new(Self::from_index(&index));
             *guard = Some((sig, arc.clone(), index.warnings.clone()));
             return (arc, index.warnings, true);
@@ -4785,6 +4867,7 @@ cache_read = "free"
             ]}"#,
         );
         let index_path = dir.join("pricing-index.json");
+        *PRICE_CACHE.lock().unwrap() = None; // 进程缓存先于索引命中，必须清空
         // 先用新代码建立正确索引（获得有效 sig）
         let (p, _, _) = Pricing::load_cached(
             None,
@@ -5065,6 +5148,126 @@ cache_read = "free"
             Some("higher-partial")
         );
         assert_eq!(est.excluded_incomplete_schedules, 0);
+    }
+
+    // ── R06：非法（非有限/负）单价不得进入估算 ──────────────────────
+
+    #[test]
+    fn test_nonfinite_price_rejected_toml() {
+        // TOML nan/inf/-inf 显式数值 → 整条候选拒绝并给出定位 warning
+        let (p, warnings) = external_entry(
+            r#"
+[[model]]
+prefix = "bad/nan"
+input = nan
+output = 1.0
+
+[[model]]
+prefix = "bad/inf"
+input = inf
+
+[[model]]
+prefix = "bad/-inf"
+output = -inf
+
+[[model]]
+prefix = "ok/zero"
+input = 0.0
+output = 2.0
+"#,
+        );
+        assert_eq!(p.external_count(), 1, "仅合法条目保留");
+        assert!(p.lookup("nan").is_none());
+        assert!(p.lookup("inf").is_none());
+        assert!(p.lookup("-inf").is_none());
+        // 合法 0 保留
+        assert_eq!(
+            p.lookup("zero").unwrap().plan.base.input,
+            RateSpec::Fixed(0.0)
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("bad/nan") && w.contains("非法")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("bad/inf")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("bad/-inf")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_invalid_base_not_restored_by_degradation() {
+        // models.dev 快照 input=-2：不能"降级只留基础价"地恢复非法数值，
+        // 必须拒绝该条目并给出 warning；合法条目继续参与。
+        let dir = std::env::temp_dir().join(format!("tokenscope-r06-md-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let snap = write(
+            &dir,
+            "pricing-modelsdev.json",
+            r#"{"v":3,"synced_at":"t","entries":[
+                {"id":"prov/neg","name":null,"input":-2.0,"output":3.0},
+                {"id":"prov/ok","name":null,"input":1.0,"output":2.0}
+            ]}"#,
+        );
+        let (p, warnings) = Pricing::load(None, Some(&snap), None);
+        assert!(p.lookup("ok").is_some());
+        assert!(p.lookup("neg").is_none(), "非法 base 不得以任何形式恢复");
+        assert!(
+            warnings.iter().any(|w| w.contains("prov/neg")),
+            "{warnings:?}"
+        );
+        // 合法候选正常择价；无合法候选时保持未计价
+        let est = p.estimate("ok", &counts(1_000_000, 0, 0, 0), at()).unwrap();
+        assert!((est.cost - 1.0).abs() < 1e-9);
+        assert!(p.estimate("neg", &counts(1, 0, 0, 0), at()).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_invalid_price_cannot_survive_index_load() {
+        // 有效签名索引携带非法数值（如 -5）→ 恢复路径不得静默接受；
+        // 当前版本索引发现非法条目时按来源重建。
+        let dir = std::env::temp_dir().join(format!("tokenscope-r06-idx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = write(
+            &dir,
+            "pricing.toml",
+            "[[model]]
+prefix = \"m\"\ninput = 2.0\noutput = 1.0\n",
+        );
+        let index_path = dir.join("pricing-index.json");
+        *PRICE_CACHE.lock().unwrap() = None; // 进程缓存先于索引命中，必须清空
+        let (p, _, _) = Pricing::load_cached(Some(&toml), None, None, &index_path);
+        assert_eq!(p.lookup("m").unwrap().plan.base.input, RateSpec::Fixed(2.0));
+        // 伪造当前版本索引：input=-5
+        let good = crate::pricing::load_index(&index_path).unwrap().unwrap();
+        let mut bad_entries = good.entries.clone();
+        bad_entries[0].plan.as_mut().unwrap().base.input = RateSpec::Fixed(-5.0);
+        let bad = PricingIndex {
+            v: INDEX_VERSION,
+            warnings: good.warnings.clone(),
+            sig: good.sig.clone(),
+            synced_at: good.synced_at.clone(),
+            entries: bad_entries,
+        };
+        crate::pricing::save_index(&index_path, &bad).unwrap();
+        let (p2, _, hit) = Pricing::load_cached(Some(&toml), None, None, &index_path);
+        assert!(!hit, "含非法数值的索引必须触发重建");
+        assert_eq!(
+            p2.lookup("m").unwrap().plan.base.input,
+            RateSpec::Fixed(2.0),
+            "重建后从来源恢复合法价"
+        );
+        *PRICE_CACHE.lock().unwrap() = None;
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -118,8 +118,10 @@ fn parse_price(v: &Option<String>) -> Result<Option<f64>, String> {
         return Ok(None);
     }
     let n: f64 = s.parse().map_err(|e| format!("价格串非法 {s:?}: {e}"))?;
-    if n < 0.0 {
-        return Err(format!("负价 {n}"));
+    // R06：API 可能返回 "NaN"/"Infinity"/"-Infinity"——parse 成功但非法，
+    // 必须在此拒绝，避免脏值进入快照（快照字段是数值，无法二次拦截）。
+    if !n.is_finite() || n < 0.0 {
+        return Err(format!("价格非法（须为有限非负）: {n}"));
     }
     Ok(Some(n))
 }
@@ -281,6 +283,25 @@ pub fn load_snapshot(snapshot_path: &Path) -> Result<Option<Snapshot>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_parse_price_rejects_nonfinite_and_negative() {
+        // R06：OR API 价格串可能是 "NaN"/"Infinity"/负数——同步期必须拒绝，
+        // 不让脏值进入快照（快照 JSON 数值字段无法事后拦截字符串形式）。
+        assert!(super::parse_price(&None).unwrap().is_none());
+        assert!(super::parse_price(&Some(String::new())).unwrap().is_none());
+        assert_eq!(
+            super::parse_price(&Some("0.0000005".into())).unwrap(),
+            Some(0.0000005)
+        );
+        assert_eq!(super::parse_price(&Some("0".into())).unwrap(), Some(0.0));
+        for bad in ["NaN", "Infinity", "-Infinity", "inf", "-5", "-0.1"] {
+            assert!(
+                super::parse_price(&Some(bad.to_string())).is_err(),
+                "{bad} 必须被拒绝"
+            );
+        }
+    }
+
     use super::*;
 
     fn write_fixture(dir: &Path) -> std::path::PathBuf {
