@@ -184,9 +184,11 @@ body {
     radial-gradient(ellipse 55% 50% at 60% 100%, var(--ts-ambient-3), transparent 70%);
 }
 
-/* 精确数字：token 数、金额、百分比统一 tabular lining */
+/* 精确数字：token 数、金额、百分比统一 tabular lining；
+   nowrap 防止窄窗口下千分位数字断行（表格内部横向滚动代替折行） */
 .ts-num {
   font-variant-numeric: tabular-nums lining-nums;
+  white-space: nowrap;
 }
 
 /* 等宽：模型 ID、路径、公式与精确 token 数 */

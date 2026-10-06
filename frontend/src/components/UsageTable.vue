@@ -146,6 +146,7 @@ const sourceLines = computed(() =>
       :row-props="rowProps"
       size="small"
       :bordered="false"
+      :scroll-x="1080"
     />
     <div class="table-hint">点击行（或聚焦后按 Enter）可下钻到请求明细。</div>
     <div v-if="report.totals.unknown_pricing" class="table-note">

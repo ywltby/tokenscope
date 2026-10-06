@@ -26,7 +26,7 @@ function fmtPrice(v: number): string {
 }
 
 const columns = computed<DataTableColumn[]>(() => [
-  { title: "时间", key: "ts", minWidth: 150 },
+  { title: "时间", key: "ts", minWidth: 150, className: "ts-num" },
   {
     title: "Agent",
     key: "agent",
@@ -43,7 +43,9 @@ const columns = computed<DataTableColumn[]>(() => [
   {
     title: "项目",
     key: "project",
-    minWidth: 100,
+    minWidth: 120,
+    // Claude 项目目录名是压成一段的长路径串：单行省略，悬浮/聚焦可见完整值。
+    ellipsis: { tooltip: true },
     // C2：明细项目显示末段（身份是完整路径），悬浮可见完整值。
     render: (r) => {
       const p = asRow(r).project;
@@ -236,6 +238,7 @@ const rowKey = (r: object): string => {
       size="small"
       :bordered="false"
       :max-height="380"
+      :scroll-x="1180"
       virtual-scroll
     />
     <div class="table-hint">
