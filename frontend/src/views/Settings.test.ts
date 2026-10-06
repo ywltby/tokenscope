@@ -35,7 +35,7 @@ vi.mock("naive-ui", async (importOriginal) => {
 
 // useMessage 打桩（naive-ui 的 useMessage 需要 provider）；
 // spy 提升为稳定引用，供断言成功/失败提示。
-const msgSpy = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+const msgSpy = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }));
 vi.mock("naive-ui", async (importOriginal) => {
   const actual = await importOriginal<typeof import("naive-ui")>();
   return {
@@ -398,9 +398,9 @@ describe("Settings macOS 分组结构（设计系统 Task 7）", () => {
     const w = mount(Settings);
     await flushPromises();
     const titles = w.findAll(".group-title").map((t) => t.text());
-    expect(titles).toEqual(["应用", "数据源", "缓存", "价格"]);
+    expect(titles).toEqual(["应用", "数据源", "缓存", "价格", "高级配置"]);
     const cards = w.findAll("section.ts-card");
-    expect(cards.length).toBe(4);
+    expect(cards.length).toBe(5);
     for (const t of w.findAll(".group-title")) {
       expect(t.element.closest("section.ts-card"), "组标题必须在卡片外").toBeNull();
     }
@@ -440,4 +440,76 @@ describe("Settings macOS 分组结构（设计系统 Task 7）", () => {
     expect(notices.some((n) => n.text().includes("OpenRouter 快照损坏"))).toBe(true);
     expect(w.find(".n-alert").exists()).toBe(false);
   });
+});
+
+describe("Settings 关闭行为与高级配置（关闭确认与配置文件计划 Task 4）", () => {
+  beforeEach(() => {
+    msgSpy.success.mockClear();
+    msgSpy.error.mockClear();
+    msgSpy.info.mockClear();
+  });
+
+  function vmOf(w: ReturnType<typeof mount>) {
+    return w.vm as unknown as {
+      closeAction: string;
+      setCloseAction: (v: string) => Promise<void>;
+    };
+  }
+
+  it("关闭窗口时默认每次询问；选最小化/退出写盘，恢复询问传 null", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    expect(w.text()).toContain("关闭窗口时");
+    const vm = vmOf(w);
+    expect(vm.closeAction).toBe("ask");
+    await vm.setCloseAction("minimize");
+    expect(invokeMock).toHaveBeenCalledWith("settings_set_close_action", { action: "minimize" });
+    await vm.setCloseAction("quit");
+    expect(invokeMock).toHaveBeenCalledWith("settings_set_close_action", { action: "quit" });
+    await vm.setCloseAction("ask");
+    expect(invokeMock).toHaveBeenCalledWith("settings_set_close_action", { action: null });
+    expect(vm.closeAction).toBe("ask");
+  });
+
+  it("记忆过的默认动作从 settings_get 读取显示", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "settings_get")
+        return Promise.resolve({ price_auto_sync: true, sources: {}, close_action: "quit" });
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    expect(vmOf(w).closeAction).toBe("quit");
+  });
+
+  it("高级配置组：底部标题 + 打开设置配置文件按钮调用 open_settings_file", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "open_settings_file")
+        return Promise.resolve("C:/Users/x/.tokenscope/settings.toml");
+      return mockBaseImpl(cmd);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const titles = w.findAll(".group-title").map((t) => t.text());
+    expect(titles.at(-1)).toBe("高级配置");
+    expect(w.text()).toContain("settings.toml");
+    const btn = w.findAll("button").find((b) => b.text().includes("打开设置配置文件"));
+    expect(btn).toBeDefined();
+    await btn!.trigger("click");
+    await flushPromises();
+    expect(invokeMock).toHaveBeenCalledWith("open_settings_file");
+    expect(msgSpy.info).toHaveBeenCalled();
+  });
+
+  /** mockBase 的命令分发表（供个别用例覆盖特定命令时兜底）。 */
+  function mockBaseImpl(cmd: string): unknown {
+    if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+    if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+    if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+    if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+    return Promise.resolve(null);
+  }
 });

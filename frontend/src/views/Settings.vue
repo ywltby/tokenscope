@@ -42,6 +42,37 @@ const autostart = ref<boolean | null>(null);
 const autostartBusy = ref(false);
 const autoSync = ref<boolean | null>(null);
 const autoSyncBusy = ref(false);
+// 关闭确认与配置文件计划 Task 4：关闭窗口默认动作（ask = 每次询问）。
+const closeAction = ref<"ask" | "minimize" | "quit">("ask");
+const CLOSE_ACTION_OPTIONS: { label: string; value: "ask" | "minimize" | "quit" }[] = [
+  { label: "每次询问", value: "ask" },
+  { label: "最小化到托盘", value: "minimize" },
+  { label: "直接退出", value: "quit" },
+];
+
+async function loadCloseAction(): Promise<void> {
+  const s = await invoke<{ close_action: "minimize" | "quit" | null }>("settings_get");
+  closeAction.value = s.close_action ?? "ask";
+}
+
+async function setCloseAction(v: "ask" | "minimize" | "quit"): Promise<void> {
+  try {
+    await invoke("settings_set_close_action", { action: v === "ask" ? null : v });
+    closeAction.value = v;
+    msg.success("关闭窗口默认动作已保存");
+  } catch (e) {
+    msg.error(String(e));
+  }
+}
+
+async function openSettingsFile(): Promise<void> {
+  try {
+    const p = await invoke<string>("open_settings_file");
+    msg.info(`已打开设置配置文件（可直接编辑，保存后对下一次读取生效）：${p}`);
+  } catch (e) {
+    msg.error(String(e));
+  }
+}
 
 async function loadAll(): Promise<void> {
   loading.value = true;
@@ -190,10 +221,14 @@ onMounted(() => {
   void loadAll();
   void loadAutostart();
   void loadAutoSync();
+  void loadCloseAction();
 });
 watch(
   () => props.refreshKey,
-  () => void loadAll(),
+  () => {
+    void loadAll();
+    void loadCloseAction();
+  },
 );
 
 /// 单价悬浮提示：来源 + OpenRouter 同前缀对照价（无对应模型标注未知价格）。
@@ -333,6 +368,24 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
                 :loading="autostartBusy"
                 aria-label="开机自启"
                 @update:value="setAutostart"
+              />
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-main">
+              <div class="setting-label">关闭窗口时</div>
+              <div class="setting-help">
+                最小化后可从托盘恢复；记忆后仍可在此修改或恢复每次询问。
+              </div>
+            </div>
+            <div class="setting-control">
+              <NSelect
+                :value="closeAction"
+                :options="CLOSE_ACTION_OPTIONS"
+                size="small"
+                style="width: 160px"
+                aria-label="关闭窗口时"
+                @update:value="setCloseAction"
               />
             </div>
           </div>
@@ -527,6 +580,19 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
             :max-height="420"
             virtual-scroll
           />
+        </section>
+      </section>
+
+      <!-- 关闭确认与配置文件计划 Task 4：高级配置 = 直接编辑设置文件 -->
+      <section class="settings-group">
+        <h2 class="group-title">高级配置</h2>
+        <section class="ts-card settings-card">
+          <div class="setting-help">
+            设置配置文件：~/.tokenscope/settings.toml（TOML，带字段注释，可直接编辑）。
+            手动保存后对下一次读取立即生效；GUI 内的修改会重写整个文件，
+            自定义注释会丢失（字段说明以文件头为准）。
+          </div>
+          <NButton size="small" @click="openSettingsFile">打开设置配置文件</NButton>
         </section>
       </section>
     </div>
