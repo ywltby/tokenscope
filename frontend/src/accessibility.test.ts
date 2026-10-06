@@ -63,12 +63,15 @@ beforeAll(() => {
 import { beforeAll } from "vitest";
 
 describe("无障碍关键点（设计系统 Task 8）", () => {
-  it("App：tablist/tab 语义 + 主题选择器带可访问名称", async () => {
+  it("App：分段控件 radiogroup 语义 + 主题控件带可访问名称", async () => {
     const w = mount(App);
     await flushPromises();
-    expect(w.find('[role="tablist"][aria-label="页面切换"]').exists()).toBe(true);
-    expect(w.findAll('[role="tab"]').length).toBe(2);
-    expect(w.find('select[aria-label^="主题偏好"]').exists()).toBe(true);
+    // 页面切换：第一个 radiogroup
+    expect(w.find('[role="radiogroup"][aria-label="页面切换"]').exists()).toBe(true);
+    // 主题切换：第二个 radiogroup
+    expect(w.find('[role="radiogroup"][aria-label^="主题偏好"]').exists()).toBe(true);
+    const radios = w.findAll('[role="radio"]');
+    expect(radios.length).toBeGreaterThanOrEqual(5); // 至少 2 (页面) + 3 (主题)
     w.unmount();
   });
 

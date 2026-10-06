@@ -91,34 +91,41 @@ describe("App 集成（Task 4）", () => {
   });
 });
 
-describe("App 应用壳（设计系统 Task 2）", () => {
+describe("App 应用壳（设计系统 Task 2，苹果风格分段控件）", () => {
   beforeEach(() => {
     localStorage.removeItem("tokenscope-theme");
   });
 
-  it("汇总/设置 tab 可识别且选中态可见", async () => {
+  it("汇总/设置分段控件可识别且选中态可见", async () => {
     mockApp(statusOk);
     const w = mount(App);
     await flushPromises();
-    const tabs = w.findAll('[role="tab"]');
-    expect(tabs.map((t) => t.text())).toEqual(["汇总", "设置"]);
-    expect(tabs[0].attributes("aria-selected")).toBe("true");
-    await tabs[1].trigger("click");
-    expect(tabs[1].attributes("aria-selected")).toBe("true");
+    const items = w.findAll('[role="radio"]');
+    // 第一组是页面切换（汇总/设置），第二组是主题切换（☀/☾/自动）
+    const pageItems = items.slice(0, 2);
+    expect(pageItems.map((t) => t.text())).toEqual(["汇总", "设置"]);
+    expect(pageItems[0].attributes("aria-checked")).toBe("true");
+    await pageItems[1].trigger("click");
+    await flushPromises();
+    expect(pageItems[1].attributes("aria-checked")).toBe("true");
     expect(w.find(".stub-settings").exists()).toBe(true);
   });
 
-  it("主题选择器可读出当前偏好并驱动 data-theme", async () => {
+  it("主题分段控件可读出当前偏好并驱动 data-theme", async () => {
     mockApp(statusOk);
     const w = mount(App);
     await flushPromises();
-    const sel = w.find("select.theme-select-control");
-    expect(sel.exists(), "主题选择器存在").toBe(true);
-    const el = sel.element as HTMLSelectElement;
-    expect(el.value, "选择器读出当前偏好").toBe("system");
-    expect(document.documentElement.dataset.theme, "data-theme 跟随解析值").toBe("light");
-    await sel.setValue("dark");
-    expect(document.documentElement.dataset.theme, "data-theme 切换为 dark").toBe("dark");
+    const groups = w.findAll('[role="radiogroup"]');
+    expect(groups.length).toBeGreaterThanOrEqual(2);
+    const themeGroup = groups[1]; // 第二组是主题
+    const themeItems = themeGroup.findAll('[role="radio"]');
+    expect(themeItems.map((t) => t.text())).toEqual(["☀", "☾", "自动"]);
+    // 默认 system（自动），解析为 light
+    expect(themeItems[2].attributes("aria-checked")).toBe("true");
+    expect(document.documentElement.dataset.theme).toBe("light");
+    await themeItems[1].trigger("click");
+    await flushPromises();
+    expect(document.documentElement.dataset.theme).toBe("dark");
     expect(localStorage.getItem("tokenscope-theme")).toBe("dark");
   });
 
