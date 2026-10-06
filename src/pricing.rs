@@ -668,6 +668,7 @@ fn estimate_entry(
         segment_label: selected.and_then(|s| s.label.clone()),
         lines,
         excluded_candidate_warning: None,
+        excluded_incomplete_schedules: 0,
     }
 }
 
@@ -777,6 +778,10 @@ pub struct CostEstimate {
     /// 所选公式的 unknown_tokens，而是"其他候选缺少价格、未参与主估算"
     /// 的不确定性提示（结果不声称是所有渠道的严格上界）。
     pub excluded_candidate_warning: Option<String>,
+    /// R02（候选内时间规则诊断）：最终选中的规则为完整时，同候选内被
+    /// 排除的**不完整时间规则**数（已知小计可能虚高）。与渠道候选计数
+    /// 单位无关，不冒充 candidate_count。
+    pub excluded_incomplete_schedules: usize,
 }
 
 /// GUI 悬浮对照用：该前缀在 OpenRouter 层的价格（无对应模型则 None）。
@@ -1755,25 +1760,60 @@ impl Pricing {
         // 更便宜）；没有完整候选才回退到部分候选中已知费用最高者。
         // 同价 tie-break 不变：来源优先级 > 完整匹配 > 前缀长度 > 原始键。
         // 禁止跨候选拼价：最终公式仍来自同一个候选。
-        let mut complete_set: Vec<(CostEstimate, MatchMode, &Entry, Option<&PriceSchedule>)> =
-            Vec::new();
-        let mut partial_set: Vec<(CostEstimate, MatchMode, &Entry, Option<&PriceSchedule>)> =
-            Vec::new();
+        type Cand<'a> = (
+            CostEstimate,
+            MatchMode,
+            &'a Entry,
+            Option<&'a PriceSchedule>,
+            usize,
+        );
+        let mut complete_set: Vec<Cand> = Vec::new();
+        let mut partial_set: Vec<Cand> = Vec::new();
         for (e, mode) in cands {
-            // 候选内变体择优：默认档 + 每个命中时间规则（整规则一套价）；
-            // 费用并列时保守保留默认档。
-            let mut vbest = (estimate_entry(e, basis_value, t, None), None);
-            for (sched, period) in matching_time_rules(&e.plan, at) {
-                let est = estimate_entry(e, basis_value, t, Some((sched, period)));
-                if est.cost > vbest.0.cost {
-                    vbest = (est, Some(sched));
-                }
-            }
-            let (est, sched) = vbest;
-            if est.complete {
-                complete_set.push((est, mode, e, sched));
+            // R02：候选内择优与外层同规则——当前时刻**适用的时间规则**为
+            // 竞争集合（规则命中时基础价仅供缺字段继承，不作为常驻竞争
+            // 者，否则谷价永远被基础价压住）；无适用规则才用默认计划。
+            // 规则之间：完整优先 → 费用降序 → 声明顺序（稳定）。
+            let rules = matching_time_rules(&e.plan, at);
+            let (est, sched, excluded) = if rules.is_empty() {
+                (estimate_entry(e, basis_value, t, None), None, 0)
             } else {
-                partial_set.push((est, mode, e, sched));
+                // 每条适用规则各自计价；inner 选择 = 完整优先 → 费用降序
+                // → 声明顺序（稳定）。胜出规则完整时，其余不完整规则计入
+                // 排除诊断（它们的已知小计可能虚高，不参与主估算）。
+                let mut best: Option<(CostEstimate, &PriceSchedule)> = None;
+                for (sched, period) in &rules {
+                    let est = estimate_entry(e, basis_value, t, Some((sched, *period)));
+                    best = match &best {
+                        None => Some((est, sched)),
+                        Some((b, _)) => {
+                            if (est.complete && !b.complete)
+                                || (est.complete == b.complete && est.cost > b.cost)
+                            {
+                                Some((est, sched))
+                            } else {
+                                best
+                            }
+                        }
+                    };
+                }
+                let (best_est, best_sched) = best.unwrap();
+                // 胜出规则完整时，同候选内不完整规则全部计为被排除；
+                // 胜出规则本身不完整（无完整规则）时无"排除"可言。
+                let excluded = if best_est.complete {
+                    rules
+                        .iter()
+                        .filter(|(s, p)| !estimate_entry(e, basis_value, t, Some((s, *p))).complete)
+                        .count()
+                } else {
+                    0
+                };
+                (best_est, Some(best_sched), excluded)
+            };
+            if est.complete {
+                complete_set.push((est, mode, e, sched, excluded));
+            } else {
+                partial_set.push((est, mode, e, sched, excluded));
             }
         }
         let (pool, reason) = if !complete_set.is_empty() {
@@ -1786,10 +1826,10 @@ impl Pricing {
         } else {
             0
         };
-        let mut best: Option<&(CostEstimate, MatchMode, &Entry, Option<&PriceSchedule>)> = None;
+        let mut best: Option<&Cand> = None;
         for cand in pool.iter() {
             best = match best {
-                Some((b, bm, be, _)) => {
+                Some((b, bm, be, _, _)) => {
                     if cand.0.cost > b.cost
                         || (cand.0.cost == b.cost && tie_rank(cand.2, cand.1) > tie_rank(be, *bm))
                     {
@@ -1801,13 +1841,15 @@ impl Pricing {
                 None => Some(cand),
             };
         }
-        let (mut est, mode, e, sched) = best.expect("候选非空时池必非空").clone();
+        let (mut est, mode, e, sched, winner_excluded) = best.expect("候选非空时池必非空").clone();
+        // R02：规则级诊断只统计**胜出候选内部**被排除的不完整时间规则
+        //（其他候选的规则排除与本次公式无关，不冒充渠道计数）。
         // 结构化提示：完整候选胜出但有不完整候选被排除——结果不是所有
         // 渠道的严格上界（不完整候选若补价可能更高）。
         let excluded_candidate_warning = if excluded > 0 {
             let names = partial_set
                 .iter()
-                .map(|(_, _, pe, _)| pe.display.as_str())
+                .map(|(_, _, pe, _, _)| pe.display.as_str())
                 .collect::<Vec<_>>()
                 .join("、");
             Some(format!(
@@ -1831,6 +1873,7 @@ impl Pricing {
             incomplete_candidate_count: partial_set.len(),
             incomplete_candidates_excluded: excluded,
         });
+        est.excluded_incomplete_schedules = winner_excluded;
         est.excluded_candidate_warning = excluded_candidate_warning;
         Some(est)
     }
@@ -3288,6 +3331,7 @@ cache_read = 1.0
                     label: Some("peak".into()),
                     timezone: Some("UTC".into()),
                     periods: vec![SchedulePeriod {
+                        label: None,
                         start_time: "12:00".into(),
                         end_time: "14:00".into(),
                         weekdays: Some(vec!["mon".into(), "fri".into()]),
@@ -3295,7 +3339,6 @@ cache_read = 1.0
                             input: RateSpec::Fixed(30.0),
                             ..Default::default()
                         },
-                        ..Default::default()
                     }],
                     ..Default::default()
                 }],
@@ -3432,6 +3475,7 @@ cache_read = 1.0
                     label: Some("peak".into()),
                     timezone: Some("UTC".into()),
                     periods: vec![SchedulePeriod {
+                        label: None,
                         start_time: "12:00".into(),
                         end_time: "14:00".into(),
                         weekdays: Some(
@@ -3444,7 +3488,6 @@ cache_read = 1.0
                             input: RateSpec::Fixed(30.0),
                             ..Default::default()
                         },
-                        ..Default::default()
                     }],
                     ..Default::default()
                 }],
@@ -3504,6 +3547,7 @@ cache_read = 1.0
                         label: Some("peak".into()),
                         timezone: Some("UTC".into()),
                         periods: vec![SchedulePeriod {
+                            label: None,
                             start_time: "12:00".into(),
                             end_time: "14:00".into(),
                             weekdays: Some(
@@ -3516,7 +3560,6 @@ cache_read = 1.0
                                 input: RateSpec::Fixed(30.0),
                                 ..Default::default()
                             },
-                            ..Default::default()
                         }],
                         ..Default::default()
                     }],
@@ -3657,6 +3700,7 @@ cache_read = 1.0
                     label: Some("peak".into()),
                     timezone: Some("UTC".into()),
                     periods: vec![SchedulePeriod {
+                        label: None,
                         start_time: "08:00".into(),
                         end_time: "20:00".into(),
                         weekdays: Some(
@@ -3669,7 +3713,6 @@ cache_read = 1.0
                             input: RateSpec::Fixed(20.0),
                             ..Default::default()
                         },
-                        ..Default::default()
                     }],
                     prices: PriceRates {
                         input: RateSpec::Fixed(2.0),
@@ -3710,6 +3753,7 @@ cache_read = 1.0
                     label: Some("peak".into()),
                     timezone: Some("Asia/Shanghai".into()),
                     periods: vec![SchedulePeriod {
+                        label: None,
                         start_time: "08:00".into(),
                         end_time: "20:00".into(),
                         weekdays: None,
@@ -3717,7 +3761,6 @@ cache_read = 1.0
                             input: RateSpec::Fixed(30.0),
                             ..Default::default()
                         },
-                        ..Default::default()
                     }],
                     prices: PriceRates {
                         input: RateSpec::Fixed(1.0),
@@ -3777,6 +3820,7 @@ cache_read = 1.0
                     timezone: Some("UTC".into()),
                     periods: vec![
                         SchedulePeriod {
+                            label: None,
                             start_time: "08:00".into(),
                             end_time: "20:00".into(),
                             weekdays: None,
@@ -3784,9 +3828,9 @@ cache_read = 1.0
                                 input: RateSpec::Fixed(5.0),
                                 ..Default::default()
                             },
-                            ..Default::default()
                         },
                         SchedulePeriod {
+                            label: None,
                             start_time: "10:00".into(),
                             end_time: "18:00".into(),
                             weekdays: None,
@@ -3794,7 +3838,6 @@ cache_read = 1.0
                                 input: RateSpec::Fixed(12.0),
                                 ..Default::default()
                             },
-                            ..Default::default()
                         },
                     ],
                     prices: PriceRates::default(),
@@ -4806,6 +4849,222 @@ cache_read = "free"
             RateSpec::Fixed(0.5)
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── R02：时间档选择——当前时刻适用规则优先于基础档，完整性优先 ──
+
+    /// 外置单模型 helper。
+    fn pricing_with_plan(raw: &str, plan: PricePlan) -> Pricing {
+        let mut p = Pricing::empty();
+        p.add_entry(Entry {
+            prefix: match_key(raw),
+            display: raw.to_string(),
+            name: None,
+            plan,
+            tier: TIER_EXTERNAL,
+        });
+        p
+    }
+
+    #[test]
+    fn test_valley_rate_overrides_base_before_channel_selection() {
+        // 谷价 $2 命中时 A 的适用价是 $2（不是基础 $10）；12:00 应选 B/$5，
+        // 21:00（规则不适用）回 A/$10。开始含入、结束排除。
+        let a = PricePlan {
+            base: PriceRates {
+                input: RateSpec::Fixed(10.0),
+                ..Default::default()
+            },
+            schedules: vec![PriceSchedule {
+                label: Some("valley".into()),
+                timezone: Some("UTC".into()),
+                periods: vec![SchedulePeriod {
+                    label: None,
+                    start_time: "08:00".into(),
+                    end_time: "20:00".into(),
+                    weekdays: None,
+                    prices: PriceRates {
+                        input: RateSpec::Fixed(2.0),
+                        ..Default::default()
+                    },
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let b = PricePlan {
+            base: PriceRates {
+                input: RateSpec::Fixed(5.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut p = Pricing::empty();
+        p.add_entry(Entry {
+            prefix: match_key("chan-a/m"),
+            display: "chan-a/m".into(),
+            name: None,
+            plan: a,
+            tier: TIER_EXTERNAL,
+        });
+        p.add_entry(Entry {
+            prefix: match_key("chan-b/m"),
+            display: "chan-b/m".into(),
+            name: None,
+            plan: b,
+            tier: TIER_EXTERNAL,
+        });
+        let t = counts(1_000_000, 0, 0, 0);
+        // 12:00 UTC：A 适用谷价 $2，但 B $5 更高 → 选 B
+        let noon: jiff::Timestamp = "2026-01-05T12:00:00Z".parse().unwrap();
+        let est = p.estimate("m", &t, noon).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-b/m");
+        assert!((est.cost - 5.0).abs() < 1e-9);
+        // 21:00 UTC：规则不适用，A 回基础 $10 > B $5 → 选 A
+        let night: jiff::Timestamp = "2026-01-05T21:00:00Z".parse().unwrap();
+        let est = p.estimate("m", &t, night).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-a/m");
+        assert!((est.cost - 10.0).abs() < 1e-9);
+        // 开始含入：08:00 整命中谷价 → B
+        let start: jiff::Timestamp = "2026-01-05T08:00:00Z".parse().unwrap();
+        let est = p.estimate("m", &t, start).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-b/m");
+        // 结束排除：20:00 整不在 [08:00,20:00) → A 基础
+        let end: jiff::Timestamp = "2026-01-05T20:00:00Z".parse().unwrap();
+        let est = p.estimate("m", &t, end).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-a/m");
+    }
+
+    #[test]
+    fn test_complete_schedule_precedes_higher_partial_schedule() {
+        // 同渠道两个适用规则：partial(input=10, read 缺)、complete(input=2, read=1)。
+        // input 1M + read 1M → 必须选完整 $3，不得按已知小计选 partial $10。
+        let plan = PricePlan {
+            base: PriceRates {
+                input: RateSpec::Fixed(99.0),
+                ..Default::default()
+            },
+            schedules: vec![
+                PriceSchedule {
+                    label: Some("partial-rule".into()),
+                    timezone: Some("UTC".into()),
+                    periods: vec![SchedulePeriod {
+                        label: None,
+                        start_time: "00:00".into(),
+                        end_time: "23:59".into(),
+                        weekdays: None,
+                        prices: PriceRates {
+                            input: RateSpec::Fixed(10.0),
+                            ..Default::default()
+                        },
+                    }],
+                    ..Default::default()
+                },
+                PriceSchedule {
+                    label: Some("complete-rule".into()),
+                    timezone: Some("UTC".into()),
+                    periods: vec![SchedulePeriod {
+                        label: None,
+                        start_time: "00:00".into(),
+                        end_time: "23:59".into(),
+                        weekdays: None,
+                        prices: PriceRates {
+                            input: RateSpec::Fixed(2.0),
+                            cache_read: RateSpec::Fixed(1.0),
+                            ..Default::default()
+                        },
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let p = pricing_with_plan("solo/m", plan);
+        let est = p
+            .estimate("m", &counts(1_000_000, 0, 0, 1_000_000), at())
+            .unwrap();
+        assert!(est.complete, "完整规则必须胜出");
+        assert_eq!(est.unknown.cache_read, 0);
+        assert!(
+            (est.cost - 3.0).abs() < 1e-9,
+            "选 complete $3，实际 {}",
+            est.cost
+        );
+        assert_eq!(
+            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            Some("complete-rule")
+        );
+        // 候选内被排除的不完整规则披露（独立诊断，不冒充渠道计数）
+        assert_eq!(est.excluded_incomplete_schedules, 1);
+    }
+
+    #[test]
+    fn test_schedule_selection_all_partial_and_zero_token_unknown() {
+        // 没有完整规则 → 已知小计最高者胜；缺价分项零 token 不影响完整性。
+        let plan = PricePlan {
+            base: PriceRates {
+                input: RateSpec::Fixed(1.0),
+                ..Default::default()
+            },
+            schedules: vec![
+                PriceSchedule {
+                    label: Some("higher-partial".into()),
+                    timezone: Some("UTC".into()),
+                    periods: vec![SchedulePeriod {
+                        label: None,
+                        start_time: "00:00".into(),
+                        end_time: "23:59".into(),
+                        weekdays: None,
+                        prices: PriceRates {
+                            input: RateSpec::Fixed(8.0),
+                            cache_read: RateSpec::Unknown,
+                            ..Default::default()
+                        },
+                    }],
+                    ..Default::default()
+                },
+                PriceSchedule {
+                    label: Some("lower-partial".into()),
+                    timezone: Some("UTC".into()),
+                    periods: vec![SchedulePeriod {
+                        label: None,
+                        start_time: "00:00".into(),
+                        end_time: "23:59".into(),
+                        weekdays: None,
+                        prices: PriceRates {
+                            input: RateSpec::Fixed(3.0),
+                            cache_read: RateSpec::Fixed(0.2),
+                            ..Default::default()
+                        },
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let p = pricing_with_plan("solo/p", plan);
+        // read 1M：lower 有 read 价 → 完整 $3.2；higher 缺 read → 不完整。
+        // 完整优先 → lower 胜，higher 被排除披露。
+        let est = p
+            .estimate("p", &counts(1_000_000, 0, 0, 1_000_000), at())
+            .unwrap();
+        assert!(est.complete);
+        assert!((est.cost - 3.2).abs() < 1e-9);
+        assert_eq!(
+            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            Some("lower-partial")
+        );
+        assert_eq!(est.excluded_incomplete_schedules, 1);
+        // read 0 token：higher 的缺价分项零 token → 按不变量 3 仍完整，
+        // 两规则皆完整 → 按费用比 8 > 3.2 → higher 胜，无排除诊断
+        let est = p.estimate("p", &counts(1_000_000, 0, 0, 0), at()).unwrap();
+        assert!(est.complete);
+        assert!((est.cost - 8.0).abs() < 1e-9);
+        assert_eq!(
+            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            Some("higher-partial")
+        );
+        assert_eq!(est.excluded_incomplete_schedules, 0);
     }
 
     #[test]
