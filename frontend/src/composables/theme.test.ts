@@ -91,6 +91,17 @@ describe("主题偏好（设计系统 Task 1）", () => {
     expect(css).toContain("@supports");
   });
 
+  it("token 层提供状态胶囊与 reduced-motion 降级（计划任务 1 Step 4）", async () => {
+    await import("../styles/tokens.css");
+    const css = [...document.querySelectorAll("style")]
+      .map((s) => s.textContent ?? "")
+      .join(String.fromCharCode(10));
+    // 标题行状态胶囊（已更新/刷新中/缓存数据）的公共基类
+    expect(css).toContain(".ts-status-pill");
+    // 尊重系统减少动效偏好：动效 token 归零
+    expect(css).toContain("prefers-reduced-motion");
+  });
+
   it("Naive UI / ECharts 适配器为两种主题产出完整覆盖", async () => {
     const { naiveThemeOverrides } = await import("../styles/naiveTheme");
     const { chartTokens } = await import("../styles/chartTheme");

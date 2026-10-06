@@ -304,6 +304,17 @@ body {
   background: rgba(48, 209, 88, 0.16);
 }
 
+/* 标题行状态胶囊（已更新 / 刷新中 / 缓存数据）：自带状态圆点，
+   圆点与文字同色（currentColor），颜色由 .ts-pill-* 修饰类提供 */
+.ts-status-pill::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
 /* 内联通知条 */
 .ts-notice {
   display: flex;
