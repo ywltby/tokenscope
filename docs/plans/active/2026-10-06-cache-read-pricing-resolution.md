@@ -291,3 +291,17 @@ git add src/pricing.rs src/report.rs src/aggregate.rs src/modelsdev.rs src/openr
 git commit -m "fix(计价): 区分缓存未知价格与按输入价计费"
 ```
 
+
+## 执行记录（2026-10-06）
+
+| 任务 | 内容 | 提交 |
+| --- | --- | --- |
+| Task 1+2 | `RateSpec` 三态（Unknown/Fixed/SameAsInput，serde 线格式与旧 `Option<f64>` 兼容）；解析顺序 = 先 input 后 cache_read 引用同层输入价；SameAsInput 白名单仅 cache_read（其余加载拒绝）；索引 v5 且兼容读 v4（v2/v3 仍失效）；CostLine.rate_kind；回归测试 6 项 | b86d09a |
+| Task 3 | `[[model_policy]]` 外置声明（末段匹配 + 可选 channel/source，只改写 Unknown cache_read，不覆盖显式值、不生成候选、未命中告警）；models.dev/OpenRouter 缺失保持 Unknown；PRICING_TEMPLATE 与 stats-semantics.md §4 增补 | 9a97909 |
+| Task 4 | 两阶段候选选择：完整候选优先取最高（缺价不按 0 比较），无完整候选回退部分最高；MatchedCandidate 三诊断计数 + reason 两阶段命名；CostEstimate.excluded_candidate_warning 结构化提示；tie-break 与禁拼价不变；cost_breakdown 场景更新为新语义 | 684829e |
+| Task 5+6 | EventCostBreakdown 透传排除提示；前端类型/公式行「输入价 $x/M」/来源区两阶段说明与估算范围行；report 级 gpt-5.4 三渠道 fixture（zenmux 排除、cortecs 完整胜出） | 7719d7a |
+| Task 7 | 全量门禁（Rust 双 manifest + 前端四件套）全绿；真实数据只读验收：gpt-5.4 2384 请求 / 3.08 亿 cache_read token 全部完整计价 $136.26、unknown_pricing=false（修复前进 unknown）；临时 example 已删除 | 见最终提交 |
+
+不变量对照：缺价 ≠ 免费（Unknown 保持 unknown）；显式 0 = 免费；
+SameAsInput 仅 cache_read 且跟随同层（分段/峰谷档）输入价；聚合四桶
+逻辑零改动（aggregate.rs 未触碰）。
