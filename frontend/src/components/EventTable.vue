@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, h } from "vue";
+import { computed, h, ref } from "vue";
 import { NButton, NDataTable, NTag, NTooltip, type DataTableColumn } from "naive-ui";
 import { AGENT_LABEL, fmtNum, projectLabel, type EventList } from "../types";
-import { formatCostBreakdown } from "../lib/costBreakdown";
+import { formatCostBreakdownRows } from "../lib/costBreakdown";
 
 const props = defineProps<{
   list: EventList;
@@ -12,6 +12,8 @@ const props = defineProps<{
   moreLoading?: boolean;
 }>();
 const emit = defineEmits<{ (e: "load-more"): void }>();
+/// 设计系统 Task 6：当前展开的费用 tooltip（行 cursor 作为键）。
+const openKey = ref<string | null>(null);
 const remaining = () => props.list.total - props.list.rows.length;
 
 function fmtPrice(v: number): string {
@@ -89,6 +91,8 @@ const columns = computed<DataTableColumn[]>(() => [
       const row = asRow(r);
       const c = row.cost_usd;
       const bd = row.cost_breakdown;
+      const key = row.cursor;
+      // c 在此分支已非空（下方 !bd 分支共用 trigger 前置判断）
       const trigger =
         c == null
           ? () =>
@@ -98,29 +102,76 @@ const columns = computed<DataTableColumn[]>(() => [
                 { default: () => "未知" },
               )
           : () => h("span", { style: "cursor: help" }, fmtPrice(c));
-      // Task 7：breakdown 存在时悬浮展示计算明细；旧/异常响应（有价无明细）
-      // 保持原样不崩溃。
+      // 设计系统 Task 6：breakdown 存在时展示"事实→公式→结果→来源"；
+      // 触发器支持 hover/focus/click，Escape 与点击外部关闭；
+      // 旧/异常响应（有价无明细）保持原样不崩溃。
       if (!bd) return trigger();
+      const open = openKey.value === key;
+      const openIt = () => {
+        openKey.value = key;
+      };
+      const closeIt = () => {
+        if (openKey.value === key) openKey.value = null;
+      };
       return h(
         NTooltip,
-        { style: "max-width: 460px", placement: "left" },
         {
-          trigger,
+          trigger: "manual",
+          placement: "left",
+          show: open,
+          style: "max-width: 480px",
+          onClickoutside: closeIt,
+        },
+        {
+          trigger: () =>
+            h(
+              "span",
+              {
+                style: "cursor: help",
+                tabindex: 0,
+                role: "button",
+                "aria-label": "费用计算明细",
+                "aria-expanded": open,
+                class: "ts-focusable",
+                onClick: openIt,
+                onKeydown: (e: KeyboardEvent) => {
+                  if (e.key === "Escape") closeIt();
+                },
+                onMouseenter: openIt,
+                onMouseleave: closeIt,
+                onFocus: openIt,
+                onBlur: closeIt,
+              },
+              fmtPrice(c as number),
+            ),
           default: () =>
             h(
               "div",
-              { style: "font-size: 12px; line-height: 1.7; text-align: left" },
-              formatCostBreakdown(bd).map((l) =>
-                h(
+              { class: "cost-tooltip" },
+              formatCostBreakdownRows(bd).map((row2) => {
+                if (row2.divider) return h("div", { class: "bd-divider" });
+                if (row2.detail != null) {
+                  return h(
+                    "div",
+                    { class: ["bd-row", row2.unknown ? "bd-unknown" : ""] },
+                    `${row2.label} ${row2.detail}`,
+                  );
+                }
+                return h(
                   "div",
                   {
-                    style: l.unknown
-                      ? "color: #f0a020; white-space: normal"
-                      : "white-space: normal",
+                    class: [
+                      "bd-row",
+                      row2.unknown ? "bd-unknown" : "",
+                      row2.total ? "bd-total" : "",
+                    ],
                   },
-                  l.text,
-                ),
-              ),
+                  [
+                    h("span", { class: "bd-label" }, row2.label),
+                    h("span", { class: "bd-value ts-num" }, row2.value ?? ""),
+                  ],
+                );
+              }),
             ),
         },
       );
@@ -163,3 +214,46 @@ const rowKey = (r: object): string => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.cost-tooltip {
+  font-size: 12px;
+  line-height: 1.7;
+  text-align: left;
+  min-width: 320px;
+}
+
+.bd-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ts-space-3);
+  white-space: normal;
+}
+
+.bd-label {
+  color: var(--ts-text-secondary);
+  flex: 0 0 auto;
+}
+
+.bd-value {
+  font-family: var(--ts-font-mono);
+  text-align: right;
+  color: var(--ts-text);
+}
+
+.bd-row.bd-unknown .bd-label,
+.bd-row.bd-unknown .bd-value {
+  color: var(--ts-warning);
+}
+
+.bd-row.bd-total .bd-value {
+  font-weight: 700;
+}
+
+.bd-divider {
+  height: 1px;
+  background: var(--ts-border);
+  margin: var(--ts-space-1) 0;
+}
+</style>
