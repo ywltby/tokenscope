@@ -26,10 +26,12 @@ const columns = computed<DataTableColumn[]>(() => {
     // C2：项目身份是完整路径，展示用 label（末段），悬浮可见完整 key。
     render: (row) => h("span", asGroup(row).label ?? asGroup(row).key),
   };
+  // 设计系统 Task 5：数字列右对齐 + tabular lining 数字
   const num = (title: string, key: string): DataTableColumn => ({
     title,
     key,
     align: "right",
+    className: "ts-num",
     render: (row) => fmtNum(Number((row as Record<string, unknown>)[key] ?? 0)),
   });
   const token = (
@@ -39,6 +41,7 @@ const columns = computed<DataTableColumn[]>(() => {
     title,
     key: `tokens.${path}`,
     align: "right",
+    className: "ts-num",
     render: (row) => fmtNum(asGroup(row).tokens[path]),
   });
   const cols: DataTableColumn[] = [
@@ -52,6 +55,7 @@ const columns = computed<DataTableColumn[]>(() => {
       title: "合计",
       key: "total",
       align: "right",
+      className: "ts-num",
       render: (row) =>
         fmtNum(
           asGroup(row).tokens.input +
@@ -61,13 +65,16 @@ const columns = computed<DataTableColumn[]>(() => {
         ),
     },
     {
-      title: "费用$",
+      // 设计系统 Task 5：金额列使用估算语义表头
+      title: "费用$(估算)",
       key: "cost_usd",
       align: "right",
+      className: "ts-num",
       render: (row) => {
         const g = asGroup(row);
         const text = fmtCost(g.cost_usd) + (g.unknown_pricing ? "†" : "");
-        return h("span", { style: g.unknown_pricing ? "opacity: 0.75" : "" }, text);
+        // 未知标记用警告色显式呈现，不用 opacity 压低（DESIGN.md §1）
+        return h("span", { style: g.unknown_pricing ? "color: var(--ts-warning)" : "" }, text);
       },
     },
   ];
@@ -80,7 +87,7 @@ const columns = computed<DataTableColumn[]>(() => {
       render: (row) => {
         const u = asGroup(row).unknown_tokens;
         const n = u.input + u.output + u.cache_write + u.cache_read;
-        return n > 0 ? h("span", { style: "opacity: 0.75" }, fmtNum(n)) : "—";
+        return n > 0 ? h("span", { style: "color: var(--ts-warning)" }, fmtNum(n)) : "—";
       },
     });
   }
@@ -90,10 +97,23 @@ const columns = computed<DataTableColumn[]>(() => {
 const rows = computed<Group[]>(() => props.report.groups);
 const rowKey = (row: object): string => asGroup(row).key;
 const rowClass = (row: object): string => (asGroup(row).key === "合计" ? "total-row" : "");
+// 设计系统 Task 5：行可聚焦，Enter/Space 与点击等价下钻（键盘路径）。
 const rowProps = (row: object) => ({
   style: "cursor: pointer",
+  tabindex: 0,
+  role: "button",
+  "aria-label": `查看 ${asGroup(row).key} 的请求明细`,
   onclick: () => emit("row-click", asGroup(row).key),
+  onkeydown: (e: KeyboardEvent) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      emit("row-click", asGroup(row).key);
+    }
+  },
 });
+
+// 设计系统 Task 5：暴露列定义与行 props 供组件测试断言（无行渲染环境）。
+defineExpose({ columns, rowProps });
 
 const sourceLines = computed(() =>
   buildSourceLines(props.report.sources).map((s) => ({
@@ -112,28 +132,20 @@ const sourceLines = computed(() =>
       :row-class-name="rowClass"
       :row-props="rowProps"
       size="small"
-      :bordered="true"
-      :single-line="false"
+      :bordered="false"
     />
-    <div style="font-size: 12px; opacity: 0.6; margin-top: 4px">点击行可下钻到请求明细。</div>
-    <div
-      v-if="report.totals.unknown_pricing"
-      style="font-size: 12px; opacity: 0.7; margin-top: 6px"
-    >
+    <div class="table-hint">点击行（或聚焦后按 Enter）可下钻到请求明细。</div>
+    <div v-if="report.totals.unknown_pricing" class="table-note">
       † 费用为估算，仅含已计价部分：无价格模型的全部用量、或价格快照缺分项价
       （如缓存价未知）时该分项的用量，均不计入费用，其 token 数见"未知†"列。
     </div>
-    <NCollapse style="margin-top: 8px">
+    <NCollapse class="source-collapse">
       <NCollapseItem title="来源采集统计" name="sources">
-        <div
-          v-for="s in sourceLines"
-          :key="s.agent"
-          style="font-size: 12px; opacity: 0.8; line-height: 1.9"
-        >
+        <div v-for="s in sourceLines" :key="s.agent" class="source-line">
           <strong>{{ s.agent }}</strong
           >：{{ s.parts.join(" · ") }}
         </div>
-        <div v-if="report.warnings.length" style="font-size: 12px; color: #d97706">
+        <div v-if="report.warnings.length" class="source-warning">
           {{ report.warnings.join("；") }}
         </div>
       </NCollapseItem>
@@ -141,8 +153,31 @@ const sourceLines = computed(() =>
   </div>
 </template>
 
-<style>
+<style scoped>
 .total-row strong {
   font-weight: 700;
+}
+.table-hint {
+  font-size: 12px;
+  color: var(--ts-text-muted);
+  margin-top: var(--ts-space-1);
+}
+.table-note {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ts-text-secondary);
+  margin-top: var(--ts-space-2);
+}
+.source-collapse {
+  margin-top: var(--ts-space-2);
+}
+.source-line {
+  font-size: 12px;
+  line-height: 1.9;
+  color: var(--ts-text-secondary);
+}
+.source-warning {
+  font-size: 12px;
+  color: var(--ts-warning);
 }
 </style>

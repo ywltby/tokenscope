@@ -56,3 +56,54 @@ describe("UsageTable 费用可追溯（C5）", () => {
     expect(w.text()).not.toContain("未知†");
   });
 });
+
+// 设计系统 Task 5：表格语义——列对齐/tabular 数字/估算表头/键盘下钻。
+describe("UsageTable 表格语义（设计系统 Task 5）", () => {
+  function exposed(w: ReturnType<typeof mount>) {
+    return w.vm as unknown as {
+      columns: {
+        key: string;
+        align?: string;
+        className?: string;
+        title?: string;
+        render?: (row: object) => unknown;
+      }[];
+      rowProps: (g: Group) => Record<string, unknown>;
+    };
+  }
+
+  it("数字列右对齐且使用 tabular 数字类", () => {
+    const w = mount(UsageTable, { props: { report: report([group("m")], false) } });
+    const cols = exposed(w).columns;
+    for (const key of ["requests", "tokens.input", "tokens.output", "total", "cost_usd"]) {
+      const c = cols.find((x) => x.key === key);
+      expect(c, `${key} 列存在`).toBeDefined();
+      expect(c!.align).toBe("right");
+      expect(c!.className).toContain("ts-num");
+    }
+  });
+
+  it("费用列表头带估算语义；未知标记用警告色而非 opacity", () => {
+    const w = mount(UsageTable, { props: { report: report([group("m")], true) } });
+    const cols = exposed(w).columns;
+    const cost = cols.find((x) => x.key === "cost_usd");
+    expect(String(cost!.title)).toContain("估算");
+    const unknownCol = cols.find((x) => x.key === "unknown_tokens");
+    const vnode = unknownCol!.render!(group("x", { input: 100 })) as { props?: { style?: string } };
+    const style = JSON.stringify(vnode?.props?.style ?? "");
+    expect(style).not.toContain("opacity");
+    expect(style).toContain("--ts-warning");
+  });
+
+  it("聚合行可通过 Enter/Space 键盘下钻（不只靠点击）", () => {
+    const w = mount(UsageTable, { props: { report: report([group("m1")], false) } });
+    const rp = exposed(w).rowProps(group("m1"));
+    expect(rp.tabindex).toBe(0);
+    expect(typeof rp.onkeydown).toBe("function");
+    (rp.onkeydown as (e: { key: string; preventDefault: () => void }) => void)({
+      key: "Enter",
+      preventDefault: () => {},
+    });
+    expect(w.emitted("row-click")).toBeTruthy();
+  });
+});

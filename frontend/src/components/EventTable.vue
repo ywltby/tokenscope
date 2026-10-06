@@ -33,6 +33,8 @@ const columns = computed<DataTableColumn[]>(() => [
     key: "model",
     minWidth: 180,
     ellipsis: { tooltip: true },
+    // 设计系统 Task 5：模型名可聚焦获取完整值（不只 hover）
+    render: (r) => h("span", { tabindex: 0, class: "ts-focusable" }, asRow(r).model),
   },
   {
     title: "项目",
@@ -44,29 +46,45 @@ const columns = computed<DataTableColumn[]>(() => [
       const label = projectLabel(p);
       if (label === p) return label;
       return h(NTooltip, null, {
-        trigger: () => h("span", { style: "cursor: help" }, label),
+        trigger: () =>
+          h("span", { style: "cursor: help", tabindex: 0, class: "ts-focusable" }, label),
         default: () => p,
       });
     },
   },
-  { title: "输入", key: "input", align: "right", render: (r) => fmtNum(asRow(r).input) },
-  { title: "输出", key: "output", align: "right", render: (r) => fmtNum(asRow(r).output) },
+  {
+    title: "输入",
+    key: "input",
+    align: "right",
+    className: "ts-num",
+    render: (r) => fmtNum(asRow(r).input),
+  },
+  {
+    title: "输出",
+    key: "output",
+    align: "right",
+    className: "ts-num",
+    render: (r) => fmtNum(asRow(r).output),
+  },
   {
     title: "缓存写",
     key: "cache_write",
     align: "right",
+    className: "ts-num",
     render: (r) => fmtNum(asRow(r).cache_write),
   },
   {
     title: "缓存读",
     key: "cache_read",
     align: "right",
+    className: "ts-num",
     render: (r) => fmtNum(asRow(r).cache_read),
   },
   {
-    title: "费用$",
+    title: "费用$(估算)",
     key: "cost_usd",
     align: "right",
+    className: "ts-num",
     render: (r) => {
       const row = asRow(r);
       const c = row.cost_usd;
@@ -110,6 +128,9 @@ const columns = computed<DataTableColumn[]>(() => [
   },
 ]);
 
+// 设计系统 Task 5：暴露列定义供组件测试断言（无行渲染环境）。
+defineExpose({ columns });
+
 type EventRowT = EventList["rows"][number];
 const asRow = (r: object): EventRowT => r as unknown as EventRowT;
 
@@ -126,8 +147,7 @@ const rowKey = (r: object): string => {
       :data="props.list.rows"
       :row-key="rowKey"
       size="small"
-      :bordered="true"
-      :single-line="false"
+      :bordered="false"
       :max-height="380"
       virtual-scroll
     />

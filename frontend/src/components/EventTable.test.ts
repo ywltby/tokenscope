@@ -179,3 +179,25 @@ describe("EventTable 费用悬浮（Task 7）", () => {
     expect(w.exists()).toBe(true);
   });
 });
+
+// 设计系统 Task 5：明细表列语义（对齐/数字/省略列）。
+describe("EventTable 表格语义（设计系统 Task 5）", () => {
+  function exposed(w: ReturnType<typeof mount>) {
+    return w.vm as unknown as {
+      columns: { key: string; align?: string; className?: string; ellipsis?: unknown }[];
+    };
+  }
+
+  it("数字列右对齐且使用 tabular 数字类；模型列省略并可查完整值", () => {
+    const w = mount(EventTable, { props: { list: list([row()], 1), filterLabel: "" } });
+    const cols = exposed(w).columns;
+    for (const key of ["input", "output", "cache_write", "cache_read", "cost_usd"]) {
+      const c = cols.find((x) => x.key === key);
+      expect(c, `${key} 列存在`).toBeDefined();
+      expect(c!.align).toBe("right");
+      expect(c!.className).toContain("ts-num");
+    }
+    const model = cols.find((x) => x.key === "model");
+    expect(model!.ellipsis).toBeTruthy();
+  });
+});
