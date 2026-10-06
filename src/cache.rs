@@ -29,8 +29,10 @@ pub struct CacheStats {
 /// 解析语义版本（B5 前置/B1 依赖）：版本不符的缓存必须整体失效——否则
 /// 解析规则升级后旧缓存继续供数（R04）。递增记录：v2 = Codex cache_write
 /// 语义修复（input = raw − cached − cache_write）；v3 = Codex 项目身份改
-/// 完整 cwd（C2/R03）+ Claude 项目相对路径。
-const SCHEMA_VERSION: &str = "3";
+/// 完整 cwd（C2/R03）+ Claude 项目相对路径；
+/// v4 = 缓存身份纳入来源上下文（R05）：文件键 = agent + 规范化根目录 +
+/// 规范化文件路径——旧 v3 行无 root 维度，整体失效重建。
+const SCHEMA_VERSION: &str = "4";
 
 fn fingerprint(size: u64, mtime_ms: i64) -> (i64, i64) {
     // u64 → i64 存库；实际文件大小远小于 i64 上限。
@@ -66,7 +68,8 @@ impl Cache {
             );
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY,
-                path TEXT UNIQUE NOT NULL,
+                path TEXT NOT NULL,
+                root TEXT NOT NULL DEFAULT '',
                 agent TEXT NOT NULL,
                 size INTEGER NOT NULL,
                 mtime_ms INTEGER NOT NULL,
@@ -90,7 +93,9 @@ impl Cache {
                 cache_write INTEGER NOT NULL,
                 cache_read INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_events_file ON events(file_id);",
+            CREATE INDEX IF NOT EXISTS idx_events_file ON events(file_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_files_identity
+                ON files(agent, root, path);",
         )?;
         // 解析版本不符 → 旧缓存整体失效（清空后按当前规则重建）。
         // 此前版本号只写不查（R04）：解析规则升级后旧缓存继续供数。
@@ -120,13 +125,16 @@ impl Cache {
         Ok(Self { conn })
     }
 
-    /// 命中：指纹一致才返回缓存产物（事件按来源 agent 标注）。
+    /// 命中：指纹一致**且来源上下文（agent + 根目录）一致**才返回缓存产物。
+    /// R05：SQL 真正过滤 agent/root——不同来源类型或根目录的解析产物互不
+    /// 可见，杜绝"旧事件改标 agent"与"换根沿用旧项目名"。
     /// 文件行与事件行包在同一个读事务里（R04）：并发清理/写入时读到的是
     /// 单一快照，不会出现"有文件行无事件行"的半截命中。
     pub fn lookup_file(
         &self,
         path: &str,
         agent: AgentKind,
+        root: &str,
         size: u64,
         mtime_ms: i64,
     ) -> Result<Option<CachedFile>> {
@@ -138,20 +146,24 @@ impl Cache {
             let mut stmt = tx.prepare(
                 "SELECT id, lines_seen, bad_lines, skipped_sidechain, skipped_synthetic,
                         skipped_zero_usage, skipped_no_model, ignored_token_usage_record
-                 FROM files WHERE path = ?1 AND size = ?2 AND mtime_ms = ?3",
+                 FROM files
+                 WHERE path = ?1 AND agent = ?2 AND root = ?3 AND size = ?4 AND mtime_ms = ?5",
             )?;
-            stmt.query_row(rusqlite::params![path, size_s, mtime_s], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, i64>(5)?,
-                    r.get::<_, i64>(6)?,
-                    r.get::<_, i64>(7)?,
-                ))
-            })
+            stmt.query_row(
+                rusqlite::params![path, agent.as_str(), root, size_s, mtime_s],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, i64>(5)?,
+                        r.get::<_, i64>(6)?,
+                        r.get::<_, i64>(7)?,
+                    ))
+                },
+            )
             .optional()?
         };
         let Some((id, lines_seen, bad_lines, sidechain, synthetic, zero, no_model, tur)) = row
@@ -216,21 +228,28 @@ impl Cache {
         &self,
         path: &str,
         agent: AgentKind,
+        root: &str,
         size: u64,
         mtime_ms: i64,
         parse: &FileParse,
     ) -> Result<()> {
         let (size, mtime_ms) = fingerprint(size, mtime_ms);
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM files WHERE path = ?1", [path])?;
+        // R05：身份键 = (agent, root, path)。删除旧行也按完整身份——
+        // 不同上下文的同路径行互不覆盖。
         tx.execute(
-            "INSERT INTO files(path, agent, size, mtime_ms, lines_seen, bad_lines,
+            "DELETE FROM files WHERE path = ?1 AND agent = ?2 AND root = ?3",
+            rusqlite::params![path, agent.as_str(), root],
+        )?;
+        tx.execute(
+            "INSERT INTO files(path, agent, root, size, mtime_ms, lines_seen, bad_lines,
                                skipped_sidechain, skipped_synthetic, skipped_zero_usage,
                                skipped_no_model, ignored_token_usage_record)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 path,
                 agent.as_str(),
+                root,
                 size,
                 mtime_ms,
                 parse.stats.lines_seen as i64,
@@ -242,8 +261,11 @@ impl Cache {
                 parse.stats.ignored_token_usage_record as i64,
             ],
         )?;
-        let file_id: i64 =
-            tx.query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))?;
+        let file_id: i64 = tx.query_row(
+            "SELECT id FROM files WHERE path = ?1 AND agent = ?2 AND root = ?3",
+            rusqlite::params![path, agent.as_str(), root],
+            |r| r.get(0),
+        )?;
         let mut stmt = tx.prepare(
             "INSERT INTO events(file_id, ts, record_id, model, session_id, project,
                                 input, output, cache_write, cache_read)
@@ -273,11 +295,13 @@ impl Cache {
     /// 缓存被整体清除再重建（全部→Claude→全部 会反复重解析 Codex）。
     /// 调用方约定：发现失败（errors 非空或根目录缺失）的来源不调用——
     /// 无法区分"已删除"与"暂时读不到"，绝不因发现失败清缓存。
-    pub fn purge_agent(&self, agent: AgentKind, keep: &[String]) -> Result<usize> {
+    pub fn purge_agent(&self, agent: AgentKind, root: &str, keep: &[String]) -> Result<usize> {
+        // R05：清理只作用于 (agent, root) 上下文——换根后旧上下文的行由
+        // keep 缺失自然清出，但绝不波及其他 agent/上下文。
         let mut stmt = self
             .conn
-            .prepare("SELECT id, path FROM files WHERE agent = ?1")?;
-        let rows = stmt.query_map([agent.as_str()], |r| {
+            .prepare("SELECT id, path FROM files WHERE agent = ?1 AND root = ?2")?;
+        let rows = stmt.query_map(rusqlite::params![agent.as_str(), root], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
         })?;
         let mut stale = Vec::new();
@@ -364,7 +388,7 @@ mod tests {
         let dir = tmp_dir("version");
         let path = dir.join("cache.db");
         let c = Cache::open(&path).unwrap();
-        c.store_file("a.jsonl", AgentKind::Codex, 10, 100, &parse_with(2))
+        c.store_file("a.jsonl", AgentKind::Codex, "root", 10, 100, &parse_with(2))
             .unwrap();
         assert_eq!(c.stats().unwrap().events, 2);
         drop(c);
@@ -377,7 +401,7 @@ mod tests {
         assert_eq!(c.stats().unwrap().events, 0, "版本不符必须清空重建");
         assert_eq!(c.stats().unwrap().files, 0);
         // 失效后可正常重新入库。
-        c.store_file("a.jsonl", AgentKind::Codex, 10, 100, &parse_with(2))
+        c.store_file("a.jsonl", AgentKind::Codex, "root", 10, 100, &parse_with(2))
             .unwrap();
         assert_eq!(c.stats().unwrap().events, 2);
         std::fs::remove_dir_all(&dir).ok();
@@ -388,11 +412,19 @@ mod tests {
         // B5（F06）：清理只作用于指定 agent——查看单 agent 不再清空其他来源。
         let dir = tmp_dir("purge");
         let c = Cache::open(&dir.join("cache.db")).unwrap();
-        c.store_file("codex-a.jsonl", AgentKind::Codex, 1, 1, &parse_with(1))
-            .unwrap();
+        c.store_file(
+            "codex-a.jsonl",
+            AgentKind::Codex,
+            "root",
+            1,
+            1,
+            &parse_with(1),
+        )
+        .unwrap();
         c.store_file(
             "claude-a.jsonl",
             AgentKind::ClaudeCode,
+            "root",
             2,
             2,
             &parse_with(3),
@@ -400,7 +432,7 @@ mod tests {
         .unwrap();
         // 只清理 codex 的过期行：claude 行必须原样保留。
         let n = c
-            .purge_agent(AgentKind::Codex, &["codex-kept.jsonl".to_string()])
+            .purge_agent(AgentKind::Codex, "root", &["kept.jsonl".to_string()])
             .unwrap();
         assert_eq!(n, 1);
         let st = c.stats().unwrap();
@@ -408,10 +440,79 @@ mod tests {
         assert_eq!(st.events, 3);
         // claude 自身范围：keep 中的行不清。
         let n = c
-            .purge_agent(AgentKind::ClaudeCode, &["claude-a.jsonl".to_string()])
+            .purge_agent(
+                AgentKind::ClaudeCode,
+                "root",
+                &["claude-a.jsonl".to_string()],
+            )
             .unwrap();
         assert_eq!(n, 0);
         assert_eq!(c.stats().unwrap().files, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_cache_schema_invalidates_contextless_rows() {
+        // R05：v3 旧行没有 root 维度 → schema v4 打开即整体失效。
+        let dir = tmp_dir("schema-v4");
+        let path = dir.join("cache.db");
+        let c = Cache::open(&path).unwrap();
+        c.store_file("a.jsonl", AgentKind::Codex, "root", 1, 1, &parse_with(2))
+            .unwrap();
+        drop(c);
+        // 模拟 v3：版本号改回 "3"。
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute("UPDATE meta SET value='3' WHERE key='schema_version'", [])
+            .unwrap();
+        drop(raw);
+        let c = Cache::open(&path).unwrap();
+        assert_eq!(c.stats().unwrap().files, 0, "v3 上下文缺失行必须清空");
+        assert_eq!(c.stats().unwrap().events, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_lookup_scoped_by_agent_and_root() {
+        // R05：同路径不同 agent / 不同 root 的缓存行互不可见、互不覆盖。
+        let dir = tmp_dir("identity");
+        let c = Cache::open(&dir.join("cache.db")).unwrap();
+        c.store_file(
+            "s.jsonl",
+            AgentKind::ClaudeCode,
+            "root-a",
+            1,
+            1,
+            &parse_with(2),
+        )
+        .unwrap();
+        // 同路径同 root 换 agent：未命中（不返回改标旧事件）
+        assert!(
+            c.lookup_file("s.jsonl", AgentKind::Codex, "root-a", 1, 1)
+                .unwrap()
+                .is_none()
+        );
+        // 同 agent 同路径换 root：未命中（不返回旧项目名解析）
+        assert!(
+            c.lookup_file("s.jsonl", AgentKind::ClaudeCode, "root-b", 1, 1)
+                .unwrap()
+                .is_none()
+        );
+        // 完整身份一致：命中
+        assert!(
+            c.lookup_file("s.jsonl", AgentKind::ClaudeCode, "root-a", 1, 1)
+                .unwrap()
+                .is_some()
+        );
+        // 换 agent 后写入不覆盖 claude 行（身份隔离共存）
+        c.store_file("s.jsonl", AgentKind::Codex, "root-a", 1, 1, &parse_with(1))
+            .unwrap();
+        assert_eq!(c.stats().unwrap().files, 2, "不同 agent 的同路径行共存");
+        assert!(
+            c.lookup_file("s.jsonl", AgentKind::ClaudeCode, "root-a", 1, 1)
+                .unwrap()
+                .is_some(),
+            "原上下文行未被覆盖"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -422,7 +523,7 @@ mod tests {
         let dir = tmp_dir("snapshot");
         let path = dir.join("cache.db");
         let c = Cache::open(&path).unwrap();
-        c.store_file("a.jsonl", AgentKind::Codex, 1, 1, &parse_with(5))
+        c.store_file("a.jsonl", AgentKind::Codex, "root", 1, 1, &parse_with(5))
             .unwrap();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
@@ -434,7 +535,10 @@ mod tests {
             }
         });
         for _ in 0..200 {
-            if let Some(hit) = c.lookup_file("a.jsonl", AgentKind::Codex, 1, 1).unwrap() {
+            if let Some(hit) = c
+                .lookup_file("a.jsonl", AgentKind::Codex, "root", 1, 1)
+                .unwrap()
+            {
                 assert_eq!(
                     hit.parse.events.len(),
                     5,

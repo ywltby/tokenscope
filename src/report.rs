@@ -590,15 +590,20 @@ fn collect_all_with_sources(
         let mut lookup_errs = 0u32;
         let mut store_errs = 0u32;
         let mut unstable = 0u32;
+        // R05：缓存身份 = agent + 规范化根目录 + 规范化文件路径。换根/换
+        // agent 后文件键不同，缓存自然失效重解析；项目名等派生字段与
+        // refresh 完全一致。
+        let root_ctx = normalize_path(src.root()).to_string_lossy().to_lowercase();
         for file in &files {
             let path_str = file.display().to_string();
-            agent_keep.push(path_str.clone());
+            let cache_key = normalize_path(file).to_string_lossy().to_lowercase();
+            agent_keep.push(cache_key.clone());
             let mut cached: Option<crate::source::FileParse> = None;
             if !opts.refresh
                 && let (Some(c), Some(size), Ok(mt)) =
                     (cache.as_ref(), file_size(file), mtime_ms(file))
             {
-                match c.lookup_file(&path_str, kind, size, mt) {
+                match c.lookup_file(&cache_key, kind, &root_ctx, size, mt) {
                     Ok(hit) => cached = hit.map(|cf| cf.parse),
                     Err(e) => {
                         lookup_errs += 1;
@@ -639,7 +644,8 @@ fn collect_all_with_sources(
                             let size = fp_after.0.unwrap_or(0);
                             let mt = fp_after.1.unwrap_or(0);
                             let t = std::time::Instant::now();
-                            if let Err(e) = c.store_file(&path_str, kind, size, mt, &p) {
+                            if let Err(e) = c.store_file(&cache_key, kind, &root_ctx, size, mt, &p)
+                            {
                                 store_errs += 1;
                                 warnings.push(format!("缓存写入失败（不影响统计）: {e:#}"));
                             }
@@ -690,7 +696,7 @@ fn collect_all_with_sources(
             && src.root().is_dir()
         {
             let t = std::time::Instant::now();
-            match c.purge_agent(kind, &agent_keep) {
+            match c.purge_agent(kind, &root_ctx, &agent_keep) {
                 Ok(n) => {
                     if n > 0 {
                         log::info!(
