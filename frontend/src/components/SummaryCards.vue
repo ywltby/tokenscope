@@ -1,9 +1,10 @@
 <script setup lang="ts">
-// 设计系统 Task 3：统一指标读数条 + 轻量 token 分项行。
-// 首屏先回答"用了多少、花费多少、覆盖什么时间"（DESIGN.md §4）；
-// 数字 tabular lining，未知价格用 † 与警告色显式标注（不得伪装成 0），
-// 命中率公式保持 cache_read / (input + cache_read) 不变。
+// 设计系统 Task 4：单张指标卡（DESIGN.md §5 指标卡）——左侧主读数估算费用
+// （44px），右侧三个次读数（26px）发丝线分隔；含未计价 token 时费用旁警告
+// 胶囊；命中率公式收进 tooltip（hover/focus 均可打开）；底部四类 token
+// 分项比例条 + 色点图例。公式口径不变：cache_read / (input + cache_read)。
 import { computed } from "vue";
+import { NTooltip } from "naive-ui";
 import { fmtCost, fmtNum, type Group } from "../types";
 
 const props = defineProps<{ totals: Group }>();
@@ -35,125 +36,213 @@ const parts = computed(() => [
 </script>
 
 <template>
-  <section class="metric-strip" aria-label="用量指标">
-    <div class="metric metric-cost">
-      <div class="metric-label">
-        估算费用
-        <span v-if="totals.unknown_pricing" class="unknown-mark">† 含未计价 token</span>
+  <section class="metric-card ts-card" aria-label="用量指标">
+    <div class="metric-row">
+      <!-- 主读数：估算费用 -->
+      <div class="metric-main">
+        <div class="metric-label">
+          估算费用
+          <span v-if="totals.unknown_pricing" class="ts-pill ts-pill-warning">
+            含未计价 token
+          </span>
+        </div>
+        <div class="metric-value metric-value-main ts-num">
+          <template v-if="costUnknownOnly">未知†</template>
+          <template v-else>{{ costText }}</template>
+        </div>
+        <div class="metric-unit">USD · 估算值，非账单</div>
       </div>
-      <div class="metric-value ts-num">
-        <template v-if="costUnknownOnly">未知†</template>
-        <template v-else>{{ costText }}</template>
+
+      <!-- 次读数：总 token / 请求数 / 缓存命中率，发丝线分隔 -->
+      <div class="metric-secondary">
+        <div class="metric-item">
+          <div class="metric-label">总 token</div>
+          <div class="metric-value ts-num">{{ fmtNum(total) }}</div>
+          <div class="metric-unit">≈ {{ wan }} 万 tokens</div>
+        </div>
+        <div class="metric-sep" aria-hidden="true" />
+        <div class="metric-item">
+          <div class="metric-label">请求数</div>
+          <div class="metric-value ts-num">{{ fmtNum(totals.requests) }}</div>
+          <div class="metric-unit">次请求</div>
+        </div>
+        <div class="metric-sep" aria-hidden="true" />
+        <div class="metric-item">
+          <NTooltip placement="bottom">
+            <template #trigger>
+              <div class="metric-label metric-label-help" tabindex="0">缓存命中率</div>
+            </template>
+            <div class="hit-tip">
+              命中率 = 缓存读 ÷（新增输入 + 缓存读）。<br />
+              缓存读直接复用上下文，消耗 token 数计入分母但费用通常为零或极低。
+            </div>
+          </NTooltip>
+          <div class="metric-value ts-num">
+            {{ hitRate == null ? "N/A" : `${hitRate.toFixed(1)}%` }}
+          </div>
+          <div class="metric-unit">缓存读占比</div>
+        </div>
       </div>
-      <div class="metric-unit">USD · 估算值，非账单</div>
     </div>
-    <div class="metric">
-      <div class="metric-label">总 token</div>
-      <div class="metric-value ts-num">{{ fmtNum(total) }}</div>
-      <div class="metric-unit">≈ {{ wan }} 万 tokens</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">请求数</div>
-      <div class="metric-value ts-num">{{ fmtNum(totals.requests) }}</div>
-      <div class="metric-unit">次请求</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">缓存命中率</div>
-      <div class="metric-value ts-num">
-        {{ hitRate == null ? "N/A" : `${hitRate.toFixed(1)}%` }}
+
+    <!-- 分项比例条：6px 高、3px 圆角、按占比分段（全零为空槽） -->
+    <div class="parts-bar-container">
+      <div v-if="total > 0" class="parts-bar" role="img" aria-label="token 分项比例条">
+        <span
+          v-for="p in parts"
+          :key="p.kind"
+          class="bar-segment"
+          :class="`bar-${p.kind}`"
+          :style="{ width: `${((p.value / total) * 100).toFixed(2)}%` }"
+          :aria-label="`${p.label} ${fmtNum(p.value)}`"
+        />
       </div>
-      <div class="metric-unit">缓存读 ÷（新增输入 + 缓存读）</div>
+      <div v-else class="parts-bar parts-bar-empty" />
+    </div>
+
+    <!-- 图例：色点 + 名称 + 数值（与比例条/图表同源 token） -->
+    <div class="parts-legend" aria-label="token 分项">
+      <span v-for="p in parts" :key="p.kind" class="legend-item">
+        <span class="legend-dot" :class="`part-${p.kind}`" aria-hidden="true" />
+        <span class="legend-label">{{ p.label }}</span>
+        <span class="legend-value ts-num">{{ fmtNum(p.value) }}</span>
+      </span>
     </div>
   </section>
-
-  <!-- 轻量分项行：低饱和语义色点 + 文字 + 细竖线分隔（不再是四张彩卡） -->
-  <div class="token-parts" aria-label="token 分项">
-    <template v-for="(p, i) in parts" :key="p.kind">
-      <span v-if="i > 0" class="part-sep" aria-hidden="true"></span>
-      <span class="part">
-        <span class="part-dot" :class="`part-${p.kind}`" aria-hidden="true"></span>
-        <span class="part-label">{{ p.label }}</span>
-        <span class="part-value ts-num">{{ fmtNum(p.value) }}</span>
-      </span>
-    </template>
-  </div>
 </template>
 
 <style scoped>
-.metric-strip {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--ts-space-4);
-  background: var(--ts-surface-solid);
-  border: 1px solid var(--ts-border);
-  border-radius: var(--ts-radius-lg);
-  padding: var(--ts-space-4) var(--ts-space-6);
+.metric-row {
+  display: flex;
+  gap: var(--ts-space-6);
+  align-items: flex-start;
 }
 
-.metric + .metric {
-  border-left: 1px solid var(--ts-border);
-  padding-left: var(--ts-space-4);
+.metric-main {
+  flex: 0 0 auto;
+  min-width: 200px;
+}
+
+.metric-secondary {
+  flex: 1;
+  display: flex;
+  gap: var(--ts-space-4);
+  align-items: flex-start;
+}
+
+.metric-item {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 发丝线分隔（DESIGN.md §5 指标卡） */
+.metric-sep {
+  width: 1px;
+  height: 48px;
+  background: var(--ts-separator);
+  flex-shrink: 0;
+  align-self: center;
 }
 
 .metric-label {
   font-size: 12px;
+  font-weight: 500;
   line-height: 1.4;
   color: var(--ts-text-secondary);
   display: flex;
   align-items: center;
   gap: var(--ts-space-2);
-  white-space: nowrap;
+  margin-bottom: var(--ts-space-1);
 }
 
-.unknown-mark {
-  color: var(--ts-warning);
-  font-weight: 600;
+/* 命中率公式 tooltip 触发器：hover/focus 都可打开 */
+.metric-label-help {
+  cursor: help;
+  width: fit-content;
 }
 
+/* 次读数 26px/600 */
 .metric-value {
-  font-size: 32px;
-  font-weight: 700;
-  line-height: 1.15;
+  font-family: var(--ts-font-display);
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
   color: var(--ts-text);
-  margin-top: var(--ts-space-1);
   white-space: nowrap;
 }
 
-.metric-cost .metric-value {
-  color: var(--ts-accent);
+/* 主读数（估算费用）44px/600，用主文字色不染强调色 */
+.metric-value-main {
+  font-size: 44px;
+  letter-spacing: -0.03em;
 }
 
 .metric-unit {
   font-size: 12px;
   line-height: 1.4;
   color: var(--ts-text-muted);
-  margin-top: var(--ts-space-1);
+  margin-top: 2px;
 }
 
-.token-parts {
+.hit-tip {
+  max-width: 320px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 分项比例条 */
+.parts-bar-container {
+  margin-top: var(--ts-space-5);
+}
+
+.parts-bar {
+  display: flex;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--ts-fill);
+}
+
+.bar-segment {
+  height: 100%;
+}
+
+.bar-input {
+  background: var(--ts-chart-input);
+}
+.bar-output {
+  background: var(--ts-chart-output);
+}
+.bar-cache_write {
+  background: var(--ts-chart-cache-write);
+}
+.bar-cache_read {
+  background: var(--ts-chart-cache-read);
+}
+
+/* 图例：色点 + 名称 + 数值 */
+.parts-legend {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--ts-space-3);
+  gap: var(--ts-space-4);
   margin-top: var(--ts-space-3);
   font-size: 13px;
-  color: var(--ts-text-secondary);
 }
 
-.part {
+.legend-item {
   display: inline-flex;
   align-items: center;
   gap: var(--ts-space-2);
-  white-space: nowrap;
 }
 
-.part-dot {
+.legend-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
 }
 
-/* 低饱和图表系列色（与 chartTheme.ts / --ts-chart-* 同源，非状态色） */
 .part-input {
   background: var(--ts-chart-input);
 }
@@ -167,27 +256,23 @@ const parts = computed(() => [
   background: var(--ts-chart-cache-read);
 }
 
-.part-value {
+.legend-label {
+  color: var(--ts-text-secondary);
+}
+
+.legend-value {
   color: var(--ts-text);
   font-weight: 600;
 }
 
-.part-sep {
-  width: 1px;
-  height: 14px;
-  background: var(--ts-border);
-}
-
-/* 窄窗口：读数条 2×2，避免挤压 */
+/* 窄窗口：主读数与次读数纵向堆叠 */
 @media (max-width: 1024px) {
-  .metric-strip {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    row-gap: var(--ts-space-4);
-    padding: var(--ts-space-4);
+  .metric-row {
+    flex-direction: column;
+    gap: var(--ts-space-5);
   }
-  .metric:nth-child(3) {
-    border-left: none;
-    padding-left: 0;
+  .metric-secondary {
+    width: 100%;
   }
 }
 </style>

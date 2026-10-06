@@ -1,8 +1,21 @@
-// 设计系统 Task 3：SummaryCards 统一指标条——显示层断言（不重算公式）。
-import { describe, expect, it } from "vitest";
+// 设计系统 Task 3/4：SummaryCards 指标卡——显示层断言（不重算公式）。
+import { describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import SummaryCards from "./SummaryCards.vue";
 import type { Group } from "../types";
+
+// NTooltip 打桩为透传渲染（trigger + 内容同渲染），断言公式收进 tooltip。
+vi.mock("naive-ui", async (importOriginal) => {
+  const { defineComponent: dc, h } = await import("vue");
+  const actual = await importOriginal<typeof import("naive-ui")>();
+  const NTooltipStub = dc({
+    name: "NTooltip",
+    setup(_, { slots }) {
+      return () => h("div", { class: "tooltip-stub" }, [slots.trigger?.(), slots.default?.()]);
+    },
+  });
+  return { ...actual, NTooltip: NTooltipStub };
+});
 
 function totals(over: Partial<Group> = {}): Group {
   return {
@@ -81,5 +94,56 @@ describe("SummaryCards 指标条（设计系统 Task 3）", () => {
     expect(text).toContain("12,000");
     // DESIGN.md：不使用 emoji 作为产品图标
     expect(w.text()).not.toMatch(/\p{Extended_Pictographic}/u);
+  });
+});
+
+describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
+  it("单卡结构：左主读数费用，右三项次读数以发丝线分隔", () => {
+    const w = mountCards(totals({ cost_usd: 12.84 }));
+    expect(w.find(".ts-card").exists()).toBe(true);
+    const main = w.find(".metric-main");
+    expect(main.text()).toContain("估算费用");
+    expect(main.text()).toContain("$12.84");
+    expect(main.text()).toContain("USD · 估算值，非账单");
+    const secondary = w.find(".metric-secondary");
+    expect(secondary.findAll(".metric-item").length).toBe(3);
+    expect(w.findAll(".metric-sep").length).toBe(2);
+  });
+
+  it("比例条按占比分段，宽度与 token 数一致", () => {
+    const w = mountCards(totals());
+    // total = 12000 + 3000 + 4000 + 50000 = 69000
+    const segments = w.findAll(".bar-segment");
+    expect(segments.length).toBe(4);
+    expect(segments[0].attributes("style")).toContain("17.39%");
+    expect(segments[3].attributes("style")).toContain("72.46%");
+  });
+
+  it("全部为零时比例条为空槽，不渲染分段", () => {
+    const w = mountCards(
+      totals({ tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 } }),
+    );
+    expect(w.find(".parts-bar-empty").exists()).toBe(true);
+    expect(w.findAll(".bar-segment").length).toBe(0);
+  });
+
+  it("未知价格在费用旁显示警告胶囊「含未计价 token」", () => {
+    const w = mountCards(totals({ cost_usd: 0.5, unknown_pricing: true }));
+    const pill = w.find(".ts-pill-warning");
+    expect(pill.exists()).toBe(true);
+    expect(pill.text()).toContain("含未计价 token");
+  });
+
+  it("命中率公式收进 tooltip（正文只留结论），标签可聚焦", () => {
+    const w = mountCards(totals());
+    // tooltip 内容含公式且触发器可聚焦（hover/focus 路径）
+    const stub = w.find(".tooltip-stub");
+    expect(stub.exists()).toBe(true);
+    expect(stub.text()).toContain("命中率 = 缓存读");
+    expect(stub.find('[tabindex="0"]').exists()).toBe(true);
+    // 公式只存在于 tooltip 内容中，不得铺在卡片正文
+    const cardText = w.find('[aria-label="用量指标"]').text();
+    const outside = cardText.replace(stub.text(), "");
+    expect(outside).not.toContain("命中率 = 缓存读");
   });
 });
