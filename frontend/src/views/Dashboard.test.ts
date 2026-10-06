@@ -316,3 +316,35 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     expect(state(w)["agent"]).toBe("claude");
   });
 });
+
+describe("Dashboard 状态（设计系统 Task 7）", () => {
+  it("空数据时有明确状态文案与下一步指引", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "summarize")
+        return Promise.resolve({
+          timezone: "UTC",
+          generated_at: "t",
+          sources: [],
+          by: "day",
+          groups: [],
+          totals: {
+            key: "totals",
+            requests: 0,
+            tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+            cost_usd: 0,
+            unknown_pricing: false,
+            unknown_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+          },
+          warnings: [],
+        });
+      if (cmd === "list_events") return Promise.resolve({ rows: [], total: 0, warnings: [] });
+      if (cmd === "source_status") return Promise.resolve([]);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      return Promise.resolve(null);
+    });
+    const w = mount(Dashboard, { props: { refreshKey: 0 } });
+    await flushPromises();
+    expect(w.text()).toContain("暂无数据");
+    expect(w.text()).toContain("调整时间范围");
+  });
+});

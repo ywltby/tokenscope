@@ -333,7 +333,14 @@ void loadSources();
           </NTag>
           <NTag v-else-if="loading" size="small" type="info" :bordered="false">刷新中…</NTag>
         </div>
-        <template v-if="report">
+        <!-- 设计系统 Task 7：空数据状态明确可见，并给出下一步指引 -->
+        <div v-if="report && report.groups.length === 0" class="empty-state" role="status">
+          <div class="empty-title">暂无数据</div>
+          <div class="empty-hint">
+            调整时间范围或来源后重试；若刚配置来源，先在设置页确认目录正确。
+          </div>
+        </div>
+        <template v-else-if="report">
           <SummaryCards :totals="report.totals" />
           <TrendChart
             v-if="report.by === 'day' || report.groups.length > 2"
@@ -372,6 +379,26 @@ void loadSources();
 </template>
 
 <style scoped>
+.empty-state {
+  border: 1px dashed var(--ts-border-strong);
+  border-radius: var(--ts-radius-lg);
+  background: var(--ts-surface-solid);
+  padding: var(--ts-space-8) var(--ts-space-6);
+  text-align: center;
+}
+
+.empty-title {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--ts-text);
+}
+
+.empty-hint {
+  font-size: 12px;
+  color: var(--ts-text-muted);
+  margin-top: var(--ts-space-2);
+}
+
 .page-head {
   display: flex;
   align-items: flex-end;

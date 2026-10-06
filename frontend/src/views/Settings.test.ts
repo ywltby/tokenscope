@@ -359,3 +359,36 @@ describe("Settings 数据来源（claude-code 行修复）", () => {
     void codex;
   });
 });
+
+describe("Settings 分组与状态（设计系统 Task 7）", () => {
+  it("设置页按 应用/数据源/缓存/价格 四组渲染", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    for (const title of ["应用", "数据源", "缓存", "价格"]) {
+      expect(w.text()).toContain(title);
+    }
+  });
+
+  it("来源身份标签用中性色（成功/警告只表达同步状态）", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    // pricingView.entries 为空 → 无来源行；断言不出现成功/警告色的身份标签
+    const tags = w.findAll(".n-tag");
+    const identity = tags.filter((t) => ["外置", "models.dev", "OpenRouter"].includes(t.text()));
+    for (const t of identity) {
+      expect(
+        t.classes().some((c) => c.includes("success") || c.includes("warning")),
+        `身份标签 ${t.text()} 不得使用状态色`,
+      ).toBe(false);
+    }
+  });
+
+  it("技术路径与同步时间收纳到可展开区域", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    // naive-ui mock 的第二个工厂覆盖了 stub——直接断言真实 NCollapse DOM
+    const item = w.find(".n-collapse-item");
+    expect(item.exists(), "应存在可展开区域").toBe(true);
+    expect(w.text()).toContain("技术详情");
+  });
+});

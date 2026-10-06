@@ -6,12 +6,13 @@ import {
   NAlert,
   NButton,
   NCard,
+  NCollapse,
+  NCollapseItem,
   NDataTable,
   NGrid,
   NGi,
   NSelect,
   NSpin,
-  NStatistic,
   NInput,
   NSwitch,
   NTag,
@@ -286,14 +287,9 @@ const priceColumns = computed<DataTableColumn[]>(() => [
       h(
         NTag,
         {
+          // 设计系统 Task 7：来源身份用中性色；成功/警告/错误只表达状态
           size: "small",
           bordered: false,
-          type:
-            asEntry(r).source === "外置"
-              ? "success"
-              : asEntry(r).source === "models.dev"
-                ? "info"
-                : "warning",
         },
         { default: () => asEntry(r).source },
       ),
@@ -312,22 +308,23 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
     <div style="min-height: 380px">
       <NGrid :cols="2" :x-gap="12" :y-gap="12" item-responsive responsive="screen">
         <NGi span="1">
-          <NCard title="桌面体验" size="small">
+          <NCard title="应用" size="small">
             <div style="margin-bottom: 12px">
-              <NStatistic label="聚合/展示时区" :value="tz === 'local' ? '本机时区' : tz" />
-              <div style="font-size: 12px; opacity: 0.6; margin: 4px 0 8px">
-                存储/计算一律 UTC，仅展示按此时区一次转换。
+              <div class="stat-row">
+                <span class="stat-label">聚合/展示时区</span>
+                <span class="stat-value">{{ tz === "local" ? "本机时区" : tz }}</span>
               </div>
+              <div class="help-line">存储/计算一律 UTC，仅展示按此时区一次转换。</div>
               <NSelect v-model:value="tz" :options="TZ_OPTIONS" size="small" style="width: 200px" />
             </div>
             <div>
-              <NStatistic
-                label="开机自启"
-                :value="autostart == null ? '—' : autostart ? '已开启' : '已关闭'"
-              />
-              <div style="font-size: 12px; opacity: 0.6; margin: 4px 0 8px">
-                开机后自动启动并驻留托盘。
+              <div class="stat-row">
+                <span class="stat-label">开机自启</span>
+                <span class="stat-value">{{
+                  autostart == null ? "—" : autostart ? "已开启" : "已关闭"
+                }}</span>
               </div>
+              <div class="help-line">开机后自动启动并驻留托盘。</div>
               <NSwitch
                 :value="autostart === true"
                 :disabled="autostart == null || autostartBusy"
@@ -338,7 +335,7 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
           </NCard>
         </NGi>
         <NGi span="1">
-          <NCard title="数据来源" size="small">
+          <NCard title="数据源" size="small">
             <div v-for="s in sources" :key="s.agent" style="margin-bottom: 16px">
               <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px">
                 <strong>{{ AGENT_LABEL[s.agent] ?? s.agent }}</strong>
@@ -384,18 +381,37 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
           </NCard>
         </NGi>
         <NGi span="1">
-          <NCard title="解析缓存" size="small">
-            <NStatistic label="缓存文件" :value="cache ? fmtNum(cache.files) : '—'" />
-            <NStatistic label="缓存事件" :value="cache ? fmtNum(cache.events) : '—'" />
-            <div style="font-size: 12px; opacity: 0.6; margin: 6px 0">{{ cache?.path }}</div>
-            <div style="font-size: 12px; opacity: 0.6; margin-bottom: 10px">
+          <NCard title="缓存" size="small">
+            <div class="stat-row">
+              <span class="stat-label">缓存文件</span>
+              <span class="stat-value ts-num">{{ cache ? fmtNum(cache.files) : "—" }}</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">缓存事件</span>
+              <span class="stat-value ts-num">{{ cache ? fmtNum(cache.events) : "—" }}</span>
+            </div>
+            <div class="help-line">
               缓存是纯优化：任何故障都会自动退回全量扫描，统计数字不受影响。
             </div>
+            <NCollapse class="tech-collapse">
+              <NCollapseItem title="技术详情" name="tech">
+                <div class="tech-line">缓存路径：{{ cache?.path ?? "—" }}</div>
+                <div class="tech-line">models.dev 快照：{{ pricing?.modelsdev_path ?? "—" }}</div>
+                <div class="tech-line">OpenRouter 快照：{{ pricing?.openrouter_path ?? "—" }}</div>
+                <div class="tech-line">外置价格文件：{{ pricing?.path ?? "—" }}</div>
+                <div class="tech-line">
+                  models.dev 上次同步：{{ pricing?.modelsdev_synced_at ?? "—" }}
+                </div>
+                <div class="tech-line">
+                  OpenRouter 上次同步：{{ pricing?.openrouter_synced_at ?? "—" }}
+                </div>
+              </NCollapseItem>
+            </NCollapse>
             <NButton size="small" :loading="rebuilding" @click="rebuild">重建缓存</NButton>
           </NCard>
         </NGi>
         <NGi span="2">
-          <NCard title="模型价格表" size="small">
+          <NCard title="价格" size="small">
             <template #header-extra>
               <div style="display: flex; gap: 8px">
                 <NButton size="small" type="primary" :loading="syncing" @click="syncPricing">
@@ -409,14 +425,8 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
                 pricing?.modelsdev_count ?? 0
               }}
               条，主源）> OpenRouter（{{ pricing?.openrouter_count ?? 0 }} 条，补充源）；
-              层内最长前缀匹配，未收录模型按未知价格处理（无内置兜底）。本地 models.dev
-              快照是离线缓存：断网时继续按上次同步数据计价。
-              <template v-if="pricing?.modelsdev_synced_at">
-                models.dev 上次同步：{{ pricing.modelsdev_synced_at }}；</template
-              >
-              <template v-if="pricing?.openrouter_synced_at"
-                >OpenRouter 上次同步：{{ pricing.openrouter_synced_at }}</template
-              >
+              层内最长前缀匹配，未收录模型按未知价格处理（无内置兜底）。本地快照是
+              离线缓存：断网时继续按上次同步数据计价；同步时间与快照路径见"缓存"组的技术详情。
             </div>
             <!-- Task 4：主源缺失或损坏 → 状态/路径/需要同步提示 -->
             <NAlert
@@ -470,3 +480,42 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
     </div>
   </NSpin>
 </template>
+<style scoped>
+.stat-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ts-space-3);
+  margin-bottom: var(--ts-space-2);
+}
+
+.stat-label {
+  font-size: 13px;
+  color: var(--ts-text-secondary);
+}
+
+.stat-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ts-text);
+}
+
+.help-line {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ts-text-muted);
+  margin: var(--ts-space-1) 0 var(--ts-space-2);
+}
+
+.tech-collapse {
+  margin-top: var(--ts-space-2);
+}
+
+.tech-line {
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--ts-text-secondary);
+  font-family: var(--ts-font-mono);
+  word-break: break-all;
+}
+</style>
