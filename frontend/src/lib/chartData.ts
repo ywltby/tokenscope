@@ -20,14 +20,17 @@ export interface BarChartData {
   series: BarChartSeries[];
 }
 
+/// 分类顺序（单一事实源）：日维度保持时间序；非日维度按 输入+输出 用量降序。
+function orderGroups(groups: Group[], by: string): Group[] {
+  return by === "day"
+    ? groups
+    : [...groups].sort(
+        (a, b) => b.tokens.input + b.tokens.output - (a.tokens.input + a.tokens.output),
+      );
+}
+
 export function buildBarChartData(groups: Group[], by: string): BarChartData {
-  // 日维度保持时间序（后端按日升序）；非日维度按 输入+输出 用量降序。
-  const ordered =
-    by === "day"
-      ? groups
-      : [...groups].sort(
-          (a, b) => b.tokens.input + b.tokens.output - (a.tokens.input + a.tokens.output),
-        );
+  const ordered = orderGroups(groups, by);
   return {
     // C2：项目维度分类显示用展示名（末段），完整路径经 key 保留。
     categories: ordered.map((g) => g.label ?? g.key),
@@ -36,4 +39,37 @@ export function buildBarChartData(groups: Group[], by: string): BarChartData {
       values: ordered.map((g) => g.tokens[s.name]),
     })),
   };
+}
+
+/// 设计系统 Task 4：与分类轴同序的完整原始键（长名 tooltip 用，不参与聚合）。
+export function fullLabels(groups: Group[], by: string): string[] {
+  return orderGroups(groups, by).map((g) => g.key);
+}
+
+/// 可访问文字摘要：与图表数据等价的逐类别行（图例/颜色之外的读数路径）。
+export function chartSummaryLines(groups: Group[], by: string): string[] {
+  const title =
+    by === "day"
+      ? "按日汇总："
+      : by === "model"
+        ? "按模型汇总："
+        : by === "project"
+          ? "按项目汇总："
+          : "按应用汇总：";
+  const lines = [title];
+  for (const g of orderGroups(groups, by)) {
+    const t = g.tokens;
+    const total = t.input + t.output + t.cache_write + t.cache_read;
+    lines.push(
+      `${g.label ?? g.key}：输入 ${t.input} · 输出 ${t.output} · 缓存写 ${t.cache_write} · 缓存读 ${t.cache_read} · 合计 ${total}`,
+    );
+  }
+  return lines;
+}
+
+/// 类别数量状态：空/单/多都有明确文案（多类别说明可滚动查看全部）。
+export function chartStateText(count: number): string {
+  if (count === 0) return "暂无数据：调整时间范围或来源后重试";
+  if (count === 1) return "仅 1 个类别";
+  return `${count} 个类别，图内可滚动查看全部`;
 }

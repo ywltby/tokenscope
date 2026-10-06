@@ -2,7 +2,13 @@
 // 每个分类标签仍必须对齐自己的数值（修复前：标签重排而 series 保持
 // 原始顺序，标签与数值错位）。
 import { describe, expect, it } from "vitest";
-import { SERIES, buildBarChartData } from "./chartData";
+import {
+  SERIES,
+  buildBarChartData,
+  chartStateText,
+  chartSummaryLines,
+  fullLabels,
+} from "./chartData";
 import type { Group } from "../types";
 
 function group(key: string, input: number, output = 0): Group {
@@ -48,5 +54,48 @@ describe("buildBarChartData", () => {
     const data = buildBarChartData([group("x", 5), group("y", 5)], "model");
     expect(data.categories).toEqual(["x", "y"]);
     expect(data.series[0].values).toEqual([5, 5]);
+  });
+});
+
+const g = (key: string, input: number, output = 0, cw = 0, cr = 0): Group => ({
+  key,
+  label: key.split("/").pop() ?? key,
+  requests: 1,
+  tokens: { input, output, cache_write: cw, cache_read: cr },
+  cost_usd: 0,
+  unknown_pricing: false,
+  unknown_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+});
+
+describe("chartData 显示元数据（设计系统 Task 4）", () => {
+  it("fullLabels 与分类顺序一致，携带完整原始键（长名 tooltip 用）", () => {
+    const groups = [g("C:/work/very-long-project-name/alpha-service", 10), g("short", 5)];
+    const { categories } = buildBarChartData(groups, "project");
+    const full = fullLabels(groups, "project");
+    expect(full).toHaveLength(categories.length);
+    expect(full[0]).toBe("C:/work/very-long-project-name/alpha-service");
+    expect(categories[0]).toBe("alpha-service");
+  });
+
+  it("文字摘要与图表数据等价（逐类别四类 token + 合计）", () => {
+    const groups = [g("a", 100, 20, 5, 8), g("b", 50)];
+    const { categories, series } = buildBarChartData(groups, "model");
+    const lines = chartSummaryLines(groups, "model");
+    expect(lines[0]).toContain("模型");
+    for (let i = 0; i < categories.length; i++) {
+      const line = lines[i + 1];
+      expect(line).toContain(categories[i]);
+      for (const s of series) expect(line).toContain(String(s.values[i]));
+      const total = series.reduce((acc, s) => acc + s.values[i], 0);
+      expect(line).toContain(`合计 ${total}`);
+    }
+  });
+
+  it("空数据、单类别、多类别有明确状态文案", () => {
+    expect(chartStateText(0)).toContain("暂无数据");
+    expect(chartStateText(1)).toContain("1 个类别");
+    expect(chartStateText(50)).toContain("50 个类别");
+    // 多类别必须说明可滚动查看
+    expect(chartStateText(50)).toContain("滚动");
   });
 });
