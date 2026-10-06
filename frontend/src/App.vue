@@ -15,12 +15,20 @@ import {
   type GlobalTheme,
 } from "naive-ui";
 import { useTheme } from "./composables/theme";
+import { naiveThemeOverrides } from "./styles/naiveTheme";
+import { watchEffect } from "vue";
 import PricingStatusBanner from "./components/PricingStatusBanner.vue";
 import Dashboard from "./views/Dashboard.vue";
 import Settings from "./views/Settings.vue";
 
 const { mode, toggle } = useTheme();
 const theme = computed<GlobalTheme | null>(() => (mode.value === "dark" ? darkTheme : null));
+// Task 1：Naive UI 覆盖与 CSS token 双轨消费同一语义色；html[data-theme]
+// 驱动 tokens.css 的深色分支，切换不产生首帧闪烁（首渲染前已绑定）。
+const themeOverrides = computed(() => naiveThemeOverrides(mode.value));
+watchEffect(() => {
+  document.documentElement.dataset.theme = mode.value;
+});
 
 const page = ref<"summary" | "settings">("summary");
 // 回到汇总页时强制刷新一次数据（设置页可能重建了缓存）。
@@ -31,7 +39,12 @@ watch(page, (p) => {
 </script>
 
 <template>
-  <NConfigProvider :theme="theme" :locale="zhCN" :date-locale="dateZhCN">
+  <NConfigProvider
+    :theme="theme"
+    :theme-overrides="themeOverrides"
+    :locale="zhCN"
+    :date-locale="dateZhCN"
+  >
     <NGlobalStyle />
     <NMessageProvider>
       <NLayout style="height: 100vh">

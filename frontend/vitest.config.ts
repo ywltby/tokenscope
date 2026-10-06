@@ -7,5 +7,8 @@ export default defineConfig({
   test: {
     environment: "happy-dom",
     include: ["src/**/*.test.ts"],
+    // 设计系统 Task 1：css: true 让 tokens.css 在测试中真实注入 DOM，
+    // 断言语义 token 的两套主题与降级规则（默认空模块无法校验内容）。
+    css: true,
   },
 });

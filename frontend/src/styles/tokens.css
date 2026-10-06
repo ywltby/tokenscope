@@ -1,0 +1,168 @@
+/**
+ * TokenScope 语义视觉 token（DESIGN.md §2/§3/§4）。
+ * 浅色为默认（:root），深色挂在 html[data-theme="dark"]。
+ * 组件与样式只允许消费这里的语义变量，禁止散落十六进制值；
+ * Naive UI / ECharts 适配器（naiveTheme.ts / chartTheme.ts）与本文同步维护。
+ */
+:root {
+  color-scheme: light;
+
+  /* 表面与画布 */
+  --ts-canvas: #eef3f7;
+  --ts-canvas-glow: #dcecf2;
+  --ts-surface: rgba(255, 255, 255, 0.82);
+  --ts-surface-solid: #f8fafc;
+  --ts-surface-elevated: rgba(255, 255, 255, 0.94);
+  --ts-glass-bg: rgba(255, 255, 255, 0.72);
+  --ts-glass-stroke: rgba(255, 255, 255, 0.6);
+
+  /* 边界 */
+  --ts-border: #d4dee6;
+  --ts-border-strong: #b8cad5;
+
+  /* 文字 */
+  --ts-text: #17232e;
+  --ts-text-secondary: #405362;
+  --ts-text-muted: #647786;
+
+  /* 品牌强调 */
+  --ts-accent: #087ea4;
+  --ts-accent-hover: #056782;
+  --ts-accent-soft: #ddf3f8;
+  --ts-on-accent: #ffffff;
+
+  /* 状态 */
+  --ts-success: #19734a;
+  --ts-warning: #9a5b00;
+  --ts-error: #b33a3a;
+  --ts-info: #356b9a;
+
+  /* 图表系列（低饱和、与状态色分离；顺序固定：输入/输出/缓存写/缓存读） */
+  --ts-chart-input: #3d7ea6;
+  --ts-chart-output: #c2732b;
+  --ts-chart-cache-write: #4e9b6e;
+  --ts-chart-cache-read: #7a8ca0;
+
+  /* 间距基线（4 的倍数） */
+  --ts-space-1: 4px;
+  --ts-space-2: 8px;
+  --ts-space-3: 12px;
+  --ts-space-4: 16px;
+  --ts-space-6: 24px;
+  --ts-space-8: 32px;
+
+  /* 圆角：控件 6 / 面板 8 / 弹窗与大面板 12 */
+  --ts-radius-control: 6px;
+  --ts-radius: 8px;
+  --ts-radius-lg: 12px;
+
+  /* 焦点环：2px 高对比轮廓 */
+  --ts-focus-ring: 0 0 0 2px var(--ts-canvas), 0 0 0 4px var(--ts-accent);
+
+  /* 玻璃（仅导航/工具栏/横幅/菜单/tooltip） */
+  --ts-glass-blur: blur(16px) saturate(115%);
+  --ts-glass-shadow: 0 8px 28px rgba(8, 25, 38, 0.08);
+
+  /* 动效：120–180ms，尊重 prefers-reduced-motion */
+  --ts-motion-fast: 120ms;
+  --ts-motion: 150ms;
+  --ts-motion-slow: 180ms;
+
+  /* 字体栈（本机字体，不在线拉取） */
+  --ts-font: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  --ts-font-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --ts-canvas: #0b1118;
+  --ts-canvas-glow: #102432;
+  --ts-surface: rgba(19, 30, 42, 0.82);
+  --ts-surface-solid: #121d29;
+  --ts-surface-elevated: rgba(25, 38, 52, 0.96);
+  --ts-glass-bg: rgba(18, 29, 41, 0.68);
+  --ts-glass-stroke: rgba(255, 255, 255, 0.12);
+
+  --ts-border: #2a3b4b;
+  --ts-border-strong: #3a5062;
+
+  --ts-text: #edf5fa;
+  --ts-text-secondary: #c0cfda;
+  --ts-text-muted: #91a5b4;
+
+  --ts-accent: #6fd3ee;
+  --ts-accent-hover: #9ae5f5;
+  --ts-accent-soft: #173c4a;
+  --ts-on-accent: #08222c;
+
+  --ts-success: #72d6a1;
+  --ts-warning: #f4c56a;
+  --ts-error: #ff8f8f;
+  --ts-info: #8fc5f2;
+
+  --ts-chart-input: #7fb3d8;
+  --ts-chart-output: #e0a06a;
+  --ts-chart-cache-write: #7cc49a;
+  --ts-chart-cache-read: #9fb3c8;
+
+  --ts-focus-ring: 0 0 0 2px var(--ts-canvas), 0 0 0 4px var(--ts-accent);
+  --ts-glass-shadow: 0 8px 28px rgba(0, 0, 0, 0.32);
+}
+
+/* 不支持 backdrop-filter 的系统：玻璃退化实色，布局与对比度不变 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --ts-glass-bg: #f4f8fb;
+  }
+  :root[data-theme="dark"] {
+    --ts-glass-bg: #14202e;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --ts-motion-fast: 0ms;
+    --ts-motion: 0ms;
+    --ts-motion-slow: 0ms;
+  }
+}
+
+/* 全局画布：静态低对比径向光晕 + 基础排版 */
+body {
+  font-family: var(--ts-font);
+  color: var(--ts-text);
+  background:
+    radial-gradient(circle at 20% -10%, var(--ts-canvas-glow), transparent 55%), var(--ts-canvas);
+  transition:
+    background-color var(--ts-motion) ease,
+    color var(--ts-motion) ease;
+}
+
+/* 精确数字：token 数、金额、百分比统一 tabular lining */
+.ts-num {
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+/* 等宽：模型 ID、路径、公式与精确 token 数 */
+.ts-mono {
+  font-family: var(--ts-font-mono);
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+/* 玻璃面板：1px 内描边 + 极轻阴影，禁止发光边缘 */
+.ts-glass {
+  background: var(--ts-glass-bg);
+  -webkit-backdrop-filter: var(--ts-glass-blur);
+  backdrop-filter: var(--ts-glass-blur);
+  box-shadow:
+    inset 0 0 0 1px var(--ts-glass-stroke),
+    var(--ts-glass-shadow);
+}
+
+/* 键盘焦点轮廓（hover 不改变文字颜色；focus 高对比可见） */
+.ts-focusable:focus-visible {
+  outline: none;
+  box-shadow: var(--ts-focus-ring);
+  border-radius: var(--ts-radius-control);
+}
