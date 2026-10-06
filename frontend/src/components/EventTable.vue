@@ -2,6 +2,7 @@
 import { computed, h } from "vue";
 import { NButton, NDataTable, NTag, NTooltip, type DataTableColumn } from "naive-ui";
 import { AGENT_LABEL, fmtNum, projectLabel, type EventList } from "../types";
+import { formatCostBreakdown } from "../lib/costBreakdown";
 
 const props = defineProps<{
   list: EventList;
@@ -67,15 +68,44 @@ const columns = computed<DataTableColumn[]>(() => [
     key: "cost_usd",
     align: "right",
     render: (r) => {
-      const c = asRow(r).cost_usd;
-      if (c == null) {
-        return h(
-          NTag,
-          { size: "small", bordered: false, type: "warning" },
-          { default: () => "未知" },
-        );
-      }
-      return fmtPrice(c);
+      const row = asRow(r);
+      const c = row.cost_usd;
+      const bd = row.cost_breakdown;
+      const trigger =
+        c == null
+          ? () =>
+              h(
+                NTag,
+                { size: "small", bordered: false, type: "warning" },
+                { default: () => "未知" },
+              )
+          : () => h("span", { style: "cursor: help" }, fmtPrice(c));
+      // Task 7：breakdown 存在时悬浮展示计算明细；旧/异常响应（有价无明细）
+      // 保持原样不崩溃。
+      if (!bd) return trigger();
+      return h(
+        NTooltip,
+        { style: "max-width: 460px", placement: "left" },
+        {
+          trigger,
+          default: () =>
+            h(
+              "div",
+              { style: "font-size: 12px; line-height: 1.7; text-align: left" },
+              formatCostBreakdown(bd).map((l) =>
+                h(
+                  "div",
+                  {
+                    style: l.unknown
+                      ? "color: #f0a020; white-space: normal"
+                      : "white-space: normal",
+                  },
+                  l.text,
+                ),
+              ),
+            ),
+        },
+      );
     },
   },
 ]);

@@ -104,6 +104,55 @@ export interface PricingView {
   warnings: string[];
 }
 
+/** Task 5/6：请求级费用明细 DTO（与后端 EventCostBreakdown 对齐）。 */
+export type CostLineKind = "input" | "output" | "cache_write" | "cache_read";
+
+export interface CostLine {
+  kind: CostLineKind;
+  tokens: number;
+  /** USD / 百万 token；null = 该分项缺价（未计价，≠ 0） */
+  unit_price: number | null;
+  subtotal: number;
+  priced: boolean;
+}
+
+export type MatchMode = "full" | "full_variant_fallback" | "prefix" | "prefix_variant_fallback";
+
+export interface MatchedCandidate {
+  /** 原始完整模型键（来源侧写法） */
+  raw_key: string;
+  channel: string | null;
+  /** external / models.dev / openrouter */
+  source: string;
+  matched_key: string;
+  match_mode: MatchMode;
+  candidate_count: number;
+  /** 候选中最高费用（保守估算） */
+  reason: string;
+  schedule_label: string | null;
+  schedule_timezone: string | null;
+  /** 历史事件时间（RFC3339） */
+  request_at: string | null;
+}
+
+export interface EventCostBreakdown {
+  matched: MatchedCandidate;
+  /** "prompt_tokens" 等 */
+  basis: string | null;
+  basis_value: number;
+  /** 命中分段标签；null = 基础价档 */
+  segment_label: string | null;
+  lines: CostLine[];
+  cost_usd: number;
+  unknown: {
+    input: number;
+    output: number;
+    cache_write: number;
+    cache_read: number;
+  };
+  complete: boolean;
+}
+
 export interface EventRow {
   ts: string;
   /** D1 游标第二分量（Claude = message.id；Codex 为空） */
@@ -119,6 +168,8 @@ export interface EventRow {
   cache_write: number;
   cache_read: number;
   cost_usd?: number | null;
+  /** Task 6：请求级费用计算明细；null/缺省 = 未收录模型或旧后端 */
+  cost_breakdown?: EventCostBreakdown | null;
 }
 
 export interface EventList {
