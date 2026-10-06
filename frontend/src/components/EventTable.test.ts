@@ -42,7 +42,7 @@ function highTierBd(): EventCostBreakdown {
       matched_key: "qwen3-8-27b-obliterated:thinking",
       match_mode: "full",
       candidate_count: 2,
-      reason: "candidates_highest_cost",
+      reason: "highest_complete_cost",
       schedule_label: "peak",
       schedule_timezone: "Asia/Shanghai",
       request_at: "2026-01-05T04:00:00Z",

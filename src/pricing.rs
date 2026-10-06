@@ -667,6 +667,7 @@ fn estimate_entry(
         basis: Some(plan.basis.unwrap_or(PricingBasis::PromptTokens)),
         segment_label: selected.and_then(|s| s.label.clone()),
         lines,
+        excluded_candidate_warning: None,
     }
 }
 
@@ -713,6 +714,16 @@ pub struct MatchedCandidate {
     pub schedule_timezone: Option<String>,
     /// 参与裁决的请求时间（Task 4A：历史事件时间，RFC3339）。
     pub request_at: Option<String>,
+    // ── 两阶段候选选择诊断（缓存读取定价解析计划 Task 4）──────────
+    /// 完整候选数（实际产生 token 的分项都有可解析价格）。
+    #[serde(default)]
+    pub complete_candidate_count: usize,
+    /// 不完整候选数（含被排除者与未排除者）。
+    #[serde(default)]
+    pub incomplete_candidate_count: usize,
+    /// 被排除未参与主估算的不完整候选数（> 0 时 breakdown 附带提示）。
+    #[serde(default)]
+    pub incomplete_candidates_excluded: usize,
 }
 
 /// 单个分项的费用明细行（Task 5）：token 数、单价与小计同源，
@@ -762,6 +773,10 @@ pub struct CostEstimate {
     pub segment_label: Option<String>,
     /// 四类分项明细（顺序固定 input/output/cache_write/cache_read）。
     pub lines: Vec<CostLine>,
+    /// 完整候选胜出但存在被排除的不完整候选时的结构化提示——这不是
+    /// 所选公式的 unknown_tokens，而是"其他候选缺少价格、未参与主估算"
+    /// 的不确定性提示（结果不声称是所有渠道的严格上界）。
+    pub excluded_candidate_warning: Option<String>,
 }
 
 /// GUI 悬浮对照用：该前缀在 OpenRouter 层的价格（无对应模型则 None）。
@@ -1730,7 +1745,16 @@ impl Pricing {
         // cache_read），整笔请求切换档位；输出不参与档位选择（不变量 2）。
         let basis_value = t.prompt_tokens();
         let cand_count = cands.len();
-        let mut best: Option<(CostEstimate, MatchMode, &Entry, Option<&PriceSchedule>)> = None;
+        // 两阶段选择（缓存读取定价解析计划 Task 4）：先按请求条件对每个
+        // 候选计价，拆分完整/不完整两组；在**完整候选**中取最高费用——
+        // 缺价分项不得按 0 与完整候选比较（那会把可避免的 unknown 伪装成
+        // 更便宜）；没有完整候选才回退到部分候选中已知费用最高者。
+        // 同价 tie-break 不变：来源优先级 > 完整匹配 > 前缀长度 > 原始键。
+        // 禁止跨候选拼价：最终公式仍来自同一个候选。
+        let mut complete_set: Vec<(CostEstimate, MatchMode, &Entry, Option<&PriceSchedule>)> =
+            Vec::new();
+        let mut partial_set: Vec<(CostEstimate, MatchMode, &Entry, Option<&PriceSchedule>)> =
+            Vec::new();
         for (e, mode) in cands {
             // 候选内变体择优：默认档 + 每个命中时间规则（整规则一套价）；
             // 费用并列时保守保留默认档。
@@ -1742,18 +1766,52 @@ impl Pricing {
                 }
             }
             let (est, sched) = vbest;
-            let take = match &best {
-                None => true,
-                Some((b, bm, be, _)) => {
-                    est.cost > b.cost
-                        || (est.cost == b.cost && tie_rank(e, mode) > tie_rank(be, *bm))
-                }
-            };
-            if take {
-                best = Some((est, mode, e, sched));
+            if est.complete {
+                complete_set.push((est, mode, e, sched));
+            } else {
+                partial_set.push((est, mode, e, sched));
             }
         }
-        let (mut est, mode, e, sched) = best.unwrap();
+        let (pool, reason) = if !complete_set.is_empty() {
+            (&complete_set, "highest_complete_cost")
+        } else {
+            (&partial_set, "highest_partial_cost")
+        };
+        let excluded = if reason == "highest_complete_cost" {
+            partial_set.len()
+        } else {
+            0
+        };
+        let mut best: Option<&(CostEstimate, MatchMode, &Entry, Option<&PriceSchedule>)> = None;
+        for cand in pool.iter() {
+            best = match best {
+                Some((b, bm, be, _)) => {
+                    if cand.0.cost > b.cost
+                        || (cand.0.cost == b.cost && tie_rank(cand.2, cand.1) > tie_rank(be, *bm))
+                    {
+                        Some(cand)
+                    } else {
+                        best
+                    }
+                }
+                None => Some(cand),
+            };
+        }
+        let (mut est, mode, e, sched) = best.expect("候选非空时池必非空").clone();
+        // 结构化提示：完整候选胜出但有不完整候选被排除——结果不是所有
+        // 渠道的严格上界（不完整候选若补价可能更高）。
+        let excluded_candidate_warning = if excluded > 0 {
+            let names = partial_set
+                .iter()
+                .map(|(_, _, pe, _)| pe.display.as_str())
+                .collect::<Vec<_>>()
+                .join("、");
+            Some(format!(
+                "有 {excluded} 个候选因缺少价格未参与主估算（{names}）；若其缺失分项有价，实际最高费用可能更高"
+            ))
+        } else {
+            None
+        };
         est.matched = Some(MatchedCandidate {
             raw_key: e.display.clone(),
             channel: e.display.split_once('/').map(|(c, _)| c.to_string()),
@@ -1761,11 +1819,15 @@ impl Pricing {
             matched_key: e.prefix.clone(),
             match_mode: mode,
             candidate_count: cand_count,
-            reason: "candidates_highest_cost".to_string(),
+            reason: reason.to_string(),
             schedule_label: sched.and_then(|s| s.label.clone()),
             schedule_timezone: sched.and_then(|s| s.timezone.clone()),
             request_at: Some(at.to_string()),
+            complete_candidate_count: complete_set.len(),
+            incomplete_candidate_count: partial_set.len(),
+            incomplete_candidates_excluded: excluded,
         });
+        est.excluded_candidate_warning = excluded_candidate_warning;
         Some(est)
     }
 
@@ -2524,7 +2586,7 @@ mod tests {
         assert_eq!(m.channel.as_deref(), Some("nano-gpt"));
         assert_eq!(m.source, "openrouter");
         assert_eq!(m.match_mode, MatchMode::Full);
-        assert_eq!(m.reason, "candidates_highest_cost");
+        assert_eq!(m.reason, "highest_complete_cost");
         assert_eq!(m.matched_key, "qwen3-8-27b-obliterated:thinking");
         assert!((est.cost - 8.0).abs() < 1e-9);
         // 查询另一渠道：同一候选组，仍是 A 胜出。
@@ -3392,34 +3454,103 @@ cache_read = 1.0
         let noon: jiff::Timestamp = format!("{monday}T13:00:00Z").parse().unwrap();
         let afternoon: jiff::Timestamp = format!("{monday}T15:00:00Z").parse().unwrap();
 
-        // 场景 1：峰时 + 低于阈值。候选总价 fixed=1.02（完整）、
-        // tiered=0.255（cache_read 缺）、peak=3.1（cache 两项缺）→ peak 胜出。
+        // 场景 1（两阶段语义，缓存读取定价解析计划 Task 4）：峰时 + 低于阈值。
+        // 候选总价 fixed=1.02（完整）、tiered=0.255（cache_read 缺）、
+        // peak=3.1（cache 两项缺）——旧语义 peak 胜出（缺价按 0 比较），
+        // 新语义**完整候选优先**：fixed 胜出，不完整的 peak/tiered 被排除
+        // 并给结构化提示（它们补价后可能更高，结果不是严格上界）。
         let tc = counts(100_000, 50_000, 10_000, 20_000);
         let est = p.estimate("chan-fixed/bd", &tc, noon).unwrap();
-        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-peak/bd");
-        assert!((est.cost - 3.1).abs() < 1e-9);
-        assert!(!est.complete, "峰时候选缺缓存价 → 部分计价");
-        assert_eq!(est.unknown.cache_write, 10_000);
-        assert_eq!(est.unknown.cache_read, 20_000);
-        assert_eq!(est.basis_value, 130_000, "basis = input+cw+cr");
-        assert_eq!(est.basis, Some(PricingBasis::PromptTokens));
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-fixed/bd");
+        assert!((est.cost - 1.02).abs() < 1e-9);
+        assert!(est.complete, "完整候选胜出 → 全部计价");
+        assert_eq!(est.unknown, TokenCounts::default());
         assert_eq!(
-            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            est.matched.as_ref().unwrap().reason,
+            "highest_complete_cost"
+        );
+        let m = est.matched.as_ref().unwrap();
+        assert_eq!(m.complete_candidate_count, 1);
+        assert_eq!(m.incomplete_candidate_count, 2);
+        assert_eq!(m.incomplete_candidates_excluded, 2);
+        let warn = est.excluded_candidate_warning.as_deref().unwrap();
+        assert!(warn.contains("2 个候选") && warn.contains("chan-peak/bd"));
+        // 四行明细：fixed 基础价全计价。
+        let li = line_of(&est, CostLineKind::Input);
+        assert_eq!((li.tokens, li.unit_price), (100_000, Some(8.0)));
+        assert!((li.subtotal - 0.8).abs() < 1e-9);
+        assert_eq!(est.lines.len(), 4);
+
+        // 场景 1b：只有不完整候选时回退部分候选最高（peak 3.1 > tiered）。
+        let est_partial = {
+            let mut p3 = Pricing::empty();
+            p3.add_entry(Entry {
+                prefix: match_key("chan-peak/bd"),
+                display: "chan-peak/bd".into(),
+                name: None,
+                plan: PricePlan {
+                    base: PriceRates {
+                        input: RateSpec::Fixed(1.0),
+                        output: RateSpec::Fixed(2.0),
+                        cache_write: RateSpec::Unknown,
+                        cache_read: RateSpec::Unknown,
+                    },
+                    schedules: vec![PriceSchedule {
+                        label: Some("peak".into()),
+                        timezone: Some("UTC".into()),
+                        periods: vec![SchedulePeriod {
+                            start_time: "12:00".into(),
+                            end_time: "14:00".into(),
+                            weekdays: Some(
+                                ["mon", "tue", "wed", "thu", "fri"]
+                                    .iter()
+                                    .map(|s| s.to_string())
+                                    .collect(),
+                            ),
+                            prices: PriceRates {
+                                input: RateSpec::Fixed(30.0),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                tier: TIER_OPENROUTER,
+            });
+            p3.estimate("chan-peak/bd", &tc, noon).unwrap()
+        };
+        assert_eq!(
+            est_partial.matched.as_ref().unwrap().reason,
+            "highest_partial_cost"
+        );
+        assert!(!est_partial.complete);
+        assert_eq!(est_partial.unknown.cache_write, 10_000);
+        assert_eq!(est_partial.unknown.cache_read, 20_000);
+        assert_eq!(est_partial.basis_value, 130_000, "basis = input+cw+cr");
+        assert_eq!(
+            est_partial
+                .matched
+                .as_ref()
+                .unwrap()
+                .schedule_label
+                .as_deref(),
             Some("peak")
         );
-        assert_eq!(est.segment_label, None);
         // 四行明细：input 峰价 30、output 规则回退基础 2、缓存两项未计价。
-        let li = line_of(&est, CostLineKind::Input);
+        let li = line_of(&est_partial, CostLineKind::Input);
         assert_eq!((li.tokens, li.unit_price), (100_000, Some(30.0)));
         assert!((li.subtotal - 3.0).abs() < 1e-9);
-        let lo = line_of(&est, CostLineKind::Output);
+        let lo = line_of(&est_partial, CostLineKind::Output);
         assert_eq!((lo.tokens, lo.unit_price), (50_000, Some(2.0)));
         assert!((lo.subtotal - 0.1).abs() < 1e-9);
         for kind in [CostLineKind::CacheWrite, CostLineKind::CacheRead] {
-            let l = line_of(&est, kind);
+            let l = line_of(&est_partial, kind);
             assert!(!l.priced && l.unit_price.is_none() && l.subtotal == 0.0);
         }
-        assert_eq!(est.lines.len(), 4);
+        assert_eq!(est_partial.lines.len(), 4);
+        assert!(est_partial.excluded_candidate_warning.is_none());
 
         // 场景 2：非峰时同请求 → fixed 1.02 完整计价胜出。
         let est = p.estimate("chan-fixed/bd", &tc, afternoon).unwrap();
@@ -4361,6 +4492,133 @@ cache_read = "free"
             "{warnings:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_candidate_selection_prefers_complete_over_higher_partial() {
+        // 计划 Task 4 Step 2：候选比较不得把缺价分项按 0 与完整候选比较——
+        // 先在完整候选中取最高；没有完整候选才回退部分候选最高。
+        // input/output 更高但 cache_read 缺失的候选不得赢下带 cache_read
+        // token 的请求（那会制造可避免的 unknown）。
+        let mut p = Pricing::empty();
+        for (raw, i, o, cr) in [
+            ("zenmux/gpt-5.4", 4.0, 20.0, None), // 更贵，cache_read 缺失
+            ("cortecs/gpt-5.4", 3.0, 18.0, Some(0.3)), // 完整
+        ] {
+            p.add_entry(Entry {
+                prefix: match_key(raw),
+                display: raw.to_string(),
+                name: None,
+                plan: PricePlan {
+                    base: PriceRates {
+                        input: RateSpec::Fixed(i),
+                        output: RateSpec::Fixed(o),
+                        cache_write: RateSpec::Fixed(0.0),
+                        cache_read: RateSpec::fixed_or_unknown(cr),
+                    },
+                    ..Default::default()
+                },
+                tier: TIER_OPENROUTER,
+            });
+        }
+        let t = counts(1_000, 0, 0, 100_000);
+        let est = p.estimate("gpt-5.4", &t, at()).unwrap();
+        // 主结果 = 完整候选 cortecs（不是部分候选 zenmux）
+        assert_eq!(
+            est.matched.as_ref().unwrap().channel.as_deref(),
+            Some("cortecs")
+        );
+        assert!(est.complete, "完整候选胜出时不得有 unknown");
+        assert_eq!(est.unknown.cache_read, 0);
+        assert_eq!(
+            est.matched.as_ref().unwrap().reason,
+            "highest_complete_cost"
+        );
+        // 诊断：1 个不完整候选被排除
+        let m = est.matched.as_ref().unwrap();
+        assert_eq!(m.complete_candidate_count, 1);
+        assert_eq!(m.incomplete_candidate_count, 1);
+        assert_eq!(m.incomplete_candidates_excluded, 1);
+        // 排除警告结构化可见
+        assert!(
+            est.excluded_candidate_warning
+                .as_deref()
+                .is_some_and(|w| w.contains("zenmux") && w.contains("未参与主估算"))
+        );
+        // 费用 = cortecs 全价：1_000×3.0/1e6 + 100_000×0.3/1e6
+        assert!((est.cost - (1_000.0 * 3.0 + 100_000.0 * 0.3) / 1e6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_candidate_selection_partial_fallback_when_no_complete() {
+        // 所有候选都缺 cache_read → 回退已知费用最高者，unknown 保持非零。
+        let mut p = Pricing::empty();
+        for (raw, i, o) in [("a/m", 4.0, 20.0), ("b/m", 3.0, 18.0)] {
+            p.add_entry(Entry {
+                prefix: match_key(raw),
+                display: raw.to_string(),
+                name: None,
+                plan: PricePlan {
+                    base: PriceRates {
+                        input: RateSpec::Fixed(i),
+                        output: RateSpec::Fixed(o),
+                        cache_write: RateSpec::Fixed(0.0),
+                        cache_read: RateSpec::Unknown,
+                    },
+                    ..Default::default()
+                },
+                tier: TIER_OPENROUTER,
+            });
+        }
+        let t = counts(1_000, 0, 0, 100_000);
+        let est = p.estimate("m", &t, at()).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().channel.as_deref(), Some("a"));
+        assert_eq!(est.matched.as_ref().unwrap().reason, "highest_partial_cost");
+        assert!(!est.complete);
+        assert_eq!(est.unknown.cache_read, 100_000);
+        // 无完整候选 → 无"排除"不确定性提示（部分候选本就参与了主估算）
+        assert!(est.excluded_candidate_warning.is_none());
+        assert_eq!(est.matched.as_ref().unwrap().complete_candidate_count, 0);
+        assert_eq!(
+            est.matched.as_ref().unwrap().incomplete_candidates_excluded,
+            0
+        );
+    }
+
+    #[test]
+    fn test_candidate_selection_complete_preferred_only_with_cache_read_tokens() {
+        // 计划 Task 1：cache_read token 为 0 时，缺 cache_read 分项不影响
+        // 完整性——此时所有候选都"完整"，比较回退到费用（input/output 更高
+        // 的候选按旧语义胜出），且无排除警告。
+        let mut p = Pricing::empty();
+        for (raw, i, o, cr) in [
+            ("zenmux/gpt-5.4", 4.0, 20.0, None),
+            ("cortecs/gpt-5.4", 3.0, 18.0, Some(0.3)),
+        ] {
+            p.add_entry(Entry {
+                prefix: match_key(raw),
+                display: raw.to_string(),
+                name: None,
+                plan: PricePlan {
+                    base: PriceRates {
+                        input: RateSpec::Fixed(i),
+                        output: RateSpec::Fixed(o),
+                        cache_write: RateSpec::Fixed(0.0),
+                        cache_read: RateSpec::fixed_or_unknown(cr),
+                    },
+                    ..Default::default()
+                },
+                tier: TIER_OPENROUTER,
+            });
+        }
+        let t = counts(1_000, 500, 0, 0);
+        let est = p.estimate("gpt-5.4", &t, at()).unwrap();
+        assert_eq!(
+            est.matched.as_ref().unwrap().channel.as_deref(),
+            Some("zenmux")
+        );
+        assert!(est.complete);
+        assert!(est.excluded_candidate_warning.is_none());
     }
 
     #[test]
