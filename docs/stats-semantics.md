@@ -149,6 +149,14 @@ model 纳入键：**跨模型**的同用量请求不再误合并；重播必然�
   作为保守估算；费用并列按来源优先级（外置 > models.dev > OpenRouter）
   > 完整匹配 > 前缀更长 > 原始键打破。禁止从不同候选拼单价；breakdown
   的 `match_mode` 与 `candidate_count` 记录匹配方式与候选数。
+- **两阶段候选选择（缓存读取定价解析，2026-10-06）**：候选按请求条件
+  计价后先分**完整**（实际产生 token 的分项都有可解析价格）与**不完整**
+  两组；在完整候选中取费用最高者（`reason = highest_complete_cost`），
+  没有完整候选才回退部分候选中已知费用最高者（`highest_partial_cost`）
+  ——缺价分项不得按 0 与完整候选比较。完整候选胜出但存在被排除的不
+  完整候选时，breakdown 附带 `excluded_candidate_warning`（结果不是
+  所有渠道的严格上界）与三个诊断计数；部分候选回退时 unknown token
+  照常进入 `unknown_tokens`。
 - **分段计价（Task 1/2/3/4）**：规范区间 `[min_tokens, max_tokens)`
   左闭右开，basis 为 `prompt_tokens = input + cache_write + cache_read`
   （output 不参与档位选择）。models.dev `tiers`（`type=context`）语义
