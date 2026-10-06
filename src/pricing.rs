@@ -57,15 +57,152 @@ struct Entry {
     tier: u8,
 }
 
-/// Task 1：四类单价的规范载体（每项 Option，None = 未知/沿用；
-/// serde 字段缺省为 None——分段/基础价缺键即沿用，不静默为 0）。
+/// 单价三态（缓存读取定价解析计划 Task 2）：
+/// - `Unknown`：未知（缺价 ≠ 免费，token 进 unknown，不按 0 计费）；
+/// - `Fixed(v)`：明确数值（显式 0 = 免费，与"未知"严格区分）；
+/// - `SameAsInput`：显式声明沿用同一解析层（基础 / 分段 / 时间档）最终
+///   生效的输入单价。当前仅允许用于 `cache_read`，其他分项在加载校验时
+///   整体拒绝（不静默改语义）。
+///
+/// serde 线格式：`Fixed` → 数字、`SameAsInput` → `"same_as_input"`、
+/// `Unknown` → null。与旧 v4 索引/计划里 `Option<f64>` 的线格式完全兼容
+/// （数字 / null / 缺省语义不变），因此旧索引可直接按 v5 语义读取。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum RateSpec {
+    #[default]
+    Unknown,
+    Fixed(f64),
+    SameAsInput,
+}
+
+impl serde::Serialize for RateSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            RateSpec::Unknown => serializer.serialize_none(),
+            RateSpec::Fixed(v) => serializer.serialize_f64(*v),
+            RateSpec::SameAsInput => serializer.serialize_str("same_as_input"),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RateSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = RateSpec;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("数字单价、\"same_as_input\" 或 null（未知）")
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+                Ok(RateSpec::Fixed(v))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                Ok(RateSpec::Fixed(v as f64))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(RateSpec::Fixed(v as f64))
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                match v {
+                    "same_as_input" => Ok(RateSpec::SameAsInput),
+                    other => Err(E::custom(format!("未知价格声明 {other:?}"))),
+                }
+            }
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(RateSpec::Unknown)
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(RateSpec::Unknown)
+            }
+            fn visit_some<D: serde::Deserializer<'de>>(
+                self,
+                d: D,
+            ) -> Result<Self::Value, D::Error> {
+                RateSpec::deserialize(d)
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
+impl RateSpec {
+    /// `Option<f64>` → 三态（None = Unknown；显式 0 保留为 Fixed(0)）。
+    /// models.dev / OpenRouter 等数值来源的保守转换入口。
+    pub fn fixed_or_unknown(v: Option<f64>) -> Self {
+        match v {
+            Some(x) => RateSpec::Fixed(x),
+            None => RateSpec::Unknown,
+        }
+    }
+
+    /// 直接解析为数值单价：仅 `Fixed`；`SameAsInput` 必须由调用方按解析
+    /// 顺序（先解析 input）引用输入价，`Unknown` 保持未知——任何路径都
+    /// 不允许把 Unknown 变成 0。
+    pub fn resolve_direct(&self) -> Option<f64> {
+        match self {
+            RateSpec::Fixed(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// 显式值优先：Unknown 回退到下一层（分段 > 时间规则 > 基础价）。
+    /// `SameAsInput` 算显式声明，不触发回退。
+    pub fn or_explicit(self, fallback: RateSpec) -> RateSpec {
+        if self == RateSpec::Unknown {
+            fallback
+        } else {
+            self
+        }
+    }
+}
+
+/// 断言便利桥：`Fixed(v) == Some(v)`、`Unknown == None`、
+/// `SameAsInput` 与任何 `Option<f64>` 都不等（三态互不混淆）。
+/// 主要供测试断言沿用 `Some(x)` 字面量书写。
+impl PartialEq<Option<f64>> for RateSpec {
+    fn eq(&self, other: &Option<f64>) -> bool {
+        match (self, other) {
+            (RateSpec::Fixed(v), Some(o)) => v == o,
+            (RateSpec::Unknown, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<RateSpec> for Option<f64> {
+    fn eq(&self, other: &RateSpec) -> bool {
+        other == self
+    }
+}
+
+/// Task 1：四类单价的规范载体。每项三态（RateSpec）：缺省 Unknown——
+/// 分段/基础价缺键即未知，不静默为 0；显式 0 = 免费；cache_read 可声明
+/// same_as_input（同层输入价）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct PriceRates {
-    pub input: Option<f64>,
-    pub output: Option<f64>,
-    pub cache_write: Option<f64>,
-    pub cache_read: Option<f64>,
+    pub input: RateSpec,
+    pub output: RateSpec,
+    pub cache_write: RateSpec,
+    pub cache_read: RateSpec,
+}
+
+impl PriceRates {
+    /// 四个数值来源（models.dev / OpenRouter / 旧索引扁平字段）的保守转换：
+    /// None = Unknown，显式值 = Fixed。
+    pub fn from_options(
+        input: Option<f64>,
+        output: Option<f64>,
+        cache_write: Option<f64>,
+        cache_read: Option<f64>,
+    ) -> Self {
+        Self {
+            input: RateSpec::fixed_or_unknown(input),
+            output: RateSpec::fixed_or_unknown(output),
+            cache_write: RateSpec::fixed_or_unknown(cache_write),
+            cache_read: RateSpec::fixed_or_unknown(cache_read),
+        }
+    }
 }
 
 /// 计价依据（Task 1）：当前来源统一 PromptTokens；其余为将来复用保留。
@@ -185,7 +322,8 @@ pub(crate) fn validate_segment_rules(segments: &[PriceSegment]) -> Result<(), St
     Ok(())
 }
 
-/// 校验价格计划：非负价格、区间有序不重叠、有上限分段后不得再有分段。
+/// 校验价格计划：非负价格、区间有序不重叠、有上限分段后不得再有分段；
+/// `SameAsInput` 只允许出现在 cache_read（其他分项整条拒绝，不猜语义）。
 /// 返回 Err = 不可计价的规则（调用方跳过并给出诊断，不猜测）。
 pub fn validate_price_plan(plan: &PricePlan) -> Result<(), String> {
     let mut groups: Vec<(String, &PriceRates)> = vec![("base".to_string(), &plan.base)];
@@ -196,20 +334,48 @@ pub fn validate_price_plan(plan: &PricePlan) -> Result<(), String> {
             .map(|(i, s)| (format!("分段 {i}"), &s.prices)),
     );
     for (name, r) in groups {
-        for (comp, v) in [
-            ("input", r.input),
-            ("output", r.output),
-            ("cache_write", r.cache_write),
-            ("cache_read", r.cache_read),
-        ] {
-            if let Some(v) = v
-                && v < 0.0
-            {
-                return Err(format!("{name} 分项 {comp} 价格为负: {v}"));
-            }
+        if let Some((comp, v)) = negative_rate(r) {
+            return Err(format!("{name} 分项 {comp} 价格为负: {v}"));
+        }
+        if let Some(comp) = same_as_input_violation(r) {
+            return Err(format!(
+                "{name} 分项 {comp} 不支持 same_as_input（当前仅 cache_read 可声明沿用输入价）"
+            ));
         }
     }
     validate_segment_rules(&plan.segments)
+}
+
+/// 价格组内负值检查（Fixed 才是数值；Unknown/SameAsInput 无数值语义）。
+fn negative_rate(r: &PriceRates) -> Option<(&'static str, f64)> {
+    for (comp, spec) in [
+        ("input", r.input),
+        ("output", r.output),
+        ("cache_write", r.cache_write),
+        ("cache_read", r.cache_read),
+    ] {
+        if let RateSpec::Fixed(v) = spec
+            && v < 0.0
+        {
+            return Some((comp, v));
+        }
+    }
+    None
+}
+
+/// SameAsInput 白名单：仅 cache_read 可声明沿用输入价。
+fn same_as_input_violation(r: &PriceRates) -> Option<&'static str> {
+    for (comp, spec, allowed) in [
+        ("input", r.input, false),
+        ("output", r.output, false),
+        ("cache_write", r.cache_write, false),
+        ("cache_read", r.cache_read, true),
+    ] {
+        if spec == RateSpec::SameAsInput && !allowed {
+            return Some(comp);
+        }
+    }
+    None
 }
 
 /// 选择唯一满足 min <= basis < max 的分段（不做最近档位猜测）。
@@ -225,6 +391,7 @@ fn select_segment_in(segments: &[PriceSegment], basis_value: u64) -> Option<&Pri
 }
 
 /// 逐字段执行"分段显式值 > 时间规则值 > 基础值"（Task 4A 加入时间层）。
+/// RateSpec 语义：Unknown 才回退下一层；Fixed(0)/SameAsInput 都是显式声明。
 pub fn effective_rates(
     plan: &PricePlan,
     schedule_prices: Option<&PriceRates>,
@@ -232,27 +399,28 @@ pub fn effective_rates(
 ) -> PriceRates {
     let seg = selected.map(|s| &s.prices);
     let time = schedule_prices;
-    let layer =
-        |seg_v: Option<f64>, time_v: Option<f64>, base_v: Option<f64>| seg_v.or(time_v).or(base_v);
+    let layer = |seg_v: RateSpec, time_v: RateSpec, base_v: RateSpec| -> RateSpec {
+        seg_v.or_explicit(time_v).or_explicit(base_v)
+    };
     PriceRates {
         input: layer(
-            seg.and_then(|s| s.input),
-            time.and_then(|r| r.input),
+            seg.map(|s| s.input).unwrap_or_default(),
+            time.map(|r| r.input).unwrap_or_default(),
             plan.base.input,
         ),
         output: layer(
-            seg.and_then(|s| s.output),
-            time.and_then(|r| r.output),
+            seg.map(|s| s.output).unwrap_or_default(),
+            time.map(|r| r.output).unwrap_or_default(),
             plan.base.output,
         ),
         cache_write: layer(
-            seg.and_then(|s| s.cache_write),
-            time.and_then(|r| r.cache_write),
+            seg.map(|s| s.cache_write).unwrap_or_default(),
+            time.map(|r| r.cache_write).unwrap_or_default(),
             plan.base.cache_write,
         ),
         cache_read: layer(
-            seg.and_then(|s| s.cache_read),
-            time.and_then(|r| r.cache_read),
+            seg.map(|s| s.cache_read).unwrap_or_default(),
+            time.map(|r| r.cache_read).unwrap_or_default(),
             plan.base.cache_read,
         ),
     }
@@ -359,10 +527,25 @@ fn matching_time_rules(
     out
 }
 
+/// 分项单价来源（缓存读取定价解析计划 Task 5）：`fixed` = 明确数值单价；
+/// `same_as_input` = 沿用同一解析层的输入价（unit_price 已是解析后的实际
+/// 数值，金额仍由后端统一计算）；`unknown` = 无可用单价（缺价 ≠ 免费）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RateKind {
+    Fixed,
+    SameAsInput,
+    #[default]
+    Unknown,
+}
+
 /// 对单个候选项按本次请求条件计价（Task 2A：从 estimate 抽出，候选比较
 /// 与最终计价共用同一函数，保证 breakdown 与总价同源）。
 /// Task 4A：time_rule = 命中的（规则, 可选 period）；None = 默认档。
 /// 单条规则整体参与计价，不从不同规则逐项拼价。
+/// 三态解析顺序（计划 Task 2 Step 2）：先解析最终 input 单价，再解析
+/// cache_read——`SameAsInput` 引用同一计划/分段/时间档解析出的输入价；
+/// 输入价本身未知时 cache_read 保持未知（保守，不猜 0）。
 fn estimate_entry(
     e: &Entry,
     basis_value: u64,
@@ -381,10 +564,10 @@ fn estimate_entry(
             };
             let time_prices = match period {
                 Some(p) => PriceRates {
-                    input: p.prices.input.or(sched.prices.input),
-                    output: p.prices.output.or(sched.prices.output),
-                    cache_write: p.prices.cache_write.or(sched.prices.cache_write),
-                    cache_read: p.prices.cache_read.or(sched.prices.cache_read),
+                    input: p.prices.input.or_explicit(sched.prices.input),
+                    output: p.prices.output.or_explicit(sched.prices.output),
+                    cache_write: p.prices.cache_write.or_explicit(sched.prices.cache_write),
+                    cache_read: p.prices.cache_read.or_explicit(sched.prices.cache_read),
                 },
                 None => sched.prices,
             };
@@ -396,36 +579,55 @@ fn estimate_entry(
     // Task 5：逐分项生成明细行；cost 为各行小计之和（顺序固定，确定性的
     // 浮点求和）。未知分项仅在实际产生 token 时才标记不完整——零 token
     // 的未知分项不影响完整性（不变量 5）。
+    let input_price = rates.input.resolve_direct();
+    // 分项单价解析：Fixed → (数值, fixed)；cache_read 的 SameAsInput →
+    // (输入价, same_as_input)；其余一律未知（非 cache_read 的 SameAsInput
+    // 在加载校验已被拒绝，这里防御性视为未知）。
+    let resolve = |spec: RateSpec, is_cache_read: bool| -> (Option<f64>, RateKind) {
+        match spec {
+            RateSpec::Fixed(v) => (Some(v), RateKind::Fixed),
+            RateSpec::SameAsInput if is_cache_read => match input_price {
+                Some(p) => (Some(p), RateKind::SameAsInput),
+                None => (None, RateKind::Unknown),
+            },
+            _ => (None, RateKind::Unknown),
+        }
+    };
     let mut cost = 0.0;
     let mut complete = true;
     let mut unknown = TokenCounts::default();
     let mut lines = Vec::with_capacity(4);
-    for (kind, tokens, price, unknown_slot) in [
+    for (kind, tokens, spec, is_cache_read, unknown_slot) in [
         (
             CostLineKind::Input,
             t.input,
             rates.input,
+            false,
             &mut unknown.input,
         ),
         (
             CostLineKind::Output,
             t.output,
             rates.output,
+            false,
             &mut unknown.output,
         ),
         (
             CostLineKind::CacheWrite,
             t.cache_write,
             rates.cache_write,
+            false,
             &mut unknown.cache_write,
         ),
         (
             CostLineKind::CacheRead,
             t.cache_read,
             rates.cache_read,
+            true,
             &mut unknown.cache_read,
         ),
     ] {
+        let (price, rate_kind) = resolve(spec, is_cache_read);
         match price {
             Some(p) => {
                 let subtotal = tokens as f64 * p / 1_000_000.0;
@@ -436,6 +638,7 @@ fn estimate_entry(
                     unit_price: Some(p),
                     subtotal,
                     priced: true,
+                    rate_kind,
                 });
             }
             None => {
@@ -449,6 +652,7 @@ fn estimate_entry(
                     unit_price: None,
                     subtotal: 0.0,
                     priced: false,
+                    rate_kind: RateKind::Unknown,
                 });
             }
         }
@@ -513,6 +717,7 @@ pub struct MatchedCandidate {
 
 /// 单个分项的费用明细行（Task 5）：token 数、单价与小计同源，
 /// `priced = false` 表示该分项无最终单价（token 进 unknown，不按 0 计费）。
+/// rate_kind 区分 fixed / same_as_input（单价已解析为实际数值）/ unknown。
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CostLine {
     pub kind: CostLineKind,
@@ -522,6 +727,9 @@ pub struct CostLine {
     /// tokens × unit_price / 1e6（未计价时为 0，不计入总价）。
     pub subtotal: f64,
     pub priced: bool,
+    /// 单价来源（三态语义；unknown + priced=false = 缺价，不得显示为免费）。
+    #[serde(default)]
+    pub rate_kind: RateKind,
 }
 
 /// 四类计价分项。
@@ -618,13 +826,13 @@ struct ExternalModel {
     #[serde(default)]
     application: Option<String>,
     #[serde(default)]
-    input: Option<f64>,
+    input: RateSpec,
     #[serde(default)]
-    output: Option<f64>,
+    output: RateSpec,
     #[serde(default)]
-    cache_write: Option<f64>,
+    cache_write: RateSpec,
     #[serde(default)]
-    cache_read: Option<f64>,
+    cache_read: RateSpec,
     #[serde(default)]
     segment: Vec<ExternalSegment>,
     /// Task 4A：峰谷时间规则。Task 4 阶段仅解析——含时间规则的条目整条
@@ -645,13 +853,13 @@ struct ExternalSegment {
     #[serde(default)]
     application: Option<String>,
     #[serde(default)]
-    input: Option<f64>,
+    input: RateSpec,
     #[serde(default)]
-    output: Option<f64>,
+    output: RateSpec,
     #[serde(default)]
-    cache_write: Option<f64>,
+    cache_write: RateSpec,
     #[serde(default)]
-    cache_read: Option<f64>,
+    cache_read: RateSpec,
 }
 
 /// 外置峰谷时间规则（Task 4A）。
@@ -666,13 +874,13 @@ struct ExternalSchedule {
     period: Vec<ExternalPeriod>,
     /// 规则级价格覆盖（period 未给价时沿用）。
     #[serde(default)]
-    input: Option<f64>,
+    input: RateSpec,
     #[serde(default)]
-    output: Option<f64>,
+    output: RateSpec,
     #[serde(default)]
-    cache_write: Option<f64>,
+    cache_write: RateSpec,
     #[serde(default)]
-    cache_read: Option<f64>,
+    cache_read: RateSpec,
     /// 规则内可选上下文分段（Task 4A）。
     #[serde(default)]
     segment: Vec<ExternalSegment>,
@@ -688,13 +896,13 @@ struct ExternalPeriod {
     #[serde(default)]
     weekdays: Option<Vec<String>>,
     #[serde(default)]
-    input: Option<f64>,
+    input: RateSpec,
     #[serde(default)]
-    output: Option<f64>,
+    output: RateSpec,
     #[serde(default)]
-    cache_write: Option<f64>,
+    cache_write: RateSpec,
     #[serde(default)]
-    cache_read: Option<f64>,
+    cache_read: RateSpec,
 }
 
 /// 支持的计价依据/应用方式白名单（Task 4：未知值显式拒绝）。
@@ -809,23 +1017,19 @@ fn external_schedule_plan(
         },
         segments,
     };
-    // 规则内价格不得为负；规则分段须满足区间不变量。
+    // 规则内价格不得为负；SameAsInput 仅限 cache_read；规则分段须满足区间不变量。
     for r in [&sched.prices]
         .into_iter()
         .chain(sched.periods.iter().map(|p| &p.prices))
         .chain(sched.segments.iter().map(|g| &g.prices))
     {
-        for (comp, v) in [
-            ("input", r.input),
-            ("output", r.output),
-            ("cache_write", r.cache_write),
-            ("cache_read", r.cache_read),
-        ] {
-            if let Some(v) = v
-                && v < 0.0
-            {
-                return Err(format!("时间规则分项 {comp} 价格为负: {v}"));
-            }
+        if let Some((comp, v)) = negative_rate(r) {
+            return Err(format!("时间规则分项 {comp} 价格为负: {v}"));
+        }
+        if let Some(comp) = same_as_input_violation(r) {
+            return Err(format!(
+                "时间规则分项 {comp} 不支持 same_as_input（当前仅 cache_read 可声明沿用输入价）"
+            ));
         }
     }
     validate_segment_rules(&sched.segments)?;
@@ -931,9 +1135,12 @@ fn default_index_v1() -> u8 {
 }
 
 /// 索引格式当前版本。
-/// Task 2A：v4——匹配键改为末段模型名（保留渠道候选元数据）；旧索引按
-/// 版本失效走重建，不从旧单一归一化键推断渠道。
-pub const INDEX_VERSION: u8 = 4;
+/// Task 2A：v4——匹配键改为末段模型名（保留渠道候选元数据）。
+/// v5（缓存读取定价解析计划）：单价升级为三态 RateSpec。线格式向后兼容
+/// （数字/null 语义不变，v4 索引可直接按 v5 语义读取：数值 → Fixed、
+/// null/缺失 → Unknown、不推断 same_as_input），因此加载接受 v4 与 v5
+/// （更早的 v2/v3 匹配键语义不同，仍按版本失效重建）。
+pub const INDEX_VERSION: u8 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -1105,10 +1312,10 @@ impl Pricing {
                     name: e.name.clone(),
                     tier: e.tier,
                     plan: Some(e.plan.clone()),
-                    input: e.plan.base.input,
-                    output: e.plan.base.output,
-                    cache_write: e.plan.base.cache_write,
-                    cache_read: e.plan.base.cache_read,
+                    input: e.plan.base.input.resolve_direct(),
+                    output: e.plan.base.output.resolve_direct(),
+                    cache_write: e.plan.base.cache_write.resolve_direct(),
+                    cache_read: e.plan.base.cache_read.resolve_direct(),
                 })
                 .collect(),
         }
@@ -1121,12 +1328,7 @@ impl Pricing {
         };
         for e in &index.entries {
             let plan = e.plan.clone().unwrap_or_else(|| PricePlan {
-                base: PriceRates {
-                    input: e.input,
-                    output: e.output,
-                    cache_write: e.cache_write,
-                    cache_read: e.cache_read,
-                },
+                base: PriceRates::from_options(e.input, e.output, e.cache_write, e.cache_read),
                 ..Default::default()
             });
             pricing.add_entry(Entry {
@@ -1165,20 +1367,20 @@ impl Pricing {
                                 label: s.label.clone(),
                                 min_tokens: s.min_tokens,
                                 max_tokens: s.max_tokens,
-                                prices: PriceRates {
-                                    input: s.input,
-                                    output: s.output,
-                                    cache_write: s.cache_write,
-                                    cache_read: s.cache_read,
-                                },
+                                prices: PriceRates::from_options(
+                                    s.input,
+                                    s.output,
+                                    s.cache_write,
+                                    s.cache_read,
+                                ),
                             })
                             .collect::<Vec<_>>();
-                        let base = PriceRates {
-                            input: e.input,
-                            output: e.output,
-                            cache_write: e.cache_write,
-                            cache_read: e.cache_read,
-                        };
+                        let base = PriceRates::from_options(
+                            e.input,
+                            e.output,
+                            e.cache_write,
+                            e.cache_read,
+                        );
                         let plan = PricePlan {
                             basis: Some(PricingBasis::PromptTokens),
                             application: Some(PricingApplication::WholeRequest),
@@ -1233,7 +1435,9 @@ impl Pricing {
                             .iter()
                             .enumerate()
                             .map(|(i, o)| {
-                                let conv = |v: Option<f64>| v.map(|p| p * 1_000_000.0);
+                                let conv = |v: Option<f64>| {
+                                    RateSpec::fixed_or_unknown(v.map(|p| p * 1_000_000.0))
+                                };
                                 PriceSegment {
                                     label: Some(format!("≥{}", o.min_prompt_tokens)),
                                     min_tokens: o.min_prompt_tokens,
@@ -1255,10 +1459,14 @@ impl Pricing {
                                 basis: Some(PricingBasis::PromptTokens),
                                 application: Some(PricingApplication::WholeRequest),
                                 base: PriceRates {
-                                    input: e.prompt.map(|v| v * 1_000_000.0),
-                                    output: e.completion.map(|v| v * 1_000_000.0),
-                                    cache_write: None,
-                                    cache_read: None,
+                                    input: RateSpec::fixed_or_unknown(
+                                        e.prompt.map(|v| v * 1_000_000.0),
+                                    ),
+                                    output: RateSpec::fixed_or_unknown(
+                                        e.completion.map(|v| v * 1_000_000.0),
+                                    ),
+                                    cache_write: RateSpec::Unknown,
+                                    cache_read: RateSpec::Unknown,
                                 },
                                 segments,
                                 schedules: Vec::new(),
@@ -1479,24 +1687,24 @@ impl Pricing {
                 let openrouter = or_by_prefix
                     .get(e.prefix.as_str())
                     .map(|o| OpenRouterPrice {
-                        input: o.plan.base.input.unwrap_or(0.0),
-                        output: o.plan.base.output.unwrap_or(0.0),
-                        cache_write: o.plan.base.cache_write.unwrap_or(0.0),
-                        cache_read: o.plan.base.cache_read.unwrap_or(0.0),
+                        input: o.plan.base.input.resolve_direct().unwrap_or(0.0),
+                        output: o.plan.base.output.resolve_direct().unwrap_or(0.0),
+                        cache_write: o.plan.base.cache_write.resolve_direct().unwrap_or(0.0),
+                        cache_read: o.plan.base.cache_read.resolve_direct().unwrap_or(0.0),
                         name: o.name.clone(),
                     });
                 PricingEntry {
                     prefix: e.display.clone(),
                     name: e.name.clone(),
                     channel: e.display.split_once('/').map(|(c, _)| c.to_string()),
-                    input: e.plan.base.input,
-                    output: e.plan.base.output,
-                    cache_write: e.plan.base.cache_write,
-                    cache_read: e.plan.base.cache_read,
-                    incomplete: e.plan.base.input.is_none()
-                        || e.plan.base.output.is_none()
-                        || e.plan.base.cache_write.is_none()
-                        || e.plan.base.cache_read.is_none(),
+                    input: e.plan.base.input.resolve_direct(),
+                    output: e.plan.base.output.resolve_direct(),
+                    cache_write: e.plan.base.cache_write.resolve_direct(),
+                    cache_read: e.plan.base.cache_read.resolve_direct(),
+                    incomplete: e.plan.base.input == RateSpec::Unknown
+                        || e.plan.base.output == RateSpec::Unknown
+                        || e.plan.base.cache_write == RateSpec::Unknown
+                        || e.plan.base.cache_read == RateSpec::Unknown,
                     source: match e.tier {
                         TIER_EXTERNAL => "外置",
                         TIER_MODELSDEV => "models.dev",
@@ -1552,7 +1760,7 @@ impl Pricing {
         // 索引文件命中（D2/F10 接线）：签名与格式版本一致 → 免解析双快照，
         // 毫秒级恢复完整价格表（含分项可空语义与重建时诊断）。
         if let Ok(Some(index)) = load_index(index_path)
-            && index.v == INDEX_VERSION
+            && (INDEX_VERSION - 1..=INDEX_VERSION).contains(&index.v)
             && index.sig == sig
         {
             let arc = std::sync::Arc::new(Self::from_index(&index));
@@ -1780,6 +1988,7 @@ mod tests {
                 p.plan
                     .base
                     .cache_read
+                    .resolve_direct()
                     .is_some_and(|v| (v - 0.1 * input).abs() < 1e-9),
                 "{prefix} 缓存读 = 0.1×input"
             );
@@ -1794,6 +2003,7 @@ mod tests {
                 p.plan
                     .base
                     .cache_write
+                    .resolve_direct()
                     .is_some_and(|v| (v - 1.25 * input).abs() < 1e-9),
                 "{prefix} 写 = 1.25×input"
             );
@@ -1801,6 +2011,7 @@ mod tests {
                 p.plan
                     .base
                     .cache_read
+                    .resolve_direct()
                     .is_some_and(|v| (v - 0.1 * input).abs() < 1e-9),
                 "{prefix} 读 = 0.1×input"
             );
@@ -1858,10 +2069,10 @@ mod tests {
                 name: None,
                 plan: PricePlan {
                     base: PriceRates {
-                        input: Some(i),
-                        output: Some(o),
-                        cache_write: cw,
-                        cache_read: cr,
+                        input: RateSpec::Fixed(i),
+                        output: RateSpec::Fixed(o),
+                        cache_write: RateSpec::fixed_or_unknown(cw),
+                        cache_read: RateSpec::fixed_or_unknown(cr),
                     },
                     ..Default::default()
                 },
@@ -1878,10 +2089,10 @@ mod tests {
             application: Some(PricingApplication::WholeRequest),
             schedules: Vec::new(),
             base: PriceRates {
-                input: Some(3.0),
-                output: Some(15.0),
-                cache_write: Some(3.75),
-                cache_read: Some(0.3),
+                input: RateSpec::Fixed(3.0),
+                output: RateSpec::Fixed(15.0),
+                cache_write: RateSpec::Fixed(3.75),
+                cache_read: RateSpec::Fixed(0.3),
             },
             segments: vec![
                 PriceSegment {
@@ -1889,10 +2100,10 @@ mod tests {
                     min_tokens: 200_000,
                     max_tokens: Some(1_000_000),
                     prices: PriceRates {
-                        input: Some(6.0),
-                        output: Some(22.5),
-                        cache_write: Some(7.5),
-                        cache_read: Some(0.6),
+                        input: RateSpec::Fixed(6.0),
+                        output: RateSpec::Fixed(22.5),
+                        cache_write: RateSpec::Fixed(7.5),
+                        cache_read: RateSpec::Fixed(0.6),
                     },
                 },
                 PriceSegment {
@@ -1900,10 +2111,10 @@ mod tests {
                     min_tokens: 1_000_000,
                     max_tokens: None,
                     prices: PriceRates {
-                        input: Some(9.0),
-                        output: Some(30.0),
-                        cache_write: Some(11.25),
-                        cache_read: Some(0.9),
+                        input: RateSpec::Fixed(9.0),
+                        output: RateSpec::Fixed(30.0),
+                        cache_write: RateSpec::Fixed(11.25),
+                        cache_read: RateSpec::Fixed(0.9),
                     },
                 },
             ],
@@ -1929,7 +2140,7 @@ mod tests {
         // 计划 fixture：三段 [0,100000) [100000,272001) [272001,None)。
         let plan3 = PricePlan {
             base: PriceRates {
-                input: Some(1.0),
+                input: RateSpec::Fixed(1.0),
                 ..Default::default()
             },
             segments: vec![
@@ -1938,7 +2149,7 @@ mod tests {
                     min_tokens: 0,
                     max_tokens: Some(100_000),
                     prices: PriceRates {
-                        input: Some(2.0),
+                        input: RateSpec::Fixed(2.0),
                         ..Default::default()
                     },
                 },
@@ -1947,7 +2158,7 @@ mod tests {
                     min_tokens: 100_000,
                     max_tokens: Some(272_001),
                     prices: PriceRates {
-                        input: Some(4.0),
+                        input: RateSpec::Fixed(4.0),
                         ..Default::default()
                     },
                 },
@@ -1956,7 +2167,7 @@ mod tests {
                     min_tokens: 272_001,
                     max_tokens: None,
                     prices: PriceRates {
-                        input: Some(8.0),
+                        input: RateSpec::Fixed(8.0),
                         ..Default::default()
                     },
                 },
@@ -2022,11 +2233,11 @@ mod tests {
         assert!(validate_price_plan(&plan).is_err());
         // 负价格。
         let mut plan = tiered_plan();
-        plan.base.input = Some(-1.0);
+        plan.base.input = RateSpec::Fixed(-1.0);
         assert!(validate_price_plan(&plan).is_err());
         // 分段内负价格同样拒绝。
         let mut plan = tiered_plan();
-        plan.segments[0].prices.cache_read = Some(-0.5);
+        plan.segments[0].prices.cache_read = RateSpec::Fixed(-0.5);
         assert!(validate_price_plan(&plan).is_err());
         // 合法计划通过。
         assert!(validate_price_plan(&tiered_plan()).is_ok());
@@ -2039,10 +2250,10 @@ mod tests {
             basis: Some(PricingBasis::PromptTokens),
             application: Some(PricingApplication::WholeRequest),
             base: PriceRates {
-                input: Some(3.0),
-                output: Some(15.0),
-                cache_write: Some(3.75),
-                cache_read: Some(0.3),
+                input: RateSpec::Fixed(3.0),
+                output: RateSpec::Fixed(15.0),
+                cache_write: RateSpec::Fixed(3.75),
+                cache_read: RateSpec::Fixed(0.3),
             },
             schedules: Vec::new(),
             segments: vec![PriceSegment {
@@ -2050,10 +2261,10 @@ mod tests {
                 min_tokens: 200_000,
                 max_tokens: None,
                 prices: PriceRates {
-                    input: Some(6.0),
-                    output: None,           // 沿用基础 15.0
-                    cache_write: Some(0.0), // 显式免费，不回退
-                    cache_read: None,
+                    input: RateSpec::Fixed(6.0),
+                    output: RateSpec::Unknown,         // 沿用基础 15.0
+                    cache_write: RateSpec::Fixed(0.0), // 显式免费，不回退
+                    cache_read: RateSpec::Unknown,
                 },
             }],
         };
@@ -2066,7 +2277,7 @@ mod tests {
         // 基础价也缺失的分量 → None（估算时进 unknown）。
         let plan2 = PricePlan {
             base: PriceRates {
-                input: Some(3.0),
+                input: RateSpec::Fixed(3.0),
                 ..Default::default()
             },
             segments: vec![],
@@ -2138,10 +2349,10 @@ mod tests {
                     min_tokens: 200_000,
                     max_tokens: None,
                     prices: PriceRates {
-                        input: Some(6.0),
-                        output: Some(22.5),
-                        cache_write: Some(7.5),
-                        cache_read: Some(0.6),
+                        input: RateSpec::Fixed(6.0),
+                        output: RateSpec::Fixed(22.5),
+                        cache_write: RateSpec::Fixed(7.5),
+                        cache_read: RateSpec::Fixed(0.6),
                     },
                 }],
             },
@@ -2187,10 +2398,10 @@ mod tests {
                 name: None,
                 plan: PricePlan {
                     base: PriceRates {
-                        input: Some(i),
-                        output: Some(o),
-                        cache_write: Some(cw),
-                        cache_read: Some(cr),
+                        input: RateSpec::Fixed(i),
+                        output: RateSpec::Fixed(o),
+                        cache_write: RateSpec::Fixed(cw),
+                        cache_read: RateSpec::Fixed(cr),
                     },
                     ..Default::default()
                 },
@@ -2243,7 +2454,7 @@ mod tests {
             name: None,
             plan: PricePlan {
                 base: PriceRates {
-                    input: Some(8.0),
+                    input: RateSpec::Fixed(8.0),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -2256,7 +2467,7 @@ mod tests {
             name: None,
             plan: PricePlan {
                 base: PriceRates {
-                    input: Some(2.0),
+                    input: RateSpec::Fixed(2.0),
                     ..Default::default()
                 },
                 segments: vec![PriceSegment {
@@ -2264,7 +2475,7 @@ mod tests {
                     min_tokens: 100_000,
                     max_tokens: None,
                     prices: PriceRates {
-                        input: Some(20.0),
+                        input: RateSpec::Fixed(20.0),
                         ..Default::default()
                     },
                 }],
@@ -2302,7 +2513,7 @@ mod tests {
                 name: None,
                 plan: PricePlan {
                     base: PriceRates {
-                        input: Some(3.0),
+                        input: RateSpec::Fixed(3.0),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -2768,7 +2979,7 @@ mod tests {
             name: None,
             plan: PricePlan {
                 base: PriceRates {
-                    input: Some(2.0),
+                    input: RateSpec::Fixed(2.0),
                     ..Default::default()
                 },
                 segments: vec![PriceSegment {
@@ -2776,7 +2987,7 @@ mod tests {
                     min_tokens: 100_001,
                     max_tokens: None,
                     prices: PriceRates {
-                        input: Some(9.0),
+                        input: RateSpec::Fixed(9.0),
                         ..Default::default()
                     },
                 }],
@@ -2897,17 +3108,17 @@ cache_read = 1.0
                 basis: Some(PricingBasis::PromptTokens),
                 application: Some(PricingApplication::WholeRequest),
                 base: PriceRates {
-                    input: Some(4.0),
-                    output: Some(20.0),
-                    cache_write: Some(0.0),
-                    cache_read: None,
+                    input: RateSpec::Fixed(4.0),
+                    output: RateSpec::Fixed(20.0),
+                    cache_write: RateSpec::Fixed(0.0),
+                    cache_read: RateSpec::Unknown,
                 },
                 segments: vec![PriceSegment {
                     label: Some(">272K".into()),
                     min_tokens: 272_001,
                     max_tokens: None,
                     prices: PriceRates {
-                        input: Some(8.0),
+                        input: RateSpec::Fixed(8.0),
                         ..Default::default()
                     },
                 }],
@@ -2919,7 +3130,7 @@ cache_read = 1.0
                         end_time: "14:00".into(),
                         weekdays: Some(vec!["mon".into(), "fri".into()]),
                         prices: PriceRates {
-                            input: Some(30.0),
+                            input: RateSpec::Fixed(30.0),
                             ..Default::default()
                         },
                         ..Default::default()
@@ -2936,10 +3147,10 @@ cache_read = 1.0
             name: None,
             plan: PricePlan {
                 base: PriceRates {
-                    input: Some(1.0),
-                    output: Some(2.0),
-                    cache_write: Some(0.25),
-                    cache_read: Some(0.02),
+                    input: RateSpec::Fixed(1.0),
+                    output: RateSpec::Fixed(2.0),
+                    cache_write: RateSpec::Fixed(0.25),
+                    cache_read: RateSpec::Fixed(0.02),
                 },
                 ..Default::default()
             },
@@ -2997,10 +3208,10 @@ cache_read = 1.0
         // Task 5：统一估算器输出请求级 breakdown——四行明细与总价同源；
         // 阈值边界、部分缺价、峰谷与分段条件切换、重复估算确定性。
         let rates = |i: f64, o: f64, cw: f64, cr: f64| PriceRates {
-            input: Some(i),
-            output: Some(o),
-            cache_write: Some(cw),
-            cache_read: Some(cr),
+            input: RateSpec::Fixed(i),
+            output: RateSpec::Fixed(o),
+            cache_write: RateSpec::Fixed(cw),
+            cache_read: RateSpec::Fixed(cr),
         };
         let mut p = Pricing::empty();
         // 渠道 fixed：固定四价，无分段无时间规则。
@@ -3023,20 +3234,20 @@ cache_read = 1.0
             plan: PricePlan {
                 basis: Some(PricingBasis::PromptTokens),
                 base: PriceRates {
-                    input: Some(2.0),
-                    output: Some(1.0),
-                    cache_write: Some(0.5),
-                    cache_read: None,
+                    input: RateSpec::Fixed(2.0),
+                    output: RateSpec::Fixed(1.0),
+                    cache_write: RateSpec::Fixed(0.5),
+                    cache_read: RateSpec::Unknown,
                 },
                 segments: vec![PriceSegment {
                     label: Some(">272K".into()),
                     min_tokens: 272_001,
                     max_tokens: None,
                     prices: PriceRates {
-                        input: Some(10.0),
-                        output: Some(5.0),
-                        cache_write: None,
-                        cache_read: None,
+                        input: RateSpec::Fixed(10.0),
+                        output: RateSpec::Fixed(5.0),
+                        cache_write: RateSpec::Unknown,
+                        cache_read: RateSpec::Unknown,
                     },
                 }],
                 ..Default::default()
@@ -3050,10 +3261,10 @@ cache_read = 1.0
             name: None,
             plan: PricePlan {
                 base: PriceRates {
-                    input: Some(1.0),
-                    output: Some(2.0),
-                    cache_write: None,
-                    cache_read: None,
+                    input: RateSpec::Fixed(1.0),
+                    output: RateSpec::Fixed(2.0),
+                    cache_write: RateSpec::Unknown,
+                    cache_read: RateSpec::Unknown,
                 },
                 schedules: vec![PriceSchedule {
                     label: Some("peak".into()),
@@ -3068,7 +3279,7 @@ cache_read = 1.0
                                 .collect(),
                         ),
                         prices: PriceRates {
-                            input: Some(30.0),
+                            input: RateSpec::Fixed(30.0),
                             ..Default::default()
                         },
                         ..Default::default()
@@ -3197,7 +3408,7 @@ cache_read = 1.0
             name: None,
             plan: PricePlan {
                 base: PriceRates {
-                    input: Some(8.0),
+                    input: RateSpec::Fixed(8.0),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -3224,13 +3435,13 @@ cache_read = 1.0
                                 .collect(),
                         ),
                         prices: PriceRates {
-                            input: Some(20.0),
+                            input: RateSpec::Fixed(20.0),
                             ..Default::default()
                         },
                         ..Default::default()
                     }],
                     prices: PriceRates {
-                        input: Some(2.0),
+                        input: RateSpec::Fixed(2.0),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -3272,13 +3483,13 @@ cache_read = 1.0
                         end_time: "20:00".into(),
                         weekdays: None,
                         prices: PriceRates {
-                            input: Some(30.0),
+                            input: RateSpec::Fixed(30.0),
                             ..Default::default()
                         },
                         ..Default::default()
                     }],
                     prices: PriceRates {
-                        input: Some(1.0),
+                        input: RateSpec::Fixed(1.0),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -3292,7 +3503,7 @@ cache_read = 1.0
                 name: None,
                 plan: PricePlan {
                     base: PriceRates {
-                        input: Some(9.0),
+                        input: RateSpec::Fixed(9.0),
                         ..Default::default()
                     },
                     schedules: sched.into_iter().collect(),
@@ -3339,7 +3550,7 @@ cache_read = 1.0
                             end_time: "20:00".into(),
                             weekdays: None,
                             prices: PriceRates {
-                                input: Some(5.0),
+                                input: RateSpec::Fixed(5.0),
                                 ..Default::default()
                             },
                             ..Default::default()
@@ -3349,7 +3560,7 @@ cache_read = 1.0
                             end_time: "18:00".into(),
                             weekdays: None,
                             prices: PriceRates {
-                                input: Some(12.0),
+                                input: RateSpec::Fixed(12.0),
                                 ..Default::default()
                             },
                             ..Default::default()
@@ -3668,7 +3879,18 @@ cache_read = 0.0
             Some(0.0)
         );
         // 基名命中基名价格
-        assert!((p.lookup("tencent/hy3").unwrap().plan.base.input.unwrap() - 0.0825).abs() < 1e-9);
+        assert!(
+            (p.lookup("tencent/hy3")
+                .unwrap()
+                .plan
+                .base
+                .input
+                .resolve_direct()
+                .unwrap()
+                - 0.0825)
+                .abs()
+                < 1e-9
+        );
         // 未知变体：回退到基名价格（variant fallback 显式标记，非静默）
         let est = p
             .estimate("tencent/hy3:preview", &counts(1_000_000, 0, 0, 0), at())
@@ -3698,6 +3920,232 @@ cache_read = 0.0
         );
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&dir2).ok();
+    }
+
+    // ── 缓存读取定价解析（RateSpec 三态）回归 ──────────────────
+
+    /// 外置单条目 helper：base 四价（Option 语义经 from_options）。
+    fn external_entry(toml_body: &str) -> (Pricing, Vec<String>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("tokenscope-ratespec-{}-{seq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write(&dir, "pricing.toml", toml_body);
+        let (p, warnings) = Pricing::load(Some(&path), None, None);
+        std::fs::remove_dir_all(&dir).ok();
+        (p, warnings)
+    }
+
+    #[test]
+    fn test_ratespec_same_as_input_base_resolves_to_input_price() {
+        // 计划不变量 3/4：显式 same_as_input 沿用输入价；显式 0 仍是免费；
+        // Unknown 仍未知。三者互不混淆。
+        let (p, w) = external_entry(
+            r#"
+[[model]]
+prefix = "m/same-as-input"
+input = 2.0
+output = 10.0
+cache_write = 0.0
+cache_read = "same_as_input"
+
+[[model]]
+prefix = "m/free-read"
+input = 2.0
+output = 10.0
+cache_read = 0.0
+
+[[model]]
+prefix = "m/unknown-read"
+input = 2.0
+output = 10.0
+"#,
+        );
+        assert!(w.is_empty(), "{w:?}");
+        let t = counts(1_000, 0, 0, 50_000);
+        // same_as_input：cache_read 按输入价 2.0 计费 → 50_000 × 2 / 1e6 = 0.1
+        let est = p.estimate("same-as-input", &t, at()).unwrap();
+        assert!(est.complete, "same_as_input 解析后必须完整");
+        assert_eq!(est.unknown.cache_read, 0);
+        let cr = est
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheRead)
+            .unwrap();
+        assert_eq!(cr.unit_price, Some(2.0));
+        assert_eq!(cr.rate_kind, RateKind::SameAsInput);
+        assert!((est.cost - (1_000.0 * 2.0 + 50_000.0 * 2.0) / 1e6).abs() < 1e-9);
+        // 显式 0：免费（known），不是未知
+        let est = p.estimate("free-read", &t, at()).unwrap();
+        assert!(est.complete);
+        let cr = est
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheRead)
+            .unwrap();
+        assert_eq!(cr.unit_price, Some(0.0));
+        assert_eq!(cr.rate_kind, RateKind::Fixed);
+        assert_eq!(cr.subtotal, 0.0);
+        // Unknown：缺价 ≠ 免费
+        let est = p.estimate("unknown-read", &t, at()).unwrap();
+        assert!(!est.complete);
+        assert_eq!(est.unknown.cache_read, 50_000);
+        let cr = est
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheRead)
+            .unwrap();
+        assert_eq!(cr.rate_kind, RateKind::Unknown);
+        assert_eq!(cr.unit_price, None);
+    }
+
+    #[test]
+    fn test_ratespec_same_as_input_follows_segment_and_schedule_input() {
+        // 计划不变量 5：分段/峰谷档的 same_as_input 引用同层解析出的输入价。
+        let (p, w) = external_entry(
+            r#"
+[[model]]
+prefix = "tiered/sai"
+input = 2.0
+output = 10.0
+cache_read = "same_as_input"
+
+[[model.segment]]
+label = ">272K"
+min_tokens = 272001
+input = 8.0
+output = 30.0
+cache_read = "same_as_input"
+
+[[model]]
+prefix = "sched/peak-sai"
+input = 2.0
+output = 10.0
+cache_read = "same_as_input"
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "23:59"
+input = 30.0
+"#,
+        );
+        assert!(w.is_empty(), "{w:?}");
+        let high = counts(0, 0, 0, 300_000);
+        // 分段命中：分段 input=8 → cache_read 也是 8（SameAsInput 跟随同层输入价）
+        let est = p.estimate("sai", &high, at()).unwrap();
+        let cr = est
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheRead)
+            .unwrap();
+        assert_eq!(cr.unit_price, Some(8.0));
+        assert_eq!(cr.rate_kind, RateKind::SameAsInput);
+        assert_eq!(est.segment_label.as_deref(), Some(">272K"));
+        // 峰谷命中（无分段模型）：规则级 input=30 → cache_read 也是 30
+        let est = p.estimate("peak-sai", &high, at()).unwrap();
+        assert_eq!(
+            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            Some("peak")
+        );
+        let cr = est
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheRead)
+            .unwrap();
+        assert_eq!(
+            cr.unit_price,
+            Some(30.0),
+            "峰谷档内 same_as_input 跟随该档输入价"
+        );
+        // 低上下文走基础价 2.0
+        let est = p.estimate("sai", &counts(0, 0, 0, 1_000), at()).unwrap();
+        let cr = est
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheRead)
+            .unwrap();
+        assert_eq!(cr.unit_price, Some(2.0));
+    }
+
+    #[test]
+    fn test_ratespec_same_as_input_rejected_for_other_components() {
+        // 计划不变量：SameAsInput 仅允许 cache_read，其他分项加载即拒绝。
+        let (p, w) = external_entry(
+            r#"
+[[model]]
+prefix = "bad/sai-input"
+input = "same_as_input"
+output = 10.0
+"#,
+        );
+        assert_eq!(p.external_count(), 0, "非法声明必须整条拒绝");
+        assert!(w.iter().any(|x| x.contains("same_as_input")), "{w:?}");
+    }
+
+    #[test]
+    fn test_ratespec_missing_cache_read_with_zero_tokens_stays_complete() {
+        // 计划 Task 1 Step 1：cache_read 缺价但请求 cache_read token 为 0
+        // → 不因该字段标为不完整。
+        let (p, w) = external_entry(
+            r#"
+[[model]]
+prefix = "zero-cr/m"
+input = 2.0
+output = 10.0
+"#,
+        );
+        assert!(w.is_empty());
+        let est = p.estimate("m", &counts(1_000, 500, 0, 0), at()).unwrap();
+        assert!(est.complete);
+        assert_eq!(est.unknown.cache_read, 0);
+    }
+
+    #[test]
+    fn test_ratespec_serde_wire_format() {
+        // 线格式：Fixed → 数字（含 0）、SameAsInput → "same_as_input"、
+        // Unknown → null；旧 v4 JSON（数字/null）可按 v5 语义解析。
+        assert_eq!(
+            serde_json::to_value(PriceRates {
+                input: RateSpec::Fixed(0.0),
+                output: RateSpec::Unknown,
+                cache_write: RateSpec::SameAsInput,
+                cache_read: RateSpec::Fixed(1.5),
+            })
+            .unwrap(),
+            serde_json::json!({"input": 0.0, "output": null, "cache_write": "same_as_input", "cache_read": 1.5})
+        );
+        let r: PriceRates = serde_json::from_str(r#"{"input": 1.5, "cache_read": null}"#).unwrap();
+        assert_eq!(r.input, RateSpec::Fixed(1.5));
+        assert_eq!(r.cache_read, RateSpec::Unknown);
+        // 缺省字段 = Unknown（旧索引缺键兼容）
+        let r: PriceRates = serde_json::from_str("{}").unwrap();
+        assert_eq!(r, PriceRates::default());
+    }
+
+    #[test]
+    fn test_index_v4_json_still_loads_as_v5_semantics() {
+        // 计划不变量 10：旧索引可读——数字 → Fixed、null/缺失 → Unknown，
+        // 结果语义不变；索引版本接受 v ≤ 5。
+        let v4 = r#"{
+            "v": 4, "sig": "s", "synced_at": "t", "warnings": [],
+            "entries": [{
+                "prefix": "m", "display": "vendor/m", "name": null, "tier": 1,
+                "plan": {"base": {"input": 2.0, "output": null}},
+                "input": 2.0, "output": null, "cache_write": null, "cache_read": null
+            }]
+        }"#;
+        let index: PricingIndex = serde_json::from_str(v4).unwrap();
+        let p = Pricing::from_index(&index);
+        let plan = p.lookup("m").unwrap().plan;
+        assert_eq!(plan.base.input, RateSpec::Fixed(2.0));
+        assert_eq!(plan.base.output, RateSpec::Unknown);
+        assert_eq!(plan.base.cache_read, RateSpec::Unknown);
     }
 
     #[test]
