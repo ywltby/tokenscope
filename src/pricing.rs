@@ -1180,12 +1180,10 @@ fn default_index_v1() -> u8 {
 }
 
 /// 索引格式当前版本。
-/// Task 2A：v4——匹配键改为末段模型名（保留渠道候选元数据）。
-/// v5（缓存读取定价解析计划）：单价升级为三态 RateSpec。线格式向后兼容
-/// （数字/null 语义不变，v4 索引可直接按 v5 语义读取：数值 → Fixed、
-/// null/缺失 → Unknown、不推断 same_as_input），因此加载接受 v4 与 v5
-/// （更早的 v2/v3 匹配键语义不同，仍按版本失效重建）。
-pub const INDEX_VERSION: u8 = 5;
+/// Task 2A：v4——匹配键改为末段模型名。v5：单价三态 RateSpec。
+/// v6（全计划审核 R01）：OpenRouter 数值缓存价保留——v4/v5 索引可能
+/// 携带被错误置 Unknown 的缓存价，**拒绝读取**，一律按来源重建。
+pub const INDEX_VERSION: u8 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -1503,6 +1501,8 @@ impl Pricing {
                             plan: PricePlan {
                                 basis: Some(PricingBasis::PromptTokens),
                                 application: Some(PricingApplication::WholeRequest),
+                                // R01：快照中的数值缓存价保留（×1e6 统一
+                                // USD/M），缺失保持 Unknown，显式 0 = 免费。
                                 base: PriceRates {
                                     input: RateSpec::fixed_or_unknown(
                                         e.prompt.map(|v| v * 1_000_000.0),
@@ -1510,8 +1510,12 @@ impl Pricing {
                                     output: RateSpec::fixed_or_unknown(
                                         e.completion.map(|v| v * 1_000_000.0),
                                     ),
-                                    cache_write: RateSpec::Unknown,
-                                    cache_read: RateSpec::Unknown,
+                                    cache_write: RateSpec::fixed_or_unknown(
+                                        e.cache_write.map(|v| v * 1_000_000.0),
+                                    ),
+                                    cache_read: RateSpec::fixed_or_unknown(
+                                        e.cache_read.map(|v| v * 1_000_000.0),
+                                    ),
                                 },
                                 segments,
                                 schedules: Vec::new(),
@@ -1914,10 +1918,11 @@ impl Pricing {
         {
             return (cached.clone(), cached_warnings.clone(), true);
         }
-        // 索引文件命中（D2/F10 接线）：签名与格式版本一致 → 免解析双快照，
-        // 毫秒级恢复完整价格表（含分项可空语义与重建时诊断）。
+        // 索引文件命中（D2/F10 接线）：签名一致且版本为当前格式（R01：
+        // v4/v5 可能携带错误的缓存价语义，拒绝读取、强制重建）→
+        // 免解析双快照，毫秒级恢复完整价格表（含诊断）。
         if let Ok(Some(index)) = load_index(index_path)
-            && (INDEX_VERSION - 1..=INDEX_VERSION).contains(&index.v)
+            && index.v == INDEX_VERSION
             && index.sig == sig
         {
             let arc = std::sync::Arc::new(Self::from_index(&index));
@@ -4619,6 +4624,188 @@ cache_read = "free"
         );
         assert!(est.complete);
         assert!(est.excluded_candidate_warning.is_none());
+    }
+
+    // ── R01：OpenRouter 数值缓存价保留（全计划审核 Task 1）──────────
+
+    #[test]
+    fn test_openrouter_base_cache_rates_preserved() {
+        let dir = std::env::temp_dir().join(format!("tokenscope-r01-or-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let snap = write(
+            &dir,
+            "pricing-openrouter.json",
+            r#"{"v":2,"synced_at":"t","entries":[
+                {"id":"or/model","name":null,
+                 "prompt":0.000002,"completion":0.000003,
+                 "cache_read":0.0000005,"cache_write":0}
+            ]}"#,
+        );
+        let (p, warnings) = Pricing::load(None, None, Some(&snap));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let plan = p.lookup("model").unwrap().plan;
+        // 数值缓存价保留并 ×1e6 统一为 USD/百万 token：read 0.5/M、write 显式 0
+        assert_eq!(plan.base.input, RateSpec::Fixed(2.0));
+        assert_eq!(plan.base.output, RateSpec::Fixed(3.0));
+        assert_eq!(plan.base.cache_read, RateSpec::Fixed(0.5));
+        assert_eq!(plan.base.cache_write, RateSpec::Fixed(0.0));
+        // 端到端：input 1M + cache_read 1M → $2.5，完整
+        let est = p
+            .estimate("or/model", &counts(1_000_000, 0, 0, 1_000_000), at())
+            .unwrap();
+        assert!(est.complete);
+        assert_eq!(est.unknown.cache_read, 0);
+        assert!((est.cost - 2.5).abs() < 1e-9);
+        let cr = est
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheRead)
+            .unwrap();
+        assert_eq!(cr.unit_price, Some(0.5));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_openrouter_missing_and_explicit_zero_cache_rates() {
+        let dir = std::env::temp_dir().join(format!("tokenscope-r01-or2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let snap = write(
+            &dir,
+            "pricing-openrouter.json",
+            r#"{"v":2,"synced_at":"t","entries":[
+                {"id":"or/missing","name":null,"prompt":0.000001,"completion":0.000002},
+                {"id":"or/free","name":null,"prompt":0.000001,"completion":0.000002,"cache_read":0}
+            ]}"#,
+        );
+        let (p, warnings) = Pricing::load(None, None, Some(&snap));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // 缺失 → Unknown（不猜 0/输入价）
+        let plan = p.lookup("missing").unwrap().plan;
+        assert_eq!(plan.base.cache_read, RateSpec::Unknown);
+        assert_eq!(plan.base.cache_write, RateSpec::Unknown);
+        // 显式 0 → Fixed(0) 免费
+        let plan = p.lookup("free").unwrap().plan;
+        assert_eq!(plan.base.cache_read, RateSpec::Fixed(0.0));
+        // override 未声明缓存价 → 继承同条目基础值（分段缺键回退基础）
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_openrouter_override_inherits_base_cache_rates() {
+        let dir = std::env::temp_dir().join(format!("tokenscope-r01-or3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let snap = write(
+            &dir,
+            "pricing-openrouter.json",
+            r#"{"v":2,"synced_at":"t","entries":[
+                {"id":"or/tier","name":null,
+                 "prompt":0.000002,"completion":0.000003,
+                 "cache_read":0.0000005,"cache_write":0,
+                 "overrides":[{"min_prompt_tokens":1000000,"prompt":0.000004,"completion":0.000006}]}
+            ]}"#,
+        );
+        let (p, warnings) = Pricing::load(None, None, Some(&snap));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // basis 2M 命中 override 段；段未声明缓存价 → 继承基础 read 0.5 / write 0
+        let est = p
+            .estimate("tier", &counts(2_000_000, 0, 0, 1_000_000), at())
+            .unwrap();
+        assert!(est.complete, "override 段继承基础缓存价后必须完整");
+        let cr = est
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheRead)
+            .unwrap();
+        assert_eq!(cr.unit_price, Some(0.5));
+        // 段内 input 4/M、read 继承 0.5/M → 2M×4 + 1M×0.5 = 8.5
+        assert!((est.cost - 8.5).abs() < 1e-9);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_pricing_index_rebuilds_stale_cache_rates() {
+        // R01：旧索引把 OR 数值缓存价存成 Unknown——有效签名也不能继续用，
+        // 必须按来源重建出新单价（v4/v5 拒绝读取）。
+        let dir = std::env::temp_dir().join(format!("tokenscope-r01-idx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write(
+            &dir,
+            "pricing-openrouter.json",
+            r#"{"v":2,"synced_at":"t","entries":[
+                {"id":"or/model","name":null,
+                 "prompt":0.000002,"completion":0.000003,
+                 "cache_read":0.0000005,"cache_write":0}
+            ]}"#,
+        );
+        let index_path = dir.join("pricing-index.json");
+        // 先用新代码建立正确索引（获得有效 sig）
+        let (p, _, _) = Pricing::load_cached(
+            None,
+            None,
+            Some(dir.join("pricing-openrouter.json").as_path()),
+            &index_path,
+        );
+        assert_eq!(
+            p.lookup("model").unwrap().plan.base.cache_read,
+            RateSpec::Fixed(0.5)
+        );
+        // 伪造"旧语义"索引：同 sig（从新索引取）但缓存价被写成 Unknown（v5 旧错误产物）
+        let good = crate::pricing::load_index(&index_path).unwrap().unwrap();
+        let stale = PricingIndex {
+            v: 5,
+            warnings: good.warnings.clone(),
+            sig: good.sig.clone(),
+            synced_at: good.synced_at.clone(),
+            entries: vec![IndexEntry {
+                prefix: "model".into(),
+                display: "or/model".into(),
+                name: None,
+                tier: TIER_OPENROUTER,
+                plan: Some(PricePlan {
+                    base: PriceRates {
+                        input: RateSpec::Fixed(2.0),
+                        output: RateSpec::Fixed(3.0),
+                        cache_write: RateSpec::Unknown,
+                        cache_read: RateSpec::Unknown,
+                    },
+                    ..Default::default()
+                }),
+                input: Some(2.0),
+                output: Some(3.0),
+                cache_write: None,
+                cache_read: None,
+            }],
+        };
+        crate::pricing::save_index(&index_path, &stale).unwrap();
+        let (p2, _, hit) = Pricing::load_cached(
+            None,
+            None,
+            Some(dir.join("pricing-openrouter.json").as_path()),
+            &index_path,
+        );
+        assert!(!hit, "v5 旧语义索引必须失效重建");
+        assert_eq!(
+            p2.lookup("model").unwrap().plan.base.cache_read,
+            RateSpec::Fixed(0.5),
+            "重建后必须从快照恢复数值缓存价"
+        );
+        // 新索引重启读取一致
+        let (p3, _, hit2) = Pricing::load_cached(
+            None,
+            None,
+            Some(dir.join("pricing-openrouter.json").as_path()),
+            &index_path,
+        );
+        assert!(hit2, "v6 索引应命中");
+        assert_eq!(
+            p3.lookup("model").unwrap().plan.base.cache_read,
+            RateSpec::Fixed(0.5)
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
