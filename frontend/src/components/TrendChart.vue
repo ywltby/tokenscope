@@ -179,17 +179,26 @@ watch(() => [props.groups, props.by, mode.value], render);
     <div v-if="showSummary" class="chart-summary" role="region" aria-label="图表数据摘要">
       <div v-for="l in summaryLines" :key="l" class="summary-line ts-num">{{ l }}</div>
     </div>
-    <div
-      ref="el"
-      class="chart-canvas"
-      style="width: 100%; height: 320px"
-      role="img"
-      :aria-label="`趋势图：${titleText}，${stateText}`"
-    />
+    <!-- 任务 8（硬约束）：绘图区实色衬底——ECharts 背景透明但容器 .ts-card-solid -->
+    <div class="chart-body ts-card-solid">
+      <div
+        ref="el"
+        class="chart-canvas"
+        style="width: 100%; height: 320px"
+        role="img"
+        :aria-label="`趋势图：${titleText}，${stateText}`"
+      />
+    </div>
   </section>
 </template>
 
 <style scoped>
+/* 绘图区实色衬底容器（.ts-card-solid 提供背景与圆角） */
+.chart-body {
+  padding: var(--ts-space-2) var(--ts-space-3);
+  margin-top: var(--ts-space-2);
+}
+
 .chart-head {
   display: flex;
   align-items: baseline;

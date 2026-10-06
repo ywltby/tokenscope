@@ -324,3 +324,21 @@ loading、stale、empty、partial、error、no-price 统一使用标题行状态
 - **ECharts 主题切换残留：** 监听解析后的主题并 dispose/rebuild，业务 `chartData` 不变。
 - **透明度影响对比度：** 表格、图表绘图区、公式区立即退回 `--ts-surface-solid`；不通过降低文字 opacity 补救。
 - **并行 agent 造成类型或门禁失败：** 记录具体文件和错误，等待责任 agent 修复；禁止修改无关文件和使用 `--no-verify`。
+
+## 执行记录（2026-10-06，Apple Glass 第二版）
+
+| 任务 | 内容 | 提交 |
+| --- | --- | --- |
+| 任务 0 | 第二版视觉差异清单（`2026-10-06-design-system-visual-gap.md`）+ 基线门禁（typecheck/format/107 用例） | cbf114e |
+| 任务 1 | Apple Glass 基础层核对收尾：`.ts-status-pill` 公共类、reduced-motion/状态胶囊断言（主体由 a8788aa、b76809c 先行落地） | d547293 |
+| 任务 2 | 来源筛选改图标+文字分段控件；品牌线性 SVG 标记；分段组方向键测试 | 149c750 |
+| 任务 3 | 页头 28px 大标题 + 标题行状态胶囊；维度分段控件；NAlert → `.ts-notice` 内联通知（去设置/重试动作）；日期触发按钮入控件族；横幅 `.ts-notice` 化 | 851308d |
+| 任务 4 | 单张指标卡（费用 44px + 三次读数 26px 发丝线分隔）、警告胶囊、命中率公式入 tooltip、6px 分项比例条 + 色点图例 | 437cf3c |
+| 任务 5 | 趋势/聚合/明细统一 `.ts-card`（图例移卡头、堆叠柱顶段圆角）；表格无竖线行发丝线、› 指示、合计行粗线、可关闭筛选标签；区块间距 20px | aafe57a |
+| 任务 6 | 费用浮层 elevated 玻璃（`--ts-glass-blur-popover` 16px）+ 公式区 `.ts-card-solid` 衬底 + 交互断言（click/hover/focus/Escape/aria-expanded） | 83c0994 |
+| 任务 7 | 设置页 macOS 四组卡片（组标题在卡外、左标签右控件行）；全部警告收敛 `.ts-notice`；Dashboard 多来源异常合并可展开通知 | 5d2f882 |
+| 任务 8 | 图表绘图区实色衬底容器（硬约束）；全量前端门禁（typecheck/format/133 用例/build）+ Rust 双 manifest 回归全绿；QA 文档重写为第二版 | 见最终提交 |
+
+门禁结果与真机走查清单见 `2026-10-06-design-system-visual-qa.md`。
+**计划保持 active：完成定义第 6 条（1280×820 / 980×620 / 三种缩放 / 浅深自动主题 /
+六态状态的真实视觉验收）待走查通过后归档。**
