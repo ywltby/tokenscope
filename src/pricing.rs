@@ -2706,6 +2706,135 @@ mod tests {
     }
 
     #[test]
+    fn test_pricing_index_migration() {
+        // Task 9：旧 v3 扁平索引（首斜杠剥前缀口径）按版本失效重建；
+        // 旧快照作纯基础价离线可用；新索引恢复后保留分段；候选计价
+        // 不跨来源拼价。
+        let dir = std::env::temp_dir().join(format!("tokenscope-t9-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let idx = dir.join("pricing-index.json");
+        let _g = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *PRICE_CACHE.lock().unwrap() = None;
+        // 生产同款签名：证明重建只由版本检查触发（v3 < 当前 v4）。
+        let sig = source_sig(&[None, None, None]);
+        let v3 = serde_json::json!({
+            "v": 3,
+            "sig": sig,
+            "synced_at": "2026-10-06T00:00:00Z",
+            "entries": [
+                { "prefix": "old-flat-model", "display": "old/flat-model",
+                  "name": null, "tier": 1, "input": 1.0, "output": 2.0,
+                  "cache_write": 0.0, "cache_read": 0.0 }
+            ]
+        });
+        std::fs::write(&idx, serde_json::to_string(&v3).unwrap()).unwrap();
+        let (_, _, hit) = Pricing::load_cached(None, None, None, &idx);
+        assert!(!hit, "v3 扁平索引必须按版本失效重建（不猜测渠道键）");
+
+        // 旧 models.dev v2 快照（无分段字段）→ 离线仅基础价可用。
+        use crate::modelsdev::{Snapshot as MdSnap, SnapshotEntry as MdEntry};
+        let md_path = dir.join("pricing-modelsdev.json");
+        let md_snap = MdSnap {
+            v: 2,
+            synced_at: "t".into(),
+            entries: vec![MdEntry {
+                id: "prov/legacy".into(),
+                name: None,
+                input: Some(1.0),
+                output: Some(3.0),
+                cache_read: Some(0.1),
+                cache_write: Some(0.2),
+                segments: Vec::new(),
+            }],
+        };
+        std::fs::write(&md_path, serde_json::to_string(&md_snap).unwrap()).unwrap();
+        let (p_legacy, w) = Pricing::load(None, Some(&md_path), None);
+        assert!(w.is_empty());
+        let est = p_legacy
+            .estimate("prov/legacy", &counts(1_000_000, 0, 0, 0), at())
+            .unwrap();
+        assert!((est.cost - 1.0).abs() < 1e-9, "旧快照按基础价离线计价");
+        assert_eq!(est.segment_label, None);
+
+        // 新索引（v4）往返：segments 保留，估算命中高档。
+        let mut p_new = Pricing::empty();
+        p_new.add_entry(Entry {
+            prefix: match_key("prov/seg"),
+            display: "prov/seg".into(),
+            name: None,
+            plan: PricePlan {
+                base: PriceRates {
+                    input: Some(2.0),
+                    ..Default::default()
+                },
+                segments: vec![PriceSegment {
+                    label: Some(">100K".into()),
+                    min_tokens: 100_001,
+                    max_tokens: None,
+                    prices: PriceRates {
+                        input: Some(9.0),
+                        ..Default::default()
+                    },
+                }],
+                ..Default::default()
+            },
+            tier: TIER_MODELSDEV,
+        });
+        let index = p_new.to_index(sig, "t".into(), Vec::new());
+        std::fs::write(&idx, serde_json::to_string(&index).unwrap()).unwrap();
+        let restored = Pricing::from_index(&load_index(&idx).unwrap().unwrap());
+        let est = restored
+            .estimate("prov/seg", &counts(100_001, 0, 0, 0), at())
+            .unwrap();
+        assert_eq!(
+            est.segment_label.as_deref(),
+            Some(">100K"),
+            "新索引恢复保留分段"
+        );
+        assert!((est.cost - 100_001.0 * 9.0 / 1e6).abs() < 1e-9);
+
+        // 来源冲突不跨 provider 拼价：external（贵）与 models.dev（便宜）
+        // 同名候选并存，命中行的 source 与四类单价必须同源。
+        let ext = dir.join("pricing.toml");
+        std::fs::write(
+            &ext,
+            "[[model]]
+prefix = \"prov/seg\"
+input = 20.0
+output = 40.0
+cache_write = 5.0
+cache_read = 1.0
+",
+        )
+        .unwrap();
+        let (p_mix, wm) = Pricing::load(Some(&ext), Some(&md_path), None);
+        assert!(wm.is_empty(), "warnings: {wm:?}");
+        let est = p_mix
+            .estimate("prov/seg", &counts(1_000_000, 1_000_000, 0, 0), at())
+            .unwrap();
+        let m = est.matched.as_ref().unwrap();
+        assert_eq!(m.source, "external", "贵候选胜出");
+        let ext_in = est
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::Input)
+            .unwrap();
+        assert_eq!(ext_in.unit_price, Some(20.0), "input 单价来自 external");
+        let ext_out = est
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::Output)
+            .unwrap();
+        assert_eq!(
+            ext_out.unit_price,
+            Some(40.0),
+            "output 单价同源，不从 models.dev 拼价"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn test_pricing_index_restart_hit() {
         // D2/F10 接线：索引文件签名一致 → 跳过双快照解析直接恢复。
         let dir = std::env::temp_dir().join(format!("tokenscope-b3-idx-{}", std::process::id()));

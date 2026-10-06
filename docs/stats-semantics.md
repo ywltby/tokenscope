@@ -139,8 +139,41 @@ model 纳入键：**跨模型**的同用量请求不再误合并；重播必然�
 - **缓存失败（不变量 9）**：缓存任何故障降级全量扫描并告警；解析版本
   不符自动清库；测试密闭（不触碰真实 `~/.tokenscope`）。
 - 价格快照与外置文件的来源、条数、同步时间在设置页可见。
-
-## 5. 时间与时区
+- **候选匹配与最高费用（Task 2A，2026-10-06）**：匹配键取模型标识最后
+  一个 `/` 之后的行为准（原始完整键保留用于展示与 breakdown）。同一
+  末段键可对应多个渠道/来源候选（models.dev 跨 provider 同名模型、
+  OpenRouter 渠道、外置条目互不覆盖）；匹配分阶段回退：完整匹配（含
+  variant）→ 完整匹配（variant 回退，显式标记）→ 有边界前缀匹配
+  （`gpt-5` 不得命中 `gpt-50`）→ 前缀 + variant 回退。对每个候选按
+  **本次请求条件**（prompt token、事件时间）计价后取**总费用最高者**
+  作为保守估算；费用并列按来源优先级（外置 > models.dev > OpenRouter）
+  > 完整匹配 > 前缀更长 > 原始键打破。禁止从不同候选拼单价；breakdown
+  的 `match_mode` 与 `candidate_count` 记录匹配方式与候选数。
+- **分段计价（Task 1/2/3/4）**：规范区间 `[min_tokens, max_tokens)`
+  左闭右开，basis 为 `prompt_tokens = input + cache_write + cache_read`
+  （output 不参与档位选择）。models.dev `tiers`（`type=context`）语义
+  为 size = S 时短档覆盖 prompt <= S、高档从 S+1 开始，快照存转换后的
+  规范分段；`context_over_200k` 仅在无等价 tiers 时生效。OpenRouter
+  `overrides` 的 `min_prompt_tokens` 按**包含**下界命中（快照保留原
+  语义）；两者同名数字不共用未转换的边界。外置 TOML 支持
+  `[[model.segment]]`（`[min, max)`，末档省略 max_tokens 即无上限）与
+  可选 `basis`/`application`（当前仅支持 `prompt_tokens`/
+  `whole_request`，其他值显式拒绝）；非法条目整条忽略并给出诊断，不
+  静默回退。
+- **峰谷时间规则（Task 4A）**：外置 `[[model.schedule]]` + `period`
+  （时区、`HH:MM`–`HH:MM` 左闭右开窗口、可选星期限制、价格覆盖）。命中
+  档的价格层序为 分段显式值 > 时间规则值 > 基础价；同一候选多条规则
+  同时命中时各自计价取最高（不从不同规则拼价）。时间档按**事件时间戳**
+  与规则时区换算，不读当前墙上时钟。OpenRouter 带 `utc_start`/`utc_end`
+  的时间条件 override 暂未接入时间引擎，同步时跳过并记 warning。
+- **请求级 breakdown（Task 5/6）**：`EventRow.cost_breakdown` 与
+  `cost_usd` 来自同一次估算（不变量 7，前端不重算）：命中候选（原始键/
+  渠道/来源/匹配方式/时间档）、计价依据与依据值、命中分段标签、四类
+  分项的 token/单价/小计/是否计价、总价与未计价 token。未计价分项
+  （缺价）不按 0 计入；`complete = false` 表示部分计价。
+- **索引/快照版本（Task 9）**：价格索引 v4（末段匹配键 + 计划结构），
+  旧索引按版本失效原子重建；models.dev 快照 v3 / OpenRouter 快照 v2
+  写入分段，旧版本快照按"仅基础价"离线读取，不伪造分段。
 
 - 事件时间戳一律**存 UTC**（`jiff::Timestamp`），缓存与导出均为 UTC。
 - 展示/聚合按解析链解析时区：显式指定 > 本机时区 > 默认 Asia/Shanghai。
