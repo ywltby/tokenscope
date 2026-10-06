@@ -94,26 +94,32 @@ function render(): void {
       ? {
           type: "category",
           data: categories,
-          axisLine: { lineStyle: { color: t.border } },
-          axisLabel: { color: t.textSecondary },
+          axisLine: { show: false },
+          axisLabel: { color: t.textMuted, fontSize: 12 },
         }
       : {
           type: "value",
-          axisLabel: { color: t.textMuted, formatter: (v: number) => fmtCompact(v) },
+          axisLabel: { color: t.textMuted, fontSize: 12, formatter: (v: number) => fmtCompact(v) },
           splitLine: { lineStyle: { color: t.splitLine } },
         },
     yAxis: isDay.value
       ? {
           type: "value",
-          axisLabel: { color: t.textMuted, formatter: (v: number) => fmtCompact(v) },
+          axisLabel: { color: t.textMuted, fontSize: 12, formatter: (v: number) => fmtCompact(v) },
           splitLine: { lineStyle: { color: t.splitLine } },
         }
       : {
           type: "category",
           // interval 0 强制每个项目都显示名称；超长省略，完整值见 tooltip
           data: categories,
-          axisLine: { lineStyle: { color: t.border } },
-          axisLabel: { color: t.textSecondary, interval: 0, width: 220, overflow: "truncate" },
+          axisLine: { show: false },
+          axisLabel: {
+            color: t.textMuted,
+            fontSize: 12,
+            interval: 0,
+            width: 220,
+            overflow: "truncate",
+          },
         },
     dataZoom,
     series: series.map((s) => ({

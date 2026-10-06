@@ -1,5 +1,5 @@
 /**
- * TokenScope 语义视觉 token（DESIGN.md §2/§3/§4）。
+ * TokenScope 语义视觉 token（DESIGN.md 第二版，苹果风格）。
  * 浅色为默认（:root），深色挂在 html[data-theme="dark"]。
  * 组件与样式只允许消费这里的语义变量，禁止散落十六进制值；
  * Naive UI / ECharts 适配器（naiveTheme.ts / chartTheme.ts）与本文同步维护。
@@ -8,115 +8,128 @@
   color-scheme: light;
 
   /* 表面与画布 */
-  --ts-canvas: #eef3f7;
-  --ts-canvas-glow: #dcecf2;
-  --ts-surface: rgba(255, 255, 255, 0.82);
-  --ts-surface-solid: #f8fafc;
-  --ts-surface-elevated: rgba(255, 255, 255, 0.94);
-  --ts-glass-bg: rgba(255, 255, 255, 0.72);
-  --ts-glass-stroke: rgba(255, 255, 255, 0.6);
+  --ts-canvas: #f5f5f7;
+  --ts-surface: #ffffff;
+  --ts-surface-elevated: #ffffff;
+  --ts-glass: rgba(255, 255, 255, 0.72);
+  --ts-fill: rgba(118, 118, 128, 0.12);
+  --ts-fill-hover: rgba(118, 118, 128, 0.08);
+  --ts-segment-thumb: #ffffff;
 
   /* 边界 */
-  --ts-border: #d4dee6;
-  --ts-border-strong: #b8cad5;
+  --ts-separator: rgba(0, 0, 0, 0.08);
+  --ts-separator-strong: rgba(0, 0, 0, 0.14);
 
   /* 文字 */
-  --ts-text: #17232e;
-  --ts-text-secondary: #405362;
-  --ts-text-muted: #647786;
+  --ts-text: #1d1d1f;
+  --ts-text-secondary: #515154;
+  --ts-text-muted: #6e6e73;
 
   /* 品牌强调 */
-  --ts-accent: #087ea4;
-  --ts-accent-hover: #056782;
-  --ts-accent-soft: #ddf3f8;
+  --ts-accent: #0066cc;
+  --ts-accent-fill: #0071e3;
+  --ts-accent-soft: rgba(0, 113, 227, 0.1);
   --ts-on-accent: #ffffff;
 
   /* 状态 */
-  --ts-success: #19734a;
-  --ts-warning: #9a5b00;
-  --ts-error: #b33a3a;
-  --ts-info: #356b9a;
+  --ts-success: #1e7b34;
+  --ts-warning: #b25000;
+  --ts-error: #d70015;
+  --ts-info: #2f6fb0;
 
-  /* 图表系列（低饱和、与状态色分离；顺序固定：输入/输出/缓存写/缓存读） */
-  --ts-chart-input: #3d7ea6;
-  --ts-chart-output: #c2732b;
-  --ts-chart-cache-write: #4e9b6e;
-  --ts-chart-cache-read: #7a8ca0;
+  /* 图表系列（固定顺序：输入/输出/缓存写/缓存读） */
+  --ts-chart-input: #4c8df6;
+  --ts-chart-output: #f2a24a;
+  --ts-chart-cache-write: #5bbf7a;
+  --ts-chart-cache-read: #a7aeb8;
 
-  /* 间距基线（4 的倍数） */
+  /* 间距基线 */
   --ts-space-1: 4px;
   --ts-space-2: 8px;
   --ts-space-3: 12px;
   --ts-space-4: 16px;
+  --ts-space-5: 20px;
   --ts-space-6: 24px;
   --ts-space-8: 32px;
 
-  /* 圆角：控件 6 / 面板 8 / 弹窗与大面板 12 */
-  --ts-radius-control: 6px;
-  --ts-radius: 8px;
-  --ts-radius-lg: 12px;
+  /* 圆角：控件 8 / 分段块 6 / 卡片 14 / 浮层 12 / 胶囊 999 */
+  --ts-radius-control: 8px;
+  --ts-radius-thumb: 6px;
+  --ts-radius-card: 14px;
+  --ts-radius-popover: 12px;
+  --ts-radius-pill: 999px;
 
   /* 焦点环：2px 高对比轮廓 */
   --ts-focus-ring: 0 0 0 2px var(--ts-canvas), 0 0 0 4px var(--ts-accent);
 
-  /* 玻璃（仅导航/工具栏/横幅/菜单/tooltip） */
-  --ts-glass-blur: blur(16px) saturate(115%);
-  --ts-glass-shadow: 0 8px 28px rgba(8, 25, 38, 0.08);
+  /* 玻璃（仅吸顶导航） */
+  --ts-glass-blur: blur(24px) saturate(180%);
 
-  /* 动效：120–180ms，尊重 prefers-reduced-motion */
-  --ts-motion-fast: 120ms;
-  --ts-motion: 150ms;
-  --ts-motion-slow: 180ms;
+  /* 阴影 */
+  --ts-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 16px rgba(0, 0, 0, 0.04);
+  --ts-shadow-elevated: 0 8px 32px rgba(0, 0, 0, 0.12);
+  --ts-shadow-segment-thumb: 0 1px 3px rgba(0, 0, 0, 0.12);
 
-  /* 字体栈（本机字体，不在线拉取） */
-  --ts-font: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
-  --ts-font-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  /* 动效：160–240ms，缓动 cubic-bezier(0.25, 0.1, 0.25, 1) */
+  --ts-motion-fast: 160ms;
+  --ts-motion: 200ms;
+  --ts-motion-slow: 240ms;
+  --ts-ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+
+  /* 字体栈（本机系统字体，不在线拉取） */
+  --ts-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text",
+    "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  --ts-font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display",
+    "Segoe UI Variable Display", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  --ts-font-mono: "SF Mono", "Cascadia Mono", Consolas, monospace;
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --ts-canvas: #0b1118;
-  --ts-canvas-glow: #102432;
-  --ts-surface: rgba(19, 30, 42, 0.82);
-  --ts-surface-solid: #121d29;
-  --ts-surface-elevated: rgba(25, 38, 52, 0.96);
-  --ts-glass-bg: rgba(18, 29, 41, 0.68);
-  --ts-glass-stroke: rgba(255, 255, 255, 0.12);
+  --ts-canvas: #0f0f11;
+  --ts-surface: #1c1c1e;
+  --ts-surface-elevated: #2c2c2e;
+  --ts-glass: rgba(28, 28, 30, 0.72);
+  --ts-fill: rgba(118, 118, 128, 0.24);
+  --ts-fill-hover: rgba(118, 118, 128, 0.16);
+  --ts-segment-thumb: #636366;
 
-  --ts-border: #2a3b4b;
-  --ts-border-strong: #3a5062;
+  --ts-separator: rgba(255, 255, 255, 0.08);
+  --ts-separator-strong: rgba(255, 255, 255, 0.16);
 
-  --ts-text: #edf5fa;
-  --ts-text-secondary: #c0cfda;
-  --ts-text-muted: #91a5b4;
+  --ts-text: #f5f5f7;
+  --ts-text-secondary: #aeaeb2;
+  --ts-text-muted: #8e8e93;
 
-  --ts-accent: #6fd3ee;
-  --ts-accent-hover: #9ae5f5;
-  --ts-accent-soft: #173c4a;
-  --ts-on-accent: #08222c;
+  --ts-accent: #4da3ff;
+  --ts-accent-fill: #0060df;
+  --ts-accent-soft: rgba(77, 163, 255, 0.16);
+  --ts-on-accent: #ffffff;
 
-  --ts-success: #72d6a1;
-  --ts-warning: #f4c56a;
-  --ts-error: #ff8f8f;
-  --ts-info: #8fc5f2;
+  --ts-success: #30d158;
+  --ts-warning: #ff9f0a;
+  --ts-error: #ff6961;
+  --ts-info: #64d2ff;
 
-  --ts-chart-input: #7fb3d8;
-  --ts-chart-output: #e0a06a;
-  --ts-chart-cache-write: #7cc49a;
-  --ts-chart-cache-read: #9fb3c8;
+  --ts-chart-input: #64a0ff;
+  --ts-chart-output: #ffb35c;
+  --ts-chart-cache-write: #6fd38d;
+  --ts-chart-cache-read: #8e949c;
 
   --ts-focus-ring: 0 0 0 2px var(--ts-canvas), 0 0 0 4px var(--ts-accent);
-  --ts-glass-shadow: 0 8px 28px rgba(0, 0, 0, 0.32);
+  --ts-shadow-card: none;
+  --ts-shadow-elevated: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --ts-shadow-segment-thumb: none;
 }
 
 /* 不支持 backdrop-filter 的系统：玻璃退化实色，布局与对比度不变 */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   :root {
-    --ts-glass-bg: #f4f8fb;
+    --ts-glass: var(--ts-surface);
   }
   :root[data-theme="dark"] {
-    --ts-glass-bg: #14202e;
+    --ts-glass: var(--ts-surface);
   }
 }
 
@@ -128,15 +141,14 @@
   }
 }
 
-/* 全局画布：静态低对比径向光晕 + 基础排版 */
+/* 全局画布 + 基础排版 */
 body {
   font-family: var(--ts-font);
   color: var(--ts-text);
-  background:
-    radial-gradient(circle at 20% -10%, var(--ts-canvas-glow), transparent 55%), var(--ts-canvas);
+  background: var(--ts-canvas);
   transition:
-    background-color var(--ts-motion) ease,
-    color var(--ts-motion) ease;
+    background-color var(--ts-motion) var(--ts-ease),
+    color var(--ts-motion) var(--ts-ease);
 }
 
 /* 精确数字：token 数、金额、百分比统一 tabular lining */
@@ -150,14 +162,137 @@ body {
   font-variant-numeric: tabular-nums lining-nums;
 }
 
-/* 玻璃面板：1px 内描边 + 极轻阴影，禁止发光边缘 */
+/* 玻璃吸顶导航栏 */
 .ts-glass {
-  background: var(--ts-glass-bg);
+  background: var(--ts-glass);
   -webkit-backdrop-filter: var(--ts-glass-blur);
   backdrop-filter: var(--ts-glass-blur);
-  box-shadow:
-    inset 0 0 0 1px var(--ts-glass-stroke),
-    var(--ts-glass-shadow);
+  border-bottom: 1px solid var(--ts-separator);
+}
+
+/* 卡片：浅色靠阴影分层，深色靠描边 + 亮度 */
+.ts-card {
+  background: var(--ts-surface);
+  border-radius: var(--ts-radius-card);
+  padding: var(--ts-space-5);
+  box-shadow: var(--ts-shadow-card);
+}
+:root[data-theme="dark"] .ts-card {
+  border: 1px solid var(--ts-separator);
+}
+
+/* 分段控件 */
+.ts-segmented {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--ts-fill);
+  border-radius: var(--ts-radius-control);
+  padding: 2px;
+  height: 32px;
+}
+.ts-segmented-item {
+  position: relative;
+  border: none;
+  background: transparent;
+  color: var(--ts-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  padding: 0 var(--ts-space-3);
+  border-radius: var(--ts-radius-thumb);
+  cursor: pointer;
+  transition:
+    color var(--ts-motion) var(--ts-ease),
+    font-weight var(--ts-motion) var(--ts-ease);
+}
+.ts-segmented-item:hover {
+  color: var(--ts-text);
+}
+.ts-segmented-item[aria-checked="true"] {
+  color: var(--ts-text);
+  font-weight: 600;
+}
+.ts-segmented-thumb {
+  position: absolute;
+  top: 2px;
+  left: 0;
+  height: 28px;
+  background: var(--ts-segment-thumb);
+  border-radius: var(--ts-radius-thumb);
+  box-shadow: var(--ts-shadow-segment-thumb);
+  transition:
+    transform var(--ts-motion) var(--ts-ease),
+    width var(--ts-motion) var(--ts-ease);
+  pointer-events: none;
+  z-index: 0;
+}
+.ts-segmented-item {
+  z-index: 1;
+}
+
+/* 胶囊标签 */
+.ts-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ts-space-1);
+  padding: 2px var(--ts-space-2);
+  border-radius: var(--ts-radius-pill);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.ts-pill-info {
+  background: var(--ts-accent-soft);
+  color: var(--ts-accent);
+}
+.ts-pill-warning {
+  background: rgba(178, 80, 0, 0.1);
+  color: var(--ts-warning);
+}
+:root[data-theme="dark"] .ts-pill-warning {
+  background: rgba(255, 159, 10, 0.16);
+}
+.ts-pill-success {
+  background: rgba(30, 123, 52, 0.1);
+  color: var(--ts-success);
+}
+:root[data-theme="dark"] .ts-pill-success {
+  background: rgba(48, 209, 88, 0.16);
+}
+
+/* 内联通知条 */
+.ts-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--ts-space-3);
+  padding: var(--ts-space-3) var(--ts-space-4);
+  border-radius: var(--ts-radius-popover);
+  background: var(--ts-surface);
+  box-shadow: var(--ts-shadow-card);
+  font-size: 13px;
+  line-height: 1.45;
+}
+:root[data-theme="dark"] .ts-notice {
+  border: 1px solid var(--ts-separator);
+}
+.ts-notice-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+}
+.ts-notice-content {
+  flex: 1;
+  color: var(--ts-text-secondary);
+}
+.ts-notice-action {
+  flex-shrink: 0;
+  color: var(--ts-accent);
+  text-decoration: none;
+  font-weight: 500;
+  cursor: pointer;
+}
+.ts-notice-action:hover {
+  text-decoration: underline;
 }
 
 /* 键盘焦点轮廓（hover 不改变文字颜色；focus 高对比可见） */

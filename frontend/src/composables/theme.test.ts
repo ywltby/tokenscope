@@ -84,7 +84,9 @@ describe("主题偏好（设计系统 Task 1）", () => {
       .join(String.fromCharCode(10));
     expect(css).toContain("--ts-canvas");
     expect(css).toContain("--ts-accent");
-    expect(css).toContain("--ts-surface-solid");
+    expect(css).toContain("--ts-surface");
+    expect(css).toContain("--ts-fill");
+    expect(css).toContain("--ts-separator");
     expect(css).toContain('data-theme="dark"');
     expect(css).toContain("@supports");
   });

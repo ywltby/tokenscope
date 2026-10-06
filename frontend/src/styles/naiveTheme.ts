@@ -1,21 +1,22 @@
-/// Naive UI 主题覆盖适配器（设计系统 Task 1）。
-/// 色值与 tokens.css 同步维护（来源 DESIGN.md §2 语义色表）——CSS 变量
-/// 无法在渲染前同步读取，故这里以 TS 映射承载同一套语义色。
+/// Naive UI 主题覆盖适配器（设计系统 Task 1，苹果风格）。
+/// 色值与 tokens.css 同步维护（来源 DESIGN.md 第二版）——CSS 变量无法在
+/// 渲染前同步读取，故这里以 TS 映射承载同一套语义色。
 import type { GlobalThemeOverrides } from "naive-ui";
 import type { ThemeMode } from "../composables/theme";
 
 interface TsPalette {
   canvas: string;
   surface: string;
-  surfaceSolid: string;
   elevated: string;
-  border: string;
-  borderStrong: string;
+  fill: string;
+  fillHover: string;
+  separator: string;
+  separatorStrong: string;
   text: string;
   textSecondary: string;
   textMuted: string;
   accent: string;
-  accentHover: string;
+  accentFill: string;
   accentSoft: string;
   onAccent: string;
   success: string;
@@ -27,42 +28,44 @@ interface TsPalette {
 /// 与 tokens.css 的浅/深两组值一一对应。
 const PALETTES: Record<ThemeMode, TsPalette> = {
   light: {
-    canvas: "#EEF3F7",
-    surface: "rgba(255, 255, 255, 0.82)",
-    surfaceSolid: "#F8FAFC",
-    elevated: "rgba(255, 255, 255, 0.94)",
-    border: "#D4DEE6",
-    borderStrong: "#B8CAD5",
-    text: "#17232E",
-    textSecondary: "#405362",
-    textMuted: "#647786",
-    accent: "#087EA4",
-    accentHover: "#056782",
-    accentSoft: "#DDF3F8",
+    canvas: "#F5F5F7",
+    surface: "#FFFFFF",
+    elevated: "#FFFFFF",
+    fill: "rgba(118, 118, 128, 0.12)",
+    fillHover: "rgba(118, 118, 128, 0.08)",
+    separator: "rgba(0, 0, 0, 0.08)",
+    separatorStrong: "rgba(0, 0, 0, 0.14)",
+    text: "#1D1D1F",
+    textSecondary: "#515154",
+    textMuted: "#6E6E73",
+    accent: "#0066CC",
+    accentFill: "#0071E3",
+    accentSoft: "rgba(0, 113, 227, 0.1)",
     onAccent: "#FFFFFF",
-    success: "#19734A",
-    warning: "#9A5B00",
-    error: "#B33A3A",
-    info: "#356B9A",
+    success: "#1E7B34",
+    warning: "#B25000",
+    error: "#D70015",
+    info: "#2F6FB0",
   },
   dark: {
-    canvas: "#0B1118",
-    surface: "rgba(19, 30, 42, 0.82)",
-    surfaceSolid: "#121D29",
-    elevated: "rgba(25, 38, 52, 0.96)",
-    border: "#2A3B4B",
-    borderStrong: "#3A5062",
-    text: "#EDF5FA",
-    textSecondary: "#C0CFDA",
-    textMuted: "#91A5B4",
-    accent: "#6FD3EE",
-    accentHover: "#9AE5F5",
-    accentSoft: "#173C4A",
-    onAccent: "#08222C",
-    success: "#72D6A1",
-    warning: "#F4C56A",
-    error: "#FF8F8F",
-    info: "#8FC5F2",
+    canvas: "#0F0F11",
+    surface: "#1C1C1E",
+    elevated: "#2C2C2E",
+    fill: "rgba(118, 118, 128, 0.24)",
+    fillHover: "rgba(118, 118, 128, 0.16)",
+    separator: "rgba(255, 255, 255, 0.08)",
+    separatorStrong: "rgba(255, 255, 255, 0.16)",
+    text: "#F5F5F7",
+    textSecondary: "#AEAEB2",
+    textMuted: "#8E8E93",
+    accent: "#4DA3FF",
+    accentFill: "#0060DF",
+    accentSoft: "rgba(77, 163, 255, 0.16)",
+    onAccent: "#FFFFFF",
+    success: "#30D158",
+    warning: "#FF9F0A",
+    error: "#FF6961",
+    info: "#64D2FF",
   },
 };
 
@@ -70,27 +73,28 @@ const PALETTES: Record<ThemeMode, TsPalette> = {
 /// popover、alert、tabs 的表面/文字/边界/圆角统一走语义色。
 export function naiveThemeOverrides(mode: ThemeMode): GlobalThemeOverrides {
   const c = PALETTES[mode];
+  const isDark = mode === "dark";
   return {
     common: {
       bodyColor: c.canvas,
       cardColor: c.surface,
       modalColor: c.elevated,
       popoverColor: c.elevated,
-      tableColor: c.surfaceSolid,
-      tableHeaderColor: c.surfaceSolid,
-      inputColor: c.surfaceSolid,
-      actionColor: c.surfaceSolid,
-      hoverColor: c.accentSoft,
+      tableColor: c.surface,
+      tableHeaderColor: c.surface,
+      inputColor: c.fill,
+      actionColor: c.fill,
+      hoverColor: c.fillHover,
       textColorBase: c.text,
       textColor1: c.text,
       textColor2: c.textSecondary,
       textColor3: c.textMuted,
-      borderColor: c.border,
-      dividerColor: c.border,
+      borderColor: c.separator,
+      dividerColor: c.separator,
       primaryColor: c.accent,
-      primaryColorHover: c.accentHover,
-      primaryColorPressed: c.accentHover,
-      primaryColorSuppl: c.accent,
+      primaryColorHover: c.accent,
+      primaryColorPressed: c.accent,
+      primaryColorSuppl: c.accentFill,
       successColor: c.success,
       successColorHover: c.success,
       successColorPressed: c.success,
@@ -108,33 +112,66 @@ export function naiveThemeOverrides(mode: ThemeMode): GlobalThemeOverrides {
       infoColorPressed: c.info,
       infoColorSuppl: c.info,
       borderRadius: "8px",
-      borderRadiusSmall: "6px",
-      fontWeightStrong: "650",
+      borderRadiusSmall: "8px",
+      fontWeightStrong: "600",
+      heightMedium: "32px",
+      heightSmall: "28px",
     },
     Card: {
-      borderRadius: "12px",
-      borderColor: c.border,
+      borderRadius: "14px",
+      borderColor: isDark ? c.separator : "transparent",
+      padding: "20px",
     },
     Button: {
-      borderRadiusMedium: "6px",
-      borderRadiusSmall: "6px",
-      borderRadiusTiny: "6px",
+      borderRadiusMedium: "8px",
+      borderRadiusSmall: "8px",
+      borderRadiusTiny: "8px",
+      border: "none",
+      paddingMedium: "0 16px",
+      paddingSmall: "0 12px",
     },
-    Input: { borderRadius: "6px" },
-    DataTable: {
-      borderColor: c.border,
+    Input: {
       borderRadius: "8px",
-      thColor: c.surfaceSolid,
-      tdColor: c.surfaceSolid,
-      tdColorHover: c.accentSoft,
+      border: `1px solid ${c.separatorStrong}`,
+      heightMedium: "32px",
+      heightSmall: "28px",
+    },
+    Select: {
+      peers: {
+        InternalSelection: {
+          borderRadius: "8px",
+          border: "none",
+          heightMedium: "32px",
+          heightSmall: "28px",
+        },
+      },
+    },
+    DataTable: {
+      borderColor: "transparent",
+      borderRadius: "0",
+      thColor: c.surface,
+      tdColor: c.surface,
+      tdColorHover: c.fillHover,
+      thPaddingMedium: "12px 16px",
+      thPaddingSmall: "10px 12px",
+      tdPaddingMedium: "12px 16px",
+      tdPaddingSmall: "10px 12px",
+      thFontWeight: "500",
     },
     Tooltip: {
       color: c.elevated,
       textColor: c.text,
-      borderRadius: "8px",
+      borderRadius: "12px",
+      padding: "12px 16px",
     },
-    Popover: { borderRadius: "8px" },
-    Alert: { borderRadius: "8px" },
-    Tabs: { tabBorderColor: c.border },
+    Popover: {
+      borderRadius: "12px",
+      padding: "12px 16px",
+    },
+    Alert: {
+      borderRadius: "12px",
+      padding: "12px 16px",
+    },
+    Tabs: { tabBorderColor: "transparent" },
   };
 }
