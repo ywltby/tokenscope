@@ -798,6 +798,28 @@ pub struct EventFilter {
     pub before: Option<String>,
 }
 
+/// 请求级费用计算明细（Task 6）：复用 pricing 层结构（候选元数据、
+/// 计价依据、分项明细），供前端悬浮提示展示"算的是谁、怎么算的"；
+/// 前端不重算金额。未收录模型无 breakdown（cost_usd = None）。
+#[derive(Debug, Clone, Serialize)]
+pub struct EventCostBreakdown {
+    /// 最终命中候选：原始模型键、渠道、来源、匹配方式与时间档。
+    pub matched: crate::pricing::MatchedCandidate,
+    /// 计价依据与依据值（prompt_tokens = input + cache_write + cache_read）。
+    pub basis: Option<crate::pricing::PricingBasis>,
+    pub basis_value: u64,
+    /// 命中分段的标签（None = 基础价档）。
+    pub segment_label: Option<String>,
+    /// 四类分项明细（token / 单价 / 小计 / 是否计价）。
+    pub lines: Vec<crate::pricing::CostLine>,
+    /// 已计价小计（= 行级 cost_usd）。
+    pub cost_usd: f64,
+    /// 未计价分项的 token（缺价 ≠ 0）。
+    pub unknown: TokenCounts,
+    /// false = 部分计价（存在非零 token 的缺价分项）。
+    pub complete: bool,
+}
+
 /// 一条去重后的用量明细（展示行）。
 #[derive(Debug, Clone, Serialize)]
 pub struct EventRow {
@@ -818,6 +840,9 @@ pub struct EventRow {
     pub cache_read: u64,
     /// None = 模型无价格（unknown），不按 0。
     pub cost_usd: Option<f64>,
+    /// Task 6：请求级费用计算明细（与 cost_usd 同一次 estimate 产出）；
+    /// None = 未收录模型。
+    pub cost_breakdown: Option<EventCostBreakdown>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -898,9 +923,20 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
         .take(limit)
         .map(|(e, _s, cursor)| {
             // B3：部分计价模型的明细行展示已计价小计（unknown 分项随总计披露）。
-            let cost_usd = pricing
-                .estimate(&e.model, &TokenCounts::from_event(&e), e.ts)
-                .map(|est| est.cost);
+            // Task 6：同一次 estimate 同时产出 cost_usd 与 breakdown，
+            // 前端不重算（不变量 7）。
+            let estimate = pricing.estimate(&e.model, &TokenCounts::from_event(&e), e.ts);
+            let cost_usd = estimate.as_ref().map(|est| est.cost);
+            let cost_breakdown = estimate.map(|est| EventCostBreakdown {
+                matched: est.matched.expect("estimate 命中必有候选元数据"),
+                basis: est.basis,
+                basis_value: est.basis_value,
+                segment_label: est.segment_label,
+                lines: est.lines,
+                cost_usd: est.cost,
+                unknown: est.unknown,
+                complete: est.complete,
+            });
             EventRow {
                 ts: e.ts.to_zoned(tz.clone()).strftime("%F %T").to_string(),
                 record_id: e.record_id.clone(),
@@ -914,6 +950,7 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
                 cache_write: e.cache_write_tokens,
                 cache_read: e.cache_read_tokens,
                 cost_usd,
+                cost_breakdown,
             }
         })
         .collect();
@@ -1583,6 +1620,128 @@ cache_read = 0.4
         let expect: Vec<String> = full.rows.iter().map(|r| r.cursor.clone()).collect();
         assert_eq!(flat, expect);
         std::fs::remove_dir_all(&hermetic).ok();
+    }
+
+    #[test]
+    fn test_event_cost_breakdown() {
+        // Task 6：请求级费用明细——低档/高档各一条，breakdown 与 cost_usd
+        // 同源；部分缺价以未计价行呈现，不被当 0。
+        let dir = tmp_dir("event-breakdown");
+        let proj = dir.join("proj-bd");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess-bd.jsonl"),
+            concat!(
+                // 高档：prompt = 272001 + 0 + 5000 = 277001 ≥ 272001；
+                // 高档段缺 cache_read 价 → cr=5000 未计价。
+                r#"{"type":"assistant","timestamp":"2026-01-05T15:00:00.000Z","sessionId":"s-bd","isSidechain":false,"message":{"id":"msg-hi","model":"bd-model","usage":{"input_tokens":272001,"output_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":5000}}}"#,
+                "\n",
+                // 低档：prompt = 130000 → 基础价，四项俱全。
+                r#"{"type":"assistant","timestamp":"2026-01-05T13:00:00.000Z","sessionId":"s-bd","isSidechain":false,"message":{"id":"msg-lo","model":"bd-model","usage":{"input_tokens":100000,"output_tokens":50000,"cache_creation_input_tokens":10000,"cache_read_input_tokens":20000}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let toml = dir.join("pricing.toml");
+        std::fs::write(
+            &toml,
+            r#"[[model]]
+prefix = "bd-model"
+input = 4.0
+output = 20.0
+cache_write = 5.0
+# cache_read 故意缺省：基础与高档的缓存读都未计价（未知 ≠ 0）
+
+[[model.segment]]
+label = ">272K"
+min_tokens = 272001
+input = 8.0
+output = 30.0
+cache_write = 10.0
+"#,
+        )
+        .unwrap();
+        let cache = dir.join("cache");
+        let opts = SummaryOptions {
+            by: GroupBy::Day,
+            claude_dir: Some(dir.clone()),
+            codex_dir: Some(PathBuf::from("Z:/no-such-codex")),
+            cache_dir: Some(cache.clone()),
+            pricing_index: Some(cache.join("pricing-index.json")),
+            pricing_path: Some(toml),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/or.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/md.json")),
+            tz: Some("UTC".to_string()),
+            refresh: true,
+            ..Default::default()
+        };
+        let filter = EventFilter::default();
+        let list = list_events(&opts, &filter).unwrap();
+        assert_eq!(list.rows.len(), 2);
+        // ts 降序：高档（15:00）在前，低档（13:00）在后。
+        let hi = &list.rows[0];
+        let lo = &list.rows[1];
+        let bd = hi.cost_breakdown.as_ref().expect("高档请求必须有明细");
+        assert_eq!(hi.model, "bd-model");
+        assert_eq!(bd.matched.raw_key, "bd-model");
+        assert_eq!(bd.matched.source, "external");
+        assert_eq!(bd.matched.match_mode, crate::pricing::MatchMode::Full);
+        assert_eq!(bd.basis, Some(crate::pricing::PricingBasis::PromptTokens));
+        assert_eq!(
+            bd.basis_value, 277_001,
+            "basis = input + cache_write + cache_read"
+        );
+        assert_eq!(bd.segment_label.as_deref(), Some(">272K"));
+        assert_eq!(bd.lines.len(), 4);
+        let line = |k| bd.lines.iter().find(|l| l.kind == k).unwrap();
+        use crate::pricing::CostLineKind;
+        let li = line(CostLineKind::Input);
+        assert_eq!(
+            (li.tokens, li.unit_price, li.priced),
+            (272_001, Some(8.0), true)
+        );
+        assert!((li.subtotal - 272_001.0 * 8.0 / 1e6).abs() < 1e-9);
+        let lo_line = line(CostLineKind::Output);
+        assert_eq!((lo_line.tokens, lo_line.unit_price), (1_000, Some(30.0)));
+        let lcr = line(CostLineKind::CacheRead);
+        assert_eq!(
+            (lcr.tokens, lcr.unit_price, lcr.priced),
+            (5_000, None, false),
+            "高档缺缓存读价 → 未计价行"
+        );
+        assert!(!bd.complete);
+        assert_eq!(bd.unknown.cache_read, 5_000);
+        // breakdown 总价 == 行 cost_usd（同一次估算，不重算）。
+        assert!((bd.cost_usd - hi.cost_usd.unwrap()).abs() < 1e-12);
+        // 低档：无分段命中 → 基础价；缓存读缺价 → 部分计价（unknown 可解释）。
+        let bdl = lo.cost_breakdown.as_ref().expect("低档请求必须有明细");
+        assert_eq!(bdl.segment_label, None);
+        assert_eq!(bdl.basis_value, 130_000);
+        assert!(!bdl.complete);
+        assert_eq!(bdl.unknown.cache_read, 20_000);
+        let lil = bdl
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::Input)
+            .unwrap();
+        assert_eq!((lil.tokens, lil.unit_price), (100_000, Some(4.0)));
+        let lcl = bdl
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheRead)
+            .unwrap();
+        assert_eq!(
+            (lcl.tokens, lcl.unit_price, lcl.priced),
+            (20_000, None, false)
+        );
+        assert!((bdl.cost_usd - lo.cost_usd.unwrap()).abs() < 1e-12);
+        // breakdown 可序列化（tooltip 载体）且不泄露内部结构。
+        let json = serde_json::to_string(&hi).unwrap();
+        assert!(json.contains("\"cost_breakdown\""));
+        assert!(json.contains("\"match_mode\":\"full\""));
+        assert!(json.contains("\"schedule_label\":null"));
+        assert!(!json.contains("Entry"), "不得泄露 Rust 内部类型");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
