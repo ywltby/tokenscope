@@ -122,3 +122,16 @@
 - **Quit 误触发**：`app.exit(0)` 仅出现在 `close_resolve` 的退出分支与托盘菜单；`CloseRequested` 的 Quit 分支同样走 `exit(0)`，路径唯一可审计。
 - **前端未就绪时关闭**：Ask 分支 prevent_close 后窗口保留（I4），用户可再次点击关闭。
 - **弹窗期间二次关闭**：前端守卫去重；后端不排队事件。
+
+## 执行记录（2026-10-06）
+
+| 任务 | 内容 | 提交 |
+| --- | --- | --- |
+| 任务 1 | settings.rs：`CloseAction`（minimize/quit）+ `close_action` 字段；存储迁移 `settings.json` → `settings.toml`（中文注释头、遗留 json 只读导入、首次保存改名 `.bak`、坏内容报错不覆盖、toml 优先）；`SETTINGS_TEMPLATE` 全字段注释模板 | 353c8da |
+| 任务 2 | src-tauri：`close_decision_from` 三态决策；`CloseRequested` 分支（Ask=emit close-requested / Minimize=hide / Quit=exit(0)）；新命令 `settings_set_close_action`、`close_resolve`（remember 先重读合并写盘再隐藏/退出）、`open_settings_file`（经 `ensure_toml`：遗留先迁移，否则写模板） | e32be7c |
+| 任务 3 | 前端：`CloseConfirmDialog`（NModal elevated 玻璃 + 最小化/退出/取消 + 记忆勾选）；App 监听 `close-requested`（重复去重、unmount 取消监听、非 Tauri 环境 `.catch` 兜底）；resolve 经 `close_resolve` 回传 | 91105dd |
+| 任务 4 | 设置页：「应用」组「关闭窗口时」三选一（写盘参数 minimize/quit/null，记忆值回显）；底部「高级配置」组（settings.toml 说明 + 打开设置配置文件） | 6eec435 |
+| 任务 5 | CLAUDE.md 关窗行为描述更新；全量门禁；执行记录 | 见最终提交 |
+
+门禁：前端 typecheck / format:check / 15 文件 145 用例 / build 全绿；
+根库 cargo fmt/clippy/test 与 src-tauri fmt/clippy/test 全绿（任务 1-5 每次提交均过 pre-commit 双 manifest 门禁）。

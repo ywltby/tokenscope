@@ -19,7 +19,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **分层**：`source`（发现+解析）→ `model`（归一化事件）→ `aggregate`（聚合）→ `render`（输出）。层间只经 model 类型交互；新增 agent = 新适配器 + 合成 fixture 测试，聚合与渲染层零改动。
 - **时间口径（M6）**：存储层（SQLite）一律 UTC RFC3339 原样持有，全链路只做一次时区转换；聚合/展示时区按解析链取值——显式传入（`--tz`/GUI 下拉，`local`=本机）> 默认 Asia/Shanghai，跨日界与去重规则属于必须先写成不变量的部分。
 - **费用估算**：三层价格来源（外置 `pricing.toml` > models.dev 主源 > OpenRouter 补充），**无编译期内置价格**——未收录模型始终"未知"，不得按 0 静默吞掉；首次启动无快照时全局横幅提示联网同步。匹配键取模型标识末段（最后一个 `/` 之后），同末段的多渠道条目作为独立候选，按请求的 prompt token 与事件时间逐一计价取**最高费用**作保守估算（2026-10-06）。支持上下文分段（models.dev tiers / OpenRouter overrides / 外置 `[[model.segment]]`）与外置峰谷时间规则（按事件时间换算）；请求级明细（命中候选、档位、四类分项单价/小计）随 `cost_usd` 同源输出，前端不重算。权威口径见 `docs/stats-semantics.md` §4。
-- **输出（用户已拍板）**：**Tauri 2 + Vue 3 桌面 GUI 是唯一产品形态**（Naive UI、明暗双模式、托盘常驻、关窗缩托盘）。CLI 已于 2026-10-04 移除（用户决策）：`report.rs` 管线保留，数据经 serde 直达前端。
+- **输出（用户已拍板）**：**Tauri 2 + Vue 3 桌面 GUI 是唯一产品形态**（Naive UI、明暗双模式、托盘常驻、关窗三态——未配置默认动作时弹窗询问「最小化/直接退出 + 记忆勾选」，记忆值存 `~/.tokenscope/settings.toml` 的 `close_action`，设置页可改回每次询问；托盘「退出」旁路不受影响）。CLI 已于 2026-10-04 移除（用户决策）：`report.rs` 管线保留，数据经 serde 直达前端。
 - **GUI 主线程纪律**：Tauri v2 的同步 command 在主线程执行；扫描/解析/缓存/网络等重活一律 `async` + `spawn_blocking` 丢后台线程池，主线程零阻塞（启动卡顿的根因与修法）。
 - **候选 agent（用户 2026-10-04 排期决策）**：当前**专注 Claude Code 与 Codex**（本机有真实日志可实测）；Gemini CLI、OpenCode 等其他工具暂缓排期——待安装使用或拿到样例日志、经用户明确排期后再立项（详见 `docs/plans/README.md`）。
 
