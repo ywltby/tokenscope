@@ -205,6 +205,26 @@ describe("EventTable 表格语义（设计系统 Task 5）", () => {
     expect(model!.ellipsis).toBeTruthy();
   });
 
+  it("R10 same_second_requests_have_distinct_row_keys：同秒同会话两行身份互异", () => {
+    // 旧拼法（ts|agent|model|session）在同秒同会话时冲突——两条请求会
+    // 共用费用浮层状态。行身份必须 = 后端唯一游标（完整精度时间 +
+    // record_id）。
+    const r1 = row({ ts: "2026-10-05 10:00:00", cursor: "2026-10-05T10:00:00.123450Z|m1" });
+    const r2 = row({
+      ts: "2026-10-05 10:00:00",
+      cursor: "2026-10-05T10:00:00.234560Z|m2",
+    });
+    // fixture 前提：后端游标互异
+    expect(r1.cursor).not.toBe(r2.cursor);
+    // 从组件实际取 row-key 函数断言
+    const vm = mount(EventTable, {
+      props: { list: list([r1, r2], 2), filterLabel: "" },
+    }).vm as unknown as { rowKey: (r: object) => string };
+    expect(vm.rowKey(r1)).not.toBe(vm.rowKey(r2));
+    expect(vm.rowKey(r1)).toBe(r1.cursor);
+    expect(vm.rowKey(r2)).toBe(r2.cursor);
+  });
+
   it("卡片化：外层 .ts-card + 卡头「请求明细」，提示行不再用 opacity 压低", () => {
     const w = mount(EventTable, { props: { list: list([row()], 1), filterLabel: "" } });
     expect(w.find("section.ts-card").exists()).toBe(true);

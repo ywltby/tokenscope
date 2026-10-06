@@ -209,10 +209,10 @@ defineExpose({ columns });
 type EventRowT = EventList["rows"][number];
 const asRow = (r: object): EventRowT => r as unknown as EventRowT;
 
-const rowKey = (r: object): string => {
-  const e = asRow(r);
-  return `${e.ts}|${e.agent}|${e.model}|${e.session_id}`;
-};
+// R10：行身份 = 后端唯一游标（完整精度 UTC 时间 + record_id），不再用
+// 展示时间拼串——同秒同会话的两条请求有不同 cursor，行身份必须互异
+//（同秒请求共用费用浮层状态即因旧拼法冲突）。
+const rowKey = (r: object): string => asRow(r).cursor;
 </script>
 
 <template>

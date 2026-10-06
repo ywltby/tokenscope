@@ -3,7 +3,7 @@
 // （44px），右侧三个次读数（26px）发丝线分隔；含未计价 token 时费用旁警告
 // 胶囊；命中率公式收进 tooltip（hover/focus 均可打开）；底部四类 token
 // 分项比例条 + 色点图例。公式口径不变：cache_read / (input + cache_read)。
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { NTooltip } from "naive-ui";
 import { fmtCost, fmtNum, type Group } from "../types";
 
@@ -26,6 +26,10 @@ const hitRate = computed(() => {
 const costText = computed(() => `$${fmtCost(props.totals.cost_usd)}`);
 /// 未知价格且已计价部分为 0：显示"未知†"而不是 $0.00（缺价 ≠ 免费）。
 const costUnknownOnly = computed(() => props.totals.unknown_pricing && props.totals.cost_usd === 0);
+
+// R09：命中率公式 tooltip 受控显示——hover/focus/click 均可打开，
+// Escape 关闭；移动触达/键盘用户与鼠标用户等价。
+const hitTipOpen = ref(false);
 
 const parts = computed(() => [
   { kind: "input", label: "输入", value: props.totals.tokens.input },
@@ -68,9 +72,25 @@ const parts = computed(() => [
         </div>
         <div class="metric-sep" aria-hidden="true" />
         <div class="metric-item">
-          <NTooltip placement="bottom">
+          <NTooltip placement="bottom" trigger="manual" :show="hitTipOpen">
             <template #trigger>
-              <div class="metric-label metric-label-help" tabindex="0">缓存命中率</div>
+              <div
+                class="metric-label metric-label-help"
+                tabindex="0"
+                role="button"
+                aria-label="缓存命中率说明"
+                :aria-expanded="hitTipOpen"
+                @mouseenter="hitTipOpen = true"
+                @mouseleave="hitTipOpen = false"
+                @focus="hitTipOpen = true"
+                @blur="hitTipOpen = false"
+                @click="hitTipOpen = !hitTipOpen"
+                @keydown.escape="hitTipOpen = false"
+                @keydown.enter.prevent="hitTipOpen = !hitTipOpen"
+                @keydown.space.prevent="hitTipOpen = !hitTipOpen"
+              >
+                缓存命中率
+              </div>
             </template>
             <div class="hit-tip">
               命中率 = 缓存读 ÷（新增输入 + 缓存读）。<br />

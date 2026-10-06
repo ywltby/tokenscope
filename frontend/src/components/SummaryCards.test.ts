@@ -1,6 +1,6 @@
 // 设计系统 Task 3/4：SummaryCards 指标卡——显示层断言（不重算公式）。
 import { describe, expect, it, vi } from "vitest";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import SummaryCards from "./SummaryCards.vue";
 import type { Group } from "../types";
 
@@ -134,16 +134,49 @@ describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
     expect(pill.text()).toContain("含未计价 token");
   });
 
+  it("R09 hit_rate_tooltip_opens_on_focus：focus 打开、blur/Escape 关闭（真实 NTooltip 触发时序）", async () => {
+    // 真实 NTooltip（manual 受控）：初始不渲染内容
+    const w = mountCards(totals());
+    const trigger = w.find(".metric-label-help");
+    expect(trigger.exists()).toBe(true);
+    expect(trigger.attributes("aria-expanded")).toBe("false");
+    // focus 打开
+    await trigger.trigger("focus");
+    await flushPromises();
+    expect(trigger.attributes("aria-expanded")).toBe("true");
+    // blur 关闭
+    await trigger.trigger("blur");
+    await flushPromises();
+    expect(trigger.attributes("aria-expanded")).toBe("false");
+    // focus 再开 → Escape 关闭
+    await trigger.trigger("focus");
+    await trigger.trigger("keydown", { key: "Escape" });
+    await flushPromises();
+    expect(trigger.attributes("aria-expanded")).toBe("false");
+    // Enter/Space 切换（click 等价路径）
+    await trigger.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(trigger.attributes("aria-expanded")).toBe("true");
+  });
+
+  it("R09 hover 打开、离开关闭（鼠标路径与键盘等价）", async () => {
+    const w = mountCards(totals());
+    const trigger = w.find(".metric-label-help");
+    await trigger.trigger("mouseenter");
+    expect(trigger.attributes("aria-expanded")).toBe("true");
+    await trigger.trigger("mouseleave");
+    expect(trigger.attributes("aria-expanded")).toBe("false");
+  });
+
   it("命中率公式收进 tooltip（正文只留结论），标签可聚焦", () => {
     const w = mountCards(totals());
-    // tooltip 内容含公式且触发器可聚焦（hover/focus 路径）
-    const stub = w.find(".tooltip-stub");
-    expect(stub.exists()).toBe(true);
-    expect(stub.text()).toContain("命中率 = 缓存读");
-    expect(stub.find('[tabindex="0"]').exists()).toBe(true);
-    // 公式只存在于 tooltip 内容中，不得铺在卡片正文
-    const cardText = w.find('[aria-label="用量指标"]').text();
-    const outside = cardText.replace(stub.text(), "");
-    expect(outside).not.toContain("命中率 = 缓存读");
+    const trigger = w.find(".metric-label-help");
+    expect(trigger.exists()).toBe(true);
+    expect(trigger.attributes("tabindex")).toBe("0");
+    // 公式只出现在 tooltip 内容节点（.hit-tip）内，标签本身只有结论
+    const tip = w.find(".hit-tip");
+    expect(tip.exists()).toBe(true);
+    expect(tip.text()).toContain("命中率 = 缓存读");
+    expect(trigger.text()).not.toContain("命中率 = 缓存读");
   });
 });
