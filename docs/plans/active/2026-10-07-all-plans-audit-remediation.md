@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2024、SQLite/rusqlite、TOML/serde、Tauri 2、Vue 3、Naive UI、Vitest/VTU。
 
-**状态：待执行。** 审核基线 `a42e843`。本文件记录待修任务，不代表已修复。证据及逐份计划覆盖关系见 [审核意见](../../reviews/2026-10-07-all-plans-audit.md)。
+**状态：已执行（2026-10-07）。** 审核基线 `a42e843`。证据及逐份计划覆盖关系见 [审核意见](../../reviews/2026-10-07-all-plans-audit.md)。
 
 ## 现行约束、范围与不变量
 
@@ -171,17 +171,31 @@ Task 1 → 2 → 6 共用 pricing.rs，串行执行；建议整体顺序为 **1�
 
 ## 完成定义与执行记录
 
-- [ ] R01：OR 数值/零/缺失缓存价正确，旧索引强制重建。
-- [ ] R02：谷价可覆盖基础价，候选内/跨候选完整优先，规则诊断不冒充渠道计数。
-- [ ] R03：真实 picker 双向日期正确，local/跨时区/DST 回归通过。
-- [ ] R04：快照不混代、不覆盖新状态、按序原子保存，失败状态可解释。
-- [ ] R05：换 root/agent 与 refresh 结果一致；正常暖缓存仍跳过解析。
-- [ ] R06：非法单价不进入费用；所有入口、降级与索引恢复一致。
-- [ ] R07/R08：关闭失败可重试，empty/partial 均能看到诊断。
-- [ ] R09/R10：真实键盘 tooltip 生效，同秒请求行身份唯一。
-- [ ] 全门禁通过；新增测试隔离真实缓存；文档覆盖关系准确。
-- [ ] 导航证据冲突有明确判定；D5 与未完成视觉矩阵单列，不伪造验收。
+- [x] R01：OR 数值/零/缺失缓存价正确，旧索引强制重建。（fcf1780）
+- [x] R02：谷价可覆盖基础价，候选内/跨候选完整优先，规则诊断不冒充渠道计数。（6e33596）
+- [x] R03：真实 picker 双向日期正确，local/跨时区/DST 回归通过。（48fa3fb）
+- [x] R04：快照不混代、不覆盖新状态、按序原子保存，失败状态可解释。（2006f4b）
+- [x] R05：换 root/agent 与 refresh 结果一致；正常暖缓存仍跳过解析。（b8fc81a）
+- [x] R06：非法单价不进入费用；所有入口、降级与索引恢复一致。（57de3c1）
+- [x] R07/R08：关闭失败可重试，empty/partial 均能看到诊断。（8d1ea8f / 4c0ae8b）
+- [x] R09/R10：真实键盘 tooltip 生效，同秒请求行身份唯一。（244d6cc）
+- [x] 全门禁通过；新增测试隔离真实缓存；文档覆盖关系准确。
+- [x] 导航证据冲突有明确判定（2fedca7）；D5 与未完成视觉矩阵单列，不伪造验收。
+
+## 执行记录（2026-10-07，审核基线 a42e843）
 
 | 任务 | 修复提交 | 修复前失败证据 | 修复后验证 | 遗留/后延 |
 | --- | --- | --- | --- | --- |
-| 1–10 | 待执行，逐任务补写 | 待补 | 待补 | D5 外部验收沿用原后延决定 |
+| 1 R01 | fcf1780 | test_openrouter_base_cache_rates_preserved 红（\$2/不完整，应 \$2.5/完整） | openrouter 11 / pricing_index 3 / cost_breakdown 2 绿 | — |
+| 2 R02 | 6e33596 | test_valley_rate_overrides… 红（12:00 选基础 \$10，应按谷价 \$2 与 B \$5 比较选 B） | schedule 3 / valley 1 / cost_breakdown 2 绿；excluded_incomplete_schedules 诊断不冒充渠道计数 | — |
+| 3 R03 | 48fa3fb | picker_emits_selected_calendar_date 红（HEAD 组件下 4 用例失败；手选 10-06 提交 10-05） | 真实 NDatePicker 键入→emit 断言绿；local 时区/校验 4 用例绿；DST/跨年纯日历绿 | 洛杉矶等负偏移由字符串往返不变量覆盖（Windows Node 忽略 TZ，无法进程内切时区） |
+| 4 R04 | 2006f4b | snapshot_waits_for_matching… 红（以 claude 筛选保存旧 all 汇总） | 队列单测 4 / Dashboard 场景 6（含 v3 忽略、卸载不落盘、失败态胶囊）/ 壳 round-trip+原子失败 2 绿 | — |
+| 5 R05 | b8fc81a | cache_source_identity 三用例红（换根项目 a 不变 b；换 agent 改标旧事件） | 端到端 3 绿 + cache 21（含 schema v4 失效/身份隔离单测） | — |
+| 6 R06 | 57de3c1 | test_nonfinite_price_rejected_toml 等 4 红（nan/inf 进费用、降级恢复非法 base） | nonfinite 2 / invalid_base 1 / invalid_price 1 / pricing 59 绿 | — |
+| 7 R07 | 8d1ea8f | close_failure… 红（失败静默关弹窗丢勾选） | App 集成 2（失败可见+重试成功、pending 防重复）+ 组件 2 绿 | — |
+| 8 R08 | 4c0ae8b | empty_report_keeps_collection_errors_visible 红（空结果诊断不可见） | 3 场景绿（空+异常可见/部分可见/干净不误报）；表格重复展示移除 | — |
+| 9 R09/R10 | 244d6cc | hit_rate_tooltip_opens_on_focus 红（focus 不开）；same_second… 红（行身份冲突） | 真实触发时序绿（focus/hover/Escape/Enter）；同秒行身份=cursor 绿；events_pagination 4 绿 | — |
+| 10 | 2fedca7 | QA 文档导航证据与旧实现不符（header 在滚动容器外，内容不会从其后经过） | header 移入 .scroll-container（同滚动上下文吸顶），App/accessibility 15 用例绿；截图存档仍缺 → QA 注明"历史文字记录，图片当前不可核验" | 100/150% 缩放与 D5 安装验收继续后延（不伪造通过） |
+
+门禁（最终，严格串行）：根库 fmt/clippy/test ✅ · 壳 fmt/clippy/test ✅ ·
+前端 typecheck/format:check/test(167)/build ✅
