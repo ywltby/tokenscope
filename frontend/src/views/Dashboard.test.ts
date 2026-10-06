@@ -359,34 +359,91 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
 });
 
 describe("Dashboard 状态（设计系统 Task 7）", () => {
-  it("空数据时有明确状态文案与下一步指引", async () => {
+  function emptyReport(warnings: string[] = [], sources: object[] = []) {
+    return {
+      timezone: "UTC",
+      generated_at: "t",
+      sources,
+      by: "day",
+      groups: [],
+      totals: {
+        key: "totals",
+        requests: 0,
+        tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+        cost_usd: 0,
+        unknown_pricing: false,
+        unknown_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+      },
+      warnings,
+    };
+  }
+
+  function mountEmpty(warnings: string[] = [], sources: object[] = []): VueWrapper {
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "summarize")
-        return Promise.resolve({
-          timezone: "UTC",
-          generated_at: "t",
-          sources: [],
-          by: "day",
-          groups: [],
-          totals: {
-            key: "totals",
-            requests: 0,
-            tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
-            cost_usd: 0,
-            unknown_pricing: false,
-            unknown_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
-          },
-          warnings: [],
-        });
+      if (cmd === "summarize") return Promise.resolve(emptyReport(warnings, sources));
       if (cmd === "list_events") return Promise.resolve({ rows: [], total: 0, warnings: [] });
       if (cmd === "source_status") return Promise.resolve([]);
       if (cmd === "view_cache_load") return Promise.resolve(null);
       return Promise.resolve(null);
     });
-    const w = mount(Dashboard, { props: { refreshKey: 0 } });
+    return mount(Dashboard, { props: { refreshKey: 0 } });
+  }
+
+  it("空数据时有明确状态文案与下一步指引", async () => {
+    const w = mountEmpty();
     await flushPromises();
     expect(w.text()).toContain("暂无数据");
     expect(w.text()).toContain("调整时间范围");
+  });
+
+  it("R08 empty_report_keeps_collection_errors_visible：空结果 + 采集异常必须可见", async () => {
+    const w = mountEmpty(
+      ["Codex 快照解析失败，该层已忽略"],
+      [
+        {
+          agent: "codex",
+          stats: { io_errors: 2, bad_lines: 5, lines_seen: 10, events: 0 },
+        },
+      ],
+    );
+    await flushPromises();
+    const notice = w.findAll(".ts-notice").find((n) => n.text().includes("本轮采集存在部分问题"));
+    // 采集诊断通知必须可见
+    expect(notice).toBeDefined();
+    expect(notice!.text()).toContain("2 个文件读取失败");
+    expect(notice!.text()).toContain("5 行解析失败");
+    expect(notice!.text()).toContain("1 条采集警告");
+    // 详情可展开
+    const toggle = notice!.findAll("button").find((b) => b.text().includes("详情"));
+    await toggle!.trigger("click");
+    expect(w.text()).toContain("Codex 快照解析失败");
+    // 空状态仍显示
+    expect(w.text()).toContain("暂无数据");
+  });
+
+  it("R08 partial_report_has_visible_notice：部分数据 + 警告可见且表格仍渲染", async () => {
+    const r = { ...summaryA, warnings: ["来源目录重叠：重复文件只统计一次"] };
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "summarize") return Promise.resolve(r);
+      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    const notice = w.findAll(".ts-notice").find((n) => n.text().includes("本轮采集存在部分问题"));
+    expect(notice, "部分数据的警告必须可见").toBeDefined();
+    expect(notice!.text()).toContain("1 条采集警告");
+    // 表格仍渲染（部分数据展示；mountDashboard 中表格已打桩）
+    expect(w.html()).toContain("usage-table-stub");
+  });
+
+  it("R08 clean_empty_report_is_not_error：干净空区间不误报", async () => {
+    const w = mountEmpty();
+    await flushPromises();
+    const notices = w.findAll(".ts-notice").filter((n) => n.text().includes("本轮采集"));
+    expect(notices.length).toBe(0); // 干净空区间不得显示采集诊断
   });
 });
 

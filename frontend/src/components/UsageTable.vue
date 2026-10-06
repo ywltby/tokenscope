@@ -159,9 +159,7 @@ const sourceLines = computed(() =>
           <strong>{{ s.agent }}</strong
           >：{{ s.parts.join(" · ") }}
         </div>
-        <div v-if="report.warnings.length" class="source-warning">
-          {{ report.warnings.join("；") }}
-        </div>
+        <!-- R08：warnings 已在页面级采集诊断通知展示，此处不再重复 -->
       </NCollapseItem>
     </NCollapse>
   </section>
@@ -212,9 +210,5 @@ const sourceLines = computed(() =>
   font-size: 12px;
   line-height: 1.9;
   color: var(--ts-text-secondary);
-}
-.source-warning {
-  font-size: 12px;
-  color: var(--ts-warning);
 }
 </style>

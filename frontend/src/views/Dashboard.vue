@@ -110,6 +110,28 @@ const statusPill = computed<{ cls: string; text: string }>(() => {
   return { cls: "ts-pill-success", text: "已更新" };
 });
 
+// R08（Task 8）：采集诊断——空结果/部分结果都必须可见，不依赖表格挂载。
+// 分开命名：warnings（重叠/缓存降级等）、坏行、IO 错误——不声称所有
+// warning 都表示丢数据；干净空区间不误报。
+const collectionDiagnostics = computed(() => {
+  const warns = report.value?.warnings ?? [];
+  const statsList = report.value?.sources.map((s) => s.stats) ?? [];
+  const ioErrors = statsList.reduce((a, st) => a + (st.io_errors ?? 0), 0);
+  const badLines = statsList.reduce((a, st) => a + (st.bad_lines ?? 0), 0);
+  const clean = warns.length === 0 && ioErrors === 0 && badLines === 0;
+  const summaryText = clean
+    ? null
+    : [
+        warns.length > 0 ? `${warns.length} 条采集警告` : null,
+        ioErrors > 0 ? `${ioErrors} 个文件读取失败` : null,
+        badLines > 0 ? `${badLines} 行解析失败（已跳过）` : null,
+      ]
+        .filter(Boolean)
+        .join("，");
+  return { clean, summaryText, warns, ioErrors, badLines };
+});
+const showCollectionDetails = ref(false);
+
 // 任务 7：来源异常通知——单条直接展示，多条合并为一条可展开通知。
 const problemSources = computed(() => sourceStatus.value.filter((x) => x.state !== "ready"));
 const showSourceDetails = ref(false);
@@ -406,6 +428,40 @@ void loadSources();
       </svg>
       <span class="ts-notice-content">汇总加载失败：{{ summaryError }}</span>
       <button type="button" class="ts-notice-action ts-focusable" @click="refresh">重试</button>
+    </div>
+    <!-- R08：采集诊断（空结果/部分结果均可见，不依赖表格挂载） -->
+    <div v-if="!collectionDiagnostics.clean" class="ts-notice source-notice">
+      <svg
+        class="ts-notice-icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M12 3.5 21 19.5H3z" />
+        <path d="M12 10v4" />
+        <path d="M12 17h.01" />
+      </svg>
+      <span class="ts-notice-content">
+        本轮采集存在部分问题（{{ collectionDiagnostics.summaryText }}）；已采集数据仍有效。
+      </span>
+      <button
+        v-if="collectionDiagnostics.warns.length > 0"
+        type="button"
+        class="ts-notice-action ts-focusable"
+        :aria-expanded="showCollectionDetails"
+        @click="showCollectionDetails = !showCollectionDetails"
+      >
+        详情
+      </button>
+    </div>
+    <div v-if="showCollectionDetails" class="source-details">
+      <div v-for="(w, i) in collectionDiagnostics.warns" :key="i" class="source-detail-line">
+        {{ w }}
+      </div>
     </div>
     <div v-if="eventsError" class="ts-notice source-notice">
       <svg
