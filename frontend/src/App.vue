@@ -103,36 +103,38 @@ function onCloseCancel(): void {
     <NGlobalStyle />
     <NMessageProvider>
       <div class="app-shell">
-        <header class="app-nav ts-glass">
-          <span class="brand">
-            <!-- 品牌标记：表盘/示波器意象的线性图标（DESIGN.md §3 禁 emoji 图标） -->
-            <svg
-              class="brand-mark"
-              viewBox="0 0 24 24"
-              width="18"
-              height="18"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-              aria-hidden="true"
-            >
-              <circle cx="12" cy="12" r="9" />
-              <path d="M12 12 17.2 6.8" />
-              <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none" />
-            </svg>
-            TokenScope
-          </span>
-          <SegmentedControl v-model="page" :options="pageOptions" aria-label="页面切换" />
-          <div class="spacer" />
-          <SegmentedControl
-            v-model="preference"
-            :options="themeOptions"
-            aria-label="主题偏好（浅色/深色/跟随系统）"
-            @update:model-value="setPreference"
-          />
-        </header>
         <div class="scroll-container">
+          <!-- R04 审核：导航与内容同一滚动上下文——内容滚动时从导航后方
+               经过，玻璃模糊才真正有内容可透（吸顶 header 在滚动容器内） -->
+          <header class="app-nav ts-glass">
+            <span class="brand">
+              <!-- 品牌标记：表盘/示波器意象的线性图标（DESIGN.md §3 禁 emoji 图标） -->
+              <svg
+                class="brand-mark"
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                aria-hidden="true"
+              >
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 12 17.2 6.8" />
+                <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none" />
+              </svg>
+              TokenScope
+            </span>
+            <SegmentedControl v-model="page" :options="pageOptions" aria-label="页面切换" />
+            <div class="spacer" />
+            <SegmentedControl
+              v-model="preference"
+              :options="themeOptions"
+              aria-label="主题偏好（浅色/深色/跟随系统）"
+              @update:model-value="setPreference"
+            />
+          </header>
           <!-- 全局状态横幅：渲染在内容之前，不遮挡主体 -->
           <div class="banner-slot">
             <PricingStatusBanner />
@@ -162,15 +164,13 @@ function onCloseCancel(): void {
 <style scoped>
 .app-shell {
   height: 100vh;
-  display: flex;
-  flex-direction: column;
 }
 
 .app-nav {
   position: sticky;
   top: 0;
   z-index: 10;
-  flex: 0 0 52px;
+  height: 52px;
   display: flex;
   align-items: center;
   gap: var(--ts-space-4);
