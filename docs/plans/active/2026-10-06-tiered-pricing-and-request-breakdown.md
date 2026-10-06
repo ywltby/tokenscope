@@ -718,7 +718,13 @@ pnpm --dir frontend build
 | 6 | `EventRow.cost_breakdown`（复用 pricing DTO，不泄露内部类型）；`list_events` 每事件一次 estimate 同产 `cost_usd` 与明细；分页/过滤不变 | fd8ce3e | `test_event_cost_breakdown` + report 过滤 26 项全绿 |
 | 7 | 前端 `EventRow`/breakdown DTO；`formatCostBreakdown` 纯函数（来源/渠道/匹配方式/候选最高费用说明、prompt 度量式、档位、分项、unknown 行）；费用列 NTooltip | 018cf6e | EventTable.test.ts 10 项 + 前端 54 项/typecheck/format 全绿 |
 | 8 | `PricingEntry` 携带 channel/basis/segments/schedules/has_tiered_pricing，四价 Option 化；设置页"分段"标记 + 档位悬浮（lib/tieredPrice 纯函数） | 76f2735 | `test_pricing_entries_segments` + Settings.test.ts 8 项 + 前端 58 项/build 全绿 |
-| 9 | 索引迁移（v3 扁平索引按版本失效重建）、旧快照离线基础价、新索引保留分段、跨来源不拼价；CLAUDE.md / stats-semantics §4 / D5 清单 4.9–4.12 | （本提交） | `test_pricing_index_migration` + pricing_index/modelsdev/openrouter/report 过滤全绿 |
+| 9 | 索引迁移（v3 扁平索引按版本失效重建）、旧快照离线基础价、新索引保留分段、跨来源不拼价；CLAUDE.md / stats-semantics §4 / D5 清单 4.9–4.12 | afc775d | `test_pricing_index_migration` + pricing_index/modelsdev/openrouter/report 过滤全绿 |
+| 10 | 完整门禁（见下）；定向场景全部由 Task 1–9 的具名测试覆盖（多档/旧字段/多 override/外置覆盖/阈值边界/峰谷/多渠道/缓存分项/部分缺价/未知模型/来源冲突/旧索引/tooltip 文案）；聚合总价 == 逐请求明细求和（`test_event_cost_breakdown` 内核对） | （本提交） | 门禁结果：Rust fmt/clippy/test 152 通过 + src-tauri 10 通过；前端 vitest 62 通过、typecheck/format/build 通过 |
+
+### 额外修复（计划外，阻断级）
+
+- **设置页数据来源行失效（2026-10-06 验收发现）**：`source_status` 的 agent 序列化值为 `claude-code`，而草稿键与 `source_config_set` 契约是 `claude`，导致 Claude 行开关/目录/保存整行失效且 JS 异常串直出、错误在 v-for 内跨行重复。修复：`sourceIdOf` 归一化（types.ts）、草稿按来源 ID 动态建键（缺键兜底）、错误按行归属只渲染一次、保存成功补 `msg.success`；新增 4 项组件测试钉住行为。提交 c101cf6。
+- 顺带修复 `test_pricing_index_migration` 污染全局 PRICE_CACHE 导致 `restart_hit` 顺序性 flaky（测试结束清空共享缓存）。
 
 ### 已知限制（如实记录，不猜测价格）
 
