@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { NButton, NCheckbox, NDatePicker, NPopover } from "naive-ui";
-import { addDays, calendarToMs, msToUtcCalendar, todayInTz } from "../lib/dates";
+import { addDays, todayInTz } from "../lib/dates";
 
 /**
  * ccs 风格的日期区间选择（M10；C3 修复 F07）：
@@ -92,22 +92,10 @@ const label = computed<string>(() => {
     : `${fmtShort(v[0])} ~ ${fmtShort(v[1])}`;
 });
 
-// NDatePicker 以毫秒为输入：日历字符串 ↔ UTC 零点毫秒的桥接（仅组件
-// 输入，不携带统计语义——统计语义是字符串本身）。
-const draftFromMs = computed<number | null>({
-  get: () => (draftFrom.value ? calendarToMs(draftFrom.value) : null),
-  set: (ms) => {
-    // 审阅 Task 1：picker 毫秒是 UTC 零点锚的 UI 桥接值，setter 用同一
-    // UTC 日历语义还原——统计时区不得重解释（负偏移时会变前一天）。
-    draftFrom.value = ms == null ? null : msToUtcCalendar(ms);
-  },
-});
-const draftToMs = computed<number | null>({
-  get: () => (draftTo.value ? calendarToMs(draftTo.value) : null),
-  set: (ms) => {
-    draftTo.value = ms == null ? null : msToUtcCalendar(ms);
-  },
-});
+// R03：NDatePicker 用 v-model:formatted-value + value-format 直接桥接
+// **字符串**（yyyy-MM-dd）——毫秒值在本机日历与 UTC 锚之间有日常一天
+// 的歧义，是手选日期偏一天的根因。控件吐什么字符串就存什么字符串，
+// 统计语义 = 控件日历语义，无任何时区重解释。
 
 const shortcutActive = (sc: { range: () => [string, string] }): boolean => {
   if (draftFrom.value == null || draftTo.value == null) return false;
@@ -144,13 +132,20 @@ const shortcutActive = (sc: { range: () => [string, string] }): boolean => {
         </NButton>
       </div>
       <div class="field-label">开始日期</div>
-      <NDatePicker v-model:value="draftFromMs" type="date" clearable placeholder="开始日期" />
+      <NDatePicker
+        v-model:formatted-value="draftFrom"
+        type="date"
+        clearable
+        value-format="yyyy-MM-dd"
+        placeholder="开始日期"
+      />
       <div class="field-label field-label-gap">结束日期</div>
       <NDatePicker
-        v-model:value="draftToMs"
+        v-model:formatted-value="draftTo"
         type="date"
         clearable
         :disabled="followToday"
+        value-format="yyyy-MM-dd"
         placeholder="结束日期"
       />
       <div class="follow-row">

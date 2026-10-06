@@ -8,7 +8,9 @@ export function tzDate(ms: number, tz: string): string {
 }
 
 /// 指定时区的"今天"（YYYY-MM-DD 日历值）。
+/// R03：`local` 不能传给 Intl（RangeError）——特判为本机日历日。
 export function todayInTz(tz: string): string {
+  if (tz === "local") return new Date().toLocaleDateString("sv-SE");
   return new Intl.DateTimeFormat("sv-SE", { timeZone: tz }).format(new Date());
 }
 
@@ -17,18 +19,4 @@ export function addDays(dateStr: string, n: number): string {
   const [y, m, d] = dateStr.split("-").map(Number);
   const t = Date.UTC(y, m - 1, d) + n * 86400e3;
   return new Date(t).toISOString().slice(0, 10);
-}
-
-/// 日历字符串 → NDatePicker 所需毫秒（锚定 UTC 零点，仅作组件输入）。
-export function calendarToMs(dateStr: string): number {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  return Date.UTC(y, m - 1, d);
-}
-
-/// 毫秒 → UTC 锚定日历日期（YYYY-MM-DD）。
-/// 与 `calendarToMs` 互为逆运算：calendarToMs 用 UTC 零点锚定日历字符串，
-/// 这里用 UTC 日历提取还原——picker 的 UI 毫秒值只承担桥接语义，
-/// 不得用统计时区重解释（审阅 Task 1）。
-export function msToUtcCalendar(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 10);
 }

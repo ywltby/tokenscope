@@ -4,10 +4,29 @@
 import { ref, watchEffect } from "vue";
 
 const STORAGE_KEY = "tokenscope-tz";
+const DEFAULT_TZ = "Asia/Shanghai";
+
+/// R03：持久化值校验——`local` 特判放行；其余必须是合法 IANA 时区
+/// （Intl 构造校验）。非法旧偏好回退默认，不因历史脏值抛异常导致
+/// 首屏崩溃。
+function validTz(tz: string): boolean {
+  if (tz === "local") return true;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function initial(): string {
   const saved = localStorage.getItem(STORAGE_KEY);
-  return saved ?? "Asia/Shanghai";
+  if (saved != null && validTz(saved)) return saved;
+  if (saved != null) {
+    // 无日志后端可用（前端层），console.warn 足够——不影响渲染。
+    console.warn(`持久化时区偏好非法（"{saved}"），回退默认 "${DEFAULT_TZ}"`);
+  }
+  return DEFAULT_TZ;
 }
 
 const tz = ref<string>(initial());
