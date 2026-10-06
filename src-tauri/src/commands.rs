@@ -618,8 +618,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tokenscope-t2-ovl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("settings.json");
-        std::fs::write(&path, r#"{"price_auto_sync":true}"#).unwrap();
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, "price_auto_sync = true\n").unwrap();
         // 先保存 claude 配置
         source_config_set_impl(&path, "claude", true, Some("C:/shared/logs".into())).unwrap();
         // codex 同目录 → 拒绝
@@ -640,7 +640,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tokenscope-t71-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("settings.json");
+        let path = dir.join("settings.toml");
         let corrupt = r#"{"price_auto_sync": true, "broken""#;
         std::fs::write(&path, corrupt).unwrap();
         let r = source_config_set_impl(&path, "claude", false, None);
