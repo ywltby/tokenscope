@@ -22,6 +22,7 @@ import {
 import {
   AGENT_LABEL,
   fmtNum,
+  sourceIdOf,
   type CacheInfo,
   type PricingEntry,
   type PricingView,
@@ -60,7 +61,24 @@ async function loadAll(): Promise<void> {
 // C1：来源配置草稿（编辑后按行保存）
 const drafts = ref<Record<string, { enabled: boolean; dir: string }>>({});
 const savingSource = ref<string | null>(null);
-const sourceSaveError = ref<string | null>(null);
+const sourceErrors = ref<Record<string, string>>({});
+
+/// 读取或补建该来源的草稿（设置缺键时按默认开启兜底）。
+function ensureDraft(id: string): { enabled: boolean; dir: string } {
+  const d = drafts.value[id];
+  if (d) return d;
+  const fresh = { enabled: true, dir: "" };
+  drafts.value[id] = fresh;
+  return fresh;
+}
+
+function setSourceEnabled(id: string, v: boolean): void {
+  ensureDraft(id).enabled = v;
+}
+
+function setSourceDir(id: string, v: string): void {
+  ensureDraft(id).dir = v;
+}
 
 async function loadDrafts(): Promise<void> {
   const s = await invoke<Record<string, unknown>>("settings_get");
@@ -72,19 +90,22 @@ async function loadDrafts(): Promise<void> {
 }
 
 async function saveSource(agent: string): Promise<void> {
-  savingSource.value = agent;
-  sourceSaveError.value = null;
+  const id = sourceIdOf(agent);
+  savingSource.value = id;
+  delete sourceErrors.value[id];
   try {
-    const d = drafts.value[agent];
+    const d = ensureDraft(id);
     await invoke("source_config_set", {
-      agent,
+      agent: id,
       enabled: d.enabled,
       dir: d.dir.trim() === "" ? null : d.dir.trim(),
     });
+    msg.success(`已保存 ${AGENT_LABEL[id] ?? id} 来源配置`);
     await loadSources();
   } catch (e) {
-    // Task 2：后端返回的重叠等配置错误必须可见，保留用户当前输入以便修改。
-    sourceSaveError.value = `${AGENT_LABEL[agent] ?? agent}: ${e instanceof Error ? e.message : String(e)}`;
+    // Task 2：后端返回的重叠等配置错误必须可见，保留用户当前输入以便
+    // 修改；错误只归属对应来源行（不再在 v-for 内跨行重复渲染）。
+    sourceErrors.value[id] = e instanceof Error ? e.message : String(e);
   } finally {
     savingSource.value = null;
   }
@@ -322,9 +343,9 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
               <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px">
                 <strong>{{ AGENT_LABEL[s.agent] ?? s.agent }}</strong>
                 <NSwitch
-                  :value="drafts[s.agent]?.enabled ?? true"
+                  :value="drafts[sourceIdOf(s.agent)]?.enabled ?? true"
                   size="small"
-                  @update:value="(v: boolean) => (drafts[s.agent]!.enabled = v)"
+                  @update:value="(v: boolean) => setSourceEnabled(sourceIdOf(s.agent), v)"
                 />
                 <span style="font-size: 12px; opacity: 0.6">
                   {{
@@ -340,20 +361,20 @@ const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}
                 <span style="flex: 1"></span>
                 <NButton
                   size="tiny"
-                  :loading="savingSource === s.agent"
+                  :loading="savingSource === sourceIdOf(s.agent)"
                   @click="saveSource(s.agent)"
                 >
                   保存
                 </NButton>
               </div>
               <NInput
-                :value="drafts[s.agent]?.dir ?? ''"
+                :value="drafts[sourceIdOf(s.agent)]?.dir ?? ''"
                 size="small"
                 :placeholder="`默认目录：${s.dir}`"
-                @update:value="(v: string) => (drafts[s.agent]!.dir = v)"
+                @update:value="(v: string) => setSourceDir(sourceIdOf(s.agent), v)"
               />
-              <NAlert v-if="sourceSaveError" type="error" style="margin: 6px 0">
-                {{ sourceSaveError }}
+              <NAlert v-if="sourceErrors[sourceIdOf(s.agent)]" type="error" style="margin: 6px 0">
+                {{ sourceErrors[sourceIdOf(s.agent)] }}
               </NAlert>
               <div style="font-size: 12px; opacity: 0.6; margin-top: 4px">
                 留空使用默认目录；停用后该来源完全不参与统计。两个来源不能指向同一目录。

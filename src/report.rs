@@ -1741,6 +1741,15 @@ cache_write = 10.0
         assert!(json.contains("\"match_mode\":\"full\""));
         assert!(json.contains("\"schedule_label\":null"));
         assert!(!json.contains("Entry"), "不得泄露 Rust 内部类型");
+        // 不变量 7：聚合总价 == 逐请求明细求和（同一 estimate 的两种视图）。
+        let report = summary(&opts).unwrap();
+        let row_sum: f64 = list.rows.iter().filter_map(|r| r.cost_usd).sum();
+        assert!(
+            (report.totals.cost_usd - row_sum).abs() < 1e-9,
+            "聚合 {} != 明细求和 {}",
+            report.totals.cost_usd,
+            row_sum
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

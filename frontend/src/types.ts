@@ -228,6 +228,15 @@ export interface EventDrill {
 export type Dim = "day" | "model" | "project" | "agent";
 export type AgentFilter = "all" | "claude" | "codex";
 
+/**
+ * 来源 ID 归一化（Task 8 修复）：source_status 序列化的 agent 值
+ * （"claude-code"）→ 来源 ID（"claude"，与 settings_get /
+ * source_config_set 的后端契约一致）。不归一化则 Claude 行草稿键错配。
+ */
+export function sourceIdOf(agent: string): string {
+  return agent === "claude-code" ? "claude" : agent;
+}
+
 export const AGENT_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",

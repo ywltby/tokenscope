@@ -2731,6 +2731,9 @@ mod tests {
         std::fs::write(&idx, serde_json::to_string(&v3).unwrap()).unwrap();
         let (_, _, hit) = Pricing::load_cached(None, None, None, &idx);
         assert!(!hit, "v3 扁平索引必须按版本失效重建（不猜测渠道键）");
+        // 全局 PRICE_CACHE 是共享态：本测试结束前清空，避免污染同签名的
+        // 其他密闭性测试（如 restart_hit 的"首次必重建"）。
+        *PRICE_CACHE.lock().unwrap() = None;
 
         // 旧 models.dev v2 快照（无分段字段）→ 离线仅基础价可用。
         use crate::modelsdev::{Snapshot as MdSnap, SnapshotEntry as MdEntry};

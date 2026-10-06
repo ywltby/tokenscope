@@ -33,12 +33,14 @@ vi.mock("naive-ui", async (importOriginal) => {
   };
 });
 
-// useMessage 打桩（naive-ui 的 useMessage 需要 provider）
+// useMessage 打桩（naive-ui 的 useMessage 需要 provider）；
+// spy 提升为稳定引用，供断言成功/失败提示。
+const msgSpy = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
 vi.mock("naive-ui", async (importOriginal) => {
   const actual = await importOriginal<typeof import("naive-ui")>();
   return {
     ...actual,
-    useMessage: () => ({ success: vi.fn(), error: vi.fn() }),
+    useMessage: () => msgSpy,
   };
 });
 
@@ -261,5 +263,99 @@ describe("Settings 分段价格展示（Task 8）", () => {
     expect(lines.some((l) => l.includes("分段 >272K"))).toBe(true);
     expect(lines.some((l) => l.includes("峰谷 peak"))).toBe(true);
     expect(formatTieredPricing(plain)).toEqual([]);
+  });
+});
+
+import { sourceIdOf } from "../types";
+
+describe("Settings 数据来源（claude-code 行修复）", () => {
+  beforeEach(() => {
+    msgSpy.success.mockClear();
+    msgSpy.error.mockClear();
+  });
+
+  /** 定位指定来源的行容器与行内操作区。 */
+  function rowOf(w: ReturnType<typeof mount>, label: string) {
+    const strong = w.findAll("strong").find((x) => x.text() === label);
+    expect(strong, `${label} 行应存在`).toBeDefined();
+    const ops = strong!.element.parentElement!;
+    const row = ops.parentElement!;
+    return { ops, row };
+  }
+
+  it("sourceIdOf 归一化 agent 序列化值为来源 ID", () => {
+    expect(sourceIdOf("claude-code")).toBe("claude");
+    expect(sourceIdOf("codex")).toBe("codex");
+  });
+
+  it("claude-code 行点开关：aria-checked 翻转并写入 claude 草稿", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    const { ops } = rowOf(w, "Claude Code");
+    const sw = ops.querySelector('[role="switch"]');
+    expect(sw).toBeDefined();
+    expect(sw!.getAttribute("aria-checked")).toBe("true");
+    await (sw! as HTMLElement).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+    expect(sw!.getAttribute("aria-checked")).toBe("false");
+    const vm = w.vm as unknown as { drafts: Record<string, { enabled: boolean }> };
+    expect(vm.drafts.claude.enabled).toBe(false);
+  });
+
+  it("claude-code 行点保存：invoke 使用 agent=claude 且有成功提示", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "source_config_set") return Promise.resolve({ enabled: false, dir: null });
+      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+      if (cmd === "autostart_status") return Promise.resolve(false);
+      if (cmd === "loadAutostart" || cmd === "loadAutoSync") return Promise.resolve(null);
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const { ops } = rowOf(w, "Claude Code");
+    const saveBtn = Array.from(ops.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "保存",
+    );
+    expect(saveBtn).toBeDefined();
+    await (saveBtn! as HTMLElement).click();
+    await flushPromises();
+    const call = invokeMock.mock.calls.find((c) => c[0] === "source_config_set");
+    expect(call).toBeDefined();
+    expect(call![1]).toMatchObject({ agent: "claude" });
+    expect(msgSpy.success).toHaveBeenCalled();
+  });
+
+  it("保存失败的错误只渲染在对应来源行", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "source_config_set")
+        return Promise.reject(new Error("Claude 与 Codex 来源目录指向同一位置"));
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+      if (cmd === "autostart_status") return Promise.resolve(false);
+      if (cmd === "loadAutostart" || cmd === "loadAutoSync") return Promise.resolve(null);
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const claude = rowOf(w, "Claude Code");
+    const codex = rowOf(w, "Codex");
+    const saveBtn = Array.from(claude.ops.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "保存",
+    );
+    await (saveBtn! as HTMLElement).click();
+    await flushPromises();
+    // 错误文案全页只出现一次（归属 Claude 行）——修复前在 v-for 内
+    // 跨行重复渲染两次。
+    const errText = "来源目录指向同一位置";
+    expect(w.text().split(errText).length - 1).toBe(1);
+    // 输入保留
+    const vm = w.vm as unknown as { drafts: Record<string, { enabled: boolean }> };
+    expect(vm.drafts.claude).toBeDefined();
+    void codex;
   });
 });
