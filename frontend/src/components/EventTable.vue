@@ -2,6 +2,8 @@
 import { computed, h, ref } from "vue";
 import { NButton, NDataTable, NTag, NTooltip, type DataTableColumn } from "naive-ui";
 import { AGENT_LABEL, fmtNum, projectLabel, type EventList } from "../types";
+import { formatMoney } from "../lib/formatMoney";
+import { tokenBucketLabel } from "../lib/tokenDisplay";
 import { formatCostBreakdownRows } from "../lib/costBreakdown";
 
 const props = defineProps<{
@@ -18,11 +20,9 @@ const emit = defineEmits<{ (e: "load-more"): void; (e: "clear-filter"): void }>(
 const openKey = ref<string | null>(null);
 const remaining = () => props.list.total - props.list.rows.length;
 
+// UX07：请求金额走单一入口（含 $、微小非零保护）；列头不再带 $。
 function fmtPrice(v: number): string {
-  if (v === 0) return "0";
-  if (v < 0.001) return v.toFixed(6);
-  if (v < 1) return v.toFixed(4);
-  return v.toFixed(2);
+  return formatMoney(v, "request");
 }
 
 const columns = computed<DataTableColumn[]>(() => [
@@ -73,21 +73,21 @@ const columns = computed<DataTableColumn[]>(() => [
     render: (r) => fmtNum(asRow(r).output),
   },
   {
-    title: "缓存写",
+    title: tokenBucketLabel("cache_write"),
     key: "cache_write",
     align: "right",
     className: "ts-num",
     render: (r) => fmtNum(asRow(r).cache_write),
   },
   {
-    title: "缓存读",
+    title: tokenBucketLabel("cache_read"),
     key: "cache_read",
     align: "right",
     className: "ts-num",
     render: (r) => fmtNum(asRow(r).cache_read),
   },
   {
-    title: "费用$(估算)",
+    title: "费用（估算）",
     key: "cost_usd",
     align: "right",
     className: "ts-num",

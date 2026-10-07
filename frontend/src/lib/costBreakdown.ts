@@ -2,6 +2,8 @@
 // 不做任何费用重算（不变量 7：金额一律来自后端 breakdown）。
 // 结构按 DESIGN.md §5「事实 → 公式 → 结果 → 来源」排列。
 import { fmtNum } from "../types";
+import { formatMoney } from "./formatMoney";
+import { TOKEN_BUCKETS } from "./tokenDisplay";
 import type { CostLine, CostLineKind, EventCostBreakdown, MatchMode } from "../types";
 
 /** 单行展示模型：label/value 两列；detail 为整行说明；divider 分组。 */
@@ -30,26 +32,20 @@ const MATCH_LABEL: Record<MatchMode, string> = {
   prefix_variant_fallback: "前缀匹配（变体回退）",
 };
 
-const KIND_LABEL: Record<CostLineKind, string> = {
-  input: "输入",
-  output: "输出",
-  cache_write: "缓存写",
-  cache_read: "缓存读",
-};
+// UX07：分项显示名消费 tokenDisplay 单一来源（U14：缓存命中）。
+export const KIND_LABEL: Record<CostLineKind, string> = Object.fromEntries(
+  TOKEN_BUCKETS.map((b) => [b.key, b.label]),
+) as Record<CostLineKind, string>;
 
-/** USD/百万 token 单价（0 显示 $0；小值保 6 位防长尾）。 */
+/** USD/百万 token 单价（UX07：unit 场景单一入口）。 */
 function fmtUnit(v: number): string {
-  if (v === 0) return "$0";
-  if (v < 0.001) return `$${v.toFixed(6)}`;
-  if (v < 1) return `$${v.toFixed(4)}`;
-  return `$${v.toFixed(2)}`;
+  return formatMoney(v, "unit");
 }
 
 /** 金额展示：仅排版舍入，不参与计算；极小非零金额不得显示为 $0.00。 */
+/** 金额展示（UX07：request 场景单一入口，极小非零不得显示为 $0.00）。 */
 function fmtMoney(v: number): string {
-  if (v === 0) return "$0.00";
-  if (Math.abs(v) < 0.01) return `$${v.toFixed(6)}`;
-  return `$${v.toFixed(2)}`;
+  return formatMoney(v, "request");
 }
 
 function factRows(bd: EventCostBreakdown): BreakdownRow[] {

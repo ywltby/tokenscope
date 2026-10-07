@@ -5,7 +5,8 @@
 // 分项比例条 + 色点图例。公式口径不变：cache_read / (input + cache_read)。
 import { computed, ref } from "vue";
 import { NTooltip } from "naive-ui";
-import { fmtCost, fmtNum, type Group } from "../types";
+import { fmtNum, type Group } from "../types";
+import { formatMoney } from "../lib/formatMoney";
 
 const props = defineProps<{ totals: Group }>();
 
@@ -23,7 +24,8 @@ const hitRate = computed(() => {
   return (props.totals.tokens.cache_read / base) * 100;
 });
 
-const costText = computed(() => `$${fmtCost(props.totals.cost_usd)}`);
+// UX07：汇总金额走单一入口（含 $、微小非零保护）。
+const costText = computed(() => formatMoney(props.totals.cost_usd, "summary"));
 /// 未知价格且已计价部分为 0：显示"未知†"而不是 $0.00（缺价 ≠ 免费）。
 const costUnknownOnly = computed(() => props.totals.unknown_pricing && props.totals.cost_usd === 0);
 

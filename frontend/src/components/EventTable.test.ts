@@ -154,7 +154,7 @@ describe("EventTable 费用悬浮（Task 7）", () => {
 
   it("未计价分项有明确文案且标注 unknown；总价与缺价说明可见", () => {
     const rows = formatCostBreakdownRows(highTierBd());
-    const unknownRow = rows.find((l) => l.label === "缓存读");
+    const unknownRow = rows.find((l) => l.label === "缓存命中");
     expect(unknownRow).toBeDefined();
     expect(unknownRow!.value).toContain("缺少单价");
     expect(unknownRow!.unknown).toBe(true);

@@ -3,8 +3,9 @@
 /// ECharts 默认调色板；网格、坐标轴、文字与 tooltip 颜色全部从语义
 /// token 派生。色值与 tokens.css 的 --ts-chart-* 同步维护。
 import type { ThemeMode } from "../composables/theme";
+import { TOKEN_BUCKETS, type TokenBucketKey } from "../lib/tokenDisplay";
 
-export type TokenKind = "input" | "output" | "cache_write" | "cache_read";
+export type TokenKind = TokenBucketKey;
 
 export interface ChartSeriesToken {
   key: TokenKind;
@@ -25,12 +26,8 @@ export interface ChartTokens {
   legendText: string;
 }
 
-const SERIES_META: [TokenKind, string][] = [
-  ["input", "输入"],
-  ["output", "输出"],
-  ["cache_write", "缓存写"],
-  ["cache_read", "缓存读"],
-];
+// UX07：显示名与顺序消费 tokenDisplay 单一来源（U14：缓存命中）。
+const SERIES_META: [TokenKind, string][] = TOKEN_BUCKETS.map((b) => [b.key, b.label]);
 
 /// 与 tokens.css --ts-chart-* 同步的系列色。
 const SERIES_COLORS: Record<ThemeMode, Record<TokenKind, string>> = {

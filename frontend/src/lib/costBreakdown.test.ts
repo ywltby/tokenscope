@@ -86,7 +86,7 @@ describe("costBreakdown 行模型（设计系统 Task 6）", () => {
     expect(t).toContain("输入 272,001 × $8.00/M = $2.18");
     expect(t).toContain("输出 1,000 × $30.00/M = $0.03");
     expect(t).toContain("缓存写 0 × $10.00/M = $0.00");
-    expect(t).toContain("缓存读 5,000 token，缺少单价");
+    expect(t).toContain("缓存命中 5,000 token，缺少单价");
   });
 
   it("结果行不吞掉极小非零金额", () => {
@@ -144,14 +144,14 @@ describe("costBreakdown 行模型（设计系统 Task 6）", () => {
 
   it("未知标记只出现在缺价相关行（unknown 行可被高亮渲染）", () => {
     const r = rows(bd()).filter((x) => x.unknown);
-    expect(r.map((x) => x.label)).toEqual(["缓存读", "未计价"]);
+    expect(r.map((x) => x.label)).toEqual(["缓存命中", "未计价"]);
   });
 });
 
 describe("costBreakdown 三态与排除诊断（缓存读取定价解析计划 Task 5）", () => {
   it("same_as_input 公式行标注「输入价」且单价为解析后的实际数值", () => {
     const t = text(sameAsInputBd());
-    expect(t).toContain("缓存读 5,000 × 输入价 $8.00/M = $0.04");
+    expect(t).toContain("缓存命中 5,000 × 输入价 $8.00/M = $0.0400");
     expect(t).not.toContain("缺少单价");
   });
 
@@ -167,8 +167,8 @@ describe("costBreakdown 三态与排除诊断（缓存读取定价解析计划 T
       unknown: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
       complete: true,
     });
-    const cr = rows.find((r) => r.label === "缓存读");
-    expect(cr!.value).toContain("$0/M");
+    const cr = rows.find((r) => r.label === "缓存命中");
+    expect(cr!.value).toContain("$0.00/M");
     expect(cr!.unknown).toBeUndefined();
   });
 

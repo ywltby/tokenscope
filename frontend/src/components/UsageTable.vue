@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, h } from "vue";
 import { NCollapse, NCollapseItem, NDataTable, type DataTableColumn } from "naive-ui";
-import { AGENT_LABEL, fmtCost, fmtNum, type Group, type SummaryReport } from "../types";
+import { AGENT_LABEL, fmtNum, type Group, type SummaryReport } from "../types";
+import { formatMoney } from "../lib/formatMoney";
+import { tokenBucketLabel } from "../lib/tokenDisplay";
 import { buildSourceLines } from "../lib/statsView";
 
 const props = defineProps<{ report: SummaryReport }>();
@@ -55,10 +57,10 @@ const columns = computed<DataTableColumn[]>(() => {
   const cols: DataTableColumn[] = [
     first,
     num("请求", "requests"),
-    token("输入", "input"),
-    token("输出", "output"),
-    token("缓存写", "cache_write"),
-    token("缓存读", "cache_read"),
+    token(tokenBucketLabel("input"), "input"),
+    token(tokenBucketLabel("output"), "output"),
+    token(tokenBucketLabel("cache_write"), "cache_write"),
+    token(tokenBucketLabel("cache_read"), "cache_read"),
     {
       title: "合计",
       key: "total",
@@ -80,7 +82,7 @@ const columns = computed<DataTableColumn[]>(() => {
       className: "ts-num",
       render: (row) => {
         const g = asGroup(row);
-        const text = fmtCost(g.cost_usd) + (g.unknown_pricing ? "†" : "");
+        const text = formatMoney(g.cost_usd, "summary") + (g.unknown_pricing ? "†" : "");
         // 未知标记用警告色显式呈现，不用 opacity 压低（DESIGN.md §1）
         return h("span", { style: g.unknown_pricing ? "color: var(--ts-warning)" : "" }, text);
       },

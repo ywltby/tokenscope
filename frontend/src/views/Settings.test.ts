@@ -239,7 +239,7 @@ describe("Settings 分段价格展示（Task 8）", () => {
 
   it("缺失分项显示未知，显式 0 显示 $0", () => {
     expect(fmtPriceOrUnknown(null)).toBe("未知");
-    expect(fmtPriceOrUnknown(0)).toBe("$0");
+    expect(fmtPriceOrUnknown(0)).toBe("$0.00");
     expect(fmtPriceOrUnknown(0.4)).toBe("$0.4000");
     expect(fmtPriceOrUnknown(8)).toBe("$8.00");
   });

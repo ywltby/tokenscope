@@ -1,6 +1,7 @@
 // Task 8：设置页分段价格展示的纯函数——只排版，不做任何重算。
 // 缺失分项显示"未知"，显式 0 显示 $0；分段与峰谷规则展开为悬浮行。
 import { fmtNum } from "../types";
+import { formatMoney } from "./formatMoney";
 import type {
   PriceRatesView,
   PriceScheduleView,
@@ -15,10 +16,8 @@ import type {
 export function fmtPriceOrUnknown(v: RateSpecView | undefined): string {
   if (v == null) return "未知";
   if (v === "same_as_input") return "同输入价";
-  if (v === 0) return "$0";
-  if (v < 0.001) return `$${v.toFixed(6)}`;
-  if (v < 1) return `$${v.toFixed(4)}`;
-  return `$${v.toFixed(2)}`;
+  // UX07：数值分支接金额单一入口（$0、精度、微小非零保护同族）。
+  return formatMoney(v, "unit");
 }
 
 const RATE_LABELS: [keyof PriceRatesView, string][] = [

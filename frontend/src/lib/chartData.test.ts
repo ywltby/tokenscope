@@ -28,7 +28,7 @@ describe("buildBarChartData", () => {
     // 名称序 A,B；用量序 B(100),A(10)——故意相反。
     const data = buildBarChartData([group("A", 10), group("B", 100)], "project");
     expect(data.categories).toEqual(["B", "A"]);
-    expect(data.series.map((s) => s.name)).toEqual(["输入", "输出", "缓存写", "缓存读"]);
+    expect(data.series.map((s) => s.name)).toEqual(["输入", "输出", "缓存写", "缓存命中"]);
     const input = data.series[0].values;
     expect(input).toEqual([100, 10]); // 与 categories 同源 → 不错位
     // 逐桶断言：每个标签下的每个分项都取自同一个 group。
