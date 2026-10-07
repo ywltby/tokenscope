@@ -111,6 +111,33 @@ describe("EventTable（D1 分页 / C2 项目列）", () => {
     });
     expect(w.text()).not.toContain("加载更多");
   });
+
+  // RC02：没有分页资格（恢复视图 / 新批次首页尚未成功）时按钮禁用并给出
+  // 可见原因——不允许"点击无反馈"。
+  it("more_blocked_hint_disables_button_with_visible_reason", async () => {
+    const w = mount(EventTable, {
+      props: {
+        list: list([row()], 3),
+        filterLabel: "",
+        more: true,
+        moreBlockedHint: "刷新完成后可继续加载",
+      },
+    });
+    const btn = w.findAll("button").find((b) => b.text().includes("加载更多"));
+    expect(btn).toBeDefined();
+    expect((btn!.element as HTMLButtonElement).disabled).toBe(true);
+    expect(btn!.attributes("title")).toBe("刷新完成后可继续加载");
+    // 原因在界面上可见（不只靠 title）
+    expect(w.text()).toContain("刷新完成后可继续加载");
+    await btn!.trigger("click");
+    expect(w.emitted("load-more")).toBeUndefined();
+
+    // 有分页资格时按钮恢复可用、无原因提示
+    await w.setProps({ moreBlockedHint: undefined });
+    const btn2 = w.findAll("button").find((b) => b.text().includes("加载更多"))!;
+    expect((btn2.element as HTMLButtonElement).disabled).toBe(false);
+    expect(w.text()).not.toContain("刷新完成后可继续加载");
+  });
 });
 
 describe("EventTable 费用悬浮（Task 7）", () => {

@@ -12,6 +12,11 @@ const props = defineProps<{
   /** D1 游标分页：还有未加载的行 */
   more?: boolean;
   moreLoading?: boolean;
+  /**
+   * RC02：还有余量但当前**没有分页资格**（恢复视图 / 新批次首页尚未成功）
+   * 时的说明。非空 → 按钮禁用并显示该原因，避免"点了没反应"。
+   */
+  moreBlockedHint?: string;
   /** 任务 5：下钻筛选标签可关闭（由 Dashboard 传当前是否处于下钻态） */
   filterClosable?: boolean;
 }>();
@@ -198,9 +203,18 @@ const rowKey = (r: object): string => asRow(r).cursor;
       <template v-if="props.filterLabel">· 筛选：{{ props.filterLabel }}</template>
     </div>
     <div v-if="props.more" class="load-more-row">
-      <NButton size="tiny" :loading="props.moreLoading" @click="emit('load-more')">
+      <NButton
+        size="tiny"
+        :loading="props.moreLoading"
+        :disabled="!!props.moreBlockedHint"
+        :title="props.moreBlockedHint"
+        @click="emit('load-more')"
+      >
         加载更多（还剩 {{ fmtNum(remaining()) }} 条）
       </NButton>
+      <span v-if="props.moreBlockedHint" class="load-more-hint" role="status">
+        {{ props.moreBlockedHint }}
+      </span>
     </div>
   </section>
 </template>
@@ -248,8 +262,17 @@ const rowKey = (r: object): string => asRow(r).cursor;
 }
 
 .load-more-row {
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ts-space-2);
   margin-top: var(--ts-space-2);
+}
+
+/* RC02：无分页资格时的原因说明（禁用按钮旁可见，不只靠 title） */
+.load-more-hint {
+  font-size: 12px;
+  color: var(--ts-text-muted);
 }
 
 .cost-tooltip {

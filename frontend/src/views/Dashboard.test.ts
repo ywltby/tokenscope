@@ -995,3 +995,261 @@ describe("Dashboard 空状态字阶（UX08）", () => {
     expect(body).not.toContain("650");
   });
 });
+
+// ── RC02：恢复游标隔离与过期重试（2026-10-08 复核） ──
+// 复核缺陷：磁盘恢复的旧游标缺少"当前首页成功"门槛；过期错误条的"重试"
+// 复用已完成的 beginPromise，继续请求同一过期 query（begin 次数不变）。
+describe("Dashboard 恢复分页资格与过期恢复（RC02）", () => {
+  function deferred<T>(): [Promise<T>, (v: T) => void] {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return [promise, resolve];
+  }
+
+  function row(ts: string, rid: string) {
+    return {
+      ts,
+      record_id: rid,
+      cursor: `${ts}T00:00:00.000Z|${rid}`,
+      agent: "codex",
+      model: "claude-sonnet-4-5",
+      session_id: "s",
+      project: "p",
+      input: 1,
+      output: 1,
+      cache_write: 0,
+      cache_read: 0,
+      cost_usd: 0,
+    };
+  }
+
+  /** 恢复用旧视图：与 snapshotPayload() 的筛选一致，1 行但 total 5（有余量）。 */
+  function restoredPayload() {
+    const p = snapshotPayload();
+    return {
+      ...p,
+      events: {
+        query_id: "q-old-session",
+        pricing_revision: "rev-test",
+        rows: [row("2026-10-04 08:00:00", "old")],
+        total: 5,
+        warnings: [],
+      },
+    };
+  }
+
+  function eventsCalls() {
+    return invokeMock.mock.calls
+      .filter((c) => c[0] === "query_events")
+      .map((c) => c[1] as { queryId: string; before: string | null });
+  }
+
+  function beginCalls(): number {
+    return invokeMock.mock.calls.filter((c) => c[0] === "query_begin").length;
+  }
+
+  function retryButtonFor(w: VueWrapper, noticeText: string) {
+    const notice = w.findAll(".ts-notice").find((n) => n.text().includes(noticeText));
+    return notice?.findAll("button").find((b) => b.text() === "重试");
+  }
+
+  it("restored_view_cannot_page_before_current_first_page_succeeds：恢复视图无 live 分页资格", async () => {
+    const newHandle = { ...queryInfo, queryId: "q-new-session" };
+    // 新批次首页在被显式放行前一律拒绝（恢复后的批次刷新也可能发起首页）。
+    let allowFirstPage = false;
+    invokeMock.mockImplementation((cmd: string, args?: { before?: string | null }) => {
+      if (cmd === "query_begin") return Promise.resolve(newHandle);
+      if (cmd === "view_cache_load") return Promise.resolve(restoredPayload());
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") {
+        if (!args?.before && !allowFirstPage) return Promise.reject(new Error("first page down"));
+        return Promise.resolve({
+          query_id: "q-new-session",
+          pricing_revision: "rev-test",
+          rows: [row("2026-10-06 10:00:00", "a"), row("2026-10-06 09:00:00", "b")],
+          total: 5,
+          warnings: [],
+        });
+      }
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    // 旧数据保留（stale 展示），失败状态可见
+    expect((state(w)["events"] as EventList).rows.map((r) => r.record_id)).toEqual(["old"]);
+    expect(state(w)["eventsError"]).toBe("first page down");
+    expect(state(w)["liveFirstPage"]).toBeNull();
+    // 恢复期间按钮禁用并说明原因（不能点击无反馈）
+    expect(state(w)["moreBlockedHint"]).toBe("刷新完成后可继续加载");
+
+    // 触发加载更多：不得发出任何带旧 before 的 query_events
+    (state(w)["loadMoreEvents"] as () => void)();
+    await flushPromises();
+    for (const c of eventsCalls()) {
+      expect(c.before, "恢复视图的旧游标不得用于续页").toBeNull();
+    }
+    expect((state(w)["events"] as EventList).rows.map((r) => r.record_id)).toEqual(["old"]);
+
+    // 新首页成功后才可用它的末行游标分页
+    allowFirstPage = true;
+    (state(w)["retryAfterFailure"] as (s: string) => void)("events");
+    await flushPromises();
+    expect((state(w)["events"] as EventList).rows.map((r) => r.record_id)).toEqual(["a", "b"]);
+    expect(state(w)["liveFirstPage"]).not.toBeNull();
+    expect(state(w)["moreBlockedHint"]).toBeUndefined();
+
+    (state(w)["loadMoreEvents"] as () => void)();
+    await flushPromises();
+    const last = eventsCalls().at(-1)!;
+    expect(last.before, "续页必须用当前首页的末行游标").toBe("2026-10-06 09:00:00T00:00:00.000Z|b");
+    w.unmount();
+  });
+
+  it("expired_retry_starts_one_query_for_summary_and_first_page：过期重试只建一个新批次", async () => {
+    let beginSeq = 0;
+    let eventsSeqN = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") {
+        beginSeq += 1;
+        return Promise.resolve({ ...queryInfo, queryId: `q-batch-${beginSeq}` });
+      }
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") {
+        eventsSeqN += 1;
+        if (eventsSeqN === 2) {
+          // 追加页过期（会话被淘汰）
+          return Promise.reject(new Error("query_expired: 查询会话不存在或已失效，请刷新重试"));
+        }
+        return Promise.resolve({
+          query_id: `q-batch-${beginSeq}`,
+          pricing_revision: "rev-test",
+          rows: [row("2026-10-06 10:00:00", "a")],
+          total: 2,
+          warnings: [],
+        });
+      }
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(beginCalls()).toBe(1);
+    expect((state(w)["events"] as EventList).rows.length).toBe(1);
+
+    // 加载更多 → 过期错误可见
+    (state(w)["loadMoreEvents"] as () => void)();
+    await flushPromises();
+    expect(state(w)["eventsError"]).toContain("query_expired");
+    expect(beginCalls()).toBe(1);
+
+    // 点击明细错误条"重试"：严格只新增一次 begin，汇总与首页共享新会话
+    const retry = retryButtonFor(w, "明细加载失败");
+    expect(retry, "明细错误条必须有重试按钮").toBeDefined();
+    await retry!.trigger("click");
+    await flushPromises();
+    expect(beginCalls(), "过期恢复必须只新增一次 query_begin").toBe(2);
+
+    const after = eventsCalls().filter((c) => c.queryId === "q-batch-2");
+    expect(after.length, "新会话必须重新取首页").toBeGreaterThanOrEqual(1);
+    expect(after[0].before, "新批次首页不带旧 before").toBeNull();
+    // 旧页不被追加到新批次
+    expect((state(w)["events"] as EventList).rows.map((r) => r.record_id)).toEqual(["a"]);
+    expect(state(w)["eventsError"]).toBeNull();
+    // 汇总侧同样落在新会话上
+    const summaryCalls = invokeMock.mock.calls.filter((c) => c[0] === "query_summary");
+    expect((summaryCalls.at(-1)![1] as { queryId: string }).queryId).toBe("q-batch-2");
+    w.unmount();
+  });
+
+  it("failed_begin_can_be_retried：begin 拒绝后重试不复用已失败 Promise", async () => {
+    let beginSeq = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") {
+        beginSeq += 1;
+        if (beginSeq === 1) return Promise.reject(new Error("begin down"));
+        return Promise.resolve({ ...queryInfo, queryId: "q-ok" });
+      }
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") {
+        return Promise.resolve({
+          query_id: "q-ok",
+          pricing_revision: "rev-test",
+          rows: [row("2026-10-06 10:00:00", "a")],
+          total: 1,
+          warnings: [],
+        });
+      }
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(beginCalls()).toBe(1);
+    expect(state(w)["summaryError"]).toBe("begin down");
+
+    const retry = retryButtonFor(w, "汇总加载失败");
+    expect(retry).toBeDefined();
+    await retry!.trigger("click");
+    await flushPromises();
+    expect(beginCalls(), "重试必须真正重发 begin").toBe(2);
+    expect(state(w)["report"]).not.toBeNull();
+    expect(state(w)["summaryError"]).toBeNull();
+    w.unmount();
+  });
+
+  it("late_expired_page_cannot_replace_refreshed_results：晚到的旧分页不覆盖新批次", async () => {
+    const [latePage, resolveLatePage] = deferred<EventList>();
+    let beginSeq = 0;
+    let eventsSeqN = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") {
+        beginSeq += 1;
+        return Promise.resolve({ ...queryInfo, queryId: `q-batch-${beginSeq}` });
+      }
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") {
+        eventsSeqN += 1;
+        if (eventsSeqN === 2) return latePage; // 旧批次的追加页挂起
+        return Promise.resolve({
+          query_id: `q-batch-${beginSeq}`,
+          pricing_revision: "rev-test",
+          rows: [row("2026-10-06 10:00:00", eventsSeqN === 1 ? "first" : "fresh")],
+          total: 2,
+          warnings: [],
+        });
+      }
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect((state(w)["events"] as EventList).rows.map((r) => r.record_id)).toEqual(["first"]);
+
+    // 旧批次追加页在途
+    (state(w)["loadMoreEvents"] as () => void)();
+    await flushPromises();
+
+    // 用户刷新建立新批次并成功落地
+    (state(w)["manualRefresh"] as () => void)();
+    await flushPromises();
+    expect((state(w)["events"] as EventList).rows.map((r) => r.record_id)).toEqual(["fresh"]);
+
+    // 旧批次的过期分页晚到：不得追加、不得覆盖新批次结果
+    resolveLatePage({
+      query_id: "q-batch-1",
+      pricing_revision: "rev-test",
+      rows: [row("2026-10-01 00:00:00", "stale")],
+      total: 2,
+      warnings: [],
+    });
+    await flushPromises();
+    expect((state(w)["events"] as EventList).rows.map((r) => r.record_id)).toEqual(["fresh"]);
+    w.unmount();
+  });
+});

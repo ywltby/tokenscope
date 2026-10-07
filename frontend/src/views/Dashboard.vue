@@ -19,6 +19,7 @@ import SegmentedControl from "../components/SegmentedControl.vue";
 import DateRangeSelect from "../components/DateRangeSelect.vue";
 import { TZ_OPTIONS, useTimezone } from "../composables/timezone";
 import { SNAPSHOT_VERSION, enqueueSnapshotSave } from "../lib/viewSnapshot";
+import { errorText, isQueryExpired } from "../lib/queryError";
 import { realGroups } from "../lib/chartData";
 import { onUnmounted } from "vue";
 import { todayInTz } from "../lib/dates";
@@ -100,6 +101,22 @@ const currentQuery = ref<QueryHandle | null>(null);
 // 会话；跨午夜/手动刷新的批次重建会话。
 let beginPromise: Promise<QueryHandle | null> | null = null;
 let beginEpoch = -1;
+
+// RC02：当前批次是否已成功建立后端会话（begin 成功）。begin 失败或观察到
+// query_expired 后为 false——错误条的恢复动作据此决定"新建批次"还是
+// "局部重试"（不把所有失败都当成会话失效）。
+const sessionReady = ref(false);
+// RC02：**成功首页身份**——只有它存在时"加载更多"才有分页资格。它记录
+// 本进程内一次真实成功的首页响应所属的 query_id/价格修订/主与下钻身份/
+// 批次 epoch；磁盘恢复的旧视图**不赋予**该身份，因此其旧游标（属于保存时
+// 的旧 query_id）不得用于当前后端会话续页。
+type LiveFirstPage = {
+  queryId: string;
+  pricingRevision: string;
+  epoch: number;
+  filters: SnapshotFilters;
+};
+const liveFirstPage = ref<LiveFirstPage | null>(null);
 // R04：汇总/明细各自的**请求时捕获键**（不可变）——响应返回时不再读
 // currentFilters() 冒充请求身份（混代数据保存的根因）。
 let summaryKey: SnapshotFilters | null = null;
@@ -175,6 +192,7 @@ function beginQueryForCurrentEpoch(): Promise<QueryHandle | null> {
   const epoch = refreshEpoch;
   if (beginPromise && beginEpoch === epoch) return beginPromise;
   beginEpoch = epoch;
+  sessionReady.value = false;
   const captured = {
     by: by.value,
     agent: agent.value,
@@ -194,11 +212,20 @@ function beginQueryForCurrentEpoch(): Promise<QueryHandle | null> {
       });
       if (epoch !== refreshEpoch || disposed) return null; // 旧 begin 晚到不接管
       currentQuery.value = h;
+      sessionReady.value = true;
       return h;
     } catch (e) {
       // 会话建立失败：保留旧视图（不伪装已更新），错误在汇总侧可见。
-      if (epoch === refreshEpoch && !disposed)
-        summaryError.value = e instanceof Error ? e.message : String(e);
+      if (epoch === refreshEpoch && !disposed) {
+        summaryError.value = errorText(e);
+        // RC02：失败的 Promise 不得留在缓存里——否则同一 epoch 的"重试"
+        // 会复用已失败的 begin，永远不重发（failed_begin_can_be_retried）。
+        if (beginEpoch === epoch) {
+          beginPromise = null;
+          beginEpoch = -1;
+        }
+        sessionReady.value = false;
+      }
       return null;
     }
   })();
@@ -232,8 +259,11 @@ async function refresh(): Promise<void> {
     summaryKey = captured;
     saveSnapshot();
   } catch (e) {
-    if (seq === summarySeq && !disposed)
-      summaryError.value = e instanceof Error ? e.message : String(e);
+    if (seq === summarySeq && !disposed) {
+      summaryError.value = errorText(e);
+      // RC02：会话已失效 → 本批次不再有 live 会话，恢复动作必须新建批次。
+      if (isQueryExpired(e)) sessionReady.value = false;
+    }
   } finally {
     if (seq === summarySeq && !disposed) loading.value = false;
   }
@@ -284,6 +314,11 @@ async function loadEvents(append = false): Promise<void> {
     // 的明细同主身份（by/agent/range/tz/drill）——旧筛选的游标不得用于
     // 新筛选，新筛选首批也不得被追加响应作废。
     if (eventsLoading.value || !eventsKey.value) return;
+    // RC02：必须有**当前后端会话**的成功首页身份才允许续页。磁盘恢复的
+    // 旧视图（或本批次首页尚未成功）没有该身份 → 拒绝发起带旧 before 的
+    // query_events（旧游标属于保存时的旧 query_id）。
+    const live = liveFirstPage.value;
+    if (!live || live.queryId !== currentQuery.value?.queryId) return;
     const current: SnapshotFilters = {
       by: by.value,
       agent: agent.value,
@@ -291,9 +326,13 @@ async function loadEvents(append = false): Promise<void> {
       drill: drill.value ? { ...drill.value } : null,
       tz: tz.value,
     };
+    if (!sameMainIdentity(live.filters, current)) return;
     if (!sameMainIdentity(eventsKey.value, current)) return;
     if ((eventsKey.value.drill?.type ?? null) !== (current.drill?.type ?? null)) return;
     if ((eventsKey.value.drill?.key ?? null) !== (current.drill?.key ?? null)) return;
+  } else {
+    // RC02：新的首页请求开始即作废旧首页身份——成功前不得续页。
+    liveFirstPage.value = null;
   }
   const seq = ++eventsSeq;
   const epoch = refreshEpoch;
@@ -334,12 +373,22 @@ async function loadEvents(append = false): Promise<void> {
       events.value = list;
       eventsKey.value = captured;
       eventsBatchEpoch = epoch;
+      // RC02：成功首页才赋予 live 分页资格（恢复视图永不进入本分支）。
+      liveFirstPage.value = {
+        queryId: h.queryId,
+        pricingRevision: list.pricing_revision,
+        epoch,
+        filters: captured,
+      };
     }
     freshArrived = true;
     saveSnapshot();
   } catch (e) {
-    if (seq === eventsSeq && !disposed)
-      eventsError.value = e instanceof Error ? e.message : String(e);
+    if (seq === eventsSeq && !disposed) {
+      eventsError.value = errorText(e);
+      // RC02：会话失效 → 恢复动作改为新建批次（局部重试无意义）。
+      if (isQueryExpired(e)) sessionReady.value = false;
+    }
   } finally {
     if (seq === eventsSeq && !disposed) {
       eventsLoading.value = false;
@@ -374,6 +423,9 @@ async function loadViewCache(): Promise<void> {
     eventsKey.value = cached.filters;
     report.value = cached.report;
     events.value = cached.events;
+    // RC02：恢复的旧视图没有当前后端会话的 live 首页身份——旧游标只能
+    // 作 stale 展示，续页必须等本批次首页成功（随后 startRefreshBatch）。
+    liveFirstPage.value = null;
     cachedAt.value = cached.saved_at;
     stale.value = true;
     await nextTick();
@@ -421,9 +473,35 @@ function manualRefresh(): void {
 // F03：主刷新协调入口——同一 epoch 传给汇总与明细两条查询。
 function startRefreshBatch(): void {
   refreshEpoch++;
+  // RC02：新批次 = 新会话——旧首页身份与"会话已就绪"标记立即作废，
+  // 直到本批次的 begin 与首页都成功。
+  liveFirstPage.value = null;
+  sessionReady.value = false;
   void refresh();
   void loadEvents();
 }
+
+/// RC02：统一错误恢复入口。
+/// - 会话级失败（begin 失败、query_expired、会话被淘汰/外会话游标）→
+///   建立**一个新批次**：一次 query_begin，汇总与首页共享同一新 query_id；
+/// - 普通当前会话请求失败 → 局部重试（只重发失败的那一侧）。
+/// 新批次仍可能失败，用户可再次点击重试（不自动无限重试）。
+function retryAfterFailure(scope: "summary" | "events"): void {
+  const err = scope === "summary" ? summaryError.value : eventsError.value;
+  if (!sessionReady.value || isQueryExpired(err)) {
+    startRefreshBatch();
+  } else if (scope === "summary") {
+    void refresh();
+  } else {
+    void loadEvents();
+  }
+}
+
+/// RC02：恢复视图 / 新批次首页未成功时没有分页资格——按钮禁用并说明原因，
+/// 不允许"点击无反馈"。
+const moreBlockedHint = computed<string | undefined>(() =>
+  hasMore.value && !liveFirstPage.value ? "刷新完成后可继续加载" : undefined,
+);
 
 const drillLabel = (d: EventDrill): string => `${d.type}: ${d.key}`;
 
@@ -571,7 +649,13 @@ startRefreshBatch();
         <path d="m9 9 6 6M15 9l-6 6" />
       </svg>
       <span class="ts-notice-content">汇总加载失败：{{ summaryError }}</span>
-      <button type="button" class="ts-notice-action ts-focusable" @click="refresh">重试</button>
+      <button
+        type="button"
+        class="ts-notice-action ts-focusable"
+        @click="retryAfterFailure('summary')"
+      >
+        重试
+      </button>
     </div>
     <!-- R08：采集诊断（空结果/部分结果均可见，不依赖表格挂载） -->
     <div v-if="!collectionDiagnostics.clean" class="ts-notice source-notice">
@@ -621,7 +705,11 @@ startRefreshBatch();
         <path d="m9 9 6 6M15 9l-6 6" />
       </svg>
       <span class="ts-notice-content">明细加载失败：{{ eventsError }}</span>
-      <button type="button" class="ts-notice-action ts-focusable" @click="loadEvents()">
+      <button
+        type="button"
+        class="ts-notice-action ts-focusable"
+        @click="retryAfterFailure('events')"
+      >
         重试
       </button>
     </div>
@@ -651,6 +739,7 @@ startRefreshBatch();
             :filter-closable="!!drill"
             :more="hasMore"
             :more-loading="moreLoading"
+            :more-blocked-hint="moreBlockedHint"
             @load-more="loadMoreEvents"
             @clear-filter="clearDrill"
           />
