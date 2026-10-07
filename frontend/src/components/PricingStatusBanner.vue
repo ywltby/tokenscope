@@ -14,24 +14,38 @@ import type { PricingStatus } from "../types";
 const status = ref<PricingStatus | null>(null);
 const statusFailed = ref(false);
 const statusError = ref<string | null>(null);
+// UX06：状态读取与同步各有独立 pending——重试按钮 loading 不混用；
+// 防重复激活（进行中再点不发起第二次）。
+const statusLoading = ref(false);
 const syncing = ref(false);
 const syncError = ref<string | null>(null);
+// UX06：请求代次——晚到的旧状态响应不得覆盖新结果。
+let statusSeq = 0;
 
 const visible = computed(() => status.value?.needsSync === true);
 
 async function refreshStatus(): Promise<void> {
+  if (statusLoading.value) return; // 防重复激活
+  statusLoading.value = true;
+  const seq = ++statusSeq;
   try {
-    status.value = await invoke<PricingStatus>("pricing_status");
+    const fresh = await invoke<PricingStatus>("pricing_status");
+    if (seq !== statusSeq) return; // 晚到的旧响应丢弃
+    status.value = fresh;
     statusFailed.value = false;
     statusError.value = null;
   } catch (e) {
+    if (seq !== statusSeq) return;
     statusFailed.value = true;
     status.value = null;
     statusError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    if (seq === statusSeq) statusLoading.value = false;
   }
 }
 
 async function syncNow(): Promise<void> {
+  if (syncing.value) return; // 防重复激活
   syncing.value = true;
   syncError.value = null;
   // 成功与失败路径都刷新状态：部分成功（主源 OK / 补充源失败）时横幅
@@ -41,6 +55,7 @@ async function syncNow(): Promise<void> {
   } catch (e) {
     syncError.value = e instanceof Error ? e.message : String(e);
   }
+  // 状态读取失败也保留 syncError（两类错误都可读可操作）。
   await refreshStatus();
   syncing.value = false;
 }
@@ -57,6 +72,9 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener("pricing-status-changed", onExternalChange);
 });
+
+// UX06：暴露状态读取入口供测试验证防重复激活。
+defineExpose({ refreshStatus });
 
 const bannerText = "尚未获取定价，需要联网同步价格；当前费用仅能显示为未知。";
 </script>
@@ -99,8 +117,9 @@ const bannerText = "尚未获取定价，需要联网同步价格；当前费用
       同步部分失败：{{ syncError }}（可重试；主源已可用时费用仍会正常显示）
     </span>
   </div>
-  <!-- pricing_status 读取失败 → 可重试提示而非静默空 DOM（审阅不变量 4） -->
-  <div v-else-if="statusFailed" class="ts-notice pricing-notice is-error" role="alert">
+  <!-- pricing_status 读取失败 → 可重试提示而非静默空 DOM（审阅不变量 4）；
+       UX06：与同步失败独立渲染（两类错误同时可见可操作） -->
+  <div v-if="statusFailed" class="ts-notice pricing-notice is-error" role="alert">
     <svg
       class="ts-notice-icon"
       viewBox="0 0 24 24"
@@ -114,7 +133,7 @@ const bannerText = "尚未获取定价，需要联网同步价格；当前费用
       <path d="m9 9 6 6M15 9l-6 6" />
     </svg>
     <span class="ts-notice-content">定价状态读取失败，可重试：{{ statusError }}</span>
-    <NButton size="tiny" :loading="syncing" @click="refreshStatus">重试</NButton>
+    <NButton size="tiny" :loading="statusLoading" @click="refreshStatus">重试</NButton>
   </div>
 </template>
 

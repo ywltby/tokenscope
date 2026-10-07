@@ -52,8 +52,13 @@ const CLOSE_ACTION_OPTIONS: { label: string; value: "ask" | "minimize" | "quit" 
 ];
 
 async function loadCloseAction(): Promise<void> {
-  const s = await invoke<{ close_action: "minimize" | "quit" | null }>("settings_get");
-  closeAction.value = s.close_action ?? "ask";
+  // UX06：同上——独立消费点独立处理失败。
+  try {
+    const s = await invoke<{ close_action: "minimize" | "quit" | null }>("settings_get");
+    closeAction.value = s.close_action ?? "ask";
+  } catch {
+    closeAction.value = "ask";
+  }
 }
 
 async function setCloseAction(v: "ask" | "minimize" | "quit"): Promise<void> {
@@ -75,13 +80,47 @@ async function openSettingsFile(): Promise<void> {
   }
 }
 
+// UX06：各读取区块独立错误 + 局部重试——一个区块失败不影响其他区块
+// 显示；错误显示原因与重试按钮，无未处理 rejection。
+const sourcesError = ref<string | null>(null);
+const cacheError = ref<string | null>(null);
+const pricingError = ref<string | null>(null);
+const settingsError = ref<string | null>(null);
+const autostartError = ref<string | null>(null);
+
+async function loadSources(): Promise<void> {
+  sourcesError.value = null;
+  try {
+    sources.value = await invoke<SourceStatus[]>("source_status");
+  } catch (e) {
+    sourcesError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function loadCache(): Promise<void> {
+  cacheError.value = null;
+  try {
+    cache.value = await invoke<CacheInfo>("cache_stats");
+  } catch (e) {
+    cacheError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function loadPricing(): Promise<void> {
+  pricingError.value = null;
+  try {
+    pricing.value = await invoke<PricingView>("pricing_entries");
+  } catch (e) {
+    pricingError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
 async function loadAll(): Promise<void> {
   loading.value = true;
   try {
-    sources.value = await invoke<SourceStatus[]>("source_status");
-    cache.value = await invoke<CacheInfo>("cache_stats");
-    pricing.value = await invoke<PricingView>("pricing_entries");
-    await loadDrafts();
+    // 各独立读取并发发起、各自处理失败——不用一个共享 loading/error
+    // 覆盖全部结果（settings_get 初始化配置区块，也并发）。
+    await Promise.allSettled([loadSources(), loadCache(), loadPricing(), loadDrafts()]);
   } finally {
     loading.value = false;
   }
@@ -103,18 +142,42 @@ function ensureDraft(id: string): { enabled: boolean; dir: string } {
 
 function setSourceEnabled(id: string, v: boolean): void {
   ensureDraft(id).enabled = v;
+  dirtySources.add(id);
 }
 
 function setSourceDir(id: string, v: string): void {
   ensureDraft(id).dir = v;
+  dirtySources.add(id);
 }
 
+// UX06：草稿 dirty 集合——用户编辑过的行在重试/刷新时**不被覆盖**
+//（retry_preserves_dirty_source_drafts）；保存成功后清除该行 dirty。
+const dirtySources = new Set<string>();
+// settings_get 请求代次：晚到的旧响应不得覆盖已保存值
+//（late_settings_response_does_not_overwrite_saved_value）。
+let settingsSeq = 0;
+
 async function loadDrafts(): Promise<void> {
-  const s = await invoke<Record<string, unknown>>("settings_get");
+  settingsError.value = null;
+  const seq = ++settingsSeq;
+  let s: Record<string, unknown>;
+  try {
+    s = await invoke<Record<string, unknown>>("settings_get");
+  } catch (e) {
+    if (seq !== settingsSeq) return;
+    settingsError.value = e instanceof Error ? e.message : String(e);
+    return;
+  }
+  if (seq !== settingsSeq) return; // 晚到的旧响应丢弃
   const src = (s.sources ?? {}) as Record<string, { enabled?: boolean; dir?: string | null }>;
-  drafts.value = {
+  const fresh: typeof drafts.value = {
     claude: { enabled: src.claude?.enabled ?? true, dir: src.claude?.dir ?? "" },
     codex: { enabled: src.codex?.enabled ?? true, dir: src.codex?.dir ?? "" },
+  };
+  // 只更新未编辑的草稿行——dirty 行保留用户输入。
+  drafts.value = {
+    claude: dirtySources.has("claude") ? drafts.value.claude : fresh.claude,
+    codex: dirtySources.has("codex") ? drafts.value.codex : fresh.codex,
   };
 }
 
@@ -130,7 +193,13 @@ async function saveSource(agent: string): Promise<void> {
       dir: d.dir.trim() === "" ? null : d.dir.trim(),
     });
     msg.success(`已保存 ${AGENT_LABEL[id] ?? id} 来源配置`);
+    dirtySources.delete(id);
+    // UX06：保存成功后状态刷新失败 ≠ 保存失败——区分提示，避免用户
+    // 误以为需要重复保存（loadSources 内部捕获，此处按结果改写文案）。
     await loadSources();
+    if (sourcesError.value) {
+      sourcesError.value = `已保存，但状态刷新失败（可重试）`;
+    }
   } catch (e) {
     // Task 2：后端返回的重叠等配置错误必须可见，保留用户当前输入以便
     // 修改；错误只归属对应来源行（不再在 v-for 内跨行重复渲染）。
@@ -138,10 +207,6 @@ async function saveSource(agent: string): Promise<void> {
   } finally {
     savingSource.value = null;
   }
-}
-
-async function loadSources(): Promise<void> {
-  sources.value = await invoke<SourceStatus[]>("source_status");
 }
 
 async function rebuild(): Promise<void> {
@@ -165,9 +230,12 @@ async function syncPricing(): Promise<void> {
     // 部分失败也要刷新：主源已写盘的数据立即可见（审阅 Task 3）。
     msg.error(`同步失败：${e}`);
   } finally {
-    // 成功与部分失败两条路径都重新读取价格视图 + 通知全局横幅刷新。
+    // 成功与部分失败两条路径都重新读取价格视图 + 通知全局横幅刷新；
+    // 刷新失败单独归类为"价格列表读取失败"（保留旧数据，不伪装成功）。
     try {
-      pricing.value = await invoke<PricingView>("pricing_entries");
+      await loadPricing();
+    } catch {
+      pricingError.value = "价格列表读取失败（保留上次数据）";
     } finally {
       window.dispatchEvent(new Event("pricing-status-changed"));
       syncing.value = false;
@@ -186,7 +254,12 @@ async function openPricing(): Promise<void> {
 }
 
 async function loadAutostart(): Promise<void> {
-  autostart.value = await invoke<boolean>("autostart_status");
+  autostartError.value = null;
+  try {
+    autostart.value = await invoke<boolean>("autostart_status");
+  } catch (e) {
+    autostartError.value = e instanceof Error ? e.message : String(e);
+  }
 }
 
 async function setAutostart(enabled: boolean): Promise<void> {
@@ -202,8 +275,16 @@ async function setAutostart(enabled: boolean): Promise<void> {
 }
 
 async function loadAutoSync(): Promise<void> {
-  const settings = await invoke<{ price_auto_sync: boolean }>("settings_get");
-  autoSync.value = settings.price_auto_sync;
+  // UX06：settings_get 的独立消费点同样各自处理失败——不产生未处理
+  // rejection；读取失败时开关保持未知（null = 禁用），不伪装默认值。
+  try {
+    const settings = await invoke<{ price_auto_sync: boolean }>("settings_get");
+    autoSync.value = settings.price_auto_sync;
+    settingsError.value = null;
+  } catch (e) {
+    autoSync.value = null;
+    settingsError.value = e instanceof Error ? e.message : String(e);
+  }
 }
 
 async function setAutoSync(enabled: boolean): Promise<void> {
@@ -360,6 +441,22 @@ defineExpose({ priceColumns });
       <!-- 任务 7：macOS 系统设置式分组——组标题在卡片外，每组一张 .ts-card -->
       <section class="settings-group">
         <h2 class="group-title">应用</h2>
+        <div v-if="autostartError" class="ts-notice block-error" role="alert">
+          <svg
+            class="ts-notice-icon is-error"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="9" />
+            <path d="m9 9 6 6M15 9l-6 6" />
+          </svg>
+          <span class="ts-notice-content">自启状态读取失败：{{ autostartError }}</span>
+          <NButton size="tiny" @click="loadAutostart">重试</NButton>
+        </div>
         <section class="ts-card settings-card">
           <div class="setting-row">
             <div class="setting-main">
@@ -414,6 +511,41 @@ defineExpose({ priceColumns });
 
       <section class="settings-group">
         <h2 class="group-title">数据源</h2>
+        <!-- UX06：区块独立错误 + 局部重试 -->
+        <div v-if="settingsError" class="ts-notice block-error" role="alert">
+          <svg
+            class="ts-notice-icon is-error"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="9" />
+            <path d="m9 9 6 6M15 9l-6 6" />
+          </svg>
+          <span class="ts-notice-content"
+            >设置读取失败，来源配置暂不可保存：{{ settingsError }}</span
+          >
+          <NButton size="tiny" @click="loadDrafts">重试</NButton>
+        </div>
+        <div v-if="sourcesError" class="ts-notice block-error" role="alert">
+          <svg
+            class="ts-notice-icon is-error"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="9" />
+            <path d="m9 9 6 6M15 9l-6 6" />
+          </svg>
+          <span class="ts-notice-content">来源状态读取失败：{{ sourcesError }}</span>
+          <NButton size="tiny" @click="loadSources">重试</NButton>
+        </div>
         <section class="ts-card settings-card">
           <div
             v-for="(s, i) in sources"
@@ -444,6 +576,7 @@ defineExpose({ priceColumns });
               <NButton
                 size="tiny"
                 :loading="savingSource === sourceIdOf(s.agent)"
+                :disabled="!!settingsError"
                 @click="saveSource(s.agent)"
               >
                 保存
@@ -480,6 +613,22 @@ defineExpose({ priceColumns });
 
       <section class="settings-group">
         <h2 class="group-title">缓存</h2>
+        <div v-if="cacheError" class="ts-notice block-error" role="alert">
+          <svg
+            class="ts-notice-icon is-error"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="9" />
+            <path d="m9 9 6 6M15 9l-6 6" />
+          </svg>
+          <span class="ts-notice-content">缓存统计读取失败：{{ cacheError }}</span>
+          <NButton size="tiny" @click="loadCache">重试</NButton>
+        </div>
         <section class="ts-card settings-card">
           <div class="setting-row">
             <div class="setting-main">
@@ -516,6 +665,22 @@ defineExpose({ priceColumns });
 
       <section class="settings-group">
         <h2 class="group-title">价格</h2>
+        <div v-if="pricingError" class="ts-notice block-error" role="alert">
+          <svg
+            class="ts-notice-icon is-error"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="9" />
+            <path d="m9 9 6 6M15 9l-6 6" />
+          </svg>
+          <span class="ts-notice-content">价格列表读取失败：{{ pricingError }}</span>
+          <NButton size="tiny" @click="loadPricing">重试</NButton>
+        </div>
         <section class="ts-card settings-card">
           <div class="price-actions">
             <NButton size="small" type="primary" :loading="syncing" @click="syncPricing">
@@ -625,6 +790,10 @@ defineExpose({ priceColumns });
 }
 .settings-group:last-child {
   margin-bottom: 0;
+}
+
+.block-error {
+  margin-bottom: var(--ts-space-2);
 }
 
 .group-title {

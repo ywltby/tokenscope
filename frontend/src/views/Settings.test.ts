@@ -513,3 +513,194 @@ describe("Settings 关闭行为与高级配置（关闭确认与配置文件计�
     return Promise.resolve(null);
   }
 });
+
+// ── UX06：设置首载与定价横幅错误恢复 ──
+// 各读取区块独立失败 + 局部重试；重试不覆盖已编辑草稿；晚到响应不覆盖
+// 已保存值；保存成功后状态刷新失败与保存失败区分。
+describe("Settings 首载错误恢复（UX06）", () => {
+  it("settings_initial_failures_are_independent_and_retryable：单区块失败不影响其他区块，错误可见可重试", async () => {
+    // source_status 拒绝，其余成功。
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "source_status") return Promise.reject(new Error("boom-status"));
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+      if (cmd === "autostart_status") return Promise.resolve(false);
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    // 失败区块：错误可见 + 重试按钮。
+    expect(w.text()).toContain("来源状态读取失败");
+    expect(w.text()).toContain("boom-status");
+    // 其他成功区块照常显示（缓存统计、价格表）。
+    expect(w.text()).toContain("缓存文件");
+    expect(w.text()).toContain("同步在线价格");
+    // 重试成功后错误清除。
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+      return Promise.resolve(null);
+    });
+    const retry = w.findAll("button").find((b) => b.text() === "重试");
+    expect(retry).toBeDefined();
+    await retry!.trigger("click");
+    await flushPromises();
+    expect(w.text()).not.toContain("来源状态读取失败");
+    w.unmount();
+  });
+
+  it("settings_get 失败：来源保存禁用并说明原因；恢复后可保存", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "settings_get") return Promise.reject(new Error("设置读取失败"));
+      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    expect(w.text()).toContain("设置读取失败，来源配置暂不可保存");
+    const save = w.findAll("button").find((b) => b.text() === "保存");
+    expect(save).toBeDefined();
+    expect((save!.element as HTMLButtonElement).disabled).toBe(true);
+    w.unmount();
+  });
+
+  it("retry_preserves_dirty_source_drafts：重试只更新未编辑草稿行", async () => {
+    let settingsCalls = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "settings_get") {
+        settingsCalls += 1;
+        return Promise.resolve({
+          price_auto_sync: true,
+          sources: {
+            claude: { enabled: true, dir: settingsCalls === 1 ? "C:/old-claude" : "C:/new-claude" },
+            codex: { enabled: true, dir: settingsCalls === 1 ? "C:/old-codex" : "C:/new-codex" },
+          },
+        });
+      }
+      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    // 用户编辑 claude 草稿目录。
+    const claudeInput = w
+      .findAll("input")
+      .find((i) => (i.element as HTMLInputElement).value === "C:/old-claude");
+    expect(claudeInput).toBeDefined();
+    await claudeInput!.setValue("C:/user-edited");
+    // 重试（refreshKey 触发 loadAll → loadDrafts）。
+    await w.setProps({ refreshKey: 1 });
+    await flushPromises();
+    // claude 草稿保留用户输入；codex 更新为新值。
+    const inputs = w.findAll("input");
+    const claudeVal = inputs.find((i) =>
+      (i.element as HTMLInputElement).value.includes("user-edited"),
+    );
+    expect(claudeVal, "claude 草稿保留用户编辑").toBeDefined();
+    const codexVal = inputs.find((i) => (i.element as HTMLInputElement).value === "C:/new-codex");
+    expect(codexVal, "codex 草稿更新为新值").toBeDefined();
+    w.unmount();
+  });
+
+  it("late_settings_response_does_not_overwrite_saved_value：保存后的晚到读取不覆盖", async () => {
+    // 保存成功 → 状态刷新用新值；晚到的 settings_get（旧值）不覆盖草稿。
+    let saved = false;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "settings_get") {
+        // 保存后返回保存值（模拟后端事务提交后的读取）。
+        return Promise.resolve({
+          price_auto_sync: true,
+          sources: saved
+            ? { claude: { enabled: true, dir: "C:/saved" }, codex: { enabled: true, dir: "" } }
+            : { claude: { enabled: true, dir: "" }, codex: { enabled: true, dir: "" } },
+        });
+      }
+      if (cmd === "source_config_set") {
+        saved = true;
+        return Promise.resolve({ enabled: true, dir: "C:/saved" });
+      }
+      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const claudeInput = w
+      .findAll("input")
+      .find((i) => (i.element as HTMLInputElement).value === "");
+    await claudeInput!.setValue("C:/saved");
+    const save = w.findAll("button").find((b) => b.text() === "保存");
+    await save!.trigger("click");
+    await flushPromises();
+    // 保存后草稿仍是保存值（不被旧读取响应复位）。
+    const after = w
+      .findAll("input")
+      .find((i) => (i.element as HTMLInputElement).value === "C:/saved");
+    expect(after, "保存值不被晚到读取覆盖").toBeDefined();
+    expect(w.text()).not.toContain("已保存，但状态刷新失败");
+    w.unmount();
+  });
+
+  it("来源保存成功但状态刷新失败：区分提示（不误导重复保存）", async () => {
+    let savedOnce = false;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "source_config_set") {
+        savedOnce = true;
+        return Promise.resolve({ enabled: true, dir: "C:/x" });
+      }
+      if (cmd === "source_status") {
+        return savedOnce
+          ? Promise.reject(new Error("refresh down"))
+          : Promise.resolve(sourceStatuses);
+      }
+      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const save = w.findAll("button").find((b) => b.text() === "保存");
+    await save!.trigger("click");
+    await flushPromises();
+    expect(w.text()).toContain("已保存，但状态刷新失败");
+    w.unmount();
+  });
+
+  it("syncPricing 后价格列表刷新失败：归类价格列表读取失败并保留旧数据", async () => {
+    let synced = false;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "sync_pricing_openrouter") {
+        synced = true;
+        return Promise.resolve([{ source: "models.dev", count: 5 }]);
+      }
+      if (cmd === "pricing_entries") {
+        return synced ? Promise.reject(new Error("list down")) : Promise.resolve(pricingView);
+      }
+      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const sync = w.findAll("button").find((b) => b.text().includes("同步在线价格"));
+    await sync!.trigger("click");
+    await flushPromises();
+    expect(w.text()).toContain("价格列表读取失败");
+    // syncing 退出（按钮不再 loading）。
+    const sync2 = w.findAll("button").find((b) => b.text().includes("同步在线价格"));
+    expect((sync2!.element as HTMLButtonElement).classList.toString()).not.toContain(
+      "n-button--loading",
+    );
+    w.unmount();
+  });
+});
