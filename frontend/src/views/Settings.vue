@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref, watch, type VNode } from "vue";
+import { computed, h, onMounted, onUnmounted, ref, watch, type VNode } from "vue";
 import { priceSourceLine } from "../lib/statsView";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -45,26 +45,45 @@ const autoSync = ref<boolean | null>(null);
 const autoSyncBusy = ref(false);
 // 关闭确认与配置文件计划 Task 4：关闭窗口默认动作（ask = 每次询问）。
 const closeAction = ref<"ask" | "minimize" | "quit">("ask");
+// RC03：关闭动作是否已由一次**成功**读取确认。读取失败时为 false——
+// 显示"未知"、控件禁用，不把 ask 伪装成可操作默认值。
+const closeActionKnown = ref(false);
 const CLOSE_ACTION_OPTIONS: { label: string; value: "ask" | "minimize" | "quit" }[] = [
   { label: "每次询问", value: "ask" },
   { label: "最小化到托盘", value: "minimize" },
   { label: "直接退出", value: "quit" },
 ];
 
-async function loadCloseAction(): Promise<void> {
-  // UX06：同上——独立消费点独立处理失败。
-  try {
-    const s = await invoke<{ close_action: "minimize" | "quit" | null }>("settings_get");
-    closeAction.value = s.close_action ?? "ask";
-  } catch {
-    closeAction.value = "ask";
-  }
+// RC03：设置读取/写入协调——统一读取一次，写入期间作废在途读取。
+// - settingsReadSeq：丢弃晚到的旧读取响应；
+// - mutationEpoch：任一相关写入开始即推进；旧读取即使 seq 仍最新也不得
+//   提交（**保存成功 ≠ 读取的数据更新**）；
+// - sourceEditRev：来源行编辑版本；保存成功只清除"提交时版本一致"的
+//   dirty，保存期间的新编辑保留；
+// - disposed：卸载后请求不得写状态或发通知。
+let settingsReadSeq = 0;
+let mutationEpoch = 0;
+let sourceEditCounter = 0;
+const sourceEditRev = new Map<string, number>();
+let disposed = false;
+
+function sourceEditRevOf(id: string): number {
+  return sourceEditRev.get(id) ?? 0;
+}
+
+/** 标记来源行被用户编辑：推进该行编辑版本并置 dirty。 */
+function markSourceEdited(id: string): void {
+  sourceEditRev.set(id, ++sourceEditCounter);
+  dirtySources.add(id);
 }
 
 async function setCloseAction(v: "ask" | "minimize" | "quit"): Promise<void> {
+  if (!closeActionKnown.value) return; // 未知状态不得写入
+  mutationEpoch++; // 写入开始 → 在途读取失去提交资格
   try {
     await invoke("settings_set_close_action", { action: v === "ask" ? null : v });
     closeAction.value = v;
+    closeActionKnown.value = true;
     msg.success("关闭窗口默认动作已保存");
   } catch (e) {
     msg.error(String(e));
@@ -119,8 +138,9 @@ async function loadAll(): Promise<void> {
   loading.value = true;
   try {
     // 各独立读取并发发起、各自处理失败——不用一个共享 loading/error
-    // 覆盖全部结果（settings_get 初始化配置区块，也并发）。
-    await Promise.allSettled([loadSources(), loadCache(), loadPricing(), loadDrafts()]);
+    // 覆盖全部结果。RC03：设置配置（来源草稿 + 自动同步 + 关闭动作）
+    // 由**同一次** settings_get 初始化，不再分三个消费点各读一遍。
+    await Promise.allSettled([loadSources(), loadCache(), loadPricing(), loadSettings()]);
   } finally {
     loading.value = false;
   }
@@ -128,7 +148,10 @@ async function loadAll(): Promise<void> {
 
 // C1：来源配置草稿（编辑后按行保存）
 const drafts = ref<Record<string, { enabled: boolean; dir: string }>>({});
-const savingSource = ref<string | null>(null);
+// RC03：按**行**记录保存中状态——修复前用单个 savingSource，跨行并发保存
+// 时后一行会覆盖前一行、前一行结束即提前解锁后一行。
+const savingSources = ref<string[]>([]);
+const isSourceSaving = (id: string): boolean => savingSources.value.includes(id);
 const sourceErrors = ref<Record<string, string>>({});
 
 /// 读取或补建该来源的草稿（设置缺键时按默认开启兜底）。
@@ -142,12 +165,12 @@ function ensureDraft(id: string): { enabled: boolean; dir: string } {
 
 function setSourceEnabled(id: string, v: boolean): void {
   ensureDraft(id).enabled = v;
-  dirtySources.add(id);
+  markSourceEdited(id);
 }
 
 function setSourceDir(id: string, v: string): void {
   ensureDraft(id).dir = v;
-  dirtySources.add(id);
+  markSourceEdited(id);
 }
 
 /// UX08：来源目录输入框的稳定 DOM id——`<label for>` 与真实 `<input>` 的
@@ -162,25 +185,45 @@ function dirInputLabel(agent: string): string {
 }
 
 // UX06：草稿 dirty 集合——用户编辑过的行在重试/刷新时**不被覆盖**
-//（retry_preserves_dirty_source_drafts）；保存成功后清除该行 dirty。
+//（retry_preserves_dirty_source_drafts）；保存成功后清除该行 dirty
+//（RC03：仅当编辑版本与提交时一致）。
 const dirtySources = new Set<string>();
-// settings_get 请求代次：晚到的旧响应不得覆盖已保存值
-//（late_settings_response_does_not_overwrite_saved_value）。
-let settingsSeq = 0;
 
-async function loadDrafts(): Promise<void> {
+/** RC03：设置配置读取结果（来源草稿 + 自动同步 + 关闭动作，同一次读取）。 */
+type SettingsPayload = {
+  close_action?: "minimize" | "quit" | null;
+  price_auto_sync?: boolean;
+  sources?: Record<string, { enabled?: boolean; dir?: string | null }>;
+};
+
+/**
+ * RC03：统一设置读取——**一次** settings_get 同时填充来源草稿、自动同步
+ * 与关闭动作；任一相关写入开始（mutationEpoch 变化）或读取已过期
+ * （settingsReadSeq 变化）、组件已卸载时都不提交。
+ *
+ * 失败是**未知**状态：不清空已有数据、不把 ask/false 伪装成可操作默认值；
+ * 关闭动作控件禁用并说明原因，重试入口调用本函数恢复全部依赖项。
+ */
+async function loadSettings(): Promise<void> {
+  const readSeq = ++settingsReadSeq;
+  const epochAtRead = mutationEpoch;
   settingsError.value = null;
-  const seq = ++settingsSeq;
-  let s: Record<string, unknown>;
+  let s: SettingsPayload;
   try {
-    s = await invoke<Record<string, unknown>>("settings_get");
+    s = await invoke<SettingsPayload>("settings_get");
   } catch (e) {
-    if (seq !== settingsSeq) return;
+    if (readSeq !== settingsReadSeq || disposed) return;
     settingsError.value = e instanceof Error ? e.message : String(e);
+    closeActionKnown.value = false;
+    autoSync.value = null;
     return;
   }
-  if (seq !== settingsSeq) return; // 晚到的旧响应丢弃
-  const src = (s.sources ?? {}) as Record<string, { enabled?: boolean; dir?: string | null }>;
+  // 晚到的旧读取 / 写入已发生 / 已卸载 → 不提交（旧读取不覆盖用户草稿）。
+  if (readSeq !== settingsReadSeq || epochAtRead !== mutationEpoch || disposed) return;
+  closeAction.value = s.close_action ?? "ask";
+  closeActionKnown.value = true;
+  autoSync.value = s.price_auto_sync ?? null;
+  const src = s.sources ?? {};
   const fresh: typeof drafts.value = {
     claude: { enabled: src.claude?.enabled ?? true, dir: src.claude?.dir ?? "" },
     codex: { enabled: src.codex?.enabled ?? true, dir: src.codex?.dir ?? "" },
@@ -194,7 +237,12 @@ async function loadDrafts(): Promise<void> {
 
 async function saveSource(agent: string): Promise<void> {
   const id = sourceIdOf(agent);
-  savingSource.value = id;
+  if (isSourceSaving(id)) return; // 同行防重复
+  // RC03：写入开始即推进 mutationEpoch——在途的旧读取随即失去提交资格
+  //（即使随后保存失败，也不得让旧读取覆盖用户草稿）。
+  mutationEpoch++;
+  const submittedRev = sourceEditRevOf(id);
+  savingSources.value = [...savingSources.value, id];
   delete sourceErrors.value[id];
   try {
     const d = ensureDraft(id);
@@ -204,7 +252,8 @@ async function saveSource(agent: string): Promise<void> {
       dir: d.dir.trim() === "" ? null : d.dir.trim(),
     });
     msg.success(`已保存 ${AGENT_LABEL[id] ?? id} 来源配置`);
-    dirtySources.delete(id);
+    // RC03：只清除"提交时版本一致"的 dirty——保存期间的新编辑保留。
+    if (sourceEditRevOf(id) === submittedRev) dirtySources.delete(id);
     // UX06：保存成功后状态刷新失败 ≠ 保存失败——区分提示，避免用户
     // 误以为需要重复保存（loadSources 内部捕获，此处按结果改写文案）。
     await loadSources();
@@ -216,7 +265,7 @@ async function saveSource(agent: string): Promise<void> {
     // 修改；错误只归属对应来源行（不再在 v-for 内跨行重复渲染）。
     sourceErrors.value[id] = e instanceof Error ? e.message : String(e);
   } finally {
-    savingSource.value = null;
+    savingSources.value = savingSources.value.filter((x) => x !== id);
   }
 }
 
@@ -289,20 +338,10 @@ async function setAutostart(enabled: boolean): Promise<void> {
   }
 }
 
-async function loadAutoSync(): Promise<void> {
-  // UX06：settings_get 的独立消费点同样各自处理失败——不产生未处理
-  // rejection；读取失败时开关保持未知（null = 禁用），不伪装默认值。
-  try {
-    const settings = await invoke<{ price_auto_sync: boolean }>("settings_get");
-    autoSync.value = settings.price_auto_sync;
-    settingsError.value = null;
-  } catch (e) {
-    autoSync.value = null;
-    settingsError.value = e instanceof Error ? e.message : String(e);
-  }
-}
-
 async function setAutoSync(enabled: boolean): Promise<void> {
+  // RC03：未知状态（读取失败）不得写入，避免把未知改成猜测值。
+  if (autoSync.value == null) return;
+  mutationEpoch++; // 写入开始 → 在途读取失去提交资格
   autoSyncBusy.value = true;
   try {
     autoSync.value = await invoke<boolean>("settings_set_price_auto_sync", { enabled });
@@ -315,18 +354,19 @@ async function setAutoSync(enabled: boolean): Promise<void> {
 }
 
 onMounted(() => {
+  // RC03：设置配置只读一次（loadAll → loadSettings）。
   void loadAll();
   void loadAutostart();
-  void loadAutoSync();
-  void loadCloseAction();
 });
 watch(
   () => props.refreshKey,
   () => {
     void loadAll();
-    void loadCloseAction();
   },
 );
+onUnmounted(() => {
+  disposed = true; // RC03：卸载后请求不得写状态或发通知
+});
 
 /// 单价悬浮提示：来源 + OpenRouter 同前缀对照价（无对应模型标注未知价格）。
 function priceCell(r: object, pick: (e: PricingEntry) => RateSpecView): VNode {
@@ -507,7 +547,12 @@ defineExpose({ priceColumns });
             <div class="setting-main">
               <div class="setting-label">关闭窗口时</div>
               <div class="setting-help">
-                最小化后可从托盘恢复；记忆后仍可在此修改或恢复每次询问。
+                <template v-if="!closeActionKnown">
+                  读取失败，关闭动作未知（点击上方错误条重试后可修改）。
+                </template>
+                <template v-else>
+                  最小化后可从托盘恢复；记忆后仍可在此修改或恢复每次询问。
+                </template>
               </div>
             </div>
             <div class="setting-control">
@@ -517,6 +562,7 @@ defineExpose({ priceColumns });
                 size="small"
                 style="width: 160px"
                 aria-label="关闭窗口时"
+                :disabled="!closeActionKnown"
                 @update:value="setCloseAction"
               />
             </div>
@@ -543,7 +589,7 @@ defineExpose({ priceColumns });
           <span class="ts-notice-content"
             >设置读取失败，来源配置暂不可保存：{{ settingsError }}</span
           >
-          <NButton size="tiny" @click="loadDrafts">重试</NButton>
+          <NButton size="tiny" @click="loadSettings">重试</NButton>
         </div>
         <div v-if="sourcesError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
@@ -590,7 +636,7 @@ defineExpose({ priceColumns });
               <span class="flex-fill"></span>
               <NButton
                 size="tiny"
-                :loading="savingSource === sourceIdOf(s.agent)"
+                :loading="isSourceSaving(sourceIdOf(s.agent))"
                 :disabled="!!settingsError"
                 @click="saveSource(s.agent)"
               >
