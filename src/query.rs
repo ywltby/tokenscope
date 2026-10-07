@@ -13,12 +13,18 @@
 //! 会话限制（具名常量，选值依据）：
 //! - [`MAX_ACTIVE_QUERIES`] = 8：一次刷新批次一个会话，8 个远超单窗口
 //!   交互需要；淘汰后旧游标显式过期，重建即可恢复。
-//! - [`MAX_TOTAL_SNAPSHOT_EVENTS`] = 1_500_000：快照行只存索引（8 字节/行），
-//!   事件本体在 Arc 采集快照中单份共享；150 万事件（UsageEvent 约 200 字节
-//!   含字符串堆内存，见 query_snapshot_contract 测量）≈ 300 MB 上界，
-//!   远超本机 1.2 GB 日志解析出的事件量。
+//! - [`MAX_RETAINED_QUERY_BYTES`] = 256 MiB：查询子系统**保留数据**的
+//!   字节预算。记账对象是每个会话完整可达的保留对象图（事件 Vec 与其
+//!   四个 String、逐源统计、诊断字符串、价格表的候选/嵌套规则/索引、
+//!   快照行索引与身份/时区元数据），**不由筛选命中行数代替**——2026-10-08
+//!   复核 RC05 已复现：零命中行的查询仍保留整份采集事件，而旧实现按
+//!   `rows.len()` 记账，等于不计。
 //! - [`QUERY_IDLE_TTL`] = 10 分钟：一次分页浏览极少超过 10 分钟无读取；
 //!   闲置会话优先淘汰，活跃会话（持续翻页）不被回收。
+//!
+//! 预算边界（不夸大）：本预算只约束**查询子系统的保留数据**，**不宣称**
+//! 整个进程 RSS、分配器缓存、或采集/建表期间的临时峰值被同一数值限制
+//!（见 docs/stats-semantics.md §3.5 与 tests/query_memory_budget.rs）。
 //!
 //! 查询身份（RC01）：`query_id` = 每次进程启动从系统随机源取的 128 位
 //! 命名空间 + 进程内单调计数 + 采集 generation。**跨启动唯一性只由随机
@@ -40,8 +46,12 @@ use crate::model::UsageEvent;
 use crate::report::{self, EventFilter, SourceReport, SummaryOptions};
 
 pub const MAX_ACTIVE_QUERIES: usize = 8;
-pub const MAX_TOTAL_SNAPSHOT_EVENTS: usize = 1_500_000;
+/// RC05：查询子系统保留数据的字节预算（见模块文档的边界说明）。
+pub const MAX_RETAINED_QUERY_BYTES: usize = 256 * 1024 * 1024;
 pub const QUERY_IDLE_TTL: Duration = Duration::from_secs(600);
+
+/// 字节 → MiB（错误信息与诊断用）。
+const MIB: usize = 1024 * 1024;
 
 /// 游标格式版本：v2 = 绑定 query_id / 主查询指纹 / 下钻指纹（SF04）。
 /// v1（ts|rid|seq）游标缺字段且无法验证归属，解析时直接拒绝。
@@ -63,6 +73,10 @@ pub struct QuerySnapshot {
     /// 主过滤后的固定行序（ts/rid 降序 + 组内 seq），只存事件索引。
     pub rows: Vec<SnapshotRow>,
     collection: Arc<report::CollectionSnapshot>,
+    /// RC05：保留字节额度凭证——随本快照的**最后一个 Arc** 释放。
+    /// 会话被淘汰但仍有读取者持有时继续占账
+    ///（`evicted_but_borrowed_snapshot_stays_charged`）。
+    _reservation: QuotaReservation,
 }
 
 #[derive(Debug, Clone)]
@@ -165,25 +179,169 @@ fn gc_expired(reg: &mut HashMap<String, Session>, now: Instant) {
     }
 }
 
-/// 容量策略：优先淘汰最久未使用的会话直到放得下。
-/// 单个新会话自身超总预算由调用方先拒绝（不截断事件集）。
-fn evict_to_fit(reg: &mut HashMap<String, Session>, incoming_rows: usize) {
-    let total_events = |reg: &HashMap<String, Session>| -> usize {
-        reg.values().map(|s| s.snapshot.rows.len()).sum()
-    };
-    while reg.len() + 1 > MAX_ACTIVE_QUERIES
-        || total_events(reg) + incoming_rows > MAX_TOTAL_SNAPSHOT_EVENTS
-    {
-        let Some(oldest) = reg
-            .iter()
-            .min_by_key(|(_, s)| s.last_used)
-            .map(|(k, _)| k.clone())
-        else {
-            break;
-        };
-        log::info!("查询会话 {oldest} 被淘汰（容量/TTL 策略），其游标将显式过期");
-        reg.remove(&oldest);
+/// RC05：保留字节额度（进程级）。`limit` 可在测试中注入更小值。
+struct Quota {
+    used: usize,
+    limit: usize,
+}
+
+fn quota() -> &'static Mutex<Quota> {
+    static QUOTA: OnceLock<Mutex<Quota>> = OnceLock::new();
+    QUOTA.get_or_init(|| {
+        Mutex::new(Quota {
+            used: 0,
+            limit: MAX_RETAINED_QUERY_BYTES,
+        })
+    })
+}
+
+fn quota_limit() -> usize {
+    quota().lock().unwrap_or_else(|e| e.into_inner()).limit
+}
+
+/// RC05：保留字节额度凭证。
+///
+/// 额度**随快照的最后一个 Arc 释放**——被淘汰但仍有读取者持有的快照继续
+/// 占账，直到读取结束；这样"淘汰即可腾额度"的假设不会被误用为超预算准入。
+struct QuotaReservation {
+    bytes: usize,
+    released: bool,
+}
+
+impl QuotaReservation {
+    /// 原子占额度：`used + bytes` 必须可表示且不超上限，否则**明确失败**
+    ///（绝不超预算接受，也不截断事件集来凑数）。
+    fn acquire(bytes: usize) -> Result<Self, String> {
+        let mut q = quota().lock().unwrap_or_else(|e| e.into_inner());
+        let need = q
+            .used
+            .checked_add(bytes)
+            .ok_or_else(|| "查询保留字节记账溢出（超出 usize 可表示范围）".to_string())?;
+        if need > q.limit {
+            return Err(format!(
+                "查询保留数据约 {} MiB（已保留 {} MiB，预算 {} MiB）：请缩小时间范围或稍后重试",
+                bytes / MIB,
+                q.used / MIB,
+                q.limit / MIB
+            ));
+        }
+        q.used = need;
+        Ok(Self {
+            bytes,
+            released: false,
+        })
     }
+
+    fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        let mut q = quota().lock().unwrap_or_else(|e| e.into_inner());
+        q.used = q.used.saturating_sub(self.bytes);
+    }
+}
+
+impl Drop for QuotaReservation {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn oldest_key(reg: &HashMap<String, Session>) -> Option<String> {
+    reg.iter()
+        .min_by_key(|(_, s)| s.last_used)
+        .map(|(k, _)| k.clone())
+}
+
+/// RC05：可回收额度的会话——**仅注册表持有**（`Arc::strong_count == 1`）
+/// 的会话被淘汰时才真正释放额度；被读取者持有的会话淘汰了也不腾额度。
+/// 因此额度不足时优先回收这一类；一个都没有就不要再牺牲活跃会话。
+fn reclaimable_key(reg: &HashMap<String, Session>) -> Option<String> {
+    reg.iter()
+        .filter(|(_, s)| Arc::strong_count(&s.snapshot) == 1)
+        .min_by_key(|(_, s)| s.last_used)
+        .map(|(k, _)| k.clone())
+}
+
+/// RC05：额度准入——先原子尝试；不足则淘汰一个**仅注册表持有**的会话
+///（淘汰即释放额度）后重试，直到腾出或没有可回收的会话。全部失败时返回
+/// 可读错误，不超预算接受，也不会为一次注定失败的准入牺牲活跃会话。
+fn acquire_with_eviction(bytes: usize) -> Result<QuotaReservation, String> {
+    let mut last = String::new();
+    for _ in 0..=MAX_ACTIVE_QUERIES {
+        match QuotaReservation::acquire(bytes) {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                last = e;
+                let removed = {
+                    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+                    reclaimable_key(&reg).and_then(|k| reg.remove(&k))
+                };
+                match removed {
+                    Some(s) => {
+                        log::info!(
+                            "查询会话 {} 被淘汰（保留字节预算），其游标将显式过期",
+                            s.snapshot.query_id
+                        );
+                        // 锁外丢弃：Drop 会取额度锁，避免与注册表锁形成反序。
+                        drop(s);
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    Err(last)
+}
+
+/// RC05：注册会话。容量（会话数）淘汰在注册表锁内完成，被淘汰项在**锁外**
+/// 丢弃——Drop 会触发额度释放，若在持锁时丢弃会与额度锁形成反序。
+fn register(snapshot: Arc<QuerySnapshot>) {
+    let now = Instant::now();
+    let mut evicted: Vec<Session> = Vec::new();
+    {
+        let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        gc_expired(&mut reg, now);
+        while reg.len() >= MAX_ACTIVE_QUERIES {
+            let Some(oldest) = oldest_key(&reg) else {
+                break;
+            };
+            log::info!("查询会话 {oldest} 被淘汰（容量策略），其游标将显式过期");
+            if let Some(s) = reg.remove(&oldest) {
+                evicted.push(s);
+            }
+        }
+        reg.insert(
+            snapshot.query_id.clone(),
+            Session {
+                snapshot,
+                last_used: now,
+            },
+        );
+    }
+    drop(evicted);
+}
+
+/// RC05：一个会话保留的字节 = 采集快照（事件/字符串/价格/诊断）+ 快照行
+/// 索引 + 查询身份/时区/主指纹元数据 + 快照结构自身。
+/// 计算全程受检，溢出显式报错。
+fn snapshot_retained_bytes(
+    collection: &report::CollectionSnapshot,
+    rows: &Vec<SnapshotRow>,
+    query_id: &str,
+    tz_label: &str,
+    main_fingerprint: &str,
+) -> Result<usize, String> {
+    use report::retained::{ByteCount, string_bytes, vec_bytes};
+    let mut n = ByteCount::default();
+    n.add(report::collection_retained_bytes(collection)?)?;
+    n.add(vec_bytes(rows))?;
+    n.add(string_bytes(&query_id.to_string()))?;
+    n.add(string_bytes(&tz_label.to_string()))?;
+    n.add(string_bytes(&main_fingerprint.to_string()))?;
+    n.add(std::mem::size_of::<QuerySnapshot>())?;
+    Ok(n.get())
 }
 
 /// 创建查询会话：单飞采集（复用现有缓存/单飞管线）→ 主过滤一次 →
@@ -201,13 +359,6 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
 
     // 主过滤（时间范围）一次应用：返回保留事件的索引，不复制事件。
     let kept = report::time_filter_indices(&collection.events, opts, &tz, &as_of)?;
-    if kept.len() > MAX_TOTAL_SNAPSHOT_EVENTS {
-        anyhow::bail!(
-            "查询结果 {} 行超出快照预算 {} 行，请缩小时间范围",
-            kept.len(),
-            MAX_TOTAL_SNAPSHOT_EVENTS
-        );
-    }
 
     // 排序（ts/rid 降序）+ 组内 seq：同一快照只计算一次。
     let mut keyed: Vec<(usize, &jiff::Timestamp, &str)> = kept
@@ -228,10 +379,28 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
         prev = Some((ts, rid));
     }
 
+    // RC05：按**完整保留对象**记账（不是筛选命中行数）——零命中行的查询
+    // 仍保留整份采集事件、字符串与价格表。
+    let query_id = format!("q{namespace}-{qseq}-g{}", collection.generation);
+    let charge =
+        snapshot_retained_bytes(&collection, &rows, &query_id, &tz_label, &main_fingerprint)
+            .map_err(|e| anyhow!(e))?;
+    let limit = quota_limit();
+    if charge > limit {
+        anyhow::bail!(
+            "查询保留数据约 {} MiB，超出单会话预算 {} MiB：请缩小时间范围",
+            charge / MIB,
+            limit / MIB
+        );
+    }
+    // 准入：额度原子占用（失败会按 LRU 淘汰后重试）；失败时 reservation
+    // 未建立、快照未注册，额度不泄漏。
+    let reservation = acquire_with_eviction(charge).map_err(|e| anyhow!(e))?;
+
     let snapshot = Arc::new(QuerySnapshot {
         // RC01：命名空间 + 序号 + generation。跨启动唯一性来自命名空间，
         // generation 仅用于诊断（同参并发采集合并时相同）。
-        query_id: format!("q{namespace}-{qseq}-g{}", collection.generation),
+        query_id,
         generation: collection.generation,
         pricing_revision: collection.pricing_revision.clone(),
         main_fingerprint,
@@ -241,25 +410,17 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
         by: opts.by,
         rows,
         collection,
+        _reservation: reservation,
     });
 
-    let now = Instant::now();
-    let mut reg = registry().lock().unwrap();
-    gc_expired(&mut reg, now);
-    evict_to_fit(&mut reg, snapshot.rows.len());
-    reg.insert(
-        snapshot.query_id.clone(),
-        Session {
-            snapshot: snapshot.clone(),
-            last_used: now,
-        },
-    );
     log::debug!(
-        "查询会话 {} 建立：{} 行，价格修订 {}",
+        "查询会话 {} 建立：{} 行，价格修订 {}，保留约 {} MiB",
         snapshot.query_id,
         snapshot.rows.len(),
-        snapshot.pricing_revision
+        snapshot.pricing_revision,
+        charge / MIB
     );
+    register(snapshot.clone());
     Ok(snapshot)
 }
 
@@ -371,4 +532,26 @@ pub fn backdate_query_for_tests(query_id: &str, by: Duration) {
     if let Some(s) = reg.get_mut(query_id) {
         s.last_used = s.last_used.checked_sub(by).unwrap_or_else(Instant::now);
     }
+}
+
+/// 测试专用（#[doc(hidden)]）：注入更小的保留字节预算——用小额预算触发
+/// 淘汰/拒绝路径，不必真的分配数百 MB。产品默认值不受影响。
+#[doc(hidden)]
+pub fn set_query_budget_for_tests(limit: usize) {
+    let mut q = quota().lock().unwrap_or_else(|e| e.into_inner());
+    q.limit = limit;
+}
+
+/// 测试专用（#[doc(hidden)]）：当前已占用的保留字节（会话淘汰/借用后仍
+/// 计数，直到最后一个 Arc 释放）。
+#[doc(hidden)]
+pub fn query_retained_bytes_for_tests() -> usize {
+    quota().lock().unwrap_or_else(|e| e.into_inner()).used
+}
+
+/// 测试专用（#[doc(hidden)]）：把预算恢复为产品默认值。
+#[doc(hidden)]
+pub fn reset_query_budget_for_tests() {
+    let mut q = quota().lock().unwrap_or_else(|e| e.into_inner());
+    q.limit = MAX_RETAINED_QUERY_BYTES;
 }

@@ -285,6 +285,53 @@ pub struct SchedulePeriod {
     pub prices: PriceRates,
 }
 
+/// RC05：价格计划被保留时的堆占用（分段 + 峰谷规则，含规则内嵌套分段）。
+fn plan_bytes(p: &PricePlan) -> Result<usize, String> {
+    use crate::report::retained::{ByteCount, vec_bytes};
+    let mut n = ByteCount::default();
+    n.add(vec_bytes(&p.segments))?;
+    for s in &p.segments {
+        n.add(segment_bytes(s)?)?;
+    }
+    n.add(vec_bytes(&p.schedules))?;
+    for s in &p.schedules {
+        n.add(schedule_bytes(s)?)?;
+    }
+    Ok(n.get())
+}
+
+/// RC05：单个上下文分段的堆占用（仅 `label` 有堆分配）。
+fn segment_bytes(s: &PriceSegment) -> Result<usize, String> {
+    use crate::report::retained::{ByteCount, opt_string_bytes};
+    let mut n = ByteCount::default();
+    n.add(opt_string_bytes(&s.label))?;
+    Ok(n.get())
+}
+
+/// RC05：单条峰谷时间规则的堆占用（label/timezone/periods/weekdays/嵌套分段）。
+fn schedule_bytes(s: &PriceSchedule) -> Result<usize, String> {
+    use crate::report::retained::{
+        ByteCount, opt_string_bytes, string_bytes, strings_bytes, vec_bytes,
+    };
+    let mut n = ByteCount::default();
+    n.add(opt_string_bytes(&s.label))?;
+    n.add(opt_string_bytes(&s.timezone))?;
+    n.add(vec_bytes(&s.periods))?;
+    for p in &s.periods {
+        n.add(opt_string_bytes(&p.label))?;
+        n.add(string_bytes(&p.start_time))?;
+        n.add(string_bytes(&p.end_time))?;
+        if let Some(days) = &p.weekdays {
+            n.add(strings_bytes(days))?;
+        }
+    }
+    n.add(vec_bytes(&s.segments))?;
+    for seg in &s.segments {
+        n.add(segment_bytes(seg)?)?;
+    }
+    Ok(n.get())
+}
+
 /// 分段区间不变量：有序、不重叠、无空洞、无上限段必须最后。
 /// 返回 Err = 不可计价的规则（调用方跳过并给出诊断，不猜测）。
 pub(crate) fn validate_segment_rules(segments: &[PriceSegment]) -> Result<(), String> {
@@ -1684,6 +1731,37 @@ impl Pricing {
             .entry(e.prefix.as_bytes().to_vec())
             .or_default()
             .push(e);
+    }
+
+    /// RC05：保守估算本价格表被保留时的堆占用（字节）。
+    ///
+    /// 覆盖：`HashMap` 桶数组与每桶开销、键 `Vec<u8>` 容量、每个条目的
+    /// `prefix`/`display`/`name` 字符串、价格计划的上下文分段与峰谷时间
+    /// 规则（含 `label`/`timezone`/`weekdays` 字符串与规则内嵌套分段）。
+    /// `PriceRates`/`RateSpec` 无堆分配，已含在 `size_of::<Entry>()` 内。
+    ///
+    /// 共享同一价格表的多个查询会话按**重复记账**处理（保守上界）。
+    pub fn retained_bytes(&self) -> Result<usize, String> {
+        use crate::report::retained::{
+            ByteCount, MAP_BUCKET_OVERHEAD, opt_string_bytes, string_bytes, vec_bytes,
+        };
+        let mut n = ByteCount::default();
+        n.add(
+            self.by_prefix
+                .capacity()
+                .saturating_mul(std::mem::size_of::<(Vec<u8>, Vec<Entry>)>() + MAP_BUCKET_OVERHEAD),
+        )?;
+        for (key, entries) in &self.by_prefix {
+            n.add(vec_bytes(key))?;
+            n.add(vec_bytes(entries))?;
+            for e in entries {
+                n.add(string_bytes(&e.prefix))?;
+                n.add(string_bytes(&e.display))?;
+                n.add(opt_string_bytes(&e.name))?;
+                n.add(plan_bytes(&e.plan)?)?;
+            }
+        }
+        Ok(n.get())
     }
 
     fn all_entries(&self) -> impl Iterator<Item = &Entry> {

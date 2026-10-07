@@ -230,7 +230,10 @@ struct Collected {
 /// D1：采集快照（不可变共享）——并发同参查询复用同一次采集，
 /// 事件/来源/警告/价格表一份冻结，各查询自行做时间与行级过滤。
 /// SF04：查询快照直接持有本结构的 Arc（字段对 crate 内 query 模块开放）。
-#[derive(Clone, Debug)]
+/// RC05：**不再实现 `Clone`**——单飞跟随者曾对整份快照做深拷贝
+///（`Arc::new(s.clone())`），既重复占用事件内存又让保留记账失真；
+/// 现在领队与跟随者共享同一 `Arc`。
+#[derive(Debug)]
 pub(crate) struct CollectionSnapshot {
     pub(crate) generation: u64,
     pub(crate) events: Vec<UsageEvent>,
@@ -240,8 +243,100 @@ pub(crate) struct CollectionSnapshot {
     pub(crate) pricing_revision: String,
 }
 
+/// RC05：保留字节记账——保守估算查询快照被保留时的堆占用。
+///
+/// 设计取舍：只做**上界**估算（宁可高估），覆盖 `Vec`/`String` 的堆分配、
+/// `HashMap` 桶与分配器元数据；共享对象（采集快照、价格表）在不同会话中
+/// 允许**重复记账**，换取简单且保守的上限。**不覆盖**进程级开销（栈、
+/// 分配器缓存、采集/建表期间的临时峰值），因此不宣称整个进程 RSS 的上界
+///（见 `docs/stats-semantics.md` §3.5）。
+pub(crate) mod retained {
+    use std::mem::size_of;
+
+    /// 每次堆分配除数据外的固定开销（分配器元数据 + 对齐填充）。
+    pub(crate) const ALLOC_OVERHEAD: usize = 16;
+    /// `HashMap` 每桶的额外开销（控制字节 + 对齐）。
+    pub(crate) const MAP_BUCKET_OVERHEAD: usize = 8;
+
+    /// 带受检加法的字节累加器：溢出**显式报错**，绝不回绕成小值。
+    #[derive(Debug, Default, Clone, Copy)]
+    pub(crate) struct ByteCount(usize);
+
+    impl ByteCount {
+        pub(crate) fn add(&mut self, n: usize) -> Result<(), String> {
+            self.0 = self
+                .0
+                .checked_add(n)
+                .ok_or_else(|| "保留字节记账溢出（超出 usize 可表示范围）".to_string())?;
+            Ok(())
+        }
+        pub(crate) fn get(self) -> usize {
+            self.0
+        }
+    }
+
+    /// `String` 的堆占用：按**容量**计（分配即占用，长字符串按实际分配算），
+    /// 加固定开销。
+    pub(crate) fn string_bytes(s: &String) -> usize {
+        s.capacity().saturating_add(ALLOC_OVERHEAD)
+    }
+
+    pub(crate) fn opt_string_bytes(s: &Option<String>) -> usize {
+        s.as_ref().map_or(0, string_bytes)
+    }
+
+    /// `Vec` 的堆占用：容量 × 元素大小 + 固定开销。
+    pub(crate) fn vec_bytes<T>(v: &Vec<T>) -> usize {
+        v.capacity()
+            .saturating_mul(size_of::<T>())
+            .saturating_add(ALLOC_OVERHEAD)
+    }
+
+    /// 字符串 `Vec` 的堆占用：元素缓冲 + 每个字符串本体。
+    pub(crate) fn strings_bytes(v: &Vec<String>) -> usize {
+        let mut n = vec_bytes(v);
+        for s in v {
+            n = n.saturating_add(string_bytes(s));
+        }
+        n
+    }
+}
+
+/// RC05：采集快照被一个查询会话保留时的保守堆占用（字节）。
+///
+/// 覆盖：事件 `Vec` 分配 + 每个事件的四个 `String`（model/session_id/
+/// project/record_id）、逐源统计（`CollectStats` 全为数值）、采集诊断
+/// 字符串、价格修订号、价格表（候选、嵌套分段/峰谷规则与索引）。
+///
+/// 不含快照行索引与查询身份——那部分由 `query::snapshot_retained_bytes`
+/// 一起计入。
+pub(crate) fn collection_retained_bytes(c: &CollectionSnapshot) -> Result<usize, String> {
+    use retained::{ByteCount, string_bytes, strings_bytes, vec_bytes};
+    let mut n = ByteCount::default();
+    n.add(vec_bytes(&c.events))?;
+    for e in &c.events {
+        n.add(string_bytes(&e.model))?;
+        n.add(string_bytes(&e.session_id))?;
+        n.add(string_bytes(&e.project))?;
+        n.add(string_bytes(&e.record_id))?;
+    }
+    // 逐源统计：CollectStats 只有 u64 计数，无堆分配。
+    n.add(vec_bytes(&c.sources))?;
+    // 采集诊断字符串。
+    n.add(strings_bytes(&c.warnings))?;
+    // 价格修订号 + 价格表（含候选与嵌套规则）。
+    n.add(string_bytes(&c.pricing_revision))?;
+    n.add(c.pricing.retained_bytes()?)?;
+    Ok(n.get())
+}
+
 /// 单飞槽：key → (互斥结果, 条件变量)。None = 空闲。
-type FlightCell = Arc<(Mutex<Option<Result<CollectionSnapshot, String>>>, Condvar)>;
+/// RC05：结果持有 `Arc<CollectionSnapshot>`——领队与所有跟随者共享同一份
+/// 快照，不再各自深拷贝事件（此前 `Arc::new(s.clone())`）。
+type FlightCell = Arc<(
+    Mutex<Option<Result<Arc<CollectionSnapshot>, String>>>,
+    Condvar,
+)>;
 
 /// 占用中的航班表（Task 1）：key → cell。按 key 管理——不同参数的采集
 /// 可并发进行，同参跟随者共享同一航班；清理时以 cell 指针身份核对。
@@ -273,7 +368,8 @@ fn wait_flight(cell: &FlightCell) -> Result<Arc<CollectionSnapshot>> {
     loop {
         if let Some(res) = r.as_ref() {
             return match res {
-                Ok(s) => Ok(Arc::new(s.clone())),
+                // RC05：共享同一 Arc（零拷贝）——跟随者不再复制整份事件集。
+                Ok(s) => Ok(s.clone()),
                 Err(e) => Err(anyhow::anyhow!(e.clone())),
             };
         }
@@ -343,7 +439,7 @@ fn collect_flighted_with(
         published: bool,
     }
     impl FlightGuard {
-        fn publish_ok(&mut self, snap: CollectionSnapshot) {
+        fn publish_ok(&mut self, snap: Arc<CollectionSnapshot>) {
             let mut r = self.cell.0.lock().unwrap();
             *r = Some(Ok(snap));
             self.cell.1.notify_all();
@@ -382,9 +478,11 @@ fn collect_flighted_with(
     let generation = COLLECT_GENERATION.fetch_add(1, Ordering::Relaxed);
     match leader(generation) {
         Ok(snapshot) => {
-            guard.publish_ok(snapshot.clone());
+            // RC05：只构造一次 Arc，领队与跟随者共享（不再深拷贝）。
+            let arc = Arc::new(snapshot);
+            guard.publish_ok(arc.clone());
             drop(guard);
-            Ok(Arc::new(snapshot))
+            Ok(arc)
         }
         Err(e) => {
             let msg = e.to_string();
@@ -2555,5 +2653,45 @@ mod collect_stability_tests {
             "第二次采集必须缓存命中，不得重复解析"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// RC05：保留字节记账的单元契约（受检加法、按容量计）。
+/// 运行：`cargo test --offline collect --lib`（`retained_bytes` 名称含 collect 前缀的用例）。
+#[cfg(test)]
+mod retained_bytes {
+    use super::retained::*;
+
+    #[test]
+    fn collect_retained_byte_count_rejects_overflow() {
+        let mut n = ByteCount::default();
+        n.add(usize::MAX).unwrap();
+        assert!(
+            n.add(1).is_err(),
+            "受检加法溢出必须显式报错，绝不回绕成小值"
+        );
+        assert_eq!(n.get(), usize::MAX, "失败不改变已累计值");
+    }
+
+    #[test]
+    fn collect_retained_string_bytes_are_capacity_based() {
+        // 长字符串按**容量**计（分配即占用）：3 字节内容 + 4 KiB 容量。
+        let mut s = String::with_capacity(4096);
+        s.push_str("abc");
+        assert!(
+            string_bytes(&s) >= 4096,
+            "按容量计而非 len：{}",
+            string_bytes(&s)
+        );
+        assert_eq!(opt_string_bytes(&None), 0);
+        assert!(opt_string_bytes(&Some(s)) >= 4096);
+    }
+
+    #[test]
+    fn collect_retained_vec_bytes_scale_with_capacity() {
+        let v: Vec<u64> = Vec::with_capacity(100);
+        assert!(vec_bytes(&v) >= 800, "容量 × 元素大小：{}", vec_bytes(&v));
+        let s: Vec<String> = Vec::with_capacity(2);
+        assert!(strings_bytes(&s) >= 2 * std::mem::size_of::<String>());
     }
 }
