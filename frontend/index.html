@@ -3,6 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- UX09：首帧前解析主题偏好并设置 data-theme（同源经典脚本、同步执行，
+         早于首次绘制；生产 CSP script-src 'self' 允许，故不使用内联脚本）。 -->
+    <script src="/theme-boot.js"></script>
     <title>TokenScope</title>
   </head>
   <body>

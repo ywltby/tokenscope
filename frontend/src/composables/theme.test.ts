@@ -135,3 +135,54 @@ describe("主题偏好（设计系统 Task 1）", () => {
     expect(css).toContain(".ts-segmented-thumb");
   });
 });
+
+// UX09：首帧主题取证与共享解析——boot 脚本与运行时必须消费同一存储键与
+// 同一组取值/回落规则，否则"先按默认画一帧再切换"。
+describe("UX09 首帧主题解析（prepaint）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+
+  it("preference_resolution_is_shared：boot 脚本与 resolver 同键同规则", async () => {
+    const { THEME_STORAGE_KEY, THEME_PREFERENCES, parsePreference, resolveMode } =
+      await import("../lib/themePreference");
+    const boot = (await import("../../public/theme-boot.js?raw")).default;
+    // 存储键一致
+    expect(boot).toContain(THEME_STORAGE_KEY);
+    // 接受的取值一致（且只有这三个 + 回落 system）
+    for (const p of THEME_PREFERENCES) expect(boot).toContain(`"${p}"`);
+    expect(boot).toContain('"system"');
+    expect(boot).toContain("prefers-color-scheme: dark");
+    // 运行时纯函数与 boot 语义一致
+    expect(parsePreference("dark")).toBe("dark");
+    expect(resolveMode("system", true)).toBe("dark");
+    expect(resolveMode("system", false)).toBe("light");
+  });
+
+  it("invalid_or_unavailable_storage_falls_back_to_system", async () => {
+    const { parsePreference, readStoredPreference } = await import("../lib/themePreference");
+    // 缺失 / 非法值一律回落 system（不猜 light/dark）
+    expect(parsePreference(null)).toBe("system");
+    expect(parsePreference(undefined)).toBe("system");
+    expect(parsePreference("")).toBe("system");
+    expect(parsePreference("bogus")).toBe("system");
+    expect(parsePreference("Dark")).toBe("system"); // 大小写不敏感不作兼容
+    expect(parsePreference("dark")).toBe("dark");
+    // localStorage 抛错（隐私模式/被禁用）也不得抛出
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("denied");
+    });
+    expect(readStoredPreference()).toBe("system");
+  });
+
+  it("system_changes_only_affect_system_preference", async () => {
+    const { resolveMode } = await import("../lib/themePreference");
+    expect(resolveMode("system", true)).toBe("dark");
+    expect(resolveMode("system", false)).toBe("light");
+    // 显式偏好不受系统明暗影响
+    expect(resolveMode("light", true)).toBe("light");
+    expect(resolveMode("dark", false)).toBe("dark");
+  });
+});

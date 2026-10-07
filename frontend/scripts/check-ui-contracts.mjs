@@ -633,6 +633,88 @@ for (const fixtureName of args.fixtures) {
   }
 }
 
+// ── UX09：首帧主题取证 ────────────────────────────────────────────
+// 延迟主模块执行，测量"主模块尚未运行、但已可绘制"时的 data-theme：
+// 修复前无引导脚本，此时 html 无 data-theme → 深色偏好下先按浅色绘制再切换。
+async function runPrepaintChecks() {
+  const cases = [
+    { label: "light-over-dark-system", pref: "light", system: "dark", expect: "light" },
+    { label: "dark-over-light-system", pref: "dark", system: "light", expect: "dark" },
+    { label: "system-follows-dark", pref: "system", system: "dark", expect: "dark" },
+    { label: "system-follows-light", pref: "system", system: "light", expect: "light" },
+    { label: "missing-pref-follows-dark-system", pref: null, system: "dark", expect: "dark" },
+    { label: "invalid-pref-follows-dark-system", pref: "bogus", system: "dark", expect: "dark" },
+  ];
+  const out = [];
+  for (const c of cases) {
+    const context = await browser.newContext({
+      viewport: { width: 980, height: 620 },
+      colorScheme: c.system === "dark" ? "dark" : "light",
+    });
+    if (c.pref !== null) {
+      await context.addInitScript(
+        ([key, value]) => {
+          try {
+            window.localStorage.setItem(key, value);
+          } catch {
+            /* ignore */
+          }
+        },
+        ["tokenscope-theme", c.pref],
+      );
+    }
+    let releaseMain = () => {};
+    const gate = new Promise((r) => (releaseMain = r));
+    // dev：主模块 /src/main.ts；生产：打包入口 /assets/index-*.js
+    await context.route(/\/src\/main\.ts|\/assets\/index-[\w-]+\.js/, async (route) => {
+      await gate;
+      await route.continue();
+    });
+    const page = await context.newPage();
+    let prepaint = null;
+    let mainLoadedAtPrepaint = null;
+    try {
+      await page.goto(base, { waitUntil: "commit" });
+      // 引导脚本在 head 同步执行：主模块被拦住时 data-theme 应已就位
+      await page.waitForFunction(() => document.documentElement.hasAttribute("data-theme"), {
+        timeout: 2000,
+      });
+      const pre = await page.evaluate(() => ({
+        theme: document.documentElement.getAttribute("data-theme"),
+        // 主模块是否已执行（#app 有子节点）——必须为 false，否则本检查被架空
+        mainLoaded: (document.getElementById("app")?.childElementCount ?? 0) > 0,
+      }));
+      prepaint = pre.theme;
+      mainLoadedAtPrepaint = pre.mainLoaded;
+    } catch {
+      prepaint = null;
+      mainLoadedAtPrepaint = null;
+    }
+    releaseMain();
+    let settled = null;
+    try {
+      await page.waitForSelector("#app .app-shell", { timeout: 8000 });
+      await page.waitForTimeout(400);
+      settled = await page.evaluate(() => document.documentElement.getAttribute("data-theme"));
+    } catch {
+      settled = null;
+    }
+    const ok = prepaint === c.expect && settled === c.expect && mainLoadedAtPrepaint === false;
+    out.push({ label: c.label, ok, expect: c.expect, prepaint, settled, mainLoadedAtPrepaint });
+    await page.screenshot({ path: join(args.output, `prepaint-${c.label}.png`) });
+    await context.close();
+  }
+  return out;
+}
+
+let prepaintResults = [];
+try {
+  prepaintResults = await runPrepaintChecks();
+} catch (e) {
+  prepaintResults = [{ label: "prepaint-run", ok: false, error: String(e) }];
+}
+const prepaintOk = prepaintResults.length > 0 && prepaintResults.every((r) => r.ok);
+
 await browser.close();
 
 writeFileSync(
@@ -643,6 +725,7 @@ writeFileSync(
       generated_at: new Date().toISOString(),
       url: base,
       browserVersion,
+      prepaint: prepaintResults,
       results,
     },
     null,
@@ -658,6 +741,12 @@ const baselineCheck = {
 
 console.log(`\n${baselineCheck.pass ? "PASS" : "FAIL"} ${baselineCheck.name} (${baselineCheck.detail})`);
 
+console.log(`\n${prepaintOk ? "PASS" : "FAIL"} prepaint_theme_matches_preference`);
+for (const r of prepaintResults)
+  console.log(
+    `  ${r.ok ? "✓" : "✗"} ${r.label}${r.error ? ` (${r.error})` : ` expect=${r.expect} prepaint=${r.prepaint} settled=${r.settled} mainLoaded=${r.mainLoadedAtPrepaint}`}`,
+  );
+
 // 硬约束在两种模式下都必须通过（boot 失败说明 fixture/协议漂移，不是"待修契约"）。
 if (hardFailures > 0) {
   console.error(`\n${hardFailures} 个场景存在硬失败（IPC 泄漏/页面错误/外部请求），不得作为 baseline 通过`);
@@ -665,6 +754,10 @@ if (hardFailures > 0) {
 }
 if (args.phase === "verify" && contractFailures > 0) {
   console.error(`\nverify 阶段仍有 ${contractFailures} 个场景未满足具名契约`);
+  process.exit(1);
+}
+if (args.phase === "verify" && !prepaintOk) {
+  console.error("\nverify 阶段首帧主题未匹配偏好（prepaint_theme_matches_preference）");
   process.exit(1);
 }
 console.log(`\n${args.phase} 完成：证据写入 ${args.output}`);
