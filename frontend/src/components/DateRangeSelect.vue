@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { NButton, NCheckbox, NDatePicker, NPopover } from "naive-ui";
-import { addDays, todayInTz } from "../lib/dates";
+import { addDays, rangeLabel, todayInTz } from "../lib/dates";
 
 /**
  * ccs 风格的日期区间选择（M10；C3 修复 F07）：
@@ -49,11 +49,6 @@ function applyShortcut(sc: { label: string; fromOffset: number }): void {
   followToday.value = false;
 }
 
-function fmtShort(dateStr: string): string {
-  const [, m, d] = dateStr.split("-");
-  return `${Number(m)}/${Number(d)}`;
-}
-
 // 受控开关：打开时草稿同步自当前值；取消/确定经 show 关闭。
 // SF05：打开面板是一次操作，today 只读取一次。
 watch(show, (open) => {
@@ -95,14 +90,11 @@ function clear(): void {
 
 // 触发器标签从 props 派生（修复前是 ref，只在 confirm 更新，外部重置会失同步）。
 // SF05：一次标签求值只读取一次 today。
+// UX04：跨年/非当前年保留年份，"同日"按完整 ISO 日期比较（见 rangeLabel）。
 const label = computed<string>(() => {
   const v = props.value;
-  const today = todayStr();
   if (!v) return "全部时间";
-  if (v[1] >= today && v[0] < today) return `${fmtShort(v[0])} ~ 今天`;
-  return fmtShort(v[0]) === fmtShort(v[1])
-    ? fmtShort(v[0])
-    : `${fmtShort(v[0])} ~ ${fmtShort(v[1])}`;
+  return rangeLabel(v[0], v[1], todayStr());
 });
 
 // R03：NDatePicker 用 v-model:formatted-value + value-format 直接桥接
@@ -182,7 +174,10 @@ const shortcutActive = (sc: { fromOffset: number }): boolean => {
 <style scoped>
 /* 弹层：elevated 玻璃表面（NPopover 浮层内容） */
 .range-panel {
-  width: 300px;
+  /* UX04：宽度随内容增长（快捷项不裁字），并受视口约束不产生横向滚动 */
+  width: max-content;
+  min-width: 300px;
+  max-width: min(380px, calc(100vw - 32px));
   padding: var(--ts-space-3);
   border-radius: var(--ts-radius-popover);
   background-color: var(--ts-surface-elevated);
@@ -212,21 +207,28 @@ const shortcutActive = (sc: { fromOffset: number }): boolean => {
 
 .shortcut-row {
   display: inline-flex;
+  /* UX04：组宽不足整组换行（不挤压、裁字）；各按钮宽度由文案 + 水平内边距决定 */
+  flex-wrap: wrap;
+  max-width: 100%;
   border: 1px solid var(--ts-separator);
   border-radius: var(--ts-radius-control);
   overflow: hidden;
   margin-bottom: var(--ts-space-3);
 }
 .shortcut-btn {
-  width: 34px;
-  height: 34px;
-  padding: 0;
+  /* 宽度由文案 + 水平内边距决定；外高 32px（与筛选栏其它控件一致） */
+  width: auto;
+  min-width: 0;
+  height: 32px;
+  padding: 0 var(--ts-space-3);
   font-size: 12px;
+  white-space: nowrap;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: none;
   border-radius: 0;
+  flex: 0 0 auto;
 }
 /* 相邻快捷项之间的细分隔线 */
 .shortcut-btn + .shortcut-btn {

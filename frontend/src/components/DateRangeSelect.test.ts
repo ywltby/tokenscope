@@ -49,7 +49,7 @@ function todayCalls(): number {
 }
 
 import DateRangeSelect from "./DateRangeSelect.vue";
-import { addDays, todayInTz, tzDate } from "../lib/dates";
+import { addDays, rangeLabel, todayInTz, tzDate } from "../lib/dates";
 
 const NPopoverStub = { name: "NPopover" };
 
@@ -211,4 +211,38 @@ describe("SF05 时间基准（一次操作一次 today）", () => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+// UX04：跨年/历史区间的标签必须保留年份；"同日"按完整 ISO 日期比较。
+describe("UX04 区间标签（跨年与历史年份）", () => {
+  const TODAY = "2026-10-07";
+
+  it("same_month_day_across_years_is_not_single_day：2024-01-01..2025-01-01 必须含两个年份", () => {
+    const label = rangeLabel("2024-01-01", "2025-01-01", TODAY);
+    // 修复前：两端点 M/D 都是 1/1 → 被折叠成 "1/1"（单日误判 + 年份丢失）
+    expect(label).not.toBe("1/1");
+    expect(label).toContain("2024");
+    expect(label).toContain("2025");
+  });
+
+  it("historical_range_retains_year：同年但非当前年也保留年份", () => {
+    const label = rangeLabel("2024-03-05", "2024-03-10", TODAY);
+    expect(label).toContain("2024");
+    expect(label).not.toBe("3/5 ~ 3/10");
+    // 同年当年可保留简短标签
+    expect(rangeLabel("2026-09-29", "2026-10-05", TODAY)).toBe("9/29 ~ 10/5");
+  });
+
+  it("follow_today_label_retains_start_year：跟随今天时保留起始年份", () => {
+    const label = rangeLabel("2024-01-01", TODAY, TODAY);
+    expect(label).toContain("2024");
+    expect(label).toContain("今天");
+    // 当年起始日仍用简短标签
+    expect(rangeLabel("2026-09-29", TODAY, TODAY)).toBe("9/29 ~ 今天");
+  });
+
+  it("同日按完整 ISO 日期比较：2024-01-01 与 2025-01-01 不是同一天", () => {
+    expect(rangeLabel("2024-01-01", "2024-01-01", TODAY)).toBe("2024/1/1");
+    expect(rangeLabel("2025-01-01", "2025-01-01", TODAY)).toBe("2025/1/1");
+  });
 });

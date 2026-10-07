@@ -482,7 +482,7 @@ startRefreshBatch();
       <NSelect
         :value="tz"
         :options="TZ_OPTIONS"
-        size="small"
+        size="medium"
         class="tz-select"
         aria-label="统计时区"
         @update:value="(v: string) => (tz = v)"
