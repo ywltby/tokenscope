@@ -192,8 +192,11 @@ fn opts(dir: &Path) -> SummaryOptions {
     }
 }
 
-/// 只传阶段与临时根目录：清空继承环境（不泄漏真实 TOKENSCOPE_* / 来源
-/// 配置），仅补回 Windows 运行必需的 SystemRoot/PATH/TEMP。
+/// 子进程环境：**继承**宿主环境，只剔除本应用自己的 `TOKENSCOPE_*`
+/// 变量。不 `env_clear()`——清空会破坏 Windows 的 SYSTEMDRIVE/SYSTEMROOT
+/// 解析，使 COM/组件缓存被写到仓库内的字面 `%SystemDrive%` 目录（已实测）。
+/// 密闭性由显式注入的 `SummaryOptions` 路径保证：cache/pricing/来源全部
+/// 指向临时目录，子进程不会读真实 `~/.tokenscope` 或 agent 日志。
 fn run_child(phase: &str, dir: &Path) -> std::process::Output {
     let exe = std::env::current_exe().expect("current_exe");
     let mut cmd = Command::new(exe);
@@ -204,17 +207,12 @@ fn run_child(phase: &str, dir: &Path) -> std::process::Output {
         "--test-threads=1",
         "--nocapture",
     ]);
-    cmd.env_clear();
-    for key in [
-        "SystemRoot",
-        "windir",
-        "PATH",
-        "TEMP",
-        "TMP",
-        "NUMBER_OF_PROCESSORS",
-    ] {
-        if let Ok(v) = std::env::var(key) {
-            cmd.env(key, v);
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("TOKENSCOPE_")
+        {
+            cmd.env_remove(&k);
         }
     }
     cmd.env(PHASE_ENV, phase);
