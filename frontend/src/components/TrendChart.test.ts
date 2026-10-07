@@ -208,7 +208,10 @@ describe("TrendChart 生命周期与数据更新（UX05）", () => {
     expect(opt.yAxis.data).toEqual(["a", "b"]);
     expect(opt.series[0].data).toEqual([9, 5]);
     // 摘要随新数据更新
-    await w.findAll("button").find((b) => b.text().includes("数据摘要"))!.trigger("click");
+    await w
+      .findAll("button")
+      .find((b) => b.text().includes("数据摘要"))!
+      .trigger("click");
     expect(w.find(".chart-summary").text()).toContain("合计 9");
     w.unmount();
   });
@@ -270,7 +273,9 @@ describe("TrendChart 生命周期与数据更新（UX05）", () => {
     const opt = setOption.mock.calls[0][0] as {
       tooltip: { formatter: (p: unknown) => HTMLElement };
     };
-    const node = opt.tooltip.formatter([{ dataIndex: 0, name: payload, seriesName: "输入", value: 7 }]);
+    const node = opt.tooltip.formatter([
+      { dataIndex: 0, name: payload, seriesName: "输入", value: 7 },
+    ]);
     expect(node).toBeInstanceOf(HTMLElement);
     expect(node.querySelector("img")).toBeNull();
     expect(node.textContent).toContain(payload);

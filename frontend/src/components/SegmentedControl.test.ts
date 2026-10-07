@@ -82,7 +82,9 @@ function mountVModel(initial: "a" | "b" | "c" = "a") {
             modelValue: value.value,
             options: [...OPTIONS],
             ariaLabel: "测试分组",
-            "onUpdate:modelValue": (v: "a" | "b" | "c") => (value.value = v),
+            "onUpdate:modelValue": (v: string) => {
+              value.value = v as "a" | "b" | "c";
+            },
           });
       },
     }),
@@ -96,7 +98,7 @@ describe("SegmentedControl（UX02）", () => {
     const w = mountVModel("a");
     await flushPromises();
     const items = w.findAll(".ts-segmented-item");
-    items[0].element.focus();
+    (items[0].element as HTMLElement).focus();
     expect(document.activeElement).toBe(items[0].element);
 
     await items[0].trigger("keydown", { key: "ArrowRight" });
@@ -124,7 +126,7 @@ describe("SegmentedControl（UX02）", () => {
     const items = w.findAll(".ts-segmented-item");
     expect(items.map((i) => i.attributes("tabindex"))).toEqual(["-1", "0", "-1"]);
     // 组内只有选中项在 Tab 序列中 → Tab 进入选中项，再按 Tab 离开整组
-    items[1].element.focus();
+    (items[1].element as HTMLElement).focus();
     expect(document.activeElement).toBe(items[1].element);
     w.unmount();
   });
@@ -182,7 +184,7 @@ describe("SegmentedControl（UX02）", () => {
     const w = mountCtl("a");
     await flushPromises();
     const items = w.findAll(".ts-segmented-item");
-    items[0].element.focus();
+    (items[0].element as HTMLElement).focus();
     expect(document.activeElement).toBe(items[0].element);
 
     await w.setProps({ modelValue: "c" });

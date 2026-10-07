@@ -69,7 +69,7 @@ function selectAndFocus(value: T, index: number): void {
   });
 }
 
-function select(value: T, index: number): void {
+function select(value: T): void {
   emit("update:modelValue", value);
   void nextTick(updateThumb);
 }
@@ -137,7 +137,7 @@ onBeforeUnmount(() => {
       :aria-checked="modelValue === opt.value"
       :aria-label="opt.ariaLabel ?? opt.label"
       :tabindex="modelValue === opt.value ? 0 : -1"
-      @click="select(opt.value, i)"
+      @click="select(opt.value)"
     >
       <!-- 通用 SVG 渲染插槽：主题等需要语义化图形时使用；装饰图形必须
            aria-hidden，真实名称由按钮 aria-label 承载。 -->
