@@ -78,6 +78,15 @@ function factRows(bd: EventCostBreakdown): BreakdownRow[] {
 
 function formulaRows(lines: CostLine[]): BreakdownRow[] {
   return lines.map((l) => {
+    if (l.overflow) {
+      // F04：单价已知但 token × 单价超出可表示范围——分项不计金额、
+      // token 保留为未计价；不得显示为免费或 $0。
+      return {
+        label: KIND_LABEL[l.kind],
+        value: `${fmtNum(l.tokens)} token，金额超出可表示范围`,
+        unknown: true,
+      };
+    }
     if (!l.priced || l.unit_price == null) {
       return {
         label: KIND_LABEL[l.kind],

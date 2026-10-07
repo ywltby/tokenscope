@@ -161,6 +161,9 @@ export interface CostLine {
   priced: boolean;
   /** 单价来源；same_as_input 时 unit_price 已是解析后的实际数值 */
   rate_kind?: RateKind;
+  /** F04：单价合法但 token × 单价超出 f64 表示范围——分项不计金额，
+   *  token 计入未计价；展示为"金额超出可表示范围"，不得显示为免费 */
+  overflow?: boolean;
 }
 
 export type MatchMode = "full" | "full_variant_fallback" | "prefix" | "prefix_variant_fallback";

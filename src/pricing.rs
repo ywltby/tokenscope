@@ -373,7 +373,6 @@ fn invalid_rate(r: &PriceRates) -> Option<(&'static str, f64)> {
 
 /// F05：完整计划的数值校验——索引恢复入口先把扁平字段归一成完整计划，
 /// 再用本函数统一校验，不得存在未校验的恢复通道。
-/// 覆盖范围 = R06 的 plan 全量：base/分段/时间规则/时段/规则分段。
 fn price_plan_invalid(plan: &PricePlan) -> bool {
     invalid_rate(&plan.base).is_some()
         || plan
@@ -685,17 +684,38 @@ fn estimate_entry(
         let (price, rate_kind) = resolve(spec, is_cache_read);
         match price {
             Some(p) => {
-                let subtotal = tokens as f64 * p / 1_000_000.0;
-                cost += subtotal;
-                lines.push(CostLine {
-                    kind,
-                    tokens,
-                    unit_price: Some(p),
-                    subtotal,
-                    priced: true,
-                    rate_kind,
-                    overflow: false,
-                });
+                // F04：先除后乘，避免有限单价的中间溢出（1M × 1e308/M
+                // 数学结果 1e308 有限）；求和同样防溢出。仍超出 f64 表示
+                // 范围时该分项不计金额、token 保留为未计价，带结构化溢出
+                // 原因（overflow）——不得夹成 0/最大值或伪装 complete=true。
+                let subtotal = tokens as f64 / 1_000_000.0 * p;
+                let summed = cost + subtotal;
+                if subtotal.is_finite() && summed.is_finite() {
+                    cost = summed;
+                    lines.push(CostLine {
+                        kind,
+                        tokens,
+                        unit_price: Some(p),
+                        subtotal,
+                        priced: true,
+                        rate_kind,
+                        overflow: false,
+                    });
+                } else {
+                    if tokens > 0 {
+                        complete = false;
+                        *unknown_slot = tokens;
+                    }
+                    lines.push(CostLine {
+                        kind,
+                        tokens,
+                        unit_price: Some(p),
+                        subtotal: 0.0,
+                        priced: false,
+                        rate_kind,
+                        overflow: true,
+                    });
+                }
             }
             None => {
                 if tokens > 0 {
@@ -5691,6 +5711,47 @@ input = -3.0
         ));
         assert!(p.lookup("sched").is_none());
         assert!(p.lookup("m").is_some());
+    }
+
+    #[test]
+    fn test_finite_rate_does_not_overflow_intermediate_cost() {
+        // 1M tokens × 1e308/M 数学结果 1e308 有限——不得因中间乘法溢出。
+        let p = pricing_with_plan(
+            "solo/big",
+            PricePlan {
+                base: PriceRates {
+                    input: RateSpec::Fixed(1e308),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let est = p
+            .estimate("big", &counts(1_000_000, 0, 0, 0), at())
+            .unwrap();
+        assert!(est.complete);
+        assert!(
+            (est.cost - 1e308).abs() < 1e308 * 1e-9,
+            "1M × 1e308/M 必须得有限 1e308，实际 {}",
+            est.cost
+        );
+        assert_eq!(est.lines[0].subtotal, 1e308);
+
+        // 真正超出有限表示范围（2M × 1e308/M = 2e308 → inf）：该项不计金额、
+        // token 保留为未计价，complete=false 并带结构化溢出原因；不得夹成
+        // 0/最大值或伪装 complete=true。
+        let est = p
+            .estimate("big", &counts(2_000_000, 0, 0, 0), at())
+            .unwrap();
+        assert!(!est.complete, "金额溢出不得伪装完整计价");
+        assert!(!est.cost.is_finite() || est.cost == 0.0, "溢出分项不计金额");
+        assert_eq!(est.cost, 0.0);
+        assert_eq!(est.unknown.input, 2_000_000, "溢出分项 token 保留为未计价");
+        let line = &est.lines[0];
+        assert!(line.overflow, "溢出分项必须带结构化原因");
+        assert_eq!(line.unit_price, Some(1e308));
+        assert!(!line.priced);
+        assert_eq!(line.subtotal, 0.0);
     }
 
     #[test]

@@ -188,3 +188,43 @@ describe("costBreakdown 三态与排除诊断（缓存读取定价解析计划 T
     expect(t).toContain("均不完整");
   });
 });
+
+describe("costBreakdown 溢出分项（修复后复核 F04）", () => {
+  it("溢出行显示金额超出可表示范围，不得显示为免费或固定单价", () => {
+    const b = bd();
+    const r = formatCostBreakdownRows({
+      ...b,
+      lines: b.lines.map((l) =>
+        l.kind === "input"
+          ? {
+              ...l,
+              unit_price: 1e308,
+              subtotal: 0,
+              priced: false,
+              rate_kind: "fixed" as const,
+              overflow: true,
+            }
+          : l,
+      ),
+      cost_usd: 0.03,
+      complete: false,
+      unknown: { input: 272_001, output: 0, cache_write: 0, cache_read: 0 },
+    });
+    const input = r.find((x) => x.label === "输入");
+    expect(input!.value).toContain("金额超出可表示范围");
+    expect(input!.value).not.toContain("$");
+    expect(input!.unknown).toBe(true);
+    const t = text({
+      ...b,
+      lines: b.lines.map((l) =>
+        l.kind === "input"
+          ? { ...l, unit_price: 1e308, subtotal: 0, priced: false, overflow: true }
+          : l,
+      ),
+      cost_usd: 0.03,
+      complete: false,
+    });
+    expect(t).toContain("输入 272,001 token，金额超出可表示范围");
+    expect(t).not.toContain("× $1.00");
+  });
+});
