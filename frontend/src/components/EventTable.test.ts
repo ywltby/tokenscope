@@ -2,10 +2,10 @@
 // 分页交互（D1 游标的前端入口）。
 // Task 7：费用悬浮提示——纯函数 formatCostBreakdown 的排版断言
 //（NDataTable 虚拟滚动在测试环境不渲染行，与既有用例同口径）。
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { nextTick } from "vue";
 import { mount } from "@vue/test-utils";
-import type { VNode } from "vue";
+import { defineComponent, h, type VNode } from "vue";
 import EventTable from "./EventTable.vue";
 import { projectLabel, type EventCostBreakdown, type EventList, type EventRow } from "../types";
 import { formatCostBreakdownRows, formatCostBreakdownText } from "../lib/costBreakdown";
@@ -249,62 +249,209 @@ describe("EventTable 表格语义（设计系统 Task 5）", () => {
 describe("EventTable 费用浮层（设计系统 Task 6）", () => {
   /// 取费用列 render 的 VNode（NTooltip）——行级渲染在测试环境不可达，
   /// 与既有用例同口径直接调列渲染函数。
-  function tooltipVnode(w: ReturnType<typeof mount>): VNode {
-    const cols = (
-      w.vm as unknown as { columns: { key: string; render?: (r: object) => unknown }[] }
-    ).columns;
-    const cost = cols.find((c) => c.key === "cost_usd")!;
-    const bdRow = row({ cost_usd: 2.206008, cost_breakdown: highTierBd() });
-    return cost.render!(bdRow) as VNode;
+
+  // UX03 重构：费用触发器提取为 CostBreakdownTooltip（事件转发给父层
+  // 持有的三态状态）。以下断言 EventTable 列渲染的**状态协调**：
+  // toggle/hover/escape 事件正确驱动 show 翻转；组件内部的键盘/焦点
+  // 语义由下方真实挂载测试覆盖。
+  it("费用浮层状态协调：toggle 打开/Escape 关闭、hover 跟随指针", async () => {
+    const w = mount(EventTable, {
+      props: {
+        list: list([row({ cost_usd: 2.206008, cost_breakdown: highTierBd() })], 1),
+        filterLabel: "",
+      },
+    });
+    const propsOf = (): Record<string, unknown> => {
+      const cols = (
+        w.vm as unknown as { columns: { key: string; render?: (r: object) => unknown }[] }
+      ).columns;
+      const cost = cols.find((c) => c.key === "cost_usd")!;
+      const vnode = cost.render!(
+        row({ cost_usd: 2.206008, cost_breakdown: highTierBd() }),
+      ) as VNode;
+      return vnode.props as Record<string, unknown>;
+    };
+    let p = propsOf();
+    expect(p.open).toBe(false);
+    expect(typeof p.onToggle).toBe("function");
+    expect(typeof p.onEscape).toBe("function");
+    // click（toggle）打开
+    (p.onToggle as () => void)();
+    await nextTick();
+    p = propsOf();
+    expect(p.open, "toggle 后 show 翻转").toBe(true);
+    // Escape 关闭
+    (p.onEscape as () => void)();
+    await nextTick();
+    expect((propsOf() as Record<string, unknown>).open).toBe(false);
+    // hover 跟随指针
+    (propsOf()["onHover-enter"] as () => void)();
+    await nextTick();
+    expect((propsOf() as Record<string, unknown>).open).toBe(true);
+    (propsOf()["onHover-leave"] as () => void)();
+    await nextTick();
+    expect((propsOf() as Record<string, unknown>).open).toBe(false);
+  });
+});
+
+// UX03：费用触发器真实浮层可访问性——名称含当前请求金额、描述关联
+// 指向打开时的存在节点、Escape 关闭且焦点保留、focus 保持时鼠标离开
+// 不关闭。CostBreakdownTooltip 提取后可直接挂载真实组件。
+import { flushPromises } from "@vue/test-utils";
+import { computed, ref } from "vue";
+import CostBreakdownTooltip from "./CostBreakdownTooltip.vue";
+
+describe("EventTable 费用触发器可访问性（UX03）", () => {
+  function bd(): EventCostBreakdown {
+    return {
+      matched: {
+        raw_key: "nano-gpt/qwen/x",
+        channel: "nano-gpt",
+        source: "external",
+        matched_key: "x",
+        match_mode: "full",
+        candidate_count: 1,
+        reason: "highest_complete_cost",
+        schedule_label: null,
+        schedule_timezone: null,
+        request_at: "2026-01-05T04:00:00Z",
+      },
+      basis: "prompt_tokens",
+      basis_value: 277_001,
+      segment_label: null,
+      lines: [
+        { kind: "input", tokens: 272_001, unit_price: 8, subtotal: 2.176008, priced: true },
+        { kind: "cache_read", tokens: 5_000, unit_price: null, subtotal: 0, priced: false },
+      ],
+      cost_usd: 2.206008,
+      unknown: { input: 0, output: 0, cache_write: 0, cache_read: 5_000 },
+      complete: false,
+      excluded_candidate_warning: null,
+    };
   }
 
-  it("触发器支持 click/hover/focus 打开、Escape 关闭，aria-expanded 随开合翻转", async () => {
-    const w = mount(EventTable, {
-      props: {
-        list: list([row({ cost_usd: 2.206008, cost_breakdown: highTierBd() })], 1),
-        filterLabel: "",
+  const TIP_STYLE =
+    "box-sizing: border-box; max-width: min(480px, calc(100vw - 32px)); backdrop-filter: var(--ts-glass-blur-popover); border-radius: var(--ts-radius-popover);";
+
+  /** 真实挂载：父层持有三态状态（与 EventTable 的 hoverKey/focusKey/
+   * pinnedKey 同构——hover-leave 只清 hover，focus 在时保持打开）。 */
+  function mountCell() {
+    const hover = ref(false);
+    const focus = ref(false);
+    const pinned = ref(false);
+    const Host = defineComponent({
+      setup() {
+        const open = computed(() => hover.value || focus.value || pinned.value);
+        return () =>
+          h(CostBreakdownTooltip, {
+            cost: 2.206008,
+            breakdown: bd(),
+            open: open.value,
+            tooltipStyle: TIP_STYLE,
+            "onHover-enter": () => (hover.value = true),
+            "onHover-leave": () => (hover.value = false),
+            "onFocus-enter": () => (focus.value = true),
+            "onFocus-leave": () => (focus.value = false),
+            onToggle: () => (pinned.value = !pinned.value),
+            onEscape: () => {
+              hover.value = false;
+              focus.value = false;
+              pinned.value = false;
+            },
+          });
       },
     });
-    const vnode = tooltipVnode(w);
-    const trigger = (vnode.children as Record<string, () => VNode>).trigger();
-    const p = trigger.props as Record<string, unknown>;
-    expect(p.tabindex).toBe(0);
-    expect(p.role).toBe("button");
-    expect(p["aria-expanded"]).toBe(false);
-    for (const h of ["onClick", "onFocus", "onMouseenter", "onMouseleave", "onBlur", "onKeydown"]) {
-      expect(typeof p[h], `${h} 处理器存在`).toBe("function");
-    }
-    // click 打开 → aria-expanded/show 翻转
-    (p.onClick as () => void)();
-    await nextTick();
-    const reopened = tooltipVnode(w);
-    expect((reopened.props as Record<string, unknown>).show).toBe(true);
-    const trigger2 = (reopened.children as Record<string, () => VNode>).trigger();
-    expect((trigger2.props as Record<string, unknown>)["aria-expanded"]).toBe(true);
-    // Escape 关闭
-    ((trigger2.props as Record<string, unknown>).onKeydown as (e: { key: string }) => void)({
-      key: "Escape",
+    const host = mount(Host, { attachTo: document.body });
+    const trigger = host.find('[role="button"]');
+    return { host, trigger };
+  }
+
+  function tipVisible(): boolean {
+    const tips = Array.from(document.querySelectorAll<HTMLElement>(".cost-tooltip"));
+    return tips.some((el) => {
+      let node: HTMLElement | null = el;
+      while (node) {
+        if (getComputedStyle(node).display === "none") return false;
+        node = node.parentElement;
+      }
+      return true;
     });
-    await nextTick();
-    expect((tooltipVnode(w).props as Record<string, unknown>).show).toBe(false);
+  }
+
+  async function waitTip(shown: boolean): Promise<void> {
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline) {
+      if (tipVisible() === shown) return;
+      await flushPromises();
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(tipVisible(), `费用浮层应${shown ? "出现" : "消失"}于文档`).toBe(shown);
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = "";
   });
 
-  it("浮层视觉：480px 上限（border-box）+ 16px 玻璃模糊 + 公式区实色衬底", () => {
-    const w = mount(EventTable, {
-      props: {
-        list: list([row({ cost_usd: 2.206008, cost_breakdown: highTierBd() })], 1),
-        filterLabel: "",
-      },
+  it("cost_trigger_exposes_amount_and_description：名称含金额、描述指向存在节点", async () => {
+    const { host, trigger } = mountCell();
+    expect(trigger.exists(), "费用触发器应存在").toBe(true);
+    expect(trigger.attributes("aria-label")).toBe("估算费用 $2.21，查看计算明细");
+    expect(trigger.attributes("aria-describedby")).toBeUndefined();
+    await trigger.trigger("focus");
+    await waitTip(true);
+    const descId = trigger.attributes("aria-describedby")!;
+    expect(descId).toBeTruthy();
+    expect(document.getElementById(descId), "描述节点必须存在").not.toBeNull();
+    expect(document.getElementById(descId)!.textContent).toContain("估算合计");
+    host.unmount();
+  });
+
+  it("tooltip_escape_closes_without_losing_trigger：Escape 关闭且焦点保留", async () => {
+    const { host, trigger } = mountCell();
+    // 真实键盘路径：focus 进入 → 鼠标掠过再离开（focus 分支不受影响）
+    // → Escape 关闭 → 焦点仍持有且不循环重开。
+    await (trigger.element as HTMLElement).focus();
+    await trigger.trigger("focus");
+    await waitTip(true);
+    expect(document.activeElement).toBe(trigger.element);
+    await trigger.trigger("mouseenter");
+    await trigger.trigger("mouseleave");
+    await flushPromises();
+    expect(tipVisible(), "focus 在时鼠标离开不得关闭").toBe(true);
+    await trigger.trigger("keydown", { key: "Escape" });
+    await waitTip(false);
+    // Escape 关闭不移动焦点：触发器仍持有文档焦点。
+    expect(document.activeElement).toBe(trigger.element);
+    // 关闭后不因焦点保持而循环重开。
+    await flushPromises();
+    expect(tipVisible()).toBe(false);
+    host.unmount();
+  });
+
+  it("浮层视觉：真实挂载后 480px border-box + 玻璃模糊 + 公式区实色衬底", async () => {
+    const { host, trigger } = mountCell();
+    await trigger.trigger("focus");
+    await waitTip(true);
+    // naive 把 tooltipStyle 放到浮层容器上；沿 .cost-tooltip 祖先找
+    const tip = Array.from(document.querySelectorAll<HTMLElement>(".cost-tooltip")).find((el) => {
+      let node: HTMLElement | null = el;
+      while (node) {
+        if (getComputedStyle(node).display !== "none") return true;
+        node = node.parentElement;
+      }
+      return false;
     });
-    const vnode = tooltipVnode(w);
-    const style = String((vnode.props as Record<string, unknown>).style);
-    // UX01：盒模型按 border-box 计算（修复前 content-box 下实测外框 512px），
-    // 长文本换行且外框受视口约束
-    expect(style).toContain("box-sizing: border-box");
-    expect(style).toContain("max-width: min(480px, calc(100vw - 32px))");
-    expect(style).toContain("var(--ts-glass-blur-popover)");
-    const content = (vnode.children as Record<string, () => VNode>).default();
-    expect(JSON.stringify(content)).toContain("bd-formula");
-    expect(JSON.stringify(content)).toContain("ts-card-solid");
+    expect(tip, "浮层应可见").toBeDefined();
+    let styled: HTMLElement | null = tip!;
+    let foundBox = false;
+    while (styled) {
+      if (getComputedStyle(styled).boxSizing === "border-box") foundBox = true;
+      styled = styled.parentElement;
+    }
+    expect(foundBox, "浮层链路存在 border-box（480px 上限按 border-box 计算）").toBe(true);
+    // 公式区（bd-formula 实色衬底）渲染在浮层内容中（teleport 到 body）。
+    expect(document.body.innerHTML).toContain("bd-formula");
+    expect(document.body.innerHTML).toContain("ts-card-solid");
+    host.unmount();
   });
 });

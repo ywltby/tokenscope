@@ -4,7 +4,7 @@ import { NButton, NDataTable, NTag, NTooltip, type DataTableColumn } from "naive
 import { AGENT_LABEL, fmtNum, projectLabel, type EventList } from "../types";
 import { formatMoney } from "../lib/formatMoney";
 import { tokenBucketLabel } from "../lib/tokenDisplay";
-import { formatCostBreakdownRows } from "../lib/costBreakdown";
+import CostBreakdownTooltip from "./CostBreakdownTooltip.vue";
 
 const props = defineProps<{
   list: EventList;
@@ -17,7 +17,18 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ (e: "load-more"): void; (e: "clear-filter"): void }>();
 /// 设计系统 Task 6：当前展开的费用 tooltip（行 cursor 作为键）。
-const openKey = ref<string | null>(null);
+// UX03：费用浮层三态（hover/focus/pinned）——hover 随指针、focus 随
+// 键盘焦点（focus 在时鼠标离开不关闭）、click/Enter/Space 固定切换；
+// Escape 一律关闭。openKey = 当前应显示的行。
+const hoverKey = ref<string | null>(null);
+const focusKey = ref<string | null>(null);
+const pinnedKey = ref<string | null>(null);
+const openKey = computed(() => hoverKey.value ?? focusKey.value ?? pinnedKey.value);
+function closeRowTip(key: string): void {
+  if (hoverKey.value === key) hoverKey.value = null;
+  if (focusKey.value === key) focusKey.value = null;
+  if (pinnedKey.value === key) pinnedKey.value = null;
+}
 const remaining = () => props.list.total - props.list.rows.length;
 
 // UX07：请求金额走单一入口（含 $、微小非零保护）；列头不再带 $。
@@ -96,111 +107,49 @@ const columns = computed<DataTableColumn[]>(() => [
       const c = row.cost_usd;
       const bd = row.cost_breakdown;
       const key = row.cursor;
-      // c 在此分支已非空（下方 !bd 分支共用 trigger 前置判断）
-      const trigger =
-        c == null
-          ? () =>
-              h(
-                NTag,
-                { size: "small", bordered: false, type: "warning" },
-                { default: () => "未知" },
-              )
-          : () => h("span", { style: "cursor: help" }, fmtPrice(c));
-      // 设计系统 Task 6：breakdown 存在时展示"事实→公式→结果→来源"；
-      // 触发器支持 hover/focus/click，Escape 与点击外部关闭；
-      // 旧/异常响应（有价无明细）保持原样不崩溃。
-      if (!bd) return trigger();
+      if (c == null) {
+        // 未知价格：明确状态标签，无浮层（不强转 null 成数字）。
+        return h(
+          NTag,
+          { size: "small", bordered: false, type: "warning" },
+          { default: () => "未知" },
+        );
+      }
+      // 设计系统 Task 6 / UX03：breakdown 存在时展示"事实→公式→结果→
+      // 来源"（提取为 CostBreakdownTooltip 组件——可访问交互与真实浮层
+      // 测试内聚）；旧/异常响应（有价无明细）保持金额原样不崩溃。
+      if (!bd) return h("span", { class: "ts-num" }, fmtPrice(c));
       const open = openKey.value === key;
-      const openIt = () => {
-        openKey.value = key;
-      };
-      const closeIt = () => {
-        if (openKey.value === key) openKey.value = null;
-      };
-      return h(
-        NTooltip,
-        {
-          trigger: "manual",
-          placement: "left",
-          show: open,
-          // 任务 6：elevated 玻璃浮层——480px 上限 + 16px 模糊 + 12px 圆角
-          //（背景色来自 naiveTheme Tooltip.color = --ts-surface-elevated 85%）
-          // UX01：盒模型按 border-box 计算，长文本换行；外框宽度受视口约束
-          //（修复前 content-box 下 480 + padding + border 实测 512px）
-          style:
-            "box-sizing: border-box; max-width: min(480px, calc(100vw - 32px)); backdrop-filter: var(--ts-glass-blur-popover); -webkit-backdrop-filter: var(--ts-glass-blur-popover); border-radius: var(--ts-radius-popover);",
-          onClickoutside: closeIt,
+      return h(CostBreakdownTooltip, {
+        cost: c,
+        breakdown: bd,
+        open,
+        // 任务 6：elevated 玻璃浮层——480px 上限 + 16px 模糊 + 12px 圆角
+        //（背景色来自 naiveTheme Tooltip.color = --ts-surface-elevated 85%）
+        // UX01：盒模型按 border-box 计算，长文本换行；外框宽度受视口约束
+        tooltipStyle:
+          "box-sizing: border-box; max-width: min(480px, calc(100vw - 32px)); backdrop-filter: var(--ts-glass-blur-popover); -webkit-backdrop-filter: var(--ts-glass-blur-popover); border-radius: var(--ts-radius-popover);",
+        "onHover-enter": () => {
+          hoverKey.value = key;
         },
-        {
-          trigger: () =>
-            h(
-              "span",
-              {
-                style: "cursor: help",
-                tabindex: 0,
-                role: "button",
-                "aria-label": "费用计算明细",
-                "aria-expanded": open,
-                class: "ts-focusable",
-                onClick: openIt,
-                onKeydown: (e: KeyboardEvent) => {
-                  if (e.key === "Escape") closeIt();
-                },
-                onMouseenter: openIt,
-                onMouseleave: closeIt,
-                onFocus: openIt,
-                onBlur: closeIt,
-              },
-              fmtPrice(c as number),
-            ),
-          default: () => {
-            // 事实 → 公式 → 结果 → 来源：divider 分段渲染，公式段（第 2 段）
-            // 套 .ts-card-solid 实色衬底保证可读性（DESIGN.md §5 费用明细）。
-            const rows = formatCostBreakdownRows(bd);
-            const segments: (typeof rows)[] = [];
-            let cur: typeof rows = [];
-            for (const r of rows) {
-              if (r.divider) {
-                segments.push(cur);
-                cur = [];
-              } else {
-                cur.push(r);
-              }
-            }
-            segments.push(cur);
-            const renderRow = (row2: (typeof rows)[number]) => {
-              if (row2.detail != null) {
-                return h(
-                  "div",
-                  { class: ["bd-row", row2.unknown ? "bd-unknown" : ""] },
-                  `${row2.label} ${row2.detail}`,
-                );
-              }
-              return h(
-                "div",
-                {
-                  class: ["bd-row", row2.unknown ? "bd-unknown" : "", row2.total ? "bd-total" : ""],
-                },
-                [
-                  h("span", { class: "bd-label" }, row2.label),
-                  h("span", { class: "bd-value ts-num" }, row2.value ?? ""),
-                ],
-              );
-            };
-            return h(
-              "div",
-              { class: "cost-tooltip" },
-              segments.map((seg, si) =>
-                h(
-                  "div",
-                  { class: si === 1 ? "bd-formula ts-card-solid" : undefined },
-                  seg.map(renderRow),
-                ),
-              ),
-            );
-          },
+        "onHover-leave": () => {
+          hoverKey.value = null;
         },
-      );
+        "onFocus-enter": () => {
+          focusKey.value = key;
+        },
+        "onFocus-leave": () => {
+          focusKey.value = null;
+        },
+        onToggle: () => {
+          if (pinnedKey.value === key) {
+            pinnedKey.value = null;
+          } else {
+            pinnedKey.value = key;
+          }
+        },
+        onEscape: () => closeRowTip(key),
+      });
     },
   },
 ]);

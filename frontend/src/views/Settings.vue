@@ -12,7 +12,6 @@ import {
   NSpin,
   NSwitch,
   NTag,
-  NTooltip,
   useMessage,
   type DataTableColumn,
 } from "naive-ui";
@@ -28,6 +27,7 @@ import {
 } from "../types";
 import { TZ_OPTIONS, useTimezone } from "../composables/timezone";
 import { fmtPriceOrUnknown, formatTieredPricing } from "../lib/tieredPrice";
+import HelpTooltip from "../components/HelpTooltip.vue";
 
 const props = defineProps<{ refreshKey: number }>();
 const msg = useMessage();
@@ -240,20 +240,36 @@ function priceCell(r: object, pick: (e: PricingEntry) => RateSpecView): VNode {
     ? `OpenRouter：输入 ${fmtPriceOrUnknown(or.input)} · 输出 ${fmtPriceOrUnknown(or.output)} · 缓存写 ${fmtPriceOrUnknown(or.cache_write)} · 缓存读 ${fmtPriceOrUnknown(or.cache_read)}`
     : "OpenRouter：未知价格（无对应模型）";
   const unknown = pick(e) == null;
-  return h(NTooltip, null, {
-    trigger: () =>
-      h(
-        "span",
-        { style: unknown ? "cursor: help; color: var(--ts-warning)" : "cursor: help" },
-        fmtPriceOrUnknown(pick(e)),
-      ),
-    default: () =>
-      h("div", { style: "font-size: 12px; line-height: 1.8" }, [
-        h("div", priceSourceLine(e)),
-        h("div", orLine),
-        or?.name ? h("div", { style: "opacity: 0.7" }, `模型：${or.name}`) : null,
-      ]),
-  });
+  // UX03：hover/focus/click/Enter/Space 可读、Escape 关闭且焦点不离开
+  // 触发器；aria-describedby 指向打开时的内容节点。说明文字用语义色。
+  return h(
+    HelpTooltip,
+    { label: `${e.prefix} ${columnLabelOf(pick)}单价说明` },
+    {
+      trigger: () =>
+        h(
+          "span",
+          { style: unknown ? "color: var(--ts-warning)" : undefined },
+          fmtPriceOrUnknown(pick(e)),
+        ),
+      default: () =>
+        h("div", { style: "font-size: 12px; line-height: 1.8" }, [
+          h("div", priceSourceLine(e)),
+          h("div", orLine),
+          or?.name
+            ? h("div", { style: "color: var(--ts-text-secondary)" }, `模型：${or.name}`)
+            : null,
+        ]),
+    },
+  );
+}
+
+/// 由 pick 函数反查列语义（aria-label 用）。
+function columnLabelOf(pick: (e: PricingEntry) => RateSpecView): string {
+  if (pick === ((e: PricingEntry) => e.input)) return "输入";
+  if (pick === ((e: PricingEntry) => e.output)) return "输出";
+  if (pick === ((e: PricingEntry) => e.cache_write)) return "缓存写";
+  return "缓存命中";
 }
 
 /// Task 8：模型前缀列——有分段/峰谷规则时悬浮展开档位明细。
@@ -261,23 +277,23 @@ function prefixCell(r: object): VNode {
   const e = asEntry(r);
   const lines = formatTieredPricing(e);
   if (!lines.length) return h("span", e.prefix);
+  // UX03：档位明细同样走可访问浮层（focus/click/Escape 全路径）。
   return h(
-    NTooltip,
-    { style: "max-width: 460px" },
+    HelpTooltip,
+    { label: `${e.prefix} 档位计价明细`, contentLabel: "档位计价明细" },
     {
-      trigger: () =>
-        h("span", { style: "cursor: help" }, [
-          e.prefix,
-          h(
-            NTag,
-            { size: "tiny", bordered: false, type: "info", style: "margin-left: 6px" },
-            { default: () => "分段" },
-          ),
-        ]),
+      trigger: () => [
+        e.prefix,
+        h(
+          NTag,
+          { size: "tiny", bordered: false, type: "info", style: "margin-left: 6px" },
+          { default: () => "分段" },
+        ),
+      ],
       default: () =>
         h(
           "div",
-          { style: "font-size: 12px; line-height: 1.8; white-space: normal" },
+          { style: "white-space: normal" },
           lines.map((t) => h("div", t)),
         ),
     },
@@ -332,6 +348,9 @@ const priceColumns = computed<DataTableColumn[]>(() => [
 const asEntry = (r: object): PricingEntry => r as unknown as PricingEntry;
 // 同前缀可能同时存在 models.dev/openrouter/外置行，键必须含来源
 const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}`;
+
+// UX03：暴露价格列定义供真实浮层测试触达（NDataTable 测试环境不渲染行）。
+defineExpose({ priceColumns });
 </script>
 
 <template>
