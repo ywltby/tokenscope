@@ -25,6 +25,10 @@
 
 ## 当前状态
 
+- **2026-10-08 复核修复计划待执行（基线 `22c9c26`，优先于下方历史声明）**：[复核遗留缺陷与验收补齐计划](active/2026-10-08-recheck-remediation.md) 已成文，**本次只写计划，未修产品代码**。SF04 的跨启动身份/旧游标/过期重试/内存预算，UX06 的设置恢复/晚到响应/同步重试，UX03 的列名称/键盘/外部关闭，UX07 的单价精度需重新打开；UX10 的24场景缺少必需业务与交互断言。RC01–RC11 按查询→设置→预算→可访问性/精度→OpenRouter数字价格兼容→自动矩阵→隔离原生验收执行。已有门禁通过与局部真机冒烟继续有效，但不能推出计划完成；生产 CSP、原生首帧/窗口背景、100%/125%/150% 系统缩放仍待验，D5安装验收继续后延。
+
+> 下方保留历史执行记录；其中“已全部实现”“仅剩 D5”等为当时声明，已由上方复核修正，不作为当前完成度判断。
+
 - **2026-10-08 安全/数据一致性与 UI/UX 修复计划实现完毕（基线 `9f86fd4` → `698a17f`）**：[安全、数据一致性与 UI/UX 修复计划](active/2026-10-07-ui-ux-review-remediation.md) 的 **SF01–SF11 与 UX00–UX09 已全部实现**（SF 侧：tooltip 安全输出 + 最小生产 CSP、设置读改写事务、价格读取失败显式降级、查询快照冻结事件/时间/价格、预设日期双边界、日志初始化可失败、价格三态、受检算术、重叠目录拒绝、有效候选一致、文档口径统一；UX 侧：真实组件量测入口、浮层材质/表格排版/语义色映射、分段控件语义名称与真实焦点、日期跨年标签、图表实例生命周期、设置首载错误恢复、金额与 token 单一入口、浮层可访问性、设置页层次与目录信息、首帧主题）。自动矩阵 `check-ui-contracts.mjs --phase verify` 24 场景 0 契约违例 + `prepaint_theme_matches_preference` 6 场景；前端 245 测试、typecheck、format、build 与 Rust 双 crate 门禁全绿。**仍待验**：100%/125%/150% 系统缩放、原生 Tauri 冷启动与窗口背景、D5 安装验收——不伪造通过。验收产物移至仓库根 `qa-artifacts/`（已 gitignore，本地产物不入库）。
 
 - **2026-10-07 技术审查合并入同一修复计划（基线 `3f036bb`）**：[安全、数据一致性与 UI/UX 修复计划](active/2026-10-07-ui-ux-review-remediation.md) 新增 SF01–SF11，先处理 tooltip HTML 注入与设置丢更新，再修外置价失败缓存、冻结查询/分页、预设日期上界、日志启动降级、价格三态、数值溢出、重叠目录与有效价格状态，最后同步当前文档。保留原 UX00–UX10 并明确依赖；不推翻最高候选估算/Codex 去重，不重写技术栈。新增问题已核对源码/依赖，运行时故障复现按任务执行；**本次仍仅修改计划及索引，产品修复待执行**。
@@ -55,6 +59,8 @@
 
 | 计划 | 状态 | 备注 |
 | --- | --- | --- |
+| [active/2026-10-08-recheck-remediation.md](active/2026-10-08-recheck-remediation.md) | 待执行 2026-10-08 | RC01–RC11：修复复核遗留、补自动化和隔离原生验收；本次仅计划 |
+| [active/2026-10-07-ui-ux-review-remediation.md](active/2026-10-07-ui-ux-review-remediation.md) | 复核后重新打开 | SF04/UX03/UX06/UX07 存在缺陷，UX10 覆盖不足；后续由 RC01–RC11 承接 |
 | [archive/implemented/2026-10-04-m11-pricing-cache-autosync.md](archive/implemented/2026-10-04-m11-pricing-cache-autosync.md) | ✅ 完成 2026-10-04 | M11：价格索引持久化 + 进程内缓存 + 24h 自动同步；索引 8,467 条命中后 0.86s |
 | [archive/implemented/2026-10-04-m10-date-range.md](archive/implemented/2026-10-04-m10-date-range.md) | ✅ 完成 2026-10-04 | M10：时间区间选择（GUI daterange + CLI --from/--to）；真实数据闭区间/互斥/端点验收通过 |
 | [archive/implemented/2026-10-04-m9-modelsdev-source.md](archive/implemented/2026-10-04-m9-modelsdev-source.md) | ✅ 完成 2026-10-04 | M9：models.dev 主源 + OpenRouter 备份（当时为四层合并含内置）；真实同步 7,957+466 条，unknown 清零 |
