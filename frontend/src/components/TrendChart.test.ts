@@ -1,14 +1,21 @@
-// 设计系统 Task 4：TrendChart 主题接入、高度上限与可访问摘要。
+// 设计系统 Task 4 + UX05：TrendChart 主题接入、高度上限、可访问摘要，
+// 以及实例生命周期与数据更新分离（不因无关父级更新重建；同维度 merge 保留
+// zoom；维度切换完整替换；主题切换一次 dispose/init；0 类别不建实例）。
 // echarts 全 mock（happy-dom 无 canvas），ResizeObserver 打桩。
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
+import { defineComponent, h, nextTick, ref } from "vue";
 
-const setOption = vi.fn();
-const dispose = vi.fn();
-const resize = vi.fn();
-vi.mock("echarts", () => ({
-  init: vi.fn(() => ({ setOption, dispose, resize })),
-}));
+const echartsMock = vi.hoisted(() => {
+  const setOption = vi.fn();
+  const dispose = vi.fn();
+  const resize = vi.fn();
+  const getOption = vi.fn((): unknown => ({}));
+  const init = vi.fn(() => ({ setOption, dispose, resize, getOption }));
+  return { setOption, dispose, resize, getOption, init };
+});
+
+vi.mock("echarts", () => ({ init: echartsMock.init }));
 
 vi.stubGlobal(
   "ResizeObserver",
@@ -21,6 +28,7 @@ vi.stubGlobal(
 
 import TrendChart from "./TrendChart.vue";
 import { chartTokens } from "../styles/chartTheme";
+import { useTheme } from "../composables/theme";
 import type { Group } from "../types";
 
 function group(key: string, input: number): Group {
@@ -35,10 +43,19 @@ function group(key: string, input: number): Group {
   };
 }
 
+const setOption = echartsMock.setOption;
+const init = echartsMock.init;
+const dispose = echartsMock.dispose;
+
 beforeEach(() => {
   setOption.mockClear();
   dispose.mockClear();
+  echartsMock.resize.mockClear();
+  echartsMock.getOption.mockClear();
+  echartsMock.getOption.mockReturnValue({});
+  init.mockClear();
   localStorage.removeItem("tokenscope-theme");
+  useTheme().setPreference("system");
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -65,8 +82,8 @@ describe("TrendChart（设计系统 Task 4）", () => {
       yAxis: { data: string[] };
     };
     expect(opt.dataZoom).toBeDefined();
-    const h = Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.height, 10);
-    expect(h).toBeLessThanOrEqual(560);
+    const h2 = Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.height, 10);
+    expect(h2).toBeLessThanOrEqual(560);
     w.unmount();
   });
 
@@ -85,15 +102,21 @@ describe("TrendChart（设计系统 Task 4）", () => {
     w.unmount();
   });
 
-  it("主题切换时销毁并重建实例（不残留旧主题）", async () => {
+  it("主题切换时销毁并重建实例一次（不残留旧主题）", async () => {
     const w = mount(TrendChart, { props: { groups: [group("a", 1)], by: "day" } });
     await flushPromises();
-    localStorage.setItem("tokenscope-theme", "dark");
-    window.dispatchEvent(new Event("change"));
-    // 直接改 composable 的解析值较难（单例）——用 localStorage + 手动触发
-    // matchMedia 不便；退而验证 unmount 时 dispose（重建路径复用同一分支）。
+    expect(init).toHaveBeenCalledTimes(1);
+    const disposeBefore = dispose.mock.calls.length;
+    useTheme().setPreference("dark");
+    await nextTick();
+    await flushPromises();
+    // 主题切换：一次 dispose + 一次 init（重建，不残留旧主题轴/文字色）
+    expect(dispose.mock.calls.length).toBe(disposeBefore + 1);
+    expect(init).toHaveBeenCalledTimes(2);
+    const last = setOption.mock.calls.at(-1)![0] as { textStyle?: unknown; color: string[] };
+    expect(last.color).toEqual(chartTokens("dark").series.map((s) => s.color));
+    useTheme().setPreference("system");
     w.unmount();
-    expect(dispose).toHaveBeenCalled();
   });
 });
 
@@ -130,5 +153,140 @@ describe("TrendChart 卡片化（设计系统 Task 5）", () => {
     };
     expect(optModel.series[3].itemStyle?.borderRadius).toEqual([0, 4, 4, 0]);
     wModel.unmount();
+  });
+});
+
+describe("TrendChart 生命周期与数据更新（UX05）", () => {
+  it("unrelated_parent_update_does_not_touch_chart：无关父级更新不触发 init/dispose/setOption", async () => {
+    const tick = ref(0);
+    const groups = ref<Group[]>([group("a", 1)]);
+    const w = mount(
+      defineComponent({
+        setup: () => () =>
+          h("div", [
+            h(TrendChart, { groups: groups.value, by: "day" }),
+            h("i", { class: "tick" }, String(tick.value)),
+          ]),
+      }),
+    );
+    await flushPromises();
+    expect(init).toHaveBeenCalledTimes(1);
+    const setOptionCount = setOption.mock.calls.length;
+    const disposeCount = dispose.mock.calls.length;
+
+    tick.value = 1; // 无关状态变化 → 父级重渲染，但 groups 身份不变
+    await nextTick();
+    await flushPromises();
+
+    expect(init).toHaveBeenCalledTimes(1);
+    expect(dispose.mock.calls.length).toBe(disposeCount);
+    expect(setOption.mock.calls.length).toBe(setOptionCount);
+    expect(w.find(".tick").text()).toBe("1");
+    w.unmount();
+  });
+
+  it("new_groups_update_existing_instance：新数据更新现有实例（merge，不重建）", async () => {
+    const w = mount(TrendChart, { props: { groups: [group("a", 1)], by: "model" } });
+    await flushPromises();
+    expect(init).toHaveBeenCalledTimes(1);
+    const disposeCount = dispose.mock.calls.length;
+    setOption.mockClear();
+
+    await w.setProps({ groups: [group("a", 9), group("b", 5)] });
+    await flushPromises();
+
+    // 不重建实例
+    expect(init).toHaveBeenCalledTimes(1);
+    expect(dispose.mock.calls.length).toBe(disposeCount);
+    // 数据更新走 setOption(merge)
+    expect(setOption).toHaveBeenCalledTimes(1);
+    expect(setOption.mock.calls[0][1]).toEqual({ notMerge: false });
+    const opt = setOption.mock.calls[0][0] as {
+      series: { id: string; data: number[] }[];
+      yAxis: { data: string[] };
+    };
+    expect(opt.yAxis.data).toEqual(["a", "b"]);
+    expect(opt.series[0].data).toEqual([9, 5]);
+    // 摘要随新数据更新
+    await w.findAll("button").find((b) => b.text().includes("数据摘要"))!.trigger("click");
+    expect(w.find(".chart-summary").text()).toContain("合计 9");
+    w.unmount();
+  });
+
+  it("dimension_switch_removes_obsolete_axes：维度切换完整替换 option", async () => {
+    const w = mount(TrendChart, { props: { groups: [group("2026-10-01", 1)], by: "day" } });
+    await flushPromises();
+    setOption.mockClear();
+
+    await w.setProps({ groups: [group("m1", 3)], by: "model" });
+    await flushPromises();
+
+    expect(setOption).toHaveBeenCalledTimes(1);
+    // notMerge:true → 清掉旧轴 / series / dataZoom 残留
+    expect(setOption.mock.calls[0][1]).toEqual({ notMerge: true });
+    const opt = setOption.mock.calls[0][0] as { xAxis: { type: string }; yAxis: { type: string } };
+    // 日维度 x=category/y=value；模型维度相反（x=value/y=category）
+    expect(opt.xAxis.type).toBe("value");
+    expect(opt.yAxis.type).toBe("category");
+    w.unmount();
+  });
+
+  it("same_dimension_refresh_preserves_zoom：同维度刷新保留 zoom（merge，不重建）", async () => {
+    const many = Array.from({ length: 20 }, (_, i) => group(`model-${i}`, 20 - i));
+    const w = mount(TrendChart, { props: { groups: many, by: "model" } });
+    await flushPromises();
+    expect(init).toHaveBeenCalledTimes(1);
+    const disposeCount = dispose.mock.calls.length;
+    setOption.mockClear();
+
+    await w.setProps({ groups: many.map((g2, i) => group(g2.key, i)) });
+    await flushPromises();
+
+    expect(init).toHaveBeenCalledTimes(1);
+    expect(dispose.mock.calls.length).toBe(disposeCount);
+    expect(setOption.mock.calls[0][1]).toEqual({ notMerge: false });
+    w.unmount();
+  });
+
+  it("0 类别不初始化实例（父级另给明确空状态）", async () => {
+    const w = mount(TrendChart, { props: { groups: [], by: "model" } });
+    await flushPromises();
+    expect(init).not.toHaveBeenCalled();
+    expect(w.find(".chart-state").text()).toContain("暂无数据");
+    w.unmount();
+  });
+
+  it("unmount 释放实例（dispose 调用一次）", async () => {
+    const w = mount(TrendChart, { props: { groups: [group("a", 1)], by: "day" } });
+    await flushPromises();
+    w.unmount();
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("SF01 回归：所有 setOption 路径的 tooltip 仍以 textContent 输出不可信标签", async () => {
+    const payload = `<img src=x onerror=alert(1)>sentinel-9f3`;
+    const w = mount(TrendChart, { props: { groups: [group(payload, 7)], by: "model" } });
+    await flushPromises();
+    const opt = setOption.mock.calls[0][0] as {
+      tooltip: { formatter: (p: unknown) => HTMLElement };
+    };
+    const node = opt.tooltip.formatter([{ dataIndex: 0, name: payload, seriesName: "输入", value: 7 }]);
+    expect(node).toBeInstanceOf(HTMLElement);
+    expect(node.querySelector("img")).toBeNull();
+    expect(node.textContent).toContain(payload);
+
+    // 同维度数据更新路径（merge）也必须使用同一安全 formatter
+    setOption.mockClear();
+    await w.setProps({ groups: [group(payload, 8), group("b", 1)] });
+    await flushPromises();
+    const opt2 = setOption.mock.calls.at(-1)![0] as {
+      tooltip: { formatter: (p: unknown) => HTMLElement };
+    };
+    const node2 = opt2.tooltip.formatter([
+      { dataIndex: 0, name: payload, seriesName: "输入", value: 8 },
+    ]);
+    expect(node2.querySelector("img")).toBeNull();
+    expect(node2.textContent).toContain(payload);
+    w.unmount();
   });
 });

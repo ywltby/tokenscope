@@ -10,7 +10,8 @@ const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 import Dashboard from "./Dashboard.vue";
-import type { EventList, Group, SummaryReport } from "../types";
+import TrendChart from "../components/TrendChart.vue";
+import type { Dim, EventList, Group, SummaryReport } from "../types";
 
 function group(key: string, input: number): Group {
   return {
@@ -911,5 +912,70 @@ describe("Dashboard 页头与通知（设计系统 Task 3）", () => {
     expect(notices.length).toBeGreaterThan(0);
     expect(notices.some((n) => n.text().includes("汇总加载失败"))).toBe(true);
     expect(w.find(".n-alert").exists()).toBe(false);
+  });
+});
+
+// UX05：图表实例生命周期与类别展示——父级用 computed 缓存真实类别（排除
+// 合计），以真实类别数判断是否绘制；无关父级更新不改变 groups 身份。
+describe("Dashboard 图表类别（UX05）", () => {
+  function reportWith(count: number, by: Dim): SummaryReport {
+    const real = Array.from({ length: count }, (_, i) => group(`${by}-${i}`, 10));
+    const total = group("合计", 10 * count);
+    return {
+      ...summaryA,
+      by,
+      // 后端契约：groups 含合计行（即使没有任何真实类别）
+      groups: [...real, total],
+      totals: total,
+    };
+  }
+
+  function mountWith(report: SummaryReport): VueWrapper {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(report);
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    return mountDashboard();
+  }
+
+  it("zero_one_two_categories_have_explicit_rendering：各维度 0/1/2 类别渲染明确", async () => {
+    const dims: Dim[] = ["day", "model", "project", "agent"];
+    for (const dim of dims) {
+      // 0 个真实类别（仅有合计）→ 不绘制图表，给明确空状态
+      const w0 = mountWith(reportWith(0, dim));
+      await flushPromises();
+      expect(w0.findComponent(TrendChart).exists(), `${dim} 0 类别不应绘制图表`).toBe(false);
+      expect(w0.find(".chart-empty").exists(), `${dim} 0 类别应有明确空状态`).toBe(true);
+      w0.unmount();
+
+      for (const n of [1, 2]) {
+        const w = mountWith(reportWith(n, dim));
+        await flushPromises();
+        const chart = w.findComponent(TrendChart);
+        expect(chart.exists(), `${dim} ${n} 类别应绘制图表`).toBe(true);
+        // 传给图表的是真实类别（不含合计）
+        expect((chart.props("groups") as Group[]).length).toBe(n);
+        expect((chart.props("groups") as Group[]).every((x) => x.key !== "合计")).toBe(true);
+        w.unmount();
+      }
+    }
+  });
+
+  it("chart_groups_identity_is_stable_across_unrelated_updates：无关更新不改 groups 身份", async () => {
+    mockOk();
+    const w = mountDashboard();
+    await flushPromises();
+    const before = w.findComponent(TrendChart).props("groups");
+    expect(Array.isArray(before)).toBe(true);
+    // 无关状态变化触发父级重渲染：不得生成新数组（否则图表被无谓重建）
+    state(w)["showSourceDetails"] = true;
+    await nextTick();
+    const after = w.findComponent(TrendChart).props("groups");
+    expect(after).toBe(before);
+    w.unmount();
   });
 });

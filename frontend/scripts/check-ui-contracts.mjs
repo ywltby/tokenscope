@@ -287,6 +287,34 @@ const GOTO_SETTINGS = () => {
   return { ok: true };
 };
 
+/** UX05：打开图表文字摘要并读取行（类别一致性验收）。 */
+const OPEN_CHART_SUMMARY = () => {
+  const btn = document.querySelector(".trend-card .summary-toggle");
+  if (!btn) return { available: false };
+  if (btn.getAttribute("aria-expanded") !== "true") btn.click();
+  return { available: true };
+};
+
+const READ_CHART_SUMMARY = () => {
+  const lines = [...document.querySelectorAll(".trend-card .chart-summary .summary-line")].map(
+    (l) => l.textContent ?? "",
+  );
+  return {
+    lines,
+    hasCanvas: !!document.querySelector(".trend-card .chart-canvas"),
+    stateText: document.querySelector(".trend-card .chart-state")?.textContent ?? "",
+  };
+};
+
+const CLICK_SEGMENT = (label) => {
+  const radio = [...document.querySelectorAll(".ts-segmented-item")].find(
+    (r) => r.textContent.trim() === label,
+  );
+  if (!radio) return { ok: false };
+  radio.click();
+  return { ok: true };
+};
+
 // ── 具名契约检查（对 measurements 求值，verify 阶段断言） ──────────
 function buildChecks(m, ctx) {
   const checks = [];
@@ -388,6 +416,32 @@ function buildChecks(m, ctx) {
     ]);
   }
 
+  // UX05：切维度 / 切主题后类别与摘要一致
+  if (ctx.fixture === "normal" || ctx.fixture === "multi-category") {
+    const c = m.chart;
+    const after = c?.after;
+    const afterTheme = c?.afterTheme;
+    const listed = (r) => (r?.lines ?? []).filter((l) => !l.endsWith("汇总："));
+    const expected = ctx.expectedCategories ?? [];
+    const pass =
+      !!after &&
+      !!afterTheme &&
+      after.hasCanvas &&
+      afterTheme.hasCanvas &&
+      expected.length > 0 &&
+      expected.every((name) => listed(after).some((l) => l.startsWith(`${name}：`))) &&
+      listed(after).length === expected.length &&
+      // 类别名不得是"合计"（摘要行尾的"· 合计 N"是数值，不算类别）
+      !listed(after).some((l) => l.startsWith("合计：")) &&
+      listed(afterTheme).length === expected.length &&
+      !listed(afterTheme).some((l) => l.startsWith("合计："));
+    checks.push([
+      "chart_summary_lists_all_real_categories_after_switches",
+      pass,
+      after ? `after=${listed(after).length}/${expected.length} theme=${listed(afterTheme).length}` : "no-chart",
+    ]);
+  }
+
   return checks;
 }
 
@@ -476,7 +530,33 @@ for (const fixtureName of args.fixtures) {
         }
 
         const m = await page.evaluate(MEASURE);
-        const checks = buildChecks(m, { fixture: fixtureName });
+
+        // UX05：切维度 + 切主题后，图表仍渲染且摘要列出全部真实类别（无合计）
+        let chart = null;
+        if (fixtureName === "normal" || fixtureName === "multi-category") {
+          const opened = await page.evaluate(OPEN_CHART_SUMMARY);
+          if (opened.available) {
+            await page.waitForTimeout(250);
+            const before = await page.evaluate(READ_CHART_SUMMARY);
+            await page.evaluate(CLICK_SEGMENT, "按模型");
+            await page.waitForTimeout(600);
+            const after = await page.evaluate(READ_CHART_SUMMARY);
+            await page.evaluate(CLICK_SEGMENT, "深色");
+            await page.waitForTimeout(600);
+            const afterTheme = await page.evaluate(READ_CHART_SUMMARY);
+            chart = { before, after, afterTheme };
+          }
+        }
+        m.chart = chart;
+
+        const expectedModel = (() => {
+          // 维度在会话中冻结：先 begin(by=model) 再取 summary。
+          fixture.ipc("query_begin", { by: "model", tz: "Asia/Shanghai" });
+          const sum = fixture.ipc("query_summary", { queryId: "q-expected" });
+          const groups = Array.isArray(sum?.groups) ? sum.groups : [];
+          return groups.filter((g) => g.key !== "合计").map((g) => g.label ?? g.key);
+        })();
+        const checks = buildChecks(m, { fixture: fixtureName, expectedCategories: expectedModel });
 
         // 硬约束：IPC 无未知命令、无未处理拒绝、无外部请求、无页面错误
         const bootChecks = [

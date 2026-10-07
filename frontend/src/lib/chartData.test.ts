@@ -8,6 +8,7 @@ import {
   chartStateText,
   chartSummaryLines,
   fullLabels,
+  realGroups,
 } from "./chartData";
 import type { Group } from "../types";
 
@@ -97,5 +98,21 @@ describe("chartData 显示元数据（设计系统 Task 4）", () => {
     expect(chartStateText(50)).toContain("50 个类别");
     // 多类别必须说明可滚动查看
     expect(chartStateText(50)).toContain("滚动");
+  });
+});
+
+describe("realGroups（UX05：合计不是可绘制类别）", () => {
+  it("排除合计行，保留真实类别顺序", () => {
+    const groups = [g("2026-10-01", 1), g("2026-10-02", 2), g("合计", 3)];
+    expect(realGroups(groups).map((x) => x.key)).toEqual(["2026-10-01", "2026-10-02"]);
+  });
+
+  it("仅有合计时返回空数组（父级据此显示明确空状态）", () => {
+    expect(realGroups([g("合计", 3)])).toHaveLength(0);
+  });
+
+  it("无合计行时原样返回", () => {
+    const groups = [g("a", 1), g("b", 2)];
+    expect(realGroups(groups)).toHaveLength(2);
   });
 });

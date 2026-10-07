@@ -204,18 +204,28 @@ const MULTI_GROUPS = Array.from({ length: 30 }, (_, i) =>
   group(`model-${String(i).padStart(2, "0")}`, 40000 - i * 500, { output: 20000 - i * 200, cost_usd: 0.1 }),
 );
 
-function dimGroups(by, base) {
+function dimGroups(by, kind) {
   // 让 fixture 在任意聚合维度下都有可渲染的数据（维度切换验收用）。
-  if (by === "model") {
-    return base === "multi" ? MULTI_GROUPS : NORMAL_GROUPS.map((g, i) => ({ ...g, key: `model-${i}` }));
-  }
-  if (by === "project") return NORMAL_GROUPS.map((g, i) => ({ ...g, key: `/proj/p${i}` }));
+  const base =
+    kind === "multi"
+      ? MULTI_GROUPS
+      : kind === "unknown"
+        ? UNKNOWN_GROUPS
+        : kind === "partial"
+          ? PARTIAL_GROUPS
+          : kind === "long"
+            ? LONG_GROUPS
+            : NORMAL_GROUPS;
+  if (by === "model")
+    return base.map((g, i) => ({ ...g, key: `${kind}-model-${i}`, label: null }));
+  if (by === "project")
+    return base.map((g, i) => ({ ...g, key: `/proj/${kind}-${i}`, label: `${kind}-project-${i}` }));
   if (by === "agent")
     return [
-      group("claude-code", 200000, { output: 100000, cost_usd: 0.8 }),
-      group("codex", 80000, { output: 40000, cost_usd: 0.3 }),
+      group("claude-code", 200000, { output: 100000, cost_usd: 0.8, requests: 30 }),
+      group("codex", 80000, { output: 40000, cost_usd: 0.3, requests: 12 }),
     ];
-  return NORMAL_GROUPS;
+  return base;
 }
 
 const EVENT_ROWS = [
@@ -258,56 +268,65 @@ export function buildFixture(name) {
     }
   };
 
-  const withQuery = (groupsFor) => (cmd, args) => {
-    const c = common(cmd);
-    if (c !== undefined) return c;
-    if (cmd === "query_begin") {
-      return {
-        queryId: QUERY_ID,
-        generation: 1,
-        pricingRevision: PRICING_REVISION,
-        timezone: args?.tz ?? TZ,
-        asOf: AS_OF,
-      };
-    }
-    if (cmd === "query_summary") return summary(groupsFor(args), args?.by ?? "day");
-    if (cmd === "query_events") return events(EVENT_ROWS);
-    return undefined;
+  const withQuery = (groupsFor) => {
+    // SF04：维度在 query_begin 时冻结进会话；query_summary/query_events 只带
+    // query_id，因此 fixture 必须记住会话维度（不能从 summary 参数推导）。
+    let sessionBy = "day";
+    return (cmd, args) => {
+      const c = common(cmd);
+      if (c !== undefined) return c;
+      if (cmd === "query_begin") {
+        sessionBy = args?.by ?? "day";
+        return {
+          queryId: QUERY_ID,
+          generation: 1,
+          pricingRevision: PRICING_REVISION,
+          timezone: args?.tz ?? TZ,
+          asOf: AS_OF,
+        };
+      }
+      if (cmd === "query_summary") return summary(groupsFor(sessionBy), sessionBy);
+      if (cmd === "query_events") return events(EVENT_ROWS);
+      return undefined;
+    };
   };
 
   switch (name) {
     case "normal":
-      return { ...base, ipc: withQuery(() => NORMAL_GROUPS) };
+      return { ...base, ipc: withQuery((by) => dimGroups(by, "normal")) };
     case "empty":
       return { ...base, ipc: withQuery(() => []) };
     case "unknown-price":
-      return { ...base, ipc: withQuery(() => UNKNOWN_GROUPS) };
+      return { ...base, ipc: withQuery((by) => dimGroups(by, "unknown")) };
     case "partial-price":
-      return { ...base, ipc: withQuery(() => PARTIAL_GROUPS) };
+      return { ...base, ipc: withQuery((by) => dimGroups(by, "partial")) };
     case "long-text":
-      return { ...base, ipc: withQuery(() => LONG_GROUPS) };
+      return { ...base, ipc: withQuery((by) => dimGroups(by, "long")) };
     case "multi-category":
-      return { ...base, ipc: withQuery(() => MULTI_GROUPS) };
+      return { ...base, ipc: withQuery((by) => dimGroups(by, "multi")) };
     case "settings-read-failure": {
+      let sessionBy = "day";
       return {
         ...base,
         meta: { ...base.meta, settingsFailure: true },
-        ipc: (cmd) => {
+        ipc: (cmd, args) => {
           if (cmd === "settings_get") return reject("设置文件损坏（合成）");
           if (cmd === "cache_stats") return { path: "C:/cache", files: 3, events: 120 };
           if (cmd === "pricing_entries") return pricingView();
           if (cmd === "autostart_status") return false;
           const c = common(cmd);
           if (c !== undefined) return c;
-          if (cmd === "query_begin")
+          if (cmd === "query_begin") {
+            sessionBy = args?.by ?? "day";
             return {
               queryId: QUERY_ID,
               generation: 1,
               pricingRevision: PRICING_REVISION,
-              timezone: TZ,
+              timezone: args?.tz ?? TZ,
               asOf: AS_OF,
             };
-          if (cmd === "query_summary") return summary(NORMAL_GROUPS, "day");
+          }
+          if (cmd === "query_summary") return summary(dimGroups(sessionBy, "normal"), sessionBy);
           if (cmd === "query_events") return events(EVENT_ROWS);
           return undefined;
         },

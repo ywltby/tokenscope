@@ -19,6 +19,7 @@ import SegmentedControl from "../components/SegmentedControl.vue";
 import DateRangeSelect from "../components/DateRangeSelect.vue";
 import { TZ_OPTIONS, useTimezone } from "../composables/timezone";
 import { SNAPSHOT_VERSION, enqueueSnapshotSave } from "../lib/viewSnapshot";
+import { realGroups } from "../lib/chartData";
 import { onUnmounted } from "vue";
 import { todayInTz } from "../lib/dates";
 
@@ -426,6 +427,11 @@ function startRefreshBatch(): void {
 
 const drillLabel = (d: EventDrill): string => `${d.type}: ${d.key}`;
 
+// UX05：真实可绘制类别（排除"合计"行）——用 computed 缓存，避免在模板里
+// 每次渲染都 filter 生成新数组；新数组会改变 TrendChart 的 groups 身份，
+// 触发图表不必要的 dispose/init。
+const chartGroups = computed(() => realGroups(report.value?.groups ?? []));
+
 // F03：watcher 不再 immediate——启动批次由 setup 末尾显式开启（不属于
 // 用户操作，不递增 interactionEpoch）；恢复应用期间 watcher 跳过查询。
 // 主筛选变化走 startRefreshBatch（同一 epoch 两条查询），不另设明细
@@ -632,11 +638,11 @@ startRefreshBatch();
         </div>
         <template v-else-if="report">
           <SummaryCards :totals="report.totals" />
-          <TrendChart
-            v-if="report.by === 'day' || report.groups.length > 2"
-            :groups="report.groups.filter((g) => g.key !== '合计')"
-            :by="report.by"
-          />
+          <!-- UX05：以真实类别数判断——≥1 绘制图表；0 给明确空状态，不画无内容图 -->
+          <TrendChart v-if="chartGroups.length >= 1" :groups="chartGroups" :by="report.by" />
+          <div v-else class="chart-empty" role="status">
+            <span class="chart-empty-text">暂无可绘制的类别（仅有合计行）。</span>
+          </div>
           <UsageTable :report="report" @row-click="onSummaryRowClick" />
           <EventTable
             v-if="events"
@@ -673,6 +679,21 @@ startRefreshBatch();
   font-size: 12px;
   color: var(--ts-text-muted);
   margin-top: var(--ts-space-2);
+}
+
+/* UX05：无可绘制类别时的明确空状态（不渲染无内容图表） */
+.chart-empty {
+  border: 1px dashed var(--ts-separator-strong);
+  border-radius: var(--ts-radius-card);
+  background: var(--ts-surface-solid);
+  padding: var(--ts-space-6);
+  text-align: center;
+  margin-bottom: var(--ts-space-5);
+}
+
+.chart-empty-text {
+  font-size: 12px;
+  color: var(--ts-text-muted);
 }
 
 .page-head {

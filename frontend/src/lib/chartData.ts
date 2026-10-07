@@ -20,6 +20,13 @@ export interface BarChartData {
   series: BarChartSeries[];
 }
 
+/// UX05：真实可绘制类别——排除"合计"行。合计是汇总行，不是维度类别；
+/// 父级用 computed 缓存本结果，避免在模板里每次 filter 生成新数组
+/// （新数组会改变 props 身份，触发图表不必要的重建）。
+export function realGroups(groups: Group[]): Group[] {
+  return groups.filter((g) => g.key !== "合计");
+}
+
 /// 分类顺序（单一事实源）：日维度保持时间序；非日维度按 输入+输出 用量降序。
 function orderGroups(groups: Group[], by: string): Group[] {
   return by === "day"
