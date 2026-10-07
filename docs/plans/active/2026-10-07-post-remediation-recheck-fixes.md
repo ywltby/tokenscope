@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2024、rusqlite/SQLite、serde/TOML、Tauri 2、Vue 3、Naive UI、Vitest/VTU、真实浏览器布局验收。
 
-**状态：待执行。基线：`85f3c92`。** 本计划仅记录任务，不表示问题已经修复。
+**状态：已执行完毕（2026-10-07，基线 `85f3c92` → 终点 `docs/验收` 提交）。** 逐任务红→绿证据见文末执行记录表；D5 安装验收与 100%/150% 系统缩放继续按既有决定后延，未伪造通过。
 
 上游：[全计划审核修复](2026-10-07-all-plans-audit-remediation.md)、[首次审核证据](../../reviews/2026-10-07-all-plans-audit.md)。本文件覆盖上游“R01–R10 全部完成”的验收结论及下列未闭合部分；已经修好的功能不重做。
 
@@ -182,15 +182,22 @@
 
 ## 4. 完成定义
 
-- [ ] F01：真实v3升级成功、迁移失败原子回滚、并发打开安全，健康v4暖命中保留。
-- [ ] F02：空的未命中规则不重引基础价，明确schedule默认覆盖保留。
-- [ ] F03：三个已复现快照竞态全部回归通过，分页/下钻/跨挂载仍正确。
-- [ ] F04/F05：原始非法覆盖整候选拒绝，扁平/plan索引统一校验，旧索引失效，费用不传播非有限值。
-- [ ] F06：真实浏览器量测吸顶有效，有脱敏证据，未完成系统缩放仍如实后延。
-- [ ] F07：两项索引测试独立及整套均通过，冷启动确实经过磁盘。
-- [ ] F08：真实tooltip出现/关闭可验证，hide失败返回前端可重试。
-- [ ] 全门禁与文档核对完成，历史与当前状态分明。
+- [x] F01：真实v3升级成功、迁移失败原子回滚、并发打开安全，健康v4暖命中保留。
+- [x] F02：空的未命中规则不重引基础价，明确schedule默认覆盖保留。
+- [x] F03：三个已复现快照竞态全部回归通过，分页/下钻/跨挂载仍正确。
+- [x] F04/F05：原始非法覆盖整候选拒绝，扁平/plan索引统一校验，旧索引失效，费用不传播非有限值。
+- [x] F06：真实浏览器量测吸顶有效，有脱敏证据，未完成系统缩放仍如实后延。
+- [x] F07：两项索引测试独立及整套均通过，冷启动确实经过磁盘。
+- [x] F08：真实tooltip出现/关闭可验证，hide失败返回前端可重试。
+- [x] 全门禁与文档核对完成，历史与当前状态分明。
 
 | 任务 | 状态 | 修复提交 | 红→绿证据 | 剩余限制 |
 | --- | --- | --- | --- | --- |
-| 1–8 | 待执行，逐项回写 | — | — | D5安装、100%/150%系统缩放沿用原后延决定 |
+| 1 | 完成 | `7fc1e12` test(定价): 在隔离进程中验证价格索引恢复 | 红：两条 `--lib` 索引测试单独运行 exit 101（`v5 旧语义索引必须失效重建` / `含非法数值的索引必须触发重建`——进程内 PRICE_CACHE 吞掉磁盘篡改）；绿：迁入 `tests/pricing_index_restart.rs` 子进程三阶段（seed→篡改→冷加载→可读）+ 同进程重复加载命中，单测/串行/并行均过（3 passed） | D5 安装、100%/150% 缩放沿用后延 |
+| 2 | 完成 | `5821d74` fix(缓存): 在使用新列前完成旧表结构迁移 | 红：`test_cache_migrates_real_v3_schema` 等 3 条以真实 v3 DDL fixture（`tests/fixtures/cache/schema-v3.sql`）报 `no such column: root`；绿：open 收敛为 IMMEDIATE 写事务（读版本→drop events/files→建当前表→写版本→commit，注入失败整体回滚），并发打开加 WAL 重试；lib 157 并行全过 | 迁移仅重建 TokenScope 自有派生表 |
+| 3 | 完成 | `001dee3` fix(计价): 跳过没有适用价格覆盖的时间规则 | 红：`test_unmatched_empty_schedule_does_not_reintroduce_base`（12:00 选 A/$10 带 peak 标签）、分段/星期两条（未命中仍贴时间档标签）；绿：matching_time_rules 携带 basis、未命中且无显式声明（Fixed/0/SameAsInput 或命中段覆盖）的规则整体跳过；schedule/valley/cost_breakdown 全过 | 命中规则缺字段继承基础价语义不变 |
+| 4 | 完成 | `d543c6d` fix(计价): 在所有恢复入口拒绝非法候选；`1cefac7` fix(计价): 防止单位换算与求和的中间溢出并经明细解释 | 红：时间价 nan 整候选未拒（回基础 $2）、OR override NaN 模型仍入快照（count 2）、扁平 input=-5 冷加载命中（未重建）、1M×1e308 得 inf；绿：外置/OR 数值预检先于结构丢弃（整模型拒绝+定位告警随 SyncReport.warnings）、索引 v7 仅接受新版（plan 与扁平字段归一后统一校验，from_index 兜底跳过）、先除后乘+求和防溢出（2M×1e308 → overflow 行不计金额、token 转未计价、明细显示"金额超出可表示范围"）；显式 0 合法保留。旧 OR 快照中已被丢弃的 override 无法靠重建找回，待下次正常同步 | 用户离线快照不删除、不自动联网 |
+| 5 | 完成 | `c21cb03` fix(视图缓存): 按共享刷新批次保存相容结果 | 红：同筛选刷新 99/旧明细落盘、切维度保存 filters.by=model+report.by=day、用户选 claude 后晚到 all 缓存重置筛选、新筛选首批在途时追加不被拒绝；绿：refreshEpoch 共享批次 + summaryBatchEpoch/eventsBatchEpoch 保存门槛（均属当前批次、主键含 by、report.by 一致）、append 门（首批完成+同身份）、interactionEpoch 撤销恢复资格、快照 v5 忽略 v4；Dashboard 30 + viewSnapshot 4 全过 | epoch 不跨进程、不声称两次 IPC 共享采集瞬间 |
+| 6 | 完成 | `a1c8e90` fix(布局): 约束主滚动容器并验证导航吸顶 | 红：`node frontend/scripts/check-app-scroll.mjs` 修复前 4 场景全败（容器 2274px 随内容生长、scrollTop=400 无效、document 第二条滚动）；绿：`.app-shell` flex 纵向 + `.scroll-container` min-height:0，1280×820/980×620 × 浅/深四场景全过（截图+量测见 `docs/plans/qa-artifacts/app-scroll/`），release 应用实例滚动 10 页导航吸顶（`real-window-scrolled.png`） | 100%/150% 系统缩放继续后延 |
+| 7 | 完成 | `fcba1cf` fix(无障碍): 拆分命中率浮层触发态并用真实浮层验收；`a44ac5a` fix(关闭): 透传隐藏窗口失败并允许重试 | 红：真实 NTooltip 测试（不打桩）——Escape/mouseleave/blur 后浮层仍显示（单布尔无法表达键盘与鼠标分离）；绿：hover/focus/pinned 三态拆分 + 统一 show，浮层可见性沿祖先链检测 display，移入内容不消失、focus 保持鼠标离开不取消；`close_minimize_with` 注入 hide 失败透传（Rust `test_close_hide_error_is_propagated`）、前端 `close_hide_failure_remains_retryable` 弹窗保持可重试 | — |
+| 8 | 完成 | 本提交 `docs(验收): 记录二次复核修复及真实验证结果` | 全门禁串行执行通过：根库 fmt/clippy/test（15 套件全 ok、0 FAILED）、壳 fmt/clippy/test（17 passed）、前端 typecheck/format:check/test（18 文件 177 tests）/build 全绿；独立进程索引回归与真实浏览器布局验收各通过一次，不做无理由循环 | 历史记录未覆盖改写，仅追加 |
