@@ -25,8 +25,16 @@ fn codex_basic() -> Collection {
 /// 密闭性（2026-10-05 修复）：缓存/索引一律进临时目录。此前默认落真实
 /// `~/.tokenscope/cache.db`，测试套件每跑一遍就把用户缓存 purge 成 fixture，
 /// GUI 每次启动都全量冷扫描（分钟级加载）。
+///
+/// 2026-10-08 修复：同一进程内多个测试并行调用本函数，仅用 pid 命名会让它们
+/// 共享同一目录，一个线程打开 `pricing.toml` 时另一线程 `fs::write` 同一路径
+/// → Windows 共享冲突（PermissionDenied）。加进程内单调计数器保证每次调用
+/// 得到独立目录（与 tests/e2e_claude.rs 同一处理）。
 fn hermetic_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("tokenscope-e2e-codex-{}", std::process::id()))
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("tokenscope-e2e-codex-{}-{}", std::process::id(), n))
 }
 
 /// Task 1：内置表已删除——外置 TOML 提供与校正后内置同值的 gpt 价。
