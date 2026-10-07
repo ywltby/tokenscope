@@ -15,8 +15,11 @@ use tauri::{
 use tauri_plugin_autostart::MacosLauncher;
 
 pub fn run() {
-    // WorkerGuard 与进程同生命周期（run 阻塞至退出）。
-    let _log_guard = tokenscope::logging::init("gui");
+    // SF06：日志初始化可失败——降级不阻断窗口创建；WorkerGuard 仍与进程
+    // 同生命周期（run 阻塞至退出）。状态经 managed state 暴露给前端。
+    let logging = tokenscope::logging::try_init("gui");
+    let log_status = logging.status;
+    let _log_guard = logging.guard;
     let t_boot = std::time::Instant::now();
     log::info!("TokenScope 启动（GUI）");
     tauri::Builder::default()
@@ -36,6 +39,7 @@ pub fn run() {
             commands::query_begin,
             commands::query_summary,
             commands::query_events,
+            commands::startup_diagnostics,
             commands::view_cache_load,
             commands::view_cache_save,
             commands::source_status,
@@ -55,6 +59,9 @@ pub fn run() {
             commands::open_settings_file,
         ])
         .setup(move |app| {
+            // SF06：日志状态存入 managed state，App 挂载后经
+            // startup_diagnostics 只读获取并展示非阻断通知。
+            app.manage(log_status);
             restore_window_state(app.handle())?;
             setup_tray(app.handle())?;
             start_window_state_saver(app.handle());

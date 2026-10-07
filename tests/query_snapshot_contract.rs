@@ -23,6 +23,14 @@ use tokenscope::report::{EventFilter, SummaryOptions};
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
 
+/// 本文件全部测试共享进程级会话注册表（clear/backdate 是全局操作）：
+/// 串行执行，避免并行测试互相清掉对方的活跃会话。
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn hermetic(tag: &str) -> PathBuf {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let d = std::env::temp_dir().join(format!(
@@ -71,6 +79,7 @@ const SAME_TS_BODY: &str = "\
 /// 内容不变；新 query 才反映变化。
 #[test]
 fn paging_same_timestamp_insert_delete_keeps_snapshot_rows() {
+    let _g = serial();
     let dir = hermetic("insert-delete");
     let root = dir.join("codex");
     let log = write_codex_log(&root, SAME_TS_BODY);
@@ -152,6 +161,7 @@ fn paging_same_timestamp_insert_delete_keeps_snapshot_rows() {
 /// 新 query 使用新修订（估算算法本身不变）。
 #[test]
 fn paging_keeps_price_revision_until_refresh() {
+    let _g = serial();
     let dir = hermetic("price-rev");
     let root = dir.join("codex");
     write_codex_log(&root, SAME_TS_BODY);
@@ -194,6 +204,7 @@ fn paging_keeps_price_revision_until_refresh() {
 /// 汇总请求数 == 明细 total（无下钻）。
 #[test]
 fn summary_and_events_share_query_context() {
+    let _g = serial();
     let dir = hermetic("share");
     let root = dir.join("codex");
     write_codex_log(&root, SAME_TS_BODY);
@@ -216,6 +227,7 @@ fn summary_and_events_share_query_context() {
 /// 过期/外会话/筛选不匹配的游标一律结构化拒绝，允许刷新重建。
 #[test]
 fn expired_or_foreign_cursor_requires_refresh() {
+    let _g = serial();
     let dir = hermetic("expired");
     let root = dir.join("codex");
     write_codex_log(&root, SAME_TS_BODY);
@@ -273,6 +285,7 @@ fn expired_or_foreign_cursor_requires_refresh() {
 /// 旧磁盘视图的 v1 游标（无 v/qid/指纹字段）不得续用于活跃游标翻页。
 #[test]
 fn old_disk_view_cannot_resume_live_cursor() {
+    let _g = serial();
     let dir = hermetic("old-disk");
     let root = dir.join("codex");
     write_codex_log(&root, SAME_TS_BODY);
@@ -304,6 +317,7 @@ fn old_disk_view_cannot_resume_live_cursor() {
 /// 旧会话被回收，其游标显式过期；容量上限同样触发 LRU 淘汰。
 #[test]
 fn query_registry_evicts_with_explicit_expiry() {
+    let _g = serial();
     let dir = hermetic("evict");
     let root = dir.join("codex");
     write_codex_log(&root, SAME_TS_BODY);

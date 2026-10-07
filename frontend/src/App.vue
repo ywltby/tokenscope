@@ -49,6 +49,19 @@ const themeOptions: { value: ThemePreference; label: string }[] = [
   { value: "system", label: "自动" },
 ];
 
+// ── 启动诊断（SF06）：日志初始化降级为非阻断通知 ───────────────
+// 文件日志不可用（state != ok）时提示用户；读取失败静默（非 Tauri
+// 环境/测试环境），绝不因诊断失败递归报错或阻塞。
+const logWarning = ref<string | null>(null);
+onMounted(async () => {
+  try {
+    const st = await invoke<{ state: string; message: string | null }>("startup_diagnostics");
+    if (st.state !== "ok" && st.message) logWarning.value = st.message;
+  } catch {
+    // 非 Tauri 环境：静默跳过
+  }
+});
+
 // ── 关闭确认弹窗（关闭确认与配置文件计划 Task 3）──────────────
 // 后端在未记忆默认动作时拦截关窗并 emit close-requested；这里弹窗
 // 询问（最小化/退出/取消 + 记忆勾选），决定经 close_resolve 回传。
@@ -137,6 +150,9 @@ function onCloseCancel(): void {
           </header>
           <!-- 全局状态横幅：渲染在内容之前，不遮挡主体 -->
           <div class="banner-slot">
+            <div v-if="logWarning" class="ts-notice" role="status">
+              文件日志不可用，已退回备用输出：{{ logWarning }}
+            </div>
             <PricingStatusBanner />
           </div>
           <main class="app-content">

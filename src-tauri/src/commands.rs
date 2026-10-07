@@ -174,6 +174,15 @@ pub async fn query_events(
     .await
 }
 
+/// SF06：启动诊断（只读）——App 挂载后取一次日志初始化状态，展示
+/// 非阻断通知；不触发任何重活。
+#[tauri::command]
+pub fn startup_diagnostics(
+    status: tauri::State<tokenscope::logging::LogInitStatus>,
+) -> tokenscope::logging::LogInitStatus {
+    status.inner().clone()
+}
+
 #[tauri::command]
 pub async fn source_status() -> Result<Vec<SourceStatus>, String> {
     run_blocking("source_status", move || {

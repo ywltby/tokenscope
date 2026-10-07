@@ -191,6 +191,50 @@ describe("App 应用壳（设计系统 Task 2，苹果风格分段控件）", ()
   });
 });
 
+describe("App 启动诊断（SF06：日志初始化降级非阻断通知）", () => {
+  function mockWithStartup(startup: object | Promise<never>): void {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "startup_diagnostics") return startup as Promise<unknown>;
+      if (cmd === "pricing_status") return Promise.resolve(statusOk);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+  }
+
+  it("startup_log_degraded_shows_notice：state != ok → 横幅通知可见且不阻断页面", async () => {
+    mockWithStartup(
+      Promise.resolve({
+        state: "stderr",
+        dir: null,
+        message: "日志目录创建失败: C:/x/logs（拒绝访问）",
+      }),
+    );
+    const w = mount(App);
+    await flushPromises();
+    expect(w.text()).toContain("文件日志不可用");
+    expect(w.text()).toContain("日志目录创建失败");
+    // 非阻断：汇总页照常渲染
+    expect(w.find(".stub-dashboard").exists()).toBe(true);
+  });
+
+  it("startup_log_ok_shows_no_notice：state = ok 无通知", async () => {
+    mockWithStartup(Promise.resolve({ state: "ok", dir: "C:/x/logs", message: null }));
+    const w = mount(App);
+    await flushPromises();
+    expect(w.text()).not.toContain("文件日志不可用");
+    expect(w.find(".stub-dashboard").exists()).toBe(true);
+  });
+
+  it("startup_diagnostics 失败静默跳过（非 Tauri 环境不递归报错）", async () => {
+    mockWithStartup(Promise.reject(new Error("no tauri")));
+    const w = mount(App);
+    await flushPromises();
+    expect(w.text()).not.toContain("文件日志不可用");
+    expect(w.find(".stub-dashboard").exists()).toBe(true);
+  });
+});
+
 describe("App 关闭确认（关闭确认与配置文件计划 Task 3）", () => {
   it("close-requested 事件打开弹窗；resolve 调 close_resolve 并关闭", async () => {
     mockApp(statusOk);
