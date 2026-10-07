@@ -50,23 +50,95 @@ pub fn mtime_ms(path: &Path) -> Result<i64> {
         .unwrap_or(0))
 }
 
+/// 仅测试用：迁移事务中途注入失败以验证原子回滚（不增加生产配置）。
+/// 按库路径作用域——并行测试里其他测试的 Cache::open 不受影响。
+#[cfg(test)]
+static TEST_MIGRATION_FAIL_PATH: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+
+/// 测试注入：仅对指定库文件的迁移在提交前失败。
+#[cfg(test)]
+fn test_inject_migration_fail(path: &Path) -> Result<()> {
+    if let Some(p) = TEST_MIGRATION_FAIL_PATH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        && p.as_path() == path
+    {
+        anyhow::bail!("注入的迁移失败（仅测试）");
+    }
+    Ok(())
+}
+
 impl Cache {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("创建缓存目录失败: {}", dir.display()))?;
         }
-        let conn =
+        let mut conn =
             Connection::open(path).with_context(|| format!("打开缓存失败: {}", path.display()))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
+        // busy_timeout 先于 pragma 设置：并发打开时等锁而不是立即报忙。
         conn.busy_timeout(std::time::Duration::from_millis(2000))?;
-        conn.execute_batch(
+        // WAL 切换需要短暂独占，且 SQLite 不为该切换调用 busy handler——
+        // 并发打开时对方连接可能正持锁/切换，这里小步重试（对齐 busy_timeout
+        // 的等待语义），而非把并发打开错判为损坏。
+        for attempt in 0..100 {
+            match conn.pragma_update(None, "journal_mode", "WAL") {
+                Ok(()) => break,
+                Err(e)
+                    if attempt < 99
+                        && matches!(
+                            &e,
+                            rusqlite::Error::SqliteFailure(f, _)
+                                if f.code == rusqlite::ErrorCode::DatabaseBusy
+                        ) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => return Err(e).context("设置 WAL 日志模式失败"),
+            }
+        }
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .context("启用外键约束失败")?;
+        // F01：结构迁移收敛为单一写事务。真实 v3 库的 files 没有 root 列，
+        // 必须先在事务内读取版本、把旧派生表整体 drop 后再建当前结构——
+        // 任一步失败整体回滚，绝不出现"新索引 + 旧表"的半迁移状态
+        //（修复前先建含 root 的索引，旧库连续报 no such column: root）。
+        // IMMEDIATE 写事务：并发打开在事务内重新判断版本，串行完成迁移。
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("开始缓存初始化事务失败")?;
+        tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS files (
+            );",
+        )?;
+        // 损坏 meta 的读取异常保持诊断可见，不再吞成"首次启动"。
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("读取缓存 schema 版本失败")?;
+        if stored.as_deref() != Some(SCHEMA_VERSION) {
+            if stored.is_some() {
+                log::warn!(
+                    "缓存解析版本变化（{:?} → {SCHEMA_VERSION}），清空重建",
+                    stored
+                );
+            }
+            // 只重建 TokenScope 自有派生表：先 events（引用 files），再 files
+            //（索引随表删除）；不删除数据库文件/WAL/原始日志。健康当前版
+            // 库不走此分支，不重复清空。
+            tx.execute("DROP TABLE IF EXISTS events", [])?;
+            tx.execute("DROP TABLE IF EXISTS files", [])?;
+        }
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY,
                 path TEXT NOT NULL,
                 root TEXT NOT NULL DEFAULT '',
@@ -97,31 +169,15 @@ impl Cache {
             CREATE UNIQUE INDEX IF NOT EXISTS idx_files_identity
                 ON files(agent, root, path);",
         )?;
-        // 解析版本不符 → 旧缓存整体失效（清空后按当前规则重建）。
-        // 此前版本号只写不查（R04）：解析规则升级后旧缓存继续供数。
-        let stored: Option<String> = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'schema_version'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .unwrap_or(None);
-        if stored.as_deref() != Some(SCHEMA_VERSION) {
-            if stored.is_some() {
-                log::warn!(
-                    "缓存解析版本变化（{:?} → {SCHEMA_VERSION}），清空重建",
-                    stored
-                );
-            }
-            conn.execute("DELETE FROM events", [])?;
-            conn.execute("DELETE FROM files", [])?;
-        }
-        conn.execute(
+        // 提交前的测试注入点：版本与表结构一起回滚。
+        #[cfg(test)]
+        test_inject_migration_fail(path)?;
+        tx.execute(
             "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [SCHEMA_VERSION],
         )?;
+        tx.commit()?;
         Ok(Self { conn })
     }
 
@@ -358,6 +414,27 @@ mod tests {
         d
     }
 
+    /// 用真实 v3 DDL fixture（3109678 版）合成旧结构库：files 无 root 列、
+    /// path 独占唯一、meta 版本 = 3、含一条合成事件。
+    fn seed_v3(path: &Path) {
+        let sql = include_str!("../tests/fixtures/cache/schema-v3.sql");
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(sql).unwrap();
+    }
+
+    /// files 表当前列名（结构断言用）。
+    fn files_columns(path: &Path) -> Vec<String> {
+        let raw = rusqlite::Connection::open(path).unwrap();
+        let mut stmt = raw.prepare("PRAGMA table_info(files)").unwrap();
+        let cols = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        drop(stmt);
+        cols
+    }
+
     fn parse_with(n: usize) -> FileParse {
         let events = (0..n)
             .map(|i| UsageEvent {
@@ -548,6 +625,133 @@ mod tests {
         }
         stop.store(true, Ordering::Relaxed);
         clearer.join().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_cache_migrates_real_v3_schema() {
+        // F01：真实 v3 的 files 没有 root 列、path 独占唯一。打开必须先把
+        // 旧结构整体迁移成当前结构，而不是先建含 root 的索引（修复前连续
+        // 报 no such column: root，每次退回全量扫描）。
+        let dir = tmp_dir("migrate-v3");
+        let path = dir.join("cache.db");
+        seed_v3(&path);
+
+        let c = Cache::open(&path).unwrap();
+        // v3 行无 root 维度：迁移即整体失效重建
+        assert_eq!(c.stats().unwrap().files, 0, "v3 旧行必须整体失效");
+        assert_eq!(c.stats().unwrap().events, 0);
+        // 新结构确有 root 列
+        let cols = files_columns(&path);
+        assert!(
+            cols.iter().any(|x| x == "root"),
+            "迁移后 files 必须有 root 列: {cols:?}"
+        );
+        // 复合唯一键生效：同 path 不同 root/agent 可共存
+        c.store_file(
+            "s.jsonl",
+            AgentKind::ClaudeCode,
+            "root-a",
+            1,
+            1,
+            &parse_with(2),
+        )
+        .unwrap();
+        c.store_file("s.jsonl", AgentKind::Codex, "root-a", 1, 1, &parse_with(1))
+            .unwrap();
+        c.store_file(
+            "s.jsonl",
+            AgentKind::ClaudeCode,
+            "root-b",
+            1,
+            1,
+            &parse_with(3),
+        )
+        .unwrap();
+        assert_eq!(c.stats().unwrap().files, 3, "复合身份键必须允许上下文共存");
+        drop(c);
+        // 写入后重新打开能命中
+        let c2 = Cache::open(&path).unwrap();
+        assert!(
+            c2.lookup_file("s.jsonl", AgentKind::ClaudeCode, "root-a", 1, 1)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(c2.stats().unwrap().events, 6);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_cache_migration_is_atomic() {
+        // 迁移中途失败 → 版本与表结构一起回滚：旧 v3 结构与数据原样保留，
+        // 下一次打开（无注入）再完成迁移。失败注入仅测试提供。
+        let dir = tmp_dir("migrate-atomic");
+        let path = dir.join("cache.db");
+        seed_v3(&path);
+
+        TEST_MIGRATION_FAIL_PATH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(path.clone());
+        let r = Cache::open(&path);
+        TEST_MIGRATION_FAIL_PATH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        assert!(r.is_err(), "注入失败必须使 open 返回可见降级错误");
+
+        // 回滚后：旧结构（无 root）、版本仍 3、旧事件仍在
+        let cols = files_columns(&path);
+        assert!(
+            !cols.iter().any(|x| x == "root"),
+            "迁移失败必须整体回滚，不得留下半迁移结构: {cols:?}"
+        );
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        let v: String = raw
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, "3", "版本必须随迁移失败一起回滚");
+        let n: i64 = raw
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "旧事件必须随回滚恢复");
+        drop(raw);
+
+        // 无注入的后续打开完成迁移
+        let c = Cache::open(&path).unwrap();
+        assert_eq!(c.stats().unwrap().files, 0);
+        let cols = files_columns(&path);
+        assert!(cols.iter().any(|x| x == "root"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_cache_concurrent_v3_open() {
+        // 两个连接并发打开 v3 库：写事务内重判版本 + 串行迁移，不得交错出
+        // 半迁移结构；两个打开都必须成功，结果为健康可用的当前版结构。
+        let dir = tmp_dir("migrate-conc");
+        let path = dir.join("cache.db");
+        seed_v3(&path);
+
+        let path2 = path.clone();
+        let h1 = std::thread::spawn(move || Cache::open(&path));
+        let h2 = std::thread::spawn(move || Cache::open(&path2));
+        let c1 = h1.join().unwrap().expect("并发打开 1 必须成功");
+        let c2 = h2.join().unwrap().expect("并发打开 2 必须成功");
+
+        assert_eq!(c1.stats().unwrap().files, 0, "v3 旧行整体失效一次");
+        c1.store_file("a.jsonl", AgentKind::Codex, "root", 1, 1, &parse_with(2))
+            .unwrap();
+        assert!(
+            c2.lookup_file("a.jsonl", AgentKind::Codex, "root", 1, 1)
+                .unwrap()
+                .is_some(),
+            "另一连接必须看到已迁移的健康结构"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
