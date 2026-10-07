@@ -26,7 +26,13 @@ import {
 } from "../types";
 import { TZ_OPTIONS, useTimezone } from "../composables/timezone";
 import { fmtPriceOrUnknown, formatTieredPricing } from "../lib/tieredPrice";
-import { TOKEN_BUCKETS, tokenBucketLabel, type TokenBucketKey } from "../lib/tokenDisplay";
+import {
+  TOKEN_BUCKETS,
+  UNIT_PRICE_DENOMINATOR,
+  UNIT_PRICE_SUFFIX,
+  tokenBucketLabel,
+  type TokenBucketKey,
+} from "../lib/tokenDisplay";
 import HelpTooltip from "../components/HelpTooltip.vue";
 
 const props = defineProps<{ refreshKey: number }>();
@@ -452,27 +458,27 @@ const priceColumns = computed<DataTableColumn[]>(() => [
     render: (r) => prefixCell(r),
   },
   // RC06：四桶单价列由显式 key 驱动，显示词来自 tokenDisplay 单一来源
-  //（不再散落「缓存读$」）。
+  //（不再散落「缓存读$」）。RC07：列头明确量纲——单价是 USD / 1M token。
   {
-    title: `${tokenBucketLabel("input")}$`,
+    title: `${tokenBucketLabel("input")}（${UNIT_PRICE_SUFFIX}）`,
     key: "input",
     align: "right",
     render: (r) => priceCell(r, "input"),
   },
   {
-    title: `${tokenBucketLabel("output")}$`,
+    title: `${tokenBucketLabel("output")}（${UNIT_PRICE_SUFFIX}）`,
     key: "output",
     align: "right",
     render: (r) => priceCell(r, "output"),
   },
   {
-    title: `${tokenBucketLabel("cache_write")}$`,
+    title: `${tokenBucketLabel("cache_write")}（${UNIT_PRICE_SUFFIX}）`,
     key: "cache_write",
     align: "right",
     render: (r) => priceCell(r, "cache_write"),
   },
   {
-    title: `${tokenBucketLabel("cache_read")}$`,
+    title: `${tokenBucketLabel("cache_read")}（${UNIT_PRICE_SUFFIX}）`,
     key: "cache_read",
     align: "right",
     render: (r) => priceCell(r, "cache_read"),
@@ -858,6 +864,10 @@ defineExpose({ priceColumns });
           </div>
           <div class="setting-help">
             {{ pricing?.path }}（TOML；本地价格最高优先，保存后下次统计生效）
+          </div>
+          <!-- RC07：单价量纲显式说明（列头同样标注 $/M）。 -->
+          <div class="setting-help unit-note">
+            单价单位：{{ UNIT_PRICE_DENOMINATOR }}（每百万 token）；四桶单价按下方来源优先级解析。
           </div>
           <NDataTable
             :columns="priceColumns"

@@ -1,6 +1,7 @@
 // Task 8：设置页分段价格展示的纯函数——只排版，不做任何重算。
 // 缺失分项显示"未知"，显式 0 显示 $0；分段与峰谷规则展开为悬浮行。
 import { fmtNum } from "../types";
+import { TOKEN_BUCKETS } from "./tokenDisplay";
 import { formatMoney } from "./formatMoney";
 import type {
   PriceRatesView,
@@ -20,14 +21,11 @@ export function fmtPriceOrUnknown(v: RateSpecView | undefined): string {
   return formatMoney(v, "unit");
 }
 
-const RATE_LABELS: [keyof PriceRatesView, string][] = [
-  ["input", "输入"],
-  ["output", "输出"],
-  ["cache_write", "缓存写"],
-  ["cache_read", "缓存读"],
-];
+// RC07：显示词统一来自 tokenDisplay 单一来源（U14：缓存命中），
+// 不再散落「缓存读」；技术键仍是 cache_read。
+const RATE_LABELS: [keyof PriceRatesView, string][] = TOKEN_BUCKETS.map((b) => [b.key, b.label]);
 
-/** 一组四类价格 → "输入 $8.00 · 输出 $30.00 · 缓存写 未知 · 缓存读 未知"。 */
+/** 一组四类价格 → "输入 $8 · 输出 $30 · 缓存写 未知 · 缓存命中 未知"。 */
 export function formatRates(r: PriceRatesView): string {
   return RATE_LABELS.map(([k, label]) => `${label} ${fmtPriceOrUnknown(r[k])}`).join(" · ");
 }

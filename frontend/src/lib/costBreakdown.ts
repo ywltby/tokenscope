@@ -3,7 +3,7 @@
 // 结构按 DESIGN.md §5「事实 → 公式 → 结果 → 来源」排列。
 import { fmtNum } from "../types";
 import { formatMoney } from "./formatMoney";
-import { TOKEN_BUCKETS } from "./tokenDisplay";
+import { TOKEN_BUCKETS, tokenBucketLabel } from "./tokenDisplay";
 import type { CostLine, CostLineKind, EventCostBreakdown, MatchMode } from "../types";
 
 /** 单行展示模型：label/value 两列；detail 为整行说明；divider 分组。 */
@@ -59,7 +59,7 @@ function factRows(bd: EventCostBreakdown): BreakdownRow[] {
     { label: "请求时间", value: m.request_at ?? "暂无数据" },
     {
       label: "prompt tokens",
-      detail: `输入 ${fmtNum(input)} + 缓存写 ${fmtNum(cw)} + 缓存读 ${fmtNum(cr)} = ${fmtNum(bd.basis_value)}`,
+      detail: `${tokenBucketLabel("input")} ${fmtNum(input)} + ${tokenBucketLabel("cache_write")} ${fmtNum(cw)} + ${tokenBucketLabel("cache_read")} ${fmtNum(cr)} = ${fmtNum(bd.basis_value)}`,
     },
     { label: "命中档位", value: bd.segment_label ?? "基础价档" },
     {

@@ -1,7 +1,8 @@
 // 设计系统 Task 6：费用明细行模型——事实→公式→结果→来源、未知与缺价语义。
 import { describe, expect, it } from "vitest";
 import { formatCostBreakdownRows, formatCostBreakdownText } from "./costBreakdown";
-import type { EventCostBreakdown } from "../types";
+import { fmtPriceOrUnknown, formatTieredPricing } from "./tieredPrice";
+import type { EventCostBreakdown, PricingEntry } from "../types";
 
 function bd(over: Partial<EventCostBreakdown> = {}): EventCostBreakdown {
   return {
@@ -83,9 +84,9 @@ describe("costBreakdown 行模型（设计系统 Task 6）", () => {
 
   it("公式行展示 token × 单价/M = 小计；未计价行显式说明", () => {
     const t = text(bd());
-    expect(t).toContain("输入 272,001 × $8.00/M = $2.18");
-    expect(t).toContain("输出 1,000 × $30.00/M = $0.03");
-    expect(t).toContain("缓存写 0 × $10.00/M = $0.00");
+    expect(t).toContain("输入 272,001 × $8/M = $2.18");
+    expect(t).toContain("输出 1,000 × $30/M = $0.0300");
+    expect(t).toContain("缓存写 0 × $10/M = $0.00");
     expect(t).toContain("缓存命中 5,000 token，缺少单价");
   });
 
@@ -130,7 +131,7 @@ describe("costBreakdown 行模型（设计系统 Task 6）", () => {
 
   it("事实区含 prompt 度量式、档位与峰谷条件", () => {
     const t = text(bd());
-    expect(t).toContain("输入 272,001 + 缓存写 0 + 缓存读 5,000 = 277,001");
+    expect(t).toContain("输入 272,001 + 缓存写 0 + 缓存命中 5,000 = 277,001");
     expect(t).toContain("命中档位 >272K");
     expect(t).toContain("时间档 peak（时区 Asia/Shanghai）");
   });
@@ -151,7 +152,7 @@ describe("costBreakdown 行模型（设计系统 Task 6）", () => {
 describe("costBreakdown 三态与排除诊断（缓存读取定价解析计划 Task 5）", () => {
   it("same_as_input 公式行标注「输入价」且单价为解析后的实际数值", () => {
     const t = text(sameAsInputBd());
-    expect(t).toContain("缓存命中 5,000 × 输入价 $8.00/M = $0.0400");
+    expect(t).toContain("缓存命中 5,000 × 输入价 $8/M = $0.0400");
     expect(t).not.toContain("缺少单价");
   });
 
@@ -226,5 +227,68 @@ describe("costBreakdown 溢出分项（修复后复核 F04）", () => {
     });
     expect(t).toContain("输入 272,001 token，金额超出可表示范围");
     expect(t).not.toContain("× $1.00");
+  });
+});
+
+// ── RC07：单价精度在真实设置调用点与费用公式中保留 ──
+// 复核现象：`formatMoney(1.234567, "unit")` 返回 `$1.23`（scenario 被丢弃
+// 且 ≥1 固定两位），设置页单价与公式费率都丢精度。
+describe("单价精度贯通设置与公式（RC07）", () => {
+  it("unit_precision_survives_settings_and_breakdown", () => {
+    // (a) 设置页单价格式化入口（fmtPriceOrUnknown → formatMoney(unit)）
+    expect(fmtPriceOrUnknown(1.234567)).toBe("$1.234567");
+    expect(fmtPriceOrUnknown(12.3456789)).toBe("$12.3456789");
+    expect(fmtPriceOrUnknown(0)).toBe("$0.00");
+    expect(fmtPriceOrUnknown("same_as_input")).toBe("同输入价");
+    expect(fmtPriceOrUnknown(null)).toBe("未知");
+    // 分段/峰谷嵌套视图同样保留精度（单位是 USD / 1M token）
+    const nested: PricingEntry = {
+      prefix: "precise",
+      input: 1.234567,
+      output: 12.3456789,
+      cache_write: null,
+      cache_read: "same_as_input",
+      source: "外置",
+      has_tiered_pricing: true,
+      basis: "prompt_tokens",
+      segments: [
+        {
+          label: ">272K",
+          min_tokens: 272001,
+          max_tokens: null,
+          prices: { input: 1.234567, output: 12.3456789, cache_write: null, cache_read: null },
+        },
+      ],
+    };
+    const lines = formatTieredPricing(nested);
+    expect(lines.some((l) => l.includes("输入 $1.234567") && l.includes("输出 $12.3456789"))).toBe(
+      true,
+    );
+
+    // (b) 费用公式：费率展示完整精度；金额结果仍来自 DTO（不用显示串复算）。
+    const precise = bd({
+      lines: [
+        {
+          kind: "input",
+          tokens: 1_000,
+          unit_price: 1.234567,
+          subtotal: 0.001234567,
+          priced: true,
+          rate_kind: "fixed",
+        },
+        { kind: "output", tokens: 0, unit_price: null, subtotal: 0, priced: false },
+        { kind: "cache_write", tokens: 0, unit_price: null, subtotal: 0, priced: false },
+        { kind: "cache_read", tokens: 0, unit_price: null, subtotal: 0, priced: false },
+      ],
+      cost_usd: 0.001234567,
+      unknown: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+      complete: true,
+    });
+    const t = formatCostBreakdownText(precise);
+    // 费率完整（$1.234567）；金额仍走 request 策略（<1 四位小数），
+    // 关键是**单价**不被舍成 $1.23。
+    expect(t).toContain("输入 1,000 × $1.234567/M = $0.0012");
+    expect(t).toContain("估算合计 $0.0012");
+    expect(t).not.toContain("$1.23/M");
   });
 });

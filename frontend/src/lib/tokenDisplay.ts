@@ -21,3 +21,12 @@ export const TOKEN_BUCKETS: readonly TokenBucketMeta[] = [
 export function tokenBucketLabel(key: TokenBucketKey): string {
   return TOKEN_BUCKETS.find((b) => b.key === key)?.label ?? key;
 }
+
+/**
+ * RC07：单价量纲的**单一来源**——单价是「USD / 1M token」（每百万 token），
+ * 不是每 token 价。列头、说明与费用公式共用同一份文案，避免各处自造单位
+ * 写法（如只写 `$`、`/M` 而不解释量纲）。
+ */
+export const UNIT_PRICE_DENOMINATOR = "USD / 1M token";
+/** 列头用的紧凑写法（与 {@link UNIT_PRICE_DENOMINATOR} 等价）。 */
+export const UNIT_PRICE_SUFFIX = "$/M";

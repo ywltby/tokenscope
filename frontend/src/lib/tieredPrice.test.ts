@@ -11,9 +11,10 @@ describe("fmtPriceOrUnknown（三态单价展示）", () => {
     expect(fmtPriceOrUnknown(undefined)).toBe("未知");
     expect(fmtPriceOrUnknown("same_as_input")).toBe("同输入价");
     expect(fmtPriceOrUnknown(0)).toBe("$0.00");
-    expect(fmtPriceOrUnknown(1.5)).toBe("$1.50");
-    expect(fmtPriceOrUnknown(0.5)).toBe("$0.5000");
-    expect(fmtPriceOrUnknown(0.0000012)).toBe("$0.000001");
+    expect(fmtPriceOrUnknown(1.5)).toBe("$1.5");
+    expect(fmtPriceOrUnknown(0.5)).toBe("$0.5");
+    // RC07：最短可往返十进制表示——1.2e-6 显示为 $0.0000012（不再六位截断）。
+    expect(fmtPriceOrUnknown(0.0000012)).toBe("$0.0000012");
   });
 
   it("rates_line_keeps_three_states：四类单价行携带 same_as_input", () => {
@@ -23,7 +24,7 @@ describe("fmtPriceOrUnknown（三态单价展示）", () => {
       cache_write: 0,
       cache_read: "same_as_input" as RateSpecView,
     };
-    expect(formatRates(rates)).toBe("输入 $8.00 · 输出 $30.00 · 缓存写 $0.00 · 缓存读 同输入价");
+    expect(formatRates(rates)).toBe("输入 $8 · 输出 $30 · 缓存写 $0.00 · 缓存命中 同输入价");
   });
 
   it("tiered_views_keep_rate_specs：嵌套分段/峰谷视图不把缺失标成免费", () => {
@@ -62,7 +63,7 @@ describe("fmtPriceOrUnknown（三态单价展示）", () => {
     } as unknown as PricingEntry;
     const lines = formatTieredPricing(e);
     expect(
-      lines.some((l) => l.includes("大请求") && l.includes("缓存读 未知")),
+      lines.some((l) => l.includes("大请求") && l.includes("缓存命中 未知")),
       `分段缺失分项必须显示"未知"（不是 $0.00）: ${lines.join(" / ")}`,
     ).toBe(true);
     expect(

@@ -68,7 +68,7 @@ export function chartSummaryLines(groups: Group[], by: string): string[] {
     const t = g.tokens;
     const total = t.input + t.output + t.cache_write + t.cache_read;
     lines.push(
-      `${g.label ?? g.key}：输入 ${t.input} · 输出 ${t.output} · 缓存写 ${t.cache_write} · 缓存读 ${t.cache_read} · 合计 ${total}`,
+      `${g.label ?? g.key}：${SERIES.map((s) => `${s.label} ${t[s.name]}`).join(" · ")} · 合计 ${total}`,
     );
   }
   return lines;

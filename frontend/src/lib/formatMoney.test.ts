@@ -37,15 +37,49 @@ describe("formatMoney（UX07 单一金额入口）", () => {
     expect(formatMoney(Number.NaN)).toBe("未知");
   });
 
-  it("unit_price_keeps_its_precision_and_unit：单价精度与金额大值两位", () => {
-    expect(formatMoney(0.5, "unit")).toBe("$0.5000");
-    // 0.0000005 六位舍入仍为零 → 科学记数法（微小非零保护优先于六位）。
-    expect(formatMoney(0.0000005, "unit")).toBe("$5.00e-7");
+  it("unit_price_keeps_its_precision_and_unit：单价保留有效精度，金额保持习惯精度", () => {
+    // RC07：单价 = JS number 的最短可往返十进制有效表示，不强制舍入。
+    expect(formatMoney(0.5, "unit")).toBe("$0.5");
+    expect(formatMoney(0.0000005, "unit")).toBe("$5e-7");
     expect(formatMoney(0.000005, "unit")).toBe("$0.000005");
-    expect(formatMoney(3, "unit")).toBe("$3.00");
+    expect(formatMoney(3, "unit")).toBe("$3");
+    // request/summary 保持既有习惯精度（不受 unit 改动影响）。
     expect(formatMoney(12.5, "summary")).toBe("$12.50");
+    expect(formatMoney(0.0126, "request")).toBe("$0.0126");
+    expect(formatMoney(2.5, "request")).toBe("$2.50");
     // 返回完整 USD 文本（含 $），调用方不得重复拼接。
     expect(formatMoney(1.25).startsWith("$")).toBe(true);
+  });
+
+  // RC07：复核现象——formatMoney(1.234567, "unit") 曾返回 $1.23（scenario
+  // 被丢弃 + ≥1 固定两位），真实单价精度丢失。
+  it("unit_rates_keep_significant_precision：单价格式保留有效精度与单位", () => {
+    const cases: [number, string][] = [
+      [1.234567, "$1.234567"],
+      [12.3456789, "$12.3456789"],
+      [0.123456789, "$0.123456789"],
+      [1e-8, "$1e-8"],
+      [0, "$0.00"],
+      [2.5, "$2.5"],
+      [0.0000012, "$0.0000012"],
+    ];
+    for (const [v, expected] of cases) {
+      expect(formatMoney(v, "unit"), `unit ${v}`).toBe(expected);
+    }
+    // 未知与非法值不得显示成合法价格
+    expect(formatMoney(null, "unit")).toBe("未知");
+    expect(formatMoney(undefined, "unit")).toBe("未知");
+    expect(formatMoney(Number.NaN, "unit")).toBe("未知");
+    expect(formatMoney(Number.POSITIVE_INFINITY, "unit")).toBe("未知");
+    expect(formatMoney(Number.NEGATIVE_INFINITY, "unit")).toBe("未知");
+    // 1e-8 明确非零（不得是 $0.00/$0）
+    const tiny = formatMoney(1e-8, "unit");
+    expect(tiny).not.toBe("$0.00");
+    expect(tiny).not.toBe("$0");
+    // 美元符号只出现一次
+    for (const [, text] of cases) {
+      expect(text.split("$").length - 1, text).toBe(1);
+    }
   });
 });
 

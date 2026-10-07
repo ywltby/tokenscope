@@ -245,3 +245,22 @@ describe("Settings 单价列名称与外部点击（RC06）", () => {
     cell.unmount();
   });
 });
+
+// ── RC07：单价量纲在列头与说明中显式（USD / 1M token） ──
+describe("Settings 单价量纲（RC07）", () => {
+  it("unit_dimension_is_explicit_in_headers_and_help", async () => {
+    mockOk();
+    const settings = mount(Settings, { attachTo: document.body });
+    await flushPromises();
+    const cols = (settings.vm as unknown as { priceColumns: { key: string; title: string }[] })
+      .priceColumns;
+    for (const k of ["input", "output", "cache_write", "cache_read"]) {
+      const title = cols.find((c) => c.key === k)!.title;
+      expect(title, `${k} 列头应标注量纲`).toContain("$/M");
+    }
+    // 表格附近的说明给出完整单位（每百万 token）
+    expect(settings.text()).toContain("USD / 1M token");
+    expect(settings.text()).toContain("每百万 token");
+    settings.unmount();
+  });
+});

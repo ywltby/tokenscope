@@ -271,14 +271,15 @@ describe("Settings 分段价格展示（Task 8）", () => {
   it("缺失分项显示未知，显式 0 显示 $0", () => {
     expect(fmtPriceOrUnknown(null)).toBe("未知");
     expect(fmtPriceOrUnknown(0)).toBe("$0.00");
-    expect(fmtPriceOrUnknown(0.4)).toBe("$0.4000");
-    expect(fmtPriceOrUnknown(8)).toBe("$8.00");
+    // RC07：单价保留最短可往返有效表示（不再强制四位/两位）。
+    expect(fmtPriceOrUnknown(0.4)).toBe("$0.4");
+    expect(fmtPriceOrUnknown(8)).toBe("$8");
   });
 
   it("分段范围与单价行展开；未知分项可见", () => {
     expect(formatSegmentRange(tiered.segments![0])).toBe(">272K：[272,001, ∞)");
-    expect(formatRates(tiered.segments![0].prices)).toContain("输入 $8.00");
-    expect(formatRates(tiered.segments![0].prices)).toContain("缓存读 未知");
+    expect(formatRates(tiered.segments![0].prices)).toContain("输入 $8");
+    expect(formatRates(tiered.segments![0].prices)).toContain("缓存命中 未知");
   });
 
   it("峰谷规则展示标签、时区、时段与星期限制", () => {

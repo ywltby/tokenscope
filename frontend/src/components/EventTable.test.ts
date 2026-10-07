@@ -158,10 +158,10 @@ describe("EventTable 费用悬浮（Task 7）", () => {
 
   it("prompt 度量式 = input + cache_write + cache_read = basis_value", () => {
     expect(text(highTierBd())).toContain(
-      "prompt tokens：输入 272,001 + 缓存写 0 + 缓存读 5,000 = 277,001",
+      "prompt tokens：输入 272,001 + 缓存写 0 + 缓存命中 5,000 = 277,001",
     );
     expect(text(lowTierBd())).toContain(
-      "prompt tokens：输入 100,000 + 缓存写 10,000 + 缓存读 20,000 = 130,000",
+      "prompt tokens：输入 100,000 + 缓存写 10,000 + 缓存命中 20,000 = 130,000",
     );
   });
 
@@ -172,9 +172,9 @@ describe("EventTable 费用悬浮（Task 7）", () => {
 
   it("每个分项展示 token、USD/百万单价与小计；金额无二进制浮点长尾", () => {
     const t = text(highTierBd());
-    expect(t).toContain("输入 272,001 × $8.00/M = $2.18");
-    expect(t).toContain("输出 1,000 × $30.00/M = $0.03");
-    expect(t).toContain("缓存写 0 × $10.00/M = $0.00");
+    expect(t).toContain("输入 272,001 × $8/M = $2.18");
+    expect(t).toContain("输出 1,000 × $30/M = $0.0300");
+    expect(t).toContain("缓存写 0 × $10/M = $0.00");
     expect(t).not.toMatch(/2\.1760080\d*0000/);
     expect(t).not.toContain("0.030000000000000002");
   });

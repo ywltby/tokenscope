@@ -104,14 +104,14 @@ const parts = computed(() => [
               </div>
             </template>
             <div class="hit-tip" @mouseenter="hoverOpen = true" @mouseleave="hoverOpen = false">
-              命中率 = 缓存读 ÷（新增输入 + 缓存读）。<br />
-              缓存读直接复用上下文，消耗 token 数计入分母但费用通常为零或极低。
+              命中率 = 缓存命中 ÷（新增输入 + 缓存命中）。<br />
+              缓存命中直接复用上下文，消耗 token 数计入分母但费用通常为零或极低。
             </div>
           </NTooltip>
           <div class="metric-value ts-num">
             {{ hitRate == null ? "N/A" : `${hitRate.toFixed(1)}%` }}
           </div>
-          <div class="metric-unit">缓存读占比</div>
+          <div class="metric-unit">缓存命中占比</div>
         </div>
       </div>
     </div>

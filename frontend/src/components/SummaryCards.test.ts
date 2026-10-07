@@ -177,7 +177,7 @@ describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
     // 公式只出现在 tooltip 内容节点（.hit-tip）内，标签本身只有结论
     const tip = w.find(".hit-tip");
     expect(tip.exists()).toBe(true);
-    expect(tip.text()).toContain("命中率 = 缓存读");
-    expect(trigger.text()).not.toContain("命中率 = 缓存读");
+    expect(tip.text()).toContain("命中率 = 缓存命中");
+    expect(trigger.text()).not.toContain("命中率 = 缓存命中");
   });
 });
