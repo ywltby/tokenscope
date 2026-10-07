@@ -263,6 +263,30 @@ export function buildFixture(name) {
         return null;
       case "view_cache_save":
         return null;
+      // ── 设置页（UX01 三表量测 / UX06 错误恢复会进入设置页）──
+      case "settings_get":
+        return { close_action: null, price_auto_sync: true };
+      case "settings_set_close_action":
+        return null;
+      case "settings_set_price_auto_sync":
+        return true;
+      case "cache_stats":
+      case "refresh_cache":
+        return { path: "C:/Users/dev/AppData/Roaming/tokenscope/cache.db", files: 3, events: 120 };
+      case "pricing_entries":
+        return pricingView();
+      case "autostart_status":
+        return false;
+      case "autostart_set":
+        return true;
+      case "source_config_set":
+        return null;
+      case "sync_pricing_openrouter":
+        return [];
+      case "open_settings_file":
+        return "C:/Users/dev/AppData/Roaming/tokenscope/settings.toml";
+      case "open_pricing_file":
+        return "C:/Users/dev/AppData/Roaming/tokenscope/pricing.toml";
       default:
         return undefined;
     }

@@ -123,7 +123,7 @@ const shortcutActive = (sc: { fromOffset: number }): boolean => {
         <span class="range-trigger-label">{{ label }}</span>
       </button>
     </template>
-    <div class="range-panel ts-glass">
+    <div class="range-panel">
       <div class="shortcut-row">
         <NButton
           v-for="sc in shortcuts"
@@ -180,7 +180,11 @@ const shortcutActive = (sc: { fromOffset: number }): boolean => {
   max-width: min(380px, calc(100vw - 32px));
   padding: var(--ts-space-3);
   border-radius: var(--ts-radius-popover);
+  /* UX01：浮层配方 85% elevated + 16px 模糊（修复前误用 ts-glass 的 20px，
+     且外层实色使玻璃叠在实色上失去意义——外层已改 85% 半透明） */
   background-color: var(--ts-surface-elevated);
+  -webkit-backdrop-filter: var(--ts-glass-blur-popover);
+  backdrop-filter: var(--ts-glass-blur-popover);
 }
 
 /* 触发按钮与筛选行分段控件同一族（DESIGN.md §5 筛选栏） */

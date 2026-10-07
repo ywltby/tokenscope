@@ -17,7 +17,7 @@ import { useTheme } from "../composables/theme";
 import { fmtNum, type Group } from "../types";
 import { buildBarChartData, chartStateText, chartSummaryLines, fullLabels } from "../lib/chartData";
 import { buildTooltipNode } from "../lib/chartTooltip";
-import { chartTokens } from "../styles/chartTheme";
+import { chartTokens, POPOVER_BLUR_CSS } from "../styles/chartTheme";
 
 /// 数值轴紧凑刻度（token 数：万/亿）
 function fmtCompact(v: number): string {
@@ -49,7 +49,9 @@ function canvasHeight(count: number): number {
   return isDay.value ? 320 : Math.min(MAX_H, Math.max(320, count * 34 + 70));
 }
 
-function buildDataZoom(categories: string[]): { type: "inside" | "slider"; [k: string]: unknown }[] | undefined {
+function buildDataZoom(
+  categories: string[],
+): { type: "inside" | "slider"; [k: string]: unknown }[] | undefined {
   if (isDay.value) {
     return categories.length > 60 ? [{ type: "inside", xAxisIndex: 0 }] : undefined;
   }
@@ -111,6 +113,8 @@ function buildOption(zoom?: { start?: number; end?: number }[] | null): echarts.
       borderColor: t.tooltipBorder,
       borderWidth: 1,
       textStyle: { color: t.text },
+      // UX01：ECharts HTML tooltip 走同一浮层配方（16px 模糊 + 12px 圆角）
+      extraCssText: POPOVER_BLUR_CSS,
       valueFormatter: (v: unknown) => fmtNum(Number(v ?? 0)),
       formatter: tooltipFormatter,
     },

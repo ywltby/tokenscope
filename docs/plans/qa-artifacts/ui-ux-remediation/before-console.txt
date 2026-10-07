@@ -1,0 +1,168 @@
+FAIL normal-light-1280x820
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+  ✓ segmented_outer_height_is_32  (32,32,32,32)
+  ✓ thumb_tracks_option_bounds  (50/50,66/66,66/66,50/50)
+  ✗ filter_controls_have_equal_outer_height  (32,32,32,28)
+  ✗ date_shortcuts_do_not_clip_text  (当天:ok,近2天:ok,近7天:ok,近14天:CLIP,近30天:CLIP)
+  ✗ date_panel_matches_elevated_contract  (rgba(255, 255, 255, 0.85) blur(20px) saturate(1.8))
+  ✗ three_tables_use_contract_typography  (th 14px/500 td 14px)
+  ✗ total_row_is_semibold  (400,400,400,400,400,400,400,400)
+  ✗ floating_material_matches_elevated_contract  (rgb(255, 255, 255) blur(16px) saturate(1.5))
+  ✗ cost_popover_outer_width_is_bounded  (w=512 box=content-box)
+FAIL normal-light-980x620
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+  ✓ segmented_outer_height_is_32  (32,32,32,32)
+  ✓ thumb_tracks_option_bounds  (50/50,66/66,66/66,50/50)
+  ✗ filter_controls_have_equal_outer_height  (32,32,32,28)
+  ✗ date_shortcuts_do_not_clip_text  (当天:ok,近2天:ok,近7天:ok,近14天:CLIP,近30天:CLIP)
+  ✗ date_panel_matches_elevated_contract  (rgba(255, 255, 255, 0.85) blur(20px) saturate(1.8))
+  ✗ three_tables_use_contract_typography  (th 14px/500 td 14px)
+  ✗ total_row_is_semibold  (400,400,400,400,400,400,400,400)
+  ✗ floating_material_matches_elevated_contract  (rgb(255, 255, 255) blur(16px) saturate(1.5))
+  ✗ cost_popover_outer_width_is_bounded  (w=512 box=content-box)
+FAIL normal-dark-1280x820
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+  ✓ segmented_outer_height_is_32  (32,32,32,32)
+  ✓ thumb_tracks_option_bounds  (50/50,66/66,66/66,50/50)
+  ✗ filter_controls_have_equal_outer_height  (32,32,32,28)
+  ✗ date_shortcuts_do_not_clip_text  (当天:ok,近2天:ok,近7天:ok,近14天:CLIP,近30天:CLIP)
+  ✗ date_panel_matches_elevated_contract  (rgba(44, 44, 46, 0.85) blur(20px) saturate(1.8))
+  ✗ three_tables_use_contract_typography  (th 14px/500 td 14px)
+  ✗ total_row_is_semibold  (400,400,400,400,400,400,400,400)
+  ✗ floating_material_matches_elevated_contract  (rgb(44, 44, 46) blur(16px) saturate(1.5))
+  ✗ cost_popover_outer_width_is_bounded  (w=512 box=content-box)
+FAIL normal-dark-980x620
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+  ✓ segmented_outer_height_is_32  (32,32,32,32)
+  ✓ thumb_tracks_option_bounds  (50/50,66/66,66/66,50/50)
+  ✗ filter_controls_have_equal_outer_height  (32,32,32,28)
+  ✗ date_shortcuts_do_not_clip_text  (当天:ok,近2天:ok,近7天:ok,近14天:CLIP,近30天:CLIP)
+  ✗ date_panel_matches_elevated_contract  (rgba(44, 44, 46, 0.85) blur(20px) saturate(1.8))
+  ✗ three_tables_use_contract_typography  (th 14px/500 td 14px)
+  ✗ total_row_is_semibold  (400,400,400,400,400,400,400,400)
+  ✗ floating_material_matches_elevated_contract  (rgb(44, 44, 46) blur(16px) saturate(1.5))
+  ✗ cost_popover_outer_width_is_bounded  (w=512 box=content-box)
+PASS empty-light-1280x820
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+PASS empty-light-980x620
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+PASS empty-dark-1280x820
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+PASS empty-dark-980x620
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+PASS unknown-price-light-1280x820
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+PASS unknown-price-light-980x620
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+PASS unknown-price-dark-1280x820
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+PASS unknown-price-dark-980x620
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+PASS partial-price-light-1280x820
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+PASS partial-price-light-980x620
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+PASS partial-price-dark-1280x820
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+PASS partial-price-dark-980x620
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+PASS long-text-light-1280x820
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+  ✓ page_has_no_horizontal_overflow  (1280 vs 1280)
+PASS long-text-light-980x620
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+  ✓ page_has_no_horizontal_overflow  (980 vs 980)
+PASS long-text-dark-1280x820
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+  ✓ page_has_no_horizontal_overflow  (1280 vs 1280)
+PASS long-text-dark-980x620
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+  ✓ page_has_no_horizontal_overflow  (980 vs 980)
+PASS multi-category-light-1280x820
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+  ✓ page_has_no_horizontal_overflow  (1280 vs 1280)
+PASS multi-category-light-980x620
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+  ✓ page_has_no_horizontal_overflow  (980 vs 980)
+PASS multi-category-dark-1280x820
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+  ✓ page_has_no_horizontal_overflow  (1280 vs 1280)
+PASS multi-category-dark-980x620
+  ✓ real_app_fixture_boots_without_ipc_leak
+  ✓ no_unhandled_rejection_or_page_error
+  ✓ no_console_error
+  ✓ no_external_request
+  ✓ page_has_no_horizontal_overflow  (980 vs 980)
+
+PASS baseline_records_contract_violations (24 个场景，4 个契约违例)
+
+baseline 完成：证据写入 docs/plans/qa-artifacts/ui-ux-remediation/before

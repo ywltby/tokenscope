@@ -189,8 +189,10 @@ const sourceLines = computed(() =>
 :deep(.total-row td) {
   border-top: 1px solid var(--ts-separator-strong);
 }
-.total-row strong {
-  font-weight: 700;
+/* UX01：合计行字重 600 命中真实单元格（修复前是死选择器 .total-row strong，
+   实际合计单元格由 render 输出 span，字重仍是 400） */
+:deep(.total-row td) {
+  font-weight: 600;
 }
 .table-hint {
   font-size: 12px;

@@ -289,7 +289,7 @@ describe("EventTable 费用浮层（设计系统 Task 6）", () => {
     expect((tooltipVnode(w).props as Record<string, unknown>).show).toBe(false);
   });
 
-  it("浮层视觉：480px 上限 + 16px 玻璃模糊 + 公式区实色衬底", () => {
+  it("浮层视觉：480px 上限（border-box）+ 16px 玻璃模糊 + 公式区实色衬底", () => {
     const w = mount(EventTable, {
       props: {
         list: list([row({ cost_usd: 2.206008, cost_breakdown: highTierBd() })], 1),
@@ -298,7 +298,10 @@ describe("EventTable 费用浮层（设计系统 Task 6）", () => {
     });
     const vnode = tooltipVnode(w);
     const style = String((vnode.props as Record<string, unknown>).style);
-    expect(style).toContain("max-width: 480px");
+    // UX01：盒模型按 border-box 计算（修复前 content-box 下实测外框 512px），
+    // 长文本换行且外框受视口约束
+    expect(style).toContain("box-sizing: border-box");
+    expect(style).toContain("max-width: min(480px, calc(100vw - 32px))");
     expect(style).toContain("var(--ts-glass-blur-popover)");
     const content = (vnode.children as Record<string, () => VNode>).default();
     expect(JSON.stringify(content)).toContain("bd-formula");

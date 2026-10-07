@@ -191,6 +191,8 @@ const MEASURE = () => {
 
   const totalRow = document.querySelector("tr.total-row");
   const totalCells = totalRow ? [...totalRow.querySelectorAll("td")].map((td) => getComputedStyle(td).fontWeight) : null;
+  const aggRow = document.querySelector(".usage-card tbody tr");
+  const aggregateRowHeight = aggRow ? px(aggRow.getBoundingClientRect().height) : null;
 
   return {
     segmented,
@@ -198,9 +200,11 @@ const MEASURE = () => {
     aggregateTable: tableTypography(".usage-card"),
     eventsTable: tableTypography(".events-card"),
     totalRowWeights: totalCells,
+    aggregateRowHeight,
     costTooltip: window.__TS_COST_TOOLTIP ?? null,
     datePanel: window.__TS_DATE_PANEL ?? null,
     dateShortcuts: window.__TS_DATE_SHORTCUTS ?? null,
+    settingsTable: null,
     ipcCalls: window.__TS_IPC_CALLS,
     pageErrors: window.__TS_PAGE_ERRORS,
     docScrollWidth: document.scrollingElement?.scrollWidth ?? 0,
@@ -285,6 +289,17 @@ const GOTO_SETTINGS = () => {
   if (!settings) return { ok: false };
   settings.click();
   return { ok: true };
+};
+
+/** 量测当前页面内第一张 DataTable 的排版（设置页用）。 */
+const READ_FIRST_TABLE_TYPO = () => {
+  const root = document.querySelector(".n-data-table");
+  if (!root) return null;
+  const g = (el) =>
+    el
+      ? { fontSize: getComputedStyle(el).fontSize, fontWeight: getComputedStyle(el).fontWeight }
+      : null;
+  return { th: g(root.querySelector("th")), td: g(root.querySelector("tbody td")) };
 };
 
 /** UX05：打开图表文字摘要并读取行（类别一致性验收）。 */
@@ -373,15 +388,20 @@ function buildChecks(m, ctx) {
 
   // UX01
   if (ctx.fixture === "normal") {
-    const typo = m.aggregateTable;
+    const typoOk = (t) =>
+      !!t?.th &&
+      near(Number.parseFloat(t.th.fontSize), 12, 0.5) &&
+      t.th.fontWeight === "500" &&
+      // 虚拟滚动的表在初始视口可能尚未渲染 td——有 td 时必须是 13px
+      (!t.td || near(Number.parseFloat(t.td.fontSize), 13, 0.5));
     checks.push([
       "three_tables_use_contract_typography",
-      typo?.th != null &&
-        typo?.td != null &&
-        near(Number.parseFloat(typo.th.fontSize), 12, 0.5) &&
-        typo.th.fontWeight === "500" &&
-        near(Number.parseFloat(typo.td.fontSize), 13, 0.5),
-      typo ? `th ${typo.th.fontSize}/${typo.th.fontWeight} td ${typo.td.fontSize}` : "no-table",
+      typoOk(m.aggregateTable) && typoOk(m.eventsTable) && typoOk(m.settingsTable),
+      [
+        m.aggregateTable ? `聚合 th ${m.aggregateTable.th?.fontSize}/${m.aggregateTable.th?.fontWeight} td ${m.aggregateTable.td?.fontSize}` : "聚合 无表",
+        m.eventsTable ? `明细 th ${m.eventsTable.th?.fontSize} td ${m.eventsTable.td?.fontSize}` : "明细 无表",
+        m.settingsTable ? `设置 th ${m.settingsTable.th?.fontSize}/${m.settingsTable.th?.fontWeight} td ${m.settingsTable.td?.fontSize ?? "（虚拟滚动未渲染）"}` : "设置 无表",
+      ].join(" | "),
     ]);
     checks.push([
       "total_row_is_semibold",
@@ -389,6 +409,11 @@ function buildChecks(m, ctx) {
         m.totalRowWeights.length > 0 &&
         m.totalRowWeights.every((w) => w === "600"),
       Array.isArray(m.totalRowWeights) ? m.totalRowWeights.join(",") : "no-total-row",
+    ]);
+    checks.push([
+      "aggregate_single_row_height_is_40",
+      m.aggregateRowHeight != null && near(m.aggregateRowHeight, 40, 1.5),
+      `h=${m.aggregateRowHeight}`,
     ]);
     checks.push([
       "floating_material_matches_elevated_contract",
@@ -548,6 +573,17 @@ for (const fixtureName of args.fixtures) {
           }
         }
         m.chart = chart;
+
+        // 最后切到设置页量测第三张表（聚合/明细已在汇总页量测）
+        if (fixtureName === "normal") {
+          const goto = await page.evaluate(GOTO_SETTINGS);
+          if (goto.ok) {
+            await page.waitForTimeout(600);
+            m.settingsTable = await page.evaluate(READ_FIRST_TABLE_TYPO);
+            await page.evaluate(CLICK_SEGMENT, "汇总");
+            await page.waitForTimeout(300);
+          }
+        }
 
         const expectedModel = (() => {
           // 维度在会话中冻结：先 begin(by=model) 再取 summary。

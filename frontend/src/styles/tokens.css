@@ -37,6 +37,11 @@
   --ts-warning: #b25000;
   --ts-error: #d70015;
   --ts-info: #2f6fb0;
+  /* D1：软状态背景（两主题各自维护，不再散落 rgba 字面量） */
+  --ts-success-soft: rgba(30, 123, 52, 0.1);
+  --ts-warning-soft: rgba(178, 80, 0, 0.1);
+  --ts-error-soft: rgba(215, 0, 21, 0.1);
+  --ts-info-soft: rgba(47, 111, 176, 0.1);
 
   /* 图表系列（固定顺序：输入/输出/缓存写/缓存读） */
   --ts-chart-input: #4c8df6;
@@ -122,6 +127,10 @@
   --ts-warning: #ff9f0a;
   --ts-error: #ff6961;
   --ts-info: #64d2ff;
+  --ts-success-soft: rgba(48, 209, 88, 0.16);
+  --ts-warning-soft: rgba(255, 159, 10, 0.16);
+  --ts-error-soft: rgba(255, 105, 97, 0.16);
+  --ts-info-soft: rgba(100, 210, 255, 0.16);
 
   --ts-chart-input: #64a0ff;
   --ts-chart-output: #ffb35c;
@@ -304,18 +313,44 @@ body {
   color: var(--ts-accent);
 }
 .ts-pill-warning {
-  background: rgba(178, 80, 0, 0.1);
+  background: var(--ts-warning-soft);
   color: var(--ts-warning);
 }
-:root[data-theme="dark"] .ts-pill-warning {
-  background: rgba(255, 159, 10, 0.16);
-}
 .ts-pill-success {
-  background: rgba(30, 123, 52, 0.1);
+  background: var(--ts-success-soft);
   color: var(--ts-success);
 }
-:root[data-theme="dark"] .ts-pill-success {
-  background: rgba(48, 209, 88, 0.16);
+.ts-pill-error {
+  background: var(--ts-error-soft);
+  color: var(--ts-error);
+}
+
+/*
+ * UX01：Naive 浮层统一材质——85% elevated + 16px 模糊 + 12px 圆角 + 规范阴影
+ * （DESIGN.md §2）。Popover / Tooltip / Select 菜单 / 日期面板共用同一外壳配方；
+ * 不支持的平台由 @supports 降级为 95% 实色（tokens.css 顶部）。
+ */
+.n-popover,
+.n-tooltip,
+.n-base-select-menu,
+.n-date-panel {
+  -webkit-backdrop-filter: var(--ts-glass-blur-popover);
+  backdrop-filter: var(--ts-glass-blur-popover);
+}
+
+/*
+ * UX01：DataTable 局部排版（DESIGN.md §3/§5）——表头 12px/500/1.4/secondary，
+ * 正文 13px/1.45/text。DataTable 主题只有单一 fontSize，表头字号在此按
+ * DataTable 作用域覆盖（不改 common.fontSizeSmall，不影响其它 small 控件）。
+ */
+.n-data-table th {
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 500;
+}
+.n-data-table td {
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 /* 标题行状态胶囊（已更新 / 刷新中 / 缓存数据）：自带状态圆点，

@@ -51,6 +51,9 @@ const SERIES_COLORS: Record<ThemeMode, Record<TokenKind, string>> = {
 export function chartTokens(mode: ThemeMode): ChartTokens {
   const dark = mode === "dark";
   const colors = SERIES_COLORS[mode];
+  // UX01（DESIGN.md §2/§5）：网格线映射 --ts-separator；tooltip 用 elevated
+  // 浮层（85%），与 Naive 浮层同一配方。
+  const separator = dark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.08)";
   return {
     series: SERIES_META.map(([key, label]) => ({
       key,
@@ -61,13 +64,18 @@ export function chartTokens(mode: ThemeMode): ChartTokens {
     text: dark ? "#F5F5F7" : "#1D1D1F",
     textSecondary: dark ? "#AEAEB2" : "#515154",
     textMuted: dark ? "#8E8E93" : "#6E6E73",
-    separator: dark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.08)",
-    splitLine: dark ? "rgba(255, 255, 255, 0.06)" : "rgba(0, 0, 0, 0.06)",
-    tooltipBg: dark ? "#2C2C2E" : "#FFFFFF",
+    separator,
+    splitLine: separator,
+    tooltipBg: dark ? "rgba(44, 44, 46, 0.85)" : "rgba(255, 255, 255, 0.85)",
     tooltipBorder: dark ? "rgba(255, 255, 255, 0.16)" : "rgba(0, 0, 0, 0.14)",
     legendText: dark ? "#AEAEB2" : "#515154",
   };
 }
+
+/// UX01：浮层模糊配方（16px）——ECharts HTML tooltip 经 extraCssText 消费，
+/// 与 Naive Popover/Tooltip 的 backdrop-filter 配方同值。
+export const POPOVER_BLUR_CSS =
+  "backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-radius: 12px;";
 
 /// 供 echarts.init(theme) / registerTheme 使用的主题对象（无默认调色板）。
 export function echartsThemeObject(mode: ThemeMode) {

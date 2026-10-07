@@ -34,7 +34,8 @@ const PALETTES: Record<ThemeMode, TsPalette> = {
     canvas: "#F5F5F7",
     surfaceGlass: "rgba(255, 255, 255, 0.75)",
     surface: "#FFFFFF",
-    elevated: "#FFFFFF",
+    // UX01：浮层外壳 = 85% elevated（与 tokens.css --ts-surface-elevated 一致）
+    elevated: "rgba(255, 255, 255, 0.85)",
     fill: "rgba(118, 118, 128, 0.12)",
     fillHover: "rgba(118, 118, 128, 0.08)",
     separator: "rgba(0, 0, 0, 0.08)",
@@ -55,7 +56,7 @@ const PALETTES: Record<ThemeMode, TsPalette> = {
     canvas: "#0F0F11",
     surfaceGlass: "rgba(28, 28, 30, 0.75)",
     surface: "#1C1C1E",
-    elevated: "#2C2C2E",
+    elevated: "rgba(44, 44, 46, 0.85)",
     fill: "rgba(118, 118, 128, 0.24)",
     fillHover: "rgba(118, 118, 128, 0.16)",
     separator: "rgba(255, 255, 255, 0.08)",
@@ -79,6 +80,10 @@ const PALETTES: Record<ThemeMode, TsPalette> = {
 export function naiveThemeOverrides(mode: ThemeMode): GlobalThemeOverrides {
   const c = PALETTES[mode];
   const isDark = mode === "dark";
+  // 浮层规范阴影（DESIGN.md §2：浅色 0 12px 48px rgba(0,0,0,.15) / 深色 .6）
+  const shadowElevated = isDark
+    ? "0 12px 48px rgba(0, 0, 0, 0.6)"
+    : "0 12px 48px rgba(0, 0, 0, 0.15)";
   return {
     common: {
       // 画布透明：body 的氛围光斑由 tokens.css 绘制，NGlobalStyle 不得盖掉
@@ -165,17 +170,27 @@ export function naiveThemeOverrides(mode: ThemeMode): GlobalThemeOverrides {
       thPaddingSmall: "10px 12px",
       tdPaddingMedium: "12px 16px",
       tdPaddingSmall: "10px 12px",
+      // UX01（DESIGN.md §3/§5）：表格正文 13px/1.45/primary，表头 12px/500/
+      // secondary。仅局部覆盖 DataTable，不动 common.fontSizeSmall。
+      fontSizeSmall: "13px",
+      lineHeight: "1.45",
       thFontWeight: "500",
+      thTextColor: c.textSecondary,
+      tdTextColor: c.text,
     },
     Tooltip: {
       color: c.elevated,
       textColor: c.text,
       borderRadius: "12px",
       padding: "12px 16px",
+      boxShadow: shadowElevated,
     },
     Popover: {
+      color: c.elevated,
+      textColor: c.text,
       borderRadius: "12px",
       padding: "12px 16px",
+      boxShadow: shadowElevated,
     },
     Alert: {
       borderRadius: "12px",

@@ -125,8 +125,10 @@ const columns = computed<DataTableColumn[]>(() => [
           show: open,
           // 任务 6：elevated 玻璃浮层——480px 上限 + 16px 模糊 + 12px 圆角
           //（背景色来自 naiveTheme Tooltip.color = --ts-surface-elevated 85%）
+          // UX01：盒模型按 border-box 计算，长文本换行；外框宽度受视口约束
+          //（修复前 content-box 下 480 + padding + border 实测 512px）
           style:
-            "max-width: 480px; backdrop-filter: var(--ts-glass-blur-popover); -webkit-backdrop-filter: var(--ts-glass-blur-popover); border-radius: var(--ts-radius-popover);",
+            "box-sizing: border-box; max-width: min(480px, calc(100vw - 32px)); backdrop-filter: var(--ts-glass-blur-popover); -webkit-backdrop-filter: var(--ts-glass-blur-popover); border-radius: var(--ts-radius-popover);",
           onClickoutside: closeIt,
         },
         {

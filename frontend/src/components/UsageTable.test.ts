@@ -4,6 +4,8 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import UsageTable from "./UsageTable.vue";
+// Vite ?raw：直接取 SFC 源文本做样式契约断言（项目无 @types/node）
+import usageTableSource from "./UsageTable.vue?raw";
 import type { Group, SummaryReport } from "../types";
 
 function group(key: string, unknownTokens?: Partial<Group["unknown_tokens"]>): Group {
@@ -126,5 +128,21 @@ describe("UsageTable 表格语义（设计系统 Task 5）", () => {
       JSON.stringify(v.children ?? "").includes("›");
     expect(hasArrow(normal)).toBe(true);
     expect(hasArrow(total)).toBe(false);
+  });
+});
+
+// UX01：合计行字重 600 必须命中真实单元格（修复前是死选择器 .total-row strong，
+// 实际合计单元格由 render 输出 span，字重仍为 400）。
+describe("UsageTable 合计行字重（UX01）", () => {
+  it("total_row_is_semibold：合计行真实 td 字重 600，上分隔线保留", () => {
+    const src = usageTableSource;
+    // 真实 td 规则（:deep(.total-row td)）合并后同时含上分隔线与 600 字重
+    const bodies = [...src.matchAll(/:deep\(\.total-row td\)\s*\{([^}]*)\}/g)].map((m) => m[1]);
+    expect(bodies.length, "必须存在命中真实 td 的合计行规则").toBeGreaterThan(0);
+    const merged = bodies.join("\n");
+    expect(merged).toContain("border-top: 1px solid var(--ts-separator-strong)");
+    expect(merged).toContain("font-weight: 600");
+    // 不再有死选择器 .total-row strong
+    expect(src).not.toMatch(/\.total-row strong\s*\{/);
   });
 });
