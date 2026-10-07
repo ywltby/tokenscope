@@ -1,8 +1,58 @@
 {
   "phase": "verify",
-  "generated_at": "2026-10-07T14:55:02.747Z",
+  "generated_at": "2026-10-07T15:04:09.734Z",
   "url": "http://127.0.0.1:1439",
   "browserVersion": "148.0.7778.96",
+  "prepaint": [
+    {
+      "label": "light-over-dark-system",
+      "ok": true,
+      "expect": "light",
+      "prepaint": "light",
+      "settled": "light",
+      "mainLoadedAtPrepaint": false
+    },
+    {
+      "label": "dark-over-light-system",
+      "ok": true,
+      "expect": "dark",
+      "prepaint": "dark",
+      "settled": "dark",
+      "mainLoadedAtPrepaint": false
+    },
+    {
+      "label": "system-follows-dark",
+      "ok": true,
+      "expect": "dark",
+      "prepaint": "dark",
+      "settled": "dark",
+      "mainLoadedAtPrepaint": false
+    },
+    {
+      "label": "system-follows-light",
+      "ok": true,
+      "expect": "light",
+      "prepaint": "light",
+      "settled": "light",
+      "mainLoadedAtPrepaint": false
+    },
+    {
+      "label": "missing-pref-follows-dark-system",
+      "ok": true,
+      "expect": "dark",
+      "prepaint": "dark",
+      "settled": "dark",
+      "mainLoadedAtPrepaint": false
+    },
+    {
+      "label": "invalid-pref-follows-dark-system",
+      "ok": true,
+      "expect": "dark",
+      "prepaint": "dark",
+      "settled": "dark",
+      "mainLoadedAtPrepaint": false
+    }
+  ],
   "results": [
     {
       "label": "normal-light-1280x820",
@@ -525,7 +575,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:52:57.083Z",
+                "saved_at": "2026-10-07T15:02:02.721Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -1467,7 +1517,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:53:03.561Z",
+                "saved_at": "2026-10-07T15:02:08.601Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -2409,7 +2459,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:53:09.528Z",
+                "saved_at": "2026-10-07T15:02:14.839Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -3351,7 +3401,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:53:15.676Z",
+                "saved_at": "2026-10-07T15:02:20.756Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -4182,7 +4232,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:53:21.587Z",
+                "saved_at": "2026-10-07T15:02:26.273Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -4906,7 +4956,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:53:24.078Z",
+                "saved_at": "2026-10-07T15:02:28.901Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -5630,7 +5680,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:53:26.776Z",
+                "saved_at": "2026-10-07T15:02:31.416Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -6354,7 +6404,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:53:29.476Z",
+                "saved_at": "2026-10-07T15:02:34.034Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -7121,7 +7171,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:53:33.830Z",
+                "saved_at": "2026-10-07T15:02:36.715Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -7945,7 +7995,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:53:39.504Z",
+                "saved_at": "2026-10-07T15:02:39.975Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -8769,7 +8819,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:53:44.420Z",
+                "saved_at": "2026-10-07T15:02:43.205Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -9593,7 +9643,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:53:49.580Z",
+                "saved_at": "2026-10-07T15:02:46.551Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -10417,7 +10467,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:53:55.080Z",
+                "saved_at": "2026-10-07T15:02:49.790Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -11241,7 +11291,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:54:00.077Z",
+                "saved_at": "2026-10-07T15:02:53.070Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -12065,7 +12115,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:54:04.145Z",
+                "saved_at": "2026-10-07T15:02:56.272Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -12889,7 +12939,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:54:08.427Z",
+                "saved_at": "2026-10-07T15:02:59.586Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -13718,7 +13768,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:54:11.882Z",
+                "saved_at": "2026-10-07T15:03:02.867Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -14547,7 +14597,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:54:15.540Z",
+                "saved_at": "2026-10-07T15:03:06.068Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -15376,7 +15426,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:54:18.724Z",
+                "saved_at": "2026-10-07T15:03:09.339Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -16205,7 +16255,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:54:22.013Z",
+                "saved_at": "2026-10-07T15:03:12.679Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -17039,7 +17089,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:54:25.533Z",
+                "saved_at": "2026-10-07T15:03:15.981Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -18517,7 +18567,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:54:30.592Z",
+                "saved_at": "2026-10-07T15:03:21.050Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -19995,7 +20045,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:54:35.884Z",
+                "saved_at": "2026-10-07T15:03:26.006Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",
@@ -21473,7 +21523,7 @@
             "args": {
               "value": {
                 "v": 6,
-                "saved_at": "2026-10-07T14:54:40.975Z",
+                "saved_at": "2026-10-07T15:03:30.981Z",
                 "filters": {
                   "by": "day",
                   "agent": "all",

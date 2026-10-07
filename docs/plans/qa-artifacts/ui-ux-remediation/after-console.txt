@@ -177,5 +177,13 @@ PASS multi-category-dark-980x620
 
 PASS baseline_records_contract_violations (24 个场景，0 个契约违例)
 
+PASS prepaint_theme_matches_preference
+  ✓ light-over-dark-system expect=light prepaint=light settled=light mainLoaded=false
+  ✓ dark-over-light-system expect=dark prepaint=dark settled=dark mainLoaded=false
+  ✓ system-follows-dark expect=dark prepaint=dark settled=dark mainLoaded=false
+  ✓ system-follows-light expect=light prepaint=light settled=light mainLoaded=false
+  ✓ missing-pref-follows-dark-system expect=dark prepaint=dark settled=dark mainLoaded=false
+  ✓ invalid-pref-follows-dark-system expect=dark prepaint=dark settled=dark mainLoaded=false
+
 verify 完成：证据写入 docs/plans/qa-artifacts/ui-ux-remediation/after
 EXIT=0
