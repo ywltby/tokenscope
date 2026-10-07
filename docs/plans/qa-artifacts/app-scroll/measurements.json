@@ -1,0 +1,182 @@
+[
+  {
+    "label": "1280x820-light",
+    "ok": true,
+    "clientHeight": 820,
+    "scrollHeight": 2305,
+    "scrollTopAfterSet": 400,
+    "docScrollTop": 0,
+    "docScrollHeight": 820,
+    "viewportH": 820,
+    "navTopBefore": 0,
+    "navTopAfter": 0,
+    "containerTop": 0,
+    "contentTop": -295.15625,
+    "noticeVisible": true,
+    "checks": [
+      [
+        "容器高度受视口约束",
+        true
+      ],
+      [
+        "容器存在内部可滚动内容",
+        true
+      ],
+      [
+        "scrollTop=400 真实内部滚动",
+        true
+      ],
+      [
+        "document 无第二条主滚动",
+        true
+      ],
+      [
+        "导航吸顶（top=容器顶边±1）",
+        true
+      ],
+      [
+        "内容随滚动位移（不被导航遮挡后消失）",
+        true
+      ],
+      [
+        "通知条可见",
+        true
+      ]
+    ]
+  },
+  {
+    "label": "1280x820-dark",
+    "ok": true,
+    "clientHeight": 820,
+    "scrollHeight": 2305,
+    "scrollTopAfterSet": 400,
+    "docScrollTop": 0,
+    "docScrollHeight": 820,
+    "viewportH": 820,
+    "navTopBefore": 0,
+    "navTopAfter": 0,
+    "containerTop": 0,
+    "contentTop": -295.15625,
+    "noticeVisible": true,
+    "checks": [
+      [
+        "容器高度受视口约束",
+        true
+      ],
+      [
+        "容器存在内部可滚动内容",
+        true
+      ],
+      [
+        "scrollTop=400 真实内部滚动",
+        true
+      ],
+      [
+        "document 无第二条主滚动",
+        true
+      ],
+      [
+        "导航吸顶（top=容器顶边±1）",
+        true
+      ],
+      [
+        "内容随滚动位移（不被导航遮挡后消失）",
+        true
+      ],
+      [
+        "通知条可见",
+        true
+      ]
+    ]
+  },
+  {
+    "label": "980x620-light",
+    "ok": true,
+    "clientHeight": 620,
+    "scrollHeight": 2305,
+    "scrollTopAfterSet": 400,
+    "docScrollTop": 0,
+    "docScrollHeight": 620,
+    "viewportH": 620,
+    "navTopBefore": 0,
+    "navTopAfter": 0,
+    "containerTop": 0,
+    "contentTop": -295.15625,
+    "noticeVisible": true,
+    "checks": [
+      [
+        "容器高度受视口约束",
+        true
+      ],
+      [
+        "容器存在内部可滚动内容",
+        true
+      ],
+      [
+        "scrollTop=400 真实内部滚动",
+        true
+      ],
+      [
+        "document 无第二条主滚动",
+        true
+      ],
+      [
+        "导航吸顶（top=容器顶边±1）",
+        true
+      ],
+      [
+        "内容随滚动位移（不被导航遮挡后消失）",
+        true
+      ],
+      [
+        "通知条可见",
+        true
+      ]
+    ]
+  },
+  {
+    "label": "980x620-dark",
+    "ok": true,
+    "clientHeight": 620,
+    "scrollHeight": 2305,
+    "scrollTopAfterSet": 400,
+    "docScrollTop": 0,
+    "docScrollHeight": 620,
+    "viewportH": 620,
+    "navTopBefore": 0,
+    "navTopAfter": 0,
+    "containerTop": 0,
+    "contentTop": -295.15625,
+    "noticeVisible": true,
+    "checks": [
+      [
+        "容器高度受视口约束",
+        true
+      ],
+      [
+        "容器存在内部可滚动内容",
+        true
+      ],
+      [
+        "scrollTop=400 真实内部滚动",
+        true
+      ],
+      [
+        "document 无第二条主滚动",
+        true
+      ],
+      [
+        "导航吸顶（top=容器顶边±1）",
+        true
+      ],
+      [
+        "内容随滚动位移（不被导航遮挡后消失）",
+        true
+      ],
+      [
+        "通知条可见",
+        true
+      ]
+    ]
+  }
+]

@@ -43,6 +43,16 @@
 - [x] 滚动页面：吸顶导航可见模糊，内容从导航下方经过透出（深浅两主题均验证）
       （2026-10-07 修正：原实现 header 在滚动容器外，内容不会从其后经过；
       已改为 header 置于 .scroll-container 内同一滚动上下文，见修复提交 2fedca7）
+- [x] （2026-10-07 F06 二次复核）2fedca7 的"header 入容器"不完整——
+      .app-shell 缺 flex 约束，容器仍随内容生长（合成页实测 2274px），
+      内部滚动失效、document 成第二条滚动条。修复：`.app-shell` 加
+      `display:flex; flex-direction:column`，`.scroll-container` 加
+      `min-height:0`。证据：`node frontend/scripts/check-app-scroll.mjs`
+      真实 Chromium 量测 1280×820 / 980×620 × 浅/深四场景全过
+      （修复前红灯 `qa-artifacts/app-scroll/prefix-red.txt`，修复后
+      `measurements.json` + 截图）；release 应用实例滚动 10 页后导航
+      吸顶、内容从其后经过（`real-window-scrolled.png`）。100%/150%
+      系统缩放继续后延。
 - [x] 卡片：14px 圆角、20px 内边距、顶部高光描边、区块间距 20px
 
 ### 2.2 主题与状态矩阵（浅色 / 深色 / 自动 各过一遍）

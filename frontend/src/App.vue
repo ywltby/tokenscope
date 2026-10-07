@@ -164,6 +164,11 @@ function onCloseCancel(): void {
 <style scoped>
 .app-shell {
   height: 100vh;
+  /* F06：主滚动容器必须有界——flex 纵向布局把 .scroll-container 约束在
+     剩余视口高度内；修复前容器随内容长到全高，内部滚动失效、document
+     成为第二条主滚动条，sticky 导航随文档滚走。 */
+  display: flex;
+  flex-direction: column;
 }
 
 .app-nav {
@@ -190,6 +195,9 @@ function onCloseCancel(): void {
 
 .scroll-container {
   flex: 1;
+  /* F06：min-height:0 允许 flex 子项收缩到内容以下——overflow-y:auto
+     才能成为真实滚动口（默认 min-height:auto 会重新撑开容器）。 */
+  min-height: 0;
   overflow-y: auto;
 }
 

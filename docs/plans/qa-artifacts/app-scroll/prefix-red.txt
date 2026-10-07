@@ -1,0 +1,38 @@
+FAIL 1280x820-light
+  ✗ 容器高度受视口约束
+  ✗ 容器存在内部可滚动内容
+  ✗ scrollTop=400 真实内部滚动
+  ✗ document 无第二条主滚动
+  ✓ 导航吸顶（top=容器顶边±1）
+  ✗ 内容随滚动位移（不被导航遮挡后消失）
+  ✓ 通知条可见
+  clientHeight=2274 scrollHeight=2274 docScrollHeight=2274 navTop=0 containerTop=0
+FAIL 1280x820-dark
+  ✗ 容器高度受视口约束
+  ✗ 容器存在内部可滚动内容
+  ✗ scrollTop=400 真实内部滚动
+  ✗ document 无第二条主滚动
+  ✓ 导航吸顶（top=容器顶边±1）
+  ✗ 内容随滚动位移（不被导航遮挡后消失）
+  ✓ 通知条可见
+  clientHeight=2274 scrollHeight=2274 docScrollHeight=2274 navTop=0 containerTop=0
+FAIL 980x620-light
+  ✗ 容器高度受视口约束
+  ✗ 容器存在内部可滚动内容
+  ✗ scrollTop=400 真实内部滚动
+  ✗ document 无第二条主滚动
+  ✓ 导航吸顶（top=容器顶边±1）
+  ✗ 内容随滚动位移（不被导航遮挡后消失）
+  ✓ 通知条可见
+  clientHeight=2274 scrollHeight=2274 docScrollHeight=2274 navTop=0 containerTop=0
+FAIL 980x620-dark
+  ✗ 容器高度受视口约束
+  ✗ 容器存在内部可滚动内容
+  ✗ scrollTop=400 真实内部滚动
+  ✗ document 无第二条主滚动
+  ✓ 导航吸顶（top=容器顶边±1）
+  ✗ 内容随滚动位移（不被导航遮挡后消失）
+  ✓ 通知条可见
+  clientHeight=2274 scrollHeight=2274 docScrollHeight=2274 navTop=0 containerTop=0
+
+4 个场景未通过布局验收
