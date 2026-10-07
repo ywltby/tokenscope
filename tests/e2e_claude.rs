@@ -25,8 +25,20 @@ fn basic() -> Collection {
 /// 密闭性（2026-10-05 修复）：缓存/索引一律进临时目录。此前默认落真实
 /// `~/.tokenscope/cache.db`，测试套件每跑一遍就把用户缓存 purge 成 fixture，
 /// GUI 每次启动都全量冷扫描（分钟级加载）。
+///
+/// 2026-10-07 修复：同一进程内多个测试并行调用本函数，仅用 pid 命名会让
+/// 它们共享同一目录，一个线程 `summary()` 打开 `pricing.toml` 时另一线程
+/// `fs::write` 同一路径 → Windows 共享冲突（PermissionDenied）。加进程内
+/// 单调计数器保证每次调用得到独立目录。
 fn hermetic_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("tokenscope-e2e-claude-{}", std::process::id()))
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "tokenscope-e2e-claude-{}-{}",
+        std::process::id(),
+        n
+    ))
 }
 
 /// 只走 Claude 源的 report 管线（agent 过滤，codex 目录不会触达）。
