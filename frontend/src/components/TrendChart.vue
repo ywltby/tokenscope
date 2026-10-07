@@ -7,6 +7,7 @@ import * as echarts from "echarts";
 import { useTheme } from "../composables/theme";
 import { fmtNum, type Group } from "../types";
 import { buildBarChartData, chartStateText, chartSummaryLines, fullLabels } from "../lib/chartData";
+import { buildTooltipNode } from "../lib/chartTooltip";
 import { chartTokens } from "../styles/chartTheme";
 
 /// 数值轴紧凑刻度（token 数：万/亿）
@@ -54,16 +55,21 @@ function render(): void {
   const { categories, series } = buildBarChartData(groups, props.by);
   // 长标签：轴上省略，tooltip 用完整原始键
   const full = fullLabels(groups, props.by);
-  const tooltipFormatter = (params: unknown): string => {
+  // SF01：tooltip 安全输出——返回 HTMLElement（DOM 分支），原始键只经
+  // textNode 写入；模型/项目名可含任意字符（<>&"'、中文、长串）不注入。
+  const tooltipFormatter = (params: unknown): HTMLElement => {
     const arr = (Array.isArray(params) ? params : [params]) as {
       dataIndex: number;
       name?: string;
       seriesName: string;
       value: unknown;
     }[];
-    const title = full[arr[0]?.dataIndex] ?? arr[0]?.name ?? "";
-    const lines = arr.map((p) => `${p.seriesName} ${fmtNum(Number(p.value ?? 0))}`);
-    return [title, ...lines].join("<br/>");
+    return buildTooltipNode({
+      title: full[arr[0]?.dataIndex] ?? null,
+      fallbackTitle: arr[0]?.name ?? null,
+      entries: arr.map((p) => ({ seriesName: p.seriesName, value: Number(p.value ?? 0) })),
+      formatValue: (v) => fmtNum(v),
+    });
   };
   // 滚动：横向条形 >14 类启用 y 轴 dataZoom；日维度 >60 天启用 x 轴缩放
   const dataZoom = isDay.value
