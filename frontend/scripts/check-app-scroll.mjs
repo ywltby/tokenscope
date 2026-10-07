@@ -14,7 +14,8 @@
 //      主滚动条）；
 //   4. 吸顶导航 top 始终等于容器顶边（±1px），内容从其后滚过；
 //   5. 通知条可见。
-// 通过后把量测输出与脱敏截图写入 docs/plans/qa-artifacts/app-scroll/。
+// 通过后把量测输出与脱敏截图写入仓库根 qa-artifacts/app-scroll/（已被 .gitignore
+// 忽略：属可再生的生成物，不作为源码提交）。
 //
 // 运行：node frontend/scripts/check-app-scroll.mjs
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from "node:fs";
@@ -106,7 +107,7 @@ const browser = await chromium.launch({
   headless: true,
 });
 try {
-  const outDir = join(root, "docs", "plans", "qa-artifacts", "app-scroll");
+  const outDir = join(root, "qa-artifacts", "app-scroll");
   mkdirSync(outDir, { recursive: true });
   for (const vp of VIEWPORTS) {
     for (const theme of THEMES) {
@@ -172,11 +173,11 @@ try {
 }
 
 writeFileSync(
-  join(root, "docs", "plans", "qa-artifacts", "app-scroll", "measurements.json"),
+  join(root, "qa-artifacts", "app-scroll", "measurements.json"),
   JSON.stringify(results, null, 2),
 );
 if (failed > 0) {
   console.error(`\n${failed} 个场景未通过布局验收`);
   process.exit(1);
 }
-console.log("\n全部场景通过布局验收（截图与量测见 docs/plans/qa-artifacts/app-scroll/）");
+console.log("\n全部场景通过布局验收（截图与量测见 qa-artifacts/app-scroll/）");

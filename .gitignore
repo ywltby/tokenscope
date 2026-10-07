@@ -33,3 +33,9 @@ frontend/node_modules/
 frontend/dist/
 # Tauri 构建时生成的 schema 与平台文件
 src-tauri/gen/
+
+# ── 真实浏览器验收产物（本地产物，可再生，不提交）─────────
+# frontend/scripts/check-*.mjs 写入的截图与量测 JSON（qa-artifacts/）：
+# 体积大且每次运行都会重写，属生成物而非源码；需要留档时另行导出。
+# 目录位于仓库根，与 target/、coverage.* 等同属"生成物"。
+qa-artifacts/

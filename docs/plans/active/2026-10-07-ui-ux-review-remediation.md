@@ -87,7 +87,11 @@
 | 日期弹层 | 外层实色且 blur=none；内层 85% + blur(20px)，玻璃叠在实色上，未采用 16px 浮层配方 |
 | 日期快捷项 | 五项均 34×34px；近14天/近30天文本约 38.08px，被 33px 内容区限制；其余三项本次未超宽 |
 
-持久化证据见 [量测 JSON](../../reviews/qa-artifacts/2026-10-07-ui-ux/measurements.json)、[浅色日期弹层](../../reviews/qa-artifacts/2026-10-07-ui-ux/light-date.png)、[深色费用浮层](../../reviews/qa-artifacts/2026-10-07-ui-ux/dark-cost.png)。这些是**修复前证据**，不代表所有浮层或操作系统缩放已验证。金额/类别等数据均为合成，不能用截图核对产品统计结果。
+持久化证据见 [量测 JSON](../../../qa-artifacts/2026-10-07-ui-ux/measurements.json)、[浅色日期弹层](../../../qa-artifacts/2026-10-07-ui-ux/light-date.png)、[深色费用浮层](../../../qa-artifacts/2026-10-07-ui-ux/dark-cost.png)。这些是**修复前证据**，不代表所有浮层或操作系统缩放已验证。金额/类别等数据均为合成，不能用截图核对产品统计结果。
+
+> **产物位置（2026-10-07 调整）：** 浏览器验收产物（截图、量测 JSON、控制台日志）统一落在
+> **仓库根 `qa-artifacts/`**，并已加入 `.gitignore`——体积大且每次运行都会重写，属可再生的
+> 生成物，不作为源码提交；上列链接指向本机该目录。
 
 ### 2.1 新增技术审查的核实、纠偏与覆盖关系
 
@@ -257,7 +261,7 @@ SF04/SF05/SF07/SF08/SF09/SF10 涉及查询或数据契约时，实施该任务�
 
 **验收项名称：** `real_app_fixture_boots_without_ipc_leak`、`baseline_records_contract_violations`。UX01–UX09 的浏览器验收加入同一脚本，每项具名输出失败原因；不得注入“修正后 CSS”伪造通过。
 
-**命令：** 独立终端运行 `pnpm --dir frontend exec vite --host 127.0.0.1 --port 1437`；随后运行 `node frontend/scripts/check-ui-contracts.mjs --url http://127.0.0.1:1437 --phase baseline --output docs/plans/qa-artifacts/ui-ux-remediation/before`。完成后只停止本任务启动的进程。
+**命令：** 独立终端运行 `pnpm --dir frontend exec vite --host 127.0.0.1 --port 1437`；随后运行 `node frontend/scripts/check-ui-contracts.mjs --url http://127.0.0.1:1437 --phase baseline --output qa-artifacts/ui-ux-remediation/before`。完成后只停止本任务启动的进程。
 
 ### UX01：统一浮层材质、表格排版与语义色映射
 
@@ -374,7 +378,7 @@ SF04/SF05/SF07/SF08/SF09/SF10 涉及查询或数据契约时，实施该任务�
 
 ### UX10：集中验收与文档回写
 
-**文件：** 完成 `frontend/scripts/check-ui-contracts.mjs`；新增 `docs/plans/qa-artifacts/ui-ux-remediation/` 脱敏截图/JSON；修改 `docs/plans/README.md`、`docs/plans/active/2026-10-06-design-system-visual-qa.md`、本计划；原始审查保留历史并链接终态。
+**文件：** 完成 `frontend/scripts/check-ui-contracts.mjs`；新增 `qa-artifacts/ui-ux-remediation/` 脱敏截图/JSON；修改 `docs/plans/README.md`、`docs/plans/active/2026-10-06-design-system-visual-qa.md`、本计划；原始审查保留历史并链接终态。
 
 1. 执行以下自动矩阵：浅/深 × 1280×820/980×620；正常/空/未知价/部分失败；设置重试、键盘 Tab/方向键/Enter/Space/Escape、长日期/模型/路径、多类别图表、浮层四边、reduced-motion。具名断言全部通过后截图，不用截图代替交互断言。
 2. 在**实际 App**长页滚动时检查内部 scroller 的 scrollTop、导航顶边与通知条可见性；保留既有 `check-app-scroll.mjs` 结构回归。当前合成 CSS 长页已证明修复，不等于真实产品视觉 QA 全部完成。
@@ -393,7 +397,7 @@ pnpm --dir frontend build
 # 独立终端启动生产预览；完成后只停止自己启动的进程
 pnpm --dir frontend exec vite preview --host 127.0.0.1 --port 1437
 # 在另一终端执行
-node frontend/scripts/check-ui-contracts.mjs --url http://127.0.0.1:1437 --phase verify --output docs/plans/qa-artifacts/ui-ux-remediation/after
+node frontend/scripts/check-ui-contracts.mjs --url http://127.0.0.1:1437 --phase verify --output qa-artifacts/ui-ux-remediation/after
 node frontend/scripts/check-app-scroll.mjs
 ```
 

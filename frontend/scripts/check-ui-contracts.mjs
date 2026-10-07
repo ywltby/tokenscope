@@ -11,9 +11,9 @@
 // 运行：
 //   pnpm --dir frontend exec vite --host 127.0.0.1 --port 1437
 //   node frontend/scripts/check-ui-contracts.mjs --url http://127.0.0.1:1437 \
-//     --phase baseline --output docs/plans/qa-artifacts/ui-ux-remediation/before
+//     --phase baseline --output qa-artifacts/ui-ux-remediation/before
 //   node frontend/scripts/check-ui-contracts.mjs --url http://127.0.0.1:1437 \
-//     --phase verify --output docs/plans/qa-artifacts/ui-ux-remediation/after
+//     --phase verify --output qa-artifacts/ui-ux-remediation/after
 //
 // phase=baseline 只记录当前违例（用于"修复前证据"）；phase=verify 按本计划
 // 断言具名契约。两种模式都要求：无未知 command、无未处理拒绝、无页面错误、
@@ -30,7 +30,7 @@ function parseArgs(argv) {
   const args = {
     url: "http://127.0.0.1:1437",
     phase: "verify",
-    output: join(root, "docs", "plans", "qa-artifacts", "ui-ux-remediation", "after"),
+    output: join(root, "qa-artifacts", "ui-ux-remediation", "after"),
     fixtures: ["normal", "empty", "unknown-price", "partial-price", "long-text", "multi-category"],
     themes: ["light", "dark"],
     viewports: [

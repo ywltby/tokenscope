@@ -14,7 +14,8 @@
 // 模型/项目四场景）。--vuln 为负向对照：走漏洞页，断言本脚本**能**
 // 检出注入（产品修复回退时此处会变红）。
 //
-// 产出：docs/plans/qa-artifacts/chart-tooltip-security/{measurements.json,*.png}
+// 产出：qa-artifacts/chart-tooltip-security/{measurements.json,*.png}（仓库根，
+// 已被 .gitignore 忽略——可再生的生成物）
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,7 +34,7 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv);
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const outDir = join(root, "docs", "plans", "qa-artifacts", "chart-tooltip-security");
+const outDir = join(root, "qa-artifacts", "chart-tooltip-security");
 mkdirSync(outDir, { recursive: true });
 
 function resolveExecutable() {
