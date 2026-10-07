@@ -120,7 +120,7 @@ describe("App 应用壳（设计系统 Task 2，苹果风格分段控件）", ()
     const w = mount(App);
     await flushPromises();
     const items = w.findAll('[role="radio"]');
-    // 第一组是页面切换（汇总/设置），第二组是主题切换（☀/☾/自动）
+    // 第一组是页面切换（汇总/设置），第二组是主题切换（浅色/深色/跟随系统）
     const pageItems = items.slice(0, 2);
     expect(pageItems.map((t) => t.text())).toEqual(["汇总", "设置"]);
     expect(pageItems[0].attributes("aria-checked")).toBe("true");
@@ -138,7 +138,14 @@ describe("App 应用壳（设计系统 Task 2，苹果风格分段控件）", ()
     expect(groups.length).toBeGreaterThanOrEqual(2);
     const themeGroup = groups[1]; // 第二组是主题
     const themeItems = themeGroup.findAll('[role="radio"]');
-    expect(themeItems.map((t) => t.text())).toEqual(["☀", "☾", "自动"]);
+    // UX02：语义化名称 + 装饰 SVG 图标（不再是 ☀/☾ 字符）
+    expect(themeItems.map((t) => t.text())).toEqual(["浅色", "深色", "跟随系统"]);
+    expect(themeItems.map((t) => t.attributes("aria-label"))).toEqual([
+      "浅色模式",
+      "深色模式",
+      "跟随系统",
+    ]);
+    expect(themeItems.every((t) => t.find(".seg-icon").exists())).toBe(true);
     // 默认 system（自动），解析为 light
     expect(themeItems[2].attributes("aria-checked")).toBe("true");
     expect(document.documentElement.dataset.theme).toBe("light");

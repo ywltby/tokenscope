@@ -238,6 +238,9 @@ body {
   background: var(--ts-fill);
   border-radius: var(--ts-radius-control);
   padding: 2px;
+  /* UX02：局部 border-box —— 外高严格 32px（修复前 32 + 上下 padding = 36）。
+     不全局重置盒模型，避免影响其它组件。 */
+  box-sizing: border-box;
   height: 32px;
 }
 .ts-segmented-item {
@@ -261,6 +264,11 @@ body {
 .ts-segmented-item[aria-checked="true"] {
   color: var(--ts-text);
   font-weight: 600;
+}
+/* UX02：公共焦点环——2px accent、offset 2px；底槽 overflow 可见不裁剪 */
+.ts-segmented-item:focus-visible {
+  outline: 2px solid var(--ts-accent);
+  outline-offset: 2px;
 }
 .ts-segmented-thumb {
   position: absolute;

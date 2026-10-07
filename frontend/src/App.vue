@@ -43,10 +43,12 @@ const pageOptions = [
   { value: "settings" as const, label: "设置" },
 ];
 
-const themeOptions: { value: ThemePreference; label: string }[] = [
-  { value: "light", label: "☀" },
-  { value: "dark", label: "☾" },
-  { value: "system", label: "自动" },
+const themeOptions: { value: ThemePreference; label: string; ariaLabel: string }[] = [
+  // UX02：字符图标（☀/☾）不合规范且语义不明——改用通用 SVG 插槽 +
+  // 显式语义名称（"浅色模式 / 深色模式 / 跟随系统"）。
+  { value: "light", label: "浅色", ariaLabel: "浅色模式" },
+  { value: "dark", label: "深色", ariaLabel: "深色模式" },
+  { value: "system", label: "跟随系统", ariaLabel: "跟随系统" },
 ];
 
 // ── 启动诊断（SF06）：日志初始化降级为非阻断通知 ───────────────
@@ -146,7 +148,54 @@ function onCloseCancel(): void {
               :options="themeOptions"
               aria-label="主题偏好（浅色/深色/跟随系统）"
               @update:model-value="setPreference"
-            />
+            >
+              <!-- 通用 SVG 图标插槽：装饰图形对读屏隐藏，真实名称由按钮
+                   aria-label（浅色模式/深色模式/跟随系统）承载 -->
+              <template #icon="{ option }">
+                <svg
+                  v-if="option.value === 'light'"
+                  viewBox="0 0 24 24"
+                  width="16"
+                  height="16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                >
+                  <circle cx="12" cy="12" r="4.2" />
+                  <path
+                    d="M12 2.8v2.2M12 19v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.8 12H5M19 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6"
+                  />
+                </svg>
+                <svg
+                  v-else-if="option.value === 'dark'"
+                  viewBox="0 0 24 24"
+                  width="16"
+                  height="16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M20 14.2A8.2 8.2 0 0 1 9.8 4a8.4 8.4 0 1 0 10.2 10.2z" />
+                </svg>
+                <svg
+                  v-else
+                  viewBox="0 0 24 24"
+                  width="16"
+                  height="16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <rect x="3" y="4.5" width="18" height="12" rx="2" />
+                  <path d="M8 20h8M12 16.5V20" />
+                </svg>
+              </template>
+            </SegmentedControl>
           </header>
           <!-- 全局状态横幅：渲染在内容之前，不遮挡主体 -->
           <div class="banner-slot">
