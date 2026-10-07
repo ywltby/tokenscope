@@ -6,6 +6,7 @@
 //! 容忍策略：文件缺失/坏内容 → 报错或回退默认值；未知字段忽略，向前兼容。
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -90,6 +91,36 @@ impl Default for Settings {
 
 pub fn settings_path() -> Result<PathBuf> {
     Ok(crate::report::data_dir()?.join("settings.toml"))
+}
+
+// ── SF02：统一设置事务 ─────────────────────────────────────────
+// 全体应用内写者（关闭动作、记忆关闭、自动同步开关、来源配置、
+// ensure_toml 首建/迁移）共享同一进程级读改写锁：后到的写者基于先到
+// 写者**提交后**的最新文件做读改写，旧副本不得覆盖无关字段。
+// 应用为单实例，一把锁覆盖全部设置文件更新即可；锁只在阻塞线程内
+// 等待（调用方须置于 spawn_blocking，不得跨 await 持有）。
+
+fn write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn acquire_write_lock() -> Result<MutexGuard<'static, ()>> {
+    write_lock().lock().map_err(|_| {
+        anyhow::anyhow!("设置写锁已污染（先前写入线程 panic），拒绝继续写入以保护原文件")
+    })
+}
+
+/// 设置更新的唯一事务入口：锁内 load 最新文件（含遗留导入）→ mutate 与
+/// 校验 → 原子保存 → 返回提交后的值。mutate 返回 Err 或解析/写入失败都
+/// 不落盘，原文件字节不动。并发的外部编辑器不受本进程锁约束（写入冲突
+/// 由原子替换兜底为"整文件生效其一"，不做字段级合并）。
+pub fn update<T>(path: &Path, mutate: impl FnOnce(&mut Settings) -> Result<T>) -> Result<T> {
+    let _guard = acquire_write_lock()?;
+    let mut s = load(path)?;
+    let out = mutate(&mut s)?;
+    save_unlocked(path, &s)?;
+    Ok(out)
 }
 
 /// 遗留设置文件（迁移前格式）：与 toml 同目录；路径相同（测试直传 json 路径）时
@@ -184,14 +215,16 @@ pub fn auto_sync_allowed(s: &Result<Settings, anyhow::Error>) -> bool {
 /// 确保设置文件以 toml 形态在位（open_settings_file 首建用）：
 /// 已存在 → 原样不动；缺失但有遗留 json → load 导入 + save 迁移（值保留、
 /// json 改名 .bak）；都缺失 → 写入全字段注释模板（解析即默认值）。
+/// 首建/迁移也是写者：与 [`update`] 共享同一把写锁，不与并发更新互踩。
 pub fn ensure_toml(path: &Path) -> Result<()> {
+    let _guard = acquire_write_lock()?;
     if path.exists() {
         return Ok(());
     }
     let had_legacy = legacy_json_path(path).is_some_and(|p| p.exists());
     if had_legacy {
         let s = load(path)?;
-        return save(path, &s);
+        return save_unlocked(path, &s);
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
@@ -201,7 +234,9 @@ pub fn ensure_toml(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn save(path: &Path, s: &Settings) -> Result<()> {
+/// 私有底层写入：调用方必须已持有写锁（[`update`] / [`ensure_toml`]）。
+/// 不设公有 save——防止绕过事务读改写或递归加锁。
+fn save_unlocked(path: &Path, s: &Settings) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
     }
@@ -246,7 +281,7 @@ mod tests {
                 codex: None,
             },
         };
-        save(&path, &s).unwrap();
+        save_unlocked(&path, &s).unwrap();
         assert_eq!(load(&path).unwrap(), s);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -258,13 +293,13 @@ mod tests {
             close_action: Some(CloseAction::Quit),
             ..s.clone()
         };
-        save(&path, &s2).unwrap();
+        save_unlocked(&path, &s2).unwrap();
         assert_eq!(load(&path).unwrap(), s2);
         let s3 = Settings {
             close_action: None,
             ..s2.clone()
         };
-        save(&path, &s3).unwrap();
+        save_unlocked(&path, &s3).unwrap();
         assert_eq!(load(&path).unwrap(), s3);
         assert!(
             !std::fs::read_to_string(&path)
@@ -277,7 +312,7 @@ mod tests {
     #[test]
     fn test_save_writes_comment_header_and_template_parses() {
         let path = tmp("header");
-        save(&path, &Settings::default()).unwrap();
+        save_unlocked(&path, &Settings::default()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
             text.starts_with('#'),
@@ -322,7 +357,7 @@ mod tests {
         std::fs::write(dir.join("settings.json"), r#"{"price_auto_sync": false}"#).unwrap();
         let toml_path = dir.join("settings.toml");
         let s = load(&toml_path).unwrap();
-        save(&toml_path, &s).unwrap();
+        save_unlocked(&toml_path, &s).unwrap();
         assert!(toml_path.exists());
         assert!(
             !dir.join("settings.json").exists(),

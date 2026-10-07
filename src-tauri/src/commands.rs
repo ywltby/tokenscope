@@ -176,6 +176,7 @@ pub async fn settings_set_close_action(action: Option<String>) -> Result<Option<
 }
 
 /// 损坏设置直接报错——绝不覆盖用户文件（沿用 Task 7.1 不变量）。
+/// SF02：经 settings::update 事务写盘，锁内基于最新文件只改 close_action。
 pub(crate) fn settings_set_close_action_impl(
     path: &std::path::Path,
     action: Option<String>,
@@ -186,9 +187,10 @@ pub(crate) fn settings_set_close_action_impl(
         Some("quit") => Some(CloseAction::Quit),
         Some(other) => return Err(anyhow::anyhow!("未知关闭动作: {other}")),
     };
-    let mut s = tokenscope::settings::load(path)?;
-    s.close_action = parsed;
-    tokenscope::settings::save(path, &s)?;
+    tokenscope::settings::update(path, |s| {
+        s.close_action = parsed;
+        Ok(action.clone())
+    })?;
     log::info!("关闭窗口默认动作已设置: {:?}", parsed);
     Ok(action)
 }
@@ -239,13 +241,15 @@ pub async fn close_resolve(
 }
 
 fn persist_close_action(path: &std::path::Path, minimize: bool) -> anyhow::Result<()> {
-    let mut s = tokenscope::settings::load(path)?;
-    s.close_action = Some(if minimize {
-        CloseAction::Minimize
-    } else {
-        CloseAction::Quit
-    });
-    tokenscope::settings::save(path, &s)
+    // SF02：事务内只改 close_action，其他字段基于最新文件保留。
+    tokenscope::settings::update(path, |s| {
+        s.close_action = Some(if minimize {
+            CloseAction::Minimize
+        } else {
+            CloseAction::Quit
+        });
+        Ok(())
+    })
 }
 
 /// 打开（必要时先创建）设置配置文件；返回实际路径。
@@ -281,6 +285,7 @@ pub async fn source_config_set(
 }
 
 /// Task 7.1：损坏设置直接报错——绝不 unwrap_or_default 后覆盖用户文件。
+/// SF02：来源重叠校验在事务锁内基于最新其他来源值执行。
 pub(crate) fn source_config_set_impl(
     path: &std::path::Path,
     agent: &str,
@@ -292,13 +297,13 @@ pub(crate) fn source_config_set_impl(
         "codex" => false,
         other => return Err(anyhow::anyhow!("未知 agent: {other}")),
     };
-    let mut s = tokenscope::settings::load(path)?;
     let cfg = tokenscope::settings::SourceConfig {
         enabled,
         dir: dir.clone(),
     };
-    // Task 2：保存前按"保存后的全量配置"校验重叠（仅校验两个启用的来源）。
-    {
+    tokenscope::settings::update(path, |s| {
+        // Task 2：保存前按"保存后的全量配置"校验重叠（仅校验两个启用的来源），
+        // 与写入在同一临界区内完成，避免并发保存互相看到过期副本。
         let other_dir = if claude {
             s.sources.codex.as_ref().filter(|c| c.enabled)
         } else {
@@ -319,13 +324,13 @@ pub(crate) fn source_config_set_impl(
             )
             .map_err(anyhow::Error::msg)?;
         }
-    }
-    if claude {
-        s.sources.claude = Some(cfg.clone());
-    } else {
-        s.sources.codex = Some(cfg.clone());
-    }
-    tokenscope::settings::save(path, &s)?;
+        if claude {
+            s.sources.claude = Some(cfg.clone());
+        } else {
+            s.sources.codex = Some(cfg.clone());
+        }
+        Ok(())
+    })?;
     log::info!(
         "来源配置已保存：{agent} enabled={enabled} dir={:?}",
         cfg.dir
@@ -371,20 +376,19 @@ pub async fn settings_set_price_auto_sync(
 ) -> Result<bool, String> {
     run_blocking("settings_set_price_auto_sync", move || {
         let path = tokenscope::settings::settings_path()?;
-        let mut s = tokenscope::settings::load(&path)?;
-        s.price_auto_sync = enabled;
-        tokenscope::settings::save(&path, &s)?;
-        if !enabled {
-            // 关闭自动同步时清空快照记录的同步时间，避免下次开启立即误判为"刚同步过"。
-            // 快照自身保留，仅删除 synced_at 依据——直接保留快照文件，由时间判断兜底。
-        }
+        // SF02：事务内基于最新文件只改 auto_sync 字段；用户关闭自动同步的
+        // 值不得被另一字段的旧副本复原（含并发关闭动作/来源保存）。
+        let committed = tokenscope::settings::update(&path, |s| {
+            s.price_auto_sync = enabled;
+            Ok(enabled)
+        })?;
         if enabled {
             log::info!("价格自动同步已开启");
         } else {
             log::info!("价格自动同步已关闭");
         }
         let _ = app;
-        Ok(s.price_auto_sync)
+        Ok(committed)
     })
     .await
 }
