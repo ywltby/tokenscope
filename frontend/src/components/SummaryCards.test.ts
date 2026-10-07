@@ -134,8 +134,9 @@ describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
     expect(pill.text()).toContain("含未计价 token");
   });
 
-  it("R09 hit_rate_tooltip_opens_on_focus：focus 打开、blur/Escape 关闭（真实 NTooltip 触发时序）", async () => {
-    // 真实 NTooltip（manual 受控）：初始不渲染内容
+  it("R09 hit_rate_tooltip_opens_on_focus：focus 打开、blur/Escape 关闭（受控状态切换）", async () => {
+    // NTooltip 透传打桩（真实浮层验收见 SummaryCards.tooltip.test.ts）：
+    // 本文件只验证受控状态的切换逻辑。
     const w = mountCards(totals());
     const trigger = w.find(".metric-label-help");
     expect(trigger.exists()).toBe(true);

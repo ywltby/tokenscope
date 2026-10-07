@@ -27,9 +27,18 @@ const costText = computed(() => `$${fmtCost(props.totals.cost_usd)}`);
 /// 未知价格且已计价部分为 0：显示"未知†"而不是 $0.00（缺价 ≠ 免费）。
 const costUnknownOnly = computed(() => props.totals.unknown_pricing && props.totals.cost_usd === 0);
 
-// R09：命中率公式 tooltip 受控显示——hover/focus/click 均可打开，
-// Escape 关闭；移动触达/键盘用户与鼠标用户等价。
-const hitTipOpen = ref(false);
+// R09/F08：命中率公式 tooltip 受控显示——hover/focus/click 三态分离、
+// 统一 show 计算：hover 随指针（触发器或浮层内容上保持）、focus 随键盘
+// 焦点（focus 在时鼠标离开不取消）、click 固定切换；Escape 一律关闭。
+const hoverOpen = ref(false);
+const focusOpen = ref(false);
+const pinned = ref(false);
+const hitTipOpen = computed(() => hoverOpen.value || focusOpen.value || pinned.value);
+function closeHitTip(): void {
+  hoverOpen.value = false;
+  focusOpen.value = false;
+  pinned.value = false;
+}
 
 const parts = computed(() => [
   { kind: "input", label: "输入", value: props.totals.tokens.input },
@@ -80,19 +89,19 @@ const parts = computed(() => [
                 role="button"
                 aria-label="缓存命中率说明"
                 :aria-expanded="hitTipOpen"
-                @mouseenter="hitTipOpen = true"
-                @mouseleave="hitTipOpen = false"
-                @focus="hitTipOpen = true"
-                @blur="hitTipOpen = false"
-                @click="hitTipOpen = !hitTipOpen"
-                @keydown.escape="hitTipOpen = false"
-                @keydown.enter.prevent="hitTipOpen = !hitTipOpen"
-                @keydown.space.prevent="hitTipOpen = !hitTipOpen"
+                @mouseenter="hoverOpen = true"
+                @mouseleave="hoverOpen = false"
+                @focus="focusOpen = true"
+                @blur="focusOpen = false"
+                @click="pinned = !pinned"
+                @keydown.escape="closeHitTip"
+                @keydown.enter.prevent="pinned = !pinned"
+                @keydown.space.prevent="pinned = !pinned"
               >
                 缓存命中率
               </div>
             </template>
-            <div class="hit-tip">
+            <div class="hit-tip" @mouseenter="hoverOpen = true" @mouseleave="hoverOpen = false">
               命中率 = 缓存读 ÷（新增输入 + 缓存读）。<br />
               缓存读直接复用上下文，消耗 token 数计入分母但费用通常为零或极低。
             </div>
