@@ -92,10 +92,12 @@
   --ts-ease: cubic-bezier(0.25, 0.1, 0.25, 1);
 
   /* 字体栈（本机系统字体，不在线拉取） */
-  --ts-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text",
-    "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
-  --ts-font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display",
-    "Segoe UI Variable Display", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  --ts-font:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI",
+    "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  --ts-font-display:
+    -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI Variable Display", "Segoe UI",
+    "PingFang SC", "Microsoft YaHei UI", sans-serif;
   --ts-font-mono: "SF Mono", "Cascadia Mono", Consolas, monospace;
 }
 
@@ -399,6 +401,22 @@ body {
 }
 .ts-notice-action:hover {
   text-decoration: underline;
+}
+
+/*
+ * UX08：通知条**卡内变体**。
+ * 卡片（.ts-card）本身已是玻璃外壳；卡内再叠一层玻璃会形成"玻璃套玻璃"，
+ * 并且叠加独立大阴影/外框后与卡片层次打架（DESIGN.md §2 原本对通知条与
+ * 卡片用同一配方，未区分内外）。卡内通知只保留一层浅填充 + 状态色图标，
+ * 图标、状态文本、详情、重试按钮全部保留；**卡外**通知（页面级横幅、
+ * 汇总页通知）继续用上面的玻璃配方。
+ */
+.ts-notice-inline {
+  background: var(--ts-fill);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border: none;
+  box-shadow: none;
 }
 
 /* 键盘焦点轮廓（hover 不改变文字颜色；focus 高对比可见） */

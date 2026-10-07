@@ -129,11 +129,8 @@ export function naiveThemeOverrides(mode: ThemeMode): GlobalThemeOverrides {
       heightMedium: "32px",
       heightSmall: "28px",
     },
-    Card: {
-      borderRadius: "14px",
-      borderColor: isDark ? c.separator : "transparent",
-      padding: "20px",
-    },
+    // UX08：删除无引用的 Card 覆盖——应用不使用 NCard（卡片一律走
+    // tokens.css 的 .ts-card 玻璃配方），保留会让人误以为存在第二套卡片样式。
     Button: {
       borderRadiusMedium: "8px",
       borderRadiusSmall: "8px",

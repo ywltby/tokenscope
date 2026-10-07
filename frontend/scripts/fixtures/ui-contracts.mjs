@@ -162,6 +162,14 @@ const sourceStatusReady = [
   { agent: "codex", dir: "C:/Users/dev/.codex/sessions", enabled: true, exists: true, files: 4, state: "ready" },
 ];
 
+/** UX08：超长「当前生效目录」——用于真实浏览器换行/不横向溢出验收。 */
+export const LONG_SOURCE_DIR =
+  "C:/Users/very.long.user.name/AppData/Roaming/deeply/nested/agent/workspaces/tokenscope-monorepo/packages/frontend/.claude/projects";
+const sourceStatusLong = [
+  { agent: "claude-code", dir: LONG_SOURCE_DIR, enabled: true, exists: true, files: 12, state: "ready" },
+  { agent: "codex", dir: "C:/Users/dev/.codex/sessions", enabled: true, exists: true, files: 4, state: "ready" },
+];
+
 // ── 各 fixture 的数据 ──────────────────────────────────────────────
 const NORMAL_GROUPS = [
   group("2026-10-05", 120000, { output: 60000, cache_write: 4000, cache_read: 30000, cost_usd: 0.42, requests: 12 }),
@@ -324,8 +332,14 @@ export function buildFixture(name) {
       return { ...base, ipc: withQuery((by) => dimGroups(by, "unknown")) };
     case "partial-price":
       return { ...base, ipc: withQuery((by) => dimGroups(by, "partial")) };
-    case "long-text":
-      return { ...base, ipc: withQuery((by) => dimGroups(by, "long")) };
+    case "long-text": {
+      // UX08：来源目录也换成超长路径，供设置页 textbox/换行验收
+      const inner = withQuery((by) => dimGroups(by, "long"));
+      return {
+        ...base,
+        ipc: (cmd, args) => (cmd === "source_status" ? sourceStatusLong : inner(cmd, args)),
+      };
+    }
     case "multi-category":
       return { ...base, ipc: withQuery((by) => dimGroups(by, "multi")) };
     case "settings-read-failure": {

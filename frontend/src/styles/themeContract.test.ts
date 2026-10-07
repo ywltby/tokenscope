@@ -7,6 +7,8 @@
 import { describe, expect, it } from "vitest";
 // Vite ?raw：直接取 tokens.css 源文本（项目无 @types/node，不用 node:fs）
 import tokensCss from "./tokens.css?raw";
+import naiveThemeSource from "./naiveTheme.ts?raw";
+import chartThemeSource from "./chartTheme.ts?raw";
 import { naiveThemeOverrides } from "./naiveTheme";
 import { chartTokens } from "./chartTheme";
 import type { ThemeMode } from "../composables/theme";
@@ -148,5 +150,18 @@ describe("themeContract：适配器与 CSS 语义 token 对齐（UX01）", () =>
     }
     // 浮层模糊配方 16px（Naive CSS 与 ECharts extraCssText 同源）
     expect(norm(TOKENS.light["--ts-glass-blur-popover"])).toBe("blur(16px)saturate(150%)");
+  });
+});
+
+// UX08：明确无引用的覆盖/导出已清理（避免出现第二套卡片样式与未使用主题对象）。
+describe("UX08 死代码清理", () => {
+  it("unreferenced_card_override_and_echartsThemeObject_removed", () => {
+    // 应用不使用 NCard，卡片一律走 tokens.css 的 .ts-card —— 主题里不该再留 Card 覆盖
+    expect(naiveThemeSource).not.toMatch(/^\s+Card: \{/m);
+    // ECharts 主题对象没有任何调用点（TrendChart 直接用 chartTokens）
+    expect(chartThemeSource).not.toContain("echartsThemeObject");
+    // 仍有用途的导出保留
+    expect(chartThemeSource).toContain("export function chartTokens");
+    expect(chartThemeSource).toContain("POPOVER_BLUR_CSS");
   });
 });

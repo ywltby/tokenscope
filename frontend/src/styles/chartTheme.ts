@@ -73,33 +73,3 @@ export function chartTokens(mode: ThemeMode): ChartTokens {
 /// 与 Naive Popover/Tooltip 的 backdrop-filter 配方同值。
 export const POPOVER_BLUR_CSS =
   "backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-radius: 12px;";
-
-/// 供 echarts.init(theme) / registerTheme 使用的主题对象（无默认调色板）。
-export function echartsThemeObject(mode: ThemeMode) {
-  const t = chartTokens(mode);
-  return {
-    color: t.series.map((s) => s.color),
-    backgroundColor: t.backgroundColor,
-    textStyle: { fontFamily: "inherit", color: t.text },
-    legend: { textStyle: { color: t.legendText, fontSize: 12 } },
-    categoryAxis: {
-      axisLine: { show: false },
-      axisTick: { show: false },
-      axisLabel: { color: t.textMuted, fontSize: 12 },
-      splitLine: { show: false },
-    },
-    valueAxis: {
-      axisLine: { show: false },
-      axisTick: { show: false },
-      axisLabel: { color: t.textMuted, fontSize: 12 },
-      splitLine: { lineStyle: { color: t.splitLine, type: "solid" } },
-    },
-    tooltip: {
-      backgroundColor: t.tooltipBg,
-      borderColor: t.tooltipBorder,
-      borderWidth: 1,
-      textStyle: { color: t.text },
-      padding: [12, 16],
-    },
-  };
-}

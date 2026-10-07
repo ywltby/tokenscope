@@ -669,9 +669,13 @@ startRefreshBatch();
   text-align: center;
 }
 
+/* UX08：空状态标题对齐既有字阶——卡片级结论 17px/600/1.3/-0.01em
+   （修复前 15px/650 既不在字阶内，也用非标字重） */
 .empty-title {
-  font-size: 15px;
-  font-weight: 650;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
   color: var(--ts-text);
 }
 

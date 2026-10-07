@@ -10,6 +10,8 @@ const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 import Dashboard from "./Dashboard.vue";
+// UX08：样式契约断言需要 SFC 源文本（项目无 @types/node，用 Vite ?raw）
+import dashboardSource from "./Dashboard.vue?raw";
 import TrendChart from "../components/TrendChart.vue";
 import type { Dim, EventList, Group, SummaryReport } from "../types";
 
@@ -977,5 +979,19 @@ describe("Dashboard 图表类别（UX05）", () => {
     const after = w.findComponent(TrendChart).props("groups");
     expect(after).toBe(before);
     w.unmount();
+  });
+});
+
+// UX08：空状态标题对齐既有字阶（卡片级结论 17px/600/1.3/-0.01em）。
+describe("Dashboard 空状态字阶（UX08）", () => {
+  it("empty_title_uses_card_level_scale", () => {
+    const block = /\.empty-title\s*\{([^}]*)\}/.exec(dashboardSource);
+    expect(block, "必须存在 .empty-title 规则").not.toBeNull();
+    const body = block![1];
+    expect(body).toContain("font-size: 17px");
+    expect(body).toContain("font-weight: 600");
+    // 非标字阶（15px / 650）不得残留
+    expect(body).not.toContain("15px");
+    expect(body).not.toContain("650");
   });
 });

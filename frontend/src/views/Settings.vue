@@ -150,6 +150,17 @@ function setSourceDir(id: string, v: string): void {
   dirtySources.add(id);
 }
 
+/// UX08：来源目录输入框的稳定 DOM id——`<label for>` 与真实 `<input>` 的
+/// `aria-label` 同源，保证可访问名称稳定（不依赖 placeholder 兜底）。
+function dirInputId(agent: string): string {
+  return `source-dir-${sourceIdOf(agent)}`;
+}
+
+/// UX08：来源目录字段的稳定可访问名称，如「Claude Code 日志目录」。
+function dirInputLabel(agent: string): string {
+  return `${AGENT_LABEL[agent] ?? agent} 日志目录`;
+}
+
 // UX06：草稿 dirty 集合——用户编辑过的行在重试/刷新时**不被覆盖**
 //（retry_preserves_dirty_source_drafts）；保存成功后清除该行 dirty。
 const dirtySources = new Set<string>();
@@ -210,6 +221,10 @@ async function saveSource(agent: string): Promise<void> {
 }
 
 async function rebuild(): Promise<void> {
+  // UX08：函数级防重复——不只依赖按钮 loading 态（程序化触发/快速双击
+  // 都不得并发发起第二次重建）。重建是派生数据操作，保留既有进度反馈，
+  // 不增加强制确认。
+  if (rebuilding.value) return;
   rebuilding.value = true;
   try {
     cache.value = await invoke<CacheInfo>("refresh_cache");
@@ -441,7 +456,7 @@ defineExpose({ priceColumns });
       <!-- 任务 7：macOS 系统设置式分组——组标题在卡片外，每组一张 .ts-card -->
       <section class="settings-group">
         <h2 class="group-title">应用</h2>
-        <div v-if="autostartError" class="ts-notice block-error" role="alert">
+        <div v-if="autostartError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
             class="ts-notice-icon is-error"
             viewBox="0 0 24 24"
@@ -512,7 +527,7 @@ defineExpose({ priceColumns });
       <section class="settings-group">
         <h2 class="group-title">数据源</h2>
         <!-- UX06：区块独立错误 + 局部重试 -->
-        <div v-if="settingsError" class="ts-notice block-error" role="alert">
+        <div v-if="settingsError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
             class="ts-notice-icon is-error"
             viewBox="0 0 24 24"
@@ -530,7 +545,7 @@ defineExpose({ priceColumns });
           >
           <NButton size="tiny" @click="loadDrafts">重试</NButton>
         </div>
-        <div v-if="sourcesError" class="ts-notice block-error" role="alert">
+        <div v-if="sourcesError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
             class="ts-notice-icon is-error"
             viewBox="0 0 24 24"
@@ -582,13 +597,29 @@ defineExpose({ priceColumns });
                 保存
               </NButton>
             </div>
+            <!-- UX08：稳定可访问名称（label 关联 + 真实 input 的 aria-label），
+                 不再依赖 placeholder 兜底 -->
+            <label class="dir-label" :for="dirInputId(s.agent)">{{ dirInputLabel(s.agent) }}</label>
             <NInput
               :value="drafts[sourceIdOf(s.agent)]?.dir ?? ''"
               size="small"
-              :placeholder="`默认目录：${s.dir}`"
+              placeholder="留空使用当前生效目录"
+              :input-props="{
+                id: dirInputId(s.agent),
+                'aria-label': dirInputLabel(s.agent),
+              }"
               @update:value="(v: string) => setSourceDir(sourceIdOf(s.agent), v)"
             />
-            <div v-if="sourceErrors[sourceIdOf(s.agent)]" class="ts-notice source-error">
+            <!-- UX08：s.dir 是**当前生效目录**（可能是显式覆盖，不必然是默认
+                 目录）；完整值可读、可选中复制、长路径换行不省略 -->
+            <div class="source-effective">
+              <span class="effective-label">当前生效目录：</span>
+              <span class="effective-path ts-mono">{{ s.dir }}</span>
+            </div>
+            <div
+              v-if="sourceErrors[sourceIdOf(s.agent)]"
+              class="ts-notice ts-notice-inline source-error"
+            >
               <svg
                 class="ts-notice-icon is-error"
                 viewBox="0 0 24 24"
@@ -604,7 +635,8 @@ defineExpose({ priceColumns });
               <span class="ts-notice-content">{{ sourceErrors[sourceIdOf(s.agent)] }}</span>
             </div>
             <div class="setting-help">
-              留空使用默认目录；停用后该来源完全不参与统计。两个来源不能指向同一目录。
+              留空则回到该来源的默认目录（上方「当前生效目录」是实际使用的目录，
+              可能来自显式覆盖）；停用后该来源完全不参与统计。两个来源不能指向同一目录。
               保存后回到汇总页生效。
             </div>
           </div>
@@ -613,7 +645,7 @@ defineExpose({ priceColumns });
 
       <section class="settings-group">
         <h2 class="group-title">缓存</h2>
-        <div v-if="cacheError" class="ts-notice block-error" role="alert">
+        <div v-if="cacheError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
             class="ts-notice-icon is-error"
             viewBox="0 0 24 24"
@@ -647,6 +679,10 @@ defineExpose({ priceColumns });
           </div>
           <NCollapse class="tech-collapse">
             <NCollapseItem title="技术详情" name="tech">
+              <!-- UX08：完整「当前生效目录」（含显式覆盖）——可选中复制、长路径换行 -->
+              <div v-for="s in sources" :key="`eff-${s.agent}`" class="tech-line">
+                {{ AGENT_LABEL[s.agent] ?? s.agent }} 当前生效目录：{{ s.dir }}
+              </div>
               <div class="tech-line">缓存路径：{{ cache?.path ?? "—" }}</div>
               <div class="tech-line">models.dev 快照：{{ pricing?.modelsdev_path ?? "—" }}</div>
               <div class="tech-line">OpenRouter 快照：{{ pricing?.openrouter_path ?? "—" }}</div>
@@ -659,13 +695,17 @@ defineExpose({ priceColumns });
               </div>
             </NCollapseItem>
           </NCollapse>
-          <NButton size="small" :loading="rebuilding" @click="rebuild">重建缓存</NButton>
+          <div class="rebuild-row">
+            <NButton size="small" :loading="rebuilding" @click="rebuild">重建缓存</NButton>
+            <!-- UX08：重建预期说明（重建是派生数据操作，保留进度与结果反馈） -->
+            <span class="rebuild-hint">重新扫描日志，可能需要一段时间。</span>
+          </div>
         </section>
       </section>
 
       <section class="settings-group">
         <h2 class="group-title">价格</h2>
-        <div v-if="pricingError" class="ts-notice block-error" role="alert">
+        <div v-if="pricingError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
             class="ts-notice-icon is-error"
             viewBox="0 0 24 24"
@@ -699,7 +739,7 @@ defineExpose({ priceColumns });
           <!-- 任务 7：主源缺失/损坏与快照警告 = .ts-notice（不再用高饱和 NAlert） -->
           <div
             v-if="pricing && (pricing.modelsdev_count === 0 || !pricing.modelsdev_synced_at)"
-            class="ts-notice price-notice"
+            class="ts-notice ts-notice-inline price-notice"
             role="alert"
           >
             <svg
@@ -722,7 +762,11 @@ defineExpose({ priceColumns });
               当前未覆盖模型的费用将显示为未知。
             </span>
           </div>
-          <div v-for="(w, i) in pricing?.warnings ?? []" :key="i" class="ts-notice price-notice">
+          <div
+            v-for="(w, i) in pricing?.warnings ?? []"
+            :key="i"
+            class="ts-notice ts-notice-inline price-notice"
+          >
             <svg
               class="ts-notice-icon"
               viewBox="0 0 24 24"
@@ -860,6 +904,48 @@ defineExpose({ priceColumns });
 .source-head strong {
   font-size: 14px;
   color: var(--ts-text);
+}
+
+/* UX08：来源目录字段名——稳定可访问名称，与真实 input 的 id/aria-label 关联 */
+.dir-label {
+  display: block;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ts-text-secondary);
+  margin-bottom: var(--ts-space-1);
+}
+
+/* UX08：当前生效目录——完整值可读、可选中复制、长路径换行（不省略号截断） */
+.source-effective {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ts-space-1);
+  margin-top: var(--ts-space-1);
+  font-size: 12px;
+  line-height: 1.5;
+  user-select: text;
+}
+.effective-label {
+  flex-shrink: 0;
+  color: var(--ts-text-muted);
+}
+.effective-path {
+  min-width: 0;
+  color: var(--ts-text-secondary);
+  white-space: normal;
+  word-break: break-all;
+}
+
+/* UX08：重建缓存行——按钮 + 预期说明 */
+.rebuild-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ts-space-3);
+  margin-top: var(--ts-space-2);
+}
+.rebuild-hint {
+  font-size: 12px;
+  color: var(--ts-text-muted);
 }
 
 .source-state {

@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
-import { FIXTURE_NAMES, buildFixture, isReject } from "./fixtures/ui-contracts.mjs";
+import { FIXTURE_NAMES, LONG_SOURCE_DIR, buildFixture, isReject } from "./fixtures/ui-contracts.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -214,7 +214,8 @@ const MEASURE = () => {
 
 /** 打开费用浮层并量测（在页面内执行）。 */
 const OPEN_COST_TOOLTIP = () => {
-  const trigger = document.querySelector('span[role="button"][aria-label="费用计算明细"]');
+  // UX03 起触发器为 .cost-trigger（aria-label 随金额变化，不能按固定文案选）
+  const trigger = document.querySelector(".cost-trigger");
   if (!trigger) return { available: false, reason: "no-cost-trigger" };
   trigger.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
   return { available: true };
@@ -300,6 +301,40 @@ const READ_FIRST_TABLE_TYPO = () => {
       ? { fontSize: getComputedStyle(el).fontSize, fontWeight: getComputedStyle(el).fontWeight }
       : null;
   return { th: g(root.querySelector("th")), td: g(root.querySelector("tbody td")) };
+};
+
+/** UX08：设置页来源目录输入框的可访问名称 + 「当前生效目录」换行量测。 */
+const READ_SOURCE_DIRS = () => {
+  const inputs = [...document.querySelectorAll(".source-block .n-input__input-el")];
+  const effs = [...document.querySelectorAll(".source-effective .effective-path")];
+  return {
+    inputs: inputs.map((el) => {
+      const id = el.id;
+      const label = id ? document.querySelector(`label[for="${id}"]`) : null;
+      return {
+        ariaLabel: el.getAttribute("aria-label"),
+        id,
+        placeholder: el.getAttribute("placeholder"),
+        labelText: label ? label.textContent.trim() : null,
+      };
+    }),
+    effective: effs.map((el) => {
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      return {
+        text: el.textContent ?? "",
+        clientWidth: el.clientWidth,
+        scrollWidth: el.scrollWidth,
+        height: Math.round(r.height),
+        lineHeight: Math.round(Number.parseFloat(cs.lineHeight) || 0),
+        userSelect: cs.userSelect,
+        whiteSpace: cs.whiteSpace,
+        wordBreak: cs.wordBreak,
+      };
+    }),
+    docScrollWidth: document.scrollingElement?.scrollWidth ?? 0,
+    viewportWidth: window.innerWidth,
+  };
 };
 
 /** UX05：打开图表文字摘要并读取行（类别一致性验收）。 */
@@ -441,6 +476,36 @@ function buildChecks(m, ctx) {
     ]);
   }
 
+  // UX08：设置页来源目录——真实 textbox 的稳定可访问名称 + 完整「当前生效目录」
+  if (ctx.fixture === "long-text") {
+    const sd = m.sourceDirs;
+    const inputs = sd?.inputs ?? [];
+    const names = inputs.map((i) => i.ariaLabel);
+    checks.push([
+      "source_dir_inputs_have_stable_accessible_names",
+      names.length >= 2 &&
+        names.every((n) => typeof n === "string" && n.endsWith("日志目录")) &&
+        inputs.every((i) => !!i.id && i.labelText === i.ariaLabel) &&
+        inputs.every((i) => i.placeholder === "留空使用当前生效目录"),
+      names.join(" | "),
+    ]);
+    const eff = sd?.effective ?? [];
+    const long = eff[0];
+    checks.push([
+      "effective_directory_is_shown_in_full_and_wraps",
+      !!long &&
+        long.text === ctx.expectedLongDir &&
+        long.whiteSpace === "normal" &&
+        long.wordBreak === "break-all" &&
+        long.userSelect === "text" &&
+        long.scrollWidth <= long.clientWidth + 1 &&
+        sd.docScrollWidth <= sd.viewportWidth + 1,
+      long
+        ? `chars=${long.text.length}/${ctx.expectedLongDir.length} scroll=${long.scrollWidth}/${long.clientWidth} page=${sd.docScrollWidth}/${sd.viewportWidth}`
+        : "no-effective-path",
+    ]);
+  }
+
   // UX05：切维度 / 切主题后类别与摘要一致
   if (ctx.fixture === "normal" || ctx.fixture === "multi-category") {
     const c = m.chart;
@@ -537,7 +602,7 @@ for (const fixtureName of args.fixtures) {
             window.__TS_COST_TOOLTIP = t;
           }, tip);
           await page.evaluate(() => {
-            const trigger = document.querySelector('span[role="button"][aria-label="费用计算明细"]');
+            const trigger = document.querySelector(".cost-trigger");
             trigger?.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true }));
           });
           await page.waitForTimeout(150);
@@ -575,11 +640,15 @@ for (const fixtureName of args.fixtures) {
         m.chart = chart;
 
         // 最后切到设置页量测第三张表（聚合/明细已在汇总页量测）
-        if (fixtureName === "normal") {
+        if (fixtureName === "normal" || fixtureName === "long-text") {
           const goto = await page.evaluate(GOTO_SETTINGS);
           if (goto.ok) {
             await page.waitForTimeout(600);
-            m.settingsTable = await page.evaluate(READ_FIRST_TABLE_TYPO);
+            if (fixtureName === "normal") {
+              m.settingsTable = await page.evaluate(READ_FIRST_TABLE_TYPO);
+            } else {
+              m.sourceDirs = await page.evaluate(READ_SOURCE_DIRS);
+            }
             await page.evaluate(CLICK_SEGMENT, "汇总");
             await page.waitForTimeout(300);
           }
@@ -592,7 +661,11 @@ for (const fixtureName of args.fixtures) {
           const groups = Array.isArray(sum?.groups) ? sum.groups : [];
           return groups.filter((g) => g.key !== "合计").map((g) => g.label ?? g.key);
         })();
-        const checks = buildChecks(m, { fixture: fixtureName, expectedCategories: expectedModel });
+        const checks = buildChecks(m, {
+          fixture: fixtureName,
+          expectedCategories: expectedModel,
+          expectedLongDir: LONG_SOURCE_DIR,
+        });
 
         // 硬约束：IPC 无未知命令、无未处理拒绝、无外部请求、无页面错误
         const bootChecks = [
