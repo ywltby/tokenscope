@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use tokenscope::pricing::{
-    INDEX_VERSION, PricePlan, PriceRates, Pricing, PricingIndex, RateSpec, load_index, save_index,
+    INDEX_VERSION, IndexEntry, PricePlan, PriceRates, Pricing, PricingIndex, RateSpec, load_index,
+    save_index,
 };
 
 const STAGE_ENV: &str = "TOKENSCOPE_IDX_RESTART_STAGE";
@@ -205,6 +206,78 @@ fn test_invalid_price_cannot_survive_index_load() {
             let index = dir.join("pricing-index.json");
             let (p, _, hit) = Pricing::load_cached(Some(&toml), None, None, &index);
             assert!(hit, "重建出的干净索引在新进程中应命中");
+            assert_eq!(p.lookup("m").unwrap().plan.base.input, RateSpec::Fixed(2.0));
+        }
+        other => panic!("未知阶段 {other:?}"),
+    }
+}
+
+/// SF03 冷启动回归：旧版本（v7）索引可能永久记住"无告警的读取失败产物"
+/// （旧签名仅 mtime/size）。新进程必须拒绝旧版索引、按来源重建并写出
+/// 当前版索引——用户不改文件长度/时间戳也能恢复。
+#[test]
+fn restart_rejects_legacy_degraded_index() {
+    match std::env::var(STAGE_ENV).ok().as_deref() {
+        None => {
+            let dir = fresh_dir("sf03-legacy");
+            write(&dir, "pricing.toml", EXTERNAL_TOML);
+            let index = dir.join("pricing-index.json");
+            // 父进程伪造 v7 旧索引：签名任意（旧格式），条目价格故意错误。
+            let legacy = PricingIndex {
+                v: 7,
+                sig: "legacy-mtime-size-sig".to_string(),
+                synced_at: "t".to_string(),
+                warnings: Vec::new(),
+                entries: vec![IndexEntry {
+                    prefix: "m".to_string(),
+                    display: "m".to_string(),
+                    name: None,
+                    tier: 0,
+                    plan: Some(PricePlan {
+                        base: PriceRates {
+                            input: RateSpec::Fixed(99.0),
+                            output: RateSpec::Fixed(99.0),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                    input: Some(99.0),
+                    output: Some(99.0),
+                    cache_write: None,
+                    cache_read: None,
+                }],
+            };
+            save_index(&index, &legacy).unwrap();
+            let name = "restart_rejects_legacy_degraded_index";
+            run_stage(name, "legacy_rejected", &dir);
+            // 重建后写出的当前版索引在新进程可命中。
+            run_stage(name, "current_hit", &dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        Some("legacy_rejected") => {
+            let dir = child_dir();
+            let toml = dir.join("pricing.toml");
+            let index = dir.join("pricing-index.json");
+            let (p, warnings, hit) = Pricing::load_cached(Some(&toml), None, None, &index);
+            assert!(!hit, "旧 v7 索引必须拒绝（版本失效重建）");
+            assert!(
+                warnings.is_empty(),
+                "按来源重建后不得残留降级告警: {warnings:?}"
+            );
+            assert_eq!(
+                p.lookup("m").unwrap().plan.base.input,
+                RateSpec::Fixed(2.0),
+                "内容必须来自来源而非旧索引的错误条目"
+            );
+            let reloaded = load_index(&index).unwrap().unwrap();
+            assert_eq!(reloaded.v, INDEX_VERSION, "重建必须写出当前版索引");
+        }
+        Some("current_hit") => {
+            let dir = child_dir();
+            let toml = dir.join("pricing.toml");
+            let index = dir.join("pricing-index.json");
+            let (p, _, hit) = Pricing::load_cached(Some(&toml), None, None, &index);
+            assert!(hit, "重建出的当前版索引在新进程中应命中");
             assert_eq!(p.lookup("m").unwrap().plan.base.input, RateSpec::Fixed(2.0));
         }
         other => panic!("未知阶段 {other:?}"),

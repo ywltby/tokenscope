@@ -296,15 +296,22 @@ pub(crate) fn convert_tiers(
 }
 
 /// 读快照：缺失 → Ok(None)；损坏 → Err（调用方警告并忽略该层）。
-/// v1 旧快照（分项被 0 填充）→ 缓存分项降级为未知（保守），建议重新同步。
 pub fn load_snapshot(snapshot_path: &Path) -> Result<Option<Snapshot>> {
     if !snapshot_path.exists() {
         return Ok(None);
     }
     let text = std::fs::read_to_string(snapshot_path)
         .with_context(|| format!("读快照失败: {}", snapshot_path.display()))?;
-    let mut snapshot: Snapshot = serde_json::from_str(&text)
-        .with_context(|| format!("快照解析失败: {}", snapshot_path.display()))?;
+    parse_snapshot_text(&text)
+        .map(Some)
+        .with_context(|| format!("快照解析失败: {}", snapshot_path.display()))
+}
+
+/// SF03：解析已读入内存的快照文本——读取与健康分类由调用方（pricing）
+/// 统一负责；错误只含解析原因，路径上下文由调用方补充。
+/// v1 旧快照（分项被 0 填充）→ 缓存分项降级为未知（保守），建议重新同步。
+pub(crate) fn parse_snapshot_text(text: &str) -> Result<Snapshot> {
+    let mut snapshot: Snapshot = serde_json::from_str(text)?;
     if snapshot.v < 2 {
         log::warn!(
             "models.dev 快照为 v1 格式（缓存分项曾被 0 填充），按未知保守处理；重新同步后恢复精确"
@@ -317,7 +324,7 @@ pub fn load_snapshot(snapshot_path: &Path) -> Result<Option<Snapshot>> {
         }
         snapshot.v = 2;
     }
-    Ok(Some(snapshot))
+    Ok(snapshot)
 }
 
 #[cfg(test)]

@@ -320,9 +320,16 @@ pub fn load_snapshot(snapshot_path: &Path) -> Result<Option<Snapshot>> {
     }
     let text = std::fs::read_to_string(snapshot_path)
         .with_context(|| format!("读快照失败: {}", snapshot_path.display()))?;
-    let snapshot: Snapshot = serde_json::from_str(&text)
-        .with_context(|| format!("快照解析失败: {}", snapshot_path.display()))?;
-    Ok(Some(snapshot))
+    parse_snapshot_text(&text)
+        .map(Some)
+        .with_context(|| format!("快照解析失败: {}", snapshot_path.display()))
+}
+
+/// SF03：解析已读入内存的快照文本——读取与健康分类由调用方（pricing）
+/// 统一负责；错误只含解析原因，路径上下文由调用方补充。
+pub(crate) fn parse_snapshot_text(text: &str) -> Result<Snapshot> {
+    let snapshot: Snapshot = serde_json::from_str(text)?;
+    Ok(snapshot)
 }
 
 #[cfg(test)]

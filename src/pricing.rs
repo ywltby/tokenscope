@@ -1318,7 +1318,10 @@ fn default_index_v1() -> u8 {
 /// v7（修复后复核 F04/F05）：恢复入口统一校验——plan 与旧扁平字段先
 /// 归一成完整计划再校验；v6 索引可能携带未校验的非法扁平价，**拒绝
 /// 读取**，按来源重建。
-pub const INDEX_VERSION: u8 = 7;
+/// v8（SF03）：签名改为"路径+内容摘要"、读取失败结果不再发布——旧版
+/// 索引可能永久记住了无告警的读取失败产物（同 mtime/size 旧签名），
+/// **拒绝读取**，按来源重建（候选合法性校验保留）。
+pub const INDEX_VERSION: u8 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -1424,24 +1427,197 @@ pub fn pricing_status(
 type PriceCacheEntry = (String, std::sync::Arc<Pricing>, Vec<String>);
 static PRICE_CACHE: std::sync::Mutex<Option<PriceCacheEntry>> = std::sync::Mutex::new(None);
 
-fn source_sig(paths: &[Option<PathBuf>]) -> String {
-    let mut parts = Vec::new();
-    for p in paths {
-        match p {
-            Some(path) => {
-                let meta = std::fs::metadata(path).ok();
-                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                let mtime = meta
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
-                parts.push(format!("{}:{}:{}", path.display(), size, mtime));
-            }
-            None => parts.push("-".to_string()),
+/// 测试专用锁：集成测试串行化进程内单槽价格缓存的断言窗口。
+static PRICE_CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 测试专用（#[doc(hidden)]）：返回全局价格缓存串行锁（毒化时恢复）。
+#[doc(hidden)]
+pub fn price_cache_test_lock() -> &'static std::sync::Mutex<()> {
+    &PRICE_CACHE_TEST_LOCK
+}
+
+/// 测试专用（#[doc(hidden)]）：清空进程内价格缓存（模拟冷启动）。
+#[doc(hidden)]
+pub fn clear_price_cache_for_tests() {
+    *PRICE_CACHE.lock().unwrap() = None;
+}
+
+/// SF03：单个价格来源的一次读取健康状态——「不存在」与「存在但读取失败」
+/// 必须可区分：失败要携带原因并阻止本次结果进入缓存。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceHealth {
+    /// 未配置（调用方未提供该来源路径）。
+    NotConfigured,
+    /// 配置了路径但文件不存在（可选文件，正常状态，无告警）。
+    NotFound,
+    /// 读取成功；digest = 内容摘要（纳入缓存签名，替代仅 mtime/size）。
+    Ok { digest: String },
+    /// 文件存在但读取失败（权限/共享占用/非法 UTF-8 等）——可恢复故障，
+    /// 本次结果不得写内存缓存或磁盘索引。
+    ReadFailed { reason: String },
+}
+
+impl SourceHealth {
+    fn state_token(&self) -> String {
+        match self {
+            SourceHealth::NotConfigured => "none".to_string(),
+            SourceHealth::NotFound => "missing".to_string(),
+            SourceHealth::Ok { digest } => format!("sha:{digest}"),
+            SourceHealth::ReadFailed { reason } => format!("failed:{reason}"),
         }
     }
-    parts.join("|")
+}
+
+/// SF03：一次完整加载的产物——价格表、业务诊断、来源健康与可缓存性。
+/// 业务诊断（候选/规则拒绝、快照解析失败）可随缓存持久化；读取失败
+///（read_failure_warnings 非空）不可缓存。
+#[derive(Debug, Clone)]
+pub struct PricingLoadOutcome {
+    pub pricing: Pricing,
+    /// 业务诊断——可随缓存持久化并在命中时持续可见（D2 契约）。
+    pub diagnostics: Vec<String>,
+    pub external_health: SourceHealth,
+    pub modelsdev_health: SourceHealth,
+    pub openrouter_health: SourceHealth,
+    /// 任一来源读取失败 → false：本次结果只作降级返回，绝不写缓存。
+    pub cacheable: bool,
+    /// 缓存签名：路径 + 读取健康（成功为内容摘要）。
+    pub sig: String,
+}
+
+impl PricingLoadOutcome {
+    /// 读取失败告警（临时 I/O 故障，与业务诊断分开）：携带路径与原因，
+    /// 与「文件不存在」不同分支——失败不能伪装成默认值。
+    pub fn read_failure_warnings(&self) -> Vec<String> {
+        let mut w = Vec::new();
+        for (name, health) in [
+            ("外置价格文件", &self.external_health),
+            ("models.dev 快照", &self.modelsdev_health),
+            ("OpenRouter 快照", &self.openrouter_health),
+        ] {
+            if let SourceHealth::ReadFailed { reason } = health {
+                w.push(format!(
+                    "{name}读取失败，该层本次不可用（恢复可读后将自动重新加载；原因: {reason}）"
+                ));
+            }
+        }
+        w
+    }
+
+    /// 完整告警 = 读取失败告警（在前，可见性优先）+ 业务诊断。
+    pub fn warnings(&self) -> Vec<String> {
+        let mut w = self.read_failure_warnings();
+        w.extend(self.diagnostics.iter().cloned());
+        w
+    }
+}
+
+/// 稳定内容摘要（DefaultHasher 固定键，跨进程可复现）——签名纳入内容，
+/// 同 mtime/size 的读取失败恢复（同内容）不必等元数据变化。
+fn content_digest(bytes: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// 单来源读取结果：健康分类 + 已验证 UTF-8 的文本（成功时）。
+struct SourceFile {
+    path: Option<PathBuf>,
+    health: SourceHealth,
+    text: Option<String>,
+}
+
+struct SourceReads {
+    external: SourceFile,
+    modelsdev: SourceFile,
+    openrouter: SourceFile,
+}
+
+impl SourceReads {
+    fn any_read_failed(&self) -> bool {
+        [
+            &self.external.health,
+            &self.modelsdev.health,
+            &self.openrouter.health,
+        ]
+        .iter()
+        .any(|h| matches!(h, SourceHealth::ReadFailed { .. }))
+    }
+
+    fn sig(&self) -> String {
+        [&self.external, &self.modelsdev, &self.openrouter]
+            .iter()
+            .map(|f| {
+                let p = f
+                    .path
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                format!("{p}:{}", f.health.state_token())
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+}
+
+/// 统一来源读取：reader 可注入（测试复现 PermissionDenied/共享占用等）。
+/// NotFound 与其他 io 错误分属不同分支；非法 UTF-8 也是读取失败。
+/// 成功时内容只读一次，摘要与解析共用同一份字节（避免 TOCTOU）。
+fn read_source(
+    path: Option<&Path>,
+    reader: &dyn Fn(&Path) -> std::io::Result<Vec<u8>>,
+) -> SourceFile {
+    let Some(path) = path else {
+        return SourceFile {
+            path: None,
+            health: SourceHealth::NotConfigured,
+            text: None,
+        };
+    };
+    match reader(path) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => SourceFile {
+                path: Some(path.to_path_buf()),
+                health: SourceHealth::Ok {
+                    digest: content_digest(text.as_bytes()),
+                },
+                text: Some(text),
+            },
+            Err(_) => SourceFile {
+                path: Some(path.to_path_buf()),
+                health: SourceHealth::ReadFailed {
+                    reason: format!("{}（内容不是合法 UTF-8）", path.display()),
+                },
+                text: None,
+            },
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SourceFile {
+            path: Some(path.to_path_buf()),
+            health: SourceHealth::NotFound,
+            text: None,
+        },
+        Err(e) => SourceFile {
+            path: Some(path.to_path_buf()),
+            health: SourceHealth::ReadFailed {
+                reason: format!("{}（{}: {e}）", path.display(), e.kind()),
+            },
+            text: None,
+        },
+    }
+}
+
+fn read_sources(
+    external: Option<&Path>,
+    modelsdev_snapshot: Option<&Path>,
+    openrouter_snapshot: Option<&Path>,
+    reader: &dyn Fn(&Path) -> std::io::Result<Vec<u8>>,
+) -> SourceReads {
+    SourceReads {
+        external: read_source(external, reader),
+        modelsdev: read_source(modelsdev_snapshot, reader),
+        openrouter: read_source(openrouter_snapshot, reader),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1529,18 +1705,50 @@ impl Pricing {
 
     /// 三层合并（Task 1）：openrouter/models.dev 快照叠加在空表上，外置最终覆盖。
     /// 各快照文件缺失 → 静默跳过该层；解析失败 → 警告并跳过该层。
+    /// （SF03：读取失败与缺失分属不同状态，见 [`Self::load_outcome`]。）
     pub fn load(
         external: Option<&Path>,
         modelsdev_snapshot: Option<&Path>,
         openrouter_snapshot: Option<&Path>,
     ) -> (Self, Vec<String>) {
-        // Task 1：三层来源从空表叠加，没有任何编译期 fallback。
-        let mut pricing = Self::empty();
-        let mut warnings = Vec::new();
+        let outcome = Self::load_outcome(external, modelsdev_snapshot, openrouter_snapshot);
+        let warnings = outcome.warnings();
+        (outcome.pricing, warnings)
+    }
 
-        if let Some(path) = modelsdev_snapshot {
-            match crate::modelsdev::load_snapshot(path) {
-                Ok(Some(snapshot)) => {
+    /// SF03：完整加载产物（生产读取路径）。
+    pub fn load_outcome(
+        external: Option<&Path>,
+        modelsdev_snapshot: Option<&Path>,
+        openrouter_snapshot: Option<&Path>,
+    ) -> PricingLoadOutcome {
+        Self::load_outcome_with(external, modelsdev_snapshot, openrouter_snapshot, &|p| {
+            std::fs::read(p)
+        })
+    }
+
+    /// SF03：同 [`Self::load_outcome`]，但来源读取可注入——测试用注入
+    /// reader 复现 PermissionDenied/共享占用等确定性故障（不用 sleep 猜）。
+    pub fn load_outcome_with(
+        external: Option<&Path>,
+        modelsdev_snapshot: Option<&Path>,
+        openrouter_snapshot: Option<&Path>,
+        reader: &dyn Fn(&Path) -> std::io::Result<Vec<u8>>,
+    ) -> PricingLoadOutcome {
+        let reads = read_sources(external, modelsdev_snapshot, openrouter_snapshot, reader);
+        Self::build_from_reads(reads)
+    }
+
+    /// 从已读取的来源文本构建价格表（读取失败层跳过，由 health/告警表达）。
+    fn build_from_reads(reads: SourceReads) -> PricingLoadOutcome {
+        let cacheable = !reads.any_read_failed();
+        let sig = reads.sig();
+        let mut pricing = Self::empty();
+        let mut diagnostics = Vec::new();
+
+        if let Some(text) = reads.modelsdev.text.as_deref() {
+            match crate::modelsdev::parse_snapshot_text(text) {
+                Ok(snapshot) => {
                     for e in snapshot.entries {
                         // Task 2：快照分段（models.dev size 语义已在同步时
                         // 转换为规范 [min, max)）→ PriceSegment。非法规则
@@ -1582,7 +1790,7 @@ impl Pricing {
                                 .iter()
                                 .any(|sg| invalid_rate(&sg.prices).is_some())
                         {
-                            warnings.push(format!(
+                            diagnostics.push(format!(
                                 "models.dev 条目 {} 存在非法单价（须为有限非负），该条目已拒绝",
                                 e.id
                             ));
@@ -1591,7 +1799,7 @@ impl Pricing {
                         let plan = match validate_price_plan(&plan) {
                             Ok(()) => plan,
                             Err(err) => {
-                                warnings.push(format!(
+                                diagnostics.push(format!(
                                     "models.dev 条目 {} 分段规则非法（{err}），仅保留基础价",
                                     e.id
                                 ));
@@ -1613,17 +1821,23 @@ impl Pricing {
                         });
                     }
                 }
-                Ok(None) => {}
-                Err(e) => warnings.push(format!(
-                    "models.dev 快照解析失败，该层已忽略: {}（{e:#}）",
-                    path.display()
-                )),
+                Err(e) => {
+                    let path = reads
+                        .modelsdev
+                        .path
+                        .as_deref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    diagnostics.push(format!(
+                        "models.dev 快照解析失败，该层已忽略: {path}（{e:#}）"
+                    ));
+                }
             }
         }
 
-        if let Some(path) = openrouter_snapshot {
-            match openrouter::load_snapshot(path) {
-                Ok(Some(snapshot)) => {
+        if let Some(text) = reads.openrouter.text.as_deref() {
+            match openrouter::parse_snapshot_text(text) {
+                Ok(snapshot) => {
                     for e in snapshot.entries {
                         // Task 3：OpenRouter overrides（USD/token，inclusive
                         // 下界：prompt >= min 即命中）→ 规范分段 [min,
@@ -1680,7 +1894,7 @@ impl Pricing {
                                 .iter()
                                 .any(|sg| invalid_rate(&sg.prices).is_some())
                         {
-                            warnings.push(format!(
+                            diagnostics.push(format!(
                                 "OpenRouter 条目 {} 存在非法单价（须为有限非负），该条目已拒绝",
                                 e.id
                             ));
@@ -1695,26 +1909,32 @@ impl Pricing {
                         });
                     }
                 }
-                Ok(None) => {}
-                Err(e) => warnings.push(format!(
-                    "OpenRouter 快照解析失败，该层已忽略: {}（{e:#}）",
-                    path.display()
-                )),
+                Err(e) => {
+                    let path = reads
+                        .openrouter
+                        .path
+                        .as_deref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    diagnostics.push(format!(
+                        "OpenRouter 快照解析失败，该层已忽略: {path}（{e:#}）"
+                    ));
+                }
             }
         }
 
-        if let Some(path) = external {
-            let Ok(text) = std::fs::read_to_string(path) else {
-                return (pricing, warnings);
-            };
-            let parsed: ExternalFile = match toml::from_str(&text) {
+        if let (Some(path), Some(text)) = (
+            reads.external.path.as_deref(),
+            reads.external.text.as_deref(),
+        ) {
+            let parsed: ExternalFile = match toml::from_str(text) {
                 Ok(p) => p,
                 Err(e) => {
-                    warnings.push(format!(
+                    diagnostics.push(format!(
                         "外置价格文件解析失败，该层已忽略: {}（{e}）",
                         path.display()
                     ));
-                    return (pricing, warnings);
+                    return Self::finish_outcome(pricing, diagnostics, &reads, cacheable, sig);
                 }
             };
             for m in parsed.model {
@@ -1722,7 +1942,7 @@ impl Pricing {
                 match external_model_plan(&m) {
                     Ok((plan, rule_warnings)) => {
                         for w in rule_warnings {
-                            warnings.push(format!("外置条目 {display}: {w}"));
+                            diagnostics.push(format!("外置条目 {display}: {w}"));
                         }
                         pricing.add_entry(Entry {
                             prefix: match_key(&m.prefix),
@@ -1732,13 +1952,31 @@ impl Pricing {
                             tier: TIER_EXTERNAL,
                         });
                     }
-                    Err(err) => warnings.push(format!("外置条目 {display} 已忽略: {err}")),
+                    Err(err) => diagnostics.push(format!("外置条目 {display} 已忽略: {err}")),
                 }
             }
-            pricing.apply_model_policies(&parsed.model_policy, &mut warnings);
+            pricing.apply_model_policies(&parsed.model_policy, &mut diagnostics);
         }
 
-        (pricing, warnings)
+        Self::finish_outcome(pricing, diagnostics, &reads, cacheable, sig)
+    }
+
+    fn finish_outcome(
+        pricing: Pricing,
+        diagnostics: Vec<String>,
+        reads: &SourceReads,
+        cacheable: bool,
+        sig: String,
+    ) -> PricingLoadOutcome {
+        PricingLoadOutcome {
+            pricing,
+            diagnostics,
+            external_health: reads.external.health.clone(),
+            modelsdev_health: reads.modelsdev.health.clone(),
+            openrouter_health: reads.openrouter.health.clone(),
+            cacheable,
+            sig,
+        }
     }
 
     /// 应用 [[model_policy]]（Task 3）：只把匹配候选的 Unknown cache_read
@@ -2109,18 +2347,46 @@ impl Pricing {
 
     /// 带进程内缓存的加载（M11）：三源签名一致直接复用，否则重建并写索引文件。
     /// 返回 (Pricing, 警告, 是否命中缓存)。
+    /// SF03：任一来源读取失败时返回其余来源的降级结果 + 失败告警，且绝不
+    /// 写内存缓存或磁盘索引（恢复可读后自动重新加载）。
     pub fn load_cached(
         external: Option<&Path>,
         modelsdev_snapshot: Option<&Path>,
         openrouter_snapshot: Option<&Path>,
         index_path: &Path,
     ) -> (std::sync::Arc<Pricing>, Vec<String>, bool) {
-        let paths = [
-            external.map(Path::to_path_buf),
-            modelsdev_snapshot.map(Path::to_path_buf),
-            openrouter_snapshot.map(Path::to_path_buf),
-        ];
-        let sig = source_sig(&paths);
+        Self::load_cached_with(
+            external,
+            modelsdev_snapshot,
+            openrouter_snapshot,
+            index_path,
+            &|p| std::fs::read(p),
+        )
+    }
+
+    /// SF03：同 [`Self::load_cached`]，但来源读取可注入（测试复现
+    /// PermissionDenied/共享占用等确定性故障）。
+    pub fn load_cached_with(
+        external: Option<&Path>,
+        modelsdev_snapshot: Option<&Path>,
+        openrouter_snapshot: Option<&Path>,
+        index_path: &Path,
+        reader: &dyn Fn(&Path) -> std::io::Result<Vec<u8>>,
+    ) -> (std::sync::Arc<Pricing>, Vec<String>, bool) {
+        // SF03：复用缓存前先读一次字节并验证 UTF-8，签名纳入内容摘要——
+        // "旧成功缓存已在内存而文件随后不可读"不会被直接命中遮蔽；
+        // 仅比较 mtime/size 或 File::exists 都不足够。
+        let reads = read_sources(external, modelsdev_snapshot, openrouter_snapshot, reader);
+        let sig = reads.sig();
+        if reads.any_read_failed() {
+            // 降级返回其余来源 + 失败告警；内存/磁盘成功缓存都不复用、
+            // 也不被覆盖——恢复可读后（同内容摘要）立即回到健康缓存。
+            let outcome = Self::build_from_reads(reads);
+            debug_assert!(!outcome.cacheable);
+            debug_assert!(!outcome.read_failure_warnings().is_empty());
+            let warnings = outcome.warnings();
+            return (std::sync::Arc::new(outcome.pricing), warnings, false);
+        }
         let mut guard = PRICE_CACHE.lock().unwrap();
         // D2：命中也返回持久化的诊断——降级状态必须随结果持续可见。
         if let Some((cached_sig, cached, cached_warnings)) = guard.as_ref()
@@ -2143,43 +2409,27 @@ impl Pricing {
                 .entries
                 .iter()
                 .any(|e| price_plan_invalid(&index_entry_plan(e)));
-            if has_invalid {
-                log::warn!("价格索引含非法单价条目，按来源重建");
-                // 释放锁后走重建路径（含回写干净索引）；下方正常重建逻辑
-                // 会再占锁覆盖缓存——这里直接复用其结果即可。
-                drop(guard);
-                let (pricing, mut warnings) =
-                    Self::load(external, modelsdev_snapshot, openrouter_snapshot);
-                let index = pricing.to_index(
-                    sig.clone(),
-                    jiff::Zoned::now().to_string(),
-                    warnings.clone(),
-                );
-                if let Err(e) = save_index(index_path, &index) {
-                    warnings.push(format!("价格索引写入失败（不影响统计）: {e:#}"));
-                }
-                let arc = std::sync::Arc::new(pricing);
-                PRICE_CACHE
-                    .lock()
-                    .unwrap()
-                    .replace((sig, arc.clone(), warnings.clone()));
-                return (arc, warnings, false);
+            if !has_invalid {
+                let arc = std::sync::Arc::new(Self::from_index(&index));
+                *guard = Some((sig, arc.clone(), index.warnings.clone()));
+                return (arc, index.warnings, true);
             }
-            let arc = std::sync::Arc::new(Self::from_index(&index));
-            *guard = Some((sig, arc.clone(), index.warnings.clone()));
-            return (arc, index.warnings, true);
+            log::warn!("价格索引含非法单价条目，按来源重建");
+            // 落到下方重建路径——正常重建与非法索引回退共用同一缓存写入
+            // 出口（cacheable 已由上方读取阶段保证）。
         }
-        let (pricing, mut warnings) = Self::load(external, modelsdev_snapshot, openrouter_snapshot);
-        // 重建后写索引快照，供下次进程启动快速加载。
-        let index = pricing.to_index(
+        let outcome = Self::build_from_reads(reads);
+        debug_assert!(outcome.cacheable);
+        let index = outcome.pricing.to_index(
             sig.clone(),
             jiff::Zoned::now().to_string(),
-            warnings.clone(),
+            outcome.diagnostics.clone(),
         );
+        let mut warnings = outcome.diagnostics.clone();
         if let Err(e) = save_index(index_path, &index) {
             warnings.push(format!("价格索引写入失败（不影响统计）: {e:#}"));
         }
-        let arc = std::sync::Arc::new(pricing);
+        let arc = std::sync::Arc::new(outcome.pricing);
         *guard = Some((sig, arc.clone(), warnings.clone()));
         (arc, warnings, false)
     }
@@ -2192,6 +2442,12 @@ mod tests {
     /// 测试用固定"事件时间"（历史时刻，绝不读当前墙上时钟）。
     fn at() -> jiff::Timestamp {
         "2026-01-05T10:00:00Z".parse().unwrap()
+    }
+
+    /// 生产同款签名（三源未配置）：供旧索引 fixture 使用，证明重建只由
+    /// 版本检查触发（SF03 起签名 = 路径 + 内容摘要/读取健康状态）。
+    fn prod_sig_none_sources() -> String {
+        read_sources(None, None, None, &|_| Ok(Vec::new())).sig()
     }
 
     fn counts(input: u64, output: u64, cw: u64, cr: u64) -> TokenCounts {
@@ -3283,7 +3539,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let idx = dir.join("pricing-index.json");
         // 生产同款签名：load_cached(None, None, None, _) 的三源签名。
-        let sig = source_sig(&[None, None, None]);
+        let sig = prod_sig_none_sources();
         let legacy = serde_json::json!({
             "v": 2,
             "sig": sig,
@@ -3330,7 +3586,7 @@ mod tests {
         let _g = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         *PRICE_CACHE.lock().unwrap() = None;
         // 生产同款签名：证明重建只由版本检查触发（v3 < 当前 v4）。
-        let sig = source_sig(&[None, None, None]);
+        let sig = prod_sig_none_sources();
         let v3 = serde_json::json!({
             "v": 3,
             "sig": sig,
