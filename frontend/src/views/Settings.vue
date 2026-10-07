@@ -22,6 +22,7 @@ import {
   sourceIdOf,
   type CacheInfo,
   type PricingEntry,
+  type RateSpecView,
   type PricingView,
   type SourceStatus,
 } from "../types";
@@ -232,7 +233,7 @@ watch(
 );
 
 /// 单价悬浮提示：来源 + OpenRouter 同前缀对照价（无对应模型标注未知价格）。
-function priceCell(r: object, pick: (e: PricingEntry) => number | null): VNode {
+function priceCell(r: object, pick: (e: PricingEntry) => RateSpecView): VNode {
   const e = asEntry(r);
   const or = e.openrouter;
   const orLine = or

@@ -201,7 +201,7 @@ describe("Settings 分段价格展示（Task 8）", () => {
     cache_write: 0.0,
     cache_read: null,
     source: "外置",
-    incomplete: true,
+    base_incomplete: true,
     basis: "prompt_tokens",
     has_tiered_pricing: true,
     segments: [

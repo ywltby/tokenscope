@@ -14,9 +14,10 @@ export function buildSourceLines(sources: SourceStat[]): {
   }));
 }
 
-/// 价格表悬浮的来源行（pricing_match_source_visible）：不完整条目必须可见。
+/// 价格表悬浮的来源行（pricing_match_source_visible）：基础费率不完整
+/// 的条目必须可见；"未知"不是 0，也不声称按 0 展示。
 export function priceSourceLine(e: PricingEntry): string {
-  return e.incomplete
-    ? `来源：${e.source}（不完整：部分分项价格未知，按 0 展示但未计费）`
+  return e.base_incomplete
+    ? `来源：${e.source}（基础费率不完整：部分分项价格未知，展示"未知"且未计费）`
     : `来源：${e.source}`;
 }

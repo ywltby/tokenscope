@@ -11,7 +11,7 @@ describe("priceSourceLine（pricing_match_source_visible）", () => {
       output: 2,
       cache_write: 0,
       cache_read: 0,
-      incomplete: false,
+      base_incomplete: false,
       source: "外置",
     } as PricingEntry;
     expect(priceSourceLine(e)).toBe("来源：外置");
@@ -25,7 +25,7 @@ describe("priceSourceLine（pricing_match_source_visible）", () => {
         output: 2,
         cache_write: 0,
         cache_read: 0,
-        incomplete: false,
+        base_incomplete: false,
         source,
       }) as PricingEntry;
     expect(priceSourceLine(mk("外置"))).toBe("来源：外置");
@@ -33,14 +33,14 @@ describe("priceSourceLine（pricing_match_source_visible）", () => {
     expect(priceSourceLine(mk("OpenRouter"))).toBe("来源：OpenRouter");
   });
 
-  it("不完整条目必须可见（部分分项价未知按 0 展示但未计费）", () => {
+  it("不完整条目必须可见（部分分项价未知显示未知且未计费）", () => {
     const e = {
       prefix: "x",
       input: 1,
       output: 2,
       cache_write: 0,
       cache_read: 0,
-      incomplete: true,
+      base_incomplete: true,
       source: "models.dev",
     } as PricingEntry;
     const line = priceSourceLine(e);

@@ -68,3 +68,42 @@ fn test_claude_buckets_map_one_to_one() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// SF08：单字段接近 u64::MAX 的**合法**组合——零值判断逐字段、守恒受检
+/// 后该行正常解析，四桶守恒成立（不因受检化改变正常数据语义）。
+#[test]
+fn test_codex_near_max_single_field_is_valid() {
+    let dir = tmp_dir("sf08-near-max");
+    let file = dir.join("rollout-max.jsonl");
+    let max = u64::MAX.to_string();
+    let line = format!(
+        r#"{{"timestamp":"2026-07-17T15:02:00.000Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":{max},"output_tokens":0,"cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":{max}}}}}}}}}"#
+    );
+    std::fs::write(
+        &file,
+        format!(
+            "{}
+{}
+{}
+",
+            r#"{"timestamp":"2026-07-17T15:00:00.000Z","type":"session_meta","payload":{"id":"s1","session_id":"s1","cwd":"C:/w/alpha"}}"#,
+            r#"{"timestamp":"2026-07-17T15:01:00.000Z","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.6-sol","cwd":"C:/w/alpha"}}"#,
+            line,
+        ),
+    )
+    .unwrap();
+    let source = CodexSource::new(dir.clone());
+    let (files, errors) = source.discover_with_errors();
+    assert!(errors.is_empty());
+    let parse = source.parse_file(&files[0]);
+    assert_eq!(parse.events.len(), 1, "合法 MAX 单字段行必须保留");
+    assert_eq!(parse.events[0].input_tokens, u64::MAX);
+    // 四桶守恒：input = raw input（cached/cw 为 0）。
+    let e = &parse.events[0];
+    assert_eq!(
+        e.input_tokens + e.cache_read_tokens + e.cache_write_tokens + e.output_tokens,
+        u64::MAX
+    );
+    assert!(e.validate_buckets().is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}

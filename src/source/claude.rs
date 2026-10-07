@@ -180,7 +180,7 @@ fn ingest_line(line: &str, project: &str, stats: &mut CollectStats, events: &mut
         return;
     }
 
-    events.push(UsageEvent {
+    let event = UsageEvent {
         ts,
         agent: AgentKind::ClaudeCode,
         model: msg.model.clone(),
@@ -191,7 +191,14 @@ fn ingest_line(line: &str, project: &str, stats: &mut CollectStats, events: &mut
         output_tokens: usage.output_tokens,
         cache_write_tokens: usage.cache_creation_input_tokens,
         cache_read_tokens: usage.cache_read_input_tokens,
-    });
+    };
+    // SF08：source→model 公共桶边界——四字段独立来源同样校验可表示性
+    //（异常组合计 bad_lines 跳过，不回绕）。
+    if event.validate_buckets().is_err() {
+        stats.bad_lines += 1;
+        return;
+    }
+    events.push(event);
 }
 
 #[cfg(test)]

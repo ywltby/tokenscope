@@ -378,33 +378,38 @@ pub(crate) fn source_config_set_impl(
         enabled,
         dir: dir.clone(),
     };
-    tokenscope::settings::update(path, |s| {
-        // Task 2：保存前按"保存后的全量配置"校验重叠（仅校验两个启用的来源），
-        // 与写入在同一临界区内完成，避免并发保存互相看到过期副本。
-        let other_dir = if claude {
-            s.sources.codex.as_ref().filter(|c| c.enabled)
-        } else {
-            s.sources.claude.as_ref().filter(|c| c.enabled)
-        };
-        if enabled && let Some(other) = other_dir {
-            tokenscope::settings::validate_no_overlap(
-                if claude {
-                    Some(dir.as_deref().unwrap_or(""))
-                } else {
-                    other.dir.as_deref()
-                },
-                if claude {
-                    other.dir.as_deref()
-                } else {
-                    Some(dir.as_deref().unwrap_or(""))
-                },
-            )
-            .map_err(anyhow::Error::msg)?;
-        }
+    let cfg_for_save = cfg.clone();
+    tokenscope::settings::update(path, move |s| {
+        // 先落本次修改，再按"保存后的全量配置"校验（校验对象 = 生效配置）。
         if claude {
-            s.sources.claude = Some(cfg.clone());
+            s.sources.claude = Some(cfg_for_save);
         } else {
-            s.sources.codex = Some(cfg.clone());
+            s.sources.codex = Some(cfg_for_save);
+        }
+        // SF09：解析启用来源的**有效**目录（显式配置或工具默认根）后检查
+        // 相同/嵌套冲突——默认目录与显式覆盖同样参与；禁用来源跳过
+        //（用户可借停用恢复）。与写入在同一临界区内完成。
+        let resolve = |is_claude: bool,
+                       c: &Option<tokenscope::settings::SourceConfig>|
+         -> anyhow::Result<Option<std::path::PathBuf>> {
+            let Some(c) = c else {
+                return Ok(None);
+            };
+            if !c.enabled {
+                return Ok(None);
+            }
+            Ok(Some(match &c.dir {
+                Some(d) => std::path::PathBuf::from(d),
+                None => match is_claude {
+                    true => tokenscope::source::claude::ClaudeSource::default_root()?,
+                    false => tokenscope::source::codex::CodexSource::default_root()?,
+                },
+            }))
+        };
+        let claude_eff = resolve(true, &s.sources.claude)?;
+        let codex_eff = resolve(false, &s.sources.codex)?;
+        if let (Some(a), Some(b)) = (claude_eff, codex_eff) {
+            tokenscope::settings::validate_dir_conflict(&a, &b).map_err(anyhow::Error::msg)?;
         }
         Ok(())
     })?;
@@ -802,7 +807,7 @@ mod tests {
         assert!(!st.modelsdev_available);
         assert!(st.needs_sync);
         assert!(
-            st.warnings.iter().any(|w| w.contains("主源不可用")),
+            st.warnings.iter().any(|w| w.contains("解析失败")),
             "损坏快照必须有诊断: {:?}",
             st.warnings
         );

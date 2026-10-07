@@ -51,11 +51,19 @@ export interface SourceStatus {
 
 /** Task 2：定价可用性状态（结构化 DTO，横幅据 needs_sync 渲染） */
 export interface PricingStatus {
+  /** SF10：available = 存在可解析费率路径的有效候选（明确 0 也算有价） */
   modelsdevAvailable: boolean;
+  /** 原始条目数（技术诊断，与有效候选数区分"已读取"与"有效可用"） */
   modelsdevCount: number;
+  /** SF10：主源有效候选数 */
+  modelsdevValidCount?: number;
   modelsdevSyncedAt?: string | null;
   openrouterAvailable: boolean;
+  /** SF10：补充源有效候选数 */
+  openrouterValidCount?: number;
   externalCount: number;
+  /** SF10：外置源有效候选数 */
+  externalValidCount?: number;
   hasAnyPricing: boolean;
   needsSync: boolean;
   warnings: string[];
@@ -73,20 +81,24 @@ export interface CacheInfo {
   events: number;
 }
 
+/** SF07：三态单价线格式（与后端 RateSpec serde 对齐）——数字 = USD/百万
+ * token；"same_as_input" = 沿用输入价（随分段/时间规则解析）；null = 未知。 */
+export type RateSpecView = number | "same_as_input" | null;
+
 export interface OpenRouterPrice {
-  input: number;
-  output: number;
-  cache_write: number;
-  cache_read: number;
+  input: RateSpecView;
+  output: RateSpecView;
+  cache_write: RateSpecView;
+  cache_read: RateSpecView;
   name?: string | null;
 }
 
 /** Task 8：价格计划视图（与后端 PricePlan 对齐）。 */
 export interface PriceRatesView {
-  input?: number | null;
-  output?: number | null;
-  cache_write?: number | null;
-  cache_read?: number | null;
+  input?: RateSpecView;
+  output?: RateSpecView;
+  cache_write?: RateSpecView;
+  cache_read?: RateSpecView;
 }
 
 export interface PriceSegmentView {
@@ -119,14 +131,15 @@ export interface PricingEntry {
   name?: string | null;
   /** 渠道（原始键第一个 / 之前）；null = 无 vendor 前缀 */
   channel?: string | null;
-  /** 四类基础单价：null = 未知（显示"未知"），0 = 免费 */
-  input: number | null;
-  output: number | null;
-  cache_write: number | null;
-  cache_read: number | null;
+  /** SF07：四类基础单价三态（null = 未知、0 = 免费、"same_as_input" = 同输入价） */
+  input: RateSpecView;
+  output: RateSpecView;
+  cache_write: RateSpecView;
+  cache_read: RateSpecView;
   source: string;
-  /** B3：任一分项价格未知（设置页显示"未知"并标记不完整） */
-  incomplete?: boolean;
+  /** SF07（原 incomplete）：基础费率可解析性缺失——任一分项未知，或
+   * SameAsInput 的输入价未知（依赖未定）。不等同"任意请求都会完整"。 */
+  base_incomplete?: boolean;
   /** 计价依据（"prompt_tokens" 等）；null = 未声明 */
   basis?: string | null;
   segments?: PriceSegmentView[];

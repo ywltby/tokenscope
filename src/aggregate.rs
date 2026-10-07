@@ -86,12 +86,15 @@ pub struct Aggregated {
     pub totals: Group,
 }
 
+/// SF08：聚合算术全部受检——单事件更新先在临时值上全部成功再提交；
+/// 多个各自合法的事件累计溢出/金额非有限时返回明确错误（不回绕、
+/// 不饱和、不跳过"最后一个"制造不确定统计）。
 pub fn aggregate(
     events: &[UsageEvent],
     by: GroupBy,
     tz: &TimeZone,
     pricing: &Pricing,
-) -> Aggregated {
+) -> anyhow::Result<Aggregated> {
     let mut map: BTreeMap<String, Group> = BTreeMap::new();
     // 多 agent 数据才填充 groups[].agents，单 agent 报告与 M1 输出保持一致。
     let first_agent = events.first().map(|e| e.agent);
@@ -103,30 +106,59 @@ pub fn aggregate(
             GroupBy::Project => e.project.clone(),
             GroupBy::Agent => e.agent.as_str().to_string(),
         };
+        let key_err = key.clone();
         let g = map.entry(key.clone()).or_insert_with(|| Group {
             label: project_label(&by, &key),
             key,
             ..Group::default()
         });
-        g.requests += 1;
-        g.tokens.add_event(e);
-        if multi_agent && !g.agents.contains(&e.agent.as_str()) {
-            g.agents.push(e.agent.as_str());
-        }
+        // 临时值上全部成功才提交（requests/tokens/unknown/cost）。
+        let new_requests = g
+            .requests
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("分组 {} 的请求数累计超出可表示范围", key_err))?;
+        let mut new_tokens = g.tokens;
+        let mut new_unknown = g.unknown_tokens;
+        new_tokens = new_tokens
+            .checked_add(&TokenCounts::from_event(e))
+            .ok_or_else(|| anyhow::anyhow!("分组 {} 的 token 累计超出可表示范围", key_err))?;
+        let mut new_cost = g.cost_usd;
         match pricing.estimate(&e.model, &TokenCounts::from_event(e), e.ts) {
             Some(est) => {
-                g.cost_usd += est.cost;
+                new_cost += est.cost;
+                if !new_cost.is_finite() {
+                    anyhow::bail!("分组 {} 的费用累计出现非有限值", key_err);
+                }
                 // B3：部分计价（分项缺价格）不按 0——未知分项的 token 单列，
                 // † 标记语义即"费用仅含已计价部分"。
                 if !est.complete {
-                    g.unknown_pricing = true;
-                    g.unknown_tokens.add(&est.unknown);
+                    new_unknown = new_unknown.checked_add(&est.unknown).ok_or_else(|| {
+                        anyhow::anyhow!("分组 {} 的未知 token 累计超出可表示范围", key_err)
+                    })?;
                 }
             }
             None => {
-                g.unknown_pricing = true;
-                g.unknown_tokens.add_event(e);
+                new_unknown = new_unknown
+                    .checked_add(&TokenCounts::from_event(e))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("分组 {} 的未知 token 累计超出可表示范围", key_err)
+                    })?;
             }
+        }
+        // 全部成功 → 提交（agents 追加不涉算术，随后执行）。
+        g.requests = new_requests;
+        g.tokens = new_tokens;
+        g.unknown_tokens = new_unknown;
+        g.cost_usd = new_cost;
+        if let Some(est) = pricing.estimate(&e.model, &TokenCounts::from_event(e), e.ts) {
+            if !est.complete {
+                g.unknown_pricing = true;
+            }
+        } else {
+            g.unknown_pricing = true;
+        }
+        if multi_agent && !g.agents.contains(&e.agent.as_str()) {
+            g.agents.push(e.agent.as_str());
         }
     }
     let mut groups: Vec<Group> = map.into_values().collect();
@@ -147,11 +179,23 @@ pub fn aggregate(
         ..Group::default()
     };
     for g in &groups {
-        totals.requests += g.requests;
-        totals.tokens.add(&g.tokens);
+        totals.requests = totals
+            .requests
+            .checked_add(g.requests)
+            .ok_or_else(|| anyhow::anyhow!("总计请求数累计超出可表示范围"))?;
+        totals.tokens = totals
+            .tokens
+            .checked_add(&g.tokens)
+            .ok_or_else(|| anyhow::anyhow!("总计 token 累计超出可表示范围"))?;
         totals.cost_usd += g.cost_usd;
+        if !totals.cost_usd.is_finite() {
+            anyhow::bail!("总计费用累计出现非有限值");
+        }
         totals.unknown_pricing |= g.unknown_pricing;
-        totals.unknown_tokens.add(&g.unknown_tokens);
+        totals.unknown_tokens = totals
+            .unknown_tokens
+            .checked_add(&g.unknown_tokens)
+            .ok_or_else(|| anyhow::anyhow!("总计未知 token 累计超出可表示范围"))?;
         for a in &g.agents {
             if !totals.agents.contains(a) {
                 totals.agents.push(a);
@@ -159,11 +203,11 @@ pub fn aggregate(
         }
     }
     groups.push(totals.clone());
-    Aggregated {
+    Ok(Aggregated {
         by: by.as_str(),
         groups,
         totals,
-    }
+    })
 }
 
 /// SF05：预设"近 N 天"的解析结果——统计时区下 `[起始自然日, 今天]` 的
@@ -242,7 +286,7 @@ mod tests {
             event("2026-07-17T15:59:59.000Z", "m", 1, 1),
             event("2026-07-17T16:00:00.000Z", "m", 10, 10),
         ];
-        let agg = aggregate(&events, GroupBy::Day, &tz(), &Pricing::default());
+        let agg = aggregate(&events, GroupBy::Day, &tz(), &Pricing::default()).unwrap();
         // 末行为合计
         assert_eq!(agg.groups.len(), 3);
         assert_eq!(agg.groups[0].key, "2026-07-17");
@@ -263,7 +307,7 @@ mod tests {
                 e
             },
         ];
-        let agg = aggregate(&events, GroupBy::Model, &tz(), &Pricing::default());
+        let agg = aggregate(&events, GroupBy::Model, &tz(), &Pricing::default()).unwrap();
         assert_eq!(agg.groups.len(), 3); // grok、claude、合计
         assert_eq!(agg.groups[0].key, "claude-sonnet-4-5");
         assert_eq!(agg.groups[0].tokens.input, 5);
@@ -275,7 +319,7 @@ mod tests {
         assert_eq!(agg.groups[1].unknown_tokens.input, 1);
         assert_eq!(agg.totals.unknown_tokens.input, 6);
 
-        let agg = aggregate(&events, GroupBy::Project, &tz(), &Pricing::default());
+        let agg = aggregate(&events, GroupBy::Project, &tz(), &Pricing::default()).unwrap();
         assert_eq!(agg.groups.len(), 3);
         assert_eq!(agg.groups[0].key, "proj-a");
         assert_eq!(agg.groups[0].tokens.input, 3);
@@ -288,7 +332,7 @@ mod tests {
         let mut e2 = event("2026-07-17T08:01:00.000Z", "m", 2, 2);
         e2.agent = AgentKind::Codex;
         let events = [event("2026-07-17T08:00:00.000Z", "m", 1, 1), e2];
-        let agg = aggregate(&events, GroupBy::Agent, &tz(), &Pricing::default());
+        let agg = aggregate(&events, GroupBy::Agent, &tz(), &Pricing::default()).unwrap();
         assert_eq!(agg.groups.len(), 3); // claude-code、codex、合计
         assert_eq!(agg.groups[0].key, "claude-code");
         assert_eq!(agg.groups[0].requests, 1);

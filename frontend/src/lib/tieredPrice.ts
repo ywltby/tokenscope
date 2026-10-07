@@ -1,11 +1,20 @@
 // Task 8：设置页分段价格展示的纯函数——只排版，不做任何重算。
 // 缺失分项显示"未知"，显式 0 显示 $0；分段与峰谷规则展开为悬浮行。
 import { fmtNum } from "../types";
-import type { PriceRatesView, PriceScheduleView, PriceSegmentView, PricingEntry } from "../types";
+import type {
+  PriceRatesView,
+  PriceScheduleView,
+  PriceSegmentView,
+  PricingEntry,
+  RateSpecView,
+} from "../types";
 
-/** 单价展示：null = 未知；0 = $0（显式免费）；小值保 6 位防长尾。 */
-export function fmtPriceOrUnknown(v: number | null | undefined): string {
+/** SF07 单价展示（三态）：null = 未知；"same_as_input" = 同输入价
+ * （随分段/时间规则解析，主表不冒充任何条件的最终输入价）；
+ * 0 = $0（显式免费）；小值保 6 位防长尾。 */
+export function fmtPriceOrUnknown(v: RateSpecView | undefined): string {
   if (v == null) return "未知";
+  if (v === "same_as_input") return "同输入价";
   if (v === 0) return "$0";
   if (v < 0.001) return `$${v.toFixed(6)}`;
   if (v < 1) return `$${v.toFixed(4)}`;

@@ -869,10 +869,12 @@ pub struct CostEstimate {
 /// GUI 悬浮对照用：该前缀在 OpenRouter 层的价格（无对应模型则 None）。
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenRouterPrice {
-    pub input: f64,
-    pub output: f64,
-    pub cache_write: f64,
-    pub cache_read: f64,
+    /// SF07：对照价保留三态 RateSpec——缺失分项 = Unknown（null），
+    /// 显式 0 = 免费；不得把缺失压成 0 冒充免费，也不压平 SameAsInput。
+    pub input: RateSpec,
+    pub output: RateSpec,
+    pub cache_write: RateSpec,
+    pub cache_read: RateSpec,
     pub name: Option<String>,
 }
 
@@ -886,13 +888,17 @@ pub struct PricingEntry {
     pub name: Option<String>,
     /// 渠道：原始键第一个 `/` 之前的部分；无斜杠 = None。
     pub channel: Option<String>,
-    /// 四类基础单价：None = 未知，Some(0) = 免费。
-    pub input: Option<f64>,
-    pub output: Option<f64>,
-    pub cache_write: Option<f64>,
-    pub cache_read: Option<f64>,
-    /// B3：任一分项价格未知（展示层必须可见"不完整"）。
-    pub incomplete: bool,
+    /// SF07：四类基础单价保留三态 RateSpec——Fixed(0) = 免费、
+    /// Unknown = 未知、cache_read SameAsInput = 沿用输入价（随分段/时间
+    /// 规则解析）；不再压平成 Option<f64>。
+    pub input: RateSpec,
+    pub output: RateSpec,
+    pub cache_write: RateSpec,
+    pub cache_read: RateSpec,
+    /// SF07（原 incomplete 更名）：**基础**费率可解析性——任一基础分项
+    /// Unknown，或 cache_read 声明 SameAsInput 但基础输入价 Unknown
+    /// （依赖未定）。不描述"任意请求都会完整"（以实际 breakdown 为准）。
+    pub base_incomplete: bool,
     pub source: &'static str,
     /// 计价依据（None = 未声明，按 prompt_tokens 理解）。
     pub basis: Option<PricingBasis>,
@@ -1365,60 +1371,51 @@ pub fn load_index(path: &Path) -> anyhow::Result<Option<PricingIndex>> {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PricingStatus {
+    /// SF10：存在可解析费率路径的候选数 > 0（原始条目数不再当可用性）。
     pub modelsdev_available: bool,
+    /// 原始条目数（技术诊断：与有效候选数区分"已读取"与"有效可用"）。
     pub modelsdev_count: usize,
+    /// SF10：主源有效候选数（校验通过且费率路径可解析）。
+    pub modelsdev_valid_count: usize,
     pub modelsdev_synced_at: Option<String>,
     pub openrouter_available: bool,
+    /// SF10：补充源有效候选数。
+    pub openrouter_valid_count: usize,
     pub external_count: usize,
+    /// SF10：外置源有效候选数。
+    pub external_valid_count: usize,
     pub has_any_pricing: bool,
     pub needs_sync: bool,
     pub warnings: Vec<String>,
 }
 
-/// 计算定价状态：与 `Pricing::load` / 设置页共用同一路径解析与快照规则，
-/// 不会出现设置页显示可用而汇总页认为不可用的分叉。
+/// SF10：定价可用性状态——与估算/列表消费**同一**有效候选集合
+///（load_outcome → 校验/策略 → 入表候选），"可用"= 存在可解析费率
+/// 路径的候选（明确 0 也算有价）；原始条目数只作技术诊断字段保留。
+/// 索引恢复（load_cached）走同一校验与入表路径，恢复出的集合与状态
+/// 一致，不构成校验旁路。
 pub fn pricing_status(
     external: Option<&Path>,
     modelsdev_snapshot: Option<&Path>,
     openrouter_snapshot: Option<&Path>,
 ) -> PricingStatus {
-    let mut warnings = Vec::new();
-    let (md_available, md_count, md_synced_at) =
-        match modelsdev_snapshot.map(crate::modelsdev::load_snapshot) {
-            Some(Ok(Some(s))) => {
-                let n = s.entries.len();
-                (n > 0, n, Some(s.synced_at))
-            }
-            Some(Ok(None)) => (false, 0, None),
-            Some(Err(e)) => {
-                warnings.push(format!("models.dev 快照解析失败（主源不可用）: {e:#}"));
-                (false, 0, None)
-            }
-            None => (false, 0, None),
-        };
-    let or_available = match openrouter_snapshot.map(crate::openrouter::load_snapshot) {
-        Some(Ok(Some(s))) => !s.entries.is_empty(),
-        Some(Ok(None)) => false,
-        Some(Err(e)) => {
-            warnings.push(format!("OpenRouter 快照解析失败（补充源不可用）: {e:#}"));
-            false
-        }
-        None => false,
-    };
-    let (pricing, load_warnings) = Pricing::load(external, modelsdev_snapshot, openrouter_snapshot);
-    for w in load_warnings {
-        warnings.push(w);
-    }
-    let external_count = pricing.external_count();
-    let has_any_pricing = md_available || or_available || external_count > 0;
+    let outcome = Pricing::load_outcome(external, modelsdev_snapshot, openrouter_snapshot);
+    let warnings = outcome.warnings();
+    let md_valid = outcome.pricing.modelsdev_resolvable_count();
+    let or_valid = outcome.pricing.openrouter_resolvable_count();
+    let ext_valid = outcome.pricing.external_resolvable_count();
+    let external_count = outcome.pricing.external_count();
     PricingStatus {
-        modelsdev_available: md_available,
-        modelsdev_count: md_count,
-        modelsdev_synced_at: md_synced_at,
-        openrouter_available: or_available,
+        modelsdev_available: md_valid > 0,
+        modelsdev_count: outcome.raw_modelsdev_count,
+        modelsdev_valid_count: md_valid,
+        modelsdev_synced_at: outcome.modelsdev_synced_at,
+        openrouter_available: or_valid > 0,
+        openrouter_valid_count: or_valid,
         external_count,
-        has_any_pricing,
-        needs_sync: !md_available,
+        external_valid_count: ext_valid,
+        has_any_pricing: md_valid > 0 || or_valid > 0 || ext_valid > 0,
+        needs_sync: md_valid == 0,
         warnings,
     }
 }
@@ -1483,6 +1480,11 @@ pub struct PricingLoadOutcome {
     pub cacheable: bool,
     /// 缓存签名：路径 + 读取健康（成功为内容摘要）。
     pub sig: String,
+    /// SF10：来源**原始**条目数（解析前）——与有效候选数区分的技术诊断。
+    pub raw_modelsdev_count: usize,
+    pub raw_openrouter_count: usize,
+    /// models.dev 快照的 synced_at（status 展示用）。
+    pub modelsdev_synced_at: Option<String>,
 }
 
 impl PricingLoadOutcome {
@@ -1510,6 +1512,43 @@ impl PricingLoadOutcome {
         w.extend(self.diagnostics.iter().cloned());
         w
     }
+}
+
+/// SF10：一组费率是否存在显式数值（Fixed 含显式 0）。
+fn rates_have_explicit(r: &PriceRates) -> bool {
+    matches!(r.input, RateSpec::Fixed(_))
+        || matches!(r.output, RateSpec::Fixed(_))
+        || matches!(r.cache_write, RateSpec::Fixed(_))
+        || matches!(r.cache_read, RateSpec::Fixed(_))
+}
+
+/// SF10：计划是否存在可解析费率路径（基础 → 分段 → 时间规则 → period
+/// 任一层显式 Fixed，或 SameAsInput(cache_read) 且同层输入价可解析）。
+fn plan_has_resolvable_rate_path(plan: &PricePlan) -> bool {
+    if rates_have_explicit(&plan.base) {
+        return true;
+    }
+    if matches!(plan.base.cache_read, RateSpec::SameAsInput)
+        && !matches!(plan.base.input, RateSpec::Unknown)
+    {
+        return true;
+    }
+    if plan
+        .segments
+        .iter()
+        .any(|sg| rates_have_explicit(&sg.prices))
+    {
+        return true;
+    }
+    for sched in &plan.schedules {
+        if rates_have_explicit(&sched.prices) {
+            return true;
+        }
+        if sched.periods.iter().any(|p| rates_have_explicit(&p.prices)) {
+            return true;
+        }
+    }
+    false
 }
 
 /// 稳定内容摘要（DefaultHasher 固定键，跨进程可复现）——签名纳入内容，
@@ -1745,10 +1784,15 @@ impl Pricing {
         let sig = reads.sig();
         let mut pricing = Self::empty();
         let mut diagnostics = Vec::new();
+        let mut raw_modelsdev_count = 0usize;
+        let mut raw_openrouter_count = 0usize;
+        let mut modelsdev_synced_at = None;
 
         if let Some(text) = reads.modelsdev.text.as_deref() {
             match crate::modelsdev::parse_snapshot_text(text) {
                 Ok(snapshot) => {
+                    raw_modelsdev_count = snapshot.entries.len();
+                    modelsdev_synced_at = Some(snapshot.synced_at.clone());
                     for e in snapshot.entries {
                         // Task 2：快照分段（models.dev size 语义已在同步时
                         // 转换为规范 [min, max)）→ PriceSegment。非法规则
@@ -1838,6 +1882,7 @@ impl Pricing {
         if let Some(text) = reads.openrouter.text.as_deref() {
             match openrouter::parse_snapshot_text(text) {
                 Ok(snapshot) => {
+                    raw_openrouter_count = snapshot.entries.len();
                     for e in snapshot.entries {
                         // Task 3：OpenRouter overrides（USD/token，inclusive
                         // 下界：prompt >= min 即命中）→ 规范分段 [min,
@@ -1934,7 +1979,18 @@ impl Pricing {
                         "外置价格文件解析失败，该层已忽略: {}（{e}）",
                         path.display()
                     ));
-                    return Self::finish_outcome(pricing, diagnostics, &reads, cacheable, sig);
+                    return PricingLoadOutcome {
+                        pricing,
+                        diagnostics,
+                        external_health: reads.external.health.clone(),
+                        modelsdev_health: reads.modelsdev.health.clone(),
+                        openrouter_health: reads.openrouter.health.clone(),
+                        cacheable,
+                        sig,
+                        raw_modelsdev_count,
+                        raw_openrouter_count,
+                        modelsdev_synced_at,
+                    };
                 }
             };
             for m in parsed.model {
@@ -1958,16 +2014,6 @@ impl Pricing {
             pricing.apply_model_policies(&parsed.model_policy, &mut diagnostics);
         }
 
-        Self::finish_outcome(pricing, diagnostics, &reads, cacheable, sig)
-    }
-
-    fn finish_outcome(
-        pricing: Pricing,
-        diagnostics: Vec<String>,
-        reads: &SourceReads,
-        cacheable: bool,
-        sig: String,
-    ) -> PricingLoadOutcome {
         PricingLoadOutcome {
             pricing,
             diagnostics,
@@ -1976,6 +2022,9 @@ impl Pricing {
             openrouter_health: reads.openrouter.health.clone(),
             cacheable,
             sig,
+            raw_modelsdev_count,
+            raw_openrouter_count,
+            modelsdev_synced_at,
         }
     }
 
@@ -2296,21 +2345,26 @@ impl Pricing {
                 let openrouter = or_by_prefix
                     .get(e.prefix.as_str())
                     .map(|o| OpenRouterPrice {
-                        input: o.plan.base.input.resolve_direct().unwrap_or(0.0),
-                        output: o.plan.base.output.resolve_direct().unwrap_or(0.0),
-                        cache_write: o.plan.base.cache_write.resolve_direct().unwrap_or(0.0),
-                        cache_read: o.plan.base.cache_read.resolve_direct().unwrap_or(0.0),
+                        input: o.plan.base.input,
+                        output: o.plan.base.output,
+                        cache_write: o.plan.base.cache_write,
+                        cache_read: o.plan.base.cache_read,
                         name: o.name.clone(),
                     });
+                // SF07：SameAsInput 的基础输入价 Unknown → 依赖未定也算
+                // 基础不完整（提示"沿用输入价但输入价未知"）。
+                let input_dependent_undefined = e.plan.base.cache_read == RateSpec::SameAsInput
+                    && e.plan.base.input == RateSpec::Unknown;
                 PricingEntry {
                     prefix: e.display.clone(),
                     name: e.name.clone(),
                     channel: e.display.split_once('/').map(|(c, _)| c.to_string()),
-                    input: e.plan.base.input.resolve_direct(),
-                    output: e.plan.base.output.resolve_direct(),
-                    cache_write: e.plan.base.cache_write.resolve_direct(),
-                    cache_read: e.plan.base.cache_read.resolve_direct(),
-                    incomplete: e.plan.base.input == RateSpec::Unknown
+                    input: e.plan.base.input,
+                    output: e.plan.base.output,
+                    cache_write: e.plan.base.cache_write,
+                    cache_read: e.plan.base.cache_read,
+                    base_incomplete: input_dependent_undefined
+                        || e.plan.base.input == RateSpec::Unknown
                         || e.plan.base.output == RateSpec::Unknown
                         || e.plan.base.cache_write == RateSpec::Unknown
                         || e.plan.base.cache_read == RateSpec::Unknown,
@@ -2339,6 +2393,32 @@ impl Pricing {
 
     pub fn modelsdev_count(&self) -> usize {
         self.count_tier(TIER_MODELSDEV)
+    }
+
+    /// SF10：存在**可解析费率路径**的候选数——复用后端费率语义：任一层
+    /// （基础/分段/时间规则/period）存在显式 Fixed，或 cache_read 声明
+    /// SameAsInput 且同层输入价可解析。明确 0 是有效价格；全部 Unknown
+    /// 或输入价未知的 SameAsInput 不算。status/估算/列表共用本判定，
+    /// 不在 status 复制第二套价算逻辑。
+    fn resolvable_count(&self, tier: u8) -> usize {
+        self.all_entries()
+            .filter(|e| e.tier == tier && plan_has_resolvable_rate_path(&e.plan))
+            .count()
+    }
+
+    /// SF10：主源（models.dev）有效候选数（存在可解析费率路径）。
+    pub fn modelsdev_resolvable_count(&self) -> usize {
+        self.resolvable_count(TIER_MODELSDEV)
+    }
+
+    /// SF10：补充源（OpenRouter）有效候选数。
+    pub fn openrouter_resolvable_count(&self) -> usize {
+        self.resolvable_count(TIER_OPENROUTER)
+    }
+
+    /// SF10：外置源有效候选数。
+    pub fn external_resolvable_count(&self) -> usize {
+        self.resolvable_count(TIER_EXTERNAL)
     }
 
     fn count_tier(&self, tier: u8) -> usize {
@@ -3878,16 +3958,19 @@ cache_read = 1.0
             Some(2),
             "星期限制随规则透出"
         );
-        // 基础价视图：显式 0 保留、缺失 = None（不折叠成 0）。
-        assert_eq!(t.cache_write, Some(0.0));
-        assert_eq!(t.cache_read, None);
-        assert!(t.incomplete);
+        // 基础价视图：显式 0 保留为 Fixed(0)、缺失 = Unknown（不折叠成 0）。
+        assert_eq!(t.cache_write, RateSpec::Fixed(0.0));
+        assert_eq!(t.cache_read, RateSpec::Unknown);
+        assert!(t.base_incomplete);
         // 普通条目：保持现有布局语义（无分段/时间规则、四价齐全）。
         let pl = entries.iter().find(|e| e.prefix == "plain-model").unwrap();
         assert!(!pl.has_tiered_pricing);
         assert!(pl.segments.is_empty() && pl.schedules.is_empty());
         assert_eq!(pl.channel, None);
-        assert_eq!((pl.input, pl.cache_read), (Some(1.0), Some(0.02)));
+        assert_eq!(
+            (pl.input, pl.cache_read),
+            (RateSpec::Fixed(1.0), RateSpec::Fixed(0.02))
+        );
         // 序列化：segments/schedules 可见，未知分项为 null。
         let json = serde_json::to_string(&t).unwrap();
         assert!(json.contains("\"min_tokens\":272001"));
@@ -4610,7 +4693,7 @@ cache_read = 0.0
             .openrouter
             .as_ref()
             .expect("同前缀 openrouter 条目应挂上对照价");
-        assert!((or.input - 3.0).abs() < 1e-9);
+        assert_eq!(or.input, RateSpec::Fixed(3.0));
         assert_eq!(or.name.as_deref(), Some("Claude Sonnet 4.5"));
         // Task 1：不再有"内置"来源行
         assert!(entries.iter().all(|e| e.source != "内置"));

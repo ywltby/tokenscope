@@ -226,14 +226,25 @@ fn ingest_token_count(
         u.total_tokens,
     );
     // 零分量占位行：只升 total 不升分量（本机实测 278 条），跳过计数。
-    if input + output + cached + cache_write == 0 {
+    // SF08：逐字段比较，不做加法（异常大值加法会回绕/panic）。
+    if input == 0 && output == 0 && cached == 0 && cache_write == 0 {
         stats.skipped_zero_usage += 1;
         return;
     }
     // 口径校验（R02）：total = input + output；cached 与 cache_write 均是
     // input 的子集。cached + cache_write > input 属未查证的字段组合，
     // 不猜测语义，按坏行计数暴露。
-    if total != input + output || cached + cache_write > input {
+    // SF08：全部受检——加法溢出/子集不成立都计 bad_lines 跳过本行，
+    // 继续后续行；不回绕、不饱和、不 panic。
+    let Some(total_calc) = input.checked_add(output) else {
+        stats.bad_lines += 1;
+        return;
+    };
+    let Some(cached_plus_cw) = cached.checked_add(cache_write) else {
+        stats.bad_lines += 1;
+        return;
+    };
+    if total != total_calc || cached_plus_cw > input {
         stats.bad_lines += 1;
         return;
     }
@@ -252,18 +263,26 @@ fn ingest_token_count(
         .clone()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "(未知)".to_string());
-    events.push(UsageEvent {
+    // 守恒已受检确认 cached + cache_write ≤ input 且 total 可表示：
+    // 非缓存输入一次减法得到（不再逐项减）。
+    let event = UsageEvent {
         ts,
         agent: AgentKind::Codex,
         model: model.to_string(),
         session_id: state.session_id.clone(),
         project,
         record_id: String::new(),
-        input_tokens: input - cached - cache_write,
+        input_tokens: input - cached_plus_cw,
         output_tokens: output,
         cache_write_tokens: cache_write,
         cache_read_tokens: cached,
-    });
+    };
+    // SF08：source→model 公共边界（与缓存恢复同一路径）防御性兜底。
+    if event.validate_buckets().is_err() {
+        stats.bad_lines += 1;
+        return;
+    }
+    events.push(event);
 }
 
 #[cfg(test)]

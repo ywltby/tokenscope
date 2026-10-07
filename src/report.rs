@@ -459,12 +459,14 @@ fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSna
 #[cfg(test)]
 static TEST_COLLECT_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 
-/// Task 2（审阅）：跨 agent 来源重叠去重——同一规范化文件（大小写不敏感
-/// 比较键）只保留先扫描者，并返回可诊断 warning（进 Collected.warnings
-/// 而非只写日志）。原始路径保留用于文件 IO。
-fn dedup_source_overlap(sources: Vec<Box<dyn Source>>) -> (Vec<Box<dyn Source>>, Vec<String>) {
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut warnings: Vec<String> = Vec::new();
+/// SF09：来源包装器——同一规范化文件被不同 adapter 认领 → 明确归属
+/// 冲突错误（移除「先发现者得」默认）；同 adapter 内重复路径仍按单份
+/// 保留（防同一 agent 的发现重复）。原始路径保留用于文件 IO。
+type DedupedSources = (Vec<Box<dyn Source>>, Vec<String>);
+
+fn dedup_source_overlap(sources: Vec<Box<dyn Source>>) -> Result<DedupedSources> {
+    let mut seen: std::collections::HashMap<String, AgentKind> = std::collections::HashMap::new();
+    let warnings: Vec<String> = Vec::new();
     let mut wrapped: Vec<Box<dyn Source>> = Vec::new();
     for src in sources {
         let (files, errors) = src.discover_with_errors();
@@ -472,17 +474,23 @@ fn dedup_source_overlap(sources: Vec<Box<dyn Source>>) -> (Vec<Box<dyn Source>>,
         for f in files {
             let norm = normalize_path(&f);
             let key = norm.to_string_lossy().to_lowercase();
-            if seen.insert(key) {
-                keep.push(f);
-            } else {
-                let w = format!(
-                    "来源目录重叠：{} 同时被多个 agent 扫描，重复文件只统计一次",
-                    norm.display()
-                );
-                if !warnings.contains(&w) {
-                    warnings.push(w.clone());
+            match seen.get(&key) {
+                Some(prev) if *prev != src.agent() => {
+                    anyhow::bail!(
+                        "文件归属冲突：{} 同时被 {} 与 {} 认领；                         来源目录不得重叠（相同或嵌套），请调整目录配置或停用其一来源",
+                        norm.display(),
+                        prev.as_str(),
+                        src.agent().as_str()
+                    );
                 }
-                log::warn!("{w}");
+                Some(_) => {
+                    // 同 agent 的发现重复：保留一份（不重复计数）。
+                    keep.push(f);
+                }
+                None => {
+                    seen.insert(key, src.agent());
+                    keep.push(f);
+                }
             }
         }
         wrapped.push(Box::new(DedupSource {
@@ -491,11 +499,12 @@ fn dedup_source_overlap(sources: Vec<Box<dyn Source>>) -> (Vec<Box<dyn Source>>,
             errors,
         }));
     }
-    (wrapped, warnings)
+    Ok((wrapped, warnings))
 }
 
 /// 供集成测试注入 mock source（Task 2）。
 #[doc(hidden)]
+#[derive(Debug)]
 pub struct CollectedView {
     pub events: Vec<UsageEvent>,
     pub warnings: Vec<String>,
@@ -514,14 +523,54 @@ pub fn collect_all_with_sources_for_test(
     })
 }
 
+/// SF09：解析启用来源的有效目录（显式配置或工具默认根）。
+/// 未启用的来源返回 None（不参与冲突检查，用户可借停用恢复）。
+fn effective_source_dirs(opts: &SummaryOptions) -> Result<Vec<(AgentKind, std::path::PathBuf)>> {
+    let mut out = Vec::new();
+    for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
+        if !opts.enabled(kind == AgentKind::ClaudeCode) {
+            continue;
+        }
+        let dir = match kind {
+            AgentKind::ClaudeCode => match &opts.claude_dir {
+                Some(d) => d.clone(),
+                None => ClaudeSource::default_root()?,
+            },
+            AgentKind::Codex => match &opts.codex_dir {
+                Some(d) => d.clone(),
+                None => CodexSource::default_root()?,
+            },
+        };
+        out.push((kind, dir));
+    }
+    Ok(out)
+}
+
+/// SF09：采集前校验启用来源的有效目录冲突（相同/嵌套）——覆盖手改/
+/// 旧配置；与 agent 筛选无关，「全部/仅某来源」一致报错。
+fn validate_opts_sources_overlap(opts: &SummaryOptions) -> Result<()> {
+    let dirs = effective_source_dirs(opts)?;
+    for i in 0..dirs.len() {
+        for j in i + 1..dirs.len() {
+            let (ka, da) = &dirs[i];
+            let (kb, db) = &dirs[j];
+            crate::settings::validate_dir_conflict(da, db)
+                .map_err(|e| anyhow::anyhow!("{e}（来源: {} / {}）", ka.as_str(), kb.as_str()))?;
+        }
+    }
+    Ok(())
+}
+
 fn collect_all_with_sources(
     sources: Vec<Box<dyn Source>>,
     opts: &SummaryOptions,
     generation: u64,
 ) -> Result<Collected> {
-    // Task 2（审阅）：跨 agent 来源重叠去重——同文件只统计一次，
-    // 重叠诊断进 Collected.warnings（而非只写日志）。
-    let (sources, mut overlap_warnings) = dedup_source_overlap(sources);
+    // SF09：采集前拒绝启用来源的有效目录冲突（相同/嵌套）。
+    validate_opts_sources_overlap(opts)?;
+    // SF09：跨 adapter 认领同一规范化文件 → 明确归属冲突（移除
+    // 「先发现者得」默认）；无冲突时保留发现错误透传。
+    let (sources, overlap_warnings) = dedup_source_overlap(sources)?;
     let t_total = std::time::Instant::now();
     let pricing_path = pricing_file_path(opts.pricing_path.as_ref());
     let openrouter_path = openrouter_file_path(opts.openrouter_path.as_ref());
@@ -547,7 +596,7 @@ fn collect_all_with_sources(
     );
     let (cache, mut cache_warnings) = open_cache(opts);
     warnings.append(&mut cache_warnings);
-    warnings.append(&mut overlap_warnings);
+    warnings.extend(overlap_warnings);
     #[cfg(test)]
     {
         let d = TEST_COLLECT_DELAY_MS.load(Ordering::Relaxed);
@@ -763,7 +812,7 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
         .map(|r| snapshot.event(r).clone())
         .collect();
     let t_agg = std::time::Instant::now();
-    let agg = aggregate(&events, snapshot.by, &snapshot.tz, snapshot.pricing());
+    let agg = aggregate(&events, snapshot.by, &snapshot.tz, snapshot.pricing())?;
     log::info!(
         "聚合（{}）：{} 组 / {} 请求，{} ms",
         agg.by,

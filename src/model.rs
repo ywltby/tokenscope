@@ -44,6 +44,28 @@ impl UsageEvent {
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens + self.output_tokens + self.cache_write_tokens + self.cache_read_tokens
     }
+
+    /// SF08：单事件桶边界校验（source→model 公共边界，两适配器与缓存
+    /// 恢复经过同一入口）——四桶总数与 prompt 计价基数必须可表示。
+    /// 异常事件由调用方计 bad_lines 并跳过，不做回绕/饱和。
+    pub fn validate_buckets(&self) -> Result<(), &'static str> {
+        let total = self
+            .input_tokens
+            .checked_add(self.output_tokens)
+            .and_then(|v| v.checked_add(self.cache_write_tokens))
+            .and_then(|v| v.checked_add(self.cache_read_tokens));
+        if total.is_none() {
+            return Err("四桶 token 总数超出可表示范围");
+        }
+        let prompt = self
+            .input_tokens
+            .checked_add(self.cache_write_tokens)
+            .and_then(|v| v.checked_add(self.cache_read_tokens));
+        if prompt.is_none() {
+            return Err("prompt 计价基数超出可表示范围");
+        }
+        Ok(())
+    }
 }
 
 /// 四类 token 的累计计数，聚合与费用计算共用。
@@ -87,6 +109,17 @@ impl TokenCounts {
 
     pub fn total(&self) -> u64 {
         self.input + self.output + self.cache_write + self.cache_read
+    }
+
+    /// SF08：受检累加——任一桶溢出返回 None（聚合层据此整体报错，
+    /// 不回绕、不饱和、不做部分提交）。
+    pub fn checked_add(&self, other: &TokenCounts) -> Option<TokenCounts> {
+        Some(TokenCounts {
+            input: self.input.checked_add(other.input)?,
+            output: self.output.checked_add(other.output)?,
+            cache_write: self.cache_write.checked_add(other.cache_write)?,
+            cache_read: self.cache_read.checked_add(other.cache_read)?,
+        })
     }
 }
 

@@ -32,7 +32,9 @@ pub struct CacheStats {
 /// 完整 cwd（C2/R03）+ Claude 项目相对路径；
 /// v4 = 缓存身份纳入来源上下文（R05）：文件键 = agent + 规范化根目录 +
 /// 规范化文件路径——旧 v3 行无 root 维度，整体失效重建。
-const SCHEMA_VERSION: &str = "4";
+/// SF08：恢复路径新增桶边界校验——旧版本缓存可能存有越界事件，
+/// 递增版本整体清空重建（源日志不删）。
+const SCHEMA_VERSION: &str = "5";
 
 fn fingerprint(size: u64, mtime_ms: i64) -> (i64, i64) {
     // u64 → i64 存库；实际文件大小远小于 i64 上限。
@@ -227,6 +229,7 @@ impl Cache {
             return Ok(None);
         };
         let mut events = Vec::new();
+        let restored_bad_lines;
         {
             let mut stmt = tx.prepare(
                 "SELECT ts, record_id, model, session_id, project, input, output, cache_write, cache_read
@@ -245,9 +248,10 @@ impl Cache {
                     r.get::<_, i64>(8)?,
                 ))
             })?;
+            let mut stats_bad = 0u64;
             for row in rows {
                 let (ts, record_id, model, session_id, project, input, output, cw, cr) = row?;
-                events.push(crate::model::UsageEvent {
+                let event = crate::model::UsageEvent {
                     ts: ts
                         .parse()
                         .map_err(|e| anyhow::anyhow!("缓存时间戳解析失败: {e}"))?,
@@ -260,13 +264,21 @@ impl Cache {
                     output_tokens: output.max(0) as u64,
                     cache_write_tokens: cw.max(0) as u64,
                     cache_read_tokens: cr.max(0) as u64,
-                });
+                };
+                // SF08：缓存恢复与适配器解析经过同一桶校验边界——旧缓存中
+                // 不合法事件不得绕过新检查（拒绝并计 bad_lines，不回绕）。
+                if event.validate_buckets().is_err() {
+                    stats_bad += 1;
+                    continue;
+                }
+                events.push(event);
             }
+            restored_bad_lines = stats_bad;
         }
         drop(tx);
         let mut stats = crate::source::CollectStats {
             lines_seen: lines_seen.max(0) as u64,
-            bad_lines: bad_lines.max(0) as u64,
+            bad_lines: bad_lines.max(0) as u64 + restored_bad_lines,
             skipped_sidechain: sidechain.max(0) as u64,
             skipped_synthetic: synthetic.max(0) as u64,
             skipped_zero_usage: zero.max(0) as u64,
@@ -278,6 +290,16 @@ impl Cache {
         Ok(Some(CachedFile {
             parse: FileParse { stats, events },
         }))
+    }
+
+    /// 测试专用（#[doc(hidden)]）：执行原生 SQL——集成测试模拟"旧版本
+    /// 缓存中的越界数据"用（新 store 路径会拒绝该组合）。
+    #[doc(hidden)]
+    pub fn execute_raw_for_tests(&self, sql: &str, params: &[i64]) -> Result<usize> {
+        let n = self
+            .conn
+            .execute(sql, rusqlite::params_from_iter(params.iter()))?;
+        Ok(n)
     }
 
     pub fn store_file(
@@ -328,6 +350,20 @@ impl Cache {
              VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )?;
         for e in &parse.events {
+            // SF08：入库前受检转换——超出 i64 的 token 值不得经缓存往返
+            // 回绕"洗白"（store 失败 = 该文件不缓存，下次重新解析）。
+            let conv = |v: u64| -> anyhow::Result<i64> {
+                i64::try_from(v).map_err(|_| {
+                    anyhow::anyhow!("token 计数超出缓存可表示范围（ refusing 回绕存储）")
+                })
+            };
+            let input = conv(e.input_tokens)?;
+            let output = conv(e.output_tokens)?;
+            let cw = conv(e.cache_write_tokens)?;
+            let cr = conv(e.cache_read_tokens)?;
+            if e.validate_buckets().is_err() {
+                anyhow::bail!("事件桶组合不可表示，拒绝写入缓存");
+            }
             stmt.execute(rusqlite::params![
                 file_id,
                 e.ts.to_string(),
@@ -335,10 +371,10 @@ impl Cache {
                 e.model,
                 e.session_id,
                 e.project,
-                e.input_tokens as i64,
-                e.output_tokens as i64,
-                e.cache_write_tokens as i64,
-                e.cache_read_tokens as i64,
+                input,
+                output,
+                cw,
+                cr,
             ])?;
         }
         drop(stmt);

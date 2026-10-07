@@ -166,3 +166,179 @@ cache_read = 0.0
     // 索引版本已随策略升级（旧含内置索引失效）：编译期断言。
     const _: () = assert!(INDEX_VERSION >= 3, "旧索引必须失效");
 }
+
+// ── SF10（安全与数据一致性审查 Task 10）：可用性 = 有效候选集合 ──
+//
+// 不变量（docs/stats-semantics.md §4 展示口径）：
+// 1. pricing_status 的 available/hasAnyPricing 基于**有效候选数**（校验
+//    通过且存在可解析费率路径；明确 0 是有效价格），不再用原始
+//    entries.len()；原始条目数仅作技术诊断字段（*_count）保留；
+// 2. 索引恢复（load_cached）与直读来源走同一校验/入表路径——恢复出的
+//    集合与状态一致，不构成校验旁路；
+// 3. 全部 Unknown 或输入价未知的 SameAsInput 不算可用。
+
+use tokenscope::pricing::pricing_status;
+
+fn status_fixture(
+    dir: &std::path::Path,
+    md_body: Option<&str>,
+    or_body: Option<&str>,
+) -> (PathBuf, PathBuf, PathBuf) {
+    let md = dir.join("pricing-modelsdev.json");
+    if let Some(b) = md_body {
+        std::fs::write(&md, b).unwrap();
+    }
+    let or = dir.join("pricing-openrouter.json");
+    if let Some(b) = or_body {
+        std::fs::write(&or, b).unwrap();
+    }
+    let toml = dir.join("pricing.toml");
+    (toml, md, or)
+}
+
+/// 快照所有条目都被拒绝（非法负价）→ 主源不可用（原始条目数仍可见）。
+#[test]
+fn all_rejected_candidates_do_not_mark_source_available() {
+    let dir = tmp_dir("sf10-all-rejected");
+    let (toml, md, or) = status_fixture(
+        &dir,
+        Some(
+            r#"{"v":3,"synced_at":"t","entries":[
+                {"id":"prov/a","name":null,"input":-1.0,"output":2.0},
+                {"id":"prov/b","name":null,"input":1.0,"output":-2.0},
+                {"id":"prov/c","name":null,"input":0.0,"output":0.0,"cache_read":-9.0}
+            ]}"#,
+        ),
+        None,
+    );
+    let st = pricing_status(Some(&toml), Some(&md), Some(&or));
+    assert!(!st.modelsdev_available, "全部候选被拒绝 → 主源不可用");
+    assert_eq!(st.modelsdev_count, 3, "原始条目数仍作技术诊断");
+    assert_eq!(st.modelsdev_valid_count, 0);
+    assert!(st.needs_sync, "主源无效 → needs_sync");
+    assert!(
+        st.warnings.iter().any(|w| w.contains("非法单价")),
+        "拒绝诊断必须可见: {:?}",
+        st.warnings
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 候选全部字段 Unknown（未声明）→ 无可解析费率路径 → 不可用；
+/// 显式 0 是有效价格 → 可用。
+#[test]
+fn all_unknown_candidates_are_not_pricing_available() {
+    let dir = tmp_dir("sf10-all-unknown");
+    // entries 缺 cost 键 → parse 后 input/output/cache 全 None。
+    let (toml, md, or) = status_fixture(
+        &dir,
+        Some(
+            r#"{"v":3,"synced_at":"t","entries":[
+                {"id":"prov/unknown-model","name":null}
+            ]}"#,
+        ),
+        None,
+    );
+    let st = pricing_status(Some(&toml), Some(&md), Some(&or));
+    assert!(!st.modelsdev_available, "全部 Unknown ≠ 可用");
+    assert_eq!(st.modelsdev_valid_count, 0);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 单个明确 0（免费）即有可解析费率路径 → 可用；部分费率可用仍参与
+/// 部分估算（未知分项保留）。
+#[test]
+fn explicit_zero_is_valid_available_pricing() {
+    let dir = tmp_dir("sf10-zero");
+    let (toml, md, or) = status_fixture(
+        &dir,
+        Some(
+            r#"{"v":3,"synced_at":"t","entries":[
+                {"id":"prov/free-model","name":null,"input":0.0,"output":0.0}
+            ]}"#,
+        ),
+        None,
+    );
+    let st = pricing_status(Some(&toml), Some(&md), Some(&or));
+    assert!(st.modelsdev_available, "显式 0 = 有效价格 → 可用");
+    assert_eq!(st.modelsdev_valid_count, 1);
+    assert!(!st.needs_sync);
+    assert!(st.has_any_pricing);
+
+    // 部分估算：cache_read 未知 → 估算不完整但 input/output 计费。
+    let p = Pricing::load_outcome(Some(&toml), Some(&md), Some(&or)).pricing;
+    let est = p
+        .estimate(
+            "prov/free-model",
+            &tokenscope::model::TokenCounts {
+                input: 1_000_000,
+                output: 500_000,
+                cache_write: 0,
+                cache_read: 100_000,
+            },
+            "2026-01-05T10:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(est.cost, 0.0, "显式 0 计费为 0（免费）");
+    assert!(!est.complete, "cache_read 未知 → 不完整");
+    assert_eq!(est.unknown.cache_read, 100_000, "未知分项保留");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 索引恢复路径与直读来源产生相同集合与状态（有效候选数一致），
+/// 不构成校验旁路；模拟重启（清进程缓存）后状态仍一致。
+#[test]
+fn source_status_matches_validated_entries_after_restart() {
+    let dir = tmp_dir("sf10-restart");
+    let (toml, md, or) = status_fixture(
+        &dir,
+        Some(
+            r#"{"v":3,"synced_at":"t","entries":[
+                {"id":"prov/ok","name":null,"input":1.0,"output":2.0},
+                {"id":"prov/bad","name":null,"input":-3.0,"output":2.0},
+                {"id":"prov/unknown","name":null}
+            ]}"#,
+        ),
+        None,
+    );
+    let index = dir.join("pricing-index.json");
+
+    // 直读来源的状态基准。
+    let st_direct = pricing_status(Some(&toml), Some(&md), Some(&or));
+    assert_eq!(st_direct.modelsdev_valid_count, 1, "仅 prov/ok 有效");
+
+    // 经 load_cached（重建并写索引）恢复出的集合与状态一致。
+    let (p1, _, _) = Pricing::load_cached(Some(&toml), Some(&md), Some(&or), &index);
+    assert_eq!(
+        p1.modelsdev_resolvable_count(),
+        st_direct.modelsdev_valid_count,
+        "缓存重建路径的有效候选数与 status 一致"
+    );
+
+    // 模拟重启（清进程缓存）→ 索引命中：集合/状态仍一致（索引不是旁路）。
+    tokenscope::pricing::clear_price_cache_for_tests();
+    let (p2, _, hit) = Pricing::load_cached(Some(&toml), Some(&md), Some(&or), &index);
+    assert!(hit, "重建出的当前版索引应命中");
+    assert_eq!(
+        p2.modelsdev_resolvable_count(),
+        st_direct.modelsdev_valid_count,
+        "索引恢复的集合与直读一致"
+    );
+    assert!(index.exists());
+
+    // 外置**读取失败**（目录冒充文件 → 真实 io 错误，非 NotFound）→
+    // 降级警告可见；主源本身健康不受影响。
+    let broken = dir.join("pricing.toml.broken");
+    std::fs::create_dir_all(&broken).unwrap();
+    let st_degraded = pricing_status(Some(&broken), Some(&md), Some(&or));
+    assert!(
+        st_degraded.warnings.iter().any(|w| w.contains("读取失败")),
+        "读取失败必须可见: {:?}",
+        st_degraded.warnings
+    );
+    assert!(
+        st_degraded.modelsdev_available && st_degraded.modelsdev_valid_count == 1,
+        "主源本身健康：降级只影响外置层"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

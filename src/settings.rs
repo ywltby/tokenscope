@@ -181,24 +181,48 @@ pub const SETTINGS_TEMPLATE: &str = "\
 #     注意：两个启用的来源不能指向同一目录（保存时校验）。
 ";
 
-/// Task 2：来源目录重叠校验——两个启用的 agent 指向同一规范化目录时
-/// 拒绝保存（采集层仍有防御性去重兜底旧配置/符号链接）。
+/// SF09：目录冲突校验——规范化后检查**相同或嵌套**（组件前缀关系），
+/// 大小写不敏感（Windows 语义）。错误列出冲突目录与恢复方法。
+/// 注意：canonicalize 对存在的 symlink/junction 解析实际路径；不存在的
+/// 路径走组件折叠 fallback（与采集侧一致）。
+pub fn validate_dir_conflict(a: &std::path::Path, b: &std::path::Path) -> Result<(), String> {
+    let norm = |p: &std::path::Path| -> std::path::PathBuf {
+        std::path::PathBuf::from(
+            crate::report::normalize_path(p)
+                .to_string_lossy()
+                .to_lowercase(),
+        )
+    };
+    let (na, nb) = (norm(a), norm(b));
+    if na == nb {
+        return Err(format!(
+            "来源目录冲突：{} 与 {} 指向同一位置，会导致重复统计；             请为两者配置不同且互不嵌套的目录，或停用其一来源",
+            a.display(),
+            b.display()
+        ));
+    }
+    if nb.starts_with(&na) || na.starts_with(&nb) {
+        return Err(format!(
+            "来源目录冲突：{} 与 {} 存在嵌套关系，会导致文件归属歧义或重复统计；             请为两者配置不同且互不嵌套的目录，或停用其一来源",
+            a.display(),
+            b.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Task 2（保留入口，SF09 起委托 validate_dir_conflict）：显式目录字符串
+/// 形式的重叠校验——空/None 视为未配置，跳过检查。
 pub fn validate_no_overlap(
     claude_dir: Option<&str>,
     codex_dir: Option<&str>,
 ) -> Result<(), String> {
-    let norm = |s: Option<&str>| -> Option<String> {
-        s.filter(|d| !d.trim().is_empty()).map(|d| {
-            crate::report::normalize_path(std::path::Path::new(d))
-                .to_string_lossy()
-                .to_lowercase()
-        })
+    let eff = |s: Option<&str>| -> Option<std::path::PathBuf> {
+        s.filter(|d| !d.trim().is_empty())
+            .map(std::path::PathBuf::from)
     };
-    match (norm(claude_dir), norm(codex_dir)) {
-        (Some(c), Some(x)) if c == x => Err(
-            "Claude 与 Codex 来源目录指向同一位置，会导致重复统计；请为两者配置不同目录"
-                .to_string(),
-        ),
+    match (eff(claude_dir), eff(codex_dir)) {
+        (Some(c), Some(x)) => validate_dir_conflict(&c, &x),
         _ => Ok(()),
     }
 }
