@@ -33,6 +33,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::summarize,
             commands::list_events,
+            commands::query_begin,
+            commands::query_summary,
+            commands::query_events,
             commands::view_cache_load,
             commands::view_cache_save,
             commands::source_status,

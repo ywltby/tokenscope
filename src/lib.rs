@@ -7,6 +7,7 @@ pub mod model;
 pub mod modelsdev;
 pub mod openrouter;
 pub mod pricing;
+pub mod query;
 pub mod report;
 pub mod settings;
 pub mod source;

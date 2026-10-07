@@ -12,9 +12,9 @@ use tokenscope::openrouter;
 use tokenscope::pricing::Pricing;
 use tokenscope::report::{
     CacheInfo, EventFilter, EventList, SourceStatus, SummaryOptions, SummaryReport,
-    cache_stats as cache_stats_impl, list_events as list_events_impl, modelsdev_file_path,
-    openrouter_file_path, pricing_file_path, rebuild_cache as rebuild_cache_impl,
-    source_status as source_status_impl, summary, view_cache_path,
+    cache_stats as cache_stats_impl, modelsdev_file_path, openrouter_file_path, pricing_file_path,
+    rebuild_cache as rebuild_cache_impl, source_status as source_status_impl, summary,
+    view_cache_path,
 };
 use tokenscope::settings::{CloseAction, Settings};
 
@@ -49,20 +49,7 @@ pub async fn summarize(
     from: Option<String>,
     to: Option<String>,
 ) -> Result<SummaryReport, String> {
-    let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings()?;
-    let opts = SummaryOptions {
-        by: parse_by(&by)?,
-        agent: parse_agent(agent.as_deref())?,
-        days,
-        claude_dir,
-        codex_dir,
-        claude_enabled: Some(claude_enabled),
-        codex_enabled: Some(codex_enabled),
-        tz,
-        from,
-        to,
-        ..Default::default()
-    };
+    let opts = query_opts(&by, agent, days, tz, from, to)?;
     run_blocking("summarize", move || summary(&opts)).await
 }
 
@@ -103,7 +90,88 @@ pub async fn list_events(
         limit,
         before,
     };
-    run_blocking("list_events", move || list_events_impl(&opts, &filter)).await
+    run_blocking("list_events", move || {
+        let snap = tokenscope::query::begin_query(&opts)?;
+        tokenscope::query::query_events(&snap.query_id, &filter)
+    })
+    .await
+}
+
+// ── SF04：查询快照命令（query_begin → query_summary/query_events）──
+
+/// 主筛选参数 → SummaryOptions（query_begin 与旧 summarize/list_events 共用）。
+fn query_opts(
+    by: &str,
+    agent: Option<String>,
+    days: Option<u32>,
+    tz: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+) -> Result<SummaryOptions, String> {
+    let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings()?;
+    Ok(SummaryOptions {
+        by: parse_by(by)?,
+        agent: parse_agent(agent.as_deref())?,
+        days,
+        claude_dir,
+        codex_dir,
+        claude_enabled: Some(claude_enabled),
+        codex_enabled: Some(codex_enabled),
+        tz,
+        from,
+        to,
+        ..Default::default()
+    })
+}
+
+/// SF04：创建查询会话——冻结一次采集的事件、价格修订、时间基准与来源
+/// 身份，返回 query_id 供汇总/明细（含分页）显式绑定。
+#[tauri::command]
+pub async fn query_begin(
+    by: String,
+    days: Option<u32>,
+    agent: Option<String>,
+    tz: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+) -> Result<tokenscope::query::QueryHandle, String> {
+    let opts = query_opts(&by, agent, days, tz, from, to)?;
+    run_blocking("query_begin", move || {
+        tokenscope::query::begin_query_handle(&opts)
+    })
+    .await
+}
+
+/// SF04：从会话快照聚合汇总（不重新采集；generated_at = 冻结 as_of）。
+#[tauri::command]
+pub async fn query_summary(query_id: String) -> Result<SummaryReport, String> {
+    run_blocking("query_summary", move || {
+        tokenscope::query::query_summary(&query_id)
+    })
+    .await
+}
+
+/// SF04：从会话快照分页读取明细；游标校验 query_id/指纹/行位置归属。
+#[tauri::command]
+pub async fn query_events(
+    query_id: String,
+    model: Option<String>,
+    project: Option<String>,
+    day: Option<String>,
+    limit: Option<usize>,
+    before: Option<String>,
+) -> Result<EventList, String> {
+    let filter = EventFilter {
+        model,
+        project,
+        day,
+        limit,
+        before,
+    };
+    run_blocking("query_events", move || {
+        tokenscope::query::query_events(&query_id, &filter)
+    })
+    .await
 }
 
 #[tauri::command]

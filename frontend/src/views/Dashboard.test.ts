@@ -24,6 +24,8 @@ function group(key: string, input: number): Group {
 }
 
 const summaryA: SummaryReport = {
+  query_id: "q-test-a",
+  pricing_revision: "rev-test",
   timezone: "Asia/Shanghai",
   generated_at: "2026-10-05T00:00:00+08:00",
   sources: [],
@@ -39,14 +41,30 @@ const summaryB: SummaryReport = {
   totals: group("合计", 99),
 };
 
-const events: EventList = { rows: [], total: 0, warnings: [] };
+const events: EventList = {
+  query_id: "q-test-a",
+  pricing_revision: "rev-test",
+  rows: [],
+  total: 0,
+  warnings: [],
+};
+
+/// SF04：query_begin 句柄（与 fixtures 的会话身份一致）。
+const queryInfo = {
+  queryId: "q-test-a",
+  generation: 1,
+  pricingRevision: "rev-test",
+  timezone: "Asia/Shanghai",
+  asOf: "2026-10-05T00:00:00+08:00",
+};
 
 /// 默认全部命令成功；个别测试用自定义实现覆盖特定命令。
 function mockOk(): void {
   invokeMock.mockImplementation((cmd: string) => {
+    if (cmd === "query_begin") return Promise.resolve(queryInfo);
     if (cmd === "view_cache_load") return Promise.resolve(null);
-    if (cmd === "summarize") return Promise.resolve(summaryA);
-    if (cmd === "list_events") return Promise.resolve(events);
+    if (cmd === "query_summary") return Promise.resolve(summaryA);
+    if (cmd === "query_events") return Promise.resolve(events);
     if (cmd === "source_status") return Promise.resolve([]);
     return Promise.resolve(null);
   });
@@ -98,9 +116,10 @@ describe("Dashboard 查询编排", () => {
     let resolveSummary!: (v: SummaryReport) => void;
     let resolveEvents!: (v: EventList) => void;
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "summarize") return new Promise((r) => (resolveSummary = r));
-      if (cmd === "list_events") return new Promise((r) => (resolveEvents = r));
+      if (cmd === "query_summary") return new Promise((r) => (resolveSummary = r));
+      if (cmd === "query_events") return new Promise((r) => (resolveEvents = r));
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
@@ -124,9 +143,10 @@ describe("Dashboard 查询编排", () => {
   it("dashboard_latest_query_wins：乱序返回时只保留最新查询的结果", async () => {
     const resolvers: ((v: SummaryReport) => void)[] = [];
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "summarize") return new Promise((r) => resolvers.push(r));
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_summary") return new Promise((r) => resolvers.push(r));
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
@@ -149,11 +169,12 @@ describe("Dashboard 查询编排", () => {
   it("ipc_error_visible：汇总失败有可见错误与重试，重试成功后恢复", async () => {
     let fail = true;
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "summarize") {
+      if (cmd === "query_summary") {
         return fail ? Promise.reject(new Error("boom")) : Promise.resolve(summaryA);
       }
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
@@ -189,7 +210,7 @@ describe("Dashboard 查询编排", () => {
 // v5 快照样例（模块级：多个 describe 共用）
 function snapshotPayload() {
   return {
-    v: 5,
+    v: 6,
     saved_at: "2026-10-05T00:00:00Z",
     filters: {
       by: "model",
@@ -204,13 +225,14 @@ function snapshotPayload() {
 }
 
 describe("Dashboard 视图快照与刷新（C4/F08）", () => {
-  it("view_cache_query_mismatch：v5 快照连同筛选一起恢复，口径一致", async () => {
+  it("view_cache_query_mismatch：v6 快照连同筛选一起恢复，口径一致", async () => {
     let resolveSummary!: (v: SummaryReport) => void;
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(snapshotPayload());
       // 挂起后台刷新：先验证"缓存数据"展示态，再放行
-      if (cmd === "summarize") return new Promise((r) => (resolveSummary = r));
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_summary") return new Promise((r) => (resolveSummary = r));
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
@@ -232,12 +254,13 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
 
   it("v4 旧快照（可能含混代拼接/晚到接管残留）被忽略，走正常加载", async () => {
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") {
         const p = snapshotPayload();
         return Promise.resolve({ ...p, v: 4 });
       }
-      if (cmd === "summarize") return Promise.resolve(summaryA);
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
@@ -251,12 +274,13 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
   it("late_snapshot_cannot_replace_fresh_report：晚到缓存不得覆盖新结果", async () => {
     let resolveCache!: (v: unknown) => void;
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load")
         return new Promise((r) => {
           resolveCache = r;
         });
-      if (cmd === "summarize") return Promise.resolve(summaryB); // 新汇总 99 先落地
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_summary") return Promise.resolve(summaryB); // 新汇总 99 先落地
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
@@ -272,10 +296,11 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
 
   it("view_cache_query_mismatch：v2 旧快照（ms range）不得当新数据展示", async () => {
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load")
         return Promise.resolve({ report: summaryA, events, saved_at: "x" });
-      if (cmd === "summarize") return Promise.resolve(summaryA);
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
@@ -301,9 +326,10 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
       cost_usd: 0,
     });
     invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "summarize") return Promise.resolve(summaryA);
-      if (cmd === "list_events") {
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") {
         const before = (args?.before as string | null) ?? null;
         if (!before) {
           return Promise.resolve({
@@ -330,7 +356,7 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     const ev = state(w)["events"] as EventList;
     expect(ev.rows.length).toBe(3);
     expect(ev.rows.map((r) => r.record_id)).toEqual(["b", "a", "z"]);
-    const call = invokeMock.mock.calls.filter((c) => c[0] === "list_events").at(-1)![1] as Record<
+    const call = invokeMock.mock.calls.filter((c) => c[0] === "query_events").at(-1)![1] as Record<
       string,
       unknown
     >;
@@ -345,13 +371,14 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     state(w)["agent"] = "claude";
     await nextTick();
     await flushPromises();
-    const calls = invokeMock.mock.calls.filter((c) => c[0] === "summarize");
+    // SF04：query_begin 携带主筛选参数；query_summary 只带 query_id。
+    const calls = invokeMock.mock.calls.filter((c) => c[0] === "query_begin");
     const before = calls.length;
     const refresh = w.findAll("button").find((b) => b.text() === "刷新");
     expect(refresh).toBeDefined();
     await refresh!.trigger("click");
     await flushPromises();
-    const after = invokeMock.mock.calls.filter((c) => c[0] === "summarize");
+    const after = invokeMock.mock.calls.filter((c) => c[0] === "query_begin");
     expect(after.length).toBeGreaterThan(before);
     expect(after.at(-1)![1]).toMatchObject({ agent: "claude" });
     expect(state(w)["agent"]).toBe("claude");
@@ -380,8 +407,9 @@ describe("Dashboard 状态（设计系统 Task 7）", () => {
 
   function mountEmpty(warnings: string[] = [], sources: object[] = []): VueWrapper {
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "summarize") return Promise.resolve(emptyReport(warnings, sources));
-      if (cmd === "list_events") return Promise.resolve({ rows: [], total: 0, warnings: [] });
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "query_summary") return Promise.resolve(emptyReport(warnings, sources));
+      if (cmd === "query_events") return Promise.resolve({ rows: [], total: 0, warnings: [] });
       if (cmd === "source_status") return Promise.resolve([]);
       if (cmd === "view_cache_load") return Promise.resolve(null);
       return Promise.resolve(null);
@@ -424,9 +452,10 @@ describe("Dashboard 状态（设计系统 Task 7）", () => {
   it("R08 partial_report_has_visible_notice：部分数据 + 警告可见且表格仍渲染", async () => {
     const r = { ...summaryA, warnings: ["来源目录重叠：重复文件只统计一次"] };
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "summarize") return Promise.resolve(r);
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_summary") return Promise.resolve(r);
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
@@ -460,15 +489,16 @@ describe("视图快照查询身份（R04）", () => {
     const [sumAll, resolveSumAll] = deferred<SummaryReport>();
     const [evAll, resolveEvAll] = deferred<EventList>();
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "summarize") {
+      if (cmd === "query_summary") {
         // 第一轮（all）挂起；切 claude 后的第二轮正常返回
-        return invokeMock.mock.calls.filter((c) => c[0] === "summarize").length === 1
+        return invokeMock.mock.calls.filter((c) => c[0] === "query_summary").length === 1
           ? sumAll
           : Promise.resolve(summaryB);
       }
-      if (cmd === "list_events") {
-        return invokeMock.mock.calls.filter((c) => c[0] === "list_events").length === 1
+      if (cmd === "query_events") {
+        return invokeMock.mock.calls.filter((c) => c[0] === "query_events").length === 1
           ? evAll
           : Promise.resolve(events);
       }
@@ -497,9 +527,10 @@ describe("视图快照查询身份（R04）", () => {
 
   it("failed_refresh_does_not_save_mixed_snapshot：汇总失败不落盘", async () => {
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "summarize") return Promise.reject(new Error("boom"));
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_summary") return Promise.reject(new Error("boom"));
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
@@ -513,10 +544,11 @@ describe("视图快照查询身份（R04）", () => {
   it("stale_failure_shows_retry_state：旧数据 + 刷新失败 = 失败态（非后台刷新中）", async () => {
     let fail = true;
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(snapshotPayload());
-      if (cmd === "summarize")
+      if (cmd === "query_summary")
         return fail ? Promise.reject(new Error("net down")) : Promise.resolve(summaryA);
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
@@ -538,9 +570,10 @@ describe("视图快照查询身份（R04）", () => {
   it("unmounted_dashboard_cannot_overwrite_new_snapshot：卸载实例的晚到响应不落盘", async () => {
     const [sumAll, resolveSumAll] = deferred<SummaryReport>();
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "summarize") return sumAll;
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_summary") return sumAll;
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
@@ -582,14 +615,15 @@ describe("视图快照批次与恢复所有权（F03）", () => {
     // 旧 10/10 已保存；同筛选手动刷新：汇总 99 成功、明细失败——
     // 不得出现 filters 与旧明细（同筛选但旧批次）拼成的 99/10 快照。
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "summarize") {
-        return invokeMock.mock.calls.filter((c) => c[0] === "summarize").length === 1
+      if (cmd === "query_summary") {
+        return invokeMock.mock.calls.filter((c) => c[0] === "query_summary").length === 1
           ? Promise.resolve(summaryA)
           : Promise.resolve(summaryB);
       }
-      if (cmd === "list_events") {
-        return invokeMock.mock.calls.filter((c) => c[0] === "list_events").length === 1
+      if (cmd === "query_events") {
+        return invokeMock.mock.calls.filter((c) => c[0] === "query_events").length === 1
           ? Promise.resolve(events)
           : Promise.reject(new Error("ev boom"));
       }
@@ -613,13 +647,14 @@ describe("视图快照批次与恢复所有权（F03）", () => {
     // 不得保存 filters.by=model + report.by=day 的混代快照。
     const [sumModel, resolveSumModel] = deferred<SummaryReport>();
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "summarize") {
-        return invokeMock.mock.calls.filter((c) => c[0] === "summarize").length === 1
+      if (cmd === "query_summary") {
+        return invokeMock.mock.calls.filter((c) => c[0] === "query_summary").length === 1
           ? Promise.resolve(summaryA)
           : sumModel;
       }
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
@@ -644,9 +679,10 @@ describe("视图快照批次与恢复所有权（F03）", () => {
     // 首载未返回时用户选 claude；all 筛选的启动缓存晚到——不得重置筛选。
     const [cache, resolveCache] = deferred<unknown>();
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return cache;
-      if (cmd === "summarize") return new Promise(() => {}); // 首载挂起
-      if (cmd === "list_events") return new Promise(() => {});
+      if (cmd === "query_summary") return new Promise(() => {}); // 首载挂起
+      if (cmd === "query_events") return new Promise(() => {});
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
@@ -680,10 +716,11 @@ describe("视图快照批次与恢复所有权（F03）", () => {
     });
     const [firstModelPage, resolveFirstModelPage] = deferred<EventList>();
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "summarize") return Promise.resolve(summaryA);
-      if (cmd === "list_events") {
-        const n = invokeMock.mock.calls.filter((c) => c[0] === "list_events").length;
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") {
+        const n = invokeMock.mock.calls.filter((c) => c[0] === "query_events").length;
         if (n === 1)
           return Promise.resolve({
             rows: [row("2026-10-02 10:00:00", "a")],
@@ -708,12 +745,14 @@ describe("视图快照批次与恢复所有权（F03）", () => {
     (state(w)["loadMoreEvents"] as () => void)(); // 必须被拒绝：不发起第三次请求
     await flushPromises();
     resolveFirstModelPage({
+      query_id: "q-test-a",
+      pricing_revision: "rev-test",
       rows: [row("2026-10-02 11:00:00", "b")],
       total: 3,
       warnings: [],
     });
     await flushPromises();
-    const evCalls = invokeMock.mock.calls.filter((c) => c[0] === "list_events");
+    const evCalls = invokeMock.mock.calls.filter((c) => c[0] === "query_events");
     expect(evCalls.length).toBe(2);
     expect((state(w)["events"] as EventList).rows.map((r) => r.record_id)).toEqual(["b"]);
   });
@@ -754,9 +793,10 @@ describe("Dashboard 页头与通知（设计系统 Task 3）", () => {
   it("stale 快照 → 标题行警告胶囊；后台刷新落地 → 成功胶囊", async () => {
     let resolveSummary!: (v: SummaryReport) => void;
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(snapshotPayload());
-      if (cmd === "summarize") return new Promise((r) => (resolveSummary = r));
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_summary") return new Promise((r) => (resolveSummary = r));
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
@@ -786,9 +826,10 @@ describe("Dashboard 页头与通知（设计系统 Task 3）", () => {
 
   it("来源异常渲染为内联通知，去设置动作发出 go-settings", async () => {
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "summarize") return Promise.resolve(summaryA);
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status")
         return Promise.resolve([
           {
@@ -816,9 +857,10 @@ describe("Dashboard 页头与通知（设计系统 Task 3）", () => {
 
   it("多个来源异常合并为一条可展开通知（任务 7：多条合并）", async () => {
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "summarize") return Promise.resolve(summaryA);
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status")
         return Promise.resolve([
           {
@@ -856,9 +898,10 @@ describe("Dashboard 页头与通知（设计系统 Task 3）", () => {
 
   it("汇总加载失败渲染为可重试内联通知（非 NAlert）", async () => {
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "summarize") return Promise.reject(new Error("boom"));
-      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "query_summary") return Promise.reject(new Error("boom"));
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });

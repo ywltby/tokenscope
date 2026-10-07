@@ -12,7 +12,7 @@ use anyhow::Result;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
-use crate::aggregate::{GroupBy, aggregate, filter_preset_days, preset_days_range, resolve_tz};
+use crate::aggregate::{GroupBy, aggregate, preset_days_range};
 use crate::cache::{Cache, CacheStats, mtime_ms};
 use crate::dedupe::dedupe_events;
 use crate::model::{AgentKind, TokenCounts, UsageEvent};
@@ -73,6 +73,10 @@ pub struct SourceReport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryReport {
+    /// SF04：所属查询会话 ID（同批次的明细分页必须携带同一 query_id）。
+    pub query_id: String,
+    /// SF04：冻结的价格修订号。
+    pub pricing_revision: String,
     /// 解析后的时区标识（M6）。
     pub timezone: String,
     pub by: &'static str,
@@ -219,17 +223,21 @@ struct Collected {
     sources: Vec<SourceReport>,
     pricing: std::sync::Arc<crate::pricing::Pricing>,
     warnings: Vec<String>,
+    /// SF04：价格签名（内容摘要）——进入查询快照作为价格修订号。
+    pricing_revision: String,
 }
 
 /// D1：采集快照（不可变共享）——并发同参查询复用同一次采集，
 /// 事件/来源/警告/价格表一份冻结，各查询自行做时间与行级过滤。
+/// SF04：查询快照直接持有本结构的 Arc（字段对 crate 内 query 模块开放）。
 #[derive(Clone, Debug)]
-struct CollectionSnapshot {
-    generation: u64,
-    events: Vec<UsageEvent>,
-    sources: Vec<SourceReport>,
-    warnings: Vec<String>,
-    pricing: std::sync::Arc<crate::pricing::Pricing>,
+pub(crate) struct CollectionSnapshot {
+    pub(crate) generation: u64,
+    pub(crate) events: Vec<UsageEvent>,
+    pub(crate) sources: Vec<SourceReport>,
+    pub(crate) warnings: Vec<String>,
+    pub(crate) pricing: std::sync::Arc<crate::pricing::Pricing>,
+    pub(crate) pricing_revision: String,
 }
 
 /// 单飞槽：key → (互斥结果, 条件变量)。None = 空闲。
@@ -243,7 +251,7 @@ static COLLECT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// 采集键：只含影响**采集**的参数（by/tz/from/to/days 是采集后的过滤，
 /// 不参与——汇总与明细同参并发时必须合并为一次采集）。
-fn collection_key(opts: &SummaryOptions) -> String {
+pub(crate) fn collection_key(opts: &SummaryOptions) -> String {
     format!(
         "agent={:?}|cd={:?}|xd={:?}|ce={:?}|xe={:?}|refresh={}|cache={:?}|pp={:?}|or={:?}|md={:?}|idx={:?}",
         opts.agent,
@@ -276,7 +284,7 @@ fn wait_flight(cell: &FlightCell) -> Result<Arc<CollectionSnapshot>> {
 /// 单飞入口：领队采集并发布快照；同参跟随者等待复用。
 /// Task 1（RAII）：成功、错误、panic 三条路径都发布结果并释放槽位——
 /// 失败必须可重试，等待者必须拿到真实错误而非悬挂。
-fn collect_flighted(opts: &SummaryOptions) -> Result<Arc<CollectionSnapshot>> {
+pub(crate) fn collect_flighted(opts: &SummaryOptions) -> Result<Arc<CollectionSnapshot>> {
     collect_flighted_with(opts, &|generation| collect_inner(opts, generation))
 }
 
@@ -443,19 +451,7 @@ fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSna
         sources: collected.sources,
         warnings: collected.warnings,
         pricing: collected.pricing,
-    })
-}
-
-/// 共用采集路径（M7）：价格加载 → 缓存增量采集 → 全局去重 → 回填统计。
-/// 各阶段 INFO 计时落日志（用户排障依据；粒度 = 每 agent 一行，不逐文件刷屏）。
-fn collect_all(opts: &SummaryOptions) -> Result<Collected> {
-    let snap = collect_flighted(opts)?;
-    Ok(Collected {
-        generation: snap.generation,
-        events: snap.events.clone(),
-        sources: snap.sources.clone(),
-        pricing: snap.pricing.clone(),
-        warnings: snap.warnings.clone(),
+        pricing_revision: collected.pricing_revision,
     })
 }
 
@@ -532,8 +528,9 @@ fn collect_all_with_sources(
     let modelsdev_path = modelsdev_file_path(opts.modelsdev_path.as_ref());
     let index_path = pricing_index_path(opts.pricing_index.as_ref());
     // M11：签名一致时复用进程内缓存/索引文件，仅签名变化才重解析双快照。
+    // SF04：签名同时作为价格修订号进入采集快照/查询会话。
     let t_pricing = std::time::Instant::now();
-    let (pricing, mut warnings, cache_hit) = Pricing::load_cached(
+    let (pricing, pricing_revision, mut warnings, cache_hit) = Pricing::load_cached_revision(
         Some(&pricing_path),
         Some(&modelsdev_path),
         Some(&openrouter_path),
@@ -745,25 +742,28 @@ fn collect_all_with_sources(
         sources: reports,
         pricing,
         warnings,
+        pricing_revision,
     })
 }
 
 pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
-    let t = std::time::Instant::now();
-    let Collected {
-        generation: _,
-        mut events,
-        sources,
-        pricing,
-        warnings,
-    } = collect_all(opts)?;
+    // SF04：汇总 = 建立查询快照 + 从快照聚合；同会话的明细分页与汇总
+    // 共享同一冻结事件集/价格/时间基准。
+    let snapshot = crate::query::begin_query(opts)?;
+    query_summary_from(&snapshot)
+}
 
-    let (tz, tz_label) = resolve_tz(opts.tz.as_deref())?;
-    // SF05：一次查询只在入口解析一次 as_of，过滤全程使用冻结值。
-    let as_of = jiff::Zoned::now().with_time_zone(tz.clone());
-    events = apply_time_filter(events, opts, &tz, &as_of)?;
+/// SF04：从查询快照聚合汇总（不重新采集；generated_at = 冻结的 as_of）。
+pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Result<SummaryReport> {
+    let t = std::time::Instant::now();
+    // 聚合需要连续切片：按快照固定行序物化一份（每会话一次，非每页）。
+    let events: Vec<UsageEvent> = snapshot
+        .rows
+        .iter()
+        .map(|r| snapshot.event(r).clone())
+        .collect();
     let t_agg = std::time::Instant::now();
-    let agg = aggregate(&events, opts.by, &tz, &pricing);
+    let agg = aggregate(&events, snapshot.by, &snapshot.tz, snapshot.pricing());
     log::info!(
         "聚合（{}）：{} 组 / {} 请求，{} ms",
         agg.by,
@@ -772,23 +772,23 @@ pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
         t_agg.elapsed().as_millis()
     );
     log::info!(
-        "汇总完成：by={} agent={} 天数={:?} 区间={:?}..{:?} 时区={}，{} ms",
+        "汇总完成（会话 {}）：by={} 组={} 请求={}，{} ms",
+        snapshot.query_id,
         agg.by,
-        opts.agent.as_ref().map(|k| k.as_str()).unwrap_or("all"),
-        opts.days,
-        opts.from,
-        opts.to,
-        tz_label,
+        agg.groups.len(),
+        agg.totals.requests,
         t.elapsed().as_millis()
     );
     Ok(SummaryReport {
-        timezone: tz_label,
+        query_id: snapshot.query_id.clone(),
+        pricing_revision: snapshot.pricing_revision.clone(),
+        timezone: snapshot.tz_label.clone(),
         by: agg.by,
         groups: agg.groups,
         totals: agg.totals,
-        sources,
-        warnings,
-        generated_at: jiff::Zoned::now().with_time_zone(tz).to_string(),
+        sources: snapshot.sources().to_vec(),
+        warnings: snapshot.warnings().to_vec(),
+        generated_at: snapshot.as_of.to_string(),
     })
 }
 
@@ -858,87 +858,61 @@ pub struct EventRow {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EventList {
+    /// SF04：所属查询会话（分页必须携带同一 query_id）。
+    pub query_id: String,
+    /// SF04：冻结的价格修订号（同会话内恒定）。
+    pub pricing_revision: String,
     pub rows: Vec<EventRow>,
-    /// 过滤后、截断前的总条数。
+    /// 过滤后、截断前的总条数（同一快照内恒定）。
     pub total: u64,
     pub warnings: Vec<String>,
 }
 
-/// 逐请求明细（M7）：与 summary 共用 collect_all 采集与去重路径，数字同源。
-pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventList> {
+/// SF04：从查询快照分页读取明细——下钻在固定行序上应用，游标 v2 校验
+/// 归属（query_id/主指纹/下钻指纹/行位置），不重新采集/排序/编号。
+pub(crate) fn query_events_from(
+    snapshot: &crate::query::QuerySnapshot,
+    filter: &EventFilter,
+) -> Result<EventList> {
     let t = std::time::Instant::now();
-    let Collected {
-        generation: _,
-        mut events,
-        pricing,
-        warnings,
-        ..
-    } = collect_all(opts)?;
-    let (tz, _) = resolve_tz(opts.tz.as_deref())?;
-    // F02（计划 A3）：明细先复用与汇总完全相同的主时间过滤（days / from-to
-    // 同一校验与口径），再叠加行级下钻——此前只应用 days，前端传的 from/to
-    // 被静默忽略，选择历史区间后明细与汇总范围不一致。
-    // SF05：一次查询只在入口解析一次 as_of，过滤全程使用冻结值。
-    let as_of = jiff::Zoned::now().with_time_zone(tz.clone());
-    events = apply_time_filter(events, opts, &tz, &as_of)?;
-    if let Some(day) = &filter.day {
-        events.retain(|e| e.ts.to_zoned(tz.clone()).date().to_string() == *day);
-    }
-    if let Some(m) = &filter.model {
-        events.retain(|e| &e.model == m);
-    }
-    if let Some(pr) = &filter.project {
-        events.retain(|e| &e.project == pr);
-    }
-    events.sort_by(|a, b| b.ts.cmp(&a.ts).then(b.record_id.cmp(&a.record_id)));
-    // Task 1：为相同 (ts, record_id) 的事件分配确定性组内序号（稳定排序后
-    // 按位编号）——完全相同 timestamp + 空 record_id 不再共享游标。
-    let mut tie: Vec<u64> = Vec::with_capacity(events.len());
-    let mut prev: Option<(&jiff::Timestamp, &str)> = None;
-    let mut seq: u64 = 0;
-    for e in &events {
-        let same = prev.is_some_and(|(pts, prid)| *pts == e.ts && prid == e.record_id);
-        seq = if same { seq + 1 } else { 0 };
-        tie.push(seq);
-        prev = Some((&e.ts, e.record_id.as_str()));
-    }
-    // 每行的游标 = serde_json 序列化的不透明串（完整精度 ts + rid + seq），
-    // record_id 含分隔符也不会破坏解析。
-    let mut rows: Vec<(UsageEvent, u64, String)> = events
-        .into_iter()
-        .zip(tie)
-        .map(|(e, s)| {
-            let cursor = serde_json::to_string(&PageCursor {
-                ts: e.ts.to_string(),
-                rid: e.record_id.clone(),
-                seq: s,
-            })
-            .unwrap_or_default();
-            (e, s, cursor)
+    let drill_fp = crate::query::drill_fingerprint(filter);
+    // 下钻过滤：在固定行序上筛匹配行（绝对位置），total 在同一快照内恒定。
+    let matched: Vec<usize> = snapshot
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            let e = snapshot.event(r);
+            let day_ok = filter
+                .day
+                .as_ref()
+                .is_none_or(|d| e.ts.to_zoned(snapshot.tz.clone()).date().to_string() == *d);
+            let model_ok = filter.model.as_ref().is_none_or(|m| e.model == *m);
+            let project_ok = filter.project.as_ref().is_none_or(|p| e.project == *p);
+            day_ok && model_ok && project_ok
         })
+        .map(|(i, _)| i)
         .collect();
-    // D1：total = 主过滤 + 下钻后的全量（不含游标截断），翻页时恒定。
-    let total = rows.len() as u64;
-    // 游标过滤：排序为 ts/rid 降序、组内 seq 升序——下一页 = 排序位次
-    // 严格位于游标之后的事件（ts 更小；同 ts 且 rid 更小；同 ts 同 rid
-    // 且组内序号更大）。
-    if let Some(cur) = &filter.before {
-        let (cur_ts, cur_rid, cur_seq) = parse_cursor(cur)?;
-        rows.retain(|(e, s, _)| {
-            e.ts < cur_ts
-                || (e.ts == cur_ts
-                    && (e.record_id < cur_rid || (e.record_id == cur_rid && *s > cur_seq)))
-        });
-    }
+    let total = matched.len() as u64;
+    // 游标定位：返回严格位于游标行之后的匹配行（排序位次语义不变）。
+    let after = match &filter.before {
+        Some(cur) => crate::query::locate_cursor(snapshot, cur, &drill_fp)? + 1,
+        None => 0,
+    };
     let limit = filter.limit.unwrap_or(200).min(1000);
-    let rows: Vec<EventRow> = rows
+    let rows: Vec<EventRow> = matched
         .into_iter()
+        .filter(|&pos| pos >= after)
         .take(limit)
-        .map(|(e, _s, cursor)| {
+        .map(|pos| {
+            let r = &snapshot.rows[pos];
+            let e = snapshot.event(r);
             // B3：部分计价模型的明细行展示已计价小计（unknown 分项随总计披露）。
             // Task 6：同一次 estimate 同时产出 cost_usd 与 breakdown，
             // 前端不重算（不变量 7）。
-            let estimate = pricing.estimate(&e.model, &TokenCounts::from_event(&e), e.ts);
+            let estimate = snapshot
+                .pricing()
+                .estimate(&e.model, &TokenCounts::from_event(e), e.ts);
             let cost_usd = estimate.as_ref().map(|est| est.cost);
             let cost_breakdown = estimate.map(|est| EventCostBreakdown {
                 matched: est.matched.expect("estimate 命中必有候选元数据"),
@@ -951,14 +925,28 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
                 complete: est.complete,
                 excluded_candidate_warning: est.excluded_candidate_warning,
             });
+            let cursor = serde_json::to_string(&crate::query::PageCursor {
+                v: crate::query::CURSOR_VERSION,
+                qid: snapshot.query_id.clone(),
+                mfp: snapshot.main_fingerprint.clone(),
+                dfp: drill_fp.clone(),
+                ts: e.ts.to_string(),
+                rid: e.record_id.clone(),
+                seq: r.seq,
+            })
+            .unwrap_or_default();
             EventRow {
-                ts: e.ts.to_zoned(tz.clone()).strftime("%F %T").to_string(),
+                ts: e
+                    .ts
+                    .to_zoned(snapshot.tz.clone())
+                    .strftime("%F %T")
+                    .to_string(),
                 record_id: e.record_id.clone(),
                 cursor,
                 agent: e.agent.as_str(),
-                model: e.model,
-                session_id: e.session_id,
-                project: e.project,
+                model: e.model.clone(),
+                session_id: e.session_id.clone(),
+                project: e.project.clone(),
                 input: e.input_tokens,
                 output: e.output_tokens,
                 cache_write: e.cache_write_tokens,
@@ -969,7 +957,8 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
         })
         .collect();
     log::info!(
-        "明细完成：筛选 模型={:?} 项目={:?} 日={:?}，返回 {} 行 / 共 {} 条，{} ms",
+        "明细完成（会话 {}）：筛选 模型={:?} 项目={:?} 日={:?}，返回 {} 行 / 共 {} 条，{} ms",
+        snapshot.query_id,
         filter.model,
         filter.project,
         filter.day,
@@ -978,32 +967,41 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
         t.elapsed().as_millis()
     );
     Ok(EventList {
+        query_id: snapshot.query_id.clone(),
+        pricing_revision: snapshot.pricing_revision.clone(),
         rows,
         total,
-        warnings,
+        warnings: snapshot.warnings().to_vec(),
     })
 }
 
-/// 统一时间过滤（M10）：days（预设近 N 天）与 from/to（闭区间自然日）二选一，
-/// 日期按解析时区解释。SF05：days 分支由调用方注入**本次查询冻结的
-/// as_of**，区间 = `[起始自然日, as_of 今天]` 闭区间、不含未来日期
-///（docs/stats-semantics.md §3.6）；显式 from/to 不被截断到今天。
-fn apply_time_filter(
-    mut events: Vec<UsageEvent>,
+/// SF04：主时间过滤的索引形式——返回保留事件的下标，不复制事件
+///（查询快照建立时调用；days 区间解析用冻结 as_of，见 §3.6）。
+pub(crate) fn time_filter_indices(
+    events: &[UsageEvent],
     opts: &SummaryOptions,
     tz: &TimeZone,
     as_of: &jiff::Zoned,
-) -> Result<Vec<UsageEvent>> {
+) -> Result<Vec<usize>> {
     use jiff::civil::Date;
     if opts.days.is_some() && (opts.from.is_some() || opts.to.is_some()) {
         anyhow::bail!("--days 与 --from/--to 互斥，二选一");
     }
+    let date_of = |e: &UsageEvent| e.ts.to_zoned(tz.clone()).date();
     if let Some(n) = opts.days {
         let range = preset_days_range(as_of, n)?;
-        return Ok(filter_preset_days(events, tz, range));
+        return Ok(events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                let d = date_of(e);
+                d >= range.from && d <= range.to
+            })
+            .map(|(i, _)| i)
+            .collect());
     }
     if opts.from.is_none() && opts.to.is_none() {
-        return Ok(events);
+        return Ok((0..events.len()).collect());
     }
     let parse = |s: &str| -> Result<Date> {
         s.parse::<Date>()
@@ -1016,30 +1014,38 @@ fn apply_time_filter(
     {
         anyhow::bail!("起始日期晚于结束日期: {f} > {t}");
     }
-    events.retain(|e| {
-        let d = e.ts.to_zoned(tz.clone()).date();
-        from.is_none_or(|f| d >= f) && to.is_none_or(|t| d <= t)
-    });
-    Ok(events)
+    Ok(events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            let d = date_of(e);
+            from.is_none_or(|f| d >= f) && to.is_none_or(|t| d <= t)
+        })
+        .map(|(i, _)| i)
+        .collect())
 }
 
-/// Task 1：不透明游标（serde_json 序列化）——缺字段、非法时间戳、
-/// 未知字段一律拒绝，record_id 中的分隔符不再破坏解析。
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PageCursor {
-    ts: String,
-    rid: String,
-    seq: u64,
-}
-
-fn parse_cursor(s: &str) -> Result<(jiff::Timestamp, String, u64)> {
-    let c: PageCursor =
-        serde_json::from_str(s).map_err(|e| anyhow::anyhow!("游标格式非法: {e}"))?;
-    let ts: jiff::Timestamp =
-        c.ts.parse()
-            .map_err(|e| anyhow::anyhow!("游标时间戳非法: {e}"))?;
-    Ok((ts, c.rid, c.seq))
+/// 统一时间过滤（M10，测试入口）：days（预设近 N 天）与 from/to（闭区间
+/// 自然日）二选一，日期按解析时区解释。SF05：days 分支由调用方注入**本次
+/// 查询冻结的 as_of**，区间 = `[起始自然日, as_of 今天]` 闭区间、不含未来
+/// 日期（docs/stats-semantics.md §3.6）；显式 from/to 不被截断到今天。
+/// 生产路径走 [`time_filter_indices`]（查询快照建立时调用）。
+#[cfg(test)]
+fn apply_time_filter(
+    events: Vec<UsageEvent>,
+    opts: &SummaryOptions,
+    tz: &TimeZone,
+    as_of: &jiff::Zoned,
+) -> Result<Vec<UsageEvent>> {
+    let keep: std::collections::HashSet<usize> = time_filter_indices(&events, opts, tz, as_of)?
+        .into_iter()
+        .collect();
+    Ok(events
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| keep.contains(i))
+        .map(|(_, e)| e)
+        .collect())
 }
 
 fn file_size(path: &std::path::Path) -> Option<u64> {
@@ -1120,6 +1126,14 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// 测试 shim：一次性明细读取（SF04 起等价于"建会话 + 读一次"）。
+    /// 带游标翻页的用例必须自行 begin_query 后在同一会话内翻页——
+    /// 每次调用都是新会话，跨调用游标会被显式拒绝。
+    fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventList> {
+        let snap = crate::query::begin_query(opts)?;
+        query_events_from(&snap, filter)
+    }
+
     fn fixture(agent: &str, p: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
@@ -1159,10 +1173,12 @@ mod tests {
         d
     }
 
-    /// 剥离时间戳后序列化，用于三路径一致性比较。
+    /// 剥离时间戳与会话身份后序列化，用于三路径一致性比较。
     fn normalize(r: &SummaryReport) -> String {
         let mut r = r.clone();
         r.generated_at = String::new();
+        // SF04：query_id 是会话身份（每次查询必然不同），不参与数字一致性。
+        r.query_id = String::new();
         serde_json::to_string(&r).unwrap()
     }
 
@@ -1603,7 +1619,7 @@ cache_read = 0.4
                 let o = opts.clone();
                 std::thread::spawn(move || {
                     b.wait();
-                    collect_all(&o).unwrap()
+                    crate::query::begin_query(&o).unwrap()
                 })
             })
             .collect();
@@ -1613,7 +1629,7 @@ cache_read = 0.4
             results[0].generation, results[1].generation,
             "并发同参必须复用同一采集快照"
         );
-        assert_eq!(results[0].events.len(), results[1].events.len());
+        assert_eq!(results[0].rows.len(), results[1].rows.len());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1631,7 +1647,9 @@ cache_read = 0.4
             tz: Some("Asia/Shanghai".to_string()),
             ..Default::default()
         };
-        let full = list_events(&base, &EventFilter::default()).unwrap();
+        // SF04：全量与分页取自同一查询会话（游标携带该会话 query_id）。
+        let snap = crate::query::begin_query(&base).unwrap();
+        let full = query_events_from(&snap, &EventFilter::default()).unwrap();
         assert_eq!(full.rows.len(), 7);
         let mut pages: Vec<Vec<String>> = Vec::new();
         let mut seen = 0usize;
@@ -1642,7 +1660,7 @@ cache_read = 0.4
                 before: cursor.clone(),
                 ..Default::default()
             };
-            let page = list_events(&base, &f).unwrap();
+            let page = query_events_from(&snap, &f).unwrap();
             assert_eq!(page.total, 7, "total 恒为过滤后全量");
             if page.rows.is_empty() {
                 break;
@@ -2050,6 +2068,7 @@ cache_read = 0.0
                 sources: Vec::new(),
                 warnings: Vec::new(),
                 pricing: std::sync::Arc::new(crate::pricing::Pricing::default()),
+                pricing_revision: "test".to_string(),
             })
         };
         let r = collect_flighted_with(&opts, &ok2);
@@ -2108,11 +2127,12 @@ cache_read = 0.0
         // 更晚（排序更靠后）的事件——游标必须携带完整精度 UTC 时间戳。
         let dir = tmp_dir("subsecond");
         let opts = subsecond_fixture(&dir);
+        let snap = crate::query::begin_query(&opts).unwrap();
         let mut seen: Vec<(String, u64)> = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
-            let page = list_events(
-                &opts,
+            let page = query_events_from(
+                &snap,
                 &EventFilter {
                     limit: Some(1),
                     before: cursor.clone(),
@@ -2138,8 +2158,10 @@ cache_read = 0.0
         // Task 2：空 record_id（Codex 全部如此）在同秒内靠完整精度 ts 决序。
         let dir = tmp_dir("empty-rid");
         let opts = subsecond_fixture(&dir);
-        let page1 = list_events(
-            &opts,
+        // SF04：同一查询会话内翻页（游标绑定 query_id）。
+        let snap = crate::query::begin_query(&opts).unwrap();
+        let page1 = query_events_from(
+            &snap,
             &EventFilter {
                 limit: Some(2),
                 ..Default::default()
@@ -2150,8 +2172,8 @@ cache_read = 0.0
         // 两行 record_id 均为空，但 cursor 必须可区分（完整精度 ts）。
         assert_ne!(page1.rows[0].cursor, page1.rows[1].cursor);
         let cursor = &page1.rows[1].cursor;
-        let page2 = list_events(
-            &opts,
+        let page2 = query_events_from(
+            &snap,
             &EventFilter {
                 limit: Some(2),
                 before: Some(cursor.clone()),
@@ -2208,12 +2230,13 @@ cache_read = 0.0
         // 重复读取 cursor 顺序稳定。
         let dir = tmp_dir("identical-ts");
         let opts = identical_ts_fixture(&dir);
+        let snap = crate::query::begin_query(&opts).unwrap();
         let mut seen: Vec<u64> = Vec::new();
         let mut cursors: Vec<String> = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
-            let page = list_events(
-                &opts,
+            let page = query_events_from(
+                &snap,
                 &EventFilter {
                     limit: Some(1),
                     before: cursor.clone(),
@@ -2236,8 +2259,9 @@ cache_read = 0.0
             cursors[1] != cursors[2],
             "同键两行的 cursor 必须不同: {cursors:?}"
         );
-        // 稳定性：重复查询（无游标）得到的 cursor 序列一致。
-        let again = list_events(&opts, &EventFilter::default()).unwrap();
+        // 稳定性：同一会话内重复无游标读取得到的 cursor 序列一致
+        //（cursor 含 query_id，跨会话比较需在会话内进行）。
+        let again = query_events_from(&snap, &EventFilter::default()).unwrap();
         let again_cursors: Vec<String> = again.rows.iter().map(|r| r.cursor.clone()).collect();
         let first_pass: Vec<String> =
             vec![cursors[0].clone(), cursors[1].clone(), cursors[2].clone()];

@@ -26,6 +26,10 @@ export interface SourceStat {
 }
 
 export interface SummaryReport {
+  /** SF04：所属查询会话 ID（同批次的明细分页必须携带同一 query_id）。 */
+  query_id: string;
+  /** SF04：冻结的价格修订号。 */
+  pricing_revision: string;
   timezone: string;
   generated_at: string;
   sources: SourceStat[];
@@ -231,6 +235,10 @@ export interface EventRow {
 }
 
 export interface EventList {
+  /** SF04：所属查询会话 ID（分页/追加必须同一会话）。 */
+  query_id: string;
+  /** SF04：冻结的价格修订号。 */
+  pricing_revision: string;
   rows: EventRow[];
   total: number;
   warnings: string[];

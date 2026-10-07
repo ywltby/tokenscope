@@ -24,6 +24,8 @@ function group(key: string, unknownTokens?: Partial<Group["unknown_tokens"]>): G
 
 function report(groups: Group[], totalsUnknown: boolean): SummaryReport {
   return {
+    query_id: "q",
+    pricing_revision: "rev",
     timezone: "Asia/Shanghai",
     generated_at: "t",
     sources: [],

@@ -85,6 +85,20 @@ type SnapshotPayload = {
   report: SummaryReport;
   events: EventList;
 };
+// SF04：查询会话句柄（query_begin 返回）——同一批次的汇总/明细/分页
+// 都绑定同一 query_id；价格修订随会话冻结。
+type QueryHandle = {
+  queryId: string;
+  generation: number;
+  pricingRevision: string;
+  timezone: string;
+  asOf: string;
+};
+const currentQuery = ref<QueryHandle | null>(null);
+// SF05/SF04：每批次共享一次 begin_query Promise，汇总/明细并发读取同一
+// 会话；跨午夜/手动刷新的批次重建会话。
+let beginPromise: Promise<QueryHandle | null> | null = null;
+let beginEpoch = -1;
 // R04：汇总/明细各自的**请求时捕获键**（不可变）——响应返回时不再读
 // currentFilters() 冒充请求身份（混代数据保存的根因）。
 let summaryKey: SnapshotFilters | null = null;
@@ -153,6 +167,43 @@ function sourceNoticeText(s: SourceStatus): string {
     return `${AGENT_LABEL[s.agent] ?? s.agent} 数据目录不存在（${s.dir}）。`;
   return `${AGENT_LABEL[s.agent] ?? s.agent} 目录存在但没有发现会话日志（${s.dir}）。`;
 }
+// SF04：创建（或复用）当前批次的查询会话。同一 epoch 只发起一次
+// begin_query，refresh/loadEvents 共享该 Promise；晚到的旧 begin 不得
+// 接管新批次（epoch/queryId 双重守卫）。
+function beginQueryForCurrentEpoch(): Promise<QueryHandle | null> {
+  const epoch = refreshEpoch;
+  if (beginPromise && beginEpoch === epoch) return beginPromise;
+  beginEpoch = epoch;
+  const captured = {
+    by: by.value,
+    agent: agent.value,
+    from: range.value?.[0] ?? null,
+    to: range.value?.[1] ?? null,
+    tz: tz.value,
+  };
+  beginPromise = (async () => {
+    try {
+      const h = await invoke<QueryHandle>("query_begin", {
+        by: captured.by,
+        agent: captured.agent,
+        days: null,
+        from: captured.from,
+        to: captured.to,
+        tz: captured.tz,
+      });
+      if (epoch !== refreshEpoch || disposed) return null; // 旧 begin 晚到不接管
+      currentQuery.value = h;
+      return h;
+    } catch (e) {
+      // 会话建立失败：保留旧视图（不伪装已更新），错误在汇总侧可见。
+      if (epoch === refreshEpoch && !disposed)
+        summaryError.value = e instanceof Error ? e.message : String(e);
+      return null;
+    }
+  })();
+  return beginPromise;
+}
+
 async function refresh(): Promise<void> {
   const seq = ++summarySeq;
   const epoch = refreshEpoch;
@@ -167,15 +218,12 @@ async function refresh(): Promise<void> {
   loading.value = true;
   summaryError.value = null;
   try {
-    const fresh = await invoke<SummaryReport>("summarize", {
-      by: captured.by,
-      agent: captured.agent,
-      days: null,
-      from: captured.range?.[0] ?? null,
-      to: captured.range?.[1] ?? null,
-      tz: captured.tz,
-    });
-    if (seq !== summarySeq || disposed) return; // 已有更新的查询/实例已卸载，丢弃旧响应
+    const h = await beginQueryForCurrentEpoch();
+    if (seq !== summarySeq || disposed || epoch !== refreshEpoch) return;
+    if (!h) return; // begin 失败已写入 summaryError；保留旧视图
+    const fresh = await invoke<SummaryReport>("query_summary", { queryId: h.queryId });
+    if (seq !== summarySeq || disposed || epoch !== refreshEpoch) return;
+    if (h.queryId !== currentQuery.value?.queryId) return; // 会话已被新批次替换
     report.value = fresh;
     stale.value = false;
     freshArrived = true;
@@ -211,6 +259,10 @@ function saveSnapshot(): void {
   const ek = eventsKey.value;
   if (!sameMainIdentity(sk, ek)) return;
   if (report.value.by !== sk.by) return;
+  // SF04：两侧必须来自同一后端会话（query_id/价格修订一致）——
+  // 跨会话拼接的 report/events 不落盘。
+  if (report.value.query_id !== events.value.query_id) return;
+  if (report.value.pricing_revision !== events.value.pricing_revision) return;
   const payload: SnapshotPayload = {
     v: SNAPSHOT_VERSION,
     saved_at: new Date().toISOString(),
@@ -257,18 +309,24 @@ async function loadEvents(append = false): Promise<void> {
   moreLoading.value = append;
   eventsError.value = null;
   try {
-    const list = await invoke<EventList>("list_events", {
-      agent: captured.agent,
-      from: captured.range?.[0] ?? null,
-      to: captured.range?.[1] ?? null,
+    // SF04：共享本批次的会话；下钻/翻页在同一 query_id 上执行。
+    const h = await beginQueryForCurrentEpoch();
+    if (seq !== eventsSeq || disposed || epoch !== refreshEpoch) return;
+    if (!h) {
+      // 会话建立失败：保留旧明细（不伪装已更新），错误在汇总侧可见。
+      eventsError.value = summaryError.value;
+      return;
+    }
+    const list = await invoke<EventList>("query_events", {
+      queryId: h.queryId,
       model: captured.drill?.type === "model" ? captured.drill.key : null,
       project: captured.drill?.type === "project" ? captured.drill.key : null,
       day: captured.drill?.type === "day" ? captured.drill.key : null,
       limit: 200,
       before: anchor,
-      tz: captured.tz,
     });
     if (seq !== eventsSeq || disposed) return;
+    if (h.queryId !== currentQuery.value?.queryId) return; // 旧会话响应不落地
     if (append && events.value) {
       events.value = { ...list, rows: [...events.value.rows, ...list.rows] };
     } else {

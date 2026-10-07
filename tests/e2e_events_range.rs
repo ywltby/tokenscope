@@ -6,7 +6,16 @@
 use std::path::PathBuf;
 
 use tokenscope::aggregate::GroupBy;
-use tokenscope::report::{EventFilter, SummaryOptions, list_events, summary};
+use tokenscope::report::{EventFilter, SummaryOptions, summary};
+
+/// SF04：一次性明细读取 = 建会话 + 读一次（本文件用例不跨调用翻页）。
+fn list_events(
+    opts: &SummaryOptions,
+    filter: &EventFilter,
+) -> anyhow::Result<tokenscope::report::EventList> {
+    let snap = tokenscope::query::begin_query(opts)?;
+    tokenscope::query::query_events(&snap.query_id, filter)
+}
 
 fn fixture(agent: &str, p: &str) -> PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -7,7 +7,16 @@ use std::path::PathBuf;
 
 use tokenscope::aggregate::GroupBy;
 use tokenscope::model::AgentKind;
-use tokenscope::report::{EventFilter, SummaryOptions, list_events, summary};
+use tokenscope::report::{EventFilter, SummaryOptions, summary};
+
+/// SF04：一次性明细读取 = 建会话 + 读一次（本文件用例不跨调用翻页）。
+fn list_events(
+    opts: &SummaryOptions,
+    filter: &EventFilter,
+) -> anyhow::Result<tokenscope::report::EventList> {
+    let snap = tokenscope::query::begin_query(opts)?;
+    tokenscope::query::query_events(&snap.query_id, filter)
+}
 
 fn tmp_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("tokenscope-golden-{tag}-{}", std::process::id()));
@@ -87,6 +96,8 @@ cache_read = 0.4
 fn normalize_json(r: &tokenscope::report::SummaryReport) -> String {
     let mut r = r.clone();
     r.generated_at = String::new();
+    // SF04：query_id 是会话身份（每次查询必然不同），不参与数字一致性。
+    r.query_id = String::new();
     serde_json::to_string(&r).unwrap()
 }
 

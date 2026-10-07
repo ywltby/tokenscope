@@ -2355,7 +2355,24 @@ impl Pricing {
         openrouter_snapshot: Option<&Path>,
         index_path: &Path,
     ) -> (std::sync::Arc<Pricing>, Vec<String>, bool) {
-        Self::load_cached_with(
+        let (pricing, _sig, warnings, hit) = Self::load_cached_revision(
+            external,
+            modelsdev_snapshot,
+            openrouter_snapshot,
+            index_path,
+        );
+        (pricing, warnings, hit)
+    }
+
+    /// SF04：同 [`Self::load_cached`]，另返回价格签名——作为价格修订号
+    /// 进入查询快照（分页会话冻结价格版本，价格同步不影响旧分页）。
+    pub fn load_cached_revision(
+        external: Option<&Path>,
+        modelsdev_snapshot: Option<&Path>,
+        openrouter_snapshot: Option<&Path>,
+        index_path: &Path,
+    ) -> (std::sync::Arc<Pricing>, String, Vec<String>, bool) {
+        Self::load_cached_with_revision(
             external,
             modelsdev_snapshot,
             openrouter_snapshot,
@@ -2373,6 +2390,25 @@ impl Pricing {
         index_path: &Path,
         reader: &dyn Fn(&Path) -> std::io::Result<Vec<u8>>,
     ) -> (std::sync::Arc<Pricing>, Vec<String>, bool) {
+        let (pricing, _sig, warnings, hit) = Self::load_cached_with_revision(
+            external,
+            modelsdev_snapshot,
+            openrouter_snapshot,
+            index_path,
+            reader,
+        );
+        (pricing, warnings, hit)
+    }
+
+    /// SF03/SF04：来源读取可注入，另返回签名（读取失败降级时签名为失败态，
+    /// 不进入任何缓存键）。
+    pub fn load_cached_with_revision(
+        external: Option<&Path>,
+        modelsdev_snapshot: Option<&Path>,
+        openrouter_snapshot: Option<&Path>,
+        index_path: &Path,
+        reader: &dyn Fn(&Path) -> std::io::Result<Vec<u8>>,
+    ) -> (std::sync::Arc<Pricing>, String, Vec<String>, bool) {
         // SF03：复用缓存前先读一次字节并验证 UTF-8，签名纳入内容摘要——
         // "旧成功缓存已在内存而文件随后不可读"不会被直接命中遮蔽；
         // 仅比较 mtime/size 或 File::exists 都不足够。
@@ -2385,14 +2421,14 @@ impl Pricing {
             debug_assert!(!outcome.cacheable);
             debug_assert!(!outcome.read_failure_warnings().is_empty());
             let warnings = outcome.warnings();
-            return (std::sync::Arc::new(outcome.pricing), warnings, false);
+            return (std::sync::Arc::new(outcome.pricing), sig, warnings, false);
         }
         let mut guard = PRICE_CACHE.lock().unwrap();
         // D2：命中也返回持久化的诊断——降级状态必须随结果持续可见。
         if let Some((cached_sig, cached, cached_warnings)) = guard.as_ref()
             && cached_sig == &sig
         {
-            return (cached.clone(), cached_warnings.clone(), true);
+            return (cached.clone(), sig, cached_warnings.clone(), true);
         }
         // 索引文件命中（D2/F10 接线）：签名一致且版本为当前格式（R01：
         // v4/v5 可能携带错误的缓存价语义，拒绝读取、强制重建）→
@@ -2411,8 +2447,8 @@ impl Pricing {
                 .any(|e| price_plan_invalid(&index_entry_plan(e)));
             if !has_invalid {
                 let arc = std::sync::Arc::new(Self::from_index(&index));
-                *guard = Some((sig, arc.clone(), index.warnings.clone()));
-                return (arc, index.warnings, true);
+                *guard = Some((sig.clone(), arc.clone(), index.warnings.clone()));
+                return (arc, sig, index.warnings, true);
             }
             log::warn!("价格索引含非法单价条目，按来源重建");
             // 落到下方重建路径——正常重建与非法索引回退共用同一缓存写入
@@ -2430,8 +2466,8 @@ impl Pricing {
             warnings.push(format!("价格索引写入失败（不影响统计）: {e:#}"));
         }
         let arc = std::sync::Arc::new(outcome.pricing);
-        *guard = Some((sig, arc.clone(), warnings.clone()));
-        (arc, warnings, false)
+        *guard = Some((sig.clone(), arc.clone(), warnings.clone()));
+        (arc, sig, warnings, false)
     }
 }
 

@@ -29,7 +29,7 @@ function row(over: Partial<EventRow> = {}): EventRow {
 }
 
 function list(rows: EventRow[], total: number): EventList {
-  return { rows, total, warnings: [] };
+  return { query_id: "q", pricing_revision: "rev", rows, total, warnings: [] };
 }
 
 /** Task 7 fixture：外置来源、完整匹配、峰谷档命中的高档请求（部分缺价）。 */
