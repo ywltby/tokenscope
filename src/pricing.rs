@@ -512,12 +512,26 @@ fn normalize_weekday(s: &str) -> Result<String, String> {
     }
 }
 
+/// 规则价格是否含**显式声明**（Fixed 含显式 0、SameAsInput 都算）。
+/// 全 Unknown 的空规则和仅标签/时区不算声明（F02）。
+fn rates_declared(r: &PriceRates) -> bool {
+    r.input != RateSpec::Unknown
+        || r.output != RateSpec::Unknown
+        || r.cache_write != RateSpec::Unknown
+        || r.cache_read != RateSpec::Unknown
+}
+
 /// 请求时间命中的时间规则变体（Task 4A）：每个命中规则返回
 /// （规则, 命中的 period 或 None = 规则级默认价）。规则时区非法等
 /// 在加载时已校验，此处防御性跳过。
+/// F02：未命中任何 period 的空规则（无显式价格、当前 prompt 也未命中
+/// 其分段覆盖）**整体跳过**——不能凭空成为另一套基础价参与竞争；
+/// 规则级显式声明（Fixed/0/SameAsInput）或当前 basis 命中的分段覆盖
+/// 才保留该规则。所有规则均不适用时返回空 → 默认计划参与。
 fn matching_time_rules(
     plan: &PricePlan,
     at: jiff::Timestamp,
+    basis_value: u64,
 ) -> Vec<(&PriceSchedule, Option<&SchedulePeriod>)> {
     let mut out = Vec::new();
     for sched in &plan.schedules {
@@ -549,7 +563,12 @@ fn matching_time_rules(
             }
         }
         if !hit {
-            out.push((sched, None));
+            let declared = rates_declared(&sched.prices)
+                || select_segment_in(&sched.segments, basis_value)
+                    .is_some_and(|s| rates_declared(&s.prices));
+            if declared {
+                out.push((sched, None));
+            }
         }
     }
     out
@@ -1830,8 +1849,9 @@ impl Pricing {
             // R02：候选内择优与外层同规则——当前时刻**适用的时间规则**为
             // 竞争集合（规则命中时基础价仅供缺字段继承，不作为常驻竞争
             // 者，否则谷价永远被基础价压住）；无适用规则才用默认计划。
+            // F02：未命中且无显式声明的空规则整体跳过，不重引基础价。
             // 规则之间：完整优先 → 费用降序 → 声明顺序（稳定）。
-            let rules = matching_time_rules(&e.plan, at);
+            let rules = matching_time_rules(&e.plan, at, basis_value);
             let (est, sched, excluded) = if rules.is_empty() {
                 (estimate_entry(e, basis_value, t, None), None, 0)
             } else {
@@ -5067,6 +5087,376 @@ cache_read = "free"
             Some("higher-partial")
         );
         assert_eq!(est.excluded_incomplete_schedules, 0);
+    }
+
+    // ── F02：未命中的空时间规则不得把基础价重新带入竞争 ──
+
+    /// 双规则 A（谷 period + 独立晚峰 period）+ 固定价 B 的竞争场景。
+    fn valley_peak_pricing() -> Pricing {
+        let a = PricePlan {
+            base: PriceRates {
+                input: RateSpec::Fixed(10.0),
+                ..Default::default()
+            },
+            schedules: vec![
+                PriceSchedule {
+                    label: Some("valley".into()),
+                    timezone: Some("UTC".into()),
+                    periods: vec![SchedulePeriod {
+                        label: None,
+                        start_time: "08:00".into(),
+                        end_time: "20:00".into(),
+                        weekdays: None,
+                        prices: PriceRates {
+                            input: RateSpec::Fixed(2.0),
+                            ..Default::default()
+                        },
+                    }],
+                    ..Default::default()
+                },
+                PriceSchedule {
+                    label: Some("peak".into()),
+                    timezone: Some("UTC".into()),
+                    periods: vec![SchedulePeriod {
+                        label: None,
+                        start_time: "20:00".into(),
+                        end_time: "23:00".into(),
+                        weekdays: None,
+                        prices: PriceRates {
+                            input: RateSpec::Fixed(15.0),
+                            ..Default::default()
+                        },
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let b = PricePlan {
+            base: PriceRates {
+                input: RateSpec::Fixed(5.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut p = Pricing::empty();
+        p.add_entry(Entry {
+            prefix: match_key("chan-a/m"),
+            display: "chan-a/m".into(),
+            name: None,
+            plan: a,
+            tier: TIER_EXTERNAL,
+        });
+        p.add_entry(Entry {
+            prefix: match_key("chan-b/m"),
+            display: "chan-b/m".into(),
+            name: None,
+            plan: b,
+            tier: TIER_EXTERNAL,
+        });
+        p
+    }
+
+    #[test]
+    fn test_unmatched_empty_schedule_does_not_reintroduce_base() {
+        // A base=10、谷 UTC[08:00,20:00)=2、独立晚峰 [20:00,23:00)=15；B 固定 5。
+        // 未命中的空规则不得凭空成为另一套基础价：12:00 只有谷命中（$2）→
+        // B/$5 完整最高（peak 标签不得贴到中午请求）；20:00 峰开始含入 →
+        // A/$15；23:00 两规则均不适用 → 默认计划 A/$10（结束排除）。
+        let p = valley_peak_pricing();
+        let t = counts(1_000_000, 0, 0, 0);
+        let noon: jiff::Timestamp = "2026-01-05T12:00:00Z".parse().unwrap();
+        let est = p.estimate("m", &t, noon).unwrap();
+        assert_eq!(
+            est.matched.as_ref().unwrap().raw_key,
+            "chan-b/m",
+            "谷命中的 A/$2 低于 B/$5，未命中的空 peak 规则不得重引基础 $10"
+        );
+        assert!((est.cost - 5.0).abs() < 1e-9);
+        assert_ne!(
+            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            Some("peak"),
+            "未命中规则的标签不得贴到中午请求"
+        );
+        // 20:00：谷结束排除、峰开始含入 → A/$15
+        let peak_start: jiff::Timestamp = "2026-01-05T20:00:00Z".parse().unwrap();
+        let est = p.estimate("m", &t, peak_start).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-a/m");
+        assert!((est.cost - 15.0).abs() < 1e-9);
+        assert_eq!(
+            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            Some("peak")
+        );
+        // 23:00：峰结束排除，两规则均不适用 → 默认计划基础 $10
+        let after: jiff::Timestamp = "2026-01-05T23:00:00Z".parse().unwrap();
+        let est = p.estimate("m", &t, after).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-a/m");
+        assert!((est.cost - 10.0).abs() < 1e-9);
+        assert_eq!(
+            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            None,
+            "未命中规则被跳过后不得再贴时间档标签"
+        );
+    }
+
+    #[test]
+    fn test_explicit_schedule_default_remains_applicable() {
+        // 规则级**明确声明**的默认价格（Fixed 含显式 0）= 适用，即使没有
+        // period 命中；不可与空规则一起被跳过。
+        let plan_with_default = |default: f64| PricePlan {
+            base: PriceRates {
+                input: RateSpec::Fixed(10.0),
+                ..Default::default()
+            },
+            schedules: vec![PriceSchedule {
+                label: Some("flat-default".into()),
+                timezone: Some("UTC".into()),
+                // period 只在凌晨命中；测试时刻 10:00 不命中。
+                periods: vec![SchedulePeriod {
+                    label: None,
+                    start_time: "00:00".into(),
+                    end_time: "06:00".into(),
+                    weekdays: None,
+                    prices: PriceRates {
+                        input: RateSpec::Fixed(2.0),
+                        ..Default::default()
+                    },
+                }],
+                prices: PriceRates {
+                    input: RateSpec::Fixed(default),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut p = Pricing::empty();
+        p.add_entry(Entry {
+            prefix: match_key("chan-a/m"),
+            display: "chan-a/m".into(),
+            name: None,
+            plan: plan_with_default(7.0),
+            tier: TIER_EXTERNAL,
+        });
+        p.add_entry(Entry {
+            prefix: match_key("chan-b/m"),
+            display: "chan-b/m".into(),
+            name: None,
+            plan: PricePlan {
+                base: PriceRates {
+                    input: RateSpec::Fixed(5.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            tier: TIER_EXTERNAL,
+        });
+        p.add_entry(Entry {
+            prefix: match_key("chan-c/m"),
+            display: "chan-c/m".into(),
+            name: None,
+            plan: plan_with_default(0.0),
+            tier: TIER_EXTERNAL,
+        });
+        let ten: jiff::Timestamp = "2026-01-05T10:00:00Z".parse().unwrap();
+        let est = p.estimate("m", &counts(1_000_000, 0, 0, 0), ten).unwrap();
+        // 显式默认 7 生效 → A/$7 完整最高（显式 0 生效 → C/$0 最低）；
+        // 若声明不被承认：A/C 被跳过回基础 $10 → A 基础胜出 → 断言失败。
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-a/m");
+        assert!((est.cost - 7.0).abs() < 1e-9);
+        assert_eq!(
+            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            Some("flat-default")
+        );
+    }
+
+    #[test]
+    fn test_schedule_default_same_as_input_declares_rule() {
+        // 规则级 cache_read = same_as_input 同样算明确声明：无 period 命中
+        // 时规则仍适用，缓存读按该层最终输入价计。
+        let a = PricePlan {
+            base: PriceRates {
+                input: RateSpec::Fixed(10.0),
+                ..Default::default()
+            },
+            schedules: vec![PriceSchedule {
+                label: Some("sar-default".into()),
+                timezone: Some("UTC".into()),
+                periods: vec![SchedulePeriod {
+                    label: None,
+                    start_time: "00:00".into(),
+                    end_time: "06:00".into(),
+                    weekdays: None,
+                    prices: PriceRates {
+                        input: RateSpec::Fixed(2.0),
+                        ..Default::default()
+                    },
+                }],
+                prices: PriceRates {
+                    cache_read: RateSpec::SameAsInput,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let b = PricePlan {
+            base: PriceRates {
+                input: RateSpec::Fixed(5.0),
+                cache_read: RateSpec::Fixed(1.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut p = Pricing::empty();
+        p.add_entry(Entry {
+            prefix: match_key("chan-a/m"),
+            display: "chan-a/m".into(),
+            name: None,
+            plan: a,
+            tier: TIER_EXTERNAL,
+        });
+        p.add_entry(Entry {
+            prefix: match_key("chan-b/m"),
+            display: "chan-b/m".into(),
+            name: None,
+            plan: b,
+            tier: TIER_EXTERNAL,
+        });
+        let ten: jiff::Timestamp = "2026-01-05T10:00:00Z".parse().unwrap();
+        let est = p
+            .estimate("m", &counts(1_000_000, 0, 0, 1_000_000), ten)
+            .unwrap();
+        // A：read = 输入价 10 → 1M×10 + 1M×10 = $20 完整；B = 5 + 1 = $6。
+        // 若 SameAsInput 不算声明：A 被跳过 → read 缺价不完整 → B 胜 → 红。
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-a/m");
+        assert!(est.complete);
+        assert!((est.cost - 20.0).abs() < 1e-9);
+        let cr = est
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheRead)
+            .unwrap();
+        assert_eq!(cr.unit_price, Some(10.0));
+        assert_eq!(cr.rate_kind, RateKind::SameAsInput);
+    }
+
+    #[test]
+    fn test_schedule_default_segment_requires_matching_basis() {
+        // 规则分段的显式覆盖只在**当前 prompt 命中该段**时才算声明；
+        // 不适用分段的存在不能代替实际命中。
+        let a = PricePlan {
+            base: PriceRates {
+                input: RateSpec::Fixed(10.0),
+                ..Default::default()
+            },
+            schedules: vec![PriceSchedule {
+                label: Some("long".into()),
+                timezone: Some("UTC".into()),
+                segments: vec![PriceSegment {
+                    label: Some(">272K".into()),
+                    min_tokens: 300_000,
+                    max_tokens: None,
+                    prices: PriceRates {
+                        input: RateSpec::Fixed(8.0),
+                        ..Default::default()
+                    },
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let b = PricePlan {
+            base: PriceRates {
+                input: RateSpec::Fixed(5.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut p = Pricing::empty();
+        p.add_entry(Entry {
+            prefix: match_key("chan-a/m"),
+            display: "chan-a/m".into(),
+            name: None,
+            plan: a,
+            tier: TIER_EXTERNAL,
+        });
+        p.add_entry(Entry {
+            prefix: match_key("chan-b/m"),
+            display: "chan-b/m".into(),
+            name: None,
+            plan: b,
+            tier: TIER_EXTERNAL,
+        });
+        let ten: jiff::Timestamp = "2026-01-05T10:00:00Z".parse().unwrap();
+        // basis 350K 命中 >300K 段 → 声明成立 → A input $8 → cost 0.35M×8 = 2.8
+        let est = p.estimate("m", &counts(350_000, 0, 0, 0), ten).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-a/m");
+        assert!((est.cost - 2.8).abs() < 1e-9);
+        assert_eq!(
+            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            Some("long")
+        );
+        // basis 100K 未命中段 → 无声明 → 规则跳过 → 默认计划基础 $10
+        // → cost 0.1M×10 = 1.0，不得贴 long 标签
+        let est = p.estimate("m", &counts(100_000, 0, 0, 0), ten).unwrap();
+        assert_eq!(est.matched.as_ref().unwrap().raw_key, "chan-a/m");
+        assert!((est.cost - 1.0).abs() < 1e-9);
+        assert_eq!(
+            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            None,
+            "分段未命中时规则被跳过，不得贴时间档标签"
+        );
+    }
+
+    #[test]
+    fn test_weekday_mismatch_skips_undeclared_rule() {
+        // 星期不匹配 = period 未命中：无显式声明的空规则跳过（回默认计划），
+        // 匹配日命中时规则正常生效。
+        let a = PricePlan {
+            base: PriceRates {
+                input: RateSpec::Fixed(10.0),
+                ..Default::default()
+            },
+            schedules: vec![PriceSchedule {
+                label: Some("sunday-only".into()),
+                timezone: Some("UTC".into()),
+                periods: vec![SchedulePeriod {
+                    label: None,
+                    start_time: "00:00".into(),
+                    end_time: "23:59".into(),
+                    weekdays: Some(vec!["sun".into()]),
+                    prices: PriceRates {
+                        input: RateSpec::Fixed(2.0),
+                        ..Default::default()
+                    },
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let p = pricing_with_plan("solo/w", a);
+        // 周一（2026-01-05）：规则跳过 → 基础 $10，无时间档标签
+        let monday: jiff::Timestamp = "2026-01-05T10:00:00Z".parse().unwrap();
+        let est = p
+            .estimate("w", &counts(1_000_000, 0, 0, 0), monday)
+            .unwrap();
+        assert!((est.cost - 10.0).abs() < 1e-9);
+        assert_eq!(
+            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            None,
+            "星期不匹配的空规则不得贴标签重引基础价"
+        );
+        // 周日（2026-01-04）：规则命中 → $2
+        let sunday: jiff::Timestamp = "2026-01-04T10:00:00Z".parse().unwrap();
+        let est = p
+            .estimate("w", &counts(1_000_000, 0, 0, 0), sunday)
+            .unwrap();
+        assert!((est.cost - 2.0).abs() < 1e-9);
+        assert_eq!(
+            est.matched.as_ref().unwrap().schedule_label.as_deref(),
+            Some("sunday-only")
+        );
     }
 
     // ── R06：非法（非有限/负）单价不得进入估算 ──────────────────────
