@@ -3,8 +3,9 @@
 // 合并待保存最新项 + 串行派发：绝不并发 fire-and-forget 让旧写覆盖新写。
 import { invoke } from "@tauri-apps/api/core";
 
-/** 快照格式版本：v4 = 查询批次身份协调（v3 可能含混代数据，读取时忽略）。 */
-export const SNAPSHOT_VERSION = 4;
+/** 快照格式版本：v5 = 共享刷新批次 + 恢复所有权（F03；v4 可能含混代
+ * 拼接/晚到接管残留，读取时忽略，走正常加载）。 */
+export const SNAPSHOT_VERSION = 5;
 
 export type SnapshotDispatch = (payload: unknown) => Promise<void>;
 

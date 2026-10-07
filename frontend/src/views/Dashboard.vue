@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { NButton, NSelect, NSpin } from "naive-ui";
 import {
@@ -46,6 +46,17 @@ const hasMore = computed(() => !!events.value && events.value.rows.length < even
 // immediate watcher 依次启动使后者作废前者，首屏永远转圈或停在旧快照。
 let summarySeq = 0;
 let eventsSeq = 0;
+// F03：共享刷新批次——主筛选/refreshKey/手动刷新同步生成单一 epoch，两条
+// 查询携带同一 epoch；请求代次只负责丢弃旧响应，保存门槛用 epoch 判定
+// 「两侧均成功且属于当前批次」，杜绝新汇总 + 旧明细的同筛选拼接。
+let refreshEpoch = 0;
+let summaryBatchEpoch = -1;
+let eventsBatchEpoch = -1;
+// F03：用户操作版本——启动缓存读取前捕获；任何筛选/下钻/手动刷新立即
+// 递增并撤销晚到缓存的恢复资格（即使新查询尚未返回）。
+let interactionEpoch = 0;
+// F03：恢复应用期间 watcher 跳过查询（恢复后恰好启动一批刷新，不重复触发）。
+let applyingRestore = false;
 // R04（Task 4）：实例 disposal——App 用 v-if 切页，卸载后晚到的响应
 // 不得更新状态或落盘快照（新实例的查询/保存才是权威）。
 let disposed = false;
@@ -144,7 +155,8 @@ function sourceNoticeText(s: SourceStatus): string {
 }
 async function refresh(): Promise<void> {
   const seq = ++summarySeq;
-  // R04：请求发起时捕获不可变查询身份（批次 = seq）。
+  const epoch = refreshEpoch;
+  // R04：请求发起时捕获不可变查询身份（批次 = epoch）。
   const captured: SnapshotFilters = {
     by: by.value,
     agent: agent.value,
@@ -167,6 +179,7 @@ async function refresh(): Promise<void> {
     report.value = fresh;
     stale.value = false;
     freshArrived = true;
+    summaryBatchEpoch = epoch;
     summaryKey = captured;
     saveSnapshot();
   } catch (e) {
@@ -177,19 +190,27 @@ async function refresh(): Promise<void> {
   }
 }
 
+function sameMainIdentity(a: SnapshotFilters, b: SnapshotFilters): boolean {
+  return (
+    a.by === b.by &&
+    a.agent === b.agent &&
+    a.tz === b.tz &&
+    a.range?.[0] === b.range?.[0] &&
+    a.range?.[1] === b.range?.[1]
+  );
+}
+
 function saveSnapshot(): void {
-  // R04：两侧都用**请求时捕获键**协调——汇总键缺失（汇总失败/未落地）
-  // 或两侧 agent/tz/range 不一致（刚切换筛选、另一侧还是旧批次）时
-  // 宁可不入队，也绝不落盘混代数据。
+  // F03：保存门槛 = 汇总与明细均成功且属于**当前批次**（epoch 一致），
+  // 主键完全一致（含 by），且 report.by 与键一致。任一侧失败/旧批次 →
+  // 保留上一份一致快照，不由另一侧成功写新旧拼接；分页追加只延长同
+  // 批次明细，drill 是明细侧子查询身份（汇总无 drill 概念）。
   if (!report.value || !events.value || !eventsKey.value || !summaryKey) return;
+  if (summaryBatchEpoch !== refreshEpoch || eventsBatchEpoch !== refreshEpoch) return;
   const sk = summaryKey;
   const ek = eventsKey.value;
-  const coherent =
-    sk.agent === ek.agent &&
-    sk.tz === ek.tz &&
-    sk.range?.[0] === ek.range?.[0] &&
-    sk.range?.[1] === ek.range?.[1];
-  if (!coherent) return;
+  if (!sameMainIdentity(sk, ek)) return;
+  if (report.value.by !== sk.by) return;
   const payload: SnapshotPayload = {
     v: SNAPSHOT_VERSION,
     saved_at: new Date().toISOString(),
@@ -205,7 +226,24 @@ async function loadSources(): Promise<void> {
 }
 
 async function loadEvents(append = false): Promise<void> {
+  if (append) {
+    // F03：追加页仅允许在所属明细首批完成后执行，且锚点必须与当前显示
+    // 的明细同主身份（by/agent/range/tz/drill）——旧筛选的游标不得用于
+    // 新筛选，新筛选首批也不得被追加响应作废。
+    if (eventsLoading.value || !eventsKey.value) return;
+    const current: SnapshotFilters = {
+      by: by.value,
+      agent: agent.value,
+      range: range.value ? [...range.value] : null,
+      drill: drill.value ? { ...drill.value } : null,
+      tz: tz.value,
+    };
+    if (!sameMainIdentity(eventsKey.value, current)) return;
+    if ((eventsKey.value.drill?.type ?? null) !== (current.drill?.type ?? null)) return;
+    if ((eventsKey.value.drill?.key ?? null) !== (current.drill?.key ?? null)) return;
+  }
   const seq = ++eventsSeq;
+  const epoch = refreshEpoch;
   // R04：分页追加只作用于所属明细查询——捕获含游标锚的完整身份。
   const captured: SnapshotFilters = {
     by: by.value,
@@ -236,6 +274,7 @@ async function loadEvents(append = false): Promise<void> {
     } else {
       events.value = list;
       eventsKey.value = captured;
+      eventsBatchEpoch = epoch;
     }
     freshArrived = true;
     saveSnapshot();
@@ -255,13 +294,18 @@ function loadMoreEvents(): void {
 }
 
 async function loadViewCache(): Promise<void> {
+  // F03：恢复所有权——读取前捕获用户操作版本；任何筛选/下钻/手动刷新
+  // 都会在等待期间递增 interactionEpoch，晚到缓存随即失去接管资格。
+  const epochAtRead = interactionEpoch;
   try {
     const cached = await invoke<SnapshotPayload | null>("view_cache_load");
     // R04：晚到的缓存不得覆盖已落地的新结果（新汇总/明细先到 = 缓存
     // 不再接管）；卸载实例同样不恢复。
     if (disposed || freshArrived || report.value || events.value) return;
-    // 只接受 v4 快照；v3 及更早可能含混代数据，一律走正常加载。
+    if (interactionEpoch !== epochAtRead) return;
+    // 只接受当前版快照；旧版本可能含混代数据，一律走正常加载。
     if (!cached || cached.v !== SNAPSHOT_VERSION || !cached.report || !cached.filters) return;
+    applyingRestore = true;
     // 连同筛选一起恢复：数据与筛选必然同口径（保存时已做过一致性检查）。
     by.value = cached.filters.by;
     agent.value = cached.filters.agent;
@@ -273,7 +317,12 @@ async function loadViewCache(): Promise<void> {
     events.value = cached.events;
     cachedAt.value = cached.saved_at;
     stale.value = true;
+    await nextTick();
+    applyingRestore = false;
+    // 恢复后恰好启动一批后台刷新（单一入口；watcher 已跳过，不重复查询）
+    startRefreshBatch();
   } catch {
+    applyingRestore = false;
     // 视图缓存损坏：静默忽略，走正常加载
   }
 }
@@ -303,19 +352,50 @@ function clearDrill(): void {
   drill.value = null;
 }
 
-// C4：手动刷新——以当前筛选重跑两条查询，筛选状态不动。
+// C4/F03：手动刷新——以当前筛选重跑两条查询；也是用户操作，撤销启动
+// 缓存的恢复资格。共享批次入口保证两条查询属于同一 epoch。
 function manualRefresh(): void {
+  interactionEpoch++;
+  startRefreshBatch();
+}
+
+// F03：主刷新协调入口——同一 epoch 传给汇总与明细两条查询。
+function startRefreshBatch(): void {
+  refreshEpoch++;
   void refresh();
   void loadEvents();
 }
 
 const drillLabel = (d: EventDrill): string => `${d.type}: ${d.key}`;
 
-watch([by, agent, range, tz, () => props.refreshKey], refresh, { immediate: true });
-watch([by, agent, range, tz, drill, () => props.refreshKey], () => void loadEvents(), {
-  immediate: true,
+// F03：watcher 不再 immediate——启动批次由 setup 末尾显式开启（不属于
+// 用户操作，不递增 interactionEpoch）；恢复应用期间 watcher 跳过查询。
+// 主筛选变化走 startRefreshBatch（同一 epoch 两条查询），不另设明细
+// watcher——否则每次筛选变化发起两次明细查询。
+watch([by, agent, range, tz], () => {
+  if (applyingRestore) return;
+  interactionEpoch++;
+  startRefreshBatch();
 });
+// 下钻是用户操作：撤销启动缓存的恢复资格；明细作为当前主 epoch 的
+// 子查询重扫（drill 版本），汇总沿用同批次结果。
+watch(drill, () => {
+  if (applyingRestore) return;
+  interactionEpoch++;
+  void loadEvents();
+});
+// refreshKey 是程序触发（价格同步等）：新批次但不算用户操作。
+watch(
+  () => props.refreshKey,
+  () => {
+    if (applyingRestore) return;
+    startRefreshBatch();
+  },
+);
 void loadSources();
+// 启动首批查询（等价旧 immediate watcher，且在 loadViewCache 捕获
+// interactionEpoch 之后执行，不撤销恢复资格）。
+startRefreshBatch();
 </script>
 
 <template>

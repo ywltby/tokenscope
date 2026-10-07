@@ -186,10 +186,10 @@ describe("Dashboard 查询编排", () => {
   });
 });
 
-// v4 快照样例（模块级：多个 describe 共用）
+// v5 快照样例（模块级：多个 describe 共用）
 function snapshotPayload() {
   return {
-    v: 4,
+    v: 5,
     saved_at: "2026-10-05T00:00:00Z",
     filters: {
       by: "model",
@@ -204,7 +204,7 @@ function snapshotPayload() {
 }
 
 describe("Dashboard 视图快照与刷新（C4/F08）", () => {
-  it("view_cache_query_mismatch：v4 快照连同筛选一起恢复，口径一致", async () => {
+  it("view_cache_query_mismatch：v5 快照连同筛选一起恢复，口径一致", async () => {
     let resolveSummary!: (v: SummaryReport) => void;
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "view_cache_load") return Promise.resolve(snapshotPayload());
@@ -230,11 +230,11 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     expect(state(w)["stale"]).toBe(false);
   });
 
-  it("v3 旧快照（混代风险）被忽略，走正常加载", async () => {
+  it("v4 旧快照（可能含混代拼接/晚到接管残留）被忽略，走正常加载", async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "view_cache_load") {
         const p = snapshotPayload();
-        return Promise.resolve({ ...p, v: 3 });
+        return Promise.resolve({ ...p, v: 4 });
       }
       if (cmd === "summarize") return Promise.resolve(summaryA);
       if (cmd === "list_events") return Promise.resolve(events);
@@ -243,7 +243,7 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     });
     const w = mountDashboard();
     await flushPromises();
-    // v3 被忽略：筛选不得被恢复
+    // v4 被忽略：筛选不得被恢复
     expect(state(w)["agent"]).toBe("all");
     expect(state(w)["stale"]).toBe(false);
   });
@@ -552,6 +552,170 @@ describe("视图快照查询身份（R04）", () => {
     await flushPromises();
     const saves = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save");
     expect(saves.length).toBe(0);
+  });
+});
+
+describe("视图快照批次与恢复所有权（F03）", () => {
+  function deferred<T>(): [Promise<T>, (v: T) => void] {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return [promise, resolve];
+  }
+
+  type SavePayload = {
+    value: {
+      filters: { by: string; agent: string };
+      report: SummaryReport;
+      events: EventList;
+    };
+  };
+
+  function saveCalls(): SavePayload[] {
+    return invokeMock.mock.calls
+      .filter((c) => c[0] === "view_cache_save")
+      .map((c) => c[1] as SavePayload);
+  }
+
+  it("same_filter_refresh_failure_does_not_save_mixed_snapshot：同筛选刷新新汇总成功+明细失败不得落盘拼接", async () => {
+    // 旧 10/10 已保存；同筛选手动刷新：汇总 99 成功、明细失败——
+    // 不得出现 filters 与旧明细（同筛选但旧批次）拼成的 99/10 快照。
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "summarize") {
+        return invokeMock.mock.calls.filter((c) => c[0] === "summarize").length === 1
+          ? Promise.resolve(summaryA)
+          : Promise.resolve(summaryB);
+      }
+      if (cmd === "list_events") {
+        return invokeMock.mock.calls.filter((c) => c[0] === "list_events").length === 1
+          ? Promise.resolve(events)
+          : Promise.reject(new Error("ev boom"));
+      }
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(saveCalls().length).toBeGreaterThanOrEqual(1); // 首批 10/10 正常落盘
+    const refreshBtn = w.findAll("button").find((b) => b.text() === "刷新");
+    await refreshBtn!.trigger("click");
+    await flushPromises();
+    // 汇总已是 99（2026-10-02），但明细失败：任何保存都不得携带新汇总
+    for (const call of saveCalls()) {
+      expect(call.value.report.groups[0].key).toBe("2026-10-01");
+    }
+  });
+
+  it("dimension_switch_waits_for_matching_report：切维度后明细先到不得保存 model/day 拼接", async () => {
+    // day 批次完成后切 model：明细（model）先回、汇总（model）在途——
+    // 不得保存 filters.by=model + report.by=day 的混代快照。
+    const [sumModel, resolveSumModel] = deferred<SummaryReport>();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "summarize") {
+        return invokeMock.mock.calls.filter((c) => c[0] === "summarize").length === 1
+          ? Promise.resolve(summaryA)
+          : sumModel;
+      }
+      if (cmd === "list_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    state(w)["by"] = "model";
+    await flushPromises();
+    // 明细（model）已落地、汇总（model）仍挂起：任何保存的 filters.by
+    // 必须与 report.by 一致（修复前保存 model/day 拼接）
+    for (const call of saveCalls()) {
+      expect(call.value.filters.by).toBe(call.value.report.by);
+    }
+    // 汇总随后落地 → 同批次保存放行（report.by 与查询维度一致）
+    resolveSumModel({ ...summaryB, by: "model" });
+    await flushPromises();
+    const last = saveCalls().at(-1)!.value;
+    expect(last.filters.by).toBe("model");
+    expect(last.report.by).toBe("model");
+  });
+
+  it("user_filter_change_prevents_late_cache_restore：用户已选筛选，晚到缓存不得接管", async () => {
+    // 首载未返回时用户选 claude；all 筛选的启动缓存晚到——不得重置筛选。
+    const [cache, resolveCache] = deferred<unknown>();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") return cache;
+      if (cmd === "summarize") return new Promise(() => {}); // 首载挂起
+      if (cmd === "list_events") return new Promise(() => {});
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    state(w)["agent"] = "claude";
+    await flushPromises();
+    resolveCache(snapshotPayload()); // filters.agent = "all"
+    await flushPromises();
+    expect(state(w)["agent"]).toBe("claude");
+    expect(state(w)["report"]).toBeNull();
+    expect(state(w)["stale"]).toBe(false);
+  });
+
+  it("append_cannot_invalidate_new_filter_first_page：新筛选首批在途时追加被拒绝", async () => {
+    // 切筛选后首批（model）在途：此时触发的"加载更多"必须被拒绝——
+    // 旧筛选的游标不得用于新筛选，model 首批也不得被追加响应作废。
+    const row = (ts: string, rid: string) => ({
+      ts,
+      record_id: rid,
+      cursor: `${ts}T00:00:00.000Z|${rid}`,
+      agent: "codex",
+      model: "m",
+      session_id: "s",
+      project: "p",
+      input: 1,
+      output: 1,
+      cache_write: 0,
+      cache_read: 0,
+      cost_usd: 0,
+    });
+    const [firstModelPage, resolveFirstModelPage] = deferred<EventList>();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "summarize") return Promise.resolve(summaryA);
+      if (cmd === "list_events") {
+        const n = invokeMock.mock.calls.filter((c) => c[0] === "list_events").length;
+        if (n === 1)
+          return Promise.resolve({
+            rows: [row("2026-10-02 10:00:00", "a")],
+            total: 3,
+            warnings: [],
+          });
+        if (n === 2) return firstModelPage; // model 首批挂起
+        return Promise.resolve({
+          rows: [row("2026-10-01 09:00:00", "z")],
+          total: 3,
+          warnings: [],
+        });
+      }
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect((state(w)["events"] as EventList).rows.map((r) => r.record_id)).toEqual(["a"]);
+    state(w)["by"] = "model";
+    await flushPromises(); // model 首批在途（eventsLoading = true）
+    (state(w)["loadMoreEvents"] as () => void)(); // 必须被拒绝：不发起第三次请求
+    await flushPromises();
+    resolveFirstModelPage({
+      rows: [row("2026-10-02 11:00:00", "b")],
+      total: 3,
+      warnings: [],
+    });
+    await flushPromises();
+    const evCalls = invokeMock.mock.calls.filter((c) => c[0] === "list_events");
+    expect(evCalls.length).toBe(2);
+    expect((state(w)["events"] as EventList).rows.map((r) => r.record_id)).toEqual(["b"]);
   });
 });
 
