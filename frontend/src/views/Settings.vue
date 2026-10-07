@@ -286,6 +286,9 @@ async function rebuild(): Promise<void> {
 }
 
 async function syncPricing(): Promise<void> {
+  // RC04：函数级防重复——不只依赖按钮 loading（程序化触发/快速双击都不得
+  // 并发发起第二次同步）；卸载后在途请求不得再写状态或发通知。
+  if (syncing.value || disposed) return;
   syncing.value = true;
   try {
     const reports = await invoke<{ source: string; count: number }[]>("sync_pricing_openrouter");
@@ -301,7 +304,7 @@ async function syncPricing(): Promise<void> {
     } catch {
       pricingError.value = "价格列表读取失败（保留上次数据）";
     } finally {
-      window.dispatchEvent(new Event("pricing-status-changed"));
+      if (!disposed) window.dispatchEvent(new Event("pricing-status-changed"));
       syncing.value = false;
     }
   }

@@ -1,7 +1,7 @@
 // Task 3：全局首次同步横幅——needs_sync 时可见、可同步、失败保留；
 // 有本地 models.dev 快照（离线可用）时不出现。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { flushPromises, mount } from "@vue/test-utils";
+import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
@@ -46,6 +46,10 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
 });
+// RC04：横幅在 window 上挂 pricing-status-changed 监听——未卸载的实例会
+// 跨用例继续响应事件（曾让后续用例统计到 9 次 pricing_status 调用）。
+// 自动卸载每个用例创建的 wrapper，保证监听与状态互不串扰。
+enableAutoUnmount(afterEach);
 
 function statusCalls(): number {
   return invokeMock.mock.calls.filter((c) => c[0] === "pricing_status").length;
@@ -342,10 +346,152 @@ describe("PricingStatusBanner 错误恢复（UX06）", () => {
     const sync = w.findAll("button").find((b) => b.text().includes("立即同步"));
     await sync!.trigger("click");
     await flushPromises();
-    expect(w.text()).toContain("同步部分失败");
+    // RC04：状态未知时不得宣称"部分成功"——只能报"同步失败"。
+    expect(w.text()).toContain("同步失败");
+    expect(w.text()).not.toContain("同步部分失败");
     expect(w.text()).toContain("sync down");
     expect(w.text()).toContain("定价状态读取失败");
     expect(w.text()).toContain("status down");
+    w.unmount();
+    document.body.innerHTML = "";
+  });
+
+  // ── RC04：同步错误必须有可操作的重试动作；状态刷新意图不丢失 ──
+  it("partial_sync_failure_keeps_sync_retry_action：主源可用时仍可重试补充源同步", async () => {
+    // 首载：主源缺失（needsSync）→ 点"立即同步"→ 同步失败但状态显示主源
+    // 已可用（needsSync=false）。横幅收敛，但失败条必须带**重试同步**按钮。
+    let syncCalls = 0;
+    let synced = false;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "sync_pricing_openrouter") {
+        syncCalls += 1;
+        if (syncCalls === 1) {
+          synced = true;
+          return Promise.reject(new Error("OpenRouter: network down"));
+        }
+        return Promise.resolve([{ source: "models.dev", count: 5 }]);
+      }
+      if (cmd === "pricing_status")
+        return Promise.resolve(
+          synced
+            ? {
+                modelsdevAvailable: true,
+                modelsdevCount: 5,
+                modelsdevSyncedAt: "t",
+                openrouterAvailable: false,
+                externalCount: 0,
+                hasAnyPricing: true,
+                needsSync: false,
+                warnings: [],
+              }
+            : {
+                modelsdevAvailable: false,
+                modelsdevCount: 0,
+                modelsdevSyncedAt: null,
+                openrouterAvailable: false,
+                externalCount: 0,
+                hasAnyPricing: false,
+                needsSync: true,
+                warnings: [],
+              },
+        );
+      return Promise.resolve(null);
+    });
+    const w = mount(PricingStatusBanner, { attachTo: document.body });
+    await flushPromises();
+    await w
+      .findAll("button")
+      .find((b) => b.text().includes("立即同步"))!
+      .trigger("click");
+    await flushPromises();
+    expect(w.text()).toContain("同步部分失败");
+    expect(w.text()).toContain("OpenRouter: network down");
+    expect(w.text()).not.toContain("尚未获取定价");
+
+    // 真实点击错误条的"重试同步" → 再次调用同步；成功后才清理该错误。
+    const retry = w.findAll("button").find((b) => b.text().includes("重试同步"));
+    expect(retry, "同步失败条必须有可操作的重试同步按钮").toBeDefined();
+    await retry!.trigger("click");
+    await flushPromises();
+    expect(syncCalls, "重试必须再次调用同步").toBe(2);
+    expect(w.text()).not.toContain("OpenRouter: network down");
+    expect(w.text()).not.toContain("同步部分失败");
+    w.unmount();
+    document.body.innerHTML = "";
+  });
+
+  it("repeated_sync_activation_is_single_flight：同步进行中重复激活只发一次请求", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let syncCalls = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "sync_pricing_openrouter") {
+        syncCalls += 1;
+        return gate.then(() => Promise.resolve([]));
+      }
+      if (cmd === "pricing_status") return Promise.resolve(statusNeedsSync);
+      return Promise.resolve(null);
+    });
+    const w = mount(PricingStatusBanner, { attachTo: document.body });
+    await flushPromises();
+    const sync = w.findAll("button").find((b) => b.text().includes("立即同步"))!;
+    await sync.trigger("click");
+    expect(syncCalls).toBe(1);
+    // 在途时重复点击（等价快速连点/程序化触发）→ 不得并发第二次
+    await sync.trigger("click");
+    await sync.trigger("click");
+    expect(syncCalls).toBe(1);
+    release();
+    await flushPromises();
+    expect(syncCalls).toBe(1);
+    w.unmount();
+    document.body.innerHTML = "";
+  });
+
+  it("status_change_during_pending_read_is_not_lost：挂起期间的同步完成不被丢弃", async () => {
+    // 状态读取挂起时同步完成 → 释放旧读取后最终必须采用**同步后**的状态。
+    const [pendingRead, resolvePendingRead] = ((): [Promise<unknown>, (v: unknown) => void] => {
+      let r!: (v: unknown) => void;
+      const p = new Promise<unknown>((res) => (r = res));
+      return [p, r];
+    })();
+    let statusCalls = 0;
+    let synced = false;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pricing_status") {
+        statusCalls += 1;
+        if (statusCalls === 1) return pendingRead; // 首次读取挂起
+        return Promise.resolve(
+          synced
+            ? {
+                modelsdevAvailable: true,
+                modelsdevCount: 9,
+                modelsdevSyncedAt: "t",
+                openrouterAvailable: true,
+                externalCount: 0,
+                hasAnyPricing: true,
+                needsSync: false,
+                warnings: [],
+              }
+            : statusNeedsSync,
+        );
+      }
+      return Promise.resolve(null);
+    });
+    const w = mount(PricingStatusBanner, { attachTo: document.body });
+    await flushPromises();
+    expect(statusCalls).toBe(1);
+    // 挂起期间外部派发"状态已变化"（等价设置页同步完成：状态已更新）
+    synced = true;
+    window.dispatchEvent(new Event("pricing-status-changed"));
+    await flushPromises();
+    expect(statusCalls, "在途时不得立即并发第二次").toBe(1);
+    // 释放旧读取（返回同步前的旧状态）
+    resolvePendingRead(statusNeedsSync);
+    await flushPromises();
+    // 补读一次 → 最终采用同步后的状态（横幅消失）
+    expect(statusCalls, "结束后必须补读一次").toBe(2);
+    expect(w.text()).not.toContain("尚未获取定价");
     w.unmount();
     document.body.innerHTML = "";
   });

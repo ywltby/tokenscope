@@ -1092,3 +1092,38 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
     expect(vm.drafts.claude?.dir ?? "").toBe("");
   });
 });
+
+// ── RC04：设置页同步的函数级防重复与列表刷新失败保留旧价格 ──
+describe("Settings 价格同步（RC04）", () => {
+  it("sync_pricing_is_single_flight_and_keeps_old_prices_on_refresh_failure", async () => {
+    const [gate, release] = deferred<unknown>();
+    let syncCalls = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "sync_pricing_openrouter") {
+        syncCalls += 1;
+        return gate; // 同步在途
+      }
+      // 同步后列表刷新失败：保留旧价格并归类为读取失败
+      if (cmd === "pricing_entries") return Promise.reject(new Error("list down"));
+      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "settings_get")
+        return Promise.resolve({ price_auto_sync: true, close_action: null, sources: {} });
+      if (cmd === "autostart_status") return Promise.resolve(false);
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const btn = w.findAll("button").find((b) => b.text().includes("同步在线价格"))!;
+    await btn.trigger("click");
+    expect(syncCalls).toBe(1);
+    // 在途时重复激活（快速连点/程序化触发）→ 函数级 guard 拒绝第二次
+    await btn.trigger("click");
+    await btn.trigger("click");
+    expect(syncCalls, "同步进行中不得并发第二次请求").toBe(1);
+    release([{ source: "models.dev", count: 5 }]);
+    await flushPromises();
+    expect(w.text()).toContain("价格列表读取失败");
+    w.unmount();
+  });
+});
