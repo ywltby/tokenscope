@@ -19,6 +19,12 @@
 //!   远超本机 1.2 GB 日志解析出的事件量。
 //! - [`QUERY_IDLE_TTL`] = 10 分钟：一次分页浏览极少超过 10 分钟无读取；
 //!   闲置会话优先淘汰，活跃会话（持续翻页）不被回收。
+//!
+//! 查询身份（RC01）：`query_id` = 每次进程启动从系统随机源取的 128 位
+//! 命名空间 + 进程内单调计数 + 采集 generation。**跨启动唯一性只由随机
+//! 命名空间保证**——时间戳/PID/纯计数（单独或简单拼接）在重启后都会
+//! 重新产生同一身份，使旧游标被新进程错误接受（2026-10-08 复核已复现
+//! `q0-g0` 重放）。随机源失败或计数溢出一律返回明确错误，绝不回退。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -114,6 +120,38 @@ struct Session {
 
 static QUERY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// 跨启动唯一的进程命名空间（RC01）：每次进程启动从系统随机源取 128 位，
+/// 渲染为 32 位十六进制。惰性初始化一次，结果（含失败）缓存整个进程。
+///
+/// 为什么不回退：时间戳/PID/纯计数在重启后都可能重现同一取值，正是
+/// `q0-g0` 重放的根因；宁可让 `begin_query` 明确失败，也不产生会被
+/// 误认的"合法"身份。
+static QUERY_NAMESPACE: OnceLock<Result<String, String>> = OnceLock::new();
+
+fn query_namespace() -> Result<&'static str> {
+    QUERY_NAMESPACE
+        .get_or_init(|| {
+            let mut bytes = [0u8; 16]; // 128 位
+            getrandom::getrandom(&mut bytes)
+                .map_err(|e| format!("查询身份随机源不可用，无法建立唯一查询会话: {e}"))?;
+            let mut hex = String::with_capacity(32);
+            for b in bytes {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{b:02x}");
+            }
+            Ok(hex)
+        })
+        .as_deref()
+        .map_err(|e| anyhow!("{e}"))
+}
+
+/// 进程内单调计数（命名空间内的序号）：溢出即显式拒绝，不复用旧身份。
+fn next_query_seq() -> Result<u64> {
+    QUERY_COUNTER
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
+        .map_err(|_| anyhow!("查询序号已耗尽（进程内计数溢出），请重启应用"))
+}
+
 fn registry() -> &'static Mutex<HashMap<String, Session>> {
     static REGISTRY: OnceLock<Mutex<HashMap<String, Session>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
@@ -151,6 +189,11 @@ fn evict_to_fit(reg: &mut HashMap<String, Session>, incoming_rows: usize) {
 /// 创建查询会话：单飞采集（复用现有缓存/单飞管线）→ 主过滤一次 →
 /// 排序与 seq 只算一次 → 注册。返回的 Arc 快照供汇总/分页共享。
 pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
+    // RC01：先解析进程命名空间与序号——随机源不可用/计数耗尽时在采集前
+    // 就明确失败，不做任何昂贵工作，也不产生可能被误认的身份。
+    let namespace = query_namespace()?;
+    let qseq = next_query_seq()?;
+
     let (tz, tz_label) = resolve_tz(opts.tz.as_deref())?;
     let as_of = jiff::Zoned::now().with_time_zone(tz.clone());
     let collection = report::collect_flighted(opts)?;
@@ -185,9 +228,10 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
         prev = Some((ts, rid));
     }
 
-    let n = QUERY_COUNTER.fetch_add(1, Ordering::Relaxed);
     let snapshot = Arc::new(QuerySnapshot {
-        query_id: format!("q{n}-g{}", collection.generation),
+        // RC01：命名空间 + 序号 + generation。跨启动唯一性来自命名空间，
+        // generation 仅用于诊断（同参并发采集合并时相同）。
+        query_id: format!("q{namespace}-{qseq}-g{}", collection.generation),
         generation: collection.generation,
         pricing_revision: collection.pricing_revision.clone(),
         main_fingerprint,

@@ -13,6 +13,10 @@ exclude = ["src-tauri"]
 [dependencies]
 anyhow = "1"
 dirs = "6"
+# RC01：查询身份跨启动唯一——进程启动时取 128 位系统随机命名空间。
+# 已在锁文件中作为 ring→rustls→ureq 的传递依赖存在；此处显式声明为直接
+# 依赖（不依赖传递依赖的可用性），版本与锁一致，离线可解析。
+getrandom = "0.2"
 jiff = "0.2"
 log = "0.4.34"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
