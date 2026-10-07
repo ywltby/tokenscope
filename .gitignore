@@ -27,6 +27,10 @@ rustc-ice-*.txt
 Thumbs.db
 # ZCode 工具忽略文件（内容自动同步自 .gitignore，属工具产物）
 .zcodeignore
+# WorkBuddy / CodeBuddy agent 工作区数据（记忆、技能、会话状态）——工具产物
+.workbuddy-ai/
+# WorkBuddy 生成目录（当前可能尚未出现，预留忽略）
+.workbuddy/
 
 # ── GUI（Tauri + Vue）───────────────────────────────────
 frontend/node_modules/
