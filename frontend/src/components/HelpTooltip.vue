@@ -5,7 +5,7 @@
 // 且焦点不离开触发器（tooltip_escape_closes_without_losing_trigger）。
 // 触发器有语义 aria-label；浮层打开时 aria-describedby 指向**存在**
 // 的内容节点（Vue useId 保证稳定唯一）。
-import { computed, ref, useId } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, useId } from "vue";
 import { NTooltip } from "naive-ui";
 
 const props = defineProps<{
@@ -26,15 +26,33 @@ function close(): void {
 }
 // 稳定且唯一的描述关联 ID（浮层打开时内容节点必然存在）。
 const descId = `ts-help-${useId()}`;
+
+// RC06：外部点击关闭。NTooltip 的 clickoutside 在 trigger="manual" 下不可靠
+//（实测点击文档不关闭），这里显式监听文档点击：点击**固定**后移开指针、
+// 再点其它位置必须关闭并清除 aria-describedby；点触发器自身或浮层内容不算外部。
+const triggerRef = ref<HTMLElement | null>(null);
+function onDocumentClick(e: MouseEvent): void {
+  if (!pinned.value) return;
+  const target = e.target as Node | null;
+  if (!target) return;
+  if (triggerRef.value?.contains(target)) return;
+  const body = document.getElementById(descId);
+  if (body?.contains(target)) return;
+  close();
+}
+onMounted(() => document.addEventListener("click", onDocumentClick));
+onBeforeUnmount(() => document.removeEventListener("click", onDocumentClick));
 </script>
 
 <template>
   <NTooltip placement="top" trigger="manual" :show="open">
     <template #trigger>
-      <span
+      <!-- RC06：原生 `button type=button` 提供浏览器内建 Enter/Space 激活
+           （各一次 click）；删除手写 enter/space 处理，避免与原生重复 toggle。 -->
+      <button
+        ref="triggerRef"
+        type="button"
         class="ts-focusable help-trigger"
-        tabindex="0"
-        role="button"
         :aria-label="props.label"
         :aria-expanded="open"
         :aria-describedby="open ? descId : undefined"
@@ -44,11 +62,9 @@ const descId = `ts-help-${useId()}`;
         @blur="focusOpen = false"
         @click="pinned = !pinned"
         @keydown.escape="close"
-        @keydown.enter.prevent="pinned = !pinned"
-        @keydown.space.prevent="pinned = !pinned"
       >
         <slot name="trigger" />
-      </span>
+      </button>
     </template>
     <div :id="descId" class="help-tooltip-body" :aria-label="props.contentLabel">
       <slot />
@@ -59,6 +75,15 @@ const descId = `ts-help-${useId()}`;
 <style scoped>
 .help-trigger {
   cursor: help;
+  /* RC06：原生 button 的局部外观重置——保留字号/颜色/对齐与焦点环。 */
+  appearance: none;
+  margin: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  text-align: inherit;
 }
 .help-tooltip-body {
   font-size: 12px;

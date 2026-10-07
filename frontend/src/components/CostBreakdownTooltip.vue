@@ -88,10 +88,13 @@ function renderContent(): ReturnType<typeof h> {
     @clickoutside="emit('escape')"
   >
     <template #trigger>
-      <span
+      <!-- RC06：用原生 `button type=button` 而不是 `span role=button`——
+          浏览器内建 Enter/Space 激活会各产生**一次** click，因此不再需要
+          手写键盘处理（手写 + 原生会重复 toggle）。局部重置外观，保留
+          字号/数值对齐/焦点环。 -->
+      <button
+        type="button"
         class="ts-focusable cost-trigger"
-        tabindex="0"
-        role="button"
         :aria-label="ariaLabel"
         :aria-expanded="open"
         :aria-describedby="open ? descId : undefined"
@@ -103,7 +106,7 @@ function renderContent(): ReturnType<typeof h> {
         @keydown.escape="emit('escape')"
       >
         {{ formatMoney(cost, "request") }}
-      </span>
+      </button>
     </template>
     <component :is="renderContent" />
   </NTooltip>
@@ -112,5 +115,16 @@ function renderContent(): ReturnType<typeof h> {
 <style scoped>
 .cost-trigger {
   cursor: help;
+  /* RC06：原生 button 的局部外观重置——不引入第二套排版，数字对齐与
+     焦点环沿用全局 .ts-focusable。 */
+  appearance: none;
+  margin: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  text-align: inherit;
+  font-variant-numeric: inherit;
 }
 </style>

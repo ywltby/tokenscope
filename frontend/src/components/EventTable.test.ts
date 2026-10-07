@@ -389,7 +389,8 @@ describe("EventTable 费用触发器可访问性（UX03）", () => {
       },
     });
     const host = mount(Host, { attachTo: document.body });
-    const trigger = host.find('[role="button"]');
+    // RC06：触发器是原生 button（浏览器内建 Enter/Space 激活）。
+    const trigger = host.find("button.cost-trigger");
     return { host, trigger };
   }
 
@@ -452,6 +453,38 @@ describe("EventTable 费用触发器可访问性（UX03）", () => {
     // 关闭后不因焦点保持而循环重开。
     await flushPromises();
     expect(tipVisible()).toBe(false);
+    host.unmount();
+  });
+
+  // RC06：触发器改为原生 button —— Enter/Space 由浏览器合成一次 click，
+  // 组件不得再手写 keydown 处理（否则重复 toggle）。复核现象：Escape 后
+  // 焦点保留，但 Enter/Space 都无法重新打开浮层。
+  it("cost_tooltip_reopens_with_enter_and_space_after_escape", async () => {
+    const { host, trigger } = mountCell();
+    expect(trigger.element.tagName, "触发器应为原生 button").toBe("BUTTON");
+    expect(trigger.attributes("type")).toBe("button");
+    // focus 打开
+    await (trigger.element as HTMLElement).focus();
+    await trigger.trigger("focus");
+    await waitTip(true);
+    // Escape 关闭且焦点不离开触发器
+    await trigger.trigger("keydown", { key: "Escape" });
+    await waitTip(false);
+    expect(document.activeElement).toBe(trigger.element);
+    // 单独 keydown 不得 toggle（证明没有会与原生重复的手写键盘处理）
+    for (const key of ["Enter", " "]) {
+      await trigger.trigger("keydown", { key, preventDefault: () => {} } as never);
+      await flushPromises();
+      expect(tipVisible(), `单独 keydown(${key}) 不得 toggle`).toBe(false);
+    }
+    // 浏览器为 Enter 合成的一次 click → 重新打开
+    await trigger.trigger("click");
+    await waitTip(true);
+    await trigger.trigger("click");
+    await waitTip(false);
+    // Space 的合成 click 同样能打开
+    await trigger.trigger("click");
+    await waitTip(true);
     host.unmount();
   });
 

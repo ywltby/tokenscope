@@ -21,12 +21,12 @@ import {
   sourceIdOf,
   type CacheInfo,
   type PricingEntry,
-  type RateSpecView,
   type PricingView,
   type SourceStatus,
 } from "../types";
 import { TZ_OPTIONS, useTimezone } from "../composables/timezone";
 import { fmtPriceOrUnknown, formatTieredPricing } from "../lib/tieredPrice";
+import { TOKEN_BUCKETS, tokenBucketLabel, type TokenBucketKey } from "../lib/tokenDisplay";
 import HelpTooltip from "../components/HelpTooltip.vue";
 
 const props = defineProps<{ refreshKey: number }>();
@@ -371,25 +371,31 @@ onUnmounted(() => {
   disposed = true; // RC03：卸载后请求不得写状态或发通知
 });
 
-/// 单价悬浮提示：来源 + OpenRouter 同前缀对照价（无对应模型标注未知价格）。
-function priceCell(r: object, pick: (e: PricingEntry) => RateSpecView): VNode {
+/// RC06：单价列由**显式四桶 key** 决定名称与取值。
+///
+/// 修复前 `priceCell(r, pick)` 用 `columnLabelOf(pick)` 反查列语义，靠
+/// `pick === ((e) => e.input)` 比较**函数对象**——每次调用都新建箭头函数，
+/// 比较永不相等，于是四列全部显示成「缓存命中单价说明」。现在 key 显式
+/// 传入，显示词统一来自 `tokenDisplay` 单一来源。
+function priceCell(r: object, key: TokenBucketKey): VNode {
   const e = asEntry(r);
   const or = e.openrouter;
   const orLine = or
-    ? `OpenRouter：输入 ${fmtPriceOrUnknown(or.input)} · 输出 ${fmtPriceOrUnknown(or.output)} · 缓存写 ${fmtPriceOrUnknown(or.cache_write)} · 缓存读 ${fmtPriceOrUnknown(or.cache_read)}`
+    ? `OpenRouter：${TOKEN_BUCKETS.map((b) => `${b.label} ${fmtPriceOrUnknown(or[b.key])}`).join(" · ")}`
     : "OpenRouter：未知价格（无对应模型）";
-  const unknown = pick(e) == null;
+  const spec = e[key];
+  const unknown = spec == null;
   // UX03：hover/focus/click/Enter/Space 可读、Escape 关闭且焦点不离开
   // 触发器；aria-describedby 指向打开时的内容节点。说明文字用语义色。
   return h(
     HelpTooltip,
-    { label: `${e.prefix} ${columnLabelOf(pick)}单价说明` },
+    { label: `${e.prefix} ${tokenBucketLabel(key)}单价说明` },
     {
       trigger: () =>
         h(
           "span",
           { style: unknown ? "color: var(--ts-warning)" : undefined },
-          fmtPriceOrUnknown(pick(e)),
+          fmtPriceOrUnknown(spec),
         ),
       default: () =>
         h("div", { style: "font-size: 12px; line-height: 1.8" }, [
@@ -401,14 +407,6 @@ function priceCell(r: object, pick: (e: PricingEntry) => RateSpecView): VNode {
         ]),
     },
   );
-}
-
-/// 由 pick 函数反查列语义（aria-label 用）。
-function columnLabelOf(pick: (e: PricingEntry) => RateSpecView): string {
-  if (pick === ((e: PricingEntry) => e.input)) return "输入";
-  if (pick === ((e: PricingEntry) => e.output)) return "输出";
-  if (pick === ((e: PricingEntry) => e.cache_write)) return "缓存写";
-  return "缓存命中";
 }
 
 /// Task 8：模型前缀列——有分段/峰谷规则时悬浮展开档位明细。
@@ -453,19 +451,31 @@ const priceColumns = computed<DataTableColumn[]>(() => [
     minWidth: 220,
     render: (r) => prefixCell(r),
   },
-  { title: "输入$", key: "input", align: "right", render: (r) => priceCell(r, (e) => e.input) },
-  { title: "输出$", key: "output", align: "right", render: (r) => priceCell(r, (e) => e.output) },
+  // RC06：四桶单价列由显式 key 驱动，显示词来自 tokenDisplay 单一来源
+  //（不再散落「缓存读$」）。
   {
-    title: "缓存写$",
-    key: "cache_write",
+    title: `${tokenBucketLabel("input")}$`,
+    key: "input",
     align: "right",
-    render: (r) => priceCell(r, (e) => e.cache_write),
+    render: (r) => priceCell(r, "input"),
   },
   {
-    title: "缓存读$",
+    title: `${tokenBucketLabel("output")}$`,
+    key: "output",
+    align: "right",
+    render: (r) => priceCell(r, "output"),
+  },
+  {
+    title: `${tokenBucketLabel("cache_write")}$`,
+    key: "cache_write",
+    align: "right",
+    render: (r) => priceCell(r, "cache_write"),
+  },
+  {
+    title: `${tokenBucketLabel("cache_read")}$`,
     key: "cache_read",
     align: "right",
-    render: (r) => priceCell(r, (e) => e.cache_read),
+    render: (r) => priceCell(r, "cache_read"),
   },
   {
     title: "来源",
