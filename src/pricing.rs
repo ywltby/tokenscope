@@ -4850,89 +4850,8 @@ cache_read = "free"
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn test_pricing_index_rebuilds_stale_cache_rates() {
-        // R01：旧索引把 OR 数值缓存价存成 Unknown——有效签名也不能继续用，
-        // 必须按来源重建出新单价（v4/v5 拒绝读取）。
-        let dir = std::env::temp_dir().join(format!("tokenscope-r01-idx-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        write(
-            &dir,
-            "pricing-openrouter.json",
-            r#"{"v":2,"synced_at":"t","entries":[
-                {"id":"or/model","name":null,
-                 "prompt":0.000002,"completion":0.000003,
-                 "cache_read":0.0000005,"cache_write":0}
-            ]}"#,
-        );
-        let index_path = dir.join("pricing-index.json");
-        *PRICE_CACHE.lock().unwrap() = None; // 进程缓存先于索引命中，必须清空
-        // 先用新代码建立正确索引（获得有效 sig）
-        let (p, _, _) = Pricing::load_cached(
-            None,
-            None,
-            Some(dir.join("pricing-openrouter.json").as_path()),
-            &index_path,
-        );
-        assert_eq!(
-            p.lookup("model").unwrap().plan.base.cache_read,
-            RateSpec::Fixed(0.5)
-        );
-        // 伪造"旧语义"索引：同 sig（从新索引取）但缓存价被写成 Unknown（v5 旧错误产物）
-        let good = crate::pricing::load_index(&index_path).unwrap().unwrap();
-        let stale = PricingIndex {
-            v: 5,
-            warnings: good.warnings.clone(),
-            sig: good.sig.clone(),
-            synced_at: good.synced_at.clone(),
-            entries: vec![IndexEntry {
-                prefix: "model".into(),
-                display: "or/model".into(),
-                name: None,
-                tier: TIER_OPENROUTER,
-                plan: Some(PricePlan {
-                    base: PriceRates {
-                        input: RateSpec::Fixed(2.0),
-                        output: RateSpec::Fixed(3.0),
-                        cache_write: RateSpec::Unknown,
-                        cache_read: RateSpec::Unknown,
-                    },
-                    ..Default::default()
-                }),
-                input: Some(2.0),
-                output: Some(3.0),
-                cache_write: None,
-                cache_read: None,
-            }],
-        };
-        crate::pricing::save_index(&index_path, &stale).unwrap();
-        let (p2, _, hit) = Pricing::load_cached(
-            None,
-            None,
-            Some(dir.join("pricing-openrouter.json").as_path()),
-            &index_path,
-        );
-        assert!(!hit, "v5 旧语义索引必须失效重建");
-        assert_eq!(
-            p2.lookup("model").unwrap().plan.base.cache_read,
-            RateSpec::Fixed(0.5),
-            "重建后必须从快照恢复数值缓存价"
-        );
-        // 新索引重启读取一致
-        let (p3, _, hit2) = Pricing::load_cached(
-            None,
-            None,
-            Some(dir.join("pricing-openrouter.json").as_path()),
-            &index_path,
-        );
-        assert!(hit2, "v6 索引应命中");
-        assert_eq!(
-            p3.lookup("model").unwrap().plan.base.cache_read,
-            RateSpec::Fixed(0.5)
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
+    // R01 冷启动索引回归已迁至 tests/pricing_index_restart.rs（F07）：
+    // 同进程 PRICE_CACHE 会吞掉磁盘篡改，必须用隔离子进程真实走磁盘链路。
 
     // ── R02：时间档选择——当前时刻适用规则优先于基础档，完整性优先 ──
 
@@ -5230,45 +5149,8 @@ output = 2.0
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn test_invalid_price_cannot_survive_index_load() {
-        // 有效签名索引携带非法数值（如 -5）→ 恢复路径不得静默接受；
-        // 当前版本索引发现非法条目时按来源重建。
-        let dir = std::env::temp_dir().join(format!("tokenscope-r06-idx-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let toml = write(
-            &dir,
-            "pricing.toml",
-            "[[model]]
-prefix = \"m\"\ninput = 2.0\noutput = 1.0\n",
-        );
-        let index_path = dir.join("pricing-index.json");
-        *PRICE_CACHE.lock().unwrap() = None; // 进程缓存先于索引命中，必须清空
-        let (p, _, _) = Pricing::load_cached(Some(&toml), None, None, &index_path);
-        assert_eq!(p.lookup("m").unwrap().plan.base.input, RateSpec::Fixed(2.0));
-        // 伪造当前版本索引：input=-5
-        let good = crate::pricing::load_index(&index_path).unwrap().unwrap();
-        let mut bad_entries = good.entries.clone();
-        bad_entries[0].plan.as_mut().unwrap().base.input = RateSpec::Fixed(-5.0);
-        let bad = PricingIndex {
-            v: INDEX_VERSION,
-            warnings: good.warnings.clone(),
-            sig: good.sig.clone(),
-            synced_at: good.synced_at.clone(),
-            entries: bad_entries,
-        };
-        crate::pricing::save_index(&index_path, &bad).unwrap();
-        let (p2, _, hit) = Pricing::load_cached(Some(&toml), None, None, &index_path);
-        assert!(!hit, "含非法数值的索引必须触发重建");
-        assert_eq!(
-            p2.lookup("m").unwrap().plan.base.input,
-            RateSpec::Fixed(2.0),
-            "重建后从来源恢复合法价"
-        );
-        *PRICE_CACHE.lock().unwrap() = None;
-        std::fs::remove_dir_all(&dir).ok();
-    }
+    // R06 冷启动索引回归已迁至 tests/pricing_index_restart.rs（F07），
+    // 理由同 R01：进程内缓存使磁盘篡改在同进程测试中不可观测。
 
     #[test]
     fn test_pricing_corrupt_snapshot_warns() {
