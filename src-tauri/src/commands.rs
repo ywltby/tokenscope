@@ -193,6 +193,27 @@ pub(crate) fn settings_set_close_action_impl(
     Ok(action)
 }
 
+/// F08：隐藏主窗口——窗口缺失或 hide 失败都返回可操作错误（前端沿
+/// 既有 await/catch 路径展示并允许重试），不再静默吞掉。
+fn hide_main_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let w = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在，无法最小化；可改用「直接退出」".to_string())?;
+    w.hide().map_err(|e| format!("隐藏窗口失败: {e}"))
+}
+
+/// F08：最小化动作的统一处理——成功才记成功日志；失败透传为可重试
+/// 错误。窗口动作可注入（测试验证错误传播，不构造真实 AppHandle）。
+fn close_minimize_with(hide: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    match hide() {
+        Ok(()) => {
+            log::info!("窗口关闭：最小化到托盘");
+            Ok(())
+        }
+        Err(e) => Err(format!("{e}（可重试）")),
+    }
+}
+
 /// 关闭确认弹窗的用户决定：remember=true 先持久化默认动作（写盘前重读
 /// 最新设置，只改 close_action 一个字段），再隐藏窗口或退出。
 #[tauri::command]
@@ -209,13 +230,7 @@ pub async fn close_resolve(
         .await?;
     }
     if minimize {
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.hide();
-            log::info!(
-                "窗口关闭：最小化到托盘{}",
-                if remember { "（已记忆）" } else { "" }
-            );
-        }
+        close_minimize_with(|| hide_main_window(&app))?;
     } else {
         log::info!("窗口关闭：用户选择直接退出");
         app.exit(0);
@@ -896,6 +911,19 @@ mod tests {
             Some(CloseAction::Quit)
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_close_hide_error_is_propagated() {
+        // F08：hide 失败必须透传为可重试错误（含原始原因），不得吞掉；
+        // 成功路径返回 Ok 且不产生错误信息。
+        let err = close_minimize_with(|| Err("webview busy".to_string()))
+            .expect_err("hide 失败必须返回 Err");
+        assert!(
+            err.contains("webview busy") && err.contains("可重试"),
+            "错误须携带原因并标注可重试: {err}"
+        );
+        assert!(close_minimize_with(|| Ok(())).is_ok());
     }
 
     #[test]

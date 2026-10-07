@@ -268,6 +268,41 @@ describe("App 关闭确认（关闭确认与配置文件计划 Task 3）", () =>
     expect(w.find(".stub-NModal").exists()).toBe(false);
   });
 
+  it("F08 close_hide_failure_remains_retryable：hide 失败弹窗保持可重试", async () => {
+    // 后端 hide 失败透传（“隐藏窗口失败: …（可重试）”）：弹窗保持打开、
+    // 原因可见；重试成功后关闭。不把“无错误”当隐藏成功。
+    mockApp(statusOk);
+    const w = mount(App);
+    await flushPromises();
+    closeEvent.fns.at(-1)!();
+    await flushPromises();
+    invokeMock.mockClear();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "close_resolve")
+        return Promise.reject(new Error("隐藏窗口失败: webview busy（可重试）"));
+      return Promise.resolve(null);
+    });
+    const dialog = w.find(".stub-NModal");
+    const minimize = dialog.findAll("button").find((b) => b.text().includes("最小化到托盘"));
+    await minimize!.trigger("click");
+    await flushPromises();
+    expect(w.find(".stub-NModal").exists()).toBe(true);
+    expect(w.text()).toContain("隐藏窗口失败");
+    expect(w.text()).toContain("webview busy");
+    // 重试成功 → 关闭
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "close_resolve") return Promise.resolve(null);
+      return Promise.resolve(null);
+    });
+    const minimize2 = w
+      .find(".stub-NModal")
+      .findAll("button")
+      .find((b) => b.text().includes("最小化到托盘"));
+    await minimize2!.trigger("click");
+    await flushPromises();
+    expect(w.find(".stub-NModal").exists()).toBe(false);
+  });
+
   it("R07：提交进行中不重复 invoke（防重复提交）", async () => {
     mockApp(statusOk);
     const w = mount(App);
