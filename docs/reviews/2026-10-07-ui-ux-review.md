@@ -1,5 +1,7 @@
 # UI/UX 审查问题清单（2026-10-07）
 
+> **2026-10-07 后续核实（基线 `dd6aaae`）：** 本文以下内容保留为 `1cefac7` 时的历史审查，执行请以 [独立修复计划及逐项核实表](../plans/active/2026-10-07-ui-ux-review-remediation.md) 为准。F06 导航、F08 真实 tooltip 测试已由后续提交修复；U02 并非三个 radio 完全无名称，U10 首帧闪烁尚未证实，U18 实际隐藏非日维度 0/1 个真实类别，U21 已有进行中与保存反馈。关闭弹窗已有玻璃材质，合理布局尺寸不能一律视为越阶间距。新一轮真实 App 量测另外确认分段控件外高 **36px**、费用浮层外宽 **512px**，见计划的证据与修复约束。不要照搬本文“只监听 by/mode”的图表建议，也不要全局修改 common 小字号。
+
 **基线：`1cefac7`，分支 `docs/product-review-plan`，前端工作树干净。**
 规范依据：根目录 `DESIGN.md`（第二版 Apple + Glassmorphism）。范围：`frontend/src/**` 全部非测试文件（4822 行）+ `index.html` + `src-tauri/tauri.conf.json` 窗口配置 + Naive UI / ECharts 依赖默认值。
 
