@@ -23,6 +23,31 @@ vi.mock("naive-ui", async (importOriginal) => {
   return { ...actual, NPopover: NPopoverStub };
 });
 
+// SF05：todayInTz 计数/脚本化——验证"每次操作只读取一次 today"。
+// 脚本队列耗尽后回落真实时钟；vi.restoreAllMocks 不会破坏此包装。
+vi.mock("../lib/dates", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/dates")>();
+  return {
+    ...actual,
+    todayInTz: (tz: string) => {
+      const g = globalThis as unknown as { __todayCalls?: number; __todayScript?: string[] };
+      g.__todayCalls = (g.__todayCalls ?? 0) + 1;
+      const next = g.__todayScript?.shift();
+      return next ?? actual.todayInTz(tz);
+    },
+  };
+});
+
+function setTodayScript(values: string[]): void {
+  (globalThis as unknown as { __todayScript?: string[] }).__todayScript = [...values];
+}
+function resetTodayCalls(): void {
+  (globalThis as unknown as { __todayCalls?: number }).__todayCalls = 0;
+}
+function todayCalls(): number {
+  return (globalThis as unknown as { __todayCalls?: number }).__todayCalls ?? 0;
+}
+
 import DateRangeSelect from "./DateRangeSelect.vue";
 import { addDays, todayInTz, tzDate } from "../lib/dates";
 
@@ -136,6 +161,51 @@ describe("DateRangeSelect 行为回归", () => {
     const ok = w.findAll("button").find((b) => b.text() === "确定");
     await ok!.trigger("click");
     expect(w.emitted("update:value")!.at(-1)![0]).toBeNull();
+  });
+});
+
+// SF05：时间基准——快捷项/确认每次操作只读取一次 today，两端由同一次
+// 读取派生；跨午夜取到两个"今天"的实现会被脚本化读取序列暴露。
+describe("SF05 时间基准（一次操作一次 today）", () => {
+  it("shortcut_both_ends_from_one_today_read：快捷项双读会把 08-11 当结束日提交", async () => {
+    const w = mountRange(null);
+    await open(w);
+    resetTodayCalls();
+    // 读序列：第 1 次给 08-10（快捷项操作），其后任何额外读取都得到
+    // 08-11——若实现读两次（旧实现 from/to 各取一次 now），提交对即暴露。
+    setTodayScript(["2026-08-10"]);
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "近2天")!
+      .trigger("click");
+    expect(todayCalls()).toBeGreaterThanOrEqual(1);
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "确定")!
+      .trigger("click");
+    const emitted = w.emitted("update:value")!.at(-1)![0];
+    expect(emitted).toEqual(["2026-08-09", "2026-08-10"]);
+  });
+
+  it("confirm_follow_today_reads_today_once：跟随今天的结束日来自确认时的单次读取", async () => {
+    const w = mountRange(null);
+    await open(w);
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "近2天")!
+      .trigger("click");
+    // 勾选"结束日跟随今天"（真实 NCheckbox）
+    const checkbox = w.find(".n-checkbox");
+    await checkbox.trigger("click");
+    resetTodayCalls();
+    setTodayScript(["2026-08-15", "2026-08-16"]);
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "确定")!
+      .trigger("click");
+    const emitted = w.emitted("update:value")!.at(-1)![0] as [string, string];
+    expect(emitted[1]).toBe("2026-08-15");
+    expect(todayCalls()).toBeGreaterThanOrEqual(1);
   });
 });
 

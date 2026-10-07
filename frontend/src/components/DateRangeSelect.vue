@@ -26,17 +26,24 @@ function todayStr(): string {
   return todayInTz(props.tz);
 }
 
-const shortcuts: { label: string; range: () => [string, string] }[] = [
-  { label: "当天", range: () => [todayStr(), todayStr()] },
-  // 自然日口径：昨天 + 今天两个自然日（后端过滤为自然日闭区间）。
-  { label: "近2天", range: () => [addDays(todayStr(), -1), todayStr()] },
-  { label: "近7天", range: () => [addDays(todayStr(), -6), todayStr()] },
-  { label: "近14天", range: () => [addDays(todayStr(), -13), todayStr()] },
-  { label: "近30天", range: () => [addDays(todayStr(), -29), todayStr()] },
+// SF05：快捷项只声明起始日的偏移——两端由**同一次** today 读取派生，
+// 一次操作（点击/比较/确认）跨午夜也不会取到两个不同的"今天"。
+const shortcuts: { label: string; fromOffset: number }[] = [
+  { label: "当天", fromOffset: 0 },
+  { label: "近2天", fromOffset: -1 },
+  { label: "近7天", fromOffset: -6 },
+  { label: "近14天", fromOffset: -13 },
+  { label: "近30天", fromOffset: -29 },
 ];
 
-function applyShortcut(sc: { label: string; range: () => [string, string] }): void {
-  const [from, to] = sc.range();
+/// 一次操作只读取一次 today，再计算两端（近 N 天 = [今天-(N-1), 今天]）。
+function shortcutRange(sc: { fromOffset: number }): [string, string] {
+  const today = todayStr();
+  return [addDays(today, sc.fromOffset), today];
+}
+
+function applyShortcut(sc: { label: string; fromOffset: number }): void {
+  const [from, to] = shortcutRange(sc);
   draftFrom.value = from;
   draftTo.value = to;
   followToday.value = false;
@@ -48,13 +55,15 @@ function fmtShort(dateStr: string): string {
 }
 
 // 受控开关：打开时草稿同步自当前值；取消/确定经 show 关闭。
+// SF05：打开面板是一次操作，today 只读取一次。
 watch(show, (open) => {
   if (!open) return;
+  const today = todayStr();
   if (props.value) {
     draftFrom.value = props.value[0];
     draftTo.value = props.value[1];
     // 结束日为今天视为"跟随今天"勾选态
-    followToday.value = draftTo.value >= todayStr();
+    followToday.value = draftTo.value >= today;
   } else {
     draftFrom.value = null;
     draftTo.value = null;
@@ -63,11 +72,13 @@ watch(show, (open) => {
 });
 
 function confirm(): void {
+  // SF05：确认是一次操作，today 只读取一次（跟随今天分支派生其结束日）。
+  const today = todayStr();
   if (draftFrom.value == null) {
     emit("update:value", null);
   } else if (followToday.value) {
     // 结束日跟随今天：自然日粒度下等价于"从起始日至今（含未来）"
-    emit("update:value", [draftFrom.value, todayStr()]);
+    emit("update:value", [draftFrom.value, today]);
   } else if (draftTo.value == null) {
     emit("update:value", [draftFrom.value, draftFrom.value]);
   } else {
@@ -83,10 +94,12 @@ function clear(): void {
 }
 
 // 触发器标签从 props 派生（修复前是 ref，只在 confirm 更新，外部重置会失同步）。
+// SF05：一次标签求值只读取一次 today。
 const label = computed<string>(() => {
   const v = props.value;
+  const today = todayStr();
   if (!v) return "全部时间";
-  if (v[1] >= todayStr() && v[0] < todayStr()) return `${fmtShort(v[0])} ~ 今天`;
+  if (v[1] >= today && v[0] < today) return `${fmtShort(v[0])} ~ 今天`;
   return fmtShort(v[0]) === fmtShort(v[1])
     ? fmtShort(v[0])
     : `${fmtShort(v[0])} ~ ${fmtShort(v[1])}`;
@@ -97,9 +110,9 @@ const label = computed<string>(() => {
 // 的歧义，是手选日期偏一天的根因。控件吐什么字符串就存什么字符串，
 // 统计语义 = 控件日历语义，无任何时区重解释。
 
-const shortcutActive = (sc: { range: () => [string, string] }): boolean => {
+const shortcutActive = (sc: { fromOffset: number }): boolean => {
   if (draftFrom.value == null || draftTo.value == null) return false;
-  const [from, to] = sc.range();
+  const [from, to] = shortcutRange(sc);
   return draftFrom.value === from && draftTo.value === to;
 };
 </script>

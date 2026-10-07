@@ -166,16 +166,48 @@ pub fn aggregate(
     }
 }
 
-/// 只保留最近 `days` 个自然日（含今天，按本地时区 Asia/Shanghai 落日界）的事件。
-pub fn filter_days(events: Vec<UsageEvent>, tz: &TimeZone, days: u32) -> Vec<UsageEvent> {
+/// SF05：预设"近 N 天"的解析结果——统计时区下 `[起始自然日, 今天]` 的
+/// 自然日闭区间（口径见 docs/stats-semantics.md §3.6）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresetRange {
+    pub from: jiff::civil::Date,
+    pub to: jiff::civil::Date,
+}
+
+/// 以注入的 as_of（统计时区）解析"近 N 天"：起始自然日到今天的**闭区间**，
+/// 不含未来日期。days=0 按既有约定归一为 1；超大 days 使日期减法超界时
+/// 返回可读错误，不 panic。纯函数：不读取系统时钟，today 由调用方注入
+/// 一次（取代原 filter_days 的内部 now 读取）。
+pub fn preset_days_range(as_of: &jiff::Zoned, days: u32) -> anyhow::Result<PresetRange> {
     let days = days.max(1);
-    let today = jiff::Zoned::now().with_time_zone(tz.clone()).date();
-    let cutoff = today
-        .checked_sub(jiff::Span::new().days(i64::from(days) - 1))
-        .expect("日期减法不会溢出");
+    let today = as_of.date();
+    // jiff Span 天数合法上限（±7304484 ≈ ±2 万年）；超过必然早于最小可表示
+    // 日期，直接返回可读错误——Span::new().days() 对越界值会 panic，不能依赖
+    // checked_sub 拦截。
+    const MAX_SPAN_DAYS: i64 = 7_304_484;
+    let back = i64::from(days) - 1;
+    if back > MAX_SPAN_DAYS {
+        anyhow::bail!("近 {days} 天的起始日期超出可表示范围");
+    }
+    let from = today
+        .checked_sub(jiff::Span::new().days(back))
+        .map_err(|e| anyhow::anyhow!("近 {days} 天的起始日期超出可表示范围（{e}）"))?;
+    Ok(PresetRange { from, to: today })
+}
+
+/// 只保留预设区间 `[from, to]` 内的事件：统计时区落日界、闭区间、
+/// 不含未来日期；每个事件只做一次时区转换（落日语义不变量）。
+pub fn filter_preset_days(
+    events: Vec<UsageEvent>,
+    tz: &TimeZone,
+    range: PresetRange,
+) -> Vec<UsageEvent> {
     events
         .into_iter()
-        .filter(|e| e.ts.to_zoned(tz.clone()).date() >= cutoff)
+        .filter(|e| {
+            let d = e.ts.to_zoned(tz.clone()).date();
+            d >= range.from && d <= range.to
+        })
         .collect()
 }
 
@@ -267,15 +299,81 @@ mod tests {
         assert_eq!(agg.totals.agents, ["claude-code", "codex"]);
     }
 
+    /// SF05：预设近 N 天 = `[起始自然日, 今天]` 闭区间，不含未来日期。
+    /// 固定上海"今天"（注入 as_of，不读系统时钟），覆盖：前一日、起点、
+    /// 今天 23:59:59.999999、未来一天，以及 UTC 与统计时区跨日。
     #[test]
-    fn test_filter_days() {
-        let old = event("2020-01-01T00:00:00.000Z", "m", 1, 1);
-        // 直接用 now：now - 1h 在本地午夜后一小时内会落到昨天，属测试自身的时间依赖缺陷。
-        let now_ts = jiff::Timestamp::now();
-        let mut recent = event("2026-01-01T00:00:00.000Z", "m", 1, 1);
-        recent.ts = now_ts;
-        let kept = filter_days(vec![old, recent], &tz(), 1);
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].ts, now_ts);
+    fn preset_days_excludes_future_dates() {
+        let tz = tz();
+        // 上海今天 = 2026-08-10（UTC 当日 16:00 起才算上海 08-11）。
+        let as_of = "2026-08-10T12:00:00+08:00[Asia/Shanghai]".parse().unwrap();
+        // 近 2 天 → [08-09, 08-10] 闭区间。
+        let r = preset_days_range(&as_of, 2).unwrap();
+        assert_eq!(r.from.to_string(), "2026-08-09");
+        assert_eq!(r.to.to_string(), "2026-08-10");
+
+        let mk = |ts: &str| event(ts, "m", 1, 1);
+        let events = vec![
+            // 前一日（上海 08-09 10:00 = UTC 02:00）→ 含。
+            mk("2026-08-09T02:00:00Z"),
+            // 起点当刻（上海 08-09 00:00:00 = UTC 08-08T16:00:00Z）→ 含。
+            mk("2026-08-08T16:00:00Z"),
+            // 今天 23:59:59.999999（UTC 15:59:59.999999）→ 含。
+            mk("2026-08-10T15:59:59.999999999Z"),
+            // 未来一天（上海 08-11 00:00:01）→ 排除（旧实现含未来）。
+            mk("2026-08-10T16:00:01Z"),
+            // 前天（上海 08-08）→ 区间外排除。
+            mk("2026-08-08T15:59:59Z"),
+        ];
+        let kept = filter_preset_days(events, &tz, r);
+        assert_eq!(kept.len(), 3, "起点/前日/今天23:59:59 含，未来与区间外排除");
+
+        // days=0 按既有约定归一为 1；days=1 → [今天, 今天]。
+        let r1 = preset_days_range(&as_of, 0).unwrap();
+        assert_eq!(r1.from, r1.to);
+        assert_eq!(r1.to.to_string(), "2026-08-10");
+
+        // 超大 days：日期减法超界返回可读错误，不 panic（旧实现 expect）。
+        let err = preset_days_range(&as_of, u32::MAX).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("超出可表示范围"), "可读错误: {msg}");
+    }
+
+    /// SF05：一次查询冻结一个 today——as_of 由入口解析一次后贯穿整个
+    /// 过滤；跨午夜（as_of 变为 00:00:01）属于下一次查询，不会在同一
+    /// 次过滤中出现第二个"今天"。
+    #[test]
+    fn one_query_uses_one_today_across_midnight() {
+        let tz = tz();
+        // 查询冻结在 上海今天 23:59:59.999999（午夜前一瞬）。
+        let as_of: jiff::Zoned = "2026-08-10T23:59:59.999999999+08:00[Asia/Shanghai]"
+            .parse()
+            .unwrap();
+        let range = preset_days_range(&as_of, 1).unwrap();
+        assert_eq!(range.to.to_string(), "2026-08-10", "冻结 as_of 的今天");
+
+        let boundary = vec![
+            // 上海 08-10 23:59:59 → 今天内，含。
+            event("2026-08-10T15:59:59Z", "m", 1, 1),
+            // 上海 08-11 00:00:01 → 冻结查询中的"未来"，排除。
+            event("2026-08-10T16:00:01Z", "m", 1, 1),
+        ];
+        let kept = filter_preset_days(boundary, &tz, range);
+        assert_eq!(kept.len(), 1, "同一查询内不允许第二个 today");
+        assert_eq!(
+            kept[0].ts.to_zoned(tz.clone()).date().to_string(),
+            "2026-08-10"
+        );
+
+        // 跨日之后的新查询：as_of 解析为 08-11，近 2 天 = [08-10, 08-11]，
+        // 原边界事件（08-10 23:59:59 / 08-11 00:00:01）都落在区间内。
+        let as_of_next: jiff::Zoned = "2026-08-11T00:00:01+08:00[Asia/Shanghai]".parse().unwrap();
+        let range_next = preset_days_range(&as_of_next, 2).unwrap();
+        assert_eq!(range_next.from.to_string(), "2026-08-10");
+        let events_next = vec![
+            event("2026-08-10T15:59:59Z", "m", 1, 1),
+            event("2026-08-10T16:00:01Z", "m", 1, 1),
+        ];
+        assert_eq!(filter_preset_days(events_next, &tz, range_next).len(), 2);
     }
 }

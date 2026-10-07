@@ -12,7 +12,7 @@ use anyhow::Result;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
-use crate::aggregate::{GroupBy, aggregate, filter_days, resolve_tz};
+use crate::aggregate::{GroupBy, aggregate, filter_preset_days, preset_days_range, resolve_tz};
 use crate::cache::{Cache, CacheStats, mtime_ms};
 use crate::dedupe::dedupe_events;
 use crate::model::{AgentKind, TokenCounts, UsageEvent};
@@ -759,7 +759,9 @@ pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
     } = collect_all(opts)?;
 
     let (tz, tz_label) = resolve_tz(opts.tz.as_deref())?;
-    events = apply_time_filter(events, opts, &tz)?;
+    // SF05：一次查询只在入口解析一次 as_of，过滤全程使用冻结值。
+    let as_of = jiff::Zoned::now().with_time_zone(tz.clone());
+    events = apply_time_filter(events, opts, &tz, &as_of)?;
     let t_agg = std::time::Instant::now();
     let agg = aggregate(&events, opts.by, &tz, &pricing);
     log::info!(
@@ -876,7 +878,9 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
     // F02（计划 A3）：明细先复用与汇总完全相同的主时间过滤（days / from-to
     // 同一校验与口径），再叠加行级下钻——此前只应用 days，前端传的 from/to
     // 被静默忽略，选择历史区间后明细与汇总范围不一致。
-    events = apply_time_filter(events, opts, &tz)?;
+    // SF05：一次查询只在入口解析一次 as_of，过滤全程使用冻结值。
+    let as_of = jiff::Zoned::now().with_time_zone(tz.clone());
+    events = apply_time_filter(events, opts, &tz, &as_of)?;
     if let Some(day) = &filter.day {
         events.retain(|e| e.ts.to_zoned(tz.clone()).date().to_string() == *day);
     }
@@ -981,18 +985,22 @@ pub fn list_events(opts: &SummaryOptions, filter: &EventFilter) -> Result<EventL
 }
 
 /// 统一时间过滤（M10）：days（预设近 N 天）与 from/to（闭区间自然日）二选一，
-/// 日期按解析时区解释。
+/// 日期按解析时区解释。SF05：days 分支由调用方注入**本次查询冻结的
+/// as_of**，区间 = `[起始自然日, as_of 今天]` 闭区间、不含未来日期
+///（docs/stats-semantics.md §3.6）；显式 from/to 不被截断到今天。
 fn apply_time_filter(
     mut events: Vec<UsageEvent>,
     opts: &SummaryOptions,
     tz: &TimeZone,
+    as_of: &jiff::Zoned,
 ) -> Result<Vec<UsageEvent>> {
     use jiff::civil::Date;
     if opts.days.is_some() && (opts.from.is_some() || opts.to.is_some()) {
         anyhow::bail!("--days 与 --from/--to 互斥，二选一");
     }
     if let Some(n) = opts.days {
-        return Ok(filter_days(events, tz, n));
+        let range = preset_days_range(as_of, n)?;
+        return Ok(filter_preset_days(events, tz, range));
     }
     if opts.from.is_none() && opts.to.is_none() {
         return Ok(events);
@@ -1315,6 +1323,14 @@ cache_read = 0.4
     #[test]
     fn test_apply_time_filter_range() {
         let tz = jiff::tz::TimeZone::get("Asia/Shanghai").unwrap();
+        // SF05：as_of 由调用方冻结注入；取测试固定时刻（上海 2026-08-02 正午）。
+        let as_of = jiff::Zoned::now().with_time_zone(tz.clone());
+        let as_of = as_of
+            .with()
+            .date("2026-08-02".parse().unwrap())
+            .time("12:00:00".parse().unwrap())
+            .build()
+            .unwrap();
         let mk = |ts: &str| UsageEvent {
             ts: ts.parse().unwrap(),
             agent: AgentKind::ClaudeCode,
@@ -1343,20 +1359,31 @@ cache_read = 0.4
             events.clone(),
             &opts(Some("2026-08-01".into()), Some("2026-08-01".into())),
             &tz,
+            &as_of,
         )
         .unwrap();
         assert_eq!(r.len(), 1);
         // 只给 from / 只给 to
         assert_eq!(
-            apply_time_filter(events.clone(), &opts(Some("2026-08-02".into()), None), &tz)
-                .unwrap()
-                .len(),
+            apply_time_filter(
+                events.clone(),
+                &opts(Some("2026-08-02".into()), None),
+                &tz,
+                &as_of
+            )
+            .unwrap()
+            .len(),
             2
         );
         assert_eq!(
-            apply_time_filter(events.clone(), &opts(None, Some("2026-08-01".into())), &tz)
-                .unwrap()
-                .len(),
+            apply_time_filter(
+                events.clone(),
+                &opts(None, Some("2026-08-01".into())),
+                &tz,
+                &as_of
+            )
+            .unwrap()
+            .len(),
             1
         );
         // from > to 报错；days 互斥报错；非法日期报错
@@ -1364,7 +1391,8 @@ cache_read = 0.4
             apply_time_filter(
                 events.clone(),
                 &opts(Some("2026-08-13".into()), Some("2026-08-01".into())),
-                &tz
+                &tz,
+                &as_of
             )
             .is_err()
         );
@@ -1373,9 +1401,9 @@ cache_read = 0.4
             from: Some("2026-08-01".into()),
             ..opts(None, None)
         };
-        assert!(apply_time_filter(events.clone(), &both, &tz).is_err());
+        assert!(apply_time_filter(events.clone(), &both, &tz, &as_of).is_err());
         let bad = opts(Some("2026/08/01".into()), None);
-        assert!(apply_time_filter(events.clone(), &bad, &tz).is_err());
+        assert!(apply_time_filter(events.clone(), &bad, &tz, &as_of).is_err());
     }
 
     #[test]
