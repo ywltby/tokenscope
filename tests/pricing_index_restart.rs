@@ -70,9 +70,11 @@ fn run_stage(self_test: &str, stage: &str, dir: &std::path::Path) {
     );
 }
 
-/// R01 冷启动回归：v5 旧语义索引（有效签名、缓存价被错误置 Unknown）必须
-/// 被拒绝并按来源重建；重建出的 v6 索引在另一个新进程中可命中且价格一致。
-/// 全程三个独立子进程 + 父进程 serde 篡改，磁盘链路真实经过。
+/// R01 冷启动回归：旧语义索引（有效签名、缓存价被错误置 Unknown）必须
+/// 被拒绝并按来源重建；重建出的当前版索引在另一个新进程中可命中且价格
+/// 一致。全程三个独立子进程 + 父进程 serde 篡改，磁盘链路真实经过。
+/// F04 Task 4 起索引 v7 仅接受当前版本：旧 v6（含 v4/v5）一律拒绝——
+/// fixture 篡改版本 = 6 覆盖"拒绝旧 v6 派生错误"。
 #[test]
 fn test_pricing_index_rebuilds_stale_cache_rates() {
     match std::env::var(STAGE_ENV).ok().as_deref() {
@@ -84,9 +86,9 @@ fn test_pricing_index_rebuilds_stale_cache_rates() {
             // 阶段 1：seed 子进程从合法来源生成有效签名索引
             run_stage(name, "seed", &dir);
             assert!(index.exists(), "seed 子进程必须写出索引文件");
-            // 阶段 2：父进程经 serde 把索引篡改为 v5 旧语义（同 sig）
+            // 阶段 2：父进程经 serde 把索引篡改为旧 v6 语义（同 sig）
             let mut stale: PricingIndex = load_index(&index).unwrap().unwrap();
-            stale.v = 5;
+            stale.v = 6;
             for e in &mut stale.entries {
                 e.plan = Some(PricePlan {
                     base: PriceRates {
@@ -128,7 +130,7 @@ fn test_pricing_index_rebuilds_stale_cache_rates() {
             let snap = dir.join("pricing-openrouter.json");
             let index = dir.join("pricing-index.json");
             let (p, _, hit) = Pricing::load_cached(None, None, Some(&snap), &index);
-            assert!(!hit, "v5 旧语义索引必须失效重建（真实磁盘读取路径）");
+            assert!(!hit, "旧 v6 语义索引必须失效重建（真实磁盘读取路径）");
             assert_eq!(
                 p.lookup("model").unwrap().plan.base.cache_read,
                 RateSpec::Fixed(0.5),
@@ -225,4 +227,98 @@ fn test_same_process_repeated_load_hits_memory() {
         RateSpec::Fixed(0.5)
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// F05 冷启动回归：plan=null、**扁平字段**携带非法数值（input=-5）的当前
+/// 版索引不得被静默接受——恢复入口必须先把扁平字段归一成完整计划再校验，
+/// 任一条目非法 → 整份索引按来源重建；显式 0 的合法扁平条目不受影响。
+#[test]
+fn test_invalid_flat_rate_in_current_index_forces_rebuild() {
+    /// 外置来源：m 正常；m0 带**显式 0**（cache_write 免费，合法）。
+    const TWO_MODEL_TOML: &str = "[[model]]\nprefix = \"m\"\ninput = 2.0\noutput = 1.0\n\n\
+[[model]]\nprefix = \"m0\"\ninput = 2.0\noutput = 1.0\ncache_write = 0.0\n";
+
+    match std::env::var(STAGE_ENV).ok().as_deref() {
+        None => {
+            let dir = fresh_dir("f05");
+            write(&dir, "pricing.toml", TWO_MODEL_TOML);
+            let index = dir.join("pricing-index.json");
+            let name = "test_invalid_flat_rate_in_current_index_forces_rebuild";
+            // 阶段 1：seed 生成有效签名的当前版索引
+            run_stage(name, "seed", &dir);
+            // 阶段 2：父进程把 m 的条目改成 plan=null + 扁平 input=-5
+            let mut bad: PricingIndex = load_index(&index).unwrap().unwrap();
+            let e = bad
+                .entries
+                .iter_mut()
+                .find(|e| e.prefix == "m")
+                .expect("seed 索引必含 m 条目");
+            e.plan = None;
+            e.input = Some(-5.0);
+            e.output = Some(1.0);
+            e.cache_write = None;
+            e.cache_read = None;
+            save_index(&index, &bad).unwrap();
+            // 阶段 3：新进程冷加载——扁平非法必须触发整份重建
+            run_stage(name, "cold_rebuild", &dir);
+            // 阶段 4：重建后的干净索引上，把 m0 改成扁平显式 0（合法）
+            // → 新进程必须照常命中且保留 Fixed(0)，不得误判非法。
+            let mut zero: PricingIndex = load_index(&index).unwrap().unwrap();
+            let e = zero
+                .entries
+                .iter_mut()
+                .find(|e| e.prefix == "m0")
+                .expect("seed 索引必含 m0 条目");
+            e.plan = None;
+            e.input = Some(2.0);
+            e.output = Some(1.0);
+            e.cache_write = Some(0.0);
+            e.cache_read = None;
+            save_index(&index, &zero).unwrap();
+            run_stage(name, "flat_zero_ok", &dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        Some("seed") => {
+            let dir = child_dir();
+            let toml = dir.join("pricing.toml");
+            let index = dir.join("pricing-index.json");
+            let (p, warnings, hit) = Pricing::load_cached(Some(&toml), None, None, &index);
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert!(!hit);
+            assert_eq!(p.lookup("m").unwrap().plan.base.input, RateSpec::Fixed(2.0));
+            assert_eq!(
+                p.lookup("m0").unwrap().plan.base.cache_write,
+                RateSpec::Fixed(0.0)
+            );
+        }
+        Some("cold_rebuild") => {
+            let dir = child_dir();
+            let toml = dir.join("pricing.toml");
+            let index = dir.join("pricing-index.json");
+            let (p, _, hit) = Pricing::load_cached(Some(&toml), None, None, &index);
+            assert!(!hit, "扁平字段非法的当前版索引必须触发整份重建");
+            assert_eq!(
+                p.lookup("m").unwrap().plan.base.input,
+                RateSpec::Fixed(2.0),
+                "重建后从来源恢复合法价"
+            );
+            assert_eq!(
+                p.lookup("m0").unwrap().plan.base.cache_write,
+                RateSpec::Fixed(0.0)
+            );
+        }
+        Some("flat_zero_ok") => {
+            let dir = child_dir();
+            let toml = dir.join("pricing.toml");
+            let index = dir.join("pricing-index.json");
+            let (p, _, hit) = Pricing::load_cached(Some(&toml), None, None, &index);
+            assert!(hit, "扁平显式 0 是合法条目，不得触发重建");
+            assert_eq!(
+                p.lookup("m0").unwrap().plan.base.cache_write,
+                RateSpec::Fixed(0.0),
+                "显式 0（免费）经扁平恢复后仍须保留"
+            );
+        }
+        other => panic!("未知阶段 {other:?}"),
+    }
 }

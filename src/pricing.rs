@@ -371,11 +371,10 @@ fn invalid_rate(r: &PriceRates) -> Option<(&'static str, f64)> {
     None
 }
 
-/// R06：计划内任一费率组含非法数值 → true（base/分段/时间规则/时段全覆盖）。
-fn plan_rates_invalid(plan: &Option<PricePlan>) -> bool {
-    let Some(plan) = plan else {
-        return false;
-    };
+/// F05：完整计划的数值校验——索引恢复入口先把扁平字段归一成完整计划，
+/// 再用本函数统一校验，不得存在未校验的恢复通道。
+/// 覆盖范围 = R06 的 plan 全量：base/分段/时间规则/时段/规则分段。
+fn price_plan_invalid(plan: &PricePlan) -> bool {
     invalid_rate(&plan.base).is_some()
         || plan
             .segments
@@ -389,6 +388,15 @@ fn plan_rates_invalid(plan: &Option<PricePlan>) -> bool {
                     .iter()
                     .any(|sg| invalid_rate(&sg.prices).is_some())
         })
+}
+
+/// F05：索引条目 → 完整计划——plan 与旧扁平字段统一归一，恢复入口先
+/// 归一、再校验（price_plan_invalid）、再入库，不留未校验的恢复通道。
+fn index_entry_plan(e: &IndexEntry) -> PricePlan {
+    e.plan.clone().unwrap_or_else(|| PricePlan {
+        base: PriceRates::from_options(e.input, e.output, e.cache_write, e.cache_read),
+        ..Default::default()
+    })
 }
 
 /// SameAsInput 白名单：仅 cache_read 可声明沿用输入价。
@@ -686,6 +694,7 @@ fn estimate_entry(
                     subtotal,
                     priced: true,
                     rate_kind,
+                    overflow: false,
                 });
             }
             None => {
@@ -700,6 +709,7 @@ fn estimate_entry(
                     subtotal: 0.0,
                     priced: false,
                     rate_kind: RateKind::Unknown,
+                    overflow: false,
                 });
             }
         }
@@ -789,6 +799,11 @@ pub struct CostLine {
     /// 单价来源（三态语义；unknown + priced=false = 缺价，不得显示为免费）。
     #[serde(default)]
     pub rate_kind: RateKind,
+    /// 修复后复核 F04：单价合法但 token × 单价超出 f64 表示范围——
+    /// 该分项不计金额、token 保留为未计价，前端据此刻画"金额超出可
+    /// 表示范围"，不得夹成 0 或伪装 complete=true。
+    #[serde(default)]
+    pub overflow: bool,
 }
 
 /// 四类计价分项。
@@ -1136,6 +1151,51 @@ fn external_model_plan(m: &ExternalModel) -> Result<(PricePlan, Vec<String>), St
         cache_write: m.cache_write,
         cache_read: m.cache_read,
     };
+    // F04：数值预检先于任何结构性丢弃——原始候选的时间规则（规则级/
+    // 时段/规则分段）任一显式单价非法 → **整条候选拒绝**，不得丢弃脏
+    // 规则后按基础价完整计费。结构性错误仍沿"跳过该规则 + 诊断"契约。
+    for s in &m.schedule {
+        let rule = PriceRates {
+            input: s.input,
+            output: s.output,
+            cache_write: s.cache_write,
+            cache_read: s.cache_read,
+        };
+        if let Some((comp, v)) = invalid_rate(&rule) {
+            return Err(format!(
+                "时间规则 {:?} 分项 {comp} 价格非法（须为有限非负）: {v}",
+                s.label
+            ));
+        }
+        for p in &s.period {
+            let pr = PriceRates {
+                input: p.input,
+                output: p.output,
+                cache_write: p.cache_write,
+                cache_read: p.cache_read,
+            };
+            if let Some((comp, v)) = invalid_rate(&pr) {
+                return Err(format!(
+                    "时间规则 {:?} 时段 {}–{} 分项 {comp} 价格非法（须为有限非负）: {v}",
+                    s.label, p.start_time, p.end_time
+                ));
+            }
+        }
+        for seg in &s.segment {
+            let sg = PriceRates {
+                input: seg.input,
+                output: seg.output,
+                cache_write: seg.cache_write,
+                cache_read: seg.cache_read,
+            };
+            if let Some((comp, v)) = invalid_rate(&sg) {
+                return Err(format!(
+                    "时间规则 {:?} 分段（min {}）分项 {comp} 价格非法（须为有限非负）: {v}",
+                    s.label, seg.min_tokens
+                ));
+            }
+        }
+    }
     let mut segments = Vec::with_capacity(m.segment.len());
     for s in &m.segment {
         segments.push(external_segment(s, basis, application)?);
@@ -1235,7 +1295,10 @@ fn default_index_v1() -> u8 {
 /// Task 2A：v4——匹配键改为末段模型名。v5：单价三态 RateSpec。
 /// v6（全计划审核 R01）：OpenRouter 数值缓存价保留——v4/v5 索引可能
 /// 携带被错误置 Unknown 的缓存价，**拒绝读取**，一律按来源重建。
-pub const INDEX_VERSION: u8 = 6;
+/// v7（修复后复核 F04/F05）：恢复入口统一校验——plan 与旧扁平字段先
+/// 归一成完整计划再校验；v6 索引可能携带未校验的非法扁平价，**拒绝
+/// 读取**，按来源重建。
+pub const INDEX_VERSION: u8 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -1422,10 +1485,17 @@ impl Pricing {
             by_prefix: PrefixIndex::new(),
         };
         for e in &index.entries {
-            let plan = e.plan.clone().unwrap_or_else(|| PricePlan {
-                base: PriceRates::from_options(e.input, e.output, e.cache_write, e.cache_read),
-                ..Default::default()
-            });
+            // F05：plan 与旧扁平字段统一归一成完整计划后校验——独立恢复
+            // 通道同样不留未校验入口。非法条目跳过（load_cached 已在索引
+            // 级检测非法并整份按来源重建，此处为直接调用的防御性兜底）。
+            let plan = index_entry_plan(e);
+            if price_plan_invalid(&plan) {
+                log::warn!(
+                    "价格索引条目 {} 存在非法单价，已跳过（索引应按来源重建）",
+                    e.display
+                );
+                continue;
+            }
             pricing.add_entry(Entry {
                 prefix: e.prefix.clone(),
                 display: e.display.clone(),
@@ -2047,7 +2117,12 @@ impl Pricing {
         {
             // R06：当前版索引若携带非法数值（历史脏产物），不静默接受——
             // 视为失效，按来源重建并写回干净索引。
-            let has_invalid = index.entries.iter().any(|e| plan_rates_invalid(&e.plan));
+            // F05：plan 与旧扁平字段统一归一成完整计划后校验——不能只判断
+            // Some(plan)；任一条目非法 → 整份索引按来源重建。
+            let has_invalid = index
+                .entries
+                .iter()
+                .any(|e| price_plan_invalid(&index_entry_plan(e)));
             if has_invalid {
                 log::warn!("价格索引含非法单价条目，按来源重建");
                 // 释放锁后走重建路径（含回写干净索引）；下方正常重建逻辑
@@ -5541,6 +5616,82 @@ output = 2.0
 
     // R06 冷启动索引回归已迁至 tests/pricing_index_restart.rs（F07），
     // 理由同 R01：进程内缓存使磁盘篡改在同进程测试中不可观测。
+
+    #[test]
+    fn test_invalid_schedule_rate_rejects_candidate() {
+        // F04：外置时间价非法（nan/inf/-inf/负）→ 拒绝**整条候选**，不得
+        // 把非法规则丢弃后按基础价 $2 完整计费；合法兄弟候选继续参与。
+        let period_bad = |v: &str| {
+            format!(
+                r#"
+[[model]]
+prefix = "bad/sched"
+input = 2.0
+output = 3.0
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "23:59"
+input = {v}
+"#
+            )
+        };
+        for v in ["nan", "inf", "-inf", "-1.0"] {
+            let (p, warnings) = external_entry(&period_bad(v));
+            assert!(
+                p.lookup("sched").is_none(),
+                "时间规则 input={v} 必须拒绝整条候选，不得回基础价 $2"
+            );
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.contains("bad/sched") && w.contains("非法")),
+                "须有定位告警: {warnings:?}"
+            );
+        }
+        // 规则级价格与规则分段同口径：任一显式数值非法 → 整条拒绝
+        let schedule_level = r#"
+[[model]]
+prefix = "bad/sched"
+input = 2.0
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+input = nan
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "23:59"
+input = 1.0
+"#;
+        let schedule_segment_level = r#"
+[[model]]
+prefix = "bad/sched"
+input = 2.0
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "23:59"
+input = 1.0
+[[model.schedule.segment]]
+min_tokens = 1000
+input = -3.0
+"#;
+        for body in [schedule_level, schedule_segment_level] {
+            let (p, _) = external_entry(body);
+            assert!(p.lookup("sched").is_none(), "{body}");
+        }
+        // 同一文件中的合法兄弟候选不受影响
+        let (p, _) = external_entry(&format!(
+            "{}\n[[model]]\nprefix = \"ok/m\"\ninput = 1.0\n",
+            period_bad("nan")
+        ));
+        assert!(p.lookup("sched").is_none());
+        assert!(p.lookup("m").is_some());
+    }
 
     #[test]
     fn test_pricing_corrupt_snapshot_warns() {

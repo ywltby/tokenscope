@@ -594,6 +594,10 @@ pub async fn sync_pricing_openrouter() -> Result<Vec<SyncOutcome>, String> {
         match openrouter::sync(&openrouter_file_path(None)) {
             Ok(r) => {
                 log::info!("OpenRouter 同步成功: {} 条", r.count);
+                // F04：同步丢弃诊断（整条拒绝的模型与分项）沿既有日志路径记录
+                for w in &r.warnings {
+                    log::warn!("OpenRouter 同步丢弃数据: {w}");
+                }
                 reports.push(SyncOutcome {
                     source: "OpenRouter",
                     count: r.count,

@@ -105,6 +105,10 @@ pub struct SyncReport {
     pub count: u64,
     pub path: String,
     pub synced_at: String,
+    /// 同步丢弃诊断（F04：整条拒绝的模型与分项随报告携带，调用方沿
+    /// 既有日志路径记录）。
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Task 7.4：解析价格串；None 表示字段缺失（未知），非负数值才有效。
@@ -163,6 +167,45 @@ pub(crate) fn sync_with(
     let mut entries: Vec<SnapshotEntry> = Vec::new();
     for m in body.data {
         let p = m.pricing.unwrap_or_default();
+        // F04：数值预检先于任何结构性丢弃——原始候选（基础四价 + 每个
+        // override 的四价）任一显式单价非法（NaN/inf/负）→ **整个模型
+        // 拒绝**，不得丢弃脏 override 后让模型按基础价完整计费。诊断沿
+        // 既有告警路径（含模型与分项），随 SyncReport.warnings 携带。
+        let mut invalid: Vec<String> = Vec::new();
+        for (comp, raw) in [
+            ("prompt", &p.prompt),
+            ("completion", &p.completion),
+            ("input_cache_read", &p.input_cache_read),
+            ("input_cache_write", &p.input_cache_write),
+        ] {
+            if let Err(reason) = parse_price(raw) {
+                invalid.push(format!("基础 {comp}: {reason}"));
+            }
+        }
+        for o in &p.overrides {
+            for (comp, raw) in [
+                ("prompt", &o.prompt),
+                ("completion", &o.completion),
+                ("input_cache_read", &o.input_cache_read),
+                ("input_cache_write", &o.input_cache_write),
+            ] {
+                if let Err(reason) = parse_price(raw) {
+                    invalid.push(format!(
+                        "override(min_prompt_tokens={:?}) {comp}: {reason}",
+                        o.min_prompt_tokens
+                    ));
+                }
+            }
+        }
+        if !invalid.is_empty() {
+            rejected += 1;
+            warnings.push(format!(
+                "{}: 存在非法单价，整条模型已拒绝（{}）",
+                m.id,
+                invalid.join("; ")
+            ));
+            continue;
+        }
         // Task 3：条件价格 overrides → 快照档（升序、同阈值去重、脏数据跳过）。
         let mut overrides: Vec<SnapshotOverride> = Vec::new();
         for o in &p.overrides {
@@ -260,6 +303,7 @@ pub(crate) fn sync_with(
         count,
         path: snapshot_path.display().to_string(),
         synced_at,
+        warnings,
     })
 }
 
@@ -385,38 +429,92 @@ mod tests {
     }
 
     #[test]
-    fn test_openrouter_override() {
-        // Task 3：pricing.overrides（min_prompt_tokens 条件价）必须整组
-        // 保留到快照；乱序升序化，同阈值保留首个，脏数据跳过并留 warning。
-        let dir = std::env::temp_dir().join(format!("tokenscope-or-ov-{}", std::process::id()));
+    fn test_invalid_openrouter_override_rejects_model_during_sync() {
+        // F04：override 显式单价非法（"NaN"）→ **整个模型**不入快照——
+        // 不得只丢弃脏 override 后让模型按基础价完整计费；合法兄弟模型
+        // 保留；同步告警包含模型与分项。
+        let dir = std::env::temp_dir().join(format!("tokenscope-f04-or-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("pricing-openrouter.json");
-        let body = r#"{"data":[{
-            "id":"prov/long","name":"Long",
-            "pricing":{
-                "prompt":"0.000004","completion":"0.00002",
+        let body = r#"{"data":[
+            {"id":"prov/bad","name":"Bad","pricing":{
+                "prompt":"0.000002","completion":"0.000003",
                 "overrides":[
-                    {"min_prompt_tokens":1000000,"prompt":"0.000008","completion":"0.00003",
-                     "input_cache_read":"0.0000008","input_cache_write":"0.00001"},
-                    {"min_prompt_tokens":272000,"prompt":"0.000006","completion":"0.000025",
-                     "input_cache_read":"","input_cache_write":null},
-                    {"min_prompt_tokens":272000,"prompt":"0.000099","completion":"0.000099"},
-                    {"min_prompt_tokens":150000,"prompt":"-0.000001","completion":"0.00001"},
-                    {"min_prompt_tokens":100000,"utc_start":"1630","utc_end":"1900",
-                     "prompt":"0.000001","completion":"0.000001"},
-                    {"prompt":"0.000005","completion":"0.000005"}
-                ]
-            }
-        }]}"#;
+                    {"min_prompt_tokens":100000,"prompt":"NaN","completion":"0.000006"},
+                    {"min_prompt_tokens":200000,"prompt":"0.000009","completion":"0.00001"}
+                ]}},
+            {"id":"prov/good","name":"Good","pricing":{"prompt":"0.000002","completion":"0.000003"}}
+        ]}"#;
         let report = sync_with(&path, || {
             Ok(serde_json::from_str::<ApiResponse>(body).unwrap())
         })
         .unwrap();
-        assert_eq!(report.count, 1, "基础价干净 → 条目保留");
+        assert_eq!(report.count, 1, "含非法 override 的模型必须整条拒绝");
         let snap = load_snapshot(&path).unwrap().unwrap();
-        let e = &snap.entries[0];
-        assert_eq!(e.overrides.len(), 2, "负价/时间条件/缺阈值/重复档被剔除");
+        assert_eq!(snap.entries.len(), 1);
+        assert_eq!(snap.entries[0].id, "prov/good", "合法兄弟模型保留");
+        // 同步诊断包含模型与分项（沿既有告警路径，随 SyncReport 携带）
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("prov/bad") && w.contains("prompt")),
+            "告警须含模型与分项: {:?}",
+            report.warnings
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_openrouter_override() {
+        // Task 3：pricing.overrides（min_prompt_tokens 条件价）必须整组
+        // 保留到快照；乱序升序化，同阈值保留首个，结构性脏数据（时间条件/
+        // 缺阈值/重复档）跳过并留 warning。
+        // F04：显式单价非法（负价）的 override → **整个模型拒绝**，不再
+        // "丢弃脏 override 后按基础价计费"。
+        let dir = std::env::temp_dir().join(format!("tokenscope-or-ov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pricing-openrouter.json");
+        let body = r#"{"data":[
+            {"id":"prov/long","name":"Long",
+             "pricing":{
+                 "prompt":"0.000004","completion":"0.00002",
+                 "overrides":[
+                     {"min_prompt_tokens":1000000,"prompt":"0.000008","completion":"0.00003",
+                      "input_cache_read":"0.0000008","input_cache_write":"0.00001"},
+                     {"min_prompt_tokens":272000,"prompt":"0.000006","completion":"0.000025",
+                      "input_cache_read":"","input_cache_write":null},
+                     {"min_prompt_tokens":272000,"prompt":"0.000099","completion":"0.000099"},
+                     {"min_prompt_tokens":100000,"utc_start":"1630","utc_end":"1900",
+                      "prompt":"0.000001","completion":"0.000001"},
+                     {"prompt":"0.000005","completion":"0.000005"}
+                 ]}},
+            {"id":"prov/neg-ov","name":"NegOv",
+             "pricing":{
+                 "prompt":"0.000002","completion":"0.000003",
+                 "overrides":[{"min_prompt_tokens":150000,"prompt":"-0.000001","completion":"0.00001"}]}},
+            {"id":"prov/good","name":"Good","pricing":{"prompt":"0.000002","completion":"0.000003"}}
+        ]}"#;
+        let report = sync_with(&path, || {
+            Ok(serde_json::from_str::<ApiResponse>(body).unwrap())
+        })
+        .unwrap();
+        assert_eq!(report.count, 2, "合法模型保留；负价 override 模型整条拒绝");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("prov/neg-ov") && w.contains("prompt")),
+            "负价 override 须有含模型与分项的告警: {:?}",
+            report.warnings
+        );
+        let snap = load_snapshot(&path).unwrap().unwrap();
+        assert_eq!(snap.entries[0].id, "prov/good");
+        assert_eq!(snap.entries[1].id, "prov/long");
+        let e = &snap.entries[1];
+        assert_eq!(e.overrides.len(), 2, "时间条件/缺阈值/重复档被剔除");
         // 乱序 → 升序；重复 272000 保留首个；空串/null = 未知。
         assert_eq!(e.overrides[0].min_prompt_tokens, 272_000);
         assert_eq!(e.overrides[0].prompt, Some(0.000006));
