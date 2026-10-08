@@ -94,50 +94,36 @@ describe("EventTable（D1 分页 / C2 项目列）", () => {
     expect(projectLabel("my-slug")).toBe("my-slug");
   });
 
-  it("加载更多按钮在还有余量时出现，显示剩余数并 emit load-more", async () => {
+  it("scroll loading forwards remote requests without manual paging", async () => {
     const w = mount(EventTable, {
-      props: { list: list([row()], 3), filterLabel: "", more: true },
+      props: { list: list([row()], 300), filterLabel: "", more: true },
     });
-    expect(w.text()).toContain("加载更多");
-    expect(w.text()).toContain("还剩 2 条");
-    const btn = w.findAll("button").find((b) => b.text().includes("加载更多"));
-    expect(btn).toBeDefined();
-    await btn!.trigger("click");
+    const scroll = w.findComponent({ name: "ScrollList" });
+    expect(scroll.props("more")).toBe(true);
+    expect(scroll.props("total")).toBe(300);
+    scroll.vm.$emit("load-more");
     expect(w.emitted("load-more")).toHaveLength(1);
+    expect(w.findAll("button")).toHaveLength(0);
   });
 
-  it("全部加载后不显示按钮", () => {
-    const w = mount(EventTable, {
-      props: { list: list([row()], 1), filterLabel: "" },
-    });
-    expect(w.text()).not.toContain("加载更多");
+  it("complete lists do not request another page", () => {
+    const w = mount(EventTable, { props: { list: list([row()], 1), filterLabel: "" } });
+    expect(w.findComponent({ name: "ScrollList" }).props("more")).toBe(false);
   });
 
-  // RC02：没有分页资格（恢复视图 / 新批次首页尚未成功）时按钮禁用并给出
-  // 可见原因——不允许"点击无反馈"。
-  it("more_blocked_hint_disables_button_with_visible_reason", async () => {
+  it("blocked pagination remains visible and reaches the scroll loader", async () => {
     const w = mount(EventTable, {
       props: {
-        list: list([row()], 3),
+        list: list([row()], 300),
         filterLabel: "",
         more: true,
-        moreBlockedHint: "刷新完成后可继续加载",
+        moreBlockedHint: "refresh required",
       },
     });
-    const btn = w.findAll("button").find((b) => b.text().includes("加载更多"));
-    expect(btn).toBeDefined();
-    expect((btn!.element as HTMLButtonElement).disabled).toBe(true);
-    expect(btn!.attributes("title")).toBe("刷新完成后可继续加载");
-    // 原因在界面上可见（不只靠 title）
-    expect(w.text()).toContain("刷新完成后可继续加载");
-    await btn!.trigger("click");
-    expect(w.emitted("load-more")).toBeUndefined();
-
-    // 有分页资格时按钮恢复可用、无原因提示
+    expect(w.text()).toContain("refresh required");
+    expect(w.findComponent({ name: "ScrollList" }).props("blocked")).toBe("refresh required");
     await w.setProps({ moreBlockedHint: undefined });
-    const btn2 = w.findAll("button").find((b) => b.text().includes("加载更多"))!;
-    expect((btn2.element as HTMLButtonElement).disabled).toBe(false);
-    expect(w.text()).not.toContain("刷新完成后可继续加载");
+    expect(w.text()).not.toContain("refresh required");
   });
 });
 

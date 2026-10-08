@@ -5,6 +5,7 @@ import { AGENT_LABEL, fmtNum, type Group, type SummaryReport } from "../types";
 import { formatMoney } from "../lib/formatMoney";
 import { tokenBucketLabel } from "../lib/tokenDisplay";
 import { buildSourceLines } from "../lib/statsView";
+import ScrollList from "./ScrollList.vue";
 
 const props = defineProps<{ report: SummaryReport }>();
 const emit = defineEmits<{ (e: "row-click", key: string): void }>();
@@ -138,17 +139,21 @@ const sourceLines = computed(() =>
     <div class="card-head">
       <span class="card-title">聚合</span>
     </div>
-    <NDataTable
-      :columns="columns"
-      :data="rows"
-      :row-key="rowKey"
-      :row-class-name="rowClass"
-      :row-props="rowProps"
-      size="small"
-      :bordered="false"
-      table-layout="auto"
-      class="ts-auto-table"
-    />
+    <ScrollList :rows="rows" label="聚合列表">
+      <template #default="{ rows: visibleRows }">
+        <NDataTable
+          :columns="columns"
+          :data="visibleRows"
+          :row-key="rowKey"
+          :row-class-name="rowClass"
+          :row-props="rowProps"
+          size="small"
+          :bordered="false"
+          table-layout="auto"
+          class="ts-auto-table"
+        />
+      </template>
+    </ScrollList>
     <div class="table-hint">点击行（或聚焦后按 Enter）可下钻到请求明细。</div>
     <div v-if="report.totals.unknown_pricing" class="table-note">
       † 费用为估算，仅含已计价部分：无价格模型的全部用量、或价格快照缺分项价

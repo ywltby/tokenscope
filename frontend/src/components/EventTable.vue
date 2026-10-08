@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, h, ref } from "vue";
-import { NButton, NDataTable, NTag, NTooltip, type DataTableColumn } from "naive-ui";
+import { NDataTable, NTag, NTooltip, type DataTableColumn } from "naive-ui";
 import { AGENT_LABEL, fmtNum, projectLabel, type EventList } from "../types";
 import { formatMoney } from "../lib/formatMoney";
 import { tokenBucketLabel } from "../lib/tokenDisplay";
 import CostBreakdownTooltip from "./CostBreakdownTooltip.vue";
+import ScrollList from "./ScrollList.vue";
 
 const props = defineProps<{
   list: EventList;
@@ -34,7 +35,6 @@ function closeRowTip(key: string): void {
   if (focusKey.value === key) focusKey.value = null;
   if (pinnedKey.value === key) pinnedKey.value = null;
 }
-const remaining = () => props.list.total - props.list.rows.length;
 
 // UX07：请求金额走单一入口（含 $、微小非零保护）；列头不再带 $。
 function fmtPrice(v: number): string {
@@ -185,33 +185,32 @@ const rowKey = (r: object): string => asRow(r).cursor;
         <span aria-hidden="true" class="chip-close">×</span>
       </button>
     </div>
-    <NDataTable
-      :columns="columns"
-      :data="props.list.rows"
-      :row-key="rowKey"
-      size="small"
-      :bordered="false"
-      table-layout="auto"
-      class="ts-auto-table ts-auto-table-events"
-    />
+    <ScrollList
+      :rows="props.list.rows"
+      :total="props.list.total"
+      :more="more"
+      :loading="moreLoading"
+      :blocked="moreBlockedHint"
+      label="请求明细列表"
+      class="ts-auto-table-events"
+      @load-more="emit('load-more')"
+    >
+      <template #default="{ rows }">
+        <NDataTable
+          :columns="columns"
+          :data="rows"
+          :row-key="rowKey"
+          size="small"
+          :bordered="false"
+          table-layout="auto"
+          class="ts-auto-table"
+        />
+      </template>
+    </ScrollList>
     <div class="table-hint">
       共 {{ fmtNum(props.list.total) }} 条（时间倒序）· 已加载
       {{ fmtNum(props.list.rows.length) }} 条
       <template v-if="props.filterLabel">· 筛选：{{ props.filterLabel }}</template>
-    </div>
-    <div v-if="props.more" class="load-more-row">
-      <NButton
-        size="tiny"
-        :loading="props.moreLoading"
-        :disabled="!!props.moreBlockedHint"
-        :title="props.moreBlockedHint"
-        @click="emit('load-more')"
-      >
-        加载更多（还剩 {{ fmtNum(remaining()) }} 条）
-      </NButton>
-      <span v-if="props.moreBlockedHint" class="load-more-hint" role="status">
-        {{ props.moreBlockedHint }}
-      </span>
     </div>
   </section>
 </template>

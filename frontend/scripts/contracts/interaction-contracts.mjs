@@ -147,16 +147,20 @@ const IMPL = {
       await gotoPage(session.page, "设置");
       const elapsed = Date.now() - start;
       const rows = await session.page.locator('.ts-auto-table-pricing tbody tr').count();
-      ctx.record(name, "8466 条价格数据只渲染当前页", rows > 0 && rows <= 50, `rendered=${rows}, navigation=${elapsed}ms`);
+      ctx.record(name, "8466 条价格首批只渲染 200 行", rows === 200, `rendered=${rows}, navigation=${elapsed}ms`);
       ctx.record(name, "进入设置在 3 秒内完成", elapsed < 3000, `${elapsed}ms`);
-      if (rows <= 50) {
-        await session.page.getByRole('button', { name: '下一页价格', exact: true }).click();
-        await session.page.waitForTimeout(200);
+      if (rows === 200) {
+        const viewport = session.page.getByRole('region', { name: '价格列表', exact: true });
+        await viewport.scrollIntoViewIfNeeded();
+        await viewport.focus();
+        await session.page.keyboard.press('Control+End');
+        await session.page.waitForTimeout(1000);
         const text = await session.page.locator('.ts-auto-table-pricing').innerText();
-        ctx.record(name, "下一页显示后续记录", text.includes('synthetic-model-50') && !text.includes('synthetic-model-0\n'), text.slice(0, 150));
+        const appended = await session.page.locator('.ts-auto-table-pricing tbody tr').count();
+        ctx.record(name, "滚动近底部自动追加下一批", appended === 400 && text.includes('synthetic-model-200'), `rendered=${appended}`);
         await gotoPage(session.page, "汇总");
         await gotoPage(session.page, "设置");
-        ctx.record(name, "往返后仍可进入并保留当前页", (await session.page.locator('.ts-auto-table-pricing').innerText()).includes('synthetic-model-50'), "第二页保留");
+        ctx.record(name, "往返后仍可进入且无手动分页", await session.page.locator('.pricing-pagination').count() === 0, "刷新数据后从首批开始");
         await ctx.shot(name, session, "page2");
       }
     } finally { await session.close(); }
@@ -623,14 +627,15 @@ const IMPL = {
       const page = session.page;
       const beginsBefore = session.ipcCalls.filter((x) => x.cmd === "query_begin").length;
       const rowsBefore = await page.locator(".n-data-table .n-data-table-tr").count();
-      const more = page.locator("button", { hasText: "加载更多" }).first();
+      const more = page.getByRole('region', { name: '请求明细列表', exact: true });
       ctx.record(
         "expired_query_recovers_as_one_new_batch",
-        "首页成功后提供可点击的加载更多",
+        "首页使用自动滚动加载容器",
         (await more.count()) > 0,
-        `加载更多按钮数=${await more.count()}（首页行数=${rowsBefore}）`,
+        `自动加载容器数=${await more.count()}（首页行数=${rowsBefore}）`,
       );
-      await more.click();
+      await more.focus();
+      await page.keyboard.press('Control+End');
       await page.waitForTimeout(600);
       const text = await page.locator("#app").innerText();
       ctx.record(
