@@ -75,6 +75,9 @@ struct RolloutPayload {
     // event_msg/token_count
     #[serde(default)]
     info: Option<TokenInfo>,
+    // 额度更新也复用 token_count，此时 info 为 null；不参与用量计量。
+    #[serde(default)]
+    rate_limits: Option<serde_json::Value>,
 }
 
 #[derive(Default, Deserialize)]
@@ -214,6 +217,16 @@ fn ingest_token_count(
             return;
         }
     };
+    // 仅额度通知没有请求用量。只放行对象形态，缺损的 info 或非法时间戳
+    // 仍走坏行诊断；有 info 时绝不能用 rate_limits 掩盖缺失的 usage。
+    if payload.info.is_none()
+        && payload
+            .rate_limits
+            .as_ref()
+            .is_some_and(serde_json::Value::is_object)
+    {
+        return;
+    }
     let Some(u) = payload
         .info
         .as_ref()
@@ -323,6 +336,48 @@ mod tests {
         format!(
             r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":{input},"output_tokens":{output},"cached_input_tokens":{cached},"cache_write_input_tokens":{cw},"reasoning_output_tokens":0,"total_tokens":{total}}}}}}}}}"#
         )
+    }
+
+    #[test]
+    fn test_codex_rate_limit_only_preserves_usage() {
+        let parsed = CodexSource::new(fixture("")).parse_file(&fixture("rate-limit-only.jsonl"));
+        assert_eq!(parsed.stats.bad_lines, 0);
+        assert_eq!(parsed.stats.lines_seen, 5);
+        assert_eq!(parsed.events.len(), 2);
+        assert_eq!(parsed.events[0].input_tokens, 10);
+        assert_eq!(parsed.events[0].output_tokens, 5);
+        assert_eq!(parsed.events[1].input_tokens, 20);
+        assert_eq!(parsed.events[1].output_tokens, 7);
+        assert!(
+            parsed
+                .events
+                .iter()
+                .all(|e| e.model == "synthetic-model" && e.session_id == "synthetic-rate-limit")
+        );
+    }
+
+    #[test]
+    fn test_codex_rate_limits_do_not_hide_malformed_usage() {
+        for payload in [
+            serde_json::json!({"info": {}, "rate_limits": {}}),
+            serde_json::json!({"info": {"last_token_usage": null}, "rate_limits": {}}),
+            serde_json::json!({"info": null}),
+            serde_json::json!({"info": null, "rate_limits": null}),
+            serde_json::json!({"info": null, "rate_limits": 0}),
+            serde_json::json!({"info": null, "rate_limits": []}),
+            serde_json::json!({"info": {"last_token_usage": {"input_tokens": -1}}, "rate_limits": {}}),
+        ] {
+            let mut payload = payload;
+            payload["type"] = serde_json::json!("token_count");
+            let line = serde_json::json!({"timestamp": "2026-07-17T15:03:00Z", "type": "event_msg", "payload": payload}).to_string();
+            let col = collect_lines(std::slice::from_ref(&line));
+            assert_eq!(col.stats.bad_lines, 1, "{line}");
+            assert!(col.events.is_empty());
+        }
+        let col = collect_lines(&[
+            serde_json::json!({"timestamp": "invalid", "type": "event_msg", "payload": {"type": "token_count", "info": null, "rate_limits": {}}}).to_string(),
+        ]);
+        assert_eq!(col.stats.bad_lines, 1);
     }
 
     #[test]

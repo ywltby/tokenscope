@@ -34,7 +34,8 @@ pub struct CacheStats {
 /// 规范化文件路径——旧 v3 行无 root 维度，整体失效重建。
 /// SF08：恢复路径新增桶边界校验——旧版本缓存可能存有越界事件，
 /// 递增版本整体清空重建（源日志不删）。
-const SCHEMA_VERSION: &str = "5";
+/// v6 = Codex 仅额度通知不再计坏行，重解析以清除旧 bad_lines 误报。
+const SCHEMA_VERSION: &str = "6";
 
 fn fingerprint(size: u64, mtime_ms: i64) -> (i64, i64) {
     // u64 → i64 存库；实际文件大小远小于 i64 上限。
@@ -505,9 +506,9 @@ mod tests {
             .unwrap();
         assert_eq!(c.stats().unwrap().events, 2);
         drop(c);
-        // 模拟旧版本缓存：把版本号改回 "1"。
+        // 模拟 v5 缓存：仅额度通知的误报也必须随版本升级清除。
         let raw = rusqlite::Connection::open(&path).unwrap();
-        raw.execute("UPDATE meta SET value='1' WHERE key='schema_version'", [])
+        raw.execute("UPDATE meta SET value='5' WHERE key='schema_version'", [])
             .unwrap();
         drop(raw);
         let c = Cache::open(&path).unwrap();

@@ -40,6 +40,10 @@ Anthropic Messages API 的 usage 四字段本身就是互斥桶，逐一映射�
 是线程级**累计回显**（含 `response_id`/`turn_id` 但值非单请求口径），一律
 忽略并计数（双计防线）。
 
+`token_count` 也用于额度状态通知：当 `info` 为空且 `rate_limits` 为对象时，
+校验时间戳后跳过，不计坏行、不产生请求或费用。`info` 存在但缺少
+`last_token_usage` 的记录仍计坏行；额度状态不能用于推算 token 用量。
+
 **字段语义（R02 已查证，2026-10-05）**：OpenAI Responses API 的
 `input_tokens` 是**总量桶**，`input_tokens_details.cached_tokens` 与
 `cache_write_tokens` 均为其子集。官方文档示例：
