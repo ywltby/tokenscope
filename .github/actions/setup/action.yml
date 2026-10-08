@@ -1,0 +1,31 @@
+name: Setup toolchains
+description: Locked frontend dependencies and cached Rust workspaces
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      with:
+        toolchain: stable
+        components: rustfmt, clippy
+        targets: x86_64-pc-windows-msvc
+    - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      with:
+        version: 11
+    - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      with:
+        node-version: 22
+        cache: pnpm
+        cache-dependency-path: frontend/pnpm-lock.yaml
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version: '3.12'
+    - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      with:
+        workspaces: |
+          . -> target
+          src-tauri -> target
+        key: ${{ github.job }}
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+    - name: Install frontend dependencies
+      shell: pwsh
+      run: pnpm --dir frontend install --frozen-lockfile
