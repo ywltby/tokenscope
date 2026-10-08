@@ -214,6 +214,14 @@ const MEASURE = () => {
     title: el.getAttribute("title"),
     text: el.innerText.trim(),
     hasIcon: !!el.querySelector("svg"),
+    centerOffset: (() => {
+      const button = el.getBoundingClientRect();
+      const icon = el.querySelector("svg")?.getBoundingClientRect();
+      return icon ? {
+        x: icon.left + icon.width / 2 - button.left - button.width / 2,
+        y: icon.top + icon.height / 2 - button.top - button.height / 2,
+      } : null;
+    })(),
   }));
 
   const tableTypography = (sel) => {
@@ -468,6 +476,12 @@ function buildChecks(m, ctx) {
       m.iconFilters.length === 4 && m.iconFilters.every((c) =>
         c.hasIcon && c.text === "" && !!c.name && c.name === c.title),
       JSON.stringify(m.iconFilters),
+    ]);
+    checks.push([
+      "filter_icons_are_centered_in_buttons",
+      m.iconFilters.length === 4 && m.iconFilters.every((c) =>
+        c.centerOffset && Math.abs(c.centerOffset.x) <= 0.5 && Math.abs(c.centerOffset.y) <= 0.5),
+      JSON.stringify(m.iconFilters.map((c) => ({ name: c.name, offset: c.centerOffset }))),
     ]);
     checks.push([
       "filter_controls_have_equal_outer_height",

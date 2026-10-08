@@ -157,6 +157,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .ts-segmented-item.is-icon-only {
+  display: inline-flex;
+  align-items: center;
   width: 32px;
   padding: 0;
   justify-content: center;
