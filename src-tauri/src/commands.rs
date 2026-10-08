@@ -1019,6 +1019,46 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// AP03：设置损坏时重建必须**在读取阶段**失败——已有缓存保留，
+    /// 不能留下一个被清空、又没有新数据的缓存。
+    #[test]
+    fn invalid_settings_does_not_clear_cache_on_rebuild() {
+        let dir = tmp_dir("ap03-invalid-keeps-cache");
+        let cache_dir = dir.join("cache");
+        // 先用有效来源建一次真实缓存（隔离目录 + 注入价格路径与快照）。
+        let claude = dir.join("claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(
+            claude.join("s.jsonl"),
+            r#"{"type":"assistant","timestamp":"2026-08-01T10:00:00.000Z","sessionId":"c1","message":{"id":"m1","model":"claude-sonnet-4-5","usage":{"input_tokens":100,"output_tokens":10}}}"#,
+        )
+        .unwrap();
+        let opts = tokenscope::report::SummaryOptions {
+            by: GroupBy::Day,
+            claude_dir: Some(claude),
+            codex_enabled: Some(false),
+            cache_dir: Some(cache_dir.clone()),
+            pricing_index: Some(dir.join("idx.json")),
+            openrouter_path: Some(dir.join("or.json")),
+            modelsdev_path: Some(dir.join("md.json")),
+            tz: Some("Asia/Shanghai".to_string()),
+            refresh: true,
+            ..Default::default()
+        };
+        let before = rebuild_cache_impl(&opts).unwrap();
+        assert_eq!(before.events, 1, "基线：缓存里已有 1 条事件");
+
+        // 配置损坏：重建入口在读取阶段拒绝（先于任何清理/扫描）
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, "not [valid toml").unwrap();
+        assert!(rebuild_opts(tokenscope::settings::load(&path)).is_err());
+
+        let after = cache_stats_impl(Some(cache_dir)).unwrap();
+        assert_eq!(after.files, before.files, "重建失败不得清空已有缓存");
+        assert_eq!(after.events, before.events);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn test_parse_by_valid() {
         assert!(matches!(parse_by("day"), Ok(GroupBy::Day)));

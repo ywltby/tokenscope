@@ -1457,6 +1457,7 @@ describe("Settings 价格同步（RC04）", () => {
 describe("Settings 写入生命周期与晚到失败（AP04）", () => {
   type Vm = SettingsVm & {
     saveSource: (agent: string) => Promise<void>;
+    setSourceDir: (id: string, v: string) => void;
     syncPricing: () => Promise<void>;
     rebuild: () => Promise<void>;
   };
@@ -1499,6 +1500,7 @@ describe("Settings 写入生命周期与晚到失败（AP04）", () => {
       }
       if (cmd === "settings_set_close_action") return Promise.resolve("quit");
       if (cmd === "settings_set_price_auto_sync") return Promise.resolve(false);
+      if (cmd === "source_config_set") return Promise.resolve({ enabled: true, dir: "C:/saved" });
       return cmds(cmd);
     });
     const w = mount(Settings);
@@ -1512,18 +1514,21 @@ describe("Settings 写入生命周期与晚到失败（AP04）", () => {
     await flushPromises();
     expect(settingsCalls).toBe(2);
 
-    // 挂起期间用户保存关闭动作与自动同步，均成功
+    // 挂起期间用户保存来源、关闭动作与自动同步，均成功
+    vm.setSourceDir("claude", "C:/saved");
+    await vm.saveSource("claude");
     await vm.setCloseAction("quit");
     await vm.setAutoSync(false);
     expect(vm.closeAction).toBe("quit");
     expect(vm.autoSync).toBe(false);
 
-    // 旧读取以失败结束：不得把已保存的值降级成"未知"，也不得显示旧错误
+    // 旧读取以失败结束：三类已保存状态都不得被降级或回退
     secondRead.reject(new Error("旧读取失败"));
     await flushPromises();
     expect(vm.closeAction, "晚到的失败读取不得覆盖已保存的关闭动作").toBe("quit");
     expect(vm.closeActionKnown, "已确认的状态不得被旧失败改回未知").toBe(true);
     expect(vm.autoSync, "晚到的失败读取不得把已保存的自动同步重置为未知").toBe(false);
+    expect(vm.drafts.claude?.dir, "晚到的失败读取不得回退来源草稿").toBe("C:/saved");
     expect(w.text(), "不得把旧读取的失败当成当前状态").not.toContain("旧读取失败");
     w.unmount();
   });

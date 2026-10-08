@@ -191,20 +191,48 @@ function partialBreakdown(costUsd) {
 const pricingStatusOk = {
   modelsdevAvailable: true,
   modelsdevCount: 42,
+  modelsdevValidCount: 42,
   modelsdevSyncedAt: AS_OF,
   openrouterAvailable: true,
+  openrouterValidCount: 8,
   externalCount: 5,
+  externalValidCount: 5,
   hasAnyPricing: true,
   needsSync: false,
   warnings: [],
 };
 
+/** 主源缺失且**完全无价**：要清空所有可用价格计数（横幅才可以宣称"仅能显示为未知"）。 */
 const pricingStatusNeedsSync = {
   ...pricingStatusOk,
   modelsdevAvailable: false,
   modelsdevCount: 0,
+  modelsdevValidCount: 0,
+  openrouterAvailable: false,
+  openrouterValidCount: 0,
+  externalCount: 0,
+  externalValidCount: 0,
   hasAnyPricing: false,
   needsSync: true,
+};
+
+/**
+ * AP05：主源缺失但**仍有可用价格**——needsSync=true 只说明主源没有有效候选，
+ * 不等于"没有任何价格"。两种子态用来区分横幅不能只按 needsSync 下结论：
+ * 只有外置价格表 / 只有 OpenRouter。
+ */
+const pricingStatusNeedsSyncExternalOnly = {
+  ...pricingStatusNeedsSync,
+  externalCount: 5,
+  externalValidCount: 5,
+  hasAnyPricing: true,
+};
+
+const pricingStatusNeedsSyncOpenrouterOnly = {
+  ...pricingStatusNeedsSync,
+  openrouterAvailable: true,
+  openrouterValidCount: 8,
+  hasAnyPricing: true,
 };
 
 const sourceStatusReady = [
@@ -215,6 +243,26 @@ const sourceStatusReady = [
     exists: true,
     files: 12,
     state: "ready",
+  },
+  {
+    agent: "codex",
+    dir: "C:/Users/dev/.codex/sessions",
+    enabled: true,
+    exists: true,
+    files: 4,
+    state: "ready",
+  },
+];
+
+/** AP06：目录尚未修好时的来源状态（触发"数据目录不存在"通知）。 */
+const sourceStatusMissing = [
+  {
+    agent: "claude-code",
+    dir: "C:/Users/dev/.claude/projects",
+    enabled: true,
+    exists: false,
+    files: 0,
+    state: "missing",
   },
   {
     agent: "codex",
@@ -578,7 +626,14 @@ export function buildFixture(name) {
   }
 
   // 可变状态（错误恢复类 fixture 需要"第一次失败、重试成功"）
-  const state = { settingsGets: 0, syncRuns: 0, statusReads: 0 };
+  const state = {
+    settingsGets: 0,
+    syncRuns: 0,
+    statusReads: 0,
+    sourceReads: 0,
+    sourceWrites: 0,
+    closeWrites: 0,
+  };
 
   /** 设置读取响应（按 cfg.settings 模式）。 */
   function settingsResponse() {
@@ -592,6 +647,17 @@ export function buildFixture(name) {
         sources: {
           claude: { enabled: true, dir: "C:/restored/claude" },
           codex: { enabled: false, dir: "C:/restored/codex" },
+        },
+      };
+    }
+    if (cfg.settings === "close-quit") {
+      // AP04：已确认的关闭动作（quit）——用于"写入失败必须回退到已确认值"。
+      return {
+        close_action: "quit",
+        price_auto_sync: true,
+        sources: {
+          claude: { enabled: true, dir: "C:/confirmed/claude" },
+          codex: { enabled: false, dir: "C:/confirmed/codex" },
         },
       };
     }
@@ -634,18 +700,39 @@ export function buildFixture(name) {
           // 同步前：还没有可用价格；同步后：主源已可用（needsSync=false）。
           return state.syncRuns > 0 ? { ...pricingStatusOk } : { ...pricingStatusNeedsSync };
         }
+        // AP05：按 DTO 区分横幅状态——needsSync 与 hasAnyPricing 是两个独立维度。
+        if (cfg.pricing === "needs-sync-external-only")
+          return { ...pricingStatusNeedsSyncExternalOnly };
+        if (cfg.pricing === "needs-sync-openrouter-only")
+          return { ...pricingStatusNeedsSyncOpenrouterOnly };
+        if (cfg.pricing === "none-available") return { ...pricingStatusNeedsSync };
         return pricingStatusOk;
       }
-      case "source_status":
+      case "source_status": {
+        state.sourceReads += 1;
+        // AP06：首次检测失败 / 目录尚未修好 → 用户重试或手动刷新后必须重查。
+        if (cfg.sourceStatus === "fail-then-ready") {
+          if (state.sourceReads === 1) return reject("来源状态读取失败（合成）");
+          return sourceStatusReady;
+        }
+        if (cfg.sourceStatus === "missing-then-ready") {
+          return state.sourceReads === 1 ? sourceStatusMissing : sourceStatusReady;
+        }
         return cfg.kind === "long" ? sourceStatusLong : sourceStatusReady;
+      }
       case "view_cache_load":
         return cfg.viewCache ?? null;
       case "view_cache_save":
         return null;
       case "settings_get":
         return settingsResponse();
-      case "settings_set_close_action":
+      case "settings_set_close_action": {
+        state.closeWrites += 1;
+        // AP04：写入被后端拒绝（不是读取失败）——界面必须回退到已确认值。
+        if (cfg.closeWrite === "fail-then-ok" && state.closeWrites === 1)
+          return reject("写入设置失败：磁盘不可写（合成）");
         return null;
+      }
       case "settings_set_price_auto_sync":
         return args?.enabled ?? true;
       case "cache_stats":
@@ -657,8 +744,13 @@ export function buildFixture(name) {
         return false;
       case "autostart_set":
         return true;
-      case "source_config_set":
+      case "source_config_set": {
+        state.sourceWrites += 1;
+        // AP04/Task 2：后端按行拒绝（目录冲突）——错误必须只归属该来源行。
+        if (cfg.sourceWrite === "fail-then-ok" && state.sourceWrites === 1)
+          return reject("来源目录冲突：两个启用的来源不能指向同一目录（合成）");
         return null;
+      }
       case "sync_pricing_openrouter": {
         state.syncRuns += 1;
         if (cfg.sync === "fail") return reject("OpenRouter: 同步失败（合成）");
@@ -727,6 +819,21 @@ const SCENARIOS = {
   "query-expired-on-page2": { kind: "normal", pageSize: 2, expireAfterPages: 1 },
   // RC09：状态读取失败（不谎称部分成功）+ 价格列表读取失败
   "status-read-failure": { kind: "normal", statusFails: true },
+  // AP04：来源保存被后端拒绝（目录冲突）→ 错误只归属该行、输入保留、重试成功
+  "source-save-rejected": { kind: "normal", sourceWrite: "fail-then-ok" },
+  // AP04：关闭动作写入被拒绝 → 界面回退到已确认值（quit），错误可见可重试
+  "close-action-write-failure": { kind: "normal", settings: "close-quit", closeWrite: "fail-then-ok" },
+  // AP04：挂起的 settings_get 以 reject 结束 → 不得把已保存值降级成"未知"
+  "settings-late-failure-after-save": { kind: "normal", settings: "defer-second-read" },
+  // AP06：来源检测首次拒绝 → 错误条重试成功后来源状态就绪，汇总不受影响
+  "source-status-failure-then-ready": { kind: "normal", sourceStatus: "fail-then-ready" },
+  // AP06：目录从 missing 变 ready → 手动刷新重查来源状态，旧通知消失
+  "source-status-missing-then-ready": { kind: "normal", sourceStatus: "missing-then-ready" },
+  // AP05：needsSync=true 但**有**可用价格（只有外置价格表 / 只有 OpenRouter）
+  "pricing-needs-sync-external-only": { kind: "normal", pricing: "needs-sync-external-only" },
+  "pricing-needs-sync-openrouter-only": { kind: "normal", pricing: "needs-sync-openrouter-only" },
+  // AP05：主源缺失且完全无价 → 这才是"当前费用仅能显示为未知"
+  "pricing-none-available": { kind: "normal", pricing: "none-available" },
 };
 
 export const FIXTURE_NAMES = Object.keys(SCENARIOS);

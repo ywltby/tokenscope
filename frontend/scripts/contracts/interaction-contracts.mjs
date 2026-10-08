@@ -26,6 +26,12 @@ export const REQUIRED_CONTRACTS = [
   "chart_scroll_and_zoom_survive_supported_updates",
   "real_app_scroll_keeps_navigation_visible",
   "prepaint_theme_has_correct_canvas",
+  // AP08 扩充失败反例（写出失败的写、晚到的失败读、来源检测失败、定价 DTO 分态）
+  "source_save_rejected_error_is_row_scoped",
+  "close_action_write_failure_rolls_back_to_confirmed",
+  "late_failed_settings_read_does_not_downgrade_saved",
+  "source_status_failure_recovers_without_losing_summary",
+  "pricing_banner_distinguishes_dto_states",
 ];
 
 const VIEWPORTS = {
@@ -88,6 +94,14 @@ function retryButtonIn(session, text) {
 
 function noticeWith(session, text) {
   return session.page.locator(".ts-notice").filter({ hasText: text }).first();
+}
+
+/** 设置页某个来源行（按可见来源名过滤，例如 "Claude Code" / "Codex"）。 */
+function sourceBlockOf(page, label) {
+  return page
+    .locator(".source-block")
+    .filter({ hasText: label })
+    .first();
 }
 
 /** 浮层是否真实可见（沿祖先链看 display，不能只看元素存在）。 */
@@ -1469,6 +1483,452 @@ const IMPL = {
           `settled=${settled.theme} 未知命令=${session.unknownCommands.join(",") || "无"} 外联=${session.externalRequests.length}`,
         );
         await ctx.shot("prepaint_theme_has_correct_canvas", session, `${c.label}-settled`);
+        ctx.finishSession(session);
+      } finally {
+        await session.close();
+      }
+    }
+  },
+
+  /**
+   * AP04：来源保存被后端拒绝（目录冲突）——错误只归属该来源行、用户输入保留、
+   * 全程不弹成功提示；修好后重试保存成功，行内错误消失并出现成功提示。
+   */
+  async source_save_rejected_error_is_row_scoped(ctx) {
+    const session = await ctx.open({
+      fixture: "source-save-rejected",
+      viewport: VIEWPORTS.desktop,
+      theme: "light",
+    });
+    try {
+      await openSettings(session);
+      const page = session.page;
+      const claude = sourceBlockOf(page, "Claude Code");
+      const codex = sourceBlockOf(page, "Codex");
+      const input = page.locator('[aria-label="Claude Code 日志目录"]').first();
+      ctx.record(
+        "source_save_rejected_error_is_row_scoped",
+        "两行来源都已渲染（错误归属可区分的前提）",
+        (await claude.count()) === 1 && (await codex.count()) === 1,
+        `Claude 行=${await claude.count()} Codex 行=${await codex.count()}`,
+      );
+
+      await input.fill("D:/conflict");
+      await page.waitForTimeout(150);
+      const messagesBefore = await page.locator(".n-message").allInnerTexts();
+      await realClick(page, claude.locator("button", { hasText: "保存" }));
+      await page.waitForTimeout(700);
+
+      const writes = session.ipcCalls.filter((x) => x.cmd === "source_config_set");
+      ctx.record(
+        "source_save_rejected_error_is_row_scoped",
+        "保存真的按行写入（携带用户当前输入）",
+        writes.length === 1 && writes[0].args?.dir === "D:/conflict",
+        writes.map((w) => `${w.args?.agent}:${w.args?.dir}`).join(" | ") || "无写入",
+      );
+
+      const claudeErrCount = await claude.locator(".source-error").count();
+      const claudeErrText = claudeErrCount
+        ? await claude.locator(".source-error").first().innerText()
+        : "";
+      const codexErrCount = await codex.locator(".source-error").count();
+      ctx.record(
+        "source_save_rejected_error_is_row_scoped",
+        "拒绝原因只显示在被拒的来源行（不跨行重复渲染）",
+        claudeErrCount === 1 &&
+          claudeErrText.includes("来源目录冲突") &&
+          codexErrCount === 0 &&
+          !(await codex.innerText()).includes("来源目录冲突"),
+        `Claude 行错误=${claudeErrCount} 文本="${claudeErrText.replace(/\n/g, " ").slice(0, 60)}"；Codex 行错误=${codexErrCount}`,
+      );
+
+      const keptValue = await input.inputValue();
+      ctx.record(
+        "source_save_rejected_error_is_row_scoped",
+        "被拒后保留用户输入（可直接修改后重试）",
+        keptValue === "D:/conflict",
+        `输入框值=${keptValue}`,
+      );
+
+      const messagesAfterFail = await page.locator(".n-message").allInnerTexts();
+      ctx.record(
+        "source_save_rejected_error_is_row_scoped",
+        "拒绝路径不弹成功提示（也不伪造已保存）",
+        messagesAfterFail.every((t) => !t.includes("已保存")) &&
+          messagesAfterFail.length <= messagesBefore.length,
+        `消息=${messagesAfterFail.join(" | ") || "无"}`,
+      );
+
+      await realClick(page, claude.locator("button", { hasText: "保存" }));
+      await page.waitForTimeout(900);
+      const afterRetry = await claude.locator(".source-error").count();
+      const messagesAfterOk = await page.locator(".n-message").allInnerTexts();
+      ctx.record(
+        "source_save_rejected_error_is_row_scoped",
+        "重试保存成功后错误消失并给出成功提示",
+        afterRetry === 0 &&
+          messagesAfterOk.some((t) => t.includes("已保存 Claude Code 来源配置")) &&
+          (await input.inputValue()) === "D:/conflict",
+        `重试后错误=${afterRetry}；提示=${messagesAfterOk.join(" | ") || "无"}；输入=${await input.inputValue()}`,
+      );
+
+      await ctx.shot("source_save_rejected_error_is_row_scoped", session, "row-scoped");
+      ctx.finishSession(session);
+    } finally {
+      await session.close();
+    }
+  },
+
+  /**
+   * AP04：关闭动作写入被后端拒绝——界面不得停留在一个并未写入的选择上
+   *（回退到已确认值），错误可见，再次选择可重试成功。
+   */
+  async close_action_write_failure_rolls_back_to_confirmed(ctx) {
+    const session = await ctx.open({
+      fixture: "close-action-write-failure",
+      viewport: VIEWPORTS.desktop,
+      theme: "light",
+    });
+    try {
+      await openSettings(session);
+      const page = session.page;
+      const select = page.locator('[aria-label="关闭窗口时"]').first();
+      const shown = async () => (await select.innerText()).replace(/\s+/g, "");
+      ctx.record(
+        "close_action_write_failure_rolls_back_to_confirmed",
+        "已确认的关闭动作先被正确显示（回退目标）",
+        (await shown()).includes("直接退出"),
+        `当前显示=${await shown()}`,
+      );
+
+      // 真实交互：打开下拉并选择"最小化到托盘"（第一次写入会被拒绝）
+      await realClick(page, select);
+      await page.waitForTimeout(200);
+      const option = page.locator(".n-base-select-option").filter({ hasText: "最小化到托盘" }).first();
+      ctx.record(
+        "close_action_write_failure_rolls_back_to_confirmed",
+        "下拉提供可选的关闭动作",
+        (await option.count()) > 0,
+        `选项数=${await option.count()}`,
+      );
+      await option.click({ timeout: 10000 });
+      await page.waitForTimeout(800);
+
+      const writes = session.ipcCalls.filter((x) => x.cmd === "settings_set_close_action");
+      ctx.record(
+        "close_action_write_failure_rolls_back_to_confirmed",
+        "选择真的发起了写入（action=minimize）",
+        writes.length === 1 && writes[0].args?.action === "minimize",
+        writes.map((w) => String(w.args?.action)).join(",") || "无写入",
+      );
+
+      const backTo = await shown();
+      const failureMsgs = await page.locator(".n-message").allInnerTexts();
+      const helpText = await page.locator("#app").innerText();
+      ctx.record(
+        "close_action_write_failure_rolls_back_to_confirmed",
+        "写入失败后回退到已确认值（不停留在未写入的选择上）",
+        backTo.includes("直接退出") && !backTo.includes("最小化到托盘"),
+        `回退后显示=${backTo}`,
+      );
+      ctx.record(
+        "close_action_write_failure_rolls_back_to_confirmed",
+        "写入失败原因对用户可见（不是静默回退）",
+        failureMsgs.some((t) => t.includes("写入设置失败")) &&
+          !helpText.includes("关闭动作未知"),
+        `消息=${failureMsgs.join(" | ") || "无"}；关闭动作仍为已知=${!helpText.includes("关闭动作未知")}`,
+      );
+
+      // 重试：再选一次同一项，这次写入成功
+      await realClick(page, select);
+      await page.waitForTimeout(200);
+      await page
+        .locator(".n-base-select-option")
+        .filter({ hasText: "最小化到托盘" })
+        .first()
+        .click({ timeout: 10000 });
+      await page.waitForTimeout(800);
+      const writesAfter = session.ipcCalls.filter((x) => x.cmd === "settings_set_close_action");
+      const messagesOk = await page.locator(".n-message").allInnerTexts();
+      ctx.record(
+        "close_action_write_failure_rolls_back_to_confirmed",
+        "重试写入成功：选择被确认并给出成功提示",
+        writesAfter.length === 2 &&
+          (await shown()).includes("最小化到托盘") &&
+          messagesOk.some((t) => t.includes("关闭窗口默认动作已保存")),
+        `写入次数=${writesAfter.length}；显示=${await shown()}；提示=${messagesOk.join(" | ") || "无"}`,
+      );
+
+      await ctx.shot("close_action_write_failure_rolls_back_to_confirmed", session, "rolled-back");
+      ctx.finishSession(session);
+    } finally {
+      await session.close();
+    }
+  },
+
+  /**
+   * AP04：挂起的 settings_get 以**失败**结束（写完才回来的旧读取）——不得把
+   * 用户已成功保存的结果降级成"未知"，也不得把旧失败当成当前设置状态。
+   */
+  async late_failed_settings_read_does_not_downgrade_saved(ctx) {
+    const session = await ctx.open({
+      fixture: "settings-late-failure-after-save",
+      viewport: VIEWPORTS.desktop,
+      theme: "light",
+    });
+    try {
+      await openSettings(session);
+      const page = session.page;
+      const firstText = await page.locator("#app").innerText();
+      ctx.record(
+        "late_failed_settings_read_does_not_downgrade_saved",
+        "首读失败态可见（后续用来证明晚到失败没有顶替它）",
+        firstText.includes("设置读取失败") && firstText.includes("设置读取失败（合成）"),
+        firstText.match(/设置读取失败[^\n]{0,40}/)?.[0] ?? "未找到首读错误条",
+      );
+
+      // 真实点击"重试"→ 第二次读取挂起
+      const retry = retryButtonIn(session, "设置读取失败");
+      await realClick(page, retry);
+      await page.waitForTimeout(300);
+      const pending = session.fixture.deferredState();
+      ctx.record(
+        "late_failed_settings_read_does_not_downgrade_saved",
+        "重试发起的第二次读取确实挂起中（竞态前提成立）",
+        pending.length === 1 && pending[0].startsWith("settings_get#"),
+        `挂起键=${pending.join(",") || "无"}`,
+      );
+
+      // 挂起期间用户保存来源配置并成功
+      const input = page.locator('[aria-label="Claude Code 日志目录"]').first();
+      await input.fill("C:/saved-by-user");
+      await realClick(page, sourceBlockOf(page, "Claude Code").locator("button", { hasText: "保存" }));
+      await page.waitForTimeout(700);
+      const savedWrites = session.ipcCalls.filter((x) => x.cmd === "source_config_set");
+      ctx.record(
+        "late_failed_settings_read_does_not_downgrade_saved",
+        "挂起期间用户保存来源配置成功（mutation 已发生）",
+        savedWrites.length === 1 && savedWrites[0].args?.dir === "C:/saved-by-user",
+        `写入=${savedWrites.map((w) => `${w.args?.agent}:${w.args?.dir}`).join(" | ") || "无"}`,
+      );
+
+      const unknownBefore = ((await page.locator("#app").innerText()).match(/未知/g) ?? []).length;
+      const valueBefore = await input.inputValue();
+      // 释放挂起的读取——以失败结束（旧读取的拒绝不得成为当前状态）
+      session.fixture.failDeferred(pending[0], "旧读取失败（合成）");
+      await page.waitForTimeout(700);
+      const after = await page.locator("#app").innerText();
+      const unknownAfter = (after.match(/未知/g) ?? []).length;
+
+      ctx.record(
+        "late_failed_settings_read_does_not_downgrade_saved",
+        "晚到的失败读取不得成为当前设置状态（旧失败原因不可见）",
+        !after.includes("旧读取失败（合成）"),
+        `页面含旧失败原因=${after.includes("旧读取失败（合成）")}`,
+      );
+      ctx.record(
+        "late_failed_settings_read_does_not_downgrade_saved",
+        "首读失败态未被晚到失败顶替（错误条仍是首读原因）",
+        after.includes("设置读取失败（合成）"),
+        `首读原因仍在=${after.includes("设置读取失败（合成）")}`,
+      );
+      ctx.record(
+        "late_failed_settings_read_does_not_downgrade_saved",
+        "已保存值不被回退或清空",
+        valueBefore === "C:/saved-by-user" && (await input.inputValue()) === "C:/saved-by-user",
+        `释放前=${valueBefore} 释放后=${await input.inputValue()}`,
+      );
+      ctx.record(
+        "late_failed_settings_read_does_not_downgrade_saved",
+        "晚到失败不得新增「未知」降级（未知表述不增加）",
+        unknownAfter <= unknownBefore,
+        `"未知"出现次数 ${unknownBefore}→${unknownAfter}`,
+      );
+
+      await ctx.shot("late_failed_settings_read_does_not_downgrade_saved", session, "late-reject");
+      ctx.finishSession(session);
+    } finally {
+      await session.close();
+    }
+  },
+
+  /**
+   * AP06：来源检测失败/过期都必须可见、可重试，且不得牵连已经成功的汇总；
+   * 目录从 missing 变 ready 后，手动刷新必须重查来源状态使旧通知消失。
+   */
+  async source_status_failure_recovers_without_losing_summary(ctx) {
+    // (a) 首次 source_status 拒绝 → 错误条 + 重试 → 成功后错误消失、来源就绪
+    const session = await ctx.open({
+      fixture: "source-status-failure-then-ready",
+      viewport: VIEWPORTS.desktop,
+      theme: "light",
+    });
+    try {
+      await openDashboard(session);
+      const page = session.page;
+      const text = await page.locator("#app").innerText();
+      ctx.record(
+        "source_status_failure_recovers_without_losing_summary",
+        "首次检测失败：错误条可见并带原因",
+        text.includes("来源目录检测失败") && text.includes("来源状态读取失败（合成）"),
+        text.match(/来源目录检测失败[^\n]{0,60}/)?.[0] ?? "未找到来源检测错误条",
+      );
+      const rows = await page.locator(".usage-card tbody tr").count();
+      const hasTotal = (await page.locator("tr.total-row").count()) > 0;
+      ctx.record(
+        "source_status_failure_recovers_without_losing_summary",
+        "检测失败不影响已成功的汇总（表格与合计仍在，不整体灰罩）",
+        rows >= 3 && hasTotal && !text.includes("汇总加载失败"),
+        `聚合行=${rows} 合计行=${hasTotal} 汇总错误=${text.includes("汇总加载失败")}`,
+      );
+      const retry = page
+        .locator(".ts-notice")
+        .filter({ hasText: "来源目录检测失败" })
+        .locator("button", { hasText: "重试" })
+        .first();
+      ctx.record(
+        "source_status_failure_recovers_without_losing_summary",
+        "错误条提供可点击的重试入口",
+        (await retry.count()) > 0,
+        `重试按钮数=${await retry.count()}`,
+      );
+      const readsBefore = session.ipcCalls.filter((x) => x.cmd === "source_status").length;
+      await realClick(page, retry);
+      await page.waitForTimeout(700);
+      const readsAfter = session.ipcCalls.filter((x) => x.cmd === "source_status").length;
+      const after = await page.locator("#app").innerText();
+      ctx.record(
+        "source_status_failure_recovers_without_losing_summary",
+        "重试真的重发 source_status 并清除错误",
+        readsAfter > readsBefore && !after.includes("来源目录检测失败"),
+        `source_status ${readsBefore}→${readsAfter}；错误残留=${after.includes("来源目录检测失败")}`,
+      );
+      ctx.record(
+        "source_status_failure_recovers_without_losing_summary",
+        "重试成功后来源状态就绪（不再显示目录异常通知）",
+        !after.includes("数据目录不存在") &&
+          !after.includes("个来源异常") &&
+          !after.includes("没有发现会话日志"),
+        after.match(/[^\n]*(数据目录不存在|个来源异常)[^\n]*/)?.[0]?.slice(0, 80) ?? "无来源异常通知",
+      );
+      await ctx.shot("source_status_failure_recovers_without_losing_summary", session, "retry-ok");
+      ctx.finishSession(session);
+    } finally {
+      await session.close();
+    }
+
+    // (b) 目录从 missing 变 ready：手动刷新必须重查来源状态，旧通知消失
+    const s2 = await ctx.open({
+      fixture: "source-status-missing-then-ready",
+      viewport: VIEWPORTS.desktop,
+      theme: "dark",
+    });
+    try {
+      await openDashboard(s2);
+      const page = s2.page;
+      const t1 = await page.locator("#app").innerText();
+      ctx.record(
+        "source_status_failure_recovers_without_losing_summary",
+        "目录不存在时给出具体来源通知（含目录与整改入口）",
+        t1.includes("数据目录不存在") && t1.includes("去设置"),
+        t1.match(/[^\n]*数据目录不存在[^\n]*/)?.[0]?.slice(0, 80) ?? "未找到来源异常通知",
+      );
+      const before = s2.ipcCalls.filter((x) => x.cmd === "source_status").length;
+      await realClick(page, page.locator("button", { hasText: "刷新" }).first());
+      await page.waitForTimeout(1200);
+      const afterCalls = s2.ipcCalls.filter((x) => x.cmd === "source_status").length;
+      const t2 = await page.locator("#app").innerText();
+      const rows2 = await page.locator(".usage-card tbody tr").count();
+      ctx.record(
+        "source_status_failure_recovers_without_losing_summary",
+        "手动刷新会重查来源状态（不是只重跑查询）",
+        afterCalls > before,
+        `source_status ${before}→${afterCalls}`,
+      );
+      ctx.record(
+        "source_status_failure_recovers_without_losing_summary",
+        "目录变 ready 后旧通知消失（不停留在过期状态）",
+        !t2.includes("数据目录不存在") && !t2.includes("个来源异常"),
+        t2.match(/[^\n]*(数据目录不存在|个来源异常)[^\n]*/)?.[0]?.slice(0, 80) ?? "旧通知已清除",
+      );
+      ctx.record(
+        "source_status_failure_recovers_without_losing_summary",
+        "刷新后汇总仍是成功结果（新批次数据可见）",
+        rows2 >= 3 && !t2.includes("汇总加载失败"),
+        `聚合行=${rows2} 汇总错误=${t2.includes("汇总加载失败")}`,
+      );
+      await ctx.shot("source_status_failure_recovers_without_losing_summary", s2, "missing-then-ready");
+      ctx.finishSession(s2);
+    } finally {
+      await s2.close();
+    }
+  },
+
+  /**
+   * AP05：定价横幅必须按 DTO 的两个独立维度分态——`needsSync=true` 只说明主源
+   * 没有有效候选；只有 `hasAnyPricing=false` 才是"当前费用仅能显示为未知"。
+   */
+  async pricing_banner_distinguishes_dto_states(ctx) {
+    const cases = [
+      {
+        fixture: "pricing-needs-sync-external-only",
+        label: "只有外置价格表",
+        must: ["主源（models.dev）尚待同步", "按已有价格估算", "外置价格表 5 条"],
+        forbid: ["当前费用仅能显示为未知", "OpenRouter"],
+      },
+      {
+        fixture: "pricing-needs-sync-openrouter-only",
+        label: "只有 OpenRouter",
+        must: ["主源（models.dev）尚待同步", "按已有价格估算", "OpenRouter 8 条"],
+        forbid: ["当前费用仅能显示为未知", "外置价格表"],
+      },
+      {
+        fixture: "pricing-none-available",
+        label: "完全无价",
+        must: ["尚未获取定价", "当前费用仅能显示为未知"],
+        forbid: ["主源（models.dev）尚待同步", "按已有价格估算"],
+      },
+    ];
+    for (const c of cases) {
+      const session = await ctx.open({
+        fixture: c.fixture,
+        viewport: VIEWPORTS.desktop,
+        theme: "light",
+      });
+      try {
+        await openDashboard(session);
+        const banner = (await session.page.locator(".pricing-notice").allInnerTexts())
+          .map((t) => t.replace(/\s+/g, " ").trim())
+          .join(" | ");
+        const dto = session.fixture.ipc("pricing_status", {});
+        ctx.record(
+          "pricing_banner_distinguishes_dto_states",
+          `${c.label}：DTO 是「主源缺失」而非「完全无价」`,
+          dto.needsSync === true &&
+            dto.hasAnyPricing === (c.fixture !== "pricing-none-available"),
+          `needsSync=${dto.needsSync} hasAnyPricing=${dto.hasAnyPricing} 有效候选=${dto.externalValidCount ?? 0}+${dto.openrouterValidCount ?? 0}`,
+        );
+        const missing = c.must.filter((s) => !banner.includes(s));
+        ctx.record(
+          "pricing_banner_distinguishes_dto_states",
+          `${c.label}：横幅把状态讲清楚（不省略已有价格）`,
+          banner.length > 0 && missing.length === 0,
+          missing.length ? `缺失=${missing.join("、")}；实际="${banner.slice(0, 140)}"` : banner.slice(0, 140),
+        );
+        const wrong = c.forbid.filter((s) => banner.includes(s));
+        ctx.record(
+          "pricing_banner_distinguishes_dto_states",
+          `${c.label}：不得出现与该 DTO 矛盾的结论`,
+          wrong.length === 0,
+          wrong.length ? `出现=${wrong.join("、")}；实际="${banner.slice(0, 140)}"` : "无矛盾结论",
+        );
+        ctx.record(
+          "pricing_banner_distinguishes_dto_states",
+          `${c.label}：横幅可见且无状态读取失败（可操作）`,
+          banner.length > 0 && !banner.includes("定价状态读取失败"),
+          banner ? "横幅已渲染" : "横幅缺失",
+        );
+        await ctx.shot("pricing_banner_distinguishes_dto_states", session, c.fixture);
         ctx.finishSession(session);
       } finally {
         await session.close();
