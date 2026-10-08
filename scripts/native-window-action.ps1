@@ -15,7 +15,7 @@
 param(
     [int]$ProcessId = 0,
     [string]$Name = 'tokenscope',
-    [ValidateSet('rect', 'close', 'mainrect')]
+    [ValidateSet('rect', 'close', 'mainrect', 'dpi')]
     [string]$Action = 'rect'
 )
 
@@ -33,6 +33,7 @@ public static class TsActWin {
     [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr h);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     static IntPtr _found = IntPtr.Zero;
     public static IntPtr Find(int pid) {
@@ -81,7 +82,10 @@ if ($target -le 0) {
     if ($cand.Count -eq 0) { Write-Output "PID none"; exit 4 }
     $target = $cand[0].Id
 }
-if ($Action -eq 'mainrect') {
+if ($Action -eq 'dpi') {
+    Write-Output ("PID {0} DPI {1}" -f $target, [TsActWin]::GetDpiForWindow([TsActWin]::Find($target)))
+}
+elseif ($Action -eq 'mainrect') {
     Write-Output ("PID {0} MAINRECT {1}" -f $target, [TsActWin]::LargestRect($target))
 }
 elseif ($Action -eq 'rect') {

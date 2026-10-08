@@ -79,6 +79,8 @@ pub fn run() {
             commands::open_settings_file,
         ])
         .setup(move |app| {
+            #[cfg(feature = "acceptance")]
+            acceptance::create_windows(app)?;
             // SF06：日志状态存入 managed state，App 挂载后经
             // startup_diagnostics 只读获取并展示非阻断通知。
             app.manage(log_status);
@@ -330,6 +332,10 @@ fn close_failure_payload(outcome: &CloseOutcome) -> Option<CloseActionFailure> {
 
 /// 主线程上执行一次窗口隐藏并取回结果（窗口 API 只能在主线程调用）。
 fn hide_main_window_on_main_thread(app: &tauri::AppHandle) -> Result<(), String> {
+    #[cfg(feature = "acceptance")]
+    if acceptance::fail_hide_once() {
+        return Err("隐藏窗口失败: acceptance-hide-once".to_string());
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     let app_for_main = app.clone();
     app.run_on_main_thread(move || {

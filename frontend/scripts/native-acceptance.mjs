@@ -38,7 +38,8 @@ const OUT = arg("out", path.join(REPO, "qa-artifacts", "native-recheck-2026-10-0
 const PORT = Number(arg("port", "9411"));
 const EXE = arg("exe", EXE_DEFAULT);
 const THEME = arg("theme", "system"); // light | dark | system（--force-*-mode 通道）
-const SCALE = Number(arg("scale", "1"));
+// 默认使用真实系统 DPI；显式 --scale 只作布局探查，不作为系统缩放验收。
+const SCALE = arg("scale") === undefined ? null : Number(arg("scale"));
 const EVENTS = Number(arg("events", "4"));
 const ROOT = arg("root", "");
 const EXPECT_STORED = arg("expect-stored", undefined);
@@ -235,7 +236,8 @@ class Instance {
     return manifest;
   }
   browserArgs(port = PORT) {
-    const parts = [`--remote-debugging-port=${port}`, `--force-device-scale-factor=${this.opts.scale}`];
+    const parts = [`--remote-debugging-port=${port}`];
+    if (this.opts.scale !== null) parts.push(`--force-device-scale-factor=${this.opts.scale}`);
     if (this.opts.scheme === "dark") parts.push("--force-dark-mode");
     if (this.opts.scheme === "light") parts.push("--force-light-mode");
     if (this.opts.extraBrowserArgs) parts.push(...this.opts.extraBrowserArgs);
@@ -525,6 +527,19 @@ async function measureA11y(page) {
 
 // ── 场景 ──────────────────────────────────────────────────────────
 const scenarios = {
+  // 在同一个驱动进程内完成等待；部分终端会在父进程结束时回收其原生子进程。
+  async "expire-cycle"(context) {
+    await scenarios["expire-start"](context);
+    const started = Date.now();
+    while (Date.now() < Date.parse(context.ev.sessionIdleDeadlineIso)) {
+      await sleep(1000);
+      if (context.inst.proc.exitCode !== null) throw new Error(`空闲期间进程退出：${context.inst.proc.exitCode}`);
+      if (Math.floor((Date.now() - started) / 1000) % 30 === 0) hb("原生查询会话保持空闲，等待真实 TTL");
+    }
+    context.ev.actualIdleMs = Date.now() - started;
+    context.ck.add("real_idle_exceeds_ttl", context.ev.actualIdleMs > 600000, `${context.ev.actualIdleMs} ms`);
+    await scenarios["expire-finish"](context);
+  },
   /** §2 首帧：录制连续帧 + 页面实测（偏好来自隔离 profile 的真实持久化）。 */
   async "first-frame"({ inst, ck, ev }) {
     if (!inst.framesPromise) throw new Error("first-frame 必须带 --frames（首帧要用连续帧取证，加载完成截图不算证据）");
@@ -622,6 +637,12 @@ const scenarios = {
     const vp = page.viewportSize() ?? (await page.evaluate(() => ({ width: innerWidth, height: innerHeight })));
     ev.viewport = vp;
     ev.dpr = await page.evaluate(() => devicePixelRatio);
+    ev.nativeDpi = (ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "dpi"]).stdout || "").trim();
+    if (SCALE === null) {
+      const dpi = /DPI (\d+)/.exec(ev.nativeDpi);
+      ck.add("unforced_webview_matches_native_window_dpi", !!dpi && Math.abs(Number(dpi[1]) / 96 - ev.dpr) < 0.01,
+        `${ev.nativeDpi}; WebView dpr=${ev.dpr}; 未使用缩放强制参数`);
+    }
     ev.windowRect = await inst.windowInfo();
     ev.themeMode = await page.evaluate(() => ({
       schemeDark: matchMedia("(prefers-color-scheme: dark)").matches,
@@ -809,6 +830,20 @@ const scenarios = {
     ev.cspViolations = inst.violations.slice(0, 20);
     ev.knownNoiseCount = vs.known.length;
     ck.add("no_unexpected_csp_violation_while_app_runs", vs.unexpected.length === 0, vs.unexpected.slice(0, 3).join(" | ") || `仅已知噪声 ${vs.known.length} 条`);
+    const beforeProbe = inst.violations.length;
+    // 入口脚本由同源 HTTP 资源加载，真实点击才插入 script；evaluate 只读结果。
+    await page.locator("#ts-acceptance-csp").click();
+    await page.waitForFunction(() => window.__tsCspProbe?.positiveRan && window.__tsCspProbe.violations.length >= 2);
+    ev.scriptProbe = await page.evaluate(() => window.__tsCspProbe);
+    ck.add("same_origin_positive_script_executes", ev.scriptProbe.positiveRan === true, "允许的同源脚本确实执行，排除全部脚本无法加载的假阳性");
+    ck.add("unauthorized_inline_script_is_blocked", ev.scriptProbe.inlineRan === false && ev.scriptProbe.violations.some((v) => v.blockedURI === "inline"), JSON.stringify(ev.scriptProbe));
+    ck.add("external_script_is_blocked_by_policy", ev.scriptProbe.violations.some((v) => v.blockedURI === "https://tokenscope.invalid/acceptance-blocked.js"), JSON.stringify(ev.scriptProbe.violations));
+    ck.add("only_two_expected_script_policy_events", ev.scriptProbe.violations.length === 2, JSON.stringify(ev.scriptProbe.violations));
+    // console 与 CDP Log 可能重复上报同一事件；与 DOM 事件分开记录。
+    ev.expectedScriptConsole = inst.violations.slice(beforeProbe).filter((v) =>
+      /Executing inline script violates|Loading the script 'https:\/\/tokenscope\.invalid\/acceptance-blocked\.js'/i.test(v));
+    inst.expectedScriptConsole = new Set(ev.expectedScriptConsole);
+    ck.add("production_policy_not_relaxed_for_probe", !!ev.cspHeader && !/script-src[^;]*'unsafe-inline'/.test(ev.cspHeader), ev.cspHeader);
     await page.screenshot({ path: path.join(inst.opts.shots, "csp-state.png") });
   },
 
@@ -928,6 +963,25 @@ const scenarios = {
   },
 
   /** §6-2 最小化到托盘：窗口隐藏但进程与统计继续（隔离实例）。 */
+  async "close-remember-failure"({ inst, ck, ev }) {
+    const page = inst.page;
+    await inst.waitForData();
+    const settingsPath = path.join(inst.root, "tokenscope", "settings.toml");
+    ev.settingsShaBefore = sha256File(settingsPath);
+    ev.closeRequest = (ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "close"]).stdout || "").trim();
+    await page.locator(".close-error").waitFor();
+    ev.errorText = await page.locator(".close-error").innerText();
+    ck.add("remembered_failure_visible_with_reason", /acceptance-hide-once/.test(ev.errorText), ev.errorText);
+    await page.screenshot({ path: path.join(inst.opts.shots, "remembered-failure.png") });
+    await page.getByRole("button", { name: "最小化到托盘", exact: true }).click();
+    await page.waitForTimeout(1500);
+    ev.rectAfterRetry = (ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "mainrect"]).stdout || "").trim();
+    const rect = /MAINRECT\s+(-?\d+),(-?\d+),(\d+),(\d+)/.exec(ev.rectAfterRetry);
+    ck.add("retry_hides_real_window", /MAINRECT none/.test(ev.rectAfterRetry) || (rect && Number(rect[3]) < 100 && Number(rect[4]) < 100), ev.rectAfterRetry);
+    ck.add("retry_preserves_process", inst.proc.exitCode === null, `exitCode=${inst.proc.exitCode}`);
+    ck.add("retry_keeps_remembered_settings", sha256File(settingsPath) === ev.settingsShaBefore, ev.settingsShaBefore);
+  },
+
   async "close-tray"({ inst, ck, ev }) {
     const page = inst.page;
     await page.waitForSelector(".app-nav", { timeout: 30000 });
@@ -1131,6 +1185,7 @@ const scenarios = {
       !!ev.noticeText && /query_expired|不存在或已失效/.test(ev.noticeText),
       String(ev.noticeText).replace(/\s+/g, " ").slice(0, 160),
     );
+    if (await err.count()) await err.first().scrollIntoViewIfNeeded();
     await page.screenshot({ path: path.join(inst.opts.shots, "expire-error.png") });
     const retry = page.locator(".ts-notice").filter({ hasText: "明细加载失败" }).locator("button");
     ev.retryCount = await retry.count();
@@ -1150,12 +1205,51 @@ const scenarios = {
         !!m,
         `恢复后分页文案=${String(ev.moreTextAfterRecovery).replace(/\s+/g, " ").slice(0, 80)}`,
       );
+      if (m) {
+        const hintBefore = await page.locator(".events-card .table-hint").innerText();
+        const loadedBefore = /已加载\s*([0-9,]+)/.exec(hintBefore);
+        await page.locator(".load-more-row button").first().click();
+        await page.waitForTimeout(4000);
+        ev.paginationAfterNextPage = await page.locator(".load-more-row").first().innerText().catch(() => "");
+        ev.detailHintAfterNextPage = await page.locator(".events-card .table-hint").innerText();
+        const loadedAfter = /已加载\s*([0-9,]+)/.exec(ev.detailHintAfterNextPage);
+        const remaining = /还剩\s*([0-9,]+)\s*条/.exec(ev.paginationAfterNextPage);
+        ck.add("recovered_session_loads_next_page", (await err.count()) === 0 &&
+          !!loadedBefore && !!loadedAfter && Number(loadedAfter[1].replace(/,/g, "")) > Number(loadedBefore[1].replace(/,/g, "")) &&
+          (!remaining || Number(remaining[1].replace(/,/g, "")) < Number(m[1].replace(/,/g, ""))),
+          ev.detailHintAfterNextPage);
+      }
+      const logDir = path.join(inst.root, "tokenscope", "logs");
+      const logs = fs.readdirSync(logDir).sort().map((f) => fs.readFileSync(path.join(logDir, f), "utf8")).join("\n");
+      ev.detailSessions = [...logs.matchAll(/明细完成（会话 ([^）]+)）/g)].map((m) => m[1]);
+      ck.add("recovery_uses_new_backend_session", new Set(ev.detailSessions).size >= 2,
+        ev.detailSessions.join(" → "));
     }
     await page.screenshot({ path: path.join(inst.opts.shots, "expire-recovered.png") });
     ev.windowRect = await inst.windowInfo();
   },
 
   /** §6 关窗取消：WM_CLOSE → 真实弹窗 → Escape → 进程存活 + settings 字节不变。 */
+  async "close-final-save"({ inst, ck, ev }) {
+    const page = inst.page;
+    await inst.waitForData();
+    ev.closeRequest = (ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "close"]).stdout || "").trim();
+    await page.locator(".close-dialog").waitFor();
+    // 等定时保存完成且 dirty 已清，再移除隔离根中的派生文件。
+    // 此后没有窗口事件，只有退出前最终保存可以重新生成它。
+    await page.waitForTimeout(2200);
+    const stateFile = path.join(inst.root, "tokenscope", "window-state.json");
+    ev.windowStateBefore = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    fs.unlinkSync(stateFile);
+    await page.getByRole("button", { name: "直接退出", exact: true }).click();
+    const deadline = Date.now() + 15000;
+    while (inst.proc.exitCode === null && Date.now() < deadline) await sleep(100);
+    ck.add("dialog_quit_exits_successfully", inst.proc.exitCode === 0, `exitCode=${inst.proc.exitCode}`);
+    ev.windowStateAfter = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, "utf8")) : null;
+    ck.add("dialog_quit_completes_final_save", JSON.stringify(ev.windowStateAfter) === JSON.stringify(ev.windowStateBefore),
+      JSON.stringify(ev.windowStateAfter));
+  },
+
   async "close-cancel"({ inst, ck, ev }) {
     const page = inst.page;
     await page.waitForSelector(".app-nav", { timeout: 30000 });
@@ -1242,12 +1336,16 @@ async function main() {
     env:
       SCENARIO === "sync-failure"
         ? { HTTPS_PROXY: "http://127.0.0.1:9", HTTP_PROXY: "http://127.0.0.1:9", NO_PROXY: "" }
-        : undefined,
+        : SCENARIO === "csp" ? { TOKENSCOPE_ACCEPTANCE_CSP: "1" }
+        : SCENARIO === "close-remember-failure" ? { TOKENSCOPE_ACCEPTANCE_HIDE_FAILURE_ONCE: "1" } : undefined,
     mutate: SCENARIO === "fault-logs-file" ? (r) => {
       const p = path.join(r, "tokenscope", "logs");
       fs.mkdirSync(path.dirname(p), { recursive: true });
       if (fs.existsSync(p) && fs.statSync(p).isDirectory()) throw new Error("logs 已是目录，无法注入文件故障");
       fs.writeFileSync(p, "not-a-directory\n");
+    } : SCENARIO === "close-remember-failure" ? (r) => {
+      const p = path.join(r, "tokenscope", "settings.toml");
+      fs.writeFileSync(p, 'close_action = "minimize"\n' + fs.readFileSync(p, "utf8"), "utf8");
     } : undefined,
   });
 
@@ -1336,22 +1434,25 @@ async function main() {
   }
 
   ev.dpr = await inst.page.evaluate(() => devicePixelRatio).catch(() => null);
+  const scenarioTimeoutMs = SCENARIO === "expire-cycle" ? 750000 : 240000;
+  let scenarioTimer;
   try {
     hb(`场景 ${SCENARIO} 开始`);
     await Promise.race([
       scenarios[SCENARIO]({ inst, ck, ev }),
-      sleep(240000).then(() => {
-        throw new Error("场景超过 240 s 未完成（判定为挂起，不允许无证据等待）");
+      new Promise((_, reject) => {
+        scenarioTimer = setTimeout(() => reject(new Error(`场景超过 ${scenarioTimeoutMs / 1000} s 未完成`)), scenarioTimeoutMs);
       }),
     ]);
     hb(`场景 ${SCENARIO} 结束，检查 ${ck.rows.length - ck.failures.length}/${ck.rows.length}`);
   } catch (e) {
     ck.add("scenario_executed", false, String(e.message ?? e));
     ev.error = String(e.stack ?? e).slice(0, 800);
+  } finally {
+    clearTimeout(scenarioTimer);
   }
 
   ev.checks = ck.rows;
-  ev.failed = ck.failures.map((f) => f.name);
 
   // 收尾：保留实例（expire-start）或只杀本次 PID
   if (SCENARIO === "expire-start") {
@@ -1375,8 +1476,9 @@ async function main() {
   ev.root_files_after = listFiles(root).slice(0, 60);
   ck.add("real_data_untouched", ev.real_untouched === true, `${hashOfFingerprint(realBefore)} → ${hashOfFingerprint(realAfter)}`);
   if (inst.violations) {
-    const vs = splitViolations(inst.violations);
-    ev.csp_violation_counts = { total: inst.violations.length, known_noise: vs.known.length, unexpected: vs.unexpected.length };
+    const expected = inst.violations.filter((v) => inst.expectedScriptConsole?.has(v));
+    const vs = splitViolations(inst.violations.filter((v) => !inst.expectedScriptConsole?.has(v)));
+    ev.csp_violation_counts = { total: inst.violations.length, expected_script_probe: expected.length, known_noise: vs.known.length, unexpected: vs.unexpected.length };
     ck.add(
       "no_unexpected_csp_violations_during_run",
       vs.unexpected.length === 0,
@@ -1385,6 +1487,7 @@ async function main() {
   }
 
   const out = path.join(stampDir, "evidence.json");
+  ev.failed = ck.failures.map((f) => f.name);
   fs.writeFileSync(out, JSON.stringify(ev, null, 2), "utf8");
   const summary = {
     scenario: SCENARIO,
