@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+# Independent from CI. New main pushes replace old main releases; tags only
+# replace another run for that exact tag. Generated pre-* tags do not match v*.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      sha: ${{ steps.metadata.outputs.sha }}
+      title: ${{ steps.metadata.outputs.title }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
+      latest: ${{ steps.metadata.outputs.latest }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Validate release identity and versions
+        id: metadata
+        run: python scripts/release_metadata.py
+      - uses: ./.github/actions/checks
+
+  build:
+    needs: gate
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Build production Windows x64 NSIS (without acceptance)
+        run: .\frontend\node_modules\.bin\tauri build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
+      - name: Collect installer and checksums
+        env:
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+        run: |
+          $installers = @(Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe)
+          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer" }
+          New-Item -ItemType Directory -Path release-assets | Out-Null
+          $name = "TokenScope_${env:RELEASE_TAG}_windows-x64-setup.exe"
+          Copy-Item $installers[0].FullName "release-assets/$name"
+          $hash = (Get-FileHash "release-assets/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content release-assets/SHA256SUMS.txt -Encoding utf8NoBOM
+      - name: Attest installer and checksums
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release-assets/*
+          create-storage-record: false
+      - name: Include downloadable attestation bundle
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: Copy-Item $env:BUNDLE_PATH release-assets/provenance.sigstore.json
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-${{ needs.gate.outputs.sha }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+
+  publish:
+    needs: [gate, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release-${{ needs.gate.outputs.sha }}
+          path: release-assets
+      - name: Publish complete release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+          RELEASE_SHA: ${{ needs.gate.outputs.sha }}
+          RELEASE_TITLE: ${{ needs.gate.outputs.title }}
+          PRERELEASE: ${{ needs.gate.outputs.prerelease }}
+          LATEST: ${{ needs.gate.outputs.latest }}
+          REF_TYPE: ${{ github.ref_type }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum --check SHA256SUMS.txt
+          test -s provenance.sigstore.json
+          # A tag can pre-exist without a release. Never publish another SHA's tag.
+          if gh api "repos/$GH_REPO/commits/$RELEASE_TAG" > tag.json 2> api-error.txt; then
+            test "$(jq -r .sha tag.json)" = "$RELEASE_SHA"
+          elif [ "$REF_TYPE" = tag ] || ! grep -q 'HTTP 404' api-error.txt; then
+            cat api-error.txt >&2
+            exit 1
+          fi
+          # Draft releases can exist before their generated pre-* tag exists.
+          if gh release view "$RELEASE_TAG" --json isDraft,targetCommitish > release.json 2> api-error.txt; then
+            if [ "$(jq -r .isDraft release.json)" = false ]; then
+              test "$(jq -r .sha tag.json)" = "$RELEASE_SHA"
+              echo "Release already published for $RELEASE_SHA; leaving it unchanged."
+              exit 0
+            fi
+            test "$(jq -r .targetCommitish release.json)" = "$RELEASE_SHA"
+          else
+            # gh release view reports a missing release as 'release not found'.
+            if ! grep -qiE 'release not found|HTTP 404' api-error.txt; then
+              cat api-error.txt >&2
+              exit 1
+            fi
+            args=(--draft --target "$RELEASE_SHA" --title "$RELEASE_TITLE" --generate-notes --latest=false)
+            if [ "$PRERELEASE" = true ]; then args+=(--prerelease); fi
+            gh release create "$RELEASE_TAG" "${args[@]}"
+          fi
+          gh release view "$RELEASE_TAG" --json body --jq .body > notes.md
+          cat >> notes.md <<NOTES
+
+          ---
+          Source commit: $RELEASE_SHA
+          Build and checks: $RUN_URL
+          Windows x64 NSIS installer, SHA-256 checksums, and Sigstore provenance are attached.
+          Verify provenance: gh attestation verify TokenScope_${RELEASE_TAG}_windows-x64-setup.exe --repo $GH_REPO
+          The installer is not Authenticode-signed; provenance does not remove Windows SmartScreen warnings.
+          NOTES
+          gh release upload "$RELEASE_TAG" ./*.exe SHA256SUMS.txt provenance.sigstore.json --clobber
+          # Recheck tag identity after uploads, including deleted/moved version tags.
+          if gh api "repos/$GH_REPO/commits/$RELEASE_TAG" > tag.json 2> api-error.txt; then
+            test "$(jq -r .sha tag.json)" = "$RELEASE_SHA"
+          elif [ "$REF_TYPE" = tag ] || ! grep -q 'HTTP 404' api-error.txt; then
+            cat api-error.txt >&2
+            exit 1
+          fi
+          # Publication is the final operation, after all assets and proof exist.
+          gh release edit "$RELEASE_TAG" --notes-file notes.md --prerelease="$PRERELEASE" --latest="$LATEST" --draft=false
