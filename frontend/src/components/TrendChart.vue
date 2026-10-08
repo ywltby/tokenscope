@@ -14,6 +14,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import * as echarts from "echarts";
 import { useTheme } from "../composables/theme";
+import { useTokenColors } from "../composables/tokenColors";
 import { fmtNum, type Group } from "../types";
 import { buildBarChartData, chartStateText, chartSummaryLines, fullLabels } from "../lib/chartData";
 import { buildTooltipNode } from "../lib/chartTooltip";
@@ -29,7 +30,8 @@ function fmtCompact(v: number): string {
 
 const props = defineProps<{ groups: Group[]; by: string }>();
 const { mode } = useTheme();
-const legendItems = computed(() => chartTokens(mode.value).series);
+const { overrides } = useTokenColors();
+const legendItems = computed(() => chartTokens(mode.value, overrides.value).series);
 
 const el = ref<HTMLDivElement | null>(null);
 let chart: echarts.ECharts | null = null;
@@ -77,7 +79,7 @@ function captureZoom(): { start?: number; end?: number }[] | null {
 }
 
 function buildOption(zoom?: { start?: number; end?: number }[] | null): echarts.EChartsOption {
-  const t = chartTokens(mode.value);
+  const t = chartTokens(mode.value, overrides.value);
   const groups = props.groups;
   // F03（计划 A4）：分类轴与全部 series 由同一份排序结果生成，标签与数值不错位
   const { categories, series } = buildBarChartData(groups, props.by);
@@ -244,6 +246,8 @@ watch(
   },
 );
 watch(mode, () => rebuildForTheme());
+// 仅更新调色板，不重建实例或覆盖 dataZoom。
+watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.color) }));
 </script>
 
 <template>

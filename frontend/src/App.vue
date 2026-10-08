@@ -22,6 +22,14 @@ import CloseConfirmDialog from "./components/CloseConfirmDialog.vue";
 import Dashboard from "./views/Dashboard.vue";
 import Settings from "./views/Settings.vue";
 import { createSettingsPreload, SETTINGS_PRELOAD } from "./lib/settingsPreload";
+import { useTokenColors } from "./composables/tokenColors";
+
+const tokenColors = useTokenColors();
+watchEffect(() => {
+  for (const [key, color] of Object.entries(tokenColors.colors.value)) {
+    document.documentElement.style.setProperty(`--ts-chart-${key.replaceAll("_", "-")}`, color);
+  }
+});
 
 const settingsPreload = createSettingsPreload(invoke);
 provide(SETTINGS_PRELOAD, settingsPreload);

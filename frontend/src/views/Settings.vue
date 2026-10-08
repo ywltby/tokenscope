@@ -46,6 +46,14 @@ import {
 } from "../lib/tokenDisplay";
 import HelpTooltip from "../components/HelpTooltip.vue";
 import { SETTINGS_PRELOAD } from "../lib/settingsPreload";
+import { useTokenColors } from "../composables/tokenColors";
+
+const {
+  colors: tokenColors,
+  setColor: setTokenColor,
+  resetColors,
+  persistenceError: colorSaveError,
+} = useTokenColors();
 
 const preload = inject(SETTINGS_PRELOAD, null);
 const readInitial = preload ? preload.read : invoke;
@@ -683,6 +691,33 @@ defineExpose({ priceColumns });
   <div class="settings-view">
     <!-- 首次读取尚未完成时保留稳定布局，各区块独立显示状态。 -->
     <div style="min-height: 380px">
+      <section class="settings-group token-color-settings">
+        <h2 class="group-title">Token 显示颜色</h2>
+        <section class="ts-card settings-card">
+          <div class="setting-help">
+            用于趋势图、图例和用量比例条。修改即时生效并自动保存，自定义颜色在明暗模式下共用。
+          </div>
+          <div v-for="bucket in TOKEN_BUCKETS" :key="bucket.key" class="setting-row">
+            <label :for="`token-color-${bucket.key}`" class="setting-label">{{
+              bucket.label
+            }}</label>
+            <div class="setting-control token-color-control">
+              <span class="ts-num">{{ tokenColors[bucket.key] }}</span>
+              <input
+                :id="`token-color-${bucket.key}`"
+                type="color"
+                :value="tokenColors[bucket.key]"
+                :aria-label="`${bucket.label}显示颜色`"
+                @input="setTokenColor(bucket.key, ($event.target as HTMLInputElement).value)"
+              />
+            </div>
+          </div>
+          <NButton size="small" @click="resetColors">恢复默认颜色</NButton>
+          <div v-if="colorSaveError" class="setting-help" role="alert">
+            颜色已应用，但本机偏好保存失败；请重新选择颜色后重试。
+          </div>
+        </section>
+      </section>
       <!-- 任务 7：macOS 系统设置式分组——组标题在卡片外，每组一张 .ts-card -->
       <section class="settings-group">
         <h2 class="group-title">应用</h2>
@@ -1074,6 +1109,24 @@ defineExpose({ priceColumns });
   </div>
 </template>
 <style scoped>
+.token-color-control {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.token-color-control input {
+  width: 44px;
+  height: 32px;
+  padding: 2px;
+  border: 1px solid var(--ts-separator);
+  border-radius: 6px;
+  background: var(--ts-fill);
+  cursor: pointer;
+}
+.token-color-control input:focus-visible {
+  outline: 2px solid var(--ts-accent);
+  outline-offset: 2px;
+}
 /* 任务 7：macOS 系统设置式分组——组标题在卡片外（13px/600 次要色） */
 .settings-group {
   margin-bottom: var(--ts-space-5);

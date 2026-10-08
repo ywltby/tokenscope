@@ -14,6 +14,7 @@ import { join } from "node:path";
 
 /** 计划 §3 RC09 表格的必需契约清单——一个都不能少。 */
 export const REQUIRED_CONTRACTS = [
+  "token_colors_customize_persist_and_reset",
   "empty_unknown_partial_have_correct_content",
   "settings_failure_retry_restores_all_controls",
   "saved_settings_survive_delayed_read",
@@ -136,6 +137,38 @@ async function waitTipState(session, selector, shown, timeoutMs = 2000) {
 // ── 契约实现 ────────────────────────────────────────────────────────
 
 const IMPL = {
+  async token_colors_customize_persist_and_reset(ctx) {
+    const name = "token_colors_customize_persist_and_reset";
+    const session = await ctx.open({ fixture: "normal", viewport: VIEWPORTS.desktop });
+    try {
+      await openDashboard(session);
+      const page = session.page;
+      await gotoPage(page, "设置");
+      const picker = page.getByLabel("缓存命中显示颜色", { exact: true });
+      ctx.record(name, "四类颜色都有独立选择器", await page.locator('input[type="color"]').count() === 4, "输入/输出/缓存写/缓存命中");
+      await picker.fill("#b42266");
+      await page.locator('.token-color-settings').scrollIntoViewIfNeeded();
+      await ctx.shot(name, session, "custom-color-settings");
+      await gotoPage(page, "汇总");
+      const readColors = () => page.evaluate(() => ({
+        legend: getComputedStyle(document.querySelector('.chart-legend .legend-item:last-child .legend-dot')).backgroundColor,
+        summary: getComputedStyle(document.querySelector('.part-cache_read')).backgroundColor,
+        stored: JSON.parse(localStorage.getItem('tokenscope-token-colors') ?? '{}').cache_read,
+      }));
+      const changed = await readColors();
+      ctx.record(name, "图表图例与汇总色点一致且保存", changed.legend === 'rgb(180, 34, 102)' && changed.summary === changed.legend && changed.stored === '#B42266', JSON.stringify(changed));
+      await page.reload({ waitUntil: "networkidle" });
+      await page.waitForSelector('.part-cache_read');
+      const restored = await readColors();
+      ctx.record(name, "重载后仍保留自定义颜色", restored.legend === changed.legend && restored.summary === changed.summary, JSON.stringify(restored));
+      await gotoPage(page, "设置");
+      await page.getByRole('button', { name: '恢复默认颜色', exact: true }).click();
+      await gotoPage(page, "汇总");
+      const reset = await readColors();
+      ctx.record(name, "恢复默认缓存命中为玫红色", ['rgb(214, 91, 136)', 'rgb(240, 128, 171)'].includes(reset.legend) && reset.legend === reset.summary && !reset.stored, JSON.stringify(reset));
+      await ctx.shot(name, session, "reset-default");
+    } finally { await session.close(); }
+  },
   /**
    * 空 / 未知 / 部分计价三态内容正确，且**汇总与明细同源**：
    * 明细行的金额、未知标记必须与 fixture DTO 一致，不能只有分组变化。

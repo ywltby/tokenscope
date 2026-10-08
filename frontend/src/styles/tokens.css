@@ -47,7 +47,7 @@
   --ts-chart-input: #4c8df6;
   --ts-chart-output: #f2a24a;
   --ts-chart-cache-write: #5bbf7a;
-  --ts-chart-cache-read: #a7aeb8;
+  --ts-chart-cache-read: #d65b88;
 
   /* 间距基线 */
   --ts-space-1: 4px;
@@ -137,7 +137,7 @@
   --ts-chart-input: #64a0ff;
   --ts-chart-output: #ffb35c;
   --ts-chart-cache-write: #6fd38d;
-  --ts-chart-cache-read: #8e949c;
+  --ts-chart-cache-read: #f080ab;
 
   --ts-focus-ring: 0 0 0 2px var(--ts-canvas), 0 0 0 4px var(--ts-accent);
   --ts-glass-stroke: rgba(255, 255, 255, 0.1);

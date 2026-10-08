@@ -489,9 +489,9 @@ describe("Settings macOS 分组结构（设计系统 Task 7）", () => {
     const w = mount(Settings);
     await flushPromises();
     const titles = w.findAll(".group-title").map((t) => t.text());
-    expect(titles).toEqual(["应用", "数据源", "缓存", "价格", "高级配置"]);
+    expect(titles).toEqual(["Token 显示颜色", "应用", "数据源", "缓存", "价格", "高级配置"]);
     const cards = w.findAll("section.ts-card");
-    expect(cards.length).toBe(5);
+    expect(cards.length).toBe(6);
     for (const t of w.findAll(".group-title")) {
       expect(t.element.closest("section.ts-card"), "组标题必须在卡片外").toBeNull();
     }

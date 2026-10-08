@@ -29,6 +29,7 @@ vi.stubGlobal(
 import TrendChart from "./TrendChart.vue";
 import { chartTokens } from "../styles/chartTheme";
 import { useTheme } from "../composables/theme";
+import { useTokenColors } from "../composables/tokenColors";
 import type { Group } from "../types";
 
 function group(key: string, input: number): Group {
@@ -48,6 +49,7 @@ const init = echartsMock.init;
 const dispose = echartsMock.dispose;
 
 beforeEach(() => {
+  useTokenColors().resetColors();
   setOption.mockClear();
   dispose.mockClear();
   echartsMock.resize.mockClear();
@@ -62,6 +64,20 @@ afterEach(() => {
 });
 
 describe("TrendChart（设计系统 Task 4）", () => {
+  it("颜色修改同时更新系列与图例，不重建图表或覆盖缩放", async () => {
+    const w = mount(TrendChart, { props: { groups: [group("a", 1)], by: "model" } });
+    await flushPromises();
+    setOption.mockClear();
+    useTokenColors().setColor("cache_read", "#AA2266");
+    await nextTick();
+    expect(init).toHaveBeenCalledTimes(1);
+    expect(dispose).not.toHaveBeenCalled();
+    expect(setOption).toHaveBeenLastCalledWith({
+      color: ["#4C8DF6", "#F2A24A", "#5BBF7A", "#AA2266"],
+    });
+    expect(w.findAll(".legend-dot")[3].attributes("style")).toContain("#AA2266");
+    w.unmount();
+  });
   it("不使用默认调色板：series 颜色来自 chartTokens 固定语义色", async () => {
     const w = mount(TrendChart, { props: { groups: [group("a", 1)], by: "model" } });
     await flushPromises();

@@ -35,19 +35,22 @@ const SERIES_COLORS: Record<ThemeMode, Record<TokenKind, string>> = {
     input: "#4C8DF6",
     output: "#F2A24A",
     cache_write: "#5BBF7A",
-    cache_read: "#A7AEB8",
+    cache_read: "#D65B88",
   },
   dark: {
     input: "#64A0FF",
     output: "#FFB35C",
     cache_write: "#6FD38D",
-    cache_read: "#8E949C",
+    cache_read: "#F080AB",
   },
 };
 
-export function chartTokens(mode: ThemeMode): ChartTokens {
+export function chartTokens(
+  mode: ThemeMode,
+  overrides: Partial<Record<TokenKind, string>> = {},
+): ChartTokens {
   const dark = mode === "dark";
-  const colors = SERIES_COLORS[mode];
+  const colors = { ...SERIES_COLORS[mode], ...overrides };
   // UX01（DESIGN.md §2/§5）：网格线映射 --ts-separator；tooltip 用 elevated
   // 浮层（85%），与 Naive 浮层同一配方。
   const separator = dark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.08)";
