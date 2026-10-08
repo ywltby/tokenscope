@@ -9,6 +9,7 @@ import { defineComponent, h, type VNode } from "vue";
 import EventTable from "./EventTable.vue";
 import { projectLabel, type EventCostBreakdown, type EventList, type EventRow } from "../types";
 import { formatCostBreakdownRows, formatCostBreakdownText } from "../lib/costBreakdown";
+import { UNIT_PRICE_SUFFIX_AFTER_AMOUNT } from "../lib/tokenDisplay";
 
 function row(over: Partial<EventRow> = {}): EventRow {
   return {
@@ -374,6 +375,8 @@ describe("EventTable 费用触发器可访问性（UX03）", () => {
             cost: 2.206008,
             breakdown: bd(),
             open: open.value,
+            // RC06：外部点击只在**固定态**生效（hover/focus 各自独立）。
+            pinned: pinned.value,
             tooltipStyle: TIP_STYLE,
             "onHover-enter": () => (hover.value = true),
             "onHover-leave": () => (hover.value = false),
@@ -485,6 +488,51 @@ describe("EventTable 费用触发器可访问性（UX03）", () => {
     // Space 的合成 click 同样能打开
     await trigger.trigger("click");
     await waitTip(true);
+    host.unmount();
+  });
+
+  // RC06：费用浮层的外部点击关闭（复核现象：只有帮助浮层能外部关闭，
+  // 费用浮层依赖的 NTooltip clickoutside 在 trigger="manual" 下不生效）。
+  it("cost_tooltip_closes_on_outside_click", async () => {
+    const { host, trigger } = mountCell();
+    // 点击固定 → 打开
+    await trigger.trigger("click");
+    await waitTip(true);
+    const descId = trigger.attributes("aria-describedby");
+    expect(descId, "固定态必须有描述关联").toBeTruthy();
+    // 移开指针（hover 结束，但 pinned 仍在 → 不得关闭）
+    await trigger.trigger("mouseleave");
+    await flushPromises();
+    expect(tipVisible(), "固定态下移开指针不得关闭").toBe(true);
+    // 点击浮层与触发器之外的位置 → 关闭并清除描述关联
+    const outside = document.createElement("div");
+    outside.id = "rc06-outside-target";
+    document.body.appendChild(outside);
+    outside.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+    await waitTip(false);
+    expect(trigger.attributes("aria-describedby"), "关闭后描述关联清除").toBeUndefined();
+    // 触发器仍可再次激活
+    await trigger.trigger("click");
+    await waitTip(true);
+    host.unmount();
+  });
+
+  // RC06/RC07：浮层自身说明单价量纲，且部分计价状态出现在内容里。
+  it("cost_tooltip_states_unit_and_partial_status", async () => {
+    const { host, trigger } = mountCell();
+    await trigger.trigger("focus");
+    await waitTip(true);
+    const body = document.getElementById(trigger.attributes("aria-describedby")!);
+    expect(body, "描述节点必须存在").not.toBeNull();
+    const text = body!.textContent ?? "";
+    // 量纲来自单一来源，且写在浮层内部（不是只在列头/注释里）
+    expect(text).toContain("USD / 1M token");
+    expect(text).toContain("每百万 token");
+    // 公式行的单位与 UNIT_PRICE_SUFFIX 同源
+    expect(text).toContain(`${UNIT_PRICE_SUFFIX_AFTER_AMOUNT} =`);
+    // 未完成计价（fixture complete=false）必须显式说明，不伪装成完整金额
+    expect(text).toContain("未计价");
     host.unmount();
   });
 

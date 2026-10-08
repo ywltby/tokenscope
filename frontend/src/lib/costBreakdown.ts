@@ -3,7 +3,7 @@
 // 结构按 DESIGN.md §5「事实 → 公式 → 结果 → 来源」排列。
 import { fmtNum } from "../types";
 import { formatMoney } from "./formatMoney";
-import { TOKEN_BUCKETS, tokenBucketLabel } from "./tokenDisplay";
+import { TOKEN_BUCKETS, UNIT_PRICE_SUFFIX_AFTER_AMOUNT, tokenBucketLabel } from "./tokenDisplay";
 import type { CostLine, CostLineKind, EventCostBreakdown, MatchMode } from "../types";
 
 /** 单行展示模型：label/value 两列；detail 为整行说明；divider 分组。 */
@@ -96,7 +96,9 @@ function formulaRows(lines: CostLine[]): BreakdownRow[] {
       l.rate_kind === "same_as_input" ? `输入价 ${fmtUnit(l.unit_price)}` : fmtUnit(l.unit_price);
     return {
       label: KIND_LABEL[l.kind],
-      value: `${fmtNum(l.tokens)} × ${unit}/M = ${fmtMoney(l.subtotal)}`,
+      // RC07：单位来自 tokenDisplay 的单一来源（不再各处自造 "/M" 字面量），
+      // 完整量纲在浮层内另有说明（USD / 1M token）。金额仍来自后端 DTO。
+      value: `${fmtNum(l.tokens)} × ${unit}${UNIT_PRICE_SUFFIX_AFTER_AMOUNT} = ${fmtMoney(l.subtotal)}`,
     };
   });
 }

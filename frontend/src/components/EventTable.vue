@@ -129,6 +129,8 @@ const columns = computed<DataTableColumn[]>(() => [
         cost: c,
         breakdown: bd,
         open,
+        // RC06：外部点击只对**固定态**生效，由本层清除 pinnedKey。
+        pinned: pinnedKey.value === key,
         // 任务 6：elevated 玻璃浮层——480px 上限 + 16px 模糊 + 12px 圆角
         //（背景色来自 naiveTheme Tooltip.color = --ts-surface-elevated 85%）
         // UX01：盒模型按 border-box 计算，长文本换行；外框宽度受视口约束

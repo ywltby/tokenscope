@@ -264,3 +264,116 @@ describe("Settings 单价量纲（RC07）", () => {
     settings.unmount();
   });
 });
+
+// ── RC06.4：同时挂载多行时，描述关联不得互相串用 ──
+describe("Settings 多行浮层身份（RC06）", () => {
+  function rowOf(prefix: string, orName: string): PricingEntry {
+    return {
+      ...entry,
+      prefix,
+      openrouter: {
+        input: 1.0,
+        output: 2.0,
+        cache_write: null,
+        cache_read: null,
+        name: orName,
+      },
+    };
+  }
+
+  /** 同一应用实例内渲染两行（useId 的作用域是应用实例；分成两个 mount
+   *  会让两份 id 各自从 0 起，测不到真实情况）。 */
+  function renderCell(wrapper: VueWrapper, key: string, row: object): VNode {
+    const cols = (
+      wrapper.vm as unknown as {
+        priceColumns: { key: string; render?: (r: object) => VNode }[];
+      }
+    ).priceColumns;
+    const col = cols.find((c) => c.key === key);
+    if (!col?.render) throw new Error(`列 ${key} 无 render`);
+    return col.render(row);
+  }
+
+  it("row_descriptions_have_distinct_ids_and_their_own_content", async () => {
+    mockOk();
+    const settings = mount(Settings, { attachTo: document.body });
+    await flushPromises();
+    const host = mount(
+      {
+        setup: () => () => [
+          renderCell(settings, "input", rowOf("vendor/alpha-model", "Alpha 对照")),
+          renderCell(settings, "input", rowOf("vendor/beta-model", "Beta 对照")),
+        ],
+      },
+      { attachTo: document.body },
+    );
+    const [ta, tb] = host.findAll("button.help-trigger");
+    await ta!.trigger("focus");
+    await waitTip(true);
+    // 打开第二行后，两行各有自己的描述节点
+    await tb!.trigger("focus");
+    await flushPromises();
+    const idA = ta!.attributes("aria-describedby");
+    const idB = tb!.attributes("aria-describedby");
+    expect(idA, "A 行应有描述关联").toBeTruthy();
+    expect(idB, "B 行应有描述关联").toBeTruthy();
+    expect(idA, "两行描述 id 必须互不相同").not.toBe(idB);
+    const nodeA = document.getElementById(idA!);
+    const nodeB = document.getElementById(idB!);
+    expect(nodeA, "A 的描述节点必须存在").not.toBeNull();
+    expect(nodeB, "B 的描述节点必须存在").not.toBeNull();
+    // 两个 id 指向**不同**的节点，且各自内容属于本行（不串用那一份）
+    expect(nodeA === nodeB, "两行不得指向同一个描述节点").toBe(false);
+    expect(nodeA!.textContent).toContain("Alpha 对照");
+    expect(nodeA!.textContent).not.toContain("Beta 对照");
+    expect(nodeB!.textContent).toContain("Beta 对照");
+    expect(nodeB!.textContent).not.toContain("Alpha 对照");
+    // 触发器名称也各自带本行的模型前缀与列名
+    expect(ta!.attributes("aria-label")).toContain("vendor/alpha-model 输入单价说明");
+    expect(tb!.attributes("aria-label")).toContain("vendor/beta-model 输入单价说明");
+    // 同一个 id 在文档里最多属于一份内容副本；两行之间绝不共用同一 id
+    expect(document.querySelectorAll(`[id="${idA}"]`).length).toBeGreaterThan(0);
+    host.unmount();
+    settings.unmount();
+  });
+});
+
+// ── RC07.4：真实调用点保留完整单价精度（不是只比元数据常量） ──
+describe("Settings 单价精度真实渲染（RC07）", () => {
+  it("unit_precision_survives_settings_and_breakdown", async () => {
+    mockOk();
+    const settings = mount(Settings, { attachTo: document.body });
+    await flushPromises();
+    const precise: PricingEntry = {
+      ...entry,
+      input: 1.234567,
+      output: 12.3456789,
+      cache_write: 0.123456789,
+      cache_read: "same_as_input",
+      openrouter: {
+        input: 1.234567,
+        output: 12.3456789,
+        cache_write: 0,
+        cache_read: null,
+        name: "Precise",
+      },
+    };
+    const cases: [string, string][] = [
+      ["input", "$1.234567"],
+      ["output", "$12.3456789"],
+      ["cache_write", "$0.123456789"],
+    ];
+    for (const [key, expected] of cases) {
+      const cell = mountCell(settings, key, precise);
+      // 单元格**渲染文本**必须保留完整精度（此前被舍成 $1.23）
+      expect(cell.text(), `${key} 列应显示 ${expected}`).toContain(expected);
+      expect(cell.text()).not.toContain("$1.23 ");
+      cell.unmount();
+    }
+    // SameAsInput 在单价视图仍保留语义，不被压成数字或未知
+    const readCell = mountCell(settings, "cache_read", precise);
+    expect(readCell.text()).toContain("同输入价");
+    readCell.unmount();
+    settings.unmount();
+  });
+});

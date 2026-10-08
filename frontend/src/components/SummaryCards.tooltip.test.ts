@@ -115,4 +115,36 @@ describe("命中率公式真实浮层（F08）", () => {
     await waitTip(false);
     w.unmount();
   });
+
+  // RC06：命中率触发器必须是原生 button（Enter/Space 由浏览器内建激活，
+  // 不再手写 keydown 切换），且固定态支持外部点击关闭。
+  it("hit_rate_trigger_is_native_button_and_closes_on_outside_click", async () => {
+    const w = mountReal();
+    const trigger = w.find(".metric-label-help");
+    expect(trigger.element.tagName, "触发器应为原生 button").toBe("BUTTON");
+    expect(trigger.attributes("type")).toBe("button");
+    // 点击固定 → 打开 + 描述关联指向存在节点
+    await trigger.trigger("click");
+    await waitTip(true);
+    const descId = trigger.attributes("aria-describedby");
+    expect(descId, "固定态必须有 aria-describedby").toBeTruthy();
+    expect(document.getElementById(descId!), "描述节点必须真实存在").not.toBeNull();
+    // 单独 keydown 不得再次 toggle（证明没有会与原生重复的手写键盘处理）
+    for (const key of ["Enter", " "]) {
+      await trigger.trigger("keydown", { key, preventDefault: () => {} } as never);
+      await flushPromises();
+      expect(formulaVisible(), `单独 keydown(${key}) 不得再次 toggle`).toBe(true);
+    }
+    // 点击外部 → 关闭并清除描述关联
+    const outside = document.createElement("div");
+    document.body.appendChild(outside);
+    outside.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+    await waitTip(false);
+    expect(trigger.attributes("aria-describedby"), "关闭后描述关联清除").toBeUndefined();
+    // 仍可再次激活
+    await trigger.trigger("click");
+    await waitTip(true);
+    w.unmount();
+  });
 });

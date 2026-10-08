@@ -30,3 +30,9 @@ export function tokenBucketLabel(key: TokenBucketKey): string {
 export const UNIT_PRICE_DENOMINATOR = "USD / 1M token";
 /** 列头用的紧凑写法（与 {@link UNIT_PRICE_DENOMINATOR} 等价）。 */
 export const UNIT_PRICE_SUFFIX = "$/M";
+/**
+ * 公式行跟在金额之后的量纲后缀：单价数值本身已带 `$`（如 `$8`），
+ * 因此这里只补 `/M`，与 {@link UNIT_PRICE_SUFFIX} 同一口径、同一来源，
+ * 避免各处再自造 "/百万"、"per 1M" 等写法。
+ */
+export const UNIT_PRICE_SUFFIX_AFTER_AMOUNT = "/M";

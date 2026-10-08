@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import SummaryCards from "./SummaryCards.vue";
+import { TOKEN_BUCKETS } from "../lib/tokenDisplay";
 import type { Group } from "../types";
 
 // NTooltip 打桩为透传渲染（trigger + 内容同渲染），断言公式收进 tooltip。
@@ -87,10 +88,17 @@ describe("SummaryCards 指标条（设计系统 Task 3）", () => {
     const parts = w.find('[aria-label="token 分项"]');
     expect(parts.exists()).toBe(true);
     const text = parts.text();
-    expect(text).toContain("输入");
-    expect(text).toContain("输出");
-    expect(text).toContain("缓存写");
-    expect(text).toContain("缓存命中");
+    // RC06/RC07：四类名称与顺序都来自 tokenDisplay 单一来源——逐项核对，
+    // 且按该来源的顺序出现（不再各自硬编码一套词表）。
+    for (const b of TOKEN_BUCKETS) {
+      expect(text, `分项应含「${b.label}」`).toContain(b.label);
+    }
+    const positions = TOKEN_BUCKETS.map((b) => text.indexOf(b.label));
+    expect(
+      positions.every((p) => p >= 0),
+      "四类都应出现",
+    ).toBe(true);
+    expect(positions, "顺序必须与单一来源一致").toEqual([...positions].sort((a, b) => a - b));
     expect(text).toContain("12,000");
     // DESIGN.md：不使用 emoji 作为产品图标
     expect(w.text()).not.toMatch(/\p{Extended_Pictographic}/u);
@@ -154,8 +162,17 @@ describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
     await trigger.trigger("keydown", { key: "Escape" });
     await flushPromises();
     expect(trigger.attributes("aria-expanded")).toBe("false");
-    // Enter/Space 切换（click 等价路径）
-    await trigger.trigger("keydown", { key: "Enter" });
+    // RC06：触发器改为原生 button 后，Enter/Space 由**浏览器**合成一次 click，
+    // 组件不再手写 keydown 切换（手写 + 原生会重复 toggle）。因此这里断言：
+    // 单独 keydown 不改变状态，激活事件（click）才切换。
+    for (const key of ["Enter", " "]) {
+      await trigger.trigger("keydown", { key, preventDefault: () => {} } as never);
+      await flushPromises();
+      expect(trigger.attributes("aria-expanded"), `单独 keydown(${key}) 不得再次 toggle`).toBe(
+        "false",
+      );
+    }
+    await trigger.trigger("click");
     await flushPromises();
     expect(trigger.attributes("aria-expanded")).toBe("true");
   });
@@ -173,7 +190,11 @@ describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
     const w = mountCards(totals());
     const trigger = w.find(".metric-label-help");
     expect(trigger.exists()).toBe(true);
-    expect(trigger.attributes("tabindex")).toBe("0");
+    // RC06：可聚焦性来自原生 button（不再需要 tabindex="0" 的 div 兜底，
+    // 也不需要手写键盘处理）。
+    expect(trigger.element.tagName).toBe("BUTTON");
+    expect(trigger.attributes("type")).toBe("button");
+    expect(trigger.attributes("role"), "button 不需要再挂 role").toBeUndefined();
     // 公式只出现在 tooltip 内容节点（.hit-tip）内，标签本身只有结论
     const tip = w.find(".hit-tip");
     expect(tip.exists()).toBe(true);

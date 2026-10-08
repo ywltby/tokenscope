@@ -3,10 +3,11 @@
 // （44px），右侧三个次读数（26px）发丝线分隔；含未计价 token 时费用旁警告
 // 胶囊；命中率公式收进 tooltip（hover/focus 均可打开）；底部四类 token
 // 分项比例条 + 色点图例。公式口径不变：cache_read / (input + cache_read)。
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, useId } from "vue";
 import { NTooltip } from "naive-ui";
 import { fmtNum, type Group } from "../types";
 import { formatMoney } from "../lib/formatMoney";
+import { TOKEN_BUCKETS } from "../lib/tokenDisplay";
 
 const props = defineProps<{ totals: Group }>();
 
@@ -29,9 +30,13 @@ const costText = computed(() => formatMoney(props.totals.cost_usd, "summary"));
 /// 未知价格且已计价部分为 0：显示"未知†"而不是 $0.00（缺价 ≠ 免费）。
 const costUnknownOnly = computed(() => props.totals.unknown_pricing && props.totals.cost_usd === 0);
 
-// R09/F08：命中率公式 tooltip 受控显示——hover/focus/click 三态分离、
-// 统一 show 计算：hover 随指针（触发器或浮层内容上保持）、focus 随键盘
-// 焦点（focus 在时鼠标离开不取消）、click 固定切换；Escape 一律关闭。
+// R09/F08：命中率公式 tooltip 受控显示——hover/focus/pinned 三态分离、
+// 统一 show 计算：hover 随指针、focus 随键盘焦点（focus 在时鼠标离开不取消）、
+// click 固定切换；Escape 一律关闭。
+// RC06：触发器改为原生 `button type=button`——浏览器内建 Enter/Space 各产生
+// 一次 click，删除原先手写的 keydown.enter/keydown.space（与原生重复 toggle），
+// 并补上**固定态**的外部点击关闭（NTooltip 的 clickoutside 在 trigger="manual"
+// 下不可靠，与 HelpTooltip/CostBreakdownTooltip 同一处理方式）。
 const hoverOpen = ref(false);
 const focusOpen = ref(false);
 const pinned = ref(false);
@@ -41,13 +46,27 @@ function closeHitTip(): void {
   focusOpen.value = false;
   pinned.value = false;
 }
+const descId = `ts-hit-rate-${useId()}`;
+const triggerRef = ref<HTMLElement | null>(null);
+function onDocumentClick(e: MouseEvent): void {
+  if (!pinned.value) return;
+  const target = e.target as Node | null;
+  if (!target) return;
+  if (triggerRef.value?.contains(target)) return;
+  if (document.getElementById(descId)?.contains(target)) return;
+  closeHitTip();
+}
+onMounted(() => document.addEventListener("click", onDocumentClick));
+onBeforeUnmount(() => document.removeEventListener("click", onDocumentClick));
 
-const parts = computed(() => [
-  { kind: "input", label: "输入", value: props.totals.tokens.input },
-  { kind: "output", label: "输出", value: props.totals.tokens.output },
-  { kind: "cache_write", label: "缓存写", value: props.totals.tokens.cache_write },
-  { kind: "cache_read", label: "缓存命中", value: props.totals.tokens.cache_read },
-]);
+// UX07/RC06：四类分项名称与顺序来自 tokenDisplay 单一来源（不再各自硬编码）。
+const parts = computed(() =>
+  TOKEN_BUCKETS.map((b) => ({
+    kind: b.key,
+    label: b.label,
+    value: props.totals.tokens[b.key],
+  })),
+);
 </script>
 
 <template>
@@ -85,25 +104,31 @@ const parts = computed(() => [
         <div class="metric-item">
           <NTooltip placement="bottom" trigger="manual" :show="hitTipOpen">
             <template #trigger>
-              <div
-                class="metric-label metric-label-help"
-                tabindex="0"
-                role="button"
+              <!-- RC06：原生 button + 局部外观重置；Enter/Space 由浏览器内建
+                   激活（各一次 click），不再手写 keydown 切换。 -->
+              <button
+                ref="triggerRef"
+                type="button"
+                class="metric-label metric-label-help ts-focusable label-trigger"
                 aria-label="缓存命中率说明"
                 :aria-expanded="hitTipOpen"
+                :aria-describedby="hitTipOpen ? descId : undefined"
                 @mouseenter="hoverOpen = true"
                 @mouseleave="hoverOpen = false"
                 @focus="focusOpen = true"
                 @blur="focusOpen = false"
                 @click="pinned = !pinned"
                 @keydown.escape="closeHitTip"
-                @keydown.enter.prevent="pinned = !pinned"
-                @keydown.space.prevent="pinned = !pinned"
               >
                 缓存命中率
-              </div>
+              </button>
             </template>
-            <div class="hit-tip" @mouseenter="hoverOpen = true" @mouseleave="hoverOpen = false">
+            <div
+              :id="descId"
+              class="hit-tip"
+              @mouseenter="hoverOpen = true"
+              @mouseleave="hoverOpen = false"
+            >
               命中率 = 缓存命中 ÷（新增输入 + 缓存命中）。<br />
               缓存命中直接复用上下文，消耗 token 数计入分母但费用通常为零或极低。
             </div>
@@ -190,6 +215,19 @@ const parts = computed(() => [
 .metric-label-help {
   cursor: help;
   width: fit-content;
+}
+
+/* RC06：命中率说明触发器改为原生 button，这里只做局部外观重置——
+   字号/颜色/对齐与原来的 div 标签一致，焦点环仍来自全局 .ts-focusable。 */
+.label-trigger {
+  appearance: none;
+  margin: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  text-align: inherit;
 }
 
 /* 次读数 26px/600 */
