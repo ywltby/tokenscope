@@ -101,7 +101,9 @@ pub fn run() {
                 if let Some(w) = window.get_webview_window("main") {
                     save_window_state_now(&w);
                 }
-                match commands::close_decision_from(&commands::load_settings_or_default()) {
+                // AP02：关闭决策走专用入口——设置读不出来时退回「每次询问」，
+                // 且绝不复用该退路决定采集范围（采集路径读失败即报错）。
+                match commands::close_decision_now() {
                     commands::CloseDecision::Minimize => {
                         let _ = window.hide();
                         api.prevent_close();

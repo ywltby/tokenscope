@@ -186,9 +186,62 @@ pub fn startup_diagnostics(
 #[tauri::command]
 pub async fn source_status() -> Result<Vec<SourceStatus>, String> {
     run_blocking("source_status", move || {
-        source_status_impl(&load_settings_or_default())
+        // AP02：严格读取——配置存在但坏掉时**拒绝**，绝不用默认来源顶替
+        //（那会把用户停用的来源重新拉回统计，并谎报数据范围）。
+        let s = load_settings_strict()?;
+        source_status_impl(&s)
     })
     .await
+}
+
+/// AP02：读设置的**严格**入口。文件缺失 = 产品默认值（首次启动的正常
+/// 路径）；文件存在但读取/解析失败 = Err（含路径与原因）。所有决定
+/// 「采集哪些来源」的入口（查询、状态、重建）都用它。
+pub(crate) fn load_settings_strict() -> anyhow::Result<tokenscope::settings::Settings> {
+    let path = tokenscope::settings::settings_path()?;
+    tokenscope::settings::load(&path)
+}
+
+/// C1：由设置值解析各来源的有效配置（目录覆盖 + 启停）。
+fn source_settings_from(
+    s: &tokenscope::settings::Settings,
+) -> (
+    Option<std::path::PathBuf>,
+    Option<std::path::PathBuf>,
+    bool,
+    bool,
+) {
+    let c = s.source_config(true);
+    let x = s.source_config(false);
+    (
+        c.dir.map(std::path::PathBuf::from),
+        x.dir.map(std::path::PathBuf::from),
+        c.enabled,
+        x.enabled,
+    )
+}
+
+/// AP02：采集/状态入口的统一来源解析内核（可注入读取结果以便测试）。
+/// 读取失败 → 明确错误；**不**回退默认来源。
+#[allow(clippy::type_complexity)]
+fn source_settings_impl(
+    loaded: anyhow::Result<tokenscope::settings::Settings>,
+) -> Result<
+    (
+        Option<std::path::PathBuf>,
+        Option<std::path::PathBuf>,
+        bool,
+        bool,
+    ),
+    String,
+> {
+    match loaded {
+        Ok(s) => Ok(source_settings_from(&s)),
+        Err(e) => {
+            log::warn!("设置读取失败，拒绝按默认来源采集: {e:#}");
+            Err(format!("{e:#}"))
+        }
+    }
 }
 
 /// C1：读设置并解析为各来源的有效配置（目录覆盖 + 启停）。
@@ -202,22 +255,7 @@ fn source_settings() -> Result<
     ),
     String,
 > {
-    let s = load_settings_or_default();
-    let c = s.source_config(true);
-    let x = s.source_config(false);
-    Ok((
-        c.dir.map(std::path::PathBuf::from),
-        x.dir.map(std::path::PathBuf::from),
-        c.enabled,
-        x.enabled,
-    ))
-}
-
-pub(crate) fn load_settings_or_default() -> tokenscope::settings::Settings {
-    tokenscope::settings::settings_path()
-        .ok()
-        .and_then(|p| tokenscope::settings::load(&p).ok())
-        .unwrap_or_default()
+    source_settings_impl(load_settings_strict())
 }
 
 // ── 关闭行为三态（关闭确认与配置文件计划）──────────────────
@@ -239,6 +277,26 @@ pub fn close_decision_from(s: &Settings) -> CloseDecision {
         Some(CloseAction::Minimize) => CloseDecision::Minimize,
         Some(CloseAction::Quit) => CloseDecision::Quit,
         None => CloseDecision::Ask,
+    }
+}
+
+/// AP02：关闭决策的读取入口——设置不可读时**退回「每次询问」**（安全默认：
+/// 不隐藏窗口、不退出进程，由用户当场决定），并记录原因。
+///
+/// 该退路**只**服务关闭行为：它绝不出现在采集/状态/重建路径上——那里配置
+/// 读不出来就是错误，否则坏配置会被悄悄当成"用户重新启用了默认来源"。
+pub fn close_decision_now() -> CloseDecision {
+    close_decision_impl(load_settings_strict())
+}
+
+/// AP02：关闭决策内核（可注入读取结果以便测试）。
+pub(crate) fn close_decision_impl(loaded: anyhow::Result<Settings>) -> CloseDecision {
+    match loaded {
+        Ok(s) => close_decision_from(&s),
+        Err(e) => {
+            log::warn!("关闭行为：设置读取失败，退回「每次询问」: {e:#}");
+            CloseDecision::Ask
+        }
     }
 }
 
@@ -802,6 +860,106 @@ mod tests {
             st.warnings
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 隔离临时目录（设置文件测试共用）。
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("tokenscope-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// AP02：坏配置必须拒绝查询与来源状态，绝不用默认来源顶替用户配置。
+    #[test]
+    fn corrupt_settings_rejects_query_and_source_status() {
+        let dir = tmp_dir("ap02-corrupt");
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, "price_auto_sync = true\n[sources.claude\n").unwrap();
+        // 采集探针：若入口放行（旧行为 = 回退默认来源），才会走到采集一步。
+        let mut collected = 0u32;
+        match source_settings_impl(tokenscope::settings::load(&path)) {
+            Ok(_) => collected += 1,
+            Err(e) => assert!(
+                e.contains("设置解析失败") || e.contains("读设置失败"),
+                "错误必须携带原因: {e}"
+            ),
+        }
+        assert_eq!(collected, 0, "配置损坏时不得回退默认来源继续采集");
+        // 状态入口共用同一内核（同一错误形态）。
+        let err = source_settings_impl(tokenscope::settings::load(&path)).unwrap_err();
+        assert!(err.contains("设置解析失败"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AP02：配置**在位但读不出来**（路径被目录占用）同样拒绝，不回退默认。
+    #[test]
+    fn unreadable_settings_does_not_enable_default_sources() {
+        let dir = tmp_dir("ap02-unreadable");
+        let path = dir.join("settings.toml");
+        // exists() = true，read_to_string 必失败——「在位但读不出来」。
+        std::fs::create_dir_all(&path).unwrap();
+        let err = source_settings_impl(tokenscope::settings::load(&path)).unwrap_err();
+        assert!(err.contains("读设置失败"), "必须报告读取失败: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AP02：用户显式停用/自定义根在位时，配置损坏不得把它们还原成默认。
+    #[test]
+    fn corrupt_settings_does_not_restore_disabled_sources() {
+        let dir = tmp_dir("ap02-disabled");
+        let path = dir.join("settings.toml");
+        std::fs::write(
+            &path,
+            "[sources.claude]\nenabled = false\ndir = \"D:/logs/claude\"\n[sources.codex]\nenabled = false\n",
+        )
+        .unwrap();
+        let (cd, _xd, ce, xe) = source_settings_impl(tokenscope::settings::load(&path)).unwrap();
+        assert!(!ce && !xe, "基线：两来源显式停用");
+        assert_eq!(cd.as_deref(), Some(std::path::Path::new("D:/logs/claude")));
+        // 同一路径被破坏后：拒绝，而不是变成"两来源默认启用 + 默认根"。
+        std::fs::write(&path, "not [valid toml").unwrap();
+        assert!(source_settings_impl(tokenscope::settings::load(&path)).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AP02：文件缺失 = 首次启动 → 产品默认值（默认启用 + 默认根）仍成立。
+    #[test]
+    fn missing_settings_keeps_documented_defaults() {
+        let dir = tmp_dir("ap02-missing");
+        let path = dir.join("nested").join("settings.toml");
+        let (cd, xd, ce, xe) = source_settings_impl(tokenscope::settings::load(&path)).unwrap();
+        assert!(ce && xe, "首次启动：两个来源默认启用");
+        assert!(
+            cd.is_none() && xd.is_none(),
+            "首次启动：两来源走默认根（None）"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AP02：关闭决策的读取失败退路**只**退回「每次询问」，不改变用户
+    /// 明确表达的退出/最小化意图。
+    #[test]
+    fn close_decision_reading_failure_falls_back_to_ask() {
+        assert_eq!(
+            close_decision_impl(Err(anyhow::anyhow!("设置解析失败: settings.toml"))),
+            CloseDecision::Ask
+        );
+        for (action, expected) in [
+            (Some(CloseAction::Quit), CloseDecision::Quit),
+            (Some(CloseAction::Minimize), CloseDecision::Minimize),
+            (None, CloseDecision::Ask),
+        ] {
+            let s = Settings {
+                close_action: action,
+                ..Default::default()
+            };
+            assert_eq!(
+                close_decision_impl(Ok(s)),
+                expected,
+                "close_action={action:?}"
+            );
+        }
     }
 
     #[test]
