@@ -449,6 +449,11 @@ function buildChecks(m, ctx) {
   // UX02
   if (ctx.fixture === "normal") {
     checks.push([
+      "settings_preloads_before_navigation_without_duplicate_read_or_overlay",
+      m.settingsPreload?.before > 0 && m.settingsPreload?.before === m.settingsPreload?.after && !m.settingsPreload?.overlay,
+      JSON.stringify(m.settingsPreload),
+    ]);
+    checks.push([
       "segmented_outer_height_is_32",
       m.segmented.length > 0 && m.segmented.every((s) => near(s.outer?.height, 32)),
       m.segmented.map((s) => s.outer?.height).join(","),
@@ -868,9 +873,15 @@ for (const fixtureName of args.fixtures) {
 
         // 最后切到设置页量测第三张表（聚合/明细已在汇总页量测）
         if (fixtureName === "normal" || fixtureName === "long-text") {
+          const readsBefore = session.ipcCalls.filter(c => c.cmd === "settings_get").length;
           const goto = await page.evaluate(GOTO_SETTINGS);
           if (goto.ok) {
             await page.waitForTimeout(600);
+            m.settingsPreload = {
+              before: readsBefore,
+              after: session.ipcCalls.filter(c => c.cmd === "settings_get").length,
+              overlay: await page.locator(".settings-view .n-spin-container").count() > 0,
+            };
             await page.locator(".ts-auto-table-pricing").screenshot({ path: join(args.output, `${label}-pricing.png`) });
             if (fixtureName === "normal") {
               m.settingsTable = await page.evaluate(READ_FIRST_TABLE_TYPO);

@@ -1,5 +1,17 @@
 <script setup lang="ts">
-import { computed, h, onMounted, onUnmounted, ref, watch, type Ref, type VNode } from "vue";
+import {
+  computed,
+  h,
+  inject,
+  onActivated,
+  onDeactivated,
+  onMounted,
+  onUnmounted,
+  ref,
+  watch,
+  type Ref,
+  type VNode,
+} from "vue";
 import { priceSourceLine } from "../lib/statsView";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -9,7 +21,6 @@ import {
   NDataTable,
   NInput,
   NSelect,
-  NSpin,
   NSwitch,
   NTag,
   useMessage,
@@ -34,6 +45,10 @@ import {
   type TokenBucketKey,
 } from "../lib/tokenDisplay";
 import HelpTooltip from "../components/HelpTooltip.vue";
+import { SETTINGS_PRELOAD } from "../lib/settingsPreload";
+
+const preload = inject(SETTINGS_PRELOAD, null);
+const readInitial = preload ? preload.read : invoke;
 
 const props = defineProps<{ refreshKey: number }>();
 const msg = useMessage();
@@ -42,7 +57,6 @@ const sources = ref<SourceStatus[]>([]);
 const cache = ref<CacheInfo | null>(null);
 const pricing = ref<PricingView | null>(null);
 const syncing = ref(false);
-const loading = ref(false);
 const rebuilding = ref(false);
 const { tz } = useTimezone();
 const autostart = ref<boolean | null>(null);
@@ -217,7 +231,7 @@ const autostartBlock = newBlock();
 async function loadSources(): Promise<void> {
   await runBlockRead(sourcesBlock, sourcesLoading, async (isCurrent) => {
     try {
-      const fresh = await invoke<SourceStatus[]>("source_status");
+      const fresh = await readInitial<SourceStatus[]>("source_status");
       if (!isCurrent()) return;
       sources.value = fresh;
       sourcesError.value = null;
@@ -231,7 +245,7 @@ async function loadSources(): Promise<void> {
 async function loadCache(): Promise<void> {
   await runBlockRead(cacheBlock, cacheLoading, async (isCurrent) => {
     try {
-      const fresh = await invoke<CacheInfo>("cache_stats");
+      const fresh = await readInitial<CacheInfo>("cache_stats");
       if (!isCurrent()) return;
       cache.value = fresh;
       cacheError.value = null;
@@ -245,7 +259,7 @@ async function loadCache(): Promise<void> {
 async function loadPricing(): Promise<void> {
   await runBlockRead(pricingBlock, pricingLoading, async (isCurrent) => {
     try {
-      const fresh = await invoke<PricingView>("pricing_entries");
+      const fresh = await readInitial<PricingView>("pricing_entries");
       if (!isCurrent()) return;
       pricing.value = fresh;
       pricingError.value = null;
@@ -259,15 +273,10 @@ async function loadPricing(): Promise<void> {
 }
 
 async function loadAll(): Promise<void> {
-  loading.value = true;
-  try {
-    // 各独立读取并发发起、各自处理失败——不用一个共享 loading/error
-    // 覆盖全部结果。RC03：设置配置（来源草稿 + 自动同步 + 关闭动作）
-    // 由**同一次** settings_get 初始化，不再分三个消费点各读一遍。
-    await Promise.allSettled([loadSources(), loadCache(), loadPricing(), loadSettings()]);
-  } finally {
-    loading.value = false;
-  }
+  // 各独立读取并发发起、各自处理失败——不用一个共享 loading/error
+  // 覆盖全部结果。RC03：设置配置（来源草稿 + 自动同步 + 关闭动作）
+  // 由**同一次** settings_get 初始化，不再分三个消费点各读一遍。
+  await Promise.allSettled([loadSources(), loadCache(), loadPricing(), loadSettings()]);
 }
 
 // C1：来源配置草稿（编辑后按行保存）
@@ -334,7 +343,7 @@ async function loadSettings(): Promise<void> {
     const epochAtRead = mutationEpoch;
     let s: SettingsPayload;
     try {
-      s = await invoke<SettingsPayload>("settings_get");
+      s = await readInitial<SettingsPayload>("settings_get");
     } catch (e) {
       if (readSeq !== settingsReadSeq || disposed) return;
       // AP04：晚到的**失败**读取与晚到的成功读取适用同一守卫——写入已
@@ -467,7 +476,7 @@ async function openPricing(): Promise<void> {
 async function loadAutostart(): Promise<void> {
   await runBlockRead(autostartBlock, autostartLoading, async (isCurrent) => {
     try {
-      const fresh = await invoke<boolean>("autostart_status");
+      const fresh = await readInitial<boolean>("autostart_status");
       if (!isCurrent()) return;
       autostart.value = fresh;
       autostartError.value = null;
@@ -511,15 +520,31 @@ async function setAutoSync(enabled: boolean): Promise<void> {
   }
 }
 
+let active = true;
+let activatedOnce = false;
+onActivated(() => {
+  active = true;
+  if (activatedOnce) {
+    void loadAll();
+    void loadAutostart();
+  }
+  activatedOnce = true;
+});
+onDeactivated(() => {
+  active = false;
+});
 onMounted(() => {
   // RC03：设置配置只读一次（loadAll → loadSettings）。
-  void loadAll();
+  void loadAll().then(() => {
+    // 久未打开的启动预读先展示，再校验新鲜度，不遮挡现有界面。
+    if (!disposed && preload && preload.age() > 30_000) void loadAll();
+  });
   void loadAutostart();
 });
 watch(
   () => props.refreshKey,
   () => {
-    void loadAll();
+    if (active) void loadAll();
   },
 );
 onUnmounted(() => {
@@ -655,8 +680,8 @@ defineExpose({ priceColumns });
 </script>
 
 <template>
-  <NSpin :show="loading">
-    <!-- 最小高度保证加载转圈居中于可视区 -->
+  <div class="settings-view">
+    <!-- 首次读取尚未完成时保留稳定布局，各区块独立显示状态。 -->
     <div style="min-height: 380px">
       <!-- 任务 7：macOS 系统设置式分组——组标题在卡片外，每组一张 .ts-card -->
       <section class="settings-group">
@@ -1046,7 +1071,7 @@ defineExpose({ priceColumns });
         </section>
       </section>
     </div>
-  </NSpin>
+  </div>
 </template>
 <style scoped>
 /* 任务 7：macOS 系统设置式分组——组标题在卡片外（13px/600 次要色） */

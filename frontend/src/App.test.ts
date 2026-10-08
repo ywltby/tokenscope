@@ -114,6 +114,29 @@ function triggerCloseRequested(): void {
 }
 
 describe("App 集成（Task 4）", () => {
+  it("汇总首屏已预读设置数据，切换回来复用设置实例", async () => {
+    mockApp(statusOk);
+    const w = mount(App);
+    await flushPromises();
+    expect(w.findComponent({ name: "Settings" }).exists()).toBe(false);
+    for (const command of [
+      "source_status",
+      "cache_stats",
+      "pricing_entries",
+      "settings_get",
+      "autostart_status",
+    ]) {
+      expect(invokeMock).toHaveBeenCalledWith(command);
+    }
+    await w.get('[aria-label="页面切换"] [aria-label="设置"]').trigger("click");
+    await flushPromises();
+    const instance = w.findComponent({ name: "Settings" }).vm;
+    await w.get('[aria-label="页面切换"] [aria-label="汇总"]').trigger("click");
+    await w.get('[aria-label="页面切换"] [aria-label="设置"]').trigger("click");
+    await flushPromises();
+    expect(w.findComponent({ name: "Settings" }).vm).toBe(instance);
+    w.unmount();
+  });
   it("needsSync=true 时全局横幅可见", async () => {
     mockApp(statusNeedsSync);
     const w = mount(App);

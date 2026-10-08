@@ -45,6 +45,7 @@ vi.mock("naive-ui", async (importOriginal) => {
 });
 
 import Settings from "./Settings.vue";
+import { createSettingsPreload, SETTINGS_PRELOAD } from "../lib/settingsPreload";
 // UX08：样式契约断言需要 SFC 源文本（项目无 @types/node，用 Vite ?raw）
 import settingsSource from "./Settings.vue?raw";
 
@@ -156,6 +157,21 @@ beforeEach(() => {
 });
 
 describe("Settings 同步状态传播（Task 4）", () => {
+  it("进入设置消费后台预读，不重复请求，也没有整页加载遮罩", async () => {
+    const preload = createSettingsPreload(invokeMock);
+    preload.start();
+    await flushPromises();
+    const w = mount(Settings, {
+      props: { refreshKey: 0 },
+      global: { provide: { [SETTINGS_PRELOAD as symbol]: preload } },
+    });
+    await flushPromises();
+    expect(invokeMock).toHaveBeenCalledTimes(5);
+    expect(vmOfSettings(w).autoSync).toBe(true);
+    expect(vmOfSettings(w).pricing?.modelsdev_count).toBe(10);
+    expect(w.findComponent({ name: "NSpin" }).exists()).toBe(false);
+    w.unmount();
+  });
   it("sync 部分失败仍重新调用 pricing_entries", async () => {
     let syncCalls = 0;
     invokeMock.mockImplementation((cmd: string) => {

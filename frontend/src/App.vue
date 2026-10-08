@@ -2,7 +2,7 @@
 // 应用壳（设计系统 Task 2，苹果风格）：吸顶玻璃导航 + 分段控件页面/主题
 // 切换 + 滚动容器。视觉改造不改数据流：回到汇总页仍强制刷新一次（设置页
 // 可能重建了缓存）。
-import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from "vue";
+import { computed, onBeforeUnmount, onMounted, provide, ref, watch, watchEffect } from "vue";
 import {
   dateZhCN,
   zhCN,
@@ -21,6 +21,14 @@ import PricingStatusBanner from "./components/PricingStatusBanner.vue";
 import CloseConfirmDialog from "./components/CloseConfirmDialog.vue";
 import Dashboard from "./views/Dashboard.vue";
 import Settings from "./views/Settings.vue";
+import { createSettingsPreload, SETTINGS_PRELOAD } from "./lib/settingsPreload";
+
+const settingsPreload = createSettingsPreload(invoke);
+provide(SETTINGS_PRELOAD, settingsPreload);
+// 首屏先挂载；只预读数据，不提前渲染隐藏的价格表。
+onMounted(() => {
+  settingsPreload.start();
+});
 
 const { preference, mode, setPreference } = useTheme();
 const theme = computed<GlobalTheme | null>(() => (mode.value === "dark" ? darkTheme : null));
@@ -226,7 +234,9 @@ function onCloseCancel(): void {
               :refresh-key="refreshKey"
               @go-settings="page = 'settings'"
             />
-            <Settings v-else :refresh-key="refreshKey" />
+            <KeepAlive>
+              <Settings v-if="page === 'settings'" :refresh-key="refreshKey" />
+            </KeepAlive>
           </main>
         </div>
         <!-- 关闭确认弹窗：未记忆默认动作时由后端触发 -->
