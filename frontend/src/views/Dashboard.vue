@@ -304,8 +304,48 @@ function saveSnapshot(): void {
   enqueueSnapshotSave(payload);
 }
 
+// AP06：来源检测独立状态。此前 `void loadSources()` 没有 catch——source_status
+// 拒绝会成为未处理 Promise，且旧 missing/empty 状态会一直留着（目录修好、
+// 点"刷新"也不会重查）。现在：独立错误态 + 读代次/在途合并 + 卸载守卫，
+// 手动刷新与外部刷新都重查；读取失败**不**清空已成功的汇总数据，只标注
+// 来源状态可能过期。
+const sourceError = ref<string | null>(null);
+const sourcesLoading = ref(false);
+let sourcesInflight: Promise<void> | null = null;
+let sourcesAgain = false;
+
 async function loadSources(): Promise<void> {
-  sourceStatus.value = await invoke<SourceStatus[]>("source_status");
+  if (sourcesInflight) {
+    // 合并连点/连发：在途期间只记一次补读意图，不并发第二条请求。
+    sourcesAgain = true;
+    await sourcesInflight;
+    return;
+  }
+  const round = (async () => {
+    sourcesLoading.value = true;
+    try {
+      const fresh = await invoke<SourceStatus[]>("source_status");
+      if (disposed) return;
+      sourceStatus.value = fresh;
+      sourceError.value = null;
+    } catch (e) {
+      if (disposed) return;
+      // 失败 ≠ 旧状态仍然有效：保留列表供参考，同时明确标注可能过期。
+      sourceError.value = errorText(e);
+    } finally {
+      sourcesLoading.value = false;
+    }
+  })();
+  sourcesInflight = round;
+  try {
+    await round;
+  } finally {
+    sourcesInflight = null;
+    if (sourcesAgain && !disposed) {
+      sourcesAgain = false;
+      await loadSources();
+    }
+  }
 }
 
 async function loadEvents(append = false): Promise<void> {
@@ -467,6 +507,8 @@ function clearDrill(): void {
 // 缓存的恢复资格。共享批次入口保证两条查询属于同一 epoch。
 function manualRefresh(): void {
   interactionEpoch++;
+  // AP06：手动刷新同时重查来源状态——目录修好后旧通知必须消失。
+  void loadSources();
   startRefreshBatch();
 }
 
@@ -531,6 +573,8 @@ watch(
   () => props.refreshKey,
   () => {
     if (applyingRestore) return;
+    // AP06：程序触发的刷新（价格同步等）同样重查来源状态。
+    void loadSources();
     startRefreshBatch();
   },
 );
@@ -571,6 +615,34 @@ startRefreshBatch();
         aria-label="统计时区"
         @update:value="(v: string) => (tz = v)"
       />
+    </div>
+    <!-- AP06：来源检测失败——可见、可重试，且不改动已成功的汇总数据 -->
+    <div v-if="sourceError" class="ts-notice source-notice" role="alert">
+      <svg
+        class="ts-notice-icon is-error"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        aria-hidden="true"
+      >
+        <circle cx="12" cy="12" r="9" />
+        <path d="m9 9 6 6M15 9l-6 6" />
+      </svg>
+      <span class="ts-notice-content">
+        来源目录检测失败{{ sourceStatus.length > 0 ? "（下方来源状态可能已过期）" : "" }}：{{
+          sourceError
+        }}
+      </span>
+      <button
+        type="button"
+        class="ts-notice-action ts-focusable"
+        :disabled="sourcesLoading"
+        @click="loadSources"
+      >
+        {{ sourcesLoading ? "重试中…" : "重试" }}
+      </button>
     </div>
     <!-- 任务 3/7：异常与来源四态 = 内联通知条；多条来源异常合并为一条可展开 -->
     <template v-if="problemSources.length === 1">

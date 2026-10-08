@@ -1253,3 +1253,148 @@ describe("Dashboard 恢复分页资格与过期恢复（RC02）", () => {
     w.unmount();
   });
 });
+
+// ── AP06：来源检测的失败可见性、可重试与刷新重查 ──
+// 复核缺陷：`void loadSources()` 没有 catch——source_status 拒绝会成为未处理
+// Promise，界面既没有错误也没有重试；且来源状态只在挂载时读一次，用户把
+// 目录修好后点"刷新"，旧 missing/empty 通知仍然挂着。
+describe("Dashboard 来源检测失败（AP06）", () => {
+  function statusProbe(): { reasons: unknown[]; stop: () => void } {
+    const reasons: unknown[] = [];
+    const onNode = (r: unknown): void => {
+      reasons.push(r);
+    };
+    const proc = (
+      globalThis as unknown as {
+        process?: {
+          on: (e: string, cb: (r: unknown) => void) => void;
+          off: (e: string, cb: (r: unknown) => void) => void;
+        };
+      }
+    ).process;
+    proc?.on("unhandledRejection", onNode);
+    return {
+      reasons,
+      stop: () => proc?.off("unhandledRejection", onNode),
+    };
+  }
+
+  async function settle(): Promise<void> {
+    await flushPromises();
+    await new Promise((r) => setTimeout(r, 0));
+    await flushPromises();
+  }
+
+  function retryIn(w: VueWrapper, noticeText: string) {
+    const notice = w.findAll(".ts-notice").find((n) => n.text().includes(noticeText));
+    return notice?.findAll("button").find((b) => b.text().includes("重试"));
+  }
+
+  const readyClaude = {
+    agent: "claude-code",
+    dir: "C:/claude",
+    enabled: true,
+    exists: true,
+    files: 3,
+    state: "ready",
+  };
+  const missingCodex = {
+    agent: "codex",
+    dir: "C:/codex",
+    enabled: true,
+    exists: false,
+    files: 0,
+    state: "missing",
+  };
+
+  it("source_status_failure_is_visible_and_retryable：失败可见可重试且不产生未处理拒绝", async () => {
+    const probe = statusProbe();
+    let statusCalls = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "source_status") {
+        statusCalls += 1;
+        return statusCalls === 1
+          ? Promise.reject(new Error("设置解析失败: settings.toml"))
+          : Promise.resolve([readyClaude]);
+      }
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await settle();
+    expect(probe.reasons, "source_status 拒绝不得成为未处理 rejection").toEqual([]);
+    probe.stop();
+
+    expect(w.text()).toContain("来源目录检测失败");
+    expect(w.text()).toContain("设置解析失败: settings.toml");
+    // 来源检测失败不得动已成功的汇总数据
+    expect(state(w)["report"], "汇总结果必须保留").toBeTruthy();
+
+    const retry = retryIn(w, "来源目录检测失败");
+    expect(retry, "错误条必须有重试入口").toBeDefined();
+    await retry!.trigger("click");
+    await settle();
+    expect(statusCalls).toBe(2);
+    expect(state(w)["sourceError"], "重试成功后错误必须消失").toBeNull();
+    expect((state(w)["sourceStatus"] as unknown[]).length).toBe(1);
+    expect(w.text()).not.toContain("来源目录检测失败");
+    w.unmount();
+  });
+
+  it("manual_refresh_rechecks_source_status：目录修复后刷新使旧通知消失", async () => {
+    let statusCalls = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "source_status") {
+        statusCalls += 1;
+        return Promise.resolve(statusCalls === 1 ? [missingCodex] : [readyClaude]);
+      }
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(w.text()).toContain("数据目录不存在");
+
+    const refresh = w.findAll("button").find((b) => b.text().trim() === "刷新");
+    expect(refresh).toBeDefined();
+    await refresh!.trigger("click");
+    await flushPromises();
+    expect(statusCalls, "手动刷新必须重查来源状态").toBe(2);
+    expect(w.text(), "目录恢复后旧通知必须消失").not.toContain("数据目录不存在");
+    w.unmount();
+  });
+
+  it("failed_status_read_marks_previous_state_stale：读取失败不把旧状态标为最新", async () => {
+    let statusCalls = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "source_status") {
+        statusCalls += 1;
+        return statusCalls === 1
+          ? Promise.resolve([missingCodex])
+          : Promise.reject(new Error("读取超时"));
+      }
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(w.text()).toContain("数据目录不存在");
+
+    const refresh = w.findAll("button").find((b) => b.text().trim() === "刷新")!;
+    await refresh.trigger("click");
+    await flushPromises();
+    expect(w.text()).toContain("来源目录检测失败");
+    expect(w.text(), "必须标注旧状态可能过期，而不是当作最新").toContain("可能已过期");
+    expect(w.text()).toContain("读取超时");
+    w.unmount();
+  });
+});
