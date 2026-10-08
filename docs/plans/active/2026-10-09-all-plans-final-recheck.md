@@ -235,9 +235,12 @@ node frontend/scripts/check-ui-contracts.mjs --url http://127.0.0.1:1441 --phase
 - [x] AP04：晚到成功及失败均受保护，卸载后无局部通知，关闭动作不乱序。`a2a4d11`；关闭动作改为写入串行化（在途只记最后一次意图，失败回退到已落盘值），写操作落地前检查 `disposed`。
 - [x] AP05：外置-only、OR-only、无价、主源可用及状态失败文案均符合 DTO。`a2a4d11`；组件单测 + 浏览器契约 `pricing_banner_distinguishes_dto_states`（19 条断言）。
 - [x] AP06：来源检测错误有恢复动作，刷新与晚到响应行为正确。`c31bba2`；错误条可重试、失败标注“可能已过期”、手动刷新重查，且不清空已成功的汇总。
-- [x] AP07：已记忆关闭动作失败可恢复，事件回调无阻塞文件 IO。`d68bbb2`；关窗回调只做内存更新与协调启动（单飞 + 后台 IO），退出前完成最终落盘，失败经 `close-action-failed` 复用关闭对话框重试。
+- [x] AP07：已记忆关闭动作失败可恢复，事件回调无阻塞文件 IO。`d68bbb2`；后续复核发现弹窗与托盘退出仍绕过最终保存，已由 `9222aff` 补齐并串行化定时/最终保存。隔离原生已验证弹窗退出最终落盘及记忆最小化失败→原因可见→重试隐藏，见 [补齐验收记录](2026-10-09-ap08-completion-qa.md)。
 - [x] AP08 自动化：新反例已纳入真实边界断言，完整矩阵通过。**60 场景（15 fixture × 2 主题 × 2 视口）/ 17 条必需契约 / 243 条契约断言（矩阵断言 304）、零失败**（Chromium 148.0.7778.96，提交 `d68bbb2`，产物 `qa-artifacts/all-plans-final-recheck/after/measurements.json`，gitignore）。新增契约：`source_save_rejected_error_is_row_scoped`、`close_action_write_failure_rolls_back_to_confirmed`、`late_failed_settings_read_does_not_downgrade_saved`、`source_status_failure_recovers_without_losing_summary`、`pricing_banner_distinguishes_dto_states`。需要真实 Rust 配置/缓存的案例由隔离 Rust 测试证明（`tests/rebuild_source_contract.rs` 与壳侧 settings/source/rebuild 内核测试），未用合成 IPC 冒充后端正确性。
-- [ ] AP08 原生：**待验**。query 会话过期的原生轮（需 >600 s 真实空闲与独占 PID）、Windows 每监视器 125%/150% 缩放、系统深色下“跟随系统”首帧、CSP 脚本哨兵（缺仅验收构建可用的受控入口；未为此放宽生产 CSP）本轮均未取证，环境缺失不算通过。Naive UI data-URI 预热图违规保持 **2 条 `img-src`** 的明确计数与原因，不声称绝对零违规。
+- [x] AP08 CSP：受控同源入口及真实按钮哨兵已补齐，原生 14/14 通过；普通构建不含入口，生产 CSP 未放宽。脚本 DOM 拒绝事件 2 个，CSP 重载场景控制台/CDP 合计 4 条脚本记录 + 4 条已知图片噪声，未知违规 0；不声称零违规。
+- [x] AP08 当前显示器 150%：未传强制缩放参数，原生 `GetDpiForWindow=144`、WebView dpr=1.5，组合交互 18/18 通过。
+- [x] AP08 原生 TTL：`6332f4f` 的连续场景两轮实测空闲 630.684 / 630.460 秒，`query_expired` 文案、重试新会话、200→242 行及下一页同会话均验证，每轮 12/12 通过；第二轮已补含错误条的截图，取证范围详见补齐验收记录。
+- [ ] AP08 系统环境：Windows 125% 与跨显示器切换、系统深色应用主题下“跟随系统”首帧仍待验；没有修改系统设置，不能用当前 150% / 浅色环境替代。证据与复跑命令见 [补齐验收记录](2026-10-09-ap08-completion-qa.md)。
 - [x] AP09：全计划状态与实现/验收证据一致，替代关系可追溯。本文件 §2 的“本次判定与承接”列为唯一权威覆盖关系索引；README 当前状态与总账、被承接 active 文档（RC03/RC04、SF09/UX06、C1/D4）已加承接指针；原生/系统/发布验收与代码修复分列。
 
 **已知范围限制（浏览器层，不升级为产品缺陷）：** ①“已确认值被晚到失败读取降级”的强形态在真实浏览器只有“首读失败 → 重试挂起 → 保存成功 → 晚到 reject”这一条可构造路径（`refreshKey` 仅单测可推进，生产中切页会卸载组件），因此该契约覆盖的是同族反例，强形态由组件单测覆盖；②关闭动作写入失败的原因依赖 Naive message（约 3 s 自动消失），浏览器断言只验证“可重试成功”，错误常驻需要另加行内错误条（属新需求）；③所有失败注入都在合成 IPC 层，真实后端判定由 Rust 测试与原生验收覆盖。
@@ -248,3 +251,4 @@ node frontend/scripts/check-ui-contracts.mjs --url http://127.0.0.1:1441 --phase
 | --- | --- | --- |
 | 2026-10-08～09 / 5ec826c | 31 份文档覆盖关系、关键源码、完整门禁、浏览器矩阵及隔离反例复核 | 已完成复核 |
 | 2026-10-09 / 5ec826c → d68bbb2 | AP01–AP07 逐项红→绿实现并独立提交；AP08 浏览器矩阵扩充重跑（60 场景 / 17 契约 / 243 断言，零失败）；AP09 状态归并与文档回写 | 代码与自动化已完成；AP08 原生/系统与 D5 待验，本计划保持 active |
+| 2026-10-09 / 9db0bbb → 6332f4f | `9222aff` 补所有退出入口最终保存；`6332f4f` 补受控 CSP/隐藏故障入口、持续 TTL 驱动及原生 DPI 量测。浏览器矩阵复跑；CSP、关闭保存/恢复、当前 150% 与两轮真实 TTL 验收通过 | 本机可执行的补齐项完成；125% / 跨显示器、系统深色首帧和 D5 按原边界待验，保持 active |
