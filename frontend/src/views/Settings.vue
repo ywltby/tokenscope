@@ -596,14 +596,11 @@ const priceColumns = computed<DataTableColumn[]>(() => [
   {
     title: "显示名",
     key: "name",
-    minWidth: 180,
-    ellipsis: { tooltip: true },
     render: (r) => asEntry(r).name ?? "",
   },
   {
     title: "模型前缀",
     key: "prefix",
-    minWidth: 220,
     render: (r) => prefixCell(r),
   },
   // RC06：四桶单价列由显式 key 驱动，显示词来自 tokenDisplay 单一来源
@@ -611,25 +608,25 @@ const priceColumns = computed<DataTableColumn[]>(() => [
   {
     title: `${tokenBucketLabel("input")}（${UNIT_PRICE_SUFFIX}）`,
     key: "input",
-    align: "right",
+    align: "center",
     render: (r) => priceCell(r, "input"),
   },
   {
     title: `${tokenBucketLabel("output")}（${UNIT_PRICE_SUFFIX}）`,
     key: "output",
-    align: "right",
+    align: "center",
     render: (r) => priceCell(r, "output"),
   },
   {
     title: `${tokenBucketLabel("cache_write")}（${UNIT_PRICE_SUFFIX}）`,
     key: "cache_write",
-    align: "right",
+    align: "center",
     render: (r) => priceCell(r, "cache_write"),
   },
   {
     title: `${tokenBucketLabel("cache_read")}（${UNIT_PRICE_SUFFIX}）`,
     key: "cache_read",
-    align: "right",
+    align: "center",
     render: (r) => priceCell(r, "cache_read"),
   },
   {
@@ -1030,8 +1027,8 @@ defineExpose({ priceColumns });
             :row-key="rowKey"
             size="small"
             :bordered="false"
-            :max-height="420"
-            virtual-scroll
+            table-layout="auto"
+            class="ts-auto-table ts-auto-table-pricing"
           />
         </section>
       </section>

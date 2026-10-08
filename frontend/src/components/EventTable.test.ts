@@ -220,17 +220,17 @@ describe("EventTable 表格语义（设计系统 Task 5）", () => {
     };
   }
 
-  it("数字列右对齐且使用 tabular 数字类；模型列省略并可查完整值", () => {
+  it("数字列居中且使用 tabular 数字类；模型列不强制固定布局", () => {
     const w = mount(EventTable, { props: { list: list([row()], 1), filterLabel: "" } });
     const cols = exposed(w).columns;
     for (const key of ["input", "output", "cache_write", "cache_read", "cost_usd"]) {
       const c = cols.find((x) => x.key === key);
       expect(c, `${key} 列存在`).toBeDefined();
-      expect(c!.align).toBe("right");
+      expect(c!.align).toBe("center");
       expect(c!.className).toContain("ts-num");
     }
     const model = cols.find((x) => x.key === "model");
-    expect(model!.ellipsis).toBeTruthy();
+    expect(model!.ellipsis).toBeUndefined();
   });
 
   it("R10 same_second_requests_have_distinct_row_keys：同秒同会话两行身份互异", () => {

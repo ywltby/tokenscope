@@ -209,7 +209,7 @@ const MEASURE = () => {
         rect: rect(c),
       }))
     : [];
-  const iconFilters = [...document.querySelectorAll('[aria-label="数据来源"] button, .range-trigger')].map((el) => ({
+  const iconFilters = [...document.querySelectorAll('[aria-label="数据来源"] button, [aria-label="主题偏好（浅色/深色/跟随系统）"] button, .range-trigger')].map((el) => ({
     name: el.getAttribute("aria-label"),
     title: el.getAttribute("title"),
     text: el.innerText.trim(),
@@ -238,7 +238,10 @@ const MEASURE = () => {
             color: getComputedStyle(el).color,
           }
         : null;
-    return { th: g(th), td: g(td) };
+    return { th: g(th), td: g(td),
+      centered: [...root.querySelectorAll('th, td')].every(el => getComputedStyle(el).textAlign === 'center'),
+      autoWidth: [...root.querySelectorAll('table')].every(el => getComputedStyle(el).tableLayout === 'auto'),
+    };
   };
 
   const totalRow = document.querySelector("tr.total-row");
@@ -363,7 +366,10 @@ const READ_FIRST_TABLE_TYPO = () => {
     el
       ? { fontSize: getComputedStyle(el).fontSize, fontWeight: getComputedStyle(el).fontWeight }
       : null;
-  return { th: g(root.querySelector("th")), td: g(root.querySelector("tbody td")) };
+  return { th: g(root.querySelector("th")), td: g(root.querySelector("tbody td")),
+    centered: [...root.querySelectorAll('th, td')].every(el => getComputedStyle(el).textAlign === 'center'),
+    autoWidth: [...root.querySelectorAll('table')].every(el => getComputedStyle(el).tableLayout === 'auto'),
+  };
 };
 
 /** UX08：设置页来源目录输入框的可访问名称 + 「当前生效目录」换行量测。 */
@@ -420,8 +426,9 @@ const READ_CHART_SUMMARY = () => {
 };
 
 const CLICK_SEGMENT = (label) => {
+  const name = ({ 浅色: "浅色模式", 深色: "深色模式" })[label] ?? label;
   const radio = [...document.querySelectorAll(".ts-segmented-item")].find(
-    (r) => r.textContent.trim() === label,
+    (r) => r.getAttribute("aria-label") === name || r.textContent.trim() === label,
   );
   if (!radio) return { ok: false };
   radio.click();
@@ -465,30 +472,34 @@ function buildChecks(m, ctx) {
     const positions = m.filterControls.map((c) => c.rect);
     checks.push([
       "filter_controls_stay_on_two_rows",
-      positions.length === 4 && positions.every(Boolean) &&
-        near(positions[0].top, positions[1].top, 1) &&
-        near(positions[2].top, positions[3].top, 1) &&
-        positions[2].top >= positions[0].top + positions[0].height + 8,
+      positions.length === 3 && positions.every(Boolean) &&
+        near(positions[1].top, positions[2].top, 1) &&
+        positions[1].top >= positions[0].top + positions[0].height + 8,
       positions.map((r) => r?.top).join(","),
     ]);
     checks.push([
       "source_and_date_filters_are_named_icons_without_text",
-      m.iconFilters.length === 4 && m.iconFilters.every((c) =>
+      m.iconFilters.length === 7 && m.iconFilters.every((c) =>
         c.hasIcon && c.text === "" && !!c.name && c.name === c.title),
       JSON.stringify(m.iconFilters),
     ]);
     checks.push([
       "filter_icons_are_centered_in_buttons",
-      m.iconFilters.length === 4 && m.iconFilters.every((c) =>
+      m.iconFilters.length === 7 && m.iconFilters.every((c) =>
         c.centerOffset && Math.abs(c.centerOffset.x) <= 0.5 && Math.abs(c.centerOffset.y) <= 0.5),
       JSON.stringify(m.iconFilters.map((c) => ({ name: c.name, offset: c.centerOffset }))),
     ]);
     checks.push([
       "filter_controls_have_equal_outer_height",
-      heights.length >= 4 &&
+      heights.length === 3 &&
         heights.every((h) => near(h, 32)) &&
         heights.every((h) => near(h, heights[0])),
       heights.join(","),
+    ]);
+    checks.push([
+      "tables_center_headers_and_cells_with_auto_width",
+      [m.aggregateTable, m.eventsTable, m.settingsTable].every(t => t?.centered && t?.autoWidth),
+      JSON.stringify([m.aggregateTable, m.eventsTable, m.settingsTable]),
     ]);
     const sc = m.dateShortcuts;
     checks.push([
@@ -839,19 +850,28 @@ for (const fixtureName of args.fixtures) {
             await page.evaluate(CLICK_SEGMENT, "按模型");
             await page.waitForTimeout(600);
             const after = await page.evaluate(READ_CHART_SUMMARY);
-            await page.evaluate(CLICK_SEGMENT, "深色");
+            const themeChanged = await page.evaluate(CLICK_SEGMENT, "深色");
+            if (!themeChanged.ok) throw new Error("找不到深色模式图标按钮");
             await page.waitForTimeout(600);
             const afterTheme = await page.evaluate(READ_CHART_SUMMARY);
             chart = { before, after, afterTheme };
           }
         }
         m.chart = chart;
+        // 切换交互验收后恢复场景主题，确保证据文件名与实际画面一致。
+        await page.evaluate(CLICK_SEGMENT, theme === "light" ? "浅色模式" : "深色模式");
+        await page.waitForTimeout(250);
+
+        if (fixtureName === "normal" || fixtureName === "long-text") {
+          await page.locator(".events-card").screenshot({ path: join(args.output, `${label}-events.png`) });
+        }
 
         // 最后切到设置页量测第三张表（聚合/明细已在汇总页量测）
         if (fixtureName === "normal" || fixtureName === "long-text") {
           const goto = await page.evaluate(GOTO_SETTINGS);
           if (goto.ok) {
             await page.waitForTimeout(600);
+            await page.locator(".ts-auto-table-pricing").screenshot({ path: join(args.output, `${label}-pricing.png`) });
             if (fixtureName === "normal") {
               m.settingsTable = await page.evaluate(READ_FIRST_TABLE_TYPO);
             } else {

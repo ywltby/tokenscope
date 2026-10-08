@@ -160,7 +160,12 @@ describe("App 应用壳（设计系统 Task 2，苹果风格分段控件）", ()
     const themeGroup = groups[1]; // 第二组是主题
     const themeItems = themeGroup.findAll('[role="radio"]');
     // UX02：语义化名称 + 装饰 SVG 图标（不再是 ☀/☾ 字符）
-    expect(themeItems.map((t) => t.text())).toEqual(["浅色", "深色", "跟随系统"]);
+    expect(themeItems.map((t) => t.text())).toEqual(["", "", ""]);
+    expect(themeItems.map((t) => t.attributes("title"))).toEqual([
+      "浅色模式",
+      "深色模式",
+      "跟随系统",
+    ]);
     expect(themeItems.map((t) => t.attributes("aria-label"))).toEqual([
       "浅色模式",
       "深色模式",

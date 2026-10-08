@@ -42,7 +42,7 @@ function fmtPrice(v: number): string {
 }
 
 const columns = computed<DataTableColumn[]>(() => [
-  { title: "时间", key: "ts", minWidth: 150, className: "ts-num" },
+  { title: "时间", key: "ts", className: "ts-num" },
   {
     title: "Agent",
     key: "agent",
@@ -51,17 +51,13 @@ const columns = computed<DataTableColumn[]>(() => [
   {
     title: "模型",
     key: "model",
-    minWidth: 180,
-    ellipsis: { tooltip: true },
     // 设计系统 Task 5：模型名可聚焦获取完整值（不只 hover）
     render: (r) => h("span", { tabindex: 0, class: "ts-focusable" }, asRow(r).model),
   },
   {
     title: "项目",
     key: "project",
-    minWidth: 120,
-    // Claude 项目目录名是压成一段的长路径串：单行省略，悬浮/聚焦可见完整值。
-    ellipsis: { tooltip: true },
+    // 长项目名允许换行；悬浮/聚焦可见完整路径。
     // C2：明细项目显示末段（身份是完整路径），悬浮可见完整值。
     render: (r) => {
       const p = asRow(r).project;
@@ -77,35 +73,35 @@ const columns = computed<DataTableColumn[]>(() => [
   {
     title: "输入",
     key: "input",
-    align: "right",
+    align: "center",
     className: "ts-num",
     render: (r) => fmtNum(asRow(r).input),
   },
   {
     title: "输出",
     key: "output",
-    align: "right",
+    align: "center",
     className: "ts-num",
     render: (r) => fmtNum(asRow(r).output),
   },
   {
     title: tokenBucketLabel("cache_write"),
     key: "cache_write",
-    align: "right",
+    align: "center",
     className: "ts-num",
     render: (r) => fmtNum(asRow(r).cache_write),
   },
   {
     title: tokenBucketLabel("cache_read"),
     key: "cache_read",
-    align: "right",
+    align: "center",
     className: "ts-num",
     render: (r) => fmtNum(asRow(r).cache_read),
   },
   {
     title: "费用（估算）",
     key: "cost_usd",
-    align: "right",
+    align: "center",
     className: "ts-num",
     render: (r) => {
       const row = asRow(r);
@@ -195,9 +191,8 @@ const rowKey = (r: object): string => asRow(r).cursor;
       :row-key="rowKey"
       size="small"
       :bordered="false"
-      :max-height="380"
-      :scroll-x="1180"
-      virtual-scroll
+      table-layout="auto"
+      class="ts-auto-table ts-auto-table-events"
     />
     <div class="table-hint">
       共 {{ fmtNum(props.list.total) }} 条（时间倒序）· 已加载

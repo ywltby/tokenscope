@@ -76,13 +76,13 @@ describe("UsageTable 表格语义（设计系统 Task 5）", () => {
     };
   }
 
-  it("数字列右对齐且使用 tabular 数字类", () => {
+  it("数字列居中且使用 tabular 数字类", () => {
     const w = mount(UsageTable, { props: { report: report([group("m")], false) } });
     const cols = exposed(w).columns;
     for (const key of ["requests", "tokens.input", "tokens.output", "total", "cost_usd"]) {
       const c = cols.find((x) => x.key === key);
       expect(c, `${key} 列存在`).toBeDefined();
-      expect(c!.align).toBe("right");
+      expect(c!.align).toBe("center");
       expect(c!.className).toContain("ts-num");
     }
   });

@@ -815,18 +815,19 @@ describe("Dashboard 页头与通知（设计系统 Task 3）", () => {
     expect(w.find(".page-head .ts-status-pill").classes()).toContain("ts-pill-success");
   });
 
-  it("筛选顺序固定：来源 → 聚合维度 → 日期 → 时区", async () => {
+  it("筛选顺序固定：来源首行，日期与聚合维度次行，时区仅在设置页", async () => {
     mockOk();
     const w = mountDashboard();
     await flushPromises();
     const src = w.find('[aria-label="数据来源"]').element;
     const dim = w.find('[aria-label="聚合维度"]').element;
     const range = w.findComponent({ name: "DateRangeSelect" }).element;
-    const tz = w.find(".tz-select").element;
+    expect(w.find(".tz-select").exists()).toBe(false);
     const FOLLOWING = Node.DOCUMENT_POSITION_FOLLOWING;
-    expect(src.compareDocumentPosition(dim) & FOLLOWING).toBeTruthy();
-    expect(dim.compareDocumentPosition(range) & FOLLOWING).toBeTruthy();
-    expect(range.compareDocumentPosition(tz) & FOLLOWING).toBeTruthy();
+    expect(src.compareDocumentPosition(range) & FOLLOWING).toBeTruthy();
+    expect(range.compareDocumentPosition(dim) & FOLLOWING).toBeTruthy();
+    expect(range.parentElement).toBe(dim.parentElement);
+    expect(src.parentElement).not.toBe(dim.parentElement);
   });
 
   it("来源异常渲染为内联通知，去设置动作发出 go-settings", async () => {

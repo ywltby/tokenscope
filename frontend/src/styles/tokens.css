@@ -255,6 +255,10 @@ body {
   height: 32px;
 }
 .ts-segmented-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ts-space-1);
   position: relative;
   border: none;
   background: transparent;
@@ -353,6 +357,26 @@ body {
 .n-data-table td {
   font-size: 13px;
   line-height: 1.45;
+}
+
+/* 自动列宽由原生表格根据内容分配；滚动限制放在表格外层，避免组件强制 fixed。 */
+.ts-auto-table {
+  overflow: auto;
+}
+.ts-auto-table-events {
+  max-height: 380px;
+}
+.ts-auto-table-pricing {
+  max-height: 420px;
+}
+.ts-auto-table .n-data-table-th,
+.ts-auto-table .n-data-table-td {
+  text-align: center;
+  vertical-align: middle;
+  overflow-wrap: anywhere;
+}
+.ts-auto-table .n-data-table-th__title {
+  justify-content: center;
 }
 
 /* 标题行状态胶囊（已更新 / 刷新中 / 缓存数据）：自带状态圆点，

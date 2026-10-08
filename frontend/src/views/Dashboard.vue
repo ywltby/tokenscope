@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { NButton, NSelect, NSpin } from "naive-ui";
+import { NButton, NSpin } from "naive-ui";
 import {
   AGENT_LABEL,
   type AgentFilter,
@@ -602,22 +602,14 @@ startRefreshBatch();
         <NButton size="small" secondary class="ts-focusable" @click="manualRefresh">刷新</NButton>
       </div>
     </div>
-    <!-- 固定两行：来源 / 聚合维度；日期 / 时区。 -->
+    <!-- 固定两行：来源；日期 / 聚合维度。时区在设置页调整。 -->
     <div class="filter-row filter-controls">
       <div class="filter-line">
         <SegmentedControl v-model="agent" :options="agentOptions" aria-label="数据来源" icon-only />
-        <SegmentedControl v-model="by" :options="dimOptions" aria-label="聚合维度" />
       </div>
       <div class="filter-line">
         <DateRangeSelect v-model:value="range" :tz="tz" icon-only />
-        <NSelect
-          :value="tz"
-          :options="TZ_OPTIONS"
-          size="medium"
-          class="tz-select"
-          aria-label="统计时区"
-          @update:value="(v: string) => (tz = v)"
-        />
+        <SegmentedControl v-model="by" :options="dimOptions" aria-label="聚合维度" />
       </div>
     </div>
     <!-- AP06：来源检测失败——可见、可重试，且不改动已成功的汇总数据 -->
@@ -945,10 +937,6 @@ startRefreshBatch();
   display: flex;
   align-items: center;
   gap: var(--ts-space-3);
-}
-
-.tz-select {
-  width: 160px;
 }
 
 /* 任务 5：卡片区块间距统一 20px（卡片间 20px，DESIGN.md §4） */

@@ -23,8 +23,6 @@ const columns = computed<DataTableColumn[]>(() => {
   const first: DataTableColumn = {
     title: DIM_LABEL[props.report.by] ?? "维度",
     key: "key",
-    minWidth: 140,
-    ellipsis: { tooltip: true },
     // C2：项目身份是完整路径，展示用 label（末段），悬浮可见完整 key。
     // 任务 5：可点击行右侧 › 指示（合计行不可点，不带）。
     render: (row) => {
@@ -36,11 +34,11 @@ const columns = computed<DataTableColumn[]>(() => {
       ]);
     },
   };
-  // 设计系统 Task 5：数字列右对齐 + tabular lining 数字
+  // 数字列居中，同时保留 tabular lining 数字。
   const num = (title: string, key: string): DataTableColumn => ({
     title,
     key,
-    align: "right",
+    align: "center",
     className: "ts-num",
     render: (row) => fmtNum(Number((row as Record<string, unknown>)[key] ?? 0)),
   });
@@ -50,7 +48,7 @@ const columns = computed<DataTableColumn[]>(() => {
   ): DataTableColumn => ({
     title,
     key: `tokens.${path}`,
-    align: "right",
+    align: "center",
     className: "ts-num",
     render: (row) => fmtNum(asGroup(row).tokens[path]),
   });
@@ -64,7 +62,7 @@ const columns = computed<DataTableColumn[]>(() => {
     {
       title: "合计",
       key: "total",
-      align: "right",
+      align: "center",
       className: "ts-num",
       render: (row) =>
         fmtNum(
@@ -78,7 +76,7 @@ const columns = computed<DataTableColumn[]>(() => {
       // 设计系统 Task 5：金额列使用估算语义表头
       title: "费用$(估算)",
       key: "cost_usd",
-      align: "right",
+      align: "center",
       className: "ts-num",
       render: (row) => {
         const g = asGroup(row);
@@ -93,7 +91,7 @@ const columns = computed<DataTableColumn[]>(() => {
     cols.push({
       title: "未知†",
       key: "unknown_tokens",
-      align: "right",
+      align: "center",
       render: (row) => {
         const u = asGroup(row).unknown_tokens;
         const n = u.input + u.output + u.cache_write + u.cache_read;
@@ -148,7 +146,8 @@ const sourceLines = computed(() =>
       :row-props="rowProps"
       size="small"
       :bordered="false"
-      :scroll-x="1080"
+      table-layout="auto"
+      class="ts-auto-table"
     />
     <div class="table-hint">点击行（或聚焦后按 Enter）可下钻到请求明细。</div>
     <div v-if="report.totals.unknown_pricing" class="table-note">

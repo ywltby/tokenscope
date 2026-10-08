@@ -161,6 +161,7 @@ function onCloseCancel(): void {
             <SegmentedControl
               v-model="preference"
               :options="themeOptions"
+              icon-only
               aria-label="主题偏好（浅色/深色/跟随系统）"
               @update:model-value="setPreference"
             >
@@ -263,6 +264,9 @@ function onCloseCancel(): void {
 }
 
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.01em;

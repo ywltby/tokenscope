@@ -24,6 +24,7 @@ const box = computed(() => `${props.size ?? 20}px`);
 
 <style scoped>
 .agent-icon {
+  vertical-align: middle;
   display: inline-flex;
   align-items: center;
   justify-content: center;
