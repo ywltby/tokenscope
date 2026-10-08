@@ -473,13 +473,21 @@ pub async fn cache_stats() -> Result<CacheInfo, String> {
     run_blocking("cache_stats", move || cache_stats_impl(None)).await
 }
 
+/// AP03：重建缓存——采集范围与普通查询**同一份**已成功读取的配置。
+///
+/// 修复前此处走 `rebuild_cache(None)` → `SummaryOptions::default()`，既跳过
+/// 用户停用的来源（把停用来源重新采一遍），也忽略自定义目录。现在：
+/// 1. 先严格读设置（失败即报错，先于任何清理/扫描——坏配置不得清空缓存）；
+/// 2. 用与查询相同的来源解析内核构造采集选项；
+/// 3. 由库侧按这些选项清库重建（库不隐式读用户设置）。
 #[tauri::command]
 pub async fn refresh_cache() -> Result<CacheInfo, String> {
     run_blocking("refresh_cache", move || {
         let t = std::time::Instant::now();
-        let info = rebuild_cache_impl(None)?;
+        let opts = rebuild_opts(load_settings_strict()).map_err(anyhow::Error::msg)?;
+        let info = rebuild_cache_impl(&opts)?;
         log::info!(
-            "缓存重建完成：{} 文件 / {} 事件，{} ms",
+            "缓存重建完成（按生效来源配置）：{} 文件 / {} 事件，{} ms",
             info.files,
             info.events,
             t.elapsed().as_millis()
@@ -487,6 +495,23 @@ pub async fn refresh_cache() -> Result<CacheInfo, String> {
         Ok(info)
     })
     .await
+}
+
+/// AP03：重建用的采集选项内核（可注入读取结果以便测试）。设置读取失败
+/// → Err，绝不退化成默认来源；来源与查询共用同一解析。
+pub(crate) fn rebuild_opts(
+    loaded: anyhow::Result<tokenscope::settings::Settings>,
+) -> Result<SummaryOptions, String> {
+    let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings_impl(loaded)?;
+    Ok(SummaryOptions {
+        by: GroupBy::Day,
+        claude_dir,
+        codex_dir,
+        claude_enabled: Some(claude_enabled),
+        codex_enabled: Some(codex_enabled),
+        refresh: true,
+        ..Default::default()
+    })
 }
 
 /// 应用设置（M11）。
@@ -960,6 +985,38 @@ mod tests {
                 "close_action={action:?}"
             );
         }
+    }
+
+    /// AP03：重建选项由生效配置构造——与查询同一解析；配置读取失败时
+    /// 重建入口先拒绝（先于清库/扫描），不退化成默认来源。
+    #[test]
+    fn rebuild_opts_uses_effective_sources_and_rejects_bad_settings() {
+        let dir = tmp_dir("ap03-rebuild-opts");
+        let path = dir.join("settings.toml");
+        std::fs::write(
+            &path,
+            "[sources.claude]\nenabled = false\ndir = \"D:/logs/claude\"\n[sources.codex]\nenabled = true\ndir = \"D:/logs/codex\"\n",
+        )
+        .unwrap();
+        let o = rebuild_opts(tokenscope::settings::load(&path)).unwrap();
+        let (cd, xd, ce, xe) = source_settings_impl(tokenscope::settings::load(&path)).unwrap();
+        assert_eq!(
+            (o.claude_dir.clone(), o.codex_dir.clone()),
+            (cd, xd),
+            "重建与查询必须使用同一份来源解析"
+        );
+        assert_eq!(
+            (o.claude_enabled, o.codex_enabled),
+            (Some(ce), Some(xe)),
+            "停用状态必须传给重建"
+        );
+        assert_eq!(o.claude_enabled, Some(false));
+        assert!(o.refresh, "重建必须强制全量重解析");
+
+        // 坏配置：重建入口拒绝，绝不退化成默认来源。
+        std::fs::write(&path, "not [valid toml").unwrap();
+        assert!(rebuild_opts(tokenscope::settings::load(&path)).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

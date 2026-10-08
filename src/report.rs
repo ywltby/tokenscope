@@ -213,13 +213,21 @@ pub fn cache_stats(cache_dir: Option<PathBuf>) -> Result<CacheInfo> {
     })
 }
 
-/// 重建缓存：清库后按当前日志全量重解析（GUI 设置页按钮）。
-pub fn rebuild_cache(cache_dir: Option<PathBuf>) -> Result<CacheInfo> {
+/// AP03：重建缓存——按调用方给出的采集选项清库并全量重解析。
+///
+/// 本函数**不**隐式读用户设置：来源目录、启停、缓存目录、价格路径全部由
+/// 调用方注入，GUI 用与普通查询同一份已成功读取的配置构造选项，因此
+/// 重建与查询的采集范围必然一致（修复前重建写死 `SummaryOptions::default()`，
+/// 停用的来源会被重新采集、自定义目录被忽略）。
+///
+/// 顺序：先校验来源配置（冲突即失败），再清库重建——避免"清库之后才因为
+/// 配置非法失败"，留下一个空缓存。
+pub fn rebuild_cache(opts: &SummaryOptions) -> Result<CacheInfo> {
+    let cache_dir = opts.cache_dir.clone();
+    validate_opts_sources_overlap(opts)?;
     summary(&SummaryOptions {
-        by: GroupBy::Day,
         refresh: true,
-        cache_dir: cache_dir.clone(),
-        ..Default::default()
+        ..opts.clone()
     })?;
     cache_stats(cache_dir)
 }

@@ -368,7 +368,9 @@ async function rebuild(): Promise<void> {
   rebuilding.value = true;
   try {
     cache.value = await invoke<CacheInfo>("refresh_cache");
-    msg.success("缓存已重建");
+    // AP03：重建范围 = 当前生效的来源配置（用户停用的来源不参与），且只
+    // 重建派生数据——不能声称配置外来源也被采集。
+    msg.success("缓存已重建（按当前来源配置，仅重建派生数据）");
   } catch (e) {
     msg.error(String(e));
   } finally {

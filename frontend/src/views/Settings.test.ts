@@ -907,7 +907,9 @@ describe("Settings 目录信息与重建（UX08）", () => {
     resolveRebuild({ path: "p", files: 5, events: 9 });
     await flushPromises();
     expect(calls).toBe(1);
-    expect(msgSpy.success).toHaveBeenCalledWith("缓存已重建");
+    // AP03：成功提示必须说明范围（按当前来源配置、仅派生数据），
+    // 不能只说"已重建"让用户以为配置外来源也被采集。
+    expect(msgSpy.success).toHaveBeenCalledWith("缓存已重建（按当前来源配置，仅重建派生数据）");
     expect(btn.classes()).not.toContain("n-button--loading");
   });
 
