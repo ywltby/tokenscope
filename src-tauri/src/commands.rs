@@ -370,7 +370,11 @@ pub async fn close_resolve(
         close_minimize_with(|| hide_main_window(&app))?;
     } else {
         log::info!("窗口关闭：用户选择直接退出");
-        app.exit(0);
+        run_blocking("close_quit", move || {
+            crate::quit_with_final_save(&app);
+            Ok(())
+        })
+        .await?;
     }
     Ok(())
 }

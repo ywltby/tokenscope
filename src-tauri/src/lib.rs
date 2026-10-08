@@ -205,14 +205,32 @@ fn persist_window_state(app: &tauri::AppHandle) {
             return;
         }
     };
+    let _save_guard = WINDOW_SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // 先清脏再取快照；保存期间的新窗口事件会重新置脏，不会被成功写入清掉。
+    dirty_flag(app).store(false, Ordering::Relaxed);
     let snapshot = state_mutex(app).lock().unwrap().clone();
     let Some(ws) = snapshot else {
         return; // 从未记录过窗口状态：不写空文件。
     };
     match window_state::save(&path, &ws) {
-        Ok(()) => dirty_flag(app).store(false, Ordering::Relaxed),
-        Err(e) => log::warn!("退出前窗口状态保存失败: {e:#}"),
+        Ok(()) => {}
+        Err(e) => {
+            dirty_flag(app).store(true, Ordering::Relaxed);
+            log::warn!("退出前窗口状态保存失败: {e:#}");
+        }
     }
+}
+
+fn exit_after_saving(save: impl FnOnce(), exit: impl FnOnce()) {
+    save();
+    exit();
+}
+
+static WINDOW_SAVE_LOCK: Mutex<()> = Mutex::new(());
+
+/// 后台调用：所有直接退出入口都等待最终状态保存，不经过关闭询问。
+pub(crate) fn quit_with_final_save(app: &tauri::AppHandle) {
+    exit_after_saving(|| persist_window_state(app), || app.exit(0));
 }
 
 // ── AP07：关闭请求协调 ────────────────────────────────────
@@ -340,8 +358,7 @@ fn run_close_coordination(app: &tauri::AppHandle) -> CloseOutcome {
         CloseOutcome::QuitRequested => {
             log::info!("窗口关闭：按设置直接退出");
             // 最终保存**完成之后**才退出：不是 fire-and-forget。
-            persist_window_state(app);
-            app.exit(0);
+            quit_with_final_save(app);
         }
         CloseOutcome::AskRequested => {
             // 前端未就绪时事件无人接收：窗口保持打开（不静默退出）。
@@ -382,6 +399,8 @@ fn start_window_state_saver(app: &tauri::AppHandle) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
+            // 与退出保存串行，必须先取得锁再取快照，避免旧快照后写覆盖新值。
+            let _save_guard = WINDOW_SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             if !dirty.swap(false, Ordering::Relaxed) {
                 continue;
             }
@@ -389,6 +408,7 @@ fn start_window_state_saver(app: &tauri::AppHandle) {
                 continue;
             };
             if let Err(e) = window_state::save(&path, &ws) {
+                dirty.store(true, Ordering::Relaxed);
                 log::warn!("窗口状态保存失败: {e:#}");
             }
         }
@@ -486,7 +506,10 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .tooltip("TokenScope")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main(app),
-            "quit" => app.exit(0),
+            "quit" => {
+                let app = app.clone();
+                std::thread::spawn(move || quit_with_final_save(&app));
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -519,6 +542,27 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn quit_waits_for_final_window_save() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (exit_tx, exit_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            exit_after_saving(
+                || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+                || exit_tx.send(()).unwrap(),
+            );
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(exit_rx.try_recv().is_err(), "保存仍挂起时不得退出");
+        release_tx.send(()).unwrap();
+        exit_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+    }
 
     /// AP07：已记忆的最小化失败必须可上报（用户看到原因并可重试/取消），
     /// 成功的隐藏与退出路径都不上报；退出路径不调用窗口隐藏。
