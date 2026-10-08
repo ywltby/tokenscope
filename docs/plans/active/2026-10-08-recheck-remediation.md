@@ -273,10 +273,10 @@ Remove-Item Env:TOKENSCOPE_ACCEPTANCE_ROOT
 
 ## 5. 完成定义与执行账
 
-- [ ] RC01 两个真实子进程旧游标拒绝，新会话自身分页正常。
-- [ ] RC02 旧视图无 live 分页资格，过期/失败重试可恢复且只建一个共享批次。
-- [ ] RC03 一次 settings_get 恢复所有依赖项；真实 deferred 写后回退/保存期间编辑/卸载均受保护。
-- [ ] RC04 同步与状态错误各有有效重试；pending 刷新事件不丢失。
+- [x] RC01 两个真实子进程旧游标拒绝，新会话自身分页正常。
+- [x] RC02 旧视图无 live 分页资格，过期/失败重试可恢复且只建一个共享批次。
+- [x] RC03 一次 settings_get 恢复所有依赖项；真实 deferred 写后回退/保存期间编辑/卸载均受保护。
+- [x] RC04 同步与状态错误各有有效重试；pending 刷新事件不丢失。
 - [ ] RC05 完整保留对象计账、并发准入/借用/回收边界测试通过，内存声明与保证一致。
 - [ ] RC06 真实组件及浏览器完整键盘、列名称、描述、外部关闭通过。
 - [ ] RC07 单价精度和单位在真实调用点保留，request/summary/三态计价回归不变。
@@ -288,10 +288,10 @@ Remove-Item Env:TOKENSCOPE_ACCEPTANCE_ROOT
 
 | 任务 | 状态 | 红灯证据 | 绿灯命令/数量 | 提交 | 剩余限制 |
 | --- | --- | --- | --- | --- | --- |
-| RC01 | 待执行 | — | — | — | — |
-| RC02 | 待执行 | — | — | — | — |
-| RC03 | 待执行 | — | — | — | — |
-| RC04 | 待执行 | — | — | — | 同步恢复实施时先复现 |
+| RC01 | 已完成（实现+自动化）；本轮复核确认逐项达标 | `qa-artifacts/recheck-remediation/rc01-red.txt`：两个真实子进程都生成 `q0-g0`，B 接受 A 的旧游标（`子进程 B 失败：status=Some(3)`） | `cargo test --offline --test query_process_restart --test query_snapshot_contract` → 3 passed（+1 ignored 子进程入口）+ 6 passed | `3d3ce2c`、`32ff2ba` | 偏差：同进程不同会话/错下钻/v1 游标回归落在 `tests/query_process_restart.rs`，plan 点名的 `query_snapshot_contract.rs` 未另扩（同一断言集已覆盖，不重复搬移）；子进程继承宿主环境但剥离 `TOKENSCOPE_*` 并注入临时根（`env_clear` 在 Windows 上破坏路径解析，见 `32ff2ba`） |
+| RC02 | 已完成（实现+自动化）；本轮复核确认逐项达标 | `qa-artifacts/recheck-remediation/rc02-red.txt`：恢复视图仍用旧 `before` 发起 `query_events`（`Dashboard.vue:318 sameMainIdentity(live.filters…)` 处崩溃/续页） | `pnpm --dir frontend test -- src/views/Dashboard.test.ts src/lib/viewSnapshot.test.ts` → Dashboard 37 passed、viewSnapshot 4 passed | `e5c9285` | `LiveFirstPage` 的 `pricingRevision/epoch` 仅作诊断记录，分页门槛按 plan 要求校验“当前句柄 + 已显示结果 + 主/下钻身份”；错误 DTO 未改结构化，故 `types.ts`/`commands.rs` 无需迁移 |
+| RC03 | 已完成（实现+自动化）；本轮补齐复核缺口 | `qa-artifacts/recheck-remediation/rc03-red.txt` + `rc03-gap-red.txt`：写入不作废在途读取时晚到读取把已保存的关闭动作改回旧值；丢弃补读意图时刷新不落地；探针自检证明只挂 `window` 的未处理拒绝断言是空断言 | `pnpm --dir frontend test -- src/views/Settings.test.ts` → 43 passed（本轮新增/改写 7 个具名用例）；`pnpm --dir frontend typecheck`、`format:check` 全绿；全量 273 passed | `d2a3a8d` + 本提交 | 补齐内容：五个区块统一 `runBlockRead`（读代次+在途标记+补读+卸载守卫）、来源保存写入门槛改为“未知且无在途重试”、刷新失败保留真实原因、deferred 竞态按来源/关闭动作/自动同步分别覆盖并断言提交参数与界面值、跨行保存独立解锁、重试不触发同步 |
+| RC04 | 已完成（实现+自动化）；本轮补齐复核缺口 | `qa-artifacts/recheck-remediation/rc04-red.txt` + `rc04-gap-red.txt`：卸载不失效在途请求/不移除监听时事件仍触发读取 | `pnpm --dir frontend test -- src/components/PricingStatusBanner.test.ts src/views/Settings.test.ts` → 17 passed + 43 passed | `bbeefe9` + 本提交 | 补齐内容：恢复 plan 具名 `status_retry_never_starts_sync`、`sync_failure_without_status_does_not_claim_partial_success`，新增两类按钮 pending 分离与卸载失效/移除监听用例，同步后列表刷新失败断言旧价格保留 |
 | RC05 | 待执行 | — | — | — | 不宣称全进程 RSS 硬上限 |
 | RC06 | 待执行 | — | — | — | — |
 | RC07 | 待执行 | — | — | — | — |

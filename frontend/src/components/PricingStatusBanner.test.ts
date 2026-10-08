@@ -216,7 +216,7 @@ describe("PricingStatusBanner 错误恢复（UX06）", () => {
     });
   }
 
-  it("status_retry_does_not_sync_network：状态重试只调 pricing_status", async () => {
+  it("status_retry_never_starts_sync：状态重试只调 pricing_status，绝不触发同步", async () => {
     let statusFail = true;
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pricing_status") {
@@ -319,7 +319,7 @@ describe("PricingStatusBanner 错误恢复（UX06）", () => {
     document.body.innerHTML = "";
   });
 
-  it("sync_and_status_failures_remain_visible：两类错误同时可见", async () => {
+  it("sync_failure_without_status_does_not_claim_partial_success：状态未知不宣称部分成功，两类错误同时可见", async () => {
     let syncAttempted = false;
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "sync_pricing_openrouter") {
@@ -493,6 +493,83 @@ describe("PricingStatusBanner 错误恢复（UX06）", () => {
     expect(statusCalls, "结束后必须补读一次").toBe(2);
     expect(w.text()).not.toContain("尚未获取定价");
     w.unmount();
+    document.body.innerHTML = "";
+  });
+
+  it("sync_and_status_pending_states_are_separate：两类按钮 pending 互不阻塞", async () => {
+    // RC04：同步失败与状态失败各有独立 pending——状态"重试"在途时，错误条
+    // 的"重试同步"既不显示 loading，也仍可发起同步（不能把一种 pending
+    // 当成另一种，也不能让一种错误挡住另一种的重试入口）。
+    let releaseStatus!: (v: unknown) => void;
+    const statusGate = new Promise<unknown>((r) => (releaseStatus = r));
+    let statusCalls = 0;
+    let syncCalls = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pricing_status") {
+        statusCalls += 1;
+        if (statusCalls === 1) return Promise.resolve({ ...statusNeedsSync }); // 首载：需要同步
+        if (statusCalls === 2) return Promise.reject(new Error("status down")); // 同步后刷新失败
+        return statusGate; // 状态重试挂起中
+      }
+      if (cmd === "sync_pricing_openrouter") {
+        syncCalls += 1;
+        return Promise.reject(new Error("sync down"));
+      }
+      return Promise.resolve(null);
+    });
+    const w = mount(PricingStatusBanner, { attachTo: document.body });
+    await flushPromises();
+    // 点"立即同步"→ 同步失败 + 状态刷新失败 → 两条错误同时可见。
+    await w
+      .findAll("button")
+      .find((b) => b.text().includes("立即同步"))!
+      .trigger("click");
+    await flushPromises();
+    expect(w.text()).toContain("sync down");
+    expect(w.text()).toContain("定价状态读取失败");
+
+    const statusRetry = w.findAll("button").find((b) => b.text() === "重试")!;
+    const syncRetry = w.findAll("button").find((b) => b.text().includes("重试同步"))!;
+    // 状态重试进入在途
+    await statusRetry.trigger("click");
+    await flushPromises();
+    expect(statusCalls, "状态重试应发起一次读取").toBe(3);
+    // 该读取挂起期间：同步按钮不受影响——无 loading，且点击仍能发起同步
+    expect(syncRetry.classes(), "状态 pending 不得点亮同步按钮").not.toContain("n-button--loading");
+    const syncBefore = syncCalls;
+    await syncRetry.trigger("click");
+    expect(syncCalls, "状态 pending 不得阻塞同步重试").toBe(syncBefore + 1);
+    releaseStatus({ ...statusOk });
+    await flushPromises();
+    expect(w.text(), "状态读取成功后错误条收敛").not.toContain("定价状态读取失败");
+    expect(w.text()).toContain("sync down");
+    expect(syncRetry.classes()).not.toContain("n-button--loading");
+    w.unmount();
+    document.body.innerHTML = "";
+  });
+
+  it("unmount_invalidates_inflight_requests_and_listeners：卸载后晚到响应与事件都不写状态", async () => {
+    // RC04：卸载使在途请求失效并移除监听。
+    let release!: (v: unknown) => void;
+    const gate = new Promise<unknown>((r) => (release = r));
+    let calls = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pricing_status") {
+        calls += 1;
+        return calls === 1 ? gate : Promise.resolve(statusOk);
+      }
+      return Promise.resolve(null);
+    });
+    const w = mount(PricingStatusBanner, { attachTo: document.body });
+    await flushPromises();
+    expect(calls).toBe(1);
+    w.unmount();
+    // 卸载后释放挂起的读取：不得抛未处理 rejection，也不得再响应外部事件。
+    release(statusNeedsSync);
+    await flushPromises();
+    window.dispatchEvent(new Event("pricing-status-changed"));
+    await flushPromises();
+    expect(calls, "卸载后监听已移除，事件不再触发读取").toBe(1);
     document.body.innerHTML = "";
   });
 });

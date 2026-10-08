@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, onUnmounted, ref, watch, type VNode } from "vue";
+import { computed, h, onMounted, onUnmounted, ref, watch, type Ref, type VNode } from "vue";
 import { priceSourceLine } from "../lib/statsView";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -112,32 +112,113 @@ const cacheError = ref<string | null>(null);
 const pricingError = ref<string | null>(null);
 const settingsError = ref<string | null>(null);
 const autostartError = ref<string | null>(null);
+// RC03：每个区块还有自己的在途标记与读代次——重试按钮据此显示进度并
+// 防重复触发（见 runBlockRead）。
+const sourcesLoading = ref(false);
+const cacheLoading = ref(false);
+const pricingLoading = ref(false);
+const settingsLoading = ref(false);
+const autostartLoading = ref(false);
+
+/**
+ * RC03：写入门槛——"设置状态未知"= 最近一次读取失败**且当前没有在途重试**。
+ * 重试进行中不新增禁用：用户本地的草稿仍可保存，而那次晚到的旧读取会被
+ * mutationEpoch 作废（保存成功 ≠ 读取的数据更新）。错误条在重试期间保持
+ * 可见，不让用户以为问题已经消失。
+ */
+const settingsUnknown = computed(() => settingsError.value !== null && !settingsLoading.value);
+
+/** RC03：单个区块的读取协调状态（读代次 + 在途轮次 + 补读意图）。 */
+type BlockRead = { seq: number; inflight: Promise<void> | null; again: boolean };
+function newBlock(): BlockRead {
+  return { seq: 0, inflight: null, again: false };
+}
+
+/**
+ * RC03：区块读取统一入口。
+ * - **读代次**：只有仍属最新一轮的响应才允许提交（值与错误都不例外），
+ *   晚到的旧读取不得覆盖新结果；
+ * - **卸载守卫**：`disposed` 后一律不提交；
+ * - **防重复但不丢刷新**：在途期间的再次触发不并发第二条请求，只记一次
+ *   补读意图，本轮结束后立即重读；调用方 `await` 到的是**最终一轮**，
+ *   因此"保存后刷新状态"这类串联不会读到中间态。
+ */
+async function runBlockRead(
+  st: BlockRead,
+  loadingFlag: Ref<boolean>,
+  run: (isCurrent: () => boolean) => Promise<void>,
+): Promise<void> {
+  if (st.inflight) {
+    st.again = true;
+    await st.inflight;
+    return;
+  }
+  const token = ++st.seq;
+  const round = (async () => {
+    loadingFlag.value = true;
+    try {
+      await run(() => !disposed && st.seq === token);
+    } finally {
+      loadingFlag.value = false;
+      st.inflight = null;
+      if (st.again && !disposed) {
+        st.again = false;
+        await runBlockRead(st, loadingFlag, run);
+      }
+    }
+  })();
+  st.inflight = round;
+  await round;
+}
+
+const sourcesBlock = newBlock();
+const cacheBlock = newBlock();
+const pricingBlock = newBlock();
+const settingsBlock = newBlock();
+const autostartBlock = newBlock();
 
 async function loadSources(): Promise<void> {
-  sourcesError.value = null;
-  try {
-    sources.value = await invoke<SourceStatus[]>("source_status");
-  } catch (e) {
-    sourcesError.value = e instanceof Error ? e.message : String(e);
-  }
+  await runBlockRead(sourcesBlock, sourcesLoading, async (isCurrent) => {
+    try {
+      const fresh = await invoke<SourceStatus[]>("source_status");
+      if (!isCurrent()) return;
+      sources.value = fresh;
+      sourcesError.value = null;
+    } catch (e) {
+      if (!isCurrent()) return;
+      sourcesError.value = e instanceof Error ? e.message : String(e);
+    }
+  });
 }
 
 async function loadCache(): Promise<void> {
-  cacheError.value = null;
-  try {
-    cache.value = await invoke<CacheInfo>("cache_stats");
-  } catch (e) {
-    cacheError.value = e instanceof Error ? e.message : String(e);
-  }
+  await runBlockRead(cacheBlock, cacheLoading, async (isCurrent) => {
+    try {
+      const fresh = await invoke<CacheInfo>("cache_stats");
+      if (!isCurrent()) return;
+      cache.value = fresh;
+      cacheError.value = null;
+    } catch (e) {
+      if (!isCurrent()) return;
+      cacheError.value = e instanceof Error ? e.message : String(e);
+    }
+  });
 }
 
 async function loadPricing(): Promise<void> {
-  pricingError.value = null;
-  try {
-    pricing.value = await invoke<PricingView>("pricing_entries");
-  } catch (e) {
-    pricingError.value = e instanceof Error ? e.message : String(e);
-  }
+  await runBlockRead(pricingBlock, pricingLoading, async (isCurrent) => {
+    try {
+      const fresh = await invoke<PricingView>("pricing_entries");
+      if (!isCurrent()) return;
+      pricing.value = fresh;
+      pricingError.value = null;
+    } catch (e) {
+      if (!isCurrent()) return;
+      // RC04：读取失败是**未知**，保留旧价格列表，只记录原因（标签由错误条
+      // 统一给出，是否保留旧数据在提示里显式说明）。
+      pricingError.value = e instanceof Error ? e.message : String(e);
+    }
+  });
 }
 
 async function loadAll(): Promise<void> {
@@ -211,34 +292,36 @@ type SettingsPayload = {
  * 关闭动作控件禁用并说明原因，重试入口调用本函数恢复全部依赖项。
  */
 async function loadSettings(): Promise<void> {
-  const readSeq = ++settingsReadSeq;
-  const epochAtRead = mutationEpoch;
-  settingsError.value = null;
-  let s: SettingsPayload;
-  try {
-    s = await invoke<SettingsPayload>("settings_get");
-  } catch (e) {
-    if (readSeq !== settingsReadSeq || disposed) return;
-    settingsError.value = e instanceof Error ? e.message : String(e);
-    closeActionKnown.value = false;
-    autoSync.value = null;
-    return;
-  }
-  // 晚到的旧读取 / 写入已发生 / 已卸载 → 不提交（旧读取不覆盖用户草稿）。
-  if (readSeq !== settingsReadSeq || epochAtRead !== mutationEpoch || disposed) return;
-  closeAction.value = s.close_action ?? "ask";
-  closeActionKnown.value = true;
-  autoSync.value = s.price_auto_sync ?? null;
-  const src = s.sources ?? {};
-  const fresh: typeof drafts.value = {
-    claude: { enabled: src.claude?.enabled ?? true, dir: src.claude?.dir ?? "" },
-    codex: { enabled: src.codex?.enabled ?? true, dir: src.codex?.dir ?? "" },
-  };
-  // 只更新未编辑的草稿行——dirty 行保留用户输入。
-  drafts.value = {
-    claude: dirtySources.has("claude") ? drafts.value.claude : fresh.claude,
-    codex: dirtySources.has("codex") ? drafts.value.codex : fresh.codex,
-  };
+  await runBlockRead(settingsBlock, settingsLoading, async () => {
+    const readSeq = ++settingsReadSeq;
+    const epochAtRead = mutationEpoch;
+    let s: SettingsPayload;
+    try {
+      s = await invoke<SettingsPayload>("settings_get");
+    } catch (e) {
+      if (readSeq !== settingsReadSeq || disposed) return;
+      settingsError.value = e instanceof Error ? e.message : String(e);
+      closeActionKnown.value = false;
+      autoSync.value = null;
+      return;
+    }
+    // 晚到的旧读取 / 写入已发生 / 已卸载 → 不提交（旧读取不覆盖用户草稿）。
+    if (readSeq !== settingsReadSeq || epochAtRead !== mutationEpoch || disposed) return;
+    settingsError.value = null;
+    closeAction.value = s.close_action ?? "ask";
+    closeActionKnown.value = true;
+    autoSync.value = s.price_auto_sync ?? null;
+    const src = s.sources ?? {};
+    const fresh: typeof drafts.value = {
+      claude: { enabled: src.claude?.enabled ?? true, dir: src.claude?.dir ?? "" },
+      codex: { enabled: src.codex?.enabled ?? true, dir: src.codex?.dir ?? "" },
+    };
+    // 只更新未编辑的草稿行——dirty 行保留用户输入。
+    drafts.value = {
+      claude: dirtySources.has("claude") ? drafts.value.claude : fresh.claude,
+      codex: dirtySources.has("codex") ? drafts.value.codex : fresh.codex,
+    };
+  });
 }
 
 async function saveSource(agent: string): Promise<void> {
@@ -261,10 +344,12 @@ async function saveSource(agent: string): Promise<void> {
     // RC03：只清除"提交时版本一致"的 dirty——保存期间的新编辑保留。
     if (sourceEditRevOf(id) === submittedRev) dirtySources.delete(id);
     // UX06：保存成功后状态刷新失败 ≠ 保存失败——区分提示，避免用户
-    // 误以为需要重复保存（loadSources 内部捕获，此处按结果改写文案）。
+    // 误以为需要重复保存；RC03：原始失败原因必须一并保留（不能只说
+    // "可重试"却把为什么失败丢掉）。
     await loadSources();
     if (sourcesError.value) {
-      sourcesError.value = `已保存，但状态刷新失败（可重试）`;
+      const reason = sourcesError.value;
+      sourcesError.value = `已保存，但状态刷新失败（${reason}，可重试）`;
     }
   } catch (e) {
     // Task 2：后端返回的重叠等配置错误必须可见，保留用户当前输入以便
@@ -304,11 +389,10 @@ async function syncPricing(): Promise<void> {
     msg.error(`同步失败：${e}`);
   } finally {
     // 成功与部分失败两条路径都重新读取价格视图 + 通知全局横幅刷新；
-    // 刷新失败单独归类为"价格列表读取失败"（保留旧数据，不伪装成功）。
+    // 列表读取失败由 loadPricing 归类为"价格列表读取失败"并保留旧数据
+    //（RC04：不把读取失败伪装成同步失败，也不清空已显示的价格）。
     try {
       await loadPricing();
-    } catch {
-      pricingError.value = "价格列表读取失败（保留上次数据）";
     } finally {
       if (!disposed) window.dispatchEvent(new Event("pricing-status-changed"));
       syncing.value = false;
@@ -320,19 +404,25 @@ async function openPricing(): Promise<void> {
   try {
     const p = await invoke<string>("open_pricing_file");
     msg.info(`已在系统默认编辑器打开（保存后下次统计生效）\n${p}`);
-    pricing.value = await invoke<PricingView>("pricing_entries");
+    // RC03：价格列表只经 loadPricing 一条路径读取（带读代次/卸载守卫）。
+    await loadPricing();
   } catch (e) {
     msg.error(String(e));
   }
 }
 
 async function loadAutostart(): Promise<void> {
-  autostartError.value = null;
-  try {
-    autostart.value = await invoke<boolean>("autostart_status");
-  } catch (e) {
-    autostartError.value = e instanceof Error ? e.message : String(e);
-  }
+  await runBlockRead(autostartBlock, autostartLoading, async (isCurrent) => {
+    try {
+      const fresh = await invoke<boolean>("autostart_status");
+      if (!isCurrent()) return;
+      autostart.value = fresh;
+      autostartError.value = null;
+    } catch (e) {
+      if (!isCurrent()) return;
+      autostartError.value = e instanceof Error ? e.message : String(e);
+    }
+  });
 }
 
 async function setAutostart(enabled: boolean): Promise<void> {
@@ -529,7 +619,7 @@ defineExpose({ priceColumns });
             <path d="m9 9 6 6M15 9l-6 6" />
           </svg>
           <span class="ts-notice-content">自启状态读取失败：{{ autostartError }}</span>
-          <NButton size="tiny" @click="loadAutostart">重试</NButton>
+          <NButton size="tiny" :loading="autostartLoading" @click="loadAutostart">重试</NButton>
         </div>
         <section class="ts-card settings-card">
           <div class="setting-row">
@@ -608,7 +698,7 @@ defineExpose({ priceColumns });
           <span class="ts-notice-content"
             >设置读取失败，来源配置暂不可保存：{{ settingsError }}</span
           >
-          <NButton size="tiny" @click="loadSettings">重试</NButton>
+          <NButton size="tiny" :loading="settingsLoading" @click="loadSettings">重试</NButton>
         </div>
         <div v-if="sourcesError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
@@ -624,7 +714,7 @@ defineExpose({ priceColumns });
             <path d="m9 9 6 6M15 9l-6 6" />
           </svg>
           <span class="ts-notice-content">来源状态读取失败：{{ sourcesError }}</span>
-          <NButton size="tiny" @click="loadSources">重试</NButton>
+          <NButton size="tiny" :loading="sourcesLoading" @click="loadSources">重试</NButton>
         </div>
         <section class="ts-card settings-card">
           <div
@@ -656,7 +746,7 @@ defineExpose({ priceColumns });
               <NButton
                 size="tiny"
                 :loading="isSourceSaving(sourceIdOf(s.agent))"
-                :disabled="!!settingsError"
+                :disabled="settingsUnknown"
                 @click="saveSource(s.agent)"
               >
                 保存
@@ -724,7 +814,7 @@ defineExpose({ priceColumns });
             <path d="m9 9 6 6M15 9l-6 6" />
           </svg>
           <span class="ts-notice-content">缓存统计读取失败：{{ cacheError }}</span>
-          <NButton size="tiny" @click="loadCache">重试</NButton>
+          <NButton size="tiny" :loading="cacheLoading" @click="loadCache">重试</NButton>
         </div>
         <section class="ts-card settings-card">
           <div class="setting-row">
@@ -783,8 +873,10 @@ defineExpose({ priceColumns });
             <circle cx="12" cy="12" r="9" />
             <path d="m9 9 6 6M15 9l-6 6" />
           </svg>
-          <span class="ts-notice-content">价格列表读取失败：{{ pricingError }}</span>
-          <NButton size="tiny" @click="loadPricing">重试</NButton>
+          <span class="ts-notice-content"
+            >价格列表读取失败{{ pricing ? "（保留上次数据）" : "" }}：{{ pricingError }}</span
+          >
+          <NButton size="tiny" :loading="pricingLoading" @click="loadPricing">重试</NButton>
         </div>
         <section class="ts-card settings-card">
           <div class="price-actions">

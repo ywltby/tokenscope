@@ -75,6 +75,48 @@ function deferred<T>(): [Promise<T>, (v: T) => void] {
   return [promise, resolve];
 }
 
+/**
+ * RC03：未处理拒绝探针。happy-dom 不会把 `unhandledrejection` 派发给 window
+ * 监听器（实测只走 Node 的 process 事件），只挂 window 监听等于空断言；
+ * 因此同时挂 process 监听，并由用例先做一次自检泄漏证明探针真的能红。
+ */
+function rejectionProbe(): { reasons: unknown[]; leak: (m: string) => void; stop: () => void } {
+  const reasons: unknown[] = [];
+  const onNode = (r: unknown): void => {
+    reasons.push(r);
+  };
+  const onWindow = (e: PromiseRejectionEvent): void => {
+    reasons.push(e.reason);
+  };
+  const proc = (
+    globalThis as unknown as {
+      process?: {
+        on: (ev: string, cb: (r: unknown) => void) => void;
+        off: (ev: string, cb: (r: unknown) => void) => void;
+      };
+    }
+  ).process;
+  window.addEventListener("unhandledrejection", onWindow);
+  proc?.on("unhandledRejection", onNode);
+  return {
+    reasons,
+    leak: (m: string) => {
+      void Promise.reject(new Error(m));
+    },
+    stop: () => {
+      window.removeEventListener("unhandledrejection", onWindow);
+      proc?.off("unhandledRejection", onNode);
+    },
+  };
+}
+
+/** 排空微任务与一个宏任务，让可能的悬挂拒绝被探针记录。 */
+async function settleAsync(): Promise<void> {
+  await flushPromises();
+  await new Promise((r) => setTimeout(r, 0));
+  await flushPromises();
+}
+
 /** 在指定通知条内找"重试"按钮。 */
 function retryButtonFor(w: VueWrapper, noticeText: string) {
   const notice = w.findAll(".ts-notice").find((n) => n.text().includes(noticeText));
@@ -87,6 +129,7 @@ type SettingsVm = {
   closeActionKnown: boolean;
   autoSync: boolean | null;
   drafts: Record<string, { enabled: boolean; dir: string }>;
+  pricing: { modelsdev_count: number; entries: unknown[] } | null;
   setCloseAction: (v: string) => Promise<void>;
   setAutoSync: (v: boolean) => Promise<void>;
 };
@@ -641,7 +684,7 @@ describe("Settings 首载错误恢复（UX06）", () => {
     w.unmount();
   });
 
-  it("late_settings_response_does_not_overwrite_saved_value：真实 deferred 晚到读取不覆盖已保存值", async () => {
+  it("late_settings_response_does_not_overwrite_saved_source_value：晚到读取不覆盖已保存来源", async () => {
     // RC03：按"重试读取挂起 → 编辑 → 保存成功 → 释放旧读取"执行。
     // 保存成功 ≠ 读取的数据更新——写入开始即作废在途读取的提交资格。
     const [pendingRead, resolvePendingRead] = deferred<unknown>();
@@ -677,6 +720,12 @@ describe("Settings 首载错误恢复（UX06）", () => {
     await save.trigger("click");
     await flushPromises();
     expect(vm.drafts.claude.dir).toBe("C:/saved");
+    // 提交参数必须是用户保存的值（mock 不会自动回读新值）
+    expect(invokeMock).toHaveBeenCalledWith("source_config_set", {
+      agent: "claude",
+      enabled: true,
+      dir: "C:/saved",
+    });
 
     // 释放内容为旧值的挂起读取：不得覆盖保存值，也不得填充关闭动作/自动同步
     resolvePendingRead({
@@ -689,6 +738,11 @@ describe("Settings 首载错误恢复（UX06）", () => {
     });
     await flushPromises();
     expect(vm.drafts.claude.dir, "晚到读取不得覆盖保存值").toBe("C:/saved");
+    // 界面值（真实 input 的 value）同样是保存值
+    const claudeAfter = w
+      .findAll("input")
+      .find((i) => i.attributes("aria-label") === "Claude Code 日志目录");
+    expect((claudeAfter!.element as HTMLInputElement).value).toBe("C:/saved");
     expect(vm.closeActionKnown, "晚到读取不得让未知状态变成已知").toBe(false);
     expect(vm.closeAction).toBe("ask");
     w.unmount();
@@ -716,7 +770,10 @@ describe("Settings 首载错误恢复（UX06）", () => {
     const save = w.findAll("button").find((b) => b.text() === "保存");
     await save!.trigger("click");
     await flushPromises();
+    // RC03：提示必须保留真实失败原因，不能只说"可重试"。
     expect(w.text()).toContain("已保存，但状态刷新失败");
+    expect(w.text()).toContain("refresh down");
+    expect(w.text()).toContain("可重试");
     w.unmount();
   });
 
@@ -945,11 +1002,17 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
   });
 
   it("settings_initial_failures_stay_isolated_and_raise_no_unhandled_rejection", async () => {
-    const unhandled: unknown[] = [];
-    const onUnhandled = (e: PromiseRejectionEvent): void => {
-      unhandled.push(e.reason);
-    };
-    window.addEventListener("unhandledrejection", onUnhandled);
+    const probe = rejectionProbe();
+    // 自检：先制造一条真实泄漏，确认探针**能够**变红——否则"无未处理拒绝"
+    // 只是空断言（happy-dom 下 window 监听器永远收不到）。
+    probe.leak("probe-sentinel");
+    await settleAsync();
+    expect(
+      probe.reasons.some((r) => String(r).includes("probe-sentinel")),
+      "探针必须能捕捉未处理拒绝",
+    ).toBe(true);
+    probe.reasons.length = 0;
+
     const cases: [string, string][] = [
       ["settings_get", "设置读取失败，来源配置暂不可保存"],
       ["source_status", "来源状态读取失败"],
@@ -963,17 +1026,84 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
         cmd === failing ? Promise.reject(new Error(`${failing} down`)) : settingsImpl(cmd),
       );
       const w = mount(Settings);
-      await flushPromises();
+      await settleAsync();
       expect(w.text(), failing).toContain(expected);
       expect(w.text(), failing).toContain(`${failing} down`);
       // 其他成功区块照常渲染（缓存/价格/数据源三组都在）
       expect(w.text(), failing).toContain("缓存文件");
       expect(w.text(), failing).toContain("同步在线价格");
       expect(w.text(), failing).toContain("数据源");
+      expect(probe.reasons, failing).toEqual([]);
       w.unmount();
     }
-    window.removeEventListener("unhandledrejection", onUnhandled);
-    expect(unhandled, "不得产生未处理拒绝").toEqual([]);
+    probe.stop();
+  });
+
+  it("block_retry_never_starts_a_network_sync：任何读取重试都只重读，不触发同步", async () => {
+    // RC03/RC04：读取重试的语义是"重新读取该区块"，不得顺手发起联网同步。
+    let fail = true;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "settings_get" && fail) return Promise.reject(new Error("设置读取失败"));
+      if (cmd === "source_status" && fail) return Promise.reject(new Error("来源状态读取失败"));
+      if (cmd === "cache_stats" && fail) return Promise.reject(new Error("缓存统计读取失败"));
+      if (cmd === "pricing_entries" && fail) return Promise.reject(new Error("价格列表读取失败"));
+      if (cmd === "autostart_status" && fail) return Promise.reject(new Error("自启状态读取失败"));
+      if (cmd === "settings_get")
+        return Promise.resolve({ price_auto_sync: true, close_action: null, sources: {} });
+      return settingsImpl(cmd);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    fail = false;
+    for (const notice of [
+      "设置读取失败",
+      "来源状态读取失败",
+      "缓存统计读取失败",
+      "价格列表读取失败",
+      "自启状态读取失败",
+    ]) {
+      const retry = retryButtonFor(w, notice);
+      expect(retry, `${notice} 必须有重试按钮`).toBeDefined();
+      await retry!.trigger("click");
+      await flushPromises();
+    }
+    const cmds = invokeMock.mock.calls.map((c) => c[0]);
+    expect(cmds, "重试不得触发 sync_pricing_openrouter").not.toContain("sync_pricing_openrouter");
+    // 五个区块都恢复正常
+    expect(w.text()).not.toContain("读取失败");
+    w.unmount();
+  });
+
+  it("block_retry_while_pending_rereads_after_and_never_lets_stale_win：在途重试补读一次", async () => {
+    // RC03：区块重试防重复，但刷新意图不能丢——在途期间的再次触发本轮
+    // 结束后必须补读一次，最终采用新数据，旧响应不得覆盖。
+    const [staleRead, releaseStale] = deferred<unknown>();
+    let priceCalls = 0;
+    const oldView = { ...pricingView, modelsdev_count: 1, entries: [] };
+    const newView = { ...pricingView, modelsdev_count: 999, entries: [] };
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pricing_entries") {
+        priceCalls += 1;
+        return priceCalls === 1 ? staleRead : Promise.resolve(newView);
+      }
+      if (cmd === "settings_get")
+        return Promise.resolve({ ...oldView, price_auto_sync: true, sources: {} });
+      return settingsImpl(cmd);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const vm = vmOfSettings(w);
+    expect(vm.pricing, "读取挂起期间不得提前提交价格数据").toBeNull();
+    // 首载读取仍挂起时触发刷新（refreshKey）→ 不得并发第二条请求
+    await w.setProps({ refreshKey: 1 });
+    await flushPromises();
+    expect(priceCalls, "在途期间重复刷新不得并发请求").toBe(1);
+    // 释放旧读取（内容是刷新前的旧状态）→ 结束后补读一次并采用新值
+    releaseStale(oldView);
+    await flushPromises();
+    expect(priceCalls, "刷新意图必须补读一次").toBe(2);
+    expect(vm.pricing?.modelsdev_count, "旧结果不得覆盖补读结果").toBe(999);
+    w.unmount();
   });
 
   it("settings_retry_restores_all_dependent_controls：重试恢复来源/关闭动作/自动同步", async () => {
@@ -1092,6 +1222,132 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
     expect(vm.closeActionKnown, "卸载后的晚到读取不得写状态").toBe(false);
     expect(vm.drafts.claude?.dir ?? "").toBe("");
   });
+
+  it("late_settings_response_does_not_overwrite_saved_close_action：晚到读取不覆盖已保存关闭动作", async () => {
+    // RC03：关闭动作也必须是真实 deferred 竞态——首次读取成功 → 第二次读取
+    // 挂起 → 用户改关闭动作并写盘成功 → 释放旧读取（最小化）→ 仍是退出。
+    const [pendingRead, resolvePendingRead] = deferred<unknown>();
+    let settingsCalls = 0;
+    const settingsOf = (close: string) => ({
+      price_auto_sync: true,
+      close_action: close,
+      sources: {},
+    });
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "settings_get") {
+        settingsCalls += 1;
+        return settingsCalls === 2 ? pendingRead : Promise.resolve(settingsOf("ask"));
+      }
+      if (cmd === "settings_set_close_action") return Promise.resolve("quit");
+      return settingsImpl(cmd);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const vm = vmOfSettings(w);
+    expect(vm.closeAction).toBe("ask");
+    expect(vm.closeActionKnown).toBe(true);
+
+    // 第二次读取挂起（内容将是旧值"最小化"）
+    await w.setProps({ refreshKey: 1 });
+    await flushPromises();
+    expect(settingsCalls).toBe(2);
+    // 挂起期间用户改关闭动作并成功写盘
+    await vm.setCloseAction("quit");
+    expect(invokeMock).toHaveBeenCalledWith("settings_set_close_action", { action: "quit" });
+    expect(vm.closeAction).toBe("quit");
+    expect(w.text()).toContain("直接退出");
+    // 释放旧读取
+    resolvePendingRead(settingsOf("minimize"));
+    await flushPromises();
+    expect(vm.closeAction, "晚到读取不得把已保存的退出改回最小化").toBe("quit");
+    expect(w.text()).toContain("直接退出");
+    expect(w.text()).not.toContain("最小化到托盘");
+    w.unmount();
+  });
+
+  it("late_settings_response_does_not_overwrite_saved_auto_sync：晚到读取不覆盖已保存自动同步", async () => {
+    // RC03：自动同步同样覆盖——保存 false 后释放"true"的旧读取，界面与状态
+    // 都必须停在 false。
+    const [pendingRead, resolvePendingRead] = deferred<unknown>();
+    let settingsCalls = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "settings_get") {
+        settingsCalls += 1;
+        return settingsCalls === 2
+          ? pendingRead
+          : Promise.resolve({ price_auto_sync: true, close_action: null, sources: {} });
+      }
+      if (cmd === "settings_set_price_auto_sync") return Promise.resolve(false);
+      return settingsImpl(cmd);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const vm = vmOfSettings(w);
+    expect(vm.autoSync).toBe(true);
+
+    await w.setProps({ refreshKey: 1 });
+    await flushPromises();
+    expect(settingsCalls).toBe(2);
+    await vm.setAutoSync(false);
+    expect(invokeMock).toHaveBeenCalledWith("settings_set_price_auto_sync", { enabled: false });
+    expect(vm.autoSync).toBe(false);
+    const sw = w.find('[role="switch"][aria-label="自动同步价格"]');
+    expect(sw.exists(), "自动同步开关必须可定位").toBe(true);
+    expect(sw.attributes("aria-checked"), "界面开关显示已关闭").toBe("false");
+
+    resolvePendingRead({ price_auto_sync: true, close_action: null, sources: {} });
+    await flushPromises();
+    expect(vm.autoSync, "晚到读取不得把已保存的关闭改回开启").toBe(false);
+    expect(
+      w.find('[role="switch"][aria-label="自动同步价格"]').attributes("aria-checked"),
+      "界面开关不得被旧读取翻回 true",
+    ).toBe("false");
+    w.unmount();
+  });
+
+  it("concurrent_row_saves_keep_independent_saving_state：跨行保存不共用全局 saving 状态", async () => {
+    // 每行有自己的保存中状态——claude 提交挂起时 codex 仍可保存并解锁，
+    // claude 不得被 codex 的返回提前解锁。
+    const [claudeGate, releaseClaude] = deferred<unknown>();
+    invokeMock.mockImplementation((c: string, args?: Record<string, unknown>) => {
+      if (c === "source_config_set") {
+        return args?.agent === "claude" ? claudeGate : Promise.resolve({ ok: true });
+      }
+      return settingsImpl(c);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const claudeRow = w.findAll("strong").find((x) => x.text() === "Claude Code")!;
+    const codexRow = w.findAll("strong").find((x) => x.text() === "Codex")!;
+    const saveIn = (anchor: typeof claudeRow) =>
+      Array.from(anchor.element.parentElement!.querySelectorAll("button")).find(
+        (b) => b.textContent?.trim() === "保存",
+      ) as HTMLButtonElement | undefined;
+    const claudeSave = saveIn(claudeRow)!;
+    const codexSave = saveIn(codexRow)!;
+
+    await claudeSave.click();
+    await flushPromises();
+    expect(claudeSave.classList.toString(), "claude 提交在途 → 该行保存中").toContain(
+      "n-button--loading",
+    );
+    expect(codexSave.classList.toString(), "另一行不得被视为保存中").not.toContain(
+      "n-button--loading",
+    );
+    // codex 保存完成，不得提前解锁 claude
+    await codexSave.click();
+    await flushPromises();
+    expect(codexSave.classList.toString()).not.toContain("n-button--loading");
+    expect(claudeSave.classList.toString(), "codex 返回不得解锁 claude 行").toContain(
+      "n-button--loading",
+    );
+    releaseClaude({ ok: true });
+    await flushPromises();
+    expect(claudeSave.classList.toString(), "claude 自己完成后解锁").not.toContain(
+      "n-button--loading",
+    );
+    w.unmount();
+  });
 });
 
 // ── RC04：设置页同步的函数级防重复与列表刷新失败保留旧价格 ──
@@ -1125,6 +1381,68 @@ describe("Settings 价格同步（RC04）", () => {
     release([{ source: "models.dev", count: 5 }]);
     await flushPromises();
     expect(w.text()).toContain("价格列表读取失败");
+    w.unmount();
+  });
+
+  it("sync_refresh_failure_keeps_previous_price_entries：列表刷新失败保留旧价格", async () => {
+    // RC04：同步后的列表读取失败必须是"读取失败"，已显示的价格数据不得被
+    // 清空（否则用户看到价格消失，误以为同步把数据弄坏了）。
+    const withEntries = {
+      ...pricingView,
+      modelsdev_count: 3,
+      entries: [
+        {
+          prefix: "vendor/keep-me",
+          name: "Keep",
+          channel: "vendor",
+          input: 1,
+          output: 2,
+          cache_write: 0.2,
+          cache_read: 0.1,
+          base_incomplete: false,
+          source: "models.dev",
+          basis: null,
+          segments: [],
+          schedules: [],
+          has_tiered_pricing: false,
+          openrouter: null,
+        },
+      ],
+    };
+    let synced = false;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "sync_pricing_openrouter") {
+        synced = true;
+        return Promise.resolve([{ source: "models.dev", count: 3 }]);
+      }
+      if (cmd === "pricing_entries") {
+        return synced ? Promise.reject(new Error("list down")) : Promise.resolve(withEntries);
+      }
+      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "settings_get")
+        return Promise.resolve({ price_auto_sync: true, close_action: null, sources: {} });
+      if (cmd === "autostart_status") return Promise.resolve(false);
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const vm = vmOfSettings(w);
+    expect(vm.pricing?.entries.length, "首载已有 1 条价格").toBe(1);
+
+    await w
+      .findAll("button")
+      .find((b) => b.text().includes("同步在线价格"))!
+      .trigger("click");
+    await flushPromises();
+    expect(w.text()).toContain("价格列表读取失败");
+    expect(w.text()).toContain("保留上次数据");
+    expect(w.text()).toContain("list down");
+    expect(vm.pricing?.entries.length, "刷新失败必须保留旧价格数据").toBe(1);
+    // 旧数据仍在界面上（优先级行的 models.dev 条数来自保留的价格视图）
+    expect(w.text()).toContain("models.dev（3 条，主源）");
+    // 归类为读取失败而非"无价格"：错误条仍提供该区块的重试入口
+    expect(retryButtonFor(w, "价格列表读取失败"), "价格区块必须有重试").toBeDefined();
     w.unmount();
   });
 });
