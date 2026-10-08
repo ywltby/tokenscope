@@ -738,8 +738,18 @@ export function buildFixture(name) {
       case "cache_stats":
       case "refresh_cache":
         return { path: "C:/Users/dev/AppData/Roaming/tokenscope/cache.db", files: 3, events: 120 };
-      case "pricing_entries":
-        return cfg.statusFails ? reject("价格状态读取失败（合成）") : pricingView();
+      case "pricing_entries": {
+        if (cfg.statusFails) return reject("价格状态读取失败（合成）");
+        const view = pricingView();
+        if (cfg.largePricing) {
+          const sample = view.entries[0];
+          view.entries = Array.from({ length: 8466 }, (_, i) => ({
+            ...sample, prefix: `synthetic-model-${i}`, name: `合成模型 ${i}`, source: "models.dev",
+          }));
+          view.modelsdev_count = 8466;
+        }
+        return view;
+      }
       case "autostart_status":
         return false;
       case "autostart_set":
@@ -804,6 +814,7 @@ export function buildFixture(name) {
 /** 场景配置表：每个 fixture 明确它的失败/挂起/过期形态。 */
 const SCENARIOS = {
   normal: { kind: "normal" },
+  "large-pricing": { kind: "normal", largePricing: true },
   empty: { kind: "empty" },
   "unknown-price": { kind: "unknown" },
   "partial-price": { kind: "partial" },

@@ -64,6 +64,27 @@ const msg = useMessage();
 const sources = ref<SourceStatus[]>([]);
 const cache = ref<CacheInfo | null>(null);
 const pricing = ref<PricingView | null>(null);
+// 自动列宽使用原生布局，必须限制同时挂载的单元格/浮层数量。
+const PRICE_PAGE_SIZE = 50;
+const pricingPage = ref(1);
+const pricingPageCount = computed(() =>
+  Math.max(1, Math.ceil((pricing.value?.entries.length ?? 0) / PRICE_PAGE_SIZE)),
+);
+const visiblePricingEntries = computed(() =>
+  (pricing.value?.entries ?? []).slice(
+    (pricingPage.value - 1) * PRICE_PAGE_SIZE,
+    pricingPage.value * PRICE_PAGE_SIZE,
+  ),
+);
+const pricingTable = ref<{ $el: HTMLElement } | null>(null);
+function setPricingPage(page: number): void {
+  pricingPage.value = Math.min(
+    pricingPageCount.value,
+    Math.max(1, Number.isFinite(page) ? Math.trunc(page) : 1),
+  );
+  if (pricingTable.value?.$el) pricingTable.value.$el.scrollTop = 0;
+}
+watch(pricingPageCount, () => setPricingPage(pricingPage.value));
 const syncing = ref(false);
 const rebuilding = ref(false);
 const { tz } = useTimezone();
@@ -1082,14 +1103,50 @@ defineExpose({ priceColumns });
             单价单位：{{ UNIT_PRICE_DENOMINATOR }}（每百万 token）；四桶单价按下方来源优先级解析。
           </div>
           <NDataTable
+            ref="pricingTable"
             :columns="priceColumns"
-            :data="pricing?.entries ?? []"
+            :data="visiblePricingEntries"
             :row-key="rowKey"
             size="small"
             :bordered="false"
             table-layout="auto"
             class="ts-auto-table ts-auto-table-pricing"
           />
+          <div
+            v-if="(pricing?.entries.length ?? 0) > PRICE_PAGE_SIZE"
+            class="pricing-pagination"
+            aria-label="价格分页"
+          >
+            <span
+              >共 {{ fmtNum(pricing?.entries.length ?? 0) }} 条，每页 {{ PRICE_PAGE_SIZE }} 条</span
+            >
+            <NButton
+              size="small"
+              aria-label="上一页价格"
+              :disabled="pricingPage === 1"
+              @click="setPricingPage(pricingPage - 1)"
+              >上一页</NButton
+            >
+            <label
+              >第
+              <input
+                type="number"
+                aria-label="价格页码"
+                :value="pricingPage"
+                min="1"
+                :max="pricingPageCount"
+                @change="setPricingPage(Number(($event.target as HTMLInputElement).value))"
+              />
+              / {{ pricingPageCount }} 页</label
+            >
+            <NButton
+              size="small"
+              aria-label="下一页价格"
+              :disabled="pricingPage === pricingPageCount"
+              @click="setPricingPage(pricingPage + 1)"
+              >下一页</NButton
+            >
+          </div>
         </section>
       </section>
 
@@ -1109,6 +1166,29 @@ defineExpose({ priceColumns });
   </div>
 </template>
 <style scoped>
+.pricing-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--ts-text-secondary);
+}
+.pricing-pagination input {
+  width: 64px;
+  padding: 4px;
+  border: 1px solid var(--ts-separator);
+  border-radius: 4px;
+  background: var(--ts-fill);
+  color: var(--ts-text);
+  text-align: center;
+}
+.pricing-pagination input:focus-visible {
+  outline: 2px solid var(--ts-accent);
+  outline-offset: 2px;
+}
 .token-color-control {
   display: flex;
   align-items: center;

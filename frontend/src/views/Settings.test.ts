@@ -157,6 +157,33 @@ beforeEach(() => {
 });
 
 describe("Settings 同步状态传播（Task 4）", () => {
+  it("8466 条价格仅传当前页给表格，末页与数据缩减后页码正确", async () => {
+    let entries = Array.from({ length: 8466 }, (_, i) => ({
+      prefix: `model-${i}`,
+      source: "models.dev",
+    }));
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command: string) =>
+      command === "pricing_entries" ? Promise.resolve({ ...pricingView, entries }) : base(command),
+    );
+    const w = mount(Settings, { props: { refreshKey: 0 } });
+    await flushPromises();
+    const vm = w.vm as unknown as {
+      visiblePricingEntries: { prefix: string }[];
+      pricingPage: number;
+    };
+    expect(vm.visiblePricingEntries).toHaveLength(50);
+    await w.get('[aria-label="价格页码"]').setValue("170");
+    expect(vm.visiblePricingEntries).toHaveLength(16);
+    expect(vm.visiblePricingEntries[0].prefix).toBe("model-8450");
+    expect(w.get('[aria-label="下一页价格"]').attributes("disabled")).toBeDefined();
+    entries = entries.slice(0, 3);
+    await w.setProps({ refreshKey: 1 });
+    await flushPromises();
+    expect(vm.pricingPage).toBe(1);
+    expect(vm.visiblePricingEntries).toHaveLength(3);
+    w.unmount();
+  });
   it("进入设置消费后台预读，不重复请求，也没有整页加载遮罩", async () => {
     const preload = createSettingsPreload(invokeMock);
     preload.start();

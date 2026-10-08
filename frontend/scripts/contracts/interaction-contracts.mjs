@@ -14,6 +14,7 @@ import { join } from "node:path";
 
 /** 计划 §3 RC09 表格的必需契约清单——一个都不能少。 */
 export const REQUIRED_CONTRACTS = [
+  "large_pricing_does_not_block_settings_navigation",
   "token_colors_customize_persist_and_reset",
   "empty_unknown_partial_have_correct_content",
   "settings_failure_retry_restores_all_controls",
@@ -137,6 +138,29 @@ async function waitTipState(session, selector, shown, timeoutMs = 2000) {
 // ── 契约实现 ────────────────────────────────────────────────────────
 
 const IMPL = {
+  async large_pricing_does_not_block_settings_navigation(ctx) {
+    const name = "large_pricing_does_not_block_settings_navigation";
+    const session = await ctx.open({ fixture: "large-pricing", viewport: VIEWPORTS.desktop });
+    try {
+      await openDashboard(session);
+      const start = Date.now();
+      await gotoPage(session.page, "设置");
+      const elapsed = Date.now() - start;
+      const rows = await session.page.locator('.ts-auto-table-pricing tbody tr').count();
+      ctx.record(name, "8466 条价格数据只渲染当前页", rows > 0 && rows <= 50, `rendered=${rows}, navigation=${elapsed}ms`);
+      ctx.record(name, "进入设置在 3 秒内完成", elapsed < 3000, `${elapsed}ms`);
+      if (rows <= 50) {
+        await session.page.getByRole('button', { name: '下一页价格', exact: true }).click();
+        await session.page.waitForTimeout(200);
+        const text = await session.page.locator('.ts-auto-table-pricing').innerText();
+        ctx.record(name, "下一页显示后续记录", text.includes('synthetic-model-50') && !text.includes('synthetic-model-0\n'), text.slice(0, 150));
+        await gotoPage(session.page, "汇总");
+        await gotoPage(session.page, "设置");
+        ctx.record(name, "往返后仍可进入并保留当前页", (await session.page.locator('.ts-auto-table-pricing').innerText()).includes('synthetic-model-50'), "第二页保留");
+        await ctx.shot(name, session, "page2");
+      }
+    } finally { await session.close(); }
+  },
   async token_colors_customize_persist_and_reset(ctx) {
     const name = "token_colors_customize_persist_and_reset";
     const session = await ctx.open({ fixture: "normal", viewport: VIEWPORTS.desktop });
