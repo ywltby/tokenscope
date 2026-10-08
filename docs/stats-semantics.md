@@ -31,7 +31,7 @@ Anthropic Messages API 的 usage 四字段本身就是互斥桶，逐一映射�
 与合成行（`model == "<synthetic>"`）按既有口径排除并计数。
 **`isApiErrorMessage` 不在排除口径内**（代码未读取该字段）：API 错误行
 通常不带 usage，经"缺 usage"路径跳过；若未来出现带 usage 的错误行会
-入账——口径变更需先行确认并更新本文件。去重身份 = 
+入账——口径变更需先行确认并更新本文件。去重身份 =
 `(session_id, message.id)`，保时间戳最晚一条（流式重发取终值）。
 
 ### 2.2 Codex（`~/.codex/sessions/**/*.jsonl`，rollout 格式）

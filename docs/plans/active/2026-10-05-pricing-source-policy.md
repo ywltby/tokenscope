@@ -263,4 +263,3 @@ pnpm --dir frontend build
 **审阅后续（2026-10-06 review-findings-remediation）**：旧索引迁移补测（v2 含内置条目启动即失效重建，无内置条目恢复）——见该计划 Task 5。
 
 完成定义核对：无生产 TIER_BUILTIN/builtin()/静态 fallback ✅；models.dev 来源可单独识别（标签 + 状态 DTO + 日志）✅；首启横幅可见/可同步/失败可重试 ✅；离线快照可用 ✅；索引迁移与三门禁通过 ✅；真机证据随 D5 批次（后延，用户决策）。
-
