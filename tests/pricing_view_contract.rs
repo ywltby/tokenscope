@@ -310,3 +310,116 @@ fn nested_schedule_views_keep_rate_specs() {
     assert!(seg_json.contains("\"cache_read\":null"), "{seg_json}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// RC08：OpenRouter 数字单价经同步导入后，视图层完整保留四态与精度。
+///
+/// 复核现象：OpenRouter API 的单价既可能是数字也可能是数字字符串；此前
+/// 解析只接受字符串，数字形态会让**整个响应**反序列化失败 → 0 条导入，
+/// 对照价全丢。同步侧（src/openrouter.rs fixture 测试）保证数字可导入，
+/// 这里保证导入后的值在视图层不被舍成 0、不与未知混淆。
+///
+/// 注意：对照价按**匹配键**（末段 `/` 之后）配对，故三个模型的末段必须不同。
+#[test]
+fn openrouter_numeric_prices_survive_sync_and_view() {
+    let dir = fresh_dir("rc08-numeric");
+    // 主源：models.dev（提供可解析的主价）
+    let md = dir.join("pricing-modelsdev.json");
+    std::fs::write(
+        &md,
+        r#"{"v":3,"synced_at":"t","entries":[
+            {"id":"vendor/tiny-n","name":"Tiny","input":1.0,"output":2.0},
+            {"id":"vendor/zero-n","name":"Zero","input":1.0,"output":2.0},
+            {"id":"vendor/miss-n","name":"Missing","input":1.0,"output":2.0}
+        ]}"#,
+    )
+    .unwrap();
+    // 对照源：OpenRouter 快照——数值取自数字形态导入的结果
+    //（USD/token 原单位；极小值、显式 0、缺失三态并存）。
+    let or = dir.join("pricing-openrouter.json");
+    std::fs::write(
+        &or,
+        r#"{"v":2,"synced_at":"t","entries":[
+            {"id":"vendor/tiny-n","name":"Tiny OR","prompt":3e-7,"completion":1.5e-6,
+             "cache_read":3e-8,"cache_write":3.75e-6,
+             "overrides":[{"min_prompt_tokens":272000,"prompt":6e-7,"completion":3e-6}]},
+            {"id":"vendor/zero-n","name":"Zero OR","prompt":0,"completion":0,
+             "cache_read":0,"cache_write":0},
+            {"id":"vendor/miss-n","name":"Missing OR","prompt":1e-6}
+        ]}"#,
+    )
+    .unwrap();
+
+    let (p, warnings) = Pricing::load(None, Some(&md), Some(&or));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let entries = p.entries();
+    let main_of = |id: &str| {
+        entries
+            .iter()
+            .find(|e| e.prefix == id && e.source == "models.dev")
+            .unwrap_or_else(|| panic!("缺少主源条目 {id}"))
+    };
+
+    // (a) 极小单价：×1e6 后保留有效精度（3e-7 → 0.3 USD/M），不得舍成 0
+    let tiny = main_of("vendor/tiny-n");
+    let cmp = tiny.openrouter.as_ref().expect("同前缀对照价应存在");
+    assert!(
+        matches!(cmp.input, RateSpec::Fixed(v) if (v - 0.3).abs() < 1e-9),
+        "3e-7 USD/token → 0.3 USD/M，不得舍成 0：{:?}",
+        cmp.input
+    );
+    assert!(
+        matches!(cmp.output, RateSpec::Fixed(v) if (v - 1.5).abs() < 1e-9),
+        "输出价精度保留：{:?}",
+        cmp.output
+    );
+    assert!(
+        matches!(cmp.cache_read, RateSpec::Fixed(v) if (v - 0.03).abs() < 1e-9),
+        "更小的 3e-8 同样保留：{:?}",
+        cmp.cache_read
+    );
+    // 数字形态的 override 同样进入分段视图（此前数字会让整条丢失）：
+    // OpenRouter 层的分段挂在 openrouter 层条目自身上，逐字段核对阈值与单价。
+    let or_tiny = entries
+        .iter()
+        .find(|e| e.prefix == "vendor/tiny-n" && e.source == "OpenRouter")
+        .expect("缺少 OpenRouter 层条目");
+    assert_eq!(
+        or_tiny.segments.len(),
+        1,
+        "数字 override 必须生成 1 个分段：{:?}",
+        or_tiny.segments
+    );
+    let seg = &or_tiny.segments[0];
+    assert_eq!(
+        seg.min_tokens, 272_000,
+        "分段阈值来自数字 min_prompt_tokens"
+    );
+    assert!(
+        matches!(seg.prices.input, RateSpec::Fixed(v) if (v - 0.6).abs() < 1e-9),
+        "6e-7 USD/token → 0.6 USD/M：{:?}",
+        seg.prices.input
+    );
+    assert!(
+        matches!(seg.prices.output, RateSpec::Fixed(v) if (v - 3.0).abs() < 1e-9),
+        "3e-6 → 3.0 USD/M：{:?}",
+        seg.prices.output
+    );
+    assert!(or_tiny.has_tiered_pricing, "分段存在应标记为分档计价");
+
+    // (b) 显式 0 = 免费（与未知区分）
+    let zero = main_of("vendor/zero-n");
+    let zcmp = zero.openrouter.as_ref().expect("同前缀对照价应存在");
+    assert_eq!(zcmp.input, RateSpec::Fixed(0.0), "数字 0 = 免费 ≠ 未知");
+    assert_eq!(zcmp.cache_write, RateSpec::Fixed(0.0));
+
+    // (c) 缺失分项 = Unknown，不冒充免费
+    let miss = main_of("vendor/miss-n");
+    let mcmp = miss.openrouter.as_ref().expect("同前缀对照价应存在");
+    assert_eq!(mcmp.output, RateSpec::Unknown, "缺失不得压成 0");
+    assert_eq!(mcmp.cache_read, RateSpec::Unknown);
+    let json = serde_json::to_string(miss).unwrap();
+    assert!(json.contains("\"cache_read\":null"), "{json}");
+    assert!(!json.contains("\"cache_read\":0"), "{json}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -280,7 +280,7 @@ Remove-Item Env:TOKENSCOPE_ACCEPTANCE_ROOT
 - [ ] RC05 完整保留对象计账、并发准入/借用/回收边界测试通过，内存声明与保证一致。
 - [ ] RC06 真实组件及浏览器完整键盘、列名称、描述、外部关闭通过。
 - [ ] RC07 单价精度和单位在真实调用点保留，request/summary/三态计价回归不变。
-- [ ] RC08 OpenRouter 基础/override 的数字与字符串兼容，非法值策略及原子快照保留。
+- [x] RC08 OpenRouter 基础/override 的数字与字符串兼容，非法值策略及原子快照保留。
 - [ ] RC09 所有必需具名契约有实际断言并通过，失败恢复及首帧场景无 IPC/网络漏口。
 - [ ] RC10 release 原生隔离入口已验证，所有读写和 WebView 状态在临时根。
 - [ ] RC11 生产 CSP、原生首帧/背景、六个主题×DPI组合及故障恢复有足够证据；未验项明确留下。
@@ -295,7 +295,7 @@ Remove-Item Env:TOKENSCOPE_ACCEPTANCE_ROOT
 | RC05 | 待执行 | — | — | — | 不宣称全进程 RSS 硬上限 |
 | RC06 | 待执行 | — | — | — | — |
 | RC07 | 待执行 | — | — | — | — |
-| RC08 | 待执行 | — | — | — | 独立补充修复；无需真实 API |
+| RC08 | 已完成（实现+自动化；原生验收归 RC11） | `qa-artifacts/recheck-remediation/rc08-red.txt`：受控撤回 `parse_price` 的 Number 分支后 `openrouter_accepts_numeric_and_string_prices` 与 `numeric_zero_is_preserved_in_snapshot_and_pricing_view` 双双变红（0 条导入/取不到条目）。修复前真实失败点在 serde 层，由常驻回归 `test_rc08_old_string_only_schema_rejects_numeric_fixture` 在同一 fixture 上永久断言旧 `Option<String>` schema 反序列化失败 | `cargo test --offline openrouter --lib` → 19 passed；`cargo test --offline --test pricing_view_contract` → 5 passed；`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --offline -- -D warnings`、`cargo test --workspace --offline` → 全绿（exit 0） | 本提交（`fix(价格同步): 接受 OpenRouter 数字与字符串单价`） | 只用合成 fixture，未联网复验真实 API；`id`/`name`/`utc_start` 与根结构仍严格失败；快照数字格式与索引/事件缓存版本未变 |
 | RC09 | 待执行 | — | — | — | 不能复用24场景总数作覆盖证明 |
 | RC10 | 待执行 | — | — | — | 原生前置路径隔离 |
 | RC11 | 待执行 | — | — | — | DPI/首帧/CSP待验，D5安装后延 |
