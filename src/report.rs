@@ -644,25 +644,56 @@ pub fn collect_all_with_sources_for_test(
     })
 }
 
+/// SF09/AP01：**唯一**的有效来源目录解析——「启用 + 显式目录或工具默认根」。
+///
+/// 保存校验（壳内的 `source_config_set`）与采集校验都经本函数，因此
+/// 「配置字段缺失 = 默认启用 + 默认根」这条语义在两处不会分叉：早期实现里
+/// 保存校验把 `None` 当成"不参与校验"，于是用户能保存一份采集层必然拒绝的
+/// 配置。未启用 → `Ok(None)`（用户可借停用恢复冲突）。
+pub fn effective_source_dir(
+    kind: AgentKind,
+    enabled: bool,
+    dir: Option<&std::path::Path>,
+) -> Result<Option<std::path::PathBuf>> {
+    if !enabled {
+        return Ok(None);
+    }
+    Ok(Some(match (dir, kind) {
+        (Some(d), _) => d.to_path_buf(),
+        (None, AgentKind::ClaudeCode) => ClaudeSource::default_root()?,
+        (None, AgentKind::Codex) => CodexSource::default_root()?,
+    }))
+}
+
+/// AP01：由设置解析**全部启用来源**的有效目录（保存校验与采集入口同源）。
+pub fn effective_source_dirs_from_settings(
+    settings: &crate::settings::Settings,
+) -> Result<Vec<(AgentKind, std::path::PathBuf)>> {
+    let mut out = Vec::new();
+    for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
+        let cfg = settings.source_config(kind == AgentKind::ClaudeCode);
+        let dir = cfg.dir.as_deref().map(std::path::Path::new);
+        if let Some(dir) = effective_source_dir(kind, cfg.enabled, dir)? {
+            out.push((kind, dir));
+        }
+    }
+    Ok(out)
+}
+
 /// SF09：解析启用来源的有效目录（显式配置或工具默认根）。
-/// 未启用的来源返回 None（不参与冲突检查，用户可借停用恢复）。
+/// 未启用的来源不参与冲突检查（用户可借停用恢复）。
 fn effective_source_dirs(opts: &SummaryOptions) -> Result<Vec<(AgentKind, std::path::PathBuf)>> {
     let mut out = Vec::new();
     for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
-        if !opts.enabled(kind == AgentKind::ClaudeCode) {
-            continue;
-        }
-        let dir = match kind {
-            AgentKind::ClaudeCode => match &opts.claude_dir {
-                Some(d) => d.clone(),
-                None => ClaudeSource::default_root()?,
-            },
-            AgentKind::Codex => match &opts.codex_dir {
-                Some(d) => d.clone(),
-                None => CodexSource::default_root()?,
-            },
+        let claude = kind == AgentKind::ClaudeCode;
+        let dir = if claude {
+            opts.claude_dir.as_deref()
+        } else {
+            opts.codex_dir.as_deref()
         };
-        out.push((kind, dir));
+        if let Some(dir) = effective_source_dir(kind, opts.enabled(claude), dir)? {
+            out.push((kind, dir));
+        }
     }
     Ok(out)
 }

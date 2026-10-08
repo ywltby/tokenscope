@@ -386,30 +386,20 @@ pub(crate) fn source_config_set_impl(
         } else {
             s.sources.codex = Some(cfg_for_save);
         }
-        // SF09：解析启用来源的**有效**目录（显式配置或工具默认根）后检查
-        // 相同/嵌套冲突——默认目录与显式覆盖同样参与；禁用来源跳过
-        //（用户可借停用恢复）。与写入在同一临界区内完成。
-        let resolve = |is_claude: bool,
-                       c: &Option<tokenscope::settings::SourceConfig>|
-         -> anyhow::Result<Option<std::path::PathBuf>> {
-            let Some(c) = c else {
-                return Ok(None);
-            };
-            if !c.enabled {
-                return Ok(None);
+        // SF09/AP01：解析启用来源的**有效**目录后检查相同/嵌套冲突——
+        // 缺省字段（None）= 默认启用 + 工具默认根，因此同样参与校验；
+        // 解析函数与采集层共用（report::effective_source_dirs_from_settings），
+        // 不再把 None 当成"不参与校验"而放行采集层必然拒绝的配置。
+        // 校验与写入在同一临界区内完成：失败即不落盘。
+        let dirs = tokenscope::report::effective_source_dirs_from_settings(s)?;
+        for i in 0..dirs.len() {
+            for j in i + 1..dirs.len() {
+                let (ka, da) = &dirs[i];
+                let (kb, db) = &dirs[j];
+                tokenscope::settings::validate_dir_conflict(da, db).map_err(|e| {
+                    anyhow::anyhow!("{e}（来源: {} / {}）", ka.as_str(), kb.as_str())
+                })?;
             }
-            Ok(Some(match &c.dir {
-                Some(d) => std::path::PathBuf::from(d),
-                None => match is_claude {
-                    true => tokenscope::source::claude::ClaudeSource::default_root()?,
-                    false => tokenscope::source::codex::CodexSource::default_root()?,
-                },
-            }))
-        };
-        let claude_eff = resolve(true, &s.sources.claude)?;
-        let codex_eff = resolve(false, &s.sources.codex)?;
-        if let (Some(a), Some(b)) = (claude_eff, codex_eff) {
-            tokenscope::settings::validate_dir_conflict(&a, &b).map_err(anyhow::Error::msg)?;
         }
         Ok(())
     })?;
@@ -842,6 +832,92 @@ mod tests {
         assert!(s.sources.codex.is_none(), "被拒绝的配置不得写入");
         // 停用的来源不参与重叠校验
         source_config_set_impl(&path, "codex", false, Some("C:/shared/logs".into())).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AP01：缺省字段（`None`）= 默认启用 + 默认根，因此**必须参与**保存校验。
+    /// 修复前 `None` 被当成"不参与校验"，用户能保存一份采集层必然拒绝的
+    /// 配置：保存返回成功，紧接着每次查询都报来源目录冲突。
+    #[test]
+    fn default_enabled_source_participates_in_overlap_validation() {
+        let dir =
+            std::env::temp_dir().join(format!("tokenscope-ap01-overlap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        // 无来源配置：两个来源均缺省 = 默认启用 + 默认根。
+        std::fs::write(&path, "price_auto_sync = true\n").unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        let read = || std::fs::read_to_string(&path).unwrap();
+
+        let codex_default = tokenscope::source::codex::CodexSource::default_root().unwrap();
+        let claude_default = tokenscope::source::claude::ClaudeSource::default_root().unwrap();
+
+        // 正例：Claude 显式指向 Codex 的默认根（Codex 仍缺省）→ 拒绝且不落盘。
+        let r = source_config_set_impl(
+            &path,
+            "claude",
+            true,
+            Some(codex_default.display().to_string()),
+        );
+        assert!(
+            r.is_err(),
+            "缺省的 Codex 来源仍在生效，撞其默认根必须拒绝: {r:?}"
+        );
+        assert_eq!(read(), before, "被拒绝的配置不得落盘");
+
+        // 嵌套：Codex 默认根的父目录同样拒绝。
+        let parent = codex_default.parent().unwrap().display().to_string();
+        assert!(
+            source_config_set_impl(&path, "claude", true, Some(parent)).is_err(),
+            "与默认根嵌套的目录必须拒绝"
+        );
+        assert_eq!(read(), before);
+
+        // 反向：Codex 显式指向 Claude 的默认根（Claude 仍缺省）→ 拒绝。
+        assert!(
+            source_config_set_impl(
+                &path,
+                "codex",
+                true,
+                Some(claude_default.display().to_string())
+            )
+            .is_err(),
+            "反向撞默认根同样拒绝"
+        );
+        assert_eq!(read(), before);
+
+        // 显式停用允许保存到冲突目录（用户借停用恢复的路径）。
+        source_config_set_impl(
+            &path,
+            "claude",
+            false,
+            Some(codex_default.display().to_string()),
+        )
+        .expect("停用来源不参与校验，必须允许保存");
+
+        // 无配置来源的首次保存：无冲突目录 → 成功。
+        let custom = dir.join("codex-custom");
+        source_config_set_impl(&path, "codex", true, Some(custom.display().to_string()))
+            .expect("无冲突的显式目录必须可保存");
+
+        // 边界：显式目录与本来源默认目录一致（Claude 显式 = Claude 默认根）。
+        source_config_set_impl(
+            &path,
+            "claude",
+            true,
+            Some(claude_default.display().to_string()),
+        )
+        .expect("显式目录与本来源默认根一致不构成冲突（另一来源为自定义目录）");
+        let s = tokenscope::settings::load(&path).unwrap();
+        assert_eq!(
+            s.source_config(true).dir.as_deref(),
+            Some(claude_default.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            s.source_config(false).dir.as_deref(),
+            Some(custom.to_string_lossy().as_ref())
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

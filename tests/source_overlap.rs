@@ -165,6 +165,73 @@ fn disabled_source_allows_overlap_recovery() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// AP01：缺省字段（`None`）= 默认启用 + 工具默认根，因此在有效来源解析里
+/// **同样参与**冲突判定。修复前保存校验把 `None` 当成"不参与校验"，允许
+/// 保存一份采集层必然拒绝的配置（保存成功 → 之后每次查询报冲突）。
+#[test]
+fn default_enabled_source_participates_in_overlap_validation() {
+    use tokenscope::model::AgentKind;
+    use tokenscope::report::effective_source_dirs_from_settings;
+    use tokenscope::settings::{AgentSources, Settings, SourceConfig};
+
+    let claude_default = tokenscope::source::claude::ClaudeSource::default_root().unwrap();
+    let codex_default = tokenscope::source::codex::CodexSource::default_root().unwrap();
+
+    // 全缺省配置：两个来源都解析出来——"字段缺失 = 默认启用 + 默认根"。
+    let dirs = effective_source_dirs_from_settings(&Settings::default()).unwrap();
+    assert_eq!(dirs.len(), 2, "缺省字段必须解析为默认启用: {dirs:?}");
+    assert_eq!(dirs[0], (AgentKind::ClaudeCode, claude_default.clone()));
+    assert_eq!(dirs[1], (AgentKind::Codex, codex_default.clone()));
+
+    // 显式停用 → 不参与（用户可借停用恢复冲突目录）。
+    let disabled = Settings {
+        sources: AgentSources {
+            claude: Some(SourceConfig {
+                enabled: false,
+                dir: None,
+            }),
+            codex: None,
+        },
+        ..Default::default()
+    };
+    let dirs = effective_source_dirs_from_settings(&disabled).unwrap();
+    assert_eq!(dirs, vec![(AgentKind::Codex, codex_default.clone())]);
+
+    // Claude 显式撞 Codex 默认根（Codex 缺省）→ 冲突必须被识别。
+    let hit_default = Settings {
+        sources: AgentSources {
+            claude: Some(SourceConfig {
+                enabled: true,
+                dir: Some(codex_default.to_string_lossy().into_owned()),
+            }),
+            codex: None,
+        },
+        ..Default::default()
+    };
+    let dirs = effective_source_dirs_from_settings(&hit_default).unwrap();
+    assert_eq!(dirs.len(), 2, "缺省的 Codex 仍在生效，必须在场参与校验");
+    let err = tokenscope::settings::validate_dir_conflict(&dirs[0].1, &dirs[1].1).unwrap_err();
+    assert!(err.contains("来源目录冲突"), "{err}");
+
+    // 父/子目录（嵌套）同样冲突：默认根的上层目录不得被另一来源占用。
+    let parent = codex_default.parent().unwrap();
+    let nested = Settings {
+        sources: AgentSources {
+            claude: Some(SourceConfig {
+                enabled: true,
+                dir: Some(parent.display().to_string()),
+            }),
+            codex: None,
+        },
+        ..Default::default()
+    };
+    let dirs = effective_source_dirs_from_settings(&nested).unwrap();
+    assert!(
+        tokenscope::settings::validate_dir_conflict(&dirs[0].1, &dirs[1].1).is_err(),
+        "默认根的父目录必须识别为嵌套冲突"
+    );
+}
+
 /// Task 2（审阅）：mock source——两个 agent 对同一文件都产出事件，
 /// 修复后只保留一份（不依赖某 adapter 恰好解析不了另一种格式）。
 mod mock_pair {
