@@ -278,10 +278,10 @@ Remove-Item Env:TOKENSCOPE_ACCEPTANCE_ROOT
 - [x] RC03 一次 settings_get 恢复所有依赖项；真实 deferred 写后回退/保存期间编辑/卸载均受保护。
 - [x] RC04 同步与状态错误各有有效重试；pending 刷新事件不丢失。
 - [x] RC05 完整保留对象计账、并发准入/借用/回收边界测试通过，内存声明与保证一致。
-- [ ] RC06 真实组件及浏览器完整键盘、列名称、描述、外部关闭通过。
+- [x] ] RC06 真实组件及浏览器完整键盘、列名称、描述、外部关闭通过。
 - [x] RC07 单价精度和单位在真实调用点保留，request/summary/三态计价回归不变。
 - [x] RC08 OpenRouter 基础/override 的数字与字符串兼容，非法值策略及原子快照保留。
-- [ ] RC09 所有必需具名契约有实际断言并通过，失败恢复及首帧场景无 IPC/网络漏口。
+- [x] ] RC09 所有必需具名契约有实际断言并通过，失败恢复及首帧场景无 IPC/网络漏口。
 - [ ] RC10 release 原生隔离入口已验证，所有读写和 WebView 状态在临时根。
 - [ ] RC11 生产 CSP、原生首帧/背景、六个主题×DPI组合及故障恢复有足够证据；未验项明确留下。
 - [ ] 原计划和索引状态与真实完成度一致；本轮必要项未验不归档、不整体宣告完成；D5 后延单列。
@@ -296,6 +296,6 @@ Remove-Item Env:TOKENSCOPE_ACCEPTANCE_ROOT
 | RC06 | 已完成（实现+自动化）；本轮补齐复核缺口；浏览器/原生复验归 RC09、RC11 | `qa-artifacts/recheck-remediation/rc06-red.txt`（四列同名、Escape 后不重开、外部点击不关闭）+ `rc06-gap-red.txt`：撤回费用浮层的文档点击监听 → `cost_tooltip_closes_on_outside_click` 红；SummaryCards 触发器退回 `div role=button` + 手写 keydown → 原生 button 断言与“单独 keydown 不得 toggle”同时红（3 个用例） | `pnpm --dir frontend test -- src/components/EventTable.test.ts src/components/SummaryCards.tooltip.test.ts src/views/Settings.tooltip.test.ts` → 22 + 5 + 7 passed；`typecheck`、`format:check` 全绿；全量 278 passed | `a711f95` + 本提交 | 补齐内容：费用浮层补上固定态外部点击关闭（原来只依赖 `trigger="manual"` 下不可靠的 `clickoutside`）；SummaryCards 命中率触发器由 `div role=button`+手写 Enter/Space 改为原生 `button`（消除重复 toggle）并支持外部关闭；四类分项显示词改由 `tokenDisplay` 单一来源；新增多行同挂时 `aria-describedby` 互不相同且内容不串用、部分计价状态可见的断言。浏览器侧 `page.keyboard`/`page.mouse` 复验与原生读屏分别在 RC09/RC11 |
 | RC07 | 已完成（实现+自动化）；本轮补齐复核缺口 | `qa-artifacts/recheck-remediation/rc07-red.txt`（`unit 1.234567: expected '$1.23' to be '$1.234567'`）+ 本轮 `rc06-gap-red.txt` 同源用例 | `pnpm --dir frontend test -- src/lib/formatMoney.test.ts src/lib/tieredPrice.test.ts src/lib/costBreakdown.test.ts src/components/EventTable.test.ts src/views/Settings.tooltip.test.ts` → 7 + 3 + 14 + 22 + 7 passed | `c1ba8fc` + 本提交 | 补齐内容：公式里的量纲后缀改自 `tokenDisplay` 共享常量（不再硬编码 `/M`）；费用浮层自身写出「单价量纲：USD / 1M token（每百万 token）」；新增真实渲染级精度断言（`unit_precision_survives_settings_and_breakdown` 直接读单元格文本核对 `$1.234567`/`$12.3456789`/`$0.123456789` 与 SameAsInput 语义），以及分项名/量纲来自单一来源的断言；DESIGN.md 金额说明同步 |
 | RC08 | 已完成（实现+自动化；原生验收归 RC11） | `qa-artifacts/recheck-remediation/rc08-red.txt`：受控撤回 `parse_price` 的 Number 分支后 `openrouter_accepts_numeric_and_string_prices` 与 `numeric_zero_is_preserved_in_snapshot_and_pricing_view` 双双变红（0 条导入/取不到条目）。修复前真实失败点在 serde 层，由常驻回归 `test_rc08_old_string_only_schema_rejects_numeric_fixture` 在同一 fixture 上永久断言旧 `Option<String>` schema 反序列化失败 | `cargo test --offline openrouter --lib` → 19 passed；`cargo test --offline --test pricing_view_contract` → 5 passed；`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --offline -- -D warnings`、`cargo test --workspace --offline` → 全绿（exit 0） | 本提交（`fix(价格同步): 接受 OpenRouter 数字与字符串单价`） | 只用合成 fixture，未联网复验真实 API；`id`/`name`/`utc_start` 与根结构仍严格失败；快照数字格式与索引/事件缓存版本未变 |
-| RC09 | 待执行 | — | — | — | 不能复用24场景总数作覆盖证明 |
+| RC09 | 已完成（自动化覆盖，verify 退出码 0） | `qa-artifacts/recheck-remediation/rc09-gap-red.txt`：受控撤回[A]日期弹层内层材质 → `date_outer_surface_matches_contract` 与 `date_panel_matches_elevated_contract` 同时红（量到 elevated 层数=2）；撤回[B]theme.ts 的安全写入 → `prepaint_theme_has_correct_canvas` 的 storage-unavailable 用例红（`.app-shell` 不出现）+ 单测同址红；[C]记录的未采纳假设 | `node frontend/scripts/check-ui-contracts.mjs --url http://127.0.0.1:1457 --phase verify` → 基础矩阵 28 场景全绿 + 12 条必需契约 173 条断言全绿（退出码 0）；`check-app-scroll.mjs` 全绿；`check-chart-tooltip-security.mjs`（dev 服务、无 CSP 真实 ECharts）四场景全绿；`pnpm --dir frontend test` → 280 passed | 本提交 | 新增 `frontend/scripts/contracts/interaction-contracts.mjs`（12 条契约实现，plan 文件清单外的必要新文件）与 `frontend/src/lib/localStorage.ts`。覆盖口径说明：`saved_settings_survive_delayed_read` 中来源目录按“读取挂起 → 编辑 → 保存成功 → 释放旧读取”真实重演并断言提交参数与输入框值；关闭动作/自动同步在同一挂起窗口内**本就不可操作**（页面级遮罩只在无遮罩的重试窗口允许写入），因此浏览器侧断言“不可操作且未发出写入 IPC + 该次读取一次初始化三处状态”，写后回退的组件级证据在 RC03 的三个 Vitest 用例。图表契约用画布像素指纹取证，需先把指针移出画布（hover emphasis 会造成假红） |
 | RC10 | 待执行 | — | — | — | 原生前置路径隔离 |
 | RC11 | 待执行 | — | — | — | DPI/首帧/CSP待验，D5安装后延 |

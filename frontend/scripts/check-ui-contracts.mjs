@@ -21,8 +21,15 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 import { chromium } from "playwright-core";
-import { FIXTURE_NAMES, LONG_SOURCE_DIR, buildFixture, isReject } from "./fixtures/ui-contracts.mjs";
+import {
+  FIXTURE_NAMES,
+  LONG_SOURCE_DIR,
+  buildFixture,
+  isReject,
+} from "./fixtures/ui-contracts.mjs";
+import { REQUIRED_CONTRACTS, runContracts } from "./contracts/interaction-contracts.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -31,8 +38,18 @@ function parseArgs(argv) {
     url: "http://127.0.0.1:1437",
     phase: "verify",
     output: join(root, "qa-artifacts", "ui-ux-remediation", "after"),
-    fixtures: ["normal", "empty", "unknown-price", "partial-price", "long-text", "multi-category"],
+    // RC09：默认矩阵必须包含失败 fixture（不能只跑正常数据就声称覆盖）
+    fixtures: [
+      "normal",
+      "empty",
+      "unknown-price",
+      "partial-price",
+      "long-text",
+      "multi-category",
+      "settings-read-failure",
+    ],
     themes: ["light", "dark"],
+    contracts: REQUIRED_CONTRACTS,
     viewports: [
       { width: 1280, height: 820, label: "1280x820" },
       { width: 980, height: 620, label: "980x620" },
@@ -45,6 +62,7 @@ function parseArgs(argv) {
     else if (a === "--output") args.output = argv[++i];
     else if (a === "--fixture") args.fixtures = argv[++i].split(",");
     else if (a === "--theme") args.themes = argv[++i].split(",");
+    else if (a === "--contract") args.contracts = argv[++i].split(",");
     else if (a === "--viewport") {
       args.viewports = argv[++i].split(",").map((s) => {
         const [w, h] = s.split("x").map(Number);
@@ -52,10 +70,13 @@ function parseArgs(argv) {
       });
     } else throw new Error(`未知参数 ${a}`);
   }
+  for (const c of args.contracts)
+    if (!REQUIRED_CONTRACTS.includes(c)) throw new Error(`未知契约 ${c}`);
   if (args.phase !== "baseline" && args.phase !== "verify")
     throw new Error(`--phase 必须是 baseline 或 verify（收到 ${args.phase}）`);
   for (const f of args.fixtures)
-    if (!FIXTURE_NAMES.includes(f)) throw new Error(`未知 fixture ${f}（可选：${FIXTURE_NAMES.join(", ")}）`);
+    if (!FIXTURE_NAMES.includes(f))
+      throw new Error(`未知 fixture ${f}（可选：${FIXTURE_NAMES.join(", ")}）`);
   return args;
 }
 
@@ -185,12 +206,22 @@ const MEASURE = () => {
     if (!root) return null;
     const th = root.querySelector("th");
     const td = root.querySelector("tbody td");
-    const g = (el) => (el ? { fontSize: getComputedStyle(el).fontSize, fontWeight: getComputedStyle(el).fontWeight, lineHeight: getComputedStyle(el).lineHeight, color: getComputedStyle(el).color } : null);
+    const g = (el) =>
+      el
+        ? {
+            fontSize: getComputedStyle(el).fontSize,
+            fontWeight: getComputedStyle(el).fontWeight,
+            lineHeight: getComputedStyle(el).lineHeight,
+            color: getComputedStyle(el).color,
+          }
+        : null;
     return { th: g(th), td: g(td) };
   };
 
   const totalRow = document.querySelector("tr.total-row");
-  const totalCells = totalRow ? [...totalRow.querySelectorAll("td")].map((td) => getComputedStyle(td).fontWeight) : null;
+  const totalCells = totalRow
+    ? [...totalRow.querySelectorAll("td")].map((td) => getComputedStyle(td).fontWeight)
+    : null;
   const aggRow = document.querySelector(".usage-card tbody tr");
   const aggregateRowHeight = aggRow ? px(aggRow.getBoundingClientRect().height) : null;
 
@@ -257,6 +288,10 @@ const READ_DATE_PANEL = () => {
   if (!panel) return { available: false };
   const px = (v) => Math.round(Number.parseFloat(v) * 100) / 100;
   const cs = getComputedStyle(panel);
+  // RC09：材质只应存在**一层**。内层面板现在保持透明，真正的 elevated 表面
+  // 是 Naive 的弹层外壳——因此这里同时量内层与外壳，供断言核对。
+  const shell = panel.closest(".n-popover") ?? panel.parentElement;
+  const shellCs = shell ? getComputedStyle(shell) : null;
   const shortcuts = [...document.querySelectorAll(".shortcut-btn")].map((b) => {
     const label = b.querySelector(".n-button__content") ?? b;
     const range = document.createRange();
@@ -278,6 +313,10 @@ const READ_DATE_PANEL = () => {
     backgroundColor: cs.backgroundColor,
     backdropFilter: cs.backdropFilter || cs.webkitBackdropFilter,
     borderRadius: cs.borderRadius,
+    shellClass: shell ? (shell.className || "").toString().slice(0, 40) : null,
+    shellBackground: shellCs?.backgroundColor ?? null,
+    shellBackdrop: shellCs ? shellCs.backdropFilter || shellCs.webkitBackdropFilter : null,
+    shellRadius: shellCs?.borderRadius ?? null,
     width: px(r.width),
     shortcuts,
   };
@@ -401,23 +440,32 @@ function buildChecks(m, ctx) {
     const heights = m.filterControls.map((c) => c.rect?.height).filter((h) => h != null);
     checks.push([
       "filter_controls_have_equal_outer_height",
-      heights.length >= 4 && heights.every((h) => near(h, 32)) && heights.every((h) => near(h, heights[0])),
+      heights.length >= 4 &&
+        heights.every((h) => near(h, 32)) &&
+        heights.every((h) => near(h, heights[0])),
       heights.join(","),
     ]);
     const sc = m.dateShortcuts;
     checks.push([
       "date_shortcuts_do_not_clip_text",
       Array.isArray(sc) && sc.length >= 5 && sc.every((s) => !s.clipped),
-      Array.isArray(sc) ? sc.map((s) => `${s.text}:${s.clipped ? "CLIP" : "ok"}`).join(",") : "no-panel",
+      Array.isArray(sc)
+        ? sc.map((s) => `${s.text}:${s.clipped ? "CLIP" : "ok"}`).join(",")
+        : "no-panel",
     ]);
     checks.push([
+      // RC09：日期弹层只有**一层**有效 elevated 材质——外壳 85% + 16px 模糊 +
+      // 12px 圆角，内层面板保持透明（此前两层都上玻璃 = 双层玻璃）。
       "date_panel_matches_elevated_contract",
       m.datePanel?.available === true &&
-        parseColorAlpha(m.datePanel.backgroundColor) != null &&
-        Math.abs(parseColorAlpha(m.datePanel.backgroundColor) - 0.85) <= 0.06 &&
-        /blur\(16px\)/.test(m.datePanel.backdropFilter ?? "") &&
-        /12px/.test(m.datePanel.borderRadius ?? ""),
-      m.datePanel ? `${m.datePanel.backgroundColor} ${m.datePanel.backdropFilter}` : "no-panel",
+        Math.abs(parseColorAlpha(m.datePanel.shellBackground) - 0.85) <= 0.06 &&
+        /blur\(16px\)/.test(m.datePanel.shellBackdrop ?? "") &&
+        /12px/.test(m.datePanel.shellRadius ?? "") &&
+        Math.abs(parseColorAlpha(m.datePanel.backgroundColor) - 0) <= 0.01 &&
+        !/blur\(16px\)/.test(m.datePanel.backdropFilter ?? ""),
+      m.datePanel
+        ? `外壳=${m.datePanel.shellBackground} ${m.datePanel.shellBackdrop} ${m.datePanel.shellRadius}；内层=${m.datePanel.backgroundColor} ${m.datePanel.backdropFilter}`
+        : "no-panel",
     ]);
   }
 
@@ -433,9 +481,15 @@ function buildChecks(m, ctx) {
       "three_tables_use_contract_typography",
       typoOk(m.aggregateTable) && typoOk(m.eventsTable) && typoOk(m.settingsTable),
       [
-        m.aggregateTable ? `聚合 th ${m.aggregateTable.th?.fontSize}/${m.aggregateTable.th?.fontWeight} td ${m.aggregateTable.td?.fontSize}` : "聚合 无表",
-        m.eventsTable ? `明细 th ${m.eventsTable.th?.fontSize} td ${m.eventsTable.td?.fontSize}` : "明细 无表",
-        m.settingsTable ? `设置 th ${m.settingsTable.th?.fontSize}/${m.settingsTable.th?.fontWeight} td ${m.settingsTable.td?.fontSize ?? "（虚拟滚动未渲染）"}` : "设置 无表",
+        m.aggregateTable
+          ? `聚合 th ${m.aggregateTable.th?.fontSize}/${m.aggregateTable.th?.fontWeight} td ${m.aggregateTable.td?.fontSize}`
+          : "聚合 无表",
+        m.eventsTable
+          ? `明细 th ${m.eventsTable.th?.fontSize} td ${m.eventsTable.td?.fontSize}`
+          : "明细 无表",
+        m.settingsTable
+          ? `设置 th ${m.settingsTable.th?.fontSize}/${m.settingsTable.th?.fontWeight} td ${m.settingsTable.td?.fontSize ?? "（虚拟滚动未渲染）"}`
+          : "设置 无表",
       ].join(" | "),
     ]);
     checks.push([
@@ -456,7 +510,9 @@ function buildChecks(m, ctx) {
         Math.abs(parseColorAlpha(m.costTooltip.backgroundColor) - 0.85) <= 0.06 &&
         /blur\(16px\)/.test(m.costTooltip.backdropFilter ?? "") &&
         /12px/.test(m.costTooltip.borderRadius ?? ""),
-      m.costTooltip ? `${m.costTooltip.backgroundColor} ${m.costTooltip.backdropFilter}` : "no-tooltip",
+      m.costTooltip
+        ? `${m.costTooltip.backgroundColor} ${m.costTooltip.backdropFilter}`
+        : "no-tooltip",
     ]);
     checks.push([
       "cost_popover_outer_width_is_bounded",
@@ -528,62 +584,169 @@ function buildChecks(m, ctx) {
     checks.push([
       "chart_summary_lists_all_real_categories_after_switches",
       pass,
-      after ? `after=${listed(after).length}/${expected.length} theme=${listed(afterTheme).length}` : "no-chart",
+      after
+        ? `after=${listed(after).length}/${expected.length} theme=${listed(afterTheme).length}`
+        : "no-chart",
     ]);
   }
 
   return checks;
 }
 
+/**
+ * RC09：建立一个带合成 IPC、外联拦截与收集钩子的浏览器会话。
+ * 汇总量测矩阵与交互契约共用本工厂——失败/延迟/边界场景也走同一套 IPC 与
+ * 外联拦截，不允许"只有正常场景才 mock"。
+ * @param {object} opts
+ * @param {string} opts.fixture fixture 名
+ * @param {string|null} opts.theme 预置主题偏好（null = 不写）
+ * @param {{width:number,height:number,label:string}} opts.viewport
+ * @param {"reduce"|"no-preference"} [opts.reducedMotion]
+ * @param {"light"|"dark"} [opts.colorScheme] 系统级偏好
+ * @param {boolean} [opts.gateMainModule] 拦住入口脚本，用于首帧取证
+ * @param {boolean} [opts.storageBlocked] localStorage 不可用（隐私模式等价）
+ * @param {string} [opts.contract] 归属契约（写进记录）
+ */
+async function openSession(opts) {
+  const fixtureName = opts.fixture;
+  const theme = opts.theme ?? null;
+  const vp = opts.viewport ?? VIEWPORTS.desktop;
+  const fixture = buildFixture(fixtureName);
+  const label = [
+    fixtureName,
+    theme ?? "no-pref",
+    vp.label,
+    opts.reducedMotion === "reduce" ? "reduced" : null,
+    opts.storageBlocked ? "nostore" : null,
+  ]
+    .filter(Boolean)
+    .join("-");
+  const contextOptions = { viewport: { width: vp.width, height: vp.height } };
+  if (opts.colorScheme) contextOptions.colorScheme = opts.colorScheme;
+  if (opts.reducedMotion) contextOptions.reducedMotion = opts.reducedMotion;
+  const context = await browser.newContext(contextOptions);
+
+  const externalRequests = [];
+  const ipcCalls = [];
+  const unknownCommands = [];
+
+  // Node 侧桥接：未知 command 显式记录并由断言判定；reject 标记翻成拒绝；
+  // defer 标记保持挂起，直到测试调用 fixture.settleDeferred/failDeferred。
+  await context.exposeFunction("__TS_FIXTURE_IPC", async (cmd, payload) => {
+    ipcCalls.push({ cmd, args: payload ?? {} });
+    const res = await fixture.ipc(cmd, payload ?? {});
+    if (res === undefined) {
+      unknownCommands.push(cmd);
+      return { __unknown: true, cmd };
+    }
+    if (isReject(res)) throw new Error(res.message);
+    return res;
+  });
+  await context.addInitScript(INIT_SCRIPT);
+  if (opts.storageBlocked) {
+    // 隐私模式等价：localStorage 读写抛错，应用必须在无本地存储时仍能绘制。
+    await context.addInitScript(() => {
+      Object.defineProperty(window, "localStorage", {
+        get() {
+          throw new Error("storage blocked");
+        },
+      });
+    });
+  } else if (theme !== null) {
+    await context.addInitScript(
+      ([key, value]) => {
+        try {
+          window.localStorage.setItem(key, value);
+        } catch {
+          /* ignore */
+        }
+      },
+      ["tokenscope-theme", theme],
+    );
+  }
+  await context.route("**/*", (route) => {
+    const url = route.request().url();
+    if (!url.startsWith(base) && !url.startsWith("data:") && !url.startsWith("blob:")) {
+      externalRequests.push(url);
+      return route.abort();
+    }
+    return route.continue();
+  });
+
+  // 首帧取证：拦住入口脚本（dev 的 /src/main.ts 或生产包入口）直到释放。
+  let releaseMainModule = () => {};
+  const mainGate = new Promise((r) => (releaseMainModule = r));
+  if (opts.gateMainModule) {
+    await context.route(/\/src\/main\.ts|\/assets\/index-[\w-]+\.js/, async (route) => {
+      await mainGate;
+      await route.continue();
+    });
+  }
+
+  const page = await context.newPage();
+  const consoleErrors = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "error" && !/ResizeObserver loop/.test(msg.text()))
+      consoleErrors.push(msg.text());
+  });
+  page.on("pageerror", (e) => {
+    if (!/ResizeObserver loop/.test(e.message)) consoleErrors.push(`pageerror: ${e.message}`);
+  });
+
+  return {
+    page,
+    context,
+    fixture,
+    label,
+    url: base,
+    viewport: vp,
+    theme,
+    ipcCalls,
+    unknownCommands,
+    externalRequests,
+    get pageErrors() {
+      return consoleErrors;
+    },
+    async readPageErrors() {
+      return page.evaluate(() => window.__TS_PAGE_ERRORS ?? []);
+    },
+    async readIpcCalls() {
+      return page.evaluate(() => window.__TS_IPC_CALLS ?? []);
+    },
+    async releaseMainModule() {
+      releaseMainModule();
+      await mainGate;
+    },
+    async close() {
+      await context.close();
+    },
+  };
+}
+
+const VIEWPORTS = {
+  desktop: { width: 1280, height: 820, label: "1280x820" },
+  small: { width: 980, height: 620, label: "980x620" },
+};
+
 for (const fixtureName of args.fixtures) {
   for (const theme of args.themes) {
     for (const vp of args.viewports) {
       const label = `${fixtureName}-${theme}-${vp.label}`;
-      const fixture = buildFixture(fixtureName);
-      const context = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
-      const externalRequests = [];
-      const ipcCalls = [];
-      const unknownCommands = [];
+      const session = await openSession({ fixture: fixtureName, theme, viewport: vp });
+      const fixture = session.fixture;
+      const { page, context } = session;
+      const externalRequests = session.externalRequests;
+      const unknownCommands = session.unknownCommands;
+      const consoleErrors = session.pageErrors;
 
-      // Node 侧桥接：未知 command 显式记录并由断言判定；reject 标记翻成拒绝。
-      await context.exposeFunction("__TS_FIXTURE_IPC", (cmd, payload) => {
-        ipcCalls.push({ cmd, args: payload });
-        const res = fixture.ipc(cmd, payload);
-        if (res === undefined) {
-          unknownCommands.push(cmd);
-          return { __unknown: true, cmd };
-        }
-        if (isReject(res)) throw new Error(res.message);
-        return res;
-      });
-      await context.addInitScript(INIT_SCRIPT);
-      await context.addInitScript(([t]) => {
-        try {
-          window.localStorage.setItem("tokenscope-theme", t);
-        } catch {
-          /* ignore */
-        }
-      }, [theme]);
-      await context.route("**/*", (route) => {
-        const url = route.request().url();
-        if (!url.startsWith(base) && !url.startsWith("data:") && !url.startsWith("blob:")) {
-          externalRequests.push(url);
-          return route.abort();
-        }
-        return route.continue();
-      });
-
-      const page = await context.newPage();
-      const consoleErrors = [];
-      page.on("console", (msg) => {
-        if (msg.type() === "error" && !/ResizeObserver loop/.test(msg.text()))
-          consoleErrors.push(msg.text());
-      });
-      page.on("pageerror", (e) => {
-        if (!/ResizeObserver loop/.test(e.message)) consoleErrors.push(`pageerror: ${e.message}`);
-      });
-
-      const record = { label, fixture: fixtureName, theme, viewport: vp.label, checks: [], ok: false };
+      const record = {
+        label,
+        fixture: fixtureName,
+        theme,
+        viewport: vp.label,
+        checks: [],
+        ok: false,
+      };
 
       try {
         await page.goto(base, { waitUntil: "networkidle" });
@@ -655,9 +818,9 @@ for (const fixtureName of args.fixtures) {
         }
 
         const expectedModel = (() => {
-          // 维度在会话中冻结：先 begin(by=model) 再取 summary。
-          fixture.ipc("query_begin", { by: "model", tz: "Asia/Shanghai" });
-          const sum = fixture.ipc("query_summary", { queryId: "q-expected" });
+          // 维度在会话中冻结：用 fixture 的会话表按 by=model 建会话再取 summary。
+          const h = fixture.table.begin({ by: "model", tz: "Asia/Shanghai" });
+          const sum = fixture.table.summary(h.queryId);
           const groups = Array.isArray(sum?.groups) ? sum.groups : [];
           return groups.filter((g) => g.key !== "合计").map((g) => g.label ?? g.key);
         })();
@@ -668,9 +831,14 @@ for (const fixtureName of args.fixtures) {
         });
 
         // 硬约束：IPC 无未知命令、无未处理拒绝、无外部请求、无页面错误
+        const pageErrors = await session.readPageErrors();
         const bootChecks = [
-          ["real_app_fixture_boots_without_ipc_leak", unknownCommands.length === 0, unknownCommands.join(",")],
-          ["no_unhandled_rejection_or_page_error", m.pageErrors.length === 0, m.pageErrors.join(" | ")],
+          [
+            "real_app_fixture_boots_without_ipc_leak",
+            unknownCommands.length === 0,
+            unknownCommands.join(","),
+          ],
+          ["no_unhandled_rejection_or_page_error", pageErrors.length === 0, pageErrors.join(" | ")],
           ["no_console_error", consoleErrors.length === 0, consoleErrors.join(" | ")],
           ["no_external_request", externalRequests.length === 0, externalRequests.join(",")],
         ];
@@ -678,10 +846,10 @@ for (const fixtureName of args.fixtures) {
         const allChecks = [...bootChecks, ...checks];
         record.checks = allChecks.map(([name, pass, detail]) => ({ name, pass, detail }));
         record.ok = allChecks.every(([, pass]) => pass);
-        record.pageErrors = m.pageErrors;
+        record.pageErrors = pageErrors;
         record.consoleErrors = consoleErrors;
         record.externalRequests = externalRequests;
-        record.ipcCommands = [...new Set(ipcCalls.map((c) => c.cmd))];
+        record.ipcCommands = [...new Set(session.ipcCalls.map((c) => c.cmd))];
         record.measurements = m;
 
         const bootOk = bootChecks.every(([, pass]) => pass);
@@ -706,87 +874,48 @@ for (const fixtureName of args.fixtures) {
   }
 }
 
-// ── UX09：首帧主题取证 ────────────────────────────────────────────
-// 延迟主模块执行，测量"主模块尚未运行、但已可绘制"时的 data-theme：
-// 修复前无引导脚本，此时 html 无 data-theme → 深色偏好下先按浅色绘制再切换。
-async function runPrepaintChecks() {
-  const cases = [
-    { label: "light-over-dark-system", pref: "light", system: "dark", expect: "light" },
-    { label: "dark-over-light-system", pref: "dark", system: "light", expect: "dark" },
-    { label: "system-follows-dark", pref: "system", system: "dark", expect: "dark" },
-    { label: "system-follows-light", pref: "system", system: "light", expect: "light" },
-    { label: "missing-pref-follows-dark-system", pref: null, system: "dark", expect: "dark" },
-    { label: "invalid-pref-follows-dark-system", pref: "bogus", system: "dark", expect: "dark" },
-  ];
-  const out = [];
-  for (const c of cases) {
-    const context = await browser.newContext({
-      viewport: { width: 980, height: 620 },
-      colorScheme: c.system === "dark" ? "dark" : "light",
-    });
-    if (c.pref !== null) {
-      await context.addInitScript(
-        ([key, value]) => {
-          try {
-            window.localStorage.setItem(key, value);
-          } catch {
-            /* ignore */
-          }
-        },
-        ["tokenscope-theme", c.pref],
-      );
-    }
-    let releaseMain = () => {};
-    const gate = new Promise((r) => (releaseMain = r));
-    // dev：主模块 /src/main.ts；生产：打包入口 /assets/index-*.js
-    await context.route(/\/src\/main\.ts|\/assets\/index-[\w-]+\.js/, async (route) => {
-      await gate;
-      await route.continue();
-    });
-    const page = await context.newPage();
-    let prepaint = null;
-    let mainLoadedAtPrepaint = null;
-    try {
-      await page.goto(base, { waitUntil: "commit" });
-      // 引导脚本在 head 同步执行：主模块被拦住时 data-theme 应已就位
-      await page.waitForFunction(() => document.documentElement.hasAttribute("data-theme"), {
-        timeout: 2000,
-      });
-      const pre = await page.evaluate(() => ({
-        theme: document.documentElement.getAttribute("data-theme"),
-        // 主模块是否已执行（#app 有子节点）——必须为 false，否则本检查被架空
-        mainLoaded: (document.getElementById("app")?.childElementCount ?? 0) > 0,
-      }));
-      prepaint = pre.theme;
-      mainLoadedAtPrepaint = pre.mainLoaded;
-    } catch {
-      prepaint = null;
-      mainLoadedAtPrepaint = null;
-    }
-    releaseMain();
-    let settled = null;
-    try {
-      await page.waitForSelector("#app .app-shell", { timeout: 8000 });
-      await page.waitForTimeout(400);
-      settled = await page.evaluate(() => document.documentElement.getAttribute("data-theme"));
-    } catch {
-      settled = null;
-    }
-    const ok = prepaint === c.expect && settled === c.expect && mainLoadedAtPrepaint === false;
-    out.push({ label: c.label, ok, expect: c.expect, prepaint, settled, mainLoadedAtPrepaint });
-    await page.screenshot({ path: join(args.output, `prepaint-${c.label}.png`) });
-    await context.close();
-  }
-  return out;
+// ── RC09：具名交互契约 ───────────────────────────────────
+// 失败恢复、业务状态、键盘/读屏、浮层四边、reduced-motion、图表 zoom、真实
+// App 滚动与首帧画布颜色——每条都必须真实操作页面（locator/keyboard/mouse）
+// 并断言业务结果；缺少场景或关键断言直接让 verify 失败，场景数本身不算覆盖。
+let commitHash = "unknown";
+try {
+  commitHash = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+} catch {
+  console.warn("警告：无法记录 git 提交 hash（证据里写 unknown）");
 }
 
-let prepaintResults = [];
+let contractResults = [];
+let contractFailList = [];
 try {
-  prepaintResults = await runPrepaintChecks();
+  const run = await runContracts({
+    open: openSession,
+    output: args.output,
+    only: args.contracts,
+    meta: { commit: commitHash, browserVersion, url: base },
+  });
+  contractResults = run.results;
+  contractFailList = run.failures;
 } catch (e) {
-  prepaintResults = [{ label: "prepaint-run", ok: false, error: String(e) }];
+  contractFailList.push("契约运行器异常：" + e);
+  console.error(String(e));
 }
-const prepaintOk = prepaintResults.length > 0 && prepaintResults.every((r) => r.ok);
+
+const contractsByGroup = new Map();
+for (const r of contractResults) {
+  if (!contractsByGroup.has(r.contract)) contractsByGroup.set(r.contract, []);
+  contractsByGroup.get(r.contract).push(r);
+}
+// 缺失即失败：必需契约清单里没有任何记录的条目要显式记为未覆盖。
+for (const name of args.contracts) {
+  if (!contractsByGroup.has(name)) {
+    contractFailList.push(name + "：没有任何断言记录（契约未覆盖）");
+  }
+}
+const contractsOk = contractFailList.length === 0;
 
 await browser.close();
 
@@ -798,7 +927,11 @@ writeFileSync(
       generated_at: new Date().toISOString(),
       url: base,
       browserVersion,
-      prepaint: prepaintResults,
+      commit: commitHash,
+      required_contracts: REQUIRED_CONTRACTS,
+      contracts: contractResults,
+      required_contracts: REQUIRED_CONTRACTS,
+      contracts: contractResults,
       results,
     },
     null,
@@ -812,25 +945,39 @@ const baselineCheck = {
   detail: `${results.length} 个场景，${contractFailures} 个契约违例`,
 };
 
-console.log(`\n${baselineCheck.pass ? "PASS" : "FAIL"} ${baselineCheck.name} (${baselineCheck.detail})`);
+console.log(
+  `\n${baselineCheck.pass ? "PASS" : "FAIL"} ${baselineCheck.name} (${baselineCheck.detail})`,
+);
 
-console.log(`\n${prepaintOk ? "PASS" : "FAIL"} prepaint_theme_matches_preference`);
-for (const r of prepaintResults)
+console.log(
+  `
+${contractsOk ? "PASS" : "FAIL"} rc09_named_interaction_contracts（${REQUIRED_CONTRACTS.length} 条必需契约）`,
+);
+for (const name of REQUIRED_CONTRACTS) {
+  const rows = contractsByGroup.get(name) ?? [];
+  const bad = rows.filter((x) => !x.pass);
+  const mark = rows.length && bad.length === 0 ? "✓" : "✗";
   console.log(
-    `  ${r.ok ? "✓" : "✗"} ${r.label}${r.error ? ` (${r.error})` : ` expect=${r.expect} prepaint=${r.prepaint} settled=${r.settled} mainLoaded=${r.mainLoadedAtPrepaint}`}`,
+    `  ${mark} ${name}：${rows.length} 条断言${bad.length ? `，${bad.length} 条失败` : ""}`,
   );
+  for (const x of bad) console.log(`      ✗ ${x.name}  (${x.detail})`);
+}
 
 // 硬约束在两种模式下都必须通过（boot 失败说明 fixture/协议漂移，不是"待修契约"）。
 if (hardFailures > 0) {
-  console.error(`\n${hardFailures} 个场景存在硬失败（IPC 泄漏/页面错误/外部请求），不得作为 baseline 通过`);
+  console.error(
+    `\n${hardFailures} 个场景存在硬失败（IPC 泄漏/页面错误/外部请求），不得作为 baseline 通过`,
+  );
   process.exit(1);
 }
 if (args.phase === "verify" && contractFailures > 0) {
   console.error(`\nverify 阶段仍有 ${contractFailures} 个场景未满足具名契约`);
   process.exit(1);
 }
-if (args.phase === "verify" && !prepaintOk) {
-  console.error("\nverify 阶段首帧主题未匹配偏好（prepaint_theme_matches_preference）");
+if (args.phase === "verify" && !contractsOk) {
+  console.error(`
+verify 阶段具名交互契约未全部通过（${contractFailList.length} 项）`);
+  for (const f of contractFailList.slice(0, 60)) console.error(`  ✗ ${f}`);
   process.exit(1);
 }
 console.log(`\n${args.phase} 完成：证据写入 ${args.output}`);

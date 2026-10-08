@@ -4,6 +4,8 @@
 /// 'self'` 允许）消费**同一存储键与解析规则**；`composables/theme.ts` 复用
 /// 这里的纯函数。两处规则一致性由 `preference_resolution_is_shared` 测试守住
 /// ——避免首帧解析与运行时解析漂移（那正是"闪一下再切换"的成因）。
+import { readItem } from "./localStorage";
+
 export type ThemePreference = "light" | "dark" | "system";
 export type ThemeMode = "light" | "dark";
 
@@ -25,11 +27,8 @@ export function resolveMode(pref: ThemePreference, systemDark: boolean): ThemeMo
 
 /** 读取存储偏好；localStorage 不可用/抛错（隐私模式等）时回落 system。 */
 export function readStoredPreference(): ThemePreference {
-  try {
-    return parsePreference(localStorage.getItem(THEME_STORAGE_KEY));
-  } catch {
-    return "system";
-  }
+  // 与 localStorage.ts 同一安全入口：不可用时返回 null → 回落 system。
+  return parsePreference(readItem(THEME_STORAGE_KEY));
 }
 
 /** 系统是否偏好深色；matchMedia 不可用时视为浅色（不抛错）。 */

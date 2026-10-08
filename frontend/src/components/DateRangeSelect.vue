@@ -180,11 +180,13 @@ const shortcutActive = (sc: { fromOffset: number }): boolean => {
   max-width: min(380px, calc(100vw - 32px));
   padding: var(--ts-space-3);
   border-radius: var(--ts-radius-popover);
-  /* UX01：浮层配方 85% elevated + 16px 模糊（修复前误用 ts-glass 的 20px，
-     且外层实色使玻璃叠在实色上失去意义——外层已改 85% 半透明） */
-  background-color: var(--ts-surface-elevated);
-  -webkit-backdrop-filter: var(--ts-glass-blur-popover);
-  backdrop-filter: var(--ts-glass-blur-popover);
+  /* RC09（date_outer_surface_matches_contract）：材质只保留**一层**——
+     Naive 的 .n-popover 外壳已经是 85% elevated + 16px 模糊，这里再叠一次
+     就是双层玻璃（两层半透明互相叠加、模糊采样自己的 backing，实际观感比
+     单层更浊且对比不稳定）。内层保持透明，只负责排版。 */
+  background-color: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 /* 触发按钮与筛选行分段控件同一族（DESIGN.md §5 筛选栏） */

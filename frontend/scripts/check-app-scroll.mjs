@@ -44,9 +44,7 @@ const styleContent = extractStyle("app-content");
 // ── 浏览器解析：ms-playwright 缓存 → 系统 Chrome → 系统 Edge ──
 function resolveExecutable() {
   const candidates = [];
-  const cache = process.env.LOCALAPPDATA
-    ? join(process.env.LOCALAPPDATA, "ms-playwright")
-    : null;
+  const cache = process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "ms-playwright") : null;
   if (cache && existsSync(cache)) {
     const dirs = readdirSafe(cache).filter((d) => d.startsWith("chromium-"));
     for (const d of dirs) {

@@ -2,6 +2,7 @@
 /// localStorage 持久化；Dashboard 与 Settings 共享同一模块级 ref，设置页修改后
 /// 回到汇总页即按新时区刷新。
 import { ref, watchEffect } from "vue";
+import { readItem, writeItem } from "../lib/localStorage";
 
 const STORAGE_KEY = "tokenscope-tz";
 const DEFAULT_TZ = "Asia/Shanghai";
@@ -20,7 +21,8 @@ function validTz(tz: string): boolean {
 }
 
 function initial(): string {
-  const saved = localStorage.getItem(STORAGE_KEY);
+  // RC09：存储不可用（隐私模式/策略禁用）时读不到偏好也不能抛——回落默认时区。
+  const saved = readItem(STORAGE_KEY);
   if (saved != null && validTz(saved)) return saved;
   if (saved != null) {
     // 无日志后端可用（前端层），console.warn 足够——不影响渲染。
@@ -32,7 +34,8 @@ function initial(): string {
 const tz = ref<string>(initial());
 
 watchEffect(() => {
-  localStorage.setItem(STORAGE_KEY, tz.value);
+  // RC09：持久化失败只是"下次启动回到默认时区"，不得打断组件初始化。
+  writeItem(STORAGE_KEY, tz.value);
 });
 
 export const TZ_OPTIONS: { label: string; value: string }[] = [

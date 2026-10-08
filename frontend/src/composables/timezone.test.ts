@@ -40,4 +40,28 @@ describe("timezone 偏好校验（R03）", () => {
     const { tz } = await setup(null);
     expect(tz.value).toBe("Asia/Shanghai");
   });
+
+  it("storage_unavailable_falls_back_and_never_throws：localStorage 抛错不阻断时区偏好", async () => {
+    // RC09：隐私模式/策略禁用下访问 localStorage 直接抛错。读必须回落默认，
+    // 写必须静默失败——否则 composable 初始化即抛，组件 setup 崩溃、窗口空白。
+    vi.resetModules();
+    const desc = Object.getOwnPropertyDescriptor(window, "localStorage");
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      get() {
+        throw new Error("storage blocked");
+      },
+    });
+    try {
+      const mod = await import("./timezone");
+      const { tz } = mod.useTimezone();
+      expect(tz.value, "读失败应回落默认时区").toBe("Asia/Shanghai");
+      // 写入（watchEffect）不得抛——等一次微任务让副作用真正执行
+      tz.value = "UTC";
+      await new Promise((r) => setTimeout(r, 0));
+      expect(tz.value).toBe("UTC");
+    } finally {
+      Object.defineProperty(window, "localStorage", desc ?? {});
+    }
+  });
 });

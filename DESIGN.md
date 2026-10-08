@@ -74,6 +74,8 @@ TokenScope 是长期查看 AI 用量、请求明细和估算费用的桌面工�
 - 表格主体、图表绘图区、费用公式区：使用 `--ts-surface-solid` 实色背景
 - 做法：在 `.ts-card` 内部套 `.ts-card-solid` 类，或直接给表格/图表容器设置实色背景
 
+**浮层材质只允许一层（RC09，2026-10-08）：** 由 Naive 弹层外壳（`.n-popover`，其 `color` 已是 `--ts-surface-elevated` 85% + `blur(16px)`）承载玻璃时，**内层面板不得再叠一次同配方**。此前日期弹层在 `.range-panel` 与外壳各上一次材质，两层半透明互相叠加、模糊各自采样自己的 backing，实际比单层更浊且对比不稳定。规则：一个浮层恰好一层 elevated 材质；内层只做排版（透明背景、无 `backdrop-filter`）。验收见 `frontend/scripts/check-ui-contracts.mjs` 的 `date_outer_surface_matches_contract`（同时量内层与 Naive 外壳祖先）。
+
 **吸顶导航栏（.ts-glass）**：
 - 与卡片同样的玻璃配方，但不透明度稍低（72%）
 - 底边一条发丝线 `border-bottom: 1px solid var(--ts-separator)`

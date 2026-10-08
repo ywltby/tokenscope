@@ -185,4 +185,37 @@ describe("UX09 首帧主题解析（prepaint）", () => {
     expect(resolveMode("light", true)).toBe("light");
     expect(resolveMode("dark", false)).toBe("dark");
   });
+
+  it("storage_unavailable_still_resolves_theme_and_never_throws：存储不可用时主题仍可用", async () => {
+    // RC09：localStorage 访问抛错时，theme composable 必须回落 system 偏好、
+    // 写入静默降级；否则 setup 抛错 → 首帧后再也渲染不出 .app-shell。
+    vi.resetModules();
+    vi.stubGlobal("matchMedia", () => ({
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const desc = Object.getOwnPropertyDescriptor(window, "localStorage");
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      get() {
+        throw new Error("storage blocked");
+      },
+    });
+    try {
+      const mod = await import("./theme");
+      const { useTheme } = mod;
+      const { mode, setPreference } = useTheme();
+      // 读失败 → 回落 system；system + 系统深色 → 实际主题必须是 dark。
+      // （若 composable 在存储抛错时中断初始化，这里根本取不到解析结果。）
+      expect(mode.value, "存储不可用时仍应按 system 偏好解析出主题").toBe("dark");
+      // 写入（watchEffect）不得抛，且偏好仍在本次会话内生效
+      setPreference("light");
+      await new Promise((r) => setTimeout(r, 0));
+      expect(mode.value, "显式偏好切换仍生效（持久化被静默降级）").toBe("light");
+    } finally {
+      Object.defineProperty(window, "localStorage", desc ?? {});
+      vi.unstubAllGlobals();
+    }
+  });
 });

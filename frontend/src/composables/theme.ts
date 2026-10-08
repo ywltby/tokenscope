@@ -3,6 +3,7 @@
 /// `lib/themePreference.ts`，首帧引导脚本 public/theme-boot.js 复用同一套）。
 /// 系统主题变化只影响 system 偏好；组件只消费解析后的 mode。
 import { computed, ref, watchEffect } from "vue";
+import { writeItem } from "../lib/localStorage";
 import {
   THEME_STORAGE_KEY,
   readStoredPreference,
@@ -24,7 +25,9 @@ const preference = ref<ThemePreference>(readStoredPreference());
 const mode = computed<ThemeMode>(() => resolveMode(preference.value, systemDark.value));
 
 watchEffect(() => {
-  localStorage.setItem(THEME_STORAGE_KEY, preference.value);
+  // RC09：localStorage 不可用（隐私模式、策略禁用、配额耗尽）时写入会直接
+  // 抛错。偏好无法持久化不应打断应用启动——这里降级为"本次会话内生效"。
+  writeItem(THEME_STORAGE_KEY, preference.value);
 });
 
 export function useTheme() {
