@@ -1,3 +1,4 @@
+pub mod acceptance;
 pub mod aggregate;
 pub mod cache;
 pub mod dedupe;

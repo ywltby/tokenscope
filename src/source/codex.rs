@@ -38,6 +38,10 @@ impl CodexSource {
     }
 
     pub fn default_root() -> Result<PathBuf> {
+        // RC10：验收模式一律用隔离根下的来源目录，绝不回退真实 ~/.codex。
+        if let Some(dir) = crate::acceptance::source_dir_override(false) {
+            return Ok(dir.join("sessions"));
+        }
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录"))?;
         Ok(home.join(".codex").join("sessions"))
     }

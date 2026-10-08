@@ -88,7 +88,15 @@ pub struct SummaryReport {
 }
 
 /// TokenScope 自有数据目录（M4）：`~/.tokenscope`。
+///
+/// RC10：以 `--features acceptance` 构建且启动时给了合法
+/// `TOKENSCOPE_ACCEPTANCE_ROOT` 时，返回隔离根下的数据目录——cache.db、
+/// settings.toml 与迁移备份、双源价格快照、pricing-index、view-cache、日志
+/// 全部随之落进隔离根（都经本函数派生）。普通构建恒为 `None`，行为不变。
 pub fn data_dir() -> Result<PathBuf> {
+    if let Some(dir) = crate::acceptance::data_dir_override() {
+        return Ok(dir);
+    }
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录"))?;
     Ok(home.join(".tokenscope"))
 }

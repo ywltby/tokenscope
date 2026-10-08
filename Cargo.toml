@@ -10,6 +10,14 @@ license = "MIT"
 # tokenscope.exe 而互不覆盖
 exclude = ["src-tauri"]
 
+[features]
+# 默认构建不含验收入口（产品构建行为完全不变）。
+default = []
+# RC10：原生生产验收——只有该 feature 的构建识别 TOKENSCOPE_ACCEPTANCE_ROOT，
+# 并把所有落盘路径（数据目录、来源根、日志、窗口状态、WebView 用户数据）
+# 重定向到隔离根；缺失/非法时拒绝启动，绝不回退真实 HOME。
+acceptance = []
+
 [dependencies]
 anyhow = "1"
 dirs = "6"

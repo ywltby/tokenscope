@@ -19,6 +19,14 @@ path = "src/main.rs"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# 默认构建不含验收入口（与根库一致：普通构建行为完全不变）。
+default = []
+# RC10：显式透传根库同名 feature——`tauri build --features acceptance` 只
+# 会传到这里，根库的 acceptance 分支必须随之启用，否则隔离根解析不到、
+# 验收实例会带着真实 HOME 启动。
+acceptance = ["tokenscope/acceptance"]
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }

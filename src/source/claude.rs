@@ -64,6 +64,11 @@ impl ClaudeSource {
     }
 
     pub fn default_root() -> Result<PathBuf> {
+        // RC10：验收模式一律用隔离根下的来源目录，**绝不**回退真实
+        // ~/.claude/projects（哪怕该目录不存在也只报"目录不存在"）。
+        if let Some(dir) = crate::acceptance::source_dir_override(true) {
+            return Ok(dir.join("projects"));
+        }
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录"))?;
         Ok(home.join(".claude").join("projects"))
     }

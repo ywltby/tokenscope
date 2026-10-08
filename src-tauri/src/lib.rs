@@ -4,6 +4,9 @@
 mod commands;
 mod window_state;
 
+#[cfg(feature = "acceptance")]
+mod acceptance;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +18,17 @@ use tauri::{
 use tauri_plugin_autostart::MacosLauncher;
 
 pub fn run() {
+    // RC10：验收构建在**任何路径被解析之前**确认隔离根。缺失/非法直接退出
+    // （退出码 2），绝不带着真实 ~/.tokenscope 与真实 agent 日志继续启动——
+    // 那种"通过"其实是拿用户数据签字。普通构建编译期就没有这段代码。
+    #[cfg(feature = "acceptance")]
+    let acceptance_root = match acceptance::start() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("验收模式启动失败：{e}");
+            std::process::exit(2);
+        }
+    };
     // SF06：日志初始化可失败——降级不阻断窗口创建；WorkerGuard 仍与进程
     // 同生命周期（run 阻塞至退出）。状态经 managed state 暴露给前端。
     let logging = tokenscope::logging::try_init("gui");
@@ -22,6 +36,12 @@ pub fn run() {
     let _log_guard = logging.guard;
     let t_boot = std::time::Instant::now();
     log::info!("TokenScope 启动（GUI）");
+    // RC10：验收构建把 WebView 用户数据目录与 identifier 也指向隔离根，
+    // 这样首帧主题/恢复行为不受真实 localStorage 干扰，且能与普通实例并存。
+    #[allow(unused_mut)]
+    let mut context = tauri::generate_context!();
+    #[cfg(feature = "acceptance")]
+    acceptance::configure(context.config_mut(), &acceptance_root);
     tauri::Builder::default()
         // 单实例必须最先注册：二次启动走回调唤起已有窗口，不新建实例。
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -104,7 +124,7 @@ pub fn run() {
             }
             _ => {}
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("TokenScope 应用运行失败");
 }
 
@@ -227,8 +247,13 @@ fn start_price_auto_sync() {
         // 首查延迟 2 分钟，避开启动瞬间的磁盘与网络竞争。
         std::thread::sleep(std::time::Duration::from_secs(120));
         loop {
-            let settings_path = tokenscope::settings::settings_path()
-                .unwrap_or_else(|_| std::path::PathBuf::from("settings.json"));
+            // RC10：定位不到数据目录时**不**退回当前工作目录（那会把
+            // settings.json 写到进程 CWD，脱离任何隔离根/用户目录约定）。
+            let Ok(settings_path) = tokenscope::settings::settings_path() else {
+                log::warn!("无法定位设置文件路径，本轮价格自动同步跳过（不回退 CWD）");
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+                continue;
+            };
             // D3/R06：设置异常 → 离线（关闭自动同步的用户意图不能被重置成联网）。
             let loaded = tokenscope::settings::load(&settings_path);
             let auto = tokenscope::settings::auto_sync_allowed(&loaded);
