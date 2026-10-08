@@ -83,24 +83,61 @@ function markSourceEdited(id: string): void {
   dirtySources.add(id);
 }
 
+// AP04：关闭动作写入串行化。此前快速连续选择会并发发出两个写请求，只在
+// 响应端忽略旧结果并不能阻止**后端**按到达顺序落盘旧值——界面显示的默认
+// 动作可能与实际持久化的相反。这里从源头串行：任一时刻只有一个写请求在
+// 飞；飞行期间的再次选择记为待写意图（只保留最后一次），当前写完成后立即
+// 补写，最终 UI 与最后一次实际落盘的值一致。
+const closeActionBusy = ref(false);
+let closeActionPending: "ask" | "minimize" | "quit" | undefined;
+
 async function setCloseAction(v: "ask" | "minimize" | "quit"): Promise<void> {
   if (!closeActionKnown.value) return; // 未知状态不得写入
-  mutationEpoch++; // 写入开始 → 在途读取失去提交资格
+  if (closeActionBusy.value) {
+    closeActionPending = v; // 记最后一次意图，不并发第二条请求
+    closeAction.value = v; // UI 立即反映选择（补写失败会回退）
+    return;
+  }
+  closeActionBusy.value = true;
+  let settled = closeAction.value; // 最后一次**确认落盘**的值
+  let target: "ask" | "minimize" | "quit" | undefined = v;
+  let failed = false;
   try {
-    await invoke("settings_set_close_action", { action: v === "ask" ? null : v });
-    closeAction.value = v;
-    closeActionKnown.value = true;
-    msg.success("关闭窗口默认动作已保存");
-  } catch (e) {
-    msg.error(String(e));
+    while (target !== undefined) {
+      closeActionPending = undefined;
+      mutationEpoch++; // 写入开始 → 在途读取失去提交资格
+      try {
+        await invoke("settings_set_close_action", { action: target === "ask" ? null : target });
+      } catch (e) {
+        if (disposed) return;
+        failed = true;
+        msg.error(String(e));
+        break;
+      }
+      if (disposed) return; // AP04：卸载后不得写状态或弹通知
+      settled = target;
+      closeAction.value = target;
+      closeActionKnown.value = true;
+      msg.success("关闭窗口默认动作已保存");
+      target = closeActionPending;
+    }
+  } finally {
+    closeActionBusy.value = false;
+    if (failed) {
+      // 回退到已落盘的值：界面不保留一个并未写入的选择。
+      closeActionPending = undefined;
+      closeAction.value = settled;
+    }
   }
 }
 
 async function openSettingsFile(): Promise<void> {
   try {
     const p = await invoke<string>("open_settings_file");
+    if (disposed) return; // AP04：卸载后不弹通知
     msg.info(`已打开设置配置文件（可直接编辑，保存后对下一次读取生效）：${p}`);
   } catch (e) {
+    if (disposed) return;
     msg.error(String(e));
   }
 }
@@ -300,6 +337,10 @@ async function loadSettings(): Promise<void> {
       s = await invoke<SettingsPayload>("settings_get");
     } catch (e) {
       if (readSeq !== settingsReadSeq || disposed) return;
+      // AP04：晚到的**失败**读取与晚到的成功读取适用同一守卫——写入已
+      // 发生（mutationEpoch 变化）时，旧读取的拒绝不得把刚保存的值降级成
+      // 「未知」，也不得把旧错误当成当前状态。修复前只有成功分支检查。
+      if (epochAtRead !== mutationEpoch) return;
       settingsError.value = e instanceof Error ? e.message : String(e);
       closeActionKnown.value = false;
       autoSync.value = null;
@@ -340,6 +381,7 @@ async function saveSource(agent: string): Promise<void> {
       enabled: d.enabled,
       dir: d.dir.trim() === "" ? null : d.dir.trim(),
     });
+    if (disposed) return; // AP04：卸载后不弹通知、不写局部状态
     msg.success(`已保存 ${AGENT_LABEL[id] ?? id} 来源配置`);
     // RC03：只清除"提交时版本一致"的 dirty——保存期间的新编辑保留。
     if (sourceEditRevOf(id) === submittedRev) dirtySources.delete(id);
@@ -347,6 +389,7 @@ async function saveSource(agent: string): Promise<void> {
     // 误以为需要重复保存；RC03：原始失败原因必须一并保留（不能只说
     // "可重试"却把为什么失败丢掉）。
     await loadSources();
+    if (disposed) return;
     if (sourcesError.value) {
       const reason = sourcesError.value;
       sourcesError.value = `已保存，但状态刷新失败（${reason}，可重试）`;
@@ -354,6 +397,7 @@ async function saveSource(agent: string): Promise<void> {
   } catch (e) {
     // Task 2：后端返回的重叠等配置错误必须可见，保留用户当前输入以便
     // 修改；错误只归属对应来源行（不再在 v-for 内跨行重复渲染）。
+    if (disposed) return;
     sourceErrors.value[id] = e instanceof Error ? e.message : String(e);
   } finally {
     savingSources.value = savingSources.value.filter((x) => x !== id);
@@ -367,11 +411,14 @@ async function rebuild(): Promise<void> {
   if (rebuilding.value) return;
   rebuilding.value = true;
   try {
-    cache.value = await invoke<CacheInfo>("refresh_cache");
+    const info = await invoke<CacheInfo>("refresh_cache");
+    if (disposed) return; // AP04：卸载后不写状态或弹通知
+    cache.value = info;
     // AP03：重建范围 = 当前生效的来源配置（用户停用的来源不参与），且只
     // 重建派生数据——不能声称配置外来源也被采集。
     msg.success("缓存已重建（按当前来源配置，仅重建派生数据）");
   } catch (e) {
+    if (disposed) return;
     msg.error(String(e));
   } finally {
     rebuilding.value = false;
@@ -385,9 +432,11 @@ async function syncPricing(): Promise<void> {
   syncing.value = true;
   try {
     const reports = await invoke<{ source: string; count: number }[]>("sync_pricing_openrouter");
+    if (disposed) return; // AP04：卸载后不弹通知
     msg.success(reports.map((r) => `${r.source} ${r.count} 条`).join("，"));
   } catch (e) {
     // 部分失败也要刷新：主源已写盘的数据立即可见（审阅 Task 3）。
+    if (disposed) return;
     msg.error(`同步失败：${e}`);
   } finally {
     // 成功与部分失败两条路径都重新读取价格视图 + 通知全局横幅刷新；
@@ -405,10 +454,12 @@ async function syncPricing(): Promise<void> {
 async function openPricing(): Promise<void> {
   try {
     const p = await invoke<string>("open_pricing_file");
+    if (disposed) return; // AP04：卸载后不弹通知
     msg.info(`已在系统默认编辑器打开（保存后下次统计生效）\n${p}`);
     // RC03：价格列表只经 loadPricing 一条路径读取（带读代次/卸载守卫）。
     await loadPricing();
   } catch (e) {
+    if (disposed) return;
     msg.error(String(e));
   }
 }
@@ -430,9 +481,12 @@ async function loadAutostart(): Promise<void> {
 async function setAutostart(enabled: boolean): Promise<void> {
   autostartBusy.value = true;
   try {
-    autostart.value = await invoke<boolean>("autostart_set", { enabled });
+    const fresh = await invoke<boolean>("autostart_set", { enabled });
+    if (disposed) return; // AP04：卸载后不写状态或弹通知
+    autostart.value = fresh;
     msg.success(enabled ? "已开启开机自启" : "已关闭开机自启");
   } catch (e) {
+    if (disposed) return;
     msg.error(String(e));
   } finally {
     autostartBusy.value = false;
@@ -445,9 +499,12 @@ async function setAutoSync(enabled: boolean): Promise<void> {
   mutationEpoch++; // 写入开始 → 在途读取失去提交资格
   autoSyncBusy.value = true;
   try {
-    autoSync.value = await invoke<boolean>("settings_set_price_auto_sync", { enabled });
+    const committed = await invoke<boolean>("settings_set_price_auto_sync", { enabled });
+    if (disposed) return; // AP04：卸载后不写状态或弹通知
+    autoSync.value = committed;
     msg.success(enabled ? "已开启自动同步（每 24h）" : "已关闭自动同步");
   } catch (e) {
+    if (disposed) return;
     msg.error(String(e));
   } finally {
     autoSyncBusy.value = false;
@@ -674,6 +731,7 @@ defineExpose({ priceColumns });
                 style="width: 160px"
                 aria-label="关闭窗口时"
                 :disabled="!closeActionKnown"
+                :loading="closeActionBusy"
                 @update:value="setCloseAction"
               />
             </div>
@@ -854,8 +912,11 @@ defineExpose({ priceColumns });
           </NCollapse>
           <div class="rebuild-row">
             <NButton size="small" :loading="rebuilding" @click="rebuild">重建缓存</NButton>
-            <!-- UX08：重建预期说明（重建是派生数据操作，保留进度与结果反馈） -->
-            <span class="rebuild-hint">重新扫描日志，可能需要一段时间。</span>
+            <!-- UX08：重建预期说明（重建是派生数据操作，保留进度与结果反馈）；
+                 AP03：范围由当前来源配置决定，只重建派生数据 -->
+            <span class="rebuild-hint"
+              >按当前来源配置重新扫描日志，可能需要一段时间（仅重建派生数据，统计口径不变）。</span
+            >
           </div>
         </section>
       </section>
@@ -917,8 +978,8 @@ defineExpose({ priceColumns });
             </svg>
             <span class="ts-notice-content">
               主源（models.dev）尚未就绪{{ pricing.modelsdev_synced_at ? "或数据为空" : "" }}：
-              {{ pricing.modelsdev_path }}。点击上方「同步在线价格」获取定价；
-              当前未覆盖模型的费用将显示为未知。
+              {{ pricing.modelsdev_path }}。点击上方「同步在线价格」获取定价； 外置价格表与
+              OpenRouter 快照中已有的价格仍参与估算，未被任何来源覆盖的模型显示为未知。
             </span>
           </div>
           <div

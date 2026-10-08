@@ -1448,3 +1448,185 @@ describe("Settings 价格同步（RC04）", () => {
     w.unmount();
   });
 });
+
+// ── AP04：异步失败结果与写操作生命周期 ──
+// 复核缺陷：loadSettings 只在成功分支检查 mutationEpoch，晚到的**失败**读取
+// 会把刚保存的值降级成"未知"；各写操作 await 之后普遍没有 disposed 检查，
+// 卸载后仍会弹成功通知；关闭动作快速连选会并发两个写请求（响应端忽略旧
+// 结果并不能阻止后端按到达顺序落盘旧值）。
+describe("Settings 写入生命周期与晚到失败（AP04）", () => {
+  type Vm = SettingsVm & {
+    saveSource: (agent: string) => Promise<void>;
+    syncPricing: () => Promise<void>;
+    rebuild: () => Promise<void>;
+  };
+
+  function ctl<T>(): {
+    promise: Promise<T>;
+    resolve: (v: T) => void;
+    reject: (e: unknown) => void;
+  } {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function cmds(cmd: string): unknown {
+    if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+    if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+    if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+    if (cmd === "autostart_status") return Promise.resolve(false);
+    return Promise.resolve(null);
+  }
+
+  it("late_rejected_settings_read_does_not_reset_saved_value：晚到失败读取不降级已保存值", async () => {
+    const secondRead = ctl<unknown>();
+    let settingsCalls = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "settings_get") {
+        settingsCalls += 1;
+        if (settingsCalls === 1)
+          return Promise.resolve({
+            price_auto_sync: true,
+            close_action: "ask",
+            sources: {},
+          });
+        return secondRead.promise; // 旧刷新挂起
+      }
+      if (cmd === "settings_set_close_action") return Promise.resolve("quit");
+      if (cmd === "settings_set_price_auto_sync") return Promise.resolve(false);
+      return cmds(cmd);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const vm = vmOfSettings(w) as Vm;
+    expect(vm.closeAction).toBe("ask");
+    expect(vm.autoSync).toBe(true);
+
+    // 第二次读取挂起（内容无关，最终以失败告终）
+    await w.setProps({ refreshKey: 1 });
+    await flushPromises();
+    expect(settingsCalls).toBe(2);
+
+    // 挂起期间用户保存关闭动作与自动同步，均成功
+    await vm.setCloseAction("quit");
+    await vm.setAutoSync(false);
+    expect(vm.closeAction).toBe("quit");
+    expect(vm.autoSync).toBe(false);
+
+    // 旧读取以失败结束：不得把已保存的值降级成"未知"，也不得显示旧错误
+    secondRead.reject(new Error("旧读取失败"));
+    await flushPromises();
+    expect(vm.closeAction, "晚到的失败读取不得覆盖已保存的关闭动作").toBe("quit");
+    expect(vm.closeActionKnown, "已确认的状态不得被旧失败改回未知").toBe(true);
+    expect(vm.autoSync, "晚到的失败读取不得把已保存的自动同步重置为未知").toBe(false);
+    expect(w.text(), "不得把旧读取的失败当成当前状态").not.toContain("旧读取失败");
+    w.unmount();
+  });
+
+  it("settings_mutations_do_not_notify_after_unmount：卸载后写响应既不通知也不写状态", async () => {
+    const gates: Record<string, { resolve: (v: unknown) => void; reject: (e: unknown) => void }> =
+      {};
+    const gate = (key: string) => {
+      const c = ctl<unknown>();
+      gates[key] = { resolve: c.resolve, reject: c.reject };
+      return c.promise;
+    };
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "source_config_set") return gate("source");
+      if (cmd === "settings_set_price_auto_sync") return gate("autoSync");
+      if (cmd === "settings_set_close_action") return gate("close");
+      if (cmd === "sync_pricing_openrouter") return gate("sync");
+      if (cmd === "refresh_cache") return gate("rebuild");
+      if (cmd === "settings_get")
+        return Promise.resolve({ price_auto_sync: true, close_action: "ask", sources: {} });
+      return cmds(cmd);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const vm = vmOfSettings(w) as Vm;
+    const running = [
+      vm.saveSource("claude"),
+      vm.setAutoSync(false),
+      vm.setCloseAction("quit"),
+      vm.syncPricing(),
+      vm.rebuild(),
+    ];
+    await flushPromises();
+    expect(Object.keys(gates).sort()).toEqual(["autoSync", "close", "rebuild", "source", "sync"]);
+
+    msgSpy.success.mockClear();
+    msgSpy.error.mockClear();
+    msgSpy.info.mockClear();
+    w.unmount();
+
+    // 成功与失败两条路径都在卸载后落地
+    gates.source.resolve({ ok: true });
+    gates.autoSync.reject(new Error("auto sync down"));
+    gates.close.resolve("quit");
+    gates.sync.reject(new Error("sync down"));
+    gates.rebuild.resolve({ path: "p", files: 1, events: 1 });
+    await Promise.allSettled(running);
+    await flushPromises();
+
+    expect(msgSpy.success, "卸载后不得再发成功通知").not.toHaveBeenCalled();
+    expect(msgSpy.error, "卸载后不得再发失败通知").not.toHaveBeenCalled();
+    expect(msgSpy.info).not.toHaveBeenCalled();
+  });
+
+  it("close_action_rapid_changes_cannot_reorder：快速连选串行落地，UI 与最终持久化一致", async () => {
+    const first = ctl<unknown>();
+    const writes: (string | null)[] = [];
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "settings_set_close_action") {
+        writes.push((args?.action ?? null) as string | null);
+        return writes.length === 1 ? first.promise : Promise.resolve(args?.action ?? null);
+      }
+      if (cmd === "settings_get")
+        return Promise.resolve({ price_auto_sync: true, close_action: "ask", sources: {} });
+      return cmds(cmd);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const vm = vmOfSettings(w) as Vm;
+
+    const p1 = vm.setCloseAction("minimize");
+    await flushPromises();
+    expect(writes).toEqual(["minimize"]);
+    // 第一次写入仍在途时的第二次选择：记为待写意图，不并发第二条请求
+    const p2 = vm.setCloseAction("quit");
+    await flushPromises();
+    expect(writes, "在途写入期间不得并发第二条请求（否则后端可能乱序落盘）").toEqual(["minimize"]);
+    expect(vm.closeAction, "UI 立即反映最后选择").toBe("quit");
+
+    first.resolve("minimize");
+    await Promise.allSettled([p1, p2]);
+    await flushPromises();
+    expect(writes, "当前写完成后立即补写最后选择").toEqual(["minimize", "quit"]);
+    expect(vm.closeAction, "UI 与最后实际落盘的值一致").toBe("quit");
+    expect(vm.closeActionKnown).toBe(true);
+    w.unmount();
+  });
+
+  it("close_action_write_failure_rolls_back_to_persisted_value：写入失败回到已落盘值", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "settings_set_close_action") return Promise.reject(new Error("disk full"));
+      if (cmd === "settings_get")
+        return Promise.resolve({ price_auto_sync: true, close_action: "ask", sources: {} });
+      return cmds(cmd);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const vm = vmOfSettings(w) as Vm;
+    await vm.setCloseAction("minimize");
+    await flushPromises();
+    expect(msgSpy.error).toHaveBeenCalled();
+    expect(vm.closeAction, "失败不得让界面停留在一个并未写入的选择").toBe("ask");
+    expect(vm.closeActionKnown).toBe(true);
+    w.unmount();
+  });
+});

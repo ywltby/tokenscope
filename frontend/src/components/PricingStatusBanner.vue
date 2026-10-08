@@ -83,10 +83,12 @@ async function syncNow(): Promise<void> {
   // "点了重试就看不到为什么失败"。
   try {
     await invoke("sync_pricing_openrouter");
-    syncError.value = null;
+    if (!disposed) syncError.value = null;
   } catch (e) {
-    syncError.value = e instanceof Error ? e.message : String(e);
+    // AP04：成功与失败路径适用同一卸载守卫——卸载后不得再写状态。
+    if (!disposed) syncError.value = e instanceof Error ? e.message : String(e);
   }
+  if (disposed) return;
   // 成功与失败路径都刷新状态：部分成功（主源 OK / 补充源失败）时横幅
   // 依据新状态收敛，同时保留补充源失败原因。状态变化信号用 changed=true
   // ——挂起期间到达也不丢。
@@ -112,7 +114,30 @@ onBeforeUnmount(() => {
 // UX06：暴露状态读取入口供测试验证防重复激活。
 defineExpose({ refreshStatus });
 
-const bannerText = "尚未获取定价，需要联网同步价格；当前费用仅能显示为未知。";
+/**
+ * AP05：`needsSync` 只表示**主源（models.dev）没有有效候选**，不等于
+ * "没有任何价格"——外置价格表或 OpenRouter 快照可以有价，估算仍在用它们。
+ * 固定宣称「当前费用仅能显示为未知」是错的（修复前即如此）：
+ * - 完全无价（`hasAnyPricing=false`）→ 当前无可用价格，需联网同步；
+ * - 有价但主源缺失 → 主源待同步，已有价格仍参与估算，未收录模型仍未知。
+ * 不把原始条目数当有效价格，也不承诺所有请求都能完整计价。
+ */
+const bannerText = computed(() => {
+  const s = status.value;
+  if (!s) return "";
+  if (!s.hasAnyPricing) {
+    return "尚未获取定价，需要联网同步价格；当前费用仅能显示为未知。";
+  }
+  const external = s.externalValidCount ?? 0;
+  const openrouter = s.openrouterValidCount ?? 0;
+  const sources = [
+    external > 0 ? `外置价格表 ${external} 条` : null,
+    openrouter > 0 ? `OpenRouter ${openrouter} 条` : null,
+  ]
+    .filter(Boolean)
+    .join("、");
+  return `主源（models.dev）尚待同步，其定价暂不可用；当前费用按已有价格估算（${sources}有效候选），未收录的模型仍显示为未知。`;
+});
 </script>
 
 <template>

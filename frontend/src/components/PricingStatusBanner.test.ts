@@ -573,3 +573,79 @@ describe("PricingStatusBanner 错误恢复（UX06）", () => {
     document.body.innerHTML = "";
   });
 });
+
+describe("PricingStatusBanner 主源缺失与完全无价的区分（AP05）", () => {
+  // `needsSync` 只表示主源（models.dev）没有有效候选；外置表 / OpenRouter
+  // 仍可能有价并在参与估算。修复前横幅对这两种状态都说"当前费用仅能显示
+  // 为未知"——用户会以为已有价格没被用上。
+  const externalOnly = {
+    modelsdevAvailable: false,
+    modelsdevCount: 0,
+    modelsdevValidCount: 0,
+    modelsdevSyncedAt: null,
+    openrouterAvailable: false,
+    openrouterValidCount: 0,
+    externalCount: 4,
+    externalValidCount: 3,
+    hasAnyPricing: true,
+    needsSync: true,
+    warnings: [],
+  };
+  const openrouterOnly = {
+    ...externalOnly,
+    openrouterAvailable: true,
+    openrouterValidCount: 5,
+    externalCount: 0,
+    externalValidCount: 0,
+  };
+
+  it("external_only_pricing_does_not_claim_all_costs_unknown", async () => {
+    invokeMock.mockImplementation((cmd: string) =>
+      cmd === "pricing_status" ? Promise.resolve(externalOnly) : Promise.resolve(null),
+    );
+    const w = mount(PricingStatusBanner);
+    await flushPromises();
+    const text = w.text();
+    expect(text).toContain("主源（models.dev）尚待同步");
+    expect(text, "只报有效候选数，不把原始条目数当可用价格").toContain("外置价格表 3 条");
+    expect(text).not.toContain("外置价格表 4 条");
+    expect(text, "有价时不得声称全部未知").not.toContain("当前费用仅能显示为未知");
+    expect(text).not.toContain("尚未获取定价");
+    expect(text, "未覆盖模型仍可能未知——不承诺全部计价").toContain("未收录的模型仍显示为未知");
+    expect(text, "主源确实待同步，同步动作保留").toContain("立即同步");
+  });
+
+  it("openrouter_only_pricing_does_not_claim_all_costs_unknown", async () => {
+    invokeMock.mockImplementation((cmd: string) =>
+      cmd === "pricing_status" ? Promise.resolve(openrouterOnly) : Promise.resolve(null),
+    );
+    const w = mount(PricingStatusBanner);
+    await flushPromises();
+    const text = w.text();
+    expect(text).toContain("OpenRouter 5 条");
+    expect(text).not.toContain("当前费用仅能显示为未知");
+    expect(text).not.toContain("外置价格表");
+  });
+
+  it("pricing_absent_claims_unknown_cost：完全无价才说当前费用未知", async () => {
+    invokeMock.mockImplementation((cmd: string) =>
+      cmd === "pricing_status" ? Promise.resolve(statusNeedsSync) : Promise.resolve(null),
+    );
+    const w = mount(PricingStatusBanner);
+    await flushPromises();
+    const text = w.text();
+    expect(text).toContain("尚未获取定价");
+    expect(text).toContain("当前费用仅能显示为未知");
+    expect(text).not.toContain("主源（models.dev）尚待同步");
+  });
+
+  it("primary_source_available_hides_banner", async () => {
+    invokeMock.mockImplementation((cmd: string) =>
+      cmd === "pricing_status" ? Promise.resolve(statusOk) : Promise.resolve(null),
+    );
+    const w = mount(PricingStatusBanner);
+    await flushPromises();
+    expect(w.text()).not.toContain("主源（models.dev）尚待同步");
+    expect(w.text()).not.toContain("尚未获取定价");
+  });
+});
