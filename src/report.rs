@@ -257,6 +257,8 @@ pub(crate) mod retained {
     pub(crate) const ALLOC_OVERHEAD: usize = 16;
     /// `HashMap` 每桶的额外开销（控制字节 + 对齐）。
     pub(crate) const MAP_BUCKET_OVERHEAD: usize = 8;
+    /// 记账溢出的统一诊断（受检算术失败时返回，绝不回绕或夹取）。
+    const OVERFLOW: &str = "保留字节记账溢出（超出 usize 可表示范围）";
 
     /// 带受检加法的字节累加器：溢出**显式报错**，绝不回绕成小值。
     #[derive(Debug, Default, Clone, Copy)]
@@ -275,30 +277,43 @@ pub(crate) mod retained {
         }
     }
 
-    /// `String` 的堆占用：按**容量**计（分配即占用，长字符串按实际分配算），
-    /// 加固定开销。
-    pub(crate) fn string_bytes(s: &String) -> usize {
-        s.capacity().saturating_add(ALLOC_OVERHEAD)
+    /// `capacity × elem_size + 分配固定开销`——**全部受检**：溢出显式报错，
+    /// 绝不 saturating 夹取成"看起来更小的保留量"（夹取会让预算准入放行
+    /// 一个实际更大的快照）。
+    pub(crate) fn capacity_bytes(cap: usize, elem_size: usize) -> Result<usize, String> {
+        let data = cap
+            .checked_mul(elem_size)
+            .ok_or_else(|| OVERFLOW.to_string())?;
+        data.checked_add(ALLOC_OVERHEAD)
+            .ok_or_else(|| OVERFLOW.to_string())
     }
 
-    pub(crate) fn opt_string_bytes(s: &Option<String>) -> usize {
-        s.as_ref().map_or(0, string_bytes)
+    /// `String` 的堆占用：按**容量**计（分配即占用，长字符串按实际分配算），
+    /// 加固定开销。
+    pub(crate) fn string_bytes(s: &String) -> Result<usize, String> {
+        capacity_bytes(s.capacity(), 1)
+    }
+
+    pub(crate) fn opt_string_bytes(s: &Option<String>) -> Result<usize, String> {
+        match s {
+            Some(v) => string_bytes(v),
+            None => Ok(0),
+        }
     }
 
     /// `Vec` 的堆占用：容量 × 元素大小 + 固定开销。
-    pub(crate) fn vec_bytes<T>(v: &Vec<T>) -> usize {
-        v.capacity()
-            .saturating_mul(size_of::<T>())
-            .saturating_add(ALLOC_OVERHEAD)
+    pub(crate) fn vec_bytes<T>(v: &Vec<T>) -> Result<usize, String> {
+        capacity_bytes(v.capacity(), size_of::<T>())
     }
 
     /// 字符串 `Vec` 的堆占用：元素缓冲 + 每个字符串本体。
-    pub(crate) fn strings_bytes(v: &Vec<String>) -> usize {
-        let mut n = vec_bytes(v);
+    pub(crate) fn strings_bytes(v: &Vec<String>) -> Result<usize, String> {
+        let mut n = ByteCount::default();
+        n.add(vec_bytes(v)?)?;
         for s in v {
-            n = n.saturating_add(string_bytes(s));
+            n.add(string_bytes(s)?)?;
         }
-        n
+        Ok(n.get())
     }
 }
 
@@ -313,19 +328,19 @@ pub(crate) mod retained {
 pub(crate) fn collection_retained_bytes(c: &CollectionSnapshot) -> Result<usize, String> {
     use retained::{ByteCount, string_bytes, strings_bytes, vec_bytes};
     let mut n = ByteCount::default();
-    n.add(vec_bytes(&c.events))?;
+    n.add(vec_bytes(&c.events)?)?;
     for e in &c.events {
-        n.add(string_bytes(&e.model))?;
-        n.add(string_bytes(&e.session_id))?;
-        n.add(string_bytes(&e.project))?;
-        n.add(string_bytes(&e.record_id))?;
+        n.add(string_bytes(&e.model)?)?;
+        n.add(string_bytes(&e.session_id)?)?;
+        n.add(string_bytes(&e.project)?)?;
+        n.add(string_bytes(&e.record_id)?)?;
     }
     // 逐源统计：CollectStats 只有 u64 计数，无堆分配。
-    n.add(vec_bytes(&c.sources))?;
+    n.add(vec_bytes(&c.sources)?)?;
     // 采集诊断字符串。
-    n.add(strings_bytes(&c.warnings))?;
+    n.add(strings_bytes(&c.warnings)?)?;
     // 价格修订号 + 价格表（含候选与嵌套规则）。
-    n.add(string_bytes(&c.pricing_revision))?;
+    n.add(string_bytes(&c.pricing_revision)?)?;
     n.add(c.pricing.retained_bytes()?)?;
     Ok(n.get())
 }
@@ -2678,20 +2693,31 @@ mod retained_bytes {
         // 长字符串按**容量**计（分配即占用）：3 字节内容 + 4 KiB 容量。
         let mut s = String::with_capacity(4096);
         s.push_str("abc");
-        assert!(
-            string_bytes(&s) >= 4096,
-            "按容量计而非 len：{}",
-            string_bytes(&s)
-        );
-        assert_eq!(opt_string_bytes(&None), 0);
-        assert!(opt_string_bytes(&Some(s)) >= 4096);
+        let charged = string_bytes(&s).unwrap();
+        assert!(charged >= 4096, "按容量计而非 len：{charged}");
+        assert_eq!(opt_string_bytes(&None).unwrap(), 0);
+        assert!(opt_string_bytes(&Some(s)).unwrap() >= 4096);
     }
 
     #[test]
     fn collect_retained_vec_bytes_scale_with_capacity() {
         let v: Vec<u64> = Vec::with_capacity(100);
-        assert!(vec_bytes(&v) >= 800, "容量 × 元素大小：{}", vec_bytes(&v));
+        let charged = vec_bytes(&v).unwrap();
+        assert!(charged >= 800, "容量 × 元素大小：{charged}");
         let s: Vec<String> = Vec::with_capacity(2);
-        assert!(strings_bytes(&s) >= 2 * std::mem::size_of::<String>());
+        assert!(strings_bytes(&s).unwrap() >= 2 * std::mem::size_of::<String>());
+    }
+
+    #[test]
+    fn collect_retained_leaf_helpers_reject_overflow_not_saturate() {
+        // RC05：叶子助手也必须**受检**——夹取（saturating）会把一次超大保留
+        // 量报成"等于 usize::MAX 以内的小值"，让预算准入放行更大的快照。
+        assert!(
+            capacity_bytes(usize::MAX, 2).is_err(),
+            "容量×元素溢出必须显式报错"
+        );
+        assert!(capacity_bytes(usize::MAX, 1).is_err(), "加分配开销同样受检");
+        // 正常值仍给出精确结果
+        assert_eq!(capacity_bytes(3, 4).unwrap(), 3 * 4 + ALLOC_OVERHEAD);
     }
 }

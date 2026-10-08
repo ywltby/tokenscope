@@ -289,11 +289,11 @@ pub struct SchedulePeriod {
 fn plan_bytes(p: &PricePlan) -> Result<usize, String> {
     use crate::report::retained::{ByteCount, vec_bytes};
     let mut n = ByteCount::default();
-    n.add(vec_bytes(&p.segments))?;
+    n.add(vec_bytes(&p.segments)?)?;
     for s in &p.segments {
         n.add(segment_bytes(s)?)?;
     }
-    n.add(vec_bytes(&p.schedules))?;
+    n.add(vec_bytes(&p.schedules)?)?;
     for s in &p.schedules {
         n.add(schedule_bytes(s)?)?;
     }
@@ -304,7 +304,7 @@ fn plan_bytes(p: &PricePlan) -> Result<usize, String> {
 fn segment_bytes(s: &PriceSegment) -> Result<usize, String> {
     use crate::report::retained::{ByteCount, opt_string_bytes};
     let mut n = ByteCount::default();
-    n.add(opt_string_bytes(&s.label))?;
+    n.add(opt_string_bytes(&s.label)?)?;
     Ok(n.get())
 }
 
@@ -314,18 +314,18 @@ fn schedule_bytes(s: &PriceSchedule) -> Result<usize, String> {
         ByteCount, opt_string_bytes, string_bytes, strings_bytes, vec_bytes,
     };
     let mut n = ByteCount::default();
-    n.add(opt_string_bytes(&s.label))?;
-    n.add(opt_string_bytes(&s.timezone))?;
-    n.add(vec_bytes(&s.periods))?;
+    n.add(opt_string_bytes(&s.label)?)?;
+    n.add(opt_string_bytes(&s.timezone)?)?;
+    n.add(vec_bytes(&s.periods)?)?;
     for p in &s.periods {
-        n.add(opt_string_bytes(&p.label))?;
-        n.add(string_bytes(&p.start_time))?;
-        n.add(string_bytes(&p.end_time))?;
+        n.add(opt_string_bytes(&p.label)?)?;
+        n.add(string_bytes(&p.start_time)?)?;
+        n.add(string_bytes(&p.end_time)?)?;
         if let Some(days) = &p.weekdays {
-            n.add(strings_bytes(days))?;
+            n.add(strings_bytes(days)?)?;
         }
     }
-    n.add(vec_bytes(&s.segments))?;
+    n.add(vec_bytes(&s.segments)?)?;
     for seg in &s.segments {
         n.add(segment_bytes(seg)?)?;
     }
@@ -1743,21 +1743,22 @@ impl Pricing {
     /// 共享同一价格表的多个查询会话按**重复记账**处理（保守上界）。
     pub fn retained_bytes(&self) -> Result<usize, String> {
         use crate::report::retained::{
-            ByteCount, MAP_BUCKET_OVERHEAD, opt_string_bytes, string_bytes, vec_bytes,
+            ByteCount, MAP_BUCKET_OVERHEAD, capacity_bytes, opt_string_bytes, string_bytes,
+            vec_bytes,
         };
         let mut n = ByteCount::default();
-        n.add(
-            self.by_prefix
-                .capacity()
-                .saturating_mul(std::mem::size_of::<(Vec<u8>, Vec<Entry>)>() + MAP_BUCKET_OVERHEAD),
-        )?;
+        // 桶数组本身：容量 ×（桶元素 + 每桶开销）+ 分配开销，受检乘法。
+        n.add(capacity_bytes(
+            self.by_prefix.capacity(),
+            std::mem::size_of::<(Vec<u8>, Vec<Entry>)>() + MAP_BUCKET_OVERHEAD,
+        )?)?;
         for (key, entries) in &self.by_prefix {
-            n.add(vec_bytes(key))?;
-            n.add(vec_bytes(entries))?;
+            n.add(vec_bytes(key)?)?;
+            n.add(vec_bytes(entries)?)?;
             for e in entries {
-                n.add(string_bytes(&e.prefix))?;
-                n.add(string_bytes(&e.display))?;
-                n.add(opt_string_bytes(&e.name))?;
+                n.add(string_bytes(&e.prefix)?)?;
+                n.add(string_bytes(&e.display)?)?;
+                n.add(opt_string_bytes(&e.name)?)?;
                 n.add(plan_bytes(&e.plan)?)?;
             }
         }

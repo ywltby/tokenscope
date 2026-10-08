@@ -16,12 +16,46 @@
 //! 不触碰真实 `~/.tokenscope` 与 agent 日志。预算用测试钩子注入小值，
 //! 不分配数百 MB。
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use tokenscope::aggregate::GroupBy;
 use tokenscope::query;
 use tokenscope::report::{EventFilter, SummaryOptions};
+
+/// RC05：建表/解析期间的**临时保留峰值**单独量测。保留预算只覆盖查询结束
+/// 后仍被持有的数据，**不覆盖**采集与排序过程中的瞬时占用；这里用只存在于
+/// 本测试二进制内的计数分配器把两者量化分开（结果记录在
+/// docs/stats-semantics.md §3.5），不改产品构建的分配器。
+struct TrackingAlloc;
+
+static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+unsafe impl GlobalAlloc for TrackingAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() {
+            let prev = LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+            let live = prev.saturating_add(layout.size());
+            PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // 计数只回退、绝不下溢 panic；真实释放仍完全交给系统分配器。
+        let size = layout.size();
+        let _ = LIVE_BYTES.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_sub(size))
+        });
+        unsafe { System.dealloc(ptr, layout) };
+    }
+}
+
+#[global_allocator]
+static TRACKING_ALLOC: TrackingAlloc = TrackingAlloc;
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
 
@@ -294,6 +328,10 @@ fn single_snapshot_over_budget_is_rejected_without_truncation() {
 }
 
 /// 被淘汰但仍有读取者持有的快照**继续占账**，直到最后一个 Arc 释放。
+///
+/// RC05：借用期用 channel 确定性地钉住——读取线程进入 `with_snapshot` 后
+/// 发信号并停在这里，主线程在收到信号后才淘汰、核对额度，再放行；不用
+/// sleep 赌时序。
 #[test]
 fn evicted_but_borrowed_snapshot_stays_charged() {
     let _g = serial();
@@ -305,33 +343,63 @@ fn evicted_but_borrowed_snapshot_stays_charged() {
     let base = fresh(usize::MAX);
     let held = query::begin_query(&o).unwrap();
     let held_charge = used() - base;
+    let id = held.query_id.clone();
 
-    // 建满容量，把 held 挤出注册表。
-    for _ in 0..query::MAX_ACTIVE_QUERIES {
-        let s = query::begin_query(&o).unwrap();
-        drop(s);
-    }
-    let err = query::query_events(&held.query_id, &EventFilter::default()).unwrap_err();
-    assert!(
-        err.to_string().contains("query_expired"),
-        "被淘汰后游标必须过期"
-    );
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<usize>();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
 
-    let before_drop = used();
-    assert!(
-        before_drop >= held_charge,
-        "被淘汰但被借用的快照仍须占账：{before_drop} < {held_charge}"
+    let reader = std::thread::scope(|scope| {
+        let borrowed_id = id.clone();
+        let h = scope.spawn(move || {
+            query::with_snapshot(&borrowed_id, |snap| {
+                // 借用期内：把"已进入"告诉主线程，然后停在这里等放行。
+                entered_tx.send(snap.rows.len()).unwrap();
+                resume_rx.recv().expect("主线程必须放行");
+                Ok("borrowed")
+            })
+        });
+        let rows_while_borrowed = entered_rx.recv().expect("读取线程必须进入借用期");
+        assert_eq!(rows_while_borrowed, 20, "借用期内读到的应是同一份快照");
+
+        // 借用期内把注册表清掉 = 会话被淘汰（注册表不再持有 Arc）。
+        query::clear_query_registry_for_tests();
+        let err = query::query_events(&id, &EventFilter::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("query_expired"),
+            "被淘汰后游标必须过期：{err}"
+        );
+        let while_borrowed = used();
+        assert!(
+            while_borrowed >= base + held_charge,
+            "被淘汰但仍被读取者持有 → 继续占账：{while_borrowed} < {}",
+            base + held_charge
+        );
+
+        resume_tx.send(()).unwrap();
+        h.join().unwrap()
+    });
+    assert_eq!(reader.unwrap(), "borrowed");
+    // 读取者退出后，测试自己的 Arc 是最后一个持有者。
+    let after_reader = used();
+    assert_eq!(
+        after_reader,
+        base + held_charge,
+        "只有注册表被清、Arc 仍活着时不得退还"
     );
     drop(held);
     assert_eq!(
         used(),
-        before_drop - held_charge,
-        "只在最后一个 Arc 释放时退还该会话额度"
+        after_reader - held_charge,
+        "最后一个 Arc 释放才退账"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 并发准入不得超预算：用 barrier 让两个线程同时抢，只允许一个成功。
+/// 并发准入不得超预算：两个线程由 channel 同时放行抢额度，预算只够一个
+/// 会话 → 恰好一个成功，且已用额度始终不超上限。
+///
+/// RC05：放行时机由 channel 决定（不是 sleep）；胜者的 Arc 由主线程持有，
+/// 因此败者**无法**靠淘汰腾出额度——这正是要验证的原子准入语义。
 #[test]
 fn concurrent_admission_respects_budget() {
     let _g = serial();
@@ -349,16 +417,17 @@ fn concurrent_admission_respects_budget() {
     let limit = per + per / 2; // 只装得下 1 个
     query::set_query_budget_for_tests(limit);
 
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-    // 两个线程同时抢：胜者**保持 Arc 存活**（额度不会被败者回收），
-    // 因此恰好一个成功且已用额度不超预算。
-    let held = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..2)
-            .map(|_| {
-                let b = barrier.clone();
+    // 每个线程一个放行信道：两者都阻塞在 recv() 上，主线程一次性放行，
+    // 起跑时刻确定（不靠 sleep 猜交错），而"谁先占到额度"由额度锁决定。
+    let (go1, wait1) = std::sync::mpsc::channel::<()>();
+    let (go2, wait2) = std::sync::mpsc::channel::<()>();
+    let results = std::thread::scope(|scope| {
+        let handles: Vec<_> = [wait1, wait2]
+            .into_iter()
+            .map(|go| {
                 let o = o.clone();
                 scope.spawn(move || {
-                    b.wait(); // 同时起跑，确定性交错（不用 sleep）
+                    go.recv().expect("主线程放行后才起跑");
                     match query::begin_query(&o) {
                         Ok(s) => (true, Some(s)),
                         Err(_) => (false, None),
@@ -366,14 +435,135 @@ fn concurrent_admission_respects_budget() {
                 })
             })
             .collect();
+        go1.send(()).unwrap();
+        go2.send(()).unwrap();
         handles
             .into_iter()
             .map(|h| h.join().unwrap())
             .collect::<Vec<_>>()
     });
-    let ok = held.iter().filter(|(ok, _)| *ok).count();
+    let ok = results.iter().filter(|(ok, _)| *ok).count();
     assert_eq!(ok, 1, "预算只够一个会话，必须恰好一个成功");
     assert!(used() <= limit, "并发准入不得超预算：{} > {limit}", used());
-    drop(held);
+    // 败者的失败必须是可读的预算错误，而不是静默截断或超预算接受
+    let loser_msg = match query::begin_query(&o) {
+        Ok(_) => String::new(),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        loser_msg.contains("预算"),
+        "在胜者仍持有额度时，后到准入必须显式失败并说明预算：{loser_msg}"
+    );
+    drop(results);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 准入失败**不得破坏当前已显示的查询**：已有会话仍可用、额度不变，
+/// 失败不留下半占用的额度（RC05.7）。
+#[test]
+fn admission_failure_keeps_displayed_session_usable() {
+    let _g = serial();
+    let dir = hermetic("admission-failure");
+    let root = dir.join("codex");
+    write_log(&root, &codex_body(30, "gpt-5.6-sol", "C:/w/a"));
+    let o = opts(&dir, &root);
+
+    let base = fresh(usize::MAX);
+    let displayed = query::begin_query(&o).unwrap();
+    let per = used() - base;
+    assert!(per > 0);
+
+    // 预算只够当前这一个会话；新的准入必须失败，且不能把当前会话挤掉。
+    query::set_query_budget_for_tests(per);
+    let err = match query::begin_query(&o) {
+        Ok(_) => panic!("预算已被当前会话占满，新准入必须失败"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("预算"), "错误必须可读并说明预算：{err}");
+    assert_eq!(used(), base + per, "失败的准入不得改变已用额度");
+    let page = query::query_events(&displayed.query_id, &EventFilter::default()).unwrap();
+    assert_eq!(page.total, 30, "准入失败不得影响当前已显示查询");
+    drop(displayed);
+    // 注册表仍持有一份 Arc → 必须连注册表一起清空，才是"最后一个 Arc 释放"。
+    query::clear_query_registry_for_tests();
+    assert_eq!(used(), base, "注册表与测试持有者都释放后额度归零");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 准入错误不得给出"缩小时间范围"这类无效建议（RC05.7：建议必须真的减少
+/// 保留量——采集事件整份随会话保留，时间范围只是采集后的过滤）。
+#[test]
+fn budget_errors_give_only_effective_advice() {
+    let _g = serial();
+    let dir = hermetic("advice");
+    let root = dir.join("codex");
+    write_log(&root, &codex_body(20, "gpt-5.6-sol", "C:/w/a"));
+    let o = opts(&dir, &root);
+
+    let base = fresh(usize::MAX);
+    let per = {
+        let s = query::begin_query(&o).unwrap();
+        let v = used() - base;
+        drop(s);
+        query::clear_query_registry_for_tests();
+        v
+    };
+    query::set_query_budget_for_tests(per / 2);
+    let msg = match query::begin_query(&o) {
+        Ok(_) => panic!("单会话超预算必须明确失败"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        !msg.contains("请缩小"),
+        "缩小范围不减少保留量，不得作为建议出现：{msg}"
+    );
+    assert!(
+        msg.contains("不会减少保留量"),
+        "必须明确说明时间范围不影响保留量：{msg}"
+    );
+    assert!(
+        msg.contains("停用") || msg.contains("会话数") || msg.contains("稍后重试"),
+        "必须给出真正能减少保留量或等待释放的建议：{msg}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RC05：建表/解析期间的**临时保留峰值**必须单独量测并记录，不得伪装成
+/// "已由保留预算覆盖"。断言方向：瞬时峰值 ≥ 最终保留记账。
+#[test]
+fn build_peak_is_measured_separately_from_retained_charge() {
+    let _g = serial();
+    const N: usize = 400;
+    let dir = hermetic("build-peak");
+    let root = dir.join("codex");
+    write_log(&root, &codex_body(N, "gpt-5.6-sol", "C:/w/a"));
+    let o = opts(&dir, &root);
+
+    let base = fresh(usize::MAX);
+    // 窗口起点：把"存活字节"当前值作为峰值起点（**不重置**存活计数，
+    // 否则窗口前的分配在窗口内释放会让计数下溢）。
+    let live_before = LIVE_BYTES.load(Ordering::Relaxed);
+    PEAK_BYTES.store(live_before, Ordering::Relaxed);
+    let snap = query::begin_query(&o).unwrap();
+    let charge = used() - base;
+    let peak = PEAK_BYTES.load(Ordering::Relaxed);
+    let live_end = LIVE_BYTES.load(Ordering::Relaxed);
+    let peak_delta = peak.saturating_sub(live_before);
+    let live_delta = live_end.saturating_sub(live_before);
+
+    // 量测记录（--nocapture 可见；数值回写 docs/stats-semantics.md §3.5）
+    eprintln!(
+        "RC05 临时峰值量测：events={N}，保留记账={charge} B，建表期间存活峰值={peak_delta} B，窗口结束时仍存活={live_delta} B，峰值/仍存活={:.2}",
+        peak_delta as f64 / (live_delta.max(1)) as f64
+    );
+    assert!(charge >= N * EVENT_SIZE, "保留记账须覆盖全部事件：{charge}");
+    assert!(live_delta > 0, "窗口内必须确实保留了新数据：{live_delta}");
+    assert!(
+        peak_delta >= live_delta,
+        "瞬时峰值必须不低于窗口结束时仍存活的字节：peak={peak_delta} live_end={live_delta}"
+    );
+    drop(snap);
+    query::clear_query_registry_for_tests();
+    assert_eq!(used(), base, "注册表与本地 Arc 都释放后额度归还");
     let _ = std::fs::remove_dir_all(&dir);
 }

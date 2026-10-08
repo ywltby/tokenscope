@@ -357,3 +357,65 @@ fn query_registry_evicts_with_explicit_expiry() {
     assert_eq!(ok.total, 3);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// RC05：同参会话共享同一 `Arc<CollectionSnapshot>`（单飞不深拷贝），但
+/// **每个会话各自完整计账**——不得因为底层是 Arc 共享就漏账，也不得为了
+/// 省账把两份保留合并成一笔。同时验证两个会话的游标各自独立可用。
+#[test]
+fn shared_collection_snapshots_charge_every_session() {
+    let _g = serial();
+    let dir = hermetic("shared-arc-charge");
+    let root = dir.join("codex");
+    write_codex_log(&root, SAME_TS_BODY);
+    let o = opts(&dir, &root);
+
+    query::clear_query_registry_for_tests();
+    // 起点额度：本文件其他测试留下的会话此时都应已释放（用 delta 计账）。
+    let base = query::query_retained_bytes_for_tests();
+    query::set_query_budget_for_tests(usize::MAX);
+
+    let a = query::begin_query(&o).unwrap();
+    let after_a = query::query_retained_bytes_for_tests();
+    let charge_a = after_a - base;
+    assert!(charge_a > 0, "首个会话必须计账");
+
+    let b = query::begin_query(&o).unwrap();
+    let after_b = query::query_retained_bytes_for_tests();
+    let charge_b = after_b - after_a;
+    assert_ne!(a.query_id, b.query_id);
+    assert!(
+        charge_b >= charge_a * 9 / 10,
+        "共享 Arc 的第二个会话仍须按完整保留图计账：a={charge_a} b={charge_b}"
+    );
+
+    // 两个会话各自分页可用，游标不跨会话（错会话明确拒绝）。
+    let pa = query::query_events(&a.query_id, &EventFilter::default()).unwrap();
+    let pb = query::query_events(&b.query_id, &EventFilter::default()).unwrap();
+    assert_eq!(pa.total, pb.total);
+    let cursor_a = pa.rows[0].cursor.clone();
+    let err = query::query_events(
+        &b.query_id,
+        &EventFilter {
+            before: Some(cursor_a),
+            ..Default::default()
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("query_expired"),
+        "A 的游标用于 B 必须结构化拒绝：{err}"
+    );
+
+    drop(a);
+    drop(b);
+    // 注册表还各持有一份 Arc——清空注册表才是"最后一个 Arc 释放"。
+    query::clear_query_registry_for_tests();
+    assert_eq!(
+        query::query_retained_bytes_for_tests(),
+        base,
+        "两个会话的最后一个 Arc 都释放后额度全部归还"
+    );
+    query::reset_query_budget_for_tests();
+    let _ = std::fs::remove_dir_all(&dir);
+}

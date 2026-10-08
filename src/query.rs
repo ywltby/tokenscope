@@ -53,6 +53,18 @@ pub const QUERY_IDLE_TTL: Duration = Duration::from_secs(600);
 /// 字节 → MiB（错误信息与诊断用）。
 const MIB: usize = 1024 * 1024;
 
+/// 预算错误里的字节写法：小预算（测试注入）也要给出**可读且不为 0** 的量，
+/// 不能出现"约 0 MiB"这种看不出实际大小的提示。
+fn display_bytes(n: usize) -> String {
+    if n >= MIB {
+        format!("{:.2} MiB（{} 字节）", n as f64 / MIB as f64, n)
+    } else if n >= 1024 {
+        format!("{:.1} KiB（{} 字节）", n as f64 / 1024.0, n)
+    } else {
+        format!("{n} 字节")
+    }
+}
+
 /// 游标格式版本：v2 = 绑定 query_id / 主查询指纹 / 下钻指纹（SF04）。
 /// v1（ts|rid|seq）游标缺字段且无法验证归属，解析时直接拒绝。
 pub const CURSOR_VERSION: u8 = 2;
@@ -218,11 +230,18 @@ impl QuotaReservation {
             .checked_add(bytes)
             .ok_or_else(|| "查询保留字节记账溢出（超出 usize 可表示范围）".to_string())?;
         if need > q.limit {
+            // RC05：建议必须与"什么才会减少保留量"一致——采集快照整份随会话
+            // 保留，时间范围只是采集后的过滤，缩小范围**不会**降低保留字节。
             return Err(format!(
-                "查询保留数据约 {} MiB（已保留 {} MiB，预算 {} MiB）：请缩小时间范围或稍后重试",
-                bytes / MIB,
-                q.used / MIB,
-                q.limit / MIB
+                "查询保留数据 {need}（本次 {bytes}，已保留 {used}，预算 {limit}，约合 {need_mib} MiB）：\
+                 可减少同时进行的查询会话数，或稍后重试（闲置会话超过 {ttl} 秒自动回收）；\
+                 需要立即腾出额度请在设置中停用暂不采集的来源目录（缩小时间范围不会减少保留量）",
+                need = display_bytes(need),
+                bytes = display_bytes(bytes),
+                used = display_bytes(q.used),
+                limit = display_bytes(q.limit),
+                need_mib = need as f64 / MIB as f64,
+                ttl = QUERY_IDLE_TTL.as_secs()
             ));
         }
         q.used = need;
@@ -324,8 +343,12 @@ fn register(snapshot: Arc<QuerySnapshot>) {
 }
 
 /// RC05：一个会话保留的字节 = 采集快照（事件/字符串/价格/诊断）+ 快照行
-/// 索引 + 查询身份/时区/主指纹元数据 + 快照结构自身。
+/// 索引 + 查询身份/价格修订/时区/主指纹元数据 + 快照结构自身。
 /// 计算全程受检，溢出显式报错。
+///
+/// 采集快照与价格表按 Arc **共享**，但这里仍逐会话完整计账（保守、简单，
+/// 宁可重复计账也不漏账）；快照自身持有的 `pricing_revision` 是采集修订号
+/// 的一份**克隆**，同样单独计入。
 fn snapshot_retained_bytes(
     collection: &report::CollectionSnapshot,
     rows: &Vec<SnapshotRow>,
@@ -336,10 +359,14 @@ fn snapshot_retained_bytes(
     use report::retained::{ByteCount, string_bytes, vec_bytes};
     let mut n = ByteCount::default();
     n.add(report::collection_retained_bytes(collection)?)?;
-    n.add(vec_bytes(rows))?;
-    n.add(string_bytes(&query_id.to_string()))?;
-    n.add(string_bytes(&tz_label.to_string()))?;
-    n.add(string_bytes(&main_fingerprint.to_string()))?;
+    n.add(vec_bytes(rows)?)?;
+    n.add(string_bytes(&query_id.to_string())?)?;
+    n.add(string_bytes(&tz_label.to_string())?)?;
+    n.add(string_bytes(&main_fingerprint.to_string())?)?;
+    // 本会话自身持有的价格修订克隆 + 时区对象（其内部名称/规则串由
+    // TimeZone 自身结构保守按 size_of 计入，标签串已在 tz_label 计过）。
+    n.add(string_bytes(&collection.pricing_revision)?)?;
+    n.add(std::mem::size_of::<TimeZone>())?;
     n.add(std::mem::size_of::<QuerySnapshot>())?;
     Ok(n.get())
 }
@@ -387,10 +414,15 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
             .map_err(|e| anyhow!(e))?;
     let limit = quota_limit();
     if charge > limit {
+        // RC05：单会话超预算——明确失败、不截断事件；建议必须真实有效：
+        // 采集到的事件整份随会话保留，时间范围是采集后的过滤，缩小范围并
+        // 不减少保留量，所以不能这样提示。
         anyhow::bail!(
-            "查询保留数据约 {} MiB，超出单会话预算 {} MiB：请缩小时间范围",
-            charge / MIB,
-            limit / MIB
+            "查询保留数据 {}（约合 {:.2} MiB）超出单会话预算 {}：可在设置中停用暂不采集的来源目录后重试，\
+             或稍后重试等待闲置会话回收（缩小时间范围不会减少保留量——整份采集事件随会话保留，不按要求截断）",
+            display_bytes(charge),
+            charge as f64 / MIB as f64,
+            display_bytes(limit)
         );
     }
     // 准入：额度原子占用（失败会按 LRU 淘汰后重试）；失败时 reservation
