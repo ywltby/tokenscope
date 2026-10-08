@@ -94,29 +94,19 @@ pub fn run() {
         })
         // 关闭行为三态（关闭确认与配置文件计划）：配置了默认动作（设置页或
         // 弹窗记忆）则直接执行；未配置 → prevent_close + emit close-requested，
-        // 由前端弹窗询问（最小化/退出/取消 + 记忆勾选）。关窗时机顺带落盘
-        // 一次窗口状态。
+        // 由前端弹窗询问（最小化/退出/取消 + 记忆勾选）。
+        //
+        // AP07：事件回调只做「阻止默认关闭 + 记录内存态 + 启动协调」三件
+        // 立即返回的事——设置读取（磁盘 IO）与窗口状态落盘全部移出回调，
+        // 由后台线程完成；窗口在后台结果出来前不会消失。协调是单飞的：
+        // 处理期间重复关窗不并发执行、不排队。
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
                 if let Some(w) = window.get_webview_window("main") {
-                    save_window_state_now(&w);
-                }
-                // AP02：关闭决策走专用入口——设置读不出来时退回「每次询问」，
-                // 且绝不复用该退路决定采集范围（采集路径读失败即报错）。
-                match commands::close_decision_now() {
-                    commands::CloseDecision::Minimize => {
-                        let _ = window.hide();
-                        api.prevent_close();
-                    }
-                    commands::CloseDecision::Quit => {
-                        log::info!("窗口关闭：按设置直接退出");
-                        window.app_handle().exit(0);
-                    }
-                    commands::CloseDecision::Ask => {
-                        // 前端未就绪时事件无人接收：窗口保持打开（不静默退出）。
-                        let _ = window.emit("close-requested", ());
-                        api.prevent_close();
-                    }
+                    // 仅更新内存并置脏（落盘交给每秒 saver 或退出前的最终保存）。
+                    update_window_state(&w);
+                    request_close(&w);
                 }
             }
             tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) => {
@@ -204,18 +194,184 @@ fn update_window_state(window: &tauri::WebviewWindow) {
     dirty_flag(app).store(true, Ordering::Relaxed);
 }
 
-fn save_window_state_now(window: &tauri::WebviewWindow) {
-    update_window_state(window);
-    let app = window.app_handle();
-    let state = state_mutex(app);
-    let guard = state.lock().unwrap();
-    if let Some(ws) = guard.as_ref()
-        && let Ok(path) = window_state::state_path()
-        && let Err(e) = window_state::save(&path, ws)
-    {
-        log::warn!("窗口状态保存失败: {e:#}");
+/// AP07：把内存中的窗口状态落盘（退出前的最终保存）。**调用方必须在后台
+/// 线程**：这里是磁盘 IO，不能出现在窗口事件回调里；同时不触碰窗口 API
+///（Tauri 的窗口操作只能在主线程执行）。
+fn persist_window_state(app: &tauri::AppHandle) {
+    let path = match window_state::state_path() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("无法定位窗口状态路径，退出前保存跳过: {e:#}");
+            return;
+        }
+    };
+    let snapshot = state_mutex(app).lock().unwrap().clone();
+    let Some(ws) = snapshot else {
+        return; // 从未记录过窗口状态：不写空文件。
+    };
+    match window_state::save(&path, &ws) {
+        Ok(()) => dirty_flag(app).store(false, Ordering::Relaxed),
+        Err(e) => log::warn!("退出前窗口状态保存失败: {e:#}"),
     }
-    dirty_flag(app).store(false, Ordering::Relaxed);
+}
+
+// ── AP07：关闭请求协调 ────────────────────────────────────
+// 关窗事件入口必须**立即返回**（配置读取与状态落盘都是磁盘 IO），且同一
+// 时刻只处理一个关闭请求：协调期间的重复关窗被忽略而不是并发执行或提前
+// 退出。窗口动作（hide/退出）仍由主线程执行——后台线程只调度并等待结果。
+
+/// 一次关闭请求的执行结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CloseOutcome {
+    /// 已隐藏窗口（窗口在托盘保留）。
+    Minimized,
+    /// 已通知前端询问（窗口保持可见）。
+    AskRequested,
+    /// 已按设置退出进程。
+    QuitRequested,
+    /// 已记忆的最小化失败：窗口保持可见，原因需上报给用户重试。
+    MinimizeFailed(String),
+}
+
+/// AP07：关闭请求单飞门（进程级）——协调期间重复关窗不并发执行、不排队。
+struct CloseGate {
+    busy: AtomicBool,
+}
+
+impl CloseGate {
+    const fn new() -> Self {
+        Self {
+            busy: AtomicBool::new(false),
+        }
+    }
+
+    /// true = 本次取得执行权；false = 已有请求在处理（本次忽略）。
+    fn try_begin(&self) -> bool {
+        !self.busy.swap(true, Ordering::SeqCst)
+    }
+
+    fn finish(&self) {
+        self.busy.store(false, Ordering::SeqCst);
+    }
+}
+
+static CLOSE_GATE: CloseGate = CloseGate::new();
+
+/// AP07：在后台线程执行一次关闭协调；返回 None 表示已有请求在处理
+///（调用方=关窗事件，本身不做任何阻塞工作）。
+fn spawn_close_work(
+    work: impl FnOnce() -> CloseOutcome + Send + 'static,
+) -> Option<std::thread::JoinHandle<CloseOutcome>> {
+    if !CLOSE_GATE.try_begin() {
+        log::debug!("关闭请求处理中，忽略重复触发");
+        return None;
+    }
+    Some(std::thread::spawn(move || {
+        let outcome = work();
+        CLOSE_GATE.finish();
+        outcome
+    }))
+}
+
+/// AP07：关闭决策的执行内核（窗口动作注入以便测试）。最小化失败**必须**
+/// 返回可上报的原因，绝不静默吞掉——否则用户点了关闭后窗口既不隐藏也
+/// 没有任何反馈。
+fn execute_close_decision(
+    decision: commands::CloseDecision,
+    hide: impl FnOnce() -> Result<(), String>,
+) -> CloseOutcome {
+    match decision {
+        commands::CloseDecision::Minimize => match hide() {
+            Ok(()) => {
+                log::info!("窗口关闭：按设置最小化到托盘");
+                CloseOutcome::Minimized
+            }
+            Err(e) => CloseOutcome::MinimizeFailed(format!("{e}（可重试，或改用「直接退出」）")),
+        },
+        commands::CloseDecision::Quit => CloseOutcome::QuitRequested,
+        commands::CloseDecision::Ask => CloseOutcome::AskRequested,
+    }
+}
+
+/// AP07：需要向用户上报的关闭失败（None = 无需上报）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct CloseActionFailure {
+    pub action: &'static str,
+    pub reason: String,
+}
+
+fn close_failure_payload(outcome: &CloseOutcome) -> Option<CloseActionFailure> {
+    match outcome {
+        CloseOutcome::MinimizeFailed(reason) => Some(CloseActionFailure {
+            action: "minimize",
+            reason: reason.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// 主线程上执行一次窗口隐藏并取回结果（窗口 API 只能在主线程调用）。
+fn hide_main_window_on_main_thread(app: &tauri::AppHandle) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let app_for_main = app.clone();
+    app.run_on_main_thread(move || {
+        let out = match app_for_main.get_webview_window("main") {
+            Some(w) => w.hide().map_err(|e| format!("隐藏窗口失败: {e}")),
+            None => Err("主窗口不存在，无法最小化".to_string()),
+        };
+        let _ = tx.send(out);
+    })
+    .map_err(|e| format!("调度窗口隐藏失败: {e}"))?;
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(r) => r,
+        Err(e) => Err(format!("等待窗口隐藏结果失败: {e}")),
+    }
+}
+
+/// AP07：一次关闭请求的完整处理（在后台线程运行）——读设置（磁盘）、
+/// 调度窗口动作、必要时上报失败；退出路径先完成最终落盘再退出。
+fn run_close_coordination(app: &tauri::AppHandle) -> CloseOutcome {
+    let decision = commands::close_decision_now();
+    let app_for_hide = app.clone();
+    let outcome = execute_close_decision(decision, move || {
+        hide_main_window_on_main_thread(&app_for_hide)
+    });
+    match &outcome {
+        CloseOutcome::QuitRequested => {
+            log::info!("窗口关闭：按设置直接退出");
+            // 最终保存**完成之后**才退出：不是 fire-and-forget。
+            persist_window_state(app);
+            app.exit(0);
+        }
+        CloseOutcome::AskRequested => {
+            // 前端未就绪时事件无人接收：窗口保持打开（不静默退出）。
+            if let Err(e) = app.emit("close-requested", ()) {
+                log::warn!("发送关闭询问事件失败: {e}");
+            }
+        }
+        CloseOutcome::MinimizeFailed(reason) => log::warn!("已记忆的最小化失败: {reason}"),
+        CloseOutcome::Minimized => {}
+    }
+    outcome
+}
+
+/// AP07：关窗事件入口——立即返回，重活全部在后台线程。
+fn request_close(window: &tauri::WebviewWindow) {
+    let app = window.app_handle().clone();
+    let handle = spawn_close_work({
+        let app = app.clone();
+        move || run_close_coordination(&app)
+    });
+    let Some(handle) = handle else { return };
+    std::thread::spawn(move || {
+        let outcome = handle.join().unwrap_or(CloseOutcome::AskRequested);
+        if let Some(payload) = close_failure_payload(&outcome) {
+            log::warn!("关闭动作失败，向界面请求重试: {}", payload.reason);
+            if let Err(e) = app.emit("close-action-failed", payload) {
+                log::warn!("上报关闭失败事件失败: {e}");
+            }
+        }
+    });
 }
 
 /// 每秒检查脏标记并落盘（节流）。
@@ -355,5 +511,90 @@ fn show_main(app: &tauri::AppHandle) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// AP07：已记忆的最小化失败必须可上报（用户看到原因并可重试/取消），
+    /// 成功的隐藏与退出路径都不上报；退出路径不调用窗口隐藏。
+    #[test]
+    fn remembered_minimize_failure_is_reported_and_retryable() {
+        let failed = execute_close_decision(commands::CloseDecision::Minimize, || {
+            Err("隐藏窗口失败: webview busy".to_string())
+        });
+        let payload = close_failure_payload(&failed).expect("失败必须可上报给界面");
+        assert_eq!(payload.action, "minimize");
+        assert!(
+            payload.reason.contains("webview busy"),
+            "必须携带原始原因: {}",
+            payload.reason
+        );
+        assert!(
+            payload.reason.contains("可重试"),
+            "必须标注可重试: {}",
+            payload.reason
+        );
+
+        let ok = execute_close_decision(commands::CloseDecision::Minimize, || Ok(()));
+        assert_eq!(ok, CloseOutcome::Minimized);
+        assert!(close_failure_payload(&ok).is_none(), "成功路径不得上报失败");
+
+        // 与未记忆的 close_resolve 路径共用结果处理：询问本身不是失败。
+        let ask = execute_close_decision(commands::CloseDecision::Ask, || Ok(()));
+        assert_eq!(ask, CloseOutcome::AskRequested);
+        assert!(close_failure_payload(&ask).is_none());
+
+        let quit = execute_close_decision(commands::CloseDecision::Quit, || {
+            panic!("退出路径不得调用窗口隐藏")
+        });
+        assert_eq!(quit, CloseOutcome::QuitRequested);
+        assert!(close_failure_payload(&quit).is_none());
+    }
+
+    /// AP07：关窗事件入口不得等待配置读取/状态写入；协调期间的重复关窗
+    /// 不并发执行也不提前退出；一轮结束后可再次关闭。
+    #[test]
+    fn close_handler_does_not_wait_for_settings_or_state_io() {
+        let gate: Arc<(Mutex<bool>, Condvar)> = Arc::new((Mutex::new(false), Condvar::new()));
+        let g = gate.clone();
+        let started = Instant::now();
+        let handle = spawn_close_work(move || {
+            // 模拟被 barrier 挂起的设置读取与窗口状态写入。
+            let (m, cv) = &*g;
+            let mut released = m.lock().unwrap();
+            while !*released {
+                released = cv.wait(released).unwrap();
+            }
+            CloseOutcome::AskRequested
+        })
+        .expect("首次关闭请求必须被接受");
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "事件入口不得等待配置读取或状态写入"
+        );
+        assert!(
+            spawn_close_work(|| CloseOutcome::QuitRequested).is_none(),
+            "协调期间的重复关窗不得并发执行或提前退出"
+        );
+
+        {
+            let (m, cv) = &*gate;
+            *m.lock().unwrap() = true;
+            cv.notify_all();
+        }
+        assert_eq!(
+            handle.join().unwrap(),
+            CloseOutcome::AskRequested,
+            "后续结果单次返回"
+        );
+
+        let again = spawn_close_work(|| CloseOutcome::QuitRequested)
+            .expect("上一轮结束后必须可再次关闭（不残留 in-flight 状态）");
+        assert_eq!(again.join().unwrap(), CloseOutcome::QuitRequested);
     }
 }

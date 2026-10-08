@@ -67,21 +67,36 @@ onMounted(async () => {
 // ── 关闭确认弹窗（关闭确认与配置文件计划 Task 3）──────────────
 // 后端在未记忆默认动作时拦截关窗并 emit close-requested；这里弹窗
 // 询问（最小化/退出/取消 + 记忆勾选），决定经 close_resolve 回传。
+// AP07：已记忆默认动作的执行失败（隐藏窗口失败等）由后端 emit
+// close-action-failed——窗口仍然可见，这里显示原因并保持弹窗打开，
+// 用户可重试（再选一次）或取消，与未记忆路径共用同一结果处理。
 const closeDialogOpen = ref(false);
-let unlistenClose: (() => void) | null = null;
+type CloseActionFailure = { action?: string; reason?: string };
+let unlistenClose: (() => void)[] = [];
 onMounted(() => {
-  listen("close-requested", () => {
+  const register = (event: string, handler: (payload: unknown) => void): void => {
+    listen(event, handler)
+      .then((un) => {
+        unlistenClose.push(un);
+      })
+      .catch(() => {
+        // 非 Tauri 环境（浏览器预览/测试）没有事件系统：静默跳过
+      });
+  };
+  register("close-requested", () => {
     // 弹窗已开时忽略重复关闭请求（防止事件叠加）
     if (!closeDialogOpen.value) closeDialogOpen.value = true;
-  })
-    .then((un) => {
-      unlistenClose = un;
-    })
-    .catch(() => {
-      // 非 Tauri 环境（浏览器预览/测试）没有事件系统：静默跳过
-    });
+  });
+  register("close-action-failed", (ev) => {
+    const reason = (ev as { payload?: CloseActionFailure } | null)?.payload?.reason ?? "";
+    closeSubmitError.value = `关闭操作失败，请重试或取消：${reason}`;
+    closeDialogOpen.value = true;
+  });
 });
-onBeforeUnmount(() => unlistenClose?.());
+onBeforeUnmount(() => {
+  for (const un of unlistenClose) un();
+  unlistenClose = [];
+});
 
 // R07：关闭决定异步执行——失败（写记忆配置/隐藏/退出前错误）时弹窗
 // 保持打开并显示原因，用户可重试或取消；成功后由窗口动作结束。

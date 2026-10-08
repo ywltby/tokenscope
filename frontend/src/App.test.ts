@@ -7,11 +7,18 @@ import { defineComponent, h } from "vue";
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
-// close-requested 事件监听打桩：保留回调引用供测试手动触发。
-const closeEvent = vi.hoisted(() => ({ fns: [] as (() => void)[], unlisten: vi.fn() }));
+// close-requested / close-action-failed 事件监听打桩：保留回调引用供测试手动触发。
+const closeEvent = vi.hoisted(() => ({
+  fns: [] as ((ev?: unknown) => void)[],
+  byName: new Map<string, ((ev?: unknown) => void)[]>(),
+  unlisten: vi.fn(),
+}));
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn((_event: string, cb: () => void) => {
+  listen: vi.fn((event: string, cb: (ev?: unknown) => void) => {
     closeEvent.fns.push(cb);
+    const list = closeEvent.byName.get(event) ?? [];
+    list.push(cb);
+    closeEvent.byName.set(event, list);
     return Promise.resolve(closeEvent.unlisten);
   }),
 }));
@@ -90,7 +97,21 @@ function mockApp(pricingStatus: object): void {
 
 beforeEach(() => {
   invokeMock.mockReset();
+  closeEvent.fns.length = 0;
+  closeEvent.byName.clear();
 });
+
+/// AP07：App 现在注册两个监听（close-requested / close-action-failed），
+/// 按事件名取回调，避免"最后一个注册的"歧义。
+function listenerOf(event: string): (ev?: unknown) => void {
+  const list = closeEvent.byName.get(event);
+  if (!list?.length) throw new Error(`未注册监听: ${event}`);
+  return list.at(-1)!;
+}
+
+function triggerCloseRequested(): void {
+  listenerOf("close-requested")();
+}
 
 describe("App 集成（Task 4）", () => {
   it("needsSync=true 时全局横幅可见", async () => {
@@ -249,7 +270,7 @@ describe("App 关闭确认（关闭确认与配置文件计划 Task 3）", () =>
     await flushPromises();
     // 初始（未收到关闭请求）不渲染弹窗内容
     expect(w.find(".stub-NModal").exists()).toBe(false);
-    closeEvent.fns.at(-1)!();
+    triggerCloseRequested();
     await flushPromises();
     const dialog = w.find(".stub-NModal");
     expect(dialog.exists()).toBe(true);
@@ -270,8 +291,8 @@ describe("App 关闭确认（关闭确认与配置文件计划 Task 3）", () =>
     mockApp(statusOk);
     const w = mount(App);
     await flushPromises();
-    closeEvent.fns.at(-1)!();
-    closeEvent.fns.at(-1)!();
+    triggerCloseRequested();
+    triggerCloseRequested();
     await flushPromises();
     expect(w.find(".stub-NModal").exists()).toBe(true);
     invokeMock.mockClear();
@@ -289,7 +310,7 @@ describe("App 关闭确认（关闭确认与配置文件计划 Task 3）", () =>
     mockApp(statusOk);
     const w = mount(App);
     await flushPromises();
-    closeEvent.fns.at(-1)!();
+    triggerCloseRequested();
     await flushPromises();
     invokeMock.mockClear();
     // 第一次提交失败
@@ -325,7 +346,7 @@ describe("App 关闭确认（关闭确认与配置文件计划 Task 3）", () =>
     mockApp(statusOk);
     const w = mount(App);
     await flushPromises();
-    closeEvent.fns.at(-1)!();
+    triggerCloseRequested();
     await flushPromises();
     invokeMock.mockClear();
     invokeMock.mockImplementation((cmd: string) => {
@@ -358,7 +379,7 @@ describe("App 关闭确认（关闭确认与配置文件计划 Task 3）", () =>
     mockApp(statusOk);
     const w = mount(App);
     await flushPromises();
-    closeEvent.fns.at(-1)!();
+    triggerCloseRequested();
     await flushPromises();
     let release!: () => void;
     const gate = new Promise<void>((r) => {
@@ -386,5 +407,53 @@ describe("App 关闭确认（关闭确认与配置文件计划 Task 3）", () =>
     await flushPromises();
     w.unmount();
     expect(closeEvent.unlisten).toHaveBeenCalled();
+  });
+
+  it("AP07 close_action_failure_is_reported_and_retryable：已记忆动作失败也有原因与重试", async () => {
+    // 后端按记忆的默认动作执行失败（例如隐藏窗口失败）时窗口仍然可见，
+    // 必须把原因送到界面并提供重试/取消——不能静默留在"点了关闭没反应"。
+    mockApp(statusOk);
+    const w = mount(App);
+    await flushPromises();
+    expect(w.find(".stub-NModal").exists()).toBe(false);
+
+    listenerOf("close-action-failed")({
+      payload: { action: "minimize", reason: "隐藏窗口失败: webview busy（可重试）" },
+    });
+    await flushPromises();
+    expect(w.find(".stub-NModal").exists(), "失败必须弹出可操作的对话框").toBe(true);
+    expect(w.text()).toContain("关闭操作失败");
+    expect(w.text()).toContain("webview busy");
+
+    // 与未记忆路径共用结果处理：重试走 close_resolve
+    invokeMock.mockClear();
+    const minimize = w
+      .find(".stub-NModal")
+      .findAll("button")
+      .find((b) => b.text().includes("最小化到托盘"));
+    await minimize!.trigger("click");
+    await flushPromises();
+    expect(invokeMock).toHaveBeenCalledWith("close_resolve", {
+      minimize: true,
+      remember: false,
+    });
+    expect(w.find(".stub-NModal").exists()).toBe(false);
+  });
+
+  it("AP07 close_action_failure_can_be_cancelled：取消不触发任何关闭动作", async () => {
+    mockApp(statusOk);
+    const w = mount(App);
+    await flushPromises();
+    listenerOf("close-action-failed")({ payload: { reason: "隐藏窗口失败" } });
+    await flushPromises();
+    invokeMock.mockClear();
+    const cancel = w
+      .find(".stub-NModal")
+      .findAll("button")
+      .find((b) => b.text().includes("取消"));
+    await cancel!.trigger("click");
+    await flushPromises();
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(w.find(".stub-NModal").exists()).toBe(false);
   });
 });
