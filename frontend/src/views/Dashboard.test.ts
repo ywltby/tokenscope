@@ -761,17 +761,19 @@ describe("视图快照批次与恢复所有权（F03）", () => {
   });
 });
 
-describe("Dashboard 来源筛选（设计系统 Task 2，图标 + 文字分段）", () => {
-  it("来源是 radiogroup 分段控件：每项图标 + 文字，点击切换过滤", async () => {
+describe("Dashboard 来源筛选（纯图标分段）", () => {
+  it("来源只显示图标且保留名称，点击切换过滤", async () => {
     mockOk();
     const w = mountDashboard();
     await flushPromises();
     const group = w.find('[role="radiogroup"][aria-label="数据来源"]');
     expect(group.exists()).toBe(true);
     const items = group.findAll('[role="radio"]');
-    expect(items.map((t) => t.text())).toEqual(["全部", "Claude Code", "Codex"]);
+    expect(items.map((t) => t.text())).toEqual(["", "", ""]);
+    expect(items.map((t) => t.attributes("aria-label"))).toEqual(["全部", "Claude Code", "Codex"]);
+    expect(items.map((t) => t.attributes("title"))).toEqual(["全部", "Claude Code", "Codex"]);
     expect(items[0].attributes("aria-checked")).toBe("true");
-    // 图标 + 文字（AgentIcon 渲染在 .seg-icon 内），不再是纯图标方块
+    // AgentIcon 保留品牌身份，文字由可访问名称与悬停提示承载。
     expect(items[1].find(".seg-icon").exists()).toBe(true);
     await items[2].trigger("click");
     await flushPromises();

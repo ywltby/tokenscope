@@ -14,7 +14,11 @@ import { addDays, rangeLabel, todayInTz } from "../lib/dates";
  */
 // Task 6：对外契约 = 统计时区下的日历字符串（YYYY-MM-DD），不再传
 // 本机零点毫秒（本机时区与统计时区不同会导致"今天"错日）。
-const props = defineProps<{ value: [string, string] | null; tz: string }>();
+const props = defineProps<{
+  value: [string, string] | null;
+  tz: string;
+  iconOnly?: boolean;
+}>();
 const emit = defineEmits<{ (e: "update:value", v: [string, string] | null): void }>();
 
 const show = ref(false);
@@ -119,8 +123,30 @@ const shortcutActive = (sc: { fromOffset: number }): boolean => {
   >
     <template #trigger>
       <!-- 任务 3：与分段控件同族——32px、--ts-fill 底、无描边、8px 圆角 -->
-      <button type="button" class="range-trigger ts-focusable">
-        <span class="range-trigger-label">{{ label }}</span>
+      <button
+        type="button"
+        class="range-trigger ts-focusable"
+        :class="{ 'is-icon-only': iconOnly, 'has-range': iconOnly && value }"
+        :aria-label="label"
+        :aria-expanded="show"
+        :title="iconOnly ? label : undefined"
+      >
+        <svg
+          v-if="iconOnly"
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <rect x="3" y="5" width="18" height="16" rx="3" />
+          <path d="M7 3v4M17 3v4M3 11h18M8 15h2M14 15h2" />
+        </svg>
+        <span v-else class="range-trigger-label">{{ label }}</span>
       </button>
     </template>
     <div class="range-panel">
@@ -205,6 +231,16 @@ const shortcutActive = (sc: { fromOffset: number }): boolean => {
 }
 .range-trigger:hover {
   color: var(--ts-text);
+}
+
+.range-trigger.is-icon-only {
+  width: 32px;
+  padding: 0;
+  justify-content: center;
+}
+.range-trigger.has-range {
+  background: var(--ts-accent-soft);
+  color: var(--ts-accent);
 }
 
 .range-trigger-label {

@@ -24,6 +24,7 @@ const props = defineProps<{
   modelValue: T;
   options: SegmentOption<T>[];
   ariaLabel?: string;
+  iconOnly?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -134,6 +135,8 @@ onBeforeUnmount(() => {
       type="button"
       role="radio"
       class="ts-segmented-item"
+      :class="{ 'is-icon-only': iconOnly }"
+      :title="iconOnly ? (opt.ariaLabel ?? opt.label) : undefined"
       :aria-checked="modelValue === opt.value"
       :aria-label="opt.ariaLabel ?? opt.label"
       :tabindex="modelValue === opt.value ? 0 : -1"
@@ -147,12 +150,18 @@ onBeforeUnmount(() => {
       <span v-else-if="opt.icon" class="seg-icon" aria-hidden="true">
         <AgentIcon :name="opt.icon" :size="16" />
       </span>
-      <span>{{ opt.label }}</span>
+      <span v-if="!iconOnly">{{ opt.label }}</span>
     </button>
   </div>
 </template>
 
 <style scoped>
+.ts-segmented-item.is-icon-only {
+  width: 32px;
+  padding: 0;
+  justify-content: center;
+}
+
 .seg-icon {
   display: inline-flex;
   align-items: center;

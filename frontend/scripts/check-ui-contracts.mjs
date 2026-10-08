@@ -203,12 +203,18 @@ const MEASURE = () => {
 
   const filterRow = document.querySelector(".filter-row");
   const filterControls = filterRow
-    ? [...filterRow.children].map((c) => ({
+    ? [...filterRow.querySelectorAll(".filter-line > *")].map((c) => ({
         tag: c.tagName.toLowerCase(),
         cls: c.className,
         rect: rect(c),
       }))
     : [];
+  const iconFilters = [...document.querySelectorAll('[aria-label="数据来源"] button, .range-trigger')].map((el) => ({
+    name: el.getAttribute("aria-label"),
+    title: el.getAttribute("title"),
+    text: el.innerText.trim(),
+    hasIcon: !!el.querySelector("svg"),
+  }));
 
   const tableTypography = (sel) => {
     const root = document.querySelector(sel);
@@ -237,6 +243,7 @@ const MEASURE = () => {
   return {
     segmented,
     filterControls,
+    iconFilters,
     aggregateTable: tableTypography(".usage-card"),
     eventsTable: tableTypography(".events-card"),
     totalRowWeights: totalCells,
@@ -447,6 +454,21 @@ function buildChecks(m, ctx) {
   // UX04
   if (ctx.fixture === "normal") {
     const heights = m.filterControls.map((c) => c.rect?.height).filter((h) => h != null);
+    const positions = m.filterControls.map((c) => c.rect);
+    checks.push([
+      "filter_controls_stay_on_two_rows",
+      positions.length === 4 && positions.every(Boolean) &&
+        near(positions[0].top, positions[1].top, 1) &&
+        near(positions[2].top, positions[3].top, 1) &&
+        positions[2].top >= positions[0].top + positions[0].height + 8,
+      positions.map((r) => r?.top).join(","),
+    ]);
+    checks.push([
+      "source_and_date_filters_are_named_icons_without_text",
+      m.iconFilters.length === 4 && m.iconFilters.every((c) =>
+        c.hasIcon && c.text === "" && !!c.name && c.name === c.title),
+      JSON.stringify(m.iconFilters),
+    ]);
     checks.push([
       "filter_controls_have_equal_outer_height",
       heights.length >= 4 &&

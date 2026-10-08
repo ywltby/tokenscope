@@ -602,19 +602,23 @@ startRefreshBatch();
         <NButton size="small" secondary class="ts-focusable" @click="manualRefresh">刷新</NButton>
       </div>
     </div>
-    <!-- 筛选行：来源 → 维度 → 日期 → 时区 → 刷新（窄窗口自动换行） -->
-    <div class="filter-row">
-      <SegmentedControl v-model="agent" :options="agentOptions" aria-label="数据来源" />
-      <SegmentedControl v-model="by" :options="dimOptions" aria-label="聚合维度" />
-      <DateRangeSelect v-model:value="range" :tz="tz" />
-      <NSelect
-        :value="tz"
-        :options="TZ_OPTIONS"
-        size="medium"
-        class="tz-select"
-        aria-label="统计时区"
-        @update:value="(v: string) => (tz = v)"
-      />
+    <!-- 固定两行：来源 / 聚合维度；日期 / 时区。 -->
+    <div class="filter-row filter-controls">
+      <div class="filter-line">
+        <SegmentedControl v-model="agent" :options="agentOptions" aria-label="数据来源" icon-only />
+        <SegmentedControl v-model="by" :options="dimOptions" aria-label="聚合维度" />
+      </div>
+      <div class="filter-line">
+        <DateRangeSelect v-model:value="range" :tz="tz" icon-only />
+        <NSelect
+          :value="tz"
+          :options="TZ_OPTIONS"
+          size="medium"
+          class="tz-select"
+          aria-label="统计时区"
+          @update:value="(v: string) => (tz = v)"
+        />
+      </div>
     </div>
     <!-- AP06：来源检测失败——可见、可重试，且不改动已成功的汇总数据 -->
     <div v-if="sourceError" class="ts-notice source-notice" role="alert">
@@ -931,10 +935,16 @@ startRefreshBatch();
 
 .filter-row {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: flex-start;
   gap: var(--ts-space-3);
   margin-bottom: var(--ts-space-3);
+}
+
+.filter-line {
+  display: flex;
+  align-items: center;
+  gap: var(--ts-space-3);
 }
 
 .tz-select {
