@@ -30,7 +30,11 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Root,
 
-    [switch]$SkipPricing
+    [switch]$SkipPricing,
+
+    # 合成 Claude 事件总条数。默认 4 条（小样本，够看空/满两种状态）；
+    # 需要验证明细分页 / 会话过期（RC02）时传 >200（前端单页 limit=200）。
+    [int]$Events = 4
 )
 
 $ErrorActionPreference = 'Stop'
@@ -101,6 +105,7 @@ function Record-File {
 }
 
 # ── 3. 合成 agent 日志（真实 agent 日志永不参与） ──────────────────
+if ($Events -lt 4) { throw "-Events 至少 4（基线合成事件数），收到 $Events" }
 $projectSlug = '-acceptance-workspace-tokenscope'
 # 布局必须与适配器默认根一致：<claude 根>\projects\<slug>\*.jsonl
 $projectDir = Join-Path (Join-Path $claudeDir 'projects') $projectSlug
@@ -111,6 +116,18 @@ $entries = @(
     @{ ts = '2026-10-07T03:15:00.000Z'; model = 'gpt-5-codex';       in = 500;  out = 200; cr = 0;    cw = 0 },
     @{ ts = '2026-10-07T04:45:00.000Z'; model = 'mystery-model';     in = 700;  out = 300; cr = 0;    cw = 0 }
 )
+# 分页/过期验收需要 >200 条明细：按需补齐合成事件（确定性取值，无随机）。
+$fillerModels = @('claude-sonnet-4-5', 'gpt-5-codex')
+for ($i = $entries.Count; $i -lt $Events; $i++) {
+    $entries += @{
+        ts    = ('2026-10-{0:d2}T{1:d2}:{2:d2}:00.000Z' -f (5 + ($i % 3)), (1 + ($i % 20)), ($i % 60))
+        model = $fillerModels[$i % 2]
+        in    = 300 + ($i % 50) * 7
+        out   = 120 + ($i % 30) * 3
+        cr    = ($i % 4) * 250
+        cw    = ($i % 3) * 100
+    }
+}
 $idx = 0
 $lines = foreach ($e in $entries) {
     $idx++
@@ -208,6 +225,7 @@ $manifest = [ordered]@{
     webview_data_dir    = $webviewDir
     env_var             = @{ name = 'TOKENSCOPE_ACCEPTANCE_ROOT'; value = $rootFull }
     price_auto_sync     = $false
+    claude_events       = $Events
     files               = $written.Values
     prepared_at         = (Get-Date).ToString('o')
     script              = 'scripts/prepare-native-acceptance.ps1'

@@ -1,6 +1,10 @@
 # 复核遗留缺陷与验收补齐 Implementation Plan
 
-> **执行说明：** 使用 `executing-plans` 技能按任务执行。本文为修复方案，**尚未执行**；本次只编写计划并纠正状态记录。修复前先运行能在当前代码上因目标行为失败的测试，再实现、验证、独立提交；不得仅凭测试名称或总通过数勾选完成。
+> **执行说明：** 使用 `executing-plans` 技能按任务执行。RC01–RC10 已按上述流程执行并提交；
+> **RC11 原生取证已完成大部分，但未全部闭合**（会话过期原生轮、Windows 每监视器缩放、
+> 系统深色首帧、CSP 脚本哨兵仍为待验，见 §5 执行账 RC11 行与
+> [原生验收记录](2026-10-08-native-recheck-qa.md)），因此本计划保持 active、不归档。
+> 修复前先运行能在当前代码上因目标行为失败的测试，再实现、验证、独立提交；不得仅凭测试名称或总通过数勾选完成。
 
 **目标：** 修复 2026-10-08 复核确认的查询会话隔离、过期恢复、设置竞态、内存预算、可访问性和单价精度缺陷，补齐自动化与原生验收证据。
 
@@ -278,13 +282,13 @@ Remove-Item Env:TOKENSCOPE_ACCEPTANCE_ROOT
 - [x] RC03 一次 settings_get 恢复所有依赖项；真实 deferred 写后回退/保存期间编辑/卸载均受保护。
 - [x] RC04 同步与状态错误各有有效重试；pending 刷新事件不丢失。
 - [x] RC05 完整保留对象计账、并发准入/借用/回收边界测试通过，内存声明与保证一致。
-- [x] ] RC06 真实组件及浏览器完整键盘、列名称、描述、外部关闭通过。
+- [x] RC06 真实组件及浏览器完整键盘、列名称、描述、外部关闭通过。
 - [x] RC07 单价精度和单位在真实调用点保留，request/summary/三态计价回归不变。
 - [x] RC08 OpenRouter 基础/override 的数字与字符串兼容，非法值策略及原子快照保留。
-- [x] ] RC09 所有必需具名契约有实际断言并通过，失败恢复及首帧场景无 IPC/网络漏口。
-- [ ] RC10 release 原生隔离入口已验证，所有读写和 WebView 状态在临时根。
-- [ ] RC11 生产 CSP、原生首帧/背景、六个主题×DPI组合及故障恢复有足够证据；未验项明确留下。
-- [ ] 原计划和索引状态与真实完成度一致；本轮必要项未验不归档、不整体宣告完成；D5 后延单列。
+- [x] RC09 所有必需具名契约有实际断言并通过，失败恢复及首帧场景无 IPC/网络漏口。
+- [x] RC10 release 原生隔离入口已验证，所有读写和 WebView 状态在临时根（原生 22 轮逐轮 `real_untouched=true`）。
+- [ ] RC11 部分闭合：生产 CSP 策略文本与全功能可用、原生浅/深/跟随系统首帧、六组主题×WebView 缩放、logs/价格锁/查询稳定/同步失败四类故障与关窗三态已取证；**会话过期原生轮、Windows 每监视器缩放、系统深色首帧、CSP 内联/外源脚本哨兵仍待验**（缺失证据逐项记录于 QA §5-5/§3/§2/§4）。
+- [x] 原计划和索引状态与真实完成度一致；本轮必要项未验不归档、不整体宣告完成；D5 后延单列。
 
 | 任务 | 状态 | 红灯证据 | 绿灯命令/数量 | 提交 | 剩余限制 |
 | --- | --- | --- | --- | --- | --- |
@@ -298,4 +302,4 @@ Remove-Item Env:TOKENSCOPE_ACCEPTANCE_ROOT
 | RC08 | 已完成（实现+自动化；原生验收归 RC11） | `qa-artifacts/recheck-remediation/rc08-red.txt`：受控撤回 `parse_price` 的 Number 分支后 `openrouter_accepts_numeric_and_string_prices` 与 `numeric_zero_is_preserved_in_snapshot_and_pricing_view` 双双变红（0 条导入/取不到条目）。修复前真实失败点在 serde 层，由常驻回归 `test_rc08_old_string_only_schema_rejects_numeric_fixture` 在同一 fixture 上永久断言旧 `Option<String>` schema 反序列化失败 | `cargo test --offline openrouter --lib` → 19 passed；`cargo test --offline --test pricing_view_contract` → 5 passed；`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --offline -- -D warnings`、`cargo test --workspace --offline` → 全绿（exit 0） | 本提交（`fix(价格同步): 接受 OpenRouter 数字与字符串单价`） | 只用合成 fixture，未联网复验真实 API；`id`/`name`/`utc_start` 与根结构仍严格失败；快照数字格式与索引/事件缓存版本未变 |
 | RC09 | 已完成（自动化覆盖，verify 退出码 0） | `qa-artifacts/recheck-remediation/rc09-gap-red.txt`：受控撤回[A]日期弹层内层材质 → `date_outer_surface_matches_contract` 与 `date_panel_matches_elevated_contract` 同时红（量到 elevated 层数=2）；撤回[B]theme.ts 的安全写入 → `prepaint_theme_has_correct_canvas` 的 storage-unavailable 用例红（`.app-shell` 不出现）+ 单测同址红；[C]记录的未采纳假设 | `node frontend/scripts/check-ui-contracts.mjs --url http://127.0.0.1:1457 --phase verify` → 基础矩阵 28 场景全绿 + 12 条必需契约 173 条断言全绿（退出码 0）；`check-app-scroll.mjs` 全绿；`check-chart-tooltip-security.mjs`（dev 服务、无 CSP 真实 ECharts）四场景全绿；`pnpm --dir frontend test` → 280 passed | 本提交 | 新增 `frontend/scripts/contracts/interaction-contracts.mjs`（12 条契约实现，plan 文件清单外的必要新文件）与 `frontend/src/lib/localStorage.ts`。覆盖口径说明：`saved_settings_survive_delayed_read` 中来源目录按“读取挂起 → 编辑 → 保存成功 → 释放旧读取”真实重演并断言提交参数与输入框值；关闭动作/自动同步在同一挂起窗口内**本就不可操作**（页面级遮罩只在无遮罩的重试窗口允许写入），因此浏览器侧断言“不可操作且未发出写入 IPC + 该次读取一次初始化三处状态”，写后回退的组件级证据在 RC03 的三个 Vitest 用例。图表契约用画布像素指纹取证，需先把指针移出画布（hover emphasis 会造成假红） |
 | RC10 | 已完成（入口 + 自动化）；release/acceptance 实跑取证归 RC11 | `qa-artifacts/recheck-remediation/rc10-red.txt`：未启用 feature 时子进程以 `ACCEPTANCE_NOT_BUILT`/退出码 2 失败、壳侧 `start_with(None)` 直接 Err（缺失验收根必须拒绝启动） | `cargo test --offline --features acceptance --test native_acceptance` → 3 passed（2 个 `#[ignore]` 为子进程阶段入口，由父进程按码调用）；`cargo test --manifest-path src-tauri/Cargo.toml --offline --features acceptance acceptance` → 2 passed；`cargo clippy --all-targets --features acceptance -- -D warnings`（根 + 壳）与默认构建门禁全绿 | 本提交 | 新增 `src/acceptance.rs`、`src-tauri/src/acceptance.rs`、`scripts/prepare-native-acceptance.ps1`（UTF-8 BOM，供 Windows PowerShell 5.1 正确读中文）、`docs/plans/active/2026-10-08-native-recheck-qa.md`。根/壳各加非默认 feature `acceptance`（壳显式透传）。**顺带修掉两处真实缺陷**：canonicalize 的 `\\?\` 前缀会一路泄漏到来源目录显示（已剥除）；准备脚本首版合成日志不符合适配器口径（Claude 缺 `sessionId`/`message.id`、Codex 违反 `total=input+output` 与 `cached+cache_write≤input`）导致 events=0/bad_lines=6，已按真实契约修正并实测 files=2/events=4/bad_lines=1 与 files=1/events=2/bad_lines=0。WebView 用户数据与 identifier（避免与运行中的普通实例撞单实例名）也指向隔离根 |
-| RC11 | 待执行 | — | — | — | DPI/首帧/CSP待验，D5安装后延 |
+| RC11 | **部分完成**：§1–§6 大部分已用 release+`acceptance` 原生实例取证；四类项明确待验，本计划保持 active | `qa-artifacts/native-recheck-2026-10-08/`（22 轮 `evidence.json` + 帧序列 + 截图 + 进程日志，gitignore）。有效红灯（不是"环境没跑起来"）：①早期 combo 轮用 `--theme dark` 标记深色，实测 `prefers-color-scheme:dark=false` → 该轮 `data-theme=light`，R0 整轮作废并重做 C1–C6；②首帧亮度解码全 null（PNG 签名常量把 0x47 写成 0x45）→ "21 帧无法解码"被断言抓出；③分页断言用虚拟滚动的 DOM 行数 → `剩余 42 → null` 红，改按"还剩 N 条"文案判定；④价格锁轮中途才加锁 → 无降级告警（`等待 0 s` 暴露锁根本没持有），改为启动前持有并确认；⑤`spawn({detached:true})` 下 PowerShell 立即以 0 退出、脚本体不执行 → 锁进程改非 detached；⑥托盘最小化断言 `RECT none` 红（实测残留 22×22 宿主窗口）→ 改按"最大可见顶层窗口"判定 | `tauri build --features acceptance --no-bundle` → `src-tauri/target/release/tokenscope.exe`（SHA256 前缀 `581072f0131af15f`）；`node frontend/scripts/native-acceptance.mjs --scenario …`：combo 6 轮各 17/17、first-frame 3 轮各 9/9、csp 9/9、fault-logs-file 5/5、fault-pricing-locked 7/7、query-stability 5/5、sync-failure 5/5、close-cancel 7/7、close-tray 6/6、close-remember 8/8；`cargo test --offline --features acceptance --test native_acceptance` → 3 passed；`pnpm --dir frontend test` → 280 passed（24 files）、`typecheck`、`format:check` 全绿 | 本提交 | **待验（缺失证据已逐项写进 QA 文档）**：①§5-5 会话过期——唯一合法通道是真实空闲 >600 s 后点"加载更多"，两次隔离实例都在空闲窗口内被外部进程终止（应用日志止于自身最后一条查询、无优雅关闭记录），缺 `expire-finish` 的 4 条断言；旁证是 RC09 浏览器契约 `query-expired-on-page2` 与 Rust 侧过期分支测试，二者不等同原生。②100%/125%/150% 由 `--force-device-scale-factor` 注入（实测 dpr 1/1.25/1.5），**不是** Windows 每监视器缩放（不改显示设置）。③"跟随系统"只覆盖系统=浅色这一半（不改系统应用主题）。④CSP 内联/外源脚本哨兵无合法注入通道（调试器求值按 plan 不算证据）；已验的是实际响应头策略文本 + 全功能在该策略下可用 + 无未预期违规。**新发现（登记不改代码）**：定价横幅在"仅外置价格可用"时仍写"尚未获取定价…当前费用仅能显示为未知"，与同屏真实显示的费用矛盾（RC04 同族口径问题，建议新开条目处理）；naive-ui 2.45.3 模块级 data-URI 预热图在生产 CSP 下固定产生 2 条 `img-src` 违规（上游死代码，功能无影响，未为此放宽 CSP）。另记并发观察：取证期间本机另有非验收实例（父进程 `cargo`）持续写真实 `~/.tokenscope`，每轮 `real_untouched` 仍为 true（比较本次运行前后），但跨轮指纹会漂移——见 QA §8.1 |
