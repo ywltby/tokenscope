@@ -5,15 +5,18 @@
 //!   （`record_id` = message.id，跨文件去重由全局 dedupe 步骤执行）；
 //! - `isSidechain` 与 `<synthetic>` 跳过并计数；解析失败 / 缺 usage / 缺时间戳 /
 //!   缺 message.id 计入坏行；
-//! - 项目名 = projects 下第一级目录名（根下散放记 "(根目录)"）。
+//! - 项目身份（A02）：会话**初始 cwd**——顶层 `cwd` 归一化后按 sessionId 取
+//!   首个有效值；无可信 cwd 时回落文件父目录相对根的路径（真实布局下即
+//!   slug，根下散放记 "(根目录)"）。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use jiff::Timestamp;
 use serde::Deserialize;
 
-use super::{CollectStats, FileParse, Source, read_text, walk_jsonl};
+use super::{CollectStats, FileParse, Source, project_path, read_text, walk_jsonl};
 use crate::model::{AgentKind, UsageEvent};
 
 pub const SYNTHETIC_MODEL: &str = "<synthetic>";
@@ -28,6 +31,10 @@ struct ClaudeLine {
     timestamp: Option<String>,
     #[serde(rename = "sessionId", default)]
     session_id: String,
+    /// A02：会话上下文里的 cwd（顶层字段）。缺失、空值、类型异常一律只是
+    /// 「没有可信身份」——路径提取容错与 usage 校验分开，不产生坏行。
+    #[serde(default)]
+    cwd: Option<serde_json::Value>,
     #[serde(default)]
     message: Option<ClaudeMessage>,
 }
@@ -131,17 +138,40 @@ impl Source for ClaudeSource {
     }
 }
 
-fn ingest_text(text: &str, project: &str, stats: &mut CollectStats, events: &mut Vec<UsageEvent>) {
+fn ingest_text(
+    text: &str,
+    file_project: &str,
+    stats: &mut CollectStats,
+    events: &mut Vec<UsageEvent>,
+) {
+    // A02：一次读取、一轮解析——先按 sessionId 收集「首个有效 cwd」，最后统一
+    // 赋值给该会话的事件（不为每个事件重读文件）。日志前缀缺失时较晚出现的
+    // 首值同样可用于本会话已解析事件；跨 session 绝不共用首值（含无 ID 分组，
+    // 该分组只在文件内有效）。
+    let mut initial: HashMap<String, String> = HashMap::new();
+    let mut pending: Vec<(String, UsageEvent)> = Vec::new();
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
         }
         stats.lines_seen += 1;
-        ingest_line(line, project, stats, events);
+        ingest_line(line, stats, &mut initial, &mut pending);
+    }
+    for (session, mut event) in pending {
+        event.project = initial
+            .get(&session)
+            .cloned()
+            .unwrap_or_else(|| file_project.to_string());
+        events.push(event);
     }
 }
 
-fn ingest_line(line: &str, project: &str, stats: &mut CollectStats, events: &mut Vec<UsageEvent>) {
+fn ingest_line(
+    line: &str,
+    stats: &mut CollectStats,
+    initial: &mut HashMap<String, String>,
+    pending: &mut Vec<(String, UsageEvent)>,
+) {
     let rec: ClaudeLine = match serde_json::from_str(line) {
         Ok(r) => r,
         Err(_) => {
@@ -149,6 +179,18 @@ fn ingest_line(line: &str, project: &str, stats: &mut CollectStats, events: &mut
             return;
         }
     };
+    // A02：身份上下文采集——非 assistant 行（user/system 等）同样提供上下文；
+    // sidechain 记录属子代理上下文，不参与主会话身份。只取**首个有效**值：
+    // 归一化失败（相对路径、类型异常、空值）不写入、不影响后续行，也不计坏行。
+    if !rec.is_sidechain
+        && let Some(key) = rec
+            .cwd
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .and_then(project_path::normalize_project_path)
+    {
+        initial.entry(rec.session_id.clone()).or_insert(key);
+    }
     if rec.kind != "assistant" {
         return;
     }
@@ -190,7 +232,8 @@ fn ingest_line(line: &str, project: &str, stats: &mut CollectStats, events: &mut
         agent: AgentKind::ClaudeCode,
         model: msg.model.clone(),
         session_id: rec.session_id.clone(),
-        project: project.to_string(),
+        // A02：项目身份在 ingest_text 收尾时按会话首值统一定稿，此处只占位。
+        project: String::new(),
         record_id: msg.id.clone(),
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
@@ -203,7 +246,7 @@ fn ingest_line(line: &str, project: &str, stats: &mut CollectStats, events: &mut
         stats.bad_lines += 1;
         return;
     }
-    events.push(event);
+    pending.push((rec.session_id.clone(), event));
 }
 
 #[cfg(test)]
