@@ -167,10 +167,10 @@ function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsO
         filterMode: "filter",
         borderColor: "transparent",
         backgroundColor: "transparent",
-        fillerColor: t.separator,
+        fillerColor: t.sliderFill,
         showDataShadow: false,
-        handleStyle: { color: t.textMuted, borderColor: "transparent" },
-        moveHandleStyle: { color: t.textMuted, opacity: 0.5 },
+        handleStyle: { color: t.sliderHandle, borderColor: "transparent" },
+        moveHandleStyle: { color: t.sliderHandle, opacity: 0.5 },
         emphasis: {
           handleStyle: { color: t.textSecondary, borderColor: "transparent" },
           moveHandleStyle: { color: t.textSecondary, opacity: 0.7 },

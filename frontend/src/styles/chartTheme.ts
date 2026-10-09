@@ -24,6 +24,8 @@ export interface ChartTokens {
   tooltipBg: string;
   tooltipBorder: string;
   legendText: string;
+  sliderFill: string;
+  sliderHandle: string;
 }
 
 // UX07：显示名与顺序消费 tokenDisplay 单一来源（U14：缓存命中）。
@@ -69,6 +71,8 @@ export function chartTokens(
     tooltipBg: dark ? "rgba(44, 44, 46, 0.85)" : "rgba(255, 255, 255, 0.85)",
     tooltipBorder: dark ? "rgba(255, 255, 255, 0.16)" : "rgba(0, 0, 0, 0.14)",
     legendText: dark ? "#AEAEB2" : "#515154",
+    sliderFill: dark ? "rgba(255, 255, 255, 0.035)" : "rgba(0, 0, 0, 0.025)",
+    sliderHandle: dark ? "rgba(255, 255, 255, 0.16)" : "rgba(0, 0, 0, 0.16)",
   };
 }
 
