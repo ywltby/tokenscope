@@ -16,7 +16,7 @@ import * as echarts from "echarts";
 import { useTheme } from "../composables/theme";
 import { useTokenColors } from "../composables/tokenColors";
 import { fmtNum, type Group } from "../types";
-import { buildBarChartData, fullLabels } from "../lib/chartData";
+import { buildBarChartData, tooltipLabels } from "../lib/chartData";
 import { buildTooltipNode } from "../lib/chartTooltip";
 import { chartTokens, POPOVER_BLUR_CSS } from "../styles/chartTheme";
 
@@ -91,8 +91,8 @@ function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsO
   const groups = props.groups;
   // F03（计划 A4）：分类轴与全部 series 由同一份排序结果生成，标签与数值不错位
   const { categories, series } = buildBarChartData(groups, props.by);
-  // 长标签：轴上省略，tooltip 用完整原始键
-  const full = fullLabels(groups, props.by);
+  // 长标签：轴上省略，tooltip 用展示名（模型维度不能用压缩后的身份键）
+  const full = tooltipLabels(groups, props.by);
   // SF01：tooltip 安全输出——返回 HTMLElement（DOM 分支），原始键只经
   // textNode 写入；模型/项目名可含任意字符（<>&"'、中文、长串）不注入。
   const tooltipFormatter = (params: unknown): HTMLElement => {

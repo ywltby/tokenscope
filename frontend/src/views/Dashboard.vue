@@ -492,7 +492,14 @@ function onSummaryRowClick(key: string): void {
     drill.value = null;
     return;
   }
-  drill.value = { type: by.value as "day" | "model" | "project", key };
+  const row = report.value?.groups.find((g) => g.key === key);
+  // MP04：筛选键始终是后端身份 key；展示名另存 label（模型维度 = 友好名），
+  // 避免把压缩后的身份键或名称反过来当筛选键。
+  drill.value = {
+    type: by.value as "day" | "model" | "project",
+    key,
+    label: row?.label ?? key,
+  };
 }
 
 function clearDrill(): void {
@@ -541,7 +548,10 @@ const moreBlockedHint = computed<string | undefined>(() =>
   hasMore.value && !liveFirstPage.value ? "刷新完成后可继续加载" : undefined,
 );
 
-const drillLabel = (d: EventDrill): string => `${d.type}: ${d.key}`;
+const drillLabel = (d: EventDrill): string =>
+  // MP04：模型维度显示友好名（key 是等价身份键）；项目维度保留完整路径，
+  // 避免同名不同路径产生歧义。
+  `${d.type}: ${d.type === "project" ? d.key : (d.label ?? d.key)}`;
 
 // UX05：真实可绘制类别（排除"合计"行）——用 computed 缓存，避免在模板里
 // 每次渲染都 filter 生成新数组；新数组会改变 TrendChart 的 groups 身份，

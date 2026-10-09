@@ -122,10 +122,17 @@ impl QuerySnapshot {
 }
 
 /// 下钻过滤指纹（模型/项目/日——明细侧子查询身份；游标/limit 不参与）。
+/// MP04：模型筛选按**等价身份**归一——同一模型的两种写法（`claude-opus-5-5`
+/// 与 `claude-opus-5.5`）视为同一子查询，游标可在其间续用；不同模型（含
+/// 变体）仍是不同指纹。
 pub(crate) fn drill_fingerprint(filter: &EventFilter) -> String {
+    let model = filter
+        .model
+        .as_deref()
+        .map(|m| crate::model_identity::ModelIdentity::parse(m).identity_key());
     format!(
         "model={:?}|project={:?}|day={:?}",
-        filter.model, filter.project, filter.day
+        model, filter.project, filter.day
     )
 }
 

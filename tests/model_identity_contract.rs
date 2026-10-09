@@ -1,14 +1,16 @@
-//! MP03：可信模型展示名——来源、独立性、顺序无关与旧快照兜底。
+//! MP03/MP04：可信模型展示名 + 模型身份分组与下钻。
 //!
 //! 计划：docs/plans/active/2026-10-10-model-pricing-name-equivalence.md §2.12/§3。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use tokenscope::aggregate::GroupBy;
 use tokenscope::model::TokenCounts;
 use tokenscope::model_identity::ModelIdentity;
 use tokenscope::modelsdev::{load_snapshot, sync_with_body_for_tests};
 use tokenscope::pricing::Pricing;
+use tokenscope::report::{EventFilter, SummaryOptions, summary};
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -37,6 +39,264 @@ fn sync_to(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     sync_with_body_for_tests(&path, body).unwrap();
     path
+}
+
+// ---- MP04：模型身份分组、下钻与守恒 ----
+
+/// Claude 合成日志目录：每行一条 assistant 用量事件（同一会话、同一 cwd）。
+fn claude_dir(dir: &Path, models: &[&str], input: u64) -> PathBuf {
+    let project = dir.join("claude").join("alpha");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut body = String::new();
+    for (i, model) in models.iter().enumerate() {
+        let ts = format!("2026-10-07T05:{:02}:{:02}.000Z", i / 60, i % 60);
+        body.push_str(&format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","sessionId":"s1","cwd":"C:/work/alpha","message":{{"id":"m-{i}","model":"{model}","usage":{{"input_tokens":{input},"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#
+        ));
+        body.push('\n');
+    }
+    std::fs::write(project.join("s.jsonl"), body).unwrap();
+    dir.join("claude")
+}
+
+fn no_codex(dir: &Path) -> PathBuf {
+    dir.join("no-codex")
+}
+
+fn opts(dir: &Path, claude: &Path, modelsdev: Option<&Path>, by: GroupBy) -> SummaryOptions {
+    SummaryOptions {
+        by,
+        claude_dir: Some(claude.to_path_buf()),
+        codex_dir: Some(no_codex(dir)),
+        cache_dir: Some(dir.join("cache")),
+        pricing_index: Some(dir.join("idx.json")),
+        pricing_path: Some(dir.join("pricing-missing.toml")),
+        openrouter_path: Some(dir.join("or-missing.json")),
+        modelsdev_path: Some(
+            modelsdev
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| dir.join("md-missing.json")),
+        ),
+        tz: Some("Asia/Shanghai".to_string()),
+        ..Default::default()
+    }
+}
+
+fn list_all(o: &SummaryOptions, filter: &EventFilter) -> tokenscope::report::EventList {
+    let snap = tokenscope::query::begin_query(o).unwrap();
+    tokenscope::query::query_events(&snap.query_id, filter).unwrap()
+}
+
+#[test]
+fn model_identity_groups_aliases_across_agents() {
+    let dir = tmp("groups");
+    let claude = claude_dir(
+        &dir,
+        &["claude-opus-5-5", "claude-opus-5.5", "CLAUDE_OPUS_5_5"],
+        10,
+    );
+    // 可信 models.dev 名（只挂在其中一个等价 ID 上）。
+    let md = sync_to(
+        &dir,
+        "pricing-modelsdev.json",
+        r#"{"acme": {"models": {"claude-opus-5.5": {"name": "Claude Opus 5.5", "cost": {"input": 3, "output": 15}}}}}"#,
+    );
+    let r = summary(&opts(&dir, &claude, Some(&md), GroupBy::Model)).unwrap();
+    assert_eq!(
+        r.groups.len(),
+        2,
+        "三种拼写合并为一行 + 合计：{:?}",
+        r.groups
+    );
+    let g = &r.groups[0];
+    assert_eq!(g.key, "claudeopus55", "key 是等价身份键");
+    assert_eq!(
+        g.label.as_deref(),
+        Some("Claude Opus 5.5"),
+        "优先使用可信 models.dev 模型名"
+    );
+    assert_eq!(g.requests, 3, "三种拼写都计入同一模型");
+    assert_eq!(g.tokens.input, 30);
+
+    // 无可信名称时退回原始代表写法（字典序最小），不展示压缩键。
+    let dir2 = tmp("groups-no-name");
+    let claude2 = claude_dir(&dir2, &["claude-opus-5.5", "claude-opus-5-5"], 10);
+    let r2 = summary(&opts(&dir2, &claude2, None, GroupBy::Model)).unwrap();
+    assert_eq!(r2.groups.len(), 2);
+    assert_eq!(r2.groups[0].key, "claudeopus55");
+    assert_eq!(r2.groups[0].label.as_deref(), Some("claude-opus-5-5"));
+}
+
+#[test]
+fn model_identity_preserves_usage_and_requests() {
+    let dir = tmp("conservation");
+    let models = ["claude-opus-5-5", "claude-opus-5.5", "claude-opus-5-5"];
+    let claude = claude_dir(&dir, &models, 100);
+    let r = summary(&opts(&dir, &claude, None, GroupBy::Model)).unwrap();
+    let g = &r.groups[0];
+    assert_eq!(g.requests, 3);
+    assert_eq!(g.tokens.input, 300);
+    assert_eq!(g.tokens.output, 3);
+    assert_eq!(r.totals.requests, 3);
+    assert_eq!(r.totals.tokens, g.tokens, "合并只重排分组，不改总量");
+}
+
+#[test]
+fn model_identity_keeps_versions_and_variants_separate() {
+    let dir = tmp("separate");
+    let claude = claude_dir(
+        &dir,
+        &[
+            "claude-opus-5-5",
+            "claude-opus-5-5-20260101",
+            "claude-opus-5-5:free",
+            "claude-opus-5-6",
+        ],
+        10,
+    );
+    let r = summary(&opts(&dir, &claude, None, GroupBy::Model)).unwrap();
+    let keys: Vec<&str> = r.groups.iter().map(|g| g.key.as_str()).collect();
+    assert_eq!(
+        keys,
+        [
+            "claudeopus55",
+            "claudeopus5520260101",
+            "claudeopus55:free",
+            "claudeopus56",
+            "合计"
+        ],
+        "不同版本与变体不得合并（前缀相同也不行）"
+    );
+    assert!(
+        r.groups[..r.groups.len() - 1]
+            .iter()
+            .all(|g| g.requests == 1),
+        "每个身份各一条请求"
+    );
+}
+
+#[test]
+fn model_identity_group_cost_sums_per_request() {
+    let dir = tmp("cost");
+    // 两条请求：token 不同 → 分组费用必须等于逐请求费用之和（不能先合并再计价）。
+    let project = dir.join("claude").join("alpha");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut body = String::new();
+    for (i, (model, input)) in [
+        ("claude-opus-5-5", 1_000_000u64),
+        ("claude-opus-5.5", 2_000_000u64),
+    ]
+    .iter()
+    .enumerate()
+    {
+        body.push_str(&format!(
+            r#"{{"type":"assistant","timestamp":"2026-10-07T0{}:00:00.000Z","sessionId":"s1","cwd":"C:/work/alpha","message":{{"id":"c-{i}","model":"{model}","usage":{{"input_tokens":{input},"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#,
+            i + 5
+        ));
+        body.push('\n');
+    }
+    std::fs::write(project.join("s.jsonl"), body).unwrap();
+    let md = sync_to(
+        &dir,
+        "pricing-modelsdev.json",
+        r#"{"acme": {"models": {"claude-opus-5.5": {"name": "Opus 5.5", "cost": {"input": 3, "output": 15}}}}}"#,
+    );
+    let o = opts(&dir, &dir.join("claude"), Some(&md), GroupBy::Model);
+    let r = summary(&o).unwrap();
+    let g = &r.groups[0];
+    assert_eq!(g.requests, 2);
+    assert!(
+        (g.cost_usd - 9.0).abs() < 1e-9,
+        "1M×3 + 2M×3 = 9：逐请求计价后求和，{}",
+        g.cost_usd
+    );
+
+    // 明细逐条费用与分组一致（同源）。
+    let events = list_all(
+        &o,
+        &EventFilter {
+            model: Some(g.key.clone()),
+            ..Default::default()
+        },
+    );
+    let sum: f64 = events.rows.iter().filter_map(|row| row.cost_usd).sum();
+    assert!((sum - g.cost_usd).abs() < 1e-9, "{sum} vs {}", g.cost_usd);
+    assert_eq!(events.total, 2);
+}
+
+#[test]
+fn model_identity_drill_pages_include_all_spellings() {
+    let dir = tmp("pages");
+    // 210 条事件、两种拼写交替 → 下钻必须跨页返回全部等价请求。
+    let models: Vec<&str> = (0..210)
+        .map(|i| {
+            if i % 2 == 0 {
+                "claude-opus-5-5"
+            } else {
+                "claude-opus-5.5"
+            }
+        })
+        .collect();
+    let project = dir.join("claude").join("alpha");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut body = String::new();
+    for (i, model) in models.iter().enumerate() {
+        let ts = format!(
+            "2026-10-07T{:02}:{:02}:{:02}.000Z",
+            5 + i / 3600,
+            (i / 60) % 60,
+            i % 60
+        );
+        body.push_str(&format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","sessionId":"s1","cwd":"C:/work/alpha","message":{{"id":"p-{i}","model":"{model}","usage":{{"input_tokens":10,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#
+        ));
+        body.push('\n');
+    }
+    std::fs::write(project.join("s.jsonl"), body).unwrap();
+
+    let o = opts(&dir, &dir.join("claude"), None, GroupBy::Model);
+    let r = summary(&o).unwrap();
+    assert_eq!(r.groups[0].requests, 210, "两种拼写全部合并");
+
+    let key = r.groups[0].key.clone();
+    let snap = tokenscope::query::begin_query(&o).unwrap();
+    let page1 = tokenscope::query::query_events(
+        &snap.query_id,
+        &EventFilter {
+            model: Some(key.clone()),
+            limit: Some(200),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(page1.total, 210);
+    assert_eq!(page1.rows.len(), 200);
+    let page2 = tokenscope::query::query_events(
+        &snap.query_id,
+        &EventFilter {
+            model: Some(key.clone()),
+            limit: Some(200),
+            before: Some(page1.rows.last().unwrap().cursor.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(page2.total, 210, "total 是过滤后全量，不随游标截断");
+    assert_eq!(page2.rows.len(), 10, "续页补齐剩余 10 条");
+    let ids: std::collections::BTreeSet<String> = page1
+        .rows
+        .iter()
+        .chain(page2.rows.iter())
+        .map(|row| row.record_id.clone())
+        .collect();
+    assert_eq!(ids.len(), 210, "跨页不重不漏");
+    assert!(
+        page1
+            .rows
+            .iter()
+            .chain(page2.rows.iter())
+            .all(|row| row.project == "C:/work/alpha")
+    );
 }
 
 #[test]

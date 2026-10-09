@@ -50,3 +50,10 @@ export function buildBarChartData(groups: Group[], by: string): BarChartData {
 export function fullLabels(groups: Group[], by: string): string[] {
   return orderGroups(groups, by).map((g) => g.key);
 }
+
+/// MP04：tooltip 标题——项目维度保留完整路径（长名靠 tooltip 展开），其余
+/// 维度显示展示名：模型维度的 key 是等价身份键（`claudeopus55`），绝不能拿它
+/// 当标题；原始模型名仍在请求明细里可查。
+export function tooltipLabels(groups: Group[], by: string): string[] {
+  return orderGroups(groups, by).map((g) => (by === "project" ? g.key : (g.label ?? g.key)));
+}

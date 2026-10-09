@@ -133,12 +133,19 @@ fn test_e2e_summary_struct() {
 
 #[test]
 fn test_e2e_summary_dimensions() {
-    // 模型维度（末行为合计）
+    // 模型维度（末行为合计）：MP04 起 key 是等价身份键、label 是展示名。
     let rm = claude_report(GroupBy::Model);
     let keys: Vec<&str> = rm.groups.iter().map(|g| g.key.as_str()).collect();
+    assert_eq!(keys, ["claudesonnet4520250929", "tencent/hy3:free", "合计"]);
+    let labels: Vec<&str> = rm
+        .groups
+        .iter()
+        .map(|g| g.label.as_deref().unwrap_or(""))
+        .collect();
     assert_eq!(
-        keys,
-        ["claude-sonnet-4-5-20250929", "tencent/hy3:free", "合计"]
+        labels,
+        ["claude-sonnet-4-5-20250929", "tencent/hy3:free", ""],
+        "无可信 models.dev 名时退回原始代表写法，合计行无 label"
     );
     assert_eq!(rm.groups[0].requests, 2);
     assert_eq!(rm.groups[0].tokens.input, 1100);

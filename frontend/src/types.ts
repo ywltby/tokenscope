@@ -263,7 +263,10 @@ export interface EventList {
 
 export interface EventDrill {
   type: "day" | "model" | "project";
+  /** 后端筛选键（模型维度 = 等价身份键，如 `claudeopus55`）。 */
   key: string;
+  /** MP04：展示名（模型维度 = 友好名，项目维度 = 路径末段）；仅用于文案。 */
+  label?: string;
 }
 
 export type Dim = "day" | "model" | "project" | "agent";

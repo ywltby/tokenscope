@@ -7,7 +7,26 @@ use jiff::tz::TimeZone;
 use serde::Serialize;
 
 use crate::model::{TokenCounts, UsageEvent};
+use crate::model_identity::ModelIdentity;
 use crate::pricing::Pricing;
+
+/// MP04：聚合中间态——分组累计 + 该组原始模型名的稳定代表写法。
+#[derive(Default)]
+struct GroupAccum {
+    group: Group,
+    representative: Option<String>,
+}
+
+/// MP04：Model 维度的展示名——优先可信 models.dev 模型名（按完整等价 ID
+/// 命中且与条目顺序无关），其次该组原始模型名的稳定代表，绝不展示压缩后的
+/// 身份键（`claudeopus55` 这类写法只用于筛选与下钻匹配）。
+fn model_label(key: &str, representative: Option<&str>, pricing: &Pricing) -> String {
+    let rep = representative.unwrap_or(key);
+    pricing
+        .display_name_for(rep)
+        .or_else(|| pricing.display_name_for(key))
+        .unwrap_or_else(|| rep.to_string())
+}
 
 /// 时区解析（M6）：显式传入 > 本机系统（`--tz local`）> 默认 Asia/Shanghai。
 /// 存储层永远持有 UTC（见 cache.rs），全链路只在此解析一次。
@@ -89,29 +108,47 @@ pub struct Aggregated {
 /// SF08：聚合算术全部受检——单事件更新先在临时值上全部成功再提交；
 /// 多个各自合法的事件累计溢出/金额非有限时返回明确错误（不回绕、
 /// 不饱和、不跳过"最后一个"制造不确定统计）。
+///
+/// MP04：Model 维度的分组键是**模型等价身份**（`mode_identity` 规则），
+/// `claude-opus-5-5` / `claude-opus-5.5` 等写法合并为同一组；`Group.label`
+/// 优先取可信 models.dev 模型名，否则退回该组原始模型名的稳定代表写法
+///（字典序最小，与事件顺序无关）。下钻仍按同一身份规则匹配。
 pub fn aggregate(
     events: &[UsageEvent],
     by: GroupBy,
     tz: &TimeZone,
     pricing: &Pricing,
 ) -> anyhow::Result<Aggregated> {
-    let mut map: BTreeMap<String, Group> = BTreeMap::new();
+    let mut map: BTreeMap<String, GroupAccum> = BTreeMap::new();
     // 多 agent 数据才填充 groups[].agents，单 agent 报告与 M1 输出保持一致。
     let first_agent = events.first().map(|e| e.agent);
     let multi_agent = first_agent.is_some_and(|f| events.iter().any(|e| e.agent != f));
     for e in events {
         let key = match by {
             GroupBy::Day => e.ts.to_zoned(tz.clone()).date().to_string(),
-            GroupBy::Model => e.model.clone(),
+            GroupBy::Model => ModelIdentity::parse(&e.model).identity_key(),
             GroupBy::Project => e.project.clone(),
             GroupBy::Agent => e.agent.as_str().to_string(),
         };
         let key_err = key.clone();
-        let g = map.entry(key.clone()).or_insert_with(|| Group {
-            label: project_label(&by, &key),
-            key,
-            ..Group::default()
+        let acc = map.entry(key.clone()).or_insert_with(|| GroupAccum {
+            group: Group {
+                label: None,
+                key,
+                ..Group::default()
+            },
+            representative: None,
         });
+        // MP04：无可信展示名时的代表写法 = 该组原始模型名的最小字典序（稳定）。
+        if by == GroupBy::Model
+            && acc
+                .representative
+                .as_deref()
+                .is_none_or(|r| e.model.as_str() < r)
+        {
+            acc.representative = Some(e.model.clone());
+        }
+        let g = &mut acc.group;
         // 临时值上全部成功才提交（requests/tokens/unknown/cost）。
         let new_requests = g
             .requests
@@ -161,9 +198,8 @@ pub fn aggregate(
             g.agents.push(e.agent.as_str());
         }
     }
-    let mut groups: Vec<Group> = map.into_values().collect();
-    /// Project 维度的展示名 = 路径末段（正反斜杠都容忍）；其他维度 None。
-    fn project_label(by: &GroupBy, key: &str) -> Option<String> {
+    /// 其他维度的展示名生成器（Project = 路径末段；Day/Agent = None）。
+    fn other_label(by: &GroupBy, key: &str) -> Option<String> {
         if *by != GroupBy::Project {
             return None;
         }
@@ -174,6 +210,17 @@ pub fn aggregate(
                 .to_string(),
         )
     }
+    let mut groups: Vec<Group> = map
+        .into_values()
+        .map(|acc| {
+            let mut g = acc.group;
+            g.label = match by {
+                GroupBy::Model => Some(model_label(&g.key, acc.representative.as_deref(), pricing)),
+                _ => other_label(&by, &g.key),
+            };
+            g
+        })
+        .collect();
     let mut totals = Group {
         key: "合计".to_string(),
         ..Group::default()
@@ -311,7 +358,9 @@ mod tests {
         ];
         let agg = aggregate(&events, GroupBy::Model, &tz(), &Pricing::default()).unwrap();
         assert_eq!(agg.groups.len(), 3); // grok、claude、合计
-        assert_eq!(agg.groups[0].key, "claude-sonnet-4-5");
+        // MP04：Model 维度的 key 是等价身份键，label 是无可信名称时的原始代表写法。
+        assert_eq!(agg.groups[0].key, "claudesonnet45");
+        assert_eq!(agg.groups[0].label.as_deref(), Some("claude-sonnet-4-5"));
         assert_eq!(agg.groups[0].tokens.input, 5);
         // Task 1：默认空价格表 → 所有模型 unknown（无编译期兜底）。
         assert!(agg.groups[0].unknown_pricing);

@@ -1140,6 +1140,12 @@ pub(crate) fn query_events_from(
     let t = std::time::Instant::now();
     let drill_fp = crate::query::drill_fingerprint(filter);
     // 下钻过滤：在固定行序上筛匹配行（绝对位置），total 在同一快照内恒定。
+    // MP04：模型筛选按**等价身份**匹配——前端传身份键（Group.key）或原始
+    // 写法都能命中，规则与聚合分组完全一致。
+    let model_key: Option<String> = filter
+        .model
+        .as_deref()
+        .map(|m| crate::model_identity::ModelIdentity::parse(m).identity_key());
     let matched: Vec<usize> = snapshot
         .rows
         .iter()
@@ -1150,7 +1156,9 @@ pub(crate) fn query_events_from(
                 .day
                 .as_ref()
                 .is_none_or(|d| e.ts.to_zoned(snapshot.tz.clone()).date().to_string() == *d);
-            let model_ok = filter.model.as_ref().is_none_or(|m| e.model == *m);
+            let model_ok = model_key.as_ref().is_none_or(|k| {
+                crate::model_identity::ModelIdentity::parse(&e.model).identity_key() == *k
+            });
             let project_ok = filter.project.as_ref().is_none_or(|p| e.project == *p);
             day_ok && model_ok && project_ok
         })

@@ -149,12 +149,18 @@ fn test_golden_summary_events_parity() {
     let keys: Vec<&str> = m.groups.iter().map(|g| g.key.as_str()).collect();
     assert_eq!(
         keys,
-        [
-            "claude-sonnet-4-5",
-            "gpt-5.6-sol",
-            "unknown-model-x",
-            "合计"
-        ]
+        ["claudesonnet45", "gpt56sol", "unknownmodelx", "合计"],
+        "MP04：模型维度 key 是等价身份键"
+    );
+    let labels: Vec<&str> = m
+        .groups
+        .iter()
+        .map(|g| g.label.as_deref().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        labels,
+        ["claude-sonnet-4-5", "gpt-5.6-sol", "unknown-model-x", ""],
+        "展示名退回原始代表写法（合计行无 label）"
     );
     let p = summary(&SummaryOptions {
         by: GroupBy::Project,

@@ -209,6 +209,37 @@ describe("Dashboard 查询编排", () => {
     onClick("合计");
     expect(state(w)["drill"]).toBeNull();
   });
+
+  it("model_group_label_and_drill_key_are_distinct：下钻键是身份键，展示标签是友好名", async () => {
+    const modelReport: SummaryReport = {
+      ...summaryA,
+      by: "model",
+      groups: [{ ...group("claudeopus55", 10), label: "Claude Opus 5.5" }, group("合计", 10)],
+      totals: group("合计", 10),
+    };
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "query_summary") return Promise.resolve(modelReport);
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    state(w)["by"] = "model";
+    await nextTick();
+    await flushPromises();
+    const onClick = state(w)["onSummaryRowClick"] as (key: string) => void;
+    onClick("claudeopus55");
+    await nextTick();
+    const drill = state(w)["drill"] as { key: string; label?: string } | null;
+    // 传后端查询的是身份键；展示用 label（绝不是把名称反过来当 key）。
+    expect(drill?.key).toBe("claudeopus55");
+    expect(drill?.label).toBe("Claude Opus 5.5");
+    expect(w.text()).toContain("Claude Opus 5.5");
+    expect(w.text()).not.toContain("claudeopus55");
+  });
 });
 
 // 当前版本快照样例（模块级：多个 describe 共用）
@@ -301,6 +332,42 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     expect(state(w)["stale"]).toBe(false);
     // 走正常加载：展示的是后端新分组，而不是旧快照里的旧分组。
     expect((state(w)["report"] as SummaryReport).groups[0].key).toBe("2026-10-01");
+  });
+
+  it("old_matching_rules_snapshot_is_ignored：旧匹配规则算出的金额不恢复，新响应后正常保存", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") {
+        const p = snapshotPayload();
+        // v8 快照：金额由旧的模型匹配规则（`-`/`.` 不等价）算出。
+        return Promise.resolve({
+          ...p,
+          v: 8,
+          report: {
+            ...summaryA,
+            groups: [group("claude-opus-5.5", 42)],
+            totals: group("合计", 42),
+          },
+        });
+      }
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    // 旧快照整体忽略：金额与分组来自新响应（而非旧规则的 42）。
+    expect(state(w)["stale"]).toBe(false);
+    const report = state(w)["report"] as SummaryReport;
+    expect(report.groups[0].key).toBe("2026-10-01");
+    // 新响应落地后按当前版本正常保存（含新的 v）。
+    const w2 = mountDashboard();
+    await flushPromises();
+    await nextTick();
+    const saves = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save");
+    expect((saves.at(-1)?.[1] as { value: { v: number } }).value.v).toBe(SNAPSHOT_VERSION);
+    w2.unmount();
   });
 
   it("late_snapshot_cannot_replace_fresh_report：晚到缓存不得覆盖新结果", async () => {

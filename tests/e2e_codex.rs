@@ -153,7 +153,16 @@ fn test_e2e_codex_json() {
     assert_eq!(d1.tokens.output, 100);
     assert_eq!(d1.tokens.cache_write, 50);
     assert_eq!(d1.tokens.cache_read, 200);
-    assert!((d1.cost_usd - 5330.0 / 1_000_000.0).abs() < 1e-12);
+    assert!(
+        (d1.cost_usd - 5330.0 / 1_000_000.0).abs() < 1e-12,
+        "07-17 分组费用异常：cost={} groups={:?} warnings={:?}",
+        d1.cost_usd,
+        groups
+            .iter()
+            .map(|g| (g.key.clone(), g.requests, g.cost_usd, g.unknown_pricing))
+            .collect::<Vec<_>>(),
+        r.warnings
+    );
     assert!(!d1.unknown_pricing);
 
     // 07-18：16:01Z/16:06Z 落本地次日 + 次日 02:00Z。
@@ -170,10 +179,16 @@ fn test_e2e_codex_json() {
     assert_eq!(t.requests, 4);
     assert!((t.cost_usd - 6541.0 / 1_000_000.0).abs() < 1e-9);
 
-    // 模型维度：BTreeMap 序（末行为合计）。
+    // 模型维度：等价身份键序（末行为合计）；label 退回原始代表写法。
     let rm = codex_report(GroupBy::Model);
     let keys: Vec<&str> = rm.groups.iter().map(|g| g.key.as_str()).collect();
-    assert_eq!(keys, ["gpt-5.4", "gpt-5.5", "gpt-5.6-sol", "合计"]);
+    assert_eq!(keys, ["gpt54", "gpt55", "gpt56sol", "合计"]);
+    let labels: Vec<&str> = rm
+        .groups
+        .iter()
+        .map(|g| g.label.as_deref().unwrap_or(""))
+        .collect();
+    assert_eq!(labels, ["gpt-5.4", "gpt-5.5", "gpt-5.6-sol", ""]);
     let sol = &rm.groups[2];
     assert_eq!(sol.requests, 2);
     assert_eq!(sol.tokens.input, 760);
