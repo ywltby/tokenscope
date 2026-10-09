@@ -3,11 +3,12 @@
 // 合并待保存最新项 + 串行派发：绝不并发 fire-and-forget 让旧写覆盖新写。
 import { invoke } from "@tauri-apps/api/core";
 
-/** 快照格式版本：v6 = 查询会话契约（SF04）——report/events 携带后端
- * query_id 与价格修订号，保存时校验同会话一致；v5 及更早版本不含会话
- * 身份且游标为旧格式，读取时忽略，走正常加载（旧游标无法续用于 v2
- * 分页协议）。 */
-export const SNAPSHOT_VERSION = 6;
+/** 快照格式版本：v7 = 统一项目身份（阶段 A）——项目 key 从 slug/cwd 分裂
+ * 口径改为统一路径身份，旧快照里的分组 key 与下钻 key 都已失效，读取时
+ * 必须忽略（否则启动瞬间会闪现旧分组）；v6 = 查询会话契约（SF04），
+ * report/events 携带后端 query_id 与价格修订号；v5 及更早版本不含会话
+ * 身份且游标为旧格式。 */
+export const SNAPSHOT_VERSION = 7;
 
 export type SnapshotDispatch = (payload: unknown) => Promise<void>;
 

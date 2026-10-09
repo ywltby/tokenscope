@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust、serde、SQLite、Tauri 2、Vue 3、Vitest。
 
-**状态：** 待实施，所有任务未完成。本轮只编制计划，不修改运行时代码或用户数据。
+**状态：** 阶段 A（A01–A06）已实施并提交；阶段 B（B01–B03）未开始。阶段 B 的归属规则未定稿前，不得声称两侧目录切换语义一致。
 
 ## 1. 依据与范围
 
@@ -77,57 +77,57 @@
 
 ### A01 公共路径归一化
 
-- [ ] 修改 `src/source/mod.rs`，新增 `src/source/project_path.rs`；测试 `tests/project_path_normalization.rs`；必要时修改 `Cargo.toml` / `Cargo.lock`，优先复用已有 URI 依赖。
-- [ ] 定义可失败的纯函数 `normalize_project_path(raw: &str) -> Option<String>`，不得访问用户文件系统。
-- [ ] 测试 `windows_equivalent_paths_share_key`、`file_uri_decodes_once`、`roots_and_unc_are_preserved`、`posix_case_and_backslash_are_preserved`、`ambiguous_paths_are_rejected`。
-- [ ] 表驱动覆盖 `C:\a\b` / `c:/a/b/` → `C:/a/b`、中文、空格、字面 `%20`、根目录和不支持的 URI。
-- [ ] 验证：`cargo test --test project_path_normalization`，预期全部通过；提交 `feat(source): 统一项目路径身份归一化`。
+- [x] 修改 `src/source/mod.rs`，新增 `src/source/project_path.rs`；测试 `tests/project_path_normalization.rs`；必要时修改 `Cargo.toml` / `Cargo.lock`，优先复用已有 URI 依赖。（`url` 已锁定在依赖图中，提为直接依赖）
+- [x] 定义可失败的纯函数 `normalize_project_path(raw: &str) -> Option<String>`，不得访问用户文件系统。
+- [x] 测试 `windows_equivalent_paths_share_key`、`file_uri_decodes_once`、`roots_and_unc_are_preserved`、`posix_case_and_backslash_are_preserved`、`ambiguous_paths_are_rejected`。
+- [x] 表驱动覆盖 `C:\a\b` / `c:/a/b/` → `C:/a/b`、中文、空格、字面 `%20`、根目录和不支持的 URI。
+- [x] 验证：`cargo test --test project_path_normalization`，5 项全过；提交 `feat(source): 统一项目路径身份归一化`（`6413b85`）。
 
 ### A02 Claude 会话初始 cwd 与目录兜底
 
-- [ ] 修改 `src/source/claude.rs`；新增 `tests/fixtures/project-path/claude-initial-cwd.jsonl`、`claude-cwd-drift.jsonl`、`claude-multi-session.jsonl`；新增 `tests/project_path_attribution.rs`。
-- [ ] 写 `claude_initial_cwd_is_shared_by_session_events`、`claude_subdirectory_drift_does_not_split_phase_a`、`claude_sessions_do_not_share_initial_cwd`、`invalid_cwd_does_not_drop_usage`。
-- [ ] 一次读取、一轮解析收集首值与事件，最后按 session 赋值；不要为每个事件重读文件，不改变坏行和 sidechain 计数。
-- [ ] 非 assistant 行中的有效 cwd 也可提供上下文；忽略 sidechain 对主会话身份的影响。没有 sessionId 的记录仅在该文件的无 ID 分组内使用首值，不跨文件共享。
-- [ ] 未找到 cwd 暂走既有 `project_of`，A03 再接唯一映射兜底。根下文件有 cwd 时优先 cwd；没有时仍为 `(根目录)`。
-- [ ] 验证：`cargo test --test project_path_attribution claude_`；提交 `fix(claude): 按会话初始cwd恢复项目身份`。
+- [x] 修改 `src/source/claude.rs`；新增 `tests/fixtures/project-path/claude-initial-cwd.jsonl`、`claude-cwd-drift.jsonl`、`claude-multi-session.jsonl`；新增 `tests/project_path_attribution.rs`（另加 `claude-invalid-cwd.jsonl` 覆盖无效 cwd 容错）。
+- [x] 写 `claude_initial_cwd_is_shared_by_session_events`、`claude_subdirectory_drift_does_not_split_phase_a`、`claude_sessions_do_not_share_initial_cwd`、`invalid_cwd_does_not_drop_usage`。
+- [x] 一次读取、一轮解析收集首值与事件，最后按 session 赋值；不要为每个事件重读文件，不改变坏行和 sidechain 计数。
+- [x] 非 assistant 行中的有效 cwd 也可提供上下文；忽略 sidechain 对主会话身份的影响。没有 sessionId 的记录仅在该文件的无 ID 分组内使用首值，不跨文件共享。
+- [x] 未找到 cwd 暂走既有 `project_of`，A03 再接唯一映射兜底。根下文件有 cwd 时优先 cwd；没有时仍为 `(根目录)`。
+- [x] 验证：`cargo test --test project_path_attribution claude_`，4 项全过；提交 `fix(claude): 按会话初始cwd恢复项目身份`（`3068ac9`，壳锁文件同步 `7ddde7d`）。
 
 ### A03 唯一正向映射与配置依赖
 
-- [ ] 新增 `src/source/claude_projects.rs`、`tests/claude_project_mapping.rs`、合成 `tests/fixtures/project-path/claude-projects.json`；修改 `src/source/claude.rs`、`src/report.rs`、`src/cache.rs`。
-- [ ] 映射由显式配置路径注入，默认来源才解析对应账户的 `~/.claude.json`；自定义来源无明确配置关联时不读取本机映射。测试构造器始终注入临时文件或禁用映射。
-- [ ] 按确认的正向 slug 编码生成候选，使用编码前原始路径匹配 slug，匹配成功后再归一化身份。不同候选归一后仍不同则视为冲突；不选择第一个。
-- [ ] 测试 `unique_forward_mapping_resolves_legacy_slug`、`colliding_slugs_remain_unmerged`、`custom_root_does_not_use_home_mapping`、`missing_or_bad_config_keeps_usage`。
-- [ ] 每个采集批次只加载一次映射，形成确定性 revision；有效映射、缺失、损坏等状态变化均纳入 revision。不得每行读配置或只在启动时永久缓存。
-- [ ] 给依赖映射的解析缓存增加上下文修订匹配，并让 `src/report.rs` 的内存复用键感知该修订；不改日志指纹也能在映射变化后重新解析。已建立查询会话继续使用旧冻结快照。
-- [ ] 测试 `mapping_change_invalidates_disk_and_memory_results`：日志不变、配置改动，下一次查询归属更新；原查询不变。验证：`cargo test --test claude_project_mapping`；提交 `fix(claude): 安全解析旧项目映射并纳入缓存失效`。
+- [x] 新增 `src/source/claude_projects.rs`、`tests/claude_project_mapping.rs`、合成 `tests/fixtures/project-path/claude-projects.json`；修改 `src/source/claude.rs`、`src/report.rs`、`src/cache.rs`。
+- [x] 映射由显式配置路径注入（新选项 `claude_projects_path`），默认来源才解析对应账户的 `~/.claude.json`；自定义来源无明确配置关联时不读取本机映射。测试构造器始终注入临时文件或禁用映射。
+- [x] 按确认的正向 slug 编码生成候选，使用编码前原始路径匹配 slug，匹配成功后再归一化身份。不同候选归一后仍不同则视为冲突；不选择第一个。
+- [x] 测试 `unique_forward_mapping_resolves_legacy_slug`、`colliding_slugs_remain_unmerged`、`custom_root_does_not_use_home_mapping`、`missing_or_bad_config_keeps_usage`。
+- [x] 每个采集批次只加载一次映射，形成确定性 revision；有效映射、缺失、损坏等状态变化均纳入 revision。不得每行读配置或只在启动时永久缓存（进程内按 size+mtime 纳秒指纹缓存）。
+- [x] 给依赖映射的解析缓存增加上下文修订匹配（`files.context_rev`，解析版本 6 → 7），并让 `src/report.rs` 的内存复用键感知该修订（`collection_key` 含映射修订；`DedupSource` 显式转发 `context_revision`）；不改日志指纹也能在映射变化后重新解析。已建立查询会话继续使用旧冻结快照。
+- [x] 测试 `mapping_change_invalidates_disk_and_memory_results`：日志不变、配置改动，下一次查询归属更新；原查询不变。验证：`cargo test --test claude_project_mapping`，5 项全过；提交 `fix(claude): 安全解析旧项目映射并纳入缓存失效`（`3aee5aa`）。
 
 ### A04 Codex 归一化与切换回归保护
 
-- [ ] 修改 `src/source/codex.rs`；在 `tests/project_path_attribution.rs` 增加 Codex 用例与 `tests/fixtures/project-path/codex-cwd-switch.jsonl`。
-- [ ] 测试 `codex_initial_path_matches_claude`、`codex_turn_context_changes_only_later_events`、`codex_a_b_a_switch_is_preserved`、`codex_new_session_does_not_inherit_cwd`。
-- [ ] `session_meta` 重置目录上下文；有效 `turn_context.cwd` 更新后续事件。不把 Codex 项目冻结到文件首值；空/无效字段不清掉同 session 已知目录。
-- [ ] 无有效 cwd 使用现有未知项目兜底；初始上下文缺失时使用首个有效 turn_context，但不跨 session 回填。
-- [ ] 验证：`cargo test --test project_path_attribution codex_`、`cargo test source::codex`；提交 `fix(codex): 归一项目路径并保留上下文切换`。
+- [x] 修改 `src/source/codex.rs`；在 `tests/project_path_attribution.rs` 增加 Codex 用例与 `tests/fixtures/project-path/codex-cwd-switch.jsonl`。
+- [x] 测试 `codex_initial_path_matches_claude`、`codex_turn_context_changes_only_later_events`、`codex_a_b_a_switch_is_preserved`、`codex_new_session_does_not_inherit_cwd`。
+- [x] `session_meta` 重置目录上下文；有效 `turn_context.cwd` 更新后续事件。不把 Codex 项目冻结到文件首值；空/无效字段不清掉同 session 已知目录。
+- [x] 无有效 cwd 使用现有未知项目兜底；初始上下文缺失时使用首个有效 turn_context，但不跨 session 回填。
+- [x] 验证：`cargo test --test project_path_attribution codex_`（8 项全过）、`cargo test --lib codex`（15 项全过）；提交 `fix(codex): 归一项目路径并保留上下文切换`（`4eff289`）。
 
 ### A05 跨工具聚合、展示与下钻闭环
 
-- [ ] 修订 `tests/project_alias_cross_agent.rs`，新增 `tests/project_path_drilldown.rs`；核对 `src/aggregate.rs`、`src/report.rs`、`src/query.rs`，只在测试发现不兼容时修改。
-- [ ] 旧用例拆为两种：有相同可靠 cwd 则合并；仅 basename 相同或 Claude 只有 slug 则不推断合并。
-- [ ] 测试 `same_path_merges_agents`、`same_basename_different_paths_stay_separate`、`merged_project_drilldown_returns_both_agents`、`project_merge_preserves_totals`。
-- [ ] 通过真实 `query_begin` / 汇总 / 下钻事件管线断言 key 精确回传；超过一页时续页仍属该项目，来源筛选可分别取出两侧事件。
-- [ ] 逐字段比较变更前后的总请求、四类 token、费用及未知价格状态；不能只对比项目行数。
-- [ ] 验证：`cargo test --test project_alias_cross_agent`、`cargo test --test project_path_drilldown`；提交 `test(project): 覆盖跨工具路径合并与下钻`。
+- [x] 修订 `tests/project_alias_cross_agent.rs`，新增 `tests/project_path_drilldown.rs`；核对 `src/aggregate.rs`、`src/report.rs`、`src/query.rs`，只在测试发现不兼容时修改（本轮无需改动管线代码）。
+- [x] 旧用例拆为两种：有相同可靠 cwd 则合并；仅 basename 相同或 Claude 只有 slug 则不推断合并。
+- [x] 测试 `same_path_merges_agents`、`same_basename_different_paths_stay_separate`、`merged_project_drilldown_returns_both_agents`、`project_merge_preserves_totals`。
+- [x] 通过真实 `query_begin` / 汇总 / 下钻事件管线断言 key 精确回传；超过一页时续页仍属该项目（limit=2 翻三页），来源筛选可分别取出两侧事件。
+- [x] 逐字段比较变更前后的总请求、四类 token、费用及未知价格状态；不能只对比项目行数。
+- [x] 验证：`cargo test --test project_alias_cross_agent`（2 项）、`cargo test --test project_path_drilldown`（2 项）全过；提交 `test(project): 覆盖跨工具路径合并与下钻`（`1ffee42`）。
 
 ### A06 迁移、口径与阶段 A 验收
 
-- [ ] 修改 `src/cache.rs`：解析版本 6 → 7；若实施时版本已变化则递增实际版本，禁止覆盖别人的迁移。测试 `project_identity_version_reparses_legacy_rows`。
-- [ ] 修改 `frontend/src/lib/viewSnapshot.ts`、对应 `.test.ts`；递增快照版本，拒绝旧分组/旧下钻 key。测试 `old_project_identity_snapshot_is_ignored`；核对 `frontend/src/views/Dashboard.vue` 的恢复路径。
-- [ ] 更新 `docs/stats-semantics.md` §3.4、必要的 `CLAUDE.md` 项目身份说明、本计划和 `docs/plans/README.md`；不将 B 写为已完成。
-- [ ] 用临时目录中的 v6 缓存验证：首次升级重解析、第二次热命中，两次结果一致；模拟配置映射更新后再验证缓存失效。
-- [ ] 验证：`cargo test project_identity_version`、`pnpm --dir frontend test -- src/lib/viewSnapshot.test.ts`，再执行 §4 门禁。
-- [ ] 原生验收用隔离来源、缓存、配置和价格路径；同项目一行、展示名正常、下钻含两侧事件、启动无旧 slug 分裂闪现。真实缓存冷重建另列执行记录，不以旧报告的 5.5 秒作性能保证。
-- [ ] 提交 `fix(cache): 迁移统一项目身份并更新统计口径`；填写阶段 A 独立验收记录。
+- [x] 修改 `src/cache.rs`：解析版本 6 → 7；若实施时版本已变化则递增实际版本，禁止覆盖别人的迁移（A03 已升到 7，本项递增到 **8**）；测试 `project_identity_version_reparses_legacy_rows`。
+- [x] 修改 `frontend/src/lib/viewSnapshot.ts`、对应 `.test.ts`；递增快照版本（6 → **7**），拒绝旧分组/旧下钻 key。测试 `old_project_identity_snapshot_is_ignored`；核对 `frontend/src/views/Dashboard.vue` 的恢复路径（`cached.v !== SNAPSHOT_VERSION` 即忽略）。
+- [x] 更新 `docs/stats-semantics.md` §3.4、`CLAUDE.md` 项目身份说明、本计划和 `docs/plans/README.md`；不将 B 写为已完成。
+- [x] 用临时目录中的旧版本缓存验证：首次升级重解析、第二次热命中，两次结果一致；模拟配置映射更新后再验证缓存失效（`tests/project_identity_acceptance.rs` + `tests/claude_project_mapping.rs::mapping_change_invalidates_disk_and_memory_results`）。
+- [x] 验证：`cargo test project_identity_version`、`pnpm --dir frontend test -- src/lib/viewSnapshot.test.ts src/views/Dashboard.test.ts`，再执行 §4 门禁。
+- [x] 隔离数据路径验收：`tests/project_identity_acceptance.rs` 用隔离来源/缓存/配置/价格（临时目录）核对同项目一行、展示名正常、下钻含两侧事件；"启动不闪现旧分组"由前端旧快照忽略用例等价覆盖。**边界**：GUI 原生实例的目视确认（真实窗口启动观感）仍待发布验收执行；真实缓存冷重建未在本轮执行，不以旧报告的 5.5 秒作性能保证。
+- [x] 提交 `fix(cache): 迁移统一项目身份并更新统计口径`；填写阶段 A 独立验收记录（见文末「实施记录」）。
 
 ### B01 目录切换证据与归属规则定稿
 
@@ -192,4 +192,29 @@ pnpm --dir frontend build
 | 磁盘/内存缓存、启动视图与下钻一致 | 必须通过 | 必须通过 |
 | worktree / sidechain 归并 | 不实施 | 不实施 |
 
-实施记录：尚无。阶段 A 未开始；阶段 B 未开始。探针脚本 `ts_probe*.py` 只作可选排查辅助，不作为仓库测试依赖，也不保证临时文件仍存在。
+## 6. 实施记录（阶段 A）
+
+任务按顺序实现，每项先写失败用例再实现；提交均为独立 commit，pre-commit 钩子（根库与壳的 fmt/clippy/test、前端 typecheck/format/test）每轮通过。
+
+| 任务 | 提交 | 定向验证 |
+| --- | --- | --- |
+| A01 公共路径归一化 | `6413b85` | `cargo test --test project_path_normalization`（5 项） |
+| A02 Claude 会话初始 cwd（另含壳锁文件同步 `7ddde7d`） | `3068ac9` | `cargo test --test project_path_attribution`（Claude 侧 4 项） |
+| A03 唯一正向映射与缓存失效 | `3aee5aa` | `cargo test --test claude_project_mapping`（5 项）+ 映射/缓存单测 |
+| A04 Codex 归一化与切换保护 | `4eff289` | `cargo test --test project_path_attribution`（8 项）、`cargo test --lib codex`（15 项） |
+| A05 跨工具聚合与下钻 | `1ffee42` | `cargo test --test project_alias_cross_agent`（2 项）、`--test project_path_drilldown`（2 项） |
+| A06 迁移、口径与验收 | 本项提交 | `cargo test --lib project_identity_version`、`cargo test --test project_identity_acceptance`、前端快照用例 |
+
+阶段 A 验收结论（逐项对应 §5 完成标准）：
+
+- 同路径跨工具合并、同名不同路径不合并：`same_path_merges_agents` / `same_basename_different_paths_stay_separate` / `codex_initial_path_matches_claude` 通过。
+- 四类 token、费用与请求总数守恒：`project_merge_preserves_totals`（含身份分裂对照）与 A06 隔离验收逐字段通过。
+- 映射冲突与配置变化失效：`colliding_slugs_remain_unmerged`、`mapping_change_invalidates_disk_and_memory_results` 通过（已建立的查询会话继续使用旧冻结快照）。
+- Codex A → B → A 保留：`codex_a_b_a_switch_is_preserved`、`codex_new_session_does_not_inherit_cwd` 通过。
+- Claude cwd 漂移：按会话初始路径归属（`claude_subdirectory_drift_does_not_split_phase_a`），阶段限制已写入口径（`docs/stats-semantics.md` §3.4）。
+- 磁盘/内存缓存、启动视图与下钻一致：缓存解析版本 6 → 7（映射修订）→ 8（身份口径），前端快照版本 6 → 7；`old_project_identity_snapshot_is_ignored` 与 A06 隔离验收通过。
+- worktree / sidechain 归并：未实施（B01 定稿前不做）。
+
+两处口径修订（已同步文档）：Claude 身份由「文件父目录相对路径（slug）」改为「会话初始 cwd > 唯一正向映射 > slug 兜底」；Codex 身份由「原始 cwd 字符串」改为「归一化 cwd」。两者都改变缓存中的派生字段，因此解析版本必须递增。
+
+未完成与边界：阶段 B（B01–B03）未开始；未执行真实缓存冷重建（不以旧报告的 5.5 秒作性能保证）；GUI 原生实例的目视验收留待发布验收。探针脚本 `ts_probe*.py` 只作可选排查辅助，不作为仓库测试依赖，也不保证临时文件仍存在。

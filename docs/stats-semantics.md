@@ -139,15 +139,33 @@ model 纳入键：**跨模型**的同用量请求不再误合并；重播必然�
 `src/dedupe.rs`：重播保首条、跨批次/跨日仍去重、agent 间隔离。
 `tests/e2e_events_range.rs` 等端到端测试保证去重与汇总/明细同源。
 
-### 3.4 项目身份（C2/R03）
+### 3.4 项目身份（C2/R03；2026-10-09 阶段 A 修订）
 
-- Claude：文件父目录**相对根路径**（真实 `projects/<slug>/` 布局下即
-  slug 本身）；嵌套目录 `a/sub` 与 `sub` 可区分；
-- Codex：**完整 cwd**（basename 同名不同路径不合并）；
-- 展示名（`Group.label`）= 路径末段，完整身份保留下钻匹配；
-- **跨工具同名项目不自动合并**（test_project_alias_cross_agent）：
-  Claude slug 与 Codex cwd 是独立身份，展示名相同属预期；关联需显式
-  别名机制（未立项）。
+- **统一 key**：项目身份 = source 层归一化的绝对路径（Windows 反斜杠统一为
+  `/`、盘符大写、非根去尾随分隔符；根路径与 UNC 保留主机/共享语义；`file://`
+  按 URI 解析并只做一次百分号解码）。归一化不访问文件系统、不折叠符号链接/
+  junction/worktree 或目录别名；不可安全解释的输入（相对路径、`C:foo`、
+  非 file scheme、非法百分号编码、`.`/`..` 组件）判为「不可用」并走兜底。
+- **Claude**：会话**初始 cwd**（顶层 `cwd` 归一化后按 sessionId 取首个有效
+  值；无 sessionId 的记录只在文件内的无 ID 分组使用首值）。日志里没有可信
+  cwd 时，按 `~/.claude.json` 的 projects **正向编码**（每个非 ASCII 字母
+  数字字符 → `-`，与真实 `projects/<slug>/` 布局一致）唯一命中的真实路径
+  作为身份；同一 slug 对应多个不同路径（冲突）、或映射缺失/损坏时，保持
+  slug 独立身份——不反向解码、不选第一个、不按前缀猜测。
+- **Codex**：当前上下文 cwd——有效 `turn_context.cwd` 更新其后事件（A → B → A
+  保留），`session_meta` 重置目录上下文（新会话不继承上一会话目录），
+  空/无效 cwd 不清掉同会话已知目录；无有效 cwd 记 `(未知)`。
+- **展示名（`Group.label`）= 路径末段**，完整身份保留下钻匹配。
+- **跨工具合并**：同一路径的 Claude 与 Codex 会话归入同一项目、一次聚合；
+  仅展示名相同（Claude 只有 slug、或路径不同）**不合并**
+  （`tests/project_alias_cross_agent.rs`、`tests/project_path_drilldown.rs`）。
+- **失效**：Claude 项目映射的内容与状态构成解析上下文修订（缓存
+  `files.context_rev` 与采集复用键都据此区分）——配置变化后新查询重新解析，
+  已建立的查询会话继续使用旧冻结快照；磁盘快照版本随之递增（旧分组/旧下钻
+  key 读取时忽略）。
+- **阶段限制（B 未实施，不得声称两侧目录切换语义一致）**：Claude 会话中途
+  切换目录后的请求仍按会话初始路径归属；worktree、符号链接与任意父子目录
+  不自动归并——待 B01 证据核验后再定稿归属规则。
 
 ## 3.5 分页游标与查询快照（D1/Task 2；SF04 扩展）
 

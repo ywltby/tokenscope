@@ -14,6 +14,7 @@ import Dashboard from "./Dashboard.vue";
 import dashboardSource from "./Dashboard.vue?raw";
 import TrendChart from "../components/TrendChart.vue";
 import type { Dim, EventList, Group, SummaryReport } from "../types";
+import { SNAPSHOT_VERSION } from "../lib/viewSnapshot";
 
 function group(key: string, input: number): Group {
   return {
@@ -210,10 +211,10 @@ describe("Dashboard 查询编排", () => {
   });
 });
 
-// v5 快照样例（模块级：多个 describe 共用）
+// 当前版本快照样例（模块级：多个 describe 共用）
 function snapshotPayload() {
   return {
-    v: 6,
+    v: SNAPSHOT_VERSION,
     saved_at: "2026-10-05T00:00:00Z",
     filters: {
       by: "model",
@@ -272,6 +273,33 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     // v4 被忽略：筛选不得被恢复
     expect(state(w)["agent"]).toBe("all");
     expect(state(w)["stale"]).toBe(false);
+  });
+
+  it("old_project_identity_snapshot_is_ignored：旧项目身份快照的旧分组与旧下钻 key 都不恢复", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") {
+        const p = snapshotPayload();
+        return Promise.resolve({
+          ...p,
+          // A06 之前的快照：项目身份是 slug/cwd 分裂口径，分组 key 与下钻
+          // key（老 slug）都已失效——读取时必须整体忽略，而不是恢复旧分组。
+          v: 6,
+          filters: { ...p.filters, drill: { type: "project", key: "alpha" } },
+        });
+      }
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(state(w)["agent"]).toBe("all");
+    expect(state(w)["drill"]).toBeNull();
+    expect(state(w)["stale"]).toBe(false);
+    // 走正常加载：展示的是后端新分组，而不是旧快照里的旧分组。
+    expect((state(w)["report"] as SummaryReport).groups[0].key).toBe("2026-10-01");
   });
 
   it("late_snapshot_cannot_replace_fresh_report：晚到缓存不得覆盖新结果", async () => {

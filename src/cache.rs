@@ -48,7 +48,10 @@ pub struct CacheStats {
 /// v7 = 项目映射修订纳入缓存身份（A03）：Claude 的 slug 身份会按账户配置
 ///（`~/.claude.json` 的 projects）解析为真实路径，外部配置变化不改变日志
 /// 指纹——必须按映射修订区分命中，否则旧归属会一直被复用。
-const SCHEMA_VERSION: &str = "7";
+/// v8 = 项目身份口径统一（A06）：Claude 改为会话初始 cwd、Codex 改为归一化
+/// cwd、两者与映射解析出的真实路径共用同一 key——旧行里的项目身份是另一种
+/// 口径，必须整体失效重解析（否则升级后仍按旧 slug 分组）。
+const SCHEMA_VERSION: &str = "8";
 
 fn fingerprint(size: u64, mtime_ms: i64) -> (i64, i64) {
     // u64 → i64 存库；实际文件大小远小于 i64 上限。
@@ -553,6 +556,54 @@ mod tests {
             ..crate::source::CollectStats::default()
         };
         FileParse { stats, events }
+    }
+
+    #[test]
+    fn project_identity_version_reparses_legacy_rows() {
+        // A06：项目身份口径统一（Claude 会话初始 cwd / 映射解析、Codex 归一化
+        // cwd）改变了解析产物——旧版本缓存必须整体失效重解析；升级后首次
+        // 重解析的结果必须能被第二次打开热命中（迁移不是"每次重建"）。
+        let dir = tmp_dir("identity-v8");
+        let path = dir.join("cache.db");
+        let c = Cache::open(&path).unwrap();
+        store(
+            &c,
+            "a.jsonl",
+            AgentKind::ClaudeCode,
+            "root",
+            10,
+            100,
+            &parse_with(2),
+        )
+        .unwrap();
+        assert_eq!(c.stats().unwrap().events, 2);
+        drop(c);
+        // 模拟升级前的 v7 缓存（项目身份尚未统一）。
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute("UPDATE meta SET value='7' WHERE key='schema_version'", [])
+            .unwrap();
+        drop(raw);
+        let c = Cache::open(&path).unwrap();
+        assert_eq!(c.stats().unwrap().files, 0, "旧身份口径行必须整体失效");
+        assert_eq!(c.stats().unwrap().events, 0);
+        // 首次升级重解析后写入：第二次打开热命中且结果一致。
+        store(
+            &c,
+            "a.jsonl",
+            AgentKind::ClaudeCode,
+            "root",
+            10,
+            100,
+            &parse_with(2),
+        )
+        .unwrap();
+        drop(c);
+        let c = Cache::open(&path).unwrap();
+        let hit = lookup(&c, "a.jsonl", AgentKind::ClaudeCode, "root", 10, 100)
+            .unwrap()
+            .expect("升级后的第二次打开必须热命中");
+        assert_eq!(hit.parse.events.len(), 2);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
