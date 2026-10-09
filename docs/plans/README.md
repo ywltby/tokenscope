@@ -63,6 +63,7 @@
 
 | 计划 | 状态 | 备注 |
 | --- | --- | --- |
+| [active/2026-10-09-first-launch-privacy-consent.md](active/2026-10-09-first-launch-privacy-consent.md) | 计划已入库，待确认实施 | 首次启动隐私同意：前后端闸门、先保存后解锁、拒绝退出及失败保护；仅计划，未改产品实现 |
 | [active/2026-10-09-all-plans-final-recheck.md](active/2026-10-09-all-plans-final-recheck.md) | 实现与自动化完成；原生部分通过，系统项待验 | 全计划终态复核与遗留修复；AP07 退出漏口已补，AP08 分项状态见执行账；发布验收仍在 D5 |
 | [active/2026-10-09-ap08-completion-qa.md](active/2026-10-09-ap08-completion-qa.md) | 补齐验收记录 | AP07 / AP08 后续原生证据、失败尝试、发布构建入口隔离与未验边界；不新增发布签字入口 |
 | [active/2026-10-08-recheck-remediation.md](active/2026-10-08-recheck-remediation.md) | 执行中（RC01–RC10 完成，RC11 部分待验） | RC01–RC11：修复复核遗留、补自动化和隔离原生验收；原生会话过期/系统缩放/系统深色首帧/CSP 哨兵仍待验，故不归档 |
