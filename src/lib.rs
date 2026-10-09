@@ -5,6 +5,7 @@ pub mod dedupe;
 pub mod fsutil;
 pub mod logging;
 pub mod model;
+pub mod model_identity;
 pub mod modelsdev;
 pub mod openrouter;
 pub mod pricing;
