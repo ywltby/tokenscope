@@ -51,7 +51,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
       - name: Build production Windows x64 NSIS (without acceptance)
-        run: .\frontend\node_modules\.bin\tauri build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
+        run: node .\frontend\node_modules\@tauri-apps\cli\tauri.js build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
       - name: Collect installer and checksums
         env:
           RELEASE_TAG: ${{ needs.gate.outputs.tag }}
