@@ -154,7 +154,7 @@ const sourceLines = computed(() =>
         />
       </template>
     </ScrollList>
-    <div class="table-hint">点击行（或聚焦后按 Enter）可下钻到请求明细。</div>
+    <div class="table-hint">点击任意一行，查看对应的请求明细；也可选中后按 Enter。</div>
     <div v-if="report.totals.unknown_pricing" class="table-note">
       † 费用为估算，仅含已计价部分：无价格模型的全部用量、或价格快照缺分项价
       （如缓存价未知）时该分项的用量，均不计入费用，其 token 数见"未知†"列。
