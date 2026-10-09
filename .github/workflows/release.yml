@@ -110,7 +110,8 @@ jobs:
           sha256sum --check SHA256SUMS.txt
           test -s provenance.sigstore.json
           # A tag can pre-exist without a release. Never publish another SHA's tag.
-          if gh api "repos/$GH_REPO/commits/$RELEASE_TAG" > tag.json 2> api-error.txt; then
+          if gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" > tag-ref.json 2> api-error.txt; then
+            gh api "repos/$GH_REPO/commits/$RELEASE_TAG" > tag.json
             test "$(jq -r .sha tag.json)" = "$RELEASE_SHA"
           elif [ "$REF_TYPE" = tag ] || ! grep -q 'HTTP 404' api-error.txt; then
             cat api-error.txt >&2
@@ -146,7 +147,8 @@ jobs:
           NOTES
           gh release upload "$RELEASE_TAG" ./*.exe SHA256SUMS.txt provenance.sigstore.json --clobber
           # Recheck tag identity after uploads, including deleted/moved version tags.
-          if gh api "repos/$GH_REPO/commits/$RELEASE_TAG" > tag.json 2> api-error.txt; then
+          if gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" > tag-ref.json 2> api-error.txt; then
+            gh api "repos/$GH_REPO/commits/$RELEASE_TAG" > tag.json
             test "$(jq -r .sha tag.json)" = "$RELEASE_SHA"
           elif [ "$REF_TYPE" = tag ] || ! grep -q 'HTTP 404' api-error.txt; then
             cat api-error.txt >&2
