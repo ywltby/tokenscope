@@ -15,7 +15,10 @@ pub const API_URL: &str = "https://models.dev/api.json";
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ApiEntry {
+    /// 供应商名称。MP03：**有意不读**——provider 名不是模型展示名，不得兜底
+    /// 成模型的 `name`（快照里只保留模型级 name）。
     #[serde(default)]
+    #[allow(dead_code)]
     name: Option<String>,
     #[serde(default)]
     models: BTreeMap<String, ApiModel>,
@@ -136,6 +139,8 @@ pub struct Snapshot {
     /// （tiers/context_over_200k）。v1 的缓存分项被 0 填充已损失信息，
     /// 加载时按未知保守处理，等待下一次同步升级；旧快照一律可按
     /// "只有基础价格"离线读取，不伪造分段。
+    /// v4（MP03）：`name` 仅来自模型级字段——v1–v3 的 name 可能实为供应商
+    /// 名称，加载时清空（价格继续可用），聚合展示名退回原始代表写法。
     #[serde(default = "default_snapshot_v1")]
     pub v: u8,
     pub synced_at: String,
@@ -197,7 +202,9 @@ pub(crate) fn sync_with(
             }
             entries.push(SnapshotEntry {
                 id: format!("{provider}/{model_id}"),
-                name: m.name.or(entry.name.clone()),
+                // MP03：name 只取**模型级**字段——provider 名不是模型展示名，
+                // 不得兜底（旧实现会在模型无 name 时写入供应商名称）。
+                name: m.name,
                 input: cost.input,
                 output: cost.output,
                 cache_read: cost.cache_read,
@@ -216,7 +223,7 @@ pub(crate) fn sync_with(
     let synced_at = jiff::Zoned::now().to_string();
     let count = entries.len() as u64;
     let snapshot = Snapshot {
-        v: 3,
+        v: 4,
         synced_at: synced_at.clone(),
         entries,
     };
@@ -324,7 +331,21 @@ pub(crate) fn parse_snapshot_text(text: &str) -> Result<Snapshot> {
         }
         snapshot.v = 2;
     }
+    // MP03：v4 之前的 name 可能实为供应商名称（旧同步把 provider name 兜底成
+    // 模型名）——价格继续可用，但来源不明的 name 不得作为聚合展示名。
+    if snapshot.v < 4 {
+        for e in &mut snapshot.entries {
+            e.name = None;
+        }
+    }
     Ok(snapshot)
+}
+
+/// 测试专用（`#[doc(hidden)]`）：以固定 JSON 响应体跑一次同步，不联网。
+#[doc(hidden)]
+pub fn sync_with_body_for_tests(snapshot_path: &Path, body: &str) -> Result<SyncReport> {
+    let parsed: BTreeMap<String, ApiEntry> = serde_json::from_str(body)?;
+    sync_with(snapshot_path, || Ok(parsed))
 }
 
 #[cfg(test)]
@@ -353,7 +374,7 @@ mod tests {
                         let (segments, _) = convert_tiers(&c.tiers, c.context_over_200k.as_ref());
                         SnapshotEntry {
                             id: format!("{provider}/{id}"),
-                            name: m.name.or(entry.name.clone()),
+                            name: m.name,
                             input: c.input,
                             output: c.output,
                             cache_read: c.cache_read,

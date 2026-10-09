@@ -2478,6 +2478,30 @@ impl Pricing {
         self.count_tier(TIER_EXTERNAL)
     }
 
+    /// MP03：按**完整等价 ID**查询可信展示名（models.dev 模型级 `name`）。
+    ///
+    /// 与价格赢家选择独立：同一等价 ID 下按 (display, name) 稳定序择一，
+    /// 不随条目/事件顺序变化；仅前缀命中的旧版本不得冒充本模型；不同 ID
+    /// 即使 name 相同也不合并（身份由 `model_identity` 决定）。未命中返回
+    /// None——聚合层退回该组原始模型名的稳定代表写法。
+    pub fn display_name_for(&self, model: &str) -> Option<String> {
+        let id = crate::model_identity::ModelIdentity::parse(model);
+        if id.is_empty_key() {
+            return None;
+        }
+        let group = self.by_prefix.get(id.leaf_key().as_bytes())?;
+        let mut best: Option<&Entry> = None;
+        for e in group {
+            if e.name.is_none() {
+                continue;
+            }
+            if best.is_none_or(|b| entry_display_order(e, b)) {
+                best = Some(e);
+            }
+        }
+        best.and_then(|e| e.name.clone())
+    }
+
     pub fn openrouter_count(&self) -> usize {
         self.count_tier(TIER_OPENROUTER)
     }
