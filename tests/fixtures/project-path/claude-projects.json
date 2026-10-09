@@ -1,0 +1,10 @@
+{
+  "numStartups": 7,
+  "projects": {
+    "C:\\work\\alpha": { "history": [] },
+    "D:\\other\\alpha!": { "history": [] },
+    "C:\\work\\a.b": { "history": [] },
+    "C:\\work\\a-b": { "history": [] },
+    "relative\\path": { "history": [] }
+  }
+}

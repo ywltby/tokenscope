@@ -4,6 +4,7 @@
 //! - 发现与解析拆为 `discover` / `parse_file` 两个能力，供缓存按文件指纹增量失效。
 
 pub mod claude;
+pub mod claude_projects;
 pub mod codex;
 pub mod project_path;
 
@@ -93,6 +94,13 @@ pub trait Source {
 
     /// 解析单个文件（不做跨文件去重；读取失败计 `io_errors` 并返回空产物）。
     fn parse_file(&self, path: &Path) -> FileParse;
+
+    /// A03：解析上下文修订——影响解析结果的**外部配置**摘要（如 Claude 项目
+    /// 映射）。变化即代表派生结果失效：文件缓存按该修订区分命中，查询复用键
+    /// 也据此分开。默认空串 = 无可变外部依赖。
+    fn context_revision(&self) -> &str {
+        ""
+    }
 
     /// 便捷全量采集：发现 + 逐文件解析，未全局去重（目录缺失 → 警告 + 空结果）。
     fn collect(&self) -> Result<Collection> {

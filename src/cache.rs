@@ -12,6 +12,16 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::model::AgentKind;
 use crate::source::FileParse;
 
+/// 缓存文件身份（R05 + A03）：agent + 规范化根目录 + 规范化文件路径 +
+/// 解析上下文修订。四者共同决定"这份解析产物对谁可见"。
+pub struct FileKey<'a> {
+    pub path: &'a str,
+    pub agent: AgentKind,
+    pub root: &'a str,
+    /// 影响解析结果的**外部配置**修订（如 Claude 项目映射）；无此依赖传空串。
+    pub context_rev: &'a str,
+}
+
 pub struct Cache {
     conn: Connection,
 }
@@ -35,7 +45,10 @@ pub struct CacheStats {
 /// SF08：恢复路径新增桶边界校验——旧版本缓存可能存有越界事件，
 /// 递增版本整体清空重建（源日志不删）。
 /// v6 = Codex 仅额度通知不再计坏行，重解析以清除旧 bad_lines 误报。
-const SCHEMA_VERSION: &str = "6";
+/// v7 = 项目映射修订纳入缓存身份（A03）：Claude 的 slug 身份会按账户配置
+///（`~/.claude.json` 的 projects）解析为真实路径，外部配置变化不改变日志
+/// 指纹——必须按映射修订区分命中，否则旧归属会一直被复用。
+const SCHEMA_VERSION: &str = "7";
 
 fn fingerprint(size: u64, mtime_ms: i64) -> (i64, i64) {
     // u64 → i64 存库；实际文件大小远小于 i64 上限。
@@ -148,6 +161,7 @@ impl Cache {
                 agent TEXT NOT NULL,
                 size INTEGER NOT NULL,
                 mtime_ms INTEGER NOT NULL,
+                context_rev TEXT NOT NULL DEFAULT '',
                 lines_seen INTEGER NOT NULL DEFAULT 0,
                 bad_lines INTEGER NOT NULL DEFAULT 0,
                 skipped_sidechain INTEGER NOT NULL DEFAULT 0,
@@ -184,16 +198,16 @@ impl Cache {
         Ok(Self { conn })
     }
 
-    /// 命中：指纹一致**且来源上下文（agent + 根目录）一致**才返回缓存产物。
-    /// R05：SQL 真正过滤 agent/root——不同来源类型或根目录的解析产物互不
-    /// 可见，杜绝"旧事件改标 agent"与"换根沿用旧项目名"。
+    /// 命中：指纹一致**且来源上下文（agent + 根目录 + 解析上下文修订）一致**
+    /// 才返回缓存产物。R05：SQL 真正过滤 agent/root——不同来源类型或根目录的
+    /// 解析产物互不可见，杜绝"旧事件改标 agent"与"换根沿用旧项目名"。
+    /// A03：`context_rev` 承载可变外部配置（Claude 项目映射）的修订——配置一变
+    /// 就未命中并重新解析，日志指纹不必变化。
     /// 文件行与事件行包在同一个读事务里（R04）：并发清理/写入时读到的是
     /// 单一快照，不会出现"有文件行无事件行"的半截命中。
     pub fn lookup_file(
         &self,
-        path: &str,
-        agent: AgentKind,
-        root: &str,
+        key: &FileKey<'_>,
         size: u64,
         mtime_ms: i64,
     ) -> Result<Option<CachedFile>> {
@@ -206,10 +220,18 @@ impl Cache {
                 "SELECT id, lines_seen, bad_lines, skipped_sidechain, skipped_synthetic,
                         skipped_zero_usage, skipped_no_model, ignored_token_usage_record
                  FROM files
-                 WHERE path = ?1 AND agent = ?2 AND root = ?3 AND size = ?4 AND mtime_ms = ?5",
+                 WHERE path = ?1 AND agent = ?2 AND root = ?3 AND size = ?4 AND mtime_ms = ?5
+                       AND context_rev = ?6",
             )?;
             stmt.query_row(
-                rusqlite::params![path, agent.as_str(), root, size_s, mtime_s],
+                rusqlite::params![
+                    key.path,
+                    key.agent.as_str(),
+                    key.root,
+                    size_s,
+                    mtime_s,
+                    key.context_rev
+                ],
                 |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
@@ -256,7 +278,7 @@ impl Cache {
                     ts: ts
                         .parse()
                         .map_err(|e| anyhow::anyhow!("缓存时间戳解析失败: {e}"))?,
-                    agent,
+                    agent: key.agent,
                     model,
                     session_id,
                     project,
@@ -305,9 +327,7 @@ impl Cache {
 
     pub fn store_file(
         &self,
-        path: &str,
-        agent: AgentKind,
-        root: &str,
+        key: &FileKey<'_>,
         size: u64,
         mtime_ms: i64,
         parse: &FileParse,
@@ -315,20 +335,23 @@ impl Cache {
         let (size, mtime_ms) = fingerprint(size, mtime_ms);
         let tx = self.conn.unchecked_transaction()?;
         // R05：身份键 = (agent, root, path)。删除旧行也按完整身份——
-        // 不同上下文的同路径行互不覆盖。
+        // 不同上下文的同路径行互不覆盖。A03：解析上下文修订不是身份维度，
+        // 而是命中条件——同一文件的解析产物只保留最新修订一份（否则旧修订的
+        // 行会永久堆积且永不再命中）。
         tx.execute(
             "DELETE FROM files WHERE path = ?1 AND agent = ?2 AND root = ?3",
-            rusqlite::params![path, agent.as_str(), root],
+            rusqlite::params![key.path, key.agent.as_str(), key.root],
         )?;
         tx.execute(
-            "INSERT INTO files(path, agent, root, size, mtime_ms, lines_seen, bad_lines,
-                               skipped_sidechain, skipped_synthetic, skipped_zero_usage,
-                               skipped_no_model, ignored_token_usage_record)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO files(path, agent, root, context_rev, size, mtime_ms, lines_seen,
+                               bad_lines, skipped_sidechain, skipped_synthetic,
+                               skipped_zero_usage, skipped_no_model, ignored_token_usage_record)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
-                path,
-                agent.as_str(),
-                root,
+                key.path,
+                key.agent.as_str(),
+                key.root,
+                key.context_rev,
                 size,
                 mtime_ms,
                 parse.stats.lines_seen as i64,
@@ -342,7 +365,7 @@ impl Cache {
         )?;
         let file_id: i64 = tx.query_row(
             "SELECT id FROM files WHERE path = ?1 AND agent = ?2 AND root = ?3",
-            rusqlite::params![path, agent.as_str(), root],
+            rusqlite::params![key.path, key.agent.as_str(), key.root],
             |r| r.get(0),
         )?;
         let mut stmt = tx.prepare(
@@ -472,6 +495,43 @@ mod tests {
         cols
     }
 
+    /// A03：测试默认的解析上下文修订（多数用例不区分映射修订）。
+    const CTX: &str = "test-ctx";
+
+    /// 便利包装：固定上下文修订的写入（`.unwrap()` 语义与原调用一致）。
+    fn store(
+        c: &Cache,
+        path: &str,
+        agent: AgentKind,
+        root: &str,
+        size: u64,
+        mtime: i64,
+        parse: &FileParse,
+    ) -> Result<()> {
+        c.store_file(&file_key(path, agent, root), size, mtime, parse)
+    }
+
+    /// 便利包装：固定上下文修订的命中查询。
+    fn lookup(
+        c: &Cache,
+        path: &str,
+        agent: AgentKind,
+        root: &str,
+        size: u64,
+        mtime: i64,
+    ) -> Result<Option<CachedFile>> {
+        c.lookup_file(&file_key(path, agent, root), size, mtime)
+    }
+
+    fn file_key<'a>(path: &'a str, agent: AgentKind, root: &'a str) -> FileKey<'a> {
+        FileKey {
+            path,
+            agent,
+            root,
+            context_rev: CTX,
+        }
+    }
+
     fn parse_with(n: usize) -> FileParse {
         let events = (0..n)
             .map(|i| UsageEvent {
@@ -502,8 +562,16 @@ mod tests {
         let dir = tmp_dir("version");
         let path = dir.join("cache.db");
         let c = Cache::open(&path).unwrap();
-        c.store_file("a.jsonl", AgentKind::Codex, "root", 10, 100, &parse_with(2))
-            .unwrap();
+        store(
+            &c,
+            "a.jsonl",
+            AgentKind::Codex,
+            "root",
+            10,
+            100,
+            &parse_with(2),
+        )
+        .unwrap();
         assert_eq!(c.stats().unwrap().events, 2);
         drop(c);
         // 模拟 v5 缓存：仅额度通知的误报也必须随版本升级清除。
@@ -515,8 +583,16 @@ mod tests {
         assert_eq!(c.stats().unwrap().events, 0, "版本不符必须清空重建");
         assert_eq!(c.stats().unwrap().files, 0);
         // 失效后可正常重新入库。
-        c.store_file("a.jsonl", AgentKind::Codex, "root", 10, 100, &parse_with(2))
-            .unwrap();
+        store(
+            &c,
+            "a.jsonl",
+            AgentKind::Codex,
+            "root",
+            10,
+            100,
+            &parse_with(2),
+        )
+        .unwrap();
         assert_eq!(c.stats().unwrap().events, 2);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -526,7 +602,8 @@ mod tests {
         // B5（F06）：清理只作用于指定 agent——查看单 agent 不再清空其他来源。
         let dir = tmp_dir("purge");
         let c = Cache::open(&dir.join("cache.db")).unwrap();
-        c.store_file(
+        store(
+            &c,
             "codex-a.jsonl",
             AgentKind::Codex,
             "root",
@@ -535,7 +612,8 @@ mod tests {
             &parse_with(1),
         )
         .unwrap();
-        c.store_file(
+        store(
+            &c,
             "claude-a.jsonl",
             AgentKind::ClaudeCode,
             "root",
@@ -571,8 +649,16 @@ mod tests {
         let dir = tmp_dir("schema-v4");
         let path = dir.join("cache.db");
         let c = Cache::open(&path).unwrap();
-        c.store_file("a.jsonl", AgentKind::Codex, "root", 1, 1, &parse_with(2))
-            .unwrap();
+        store(
+            &c,
+            "a.jsonl",
+            AgentKind::Codex,
+            "root",
+            1,
+            1,
+            &parse_with(2),
+        )
+        .unwrap();
         drop(c);
         // 模拟 v3：版本号改回 "3"。
         let raw = rusqlite::Connection::open(&path).unwrap();
@@ -590,7 +676,8 @@ mod tests {
         // R05：同路径不同 agent / 不同 root 的缓存行互不可见、互不覆盖。
         let dir = tmp_dir("identity");
         let c = Cache::open(&dir.join("cache.db")).unwrap();
-        c.store_file(
+        store(
+            &c,
             "s.jsonl",
             AgentKind::ClaudeCode,
             "root-a",
@@ -601,28 +688,36 @@ mod tests {
         .unwrap();
         // 同路径同 root 换 agent：未命中（不返回改标旧事件）
         assert!(
-            c.lookup_file("s.jsonl", AgentKind::Codex, "root-a", 1, 1)
+            lookup(&c, "s.jsonl", AgentKind::Codex, "root-a", 1, 1)
                 .unwrap()
                 .is_none()
         );
         // 同 agent 同路径换 root：未命中（不返回旧项目名解析）
         assert!(
-            c.lookup_file("s.jsonl", AgentKind::ClaudeCode, "root-b", 1, 1)
+            lookup(&c, "s.jsonl", AgentKind::ClaudeCode, "root-b", 1, 1)
                 .unwrap()
                 .is_none()
         );
         // 完整身份一致：命中
         assert!(
-            c.lookup_file("s.jsonl", AgentKind::ClaudeCode, "root-a", 1, 1)
+            lookup(&c, "s.jsonl", AgentKind::ClaudeCode, "root-a", 1, 1)
                 .unwrap()
                 .is_some()
         );
         // 换 agent 后写入不覆盖 claude 行（身份隔离共存）
-        c.store_file("s.jsonl", AgentKind::Codex, "root-a", 1, 1, &parse_with(1))
-            .unwrap();
+        store(
+            &c,
+            "s.jsonl",
+            AgentKind::Codex,
+            "root-a",
+            1,
+            1,
+            &parse_with(1),
+        )
+        .unwrap();
         assert_eq!(c.stats().unwrap().files, 2, "不同 agent 的同路径行共存");
         assert!(
-            c.lookup_file("s.jsonl", AgentKind::ClaudeCode, "root-a", 1, 1)
+            lookup(&c, "s.jsonl", AgentKind::ClaudeCode, "root-a", 1, 1)
                 .unwrap()
                 .is_some(),
             "原上下文行未被覆盖"
@@ -637,8 +732,16 @@ mod tests {
         let dir = tmp_dir("snapshot");
         let path = dir.join("cache.db");
         let c = Cache::open(&path).unwrap();
-        c.store_file("a.jsonl", AgentKind::Codex, "root", 1, 1, &parse_with(5))
-            .unwrap();
+        store(
+            &c,
+            "a.jsonl",
+            AgentKind::Codex,
+            "root",
+            1,
+            1,
+            &parse_with(5),
+        )
+        .unwrap();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let path2 = path.clone();
@@ -649,10 +752,7 @@ mod tests {
             }
         });
         for _ in 0..200 {
-            if let Some(hit) = c
-                .lookup_file("a.jsonl", AgentKind::Codex, "root", 1, 1)
-                .unwrap()
-            {
+            if let Some(hit) = lookup(&c, "a.jsonl", AgentKind::Codex, "root", 1, 1).unwrap() {
                 assert_eq!(
                     hit.parse.events.len(),
                     5,
@@ -685,7 +785,8 @@ mod tests {
             "迁移后 files 必须有 root 列: {cols:?}"
         );
         // 复合唯一键生效：同 path 不同 root/agent 可共存
-        c.store_file(
+        store(
+            &c,
             "s.jsonl",
             AgentKind::ClaudeCode,
             "root-a",
@@ -694,9 +795,18 @@ mod tests {
             &parse_with(2),
         )
         .unwrap();
-        c.store_file("s.jsonl", AgentKind::Codex, "root-a", 1, 1, &parse_with(1))
-            .unwrap();
-        c.store_file(
+        store(
+            &c,
+            "s.jsonl",
+            AgentKind::Codex,
+            "root-a",
+            1,
+            1,
+            &parse_with(1),
+        )
+        .unwrap();
+        store(
+            &c,
             "s.jsonl",
             AgentKind::ClaudeCode,
             "root-b",
@@ -710,7 +820,7 @@ mod tests {
         // 写入后重新打开能命中
         let c2 = Cache::open(&path).unwrap();
         assert!(
-            c2.lookup_file("s.jsonl", AgentKind::ClaudeCode, "root-a", 1, 1)
+            lookup(&c2, "s.jsonl", AgentKind::ClaudeCode, "root-a", 1, 1)
                 .unwrap()
                 .is_some()
         );
@@ -781,10 +891,18 @@ mod tests {
         let c2 = h2.join().unwrap().expect("并发打开 2 必须成功");
 
         assert_eq!(c1.stats().unwrap().files, 0, "v3 旧行整体失效一次");
-        c1.store_file("a.jsonl", AgentKind::Codex, "root", 1, 1, &parse_with(2))
-            .unwrap();
+        store(
+            &c1,
+            "a.jsonl",
+            AgentKind::Codex,
+            "root",
+            1,
+            1,
+            &parse_with(2),
+        )
+        .unwrap();
         assert!(
-            c2.lookup_file("a.jsonl", AgentKind::Codex, "root", 1, 1)
+            lookup(&c2, "a.jsonl", AgentKind::Codex, "root", 1, 1)
                 .unwrap()
                 .is_some(),
             "另一连接必须看到已迁移的健康结构"

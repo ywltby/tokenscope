@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 
 use tokenscope::aggregate::{GroupBy, aggregate};
-use tokenscope::cache::Cache;
+use tokenscope::cache::{Cache, FileKey};
 use tokenscope::model::{AgentKind, TokenCounts, UsageEvent};
 use tokenscope::pricing::Pricing;
 use tokenscope::source::{CollectStats, FileParse, Source};
@@ -170,9 +170,12 @@ fn legacy_cached_event_cannot_bypass_validation() {
     };
     cache
         .store_file(
-            "p/bad.jsonl",
-            AgentKind::ClaudeCode,
-            "root",
+            &FileKey {
+                path: "p/bad.jsonl",
+                agent: AgentKind::ClaudeCode,
+                root: "root",
+                context_rev: "test-ctx",
+            },
             100,
             1_000,
             &parse,
@@ -188,7 +191,16 @@ fn legacy_cached_event_cannot_bypass_validation() {
         .unwrap();
 
     let cached = cache
-        .lookup_file("p/bad.jsonl", AgentKind::ClaudeCode, "root", 100, 1_000)
+        .lookup_file(
+            &FileKey {
+                path: "p/bad.jsonl",
+                agent: AgentKind::ClaudeCode,
+                root: "root",
+                context_rev: "test-ctx",
+            },
+            100,
+            1_000,
+        )
         .unwrap()
         .expect("指纹一致必须命中");
     assert_eq!(

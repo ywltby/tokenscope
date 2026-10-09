@@ -18,6 +18,7 @@ use crate::dedupe::dedupe_events;
 use crate::model::{AgentKind, TokenCounts, UsageEvent};
 use crate::pricing::Pricing;
 use crate::source::claude::ClaudeSource;
+use crate::source::claude_projects::ProjectMapping;
 use crate::source::codex::CodexSource;
 use crate::source::{CollectStats, Source};
 
@@ -52,6 +53,10 @@ pub struct SummaryOptions {
     /// 也不出现在来源统计里。
     pub claude_enabled: Option<bool>,
     pub codex_enabled: Option<bool>,
+    /// A03：Claude 项目映射配置文件（`~/.claude.json` 形态，含 `projects`）。
+    /// `None` = 默认来源才使用对应账户的默认配置；显式给出时按该路径读取
+    ///（测试注入）。自定义来源 + `None` = 不读取任何本机映射。
+    pub claude_projects_path: Option<PathBuf>,
 }
 
 impl SummaryOptions {
@@ -142,17 +147,39 @@ pub fn pricing_file_path(pricing_file: Option<&PathBuf>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("pricing.toml"))
 }
 
-fn make_source(kind: AgentKind, dir: &Option<PathBuf>) -> Result<Box<dyn Source>> {
+fn make_source(opts: &SummaryOptions, kind: AgentKind) -> Result<Box<dyn Source>> {
     Ok(match kind {
-        AgentKind::ClaudeCode => Box::new(ClaudeSource::new(match dir {
-            Some(p) => p.clone(),
-            None => ClaudeSource::default_root()?,
-        })),
-        AgentKind::Codex => Box::new(CodexSource::new(match dir {
+        AgentKind::ClaudeCode => {
+            let root = match opts.claude_dir.as_ref() {
+                Some(p) => p.clone(),
+                None => ClaudeSource::default_root()?,
+            };
+            Box::new(ClaudeSource::with_mapping(
+                root,
+                claude_project_mapping(opts),
+            ))
+        }
+        AgentKind::Codex => Box::new(CodexSource::new(match opts.codex_dir.as_ref() {
             Some(p) => p.clone(),
             None => CodexSource::default_root()?,
         })),
     })
+}
+
+/// A03：Claude 项目映射的加载策略——显式配置路径 > 默认来源的账户配置；
+/// 自定义来源没有明确的配置关联时一律禁用（**不**读取本机 `~/.claude.json`）。
+/// 走进程内指纹缓存：同一采集批次的键计算与解析共用一次加载结果。
+fn claude_project_mapping(opts: &SummaryOptions) -> Arc<ProjectMapping> {
+    if let Some(path) = opts.claude_projects_path.as_ref() {
+        return ProjectMapping::load_cached(path);
+    }
+    if opts.claude_dir.is_some() {
+        return Arc::new(ProjectMapping::disabled());
+    }
+    match ClaudeSource::default_mapping_path() {
+        Ok(p) => ProjectMapping::load_cached(&p),
+        Err(_) => Arc::new(ProjectMapping::disabled()),
+    }
 }
 
 /// 缓存开关解析：返回 Ok(None) 表示放弃缓存（含原因，调用方告警）。
@@ -376,10 +403,17 @@ static INFLIGHT: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Fli
 static COLLECT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// 采集键：只含影响**采集**的参数（by/tz/from/to/days 是采集后的过滤，
-/// 不参与——汇总与明细同参并发时必须合并为一次采集）。
+/// 不参与——汇总与明细同参并发时必须合并为一次采集）。A03：Claude 项目映射
+/// 修订属于采集输入——配置变化后必须走新采集，不能复用旧航班结果。
 pub(crate) fn collection_key(opts: &SummaryOptions) -> String {
+    // Claude 停用时映射不参与采集，键里固定为 disabled（不读账户配置）。
+    let mapping_rev = if opts.enabled(true) {
+        claude_project_mapping(opts).revision().to_string()
+    } else {
+        "disabled".to_string()
+    };
     format!(
-        "agent={:?}|cd={:?}|xd={:?}|ce={:?}|xe={:?}|refresh={}|cache={:?}|pp={:?}|or={:?}|md={:?}|idx={:?}",
+        "agent={:?}|cd={:?}|xd={:?}|ce={:?}|xe={:?}|refresh={}|cache={:?}|pp={:?}|or={:?}|md={:?}|idx={:?}|cpm={:?}|map={}",
         opts.agent,
         opts.claude_dir,
         opts.codex_dir,
@@ -390,7 +424,9 @@ pub(crate) fn collection_key(opts: &SummaryOptions) -> String {
         opts.pricing_path,
         opts.openrouter_path,
         opts.modelsdev_path,
-        opts.pricing_index
+        opts.pricing_index,
+        opts.claude_projects_path,
+        mapping_rev
     )
 }
 
@@ -433,6 +469,12 @@ impl Source for DedupSource {
 
     fn discover_with_errors(&self) -> (Vec<PathBuf>, Vec<String>) {
         (self.keep.clone(), self.errors.clone())
+    }
+
+    /// A03：解析上下文修订必须转发——否则包装层会悄悄丢掉"外部配置参与
+    /// 缓存命中"这条语义（映射变化后磁盘缓存仍会命中旧归属）。
+    fn context_revision(&self) -> &str {
+        self.inner.context_revision()
     }
 
     fn parse_file(&self, path: &std::path::Path) -> crate::source::FileParse {
@@ -567,11 +609,7 @@ fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSna
         if !opts.enabled(kind == AgentKind::ClaudeCode) {
             continue; // C1：停用的来源零采集、零告警，状态由 source_status 呈现
         }
-        let dir = match kind {
-            AgentKind::ClaudeCode => &opts.claude_dir,
-            AgentKind::Codex => &opts.codex_dir,
-        };
-        sources.push(make_source(kind, dir)?);
+        sources.push(make_source(opts, kind)?);
     }
     let collected = collect_all_with_sources(sources, opts, generation)?;
     Ok(CollectionSnapshot {
@@ -798,18 +836,26 @@ fn collect_all_with_sources(
         let mut unstable = 0u32;
         // R05：缓存身份 = agent + 规范化根目录 + 规范化文件路径。换根/换
         // agent 后文件键不同，缓存自然失效重解析；项目名等派生字段与
-        // refresh 完全一致。
+        // refresh 完全一致。A03：解析上下文修订（如 Claude 项目映射）参与
+        // 命中判定——外部配置变化必须重新解析，而不是继续供旧归属。
         let root_ctx = normalize_path(src.root()).to_string_lossy().to_lowercase();
+        let context_rev = src.context_revision().to_string();
         for file in &files {
             let path_str = file.display().to_string();
             let cache_key = normalize_path(file).to_string_lossy().to_lowercase();
             agent_keep.push(cache_key.clone());
+            let file_key = crate::cache::FileKey {
+                path: cache_key.as_str(),
+                agent: kind,
+                root: root_ctx.as_str(),
+                context_rev: context_rev.as_str(),
+            };
             let mut cached: Option<crate::source::FileParse> = None;
             if !opts.refresh
                 && let (Some(c), Some(size), Ok(mt)) =
                     (cache.as_ref(), file_size(file), mtime_ms(file))
             {
-                match c.lookup_file(&cache_key, kind, &root_ctx, size, mt) {
+                match c.lookup_file(&file_key, size, mt) {
                     Ok(hit) => cached = hit.map(|cf| cf.parse),
                     Err(e) => {
                         lookup_errs += 1;
@@ -850,8 +896,7 @@ fn collect_all_with_sources(
                             let size = fp_after.0.unwrap_or(0);
                             let mt = fp_after.1.unwrap_or(0);
                             let t = std::time::Instant::now();
-                            if let Err(e) = c.store_file(&cache_key, kind, &root_ctx, size, mt, &p)
-                            {
+                            if let Err(e) = c.store_file(&file_key, size, mt, &p) {
                                 store_errs += 1;
                                 warnings.push(format!("缓存写入失败（不影响统计）: {e:#}"));
                             }
@@ -1286,7 +1331,12 @@ pub fn source_status(settings: &crate::settings::Settings) -> Result<Vec<SourceS
         let dir: Option<PathBuf> = cfg.dir.map(PathBuf::from);
         let root = match dir {
             Some(p) => p,
-            None => make_source(kind, &None)?.root().to_path_buf(),
+            // 默认来源：直接取适配器默认根（不构造 source——状态查询不需要
+            // 解析上下文，也不应触发映射加载）。
+            None => match kind {
+                AgentKind::ClaudeCode => ClaudeSource::default_root()?,
+                AgentKind::Codex => CodexSource::default_root()?,
+            },
         };
         let exists = root.is_dir();
         let files = count_jsonl(&root);

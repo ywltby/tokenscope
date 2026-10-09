@@ -6,16 +6,18 @@
 //! - `isSidechain` 与 `<synthetic>` 跳过并计数；解析失败 / 缺 usage / 缺时间戳 /
 //!   缺 message.id 计入坏行；
 //! - 项目身份（A02）：会话**初始 cwd**——顶层 `cwd` 归一化后按 sessionId 取
-//!   首个有效值；无可信 cwd 时回落文件父目录相对根的路径（真实布局下即
-//!   slug，根下散放记 "(根目录)"）。
+//!   首个有效值；无可信 cwd 时回落文件身份（A03：唯一正向映射解析出的真实
+//!   路径 > 相对根的父目录路径，即真实布局下的 slug；根下散放记 "(根目录)"）。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use jiff::Timestamp;
 use serde::Deserialize;
 
+use super::claude_projects::ProjectMapping;
 use super::{CollectStats, FileParse, Source, project_path, read_text, walk_jsonl};
 use crate::model::{AgentKind, UsageEvent};
 
@@ -63,11 +65,29 @@ struct ClaudeUsage {
 
 pub struct ClaudeSource {
     root: PathBuf,
+    /// A03：项目映射（slug → 真实路径身份）。默认禁用——只有采集层明确
+    /// 注入（默认账户配置或显式配置路径）才启用，自定义来源不读本机映射。
+    mapping: Arc<ProjectMapping>,
 }
 
 impl ClaudeSource {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            mapping: Arc::new(ProjectMapping::disabled()),
+        }
+    }
+
+    /// A03：带项目映射的构造器（采集层注入；测试同样显式注入）。
+    pub fn with_mapping(root: impl Into<PathBuf>, mapping: Arc<ProjectMapping>) -> Self {
+        Self {
+            root: root.into(),
+            mapping,
+        }
+    }
+
+    pub fn mapping(&self) -> &ProjectMapping {
+        &self.mapping
     }
 
     pub fn default_root() -> Result<PathBuf> {
@@ -80,11 +100,33 @@ impl ClaudeSource {
         Ok(home.join(".claude").join("projects"))
     }
 
-    /// 项目名 = projects 下第一级目录名；根下散放的 jsonl 记为 "(根目录)"。
-    /// 项目身份 = 相对根的父目录路径（C2/R03）：真实布局（projects/<slug>/
-    /// *.jsonl）下即 slug 本身、行为不变；自定义目录树嵌套时 "a/sub" 与
-    /// "sub" 可区分，不再因父目录同名误合并。
+    /// A03：默认账户的 Claude 配置路径（`~/.claude.json`）。验收模式走隔离根
+    /// 下的 `sources/claude/claude.json`，**绝不**读取真实账户配置。
+    pub fn default_mapping_path() -> Result<PathBuf> {
+        if let Some(dir) = crate::acceptance::source_dir_override(true) {
+            return Ok(dir.join("claude.json"));
+        }
+        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录"))?;
+        Ok(home.join(".claude.json"))
+    }
+
+    /// 文件身份 = 会话 cwd 不可用时的兜底：相对根的父目录路径（C2/R03，
+    /// 真实布局 `projects/<slug>/` 下即 slug 本身）；A03 起，该 slug 若能在
+    /// 注入的映射里唯一正向命中，则改用归一化真实路径作为身份。
     fn project_of(&self, path: &Path) -> String {
+        let legacy = self.slug_of(path);
+        if legacy == "(根目录)" {
+            return legacy;
+        }
+        match self.mapping.resolve(&legacy) {
+            Some(identity) => identity.to_string(),
+            // 未命中 / 冲突 slug / 映射禁用：保持独立 slug 身份，不做前缀猜测。
+            None => legacy,
+        }
+    }
+
+    /// 相对采集根的父目录路径（真实布局下 = 项目 slug）。
+    fn slug_of(&self, path: &Path) -> String {
         let parent = match path.parent() {
             Some(p) if p == self.root => return "(根目录)".to_string(),
             Some(p) => p,
@@ -109,6 +151,11 @@ impl Source for ClaudeSource {
 
     fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// A03：映射状态与内容摘要——变化即让文件缓存与查询复用键失效。
+    fn context_revision(&self) -> &str {
+        self.mapping.revision()
     }
 
     fn discover_with_errors(&self) -> (Vec<PathBuf>, Vec<String>) {
