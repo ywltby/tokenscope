@@ -44,7 +44,7 @@ function fmtPrice(v: number): string {
 const columns = computed<DataTableColumn[]>(() => [
   { title: "时间", key: "ts", className: "ts-num" },
   {
-    title: "Agent",
+    title: "应用",
     key: "agent",
     render: (r) => AGENT_LABEL[asRow(r).agent] ?? asRow(r).agent,
   },
