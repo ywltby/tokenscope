@@ -117,9 +117,9 @@ function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsO
     // 图例移至卡片头部（HTML 圆点图例），画布内不再渲染
     grid: {
       left: 8,
-      right: isDay.value ? 16 : 48,
+      right: isDay.value ? 16 : 64,
       top: 16,
-      bottom: isDay.value ? 56 : 24,
+      bottom: isDay.value ? 56 : 44,
       containLabel: true,
     },
     xAxis: isDay.value
@@ -161,11 +161,20 @@ function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsO
         id: "category-slider",
         type: "slider",
         ...(isDay.value
-          ? { xAxisIndex: 0, bottom: 4, height: 20 }
-          : { yAxisIndex: 0, right: 4, width: 18 }),
+          ? { xAxisIndex: 0, bottom: 4, right: 80, height: 20 }
+          : { yAxisIndex: 0, top: 16, bottom: 44, right: 16, width: 16 }),
         ...zoom,
         filterMode: "filter",
-        borderColor: t.splitLine,
+        borderColor: "transparent",
+        backgroundColor: "transparent",
+        fillerColor: t.separator,
+        showDataShadow: false,
+        handleStyle: { color: t.textMuted, borderColor: "transparent" },
+        moveHandleStyle: { color: t.textMuted, opacity: 0.5 },
+        emphasis: {
+          handleStyle: { color: t.textSecondary, borderColor: "transparent" },
+          moveHandleStyle: { color: t.textSecondary, opacity: 0.7 },
+        },
         textStyle: { color: t.textMuted },
       },
       {
@@ -305,11 +314,11 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
           <span class="legend-label">{{ s.label }}</span>
         </span>
       </div>
-      <button class="chart-reset" type="button" @click="resetZoom">显示全部</button>
     </div>
     <!-- 任务 8（硬约束）：绘图区实色衬底——ECharts 背景透明但容器 .ts-card-solid -->
     <div
       class="chart-body ts-card-solid"
+      :class="{ 'chart-body-time': isDay }"
       tabindex="0"
       role="region"
       :aria-label="`${titleText}，拖动范围滑块缩放，Ctrl 加滚轮缩放`"
@@ -321,6 +330,7 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
         role="img"
         :aria-label="titleText"
       />
+      <button class="chart-reset" type="button" @click="resetZoom">显示全部</button>
     </div>
   </section>
 </template>
@@ -328,19 +338,34 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
 <style scoped>
 /* 绘图区实色衬底容器（.ts-card-solid 提供背景与圆角） */
 .chart-body {
+  position: relative;
   min-width: 0;
   overflow: hidden;
   padding: var(--ts-space-2) var(--ts-space-3);
   margin-top: var(--ts-space-2);
 }
 .chart-reset {
-  color: var(--ts-accent);
+  position: absolute;
+  right: 4px;
+  bottom: 12px;
+  width: 64px;
+  height: 28px;
+  color: var(--ts-text-secondary);
   background: transparent;
   border: none;
   font: inherit;
   font-size: 12px;
   cursor: pointer;
   padding: 4px;
+}
+.chart-body-time .chart-reset {
+  right: 12px;
+  bottom: 8px;
+}
+.chart-reset:hover {
+  color: var(--ts-text);
+  background: var(--ts-fill-hover);
+  border-radius: var(--ts-radius-control);
 }
 .chart-reset:focus-visible {
   outline: 2px solid var(--ts-accent);
