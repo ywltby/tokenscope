@@ -121,7 +121,7 @@ describe("无障碍关键点（设计系统 Task 8）", () => {
     await flushPromises();
     const canvas = w.find(".chart-canvas");
     expect(canvas.attributes("role")).toBe("img");
-    expect(canvas.attributes("aria-label")).toContain("趋势图");
+    expect(canvas.attributes("aria-label")).toBe("使用趋势");
     w.unmount();
     vi.unstubAllGlobals();
   });

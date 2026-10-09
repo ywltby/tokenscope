@@ -11,8 +11,15 @@ const echartsMock = vi.hoisted(() => {
   const dispose = vi.fn();
   const resize = vi.fn();
   const getOption = vi.fn((): unknown => ({}));
-  const init = vi.fn((..._args: unknown[]) => ({ setOption, dispose, resize, getOption }));
-  return { setOption, dispose, resize, getOption, init };
+  const dispatchAction = vi.fn();
+  const init = vi.fn((..._args: unknown[]) => ({
+    setOption,
+    dispose,
+    resize,
+    getOption,
+    dispatchAction,
+  }));
+  return { setOption, dispose, resize, getOption, dispatchAction, init };
 });
 
 vi.mock("echarts", () => ({ init: echartsMock.init }));
@@ -64,6 +71,46 @@ afterEach(() => {
 });
 
 describe("TrendChart（设计系统 Task 4）", () => {
+  it.each([
+    ["day", "使用趋势"],
+    ["model", "模型用量"],
+    ["agent", "应用用量"],
+    ["project", "项目用量"],
+  ])("%s 使用对应标题", async (by, title) => {
+    const w = mount(TrendChart, { props: { groups: [group("a", 10)], by } });
+    expect(w.find(".chart-title").text()).toBe(title);
+    expect(w.find(".chart-canvas").attributes("aria-label")).toBe(title);
+    w.unmount();
+  });
+  it("刷新和主题切换保留缩放；恢复按钮回到完整范围；普通滚轮不缩放", async () => {
+    const w = mount(TrendChart, {
+      props: { groups: [group("a", 10), group("b", 20)], by: "model" },
+    });
+    const initial = setOption.mock.calls[0][0];
+    expect(initial.dataZoom[1]).toMatchObject({
+      zoomOnMouseWheel: "ctrl",
+      moveOnMouseWheel: false,
+    });
+    echartsMock.getOption.mockReturnValue({ dataZoom: [{ start: 25, end: 75 }] });
+    await w.setProps({ groups: [group("a", 15), group("b", 25)] });
+    expect(setOption.mock.calls.at(-1)![0].dataZoom).toBeUndefined();
+    useTheme().setPreference("dark");
+    await nextTick();
+    expect(setOption.mock.calls.at(-1)![0].dataZoom[0]).toMatchObject({ start: 25, end: 75 });
+    await w.find(".chart-reset").trigger("click");
+    expect(echartsMock.dispatchAction).toHaveBeenCalledWith({
+      type: "dataZoom",
+      start: 0,
+      end: 100,
+    });
+    await w.setProps({ by: "day" });
+    expect(setOption.mock.calls.at(-1)![0].dataZoom[0]).toMatchObject({
+      start: 0,
+      end: 100,
+      xAxisIndex: 0,
+    });
+    w.unmount();
+  });
   it.each(["day", "model", "project", "agent"])("%s 超过200类仍保留每类的四项数据", async (by) => {
     const groups = Array.from({ length: 240 }, (_, i) => ({
       ...group(`category-${i}`, i),
@@ -72,7 +119,7 @@ describe("TrendChart（设计系统 Task 4）", () => {
     const w = mount(TrendChart, { props: { groups, by } });
     await flushPromises();
     const opt = setOption.mock.calls[0][0];
-    expect(opt.dataZoom).toEqual([]);
+    expect(opt.dataZoom[0]).toMatchObject({ start: 0, end: 100 });
     expect(opt.series).toHaveLength(4);
     for (const [index, series] of opt.series.entries()) {
       expect(series.data).toHaveLength(240);
@@ -81,9 +128,9 @@ describe("TrendChart（设计系统 Task 4）", () => {
       );
     }
     if (by === "day")
-      expect(
-        Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.minWidth),
-      ).toBeGreaterThan(240 * 40);
+      expect(Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.minWidth)).toBe(
+        0,
+      );
     await w.setProps({ groups: groups.slice(0, 2) });
     expect(
       setOption.mock.calls.at(-1)![0].series.every((s: { data: number[] }) => s.data.length === 2),
@@ -115,21 +162,24 @@ describe("TrendChart（设计系统 Task 4）", () => {
     w.unmount();
   });
 
-  it.each(["model", "project", "agent"])("%s 完整排列所有类别，普通滚动不缩放数据", async (by) => {
-    const many = Array.from({ length: 50 }, (_, i) => group(`model-${i}`, 50 - i));
-    const w = mount(TrendChart, { props: { groups: many, by } });
-    await flushPromises();
-    const opt = setOption.mock.calls[0][0] as {
-      dataZoom?: unknown[];
-      yAxis: { data: string[] };
-    };
-    expect(opt.dataZoom ?? []).toHaveLength(0);
-    expect(opt.yAxis.data).toHaveLength(50);
-    const h2 = Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.height, 10);
-    expect(h2).toBeGreaterThanOrEqual(50 * 34);
-    expect(init.mock.calls[0][2]).toEqual({ renderer: "svg" });
-    w.unmount();
-  });
+  it.each(["model", "project", "agent"])(
+    "%s 保留全部类别且画布高度封顶，提供显式缩放",
+    async (by) => {
+      const many = Array.from({ length: 50 }, (_, i) => group(`model-${i}`, 50 - i));
+      const w = mount(TrendChart, { props: { groups: many, by } });
+      await flushPromises();
+      const opt = setOption.mock.calls[0][0] as {
+        dataZoom?: unknown[];
+        yAxis: { data: string[] };
+      };
+      expect(opt.dataZoom).toHaveLength(2);
+      expect(opt.yAxis.data).toHaveLength(50);
+      const h2 = Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.height, 10);
+      expect(h2).toBeLessThanOrEqual(480);
+      expect(init.mock.calls[0][2]).toEqual({ renderer: "svg" });
+      w.unmount();
+    },
+  );
 
   it("保留图表画布，不提供数据摘要面板", async () => {
     const w = mount(TrendChart, {

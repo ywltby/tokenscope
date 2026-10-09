@@ -1168,8 +1168,8 @@ const IMPL = {
   },
 
   /**
-   * 图表：完整 SVG 类别、普通滚轮到达末项、刷新保留位置、维度切换。
-   * 保留历史契约标识以兼容既有验收命令；不再允许滚轮缩放隐藏数据。
+   * 图表：完整数据概览、自适应尺寸、显式缩放、恢复全部及刷新保留范围。
+   * 普通滚轮留给页面滚动，Ctrl 加滚轮才触发图表缩放。
    */
   async chart_scroll_and_zoom_survive_supported_updates(ctx) {
     const session = await ctx.open({
@@ -1181,47 +1181,37 @@ const IMPL = {
     try {
       await openDashboard(session);
       const page = session.page;
-      for (const dimension of ["按模型", "按项目", "按应用", "按时间"]) {
+      const bars = () => page.locator('.chart-canvas svg').evaluate(el => [...el.querySelectorAll('path')].filter(p => getComputedStyle(p).fill === 'rgb(76, 141, 246)').length);
+      for (const [dimension, title] of [["按模型", "模型用量"], ["按项目", "项目用量"], ["按应用", "应用用量"], ["按时间", "使用趋势"]]) {
         await clickSegment(page, dimension);
         await page.waitForTimeout(800);
         const body = page.locator(".chart-body");
-        const svg = body.locator("svg");
-        const before = await svg.locator("text").allTextContents();
-        ctx.record(contract, `${dimension}完整绘制SVG`, before.length > 0, before.join(" | "));
-        if (dimension === "按项目") {
-          const labels = before.filter(t => /^multi-project-\d+$/.test(t));
-          ctx.record(contract, "项目全部30类均绘制", labels.length === 30, JSON.stringify(labels));
-        }
-        if (dimension === "按时间") {
-          const labels = before.filter(t => /^2026-09-\d+$/.test(t));
-          ctx.record(contract, "时间全部30日均绘制且旧模型不残留", labels.length === 30 && !before.some(t => /^multi-model-/.test(t)), JSON.stringify(labels));
-          await body.evaluate(el => { el.scrollLeft = el.scrollWidth; });
-          const last = await svg.getByText("2026-09-30", {exact: true}).boundingBox();
-          const viewport = await body.boundingBox();
-          ctx.record(contract, "水平滚至末日可见", !!last && last.x >= viewport.x && last.x + last.width <= viewport.x + viewport.width, JSON.stringify(last));
-        }
-        const metrics = await body.evaluate(el => ({
-          height: el.scrollHeight, visible: el.clientHeight,
-          width: el.scrollWidth, available: el.clientWidth,
-        }));
+        const metrics = await body.evaluate(el => ({width: el.clientWidth, scrollWidth: el.scrollWidth, height: el.clientHeight, scrollHeight: el.scrollHeight}));
+        ctx.record(contract, `${dimension}标题与自适应尺寸`, await page.locator('.chart-title').textContent() === title && metrics.scrollWidth <= metrics.width + 1 && metrics.height <= 500 && metrics.scrollHeight <= metrics.height + 1, JSON.stringify(metrics));
         if (dimension === "按模型") {
-          const labels = before.filter(t => /^multi-model-\d+$/.test(t));
-          ctx.record(contract, "模型首尾及全部30个类别均绘制", labels.length === 30 && labels.includes("multi-model-0") && labels.includes("multi-model-29"), JSON.stringify(labels));
+          const before = await bars();
+          ctx.record(contract, "默认概览保留全部30根输入柱", before === 30, String(before));
           await body.evaluate(el => el.scrollIntoView({block: "center"}));
           const box = await body.boundingBox();
-          await page.mouse.move(box.x + box.width / 2, Math.min(box.y + 100, 700));
-          await page.mouse.wheel(0, 400);
-          await page.waitForTimeout(250);
-          ctx.record(contract, "滚轮移动容器而不筛掉类别", (await body.evaluate(el => el.scrollTop)) > 0 && JSON.stringify(before) === JSON.stringify(await svg.locator("text").allTextContents()), JSON.stringify(metrics));
-          await body.evaluate(el => { el.scrollTop = el.scrollHeight; });
-          const last = svg.getByText("multi-model-29", {exact: true});
-          const lastBox = await last.boundingBox();
-          const bodyBox = await body.boundingBox();
-          ctx.record(contract, "滚至底部可见末项", !!lastBox && lastBox.y >= bodyBox.y && lastBox.y + lastBox.height <= bodyBox.y + bodyBox.height, JSON.stringify(lastBox));
-          const top = await body.evaluate(el => el.scrollTop);
+          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+          await page.keyboard.down("Control");
+          await page.mouse.wheel(0, -600);
+          await page.keyboard.up("Control");
+          await page.mouse.move(8, 8);
+          await page.waitForTimeout(800);
+          const zoomed = await bars();
+          await ctx.shot(contract, session, "zoomed");
+          ctx.record(contract, "显式缩放聚焦部分类别", zoomed > 0 && zoomed < before, `${before} -> ${zoomed}`);
           await realClick(page, page.locator("button", {hasText: "刷新"}));
           await page.waitForTimeout(1000);
-          ctx.record(contract, "同维刷新保留位置和全部类别", (await body.evaluate(el => el.scrollTop)) === top && JSON.stringify(before) === JSON.stringify(await svg.locator("text").allTextContents()), String(top));
+          ctx.record(contract, "同维刷新保留缩放范围", await bars() === zoomed, String(await bars()));
+          await page.setViewportSize({width: 980, height: 620});
+          await page.waitForTimeout(500);
+          const resized = await body.evaluate(el => ({width: el.clientWidth, scrollWidth: el.scrollWidth}));
+          ctx.record(contract, "窄窗口宽度适配且保留缩放", resized.width < metrics.width && resized.scrollWidth <= resized.width + 1 && await bars() === zoomed, JSON.stringify(resized));
+          await realClick(page, page.getByRole("button", {name: "显示全部", exact: true}));
+          await page.waitForTimeout(600);
+          ctx.record(contract, "恢复全部30类", await bars() === before, String(await bars()));
         }
         await ctx.shot(contract, session, dimension);
       }

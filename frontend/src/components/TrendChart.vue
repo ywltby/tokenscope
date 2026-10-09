@@ -38,14 +38,44 @@ let chart: echarts.ECharts | null = null;
 let observer: ResizeObserver | null = null;
 
 const isDay = computed(() => props.by === "day");
-const titleText = "使用趋势";
+const titleText = computed(
+  () =>
+    ({ day: "使用趋势", model: "模型用量", agent: "应用用量", project: "项目用量" })[props.by] ??
+    "用量分布",
+);
 
-/// 非日维度为横向条形：每项至少 34px，外层视口封顶 560px 并滚动（不无限撑高页面）。
+/// 画布始终适配容器；类别增多只调整轴标签密度，不撑开页面。
 function canvasHeight(count: number): number {
-  return isDay.value ? 320 : Math.max(320, count * 34 + 70);
+  return isDay.value ? 360 : Math.min(480, Math.max(320, count * 30 + 70));
 }
 
-function buildOption(): echarts.EChartsOption {
+type ZoomRange = {
+  start: number;
+  end: number;
+  startValue?: number;
+  endValue?: number;
+  rangeMode?: ["value", "value"];
+};
+function captureZoom(): ZoomRange {
+  const option = chart?.getOption() as { dataZoom?: Partial<ZoomRange>[] } | undefined;
+  const range = option?.dataZoom?.[0];
+  return {
+    start: range?.start ?? 0,
+    end: range?.end ?? 100,
+    ...(range?.startValue !== undefined && range?.endValue !== undefined
+      ? {
+          startValue: range.startValue,
+          endValue: range.endValue,
+          rangeMode: ["value", "value"] as ["value", "value"],
+        }
+      : {}),
+  };
+}
+function resetZoom(): void {
+  chart?.dispatchAction({ type: "dataZoom", start: 0, end: 100 });
+}
+
+function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsOption {
   const t = chartTokens(mode.value, overrides.value);
   const groups = props.groups;
   // F03（计划 A4）：分类轴与全部 series 由同一份排序结果生成，标签与数值不错位
@@ -85,13 +115,19 @@ function buildOption(): echarts.EChartsOption {
       formatter: tooltipFormatter,
     },
     // 图例移至卡片头部（HTML 圆点图例），画布内不再渲染
-    grid: { left: 8, right: 16, top: 16, bottom: 8, containLabel: true },
+    grid: {
+      left: 8,
+      right: isDay.value ? 16 : 48,
+      top: 16,
+      bottom: isDay.value ? 56 : 24,
+      containLabel: true,
+    },
     xAxis: isDay.value
       ? {
           type: "category",
           data: categories,
           axisLine: { show: false },
-          axisLabel: { color: t.textMuted, fontSize: 12, interval: 0, rotate: 45 },
+          axisLabel: { color: t.textMuted, fontSize: 12, interval: "auto", hideOverlap: true },
         }
       : {
           type: "value",
@@ -107,18 +143,42 @@ function buildOption(): echarts.EChartsOption {
       : {
           type: "category",
           inverse: true,
-          // interval 0 强制每个项目都显示名称；超长省略，完整值见 tooltip
+          // 标签密度随视口与缩放范围自适应；完整名称见 tooltip。
           data: categories,
           axisLine: { show: false },
           axisLabel: {
             color: t.textMuted,
             fontSize: 12,
-            interval: 0,
-            width: 220,
+            interval: "auto",
+            hideOverlap: true,
+            width: Math.min(220, (el.value?.clientWidth || 800) * 0.25),
             overflow: "truncate",
           },
         },
-    dataZoom: [],
+    // 默认总览全部数据；类别轴筛选后，数值轴自动按可见数据重新定标。
+    dataZoom: [
+      {
+        id: "category-slider",
+        type: "slider",
+        ...(isDay.value
+          ? { xAxisIndex: 0, bottom: 4, height: 20 }
+          : { yAxisIndex: 0, right: 4, width: 18 }),
+        ...zoom,
+        filterMode: "filter",
+        borderColor: t.splitLine,
+        textStyle: { color: t.textMuted },
+      },
+      {
+        id: "category-inside",
+        type: "inside",
+        ...(isDay.value ? { xAxisIndex: 0 } : { yAxisIndex: 0 }),
+        ...zoom,
+        filterMode: "filter",
+        zoomOnMouseWheel: "ctrl",
+        moveOnMouseWheel: false,
+        preventDefaultMouseMove: false,
+      },
+    ],
     // 堆叠柱只让最上段（最后一个系列）带圆角：日维度柱顶 [4,4,0,0]，
     // 非日维度横向条尾 [0,4,4,0]（DESIGN.md §5 图表）
     series: series.map((s, i) => ({
@@ -140,7 +200,7 @@ function buildOption(): echarts.EChartsOption {
 function applyHeight(): void {
   if (!el.value) return;
   el.value.style.height = `${canvasHeight(props.groups.length)}px`;
-  el.value.style.minWidth = isDay.value ? `${props.groups.length * 48 + 80}px` : "0";
+  el.value.style.minWidth = "0px";
 }
 
 /// 首次初始化（0 类别不建实例）。
@@ -164,7 +224,10 @@ function updateData(): void {
   }
   applyHeight();
   chart.resize();
-  chart.setOption(buildOption(), { notMerge: false });
+  // 同维更新不要重新下发百分比范围，否则离散类别边界会再次取整而漂移。
+  const option = buildOption();
+  delete option.dataZoom;
+  chart.setOption(option, { notMerge: false });
 }
 
 /// 维度切换：完整替换（清掉旧轴 / series / dataZoom 残留）。
@@ -186,16 +249,23 @@ function switchDimension(): void {
 /// 主题切换：允许一次 dispose/init，保留外层滚动位置。
 function rebuildForTheme(): void {
   if (!el.value || props.groups.length === 0) return;
+  const zoom = captureZoom();
   chart?.dispose();
   chart = null;
   applyHeight();
   chart = echarts.init(el.value, null, { renderer: "svg" });
-  chart.setOption(buildOption(), { notMerge: true });
+  chart.setOption(buildOption(zoom), { notMerge: true });
 }
 
 onMounted(() => {
   initChart();
-  observer = new ResizeObserver(() => chart?.resize());
+  observer = new ResizeObserver(() => {
+    chart?.resize();
+    if (chart && !isDay.value)
+      chart.setOption({
+        yAxis: { axisLabel: { width: Math.min(220, (el.value?.clientWidth || 800) * 0.25) } },
+      });
+  });
   if (el.value) observer.observe(el.value);
 });
 
@@ -235,20 +305,21 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
           <span class="legend-label">{{ s.label }}</span>
         </span>
       </div>
+      <button class="chart-reset" type="button" @click="resetZoom">显示全部</button>
     </div>
     <!-- 任务 8（硬约束）：绘图区实色衬底——ECharts 背景透明但容器 .ts-card-solid -->
     <div
       class="chart-body ts-card-solid"
       tabindex="0"
       role="region"
-      aria-label="使用趋势，可滚动查看全部数据"
+      :aria-label="`${titleText}，拖动范围滑块缩放，Ctrl 加滚轮缩放`"
     >
       <div
         ref="el"
         class="chart-canvas"
         style="width: 100%; height: 320px"
         role="img"
-        :aria-label="`趋势图：${titleText}`"
+        :aria-label="titleText"
       />
     </div>
   </section>
@@ -257,10 +328,23 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
 <style scoped>
 /* 绘图区实色衬底容器（.ts-card-solid 提供背景与圆角） */
 .chart-body {
-  max-height: 560px;
-  overflow: auto;
+  min-width: 0;
+  overflow: hidden;
   padding: var(--ts-space-2) var(--ts-space-3);
   margin-top: var(--ts-space-2);
+}
+.chart-reset {
+  color: var(--ts-accent);
+  background: transparent;
+  border: none;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px;
+}
+.chart-reset:focus-visible {
+  outline: 2px solid var(--ts-accent);
+  outline-offset: 2px;
 }
 .chart-body:focus-visible {
   outline: 2px solid var(--ts-accent);
