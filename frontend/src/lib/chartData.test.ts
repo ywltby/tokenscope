@@ -17,6 +17,31 @@ function group(key: string, input: number, output = 0): Group {
 }
 
 describe("buildBarChartData", () => {
+  it.each(["model", "agent", "project"])("%s 按四类token总量递减，缓存用量参与排序", (by) => {
+    const groups = [
+      g("input-heavy", 100),
+      g("cache-read-heavy", 1, 0, 0, 200),
+      g("cache-write-heavy", 2, 0, 300),
+      g("tied", 100),
+    ];
+    const data = buildBarChartData(groups, by);
+    expect(data.categories).toEqual([
+      "cache-write-heavy",
+      "cache-read-heavy",
+      "input-heavy",
+      "tied",
+    ]);
+    expect(fullLabels(groups, by)).toEqual(data.categories);
+    expect(
+      data.categories.map((_, i) => data.series.reduce((sum, s) => sum + s.values[i], 0)),
+    ).toEqual([302, 201, 100, 100]);
+    expect(groups.map((x) => x.key)).toEqual([
+      "input-heavy",
+      "cache-read-heavy",
+      "cache-write-heavy",
+      "tied",
+    ]);
+  });
   it("chart_labels_match_series：非日维度按用量降序且每个标签对齐自己的数值", () => {
     // 名称序 A,B；用量序 B(100),A(10)——故意相反。
     const data = buildBarChartData([group("A", 10), group("B", 100)], "project");

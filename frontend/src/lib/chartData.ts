@@ -27,13 +27,10 @@ export function realGroups(groups: Group[]): Group[] {
   return groups.filter((g) => g.key !== "合计");
 }
 
-/// 分类顺序（单一事实源）：日维度保持时间序；非日维度按 输入+输出 用量降序。
+/// 分类顺序（单一事实源）：日维度保持时间序；其余按堆叠柱四类 token 总量降序。
 function orderGroups(groups: Group[], by: string): Group[] {
-  return by === "day"
-    ? groups
-    : [...groups].sort(
-        (a, b) => b.tokens.input + b.tokens.output - (a.tokens.input + a.tokens.output),
-      );
+  const total = (g: Group): number => SERIES.reduce((sum, s) => sum + g.tokens[s.name], 0);
+  return by === "day" ? groups : [...groups].sort((a, b) => total(b) - total(a));
 }
 
 export function buildBarChartData(groups: Group[], by: string): BarChartData {
