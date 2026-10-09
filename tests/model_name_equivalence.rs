@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokenscope::model::TokenCounts;
-use tokenscope::pricing::{MatchMode, Pricing};
+use tokenscope::pricing::{INDEX_VERSION, MatchMode, Pricing, clear_price_cache_for_tests};
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -320,4 +320,97 @@ fn model_equivalence_price_view_comparison_is_deterministic() {
         Some("A Name"),
         "按 display 稳定择一并对应该候选的原名称"
     );
+}
+
+// ---- MP05：索引重建、离线恢复与价格修订 ----
+
+#[test]
+fn model_equivalence_old_index_rebuilds_offline() {
+    let dir = tmp("index-old");
+    let ext = write(
+        &dir,
+        "ext.toml",
+        "[[model]]\nprefix = \"vendorA/gpt-5.6\"\ninput = 4.0\n",
+    );
+    let idx = dir.join("idx.json");
+    clear_price_cache_for_tests();
+    let (cold, _rev, _w, _hit) = Pricing::load_cached_revision(Some(&ext), None, None, &idx);
+    assert!(
+        cold.estimate("gpt-5.6-sol", &counts(1_000_000, 0, 0, 0), at())
+            .is_some()
+    );
+
+    // 把索引改造成旧版本（v8，匹配键是旧规则 `gpt-5-6`）——来源字节不变。
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&idx).unwrap()).unwrap();
+    json["v"] = serde_json::json!(8);
+    json["entries"][0]["prefix"] = serde_json::json!("gpt-5-6");
+    std::fs::write(&idx, serde_json::to_string(&json).unwrap()).unwrap();
+
+    clear_price_cache_for_tests();
+    let (rebuilt, rev, _w2, _hit2) = Pricing::load_cached_revision(Some(&ext), None, None, &idx);
+    assert!(
+        rebuilt
+            .estimate("gpt-5.6-sol", &counts(1_000_000, 0, 0, 0), at())
+            .is_some(),
+        "旧索引必须被拒绝并按本地来源离线重建（不联网）"
+    );
+    // 索引已写回为当前版本，且键是等价形式、与保留的 display 一致。
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&idx).unwrap()).unwrap();
+    assert_eq!(after["v"].as_u64(), Some(u64::from(INDEX_VERSION)));
+    assert_eq!(after["entries"][0]["prefix"].as_str(), Some("gpt56"));
+    assert!(rev.contains(&format!("rules:{INDEX_VERSION}")), "{rev}");
+}
+
+#[test]
+fn model_equivalence_restart_matches_cold_build() {
+    let dir = tmp("restart");
+    let ext = write(
+        &dir,
+        "ext.toml",
+        "[[model]]\nprefix = \"vendorA/claude-opus-5.5\"\ninput = 3.0\noutput = 15.0\n",
+    );
+    let idx = dir.join("idx.json");
+    clear_price_cache_for_tests();
+    let (cold, rev_cold, _w, _hit) = Pricing::load_cached_revision(Some(&ext), None, None, &idx);
+    let cold_cost = cold
+        .estimate("claude-opus-5-5", &counts(1_000_000, 0, 0, 0), at())
+        .unwrap()
+        .cost;
+    clear_price_cache_for_tests();
+    let (warm, rev_warm, _w2, _hit2) = Pricing::load_cached_revision(Some(&ext), None, None, &idx);
+    let warm_cost = warm
+        .estimate("claude-opus-5.5", &counts(1_000_000, 0, 0, 0), at())
+        .unwrap()
+        .cost;
+    assert_eq!(cold_cost, warm_cost, "索引恢复与冷建必须给同一金额");
+    assert_eq!(rev_cold, rev_warm, "同来源同规则 → 同价格修订");
+}
+
+#[test]
+fn model_equivalence_revision_changes_with_rules() {
+    let dir = tmp("revision");
+    let ext = write(
+        &dir,
+        "ext.toml",
+        "[[model]]\nprefix = \"vendorA/opus-5.5\"\ninput = 3.0\n",
+    );
+    clear_price_cache_for_tests();
+    let (_, rev, _w, _hit) =
+        Pricing::load_cached_revision(Some(&ext), None, None, &dir.join("idx.json"));
+    assert!(
+        rev.contains(&format!("rules:{INDEX_VERSION}")),
+        "价格修订必须携带匹配规则版本：{rev}"
+    );
+    // 来源内容变化 → 修订变化（前端快照据此拒绝旧金额）。
+    let ext2 = write(
+        &dir,
+        "ext2.toml",
+        "[[model]]\nprefix = \"vendorA/opus-5.5\"\ninput = 3.5\n",
+    );
+    clear_price_cache_for_tests();
+    let (_, rev2, _w2, _hit2) =
+        Pricing::load_cached_revision(Some(&ext2), None, None, &dir.join("idx2.json"));
+    assert_ne!(rev, rev2);
 }

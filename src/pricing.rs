@@ -1376,7 +1376,11 @@ fn default_index_v1() -> u8 {
 /// v8（SF03）：签名改为"路径+内容摘要"、读取失败结果不再发布——旧版
 /// 索引可能永久记住了无告警的读取失败产物（同 mtime/size 旧签名），
 /// **拒绝读取**，按来源重建（候选合法性校验保留）。
-pub const INDEX_VERSION: u8 = 8;
+/// v9（MP05）：匹配键改为等价键（删除 `-` `.` `_`）——v8 索引里的
+/// prefix 是旧规则（`gpt-5.6-sol`），与新查询键（`gpt56sol`）不兼容，
+/// **拒绝读取**并按来源离线重建；重建用保留的 `display` 原文重新推导键，
+/// 不从压扁后的键反推结构。
+pub const INDEX_VERSION: u8 = 9;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -1634,18 +1638,23 @@ impl SourceReads {
     }
 
     fn sig(&self) -> String {
-        [&self.external, &self.modelsdev, &self.openrouter]
-            .iter()
-            .map(|f| {
-                let p = f
-                    .path
-                    .as_deref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "-".to_string());
-                format!("{p}:{}", f.health.state_token())
-            })
-            .collect::<Vec<_>>()
-            .join("|")
+        // MP05：签名同时携带**匹配规则版本**——规则升级（等价键、边界回退）
+        // 时即使来源字节一模一样，也必须重建候选索引并让前端快照的价格修订
+        // 变化（否则旧规则算出的金额会被当成同一修订继续复用）。
+        let mut parts = vec![format!("rules:{INDEX_VERSION}")];
+        parts.extend(
+            [&self.external, &self.modelsdev, &self.openrouter]
+                .iter()
+                .map(|f| {
+                    let p = f
+                        .path
+                        .as_deref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    format!("{p}:{}", f.health.state_token())
+                }),
+        );
+        parts.join("|")
     }
 }
 
@@ -2640,12 +2649,23 @@ impl Pricing {
                 .entries
                 .iter()
                 .any(|e| price_plan_invalid(&index_entry_plan(e)));
-            if !has_invalid {
+            // MP05：索引里的 prefix 必须能由保留的 display 原文重新推导——
+            // 不一致说明索引写于其它匹配规则（或在传输中被改写），重建而非
+            // 猜测（避免用"丢失符号的键"当边界信息）。
+            let stale_keys = index
+                .entries
+                .iter()
+                .any(|e| e.display.trim().is_empty() || match_key(&e.display) != e.prefix);
+            if !has_invalid && !stale_keys {
                 let arc = std::sync::Arc::new(Self::from_index(&index));
                 *guard = Some((sig.clone(), arc.clone(), index.warnings.clone()));
                 return (arc, sig, index.warnings, true);
             }
-            log::warn!("价格索引含非法单价条目，按来源重建");
+            if stale_keys {
+                log::warn!("价格索引匹配键与原始名称不一致，按来源重建");
+            } else {
+                log::warn!("价格索引含非法单价条目，按来源重建");
+            }
             // 落到下方重建路径——正常重建与非法索引回退共用同一缓存写入
             // 出口（cacheable 已由上方读取阶段保证）。
         }
