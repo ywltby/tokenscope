@@ -803,7 +803,7 @@ startRefreshBatch();
           <EventTable
             v-if="events"
             :list="events"
-            :filter-label="drill ? drillLabel(drill) : '无（显示最新 200 条）'"
+            :filter-label="drill ? drillLabel(drill) : ''"
             :filter-closable="!!drill"
             :more="hasMore"
             :more-loading="moreLoading"

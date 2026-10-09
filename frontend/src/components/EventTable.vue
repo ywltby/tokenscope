@@ -208,8 +208,7 @@ const rowKey = (r: object): string => asRow(r).cursor;
       </template>
     </ScrollList>
     <div class="table-hint">
-      共 {{ fmtNum(props.list.total) }} 条（时间倒序）· 已加载
-      {{ fmtNum(props.list.rows.length) }} 条
+      共 {{ fmtNum(props.list.total) }} 条· 已加载 {{ fmtNum(props.list.rows.length) }} 条
       <template v-if="props.filterLabel">· 筛选：{{ props.filterLabel }}</template>
     </div>
   </section>
