@@ -782,13 +782,13 @@ describe("Dashboard 来源筛选（纯图标分段）", () => {
 });
 
 describe("Dashboard 页头与通知（设计系统 Task 3）", () => {
-  it("大标题 + 时区/日期摘要在左，状态胶囊与刷新在标题行右侧", async () => {
+  it("大标题在左，状态胶囊与刷新在右，不显示时区日期说明", async () => {
     mockOk();
     const w = mountDashboard();
     await flushPromises();
     expect(w.find(".page-title").text()).toBe("用量汇总");
     const head = w.find(".page-head");
-    expect(head.find(".page-sub").text()).toContain("统计时区");
+    expect(head.find(".page-sub").exists()).toBe(false);
     const pill = head.find(".ts-status-pill");
     expect(pill.exists()).toBe(true);
     expect(pill.text()).toContain("已更新");

@@ -17,12 +17,11 @@ import TrendChart from "../components/TrendChart.vue";
 import EventTable from "../components/EventTable.vue";
 import SegmentedControl from "../components/SegmentedControl.vue";
 import DateRangeSelect from "../components/DateRangeSelect.vue";
-import { TZ_OPTIONS, useTimezone } from "../composables/timezone";
+import { useTimezone } from "../composables/timezone";
 import { SNAPSHOT_VERSION, enqueueSnapshotSave } from "../lib/viewSnapshot";
 import { errorText, isQueryExpired } from "../lib/queryError";
 import { realGroups } from "../lib/chartData";
 import { onUnmounted } from "vue";
-import { todayInTz } from "../lib/dates";
 
 const props = defineProps<{ refreshKey: number }>();
 /// 任务 3：来源异常通知的「去设置 ›」动作——由应用壳切换到设置页。
@@ -32,9 +31,6 @@ const by = ref<Dim>("day");
 const agent = ref<AgentFilter>("all");
 const range = ref<[string, string] | null>(null);
 const { tz } = useTimezone();
-// 设计系统 Task 2：标题行的日期/时区摘要（随 tz 响应式更新）。
-const todayLabel = computed(() => todayInTz(tz.value));
-const tzLabel = computed(() => TZ_OPTIONS.find((o) => o.value === tz.value)?.label ?? tz.value);
 const report = ref<SummaryReport | null>(null);
 const loading = ref(false);
 const sourceStatus = ref<SourceStatus[]>([]);
@@ -590,10 +586,7 @@ startRefreshBatch();
     <div class="page-head">
       <div class="head-left">
         <h1 class="page-title">用量汇总</h1>
-        <div class="page-sub">
-          统计时区 {{ tzLabel }} · 今天 {{ todayLabel
-          }}<template v-if="drill"> · 已筛选 {{ drillLabel(drill) }}</template>
-        </div>
+        <div v-if="drill" class="page-sub">已筛选 {{ drillLabel(drill) }}</div>
       </div>
       <div class="head-right">
         <span class="ts-pill ts-status-pill" :class="statusPill.cls" role="status">{{

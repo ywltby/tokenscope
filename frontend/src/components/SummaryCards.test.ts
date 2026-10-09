@@ -112,7 +112,7 @@ describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
     const main = w.find(".metric-main");
     expect(main.text()).toContain("估算费用");
     expect(main.text()).toContain("$12.84");
-    expect(main.text()).toContain("USD · 估算值，非账单");
+    expect(main.text()).not.toContain("USD · 估算值，非账单");
     const secondary = w.find(".metric-secondary");
     expect(secondary.findAll(".metric-item").length).toBe(3);
     expect(w.findAll(".metric-sep").length).toBe(2);

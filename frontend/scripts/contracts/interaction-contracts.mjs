@@ -1249,20 +1249,6 @@ const IMPL = {
           ? `canvas=${box.width.toFixed(0)}x${box.height.toFixed(0)} 可见=(${box.left.toFixed(0)},${box.top.toFixed(0)})-(${box.right.toFixed(0)},${box.bottom.toFixed(0)})`
           : "画布不在视口内可见",
       );
-      // 摘要与数据一致：30 个类别全部可枚举（展开真实"数据摘要"面板后读 DOM）
-      await realClick(page, page.locator(".summary-toggle").first());
-      await page.waitForSelector(".chart-summary", { timeout: 5000 });
-      const summaryText = await page.locator(".chart-summary").first().innerText();
-      const listed = (await page.locator(".chart-summary .summary-line").allInnerTexts())
-        .map((t) => t.trim())
-        .filter((l) => !l.startsWith("按") && l.includes("："));
-      ctx.record(
-        "chart_scroll_and_zoom_survive_supported_updates",
-        "摘要列出 fixture 的全部 30 个真实类别（无合计行）",
-        listed.length === 30 && !summaryText.includes("合计："),
-        `类别行=${listed.length}/30`,
-      );
-      // 交互前重新量测：展开"数据摘要"会把画布顶下去，旧坐标会落在画布外
       await centerChart();
       await page.waitForTimeout(300);
       box = (await chartRect()) ?? box;
@@ -1314,7 +1300,7 @@ const IMPL = {
         .first()
         .evaluate(
           (el) =>
-            `${el.width}x${el.height}|summary=${document.querySelectorAll(".chart-summary .summary-line").length}`,
+            `${el.width}x${el.height}`,
         );
       await realClick(page, page.locator("button", { hasText: "刷新" }));
       await page.mouse.move(8, 8);
@@ -1325,7 +1311,7 @@ const IMPL = {
         .first()
         .evaluate(
           (el) =>
-            `${el.width}x${el.height}|summary=${document.querySelectorAll(".chart-summary .summary-line").length}`,
+            `${el.width}x${el.height}`,
         );
       ctx.record(
         "chart_scroll_and_zoom_survive_supported_updates",
@@ -1336,24 +1322,7 @@ const IMPL = {
       // 切维度：完整替换，旧类别不残留
       await clickSegment(page, "按日");
       await page.waitForTimeout(900);
-      // 切维后摘要仍在（若被收起就重新展开），再核对残留
-      if ((await page.locator(".chart-summary").count()) === 0) {
-        await realClick(page, page.locator(".summary-toggle").first());
-      }
-      await page.waitForSelector(".chart-summary", { timeout: 5000 });
-      const daySummary = await page.locator(".chart-summary").first().innerText();
-      // 切维后类别应整体换成日期键，不残留任何模型类别行
-      const dayLines = (await page.locator(".chart-summary .summary-line").allInnerTexts()).map(
-        (t) => t.trim(),
-      );
-      const residue = dayLines.some((l) => /model-\d+/.test(l));
       const afterSwitch = await canvasFingerprint(page);
-      ctx.record(
-        "chart_scroll_and_zoom_survive_supported_updates",
-        "切维度后摘要不再残留旧类别",
-        residue === false && daySummary.length > 0,
-        `残留=${residue}；摘要片段=${daySummary.slice(0, 60).split("\n").join(" | ")}`,
-      );
       ctx.record(
         "chart_scroll_and_zoom_survive_supported_updates",
         "切维度后画布确实重绘（非保留旧实例状态）",

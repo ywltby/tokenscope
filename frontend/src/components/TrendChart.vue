@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 设计系统 Task 4：趋势图接入统一图表主题（固定语义色/顺序，禁用默认
-// 调色板），类别多时高度封顶 + 图内滚动，并提供等价文字摘要（可访问性）。
+// 调色板），类别多时高度封顶并保留图内滚动。
 // 聚合口径不变：分类与 series 仍由 buildBarChartData 单源生成（F03）。
 //
 // UX05（界面审查修复）：实例生命周期与数据更新分离——
@@ -16,7 +16,7 @@ import * as echarts from "echarts";
 import { useTheme } from "../composables/theme";
 import { useTokenColors } from "../composables/tokenColors";
 import { fmtNum, type Group } from "../types";
-import { buildBarChartData, chartStateText, chartSummaryLines, fullLabels } from "../lib/chartData";
+import { buildBarChartData, fullLabels } from "../lib/chartData";
 import { buildTooltipNode } from "../lib/chartTooltip";
 import { chartTokens, POPOVER_BLUR_CSS } from "../styles/chartTheme";
 
@@ -38,9 +38,6 @@ let chart: echarts.ECharts | null = null;
 let observer: ResizeObserver | null = null;
 
 const isDay = computed(() => props.by === "day");
-const stateText = computed(() => chartStateText(props.groups.length));
-const summaryLines = computed(() => chartSummaryLines(props.groups, props.by));
-const showSummary = ref(false);
 const titleText = computed(() =>
   isDay.value ? "每日 token 趋势（堆叠）" : "token 分布（按用量排序）",
 );
@@ -254,7 +251,6 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
   <section class="ts-card trend-card">
     <div class="chart-head">
       <span class="chart-title">{{ titleText }}</span>
-      <span class="chart-state">{{ stateText }}</span>
       <!-- 圆点图例（与图表系列同源 token，DESIGN.md §5 图表） -->
       <div class="chart-legend" aria-hidden="true">
         <span v-for="s in legendItems" :key="s.key" class="legend-item">
@@ -262,17 +258,6 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
           <span class="legend-label">{{ s.label }}</span>
         </span>
       </div>
-      <button
-        type="button"
-        class="summary-toggle ts-focusable"
-        :aria-expanded="showSummary"
-        @click="showSummary = !showSummary"
-      >
-        数据摘要
-      </button>
-    </div>
-    <div v-if="showSummary" class="chart-summary" role="region" aria-label="图表数据摘要">
-      <div v-for="l in summaryLines" :key="l" class="summary-line ts-num">{{ l }}</div>
     </div>
     <!-- 任务 8（硬约束）：绘图区实色衬底——ECharts 背景透明但容器 .ts-card-solid -->
     <div class="chart-body ts-card-solid">
@@ -281,7 +266,7 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
         class="chart-canvas"
         style="width: 100%; height: 320px"
         role="img"
-        :aria-label="`趋势图：${titleText}，${stateText}`"
+        :aria-label="`趋势图：${titleText}`"
       />
     </div>
   </section>
@@ -310,11 +295,6 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
   color: var(--ts-text);
 }
 
-.chart-state {
-  font-size: 12px;
-  color: var(--ts-text-muted);
-}
-
 .chart-legend {
   display: inline-flex;
   align-items: center;
@@ -339,38 +319,5 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
 
 .legend-label {
   white-space: nowrap;
-}
-
-/* 头部操作：fill 底、无描边、控件圆角（与筛选栏同族） */
-.summary-toggle {
-  border: none;
-  background: var(--ts-fill);
-  color: var(--ts-text-secondary);
-  font: inherit;
-  font-size: 12px;
-  border-radius: var(--ts-radius-control);
-  padding: var(--ts-space-1) var(--ts-space-2);
-  cursor: pointer;
-}
-
-.summary-toggle:hover {
-  color: var(--ts-text);
-}
-
-.chart-summary {
-  border: 1px solid var(--ts-separator);
-  border-radius: var(--ts-radius-control);
-  background: var(--ts-surface-solid);
-  padding: var(--ts-space-2) var(--ts-space-3);
-  margin-bottom: var(--ts-space-2);
-  max-height: 220px;
-  overflow-y: auto;
-}
-
-.summary-line {
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--ts-text-secondary);
-  font-family: var(--ts-font-mono);
 }
 </style>

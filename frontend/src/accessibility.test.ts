@@ -96,7 +96,7 @@ describe("无障碍关键点（设计系统 Task 8）", () => {
     w.unmount();
   });
 
-  it("TrendChart：图表 role=img 带摘要 aria-label，摘要按钮可展开", async () => {
+  it("TrendChart：图表 role=img 保留描述性 aria-label", async () => {
     const groups: Group[] = [
       {
         key: "a",
@@ -122,12 +122,6 @@ describe("无障碍关键点（设计系统 Task 8）", () => {
     const canvas = w.find(".chart-canvas");
     expect(canvas.attributes("role")).toBe("img");
     expect(canvas.attributes("aria-label")).toContain("趋势图");
-    const btn = w.findAll("button").find((b) => b.text().includes("数据摘要"));
-    expect(btn).toBeDefined();
-    expect(btn!.attributes("aria-expanded")).toBe("false");
-    await btn!.trigger("click");
-    expect(btn!.attributes("aria-expanded")).toBe("true");
-    expect(w.find('[role="region"][aria-label="图表数据摘要"]').exists()).toBe(true);
     w.unmount();
     vi.unstubAllGlobals();
   });

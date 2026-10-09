@@ -406,23 +406,9 @@ const READ_SOURCE_DIRS = () => {
   };
 };
 
-/** UX05：打开图表文字摘要并读取行（类别一致性验收）。 */
-const OPEN_CHART_SUMMARY = () => {
-  const btn = document.querySelector(".trend-card .summary-toggle");
-  if (!btn) return { available: false };
-  if (btn.getAttribute("aria-expanded") !== "true") btn.click();
-  return { available: true };
-};
-
-const READ_CHART_SUMMARY = () => {
-  const lines = [...document.querySelectorAll(".trend-card .chart-summary .summary-line")].map(
-    (l) => l.textContent ?? "",
-  );
-  return {
-    lines,
-    hasCanvas: !!document.querySelector(".trend-card .chart-canvas"),
-    stateText: document.querySelector(".trend-card .chart-state")?.textContent ?? "",
-  };
+const READ_CHART_CANVAS = () => {
+  const canvas = document.querySelector(".trend-card canvas");
+  return !!canvas && canvas.width > 0 && canvas.height > 0;
 };
 
 const CLICK_SEGMENT = (label) => {
@@ -625,30 +611,7 @@ function buildChecks(m, ctx) {
 
   // UX05：切维度 / 切主题后类别与摘要一致
   if (ctx.fixture === "normal" || ctx.fixture === "multi-category") {
-    const c = m.chart;
-    const after = c?.after;
-    const afterTheme = c?.afterTheme;
-    const listed = (r) => (r?.lines ?? []).filter((l) => !l.endsWith("汇总："));
-    const expected = ctx.expectedCategories ?? [];
-    const pass =
-      !!after &&
-      !!afterTheme &&
-      after.hasCanvas &&
-      afterTheme.hasCanvas &&
-      expected.length > 0 &&
-      expected.every((name) => listed(after).some((l) => l.startsWith(`${name}：`))) &&
-      listed(after).length === expected.length &&
-      // 类别名不得是"合计"（摘要行尾的"· 合计 N"是数值，不算类别）
-      !listed(after).some((l) => l.startsWith("合计：")) &&
-      listed(afterTheme).length === expected.length &&
-      !listed(afterTheme).some((l) => l.startsWith("合计："));
-    checks.push([
-      "chart_summary_lists_all_real_categories_after_switches",
-      pass,
-      after
-        ? `after=${listed(after).length}/${expected.length} theme=${listed(afterTheme).length}`
-        : "no-chart",
-    ]);
+    checks.push(["chart_renders_after_dimension_and_theme_switch", !!m.chart?.after && !!m.chart?.afterTheme, JSON.stringify(m.chart)]);
   }
 
   return checks;
@@ -848,19 +811,14 @@ for (const fixtureName of args.fixtures) {
         // UX05：切维度 + 切主题后，图表仍渲染且摘要列出全部真实类别（无合计）
         let chart = null;
         if (fixtureName === "normal" || fixtureName === "multi-category") {
-          const opened = await page.evaluate(OPEN_CHART_SUMMARY);
-          if (opened.available) {
-            await page.waitForTimeout(250);
-            const before = await page.evaluate(READ_CHART_SUMMARY);
-            await page.evaluate(CLICK_SEGMENT, "按模型");
-            await page.waitForTimeout(600);
-            const after = await page.evaluate(READ_CHART_SUMMARY);
-            const themeChanged = await page.evaluate(CLICK_SEGMENT, "深色");
-            if (!themeChanged.ok) throw new Error("找不到深色模式图标按钮");
-            await page.waitForTimeout(600);
-            const afterTheme = await page.evaluate(READ_CHART_SUMMARY);
-            chart = { before, after, afterTheme };
-          }
+          await page.evaluate(CLICK_SEGMENT, "按模型");
+          await page.waitForTimeout(600);
+          const after = await page.evaluate(READ_CHART_CANVAS);
+          const themeChanged = await page.evaluate(CLICK_SEGMENT, "深色");
+          if (!themeChanged.ok) throw new Error("Missing dark theme control");
+          await page.waitForTimeout(600);
+          const afterTheme = await page.evaluate(READ_CHART_CANVAS);
+          chart = { after, afterTheme };
         }
         m.chart = chart;
         // 切换交互验收后恢复场景主题，确保证据文件名与实际画面一致。
@@ -893,16 +851,8 @@ for (const fixtureName of args.fixtures) {
           }
         }
 
-        const expectedModel = (() => {
-          // 维度在会话中冻结：用 fixture 的会话表按 by=model 建会话再取 summary。
-          const h = fixture.table.begin({ by: "model", tz: "Asia/Shanghai" });
-          const sum = fixture.table.summary(h.queryId);
-          const groups = Array.isArray(sum?.groups) ? sum.groups : [];
-          return groups.filter((g) => g.key !== "合计").map((g) => g.label ?? g.key);
-        })();
         const checks = buildChecks(m, {
           fixture: fixtureName,
-          expectedCategories: expectedModel,
           expectedLongDir: LONG_SOURCE_DIR,
         });
 

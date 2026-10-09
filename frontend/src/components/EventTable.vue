@@ -99,7 +99,7 @@ const columns = computed<DataTableColumn[]>(() => [
     render: (r) => fmtNum(asRow(r).cache_read),
   },
   {
-    title: "费用（估算）",
+    title: "费用",
     key: "cost_usd",
     align: "center",
     className: "ts-num",

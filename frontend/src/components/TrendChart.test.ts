@@ -103,18 +103,14 @@ describe("TrendChart（设计系统 Task 4）", () => {
     w.unmount();
   });
 
-  it("提供等价文字摘要：按钮展开后含类别与四类 token 合计", async () => {
+  it("保留图表画布，不提供数据摘要面板", async () => {
     const w = mount(TrendChart, {
       props: { groups: [group("alpha", 100), group("beta", 40)], by: "model" },
     });
     await flushPromises();
-    const btn = w.findAll("button").find((b) => b.text().includes("数据摘要"));
-    expect(btn).toBeDefined();
-    await btn!.trigger("click");
-    const summary = w.find(".chart-summary");
-    expect(summary.exists()).toBe(true);
-    expect(summary.text()).toContain("alpha");
-    expect(summary.text()).toContain("合计 100");
+    expect(w.find(".chart-canvas").exists()).toBe(true);
+    expect(w.find(".summary-toggle").exists()).toBe(false);
+    expect(w.find(".chart-summary").exists()).toBe(false);
     w.unmount();
   });
 
@@ -223,12 +219,6 @@ describe("TrendChart 生命周期与数据更新（UX05）", () => {
     };
     expect(opt.yAxis.data).toEqual(["a", "b"]);
     expect(opt.series[0].data).toEqual([9, 5]);
-    // 摘要随新数据更新
-    await w
-      .findAll("button")
-      .find((b) => b.text().includes("数据摘要"))!
-      .trigger("click");
-    expect(w.find(".chart-summary").text()).toContain("合计 9");
     w.unmount();
   });
 
@@ -271,7 +261,7 @@ describe("TrendChart 生命周期与数据更新（UX05）", () => {
     const w = mount(TrendChart, { props: { groups: [], by: "model" } });
     await flushPromises();
     expect(init).not.toHaveBeenCalled();
-    expect(w.find(".chart-state").text()).toContain("暂无数据");
+    expect(w.find(".chart-state").exists()).toBe(false);
     w.unmount();
   });
 

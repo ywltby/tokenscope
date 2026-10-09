@@ -52,31 +52,3 @@ export function buildBarChartData(groups: Group[], by: string): BarChartData {
 export function fullLabels(groups: Group[], by: string): string[] {
   return orderGroups(groups, by).map((g) => g.key);
 }
-
-/// 可访问文字摘要：与图表数据等价的逐类别行（图例/颜色之外的读数路径）。
-export function chartSummaryLines(groups: Group[], by: string): string[] {
-  const title =
-    by === "day"
-      ? "按日汇总："
-      : by === "model"
-        ? "按模型汇总："
-        : by === "project"
-          ? "按项目汇总："
-          : "按应用汇总：";
-  const lines = [title];
-  for (const g of orderGroups(groups, by)) {
-    const t = g.tokens;
-    const total = t.input + t.output + t.cache_write + t.cache_read;
-    lines.push(
-      `${g.label ?? g.key}：${SERIES.map((s) => `${s.label} ${t[s.name]}`).join(" · ")} · 合计 ${total}`,
-    );
-  }
-  return lines;
-}
-
-/// 类别数量状态：空/单/多都有明确文案（多类别说明可滚动查看全部）。
-export function chartStateText(count: number): string {
-  if (count === 0) return "暂无数据：调整时间范围或来源后重试";
-  if (count === 1) return "仅 1 个类别";
-  return `${count} 个类别，图内可滚动查看全部`;
-}

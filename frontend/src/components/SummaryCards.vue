@@ -84,7 +84,6 @@ const parts = computed(() =>
           <template v-if="costUnknownOnly">未知†</template>
           <template v-else>{{ costText }}</template>
         </div>
-        <div class="metric-unit">USD · 估算值，非账单</div>
       </div>
 
       <!-- 次读数：总 token / 请求数 / 缓存命中率，发丝线分隔 -->
