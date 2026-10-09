@@ -243,3 +243,33 @@ pnpm --dir frontend build
 口径修订汇总（已同步 `docs/stats-semantics.md` §3.4 与 `CLAUDE.md`）：Claude 身份由「文件父目录相对路径（slug）」→「项目根归并（会话 cwd 推进）」，Codex 由「原始 cwd / 轮级精确」→「项目根归并」；新增 `session_initial_cwd` 与 `event_cwd` 两个事件字段。
 
 未完成与边界：GUI 原生实例的目视验收（真实窗口启动观感、隔离实例截图）未执行——本计划因此保持 active，不归档；未执行真实缓存冷重建（不以旧报告的 5.5 秒作性能保证）。探针脚本 `ts_probe*.py` 只作可选排查辅助，不作为仓库测试依赖，也不保证临时文件仍存在。
+
+### 隔离数据路径验收执行记录（2026-10-09）
+
+1. 准备隔离根（合成来源 + 隔离缓存/配置/价格）：
+
+   ```powershell
+   $root = Join-Path $env:TEMP ('tokenscope-native-' + [guid]::NewGuid().ToString('N'))
+   $src = Get-Content -Raw -Encoding UTF8 .\scripts\prepare-native-acceptance.ps1
+   & ([scriptblock]::Create($src)) -Root $root   # 5.1 宿主需显式 UTF-8 读取（见脚本 .NOTES）
+   $env:TOKENSCOPE_ACCEPTANCE_ROOT = $root
+   ```
+
+   合成日志已按阶段 A/B 的验收需要补 `cwd`：Claude 前两条位于
+   `C:\acceptance\workspace\tokenscope`（其中一条是其子目录 `src`）与 Codex
+   起始目录相同；后两条越出该根到 `C:\acceptance\workspace\bee`（子目录
+   `bee\123`）。事件总数仍由 `-Events` 决定。
+
+2. 归属前哨（非 GUI 路径，`tests/native_acceptance_attribution.rs`，`#[ignore]` +
+   `TOKENSCOPE_ACCEPTANCE_ROOT` 显式授权）：
+
+   `cargo test --test native_acceptance_attribution -- --ignored` → 通过：
+   合并行含两侧 agent、展示名 `tokenscope`、切换后新项目行 `bee` 只含
+   claude-code、`src` 与 `bee/123` 不独立成行、无 slug 残留、下钻含两侧事件。
+
+3. RC10 隔离密闭性回归：`cargo test --features acceptance --test native_acceptance`
+   → 3 项通过（另 2 项为父用例驱动的子进程用例）。
+
+4. **未执行**：GUI 窗口目视（迁移后可执行：`$env:TOKENSCOPE_ACCEPTANCE_ROOT = $root`
+   后启动 acceptance 构建，观察"同项目一行、下钻含两侧事件、启动不闪现旧分组"）。
+   该步骤需要人工观察，故计划不归档。

@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     RC10：为原生生产验收准备**隔离根**（合成日志 + 有效价格 + 离线设置）。
 
@@ -20,10 +20,27 @@
       - 不修改 HOME/USERPROFILE/APPDATA，不写注册表，不安装自启；
       - 所有文本一律 UTF-8（无 BOM），换行 LF。
 
+    合成日志内容（用于项目身份验收）：Claude 行带顶层 cwd——前两条位于
+    `C:\acceptance\workspace\tokenscope`（其中一条是其子目录 src）与 Codex
+    起始目录相同，应合并为**一行**（两侧 agent）；后两条越出该根到
+    `C:\acceptance\workspace\bee`，应成为**新项目**（子目录 bee\123 归并进来）。
+    事件总数仍由 -Events 决定。
+
 .EXAMPLE
     $root = Join-Path ([System.IO.Path]::GetTempPath()) ('tokenscope-native-' + [guid]::NewGuid().ToString('N'))
     .\scripts\prepare-native-acceptance.ps1 -Root $root
     $env:TOKENSCOPE_ACCEPTANCE_ROOT = $root
+
+.NOTES
+    Windows PowerShell 5.1 按 ANSI 编码读取**无 BOM** 的 UTF-8 脚本，本脚本里的
+    中文会变成乱码并破坏解析（报 "Missing expression after ','" 之类）。在 5.1
+    宿主机上请改用：
+
+        $src = Get-Content -Raw -Encoding UTF8 .\scripts\prepare-native-acceptance.ps1
+        & ([scriptblock]::Create($src)) -Root $root
+
+    或安装 PowerShell 7 后 `pwsh -File .\scripts\prepare-native-acceptance.ps1 -Root $root`。
+    脚本文件本身保持仓库约定（UTF-8 无 BOM、LF）。
 #>
 [CmdletBinding()]
 param(
@@ -111,10 +128,12 @@ $projectSlug = '-acceptance-workspace-tokenscope'
 $projectDir = Join-Path (Join-Path $claudeDir 'projects') $projectSlug
 $session = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
 $entries = @(
-    @{ ts = '2026-10-06T01:00:00.000Z'; model = 'claude-sonnet-4-5'; in = 1200; out = 640; cr = 3000; cw = 100 },
-    @{ ts = '2026-10-06T02:30:00.000Z'; model = 'claude-sonnet-4-5'; in = 900;  out = 400; cr = 2000; cw = 0 },
-    @{ ts = '2026-10-07T03:15:00.000Z'; model = 'gpt-5-codex';       in = 500;  out = 200; cr = 0;    cw = 0 },
-    @{ ts = '2026-10-07T04:45:00.000Z'; model = 'mystery-model';     in = 700;  out = 300; cr = 0;    cw = 0 }
+    # cwd 覆盖阶段 A/B 的归属验收：前两条与 Codex 起始目录相同（其中一条是
+    # 子目录，应归并到同一项目）；后两条越出该根，应成为新项目及其子目录。
+    @{ ts = '2026-10-06T01:00:00.000Z'; model = 'claude-sonnet-4-5'; in = 1200; out = 640; cr = 3000; cw = 100; cwd = 'C:\acceptance\workspace\tokenscope' },
+    @{ ts = '2026-10-06T02:30:00.000Z'; model = 'claude-sonnet-4-5'; in = 900;  out = 400; cr = 2000; cw = 0;   cwd = 'C:\acceptance\workspace\tokenscope\src' },
+    @{ ts = '2026-10-07T03:15:00.000Z'; model = 'gpt-5-codex';       in = 500;  out = 200; cr = 0;    cw = 0;   cwd = 'C:\acceptance\workspace\bee' },
+    @{ ts = '2026-10-07T04:45:00.000Z'; model = 'mystery-model';     in = 700;  out = 300; cr = 0;    cw = 0;   cwd = 'C:\acceptance\workspace\bee\123' }
 )
 # 分页/过期验收需要 >200 条明细：按需补齐合成事件（确定性取值，无随机）。
 $fillerModels = @('claude-sonnet-4-5', 'gpt-5-codex')
@@ -126,6 +145,7 @@ for ($i = $entries.Count; $i -lt $Events; $i++) {
         out   = 120 + ($i % 30) * 3
         cr    = ($i % 4) * 250
         cw    = ($i % 3) * 100
+        cwd   = if ($i % 2 -eq 0) { 'C:\acceptance\workspace\tokenscope\src' } else { 'C:\acceptance\workspace\bee\123' }
     }
 }
 $idx = 0
@@ -148,6 +168,7 @@ $lines = foreach ($e in $entries) {
         isSidechain = $false
         sessionId = $session
         timestamp = $e.ts
+        cwd = $e.cwd
         message = ($msg | ConvertFrom-Json)
     } | ConvertTo-Json -Compress -Depth 10)
 }
