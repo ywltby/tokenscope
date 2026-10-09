@@ -80,7 +80,7 @@ describe("视图快照保存队列（R04）", () => {
     expect(warn).toHaveBeenCalled();
   });
 
-  it("SNAPSHOT_VERSION 为 7（项目身份统一；v6 及更旧快照读取时忽略）", () => {
-    expect(SNAPSHOT_VERSION).toBe(7);
+  it("SNAPSHOT_VERSION 为 8（项目根归并；v7 及更旧快照读取时忽略）", () => {
+    expect(SNAPSHOT_VERSION).toBe(8);
   });
 });

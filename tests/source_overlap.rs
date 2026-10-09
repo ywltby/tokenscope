@@ -287,6 +287,8 @@ mod mock_pair {
                     model: "m".into(),
                     session_id: "s".into(),
                     project: "p".into(),
+                    session_initial_cwd: None,
+                    event_cwd: None,
                     record_id: String::new(),
                     input_tokens: 100,
                     output_tokens: 10,

@@ -238,6 +238,10 @@ export interface EventRow {
   model: string;
   session_id: string;
   project: string;
+  /** B02：会话初始工作目录（项目根归并口径的一部分）；null/缺省 = 无可信 cwd */
+  session_initial_cwd?: string | null;
+  /** B02：该请求作用域内最近观察到的结构化工作目录（保留子目录细节） */
+  event_cwd?: string | null;
   input: number;
   output: number;
   cache_write: number;

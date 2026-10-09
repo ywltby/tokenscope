@@ -14,11 +14,10 @@
 //!   provider 映射），按坏行计数不入账，不猜测语义；
 //! - 零分量占位行（只升 total）跳过计数；分量非零但 total 不符按坏行计数；
 //! - 模型按时间序最近的 `turn_context` 归属，遇 `session_meta` 重置；
-//! - 项目身份（A04）= 当前上下文的**归一化 cwd**：有效 `turn_context.cwd`
-//!   更新后续事件（A → B → A 保留），`session_meta` 重置目录上下文（新会话
-//!   不继承上一会话的目录），空/无效 cwd 不清掉同会话已知目录；完全没有
-//!   可信 cwd 时记 "(未知)"；
-//!   展示名由聚合层派生；
+//! - 项目身份（阶段 B）：按会话维护**项目根**——`turn_context` 的有效 cwd 在
+//!   当前根之下则保持根（子目录归并），越出当前根即视为新项目；`session_meta`
+//!   重置目录上下文（新会话不继承上一会话的目录）；空/无效 cwd 不清掉同会话
+//!   已知目录；完全没有可信 cwd 时记 "(未知)"；展示名由聚合层派生；
 //! - 同请求重发的去重自 M4 起上移到全局 dedupe 步骤（按 `(session, 用量五元组)`
 //!   保首条），本层原样产出事件（record_id 为空）。
 
@@ -28,7 +27,8 @@ use anyhow::Result;
 use jiff::Timestamp;
 use serde::Deserialize;
 
-use super::{CollectStats, FileParse, Source, project_path, read_text, walk_jsonl};
+use super::project_path::{self, ProjectRootTracker};
+use super::{CollectStats, FileParse, Source, read_text, walk_jsonl};
 use crate::model::{AgentKind, UsageEvent};
 
 pub struct CodexSource {
@@ -103,23 +103,28 @@ struct LastUsage {
     total_tokens: u64,
 }
 
-/// 文件内解析状态：session 边界与模型归属。
+/// 文件内解析状态：session 边界、模型归属与项目根。
 #[derive(Default)]
 struct ScanState {
     session_id: String,
     model: Option<String>,
-    /// 当前上下文的**归一化**项目身份（A04）；None = 本会话尚无可信目录。
-    cwd: Option<String>,
+    /// 阶段 B：当前会话的项目根状态机（子目录归并、越界成新项目）。
+    tracker: ProjectRootTracker,
+    /// 本会话首个有效 cwd（B02 的 `session_initial_cwd`）。
+    initial_cwd: Option<String>,
 }
 
-/// A04：更新会话目录上下文——只接受可归一化的 cwd；空值、类型异常与不可
-/// 解释的路径（相对路径等）既不写入，也**不清掉**同会话已知目录。
-fn update_cwd(state: &mut ScanState, raw: Option<&str>) {
+/// 观察一个（未归一化的）cwd：只接受可归一化的值；空值、类型异常与不可解释的
+/// 路径既不写入，也**不清掉**同会话已知目录。
+fn observe_cwd(state: &mut ScanState, raw: Option<&str>) {
     let Some(raw) = raw else {
         return;
     };
     if let Some(identity) = project_path::normalize_project_path(raw) {
-        state.cwd = Some(identity);
+        if state.initial_cwd.is_none() {
+            state.initial_cwd = Some(identity.clone());
+        }
+        state.tracker.observe(&identity);
     }
 }
 
@@ -187,22 +192,23 @@ fn ingest_line(
     };
     match rec.kind.as_str() {
         "session_meta" => {
-            // session 边界：模型归属与目录上下文一起重置——新会话绝不继承
-            // 上一个 session 的目录（A04 不变量 4）。
+            // session 边界：模型归属、项目根与初始目录一起重置——新会话绝不
+            // 继承上一个 session 的目录（A04 不变量 4）。
             state.session_id = payload
                 .session_id
                 .clone()
                 .or_else(|| payload.id.clone())
                 .unwrap_or_default();
             state.model = None;
-            state.cwd = None;
-            update_cwd(state, payload.cwd.as_deref());
+            state.tracker.reset();
+            state.initial_cwd = None;
+            observe_cwd(state, payload.cwd.as_deref());
         }
         "turn_context" => {
             if payload.model.is_some() {
                 state.model = payload.model.clone();
             }
-            update_cwd(state, payload.cwd.as_deref());
+            observe_cwd(state, payload.cwd.as_deref());
         }
         "token_usage_record" => stats.ignored_token_usage_record += 1,
         "event_msg" if payload.kind == "token_count" => {
@@ -286,10 +292,15 @@ fn ingest_token_count(
         stats.bad_lines += 1;
         return;
     }
-    // A04（C2/R03 延续）：项目身份 = 当前上下文的归一化 cwd——不同路径的同名
-    // 目录不合并，同路径的跨工具会话共用同一 key；无有效 cwd 时沿用既有
-    // "(未知)" 兜底，展示名（basename）由聚合层派生为 Group.label。
-    let project = state.cwd.clone().unwrap_or_else(|| "(未知)".to_string());
+    // A04/B：项目身份 = 当前会话的项目根（子目录归并、越出当前根即新项目）；
+    // 不同路径的同名目录不合并，同路径的跨工具会话共用同一 key；无有效 cwd 时
+    // 沿用既有 "(未知)" 兜底，展示名（basename）由聚合层派生为 Group.label。
+    let project = state
+        .tracker
+        .root()
+        .map_or_else(|| "(未知)".to_string(), str::to_string);
+    let event_cwd = state.tracker.cwd().map(str::to_string);
+    let session_initial_cwd = state.initial_cwd.clone();
     // 守恒已受检确认 cached + cache_write ≤ input 且 total 可表示：
     // 非缓存输入一次减法得到（不再逐项减）。
     let event = UsageEvent {
@@ -298,6 +309,8 @@ fn ingest_token_count(
         model: model.to_string(),
         session_id: state.session_id.clone(),
         project,
+        session_initial_cwd,
+        event_cwd,
         record_id: String::new(),
         input_tokens: input - cached_plus_cw,
         output_tokens: output,

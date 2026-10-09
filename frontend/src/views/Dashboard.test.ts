@@ -282,8 +282,9 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
         const p = snapshotPayload();
         return Promise.resolve({
           ...p,
-          // A06 之前的快照：项目身份是 slug/cwd 分裂口径，分组 key 与下钻
-          // key（老 slug）都已失效——读取时必须整体忽略，而不是恢复旧分组。
+          // v7 及更早的快照：项目 key 是"会话初始路径/slug"口径，分组 key 与
+          // 下钻 key（老 slug）在项目根归并后都已失效——读取时必须整体忽略，
+          // 而不是恢复旧分组。
           v: 6,
           filters: { ...p.filters, drill: { type: "project", key: "alpha" } },
         });

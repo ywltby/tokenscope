@@ -377,6 +377,9 @@ pub(crate) fn collection_retained_bytes(c: &CollectionSnapshot) -> Result<usize,
         n.add(string_bytes(&e.session_id)?)?;
         n.add(string_bytes(&e.project)?)?;
         n.add(string_bytes(&e.record_id)?)?;
+        // B02：目录上下文字段同样计入保留字节（只计 Some 的堆分配）。
+        n.add(retained::opt_string_bytes(&e.session_initial_cwd)?)?;
+        n.add(retained::opt_string_bytes(&e.event_cwd)?)?;
     }
     // 逐源统计：CollectStats 只有 u64 计数，无堆分配。
     n.add(vec_bytes(&c.sources)?)?;
@@ -1099,6 +1102,12 @@ pub struct EventRow {
     pub model: String,
     pub session_id: String,
     pub project: String,
+    /// B02：会话初始工作目录（归一化）；None = 该会话没有可信 cwd
+    ///（身份由文件身份或 `(未知)` 兜底）。
+    pub session_initial_cwd: Option<String>,
+    /// B02：该请求作用域内最近观察到的结构化工作目录（保留子目录细节；
+    /// 与 `project` 的区别是后者已按项目根归并）。
+    pub event_cwd: Option<String>,
     pub input: u64,
     pub output: u64,
     pub cache_write: u64,
@@ -1201,6 +1210,8 @@ pub(crate) fn query_events_from(
                 model: e.model.clone(),
                 session_id: e.session_id.clone(),
                 project: e.project.clone(),
+                session_initial_cwd: e.session_initial_cwd.clone(),
+                event_cwd: e.event_cwd.clone(),
                 input: e.input_tokens,
                 output: e.output_tokens,
                 cache_write: e.cache_write_tokens,
@@ -1612,6 +1623,8 @@ cache_read = 0.4
             model: "m".into(),
             session_id: "s".into(),
             project: "p".into(),
+            session_initial_cwd: None,
+            event_cwd: None,
             record_id: String::new(),
             input_tokens: 1,
             output_tokens: 1,
@@ -1863,6 +1876,44 @@ cache_read = 0.4
             "doubao 经 models.dev 层入价: {r:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// B02：新增的目录上下文字段必须计入保留字节——只改模型漏改记账会让
+    /// 预算低估（RC05 的记账对象是完整可达的保留对象图）。
+    #[test]
+    fn new_cwd_fields_are_in_memory_budget() {
+        let snap = |e: UsageEvent| CollectionSnapshot {
+            generation: 0,
+            events: vec![e],
+            sources: Vec::new(),
+            warnings: Vec::new(),
+            pricing: Arc::new(Pricing::default()),
+            pricing_revision: String::new(),
+        };
+        let mk = |initial: Option<&str>, cwd: Option<&str>| UsageEvent {
+            ts: "2026-07-17T15:00:00Z".parse().unwrap(),
+            agent: AgentKind::Codex,
+            model: "m".into(),
+            session_id: "s".into(),
+            project: "p".into(),
+            session_initial_cwd: initial.map(str::to_string),
+            event_cwd: cwd.map(str::to_string),
+            record_id: String::new(),
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
+        };
+        let without = collection_retained_bytes(&snap(mk(None, None))).unwrap();
+        let with = collection_retained_bytes(&snap(mk(
+            Some("C:/work/alpha-session-initial"),
+            Some("C:/work/alpha/sub/deep/event-cwd"),
+        )))
+        .unwrap();
+        assert!(
+            with > without,
+            "目录上下文字段必须计入保留字节：{with} vs {without}"
+        );
     }
 
     #[test]
@@ -2640,6 +2691,8 @@ mod collect_stability_tests {
                     model: "m".into(),
                     session_id: "s".into(),
                     project: "p".into(),
+                    session_initial_cwd: None,
+                    event_cwd: None,
                     record_id: String::new(),
                     input_tokens: 1,
                     output_tokens: 1,
@@ -2720,6 +2773,8 @@ mod collect_stability_tests {
                     model: "m".into(),
                     session_id: "s".into(),
                     project: "p".into(),
+                    session_initial_cwd: None,
+                    event_cwd: None,
                     record_id: String::new(),
                     input_tokens: 1,
                     output_tokens: 1,
@@ -2804,6 +2859,11 @@ mod retained_bytes {
         let s: Vec<String> = Vec::with_capacity(2);
         assert!(strings_bytes(&s).unwrap() >= 2 * std::mem::size_of::<String>());
     }
+
+    /// B02：新增的目录上下文字段必须计入保留字节——只改模型漏改记账会让
+    /// 预算低估，正是 RC05 禁止的情况。断言在顶层 tests 模块（那里可见
+    /// `CollectionSnapshot` 与 `collection_retained_bytes`）：
+    /// `new_cwd_fields_are_in_memory_budget`。
 
     #[test]
     fn collect_retained_leaf_helpers_reject_overflow_not_saturate() {

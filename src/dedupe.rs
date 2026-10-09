@@ -110,6 +110,8 @@ mod tests {
             model: "m".into(),
             session_id: e.session.into(),
             project: "p".into(),
+            session_initial_cwd: None,
+            event_cwd: None,
             record_id: e.record_id.into(),
             input_tokens: e.input,
             output_tokens: e.output,

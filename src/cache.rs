@@ -51,7 +51,10 @@ pub struct CacheStats {
 /// v8 = 项目身份口径统一（A06）：Claude 改为会话初始 cwd、Codex 改为归一化
 /// cwd、两者与映射解析出的真实路径共用同一 key——旧行里的项目身份是另一种
 /// 口径，必须整体失效重解析（否则升级后仍按旧 slug 分组）。
-const SCHEMA_VERSION: &str = "8";
+/// v9 = 项目根归并（B02/B03）：`project` 改为"当前项目根"（子目录归并、越界
+/// 成新项目），并新增 `session_initial_cwd` / `event_cwd` 两个目录上下文字段——
+/// 旧行的 `project` 是按会话首值/轮次精确取值，与归并语义不同，必须重解析。
+const SCHEMA_VERSION: &str = "9";
 
 fn fingerprint(size: u64, mtime_ms: i64) -> (i64, i64) {
     // u64 → i64 存库；实际文件大小远小于 i64 上限。
@@ -180,6 +183,8 @@ impl Cache {
                 model TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 project TEXT NOT NULL,
+                session_initial_cwd TEXT,
+                event_cwd TEXT,
                 input INTEGER NOT NULL,
                 output INTEGER NOT NULL,
                 cache_write INTEGER NOT NULL,
@@ -258,7 +263,8 @@ impl Cache {
         let restored_bad_lines;
         {
             let mut stmt = tx.prepare(
-                "SELECT ts, record_id, model, session_id, project, input, output, cache_write, cache_read
+                "SELECT ts, record_id, model, session_id, project, session_initial_cwd, event_cwd,
+                        input, output, cache_write, cache_read
                  FROM events WHERE file_id = ?1 ORDER BY rowid",
             )?;
             let rows = stmt.query_map([id], |r| {
@@ -268,15 +274,29 @@ impl Cache {
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
-                    r.get::<_, i64>(5)?,
-                    r.get::<_, i64>(6)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
                     r.get::<_, i64>(7)?,
                     r.get::<_, i64>(8)?,
+                    r.get::<_, i64>(9)?,
+                    r.get::<_, i64>(10)?,
                 ))
             })?;
             let mut stats_bad = 0u64;
             for row in rows {
-                let (ts, record_id, model, session_id, project, input, output, cw, cr) = row?;
+                let (
+                    ts,
+                    record_id,
+                    model,
+                    session_id,
+                    project,
+                    session_initial_cwd,
+                    event_cwd,
+                    input,
+                    output,
+                    cw,
+                    cr,
+                ) = row?;
                 let event = crate::model::UsageEvent {
                     ts: ts
                         .parse()
@@ -285,6 +305,8 @@ impl Cache {
                     model,
                     session_id,
                     project,
+                    session_initial_cwd,
+                    event_cwd,
                     record_id,
                     input_tokens: input.max(0) as u64,
                     output_tokens: output.max(0) as u64,
@@ -373,8 +395,8 @@ impl Cache {
         )?;
         let mut stmt = tx.prepare(
             "INSERT INTO events(file_id, ts, record_id, model, session_id, project,
-                                input, output, cache_write, cache_read)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                session_initial_cwd, event_cwd, input, output, cache_write, cache_read)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )?;
         for e in &parse.events {
             // SF08：入库前受检转换——超出 i64 的 token 值不得经缓存往返
@@ -398,6 +420,8 @@ impl Cache {
                 e.model,
                 e.session_id,
                 e.project,
+                e.session_initial_cwd,
+                e.event_cwd,
                 input,
                 output,
                 cw,
@@ -543,6 +567,8 @@ mod tests {
                 model: "m".into(),
                 session_id: "s".into(),
                 project: "p".into(),
+                session_initial_cwd: Some("C:/p".into()),
+                event_cwd: Some("C:/p/sub".into()),
                 record_id: String::new(),
                 input_tokens: i as u64 + 1,
                 output_tokens: 1,

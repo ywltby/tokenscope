@@ -272,6 +272,8 @@ mod tests {
             session_id: "s".into(),
             record_id: String::new(),
             project: "proj-a".into(),
+            session_initial_cwd: None,
+            event_cwd: None,
             input_tokens: input,
             output_tokens: output,
             cache_write_tokens: 0,

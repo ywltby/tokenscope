@@ -30,7 +30,15 @@ pub struct UsageEvent {
     pub agent: AgentKind,
     pub model: String,
     pub session_id: String,
+    /// 已决归属 key（阶段 B）：按"项目根 + 前缀归并"决定——进入当前根的
+    /// 子目录仍归该根，越出当前根则视为切换到新项目。
     pub project: String,
+    /// B02：会话**初始**工作目录（归一化）；None = 该会话没有可信 cwd，
+    /// 身份由文件身份（Claude）或 `(未知)`（Codex）兜底。
+    pub session_initial_cwd: Option<String>,
+    /// B02：该请求作用域内最近观察到的结构化工作目录（归一化）；与
+    /// `project` 的区别是它保留子目录细节，用于排查与后续规则演进。
+    pub event_cwd: Option<String>,
     /// agent 原生日志标识（Claude 的 message.id；Codex 无此标识记空串），
     /// 供全局去重使用。
     pub record_id: String,
@@ -135,6 +143,8 @@ mod tests {
             model: "m".into(),
             session_id: "s".into(),
             project: "p".into(),
+            session_initial_cwd: None,
+            event_cwd: None,
             input_tokens: input,
             output_tokens: output,
             cache_write_tokens: cw,

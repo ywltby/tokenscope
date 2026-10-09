@@ -5,6 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
+use tokenscope::cache::{Cache, FileKey};
+use tokenscope::model::AgentKind;
 use tokenscope::source::Source;
 use tokenscope::source::claude::ClaudeSource;
 use tokenscope::source::codex::CodexSource;
@@ -124,4 +126,140 @@ fn codex_new_session_does_not_inherit_cwd() {
         p.events[5].project, "E:/third/gamma",
         "该 session 首个有效 turn_context 生效，且不回溯"
     );
+}
+
+// ---- 阶段 B（B02/B03）：项目根归并 ----
+
+#[test]
+fn claude_structured_cwd_switch() {
+    let p = claude_parse("session-switch/claude-switch.jsonl");
+    assert_eq!(p.stats.bad_lines, 0);
+    let seq: Vec<&str> = p.events.iter().map(|e| e.project.as_str()).collect();
+    assert_eq!(
+        seq,
+        ["C:/test", "C:/test", "C:/test", "C:/bee", "C:/bee"],
+        "进入子目录仍归当前根；越界即新项目，其子目录同属新项目"
+    );
+    let cwds: Vec<Option<&str>> = p.events.iter().map(|e| e.event_cwd.as_deref()).collect();
+    assert_eq!(
+        cwds,
+        [
+            Some("C:/test"),
+            Some("C:/test/123/456"),
+            Some("C:/test"),
+            Some("C:/bee"),
+            Some("C:/bee/123"),
+        ],
+        "event_cwd 保留子目录细节"
+    );
+}
+
+#[test]
+fn codex_structured_cwd_switch() {
+    let p = codex_parse("session-switch/codex-switch.jsonl");
+    assert_eq!(p.stats.bad_lines, 0);
+    let seq: Vec<&str> = p.events.iter().map(|e| e.project.as_str()).collect();
+    assert_eq!(
+        seq,
+        ["C:/test", "C:/test", "C:/bee", "C:/bee", "C:/test"],
+        "子目录归并 + 越界切换 + 回到旧目录按新根处理"
+    );
+}
+
+#[test]
+fn switch_does_not_reassign_previous_events() {
+    // 归属在事件产生时定稿：后来的切换不得回溯改写更早的请求（两侧同理）。
+    let c = claude_parse("session-switch/claude-switch.jsonl");
+    assert_eq!(c.events[0].project, "C:/test");
+    assert_eq!(c.events[2].project, "C:/test");
+    assert_eq!(c.events[3].project, "C:/bee");
+    let x = codex_parse("session-switch/codex-switch.jsonl");
+    assert_eq!(x.events[0].project, "C:/test");
+    assert_eq!(x.events[2].project, "C:/bee");
+    assert_eq!(x.events[4].project, "C:/test", "回到旧目录不改写历史");
+}
+
+#[test]
+fn shell_cd_text_does_not_change_project() {
+    // 工具文本里的 `cd` 不改变结构化 cwd（B01 结论 3）：归属保持会话当前根。
+    let p = claude_parse("session-switch/claude-shell-cd.jsonl");
+    assert_eq!(p.stats.bad_lines, 0);
+    assert_eq!(p.events.len(), 2);
+    assert!(p.events.iter().all(|e| e.project == "C:/test"));
+    assert!(
+        p.events
+            .iter()
+            .all(|e| e.event_cwd.as_deref() == Some("C:/test"))
+    );
+}
+
+#[test]
+fn both_agents_follow_decided_subdirectory_policy() {
+    // 子目录政策两侧一致：更深的工作目录仍归当前项目根。
+    let c = claude_parse("session-switch/claude-switch.jsonl");
+    let x = codex_parse("session-switch/codex-switch.jsonl");
+    assert_eq!(
+        c.events[1].project, "C:/test",
+        "Claude：/test/123/456 → /test"
+    );
+    assert_eq!(x.events[1].project, "C:/test", "Codex：/test/123 → /test");
+}
+
+#[test]
+fn initial_cwd_is_stable_while_event_cwd_changes() {
+    // B02：会话初始目录稳定，event_cwd 随上下文变化；归属按项目根归并。
+    let p = claude_parse("session-switch/claude-switch.jsonl");
+    assert!(
+        p.events
+            .iter()
+            .all(|e| e.session_initial_cwd.as_deref() == Some("C:/test")),
+        "会话初始目录必须稳定"
+    );
+    let distinct: std::collections::BTreeSet<&str> = p
+        .events
+        .iter()
+        .filter_map(|e| e.event_cwd.as_deref())
+        .collect();
+    assert!(distinct.len() >= 3, "event_cwd 应当变化: {distinct:?}");
+    assert!(
+        p.events
+            .iter()
+            .all(|e| e.project == "C:/test" || e.project == "C:/bee")
+    );
+}
+
+#[test]
+fn cwd_context_survives_cache_roundtrip() {
+    // B02：两个目录上下文字段必须贯通缓存读写（序列化与恢复一致）。
+    let dir = std::env::temp_dir().join(format!("tokenscope-b02-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cache = Cache::open(&dir.join("cache.db")).unwrap();
+    let parse = claude_parse("session-switch/claude-switch.jsonl");
+    let key = FileKey {
+        path: "p.jsonl",
+        agent: AgentKind::ClaudeCode,
+        root: "root",
+        context_rev: "rev",
+    };
+    cache.store_file(&key, 10, 20, &parse).unwrap();
+    let hit = cache
+        .lookup_file(&key, 10, 20)
+        .unwrap()
+        .expect("指纹一致必须命中");
+    let take =
+        |p: &tokenscope::source::FileParse| -> Vec<(Option<String>, Option<String>, String)> {
+            p.events
+                .iter()
+                .map(|e| {
+                    (
+                        e.session_initial_cwd.clone(),
+                        e.event_cwd.clone(),
+                        e.project.clone(),
+                    )
+                })
+                .collect()
+        };
+    assert_eq!(take(&hit.parse), take(&parse));
+    std::fs::remove_dir_all(&dir).ok();
 }

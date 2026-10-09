@@ -204,6 +204,63 @@ fn split_components(s: &str, allow_backslash: bool) -> Option<Vec<&str>> {
     Some(out)
 }
 
+/// 阶段 B（B01 定稿规则）：会话内的**项目根**状态机。
+///
+/// 规则（用户 2026-10-09 确认）：会话从 `/test` 起步时——进入 `/test/123`
+/// 或更深目录仍属 `/test` 项目；一旦工作目录越出当前根（如 `/test` →
+/// `/bee`），该目录成为**新项目**，其子目录（`/bee/123`）同属新项目。
+///
+/// 语义要点：
+/// - 只在**越界**时更新根，子目录不改变根；
+/// - 「无 cwd」不改变状态（沿用已知根与最近目录），也不得借用未来切换；
+/// - session 边界由调用方显式 [`reset`](Self::reset)；
+/// - 判定按字节前缀（Windows 大小写不折叠）——宁可保守拆开，也不猜测合并。
+#[derive(Debug, Default, Clone)]
+pub struct ProjectRootTracker {
+    /// 最近观察到的（已归一化）工作目录。
+    cwd: Option<String>,
+    /// 当前项目根（越界时更新）。
+    root: Option<String>,
+}
+
+impl ProjectRootTracker {
+    /// 观察一个已归一化的工作目录：在根之下则保持根，越界则以该目录为新根。
+    pub fn observe(&mut self, cwd: &str) {
+        self.cwd = Some(cwd.to_string());
+        match &self.root {
+            Some(root) if is_under(cwd, root) => {}
+            _ => self.root = Some(cwd.to_string()),
+        }
+    }
+
+    /// session 边界：目录上下文整体重置（新会话不继承旧会话）。
+    pub fn reset(&mut self) {
+        self.cwd = None;
+        self.root = None;
+    }
+
+    /// 当前项目根（已决归属 key）。
+    pub fn root(&self) -> Option<&str> {
+        self.root.as_deref()
+    }
+
+    /// 最近观察到的结构化工作目录（保留子目录细节）。
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
+    }
+}
+
+/// `cwd` 是否位于 `root` 之下（含相等）；根路径以分隔符结尾时按纯前缀处理。
+fn is_under(cwd: &str, root: &str) -> bool {
+    if cwd == root {
+        return true;
+    }
+    if root.ends_with('/') {
+        return cwd.starts_with(root);
+    }
+    cwd.len() > root.len() && cwd.starts_with(root) && cwd.as_bytes()[root.len()] == b'/'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +277,36 @@ mod tests {
         assert_eq!(uri_scheme("file:///a"), Some("file"));
         assert_eq!(uri_scheme("1http://a"), None);
         assert_eq!(uri_scheme("no-colon"), None);
+    }
+
+    #[test]
+    fn tracker_merges_subdirectories_and_switches_on_escape() {
+        let mut t = ProjectRootTracker::default();
+        t.observe("C:/test");
+        assert_eq!(t.root(), Some("C:/test"));
+        t.observe("C:/test/123");
+        assert_eq!(t.root(), Some("C:/test"), "子目录仍属同一项目");
+        t.observe("C:/test/123/456/789");
+        assert_eq!(t.root(), Some("C:/test"));
+        t.observe("C:/bee");
+        assert_eq!(t.root(), Some("C:/bee"), "越出当前根 → 新项目");
+        t.observe("C:/bee/123");
+        assert_eq!(t.root(), Some("C:/bee"));
+        // 回到先前的其他目录同样按"越界即新根"处理（不猜测历史归属）。
+        t.observe("C:/test");
+        assert_eq!(t.root(), Some("C:/test"));
+        // 前缀边界：C:/testx 不是 C:/test 的子目录。
+        let mut t2 = ProjectRootTracker::default();
+        t2.observe("C:/test");
+        t2.observe("C:/testx");
+        assert_eq!(t2.root(), Some("C:/testx"));
+        // 根路径（盘符根与 POSIX 根）下的一切都在其内。
+        let mut t3 = ProjectRootTracker::default();
+        t3.observe("/");
+        t3.observe("/srv/app");
+        assert_eq!(t3.root(), Some("/"));
+        t3.reset();
+        assert_eq!(t3.root(), None);
+        assert_eq!(t3.cwd(), None);
     }
 }

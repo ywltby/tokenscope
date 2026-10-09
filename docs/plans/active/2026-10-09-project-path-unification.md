@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust、serde、SQLite、Tauri 2、Vue 3、Vitest。
 
-**状态：** 阶段 A（A01–A06）已实施并提交；阶段 B（B01–B03）未开始。阶段 B 的归属规则未定稿前，不得声称两侧目录切换语义一致。
+**状态：** 阶段 A（A01–A06）与阶段 B（B01–B03）均已实施并提交；归属规则已由用户 2026-10-09 定稿（项目根归并，两侧一致）。唯一未执行的验收项是 GUI 原生实例的目视确认（自动化与隔离数据路径验收均已完成），因此本计划保持 active、暂不归档。
 
 ## 1. 依据与范围
 
@@ -78,6 +78,12 @@
 - 两侧更新语义不同，不能共用同一个「会话目录」解释；
 - 实例 1–4 的产品选择见研究文档 §4；确认之前不上线任何自动重新分组。
 
+**定稿（2026-10-09 用户确认）**：归属按**项目根**归并、两侧一致——从 `/test`
+起步时，进入 `/test/123` 或更深目录仍归 `/test`；工作目录一旦**越出当前根**
+（`/test` → `/bee`），该目录即成为新项目，其子目录（`/bee/123`）同属新项目。
+判定用归一化路径的分量边界前缀，不做文件系统访问、不推断仓库根、不折叠
+大小写；缺上下文不回溯、不借用未来切换（实例 4 保持"记 `(未知)` 后按新值"）。
+
 ## 3. 任务清单
 
 每项按“写合成失败用例 → 运行确认失败 → 最小实现 → 定向验证 → 自查提交”执行。以下测试名是要新增或修订的验收入口，不代表已经存在或通过。
@@ -142,26 +148,26 @@
 - [x] 仅保留最小结构化字段样例（type、sessionId、cwd、时间与合成 usage）；不提交真实提示词、工具输出或用户日志。
 - [x] 区分 `session_meta`、`turn_context`、Claude user/assistant 顶层 cwd，以及仅 shell 子进程执行 `cd` 的反例（后者作为「未验证推论」明示）。
 - [x] 明确记录哪种变化足以代表当前请求工作目录；不能仅凭“存在 cwd 字段”认定更新语义相同（Codex 轮级快照 vs Claude 行级快照）。
-- [ ] 定稿 §2 决策门：事件 cwd 与项目归属的关系、父子目录处理、缺上下文处理；需要产品选择的规则列成具体实例供确认，不默认归并仓库根。**→ 证据核验已完成，四个实例的选项待产品确认（研究文档 §4）。**
+- [x] 定稿 §2 决策门：事件 cwd 与项目归属的关系、父子目录处理、缺上下文处理；需要产品选择的规则列成具体实例供确认，不默认归并仓库根。**→ 已由用户 2026-10-09 确认（项目根归并：子目录归并、越界切换；缺上下文不回溯）。**
 - [x] 验证：将观测转换为 B03 的具名 fixture（研究文档 §5 给出用例 → fixture 映射）；核对每个结论都有样例与局限。提交 `docs(project): 核验会话目录变化语义并列出归属待决项`（本次）。
 
 ### B02 分离初始项目路径与请求工作目录
 
-- [ ] 按 B01 已定规则修改 `src/model.rs`、`src/source/claude.rs`、`src/source/codex.rs`、`src/cache.rs`；若暴露到 IPC，再同步 `src/report.rs` 与 `frontend/src/types.ts`，不强制新增界面控件。
-- [ ] 数据模型分别表达 `session_initial_cwd` 与 `event_cwd`（可选），已有 `project` 保存已决归属 key；字段名称可按仓库惯例定稿，但语义不可复用成一个字段。
-- [ ] 新字段必须贯通序列化和缓存读写；若两阶段分批发布，B 再递增解析版本，并按兼容性判断界面快照版本，不复用已发布的版本 7。
-- [ ] 更新 `src/report.rs` 保留内存预算估算与 `src/query.rs` 相关测试；新增字符串也计入预算，不能只修改模型而漏掉保留内存。
-- [ ] 测试 `initial_cwd_is_stable_while_event_cwd_changes`、`cwd_context_survives_cache_roundtrip`、`new_cwd_fields_are_in_memory_budget`。
-- [ ] 验证：`cargo test cwd_context`、`cargo test initial_cwd`、`cargo test memory_budget`；提交 `feat(project): 分离会话初始路径和请求工作目录`。
+- [x] 按 B01 已定规则修改 `src/model.rs`、`src/source/claude.rs`、`src/source/codex.rs`、`src/cache.rs`；若暴露到 IPC，再同步 `src/report.rs` 与 `frontend/src/types.ts`，不强制新增界面控件（`EventRow` 增两个可选字段，界面未新增控件）。
+- [x] 数据模型分别表达 `session_initial_cwd` 与 `event_cwd`（均为 `Option<String>`），已有 `project` 保存已决归属 key；字段名称可按仓库惯例定稿，但语义不可复用成一个字段。
+- [x] 新字段必须贯通序列化和缓存读写；若两阶段分批发布，B 再递增解析版本，并按兼容性判断界面快照版本，不复用已发布的版本 7（解析版本 8 → **9**，界面快照 7 → **8**）。
+- [x] 更新 `src/report.rs` 保留内存预算估算与 `src/query.rs` 相关测试；新增字符串也计入预算，不能只修改模型而漏掉保留内存（`collection_retained_bytes` 计入两个 `Option<String>`）。
+- [x] 测试 `initial_cwd_is_stable_while_event_cwd_changes`、`cwd_context_survives_cache_roundtrip`、`new_cwd_fields_are_in_memory_budget`。
+- [x] 验证：`cargo test cwd_context`、`cargo test initial_cwd`、`cargo test memory_budget` 均命中并通过；提交与 B03 合并为 `feat(project): 支持结构化会话目录切换归属`（字段与归属规则耦合，拆开会留下不可编译的中间状态——已在提交信息中说明）。
 
 ### B03 双侧切换归属与最终验收
 
-- [ ] 修改两侧适配器与 `tests/project_path_attribution.rs`、`tests/project_path_drilldown.rs`，新增 `tests/fixtures/project-path/session-switch/` 合成用例。
-- [ ] 测试 `claude_structured_cwd_switch`、`codex_structured_cwd_switch`、`switch_does_not_reassign_previous_events`、`shell_cd_text_does_not_change_project`、`both_agents_follow_decided_subdirectory_policy`。
-- [ ] 未知上下文不借用下一 session 或未来切换的 cwd；归属变化不回溯修改已发生请求。
-- [ ] 验证切换后 A/B 各组的请求与 token，A → B → A 可正确返回 A；下钻、分页、热缓存和无缓存结果一致。
-- [ ] 执行 §4 门禁及隔离原生验收，更新统计口径与阶段状态。只有 B01–B03 和 A 均验收完成才归档整份计划。
-- [ ] 提交 `feat(project): 支持结构化会话目录切换归属`。
+- [x] 修改两侧适配器与 `tests/project_path_attribution.rs`、`tests/project_path_drilldown.rs`，新增 `tests/fixtures/project-path/session-switch/` 合成用例。
+- [x] 测试 `claude_structured_cwd_switch`、`codex_structured_cwd_switch`、`switch_does_not_reassign_previous_events`、`shell_cd_text_does_not_change_project`、`both_agents_follow_decided_subdirectory_policy`。
+- [x] 未知上下文不借用下一 session 或未来切换的 cwd；归属变化不回溯修改已发生请求。
+- [x] 验证切换后 A/B 各组的请求与 token，A → B → A 可正确返回 A；下钻、分页、热缓存和无缓存结果一致（阶段 A 的下钻/守恒用例继续通过，另加切换后的归属断言）。
+- [x] 执行 §4 门禁及隔离原生验收（隔离数据路径部分），更新统计口径与阶段状态。只有 B01–B03 和 A 均验收完成才归档整份计划——**GUI 原生目视项未执行，故本计划保持 active、不归档**。
+- [x] 提交 `feat(project): 支持结构化会话目录切换归属`（含 B02 数据模型，见 B02 说明）。
 
 ## 4. 验证命令与执行纪律
 
