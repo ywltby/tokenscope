@@ -122,7 +122,7 @@ const stale = ref(false);
 const cachedAt = ref<string | null>(null);
 
 const dimOptions: { label: string; value: Dim }[] = [
-  { label: "按日", value: "day" },
+  { label: "按时间", value: "day" },
   { label: "按模型", value: "model" },
   { label: "按项目", value: "project" },
   { label: "按应用", value: "agent" },

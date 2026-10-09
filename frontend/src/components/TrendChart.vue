@@ -5,9 +5,9 @@
 //
 // UX05（界面审查修复）：实例生命周期与数据更新分离——
 //   - 初始化 / 同维度数据更新 / 维度切换 / 主题切换 / 卸载各自独立；
-//   - 同维度数据更新走 setOption(merge)，不 dispose 重建、保留 zoom；
+//   - 同维度数据更新走 setOption(merge)，不 dispose 重建、保留滚动位置；
 //   - 维度切换完整替换 option（清掉旧轴/series/dataZoom）；
-//   - 主题切换允许一次 dispose/init，并恢复同维度适用的 zoom；
+//   - 主题切换允许一次 dispose/init，保留外层滚动位置；
 //   - resize 只 resize；卸载释放实例与观察器；
 //   - 0 类别不初始化图表（父级另给明确空状态）；
 //   - 所有 setOption 路径继续使用 SF01 的 DOM/textContent 安全 formatter。
@@ -38,44 +38,14 @@ let chart: echarts.ECharts | null = null;
 let observer: ResizeObserver | null = null;
 
 const isDay = computed(() => props.by === "day");
-const titleText = computed(() =>
-  isDay.value ? "每日 token 趋势（堆叠）" : "token 分布（按用量排序）",
-);
+const titleText = "使用趋势";
 
-/// 非日维度为横向条形：高度封顶 560px，超出部分图内滚动（不无限撑高页面）。
-const MAX_H = 560;
+/// 非日维度为横向条形：每项至少 34px，外层视口封顶 560px 并滚动（不无限撑高页面）。
 function canvasHeight(count: number): number {
-  return isDay.value ? 320 : Math.min(MAX_H, Math.max(320, count * 34 + 70));
+  return isDay.value ? 320 : Math.max(320, count * 34 + 70);
 }
 
-function buildDataZoom(
-  categories: string[],
-): { type: "inside" | "slider"; [k: string]: unknown }[] | undefined {
-  if (isDay.value) {
-    return categories.length > 60 ? [{ type: "inside", xAxisIndex: 0 }] : undefined;
-  }
-  return props.groups.length > 14
-    ? [
-        { type: "inside", yAxisIndex: 0 },
-        { type: "slider", yAxisIndex: 0, right: 0, width: 14 },
-      ]
-    : undefined;
-}
-
-/// 读取当前 zoom（用于主题重建后恢复同维度适用的缩放）。
-function captureZoom(): { start?: number; end?: number }[] | null {
-  const c = chart as unknown as { getOption?: () => unknown } | null;
-  if (!c || typeof c.getOption !== "function") return null;
-  try {
-    const opt = c.getOption() as { dataZoom?: { start?: number; end?: number }[] };
-    if (!Array.isArray(opt?.dataZoom) || opt.dataZoom.length === 0) return null;
-    return opt.dataZoom.map((z) => ({ start: z.start, end: z.end }));
-  } catch {
-    return null;
-  }
-}
-
-function buildOption(zoom?: { start?: number; end?: number }[] | null): echarts.EChartsOption {
+function buildOption(): echarts.EChartsOption {
   const t = chartTokens(mode.value, overrides.value);
   const groups = props.groups;
   // F03（计划 A4）：分类轴与全部 series 由同一份排序结果生成，标签与数值不错位
@@ -98,15 +68,12 @@ function buildOption(zoom?: { start?: number; end?: number }[] | null): echarts.
       formatValue: (v) => fmtNum(v),
     });
   };
-  let dataZoom = buildDataZoom(categories);
-  if (dataZoom && zoom) {
-    dataZoom = dataZoom.map((d, i) => ({ ...d, ...(zoom[i] ?? {}) }));
-  }
   return {
     backgroundColor: "transparent",
     // 固定语义色（与图例/摘要文字对应），禁用 ECharts 默认调色板
     color: t.series.map((s) => s.color),
     tooltip: {
+      appendToBody: true,
       trigger: "axis",
       backgroundColor: t.tooltipBg,
       borderColor: t.tooltipBorder,
@@ -124,7 +91,7 @@ function buildOption(zoom?: { start?: number; end?: number }[] | null): echarts.
           type: "category",
           data: categories,
           axisLine: { show: false },
-          axisLabel: { color: t.textMuted, fontSize: 12 },
+          axisLabel: { color: t.textMuted, fontSize: 12, interval: 0, rotate: 45 },
         }
       : {
           type: "value",
@@ -139,6 +106,7 @@ function buildOption(zoom?: { start?: number; end?: number }[] | null): echarts.
         }
       : {
           type: "category",
+          inverse: true,
           // interval 0 强制每个项目都显示名称；超长省略，完整值见 tooltip
           data: categories,
           axisLine: { show: false },
@@ -150,7 +118,7 @@ function buildOption(zoom?: { start?: number; end?: number }[] | null): echarts.
             overflow: "truncate",
           },
         },
-    dataZoom,
+    dataZoom: [],
     // 堆叠柱只让最上段（最后一个系列）带圆角：日维度柱顶 [4,4,0,0]，
     // 非日维度横向条尾 [0,4,4,0]（DESIGN.md §5 图表）
     series: series.map((s, i) => ({
@@ -159,7 +127,7 @@ function buildOption(zoom?: { start?: number; end?: number }[] | null): echarts.
       name: s.name,
       type: "bar",
       stack: "tokens",
-      // by != day 时换为普通并列条形，取值函数相同
+      // 非日维度横向堆叠，四类 token 全部保留
       barMaxWidth: 36,
       data: s.values,
       ...(i === series.length - 1
@@ -172,19 +140,24 @@ function buildOption(zoom?: { start?: number; end?: number }[] | null): echarts.
 function applyHeight(): void {
   if (!el.value) return;
   el.value.style.height = `${canvasHeight(props.groups.length)}px`;
+  el.value.style.minWidth = isDay.value ? `${props.groups.length * 48 + 80}px` : "0";
 }
 
 /// 首次初始化（0 类别不建实例）。
 function initChart(): void {
   if (!el.value || props.groups.length === 0) return;
   applyHeight();
-  chart = echarts.init(el.value, null);
+  chart = echarts.init(el.value, null, { renderer: "svg" });
   chart.setOption(buildOption(), { notMerge: true });
 }
 
-/// 同维度数据更新：merge（保留 zoom、不重建实例）。
+/// 同维度数据更新：merge（保留滚动位置、不重建实例）。
 function updateData(): void {
-  if (props.groups.length === 0) return;
+  if (props.groups.length === 0) {
+    chart?.dispose();
+    chart = null;
+    return;
+  }
   if (!chart) {
     initChart();
     return;
@@ -196,6 +169,11 @@ function updateData(): void {
 
 /// 维度切换：完整替换（清掉旧轴 / series / dataZoom 残留）。
 function switchDimension(): void {
+  const viewport = el.value?.parentElement;
+  if (viewport) {
+    viewport.scrollTop = 0;
+    viewport.scrollLeft = 0;
+  }
   if (!chart) {
     initChart();
     return;
@@ -205,15 +183,14 @@ function switchDimension(): void {
   chart.setOption(buildOption(), { notMerge: true });
 }
 
-/// 主题切换：允许一次 dispose/init，恢复同维度适用的 zoom。
+/// 主题切换：允许一次 dispose/init，保留外层滚动位置。
 function rebuildForTheme(): void {
   if (!el.value || props.groups.length === 0) return;
-  const zoom = captureZoom();
   chart?.dispose();
   chart = null;
   applyHeight();
-  chart = echarts.init(el.value, null);
-  chart.setOption(buildOption(zoom), { notMerge: true });
+  chart = echarts.init(el.value, null, { renderer: "svg" });
+  chart.setOption(buildOption(), { notMerge: true });
 }
 
 onMounted(() => {
@@ -230,9 +207,9 @@ onBeforeUnmount(() => {
 });
 
 // 数据更新与维度切换分离：只监听 by/mode 会漏掉新数据，只在每次数据更新
-// 时重建实例又会丢失 zoom 与实例状态——两者都不是这里的做法。
+// 时重建实例又会丢失滚动位置 与实例状态——两者都不是这里的做法。
 // 合并为单一批次判断：同一次 flush 内若维度变了就完整替换（不先 merge 再
-// 替换产生中间态），否则按同维度数据更新 merge（保留 zoom）。
+// 替换产生中间态），否则按同维度数据更新 merge（保留滚动位置）。
 watch(
   () => [props.groups, props.by] as const,
   (cur, prev) => {
@@ -260,7 +237,12 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
       </div>
     </div>
     <!-- 任务 8（硬约束）：绘图区实色衬底——ECharts 背景透明但容器 .ts-card-solid -->
-    <div class="chart-body ts-card-solid">
+    <div
+      class="chart-body ts-card-solid"
+      tabindex="0"
+      role="region"
+      aria-label="使用趋势，可滚动查看全部数据"
+    >
       <div
         ref="el"
         class="chart-canvas"
@@ -275,8 +257,14 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
 <style scoped>
 /* 绘图区实色衬底容器（.ts-card-solid 提供背景与圆角） */
 .chart-body {
+  max-height: 560px;
+  overflow: auto;
   padding: var(--ts-space-2) var(--ts-space-3);
   margin-top: var(--ts-space-2);
+}
+.chart-body:focus-visible {
+  outline: 2px solid var(--ts-accent);
+  outline-offset: 2px;
 }
 
 .chart-head {

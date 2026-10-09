@@ -305,7 +305,7 @@ class Instance {
   async waitForData(timeoutMs = 30000) {
     await this.page.waitForSelector(".app-nav", { timeout: timeoutMs });
     await this.page.waitForFunction(
-      () => document.querySelectorAll(".ts-skeleton, .n-skeleton").length === 0 && !!document.querySelector("canvas"),
+      () => document.querySelectorAll(".ts-skeleton, .n-skeleton").length === 0 && !!document.querySelector(".chart-canvas svg"),
       null,
       { timeout: timeoutMs, polling: 250 },
     );
@@ -467,15 +467,14 @@ async function measureDateShell(page) {
 
 async function measureChart(page) {
   const out = {};
-  const c = page.locator("canvas").first();
+  const c = page.locator(".chart-canvas svg").first();
   out.canvasPresent = (await c.count()) > 0;
   if (out.canvasPresent) {
     const b = await c.boundingBox();
     out.box = b;
     out.sizeOk = b && b.width > 100 && b.height > 60;
     out.painted = await c.evaluate((el) => {
-      const d = el.toDataURL().length;
-      return d > 2000;
+      return el.querySelectorAll("path").length > 0 && el.querySelectorAll("text").length > 0;
     });
   }
   return out;
@@ -678,7 +677,7 @@ const scenarios = {
     await page.waitForTimeout(900);
     ev.chartByModel = await measureChart(page);
     ck.add("chart_renders_after_dimension_switch", ev.chartByModel.sizeOk === true, JSON.stringify(ev.chartByModel.box));
-    await page.getByRole("radio", { name: "按日" }).click();
+    await page.getByRole("radio", { name: "按时间" }).click();
     await page.waitForTimeout(700);
     // 4) 日期外壳
     ev.date = await measureDateShell(page);
@@ -801,7 +800,7 @@ const scenarios = {
     await page.getByRole("radio", { name: "按模型" }).click();
     await page.waitForTimeout(800);
     const chart = await measureChart(page);
-    await page.getByRole("radio", { name: "按日" }).click();
+    await page.getByRole("radio", { name: "按时间" }).click();
     await page.waitForTimeout(600);
     const date = await measureDateShell(page);
     // 主题生效量测取**有颜色的卡片**：.app-shell/html/body 本身透明（实测），

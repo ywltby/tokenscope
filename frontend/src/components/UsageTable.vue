@@ -75,7 +75,7 @@ const columns = computed<DataTableColumn[]>(() => {
     },
     {
       // 设计系统 Task 5：金额列使用估算语义表头
-      title: "费用$(估算)",
+      title: "费用",
       key: "cost_usd",
       align: "center",
       className: "ts-num",

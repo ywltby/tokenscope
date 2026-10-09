@@ -11,7 +11,7 @@ const echartsMock = vi.hoisted(() => {
   const dispose = vi.fn();
   const resize = vi.fn();
   const getOption = vi.fn((): unknown => ({}));
-  const init = vi.fn(() => ({ setOption, dispose, resize, getOption }));
+  const init = vi.fn((..._args: unknown[]) => ({ setOption, dispose, resize, getOption }));
   return { setOption, dispose, resize, getOption, init };
 });
 
@@ -64,6 +64,32 @@ afterEach(() => {
 });
 
 describe("TrendChart（设计系统 Task 4）", () => {
+  it.each(["day", "model", "project", "agent"])("%s 超过200类仍保留每类的四项数据", async (by) => {
+    const groups = Array.from({ length: 240 }, (_, i) => ({
+      ...group(`category-${i}`, i),
+      tokens: { input: i, output: i * 2, cache_write: i * 3, cache_read: i * 4 },
+    }));
+    const w = mount(TrendChart, { props: { groups, by } });
+    await flushPromises();
+    const opt = setOption.mock.calls[0][0];
+    expect(opt.dataZoom).toEqual([]);
+    expect(opt.series).toHaveLength(4);
+    for (const [index, series] of opt.series.entries()) {
+      expect(series.data).toHaveLength(240);
+      expect(series.data.reduce((a: number, b: number) => a + b, 0)).toBe(
+        ((239 * 240) / 2) * (index + 1),
+      );
+    }
+    if (by === "day")
+      expect(
+        Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.minWidth),
+      ).toBeGreaterThan(240 * 40);
+    await w.setProps({ groups: groups.slice(0, 2) });
+    expect(
+      setOption.mock.calls.at(-1)![0].series.every((s: { data: number[] }) => s.data.length === 2),
+    ).toBe(true);
+    w.unmount();
+  });
   it("颜色修改同时更新系列与图例，不重建图表或覆盖缩放", async () => {
     const w = mount(TrendChart, { props: { groups: [group("a", 1)], by: "model" } });
     await flushPromises();
@@ -89,17 +115,19 @@ describe("TrendChart（设计系统 Task 4）", () => {
     w.unmount();
   });
 
-  it("非日维度类别很多时高度有上限并启用滚动（dataZoom）", async () => {
+  it.each(["model", "project", "agent"])("%s 完整排列所有类别，普通滚动不缩放数据", async (by) => {
     const many = Array.from({ length: 50 }, (_, i) => group(`model-${i}`, 50 - i));
-    const w = mount(TrendChart, { props: { groups: many, by: "model" } });
+    const w = mount(TrendChart, { props: { groups: many, by } });
     await flushPromises();
     const opt = setOption.mock.calls[0][0] as {
       dataZoom?: unknown[];
       yAxis: { data: string[] };
     };
-    expect(opt.dataZoom).toBeDefined();
+    expect(opt.dataZoom ?? []).toHaveLength(0);
+    expect(opt.yAxis.data).toHaveLength(50);
     const h2 = Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.height, 10);
-    expect(h2).toBeLessThanOrEqual(560);
+    expect(h2).toBeGreaterThanOrEqual(50 * 34);
+    expect(init.mock.calls[0][2]).toEqual({ renderer: "svg" });
     w.unmount();
   });
 
@@ -226,6 +254,9 @@ describe("TrendChart 生命周期与数据更新（UX05）", () => {
     const w = mount(TrendChart, { props: { groups: [group("2026-10-01", 1)], by: "day" } });
     await flushPromises();
     setOption.mockClear();
+    const viewport = w.find(".chart-body").element;
+    viewport.scrollLeft = 200;
+    viewport.scrollTop = 300;
 
     await w.setProps({ groups: [group("m1", 3)], by: "model" });
     await flushPromises();
@@ -237,10 +268,12 @@ describe("TrendChart 生命周期与数据更新（UX05）", () => {
     // 日维度 x=category/y=value；模型维度相反（x=value/y=category）
     expect(opt.xAxis.type).toBe("value");
     expect(opt.yAxis.type).toBe("category");
+    expect(viewport.scrollTop).toBe(0);
+    expect(viewport.scrollLeft).toBe(0);
     w.unmount();
   });
 
-  it("same_dimension_refresh_preserves_zoom：同维度刷新保留 zoom（merge，不重建）", async () => {
+  it("同维度刷新沿用实例并完整更新全部数据", async () => {
     const many = Array.from({ length: 20 }, (_, i) => group(`model-${i}`, 20 - i));
     const w = mount(TrendChart, { props: { groups: many, by: "model" } });
     await flushPromises();

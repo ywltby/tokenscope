@@ -1168,11 +1168,8 @@ const IMPL = {
   },
 
   /**
-   * 图表：多类别滚动可见完整类别；真实交互改变 zoom；同维刷新保持 zoom；
-   * 切维清理残留；摘要数值与数据一致。
-   *
-   * 断言方式：真实滚轮交互 + 画布像素指纹（ECharts 渲染到 canvas，页面没有
-   * 暴露实例；像素指纹比"检查某个属性存在"更能证明渲染确实变了）。
+   * 图表：完整 SVG 类别、普通滚轮到达末项、刷新保留位置、维度切换。
+   * 保留历史契约标识以兼容既有验收命令；不再允许滚轮缩放隐藏数据。
    */
   async chart_scroll_and_zoom_survive_supported_updates(ctx) {
     const session = await ctx.open({
@@ -1180,156 +1177,54 @@ const IMPL = {
       viewport: VIEWPORTS.desktop,
       theme: "light",
     });
-    const canvasFingerprint = (page) =>
-      page.evaluate(() => {
-        const list = [...document.querySelectorAll("canvas")];
-        if (list.length === 0) return null;
-        let acc = 0;
-        let bytes = 0;
-        const sizes = [];
-        for (const c of list) {
-          const url = c.toDataURL();
-          bytes += url.length;
-          for (let i = 0; i < url.length; i += 61) acc = (acc * 33 + url.charCodeAt(i)) >>> 0;
-        }
-        for (const c of list) {
-          const r = c.getBoundingClientRect();
-          sizes.push(
-            `${Math.round(r.width)}x${Math.round(r.height)}@${Math.round(r.left)},${Math.round(r.top)}`,
-          );
-        }
-        return { canvases: list.length, bytes, hash: acc, sizes: sizes.join("|") };
-      });
+    const contract = "chart_scroll_and_zoom_survive_supported_updates";
     try {
       await openDashboard(session);
       const page = session.page;
-      // 真实切到"按模型"——30 个类别才会启用 dataZoom（>14）
-      await clickSegment(page, "按模型");
-      await page.waitForTimeout(900);
-      // 把画布滚到视口**中央**——只 scrollIntoViewIfNeeded 时高画布仍可能
-      // 大部分在视口外，滚轮/拖动坐标落在视口外就传不到 ECharts。
-      await page
-        .locator("canvas")
-        .first()
-        .evaluate((el) => el.scrollIntoView({ block: "center" }));
-      await page.waitForTimeout(400);
-      const vw = session.viewport.width;
-      const vh = session.viewport.height;
-      const chartRect = async () => {
-        const raw = await page.locator("canvas").first().boundingBox();
-        if (!raw) return null;
-        const left = Math.max(raw.x, 4);
-        const top = Math.max(raw.y, 4);
-        const right = Math.min(raw.x + raw.width, vw - 4);
-        const bottom = Math.min(raw.y + raw.height, vh - 4);
-        return {
-          left,
-          top,
-          right,
-          bottom,
-          width: raw.width,
-          height: raw.height,
-          cx: (left + right) / 2,
-          cy: (top + bottom) / 2,
-        };
-      };
-      const centerChart = () =>
-        page
-          .locator("canvas")
-          .first()
-          .evaluate((el) => el.scrollIntoView({ block: "center" }));
-      await centerChart();
-      await page.waitForTimeout(300);
-      let box = await chartRect();
-      ctx.record(
-        "chart_scroll_and_zoom_survive_supported_updates",
-        "多类别图表渲染真实 canvas 且交互区完整可见",
-        !!box && box.right - box.left > 80 && box.bottom - box.top > 40,
-        box
-          ? `canvas=${box.width.toFixed(0)}x${box.height.toFixed(0)} 可见=(${box.left.toFixed(0)},${box.top.toFixed(0)})-(${box.right.toFixed(0)},${box.bottom.toFixed(0)})`
-          : "画布不在视口内可见",
-      );
-      await centerChart();
-      await page.waitForTimeout(300);
-      box = (await chartRect()) ?? box;
-      // 真实滚轮交互改变 zoom（inside dataZoom 绑在 y 轴上）
-      const before = await canvasFingerprint(page);
-      await page.mouse.move(box.cx, box.cy);
-      await page.mouse.wheel(0, -400);
-      await page.waitForTimeout(700);
-      const afterWheel = await canvasFingerprint(page);
-      // 诊断：滚轮无效时，改用真实拖动 inside dataZoom（panned 窗口）取证
-      let afterDrag = afterWheel;
-      if (before && afterWheel && before.hash === afterWheel.hash) {
-        // 拖动 inside dataZoom（在绘图区内按住并平移）
-        await page.mouse.move(box.cx, box.top + (box.bottom - box.top) * 0.3);
-        await page.mouse.down();
-        await page.mouse.move(box.cx, box.top + (box.bottom - box.top) * 0.7, { steps: 14 });
-        await page.mouse.up();
-        await page.waitForTimeout(700);
-        afterDrag = await canvasFingerprint(page);
+      for (const dimension of ["按模型", "按项目", "按应用", "按时间"]) {
+        await clickSegment(page, dimension);
+        await page.waitForTimeout(800);
+        const body = page.locator(".chart-body");
+        const svg = body.locator("svg");
+        const before = await svg.locator("text").allTextContents();
+        ctx.record(contract, `${dimension}完整绘制SVG`, before.length > 0, before.join(" | "));
+        if (dimension === "按项目") {
+          const labels = before.filter(t => /^multi-project-\d+$/.test(t));
+          ctx.record(contract, "项目全部30类均绘制", labels.length === 30, JSON.stringify(labels));
+        }
+        if (dimension === "按时间") {
+          const labels = before.filter(t => /^2026-09-\d+$/.test(t));
+          ctx.record(contract, "时间全部30日均绘制且旧模型不残留", labels.length === 30 && !before.some(t => /^multi-model-/.test(t)), JSON.stringify(labels));
+          await body.evaluate(el => { el.scrollLeft = el.scrollWidth; });
+          const last = await svg.getByText("2026-09-30", {exact: true}).boundingBox();
+          const viewport = await body.boundingBox();
+          ctx.record(contract, "水平滚至末日可见", !!last && last.x >= viewport.x && last.x + last.width <= viewport.x + viewport.width, JSON.stringify(last));
+        }
+        const metrics = await body.evaluate(el => ({
+          height: el.scrollHeight, visible: el.clientHeight,
+          width: el.scrollWidth, available: el.clientWidth,
+        }));
+        if (dimension === "按模型") {
+          const labels = before.filter(t => /^multi-model-\d+$/.test(t));
+          ctx.record(contract, "模型首尾及全部30个类别均绘制", labels.length === 30 && labels.includes("multi-model-0") && labels.includes("multi-model-29"), JSON.stringify(labels));
+          await body.evaluate(el => el.scrollIntoView({block: "center"}));
+          const box = await body.boundingBox();
+          await page.mouse.move(box.x + box.width / 2, Math.min(box.y + 100, 700));
+          await page.mouse.wheel(0, 400);
+          await page.waitForTimeout(250);
+          ctx.record(contract, "滚轮移动容器而不筛掉类别", (await body.evaluate(el => el.scrollTop)) > 0 && JSON.stringify(before) === JSON.stringify(await svg.locator("text").allTextContents()), JSON.stringify(metrics));
+          await body.evaluate(el => { el.scrollTop = el.scrollHeight; });
+          const last = svg.getByText("multi-model-29", {exact: true});
+          const lastBox = await last.boundingBox();
+          const bodyBox = await body.boundingBox();
+          ctx.record(contract, "滚至底部可见末项", !!lastBox && lastBox.y >= bodyBox.y && lastBox.y + lastBox.height <= bodyBox.y + bodyBox.height, JSON.stringify(lastBox));
+          const top = await body.evaluate(el => el.scrollTop);
+          await realClick(page, page.locator("button", {hasText: "刷新"}));
+          await page.waitForTimeout(1000);
+          ctx.record(contract, "同维刷新保留位置和全部类别", (await body.evaluate(el => el.scrollTop)) === top && JSON.stringify(before) === JSON.stringify(await svg.locator("text").allTextContents()), String(top));
+        }
+        await ctx.shot(contract, session, dimension);
       }
-      let afterSlider = afterDrag;
-      if (before && afterDrag && before.hash === afterDrag.hash) {
-        // 拖动 dataZoom 滑块（右侧 14px 轨道）
-        const trackX = box.right - 7;
-        await page.mouse.move(trackX, box.top + (box.bottom - box.top) * 0.2);
-        await page.mouse.down();
-        await page.mouse.move(trackX, box.top + (box.bottom - box.top) * 0.55, { steps: 14 });
-        await page.mouse.up();
-        await page.waitForTimeout(700);
-        afterSlider = await canvasFingerprint(page);
-      }
-      ctx.record(
-        "chart_scroll_and_zoom_survive_supported_updates",
-        "真实交互改变图表缩放窗口（滚轮或拖动 inside dataZoom）",
-        !!before &&
-          (before.hash !== afterWheel.hash ||
-            before.hash !== afterDrag.hash ||
-            before.hash !== afterSlider.hash),
-        `画布=${before?.sizes} 初始=${before?.hash} 滚轮=${afterWheel?.hash} 拖动=${afterDrag?.hash} 滑块=${afterSlider?.hash}`,
-      );
-      // 同维度刷新：merge 更新，zoom 状态保持（像素指纹应回到同一渲染结果）
-      // 先把指针移出画布——停留在柱条上会保留 hover emphasis，那与缩放无关
-      // 的像素差会让本断言假红。
-      await page.mouse.move(8, 8);
-      await page.waitForTimeout(600);
-      const zoomed = await canvasFingerprint(page);
-      const sizeBefore = await page
-        .locator("canvas")
-        .first()
-        .evaluate(
-          (el) =>
-            `${el.width}x${el.height}`,
-        );
-      await realClick(page, page.locator("button", { hasText: "刷新" }));
-      await page.mouse.move(8, 8);
-      await page.waitForTimeout(2200);
-      const afterRefresh = await canvasFingerprint(page);
-      const sizeAfter = await page
-        .locator("canvas")
-        .first()
-        .evaluate(
-          (el) =>
-            `${el.width}x${el.height}`,
-        );
-      ctx.record(
-        "chart_scroll_and_zoom_survive_supported_updates",
-        "同维度刷新保留缩放窗口（不 dispose 重建）",
-        !!zoomed && !!afterRefresh && zoomed.hash === afterRefresh.hash && sizeBefore === sizeAfter,
-        `刷新前=${zoomed?.hash}(${sizeBefore}) 刷新后=${afterRefresh?.hash}(${sizeAfter})`,
-      );
-      // 切维度：完整替换，旧类别不残留
-      await clickSegment(page, "按日");
-      await page.waitForTimeout(900);
-      const afterSwitch = await canvasFingerprint(page);
-      ctx.record(
-        "chart_scroll_and_zoom_survive_supported_updates",
-        "切维度后画布确实重绘（非保留旧实例状态）",
-        !!afterSwitch && !!afterRefresh && afterSwitch.hash !== afterRefresh.hash,
-        `切维前=${afterRefresh?.hash} 切维后=${afterSwitch?.hash}`,
-      );
-      await ctx.shot("chart_scroll_and_zoom_survive_supported_updates", session, "multi-category");
       ctx.finishSession(session);
     } finally {
       await session.close();

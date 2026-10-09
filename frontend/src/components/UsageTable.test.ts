@@ -87,11 +87,11 @@ describe("UsageTable 表格语义（设计系统 Task 5）", () => {
     }
   });
 
-  it("费用列表头带估算语义；未知标记用警告色而非 opacity", () => {
+  it("费用列表头简化为费用；未知标记用警告色而非 opacity", () => {
     const w = mount(UsageTable, { props: { report: report([group("m")], true) } });
     const cols = exposed(w).columns;
     const cost = cols.find((x) => x.key === "cost_usd");
-    expect(String(cost!.title)).toContain("估算");
+    expect(String(cost!.title)).toBe("费用");
     const unknownCol = cols.find((x) => x.key === "unknown_tokens");
     const vnode = unknownCol!.render!(group("x", { input: 100 })) as { props?: { style?: string } };
     const style = JSON.stringify(vnode?.props?.style ?? "");

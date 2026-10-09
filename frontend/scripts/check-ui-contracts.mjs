@@ -407,8 +407,9 @@ const READ_SOURCE_DIRS = () => {
 };
 
 const READ_CHART_CANVAS = () => {
-  const canvas = document.querySelector(".trend-card canvas");
-  return !!canvas && canvas.width > 0 && canvas.height > 0;
+  const svg = document.querySelector(".trend-card svg");
+  const rect = svg?.getBoundingClientRect();
+  return !!rect && rect.width > 0 && rect.height > 0;
 };
 
 const CLICK_SEGMENT = (label) => {
