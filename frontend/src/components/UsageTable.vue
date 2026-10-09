@@ -4,6 +4,7 @@ import { NCollapse, NCollapseItem, NDataTable, type DataTableColumn } from "naiv
 import { AGENT_LABEL, fmtNum, type Group, type SummaryReport } from "../types";
 import { formatMoney } from "../lib/formatMoney";
 import { tokenBucketLabel } from "../lib/tokenDisplay";
+import { displayTokens, totalTokens } from "../lib/tokenUsage";
 import { buildSourceLines } from "../lib/statsView";
 import ScrollList from "./ScrollList.vue";
 
@@ -51,7 +52,7 @@ const columns = computed<DataTableColumn[]>(() => {
     key: `tokens.${path}`,
     align: "center",
     className: "ts-num",
-    render: (row) => fmtNum(asGroup(row).tokens[path]),
+    render: (row) => fmtNum(displayTokens(asGroup(row).tokens)[path]),
   });
   const cols: DataTableColumn[] = [
     first,
@@ -65,13 +66,7 @@ const columns = computed<DataTableColumn[]>(() => {
       key: "total",
       align: "center",
       className: "ts-num",
-      render: (row) =>
-        fmtNum(
-          asGroup(row).tokens.input +
-            asGroup(row).tokens.output +
-            asGroup(row).tokens.cache_write +
-            asGroup(row).tokens.cache_read,
-        ),
+      render: (row) => fmtNum(totalTokens(asGroup(row).tokens)),
     },
     {
       // 设计系统 Task 5：金额列使用估算语义表头

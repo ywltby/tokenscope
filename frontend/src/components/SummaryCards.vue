@@ -2,25 +2,20 @@
 // 设计系统 Task 4：单张指标卡（DESIGN.md §5 指标卡）——左侧主读数估算费用
 // （44px），右侧三个次读数（26px）发丝线分隔；含未计价 token 时费用旁警告
 // 胶囊；命中率公式收进 tooltip（hover/focus 均可打开）；底部四类 token
-// 分项比例条 + 色点图例。公式口径不变：cache_read / (input + cache_read)。
+// 图例 + 输入/输出比例条。命中率分母为含两类缓存的总输入。
 import { computed, onBeforeUnmount, onMounted, ref, useId } from "vue";
 import { NTooltip } from "naive-ui";
 import { fmtNum, type Group } from "../types";
 import { formatMoney } from "../lib/formatMoney";
 import { TOKEN_BUCKETS } from "../lib/tokenDisplay";
+import { displayTokens, totalInput, totalTokens } from "../lib/tokenUsage";
 
 const props = defineProps<{ totals: Group }>();
 
-const total = computed(
-  () =>
-    props.totals.tokens.input +
-    props.totals.tokens.output +
-    props.totals.tokens.cache_write +
-    props.totals.tokens.cache_read,
-);
+const total = computed(() => totalTokens(props.totals.tokens));
 const wan = computed(() => (total.value / 1e4).toFixed(2));
 const hitRate = computed(() => {
-  const base = props.totals.tokens.input + props.totals.tokens.cache_read;
+  const base = totalInput(props.totals.tokens);
   if (base === 0) return null;
   return (props.totals.tokens.cache_read / base) * 100;
 });
@@ -64,7 +59,7 @@ const parts = computed(() =>
   TOKEN_BUCKETS.map((b) => ({
     kind: b.key,
     label: b.label,
-    value: props.totals.tokens[b.key],
+    value: displayTokens(props.totals.tokens)[b.key],
   })),
 );
 </script>
@@ -128,7 +123,7 @@ const parts = computed(() =>
               @mouseenter="hoverOpen = true"
               @mouseleave="hoverOpen = false"
             >
-              命中率 = 缓存命中 ÷（新增输入 + 缓存命中）。<br />
+              命中率 = 缓存命中 ÷ 输入。输入包含缓存写入和缓存命中。<br />
               缓存命中直接复用上下文，消耗 token 数计入分母但费用通常为零或极低。
             </div>
           </NTooltip>
@@ -144,7 +139,7 @@ const parts = computed(() =>
     <div class="parts-bar-container">
       <div v-if="total > 0" class="parts-bar" role="img" aria-label="token 分项比例条">
         <span
-          v-for="p in parts"
+          v-for="p in parts.filter((p) => p.kind === 'input' || p.kind === 'output')"
           :key="p.kind"
           class="bar-segment"
           :class="`bar-${p.kind}`"

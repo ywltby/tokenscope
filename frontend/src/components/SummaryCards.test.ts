@@ -77,10 +77,10 @@ describe("SummaryCards 指标条（设计系统 Task 3）", () => {
     expect(text).toContain("$0.000013");
   });
 
-  it("命中率沿用 cache_read / (input + cache_read) 公式", () => {
+  it("命中率以包含两类缓存的总输入为分母", () => {
     const w = mountCards(totals());
-    // 50000 / (12000 + 50000) = 80.6%
-    expect(w.text()).toContain("80.6%");
+    // 50000 / (12000 + 4000 + 50000) = 75.8%
+    expect(w.text()).toContain("75.8%");
   });
 
   it("token 分项行使用低饱和语义色与文字，不使用 emoji", () => {
@@ -99,7 +99,7 @@ describe("SummaryCards 指标条（设计系统 Task 3）", () => {
       "四类都应出现",
     ).toBe(true);
     expect(positions, "顺序必须与单一来源一致").toEqual([...positions].sort((a, b) => a - b));
-    expect(text).toContain("12,000");
+    expect(text).toContain("66,000");
     // DESIGN.md：不使用 emoji 作为产品图标
     expect(w.text()).not.toMatch(/\p{Extended_Pictographic}/u);
   });
@@ -122,9 +122,9 @@ describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
     const w = mountCards(totals());
     // total = 12000 + 3000 + 4000 + 50000 = 69000
     const segments = w.findAll(".bar-segment");
-    expect(segments.length).toBe(4);
-    expect(segments[0].attributes("style")).toContain("17.39%");
-    expect(segments[3].attributes("style")).toContain("72.46%");
+    expect(segments.length).toBe(2);
+    expect(segments[0].attributes("style")).toContain("95.65%");
+    expect(segments[1].attributes("style")).toContain("4.35%");
   });
 
   it("全部为零时比例条为空槽，不渲染分段", () => {

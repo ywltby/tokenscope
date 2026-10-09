@@ -200,20 +200,18 @@ function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsO
         preventDefaultMouseMove: false,
       },
     ],
-    // 堆叠柱只让最上段（最后一个系列）带圆角：日维度柱顶 [4,4,0,0]，
+    // 并列柱各自带圆角：日维度柱顶 [4,4,0,0]，
     // 非日维度横向条尾 [0,4,4,0]（DESIGN.md §5 图表）
-    series: series.map((s, i) => ({
+    series: series.map((s) => ({
       // 稳定 id：同维度数据更新按 id merge，不新建系列
       id: s.name,
       name: s.name,
       type: "bar",
-      stack: "tokens",
-      // 非日维度横向堆叠，四类 token 全部保留
+      // 总输入包含缓存子项，四项并列显示，不能再堆叠相加。
+      // 非日维度横向并列，四类 token 全部保留
       barMaxWidth: 36,
       data: s.values,
-      ...(i === series.length - 1
-        ? { itemStyle: { borderRadius: isDay.value ? [4, 4, 0, 0] : [0, 4, 4, 0] } }
-        : {}),
+      itemStyle: { borderRadius: isDay.value ? [4, 4, 0, 0] : [0, 4, 4, 0] },
     })),
   };
 }

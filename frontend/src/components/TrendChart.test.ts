@@ -124,7 +124,7 @@ describe("TrendChart（设计系统 Task 4）", () => {
     for (const [index, series] of opt.series.entries()) {
       expect(series.data).toHaveLength(240);
       expect(series.data.reduce((a: number, b: number) => a + b, 0)).toBe(
-        ((239 * 240) / 2) * (index + 1),
+        ((239 * 240) / 2) * [8, 2, 3, 4][index],
       );
     }
     if (by === "day")
@@ -223,7 +223,7 @@ describe("TrendChart 卡片化（设计系统 Task 5）", () => {
     w.unmount();
   });
 
-  it("堆叠柱仅最上段系列带圆角：日维度柱顶 [4,4,0,0]，非日维度条尾 [0,4,4,0]", async () => {
+  it("总输入与缓存子项并列不堆叠，每根柱子末端带圆角", async () => {
     const wDay = mount(TrendChart, { props: { groups: [group("a", 1)], by: "day" } });
     await flushPromises();
     const optDay = setOption.mock.calls[0][0] as {
@@ -231,8 +231,9 @@ describe("TrendChart 卡片化（设计系统 Task 5）", () => {
     };
     expect(optDay.series).toHaveLength(4);
     expect(optDay.series[3].itemStyle?.borderRadius).toEqual([4, 4, 0, 0]);
-    for (const s of optDay.series.slice(0, 3)) {
-      expect(s.itemStyle?.borderRadius).toBeUndefined();
+    for (const s of optDay.series) {
+      expect(s).not.toHaveProperty("stack");
+      expect(s.itemStyle?.borderRadius).toEqual([4, 4, 0, 0]);
     }
     wDay.unmount();
 

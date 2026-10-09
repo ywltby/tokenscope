@@ -71,6 +71,23 @@ const text = (b: EventCostBreakdown) => formatCostBreakdownText(b);
 const rows = (b: EventCostBreakdown) => formatCostBreakdownRows(b);
 
 describe("costBreakdown 行模型（设计系统 Task 6）", () => {
+  it("总输入展示不合并普通输入与缓存写入计费量", () => {
+    const b = bd({
+      basis_value: 2060,
+      lines: [
+        { kind: "input", tokens: 3, unit_price: 2, subtotal: 0.000006, priced: true },
+        { kind: "cache_write", tokens: 2057, unit_price: 5, subtotal: 0.010285, priced: true },
+      ],
+      cost_usd: 0.010291,
+      complete: true,
+    });
+    const before = structuredClone(b);
+    const t = text(b);
+    expect(t).toContain("输入（扣除缓存） 3 × $2/M = $0.000006");
+    expect(t).toContain("缓存写 2,057 × $5/M = $0.0103");
+    expect(t).toContain("总输入 2,060");
+    expect(b).toEqual(before);
+  });
   it("按 事实→公式→结果→来源 分组，组间 divider", () => {
     const r = rows(bd());
     const firstLabels = ["匹配模型", "渠道", "请求时间", "prompt tokens", "命中档位", "时间档"];
@@ -84,7 +101,7 @@ describe("costBreakdown 行模型（设计系统 Task 6）", () => {
 
   it("公式行展示 token × 单价/M = 小计；未计价行显式说明", () => {
     const t = text(bd());
-    expect(t).toContain("输入 272,001 × $8/M = $2.18");
+    expect(t).toContain("输入（扣除缓存） 272,001 × $8/M = $2.18");
     expect(t).toContain("输出 1,000 × $30/M = $0.0300");
     expect(t).toContain("缓存写 0 × $10/M = $0.00");
     expect(t).toContain("缓存命中 5,000 token，缺少单价");
@@ -131,7 +148,7 @@ describe("costBreakdown 行模型（设计系统 Task 6）", () => {
 
   it("事实区含 prompt 度量式、档位与峰谷条件", () => {
     const t = text(bd());
-    expect(t).toContain("输入 272,001 + 缓存写 0 + 缓存命中 5,000 = 277,001");
+    expect(t).toContain("输入（扣除缓存） 272,001 + 缓存写 0 + 缓存命中 5,000 = 总输入 277,001");
     expect(t).toContain("命中档位 >272K");
     expect(t).toContain("时间档 peak（时区 Asia/Shanghai）");
   });
@@ -211,7 +228,7 @@ describe("costBreakdown 溢出分项（修复后复核 F04）", () => {
       complete: false,
       unknown: { input: 272_001, output: 0, cache_write: 0, cache_read: 0 },
     });
-    const input = r.find((x) => x.label === "输入");
+    const input = r.find((x) => x.label === "输入（扣除缓存）");
     expect(input!.value).toContain("金额超出可表示范围");
     expect(input!.value).not.toContain("$");
     expect(input!.unknown).toBe(true);
@@ -225,7 +242,7 @@ describe("costBreakdown 溢出分项（修复后复核 F04）", () => {
       cost_usd: 0.03,
       complete: false,
     });
-    expect(t).toContain("输入 272,001 token，金额超出可表示范围");
+    expect(t).toContain("输入（扣除缓存） 272,001 token，金额超出可表示范围");
     expect(t).not.toContain("× $1.00");
   });
 });
@@ -287,7 +304,7 @@ describe("单价精度贯通设置与公式（RC07）", () => {
     const t = formatCostBreakdownText(precise);
     // 费率完整（$1.234567）；金额仍走 request 策略（<1 四位小数），
     // 关键是**单价**不被舍成 $1.23。
-    expect(t).toContain("输入 1,000 × $1.234567/M = $0.0012");
+    expect(t).toContain("输入（扣除缓存） 1,000 × $1.234567/M = $0.0012");
     expect(t).toContain("估算合计 $0.0012");
     expect(t).not.toContain("$1.23/M");
   });

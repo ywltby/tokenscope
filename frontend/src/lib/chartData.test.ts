@@ -33,7 +33,7 @@ describe("buildBarChartData", () => {
     ]);
     expect(fullLabels(groups, by)).toEqual(data.categories);
     expect(
-      data.categories.map((_, i) => data.series.reduce((sum, s) => sum + s.values[i], 0)),
+      data.categories.map((_, i) => data.series[0].values[i] + data.series[1].values[i]),
     ).toEqual([302, 201, 100, 100]);
     expect(groups.map((x) => x.key)).toEqual([
       "input-heavy",

@@ -4,6 +4,7 @@ import { NDataTable, NTag, NTooltip, type DataTableColumn } from "naive-ui";
 import { AGENT_LABEL, fmtNum, projectLabel, type EventList } from "../types";
 import { formatMoney } from "../lib/formatMoney";
 import { tokenBucketLabel } from "../lib/tokenDisplay";
+import { totalInput } from "../lib/tokenUsage";
 import CostBreakdownTooltip from "./CostBreakdownTooltip.vue";
 import ScrollList from "./ScrollList.vue";
 
@@ -75,7 +76,7 @@ const columns = computed<DataTableColumn[]>(() => [
     key: "input",
     align: "center",
     className: "ts-num",
-    render: (r) => fmtNum(asRow(r).input),
+    render: (r) => fmtNum(totalInput(asRow(r))),
   },
   {
     title: "输出",

@@ -3,6 +3,7 @@
 // 标签与数值错位（A=10、B=100 可能显示 B=10、A=100）。
 import { TOKEN_BUCKETS } from "./tokenDisplay";
 import type { Group, TokenCounts } from "../types";
+import { displayTokens, totalTokens } from "./tokenUsage";
 
 // UX07：显示名消费 tokenDisplay 单一来源（U14：缓存命中）。
 export const SERIES: { name: keyof TokenCounts; label: string }[] = TOKEN_BUCKETS.map((b) => ({
@@ -27,9 +28,9 @@ export function realGroups(groups: Group[]): Group[] {
   return groups.filter((g) => g.key !== "合计");
 }
 
-/// 分类顺序（单一事实源）：日维度保持时间序；其余按堆叠柱四类 token 总量降序。
+/// 日维度保持时间序；其余按总输入 + 输出降序，缓存不重复计数。
 function orderGroups(groups: Group[], by: string): Group[] {
-  const total = (g: Group): number => SERIES.reduce((sum, s) => sum + g.tokens[s.name], 0);
+  const total = (g: Group): number => totalTokens(g.tokens);
   return by === "day" ? groups : [...groups].sort((a, b) => total(b) - total(a));
 }
 
@@ -40,7 +41,7 @@ export function buildBarChartData(groups: Group[], by: string): BarChartData {
     categories: ordered.map((g) => g.label ?? g.key),
     series: SERIES.map((s) => ({
       name: s.label,
-      values: ordered.map((g) => g.tokens[s.name]),
+      values: ordered.map((g) => displayTokens(g.tokens)[s.name]),
     })),
   };
 }
