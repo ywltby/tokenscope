@@ -149,6 +149,7 @@ function onCloseCancel(): void {
     <NGlobalStyle />
     <NMessageProvider>
       <div class="app-shell">
+        <div class="ts-ambient" aria-hidden="true"></div>
         <div class="scroll-container">
           <!-- R04 审核：导航与内容同一滚动上下文——内容滚动时从导航后方
                经过，玻璃模糊才真正有内容可透（吸顶 header 在滚动容器内） -->
@@ -262,6 +263,7 @@ function onCloseCancel(): void {
 
 <style scoped>
 .app-shell {
+  isolation: isolate;
   height: 100vh;
   /* F06：主滚动容器必须有界——flex 纵向布局把 .scroll-container 约束在
      剩余视口高度内；修复前容器随内容长到全高，内部滚动失效、document

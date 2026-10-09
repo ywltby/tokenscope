@@ -31,7 +31,7 @@ interface TsPalette {
 /// 与 tokens.css 的浅/深两组值一一对应。
 const PALETTES: Record<ThemeMode, TsPalette> = {
   light: {
-    canvas: "#F5F5F7",
+    canvas: "#E3E8EF",
     surfaceGlass: "rgba(255, 255, 255, 0.75)",
     surface: "#FFFFFF",
     // UX01：浮层外壳 = 85% elevated（与 tokens.css --ts-surface-elevated 一致）
@@ -53,7 +53,7 @@ const PALETTES: Record<ThemeMode, TsPalette> = {
     info: "#2F6FB0",
   },
   dark: {
-    canvas: "#0F0F11",
+    canvas: "#0B0E14",
     surfaceGlass: "rgba(28, 28, 30, 0.75)",
     surface: "#1C1C1E",
     elevated: "rgba(44, 44, 46, 0.85)",

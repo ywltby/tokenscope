@@ -8,7 +8,7 @@
   color-scheme: light;
 
   /* 表面与画布 */
-  --ts-canvas: #f5f5f7;
+  --ts-canvas: #e3e8ef;
   --ts-surface: rgba(255, 255, 255, 0.75);
   --ts-surface-solid: #ffffff;
   --ts-surface-elevated: rgba(255, 255, 255, 0.85);
@@ -75,7 +75,7 @@
   --ts-glass-stroke: rgba(255, 255, 255, 0.55);
   --ts-glass-highlight: rgba(255, 255, 255, 0.8);
 
-  /* 背景氛围光斑（静态、低饱和，只为让玻璃有内容可模糊） */
+  /* 背景氛围光斑：低饱和，缓慢流动衬托玻璃层次 */
   --ts-ambient-1: rgba(0, 113, 227, 0.14);
   --ts-ambient-2: rgba(90, 200, 250, 0.12);
   --ts-ambient-3: rgba(52, 199, 89, 0.08);
@@ -104,7 +104,7 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --ts-canvas: #0f0f11;
+  --ts-canvas: #0b0e14;
   --ts-surface: rgba(28, 28, 30, 0.75);
   --ts-surface-solid: #1c1c1e;
   --ts-surface-elevated: rgba(44, 44, 46, 0.85);
@@ -173,18 +173,55 @@
 }
 
 /*
- * 全局画布：三团静态柔光（蓝 / 青 / 暖橙）固定在视口上，给玻璃卡片"可模糊的东西"。
- * 不动画、不跟随滚动；饱和度克制，截图与长时间阅读不刺眼。禁止紫色。
+ * 全局画布：略深底色衬托浅色卡片，蓝 / 青 / 浅绿柔光独立缓慢流转。
+ * 背景层固定并裁剪在视口内，不参与交互或内容滚动。禁止紫色。
  */
 body {
   font-family: var(--ts-font);
   color: var(--ts-text);
   background-color: var(--ts-canvas);
-  background-image: var(--ts-canvas-aurora);
-  background-attachment: fixed;
   transition:
     background-color var(--ts-motion) var(--ts-ease),
     color var(--ts-motion) var(--ts-ease);
+}
+
+/* 独立装饰层：只动画 transform，避免逐帧改变渐变或模糊参数。 */
+.ts-ambient {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background-color: var(--ts-canvas);
+  overflow: hidden;
+  pointer-events: none;
+}
+.ts-ambient::before,
+.ts-ambient::after {
+  content: "";
+  position: absolute;
+  inset: -15%;
+  background-image: var(--ts-canvas-aurora);
+  animation: ts-ambient-drift 24s ease-in-out infinite alternate;
+}
+.ts-ambient::after {
+  opacity: 0.5;
+  animation-duration: 32s;
+  animation-delay: -16s;
+  animation-direction: alternate-reverse;
+}
+@keyframes ts-ambient-drift {
+  from {
+    transform: translate3d(-5%, -3%, 0) rotate(-4deg) scale(1.02);
+  }
+  to {
+    transform: translate3d(5%, 4%, 0) rotate(5deg) scale(1.1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ts-ambient::before,
+  .ts-ambient::after {
+    animation: none;
+    transform: none;
+  }
 }
 
 /* 柔光层只引用 --ts-ambient-*，明暗两套值在上方 token 区维护 */
