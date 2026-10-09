@@ -49,6 +49,17 @@ function canvasHeight(count: number): number {
   return isDay.value ? 360 : Math.min(480, Math.max(320, count * 30 + 70));
 }
 
+function categoryLabelWidth(): number {
+  const width = el.value?.clientWidth || 800;
+  return props.by === "project" ? Math.min(180, width * 0.2) : Math.min(220, width * 0.25);
+}
+
+function formatCategoryLabel(value: string): string {
+  return props.by === "project"
+    ? echarts.format.truncateText(value, categoryLabelWidth(), "12px sans-serif", "…")
+    : value;
+}
+
 type ZoomRange = {
   start: number;
   end: number;
@@ -151,7 +162,8 @@ function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsO
             fontSize: 12,
             interval: "auto",
             hideOverlap: true,
-            width: Math.min(220, (el.value?.clientWidth || 800) * 0.25),
+            width: categoryLabelWidth(),
+            formatter: formatCategoryLabel,
             overflow: "truncate",
           },
         },
@@ -272,7 +284,7 @@ onMounted(() => {
     chart?.resize();
     if (chart && !isDay.value)
       chart.setOption({
-        yAxis: { axisLabel: { width: Math.min(220, (el.value?.clientWidth || 800) * 0.25) } },
+        yAxis: { axisLabel: { width: categoryLabelWidth(), formatter: formatCategoryLabel } },
       });
   });
   if (el.value) observer.observe(el.value);
