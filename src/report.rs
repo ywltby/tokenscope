@@ -1765,11 +1765,11 @@ cache_read = 0.4
         assert_eq!(l.total, 2);
         assert!(l.rows.iter().all(|r| r.model == "gpt-5.6-sol"));
 
-        // 项目过滤（C2：项目身份 = 完整 cwd）：codex e3 所在 beta 项目 1 行
+        // 项目过滤（A04：项目身份 = 归一化 cwd）：codex e3 所在 beta 项目 1 行
         let l = list_events(
             &base,
             &EventFilter {
-                project: Some(r"C:\work\beta".into()),
+                project: Some("C:/work/beta".into()),
                 ..Default::default()
             },
         )

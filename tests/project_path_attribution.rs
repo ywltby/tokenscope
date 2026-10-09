@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use tokenscope::source::Source;
 use tokenscope::source::claude::ClaudeSource;
+use tokenscope::source::codex::CodexSource;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/project-path")
@@ -15,6 +16,11 @@ fn root() -> PathBuf {
 fn claude_parse(name: &str) -> tokenscope::source::FileParse {
     let r = root();
     ClaudeSource::new(&r).parse_file(&r.join(name))
+}
+
+fn codex_parse(name: &str) -> tokenscope::source::FileParse {
+    let r = root();
+    CodexSource::new(&r).parse_file(&r.join(name))
 }
 
 fn projects(p: &tokenscope::source::FileParse) -> Vec<String> {
@@ -69,5 +75,53 @@ fn invalid_cwd_does_not_drop_usage() {
     assert_eq!(
         projects(&p),
         ["(根目录)", "(根目录)", "(根目录)", "(根目录)"]
+    );
+}
+
+#[test]
+fn codex_initial_path_matches_claude() {
+    let c = claude_parse("claude-initial-cwd.jsonl");
+    let x = codex_parse("codex-cwd-switch.jsonl");
+    assert_eq!(x.stats.bad_lines, 0);
+    assert_eq!(c.events[0].project, "C:/work/alpha");
+    assert_eq!(
+        x.events[0].project, "C:/work/alpha",
+        "同一路径的跨工具会话必须是同一身份 key"
+    );
+}
+
+#[test]
+fn codex_turn_context_changes_only_later_events() {
+    let p = codex_parse("codex-cwd-switch.jsonl");
+    assert_eq!(p.events.len(), 6);
+    assert_eq!(p.events[0].project, "C:/work/alpha");
+    assert_eq!(
+        p.events[1].project, "D:/other/beta",
+        "切换只影响其后事件，不回溯改写已发生请求"
+    );
+}
+
+#[test]
+fn codex_a_b_a_switch_is_preserved() {
+    let p = codex_parse("codex-cwd-switch.jsonl");
+    let seq: Vec<&str> = p.events.iter().map(|e| e.project.as_str()).collect();
+    assert_eq!(
+        &seq[..3],
+        ["C:/work/alpha", "D:/other/beta", "C:/work/alpha"],
+        "A → B → A 切换不得被冻结成文件首值"
+    );
+    assert_eq!(seq[3], "C:/work/alpha", "空 cwd 不清掉同会话已知目录");
+}
+
+#[test]
+fn codex_new_session_does_not_inherit_cwd() {
+    let p = codex_parse("codex-cwd-switch.jsonl");
+    assert_eq!(
+        p.events[4].project, "(未知)",
+        "新 session 无 cwd 时不得继承上一个 session 的目录"
+    );
+    assert_eq!(
+        p.events[5].project, "E:/third/gamma",
+        "该 session 首个有效 turn_context 生效，且不回溯"
     );
 }

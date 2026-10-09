@@ -14,7 +14,10 @@
 //!   provider 映射），按坏行计数不入账，不猜测语义；
 //! - 零分量占位行（只升 total）跳过计数；分量非零但 total 不符按坏行计数；
 //! - 模型按时间序最近的 `turn_context` 归属，遇 `session_meta` 重置；
-//! - 项目身份 = 完整 cwd（C2/R03：basename 同名不同路径会误合并），
+//! - 项目身份（A04）= 当前上下文的**归一化 cwd**：有效 `turn_context.cwd`
+//!   更新后续事件（A → B → A 保留），`session_meta` 重置目录上下文（新会话
+//!   不继承上一会话的目录），空/无效 cwd 不清掉同会话已知目录；完全没有
+//!   可信 cwd 时记 "(未知)"；
 //!   展示名由聚合层派生；
 //! - 同请求重发的去重自 M4 起上移到全局 dedupe 步骤（按 `(session, 用量五元组)`
 //!   保首条），本层原样产出事件（record_id 为空）。
@@ -25,7 +28,7 @@ use anyhow::Result;
 use jiff::Timestamp;
 use serde::Deserialize;
 
-use super::{CollectStats, FileParse, Source, read_text, walk_jsonl};
+use super::{CollectStats, FileParse, Source, project_path, read_text, walk_jsonl};
 use crate::model::{AgentKind, UsageEvent};
 
 pub struct CodexSource {
@@ -105,7 +108,19 @@ struct LastUsage {
 struct ScanState {
     session_id: String,
     model: Option<String>,
+    /// 当前上下文的**归一化**项目身份（A04）；None = 本会话尚无可信目录。
     cwd: Option<String>,
+}
+
+/// A04：更新会话目录上下文——只接受可归一化的 cwd；空值、类型异常与不可
+/// 解释的路径（相对路径等）既不写入，也**不清掉**同会话已知目录。
+fn update_cwd(state: &mut ScanState, raw: Option<&str>) {
+    let Some(raw) = raw else {
+        return;
+    };
+    if let Some(identity) = project_path::normalize_project_path(raw) {
+        state.cwd = Some(identity);
+    }
 }
 
 impl Source for CodexSource {
@@ -172,24 +187,22 @@ fn ingest_line(
     };
     match rec.kind.as_str() {
         "session_meta" => {
-            // session 边界：重置模型归属；项目随 cwd 更新。
+            // session 边界：模型归属与目录上下文一起重置——新会话绝不继承
+            // 上一个 session 的目录（A04 不变量 4）。
             state.session_id = payload
                 .session_id
                 .clone()
                 .or_else(|| payload.id.clone())
                 .unwrap_or_default();
             state.model = None;
-            if payload.cwd.is_some() {
-                state.cwd = payload.cwd.clone();
-            }
+            state.cwd = None;
+            update_cwd(state, payload.cwd.as_deref());
         }
         "turn_context" => {
             if payload.model.is_some() {
                 state.model = payload.model.clone();
             }
-            if payload.cwd.is_some() {
-                state.cwd = payload.cwd.clone();
-            }
+            update_cwd(state, payload.cwd.as_deref());
         }
         "token_usage_record" => stats.ignored_token_usage_record += 1,
         "event_msg" if payload.kind == "token_count" => {
@@ -273,13 +286,10 @@ fn ingest_token_count(
         stats.bad_lines += 1;
         return;
     }
-    // C2（R03）：项目身份 = 完整 cwd（不同路径的同名目录不再误合并）；
-    // 展示名（basename）由聚合层派生为 Group.label。
-    let project = state
-        .cwd
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "(未知)".to_string());
+    // A04（C2/R03 延续）：项目身份 = 当前上下文的归一化 cwd——不同路径的同名
+    // 目录不合并，同路径的跨工具会话共用同一 key；无有效 cwd 时沿用既有
+    // "(未知)" 兜底，展示名（basename）由聚合层派生为 Group.label。
+    let project = state.cwd.clone().unwrap_or_else(|| "(未知)".to_string());
     // 守恒已受检确认 cached + cache_write ≤ input 且 total 可表示：
     // 非缓存输入一次减法得到（不再逐项减）。
     let event = UsageEvent {
