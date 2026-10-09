@@ -25,6 +25,8 @@
 
 ## 当前状态
 
+- **2026-10-10 模型名称等价：已实施完成并归档。** [模型名称统一分组与定价匹配](archive/implemented/2026-10-10-model-pricing-name-equivalence.md)（`37454dd`…`35725f8`）。模型身份按等价键合并（ASCII 大小写与 `-` `.` `_` 不计：`claude-opus-5-5` / `claude-opus-5.5` / `Claude_Opus_5_5` 同一身份），不同版本与变体（`:free` / `:thinking`）保持独立；图表、聚合与下钻统一按身份键匹配，展示名优先取可信 models.dev 模型级 `name`（provider 名不再兜底，v1–v3 旧快照的名称加载时清空）；定价同样等价化，前缀回退只能在分隔符边界截断（`opus550` / `gpt-500` 不得命中更短条目）；价格索引 v9 与来源签名携带匹配规则版本（`rules:v9`），前端费用视图快照 v9——规则升级后离线重建、旧金额不恢复。过程记录：残留的旧语义索引曾让模型静默变成 unknown（已由版本升级 + 键一致性校验修复）；未跑项（GUI 原生目视、真实联网同步观察）已在计划与验收记录中标明。
+
 - **2026-10-09 跨工具项目路径统一（分支 `feat/project-path-unification`）：阶段 A（A01–A06）与阶段 B（B01–B03）均已实施，门禁全绿；仅 GUI 原生目视验收未执行，计划保持 active、未归档。** [跨工具项目路径统一与会话目录切换](active/2026-10-09-project-path-unification.md)。阶段 A 把项目身份改为 source 层统一的规范化绝对路径（Claude 会话初始 cwd + `~/.claude.json` 正向编码兜底、Codex 归一化 cwd），同一路径跨工具合并为一行、仅同名不合并；阶段 B 按用户定稿的**项目根归并**规则统一两侧：进入当前根的子目录仍归该根（`/test` → `/test/123/456` 都是 `/test`），越出当前根才算切换项目（`/test` → `/bee`，其子目录归 `/bee`）。事件新增 `session_initial_cwd` 与 `event_cwd`，缓存解析版本 6 → 7 → 8 → 9、前端快照 6 → 7 → 8；映射内容/状态变化即让磁盘缓存与采集复用键失效而旧查询会话仍冻结。B01 只读核验结论（Codex `turn_context.cwd` 是轮级工作目录、Claude 顶层 `cwd` 是行级状态快照）见 [核验记录](../research/2026-10-09-session-cwd-semantics.md)。
 
 - **2026-10-09 新计划（阶段 A 之前的状态记录）：** 同一计划原为「待实施」；阶段 A/阶段 B 见上一行。
@@ -67,7 +69,7 @@
 
 | 计划 | 状态 | 备注 |
 | --- | --- | --- |
-| [active/2026-10-10-model-pricing-name-equivalence.md](active/2026-10-10-model-pricing-name-equivalence.md) | 待确认实施 | 模型身份忽略大小写及 `-._`，图表/聚合/下钻统一；可信 models.dev 模型 name 用于展示；定价保留候选和边界、逐请求计费，升级索引与视图快照 |
+| [archive/implemented/2026-10-10-model-pricing-name-equivalence.md](archive/implemented/2026-10-10-model-pricing-name-equivalence.md) | ✅ 完成 2026-10-10 | 模型身份忽略大小写及 `-._`，图表/聚合/下钻统一；可信 models.dev 模型 name 用于展示；定价保留候选和边界、逐请求计费；索引 v9 与视图快照 v9 失效重建（`37454dd`…`35725f8`） |
 | [active/2026-10-09-project-path-unification.md](active/2026-10-09-project-path-unification.md) | 阶段 A + B 实现与自动化验收完成；GUI 原生目视项未执行，保持 active | 跨工具项目路径统一：source 层统一身份、项目根归并（子目录归并 + 越界切换）、映射正向解析与缓存失效、`session_initial_cwd`/`event_cwd` 字段；缓存版本 9、前端快照 8，门禁全绿 |
 | [active/2026-10-09-first-launch-privacy-consent.md](active/2026-10-09-first-launch-privacy-consent.md) | 计划已入库，待确认实施 | 首次启动隐私同意：前后端闸门、先保存后解锁、拒绝退出及失败保护；仅计划，未改产品实现 |
 | [active/2026-10-09-all-plans-final-recheck.md](active/2026-10-09-all-plans-final-recheck.md) | 实现与自动化完成；原生部分通过，系统项待验 | 全计划终态复核与遗留修复；AP07 退出漏口已补，AP08 分项状态见执行账；发布验收仍在 D5 |
