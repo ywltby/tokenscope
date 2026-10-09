@@ -43,6 +43,18 @@ fn match_key(raw: &str) -> String {
         .to_string()
 }
 
+/// 展示序（稳定）：按 display 再按 name 字典序比较——用于同前缀多条目择一。
+fn entry_display_order(a: &Entry, b: &Entry) -> bool {
+    let key = |e: &Entry| {
+        (
+            e.display.clone(),
+            e.name.clone().unwrap_or_default(),
+            e.tier,
+        )
+    };
+    key(a) < key(b)
+}
+
 #[derive(Debug, Clone)]
 struct Entry {
     /// 归一化前缀（匹配用）。
@@ -2401,12 +2413,24 @@ impl Pricing {
 
     /// GUI 设置页条目（合并视图，含来源、显示名与同前缀 OpenRouter 对照价）。
     pub fn entries(&self) -> Vec<PricingEntry> {
-        // openrouter 层按归一化前缀索引，供非 openrouter 行对照（精确同前缀）。
-        let or_by_prefix: std::collections::HashMap<&str, &Entry> = self
-            .all_entries()
-            .filter(|e| e.tier == TIER_OPENROUTER)
-            .map(|e| (e.prefix.as_str(), e))
-            .collect();
+        // OpenRouter 层按等价前缀索引，供非 OpenRouter 行对照（精确同前缀）。
+        // MP02：等价化后同前缀可能有多条（不同渠道）——HashMap 的"后写覆盖"
+        // 会随条目顺序变化，这里改为按 (display, name) 稳定序择一，保证视图与
+        // 加载顺序无关；对照价仍取自**一条完整记录**，不拼接分项。
+        let mut or_by_prefix: std::collections::HashMap<&str, &Entry> =
+            std::collections::HashMap::new();
+        for e in self.all_entries().filter(|e| e.tier == TIER_OPENROUTER) {
+            match or_by_prefix.entry(e.prefix.as_str()) {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    if entry_display_order(e, slot.get()) {
+                        slot.insert(e);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(e);
+                }
+            }
+        }
         self.all_entries()
             .map(|e| {
                 let openrouter = or_by_prefix
