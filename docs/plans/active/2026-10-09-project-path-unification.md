@@ -191,7 +191,7 @@ pnpm --dir frontend build
 - 不设置真实性能测试授权环境变量，不顺带执行真实缓存重建。需要真实验收时单列范围与结果，优先只读日志及隔离派生目录。
 - 每项记录测试命令、结果、commit 和证据位置；阶段完成不能仅凭全套测试绿色判断。
 - 不跳过提交钩子；按项目默认流程提交和推送。远端更新先检查再整合，不强推。
-- 本轮编制计划不启动实施，后续按任务顺序执行；不要求并行代理。
+- 阶段 A/B 已按任务顺序执行完毕；探针脚本只在临时目录运行，不作为仓库依赖。
 
 ## 5. 完成标准与记录
 
@@ -205,7 +205,7 @@ pnpm --dir frontend build
 | 磁盘/内存缓存、启动视图与下钻一致 | 必须通过 | 必须通过 |
 | worktree / sidechain 归并 | 不实施 | 不实施 |
 
-## 6. 实施记录（阶段 A）
+## 6. 实施记录（阶段 A + 阶段 B）
 
 任务按顺序实现，每项先写失败用例再实现；提交均为独立 commit，pre-commit 钩子（根库与壳的 fmt/clippy/test、前端 typecheck/format/test）每轮通过。
 
@@ -216,7 +216,10 @@ pnpm --dir frontend build
 | A03 唯一正向映射与缓存失效 | `3aee5aa` | `cargo test --test claude_project_mapping`（5 项）+ 映射/缓存单测 |
 | A04 Codex 归一化与切换保护 | `4eff289` | `cargo test --test project_path_attribution`（8 项）、`cargo test --lib codex`（15 项） |
 | A05 跨工具聚合与下钻 | `1ffee42` | `cargo test --test project_alias_cross_agent`（2 项）、`--test project_path_drilldown`（2 项） |
-| A06 迁移、口径与验收 | 本项提交 | `cargo test --lib project_identity_version`、`cargo test --test project_identity_acceptance`、前端快照用例 |
+| A06 迁移、口径与验收 | `72541d6` | `cargo test --lib project_identity_version`、`cargo test --test project_identity_acceptance`、前端快照用例 |
+| B01 目录切换证据核验 | `419a965` | 只读统计 + `docs/research/2026-10-09-session-cwd-semantics.md`（四个待决实例） |
+| B02 数据模型分离 | 与 B03 合并 `eb1c9c9` | `cargo test cwd_context`、`cargo test initial_cwd`、`cargo test memory_budget` |
+| B03 归属规则与验收 | `eb1c9c9` | `cargo test --test project_path_attribution`（15 项 + 阶段 A 回归） |
 
 阶段 A 验收结论（逐项对应 §5 完成标准）：
 
@@ -224,10 +227,19 @@ pnpm --dir frontend build
 - 四类 token、费用与请求总数守恒：`project_merge_preserves_totals`（含身份分裂对照）与 A06 隔离验收逐字段通过。
 - 映射冲突与配置变化失效：`colliding_slugs_remain_unmerged`、`mapping_change_invalidates_disk_and_memory_results` 通过（已建立的查询会话继续使用旧冻结快照）。
 - Codex A → B → A 保留：`codex_a_b_a_switch_is_preserved`、`codex_new_session_does_not_inherit_cwd` 通过。
-- Claude cwd 漂移：按会话初始路径归属（`claude_subdirectory_drift_does_not_split_phase_a`），阶段限制已写入口径（`docs/stats-semantics.md` §3.4）。
+- Claude cwd 漂移：阶段 A 按会话初始路径归属（`claude_subdirectory_drift_does_not_split_phase_a`），阶段限制当时已写入口径。
 - 磁盘/内存缓存、启动视图与下钻一致：缓存解析版本 6 → 7（映射修订）→ 8（身份口径），前端快照版本 6 → 7；`old_project_identity_snapshot_is_ignored` 与 A06 隔离验收通过。
-- worktree / sidechain 归并：未实施（B01 定稿前不做）。
+- worktree / sidechain 归并：未实施（不在范围内）。
 
-两处口径修订（已同步文档）：Claude 身份由「文件父目录相对路径（slug）」改为「会话初始 cwd > 唯一正向映射 > slug 兜底」；Codex 身份由「原始 cwd 字符串」改为「归一化 cwd」。两者都改变缓存中的派生字段，因此解析版本必须递增。
+阶段 B 验收结论（同上逐项对应）：
 
-未完成与边界：阶段 B（B01–B03）未开始；未执行真实缓存冷重建（不以旧报告的 5.5 秒作性能保证）；GUI 原生实例的目视验收留待发布验收。探针脚本 `ts_probe*.py` 只作可选排查辅助，不作为仓库测试依赖，也不保证临时文件仍存在。
+- 两侧统一规则：`both_agents_follow_decided_subdirectory_policy`（子目录归并）与 `claude_structured_cwd_switch` / `codex_structured_cwd_switch`（越界切换）通过。
+- 不回溯：`switch_does_not_reassign_previous_events` 通过（切换只影响其后事件）。
+- 反例：`shell_cd_text_does_not_change_project` 通过（工具文本里的 `cd` 不改归属）。
+- 数据模型与缓存：`initial_cwd_is_stable_while_event_cwd_changes`、`cwd_context_survives_cache_roundtrip`、`new_cwd_fields_are_in_memory_budget` 通过；解析版本 9、界面快照版本 8。
+- 回归：阶段 A 全部用例（合并/守恒/映射失效/下钻分页）与 §4 门禁（根库与壳 fmt/clippy/test、前端 typecheck/format/test/build）全绿。
+- worktree / sidechain 归并：仍不实施（用户定稿规则不需要仓库根推断）。
+
+口径修订汇总（已同步 `docs/stats-semantics.md` §3.4 与 `CLAUDE.md`）：Claude 身份由「文件父目录相对路径（slug）」→「项目根归并（会话 cwd 推进）」，Codex 由「原始 cwd / 轮级精确」→「项目根归并」；新增 `session_initial_cwd` 与 `event_cwd` 两个事件字段。
+
+未完成与边界：GUI 原生实例的目视验收（真实窗口启动观感、隔离实例截图）未执行——本计划因此保持 active，不归档；未执行真实缓存冷重建（不以旧报告的 5.5 秒作性能保证）。探针脚本 `ts_probe*.py` 只作可选排查辅助，不作为仓库测试依赖，也不保证临时文件仍存在。
