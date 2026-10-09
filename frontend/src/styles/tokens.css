@@ -397,6 +397,28 @@ body {
 }
 
 /* 自动列宽由原生表格根据内容分配；滚动限制放在表格外层，避免组件强制 fixed。 */
+/* 保留轨道占位，只隐藏垂直滑块，避免显示/隐藏时内容宽度跳动。 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ts-text-muted);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:vertical {
+  background-color: transparent;
+}
+.ts-scrolling::-webkit-scrollbar-thumb:vertical {
+  background-color: var(--ts-text-muted);
+}
+
 .ts-auto-table {
   overflow: auto;
 }

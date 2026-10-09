@@ -23,7 +23,9 @@ import Dashboard from "./views/Dashboard.vue";
 import Settings from "./views/Settings.vue";
 import { createSettingsPreload, SETTINGS_PRELOAD } from "./lib/settingsPreload";
 import { useTokenColors } from "./composables/tokenColors";
+import { useAutoHideScrollbars } from "./composables/autoHideScrollbars";
 
+useAutoHideScrollbars();
 const tokenColors = useTokenColors();
 watchEffect(() => {
   for (const [key, color] of Object.entries(tokenColors.colors.value)) {
