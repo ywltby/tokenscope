@@ -18,6 +18,11 @@ default = []
 # 重定向到隔离根；缺失/非法时拒绝启动，绝不回退真实 HOME。
 acceptance = []
 
+[dev-dependencies]
+# H01+：集成测试需要直接构造/检查 SQLite fixture（旧版历史库、CCS 来源库）。
+# 与主依赖同版本同 features，cargo 复用同一份构建，不引入新依赖树。
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
 [dependencies]
 anyhow = "1"
 dirs = "6"

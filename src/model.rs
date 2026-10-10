@@ -20,6 +20,16 @@ impl AgentKind {
             AgentKind::Codex => "codex",
         }
     }
+
+    /// 持久层反向解析（库内不允许出现未知应用名——读到未知值必须报错，
+    /// 不能悄悄当成默认应用）。
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "claude-code" => Ok(AgentKind::ClaudeCode),
+            "codex" => Ok(AgentKind::Codex),
+            other => Err(format!("未知应用标识: {other:?}")),
+        }
+    }
 }
 
 /// 一条用量事件，agent 无关的归一形态（M4 起为**未去重**事件，去重在全局
