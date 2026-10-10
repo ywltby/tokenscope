@@ -430,15 +430,15 @@ fn register(snapshot: Arc<QuerySnapshot>) {
 /// 的一份**克隆**，同样单独计入。
 fn snapshot_retained_bytes(
     collection: &report::CollectionSnapshot,
-    rows: &Vec<SnapshotRow>,
+    rows: &[SnapshotRow],
     query_id: &str,
     tz_label: &str,
     main_fingerprint: &str,
 ) -> Result<usize, String> {
-    use report::retained::{ByteCount, string_bytes, vec_bytes};
+    use report::retained::{ByteCount, string_bytes};
     let mut n = ByteCount::default();
     n.add(report::collection_retained_bytes(collection)?)?;
-    n.add(vec_bytes(rows)?)?;
+    n.add(rows_retained_bytes(rows)?)?;
     n.add(string_bytes(&query_id.to_string())?)?;
     n.add(string_bytes(&tz_label.to_string())?)?;
     n.add(string_bytes(&main_fingerprint.to_string())?)?;
@@ -447,6 +447,22 @@ fn snapshot_retained_bytes(
     n.add(string_bytes(&collection.pricing_revision)?)?;
     n.add(std::mem::size_of::<TimeZone>())?;
     n.add(std::mem::size_of::<QuerySnapshot>())?;
+    Ok(n.get())
+}
+
+/// 行索引的堆占用：`Vec` 元素缓冲 + 每行 `record_id` 的**字符串本体**。
+/// `vec_bytes` 只算元素定长部分——`record_id` 是堆 `String`，漏计会让长
+/// 记录标识（如 Claude 的 `session|message.id`）成批绕过会话内存预算。
+fn rows_retained_bytes(rows: &[SnapshotRow]) -> Result<usize, String> {
+    use report::retained::{ByteCount, capacity_bytes, string_bytes};
+    let mut n = ByteCount::default();
+    n.add(capacity_bytes(
+        rows.len(),
+        std::mem::size_of::<SnapshotRow>(),
+    )?)?;
+    for row in rows {
+        n.add(string_bytes(&row.record_id)?)?;
+    }
     Ok(n.get())
 }
 
@@ -700,4 +716,39 @@ pub fn query_retained_bytes_for_tests() -> usize {
 pub fn reset_query_budget_for_tests() {
     let mut q = quota().lock().unwrap_or_else(|e| e.into_inner());
     q.limit = MAX_RETAINED_QUERY_BYTES;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::report::retained::capacity_bytes;
+
+    /// 复审 #6：行索引的内存计账必须包含 `record_id` 的堆字符串——
+    /// `vec_bytes` 只算元素定长部分，漏计会让长记录标识成批绕过会话预算。
+    #[test]
+    fn row_budget_counts_record_id_heap() {
+        let long_id = "x".repeat(4096);
+        let rows = vec![
+            SnapshotRow {
+                event_id: 1,
+                index: 0,
+                seq: 0,
+                ts: jiff::Timestamp::UNIX_EPOCH,
+                record_id: long_id.clone(),
+            },
+            SnapshotRow {
+                event_id: 2,
+                index: 1,
+                seq: 0,
+                ts: jiff::Timestamp::UNIX_EPOCH,
+                record_id: long_id,
+            },
+        ];
+        let counted = rows_retained_bytes(&rows).unwrap();
+        let bare = capacity_bytes(rows.len(), std::mem::size_of::<SnapshotRow>()).unwrap();
+        assert!(
+            counted >= bare + 2 * 4096,
+            "record_id 堆内存必须计入预算（counted={counted}, bare={bare}）"
+        );
+    }
 }

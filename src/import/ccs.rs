@@ -16,8 +16,9 @@
 //! - **身份**：Claude 会话行的 `request_id` 形如 `session:<message.id>`，与
 //!   `session_id` 合起来正是 TokenScope 原生采集所用的
 //!   `claude-message = <session_id>|<message.id>` 身份，因此两侧可绑定到同一条
-//!   历史事件；Codex 的 `token_count` 不带请求标识，导入侧**不猜测**身份，
-//!   只按来源记录键去重。
+//!   历史事件；Codex 的 `token_count` 不带请求标识，导入侧登记与原生采集同构
+//!   的保守重播身份（`codex-usage = session|模型|四桶`）——缺 session_id 时不
+//!   猜测身份，只按来源记录键去重，库内有同时间同用量候选时列为重叠候选。
 //! - **日汇总**：CCS 会把旧明细归并成日粒度并删除明细，导入必须同时覆盖两张表；
 //!   日汇总单独保存（`ccs_daily_usage`），不伪造成请求事件、不与明细相加。
 //! - **缺 cwd**：请求明细没有 cwd/project 列，因此项目保持未知，不按模型、
@@ -805,7 +806,10 @@ fn request_write(app: AgentKind, raw: &RawRequest, logical_source: &str) -> Resu
     );
     // Claude 会话导入的 request_id 形如 `session:<message.id>`，与原生采集的
     // `(session_id, message.id)` 合起来正是同一身份 → 跨来源绑定到同一事件。
-    // 身份不足（缺 session_id / 非会话前缀）时不猜测，只按来源键去重。
+    // Codex 的 `token_count` 不带请求标识，但 `(session_id, 原始模型, 四桶)`
+    // 的保守重播身份两侧同构：把它登记为别名，先导入后采集与先采集后导入
+    // 都命中同一事件（并集与顺序无关）；缺 session_id 时身份不足，不猜测，
+    // 只按来源键去重、库内有同时间同用量候选时列为重叠候选。
     let mut aliases = Vec::new();
     if let Some(message_id) = request_id.strip_prefix(SESSION_REQUEST_ID_PREFIX)
         && let Some(session_id) = raw.session_id.as_deref().filter(|s| !s.is_empty())
@@ -815,6 +819,14 @@ fn request_write(app: AgentKind, raw: &RawRequest, logical_source: &str) -> Resu
             app,
             scheme: "claude-message".to_string(),
             value: format!("{session_id}|{message_id}"),
+        });
+    } else if app == AgentKind::Codex
+        && let Some(session_id) = raw.session_id.as_deref().filter(|s| !s.is_empty())
+    {
+        aliases.push(EventAlias {
+            app,
+            scheme: "codex-usage".to_string(),
+            value: codex_usage_alias_value(session_id, &raw.model, &tokens),
         });
     }
     Ok(EventWrite {
@@ -909,6 +921,16 @@ fn rollup_write(
     })
 }
 
+/// Codex 保守重播身份的统一构造：`request_write`（按来源行导入）与
+/// `session_row_aliases`（被剔除会话行向 proxy 行转移）共用，保证同一请求
+/// 两侧产出的别名值逐字节一致——否则原生采集命中不了已导入事件。
+fn codex_usage_alias_value(session_id: &str, model: &str, tokens: &TokenCounts) -> String {
+    format!(
+        "{session_id}|{model}|{}|{}|{}|{}",
+        tokens.input, tokens.output, tokens.cache_write, tokens.cache_read
+    )
+}
+
 fn non_negative(v: i64, what: &str, id: &str) -> Result<u64> {
     if v < 0 {
         bail!("{what} 为负（{id}）");
@@ -916,31 +938,61 @@ fn non_negative(v: i64, what: &str, id: &str) -> Result<u64> {
     Ok(v as u64)
 }
 
-/// 会话行携带的原生别名（`session:<message.id>` + `session_id`）。
+/// 会话行携带的原生别名（Claude：`session:<message.id>` + `session_id`；
+/// Codex：保守重播身份 `codex-usage`）。
 ///
 /// CCS 的会话导入行本身就是原生身份的另一份证据：即便该行因为"与 proxy 行
 /// 重复"被按有效用量口径剔除，它的别名也必须留给被保留的那条 proxy 行——
 /// 否则 TokenScope 的原生采集之后会为同一请求再建一条事件（重复计费）。
+/// Codex 的重播身份按**会话行**的归一化四桶构造（原生侧解析出的正是这些
+/// 真实桶值；proxy 行的 cache 写可能因 legacy 口径缺报为 0）。
 fn session_row_aliases(app: AgentKind, raw: &RawRequest) -> Vec<(String, String)> {
-    if app != AgentKind::ClaudeCode {
-        return Vec::new();
-    }
-    let Some(request_id) = raw.request_id.as_deref() else {
-        return Vec::new();
-    };
-    let Some(message_id) = request_id.strip_prefix(SESSION_REQUEST_ID_PREFIX) else {
-        return Vec::new();
-    };
     let Some(session_id) = raw.session_id.as_deref().filter(|s| !s.is_empty()) else {
         return Vec::new();
     };
-    if message_id.is_empty() {
-        return Vec::new();
+    match app {
+        AgentKind::ClaudeCode => {
+            let Some(request_id) = raw.request_id.as_deref() else {
+                return Vec::new();
+            };
+            let Some(message_id) = request_id.strip_prefix(SESSION_REQUEST_ID_PREFIX) else {
+                return Vec::new();
+            };
+            if message_id.is_empty() {
+                return Vec::new();
+            }
+            vec![(
+                "claude-message".to_string(),
+                format!("{session_id}|{message_id}"),
+            )]
+        }
+        AgentKind::Codex => {
+            if raw.model.trim().is_empty()
+                || raw.input_tokens < 0
+                || raw.output_tokens < 0
+                || raw.cache_read_tokens < 0
+                || raw.cache_creation_tokens < 0
+            {
+                return Vec::new();
+            }
+            let tokens = TokenCounts {
+                input: fresh_input(
+                    &raw.app_type,
+                    raw.input_token_semantics,
+                    raw.input_tokens as u64,
+                    raw.cache_read_tokens as u64,
+                    raw.cache_creation_tokens as u64,
+                ),
+                output: raw.output_tokens as u64,
+                cache_write: raw.cache_creation_tokens as u64,
+                cache_read: raw.cache_read_tokens as u64,
+            };
+            vec![(
+                "codex-usage".to_string(),
+                codex_usage_alias_value(session_id, &raw.model, &tokens),
+            )]
+        }
     }
-    vec![(
-        "claude-message".to_string(),
-        format!("{session_id}|{message_id}"),
-    )]
 }
 
 /// proxy 行索引：判定会话行是否与某条成功 proxy 行重复（CCS 的

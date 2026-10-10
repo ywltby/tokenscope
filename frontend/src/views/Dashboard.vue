@@ -80,6 +80,9 @@ type SnapshotPayload = {
   v: number;
   saved_at: string;
   filters: SnapshotFilters;
+  /** v11：日粒度历史参与方式随快照保存——「只看请求明细」是用户显式选择，
+   * 重新进入页面必须恢复，不能静默回退成 auto 重新带入日汇总。 */
+  rollups_mode: "auto" | "detail_only";
   report: SummaryReport;
   events: EventList;
 };
@@ -311,6 +314,7 @@ function saveSnapshot(): void {
       ...ek,
       drill: ek.drill ? { ...ek.drill, label: resolvedDrillLabel(ek.drill) } : null,
     },
+    rollups_mode: rollupsMode.value,
     report: report.value,
     events: events.value,
   };
@@ -473,6 +477,8 @@ async function loadViewCache(): Promise<void> {
     range.value = cached.filters.range ? [...cached.filters.range] : null;
     drill.value = cached.filters.drill ? { ...cached.filters.drill } : null;
     tz.value = cached.filters.tz;
+    // v11：日粒度参与方式一并恢复——「只看请求明细」是显式选择，不回退 auto。
+    rollupsMode.value = cached.rollups_mode === "detail_only" ? "detail_only" : "auto";
     eventsKey.value = cached.filters;
     report.value = cached.report;
     events.value = cached.events;

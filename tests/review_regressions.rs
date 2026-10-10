@@ -353,6 +353,10 @@ fn large_detail_plus_rollup_does_not_deadlock() {
 /// 审阅 #3a：Codex 没有可证实身份——CCS 行与本地已有请求"同时间同用量"时，
 /// 必须列为未解决重叠候选：预览可见、默认拒绝提交（不静默重复计费），
 /// 用户显式确认后才按新增导入并留下审计计数。
+/// 审阅 #3a：**身份不足**（无 session_id，构造不出任何别名）的 Codex 来源行，
+/// 与本地已有请求同时间同用量 → 预览列为重叠候选（未解决）、默认拒绝提交；
+/// 显式确认后按新增导入并留审计。带 session_id 的行登记保守重播身份别名，
+/// 两侧直接命中同一事件（见 codex_import_and_collect_yield_the_same_union）。
 #[test]
 fn codex_overlap_candidate_requires_explicit_confirmation() {
     let dir = temp_dir("overlap-codex");
@@ -389,7 +393,7 @@ fn codex_overlap_candidate_requires_explicit_confirmation() {
             request_id: "ccs-1".into(),
             app_type: "codex".into(),
             model: "gpt-5.6-sol".into(),
-            session_id: Some("sess-1".into()),
+            session_id: None,
             data_source: "codex_session".into(),
             created_at: ts.as_second(),
             input: 100,
@@ -1139,14 +1143,14 @@ fn schema_upgrade_creates_restorable_backup() {
     let path = dir.join("history.db");
     {
         let history = HistoryDb::open(&path).unwrap();
-        assert_eq!(history.schema_version().unwrap(), 2, "新库直接是当前版本");
+        assert_eq!(history.schema_version().unwrap(), 3, "新库直接是当前版本");
     }
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.pragma_update(None, "user_version", 1).unwrap();
     }
     let history = HistoryDb::open(&path).unwrap();
-    assert_eq!(history.schema_version().unwrap(), 2, "升级到当前版本");
+    assert_eq!(history.schema_version().unwrap(), 3, "升级到当前版本");
     let backup = dir.join("history.db.backup-v1");
     assert!(backup.is_file(), "必须生成升级前备份：{}", backup.display());
     let conn = rusqlite::Connection::open(&backup).unwrap();
@@ -1219,5 +1223,450 @@ fn import_commit_rechecks_generation_inside_transaction() {
     .to_string();
     assert!(err.contains("重新预览"), "{err}");
     assert_eq!(history.event_count().unwrap(), 1, "拒绝时零写入");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ================================================================ 复审第二轮
+
+use tokenscope::history::EventAlias;
+
+/// 复审 #3：先导入 CCS、后采集 Codex 必须与反向顺序得到**相同并集**。
+/// CCS 侧现在登记与原生采集同构的保守重播身份（`codex-usage`），两侧命中
+/// 同一事件；缺 session_id 的行仍走重叠候选（见上一测试）。
+#[test]
+fn codex_import_and_collect_yield_the_same_union() {
+    let ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
+    let ccs_row = CcsRow {
+        request_id: "ccs-1".into(),
+        app_type: "codex".into(),
+        model: "gpt-5.6-sol".into(),
+        session_id: Some("sess-1".into()),
+        data_source: "codex_session".into(),
+        created_at: ts.as_second(),
+        input: 100,
+        output: 30,
+    };
+    let lines = vec![
+        codex_meta("sess-1", "/work/app"),
+        codex_context("gpt-5.6-sol", "/work/app"),
+        codex_token_count("2026-07-17T15:00:00.000Z", 100, 30),
+    ];
+
+    // 顺序 A：先导入，后采集。
+    let dir = temp_dir("union-import-first");
+    let history = history_of(&dir);
+    seed_ccs(
+        &dir.join("cc-switch.db"),
+        std::slice::from_ref(&ccs_row),
+        &[],
+    );
+    let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
+    let preview = ccs::preview(&source, &history, "UTC").unwrap();
+    assert_eq!(preview.would_overlap, 0, "重播身份命中，不再是重叠候选");
+    assert_eq!(preview.would_insert, 1);
+    let report = ccs::commit(
+        &preview.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        false,
+    )
+    .unwrap();
+    assert_eq!(report.requests_inserted, 1);
+    let codex = dir.join("codex");
+    codex_rollout(&codex, "sessions/2026/07/17/rollout-u.jsonl", &lines);
+    summary(&opts(&dir, None, Some(codex))).unwrap();
+    assert_eq!(
+        history.event_count().unwrap(),
+        1,
+        "采集并入已导入事件，不新增"
+    );
+    assert_eq!(history.totals().unwrap().input, 100, "token 不翻倍");
+    assert_eq!(history.totals().unwrap().output, 30);
+    std::fs::remove_dir_all(&dir).ok();
+
+    // 顺序 B：先采集，后导入。
+    let dir = temp_dir("union-collect-first");
+    let history = history_of(&dir);
+    let codex = dir.join("codex");
+    codex_rollout(&codex, "sessions/2026/07/17/rollout-u.jsonl", &lines);
+    summary(&opts(&dir, None, Some(codex))).unwrap();
+    assert_eq!(history.event_count().unwrap(), 1);
+    seed_ccs(&dir.join("cc-switch.db"), &[ccs_row], &[]);
+    let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
+    let preview = ccs::preview(&source, &history, "UTC").unwrap();
+    assert_eq!(preview.would_overlap, 0, "两个顺序都必须免提示命中同一事件");
+    let report = ccs::commit(
+        &preview.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        history.event_count().unwrap(),
+        1,
+        "导入并入已采集事件，不新增"
+    );
+    assert_eq!(history.totals().unwrap().input, 100, "token 不翻倍");
+    assert_eq!(report.requests_unchanged + report.requests_conflicted, 1);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 复审 #3 的会话行分支：Codex 会话行因"与 proxy 行重复"被剔除时，它的
+/// 保守重播身份必须转移给被保留的 proxy 行——否则先导入（留 proxy 行）后
+/// 采集（带 session_id）仍会为同一请求再建一条事件。
+#[test]
+fn deduped_codex_session_row_donates_replay_identity_to_proxy_row() {
+    let dir = temp_dir("codex-alias-donate");
+    let history = history_of(&dir);
+    let ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
+    let proxy = CcsRow {
+        request_id: "px-1".into(),
+        app_type: "codex".into(),
+        model: "gpt-5.6-sol".into(),
+        session_id: None,
+        data_source: "proxy".into(),
+        created_at: ts.as_second(),
+        input: 100,
+        output: 30,
+    };
+    let session = CcsRow {
+        request_id: "cs-1".into(),
+        session_id: Some("sess-1".into()),
+        data_source: "codex_session".into(),
+        created_at: ts.as_second() + 10,
+        ..proxy.clone()
+    };
+    seed_ccs(&dir.join("cc-switch.db"), &[proxy, session], &[]);
+    let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
+    let preview = ccs::preview(&source, &history, "UTC").unwrap();
+    assert_eq!(
+        preview.requests_importable, 1,
+        "会话行与 proxy 行同请求，只保留一条"
+    );
+    assert_eq!(preview.requests_skipped_duplicate_of_proxy, 1);
+    let report = ccs::commit(
+        &preview.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        false,
+    )
+    .unwrap();
+    assert_eq!(report.requests_inserted, 1);
+    assert_eq!(
+        history.alias_count().unwrap(),
+        1,
+        "被剔除会话行的重播身份必须转移给保留的 proxy 行"
+    );
+
+    // 原生采集带同一 session/模型/四桶 → 命中转移的别名，不新增事件。
+    let codex = dir.join("codex");
+    codex_rollout(
+        &codex,
+        "sessions/2026/07/17/rollout-d.jsonl",
+        &[
+            codex_meta("sess-1", "/work/app"),
+            codex_context("gpt-5.6-sol", "/work/app"),
+            codex_token_count("2026-07-17T15:00:00.000Z", 100, 30),
+        ],
+    );
+    summary(&opts(&dir, None, Some(codex))).unwrap();
+    assert_eq!(history.event_count().unwrap(), 1, "采集并入 proxy 行事件");
+    assert_eq!(history.totals().unwrap().input, 100, "token 不翻倍");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 复审 #1/#2/#5（迁移分支）：v2 旧库升级到 v3 时——
+/// 补齐 Codex 重播身份（文件移动后重扫不再重复计量）、把采集时刻改写为
+/// 事件时间（真实终值不再被判过期）、同键日汇总仅时区不同的重复行折叠。
+#[test]
+fn upgraded_v2_history_backfills_identity_time_and_rollup_key() {
+    let dir = temp_dir("v2-upgrade");
+    let path = dir.join("data").join("history.db");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let codex_ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
+    let claude_ts: jiff::Timestamp = "2026-07-17T15:01:40Z".parse().unwrap();
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(tokenscope::history::legacy_v1_schema_for_tests())
+            .unwrap();
+        conn.execute_batch(tokenscope::history::legacy_v2_schema_for_tests())
+            .unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        // 旧 Codex 事件：观察时间 = 采集时刻（旧语义），没有 codex-usage 别名。
+        conn.execute(
+            "INSERT INTO usage_events(event_key, app, ts_seconds, ts_nanos, model_raw,
+                model_identity, identity_revision, session_id, record_id, project_key,
+                session_initial_cwd, event_cwd, input_tokens, output_tokens,
+                cache_write_tokens, cache_read_tokens, origin_rank, observed_at_utc,
+                observed_at_seconds, observed_at_nanos, parser_revision)
+             VALUES('native|codex|/logs/a.jsonl|0|fp', 'codex', ?1, 0, 'gpt-5.6-sol',
+                    'gpt56sol', 1, 'sess-1', NULL, NULL, NULL, NULL, '100', '30', '0', '0',
+                    1, '2026-10-10T00:00:00Z', 1792000000, 0, 1)",
+            [codex_ts.as_second()],
+        )
+        .unwrap();
+        // 旧 Claude 事件：终值 5，观察时间 = 采集时刻（晚于事件时间）。
+        conn.execute(
+            "INSERT INTO usage_events(event_key, app, ts_seconds, ts_nanos, model_raw,
+                model_identity, identity_revision, session_id, record_id, project_key,
+                session_initial_cwd, event_cwd, input_tokens, output_tokens,
+                cache_write_tokens, cache_read_tokens, origin_rank, observed_at_utc,
+                observed_at_seconds, observed_at_nanos, parser_revision)
+             VALUES('native|claude|/logs/c.jsonl|0|fp', 'claude-code', ?1, 0,
+                    'claude-opus-5-5', 'claudeopus55', 1, 'sess-C', 'm1', NULL, NULL, NULL,
+                    '10', '5', '0', '0', 1, '2026-10-10T00:00:00Z', 1792000000, 0, 1)",
+            [claude_ts.as_second()],
+        )
+        .unwrap();
+        // 同键日汇总存了两份（v2 把 source_tz 纳入唯一键的缺陷产物）。
+        for tz in ["UTC", "Asia/Shanghai"] {
+            conn.execute(
+                "INSERT INTO ccs_daily_usage(logical_source, day, source_tz, app, provider_id,
+                    model, request_model, pricing_model, request_count, input_tokens,
+                    output_tokens, cache_write_tokens, cache_read_tokens, input_semantics,
+                    source_cost_usd, import_run_id, revision)
+                 VALUES('ccs', '2026-06-01', ?1, 'codex', 'p1', 'gpt-5.6', '', '', 10,
+                        '1000', '200', '0', '0', 2, '1.5', NULL, 1)",
+                [tz],
+            )
+            .unwrap();
+        }
+    }
+    let history = HistoryDb::open(&path).unwrap();
+    assert_eq!(history.schema_version().unwrap(), 3, "升级到当前版本");
+    assert_eq!(
+        history.rollup_count().unwrap(),
+        1,
+        "仅时区不同的重复汇总折叠"
+    );
+    assert_eq!(
+        history.rollup_request_count().unwrap(),
+        10,
+        "请求数不因时区重复翻倍"
+    );
+    assert_eq!(
+        history.daily_rollups(None).unwrap()[0].source_tz,
+        "UTC",
+        "折叠保留最早一条（与 KeepExisting 策略一致）"
+    );
+
+    // 复审 #2：迁移后写回真实终值（同事件键、同事件时间）必须按更新处理，
+    // 不再被旧的"采集时刻"观察时间判为过期。
+    let ts: jiff::Timestamp = "2026-07-17T15:01:40Z".parse().unwrap();
+    let s = history
+        .write_batch(&[EventWrite {
+            event_key: "native|claude|/logs/c.jsonl|0|fp".into(),
+            app: AgentKind::ClaudeCode,
+            ts,
+            model_raw: "claude-opus-5-5".into(),
+            model_identity: "claudeopus55".into(),
+            session_id: Some("sess-C".into()),
+            record_id: Some("m1".into()),
+            project_key: Some("/work/app".into()),
+            session_initial_cwd: None,
+            event_cwd: None,
+            tokens: TokenCounts {
+                input: 10,
+                output: 20,
+                cache_write: 0,
+                cache_read: 0,
+            },
+            precedence: WritePrecedence::NativeLog,
+            observed_at: ts,
+            aliases: vec![EventAlias {
+                app: AgentKind::ClaudeCode,
+                scheme: "claude-message".into(),
+                value: "sess-C|m1".into(),
+            }],
+            origins: Vec::new(),
+        }])
+        .unwrap();
+    assert_eq!(s.updated, 1, "真实终值按更新处理（此前被判 stale）");
+    assert_eq!(
+        history.totals().unwrap().output,
+        50,
+        "Claude 终值 5 → 20（Codex 30 + Claude 20）"
+    );
+
+    // 复审 #1：文件移动后重扫（新来源键 + 重播身份别名）必须命中迁移回填的
+    // 别名，不新增事件。
+    let moved_ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
+    history
+        .write_batch(&[EventWrite {
+            event_key: "native|codex|/archive/a.jsonl|0|fp".into(),
+            app: AgentKind::Codex,
+            ts: moved_ts,
+            model_raw: "gpt-5.6-sol".into(),
+            model_identity: "gpt56sol".into(),
+            session_id: Some("sess-1".into()),
+            record_id: None,
+            project_key: Some("/work/app".into()),
+            session_initial_cwd: None,
+            event_cwd: None,
+            tokens: TokenCounts {
+                input: 100,
+                output: 30,
+                cache_write: 0,
+                cache_read: 0,
+            },
+            precedence: WritePrecedence::NativeLog,
+            observed_at: moved_ts,
+            aliases: vec![EventAlias {
+                app: AgentKind::Codex,
+                scheme: "codex-usage".into(),
+                value: "sess-1|gpt-5.6-sol|100|30|0|0".into(),
+            }],
+            origins: Vec::new(),
+        }])
+        .unwrap();
+    assert_eq!(
+        history.event_count().unwrap(),
+        2,
+        "移动后重扫命中回填的别名，不新增 Codex 事件"
+    );
+    assert_eq!(
+        history.alias_count().unwrap(),
+        2,
+        "codex-usage 别名只此一条"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 复审 #5（运行期）：同一 CCS 库改选来源时区再次导入，日汇总不重复累计。
+#[test]
+fn changing_source_timezone_does_not_duplicate_rollups() {
+    let dir = temp_dir("rollup-tz");
+    let history = history_of(&dir);
+    seed_ccs(
+        &dir.join("cc-switch.db"),
+        &[],
+        &[("2026-06-01", "codex", "gpt-5.6", "", 10, 1000, 200)],
+    );
+    let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
+    let preview = ccs::preview(&source, &history, "UTC").unwrap();
+    assert_eq!(preview.rollups_new, 1);
+    ccs::commit(
+        &preview.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        false,
+    )
+    .unwrap();
+    assert_eq!(history.rollup_count().unwrap(), 1);
+
+    let preview = ccs::preview(&source, &history, "Asia/Shanghai").unwrap();
+    assert_eq!(preview.rollups_new, 0, "同键快照不再因时区不同变成新行");
+    assert_eq!(preview.rollups_unchanged, 1);
+    assert_eq!(preview.rollups_conflicting, 0, "仅时区差异不构成内容冲突");
+    ccs::commit(
+        &preview.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        false,
+    )
+    .unwrap();
+    assert_eq!(history.rollup_count().unwrap(), 1, "不产生第二份快照");
+    assert_eq!(history.rollup_request_count().unwrap(), 10, "请求不翻倍");
+    assert_eq!(
+        history.daily_rollups(None).unwrap()[0].source_tz,
+        "Asia/Shanghai",
+        "时区假设修订为本次导入的选择"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 复审 #4：优先级判定先于观察时间——原生日志比 CCS 导入更可信，即使原生
+/// 事件时间早于已存 CCS 值也要胜出；反向（CCS 后到）仍按冲突保留原生值。
+#[test]
+fn native_precedence_beats_observed_time() {
+    let dir = temp_dir("precedence");
+    let history = history_of(&dir);
+    let t0: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
+    let t5: jiff::Timestamp = "2026-07-17T15:00:05Z".parse().unwrap();
+    let alias = EventAlias {
+        app: AgentKind::ClaudeCode,
+        scheme: "claude-message".into(),
+        value: "sess-1|m1".into(),
+    };
+    // CCS 先到（created_at 比原生晚 5 秒，输出 50）。
+    history
+        .write_batch(&[EventWrite {
+            event_key: "ccs|claude|proxy|p1".into(),
+            app: AgentKind::ClaudeCode,
+            ts: t5,
+            model_raw: "claude-opus-5-5".into(),
+            model_identity: "claudeopus55".into(),
+            session_id: Some("sess-1".into()),
+            record_id: Some("m1".into()),
+            project_key: None,
+            session_initial_cwd: None,
+            event_cwd: None,
+            tokens: TokenCounts {
+                input: 10,
+                output: 50,
+                cache_write: 0,
+                cache_read: 0,
+            },
+            precedence: WritePrecedence::CcsImport,
+            observed_at: t5,
+            aliases: vec![alias.clone()],
+            origins: Vec::new(),
+        }])
+        .unwrap();
+    // 原生后到（事件时间早 5 秒，输出 30）。
+    let s = history
+        .write_batch(&[EventWrite {
+            event_key: "native|claude|/logs/a.jsonl|0|fp".into(),
+            app: AgentKind::ClaudeCode,
+            ts: t0,
+            model_raw: "claude-opus-5-5".into(),
+            model_identity: "claudeopus55".into(),
+            session_id: Some("sess-1".into()),
+            record_id: Some("m1".into()),
+            project_key: Some("/work/app".into()),
+            session_initial_cwd: None,
+            event_cwd: None,
+            tokens: TokenCounts {
+                input: 10,
+                output: 30,
+                cache_write: 0,
+                cache_read: 0,
+            },
+            precedence: WritePrecedence::NativeLog,
+            observed_at: t0,
+            aliases: vec![alias.clone()],
+            origins: Vec::new(),
+        }])
+        .unwrap();
+    assert_eq!(s.updated, 1, "更高优先级来源不得被观察时间判定拦下");
+    assert_eq!(history.totals().unwrap().output, 30, "原生终值胜出");
+    // 反向：CCS 再后到不能覆盖原生终值（保持冲突语义）。
+    let s2 = history
+        .write_batch(&[EventWrite {
+            event_key: "ccs|claude|proxy|p2".into(),
+            app: AgentKind::ClaudeCode,
+            ts: t5,
+            model_raw: "claude-opus-5-5".into(),
+            model_identity: "claudeopus55".into(),
+            session_id: Some("sess-1".into()),
+            record_id: Some("m1".into()),
+            project_key: None,
+            session_initial_cwd: None,
+            event_cwd: None,
+            tokens: TokenCounts {
+                input: 10,
+                output: 50,
+                cache_write: 0,
+                cache_read: 0,
+            },
+            precedence: WritePrecedence::CcsImport,
+            observed_at: t5,
+            aliases: vec![alias],
+            origins: Vec::new(),
+        }])
+        .unwrap();
+    assert_eq!(s2.conflicts, 1, "低优先级来源保持冲突语义");
+    assert_eq!(history.totals().unwrap().output, 30);
     std::fs::remove_dir_all(&dir).ok();
 }

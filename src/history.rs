@@ -32,7 +32,7 @@ use crate::model::{AgentKind, TokenCounts};
 ///
 /// - v1 = `history_meta` + `source_files` + `usage_events`；
 /// - v2 = 别名 / 来源记录 / CCS 日汇总 / 导入批次四表（H01 起）。
-pub const HISTORY_SCHEMA_VERSION: i64 = 2;
+pub const HISTORY_SCHEMA_VERSION: i64 = 3;
 
 /// 解析规则版本：适配器输出语义变化时递增（与事件一并存储，供重解析判定）。
 pub const PARSER_REVISION: i64 = 1;
@@ -198,8 +198,97 @@ pub fn legacy_v1_schema_for_tests() -> &'static str {
     SCHEMA_V1
 }
 
+/// v2 建表 SQL（迁移使用；集成测试据此构造 v2 旧库验证 v3 数据迁移）。
+#[doc(hidden)]
+pub fn legacy_v2_schema_for_tests() -> &'static str {
+    SCHEMA_V2
+}
+
+/// v3 数据迁移：修复三个"旧库升级后行为不正确"的数据问题（结构不变，只改数据）。
+///
+/// - **日汇总身份去掉 `source_tz`**（v2 把它放进了唯一键）：同一 CCS 库改选
+///   来源时区再次导入时，同一份日汇总获得了两个身份、统计重复累计。重建表并把
+///   仅时区不同的重复行折叠为最早一条（同键快照冲突一律保留先存值，与运行期
+///   KeepExisting 策略一致）；CCS 的完整主键本就不含时区（计划 §5.3）。
+/// - **观察时间改写为事件时间**：v2 及更早版本把"采集时刻"存进
+///   `observed_at`，升级后代码按"事件时间"判定终值新旧——旧记录的采集时刻
+///   总是晚于其事件时间，后续真实终值会被误判为过期。全部改写为
+///   `ts_seconds/ts_nanos`（CCS 行本来就存事件时间，改写是无操作）。
+/// - **补齐 Codex 保守重播身份别名**：v2 时代的原生事件没有 `codex-usage`
+///   别名，而已采集文件的指纹命中会让重解析不再发生——文件一旦移动到归档
+///   目录就找不到旧事件、重复计量。从库内字段重建该别名（与
+///   `UsageEvent::same_source_identity` 同一构造规则）；同身份对应多个事件时
+///   无法唯一改绑，保持缺失（这些事件维持既有保守行为）。
+const SCHEMA_V3: &str = r"
+CREATE TABLE ccs_daily_usage_v3 (
+    id INTEGER PRIMARY KEY,
+    logical_source TEXT NOT NULL,
+    day TEXT NOT NULL,
+    source_tz TEXT NOT NULL,
+    app TEXT NOT NULL,
+    provider_id TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    request_model TEXT NOT NULL DEFAULT '',
+    pricing_model TEXT NOT NULL DEFAULT '',
+    request_count INTEGER NOT NULL,
+    input_tokens TEXT NOT NULL,
+    output_tokens TEXT NOT NULL,
+    cache_write_tokens TEXT NOT NULL,
+    cache_read_tokens TEXT NOT NULL,
+    input_semantics INTEGER NOT NULL,
+    source_cost_usd TEXT,
+    import_run_id INTEGER,
+    revision INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(logical_source, day, app, provider_id, model, request_model, pricing_model)
+);
+INSERT INTO ccs_daily_usage_v3(logical_source, day, source_tz, app, provider_id, model,
+    request_model, pricing_model, request_count, input_tokens, output_tokens,
+    cache_write_tokens, cache_read_tokens, input_semantics, source_cost_usd,
+    import_run_id, revision)
+SELECT logical_source, day, source_tz, app, provider_id, model, request_model, pricing_model,
+    request_count, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+    input_semantics, source_cost_usd, import_run_id, revision
+FROM ccs_daily_usage c
+WHERE c.id = (
+    SELECT MIN(c2.id) FROM ccs_daily_usage c2
+    WHERE c2.logical_source = c.logical_source AND c2.day = c.day AND c2.app = c.app
+      AND c2.provider_id = c.provider_id AND c2.model = c.model
+      AND c2.request_model = c.request_model AND c2.pricing_model = c.pricing_model
+);
+DROP TABLE ccs_daily_usage;
+ALTER TABLE ccs_daily_usage_v3 RENAME TO ccs_daily_usage;
+CREATE INDEX IF NOT EXISTS idx_ccs_daily_day ON ccs_daily_usage(day, app, model);
+UPDATE usage_events SET observed_at_seconds = ts_seconds, observed_at_nanos = ts_nanos;
+INSERT INTO event_aliases(event_id, app, identity_scheme, identity_value, created_generation)
+SELECT e.id, 'codex', 'codex-usage',
+       e.session_id || '|' || e.model_raw || '|' || e.input_tokens || '|' || e.output_tokens
+         || '|' || e.cache_write_tokens || '|' || e.cache_read_tokens,
+       0
+FROM usage_events e
+WHERE e.app = 'codex'
+  AND COALESCE(e.session_id, '') <> ''
+  AND e.model_raw <> ''
+  AND NOT EXISTS (
+      SELECT 1 FROM event_aliases x
+      WHERE x.event_id = e.id AND x.identity_scheme = 'codex-usage')
+  AND (
+      SELECT COUNT(*) FROM usage_events g
+      WHERE g.app = 'codex' AND COALESCE(g.session_id, '') <> '' AND g.model_raw <> ''
+        AND g.session_id = e.session_id AND g.model_raw = e.model_raw
+        AND g.input_tokens = e.input_tokens AND g.output_tokens = e.output_tokens
+        AND g.cache_write_tokens = e.cache_write_tokens
+        AND g.cache_read_tokens = e.cache_read_tokens
+  ) = 1
+  AND NOT EXISTS (
+      SELECT 1 FROM event_aliases y
+      WHERE y.app = 'codex' AND y.identity_scheme = 'codex-usage'
+        AND y.identity_value = e.session_id || '|' || e.model_raw || '|' || e.input_tokens
+          || '|' || e.output_tokens || '|' || e.cache_write_tokens || '|' || e.cache_read_tokens
+  );
+";
+
 /// 版本化迁移表：`(目标版本, SQL)`，从 0 起按序执行。
-const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2)];
+const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2), (3, SCHEMA_V3)];
 
 /// 写入优先级：数值越大越可信。原生日志终值优先于 CCS 导入值；同一优先级
 /// 内部按观察时间取更晚者（计划 §5.3：与导入顺序无关）。
@@ -338,6 +427,8 @@ pub struct DailyRollupWrite {
     /// CCS 原始统计日（`YYYY-MM-DD`，来源时区下的自然日，不重切时区）。
     pub day: String,
     /// 来源统计时区（CCS 用 `localtime` 生成日键，这里存导入时的本机时区假设）。
+    /// **不是身份的一部分**：同一 CCS 库改选时区再次导入更新该假设，不产生
+    /// 第二份快照。
     pub source_tz: String,
     pub app: AgentKind,
     pub provider_id: String,
@@ -1029,6 +1120,11 @@ impl HistoryDb {
     }
 
     /// 日汇总快照在库内的处置分类（只读）。
+    ///
+    /// 身份 = CCS 完整主键（**不含** `source_tz`——那是导入时记录的统计时区
+    /// 假设，不是数据身份；否则同一 CCS 库改选时区再次导入会把同一份汇总
+    /// 变成两条、重复累计）。内容比较同样不含时区：仅时区不同 = 同一份
+    /// 用量快照，按未变化计（提交时仅修订时区元数据）。
     pub fn classify_rollup(&self, r: &DailyRollupWrite) -> Result<RollupClass> {
         let existing: Option<(i64, String, String, String, String, Option<String>)> = self
             .conn
@@ -1036,12 +1132,11 @@ impl HistoryDb {
                 "SELECT request_count, input_tokens, output_tokens, cache_write_tokens,
                         cache_read_tokens, source_cost_usd
                  FROM ccs_daily_usage
-                 WHERE logical_source = ?1 AND day = ?2 AND source_tz = ?3 AND app = ?4
-                   AND provider_id = ?5 AND model = ?6 AND request_model = ?7 AND pricing_model = ?8",
+                 WHERE logical_source = ?1 AND day = ?2 AND app = ?3
+                   AND provider_id = ?4 AND model = ?5 AND request_model = ?6 AND pricing_model = ?7",
                 params![
                     r.logical_source,
                     r.day,
-                    r.source_tz,
                     r.app.as_str(),
                     r.provider_id,
                     r.model,
@@ -1783,9 +1878,17 @@ fn lookup_overlap_candidate(conn: &Connection, w: &EventWrite) -> Result<Option<
 }
 
 /// 库内处置判定（纯函数，预览与写入共用）。
+///
+/// 优先级**先于**观察时间：原生日志比 CCS 导入更可信，同一条请求的原生记录
+/// 无论事件时间是否早于已存 CCS 值都要胜出（计划 §5.3：原生记录按原生终值
+/// 规则选取，与导入顺序无关）——否则 CCS 的 `created_at` 稍晚几秒时，后采集
+/// 的原生终值会被"观察时间更早"误判为过期。观察时间只在**同优先级**内区分
+/// 新旧（同请求的流式更新、旧副本回放）。
 fn classify_against(existing: &StoredEvent, w: &EventWrite) -> WriteClass {
     if content_equal(existing, w) {
         WriteClass::Unchanged
+    } else if w.precedence > existing.precedence {
+        WriteClass::Update
     } else if existing.precedence > w.precedence {
         WriteClass::Conflict
     } else if w.observed_at < existing.observed_at {
@@ -1795,7 +1898,7 @@ fn classify_against(existing: &StoredEvent, w: &EventWrite) -> WriteClass {
     }
 }
 
-/// 库内同键日汇总快照的读取形态（含批次归属，供诊断）。
+/// 库内同键日汇总快照的读取形态（含来源时区与批次归属，供诊断）。
 type RollupSnapshotRow = (
     i64,
     i64,
@@ -1804,11 +1907,13 @@ type RollupSnapshotRow = (
     String,
     String,
     Option<String>,
+    String,
     Option<i64>,
 );
 
-/// 日汇总快照写入：同键内容相同 → 跳过；内容不同 → 按策略保留或替换
-/// （来源无可验证修订时默认保留已存值并计冲突）。
+/// 日汇总快照写入：同键内容相同 → 跳过（仅来源时区假设不同时修订该元数据，
+/// 用量未变仍计未变化）；内容不同 → 按策略保留或替换（来源无可验证修订时
+/// 默认保留已存值并计冲突）。同键身份 = CCS 完整主键，**不含** `source_tz`。
 fn write_rollups_in_tx(
     tx: &Transaction<'_>,
     rollups: &[DailyRollupWrite],
@@ -1825,14 +1930,13 @@ fn write_rollups_in_tx(
         let existing: Option<RollupSnapshotRow> = tx
             .query_row(
                 "SELECT id, request_count, input_tokens, output_tokens, cache_write_tokens,
-                        cache_read_tokens, source_cost_usd, import_run_id
+                        cache_read_tokens, source_cost_usd, source_tz, import_run_id
                  FROM ccs_daily_usage
-                 WHERE logical_source = ?1 AND day = ?2 AND source_tz = ?3 AND app = ?4
-                   AND provider_id = ?5 AND model = ?6 AND request_model = ?7 AND pricing_model = ?8",
+                 WHERE logical_source = ?1 AND day = ?2 AND app = ?3
+                   AND provider_id = ?4 AND model = ?5 AND request_model = ?6 AND pricing_model = ?7",
                 params![
                     r.logical_source,
                     r.day,
-                    r.source_tz,
                     r.app.as_str(),
                     r.provider_id,
                     r.model,
@@ -1849,6 +1953,7 @@ fn write_rollups_in_tx(
                         row.get(5)?,
                         row.get(6)?,
                         row.get(7)?,
+                        row.get(8)?,
                     ))
                 },
             )
@@ -1885,7 +1990,7 @@ fn write_rollups_in_tx(
                 summary.inserted += 1;
                 changed = true;
             }
-            Some((id, count, i, o, cw, cr, cost, _run)) => {
+            Some((id, count, i, o, cw, cr, cost, existing_tz, _run)) => {
                 let same = count == r.request_count as i64
                     && i == r.tokens.input.to_string()
                     && o == r.tokens.output.to_string()
@@ -1893,12 +1998,22 @@ fn write_rollups_in_tx(
                     && cr == r.tokens.cache_read.to_string()
                     && cost == r.source_cost_usd.map(|v| v.to_string());
                 if same {
+                    if existing_tz != r.source_tz {
+                        // 同一份快照、来源时区假设变了：修订元数据（查询侧的
+                        // 日时区不匹配提示据此更准），用量与请求数不动。
+                        tx.execute(
+                            "UPDATE ccs_daily_usage SET source_tz = ?2 WHERE id = ?1",
+                            params![id, r.source_tz],
+                        )?;
+                        changed = true;
+                    }
                     summary.unchanged += 1;
                 } else if r.revision > 0 || policy == RollupConflictPolicy::TakeSource {
                     tx.execute(
                         "UPDATE ccs_daily_usage SET request_count = ?2, input_tokens = ?3,
                             output_tokens = ?4, cache_write_tokens = ?5, cache_read_tokens = ?6,
-                            input_semantics = ?7, source_cost_usd = ?8, revision = ?9
+                            input_semantics = ?7, source_cost_usd = ?8, revision = ?9,
+                            source_tz = ?10
                          WHERE id = ?1",
                         params![
                             id,
@@ -1910,6 +2025,7 @@ fn write_rollups_in_tx(
                             r.input_semantics,
                             r.source_cost_usd.map(|v| v.to_string()),
                             r.revision,
+                            r.source_tz,
                         ],
                     )?;
                     summary.replaced += 1;

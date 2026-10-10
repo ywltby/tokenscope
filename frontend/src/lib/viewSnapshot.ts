@@ -3,12 +3,14 @@
 // 合并待保存最新项 + 串行派发：绝不并发 fire-and-forget 让旧写覆盖新写。
 import { invoke } from "@tauri-apps/api/core";
 
-/** 快照格式版本：v10 = 上下文解析修复（第三轮审查）——Codex 会话边界、
+/** 快照格式版本：v11 = 「只看请求明细」（rollups_mode）随快照保存/恢复，
+ * v10 及更早快照读不出该模式（恢复后回退 auto、可能重新带入日粒度历史），
+ * 读取时忽略；v10 = 上下文解析修复（第三轮审查）——Codex 会话边界、
  * file URI 点段、UNC/URI 主机大小写与 POSIX 尾空格的修复改变了事件的
- * session/project，v9 及更早快照的分组与下钻 key 不再可信，读取时忽略；
+ * session/project，v9 及更早快照的分组与下钻 key 不再可信；
  * v9 = 模型匹配规则（等价键）；v8 = 项目根归并；v7 = 统一项目身份；
  * v6 = 查询会话契约（SF04）；v5 及更早版本不含会话身份且游标为旧格式。 */
-export const SNAPSHOT_VERSION = 10;
+export const SNAPSHOT_VERSION = 11;
 
 export type SnapshotDispatch = (payload: unknown) => Promise<void>;
 
