@@ -63,6 +63,36 @@ cc-switch 的用量统计不是"每个 agent 一个统计库"，而是**双链�
 筛选项（代码对应 `folded_app_type_sql`，`usage_stats.rs:349-351`，仅用于读侧筛选与
 分组，不改动任何已存储行）。
 
+### 2.2 覆盖矩阵：每个 agent 靠哪条链路、读什么
+
+**七家有独立会话适配器，覆盖七种数据面（4 种 JSONL 目录 + 2 种 SQLite + 1 种 JSON/JSONL
+混合）**；全部同时受代理链路覆盖（前提是流量经本地路由）。
+
+| 应用（`app_type`） | 会话链路 | 代理链路 | 会话数据面（§12 详述） |
+| --- | --- | --- | --- |
+| Claude Code（`claude`） | ✓ 独立适配器 | ✓ | `~/.claude/projects/**`：主会话 + `subagents/` + `subagents/workflows/wf_*/` 下的 `*.jsonl` |
+| Claude Desktop（`claude-desktop`） | ✗ **无独立适配器** | ✓（只统计经路由的"模型映射"请求） | —（展示口径折叠进 `claude`，明细仍保留原始 `app_type`） |
+| Codex（`codex`） | ✓ | ✓ | `~/.codex/{sessions,archived_sessions}/**/rollout-*.jsonl`（可 `.jsonl.zst`） |
+| Gemini CLI（`gemini`） | ✓ | ✓ | `~/.gemini/tmp/<project_hash>/chats/session-*.json` 或 `.jsonl`（JSONL 先回放成单对象） |
+| OpenCode（`opencode`） | ✓ | ✓ | SQLite `opencode.db`（V1 `session`+`message` / V2 `session_v2`+`session_message` 双布局） |
+| Grok Build（`grokbuild`） | ✓ | ✓ | `~/.grok/{sessions,archived_sessions}/<enc-cwd>/<session-id>/updates.jsonl` |
+| Pi（`pi`） | ✓ | ✓ | `~/.pi/agent/sessions/**/*.jsonl`（目录布局随配置可扁平化） |
+| MiniMax Code（`mcode`） | ✓ | ✓ | SQLite `<data_dir>/v2/sqlite/runtime-state.sqlite` 的 `local_runtime_token_usage` 表 |
+| OpenClaw、Hermes | ✗ | 视是否经路由 | 官方文档明确"暂不支持用量统计" |
+
+**读取方式的一句话概括**（细节与行号见 §12）：
+
+- **文件型（Claude / Codex / Gemini / Grok / Pi）**：发现候选文件 → 按 `session_log_sync`
+  游标判断增量 → 逐行（或先回放）解析 → 取"单次值"或"累计快照差分" → 组 `request_id` →
+  批量写 `proxy_request_logs`，游标与数据同事务提交。
+- **SQLite 型（OpenCode / MiniMax Code）**：只读打开源库 → 按源表水位
+  （OpenCode 用 `time_updated`，MiniMax 用自增 `id`）取新行 → 解析 JSON 列或直接读列 →
+  同样的 `request_id` + 幂等写入。
+- **增量钥匙**各不相同但都落在同一张 `session_log_sync` 表：Claude 是字节偏移 + 尾部指纹，
+  Codex 是 mtime+size（每次从头重放），Gemini/Grok 是 mtime（变更即整文件重读），
+  Pi 是 mtime+size+尾指纹+完整位编码进 `last_synced_at`，OpenCode 是库+WAL mtime 加会话级
+  `time_updated`，MiniMax 是源表自增 id。
+
 ## 3. 数据库与迁移
 
 ### 3.1 库文件与连接
