@@ -69,7 +69,7 @@ fn display_bytes(n: usize) -> String {
 /// v1（ts|rid|seq）游标缺字段且无法验证归属，解析时直接拒绝。
 pub const CURSOR_VERSION: u8 = 2;
 
-/// 查询快照：冻结的主过滤行序 + 采集/价格上下文。
+/// 查询快照：冻结的主过滤行序 + 采集/价格上下文 + 只读事务快照。
 pub struct QuerySnapshot {
     pub query_id: String,
     pub generation: u64,
@@ -82,12 +82,20 @@ pub struct QuerySnapshot {
     /// 冻结的查询时间基准（SF05：一次查询只解析一次 today）。
     pub as_of: jiff::Zoned,
     pub by: crate::aggregate::GroupBy,
-    /// 主过滤后的固定行序（ts/rid 降序 + 组内 seq），只存事件索引。
+    /// 主过滤后的固定行序（ts/rid 降序 + 组内 seq），只存**行索引**。
     pub rows: Vec<SnapshotRow>,
+    /// H07：冻结的时间边界（days/from/to 在建立快照时解析一次并固定）。
+    time_bounds: report::TimeBounds,
     /// H06：本次查询固定的日汇总桶选择——只有日粒度的外部历史按桶决定统计
     /// 来源（明细覆盖 / 汇总口径），在建快照时**算一次**后冻结。
     rollup_selection: report::RollupSelection,
     collection: Arc<report::CollectionSnapshot>,
+    /// H07：只读事务快照——汇总与分页都从它读取，采集/导入提交后旧查询不变。
+    read: Arc<crate::history::ReadSnapshot>,
+    /// H07：懒物化的事件集（**只有明细分页/下钻才需要**；汇总走流式读取，
+    /// 不触发它，因此汇总的内存占用不随历史规模增长）。
+    materialized: std::sync::OnceLock<Vec<UsageEvent>>,
+    materialize_error: std::sync::OnceLock<String>,
     /// RC05：保留字节额度凭证——随本快照的**最后一个 Arc** 释放。
     /// 会话被淘汰但仍有读取者持有时继续占账
     ///（`evicted_but_borrowed_snapshot_stays_charged`）。
@@ -96,19 +104,95 @@ pub struct QuerySnapshot {
 
 #[derive(Debug, Clone)]
 pub struct SnapshotRow {
-    /// 采集事件集中的位置（零复制）。
+    /// 库内事件主键（H07：快照不再持有事件本体）。
+    pub event_id: i64,
+    /// 该行在懒物化事件向量中的位置（与行序一一对应；分页/下钻用）。
     pub index: usize,
     /// 相同 (ts, record_id) 组内的序号（0..n）——游标第三分量。
     pub seq: u64,
 }
 
 impl QuerySnapshot {
+    /// 该行的事件。会触发**懒物化**（整份行序事件一次读入）——汇总路径不走
+    /// 这里，因此不影响"汇总不物化历史"的约束。
     pub fn event(&self, row: &SnapshotRow) -> &UsageEvent {
-        &self.collection.events[row.index]
+        &self.materialized_events()[row.index]
     }
 
     pub fn events(&self) -> &[UsageEvent] {
-        &self.collection.events
+        self.materialized_events()
+    }
+
+    /// 懒物化失败时向上报告（分页/下钻因此得到明确错误而不是空结果）。
+    pub fn try_materialize(&self) -> Result<()> {
+        let _ = self.materialized_events();
+        match self.materialize_error.get() {
+            Some(e) => Err(anyhow::anyhow!("{e}")),
+            None => Ok(()),
+        }
+    }
+
+    fn materialized_events(&self) -> &Vec<UsageEvent> {
+        self.materialized
+            .get_or_init(|| match self.load_events_in_row_order() {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = self.materialize_error.set(format!("{e:#}"));
+                    Vec::new()
+                }
+            })
+    }
+
+    /// 按行序（ts/rid 降序 + 组内 seq）物化事件：先批量取回事件本体，再按
+    /// 索引重排——保证 `rows[i].index == i`。
+    fn load_events_in_row_order(&self) -> Result<Vec<UsageEvent>> {
+        let ids: Vec<i64> = self.rows.iter().map(|r| r.event_id).collect();
+        let mut by_id: std::collections::HashMap<i64, UsageEvent> =
+            std::collections::HashMap::with_capacity(ids.len());
+        for chunk in ids.chunks(4096) {
+            for stored in self.read.fetch_events(chunk)? {
+                by_id.insert(stored.id, report::usage_event_of(&stored));
+            }
+        }
+        let mut out = Vec::with_capacity(self.rows.len());
+        for r in &self.rows {
+            let e = by_id.remove(&r.event_id).ok_or_else(|| {
+                anyhow::anyhow!("查询快照行 {} 在库中不存在（快照与库不一致）", r.event_id)
+            })?;
+            out.push(e);
+        }
+        Ok(out)
+    }
+
+    /// H07：**流式**遍历主过滤后的事件（按行序），不物化整份历史。
+    /// 供汇总聚合使用；`f` 返回 Err 时立即中止并透传。
+    pub(crate) fn for_each_event(
+        &self,
+        f: &mut dyn FnMut(&UsageEvent) -> Result<()>,
+    ) -> Result<()> {
+        let ids: Vec<i64> = self.rows.iter().map(|r| r.event_id).collect();
+        let mut by_id: std::collections::HashMap<i64, UsageEvent> =
+            std::collections::HashMap::with_capacity(ids.len().min(4096));
+        for chunk in ids.chunks(4096) {
+            by_id.clear();
+            for stored in self.read.fetch_events(chunk)? {
+                by_id.insert(stored.id, report::usage_event_of(&stored));
+            }
+            for id in chunk {
+                let e = by_id
+                    .get(id)
+                    .ok_or_else(|| anyhow::anyhow!("查询快照行 {id} 在库中不存在"))?;
+                f(e)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 冻结的时间边界（`days`/`from`/`to` 在建快照时解析一次）——以
+    /// `(from, to)` 自然日文本返回，供界面显示与测试断言；`None` 表示该侧不限。
+    pub fn time_bounds(&self) -> (Option<String>, Option<String>) {
+        let (from, to) = self.time_bounds.parts();
+        (from.map(|d| d.to_string()), to.map(|d| d.to_string()))
     }
 
     pub fn pricing(&self) -> &Arc<crate::pricing::Pricing> {
@@ -400,42 +484,54 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
     let collection = report::collect_flighted(opts)?;
     let main_fingerprint = main_fingerprint(opts, &tz_label);
 
-    // 主过滤（时间范围）一次应用：返回保留事件的索引，不复制事件。
-    let kept = report::time_filter_indices(&collection.events, opts, &tz, &as_of)?;
+    // H07：采集提交之后建立只读事务快照——本次查询看到的就是这一刻的库内容，
+    // 之后的采集/导入提交不会改变它（不静默换页、不混入新数据）。
+    let read = report::open_read_snapshot(opts)?;
+
+    // 冻结的时间边界：days/from/to 只解析一次（SF05），汇总与分页共用。
+    let time_bounds = report::TimeBounds::resolve(opts, &as_of)?;
+
+    // 主过滤（时间范围）在**流式读取**时应用：把通过过滤的行建成轻量索引
+    // （事件主键 + 时间戳 + 记录标识），不把事件本体读进内存。
+    let mut keyed: Vec<(i64, jiff::Timestamp, String)> = Vec::new();
+    read.stream_rows(opts.agent, &mut |row| {
+        if time_bounds.matches(row.ts, &tz) {
+            keyed.push((row.id, row.ts, row.record_id));
+        }
+        Ok(())
+    })?;
 
     // 排序（ts/rid 降序）+ 组内 seq：同一快照只计算一次。
-    let mut keyed: Vec<(usize, &jiff::Timestamp, &str)> = kept
-        .into_iter()
-        .map(|i| {
-            let e = &collection.events[i];
-            (i, &e.ts, e.record_id.as_str())
-        })
-        .collect();
-    keyed.sort_by(|a, b| b.1.cmp(a.1).then(b.2.cmp(a.2)));
+    keyed.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
     let mut rows: Vec<SnapshotRow> = Vec::with_capacity(keyed.len());
-    let mut prev: Option<(&jiff::Timestamp, &str)> = None;
+    let mut prev: Option<(jiff::Timestamp, String)> = None;
     let mut seq: u64 = 0;
-    for (index, ts, rid) in keyed {
-        let same = prev.is_some_and(|(pts, prid)| pts == ts && prid == rid);
+    for (position, (event_id, ts, rid)) in keyed.into_iter().enumerate() {
+        let same = prev
+            .as_ref()
+            .is_some_and(|(pts, prid)| *pts == ts && *prid == rid);
         seq = if same { seq + 1 } else { 0 };
-        rows.push(SnapshotRow { index, seq });
+        rows.push(SnapshotRow {
+            event_id,
+            index: position,
+            seq,
+        });
         prev = Some((ts, rid));
     }
 
-    // RC05：按**完整保留对象**记账（不是筛选命中行数）——零命中行的查询
-    // 仍保留整份采集事件、字符串与价格表。
+    // RC05：按**会话实际保留的数据**记账——H07 起事件本体不再随会话常驻
+    // （汇总流式读取、分页才懒物化），因此这里计的是行索引、元数据与价格表；
+    // 懒物化事件不改变"这个上限只约束查询子系统的保留数据"这一边界。
     let query_id = format!("q{namespace}-{qseq}-g{}", collection.generation);
     let charge =
         snapshot_retained_bytes(&collection, &rows, &query_id, &tz_label, &main_fingerprint)
             .map_err(|e| anyhow!(e))?;
     let limit = quota_limit();
     if charge > limit {
-        // RC05：单会话超预算——明确失败、不截断事件；建议必须真实有效：
-        // 采集到的事件整份随会话保留，时间范围是采集后的过滤，缩小范围并
-        // 不减少保留量，所以不能这样提示。
+        // RC05：单会话超预算——明确失败、不截断数据；建议必须真实有效。
         anyhow::bail!(
-            "查询保留数据 {}（约合 {:.2} MiB）超出单会话预算 {}：可在设置中停用暂不采集的来源目录后重试，\
-             或稍后重试等待闲置会话回收（缩小时间范围不会减少保留量——整份采集事件随会话保留，不按要求截断）",
+            "查询保留数据 {}（约合 {:.2} MiB）超出单会话预算 {}：可缩小时间范围后重试，\
+             或稍后重试等待闲置会话回收（不按要求截断数据）",
             display_bytes(charge),
             charge as f64 / MIB as f64,
             display_bytes(limit)
@@ -447,13 +543,19 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
 
     // H06：日汇总桶选择在这里固定一次——按日筛选/分组且时区与来源时区不同时，
     // 日汇总不参与（返回可恢复提示），绝不把来源日期当午夜事件重切。
-    let day_sensitive = opts.by == crate::aggregate::GroupBy::Day
-        || opts.days.is_some()
-        || opts.from.is_some()
-        || opts.to.is_some();
+    // H07：明细桶集合由只读快照**流式**构建（内存随不同桶数增长，不随事件数）。
+    let day_sensitive = opts.by == crate::aggregate::GroupBy::Day || !time_bounds.is_unbounded();
+    let rollups = read.rollups(opts.agent)?;
+    let source_tzs: Vec<String> = rollups
+        .iter()
+        .map(|r| r.source_tz.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let buckets = report::collect_detail_buckets(&read, opts.agent, &source_tzs)?;
     let rollup_selection = report::select_rollup_contributions(
-        &collection.events,
-        &collection.rollups,
+        &buckets,
+        &rollups,
         day_sensitive,
         &tz_label,
         report::RollupBucketPolicy::default(),
@@ -471,8 +573,12 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
         as_of,
         by: opts.by,
         rows,
+        time_bounds,
         rollup_selection,
         collection,
+        read,
+        materialized: std::sync::OnceLock::new(),
+        materialize_error: std::sync::OnceLock::new(),
         _reservation: reservation,
     });
 

@@ -146,9 +146,10 @@ fn fresh(limit: usize) -> usize {
 
 const EVENT_SIZE: usize = std::mem::size_of::<tokenscope::model::UsageEvent>();
 
-/// 零命中行仍为**整份采集事件**记账（旧实现按 rows.len()=0 计）。
+/// H07：零命中区间不再为事件本体记账——会话只保留行索引、采集元数据与价格表，
+/// 因此记账与事件总数无关（旧实现为整份采集事件记账）。
 #[test]
-fn empty_range_charges_retained_collection() {
+fn empty_range_charges_only_session_metadata() {
     let _g = serial();
     let dir = hermetic("empty-range");
     let root = dir.join("codex");
@@ -164,18 +165,20 @@ fn empty_range_charges_retained_collection() {
     assert_eq!(page.total, 0);
 
     let charged = used() - base;
+    assert!(charged > 0, "会话元数据与价格表仍须记账：{charged}");
     assert!(
-        charged >= N * EVENT_SIZE,
-        "零命中行仍须为保留的 {N} 条事件记账：{charged} < {}",
+        charged < N * EVENT_SIZE,
+        "事件本体不再随会话保留，记账必须远小于事件总量：{charged} >= {}",
         N * EVENT_SIZE
     );
     drop(snap);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 事件数相同、模型/项目字符串更长 → 保留记账更高。
+/// H07：事件里的模型/项目字符串**不再**影响保留记账（事件本体不随会话常驻），
+/// 决定记账的是**行数**。
 #[test]
-fn long_strings_increase_snapshot_charge() {
+fn long_event_strings_do_not_inflate_charge() {
     let _g = serial();
     const N: usize = 20;
 
@@ -185,6 +188,7 @@ fn long_strings_increase_snapshot_charge() {
     let base = fresh(usize::MAX);
     let short = query::begin_query(&opts(&short_dir, &short_root)).unwrap();
     let short_charge = used() - base;
+    assert_eq!(short.rows.len(), N);
     drop(short);
 
     let long_dir = hermetic("long-strings");
@@ -195,11 +199,12 @@ fn long_strings_increase_snapshot_charge() {
     let base2 = fresh(usize::MAX);
     let long = query::begin_query(&opts(&long_dir, &long_root)).unwrap();
     let long_charge = used() - base2;
+    assert_eq!(long.rows.len(), N);
     drop(long);
 
     assert!(
-        long_charge > short_charge,
-        "长模型/项目字符串必须增加保留记账：long={long_charge} short={short_charge}"
+        long_charge <= short_charge + 16 * 1024,
+        "事件内的长字符串不得抬高保留记账：long={long_charge} short={short_charge}"
     );
     let _ = std::fs::remove_dir_all(&short_dir);
     let _ = std::fs::remove_dir_all(&long_dir);
@@ -513,17 +518,15 @@ fn budget_errors_give_only_effective_advice() {
         Ok(_) => panic!("单会话超预算必须明确失败"),
         Err(e) => e.to_string(),
     };
+    // H07：会话保留的是**行索引 + 采集元数据 + 价格表**（事件本体不随会话常驻），
+    // 因此"缩小时间范围能减少保留行数"是**有效**建议，不再禁止出现。
     assert!(
-        !msg.contains("请缩小"),
-        "缩小范围不减少保留量，不得作为建议出现：{msg}"
-    );
-    assert!(
-        msg.contains("不会减少保留量"),
-        "必须明确说明时间范围不影响保留量：{msg}"
-    );
-    assert!(
-        msg.contains("停用") || msg.contains("会话数") || msg.contains("稍后重试"),
+        msg.contains("缩小时间范围") || msg.contains("稍后重试") || msg.contains("闲置会话"),
         "必须给出真正能减少保留量或等待释放的建议：{msg}"
+    );
+    assert!(
+        !msg.contains("停用") || msg.contains("时间范围"),
+        "建议必须与当前记账对象一致（不再要求停用来源）：{msg}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -556,7 +559,10 @@ fn build_peak_is_measured_separately_from_retained_charge() {
         "RC05 临时峰值量测：events={N}，保留记账={charge} B，建表期间存活峰值={peak_delta} B，窗口结束时仍存活={live_delta} B，峰值/仍存活={:.2}",
         peak_delta as f64 / (live_delta.max(1)) as f64
     );
-    assert!(charge >= N * EVENT_SIZE, "保留记账须覆盖全部事件：{charge}");
+    assert!(
+        charge >= N * std::mem::size_of::<query::SnapshotRow>(),
+        "保留记账须覆盖全部行索引：{charge}"
+    );
     assert!(live_delta > 0, "窗口内必须确实保留了新数据：{live_delta}");
     assert!(
         peak_delta >= live_delta,

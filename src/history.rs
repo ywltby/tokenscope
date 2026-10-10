@@ -439,6 +439,247 @@ pub struct SourceFileRecord {
     pub stats: crate::source::CollectStats,
 }
 
+/// H07：流式读取的一行轻量索引（不含事件本体，避免整表物化）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowRef {
+    pub id: i64,
+    pub ts: Timestamp,
+    pub record_id: String,
+}
+
+/// H07：只读快照——独立只读连接 + 显式读事务。
+///
+/// WAL 模式下，读事务在第一次读取时建立一致视图：采集或导入提交之后，**旧
+/// 查询看到的仍是事务开始时的数据**（不静默换页、不混入新数据）；快照被淘汰
+/// 或超过闲置期限时随连接一起释放，读事务不再长期阻塞 WAL checkpoint。
+/// 连接与写连接分离，因此快照不占用写入方的锁。
+pub struct ReadSnapshot {
+    /// `rusqlite::Connection` 是 `Send` 但不是 `Sync`：查询会话可能被多个线程
+    /// 读取（汇总/分页），因此连接放在互斥量后面——同一时刻一个读者，语义不变。
+    conn: std::sync::Mutex<Connection>,
+    closed: bool,
+}
+
+/// 当前存活的只读快照数（诊断与测试：验证读事务随会话淘汰/超时释放）。
+pub fn open_read_snapshot_count() -> usize {
+    OPEN_READ_SNAPSHOTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static OPEN_READ_SNAPSHOTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl std::fmt::Debug for ReadSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadSnapshot")
+            .field("closed", &self.closed)
+            .finish()
+    }
+}
+
+impl HistoryDb {
+    /// 建立一个只读快照（独立连接，不阻塞写入连接）。
+    pub fn read_snapshot(&self) -> Result<ReadSnapshot> {
+        let conn = Connection::open_with_flags(
+            &self.path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| format!("打开历史库只读快照失败: {}", self.path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        // 显式读事务：视图在第一次读取时固定，之后不再变化（WAL 快照隔离）。
+        conn.execute_batch("BEGIN")
+            .context("开启历史库只读事务失败")?;
+        OPEN_READ_SNAPSHOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(ReadSnapshot {
+            conn: std::sync::Mutex::new(conn),
+            closed: false,
+        })
+    }
+}
+
+impl ReadSnapshot {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 快照内的用量/身份 generation（冻结视图，不随新提交改变）。
+    pub fn generation(&self) -> Result<u64> {
+        match self.meta(META_GENERATION)? {
+            Some(v) => parse_u64_text(&v, META_GENERATION),
+            None => Ok(0),
+        }
+    }
+
+    fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT value FROM history_meta WHERE key = ?1",
+                params![key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    /// 快照内的事件总数（`None` = 全部应用）。
+    pub fn event_count(&self, app: Option<AgentKind>) -> Result<u64> {
+        let n: i64 = self.lock().query_row(
+            "SELECT COUNT(*) FROM usage_events WHERE (?1 IS NULL OR app = ?1)",
+            params![app.map(|a| a.as_str())],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u64)
+    }
+
+    /// 日汇总快照（按时间/应用过滤在调用方完成）。
+    pub fn rollups(&self, app: Option<AgentKind>) -> Result<Vec<StoredRollup>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT logical_source, day, source_tz, app, provider_id, model, request_model,
+                    pricing_model, request_count, input_tokens, output_tokens,
+                    cache_write_tokens, cache_read_tokens, input_semantics, source_cost_usd
+             FROM ccs_daily_usage
+             WHERE (?1 IS NULL OR app = ?1)
+             ORDER BY day, app, model, provider_id",
+        )?;
+        let rows = stmt.query_map(params![app.map(|a| a.as_str())], |r| {
+            let raw_app: String = r.get(3)?;
+            let app = parse_agent(&raw_app).map_err(|e| conversion_error(3, e))?;
+            Ok(StoredRollup {
+                logical_source: r.get(0)?,
+                day: r.get(1)?,
+                source_tz: r.get(2)?,
+                app,
+                provider_id: r.get(4)?,
+                model: r.get(5)?,
+                request_model: r.get(6)?,
+                pricing_model: r.get(7)?,
+                request_count: r.get::<_, i64>(8)?.max(0) as u64,
+                tokens: TokenCounts {
+                    input: u64_from_row(r, 9)?,
+                    output: u64_from_row(r, 10)?,
+                    cache_write: u64_from_row(r, 11)?,
+                    cache_read: u64_from_row(r, 12)?,
+                },
+                input_semantics: r.get(13)?,
+                source_cost_usd: r
+                    .get::<_, Option<String>>(14)?
+                    .and_then(|s| s.trim().parse::<f64>().ok())
+                    .filter(|v| v.is_finite()),
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// **流式**遍历行的轻量索引，顺序固定为 `(ts_seconds, ts_nanos, id)` 升序。
+    /// 逐行回调，不把整表读进内存；回调返回值可提前终止遍历（Err 向上透传）。
+    pub fn stream_rows(
+        &self,
+        app: Option<AgentKind>,
+        f: &mut dyn FnMut(RowRef) -> Result<()>,
+    ) -> Result<()> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, ts_seconds, ts_nanos, record_id
+             FROM usage_events
+             WHERE (?1 IS NULL OR app = ?1)
+             ORDER BY ts_seconds, ts_nanos, id",
+        )?;
+        let mut rows = stmt.query(params![app.map(|a| a.as_str())])?;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let secs: i64 = row.get(1)?;
+            let nanos: i64 = row.get(2)?;
+            let record_id: Option<String> = row.get(3)?;
+            f(RowRef {
+                id,
+                ts: timestamp_from_parts(secs, nanos),
+                record_id: record_id.unwrap_or_default(),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// **流式**分批读取事件本体：每批至多 `chunk` 条，内存占用与批大小成正比。
+    pub fn for_each_chunk(
+        &self,
+        app: Option<AgentKind>,
+        chunk: usize,
+        f: &mut dyn FnMut(&[StoredEvent]) -> Result<()>,
+    ) -> Result<()> {
+        let chunk = chunk.max(1);
+        let mut batch: Vec<i64> = Vec::with_capacity(chunk);
+        let mut flush = |ids: &mut Vec<i64>| -> Result<()> {
+            if ids.is_empty() {
+                return Ok(());
+            }
+            let events = self.fetch_events(ids)?;
+            ids.clear();
+            f(&events)
+        };
+        self.stream_rows(app, &mut |r| {
+            batch.push(r.id);
+            if batch.len() >= chunk {
+                flush(&mut batch)?;
+            }
+            Ok(())
+        })?;
+        flush(&mut batch)
+    }
+
+    /// 按 id 批量取事件本体（排序按库内 `(ts, id)`，调用方按需重排）。
+    pub fn fetch_events(&self, ids: &[i64]) -> Result<Vec<StoredEvent>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // id 是库内整数主键：拼占位符而不是插值，避免 SQL 注入面。
+        let placeholders = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, event_key, app, ts_seconds, ts_nanos, model_raw, model_identity,
+                    identity_revision, session_id, record_id, project_key,
+                    session_initial_cwd, event_cwd, input_tokens, output_tokens,
+                    cache_write_tokens, cache_read_tokens, origin_rank, observed_at_seconds,
+                    observed_at_nanos, parser_revision
+             FROM usage_events WHERE id IN ({placeholders})"
+        );
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), row_to_stored_event)?;
+        let mut out = Vec::with_capacity(ids.len());
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// 释放读事务（闲置淘汰、TTL 到期或显式关闭时调用；Drop 时兜底）。
+    pub fn close(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
+        OPEN_READ_SNAPSHOTS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        // 只读事务用 ROLLBACK 结束：不产生写入，也不留下未提交状态。
+        if let Err(e) = self.lock().execute_batch("ROLLBACK") {
+            log::debug!("历史库只读快照结束事务失败（连接即将释放）: {e}");
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+}
+
+impl Drop for ReadSnapshot {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 /// 来源文件读取形态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredSourceFile {
@@ -746,6 +987,16 @@ impl HistoryDb {
     /// 事件总数。
     pub fn event_count(&self) -> Result<u64> {
         self.count("usage_events")
+    }
+
+    /// 某个应用的事件数（来源统计用；计数查询，不物化事件）。
+    pub fn event_count_of(&self, app: AgentKind) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM usage_events WHERE app = ?1",
+            params![app.as_str()],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u64)
     }
 
     /// 别名行数。

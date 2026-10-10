@@ -12,7 +12,7 @@ use anyhow::Result;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
-use crate::aggregate::{GroupBy, aggregate_with_rollups, preset_days_range};
+use crate::aggregate::{GroupBy, preset_days_range};
 use crate::cache::{Cache, mtime_ms};
 use crate::dedupe::dedupe_events;
 use crate::model::{AgentKind, TokenCounts, UsageEvent};
@@ -305,9 +305,6 @@ pub fn rebuild_cache(opts: &SummaryOptions) -> Result<CacheInfo> {
 /// 采集产物：去重后事件 + 逐源统计 + 价格表 + 警告。summary / list_events 共用。
 struct Collected {
     generation: u64,
-    events: Vec<UsageEvent>,
-    /// H06：日汇总快照（只有日粒度的外部历史）。
-    rollups: Vec<crate::history::StoredRollup>,
     sources: Vec<SourceReport>,
     pricing: std::sync::Arc<crate::pricing::Pricing>,
     warnings: Vec<String>,
@@ -324,9 +321,6 @@ struct Collected {
 #[derive(Debug)]
 pub(crate) struct CollectionSnapshot {
     pub(crate) generation: u64,
-    pub(crate) events: Vec<UsageEvent>,
-    /// H06：只有日粒度的外部汇总快照（CCS 归并后的历史）。
-    pub(crate) rollups: Vec<crate::history::StoredRollup>,
     pub(crate) sources: Vec<SourceReport>,
     pub(crate) warnings: Vec<String>,
     pub(crate) pricing: std::sync::Arc<crate::pricing::Pricing>,
@@ -418,32 +412,10 @@ pub(crate) mod retained {
 pub(crate) fn collection_retained_bytes(c: &CollectionSnapshot) -> Result<usize, String> {
     use retained::{ByteCount, string_bytes, strings_bytes, vec_bytes};
     let mut n = ByteCount::default();
-    n.add(vec_bytes(&c.events)?)?;
-    for e in &c.events {
-        n.add(string_bytes(&e.model)?)?;
-        n.add(string_bytes(&e.session_id)?)?;
-        n.add(string_bytes(&e.project)?)?;
-        n.add(string_bytes(&e.record_id)?)?;
-        // B02：目录上下文字段同样计入保留字节（只计 Some 的堆分配）。
-        n.add(retained::opt_string_bytes(&e.session_initial_cwd)?)?;
-        n.add(retained::opt_string_bytes(&e.event_cwd)?)?;
-    }
-    // 逐源统计：CollectStats 只有 u64 计数，无堆分配。
+    // H07：事件本体不再随采集快照常驻（查询流式读取），因此只计采集元数据：
+    // 逐源统计、诊断字符串与价格表（含候选与嵌套规则）。
     n.add(vec_bytes(&c.sources)?)?;
-    // H06：日汇总快照同样随会话保留（字符串为主，token 为定长数值）。
-    n.add(vec_bytes(&c.rollups)?)?;
-    for r in &c.rollups {
-        n.add(string_bytes(&r.logical_source)?)?;
-        n.add(string_bytes(&r.day)?)?;
-        n.add(string_bytes(&r.source_tz)?)?;
-        n.add(string_bytes(&r.provider_id)?)?;
-        n.add(string_bytes(&r.model)?)?;
-        n.add(string_bytes(&r.request_model)?)?;
-        n.add(string_bytes(&r.pricing_model)?)?;
-    }
-    // 采集诊断字符串。
     n.add(strings_bytes(&c.warnings)?)?;
-    // 价格修订号 + 价格表（含候选与嵌套规则）。
     n.add(string_bytes(&c.pricing_revision)?)?;
     n.add(c.pricing.retained_bytes()?)?;
     Ok(n.get())
@@ -699,8 +671,6 @@ fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSna
     let collected = collect_all_with_sources(sources, opts, generation)?;
     Ok(CollectionSnapshot {
         generation: collected.generation,
-        events: collected.events,
-        rollups: collected.rollups,
         sources: collected.sources,
         warnings: collected.warnings,
         pricing: collected.pricing,
@@ -764,14 +734,22 @@ pub struct CollectedView {
 }
 
 /// 供集成测试注入 mock source（Task 2）——走与生产完全相同的重叠去重。
+/// H07：生产采集不再回读事件（改由查询层流式读取），测试入口仍回读一份，
+/// 便于断言"这一轮到底写进了什么"。
 #[doc(hidden)]
 pub fn collect_all_with_sources_for_test(
     sources: Vec<Box<dyn Source>>,
     opts: &SummaryOptions,
 ) -> Result<CollectedView> {
     let c = collect_all_with_sources(sources, opts, 0)?;
+    let history = open_history(opts)?;
+    let events: Vec<UsageEvent> = history
+        .stored_events_filtered(opts.agent)?
+        .iter()
+        .map(usage_event_of)
+        .collect();
     Ok(CollectedView {
-        events: c.events,
+        events,
         warnings: c.warnings,
     })
 }
@@ -1118,13 +1096,10 @@ fn collect_all_with_sources(
         history.touch_source_file(rec)?;
     }
 
-    // H04：查询输入 = 库内事实（按 opts.agent 过滤），而不是"本轮解析出的
-    // 事件"。来源文件被删除、来源被停用、指纹被重置都不会让已保存的用量
-    // 消失（不变量 3）；H07 起改为流式读取，不再整表物化。
-    let stored = history.stored_events_filtered(opts.agent)?;
-    let events: Vec<UsageEvent> = stored.iter().map(usage_event_of).collect();
-    // H06：只有日粒度的历史同样属于"已保存的用量"，按应用过滤后随快照冻结。
-    let rollups = history.daily_rollups(opts.agent)?;
+    // H07：采集只负责把**本轮解析出的**事件写入历史库并维护来源指纹；
+    // 查询输入不再在这里回读（那会把整份历史物化进内存）。事件由查询层从
+    // 只读快照流式读取，因此来源文件被删除、来源被停用、指纹被重置都不会让
+    // 已保存的用量消失（不变量 3）。
     let history_generation = history.generation()?;
     for s in &mut reports {
         s.stats.duplicates_dropped = dropped
@@ -1132,24 +1107,124 @@ fn collect_all_with_sources(
             .find(|(a, _)| *a == s.agent)
             .map(|(_, n)| *n)
             .unwrap_or(0);
-        s.stats.events = events.iter().filter(|e| e.agent == s.agent).count() as u64;
+        // 来源统计的“事件数”= 该应用在库中的事实数（含历史累积），用计数查询
+        // 取得，避免为统计再物化一次事件集。
+        s.stats.events = history.event_count_of(s.agent)?;
     }
     log::info!(
-        "采集完成：库内事件 {}，本轮解析 {} 项，警告 {}，总计 {} ms",
-        events.len(),
+        "采集完成：本轮解析 {} 项，警告 {}，总计 {} ms",
         registrations.len(),
         warnings.len(),
         t_total.elapsed().as_millis()
     );
     Ok(Collected {
         generation: history_generation,
-        events,
-        rollups,
         sources: reports,
         pricing,
         warnings,
         pricing_revision,
     })
+}
+
+/// H07：为查询建立一个只读快照（独立连接 + 显式读事务）。
+///
+/// 快照在 WAL 下提供一致读取视图：采集/导入提交之后，**旧查询看到的仍是事务
+/// 开始时的数据**；快照随查询会话存活，被淘汰或超时时释放（`Drop` 兜底），
+/// 不会长期占住读事务。
+pub(crate) fn open_read_snapshot(
+    opts: &SummaryOptions,
+) -> Result<std::sync::Arc<crate::history::ReadSnapshot>> {
+    let path = history_file_path(opts)?;
+    let history = crate::history::HistoryDb::open(&path)
+        .map_err(|e| anyhow::anyhow!("打开用量历史库失败：{e:#}"))?;
+    Ok(std::sync::Arc::new(history.read_snapshot()?))
+}
+
+/// H07：冻结的时间边界——`days` / `from` / `to` 在建立快照时解析**一次**，
+/// 汇总与分页共用同一份判定（不重复解析"今天"，也不因跨日界漂移）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TimeBounds {
+    from: Option<jiff::civil::Date>,
+    to: Option<jiff::civil::Date>,
+}
+
+impl TimeBounds {
+    pub(crate) fn resolve(opts: &SummaryOptions, as_of: &jiff::Zoned) -> Result<Self> {
+        use jiff::civil::Date;
+        if opts.days.is_some() && (opts.from.is_some() || opts.to.is_some()) {
+            anyhow::bail!("--days 与 --from/--to 互斥，二选一");
+        }
+        if let Some(n) = opts.days {
+            let range = preset_days_range(as_of, n)?;
+            return Ok(Self {
+                from: Some(range.from),
+                to: Some(range.to),
+            });
+        }
+        let parse = |s: &str| -> Result<Date> {
+            s.parse::<Date>()
+                .map_err(|e| anyhow::anyhow!("日期格式应为 YYYY-MM-DD: {s:?}（{e}）"))
+        };
+        let from = opts.from.as_deref().map(parse).transpose()?;
+        let to = opts.to.as_deref().map(parse).transpose()?;
+        if let (Some(f), Some(t)) = (from, to)
+            && f > t
+        {
+            anyhow::bail!("起始日期晚于结束日期: {f} > {t}");
+        }
+        Ok(Self { from, to })
+    }
+
+    /// 事件（按查询时区解释的自然日）是否落在冻结区间内。
+    pub(crate) fn matches(&self, ts: jiff::Timestamp, tz: &TimeZone) -> bool {
+        if self.from.is_none() && self.to.is_none() {
+            return true;
+        }
+        let d = ts.to_zoned(tz.clone()).date();
+        self.from.is_none_or(|f| d >= f) && self.to.is_none_or(|t| d <= t)
+    }
+
+    /// 是否限定了时间范围（用于判断"按日视图"是否受日汇总时区影响）。
+    pub(crate) fn is_unbounded(&self) -> bool {
+        self.from.is_none() && self.to.is_none()
+    }
+
+    /// 冻结边界的两端（诊断与界面显示用）。
+    pub(crate) fn parts(&self) -> (Option<jiff::civil::Date>, Option<jiff::civil::Date>) {
+        (self.from, self.to)
+    }
+}
+
+/// H06/H07：明细桶集合（来源时区下的日期 + 应用 + 等价模型）。
+///
+/// 流式构建：内存只随**不同桶数**增长（而不是事件数），因此判定"某个日汇总桶
+/// 是否已被明细覆盖"不需要把历史读进内存。
+pub(crate) type DetailBuckets =
+    std::collections::HashMap<String, std::collections::HashSet<(String, String, String)>>;
+
+pub(crate) fn collect_detail_buckets(
+    read: &crate::history::ReadSnapshot,
+    app: Option<AgentKind>,
+    source_tzs: &[String],
+) -> Result<DetailBuckets> {
+    let mut out: DetailBuckets = std::collections::HashMap::new();
+    for tz_name in source_tzs {
+        let Ok(source_tz) = jiff::tz::TimeZone::get(tz_name) else {
+            continue;
+        };
+        let entry = out.entry(tz_name.clone()).or_default();
+        read.for_each_chunk(app, 4096, &mut |events| {
+            for e in events {
+                entry.insert((
+                    e.ts.to_zoned(source_tz.clone()).date().to_string(),
+                    e.app.as_str().to_string(),
+                    crate::model_identity::ModelIdentity::parse(&e.model_raw).identity_key(),
+                ));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(out)
 }
 
 /// H06：日汇总桶的统计来源策略。
@@ -1163,6 +1238,7 @@ pub enum RollupBucketPolicy {
 }
 
 /// H06：桶选择结果——实际参与的汇总贡献 + 覆盖诊断。
+#[derive(Debug)]
 pub struct RollupSelection {
     pub(crate) contributions: Vec<crate::aggregate::RollupContribution>,
     pub(crate) coverage: crate::aggregate::RollupCoverage,
@@ -1182,13 +1258,12 @@ pub struct RollupSelection {
 /// 桶选择在建快照时固定一次，因此不同视图（汇总/明细/下钻）不会因筛选条件
 /// 改变统计优先级。
 pub(crate) fn select_rollup_contributions(
-    events: &[UsageEvent],
+    detail_buckets: &DetailBuckets,
     rollups: &[crate::history::StoredRollup],
     day_sensitive: bool,
     tz_label: &str,
     policy: RollupBucketPolicy,
 ) -> RollupSelection {
-    use std::collections::{HashMap, HashSet};
     let mut selection = RollupSelection {
         contributions: Vec::new(),
         coverage: crate::aggregate::RollupCoverage::default(),
@@ -1197,43 +1272,23 @@ pub(crate) fn select_rollup_contributions(
     if rollups.is_empty() {
         return selection;
     }
-    // 明细桶索引：按来源时区分别计算"该日是否已有明细"。
-    let mut detail_buckets: HashMap<String, HashSet<(String, String, String)>> = HashMap::new();
     let mut mismatched: Vec<String> = Vec::new();
     for r in rollups {
-        let source_tz = match jiff::tz::TimeZone::get(&r.source_tz) {
-            Ok(tz) => tz,
-            Err(_) => {
-                // 认不出来源时区时不可重切日期：日汇总不参与按日视图。
-                if !mismatched.contains(&r.source_tz) {
-                    mismatched.push(r.source_tz.clone());
-                }
-                continue;
+        if jiff::tz::TimeZone::get(&r.source_tz).is_err() {
+            // 认不出来源时区时不可重切日期：日汇总不参与任何按日解释。
+            if !mismatched.contains(&r.source_tz) {
+                mismatched.push(r.source_tz.clone());
             }
-        };
+            continue;
+        }
         if day_sensitive && r.source_tz != tz_label {
             if !mismatched.contains(&r.source_tz) {
                 mismatched.push(r.source_tz.clone());
             }
             continue;
         }
-        let buckets = detail_buckets
-            .entry(r.source_tz.clone())
-            .or_insert_with(|| {
-                let mut set = HashSet::new();
-                for e in events {
-                    if e.agent != r.app {
-                        continue;
-                    }
-                    let day = e.ts.to_zoned(source_tz.clone()).date().to_string();
-                    set.insert((
-                        day,
-                        e.agent.as_str().to_string(),
-                        crate::model_identity::ModelIdentity::parse(&e.model).identity_key(),
-                    ));
-                }
-                set
-            });
+        let empty = std::collections::HashSet::new();
+        let buckets = detail_buckets.get(&r.source_tz).unwrap_or(&empty);
         let key = (
             r.day.clone(),
             r.app.as_str().to_string(),
@@ -1340,7 +1395,7 @@ fn event_write_of(ev: &UsageEvent) -> crate::history::EventWrite {
 }
 
 /// H04：库内事件 → 归一化事件（查询输入形态）。
-fn usage_event_of(s: &crate::history::StoredEvent) -> UsageEvent {
+pub(crate) fn usage_event_of(s: &crate::history::StoredEvent) -> UsageEvent {
     UsageEvent {
         ts: s.ts,
         agent: s.app,
@@ -1379,25 +1434,22 @@ pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
 }
 
 /// SF04：从查询快照聚合汇总（不重新采集；generated_at = 冻结的 as_of）。
+///
+/// H07：**流式**汇总——事件从只读事务快照分批读取，聚合状态只随分组数增长，
+/// 因此整份历史（百万级事件）也不需要先物化进内存。
 pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Result<SummaryReport> {
     let t = std::time::Instant::now();
-    // 聚合需要连续切片：按快照固定行序物化一份（每会话一次，非每页）。
-    let events: Vec<UsageEvent> = snapshot
-        .rows
-        .iter()
-        .map(|r| snapshot.event(r).clone())
-        .collect();
     // H06：桶选择在快照建立时已固定（这里只是读取同一份输入），因此汇总、
     // 明细与下钻不会因筛选条件改变统计优先级。
     let selection = snapshot.rollup_selection();
     let t_agg = std::time::Instant::now();
-    let agg = aggregate_with_rollups(
-        &events,
-        &selection.contributions,
-        snapshot.by,
-        &snapshot.tz,
-        snapshot.pricing(),
-    )?;
+    let mut state = crate::aggregate::AggregateState::new(snapshot.by, snapshot.tz.clone());
+    let pricing = snapshot.pricing().clone();
+    snapshot.for_each_event(&mut |e| state.push_event(e, &pricing))?;
+    for r in &selection.contributions {
+        state.push_rollup(r)?;
+    }
+    let agg = state.finish(&pricing)?;
     log::info!(
         "聚合（{}）：{} 组 / {} 请求（日汇总桶 {}，未解决覆盖 {}），{} ms",
         agg.by,
@@ -1630,8 +1682,12 @@ pub(crate) fn query_events_from(
     })
 }
 
-/// SF04：主时间过滤的索引形式——返回保留事件的下标，不复制事件
-///（查询快照建立时调用；days 区间解析用冻结 as_of，见 §3.6）。
+/// 统一时间过滤（M10，测试入口）：days（预设近 N 天）与 from/to（闭区间
+/// 自然日）二选一，日期按解析时区解释。SF05：days 分支由调用方注入**本次
+/// 查询冻结的 as_of**，区间 = `[起始自然日, as_of 今天]` 闭区间、不含未来
+/// 日期（docs/stats-semantics.md §3.6）；显式 from/to 不被截断到今天。
+/// 生产路径走 `query::begin_query` 的冻结时间边界（H07 起不再物化事件）。
+#[cfg(test)]
 pub(crate) fn time_filter_indices(
     events: &[UsageEvent],
     opts: &SummaryOptions,
@@ -2277,44 +2333,39 @@ cache_read = 0.4
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// B02：新增的目录上下文字段必须计入保留字节——只改模型漏改记账会让
-    /// 预算低估（RC05 的记账对象是完整可达的保留对象图）。
+    /// H07：保留字节记账必须覆盖**会话实际保留的数据**——采集元数据（逐源统计、
+    /// 诊断字符串、价格表）与查询侧的行索引；事件本体不再随会话常驻（汇总走
+    /// 流式读取，只有明细分页才懒物化），因此这里按这两部分断言。
     #[test]
-    fn new_cwd_fields_are_in_memory_budget() {
-        let snap = |e: UsageEvent| CollectionSnapshot {
+    fn retained_bytes_cover_session_metadata_and_row_index() {
+        let meta_only = |warnings: Vec<String>| CollectionSnapshot {
             generation: 0,
-            events: vec![e],
-            rollups: Vec::new(),
             sources: Vec::new(),
-            warnings: Vec::new(),
+            warnings,
             pricing: Arc::new(Pricing::default()),
             pricing_revision: String::new(),
         };
-        let mk = |initial: Option<&str>, cwd: Option<&str>| UsageEvent {
-            ts: "2026-07-17T15:00:00Z".parse().unwrap(),
-            agent: AgentKind::Codex,
-            model: "m".into(),
-            session_id: "s".into(),
-            project: "p".into(),
-            session_initial_cwd: initial.map(str::to_string),
-            event_cwd: cwd.map(str::to_string),
-            record_id: String::new(),
-            line: 0,
-            source_path: String::new(),
-            input_tokens: 1,
-            output_tokens: 1,
-            cache_write_tokens: 0,
-            cache_read_tokens: 0,
-        };
-        let without = collection_retained_bytes(&snap(mk(None, None))).unwrap();
-        let with = collection_retained_bytes(&snap(mk(
-            Some("C:/work/alpha-session-initial"),
-            Some("C:/work/alpha/sub/deep/event-cwd"),
-        )))
-        .unwrap();
+        let base = collection_retained_bytes(&meta_only(Vec::new())).unwrap();
+        let with_warning =
+            collection_retained_bytes(&meta_only(vec!["诊断字符串".repeat(200)])).unwrap();
         assert!(
-            with > without,
-            "目录上下文字段必须计入保留字节：{with} vs {without}"
+            with_warning > base,
+            "采集诊断必须计入保留字节：{with_warning} vs {base}"
+        );
+
+        // 行索引（事件主键 + 时间戳 + 记录标识 + seq）单独计入：
+        // 会话保留的行索引越多，记账越大——预算因此仍能约束分页会话。
+        let rows: Vec<crate::query::SnapshotRow> = (0..1000)
+            .map(|i| crate::query::SnapshotRow {
+                event_id: i,
+                index: i as usize,
+                seq: 0,
+            })
+            .collect();
+        let row_bytes = retained::vec_bytes(&rows).unwrap();
+        assert!(
+            row_bytes >= 1000 * std::mem::size_of::<crate::query::SnapshotRow>(),
+            "行索引必须计入保留字节：{row_bytes}"
         );
     }
 
@@ -2776,8 +2827,6 @@ cache_read = 0.0
         let ok2 = |_gen: u64| -> Result<CollectionSnapshot> {
             Ok(CollectionSnapshot {
                 generation: 9,
-                events: Vec::new(),
-                rollups: Vec::new(),
                 sources: Vec::new(),
                 warnings: Vec::new(),
                 pricing: std::sync::Arc::new(crate::pricing::Pricing::default()),
@@ -3128,7 +3177,7 @@ mod collect_stability_tests {
             root: root.clone(),
             file: file.clone(),
         })];
-        let c = collect_all_with_sources(sources, &opts, 0).unwrap();
+        let c = collect_all_with_sources_for_test(sources, &opts).unwrap();
         assert_eq!(c.events.len(), 1, "解析结果正常入账");
         assert!(
             c.warnings.iter().any(|w| w.contains("本轮不登记指纹")),

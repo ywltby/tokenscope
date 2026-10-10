@@ -180,11 +180,66 @@ pub fn aggregate_with_rollups(
     tz: &TimeZone,
     pricing: &Pricing,
 ) -> anyhow::Result<Aggregated> {
-    let mut map: BTreeMap<String, GroupAccum> = BTreeMap::new();
-    // 多 agent 数据才填充 groups[].agents，单 agent 报告与 M1 输出保持一致。
-    let first_agent = events.first().map(|e| e.agent);
-    let multi_agent = first_agent.is_some_and(|f| events.iter().any(|e| e.agent != f));
+    let mut state = AggregateState::new(by, tz.clone());
     for e in events {
+        state.push_event(e, pricing)?;
+    }
+    for r in rollups {
+        state.push_rollup(r)?;
+    }
+    state.finish(pricing)
+}
+
+/// 增量聚合状态（H07）：事件与日汇总贡献**逐条喂入**，内存只随**分组数**
+/// 增长（不随事件数）——冻结查询因此可以流式汇总整份历史，不必先把所有事件
+/// 物化进内存。
+pub struct AggregateState {
+    by: GroupBy,
+    tz: TimeZone,
+    map: BTreeMap<String, GroupAccum>,
+    /// 出现过的来源应用（只有多应用数据才在分组里标注 agents）。
+    agent_seen: Vec<&'static str>,
+}
+
+impl AggregateState {
+    pub fn new(by: GroupBy, tz: TimeZone) -> Self {
+        Self {
+            by,
+            tz,
+            map: BTreeMap::new(),
+            agent_seen: Vec::new(),
+        }
+    }
+
+    /// 喂入一条明细事件。
+    pub fn push_event(&mut self, e: &UsageEvent, pricing: &Pricing) -> anyhow::Result<()> {
+        if !self.agent_seen.contains(&e.agent.as_str()) {
+            self.agent_seen.push(e.agent.as_str());
+        }
+        push_event_into(&mut self.map, self.by, &self.tz, e, pricing)
+    }
+
+    /// 喂入一条日汇总贡献。
+    pub fn push_rollup(&mut self, r: &RollupContribution) -> anyhow::Result<()> {
+        if !self.agent_seen.contains(&r.app.as_str()) {
+            self.agent_seen.push(r.app.as_str());
+        }
+        push_rollup_into(&mut self.map, self.by, r)
+    }
+}
+
+/// 单条事件的合并逻辑（切片路径与流式路径共用同一实现）。
+fn push_event_into(
+    map: &mut BTreeMap<String, GroupAccum>,
+    by: GroupBy,
+    tz: &TimeZone,
+    e: &UsageEvent,
+    pricing: &Pricing,
+) -> anyhow::Result<()> {
+    // 逐条喂入时不知道最终是否多应用：先如实记录，`finish` 再按需清空
+    //（与切片路径“单 agent 报告不填 agents”的输出完全一致）。
+    const RECORD_AGENTS: bool = true;
+    {
         let key = match by {
             GroupBy::Day => e.ts.to_zoned(tz.clone()).date().to_string(),
             GroupBy::Model => ModelIdentity::parse(&e.model).identity_key(),
@@ -255,14 +310,23 @@ pub fn aggregate_with_rollups(
         } else {
             g.unknown_pricing = true;
         }
-        if multi_agent && !g.agents.contains(&e.agent.as_str()) {
+        if RECORD_AGENTS && !g.agents.contains(&e.agent.as_str()) {
             g.agents.push(e.agent.as_str());
         }
     }
-    // H06：日汇总贡献并入——只有日粒度的历史不能按当前价格与档位重估，
-    // 也不代表"剩余的独立请求"：四桶整体计入未知 token，原因标注为
-    // 「历史数据只有汇总」。
-    for r in rollups {
+    Ok(())
+}
+
+/// 喂入一条日汇总贡献（H06）：只有日粒度的历史不能按当前价格与档位重估，
+/// 也不代表「剩余的独立请求」：四桶整体计入未知 token，原因标注为
+/// 「历史数据只有汇总」。
+fn push_rollup_into(
+    map: &mut BTreeMap<String, GroupAccum>,
+    by: GroupBy,
+    r: &RollupContribution,
+) -> anyhow::Result<()> {
+    const RECORD_AGENTS: bool = true;
+    {
         let key = match by {
             GroupBy::Day => r.day.clone(),
             GroupBy::Model => ModelIdentity::parse(&r.model).identity_key(),
@@ -302,70 +366,89 @@ pub fn aggregate_with_rollups(
             .ok_or_else(|| anyhow::anyhow!("分组 {key_err} 的未知 token 累计超出可表示范围"))?;
         g.unknown_pricing = true;
         g.unknown_reason = Some("rollup_only");
-        if multi_agent && !g.agents.contains(&r.app.as_str()) {
+        if RECORD_AGENTS && !g.agents.contains(&r.app.as_str()) {
             g.agents.push(r.app.as_str());
         }
     }
-    // 其他维度的展示名生成器（Project = 路径末段；Day/Agent = None）。
-    fn other_label(by: &GroupBy, key: &str) -> Option<String> {
-        if *by != GroupBy::Project {
-            return None;
+    Ok(())
+}
+
+impl AggregateState {
+    /// 收口：生成分组展示名、总计，以及（仅在多应用数据时保留的）agents 标注。
+    pub fn finish(self, pricing: &Pricing) -> anyhow::Result<Aggregated> {
+        let multi_agent = self.agent_seen.len() > 1;
+        let by = self.by;
+        let map = self.map;
+        // 其他维度的展示名生成器（Project = 路径末段；Day/Agent = None）。
+        fn other_label(by: &GroupBy, key: &str) -> Option<String> {
+            if *by != GroupBy::Project {
+                return None;
+            }
+            Some(
+                key.rsplit(['/', '\\'])
+                    .find(|s| !s.is_empty())
+                    .unwrap_or(key)
+                    .to_string(),
+            )
         }
-        Some(
-            key.rsplit(['/', '\\'])
-                .find(|s| !s.is_empty())
-                .unwrap_or(key)
-                .to_string(),
-        )
-    }
-    let mut groups: Vec<Group> = map
-        .into_values()
-        .map(|acc| {
-            let mut g = acc.group;
-            g.label = match by {
-                GroupBy::Model => Some(model_label(&g.key, acc.representative.as_deref(), pricing)),
-                _ => other_label(&by, &g.key),
-            };
-            g
-        })
-        .collect();
-    let mut totals = Group {
-        key: "合计".to_string(),
-        ..Group::default()
-    };
-    for g in &groups {
-        totals.requests = totals
-            .requests
-            .checked_add(g.requests)
-            .ok_or_else(|| anyhow::anyhow!("总计请求数累计超出可表示范围"))?;
-        totals.tokens = totals
-            .tokens
-            .checked_add(&g.tokens)
-            .ok_or_else(|| anyhow::anyhow!("总计 token 累计超出可表示范围"))?;
-        totals.cost_usd += g.cost_usd;
-        if !totals.cost_usd.is_finite() {
-            anyhow::bail!("总计费用累计出现非有限值");
-        }
-        totals.unknown_pricing |= g.unknown_pricing;
-        if totals.unknown_reason.is_none() {
-            totals.unknown_reason = g.unknown_reason;
-        }
-        totals.unknown_tokens = totals
-            .unknown_tokens
-            .checked_add(&g.unknown_tokens)
-            .ok_or_else(|| anyhow::anyhow!("总计未知 token 累计超出可表示范围"))?;
-        for a in &g.agents {
-            if !totals.agents.contains(a) {
-                totals.agents.push(a);
+        let mut groups: Vec<Group> = map
+            .into_values()
+            .map(|acc| {
+                let mut g = acc.group;
+                g.label = match by {
+                    GroupBy::Model => {
+                        Some(model_label(&g.key, acc.representative.as_deref(), pricing))
+                    }
+                    _ => other_label(&by, &g.key),
+                };
+                g
+            })
+            .collect();
+        // 单应用数据不标注 agents（与 M1 起的输出保持一致）：喂入阶段如实记录，
+        // 收口时按最终是否多应用决定保留。
+        if !multi_agent {
+            for g in &mut groups {
+                g.agents.clear();
             }
         }
+        let mut totals = Group {
+            key: "合计".to_string(),
+            ..Group::default()
+        };
+        for g in &groups {
+            totals.requests = totals
+                .requests
+                .checked_add(g.requests)
+                .ok_or_else(|| anyhow::anyhow!("总计请求数累计超出可表示范围"))?;
+            totals.tokens = totals
+                .tokens
+                .checked_add(&g.tokens)
+                .ok_or_else(|| anyhow::anyhow!("总计 token 累计超出可表示范围"))?;
+            totals.cost_usd += g.cost_usd;
+            if !totals.cost_usd.is_finite() {
+                anyhow::bail!("总计费用累计出现非有限值");
+            }
+            totals.unknown_pricing |= g.unknown_pricing;
+            if totals.unknown_reason.is_none() {
+                totals.unknown_reason = g.unknown_reason;
+            }
+            totals.unknown_tokens = totals
+                .unknown_tokens
+                .checked_add(&g.unknown_tokens)
+                .ok_or_else(|| anyhow::anyhow!("总计未知 token 累计超出可表示范围"))?;
+            for a in &g.agents {
+                if !totals.agents.contains(a) {
+                    totals.agents.push(a);
+                }
+            }
+        }
+        groups.push(totals.clone());
+        Ok(Aggregated {
+            by: by.as_str(),
+            groups,
+            totals,
+        })
     }
-    groups.push(totals.clone());
-    Ok(Aggregated {
-        by: by.as_str(),
-        groups,
-        totals,
-    })
 }
 
 /// SF05：预设"近 N 天"的解析结果——统计时区下 `[起始自然日, 今天]` 的
