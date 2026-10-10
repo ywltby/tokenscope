@@ -2,13 +2,15 @@
 // 设计系统 Task 4：单张指标卡（DESIGN.md §5 指标卡）——左侧主读数估算费用
 // （44px），右侧三个次读数（26px）发丝线分隔；含未计价 token 时费用旁警告
 // 胶囊；命中率公式收进 tooltip（hover/focus 均可打开）；底部四类 token
-// 图例 + 输入/输出比例条。命中率分母为含两类缓存的总输入。
+// 图例 + **互斥四桶**比例条（输入 = 未缓存输入，与缓存写/缓存命中并列，
+// 四类颜色齐全）。命中率分母为含两类缓存的**总输入**（与比例条口径不同，
+// tooltip 内写明）。
 import { computed, onBeforeUnmount, onMounted, ref, useId } from "vue";
 import { NTooltip } from "naive-ui";
 import { fmtNum, type Group } from "../types";
 import { formatMoney } from "../lib/formatMoney";
 import { TOKEN_BUCKETS } from "../lib/tokenDisplay";
-import { displayTokens, totalInput, totalTokens } from "../lib/tokenUsage";
+import { totalInput, totalTokens } from "../lib/tokenUsage";
 
 const props = defineProps<{ totals: Group }>();
 
@@ -55,11 +57,13 @@ onMounted(() => document.addEventListener("click", onDocumentClick));
 onBeforeUnmount(() => document.removeEventListener("click", onDocumentClick));
 
 // UX07/RC06：四类分项名称与顺序来自 tokenDisplay 单一来源（不再各自硬编码）。
+// 2026-10-10 用户修订：英雄栏恢复**互斥四桶**口径——「输入」= 未缓存输入，
+// 不含缓存写入/缓存命中；四类相加 = 总 token，比例条因此能显示四种系列色。
 const parts = computed(() =>
   TOKEN_BUCKETS.map((b) => ({
     kind: b.key,
     label: b.label,
-    value: displayTokens(props.totals.tokens)[b.key],
+    value: props.totals.tokens[b.key],
   })),
 );
 </script>
@@ -123,7 +127,8 @@ const parts = computed(() =>
               @mouseenter="hoverOpen = true"
               @mouseleave="hoverOpen = false"
             >
-              命中率 = 缓存命中 ÷ 输入。输入包含缓存写入和缓存命中。<br />
+              命中率 = 缓存命中 ÷ 总输入（含缓存写入与缓存命中）。<br />
+              卡片上的「输入」是未缓存输入，与缓存写/缓存命中互斥；命中率分母是三者之和。
               缓存命中直接复用上下文，消耗 token 数计入分母但费用通常为零或极低。
             </div>
           </NTooltip>
@@ -135,11 +140,11 @@ const parts = computed(() =>
       </div>
     </div>
 
-    <!-- 分项比例条：6px 高、3px 圆角、按占比分段（全零为空槽） -->
+    <!-- 分项比例条：6px 高、3px 圆角、按互斥四桶占比分段（全零为空槽） -->
     <div class="parts-bar-container">
       <div v-if="total > 0" class="parts-bar" role="img" aria-label="token 分项比例条">
         <span
-          v-for="p in parts.filter((p) => p.kind === 'input' || p.kind === 'output')"
+          v-for="p in parts"
           :key="p.kind"
           class="bar-segment"
           :class="`bar-${p.kind}`"

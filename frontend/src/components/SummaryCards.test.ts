@@ -99,7 +99,14 @@ describe("SummaryCards 指标条（设计系统 Task 3）", () => {
       "四类都应出现",
     ).toBe(true);
     expect(positions, "顺序必须与单一来源一致").toEqual([...positions].sort((a, b) => a - b));
-    expect(text).toContain("66,000");
+    // 2026-10-10 用户修订：英雄栏为**互斥四桶**——「输入」是未缓存输入
+    // （12,000），不是含缓存的总输入（66,000）；四类相加 = 总 token。
+    expect(text).toContain("12,000");
+    expect(text).not.toContain("66,000");
+    expect(text).toContain("50,000");
+    for (const v of ["12,000", "3,000", "4,000", "50,000"]) {
+      expect(text, `四类分项数值都应出现：${v}`).toContain(v);
+    }
     // DESIGN.md：不使用 emoji 作为产品图标
     expect(w.text()).not.toMatch(/\p{Extended_Pictographic}/u);
   });
@@ -118,13 +125,26 @@ describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
     expect(w.findAll(".metric-sep").length).toBe(2);
   });
 
-  it("比例条按占比分段，宽度与 token 数一致", () => {
+  it("比例条按互斥四桶分段，四类颜色齐全、宽度与 token 数一致", () => {
     const w = mountCards(totals());
-    // total = 12000 + 3000 + 4000 + 50000 = 69000
+    // total = 12000 + 3000 + 4000 + 50000 = 69000（互斥四桶，不相加堆叠）
     const segments = w.findAll(".bar-segment");
-    expect(segments.length).toBe(2);
-    expect(segments[0].attributes("style")).toContain("95.65%");
-    expect(segments[1].attributes("style")).toContain("4.35%");
+    expect(segments.length, "缓存写/缓存命中必须有独立分段（颜色可见）").toBe(4);
+    const classes = segments.map((s) => s.classes().join(" "));
+    expect(classes).toEqual([
+      "bar-segment bar-input",
+      "bar-segment bar-output",
+      "bar-segment bar-cache_write",
+      "bar-segment bar-cache_read",
+    ]);
+    const widths = segments.map((s) => s.attributes("style"));
+    expect(widths[0]).toContain("17.39%"); // 12,000 / 69,000
+    expect(widths[1]).toContain("4.35%"); // 3,000
+    expect(widths[2]).toContain("5.80%"); // 4,000
+    expect(widths[3]).toContain("72.46%"); // 50,000
+    // 各段标注可访问名称与数值（缓存两项不再是隐形的子集）。
+    expect(segments[2].attributes("aria-label")).toContain("缓存写");
+    expect(segments[3].attributes("aria-label")).toContain("缓存命中");
   });
 
   it("全部为零时比例条为空槽，不渲染分段", () => {
