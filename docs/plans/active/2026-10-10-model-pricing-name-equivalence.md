@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust、serde、现有价格索引与查询快照；Vue/TypeScript 图表、聚合表及下钻标签。
 
-**状态：** 已实施完成并归档（2026-10-10）。范围：模型分组、展示与定价统一。基线 `ec23d4a`，实施记录见文末。
+**状态：** **已重新打开**（2026-10-10 第二轮审查）。MP03 的展示名来源与空白名处理、MP01/MP02 的空键入库校验、MP04/MP05 的边界验收均已按审查意见补齐并验证（见文末「审查修复记录（第二轮）」）；**待复核确认后再归档**。范围：模型分组、展示与定价统一。基线 `ec23d4a`。
 
 ## 1. 现状与范围
 
@@ -46,7 +46,7 @@
 
 - [x] 先写 `model_equivalence_key_examples`、`model_equivalence_preserves_structure`、`model_equivalence_rejects_empty_base`、`model_equivalence_boundary_offsets`，验证三种名称、混合大小写、连续符号、渠道、变体、空键、中文以及 UTF-8 安全边界。
 - [x] 执行 `cargo test model_equivalence`，记录新行为的失败断言（先红后绿）。
-- [x] 实现专用结构，分别保留原文、等价基名/变体键和基名合法前缀偏移（`ModelIdentity`：raw/namespace/leaf/base/variant/leaf_key/base_key/boundaries；片段转换按 plan 给定写法）。
+- [x] 实现专用结构，分别保留原文、等价基名/变体键和基名合法前缀偏移（`ModelIdentity`：raw/namespace/leaf/base/variant/leaf_key/base_key/boundaries；片段转换按 plan 给定写法）。**第二轮审查修订**：归一后基名为空的条目在**入库时**即被拒绝并给出诊断（外置 / models.dev / OpenRouter 三处），回归用例 `empty_model_key_entry_is_rejected_with_diagnostic`。
 - [x] 复跑上述测试；审查所有 normalize_model_id 调用，避免把显示名、渠道元数据也压缩（调用点仅限匹配键与条目 prefix；展示一律用 `display` 原文）。
 - [x] 独立提交：`feat(pricing): 统一模型名称等价键并保留边界`（`37454dd`）。
 
@@ -67,7 +67,7 @@
 
 - [x] 先写 `model_display_name_uses_model_not_provider`、`model_display_name_is_not_identity`、`model_display_name_is_order_independent`、`model_display_name_requires_full_id_match`、`model_display_name_legacy_snapshot_falls_back`，验证 name 缺失、供应商兜底、同名不同 ID、等价 ID 不同 name 和离线旧快照。
 - [x] 执行 `cargo test model_display_name` 记录失败后再实现。模型同步不再把 provider name 填为模型 name（`m.name`，provider 名显式不读）；models.dev 快照 v3 → **v4**；v1–v3 继续离线读价格，但加载时清空来源不明的 name；无需强制联网升级。
-- [x] 在价格对象提供只读展示名解析器 `Pricing::display_name_for`，与价格赢家选择独立；同一等价 ID 下按 `(display, name)` 稳定序选取，仅完整等价 ID 命中（前缀回退不算），未命中返回 None，由聚合稳定选取代表原文。
+- [x] 在价格对象提供只读展示名解析器 `Pricing::display_name_for`，与价格赢家选择独立；同一等价 ID 下按 `(display, name)` 稳定序选取，仅完整等价 ID 命中（前缀回退不算），未命中返回 None，由聚合稳定选取代表原文。**第二轮审查修订**：展示名**只认 models.dev** 的模型级 `name`（OpenRouter 渠道别名／外置条目名称不得覆盖），空白名称视为缺失（否则标签会显示空白）；回归用例 `model_display_name_requires_trusted_source`、`blank_model_name_is_unavailable`。
 - [x] 无 cost 模型本轮不纳入名称元数据集合：允许无 cost 时退回原始代表名，不制造零价 PricePlan（聚合层实现）。
 - [x] 复跑测试；独立提交：`fix(modelsdev): 区分模型展示名与供应商名称`（`7d6cee8`）。
 
@@ -75,7 +75,7 @@
 
 **文件：** `src/aggregate.rs`、`src/report.rs`、`src/query.rs`（下钻指纹）、`tests/model_identity_contract.rs`、`frontend/src/types.ts`、`frontend/src/views/Dashboard.vue` 及其测试、`frontend/src/components/UsageTable.vue` 及其测试、`frontend/src/lib/chartData.ts`/`chartTooltip.ts` 及其测试。
 
-- [x] 先写 `model_identity_groups_aliases_across_agents`、`model_identity_preserves_usage_and_requests`、`model_identity_keeps_versions_and_variants_separate`、`model_identity_group_cost_sums_per_request`、`model_identity_drill_pages_include_all_spellings`。超过 200 条合成数据（210 条）跨页混合两种名称，断言不漏不重、金额与汇总一致；逐请求计价按两条不同 token 的请求核对。
+- [x] 先写 `model_identity_groups_aliases_across_agents`、`model_identity_preserves_usage_and_requests`、`model_identity_keeps_versions_and_variants_separate`、`model_identity_group_cost_sums_per_request`、`model_identity_drill_pages_include_all_spellings`。超过 200 条合成数据（210 条）跨页混合两种名称，断言不漏不重、金额与汇总一致；逐请求计价按两条不同 token 的请求核对。**第二轮审查补强**：固定单价场景 `1M×3 + 2M×3 = 9` 无法检出"先合并 token 再计价"的错误，新增 `model_identity_group_cost_uses_per_request_tiers_and_schedules`——跨上下文阈值（200k + 100k 各自在基础档，合并后会跨过 272K 高档）与峰谷时间档（峰 6.0 + 谷 2.0）两个场景，均断言分组费用 = 明细逐条之和且 ≠ 合并计价的结果。
 - [x] 执行 `cargo test --test model_identity_contract` 记录失败后，再让聚合使用公共身份键和稳定 label；下钻事件比较及游标筛选指纹使用同一身份规则。未覆盖 `UsageEvent.model` 或 `EventRow.model`，未调整 dedupe 的模型字段。
 - [x] 前端统一用 label 显示图表（分类轴 + tooltip）、聚合首列与筛选标签，传 key 查询；模型维度 tooltip 改用 `tooltipLabels`（不再展示压缩身份键），原始名称仍在请求明细可查。没有把 `Claude Opus 5.5` 这样的 name 当后端筛选 key。
 - [x] 新增前端 `model_group_label_and_drill_key_are_distinct`、`model_chart_uses_friendly_label`，核对图表与表格只出现一项、点击行请求传 canonical key、筛选提示不出现压缩键。
@@ -99,7 +99,7 @@
 - [x] 执行门禁：根库 fmt/clippy/test、壳 fmt/clippy/test 全部退出码 0。
 - [x] 前端执行 typecheck / format:check / test（28 文件 323 项）/ build，全部退出码 0。
 - [x] 隔离 fixture 验收：图表与聚合表三种拼写合为一项、展示可信 models.dev name、下钻 210 条跨页展示两种原始名称、3×3 同金额、聚合与明细一致、浮层候选真实、缺价/免费变体不产生假零价——逐条证据见 `qa-artifacts/model-name-equivalence/acceptance.md`。
-- [x] 冷启动与索引热恢复各一轮（`model_equivalence_restart_matches_cold_build`）；产物写 `qa-artifacts/model-name-equivalence/`（gitignore，本地），不含真实会话日志；未跑的 GUI 原生目视在记录中明确标待验（不以合成 IPC 冒充真实后端）。
+- [x] 冷启动与索引热恢复各一轮（`model_equivalence_restart_matches_cold_build`）；产物写 `qa-artifacts/model-name-equivalence/`（gitignore，本地），不含真实会话日志；未跑的 GUI 原生目视在记录中明确标待验（不以合成 IPC 冒充真实后端）。**第二轮审查补强**：该用例改为断言 `hit` 标志（冷建 `hit=false`、清空进程缓存后 `hit=true`）——只比较金额无法区分"命中磁盘索引"与"每次都重建"，现在恢复路径本身被验证。
 - [x] 回写测试数、命令退出码、提交及验收证据（见文末实施记录）；独立提交文档后归档计划。
 
 ## 4. 完成标准
@@ -118,6 +118,7 @@
 | MP04 分组/下钻/前端 | `75ca8e2` | `--test model_identity_contract`（10 项）、前端 54 项 |
 | MP05 索引与视图失效 | `35725f8` | 同文件 11 项 + 前端快照用例 |
 | MP06 文档与验收 | 本项提交 | 全门禁（见下）+ `qa-artifacts/model-name-equivalence/` |
+| 第二轮审查修复 | 本项提交 | `cargo test --test model_identity_contract`（13 项）、`--test model_name_equivalence`（12 项），均为先红后绿 |
 
 ### 过程中的两个实证发现
 
@@ -129,7 +130,22 @@
 - 根库：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`
 - 壳：`cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`、`cargo test --manifest-path src-tauri/Cargo.toml`
 - 前端：`typecheck`、`format:check`、`test`（28 文件 / **323** 项）、`build`
+- 第二轮修复后按同一组命令复跑，全部退出码 0。
 
 ### 未跑项（不写成通过）
 
 GUI 原生目视（真实窗口内点模型行、观察费用浮层与筛选提示）与真实 models.dev 联网同步后的现场观察未执行；离线重建路径、等价分组与金额一致性均已由测试与隔离 fixture 覆盖。证据：`qa-artifacts/model-name-equivalence/acceptance.md`。
+
+### 审查修复记录（第二轮，2026-10-10）
+
+外部复核（证据 `qa-artifacts/model-name-review-probe.log`，3 项隔离探针全部复现）提出 3 处实现问题与 2 处测试缺口，本轮逐项修复并补回归：
+
+| 问题 | 复现 | 修复 | 回归用例 |
+| --- | --- | --- | --- |
+| 展示名可能被 OpenRouter 别名覆盖 | 同等价 ID 同时有 models.dev `Trusted Model Name` 与 OpenRouter `Channel Alias`，实际返回后者 | `display_name_for` 限定 `TIER_MODELSDEV` 且名称可用（非空白）——渠道别名与外置名称不再冒充模型名，无可信名时返回 None（聚合退回原始代表写法） | `model_display_name_requires_trusted_source` |
+| 空白名称阻断原始名兜底 | models.dev `name = "   "` → 返回 `Some("   ")`，分组标签可能显示空白 | 空白名称视为缺失（`usable_name` 判定） | `blank_model_name_is_unavailable`（含聚合 label 退回代表写法断言） |
+| 空模型键条目仍被接受 | 外置 `prefix = "provider/-._"` 仍进入价格表（查询端拒绝空键，因此不构成通配定价，但缺少入库校验与诊断） | 三处入库点（外置 / models.dev / OpenRouter）在归一后基名为空时拒绝该条目并给出诊断 | `empty_model_key_entry_is_rejected_with_diagnostic` |
+| 逐请求计费测试无法检出合并计价 | 固定单价下 `1M×3 + 2M×3 = 9`，错误合并 token 也得到同一结果 | 新增跨上下文阈值与峰谷时间档两个场景 | `model_identity_group_cost_uses_per_request_tiers_and_schedules` |
+| 索引恢复测试未证明命中索引 | 清空进程缓存后只比较金额，每次重建也会通过 | 断言 `hit` 标志（冷建 false、热恢复 true） | `model_equivalence_restart_matches_cold_build` |
+
+复核确认未被破坏的部分：正常拼写合并、210 条分页、原始明细名称保留、版本失效接线均照常。修复后根库与壳门禁、前端四项全绿。

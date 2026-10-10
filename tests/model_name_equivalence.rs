@@ -364,6 +364,32 @@ fn model_equivalence_old_index_rebuilds_offline() {
 }
 
 #[test]
+fn empty_model_key_entry_is_rejected_with_diagnostic() {
+    let dir = tmp("empty-key");
+    let ext = write(
+        &dir,
+        "ext.toml",
+        "[[model]]\nprefix = \"provider/-._\"\ninput = 3.0\n\n\
+         [[model]]\nprefix = \"provider/ok-1\"\ninput = 1.0\n",
+    );
+    let (p, warnings) = Pricing::load(Some(&ext), None, None);
+    assert!(
+        p.estimate("provider/-._", &counts(1_000_000, 0, 0, 0), at())
+            .is_none(),
+        "归一后为空的模型键不得进入价格表"
+    );
+    assert!(
+        p.estimate("provider/ok-1", &counts(1_000_000, 0, 0, 0), at())
+            .is_some(),
+        "同文件里的正常条目不受影响"
+    );
+    assert!(
+        warnings.iter().any(|w| w.contains("归一后为空")),
+        "拒绝必须给出诊断: {warnings:?}"
+    );
+}
+
+#[test]
 fn model_equivalence_restart_matches_cold_build() {
     let dir = tmp("restart");
     let ext = write(
@@ -373,17 +399,24 @@ fn model_equivalence_restart_matches_cold_build() {
     );
     let idx = dir.join("idx.json");
     clear_price_cache_for_tests();
-    let (cold, rev_cold, _w, _hit) = Pricing::load_cached_revision(Some(&ext), None, None, &idx);
+    let (cold, rev_cold, _w, hit_cold) =
+        Pricing::load_cached_revision(Some(&ext), None, None, &idx);
+    assert!(!hit_cold, "首次加载没有索引可命中（冷建）");
     let cold_cost = cold
         .estimate("claude-opus-5-5", &counts(1_000_000, 0, 0, 0), at())
         .unwrap()
         .cost;
     clear_price_cache_for_tests();
-    let (warm, rev_warm, _w2, _hit2) = Pricing::load_cached_revision(Some(&ext), None, None, &idx);
+    let (warm, rev_warm, _w2, hit_warm) =
+        Pricing::load_cached_revision(Some(&ext), None, None, &idx);
     let warm_cost = warm
         .estimate("claude-opus-5.5", &counts(1_000_000, 0, 0, 0), at())
         .unwrap()
         .cost;
+    assert!(
+        hit_warm,
+        "清空进程缓存后必须命中磁盘索引——否则只是再次重建，无法证明恢复路径"
+    );
     assert_eq!(cold_cost, warm_cost, "索引恢复与冷建必须给同一金额");
     assert_eq!(rev_cold, rev_warm, "同来源同规则 → 同价格修订");
 }

@@ -55,6 +55,18 @@ fn entry_display_order(a: &Entry, b: &Entry) -> bool {
     key(a) < key(b)
 }
 
+/// 名称是否可用：非 None 且去掉首尾空白后非空——空白名称视为缺失
+/// （否则聚合标签、图表名称会显示成空白）。
+fn usable_name(name: &Option<String>) -> bool {
+    name.as_deref().is_some_and(|n| !n.trim().is_empty())
+}
+
+/// 归一后基名为空（`provider/-._`、`-._`）→ 不是有效价格键：拒绝入库并由调用方
+/// 给出诊断（查询端同样拒绝空键，这里从源头保证空键不进入价格表）。
+fn empty_model_key(display: &str) -> bool {
+    crate::model_identity::ModelIdentity::parse(display).is_empty_key()
+}
+
 #[derive(Debug, Clone)]
 struct Entry {
     /// 归一化前缀（匹配用）。
@@ -1946,6 +1958,13 @@ impl Pricing {
                                 }
                             }
                         };
+                        if empty_model_key(&e.id) {
+                            diagnostics.push(format!(
+                                "models.dev 条目 {} 的模型标识归一后为空，已拒绝",
+                                e.id
+                            ));
+                            continue;
+                        }
                         pricing.add_entry(Entry {
                             prefix: match_key(&e.id),
                             display: e.id,
@@ -2035,6 +2054,13 @@ impl Pricing {
                             ));
                             continue;
                         }
+                        if empty_model_key(&e.id) {
+                            diagnostics.push(format!(
+                                "OpenRouter 条目 {} 的模型标识归一后为空，已拒绝",
+                                e.id
+                            ));
+                            continue;
+                        }
                         pricing.add_entry(Entry {
                             prefix: match_key(&e.id),
                             display: e.id,
@@ -2085,6 +2111,10 @@ impl Pricing {
             };
             for m in parsed.model {
                 let display = m.prefix.clone();
+                if empty_model_key(&display) {
+                    diagnostics.push(format!("外置条目 {display} 的模型标识归一后为空，已忽略"));
+                    continue;
+                }
                 match external_model_plan(&m) {
                     Ok((plan, rule_warnings)) => {
                         for w in rule_warnings {
@@ -2487,7 +2517,9 @@ impl Pricing {
         self.count_tier(TIER_EXTERNAL)
     }
 
-    /// MP03：按**完整等价 ID**查询可信展示名（models.dev 模型级 `name`）。
+    /// MP03（审查修订）：按**完整等价 ID**查询可信展示名——只认 models.dev
+    /// 的模型级 `name`（OpenRouter 渠道别名、外置条目名称不作为模型展示名），
+    /// 空白名称视为缺失。
     ///
     /// 与价格赢家选择独立：同一等价 ID 下按 (display, name) 稳定序择一，
     /// 不随条目/事件顺序变化；仅前缀命中的旧版本不得冒充本模型；不同 ID
@@ -2501,7 +2533,7 @@ impl Pricing {
         let group = self.by_prefix.get(id.leaf_key().as_bytes())?;
         let mut best: Option<&Entry> = None;
         for e in group {
-            if e.name.is_none() {
+            if e.tier != TIER_MODELSDEV || !usable_name(&e.name) {
                 continue;
             }
             if best.is_none_or(|b| entry_display_order(e, b)) {

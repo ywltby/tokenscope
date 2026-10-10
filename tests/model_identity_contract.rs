@@ -63,6 +63,21 @@ fn no_codex(dir: &Path) -> PathBuf {
     dir.join("no-codex")
 }
 
+/// 指定时间与模型的 Claude 合成事件（逐请求计费场景用）。
+fn claude_events(dir: &Path, rows: &[(&str, &str, u64)]) -> PathBuf {
+    let project = dir.join("claude").join("alpha");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut body = String::new();
+    for (i, (ts, model, input)) in rows.iter().enumerate() {
+        body.push_str(&format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","sessionId":"s1","cwd":"C:/work/alpha","message":{{"id":"m-{i}","model":"{model}","usage":{{"input_tokens":{input},"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#
+        ));
+        body.push('\n');
+    }
+    std::fs::write(project.join("s.jsonl"), body).unwrap();
+    dir.join("claude")
+}
+
 fn opts(dir: &Path, claude: &Path, modelsdev: Option<&Path>, by: GroupBy) -> SummaryOptions {
     SummaryOptions {
         by,
@@ -70,7 +85,7 @@ fn opts(dir: &Path, claude: &Path, modelsdev: Option<&Path>, by: GroupBy) -> Sum
         codex_dir: Some(no_codex(dir)),
         cache_dir: Some(dir.join("cache")),
         pricing_index: Some(dir.join("idx.json")),
-        pricing_path: Some(dir.join("pricing-missing.toml")),
+        pricing_path: Some(dir.join("pricing.toml")),
         openrouter_path: Some(dir.join("or-missing.json")),
         modelsdev_path: Some(
             modelsdev
@@ -125,6 +140,147 @@ fn model_identity_groups_aliases_across_agents() {
     assert_eq!(r2.groups.len(), 2);
     assert_eq!(r2.groups[0].key, "claudeopus55");
     assert_eq!(r2.groups[0].label.as_deref(), Some("claude-opus-5-5"));
+}
+
+#[test]
+fn model_display_name_requires_trusted_source() {
+    let dir = tmp("trusted-source");
+    // models.dev 提供可信模型名；OpenRouter 的同等价 ID 只有渠道别名。
+    let md = sync_to(
+        &dir,
+        "pricing-modelsdev.json",
+        r#"{"acme": {"models": {"opus-5.5": {"name": "Trusted Model Name", "cost": {"input": 3, "output": 15}}}}}"#,
+    );
+    let orp = dir.join("openrouter.json");
+    std::fs::write(
+        &orp,
+        r#"{"v":2,"synced_at":"t","entries":[{"id":"alias/opus5.5","name":"Channel Alias","prompt":0.000004,"completion":0.00002}]}"#,
+    )
+    .unwrap();
+    let (p, _w) = Pricing::load(None, Some(&md), Some(&orp));
+    assert_eq!(
+        p.display_name_for("opus55").as_deref(),
+        Some("Trusted Model Name"),
+        "展示名只认可信来源（models.dev）的模型级 name"
+    );
+
+    // 只有 OpenRouter 时没有可信名 → None（聚合退回原始代表写法）。
+    let dir2 = tmp("trusted-source-or-only");
+    let orp2 = dir2.join("openrouter.json");
+    std::fs::write(
+        &orp2,
+        r#"{"v":2,"synced_at":"t","entries":[{"id":"alias/opus5.5","name":"Channel Alias","prompt":0.000004,"completion":0.00002}]}"#,
+    )
+    .unwrap();
+    let (p2, _w2) = Pricing::load(None, None, Some(&orp2));
+    assert_eq!(
+        p2.display_name_for("opus55"),
+        None,
+        "渠道别名不得成为模型展示名"
+    );
+}
+
+#[test]
+fn blank_model_name_is_unavailable() {
+    let dir = tmp("blank-name");
+    let md = sync_to(
+        &dir,
+        "pricing-modelsdev.json",
+        r#"{"acme": {"models": {"opus-5.5": {"name": "   ", "cost": {"input": 3, "output": 15}}}}}"#,
+    );
+    let (p, _w) = Pricing::load(None, Some(&md), None);
+    assert_eq!(p.display_name_for("opus55"), None, "空白名称视为缺失");
+
+    // 聚合标签必须退回原始代表写法，不能显示空白。
+    let claude = claude_dir(&dir, &["claude-opus-5.5"], 10);
+    let r = summary(&opts(&dir, &claude, Some(&md), GroupBy::Model)).unwrap();
+    assert_eq!(r.groups[0].key, "claudeopus55");
+    assert_eq!(
+        r.groups[0].label.as_deref(),
+        Some("claude-opus-5.5"),
+        "空白名称不得成为展示名"
+    );
+}
+
+#[test]
+fn model_identity_group_cost_uses_per_request_tiers_and_schedules() {
+    // 场景 1：上下文分段阈值——两条各自落在基础档的请求，若被错误地
+    // "先合并 token 再计价" 就会跨过 272K 阈值按高档计费（金额翻倍）。
+    let dir = tmp("per-request-tier");
+    let snap = dir.join("pricing-modelsdev.json");
+    std::fs::write(
+        &snap,
+        r#"{"v":4,"synced_at":"t","entries":[{"id":"acme/claude-opus-5.5","name":"Opus 5.5",
+            "input":4.0,"output":20.0,
+            "segments":[{"min_tokens":272001,"input":8.0,"output":40.0}]}]}"#,
+    )
+    .unwrap();
+    let claude = claude_events(
+        &dir,
+        &[
+            ("2026-10-07T05:00:00.000Z", "claude-opus-5-5", 200_000),
+            ("2026-10-07T06:00:00.000Z", "claude-opus-5.5", 100_000),
+        ],
+    );
+    let o = opts(&dir, &claude, Some(&snap), GroupBy::Model);
+    let r = summary(&o).unwrap();
+    let g = &r.groups[0];
+    assert_eq!(g.requests, 2);
+    let merged_would_cost = 300_000.0 * 8.0 / 1e6;
+    assert!(
+        (g.cost_usd - 1.2).abs() < 1e-9,
+        "逐请求计价应为 200k×4 + 100k×4 = 1.2/1M，实际 {}",
+        g.cost_usd
+    );
+    assert!(
+        (g.cost_usd - merged_would_cost).abs() > 1e-9,
+        "不得按合并后的高档计费（{merged_would_cost}）"
+    );
+    let events = list_all(&o, &EventFilter::default());
+    let per_request: f64 = events.rows.iter().filter_map(|row| row.cost_usd).sum();
+    assert!(
+        (per_request - g.cost_usd).abs() < 1e-9,
+        "明细逐条之和必须等于分组费用"
+    );
+
+    // 场景 2：时间档（峰谷）——两条请求落在不同档，分组费用 = 各档之和。
+    let dir2 = tmp("per-request-schedule");
+    let ext = dir2.join("pricing.toml");
+    std::fs::write(
+        &ext,
+        r#"
+[[model]]
+prefix = "claude-opus-5-5"
+input = 2.0
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+[[model.schedule.period]]
+start_time = "09:00"
+end_time = "18:00"
+input = 6.0
+"#,
+    )
+    .unwrap();
+    let claude2 = claude_events(
+        &dir2,
+        &[
+            ("2026-10-07T10:00:00.000Z", "claude-opus-5-5", 1_000_000),
+            ("2026-10-07T02:00:00.000Z", "claude-opus-5-5", 1_000_000),
+        ],
+    );
+    let o2 = opts(&dir2, &claude2, None, GroupBy::Model);
+    let r2 = summary(&o2).unwrap();
+    let g2 = &r2.groups[0];
+    assert_eq!(g2.requests, 2);
+    assert!(
+        (g2.cost_usd - 8.0).abs() < 1e-9,
+        "峰 6.0 + 谷 2.0 = 8.0/1M，实际 {}",
+        g2.cost_usd
+    );
+    let events2 = list_all(&o2, &EventFilter::default());
+    let per_request2: f64 = events2.rows.iter().filter_map(|row| row.cost_usd).sum();
+    assert!((per_request2 - g2.cost_usd).abs() < 1e-9);
 }
 
 #[test]
