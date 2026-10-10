@@ -525,6 +525,99 @@ pub async fn cache_stats(app: tauri::AppHandle) -> Result<CacheInfo, String> {
     run_blocking("cache_stats", move || cache_stats_impl(None)).await
 }
 
+/// H05：CCS 导入预览——**只在用户点击时**执行；进入设置页、显示默认路径或恢复
+/// 上次选择都不会打开来源库（计划不变量 11）。预览不写入任何用量。
+#[tauri::command]
+pub async fn ccs_import_preview(
+    app: tauri::AppHandle,
+    source_path: Option<String>,
+) -> Result<tokenscope::import::ccs::ImportPreview, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    let path = resolve_ccs_path(source_path)?;
+    run_blocking("ccs_import_preview", move || {
+        let history = open_history_for_import()?;
+        let source = tokenscope::import::ccs::CcsSource::open(&path)?;
+        tokenscope::import::ccs::preview(&source, &history, &default_source_tz())
+    })
+    .await
+}
+
+/// H05：提交本次导入（**只执行一个批次**；计划一次性消费，重复提交明确失败）。
+#[tauri::command]
+pub async fn ccs_import_commit(
+    app: tauri::AppHandle,
+    plan_id: String,
+    take_source_rollups: Option<bool>,
+) -> Result<tokenscope::import::ccs::ImportReport, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    let policy = if take_source_rollups.unwrap_or(false) {
+        tokenscope::history::RollupConflictPolicy::TakeSource
+    } else {
+        tokenscope::history::RollupConflictPolicy::KeepExisting
+    };
+    run_blocking("ccs_import_commit", move || {
+        let history = open_history_for_import()?;
+        tokenscope::import::ccs::commit(&plan_id, &history, policy)
+    })
+    .await
+}
+
+/// H05：取消预览（丢弃计划，不写任何用量）。
+#[tauri::command]
+pub async fn ccs_import_discard(app: tauri::AppHandle, plan_id: String) -> Result<bool, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    run_blocking("ccs_import_discard", move || {
+        Ok(tokenscope::import::ccs::discard(&plan_id))
+    })
+    .await
+}
+
+/// H05：来源库默认路径与存在性（只读路径解析，**不打开**库）。
+///
+/// 仍走统一隐私闸门：未解锁业务时不返回任何路径信息，也不接触来源库。
+#[tauri::command]
+pub fn ccs_import_defaults(app: tauri::AppHandle) -> Result<CcsImportDefaults, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    let path = tokenscope::import::ccs::default_source_path().map_err(|e| format!("{e:#}"))?;
+    Ok(CcsImportDefaults {
+        path: path.display().to_string(),
+        exists: tokenscope::import::ccs::source_exists(&path),
+        timezone: default_source_tz(),
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CcsImportDefaults {
+    pub path: String,
+    pub exists: bool,
+    /// 日汇总的来源统计时区假设（CCS 用本机日生成日键）。
+    pub timezone: String,
+}
+
+/// H05：解析来源库路径（空/缺省 → 默认路径）。
+fn resolve_ccs_path(source_path: Option<String>) -> Result<std::path::PathBuf, String> {
+    match source_path.map(|p| p.trim().to_string()) {
+        Some(p) if !p.is_empty() => Ok(std::path::PathBuf::from(p)),
+        _ => tokenscope::import::ccs::default_source_path().map_err(|e| format!("{e:#}")),
+    }
+}
+
+/// H05：导入写入的目标库（TokenScope 自己的历史库）。
+fn open_history_for_import() -> anyhow::Result<tokenscope::history::HistoryDb> {
+    let path = tokenscope::history::history_file_path()?;
+    tokenscope::history::HistoryDb::open(&path)
+}
+
+/// H05：日汇总的来源统计时区假设——CCS 用 `localtime` 生成日键，这里记录
+/// 导入时的本机时区名（无法解析时退回 `local`，绝不宣称它是 UTC）。
+fn default_source_tz() -> String {
+    jiff::tz::TimeZone::system()
+        .iana_name()
+        .map(str::to_string)
+        .unwrap_or_else(|| "local".to_string())
+}
+
 /// AP03：重建缓存——采集范围与普通查询**同一份**已成功读取的配置。
 ///
 /// 修复前此处走 `rebuild_cache(None)` → `SummaryOptions::default()`，既跳过

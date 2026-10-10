@@ -153,21 +153,28 @@ const statusPill = computed<{ cls: string; text: string }>(() => {
 // 分开命名：warnings（重叠/缓存降级等）、坏行、IO 错误——不声称所有
 // warning 都表示丢数据；干净空区间不误报。
 const collectionDiagnostics = computed(() => {
-  const warns = report.value?.warnings ?? [];
+  // H06：日汇总的时区不匹配是「当前视图看不到这部分历史」的可恢复提示，
+  // 与采集警告并列展示（不混入坏行/IO 统计）。
+  const warns = [...(report.value?.warnings ?? [])];
+  const mismatch = report.value?.rollup_coverage?.timezone_mismatch;
+  if (mismatch && !warns.includes(mismatch)) warns.push(mismatch);
   const statsList = report.value?.sources.map((s) => s.stats) ?? [];
   const ioErrors = statsList.reduce((a, st) => a + (st.io_errors ?? 0), 0);
   const badLines = statsList.reduce((a, st) => a + (st.bad_lines ?? 0), 0);
-  const clean = warns.length === 0 && ioErrors === 0 && badLines === 0;
+  // H06：含只有日粒度的历史时，费用按「未知」披露（不是模型未收录）。
+  const rollupOnly = report.value?.totals.unknown_reason === "rollup_only";
+  const clean = warns.length === 0 && ioErrors === 0 && badLines === 0 && !rollupOnly;
   const summaryText = clean
     ? null
     : [
         warns.length > 0 ? `${warns.length} 条采集警告` : null,
         ioErrors > 0 ? `${ioErrors} 个文件读取失败` : null,
         badLines > 0 ? `${badLines} 行解析失败（已跳过）` : null,
+        rollupOnly ? "含只有日粒度的历史（这部分费用按未知披露）" : null,
       ]
         .filter(Boolean)
         .join("，");
-  return { clean, summaryText, warns, ioErrors, badLines };
+  return { clean, summaryText, warns, ioErrors, badLines, rollupOnly };
 });
 const showCollectionDetails = ref(false);
 

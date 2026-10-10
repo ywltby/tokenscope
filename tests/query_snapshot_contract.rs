@@ -144,13 +144,19 @@ fn paging_same_timestamp_insert_delete_keeps_snapshot_rows() {
     }
     assert_eq!(seen2, seen, "旧 query 完整遍历与首次一致（不重不漏）");
 
-    // 新 query 才反映变化：20 被替换为 200001 → total 仍 3、行序含新值。
+    // 新 query 才反映变化：H04 起历史库保留已保存的用量——Codex 的
+    // `token_count` 不带请求身份（不猜测身份），被改写的那一行是**新**用量
+    // 事实而不是对旧事实的覆盖，因此 total 变为 4，旧值仍在（不丢历史）。
     let snap2 = query::begin_query(&o).unwrap();
     let fresh = query::query_events(&snap2.query_id, &EventFilter::default()).unwrap();
-    assert_eq!(fresh.total, 3);
+    assert_eq!(fresh.total, 4);
     assert!(
         fresh.rows.iter().any(|r| r.input == 200001),
         "新 query 反映日志修改"
+    );
+    assert!(
+        fresh.rows.iter().any(|r| r.input == 20),
+        "已保存的旧用量不被覆盖（来源文件被改写不等于删除历史）"
     );
     // 新会话的 query_id 必然不同。
     assert_ne!(snap.query_id, snap2.query_id);

@@ -17,12 +17,23 @@ export interface Group {
   cost_usd: number;
   unknown_pricing: boolean;
   unknown_tokens: TokenCounts;
+  /** H06：未知费用的原因（`rollup_only` = 该组含只有日粒度的历史）。 */
+  unknown_reason?: "rollup_only" | null;
   agents?: string[];
 }
 
 export interface SourceStat {
   agent: "claude-code" | "codex";
   stats: Record<string, number>;
+}
+
+/** H06：日汇总桶覆盖诊断（明细覆盖 / 汇总口径 / 未解决覆盖 / 时区提示）。 */
+export interface RollupCoverage {
+  detail_buckets: number;
+  rollup_buckets: number;
+  unresolved_buckets: number;
+  unresolved_covered_tokens: TokenCounts;
+  timezone_mismatch?: string | null;
 }
 
 export interface SummaryReport {
@@ -37,6 +48,61 @@ export interface SummaryReport {
   groups: Group[];
   totals: Group;
   warnings: string[];
+  /** H06：日汇总桶覆盖诊断（缺省 = 本次查询没有日粒度历史）。 */
+  rollup_coverage?: RollupCoverage;
+}
+
+/** H05：CCS 导入的来源库默认路径与存在性（只读路径解析，不打开库）。 */
+export interface CcsImportDefaults {
+  path: string;
+  exists: boolean;
+  /** 日汇总的来源统计时区假设（CCS 用本机日生成日键）。 */
+  timezone: string;
+}
+
+/** H05：导入预览（不写入任何用量）。 */
+export interface CcsImportPreview {
+  plan_id: string;
+  logical_source: string;
+  source_path: string;
+  source_schema: string;
+  source_day_timezone: string;
+  history_generation: number;
+  generated_at: string;
+  expires_in_seconds: number;
+  requests_total: number;
+  requests_importable: number;
+  requests_skipped_other_app: number;
+  requests_skipped_duplicate_of_proxy: number;
+  requests_rejected: number;
+  rejected_reasons: string[];
+  would_insert: number;
+  would_update: number;
+  would_unchanged: number;
+  would_conflict: number;
+  would_stale: number;
+  net_new_tokens: TokenCounts;
+  rollups_total: number;
+  rollups_new: number;
+  rollups_unchanged: number;
+  rollups_conflicting: number;
+  unsupported_apps: [string, number][];
+  records_without_project: number;
+}
+
+/** H05：导入提交结果（可核查）。 */
+export interface CcsImportReport {
+  run_id: number;
+  logical_source: string;
+  requests_inserted: number;
+  requests_updated: number;
+  requests_unchanged: number;
+  requests_conflicted: number;
+  requests_stale: number;
+  rollups_snapshotted: number;
+  rollups_conflicted: number;
+  net_new_tokens: TokenCounts;
+  generation_after: number;
 }
 
 export interface SourceStatus {

@@ -31,11 +31,15 @@ import {
   fmtNum,
   sourceIdOf,
   type CacheInfo,
+  type CcsImportDefaults,
+  type CcsImportPreview,
+  type CcsImportReport,
   type PricingEntry,
   type PricingView,
   type SourceStatus,
 } from "../types";
 import { TZ_OPTIONS, useTimezone } from "../composables/timezone";
+import { totalTokens } from "../lib/tokenUsage";
 import { fmtPriceOrUnknown, formatTieredPricing } from "../lib/tieredPrice";
 import {
   TOKEN_BUCKETS,
@@ -67,6 +71,21 @@ const cache = ref<CacheInfo | null>(null);
 const pricing = ref<PricingView | null>(null);
 const syncing = ref(false);
 const rebuilding = ref(false);
+// H05：CCS 手动导入——默认路径只做**路径解析**（不打开来源库）：进入设置页、
+// 显示默认路径或恢复上次选择都不会读取 CCS 用量；只有点击按钮才只读打开。
+const ccsDefaults = ref<CcsImportDefaults | null>(null);
+const ccsPreview = ref<CcsImportPreview | null>(null);
+const ccsReport = ref<CcsImportReport | null>(null);
+const ccsBusy = ref(false);
+const ccsError = ref<string | null>(null);
+const ccsTakeSourceRollups = ref(false);
+/** 预览/结果里的净新增 token 合计（四桶之和，展示用）。 */
+const netNewTokens = computed(() =>
+  ccsPreview.value ? totalTokens(ccsPreview.value.net_new_tokens) : 0,
+);
+const reportNetTokens = computed(() =>
+  ccsReport.value ? totalTokens(ccsReport.value.net_new_tokens) : 0,
+);
 const { tz } = useTimezone();
 const autostart = ref<boolean | null>(null);
 const autostartBusy = ref(false);
@@ -265,6 +284,69 @@ async function loadCache(): Promise<void> {
   });
 }
 
+/// H05：读取 CCS 导入的默认路径与存在性——**不打开来源库**，也不导入任何用量。
+async function loadCcsDefaults(): Promise<void> {
+  try {
+    ccsDefaults.value = await invoke<CcsImportDefaults>("ccs_import_defaults");
+  } catch (e) {
+    ccsError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+/// H05：生成导入预览（只读来源库；预览不写入任何用量）。
+async function previewCcsImport(): Promise<void> {
+  if (ccsBusy.value) return; // 防重复提交：预览期间按钮禁用
+  ccsBusy.value = true;
+  ccsError.value = null;
+  ccsReport.value = null;
+  try {
+    ccsPreview.value = await invoke<CcsImportPreview>("ccs_import_preview", {
+      sourcePath: ccsDefaults.value?.path ?? null,
+    });
+  } catch (e) {
+    ccsPreview.value = null;
+    ccsError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    ccsBusy.value = false;
+  }
+}
+
+/// H05：提交本次导入（只执行一个批次；计划一次性消费，重复提交会被后端拒绝）。
+async function commitCcsImport(): Promise<void> {
+  const plan = ccsPreview.value;
+  if (!plan || ccsBusy.value) return;
+  ccsBusy.value = true;
+  ccsError.value = null;
+  try {
+    const report = await invoke<CcsImportReport>("ccs_import_commit", {
+      planId: plan.plan_id,
+      takeSourceRollups: ccsTakeSourceRollups.value,
+    });
+    ccsReport.value = report;
+    ccsPreview.value = null;
+    msg.success("CCS 用量已导入（与已有历史去重求并集）");
+    await loadCache();
+  } catch (e) {
+    // 失败不自动重试：保留错误提示，用户可手动重新预览
+    ccsError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    ccsBusy.value = false;
+  }
+}
+
+/// H05：取消预览——丢弃计划，不写任何用量。
+async function discardCcsImport(): Promise<void> {
+  const plan = ccsPreview.value;
+  ccsPreview.value = null;
+  ccsReport.value = null;
+  if (!plan) return;
+  try {
+    await invoke<boolean>("ccs_import_discard", { planId: plan.plan_id });
+  } catch (e) {
+    ccsError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
 async function loadPricing(): Promise<void> {
   await runBlockRead(pricingBlock, pricingLoading, async (isCurrent) => {
     try {
@@ -285,7 +367,13 @@ async function loadAll(): Promise<void> {
   // 各独立读取并发发起、各自处理失败——不用一个共享 loading/error
   // 覆盖全部结果。RC03：设置配置（来源草稿 + 自动同步 + 关闭动作）
   // 由**同一次** settings_get 初始化，不再分三个消费点各读一遍。
-  await Promise.allSettled([loadSources(), loadCache(), loadPricing(), loadSettings()]);
+  await Promise.allSettled([
+    loadSources(),
+    loadCache(),
+    loadPricing(),
+    loadSettings(),
+    loadCcsDefaults(),
+  ]);
 }
 
 // C1：来源配置草稿（编辑后按行保存）
@@ -424,7 +512,7 @@ async function saveSource(agent: string): Promise<void> {
 
 async function rebuild(): Promise<void> {
   // UX08：函数级防重复——不只依赖按钮 loading 态（程序化触发/快速双击
-  // 都不得并发发起第二次重建）。重建是派生数据操作，保留既有进度反馈，
+  // 都不得并发发起第二次重扫）。重扫是解析层操作，保留既有进度反馈，
   // 不增加强制确认。
   if (rebuilding.value) return;
   rebuilding.value = true;
@@ -432,9 +520,9 @@ async function rebuild(): Promise<void> {
     const info = await invoke<CacheInfo>("refresh_cache");
     if (disposed) return; // AP04：卸载后不写状态或弹通知
     cache.value = info;
-    // AP03：重建范围 = 当前生效的来源配置（用户停用的来源不参与），且只
-    // 重建派生数据——不能声称配置外来源也被采集。
-    msg.success("缓存已重建（按当前来源配置，仅重建派生数据）");
+    // H04：重扫 = 重置采集指纹并重新解析当前文件；范围 = 当前生效的来源配置，
+    // 且**不删除**已保存的历史用量（历史删除不是缓存操作）。
+    msg.success("已重扫日志（按当前来源配置重新解析，已保存的历史用量不受影响）");
   } catch (e) {
     if (disposed) return;
     msg.error(String(e));
@@ -969,12 +1057,110 @@ defineExpose({ priceColumns });
             </NCollapseItem>
           </NCollapse>
           <div class="rebuild-row">
-            <NButton size="small" :loading="rebuilding" @click="rebuild">重建缓存</NButton>
-            <!-- UX08：重建预期说明（重建是派生数据操作，保留进度与结果反馈）；
-                 AP03：范围由当前来源配置决定，只重建派生数据 -->
+            <NButton size="small" :loading="rebuilding" @click="rebuild">重扫日志</NButton>
+            <!-- UX08：重扫预期说明；AP03：范围由当前来源配置决定；
+                 H04：重扫只重置采集指纹并重新解析当前文件，**不**删除已保存的用量 -->
             <span class="rebuild-hint"
-              >按当前来源配置重新扫描日志，可能需要一段时间（仅重建派生数据，统计口径不变）。</span
+              >重置采集指纹并按当前来源配置重新扫描日志，可能需要一段时间（已保存的历史用量不会被删除）。</span
             >
+          </div>
+        </section>
+      </section>
+
+      <section class="settings-group">
+        <h2 class="group-title">从 CCS 导入用量</h2>
+        <section class="ts-card settings-card">
+          <div class="setting-help">
+            手动一次性导入 cc-switch 的历史用量（请求明细 + 日汇总）：只在点击后<span
+              class="ts-strong"
+              >只读</span
+            >打开来源库，不自动同步、不重试；导入结果与 TokenScope
+            已有历史去重求并集，重复导入不会重复计费。
+          </div>
+          <div class="setting-row">
+            <div class="setting-main">
+              <div class="setting-label">来源库</div>
+              <div class="setting-help">
+                {{ ccsDefaults?.path ?? "—" }}
+                <template v-if="ccsDefaults && !ccsDefaults.exists">（未找到该文件）</template>
+                <template v-else-if="ccsDefaults"
+                  >（日汇总按来源时区 {{ ccsDefaults.timezone }} 记录）</template
+                >
+              </div>
+            </div>
+            <NButton
+              size="small"
+              :loading="ccsBusy"
+              :disabled="ccsBusy || !!ccsPreview"
+              @click="previewCcsImport"
+              >从 CCS 导入用量</NButton
+            >
+          </div>
+
+          <div v-if="ccsError" class="ts-notice ts-notice-inline block-error" role="alert">
+            <span class="ts-notice-content">CCS 导入未完成：{{ ccsError }}</span>
+          </div>
+
+          <div v-if="ccsPreview" class="ccs-preview">
+            <div class="setting-row">
+              <div class="setting-main">
+                <div class="setting-label">预览（尚未写入）</div>
+                <div class="setting-help">
+                  明细 {{ fmtNum(ccsPreview.requests_total) }} 条：可导入
+                  {{ fmtNum(ccsPreview.requests_importable) }}、其他应用
+                  {{ fmtNum(ccsPreview.requests_skipped_other_app) }}、与代理日志重复
+                  {{ fmtNum(ccsPreview.requests_skipped_duplicate_of_proxy) }}、字段不合法
+                  {{ fmtNum(ccsPreview.requests_rejected) }}；日汇总
+                  {{ fmtNum(ccsPreview.rollups_total) }} 条（新增
+                  {{ fmtNum(ccsPreview.rollups_new) }}、冲突
+                  {{ fmtNum(ccsPreview.rollups_conflicting) }}）。
+                </div>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-main">
+                <div class="setting-label">预计变化</div>
+                <div class="setting-help">
+                  新增 {{ fmtNum(ccsPreview.would_insert) }}、更新
+                  {{ fmtNum(ccsPreview.would_update) }}、已存在
+                  {{ fmtNum(ccsPreview.would_unchanged) }}、冲突保留现有值
+                  {{ fmtNum(ccsPreview.would_conflict) }}；净新增 token
+                  {{ fmtNum(netNewTokens) }}。无项目归属记录
+                  {{ fmtNum(ccsPreview.records_without_project) }} 条（项目视图显示为「未知」）。
+                </div>
+              </div>
+            </div>
+            <div
+              v-if="ccsPreview.would_conflict > 0 || ccsPreview.rollups_conflicting > 0"
+              class="setting-row"
+            >
+              <div class="setting-main">
+                <div class="setting-label">以来源快照为准</div>
+                <div class="setting-help">
+                  存在与已存值冲突的来源记录：默认保留 TokenScope
+                  已保存的值（不静默覆盖较新数据）。勾选后本批次改用来源快照。
+                </div>
+              </div>
+              <NSwitch v-model:value="ccsTakeSourceRollups" size="small" />
+            </div>
+            <div class="rebuild-row">
+              <NButton size="small" type="primary" :loading="ccsBusy" @click="commitCcsImport"
+                >导入</NButton
+              >
+              <NButton size="small" :disabled="ccsBusy" @click="discardCcsImport">取消</NButton>
+              <span class="rebuild-hint"
+                >预览基于当前历史快照；期间若有新的采集或导入，提交会被拒绝并要求重新预览。</span
+              >
+            </div>
+          </div>
+
+          <div v-if="ccsReport" class="setting-help">
+            最近一次导入：新增 {{ fmtNum(ccsReport.requests_inserted) }}、更新
+            {{ fmtNum(ccsReport.requests_updated) }}、已存在
+            {{ fmtNum(ccsReport.requests_unchanged) }}、冲突
+            {{ fmtNum(ccsReport.requests_conflicted) }}；日汇总落盘
+            {{ fmtNum(ccsReport.rollups_snapshotted) }} 条；净新增 token
+            {{ fmtNum(reportNetTokens) }}。
           </div>
         </section>
       </section>

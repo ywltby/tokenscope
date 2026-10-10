@@ -58,6 +58,12 @@ pub const PROTECTED_COMMANDS: &[&str] = &[
     "source_config_set",
     "cache_stats",
     "refresh_cache",
+    // H05：CCS 导入只由用户在设置页手动触发，且同样受隐私闸门保护
+    //（未解锁业务时不打开来源库、不读历史库）。
+    "ccs_import_defaults",
+    "ccs_import_preview",
+    "ccs_import_commit",
+    "ccs_import_discard",
     "pricing_entries",
     "pricing_status",
     "open_pricing_file",

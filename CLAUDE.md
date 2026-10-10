@@ -14,7 +14,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **界面实现前必须阅读根目录 `DESIGN.md`**。其中的玻璃质感、明暗主题、颜色语义、布局、可访问性和费用明细展示规则是 GUI 的统一约束；若与用户明确的产品需求冲突，以用户需求为准，并同步更新该文档。
 
-- **只读原则**：TokenScope 只读取各 agent 的本地数据目录，绝不写入、移动或清理它们；自身缓存（SQLite `~/.tokenscope/cache.db`，按文件指纹增量失效、故障自动降级全量扫描）、外置价格表（`~/.tokenscope/pricing.toml`）、OpenRouter 价格快照（`~/.tokenscope/pricing-openrouter.json`）、models.dev 价格快照（`~/.tokenscope/pricing-modelsdev.json`）与价格索引/settings/窗口状态等派生文件只写 TokenScope 自己的数据目录 `~/.tokenscope/`。
+- **只读原则**：TokenScope 只读取各 agent 的本地数据目录，绝不写入、移动或清理它们；**统一用量历史库**（SQLite `~/.tokenscope/history.db`，事实源：用量事件、跨来源身份别名、来源证据、CCS 日汇总与导入批次）、外置价格表（`~/.tokenscope/pricing.toml`）、OpenRouter 价格快照（`~/.tokenscope/pricing-openrouter.json`）、models.dev 价格快照（`~/.tokenscope/pricing-modelsdev.json`）与价格索引/settings/窗口状态等派生文件只写 TokenScope 自己的数据目录 `~/.tokenscope/`。旧 `~/.tokenscope/cache.db` 只在首次升级时被**只读**迁移一次（`migrate_legacy_cache`），之后不再参与运行时查询。
+- **用量历史与导入（H01–H08，2026-10-10）**：`history.db` 累积累积事实——来源文件删除、来源停用、改采集目录、重扫日志都不删除已保存的用量；事件来源键 = 文件 + 行序 + 内容指纹（同内容幂等跳过、同行内容变化产生新事件而不覆盖旧事实）；Claude 的 `(session_id, message.id)` 作为跨来源身份别名，使 CCS 导入的同一请求绑定到原生事件而不重复计费。cc-switch 导入**只在设置页手动触发一次**（预览 → 确认 → 一个批次），来源库一律只读、只读用量白名单列，不自动同步、不重试、失败不恢复；日汇总单独保存（`ccs_daily_usage`）且费用按「只有日粒度」披露为未知。查询侧持有独立只读事务快照 + 流式汇总（内存不随历史规模增长），明细分页才懒物化事件。
 - **适配器架构**：每个 agent 一个 source 适配器，职责是「发现日志文件 → 解析为统一用量事件」。agent 特有的 JSONL / JSON / SQLite 细节全部封在适配器内；对外只产出统一的 `UsageEvent`（时间戳、agent、模型、输入 / 输出 / 缓存 token、会话与项目标识）。
 - **分层**：`source`（发现+解析）→ `model`（归一化事件）→ `aggregate`（聚合）→ `render`（输出）。层间只经 model 类型交互；新增 agent = 新适配器 + 合成 fixture 测试，聚合与渲染层零改动。
 - **时间口径（M6；SF05 修订）**：存储层（SQLite）一律 UTC RFC3339 原样持有，全链路只做一次时区转换；聚合/展示时区按解析链取值——GUI 下拉显式传入（`local`=本机）> 默认 Asia/Shanghai，跨日界与去重规则属于必须先写成不变量的部分。一次查询（汇总/明细/分页）只在入口解析一次「今天」并冻结；预设近 N 天 = 统计时区 `[起始自然日, 今天]` 闭区间，不含未来。
@@ -67,7 +68,7 @@ GUI（Tauri CLI 在仓库根调用——CLI 只向下搜索 src-tauri，在 fron
 - 前端 TypeScript 钉 TypeScript 5.x（vue-tsc 与 TS 7 不兼容，勿升级）；Naive UI 组件库、ECharts 图表（直接用 echarts，未包 vue-echarts）。
 - **格式化分工**：Rust 用 `cargo fmt`（`rustfmt.toml` 钉 LF）；前端用 Prettier（`frontend/.prettierrc.json`，双引号/分号/2 空格/printWidth 100）。**提交钩子**（`.githooks/pre-commit`，克隆后执行一次 `git config core.hooksPath .githooks` 启用，计划 A5 后）会自动跑：根库 fmt/clippy/test + **壳（src-tauri）fmt/clippy/test**（两个独立 manifest，根命令不覆盖壳）+ 前端 typecheck + format:check + **test（vitest）**。CI（`.github/workflows/ci.yml`）在 push/PR 上跑同一门禁（clippy 加 `-D warnings`，另含前端 build）；`tauri build` 属发布验收不进 CI。
 - **测试密闭性（2026-10-05 事故修复，必须遵守）**：任何测试（单元/e2e）构造 `SummaryOptions` 时，`cache_dir` 与 `pricing_index` **必须注入临时目录**，禁止落回默认 `~/.tokenscope`——否则测试会把用户真实缓存 purge 成 fixture，GUI 每次启动都全量冷扫描（用户 1.2 GB 日志，分钟级加载）。新测试评审时先看这两项。
-- **真实数据性能验收/缓存预热**（`#[ignore]`，需显式环境变量，会全量解析本机 `~/.claude`、`~/.codex` 并重建 `~/.tokenscope/cache.db`）：
+- **真实数据性能验收/缓存预热**（`#[ignore]`，需显式环境变量，会全量解析本机 `~/.claude`、`~/.codex` 并写入 `~/.tokenscope/history.db`）：
 
 ```powershell
 $env:TOKENSCOPE_REAL_PERF = "1"; cargo test --release --test perf_real_data -- --ignored --nocapture

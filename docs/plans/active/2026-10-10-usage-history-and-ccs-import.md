@@ -9,8 +9,18 @@
 **Tech Stack:** Rust、现有 rusqlite/SQLite、Tauri 2、Vue 3、现有 ModelIdentity/项目路径规范化/四桶 token 契约。
 
 - 日期：2026-10-10
-- 状态：设计方案；需求已确认，产品实现尚未开始。
+- 状态：**H01–H08 已实施**（代码 + 自动化验收完成；原生 GUI 导入流程与真实 CCS 库只读核验待验）。
 - 核对基线：`0c18e85`；交付基线：`82dd7a4`，接线时须遵守已实施的首次启动隐私闸门。
+- 实施摘要（每项均带定向测试，见 §7 任务表与对应测试文件）：
+  - **H01** `src/history.rs` + `tests/history_storage.rs`：`history.db` 事实库（事件/别名/来源/日汇总/导入批次）、受检 u64 文本读写、版本化迁移与未知版本明确拒绝、竞争写入不复制事件、无变更不递增 generation。
+  - **H02** `src/source/{claude,codex,mod}.rs`、`src/model.rs`：子代理用量并入（`isSidechain` 不再排除且不参与项目根推进）、Codex 默认双根（`sessions` + `archived_sessions`）且显式根不越界、事件带行序与源路径、`native_identity` 只给可证实身份（Codex 返回 None）、`tests/all_usage_sources.rs`。
+  - **H03** `migrate_legacy_cache` + `tests/history_migration.rs`：旧 `cache.db` 在任何版本重建前只读迁移一次，仅迁合法字段、失败可重试、源文件消失不丢已缓存用量。
+  - **H04** 采集写入历史库 + `tests/history_collection.rs`：指纹命中不重解析、删除/截短/替换源文件都不丢历史、来源停用仍可查、重扫只重置指纹、并发采集不复制事件；壳侧 5 分钟定时采集（与手动/启动共用单飞、只在隐私解锁后运行、退出等待已开始的提交）。
+  - **H05** `src/import/ccs.rs` + `tests/ccs_import.rs`：只读导入请求明细与日汇总，输入口径 0/1/2 与 cache-inclusive 应用扣减、会话行与代理行去重、`session:<message.id>` 跨来源身份、日汇总快照冲突不静默覆盖、预览→提交两阶段（一次性计划、generation 绑定、同事务批次）。
+  - **H06** 并集与日汇总桶选择 + `tests/history_overlap.rs`：A∪B 只算一次、双向顺序一致、只有日粒度的历史计入统计但费用按「历史数据只有汇总」披露为未知、明细覆盖桶不双加、来源日时区与展示时区不一致时按日视图拒绝重切。
+  - **H07** 冻结查询与流式读取 + `tests/history_queries.rs`：只读事务快照（旧查询不变、新查询见新 generation、随会话淘汰释放）、流式汇总（记账与事件数无关）、同时间戳分页无重不漏、预算仍生效。
+  - **H08** 设置页「从 CCS 导入用量」面板（预览/确认/取消/失败不自动重试、按钮防重复提交）+ 仪表盘日粒度与未知项目提示 + 文档（`CLAUDE.md`、`docs/stats-semantics.md` §5/§6、`docs/privacy.md`、`DESIGN.md`）+ `frontend/src/views/Settings.ccsImport.test.ts`。
+- 未验项（不声明通过）：原生 GUI 上的完整导入流程（release 构建 + 真实 `~/.cc-switch/cc-switch.db` 只读核对）、真实 1.2 GB 日志下的历史库冷/热启动基准复测、多设备 CCS 数据集合并（本期明确不设计）。
 - 用户已确定：统一数据库放在 `~/.tokenscope/`；只保存关键 token 和 cwd 等元数据，不复制完整 JSONL；所有代理都关注用量，不建立主代理与子代理关系。
 - 用户已确定：CCS 导入放在设置页，仅由用户手动操作执行一次；未点击不读取或导入 CCS 用量，不进行自动同步。
 - 用户已确定：导入数据必须与 TokenScope 已有历史去重求并集；不能每次导入都追加一份相同用量，也不能只在同一个导入批次内去重。
@@ -217,3 +227,5 @@ CCS 按 `date(created_at, 'unixepoch', 'localtime')` 生成日汇总，库内日
 ## 8 本次交付范围
 
 本次交付为数据库和导入方案，不实施产品功能。用户已经确认数据目录、精简记录、全部代理用量范围、设置页手动一次性 CCS 导入及与已有历史去重求并集；具体实施应以本计划的不变量、兼容 fixture 和重叠策略为准。
+
+> **实施后记（2026-10-10）**：本节写于设计阶段，现已被 §1–§7 的实施覆盖——H01–H08 均已落地（见文首实施摘要）。交付形态仍遵守本节确认的边界：数据落在 `~/.tokenscope/history.db`、只保存关键 token 与 cwd 元数据、不复制完整 JSONL、不建立主/子代理关系、CCS 导入只在设置页手动执行一次。

@@ -186,7 +186,9 @@ describe("Settings 同步状态传播（Task 4）", () => {
       global: { provide: { [SETTINGS_PRELOAD as symbol]: preload } },
     });
     await flushPromises();
-    expect(invokeMock).toHaveBeenCalledTimes(5);
+    // source_status / cache_stats / pricing_entries / settings_get /
+    // autostart_status + H05 的来源库默认路径解析（只解析路径，不打开 CCS 库）
+    expect(invokeMock).toHaveBeenCalledTimes(6);
     expect(vmOfSettings(w).autoSync).toBe(true);
     expect(vmOfSettings(w).pricing?.modelsdev_count).toBe(10);
     expect(w.findComponent({ name: "NSpin" }).exists()).toBe(false);
@@ -509,9 +511,17 @@ describe("Settings macOS 分组结构（设计系统 Task 7）", () => {
     const w = mount(Settings);
     await flushPromises();
     const titles = w.findAll(".group-title").map((t) => t.text());
-    expect(titles).toEqual(["Token 显示颜色", "应用", "数据源", "缓存", "价格", "高级配置"]);
+    expect(titles).toEqual([
+      "Token 显示颜色",
+      "应用",
+      "数据源",
+      "缓存",
+      "从 CCS 导入用量",
+      "价格",
+      "高级配置",
+    ]);
     const cards = w.findAll("section.ts-card");
-    expect(cards.length).toBe(6);
+    expect(cards.length).toBe(7);
     for (const t of w.findAll(".group-title")) {
       expect(t.element.closest("section.ts-card"), "组标题必须在卡片外").toBeNull();
     }
@@ -933,7 +943,7 @@ describe("Settings 目录信息与重建（UX08）", () => {
     await flushPromises();
     // 预期说明可见
     expect(w.text()).toContain("重新扫描日志，可能需要一段时间");
-    const btn = w.findAll("button").find((b) => b.text().includes("重建缓存"))!;
+    const btn = w.findAll("button").find((b) => b.text().includes("重扫日志"))!;
     expect(btn).toBeDefined();
     await btn.trigger("click");
     // 进行中：按钮处于 loading（进度反馈保留）
@@ -943,9 +953,11 @@ describe("Settings 目录信息与重建（UX08）", () => {
     resolveRebuild({ path: "p", files: 5, events: 9 });
     await flushPromises();
     expect(calls).toBe(1);
-    // AP03：成功提示必须说明范围（按当前来源配置、仅派生数据），
-    // 不能只说"已重建"让用户以为配置外来源也被采集。
-    expect(msgSpy.success).toHaveBeenCalledWith("缓存已重建（按当前来源配置，仅重建派生数据）");
+    // H04/AP03：成功提示必须说明范围（按当前来源配置重新解析）与"历史用量
+    // 不受影响"，不能只说"已重建"让用户以为配置外来源也被采集。
+    expect(msgSpy.success).toHaveBeenCalledWith(
+      "已重扫日志（按当前来源配置重新解析，已保存的历史用量不受影响）",
+    );
     expect(btn.classes()).not.toContain("n-button--loading");
   });
 
