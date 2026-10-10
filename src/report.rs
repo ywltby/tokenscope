@@ -13,7 +13,7 @@ use jiff::tz::TimeZone;
 use serde::Serialize;
 
 use crate::aggregate::{GroupBy, aggregate, preset_days_range};
-use crate::cache::{Cache, CacheStats, mtime_ms};
+use crate::cache::{Cache, mtime_ms};
 use crate::dedupe::dedupe_events;
 use crate::model::{AgentKind, TokenCounts, UsageEvent};
 use crate::pricing::Pricing;
@@ -57,6 +57,10 @@ pub struct SummaryOptions {
     /// `None` = 默认来源才使用对应账户的默认配置；显式给出时按该路径读取
     ///（测试注入）。自定义来源 + `None` = 不读取任何本机映射。
     pub claude_projects_path: Option<PathBuf>,
+    /// H04：统一用量历史库路径（`None` = `cache_dir/history.db`，再退
+    /// `~/.tokenscope/history.db`）。测试沿用既有 `cache_dir` 隔离根，
+    /// 新增的历史路径绝不落回真实数据目录（计划不变量 10）。
+    pub history_path: Option<PathBuf>,
 }
 
 impl SummaryOptions {
@@ -114,6 +118,32 @@ pub fn cache_file_path(cache_dir: Option<&PathBuf>) -> PathBuf {
         .join("cache.db")
 }
 
+/// H04：历史库路径——显式注入 > `cache_dir` 隔离根 > 默认数据目录。
+///
+/// 测试一律经 `cache_dir` 注入临时根（计划不变量 10），因此新增的历史路径
+/// 天然落在隔离目录里，不会触碰用户真实 `~/.tokenscope`。
+pub fn history_file_path(opts: &SummaryOptions) -> Result<PathBuf> {
+    if let Some(p) = opts.history_path.as_ref() {
+        return Ok(p.clone());
+    }
+    if let Some(dir) = opts.cache_dir.as_ref() {
+        return Ok(dir.join("history.db"));
+    }
+    crate::history::history_file_path()
+}
+
+/// H03：遗留 `cache.db` 路径（迁移的只读来源，永不写入）。
+pub fn legacy_cache_file_path(opts: &SummaryOptions) -> PathBuf {
+    cache_file_path(opts.cache_dir.as_ref())
+}
+
+/// H04：打开历史库。失败即明确报错——历史库是事实源，不是可丢弃缓存，
+/// 不得静默用"现存日志的临时扫描"代替完整历史（计划不变量 7）。
+fn open_history(opts: &SummaryOptions) -> Result<crate::history::HistoryDb> {
+    let path = history_file_path(opts)?;
+    crate::history::HistoryDb::open(&path).map_err(|e| anyhow::anyhow!("打开用量历史库失败：{e:#}"))
+}
+
 /// 外置价格**文件**路径：传入即用；None = `~/.tokenscope/pricing.toml`。
 pub fn openrouter_file_path(snapshot_file: Option<&PathBuf>) -> PathBuf {
     snapshot_file
@@ -159,10 +189,12 @@ fn make_source(opts: &SummaryOptions, kind: AgentKind) -> Result<Box<dyn Source>
                 claude_project_mapping(opts),
             ))
         }
-        AgentKind::Codex => Box::new(CodexSource::new(match opts.codex_dir.as_ref() {
-            Some(p) => p.clone(),
-            None => CodexSource::default_root()?,
-        })),
+        AgentKind::Codex => Box::new(match opts.codex_dir.as_ref() {
+            // 显式自定义根：只在选定目录内递归（单根）。
+            Some(p) => CodexSource::new(p.clone()),
+            // 默认来源：sessions + archived_sessions 两个根（H02）。
+            None => CodexSource::with_roots(CodexSource::default_roots()?),
+        }),
     })
 }
 
@@ -182,8 +214,9 @@ fn claude_project_mapping(opts: &SummaryOptions) -> Arc<ProjectMapping> {
     }
 }
 
-/// 缓存开关解析：返回 Ok(None) 表示放弃缓存（含原因，调用方告警）。
-/// 任何降级路径都同步 warn 落日志——纯优化失效必须可追溯。
+/// 缓存开关解析（历史遗留）：H04 起解析缓存不再是事实源，本函数仅保留给
+/// 尚未切换的调用点；生产采集路径一律走历史库。
+#[allow(dead_code)]
 fn open_cache(opts: &SummaryOptions) -> (Option<Cache>, Vec<String>) {
     let mut warnings = Vec::new();
     if opts.cache_dir.is_none() && data_dir().is_err() {
@@ -214,7 +247,7 @@ fn open_cache(opts: &SummaryOptions) -> (Option<Cache>, Vec<String>) {
     }
 }
 
-/// 缓存状态（GUI 设置页）。
+/// H04：数据存储状态（GUI 设置页）——读的是统一历史库，不再是解析缓存。
 #[derive(Debug, Clone, Serialize)]
 pub struct CacheInfo {
     pub path: String,
@@ -223,7 +256,11 @@ pub struct CacheInfo {
 }
 
 pub fn cache_stats(cache_dir: Option<PathBuf>) -> Result<CacheInfo> {
-    let path = cache_file_path(cache_dir.as_ref());
+    let opts = SummaryOptions {
+        cache_dir,
+        ..Default::default()
+    };
+    let path = history_file_path(&opts)?;
     if !path.exists() {
         return Ok(CacheInfo {
             path: path.display().to_string(),
@@ -231,27 +268,31 @@ pub fn cache_stats(cache_dir: Option<PathBuf>) -> Result<CacheInfo> {
             events: 0,
         });
     }
-    let c = Cache::open(&path)?;
-    let CacheStats { files, events } = c.stats()?;
+    let history = crate::history::HistoryDb::open(&path)
+        .map_err(|e| anyhow::anyhow!("打开用量历史库失败：{e:#}"))?;
     Ok(CacheInfo {
         path: path.display().to_string(),
-        files,
-        events,
+        files: history.source_file_count()?,
+        events: history.event_count()?,
     })
 }
 
-/// AP03：重建缓存——按调用方给出的采集选项清库并全量重解析。
+/// AP03/H04：重扫日志——重置采集指纹并重新解析当前文件；**不**清
+/// `usage_events`／`ccs_daily_usage`（历史删除不是缓存操作，计划 §4）。
 ///
-/// 本函数**不**隐式读用户设置：来源目录、启停、缓存目录、价格路径全部由
+/// 本函数**不**隐式读用户设置：来源目录、启停、数据目录、价格路径全部由
 /// 调用方注入，GUI 用与普通查询同一份已成功读取的配置构造选项，因此
-/// 重建与查询的采集范围必然一致（修复前重建写死 `SummaryOptions::default()`，
+/// 重扫与查询的采集范围必然一致（修复前重建写死 `SummaryOptions::default()`，
 /// 停用的来源会被重新采集、自定义目录被忽略）。
 ///
-/// 顺序：先校验来源配置（冲突即失败），再清库重建——避免"清库之后才因为
-/// 配置非法失败"，留下一个空缓存。
+/// 顺序：先校验来源配置（冲突即失败），再重置指纹——避免"重置之后才因为
+/// 配置非法失败"，留下一个指纹全丢的中间状态。
 pub fn rebuild_cache(opts: &SummaryOptions) -> Result<CacheInfo> {
     let cache_dir = opts.cache_dir.clone();
     validate_opts_sources_overlap(opts)?;
+    let history = open_history(opts)?;
+    let reset = history.reset_fingerprints()?;
+    log::info!("重扫日志：重置 {reset} 条采集指纹（已保存的用量不受影响）");
     summary(&SummaryOptions {
         refresh: true,
         ..opts.clone()
@@ -470,6 +511,11 @@ impl Source for DedupSource {
         self.inner.root()
     }
 
+    /// H02：多根语义必须转发——包装层丢掉归档根会让清理与告警只看第一个根。
+    fn roots(&self) -> Vec<PathBuf> {
+        self.inner.roots()
+    }
+
     fn discover_with_errors(&self) -> (Vec<PathBuf>, Vec<String>) {
         (self.keep.clone(), self.errors.clone())
     }
@@ -572,9 +618,14 @@ fn collect_flighted_with(
 /// Task 2：路径规范化——canonicalize 优先；不存在时用绝对路径 +
 /// 组件清理（剥离 `.` 与空组件）作为稳定 fallback（大小写保留，
 /// Windows 大小写不敏感重叠由后扫描方的精确键比对兜底）。
+///
+/// H06 修复：Windows 的 `canonicalize` 会加上 `\\?\`（UNC 为 `\\?\UNC\`）
+/// 前缀，而后备路径没有——同一位置因此出现两种写法，导致"存在的目录"与其
+/// "尚不存在的子目录"被判成互不嵌套（来源冲突漏检），缓存键也会随目录存在
+/// 与否分裂。统一剥离该前缀，保证同一位置永远得到同一字符串。
 pub(crate) fn normalize_path(p: &std::path::Path) -> PathBuf {
     match p.canonicalize() {
-        Ok(c) => c,
+        Ok(c) => strip_verbatim(c),
         // Task 2（审阅）：fallback 折叠 `.`、`..` 与空组件——`a\..\shared`
         // 与 `a\shared` 规范化到同一路径（目录不存在时 canonicalize 失败）。
         Err(_) => {
@@ -597,9 +648,23 @@ pub(crate) fn normalize_path(p: &std::path::Path) -> PathBuf {
             for s in stack {
                 out.push(s);
             }
-            out
+            strip_verbatim(out)
         }
     }
+}
+
+/// 剥离 Windows 的 `\\?\`（UNC 为 `\\?\UNC\`）逐字前缀——让
+/// `canonicalize` 结果与后备路径同构（见 [`normalize_path`]）。其他平台无此
+/// 前缀，函数等同恒等变换。
+pub(crate) fn strip_verbatim(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path
 }
 
 fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSnapshot> {
@@ -698,23 +763,37 @@ pub fn collect_all_with_sources_for_test(
 /// 保存校验（壳内的 `source_config_set`）与采集校验都经本函数，因此
 /// 「配置字段缺失 = 默认启用 + 默认根」这条语义在两处不会分叉：早期实现里
 /// 保存校验把 `None` 当成"不参与校验"，于是用户能保存一份采集层必然拒绝的
-/// 配置。未启用 → `Ok(None)`（用户可借停用恢复冲突）。
+/// 配置。未启用 → 空集合（用户可借停用恢复冲突）。
+/// H02：返回**全部**根——Codex 默认来源含 `sessions/` 与 `archived_sessions/`，
+/// 两者都必须参与冲突校验，不能只看第一个。
+pub fn effective_source_roots(
+    kind: AgentKind,
+    enabled: bool,
+    dir: Option<&std::path::Path>,
+) -> Result<Vec<std::path::PathBuf>> {
+    if !enabled {
+        return Ok(Vec::new());
+    }
+    Ok(match (dir, kind) {
+        (Some(d), _) => vec![d.to_path_buf()],
+        (None, AgentKind::ClaudeCode) => vec![ClaudeSource::default_root()?],
+        (None, AgentKind::Codex) => CodexSource::default_roots()?,
+    })
+}
+
+/// 兼容入口：首个有效根（单根来源）。多根来源请用
+/// [`effective_source_roots`]——只看第一个根会漏掉归档目录。
 pub fn effective_source_dir(
     kind: AgentKind,
     enabled: bool,
     dir: Option<&std::path::Path>,
 ) -> Result<Option<std::path::PathBuf>> {
-    if !enabled {
-        return Ok(None);
-    }
-    Ok(Some(match (dir, kind) {
-        (Some(d), _) => d.to_path_buf(),
-        (None, AgentKind::ClaudeCode) => ClaudeSource::default_root()?,
-        (None, AgentKind::Codex) => CodexSource::default_root()?,
-    }))
+    Ok(effective_source_roots(kind, enabled, dir)?
+        .into_iter()
+        .next())
 }
 
-/// AP01：由设置解析**全部启用来源**的有效目录（保存校验与采集入口同源）。
+/// AP01：由设置解析**全部启用来源的全部根**（保存校验与采集入口同源）。
 pub fn effective_source_dirs_from_settings(
     settings: &crate::settings::Settings,
 ) -> Result<Vec<(AgentKind, std::path::PathBuf)>> {
@@ -722,15 +801,15 @@ pub fn effective_source_dirs_from_settings(
     for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
         let cfg = settings.source_config(kind == AgentKind::ClaudeCode);
         let dir = cfg.dir.as_deref().map(std::path::Path::new);
-        if let Some(dir) = effective_source_dir(kind, cfg.enabled, dir)? {
-            out.push((kind, dir));
+        for root in effective_source_roots(kind, cfg.enabled, dir)? {
+            out.push((kind, root));
         }
     }
     Ok(out)
 }
 
 /// SF09：解析启用来源的有效目录（显式配置或工具默认根）。
-/// 未启用的来源不参与冲突检查（用户可借停用恢复）。
+/// 未启用的来源不参与冲突检查（用户可借停用恢复）；多根来源逐根展开。
 fn effective_source_dirs(opts: &SummaryOptions) -> Result<Vec<(AgentKind, std::path::PathBuf)>> {
     let mut out = Vec::new();
     for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
@@ -740,8 +819,8 @@ fn effective_source_dirs(opts: &SummaryOptions) -> Result<Vec<(AgentKind, std::p
         } else {
             opts.codex_dir.as_deref()
         };
-        if let Some(dir) = effective_source_dir(kind, opts.enabled(claude), dir)? {
-            out.push((kind, dir));
+        for root in effective_source_roots(kind, opts.enabled(claude), dir)? {
+            out.push((kind, root));
         }
     }
     Ok(out)
@@ -765,7 +844,7 @@ fn validate_opts_sources_overlap(opts: &SummaryOptions) -> Result<()> {
 fn collect_all_with_sources(
     sources: Vec<Box<dyn Source>>,
     opts: &SummaryOptions,
-    generation: u64,
+    _generation: u64,
 ) -> Result<Collected> {
     // SF09：采集前拒绝启用来源的有效目录冲突（相同/嵌套）。
     validate_opts_sources_overlap(opts)?;
@@ -795,8 +874,30 @@ fn collect_all_with_sources(
         },
         t_pricing.elapsed().as_millis()
     );
-    let (cache, mut cache_warnings) = open_cache(opts);
-    warnings.append(&mut cache_warnings);
+    // H04：打开历史库并完成一次性遗留迁移。历史库是事实源——打不开就
+    // 明确报错，不静默回退到"只扫现存日志"（计划不变量 7）。
+    let history = open_history(opts)?;
+    // H03：迁移必须先于任何旧版本缓存的版本重建/purge 执行。
+    if let Some(rep) =
+        crate::history::migrate_legacy_cache(&history, &legacy_cache_file_path(opts))?
+    {
+        log::info!(
+            "遗留缓存迁移：文件 {}，事件行 {}，新增 {}，更新 {}，已存在 {}，冲突 {}，拒绝 {}",
+            rep.files,
+            rep.events_seen,
+            rep.inserted,
+            rep.updated,
+            rep.unchanged,
+            rep.conflicts,
+            rep.rejected
+        );
+        if rep.rejected > 0 {
+            warnings.push(format!(
+                "遗留缓存有 {} 条记录字段不合法，未迁入（其余已迁移）",
+                rep.rejected
+            ));
+        }
+    }
     warnings.extend(overlap_warnings);
     #[cfg(test)]
     {
@@ -808,170 +909,168 @@ fn collect_all_with_sources(
 
     let mut reports: Vec<SourceReport> = Vec::new();
     let mut all_events: Vec<UsageEvent> = Vec::new();
+    let mut registrations: Vec<crate::history::SourceFileRecord> = Vec::new();
+    // H04：来源登记（指纹）按 (app, 来源上下文, 规范化路径) 索引——指纹一致
+    // 且**根集合未变**的来源文件本轮不重解析，其事件已在库中。换根后同一
+    // 文件必须重新解析（子目录日志的项目归属随根变化），不得沿用旧归属。
+    let known: std::collections::HashMap<
+        (AgentKind, String, String),
+        crate::history::StoredSourceFile,
+    > = history
+        .source_files()?
+        .into_iter()
+        .map(|f| ((f.key.app, f.key.root.clone(), f.key.path.clone()), f))
+        .collect();
 
     for src in sources {
         let kind = src.agent();
         let t_agent = std::time::Instant::now();
         let mut stats = CollectStats::default();
-        let mut events: Vec<UsageEvent> = Vec::new();
         let (files, discovery_errors) = src.discover_with_errors();
         // B4：发现期异常必须可见；发现失败的来源不参与缓存清理。
         for e in &discovery_errors {
             warnings.push(e.clone());
         }
-        if files.is_empty() && !src.root().is_dir() {
-            warnings.push(format!(
-                "{} 目录不存在：{}",
-                match kind {
-                    AgentKind::ClaudeCode => "Claude",
-                    AgentKind::Codex => "Codex",
-                },
-                src.root().display()
-            ));
+        if files.is_empty() && !src.roots().iter().any(|r| r.is_dir()) {
+            for root in src.roots() {
+                warnings.push(format!(
+                    "{} 目录不存在：{}",
+                    match kind {
+                        AgentKind::ClaudeCode => "Claude",
+                        AgentKind::Codex => "Codex",
+                    },
+                    root.display()
+                ));
+            }
         }
-        let mut agent_keep: Vec<String> = Vec::new();
+        let mut agent_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut cached_hits = 0u32;
         let mut reparsed = 0u32;
+        let mut parsed_events_total = 0u64;
         let mut parse_ms_total = 0u128;
-        let mut store_ms_total = 0u128;
-        let mut lookup_errs = 0u32;
-        let mut store_errs = 0u32;
         let mut unstable = 0u32;
-        // R05：缓存身份 = agent + 规范化根目录 + 规范化文件路径。换根/换
-        // agent 后文件键不同，缓存自然失效重解析；项目名等派生字段与
-        // refresh 完全一致。A03：解析上下文修订（如 Claude 项目映射）参与
-        // 命中判定——外部配置变化必须重新解析，而不是继续供旧归属。
-        let root_ctx = normalize_path(src.root()).to_string_lossy().to_lowercase();
+        let mut io_failed = 0u32;
+        // R05/A03/H02：来源上下文 = agent + 规范化根集合 + 解析上下文修订。
+        // 换根、换 agent、外部配置（如 Claude 项目映射）变化都会让指纹命中
+        // 失效并重新解析，不会继续把旧归属供数。
+        let root_ctx = src
+            .roots()
+            .iter()
+            .map(|r| normalize_path(r).to_string_lossy().to_lowercase())
+            .collect::<Vec<_>>()
+            .join(";");
         let context_rev = src.context_revision().to_string();
         for file in &files {
             let path_str = file.display().to_string();
-            let cache_key = normalize_path(file).to_string_lossy().to_lowercase();
-            agent_keep.push(cache_key.clone());
-            let file_key = crate::cache::FileKey {
-                path: cache_key.as_str(),
-                agent: kind,
-                root: root_ctx.as_str(),
-                context_rev: context_rev.as_str(),
-            };
-            let mut cached: Option<crate::source::FileParse> = None;
+            let path_key = normalize_path(file).to_string_lossy().to_lowercase();
+            agent_seen.insert(path_key.clone());
+            let size = file_size(file);
+            let mt = mtime_ms(file).ok();
+            let fingerprint = size.zip(mt).map(|(s, m)| format!("{s}:{m}"));
+            // H04：指纹一致且来源上下文未变 → 本轮不重解析——该文件的事件
+            // 已经在历史库里，统计沿用上次解析结果。
             if !opts.refresh
-                && let (Some(c), Some(size), Ok(mt)) =
-                    (cache.as_ref(), file_size(file), mtime_ms(file))
+                && let Some(prev) = known.get(&(kind, root_ctx.clone(), path_key.clone()))
+                && let Some(fp) = fingerprint.as_deref()
+                && prev.state == "present"
+                && prev.fingerprint == fp
+                && prev.context_revision == context_rev
             {
-                match c.lookup_file(&file_key, size, mt) {
-                    Ok(hit) => cached = hit.map(|cf| cf.parse),
-                    Err(e) => {
-                        lookup_errs += 1;
-                        warnings.push(format!("缓存读取失败（该文件全量解析）: {e:#}"));
-                    }
-                }
+                stats.add_file(&crate::source::FileParse {
+                    stats: prev.stats.clone(),
+                    events: Vec::new(),
+                });
+                cached_hits += 1;
+                continue;
             }
-            let parse = match cached {
-                Some(p) => {
-                    cached_hits += 1;
-                    p
-                }
-                None => {
-                    // B4：解析前取指纹，解析后复核——追加中的文件不写"成功"
-                    // 缓存（否则旧数据配上新指纹，此后永远命中陈旧内容）。
-                    let fp_before = if cache.is_some() {
-                        Some((file_size(file), mtime_ms(file).ok()))
-                    } else {
-                        None
-                    };
-                    let t = std::time::Instant::now();
-                    let p = src.parse_file(file);
-                    parse_ms_total += t.elapsed().as_millis();
-                    reparsed += 1;
-                    if let Some(c) = &cache {
-                        let fp_after = (file_size(file), mtime_ms(file).ok());
-                        let stable = fp_before == Some(fp_after);
-                        if !stable {
-                            unstable += 1;
-                            warnings
-                                .push(format!("采集期间文件变化，本轮不计入缓存: {}", path_str));
-                        } else if p.stats.io_errors > 0 {
-                            warnings.push(format!(
-                                "文件读取失败，本轮不缓存（不影响统计）: {}",
-                                path_str
-                            ));
-                        } else {
-                            let size = fp_after.0.unwrap_or(0);
-                            let mt = fp_after.1.unwrap_or(0);
-                            let t = std::time::Instant::now();
-                            if let Err(e) = c.store_file(&file_key, size, mt, &p) {
-                                store_errs += 1;
-                                warnings.push(format!("缓存写入失败（不影响统计）: {e:#}"));
-                            }
-                            store_ms_total += t.elapsed().as_millis();
-                        }
-                    }
-                    p
-                }
-            };
-            stats.add_file(&parse);
-            events.extend(parse.events);
+            // B4：解析前取指纹、解析后复核——追加中的文件不登记成功指纹
+            //（否则旧内容配上新指纹，此后永远命中陈旧结果）。
+            let fp_before = (size, mt);
+            let t = std::time::Instant::now();
+            let parsed = src.parse_file(file);
+            parse_ms_total += t.elapsed().as_millis();
+            reparsed += 1;
+            let fp_after = (file_size(file), mtime_ms(file).ok());
+            let stable = fp_before == fp_after && fp_after.0.is_some() && fp_after.1.is_some();
+            if !stable {
+                unstable += 1;
+                warnings.push(format!("采集期间文件变化，本轮不登记指纹: {}", path_str));
+            } else if parsed.stats.io_errors > 0 {
+                io_failed += 1;
+                warnings.push(format!(
+                    "文件读取失败，本轮不登记指纹（已解析部分不影响统计）: {}",
+                    path_str
+                ));
+            } else {
+                registrations.push(crate::history::SourceFileRecord {
+                    key: crate::history::SourceFileKey {
+                        app: kind,
+                        root: root_ctx.clone(),
+                        path: path_key.clone(),
+                    },
+                    fingerprint: fingerprint.clone().unwrap_or_default(),
+                    size_bytes: fp_after.0.unwrap_or(0),
+                    mtime_ms: fp_after.1.unwrap_or(0),
+                    context_revision: context_rev.clone(),
+                    last_success_utc: Some(jiff::Timestamp::now().to_string()),
+                    stats: parsed.stats.clone(),
+                });
+            }
+            stats.add_file(&parsed);
+            parsed_events_total += parsed.events.len() as u64;
+            all_events.extend(parsed.events);
         }
         stats.files_scanned = files.len() as u64;
         log::info!(
-            "采集 {}: 文件 {}（缓存命中 {} / 重解析 {}），解析 {} ms，写缓存 {} ms，解析层事件 {}，累计 {} ms",
+            "采集 {}: 文件 {}（指纹命中 {} / 重解析 {}），解析 {} ms，解析层事件 {}，累计 {} ms",
             kind.as_str(),
             files.len(),
             cached_hits,
             reparsed,
             parse_ms_total,
-            store_ms_total,
-            events.len(),
+            parsed_events_total,
             t_agent.elapsed().as_millis()
         );
-        // 缓存错误只聚合一行 warn（逐文件明细已进 warnings 随报告返回前端）。
-        if lookup_errs > 0 {
-            log::warn!(
-                "采集 {}: {lookup_errs} 个文件缓存读取失败，均已回退全量解析",
-                kind.as_str()
-            );
-        }
-        if store_errs > 0 {
-            log::warn!(
-                "采集 {}: {store_errs} 个文件缓存写入失败（不影响统计）",
-                kind.as_str()
-            );
-        }
         if unstable > 0 {
             log::warn!(
-                "采集 {}: {unstable} 个文件采集期间持续变化，本轮未入缓存",
+                "采集 {}: {unstable} 个文件采集期间持续变化，本轮未登记指纹",
                 kind.as_str()
             );
         }
-        // B5/F06：清理只作用于本来源；发现失败绝不清理（无法区分"已删除"
-        // 与"暂时读不到"）。
-        if let Some(c) = &cache
-            && discovery_errors.is_empty()
-            && src.root().is_dir()
-        {
-            let t = std::time::Instant::now();
-            match c.purge_agent(kind, &root_ctx, &agent_keep) {
-                Ok(n) => {
-                    if n > 0 {
-                        log::info!(
-                            "缓存清理（{}）：{} 条过期行，{} ms",
-                            kind.as_str(),
-                            n,
-                            t.elapsed().as_millis()
-                        );
-                    }
-                }
-                Err(e) => warnings.push(format!("缓存清理失败（不影响统计）: {e:#}")),
+        if io_failed > 0 {
+            log::warn!(
+                "采集 {}: {io_failed} 个文件读取失败，本轮未登记指纹（下轮重试）",
+                kind.as_str()
+            );
+        }
+        // B5/F06 + H04：已消失的来源文件只标记状态，**绝不**删除已保存的
+        // 用量（不变量 3）；发现失败时不做任何标记（无法区分"已删除"与
+        // "暂时读不到"）。
+        if discovery_errors.is_empty() && src.roots().iter().any(|r| r.is_dir()) {
+            let stale: Vec<crate::history::SourceFileKey> = known
+                .values()
+                .filter(|f| {
+                    f.key.app == kind && f.key.root == root_ctx && !agent_seen.contains(&f.key.path)
+                })
+                .map(|f| f.key.clone())
+                .collect();
+            if !stale.is_empty() {
+                let n = history.mark_sources_missing(&stale)?;
+                log::info!(
+                    "来源缺失（{}）：{} 个文件标记为 missing（已保存用量保留）",
+                    kind.as_str(),
+                    n
+                );
             }
         }
         reports.push(SourceReport { agent: kind, stats });
-        all_events.extend(events);
     }
 
-    // 全局去重（跨文件、按 agent 规则），并回填 per-agent 的丢弃数与事件数。
+    // 全局去重（跨文件、按 agent 规则）。去重结果既用于统计，也用于写库：
+    // 同一请求的流式重发在内存里就按终值收敛，库内不需要再处理这种重复。
     let t_dedupe = std::time::Instant::now();
     let before = all_events.len();
-    let (events, dropped) = dedupe_events(all_events);
+    let (mut events, dropped) = dedupe_events(all_events);
     log::info!(
         "去重：{} → {}（丢弃 {}），{} ms",
         before,
@@ -979,6 +1078,34 @@ fn collect_all_with_sources(
         dropped.iter().map(|(_, n)| n).sum::<u64>(),
         t_dedupe.elapsed().as_millis()
     );
+
+    // H04：按事件时间升序写入历史库——同一请求的多份来源记录在同一批内
+    // 按"后写者胜出"合并，与全局去重"取时间戳最晚"的口径一致；写入按来源
+    // 键 + 内容指纹去重，因此重复采集幂等，且文件被替换后旧事实不被覆盖。
+    events.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.line.cmp(&b.line)));
+    let writes: Vec<crate::history::EventWrite> = events.iter().map(event_write_of).collect();
+    let write_summary = history.write_batch(&writes)?;
+    log::info!(
+        "历史库写入：新增 {}，更新 {}，已存在 {}，冲突 {}，陈旧 {}；别名 +{}，来源 +{}",
+        write_summary.inserted,
+        write_summary.updated,
+        write_summary.unchanged,
+        write_summary.conflicts,
+        write_summary.stale,
+        write_summary.aliases_added,
+        write_summary.origins_added
+    );
+    // 指纹登记在用量提交**之后**：崩溃不会出现"指纹已成功但用量没落库"。
+    for rec in &registrations {
+        history.touch_source_file(rec)?;
+    }
+
+    // H04：查询输入 = 库内事实（按 opts.agent 过滤），而不是"本轮解析出的
+    // 事件"。来源文件被删除、来源被停用、指纹被重置都不会让已保存的用量
+    // 消失（不变量 3）；H07 起改为流式读取，不再整表物化。
+    let stored = history.stored_events_filtered(opts.agent)?;
+    let events: Vec<UsageEvent> = stored.iter().map(usage_event_of).collect();
+    let history_generation = history.generation()?;
     for s in &mut reports {
         s.stats.duplicates_dropped = dropped
             .iter()
@@ -988,19 +1115,102 @@ fn collect_all_with_sources(
         s.stats.events = events.iter().filter(|e| e.agent == s.agent).count() as u64;
     }
     log::info!(
-        "采集完成：事件 {}，警告 {}，总计 {} ms",
+        "采集完成：库内事件 {}，本轮解析 {} 项，警告 {}，总计 {} ms",
         events.len(),
+        registrations.len(),
         warnings.len(),
         t_total.elapsed().as_millis()
     );
     Ok(Collected {
-        generation,
+        generation: history_generation,
         events,
         sources: reports,
         pricing,
         warnings,
         pricing_revision,
     })
+}
+
+/// H04：归一化事件 → 历史库写入形态。
+///
+/// 来源键 = `native|{app}|{规范化路径}|{行序}|{内容指纹}`：
+/// - 内容不变 → 同一来源键 → 重复采集幂等跳过；
+/// - 同一行内容变化（文件被替换、新请求占用同一行）→ 新来源键 → 新事件，
+///   旧事实保留，绝不用新值覆盖已保存的旧请求；
+/// - 流式终值更新由原生身份别名命中同一事件后按终值规则完成。
+fn event_write_of(ev: &UsageEvent) -> crate::history::EventWrite {
+    use crate::history::{
+        EventAlias, EventOrigin, EventWrite, ORIGIN_KIND_NATIVE_FILE, WritePrecedence,
+    };
+    let position = format!("{}|{}|{}", ev.agent.as_str(), ev.source_path, ev.line);
+    let key = format!("native|{position}|{}", ev.content_fingerprint());
+    let mut aliases = Vec::new();
+    if let Some((scheme, value)) = ev.native_identity() {
+        aliases.push(EventAlias {
+            app: ev.agent,
+            scheme: scheme.to_string(),
+            value,
+        });
+    }
+    EventWrite {
+        event_key: key.clone(),
+        app: ev.agent,
+        ts: ev.ts,
+        model_raw: ev.model.clone(),
+        model_identity: crate::model_identity::ModelIdentity::parse(&ev.model).identity_key(),
+        session_id: non_empty(&ev.session_id),
+        record_id: non_empty(&ev.record_id),
+        project_key: non_empty(&ev.project),
+        session_initial_cwd: ev.session_initial_cwd.clone(),
+        event_cwd: ev.event_cwd.clone(),
+        tokens: TokenCounts::from_event(ev),
+        precedence: WritePrecedence::NativeLog,
+        observed_at: jiff::Timestamp::now(),
+        aliases,
+        origins: vec![EventOrigin {
+            origin_kind: ORIGIN_KIND_NATIVE_FILE.to_string(),
+            origin_key: key,
+            app: ev.agent,
+            import_run_id: None,
+            parser_revision: crate::history::PARSER_REVISION,
+            source_model_raw: None,
+            pricing_model: None,
+            source_cost_usd: None,
+            ts_precision_seconds: false,
+        }],
+    }
+}
+
+/// H04：库内事件 → 归一化事件（查询输入形态）。
+fn usage_event_of(s: &crate::history::StoredEvent) -> UsageEvent {
+    UsageEvent {
+        ts: s.ts,
+        agent: s.app,
+        model: s.model_raw.clone(),
+        session_id: s.session_id.clone().unwrap_or_default(),
+        // 无项目归属（如只有日粒度的外部汇总）保持"未知"，不伪造项目。
+        project: s
+            .project_key
+            .clone()
+            .unwrap_or_else(|| "(未知)".to_string()),
+        session_initial_cwd: s.session_initial_cwd.clone(),
+        event_cwd: s.event_cwd.clone(),
+        record_id: s.record_id.clone().unwrap_or_default(),
+        line: 0,
+        source_path: String::new(),
+        input_tokens: s.tokens.input,
+        output_tokens: s.tokens.output,
+        cache_write_tokens: s.tokens.cache_write,
+        cache_read_tokens: s.tokens.cache_read,
+    }
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
 }
 
 pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
@@ -1452,11 +1662,18 @@ mod tests {
     }
 
     /// 剥离时间戳与会话身份后序列化，用于三路径一致性比较。
+    ///
+    /// H04：`duplicates_dropped` 是**本轮解析**的产物（指纹命中时本轮没有
+    /// 解析、自然没有可丢弃的重复行），不属于"查询数字"，比较前归零；
+    /// 请求数 / 四桶 / 费用 / 分组 / 警告全部参与比较。
     fn normalize(r: &SummaryReport) -> String {
         let mut r = r.clone();
         r.generated_at = String::new();
         // SF04：query_id 是会话身份（每次查询必然不同），不参与数字一致性。
         r.query_id = String::new();
+        for s in &mut r.sources {
+            s.stats.duplicates_dropped = 0;
+        }
         serde_json::to_string(&r).unwrap()
     }
 
@@ -1465,7 +1682,7 @@ mod tests {
         let r = summary(&opts(None, None, false)).unwrap();
         assert_eq!(r.by, "day");
         assert_eq!(r.sources.len(), 2);
-        assert_eq!(r.totals.requests, 7); // claude 3 + codex 4（去重后）
+        assert_eq!(r.totals.requests, 8); // claude 4（含子代理）+ codex 4（去重后）
         assert_eq!(r.groups.len(), 3); // 07-17、07-18、合计
         assert_eq!(r.groups[0].agents, ["claude-code", "codex"]);
         assert!(r.generated_at.contains('+'), "generated_at 带时区偏移");
@@ -1484,7 +1701,7 @@ mod tests {
         let r = summary(&opts).unwrap();
         assert_eq!(r.sources.len(), 1);
         assert_eq!(r.sources[0].agent, AgentKind::ClaudeCode);
-        assert_eq!(r.totals.requests, 3);
+        assert_eq!(r.totals.requests, 4, "H02：子代理用量并入，不再排除");
     }
 
     #[test]
@@ -1510,10 +1727,11 @@ mod tests {
         let refresh = normalize(&summary(&opts(cache_dir.clone(), None, true)).unwrap());
         assert_eq!(cold, warm, "缓存命中必须与首次全量一致");
         assert_eq!(cold, refresh, "--refresh 重建后必须一致");
-        // 缓存里确实有数据（解析层未去重总数：claude 5 + codex 5）
+        // 历史库确实有数据：来源登记 4 个文件（claude 2 + codex 2），
+        // 用量事实为去重后的 8 条请求。
         let info = cache_stats(Some(dir.clone())).unwrap();
         assert_eq!(info.files, 4); // claude 2 + codex 2
-        assert_eq!(info.events, 10);
+        assert_eq!(info.events, 8);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1566,17 +1784,16 @@ mod tests {
     }
 
     #[test]
-    fn test_report_cache_corrupt_fallback() {
-        // 坏缓存文件 → 警告 + 数字仍正确（纯优化原则）。
-        let dir = tmp_dir("corrupt");
-        std::fs::write(dir.join("cache.db"), b"this is not a sqlite database").unwrap();
-        let r = summary(&opts(Some(dir.clone()), None, false)).unwrap();
-        assert_eq!(r.totals.requests, 7);
-        assert!(
-            r.warnings.iter().any(|w| w.contains("缓存")),
-            "应有缓存降级警告: {:?}",
-            r.warnings
-        );
+    fn test_corrupt_history_db_is_reported_not_silently_replaced() {
+        // H04/不变量 7：历史库是事实源——损坏时**明确报错**，不得静默改用
+        // "现存日志的临时扫描"代替完整历史（旧实现把坏缓存降级为全量扫描，
+        // 那对缓存成立，对持久事实不成立）。
+        let dir = tmp_dir("corrupt-history");
+        std::fs::write(dir.join("history.db"), b"this is not a sqlite database").unwrap();
+        let err = summary(&opts(Some(dir.clone()), None, false))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("历史库") || err.contains("迁移"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1634,6 +1851,8 @@ cache_read = 0.4
             session_initial_cwd: None,
             event_cwd: None,
             record_id: String::new(),
+            line: 0,
+            source_path: String::new(),
             input_tokens: 1,
             output_tokens: 1,
             cache_write_tokens: 0,
@@ -1760,13 +1979,13 @@ cache_read = 0.4
             tz: Some("Asia/Shanghai".to_string()),
             ..Default::default()
         };
-        // 全量：去重后 7 行（与汇总 requests 一致），按时间倒序
+        // 全量：去重后 8 行（与汇总 requests 一致），按时间倒序
         let (all_ok, list) = {
             let l = list_events(&base, &EventFilter::default()).unwrap();
-            (l.total == 7, l)
+            (l.total == 8, l)
         };
         assert!(all_ok, "total={}", list.total);
-        assert_eq!(list.rows.len(), 7);
+        assert_eq!(list.rows.len(), 8);
         assert_eq!(list.warnings.len(), 0);
         let tss: Vec<&str> = list.rows.iter().map(|r| r.ts.as_str()).collect();
         let mut sorted = tss.clone();
@@ -1818,7 +2037,7 @@ cache_read = 0.4
         )
         .unwrap();
         assert_eq!(l.rows.len(), 3);
-        assert_eq!(l.total, 7);
+        assert_eq!(l.total, 8);
 
         // Task 1：该测试无任何定价来源 → 全部行 cost=None（unknown 语义）。
         let unknown: Vec<&EventRow> = list.rows.iter().filter(|r| r.cost_usd.is_none()).collect();
@@ -1907,6 +2126,8 @@ cache_read = 0.4
             session_initial_cwd: initial.map(str::to_string),
             event_cwd: cwd.map(str::to_string),
             record_id: String::new(),
+            line: 0,
+            source_path: String::new(),
             input_tokens: 1,
             output_tokens: 1,
             cache_write_tokens: 0,
@@ -1968,7 +2189,7 @@ cache_read = 0.4
         // SF04：全量与分页取自同一查询会话（游标携带该会话 query_id）。
         let snap = crate::query::begin_query(&base).unwrap();
         let full = query_events_from(&snap, &EventFilter::default()).unwrap();
-        assert_eq!(full.rows.len(), 7);
+        assert_eq!(full.rows.len(), 8);
         let mut pages: Vec<Vec<String>> = Vec::new();
         let mut seen = 0usize;
         let mut cursor: Option<String> = None;
@@ -1979,7 +2200,7 @@ cache_read = 0.4
                 ..Default::default()
             };
             let page = query_events_from(&snap, &f).unwrap();
-            assert_eq!(page.total, 7, "total 恒为过滤后全量");
+            assert_eq!(page.total, 8, "total 恒为过滤后全量");
             if page.rows.is_empty() {
                 break;
             }
@@ -1989,7 +2210,7 @@ cache_read = 0.4
             let last = page.rows.last().unwrap();
             cursor = Some(last.cursor.clone());
         }
-        assert_eq!(seen, 7, "翻页覆盖全量");
+        assert_eq!(seen, 8, "翻页覆盖全量");
         let flat: Vec<String> = pages.into_iter().flatten().collect();
         let expect: Vec<String> = full.rows.iter().map(|r| r.cursor.clone()).collect();
         assert_eq!(flat, expect);
@@ -2641,7 +2862,7 @@ cache_read = 0.0
         };
         let _ = &mut s;
         let r = summary(&opts).unwrap();
-        assert_eq!(r.totals.requests, 3, "只剩 claude 的 3 条");
+        assert_eq!(r.totals.requests, 4, "只剩 claude 的 4 条（含子代理）");
         assert_eq!(r.sources.len(), 1);
         assert_eq!(r.sources[0].agent, AgentKind::ClaudeCode);
         std::fs::remove_dir_all(&dir).ok();
@@ -2702,6 +2923,8 @@ mod collect_stability_tests {
                     session_initial_cwd: None,
                     event_cwd: None,
                     record_id: String::new(),
+                    line: 0,
+                    source_path: String::new(),
                     input_tokens: 1,
                     output_tokens: 1,
                     cache_write_tokens: 0,
@@ -2734,14 +2957,14 @@ mod collect_stability_tests {
         let c = collect_all_with_sources(sources, &opts, 0).unwrap();
         assert_eq!(c.events.len(), 1, "解析结果正常入账");
         assert!(
-            c.warnings.iter().any(|w| w.contains("本轮不计入缓存")),
+            c.warnings.iter().any(|w| w.contains("本轮不登记指纹")),
             "应有文件变化警告: {:?}",
             c.warnings
         );
-        // 关键断言：不稳定文件绝不能配上"追加后"的指纹写成成功缓存——
+        // 关键断言：不稳定文件绝不能配上"追加后"的指纹写成成功登记——
         // 否则此后永远命中这份缺尾数据。
         let info = cache_stats(opts.cache_dir.clone()).unwrap();
-        assert_eq!(info.files, 0, "采集期间变化的文件不得入缓存");
+        assert_eq!(info.files, 0, "采集期间变化的文件不得登记指纹");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2784,6 +3007,8 @@ mod collect_stability_tests {
                     session_initial_cwd: None,
                     event_cwd: None,
                     record_id: String::new(),
+                    line: 0,
+                    source_path: String::new(),
                     input_tokens: 1,
                     output_tokens: 1,
                     cache_write_tokens: 0,

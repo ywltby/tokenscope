@@ -176,12 +176,16 @@ fn default_enabled_source_participates_in_overlap_validation() {
 
     let claude_default = tokenscope::source::claude::ClaudeSource::default_root().unwrap();
     let codex_default = tokenscope::source::codex::CodexSource::default_root().unwrap();
+    let codex_archived = codex_default.parent().unwrap().join("archived_sessions");
 
     // 全缺省配置：两个来源都解析出来——"字段缺失 = 默认启用 + 默认根"。
+    // H02：Codex 默认来源含 sessions 与 archived_sessions **两个根**，
+    // 两者都必须参与冲突校验。
     let dirs = effective_source_dirs_from_settings(&Settings::default()).unwrap();
-    assert_eq!(dirs.len(), 2, "缺省字段必须解析为默认启用: {dirs:?}");
+    assert_eq!(dirs.len(), 3, "缺省字段必须解析为默认启用: {dirs:?}");
     assert_eq!(dirs[0], (AgentKind::ClaudeCode, claude_default.clone()));
     assert_eq!(dirs[1], (AgentKind::Codex, codex_default.clone()));
+    assert_eq!(dirs[2], (AgentKind::Codex, codex_archived.clone()));
 
     // 显式停用 → 不参与（用户可借停用恢复冲突目录）。
     let disabled = Settings {
@@ -195,7 +199,13 @@ fn default_enabled_source_participates_in_overlap_validation() {
         ..Default::default()
     };
     let dirs = effective_source_dirs_from_settings(&disabled).unwrap();
-    assert_eq!(dirs, vec![(AgentKind::Codex, codex_default.clone())]);
+    assert_eq!(
+        dirs,
+        vec![
+            (AgentKind::Codex, codex_default.clone()),
+            (AgentKind::Codex, codex_archived.clone())
+        ]
+    );
 
     // Claude 显式撞 Codex 默认根（Codex 缺省）→ 冲突必须被识别。
     let hit_default = Settings {
@@ -209,7 +219,7 @@ fn default_enabled_source_participates_in_overlap_validation() {
         ..Default::default()
     };
     let dirs = effective_source_dirs_from_settings(&hit_default).unwrap();
-    assert_eq!(dirs.len(), 2, "缺省的 Codex 仍在生效，必须在场参与校验");
+    assert_eq!(dirs.len(), 3, "缺省的 Codex 仍在生效，必须在场参与校验");
     let err = tokenscope::settings::validate_dir_conflict(&dirs[0].1, &dirs[1].1).unwrap_err();
     assert!(err.contains("来源目录冲突"), "{err}");
 
@@ -229,6 +239,10 @@ fn default_enabled_source_participates_in_overlap_validation() {
     assert!(
         tokenscope::settings::validate_dir_conflict(&dirs[0].1, &dirs[1].1).is_err(),
         "默认根的父目录必须识别为嵌套冲突"
+    );
+    assert!(
+        tokenscope::settings::validate_dir_conflict(&dirs[0].1, &dirs[2].1).is_err(),
+        "归档根同样参与嵌套冲突校验"
     );
 }
 
@@ -290,6 +304,8 @@ mod mock_pair {
                     session_initial_cwd: None,
                     event_cwd: None,
                     record_id: String::new(),
+                    line: 0,
+                    source_path: String::new(),
                     input_tokens: 100,
                     output_tokens: 10,
                     cache_write_tokens: 0,

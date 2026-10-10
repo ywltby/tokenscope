@@ -98,6 +98,12 @@ fn normalize_json(r: &tokenscope::report::SummaryReport) -> String {
     r.generated_at = String::new();
     // SF04：query_id 是会话身份（每次查询必然不同），不参与数字一致性。
     r.query_id = String::new();
+    // H04：`duplicates_dropped` 是**本轮解析**的产物（指纹命中轮次没有解析、
+    // 自然没有可丢弃的重复行）；请求数 / 四桶 / 费用 / 分组 / 警告仍逐字段
+    // 参与比较，查询数字的三路径一致性保证不变。
+    for s in &mut r.sources {
+        s.stats.duplicates_dropped = 0;
+    }
     serde_json::to_string(&r).unwrap()
 }
 

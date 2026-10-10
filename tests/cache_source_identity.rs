@@ -95,7 +95,8 @@ fn cache_source_identity_root_change_matches_refresh() {
 #[test]
 fn cache_source_identity_agent_change_reparses() {
     // 同一路径先用 ClaudeSource 再用 CodexSource：Codex 解析 Claude 形态
-    // 日志 = 0 事件；缓存不得返回改标 agent 的旧事件。
+    // 日志 = 0 事件；**不得**把已保存的 Claude 事件改标成 Codex。
+    // H04：历史库累积事实——R05 的诉求是"不改标"，不是"删除历史"。
     let dir = tmp_dir("agent");
     let shared = dir.join("shared");
     std::fs::create_dir_all(&shared).unwrap();
@@ -105,23 +106,50 @@ fn cache_source_identity_agent_change_reparses() {
     )
     .unwrap();
 
-    // Claude 先行：1 事件暖缓存
+    // Claude 先行：1 事件入库
     let (_p, n_claude) = first_project(&dir, shared.clone(), Some(dir.join("no-codex")));
     assert_eq!(n_claude, 1);
 
-    // 换 Codex 指向同一目录：**先验证暖查询** = 0 事件（不是改标旧事件）
-    let o_codex = opts(&dir, shared.join("no-such"), Some(shared.clone()));
+    // 换 Codex 指向同一目录：Codex 自己不产出事件，也不会把 Claude 的事件改标。
+    // Claude 源改指一个**互不嵌套**的不存在目录（`shared` 之下的路径会与
+    // Codex 根构成嵌套冲突，按 SF09 规则被采集入口明确拒绝）。
+    let o_codex = opts(&dir, dir.join("no-such-claude"), Some(shared.clone()));
     let r = summary(&o_codex).unwrap();
+    assert_eq!(r.totals.requests, 1, "已保存的 Claude 历史仍在（未被删除）");
     assert_eq!(
-        r.totals.requests, 0,
+        r.sources.len(),
+        2,
+        "两个来源都启用：Claude 指向不存在目录、Codex 指向 shared"
+    );
+    assert!(
+        r.sources
+            .iter()
+            .any(|s| s.agent == tokenscope::model::AgentKind::Codex),
+        "本轮的来源统计含被采集的 Codex"
+    );
+    let history =
+        tokenscope::history::HistoryDb::open(&dir.join("cache").join("history.db")).unwrap();
+    assert_eq!(
+        history
+            .stored_events_filtered(Some(tokenscope::model::AgentKind::Codex))
+            .unwrap()
+            .len(),
+        0,
         "Codex 解析 Claude 形态日志 = 0 事件（缓存不得改标）"
     );
+    assert_eq!(
+        history
+            .stored_events_filtered(Some(tokenscope::model::AgentKind::ClaudeCode))
+            .unwrap()
+            .len(),
+        1
+    );
 
-    // refresh 对照：强制重解析同样 0 事件
-    let mut o_ref = opts(&dir, shared.join("no-such"), Some(shared.clone()));
+    // refresh 对照：强制重解析同样是 0 个 Codex 事件。
+    let mut o_ref = opts(&dir, dir.join("no-such-claude"), Some(shared.clone()));
     o_ref.refresh = true;
     let r_ref = summary(&o_ref).unwrap();
-    assert_eq!(r_ref.totals.requests, 0);
+    assert_eq!(r_ref.totals.requests, 1);
     std::fs::remove_dir_all(&dir).ok();
 }
 

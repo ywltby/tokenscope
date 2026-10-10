@@ -123,16 +123,20 @@ pub enum RuntimeStep {
     Tray,
     /// 价格自动同步线程（120 秒等待从业务解锁开始计时）。
     PriceSync,
+    /// H04：原生日志定时采集线程（5 分钟轮询；只在业务解锁后运行，
+    /// 未同意时不打开历史库、不读日志）。
+    Collection,
 }
 
 impl RuntimeStep {
     /// 全部步骤（顺序即初始化顺序）。
-    pub const ALL: [RuntimeStep; 5] = [
+    pub const ALL: [RuntimeStep; 6] = [
         RuntimeStep::Logging,
         RuntimeStep::WindowState,
         RuntimeStep::Saver,
         RuntimeStep::Tray,
         RuntimeStep::PriceSync,
+        RuntimeStep::Collection,
     ];
 }
 
@@ -144,6 +148,7 @@ pub struct RuntimeFlags {
     saver: bool,
     tray: bool,
     price_sync: bool,
+    collection: bool,
 }
 
 impl RuntimeFlags {
@@ -162,6 +167,7 @@ impl RuntimeFlags {
             RuntimeStep::Saver => self.saver,
             RuntimeStep::Tray => self.tray,
             RuntimeStep::PriceSync => self.price_sync,
+            RuntimeStep::Collection => self.collection,
         }
     }
 
@@ -172,6 +178,7 @@ impl RuntimeFlags {
             RuntimeStep::Saver => self.saver = true,
             RuntimeStep::Tray => self.tray = true,
             RuntimeStep::PriceSync => self.price_sync = true,
+            RuntimeStep::Collection => self.collection = true,
         }
     }
 }
@@ -897,7 +904,8 @@ mod tests {
             vec![
                 RuntimeStep::Saver,
                 RuntimeStep::Tray,
-                RuntimeStep::PriceSync
+                RuntimeStep::PriceSync,
+                RuntimeStep::Collection
             ],
             "已完成的步骤不得重复执行"
         );

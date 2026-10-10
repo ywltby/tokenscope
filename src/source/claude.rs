@@ -3,8 +3,10 @@
 //! 口径（依据本机实测，见 docs/plans/archive 的 M1 计划与 M4 重构）：
 //! - 只取 `type == "assistant"` 行的 `message.usage`，产出**未去重**事件
 //!   （`record_id` = message.id，跨文件去重由全局 dedupe 步骤执行）；
-//! - `isSidechain` 与 `<synthetic>` 跳过并计数；解析失败 / 缺 usage / 缺时间戳 /
-//!   缺 message.id 计入坏行；
+//! - H02：`isSidechain` **不再**是用量排除条件——子代理请求同样是真实用量，
+//!   一并纳入（计划 §2 不变量 1）；仅 `<synthetic>` 与畸形行跳过并计数；
+//! - 身份隔离仍然保留：sidechain 行的 cwd 属另一执行上下文，不参与本会话
+//!   项目根的推进（否则一条子代理记录会把主链的归属推到别的目录）；
 //! - 项目身份：按会话维护**项目根**（阶段 B / B01 定稿规则）——进入当前根的
 //!   子目录仍归该根，越出当前根即视为新项目（`ProjectRootTracker`）；
 //!   会话完全无可信 cwd 时回落文件身份（A03：唯一正向映射解析出的真实路径 >
@@ -176,8 +178,9 @@ impl Source for ClaudeSource {
         let mut stats = CollectStats::default();
         let mut events = Vec::new();
         let project = self.project_of(path);
+        let source_path = path.display().to_string();
         match read_text(path) {
-            Ok(text) => ingest_text(&text, &project, &mut stats, &mut events),
+            Ok(text) => ingest_text(&text, &source_path, &project, &mut stats, &mut events),
             // 读取失败（B4）：计 io_errors、返回空产物——报告层据此跳过
             // 成功缓存并告警，不与"坏行"（内容问题）混计。
             Err(_) => stats.io_errors += 1,
@@ -189,6 +192,7 @@ impl Source for ClaudeSource {
 
 fn ingest_text(
     text: &str,
+    source_path: &str,
     file_project: &str,
     stats: &mut CollectStats,
     events: &mut Vec<UsageEvent>,
@@ -197,12 +201,20 @@ fn ingest_text(
     // 越出当前根即新项目），事件直接带归宿；不得为每个事件重读文件。
     // 完全无可信 cwd 的会话回落文件身份（唯一映射 > slug，见 project_of）。
     let mut scan = ClaudeScan::default();
-    for line in text.lines() {
+    for (line_no, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
         stats.lines_seen += 1;
-        ingest_line(line, file_project, stats, events, &mut scan);
+        ingest_line(
+            line,
+            line_no as u64,
+            source_path,
+            file_project,
+            stats,
+            events,
+            &mut scan,
+        );
     }
 }
 
@@ -217,6 +229,8 @@ struct ClaudeScan {
 
 fn ingest_line(
     line: &str,
+    line_no: u64,
+    source_path: &str,
     file_project: &str,
     stats: &mut CollectStats,
     events: &mut Vec<UsageEvent>,
@@ -248,10 +262,6 @@ fn ingest_line(
             .observe(&key);
     }
     if rec.kind != "assistant" {
-        return;
-    }
-    if rec.is_sidechain {
-        stats.skipped_sidechain += 1;
         return;
     }
     let Some(msg) = rec.message.as_ref() else {
@@ -303,6 +313,8 @@ fn ingest_line(
         session_initial_cwd,
         event_cwd,
         record_id: msg.id.clone(),
+        line: line_no,
+        source_path: source_path.to_string(),
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         cache_write_tokens: usage.cache_creation_input_tokens,
@@ -325,7 +337,7 @@ mod tests {
     fn collect_text(text: &str) -> Collection {
         let mut stats = CollectStats::default();
         let mut events = Vec::new();
-        ingest_text(text, "proj-t", &mut stats, &mut events);
+        ingest_text(text, "test.jsonl", "proj-t", &mut stats, &mut events);
         stats.events = events.len() as u64;
         Collection {
             agent: AgentKind::ClaudeCode,
@@ -411,11 +423,38 @@ mod tests {
     }
 
     #[test]
-    fn test_sidechain_excluded() {
-        let line = r#"{"type":"assistant","isSidechain":true,"timestamp":"2026-07-17T08:00:00.000Z","sessionId":"s1","message":{"id":"m1","model":"m","usage":{"input_tokens":9,"output_tokens":9}}}"#;
-        let col = collect_text(line);
-        assert!(col.events.is_empty());
-        assert_eq!(col.stats.skipped_sidechain, 1);
+    fn test_sidechain_usage_included_without_advancing_project_root() {
+        // H02：子代理请求同样是真实用量，不再被排除（计划 §2 不变量 1）；
+        // 但 sidechain 的 cwd 属另一执行上下文——不得推进本会话项目根。
+        let lines = [
+            r#"{"type":"user","timestamp":"2026-07-17T08:00:00.000Z","sessionId":"s1","cwd":"/work/main"}"#.to_string(),
+            assistant(
+                "m1",
+                "2026-07-17T08:00:01.000Z",
+                r#"{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}"#,
+            ),
+            r#"{"type":"assistant","isSidechain":true,"timestamp":"2026-07-17T08:00:02.000Z","sessionId":"s1","cwd":"/other/place","message":{"id":"m2","model":"m","usage":{"input_tokens":9,"output_tokens":9}}}"#
+                .to_string(),
+            assistant(
+                "m3",
+                "2026-07-17T08:00:03.000Z",
+                r#"{"input_tokens":2,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}"#,
+            ),
+        ]
+        .join("\n");
+        let col = collect_text(&lines);
+        assert_eq!(col.events.len(), 3, "子代理用量并入，独立请求相加");
+        assert_eq!(col.stats.skipped_sidechain, 0);
+        let projects: Vec<&str> = col.events.iter().map(|e| e.project.as_str()).collect();
+        assert!(
+            projects.iter().all(|p| *p == "/work/main"),
+            "sidechain 的 cwd 不推进主链项目根: {projects:?}"
+        );
+        assert_eq!(
+            col.events.iter().map(|e| e.line).collect::<Vec<_>>(),
+            vec![1u64, 2, 3],
+            "事件带 0-based 行序（origin key 定位用）"
+        );
     }
 
     #[test]

@@ -460,6 +460,12 @@ fn missing_source_keeps_usage_and_records_state() {
         mtime_ms: 200,
         context_revision: "rev1".into(),
         last_success_utc: Some("2026-07-17T08:00:00Z".into()),
+        stats: tokenscope::source::CollectStats {
+            lines_seen: 7,
+            bad_lines: 1,
+            events: 3,
+            ..Default::default()
+        },
     };
     h.touch_source_file(&rec).unwrap();
     assert_eq!(h.source_file_count().unwrap(), 1);

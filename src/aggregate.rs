@@ -318,6 +318,8 @@ mod tests {
             model: model.into(),
             session_id: "s".into(),
             record_id: String::new(),
+            line: 0,
+            source_path: String::new(),
             project: "proj-a".into(),
             session_initial_cwd: None,
             event_cwd: None,

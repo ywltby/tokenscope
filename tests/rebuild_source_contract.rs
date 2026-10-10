@@ -118,10 +118,13 @@ fn rebuild_uses_custom_source_roots() {
     assert_eq!(summary(&o).unwrap().totals.requests, 1);
 
     // 换成默认根：按新根采集（证明范围完全由配置决定，而非写死的默认）。
+    // H04：换根**不删除**已保存的用量——旧根的事件保留，新根的事件补入；
+    // 历史库是累积的用量事实，不是"当前扫描结果的镜像"。
     let mut o2 = o.clone();
     o2.claude_dir = Some(default_root);
     let info2 = rebuild_cache(&o2).unwrap();
-    assert_eq!(info2.events, 2);
+    assert_eq!(info2.events, 3, "自定义根 1 条 + 默认根 2 条（历史累积）");
+    assert_eq!(summary(&o2).unwrap().totals.requests, 3);
     std::fs::remove_dir_all(&dir).ok();
 }
 

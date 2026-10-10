@@ -4,6 +4,7 @@ pub mod cache;
 pub mod dedupe;
 pub mod fsutil;
 pub mod history;
+pub mod import;
 pub mod logging;
 pub mod model;
 pub mod model_identity;

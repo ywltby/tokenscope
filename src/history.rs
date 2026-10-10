@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use serde::Serialize;
 
 use crate::model::{AgentKind, TokenCounts};
 
@@ -43,6 +44,8 @@ pub const IDENTITY_REVISION: i64 = 1;
 pub const ORIGIN_KIND_NATIVE_FILE: &str = "native_file";
 /// 来源记录种类：CCS 请求明细行。
 pub const ORIGIN_KIND_CCS_REQUEST: &str = "ccs_request";
+/// 来源记录种类：遗留 `cache.db` 迁移过来的已缓存用量。
+pub const ORIGIN_KIND_LEGACY_CACHE: &str = "legacy_cache";
 
 const META_GENERATION: &str = "generation";
 const META_PARSER_REVISION: &str = "parser_revision";
@@ -71,6 +74,14 @@ CREATE TABLE IF NOT EXISTS source_files (
     last_success_utc TEXT,
     observations INTEGER NOT NULL DEFAULT 0,
     diagnostic TEXT,
+    lines_seen INTEGER NOT NULL DEFAULT 0,
+    bad_lines INTEGER NOT NULL DEFAULT 0,
+    skipped_sidechain INTEGER NOT NULL DEFAULT 0,
+    skipped_synthetic INTEGER NOT NULL DEFAULT 0,
+    skipped_zero_usage INTEGER NOT NULL DEFAULT 0,
+    skipped_no_model INTEGER NOT NULL DEFAULT 0,
+    ignored_token_usage_record INTEGER NOT NULL DEFAULT 0,
+    parsed_events INTEGER NOT NULL DEFAULT 0,
     UNIQUE(app, root, path)
 );
 CREATE TABLE IF NOT EXISTS usage_events (
@@ -190,6 +201,9 @@ pub fn legacy_v1_schema_for_tests() -> &'static str {
 /// 版本化迁移表：`(目标版本, SQL)`，从 0 起按序执行。
 const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2)];
 
+/// H03：遗留缓存迁移的每批事务规模（过大则事务时长与内存都失控）。
+const LEGACY_MIGRATION_CHUNK: usize = 500;
+
 /// 写入优先级：数值越大越可信。原生日志终值优先于 CCS 导入值；同一优先级
 /// 内部按观察时间取更晚者（计划 §5.3：与导入顺序无关）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -263,7 +277,7 @@ pub struct EventWrite {
 }
 
 /// 批次写入结果（逐类计数，与计划 §7 H05 的预览/审计口径一致）。
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct WriteSummary {
     /// 新插入的事件数。
     pub inserted: u64,
@@ -286,6 +300,100 @@ impl WriteSummary {
     pub fn changed_events(&self) -> u64 {
         self.inserted + self.updated
     }
+}
+
+/// 单条写入在库内的处置分类（预览与提交共用同一判定，见
+/// [`HistoryDb::classify_write`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteClass {
+    /// 库内没有该请求 → 新增。
+    Insert,
+    /// 同一请求的新终值 → 更新。
+    Update,
+    /// 内容完全相同 → 跳过。
+    Unchanged,
+    /// 低优先级来源与已存高优先级终值冲突 → 保留已存值。
+    Conflict,
+    /// 观察时间早于已存终值 → 保留较新值。
+    Stale,
+}
+
+/// 日粒度汇总快照的一条写入（CCS 完整主键 + 来源时区 + 归一化四桶）。
+///
+/// 与请求明细分表保存：日汇总没有逐请求时间、会话与 cwd，不能伪造成请求
+/// 事件，也不能与明细直接相加（计划 §5.3）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailyRollupWrite {
+    pub logical_source: String,
+    /// CCS 原始统计日（`YYYY-MM-DD`，来源时区下的自然日，不重切时区）。
+    pub day: String,
+    /// 来源统计时区（CCS 用 `localtime` 生成日键，这里存导入时的本机时区假设）。
+    pub source_tz: String,
+    pub app: AgentKind,
+    pub provider_id: String,
+    pub model: String,
+    pub request_model: String,
+    pub pricing_model: String,
+    pub request_count: u64,
+    pub tokens: TokenCounts,
+    /// 归一化后的输入口径版本（`2` = fresh，与 CCS rollup 写入口径一致）。
+    pub input_semantics: i64,
+    pub source_cost_usd: Option<f64>,
+    /// 来源可验证修订；CCS 不提供 → 0（内容不同的同键快照一律计冲突，
+    /// 不自动认定"后导入的就是更新版本"）。
+    pub revision: i64,
+}
+
+/// 同键快照内容冲突时的处置策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RollupConflictPolicy {
+    /// 默认：保留已存快照，把差异列为冲突交给用户决定。
+    #[default]
+    KeepExisting,
+    /// 用户在本轮预览中明确选择"以来源为准"。
+    TakeSource,
+}
+
+/// 日汇总批次结果。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RollupSummary {
+    pub inserted: u64,
+    pub unchanged: u64,
+    pub replaced: u64,
+    pub conflicted: u64,
+}
+
+/// 日汇总的库内处置分类（预览与提交共用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RollupClass {
+    /// 库内没有同键快照。
+    New,
+    /// 同键内容完全相同。
+    Unchanged,
+    /// 同键内容不同：来源缺少可验证修订时按冲突呈现，不静默覆盖较新值。
+    Conflicting,
+}
+
+/// 一次导入批次的审计记录（与数据同事务提交）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportRunRecord {
+    pub logical_source: String,
+    pub source_path: String,
+    pub source_schema: String,
+    pub started_utc: String,
+    pub status: String,
+    pub detail: Option<String>,
+    pub import_revision: i64,
+}
+
+/// 导入批次结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ImportOutcome {
+    pub run_id: i64,
+    pub events: WriteSummary,
+    pub rollups: RollupSummary,
 }
 
 /// 库内事件（读取形态）。
@@ -326,6 +434,9 @@ pub struct SourceFileRecord {
     pub mtime_ms: i64,
     pub context_revision: String,
     pub last_success_utc: Option<String>,
+    /// H04：本次文件解析的逐文件统计。指纹命中（本轮未重解析）时由采集层
+    /// 沿用上一次写入的值，来源统计因此始终完整可见（与旧缓存的语义一致）。
+    pub stats: crate::source::CollectStats,
 }
 
 /// 来源文件读取形态。
@@ -340,6 +451,7 @@ pub struct StoredSourceFile {
     pub last_seen_utc: Option<String>,
     pub last_success_utc: Option<String>,
     pub observations: u64,
+    pub stats: crate::source::CollectStats,
 }
 
 /// TokenScope 数据目录下的历史库路径（`~/.tokenscope/history.db`）。
@@ -501,111 +613,116 @@ impl HistoryDb {
             return Ok(WriteSummary::default());
         }
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let mut summary = WriteSummary::default();
-        let mut changed = false;
-        for write in batch {
-            validate_write(write)?;
-            let existing = lookup_event(&tx, write)?;
-            let event_id = match existing {
-                Some(stored) => merge_event(&tx, stored, write, &mut summary, &mut changed)?,
-                None => {
-                    let id = insert_event(&tx, write)?;
-                    summary.inserted += 1;
-                    changed = true;
-                    id
-                }
-            };
-            for alias in &write.aliases {
-                if alias.scheme.is_empty() || alias.value.is_empty() {
-                    bail!(
-                        "别名不得为空（scheme/value）: {} / {}",
-                        alias.scheme,
-                        alias.value
-                    );
-                }
-                let current: Option<i64> = tx
-                    .query_row(
-                        "SELECT event_id FROM event_aliases
-                         WHERE app = ?1 AND identity_scheme = ?2 AND identity_value = ?3",
-                        params![alias.app.as_str(), alias.scheme, alias.value],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                match current {
-                    Some(id) if id == event_id => {}
-                    Some(id) => bail!(
-                        "别名冲突：{} / {} / {} 已绑定事件 {id}，不能改绑事件 {event_id}",
-                        alias.app.as_str(),
-                        alias.scheme,
-                        alias.value
-                    ),
-                    None => {
-                        tx.execute(
-                            "INSERT INTO event_aliases(event_id, app, identity_scheme,
-                                                       identity_value, created_generation)
-                             VALUES(?1, ?2, ?3, ?4, ?5)",
-                            params![
-                                event_id,
-                                alias.app.as_str(),
-                                alias.scheme,
-                                alias.value,
-                                self.generation()? as i64
-                            ],
-                        )?;
-                        summary.aliases_added += 1;
-                        changed = true;
-                    }
-                }
-            }
-            for origin in &write.origins {
-                if origin.origin_key.is_empty() {
-                    bail!("来源记录键不得为空（{}）", origin.origin_kind);
-                }
-                let current: Option<i64> = tx
-                    .query_row(
-                        "SELECT event_id FROM event_origins
-                         WHERE origin_kind = ?1 AND origin_key = ?2",
-                        params![origin.origin_kind, origin.origin_key],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                match current {
-                    Some(id) if id == event_id => {}
-                    Some(id) => bail!(
-                        "来源记录冲突：{} / {} 已指向事件 {id}，不能改指事件 {event_id}",
-                        origin.origin_kind,
-                        origin.origin_key
-                    ),
-                    None => {
-                        tx.execute(
-                            "INSERT INTO event_origins(event_id, origin_kind, origin_key, app,
-                                import_run_id, parser_revision, source_model_raw, pricing_model,
-                                source_cost_usd, ts_precision_seconds)
-                             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                            params![
-                                event_id,
-                                origin.origin_kind,
-                                origin.origin_key,
-                                origin.app.as_str(),
-                                origin.import_run_id,
-                                origin.parser_revision,
-                                origin.source_model_raw,
-                                origin.pricing_model,
-                                origin.source_cost_usd.map(|v| v.to_string()),
-                                if origin.ts_precision_seconds { 1 } else { 0 },
-                            ],
-                        )?;
-                        summary.origins_added += 1;
-                        changed = true;
-                    }
-                }
-            }
-        }
+        let generation = self.generation()?;
+        let (summary, changed) = write_events_in_tx(&tx, batch, generation)?;
         if changed {
             bump_generation(&tx)?;
         }
         tx.commit()?;
         Ok(summary)
+    }
+
+    /// 单条写入在库内的处置分类（**预览与提交共用同一判定**，因此预览数字
+    /// 与提交结果不会分叉）。只读，不改变库内容。
+    pub fn classify_write(&self, w: &EventWrite) -> Result<WriteClass> {
+        validate_write(w)?;
+        match lookup_event(&self.conn, w)? {
+            None => Ok(WriteClass::Insert),
+            Some(existing) => Ok(classify_against(&existing, w)),
+        }
+    }
+
+    /// 日汇总快照在库内的处置分类（只读）。
+    pub fn classify_rollup(&self, r: &DailyRollupWrite) -> Result<RollupClass> {
+        let existing: Option<(i64, String, String, String, String, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT request_count, input_tokens, output_tokens, cache_write_tokens,
+                        cache_read_tokens, source_cost_usd
+                 FROM ccs_daily_usage
+                 WHERE logical_source = ?1 AND day = ?2 AND source_tz = ?3 AND app = ?4
+                   AND provider_id = ?5 AND model = ?6 AND request_model = ?7 AND pricing_model = ?8",
+                params![
+                    r.logical_source,
+                    r.day,
+                    r.source_tz,
+                    r.app.as_str(),
+                    r.provider_id,
+                    r.model,
+                    r.request_model,
+                    r.pricing_model
+                ],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(match existing {
+            None => RollupClass::New,
+            Some((count, i, o, cw, cr, cost)) => {
+                let same = count == r.request_count as i64
+                    && i == r.tokens.input.to_string()
+                    && o == r.tokens.output.to_string()
+                    && cw == r.tokens.cache_write.to_string()
+                    && cr == r.tokens.cache_read.to_string()
+                    && cost == r.source_cost_usd.map(|v| v.to_string());
+                if same {
+                    RollupClass::Unchanged
+                } else {
+                    RollupClass::Conflicting
+                }
+            }
+        })
+    }
+
+    /// 导入批次的净新增用量（该批次来源指向的事件的四桶之和）。
+    pub fn import_run_net_tokens(&self, run_id: i64) -> Result<TokenCounts> {
+        net_new_tokens_conn(&self.conn, run_id)
+    }
+
+    /// H05：CCS 导入的一个批次——事件、日汇总快照与导入审计**在同一事务**内
+    /// 提交（计划 §5.1：批次与数据同事务，崩溃或失败整体回滚）。
+    pub fn apply_import_batch(
+        &self,
+        writes: &[EventWrite],
+        rollups: &[DailyRollupWrite],
+        policy: RollupConflictPolicy,
+        run: &ImportRunRecord,
+    ) -> Result<ImportOutcome> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let generation = self.generation()?;
+        // 先落批次行拿到 id：来源证据要记录"这批用量来自哪次导入"。
+        let run_id = insert_import_run(&tx, run)?;
+        let mut writes = writes.to_vec();
+        for w in &mut writes {
+            for o in &mut w.origins {
+                if o.import_run_id.is_none() {
+                    o.import_run_id = Some(run_id);
+                }
+            }
+        }
+        let (write_summary, events_changed) = write_events_in_tx(&tx, &writes, generation)?;
+        let (rollup_summary, rollups_changed) = write_rollups_in_tx(&tx, rollups, policy, run_id)?;
+        let changed = events_changed || rollups_changed;
+        // 完全相同的重复导入：不新增用量、不重复来源、不递增 generation，
+        // 但审计批次照常登记（计划 §3：可以记录审计结果）。
+        finish_import_run(&tx, run_id, run, &write_summary, &rollup_summary)?;
+        if changed {
+            bump_generation(&tx)?;
+        }
+        tx.commit()?;
+        Ok(ImportOutcome {
+            run_id,
+            events: write_summary,
+            rollups: rollup_summary,
+        })
     }
 
     /// 事件总数。
@@ -628,6 +745,21 @@ impl HistoryDb {
         self.count("source_files")
     }
 
+    /// 日汇总快照行数（诊断与测试）。
+    pub fn rollup_count(&self) -> Result<u64> {
+        self.count("ccs_daily_usage")
+    }
+
+    /// 日汇总快照的请求数合计（诊断与冲突核对）。
+    pub fn rollup_request_count(&self) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(request_count), 0) FROM ccs_daily_usage",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u64)
+    }
+
     fn count(&self, table: &str) -> Result<u64> {
         let n: i64 = self
             .conn
@@ -637,6 +769,14 @@ impl HistoryDb {
 
     /// 全部事件（按 `(ts_seconds, ts_nanos, id)` 稳定排序）。
     pub fn stored_events(&self) -> Result<Vec<StoredEvent>> {
+        self.stored_events_filtered(None)
+    }
+
+    /// H04：按应用读取事件（`None` = 全部应用）——采集提交后回填查询输入。
+    ///
+    /// 返回的是**库内全部事实**，与"本轮哪些文件被重新解析"无关：来源文件
+    /// 已删除、来源已停用、指纹被重置都不会让已保存的用量消失（计划不变量 3）。
+    pub fn stored_events_filtered(&self, app: Option<AgentKind>) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, event_key, app, ts_seconds, ts_nanos, model_raw, model_identity,
                     identity_revision, session_id, record_id, project_key,
@@ -644,14 +784,23 @@ impl HistoryDb {
                     cache_write_tokens, cache_read_tokens, origin_rank, observed_at_seconds,
                     observed_at_nanos, parser_revision
              FROM usage_events
+             WHERE (?1 IS NULL OR app = ?1)
              ORDER BY ts_seconds, ts_nanos, id",
         )?;
-        let rows = stmt.query_map([], row_to_stored_event)?;
+        let rows = stmt.query_map(params![app.map(|a| a.as_str())], row_to_stored_event)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// H04：重扫日志——重置采集指纹（下次采集按新文件重新解析），
+    /// **不**清 `usage_events`／`event_aliases`／`event_origins`／`ccs_daily_usage`
+    /// （历史删除不是缓存操作）。返回清掉的来源登记行数。
+    pub fn reset_fingerprints(&self) -> Result<u64> {
+        let n = self.conn.execute("DELETE FROM source_files", [])?;
+        Ok(n as u64)
     }
 
     /// 四桶合计：**流式读取 + Rust 受检累加**（不把全表拉进内存，也不让
@@ -695,8 +844,11 @@ impl HistoryDb {
         self.conn.execute(
             "INSERT INTO source_files(app, root, path, fingerprint, size_bytes, mtime_ms,
                                       context_revision, state, last_seen_utc, last_success_utc,
-                                      observations)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 'present', ?8, ?9, 1)
+                                      observations, lines_seen, bad_lines, skipped_sidechain,
+                                      skipped_synthetic, skipped_zero_usage, skipped_no_model,
+                                      ignored_token_usage_record, parsed_events)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 'present', ?8, ?9, 1, ?10, ?11, ?12, ?13, ?14,
+                    ?15, ?16, ?17)
              ON CONFLICT(app, root, path) DO UPDATE SET
                 fingerprint = excluded.fingerprint,
                 size_bytes = excluded.size_bytes,
@@ -705,7 +857,15 @@ impl HistoryDb {
                 state = 'present',
                 last_seen_utc = excluded.last_seen_utc,
                 last_success_utc = COALESCE(excluded.last_success_utc, source_files.last_success_utc),
-                observations = source_files.observations + 1",
+                observations = source_files.observations + 1,
+                lines_seen = excluded.lines_seen,
+                bad_lines = excluded.bad_lines,
+                skipped_sidechain = excluded.skipped_sidechain,
+                skipped_synthetic = excluded.skipped_synthetic,
+                skipped_zero_usage = excluded.skipped_zero_usage,
+                skipped_no_model = excluded.skipped_no_model,
+                ignored_token_usage_record = excluded.ignored_token_usage_record,
+                parsed_events = excluded.parsed_events",
             params![
                 rec.key.app.as_str(),
                 rec.key.root,
@@ -716,6 +876,14 @@ impl HistoryDb {
                 rec.context_revision,
                 now,
                 rec.last_success_utc,
+                rec.stats.lines_seen as i64,
+                rec.stats.bad_lines as i64,
+                rec.stats.skipped_sidechain as i64,
+                rec.stats.skipped_synthetic as i64,
+                rec.stats.skipped_zero_usage as i64,
+                rec.stats.skipped_no_model as i64,
+                rec.stats.ignored_token_usage_record as i64,
+                rec.stats.events as i64,
             ],
         )?;
         Ok(())
@@ -749,7 +917,9 @@ impl HistoryDb {
     pub fn source_files(&self) -> Result<Vec<StoredSourceFile>> {
         let mut stmt = self.conn.prepare(
             "SELECT app, root, path, fingerprint, size_bytes, mtime_ms, context_revision,
-                    state, last_seen_utc, last_success_utc, observations
+                    state, last_seen_utc, last_success_utc, observations, lines_seen,
+                    bad_lines, skipped_sidechain, skipped_synthetic, skipped_zero_usage,
+                    skipped_no_model, ignored_token_usage_record, parsed_events
              FROM source_files ORDER BY app, root, path",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -769,6 +939,17 @@ impl HistoryDb {
                 last_seen_utc: r.get(8)?,
                 last_success_utc: r.get(9)?,
                 observations: r.get::<_, i64>(10)?.max(0) as u64,
+                stats: crate::source::CollectStats {
+                    lines_seen: r.get::<_, i64>(11)?.max(0) as u64,
+                    bad_lines: r.get::<_, i64>(12)?.max(0) as u64,
+                    skipped_sidechain: r.get::<_, i64>(13)?.max(0) as u64,
+                    skipped_synthetic: r.get::<_, i64>(14)?.max(0) as u64,
+                    skipped_zero_usage: r.get::<_, i64>(15)?.max(0) as u64,
+                    skipped_no_model: r.get::<_, i64>(16)?.max(0) as u64,
+                    ignored_token_usage_record: r.get::<_, i64>(17)?.max(0) as u64,
+                    events: r.get::<_, i64>(18)?.max(0) as u64,
+                    ..crate::source::CollectStats::default()
+                },
             })
         })?;
         let mut out = Vec::new();
@@ -791,6 +972,512 @@ impl HistoryDb {
         }
         Ok(out)
     }
+}
+
+/// H03：遗留缓存迁移结果（一次性）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct LegacyMigrationReport {
+    /// 读到的旧缓存文件数。
+    pub files: u64,
+    /// 读到的旧缓存事件行数。
+    pub events_seen: u64,
+    pub inserted: u64,
+    pub updated: u64,
+    pub unchanged: u64,
+    pub conflicts: u64,
+    pub stale: u64,
+    /// 字段不合法（时间戳不可解析、token 越界等）而**未**迁入的行数。
+    pub rejected: u64,
+}
+
+/// H03：把遗留 `cache.db` 里已缓存的原生用量一次性迁入历史库。
+///
+/// 顺序要求（计划 §6）：必须在**任何** `Cache::open` 的版本重建/purge 之前
+/// 执行——本函数只以只读方式读取旧库，不打开、不重建、不清理它。
+///
+/// - 逐条只迁**合法**字段：时间戳不可解析、token 越界或桶组合不可表示的行
+///   计 `rejected` 跳过，一条坏行不得毁掉整批迁移；
+/// - 事件身份 = 旧缓存行位置（`(app, path, 行序)`），原生身份（Claude 的
+///   `(session_id, message.id)`）另作别名登记：重扫同一文件时命中同一事件，
+///   不产生重复用量；
+/// - 迁移**不读源日志**：源文件已被清理时旧缓存里的用量照样保留；
+/// - 完成后写一次性标记：重复调用直接跳过（`Ok(None)`）；失败不写标记，
+///   整批可用同一份旧库重试。
+pub fn migrate_legacy_cache(
+    history: &HistoryDb,
+    legacy_cache: &Path,
+) -> Result<Option<LegacyMigrationReport>> {
+    if history.legacy_cache_migrated()? {
+        return Ok(None);
+    }
+    if !legacy_cache.exists() {
+        // 没有旧缓存可迁：直接标记完成，避免每次启动都尝试打开。
+        history.mark_legacy_cache_migrated()?;
+        return Ok(Some(LegacyMigrationReport::default()));
+    }
+    let files = crate::cache::read_legacy_cache(legacy_cache)?;
+    let mut report = LegacyMigrationReport {
+        files: files.len() as u64,
+        ..Default::default()
+    };
+    let mut batch: Vec<EventWrite> = Vec::new();
+    for file in &files {
+        for (idx, ev) in file.events.iter().enumerate() {
+            report.events_seen += 1;
+            match legacy_event_write(file, idx, ev) {
+                Ok(w) => batch.push(w),
+                Err(e) => {
+                    report.rejected += 1;
+                    log::debug!("遗留缓存迁移跳过一条事件（{} / {}）：{e}", file.path, idx);
+                }
+            }
+        }
+    }
+    for chunk in batch.chunks(LEGACY_MIGRATION_CHUNK) {
+        let s = history.write_batch(chunk)?;
+        report.inserted += s.inserted;
+        report.updated += s.updated;
+        report.unchanged += s.unchanged;
+        report.conflicts += s.conflicts;
+        report.stale += s.stale;
+    }
+    // 只在整批成功提交后落标记：失败（含中途崩溃）可原样重试。
+    history.mark_legacy_cache_migrated()?;
+    log::info!(
+        "遗留缓存迁移完成：文件 {}，事件行 {}，新增 {}，更新 {}，已存在 {}，冲突 {}，拒绝 {}",
+        report.files,
+        report.events_seen,
+        report.inserted,
+        report.updated,
+        report.unchanged,
+        report.conflicts,
+        report.rejected
+    );
+    Ok(Some(report))
+}
+
+/// 单条遗留缓存事件的迁移形态（字段不合法即拒绝该条，不猜测）。
+fn legacy_event_write(
+    file: &crate::cache::LegacyCacheFile,
+    idx: usize,
+    ev: &crate::cache::LegacyEvent,
+) -> Result<EventWrite> {
+    let ts: Timestamp = ev
+        .ts
+        .parse()
+        .map_err(|e| anyhow!("时间戳不可解析（{:?}）: {e}", ev.ts))?;
+    if ev.model.trim().is_empty() {
+        bail!("模型名为空");
+    }
+    let tokens = TokenCounts {
+        input: ev.input,
+        output: ev.output,
+        cache_write: ev.cache_write,
+        cache_read: ev.cache_read,
+    };
+    let total = tokens
+        .input
+        .checked_add(tokens.output)
+        .and_then(|v| v.checked_add(tokens.cache_write))
+        .and_then(|v| v.checked_add(tokens.cache_read))
+        .ok_or_else(|| anyhow!("四桶合计超出可表示范围"))?;
+    let _ = total;
+    // 旧缓存里的行序（v11+）优先；更早版本没有该列，用行位置兜底。
+    let position = if ev.line > 0 { ev.line } else { idx as u64 };
+    let mut aliases = Vec::new();
+    if !ev.session_id.is_empty() && !ev.record_id.is_empty() {
+        aliases.push(EventAlias {
+            app: file.app,
+            scheme: "claude-message".to_string(),
+            value: format!("{}|{}", ev.session_id, ev.record_id),
+        });
+    }
+    Ok(EventWrite {
+        event_key: format!(
+            "legacy-cache|{}|{}|{position}",
+            file.app.as_str(),
+            file.path
+        ),
+        app: file.app,
+        ts,
+        model_raw: ev.model.clone(),
+        model_identity: crate::model_identity::ModelIdentity::parse(&ev.model).identity_key(),
+        session_id: non_empty(&ev.session_id),
+        record_id: non_empty(&ev.record_id),
+        project_key: non_empty(&ev.project),
+        session_initial_cwd: ev.session_initial_cwd.clone(),
+        event_cwd: ev.event_cwd.clone(),
+        tokens,
+        // 旧缓存保存的是已经解析过的原生用量，优先级与原生日志一致；
+        // 观察时间取事件时间，重扫得到同一终值时按内容相等跳过。
+        precedence: WritePrecedence::NativeLog,
+        observed_at: ts,
+        aliases,
+        origins: vec![EventOrigin {
+            origin_kind: ORIGIN_KIND_LEGACY_CACHE.to_string(),
+            origin_key: format!(
+                "legacy-cache|{}|{}|{position}",
+                file.app.as_str(),
+                file.path
+            ),
+            app: file.app,
+            import_run_id: None,
+            // 旧缓存的解析版本未知（可能早于版本号机制），记 0 = 遗留。
+            parser_revision: 0,
+            source_model_raw: None,
+            pricing_model: None,
+            source_cost_usd: None,
+            ts_precision_seconds: false,
+        }],
+    })
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+/// 批次写入的**事务内**内核：写入事件、别名与来源证据，并回填统计。
+/// 返回 `(统计, 是否改变了任何行)`；是否递增 generation 与提交由调用方决定。
+fn write_events_in_tx(
+    tx: &Transaction<'_>,
+    batch: &[EventWrite],
+    generation: u64,
+) -> Result<(WriteSummary, bool)> {
+    let mut summary = WriteSummary::default();
+    let mut changed = false;
+    for write in batch {
+        validate_write(write)?;
+        let existing = lookup_event(tx, write)?;
+        let event_id = match existing {
+            Some(stored) => merge_event(tx, stored, write, &mut summary, &mut changed)?,
+            None => {
+                let id = insert_event(tx, write)?;
+                summary.inserted += 1;
+                changed = true;
+                id
+            }
+        };
+        for alias in &write.aliases {
+            if alias.scheme.is_empty() || alias.value.is_empty() {
+                bail!(
+                    "别名不得为空（scheme/value）: {} / {}",
+                    alias.scheme,
+                    alias.value
+                );
+            }
+            let current: Option<i64> = tx
+                .query_row(
+                    "SELECT event_id FROM event_aliases
+                     WHERE app = ?1 AND identity_scheme = ?2 AND identity_value = ?3",
+                    params![alias.app.as_str(), alias.scheme, alias.value],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match current {
+                Some(id) if id == event_id => {}
+                Some(id) => bail!(
+                    "别名冲突：{} / {} / {} 已绑定事件 {id}，不能改绑事件 {event_id}",
+                    alias.app.as_str(),
+                    alias.scheme,
+                    alias.value
+                ),
+                None => {
+                    tx.execute(
+                        "INSERT INTO event_aliases(event_id, app, identity_scheme,
+                                                   identity_value, created_generation)
+                         VALUES(?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            event_id,
+                            alias.app.as_str(),
+                            alias.scheme,
+                            alias.value,
+                            generation as i64
+                        ],
+                    )?;
+                    summary.aliases_added += 1;
+                    changed = true;
+                }
+            }
+        }
+        for origin in &write.origins {
+            if origin.origin_key.is_empty() {
+                bail!("来源记录键不得为空（{}）", origin.origin_kind);
+            }
+            let current: Option<i64> = tx
+                .query_row(
+                    "SELECT event_id FROM event_origins
+                     WHERE origin_kind = ?1 AND origin_key = ?2",
+                    params![origin.origin_kind, origin.origin_key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match current {
+                Some(id) if id == event_id => {}
+                Some(id) => bail!(
+                    "来源记录冲突：{} / {} 已指向事件 {id}，不能改指事件 {event_id}",
+                    origin.origin_kind,
+                    origin.origin_key
+                ),
+                None => {
+                    tx.execute(
+                        "INSERT INTO event_origins(event_id, origin_kind, origin_key, app,
+                            import_run_id, parser_revision, source_model_raw, pricing_model,
+                            source_cost_usd, ts_precision_seconds)
+                         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        params![
+                            event_id,
+                            origin.origin_kind,
+                            origin.origin_key,
+                            origin.app.as_str(),
+                            origin.import_run_id,
+                            origin.parser_revision,
+                            origin.source_model_raw,
+                            origin.pricing_model,
+                            origin.source_cost_usd.map(|v| v.to_string()),
+                            if origin.ts_precision_seconds { 1 } else { 0 },
+                        ],
+                    )?;
+                    summary.origins_added += 1;
+                    changed = true;
+                }
+            }
+        }
+    }
+    Ok((summary, changed))
+}
+
+/// 库内处置判定（纯函数，预览与写入共用）。
+fn classify_against(existing: &StoredEvent, w: &EventWrite) -> WriteClass {
+    if content_equal(existing, w) {
+        WriteClass::Unchanged
+    } else if existing.precedence > w.precedence {
+        WriteClass::Conflict
+    } else if w.observed_at < existing.observed_at {
+        WriteClass::Stale
+    } else {
+        WriteClass::Update
+    }
+}
+
+/// 库内同键日汇总快照的读取形态（含批次归属，供诊断）。
+type RollupSnapshotRow = (
+    i64,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<i64>,
+);
+
+/// 日汇总快照写入：同键内容相同 → 跳过；内容不同 → 按策略保留或替换
+/// （来源无可验证修订时默认保留已存值并计冲突）。
+fn write_rollups_in_tx(
+    tx: &Transaction<'_>,
+    rollups: &[DailyRollupWrite],
+    policy: RollupConflictPolicy,
+    run_id: i64,
+) -> Result<(RollupSummary, bool)> {
+    let mut summary = RollupSummary::default();
+    let mut changed = false;
+    for r in rollups {
+        if r.request_count == 0 && r.tokens.total() == 0 {
+            // 空快照没有统计意义，不写入（避免用 0 覆盖已有历史）。
+            continue;
+        }
+        let existing: Option<RollupSnapshotRow> = tx
+            .query_row(
+                "SELECT id, request_count, input_tokens, output_tokens, cache_write_tokens,
+                        cache_read_tokens, source_cost_usd, import_run_id
+                 FROM ccs_daily_usage
+                 WHERE logical_source = ?1 AND day = ?2 AND source_tz = ?3 AND app = ?4
+                   AND provider_id = ?5 AND model = ?6 AND request_model = ?7 AND pricing_model = ?8",
+                params![
+                    r.logical_source,
+                    r.day,
+                    r.source_tz,
+                    r.app.as_str(),
+                    r.provider_id,
+                    r.model,
+                    r.request_model,
+                    r.pricing_model
+                ],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        match existing {
+            None => {
+                tx.execute(
+                    "INSERT INTO ccs_daily_usage(logical_source, day, source_tz, app, provider_id,
+                        model, request_model, pricing_model, request_count, input_tokens,
+                        output_tokens, cache_write_tokens, cache_read_tokens, input_semantics,
+                        source_cost_usd, import_run_id, revision)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                            ?16, ?17)",
+                    params![
+                        r.logical_source,
+                        r.day,
+                        r.source_tz,
+                        r.app.as_str(),
+                        r.provider_id,
+                        r.model,
+                        r.request_model,
+                        r.pricing_model,
+                        r.request_count as i64,
+                        r.tokens.input.to_string(),
+                        r.tokens.output.to_string(),
+                        r.tokens.cache_write.to_string(),
+                        r.tokens.cache_read.to_string(),
+                        r.input_semantics,
+                        r.source_cost_usd.map(|v| v.to_string()),
+                        run_id,
+                        r.revision,
+                    ],
+                )?;
+                summary.inserted += 1;
+                changed = true;
+            }
+            Some((id, count, i, o, cw, cr, cost, _run)) => {
+                let same = count == r.request_count as i64
+                    && i == r.tokens.input.to_string()
+                    && o == r.tokens.output.to_string()
+                    && cw == r.tokens.cache_write.to_string()
+                    && cr == r.tokens.cache_read.to_string()
+                    && cost == r.source_cost_usd.map(|v| v.to_string());
+                if same {
+                    summary.unchanged += 1;
+                } else if r.revision > 0 || policy == RollupConflictPolicy::TakeSource {
+                    tx.execute(
+                        "UPDATE ccs_daily_usage SET request_count = ?2, input_tokens = ?3,
+                            output_tokens = ?4, cache_write_tokens = ?5, cache_read_tokens = ?6,
+                            input_semantics = ?7, source_cost_usd = ?8, revision = ?9
+                         WHERE id = ?1",
+                        params![
+                            id,
+                            r.request_count as i64,
+                            r.tokens.input.to_string(),
+                            r.tokens.output.to_string(),
+                            r.tokens.cache_write.to_string(),
+                            r.tokens.cache_read.to_string(),
+                            r.input_semantics,
+                            r.source_cost_usd.map(|v| v.to_string()),
+                            r.revision,
+                        ],
+                    )?;
+                    summary.replaced += 1;
+                    changed = true;
+                } else {
+                    // 来源缺少可验证修订：不静默覆盖较新值，计入冲突由预览呈现。
+                    summary.conflicted += 1;
+                }
+            }
+        }
+    }
+    Ok((summary, changed))
+}
+
+fn insert_import_run(tx: &Transaction<'_>, run: &ImportRunRecord) -> Result<i64> {
+    tx.execute(
+        "INSERT INTO import_runs(logical_source, source_path, source_schema, started_utc,
+            committed_utc, status, detail, import_revision)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            run.logical_source,
+            run.source_path,
+            run.source_schema,
+            run.started_utc,
+            Timestamp::now().to_string(),
+            run.status,
+            run.detail,
+            run.import_revision,
+        ],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
+fn finish_import_run(
+    tx: &Transaction<'_>,
+    run_id: i64,
+    run: &ImportRunRecord,
+    write_summary: &WriteSummary,
+    rollup_summary: &RollupSummary,
+) -> Result<()> {
+    let net = net_new_tokens(tx, run_id)?;
+    tx.execute(
+        "UPDATE import_runs SET requests_inserted = ?2, requests_updated = ?3,
+            requests_unchanged = ?4, requests_conflicted = ?5, requests_stale = ?6,
+            rollups_snapshotted = ?7, rollups_conflicted = ?8,
+            net_input_tokens = ?9, net_output_tokens = ?10,
+            net_cache_write_tokens = ?11, net_cache_read_tokens = ?12
+         WHERE id = ?1",
+        params![
+            run_id,
+            write_summary.inserted as i64,
+            write_summary.updated as i64,
+            write_summary.unchanged as i64,
+            write_summary.conflicts as i64,
+            write_summary.stale as i64,
+            (rollup_summary.inserted + rollup_summary.replaced) as i64,
+            rollup_summary.conflicted as i64,
+            net.input.to_string(),
+            net.output.to_string(),
+            net.cache_write.to_string(),
+            net.cache_read.to_string(),
+        ],
+    )?;
+    let _ = run;
+    Ok(())
+}
+
+/// 本批次**净新增**用量：来源为该批次的事件四桶之和（已按库内合并去重）。
+fn net_new_tokens(tx: &Transaction<'_>, run_id: i64) -> Result<TokenCounts> {
+    net_new_tokens_conn(tx, run_id)
+}
+
+fn net_new_tokens_conn(conn: &Connection, run_id: i64) -> Result<TokenCounts> {
+    let mut stmt = conn.prepare(
+        "SELECT e.input_tokens, e.output_tokens, e.cache_write_tokens, e.cache_read_tokens
+         FROM event_origins o JOIN usage_events e ON e.id = o.event_id
+         WHERE o.import_run_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![run_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut acc = TokenCounts::default();
+    for row in rows {
+        let (i, o, cw, cr) = row?;
+        let counts = TokenCounts {
+            input: parse_u64_text(&i, "input_tokens")?,
+            output: parse_u64_text(&o, "output_tokens")?,
+            cache_write: parse_u64_text(&cw, "cache_write_tokens")?,
+            cache_read: parse_u64_text(&cr, "cache_read_tokens")?,
+        };
+        acc = acc
+            .checked_add(&counts)
+            .ok_or_else(|| anyhow!("导入批次净新增用量溢出可表示范围"))?;
+    }
+    Ok(acc)
 }
 
 /// 校验单条写入（在事务开始后、写任何行之前逐条执行；失败整批回滚）。
@@ -826,8 +1513,8 @@ fn validate_write(w: &EventWrite) -> Result<()> {
 }
 
 /// 按来源键 → 来源记录证据 → 原生身份别名 三级查找已存在事件。
-fn lookup_event(tx: &Transaction<'_>, w: &EventWrite) -> Result<Option<StoredEvent>> {
-    let by_key = tx
+fn lookup_event(conn: &Connection, w: &EventWrite) -> Result<Option<StoredEvent>> {
+    let by_key = conn
         .query_row(
             "SELECT id FROM usage_events WHERE event_key = ?1",
             params![w.event_key],
@@ -835,10 +1522,10 @@ fn lookup_event(tx: &Transaction<'_>, w: &EventWrite) -> Result<Option<StoredEve
         )
         .optional()?;
     if let Some(id) = by_key {
-        return load_event(tx, id);
+        return load_event(conn, id);
     }
     for origin in &w.origins {
-        let hit: Option<i64> = tx
+        let hit: Option<i64> = conn
             .query_row(
                 "SELECT event_id FROM event_origins WHERE origin_kind = ?1 AND origin_key = ?2",
                 params![origin.origin_kind, origin.origin_key],
@@ -846,12 +1533,12 @@ fn lookup_event(tx: &Transaction<'_>, w: &EventWrite) -> Result<Option<StoredEve
             )
             .optional()?;
         if let Some(id) = hit {
-            return load_event(tx, id);
+            return load_event(conn, id);
         }
     }
     let mut hits: Vec<i64> = Vec::new();
     for alias in &w.aliases {
-        let hit: Option<i64> = tx
+        let hit: Option<i64> = conn
             .query_row(
                 "SELECT event_id FROM event_aliases
                  WHERE app = ?1 AND identity_scheme = ?2 AND identity_value = ?3",
@@ -867,7 +1554,7 @@ fn lookup_event(tx: &Transaction<'_>, w: &EventWrite) -> Result<Option<StoredEve
     }
     match hits.len() {
         0 => Ok(None),
-        1 => load_event(tx, hits[0]),
+        1 => load_event(conn, hits[0]),
         // 同一请求的两个身份各自绑定了不同事件：这是"库内已有重复事件"，
         // 合并策略需按来源优先级决策（计划 §5.3 的冲突处理），此处不猜测，
         // 明确拒绝整批，交由调用方呈现为未解决冲突。
@@ -875,8 +1562,8 @@ fn lookup_event(tx: &Transaction<'_>, w: &EventWrite) -> Result<Option<StoredEve
     }
 }
 
-fn load_event(tx: &Transaction<'_>, id: i64) -> Result<Option<StoredEvent>> {
-    Ok(tx
+fn load_event(conn: &Connection, id: i64) -> Result<Option<StoredEvent>> {
+    Ok(conn
         .query_row(
             "SELECT id, event_key, app, ts_seconds, ts_nanos, model_raw, model_identity,
                     identity_revision, session_id, record_id, project_key,
@@ -956,7 +1643,8 @@ fn parse_agent(raw: &str) -> Result<AgentKind> {
 }
 
 /// 合并判定：内容完全相同 → 跳过；低优先级不覆盖高优先级；更旧的观察不覆盖
-/// 较新的终值；其余按本次观察更新该事件。
+/// 较新的终值；其余按本次观察更新该事件。判定与
+/// [`HistoryDb::classify_write`] 共用同一纯函数，预览数字因此与提交结果一致。
 fn merge_event(
     tx: &Transaction<'_>,
     existing: StoredEvent,
@@ -964,25 +1652,28 @@ fn merge_event(
     summary: &mut WriteSummary,
     changed: &mut bool,
 ) -> Result<i64> {
-    if content_equal(&existing, w) {
-        summary.unchanged += 1;
-        return Ok(existing.id);
-    }
-    if existing.precedence > w.precedence {
-        summary.conflicts += 1;
-        log::debug!(
-            "历史库冲突：来源 {} 与已存原生终值冲突，保留原生值",
-            w.event_key
-        );
-        return Ok(existing.id);
-    }
-    if w.observed_at < existing.observed_at {
-        summary.stale += 1;
-        log::debug!(
-            "历史库陈旧写入：{} 的观察时间早于已存终值，保留较新值",
-            w.event_key
-        );
-        return Ok(existing.id);
+    match classify_against(&existing, w) {
+        WriteClass::Unchanged => {
+            summary.unchanged += 1;
+            return Ok(existing.id);
+        }
+        WriteClass::Conflict => {
+            summary.conflicts += 1;
+            log::debug!(
+                "历史库冲突：来源 {} 与已存更高优先级终值冲突，保留已存值",
+                w.event_key
+            );
+            return Ok(existing.id);
+        }
+        WriteClass::Stale => {
+            summary.stale += 1;
+            log::debug!(
+                "历史库陈旧写入：{} 的观察时间早于已存终值，保留较新值",
+                w.event_key
+            );
+            return Ok(existing.id);
+        }
+        WriteClass::Insert | WriteClass::Update => {}
     }
     tx.execute(
         "UPDATE usage_events SET

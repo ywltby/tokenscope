@@ -89,14 +89,10 @@ fn opts(dir: &Path, claude: &Path, codex: &Path) -> SummaryOptions {
     }
 }
 
-/// 模拟升级前的缓存：把解析版本改回指定值（仅测试使用）。
-fn downgrade_schema_version(db: &Path, version: &str) {
-    let conn = rusqlite::Connection::open(db).unwrap();
-    conn.execute(
-        "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
-        [version],
-    )
-    .unwrap();
+/// 模拟"解析规则变化后重扫"：H04 起解析缓存由历史库的来源指纹承担，
+/// 重扫 = 重置指纹 + 重新解析当前文件（绝不删除已保存的用量）。
+fn rescan(o: &tokenscope::report::SummaryOptions) -> tokenscope::report::CacheInfo {
+    tokenscope::report::rebuild_cache(o).unwrap()
 }
 
 fn snapshot_tuple(
@@ -129,18 +125,20 @@ fn project_identity_upgrade_reparses_and_stays_consistent() {
     let after_first = cache_stats(o.cache_dir.clone()).unwrap();
     assert!(after_first.events > 0, "首轮必须写入缓存");
 
-    // 2) 模拟升级（旧版本缓存）→ 首次打开整体失效重解析，结果逐字段一致。
-    downgrade_schema_version(&dir.join("cache").join("cache.db"), "6");
+    // 2) 重扫日志（重置采集指纹并重新解析当前文件）→ 结果逐字段一致，
+    // 历史既不因重扫丢失，也不因重解析重复计费。
+    let rebuilt = rescan(&o);
+    assert!(rebuilt.events > 0, "重扫后历史库仍有用量事实");
     let second = summary(&o).unwrap();
     assert_eq!(
         snapshot_tuple(&second),
         snapshot_tuple(&first),
-        "升级重解析后必须与升级前逐字段一致"
+        "重扫后必须与重扫前逐字段一致"
     );
     let after_upgrade = cache_stats(o.cache_dir.clone()).unwrap();
     assert_eq!(
         after_upgrade.events, after_first.events,
-        "升级重解析必须与升级前得到同一事件集"
+        "重扫必须与重扫前得到同一事件集"
     );
 
     // 3) 再次查询（热命中路径）：结果与首轮逐字段一致。

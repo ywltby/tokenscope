@@ -58,7 +58,11 @@ pub struct CacheStats {
 /// 边界（旧结果里新会话的事件被算到旧会话/旧项目）、file URI 点段与 NUL 拒绝、
 /// UNC 与 URI 主机大小写统一、POSIX 尾空格不再被 trim——这些修复改变了事件
 /// 内容（session_id / project），旧缓存必须整体失效重解析。
-const SCHEMA_VERSION: &str = "10";
+/// v11 = H02 纳入全部用量：Claude 子代理（`isSidechain`）用量不再排除、事件
+/// 携带源文件内 0-based 行序（历史库来源定位用）——旧行的"子代理被跳过"是
+/// 另一种口径，必须整体失效重解析（旧缓存里的 sidechain 用量无从恢复，
+/// 由源日志重解析补上）。
+const SCHEMA_VERSION: &str = "11";
 
 fn fingerprint(size: u64, mtime_ms: i64) -> (i64, i64) {
     // u64 → i64 存库；实际文件大小远小于 i64 上限。
@@ -189,6 +193,7 @@ impl Cache {
                 project TEXT NOT NULL,
                 session_initial_cwd TEXT,
                 event_cwd TEXT,
+                line INTEGER NOT NULL DEFAULT 0,
                 input INTEGER NOT NULL,
                 output INTEGER NOT NULL,
                 cache_write INTEGER NOT NULL,
@@ -268,7 +273,7 @@ impl Cache {
         {
             let mut stmt = tx.prepare(
                 "SELECT ts, record_id, model, session_id, project, session_initial_cwd, event_cwd,
-                        input, output, cache_write, cache_read
+                        line, input, output, cache_write, cache_read
                  FROM events WHERE file_id = ?1 ORDER BY rowid",
             )?;
             let rows = stmt.query_map([id], |r| {
@@ -284,6 +289,7 @@ impl Cache {
                     r.get::<_, i64>(8)?,
                     r.get::<_, i64>(9)?,
                     r.get::<_, i64>(10)?,
+                    r.get::<_, i64>(11)?,
                 ))
             })?;
             let mut stats_bad = 0u64;
@@ -296,6 +302,7 @@ impl Cache {
                     project,
                     session_initial_cwd,
                     event_cwd,
+                    line,
                     input,
                     output,
                     cw,
@@ -312,6 +319,8 @@ impl Cache {
                     session_initial_cwd,
                     event_cwd,
                     record_id,
+                    line: line.max(0) as u64,
+                    source_path: key.path.to_string(),
                     input_tokens: input.max(0) as u64,
                     output_tokens: output.max(0) as u64,
                     cache_write_tokens: cw.max(0) as u64,
@@ -399,8 +408,9 @@ impl Cache {
         )?;
         let mut stmt = tx.prepare(
             "INSERT INTO events(file_id, ts, record_id, model, session_id, project,
-                                session_initial_cwd, event_cwd, input, output, cache_write, cache_read)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                session_initial_cwd, event_cwd, line, input, output,
+                                cache_write, cache_read)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )?;
         for e in &parse.events {
             // SF08：入库前受检转换——超出 i64 的 token 值不得经缓存往返
@@ -426,6 +436,7 @@ impl Cache {
                 e.project,
                 e.session_initial_cwd,
                 e.event_cwd,
+                e.line as i64,
                 input,
                 output,
                 cw,
@@ -489,6 +500,128 @@ impl Cache {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// H03：遗留缓存的一条事件（旧版本 `events` 行的直接形态；`line` 仅 v11+
+/// 缓存存在，更早版本无从得知，记 0）。
+#[derive(Debug, Clone)]
+pub struct LegacyEvent {
+    pub ts: String,
+    pub record_id: String,
+    pub model: String,
+    pub session_id: String,
+    pub project: String,
+    pub session_initial_cwd: Option<String>,
+    pub event_cwd: Option<String>,
+    pub line: u64,
+    pub input: u64,
+    pub output: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+}
+
+/// H03：遗留缓存的一个文件及其事件（旧版本 `files` 行 + 其 `events` 行）。
+#[derive(Debug, Clone)]
+pub struct LegacyCacheFile {
+    pub app: AgentKind,
+    pub root: String,
+    pub path: String,
+    pub context_revision: String,
+    pub size: u64,
+    pub mtime_ms: i64,
+    pub events: Vec<LegacyEvent>,
+}
+
+/// H03：以**只读**方式读取遗留缓存的可迁内容——绝不触发 `Cache::open` 的
+/// 版本重建或清空（迁移必须发生在任何旧版本重建/purge 之前，见计划 §6）。
+///
+/// 缺表（全新/空文件）返回空集合；库不可读或结构不完整返回明确错误，
+/// 由调用方决定是否放弃迁移（放弃只影响"补齐旧数据"，不影响新采集）。
+pub fn read_legacy_cache(path: &Path) -> Result<Vec<LegacyCacheFile>> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("只读打开遗留缓存失败: {}", path.display()))?;
+    let mut tables = Vec::new();
+    {
+        let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for r in rows {
+            tables.push(r?);
+        }
+    }
+    if !tables.iter().any(|t| t == "files") || !tables.iter().any(|t| t == "events") {
+        log::debug!("遗留缓存无 files/events 表，视为无可迁内容");
+        return Ok(Vec::new());
+    }
+    let has_line = {
+        let mut stmt = conn.prepare("PRAGMA table_info(events)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        let mut names = Vec::new();
+        for r in rows {
+            names.push(r?);
+        }
+        names.iter().any(|n| n == "line")
+    };
+    let mut out = Vec::new();
+    let mut files_stmt = conn.prepare(
+        "SELECT id, agent, root, path, context_rev, size, mtime_ms FROM files ORDER BY id",
+    )?;
+    let files: Vec<(i64, String, String, String, String, i64, i64)> = files_stmt
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(files_stmt);
+    let line_expr = if has_line { "line" } else { "0" };
+    for (file_id, agent, root, file_path, context_rev, size, mtime) in files {
+        let agent = AgentKind::parse(&agent).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let sql = format!(
+            "SELECT ts, record_id, model, session_id, project, session_initial_cwd, event_cwd,
+                    {line_expr}, input, output, cache_write, cache_read
+             FROM events WHERE file_id = ?1 ORDER BY rowid"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([file_id], |r| {
+            Ok(LegacyEvent {
+                ts: r.get(0)?,
+                record_id: r.get(1)?,
+                model: r.get(2)?,
+                session_id: r.get(3)?,
+                project: r.get(4)?,
+                session_initial_cwd: r.get(5)?,
+                event_cwd: r.get(6)?,
+                line: r.get::<_, i64>(7)?.max(0) as u64,
+                input: r.get::<_, i64>(8)?.max(0) as u64,
+                output: r.get::<_, i64>(9)?.max(0) as u64,
+                cache_write: r.get::<_, i64>(10)?.max(0) as u64,
+                cache_read: r.get::<_, i64>(11)?.max(0) as u64,
+            })
+        })?;
+        let mut events = Vec::new();
+        for r in rows {
+            events.push(r?);
+        }
+        out.push(LegacyCacheFile {
+            app: agent,
+            root,
+            path: file_path,
+            context_revision: context_rev,
+            size: size.max(0) as u64,
+            mtime_ms: mtime,
+            events,
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -574,6 +707,8 @@ mod tests {
                 session_initial_cwd: Some("C:/p".into()),
                 event_cwd: Some("C:/p/sub".into()),
                 record_id: String::new(),
+                line: 0,
+                source_path: String::new(),
                 input_tokens: i as u64 + 1,
                 output_tokens: 1,
                 cache_write_tokens: 0,

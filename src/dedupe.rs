@@ -113,6 +113,8 @@ mod tests {
             session_initial_cwd: None,
             event_cwd: None,
             record_id: e.record_id.into(),
+            line: 0,
+            source_path: String::new(),
             input_tokens: e.input,
             output_tokens: e.output,
             cache_write_tokens: e.cw,

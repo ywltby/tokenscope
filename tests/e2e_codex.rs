@@ -215,18 +215,18 @@ fn test_e2e_multi_agent_merge() {
     assert_eq!(r.sources.len(), 2);
     assert_eq!(r.groups.len(), 3); // claude-code、codex、合计
     assert_eq!(r.groups[0].key, "claude-code");
-    assert_eq!(r.groups[0].requests, 3);
+    assert_eq!(r.groups[0].requests, 4, "H02：子代理用量一并计入");
     assert_eq!(r.groups[1].key, "codex");
     assert_eq!(r.groups[1].requests, 4);
-    assert_eq!(r.totals.requests, 7);
+    assert_eq!(r.totals.requests, 8);
     assert_eq!(r.totals.agents, ["claude-code", "codex"]);
 
-    // 日维度合并：claude 07-17 1 条 + codex 07-17 1 条 = 2；07-18 = 2 + 3 = 5。
+    // 日维度合并：claude 07-17 1 条 + codex 07-17 1 条 = 2；07-18 = 3 + 3 = 6。
     let d = both_report(GroupBy::Day);
     assert_eq!(d.groups.len(), 3);
     assert_eq!(d.groups[0].key, "2026-07-17");
     assert_eq!(d.groups[0].requests, 2);
-    assert_eq!(d.groups[1].requests, 5);
+    assert_eq!(d.groups[1].requests, 6);
     // 多 agent 数据填充 agents 字段。
     assert_eq!(d.groups[0].agents, ["claude-code", "codex"]);
 

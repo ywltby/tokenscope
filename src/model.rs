@@ -52,6 +52,12 @@ pub struct UsageEvent {
     /// agent 原生日志标识（Claude 的 message.id；Codex 无此标识记空串），
     /// 供全局去重使用。
     pub record_id: String,
+    /// H02：源文件内 0-based 行序——历史库 origin key 的组成部分，使一条
+    /// 请求能被精确定位到"哪个文件的第几行"。无法得知时记 0。
+    pub line: u64,
+    /// H04：事件所属源文件的规范化路径（历史库的来源键组成部分）。
+    /// 无文件来源（如外部汇总）记空串。
+    pub source_path: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_write_tokens: u64,
@@ -83,6 +89,66 @@ impl UsageEvent {
             return Err("prompt 计价基数超出可表示范围");
         }
         Ok(())
+    }
+
+    /// H04：事件内容指纹（FNV-1a 64，跨进程稳定）。
+    ///
+    /// 用途：历史库的来源键 = 文件 + 行序 + **内容指纹**。这样
+    /// - 同一行内容不变 → 同一来源键 → 完全相同的重复采集幂等跳过；
+    /// - 同一行的内容变了（文件被替换、新请求占用同一行）→ 新来源键 →
+    ///   新事件，**旧事实保留**，绝不用新值覆盖已保存的旧请求；
+    /// - Claude 的流式终值更新由原生身份别名（`(session_id, message.id)`）
+    ///   命中同一事件后按终值规则更新，不依赖来源键。
+    pub fn content_fingerprint(&self) -> String {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut write = |bytes: &[u8]| {
+            for b in bytes {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        write(self.ts.to_string().as_bytes());
+        write(b"\x1f");
+        write(self.model.as_bytes());
+        write(b"\x1f");
+        write(self.session_id.as_bytes());
+        write(b"\x1f");
+        write(self.record_id.as_bytes());
+        write(b"\x1f");
+        write(self.source_path.as_bytes());
+        for v in [
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_write_tokens,
+            self.cache_read_tokens,
+        ] {
+            write(&v.to_le_bytes());
+        }
+        format!("{h:016x}")
+    }
+
+    /// H02：原生请求身份——跨来源（原生日志 ↔ CCS 导入）去重所依赖的
+    /// **可证实**稳定标识。返回 `(scheme, value)`。
+    ///
+    /// - Claude：`(session_id, message.id)` 是上游稳定标识，同一请求的流式
+    ///   更新与重复来源都指向同一条；
+    /// - Codex：rollout 的 `token_count` 记录不带请求标识（无 id / 无序号），
+    ///   身份不足时返回 `None`——**不猜测身份**，该来源的请求只按库内来源键
+    ///   与既有保守重播规则处理。
+    pub fn native_identity(&self) -> Option<(&'static str, String)> {
+        match self.agent {
+            AgentKind::ClaudeCode => {
+                if self.session_id.is_empty() || self.record_id.is_empty() {
+                    None
+                } else {
+                    Some((
+                        "claude-message",
+                        format!("{}|{}", self.session_id, self.record_id),
+                    ))
+                }
+            }
+            AgentKind::Codex => None,
+        }
     }
 }
 
@@ -150,6 +216,8 @@ mod tests {
             ts: "2026-07-17T08:00:00.000Z".parse().unwrap(),
             agent: AgentKind::ClaudeCode,
             record_id: String::new(),
+            line: 0,
+            source_path: String::new(),
             model: "m".into(),
             session_id: "s".into(),
             project: "p".into(),

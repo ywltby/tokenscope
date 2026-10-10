@@ -307,6 +307,12 @@ pub(crate) fn initialize_business_runtime(
         flags.mark(RuntimeStep::PriceSync);
     }
 
+    // 6) H04：原生日志定时采集线程（5 分钟轮询，与手动刷新共用单飞协调器）。
+    if !flags.done(RuntimeStep::Collection) {
+        start_periodic_collection(app.clone());
+        flags.mark(RuntimeStep::Collection);
+    }
+
     log::info!(
         "业务初始化完成（日志/窗口/托盘/自同步线程，剩余步骤 {}），{} ms",
         flags.pending().len(),
@@ -379,6 +385,91 @@ fn persist_window_state(app: &tauri::AppHandle) {
     }
 }
 
+// ── H04：原生日志定时采集（5 分钟）─────────────────────────
+// 与启动采集、手动刷新共用 `report::collect_flighted` 的后台单飞协调器：
+// 三者并发时只会真正采集一次。定时线程只走原生日志，**不**读取、也不导入
+// CCS 库（计划不变量 11），且只在业务解锁（Ready）后运行。
+const COLLECT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+/// 首查延迟：启动本身已经采集过一次，避开启动瞬间的磁盘竞争。
+const COLLECT_FIRST_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+/// 停止轮询粒度（退出时快速响应）。
+const COLLECT_STOP_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+static COLLECT_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static COLLECT_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 是否有一次采集正在提交中（退出路径据此等待已开始的提交）。
+static COLLECT_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn start_periodic_collection(app: tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    if COLLECT_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        sleep_interruptible(COLLECT_FIRST_DELAY);
+        loop {
+            if COLLECT_STOP.load(Ordering::SeqCst) {
+                break;
+            }
+            let phase = privacy::phase_of(&app);
+            if !phase.allows_business() {
+                // 未同意/退出中：不打开历史库、不读任何来源日志。
+                log::debug!(
+                    "定时采集轮询：phase={} → 跳过（未解锁业务）",
+                    phase.as_str()
+                );
+            } else {
+                let loaded = commands::load_settings_strict();
+                match commands::collection_opts_from(loaded) {
+                    Err(e) => log::warn!("定时采集跳过（设置不可用）: {e}"),
+                    Ok(opts) => {
+                        let t = std::time::Instant::now();
+                        COLLECT_ACTIVE.store(true, Ordering::SeqCst);
+                        let result = tokenscope::report::summary(&opts);
+                        COLLECT_ACTIVE.store(false, Ordering::SeqCst);
+                        match result {
+                            Ok(r) => log::debug!(
+                                "定时采集完成：请求 {}，警告 {}，{} ms",
+                                r.totals.requests,
+                                r.warnings.len(),
+                                t.elapsed().as_millis()
+                            ),
+                            Err(e) => tokenscope::logging::log_error("定时采集失败", &e),
+                        }
+                    }
+                }
+            }
+            sleep_interruptible(COLLECT_INTERVAL);
+        }
+        log::info!("定时采集线程已退出");
+    });
+}
+
+/// 分片睡眠：退出请求可在一个分片内被观察到（否则最长要等整个周期）。
+fn sleep_interruptible(total: std::time::Duration) {
+    use std::sync::atomic::Ordering;
+    let mut left = total;
+    while left > std::time::Duration::ZERO {
+        if COLLECT_STOP.load(Ordering::SeqCst) {
+            return;
+        }
+        let slice = left.min(COLLECT_STOP_POLL);
+        std::thread::sleep(slice);
+        left = left.saturating_sub(slice);
+    }
+}
+
+/// 退出路径：请求停止定时采集，并等待**已经开始的提交**完成（有限等待，
+/// 超时即不再阻塞退出——已提交的事务在库内，未提交的由 SQLite 事务回滚）。
+pub(crate) fn stop_periodic_collection(wait: std::time::Duration) {
+    use std::sync::atomic::Ordering;
+    COLLECT_STOP.store(true, Ordering::SeqCst);
+    let deadline = std::time::Instant::now() + wait;
+    while COLLECT_ACTIVE.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn exit_after_saving(save: impl FnOnce(), exit: impl FnOnce()) {
     save();
     exit();
@@ -388,6 +479,8 @@ static WINDOW_SAVE_LOCK: Mutex<()> = Mutex::new(());
 
 /// 后台调用：所有直接退出入口都等待最终状态保存，不经过关闭询问。
 pub(crate) fn quit_with_final_save(app: &tauri::AppHandle) {
+    // H04：先请定时采集收尾（等待已开始的提交），再落窗口状态并退出。
+    stop_periodic_collection(std::time::Duration::from_secs(5));
     exit_after_saving(|| persist_window_state(app), || app.exit(0));
 }
 

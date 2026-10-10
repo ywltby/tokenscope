@@ -278,6 +278,25 @@ fn source_settings() -> Result<
     source_settings_impl(load_settings_strict())
 }
 
+/// H04：由**已成功读取**的设置构造采集选项（定时采集与查询同源）。
+///
+/// 读取失败一律返回 Err——定时采集不按默认来源兜底，也不读取 CCS 库
+///（计划不变量 11）。来源目录、启停、数据目录全部与普通查询同一份解析
+/// 内核，因此"定时采集"与"用户手动查询"的采集范围不可能分叉。
+pub(crate) fn collection_opts_from(
+    loaded: anyhow::Result<tokenscope::settings::Settings>,
+) -> Result<SummaryOptions, String> {
+    let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings_impl(loaded)?;
+    Ok(SummaryOptions {
+        by: tokenscope::aggregate::GroupBy::Day,
+        claude_dir,
+        codex_dir,
+        claude_enabled: Some(claude_enabled),
+        codex_enabled: Some(codex_enabled),
+        ..Default::default()
+    })
+}
+
 // ── 关闭行为三态（关闭确认与配置文件计划）──────────────────
 
 /// 窗口关闭请求的处置。

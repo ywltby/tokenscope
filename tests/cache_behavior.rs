@@ -58,7 +58,7 @@ fn test_agent_filter_preserves_other_cache() {
         4,
         "查看单 agent 不得清空其他来源的缓存"
     );
-    assert_eq!(r1.totals.requests, 3);
+    assert_eq!(r1.totals.requests, 4, "H02：Claude 子代理用量一并纳入");
     // 切回全部：codex 直接命中缓存（数字不变；此处以结果一致性断言）。
     let r2 = summary(&all).unwrap();
     assert_eq!(r2.totals.requests, r0.totals.requests);
