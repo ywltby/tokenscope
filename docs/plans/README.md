@@ -25,7 +25,7 @@
 
 ## 当前状态
 
-- **2026-10-10 新设计：统一用量数据库与 CCS 历史导入（产品尚未实施）。** [实施计划](active/2026-10-10-usage-history-and-ccs-import.md) 采用 `~/.tokenscope/history.db`，保存精简的请求级 token/cwd 元数据、采集指纹与 CCS 导入记录；项目为索引列，不按项目分库，不保存完整 JSONL 或代理关系。所有代理用量纳入并按请求去重；源日志消失、停用或重扫不删除历史；CCS 请求明细与日汇总分表导入、幂等更新，重叠桶不直接相加，缺失项目及逐请求信息保持未知。
+- **2026-10-10 新设计：统一用量数据库与 CCS 历史导入（产品尚未实施）。** [实施计划](active/2026-10-10-usage-history-and-ccs-import.md) 采用 `~/.tokenscope/history.db`，保存精简的请求级 token/cwd 元数据、采集指纹与 CCS 导入记录；项目为索引列，不按项目分库，不保存完整 JSONL 或代理关系。所有代理用量纳入并按请求去重；源日志消失、停用或重扫不删除历史。CCS 导入仅由设置页手动操作执行一次，未点击不读取或导入，启动、刷新及定时采集不联动；请求明细与已有历史按稳定身份求并集，支持双向去重、重复导入跳过与终值更新。日汇总分表保存、同来源快照幂等，不能恢复请求交集的重叠不直接相加，缺失项目及逐请求信息保持未知。
 
 - **2026-10-10 首次启动隐私同意已实施（P01–P06 代码与自动化验收完成；计划保持 active，原生时序与发布验收待验）。** [首次启动隐私同意实施计划](active/2026-10-09-first-launch-privacy-consent.md)。`~/.tokenscope/settings.toml` 新增 `privacy_policy_accepted`（缺失/`false` = 未同意）；引导判定只认磁盘上真实有效的 TOML——`NotFound` 与其他 I/O/解析错误分道，不用默认值、不读遗留 `settings.json`，损坏文件不改写、不覆盖。未 Ready 时后端闸门关闭：23 个业务命令在进入业务闭包之前统一返回 `privacy_consent_required`（含 `startup_diagnostics`、`close_resolve`、`open_settings_file`），日志/窗口状态恢复与 saver/托盘/价格线程全部延后到同意后的单次初始化（只补未完成步骤），窗口关闭与尺寸事件在引导期不落盘、不读已记忆的关闭动作。前端拆为引导壳 `App.vue` 与业务主应用 `MainApp.vue`：Ready 之前只有 `privacy_bootstrap` 一条 IPC，动态 `import()` 才挂载主应用（静态导入会执行读持久化偏好的模块级副作用）；首帧主题改为一律跟随系统（`theme-boot.js` 不碰存储），偏好在 Ready 后、业务挂载前显式恢复。政策全文由 `include_str!(docs/privacy.md)` 打包，前端做确定性渲染（链接降级为纯文本，无 `v-html`/外链/远程资源）。拒绝 → 专属退出确认（无记忆、无最小化、无托盘），确认退出直接结束进程、不做窗口状态最终保存。验证：根库 `cargo test --workspace`、壳 `cargo test` 40 项、前端 348 项 + typecheck/format/build 全绿；Chromium 新增 `privacy_no_business_effects_before_acceptance` / `privacy_denied_ipc_has_no_filesystem_or_network_effect` 各 8 条断言通过（并借此修掉引导壳与主应用重复渲染 `NGlobalStyle` 的回归）。**未验**：原生 `privacy-consent-gate` / `privacy-accept-restart`（需 release + `acceptance` 构建）、120 秒门槛的原生计时观察、全量 60 场景矩阵复跑、NSIS 安装与系统缩放现场。
 
@@ -73,7 +73,7 @@
 
 | 计划 | 状态 | 备注 |
 | --- | --- | --- |
-| [active/2026-10-10-usage-history-and-ccs-import.md](active/2026-10-10-usage-history-and-ccs-import.md) | 设计方案，产品尚未实施 | 统一 `history.db` 保存精简请求用量与 cwd；项目索引、全部代理纳入、不保存 JSONL/代理关系；CCS 明细和日汇总导入、幂等与重叠处理、历史迁移和冻结查询 |
+| [active/2026-10-10-usage-history-and-ccs-import.md](active/2026-10-10-usage-history-and-ccs-import.md) | 设计方案，产品尚未实施 | 统一 `history.db` 保存精简请求用量与 cwd；项目索引、全部代理纳入、不保存 JSONL/代理关系；设置页手动单次 CCS 导入、不自动同步；明细与已有历史去重求并集、重复导入跳过；日汇总快照幂等与重叠处理、历史迁移及冻结查询 |
 | [active/2026-10-10-model-pricing-name-equivalence.md](active/2026-10-10-model-pricing-name-equivalence.md) | 第二轮审查后重新打开：缺陷已修复，待复核确认归档 | 模型身份忽略大小写及 `-._`，图表/聚合/下钻统一；展示名只认可信 models.dev 名称；定价保留候选和边界、逐请求计费（含分段/峰谷断言）；索引 v9 与视图快照 v9 失效重建（`37454dd`…`35725f8` + 本轮修复） |
 | [active/2026-10-09-project-path-unification.md](active/2026-10-09-project-path-unification.md) | 阶段 A + B 实现与自动化验收完成；第二轮、第三轮审查缺陷均已修复；GUI 原生目视项未执行，保持 active | 跨工具项目路径统一：source 层统一身份、项目根归并（子目录归并 + 越界切换）、映射正向解析与缓存失效、`session_initial_cwd`/`event_cwd` 字段；缓存解析版本 10、前端快照 10；审查修复：Codex 上下文字段宽容解析、`file://` 点段/NUL/反斜杠语义、UNC 与 URI 主机同口径、POSIX 尾空格保留、映射读取失败可重试、切换后 Codex/无缓存路径联动验收 |
 | [active/2026-10-09-first-launch-privacy-consent.md](active/2026-10-09-first-launch-privacy-consent.md) | 已实施（P01–P06 代码与自动化验收完成）；原生时序与发布验收待验，保持 active | 首次启动隐私同意：`privacy_policy_accepted` 严格读取（NotFound ≠ 其他 I/O 错误）、先原子保存后解锁、23 个业务命令统一 guard、未同意零业务副作用（无日志/缓存/窗口/托盘/价格请求）、拒绝退出不读关闭动作不做最终保存；浏览器侧两条具名契约在 Chromium 通过，原生场景待验 |
