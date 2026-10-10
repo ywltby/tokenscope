@@ -52,6 +52,9 @@ const preview = {
   would_unchanged: 2,
   would_conflict: 0,
   would_stale: 0,
+  would_overlap: 0,
+  overlap_unresolved: false,
+  overlap_examples: [] as string[],
   net_new_tokens: { input: 100, output: 10, cache_write: 0, cache_read: 0 },
   rollups_total: 2,
   rollups_new: 2,
@@ -69,6 +72,7 @@ const report = {
   requests_unchanged: 2,
   requests_conflicted: 0,
   requests_stale: 0,
+  requests_overlap: 0,
   rollups_snapshotted: 2,
   rollups_conflicted: 0,
   net_new_tokens: { input: 100, output: 10, cache_write: 0, cache_read: 0 },
@@ -189,6 +193,61 @@ describe("Settings CCS 导入（H05/H08）", () => {
     expect((discardCall![1] as { planId: string }).planId).toBe("plan-1");
     expect(invokeMock.mock.calls.some((c) => c[0] === "ccs_import_commit")).toBe(false);
     expect(w.text()).not.toContain("预览（尚未写入）");
+    w.unmount();
+  });
+
+  it("重叠候选默认拒绝提交，勾选后才按新增导入", async () => {
+    const overlapPreview = {
+      ...preview,
+      would_overlap: 2,
+      overlap_unresolved: true,
+      overlap_examples: ["claude / gpt-5.6-sol / 2026-07-17T15:00:00Z / 130"],
+    };
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats")
+        return Promise.resolve({ path: "C:/data/history.db", files: 4, events: 8 });
+      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+      if (cmd === "ccs_import_defaults")
+        return Promise.resolve({ path: preview.source_path, exists: true, timezone: "UTC" });
+      if (cmd === "ccs_import_preview") return Promise.resolve(overlapPreview);
+      if (cmd === "ccs_import_commit") return Promise.resolve(report);
+      return Promise.resolve(null);
+    });
+    const w = mountSettings();
+    await flushPromises();
+    await w
+      .findAll("button")
+      .find((b) => b.text().includes("从 CCS 导入用量"))!
+      .trigger("click");
+    await flushPromises();
+    expect(w.text()).toContain("重叠候选");
+    expect(w.text()).toContain("默认不导入");
+    expect(w.text()).toContain("claude / gpt-5.6-sol");
+
+    // 未勾选 → 不提交，给出明确提示
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "导入")!
+      .trigger("click");
+    await flushPromises();
+    expect(invokeMock.mock.calls.some((c) => c[0] === "ccs_import_commit")).toBe(false);
+    expect(w.text()).toContain("CCS 导入未完成");
+
+    // 勾选「重叠候选」后提交，allowOverlap 必须传下去
+    const overlapRow = w.findAll(".setting-row").find((r) => r.text().includes("重叠候选"));
+    expect(overlapRow, "重叠候选行必须存在").toBeDefined();
+    await overlapRow!.find(".n-switch").trigger("click");
+    await flushPromises();
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "导入")!
+      .trigger("click");
+    await flushPromises();
+    const commit = invokeMock.mock.calls.find((c) => c[0] === "ccs_import_commit");
+    expect(commit, "勾选后必须发起提交").toBeDefined();
+    expect((commit![1] as { allowOverlap: boolean }).allowOverlap).toBe(true);
     w.unmount();
   });
 

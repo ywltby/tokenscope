@@ -156,8 +156,8 @@ const collectionDiagnostics = computed(() => {
   // H06：日汇总的时区不匹配是「当前视图看不到这部分历史」的可恢复提示，
   // 与采集警告并列展示（不混入坏行/IO 统计）。
   const warns = [...(report.value?.warnings ?? [])];
-  const mismatch = report.value?.rollup_coverage?.timezone_mismatch;
-  if (mismatch && !warns.includes(mismatch)) warns.push(mismatch);
+  const timezoneMismatch = report.value?.rollup_coverage?.timezone_mismatch ?? null;
+  if (timezoneMismatch && !warns.includes(timezoneMismatch)) warns.push(timezoneMismatch);
   const statsList = report.value?.sources.map((s) => s.stats) ?? [];
   const ioErrors = statsList.reduce((a, st) => a + (st.io_errors ?? 0), 0);
   const badLines = statsList.reduce((a, st) => a + (st.bad_lines ?? 0), 0);
@@ -174,9 +174,12 @@ const collectionDiagnostics = computed(() => {
       ]
         .filter(Boolean)
         .join("，");
-  return { clean, summaryText, warns, ioErrors, badLines, rollupOnly };
+  return { clean, summaryText, warns, ioErrors, badLines, rollupOnly, timezoneMismatch };
 });
 const showCollectionDetails = ref(false);
+/// H08：日粒度历史是否参与统计（`detail_only` = 只看请求明细）。切换会重建
+/// 查询会话（桶选择在建快照时固定，不能事后改），因此与其它筛选项同路径。
+const rollupsMode = ref<"auto" | "detail_only">("auto");
 
 // 任务 7：来源异常通知——单条直接展示，多条合并为一条可展开通知。
 const problemSources = computed(() => sourceStatus.value.filter((x) => x.state !== "ready"));
@@ -212,6 +215,9 @@ function beginQueryForCurrentEpoch(): Promise<QueryHandle | null> {
         from: captured.from,
         to: captured.to,
         tz: captured.tz,
+        // H08：日粒度历史参与方式（`detail_only` = 只看请求明细；来源时区与
+        // 展示时区不一致时用户可选的恢复路径之一）。
+        rollups: rollupsMode.value === "detail_only" ? "detail_only" : null,
       });
       if (epoch !== refreshEpoch || disposed) return null; // 旧 begin 晚到不接管
       currentQuery.value = h;
@@ -537,6 +543,14 @@ function startRefreshBatch(): void {
   void loadEvents();
 }
 
+/// H08：切换"只看请求明细"——桶选择在建快照时固定，必须重建查询会话，
+/// 因此与其它筛选项走同一条刷新路径（不原地改已冻结的统计口径）。
+function setRollupsMode(mode: "auto" | "detail_only"): void {
+  if (rollupsMode.value === mode) return;
+  rollupsMode.value = mode;
+  startRefreshBatch();
+}
+
 /// RC02：统一错误恢复入口。
 /// - 会话级失败（begin 失败、query_expired、会话被淘汰/外会话游标）→
 ///   建立**一个新批次**：一次 query_begin，汇总与首页共享同一新 query_id；
@@ -776,6 +790,43 @@ startRefreshBatch();
       <div v-for="(w, i) in collectionDiagnostics.warns" :key="i" class="source-detail-line">
         {{ w }}
       </div>
+    </div>
+    <!-- H08：日粒度历史的参与方式——计划 §5.2 给的两条恢复路径在这里可操作：
+         切回来源时区（筛选栏），或只看请求明细（下面的按钮）。 -->
+    <div
+      v-if="rollupsMode === 'auto' && collectionDiagnostics.timezoneMismatch"
+      class="ts-notice source-notice"
+    >
+      <svg
+        class="ts-notice-icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 8v5" />
+        <path d="M12 16h.01" />
+      </svg>
+      <span class="ts-notice-content">{{ collectionDiagnostics.timezoneMismatch }}</span>
+      <button
+        type="button"
+        class="ts-notice-action ts-focusable"
+        @click="setRollupsMode('detail_only')"
+      >
+        只看请求明细
+      </button>
+    </div>
+    <div v-else-if="rollupsMode === 'detail_only'" class="ts-notice source-notice">
+      <span class="ts-notice-content"
+        >当前只统计请求明细（不含只有日粒度的历史）；按日视图不受来源时区影响。</span
+      >
+      <button type="button" class="ts-notice-action ts-focusable" @click="setRollupsMode('auto')">
+        恢复自动参与
+      </button>
     </div>
     <div v-if="eventsError" class="ts-notice source-notice">
       <svg

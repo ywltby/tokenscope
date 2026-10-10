@@ -81,6 +81,14 @@ const ccsReport = ref<CcsImportReport | null>(null);
 const ccsBusy = ref(false);
 const ccsError = ref<string | null>(null);
 const ccsTakeSourceRollups = ref(false);
+/// H05：重叠候选（同时间同用量但身份不足）的处理——默认不导入，需用户显式确认。
+const ccsAllowOverlap = ref(false);
+/// H05：日汇总的来源统计时区（默认本机；来源库用 localtime 生成日键）。
+const ccsSourceTz = ref<string>("local");
+const CCS_TZ_OPTIONS = [
+  { label: "本机时区（默认）", value: "local" },
+  ...TZ_OPTIONS.filter((o) => o.value !== "local"),
+];
 /** 预览/结果里的净新增 token 合计（四桶之和，展示用）。 */
 const netNewTokens = computed(() =>
   ccsPreview.value ? totalTokens(ccsPreview.value.net_new_tokens) : 0,
@@ -307,7 +315,9 @@ async function previewCcsImport(): Promise<void> {
   try {
     ccsPreview.value = await invoke<CcsImportPreview>("ccs_import_preview", {
       sourcePath: ccsPath.value.trim() || null,
+      sourceDayTimezone: ccsSourceTz.value === "local" ? null : ccsSourceTz.value,
     });
+    ccsAllowOverlap.value = false;
   } catch (e) {
     ccsPreview.value = null;
     ccsError.value = e instanceof Error ? e.message : String(e);
@@ -317,18 +327,28 @@ async function previewCcsImport(): Promise<void> {
 }
 
 /// H05：提交本次导入（只执行一个批次；计划一次性消费，重复提交会被后端拒绝）。
+///
+/// 存在未解决的重叠候选时后端默认拒绝：用户勾选「按新增导入」才把
+/// `allowOverlap` 传下去（不猜身份、也不静默把候选当新请求）。
 async function commitCcsImport(): Promise<void> {
   const plan = ccsPreview.value;
   if (!plan || ccsBusy.value) return;
+  if (plan.overlap_unresolved && !ccsAllowOverlap.value) {
+    ccsError.value =
+      "存在与本地已有请求时间/用量相同但身份不足的记录：确认它们是不同请求后勾选「按新增导入」，或取消后先核对来源。";
+    return;
+  }
   ccsBusy.value = true;
   ccsError.value = null;
   try {
     const report = await invoke<CcsImportReport>("ccs_import_commit", {
       planId: plan.plan_id,
       takeSourceRollups: ccsTakeSourceRollups.value,
+      allowOverlap: ccsAllowOverlap.value,
     });
     ccsReport.value = report;
     ccsPreview.value = null;
+    ccsAllowOverlap.value = false;
     msg.success("CCS 用量已导入（与已有历史去重求并集）");
     await loadCache();
   } catch (e) {
@@ -1107,6 +1127,22 @@ defineExpose({ priceColumns });
               }"
             />
           </div>
+          <div class="setting-row">
+            <div class="setting-main">
+              <div class="setting-label">来源统计时区</div>
+              <div class="setting-help">
+                来源库按本机时区生成日键：日汇总只在**这个时区**下与展示时区一致时才参与按日统计（不一致时按日视图会提示切换或只看请求明细）。
+              </div>
+            </div>
+            <NSelect
+              v-model:value="ccsSourceTz"
+              class="ccs-tz"
+              size="small"
+              :options="CCS_TZ_OPTIONS"
+              :disabled="ccsBusy || !!ccsPreview"
+              aria-label="来源统计时区"
+            />
+          </div>
           <div class="rebuild-row">
             <NButton
               size="small"
@@ -1165,6 +1201,20 @@ defineExpose({ priceColumns });
                 </div>
               </div>
               <NSwitch v-model:value="ccsTakeSourceRollups" size="small" />
+            </div>
+            <div v-if="ccsPreview.overlap_unresolved" class="setting-row">
+              <div class="setting-main">
+                <div class="setting-label">重叠候选</div>
+                <div class="setting-help">
+                  有
+                  {{ fmtNum(ccsPreview.would_overlap) }}
+                  条来源记录与本地已有请求的时间与用量相同，但缺少可证实的请求身份；时间与用量相同只是线索，不能据此认定是同一次请求。默认不导入——确认它们是不同请求后再勾选。
+                  <template v-if="ccsPreview.overlap_examples.length > 0">
+                    <br />例：{{ ccsPreview.overlap_examples.join("；") }}
+                  </template>
+                </div>
+              </div>
+              <NSwitch v-model:value="ccsAllowOverlap" size="small" />
             </div>
             <div class="rebuild-row">
               <NButton size="small" type="primary" :loading="ccsBusy" @click="commitCcsImport"
@@ -1465,6 +1515,11 @@ defineExpose({ priceColumns });
 .ccs-path {
   max-width: 420px;
   width: 100%;
+}
+
+.ccs-tz {
+  min-width: 180px;
+  max-width: 240px;
 }
 
 .source-state {

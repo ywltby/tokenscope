@@ -81,6 +81,12 @@ export interface CcsImportPreview {
   would_unchanged: number;
   would_conflict: number;
   would_stale: number;
+  /** H05：身份不足但库内有"同时间同用量"候选的记录数（只作核对线索）。 */
+  would_overlap: number;
+  /** H05：存在未解决的重叠候选——提交需要用户显式确认，否则后端拒绝。 */
+  overlap_unresolved: boolean;
+  /** 重叠候选样例（最多 5 条）。 */
+  overlap_examples: string[];
   net_new_tokens: TokenCounts;
   rollups_total: number;
   rollups_new: number;
@@ -99,6 +105,8 @@ export interface CcsImportReport {
   requests_unchanged: number;
   requests_conflicted: number;
   requests_stale: number;
+  /** 本批按"新增"导入但存在重叠候选的记录数（审计用）。 */
+  requests_overlap: number;
   rollups_snapshotted: number;
   rollups_conflicted: number;
   net_new_tokens: TokenCounts;
