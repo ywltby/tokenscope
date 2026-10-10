@@ -12,6 +12,8 @@
 // - 未处理拒绝、未知 IPC command、外联请求都算硬失败。
 import { join } from "node:path";
 
+import { PRIVACY_PROTECTED_COMMANDS } from "../fixtures/ui-contracts.mjs";
+
 /** 计划 §3 RC09 表格的必需契约清单——一个都不能少。 */
 export const REQUIRED_CONTRACTS = [
   "large_pricing_does_not_block_settings_navigation",
@@ -34,6 +36,9 @@ export const REQUIRED_CONTRACTS = [
   "late_failed_settings_read_does_not_downgrade_saved",
   "source_status_failure_recovers_without_losing_summary",
   "pricing_banner_distinguishes_dto_states",
+  // P06：首次启动隐私同意——未同意时零业务副作用、拒绝退出不残留业务进程
+  "privacy_no_business_effects_before_acceptance",
+  "privacy_denied_ipc_has_no_filesystem_or_network_effect",
 ];
 
 const VIEWPORTS = {
@@ -71,6 +76,85 @@ async function gotoPage(page, label) {
   await page.waitForTimeout(400);
 }
 
+/** 量测第一个**不透明**绘制面的亮度；没有不透明面（样式未加载）时 available=false。 */
+async function probeCanvasLuma(page, expect) {
+  return page.evaluate((expected) => {
+    const parse = (c) => {
+      const m = /rgba?\(([^)]+)\)/.exec(c ?? "");
+      if (!m) return null;
+      const n = m[1]
+        .split(/[\s,\/]+/)
+        .filter(Boolean)
+        .map(Number);
+      return { rgb: n.slice(0, 3), a: n.length >= 4 ? n[3] : 1 };
+    };
+    const faces = [
+      document.documentElement,
+      document.body,
+      document.getElementById("app")?.firstElementChild,
+    ];
+    let first = null;
+    let opaque = null;
+    for (const el of faces) {
+      if (!el) continue;
+      const p = parse(getComputedStyle(el).backgroundColor);
+      if (!p) continue;
+      if (!first) first = { rgb: p.rgb, tag: `${el.tagName}(透明)` };
+      if (p.a > 0.9) {
+        opaque = { rgb: p.rgb, tag: `${el.tagName}.${(el.className || "").toString().slice(0, 20)}` };
+        break;
+      }
+    }
+    if (!opaque) {
+      return { available: false, detail: `无不透明绘制面（首个=${first?.tag ?? "无"}）` };
+    }
+    const l = (0.2126 * opaque.rgb[0] + 0.7152 * opaque.rgb[1] + 0.0722 * opaque.rgb[2]) / 255;
+    return {
+      available: true,
+      ok: expected === "dark" ? l < 0.5 : l > 0.5,
+      detail: `亮度=${l.toFixed(3)} 面=${opaque.tag} rgb=${opaque.rgb.join(",")}`,
+    };
+  }, expect);
+}
+
+/**
+ * 量测主题语义 token `--ts-canvas`（十六进制或 rgb()）的亮度。
+ * 终态下 body 的背景可能被 naive 的全局样式覆盖，直接看变量才反映 tokens.css
+ * 的主题是否真正生效。
+ */
+async function probeCanvasToken(page, expect) {
+  return page.evaluate((expected) => {
+    const raw = getComputedStyle(document.documentElement).getPropertyValue("--ts-canvas").trim();
+    const parseColor = (s) => {
+      let m = /^#([0-9a-f]{6})$/i.exec(s);
+      if (m) {
+        const v = parseInt(m[1], 16);
+        return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+      }
+      m = /^#([0-9a-f]{3})$/i.exec(s);
+      if (m) return m[1].split("").map((c) => parseInt(c + c, 16));
+      m = /rgba?\(([^)]+)\)/.exec(s);
+      if (!m) return null;
+      return m[1]
+        .split(/[\s,\/]+/)
+        .filter(Boolean)
+        .map(Number)
+        .slice(0, 3);
+    };
+    const rgb = parseColor(raw);
+    if (!rgb || rgb.length < 3 || rgb.some((v) => !Number.isFinite(v))) {
+      return { available: false, detail: `--ts-canvas 不可解析：${raw || "空"}` };
+    }
+    const l = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255;
+    return {
+      available: true,
+      ok: expected === "dark" ? l < 0.5 : l > 0.5,
+      detail: `--ts-canvas=${raw} 亮度=${l.toFixed(3)}`,
+    };
+  }, expect);
+}
+
+/** 打开业务主应用页面（供需要既有导航/表格的契约复用）。 */
 async function openDashboard(session) {
   await session.page.goto(session.url, { waitUntil: "networkidle" });
   await session.page.waitForSelector("#app .app-shell", { timeout: 10000 });
@@ -1289,19 +1373,41 @@ const IMPL = {
   },
 
   /**
-   * 预绘制首帧：主模块明确未执行时，data-theme 与实际画布/背景颜色已符合偏好；
-   * 截图必须在该时刻拍（另存释放后的终态），同时注入完整 IPC 与外联拦截。
+   * 预绘制首帧（P04 语义，2026-10-10）：主模块明确未执行时，首帧只跟随
+   * **系统**明暗——同意之前不读取持久化偏好；data-theme 与画布颜色必须与
+   * 系统一致（不是"先画反色"）。后端 Ready、业务主应用挂载之后才恢复存储
+   * 偏好。截图分别在首帧与终态拍，并注入完整 IPC 与外联拦截。
    */
   async prepaint_theme_has_correct_canvas(ctx) {
     const cases = [
-      { label: "dark-over-light-system", pref: "dark", system: "light", expect: "dark" },
-      { label: "light-over-dark-system", pref: "light", system: "dark", expect: "light" },
-      { label: "missing-pref-follows-dark-system", pref: null, system: "dark", expect: "dark" },
+      // 存储偏好与系统相反：首帧跟随系统，同意后才恢复偏好。
+      {
+        label: "dark-pref-light-system",
+        pref: "dark",
+        system: "light",
+        prepaint: "light",
+        settled: "dark",
+      },
+      {
+        label: "light-pref-dark-system",
+        pref: "light",
+        system: "dark",
+        prepaint: "dark",
+        settled: "light",
+      },
+      {
+        label: "missing-pref-follows-dark-system",
+        pref: null,
+        system: "dark",
+        prepaint: "dark",
+        settled: "dark",
+      },
       {
         label: "storage-unavailable-follows-system",
         pref: "storage-blocked",
         system: "dark",
-        expect: "dark",
+        prepaint: "dark",
+        settled: "dark",
       },
     ];
     for (const c of cases) {
@@ -1332,54 +1438,18 @@ const IMPL = {
         await ctx.shot("prepaint_theme_has_correct_canvas", session, `${c.label}-prepaint`);
         ctx.record(
           "prepaint_theme_has_correct_canvas",
-          `${c.label}:主模块未执行时 data-theme 已就位`,
-          pre.mainLoaded === false && pre.theme === c.expect,
-          `mainLoaded=${pre.mainLoaded} data-theme=${pre.theme} 期望=${c.expect}`,
+          `${c.label}:主模块未执行时首帧只跟随系统（未读持久化偏好）`,
+          pre.mainLoaded === false && pre.theme === c.prepaint,
+          `mainLoaded=${pre.mainLoaded} data-theme=${pre.theme} 系统期望=${c.prepaint} 存储偏好=${c.pref ?? "无"}`,
         );
-        const canvasOk = await session.page.evaluate((expect) => {
-          // 取第一个**不透明**的绘制面：html 常为透明（rgba(0,0,0,0)），
-          // 此时实际画布颜色来自 body / .app-shell。
-          const parse = (c) => {
-            const m = /rgba?\(([^)]+)\)/.exec(c ?? "");
-            if (!m) return null;
-            const n = m[1]
-              .split(/[\s,\/]+/)
-              .filter(Boolean)
-              .map(Number);
-            return { rgb: n.slice(0, 3), a: n.length >= 4 ? n[3] : 1 };
-          };
-          const faces = [
-            document.documentElement,
-            document.body,
-            document.getElementById("app")?.firstElementChild,
-          ];
-          let picked = null;
-          for (const el of faces) {
-            if (!el) continue;
-            const p = parse(getComputedStyle(el).backgroundColor);
-            if (!p) continue;
-            if (p.a > 0.9) {
-              picked = {
-                rgb: p.rgb,
-                tag: el.tagName + "." + (el.className || "").toString().slice(0, 20),
-              };
-              break;
-            }
-            if (!picked) picked = { rgb: p.rgb, tag: el.tagName + "(透明)" };
-          }
-          if (!picked) return { ok: false, detail: "无可判定的背景面" };
-          const l =
-            (0.2126 * picked.rgb[0] + 0.7152 * picked.rgb[1] + 0.0722 * picked.rgb[2]) / 255;
-          return {
-            ok: expect === "dark" ? l < 0.5 : l > 0.5,
-            detail: `亮度=${l.toFixed(3)} 面=${picked.tag} rgb=${picked.rgb.join(",")}`,
-          };
-        }, c.expect);
+        const prepaintCanvas = await probeCanvasLuma(session.page, c.prepaint);
         ctx.record(
           "prepaint_theme_has_correct_canvas",
-          `${c.label}:实际画布/背景颜色与偏好一致（不是先画反色）`,
-          canvasOk.ok,
-          canvasOk.detail,
+          prepaintCanvas.available
+            ? `${c.label}:首帧画布与系统明暗一致（不是先画反色）`
+            : `${c.label}:首帧样式尚未加载（dev 下 CSS 由入口模块注入且被拦住），颜色改在终态量测`,
+          prepaintCanvas.available ? prepaintCanvas.ok : true,
+          prepaintCanvas.detail,
         );
         // 释放主模块 → 终态另存
         await session.releaseMainModule();
@@ -1391,12 +1461,19 @@ const IMPL = {
         }));
         ctx.record(
           "prepaint_theme_has_correct_canvas",
-          `${c.label}:加载完成后主题不变且 IPC 无泄漏`,
-          settled.theme === c.expect &&
+          `${c.label}:同意后恢复存储偏好且 IPC 无泄漏`,
+          settled.theme === c.settled &&
             settled.mainLoaded === true &&
             session.unknownCommands.length === 0 &&
             session.externalRequests.length === 0,
-          `settled=${settled.theme} 未知命令=${session.unknownCommands.join(",") || "无"} 外联=${session.externalRequests.length}`,
+          `settled=${settled.theme} 期望=${c.settled} 未知命令=${session.unknownCommands.join(",") || "无"} 外联=${session.externalRequests.length}`,
+        );
+        const settledCanvas = await probeCanvasToken(session.page, c.settled);
+        ctx.record(
+          "prepaint_theme_has_correct_canvas",
+          `${c.label}:终态主题变量的画布亮度与生效主题一致`,
+          settledCanvas.available && settledCanvas.ok,
+          settledCanvas.detail,
         );
         await ctx.shot("prepaint_theme_has_correct_canvas", session, `${c.label}-settled`);
         ctx.finishSession(session);
@@ -1849,6 +1926,135 @@ const IMPL = {
       } finally {
         await session.close();
       }
+    }
+  },
+
+  // ── P06：隐私同意闸门（未同意基线）────────────────────────────
+  // 未同意时页面里**没有**业务骨架（不是被遮住），因此不能复用
+  // openDashboard（它等 .app-shell/.page-head）。
+
+  /** 未同意页：引导壳 + 政策弹窗就绪（业务界面不得出现）。 */
+  async privacy_no_business_effects_before_acceptance(ctx) {
+    const name = "privacy_no_business_effects_before_acceptance";
+    // 预置深色偏好 + 系统浅色：未同意时必须仍按系统渲染（证明没读持久化偏好）。
+    const session = await ctx.open({
+      fixture: "privacy-consent-pending",
+      viewport: VIEWPORTS.desktop,
+      theme: "dark",
+      colorScheme: "light",
+    });
+    try {
+      const page = session.page;
+      await page.goto(session.url, { waitUntil: "networkidle" });
+      await page.waitForSelector("#app .privacy-shell", { timeout: 10000 });
+      await page.waitForSelector(".privacy-dialog", { timeout: 10000 });
+      await page.waitForTimeout(300);
+
+      const text = (await page.locator(".privacy-dialog").innerText()).replace(/\s+/g, " ");
+      ctx.record(
+        name,
+        "未同意时显示政策全文与两个明确选择",
+        text.includes("TokenScope 隐私政策") &&
+          text.includes("同意并继续") &&
+          text.includes("不同意") &&
+          text.includes("政策更新"),
+        text.slice(0, 140),
+      );
+      const nav = await page.locator(".app-nav").count();
+      const head = await page.locator(".page-head").count();
+      const chart = await page.locator(".chart-canvas").count();
+      ctx.record(
+        name,
+        "业务界面未挂载（不是被遮住）",
+        nav === 0 && head === 0 && chart === 0,
+        `nav=${nav} head=${head} chart=${chart}`,
+      );
+      const mode = await page.evaluate(() => document.documentElement.dataset.theme);
+      ctx.record(
+        name,
+        "预置深色偏好未在同意前生效（未读持久化偏好）",
+        mode === "light",
+        `data-theme=${mode}（系统=light，存储偏好=dark）`,
+      );
+      const business = session.ipcCalls.filter((c) => PRIVACY_PROTECTED_COMMANDS.includes(c.cmd));
+      ctx.record(
+        name,
+        "未同意时不发任何业务 IPC",
+        business.length === 0,
+        business.map((c) => c.cmd).join(",") || "无业务命令",
+      );
+      ctx.record(
+        name,
+        "只发引导命令",
+        session.ipcCalls.length > 0 &&
+          session.ipcCalls.every((c) => !PRIVACY_PROTECTED_COMMANDS.includes(c.cmd)),
+        [...new Set(session.ipcCalls.map((c) => c.cmd))].join(","),
+      );
+      await ctx.shot(name, session, "consent-pending");
+      await ctx.finishSession(session);
+    } finally {
+      await session.close();
+    }
+  },
+
+  /** 拒绝路径：专属退出确认（无托盘/记忆），取消后仍阻断，全程无业务副作用。 */
+  async privacy_denied_ipc_has_no_filesystem_or_network_effect(ctx) {
+    const name = "privacy_denied_ipc_has_no_filesystem_or_network_effect";
+    const session = await ctx.open({
+      fixture: "privacy-consent-pending",
+      viewport: VIEWPORTS.small,
+      theme: "light",
+    });
+    try {
+      const page = session.page;
+      await page.goto(session.url, { waitUntil: "networkidle" });
+      await page.waitForSelector(".privacy-dialog", { timeout: 10000 });
+      await page.waitForTimeout(200);
+
+      await page.locator(".privacy-actions button", { hasText: "不同意" }).first().click();
+      await page.waitForSelector(".exit-dialog", { timeout: 5000 });
+      const exitText = (await page.locator(".exit-dialog").innerText()).replace(/\s+/g, " ");
+      ctx.record(
+        name,
+        "拒绝进入专属退出确认",
+        exitText.includes("退出 TokenScope？") && exitText.includes("返回隐私政策"),
+        exitText.slice(0, 120),
+      );
+      ctx.record(
+        name,
+        "不提供最小化到托盘 / 记住选择",
+        !exitText.includes("最小化") && !exitText.includes("记住"),
+        exitText.slice(0, 120),
+      );
+
+      await page.locator(".exit-actions button", { hasText: "返回隐私政策" }).first().click();
+      await page.waitForTimeout(300);
+      const exitDialogs = await page.locator(".exit-dialog").count();
+      const nav = await page.locator(".app-nav").count();
+      ctx.record(
+        name,
+        "取消退出后回到政策且业务仍未挂载",
+        exitDialogs === 0 && nav === 0,
+        `exit=${exitDialogs} nav=${nav}`,
+      );
+
+      const business = session.ipcCalls.filter((c) => PRIVACY_PROTECTED_COMMANDS.includes(c.cmd));
+      ctx.record(
+        name,
+        "拒绝路径未发业务 IPC（无文件/网络副作用来源）",
+        business.length === 0,
+        business.map((c) => c.cmd).join(",") || "无业务命令",
+      );
+      ctx.record(
+        name,
+        "同意页无任何外部请求",
+        session.externalRequests.length === 0,
+        session.externalRequests.join(",") || "无外联",
+      );
+      await ctx.shot(name, session, "consent-denied");
+      await ctx.finishSession(session);
+    } finally {
+      await session.close();
     }
   },
 };

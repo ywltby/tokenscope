@@ -28,6 +28,12 @@ TokenScope 是长期查看 AI 用量、请求明细和估算费用的桌面工�
 
 浅色和深色是两套同等完整的主题。颜色只通过语义 token 使用，集中定义在 `frontend/src/styles/tokens.css`，由 Naive UI `themeOverrides`（`naiveTheme.ts`）与 ECharts 适配器（`chartTheme.ts`）同步消费；组件中禁止散落十六进制值。
 
+### 首屏与隐私同意引导期（2026-10-10）
+
+引导期（首次启动、无有效同意记录）**不读取用户持久化偏好**：首帧由 `frontend/public/theme-boot.js` 只按系统明暗写 `html[data-theme]`，引导壳 `App.vue` 同样只消费系统明暗。用户保存的主题/颜色偏好在后端 Ready 之后、业务主应用挂载之前由 `lib/themePreference.ts` 的 `applyResolvedThemeAttribute()` 显式恢复；因此进入主界面的一瞬间可能出现一次"系统 → 偏好"的主题切换，这是有意行为，不作为首帧闪烁缺陷处理。
+
+引导期界面只使用本文的语义 token 与浮层玻璃配方（`--ts-surface-elevated` + `--ts-glass-blur-popover` + `--ts-radius-popover`）：政策弹窗（`.privacy-dialog`，宽度上限 640px、正文区域独立滚动）与未同意的退出确认（`.exit-dialog`，420px，与关闭确认同规格）。`NGlobalStyle` 在同一文档内只注入一份（由引导壳持有，业务主应用 `MainApp.vue` 不再渲染，避免 naive 的重复实例警告）；政策全文用文本插值渲染，不使用 `v-html`、不加载远程资源，第三方链接只作纯文本展示。
+
 ### 语义色
 
 | Token | 浅色 | 深色 | 用途 |
@@ -259,7 +265,8 @@ Token 显示颜色提供输入、输出、缓存写、缓存命中四个颜色�
 
 - `frontend/src/styles/tokens.css`：语义色、间距、圆角、阴影、字体、`.ts-card` / `.ts-segmented` 等公共样式。
 - `frontend/src/styles/naiveTheme.ts`、`chartTheme.ts`：与 tokens.css 同值同步。
-- `frontend/src/App.vue`：吸顶玻璃导航与整体滚动容器。
+- `frontend/src/App.vue`：隐私同意引导壳（检查 / 政策 / 退出确认三态；业务主应用在后端 Ready 后动态挂载）。
+- `frontend/src/MainApp.vue`：吸顶玻璃导航与整体滚动容器（同意之后的业务主应用）。
 - `frontend/src/components/`、`frontend/src/views/`：按本文契约调整。
 
 交付前验收：1280×820 与 980×620；浅色与深色；导航栏下有内容滚过时的玻璃效果；长模型/渠道名；无缓存、旧缓存、部分价格、未知价格；零值与极小非零金额；tooltip 靠近窗口边缘；键盘操作；100/125/150% 缩放；图例和数据表一致。完成验收需要真实截图或可复现步骤，不能以"编译通过"代替视觉验收。

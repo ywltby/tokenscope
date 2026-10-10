@@ -2,6 +2,7 @@
 //! 全部数据逻辑在根 crate 的 report 管线（CLI/GUI 同源）。
 
 mod commands;
+mod privacy;
 mod window_state;
 
 #[cfg(feature = "acceptance")]
@@ -9,6 +10,7 @@ mod acceptance;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tauri::{
     Emitter, Manager,
@@ -16,6 +18,49 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_autostart::MacosLauncher;
+
+use privacy::{RuntimeFlags, RuntimeStep};
+
+/// SF06 + P03：日志运行时状态（managed state）。
+///
+/// 未同意前**不**创建 `logs` 目录、不安装全局 subscriber，也不建立永久
+/// stderr subscriber 阻挡后续 logger；同意后由 [`initialize_business_runtime`]
+/// 初始化一次，WorkerGuard 随本 holder 存活至进程退出（不随局部函数返回丢弃）。
+pub(crate) struct LogState(Mutex<Option<tokenscope::logging::Logging>>);
+
+impl LogState {
+    fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    /// 当前状态：未初始化时为 `pending`（前端只显示非阻断通知，不报故障）。
+    pub(crate) fn status(&self) -> tokenscope::logging::LogInitStatus {
+        match self.lock().as_ref() {
+            Some(logging) => logging.status.clone(),
+            None => tokenscope::logging::LogInitStatus {
+                state: "pending",
+                dir: None,
+                message: None,
+            },
+        }
+    }
+
+    /// 单次初始化（重复调用返回既有状态，不重复安装 subscriber）。
+    fn initialize(&self) -> tokenscope::logging::LogInitStatus {
+        let mut guard = self.lock();
+        if let Some(logging) = guard.as_ref() {
+            return logging.status.clone();
+        }
+        let logging = tokenscope::logging::try_init("gui");
+        let status = logging.status.clone();
+        *guard = Some(logging);
+        status
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<tokenscope::logging::Logging>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
 
 pub fn run() {
     // RC10：验收构建在**任何路径被解析之前**确认隔离根。缺失/非法直接退出
@@ -29,13 +74,8 @@ pub fn run() {
             std::process::exit(2);
         }
     };
-    // SF06：日志初始化可失败——降级不阻断窗口创建；WorkerGuard 仍与进程
-    // 同生命周期（run 阻塞至退出）。状态经 managed state 暴露给前端。
-    let logging = tokenscope::logging::try_init("gui");
-    let log_status = logging.status;
-    let _log_guard = logging.guard;
-    let t_boot = std::time::Instant::now();
-    log::info!("TokenScope 启动（GUI）");
+    // P03：未同意前零业务副作用——日志初始化（建 logs 目录、打开日志文件）
+    // 延后到同意之后的单次业务初始化；引导阶段只在内存里维护状态。
     // RC10：验收构建把 WebView 用户数据目录与 identifier 也指向隔离根，
     // 这样首帧主题/恢复行为不受真实 localStorage 干扰，且能与普通实例并存。
     #[allow(unused_mut)]
@@ -54,6 +94,9 @@ pub fn run() {
             None,
         ))
         .invoke_handler(tauri::generate_handler![
+            privacy::privacy_bootstrap,
+            privacy::privacy_accept,
+            privacy::privacy_exit_resolve,
             commands::summarize,
             commands::list_events,
             commands::query_begin,
@@ -81,17 +124,12 @@ pub fn run() {
         .setup(move |app| {
             #[cfg(feature = "acceptance")]
             acceptance::create_windows(app)?;
-            // SF06：日志状态存入 managed state，App 挂载后经
-            // startup_diagnostics 只读获取并展示非阻断通知。
-            app.manage(log_status);
-            restore_window_state(app.handle())?;
-            setup_tray(app.handle())?;
-            start_window_state_saver(app.handle());
-            start_price_auto_sync();
-            log::info!(
-                "GUI 初始化完成（窗口状态/托盘/自同步线程），{} ms",
-                t_boot.elapsed().as_millis()
-            );
+            // 最小引导初始化：只注册内存容器与状态，零业务副作用。
+            // 窗口事件可能随时到达，先把 holder 注册好（否则 app.state 会 panic）；
+            // 日志/窗口恢复/托盘/价格线程一律等同意后的单次业务初始化。
+            install_window_state_holder(app.handle());
+            app.manage(LogState::new());
+            app.manage(privacy::PrivacyState::new());
             Ok(())
         })
         // 关闭行为三态（关闭确认与配置文件计划）：配置了默认动作（设置页或
@@ -105,14 +143,24 @@ pub fn run() {
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
-                if let Some(w) = window.get_webview_window("main") {
-                    // 仅更新内存并置脏（落盘交给每秒 saver 或退出前的最终保存）。
-                    update_window_state(&w);
-                    request_close(&w);
+                // P02/P03：未同意（非 Ready）时不读 close_action、不写窗口状态、
+                // 不最小化——只记录待处理标记并提示前端显示退出确认。
+                match privacy::close_event_action(privacy::phase_of(window.app_handle())) {
+                    privacy::WindowEventAction::Business => {
+                        if let Some(w) = window.get_webview_window("main") {
+                            // 仅更新内存并置脏（落盘交给每秒 saver 或退出前的最终保存）。
+                            update_window_state(&w);
+                            request_close(&w);
+                        }
+                    }
+                    _ => privacy::request_exit_prompt(window.app_handle()),
                 }
             }
             tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) => {
-                if let Some(w) = window.get_webview_window("main") {
+                if privacy::geometry_event_action(privacy::phase_of(window.app_handle()))
+                    == privacy::WindowEventAction::Business
+                    && let Some(w) = window.get_webview_window("main")
+                {
                     update_window_state(&w);
                 }
             }
@@ -132,16 +180,38 @@ fn window_state_shared() -> SharedState {
     Arc::new(Mutex::new(None))
 }
 
-fn restore_window_state(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let path = window_state::state_path().ok();
-    let loaded = path.as_deref().and_then(|p| match window_state::load(p) {
-        Ok(ws) => ws,
-        Err(e) => {
-            log::warn!("窗口状态读取失败，使用默认尺寸: {e:#}");
-            None
-        }
+/// P03：只注册窗口状态的内存容器（setup 期调用，纯内存、零磁盘/窗口副作用）。
+fn install_window_state_holder(app: &tauri::AppHandle) {
+    app.manage(SharedStateHolder {
+        state: window_state_shared(),
+        dirty: Arc::new(AtomicBool::new(false)),
     });
-    if let (Some(win), Some(ws)) = (app.get_webview_window("main"), loaded.clone()) {
+}
+
+/// P03：读取窗口状态文件（纯 IO，调用方须在后台线程）。
+fn load_window_state() -> (Option<window_state::WindowState>, Vec<String>) {
+    let mut diagnostics = Vec::new();
+    let path = match window_state::state_path() {
+        Ok(p) => p,
+        Err(e) => {
+            diagnostics.push(format!("无法定位窗口状态路径，本次使用默认尺寸：{e:#}"));
+            return (None, diagnostics);
+        }
+    };
+    match window_state::load(&path) {
+        Ok(ws) => (ws, diagnostics),
+        Err(e) => {
+            diagnostics.push(format!("窗口状态读取失败，本次使用默认尺寸：{e:#}"));
+            (None, diagnostics)
+        }
+    }
+}
+
+/// P03：把已读取的窗口状态应用到窗口并初始化内存基线（**主线程**调用）。
+fn apply_loaded_window_state(app: &tauri::AppHandle, loaded: Option<window_state::WindowState>) {
+    let Some(ws) = loaded else { return };
+    *state_mutex(app).lock().unwrap_or_else(|e| e.into_inner()) = Some(ws.clone());
+    if let Some(win) = app.get_webview_window("main") {
         if ws.maximized {
             let _ = win.maximize();
         } else {
@@ -149,14 +219,100 @@ fn restore_window_state(app: &tauri::AppHandle) -> tauri::Result<()> {
             let _ = win.set_position(tauri::PhysicalPosition::new(ws.x, ws.y));
         }
     }
-    app.manage(SharedStateHolder {
-        state: window_state_shared(),
-        dirty: Arc::new(AtomicBool::new(false)),
-    });
-    if let Some(ws) = loaded {
-        *state_mutex(app).lock().unwrap() = Some(ws);
+}
+
+/// 在窗口主线程执行并取回结果（Tauri 的窗口 API 只能在主线程调用）。
+pub(crate) fn on_main_thread<T: Send + 'static>(
+    app: &tauri::AppHandle,
+    work: impl FnOnce(&tauri::AppHandle) -> T + Send + 'static,
+) -> Result<T, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let app_for_main = app.clone();
+    app.run_on_main_thread(move || {
+        let out = work(&app_for_main);
+        let _ = tx.send(out);
+    })
+    .map_err(|e| format!("调度主线程任务失败: {e}"))?;
+    rx.recv_timeout(Duration::from_secs(30))
+        .map_err(|e| format!("等待主线程任务失败: {e}"))
+}
+
+/// P03：同意成立后的**单次**业务初始化——只补 [`RuntimeFlags`] 未完成的步骤。
+///
+/// 必须在后台线程调用（含磁盘 IO 与线程启动）；窗口 API 经主线程调度。
+/// 返回非阻断诊断（日志降级、托盘失败等）；Err = 关键失败（主线程不可用），
+/// 此时保持闸门关闭，用户重试时只补未完成部分。
+pub(crate) fn initialize_business_runtime(
+    app: &tauri::AppHandle,
+    flags: &mut RuntimeFlags,
+) -> Result<Vec<String>, String> {
+    let t0 = std::time::Instant::now();
+    let mut diagnostics = Vec::new();
+
+    // 1) 文件日志：失败按 SF06 的非阻断降级路径（stderr / 关闭输出）。
+    if !flags.done(RuntimeStep::Logging) {
+        let status = app.state::<LogState>().initialize();
+        flags.mark(RuntimeStep::Logging);
+        if status.state != "ok" {
+            diagnostics.push(
+                status
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "文件日志不可用（已降级）".to_string()),
+            );
+        }
+        log::info!("日志系统初始化：state={}", status.state);
     }
-    Ok(())
+
+    // 2) 窗口状态：读取在后台（本函数已在后台线程），应用到窗口在主线程。
+    if !flags.done(RuntimeStep::WindowState) {
+        let (loaded, read_diagnostics) = load_window_state();
+        diagnostics.extend(read_diagnostics);
+        match on_main_thread(app, move |app| apply_loaded_window_state(app, loaded)) {
+            Ok(()) => flags.mark(RuntimeStep::WindowState),
+            Err(e) => {
+                log::warn!("窗口状态恢复失败: {e}");
+                return Err(format!("窗口初始化失败：{e}"));
+            }
+        }
+    }
+
+    // 3) 托盘（同意后才创建；失败只报诊断，应用仍可用）。
+    if !flags.done(RuntimeStep::Tray) {
+        match on_main_thread(app, |app| setup_tray(app).map_err(|e| e.to_string())) {
+            Ok(Ok(())) => flags.mark(RuntimeStep::Tray),
+            Ok(Err(e)) => {
+                log::warn!("托盘创建失败: {e}");
+                diagnostics.push(format!(
+                    "托盘图标创建失败：{e}（应用仍可用；关闭窗口会询问最小化或退出）"
+                ));
+            }
+            Err(e) => {
+                log::warn!("托盘初始化调度失败: {e}");
+                return Err(format!("托盘初始化失败：{e}"));
+            }
+        }
+    }
+
+    // 4) 窗口状态节流保存线程（一次）。
+    if !flags.done(RuntimeStep::Saver) {
+        start_window_state_saver(app);
+        flags.mark(RuntimeStep::Saver);
+    }
+
+    // 5) 价格自动同步线程：默认开启、按快照到期判断、每小时轮询；
+    //    首次等待 120 秒从**业务解锁**开始计时（线程在这里才启动）。
+    if !flags.done(RuntimeStep::PriceSync) {
+        start_price_auto_sync(app.clone());
+        flags.mark(RuntimeStep::PriceSync);
+    }
+
+    log::info!(
+        "业务初始化完成（日志/窗口/托盘/自同步线程，剩余步骤 {}），{} ms",
+        flags.pending().len(),
+        t0.elapsed().as_millis()
+    );
+    Ok(diagnostics)
 }
 
 struct SharedStateHolder {
@@ -424,11 +580,12 @@ fn start_window_state_saver(app: &tauri::AppHandle) {
 // ── 价格定时同步（M11）──────────────────────────────────
 // 默认开启、每 24h 检查一次：距上次成功同步 ≥24h 则后台同步双源并重建
 // 索引。轮询而非精确定时（系统休眠会漂移）；关闭开关后完全不联网。
+// P03：线程只在业务解锁（Ready）后启动，未同意时不联网、不读价格快照。
 const PRICE_SYNC_INTERVAL_HOURS: i64 = 24;
 
-fn start_price_auto_sync() {
+fn start_price_auto_sync(app: tauri::AppHandle) {
     std::thread::spawn(move || {
-        // 首查延迟 2 分钟，避开启动瞬间的磁盘与网络竞争。
+        // 首查延迟 2 分钟，避开启动瞬间的磁盘与网络竞争；从业务解锁开始计时。
         std::thread::sleep(std::time::Duration::from_secs(120));
         loop {
             // RC10：定位不到数据目录时**不**退回当前工作目录（那会把
@@ -445,15 +602,19 @@ fn start_price_auto_sync() {
                 log::warn!("设置读取失败，价格自动同步本轮按离线处理: {e:#}");
             }
             let modelsdev_snapshot = tokenscope::report::modelsdev_file_path(None);
-            let (due, age_note) = match last_sync_age_hours(&modelsdev_snapshot) {
-                Ok(hours) => (hours >= PRICE_SYNC_INTERVAL_HOURS, format!("{hours}h")),
-                Err(reason) => (true, format!("未知（{reason}）")),
+            let (age_hours, age_note) = match last_sync_age_hours(&modelsdev_snapshot) {
+                Ok(hours) => (Some(hours), format!("{hours}h")),
+                Err(reason) => (None, format!("未知（{reason}）")),
             };
+            // P02/P03：闸门也是这一层的判据——非 Ready（含退出中）永不联网。
+            let phase = privacy::phase_of(&app);
+            let run = privacy::price_sync_due(phase, auto, age_hours, PRICE_SYNC_INTERVAL_HOURS);
             log::debug!(
-                "价格同步轮询：auto={auto} 距上次同步={age_note}（阈值 {PRICE_SYNC_INTERVAL_HOURS}h）→ {}",
-                if auto && due { "同步" } else { "跳过" }
+                "价格同步轮询：phase={} auto={auto} 距上次同步={age_note}（阈值 {PRICE_SYNC_INTERVAL_HOURS}h）→ {}",
+                phase.as_str(),
+                if run { "同步" } else { "跳过" }
             );
-            if auto && due {
+            if run {
                 let t = std::time::Instant::now();
                 log::info!("价格自动同步开始（距上次同步 {age_note}）");
                 match tokenscope::modelsdev::sync(&tokenscope::report::modelsdev_file_path(None)) {

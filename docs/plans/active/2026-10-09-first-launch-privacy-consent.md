@@ -1,11 +1,10 @@
 # TokenScope 首次启动隐私同意实施计划
 
 - 日期：2026-10-09
-- 状态：待确认，未实施
+- 状态：**已实施（P01–P06 代码与自动化验收完成，2026-10-10）；原生时序与发布验收待验，计划保持 active**
 - 只读核对基线：main / 9b4c29b0bc2838108f8b52acdbff1bed0ab39d42
 - 拟入库位置：docs/plans/active/2026-10-09-first-launch-privacy-consent.md
-- 本交付只包含方案；未修改产品实现，未提交或推送仓库
-- 仓库规范：已阅读 AGENTS.md、CLAUDE.md、DESIGN.md 与 docs/plans/README.md。实际实施须先写失败测试，再实现；各任务须记录测试名、验证命令和证据。当前所有任务均未完成
+- 仓库规范：已阅读 AGENTS.md、CLAUDE.md、DESIGN.md 与 docs/plans/README.md。实际实施先写失败测试再实现；各任务记录测试名、验证命令与证据（见文末执行记录）。**未验项在文末单列，不写作通过**
 
 ## 一 目标
 
@@ -324,4 +323,59 @@ UI/原生验收按已有脚本的实际参数运行，扩展具名契约并记�
 - 政策说明与实际打包行为一致，Windows 原生时序证据成立
 - 经用户确认实施后才改产品代码；提交与发布仍按当时用户指示执行，本计划不构成发布授权
 - 完成验收后再按仓库规范归档计划，更新 docs/plans/README.md 状态与完成时间，不提前标完成
+
+## 十一 执行记录（2026-10-10）
+
+实施基线 `78d3266`（工作区含用户其他计划未提交改动，本计划只提交自己的文件）。
+
+### P01 配置字段与严格引导读取（完成）
+
+- 代码：`src/settings.rs`（顶层 `privacy_policy_accepted`（serde 默认 false）、`ConsentRead`、`read_consent`（NotFound 与其他 I/O 分道）、`accept_privacy_policy`（复用 SF02 事务锁）、模板字段说明）、`tests/settings_transactions.rs`
+- 测试（全部通过）：`privacy_missing_toml_requires_consent`、`privacy_missing_field_and_false_require_consent`、`privacy_valid_true_allows_bootstrap`、`privacy_legacy_json_never_grants_bootstrap`、`privacy_corrupt_or_unreadable_settings_fail_closed`、`privacy_accept_preserves_existing_settings`、`privacy_accept_migrates_legacy_after_user_action`、`privacy_accept_save_failure_keeps_gate_closed`、`privacy_concurrent_updates_preserve_acceptance`
+- 命令：`cargo test --locked --workspace privacy`（9 项，含 4 项事务用例）；`cargo test --locked --test settings_transactions`
+
+### P02 后端生命周期和所有入口闸门（完成）
+
+- 代码：新增 `src-tauri/src/privacy.rs`（Phase 状态机、单飞门 + Condvar 等待落定、`require_ready`、`privacy_bootstrap` / `privacy_accept` / `privacy_exit_resolve`、`BOOTSTRAP_COMMANDS` / `PROTECTED_COMMANDS` 分类表、真值 DTO）；`src-tauri/src/lib.rs` 注册引导命令；`src-tauri/src/commands.rs` 全部 23 个业务命令首行调用统一 guard（拒绝时**不进入** `run_blocking` 业务闭包）
+- 测试：`privacy_all_business_commands_reject_before_ready`（扫描 `generate_handler!` 全表：每个命令必须在分类表内、受保护命令必须含 guard 调用）、`privacy_guard_rejects_without_calling_business_closure`、`privacy_accept_publishes_ready_only_after_atomic_save`、`privacy_double_accept_starts_runtime_once`、`privacy_reload_bootstrap_is_idempotent`、`privacy_late_response_cannot_reopen_exiting_app`
+- 命令：`cargo test --locked --manifest-path src-tauri/Cargo.toml privacy`
+
+### P03 延后所有启动副作用（完成）
+
+- 代码：`src-tauri/src/lib.rs`（`LogState` holder + `initialize_business_runtime`（只补 `RuntimeFlags` 未完成步骤）、`install_window_state_holder`、窗口事件按阶段分流、价格线程改为同意后启动且每轮经 `price_sync_due` 判定）；`privacy.rs`（`RuntimeFlags`/`RuntimeStep`、`WindowEventAction`、`price_sync_due`）
+- 行为：未同意时不创建 `logs` 目录、不恢复/保存窗口状态、不建托盘、不起价格线程；日志状态 `pending` 只在 Ready 后经 `startup_diagnostics` 读取
+- 测试：`privacy_bootstrap_has_no_business_io`、`privacy_window_events_before_ready_do_not_persist`、`privacy_timer_cannot_sync_while_waiting_for_consent`、`privacy_runtime_initialization_runs_once`、`privacy_saved_consent_then_restart_recovers`
+- 命令：`cargo test --locked --manifest-path src-tauri/Cargo.toml privacy`；`cargo test --locked --workspace logging`
+
+### P04 首屏隔离与本地政策（完成）
+
+- 代码：`frontend/src/App.vue`（引导壳：检查/政策/阻塞三态 + Ready 后 `defineAsyncComponent` 动态挂载）、`frontend/src/MainApp.vue`（原 App.vue 整体迁入）、`frontend/src/components/PrivacyConsentDialog.vue`（遮罩与 Esc 不关闭、不预选同意）、`frontend/src/lib/privacyGate.ts`（引导状态 + 单飞）、`frontend/src/lib/policyMarkdown.ts`（安全确定性渲染，链接降级为纯文本）、`frontend/public/theme-boot.js`（首帧只跟随系统，不读偏好）、`src-tauri/src/privacy.rs`（`include_str!("../../docs/privacy.md")` + `PolicyInfo`）
+- 测试：`bootstrap_does_not_import_or_mount_business_app`、`consent_screen_makes_only_bootstrap_calls`、`consent_screen_does_not_access_local_storage`、`policy_is_complete_and_available_offline`、`accept_waits_for_backend_ready`、`failed_accept_keeps_policy_visible`、`repeated_accept_is_single_flight`、`accepted_start_restores_preferences_before_main_mount`（偏好读取早于业务挂载）；另 `renders_headings_list_and_paragraphs_in_source_order` 等渲染用例
+- 命令：`pnpm --dir frontend test`（31 文件 / 348 测试通过）、`pnpm --dir frontend typecheck`、`format:check`、`build` 全绿
+- 有意行为变化：首帧主题不再读持久化偏好（引导期跟随系统），偏好恢复改为 Ready 后、业务挂载前的显式 `applyResolvedThemeAttribute()`；`theme.test.ts` 的 `preference_resolution_is_shared` 已按新语义改写
+
+### P05 拒绝和全关闭路径（完成）
+
+- 代码：`frontend/src/components/PrivacyExitDialog.vue`（专属确认：无记忆、无最小化；Esc/遮罩=取消）、`privacyGate.ts`（`requestExitPrompt`/`confirmExit`/`cancelExit`，保存期间只记待处理）、`src-tauri/src/privacy.rs`（`privacy_exit_resolve`：`exit=true` 直接 `app.exit(0)`，不读 `close_action`、不写设置、不做窗口状态最终保存）、`lib.rs`（非 Ready 的 `CloseRequested` 只置待处理标记并 emit，前端监听前到达的请求由 bootstrap 响应的 `exitPromptPending` 恢复）
+- 测试：`reject_opens_exit_confirmation`、`cancel_exit_returns_to_blocked_policy`、`close_before_listener_is_recovered_by_bootstrap`、`close_while_saving_does_not_race_accept`、`privacy_window_events_before_ready_do_not_persist`、`privacy_late_response_cannot_reopen_exiting_app`、`ready_close_preserves_existing_behavior`（原 19 项关闭回归迁入 `MainApp.test.ts` 后仍全绿）
+- 命令：`cargo test --locked --manifest-path src-tauri/Cargo.toml`；`pnpm --dir frontend test`
+
+### P06 文档和验收工具（完成，含 1 处真实缺陷）
+
+- 文档：`docs/privacy.md`（先同意后读取/同步的实际行为、引导期必要例外、同步计时起算点、控制手段与本地性说明、程序内同意机制已实现）、`docs/plans/d5-acceptance-checklist.md`（新增 5.6–5.8，改写 2.2 / 3.4 / 5.4）
+- 契约与夹具：`frontend/scripts/fixtures/ui-contracts.mjs`（引导命令基线 + `privacy-consent-pending` fixture + `PRIVACY_PROTECTED_COMMANDS`）、`frontend/scripts/contracts/interaction-contracts.mjs`（`privacy_no_business_effects_before_acceptance`、`privacy_denied_ipc_has_no_filesystem_or_network_effect`；`prepaint_theme_has_correct_canvas` 按 P04 新语义改写为"首帧只跟随系统、同意后恢复偏好"）、`frontend/scripts/native-acceptance.mjs`（场景 `privacy-consent-gate`、`privacy-accept-restart` + 启动前删除同意记录的 mutate）、`scripts/prepare-native-acceptance.ps1`（隔离根 settings.toml 预置 `privacy_policy_accepted = true` 作为已同意基线，未同意场景由驱动脚本删除该行构造）、`frontend/scripts/check-app-scroll.mjs`（样式抽取改指向 `MainApp.vue`）、Rust 侧 `privacy_packaged_policy_matches_source`（打包政策与源文件逐字一致 + 九章齐全 + 标题日期可解析）
+- 命令与结果：
+  - `node frontend/scripts/check-ui-contracts.mjs --url http://127.0.0.1:1437 --phase verify --output qa-artifacts/privacy-consent --fixture normal --theme light --viewport 1280x820 --contract privacy_no_business_effects_before_acceptance,privacy_denied_ipc_has_no_filesystem_or_network_effect` → exit 0，两条契约各 8 条断言通过，`normal-light-1280x820` 硬约束全过
+  - `node frontend/scripts/check-ui-contracts.mjs … --viewport 980x620 --contract prepaint_theme_has_correct_canvas,privacy_no_business_effects_before_acceptance,privacy_denied_ipc_has_no_filesystem_or_network_effect` → exit 0（`prepaint_theme_has_correct_canvas` 25 条断言、两条隐私契约各 8 条）
+  - 首次运行契约时捕获真实回归：引导壳与主应用各自渲染 `NGlobalStyle`，naive 报 "More than one n-global-style exist"（`no_console_error` 硬失败）。已改为全局样式只在引导壳注入一份，复跑转绿
+  - 改造 `prepaint_theme_has_correct_canvas` 时另修正两处量测口径：首帧在 dev 下入口被拦住、CSS 未加载，画布颜色改为"样式可用才判定"；终态 `body` 背景会被 naive 全局样式覆盖，改用主题语义 token `--ts-canvas` 判定
+  - `node --check` 三个验收脚本通过；`cargo test --locked --manifest-path src-tauri/Cargo.toml privacy_packaged` 通过
+
+### 未验项（不得写作通过）
+
+1. 原生（release + `acceptance` 构建）场景 `privacy-consent-gate`、`privacy-accept-restart` 未执行——需构建隔离产物并真实驱动窗口/CDP
+2. 验收矩阵第 1 项"超过原有 120 秒门槛仍无价格请求"的真实等待观察未执行（已有 `price_sync_due` 单测与线程启动时序保证，但缺少原生计时证据）
+3. 浏览器矩阵全量复跑（60 场景）未执行：本轮只跑 `normal-light-1280x820` 单场景 + 两条新契约
+4. Windows NSIS 安装/升级（D5 2.x）与 100%/125%/150% 缩放下的政策弹窗排版现场未验
+5. `pnpm --dir frontend build` 与 `tauri build` 的打包产物内政策文本核对（`include_str!` 已由 Rust 测试守住源文件一致性，但未在安装包内二次核对）
 

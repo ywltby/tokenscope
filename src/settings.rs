@@ -52,6 +52,11 @@ pub struct AgentSources {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
+    /// P01：隐私政策同意记录。缺失/false = 未同意，启动只显示隐私政策；
+    /// 仅在用户点击「同意并继续」并原子保存成功后才由程序写为 true。
+    /// 引导判定用 [`read_consent`]（严格读取），默认值不是授权。
+    #[serde(default)]
+    pub privacy_policy_accepted: bool,
     /// 定时自动同步在线价格（默认开启，每 24h）。
     #[serde(default = "default_true")]
     pub price_auto_sync: bool,
@@ -82,6 +87,7 @@ impl Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            privacy_policy_accepted: false,
             price_auto_sync: true,
             sources: AgentSources::default(),
             close_action: None,
@@ -154,6 +160,58 @@ pub fn load(path: &Path) -> Result<Settings> {
     Ok(s)
 }
 
+// ── P01：首次启动隐私同意（严格读取 + 事务保存）─────────────────
+//
+// 不变量：授权只能来自「真实存在且解析成功的 settings.toml 中该字段为 true」。
+// 文件缺失、遗留 settings.json、默认值、损坏/不可读文件都**不是**同意——
+// 引导判定绝不调用 load().unwrap_or_default()，也绝不用 Path::exists()
+// 把权限/IO 错误吞成「新安装」。
+
+/// [`read_consent`] 的判定结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsentRead {
+    /// 真实 TOML 在位且同意字段为 true。
+    Granted,
+    /// 真实 TOML 在位，但同意字段缺失或为 false。
+    NotGranted,
+    /// 没有 settings.toml：首次安装、删除配置、只剩遗留 settings.json 都算这里。
+    Missing,
+    /// 路径无法定位/读取/解析（权限、路径被目录占用、字段类型错误等）——按封闭处理。
+    Unreadable(String),
+}
+
+/// P01：引导专用的**严格**同意读取：只认磁盘上的真实 TOML。
+///
+/// 与 [`load`] 的区别：这里不导入遗留 json、不回退默认值，并区分
+/// 「NotFound（真的没有文件）」与「其它 I/O/解析错误（有文件但读不出来）」，
+/// 后者必须让引导显示「无法确认隐私设置」而不是当成新安装。
+pub fn read_consent(path: &Path) -> ConsentRead {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ConsentRead::Missing,
+        Err(e) => {
+            return ConsentRead::Unreadable(format!("读设置失败: {}（{e}）", path.display()));
+        }
+    };
+    match toml::from_str::<Settings>(&text) {
+        Ok(s) if s.privacy_policy_accepted => ConsentRead::Granted,
+        Ok(_) => ConsentRead::NotGranted,
+        Err(e) => ConsentRead::Unreadable(format!("设置解析失败: {}（{e}）", path.display())),
+    }
+}
+
+/// P01：用户点击「同意并继续」后的保存事务——沿用 SF02 事务锁，锁内基于
+/// **最新磁盘值**只把同意字段设为 true，原子替换成功后才算同意成立。
+///
+/// 失败（解析/写入/锁污染）不落盘也不改内存值：调用方必须保持闸门关闭。
+/// 遗留 json 的迁移只在这里发生（用户已明确同意之后）。
+pub fn accept_privacy_policy(path: &Path) -> Result<()> {
+    update(path, |s| {
+        s.privacy_policy_accepted = true;
+        Ok(())
+    })
+}
+
 /// 配置文件头注释：每次保存都随内容重写（GUI 保存会丢自定义注释，见头说明）。
 pub const SETTINGS_HEADER: &str = "\
 # TokenScope 设置文件（GUI 设置页与手工编辑共用；可直接编辑，保存后对下一次读取生效）
@@ -167,6 +225,14 @@ pub const SETTINGS_TEMPLATE: &str = "\
 # 本文件是图形设置页的唯一事实源：页面上的修改会写回这里，
 # 手动编辑保存后同样立即生效（每次读取都从磁盘加载）。
 # 注意：GUI 保存时会重写整个文件，自定义注释会丢失（字段说明以本模板为准）。
+#
+# privacy_policy_accepted = true | false
+#     隐私政策同意记录（默认 false）。缺失或 false 时，下一次启动先显示
+#     隐私政策并要求明确同意，之后才读取来源日志、建立缓存、写诊断日志与
+#     同步价格；不同意时应用不进入业务界面，可直接退出。
+#     该项只在应用内点击「同意并继续」且保存成功后由程序写入 true。
+#     删除本行或改为 false 会在下一次启动重新询问。本地文件不是防篡改的
+#     法律证明：手工写成 true 同样会被接受为「用户已知情」。
 #
 # price_auto_sync = true | false
 #     价格自动同步（默认开启，每 24h 检查一次；关闭后完全不联网）。
@@ -295,6 +361,7 @@ mod tests {
     fn test_settings_roundtrip_with_close_action() {
         let path = tmp("roundtrip");
         let s = Settings {
+            privacy_policy_accepted: false,
             price_auto_sync: false,
             close_action: Some(CloseAction::Minimize),
             sources: crate::settings::AgentSources {
@@ -480,6 +547,91 @@ mod tests {
         std::fs::write(&path, "price_auto_sync = false\nfuture_key = 123\n").unwrap();
         let s = load(&path).unwrap();
         assert!(!s.price_auto_sync);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    // ── P01：首次启动隐私同意（严格读取）─────────────────────
+
+    /// 没有 TOML（首次安装、删除配置）→ Missing；默认值本身不是授权。
+    #[test]
+    fn privacy_missing_toml_requires_consent() {
+        let path = tmp("privacy-missing");
+        assert_eq!(read_consent(&path), ConsentRead::Missing);
+        assert!(
+            !Settings::default().privacy_policy_accepted,
+            "默认值必须为未同意"
+        );
+        // load()（业务路径）与 read_consent（引导路径）对缺失文件都不产生授权
+        assert!(!load(&path).unwrap().privacy_policy_accepted);
+    }
+
+    /// 有效 TOML：字段缺失或显式 false 都要求同意。
+    #[test]
+    fn privacy_missing_field_and_false_require_consent() {
+        let path = tmp("privacy-field");
+        std::fs::write(&path, "price_auto_sync = false\n").unwrap();
+        assert_eq!(read_consent(&path), ConsentRead::NotGranted);
+        std::fs::write(&path, "privacy_policy_accepted = false\n").unwrap();
+        assert_eq!(read_consent(&path), ConsentRead::NotGranted);
+    }
+
+    /// 有效 TOML + true → 允许进入同意后的启动流程（重启不再询问）。
+    #[test]
+    fn privacy_valid_true_allows_bootstrap() {
+        let path = tmp("privacy-true");
+        std::fs::write(
+            &path,
+            "privacy_policy_accepted = true\nprice_auto_sync = false\n",
+        )
+        .unwrap();
+        assert_eq!(read_consent(&path), ConsentRead::Granted);
+        assert!(!load(&path).unwrap().price_auto_sync, "其余字段照常读取");
+    }
+
+    /// 遗留 json（即使其中写了 true）不构成授权：引导不读它，也不迁移。
+    #[test]
+    fn privacy_legacy_json_never_grants_bootstrap() {
+        let dir = tmp("privacy-legacy");
+        let dir = dir.parent().unwrap();
+        let legacy = dir.join("settings.json");
+        std::fs::write(&legacy, r#"{"privacy_policy_accepted": true}"#).unwrap();
+        assert_eq!(
+            read_consent(&dir.join("settings.toml")),
+            ConsentRead::Missing
+        );
+        assert!(legacy.exists(), "引导读取不得改动遗留文件");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 损坏 / 类型错误 / 路径被目录占用 → Unreadable（封闭），原文件字节不动。
+    #[test]
+    fn privacy_corrupt_or_unreadable_settings_fail_closed() {
+        let path = tmp("privacy-corrupt");
+        let corrupt = "privacy_policy_accepted = \"yes\"\nnot [valid";
+        std::fs::write(&path, corrupt).unwrap();
+        assert!(matches!(read_consent(&path), ConsentRead::Unreadable(_)));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            corrupt,
+            "引导读取不得改写原文件"
+        );
+
+        // 类型错误：字符串写进 bool 字段
+        std::fs::write(&path, "privacy_policy_accepted = \"true\"\n").unwrap();
+        let typed = read_consent(&path);
+        assert!(
+            matches!(typed, ConsentRead::Unreadable(_)),
+            "字段类型错误必须封闭而不是当作未同意/默认值: {typed:?}"
+        );
+
+        // 路径被目录占用：exists() = true 但读不出来 → Unreadable，不是 Missing
+        let as_dir = path.parent().unwrap().join("settings-as-dir.toml");
+        std::fs::create_dir_all(&as_dir).unwrap();
+        let blocked = read_consent(&as_dir);
+        assert!(
+            matches!(&blocked, ConsentRead::Unreadable(m) if m.contains("读设置失败")),
+            "I/O 错误不得被吞成「新安装」: {blocked:?}"
+        );
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }

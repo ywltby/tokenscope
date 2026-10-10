@@ -4,7 +4,8 @@
 // 解析 ms-playwright 缓存 → 系统 Chrome → 系统 Edge，全部缺失时报错退出
 //（不回退 happy-dom——布局断言必须经过真实 Chromium）。
 //
-// 脚本从当前 App.vue 读取**实际** scoped 样式（.app-shell/.app-nav/
+// 脚本从当前主应用组件 MainApp.vue（P04 起 App.vue 是隐私引导壳，业务
+// 布局迁到 MainApp.vue）读取**实际** scoped 样式（.app-shell/.app-nav/
 // .scroll-container/.app-content/.banner-slot）与 styles/tokens.css，
 // 注入一个不含任何用户数据的 2200px 合成长页面，在 1280×820 与
 // 980×620、浅色/深色下断言：
@@ -25,14 +26,14 @@ import { chromium } from "playwright-core";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const frontend = join(root, "frontend");
-const appVue = readFileSync(join(frontend, "src", "App.vue"), "utf8");
+const appVue = readFileSync(join(frontend, "src", "MainApp.vue"), "utf8");
 const tokensCss = readFileSync(join(frontend, "src", "styles", "tokens.css"), "utf8");
 
-// ── 从 App.vue 提取实际 scoped 样式（不复制修正后的 CSS 给测试通过）──
+// ── 从 MainApp.vue 提取实际 scoped 样式（不复制修正后的 CSS 给测试通过）──
 function extractStyle(cls) {
   const re = new RegExp(`\\.${cls}\\s*\\{([^}]*)\\}`, "m");
   const m = appVue.match(re);
-  if (!m) throw new Error(`App.vue 中未找到 .${cls} 样式（脚本依赖实际样式，禁止内嵌副本）`);
+  if (!m) throw new Error(`MainApp.vue 中未找到 .${cls} 样式（脚本依赖实际样式，禁止内嵌副本）`);
   return m[1].trim();
 }
 const styleShell = extractStyle("app-shell");

@@ -539,7 +539,14 @@ const scenarios = {
     context.ck.add("real_idle_exceeds_ttl", context.ev.actualIdleMs > 600000, `${context.ev.actualIdleMs} ms`);
     await scenarios["expire-finish"](context);
   },
-  /** §2 首帧：录制连续帧 + 页面实测（偏好来自隔离 profile 的真实持久化）。 */
+  /**
+   * §2 首帧：录制连续帧 + 页面实测（偏好来自隔离 profile 的真实持久化）。
+   *
+   * P04 语义（2026-10-10）：首帧只跟随**系统**明暗——同意之前不读持久化偏好，
+   * 因此 `--theme`（存储偏好）不影响首帧亮度断言，系统明暗由
+   * `--force-dark-mode` / `--force-light-mode` 通道决定（`--expect-theme`）。
+   * 存储偏好在点击「同意并继续」、后端 Ready 后才恢复（见 privacy-accept-restart）。
+   */
   async "first-frame"({ inst, ck, ev }) {
     if (!inst.framesPromise) throw new Error("first-frame 必须带 --frames（首帧要用连续帧取证，加载完成截图不算证据）");
     await inst.waitForData();
@@ -1279,6 +1286,140 @@ const scenarios = {
     await page.screenshot({ path: path.join(inst.opts.shots, "after-cancel.png") });
     ev.windowRect = await inst.windowInfo();
   },
+
+  /**
+   * P06 隐私闸门（未同意）：隔离根里没有同意记录（prepare 脚本写的
+   * settings.toml 不含 privacy_policy_accepted）→ 只显示政策；业务界面不挂载、
+   * 不产生业务文件；拒绝退出后进程结束且不留托盘/同意记录。
+   */
+  async "privacy-consent-gate"({ inst, ck, ev }) {
+    const page = inst.page;
+    const dataDir = path.join(inst.root, "tokenscope");
+    const settingsPath = path.join(dataDir, "settings.toml");
+    const businessFiles = () =>
+      listFiles(dataDir).filter((f) =>
+        /^(logs\/|cache\.db|window-state\.json|view-cache\.json|pricing-)/.test(f),
+      );
+
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+    await page.waitForTimeout(1500);
+    ev.settingsBefore = fs.readFileSync(settingsPath, "utf8");
+    ck.add(
+      "fixture_has_no_consent_record",
+      !/privacy_policy_accepted\s*=\s*true/.test(ev.settingsBefore),
+      "隔离根必须未写同意记录（否则测的不是引导态）",
+    );
+
+    ev.businessDomNodes = await page.locator(".app-nav, .page-head, .chart-canvas").count();
+    ck.add(
+      "business_ui_not_mounted_before_consent",
+      ev.businessDomNodes === 0,
+      `业务节点数=${ev.businessDomNodes}`,
+    );
+    const text = (await page.locator(".privacy-dialog").innerText()).replace(/\s+/g, " ");
+    ck.add(
+      "policy_visible_before_consent",
+      text.includes("TokenScope 隐私政策") &&
+        text.includes("同意并继续") &&
+        text.includes("不同意"),
+      text.slice(0, 120),
+    );
+
+    ev.businessFilesBeforeAccept = businessFiles();
+    ck.add(
+      "no_business_files_before_consent",
+      ev.businessFilesBeforeAccept.length === 0,
+      ev.businessFilesBeforeAccept.join(",") || "无业务文件",
+    );
+
+    // 拒绝 → 专属退出确认（无托盘/记忆选项）
+    await page.locator(".privacy-actions button", { hasText: "不同意" }).first().click();
+    await page.waitForSelector(".exit-dialog", { timeout: 5000 });
+    const exitText = (await page.locator(".exit-dialog").innerText()).replace(/\s+/g, " ");
+    ck.add(
+      "reject_opens_exit_confirmation",
+      exitText.includes("退出 TokenScope？") && exitText.includes("返回隐私政策"),
+      exitText.slice(0, 120),
+    );
+    ck.add(
+      "no_tray_or_remember_option",
+      !exitText.includes("最小化") && !exitText.includes("记住"),
+      exitText.slice(0, 120),
+    );
+
+    // 取消 → 回到政策，仍被阻断
+    await page.locator(".exit-actions button", { hasText: "返回隐私政策" }).first().click();
+    await page.waitForTimeout(500);
+    ev.navAfterCancel = await page.locator(".app-nav").count();
+    ck.add("cancel_exit_stays_blocked", ev.navAfterCancel === 0, `nav=${ev.navAfterCancel}`);
+
+    // 确认退出 → 进程结束、无托盘残留、无同意记录、无窗口状态落盘
+    await page.locator(".privacy-actions button", { hasText: "不同意" }).first().click();
+    await page.waitForSelector(".exit-dialog", { timeout: 5000 });
+    await page.locator(".exit-actions button", { hasText: "退出程序" }).first().click();
+    const deadline = Date.now() + 20000;
+    while (inst.proc.exitCode === null && Date.now() < deadline) await sleep(200);
+    ev.exitCode = inst.proc.exitCode;
+    ck.add("rejected_exit_closes_process", inst.proc.exitCode !== null, `exitCode=${inst.proc.exitCode}`);
+
+    ev.businessFilesAfterExit = businessFiles();
+    ck.add(
+      "rejection_leaves_no_business_files",
+      ev.businessFilesAfterExit.length === 0,
+      ev.businessFilesAfterExit.join(",") || "无业务文件",
+    );
+    ev.settingsAfter = fs.readFileSync(settingsPath, "utf8");
+    ck.add(
+      "rejection_writes_no_consent_record",
+      !/privacy_policy_accepted\s*=\s*true/.test(ev.settingsAfter),
+      "拒绝不得留下同意记录",
+    );
+    ev.rectAfterExit = (ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "mainrect"]).stdout || "").trim();
+    ck.add(
+      "no_tray_process_after_reject",
+      inst.proc.exitCode !== null && /MAINRECT none/i.test(ev.rectAfterExit),
+      ev.rectAfterExit || "无窗口",
+    );
+  },
+
+  /**
+   * P06 同意记录跨重启：点击「同意并继续」→ 原子落盘 + 业务初始化；
+   * 重启同一隔离根不再询问（第 9 条验收：有有效 true 时不询问）。
+   */
+  async "privacy-accept-restart"({ inst, ck, ev }) {
+    const page = inst.page;
+    const settingsPath = path.join(inst.root, "tokenscope", "settings.toml");
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+    await page.locator(".privacy-actions button", { hasText: "同意并继续" }).first().click();
+    await page.waitForSelector(".app-nav", { timeout: 60000 });
+    ev.settingsAfterAccept = fs.readFileSync(settingsPath, "utf8");
+    ck.add(
+      "accept_writes_consent_record",
+      /privacy_policy_accepted\s*=\s*true/.test(ev.settingsAfterAccept),
+      ev.settingsAfterAccept.split("\n")[0],
+    );
+    ev.consentDialogAfterAccept = await page.locator(".privacy-dialog").count();
+    ck.add(
+      "consent_dialog_closed_after_accept",
+      ev.consentDialogAfterAccept === 0,
+      `残留=${ev.consentDialogAfterAccept}`,
+    );
+
+    // 重启同一隔离根：不再询问（页面句柄必须重新取）
+    const info = await inst.launch(PORT + 1);
+    ev.relaunchPid = info.pid;
+    ev.relaunchPort = PORT + 1;
+    const page2 = inst.page;
+    await page2.waitForSelector(".app-nav", { timeout: 60000 });
+    await page2.waitForTimeout(1500);
+    ev.relaunchConsentDialog = await page2.locator(".privacy-dialog").count();
+    ck.add(
+      "restart_does_not_ask_again",
+      ev.relaunchConsentDialog === 0,
+      `重启后政策弹窗数=${ev.relaunchConsentDialog}`,
+    );
+    await page2.screenshot({ path: path.join(inst.opts.shots, "relaunch-ready.png") });
+  },
 };
 
 const labelToValue = (label) =>
@@ -1345,6 +1486,14 @@ async function main() {
     } : SCENARIO === "close-remember-failure" ? (r) => {
       const p = path.join(r, "tokenscope", "settings.toml");
       fs.writeFileSync(p, 'close_action = "minimize"\n' + fs.readFileSync(p, "utf8"), "utf8");
+    } : SCENARIO === "privacy-consent-gate" || SCENARIO === "privacy-accept-restart" ? (r) => {
+      // P06：这两个场景要"未同意"状态——删掉隔离根预置的同意记录
+      //（其余场景保留已同意基线，继续覆盖业务路径）。
+      const p = path.join(r, "tokenscope", "settings.toml");
+      const text = fs.readFileSync(p, "utf8");
+      const stripped = text.replace(/^[ \t]*privacy_policy_accepted[ \t]*=[ \t]*true[ \t]*\r?\n?/m, "");
+      if (stripped === text) throw new Error("隔离根 settings.toml 未含同意记录，无法构造未同意场景");
+      fs.writeFileSync(p, stripped, "utf8");
     } : undefined,
   });
 

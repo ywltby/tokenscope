@@ -18,6 +18,8 @@ use tokenscope::report::{
 };
 use tokenscope::settings::{CloseAction, Settings};
 
+use crate::privacy;
+
 pub fn parse_by(by: &str) -> Result<GroupBy, String> {
     match by {
         "day" => Ok(GroupBy::Day),
@@ -42,6 +44,7 @@ pub fn parse_agent(agent: Option<&str>) -> Result<Option<AgentKind>, String> {
 /// 丢到后台线程池，GUI 主线程零阻塞。
 #[tauri::command]
 pub async fn summarize(
+    app: tauri::AppHandle,
     by: String,
     days: Option<u32>,
     agent: Option<String>,
@@ -49,6 +52,8 @@ pub async fn summarize(
     from: Option<String>,
     to: Option<String>,
 ) -> Result<SummaryReport, String> {
+    // P02：业务闸门——未同意（非 Ready）时不进入采集/解析/缓存/网络。
+    privacy::require_ready(&privacy::state_of(&app))?;
     let opts = query_opts(&by, agent, days, tz, from, to)?;
     run_blocking("summarize", move || summary(&opts)).await
 }
@@ -58,6 +63,7 @@ pub async fn summarize(
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn list_events(
+    app: tauri::AppHandle,
     agent: Option<String>,
     days: Option<u32>,
     model: Option<String>,
@@ -69,6 +75,7 @@ pub async fn list_events(
     from: Option<String>,
     to: Option<String>,
 ) -> Result<EventList, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings()?;
     let opts = SummaryOptions {
         by: GroupBy::Day,
@@ -128,6 +135,7 @@ fn query_opts(
 /// 身份，返回 query_id 供汇总/明细（含分页）显式绑定。
 #[tauri::command]
 pub async fn query_begin(
+    app: tauri::AppHandle,
     by: String,
     days: Option<u32>,
     agent: Option<String>,
@@ -135,6 +143,7 @@ pub async fn query_begin(
     from: Option<String>,
     to: Option<String>,
 ) -> Result<tokenscope::query::QueryHandle, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     let opts = query_opts(&by, agent, days, tz, from, to)?;
     run_blocking("query_begin", move || {
         tokenscope::query::begin_query_handle(&opts)
@@ -144,7 +153,11 @@ pub async fn query_begin(
 
 /// SF04：从会话快照聚合汇总（不重新采集；generated_at = 冻结 as_of）。
 #[tauri::command]
-pub async fn query_summary(query_id: String) -> Result<SummaryReport, String> {
+pub async fn query_summary(
+    app: tauri::AppHandle,
+    query_id: String,
+) -> Result<SummaryReport, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("query_summary", move || {
         tokenscope::query::query_summary(&query_id)
     })
@@ -154,6 +167,7 @@ pub async fn query_summary(query_id: String) -> Result<SummaryReport, String> {
 /// SF04：从会话快照分页读取明细；游标校验 query_id/指纹/行位置归属。
 #[tauri::command]
 pub async fn query_events(
+    app: tauri::AppHandle,
     query_id: String,
     model: Option<String>,
     project: Option<String>,
@@ -161,6 +175,7 @@ pub async fn query_events(
     limit: Option<usize>,
     before: Option<String>,
 ) -> Result<EventList, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     let filter = EventFilter {
         model,
         project,
@@ -176,15 +191,20 @@ pub async fn query_events(
 
 /// SF06：启动诊断（只读）——App 挂载后取一次日志初始化状态，展示
 /// 非阻断通知；不触发任何重活。
+///
+/// P02/P03：日志在同意后才初始化，因此本命令同样受闸门保护（未 Ready
+/// 时诊断状态为 `pending`，没有业务含义）。
 #[tauri::command]
 pub fn startup_diagnostics(
-    status: tauri::State<tokenscope::logging::LogInitStatus>,
-) -> tokenscope::logging::LogInitStatus {
-    status.inner().clone()
+    app: tauri::AppHandle,
+) -> Result<tokenscope::logging::LogInitStatus, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    Ok(app.state::<crate::LogState>().status())
 }
 
 #[tauri::command]
-pub async fn source_status() -> Result<Vec<SourceStatus>, String> {
+pub async fn source_status(app: tauri::AppHandle) -> Result<Vec<SourceStatus>, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("source_status", move || {
         // AP02：严格读取——配置存在但坏掉时**拒绝**，绝不用默认来源顶替
         //（那会把用户停用的来源重新拉回统计，并谎报数据范围）。
@@ -302,7 +322,11 @@ pub(crate) fn close_decision_impl(loaded: anyhow::Result<Settings>) -> CloseDeci
 
 /// 设置页「关闭窗口时」：每次询问（None）/ 最小化到托盘 / 直接退出。
 #[tauri::command]
-pub async fn settings_set_close_action(action: Option<String>) -> Result<Option<String>, String> {
+pub async fn settings_set_close_action(
+    app: tauri::AppHandle,
+    action: Option<String>,
+) -> Result<Option<String>, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("settings_set_close_action", move || {
         let path = tokenscope::settings::settings_path()?;
         settings_set_close_action_impl(&path, action)
@@ -359,6 +383,7 @@ pub async fn close_resolve(
     minimize: bool,
     remember: bool,
 ) -> Result<(), String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     if remember {
         run_blocking("close_resolve", move || {
             let path = tokenscope::settings::settings_path()?;
@@ -396,6 +421,7 @@ fn persist_close_action(path: &std::path::Path, minimize: bool) -> anyhow::Resul
 /// 避免"打开空模板后旧设置被遮蔽"。
 #[tauri::command]
 pub async fn open_settings_file(app: tauri::AppHandle) -> Result<String, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     let path = tokenscope::settings::settings_path().map_err(|e| e.to_string())?;
     let path = run_blocking("open_settings_file", move || {
         tokenscope::settings::ensure_toml(&path)?;
@@ -412,10 +438,12 @@ pub async fn open_settings_file(app: tauri::AppHandle) -> Result<String, String>
 /// C1：保存单一来源配置（启停 + 目录覆盖；dir=None 回默认目录）。
 #[tauri::command]
 pub async fn source_config_set(
+    app: tauri::AppHandle,
     agent: String,
     enabled: bool,
     dir: Option<String>,
 ) -> Result<tokenscope::settings::SourceConfig, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("source_config_set", move || {
         let path = tokenscope::settings::settings_path()?;
         source_config_set_impl(&path, &agent, enabled, dir)
@@ -473,7 +501,8 @@ pub(crate) fn source_config_set_impl(
 }
 
 #[tauri::command]
-pub async fn cache_stats() -> Result<CacheInfo, String> {
+pub async fn cache_stats(app: tauri::AppHandle) -> Result<CacheInfo, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("cache_stats", move || cache_stats_impl(None)).await
 }
 
@@ -485,7 +514,8 @@ pub async fn cache_stats() -> Result<CacheInfo, String> {
 /// 2. 用与查询相同的来源解析内核构造采集选项；
 /// 3. 由库侧按这些选项清库重建（库不隐式读用户设置）。
 #[tauri::command]
-pub async fn refresh_cache() -> Result<CacheInfo, String> {
+pub async fn refresh_cache(app: tauri::AppHandle) -> Result<CacheInfo, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("refresh_cache", move || {
         let t = std::time::Instant::now();
         let opts = rebuild_opts(load_settings_strict()).map_err(anyhow::Error::msg)?;
@@ -520,7 +550,8 @@ pub(crate) fn rebuild_opts(
 
 /// 应用设置（M11）。
 #[tauri::command]
-pub async fn settings_get() -> Result<Settings, String> {
+pub async fn settings_get(app: tauri::AppHandle) -> Result<Settings, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("settings_get", move || {
         let path = tokenscope::settings::settings_path()?;
         tokenscope::settings::load(&path)
@@ -533,6 +564,7 @@ pub async fn settings_set_price_auto_sync(
     app: tauri::AppHandle,
     enabled: bool,
 ) -> Result<bool, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("settings_set_price_auto_sync", move || {
         let path = tokenscope::settings::settings_path()?;
         // SF02：事务内基于最新文件只改 auto_sync 字段；用户关闭自动同步的
@@ -555,7 +587,8 @@ pub async fn settings_set_price_auto_sync(
 /// 上次视图快照（M10 后启动提速）：原样存取前端渲染结果，零类型耦合。
 /// 坏文件 → None 静默忽略。
 #[tauri::command]
-pub async fn view_cache_load() -> Result<Option<serde_json::Value>, String> {
+pub async fn view_cache_load(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("view_cache_load", move || {
         let path = view_cache_path()?;
         // R04：读写共用 impl（round-trip 同源）。
@@ -565,7 +598,11 @@ pub async fn view_cache_load() -> Result<Option<serde_json::Value>, String> {
 }
 
 #[tauri::command]
-pub async fn view_cache_save(value: serde_json::Value) -> Result<(), String> {
+pub async fn view_cache_save(
+    app: tauri::AppHandle,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("view_cache_save", move || {
         let t = std::time::Instant::now();
         let path = view_cache_path()?;
@@ -605,6 +642,7 @@ pub(crate) fn view_cache_load_impl(
 /// 开机自启状态（M8；写系统自启动项属用户显式操作，默认关闭）。
 #[tauri::command]
 pub async fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("autostart_status", move || {
         app.autolaunch()
             .is_enabled()
@@ -615,6 +653,7 @@ pub async fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
 
 #[tauri::command]
 pub async fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("autostart_set", move || {
         let launch = app.autolaunch();
         if enabled {
@@ -685,7 +724,10 @@ pub struct PricingView {
 
 /// Task 2：定价可用性状态（全局横幅数据源；与 pricing_entries 同路径解析）。
 #[tauri::command]
-pub async fn pricing_status() -> Result<tokenscope::pricing::PricingStatus, String> {
+pub async fn pricing_status(
+    app: tauri::AppHandle,
+) -> Result<tokenscope::pricing::PricingStatus, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("pricing_status", move || {
         Ok(tokenscope::pricing::pricing_status(
             Some(&pricing_file_path(None)),
@@ -697,7 +739,8 @@ pub async fn pricing_status() -> Result<tokenscope::pricing::PricingStatus, Stri
 }
 
 #[tauri::command]
-pub async fn pricing_entries() -> Result<PricingView, String> {
+pub async fn pricing_entries(app: tauri::AppHandle) -> Result<PricingView, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("pricing_entries", move || {
         let t = std::time::Instant::now();
         let path = pricing_file_path(None);
@@ -748,7 +791,8 @@ pub struct SyncOutcome {
 
 /// 同步双在线源（models.dev 主源 + OpenRouter 备份）；单源失败不影响另一源。
 #[tauri::command]
-pub async fn sync_pricing_openrouter() -> Result<Vec<SyncOutcome>, String> {
+pub async fn sync_pricing_openrouter(app: tauri::AppHandle) -> Result<Vec<SyncOutcome>, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     tauri::async_runtime::spawn_blocking(|| {
         let t = std::time::Instant::now();
         log::info!("手动同步价格双源开始");
@@ -808,6 +852,7 @@ pub async fn sync_pricing_openrouter() -> Result<Vec<SyncOutcome>, String> {
 /// D4：建模板涉及磁盘 IO，一律后台执行（主线程纪律）。
 #[tauri::command]
 pub async fn open_pricing_file(app: tauri::AppHandle) -> Result<String, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     let path = pricing_file_path(None);
     let path = run_blocking("open_pricing_file", move || {
         if !path.exists() {
