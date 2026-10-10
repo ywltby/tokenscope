@@ -12,7 +12,7 @@ use anyhow::Result;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
-use crate::aggregate::{GroupBy, aggregate, preset_days_range};
+use crate::aggregate::{GroupBy, aggregate_with_rollups, preset_days_range};
 use crate::cache::{Cache, mtime_ms};
 use crate::dedupe::dedupe_events;
 use crate::model::{AgentKind, TokenCounts, UsageEvent};
@@ -93,6 +93,8 @@ pub struct SummaryReport {
     pub totals: crate::aggregate::Group,
     pub sources: Vec<SourceReport>,
     pub warnings: Vec<String>,
+    /// H06：日汇总桶覆盖诊断（明细覆盖 / 汇总口径 / 未解决覆盖 / 时区提示）。
+    pub rollup_coverage: crate::aggregate::RollupCoverage,
     pub generated_at: String,
 }
 
@@ -304,6 +306,8 @@ pub fn rebuild_cache(opts: &SummaryOptions) -> Result<CacheInfo> {
 struct Collected {
     generation: u64,
     events: Vec<UsageEvent>,
+    /// H06：日汇总快照（只有日粒度的外部历史）。
+    rollups: Vec<crate::history::StoredRollup>,
     sources: Vec<SourceReport>,
     pricing: std::sync::Arc<crate::pricing::Pricing>,
     warnings: Vec<String>,
@@ -321,6 +325,8 @@ struct Collected {
 pub(crate) struct CollectionSnapshot {
     pub(crate) generation: u64,
     pub(crate) events: Vec<UsageEvent>,
+    /// H06：只有日粒度的外部汇总快照（CCS 归并后的历史）。
+    pub(crate) rollups: Vec<crate::history::StoredRollup>,
     pub(crate) sources: Vec<SourceReport>,
     pub(crate) warnings: Vec<String>,
     pub(crate) pricing: std::sync::Arc<crate::pricing::Pricing>,
@@ -424,6 +430,17 @@ pub(crate) fn collection_retained_bytes(c: &CollectionSnapshot) -> Result<usize,
     }
     // 逐源统计：CollectStats 只有 u64 计数，无堆分配。
     n.add(vec_bytes(&c.sources)?)?;
+    // H06：日汇总快照同样随会话保留（字符串为主，token 为定长数值）。
+    n.add(vec_bytes(&c.rollups)?)?;
+    for r in &c.rollups {
+        n.add(string_bytes(&r.logical_source)?)?;
+        n.add(string_bytes(&r.day)?)?;
+        n.add(string_bytes(&r.source_tz)?)?;
+        n.add(string_bytes(&r.provider_id)?)?;
+        n.add(string_bytes(&r.model)?)?;
+        n.add(string_bytes(&r.request_model)?)?;
+        n.add(string_bytes(&r.pricing_model)?)?;
+    }
     // 采集诊断字符串。
     n.add(strings_bytes(&c.warnings)?)?;
     // 价格修订号 + 价格表（含候选与嵌套规则）。
@@ -683,6 +700,7 @@ fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSna
     Ok(CollectionSnapshot {
         generation: collected.generation,
         events: collected.events,
+        rollups: collected.rollups,
         sources: collected.sources,
         warnings: collected.warnings,
         pricing: collected.pricing,
@@ -1105,6 +1123,8 @@ fn collect_all_with_sources(
     // 消失（不变量 3）；H07 起改为流式读取，不再整表物化。
     let stored = history.stored_events_filtered(opts.agent)?;
     let events: Vec<UsageEvent> = stored.iter().map(usage_event_of).collect();
+    // H06：只有日粒度的历史同样属于"已保存的用量"，按应用过滤后随快照冻结。
+    let rollups = history.daily_rollups(opts.agent)?;
     let history_generation = history.generation()?;
     for s in &mut reports {
         s.stats.duplicates_dropped = dropped
@@ -1124,11 +1144,149 @@ fn collect_all_with_sources(
     Ok(Collected {
         generation: history_generation,
         events,
+        rollups,
         sources: reports,
         pricing,
         warnings,
         pricing_revision,
     })
+}
+
+/// H06：日汇总桶的统计来源策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RollupBucketPolicy {
+    /// 默认：桶内有明细就只统计明细（无法证明汇总被明细完整覆盖时不追加汇总）。
+    #[default]
+    PreferDetail,
+    /// 用户在本轮明确选择"以 CCS 日汇总为准"：命中桶整桶替换为汇总值。
+    PreferRollup,
+}
+
+/// H06：桶选择结果——实际参与的汇总贡献 + 覆盖诊断。
+pub struct RollupSelection {
+    pub(crate) contributions: Vec<crate::aggregate::RollupContribution>,
+    pub(crate) coverage: crate::aggregate::RollupCoverage,
+    pub(crate) warnings: Vec<String>,
+}
+
+/// H06：按 `(CCS 原始统计日, 来源时区, 应用, 等价模型)` 桶决定统计来源。
+///
+/// 规则（计划 §5.3）：
+/// - 桶内**没有**请求明细 → 使用已去重的日汇总（计入统计，费用未知）；
+/// - 桶内**有**请求明细 → 默认只统计明细；同时存在日汇总时记为「未解决覆盖」
+///   （仅总量相等不足以证明覆盖，不追加、不按差额造"剩余请求"）；
+/// - 用户显式选择以汇总为准时，命中桶整桶替换为汇总值；
+/// - 按日筛选/分组而查询时区 ≠ 来源日时区时，日汇总**不参与**（返回可恢复
+///   提示：切回来源时区或只看请求明细），绝不把来源日期当作午夜事件重切。
+///
+/// 桶选择在建快照时固定一次，因此不同视图（汇总/明细/下钻）不会因筛选条件
+/// 改变统计优先级。
+pub(crate) fn select_rollup_contributions(
+    events: &[UsageEvent],
+    rollups: &[crate::history::StoredRollup],
+    day_sensitive: bool,
+    tz_label: &str,
+    policy: RollupBucketPolicy,
+) -> RollupSelection {
+    use std::collections::{HashMap, HashSet};
+    let mut selection = RollupSelection {
+        contributions: Vec::new(),
+        coverage: crate::aggregate::RollupCoverage::default(),
+        warnings: Vec::new(),
+    };
+    if rollups.is_empty() {
+        return selection;
+    }
+    // 明细桶索引：按来源时区分别计算"该日是否已有明细"。
+    let mut detail_buckets: HashMap<String, HashSet<(String, String, String)>> = HashMap::new();
+    let mut mismatched: Vec<String> = Vec::new();
+    for r in rollups {
+        let source_tz = match jiff::tz::TimeZone::get(&r.source_tz) {
+            Ok(tz) => tz,
+            Err(_) => {
+                // 认不出来源时区时不可重切日期：日汇总不参与按日视图。
+                if !mismatched.contains(&r.source_tz) {
+                    mismatched.push(r.source_tz.clone());
+                }
+                continue;
+            }
+        };
+        if day_sensitive && r.source_tz != tz_label {
+            if !mismatched.contains(&r.source_tz) {
+                mismatched.push(r.source_tz.clone());
+            }
+            continue;
+        }
+        let buckets = detail_buckets
+            .entry(r.source_tz.clone())
+            .or_insert_with(|| {
+                let mut set = HashSet::new();
+                for e in events {
+                    if e.agent != r.app {
+                        continue;
+                    }
+                    let day = e.ts.to_zoned(source_tz.clone()).date().to_string();
+                    set.insert((
+                        day,
+                        e.agent.as_str().to_string(),
+                        crate::model_identity::ModelIdentity::parse(&e.model).identity_key(),
+                    ));
+                }
+                set
+            });
+        let key = (
+            r.day.clone(),
+            r.app.as_str().to_string(),
+            crate::model_identity::ModelIdentity::parse(&r.model).identity_key(),
+        );
+        let has_detail = buckets.contains(&key);
+        match (has_detail, policy) {
+            (true, RollupBucketPolicy::PreferDetail) => {
+                // 明细优先：汇总不追加，也不按差额造请求；缺口如实披露。
+                selection.coverage.detail_buckets += 1;
+                selection.coverage.unresolved_buckets += 1;
+                if let Some(t) = selection
+                    .coverage
+                    .unresolved_covered_tokens
+                    .checked_add(&r.tokens)
+                {
+                    selection.coverage.unresolved_covered_tokens = t;
+                }
+            }
+            _ => {
+                selection.coverage.rollup_buckets += 1;
+                selection
+                    .contributions
+                    .push(crate::aggregate::RollupContribution {
+                        day: r.day.clone(),
+                        source_tz: r.source_tz.clone(),
+                        app: r.app,
+                        model: r.model.clone(),
+                        tokens: r.tokens,
+                        requests: r.request_count,
+                        source_cost_usd: r.source_cost_usd,
+                        source: r.logical_source.clone(),
+                    });
+            }
+        }
+    }
+    if !mismatched.is_empty() {
+        let list = mismatched.join("、");
+        selection.coverage.timezone_mismatch = Some(format!(
+            "日汇总按来源统计时区（{list}）生成，与当前展示时区（{tz_label}）不同；\
+             按日筛选或分组时不重切日期，这部分历史只在「不限日期」的总量视图计入。\
+             可切换展示时区到来源时区，或只看请求明细。"
+        ));
+    }
+    if selection.coverage.unresolved_buckets > 0 {
+        selection.warnings.push(format!(
+            "有 {} 个日期/模型桶同时存在请求明细与日汇总，且无法证明明细已完整覆盖汇总；\
+             这些桶按请求明细统计，未纳入的汇总共 {} token（不直接相加，避免重复计费）",
+            selection.coverage.unresolved_buckets,
+            selection.coverage.unresolved_covered_tokens.total()
+        ));
+    }
+    selection
 }
 
 /// H04：归一化事件 → 历史库写入形态。
@@ -1229,13 +1387,24 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
         .iter()
         .map(|r| snapshot.event(r).clone())
         .collect();
+    // H06：桶选择在快照建立时已固定（这里只是读取同一份输入），因此汇总、
+    // 明细与下钻不会因筛选条件改变统计优先级。
+    let selection = snapshot.rollup_selection();
     let t_agg = std::time::Instant::now();
-    let agg = aggregate(&events, snapshot.by, &snapshot.tz, snapshot.pricing())?;
+    let agg = aggregate_with_rollups(
+        &events,
+        &selection.contributions,
+        snapshot.by,
+        &snapshot.tz,
+        snapshot.pricing(),
+    )?;
     log::info!(
-        "聚合（{}）：{} 组 / {} 请求，{} ms",
+        "聚合（{}）：{} 组 / {} 请求（日汇总桶 {}，未解决覆盖 {}），{} ms",
         agg.by,
         agg.groups.len(),
         agg.totals.requests,
+        selection.coverage.rollup_buckets,
+        selection.coverage.unresolved_buckets,
         t_agg.elapsed().as_millis()
     );
     log::info!(
@@ -1246,6 +1415,8 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
         agg.totals.requests,
         t.elapsed().as_millis()
     );
+    let mut warnings = snapshot.warnings().to_vec();
+    warnings.extend(selection.warnings.iter().cloned());
     Ok(SummaryReport {
         query_id: snapshot.query_id.clone(),
         pricing_revision: snapshot.pricing_revision.clone(),
@@ -1254,7 +1425,8 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
         groups: agg.groups,
         totals: agg.totals,
         sources: snapshot.sources().to_vec(),
-        warnings: snapshot.warnings().to_vec(),
+        warnings,
+        rollup_coverage: selection.coverage.clone(),
         generated_at: snapshot.as_of.to_string(),
     })
 }
@@ -2112,6 +2284,7 @@ cache_read = 0.4
         let snap = |e: UsageEvent| CollectionSnapshot {
             generation: 0,
             events: vec![e],
+            rollups: Vec::new(),
             sources: Vec::new(),
             warnings: Vec::new(),
             pricing: Arc::new(Pricing::default()),
@@ -2604,6 +2777,7 @@ cache_read = 0.0
             Ok(CollectionSnapshot {
                 generation: 9,
                 events: Vec::new(),
+                rollups: Vec::new(),
                 sources: Vec::new(),
                 warnings: Vec::new(),
                 pricing: std::sync::Arc::new(crate::pricing::Pricing::default()),

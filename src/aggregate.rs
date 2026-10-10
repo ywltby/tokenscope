@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
-use crate::model::{TokenCounts, UsageEvent};
+use crate::model::{AgentKind, TokenCounts, UsageEvent};
 use crate::model_identity::ModelIdentity;
 use crate::pricing::Pricing;
 
@@ -94,8 +94,54 @@ pub struct Group {
     pub cost_usd: f64,
     pub unknown_pricing: bool,
     pub unknown_tokens: TokenCounts,
+    /// H06：本组未知费用的**原因**（如 `rollup_only` = 该组含只有日粒度的历史，
+    /// 不能按当前档位/峰谷重估）。缺价（模型未收录）时为 None，两者的处置同为
+    /// "计入未知 token"，但原因不同，界面必须区分。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unknown_reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<&'static str>,
+}
+
+/// H06：日汇总贡献——只有日粒度的历史（CCS 归并后的快照）。
+///
+/// 不伪造成请求事件：没有逐请求时间、会话与 cwd，也没有 prompt 规模，无法按
+/// 当前上下文档位与峰谷规则重估费用。聚合时它的四桶计入「未知 token」，原因
+/// 标注为「历史数据只有汇总」；来源费用只作为来源值保存，不进入主估算。
+#[derive(Debug, Clone, PartialEq)]
+pub struct RollupContribution {
+    /// 来源统计日（来源时区的自然日）。
+    pub day: String,
+    /// 来源统计时区标识（用于时区不匹配判定）。
+    pub source_tz: String,
+    pub app: AgentKind,
+    /// 原始模型名（分组时按等价身份归一）。
+    pub model: String,
+    pub tokens: TokenCounts,
+    pub requests: u64,
+    /// 来源费用（CCS 记录值，仅作来源证据）。
+    pub source_cost_usd: Option<f64>,
+    /// 逻辑来源标识。
+    pub source: String,
+}
+
+/// 桶覆盖诊断（进入报告，供界面解释"为什么这部分费用是未知的"）。
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RollupCoverage {
+    /// 明细覆盖的桶数。
+    pub detail_buckets: u64,
+    /// 改用日汇总的桶数。
+    pub rollup_buckets: u64,
+    /// 明细与日汇总同时存在、但**无法证明**汇总已被明细完整覆盖的桶数
+    /// （这些桶默认只统计明细，汇总不追加）。
+    pub unresolved_buckets: u64,
+    /// 上述未解决桶里未纳入统计的汇总 token（如实披露缺口）。
+    pub unresolved_covered_tokens: TokenCounts,
+    /// 查询时区与来源日时区不一致时的提示（不为 None 时，日汇总只在不按日
+    /// 筛选/分组的查询里计入；按日视图需要切回来源时区或只看请求明细）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone_mismatch: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -115,6 +161,21 @@ pub struct Aggregated {
 ///（字典序最小，与事件顺序无关）。下钻仍按同一身份规则匹配。
 pub fn aggregate(
     events: &[UsageEvent],
+    by: GroupBy,
+    tz: &TimeZone,
+    pricing: &Pricing,
+) -> anyhow::Result<Aggregated> {
+    aggregate_with_rollups(events, &[], by, tz, pricing)
+}
+
+/// 汇总聚合（H06 起支持日汇总贡献）。
+///
+/// `rollups` 是**只有日粒度**的历史贡献（见 [`RollupContribution`]）：它们的
+/// 四桶直接计入分组与总计，但整体计入「未知 token」并标注原因，绝不按当前
+/// 价格/档位重估，也不与请求明细相加成"剩余请求"。
+pub fn aggregate_with_rollups(
+    events: &[UsageEvent],
+    rollups: &[RollupContribution],
     by: GroupBy,
     tz: &TimeZone,
     pricing: &Pricing,
@@ -198,7 +259,54 @@ pub fn aggregate(
             g.agents.push(e.agent.as_str());
         }
     }
-    /// 其他维度的展示名生成器（Project = 路径末段；Day/Agent = None）。
+    // H06：日汇总贡献并入——只有日粒度的历史不能按当前价格与档位重估，
+    // 也不代表"剩余的独立请求"：四桶整体计入未知 token，原因标注为
+    // 「历史数据只有汇总」。
+    for r in rollups {
+        let key = match by {
+            GroupBy::Day => r.day.clone(),
+            GroupBy::Model => ModelIdentity::parse(&r.model).identity_key(),
+            // 日汇总没有 cwd/project：与明细侧同一约定，保持「未知」。
+            GroupBy::Project => "(未知)".to_string(),
+            GroupBy::Agent => r.app.as_str().to_string(),
+        };
+        let key_err = key.clone();
+        let acc = map.entry(key.clone()).or_insert_with(|| GroupAccum {
+            group: Group {
+                label: None,
+                key,
+                ..Group::default()
+            },
+            representative: None,
+        });
+        if by == GroupBy::Model
+            && acc
+                .representative
+                .as_deref()
+                .is_none_or(|rep| r.model.as_str() < rep)
+        {
+            acc.representative = Some(r.model.clone());
+        }
+        let g = &mut acc.group;
+        g.requests = g
+            .requests
+            .checked_add(r.requests)
+            .ok_or_else(|| anyhow::anyhow!("分组 {key_err} 的请求数累计超出可表示范围"))?;
+        g.tokens = g
+            .tokens
+            .checked_add(&r.tokens)
+            .ok_or_else(|| anyhow::anyhow!("分组 {key_err} 的 token 累计超出可表示范围"))?;
+        g.unknown_tokens = g
+            .unknown_tokens
+            .checked_add(&r.tokens)
+            .ok_or_else(|| anyhow::anyhow!("分组 {key_err} 的未知 token 累计超出可表示范围"))?;
+        g.unknown_pricing = true;
+        g.unknown_reason = Some("rollup_only");
+        if multi_agent && !g.agents.contains(&r.app.as_str()) {
+            g.agents.push(r.app.as_str());
+        }
+    }
+    // 其他维度的展示名生成器（Project = 路径末段；Day/Agent = None）。
     fn other_label(by: &GroupBy, key: &str) -> Option<String> {
         if *by != GroupBy::Project {
             return None;
@@ -239,6 +347,9 @@ pub fn aggregate(
             anyhow::bail!("总计费用累计出现非有限值");
         }
         totals.unknown_pricing |= g.unknown_pricing;
+        if totals.unknown_reason.is_none() {
+            totals.unknown_reason = g.unknown_reason;
+        }
         totals.unknown_tokens = totals
             .unknown_tokens
             .checked_add(&g.unknown_tokens)

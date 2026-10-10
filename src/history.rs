@@ -454,6 +454,24 @@ pub struct StoredSourceFile {
     pub stats: crate::source::CollectStats,
 }
 
+/// H06：日汇总快照的读取形态（只有日粒度，没有逐请求时间/会话/cwd）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredRollup {
+    pub logical_source: String,
+    /// CCS 原始统计日（来源时区的自然日，不重切时区）。
+    pub day: String,
+    pub source_tz: String,
+    pub app: AgentKind,
+    pub provider_id: String,
+    pub model: String,
+    pub request_model: String,
+    pub pricing_model: String,
+    pub request_count: u64,
+    pub tokens: TokenCounts,
+    pub input_semantics: i64,
+    pub source_cost_usd: Option<f64>,
+}
+
 /// TokenScope 数据目录下的历史库路径（`~/.tokenscope/history.db`）。
 pub fn history_file_path() -> Result<PathBuf> {
     Ok(crate::report::data_dir()?.join("history.db"))
@@ -758,6 +776,53 @@ impl HistoryDb {
             |r| r.get(0),
         )?;
         Ok(n.max(0) as u64)
+    }
+
+    /// H06：读取日汇总快照（`None` = 全部应用）。
+    ///
+    /// 返回的是**已去重的来源快照**：CCS 已清理的请求明细在 TokenScope 仍可查，
+    /// 而日汇总只提供总量；查询侧据此决定每个 `(日, 应用, 等价模型)` 桶是
+    /// 用明细还是用汇总（见 `aggregate::select_rollup_contributions`）。
+    pub fn daily_rollups(&self, app: Option<AgentKind>) -> Result<Vec<StoredRollup>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT logical_source, day, source_tz, app, provider_id, model, request_model,
+                    pricing_model, request_count, input_tokens, output_tokens,
+                    cache_write_tokens, cache_read_tokens, input_semantics, source_cost_usd
+             FROM ccs_daily_usage
+             WHERE (?1 IS NULL OR app = ?1)
+             ORDER BY day, app, model, provider_id",
+        )?;
+        let rows = stmt.query_map(params![app.map(|a| a.as_str())], |r| {
+            let raw_app: String = r.get(3)?;
+            let app = parse_agent(&raw_app).map_err(|e| conversion_error(3, e))?;
+            Ok(StoredRollup {
+                logical_source: r.get(0)?,
+                day: r.get(1)?,
+                source_tz: r.get(2)?,
+                app,
+                provider_id: r.get(4)?,
+                model: r.get(5)?,
+                request_model: r.get(6)?,
+                pricing_model: r.get(7)?,
+                request_count: r.get::<_, i64>(8)?.max(0) as u64,
+                tokens: TokenCounts {
+                    input: u64_from_row(r, 9)?,
+                    output: u64_from_row(r, 10)?,
+                    cache_write: u64_from_row(r, 11)?,
+                    cache_read: u64_from_row(r, 12)?,
+                },
+                input_semantics: r.get(13)?,
+                source_cost_usd: r
+                    .get::<_, Option<String>>(14)?
+                    .and_then(|s| s.trim().parse::<f64>().ok())
+                    .filter(|v| v.is_finite()),
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     fn count(&self, table: &str) -> Result<u64> {

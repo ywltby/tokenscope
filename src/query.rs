@@ -84,6 +84,9 @@ pub struct QuerySnapshot {
     pub by: crate::aggregate::GroupBy,
     /// 主过滤后的固定行序（ts/rid 降序 + 组内 seq），只存事件索引。
     pub rows: Vec<SnapshotRow>,
+    /// H06：本次查询固定的日汇总桶选择——只有日粒度的外部历史按桶决定统计
+    /// 来源（明细覆盖 / 汇总口径），在建快照时**算一次**后冻结。
+    rollup_selection: report::RollupSelection,
     collection: Arc<report::CollectionSnapshot>,
     /// RC05：保留字节额度凭证——随本快照的**最后一个 Arc** 释放。
     /// 会话被淘汰但仍有读取者持有时继续占账
@@ -118,6 +121,12 @@ impl QuerySnapshot {
 
     pub fn warnings(&self) -> &[String] {
         &self.collection.warnings
+    }
+
+    /// H06：本次查询固定的日汇总桶选择（建快照时**只算一次**——汇总、明细与
+    /// 下钻读同一份结果，不因筛选条件改变统计优先级）。
+    pub fn rollup_selection(&self) -> &report::RollupSelection {
+        &self.rollup_selection
     }
 }
 
@@ -436,6 +445,20 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
     // 未建立、快照未注册，额度不泄漏。
     let reservation = acquire_with_eviction(charge).map_err(|e| anyhow!(e))?;
 
+    // H06：日汇总桶选择在这里固定一次——按日筛选/分组且时区与来源时区不同时，
+    // 日汇总不参与（返回可恢复提示），绝不把来源日期当午夜事件重切。
+    let day_sensitive = opts.by == crate::aggregate::GroupBy::Day
+        || opts.days.is_some()
+        || opts.from.is_some()
+        || opts.to.is_some();
+    let rollup_selection = report::select_rollup_contributions(
+        &collection.events,
+        &collection.rollups,
+        day_sensitive,
+        &tz_label,
+        report::RollupBucketPolicy::default(),
+    );
+
     let snapshot = Arc::new(QuerySnapshot {
         // RC01：命名空间 + 序号 + generation。跨启动唯一性来自命名空间，
         // generation 仅用于诊断（同参并发采集合并时相同）。
@@ -448,6 +471,7 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
         as_of,
         by: opts.by,
         rows,
+        rollup_selection,
         collection,
         _reservation: reservation,
     });
