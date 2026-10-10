@@ -269,6 +269,24 @@ fn accumulate(a: TokenCounts, b: TokenCounts) -> TokenCounts {
     }
 }
 
+/// 分组快照（逐字段比较冷/热/强制刷新三条路径）。
+fn groups_snapshot(
+    r: &tokenscope::report::SummaryReport,
+) -> Vec<(String, u64, TokenCounts, f64, bool)> {
+    r.groups
+        .iter()
+        .map(|g| {
+            (
+                g.key.clone(),
+                g.requests,
+                g.tokens,
+                g.cost_usd,
+                g.unknown_pricing,
+            )
+        })
+        .collect()
+}
+
 /// B03 修订（审查）：目录切换后的**完整联动**验收——A/B 分组、下钻分页、
 /// 冷/热缓存结果与费用守恒串成一组断言，用同一份会话内切换 fixture。
 #[test]
@@ -319,21 +337,11 @@ fn switch_groups_drilldown_pages_cache_and_cost_are_consistent() {
 
     // 2) 冷/热缓存：第二次查询（命中磁盘缓存）必须与冷跑逐字段一致。
     let hot = summary(&opts).unwrap();
-    let snap = |r: &tokenscope::report::SummaryReport| {
-        r.groups
-            .iter()
-            .map(|g| {
-                (
-                    g.key.clone(),
-                    g.requests,
-                    g.tokens,
-                    g.cost_usd,
-                    g.unknown_pricing,
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(snap(&cold), snap(&hot), "冷/热缓存结果必须逐字段一致");
+    assert_eq!(
+        groups_snapshot(&cold),
+        groups_snapshot(&hot),
+        "冷/热缓存结果必须逐字段一致"
+    );
 
     // 3) 费用守恒：两组之和 = 合计，且各自等于明细逐条费用之和。
     assert!(
@@ -396,4 +404,97 @@ fn switch_groups_drilldown_pages_cache_and_cost_are_consistent() {
                 || r.event_cwd.as_deref() == Some("C:/bee")),
         "明细保留切换后的原始工作目录"
     );
+}
+
+/// 第三轮审查补齐：Codex 侧的切换联动 + **无缓存路径**（强制刷新）一致性。
+#[test]
+fn codex_switch_groups_and_no_cache_path_are_consistent() {
+    let dir = tmp("codex-switch");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/project-path/session-switch");
+    let codex_root = dir.join("sources").join("codex");
+    std::fs::create_dir_all(&codex_root).unwrap();
+    std::fs::copy(
+        fixture.join("codex-switch.jsonl"),
+        codex_root.join("rollout.jsonl"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("pricing.toml"),
+        "[[model]]\nprefix = \"gpt-5.6-sol\"\ninput = 4.0\noutput = 20.0\n",
+    )
+    .unwrap();
+    let opts = SummaryOptions {
+        by: GroupBy::Project,
+        agent: Some(AgentKind::Codex),
+        claude_dir: Some(dir.join("no-claude")),
+        codex_dir: Some(codex_root),
+        cache_dir: Some(dir.join("cache")),
+        pricing_index: Some(dir.join("idx.json")),
+        pricing_path: Some(dir.join("pricing.toml")),
+        openrouter_path: Some(dir.join("or-missing.json")),
+        modelsdev_path: Some(dir.join("md-missing.json")),
+        tz: Some("Asia/Shanghai".to_string()),
+        ..Default::default()
+    };
+
+    // session_meta C:/test → turn_context 依次 C:/test、C:/test/123、C:/bee、
+    // C:/bee/123、C:/test：3 条归 C:/test，2 条归 C:/bee。
+    let cold = summary(&opts).unwrap();
+    assert_eq!(cold.groups.len(), 3, "两个项目 + 合计：{:?}", cold.groups);
+    let pick = |k: &str| {
+        cold.groups
+            .iter()
+            .find(|g| g.key == k)
+            .cloned()
+            .unwrap_or_else(|| panic!("缺少分组 {k}"))
+    };
+    let a = pick("C:/test");
+    let b = pick("C:/bee");
+    assert_eq!((a.requests, b.requests), (3, 2), "切换后的请求分别归两组");
+
+    // 热缓存（命中磁盘）与**无缓存路径**（refresh = 全量重解析）都与冷跑一致。
+    let hot = summary(&opts).unwrap();
+    assert_eq!(
+        groups_snapshot(&cold),
+        groups_snapshot(&hot),
+        "热缓存结果必须逐字段一致"
+    );
+    let refreshed = summary(&SummaryOptions {
+        refresh: true,
+        ..opts.clone()
+    })
+    .unwrap();
+    assert_eq!(
+        groups_snapshot(&cold),
+        groups_snapshot(&refreshed),
+        "强制刷新（无缓存路径）必须与冷/热逐字段一致"
+    );
+
+    // 费用守恒：两组之和 = 合计，且各自 = 明细逐条之和。
+    assert!(
+        (a.cost_usd + b.cost_usd - cold.totals.cost_usd).abs() < 1e-12,
+        "{} + {} != {}",
+        a.cost_usd,
+        b.cost_usd,
+        cold.totals.cost_usd
+    );
+    let q = query::begin_query(&opts).unwrap();
+    let detail = |project: &str| {
+        query::query_events(
+            &q.query_id,
+            &EventFilter {
+                project: Some(project.to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let sum_cost =
+        |project: &str| -> f64 { detail(project).rows.iter().filter_map(|r| r.cost_usd).sum() };
+    assert!((sum_cost("C:/test") - a.cost_usd).abs() < 1e-12);
+    assert!((sum_cost("C:/bee") - b.cost_usd).abs() < 1e-12);
+    assert_eq!(detail("C:/test").total, 3);
+    assert_eq!(detail("C:/bee").total, 2);
+    assert!(detail("C:/bee").rows.iter().all(|r| r.project == "C:/bee"));
 }

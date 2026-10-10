@@ -54,7 +54,11 @@ pub struct CacheStats {
 /// v9 = 项目根归并（B02/B03）：`project` 改为"当前项目根"（子目录归并、越界
 /// 成新项目），并新增 `session_initial_cwd` / `event_cwd` 两个目录上下文字段——
 /// 旧行的 `project` 是按会话首值/轮次精确取值，与归并语义不同，必须重解析。
-const SCHEMA_VERSION: &str = "9";
+/// v10 = 上下文解析修复（第三轮审查）：Codex 上下文字段类型异常不再阻断会话
+/// 边界（旧结果里新会话的事件被算到旧会话/旧项目）、file URI 点段与 NUL 拒绝、
+/// UNC 与 URI 主机大小写统一、POSIX 尾空格不再被 trim——这些修复改变了事件
+/// 内容（session_id / project），旧缓存必须整体失效重解析。
+const SCHEMA_VERSION: &str = "10";
 
 fn fingerprint(size: u64, mtime_ms: i64) -> (i64, i64) {
     // u64 → i64 存库；实际文件大小远小于 i64 上限。
@@ -582,6 +586,36 @@ mod tests {
             ..crate::source::CollectStats::default()
         };
         FileParse { stats, events }
+    }
+
+    #[test]
+    fn repaired_semantics_require_cache_migration() {
+        // 第三轮审查：上下文解析修复（Codex 会话边界、file URI 点段/NUL、
+        // UNC 与 URI 主机大小写、POSIX 尾空格）改变了事件内容——v9 缓存里的
+        // session_id / project 是修复前的产物，必须整体失效重解析。
+        let dir = tmp_dir("semantics-v10");
+        let path = dir.join("cache.db");
+        let c = Cache::open(&path).unwrap();
+        store(
+            &c,
+            "a.jsonl",
+            AgentKind::Codex,
+            "root",
+            10,
+            100,
+            &parse_with(2),
+        )
+        .unwrap();
+        assert_eq!(c.stats().unwrap().events, 2);
+        drop(c);
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute("UPDATE meta SET value='9' WHERE key='schema_version'", [])
+            .unwrap();
+        drop(raw);
+        let c = Cache::open(&path).unwrap();
+        assert_eq!(c.stats().unwrap().files, 0, "v9 缓存必须整体失效");
+        assert_eq!(c.stats().unwrap().events, 0);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

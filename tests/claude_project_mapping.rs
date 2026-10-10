@@ -58,6 +58,38 @@ fn keys(report: &tokenscope::report::SummaryReport) -> Vec<String> {
     report.groups.iter().map(|g| g.key.clone()).collect()
 }
 
+#[cfg(windows)]
+#[test]
+fn locked_config_is_retried_after_recovery() {
+    use std::os::windows::fs::OpenOptionsExt;
+    // 第三轮审查：配置短暂被锁（读取失败）时产生的映射不得被缓存——
+    // 否则文件恢复可读后仍会沿用失败映射、保留 slug 身份，直到指纹变化
+    // 或进程重启。
+    let dir = tmp("locked-config");
+    let path = dir.join("claude.json");
+    std::fs::write(&path, r#"{"projects":{"C:\\work\\alpha":{}}}"#).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&path)
+        .unwrap();
+    let locked = ProjectMapping::load_cached(&path);
+    assert_eq!(
+        locked.state(),
+        MappingState::Unusable,
+        "独占打开期间读取失败 → 不可用"
+    );
+    drop(lock);
+    // 文件内容与指纹都没变：失败状态不得进缓存，恢复后必须真的重读。
+    let recovered = ProjectMapping::load_cached(&path);
+    assert_eq!(
+        recovered.state(),
+        MappingState::Loaded,
+        "恢复可读后必须重新加载（失败状态不得被缓存）"
+    );
+    assert_eq!(recovered.resolve("C--work-alpha"), Some("C:/work/alpha"));
+}
+
 #[test]
 fn unique_forward_mapping_resolves_legacy_slug() {
     let dir = tmp("unique");

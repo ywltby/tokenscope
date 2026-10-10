@@ -80,7 +80,7 @@ describe("视图快照保存队列（R04）", () => {
     expect(warn).toHaveBeenCalled();
   });
 
-  it("SNAPSHOT_VERSION 为 9（模型匹配规则；v8 及更旧快照读取时忽略）", () => {
-    expect(SNAPSHOT_VERSION).toBe(9);
+  it("SNAPSHOT_VERSION 为 10（上下文解析修复；v9 及更旧快照读取时忽略）", () => {
+    expect(SNAPSHOT_VERSION).toBe(10);
   });
 });

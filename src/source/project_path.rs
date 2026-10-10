@@ -10,6 +10,8 @@
 //! - `file://` 走 URI 解析器并**只**做一次百分号解码；普通路径的 `%20` 是字面值；
 //!   URI 路径同样受"拒绝 `.`/`..` 组件、解码后不含 NUL"约束（解析器会折叠
 //!   点段，故检查在解析之前完成），合法空格（`%20`）正常解码；
+//! - 主机名大小写不敏感（UNC 与 URI 同口径小写）、**不做整体 trim**（尾空格
+//!   是合法文件名字符）、编码反斜杠 `%5C` 是字面字符而字面 `\` 按分隔符；
 //! - POSIX 路径保留大小写与合法反斜杠字符；
 //! - 相对路径、`C:foo`、非 file scheme、非法百分号编码、`.`/`..` 组件 →
 //!   「不可用」（不猜测、不折叠符号链接/别名）。
@@ -21,8 +23,10 @@ pub fn normalize_project_path(raw: &str) -> Option<String> {
     if raw.contains('\0') {
         return None;
     }
-    let s = raw.trim();
-    if s.is_empty() {
+    // **不做整体 trim**：尾/首空格是合法文件名字符（POSIX 上 `/tmp/alpha `
+    // 与 `/tmp/alpha` 是两个目录），整体去空白会误合并；仅"全空白"视为不可用。
+    let s = raw;
+    if s.trim().is_empty() {
         return None;
     }
     let b = s.as_bytes();
@@ -69,13 +73,16 @@ fn from_file_uri(s: &str) -> Option<String> {
     if !after.starts_with('/') {
         return None;
     }
-    // 先对 URI 的**原始路径**做一次百分号解码并检查合法性，再交给 URL 解析器：
-    // 解析器会静默折叠 `.` / `..` 点段（`file:///C:/a/../b` → `/C:/b`），
-    // 与"不折叠、不猜测"的规则冲突，因此检查必须在解析之前完成。
-    // 拒绝项：`.` / `..` 组件（含 `%2e%2e` 形式）、解码后的 NUL 等空字符。
-    // 保留项：空格（`%20`）等合法字符——URI 只解码一次，普通路径按字面。
-    let decoded = percent_decode_once(uri_path_part(after))?;
-    if decoded.contains('\0') || has_dot_components(&decoded) {
+    // 先对 URI 的**原始**路径做检查，再交给 URL 解析器：解析器会静默折叠
+    // `.` / `..` 点段（`file:///C:/a/../b` → `/C:/b`），与"不折叠、不猜测"
+    // 的规则冲突。拒绝项：`.` / `..` 组件（含 `%2e%2e` 形式）、解码后的 NUL；
+    // 字面反斜杠按分隔符看待（WHATWG 会对 file URI 归一），而**编码的**
+    // `%5C` 是字面字符（普通文件名允许）。合法空格（`%20`）正常解码。
+    let raw_path = uri_path_part(after);
+    if raw_path.is_empty() {
+        return None;
+    }
+    if has_dot_components(raw_path)? || percent_decode_once(raw_path)?.contains('\0') {
         return None;
     }
     let url = url::Url::parse(s).ok()?;
@@ -86,12 +93,18 @@ fn from_file_uri(s: &str) -> Option<String> {
     if url.query().is_some() || url.fragment().is_some() {
         return None;
     }
-    // 解析器可能改写路径（反斜杠归一、保留 `%2F` 等）——对解析后的路径重复
-    // 同一套检查，避免绕过。
-    let path = percent_decode_once(url.path())?;
-    if path.contains('\0') || has_dot_components(&path) {
+    // 解析器可能改写路径（反斜杠归一、保留 `%2F`/`%5C` 等）——对解析后的
+    // 原始路径重复同一套检查，避免绕过。
+    let url_raw = url.path();
+    if url_raw.is_empty()
+        || has_dot_components(url_raw)?
+        || percent_decode_once(url_raw)?.contains('\0')
+    {
         return None;
     }
+    let path = percent_decode_once(url_raw)?;
+    // 主机名大小写不敏感：URI 主机解析恒为小写，与直接 UNC 写法同口径
+    // （`normalize_unc` 同样小写主机段），保证同路径同一身份。
     let host = url.host_str().unwrap_or("").to_ascii_lowercase();
     if host.is_empty() || host == "localhost" {
         return local_from_uri_path(&path);
@@ -100,20 +113,31 @@ fn from_file_uri(s: &str) -> Option<String> {
 }
 
 /// 去掉可选 authority（`//host`）后的 URI 路径部分。
+///
+/// authority 结束于第一个 `/` **或** `\`：file URI 的字面反斜杠会被解析器
+/// 归一为分隔符，authority 判定必须同口径——否则 `file://server\share\a\..\b`
+/// 会取到空路径而绕过点段检查。
 fn uri_path_part(after: &str) -> &str {
-    match after.strip_prefix("//") {
-        Some(rest) => match rest.find('/') {
-            Some(i) => &rest[i..],
-            None => "",
-        },
-        None => after,
+    let rest = after.strip_prefix("//").unwrap_or(after);
+    match rest.find(['/', '\\']) {
+        Some(i) => &rest[i..],
+        None => "",
     }
 }
 
-/// 是否含 `.` / `..` 点段（`\` 同样按分隔符看待，与 file URI 的归一一致）。
-fn has_dot_components(path: &str) -> bool {
-    path.split(['/', '\\'])
-        .any(|part| part == "." || part == "..")
+/// 是否含 `.` / `..` 点段。
+///
+/// 在**原始**文本上按未编码的分隔符（`/`、`\`）切分组件，再逐组件解码判断：
+/// `%2e%2e` 解码后是 `..` → 拒绝；`%5C` 解码后是字面反斜杠（普通字符）→
+/// 不当作分隔符（POSIX 路径 `/tmp/a\..\b` 的 URI 写法必须同身份）。
+/// 组件解码失败（非法百分号序列）返回 `None`，由调用方判为不可用。
+fn has_dot_components(path: &str) -> Option<bool> {
+    for part in path.split(['/', '\\']) {
+        if matches!(percent_decode_once(part)?.as_str(), "." | "..") {
+            return Some(true);
+        }
+    }
+    Some(false)
 }
 
 /// 本地 file URI 路径：`/C:/a` → Windows 身份；其余 POSIX 绝对路径。
@@ -208,9 +232,11 @@ fn normalize_unc(s: &str) -> Option<String> {
     if host == "?" || host == "." {
         return None;
     }
+    // 主机名大小写不敏感：URI 主机解析恒为小写，直接 UNC 写法必须同口径，
+    // 否则 `\\Server\Share` 与 `file://Server/Share` 会把同一路径拆成两个身份。
     let mut out = String::with_capacity(s.len());
     out.push_str("//");
-    out.push_str(host);
+    out.push_str(&host.to_ascii_lowercase());
     out.push('/');
     out.push_str(share);
     for p in &parts[2..] {

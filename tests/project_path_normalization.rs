@@ -102,6 +102,55 @@ fn file_uri_and_plain_path_share_identity_for_spaces() {
 }
 
 #[test]
+fn posix_trailing_space_is_preserved() {
+    // 第三轮审查：尾空格是合法文件名字符——`/tmp/alpha ` 与 `/tmp/alpha`
+    // 是两个不同目录，不得用整体 trim 误合并。
+    assert_eq!(norm("/tmp/alpha ").as_deref(), Some("/tmp/alpha "));
+    assert_ne!(norm("/tmp/alpha "), norm("/tmp/alpha"));
+    assert_eq!(norm("/tmp/al pha").as_deref(), Some("/tmp/al pha"));
+    // 全空白仍不可用。
+    assert!(norm("   ").is_none());
+    assert!(norm("").is_none());
+}
+
+#[test]
+fn unc_and_file_uri_agree_on_host_case() {
+    // 第三轮审查：URI 主机解析恒为小写；直接 UNC 路径必须同口径，
+    // 否则同一台机器上的同一路径被拆成两个身份。
+    assert_eq!(
+        norm(r"\\Server\Share\Dir").as_deref(),
+        Some("//server/Share/Dir")
+    );
+    assert_eq!(
+        norm("file://Server/Share/Dir").as_deref(),
+        Some("//server/Share/Dir")
+    );
+    assert_eq!(norm(r"\\Server\Share\Dir"), norm("file://Server/Share/Dir"));
+}
+
+#[test]
+fn uri_backslash_handling_matches_path_semantics() {
+    // 第三轮审查：字面反斜杠在 file URI 里是分隔符（WHATWG 归一）——其中的
+    // `..` 必须拒绝（原实现在没有 `/` 的 authority 后返回空路径，绕过检查）。
+    assert!(norm(r"file://server\share\a\..\b").is_none());
+    assert!(norm(r"file:///C:\a\..\b").is_none());
+    // 编码的反斜杠（%5C）是**字面字符**：与普通 POSIX 路径同一身份，
+    // 不得被当作分隔符而误拒绝。
+    assert_eq!(
+        norm("file:///tmp/a%5C..%5Cb").as_deref(),
+        Some(r"/tmp/a\..\b")
+    );
+    assert_eq!(
+        norm("file:///tmp/a%5C..%5Cb"),
+        norm(r"/tmp/a\..\b"),
+        "编码反斜杠与普通路径必须同身份"
+    );
+    // 编码点段仍然拒绝（大小写两种写法）。
+    assert!(norm("file:///C:/a/%2e%2e/b").is_none());
+    assert!(norm("file:///C:/a/%2E%2E/b").is_none());
+}
+
+#[test]
 fn roots_and_unc_are_preserved() {
     assert_eq!(norm(r"C:\").as_deref(), Some("C:/"), "根目录不能变成 C:");
     assert_eq!(norm("c:/").as_deref(), Some("C:/"));

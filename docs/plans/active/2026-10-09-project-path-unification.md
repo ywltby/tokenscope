@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust、serde、SQLite、Tauri 2、Vue 3、Vitest。
 
-**状态：** 阶段 A（A01–A06）与阶段 B（B01–B03）均已实施并提交；归属规则由用户 2026-10-09 确认（项目根归并，两侧一致）。2026-10-10 外部审查提出的三处缺陷（Codex 异常 cwd 破坏会话隔离、`file://` 绕过路径检查、切换后联动验收不足）已修复并补回归，见文末「审查修复记录」。唯一未执行的验收项是 GUI 原生实例的目视确认（自动化与隔离数据路径验收均已完成），因此本计划保持 active、暂不归档。
+**状态：** 阶段 A（A01–A06）与阶段 B（B01–B03）均已实施并提交；归属规则由用户 2026-10-09 确认（项目根归并，两侧一致）。外部复核已完成三轮：第二轮的三处缺陷（Codex 异常 cwd 破坏会话隔离、`file://` 绕过路径检查、切换后联动验收不足）与**第三轮的六处 P2 + 一项验收缺口**（缓存迁移、映射读取失败缓存、URI 点段绕过、POSIX 尾空格、UNC/URI 主机大小写、编码反斜杠误拒；Codex 与无缓存路径联动）均已修复并补回归，见文末两节「审查修复记录」。唯一未执行的验收项是 GUI 原生实例的目视确认（自动化与隔离数据路径验收均已完成），因此本计划保持 active、暂不归档。
 
 ## 1. 依据与范围
 
@@ -255,6 +255,22 @@ pnpm --dir frontend build
 | 切换后的完整联动验收不足 | —（验收缺口，非运行时缺陷） | 新增联动断言：A/B 分组请求数与费用、冷/热缓存逐字段一致、费用守恒（两组之和 = 合计 = 明细之和）、`limit=2` 翻页不重不漏、明细保留切换后的原始目录 | `switch_groups_drilldown_pages_cache_and_cost_are_consistent` |
 
 审查同时确认：正常路径上的跨工具合并、子目录归并、越界切换、映射失效、新字段缓存与内存预算均已落地。修复后复跑定向用例与全套门禁（根库/壳 fmt+clippy+test、前端 typecheck/format/test/build）全绿。
+
+### 审查修复记录（第三轮，2026-10-10）
+
+外部复核（隔离探针复现）提出六处 P2 与一项验收缺口，本轮逐项修复：
+
+| 问题 | 复现 | 修复 | 回归用例 |
+| --- | --- | --- | --- |
+| 修复未迁移旧缓存 | 隔离升级后 2 次请求仅统计为 1 次，强制刷新才恢复（修复前后的解析产物不同，但版本号都是 9） | 缓存解析版本 9 → **10**（Codex 会话边界、file URI 点段、UNC/URI 主机大小写、POSIX 尾空格修复后的内容变化）；前端快照 9 → **10** | `repaired_semantics_require_cache_migration` + 快照版本用例 |
+| 映射读取失败被持续缓存 | 配置短暂被独占锁后，恢复可读仍沿用失败映射、保留 slug，直到指纹变化或重启 | `load_cached` 只在状态 **非 `Unusable`** 时写进程内缓存（读取失败可重试） | `locked_config_is_retried_after_recovery`（Windows 独占打开，确定性复现） |
+| URI 点段检查仍可绕过 | `file://server\share\a\..\b` 被接受为 `//server/share/b`（authority 后取不到 `/` 时返回空路径） | authority 判定同时接受 `\` 终止（与解析器对 file URI 的反斜杠归一一致） | `uri_backslash_handling_matches_path_semantics` |
+| POSIX 尾空格被删除 | `/tmp/alpha ` 与 `/tmp/alpha` 得到同一 key（误合并两个目录） | 去掉整体 `trim`（仅"全空白"判不可用；尾/首空格是合法文件名字符） | `posix_trailing_space_is_preserved` |
+| UNC 与 URI 身份不一致 | `\\Server\Share\Dir`（保留大写）与 `file://Server/Share/Dir`（URL 小写）拆成两个身份 | `normalize_unc` 主机段小写化，与 URI 主机解析同口径 | `unc_and_file_uri_agree_on_host_case` |
+| 合法 POSIX 反斜杠被误拒绝 | 普通 `/tmp/a\..\b` 接受，但对应 URI `file:///tmp/a%5C..%5Cb` 返回不可用 | 点段检查改为"按**未编码**分隔符切分组件 + 逐组件解码"：`%5C` 是字面字符，`%2e%2e` 仍是点段 | 同上 |
+| 验收缺口：缺 Codex 与无缓存路径 | — | 新增 Codex 切换联动断言与 `refresh = true`（无缓存路径）一致性比较 | `codex_switch_groups_and_no_cache_path_are_consistent` |
+
+六处修复的定向测试与全量门禁（根库/壳 fmt+clippy+test、前端 typecheck/format/test 323 项/build）全部退出码 0。
 
 ### 隔离数据路径验收执行记录（2026-10-09）
 

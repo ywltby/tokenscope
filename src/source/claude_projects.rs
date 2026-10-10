@@ -133,8 +133,13 @@ impl ProjectMapping {
             }
         }
         let loaded = Arc::new(Self::load_from(path));
-        let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        guard.insert(key, (fingerprint, loaded.clone()));
+        // 第三轮审查：**读取失败不进缓存**——配置被独占/短暂不可读时得到的
+        // 失败状态若被缓存（指纹是文件本身的 size+mtime，不会变化），恢复可读
+        // 后仍会沿用失败映射、保留 slug 身份，直到文件指纹变化或进程重启。
+        if loaded.state() != MappingState::Unusable {
+            let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            guard.insert(key, (fingerprint, loaded.clone()));
+        }
         loaded
     }
 
