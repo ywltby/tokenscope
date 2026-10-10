@@ -126,8 +126,11 @@ pub struct RollupContribution {
 }
 
 /// 桶覆盖诊断（进入报告，供界面解释"为什么这部分费用是未知的"）。
+///
+/// 字段保持**蛇形**命名：与 `SummaryReport`/`EventRow` 等既有 IPC 载荷一致，
+/// 前端类型逐字段对应（早期误加 camelCase 改名会让前端读到 undefined，
+/// 时区提示因此整段消失）。
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RollupCoverage {
     /// 明细覆盖的桶数。
     pub detail_buckets: u64,

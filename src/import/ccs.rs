@@ -99,6 +99,11 @@ impl CcsSource {
         .with_context(|| format!("只读打开 CCS 库失败: {}", path.display()))?;
         // 与正在写入的 CCS 共存：WAL 下读取是一致快照，等锁而不是立即报忙。
         conn.busy_timeout(Duration::from_millis(5000))?;
+        // 一致读事务（计划 §5.1）：结构探测、明细与日汇总必须在**同一个**读
+        // 快照里读取——否则 CCS 正在归并/清理时，列探测与行读取可能看到不同的
+        // 库状态（例如读到一半明细被归并删除，日汇总却是旧的）。
+        conn.execute_batch("BEGIN")
+            .context("开启 CCS 只读事务失败")?;
         Ok(Self {
             conn,
             path: path.to_path_buf(),
@@ -214,6 +219,9 @@ impl CcsSource {
     }
 
     /// 读取日汇总（白名单列），列顺序同 [`RawRollup`]。
+    ///
+    /// `request_model` 是 CCS 日汇总**完整主键**的组成部分（同一模型下不同
+    /// 客户端别名各自成行）：漏读它会把两条合法汇总折叠成一条、丢掉用量。
     fn read_rollups(&self) -> Result<Vec<RawRollup>> {
         let opt = |name: &str| {
             if self
@@ -226,10 +234,11 @@ impl CcsSource {
             }
         };
         let sql = format!(
-            "SELECT date, app_type, provider_id, model, {}, request_count,
+            "SELECT date, app_type, provider_id, model, {}, {}, request_count,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                     input_token_semantics, {}
              FROM usage_daily_rollups",
+            opt("request_model"),
             opt("pricing_model"),
             opt("total_cost_usd"),
         );
@@ -240,14 +249,15 @@ impl CcsSource {
                 app_type: r.get(1)?,
                 provider_id: r.get(2)?,
                 model: r.get(3)?,
-                pricing_model: r.get(4)?,
-                request_count: r.get(5)?,
-                input_tokens: r.get(6)?,
-                output_tokens: r.get(7)?,
-                cache_read_tokens: r.get(8)?,
-                cache_creation_tokens: r.get(9)?,
-                input_token_semantics: r.get(10)?,
-                total_cost_usd: r.get(11)?,
+                request_model: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                pricing_model: r.get(5)?,
+                request_count: r.get(6)?,
+                input_tokens: r.get(7)?,
+                output_tokens: r.get(8)?,
+                cache_read_tokens: r.get(9)?,
+                cache_creation_tokens: r.get(10)?,
+                input_token_semantics: r.get(11)?,
+                total_cost_usd: r.get(12)?,
             })
         })?;
         let mut out = Vec::new();
@@ -284,9 +294,8 @@ const REQUIRED_ROLLUP_COLUMNS: &[&str] = &[
     "input_token_semantics",
 ];
 
-/// 来源库结构探测结果（诊断与预览展示）。
+/// 来源库结构探测结果（诊断与预览展示，字段蛇形命名同其它 IPC 载荷）。
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct CcsSchema {
     /// 来源库 `PRAGMA user_version`（仅诊断，不作为支持性判据）。
     pub user_version: i64,
@@ -319,6 +328,8 @@ struct RawRollup {
     app_type: String,
     provider_id: String,
     model: String,
+    /// CCS 完整主键的组成部分（同模型下不同客户端别名各自成行）。
+    request_model: String,
     pricing_model: Option<String>,
     request_count: i64,
     input_tokens: i64,
@@ -330,8 +341,11 @@ struct RawRollup {
 }
 
 /// 预览（**不写入任何用量**）。
+///
+/// 字段一律**蛇形**命名：与项目既有 IPC 载荷（`SummaryReport`/`EventRow`）同
+/// 一套约定，前端 `types.ts` 逐字段对应。早期误加的 camelCase 改名会让前端
+/// 读到 `undefined`（预览计数与 plan_id 全部拿不到），这里不再使用。
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ImportPreview {
     /// 提交时原样回传（一次性、有有效期、绑定历史 generation）。
     pub plan_id: String,
@@ -355,6 +369,13 @@ pub struct ImportPreview {
     pub would_unchanged: u64,
     pub would_conflict: u64,
     pub would_stale: u64,
+    /// 身份不足但库内存在"同应用/同模型/同用量/时间接近"候选的记录数：
+    /// 只作核对线索（计划 §5.3），默认不合并、也不自动导入。
+    pub would_overlap: u64,
+    /// 是否存在未解决的重叠候选：为 true 时提交需要用户显式确认。
+    pub overlap_unresolved: bool,
+    /// 重叠候选样例（最多 5 条，供用户判断）。
+    pub overlap_examples: Vec<String>,
     pub net_new_tokens: TokenCounts,
     pub rollups_total: u64,
     pub rollups_new: u64,
@@ -368,7 +389,6 @@ pub struct ImportPreview {
 
 /// 提交结果（可核查）。
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ImportReport {
     pub run_id: i64,
     pub logical_source: String,
@@ -377,6 +397,8 @@ pub struct ImportReport {
     pub requests_unchanged: u64,
     pub requests_conflicted: u64,
     pub requests_stale: u64,
+    /// 本批按"新增"导入、但存在同时间同用量重叠候选的记录数（审计用）。
+    pub requests_overlap: u64,
     pub rollups_snapshotted: u64,
     pub rollups_conflicted: u64,
     pub net_new_tokens: TokenCounts,
@@ -457,6 +479,9 @@ pub fn preview(
         would_unchanged: 0,
         would_conflict: 0,
         would_stale: 0,
+        would_overlap: 0,
+        overlap_unresolved: false,
+        overlap_examples: Vec::new(),
         net_new_tokens: TokenCounts::default(),
         rollups_total: rollups.len() as u64,
         rollups_new: 0,
@@ -469,7 +494,7 @@ pub fn preview(
     let proxy_index = ProxyIndex::build(&requests);
     let mut writes: Vec<EventWrite> = Vec::new();
     let mut unsupported: HashMap<String, u64> = HashMap::new();
-    for raw in &requests {
+    for (idx, raw) in requests.iter().enumerate() {
         let Some(app) = map_app(&raw.app_type) else {
             *unsupported.entry(raw.app_type.clone()).or_default() += 1;
             preview.requests_skipped_other_app += 1;
@@ -477,11 +502,25 @@ pub fn preview(
         };
         if proxy_index.is_duplicate_session_row(raw) {
             // 会话行与 proxy 行是同一次请求：CCS 的"有效用量"口径只保留一条。
+            // 被剔除会话行的**原生别名**由 proxy 行继承（见下），否则原生采集
+            // 之后会为同一请求再建一条事件。
             preview.requests_skipped_duplicate_of_proxy += 1;
             continue;
         }
         match request_write(app, raw, CCS_LOGICAL_SOURCE) {
-            Ok(w) => writes.push(w),
+            Ok(mut w) => {
+                // 继承被剔除会话行的原生身份（跨来源去重证据不能因为去重而丢）。
+                for (scheme, value) in proxy_index.aliases_for(idx) {
+                    if !w.aliases.iter().any(|a| a.scheme == *scheme) {
+                        w.aliases.push(EventAlias {
+                            app,
+                            scheme: scheme.clone(),
+                            value: value.clone(),
+                        });
+                    }
+                }
+                writes.push(w);
+            }
             Err(e) => {
                 preview.requests_rejected += 1;
                 if preview.rejected_reasons.len() < 20 {
@@ -516,8 +555,22 @@ pub fn preview(
             WriteClass::Unchanged => preview.would_unchanged += 1,
             WriteClass::Conflict => preview.would_conflict += 1,
             WriteClass::Stale => preview.would_stale += 1,
+            WriteClass::OverlapCandidate => {
+                // 身份不足但库内有"同时间同用量"的候选：只作线索，不合并。
+                preview.would_overlap += 1;
+                if preview.overlap_examples.len() < 5 {
+                    preview.overlap_examples.push(format!(
+                        "{} / {} / {} / {}",
+                        raw_app_label(w.app),
+                        w.model_raw,
+                        w.ts,
+                        w.tokens.total()
+                    ));
+                }
+            }
         }
     }
+    preview.overlap_unresolved = preview.would_overlap > 0;
 
     // 日汇总：与库内同键快照对比（内容不同且来源无可验证修订 → 冲突）。
     let mut rollup_writes = Vec::new();
@@ -561,11 +614,13 @@ pub fn preview(
 }
 
 /// 提交一次导入：**只执行本次计划的一个批次**。计划一次性消费（双击或并发
-/// 调用第二次会明确失败），过期或历史库已变化则要求重新预览。
+/// 调用第二次会明确失败）；过期、历史库已变化（事务内校验 generation）或
+/// 存在**未解决的重叠候选**而未获用户确认时拒绝提交并要求重新预览。
 pub fn commit(
     plan_id: &str,
     history: &HistoryDb,
     policy: RollupConflictPolicy,
+    allow_overlap: bool,
 ) -> Result<ImportReport> {
     let plan = {
         let mut guard = plans().lock().unwrap_or_else(|e| e.into_inner());
@@ -579,8 +634,14 @@ pub fn commit(
             PLAN_TTL.as_secs() / 60
         );
     }
-    if history.generation()? != plan.preview.history_generation {
-        bail!("历史库在本预览之后发生了变化（可能有新的采集或导入），请重新预览");
+    if plan.preview.overlap_unresolved && !allow_overlap {
+        // 计划 §5.3：缺少跨来源身份且存在重叠候选时不猜身份、不自动合并，
+        // 也不默认把候选取值当成新请求导入。
+        bail!(
+            "有 {} 条来源记录与本地已有请求时间/用量相同但缺少可证实身份（重叠候选）：\
+             默认不导入以免重复计费。确认这些是不同请求时可选择「按新增导入」后重新提交。",
+            plan.preview.would_overlap
+        );
     }
     let run = ImportRunRecord {
         logical_source: CCS_LOGICAL_SOURCE.to_string(),
@@ -591,15 +652,24 @@ pub fn commit(
         detail: None,
         import_revision: 1,
     };
-    let outcome = history.apply_import_batch(&plan.writes, &plan.rollups, policy, &run)?;
+    // generation 在**事务内**再校验一次：预览之后、提交之前发生的任何采集或
+    // 导入都会让整批拒绝（不拿过期预览插入重复请求）。
+    let outcome = history.apply_import_batch(
+        &plan.writes,
+        &plan.rollups,
+        policy,
+        &run,
+        Some(plan.preview.history_generation),
+    )?;
     let generation_after = history.generation()?;
     log::info!(
-        "CCS 导入完成：批次 {}，新增 {}，更新 {}，已存在 {}，冲突 {}，日汇总落盘 {} / 冲突 {}",
+        "CCS 导入完成：批次 {}，新增 {}，更新 {}，已存在 {}，冲突 {}，重叠候选 {}，日汇总落盘 {} / 冲突 {}",
         outcome.run_id,
         outcome.events.inserted,
         outcome.events.updated,
         outcome.events.unchanged,
         outcome.events.conflicts,
+        outcome.events.overlap_candidates,
         outcome.rollups.inserted + outcome.rollups.replaced,
         outcome.rollups.conflicted
     );
@@ -611,6 +681,7 @@ pub fn commit(
         requests_unchanged: outcome.events.unchanged,
         requests_conflicted: outcome.events.conflicts,
         requests_stale: outcome.events.stale,
+        requests_overlap: outcome.events.overlap_candidates,
         rollups_snapshotted: outcome.rollups.inserted + outcome.rollups.replaced,
         rollups_conflicted: outcome.rollups.conflicted,
         net_new_tokens: history.import_run_net_tokens(outcome.run_id)?,
@@ -639,6 +710,13 @@ fn map_app(app_type: &str) -> Option<AgentKind> {
         "claude" => Some(AgentKind::ClaudeCode),
         "codex" => Some(AgentKind::Codex),
         _ => None,
+    }
+}
+
+fn raw_app_label(app: AgentKind) -> &'static str {
+    match app {
+        AgentKind::ClaudeCode => "claude",
+        AgentKind::Codex => "codex",
     }
 }
 
@@ -804,7 +882,7 @@ fn rollup_write(
         app,
         provider_id: raw.provider_id.clone(),
         model: raw.model.clone(),
-        request_model: String::new(),
+        request_model: raw.request_model.clone(),
         pricing_model: raw.pricing_model.clone().unwrap_or_default(),
         request_count: raw.request_count as u64,
         tokens: TokenCounts {
@@ -838,11 +916,41 @@ fn non_negative(v: i64, what: &str, id: &str) -> Result<u64> {
     Ok(v as u64)
 }
 
+/// 会话行携带的原生别名（`session:<message.id>` + `session_id`）。
+///
+/// CCS 的会话导入行本身就是原生身份的另一份证据：即便该行因为"与 proxy 行
+/// 重复"被按有效用量口径剔除，它的别名也必须留给被保留的那条 proxy 行——
+/// 否则 TokenScope 的原生采集之后会为同一请求再建一条事件（重复计费）。
+fn session_row_aliases(app: AgentKind, raw: &RawRequest) -> Vec<(String, String)> {
+    if app != AgentKind::ClaudeCode {
+        return Vec::new();
+    }
+    let Some(request_id) = raw.request_id.as_deref() else {
+        return Vec::new();
+    };
+    let Some(message_id) = request_id.strip_prefix(SESSION_REQUEST_ID_PREFIX) else {
+        return Vec::new();
+    };
+    let Some(session_id) = raw.session_id.as_deref().filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    if message_id.is_empty() {
+        return Vec::new();
+    }
+    vec![(
+        "claude-message".to_string(),
+        format!("{session_id}|{message_id}"),
+    )]
+}
+
 /// proxy 行索引：判定会话行是否与某条成功 proxy 行重复（CCS 的
-/// `effective_usage_log_filter` 等价实现）。
+/// `effective_usage_log_filter` 等价实现），并记录"被剔除的会话行把原生别名
+/// 留给哪条 proxy 行"。
 struct ProxyIndex<'a> {
     rows: &'a [RawRequest],
     by_app: HashMap<String, Vec<usize>>,
+    /// proxy 行下标 → 该行继承的原生别名。
+    inherited_aliases: HashMap<usize, Vec<(String, String)>>,
 }
 
 impl<'a> ProxyIndex<'a> {
@@ -858,18 +966,44 @@ impl<'a> ProxyIndex<'a> {
             }
             by_app.entry(r.app_type.clone()).or_default().push(i);
         }
-        Self { rows, by_app }
+        let mut index = Self {
+            rows,
+            by_app,
+            inherited_aliases: HashMap::new(),
+        };
+        // 先算出会话行 → proxy 行的匹配，再把别名转移过去。
+        for row in rows {
+            if !SESSION_DATA_SOURCES.contains(&row.data_source.as_str()) {
+                continue;
+            }
+            let Some(app) = map_app(&row.app_type) else {
+                continue;
+            };
+            if let Some(proxy) = index.matching_proxy_row(row) {
+                let aliases = session_row_aliases(app, row);
+                if !aliases.is_empty() {
+                    index
+                        .inherited_aliases
+                        .entry(proxy)
+                        .or_default()
+                        .extend(aliases);
+                }
+            }
+        }
+        index
     }
 
     /// 该会话行是否与某条 proxy 行是同一次请求。
     fn is_duplicate_session_row(&self, row: &RawRequest) -> bool {
+        self.matching_proxy_row(row).is_some()
+    }
+
+    fn matching_proxy_row(&self, row: &RawRequest) -> Option<usize> {
         if !SESSION_DATA_SOURCES.contains(&row.data_source.as_str()) {
-            return false;
+            return None;
         }
-        let Some(candidates) = self.by_app.get(&row.app_type) else {
-            return false;
-        };
-        candidates.iter().any(|&i| {
+        let candidates = self.by_app.get(&row.app_type)?;
+        candidates.iter().copied().find(|&i| {
             let p = &self.rows[i];
             let app_match = p.app_type == row.app_type
                 || (p.app_type == "claude" && row.app_type == "claude-desktop")
@@ -884,6 +1018,14 @@ impl<'a> ProxyIndex<'a> {
                     || p.model.eq_ignore_ascii_case("unknown")
                     || row.model.eq_ignore_ascii_case("unknown"))
         })
+    }
+
+    /// 该 proxy 行继承的原生别名（来自被剔除的会话行）。
+    fn aliases_for(&self, proxy_index: usize) -> &[(String, String)] {
+        self.inherited_aliases
+            .get(&proxy_index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 }
 

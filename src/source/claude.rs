@@ -218,13 +218,19 @@ fn ingest_text(
     }
 }
 
-/// 单文件扫描状态（阶段 B）：按 sessionId 维护项目根状态机与会话初始目录。
+/// 单文件扫描状态（阶段 B）：按 sessionId 维护项目根状态机与会话初始目录；
+/// sidechain（子代理）上下文**单独**维护一份，互不影响。
 #[derive(Default)]
 struct ClaudeScan {
     /// sessionId → 项目根（无 sessionId 的记录共用空串分组，仅限本文件）。
     trackers: HashMap<String, ProjectRootTracker>,
     /// sessionId → 会话首个有效 cwd（B02 的 `session_initial_cwd`）。
     initials: HashMap<String, String>,
+    /// H02 修订：sidechain 行自己的上下文——子代理可能是**独立的一整份日志**
+    ///（全是 `isSidechain: true`），它的可信 cwd 只能进这里，既不推进主链
+    /// 项目根，也不会让自己退化成"用目录名当项目"。
+    sidechain_trackers: HashMap<String, ProjectRootTracker>,
+    sidechain_initials: HashMap<String, String>,
 }
 
 fn ingest_line(
@@ -244,22 +250,31 @@ fn ingest_line(
         }
     };
     // 身份上下文采集——非 assistant 行（user/system/attachment 等）同样提供；
-    // sidechain 记录属子代理上下文，不参与主会话身份。归一化失败（相对路径、
-    // 类型异常、空值）不写入、不影响后续行，也不计坏行。
-    if !rec.is_sidechain
-        && let Some(key) = rec
-            .cwd
-            .as_ref()
-            .and_then(serde_json::Value::as_str)
-            .and_then(project_path::normalize_project_path)
+    // sidechain 记录进**自己的**上下文（不参与主会话身份，反之亦然）。
+    // 归一化失败（相对路径、类型异常、空值）不写入、不影响后续行，也不计坏行。
+    if let Some(key) = rec
+        .cwd
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .and_then(project_path::normalize_project_path)
     {
-        scan.initials
-            .entry(rec.session_id.clone())
-            .or_insert_with(|| key.clone());
-        scan.trackers
-            .entry(rec.session_id.clone())
-            .or_default()
-            .observe(&key);
+        if rec.is_sidechain {
+            scan.sidechain_initials
+                .entry(rec.session_id.clone())
+                .or_insert_with(|| key.clone());
+            scan.sidechain_trackers
+                .entry(rec.session_id.clone())
+                .or_default()
+                .observe(&key);
+        } else {
+            scan.initials
+                .entry(rec.session_id.clone())
+                .or_insert_with(|| key.clone());
+            scan.trackers
+                .entry(rec.session_id.clone())
+                .or_default()
+                .observe(&key);
+        }
     }
     if rec.kind != "assistant" {
         return;
@@ -270,6 +285,12 @@ fn ingest_line(
     };
     if msg.model == SYNTHETIC_MODEL {
         stats.skipped_synthetic += 1;
+        return;
+    }
+    if msg.model.trim().is_empty() {
+        // 模型名为空的用量行无法归属模型，也无法入库：计坏行跳过，
+        // 不让一条坏记录把整份日志（乃至整批采集）拖垮。
+        stats.bad_lines += 1;
         return;
     }
     let Some(usage) = msg.usage.as_ref() else {
@@ -293,16 +314,37 @@ fn ingest_line(
         return;
     }
 
-    // 阶段 B：归属 = 该会话当前项目根（子目录归并、越界成新项目）；
-    // 没有可信 cwd 的会话回落文件身份。
-    let tracker = scan.trackers.get(&rec.session_id);
+    // 阶段 B：归属 = **该行所属上下文**的项目根（主链与子代理各自维护，
+    // 子代理的 cwd 不推进主链根，主链 cwd 也不冒充子代理的归属）；
+    // 两个上下文都没有可信 cwd 时才回落文件身份。
+    let (tracker, initials) = if rec.is_sidechain {
+        (
+            scan.sidechain_trackers.get(&rec.session_id),
+            scan.sidechain_initials.get(&rec.session_id),
+        )
+    } else {
+        (
+            scan.trackers.get(&rec.session_id),
+            scan.initials.get(&rec.session_id),
+        )
+    };
+    // 子代理上下文没有可信 cwd 时退回主链根（同一会话内的相对位置），
+    // 仍没有才用文件身份。
+    let (tracker, initials) = match (tracker, rec.is_sidechain) {
+        (Some(t), _) => (Some(t), initials),
+        (None, true) => (
+            scan.trackers.get(&rec.session_id),
+            scan.initials.get(&rec.session_id),
+        ),
+        (None, false) => (None, initials),
+    };
     let project = tracker
         .and_then(ProjectRootTracker::root)
         .map_or_else(|| file_project.to_string(), str::to_string);
     let event_cwd = tracker
         .and_then(ProjectRootTracker::cwd)
         .map(str::to_string);
-    let session_initial_cwd = scan.initials.get(&rec.session_id).cloned();
+    let session_initial_cwd = initials.cloned();
 
     let event = UsageEvent {
         ts,
@@ -445,10 +487,26 @@ mod tests {
         let col = collect_text(&lines);
         assert_eq!(col.events.len(), 3, "子代理用量并入，独立请求相加");
         assert_eq!(col.stats.skipped_sidechain, 0);
-        let projects: Vec<&str> = col.events.iter().map(|e| e.project.as_str()).collect();
-        assert!(
-            projects.iter().all(|p| *p == "/work/main"),
-            "sidechain 的 cwd 不推进主链项目根: {projects:?}"
+        // H02 + 审阅 #12：sidechain 有自己的执行上下文——它的可信 cwd 用于
+        // **自己**的事件归属（独立子代理日志不会退化成"用目录名当项目"），
+        // 但绝不能推进主链项目根。
+        let by_line = |line: u64| -> &str {
+            col.events
+                .iter()
+                .find(|e| e.line == line)
+                .map(|e| e.project.as_str())
+                .expect("行序存在")
+        };
+        assert_eq!(by_line(1), "/work/main", "主链事件归属主链根");
+        assert_eq!(by_line(2), "/other/place", "子代理事件归属它自己的上下文");
+        assert_eq!(by_line(3), "/work/main", "子代理的 cwd 不推进主链项目根");
+        assert_eq!(
+            col.events
+                .iter()
+                .find(|e| e.line == 2)
+                .and_then(|e| e.event_cwd.clone()),
+            Some("/other/place".to_string()),
+            "子代理的可信 cwd 必须保留（不再被丢弃）"
         );
         assert_eq!(
             col.events.iter().map(|e| e.line).collect::<Vec<_>>(),

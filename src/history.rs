@@ -201,9 +201,6 @@ pub fn legacy_v1_schema_for_tests() -> &'static str {
 /// 版本化迁移表：`(目标版本, SQL)`，从 0 起按序执行。
 const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2)];
 
-/// H03：遗留缓存迁移的每批事务规模（过大则事务时长与内存都失控）。
-const LEGACY_MIGRATION_CHUNK: usize = 500;
-
 /// 写入优先级：数值越大越可信。原生日志终值优先于 CCS 导入值；同一优先级
 /// 内部按观察时间取更晚者（计划 §5.3：与导入顺序无关）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -289,10 +286,16 @@ pub struct WriteSummary {
     pub conflicts: u64,
     /// 观察时间早于已存终值、保留较新值的记录数。
     pub stale: u64,
+    /// 自动插入的新请求中，存在"同时间同用量但身份不足"重叠候选的记录数
+    /// （仅供审计：调用方决定是否允许这类导入）。
+    pub overlap_candidates: u64,
     /// 新增的别名行数。
     pub aliases_added: u64,
     /// 新增的来源证据行数。
     pub origins_added: u64,
+    /// **本批插入**事件的四桶之和：只给已有事件补来源证据时保持 0
+    ///（净新增用量必须按真正新增的事实统计）。
+    pub inserted_tokens: TokenCounts,
 }
 
 impl WriteSummary {
@@ -317,6 +320,12 @@ pub enum WriteClass {
     Conflict,
     /// 观察时间早于已存终值 → 保留较新值。
     Stale,
+    /// **重叠候选未解决**：来源记录没有可证实身份，但库内存在"同应用、同模型
+    /// 等价身份、四桶相同、时间接近"的既有请求。时间与用量相同只是核对线索，
+    /// 不能据此宣称是同一次请求——默认按冲突呈现并要求用户显式决定
+    ///（计划 §5.3：缺少跨来源身份且存在重叠候选时，预览列为未解决，
+    /// 默认不提交含此类冲突的计划）。
+    OverlapCandidate,
 }
 
 /// 日粒度汇总快照的一条写入（CCS 完整主键 + 来源时区 + 归一化四桶）。
@@ -573,33 +582,73 @@ impl ReadSnapshot {
         Ok(out)
     }
 
+    /// **分批**流式遍历行索引（keyset 分页）：每批在**锁内**只取数据，
+    /// 回调在**锁外**执行——回调因此可以安全地再次读取本快照（早期实现
+    /// 在持锁期间回调，`fetch_events` 会重复获取同一把非重入互斥量而死锁）。
+    pub fn for_each_row_batch(
+        &self,
+        app: Option<AgentKind>,
+        batch: usize,
+        f: &mut dyn FnMut(&[RowRef]) -> Result<()>,
+    ) -> Result<()> {
+        let batch = batch.max(1) as i64;
+        let mut after: Option<(i64, i64, i64)> = None;
+        loop {
+            let rows = {
+                let conn = self.lock();
+                let mut stmt = conn.prepare(
+                    "SELECT id, ts_seconds, ts_nanos, record_id
+                     FROM usage_events
+                     WHERE (?1 IS NULL OR app = ?1)
+                       AND (?2 IS NULL OR (ts_seconds, ts_nanos, id) > (?2, ?3, ?4))
+                     ORDER BY ts_seconds, ts_nanos, id
+                     LIMIT ?5",
+                )?;
+                let (s, n, i) = match after {
+                    Some(v) => (Some(v.0), Some(v.1), Some(v.2)),
+                    None => (None, None, None),
+                };
+                let mapped =
+                    stmt.query_map(params![app.map(|a| a.as_str()), s, n, i, batch], |row| {
+                        let id: i64 = row.get(0)?;
+                        let secs: i64 = row.get(1)?;
+                        let nanos: i64 = row.get(2)?;
+                        let record_id: Option<String> = row.get(3)?;
+                        Ok(RowRef {
+                            id,
+                            ts: timestamp_from_parts(secs, nanos),
+                            record_id: record_id.unwrap_or_default(),
+                        })
+                    })?;
+                let mut out = Vec::new();
+                for r in mapped {
+                    out.push(r?);
+                }
+                out
+            };
+            if rows.is_empty() {
+                return Ok(());
+            }
+            after = rows
+                .last()
+                .map(|r| (r.ts.as_second(), r.ts.subsec_nanosecond() as i64, r.id));
+            f(&rows)?;
+        }
+    }
+
     /// **流式**遍历行的轻量索引，顺序固定为 `(ts_seconds, ts_nanos, id)` 升序。
-    /// 逐行回调，不把整表读进内存；回调返回值可提前终止遍历（Err 向上透传）。
+    /// 逐行回调（内部按批读取，锁不跨越回调）。
     pub fn stream_rows(
         &self,
         app: Option<AgentKind>,
         f: &mut dyn FnMut(RowRef) -> Result<()>,
     ) -> Result<()> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, ts_seconds, ts_nanos, record_id
-             FROM usage_events
-             WHERE (?1 IS NULL OR app = ?1)
-             ORDER BY ts_seconds, ts_nanos, id",
-        )?;
-        let mut rows = stmt.query(params![app.map(|a| a.as_str())])?;
-        while let Some(row) = rows.next()? {
-            let id: i64 = row.get(0)?;
-            let secs: i64 = row.get(1)?;
-            let nanos: i64 = row.get(2)?;
-            let record_id: Option<String> = row.get(3)?;
-            f(RowRef {
-                id,
-                ts: timestamp_from_parts(secs, nanos),
-                record_id: record_id.unwrap_or_default(),
-            })?;
-        }
-        Ok(())
+        self.for_each_row_batch(app, 1024, &mut |rows| {
+            for r in rows {
+                f(r.clone())?;
+            }
+            Ok(())
+        })
     }
 
     /// **流式**分批读取事件本体：每批至多 `chunk` 条，内存占用与批大小成正比。
@@ -609,24 +658,12 @@ impl ReadSnapshot {
         chunk: usize,
         f: &mut dyn FnMut(&[StoredEvent]) -> Result<()>,
     ) -> Result<()> {
-        let chunk = chunk.max(1);
-        let mut batch: Vec<i64> = Vec::with_capacity(chunk);
-        let mut flush = |ids: &mut Vec<i64>| -> Result<()> {
-            if ids.is_empty() {
-                return Ok(());
-            }
-            let events = self.fetch_events(ids)?;
-            ids.clear();
+        self.for_each_row_batch(app, chunk, &mut |rows| {
+            let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+            // 锁已释放：`fetch_events` 在这里取锁不会与行扫描互锁。
+            let events = self.fetch_events(&ids)?;
             f(&events)
-        };
-        self.stream_rows(app, &mut |r| {
-            batch.push(r.id);
-            if batch.len() >= chunk {
-                flush(&mut batch)?;
-            }
-            Ok(())
-        })?;
-        flush(&mut batch)
+        })
     }
 
     /// 按 id 批量取事件本体（排序按库内 `(ts, id)`，调用方按需重排）。
@@ -786,7 +823,12 @@ impl HistoryDb {
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))?)
     }
 
-    /// 版本迁移：事务内按序执行，失败整体回滚并保留原库。
+    /// 版本迁移：**先备份**（SQLite 在线备份语义的 `VACUUM INTO`，生成可直接
+    /// 打开的完整副本），再在事务内按序执行迁移，失败整体回滚并保留原库。
+    ///
+    /// 备份只在实际发生升级（`0 < 现有版本 < 当前版本`）时生成，且已存在则
+    /// 不覆盖——用户总能在 TokenScope 数据目录里找到升级前的可恢复副本
+    ///（计划 §6：变更前通过 SQLite 备份 API 在 TokenScope 目录生成可恢复备份）。
     fn migrate(&self) -> Result<()> {
         let current = self.schema_version()?;
         if current > HISTORY_SCHEMA_VERSION {
@@ -794,6 +836,10 @@ impl HistoryDb {
                 "历史库结构版本 {current} 高于本程序支持的 {HISTORY_SCHEMA_VERSION}；\
                  保留文件不作修改，请升级 TokenScope 后再打开"
             );
+        }
+        if current > 0 && current < HISTORY_SCHEMA_VERSION {
+            // 升级前先落可恢复备份（失败即中止本次升级，结构不变）。
+            self.backup_before_upgrade(current)?;
         }
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         for (version, sql) in MIGRATIONS {
@@ -819,6 +865,31 @@ impl HistoryDb {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// 升级前备份：`VACUUM INTO` 生成完整的、可直接打开的 SQLite 副本
+    ///（等价于 SQLite 在线备份 API），落在历史库同目录。
+    ///
+    /// 已存在同名备份时不覆盖（升级重试不产生多份），失败即中止升级——
+    /// 宁可这次不升级，也不在没有可恢复副本的情况下改结构。
+    fn backup_before_upgrade(&self, from_version: i64) -> Result<()> {
+        let target = self
+            .path
+            .with_extension(format!("db.backup-v{from_version}"));
+        if target.exists() {
+            log::info!("升级前备份已存在，跳过：{}", target.display());
+            return Ok(());
+        }
+        // VACUUM INTO 的路径参数不能用占位符，需内联；单引号按 SQL 规则转义。
+        let escaped = target.display().to_string().replace('\'', "''");
+        self.conn
+            .execute_batch(&format!("VACUUM INTO '{escaped}'"))
+            .with_context(|| format!("升级前备份失败（目标 {}）", target.display()))?;
+        log::info!(
+            "历史库升级前备份完成：v{from_version} → {}",
+            target.display()
+        );
         Ok(())
     }
 
@@ -862,6 +933,56 @@ impl HistoryDb {
         self.set_meta(META_LEGACY_MIGRATION, "done")
     }
 
+    /// 批次写入（可带一次性标记，**同一事务**提交）。
+    ///
+    /// 遗留缓存迁移用：全部事件与「已迁移」标记必须原子——中途失败时库内保持
+    /// 事务前状态，不留半迁移；标记与数据同时可见，也不会出现"标记已写但数据
+    /// 没落库"。
+    pub fn write_batch_with_marker(
+        &self,
+        batch: &[EventWrite],
+        marker_key: Option<&str>,
+    ) -> Result<WriteSummary> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let generation = self.generation_in_tx(&tx)?;
+        let (summary, changed) = write_events_in_tx(&tx, batch, generation)?;
+        if let Some(key) = marker_key {
+            set_meta_in_tx(&tx, key, "done")?;
+        }
+        if changed {
+            bump_generation(&tx)?;
+        }
+        tx.commit()?;
+        Ok(summary)
+    }
+
+    /// 事务内 generation 读取（写事务内校验用：防止"预览后、提交前"的窗口）。
+    fn generation_in_tx(&self, tx: &Transaction<'_>) -> Result<u64> {
+        let value: Option<String> = tx
+            .query_row(
+                "SELECT value FROM history_meta WHERE key = ?1",
+                params![META_GENERATION],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match value {
+            Some(v) => parse_u64_text(&v, META_GENERATION),
+            None => Ok(0),
+        }
+    }
+
+    /// 单条写入是否合法（采集侧预检用）：不合法的事件应跳过并计诊断，
+    /// **不能**让整批写入因一条坏记录失败（否则一条坏行会让全部采集不回账）。
+    pub fn can_write(&self, w: &EventWrite) -> Result<bool> {
+        match validate_write(w) {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                log::debug!("写入预检拒绝：{e}");
+                Ok(false)
+            }
+        }
+    }
+
     /// 批次写入：在**一个写事务**内按已存在的来源键/原生身份别名合并事件。
     ///
     /// 顺序无关性：同一请求的原生值与 CCS 值无论谁先写，最终都保留原生终值
@@ -886,8 +1007,24 @@ impl HistoryDb {
     pub fn classify_write(&self, w: &EventWrite) -> Result<WriteClass> {
         validate_write(w)?;
         match lookup_event(&self.conn, w)? {
-            None => Ok(WriteClass::Insert),
+            None => match self.overlap_candidate(w)? {
+                // 无身份但有重叠候选：不宣称"就是同一次请求"，按未解决呈现。
+                Some(_) if w.aliases.is_empty() => Ok(WriteClass::OverlapCandidate),
+                _ => Ok(WriteClass::Insert),
+            },
             Some(existing) => Ok(classify_against(&existing, w)),
+        }
+    }
+
+    /// 重叠候选检测（只读）：库内是否存在同应用、同模型等价身份、四桶相同、
+    /// 时间接近的既有请求。仅用于把"身份不足 + 存在重叠"的来源记录标为未解决。
+    ///
+    /// 时间窗按秒比较（CCS 只到秒，且导入与原生采集的时间戳可能相差数秒到
+    /// 数分钟）；窗口内命中即视为候选，不做合并。
+    pub fn overlap_candidate(&self, w: &EventWrite) -> Result<Option<StoredEvent>> {
+        match lookup_overlap_candidate(&self.conn, w)? {
+            Some(id) => load_event(&self.conn, id),
+            None => Ok(None),
         }
     }
 
@@ -941,22 +1078,46 @@ impl HistoryDb {
         })
     }
 
-    /// 导入批次的净新增用量（该批次来源指向的事件的四桶之和）。
+    /// 导入批次的净新增用量（读审计行；提交时按**本批插入**的事件写入）。
     pub fn import_run_net_tokens(&self, run_id: i64) -> Result<TokenCounts> {
-        net_new_tokens_conn(&self.conn, run_id)
+        let (i, o, cw, cr): (String, String, String, String) = self.conn.query_row(
+            "SELECT net_input_tokens, net_output_tokens, net_cache_write_tokens,
+                    net_cache_read_tokens FROM import_runs WHERE id = ?1",
+            params![run_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        Ok(TokenCounts {
+            input: parse_u64_text(&i, "net_input_tokens")?,
+            output: parse_u64_text(&o, "net_output_tokens")?,
+            cache_write: parse_u64_text(&cw, "net_cache_write_tokens")?,
+            cache_read: parse_u64_text(&cr, "net_cache_read_tokens")?,
+        })
     }
 
     /// H05：CCS 导入的一个批次——事件、日汇总快照与导入审计**在同一事务**内
     /// 提交（计划 §5.1：批次与数据同事务，崩溃或失败整体回滚）。
+    ///
+    /// `expected_generation` 在**事务内**校验（不是提交前）：预览之后、提交
+    /// 之前发生的任何采集/导入都会让 generation 变化，此时整批拒绝并要求
+    /// 重新预览——避免拿过期预览去插入重复请求（计划不变量 12）。
     pub fn apply_import_batch(
         &self,
         writes: &[EventWrite],
         rollups: &[DailyRollupWrite],
         policy: RollupConflictPolicy,
         run: &ImportRunRecord,
+        expected_generation: Option<u64>,
     ) -> Result<ImportOutcome> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let generation = self.generation()?;
+        let generation = self.generation_in_tx(&tx)?;
+        if let Some(expected) = expected_generation
+            && expected != generation
+        {
+            bail!(
+                "历史库在本次预览之后发生了变化（generation {expected} → {generation}），\
+                 请重新预览后再提交"
+            );
+        }
         // 先落批次行拿到 id：来源证据要记录"这批用量来自哪次导入"。
         let run_id = insert_import_run(&tx, run)?;
         let mut writes = writes.to_vec();
@@ -970,9 +1131,11 @@ impl HistoryDb {
         let (write_summary, events_changed) = write_events_in_tx(&tx, &writes, generation)?;
         let (rollup_summary, rollups_changed) = write_rollups_in_tx(&tx, rollups, policy, run_id)?;
         let changed = events_changed || rollups_changed;
+        // 净新增 = **本批插入**事件的四桶之和（只补来源证据的记录不计）。
+        let net_new = write_summary.inserted_tokens;
         // 完全相同的重复导入：不新增用量、不重复来源、不递增 generation，
         // 但审计批次照常登记（计划 §3：可以记录审计结果）。
-        finish_import_run(&tx, run_id, run, &write_summary, &rollup_summary)?;
+        finish_import_run(&tx, run_id, net_new, &write_summary, &rollup_summary)?;
         if changed {
             bump_generation(&tx)?;
         }
@@ -1317,8 +1480,9 @@ pub struct LegacyMigrationReport {
 ///   `(session_id, message.id)`）另作别名登记：重扫同一文件时命中同一事件，
 ///   不产生重复用量；
 /// - 迁移**不读源日志**：源文件已被清理时旧缓存里的用量照样保留；
-/// - 完成后写一次性标记：重复调用直接跳过（`Ok(None)`）；失败不写标记，
-///   整批可用同一份旧库重试。
+/// - **整批原子**：全部写入与一次性标记在**同一个写事务**里提交——中途失败
+///   （例如第 501 条写入报错）时库内保持事务前状态，绝不留下"前 500 条已提交"
+///   的半迁移；失败不写标记，可用同一份旧库原样重试。
 pub fn migrate_legacy_cache(
     history: &HistoryDb,
     legacy_cache: &Path,
@@ -1349,16 +1513,13 @@ pub fn migrate_legacy_cache(
             }
         }
     }
-    for chunk in batch.chunks(LEGACY_MIGRATION_CHUNK) {
-        let s = history.write_batch(chunk)?;
-        report.inserted += s.inserted;
-        report.updated += s.updated;
-        report.unchanged += s.unchanged;
-        report.conflicts += s.conflicts;
-        report.stale += s.stale;
-    }
-    // 只在整批成功提交后落标记：失败（含中途崩溃）可原样重试。
-    history.mark_legacy_cache_migrated()?;
+    // 整批一个事务 + 标记同事务提交：失败整体回滚（计划 §6 的事务前状态）。
+    let summary = history.write_batch_with_marker(&batch, Some(META_LEGACY_MIGRATION))?;
+    report.inserted = summary.inserted;
+    report.updated = summary.updated;
+    report.unchanged = summary.unchanged;
+    report.conflicts = summary.conflicts;
+    report.stale = summary.stale;
     log::info!(
         "遗留缓存迁移完成：文件 {}，事件行 {}，新增 {}，更新 {}，已存在 {}，冲突 {}，拒绝 {}",
         report.files,
@@ -1400,12 +1561,30 @@ fn legacy_event_write(
     let _ = total;
     // 旧缓存里的行序（v11+）优先；更早版本没有该列，用行位置兜底。
     let position = if ev.line > 0 { ev.line } else { idx as u64 };
+    // 身份别名：迁移过来的行必须能与"迁移后重扫"命中同一事件，否则同一请求
+    // 会被计两次（Claude 用可证实身份，Codex 用与全局去重一致的保守重播身份）。
+    let identity_event = crate::model::UsageEvent {
+        ts,
+        agent: file.app,
+        model: ev.model.clone(),
+        session_id: ev.session_id.clone(),
+        project: ev.project.clone(),
+        session_initial_cwd: ev.session_initial_cwd.clone(),
+        event_cwd: ev.event_cwd.clone(),
+        record_id: ev.record_id.clone(),
+        line: 0,
+        source_path: String::new(),
+        input_tokens: ev.input,
+        output_tokens: ev.output,
+        cache_write_tokens: ev.cache_write,
+        cache_read_tokens: ev.cache_read,
+    };
     let mut aliases = Vec::new();
-    if !ev.session_id.is_empty() && !ev.record_id.is_empty() {
+    if let Some((scheme, value)) = identity_event.same_source_identity() {
         aliases.push(EventAlias {
             app: file.app,
-            scheme: "claude-message".to_string(),
-            value: format!("{}|{}", ev.session_id, ev.record_id),
+            scheme: scheme.to_string(),
+            value,
         });
     }
     Ok(EventWrite {
@@ -1471,8 +1650,17 @@ fn write_events_in_tx(
         let event_id = match existing {
             Some(stored) => merge_event(tx, stored, write, &mut summary, &mut changed)?,
             None => {
+                // 身份不足（无别名）且库内有重叠候选时记录审计计数：调用方
+                // 可能在用户确认后按"新增"导入，这条计数让结果可核查。
+                if write.aliases.is_empty() && lookup_overlap_candidate(tx, write)?.is_some() {
+                    summary.overlap_candidates += 1;
+                }
                 let id = insert_event(tx, write)?;
                 summary.inserted += 1;
+                summary.inserted_tokens = summary
+                    .inserted_tokens
+                    .checked_add(&write.tokens)
+                    .ok_or_else(|| anyhow!("本批新增用量累计溢出可表示范围"))?;
                 changed = true;
                 id
             }
@@ -1564,6 +1752,34 @@ fn write_events_in_tx(
         }
     }
     Ok((summary, changed))
+}
+
+/// 重叠候选查询（`&Connection` 版本：写事务内外共用同一判定）。
+fn lookup_overlap_candidate(conn: &Connection, w: &EventWrite) -> Result<Option<i64>> {
+    const WINDOW_SECONDS: i64 = 600;
+    Ok(conn
+        .query_row(
+            "SELECT id FROM usage_events
+             WHERE app = ?1 AND model_identity = ?2
+               AND input_tokens = ?3 AND output_tokens = ?4
+               AND cache_write_tokens = ?5 AND cache_read_tokens = ?6
+               AND ts_seconds BETWEEN ?7 AND ?8
+             ORDER BY ABS(ts_seconds - ?9), id
+             LIMIT 1",
+            params![
+                w.app.as_str(),
+                w.model_identity,
+                w.tokens.input.to_string(),
+                w.tokens.output.to_string(),
+                w.tokens.cache_write.to_string(),
+                w.tokens.cache_read.to_string(),
+                w.ts.as_second() - WINDOW_SECONDS,
+                w.ts.as_second() + WINDOW_SECONDS,
+                w.ts.as_second(),
+            ],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?)
 }
 
 /// 库内处置判定（纯函数，预览与写入共用）。
@@ -1730,11 +1946,10 @@ fn insert_import_run(tx: &Transaction<'_>, run: &ImportRunRecord) -> Result<i64>
 fn finish_import_run(
     tx: &Transaction<'_>,
     run_id: i64,
-    run: &ImportRunRecord,
+    net_new: TokenCounts,
     write_summary: &WriteSummary,
     rollup_summary: &RollupSummary,
 ) -> Result<()> {
-    let net = net_new_tokens(tx, run_id)?;
     tx.execute(
         "UPDATE import_runs SET requests_inserted = ?2, requests_updated = ?3,
             requests_unchanged = ?4, requests_conflicted = ?5, requests_stale = ?6,
@@ -1751,49 +1966,23 @@ fn finish_import_run(
             write_summary.stale as i64,
             (rollup_summary.inserted + rollup_summary.replaced) as i64,
             rollup_summary.conflicted as i64,
-            net.input.to_string(),
-            net.output.to_string(),
-            net.cache_write.to_string(),
-            net.cache_read.to_string(),
+            net_new.input.to_string(),
+            net_new.output.to_string(),
+            net_new.cache_write.to_string(),
+            net_new.cache_read.to_string(),
         ],
     )?;
-    let _ = run;
     Ok(())
 }
 
-/// 本批次**净新增**用量：来源为该批次的事件四桶之和（已按库内合并去重）。
-fn net_new_tokens(tx: &Transaction<'_>, run_id: i64) -> Result<TokenCounts> {
-    net_new_tokens_conn(tx, run_id)
-}
-
-fn net_new_tokens_conn(conn: &Connection, run_id: i64) -> Result<TokenCounts> {
-    let mut stmt = conn.prepare(
-        "SELECT e.input_tokens, e.output_tokens, e.cache_write_tokens, e.cache_read_tokens
-         FROM event_origins o JOIN usage_events e ON e.id = o.event_id
-         WHERE o.import_run_id = ?1",
+/// 事务内写入元信息（一次性标记等）。
+fn set_meta_in_tx(tx: &Transaction<'_>, key: &str, value: &str) -> Result<()> {
+    tx.execute(
+        "INSERT INTO history_meta(key, value) VALUES(?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
     )?;
-    let rows = stmt.query_map(params![run_id], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-        ))
-    })?;
-    let mut acc = TokenCounts::default();
-    for row in rows {
-        let (i, o, cw, cr) = row?;
-        let counts = TokenCounts {
-            input: parse_u64_text(&i, "input_tokens")?,
-            output: parse_u64_text(&o, "output_tokens")?,
-            cache_write: parse_u64_text(&cw, "cache_write_tokens")?,
-            cache_read: parse_u64_text(&cr, "cache_read_tokens")?,
-        };
-        acc = acc
-            .checked_add(&counts)
-            .ok_or_else(|| anyhow!("导入批次净新增用量溢出可表示范围"))?;
-    }
-    Ok(acc)
+    Ok(())
 }
 
 /// 校验单条写入（在事务开始后、写任何行之前逐条执行；失败整批回滚）。
@@ -1989,7 +2178,7 @@ fn merge_event(
             );
             return Ok(existing.id);
         }
-        WriteClass::Insert | WriteClass::Update => {}
+        WriteClass::Insert | WriteClass::Update | WriteClass::OverlapCandidate => {}
     }
     tx.execute(
         "UPDATE usage_events SET

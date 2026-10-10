@@ -240,7 +240,13 @@ fn real_import_into_isolated_history_is_idempotent() {
         first.net_new_tokens.total()
     );
 
-    let report = ccs::commit(&first.plan_id, &history, RollupConflictPolicy::KeepExisting).unwrap();
+    let report = ccs::commit(
+        &first.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        true,
+    )
+    .unwrap();
     let events_after_first = history.event_count().unwrap();
     let generation_after_first = history.generation().unwrap();
     eprintln!(
@@ -265,6 +271,7 @@ fn real_import_into_isolated_history_is_idempotent() {
         &second.plan_id,
         &history,
         RollupConflictPolicy::KeepExisting,
+        true,
     )
     .unwrap();
     assert_eq!(report2.requests_inserted, 0);

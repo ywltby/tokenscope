@@ -134,7 +134,8 @@ impl UsageEvent {
     ///   更新与重复来源都指向同一条；
     /// - Codex：rollout 的 `token_count` 记录不带请求标识（无 id / 无序号），
     ///   身份不足时返回 `None`——**不猜测身份**，该来源的请求只按库内来源键
-    ///   与既有保守重播规则处理。
+    ///   与既有保守重播规则处理（跨来源合并需要的是可证实身份，故不给 Codex
+    ///   任何跨来源别名）。
     pub fn native_identity(&self) -> Option<(&'static str, String)> {
         match self.agent {
             AgentKind::ClaudeCode => {
@@ -148,6 +149,36 @@ impl UsageEvent {
                 }
             }
             AgentKind::Codex => None,
+        }
+    }
+
+    /// 保守重播身份（**同源**去重，不跨来源）：文件被归档移动、复制成副本、
+    /// 或先经遗留缓存迁移后重扫时，同一条请求必须仍映射到同一事件行。
+    ///
+    /// 规则与全局去重（`dedupe.rs` §3.2）完全一致：Codex 的 `token_count`
+    /// 没有请求标识，但 `(session_id, 原始模型, 四桶)` 相同的记录按保守规则
+    /// 视为同一次请求的重播/副本——因此把它登记为别名，**与文件路径无关**。
+    /// 该别名只用于同来源去重；CCS 导入不得使用它（跨来源身份必须可证实）。
+    pub fn same_source_identity(&self) -> Option<(&'static str, String)> {
+        match self.agent {
+            AgentKind::ClaudeCode => self.native_identity(),
+            AgentKind::Codex => {
+                if self.session_id.is_empty() || self.model.is_empty() {
+                    return None;
+                }
+                Some((
+                    "codex-usage",
+                    format!(
+                        "{}|{}|{}|{}|{}|{}",
+                        self.session_id,
+                        self.model,
+                        self.input_tokens,
+                        self.output_tokens,
+                        self.cache_write_tokens,
+                        self.cache_read_tokens
+                    ),
+                ))
+            }
         }
     }
 }

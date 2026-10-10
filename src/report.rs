@@ -26,6 +26,9 @@ use crate::source::{CollectStats, Source};
 pub struct SummaryOptions {
     pub by: GroupBy,
     pub agent: Option<AgentKind>,
+    /// H08：日粒度历史的参与方式（默认自动；`DetailOnly` = 只用请求明细）。
+    /// 由壳侧命令按查询参数映射（不参与 serde，避免给 `GroupBy` 强加序列化）。
+    pub rollups: RollupsMode,
     pub days: Option<u32>,
     pub claude_dir: Option<PathBuf>,
     pub codex_dir: Option<PathBuf>,
@@ -435,6 +438,24 @@ static INFLIGHT: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Fli
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 static COLLECT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// 采集的**统一串行闸门**（H04/H07 修订）：启动采集、手动刷新、重扫与定时
+/// 采集都要经过这里。
+///
+/// 同参调用仍然单飞（跟随者等待同一航班，零重复解析）；**不同参数**的调用
+/// 排队而不是并行——早期实现只按参数分键，换一个参数（仅改 agent 筛选或
+/// refresh）就会同时跑起第二条管线，与"同一个后台单飞协调器"的要求不符，
+/// 也会让同一批源文件被两轮解析各自入库。
+static COLLECT_SERIAL: Mutex<()> = Mutex::new(());
+/// 观测：当前正在跑的采集管线数与历史峰值（测试断言"不同参数不并行"）。
+static COLLECT_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+static COLLECT_MAX_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+
+/// 取走并清零"同时进行的采集管线数"峰值（诊断与测试）。
+#[doc(hidden)]
+pub fn take_max_concurrent_collections_for_tests() -> u64 {
+    COLLECT_MAX_IN_FLIGHT.swap(0, Ordering::SeqCst)
+}
+
 /// 采集键：只含影响**采集**的参数（by/tz/from/to/days 是采集后的过滤，
 /// 不参与——汇总与明细同参并发时必须合并为一次采集）。A03：Claude 项目映射
 /// 修订属于采集输入——配置变化后必须走新采集，不能复用旧航班结果。
@@ -587,7 +608,16 @@ fn collect_flighted_with(
         published: false,
     };
     let generation = COLLECT_GENERATION.fetch_add(1, Ordering::Relaxed);
-    match leader(generation) {
+    // 串行闸门：不同参数的采集排队执行（同参跟随者不经过这里，仍在航班上等待）。
+    let result = {
+        let _serial = COLLECT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let in_flight = COLLECT_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+        COLLECT_MAX_IN_FLIGHT.fetch_max(in_flight, Ordering::SeqCst);
+        let r = leader(generation);
+        COLLECT_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+        r
+    };
+    match result {
         Ok(snapshot) => {
             // RC05：只构造一次 Arc，领队与跟随者共享（不再深拷贝）。
             let arc = Arc::new(snapshot);
@@ -1079,7 +1109,32 @@ fn collect_all_with_sources(
     // 按"后写者胜出"合并，与全局去重"取时间戳最晚"的口径一致；写入按来源
     // 键 + 内容指纹去重，因此重复采集幂等，且文件被替换后旧事实不被覆盖。
     events.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.line.cmp(&b.line)));
-    let writes: Vec<crate::history::EventWrite> = events.iter().map(event_write_of).collect();
+    // 逐条预检 + 跳过不可写入的事件：单条坏记录（如模型名为空的遗留行）不得
+    // 让整批回滚——否则一条坏事件会让**全部采集失败**，连已有历史都无法展示。
+    // 跳过的条数进诊断，与适配器层的 bad_lines 口径一致（不静默吞掉）。
+    let mut writes: Vec<crate::history::EventWrite> = Vec::with_capacity(events.len());
+    let mut skipped_unwritable = 0u64;
+    for ev in &events {
+        let write = event_write_of(ev);
+        match history.can_write(&write) {
+            Ok(true) => writes.push(write),
+            Ok(false) => {
+                skipped_unwritable += 1;
+                log::warn!(
+                    "跳过不可入库的事件（{} / {} / {:?}）：字段不合法",
+                    ev.agent.as_str(),
+                    ev.model,
+                    ev.ts
+                );
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    if skipped_unwritable > 0 {
+        warnings.push(format!(
+            "{skipped_unwritable} 条事件字段不合法，未写入历史库（其余照常入账）"
+        ));
+    }
     let write_summary = history.write_batch(&writes)?;
     log::info!(
         "历史库写入：新增 {}，更新 {}，已存在 {}，冲突 {}，陈旧 {}；别名 +{}，来源 +{}",
@@ -1245,6 +1300,39 @@ pub struct RollupSelection {
     pub(crate) warnings: Vec<String>,
 }
 
+/// H06/H08：日粒度历史的参与方式。
+///
+/// - `Auto`：按桶选择规则参与（明细优先；时区不匹配时拒绝重切日期）；
+/// - `DetailOnly`：**只用请求明细**——计划 §5.2 给恢复路径之一（来源时区与
+///   展示时区不一致时，用户可切回来源时区，或只看请求明细）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RollupsMode {
+    #[default]
+    Auto,
+    DetailOnly,
+}
+
+/// 日汇总是否落在查询的时间范围内。
+///
+/// 未限定范围 → 全部参与；设了范围：能解析日期就按日期比较，**解析不出日期
+/// 时排除**（宁可少算声明范围外的历史，也不把范围外的用量混进来）。
+fn rollup_in_bounds(r: &crate::history::StoredRollup, bounds: &TimeBounds) -> bool {
+    if bounds.is_unbounded() {
+        return true;
+    }
+    let Ok(day) = r.day.parse::<jiff::civil::Date>() else {
+        return false;
+    };
+    if bounds.from.is_some_and(|from| day < from) {
+        return false;
+    }
+    if bounds.to.is_some_and(|to| day > to) {
+        return false;
+    }
+    true
+}
+
 /// H06：按 `(CCS 原始统计日, 来源时区, 应用, 等价模型)` 桶决定统计来源。
 ///
 /// 规则（计划 §5.3）：
@@ -1263,17 +1351,25 @@ pub(crate) fn select_rollup_contributions(
     day_sensitive: bool,
     tz_label: &str,
     policy: RollupBucketPolicy,
+    bounds: &TimeBounds,
+    mode: RollupsMode,
 ) -> RollupSelection {
     let mut selection = RollupSelection {
         contributions: Vec::new(),
         coverage: crate::aggregate::RollupCoverage::default(),
         warnings: Vec::new(),
     };
-    if rollups.is_empty() {
+    if rollups.is_empty() || mode == RollupsMode::DetailOnly {
+        // 仅明细模式：用户显式要求不看日粒度历史（不报"缺失"，这是他的选择）。
         return selection;
     }
     let mut mismatched: Vec<String> = Vec::new();
     for r in rollups {
+        // H08：主时间范围同样作用于日汇总——只按日粒度保存的历史也必须遵守
+        // 用户选择的日期区间（早期实现让"只看 10 月 9 日"仍带出 6 月 1 日）。
+        if !rollup_in_bounds(r, bounds) {
+            continue;
+        }
         if jiff::tz::TimeZone::get(&r.source_tz).is_err() {
             // 认不出来源时区时不可重切日期：日汇总不参与任何按日解释。
             if !mismatched.contains(&r.source_tz) {
@@ -1352,18 +1448,27 @@ pub(crate) fn select_rollup_contributions(
 ///   旧事实保留，绝不用新值覆盖已保存的旧请求；
 /// - 流式终值更新由原生身份别名命中同一事件后按终值规则完成。
 fn event_write_of(ev: &UsageEvent) -> crate::history::EventWrite {
-    use crate::history::{
-        EventAlias, EventOrigin, EventWrite, ORIGIN_KIND_NATIVE_FILE, WritePrecedence,
-    };
+    use crate::history::{EventOrigin, EventWrite, ORIGIN_KIND_NATIVE_FILE, WritePrecedence};
     let position = format!("{}|{}|{}", ev.agent.as_str(), ev.source_path, ev.line);
     let key = format!("native|{position}|{}", ev.content_fingerprint());
+    // 身份别名两类都登记：
+    // - 可证实的跨来源身份（Claude 的 `(session, message.id)`）；
+    // - 保守重播身份（Codex 的 `(session, 原始模型, 四桶)`）——**同源**去重，
+    //   使文件归档移动、复制副本与遗留缓存迁移后的重扫都命中同一事件，
+    //   不会因为路径变化而重复累计。
     let mut aliases = Vec::new();
-    if let Some((scheme, value)) = ev.native_identity() {
-        aliases.push(EventAlias {
-            app: ev.agent,
-            scheme: scheme.to_string(),
-            value,
-        });
+    for identity in [ev.native_identity(), ev.same_source_identity()] {
+        if let Some((scheme, value)) = identity
+            && !aliases
+                .iter()
+                .any(|a: &crate::history::EventAlias| a.scheme == scheme)
+        {
+            aliases.push(crate::history::EventAlias {
+                app: ev.agent,
+                scheme: scheme.to_string(),
+                value,
+            });
+        }
     }
     EventWrite {
         event_key: key.clone(),
@@ -1378,7 +1483,10 @@ fn event_write_of(ev: &UsageEvent) -> crate::history::EventWrite {
         event_cwd: ev.event_cwd.clone(),
         tokens: TokenCounts::from_event(ev),
         precedence: WritePrecedence::NativeLog,
-        observed_at: jiff::Timestamp::now(),
+        // 观察时间取**事件时间**而不是采集时刻：重新解析一份较旧的副本
+        //（归档文件、旧备份）不得把已保存的较新终值回退——终值更新因此
+        // 仍按"更晚的事件时间胜出"，且与导入侧口径一致。
+        observed_at: ev.ts,
         aliases,
         origins: vec![EventOrigin {
             origin_kind: ORIGIN_KIND_NATIVE_FILE.to_string(),
@@ -1567,10 +1675,15 @@ pub struct EventList {
 
 /// SF04：从查询快照分页读取明细——下钻在固定行序上应用，游标 v2 校验
 /// 归属（query_id/主指纹/下钻指纹/行位置），不重新采集/排序/编号。
+///
+/// H08 修订：**分批读取**（每批至多 [`PAGE_SCAN_BATCH`] 条事件）——一次遍历
+/// 同时算出 `total` 与当前页，内存占用与批大小成正比，不再整份物化事件
+///（早期实现会让 `limit=1` 的请求也占住全部历史，绕过会话预算）。
 pub(crate) fn query_events_from(
     snapshot: &crate::query::QuerySnapshot,
     filter: &EventFilter,
 ) -> Result<EventList> {
+    const PAGE_SCAN_BATCH: usize = 256;
     let t = std::time::Instant::now();
     let drill_fp = crate::query::drill_fingerprint(filter);
     // 下钻过滤：在固定行序上筛匹配行（绝对位置），total 在同一快照内恒定。
@@ -1580,89 +1693,80 @@ pub(crate) fn query_events_from(
         .model
         .as_deref()
         .map(|m| crate::model_identity::ModelIdentity::parse(m).identity_key());
-    let matched: Vec<usize> = snapshot
-        .rows
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| {
-            let e = snapshot.event(r);
-            let day_ok = filter
-                .day
-                .as_ref()
-                .is_none_or(|d| e.ts.to_zoned(snapshot.tz.clone()).date().to_string() == *d);
-            let model_ok = model_key.as_ref().is_none_or(|k| {
-                crate::model_identity::ModelIdentity::parse(&e.model).identity_key() == *k
-            });
-            let project_ok = filter.project.as_ref().is_none_or(|p| e.project == *p);
-            day_ok && model_ok && project_ok
-        })
-        .map(|(i, _)| i)
-        .collect();
-    let total = matched.len() as u64;
     // 游标定位：返回严格位于游标行之后的匹配行（排序位次语义不变）。
     let after = match &filter.before {
         Some(cur) => crate::query::locate_cursor(snapshot, cur, &drill_fp)? + 1,
         None => 0,
     };
     let limit = filter.limit.unwrap_or(200).min(1000);
-    let rows: Vec<EventRow> = matched
-        .into_iter()
-        .filter(|&pos| pos >= after)
-        .take(limit)
-        .map(|pos| {
-            let r = &snapshot.rows[pos];
-            let e = snapshot.event(r);
-            // B3：部分计价模型的明细行展示已计价小计（unknown 分项随总计披露）。
-            // Task 6：同一次 estimate 同时产出 cost_usd 与 breakdown，
-            // 前端不重算（不变量 7）。
-            let estimate = snapshot
-                .pricing()
-                .estimate(&e.model, &TokenCounts::from_event(e), e.ts);
-            let cost_usd = estimate.as_ref().map(|est| est.cost);
-            let cost_breakdown = estimate.map(|est| EventCostBreakdown {
-                matched: est.matched.expect("estimate 命中必有候选元数据"),
-                basis: est.basis,
-                basis_value: est.basis_value,
-                segment_label: est.segment_label,
-                lines: est.lines,
-                cost_usd: est.cost,
-                unknown: est.unknown,
-                complete: est.complete,
-                excluded_candidate_warning: est.excluded_candidate_warning,
-            });
-            let cursor = serde_json::to_string(&crate::query::PageCursor {
-                v: crate::query::CURSOR_VERSION,
-                qid: snapshot.query_id.clone(),
-                mfp: snapshot.main_fingerprint.clone(),
-                dfp: drill_fp.clone(),
-                ts: e.ts.to_string(),
-                rid: e.record_id.clone(),
-                seq: r.seq,
-            })
-            .unwrap_or_default();
-            EventRow {
-                ts: e
-                    .ts
-                    .to_zoned(snapshot.tz.clone())
-                    .strftime("%F %T")
-                    .to_string(),
-                record_id: e.record_id.clone(),
-                cursor,
-                agent: e.agent.as_str(),
-                model: e.model.clone(),
-                session_id: e.session_id.clone(),
-                project: e.project.clone(),
-                session_initial_cwd: e.session_initial_cwd.clone(),
-                event_cwd: e.event_cwd.clone(),
-                input: e.input_tokens,
-                output: e.output_tokens,
-                cache_write: e.cache_write_tokens,
-                cache_read: e.cache_read_tokens,
-                cost_usd,
-                cost_breakdown,
-            }
+    let mut total: u64 = 0;
+    let mut rows: Vec<EventRow> = Vec::new();
+    let pricing = snapshot.pricing().clone();
+    snapshot.for_each_row_event(PAGE_SCAN_BATCH, &mut |row, e| {
+        let day_ok = filter
+            .day
+            .as_ref()
+            .is_none_or(|d| e.ts.to_zoned(snapshot.tz.clone()).date().to_string() == *d);
+        let model_ok = model_key.as_ref().is_none_or(|k| {
+            crate::model_identity::ModelIdentity::parse(&e.model).identity_key() == *k
+        });
+        let project_ok = filter.project.as_ref().is_none_or(|p| e.project == *p);
+        if !(day_ok && model_ok && project_ok) {
+            return Ok(());
+        }
+        let position = row.index;
+        total += 1;
+        if position < after || rows.len() >= limit {
+            return Ok(());
+        }
+        // B3：部分计价模型的明细行展示已计价小计（unknown 分项随总计披露）。
+        // Task 6：同一次 estimate 同时产出 cost_usd 与 breakdown，前端不重算。
+        let estimate = pricing.estimate(&e.model, &TokenCounts::from_event(e), e.ts);
+        let cost_usd = estimate.as_ref().map(|est| est.cost);
+        let cost_breakdown = estimate.map(|est| EventCostBreakdown {
+            matched: est.matched.expect("estimate 命中必有候选元数据"),
+            basis: est.basis,
+            basis_value: est.basis_value,
+            segment_label: est.segment_label,
+            lines: est.lines,
+            cost_usd: est.cost,
+            unknown: est.unknown,
+            complete: est.complete,
+            excluded_candidate_warning: est.excluded_candidate_warning,
+        });
+        let cursor = serde_json::to_string(&crate::query::PageCursor {
+            v: crate::query::CURSOR_VERSION,
+            qid: snapshot.query_id.clone(),
+            mfp: snapshot.main_fingerprint.clone(),
+            dfp: drill_fp.clone(),
+            ts: e.ts.to_string(),
+            rid: e.record_id.clone(),
+            seq: row.seq,
         })
-        .collect();
+        .unwrap_or_default();
+        rows.push(EventRow {
+            ts: e
+                .ts
+                .to_zoned(snapshot.tz.clone())
+                .strftime("%F %T")
+                .to_string(),
+            record_id: e.record_id.clone(),
+            cursor,
+            agent: e.agent.as_str(),
+            model: e.model.clone(),
+            session_id: e.session_id.clone(),
+            project: e.project.clone(),
+            session_initial_cwd: e.session_initial_cwd.clone(),
+            event_cwd: e.event_cwd.clone(),
+            input: e.input_tokens,
+            output: e.output_tokens,
+            cache_write: e.cache_write_tokens,
+            cache_read: e.cache_read_tokens,
+            cost_usd,
+            cost_breakdown,
+        });
+        Ok(())
+    })?;
     log::info!(
         "明细完成（会话 {}）：筛选 模型={:?} 项目={:?} 日={:?}，返回 {} 行 / 共 {} 条，{} ms",
         snapshot.query_id,
@@ -2360,6 +2464,8 @@ cache_read = 0.4
                 event_id: i,
                 index: i as usize,
                 seq: 0,
+                ts: "2026-09-15T08:00:00Z".parse().unwrap(),
+                record_id: format!("r{i}"),
             })
             .collect();
         let row_bytes = retained::vec_bytes(&rows).unwrap();

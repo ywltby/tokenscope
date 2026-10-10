@@ -42,6 +42,8 @@ pub fn parse_agent(agent: Option<&str>) -> Result<Option<AgentKind>, String> {
 /// **主线程纪律（用户反馈启动卡顿的根因）**：Tauri v2 的同步 command 在
 /// 主线程执行，扫描/解析/缓存/网络等重活一律 `async` + `spawn_blocking`
 /// 丢到后台线程池，GUI 主线程零阻塞。
+// 参数面由 IPC 契约决定（每个筛选项一个 invoke 参数），非设计膨胀。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn summarize(
     app: tauri::AppHandle,
@@ -51,10 +53,11 @@ pub async fn summarize(
     tz: Option<String>,
     from: Option<String>,
     to: Option<String>,
+    rollups: Option<String>,
 ) -> Result<SummaryReport, String> {
     // P02：业务闸门——未同意（非 Ready）时不进入采集/解析/缓存/网络。
     privacy::require_ready(&privacy::state_of(&app))?;
-    let opts = query_opts(&by, agent, days, tz, from, to)?;
+    let opts = query_opts(&by, agent, days, tz, from, to, rollups)?;
     run_blocking("summarize", move || summary(&opts)).await
 }
 
@@ -114,11 +117,15 @@ fn query_opts(
     tz: Option<String>,
     from: Option<String>,
     to: Option<String>,
+    rollups: Option<String>,
 ) -> Result<SummaryOptions, String> {
     let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings()?;
     Ok(SummaryOptions {
         by: parse_by(by)?,
         agent: parse_agent(agent.as_deref())?,
+        // H08：日粒度历史的参与方式——`detail_only` = 只用请求明细
+        //（来源时区与展示时区不一致时用户可选的恢复路径之一）。
+        rollups: parse_rollups_mode(rollups.as_deref())?,
         days,
         claude_dir,
         codex_dir,
@@ -131,8 +138,19 @@ fn query_opts(
     })
 }
 
+/// H08：查询参数里的日粒度历史模式（缺省 = 自动参与）。
+fn parse_rollups_mode(value: Option<&str>) -> Result<tokenscope::report::RollupsMode, String> {
+    match value.map(str::trim) {
+        None | Some("") | Some("auto") => Ok(tokenscope::report::RollupsMode::Auto),
+        Some("detail_only") => Ok(tokenscope::report::RollupsMode::DetailOnly),
+        Some(other) => Err(format!("未知的日粒度历史模式：{other}")),
+    }
+}
+
 /// SF04：创建查询会话——冻结一次采集的事件、价格修订、时间基准与来源
 /// 身份，返回 query_id 供汇总/明细（含分页）显式绑定。
+// 参数面由 IPC 契约决定（每个筛选项一个 invoke 参数），非设计膨胀。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn query_begin(
     app: tauri::AppHandle,
@@ -142,9 +160,10 @@ pub async fn query_begin(
     tz: Option<String>,
     from: Option<String>,
     to: Option<String>,
+    rollups: Option<String>,
 ) -> Result<tokenscope::query::QueryHandle, String> {
     privacy::require_ready(&privacy::state_of(&app))?;
-    let opts = query_opts(&by, agent, days, tz, from, to)?;
+    let opts = query_opts(&by, agent, days, tz, from, to, rollups)?;
     run_blocking("query_begin", move || {
         tokenscope::query::begin_query_handle(&opts)
     })
@@ -531,23 +550,29 @@ pub async fn cache_stats(app: tauri::AppHandle) -> Result<CacheInfo, String> {
 pub async fn ccs_import_preview(
     app: tauri::AppHandle,
     source_path: Option<String>,
+    source_day_timezone: Option<String>,
 ) -> Result<tokenscope::import::ccs::ImportPreview, String> {
     privacy::require_ready(&privacy::state_of(&app))?;
     let path = resolve_ccs_path(source_path)?;
+    let tz = resolve_source_day_tz(source_day_timezone)?;
     run_blocking("ccs_import_preview", move || {
         let history = open_history_for_import()?;
         let source = tokenscope::import::ccs::CcsSource::open(&path)?;
-        tokenscope::import::ccs::preview(&source, &history, &default_source_tz())
+        tokenscope::import::ccs::preview(&source, &history, &tz)
     })
     .await
 }
 
 /// H05：提交本次导入（**只执行一个批次**；计划一次性消费，重复提交明确失败）。
+///
+/// `allow_overlap` 是用户对"重叠候选"的显式决定：默认（false）拒绝提交含重叠
+/// 候选的计划，避免把"同时间同用量但身份不足"的来源记录当成新请求重复计费。
 #[tauri::command]
 pub async fn ccs_import_commit(
     app: tauri::AppHandle,
     plan_id: String,
     take_source_rollups: Option<bool>,
+    allow_overlap: Option<bool>,
 ) -> Result<tokenscope::import::ccs::ImportReport, String> {
     privacy::require_ready(&privacy::state_of(&app))?;
     let policy = if take_source_rollups.unwrap_or(false) {
@@ -555,9 +580,10 @@ pub async fn ccs_import_commit(
     } else {
         tokenscope::history::RollupConflictPolicy::KeepExisting
     };
+    let allow = allow_overlap.unwrap_or(false);
     run_blocking("ccs_import_commit", move || {
         let history = open_history_for_import()?;
-        tokenscope::import::ccs::commit(&plan_id, &history, policy)
+        tokenscope::import::ccs::commit(&plan_id, &history, policy, allow)
     })
     .await
 }
@@ -609,8 +635,20 @@ fn open_history_for_import() -> anyhow::Result<tokenscope::history::HistoryDb> {
     tokenscope::history::HistoryDb::open(&path)
 }
 
-/// H05：日汇总的来源统计时区假设——CCS 用 `localtime` 生成日键，这里记录
-/// 导入时的本机时区名（无法解析时退回 `local`，绝不宣称它是 UTC）。
+/// H05：日汇总的来源统计时区假设——CCS 用 `localtime` 生成日键，默认记录导入
+/// 时的本机时区名；用户在预览面板里改选来源时区时按用户选择记录（不宣称它是
+/// UTC，也不静默替换成展示时区）。
+fn resolve_source_day_tz(chosen: Option<String>) -> Result<String, String> {
+    match chosen.map(|s| s.trim().to_string()) {
+        Some(s) if !s.is_empty() && s != "local" => jiff::tz::TimeZone::get(&s)
+            .map(|_| s.clone())
+            .map_err(|_| format!("无法识别的来源时区：{s}")),
+        _ => Ok(default_source_tz()),
+    }
+}
+
+/// H05：日汇总的来源统计时区假设——CCS 用 `localtime` 生成日键，默认记录导入
+/// 时的本机时区名（无法解析时退回 `local`，绝不宣称它是 UTC）。
 fn default_source_tz() -> String {
     jiff::tz::TimeZone::system()
         .iana_name()

@@ -92,10 +92,6 @@ pub struct QuerySnapshot {
     collection: Arc<report::CollectionSnapshot>,
     /// H07：只读事务快照——汇总与分页都从它读取，采集/导入提交后旧查询不变。
     read: Arc<crate::history::ReadSnapshot>,
-    /// H07：懒物化的事件集（**只有明细分页/下钻才需要**；汇总走流式读取，
-    /// 不触发它，因此汇总的内存占用不随历史规模增长）。
-    materialized: std::sync::OnceLock<Vec<UsageEvent>>,
-    materialize_error: std::sync::OnceLock<String>,
     /// RC05：保留字节额度凭证——随本快照的**最后一个 Arc** 释放。
     /// 会话被淘汰但仍有读取者持有时继续占账
     ///（`evicted_but_borrowed_snapshot_stays_charged`）。
@@ -106,63 +102,20 @@ pub struct QuerySnapshot {
 pub struct SnapshotRow {
     /// 库内事件主键（H07：快照不再持有事件本体）。
     pub event_id: i64,
-    /// 该行在懒物化事件向量中的位置（与行序一一对应；分页/下钻用）。
+    /// 排序后的行序位置（会话内绝对位置，游标按它跳页）。
     pub index: usize,
     /// 相同 (ts, record_id) 组内的序号（0..n）——游标第三分量。
     pub seq: u64,
+    /// 事件时间戳与记录标识：游标定位与日筛选只需行元数据，
+    /// 不必为定位而读取事件本体。
+    pub ts: jiff::Timestamp,
+    pub record_id: String,
 }
 
 impl QuerySnapshot {
-    /// 该行的事件。会触发**懒物化**（整份行序事件一次读入）——汇总路径不走
-    /// 这里，因此不影响"汇总不物化历史"的约束。
-    pub fn event(&self, row: &SnapshotRow) -> &UsageEvent {
-        &self.materialized_events()[row.index]
-    }
-
-    pub fn events(&self) -> &[UsageEvent] {
-        self.materialized_events()
-    }
-
-    /// 懒物化失败时向上报告（分页/下钻因此得到明确错误而不是空结果）。
-    pub fn try_materialize(&self) -> Result<()> {
-        let _ = self.materialized_events();
-        match self.materialize_error.get() {
-            Some(e) => Err(anyhow::anyhow!("{e}")),
-            None => Ok(()),
-        }
-    }
-
-    fn materialized_events(&self) -> &Vec<UsageEvent> {
-        self.materialized
-            .get_or_init(|| match self.load_events_in_row_order() {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = self.materialize_error.set(format!("{e:#}"));
-                    Vec::new()
-                }
-            })
-    }
-
-    /// 按行序（ts/rid 降序 + 组内 seq）物化事件：先批量取回事件本体，再按
-    /// 索引重排——保证 `rows[i].index == i`。
-    fn load_events_in_row_order(&self) -> Result<Vec<UsageEvent>> {
-        let ids: Vec<i64> = self.rows.iter().map(|r| r.event_id).collect();
-        let mut by_id: std::collections::HashMap<i64, UsageEvent> =
-            std::collections::HashMap::with_capacity(ids.len());
-        for chunk in ids.chunks(4096) {
-            for stored in self.read.fetch_events(chunk)? {
-                by_id.insert(stored.id, report::usage_event_of(&stored));
-            }
-        }
-        let mut out = Vec::with_capacity(self.rows.len());
-        for r in &self.rows {
-            let e = by_id.remove(&r.event_id).ok_or_else(|| {
-                anyhow::anyhow!("查询快照行 {} 在库中不存在（快照与库不一致）", r.event_id)
-            })?;
-            out.push(e);
-        }
-        Ok(out)
-    }
+    // H08 修订：不再提供"整份懒物化"的事件视图——分页与下钻一律走
+    // `for_each_row_event` / `event_by_row`（按批读取，内存与批大小成正比），
+    // 否则明细分页会绕过会话预算。
 
     /// H07：**流式**遍历主过滤后的事件（按行序），不物化整份历史。
     /// 供汇总聚合使用；`f` 返回 Err 时立即中止并透传。
@@ -183,6 +136,32 @@ impl QuerySnapshot {
                     .get(id)
                     .ok_or_else(|| anyhow::anyhow!("查询快照行 {id} 在库中不存在"))?;
                 f(e)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// H07/H08：**分批**按行序读取事件（每批至多 `batch` 条），回调拿到
+    /// `(行, 事件)`。分批而不是整份物化：明细分页因此不会绕过会话预算
+    ///（早期实现一次物化全部事件，64 KiB 预算下实际保留可达数 MB）。
+    pub(crate) fn for_each_row_event(
+        &self,
+        batch: usize,
+        f: &mut dyn FnMut(&SnapshotRow, &UsageEvent) -> Result<()>,
+    ) -> Result<()> {
+        let batch = batch.max(1);
+        for chunk in self.rows.chunks(batch) {
+            let ids: Vec<i64> = chunk.iter().map(|r| r.event_id).collect();
+            let mut by_id: std::collections::HashMap<i64, UsageEvent> =
+                std::collections::HashMap::with_capacity(ids.len());
+            for stored in self.read.fetch_events(&ids)? {
+                by_id.insert(stored.id, report::usage_event_of(&stored));
+            }
+            for row in chunk {
+                let e = by_id
+                    .get(&row.event_id)
+                    .ok_or_else(|| anyhow::anyhow!("查询快照行 {} 在库中不存在", row.event_id))?;
+                f(row, e)?;
             }
         }
         Ok(())
@@ -515,13 +494,14 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
             event_id,
             index: position,
             seq,
+            ts,
+            record_id: rid.clone(),
         });
         prev = Some((ts, rid));
     }
 
     // RC05：按**会话实际保留的数据**记账——H07 起事件本体不再随会话常驻
-    // （汇总流式读取、分页才懒物化），因此这里计的是行索引、元数据与价格表；
-    // 懒物化事件不改变"这个上限只约束查询子系统的保留数据"这一边界。
+    // （汇总与明细分页都按批流式读取），因此这里计的是行索引、元数据与价格表。
     let query_id = format!("q{namespace}-{qseq}-g{}", collection.generation);
     let charge =
         snapshot_retained_bytes(&collection, &rows, &query_id, &tz_label, &main_fingerprint)
@@ -559,6 +539,8 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
         day_sensitive,
         &tz_label,
         report::RollupBucketPolicy::default(),
+        &time_bounds,
+        opts.rollups,
     );
 
     let snapshot = Arc::new(QuerySnapshot {
@@ -577,8 +559,6 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
         rollup_selection,
         collection,
         read,
-        materialized: std::sync::OnceLock::new(),
-        materialize_error: std::sync::OnceLock::new(),
         _reservation: reservation,
     });
 
@@ -680,10 +660,7 @@ pub fn locate_cursor(snapshot: &QuerySnapshot, cursor_str: &str, drill_fp: &str)
     snapshot
         .rows
         .iter()
-        .position(|r| {
-            let e = snapshot.event(r);
-            e.ts == ts && e.record_id == c.rid && r.seq == c.seq
-        })
+        .position(|r| r.ts == ts && r.record_id == c.rid && r.seq == c.seq)
         .ok_or_else(|| anyhow!("游标位置在当前查询中不存在，请刷新重试"))
 }
 

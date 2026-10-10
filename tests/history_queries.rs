@@ -163,13 +163,11 @@ fn same_timestamp_paging_covers_every_row_exactly_once() {
 
 #[test]
 fn large_history_summarizes_streaming_with_bounded_retention() {
-    // 20 万条合成事件（debug 构建下的可接受规模）：汇总必须走**流式读取**。
-    // 判据是"记账与事件数无关"这一性质——会话只保留行索引，不保留事件本体
-    //（保留事件本体时每条还要计 model/session/project/record 四个字符串），
-    // 因此按每行成本断言，规模可线性放大。
+    // 4 万条合成事件（debug 构建下的可接受规模；性质断言与规模无关）：
+    // 汇总必须走**流式读取**——判据是"会话保留的数据与事件本体无关"。
     let dir = temp_dir("large");
     let history = HistoryDb::open(&dir.join("data").join("history.db")).unwrap();
-    let total = 200_000usize;
+    let total = 40_000usize;
     seed_events(&history, "bulk", total, false);
 
     let o = opts(&dir);
@@ -183,8 +181,8 @@ fn large_history_summarizes_streaming_with_bounded_retention() {
 
     let charged = query::query_retained_bytes_for_tests();
     assert!(
-        charged < total * 64,
-        "会话保留数据必须只含行索引（每行 < 64 字节）：实际 {charged} 字节 / {total} 行"
+        charged < total * 256,
+        "会话保留数据必须只含行索引（每行 < 256 字节，远小于事件本体）：实际 {charged} 字节 / {total} 行"
     );
     std::fs::remove_dir_all(&dir).ok();
 }

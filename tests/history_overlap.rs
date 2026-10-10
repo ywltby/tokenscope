@@ -152,6 +152,7 @@ fn import_all(dir: &Path, source_day_tz: &str) -> ccs::ImportReport {
         &preview.plan_id,
         &history,
         tokenscope::history::RollupConflictPolicy::KeepExisting,
+        true,
     )
     .unwrap()
 }
@@ -537,6 +538,7 @@ fn unknown_agent_kind_import_is_recorded_but_not_imported() {
         &preview.plan_id,
         &history,
         tokenscope::history::RollupConflictPolicy::KeepExisting,
+        true,
     )
     .unwrap();
     assert_eq!(report.requests_inserted, 0);

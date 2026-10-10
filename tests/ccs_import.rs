@@ -154,6 +154,7 @@ fn preview_and_commit(dir: &Path, history: &HistoryDb) -> (ccs::ImportPreview, c
         &preview.plan_id,
         history,
         RollupConflictPolicy::KeepExisting,
+        true,
     )
     .unwrap();
     (preview, report)
@@ -375,7 +376,13 @@ fn repeat_import_from_same_or_copied_database_is_idempotent() {
     let source = CcsSource::open(&backup).unwrap();
     let p3 = ccs::preview(&source, &history, "Asia/Shanghai").unwrap();
     assert_eq!(p3.would_unchanged, 2);
-    let r3 = ccs::commit(&p3.plan_id, &history, RollupConflictPolicy::KeepExisting).unwrap();
+    let r3 = ccs::commit(
+        &p3.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        true,
+    )
+    .unwrap();
     assert_eq!(r3.requests_inserted, 0);
     assert_eq!(history.totals().unwrap(), tokens);
     assert_eq!(history.event_count().unwrap(), 2);
@@ -414,6 +421,7 @@ fn changed_rollup_snapshot_is_conflict_not_silent_overwrite() {
         &preview.plan_id,
         &history,
         RollupConflictPolicy::KeepExisting,
+        true,
     )
     .unwrap();
     assert_eq!(report.rollups_conflicted, 1);
@@ -434,7 +442,13 @@ fn changed_rollup_snapshot_is_conflict_not_silent_overwrite() {
     );
     let source = CcsSource::open(&dir3.join("cc-switch.db")).unwrap();
     let preview = ccs::preview(&source, &history, "Asia/Shanghai").unwrap();
-    let report = ccs::commit(&preview.plan_id, &history, RollupConflictPolicy::TakeSource).unwrap();
+    let report = ccs::commit(
+        &preview.plan_id,
+        &history,
+        RollupConflictPolicy::TakeSource,
+        true,
+    )
+    .unwrap();
     assert_eq!(report.rollups_snapshotted, 1);
     assert_eq!(history.rollup_request_count().unwrap(), 3);
     std::fs::remove_dir_all(&dir).ok();
@@ -467,7 +481,8 @@ fn plan_is_single_use_and_stale_generation_is_rejected() {
         ccs::commit(
             &preview.plan_id,
             &history,
-            RollupConflictPolicy::KeepExisting
+            RollupConflictPolicy::KeepExisting,
+            true,
         )
         .is_err()
     );
@@ -478,6 +493,7 @@ fn plan_is_single_use_and_stale_generation_is_rejected() {
         &preview.plan_id,
         &history,
         RollupConflictPolicy::KeepExisting,
+        true,
     )
     .unwrap();
     assert_eq!(report.requests_inserted, 1);
@@ -485,7 +501,8 @@ fn plan_is_single_use_and_stale_generation_is_rejected() {
         ccs::commit(
             &preview.plan_id,
             &history,
-            RollupConflictPolicy::KeepExisting
+            RollupConflictPolicy::KeepExisting,
+            true
         )
         .is_err(),
         "同一计划不得提交两次"
@@ -503,6 +520,7 @@ fn plan_is_single_use_and_stale_generation_is_rejected() {
         &preview.plan_id,
         &history,
         RollupConflictPolicy::KeepExisting,
+        true,
     )
     .unwrap_err()
     .to_string();
@@ -691,6 +709,7 @@ fn imported_claude_request_binds_to_native_event_from_session_logs() {
         &preview.plan_id,
         &history,
         RollupConflictPolicy::KeepExisting,
+        true,
     )
     .unwrap();
     assert_eq!(report.requests_inserted, 0);
