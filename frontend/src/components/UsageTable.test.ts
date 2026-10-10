@@ -129,6 +129,25 @@ describe("UsageTable 表格语义（设计系统 Task 5）", () => {
     expect(hasArrow(normal)).toBe(true);
     expect(hasArrow(total)).toBe(false);
   });
+
+  it("row_accessibility_uses_label_not_key：可访问名称用展示名，点击仍传身份键", () => {
+    const row: Group = { ...group("claudeopus55"), label: "Claude Opus 5.5" };
+    const w = mount(UsageTable, { props: { report: report([row], false) } });
+    const rp = exposed(w).rowProps(row);
+    const aria = String(rp["aria-label"]);
+    expect(aria).toContain("Claude Opus 5.5");
+    expect(aria, "屏幕阅读器不应读出压缩身份键").not.toContain("claudeopus55");
+    // 点击参数仍是后端筛选键（展示名不得当 key 用）。
+    (rp.onclick as () => void)();
+    expect(w.emitted("row-click")?.[0]).toEqual(["claudeopus55"]);
+  });
+
+  it("row_accessibility_falls_back_to_key：没有展示名时退回身份键", () => {
+    const row = group("alpha");
+    const w = mount(UsageTable, { props: { report: report([row], false) } });
+    const rp = exposed(w).rowProps(row);
+    expect(String(rp["aria-label"])).toContain("alpha");
+  });
 });
 
 // UX01：合计行字重 600 必须命中真实单元格（修复前是死选择器 .total-row strong，

@@ -240,6 +240,49 @@ describe("Dashboard 查询编排", () => {
     expect(w.text()).toContain("Claude Opus 5.5");
     expect(w.text()).not.toContain("claudeopus55");
   });
+
+  it("drill_label_follows_current_summary：价格同步后筛选提示与新快照都用新展示名", async () => {
+    // 展示名由后端汇总给出：价格同步前是旧写法，同步后换成友好名。
+    let currentLabel = "claude-opus-5-5";
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "query_summary") {
+        return Promise.resolve({
+          ...summaryA,
+          by: "model",
+          groups: [{ ...group("claudeopus55", 10), label: currentLabel }, group("合计", 10)],
+          totals: group("合计", 10),
+        });
+      }
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    state(w)["by"] = "model";
+    await nextTick();
+    await flushPromises();
+    (state(w)["onSummaryRowClick"] as (k: string) => void)("claudeopus55");
+    await nextTick();
+    expect(w.text()).toContain("claude-opus-5-5");
+
+    // 价格同步后的重查：第二次汇总带回新的展示名。
+    currentLabel = "Claude Opus 5.5";
+    (state(w)["manualRefresh"] as () => void)();
+    await flushPromises();
+    await nextTick();
+    await flushPromises();
+    expect(w.text()).toContain("Claude Opus 5.5");
+    expect(w.text(), "旧标签不得继续显示").not.toContain("model: claude-opus-5-5");
+
+    // 新快照携带新展示名，不把过期标签写盘。
+    const saves = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save");
+    const last = saves.at(-1)?.[1] as { value: { filters: { drill: { label?: string } } } };
+    expect(last.value.filters.drill.label).toBe("Claude Opus 5.5");
+    w.unmount();
+  });
 });
 
 // 当前版本快照样例（模块级：多个 describe 共用）

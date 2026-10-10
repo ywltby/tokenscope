@@ -293,7 +293,11 @@ function saveSnapshot(): void {
   const payload: SnapshotPayload = {
     v: SNAPSHOT_VERSION,
     saved_at: new Date().toISOString(),
-    filters: ek,
+    // 复核修订：下钻标签写**当前汇总解析出的**展示名，避免把过期标签带进快照。
+    filters: {
+      ...ek,
+      drill: ek.drill ? { ...ek.drill, label: resolvedDrillLabel(ek.drill) } : null,
+    },
     report: report.value,
     events: events.value,
   };
@@ -548,10 +552,14 @@ const moreBlockedHint = computed<string | undefined>(() =>
   hasMore.value && !liveFirstPage.value ? "刷新完成后可继续加载" : undefined,
 );
 
-const drillLabel = (d: EventDrill): string =>
-  // MP04：模型维度显示友好名（key 是等价身份键）；项目维度保留完整路径，
-  // 避免同名不同路径产生歧义。
-  `${d.type}: ${d.type === "project" ? d.key : (d.label ?? d.key)}`;
+/// 复核修订：下钻标签**跟随当前汇总**——价格同步/模型展示名更新后，表格与
+/// 筛选提示必须同时显示新名称；汇总里找不到时回退磁盘快照里的 label，再退回
+/// 身份键。项目维度保留完整路径，避免同名不同路径产生歧义。
+function resolvedDrillLabel(d: EventDrill): string {
+  if (d.type === "project") return d.key;
+  return report.value?.groups.find((g) => g.key === d.key)?.label ?? d.label ?? d.key;
+}
+const drillLabel = (d: EventDrill): string => `${d.type}: ${resolvedDrillLabel(d)}`;
 
 // UX05：真实可绘制类别（排除"合计"行）——用 computed 缓存，避免在模板里
 // 每次渲染都 filter 生成新数组；新数组会改变 TrendChart 的 groups 身份，

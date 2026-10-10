@@ -2669,6 +2669,8 @@ impl Pricing {
         // 索引文件命中（D2/F10 接线）：签名一致且版本为当前格式（R01：
         // v4/v5 可能携带错误的缓存价语义，拒绝读取、强制重建）→
         // 免解析双快照，毫秒级恢复完整价格表（含诊断）。
+        // 索引被拒时的重建原因（见下）随本次结果返回给调用方。
+        let mut index_rebuild_note: Option<String> = None;
         if let Ok(Some(index)) = load_index(index_path)
             && index.v == INDEX_VERSION
             && index.sig == sig
@@ -2688,18 +2690,27 @@ impl Pricing {
                 .entries
                 .iter()
                 .any(|e| e.display.trim().is_empty() || match_key(&e.display) != e.prefix);
-            if !has_invalid && !stale_keys {
+            // 复核修订：源文件加载时就被拒绝的空键条目（`provider/-._`）同样不得
+            // 经索引恢复回到价格表——恢复入口复用同一校验，命中即整体重建，
+            // 保证候选计数与诊断口径一致。
+            let has_empty_key = index.entries.iter().any(|e| empty_model_key(&e.display));
+            if !has_invalid && !stale_keys && !has_empty_key {
                 let arc = std::sync::Arc::new(Self::from_index(&index));
                 *guard = Some((sig.clone(), arc.clone(), index.warnings.clone()));
                 return (arc, sig, index.warnings, true);
             }
-            if stale_keys {
-                log::warn!("价格索引匹配键与原始名称不一致，按来源重建");
+            index_rebuild_note = Some(if stale_keys {
+                "价格索引匹配键与原始名称不一致，按来源重建".to_string()
+            } else if has_empty_key {
+                "价格索引含归一后为空的模型键条目，按来源重建".to_string()
             } else {
-                log::warn!("价格索引含非法单价条目，按来源重建");
-            }
+                "价格索引含非法单价条目，按来源重建".to_string()
+            });
             // 落到下方重建路径——正常重建与非法索引回退共用同一缓存写入
             // 出口（cacheable 已由上方读取阶段保证）。
+        }
+        if let Some(note) = &index_rebuild_note {
+            log::warn!("{note}");
         }
         let outcome = Self::build_from_reads(reads);
         debug_assert!(outcome.cacheable);
@@ -2709,6 +2720,10 @@ impl Pricing {
             outcome.diagnostics.clone(),
         );
         let mut warnings = outcome.diagnostics.clone();
+        // 索引被拒后的重建原因随结果返回：降级状态必须对用户可见，不能只落日志。
+        if let Some(note) = index_rebuild_note.take() {
+            warnings.insert(0, note);
+        }
         if let Err(e) = save_index(index_path, &index) {
             warnings.push(format!("价格索引写入失败（不影响统计）: {e:#}"));
         }

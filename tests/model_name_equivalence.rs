@@ -364,6 +364,71 @@ fn model_equivalence_old_index_rebuilds_offline() {
 }
 
 #[test]
+fn old_index_with_empty_model_key_rebuilds() {
+    // 复核修订：源文件加载时就被拒绝的空键条目（`provider/-._`）不得经索引
+    // 恢复回到价格表——恢复入口复用同一校验并触发重建（否则候选计数与诊断
+    // 会与实际入库集合不一致）。
+    let dir = tmp("index-empty-key");
+    let ext = write(
+        &dir,
+        "ext.toml",
+        "[[model]]\nprefix = \"vendorA/ok-1\"\ninput = 1.0\n",
+    );
+    let idx = dir.join("idx.json");
+    clear_price_cache_for_tests();
+    let (cold, _rev, _w, _hit) = Pricing::load_cached_revision(Some(&ext), None, None, &idx);
+    assert!(
+        cold.estimate("ok-1", &counts(1_000_000, 0, 0, 0), at())
+            .is_some()
+    );
+
+    // 把当前版本索引追加一条空键条目：prefix 与 display 自洽（`match_key`
+    // 返回空串），只有"归一后基名为空"这一条能识破它。
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&idx).unwrap()).unwrap();
+    json["entries"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "prefix": "",
+            "display": "provider/-._",
+            "name": null,
+            "tier": 0,
+            "plan": null,
+            "input": 3.0,
+            "output": null,
+            "cache_write": null,
+            "cache_read": null
+        }));
+    std::fs::write(&idx, serde_json::to_string(&json).unwrap()).unwrap();
+
+    clear_price_cache_for_tests();
+    let (rebuilt, _rev2, warnings, hit) =
+        Pricing::load_cached_revision(Some(&ext), None, None, &idx);
+    assert!(!hit, "含空键条目的索引必须整体重建，不得恢复");
+    assert!(
+        warnings.iter().any(|w| w.contains("为空")),
+        "必须给出重建诊断：{warnings:?}"
+    );
+    assert!(
+        rebuilt
+            .estimate("ok-1", &counts(1_000_000, 0, 0, 0), at())
+            .is_some(),
+        "重建后正常条目仍可用"
+    );
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&idx).unwrap()).unwrap();
+    assert!(
+        after["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["display"] != "provider/-._"),
+        "写回的索引不得含空键条目"
+    );
+}
+
+#[test]
 fn empty_model_key_entry_is_rejected_with_diagnostic() {
     let dir = tmp("empty-key");
     let ext = write(

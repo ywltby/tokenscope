@@ -108,7 +108,9 @@ const rowProps = (row: object) => ({
   class: "ts-focusable",
   tabindex: 0,
   role: "button",
-  "aria-label": `查看 ${asGroup(row).key} 的请求明细`,
+  // 复核修订：可访问名称用展示名（模型维度是友好名），身份键只用于点击参数——
+  // 屏幕阅读器不应读出 `claudeopus55` 这类压缩身份键。
+  "aria-label": `查看 ${asGroup(row).label ?? asGroup(row).key} 的请求明细`,
   onclick: () => emit("row-click", asGroup(row).key),
   onkeydown: (e: KeyboardEvent) => {
     if (e.key === "Enter" || e.key === " ") {
