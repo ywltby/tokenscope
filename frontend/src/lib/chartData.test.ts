@@ -32,9 +32,12 @@ describe("buildBarChartData", () => {
       "tied",
     ]);
     expect(fullLabels(groups, by)).toEqual(data.categories);
+    // 2026-10-10 用户修订：图表与英雄栏统一为**互斥四桶**（输入 = 未缓存输入），
+    // 四类相加 = 总 token——不再用"输入含缓存"口径（那时只需加前两项）。
     expect(
-      data.categories.map((_, i) => data.series[0].values[i] + data.series[1].values[i]),
+      data.categories.map((_, i) => data.series.reduce((sum, s) => sum + s.values[i], 0)),
     ).toEqual([302, 201, 100, 100]);
+    expect(data.series.map((s) => s.name)).toEqual(["输入", "输出", "缓存写", "缓存命中"]);
     expect(groups.map((x) => x.key)).toEqual([
       "input-heavy",
       "cache-read-heavy",

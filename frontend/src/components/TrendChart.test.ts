@@ -123,8 +123,10 @@ describe("TrendChart（设计系统 Task 4）", () => {
     expect(opt.series).toHaveLength(4);
     for (const [index, series] of opt.series.entries()) {
       expect(series.data).toHaveLength(240);
+      // 2026-10-10 用户修订：图表为互斥四桶——「输入」= 未缓存输入（系数 1，
+      // 原"输入含缓存"口径下是 1+3+4=8）。
       expect(series.data.reduce((a: number, b: number) => a + b, 0)).toBe(
-        ((239 * 240) / 2) * [8, 2, 3, 4][index],
+        ((239 * 240) / 2) * [1, 2, 3, 4][index],
       );
     }
     if (by === "day")

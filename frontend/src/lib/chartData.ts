@@ -3,7 +3,7 @@
 // 标签与数值错位（A=10、B=100 可能显示 B=10、A=100）。
 import { TOKEN_BUCKETS } from "./tokenDisplay";
 import type { Group, TokenCounts } from "../types";
-import { displayTokens, totalTokens } from "./tokenUsage";
+import { totalTokens } from "./tokenUsage";
 
 // UX07：显示名消费 tokenDisplay 单一来源（U14：缓存命中）。
 export const SERIES: { name: keyof TokenCounts; label: string }[] = TOKEN_BUCKETS.map((b) => ({
@@ -39,9 +39,12 @@ export function buildBarChartData(groups: Group[], by: string): BarChartData {
   return {
     // C2：项目维度分类显示用展示名（末段），完整路径经 key 保留。
     categories: ordered.map((g) => g.label ?? g.key),
+    // 2026-10-10 用户修订：图表与英雄栏统一用**互斥四桶**——「输入」= 未缓存
+    // 输入（不含缓存写入/缓存命中），四类相加 = 总 token，不重复计数。
+    // 排序仍按总 token（四桶之和，与展示口径一致）。
     series: SERIES.map((s) => ({
       name: s.label,
-      values: ordered.map((g) => displayTokens(g.tokens)[s.name]),
+      values: ordered.map((g) => g.tokens[s.name]),
     })),
   };
 }
