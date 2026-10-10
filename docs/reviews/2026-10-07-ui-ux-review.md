@@ -1,6 +1,8 @@
 # UI/UX 审查问题清单（2026-10-07）
 
-> **2026-10-07 后续核实（基线 `dd6aaae`）：** 本文以下内容保留为 `1cefac7` 时的历史审查，执行请以 [独立修复计划及逐项核实表](../plans/active/2026-10-07-ui-ux-review-remediation.md) 为准。F06 导航、F08 真实 tooltip 测试已由后续提交修复；U02 并非三个 radio 完全无名称，U10 首帧闪烁尚未证实，U18 实际隐藏非日维度 0/1 个真实类别，U21 已有进行中与保存反馈。关闭弹窗已有玻璃材质，合理布局尺寸不能一律视为越阶间距。新一轮真实 App 量测另外确认分段控件外高 **36px**、费用浮层外宽 **512px**，见计划的证据与修复约束。不要照搬本文“只监听 by/mode”的图表建议，也不要全局修改 common 小字号。
+> **2026-10-11 历史状态：** 本文保留当时审查发现；后续修复/需求已有变化，当前完成与待办采用 [总账](../plans/README.md) 和 [整合计划](../plans/active/2026-10-11-consolidated-remaining-work.md)。不要把原“仍存在/待执行”直接当作当前缺陷。
+
+> **2026-10-07 后续核实（基线 `dd6aaae`）：** 本文以下内容保留为 `1cefac7` 时的历史审查，执行请以 [独立修复计划及逐项核实表](../plans/archive/partial/2026-10-07-ui-ux-review-remediation.md) 为准。F06 导航、F08 真实 tooltip 测试已由后续提交修复；U02 并非三个 radio 完全无名称，U10 首帧闪烁尚未证实，U18 实际隐藏非日维度 0/1 个真实类别，U21 已有进行中与保存反馈。关闭弹窗已有玻璃材质，合理布局尺寸不能一律视为越阶间距。新一轮真实 App 量测另外确认分段控件外高 **36px**、费用浮层外宽 **512px**，见计划的证据与修复约束。不要照搬本文“只监听 by/mode”的图表建议，也不要全局修改 common 小字号。
 
 **基线：`1cefac7`，分支 `docs/product-review-plan`，前端工作树干净。**
 规范依据：根目录 `DESIGN.md`（第二版 Apple + Glassmorphism）。范围：`frontend/src/**` 全部非测试文件（4822 行）+ `index.html` + `src-tauri/tauri.conf.json` 窗口配置 + Naive UI / ECharts 依赖默认值。
@@ -22,7 +24,7 @@
 
 | 既有编号 | 位置 | 本次复核结论 |
 | --- | --- | --- |
-| **F06**（导航滚动容器无高度约束，吸顶失效） | [修复后复核遗留计划](../plans/active/2026-10-07-post-remediation-recheck-fixes.md) Task 6，状态"待执行" | **确认仍在**。计算样式实测：`.app-shell` display=block、`.scroll-container` clientHeight=scrollHeight=1484px、`html/body` overflow=visible → 容器自身永不滚动，sticky 的 scrollport 不动，导航随 document 滚出视口。不重复编号，按 Task 6 执行即可 |
+| **F06**（导航滚动容器无高度约束，吸顶失效） | [修复后复核遗留计划](../plans/archive/implemented/2026-10-07-post-remediation-recheck-fixes.md) Task 6，状态"待执行" | **确认仍在**。计算样式实测：`.app-shell` display=block、`.scroll-container` clientHeight=scrollHeight=1484px、`html/body` overflow=visible → 容器自身永不滚动，sticky 的 scrollport 不动，导航随 document 滚出视口。不重复编号，按 Task 6 执行即可 |
 | **F08**（NTooltip 测试全局打桩、可见性未验） | 同上 Task 7 | 仍成立；另见本文 **U13**（`.metric-label-help` 缺焦点环类） |
 | R07 / R08 / R09 / R10 | 上一轮修复 | 已核实真修复：关窗失败保留弹窗与原因且防重复提交（`App.vue:76-88`）、采集诊断独立呈现（`Dashboard.vue:113-135` 等）、命中率浮层已响应 focus/click/Escape（`SummaryCards.vue:75-99`）、明细行身份用后端游标（`EventTable.vue:215`） |
 | `2026-10-06-design-system-visual-qa.md §2.1` | 勾选项"滚动页面：吸顶导航可见模糊 ✅" | **与实现冲突**，随 F06 修复一并回写，不能保留误导后续执行者的通过记录 |
