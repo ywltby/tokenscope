@@ -20,7 +20,8 @@
   - **H06** 并集与日汇总桶选择 + `tests/history_overlap.rs`：A∪B 只算一次、双向顺序一致、只有日粒度的历史计入统计但费用按「历史数据只有汇总」披露为未知、明细覆盖桶不双加、来源日时区与展示时区不一致时按日视图拒绝重切。
   - **H07** 冻结查询与流式读取 + `tests/history_queries.rs`：只读事务快照（旧查询不变、新查询见新 generation、随会话淘汰释放）、流式汇总（记账与事件数无关）、同时间戳分页无重不漏、预算仍生效。
   - **H08** 设置页「从 CCS 导入用量」面板（预览/确认/取消/失败不自动重试、按钮防重复提交）+ 仪表盘日粒度与未知项目提示 + 文档（`CLAUDE.md`、`docs/stats-semantics.md` §5/§6、`docs/privacy.md`、`DESIGN.md`）+ `frontend/src/views/Settings.ccsImport.test.ts`。
-- 未验项（不声明通过）：原生 GUI 上的完整导入流程（release 构建 + 真实 `~/.cc-switch/cc-switch.db` 只读核对）、真实 1.2 GB 日志下的历史库冷/热启动基准复测、多设备 CCS 数据集合并（本期明确不设计）。
+- 已核验（真实数据、只读）：`tests/ccs_schema_probe.rs` 的 `real_import_into_isolated_history_is_idempotent` 在本机真实 `~/.cc-switch/cc-switch.db`（user_version=20）上跑通端到端导入——1,962 条明细全部可导入（0 拒绝）、109 条日汇总新增、净新增 233,401,013 token，分类总数守恒；同一库重复导入新增 0、事件数与 generation 均不变。来源库只读、写入落在隔离的临时历史库。
+- 未验项（不声明通过）：release 构建下的原生 GUI 导入目视（点击预览→确认→结果展示的实际观感与交互）、真实 1.2 GB 日志下的历史库冷/热启动基准复测、多设备 CCS 数据集合并（本期明确不设计）。
 - 用户已确定：统一数据库放在 `~/.tokenscope/`；只保存关键 token 和 cwd 等元数据，不复制完整 JSONL；所有代理都关注用量，不建立主代理与子代理关系。
 - 用户已确定：CCS 导入放在设置页，仅由用户手动操作执行一次；未点击不读取或导入 CCS 用量，不进行自动同步。
 - 用户已确定：导入数据必须与 TokenScope 已有历史去重求并集；不能每次导入都追加一份相同用量，也不能只在同一个导入批次内去重。
