@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust、serde、SQLite、Tauri 2、Vue 3、Vitest。
 
-**状态：** 阶段 A（A01–A06）与阶段 B（B01–B03）均已实施并提交；归属规则已由用户 2026-10-09 定稿（项目根归并，两侧一致）。唯一未执行的验收项是 GUI 原生实例的目视确认（自动化与隔离数据路径验收均已完成），因此本计划保持 active、暂不归档。
+**状态：** 阶段 A（A01–A06）与阶段 B（B01–B03）均已实施并提交；归属规则由用户 2026-10-09 确认（项目根归并，两侧一致）。2026-10-10 外部审查提出的三处缺陷（Codex 异常 cwd 破坏会话隔离、`file://` 绕过路径检查、切换后联动验收不足）已修复并补回归，见文末「审查修复记录」。唯一未执行的验收项是 GUI 原生实例的目视确认（自动化与隔离数据路径验收均已完成），因此本计划保持 active、暂不归档。
 
 ## 1. 依据与范围
 
@@ -93,7 +93,7 @@
 - [x] 修改 `src/source/mod.rs`，新增 `src/source/project_path.rs`；测试 `tests/project_path_normalization.rs`；必要时修改 `Cargo.toml` / `Cargo.lock`，优先复用已有 URI 依赖。（`url` 已锁定在依赖图中，提为直接依赖）
 - [x] 定义可失败的纯函数 `normalize_project_path(raw: &str) -> Option<String>`，不得访问用户文件系统。
 - [x] 测试 `windows_equivalent_paths_share_key`、`file_uri_decodes_once`、`roots_and_unc_are_preserved`、`posix_case_and_backslash_are_preserved`、`ambiguous_paths_are_rejected`。
-- [x] 表驱动覆盖 `C:\a\b` / `c:/a/b/` → `C:/a/b`、中文、空格、字面 `%20`、根目录和不支持的 URI。
+- [x] 表驱动覆盖 `C:\a\b` / `c:/a/b/` → `C:/a/b`、中文、空格、字面 `%20`、根目录和不支持的 URI。**审查修订（2026-10-10）**：URI 路径同样受「拒绝 `.`/`..` 组件、解码后不含 NUL」约束——检查必须在 `url::Url::parse` **之前**完成（解析器会静默折叠点段）；合法空格（`%20`）正常解码且与普通路径同一身份，普通路径里的 `%20` 仍按字面。新增 `file_uri_rejects_dot_segments_and_nul`、`file_uri_and_plain_path_share_identity_for_spaces`。
 - [x] 验证：`cargo test --test project_path_normalization`，5 项全过；提交 `feat(source): 统一项目路径身份归一化`（`6413b85`）。
 
 ### A02 Claude 会话初始 cwd 与目录兜底
@@ -119,7 +119,7 @@
 
 - [x] 修改 `src/source/codex.rs`；在 `tests/project_path_attribution.rs` 增加 Codex 用例与 `tests/fixtures/project-path/codex-cwd-switch.jsonl`。
 - [x] 测试 `codex_initial_path_matches_claude`、`codex_turn_context_changes_only_later_events`、`codex_a_b_a_switch_is_preserved`、`codex_new_session_does_not_inherit_cwd`。
-- [x] `session_meta` 重置目录上下文；有效 `turn_context.cwd` 更新后续事件。不把 Codex 项目冻结到文件首值；空/无效字段不清掉同 session 已知目录。
+- [x] `session_meta` 重置目录上下文；有效 `turn_context.cwd` 更新后续事件。不把 Codex 项目冻结到文件首值；空/无效字段不清掉同 session 已知目录。**审查修订（2026-10-10）**：`payload` 的上下文元数据（id / session_id / cwd / model）改为宽容类型——类型异常只表示"没有该值"，**不得让整条记录解析失败**（此前 `"cwd": 12345` 会让 `session_meta` 整行失败，会话边界重置被跳过，新会话请求被算到旧会话与旧项目）。用量字段 `info` 保持严格（类型异常按坏行计数）。新增 fixture `codex-invalid-cwd.jsonl` 与用例 `codex_invalid_cwd_does_not_skip_session_boundary`。
 - [x] 无有效 cwd 使用现有未知项目兜底；初始上下文缺失时使用首个有效 turn_context，但不跨 session 回填。
 - [x] 验证：`cargo test --test project_path_attribution codex_`（8 项全过）、`cargo test --lib codex`（15 项全过）；提交 `fix(codex): 归一项目路径并保留上下文切换`（`4eff289`）。
 
@@ -165,7 +165,7 @@
 - [x] 修改两侧适配器与 `tests/project_path_attribution.rs`、`tests/project_path_drilldown.rs`，新增 `tests/fixtures/project-path/session-switch/` 合成用例。
 - [x] 测试 `claude_structured_cwd_switch`、`codex_structured_cwd_switch`、`switch_does_not_reassign_previous_events`、`shell_cd_text_does_not_change_project`、`both_agents_follow_decided_subdirectory_policy`。
 - [x] 未知上下文不借用下一 session 或未来切换的 cwd；归属变化不回溯修改已发生请求。
-- [x] 验证切换后 A/B 各组的请求与 token，A → B → A 可正确返回 A；下钻、分页、热缓存和无缓存结果一致（阶段 A 的下钻/守恒用例继续通过，另加切换后的归属断言）。
+- [x] 验证切换后 A/B 各组的请求与 token，A → B → A 可正确返回 A；下钻、分页、热缓存和无缓存结果一致。**收窄（2026-10-10 审查）**：本轮补齐 `switch_groups_drilldown_pages_cache_and_cost_are_consistent`（`tests/project_path_drilldown.rs`）——同一会话切换 fixture 上串成一组断言：A/B 两组请求数与费用、冷/热缓存逐字段一致、两组费用之和 = 合计且各自 = 明细逐条之和、A 组 `limit=2` 翻页 2+1 不重不漏、B 组明细保留切换后的原始工作目录。此前只验证了"切换解析"与"阶段 A 的分页"，不构成完整联动验收。
 - [x] 执行 §4 门禁及隔离原生验收（隔离数据路径部分），更新统计口径与阶段状态。只有 B01–B03 和 A 均验收完成才归档整份计划——**GUI 原生目视项未执行，故本计划保持 active、不归档**。
 - [x] 提交 `feat(project): 支持结构化会话目录切换归属`（含 B02 数据模型，见 B02 说明）。
 
@@ -243,6 +243,18 @@ pnpm --dir frontend build
 口径修订汇总（已同步 `docs/stats-semantics.md` §3.4 与 `CLAUDE.md`）：Claude 身份由「文件父目录相对路径（slug）」→「项目根归并（会话 cwd 推进）」，Codex 由「原始 cwd / 轮级精确」→「项目根归并」；新增 `session_initial_cwd` 与 `event_cwd` 两个事件字段。
 
 未完成与边界：GUI 原生实例的目视验收（真实窗口启动观感、隔离实例截图）未执行——本计划因此保持 active，不归档；未执行真实缓存冷重建（不以旧报告的 5.5 秒作性能保证）。探针脚本 `ts_probe*.py` 只作可选排查辅助，不作为仓库测试依赖，也不保证临时文件仍存在。
+
+### 审查修复记录（2026-10-10）
+
+外部审查（证据 `qa-artifacts/project-path-review-probe.log`，3 项边界探针全部复现）提出三类问题，本轮逐项修复并补回归：
+
+| 问题 | 复现 | 修复 | 回归用例 |
+| --- | --- | --- | --- |
+| Codex 异常 cwd 破坏会话隔离 | 新 `session_meta` 的 `"cwd": 12345` → 整行解析失败、会话边界被跳过（新会话请求被标成旧会话 `old` 并继承旧项目） | `RolloutPayload` 的 id / session_id / cwd / model 改为宽容类型 + 字符串提取；`info` 保持严格 | `codex_invalid_cwd_does_not_skip_session_boundary`（新增 fixture `codex-invalid-cwd.jsonl`） |
+| `file://` 绕过异常路径检查 | `file:///C:/a/../b` 被 `url::Url` 静默折叠为 `C:/b`；`file:///C:/a%00b` 解码后含 NUL 仍被接受 | 在 `Url::parse` **之前**对原始 URI 路径做一次解码并检查 `.`/`..` 组件与 NUL；解析后再查一遍；空格（`%20`）与普通路径字面 `%20` 的语义不变 | `file_uri_rejects_dot_segments_and_nul`、`file_uri_and_plain_path_share_identity_for_spaces` |
+| 切换后的完整联动验收不足 | —（验收缺口，非运行时缺陷） | 新增联动断言：A/B 分组请求数与费用、冷/热缓存逐字段一致、费用守恒（两组之和 = 合计 = 明细之和）、`limit=2` 翻页不重不漏、明细保留切换后的原始目录 | `switch_groups_drilldown_pages_cache_and_cost_are_consistent` |
+
+审查同时确认：正常路径上的跨工具合并、子目录归并、越界切换、映射失效、新字段缓存与内存预算均已落地。修复后复跑定向用例与全套门禁（根库/壳 fmt+clippy+test、前端 typecheck/format/test/build）全绿。
 
 ### 隔离数据路径验收执行记录（2026-10-09）
 

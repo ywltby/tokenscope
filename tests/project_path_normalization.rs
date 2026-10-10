@@ -54,6 +54,54 @@ fn file_uri_decodes_once() {
 }
 
 #[test]
+fn file_uri_rejects_dot_segments_and_nul() {
+    // A01 修订（审查）：URI 路径同样受"拒绝 . / .. 组件、不做折叠"的约束——
+    // URL 解析器会静默折叠点段，所以必须在交给解析器之前自行检查。
+    assert!(norm("file:///C:/a/../b").is_none(), "不得折叠 .. 后接受");
+    assert!(norm("file:///C:/a/./b").is_none(), "不得折叠 . 后接受");
+    assert!(
+        norm("file:///C:/a/%2e%2e/b").is_none(),
+        "编码后的点段同样拒绝"
+    );
+    assert!(norm("file:///server/share/../x").is_none(), "UNC 形态同理");
+    // 解码后含 NUL（空字符）不是可安全解释的路径。
+    assert!(norm("file:///C:/a%00b").is_none(), "解码后含 NUL 必须拒绝");
+    assert!(norm("file:///C:/a%00").is_none());
+    assert!(norm("file:///C:/%00").is_none());
+}
+
+#[test]
+fn file_uri_and_plain_path_share_identity_for_spaces() {
+    // 合法空格（%20）必须可用：URI 解码一次，普通路径按字面——两者同一身份。
+    assert_eq!(
+        norm("file:///C:/我的项目/demo%20app").as_deref(),
+        Some("C:/我的项目/demo app")
+    );
+    assert_eq!(
+        norm(r"C:\我的项目\demo app").as_deref(),
+        Some("C:/我的项目/demo app")
+    );
+    assert_eq!(
+        norm("file:///C:/我的项目/demo%20app"),
+        norm(r"C:\我的项目\demo app")
+    );
+    // 普通路径里的 `%20` 是字面值（不解码）；URI 里的 `%2520` 只解码一次。
+    assert_eq!(
+        norm(r"C:\我的项目\demo%20app").as_deref(),
+        Some("C:/我的项目/demo%20app")
+    );
+    assert_eq!(
+        norm("file:///C:/我的项目/demo%2520app").as_deref(),
+        Some("C:/我的项目/demo%20app")
+    );
+    assert_ne!(
+        norm(r"C:\我的项目\demo%20app"),
+        norm(r"C:\我的项目\demo app"),
+        "字面 %20 与真实空格不是同一路径"
+    );
+}
+
+#[test]
 fn roots_and_unc_are_preserved() {
     assert_eq!(norm(r"C:\").as_deref(), Some("C:/"), "根目录不能变成 C:");
     assert_eq!(norm("c:/").as_deref(), Some("C:/"));

@@ -8,6 +8,8 @@
 //! - Windows 绝对路径：反斜杠统一为 `/`、盘符大写、去尾随分隔符；**不**整体小写；
 //! - 根语义保留：`C:/` 不变成 `C:`、POSIX `/` 保持 `/`、UNC 保留主机与共享；
 //! - `file://` 走 URI 解析器并**只**做一次百分号解码；普通路径的 `%20` 是字面值；
+//!   URI 路径同样受"拒绝 `.`/`..` 组件、解码后不含 NUL"约束（解析器会折叠
+//!   点段，故检查在解析之前完成），合法空格（`%20`）正常解码；
 //! - POSIX 路径保留大小写与合法反斜杠字符；
 //! - 相对路径、`C:foo`、非 file scheme、非法百分号编码、`.`/`..` 组件 →
 //!   「不可用」（不猜测、不折叠符号链接/别名）。
@@ -67,6 +69,15 @@ fn from_file_uri(s: &str) -> Option<String> {
     if !after.starts_with('/') {
         return None;
     }
+    // 先对 URI 的**原始路径**做一次百分号解码并检查合法性，再交给 URL 解析器：
+    // 解析器会静默折叠 `.` / `..` 点段（`file:///C:/a/../b` → `/C:/b`），
+    // 与"不折叠、不猜测"的规则冲突，因此检查必须在解析之前完成。
+    // 拒绝项：`.` / `..` 组件（含 `%2e%2e` 形式）、解码后的 NUL 等空字符。
+    // 保留项：空格（`%20`）等合法字符——URI 只解码一次，普通路径按字面。
+    let decoded = percent_decode_once(uri_path_part(after))?;
+    if decoded.contains('\0') || has_dot_components(&decoded) {
+        return None;
+    }
     let url = url::Url::parse(s).ok()?;
     if !url.scheme().eq_ignore_ascii_case("file") {
         return None;
@@ -75,13 +86,34 @@ fn from_file_uri(s: &str) -> Option<String> {
     if url.query().is_some() || url.fragment().is_some() {
         return None;
     }
-    // 仅对 URI 做一次百分号解码；非法序列（`%zz`、截断的 `%2`）判为不可用。
+    // 解析器可能改写路径（反斜杠归一、保留 `%2F` 等）——对解析后的路径重复
+    // 同一套检查，避免绕过。
     let path = percent_decode_once(url.path())?;
+    if path.contains('\0') || has_dot_components(&path) {
+        return None;
+    }
     let host = url.host_str().unwrap_or("").to_ascii_lowercase();
     if host.is_empty() || host == "localhost" {
         return local_from_uri_path(&path);
     }
     normalize_unc(&format!("//{host}{path}"))
+}
+
+/// 去掉可选 authority（`//host`）后的 URI 路径部分。
+fn uri_path_part(after: &str) -> &str {
+    match after.strip_prefix("//") {
+        Some(rest) => match rest.find('/') {
+            Some(i) => &rest[i..],
+            None => "",
+        },
+        None => after,
+    }
+}
+
+/// 是否含 `.` / `..` 点段（`\` 同样按分隔符看待，与 file URI 的归一一致）。
+fn has_dot_components(path: &str) -> bool {
+    path.split(['/', '\\'])
+        .any(|part| part == "." || part == "..")
 }
 
 /// 本地 file URI 路径：`/C:/a` → Windows 身份；其余 POSIX 绝对路径。

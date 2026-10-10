@@ -61,26 +61,53 @@ struct RolloutLine {
 }
 
 /// 宽松结构：一次声明覆盖 session_meta / turn_context / event_msg 三类 payload。
+///
+/// 上下文元数据（id / session_id / cwd / model）一律用**宽容类型**：类型异常
+/// 只表示"没有可信值"，不得让整条记录解析失败——否则 `session_meta` 的会话
+/// 边界重置与 `turn_context` 的目录上下文会被静默跳过，新会话的请求被算到
+/// 旧会话与旧项目上。用量字段（`info`）保持严格：类型异常按坏行计数。
 #[derive(Default, Deserialize)]
 struct RolloutPayload {
     #[serde(rename = "type", default)]
     kind: String,
     // session_meta
     #[serde(default)]
-    id: Option<String>,
+    id: Option<serde_json::Value>,
     #[serde(default)]
-    session_id: Option<String>,
+    session_id: Option<serde_json::Value>,
     #[serde(default)]
-    cwd: Option<String>,
+    cwd: Option<serde_json::Value>,
     // turn_context
     #[serde(default)]
-    model: Option<String>,
+    model: Option<serde_json::Value>,
     // event_msg/token_count
     #[serde(default)]
     info: Option<TokenInfo>,
     // 额度更新也复用 token_count，此时 info 为 null；不参与用量计量。
     #[serde(default)]
     rate_limits: Option<serde_json::Value>,
+}
+
+impl RolloutPayload {
+    fn as_str_field(v: &Option<serde_json::Value>) -> Option<&str> {
+        v.as_ref().and_then(serde_json::Value::as_str)
+    }
+
+    fn id(&self) -> Option<&str> {
+        Self::as_str_field(&self.id)
+    }
+
+    fn session_id(&self) -> Option<&str> {
+        Self::as_str_field(&self.session_id)
+    }
+
+    fn cwd(&self) -> Option<&str> {
+        Self::as_str_field(&self.cwd)
+    }
+
+    fn model(&self) -> Option<&str> {
+        Self::as_str_field(&self.model)
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -193,22 +220,23 @@ fn ingest_line(
     match rec.kind.as_str() {
         "session_meta" => {
             // session 边界：模型归属、项目根与初始目录一起重置——新会话绝不
-            // 继承上一个 session 的目录（A04 不变量 4）。
+            // 继承上一个 session 的目录（A04 不变量 4）。上下文字段类型异常
+            // 只影响该字段本身，不阻断边界重置（审查修订）。
             state.session_id = payload
-                .session_id
-                .clone()
-                .or_else(|| payload.id.clone())
+                .session_id()
+                .or_else(|| payload.id())
+                .map(str::to_string)
                 .unwrap_or_default();
             state.model = None;
             state.tracker.reset();
             state.initial_cwd = None;
-            observe_cwd(state, payload.cwd.as_deref());
+            observe_cwd(state, payload.cwd());
         }
         "turn_context" => {
-            if payload.model.is_some() {
-                state.model = payload.model.clone();
+            if let Some(m) = payload.model() {
+                state.model = Some(m.to_string());
             }
-            observe_cwd(state, payload.cwd.as_deref());
+            observe_cwd(state, payload.cwd());
         }
         "token_usage_record" => stats.ignored_token_usage_record += 1,
         "event_msg" if payload.kind == "token_count" => {

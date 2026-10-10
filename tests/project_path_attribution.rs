@@ -81,6 +81,31 @@ fn invalid_cwd_does_not_drop_usage() {
 }
 
 #[test]
+fn codex_invalid_cwd_does_not_skip_session_boundary() {
+    // A04 修订（审查）：`session_meta` 的 cwd 类型异常只表示"没有可信路径"，
+    // 不得让整条记录解析失败——否则会话边界（session_id 重置）与目录上下文
+    // 重置会被静默跳过，新会话的请求被算到旧会话与旧项目上。
+    let p = codex_parse("codex-invalid-cwd.jsonl");
+    assert_eq!(p.stats.bad_lines, 0, "上下文类型异常不计坏行");
+    assert_eq!(p.events.len(), 2);
+    assert_eq!(p.events[0].session_id, "old");
+    assert_eq!(p.events[0].project, "C:/work/alpha");
+    assert_eq!(
+        p.events[1].session_id, "new",
+        "异常 cwd 不得阻断会话边界处理"
+    );
+    assert_eq!(
+        p.events[1].project, "D:/other/beta",
+        "新会话目录上下文独立于上一个会话"
+    );
+    assert_eq!(
+        p.events[1].session_initial_cwd.as_deref(),
+        Some("D:/other/beta"),
+        "异常 cwd 之后的有效上下文照常成为新会话初始目录"
+    );
+}
+
+#[test]
 fn codex_initial_path_matches_claude() {
     let c = claude_parse("claude-initial-cwd.jsonl");
     let x = codex_parse("codex-cwd-switch.jsonl");

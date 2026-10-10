@@ -70,7 +70,7 @@
 | 计划 | 状态 | 备注 |
 | --- | --- | --- |
 | [archive/implemented/2026-10-10-model-pricing-name-equivalence.md](archive/implemented/2026-10-10-model-pricing-name-equivalence.md) | ✅ 完成 2026-10-10 | 模型身份忽略大小写及 `-._`，图表/聚合/下钻统一；可信 models.dev 模型 name 用于展示；定价保留候选和边界、逐请求计费；索引 v9 与视图快照 v9 失效重建（`37454dd`…`35725f8`） |
-| [active/2026-10-09-project-path-unification.md](active/2026-10-09-project-path-unification.md) | 阶段 A + B 实现与自动化验收完成；GUI 原生目视项未执行，保持 active | 跨工具项目路径统一：source 层统一身份、项目根归并（子目录归并 + 越界切换）、映射正向解析与缓存失效、`session_initial_cwd`/`event_cwd` 字段；缓存版本 9、前端快照 8，门禁全绿 |
+| [active/2026-10-09-project-path-unification.md](active/2026-10-09-project-path-unification.md) | 阶段 A + B 实现与自动化验收完成；2026-10-10 审查缺陷已修复；GUI 原生目视项未执行，保持 active | 跨工具项目路径统一：source 层统一身份、项目根归并（子目录归并 + 越界切换）、映射正向解析与缓存失效、`session_initial_cwd`/`event_cwd` 字段；缓存版本 9、前端快照 8；审查修复：Codex 上下文字段宽容解析、`file://` 点段/NUL 拒绝、切换后联动验收 |
 | [active/2026-10-09-first-launch-privacy-consent.md](active/2026-10-09-first-launch-privacy-consent.md) | 计划已入库，待确认实施 | 首次启动隐私同意：前后端闸门、先保存后解锁、拒绝退出及失败保护；仅计划，未改产品实现 |
 | [active/2026-10-09-all-plans-final-recheck.md](active/2026-10-09-all-plans-final-recheck.md) | 实现与自动化完成；原生部分通过，系统项待验 | 全计划终态复核与遗留修复；AP07 退出漏口已补，AP08 分项状态见执行账；发布验收仍在 D5 |
 | [active/2026-10-09-ap08-completion-qa.md](active/2026-10-09-ap08-completion-qa.md) | 补齐验收记录 | AP07 / AP08 后续原生证据、失败尝试、发布构建入口隔离与未验边界；不新增发布签字入口 |
