@@ -67,7 +67,8 @@
 3. **OpenCode 适配器**：同上，暂缓前提同 Gemini（本机无数据源）。
 4. **逐请求明细视图**：按会话/日期下钻请求级列表，数据已在缓存 `events` 表，主要是 GUI 工作。
 5. ~~桌面体验补全~~ → ✅ 已完成（M8：单实例互斥、窗口状态记忆、开机自启）；剩余自动更新单独立项。
-6. **存储引擎换 DuckDB**（已评估，暂缓——2026-10-05）：当前聚合全部在内存完成，SQLite 行式存储够用（价格索引命中后真实汇总约 0.9s），DuckDB 的收益在分析型扫描与聚合下推，而 bundled C++ 依赖会明显加重构建。**立项触发条件**：事件量达百万行级，或需要把 GROUP BY 聚合下推进 SQL；交接面收敛在 `src/cache.rs` 单文件，届时替换成本可控。
+6. **Qoder CN 适配器**（`~/.qoder-cn`）：本机已安装且已有真实会话数据，**前置逆向已完成**——[会话存储与用量计量逆向](../research/2026-10-11-qoder-cn-session-storage.md)。实现路径已选定：解密 `projects/<slug>/<sessionId>/state.json`（AES-256-GCM + 硬编码主密钥）取会话级四桶权威值，配合转录 `context_usage_ratio × contextWindow` 还原逐请求 input 明细（本机 4/4 会话逐请求求和与解密值**零差额**）。接入必须先做桶归一：Qoder 的 `input_tokens` 是含缓存的 prompt 总量，需减去 `cache_read_input_tokens` 才能与 Claude / Codex 互斥桶口径合并。**待用户明确排期后立项。**
+7. **存储引擎换 DuckDB**（已评估，暂缓——2026-10-05）：当前聚合全部在内存完成，SQLite 行式存储够用（价格索引命中后真实汇总约 0.9s），DuckDB 的收益在分析型扫描与聚合下推，而 bundled C++ 依赖会明显加重构建。**立项触发条件**：事件量达百万行级，或需要把 GROUP BY 聚合下推进 SQL；交接面收敛在 `src/cache.rs` 单文件，届时替换成本可控。
 
 ## 总账
 
