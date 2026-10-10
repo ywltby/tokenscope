@@ -225,26 +225,33 @@ describe("TrendChart 卡片化（设计系统 Task 5）", () => {
     w.unmount();
   });
 
-  it("总输入与缓存子项并列不堆叠，每根柱子末端带圆角", async () => {
+  it("互斥四桶堆叠在同一根柱上，只有最上段带圆角", async () => {
     const wDay = mount(TrendChart, { props: { groups: [group("a", 1)], by: "day" } });
     await flushPromises();
     const optDay = setOption.mock.calls[0][0] as {
-      series: { itemStyle?: { borderRadius?: number[] } }[];
+      series: { stack?: string; itemStyle?: { borderRadius?: number[] } }[];
     };
     expect(optDay.series).toHaveLength(4);
-    expect(optDay.series[3].itemStyle?.borderRadius).toEqual([4, 4, 0, 0]);
+    // 每类一根柱：四类堆叠（stack 相同），柱高即该类总 token。
     for (const s of optDay.series) {
-      expect(s).not.toHaveProperty("stack");
-      expect(s.itemStyle?.borderRadius).toEqual([4, 4, 0, 0]);
+      expect(s.stack, "四类必须堆叠在同一根柱上").toBe("tokens");
     }
+    // 只有最上段（最后一个系列）带圆角，其余段不带——否则堆叠中间出现台阶。
+    expect(optDay.series[3].itemStyle?.borderRadius).toEqual([4, 4, 0, 0]);
+    expect(optDay.series[0].itemStyle?.borderRadius).toBeUndefined();
+    expect(optDay.series[1].itemStyle?.borderRadius).toBeUndefined();
+    expect(optDay.series[2].itemStyle?.borderRadius).toBeUndefined();
     wDay.unmount();
 
     const wModel = mount(TrendChart, { props: { groups: [group("a", 1)], by: "model" } });
     await flushPromises();
     const optModel = setOption.mock.calls.at(-1)![0] as {
-      series: { itemStyle?: { borderRadius?: number[] } }[];
+      series: { stack?: string; itemStyle?: { borderRadius?: number[] } }[];
     };
     expect(optModel.series[3].itemStyle?.borderRadius).toEqual([0, 4, 4, 0]);
+    for (const s of optModel.series) {
+      expect(s.stack).toBe("tokens");
+    }
     wModel.unmount();
   });
 });
