@@ -74,6 +74,8 @@ const rebuilding = ref(false);
 // H05：CCS 手动导入——默认路径只做**路径解析**（不打开来源库）：进入设置页、
 // 显示默认路径或恢复上次选择都不会读取 CCS 用量；只有点击按钮才只读打开。
 const ccsDefaults = ref<CcsImportDefaults | null>(null);
+/** 本次导入使用的来源库路径（默认取本机 CCS 库；用户可改选其它副本）。 */
+const ccsPath = ref<string>("");
 const ccsPreview = ref<CcsImportPreview | null>(null);
 const ccsReport = ref<CcsImportReport | null>(null);
 const ccsBusy = ref(false);
@@ -287,7 +289,10 @@ async function loadCache(): Promise<void> {
 /// H05：读取 CCS 导入的默认路径与存在性——**不打开来源库**，也不导入任何用量。
 async function loadCcsDefaults(): Promise<void> {
   try {
-    ccsDefaults.value = await invoke<CcsImportDefaults>("ccs_import_defaults");
+    const defaults = await invoke<CcsImportDefaults>("ccs_import_defaults");
+    ccsDefaults.value = defaults;
+    // 仅在用户尚未编辑时填入默认值（恢复上次选择不触发任何读取）。
+    if (!ccsPath.value) ccsPath.value = defaults.path;
   } catch (e) {
     ccsError.value = e instanceof Error ? e.message : String(e);
   }
@@ -301,7 +306,7 @@ async function previewCcsImport(): Promise<void> {
   ccsReport.value = null;
   try {
     ccsPreview.value = await invoke<CcsImportPreview>("ccs_import_preview", {
-      sourcePath: ccsDefaults.value?.path ?? null,
+      sourcePath: ccsPath.value.trim() || null,
     });
   } catch (e) {
     ccsPreview.value = null;
@@ -1081,19 +1086,37 @@ defineExpose({ priceColumns });
             <div class="setting-main">
               <div class="setting-label">来源库</div>
               <div class="setting-help">
-                {{ ccsDefaults?.path ?? "—" }}
-                <template v-if="ccsDefaults && !ccsDefaults.exists">（未找到该文件）</template>
-                <template v-else-if="ccsDefaults"
-                  >（日汇总按来源时区 {{ ccsDefaults.timezone }} 记录）</template
+                {{ ccsDefaults?.exists ? "默认路径已找到" : "默认路径未找到（可改选其它副本）" }}
+                <template v-if="ccsDefaults"
+                  >；日汇总按来源时区 {{ ccsDefaults.timezone }} 记录</template
                 >
               </div>
             </div>
+            <!-- H05：来源库路径可改选其它副本；稳定可访问名称与来源目录字段一致
+                 （label 关联 + 真实 input 的 aria-label） -->
+            <label class="dir-label ccs-path-label" for="ccs-import-path">来源库路径</label>
+            <NInput
+              v-model:value="ccsPath"
+              class="ccs-path"
+              size="small"
+              placeholder="留空使用默认位置"
+              :disabled="ccsBusy || !!ccsPreview"
+              :input-props="{
+                id: 'ccs-import-path',
+                'aria-label': '来源库路径',
+              }"
+            />
+          </div>
+          <div class="rebuild-row">
             <NButton
               size="small"
               :loading="ccsBusy"
               :disabled="ccsBusy || !!ccsPreview"
               @click="previewCcsImport"
               >从 CCS 导入用量</NButton
+            >
+            <span class="rebuild-hint"
+              >点击后才只读打开该库；换选同一库的备份仍更新同一逻辑来源，不重复计费。</span
             >
           </div>
 
@@ -1436,6 +1459,12 @@ defineExpose({ priceColumns });
 .rebuild-hint {
   font-size: 12px;
   color: var(--ts-text-muted);
+}
+
+/* H05：来源库路径输入（可改选其它副本；改路径本身不读取库）。 */
+.ccs-path {
+  max-width: 420px;
+  width: 100%;
 }
 
 .source-state {

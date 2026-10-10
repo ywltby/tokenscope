@@ -122,7 +122,26 @@ describe("Settings CCS 导入（H05/H08）", () => {
     // 计划不变量 11：未点击不读取、也不导入 CCS 用量
     expect(cmds).not.toContain("ccs_import_preview");
     expect(cmds).not.toContain("ccs_import_commit");
-    expect(w.text()).toContain(preview.source_path);
+    // 默认路径只填进输入框，不读取库
+    const input = w.find('input[aria-label="来源库路径"]');
+    expect(input.exists()).toBe(true);
+    expect((input.element as HTMLInputElement).value).toBe(preview.source_path);
+    w.unmount();
+  });
+
+  it("改选其它副本时把该路径传给预览（仍只在点击后读取）", async () => {
+    const w = mountSettings();
+    await flushPromises();
+    const input = w.find('input[aria-label="来源库路径"]');
+    await input.setValue("D:/backup/cc-switch.db");
+    expect(invokeMock.mock.calls.some((c) => c[0] === "ccs_import_preview")).toBe(false);
+    await w
+      .findAll("button")
+      .find((b) => b.text().includes("从 CCS 导入用量"))!
+      .trigger("click");
+    await flushPromises();
+    const call = invokeMock.mock.calls.find((c) => c[0] === "ccs_import_preview")!;
+    expect((call[1] as { sourcePath: string }).sourcePath).toBe("D:/backup/cc-switch.db");
     w.unmount();
   });
 

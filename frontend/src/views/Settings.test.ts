@@ -870,10 +870,12 @@ describe("Settings 目录信息与重建（UX08）", () => {
     const w = mount(Settings);
     await flushPromises();
     const inputs = w.findAll(".n-input__input-el");
-    expect(inputs.length).toBeGreaterThanOrEqual(2);
+    expect(inputs.length).toBeGreaterThanOrEqual(3);
     expect(inputs.map((i) => i.attributes("aria-label"))).toEqual([
       "Claude Code 日志目录",
       "Codex 日志目录",
+      // H05：CCS 导入的来源库路径同样给稳定可访问名称
+      "来源库路径",
     ]);
     // label[for] 指向真实 input 的 id（名称不靠 placeholder 兜底）
     for (const input of inputs) {
@@ -884,7 +886,7 @@ describe("Settings 目录信息与重建（UX08）", () => {
       expect(label.text()).toBe(input.attributes("aria-label"));
     }
     // placeholder 只说明留空语义，不再内嵌会变动的路径
-    for (const input of inputs) {
+    for (const input of inputs.slice(0, 2)) {
       expect(input.attributes("placeholder")).toBe("留空使用当前生效目录");
     }
   });
