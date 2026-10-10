@@ -261,3 +261,94 @@ fn query_budget_still_applies() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// N05：百万级合成记录的规模验收——流式汇总、跨页游标连续、元数据保留
+/// 与构建耗时测量（数字打印到输出供复核记录）。
+///
+/// 覆盖范围与限制如实声明：
+/// - 汇总走**流式读取**，会话保留只含行索引（与事件本体无关）；
+/// - 行索引与命中请求数**线性**相关（本测试量化每行字节数），不能声称
+///   "查询内存与事件数无关"；
+/// - `query_events` 单页上限 1000（产品钳制），百万级全量走查不可行——
+///   跨页无重不漏的性质由 210 条/4 万条规模的专项测试覆盖，这里验证
+///   大规模下的游标连续性、total 一致性与预算表现。
+///
+/// 真实规模验收：手工运行（约 15 分钟，含 100 万行合成入库）——
+/// 测量数字打印到输出，记录在整合计划 N05 执行账。
+#[test]
+#[ignore = "百万级规模测量：手工运行（约 15 分钟），默认套件由 4 万条流式测试守护性质断言"]
+fn million_row_history_summarizes_and_pages_within_budget() {
+    let dir = temp_dir("million");
+    let history = HistoryDb::open(&dir.join("data").join("history.db")).unwrap();
+    let total = 1_000_000usize;
+
+    let t_seed = std::time::Instant::now();
+    seed_events(&history, "m", total, false);
+    let seed_elapsed = t_seed.elapsed();
+
+    // 行索引构建：覆盖全部事件（元数据保留与构建耗时的测量点）。
+    let o = opts(&dir);
+    let t_build = std::time::Instant::now();
+    let snap = query::begin_query(&o).unwrap();
+    let build_elapsed = t_build.elapsed();
+    assert_eq!(snap.rows.len(), total, "行索引覆盖全部事件");
+
+    let charged = query::query_retained_bytes_for_tests();
+    let per_row = charged / total;
+    println!(
+        "N05 规模测量：rows={total} seed={}ms build={}ms retained={charged}B（≈{per_row}B/行，预算上限 256MiB）",
+        seed_elapsed.as_millis(),
+        build_elapsed.as_millis()
+    );
+    assert!(
+        charged < total * 256,
+        "每行元数据（含 record_id 堆串）必须 ≤ 256 字节：实际 {per_row}B/行"
+    );
+    assert!(
+        charged < query::MAX_RETAINED_QUERY_BYTES,
+        "百万行索引必须落在默认预算内"
+    );
+
+    // 流式汇总：数字与规模精确一致（不受分批影响）。
+    let t_summary = std::time::Instant::now();
+    let summary = query::query_summary(&snap.query_id).unwrap();
+    println!("N05 汇总耗时：{}ms", t_summary.elapsed().as_millis());
+    assert_eq!(summary.totals.requests as usize, total);
+    assert_eq!(summary.totals.tokens.input, 100 * total as u64);
+    assert_eq!(summary.totals.tokens.output, 10 * total as u64);
+
+    // 跨页：前两页 + 游标连续；total 与行索引一致。
+    let page1 = query::query_events(
+        &snap.query_id,
+        &EventFilter {
+            limit: Some(1000),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(page1.total, total as u64);
+    assert_eq!(page1.rows.len(), 1000);
+    let page2 = query::query_events(
+        &snap.query_id,
+        &EventFilter {
+            limit: Some(1000),
+            before: Some(page1.rows.last().unwrap().cursor.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(page2.rows.len(), 1000);
+    // 页间无重叠、无跳行：两页 record_id 全局唯一（时间互异 → id 唯一）。
+    let mut ids: Vec<String> = page1
+        .rows
+        .iter()
+        .chain(page2.rows.iter())
+        .map(|r| r.record_id.clone())
+        .collect();
+    ids.sort();
+    let before = ids.len();
+    ids.dedup();
+    assert_eq!(ids.len(), before, "跨页无重复");
+
+    std::fs::remove_dir_all(&dir).ok();
+}

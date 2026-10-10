@@ -352,7 +352,11 @@ async function commitCcsImport(): Promise<void> {
     msg.success("CCS 用量已导入（与已有历史去重求并集）");
     await loadCache();
   } catch (e) {
-    // 失败不自动重试：保留错误提示，用户可手动重新预览
+    // 失败不自动重试。计划是一次性消费（后端在校验前即取出）：无论失败原因
+    // （过期 / 代次变化 / 提交错误），预览都已失效——清掉它让「重新预览」
+    // 入口直接可用，恢复动作由用户手动触发，不自动重发。
+    ccsPreview.value = null;
+    ccsAllowOverlap.value = false;
     ccsError.value = e instanceof Error ? e.message : String(e);
   } finally {
     ccsBusy.value = false;
@@ -1266,12 +1270,14 @@ defineExpose({ priceColumns });
             <NButton size="small" @click="openPricing">打开 / 创建外置价格文件</NButton>
           </div>
           <div class="setting-help">
-            优先级：外置（{{ pricing?.external_count ?? 0 }} 条）> models.dev（{{
+            候选来源：外置（{{ pricing?.external_count ?? 0 }} 条）+ models.dev（{{
               pricing?.modelsdev_count ?? 0
             }}
-            条，主源）> OpenRouter（{{ pricing?.openrouter_count ?? 0 }} 条，补充源）；
-            层内最长前缀匹配，未收录模型按未知价格处理（无内置兜底）。本地快照是
-            离线缓存：断网时继续按上次同步数据计价；同步时间与快照路径见"缓存"组的技术详情。
+            条，主源）+ OpenRouter（{{ pricing?.openrouter_count ?? 0 }} 条，补充源）；
+            同一模型的全部候选按本次请求条件计价后取总费用最高者（并列按来源优先级 &gt; 完整匹配
+            &gt; 前缀更长打破），四桶单价取自同一候选、不跨候选拼价；
+            未收录模型按未知价格处理（无内置兜底）。本地快照是离线缓存：断网时继续按
+            上次同步数据计价；同步时间与快照路径见"缓存"组的技术详情。
           </div>
           <!-- 任务 7：主源缺失/损坏与快照警告 = .ts-notice（不再用高饱和 NAlert） -->
           <div
@@ -1335,11 +1341,12 @@ defineExpose({ priceColumns });
             </div>
           </div>
           <div class="setting-help">
-            {{ pricing?.path }}（TOML；本地价格最高优先，保存后下次统计生效）
+            {{ pricing?.path }}（TOML；候选来源之一，同价并列时优先，保存后下次统计生效）
           </div>
           <!-- RC07：单价量纲显式说明（列头同样标注 $/M）。 -->
           <div class="setting-help unit-note">
-            单价单位：{{ UNIT_PRICE_DENOMINATOR }}（每百万 token）；四桶单价按下方来源优先级解析。
+            单价单位：{{ UNIT_PRICE_DENOMINATOR }}（每百万
+            token）；四桶单价来自同一选中候选（不跨候选拼价）。
           </div>
           <ScrollList :rows="pricing?.entries ?? []" label="价格列表" class="ts-auto-table-pricing">
             <template #default="{ rows }">

@@ -401,8 +401,6 @@ const COLLECT_STOP_POLL: std::time::Duration = std::time::Duration::from_millis(
 
 static COLLECT_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static COLLECT_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// 是否有一次采集正在提交中（退出路径据此等待已开始的提交）。
-static COLLECT_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn start_periodic_collection(app: tauri::AppHandle) {
     use std::sync::atomic::Ordering;
@@ -428,9 +426,9 @@ fn start_periodic_collection(app: tauri::AppHandle) {
                     Err(e) => log::warn!("定时采集跳过（设置不可用）: {e}"),
                     Ok(opts) => {
                         let t = std::time::Instant::now();
-                        COLLECT_ACTIVE.store(true, Ordering::SeqCst);
+                        // 提交观察在共享采集边界（report::collect_flighted）登记，
+                        // 手动/定时/启动入口统一被退出等待覆盖（N06）。
                         let result = tokenscope::report::summary(&opts);
-                        COLLECT_ACTIVE.store(false, Ordering::SeqCst);
                         match result {
                             Ok(r) => log::debug!(
                                 "定时采集完成：请求 {}，警告 {}，{} ms",
@@ -465,11 +463,15 @@ fn sleep_interruptible(total: std::time::Duration) {
 
 /// 退出路径：请求停止定时采集，并等待**已经开始的提交**完成（有限等待，
 /// 超时即不再阻塞退出——已提交的事务在库内，未提交的由 SQLite 事务回滚）。
+/// 等待观察在共享采集边界上（N06）：手动刷新、重扫与定时采集的领队工作
+/// 全部登记，任何入口的进行中提交都被等待。
 pub(crate) fn stop_periodic_collection(wait: std::time::Duration) {
     use std::sync::atomic::Ordering;
     COLLECT_STOP.store(true, Ordering::SeqCst);
     let deadline = std::time::Instant::now() + wait;
-    while COLLECT_ACTIVE.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+    while tokenscope::report::active_collection_submissions() > 0
+        && std::time::Instant::now() < deadline
+    {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }

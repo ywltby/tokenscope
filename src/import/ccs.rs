@@ -71,7 +71,17 @@ const SESSION_REQUEST_ID_PREFIX: &str = "session:";
 const PLAN_TTL: Duration = Duration::from_secs(600);
 
 /// 单次预览可暂存的明细上限（超出即拒绝并要求分批；本机量级远低于此）。
-const MAX_STAGED_REQUESTS: usize = 500_000;
+pub const MAX_STAGED_REQUESTS: usize = 500_000;
+
+/// N04：上限在读取与暂存过程中逐行生效——超限在**读入完成前**即失败，
+/// 峰值内存不随来源库大小无界增长。以参数传递（无全局旋钮：并行测试里
+/// 全局覆盖会污染其它用例）。
+fn check_staged_limit(count: usize, limit: usize, what: &str) -> Result<()> {
+    if count > limit {
+        bail!("来源库{what}超过暂存上限（{count} > {limit}）：请缩小来源范围后分批导入");
+    }
+    Ok(())
+}
 
 /// 默认来源库路径（`~/.cc-switch/cc-switch.db`）。
 pub fn default_source_path() -> Result<PathBuf> {
@@ -175,7 +185,7 @@ impl CcsSource {
     /// `request_model`（客户端别名）**不读取**：TokenScope 只保存建立去重与核对
     /// 所需的最小元数据，模型身份与计价口径都不从客户端别名猜测（计划 §5.2）；
     /// 来源库里的原值不受影响。
-    fn read_requests(&self) -> Result<Vec<RawRequest>> {
+    fn read_requests(&self, staged_limit: usize) -> Result<Vec<RawRequest>> {
         let opt = |name: &str| {
             if self.has_column("proxy_request_logs", name).unwrap_or(false) {
                 name.to_string()
@@ -215,6 +225,8 @@ impl CcsSource {
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
+            // N04：上限在读取过程中逐行生效——峰值内存不随来源库大小无界增长。
+            check_staged_limit(out.len(), staged_limit, "请求明细")?;
         }
         Ok(out)
     }
@@ -223,7 +235,7 @@ impl CcsSource {
     ///
     /// `request_model` 是 CCS 日汇总**完整主键**的组成部分（同一模型下不同
     /// 客户端别名各自成行）：漏读它会把两条合法汇总折叠成一条、丢掉用量。
-    fn read_rollups(&self) -> Result<Vec<RawRollup>> {
+    fn read_rollups(&self, staged_limit: usize) -> Result<Vec<RawRollup>> {
         let opt = |name: &str| {
             if self
                 .has_column("usage_daily_rollups", name)
@@ -264,6 +276,8 @@ impl CcsSource {
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
+            // N04：同请求明细共用一条上限（日汇总与明细在同一个预览内暂存）。
+            check_staged_limit(out.len(), staged_limit, "日汇总")?;
         }
         Ok(out)
     }
@@ -443,6 +457,17 @@ pub fn preview(
     history: &HistoryDb,
     source_day_timezone: &str,
 ) -> Result<ImportPreview> {
+    preview_with_limits(source, history, source_day_timezone, MAX_STAGED_REQUESTS)
+}
+
+/// 带显式暂存上限的预览（测试注入小上限用；生产入口用
+/// [`MAX_STAGED_REQUESTS`]）。
+pub fn preview_with_limits(
+    source: &CcsSource,
+    history: &HistoryDb,
+    source_day_timezone: &str,
+    staged_limit: usize,
+) -> Result<ImportPreview> {
     let schema = source.schema()?;
     if !schema.requests_table {
         bail!("来源库缺少 proxy_request_logs 表：不支持该 CCS 数据版本");
@@ -457,8 +482,8 @@ pub fn preview(
         );
     }
 
-    let requests = source.read_requests()?;
-    let rollups = source.read_rollups()?;
+    let requests = source.read_requests(staged_limit)?;
+    let rollups = source.read_rollups(staged_limit)?;
 
     let mut preview = ImportPreview {
         plan_id: String::new(),
@@ -530,21 +555,19 @@ pub fn preview(
             }
         }
     }
-    if writes.len() > MAX_STAGED_REQUESTS {
-        bail!(
-            "本次导入的请求明细过多（{} 条，上限 {MAX_STAGED_REQUESTS}）：请分批导入",
-            writes.len()
-        );
-    }
+    // 暂存上限兜底：读取期已逐行计数（check_staged_limit），此处对过滤后
+    // 的可导入写集再做一次保守校验，消息与读取期一致。
+    check_staged_limit(writes.len(), staged_limit, "请求明细")?;
     preview.requests_importable = writes.len() as u64;
     preview.records_without_project = writes.len() as u64;
     let mut unsupported: Vec<(String, u64)> = unsupported.into_iter().collect();
     unsupported.sort();
     preview.unsupported_apps = unsupported;
 
-    // 试算与提交共用同一条判定（`classify_write`），预览数字不会与提交结果分叉。
-    for w in &writes {
-        match history.classify_write(w)? {
+    // 试算与提交共用同一条判定：`classify_batch` 按提交顺序批感知分类
+    //（批内重复来源记录按未变化/更新呈现），预览数字不会与提交结果分叉。
+    for (w, class) in writes.iter().zip(history.classify_batch(&writes)?) {
+        match class {
             WriteClass::Insert => {
                 preview.would_insert += 1;
                 preview.net_new_tokens = preview

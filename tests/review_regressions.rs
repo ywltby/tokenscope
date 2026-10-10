@@ -1143,14 +1143,14 @@ fn schema_upgrade_creates_restorable_backup() {
     let path = dir.join("history.db");
     {
         let history = HistoryDb::open(&path).unwrap();
-        assert_eq!(history.schema_version().unwrap(), 3, "新库直接是当前版本");
+        assert_eq!(history.schema_version().unwrap(), 4, "新库直接是当前版本");
     }
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.pragma_update(None, "user_version", 1).unwrap();
     }
     let history = HistoryDb::open(&path).unwrap();
-    assert_eq!(history.schema_version().unwrap(), 3, "升级到当前版本");
+    assert_eq!(history.schema_version().unwrap(), 4, "升级到当前版本");
     let backup = dir.join("history.db.backup-v1");
     assert!(backup.is_file(), "必须生成升级前备份：{}", backup.display());
     let conn = rusqlite::Connection::open(&backup).unwrap();
@@ -1434,7 +1434,7 @@ fn upgraded_v2_history_backfills_identity_time_and_rollup_key() {
         }
     }
     let history = HistoryDb::open(&path).unwrap();
-    assert_eq!(history.schema_version().unwrap(), 3, "升级到当前版本");
+    assert_eq!(history.schema_version().unwrap(), 4, "升级到当前版本");
     assert_eq!(
         history.rollup_count().unwrap(),
         1,
@@ -1668,5 +1668,139 @@ fn native_precedence_beats_observed_time() {
         .unwrap();
     assert_eq!(s2.conflicts, 1, "低优先级来源保持冲突语义");
     assert_eq!(history.totals().unwrap().output, 30);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// N02：并集身份矩阵（Codex 侧）——
+/// 1) 同时间同用量、**不同会话**：独立请求，两条都保留，CCS 导入各自命中；
+/// 2) 同会话/模型/四桶、**不同时间**：保守重播合并（§3.2 已披露的限制，
+///    与内存去重同口径，显式钉住）；
+/// 3) **不同来源请求标识**、同会话/模型/四桶：一条事件、两条来源证据。
+#[test]
+fn codex_union_identity_matrix() {
+    // 场景 1：独立请求不被并集吞掉。
+    let dir = temp_dir("n02-distinct");
+    let history = history_of(&dir);
+    let ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
+    let codex = dir.join("codex");
+    for (name, session) in [("rollout-a", "sess-A"), ("rollout-b", "sess-B")] {
+        codex_rollout(
+            &codex,
+            &format!("sessions/2026/07/17/{name}.jsonl"),
+            &[
+                codex_meta(session, "/work/app"),
+                codex_context("gpt-5.6-sol", "/work/app"),
+                codex_token_count("2026-07-17T15:00:00.000Z", 100, 30),
+            ],
+        );
+    }
+    summary(&opts(&dir, None, Some(codex.clone()))).unwrap();
+    assert_eq!(
+        history.event_count().unwrap(),
+        2,
+        "不同会话的同时间同用量是两条真实请求"
+    );
+    seed_ccs(
+        &dir.join("cc-switch.db"),
+        &[
+            CcsRow {
+                request_id: "px-a".into(),
+                app_type: "codex".into(),
+                model: "gpt-5.6-sol".into(),
+                session_id: Some("sess-A".into()),
+                data_source: "proxy".into(),
+                created_at: ts.as_second(),
+                input: 100,
+                output: 30,
+            },
+            CcsRow {
+                request_id: "px-b".into(),
+                app_type: "codex".into(),
+                model: "gpt-5.6-sol".into(),
+                session_id: Some("sess-B".into()),
+                data_source: "proxy".into(),
+                created_at: ts.as_second(),
+                input: 100,
+                output: 30,
+            },
+        ],
+        &[],
+    );
+    let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
+    let preview = ccs::preview(&source, &history, "UTC").unwrap();
+    assert_eq!(
+        preview.would_overlap, 0,
+        "重播身份按会话区分，不产生重叠候选"
+    );
+    let report = ccs::commit(
+        &preview.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        history.event_count().unwrap(),
+        2,
+        "导入不新增、不合并独立请求"
+    );
+    assert_eq!(report.requests_conflicted + report.requests_unchanged, 2);
+    std::fs::remove_dir_all(&dir).ok();
+
+    // 场景 2：同会话同模型同四桶、不同时间 → 保守合并（与内存去重一致）。
+    let dir = temp_dir("n02-replay");
+    let history = history_of(&dir);
+    let codex = dir.join("codex");
+    codex_rollout(
+        &codex,
+        "sessions/2026/07/17/rollout-r.jsonl",
+        &[
+            codex_meta("sess-1", "/work/app"),
+            codex_context("gpt-5.6-sol", "/work/app"),
+            codex_token_count("2026-07-17T15:00:00.000Z", 100, 30),
+            codex_token_count("2026-07-17T16:00:00.000Z", 100, 30),
+        ],
+    );
+    summary(&opts(&dir, None, Some(codex))).unwrap();
+    assert_eq!(
+        history.event_count().unwrap(),
+        1,
+        "重播/同用量独立请求按 §3.2 保守规则合并（已披露限制）"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+
+    // 场景 3：不同 request_id 的同一条请求 → 一个事件、两条来源证据。
+    let dir = temp_dir("n02-two-origins");
+    let history = history_of(&dir);
+    let rows = ["px-1", "px-2"]
+        .into_iter()
+        .map(|rid| CcsRow {
+            request_id: rid.into(),
+            app_type: "codex".into(),
+            model: "gpt-5.6-sol".into(),
+            session_id: Some("sess-1".into()),
+            data_source: "proxy".into(),
+            created_at: ts.as_second(),
+            input: 100,
+            output: 30,
+        })
+        .collect::<Vec<_>>();
+    seed_ccs(&dir.join("cc-switch.db"), &rows, &[]);
+    let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
+    let preview = ccs::preview(&source, &history, "UTC").unwrap();
+    assert_eq!(preview.would_insert, 1, "同一条请求只新增一个事件");
+    ccs::commit(
+        &preview.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        false,
+    )
+    .unwrap();
+    assert_eq!(history.event_count().unwrap(), 1);
+    assert_eq!(
+        history.origin_count().unwrap(),
+        2,
+        "两条来源记录各自登记证据，不复制用量"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

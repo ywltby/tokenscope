@@ -723,3 +723,34 @@ fn imported_claude_request_binds_to_native_event_from_session_logs() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// N04：暂存上限在**读取过程中**逐行生效——超限即拒绝（峰值内存不随来源库
+/// 大小无界增长），且零用量写入；恢复默认后同一来源可正常预览。
+#[test]
+fn staging_limit_is_enforced_during_read_with_zero_writes() {
+    let dir = temp_dir("staging-limit");
+    let ids = ["r0", "r1", "r2", "r3", "r4", "r5"];
+    let rows: Vec<Row> = ids
+        .iter()
+        .map(|id| Row {
+            request_id: id,
+            ..Default::default()
+        })
+        .collect();
+    seed_ccs(&dir.join("cc-switch.db"), &rows, &[]);
+    let history = db(&dir);
+    let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
+    // 上限按调用注入（无全局旋钮：并行测试里全局覆盖会污染其它用例）。
+    let err = ccs::preview_with_limits(&source, &history, "UTC", 3)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("暂存上限"), "{err}");
+    assert_eq!(history.event_count().unwrap(), 0, "超限拒绝零用量写入");
+    // "失败预览不落计划"由代码结构保证（读取期 bail 发生在计划插入之前）；
+    // staged_plan_count 是进程级计数，并行套件下断言它会被其它用例污染。
+
+    let preview = ccs::preview(&source, &history, "UTC").unwrap();
+    assert_eq!(preview.requests_importable, 6, "默认上限下正常预览");
+    ccs::discard(&preview.plan_id);
+    std::fs::remove_dir_all(&dir).ok();
+}

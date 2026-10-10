@@ -410,9 +410,17 @@ fn model_identity_drill_pages_include_all_spellings() {
     }
     std::fs::write(project.join("s.jsonl"), body).unwrap();
 
-    let o = opts(&dir, &dir.join("claude"), None, GroupBy::Model);
+    // N08：给等价键挂上有可信名的价格 → 逐请求费用可求和核对；两种拼写
+    // 都经等价候选命中同一价格。
+    let md = sync_to(
+        &dir,
+        "pricing-modelsdev.json",
+        r#"{"acme": {"models": {"claude-opus-5.5": {"name": "Claude Opus 5.5", "cost": {"input": 3, "output": 15}}}}}"#,
+    );
+    let o = opts(&dir, &dir.join("claude"), Some(&md), GroupBy::Model);
     let r = summary(&o).unwrap();
     assert_eq!(r.groups[0].requests, 210, "两种拼写全部合并");
+    assert!(r.groups[0].cost_usd > 0.0, "模型已计价");
 
     let key = r.groups[0].key.clone();
     let snap = tokenscope::query::begin_query(&o).unwrap();
@@ -439,20 +447,26 @@ fn model_identity_drill_pages_include_all_spellings() {
     .unwrap();
     assert_eq!(page2.total, 210, "total 是过滤后全量，不随游标截断");
     assert_eq!(page2.rows.len(), 10, "续页补齐剩余 10 条");
-    let ids: std::collections::BTreeSet<String> = page1
-        .rows
-        .iter()
-        .chain(page2.rows.iter())
-        .map(|row| row.record_id.clone())
-        .collect();
+    let all: Vec<_> = page1.rows.iter().chain(page2.rows.iter()).collect();
+    let ids: std::collections::BTreeSet<String> =
+        all.iter().map(|row| row.record_id.clone()).collect();
     assert_eq!(ids.len(), 210, "跨页不重不漏");
-    assert!(
-        page1
-            .rows
-            .iter()
-            .chain(page2.rows.iter())
-            .all(|row| row.project == "C:/work/alpha")
+    assert!(all.iter().all(|row| row.project == "C:/work/alpha"));
+    // N08：明细保留**原始模型名**（两种拼写都在，不压缩成等价键）。
+    let raw: std::collections::BTreeSet<&str> = all.iter().map(|row| row.model.as_str()).collect();
+    assert_eq!(
+        raw,
+        std::collections::BTreeSet::from(["claude-opus-5-5", "claude-opus-5.5"]),
+        "分页保留原始模型名"
     );
+    // N08：逐请求费用求和 == 汇总费用（210 条全部有价、无 unknown 混入）。
+    let per_request: f64 = all.iter().filter_map(|row| row.cost_usd).sum();
+    assert!(
+        (per_request - r.groups[0].cost_usd).abs() < 1e-6,
+        "逐请求费用求和 {per_request} vs 汇总 {}",
+        r.groups[0].cost_usd
+    );
+    assert!(all.iter().all(|row| row.cost_usd.is_some()), "无未计价请求");
 }
 
 #[test]
@@ -590,4 +604,73 @@ fn model_display_name_legacy_snapshot_falls_back() {
             .is_some(),
         "旧快照仍可离线提供价格"
     );
+}
+
+/// N08：同一模型的等价写法**跨应用**合并——Claude 与 Codex 各自的拼写归入
+/// 同一等价身份组；下钻跨页返回两个应用的原始模型名（保留原值，不压缩）。
+#[test]
+fn model_identity_groups_equivalent_spellings_across_apps() {
+    let dir = tmp("cross-app");
+    // Claude 侧用连字符拼写，Codex 侧用点号拼写 → 同一等价键 claudeopus55。
+    let claude = claude_dir(&dir, &["claude-opus-5-5"], 10);
+    let codex = dir.join("codex");
+    let session_dir = codex.join("sessions").join("2026").join("07").join("17");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(
+        session_dir.join("rollout-x.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            r#"{"timestamp":"2026-10-07T05:00:00.000Z","type":"session_meta","payload":{"id":"cx","session_id":"cx","cwd":"C:/work/beta"}}"#,
+            r#"{"timestamp":"2026-10-07T05:01:00.000Z","type":"turn_context","payload":{"turn_id":"t","model":"claude-opus-5.5","cwd":"C:/work/beta"}}"#,
+            r#"{"timestamp":"2026-10-07T05:02:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20,"output_tokens":2,"cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":22}}}}"#
+        ),
+    )
+    .unwrap();
+
+    let o = SummaryOptions {
+        by: GroupBy::Model,
+        claude_dir: Some(claude),
+        codex_dir: Some(codex),
+        cache_dir: Some(dir.join("cache")),
+        pricing_index: Some(dir.join("idx.json")),
+        pricing_path: Some(dir.join("pricing.toml")),
+        openrouter_path: Some(dir.join("or-missing.json")),
+        modelsdev_path: Some(dir.join("md-missing.json")),
+        tz: Some("Asia/Shanghai".to_string()),
+        ..Default::default()
+    };
+    let r = summary(&o).unwrap();
+    assert_eq!(
+        r.groups.len(),
+        2,
+        "两个应用的等价拼写合并为一行 + 合计：{:?}",
+        r.groups
+    );
+    assert_eq!(r.groups[0].key, "claudeopus55");
+    assert_eq!(r.groups[0].requests, 2, "跨应用的同模型请求合并计数");
+
+    // 下钻：一页拿全两条，原始模型名各自保留（不压缩成等价键）。
+    let key = r.groups[0].key.clone();
+    let snap = tokenscope::query::begin_query(&o).unwrap();
+    let page = tokenscope::query::query_events(
+        &snap.query_id,
+        &EventFilter {
+            model: Some(key),
+            limit: Some(50),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(page.rows.len(), 2);
+    let mut agents: Vec<&str> = page.rows.iter().map(|row| row.agent).collect();
+    agents.sort();
+    assert_eq!(agents, ["claude-code", "codex"], "下钻包含两个应用");
+    let mut models: Vec<&str> = page.rows.iter().map(|row| row.model.as_str()).collect();
+    models.sort();
+    assert_eq!(
+        models,
+        ["claude-opus-5-5", "claude-opus-5.5"],
+        "明细保留原始模型名"
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }

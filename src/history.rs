@@ -32,7 +32,7 @@ use crate::model::{AgentKind, TokenCounts};
 ///
 /// - v1 = `history_meta` + `source_files` + `usage_events`；
 /// - v2 = 别名 / 来源记录 / CCS 日汇总 / 导入批次四表（H01 起）。
-pub const HISTORY_SCHEMA_VERSION: i64 = 3;
+pub const HISTORY_SCHEMA_VERSION: i64 = 4;
 
 /// 解析规则版本：适配器输出语义变化时递增（与事件一并存储，供重解析判定）。
 pub const PARSER_REVISION: i64 = 1;
@@ -288,7 +288,87 @@ WHERE e.app = 'codex'
 ";
 
 /// 版本化迁移表：`(目标版本, SQL)`，从 0 起按序执行。
-const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2), (3, SCHEMA_V3)];
+/// v4 数据迁移：合并被旧实现遗留的 **Codex 重复事件**（路径来源键时代的产物）。
+///
+/// v2 及更早版本的采集身份是"文件路径 + 行序 + 内容指纹"——同一请求的副本
+/// （归档移动、后到副本、迁移后重扫）因来源键不同被各自插入，而当时的解析
+/// 又不写保守重播身份别名，这些重复行此后无法被任何一次重解析命中。合并
+/// 规则与 `dedupe` §3.2 的保守重播规则完全一致：同 `(session, 原始模型, 四桶)`
+/// 视为同一次请求（该口径的"同模型同用量独立请求被保守合并"限制已在
+/// stats-semantics §3.2 披露，迁移沿用同一限制，不新增猜测）。
+///
+/// 组内保留一条事实承载行：原生优先（`origin_rank` 高者）、时间最早、行号
+/// 最小（与重播规则"保留首条"一致）；其余行的来源证据与别名改挂到保留行后
+/// 删除，并为保留行补齐 `codex-usage` 别名——此后的重解析与 CCS 导入命中
+/// 同一事件，重复不再增长。可区分的独立请求（不同会话/模型/四桶）不参与
+/// 合并，事实一律保留。
+const SCHEMA_V4: &str = r"
+CREATE TEMP TABLE v4_keeper AS
+SELECT id AS keeper_id,
+       session_id || '|' || model_raw || '|' || input_tokens || '|' || output_tokens
+         || '|' || cache_write_tokens || '|' || cache_read_tokens AS grp
+FROM (
+    SELECT id, session_id, model_raw, input_tokens, output_tokens,
+           cache_write_tokens, cache_read_tokens,
+           ROW_NUMBER() OVER (
+               PARTITION BY session_id, model_raw, input_tokens, output_tokens,
+                            cache_write_tokens, cache_read_tokens
+               ORDER BY origin_rank DESC, ts_seconds ASC, ts_nanos ASC, id ASC
+           ) AS rn
+    FROM usage_events
+    WHERE app = 'codex' AND COALESCE(session_id, '') <> '' AND model_raw <> ''
+)
+WHERE rn = 1;
+
+CREATE TEMP TABLE v4_loser AS
+SELECT e.id,
+       e.session_id || '|' || e.model_raw || '|' || e.input_tokens || '|' || e.output_tokens
+         || '|' || e.cache_write_tokens || '|' || e.cache_read_tokens AS grp
+FROM usage_events e
+WHERE e.app = 'codex' AND COALESCE(e.session_id, '') <> '' AND e.model_raw <> ''
+  AND NOT EXISTS (SELECT 1 FROM v4_keeper k WHERE k.keeper_id = e.id)
+  AND EXISTS (
+      SELECT 1 FROM usage_events g
+      WHERE g.app = 'codex' AND g.id <> e.id
+        AND COALESCE(g.session_id, '') = e.session_id AND g.model_raw = e.model_raw
+        AND g.input_tokens = e.input_tokens AND g.output_tokens = e.output_tokens
+        AND g.cache_write_tokens = e.cache_write_tokens
+        AND g.cache_read_tokens = e.cache_read_tokens
+  );
+
+UPDATE event_aliases
+SET event_id = (SELECT k.keeper_id FROM v4_loser l JOIN v4_keeper k ON k.grp = l.grp
+                WHERE l.id = event_aliases.event_id)
+WHERE event_id IN (SELECT id FROM v4_loser);
+
+UPDATE event_origins
+SET event_id = (SELECT k.keeper_id FROM v4_loser l JOIN v4_keeper k ON k.grp = l.grp
+                WHERE l.id = event_origins.event_id)
+WHERE event_id IN (SELECT id FROM v4_loser);
+
+DELETE FROM usage_events WHERE id IN (SELECT id FROM v4_loser);
+
+INSERT INTO event_aliases(event_id, app, identity_scheme, identity_value, created_generation)
+SELECT k.keeper_id, 'codex', 'codex-usage', k.grp, 0
+FROM v4_keeper k
+WHERE NOT EXISTS (
+      SELECT 1 FROM event_aliases a
+      WHERE a.event_id = k.keeper_id AND a.identity_scheme = 'codex-usage')
+  AND NOT EXISTS (
+      SELECT 1 FROM event_aliases a
+      WHERE a.app = 'codex' AND a.identity_scheme = 'codex-usage'
+        AND a.identity_value = k.grp);
+
+DROP TABLE v4_loser;
+DROP TABLE v4_keeper;
+";
+
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, SCHEMA_V1),
+    (2, SCHEMA_V2),
+    (3, SCHEMA_V3),
+    (4, SCHEMA_V4),
+];
 
 /// 写入优先级：数值越大越可信。原生日志终值优先于 CCS 导入值；同一优先级
 /// 内部按观察时间取更晚者（计划 §5.3：与导入顺序无关）。
@@ -1107,6 +1187,66 @@ impl HistoryDb {
         }
     }
 
+    /// **批感知**分类（预览用）：按提交顺序逐条判定，前一条写入已声明的
+    /// 身份（来源键 / 来源记录 / 别名）对后续条目可见——同一批内的重复
+    /// 来源记录因此按"未变化/更新"呈现，而不是每条都算新增。
+    ///
+    /// 判定核心与提交路径完全同构：[`lookup_event_with_claims`] 按
+    /// `lookup_event` 的三级顺序与冲突语义查找（本批声明优先于库内行），
+    /// 处置用 [`classify_against`] 纯函数；批内模拟只记账身份到事件的归属，
+    /// 不写库。`OverlapCandidate` 不记账（是否按新增导入由用户决定）。
+    pub fn classify_batch(&self, writes: &[EventWrite]) -> Result<Vec<WriteClass>> {
+        // 身份 → 本批已声明的事件（提交时会真实存在；负数 id 仅为记账键）。
+        let mut claimed: std::collections::HashMap<String, StoredEvent> =
+            std::collections::HashMap::new();
+        let mut out = Vec::with_capacity(writes.len());
+        for w in writes {
+            validate_write(w)?;
+            let existing = lookup_event_with_claims(&self.conn, w, &claimed)?;
+            let class = match existing {
+                None => match self.overlap_candidate(w)? {
+                    Some(_) if w.aliases.is_empty() => WriteClass::OverlapCandidate,
+                    _ => WriteClass::Insert,
+                },
+                Some(existing) => classify_against(&existing, w),
+            };
+            if matches!(class, WriteClass::Insert | WriteClass::Update) {
+                // 本批声明：来源键 / 来源记录 / 别名此后都指向这条（模拟事件
+                // 内容 = 本次写入的终值，与提交后的行内容一致）。
+                let sim = StoredEvent {
+                    id: -(out.len() as i64) - 1,
+                    event_key: w.event_key.clone(),
+                    app: w.app,
+                    ts: w.ts,
+                    model_raw: w.model_raw.clone(),
+                    model_identity: w.model_identity.clone(),
+                    identity_revision: IDENTITY_REVISION,
+                    session_id: w.session_id.clone(),
+                    record_id: w.record_id.clone(),
+                    project_key: w.project_key.clone(),
+                    session_initial_cwd: w.session_initial_cwd.clone(),
+                    event_cwd: w.event_cwd.clone(),
+                    tokens: w.tokens,
+                    precedence: w.precedence,
+                    observed_at: w.observed_at,
+                    parser_revision: w.parser_revision(),
+                };
+                claimed.insert(format!("k|{}", w.event_key), sim.clone());
+                for o in &w.origins {
+                    claimed.insert(format!("o|{}", o.origin_key), sim.clone());
+                }
+                for a in &w.aliases {
+                    claimed.insert(
+                        format!("a|{}|{}|{}", a.app.as_str(), a.scheme, a.value),
+                        sim.clone(),
+                    );
+                }
+            }
+            out.push(class);
+        }
+        Ok(out)
+    }
+
     /// 重叠候选检测（只读）：库内是否存在同应用、同模型等价身份、四桶相同、
     /// 时间接近的既有请求。仅用于把"身份不足 + 存在重叠"的来源记录标为未解决。
     ///
@@ -1597,6 +1737,8 @@ pub fn migrate_legacy_cache(
     };
     let mut batch: Vec<EventWrite> = Vec::new();
     for file in &files {
+        // N03：读取阶段拒绝的负数字段行计入诊断（负值不伪装成合法零值）。
+        report.rejected += file.rejected;
         for (idx, ev) in file.events.iter().enumerate() {
             report.events_seen += 1;
             match legacy_event_write(file, idx, ev) {
@@ -1654,6 +1796,8 @@ fn legacy_event_write(
         .and_then(|v| v.checked_add(tokens.cache_read))
         .ok_or_else(|| anyhow!("四桶合计超出可表示范围"))?;
     let _ = total;
+    // 桶值已在读取期受检为非负（N03）：四桶合计通过即蕴含 prompt 基数
+    //（非缓存输入 + 缓存写 + 缓存读）不溢出，无需重复校验。
     // 旧缓存里的行序（v11+）优先；更早版本没有该列，用行位置兜底。
     let position = if ev.line > 0 { ev.line } else { idx as u64 };
     // 身份别名：迁移过来的行必须能与"迁移后重扫"命中同一事件，否则同一请求
@@ -2180,6 +2324,84 @@ fn lookup_event(conn: &Connection, w: &EventWrite) -> Result<Option<StoredEvent>
         // 合并策略需按来源优先级决策（计划 §5.3 的冲突处理），此处不猜测，
         // 明确拒绝整批，交由调用方呈现为未解决冲突。
         _ => bail!("身份冲突：同一请求的多个别名分别指向事件 {hits:?}，无法在不猜测的前提下合并"),
+    }
+}
+
+/// [`lookup_event`] 的批感知变体（预览用）：同一三级顺序与冲突语义，但每级
+/// 先查本批已声明的身份（`claimed`，提交后会真实存在），再查持久库——
+/// 预览数字因此与提交结果一致（批内重复按未变化/更新呈现）。
+fn lookup_event_with_claims(
+    conn: &Connection,
+    w: &EventWrite,
+    claimed: &std::collections::HashMap<String, StoredEvent>,
+) -> Result<Option<StoredEvent>> {
+    // 1) 来源键。
+    if let Some(e) = claimed.get(&format!("k|{}", w.event_key)) {
+        return Ok(Some(e.clone()));
+    }
+    let by_key: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM usage_events WHERE event_key = ?1",
+            params![w.event_key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = by_key {
+        return load_event(conn, id);
+    }
+    // 2) 来源记录证据。
+    for origin in &w.origins {
+        if let Some(e) = claimed.get(&format!("o|{}", origin.origin_key)) {
+            return Ok(Some(e.clone()));
+        }
+        let hit: Option<i64> = conn
+            .query_row(
+                "SELECT event_id FROM event_origins WHERE origin_kind = ?1 AND origin_key = ?2",
+                params![origin.origin_kind, origin.origin_key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = hit {
+            return load_event(conn, id);
+        }
+    }
+    // 3) 身份别名（本批声明与库内行合并去重；多个不同事件 → 冲突）。
+    let mut hits: Vec<i64> = Vec::new();
+    let mut claimed_hits: Vec<&StoredEvent> = Vec::new();
+    for alias in &w.aliases {
+        let claim_key = format!("a|{}|{}|{}", alias.app.as_str(), alias.scheme, alias.value);
+        if let Some(e) = claimed.get(&claim_key) {
+            if !claimed_hits
+                .iter()
+                .any(|x| x.event_key == e.event_key && x.id == e.id)
+            {
+                claimed_hits.push(e);
+            }
+            continue;
+        }
+        let hit: Option<i64> = conn
+            .query_row(
+                "SELECT event_id FROM event_aliases
+                 WHERE app = ?1 AND identity_scheme = ?2 AND identity_value = ?3",
+                params![alias.app.as_str(), alias.scheme, alias.value],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = hit
+            && !hits.contains(&id)
+        {
+            hits.push(id);
+        }
+    }
+    match (claimed_hits.len(), hits.len()) {
+        (0, 0) => Ok(None),
+        (1, 0) => Ok(Some(claimed_hits[0].clone())),
+        (0, 1) => load_event(conn, hits[0]),
+        (0, _) => {
+            bail!("身份冲突：同一请求的多个别名分别指向事件 {hits:?}，无法在不猜测的前提下合并")
+        }
+        // 本批声明与库内行同时命中且不是同一事件：与库内多别名冲突同口径。
+        _ => bail!("身份冲突：同一请求的多个别名分别指向不同事件，无法在不猜测的前提下合并"),
     }
 }
 

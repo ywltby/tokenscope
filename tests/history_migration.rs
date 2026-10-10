@@ -245,3 +245,225 @@ fn rescan_after_migration_hits_the_same_event() {
         "两条来源证据指向同一事件"
     );
 }
+
+// ================================================================ N01/N03
+
+use tokenscope::aggregate::GroupBy;
+use tokenscope::report::{SummaryOptions, summary};
+
+fn summary_opts(dir: &std::path::Path, claude: Option<PathBuf>) -> SummaryOptions {
+    SummaryOptions {
+        by: GroupBy::Day,
+        claude_dir: claude.clone(),
+        codex_dir: None,
+        claude_enabled: Some(claude.is_some()),
+        codex_enabled: Some(false),
+        cache_dir: Some(dir.join("data")),
+        pricing_index: Some(dir.join("idx.json")),
+        pricing_path: Some(dir.join("pricing.toml")),
+        openrouter_path: Some(dir.join("or.json")),
+        modelsdev_path: Some(dir.join("md.json")),
+        tz: Some("UTC".to_string()),
+        ..Default::default()
+    }
+}
+
+/// N03：遗留缓存中的负数字段是坏数据——受检拒绝并计诊断，不用 `.max(0)`
+/// 把坏值伪装成合法零值混进用量；同行合法记录照常迁移。
+#[test]
+fn negative_legacy_values_are_rejected_not_clamped() {
+    let dir = temp_dir("negative");
+    let legacy = dir.join("cache.db");
+    seed_legacy_cache(
+        &legacy,
+        &[
+            ("2026-07-17T08:00:00.000Z", "neg-1", -5, 20, 0, 0),
+            ("2026-07-17T08:01:00.000Z", "ok-1", 10, 5, 0, 0),
+            (
+                "2026-07-17T08:02:00.000Z",
+                "overflow",
+                i64::MAX,
+                i64::MAX,
+                i64::MAX,
+                0,
+            ),
+        ],
+    );
+    let history = HistoryDb::open(&dir.join("history.db")).unwrap();
+    let report = migrate_legacy_cache(&history, &legacy).unwrap().unwrap();
+    assert_eq!(
+        report.events_seen, 2,
+        "负值行在读取阶段被拒绝，不计入可迁事件"
+    );
+    assert_eq!(report.rejected, 2, "读取期拒绝 + 溢出拒绝都计入诊断");
+    assert_eq!(report.inserted, 1);
+    assert_eq!(
+        history.totals().unwrap(),
+        tokens(10, 5, 0, 0),
+        "负值不得伪装成 0，坏组合不得入库"
+    );
+}
+
+/// N01：被旧实现污染的 v2 库（Codex 重复事件 + 被回退的 Claude 终值）在
+/// 升级后得到安全纠错——v4 合并同保守身份的重复行、v3 改写观察时间、
+/// 解析规则修订触发一次重解析让真实终值恢复；升级前备份可恢复，重复
+/// 升级不产生新备份也不改变事实。
+#[test]
+fn polluted_v2_history_is_repaired_by_upgrade_and_rescan() {
+    let dir = temp_dir("polluted-v2");
+    let db = dir.join("data").join("history.db");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+
+    // Claude 日志的当前内容 = 真实终值 21（旧实现曾把它回退成 6）。
+    let claude = dir.join("claude");
+    let log = claude.join("projects").join("p").join("s1.jsonl");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(
+        &log,
+        format!(
+            "{}\n{}\n",
+            r#"{"type":"user","timestamp":"2026-09-15T08:00:00.000Z","sessionId":"s1c","cwd":"/work/app","message":{"role":"user"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-09-15T08:00:05.000Z","sessionId":"s1c","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":21,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#
+        ),
+    )
+    .unwrap();
+    // 与 report 相同口径的指纹与键（canonicalize + 剥 \\?\ 前缀 + 小写）。
+    let fp = format!(
+        "{}:{}",
+        std::fs::metadata(&log).unwrap().len(),
+        tokenscope::cache::mtime_ms(&log).unwrap()
+    );
+    let norm = |p: &std::path::Path| -> String {
+        let c = std::fs::canonicalize(p).unwrap();
+        let s = c.to_string_lossy().to_string();
+        let s = s
+            .strip_prefix(r"\\?\UNC\")
+            .map(|r| format!(r"\\{r}"))
+            .unwrap_or_else(|| s.strip_prefix(r"\\?\").unwrap_or(&s).to_string());
+        s.to_lowercase()
+    };
+    let path_key = norm(&log);
+    let root_key = norm(&claude);
+
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(tokenscope::history::legacy_v1_schema_for_tests())
+            .unwrap();
+        conn.execute_batch(tokenscope::history::legacy_v2_schema_for_tests())
+            .unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        // 污染 #1：同一 Codex 请求的两份来源各自成行（v2 路径来源键产物）。
+        for (key, obs) in [
+            ("native|codex|/logs/a.jsonl|0|fp1", 1_792_000_000i64),
+            ("native|codex|/archive/a.jsonl|0|fp2", 1_792_000_100),
+        ] {
+            conn.execute(
+                "INSERT INTO usage_events(event_key, app, ts_seconds, ts_nanos, model_raw,
+                    model_identity, identity_revision, session_id, record_id, project_key,
+                    session_initial_cwd, event_cwd, input_tokens, output_tokens,
+                    cache_write_tokens, cache_read_tokens, origin_rank, observed_at_utc,
+                    observed_at_seconds, observed_at_nanos, parser_revision)
+                 VALUES(?1, 'codex', 1784307600, 0, 'gpt-x', 'gptx', 1, 's1', NULL, NULL,
+                        NULL, NULL, '100', '20', '0', '0', 1, '2026-10-10T00:00:00Z',
+                        ?2, 0, 1)",
+                rusqlite::params![key, obs],
+            )
+            .unwrap();
+            let id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO event_origins(event_id, origin_kind, origin_key, app,
+                    import_run_id, parser_revision, source_model_raw, pricing_model,
+                    source_cost_usd, ts_precision_seconds)
+                 VALUES(?1, 'native_file', ?2, 'codex', NULL, 1, NULL, NULL, NULL, 0)",
+                rusqlite::params![id, key],
+            )
+            .unwrap();
+        }
+        // 污染 #2：被旧副本回退的 Claude 终值（output 6，观察时间 = 采集时刻）。
+        conn.execute(
+            "INSERT INTO usage_events(event_key, app, ts_seconds, ts_nanos, model_raw,
+                model_identity, identity_revision, session_id, record_id, project_key,
+                session_initial_cwd, event_cwd, input_tokens, output_tokens,
+                cache_write_tokens, cache_read_tokens, origin_rank, observed_at_utc,
+                observed_at_seconds, observed_at_nanos, parser_revision)
+             VALUES('native|claude-code|/logs/old/c.jsonl|1|fpc', 'claude-code', 1784307700, 0,
+                    'claude-opus-5-5', 'claudeopus55', 1, 's1c', 'm1', NULL, NULL, NULL,
+                    '10', '6', '0', '0', 1, '2026-10-10T00:00:00Z', 1792000000, 0, 1)",
+            [],
+        )
+        .unwrap();
+        let cid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO event_aliases(event_id, app, identity_scheme, identity_value,
+                created_generation)
+             VALUES(?1, 'claude-code', 'claude-message', 's1c|m1', 0)",
+            [cid],
+        )
+        .unwrap();
+        // 指纹命中当前文件、但 context_revision 是旧式（无规则前缀）的登记。
+        conn.execute(
+            "INSERT INTO source_files(app, root, path, fingerprint, size_bytes, mtime_ms,
+                context_revision, state)
+             VALUES('claude-code', ?1, ?2, ?3, 1, 1, '', 'present')",
+            rusqlite::params![root_key, path_key, fp],
+        )
+        .unwrap();
+    }
+
+    let history = HistoryDb::open(&db).unwrap();
+    assert_eq!(history.schema_version().unwrap(), 4, "升级到当前版本");
+    let backup = db.with_extension("db.backup-v2");
+    assert!(backup.is_file(), "升级前必须留可恢复备份");
+    {
+        let b = rusqlite::Connection::open(&backup).unwrap();
+        let n: i64 = b
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 3, "备份（自 v2 升级）包含合并前的全部事实（可恢复）");
+    }
+    // 合并后：Codex 重复行归一，别名补齐，来源证据都挂在保留行上；
+    // Claude 终值不被迁移编造（仍是 6），等待重解析恢复。
+    assert_eq!(history.event_count().unwrap(), 2);
+    assert_eq!(
+        history.totals().unwrap(),
+        tokens(110, 26, 0, 0),
+        "Codex 100/20 只算一次；Claude 仍是污染值 6（不猜造终值）"
+    );
+    assert_eq!(
+        history.origin_count().unwrap(),
+        2,
+        "两份 Codex 来源证据都保留在合并后的行上"
+    );
+    assert_eq!(
+        history.alias_count().unwrap(),
+        2,
+        "保留行补齐 codex-usage 别名"
+    );
+
+    // 热扫（不带 refresh）：解析规则修订让登记失配 → 重解析 → 真实终值 21。
+    summary(&summary_opts(&dir, Some(claude))).unwrap();
+    assert_eq!(
+        history.totals().unwrap(),
+        tokens(110, 41, 0, 0),
+        "热扫即恢复真实终值（20 + 21），无需手动清库或重扫"
+    );
+    assert!(
+        history
+            .source_files()
+            .unwrap()
+            .iter()
+            .all(|f| f.context_revision.starts_with("2|")),
+        "重解析后按新规则修订重新登记"
+    );
+
+    // 重复升级：事实稳定，不产生新备份。
+    drop(history);
+    let again = HistoryDb::open(&db).unwrap();
+    assert_eq!(again.schema_version().unwrap(), 4);
+    assert_eq!(again.totals().unwrap(), tokens(110, 41, 0, 0));
+    assert!(
+        !db.with_extension("db.backup-v4").exists(),
+        "当前版本重复打开不触发迁移与备份"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

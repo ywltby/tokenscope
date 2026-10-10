@@ -424,13 +424,17 @@ pub(crate) fn collection_retained_bytes(c: &CollectionSnapshot) -> Result<usize,
     Ok(n.get())
 }
 
-/// 单飞槽：key → (互斥结果, 条件变量)。None = 空闲。
+/// 单飞槽：互斥结果 + 条件变量 + 该航班的等待者计数。None = 空闲。
 /// RC05：结果持有 `Arc<CollectionSnapshot>`——领队与所有跟随者共享同一份
 /// 快照，不再各自深拷贝事件（此前 `Arc::new(s.clone())`）。
-type FlightCell = Arc<(
-    Mutex<Option<Result<Arc<CollectionSnapshot>, String>>>,
-    Condvar,
-)>;
+#[derive(Default)]
+struct FlightCellInner {
+    slot: Mutex<Option<Result<Arc<CollectionSnapshot>, String>>>,
+    cv: Condvar,
+    /// 当前阻塞在本航班等待里的跟随者数（测试握手确认"已进入等待"）。
+    waiters: AtomicU64,
+}
+type FlightCell = Arc<FlightCellInner>;
 
 /// 占用中的航班表（Task 1）：key → cell。按 key 管理——不同参数的采集
 /// 可并发进行，同参跟随者共享同一航班；清理时以 cell 指针身份核对。
@@ -446,9 +450,39 @@ static COLLECT_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// refresh）就会同时跑起第二条管线，与"同一个后台单飞协调器"的要求不符，
 /// 也会让同一批源文件被两轮解析各自入库。
 static COLLECT_SERIAL: Mutex<()> = Mutex::new(());
+/// 解析/身份规则修订（N01）：进入每个文件的缓存命中键。递增让已登记指纹的
+/// 源文件在下一轮采集**重解析一次**——v2：写入身份升级为"来源键 + 持久身份
+/// 别名"且观察时间改用事件时间，旧实现登记的指纹不再代表当前解析结果；
+/// 重解析让别名补进库内、被旧实现回退的终值按"事件时间更晚者胜出"恢复。
+pub const PARSE_RULES_REVISION: u32 = 2;
 /// 观测：当前正在跑的采集管线数与历史峰值（测试断言"不同参数不并行"）。
 static COLLECT_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 static COLLECT_MAX_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+/// N06：正在进行的采集提交数（**共享边界**观察）。手动刷新、定时采集、启动
+/// 采集与重扫的领队工作（含历史库写入提交）全部经 [`collect_flighted_with`]
+/// 登记——壳侧退出路径据此等待"已开始的提交"完成，不再只覆盖定时入口。
+static COLLECT_SUBMISSIONS_ACTIVE: AtomicU64 = AtomicU64::new(0);
+
+/// 当前正在进行的采集提交数（壳侧退出等待用；0 = 无）。
+#[doc(hidden)]
+pub fn active_collection_submissions() -> u64 {
+    COLLECT_SUBMISSIONS_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// RAII：进入时 +1、离开（含 panic）时 -1——提交观察计数必须精确配平，
+/// 否则退出等待要么错过进行中的提交、要么白白等满超时。
+struct SubmissionGuard;
+impl SubmissionGuard {
+    fn enter() -> Self {
+        COLLECT_SUBMISSIONS_ACTIVE.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+impl Drop for SubmissionGuard {
+    fn drop(&mut self) {
+        COLLECT_SUBMISSIONS_ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// 取走并清零"同时进行的采集管线数"峰值（诊断与测试）。
 #[doc(hidden)]
@@ -484,8 +518,28 @@ pub(crate) fn collection_key(opts: &SummaryOptions) -> String {
     )
 }
 
+/// 测试握手（#[doc(hidden)]）：指定航班当前**已阻塞在 wait_flight 里**的
+/// 跟随者数——按航班计数，不受并行测试里其它航班影响。
+#[doc(hidden)]
+pub fn flight_waiters_for_tests(key: &str) -> u64 {
+    INFLIGHT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .map(|c| c.waiters.load(Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
 fn wait_flight(cell: &FlightCell) -> Result<Arc<CollectionSnapshot>> {
-    let mut r = cell.0.lock().unwrap();
+    struct WaiterGuard(FlightCell);
+    impl Drop for WaiterGuard {
+        fn drop(&mut self) {
+            self.0.waiters.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    cell.waiters.fetch_add(1, Ordering::SeqCst);
+    let _waiter = WaiterGuard(cell.clone());
+    let mut r = cell.slot.lock().unwrap_or_else(|e| e.into_inner());
     loop {
         if let Some(res) = r.as_ref() {
             return match res {
@@ -494,7 +548,7 @@ fn wait_flight(cell: &FlightCell) -> Result<Arc<CollectionSnapshot>> {
                 Err(e) => Err(anyhow::anyhow!(e.clone())),
             };
         }
-        r = cell.1.wait(r).unwrap();
+        r = cell.cv.wait(r).unwrap_or_else(|e| e.into_inner());
     }
 }
 
@@ -553,7 +607,7 @@ fn collect_flighted_with(
         match g.entry(key.clone()) {
             std::collections::hash_map::Entry::Occupied(e) => (e.get().clone(), false),
             std::collections::hash_map::Entry::Vacant(e) => {
-                let c: FlightCell = Arc::new((Mutex::new(None), Condvar::new()));
+                let c: FlightCell = Arc::new(FlightCellInner::default());
                 e.insert(c.clone());
                 (c, true)
             }
@@ -572,27 +626,27 @@ fn collect_flighted_with(
     }
     impl FlightGuard {
         fn publish_ok(&mut self, snap: Arc<CollectionSnapshot>) {
-            let mut r = self.cell.0.lock().unwrap();
+            let mut r = self.cell.slot.lock().unwrap_or_else(|e| e.into_inner());
             *r = Some(Ok(snap));
-            self.cell.1.notify_all();
+            self.cell.cv.notify_all();
             self.published = true;
         }
 
         fn publish_error(&mut self, msg: String) {
-            let mut r = self.cell.0.lock().unwrap();
+            let mut r = self.cell.slot.lock().unwrap_or_else(|e| e.into_inner());
             *r = Some(Err(msg));
-            self.cell.1.notify_all();
+            self.cell.cv.notify_all();
             self.published = true;
         }
     }
     impl Drop for FlightGuard {
         fn drop(&mut self) {
             if !self.published {
-                let mut r = self.cell.0.lock().unwrap();
+                let mut r = self.cell.slot.lock().unwrap_or_else(|e| e.into_inner());
                 if r.is_none() {
                     *r = Some(Err("采集线程异常退出".to_string()));
                 }
-                self.cell.1.notify_all();
+                self.cell.cv.notify_all();
             }
             // 释放槽位：仅当仍是本航班（旧 leader 不能清理被顶替的槽）。
             let mut g = INFLIGHT.lock().unwrap();
@@ -613,6 +667,9 @@ fn collect_flighted_with(
         let _serial = COLLECT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let in_flight = COLLECT_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
         COLLECT_MAX_IN_FLIGHT.fetch_max(in_flight, Ordering::SeqCst);
+        // N06：领队工作（采集 + 历史库写入提交）登记为"进行中的提交"——
+        // 手动与定时入口同样被覆盖，退出路径的等待因此完整。
+        let _submission = SubmissionGuard::enter();
         let r = leader(generation);
         COLLECT_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
         r
@@ -985,7 +1042,9 @@ fn collect_all_with_sources(
             .map(|r| normalize_path(r).to_string_lossy().to_lowercase())
             .collect::<Vec<_>>()
             .join(";");
-        let context_rev = src.context_revision().to_string();
+        // N01：解析规则修订进入缓存命中键——规则变化让已登记指纹的文件
+        // 重解析一次（存储值无该前缀 → 首轮必然失配 → 重解析并重新登记）。
+        let context_rev = format!("{}|{}", PARSE_RULES_REVISION, src.context_revision());
         for file in &files {
             let path_str = file.display().to_string();
             let path_key = normalize_path(file).to_string_lossy().to_lowercase();
@@ -2853,35 +2912,76 @@ cache_read = 0.0
     fn test_failed_flight_wakes_all_waiters() {
         let dir = tmp_dir("flight-wake");
         let opts = opts(Some(dir.join("cache")), None, false);
-        TEST_COLLECT_DELAY_MS.store(200, Ordering::Relaxed);
+        let key = collection_key(&opts);
         let calls = std::sync::Arc::new(AtomicU64::new(0));
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
-        let mut handles = Vec::new();
-        for _ in 0..3 {
-            let b = barrier.clone();
+        let (registered_tx, registered_rx) = std::sync::mpsc::channel::<()>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        // 领队：注册航班后等待两个跟随者**确认已进入等待**（真实握手），
+        // 再返回错误——跟随者不可能因调度延迟变成新领队。
+        let o_l = opts.clone();
+        let c_l = calls.clone();
+        let leader = std::thread::spawn(move || {
+            let leader_fn = move |_gen: u64| -> Result<CollectionSnapshot> {
+                c_l.fetch_add(1, Ordering::Relaxed);
+                registered_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+                Err(anyhow::anyhow!("boom"))
+            };
+            collect_flighted_with(&o_l, &leader_fn)
+        });
+        registered_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("领队必须先注册航班");
+        let mut followers = Vec::new();
+        for _ in 0..2 {
             let o = opts.clone();
-            let c = calls.clone();
-            handles.push(std::thread::spawn(move || {
-                b.wait();
-                let leader = move |_gen: u64| -> Result<CollectionSnapshot> {
-                    c.fetch_add(1, Ordering::Relaxed);
-                    // 重叠窗口由闭包自身制造（延迟旋钮在真实采集路径上，
-                    // 注入闭包的失败路径不经过它）。1s 保证并行测试负载下
-                    // 三个线程都进入单飞。
-                    std::thread::sleep(std::time::Duration::from_millis(1000));
-                    Err(anyhow::anyhow!("boom"))
+            let key = key.clone();
+            let rt = ready_tx.clone();
+            followers.push(std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !INFLIGHT.lock().unwrap().contains_key(&key) {
+                    assert!(std::time::Instant::now() < deadline, "等待航班注册超时");
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                rt.send(()).unwrap();
+                let f = move |_gen: u64| -> Result<CollectionSnapshot> {
+                    panic!("跟随者闭包不应被调用");
                 };
-                collect_flighted_with(&o, &leader)
+                collect_flighted_with(&o, &f)
             }));
         }
-        let mut errs = Vec::new();
-        for h in handles {
-            errs.push(
-                h.join()
-                    .unwrap()
-                    .expect_err("应返回错误而非悬挂")
-                    .to_string(),
-            );
+        drop(ready_tx);
+        for _ in 0..2 {
+            ready_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("跟随者必须确认已进入等待");
+        }
+        // N09：真实握手第二段——**本航班**等待者计数确认跟随者已经阻塞
+        // 在 wait_flight 里（"即将进入"在重载下可能迟到，迟到者会因槽位
+        // 已清而变成新领队；并行套件里其它航班的等待者不计入本航班）。
+        // 此后放行领队，槽位清空必然只唤醒已入队者。
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while flight_waiters_for_tests(&key) < 2 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "等待跟随者进入航班超时"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        go_tx.send(()).unwrap();
+        let errs = vec![
+            leader
+                .join()
+                .unwrap()
+                .expect_err("领队应返回错误而非悬挂")
+                .to_string(),
+        ];
+        let mut errs = errs;
+        for h in followers {
+            errs.push(h.join().unwrap().expect_err("等待者应被唤醒").to_string());
         }
         assert!(
             errs.iter().all(|e| e.contains("boom")),
@@ -2894,54 +2994,135 @@ cache_read = 0.0
 
     #[test]
     fn test_panicked_flight_wakes_waiter_and_clears_slot() {
-        let dir = tmp_dir("flight-panic");
-        let opts = opts(Some(dir.join("cache")), None, false);
-        // Task 6：channel 信号消除 sleep 竞态——
-        // (1) 领队闭包被调用 = 已注册航班 → 发 registered；
-        // (2) 主线程收到后，由独立定时线程在宽裕时间窗后发 go（此时主线程
-        //     已作为跟随者阻塞在 wait_flight，领队阻塞在 go 上不会提前清槽）；
-        // (3) 领队收到 go 才 panic → 守卫发布错误 + 清槽 → 跟随者唤醒。
-        let (registered_tx, registered_rx) = std::sync::mpsc::channel::<()>();
-        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-        let o1 = opts.clone();
-        let leader = std::thread::spawn(move || {
-            let leader_fn = |_gen: u64| -> Result<CollectionSnapshot> {
-                registered_tx.send(()).unwrap();
-                go_rx.recv().unwrap();
-                panic!("采集炸了");
-            };
-            let _ = collect_flighted_with(&o1, &leader_fn);
-        });
-        registered_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("领队必须先注册航班");
-        // 独立线程发 go：主测试线程此刻正以跟随者身份进入 wait_flight。
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(150));
+        // N09：真实握手替代时窗——跟随者先**确认航班已在注册表中**再进入
+        // 等待（此时领队阻塞在 go 上，不可能清槽），调度暂停不再能把跟随者
+        // 变成新领队。目标用例循环 100 次钉住该边界。
+        for _ in 0..100 {
+            let dir = tmp_dir("flight-panic");
+            let opts = opts(Some(dir.join("cache")), None, false);
+            let key = collection_key(&opts);
+            let (registered_tx, registered_rx) = std::sync::mpsc::channel::<()>();
+            let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+            let o1 = opts.clone();
+            let leader = std::thread::spawn(move || {
+                let leader_fn = move |_gen: u64| -> Result<CollectionSnapshot> {
+                    registered_tx.send(()).unwrap();
+                    go_rx.recv().unwrap();
+                    panic!("采集炸了");
+                };
+                let _ = collect_flighted_with(&o1, &leader_fn);
+            });
+            registered_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("领队必须先注册航班");
+            let o2 = opts.clone();
+            let follower_key = key.clone();
+            let follower = std::thread::spawn(move || {
+                // 真实握手：航班已在注册表中 = 本线程随后必然以跟随者身份
+                // 进入 wait_flight（领队阻塞在 go 上，槽位不可能先消失）。
+                // 超时只防真死锁；重载调度下靠放宽时限吸收（不是时窗竞态）。
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !INFLIGHT
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains_key(&follower_key)
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "跟随者等待航班注册超时"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                ready_tx.send(()).unwrap();
+                let ok_fn = move |_gen: u64| -> Result<CollectionSnapshot> {
+                    panic!("跟随者闭包不应被调用");
+                };
+                collect_flighted_with(&o2, &ok_fn)
+            });
+            ready_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("跟随者必须确认已进入等待");
+            // N09：等跟随者**已阻塞在本航班**的 wait_flight（按 key 计数）
+            // 再放行领队；并行套件里其它航班的等待者不计数。
+            {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while flight_waiters_for_tests(&key) < 1 {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "等待跟随者进入航班超时"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
             go_tx.send(()).unwrap();
+            let follower = follower.join().unwrap();
+            assert!(
+                follower.is_err() && follower.unwrap_err().to_string().contains("异常退出"),
+                "panic 必须唤醒等待者"
+            );
+            leader.join().unwrap_err();
+            // 槽位已清空：后续同参请求可重新执行（成功闭包这次成为领队）。
+            let ok2 = |_gen: u64| -> Result<CollectionSnapshot> {
+                Ok(CollectionSnapshot {
+                    generation: 9,
+                    sources: Vec::new(),
+                    warnings: Vec::new(),
+                    pricing: std::sync::Arc::new(crate::pricing::Pricing::default()),
+                    pricing_revision: "test".to_string(),
+                })
+            };
+            let r = collect_flighted_with(&opts, &ok2);
+            assert!(r.is_ok(), "panic 清槽后必须可重试: {r:?}");
+            assert_eq!(r.unwrap().generation, 9);
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    /// N06：提交观察在**共享采集边界**——领队工作（含历史库写入提交）期间
+    /// `active_collection_submissions()` 必须可见，结束后归零。手动刷新、
+    /// 重扫与定时采集都经过这里，壳侧退出等待因此覆盖全部入口。
+    /// 领队用通道握手（不用时窗），调度暂停不会让断言失效。
+    #[test]
+    fn submission_counter_covers_leader_work() {
+        let dir = tmp_dir("submission-counter");
+        let opts = opts(Some(dir.join("cache")), None, false);
+        let (start_tx, start_rx) = std::sync::mpsc::channel::<()>();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let o = opts.clone();
+        let h = std::thread::spawn(move || {
+            let leader = move |_gen: u64| -> Result<CollectionSnapshot> {
+                start_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+                Ok(CollectionSnapshot {
+                    generation: 1,
+                    sources: Vec::new(),
+                    warnings: Vec::new(),
+                    pricing: std::sync::Arc::new(crate::pricing::Pricing::default()),
+                    pricing_revision: "test".to_string(),
+                })
+            };
+            collect_flighted_with(&o, &leader).unwrap();
         });
-        let ok_fn = move |_gen: u64| -> Result<CollectionSnapshot> {
-            panic!("跟随者闭包不应被调用");
-        };
-        let follower = collect_flighted_with(&opts, &ok_fn);
-        assert!(
-            follower.is_err() && follower.unwrap_err().to_string().contains("异常退出"),
-            "panic 必须唤醒等待者"
+        start_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("领队必须先开始提交");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while active_collection_submissions() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            active_collection_submissions(),
+            1,
+            "提交观察必须在共享边界上（手动/定时入口同样被覆盖）"
         );
-        leader.join().unwrap_err();
-        // 槽位已清空：后续同参请求可重新执行（成功闭包这次成为领队）。
-        let ok2 = |_gen: u64| -> Result<CollectionSnapshot> {
-            Ok(CollectionSnapshot {
-                generation: 9,
-                sources: Vec::new(),
-                warnings: Vec::new(),
-                pricing: std::sync::Arc::new(crate::pricing::Pricing::default()),
-                pricing_revision: "test".to_string(),
-            })
-        };
-        let r = collect_flighted_with(&opts, &ok2);
-        assert!(r.is_ok(), "panic 清槽后必须可重试: {r:?}");
-        assert_eq!(r.unwrap().generation, 9);
+        go_tx.send(()).unwrap();
+        h.join().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while active_collection_submissions() > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(active_collection_submissions(), 0, "提交完成后归零");
         std::fs::remove_dir_all(&dir).ok();
     }
 

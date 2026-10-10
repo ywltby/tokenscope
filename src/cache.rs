@@ -308,6 +308,12 @@ impl Cache {
                     cw,
                     cr,
                 ) = row?;
+                // N03：负数是坏数据而不是合法零值——受检拒绝该行（计
+                // bad_lines），不用 `.max(0)` 把坏值伪装成 0 混进用量。
+                if line < 0 || input < 0 || output < 0 || cw < 0 || cr < 0 {
+                    stats_bad += 1;
+                    continue;
+                }
                 let event = crate::model::UsageEvent {
                     ts: ts
                         .parse()
@@ -319,12 +325,12 @@ impl Cache {
                     session_initial_cwd,
                     event_cwd,
                     record_id,
-                    line: line.max(0) as u64,
                     source_path: key.path.to_string(),
-                    input_tokens: input.max(0) as u64,
-                    output_tokens: output.max(0) as u64,
-                    cache_write_tokens: cw.max(0) as u64,
-                    cache_read_tokens: cr.max(0) as u64,
+                    line: line as u64,
+                    input_tokens: input as u64,
+                    output_tokens: output as u64,
+                    cache_write_tokens: cw as u64,
+                    cache_read_tokens: cr as u64,
                 };
                 // SF08：缓存恢复与适配器解析经过同一桶校验边界——旧缓存中
                 // 不合法事件不得绕过新检查（拒绝并计 bad_lines，不回绕）。
@@ -530,6 +536,8 @@ pub struct LegacyCacheFile {
     pub size: u64,
     pub mtime_ms: i64,
     pub events: Vec<LegacyEvent>,
+    /// N03：读取阶段因负数字段被拒绝的行数（诊断进迁移报告，不静默丢弃）。
+    pub rejected: u64,
 }
 
 /// H03：以**只读**方式读取遗留缓存的可迁内容——绝不触发 `Cache::open` 的
@@ -592,24 +600,62 @@ pub fn read_legacy_cache(path: &Path) -> Result<Vec<LegacyCacheFile>> {
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([file_id], |r| {
-            Ok(LegacyEvent {
-                ts: r.get(0)?,
-                record_id: r.get(1)?,
-                model: r.get(2)?,
-                session_id: r.get(3)?,
-                project: r.get(4)?,
-                session_initial_cwd: r.get(5)?,
-                event_cwd: r.get(6)?,
-                line: r.get::<_, i64>(7)?.max(0) as u64,
-                input: r.get::<_, i64>(8)?.max(0) as u64,
-                output: r.get::<_, i64>(9)?.max(0) as u64,
-                cache_write: r.get::<_, i64>(10)?.max(0) as u64,
-                cache_read: r.get::<_, i64>(11)?.max(0) as u64,
-            })
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, i64>(8)?,
+                r.get::<_, i64>(9)?,
+                r.get::<_, i64>(10)?,
+                r.get::<_, i64>(11)?,
+            ))
         })?;
         let mut events = Vec::new();
+        let mut rejected = 0u64;
         for r in rows {
-            events.push(r?);
+            let (
+                ts,
+                record_id,
+                model,
+                session_id,
+                project,
+                session_initial_cwd,
+                event_cwd,
+                line,
+                input,
+                output,
+                cw,
+                cr,
+            ) = r?;
+            // N03：负数是坏数据而不是合法零值——受检拒绝该行并计诊断，
+            // 不用 `.max(0)` 把坏值伪装成 0 混进用量。
+            if line < 0 || input < 0 || output < 0 || cw < 0 || cr < 0 {
+                rejected += 1;
+                log::debug!(
+                    "遗留缓存拒绝负数字段行（{}）：line={line} input={input} output={output} cw={cw} cr={cr}",
+                    file_path
+                );
+                continue;
+            }
+            events.push(LegacyEvent {
+                ts,
+                record_id,
+                model,
+                session_id,
+                project,
+                session_initial_cwd,
+                event_cwd,
+                line: line as u64,
+                input: input as u64,
+                output: output as u64,
+                cache_write: cw as u64,
+                cache_read: cr as u64,
+            });
         }
         out.push(LegacyCacheFile {
             app: agent,
@@ -619,6 +665,7 @@ pub fn read_legacy_cache(path: &Path) -> Result<Vec<LegacyCacheFile>> {
             size: size.max(0) as u64,
             mtime_ms: mtime,
             events,
+            rejected,
         });
     }
     Ok(out)

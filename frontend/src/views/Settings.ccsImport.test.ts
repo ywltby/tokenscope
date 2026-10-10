@@ -283,4 +283,47 @@ describe("Settings CCS 导入（H05/H08）", () => {
     expect(w.text()).toContain("重新预览");
     w.unmount();
   });
+
+  it("提交失败后已消费计划被清除，可直接重新预览（N04）", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats")
+        return Promise.resolve({ path: "C:/data/history.db", files: 4, events: 8 });
+      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+      if (cmd === "ccs_import_defaults")
+        return Promise.resolve({ path: preview.source_path, exists: true, timezone: "UTC" });
+      if (cmd === "ccs_import_preview") return Promise.resolve(preview);
+      if (cmd === "ccs_import_commit")
+        return Promise.reject("历史库在本预览之后发生了变化，请重新预览");
+      return Promise.resolve(null);
+    });
+    const w = mountSettings();
+    await flushPromises();
+    await w
+      .findAll("button")
+      .find((b) => b.text().includes("从 CCS 导入用量"))!
+      .trigger("click");
+    await flushPromises();
+    expect(w.text()).toContain("预览（尚未写入）");
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "导入")!
+      .trigger("click");
+    await flushPromises();
+    expect(w.text()).toContain("CCS 导入未完成");
+    // 计划一次性消费后预览必须消失（不能停留在失效计划上误导重复提交）。
+    expect(w.text()).not.toContain("预览（尚未写入）");
+
+    // 失败后恢复动作 = 用户手动重新点击预览（无需先取消旧计划）。
+    await w
+      .findAll("button")
+      .find((b) => b.text().includes("从 CCS 导入用量"))!
+      .trigger("click");
+    await flushPromises();
+    expect(w.text()).toContain("预览（尚未写入）");
+    const previews = invokeMock.mock.calls.filter((c) => c[0] === "ccs_import_preview");
+    expect(previews.length).toBe(2);
+    w.unmount();
+  });
 });

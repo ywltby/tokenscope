@@ -65,6 +65,9 @@ fn test_unknown_model_without_sources_is_unknown() {
         codex_dir: Some(dir.join("no-codex")),
         cache_dir: Some(dir.join("cache")),
         pricing_index: Some(dir.join("idx.json")),
+        // N09：价格路径全部注入临时文件——不读真实 ~/.tokenscope 下的
+        // 外置价格（否则测试结果随开发机状态漂移）。
+        pricing_path: Some(dir.join("no-pricing.toml")),
         openrouter_path: Some(dir.join("no-or.json")),
         modelsdev_path: Some(dir.join("no-md.json")),
         tz: Some("Asia/Shanghai".to_string()),
