@@ -16,9 +16,13 @@ on:
     branches: [main]
     paths:
       - 'src-tauri/**'
+      - 'src/**'
       - 'frontend/**'
       - 'scripts/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/**'
+      - '.github/actions/**'
 
 permissions:
   contents: read

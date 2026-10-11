@@ -133,24 +133,71 @@ function Get-HistoryFacts {
     }
 }
 
-function Wait-AppDbUse {
-    # M05 修订：等待**本次启动**的应用实例打开并写入历史库——判据是
-    # history.db-wal 的 LastWriteTime 晚于启动时刻。仅判断 -wal 文件存在
-    # 不够（上一次被杀进程遗留的 WAL 会一直存在），文件存在但未更新
-    # 不能证明新实例读取了保留数据。
-    param([int]$TimeoutSeconds = 60)
+function Start-AppHealthy {
+    # M05 修订：启动应用并要求**三个健康信号**全部出现——
+    #   (a) 历史库被本次实例打开并写入（-wal LastWriteTime 晚于启动时刻；
+    #       上一次被杀进程遗留的 WAL 会一直存在，文件存在不算数）；
+    #   (b) 日志出现初始化/查询成功信号（"历史库写入：…"）；
+    #   (c) 随后由 Close-AppGracefully 优雅关闭且退出码 0——写库后崩溃
+    #       （如退出码 23）的实例不能算通过。
+    # 返回进程对象供优雅关闭与退出码断言。
+    param([int]$TimeoutSeconds = 180)
     $exe = Join-Path (Get-UninstallEntry).InstallLocation "TokenScope.exe"
     $wal = "$HistoryDb-wal"
+    $logsDir = Join-Path $DataDir "logs"
     $launchedAt = Get-Date
-    Start-Process -FilePath $exe
+    $proc = Start-Process -FilePath $exe -PassThru
     $deadline = $launchedAt.AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         if ((Test-Path $wal) -and ((Get-Item $wal).LastWriteTime -gt $launchedAt)) {
-            return
+            break
+        }
+        if ($proc.HasExited) {
+            break
         }
         Start-Sleep -Seconds 1
     }
-    throw "应用未在 ${TimeoutSeconds}s 内打开并写入历史库（$wal 修改时间未更新）"
+    Assert-True (
+        (Test-Path $wal) -and ((Get-Item $wal).LastWriteTime -gt $launchedAt)
+    ) "历史库被本次实例打开并写入（-wal 修改时间已更新）"
+    # (b) 初始化/查询成功信号：日志出现"历史库写入"（采集提交完成）。
+    $logDeadline = (Get-Date).AddSeconds(60)
+    $found = $false
+    while ((Get-Date) -lt $logDeadline) {
+        if (Test-Path $logsDir) {
+            $hit = Get-ChildItem $logsDir -File -ErrorAction SilentlyContinue |
+                Select-String -SimpleMatch "历史库写入" -ErrorAction SilentlyContinue
+            if ($hit) {
+                $found = $true
+                break
+            }
+        }
+        if ($proc.HasExited) {
+            break
+        }
+        Start-Sleep -Seconds 2
+    }
+    Assert-True $found "日志出现初始化/查询成功信号（历史库写入）"
+    return $proc
+}
+
+function Close-AppGracefully {
+    # M05：(c) 优雅关闭并断言退出码 0——写库后崩溃（非 0 退出）的实例
+    # 不得算作验收通过。close_action = "quit" 时关闭窗口即退出。
+    param($Proc, [int]$TimeoutSeconds = 30)
+    if ($null -eq $Proc) {
+        return
+    }
+    if ($Proc.HasExited) {
+        Assert-True ($Proc.ExitCode -eq 0) "应用已自行退出且退出码 0（实际 $($Proc.ExitCode)）"
+        return
+    }
+    $Proc.CloseMainWindow() | Out-Null
+    if (-not $Proc.WaitForExit($TimeoutSeconds * 1000)) {
+        Stop-App
+        throw "应用未在 ${TimeoutSeconds}s 内优雅退出（强制结束后无法证明本次实例健康）"
+    }
+    Assert-True ($Proc.ExitCode -eq 0) "优雅关闭退出码 0（实际 $($Proc.ExitCode)）"
 }
 
 function Wait-AppMigration {
@@ -175,14 +222,27 @@ function Assert-MigratedFacts {
     Assert-True ($null -ne $facts -and $facts.Input -eq 180) "输入 token 合计 = 180（实际 $($facts.Input)）"
     Assert-True ($null -ne $facts -and $facts.Output -eq 35) "输出 token 合计 = 35（实际 $($facts.Output)）"
     Assert-True ($null -ne $facts -and $facts.Projects -eq 2) "项目 cwd 去重 = 2（实际 $($facts.Projects)）"
-    # M06 修订：项目 cwd 与已知路径**严格集合相等**（子串/包含匹配会让
-    # 两个路径都改错时仍然通过）。
-    $actual = @(python (Join-Path $RepoRoot "scripts\inspect_history.py") $HistoryDb "--projects" |
+    # M06 修订：三个 cwd 字段全部验到——project_key 与 session_initial_cwd
+    # 必须与已知路径**严格集合相等**，event_cwd 必须全空（子串/包含匹配
+    # 或只验 project_key 都会让元数据改错时仍然通过）。
+    $actualProjects = @(python (Join-Path $RepoRoot "scripts\inspect_history.py") $HistoryDb "--projects" |
         ForEach-Object { $_.Trim() } |
         Where-Object { $_ -ne "" } |
         Sort-Object)
-    $expected = @("C:/work/alpha", "C:/work/beta") | Sort-Object
-    Assert-True (($actual -join "`n") -eq ($expected -join "`n")) "项目 cwd 严格相等（实际 $($actual -join ', ')）"
+    $expectedProjects = @("C:/work/alpha", "C:/work/beta") | Sort-Object
+    Assert-True (($actualProjects -join "`n") -eq ($expectedProjects -join "`n")) "项目 cwd 严格相等（实际 $($actualProjects -join ', ')）"
+    $cwdLines = @(python (Join-Path $RepoRoot "scripts\inspect_history.py") $HistoryDb "--cwd" |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -ne "" })
+    $actualSics = @($cwdLines |
+        Where-Object { $_ -like "session_initial_cwd=*" } |
+        ForEach-Object { $_.Substring("session_initial_cwd=".Length) } |
+        Sort-Object)
+    Assert-True (($actualSics -join "`n") -eq ($expectedProjects -join "`n")) "会话初始 cwd 严格相等（实际 $($actualSics -join ', ')）"
+    $eventCwdNonNull = [int]($cwdLines |
+        Where-Object { $_ -like "event_cwd_nonnull=*" } |
+        ForEach-Object { $_.Substring("event_cwd_nonnull=".Length) })
+    Assert-True ($eventCwdNonNull -eq 0) "event_cwd 全空（非空 $($eventCwdNonNull) 条）"
 }
 
 $Summary = New-Object System.Collections.Generic.List[string]
@@ -206,10 +266,11 @@ try {
     Write-Host "=== 场景 2：首次启动迁移 ==="
     Stop-App
     Write-SeedData
+    $proc = Start-AppHealthy
     $facts = Wait-AppMigration
     Assert-MigratedFacts $facts
     $Summary.Add("- 首次启动迁移：3 请求 / 180 输入 / 35 输出 / 2 项目 cwd，与合成旧数据一致") | Out-Null
-    Stop-App
+    Close-AppGracefully $proc
 
     # ---------- 场景 3：重复安装（数据保留） ----------
     Write-Host "=== 场景 3：重复安装 ==="
@@ -235,15 +296,14 @@ try {
     # ---------- 场景 5：重新安装（保留数据仍可读，不重复计量） ----------
     Write-Host "=== 场景 5：重新安装 ==="
     Invoke-SilentInstall $InstallerPath
-    # 新应用实例必须实际打开并写入既有历史库（-wal 修改时间晚于启动），
-    # 读取一段观察期后事件数不重复——只查既有行数会让"应用没读"也判
-    # 成功（M05）。
-    Wait-AppDbUse
+    # 新应用实例必须实际打开并写入既有历史库（健康信号齐全），观察期后
+    # 事件数不重复——只查既有行数会让"应用没读/写了就崩"也判成功（M05）。
+    $proc = Start-AppHealthy
     Start-Sleep -Seconds 8
-    Stop-App
+    Close-AppGracefully $proc
     $facts = Get-HistoryFacts
     Assert-MigratedFacts $facts
-    $Summary.Add("- 重新安装：保留数据被新应用实例打开并读取，事件数不重复（仍 3 条）") | Out-Null
+    $Summary.Add("- 重新安装：保留数据被新应用实例打开并读取（健康退出），事件数不重复（仍 3 条）") | Out-Null
 }
 catch {
     $Failures.Add($_.Exception.Message) | Out-Null
