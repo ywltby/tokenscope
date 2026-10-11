@@ -133,21 +133,24 @@ function Get-HistoryFacts {
     }
 }
 
-function Wait-AppDbOpen {
-    # M05：等待**新启动的应用实例**实际打开历史库——WAL 连接建立时
-    # history.db-wal 文件出现，这是"新应用读取了保留数据"的可观察信号
-    #（仅靠既有事件数判定会让预置数据直接通过，应用没读也算成功）。
+function Wait-AppDbUse {
+    # M05 修订：等待**本次启动**的应用实例打开并写入历史库——判据是
+    # history.db-wal 的 LastWriteTime 晚于启动时刻。仅判断 -wal 文件存在
+    # 不够（上一次被杀进程遗留的 WAL 会一直存在），文件存在但未更新
+    # 不能证明新实例读取了保留数据。
     param([int]$TimeoutSeconds = 60)
+    $exe = Join-Path (Get-UninstallEntry).InstallLocation "TokenScope.exe"
     $wal = "$HistoryDb-wal"
-    Start-Process -FilePath (Join-Path (Get-UninstallEntry).InstallLocation "TokenScope.exe")
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $launchedAt = Get-Date
+    Start-Process -FilePath $exe
+    $deadline = $launchedAt.AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        if (Test-Path $wal) {
+        if ((Test-Path $wal) -and ((Get-Item $wal).LastWriteTime -gt $launchedAt)) {
             return
         }
         Start-Sleep -Seconds 1
     }
-    throw "应用未在 ${TimeoutSeconds}s 内打开历史库（$wal 未出现）"
+    throw "应用未在 ${TimeoutSeconds}s 内打开并写入历史库（$wal 修改时间未更新）"
 }
 
 function Wait-AppMigration {
@@ -172,11 +175,14 @@ function Assert-MigratedFacts {
     Assert-True ($null -ne $facts -and $facts.Input -eq 180) "输入 token 合计 = 180（实际 $($facts.Input)）"
     Assert-True ($null -ne $facts -and $facts.Output -eq 35) "输出 token 合计 = 35（实际 $($facts.Output)）"
     Assert-True ($null -ne $facts -and $facts.Projects -eq 2) "项目 cwd 去重 = 2（实际 $($facts.Projects)）"
-    # M06：项目 cwd 必须是**已知的那两条路径**（数量相同但路径错误不得通过）。
-    $projects = (python (Join-Path $RepoRoot "scripts\inspect_history.py") $HistoryDb "--projects") | Out-String
-    foreach ($expected in @("C:/work/alpha", "C:/work/beta")) {
-        Assert-True ($projects -match [regex]::Escape($expected)) "项目 cwd 包含 $expected"
-    }
+    # M06 修订：项目 cwd 与已知路径**严格集合相等**（子串/包含匹配会让
+    # 两个路径都改错时仍然通过）。
+    $actual = @(python (Join-Path $RepoRoot "scripts\inspect_history.py") $HistoryDb "--projects" |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -ne "" } |
+        Sort-Object)
+    $expected = @("C:/work/alpha", "C:/work/beta") | Sort-Object
+    Assert-True (($actual -join "`n") -eq ($expected -join "`n")) "项目 cwd 严格相等（实际 $($actual -join ', ')）"
 }
 
 $Summary = New-Object System.Collections.Generic.List[string]
@@ -229,9 +235,10 @@ try {
     # ---------- 场景 5：重新安装（保留数据仍可读，不重复计量） ----------
     Write-Host "=== 场景 5：重新安装 ==="
     Invoke-SilentInstall $InstallerPath
-    # 新应用实例必须实际打开既有历史库（-wal 出现），读取一段观察期后
-    # 事件数不重复——只查既有行数会让"应用没读"也判成功（M05）。
-    Wait-AppDbOpen
+    # 新应用实例必须实际打开并写入既有历史库（-wal 修改时间晚于启动），
+    # 读取一段观察期后事件数不重复——只查既有行数会让"应用没读"也判
+    # 成功（M05）。
+    Wait-AppDbUse
     Start-Sleep -Seconds 8
     Stop-App
     $facts = Get-HistoryFacts
