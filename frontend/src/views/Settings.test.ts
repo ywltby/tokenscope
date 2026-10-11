@@ -482,6 +482,14 @@ describe("Settings 分组与状态（设计系统 Task 7）", () => {
     }
   });
 
+  it("计价说明与实现一致：完整候选优先，不称全部候选取最高（N08/R03）", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    expect(w.text()).toContain("有完整四桶价格的候选优先");
+    expect(w.text()).toContain("没有完整候选时才回退到部分候选中已知费用最高者");
+    expect(w.text()).not.toContain("全部候选按本次请求条件计价");
+  });
+
   it("来源身份标签用中性色（成功/警告只表达同步状态）", async () => {
     const w = mount(Settings);
     await flushPromises();

@@ -558,19 +558,22 @@ fn build_peak_is_measured_separately_from_retained_charge() {
     let peak_delta = peak.saturating_sub(live_before);
     let live_delta = live_end.saturating_sub(live_before);
 
-    // 量测记录（--nocapture 可见；数值回写 docs/stats-semantics.md §3.5）
+    // 量测记录（--nocapture 可见；数值回写 docs/stats-semantics.md §3.5）。
+    // N09/R04 修订：**不**对窗口净存活增量（live_delta）作断言——本测试
+    // 二进制内另有进程级缓存（如价格索引快照）可能在窗口期间被释放，
+    // 无关释放会让净增量失去意义（复核实测可为一 921,764 B 的负差被
+    // saturating_sub 钳成 0）。窗口峰值（单调最大值）不受释放影响，
+    // 且窗口内确实分配了快照 → 峰值增量必然为正，这是唯一稳健断言。
     eprintln!(
-        "RC05 临时峰值量测：events={N}，保留记账={charge} B，建表期间存活峰值={peak_delta} B，窗口结束时仍存活={live_delta} B，峰值/仍存活={:.2}",
-        peak_delta as f64 / (live_delta.max(1)) as f64
+        "RC05 临时峰值量测：events={N}，保留记账={charge} B，建表期间存活峰值={peak_delta} B，窗口结束时仍存活={live_delta} B"
     );
     assert!(
         charge >= N * std::mem::size_of::<query::SnapshotRow>(),
         "保留记账须覆盖全部行索引：{charge}"
     );
-    assert!(live_delta > 0, "窗口内必须确实保留了新数据：{live_delta}");
     assert!(
-        peak_delta >= live_delta,
-        "瞬时峰值必须不低于窗口结束时仍存活的字节：peak={peak_delta} live_end={live_delta}"
+        peak_delta > 0,
+        "窗口内分配了快照，峰值增量必须为正：{peak_delta}"
     );
     drop(snap);
     query::clear_query_registry_for_tests();

@@ -1194,9 +1194,10 @@ impl HistoryDb {
     ///   映射到事实 ID，经任一身份命中的都是同一份状态；Update 统一前进，
     ///   Unchanged / Conflict / Stale 保持（R01：早期实现按身份各存副本，
     ///   同一事实经不同身份看新旧不一致，预览与提交分叉）；
-    /// - **所有**处置类别都登记本条携带的来源键 / 来源记录 / 别名（提交
-    ///   路径对每一类都补记；R01 反例 3：Unchanged 行的新别名必须让后续
-    ///   只携带该别名的写入命中同一事实，而不是误报新增）；
+    /// - **所有**处置类别都登记本条携带的来源记录与别名（提交路径对每一
+    ///   类都补记；R01 反例 3：Unchanged 行的新别名必须让后续只携带该别名
+    ///   的写入命中同一事实，而不是误报新增）；事件键只在 Insert 时登记
+    ///   （行的 event_key 列仅插入时写入，替代键不持久化）；
     /// - 别名在批内或库内已绑定**其他事实**时按提交同口径整批失败；
     /// - `OverlapCandidate` 不记账（是否按新增导入由用户决定）。
     pub fn classify_batch(&self, writes: &[EventWrite]) -> Result<Vec<WriteClass>> {
@@ -1216,14 +1217,16 @@ impl HistoryDb {
                 WriteClass::OverlapCandidate => {}
                 WriteClass::Insert => {
                     let fid = sim.insert_fact(w);
-                    sim.register(&self.conn, w, fid)?;
+                    sim.register(&self.conn, w, fid, true)?;
                 }
                 _ => {
                     let fid = fact.expect("命中事实必须已登记");
                     if class == WriteClass::Update {
                         sim.apply_update(fid, w);
                     }
-                    sim.register(&self.conn, w, fid)?;
+                    // 非 Insert 类别不持久化本条的事件键（行列只在插入时写入，
+                    // 替代键不得凭空成为后续写入的命中身份——R01 反例 2）。
+                    sim.register(&self.conn, w, fid, false)?;
                 }
             }
             out.push(class);
@@ -2460,13 +2463,51 @@ impl BatchSim {
         }
     }
 
-    /// 证据登记：与 [`write_events_in_tx`] 一致——**所有**处置类别都登记
-    /// 本条携带的来源键 / 来源记录 / 别名；别名已绑定其他事实时按提交同
-    /// 口径报错（提交会整批失败，预览不得假装可行）。
-    fn register(&mut self, conn: &Connection, w: &EventWrite, fid: i64) -> Result<()> {
-        self.claims.insert(format!("k|{}", w.event_key), fid);
+    /// 证据登记：与 [`write_events_in_tx`] 同口径——
+    ///
+    /// - **所有**处置类别都登记本条携带的来源记录与别名（提交对每一类都
+    ///   补记）；别名/来源记录已绑定**其他事实**时按提交同口径报错（提交
+    ///   会整批失败，预览不得假装可行——R01 反例 1：来源记录缺冲突校验）；
+    /// - 事件键**只在 Insert 时**登记（行的 event_key 列仅插入时写入；
+    ///   Unchanged/Update/Conflict/Stale 不持久化本条的替代键——R01 反例 2：
+    ///   凭空登记会让后续同键写入错误命中旧事实）。
+    fn register(
+        &mut self,
+        conn: &Connection,
+        w: &EventWrite,
+        fid: i64,
+        persist_key: bool,
+    ) -> Result<()> {
+        if persist_key {
+            self.claims.insert(format!("k|{}", w.event_key), fid);
+        }
         for o in &w.origins {
-            self.claims.insert(format!("o|{}", o.origin_key), fid);
+            let okey = format!("o|{}", o.origin_key);
+            if let Some(other) = self.claims.get(&okey) {
+                if *other != fid {
+                    bail!("来源记录冲突：{okey} 已绑定其他事实，提交将整批失败");
+                }
+                continue;
+            }
+            let bound: Option<i64> = conn
+                .query_row(
+                    "SELECT event_id FROM event_origins WHERE origin_kind = ?1 AND origin_key = ?2",
+                    params![o.origin_kind, o.origin_key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match bound {
+                Some(id) => {
+                    let other = self.fact_of(conn, id)?;
+                    if other != fid {
+                        bail!("来源记录冲突：{okey} 已绑定其他事实，提交将整批失败");
+                    }
+                    // 已绑定同一事实：与提交路径的 no-op 一致。
+                }
+                None => {
+                    self.claims.insert(okey, fid);
+                }
+            }
         }
         for a in &w.aliases {
             let key = alias_claim_key(a);

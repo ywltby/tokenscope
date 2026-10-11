@@ -2033,3 +2033,134 @@ fn batch_preview_unchanged_row_claims_new_aliases() {
     assert_eq!(history.event_count().unwrap(), 1);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// R01 第二轮反例 1：来源记录已绑定另一事实时，预览必须与提交同口径报错
+/// （此前预览 `Ok([Unchanged])`、提交整批失败"来源记录冲突"）。
+#[test]
+fn batch_preview_rejects_origin_bound_to_another_fact() {
+    let dir = temp_dir("r01b-origin-conflict");
+    let history = history_of(&dir);
+    let ts: jiff::Timestamp = "2026-09-15T08:00:00Z".parse().unwrap();
+    let event = |key: &str, output: u64, alias_v: &str, origin: Option<&str>| EventWrite {
+        event_key: key.into(),
+        app: AgentKind::ClaudeCode,
+        ts,
+        model_raw: "claude-opus-5-5".into(),
+        model_identity: "claudeopus55".into(),
+        session_id: Some("s1".into()),
+        record_id: Some("m1".into()),
+        project_key: Some("/work/app".into()),
+        session_initial_cwd: None,
+        event_cwd: None,
+        tokens: TokenCounts {
+            input: 10,
+            output,
+            cache_write: 0,
+            cache_read: 0,
+        },
+        precedence: WritePrecedence::CcsImport,
+        observed_at: ts,
+        aliases: vec![EventAlias {
+            app: AgentKind::ClaudeCode,
+            scheme: "claude-message".into(),
+            value: format!("s1|{alias_v}"),
+        }],
+        origins: match origin {
+            Some(o) => vec![tokenscope::history::EventOrigin {
+                origin_kind: "ccs-request".into(),
+                origin_key: o.into(),
+                app: AgentKind::ClaudeCode,
+                import_run_id: None,
+                parser_revision: 1,
+                source_model_raw: None,
+                pricing_model: None,
+                source_cost_usd: None,
+                ts_precision_seconds: true,
+            }],
+            None => Vec::new(),
+        },
+    };
+    // 事实 A（别名 a）与事实 B（别名 b + 来源记录 bound-to-b）。
+    history
+        .write_batch(&[
+            event("fact-a", 10, "a", None),
+            event("fact-b", 20, "b", Some("bound-to-b")),
+        ])
+        .unwrap();
+    assert_eq!(history.event_count().unwrap(), 2);
+
+    // 对 A 写入相同内容但携带 B 的来源记录：提交必然整批失败，预览同口径。
+    let mut w = event("fact-a", 10, "a", None);
+    w.origins = event("fact-b", 20, "b", Some("bound-to-b")).origins;
+    let err = history
+        .classify_batch(&[w])
+        .expect_err("预览必须与提交同口径拒绝来源记录改绑");
+    assert!(err.to_string().contains("来源记录冲突"), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// R01 第二轮反例 2：非 Insert 类别不得把本条的替代事件键登记为身份——
+/// 否则后续同键写入被错误命中旧事实（预览 [未变化, 更新]、提交
+/// inserted=1/unchanged=1）。修复后两侧一致为 [未变化, 新增]。
+#[test]
+fn batch_preview_does_not_persist_alternate_event_keys() {
+    let dir = temp_dir("r01b-alt-key");
+    let history = history_of(&dir);
+    let ts: jiff::Timestamp = "2026-09-15T08:00:00Z".parse().unwrap();
+    let write = |key: &str, output: u64, alias: Option<&str>| EventWrite {
+        event_key: key.into(),
+        app: AgentKind::ClaudeCode,
+        ts,
+        model_raw: "claude-opus-5-5".into(),
+        model_identity: "claudeopus55".into(),
+        session_id: Some("s1".into()),
+        record_id: Some("m1".into()),
+        project_key: Some("/work/app".into()),
+        session_initial_cwd: None,
+        event_cwd: None,
+        tokens: TokenCounts {
+            input: 10,
+            output,
+            cache_write: 0,
+            cache_read: 0,
+        },
+        precedence: WritePrecedence::NativeLog,
+        observed_at: ts,
+        aliases: match alias {
+            Some(v) => vec![EventAlias {
+                app: AgentKind::ClaudeCode,
+                scheme: "claude-message".into(),
+                value: format!("s1|{v}"),
+            }],
+            None => Vec::new(),
+        },
+        origins: Vec::new(),
+    };
+    // 既有事实：规范键 canonical、别名 a、output 10。
+    history
+        .write_batch(&[write("canonical", 10, Some("a"))])
+        .unwrap();
+
+    // write1：替代键 other-source、经别名 a 命中、内容相同 → 未变化；
+    // 其替代键不得被登记为身份。write2：同替代键、output 20、无别名 →
+    // 提交按新增处理（键与别名都不命中）。
+    let w1 = write("other-source", 10, Some("a"));
+    let w2 = write("other-source", 20, None);
+    let classes = history.classify_batch(&[w1.clone(), w2.clone()]).unwrap();
+    assert_eq!(
+        classes,
+        vec![
+            tokenscope::history::WriteClass::Unchanged,
+            tokenscope::history::WriteClass::Insert
+        ],
+        "替代事件键不持久化：write2 按新增分类"
+    );
+
+    // 提交对账：inserted=1、unchanged=1，最终两条事实（与预览一致）。
+    let s = history.write_batch(&[w1, w2]).unwrap();
+    assert_eq!(s.inserted, 1);
+    assert_eq!(s.unchanged, 1);
+    assert_eq!(s.updated, 0);
+    assert_eq!(history.event_count().unwrap(), 2);
+    std::fs::remove_dir_all(&dir).ok();
+}

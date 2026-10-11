@@ -478,7 +478,8 @@ fn plan_is_single_use_and_stale_generation_is_rejected() {
     // 取消：不写任何用量，计划被丢弃。
     assert!(ccs::discard(&preview.plan_id));
     assert_eq!(history.event_count().unwrap(), 0);
-    assert_eq!(ccs::staged_plan_count(), 0);
+    // "计划被丢弃"由下一条断言证明（已丢弃的计划无法提交）；
+    // staged_plan_count 是进程级计数，并行套件下会被其它用例的在途预览污染。
 
     // 已丢弃的计划无法提交。
     assert!(

@@ -2029,13 +2029,22 @@ mod tests {
                 tmp_dir(&format!("hermetic-{:?}", std::thread::current().id()))
             }));
         let pricing_index = cache_dir.as_ref().map(|d| d.join("pricing-index.json"));
+        // N09/R04：pricing=None 时必须显式指向临时不存在的价格文件——
+        // `pricing_file_path(None)` 会解析默认 `~/.tokenscope/pricing.toml`，
+        // 用户外置价格因此改变这些测试的费用/警告/来源状态。
+        let pricing_path = Some(pricing.unwrap_or_else(|| {
+            cache_dir
+                .as_ref()
+                .expect("cache_dir 已兜底")
+                .join("no-pricing.toml")
+        }));
         SummaryOptions {
             by: GroupBy::Day,
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
             cache_dir,
             pricing_index,
-            pricing_path: pricing,
+            pricing_path,
             // 固定指向不存在的快照，测试不依赖真实 ~/.tokenscope 状态
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
             modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),

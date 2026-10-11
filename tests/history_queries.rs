@@ -346,10 +346,8 @@ fn million_row_history_summarizes_and_pages_within_budget() {
         "N05 构建窗口：live {live_before}B → {live_after}B，窗口峰值 {build_peak}B（≈{}/行）",
         build_peak / total
     );
-    assert!(
-        build_peak >= charged,
-        "瞬时峰值必须不低于持久保留量（健全性）"
-    );
+    // 峰值仅作量测记录（保留记账是容量估算口径，与分配器实际字节不同一，
+    // 二者不构成可断言的大小关系——N09/R04 修订）。
     assert!(
         charged < total * 256,
         "每行元数据（含 record_id 堆串）必须 ≤ 256 字节：实际 {per_row}B/行"
