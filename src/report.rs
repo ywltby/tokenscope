@@ -1045,12 +1045,6 @@ fn collect_all_with_sources(
         // N01：解析规则修订进入缓存命中键——规则变化让已登记指纹的文件
         // 重解析一次（存储值无该前缀 → 首轮必然失配 → 重解析并重新登记）。
         let context_rev = format!("{}|{}", PARSE_RULES_REVISION, src.context_revision());
-        eprintln!(
-            "DBG src kind={:?} known={} files={} context_rev={context_rev}",
-            kind,
-            known.len(),
-            files.len()
-        );
         for file in &files {
             let path_str = file.display().to_string();
             let path_key = normalize_path(file).to_string_lossy().to_lowercase();
@@ -1067,8 +1061,6 @@ fn collect_all_with_sources(
                 && prev.fingerprint == fp
                 && prev.context_revision == context_rev
             {
-                eprintln!("DBG fingerprint HIT: {path_key}");
-
                 stats.add_file(&crate::source::FileParse {
                     stats: prev.stats.clone(),
                     events: Vec::new(),
@@ -1163,9 +1155,7 @@ fn collect_all_with_sources(
     // 同一请求的流式重发在内存里就按终值收敛，库内不需要再处理这种重复。
     let t_dedupe = std::time::Instant::now();
     let before = all_events.len();
-    eprintln!("DBG collect: all_events={} ", all_events.len());
     let (mut events, dropped) = dedupe_events(all_events);
-    eprintln!("DBG collect: after dedupe events={}", events.len());
     log::info!(
         "去重：{} → {}（丢弃 {}），{} ms",
         before,
@@ -1204,21 +1194,7 @@ fn collect_all_with_sources(
             "{skipped_unwritable} 条事件字段不合法，未写入历史库（其余照常入账）"
         ));
     }
-    eprintln!(
-        "DBG write_batch: writes={} skipped_unwritable={}",
-        writes.len(),
-        skipped_unwritable
-    );
     let write_summary = history.write_batch(&writes)?;
-    eprintln!(
-        "DBG write_batch result: inserted={} updated={} unchanged={} conflicts={} stale={} aliases={}",
-        write_summary.inserted,
-        write_summary.updated,
-        write_summary.unchanged,
-        write_summary.conflicts,
-        write_summary.stale,
-        write_summary.aliases_added
-    );
     log::info!(
         "历史库写入：新增 {}，更新 {}，已存在 {}，冲突 {}，陈旧 {}；别名 +{}，来源 +{}",
         write_summary.inserted,

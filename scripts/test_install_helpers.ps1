@@ -45,11 +45,15 @@ function Test-Throws {
 
 function New-Scenario {
     param([string]$Tag)
+    # 模拟真实布局：<root>/home/.tokenscope/logs（与 DataDir 派生一致，
+    # 使 Move-LaunchLogsToEvidence 的 ".tokenscope\logs" 校验可用）。
     $root = Join-Path ([System.IO.Path]::GetTempPath()) "tokenscope-helper-test-$Tag-$([System.Guid]::NewGuid().ToString('N'))"
-    New-Item -ItemType Directory -Path (Join-Path $root "logs") -Force | Out-Null
+    $dataDir = Join-Path $root "home" | Join-Path -ChildPath ".tokenscope"
+    New-Item -ItemType Directory -Path (Join-Path $dataDir "logs") -Force | Out-Null
     return [pscustomobject]@{
         Root    = $root
-        LogsDir = Join-Path $root "logs"
+        DataDir = $dataDir
+        LogsDir = Join-Path $dataDir "logs"
         Context = [pscustomobject]@{
             Process     = $null
             Pid         = $null
@@ -57,7 +61,7 @@ function New-Scenario {
             Scenario    = $Tag
             RunId       = "run-$Tag"
             EvidenceDir = $root
-            LiveLogsDir = Join-Path $root "logs"
+            LiveLogsDir = Join-Path $dataDir "logs"
             QueryId     = $null
             Requests    = $null
             Stage       = "launched"
@@ -108,11 +112,23 @@ $SummaryOk = "汇总完成（会话 q-alpha-1）：by=day 组=3 请求=3，12 ms
 
 Write-Host "=== 反例：旧日志已有成功汇总，新实例无新日志 ==="
 $s = New-Scenario "old-log-borrow"
+# 旧日志写入活动目录 → Prepare-LaunchEvidence 归档移走（真实流程）→
+# 活动目录变空。归档里的旧汇总不得满足本次启动的等待判定。
 Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log.2026-10-10" -Line $SummaryOk
+# 证据根沿用生产命名（tokenscope-install-evidence），触发 Move-LaunchLogsToEvidence
+# 的目的地守卫——契约必须走与安装验收完全相同的校验路径。
+$evidence = Prepare-LaunchEvidence -DataDir $s.DataDir -EvidenceRoot (
+    Join-Path $s.Root "tokenscope-install-evidence") -Scenario "old-log-borrow" -RunId "run-1"
+Assert-HelperTrue ((Test-Path (Join-Path $evidence "tokenscope.log.2026-10-10")) -and
+    -not (Test-Path $s.LogsDir)) "旧日志已归档移出活动目录"
+New-Item -ItemType Directory -Path $s.LogsDir -Force | Out-Null
+$proc = New-StandInProcess
+$s.Context.Process = $proc
+$s.Context.Pid = $proc.Id
 $deadline = 2
 Test-Throws {
     Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds $deadline
-} "旧日志借用必须等待超时失败（归档后的新日志没有汇总）"
+} "旧日志借用必须等待超时失败（归档后的新日志没有汇总）" "超时"
 Cleanup $s
 
 # ---------- 反例 2：仅写"历史库写入"没有"汇总完成" ----------
@@ -120,9 +136,12 @@ Cleanup $s
 Write-Host "=== 反例：仅写历史库写入 ==="
 $s = New-Scenario "write-only"
 Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line "历史库写入：新增 3，更新 0，已存在 0，冲突 0，陈旧 0；别名 +0，来源 +0"
+$proc = New-StandInProcess
+$s.Context.Process = $proc
+$s.Context.Pid = $proc.Id
 Test-Throws {
     Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 2
-} "仅写库没有汇总完成必须失败"
+} "仅写库没有汇总完成必须失败" "超时"
 Cleanup $s
 
 # ---------- 反例 3：本次汇总请求数 0 或 2 ----------
@@ -133,9 +152,12 @@ foreach ($wrong in 0, 2) {
     Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line (
         "汇总完成（会话 q-wrong）：by=day 组=1 请求=$wrong，5 ms"
     )
+    $proc = New-StandInProcess
+    $s.Context.Process = $proc
+    $s.Context.Pid = $proc.Id
     Test-Throws {
         Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 2
-    } "汇总请求数 $wrong != 3 必须失败"
+    } "汇总请求数 $wrong != 3 必须失败" "本次汇总请求数 $wrong != 期望 3"
     Cleanup $s
 }
 
@@ -150,7 +172,7 @@ foreach ($code in 0, 23) {
     $s.Context.Pid = $proc.Id
     Test-Throws {
         Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 10
-    } "等待期提前退出（退出码 $code）必须失败"
+    } "等待期提前退出（退出码 $code）必须失败" "进程在场景进行中退出"
     Cleanup $s
 }
 
@@ -166,7 +188,7 @@ foreach ($code in 0, 23) {
     $s.Context.QueryId = "q-alpha-1"
     Test-Throws {
         Observe-ProcessAlive -Context $s.Context -DurationSeconds 1 -PollMilliseconds 100
-    } "观察期提前退出（退出码 $code）必须失败"
+    } "观察期提前退出（退出码 $code）必须失败" "进程在场景进行中退出"
     Cleanup $s
 }
 
@@ -189,9 +211,12 @@ Test-Throws { Close-AppGracefully -Context (New-FakeContext -CloseResult $true -
 Write-Host "=== 反例：半行日志不算完成 ==="
 $s = New-Scenario "partial-line"
 Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line $SummaryOk -NoNewline $true
+$proc = New-StandInProcess
+$s.Context.Process = $proc
+$s.Context.Pid = $proc.Id
 Test-Throws {
     Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 2
-} "无换行的半行汇总不得参与匹配"
+} "无换行的半行汇总不得参与匹配" "超时"
 Cleanup $s
 
 # ---------- 正例 1：快启动完整汇总并存活 ----------
@@ -227,7 +252,7 @@ try {
     Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line $SummaryOk -NoNewline $true
     Test-Throws {
         Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 2
-    } "半行阶段必须继续等待"
+    } "半行阶段必须继续等待" "超时"
     Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log.1" -Line $SummaryOk
     $summary = Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 10
     Test-True ($summary.QueryId -eq "q-alpha-1") "跨文件完整行匹配"

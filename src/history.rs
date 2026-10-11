@@ -259,7 +259,9 @@ DROP TABLE ccs_daily_usage;
 ALTER TABLE ccs_daily_usage_v3 RENAME TO ccs_daily_usage;
 CREATE INDEX IF NOT EXISTS idx_ccs_daily_day ON ccs_daily_usage(day, app, model);
 UPDATE usage_events SET observed_at_seconds = ts_seconds, observed_at_nanos = ts_nanos,
-    observed_at_utc = ts_seconds;
+    -- observed_at_utc 与运行期写入同格式（RFC3339，jiff Timestamp Display）；
+    -- 亚秒不进 utc 文本（真值保留在 observed_at_nanos），迁移纯 SQL 不做逐行分支。
+    observed_at_utc = strftime('%Y-%m-%dT%H:%M:%SZ', ts_seconds, 'unixepoch');
 INSERT INTO event_aliases(event_id, app, identity_scheme, identity_value, created_generation)
 SELECT e.id, 'codex', 'codex-usage',
        e.session_id || '|' || e.model_raw || '|' || e.input_tokens || '|' || e.output_tokens
@@ -2649,14 +2651,6 @@ fn merge_event(
     summary: &mut WriteSummary,
     changed: &mut bool,
 ) -> Result<i64> {
-    eprintln!(
-        "DBG merge: existing_rank={:?} w_rank={:?} existing_cw={} w_cw={} class={:?}",
-        existing.precedence,
-        w.precedence,
-        existing.tokens.cache_write,
-        w.tokens.cache_write,
-        classify_against(&existing, w)
-    );
     match classify_against(&existing, w) {
         WriteClass::Unchanged => {
             summary.unchanged += 1;

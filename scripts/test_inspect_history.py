@@ -342,6 +342,92 @@ class VerifyManifestCase(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
 
+class SummaryModesCase(unittest.TestCase):
+    """--records / --cwd / --projects 与默认汇总模式（C-P3 修复的回归）。
+
+    - NULL 与空串必须区分显示（验收断言依赖该语义）；
+    - 表检查**之后**的模式查询遇损坏库同样退出 2，不打 traceback；
+    - 重构后各模式互不短路（records 分支的 return 不得吞掉其它模式）。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def run_cli(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), *args],
+            capture_output=True, text=True, encoding="utf-8", check=False,
+        )
+
+    def make_db(self, rows: list) -> str:
+        db = str(self.dir / "mode.db")
+        con = sqlite3.connect(db)
+        con.executescript(SCHEMA)
+        for i, (project, sic, ecwd) in enumerate(rows):
+            con.execute(
+                "INSERT INTO usage_events(event_key, app, ts_seconds, ts_nanos, model_raw, "
+                "model_identity, identity_revision, session_id, record_id, project_key, "
+                "session_initial_cwd, event_cwd, input_tokens, output_tokens, "
+                "cache_write_tokens, cache_read_tokens, origin_rank, observed_at_utc, "
+                "observed_at_seconds, observed_at_nanos, parser_revision) "
+                "VALUES(?, 'claude-code', 1784307600, 0, 'm', 'mid', 1, 's', ?, ?, ?, ?, "
+                "'10', '20', '0', '0', 1, 'x', 1784307600, 0, 1)",
+                (f"k-{i}", f"r{i}", project, sic, ecwd),
+            )
+        con.commit()
+        con.close()
+        return db
+
+    def test_records_distinguish_null_and_empty_string(self):
+        db = self.make_db([("proj-a", None, ""), ("proj-b", "/w", "/e")])
+        r = self.run_cli(db, "--records")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(
+            r.stdout.splitlines(),
+            [
+                "record_id=r0|project=proj-a|session_initial_cwd=NULL"
+                "|event_cwd=|input=10|output=20",
+                "record_id=r1|project=proj-b|session_initial_cwd=/w"
+                "|event_cwd=/e|input=10|output=20",
+            ],
+        )
+
+    def test_cwd_and_projects_modes(self):
+        db = self.make_db([("p-b", "/w1", None), ("p-a", "/w2", "/e")])
+        self.assertEqual(
+            self.run_cli(db, "--cwd").stdout.splitlines(),
+            ["session_initial_cwd=/w1", "session_initial_cwd=/w2",
+             "event_cwd_nonnull=1"],
+        )
+        self.assertEqual(
+            self.run_cli(db, "--projects").stdout.splitlines(), ["p-a", "p-b"]
+        )
+
+    def test_default_summary_mode_prints_counts(self):
+        db = self.make_db([("p", "/w", "/e"), ("p", "/w", None)])
+        r = self.run_cli(db)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "2 20 40 1")
+
+    def test_mode_query_on_corrupted_db_is_exit_2(self):
+        # sqlite_master 在第 1 页完好，表内容在第 2 页——清零第 2 页让
+        # "表存在但查询失败"，验证模式查询也走 DatabaseError → 退出 2。
+        db = self.make_db([("p", "/w", "/e")] * 20)
+        con = sqlite3.connect(db)
+        con.execute("VACUUM")
+        con.close()
+        with open(db, "r+b") as fh:
+            fh.seek(4096)
+            fh.write(b"\x00" * 8192)
+        r = self.run_cli(db, "--records")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("无法按 SQLite 打开", r.stderr)
+
+
 class GeneratorContractCase(unittest.TestCase):
     """生成器读回契约：旧缓存输入必须与期望文件逐条一致。"""
 

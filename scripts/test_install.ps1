@@ -30,6 +30,13 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "install_test_helpers.ps1")
 
+# Reset-UserHome 会整目录删除 $env:USERPROFILE\.tokenscope——开发机上这是
+# 真实数据。本脚本只在 CI Runner（RUNNER_TEMP 存在）上运行；本机调试必须
+# 显式设置 TOKENSCOPE_INSTALL_TEST_CONSENT=1，确认该目录可删。
+if (-not $env:RUNNER_TEMP -and $env:TOKENSCOPE_INSTALL_TEST_CONSENT -ne "1") {
+    throw "拒绝运行：本脚本会清空 $env:USERPROFILE\.tokenscope。仅 CI Runner 可直接运行；本机调试请设置 TOKENSCOPE_INSTALL_TEST_CONSENT=1（并确认该目录数据可删除）。"
+}
+
 $DataDir = Join-Path $env:USERPROFILE ".tokenscope"
 $UninstallKeyRoot = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall"
 $SettingsToml = Join-Path $DataDir "settings.toml"
@@ -38,6 +45,9 @@ $HistoryDb = Join-Path $DataDir "history.db"
 $LegacyCache = Join-Path $DataDir "cache.db"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $ExpectedManifest = Join-Path $RepoRoot "scripts\fixtures\install_history_expected.json"
+# "本次汇总请求数"的期望从期望 manifest 的事件数推导——fixture 与该数字
+# 是两个独立来源，钉死一起改（脚本顶部加载一次）。
+$ExpectedRequests = (Get-Content $ExpectedManifest -Raw | ConvertFrom-Json).events.Count
 $EvidenceRoot = Join-Path $env:RUNNER_TEMP "tokenscope-install-evidence"
 $Failures = New-Object System.Collections.Generic.List[string]
 $PassCount = 0
@@ -75,6 +85,12 @@ function Invoke-SilentInstall {
     param([string]$Path)
     $proc = Start-Process -FilePath $Path -ArgumentList "/S" -Wait -PassThru
     if ($proc.ExitCode -ne 0) {
+        # NSIS 静默安装失败常无日志落盘（证据目录会空到 if-no-files-found
+        # 都没得传）——把退出码与安装器路径写成失败说明，保证有证据可查。
+        $note = Join-Path $EvidenceRoot "install-failure.txt"
+        New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
+        "installer=$Path`nexit_code=$($proc.ExitCode)`nutc=$((Get-Date).ToUniversalTime().ToString('o'))" |
+            Set-Content -Path $note -Encoding utf8NoBOM
         throw "安装器退出码异常（$Path）：$($proc.ExitCode)"
     }
 }
@@ -140,7 +156,7 @@ function Verify-HistoryManifest {
 
 function Run-AppLifecycle {
     # 场景 2/5/6 共用的单实例生命周期：归档旧日志 → 唯一启动 → 等待本次
-    # "汇总完成（请求=3）" → 事实校验 → 8 秒存活观察 → 优雅关闭（退出码
+    # "汇总完成（请求=期望数）" → 事实校验 → 8 秒存活观察 → 优雅关闭（退出码
     # 0）→ 关闭后再次事实校验 → 证据落盘。
     param(
         [Parameter(Mandatory = $true)][string]$Scenario,
@@ -155,7 +171,7 @@ function Run-AppLifecycle {
         -RunId $RunId -EvidenceDir $evidenceDir `
         -LiveLogsDir (Join-Path $DataDir "logs")
     try {
-        $summary = Wait-CurrentSummary -Context $context -ExpectedRequests 3 `
+        $summary = Wait-CurrentSummary -Context $context -ExpectedRequests $ExpectedRequests `
             -TimeoutSeconds 180
         Write-Host "本次汇总：query_id=$($summary.QueryId) requests=$($summary.Requests)"
         Verify-HistoryManifest
@@ -168,11 +184,15 @@ function Run-AppLifecycle {
     catch {
         # A-P2-1：失败路径也要把**本次启动**的日志并入证据（成功路径由
         # Close-AppGracefully 复制）；A-P3-1：Launch-AppOnce 抛错时
-        # $context 尚未赋值，先判空再保存/停进程，保留原始异常。
+        # $context 尚未赋值，先判空再保存/停进程。C-P3：证据动作自身
+        # 失败只告警，不得掩盖原始异常。
+        $original = $_.Exception.Message
         if ($null -ne $context) {
-            Copy-LiveLogsToEvidence -Context $context
-            Save-ScenarioResult -Context $context -Pass $false -Stage $context.Stage `
-                -Detail $_.Exception.Message
+            try { Copy-LiveLogsToEvidence -Context $context }
+            catch { Write-Host "::warning::证据日志归档失败：$($_.Exception.Message)" }
+            try { Save-ScenarioResult -Context $context -Pass $false -Stage $context.Stage `
+                    -Detail $original }
+            catch { Write-Host "::warning::场景结果落盘失败：$($_.Exception.Message)" }
             Stop-ScenarioProcess -Context $context
         }
         throw
@@ -279,6 +299,10 @@ catch {
 }
 
 # ---------- 汇总 ----------
+# 失败模型：Assert-True 累计失败后**继续**跑后续场景（单条断言失败不影响
+# 其它事实的取证）；但任何**异常**（环境/前提破坏，如安装器失败）会跳过
+# 剩余场景直接进汇总——此时后续场景的缺失是刻意为之，证据不完整本身
+# 就是失败信号，不以"部分通过"呈现。
 foreach ($line in $Summary) {
     Write-StepSummary $line
 }

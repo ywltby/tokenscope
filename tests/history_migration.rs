@@ -141,6 +141,66 @@ fn legacy_cache_usage_is_migrated_once() {
 }
 
 #[test]
+fn v2_backfill_writes_rfc3339_observed_at_utc() {
+    // v1→v2 把"采集时刻"改写为事件时间时，utc 文本必须与运行期写入同格式
+    //（RFC3339）——此前回填把纪元秒数值塞进 TEXT 列，与其它行格式不一致。
+    let dir = temp_dir("utc-backfill");
+    let db = dir.join("history.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(tokenscope::history::legacy_v1_schema_for_tests())
+            .unwrap();
+        for (key, ts, nanos) in [
+            ("k-sec", 1_784_307_600i64, 0i64),
+            ("k-frac", 1_784_307_601, 500_000_000),
+        ] {
+            conn.execute(
+                "INSERT INTO usage_events(event_key, app, ts_seconds, ts_nanos, model_raw,
+                    model_identity, identity_revision, session_id, record_id, project_key,
+                    session_initial_cwd, event_cwd, input_tokens, output_tokens,
+                    cache_write_tokens, cache_read_tokens, origin_rank, observed_at_utc,
+                    observed_at_seconds, observed_at_nanos, parser_revision)
+                 VALUES(?1, 'codex', ?2, ?3, 'gpt-5.6', 'gpt56', 1, NULL, NULL, NULL,
+                        NULL, NULL, '1', '2', '0', '0', 1, '1970-01-01T00:00:00Z', ?2, ?3, 1)",
+                rusqlite::params![key, ts, nanos],
+            )
+            .unwrap();
+        }
+        conn.pragma_update(None, "user_version", 1).unwrap();
+    }
+    let _history = HistoryDb::open(&db).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let rows: Vec<(String, String, i64, i64)> = conn
+        .prepare(
+            "SELECT event_key, observed_at_utc, observed_at_seconds, observed_at_nanos
+                  FROM usage_events ORDER BY event_key",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "k-frac".into(),
+                "2026-07-17T17:00:01Z".into(),
+                1_784_307_601,
+                500_000_000
+            ),
+            (
+                "k-sec".into(),
+                "2026-07-17T17:00:00Z".into(),
+                1_784_307_600,
+                0
+            ),
+        ],
+        "迁移回填的 utc 是 RFC3339；亚秒只留在 observed_at_nanos"
+    );
+}
+
+#[test]
 fn invalid_rows_are_rejected_without_blocking_valid_ones() {
     let dir = temp_dir("reject");
     let legacy = dir.join("cache.db");
