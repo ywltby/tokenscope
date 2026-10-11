@@ -166,9 +166,15 @@ function Run-AppLifecycle {
         Save-ScenarioResult -Context $context -Pass $true -Stage "closed"
     }
     catch {
-        Save-ScenarioResult -Context $context -Pass $false -Stage $context.Stage `
-            -Detail $_.Exception.Message
-        Stop-ScenarioProcess -Context $context
+        # A-P2-1：失败路径也要把**本次启动**的日志并入证据（成功路径由
+        # Close-AppGracefully 复制）；A-P3-1：Launch-AppOnce 抛错时
+        # $context 尚未赋值，先判空再保存/停进程，保留原始异常。
+        if ($null -ne $context) {
+            Copy-LiveLogsToEvidence -Context $context
+            Save-ScenarioResult -Context $context -Pass $false -Stage $context.Stage `
+                -Detail $_.Exception.Message
+            Stop-ScenarioProcess -Context $context
+        }
         throw
     }
 }
@@ -210,7 +216,16 @@ try {
     $uninstaller = Get-UninstallerExe $entry.UninstallString
     Stop-App
     $proc = Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait -PassThru
-    Start-Sleep -Seconds 2
+    # A-P3-2：NSIS 卸载器把自身复制到 %TEMP% 后由副本执行删除，原进程先
+    # 退出——固定 2 秒睡眠在慢节点上有假失败风险，改为 30 秒内轮询。
+    $uninstallDeadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $uninstallDeadline) {
+        if (-not (Test-Path (Join-Path $entry.InstallLocation "TokenScope.exe")) -and
+            $null -eq (Get-UninstallEntry)) {
+            break
+        }
+        Start-Sleep -Milliseconds 500
+    }
     Assert-True ($proc.ExitCode -eq 0) "卸载器退出码 0（实际 $($proc.ExitCode)）"
     Assert-True (-not (Test-Path (Join-Path $entry.InstallLocation "TokenScope.exe"))) "卸载后主程序已清除"
     Assert-True ($null -eq (Get-UninstallEntry)) "卸载后注册项已清除"

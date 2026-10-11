@@ -79,6 +79,9 @@ def main() -> int:
     out = sys.argv[1]
     parent = os.path.dirname(os.path.abspath(out))
     os.makedirs(parent, exist_ok=True)
+    # A-P3-5：已存在的输出先删除——重复运行幂等（否则 meta 主键冲突）。
+    if os.path.exists(out):
+        os.remove(out)
     con = sqlite3.connect(out)
     try:
         con.execute("PRAGMA foreign_keys = OFF")

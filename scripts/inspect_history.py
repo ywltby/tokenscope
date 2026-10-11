@@ -29,11 +29,16 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from urllib.parse import quote
 
 
 def open_readonly(db: str):
+    # A-P3-3：路径段做百分号编码——路径含 "#" 会被当成 URI fragment 丢弃
+    # （打开错误文件 → 报"不存在"），含 "%XX" 会被百分号解码（可能静默
+    # 打开另一个文件）。
+    encoded = quote(db)
     try:
-        return sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        return sqlite3.connect(f"file:{encoded}?mode=ro", uri=True)
     except sqlite3.OperationalError:
         return None
 
@@ -242,56 +247,59 @@ def main() -> int:
         if "usage_events" not in tables:
             print("absent" if modes == [] else "")
             return 0
-        if records_mode:
-            rows = con.execute(
-                "SELECT record_id, project_key, session_initial_cwd, event_cwd, "
-                "input_tokens, output_tokens FROM usage_events "
-                "WHERE record_id IS NOT NULL AND record_id <> '' ORDER BY record_id"
-            ).fetchall()
-            for rid, proj, sic, ecwd, inp, outp in rows:
-                print(
-                    f"record_id={rid}|project={proj or 'NULL'}"
-                    f"|session_initial_cwd={sic or 'NULL'}"
-                    f"|event_cwd={ecwd or 'NULL'}"
-                    f"|input={inp}|output={outp}"
-                )
-            return 0
-        if cwd_mode:
-            sics = sorted(
-                {
-                    r[0]
-                    for r in con.execute(
-                        "SELECT DISTINCT session_initial_cwd FROM usage_events "
-                        "WHERE session_initial_cwd IS NOT NULL"
-                    ).fetchall()
-                }
+    except sqlite3.DatabaseError as exc:
+        # A-P3-4：非数据库文件（如 "not a db"）明确报错退出 2，不打 traceback。
+        print(f"无法按 SQLite 打开 {args[0]}: {exc}", file=sys.stderr)
+        return 2
+    if records_mode:
+        rows = con.execute(
+            "SELECT record_id, project_key, session_initial_cwd, event_cwd, "
+            "input_tokens, output_tokens FROM usage_events "
+            "WHERE record_id IS NOT NULL AND record_id <> '' ORDER BY record_id"
+        ).fetchall()
+        for rid, proj, sic, ecwd, inp, outp in rows:
+            print(
+                f"record_id={rid}|project={proj or 'NULL'}"
+                f"|session_initial_cwd={sic or 'NULL'}"
+                f"|event_cwd={ecwd or 'NULL'}"
+                f"|input={inp}|output={outp}"
             )
-            for v in sics:
-                print(f"session_initial_cwd={v}")
-            ecwd_nonnull = con.execute(
-                "SELECT COUNT(*) FROM usage_events WHERE event_cwd IS NOT NULL"
-            ).fetchone()[0]
-            print(f"event_cwd_nonnull={ecwd_nonnull}")
-            return 0
-        if projects_mode:
-            for (project,) in con.execute(
-                "SELECT DISTINCT project_key FROM usage_events "
-                "WHERE project_key IS NOT NULL ORDER BY project_key"
-            ).fetchall():
-                print(project)
-            return 0
-        count, total_in, total_out = con.execute(
-            "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), "
-            "COALESCE(SUM(output_tokens), 0) FROM usage_events"
-        ).fetchone()
-        projects = con.execute(
-            "SELECT COUNT(DISTINCT project_key) FROM usage_events "
-            "WHERE project_key IS NOT NULL"
-        ).fetchone()[0]
-        print(f"{count} {total_in} {total_out} {projects}")
         return 0
-    finally:
-        con.close()
+    if cwd_mode:
+        sics = sorted(
+            {
+                r[0]
+                for r in con.execute(
+                    "SELECT DISTINCT session_initial_cwd FROM usage_events "
+                    "WHERE session_initial_cwd IS NOT NULL"
+                ).fetchall()
+            }
+        )
+        for v in sics:
+            print(f"session_initial_cwd={v}")
+        ecwd_nonnull = con.execute(
+            "SELECT COUNT(*) FROM usage_events WHERE event_cwd IS NOT NULL"
+        ).fetchone()[0]
+        print(f"event_cwd_nonnull={ecwd_nonnull}")
+        return 0
+    if projects_mode:
+        for (project,) in con.execute(
+            "SELECT DISTINCT project_key FROM usage_events "
+            "WHERE project_key IS NOT NULL ORDER BY project_key"
+        ).fetchall():
+            print(project)
+        return 0
+    count, total_in, total_out = con.execute(
+        "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), "
+        "COALESCE(SUM(output_tokens), 0) FROM usage_events"
+    ).fetchone()
+    projects = con.execute(
+        "SELECT COUNT(DISTINCT project_key) FROM usage_events "
+        "WHERE project_key IS NOT NULL"
+    ).fetchone()[0]
+    print(f"{count} {total_in} {total_out} {projects}")
+    con.close()
+    return 0
 
 
 if __name__ == "__main__":

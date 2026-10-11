@@ -258,7 +258,8 @@ WHERE c.id = (
 DROP TABLE ccs_daily_usage;
 ALTER TABLE ccs_daily_usage_v3 RENAME TO ccs_daily_usage;
 CREATE INDEX IF NOT EXISTS idx_ccs_daily_day ON ccs_daily_usage(day, app, model);
-UPDATE usage_events SET observed_at_seconds = ts_seconds, observed_at_nanos = ts_nanos;
+UPDATE usage_events SET observed_at_seconds = ts_seconds, observed_at_nanos = ts_nanos,
+    observed_at_utc = ts_seconds;
 INSERT INTO event_aliases(event_id, app, identity_scheme, identity_value, created_generation)
 SELECT e.id, 'codex', 'codex-usage',
        e.session_id || '|' || e.model_raw || '|' || e.input_tokens || '|' || e.output_tokens
@@ -2017,7 +2018,16 @@ fn lookup_overlap_candidate(conn: &Connection, w: &EventWrite) -> Result<Option<
 /// 新旧（同请求的流式更新、旧副本回放）。
 fn classify_against(existing: &StoredEvent, w: &EventWrite) -> WriteClass {
     if content_equal(existing, w) {
-        WriteClass::Unchanged
+        if w.precedence > existing.precedence {
+            // P2-2：内容等值但更高优先级来源（原生日志）确认了同一事实——
+            // 仅升级 origin_rank（值不变）。否则先 CCS 后原生的确认停留在
+            // 低优先级，后续同请求的 CCS 变化会被静默覆盖而非按冲突保留
+            //（merge_event 的 Update 以等值内容重写同一行，幂等且只推进
+            // rank；BatchSim.apply_update 同步推进模拟状态）。
+            WriteClass::Update
+        } else {
+            WriteClass::Unchanged
+        }
     } else if w.precedence > existing.precedence {
         WriteClass::Update
     } else if existing.precedence > w.precedence {
@@ -2639,6 +2649,14 @@ fn merge_event(
     summary: &mut WriteSummary,
     changed: &mut bool,
 ) -> Result<i64> {
+    eprintln!(
+        "DBG merge: existing_rank={:?} w_rank={:?} existing_cw={} w_cw={} class={:?}",
+        existing.precedence,
+        w.precedence,
+        existing.tokens.cache_write,
+        w.tokens.cache_write,
+        classify_against(&existing, w)
+    );
     match classify_against(&existing, w) {
         WriteClass::Unchanged => {
             summary.unchanged += 1;
@@ -2751,7 +2769,8 @@ fn insert_event(tx: &Transaction<'_>, w: &EventWrite) -> Result<i64> {
 }
 
 impl EventWrite {
-    /// 事件解析版本：调用方可用 `parser_revision` 字段覆盖的默认值。
+    /// 事件解析版本：恒为 [`PARSER_REVISION`]（`EventWrite` 没有可覆盖的
+    /// `parser_revision` 字段——持久化列由适配器在构造时决定）。
     fn parser_revision(&self) -> i64 {
         PARSER_REVISION
     }

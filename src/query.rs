@@ -309,12 +309,15 @@ impl QuotaReservation {
             .checked_add(bytes)
             .ok_or_else(|| "查询保留字节记账溢出（超出 usize 可表示范围）".to_string())?;
         if need > q.limit {
-            // RC05：建议必须与"什么才会减少保留量"一致——采集快照整份随会话
-            // 保留，时间范围只是采集后的过滤，缩小范围**不会**降低保留字节。
+            // RC05 / N05：建议必须与"什么才会减少保留量"一致——H07 起事件
+            // 本体留在 SQLite，会话保留 = 固定元数据（价格/来源诊断）+ **按
+            // 时间边界过滤后的行索引**：缩小时间范围会减少行索引与记录标识
+            // 的保留量（固定部分不变）；减少并发会话、等待 TTL 回收、停用
+            // 暂不采集的来源目录同样有效。
             return Err(format!(
                 "查询保留数据 {need}（本次 {bytes}，已保留 {used}，预算 {limit}，约合 {need_mib} MiB）：\
                  可减少同时进行的查询会话数，或稍后重试（闲置会话超过 {ttl} 秒自动回收）；\
-                 需要立即腾出额度请在设置中停用暂不采集的来源目录（缩小时间范围不会减少保留量）",
+                 缩小时间范围或在设置中停用暂不采集的来源目录也能降低保留量",
                 need = display_bytes(need),
                 bytes = display_bytes(bytes),
                 used = display_bytes(q.used),

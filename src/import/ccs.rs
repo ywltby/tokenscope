@@ -396,6 +396,9 @@ pub struct ImportPreview {
     pub rollups_new: u64,
     pub rollups_unchanged: u64,
     pub rollups_conflicting: u64,
+    /// 不支持的应用与字段非法的日汇总行数（P3-2：无此计数时
+    /// rollups_total 可以大于 new+unchanged+conflicting 之和且无解释）。
+    pub rollups_rejected: u64,
     /// 本期不导入的应用（列出数量，不导入）。
     pub unsupported_apps: Vec<(String, u64)>,
     /// 没有项目归属的记录数：CCS 明细没有 cwd 列，项目保持未知。
@@ -510,6 +513,7 @@ pub fn preview_with_limits(
         overlap_examples: Vec::new(),
         net_new_tokens: TokenCounts::default(),
         rollups_total: rollups.len() as u64,
+        rollups_rejected: 0,
         rollups_new: 0,
         rollups_unchanged: 0,
         rollups_conflicting: 0,
@@ -537,7 +541,17 @@ pub fn preview_with_limits(
             Ok(mut w) => {
                 // 继承被剔除会话行的原生身份（跨来源去重证据不能因为去重而丢）。
                 for (scheme, value) in proxy_index.aliases_for(idx) {
-                    if !w.aliases.iter().any(|a| a.scheme == *scheme) {
+                    // 按 (scheme, value) 精确判重——同 scheme 不同值也要追加
+                    //（复核 P2-1：proxy 行未记录 Codex 缓存写时自带别名是
+                    // "cw=0" 变体，被剔除会话行捐来的是真实值变体；只按
+                    // scheme 判重会把真实值变体丢掉，原生采集因别名不命中
+                    // 而重复入库）。event_aliases 的 UNIQUE(app, scheme,
+                    // value) 允许同一事件挂多个同 scheme 别名。
+                    if !w
+                        .aliases
+                        .iter()
+                        .any(|a| a.scheme == *scheme && a.value == *value)
+                    {
                         w.aliases.push(EventAlias {
                             app,
                             scheme: scheme.clone(),
@@ -597,13 +611,16 @@ pub fn preview_with_limits(
     preview.overlap_unresolved = preview.would_overlap > 0;
 
     // 日汇总：与库内同键快照对比（内容不同且来源无可验证修订 → 冲突）。
+    // 不支持的应用与字段非法的行计入 rollups_rejected，不再静默丢弃。
     let mut rollup_writes = Vec::new();
     for raw in &rollups {
         let Some(app) = map_app(&raw.app_type) else {
+            preview.rollups_rejected += 1;
             continue;
         };
-        if let Ok(w) = rollup_write(app, raw, source_day_timezone) {
-            rollup_writes.push(w);
+        match rollup_write(app, raw, source_day_timezone) {
+            Ok(w) => rollup_writes.push(w),
+            Err(_) => preview.rollups_rejected += 1,
         }
     }
     for r in &rollup_writes {
@@ -616,15 +633,21 @@ pub fn preview_with_limits(
 
     let plan_id = new_plan_id()?;
     preview.plan_id = plan_id.clone();
-    plans().lock().unwrap_or_else(|e| e.into_inner()).insert(
-        plan_id,
-        StagedPlan {
-            preview: preview.clone(),
-            writes,
-            rollups: rollup_writes,
-            created: Instant::now(),
-        },
-    );
+    {
+        let mut plans = plans().lock().unwrap_or_else(|e| e.into_inner());
+        // P3-3：顺带回收超过 TTL 的过期计划（含完整 writes，大库反复预览
+        // 会累积数百 MB）；TTL 之内的计划不动。
+        plans.retain(|_, staged| staged.created.elapsed() <= PLAN_TTL);
+        plans.insert(
+            plan_id,
+            StagedPlan {
+                preview: preview.clone(),
+                writes,
+                rollups: rollup_writes,
+                created: Instant::now(),
+            },
+        );
+    }
     log::info!(
         "CCS 导入预览：明细 {} 条（可导入 {}、其他应用 {}、会话重复 {}、拒绝 {}），日汇总 {} 条",
         preview.requests_total,

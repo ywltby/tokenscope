@@ -1230,6 +1230,200 @@ fn import_commit_rechecks_generation_inside_transaction() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// ================================================================ 第五轮复核 P2
+
+/// 第五轮 P2-1：proxy 行自带 codex-usage 别名（cache_write=0 变体）不得
+/// 阻断被剔除会话行捐献的真实值变体（cache_write=X）——否则原生采集因
+/// 别名不命中而重复入库。
+#[test]
+fn codex_proxy_session_row_donates_real_cache_write_alias() {
+    let dir = temp_dir("p2-1-cw-donation");
+    let history = history_of(&dir);
+    let ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
+    seed_ccs(
+        &dir.join("cc-switch.db"),
+        &[
+            CcsRow {
+                request_id: "px-1".into(),
+                app_type: "codex".into(),
+                model: "gpt-5.6-sol".into(),
+                session_id: Some("sess-1".into()),
+                data_source: "proxy".into(),
+                created_at: ts.as_second(),
+                input: 110,
+                output: 30,
+            },
+            CcsRow {
+                request_id: "cs-1".into(),
+                app_type: "codex".into(),
+                model: "gpt-5.6-sol".into(),
+                session_id: Some("sess-1".into()),
+                data_source: "codex_session".into(),
+                created_at: ts.as_second(),
+                input: 110,
+                output: 30,
+            },
+        ],
+        &[],
+    );
+    // 旧版 CCS 未记录 Codex 缓存写：proxy 行 cache_creation=0，
+    // 被剔除会话行记录真实值 40（分支 3 兼容形态，研究文档确认真实存在）。
+    {
+        let conn = rusqlite::Connection::open(dir.join("cc-switch.db")).unwrap();
+        conn.execute(
+            "UPDATE proxy_request_logs SET cache_creation_tokens = 40, cache_read_tokens = 10 WHERE request_id = 'cs-1'",
+            [],
+        )
+        .unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(dir.join("cc-switch.db")).unwrap();
+        conn.execute(
+            "UPDATE proxy_request_logs SET cache_read_tokens = 10 WHERE request_id = 'px-1'",
+            [],
+        )
+        .unwrap();
+    }
+    let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
+    let preview = ccs::preview(&source, &history, "UTC").unwrap();
+    assert_eq!(
+        preview.requests_skipped_duplicate_of_proxy, 1,
+        "会话行与 proxy 行同请求，只保留一条"
+    );
+    let report = ccs::commit(
+        &preview.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        false,
+    )
+    .unwrap();
+    assert_eq!(report.requests_inserted, 1);
+
+    // 原生采集同一 rollout：真实 cache_write=40 的别名必须命中捐献变体，
+    // 不重复入库；内容差异按终值规则更新为原生值。
+    let codex = dir.join("codex");
+    let lines = vec![
+        codex_meta("sess-1", "/work/app"),
+        codex_context("gpt-5.6-sol", "/work/app"),
+        serde_json::json!({
+            "timestamp": "2026-07-17T15:00:05.000Z",
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": {"last_token_usage": {
+                "input_tokens": 150, "output_tokens": 30,
+                "cached_input_tokens": 10, "cache_write_input_tokens": 40,
+                "reasoning_output_tokens": 0, "total_tokens": 180
+            }}}
+        })
+        .to_string(),
+    ];
+    codex_rollout(&codex, "sessions/2026/07/17/rollout-cw.jsonl", &lines);
+    let r = summary(&opts(&dir, None, Some(codex))).unwrap();
+    for src in &r.sources {
+        eprintln!(
+            "SRC {} files={} events={}",
+            src.agent.as_str(),
+            src.stats.files_scanned,
+            src.stats.events
+        );
+    }
+    assert_eq!(
+        history.event_count().unwrap(),
+        1,
+        "原生并入已导入事件，不新增"
+    );
+    {
+        let conn = rusqlite::Connection::open(dir.join("data").join("history.db")).unwrap();
+        for row in conn
+            .prepare("SELECT identity_value FROM event_aliases")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+        {
+            eprintln!("ALIAS: {}", row.unwrap());
+        }
+    }
+    let totals = history.totals().unwrap();
+    eprintln!(
+        "TOTALS: input={} cw={} cr={}",
+        totals.input, totals.cache_write, totals.cache_read
+    );
+    {
+        let conn = rusqlite::Connection::open(dir.join("data").join("history.db")).unwrap();
+        for row in conn
+            .prepare("SELECT record_id, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens FROM usage_events")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .unwrap()
+        {
+            let (rid, i, o, cw, cr) = row.unwrap();
+            eprintln!("EVENT: {rid:?} in={i} out={o} cw={cw} cr={cr}");
+        }
+    }
+    assert_eq!(totals.input, 100, "原生 fresh 输入（150-10-40）");
+    assert_eq!(totals.cache_write, 40, "原生真实缓存写替换 proxy 的 0");
+    assert_eq!(totals.cache_read, 10);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 第五轮 P2-2：内容等值的原生写入必须升级 origin_rank——否则先 CCS 后
+/// 原生的确认停留在低优先级，后续同请求的 CCS 变化会被静默覆盖。
+#[test]
+fn native_confirmation_blocks_later_ccs_overwrite() {
+    let dir = temp_dir("p2-2-rank");
+    let history = history_of(&dir);
+    let ts: jiff::Timestamp = "2026-09-15T08:00:00Z".parse().unwrap();
+    let alias = EventAlias {
+        app: AgentKind::ClaudeCode,
+        scheme: "claude-message".into(),
+        value: "sess-1|m1".into(),
+    };
+    let ccs_write = |key: &str, output: u64| EventWrite {
+        event_key: key.into(),
+        app: AgentKind::ClaudeCode,
+        ts,
+        model_raw: "claude-opus-5-5".into(),
+        model_identity: "claudeopus55".into(),
+        session_id: Some("sess-1".into()),
+        record_id: Some("m1".into()),
+        project_key: None,
+        session_initial_cwd: None,
+        event_cwd: None,
+        tokens: TokenCounts {
+            input: 10,
+            output,
+            cache_write: 0,
+            cache_read: 0,
+        },
+        precedence: WritePrecedence::CcsImport,
+        observed_at: ts,
+        aliases: vec![alias.clone()],
+        origins: Vec::new(),
+    };
+    // 1) CCS 先导入 X。
+    history.write_batch(&[ccs_write("ccs|p1", 5)]).unwrap();
+    // 2) 原生采集同内容 X：内容等值 + 更高优先级 → Update（仅升级 rank）。
+    let native = EventWrite {
+        event_key: "native|a.jsonl|0".into(),
+        precedence: WritePrecedence::NativeLog,
+        ..ccs_write("ccs|p0", 5)
+    };
+    let s = history.write_batch(&[native]).unwrap();
+    assert_eq!(s.updated, 1, "内容等值的原生确认按更新处理（升级 rank）");
+    // 3) CCS 再导 Y：与已确认的原生值冲突 → 保留原生值，不静默覆盖。
+    let s2 = history.write_batch(&[ccs_write("ccs|p2", 50)]).unwrap();
+    assert_eq!(s2.conflicts, 1, "CCS 后到按冲突保留原生值");
+    assert_eq!(history.totals().unwrap().output, 5);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 // ================================================================ 复审第二轮
 
 use tokenscope::history::EventAlias;
