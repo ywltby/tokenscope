@@ -49,6 +49,14 @@ jobs:
           if (-not $version) { throw "无法从 tauri.conf.json 读取版本" }
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
           Write-Host "应用版本：$version"
+      - name: Install acceptance fact-verifier contract (N12/M06)
+        run: |
+          python -B -m unittest discover -s scripts -p "test_inspect_history.py" -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install acceptance lifecycle contract (N12/M05)
+        run: |
+          pwsh -NoProfile -File scripts/test_install_helpers.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build production Windows x64 NSIS (without acceptance)
         run: node .\frontend\node_modules\@tauri-apps\cli\tauri.js build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
       - name: Run install / first-launch migration / reinstall / uninstall scenarios

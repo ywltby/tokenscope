@@ -152,7 +152,8 @@ function Run-AppLifecycle {
         -EvidenceRoot $EvidenceRoot -Scenario $Scenario -RunId $RunId
     $exe = Join-Path (Get-UninstallEntry).InstallLocation "TokenScope.exe"
     $context = Launch-AppOnce -ExePath $exe -Scenario $Scenario `
-        -RunId $RunId -EvidenceDir $evidenceDir
+        -RunId $RunId -EvidenceDir $evidenceDir `
+        -LiveLogsDir (Join-Path $DataDir "logs")
     try {
         $summary = Wait-CurrentSummary -Context $context -ExpectedRequests 3 `
             -TimeoutSeconds 180
@@ -214,7 +215,9 @@ try {
     Assert-True (-not (Test-Path (Join-Path $entry.InstallLocation "TokenScope.exe"))) "卸载后主程序已清除"
     Assert-True ($null -eq (Get-UninstallEntry)) "卸载后注册项已清除"
     Assert-True ((Test-Path $SettingsToml) -and (Test-Path $PricingToml) -and (Test-Path $HistoryDb)) "卸载后 ~/.tokenscope 数据保留"
-    $Summary.Add("- 卸载：程序与注册项清除，~/.tokenscope 数据保留") | Out-Null
+    # 复核要求：卸载后不只检查文件存在——保留的事实逐条校验。
+    Verify-HistoryManifest
+    $Summary.Add("- 卸载：程序与注册项清除，~/.tokenscope 数据保留（事实逐条校验一致）") | Out-Null
 
     # ---------- 场景 5：重新安装（保留数据仍可读，不重复计量） ----------
     Write-Host "=== 场景 5：重新安装 ==="

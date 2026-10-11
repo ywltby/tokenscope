@@ -60,14 +60,17 @@ function Prepare-LaunchEvidence {
     return (Join-Path $scenarioDir "logs")
 }
 
-function New-AppContext {
+function Launch-AppOnce {
     # 启动唯一实例并记录上下文。RUST_LOG=info 只在子进程启动期间设置，
     # 启动后立即恢复调用者环境（子进程已继承自己的副本）。
+    # LiveLogsDir = 应用**实际写入**的日志目录（DataDir/logs）——等待函数
+    # 只读这里；EvidenceDir 是归档/结果落盘处（复核：二者不能接反）。
     param(
         [Parameter(Mandatory = $true)][string]$ExePath,
         [Parameter(Mandatory = $true)][string]$Scenario,
         [Parameter(Mandatory = $true)][string]$RunId,
-        [Parameter(Mandatory = $true)][string]$EvidenceDir
+        [Parameter(Mandatory = $true)][string]$EvidenceDir,
+        [Parameter(Mandatory = $true)][string]$LiveLogsDir
     )
     Assert-NoAliveTokenScope
     $previousRustLog = $env:RUST_LOG
@@ -91,10 +94,24 @@ function New-AppContext {
         Scenario    = $Scenario
         RunId       = $RunId
         EvidenceDir = $EvidenceDir
+        LiveLogsDir = $LiveLogsDir
         QueryId     = $null
         Requests    = $null
         Stage       = "launched"
     }
+}
+
+function Copy-LiveLogsToEvidence {
+    # 应用退出后把**本次写入**的日志复制进证据目录——归档的是旧日志，
+    # 上传的证据必须同时包含本次新增日志（供复核确认"汇总完成"来自
+    # 本次实例）。
+    param([Parameter(Mandatory = $true)]$Context)
+    if ($null -eq $Context.LiveLogsDir -or -not (Test-Path $Context.LiveLogsDir)) {
+        return
+    }
+    $dest = Join-Path $Context.EvidenceDir "live-logs"
+    New-Item -ItemType Directory -Path $dest -Force | Out-Null
+    Copy-Item -Path (Join-Path $Context.LiveLogsDir "*") -Destination $dest -Force -ErrorAction SilentlyContinue
 }
 
 function Get-CompleteLogLines {
@@ -142,7 +159,8 @@ function Wait-CurrentSummary {
         [int]$TimeoutSeconds = 180
     )
     Assert-HelperTrue ($null -ne $Context -and $null -ne $Context.Process) "上下文缺少进程句柄"
-    $logsDir = Join-Path $Context.EvidenceDir "logs"
+    Assert-HelperTrue ($null -ne $Context.LiveLogsDir) "上下文缺少 LiveLogsDir（应用实际写入的日志目录）"
+    $logsDir = $Context.LiveLogsDir
     $pattern = '汇总完成（会话 (?<qid>[^）]+)）：by=\S+ 组=\d+ 请求=(?<requests>\d+)'
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
@@ -212,6 +230,7 @@ function Close-AppGracefully {
     Assert-HelperTrue ($Context.Process.ExitCode -eq 0) (
         "优雅关闭退出码 $($Context.Process.ExitCode) != 0"
     )
+    Copy-LiveLogsToEvidence -Context $Context
     $Context.Stage = "closed"
 }
 

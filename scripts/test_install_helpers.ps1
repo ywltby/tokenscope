@@ -57,6 +57,7 @@ function New-Scenario {
             Scenario    = $Tag
             RunId       = "run-$Tag"
             EvidenceDir = $root
+            LiveLogsDir = Join-Path $root "logs"
             QueryId     = $null
             Requests    = $null
             Stage       = "launched"
@@ -75,16 +76,11 @@ function Write-LogLine {
 }
 
 function New-GuiStandInProcess {
-    param([string]$WorkDir)
-    $standIn = Join-Path $WorkDir "gui-stand-in.ps1"
-    @'
-Add-Type -AssemblyName System.Windows.Forms
-$form = New-Object System.Windows.Forms.Form
-$form.Add_Shown({ Write-Host "STAND-IN-SHOWN" })
-[System.Windows.Forms.Application]::Run($form)
-exit 0
-'@ | Set-Content -Path $standIn -Encoding utf8NoBOM
-    return Start-Process -FilePath "pwsh" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $standIn -PassThru
+    # GUI 替身：notepad 有真实主窗口，CloseMainWindow（WM_CLOSE）→
+    # 干净退出、退出码 0——与真实 GUI 应用（close_action = "quit"）的
+    # 关闭语义一致。pwsh 是控制台宿主：关窗即 0xC000013A，不能作为
+    # "优雅退出 0"的替身。
+    return Start-Process -FilePath "notepad.exe" -PassThru
 }
 
 function New-StandInProcess {
@@ -245,7 +241,7 @@ finally {
 Write-Host "=== 正例：完整生命周期 ==="
 $s = New-Scenario "full-lifecycle"
 Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line $SummaryOk
-$proc = New-GuiStandInProcess -WorkDir $s.Root
+$proc = New-GuiStandInProcess
 $s.Context.Process = $proc
 $s.Context.Pid = $proc.Id
 try {
