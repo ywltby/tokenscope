@@ -21,6 +21,7 @@ jobs:
     outputs:
       tag: ${{ steps.metadata.outputs.tag }}
       sha: ${{ steps.metadata.outputs.sha }}
+      version: ${{ steps.metadata.outputs.version }}
       title: ${{ steps.metadata.outputs.title }}
       prerelease: ${{ steps.metadata.outputs.prerelease }}
       latest: ${{ steps.metadata.outputs.latest }}
@@ -81,8 +82,54 @@ jobs:
           retention-days: 14
           overwrite: true
 
+  # N12（安装部分）：发布前在独立 Windows job 上对**将要发布的同一个**
+  # 安装包做安装/首次启动迁移/重复安装/卸载/重新安装验收；旧版升级场景
+  # 使用仓库变量 OLD_INSTALLER_URL + OLD_INSTALLER_SHA256 钉住的固定旧包
+  #（未配置时该场景跳过并告警，其余场景照常强制）。失败即不发布。
+  install-test:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release-${{ needs.gate.outputs.sha }}
+          path: installer
+      - name: Verify installer checksums
+        run: |
+          $expected = Get-Content installer/SHA256SUMS.txt
+          $file = Get-ChildItem installer/*-setup.exe | Select-Object -First 1
+          $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $line = $expected | Where-Object { $_ -like "*$($file.Name)" }
+          if (-not $line) { throw "SHA256SUMS.txt 缺少 $($file.Name)" }
+          $expectedHash = ($line -split '\s+')[0]
+          if ($hash -ne $expectedHash) { throw "SHA256 不匹配：$hash != $expectedHash" }
+          Write-Host "SHA256 校验通过：$hash"
+      - name: Install / first-launch migration / reinstall / uninstall scenarios
+        env:
+          OLD_INSTALLER_URL: ${{ vars.OLD_INSTALLER_URL }}
+          OLD_INSTALLER_SHA256: ${{ vars.OLD_INSTALLER_SHA256 }}
+        run: |
+          $file = (Get-ChildItem installer/*-setup.exe | Select-Object -First 1).FullName
+          $args = @(
+            '-InstallerPath', $file,
+            '-AppVersion', '${{ needs.gate.outputs.version }}'
+          )
+          if ($env:OLD_INSTALLER_URL) {
+            $args += @('-OldInstallerUrl', $env:OLD_INSTALLER_URL)
+          }
+          if ($env:OLD_INSTALLER_SHA256) {
+            $args += @('-OldInstallerSha256', $env:OLD_INSTALLER_SHA256)
+          }
+          & .\scripts	est_install.ps1 @args
+          exit $LASTEXITCODE
+
   publish:
-    needs: [gate, build]
+    needs: [gate, build, install-test]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
