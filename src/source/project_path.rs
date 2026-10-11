@@ -103,6 +103,12 @@ fn from_file_uri(s: &str) -> Option<String> {
         return None;
     }
     let path = percent_decode_once(url_raw)?;
+    // `%2F` 语义（H-P3-1，刻意选择并钉住测试）：一次解码把 `%2F` 归一为
+    // `/`，因此 `file:///a%2Fb` 与 `file:///a/b` 同身份。RFC 3986 上二者
+    // 是不同资源，但真实文件系统不可能存在名字含 `/` 的目录——完整编码
+    // 斜杠的工具其真实 cwd 就是解码后的路径；而"字面 %2F 目录名"在 POSIX
+    // 上合法的情形（`/a%2Fb` 直接写法）身份仍是 `/a%2Fb`，只在"某工具把
+    // 整条路径全部百分号编码"这一假设形态下出现合并不对称，不产生双计。
     // 主机名大小写不敏感：URI 主机解析恒为小写，与直接 UNC 写法同口径
     // （`normalize_unc` 同样小写主机段），保证同路径同一身份。
     let host = url.host_str().unwrap_or("").to_ascii_lowercase();

@@ -709,6 +709,24 @@ describe("视图快照查询身份（R04）", () => {
     expect(w.find(".page-head .ts-status-pill").text()).toContain("已更新");
   });
 
+  it("first_load_failure_without_data_shows_failure_not_refreshing：首载失败且无数据 = 失败态（G-P2-1）", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null); // 无快照可恢复
+      if (cmd === "query_summary") return Promise.reject(new Error("settings broken"));
+      if (cmd === "query_events") return Promise.reject(new Error("settings broken"));
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    const pill = w.find(".page-head .ts-status-pill");
+    expect(pill.classes()).toContain("ts-pill-warning");
+    expect(pill.text()).toContain("刷新失败");
+    expect(pill.text()).not.toContain("刷新中");
+    expect(w.text()).toContain("settings broken");
+  });
+
   it("unmounted_dashboard_cannot_overwrite_new_snapshot：卸载实例的晚到响应不落盘", async () => {
     const [sumAll, resolveSumAll] = deferred<SummaryReport>();
     invokeMock.mockImplementation((cmd: string) => {

@@ -219,8 +219,31 @@ fn apply_loaded_window_state(app: &tauri::AppHandle, loaded: Option<window_state
         if ws.maximized {
             let _ = win.maximize();
         } else {
-            let _ = win.set_size(tauri::PhysicalSize::new(ws.width, ws.height));
-            let _ = win.set_position(tauri::PhysicalPosition::new(ws.x, ws.y));
+            // G-P3-3：多显示器拔除后旧 x/y 可能完全在屏幕外——与任一
+            // 可用监视器无交集就放弃恢复（保留 tauri.conf 默认尺寸/居中），
+            // 内存基线仍保留原值（重新插回显示器后可手动找回）。
+            let monitors: Vec<(i32, i32, u32, u32)> = win
+                .available_monitors()
+                .map(|list| {
+                    list.iter()
+                        .map(|m| {
+                            let p = m.position();
+                            let s = m.size();
+                            (p.x, p.y, s.width, s.height)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if window_state::restorable_on_any_monitor(&ws, &monitors) {
+                let _ = win.set_size(tauri::PhysicalSize::new(ws.width, ws.height));
+                let _ = win.set_position(tauri::PhysicalPosition::new(ws.x, ws.y));
+            } else {
+                log::warn!(
+                    "窗口状态恢复被跳过：保存的位置 ({},{}) 不在任何可用显示器内",
+                    ws.x,
+                    ws.y
+                );
+            }
         }
     }
 }

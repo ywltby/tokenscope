@@ -60,6 +60,7 @@ const preview = {
   rollups_new: 2,
   rollups_unchanged: 0,
   rollups_conflicting: 0,
+  rollups_rejected: 0,
   unsupported_apps: [["gemini", 1]] as [string, number][],
   records_without_project: 8,
 };

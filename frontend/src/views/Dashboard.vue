@@ -65,6 +65,10 @@ let freshArrived = false;
 // 失败必须可见并可重试（计划 ipc_error_visible），不再无声吞异常。
 const summaryError = ref<string | null>(null);
 const eventsError = ref<string | null>(null);
+/// G-P3-4：记录明细失败发生在首页还是追加页——追加失败的原地重试必须
+/// 仍走追加，不把已累积分页重置回首页。仅 failure 路径写该标记；
+/// 重试前还要求末行游标仍在（loadEvents(append) 内部守卫兜底）。
+const eventsFailureWasAppend = ref(false);
 // C4（F08）：快照必须携带查询身份——修复前 report 与 events 来自各自
 // 的请求，保存时可能混搭不同筛选的两代数据，恢复时筛选已重置而数据
 // 还是旧口径。eventsKey 记录明细当前所属的筛选上下文，两者一致才落盘。
@@ -147,6 +151,10 @@ const statusPill = computed<{ cls: string; text: string }>(() => {
     return { cls: "ts-pill-warning", text: "缓存数据 · 刷新失败" };
   if (stale.value && loading.value)
     return { cls: "ts-pill-warning", text: "缓存数据 · 后台刷新中" };
+  // 首载失败且无任何数据可恢复：必须显示失败而非"刷新中"（G-P2-1）——
+  // !report 分支要先看错误，否则错误态对无数据场景不可达。
+  if (!report.value && summaryError.value)
+    return { cls: "ts-pill-warning", text: "刷新失败 · 暂无数据" };
   if (loading.value || !report.value) return { cls: "ts-pill-info", text: "刷新中…" };
   if (summaryError.value) return { cls: "ts-pill-warning", text: "刷新失败 · 显示上次数据" };
   return { cls: "ts-pill-success", text: "已更新" };
@@ -443,6 +451,7 @@ async function loadEvents(append = false): Promise<void> {
   } catch (e) {
     if (seq === eventsSeq && !disposed) {
       eventsError.value = errorText(e);
+      eventsFailureWasAppend.value = append;
       // RC02：会话失效 → 恢复动作改为新建批次（局部重试无意义）。
       if (isQueryExpired(e)) sessionReady.value = false;
     }
@@ -568,6 +577,10 @@ function retryAfterFailure(scope: "summary" | "events"): void {
     startRefreshBatch();
   } else if (scope === "summary") {
     void refresh();
+  } else if (eventsFailureWasAppend.value && events.value?.rows.at(-1)?.cursor) {
+    // G-P3-4：追加页失败的重试仍走追加（首页身份与锚点均未失效），
+    // 不把用户已翻到的分页进度重置回首页。
+    void loadEvents(true);
   } else {
     void loadEvents();
   }

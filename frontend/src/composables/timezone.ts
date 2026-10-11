@@ -26,7 +26,7 @@ function initial(): string {
   if (saved != null && validTz(saved)) return saved;
   if (saved != null) {
     // 无日志后端可用（前端层），console.warn 足够——不影响渲染。
-    console.warn(`持久化时区偏好非法（"{saved}"），回退默认 "${DEFAULT_TZ}"`);
+    console.warn(`持久化时区偏好非法（"${saved}"），回退默认 "${DEFAULT_TZ}"`);
   }
   return DEFAULT_TZ;
 }

@@ -76,7 +76,12 @@ const columns = computed<DataTableColumn[]>(() => {
       className: "ts-num",
       render: (row) => {
         const g = asGroup(row);
-        const text = formatMoney(g.cost_usd, "summary") + (g.unknown_pricing ? "†" : "");
+        // 与 SummaryCards 同口径：完全未计价显示"未知†"而不是 $0.00
+        //（缺价 ≠ 免费，G-P3-1）。
+        const unknownOnly = g.unknown_pricing && g.cost_usd === 0;
+        const text = unknownOnly
+          ? "未知†"
+          : formatMoney(g.cost_usd, "summary") + (g.unknown_pricing ? "†" : "");
         // 未知标记用警告色显式呈现，不用 opacity 压低（DESIGN.md §1）
         return h("span", { style: g.unknown_pricing ? "color: var(--ts-warning)" : "" }, text);
       },

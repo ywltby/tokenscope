@@ -54,6 +54,19 @@ fn file_uri_decodes_once() {
 }
 
 #[test]
+fn file_uri_encoded_slash_merges_with_plain_path() {
+    // H-P3-1 钉住刻意语义：一次解码使 `%2F` 归一为 `/`——`file:///a%2Fb`
+    // 与 `file:///a/b`、cwd 字面 `/a/b` 同身份（见 project_path.rs 内注释）。
+    // 该合并只在"工具把整条路径全百分号编码"的假设形态下与字面 `/a%2Fb`
+    // 目录名不对称；真实文件系统不存在名字含 `/` 的目录，不产生双计。
+    assert_eq!(norm("file:///a%2Fb").as_deref(), Some("/a/b"));
+    assert_eq!(norm("file:///a/b").as_deref(), Some("/a/b"));
+    // 二次编码（%252F）解码一次后是字面 `%2F`，与字面写法同身份、不并入 /a/b。
+    assert_eq!(norm("file:///a%252Fb").as_deref(), Some("/a%2Fb"));
+    assert_eq!(norm("/a%2Fb").as_deref(), Some("/a%2Fb"));
+}
+
+#[test]
 fn file_uri_rejects_dot_segments_and_nul() {
     // A01 修订（审查）：URI 路径同样受"拒绝 . / .. 组件、不做折叠"的约束——
     // URL 解析器会静默折叠点段，所以必须在交给解析器之前自行检查。

@@ -283,7 +283,9 @@ fn ingest_line(
         stats.bad_lines += 1;
         return;
     };
-    if msg.model == SYNTHETIC_MODEL {
+    // trim 后比较（H-P3-2）：真实 Claude Code 恒写精确 "<synthetic>"，
+    // 但带空白的变体同样是合成行——按字面比较会让它以 0 token 计入请求。
+    if msg.model.trim() == SYNTHETIC_MODEL {
         stats.skipped_synthetic += 1;
         return;
     }
@@ -545,6 +547,16 @@ mod tests {
         let col = collect_text(line);
         assert!(col.events.is_empty());
         assert_eq!(col.stats.skipped_synthetic, 1);
+    }
+
+    #[test]
+    fn test_synthetic_with_padding_still_skipped() {
+        // H-P3-2 防御深度：带空白的 "<synthetic>" 变体不得以 0 token 计请求。
+        let line = r#"{"type":"assistant","timestamp":"2026-07-17T08:00:00.000Z","sessionId":"s1","message":{"id":"m1","model":" <synthetic> ","usage":{"input_tokens":0,"output_tokens":0}}}"#;
+        let col = collect_text(line);
+        assert!(col.events.is_empty());
+        assert_eq!(col.stats.skipped_synthetic, 1);
+        assert_eq!(col.stats.bad_lines, 0);
     }
 
     fn fixture(p: &str) -> PathBuf {

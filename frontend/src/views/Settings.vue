@@ -1175,8 +1175,10 @@ defineExpose({ priceColumns });
                   {{ fmtNum(ccsPreview.requests_skipped_duplicate_of_proxy) }}、字段不合法
                   {{ fmtNum(ccsPreview.requests_rejected) }}；日汇总
                   {{ fmtNum(ccsPreview.rollups_total) }} 条（新增
-                  {{ fmtNum(ccsPreview.rollups_new) }}、冲突
-                  {{ fmtNum(ccsPreview.rollups_conflicting) }}）。
+                  {{ fmtNum(ccsPreview.rollups_new) }}、已存在
+                  {{ fmtNum(ccsPreview.rollups_unchanged) }}、冲突
+                  {{ fmtNum(ccsPreview.rollups_conflicting) }}、不支持/不合法被拒
+                  {{ fmtNum(ccsPreview.rollups_rejected) }}）。
                 </div>
               </div>
             </div>

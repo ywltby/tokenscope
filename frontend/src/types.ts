@@ -92,6 +92,8 @@ export interface CcsImportPreview {
   rollups_new: number;
   rollups_unchanged: number;
   rollups_conflicting: number;
+  /** 不支持的应用与字段非法的日汇总行数（total 可大于其余三分量之和）。 */
+  rollups_rejected: number;
   unsupported_apps: [string, number][];
   records_without_project: number;
 }
