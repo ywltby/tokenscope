@@ -9,10 +9,10 @@
 **Tech Stack:** Rust / SQLite / Tauri 2 / Vue 3，以及现有 Rust、Vitest、浏览器和原生 acceptance 测试工具。
 
 - 整理日期：2026-10-11。
-- 状态：**最新 `e99a4f3`：9 项完成、1 项部分完成、3 项本轮验收未执行，共 4 项待办。** N01–N09 已完成；M08/M09 版本及当前 PR 触发问题闭合。M05 写入后退出仍误通过，M06 项目路径已修而逐记录 cwd 仍未验，新增 M10 的 PR 路径过滤遗漏，N12 部分完成；当前暂不建议合并 main。详见[第三轮安装修复独立复核](../../reviews/2026-10-11-main-merge-readiness.md#install-third-recheck)；此前各轮结果保留为历史。本轮只更新复核与状态文档。
+- 状态：**最新 `b875815`：9 项完成、1 项部分完成、3 项本轮验收未执行，共 4 项待办。** N01–N09 已完成；M10 的 PR 路径过滤已闭合。M05 已拦住退出码 23，但仍会借旧日志误通过；M06 已读取三字段并检出整批损坏，但单条初始 cwd 丢失或逐记录错配仍漏检。N12 部分完成；当前暂不建议合并 main。详见[第四轮安装修复独立复核](../../reviews/2026-10-11-main-merge-readiness.md#install-fourth-recheck)；此前各轮结果保留为历史。本轮只更新复核与状态文档。
 - 核对范围：原 active 的 25 份计划、对应 audits、M1–M11 归档、D5 清单、当前源码与测试内容、可用的历史 QA 产物和实际 CI/发布记录。
 - 整理核对起点：`add8319`；后续修复提交 `3e645f3` 的 7 项已完成独立复核与最终门禁，见[复核记录](../../reviews/2026-10-11-history-seven-fixes-recheck.md)。此前工作区结果保留为历史，不再作为当前交付结论。
-- 最新实现核对：`e99a4f39f61eac9c255da2b9d692b6b7f9c9321e`；M01 的完整本地门禁基线为 `a58684c`，安装 workflow 和脚本另做静态/隔离验证。下方早期反例与执行账保留发生时的结果，当前状态以任务表及最新复核为准。执行者声明不能代替独立验证。
+- 最新实现核对：`b87581597b49906d5b5e5fc25023199171e1e063`；M01 的完整本地门禁基线为 `a58684c`，安装 workflow 和脚本另做静态/隔离验证。下方早期反例与执行账保留发生时的结果，当前状态以任务表及最新复核为准。执行者声明不能代替独立验证。
 - 总账：[计划目录](../README.md)；逐份结论：[审计索引](../audits/README.md)；发布附属清单：[D5](../d5-acceptance-checklist.md)。
 
 ## 1. 优先级与状态规则
@@ -42,7 +42,7 @@
 
 ## 3. 唯一任务状态表
 
-保留 13 个稳定责任编号，其中 N01–N09 已完成，N12 部分完成，N10/N11/N13 本轮验收未执行，共 4 项仍有待办。版本与合并前 PR 入口已修；当前仍有 M05/M06 安装验收缺口和 M10 PR 过滤遗漏。修复后通过当前产物的 PR 安装及普通 CI 两种验证，各自记账；其他系统/性能验收仍按原排期。发布前必做不等于现在改变系统、安装应用或发布版本。
+保留 13 个稳定责任编号，其中 N01–N09 已完成，N12 部分完成，N10/N11/N13 本轮验收未执行，共 4 项仍有待办。版本、合并前 PR 入口及 M10 过滤已修；当前仍有 M05/M06 两个安装验收缺口。修复后通过当前产物的 PR 安装及普通 CI 两种验证，各自记账；其他系统/性能验收仍按原排期。发布前必做不等于现在改变系统、安装应用或发布版本。
 
 | ID | 优先级 | 任务 | 当前状态 | 是否仍有必要 / 来源 |
 | --- | --- | --- | --- | --- |
@@ -57,7 +57,7 @@
 | N09 | P2 | 测试确定性、路径隔离与当前门禁 | 已完成；`a58684c` 闭合 M01，history.db 路径清单、落盘产物及有效 SQLite 七表校验实测通过；两套 manifest 的普通/acceptance 和前端门禁全绿 | 必须；review-findings Task6、来源策略测试、当前合并门禁 |
 | N10 | P2 | 隐私原生取证工具与当前完整浏览器矩阵 | P01–P05 已实现；P06 的强验收未闭合 | 必须；最新隐私计划 P06 |
 | N11 | P2 | 最新项目/模型/CCS 原生统一验收 | 分别存在待验，合并一次执行 | 必须；A06/B03、MP06、H08、设计 Task8 |
-| N12 | P2（M05 健康三信号、M06 三 cwd 字段、M10 过滤补齐已修，待 PR 实跑取证）；其余系统验收 P3 | 当前产物的 D5 系统、安装及发布验收 | 四项已修：M05 启动健康三信号（-wal 更新 + 日志"历史库写入" + 优雅关闭退出码 0）；M06 cwd 三字段全验（project/session_initial_cwd 严格集合 + event_cwd 全空）；M10 PR paths 补 src/**、Cargo.toml、Cargo.lock、.github/actions/**。待 PR CI 取得实跑结果 | 系统验收随发布批次；D5、RC11/AP08 |
+| N12 | P2（验收断言收紧完成，待 PR 实跑取证）；其余系统验收 P3 | 当前产物的 D5 系统、安装及发布验收 | M05 健康信号只认**本次启动新增**的日志字节（启动前记录文件偏移，借用旧日志的隔离进程不再通过）；M06 升级为按 record_id **逐条核对**全部 cwd 字段与 NULL 语义（单条置 NULL/两条互换不再漏检）；M10 过滤闭合。待 PR CI 实跑取证；固定旧包升级及系统/发布签字待验 | 系统验收随发布批次；D5、RC11/AP08 |
 | N13 | P3 | 历史库实际冷/热启动性能基准 | 新历史库真实规模复测未执行 | 有必要，排在正确性之后；H07、旧 D4/性能建议 |
 
 ## 4. 各任务实施与验收
@@ -193,8 +193,8 @@
 
 - 从旧 roadmap D5、多个 remediation 真机尾项、RC11/AP08、M3/M8/M11 的自身安装或运行项、CI 方案6 合并，不分别做重复签字；M4/M5/M7/M9 的界面项在 N11。
 - 附属规范：[D5 清单](../d5-acceptance-checklist.md)。当前计划持有任务状态，清单记录步骤和签字。
-- 最新安装门禁：`e99a4f3` 的 M08 版本步骤实际写出 0.1.0，M09 新增 pull_request/main，当前 workflow 修改命中路径，合并前 PR 路线可用；手动入口仍遵循默认分支规则。M02/M03/M04/M07 与 PS7 声明保持闭合；原旧 WAL 未变化和错误项目路径后缀两例现在被拒绝。详见[本轮独立复核](../../reviews/2026-10-11-main-merge-readiness.md#install-third-recheck)，不能把接线完成当安装通过。
-- 仍有 M05/M06：真实 SQLite 写入辅助启动标记后退出 23，原等待返回，观察 8 秒后五断言通过；项目路径正确但初始/事件 cwd 全改错也五断言通过。须核对本次进程存活、初始化/查询完成和逐记录 cwd/NULL 语义。新增 M10：PR paths 漏根 src/、根 Cargo 与 .github/actions/setup，具体候选路径匹配均 false；当前 workflow 变更会触发。当前 SHA 无 PR/Actions 运行。所有受控探针仅操作临时数据/模拟外部动作，见[证据](../../reviews/2026-10-11-main-merge-readiness.md#install-third-recheck)。
+- 最新安装门禁：`b875815` 已闭合 M10，实际 YAML 对根 src/Cargo/setup 等八个输入路径均匹配；Release 的 needs/publish 依赖保持正确。M05 退出码 23 现在失败 1，M06 整批初始/事件 cwd 改错失败 2；此前版本、当前 PR 入口、旧 WAL 和项目后缀问题保持闭合。详见[本轮独立复核](../../reviews/2026-10-11-main-merge-readiness.md#install-fourth-recheck)，不能把接线完成当安装通过。
+- 仍有 M05/M06：真实 SQLite 子进程只写辅助表、不读历史记录、不输出新日志，退出 0，旧日志借用后十项断言仍通过；单条初始 cwd 改 NULL 或两条记录初始 cwd 互换，各七项断言仍通过。须限定本次新增且可归属本次实例的初始化/历史查询成功信号，按稳定请求身份核对逐记录 cwd/NULL 语义。当前分支无打开 PR，当前 SHA 全事件 Actions runs=0；所有受控探针仅操作临时数据并替代外部启动，见[证据](../../reviews/2026-10-11-main-merge-readiness.md#install-fourth-recheck)。
 - 仍需：新产物安装/保留数据升级/卸载；单实例、关窗/托盘、窗口记忆、自启、休眠恢复；真实 125%/跨监视器、系统深色的新隐私引导首帧和 Ready 后偏好恢复；隐私政策在 100%/125%/150% 可读。
 - 已有旧版当前显示器 150%、CSP/TTL 证据保留；强制 WebView device scale 不能签 Windows 系统 DPI，旧偏好首帧不能签当前隐私引导。
 - M11 运行验收与隐私批次复用：Ready 后跨过 120 秒观察价格检查/同步，关闭后不再请求，重新开启恢复；按实际快照新鲜度设置合成条件，不把“线程已接线”当作计时通过。休眠恢复与 D5 3.8 同批。
@@ -228,7 +228,7 @@
 
 ## 6. 实施顺序与验证命令
 
-N01–N09 已完成，不重复实施；先补 N12 的 M05/M06 安装验收与 M10 PR 过滤缺口，取得当前产物的 PR 安装实跑结果，并按正常流程通过普通 CI；两种验证各自记账。后续做 N10/N11；N12 其余系统与正式签字随发布批次，N13 随性能验收排期。可以合并同一文件的回归，但不能以较低优先级视觉工作阻塞门禁与用量正确性。
+N01–N09 已完成，不重复实施；先补 N12 的 M05/M06 两个安装验收缺口，M10 不重复实施；再取得当前产物的 PR 安装实跑结果，并按正常流程通过普通 CI，两种验证各自记账。后续做 N10/N11；N12 其余系统与正式签字随发布批次，N13 随性能验收排期。可以合并同一文件的回归，但不能以较低优先级视觉工作阻塞门禁与用量正确性。
 
 新增测试名先在实际目标文件中登记，再执行；本计划提出的断言不是已经存在或已经通过的测试。N08 的现有目标为 `model_name_equivalence`、`model_identity_contract` 和 `pricing_source_policy`。
 
@@ -283,7 +283,8 @@ python -B -m unittest discover -s scripts -p "test_release_metadata.py" -v
 | 2026-10-11 | 第三轮复核 T01/T02 修复（执行） | 完成 | T01 批内来源身份补 origin_kind（resolve 与 register 共用 origin_claim_key，与 UNIQUE(origin_kind, origin_key) 同域）+ 两场景预览/提交对账回归；T02 report.rs 九处直构选项注入 pricing_path（含两个游标 fixture 与 append/no-reparse 稳定性测试），apply_time_filter 纯过滤构造与 acceptance/perf 默认路径用例按口径豁免；并行全量 6/6 稳定（456/10，含新回归） |
 | 2026-10-11 | 第二轮复核 M02–M07 修复（执行者声明） | 声明完成；独立复核仅四项闭合 | M02 install-test needs 补 [gate, build]（outputs 直依规则）；M03 workflow 调用路径的实际制表符（	 转义事故）清除并全文扫零；M04 make_legacy_cache 创建数据父目录；M05 场景 5 改 -wal 出现证明新实例打开既有库 + 观察期后无重复断言；M06 cwd 断言从计数升级为路径级（inspect_history --projects）；M07 旧包 SHA 必填且不匹配在安装前中止；新增 install-test.yml（workflow_dispatch）支持合并前对当前产物实跑安装验收；utf8NoBOM 兼容性声明纠正为 #Requires -Version 7（pwsh 默认 shell） |
 | 2026-10-11 | 第三轮复核 M05/M06/M08/M09 修复（执行者声明） | 声明完成；独立复核部分通过 | M05 Wait-AppDbUse 以 -wal LastWriteTime 晚于启动为准（遗留 WAL 一直存在不算数）；M06 --projects 模式 + 严格集合相等断言（本地验证 3/180/35/2 与两条路径）；M08 install-test.yml 版本改读 tauri.conf.json（分支名不是版本）；M09 增加 pull_request 触发 + paths 过滤（工作流随 PR 落入 main，M09 的默认分支规则随之满足，PR CI 即合并前安装实跑）；install-test.yml 触发器/步骤经 YAML 解析验证 |
-| 2026-10-11 | 第三轮复核 M05/M06/M10 修复（执行） | 完成 | M05 Start-AppHealthy 三健康信号（-wal 更新、日志"历史库写入"、优雅关闭退出码 0）+ Close-AppGracefully，写库后崩溃不再误通过；M06 inspect_history --cwd 模式 + 三字段断言（project 严格集合、session_initial_cwd 严格集合、event_cwd 全空）；M10 install-test.yml PR paths 补 src/**、Cargo.toml、Cargo.lock、.github/actions/**（当前 PR 改动命中过滤，PR CI 即含安装实跑） |
+| 2026-10-11 | 第三轮复核 M05/M06/M10 修复（执行者声明） | 声明完成；独立复核部分通过 | M05 Start-AppHealthy 三健康信号（-wal 更新、日志"历史库写入"、优雅关闭退出码 0）+ Close-AppGracefully，写库后崩溃不再误通过；M06 inspect_history --cwd 模式 + 三字段断言（project 严格集合、session_initial_cwd 严格集合、event_cwd 全空）；M10 install-test.yml PR paths 补 src/**、Cargo.toml、Cargo.lock、.github/actions/**（当前 PR 改动命中过滤，PR CI 即含安装实跑） |
+| 2026-10-11 | 第四轮复核 M05/M06 修复（执行） | 完成 | M05 Start-AppHealthy 启动前记录日志文件偏移、只扫描**新增字节**找"历史库写入"信号（借用旧日志的隔离进程不再通过），wal 更新与优雅关闭退出码 0 保留；M06 inspect_history --records 按 record_id 逐行输出 project/session_initial_cwd/event_cwd/input/output（缺值 NULL），断言与已知三行**严格集合相等**——单行初始 cwd 置 NULL、两条互换、event_cwd 改错均不再漏检（本地以当前 schema 构造库验证 --records 输出与预期逐字相等） |
 | 2026-10-11 | N12 安装门禁接入（执行） | 完成（安装部分） | Release workflow 新增 install-test job（build 与 publish 之间）：下载同一 artifact、校验 SHA256、按场景验收（全新安装/首启迁移/重复安装/卸载/重新安装 + 可选固定旧包升级）；迁移断言查请求数、token、cwd 而非文件存在；scripts/make_legacy_cache.py 合成 v10 旧数据、scripts/inspect_history.py 提供验收读数；PS1 带 BOM+CRLF（PS 5.1 中文系统兼容）。真实 DPI/跨显示器/休眠/自启保留本机或自托管；N12 不因此整项标完成 |
 | 2026-10-11 | 第四轮 M01 修复（执行） | 完成 | native_acceptance 的默认数据库路径检查、量测标签与落盘产物断言从 cache.db 更新为 history.db，并核对有效 SQLite 历史库（usage_events/event_aliases/event_origins/source_files/ccs_daily_usage/import_runs/history_meta 七表）；workspace+acceptance 门禁通过（456/10） |
 | 2026-10-11 | 文档整理与复核交付范围 | 仅本批文档 | 本次不改产品代码；同步当前审计与整合计划，保留其他正在推进的研究改动 |
@@ -319,3 +320,4 @@ python -B -m unittest discover -s scripts -p "test_release_metadata.py" -v
 | 2026-10-11 | 两份执行答复统一复核 | M01 再次通过；M02–M07 未闭合 | M01 3 pass/2 ignored、metadata 7 pass；M02–M04 复现。提取原 PS1 函数：模拟应用退出码 23、旧库不变、两项目路径均错误，等待返回 3/180/35/2 且四断言通过；提取原旧包块：缺 SHA 零失败/安装两次，错 SHA 一个失败/仍安装两次。仅 mock 外部安装/网络/重置动作，未操作真实用户数据；BOM/CRLF 属实，PS5.1 的 utf8NoBOM 参数不兼容另记边界 |
 | 2026-10-11 | `cc7b7d3` 安装修复独立复核 | M02/M03/M04/M07 闭合；N12 部分完成 | 两份 workflow needs/路径/无制表符通过；缺父目录造 v10 库为 3/180/35/2；旧包缺/错 SHA 安装调用均 0，正确 SHA 为 2/零失败；版本声明 7.0。M05 遗留 WAL+新实例退出 23 仍六断言通过，M06 错误路径后缀仍六断言通过；M08 分支名版本断言失败，M09 默认 main 无手动工作流入口。实际 acceptance 3/2、review_regressions 29、metadata 7 通过；全事件 Actions 当前 SHA 运行 0、无打开 PR。9 完成/1 部分完成/3 待验；未运行真实安装、不提交推送 |
 | 2026-10-11 | `e99a4f3` 第三轮安装独立复核 | M08/M09 闭合，M05/M06 部分修复；N12 部分完成 | 实际版本步骤输出 0.1.0，当前 PR 入口有效；旧 WAL 不变超时，错误项目路径失败 1。写 WAL 后退出 23、真实等待 8 秒仍五断言通过；初始/事件 cwd 全改错也五断言通过。新增 M10：根 src/Cargo/setup 单独修改不匹配安装 paths。acceptance 3/2、review_regressions 29、metadata 7 通过；无 PR/Actions，0 behind/54 ahead；9 完成/1 部分完成/3 待验；未运行真实安装，不提交推送 |
+| 2026-10-11 | `b875815` 第四轮安装独立复核 | M10 闭合，M05/M06 部分修复；N12 部分完成 | 退出 23 失败 1，整批 cwd 损坏失败 2，八条输入路径均匹配；旧日志加只写辅助表后退出 0 仍十断言通过，单条初始 cwd 丢失或两条互换各七断言通过。迁移 8、acceptance 3/2、review_regressions 29、metadata 7 通过；无 PR/Actions，0 behind/55 ahead；9 完成/1 部分完成/3 待验；未运行真实安装，不提交推送 |

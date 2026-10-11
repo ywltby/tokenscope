@@ -160,24 +160,54 @@ function Start-AppHealthy {
     Assert-True (
         (Test-Path $wal) -and ((Get-Item $wal).LastWriteTime -gt $launchedAt)
     ) "历史库被本次实例打开并写入（-wal 修改时间已更新）"
-    # (b) 初始化/查询成功信号：日志出现"历史库写入"（采集提交完成）。
+    # (b) 初始化/查询成功信号：只接受**本次启动新增**的日志字节——
+    # 启动前记录每个日志文件的偏移，之后仅扫描新增部分；借用旧日志的
+    # 隔离进程（不写新日志）无法满足该信号（第五轮复核反例）。
+    $logOffsets = @{}
+    if (Test-Path $logsDir) {
+        Get-ChildItem $logsDir -File -ErrorAction SilentlyContinue |
+            ForEach-Object { $logOffsets[$_.FullName] = $_.Length }
+    }
     $logDeadline = (Get-Date).AddSeconds(60)
     $found = $false
-    while ((Get-Date) -lt $logDeadline) {
+    while (-not $found -and (Get-Date) -lt $logDeadline) {
         if (Test-Path $logsDir) {
-            $hit = Get-ChildItem $logsDir -File -ErrorAction SilentlyContinue |
-                Select-String -SimpleMatch "历史库写入" -ErrorAction SilentlyContinue
-            if ($hit) {
-                $found = $true
-                break
+            foreach ($logFile in Get-ChildItem $logsDir -File -ErrorAction SilentlyContinue) {
+                $start = 0
+                if ($logOffsets.ContainsKey($logFile.FullName)) {
+                    $start = $logOffsets[$logFile.FullName]
+                }
+                if ($logFile.Length -le $start) {
+                    continue
+                }
+                try {
+                    $stream = [System.IO.File]::OpenRead($logFile.FullName)
+                    try {
+                        $stream.Seek($start, [System.IO.SeekOrigin]::Begin) | Out-Null
+                        $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+                        $tail = $reader.ReadToEnd()
+                    }
+                    finally {
+                        $reader.Dispose()
+                    }
+                    if ($tail -like "*历史库写入*") {
+                        $found = $true
+                        break
+                    }
+                }
+                catch [System.IO.IOException] {
+                    # 日志写入方持锁：稍后重试。
+                }
             }
         }
-        if ($proc.HasExited) {
-            break
+        if (-not $found) {
+            if ($proc.HasExited) {
+                break
+            }
+            Start-Sleep -Seconds 2
         }
-        Start-Sleep -Seconds 2
     }
-    Assert-True $found "日志出现初始化/查询成功信号（历史库写入）"
+    Assert-True $found "本次启动新增日志包含查询成功信号（历史库写入）"
     return $proc
 }
 
@@ -222,27 +252,19 @@ function Assert-MigratedFacts {
     Assert-True ($null -ne $facts -and $facts.Input -eq 180) "输入 token 合计 = 180（实际 $($facts.Input)）"
     Assert-True ($null -ne $facts -and $facts.Output -eq 35) "输出 token 合计 = 35（实际 $($facts.Output)）"
     Assert-True ($null -ne $facts -and $facts.Projects -eq 2) "项目 cwd 去重 = 2（实际 $($facts.Projects)）"
-    # M06 修订：三个 cwd 字段全部验到——project_key 与 session_initial_cwd
-    # 必须与已知路径**严格集合相等**，event_cwd 必须全空（子串/包含匹配
-    # 或只验 project_key 都会让元数据改错时仍然通过）。
-    $actualProjects = @(python (Join-Path $RepoRoot "scripts\inspect_history.py") $HistoryDb "--projects" |
+    # M06 修订二：**按请求身份逐条核对**全部 cwd 字段与 NULL 语义——
+    # DISTINCT 集合相等验不出"单行改 NULL"与"两条互换"（第五轮复核
+    # 反例）。记录行按 record_id 排序后与已知行**严格集合相等**。
+    $expectedRecords = @(
+        "record_id=m1|project=C:/work/alpha|session_initial_cwd=C:/work/alpha|event_cwd=NULL|input=100|output=20",
+        "record_id=m2|project=C:/work/alpha|session_initial_cwd=C:/work/alpha|event_cwd=NULL|input=50|output=10",
+        "record_id=m3|project=C:/work/beta|session_initial_cwd=C:/work/beta|event_cwd=NULL|input=30|output=5"
+    ) | Sort-Object
+    $actualRecords = @(python (Join-Path $RepoRoot "scripts\inspect_history.py") $HistoryDb "--records" |
         ForEach-Object { $_.Trim() } |
         Where-Object { $_ -ne "" } |
         Sort-Object)
-    $expectedProjects = @("C:/work/alpha", "C:/work/beta") | Sort-Object
-    Assert-True (($actualProjects -join "`n") -eq ($expectedProjects -join "`n")) "项目 cwd 严格相等（实际 $($actualProjects -join ', ')）"
-    $cwdLines = @(python (Join-Path $RepoRoot "scripts\inspect_history.py") $HistoryDb "--cwd" |
-        ForEach-Object { $_.Trim() } |
-        Where-Object { $_ -ne "" })
-    $actualSics = @($cwdLines |
-        Where-Object { $_ -like "session_initial_cwd=*" } |
-        ForEach-Object { $_.Substring("session_initial_cwd=".Length) } |
-        Sort-Object)
-    Assert-True (($actualSics -join "`n") -eq ($expectedProjects -join "`n")) "会话初始 cwd 严格相等（实际 $($actualSics -join ', ')）"
-    $eventCwdNonNull = [int]($cwdLines |
-        Where-Object { $_ -like "event_cwd_nonnull=*" } |
-        ForEach-Object { $_.Substring("event_cwd_nonnull=".Length) })
-    Assert-True ($eventCwdNonNull -eq 0) "event_cwd 全空（非空 $($eventCwdNonNull) 条）"
+    Assert-True (($actualRecords -join "`n") -eq ($expectedRecords -join "`n")) "逐条记录（record_id/project/初始 cwd/event_cwd/token）严格相等（实际 $($actualRecords -join ' ; ')）"
 }
 
 $Summary = New-Object System.Collections.Generic.List[string]

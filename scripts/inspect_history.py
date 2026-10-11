@@ -9,6 +9,12 @@
       逐行输出 `session_initial_cwd=<路径>`（去重非空、排序）与
       `event_cwd_nonnull=<n>`，供 cwd 元数据级断言使用（M06：三个
       cwd 字段都要验到，不只 project_key）。
+  python scripts/inspect_history.py <history.db> --records
+      按 record_id 排序逐行输出
+      `record_id=..|project=..|session_initial_cwd=..|event_cwd=..|input=..|output=..`
+      （缺值输出 NULL）——供**按请求身份逐条核对** cwd 字段与 NULL
+      语义的断言使用（M06：DISTINCT 集合相等验不出单行改 NULL 或
+      两条互换）。
 """
 
 from __future__ import annotations
@@ -25,8 +31,9 @@ def open_readonly(db: str):
 
 
 def main() -> int:
-    args = [a for a in sys.argv[1:] if a not in ("--projects", "--cwd")]
-    modes = [a for a in sys.argv[1:] if a in ("--projects", "--cwd")]
+    args = [a for a in sys.argv[1:] if a not in ("--projects", "--cwd", "--records")]
+    modes = [a for a in sys.argv[1:] if a in ("--projects", "--cwd", "--records")]
+    records_mode = "--records" in modes
     cwd_mode = "--cwd" in modes
     projects_mode = "--projects" in modes
     if len(args) != 1:
@@ -45,6 +52,20 @@ def main() -> int:
         }
         if "usage_events" not in tables:
             print("absent" if modes == [] else "")
+            return 0
+        if records_mode:
+            rows = con.execute(
+                "SELECT record_id, project_key, session_initial_cwd, event_cwd, "
+                "input_tokens, output_tokens FROM usage_events "
+                "WHERE record_id IS NOT NULL AND record_id <> '' ORDER BY record_id"
+            ).fetchall()
+            for rid, proj, sic, ecwd, inp, outp in rows:
+                print(
+                    f"record_id={rid}|project={proj or 'NULL'}"
+                    f"|session_initial_cwd={sic or 'NULL'}"
+                    f"|event_cwd={ecwd or 'NULL'}"
+                    f"|input={inp}|output={outp}"
+                )
             return 0
         if cwd_mode:
             sics = sorted(
