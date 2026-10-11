@@ -2164,3 +2164,90 @@ fn batch_preview_does_not_persist_alternate_event_keys() {
     assert_eq!(history.event_count().unwrap(), 2);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// T01：批内来源身份是**完整二元组** `(origin_kind, origin_key)`——不同
+/// 种类的同值键是不同身份。两个合法场景的预览/提交对账：
+/// 1) 空库插入 A/native_file 与 B/ccs_request（同键）→ 两条独立事实；
+/// 2) 已有 A/B 各自补同键不同种类的来源证据 → 两条未变化、证据各自落位。
+#[test]
+fn batch_preview_origin_identity_includes_kind() {
+    let dir = temp_dir("t01-origin-kind");
+    let history = history_of(&dir);
+    let ts: jiff::Timestamp = "2026-09-15T08:00:00Z".parse().unwrap();
+    let origin = |kind: &str, key: &str| tokenscope::history::EventOrigin {
+        origin_kind: kind.into(),
+        origin_key: key.into(),
+        app: AgentKind::ClaudeCode,
+        import_run_id: None,
+        parser_revision: 1,
+        source_model_raw: None,
+        pricing_model: None,
+        source_cost_usd: None,
+        ts_precision_seconds: true,
+    };
+    let write =
+        |key: &str, output: u64, origins: Vec<tokenscope::history::EventOrigin>| EventWrite {
+            event_key: key.into(),
+            app: AgentKind::ClaudeCode,
+            ts,
+            model_raw: "claude-opus-5-5".into(),
+            model_identity: "claudeopus55".into(),
+            session_id: Some("s1".into()),
+            record_id: Some("m1".into()),
+            project_key: Some("/work/app".into()),
+            session_initial_cwd: None,
+            event_cwd: None,
+            tokens: TokenCounts {
+                input: 10,
+                output,
+                cache_write: 0,
+                cache_read: 0,
+            },
+            precedence: WritePrecedence::CcsImport,
+            observed_at: ts,
+            aliases: Vec::new(),
+            origins,
+        };
+
+    // 场景 1：空库插入两种来源的同值键 → 两条独立事实。
+    let w1 = write("fact-a", 10, vec![origin("native_file", "shared-key")]);
+    let w2 = write("fact-b", 20, vec![origin("ccs-request", "shared-key")]);
+    let classes = history.classify_batch(&[w1.clone(), w2.clone()]).unwrap();
+    assert_eq!(
+        classes,
+        vec![
+            tokenscope::history::WriteClass::Insert,
+            tokenscope::history::WriteClass::Insert
+        ],
+        "不同来源种类的同值键不是同一身份"
+    );
+    let s = history.write_batch(&[w1, w2]).unwrap();
+    assert_eq!(s.inserted, 2);
+    assert_eq!(history.event_count().unwrap(), 2);
+
+    // 场景 2：两条事实（无来源证据）各自补同键不同种类的证据 → 未变化、
+    // 证据各自落位，不被误报为来源冲突。
+    let dir2 = temp_dir("t01-origin-kind-evidence");
+    let history2 = history_of(&dir2);
+    let bare = |key: &str, output: u64| write(key, output, Vec::new());
+    history2
+        .write_batch(&[bare("fact-a", 10), bare("fact-b", 20)])
+        .unwrap();
+    let w3 = write("fact-a", 10, vec![origin("native_file", "shared-key")]);
+    let w4 = write("fact-b", 20, vec![origin("ccs-request", "shared-key")]);
+    let classes = history2.classify_batch(&[w3.clone(), w4.clone()]).unwrap();
+    assert_eq!(
+        classes,
+        vec![
+            tokenscope::history::WriteClass::Unchanged,
+            tokenscope::history::WriteClass::Unchanged
+        ],
+        "补证据不得被误报为来源冲突"
+    );
+    let s = history2.write_batch(&[w3, w4]).unwrap();
+    assert_eq!(s.unchanged, 2);
+    assert_eq!(s.origins_added, 2, "两种来源证据各自登记");
+    assert_eq!(history2.event_count().unwrap(), 2);
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&dir2).ok();
+}

@@ -2329,6 +2329,13 @@ fn alias_claim_key(a: &EventAlias) -> String {
     format!("a|{}|{}|{}", a.app.as_str(), a.scheme, a.value)
 }
 
+/// 来源记录的批内身份键：**完整二元组** `(origin_kind, origin_key)`——与
+/// schema 的 UNIQUE 约束和真实 lookup/提交同域（T01：仅用 key 会让不同
+/// 种类的同值键被当成同一身份）。
+fn origin_claim_key(o: &EventOrigin) -> String {
+    format!("o|{}|{}", o.origin_kind, o.origin_key)
+}
+
 /// 写入的模拟行形态（`id` = 事实 ID；`event_key` 在 Insert 时取写入键）。
 fn sim_event(w: &EventWrite, fid: i64) -> StoredEvent {
     StoredEvent {
@@ -2399,7 +2406,7 @@ impl BatchSim {
         }
         // 2) 来源记录证据。
         for origin in &w.origins {
-            if let Some(f) = self.claims.get(&format!("o|{}", origin.origin_key)) {
+            if let Some(f) = self.claims.get(&origin_claim_key(origin)) {
                 return Ok(Some(*f));
             }
             let hit: Option<i64> = conn
@@ -2482,7 +2489,7 @@ impl BatchSim {
             self.claims.insert(format!("k|{}", w.event_key), fid);
         }
         for o in &w.origins {
-            let okey = format!("o|{}", o.origin_key);
+            let okey = origin_claim_key(o);
             if let Some(other) = self.claims.get(&okey) {
                 if *other != fid {
                     bail!("来源记录冲突：{okey} 已绑定其他事实，提交将整批失败");
