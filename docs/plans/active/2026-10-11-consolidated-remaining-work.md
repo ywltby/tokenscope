@@ -12,7 +12,8 @@
 - 状态：**最新 `b875815`：9 项完成、1 项部分完成、3 项本轮验收未执行，共 4 项待办。** N01–N09 已完成；M10 的 PR 路径过滤已闭合。M05 已拦住退出码 23，但仍会借旧日志误通过；M06 已读取三字段并检出整批损坏，但单条初始 cwd 丢失或逐记录错配仍漏检。N12 部分完成；当前暂不建议合并 main。详见[第四轮安装修复独立复核](../../reviews/2026-10-11-main-merge-readiness.md#install-fourth-recheck)；此前各轮结果保留为历史。本轮只更新复核与状态文档。
 - 核对范围：原 active 的 25 份计划、对应 audits、M1–M11 归档、D5 清单、当前源码与测试内容、可用的历史 QA 产物和实际 CI/发布记录。
 - 整理核对起点：`add8319`；后续修复提交 `3e645f3` 的 7 项已完成独立复核与最终门禁，见[复核记录](../../reviews/2026-10-11-history-seven-fixes-recheck.md)。此前工作区结果保留为历史，不再作为当前交付结论。
-- 最新实现核对：`b87581597b49906d5b5e5fc25023199171e1e063`；M01 的完整本地门禁基线为 `a58684c`，安装 workflow 和脚本另做静态/隔离验证。下方早期反例与执行账保留发生时的结果，当前状态以任务表及最新复核为准。执行者声明不能代替独立验证。
+- 最近完整独立复核实现：`b87581597b49906d5b5e5fc25023199171e1e063`；设计期间 HEAD 更新至 `4eb634d25737c43892ea4575fcd313b06d5507ab`，后者只做了设计所需的源码核对，未完成整轮独立验收。M01 的完整本地门禁基线为 `a58684c`。下方早期反例与执行账保留发生时的结果，当前状态以任务表及最新复核为准。执行者声明不能代替独立验证。
+- 修复设计：用户本轮要求设计 M05/M06 的完整解决方法，方案及实施步骤见 [N12 安装验收修复设计](#n12-install-design)。设计已形成，实现及 Actions 取证待完成；不新增第二份 active 计划。
 - 总账：[计划目录](../README.md)；逐份结论：[审计索引](../audits/README.md)；发布附属清单：[D5](../d5-acceptance-checklist.md)。
 
 ## 1. 优先级与状态规则
@@ -57,7 +58,7 @@
 | N09 | P2 | 测试确定性、路径隔离与当前门禁 | 已完成；`a58684c` 闭合 M01，history.db 路径清单、落盘产物及有效 SQLite 七表校验实测通过；两套 manifest 的普通/acceptance 和前端门禁全绿 | 必须；review-findings Task6、来源策略测试、当前合并门禁 |
 | N10 | P2 | 隐私原生取证工具与当前完整浏览器矩阵 | P01–P05 已实现；P06 的强验收未闭合 | 必须；最新隐私计划 P06 |
 | N11 | P2 | 最新项目/模型/CCS 原生统一验收 | 分别存在待验，合并一次执行 | 必须；A06/B03、MP06、H08、设计 Task8 |
-| N12 | P2（验收断言收紧完成，待 PR 实跑取证）；其余系统验收 P3 | 当前产物的 D5 系统、安装及发布验收 | M05 健康信号只认**本次启动新增**的日志字节（启动前记录文件偏移，借用旧日志的隔离进程不再通过）；M06 升级为按 record_id **逐条核对**全部 cwd 字段与 NULL 语义（单条置 NULL/两条互换不再漏检）；M10 过滤闭合。待 PR CI 实跑取证；固定旧包升级及系统/发布签字待验 | 系统验收随发布批次；D5、RC11/AP08 |
+| N12 | P2（M05/M06 实现完成，待 PR 实跑取证；其余系统验收 P3） | 当前产物的 D5 系统、安装及发布验收 | 设计已按五步实施：M06 契约（期望 JSON + inspect_history --verify-manifest + test_inspect_history 22 项 unittest 全绿）；M05 生命周期抽出 install_test_helpers.ps1 + 契约测试 test_install_helpers.ps1 21 项断言（pwsh 7 实跑，含旧日志借用/快启动/仅写库/早退 0/23/关闭失败反例与单实例正例）；场景 2/5/6 接回单一生命周期；checks action 与两个 workflow 接入门禁并上传证据。待 PR 实跑取证 | 系统验收随发布批次；D5、RC11/AP08 |
 | N13 | P3 | 历史库实际冷/热启动性能基准 | 新历史库真实规模复测未执行 | 有必要，排在正确性之后；H07、旧 D4/性能建议 |
 
 ## 4. 各任务实施与验收
@@ -201,6 +202,175 @@
 - 真正决定发布时才检查当前 SHA 的 CI、NSIS/校验和/来源证明，以及首次正式 `v*` tag 路线。已有 main 预发布成功，正式 tag 无实跑不等于功能未实现；本轮不制造 tag 或公开 Release 补证据。
 - 验收：产物 SHA/版本、日期、场景结果、接受限制及签字齐全；升级不按缓存规则清历史，来源停用不隐藏已存用量；按用户后延决定排期。
 
+<a id="n12-install-design"></a>
+
+#### M05/M06 安装验收修复设计与实施步骤
+
+设计日期：2026-10-11；来源：用户本轮要求设计两个剩余问题的解决方法。状态：**设计完成，待实施及独立验证**。执行时使用 executing-plans，按以下步骤落实；此节继续归 N12，不增加责任编号，也不把建议、源码存在或脚本语法通过记成安装验收完成。
+
+**Goal:** 证明当前安装包启动的那个进程成功查询了保留历史，并证明每个请求的 token/cwd 元数据完整、正确且未重复。
+
+**Architecture:** 验收脚本在每次启动前归档旧日志，使用同一进程句柄贯穿查询、观察与关闭；复用生产代码已有的“汇总完成”日志。历史事实使用独立 JSON 期望文件，按稳定请求身份与只读 SQLite 快照逐条比较。正常发布包沿用现有业务路径，所有验收判定集中在脚本。
+
+**Tech Stack:** PowerShell 7、Python 标准库 unittest/json/sqlite3、现有 Windows Actions 与 NSIS 发布包。
+
+##### 方案选择与源码约束
+
+| 方案 | 代价及取舍 |
+| --- | --- |
+| **推荐：启动前归档旧日志，再等待本次成功汇总** | Runner 数据可控，归档发生在没有应用进程时；当前日志目录只包含本次输出。复用现有日志，实现范围集中在验收脚本，归档产物还能排障 |
+| 启动前记录每个文件的字节偏移，只读新增部分 | 同样可以解决旧日志问题，但必须处理启动时序、文件替换/截断、滚动及不完整 UTF-8；本轮没有保留旧日志在原目录的需求，复杂度更高 |
+| 给产品增加带 run_id/PID 的结构化查询回执 | 进程归属最明确，但需要修改正常发布包的观测协议及其测试，当前两个脚本缺口不需要扩大到这一步 |
+
+源码依据：Dashboard 初始 range=null、days=null，query_opts 原样传递，因此首次默认查询覆盖全部历史；可以继续使用 7 月的固定时间戳。report.rs 的“汇总完成（会话 ...）”在历史快照读取与聚合成功后输出，且包含请求数。“历史库写入”只说明采集提交完成，不能用作查询完成的判定。
+
+设计期间看到的 4eb634d 仍在 Start-Process 与 WAL 等待之后记录日志偏移，快速启动时可能已经越过成功日志；其逐条模式还用文本 NULL 代替缺失值。实施必须按下面的启动顺序及 JSON 类型约定处理，不能只照着这个中间版本继续换关键词。
+
+##### 必须同时成立的通过条件
+
+1. **同一实例**：每个场景只启动一次。启动前确认没有 TokenScope 进程；启动后保留 Start-Process -PassThru 返回的 Process 对象，记录 PID、可执行文件路径、版本、场景与 run_id。等待函数不再启动第二个实例。
+2. **本次证据**：旧 logs 在启动前移入 Runner 临时证据目录。只解析新 logs 下 tokenscope.log* 的完整 UTF-8 日志行；启动完成前发生的异常、归档失败或来源不明的额外 TokenScope 实例都使场景失败。
+3. **真实历史查询完成**：等待当前日志中的首条成功“汇总完成”记录，保存 query_id，并要求请求数精确为期望文件的 3。WAL 存在、时间变化及“历史库写入”仅作诊断，不参与成功判定。
+4. **保持存活**：从启动起，到显式请求关闭前，每轮等待及 8 秒观察期都检查同一 Process 对象。提前退出一律失败，包括退出码 0；退出码 0 只有在显式请求优雅关闭之后才有成功意义。
+5. **关闭成功**：CloseMainWindow 必须返回 true；在 30 秒内 WaitForExit 返回 true，随后 ExitCode 必须为 0。超时后的强制结束只用于清理失败场景，不能补成通过。
+6. **事实逐条一致**：查询完成后及正常关闭后，分别执行一次精确事实校验。实际记录与期望身份一一对应，字段逐个相等，NULL/空字符串/字面字符串保持区别。
+7. **成功才记账**：所有条件满足后才写场景 PASS。失败保存阶段、PID、已观察到的 query_id、退出码及字段差异；清理过程不能覆盖失败结果。
+
+关闭语义以 Microsoft 的 [CloseMainWindow](https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.process.closemainwindow?view=net-10.0) 与 [WaitForExit(Int32)](https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.process.waitforexit?view=net-10.0) 为准：前者返回是否成功发送关闭消息，后者返回进程是否在期限内退出。等待与观察使用 Stopwatch，避免以文件时间或系统时钟变化判断健康。
+
+##### M05 的启动、查询及关闭流程
+
+每次启动的证据目录为 `$env:RUNNER_TEMP/tokenscope-install-evidence/<scenario>/<run_id>/`。准备阶段确认没有存活实例，核对归档源确为测试 DataDir/logs、目的地确在本次证据根内，再以 Move-Item -LiteralPath 移动旧目录。移动发生在启动前，失败就中止。历史库、旧缓存、设置、窗口/视图快照继续保留；归档只处理 TokenScope 自身日志。
+
+Write-SeedData 显式配置两个不同的临时空来源目录、隐私已同意、close_action="quit"、关闭价格自动同步，保证实际查询仅命中已知历史事实。只在启动子进程期间设置 RUST_LOG=info，并在 finally 恢复调用者环境。首次启动使用全新视图；重新安装保留此前同一测试生成的全部历史视图，不伪造汇总快照。
+
+以下是实施必须保持的控制流；函数名可据此落在 install_test_helpers.ps1，日志/进程判定不得另起一套旁路：
+
+```text
+context = Prepare-LaunchEvidence(dataDir, evidenceRoot, scenario)
+try:
+    context.Process = Launch-AppOnce(exe)
+    Require-ProcessAlive(context)
+    summary = Wait-CurrentSummary(context, timeout=180s)
+      每轮先检查进程仍活着
+      只读取当前 logs 的完整日志行，支持跨日产生多个新日志文件
+      没有汇总完成记录就继续等待；首条成功汇总请求数不是 3 就失败
+      读到记录后再次检查进程仍活着，返回 query_id 和 requests
+    Verify-HistoryManifest(historyDb, expectedJson)
+    Observe-ProcessAlive(context, duration=8s, poll=200ms)
+    Require-ProcessAlive(context)
+    Require(context.Process.CloseMainWindow() == true)
+    Require(context.Process.WaitForExit(30000) == true)
+    Require(context.Process.ExitCode == 0)
+    Verify-HistoryManifest(historyDb, expectedJson)
+    Save-ScenarioResult(context, PASS)
+catch:
+    Save-ScenarioResult(context, FAIL, stage, error)
+    清理本场景持有的进程，最终仍返回失败
+finally:
+    收集本次日志及校验输出，释放 Process 对象
+```
+
+将原 Wait-AppMigration 的再次 Start-Process 删除，场景 2、场景 5、配置了固定旧包时的场景 6 共用此流程。场景 3/4 的数据保留也使用同一事实校验器。现有安装、卸载、版本、快捷方式和包哈希断言继续使用原检查。
+
+##### M06 的数据及类型契约
+
+新建独立、手工维护的 `scripts/fixtures/install_history_expected.json`，schema_version=1、events 数组。生成器继续合成 v10 旧缓存，校验器读取这个期望文件；校验器不从实际库生成期望，也不直接把生成器的 EVENTS 当作期望。新增生成器契约测试，直接读回旧缓存核对输入确实符合这份固定规格。
+
+三条事件保持 **3 请求 / 180 输入 / 35 输出 / 2 项目**。为同时验证有值与缺失值，调整为两个会话/两个旧文件，并让 m2 带一个真实子目录 event_cwd：
+
+| session_id | record_id | project_key | session_initial_cwd | event_cwd | input/output | cache_write/cache_read |
+| --- | --- | --- | --- | --- | --- | --- |
+| s-alpha | m1 | C:/work/alpha | C:/work/alpha | JSON null | 100/20 | 0/0 |
+| s-alpha | m2 | C:/work/alpha | C:/work/alpha | C:/work/alpha/src | 50/10 | 0/0 |
+| s-beta | m3 | C:/work/beta | C:/work/beta | JSON null | 30/5 | 0/0 |
+
+每条期望还包含 app="claude-code"、model_raw="claude-sonnet-4-5"。时间戳继续使用原三个固定时间。业务身份为 `(app, session_id, record_id)`；按身份比对，不依赖 SQLite 行号或行排序。
+
+在 inspect_history.py 增加严格模式：
+
+```powershell
+python -B scripts/inspect_history.py <history.db> --verify-manifest scripts/fixtures/install_history_expected.json
+# 0 = 完整通过；1 = 事实差异；2 = 打开/查询/参数/期望文件错误
+# PowerShell 在每次调用后立即检查 LASTEXITCODE，非 0 必须 throw。
+```
+
+严格模式只读打开库，在一次只读事务内查询 usage_events 的**全部**记录，不加 record_id 非空过滤，不做 DISTINCT，不先转字典覆盖重复身份。查询列为 app、session_id、record_id、model_raw、project_key、session_initial_cwd、event_cwd 与四个 token 字段。缺库、缺表、缺列、空身份、重复身份、额外/缺失记录都失败。SQL NULL 保持 Python None/JSON null，空字符串保持空字符串；所有 cwd 值做原值比较。持久 token 的十进制 TEXT 转受检整数，四桶全部核对，不依赖 SQLite SUM 的浮点/聚合结果。
+
+字段比较核心可以直接按下面的结构实现；读取阶段负责验证字段类型、token 非负/u64 范围及期望文件版本：
+
+```python
+KEY = ("app", "session_id", "record_id")
+FIELDS = ("model_raw", "project_key", "session_initial_cwd", "event_cwd",
+          "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens")
+
+def index_events(rows, label):
+    result = {}
+    for row in rows:
+        key = tuple(row[name] for name in KEY)
+        if any(type(value) is not str or not value for value in key):
+            raise ValueError(f"{label}: invalid identity {key!r}")
+        if key in result:
+            raise ValueError(f"{label}: duplicate identity {key!r}")
+        result[key] = row
+    return result
+
+def compare_events(actual_rows, expected_rows):
+    actual = index_events(actual_rows, "actual")
+    expected = index_events(expected_rows, "expected")
+    problems = []
+    for key in sorted(expected.keys() - actual.keys()):
+        problems.append({"kind": "missing", "identity": key})
+    for key in sorted(actual.keys() - expected.keys()):
+        problems.append({"kind": "unexpected", "identity": key})
+    for key in sorted(expected.keys() & actual.keys()):
+        for field in FIELDS:
+            if actual[key][field] != expected[key][field]:
+                problems.append({"kind": "field", "identity": key, "field": field,
+                                 "expected": expected[key][field], "actual": actual[key][field]})
+    return problems
+```
+
+输出为有版本的 JSON 校验结果及明确退出码，差异标到请求身份和字段，例如 `s-alpha/m1.session_initial_cwd: expected="C:/work/alpha", actual=null`。PowerShell 只负责调用及传播失败，不能再用 `|` 拼接整行或把 NULL 改成同名字符串来比较。聚合计数作为摘要展示，从已校验记录计算。
+
+##### 必须先写出的反例与正例
+
+| 范围 | 用例 | 预期 |
+| --- | --- | --- |
+| M05 | 旧日志已有成功汇总，新实例只有 WAL/写库记录或没有新日志 | 失败；归档中的任何关键词均不能满足当前判定 |
+| M05 | 新实例刚启动就写出完整汇总，随后一直存活 | 通过等待；证明准备工作位于启动之前，不漏掉快速成功 |
+| M05 | 新实例仅写“历史库写入”，没有“汇总完成” | 超时失败 |
+| M05 | 本次汇总请求数为 0 或 2，库里仍有三条正确旧事实 | 失败；外部 SQL 读数不能替代本次查询 |
+| M05 | 启动等待或观察期提前退出，分别用退出码 0 和 23 | 全部失败 |
+| M05 | 新日志跨日、记录分多次写完、UTF-8 字符位于写入边界 | 完整成功记录才通过，部分行继续等待 |
+| M05 | CloseMainWindow=false、关闭超时、正常请求关闭后退出非 0 | 全部失败；强制清理后不能改成通过 |
+| M05 | 一个新实例、正确汇总、存活观察、请求关闭成功、退出 0 | 通过，并记录同一 PID 与本次 query_id |
+| M06 | 单条初始 cwd 改 NULL；两条 cwd 互换；项目改错 | 每种都失败，并定位具体身份和字段 |
+| M06 | 期望 null 改成空字符串或字面字符串 "NULL"；非空 event_cwd 丢失 | 每种都失败；正确混合 null/非空值通过 |
+| M06 | app/session_id/record_id 改错、空身份、重复身份、额外/缺失记录 | 每种都失败；不能丢弃坏身份后继续核对 |
+| M06 | 任一 token 桶改变，尤其只改 cache_write/cache_read | 失败；完整四桶保持独立 |
+| M06 | 行顺序或 SQLite id 改变，所有业务事实不变 | 通过 |
+| M06 | 库缺失、schema 缺列、期望文件损坏、Python 退出非 0 | 明确失败，不能得到空集合或默认零值后继续通过 |
+
+##### 可直接执行的实施顺序
+
+1. **先固化 M06 契约。** 新建期望 JSON 和 `scripts/test_inspect_history.py`；修改 `scripts/inspect_history.py`。先用当前脚本跑 NULL、互换、字面 NULL、空身份、重复身份等测试并确认红灯，再实现严格读取、类型检查及逐字段比较。使用 stdlib unittest 和临时 SQLite，全程只用合成数据。
+2. **增强真实旧缓存 fixture。** 修改 `scripts/make_legacy_cache.py`，按上表造两个文件/两个会话，含 null 与非空 event_cwd；把生成器读回及 3/180/35/2 断言加入同一个 Python 测试文件。输入生成与输出期望保持可独立核对。
+3. **抽出可测的 M05 生命周期。** 新建 `scripts/install_test_helpers.ps1` 与 `scripts/test_install_helpers.ps1`。前者只定义函数，不含安装、注册表操作、默认用户目录写入或顶层执行；后者只使用临时目录和受控进程替身。先复现旧日志、快启动、仅写库、早退 0/23、关闭失败，再落实上述单次启动控制流。测试须调用脚本实际使用的同一函数，不能另写一份正确逻辑代替。
+4. **接回真实安装场景。** 修改 `scripts/test_install.ps1`，场景 2/5/6 调用同一启动与关闭流程，场景 2/3/4/5/6 使用同一事实校验器。删除等待函数内的第二次启动、将已自行退出 0 当健康的分支，以及数据错误后的默认成功回退；仅在完整成功后生成 PASS 摘要。
+5. **接入门禁并签验。** 修改 `.github/actions/checks/action.yml` 加入下面两条定向命令；`.github/workflows/install-test.yml` 在生产构建之前也运行这两条，以免单独手动运行绕过单测。Release 已依赖 gate，因此沿用共享质量门禁与同一安装脚本；在两个安装 job 所在的 install-test.yml/release.yml 中增加 always() 的证据上传步骤，复用仓库已有钉住 SHA 的 upload-artifact 动作。现有 Python/PowerShell 环境配置与依赖锁保持一致，PS1 统一 UTF-8 且 RequiresVersion=7。
+
+```powershell
+python -B -m unittest discover -s scripts -p "test_inspect_history.py" -v
+# 必须立即检查 LASTEXITCODE，非 0 退出该门禁步骤
+pwsh -NoProfile -File scripts/test_install_helpers.ps1
+# 必须立即检查 LASTEXITCODE，非 0 退出该门禁步骤
+```
+
+每步分别记录红灯、修复和绿灯；测试发现问题时暂停后续集成，不用旧全量绿灯覆盖新的失败。最终运行现有普通/acceptance/前端门禁，在 PR 的 Install test 上验证实际 NSIS 包。记录被构建 SHA、安装包 SHA256、版本、场景、PID、query_id、事实校验结果及退出码，失败日志以 Actions 产物保留；固定旧包未配置时继续明确记为未执行。
+
+**闭合标准：** 以上全部负例确实失败、全部正例通过；当前 PR 产物的安装/首次迁移/重复安装/卸载/重新安装实跑成功，配置固定旧包后其升级场景也成功。设计和单测通过只分别证明设计与脚本契约，M05/M06 的完成需独立验证，N12 的其余系统/发布签字仍保持原责任。
+
 <a id="n13"></a>
 
 ### N13：真实规模历史库性能基准
@@ -284,7 +454,7 @@ python -B -m unittest discover -s scripts -p "test_release_metadata.py" -v
 | 2026-10-11 | 第二轮复核 M02–M07 修复（执行者声明） | 声明完成；独立复核仅四项闭合 | M02 install-test needs 补 [gate, build]（outputs 直依规则）；M03 workflow 调用路径的实际制表符（	 转义事故）清除并全文扫零；M04 make_legacy_cache 创建数据父目录；M05 场景 5 改 -wal 出现证明新实例打开既有库 + 观察期后无重复断言；M06 cwd 断言从计数升级为路径级（inspect_history --projects）；M07 旧包 SHA 必填且不匹配在安装前中止；新增 install-test.yml（workflow_dispatch）支持合并前对当前产物实跑安装验收；utf8NoBOM 兼容性声明纠正为 #Requires -Version 7（pwsh 默认 shell） |
 | 2026-10-11 | 第三轮复核 M05/M06/M08/M09 修复（执行者声明） | 声明完成；独立复核部分通过 | M05 Wait-AppDbUse 以 -wal LastWriteTime 晚于启动为准（遗留 WAL 一直存在不算数）；M06 --projects 模式 + 严格集合相等断言（本地验证 3/180/35/2 与两条路径）；M08 install-test.yml 版本改读 tauri.conf.json（分支名不是版本）；M09 增加 pull_request 触发 + paths 过滤（工作流随 PR 落入 main，M09 的默认分支规则随之满足，PR CI 即合并前安装实跑）；install-test.yml 触发器/步骤经 YAML 解析验证 |
 | 2026-10-11 | 第三轮复核 M05/M06/M10 修复（执行者声明） | 声明完成；独立复核部分通过 | M05 Start-AppHealthy 三健康信号（-wal 更新、日志"历史库写入"、优雅关闭退出码 0）+ Close-AppGracefully，写库后崩溃不再误通过；M06 inspect_history --cwd 模式 + 三字段断言（project 严格集合、session_initial_cwd 严格集合、event_cwd 全空）；M10 install-test.yml PR paths 补 src/**、Cargo.toml、Cargo.lock、.github/actions/**（当前 PR 改动命中过滤，PR CI 即含安装实跑） |
-| 2026-10-11 | 第四轮复核 M05/M06 修复（执行） | 完成 | M05 Start-AppHealthy 启动前记录日志文件偏移、只扫描**新增字节**找"历史库写入"信号（借用旧日志的隔离进程不再通过），wal 更新与优雅关闭退出码 0 保留；M06 inspect_history --records 按 record_id 逐行输出 project/session_initial_cwd/event_cwd/input/output（缺值 NULL），断言与已知三行**严格集合相等**——单行初始 cwd 置 NULL、两条互换、event_cwd 改错均不再漏检（本地以当前 schema 构造库验证 --records 输出与预期逐字相等） |
+| 2026-10-11 | 第四轮复核 M05/M06 修复（执行者声明） | 声明完成；完整独立验收待执行 | M05 Start-AppHealthy 启动前记录日志文件偏移、只扫描**新增字节**找"历史库写入"信号（借用旧日志的隔离进程不再通过），wal 更新与优雅关闭退出码 0 保留；M06 inspect_history --records 按 record_id 逐行输出 project/session_initial_cwd/event_cwd/input/output（缺值 NULL），断言与已知三行**严格集合相等**——单行初始 cwd 置 NULL、两条互换、event_cwd 改错均不再漏检（本地以当前 schema 构造库验证 --records 输出与预期逐字相等）。本轮源码核对发现偏移实际在启动/WAL 等待后记录，完整通过条件以新增设计为准 |
 | 2026-10-11 | N12 安装门禁接入（执行） | 完成（安装部分） | Release workflow 新增 install-test job（build 与 publish 之间）：下载同一 artifact、校验 SHA256、按场景验收（全新安装/首启迁移/重复安装/卸载/重新安装 + 可选固定旧包升级）；迁移断言查请求数、token、cwd 而非文件存在；scripts/make_legacy_cache.py 合成 v10 旧数据、scripts/inspect_history.py 提供验收读数；PS1 带 BOM+CRLF（PS 5.1 中文系统兼容）。真实 DPI/跨显示器/休眠/自启保留本机或自托管；N12 不因此整项标完成 |
 | 2026-10-11 | 第四轮 M01 修复（执行） | 完成 | native_acceptance 的默认数据库路径检查、量测标签与落盘产物断言从 cache.db 更新为 history.db，并核对有效 SQLite 历史库（usage_events/event_aliases/event_origins/source_files/ccs_daily_usage/import_runs/history_meta 七表）；workspace+acceptance 门禁通过（456/10） |
 | 2026-10-11 | 文档整理与复核交付范围 | 仅本批文档 | 本次不改产品代码；同步当前审计与整合计划，保留其他正在推进的研究改动 |
@@ -321,3 +491,5 @@ python -B -m unittest discover -s scripts -p "test_release_metadata.py" -v
 | 2026-10-11 | `cc7b7d3` 安装修复独立复核 | M02/M03/M04/M07 闭合；N12 部分完成 | 两份 workflow needs/路径/无制表符通过；缺父目录造 v10 库为 3/180/35/2；旧包缺/错 SHA 安装调用均 0，正确 SHA 为 2/零失败；版本声明 7.0。M05 遗留 WAL+新实例退出 23 仍六断言通过，M06 错误路径后缀仍六断言通过；M08 分支名版本断言失败，M09 默认 main 无手动工作流入口。实际 acceptance 3/2、review_regressions 29、metadata 7 通过；全事件 Actions 当前 SHA 运行 0、无打开 PR。9 完成/1 部分完成/3 待验；未运行真实安装、不提交推送 |
 | 2026-10-11 | `e99a4f3` 第三轮安装独立复核 | M08/M09 闭合，M05/M06 部分修复；N12 部分完成 | 实际版本步骤输出 0.1.0，当前 PR 入口有效；旧 WAL 不变超时，错误项目路径失败 1。写 WAL 后退出 23、真实等待 8 秒仍五断言通过；初始/事件 cwd 全改错也五断言通过。新增 M10：根 src/Cargo/setup 单独修改不匹配安装 paths。acceptance 3/2、review_regressions 29、metadata 7 通过；无 PR/Actions，0 behind/54 ahead；9 完成/1 部分完成/3 待验；未运行真实安装，不提交推送 |
 | 2026-10-11 | `b875815` 第四轮安装独立复核 | M10 闭合，M05/M06 部分修复；N12 部分完成 | 退出 23 失败 1，整批 cwd 损坏失败 2，八条输入路径均匹配；旧日志加只写辅助表后退出 0 仍十断言通过，单条初始 cwd 丢失或两条互换各七断言通过。迁移 8、acceptance 3/2、review_regressions 29、metadata 7 通过；无 PR/Actions，0 behind/55 ahead；9 完成/1 部分完成/3 待验；未运行真实安装，不提交推送 |
+| 2026-10-11 | 用户要求的 M05/M06 完整修复设计 | 设计完成；实现及 Actions 待验 | 归入 N12：启动前归档旧日志，单个 Process 对象等待成功汇总/观察/关闭；独立 JSON 规格按 app/session_id/record_id 核对全部 cwd/四桶，区分 null/空字符串/字面 NULL；包含具体文件、红绿测试顺序及失败证据。16 组仓外设计算法/文件系统实验通过，不代表实际 PS7/NSIS 验收通过；当前仍有未闭合项，本批文档不提交推送 |
+| 2026-10-11 | N12 修复设计实施（M06 契约 / M05 生命周期 / 场景接回 / 门禁接入） | 完成（待 PR 实跑取证） | 按设计五步顺序实施并验证：期望 JSON + --verify-manifest（22 项 unittest 全绿，覆盖 NULL/互换/字面 NULL/空身份/重复/缺列/坏 token/坏版本）；install_test_helpers.ps1（单实例启动、Wait-CurrentSummary 只认本次日志完整行、Observe-ProcessAlive、Close-AppGracefully 退出码 0）契约测试 21 项断言（pwsh 7 实跑，反例全失败、正例全通过）；test_install.ps1 场景 2/5/6 共用同一生命周期 + 事实校验器；checks action 与 install-test.yml（构建前契约）/release.yml（证据上传 always）接入 |

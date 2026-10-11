@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "events": [
+    {
+      "app": "claude-code",
+      "session_id": "s-alpha",
+      "record_id": "m1",
+      "model_raw": "claude-sonnet-4-5",
+      "project_key": "C:/work/alpha",
+      "session_initial_cwd": "C:/work/alpha",
+      "event_cwd": null,
+      "input_tokens": 100,
+      "output_tokens": 20,
+      "cache_write_tokens": 0,
+      "cache_read_tokens": 0
+    },
+    {
+      "app": "claude-code",
+      "session_id": "s-alpha",
+      "record_id": "m2",
+      "model_raw": "claude-sonnet-4-5",
+      "project_key": "C:/work/alpha",
+      "session_initial_cwd": "C:/work/alpha",
+      "event_cwd": "C:/work/alpha/src",
+      "input_tokens": 50,
+      "output_tokens": 10,
+      "cache_write_tokens": 0,
+      "cache_read_tokens": 0
+    },
+    {
+      "app": "claude-code",
+      "session_id": "s-beta",
+      "record_id": "m3",
+      "model_raw": "claude-sonnet-4-5",
+      "project_key": "C:/work/beta",
+      "session_initial_cwd": "C:/work/beta",
+      "event_cwd": null,
+      "input_tokens": 30,
+      "output_tokens": 5,
+      "cache_write_tokens": 0,
+      "cache_read_tokens": 0
+    }
+  ]
+}

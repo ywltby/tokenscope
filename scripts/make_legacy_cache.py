@@ -51,18 +51,24 @@ CREATE TABLE IF NOT EXISTS events (
 );
 """
 
-# (ts, record_id, project, session_initial_cwd, input, output, cache_write, cache_read)
+# (file_id, ts, record_id, session_id, project, session_initial_cwd,
+#  event_cwd, input, output, cache_write, cache_read)
+# 两个会话 / 两个旧文件；m2 带真实子目录 event_cwd，m1/m3 的 event_cwd 为
+# SQL NULL（验证 null 语义）；总量保持 3 请求 / 180 输入 / 35 输出 / 2 项目。
 EVENTS = [
-    ("2026-07-17T08:00:00Z", "m1", "C:/work/alpha", "C:/work/alpha", 100, 20, 0, 0),
-    ("2026-07-17T08:01:00Z", "m2", "C:/work/alpha", "C:/work/alpha", 50, 10, 0, 0),
-    ("2026-07-18T09:00:00Z", "m3", "C:/work/beta", "C:/work/beta", 30, 5, 0, 0),
+    (1, "2026-07-17T08:00:00Z", "m1", "s-alpha", "C:/work/alpha", "C:/work/alpha",
+     None, 100, 20, 0, 0),
+    (1, "2026-07-17T08:01:00Z", "m2", "s-alpha", "C:/work/alpha", "C:/work/alpha",
+     "C:/work/alpha/src", 50, 10, 0, 0),
+    (2, "2026-07-18T09:00:00Z", "m3", "s-beta", "C:/work/beta", "C:/work/beta",
+     None, 30, 5, 0, 0),
 ]
 
 EXPECTED = {
     "events": len(EVENTS),
-    "input": sum(e[4] for e in EVENTS),
-    "output": sum(e[5] for e in EVENTS),
-    "projects": len({e[2] for e in EVENTS}),
+    "input": sum(e[7] for e in EVENTS),
+    "output": sum(e[8] for e in EVENTS),
+    "projects": len({e[4] for e in EVENTS}),
 }
 
 
@@ -80,14 +86,20 @@ def main() -> int:
         con.execute("INSERT INTO meta(key, value) VALUES('schema_version', '10')")
         con.execute(
             "INSERT INTO files(id, path, root, agent, size, mtime_ms) "
-            "VALUES(1, '/logs/legacy/sess.jsonl', '/logs', 'claude-code', 100, 1700000000000)"
+            "VALUES(1, '/logs/legacy/alpha/sess.jsonl', '/logs/legacy/alpha', "
+            "'claude-code', 100, 1700000000000)"
         )
-        for i, (ts, rid, project, sic, inp, outp, cw, cr) in enumerate(EVENTS):
+        con.execute(
+            "INSERT INTO files(id, path, root, agent, size, mtime_ms) "
+            "VALUES(2, '/logs/legacy/beta/sess.jsonl', '/logs/legacy/beta', "
+            "'claude-code', 100, 1700000000000)"
+        )
+        for (file_id, ts, rid, session_id, project, sic, ecwd, inp, outp, cw, cr) in EVENTS:
             con.execute(
                 "INSERT INTO events(file_id, ts, record_id, model, session_id, project, "
                 "session_initial_cwd, event_cwd, input, output, cache_write, cache_read) "
-                "VALUES(1, ?, ?, 'claude-sonnet-4-5', 's-legacy', ?, ?, NULL, ?, ?, ?, ?)",
-                (ts, rid, project, sic, inp, outp, cw, cr),
+                "VALUES(?, ?, ?, 'claude-sonnet-4-5', ?, ?, ?, ?, ?, ?, ?, ?)",
+                (file_id, ts, rid, session_id, project, sic, ecwd, inp, outp, cw, cr),
             )
         con.commit()
         # 自检：写出的库必须能按验收口径读回。

@@ -69,3 +69,11 @@ jobs:
           }
           & .\scripts\test_install.ps1 @args
           exit $LASTEXITCODE
+      - name: Upload install evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: install-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/tokenscope-install-evidence
+          if-no-files-found: ignore
+          retention-days: 14
