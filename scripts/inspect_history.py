@@ -2,7 +2,9 @@
 
 用法：
   python scripts/inspect_history.py <history.db>
-      输出 `<requests> <input> <output> <projects>` 或 `absent`。
+      输出 `<requests> <input> <output> <projects>` 或 `absent`。token
+      列按 --verify-manifest 同口径受检解析后累加（坏值逐条打到 stderr
+      并退出 2，不做 SQLite SUM 的隐式 REAL 转换）。
   python scripts/inspect_history.py <history.db> --projects
       逐行输出去重后的 project_key（排序），供路径级断言使用。
   python scripts/inspect_history.py <history.db> --cwd
@@ -57,7 +59,7 @@ def parse_persisted_token(raw, identity, field, problems):
                          "expected": "十进制 TEXT", "actual": raw})
         return None
     text = raw.strip()
-    if not text or text.startswith(("-", "+")) or not text.isascii()             or not text.isdigit():
+    if not text or text.startswith(("-", "+")) or not text.isascii() or not text.isdigit():
         problems.append({"kind": "field", "identity": identity, "field": field,
                          "expected": "非负十进制", "actual": raw})
         return None
@@ -235,7 +237,10 @@ def main() -> int:
         return 2
     con = open_readonly(args[0])
     if con is None:
-        print("absent" if modes == [] else "")
+        # 缺库：默认模式打 absent 哨兵；行式模式不输出——严格按行比较的
+        # 断言不会把一个空行当成记录。
+        if modes == []:
+            print("absent")
         return 0
     try:
         tables = {
@@ -245,7 +250,8 @@ def main() -> int:
             ).fetchall()
         }
         if "usage_events" not in tables:
-            print("absent" if modes == [] else "")
+            if modes == []:
+                print("absent")
             return 0
         if records_mode:
             # NULL 与空串必须区分显示——验收断言依赖这一语义（空串显示为空）。
@@ -289,15 +295,31 @@ def main() -> int:
             ).fetchall():
                 print(project)
             return 0
-        count, total_in, total_out = con.execute(
-            "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), "
-            "COALESCE(SUM(output_tokens), 0) FROM usage_events"
-        ).fetchone()
-        projects = con.execute(
-            "SELECT COUNT(DISTINCT project_key) FROM usage_events "
-            "WHERE project_key IS NOT NULL"
-        ).fetchone()[0]
-        print(f"{count} {total_in} {total_out} {projects}")
+        # 与 --verify-manifest 同口径的受检解析后累加（Python int 无精度
+        # 损失）：SQLite 的 SUM 对 TEXT 列遇 u64 规模会隐式转 REAL 丢精度、
+        # 坏值静默计 0——默认汇总同样只信受检值，坏值退出 2（E-P3-1）。
+        rows = con.execute(
+            "SELECT input_tokens, output_tokens, project_key FROM usage_events"
+        ).fetchall()
+        total_in = 0
+        total_out = 0
+        projects = set()
+        problems = []
+        for i, (inp, outp, project) in enumerate(rows):
+            identity = {"row": i}
+            v_in = parse_persisted_token(inp, identity, "input_tokens", problems)
+            v_out = parse_persisted_token(outp, identity, "output_tokens", problems)
+            if v_in is not None:
+                total_in += v_in
+            if v_out is not None:
+                total_out += v_out
+            if project is not None:
+                projects.add(project)
+        if problems:
+            for problem in problems:
+                print(json.dumps(problem, ensure_ascii=False), file=sys.stderr)
+            return 2
+        print(f"{len(rows)} {total_in} {total_out} {len(projects)}")
         return 0
     except sqlite3.DatabaseError as exc:
         # A-P3-4：非数据库文件（如 "not a db"）明确报错退出 2，不打 traceback。

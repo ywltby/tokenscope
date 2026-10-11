@@ -787,7 +787,7 @@ fn dedup_source_overlap(sources: Vec<Box<dyn Source>>) -> Result<DedupedSources>
             match seen.get(&key) {
                 Some(prev) if *prev != src.agent() => {
                     anyhow::bail!(
-                        "文件归属冲突：{} 同时被 {} 与 {} 认领；                         来源目录不得重叠（相同或嵌套），请调整目录配置或停用其一来源",
+                        "文件归属冲突：{} 同时被 {} 与 {} 认领；来源目录不得重叠（相同或嵌套），请调整目录配置或停用其一来源",
                         norm.display(),
                         prev.as_str(),
                         src.agent().as_str()

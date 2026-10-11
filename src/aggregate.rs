@@ -273,13 +273,17 @@ fn push_event_into(
             .requests
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("分组 {} 的请求数累计超出可表示范围", key_err))?;
+        let event_tokens = TokenCounts::from_event(e);
         let mut new_tokens = g.tokens;
         let mut new_unknown = g.unknown_tokens;
         new_tokens = new_tokens
-            .checked_add(&TokenCounts::from_event(e))
+            .checked_add(&event_tokens)
             .ok_or_else(|| anyhow::anyhow!("分组 {} 的 token 累计超出可表示范围", key_err))?;
         let mut new_cost = g.cost_usd;
-        match pricing.estimate(&e.model, &TokenCounts::from_event(e), e.ts) {
+        // 确定性计价只算一次（百万事件聚合下两次调用是纯浪费）；estimate
+        // 不产生失败路径，求值先后不影响"临时值全部成功才提交"的纪律。
+        let estimate = pricing.estimate(&e.model, &event_tokens, e.ts);
+        match &estimate {
             Some(est) => {
                 new_cost += est.cost;
                 if !new_cost.is_finite() {
@@ -294,11 +298,9 @@ fn push_event_into(
                 }
             }
             None => {
-                new_unknown = new_unknown
-                    .checked_add(&TokenCounts::from_event(e))
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("分组 {} 的未知 token 累计超出可表示范围", key_err)
-                    })?;
+                new_unknown = new_unknown.checked_add(&event_tokens).ok_or_else(|| {
+                    anyhow::anyhow!("分组 {} 的未知 token 累计超出可表示范围", key_err)
+                })?;
             }
         }
         // 全部成功 → 提交（agents 追加不涉算术，随后执行）。
@@ -306,13 +308,12 @@ fn push_event_into(
         g.tokens = new_tokens;
         g.unknown_tokens = new_unknown;
         g.cost_usd = new_cost;
-        if let Some(est) = pricing.estimate(&e.model, &TokenCounts::from_event(e), e.ts) {
-            if !est.complete {
-                g.unknown_pricing = true;
-            }
-        } else {
-            g.unknown_pricing = true;
-        }
+        // unknown_pricing 是组内累积标记：任一事件部分计价/无价即置位，
+        // 后续完整计价的事件不得清掉它。
+        g.unknown_pricing = match &estimate {
+            Some(est) => g.unknown_pricing || !est.complete,
+            None => true,
+        };
         if RECORD_AGENTS && !g.agents.contains(&e.agent.as_str()) {
             g.agents.push(e.agent.as_str());
         }

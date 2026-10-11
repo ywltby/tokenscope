@@ -141,8 +141,8 @@ fn legacy_cache_usage_is_migrated_once() {
 }
 
 #[test]
-fn v2_backfill_writes_rfc3339_observed_at_utc() {
-    // v1→v2 把"采集时刻"改写为事件时间时，utc 文本必须与运行期写入同格式
+fn v3_backfill_writes_rfc3339_observed_at_utc() {
+    // v3 把"采集时刻"改写为事件时间时，utc 文本必须与运行期写入同格式
     //（RFC3339）——此前回填把纪元秒数值塞进 TEXT 列，与其它行格式不一致。
     let dir = temp_dir("utc-backfill");
     let db = dir.join("history.db");

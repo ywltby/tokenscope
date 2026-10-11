@@ -413,6 +413,50 @@ class SummaryModesCase(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip(), "2 20 40 1")
 
+    def test_default_mode_sums_exact_at_u64_scale(self):
+        # SQLite SUM 对 TEXT 列在 u64 规模会隐式转 REAL 丢精度——
+        # 受检解析后按 Python int 累加必须逐位精确（E-P3-1）。
+        db = str(self.dir / "big.db")
+        con = sqlite3.connect(db)
+        con.executescript(SCHEMA)
+        for i, value in enumerate(["18446744073709551615", "1"]):
+            con.execute(
+                "INSERT INTO usage_events(event_key, app, ts_seconds, ts_nanos, model_raw, "
+                "model_identity, identity_revision, session_id, record_id, project_key, "
+                "session_initial_cwd, event_cwd, input_tokens, output_tokens, "
+                "cache_write_tokens, cache_read_tokens, origin_rank, observed_at_utc, "
+                "observed_at_seconds, observed_at_nanos, parser_revision) "
+                "VALUES(?, 'claude-code', 1784307600, 0, 'm', 'mid', 1, 's', ?, 'p', "
+                "'/w', '/e', ?, '0', '0', '0', 1, 'x', 1784307600, 0, 1)",
+                (f"k-{i}", f"r{i}", value),
+            )
+        con.commit()
+        con.close()
+        r = self.run_cli(db)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "2 18446744073709551616 0 1")
+
+    def test_default_mode_rejects_bad_token_text_with_exit_2(self):
+        # Rust 侧持久化拒绝非受检十进制——汇总读数不得把坏值静默计 0。
+        db = self.make_db([("p", "/w", "/e")])
+        con = sqlite3.connect(db)
+        con.execute("UPDATE usage_events SET input_tokens = 'abc'")
+        con.commit()
+        con.close()
+        r = self.run_cli(db)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("input_tokens", r.stderr)
+
+    def test_absent_db_default_prints_absent_and_modes_print_nothing(self):
+        absent = str(self.dir / "no-such.db")
+        default = self.run_cli(absent)
+        self.assertEqual(default.returncode, 0)
+        self.assertEqual(default.stdout.strip(), "absent")
+        for mode in ("--records", "--cwd", "--projects"):
+            r = self.run_cli(absent, mode)
+            self.assertEqual(r.returncode, 0, mode)
+            self.assertEqual(r.stdout, "", f"{mode} 对缺库不得输出空行")
+
     def test_mode_query_on_corrupted_db_is_exit_2(self):
         # sqlite_master 在第 1 页完好，表内容在第 2 页——清零第 2 页让
         # "表存在但查询失败"，验证模式查询也走 DatabaseError → 退出 2。

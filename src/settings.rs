@@ -262,14 +262,14 @@ pub fn validate_dir_conflict(a: &std::path::Path, b: &std::path::Path) -> Result
     let (na, nb) = (norm(a), norm(b));
     if na == nb {
         return Err(format!(
-            "来源目录冲突：{} 与 {} 指向同一位置，会导致重复统计；             请为两者配置不同且互不嵌套的目录，或停用其一来源",
+            "来源目录冲突：{} 与 {} 指向同一位置，会导致重复统计；请为两者配置不同且互不嵌套的目录，或停用其一来源",
             a.display(),
             b.display()
         ));
     }
     if nb.starts_with(&na) || na.starts_with(&nb) {
         return Err(format!(
-            "来源目录冲突：{} 与 {} 存在嵌套关系，会导致文件归属歧义或重复统计；             请为两者配置不同且互不嵌套的目录，或停用其一来源",
+            "来源目录冲突：{} 与 {} 存在嵌套关系，会导致文件归属歧义或重复统计；请为两者配置不同且互不嵌套的目录，或停用其一来源",
             a.display(),
             b.display()
         ));
