@@ -119,7 +119,7 @@ Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log.2026-10-10" -Line $S
 # 的目的地守卫——契约必须走与安装验收完全相同的校验路径。
 $evidence = Prepare-LaunchEvidence -DataDir $s.DataDir -EvidenceRoot (
     Join-Path $s.Root "tokenscope-install-evidence") -Scenario "old-log-borrow" -RunId "run-1"
-Assert-HelperTrue ((Test-Path (Join-Path $evidence "tokenscope.log.2026-10-10")) -and
+Test-True ((Test-Path (Join-Path $evidence "tokenscope.log.2026-10-10")) -and
     -not (Test-Path $s.LogsDir)) "旧日志已归档移出活动目录"
 New-Item -ItemType Directory -Path $s.LogsDir -Force | Out-Null
 $proc = New-StandInProcess

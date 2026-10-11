@@ -47,6 +47,9 @@ jobs:
           # 当成版本传给断言。
           $version = (python -c "import json; print(json.load(open('src-tauri/tauri.conf.json', encoding='utf-8'))['version'])").Trim()
           if (-not $version) { throw "无法从 tauri.conf.json 读取版本" }
+          # 与 release 侧 release_metadata.py 的 SemVer 校验同口径；坏版本
+          # 在进 PS 断言参数前失败（单引号内插不容纳 `'` 等字符）。
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw "版本不是 SemVer：$version" }
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
           Write-Host "应用版本：$version"
       - name: Install acceptance fact-verifier contract (N12/M06)

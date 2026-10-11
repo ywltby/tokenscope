@@ -36,6 +36,9 @@ $ErrorActionPreference = "Stop"
 if (-not $env:RUNNER_TEMP -and $env:TOKENSCOPE_INSTALL_TEST_CONSENT -ne "1") {
     throw "拒绝运行：本脚本会清空 $env:USERPROFILE\.tokenscope。仅 CI Runner 可直接运行；本机调试请设置 TOKENSCOPE_INSTALL_TEST_CONSENT=1（并确认该目录数据可删除）。"
 }
+# 证据与临时来源目录的根：CI 用 Runner 临时目录；CONSENT=1 的本机调试
+# 回退系统 TEMP（Join-Path 对 $null 直接抛绑定错误，必须先兜底）。
+$TempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
 
 $DataDir = Join-Path $env:USERPROFILE ".tokenscope"
 $UninstallKeyRoot = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -48,7 +51,7 @@ $ExpectedManifest = Join-Path $RepoRoot "scripts\fixtures\install_history_expect
 # "本次汇总请求数"的期望从期望 manifest 的事件数推导——fixture 与该数字
 # 是两个独立来源，钉死一起改（脚本顶部加载一次）。
 $ExpectedRequests = (Get-Content $ExpectedManifest -Raw | ConvertFrom-Json).events.Count
-$EvidenceRoot = Join-Path $env:RUNNER_TEMP "tokenscope-install-evidence"
+$EvidenceRoot = Join-Path $TempRoot "tokenscope-install-evidence"
 $Failures = New-Object System.Collections.Generic.List[string]
 $PassCount = 0
 
@@ -119,8 +122,8 @@ function Write-SeedData {
     # 旧版数据 = v10 cache.db（3 事件 / 2 项目 / 已知 token）+ 设置 +
     # 价格文件。两个**临时空来源目录**保证启动后的实际汇总只命中迁移的
     # 历史事实（3 请求），不混入任何真实来源日志。
-    $sourceDirClaude = Join-Path $env:RUNNER_TEMP "tokenscope-empty-source-claude"
-    $sourceDirCodex = Join-Path $env:RUNNER_TEMP "tokenscope-empty-source-codex"
+    $sourceDirClaude = Join-Path $TempRoot "tokenscope-empty-source-claude"
+    $sourceDirCodex = Join-Path $TempRoot "tokenscope-empty-source-codex"
     New-Item -ItemType Directory -Path $sourceDirClaude -Force | Out-Null
     New-Item -ItemType Directory -Path $sourceDirCodex -Force | Out-Null
     python -B (Join-Path $RepoRoot "scripts\make_legacy_cache.py") $LegacyCache

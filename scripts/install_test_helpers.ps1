@@ -111,7 +111,7 @@ function Copy-LiveLogsToEvidence {
     }
     $dest = Join-Path $Context.EvidenceDir "live-logs"
     New-Item -ItemType Directory -Path $dest -Force | Out-Null
-    Copy-Item -Path (Join-Path $Context.LiveLogsDir "*") -Destination $dest -Force -ErrorAction SilentlyContinue
+    Copy-Item -Path (Join-Path $Context.LiveLogsDir "*") -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 function Get-CompleteLogLines {
