@@ -26,7 +26,14 @@ fn fixture(agent: &str, p: &str) -> PathBuf {
 
 #[test]
 fn test_partial_cost_totals() {
-    let dir = std::env::temp_dir().join(format!("tokenscope-b3-totals-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "tokenscope-b3-totals-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -52,6 +59,7 @@ fn test_partial_cost_totals() {
         codex_dir: Some(fixture("codex", "basic")),
         cache_dir: Some(dir.join("cache")),
         pricing_index: Some(dir.join("idx.json")),
+        pricing_path: Some(dir.join("no-pricing.toml")),
         openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
         modelsdev_path: Some(snap.clone()),
         tz: Some("Asia/Shanghai".to_string()),

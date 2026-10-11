@@ -10,7 +10,14 @@ use tokenscope::pricing::{INDEX_VERSION, Pricing};
 use tokenscope::report::{SummaryOptions, summary};
 
 fn tmp_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("tokenscope-policy-{tag}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!(
+        "tokenscope-policy-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d

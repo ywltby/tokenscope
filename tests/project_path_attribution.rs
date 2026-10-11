@@ -256,7 +256,14 @@ fn initial_cwd_is_stable_while_event_cwd_changes() {
 #[test]
 fn cwd_context_survives_cache_roundtrip() {
     // B02：两个目录上下文字段必须贯通缓存读写（序列化与恢复一致）。
-    let dir = std::env::temp_dir().join(format!("tokenscope-b02-cache-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "tokenscope-b02-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let cache = Cache::open(&dir.join("cache.db")).unwrap();

@@ -30,8 +30,12 @@ const CODE_ASSERTION: i32 = 4;
 fn temp_root(tag: &str) -> PathBuf {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let d = std::env::temp_dir().join(format!(
-        "tokenscope-acceptance-{tag}-{}-{n}",
-        std::process::id()
+        "tokenscope-acceptance-{tag}-{}-{n}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -409,7 +413,14 @@ fn acceptance_without_root_fails_before_collection() {
         ),
         (
             "missing".to_string(),
-            std::env::temp_dir().join(format!("tokenscope-no-such-{}", std::process::id())),
+            std::env::temp_dir().join(format!(
+                "tokenscope-no-such-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
         ),
         ("real-data".to_string(), home.join(".tokenscope")),
         ("home".to_string(), home.clone()),

@@ -18,8 +18,12 @@ const DIR_ENV: &str = "TOKENSCOPE_LOG_DIR";
 
 fn fresh_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
-        "tokenscope-log-startup-{tag}-{}",
-        std::process::id()
+        "tokenscope-log-startup-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();

@@ -20,7 +20,14 @@ fn fixture(p: &str) -> PathBuf {
 }
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("tokenscope-pmap-{tag}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!(
+        "tokenscope-pmap-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -46,6 +53,7 @@ fn opts_for(dir: &Path, claude_root: &Path, mapping: Option<PathBuf>) -> Summary
         codex_dir: Some(dir.join("no-codex")),
         cache_dir: Some(dir.join("cache")),
         pricing_index: Some(dir.join("pricing-index.json")),
+        pricing_path: Some(dir.join("no-pricing.toml")),
         openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
         modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
         claude_projects_path: mapping,

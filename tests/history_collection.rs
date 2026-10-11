@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokenscope::aggregate::GroupBy;
+use tokenscope::history::HistoryDb;
 use tokenscope::model::AgentKind;
 use tokenscope::report::{SummaryOptions, rebuild_cache, summary};
 
@@ -16,8 +17,12 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 fn temp_dir(tag: &str) -> PathBuf {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "tokenscope-history-collection-{tag}-{}-{n}",
-        std::process::id()
+        "tokenscope-history-collection-{tag}-{}-{n}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -316,5 +321,61 @@ fn concurrent_queries_share_one_collection_without_duplicating_usage() {
         tokenscope::history::HistoryDb::open(&dir.join("data").join("history.db")).unwrap();
     assert_eq!(history.event_count().unwrap(), 8, "并发采集不复制事件");
     assert_eq!(history.totals().unwrap().input, 80);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// N06 验收（根库侧）：共享提交观察覆盖**真实**采集提交（含历史库写入）——
+/// 提交期间计数可见，结束后归零，事实完整持久化。大来源量让真实采集持续
+/// 足够久，观察行为可稳定复现。
+#[test]
+fn real_submission_is_covered_by_shared_observation() {
+    let dir = temp_dir("exit-real");
+    let claude = dir.join("projects");
+    for i in 0..300 {
+        let f = claude.join("proj").join(format!("s{i}.jsonl"));
+        write_lines(
+            &f,
+            &[claude_line(
+                &format!("s{i}"),
+                &format!("m{i}"),
+                &format!("2026-09-15T08:{:02}:{:02}.000Z", (i / 60) % 60, i % 60),
+                10,
+                1,
+            )],
+        );
+    }
+    let o = opts(&dir, Some(claude), None);
+    let o2 = o.clone();
+    let worker = std::thread::spawn(move || summary(&o2).unwrap());
+
+    // 等真实提交在共享边界登记。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while tokenscope::report::active_collection_submissions() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "真实采集必须经共享边界登记为进行中提交"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    let report = worker.join().unwrap();
+    assert_eq!(report.totals.requests, 300);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while tokenscope::report::active_collection_submissions() > 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "提交完成后计数必须归零"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    // 事实已持久化：重新打开历史库读得到全部事件。
+    drop(o);
+    let history = HistoryDb::open(&dir.join("data").join("history.db")).unwrap();
+    assert_eq!(
+        history.event_count().unwrap(),
+        300,
+        "共享观察覆盖的提交必须完整落库"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

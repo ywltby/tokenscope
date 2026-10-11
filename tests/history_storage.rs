@@ -22,8 +22,12 @@ fn temp_dir(tag: &str) -> PathBuf {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let mut p = std::env::temp_dir();
     p.push(format!(
-        "tokenscope-history-storage-{tag}-{}-{n}",
-        std::process::id()
+        "tokenscope-history-storage-{tag}-{}-{n}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&p).unwrap();
     p

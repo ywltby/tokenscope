@@ -27,7 +27,14 @@ fn real_data_project_model_breakdown() {
     }
     let needle =
         std::env::var("TOKENSCOPE_REAL_PROBE_PROJECT").unwrap_or_else(|_| "weixiao".to_string());
-    let dir = std::env::temp_dir().join(format!("tokenscope-real-probe-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "tokenscope-real-probe-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 

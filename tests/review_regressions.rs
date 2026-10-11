@@ -33,8 +33,12 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 fn temp_dir(tag: &str) -> PathBuf {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "tokenscope-review-{tag}-{}-{n}",
-        std::process::id()
+        "tokenscope-review-{tag}-{}-{n}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -1802,5 +1806,230 @@ fn codex_union_identity_matrix() {
         2,
         "两条来源记录各自登记证据，不复制用量"
     );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ================================================================ R01：预览/提交对账
+
+/// R01 反例 1：同一事实经不同来源键先后更新时，预览与提交的处置数字必须
+/// 一致（此前预览 [更新, 未变]、提交 [更新, 陈旧]——同一事实经部分身份
+/// 看到旧终值）。事实始终一条，token 不变。
+#[test]
+fn batch_preview_matches_commit_for_same_fact_updates() {
+    let dir = temp_dir("r01-parity");
+    let history = history_of(&dir);
+    let t = 1_789_545_600i64;
+    let row = |rid: &'static str, at: i64| CcsRow {
+        request_id: rid.to_string(),
+        app_type: "codex".into(),
+        model: "gpt-5.6-sol".into(),
+        session_id: Some("sess-1".into()),
+        data_source: "proxy".into(),
+        created_at: at,
+        input: 100,
+        output: 10,
+    };
+    seed_ccs(
+        &dir.join("cc-switch.db"),
+        &[row("px-1", t), row("px-2", t + 1)],
+        &[],
+    );
+    // 首次导入：同保守身份合为一事实（px-2 时间更晚 → 更新胜出）。
+    {
+        let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
+        let first = ccs::preview(&source, &history, "UTC").unwrap();
+        ccs::commit(
+            &first.plan_id,
+            &history,
+            RollupConflictPolicy::KeepExisting,
+            false,
+        )
+        .unwrap();
+    }
+    assert_eq!(history.event_count().unwrap(), 1);
+
+    // px-1 的时间改为 t+2 后重新预览/提交：px-1 更新事实，px-2 经自己的
+    // 来源记录命中同一事实且观察时间更早 → 陈旧。两侧数字必须一致。
+    // （先丢弃第一只读连接：其读事务会挡住本次 UPDATE。）
+    {
+        let conn = rusqlite::Connection::open(dir.join("cc-switch.db")).unwrap();
+        conn.execute(
+            "UPDATE proxy_request_logs SET created_at = ?1 WHERE request_id = 'px-1'",
+            [t + 2],
+        )
+        .unwrap();
+    }
+    let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
+    let preview = ccs::preview(&source, &history, "UTC").unwrap();
+    assert_eq!(preview.would_insert, 0);
+    assert_eq!(preview.would_update, 1, "px-1（t+2）更新事实");
+    assert_eq!(preview.would_unchanged, 0);
+    assert_eq!(
+        preview.would_stale, 1,
+        "px-2（t+1）经自身来源记录命中同一事实"
+    );
+    let report = ccs::commit(
+        &preview.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        false,
+    )
+    .unwrap();
+    assert_eq!(report.requests_inserted, 0);
+    assert_eq!(report.requests_updated, 1, "预览与提交一致");
+    assert_eq!(report.requests_unchanged, 0);
+    assert_eq!(report.requests_stale, 1);
+    assert_eq!(history.event_count().unwrap(), 1, "事实始终一条");
+    assert_eq!(history.totals().unwrap().input, 100, "token 不变");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// R01 反例 2：同一事实持有多个别名（a、b）。write1 经 a 更新，write2 经
+/// a、b 再更新——两个别名都指向**同一事实**，不得误报"别名指向不同事件"。
+#[test]
+fn batch_preview_multi_alias_of_same_fact_does_not_conflict() {
+    let dir = temp_dir("r01-multi-alias");
+    let history = history_of(&dir);
+    let ts: jiff::Timestamp = "2026-09-15T08:00:00Z".parse().unwrap();
+    let alias = |v: &str| EventAlias {
+        app: AgentKind::ClaudeCode,
+        scheme: "claude-message".into(),
+        value: v.into(),
+    };
+    history
+        .write_batch(&[EventWrite {
+            event_key: "fact|1".into(),
+            app: AgentKind::ClaudeCode,
+            ts,
+            model_raw: "claude-opus-5-5".into(),
+            model_identity: "claudeopus55".into(),
+            session_id: Some("s1".into()),
+            record_id: Some("m1".into()),
+            project_key: Some("/work/app".into()),
+            session_initial_cwd: None,
+            event_cwd: None,
+            tokens: TokenCounts {
+                input: 10,
+                output: 10,
+                cache_write: 0,
+                cache_read: 0,
+            },
+            precedence: WritePrecedence::NativeLog,
+            observed_at: ts,
+            aliases: vec![alias("s1|a"), alias("s1|b")],
+            origins: Vec::new(),
+        }])
+        .unwrap();
+
+    let write = |key: &str, output: u64, at: &str, aliases: Vec<EventAlias>| EventWrite {
+        event_key: key.into(),
+        app: AgentKind::ClaudeCode,
+        ts: at.parse().unwrap(),
+        model_raw: "claude-opus-5-5".into(),
+        model_identity: "claudeopus55".into(),
+        session_id: Some("s1".into()),
+        record_id: Some("m1".into()),
+        project_key: Some("/work/app".into()),
+        session_initial_cwd: None,
+        event_cwd: None,
+        tokens: TokenCounts {
+            input: 10,
+            output,
+            cache_write: 0,
+            cache_read: 0,
+        },
+        precedence: WritePrecedence::NativeLog,
+        observed_at: at.parse().unwrap(),
+        aliases,
+        origins: Vec::new(),
+    };
+    let w1 = write("w|1", 20, "2026-09-15T08:01:00Z", vec![alias("s1|a")]);
+    let w2 = write(
+        "w|2",
+        30,
+        "2026-09-15T08:02:00Z",
+        vec![alias("s1|a"), alias("s1|b")],
+    );
+
+    // 预览：两个别名命中同一事实 → [更新, 更新]，不报身份冲突。
+    let classes = history.classify_batch(&[w1.clone(), w2.clone()]).unwrap();
+    assert_eq!(
+        classes,
+        vec![
+            tokenscope::history::WriteClass::Update,
+            tokenscope::history::WriteClass::Update
+        ],
+        "多别名同事实按统一终值判定"
+    );
+
+    // 提交对账：两次都是更新，最终一条事实、一个终值。
+    let s = history.write_batch(&[w1, w2]).unwrap();
+    assert_eq!(s.updated, 2);
+    assert_eq!(history.event_count().unwrap(), 1);
+    assert_eq!(history.totals().unwrap().output, 30, "终值统一");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// R01 反例 3：内容未变化的行携带**新别名**时，提交会把别名补记到同一
+/// 事实——后续只携带该别名的写入必须命中同一事实（未变化），而不是误报
+/// 新增。
+#[test]
+fn batch_preview_unchanged_row_claims_new_aliases() {
+    let dir = temp_dir("r01-unchanged-claims");
+    let history = history_of(&dir);
+    let ts: jiff::Timestamp = "2026-09-15T08:00:00Z".parse().unwrap();
+    let alias = |v: &str| EventAlias {
+        app: AgentKind::ClaudeCode,
+        scheme: "claude-message".into(),
+        value: v.into(),
+    };
+    let base = EventWrite {
+        event_key: "fact|1".into(),
+        app: AgentKind::ClaudeCode,
+        ts,
+        model_raw: "claude-opus-5-5".into(),
+        model_identity: "claudeopus55".into(),
+        session_id: Some("s1".into()),
+        record_id: Some("m1".into()),
+        project_key: Some("/work/app".into()),
+        session_initial_cwd: None,
+        event_cwd: None,
+        tokens: TokenCounts {
+            input: 10,
+            output: 10,
+            cache_write: 0,
+            cache_read: 0,
+        },
+        precedence: WritePrecedence::NativeLog,
+        observed_at: ts,
+        aliases: vec![alias("s1|a")],
+        origins: Vec::new(),
+    };
+    history.write_batch(std::slice::from_ref(&base)).unwrap();
+
+    // write1：内容相同、携带 a + 新别名 b → 未变化（提交会把 b 补记）。
+    let mut w1 = base.clone();
+    w1.event_key = "w|1".into();
+    w1.aliases = vec![alias("s1|a"), alias("s1|b")];
+    // write2：内容相同、只携带 b → 必须经 write1 补记的别名命中同一事实。
+    let mut w2 = base.clone();
+    w2.event_key = "w|2".into();
+    w2.aliases = vec![alias("s1|b")];
+
+    let classes = history.classify_batch(&[w1.clone(), w2.clone()]).unwrap();
+    assert_eq!(
+        classes,
+        vec![
+            tokenscope::history::WriteClass::Unchanged,
+            tokenscope::history::WriteClass::Unchanged
+        ],
+        "未变化行补记的别名对后续写入可见"
+    );
+
+    // 提交对账：两条都未变化、别名净增一条、事实一条。
+    let s = history.write_batch(&[w1, w2]).unwrap();
+    assert_eq!(s.unchanged, 2);
+    assert_eq!(s.aliases_added, 1, "只有 b 是新别名");
+    assert_eq!(history.event_count().unwrap(), 1);
     std::fs::remove_dir_all(&dir).ok();
 }

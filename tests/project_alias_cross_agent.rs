@@ -11,7 +11,14 @@ use tokenscope::aggregate::GroupBy;
 use tokenscope::report::{SummaryOptions, summary};
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("tokenscope-a05-alias-{tag}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!(
+        "tokenscope-a05-alias-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -60,6 +67,7 @@ fn opts(
         codex_dir: Some(codex.to_path_buf()),
         cache_dir: Some(dir.join("cache")),
         pricing_index: Some(dir.join("idx.json")),
+        pricing_path: Some(dir.join("no-pricing.toml")),
         openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
         modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
         tz: Some("Asia/Shanghai".to_string()),

@@ -35,9 +35,13 @@ fn hermetic_dir() -> PathBuf {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "tokenscope-e2e-claude-{}-{}",
+        "tokenscope-e2e-claude-{}-{}-{}",
         std::process::id(),
-        n
+        n,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ))
 }
 

@@ -540,6 +540,15 @@ pub struct LegacyCacheFile {
     pub rejected: u64,
 }
 
+/// 旧缓存的 agent 写法兼容：v3 时代存的是 `claude`（不是 `claude-code`），
+/// 其余按现行解析（未知值仍明确报错，不猜）。
+fn parse_legacy_agent(raw: &str) -> Result<AgentKind> {
+    match raw {
+        "claude" => Ok(AgentKind::ClaudeCode),
+        other => AgentKind::parse(other).map_err(|e| anyhow::anyhow!("{e}")),
+    }
+}
+
 /// H03：以**只读**方式读取遗留缓存的可迁内容——绝不触发 `Cache::open` 的
 /// 版本重建或清空（迁移必须发生在任何旧版本重建/purge 之前，见计划 §6）。
 ///
@@ -572,10 +581,53 @@ pub fn read_legacy_cache(path: &Path) -> Result<Vec<LegacyCacheFile>> {
         }
         names.iter().any(|n| n == "line")
     };
+    // H03/N03：v3 时代的旧缓存缺 root / context_rev / session_initial_cwd /
+    // event_cwd / line 等后增列——按列探测兜底空值，"仅迁合法字段"，缺列不
+    // 阻止整库迁移（此前对缺列旧结构直接报错，违背可重试迁移的语义）。
+    let files_cols: std::collections::HashSet<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(files)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        let mut names = std::collections::HashSet::new();
+        for r in rows {
+            names.insert(r?);
+        }
+        names
+    };
+    let events_cols: std::collections::HashSet<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(events)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        let mut names = std::collections::HashSet::new();
+        for r in rows {
+            names.insert(r?);
+        }
+        names
+    };
+    let file_root_expr = if files_cols.contains("root") {
+        "root"
+    } else {
+        "''"
+    };
+    let file_crev_expr = if files_cols.contains("context_rev") {
+        "context_rev"
+    } else {
+        "''"
+    };
+    let line_expr = if has_line { "line" } else { "0" };
+    let sic_expr = if events_cols.contains("session_initial_cwd") {
+        "session_initial_cwd"
+    } else {
+        "NULL"
+    };
+    let ecwd_expr = if events_cols.contains("event_cwd") {
+        "event_cwd"
+    } else {
+        "NULL"
+    };
     let mut out = Vec::new();
-    let mut files_stmt = conn.prepare(
-        "SELECT id, agent, root, path, context_rev, size, mtime_ms FROM files ORDER BY id",
-    )?;
+    let mut files_stmt = conn.prepare(&format!(
+        "SELECT id, agent, {file_root_expr}, path, {file_crev_expr}, size, mtime_ms
+         FROM files ORDER BY id"
+    ))?;
     let files: Vec<(i64, String, String, String, String, i64, i64)> = files_stmt
         .query_map([], |r| {
             Ok((
@@ -590,11 +642,10 @@ pub fn read_legacy_cache(path: &Path) -> Result<Vec<LegacyCacheFile>> {
         })?
         .collect::<rusqlite::Result<_>>()?;
     drop(files_stmt);
-    let line_expr = if has_line { "line" } else { "0" };
     for (file_id, agent, root, file_path, context_rev, size, mtime) in files {
-        let agent = AgentKind::parse(&agent).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let agent = parse_legacy_agent(&agent)?;
         let sql = format!(
-            "SELECT ts, record_id, model, session_id, project, session_initial_cwd, event_cwd,
+            "SELECT ts, record_id, model, session_id, project, {sic_expr}, {ecwd_expr},
                     {line_expr}, input, output, cache_write, cache_read
              FROM events WHERE file_id = ?1 ORDER BY rowid"
         );

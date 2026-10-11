@@ -907,4 +907,85 @@ mod tests {
             .expect("上一轮结束后必须可再次关闭（不残留 in-flight 状态）");
         assert_eq!(again.join().unwrap(), CloseOutcome::QuitRequested);
     }
+    /// N06 验收（壳侧）：退出等待覆盖**真实**历史提交——进行中的采集提交期间
+    /// 调用 `stop_periodic_collection`，它必须等到提交完成（事实持久化）才返回；
+    /// 无进行中提交时立即返回。大来源量让真实采集持续足够久，等待行为可观察。
+    #[test]
+    fn stop_periodic_collection_waits_for_real_submission() {
+        let dir = std::env::temp_dir().join(format!(
+            "tokenscope-shell-exit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let claude = dir.join("projects");
+        // 120 个独立日志文件：真实采集（发现 + 解析 + 历史库写入）持续足够久。
+        for i in 0..300 {
+            let f = claude.join("proj").join(format!("s{i}.jsonl"));
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(
+            &f,
+            format!(
+                r#"{{"type":"assistant","timestamp":"2026-09-15T08:{:02}:{:02}.000Z","sessionId":"s{i}","cwd":"C:/work/alpha","message":{{"id":"m-{i}","model":"claude-opus-5-5","usage":{{"input_tokens":10,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#,
+                (i / 60) % 60,
+                i % 60
+            ),
+        )
+        .unwrap();
+        }
+        let opts = tokenscope::report::SummaryOptions {
+            by: tokenscope::aggregate::GroupBy::Day,
+            claude_dir: Some(claude.clone()),
+            codex_dir: Some(dir.join("no-codex")),
+            claude_enabled: Some(true),
+            codex_enabled: Some(false),
+            cache_dir: Some(dir.join("data")),
+            pricing_index: Some(dir.join("idx.json")),
+            pricing_path: Some(dir.join("pricing.toml")),
+            openrouter_path: Some(dir.join("no-or.json")),
+            modelsdev_path: Some(dir.join("no-md.json")),
+            tz: Some("UTC".to_string()),
+            ..Default::default()
+        };
+
+        let o = opts.clone();
+        let worker = std::thread::spawn(move || tokenscope::report::summary(&o).unwrap());
+
+        // 等真实提交在共享边界登记（N06 计数），再触发退出等待。
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while tokenscope::report::active_collection_submissions() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "真实采集必须经共享边界登记为进行中提交"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // 退出等待：直到提交完成（计数归零）才返回。
+        stop_periodic_collection(Duration::from_secs(30));
+        assert_eq!(
+            tokenscope::report::active_collection_submissions(),
+            0,
+            "退出等待返回时不得仍有进行中提交"
+        );
+        let report = worker.join().unwrap();
+        assert_eq!(report.totals.requests, 300);
+
+        // 事实已持久化：重新打开历史库读得到全部事件。
+        let history =
+            tokenscope::history::HistoryDb::open(&dir.join("data").join("history.db")).unwrap();
+        assert_eq!(
+            history.event_count().unwrap(),
+            300,
+            "退出等待覆盖的提交必须完整落库"
+        );
+
+        // 无进行中提交：等待立即返回（有限等待不空转）。
+        let t = Instant::now();
+        stop_periodic_collection(Duration::from_secs(30));
+        assert!(t.elapsed() < Duration::from_secs(1), "无提交时立即返回");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

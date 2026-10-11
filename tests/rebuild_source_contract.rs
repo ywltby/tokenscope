@@ -13,8 +13,12 @@ use tokenscope::report::{SummaryOptions, SummaryReport, cache_stats, rebuild_cac
 
 fn tmp_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
-        "tokenscope-rebuild-src-{tag}-{}",
-        std::process::id()
+        "tokenscope-rebuild-src-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();

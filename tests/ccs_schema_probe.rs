@@ -212,7 +212,14 @@ fn real_import_into_isolated_history_is_idempotent() {
         eprintln!("跳过：本机没有 {}", source_path.display());
         return;
     }
-    let dir = std::env::temp_dir().join(format!("tokenscope-ccs-real-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "tokenscope-ccs-real-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let history = HistoryDb::open(&dir.join("history.db")).unwrap();

@@ -1187,59 +1187,43 @@ impl HistoryDb {
         }
     }
 
-    /// **批感知**分类（预览用）：按提交顺序逐条判定，前一条写入已声明的
-    /// 身份（来源键 / 来源记录 / 别名）对后续条目可见——同一批内的重复
-    /// 来源记录因此按"未变化/更新"呈现，而不是每条都算新增。
+    /// **批感知**分类（预览用）：按提交顺序逐条判定，判定与提交路径
+    /// （[`write_events_in_tx`]）完全同构——
     ///
-    /// 判定核心与提交路径完全同构：[`lookup_event_with_claims`] 按
-    /// `lookup_event` 的三级顺序与冲突语义查找（本批声明优先于库内行），
-    /// 处置用 [`classify_against`] 纯函数；批内模拟只记账身份到事件的归属，
-    /// 不写库。`OverlapCandidate` 不记账（是否按新增导入由用户决定）。
+    /// - 同一事实只有**一份**模拟终值：身份（来源键 / 来源记录 / 别名）只
+    ///   映射到事实 ID，经任一身份命中的都是同一份状态；Update 统一前进，
+    ///   Unchanged / Conflict / Stale 保持（R01：早期实现按身份各存副本，
+    ///   同一事实经不同身份看新旧不一致，预览与提交分叉）；
+    /// - **所有**处置类别都登记本条携带的来源键 / 来源记录 / 别名（提交
+    ///   路径对每一类都补记；R01 反例 3：Unchanged 行的新别名必须让后续
+    ///   只携带该别名的写入命中同一事实，而不是误报新增）；
+    /// - 别名在批内或库内已绑定**其他事实**时按提交同口径整批失败；
+    /// - `OverlapCandidate` 不记账（是否按新增导入由用户决定）。
     pub fn classify_batch(&self, writes: &[EventWrite]) -> Result<Vec<WriteClass>> {
-        // 身份 → 本批已声明的事件（提交时会真实存在；负数 id 仅为记账键）。
-        let mut claimed: std::collections::HashMap<String, StoredEvent> =
-            std::collections::HashMap::new();
+        let mut sim = BatchSim::new();
         let mut out = Vec::with_capacity(writes.len());
         for w in writes {
             validate_write(w)?;
-            let existing = lookup_event_with_claims(&self.conn, w, &claimed)?;
-            let class = match existing {
+            let found = sim.resolve(&self.conn, w)?;
+            let (class, fact) = match found {
                 None => match self.overlap_candidate(w)? {
-                    Some(_) if w.aliases.is_empty() => WriteClass::OverlapCandidate,
-                    _ => WriteClass::Insert,
+                    Some(_) if w.aliases.is_empty() => (WriteClass::OverlapCandidate, None),
+                    _ => (WriteClass::Insert, None),
                 },
-                Some(existing) => classify_against(&existing, w),
+                Some(fid) => (classify_against(sim.state(fid), w), Some(fid)),
             };
-            if matches!(class, WriteClass::Insert | WriteClass::Update) {
-                // 本批声明：来源键 / 来源记录 / 别名此后都指向这条（模拟事件
-                // 内容 = 本次写入的终值，与提交后的行内容一致）。
-                let sim = StoredEvent {
-                    id: -(out.len() as i64) - 1,
-                    event_key: w.event_key.clone(),
-                    app: w.app,
-                    ts: w.ts,
-                    model_raw: w.model_raw.clone(),
-                    model_identity: w.model_identity.clone(),
-                    identity_revision: IDENTITY_REVISION,
-                    session_id: w.session_id.clone(),
-                    record_id: w.record_id.clone(),
-                    project_key: w.project_key.clone(),
-                    session_initial_cwd: w.session_initial_cwd.clone(),
-                    event_cwd: w.event_cwd.clone(),
-                    tokens: w.tokens,
-                    precedence: w.precedence,
-                    observed_at: w.observed_at,
-                    parser_revision: w.parser_revision(),
-                };
-                claimed.insert(format!("k|{}", w.event_key), sim.clone());
-                for o in &w.origins {
-                    claimed.insert(format!("o|{}", o.origin_key), sim.clone());
+            match class {
+                WriteClass::OverlapCandidate => {}
+                WriteClass::Insert => {
+                    let fid = sim.insert_fact(w);
+                    sim.register(&self.conn, w, fid)?;
                 }
-                for a in &w.aliases {
-                    claimed.insert(
-                        format!("a|{}|{}|{}", a.app.as_str(), a.scheme, a.value),
-                        sim.clone(),
-                    );
+                _ => {
+                    let fid = fact.expect("命中事实必须已登记");
+                    if class == WriteClass::Update {
+                        sim.apply_update(fid, w);
+                    }
+                    sim.register(&self.conn, w, fid)?;
                 }
             }
             out.push(class);
@@ -2327,81 +2311,193 @@ fn lookup_event(conn: &Connection, w: &EventWrite) -> Result<Option<StoredEvent>
     }
 }
 
-/// [`lookup_event`] 的批感知变体（预览用）：同一三级顺序与冲突语义，但每级
-/// 先查本批已声明的身份（`claimed`，提交后会真实存在），再查持久库——
-/// 预览数字因此与提交结果一致（批内重复按未变化/更新呈现）。
-fn lookup_event_with_claims(
-    conn: &Connection,
-    w: &EventWrite,
-    claimed: &std::collections::HashMap<String, StoredEvent>,
-) -> Result<Option<StoredEvent>> {
-    // 1) 来源键。
-    if let Some(e) = claimed.get(&format!("k|{}", w.event_key)) {
-        return Ok(Some(e.clone()));
+/// 批内模拟状态（[`HistoryDb::classify_batch`] 用）：身份 → 事实 → 统一终值。
+struct BatchSim {
+    /// 身份键（`k|来源键`、`o|来源记录键`、`a|app|scheme|value`）→ 事实 ID。
+    claims: std::collections::HashMap<String, i64>,
+    /// 库内事件 ID → 事实 ID（同一库内事件在批内只对应一个事实）。
+    resolved: std::collections::HashMap<i64, i64>,
+    /// 事实 ID（负数，与库内正数主键不重叠）→ 统一模拟终值。
+    facts: std::collections::HashMap<i64, StoredEvent>,
+    next_fact: i64,
+}
+
+fn alias_claim_key(a: &EventAlias) -> String {
+    format!("a|{}|{}|{}", a.app.as_str(), a.scheme, a.value)
+}
+
+/// 写入的模拟行形态（`id` = 事实 ID；`event_key` 在 Insert 时取写入键）。
+fn sim_event(w: &EventWrite, fid: i64) -> StoredEvent {
+    StoredEvent {
+        id: fid,
+        event_key: w.event_key.clone(),
+        app: w.app,
+        ts: w.ts,
+        model_raw: w.model_raw.clone(),
+        model_identity: w.model_identity.clone(),
+        identity_revision: IDENTITY_REVISION,
+        session_id: w.session_id.clone(),
+        record_id: w.record_id.clone(),
+        project_key: w.project_key.clone(),
+        session_initial_cwd: w.session_initial_cwd.clone(),
+        event_cwd: w.event_cwd.clone(),
+        tokens: w.tokens,
+        precedence: w.precedence,
+        observed_at: w.observed_at,
+        parser_revision: w.parser_revision(),
     }
-    let by_key: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM usage_events WHERE event_key = ?1",
-            params![w.event_key],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(id) = by_key {
-        return load_event(conn, id);
-    }
-    // 2) 来源记录证据。
-    for origin in &w.origins {
-        if let Some(e) = claimed.get(&format!("o|{}", origin.origin_key)) {
-            return Ok(Some(e.clone()));
+}
+
+impl BatchSim {
+    fn new() -> Self {
+        Self {
+            claims: std::collections::HashMap::new(),
+            resolved: std::collections::HashMap::new(),
+            facts: std::collections::HashMap::new(),
+            next_fact: -1,
         }
-        let hit: Option<i64> = conn
+    }
+
+    fn state(&self, fid: i64) -> &StoredEvent {
+        self.facts
+            .get(&fid)
+            .expect("事实必须已登记（resolve/insert 之后）")
+    }
+
+    /// 库内事件 → 事实（首次遇到时载入为该事实的初始终值）。
+    fn fact_of(&mut self, conn: &Connection, event_id: i64) -> Result<i64> {
+        if let Some(f) = self.resolved.get(&event_id) {
+            return Ok(*f);
+        }
+        let ev = load_event(conn, event_id)?.ok_or_else(|| anyhow!("事件 {event_id} 不存在"))?;
+        let fid = self.next_fact;
+        self.next_fact -= 1;
+        self.resolved.insert(event_id, fid);
+        self.facts.insert(fid, ev);
+        Ok(fid)
+    }
+
+    /// 解析本条写入命中的事实：与 [`lookup_event`] 的三级顺序与冲突语义
+    /// 一致（来源键 → 来源记录 → 别名；本批声明优先于库内行，按事实归一）。
+    fn resolve(&mut self, conn: &Connection, w: &EventWrite) -> Result<Option<i64>> {
+        // 1) 来源键。
+        if let Some(f) = self.claims.get(&format!("k|{}", w.event_key)) {
+            return Ok(Some(*f));
+        }
+        let by_key: Option<i64> = conn
             .query_row(
-                "SELECT event_id FROM event_origins WHERE origin_kind = ?1 AND origin_key = ?2",
-                params![origin.origin_kind, origin.origin_key],
+                "SELECT id FROM usage_events WHERE event_key = ?1",
+                params![w.event_key],
                 |r| r.get(0),
             )
             .optional()?;
-        if let Some(id) = hit {
-            return load_event(conn, id);
+        if let Some(id) = by_key {
+            return self.fact_of(conn, id).map(Some);
         }
-    }
-    // 3) 身份别名（本批声明与库内行合并去重；多个不同事件 → 冲突）。
-    let mut hits: Vec<i64> = Vec::new();
-    let mut claimed_hits: Vec<&StoredEvent> = Vec::new();
-    for alias in &w.aliases {
-        let claim_key = format!("a|{}|{}|{}", alias.app.as_str(), alias.scheme, alias.value);
-        if let Some(e) = claimed.get(&claim_key) {
-            if !claimed_hits
-                .iter()
-                .any(|x| x.event_key == e.event_key && x.id == e.id)
-            {
-                claimed_hits.push(e);
+        // 2) 来源记录证据。
+        for origin in &w.origins {
+            if let Some(f) = self.claims.get(&format!("o|{}", origin.origin_key)) {
+                return Ok(Some(*f));
             }
-            continue;
+            let hit: Option<i64> = conn
+                .query_row(
+                    "SELECT event_id FROM event_origins WHERE origin_kind = ?1 AND origin_key = ?2",
+                    params![origin.origin_kind, origin.origin_key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(id) = hit {
+                return self.fact_of(conn, id).map(Some);
+            }
         }
-        let hit: Option<i64> = conn
-            .query_row(
-                "SELECT event_id FROM event_aliases
-                 WHERE app = ?1 AND identity_scheme = ?2 AND identity_value = ?3",
-                params![alias.app.as_str(), alias.scheme, alias.value],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(id) = hit
-            && !hits.contains(&id)
-        {
-            hits.push(id);
+        // 3) 身份别名：可多命中，按事实去重；指向多个事实 → 与提交同口径冲突。
+        let mut hits: Vec<i64> = Vec::new();
+        for alias in &w.aliases {
+            let key = alias_claim_key(alias);
+            if let Some(f) = self.claims.get(&key) {
+                if !hits.contains(f) {
+                    hits.push(*f);
+                }
+                continue;
+            }
+            let hit: Option<i64> = conn
+                .query_row(
+                    "SELECT event_id FROM event_aliases
+                     WHERE app = ?1 AND identity_scheme = ?2 AND identity_value = ?3",
+                    params![alias.app.as_str(), alias.scheme, alias.value],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(id) = hit {
+                let f = self.fact_of(conn, id)?;
+                if !hits.contains(&f) {
+                    hits.push(f);
+                }
+            }
+        }
+        match hits.len() {
+            0 => Ok(None),
+            1 => Ok(Some(hits[0])),
+            _ => bail!("身份冲突：同一请求的多个别名分别指向不同事实，无法在不猜测的前提下合并"),
         }
     }
-    match (claimed_hits.len(), hits.len()) {
-        (0, 0) => Ok(None),
-        (1, 0) => Ok(Some(claimed_hits[0].clone())),
-        (0, 1) => load_event(conn, hits[0]),
-        (0, _) => {
-            bail!("身份冲突：同一请求的多个别名分别指向事件 {hits:?}，无法在不猜测的前提下合并")
+
+    /// 新建事实（Insert）：模拟行 = 本条写入内容。
+    fn insert_fact(&mut self, w: &EventWrite) -> i64 {
+        let fid = self.next_fact;
+        self.next_fact -= 1;
+        self.facts.insert(fid, sim_event(w, fid));
+        fid
+    }
+
+    /// Update：统一终值前进为本次写入（事件键保持事实原值——提交路径的
+    /// UPDATE 不改 event_key）。
+    fn apply_update(&mut self, fid: i64, w: &EventWrite) {
+        if let Some(f) = self.facts.get_mut(&fid) {
+            let key = f.event_key.clone();
+            *f = sim_event(w, fid);
+            f.event_key = key;
         }
-        // 本批声明与库内行同时命中且不是同一事件：与库内多别名冲突同口径。
-        _ => bail!("身份冲突：同一请求的多个别名分别指向不同事件，无法在不猜测的前提下合并"),
+    }
+
+    /// 证据登记：与 [`write_events_in_tx`] 一致——**所有**处置类别都登记
+    /// 本条携带的来源键 / 来源记录 / 别名；别名已绑定其他事实时按提交同
+    /// 口径报错（提交会整批失败，预览不得假装可行）。
+    fn register(&mut self, conn: &Connection, w: &EventWrite, fid: i64) -> Result<()> {
+        self.claims.insert(format!("k|{}", w.event_key), fid);
+        for o in &w.origins {
+            self.claims.insert(format!("o|{}", o.origin_key), fid);
+        }
+        for a in &w.aliases {
+            let key = alias_claim_key(a);
+            if let Some(other) = self.claims.get(&key) {
+                if *other != fid {
+                    bail!("别名冲突：{key} 已绑定其他事实，提交将整批失败");
+                }
+                continue;
+            }
+            let bound: Option<i64> = conn
+                .query_row(
+                    "SELECT event_id FROM event_aliases
+                     WHERE app = ?1 AND identity_scheme = ?2 AND identity_value = ?3",
+                    params![a.app.as_str(), a.scheme, a.value],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match bound {
+                Some(id) => {
+                    let other = self.fact_of(conn, id)?;
+                    if other != fid {
+                        bail!("别名冲突：{key} 已绑定其他事实，提交将整批失败");
+                    }
+                    // 已绑定同一事实：与提交路径的 no-op 一致。
+                }
+                None => {
+                    self.claims.insert(key, fid);
+                }
+            }
+        }
+        Ok(())
     }
 }
 

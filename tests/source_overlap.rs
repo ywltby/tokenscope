@@ -9,7 +9,14 @@ use tokenscope::aggregate::GroupBy;
 use tokenscope::report::{SummaryOptions, cache_stats, summary};
 
 fn tmp_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("tokenscope-overlap-{tag}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!(
+        "tokenscope-overlap-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -38,6 +45,7 @@ fn opts(
         codex_dir,
         cache_dir: Some(dir.join("cache")),
         pricing_index: Some(dir.join("idx.json")),
+        pricing_path: Some(dir.join("no-pricing.toml")),
         openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
         modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
         tz: Some("Asia/Shanghai".to_string()),
@@ -117,6 +125,7 @@ fn overlap_validation_uses_effective_default_paths() {
         codex_dir: Some(claude_default),
         cache_dir: Some(dir.join("cache")),
         pricing_index: Some(dir.join("idx.json")),
+        pricing_path: Some(dir.join("no-pricing.toml")),
         tz: Some("Asia/Shanghai".to_string()),
         ..Default::default()
     };
@@ -130,6 +139,7 @@ fn overlap_validation_uses_effective_default_paths() {
         by: GroupBy::Day,
         cache_dir: Some(dir.join("cache2")),
         pricing_index: Some(dir.join("idx2.json")),
+        pricing_path: Some(dir.join("no-pricing.toml")),
         tz: Some("Asia/Shanghai".to_string()),
         ..Default::default()
     };
@@ -144,6 +154,7 @@ fn overlap_validation_uses_effective_default_paths() {
         codex_dir: Some(dir.join("other-codex")),
         cache_dir: Some(dir.join("cache3")),
         pricing_index: Some(dir.join("idx3.json")),
+        pricing_path: Some(dir.join("no-pricing.toml")),
         tz: Some("Asia/Shanghai".to_string()),
         ..Default::default()
     };
@@ -335,6 +346,7 @@ fn ambiguous_overlap_is_rejected_before_adapter_selection() {
             by: GroupBy::Day,
             cache_dir: Some(dir.join("cache")),
             pricing_index: Some(dir.join("idx.json")),
+            pricing_path: Some(dir.join("no-pricing.toml")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/or.json")),
             modelsdev_path: Some(PathBuf::from("Z:/no-such/md.json")),
             tz: Some("Asia/Shanghai".to_string()),
@@ -373,6 +385,7 @@ fn same_agent_duplicate_discovery_keeps_single() {
             by: GroupBy::Day,
             cache_dir: Some(dir.join("cache")),
             pricing_index: Some(dir.join("idx.json")),
+            pricing_path: Some(dir.join("no-pricing.toml")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/or.json")),
             modelsdev_path: Some(PathBuf::from("Z:/no-such/md.json")),
             tz: Some("Asia/Shanghai".to_string()),

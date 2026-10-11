@@ -19,8 +19,12 @@ static SEQ: AtomicU32 = AtomicU32::new(0);
 fn tmp(tag: &str) -> PathBuf {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let d = std::env::temp_dir().join(format!(
-        "tokenscope-settings-tx-{tag}-{}-{n}",
+        "tokenscope-settings-tx-{tag}-{}-{n}-{}",
         std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();

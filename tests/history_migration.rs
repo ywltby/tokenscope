@@ -17,8 +17,12 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 fn temp_dir(tag: &str) -> PathBuf {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "tokenscope-history-migration-{tag}-{}-{n}",
-        std::process::id()
+        "tokenscope-history-migration-{tag}-{}-{n}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -465,5 +469,40 @@ fn polluted_v2_history_is_repaired_by_upgrade_and_rescan() {
         !db.with_extension("db.backup-v4").exists(),
         "当前版本重复打开不触发迁移与备份"
     );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// N03/H03：v3 时代旧缓存（files 缺 root / context_rev，events 缺
+/// session_initial_cwd / event_cwd / line）也按"仅迁合法字段"迁移——列探测
+/// 兜底空值，缺列不再让整库迁移失败（此前直接报错，违背可重试语义）。
+#[test]
+fn v3_legacy_cache_without_later_columns_still_migrates() {
+    let dir = temp_dir("v3-legacy");
+    let legacy = dir.join("cache.db");
+    {
+        let conn = rusqlite::Connection::open(&legacy).unwrap();
+        conn.execute_batch(include_str!("fixtures/cache/schema-v3.sql"))
+            .unwrap();
+        // v3 events.files_id 外键指向 files：先插文件行再插事件行。
+        conn.execute(
+            "INSERT INTO files(id, path, agent, size, mtime_ms) VALUES(2, '/logs/new.jsonl', 'claude-code', 10, 5)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events(file_id, ts, record_id, model, session_id, project,
+                                input, output, cache_write, cache_read)
+             VALUES(2, '2026-07-17T08:00:00Z', 'm9', 'claude-sonnet-4-5', 's9', '/work/old',
+                    10, 5, 0, 0)",
+            [],
+        )
+        .unwrap();
+    }
+    let history = HistoryDb::open(&dir.join("history.db")).unwrap();
+    let report = migrate_legacy_cache(&history, &legacy).unwrap().unwrap();
+    assert_eq!(report.events_seen, 2, "v3 自带一行 + 本测试补一行");
+    assert_eq!(report.inserted, 2, "缺列旧结构照常迁移");
+    assert_eq!(history.totals().unwrap(), tokens(20, 6, 0, 0));
+    // 迁移行的项目/目录：v3 没有这些列 → 兜底空值，不得猜测。
     std::fs::remove_dir_all(&dir).ok();
 }

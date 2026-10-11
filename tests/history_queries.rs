@@ -4,8 +4,9 @@
 //! 同时间戳分页无重不漏、大历史流式汇总（保留字节与事件数无关）、只读事务
 //! 随会话淘汰释放（且可显式释放）、预算仍然生效。
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tokenscope::aggregate::GroupBy;
 use tokenscope::history::HistoryDb;
@@ -15,11 +16,47 @@ use tokenscope::report::{EventFilter, SummaryOptions};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// N05：建表/汇总窗口的**临时峰值**单独量测——保留预算不覆盖临时峰值
+/// （docs/stats-semantics.md §3.5）。计数分配器只存在于本测试二进制内，
+/// 真实释放仍交给系统分配器，计数只回退不下溢；百万测试以 `--ignored`
+/// 单线程手工运行，窗口数字不受并行套件干扰。
+struct TrackingAlloc;
+
+static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+unsafe impl GlobalAlloc for TrackingAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() {
+            let prev = LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+            let live = prev.saturating_add(layout.size());
+            PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let size = layout.size();
+        let _ = LIVE_BYTES.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_sub(size))
+        });
+        unsafe { System.dealloc(ptr, layout) };
+    }
+}
+
+#[global_allocator]
+static TRACKING_ALLOC: TrackingAlloc = TrackingAlloc;
+
 fn temp_dir(tag: &str) -> PathBuf {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "tokenscope-history-queries-{tag}-{}-{n}",
-        std::process::id()
+        "tokenscope-history-queries-{tag}-{}-{n}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -286,12 +323,17 @@ fn million_row_history_summarizes_and_pages_within_budget() {
     seed_events(&history, "m", total, false);
     let seed_elapsed = t_seed.elapsed();
 
-    // 行索引构建：覆盖全部事件（元数据保留与构建耗时的测量点）。
+    // 行索引构建：覆盖全部事件（元数据保留、构建耗时与**窗口峰值**的
+    // 测量点——窗口前清零峰值计数，构建后取回）。
     let o = opts(&dir);
+    PEAK_BYTES.store(0, Ordering::Relaxed);
+    let live_before = LIVE_BYTES.load(Ordering::Relaxed);
     let t_build = std::time::Instant::now();
     let snap = query::begin_query(&o).unwrap();
     let build_elapsed = t_build.elapsed();
     assert_eq!(snap.rows.len(), total, "行索引覆盖全部事件");
+    let build_peak = PEAK_BYTES.load(Ordering::Relaxed);
+    let live_after = LIVE_BYTES.load(Ordering::Relaxed);
 
     let charged = query::query_retained_bytes_for_tests();
     let per_row = charged / total;
@@ -299,6 +341,14 @@ fn million_row_history_summarizes_and_pages_within_budget() {
         "N05 规模测量：rows={total} seed={}ms build={}ms retained={charged}B（≈{per_row}B/行，预算上限 256MiB）",
         seed_elapsed.as_millis(),
         build_elapsed.as_millis()
+    );
+    println!(
+        "N05 构建窗口：live {live_before}B → {live_after}B，窗口峰值 {build_peak}B（≈{}/行）",
+        build_peak / total
+    );
+    assert!(
+        build_peak >= charged,
+        "瞬时峰值必须不低于持久保留量（健全性）"
     );
     assert!(
         charged < total * 256,
@@ -309,10 +359,15 @@ fn million_row_history_summarizes_and_pages_within_budget() {
         "百万行索引必须落在默认预算内"
     );
 
-    // 流式汇总：数字与规模精确一致（不受分批影响）。
+    // 流式汇总：数字与规模精确一致（不受分批影响）；同样记录窗口峰值。
+    PEAK_BYTES.store(0, Ordering::Relaxed);
     let t_summary = std::time::Instant::now();
     let summary = query::query_summary(&snap.query_id).unwrap();
-    println!("N05 汇总耗时：{}ms", t_summary.elapsed().as_millis());
+    let summary_peak = PEAK_BYTES.load(Ordering::Relaxed);
+    println!(
+        "N05 汇总耗时：{}ms，窗口峰值 {summary_peak}B",
+        t_summary.elapsed().as_millis()
+    );
     assert_eq!(summary.totals.requests as usize, total);
     assert_eq!(summary.totals.tokens.input, 100 * total as u64);
     assert_eq!(summary.totals.tokens.output, 10 * total as u64);

@@ -34,7 +34,15 @@ fn hermetic_dir() -> PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("tokenscope-e2e-codex-{}-{}", std::process::id(), n))
+    std::env::temp_dir().join(format!(
+        "tokenscope-e2e-codex-{}-{}-{}",
+        std::process::id(),
+        n,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
 }
 
 /// Task 1：内置表已删除——外置 TOML 提供与校正后内置同值的 gpt 价。

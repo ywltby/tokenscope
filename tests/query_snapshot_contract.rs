@@ -34,8 +34,12 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 fn hermetic(tag: &str) -> PathBuf {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let d = std::env::temp_dir().join(format!(
-        "tokenscope-query-snap-{tag}-{}-{n}",
-        std::process::id()
+        "tokenscope-query-snap-{tag}-{}-{n}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
