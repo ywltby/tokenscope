@@ -87,7 +87,7 @@ jobs:
   # 使用仓库变量 OLD_INSTALLER_URL + OLD_INSTALLER_SHA256 钉住的固定旧包
   #（未配置时该场景跳过并告警，其余场景照常强制）。失败即不发布。
   install-test:
-    needs: build
+    needs: [gate, build]
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -125,7 +125,7 @@ jobs:
           if ($env:OLD_INSTALLER_SHA256) {
             $args += @('-OldInstallerSha256', $env:OLD_INSTALLER_SHA256)
           }
-          & .\scripts	est_install.ps1 @args
+          & .\scripts\test_install.ps1 @args
           exit $LASTEXITCODE
 
   publish:

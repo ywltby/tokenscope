@@ -1,0 +1,46 @@
+name: Install test
+
+# N12（安装部分）：在合并 main 之前对**当前产物**做 Actions 安装实跑。
+# 手动触发（workflow_dispatch）：构建当前 ref 的 NSIS 安装包并执行
+# scripts/test_install.ps1 的全部场景。结果在 job 内可见；本工作流
+# 不发布任何产物，与 Release workflow 的 install-test（发布门禁）
+# 分别记录。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install-test:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Build production Windows x64 NSIS (without acceptance)
+        run: node .\frontend\node_modules\@tauri-apps\cli\tauri.js build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
+      - name: Run install / first-launch migration / reinstall / uninstall scenarios
+        env:
+          OLD_INSTALLER_URL: ${{ vars.OLD_INSTALLER_URL }}
+          OLD_INSTALLER_SHA256: ${{ vars.OLD_INSTALLER_SHA256 }}
+        run: |
+          $file = (Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | Select-Object -First 1).FullName
+          $args = @(
+            '-InstallerPath', $file,
+            '-AppVersion', '${{ github.ref_name }}'
+          )
+          if ($env:OLD_INSTALLER_URL) {
+            $args += @('-OldInstallerUrl', $env:OLD_INSTALLER_URL)
+          }
+          if ($env:OLD_INSTALLER_SHA256) {
+            $args += @('-OldInstallerSha256', $env:OLD_INSTALLER_SHA256)
+          }
+          & .\scripts\test_install.ps1 @args
+          exit $LASTEXITCODE

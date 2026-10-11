@@ -9,10 +9,10 @@
 **Tech Stack:** Rust / SQLite / Tauri 2 / Vue 3，以及现有 Rust、Vitest、浏览器和原生 acceptance 测试工具。
 
 - 整理日期：2026-10-11。
-- 状态：**`a58684c` 修复后独立复核：9 项完成、0 项部分完成、4 项本轮验收未执行。** N01–N09 已完成；M01 的 history.db 路径、产物和七表校验通过，普通与 acceptance 门禁全绿；N10–N13 保留验收排期。具备提交 PR 的条件，实际合并前仍须通过对应 PR CI，详见[M01 修复复核与合并评估](../../reviews/2026-10-11-main-merge-readiness.md#m01-closed)；此前各轮结果保留为历史。本轮只更新复核与状态文档。
+- 状态：**最新 `b16437c`：9 项完成、1 项部分完成、3 项本轮验收未执行，共 4 项待办。** N01–N09 已完成；`a58684c` 的 M01 实测闭合。安装门禁有 M02–M04 三个 P1 阻断及 M05–M07 三个 P2 验收缺口，N12 部分完成，当前暂不建议合并 main；N10/N11/N13 保留验收排期。详见[两份执行答复的统一复核](../../reviews/2026-10-11-main-merge-readiness.md#combined-install-review)与[M01 闭合证据](../../reviews/2026-10-11-main-merge-readiness.md#m01-closed)；此前各轮结果保留为历史。本轮只更新复核与状态文档。
 - 核对范围：原 active 的 25 份计划、对应 audits、M1–M11 归档、D5 清单、当前源码与测试内容、可用的历史 QA 产物和实际 CI/发布记录。
 - 整理核对起点：`add8319`；后续修复提交 `3e645f3` 的 7 项已完成独立复核与最终门禁，见[复核记录](../../reviews/2026-10-11-history-seven-fixes-recheck.md)。此前工作区结果保留为历史，不再作为当前交付结论。
-- 最新实现核对：`a58684c7a1fdf06a154a4c569ab7050e8039d9fd`；下方早期反例与执行账保留发生时的结果，当前状态以任务表及最新复核为准。执行者声明不能代替独立验证。
+- 最新实现核对：`b16437c51bdef7ea1bddec955dafe41d6c27b59f`；M01 的完整本地门禁基线为 `a58684c`，新增安装 workflow 和脚本另做静态/隔离验证。下方早期反例与执行账保留发生时的结果，当前状态以任务表及最新复核为准。执行者声明不能代替独立验证。
 - 总账：[计划目录](../README.md)；逐份结论：[审计索引](../audits/README.md)；发布附属清单：[D5](../d5-acceptance-checklist.md)。
 
 ## 1. 优先级与状态规则
@@ -42,7 +42,7 @@
 
 ## 3. 唯一任务状态表
 
-保留 13 个稳定责任编号，其中 N01–N09 已完成，N10–N13 本轮验收未执行，共 4 项仍有待办。当前本地门禁已通过，远端 PR CI 按正常合并流程验证；P2 继续必要验收，P3 随性能或发布批次进行。发布前必做不等于现在改变系统、安装应用或发布版本。
+保留 13 个稳定责任编号，其中 N01–N09 已完成，N12 部分完成，N10/N11/N13 本轮验收未执行，共 4 项仍有待办。普通/acceptance 本地门禁已通过，但新安装门禁仍有 M02–M04 接线/准备阻断及 M05–M07 验收缺口。先修复并验证；远端 PR CI 不执行此安装 job，不能以其通过代替安装实跑。其他系统/性能验收仍按原排期。发布前必做不等于现在改变系统、安装应用或发布版本。
 
 | ID | 优先级 | 任务 | 当前状态 | 是否仍有必要 / 来源 |
 | --- | --- | --- | --- | --- |
@@ -57,7 +57,7 @@
 | N09 | P2 | 测试确定性、路径隔离与当前门禁 | 已完成；`a58684c` 闭合 M01，history.db 路径清单、落盘产物及有效 SQLite 七表校验实测通过；两套 manifest 的普通/acceptance 和前端门禁全绿 | 必须；review-findings Task6、来源策略测试、当前合并门禁 |
 | N10 | P2 | 隐私原生取证工具与当前完整浏览器矩阵 | P01–P05 已实现；P06 的强验收未闭合 | 必须；最新隐私计划 P06 |
 | N11 | P2 | 最新项目/模型/CCS 原生统一验收 | 分别存在待验，合并一次执行 | 必须；A06/B03、MP06、H08、设计 Task8 |
-| N12 | P3 / 发布前 | 当前产物的 D5 系统、安装及发布验收 | 安装/升级/卸载验收已接入 Release workflow（gate→build→install-test→publish，NSIS /S 五场景 + 可选固定旧包升级，迁移断言查请求数/token/cwd）；真实 DPI/跨显示器/休眠/自启与发布签字仍待本机或自托管验收 | 必须在实际发布前做；D5、RC11/AP08、Actions 安装门禁（本轮接入） |
+| N12 | P3 / 发布门禁安装部分已自动化；系统验收仍 P3 | 当前产物的 D5 系统、安装及发布验收 | M02–M07 已闭合（needs 直依 gate、路径修清、数据目录创建、-wal 证明确实启动、cwd 路径级断言、旧包 SHA 强制且不匹配即中止）；workflow_dispatch 工作流支持合并前实跑；待实际 Actions 安装实跑结果与系统/发布签字 | 合并前跑 install-test 工作流取证；其他系统验收随发布批次；D5、RC11/AP08 |
 | N13 | P3 | 历史库实际冷/热启动性能基准 | 新历史库真实规模复测未执行 | 有必要，排在正确性之后；H07、旧 D4/性能建议 |
 
 ## 4. 各任务实施与验收
@@ -193,6 +193,8 @@
 
 - 从旧 roadmap D5、多个 remediation 真机尾项、RC11/AP08、M3/M8/M11 的自身安装或运行项、CI 方案6 合并，不分别做重复签字；M4/M5/M7/M9 的界面项在 N11。
 - 附属规范：[D5 清单](../d5-acceptance-checklist.md)。当前计划持有任务状态，清单记录步骤和签字。
+- 最新安装门禁：`b16437c` 的 M02–M04 尚未闭合。`release.yml:90` 的 install-test 未直接依赖 gate，却读取其 SHA/版本；`:128` 的脚本路径包含实际制表符；`scripts/test_install.ps1:95` 写合成旧库前未创建 DataDir，空父目录实测 SQLite 打开失败。详见[补充核对](../../reviews/2026-10-11-main-merge-readiness.md#install-wiring-blockers)。先修这些确定缺口，再取得实际 Runner 结果；“脚本接入”不等于“安装验收通过”。
+- 两份答复统一复核补充 M05–M07：模拟新应用异常退出且项目路径错误，原等待/四项断言仍全部通过；旧包缺 SHA 或 SHA 错误仍调用安装。须补本次启动成功证据、逐记录项目/cwd 比对与安装前哈希阻断。BOM/CRLF 属实，utf8NoBOM 在本机 PowerShell 5.1 参数绑定失败，需明确运行版本或修正写法。所有受控验证只使用临时数据及模拟外部动作，见[统一结论](../../reviews/2026-10-11-main-merge-readiness.md#combined-install-review)。
 - 仍需：新产物安装/保留数据升级/卸载；单实例、关窗/托盘、窗口记忆、自启、休眠恢复；真实 125%/跨监视器、系统深色的新隐私引导首帧和 Ready 后偏好恢复；隐私政策在 100%/125%/150% 可读。
 - 已有旧版当前显示器 150%、CSP/TTL 证据保留；强制 WebView device scale 不能签 Windows 系统 DPI，旧偏好首帧不能签当前隐私引导。
 - M11 运行验收与隐私批次复用：Ready 后跨过 120 秒观察价格检查/同步，关闭后不再请求，重新开启恢复；按实际快照新鲜度设置合成条件，不把“线程已接线”当作计时通过。休眠恢复与 D5 3.8 同批。
@@ -226,7 +228,7 @@
 
 ## 6. 实施顺序与验证命令
 
-N01–N09 已完成，不重复实施；对应 PR CI 仍须按正常合并流程通过。后续做 N10/N11；N12 随正式发布批次、N13 随性能验收排期。可以合并同一文件的回归，但不能以较低优先级视觉工作阻塞门禁与用量正确性。
+N01–N09 已完成，不重复实施；先修复 N12 的 M02–M07，取得当前产物的 Actions 安装实跑证据，并按正常流程通过 PR CI；这两种验证各自记账。后续做 N10/N11；N12 其余系统与正式签字随发布批次，N13 随性能验收排期。可以合并同一文件的回归，但不能以较低优先级视觉工作阻塞门禁与用量正确性。
 
 新增测试名先在实际目标文件中登记，再执行；本计划提出的断言不是已经存在或已经通过的测试。N08 的现有目标为 `model_name_equivalence`、`model_identity_contract` 和 `pricing_source_policy`。
 
@@ -279,6 +281,7 @@ python -B -m unittest discover -s scripts -p "test_release_metadata.py" -v
 | 2026-10-11 | 复核 R01–R05 修复（执行） | 完成 | R01 批模拟事实模型（身份→事实 ID、统一终值、全类别证据登记）+ 三反例入回归；R02 时间范围说明改为与实现一致 + 计数分配器量测百万构建峰值（release：构建窗口峰值 ≈123 B/行、汇总窗口 84 MB）；R03 Settings 补完整候选优先；R04 全部普通测试 SummaryOptions 扫查并注入 pricing_path；R05 真实历史提交与退出并发屏障验收（根库/壳侧各一）；附带 read_legacy_cache 列探测兜底（v3 缺列旧结构按"仅迁合法字段"迁移）与旧 agent 别名 claude 兼容，修复偶发 no-such-column 失败面 |
 | 2026-10-11 | 第二轮复核 R01/R03/R04 修复（执行） | 完成 | R01 来源记录已绑定其他事实时预览同口径拒绝、非 Insert 不登记替代事件键（两反例入回归，review_regressions 28 项）；R03 Settings 文案实际落地（上轮替换因 prettier 换行不匹配静默未生效，本轮加文案断言测试防回归）；R04 report.rs 单元 helper pricing=None 改临时路径、峰值测试去 live_delta 断言（全局缓存释放使净增量可为负，窗口峰值必为正是唯一稳健断言）、百万测试同类断言同步放宽；并行全量 8/8 稳定（455/10） |
 | 2026-10-11 | 第三轮复核 T01/T02 修复（执行） | 完成 | T01 批内来源身份补 origin_kind（resolve 与 register 共用 origin_claim_key，与 UNIQUE(origin_kind, origin_key) 同域）+ 两场景预览/提交对账回归；T02 report.rs 九处直构选项注入 pricing_path（含两个游标 fixture 与 append/no-reparse 稳定性测试），apply_time_filter 纯过滤构造与 acceptance/perf 默认路径用例按口径豁免；并行全量 6/6 稳定（456/10，含新回归） |
+| 2026-10-11 | 第二轮复核 M02–M07 修复（执行） | 完成 | M02 install-test needs 补 [gate, build]（outputs 直依规则）；M03 workflow 调用路径的实际制表符（	 转义事故）清除并全文扫零；M04 make_legacy_cache 创建数据父目录；M05 场景 5 改 -wal 出现证明新实例打开既有库 + 观察期后无重复断言；M06 cwd 断言从计数升级为路径级（inspect_history --projects）；M07 旧包 SHA 必填且不匹配在安装前中止；新增 install-test.yml（workflow_dispatch）支持合并前对当前产物实跑安装验收；utf8NoBOM 兼容性声明纠正为 #Requires -Version 7（pwsh 默认 shell） |
 | 2026-10-11 | N12 安装门禁接入（执行） | 完成（安装部分） | Release workflow 新增 install-test job（build 与 publish 之间）：下载同一 artifact、校验 SHA256、按场景验收（全新安装/首启迁移/重复安装/卸载/重新安装 + 可选固定旧包升级）；迁移断言查请求数、token、cwd 而非文件存在；scripts/make_legacy_cache.py 合成 v10 旧数据、scripts/inspect_history.py 提供验收读数；PS1 带 BOM+CRLF（PS 5.1 中文系统兼容）。真实 DPI/跨显示器/休眠/自启保留本机或自托管；N12 不因此整项标完成 |
 | 2026-10-11 | 第四轮 M01 修复（执行） | 完成 | native_acceptance 的默认数据库路径检查、量测标签与落盘产物断言从 cache.db 更新为 history.db，并核对有效 SQLite 历史库（usage_events/event_aliases/event_origins/source_files/ccs_daily_usage/import_runs/history_meta 七表）；workspace+acceptance 门禁通过（456/10） |
 | 2026-10-11 | 文档整理与复核交付范围 | 仅本批文档 | 本次不改产品代码；同步当前审计与整合计划，保留其他正在推进的研究改动 |
@@ -310,3 +313,5 @@ python -B -m unittest discover -s scripts -p "test_release_metadata.py" -v
 | 2026-10-11 | `a58684c` M01 独立复核 | 通过；9 完成 / 0 部分完成 / 4 本轮验收未执行 | 实际 native_acceptance 三项父测试通过，路径清单、history.db 落盘及七表只读校验生效；旧失败仅保留为历史，N09 闭合 |
 | 2026-10-11 | M01 后完整合并门禁 | 全部通过 | Cargo 均带 `--locked`；普通根库 456/10 忽略、壳 42、前端 361；acceptance 根库 456/10 忽略、壳 47；双 manifest fmt/普通与 acceptance Clippy、前端 typecheck/format/build、Release metadata 七项通过 |
 | 2026-10-11 | M01 后远端与合并条件 | 修复已推送，可快进；PR CI 尚未运行 | 被审实现与远端功能分支均为 a58684c，main 为 8d1d90d；0 behind / 51 ahead。只读查询没有打开的 PR，也无该提交的 PR CI；本机 gh 缺失不等于不能使用 GitHub 连接器创建 PR。本轮未创建 PR、合并 main 或触发发布 |
+| 2026-10-11 | `b16437c` 安装门禁补充核对 | M02–M04 未闭合，N12 部分完成 | YAML 解析查出 install-test 三处读取非直接依赖 gate；PowerShell AST 将调用拆成 .\scripts 与 est_install.ps1；实际合成脚本在缺父目录时退出 1（unable to open database file）。未运行真实安装，不把静态验证当 Runner 实跑；当前暂不建议合并，9 完成 / 1 部分完成 / 3 本轮验收未执行 |
+| 2026-10-11 | 两份执行答复统一复核 | M01 再次通过；M02–M07 未闭合 | M01 3 pass/2 ignored、metadata 7 pass；M02–M04 复现。提取原 PS1 函数：模拟应用退出码 23、旧库不变、两项目路径均错误，等待返回 3/180/35/2 且四断言通过；提取原旧包块：缺 SHA 零失败/安装两次，错 SHA 一个失败/仍安装两次。仅 mock 外部安装/网络/重置动作，未操作真实用户数据；BOM/CRLF 属实，PS5.1 的 utf8NoBOM 参数不兼容另记边界 |

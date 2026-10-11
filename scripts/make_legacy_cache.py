@@ -10,6 +10,7 @@ event_cwd，无 line 列）。默认三行 Claude 事件、两个不同项目 cw
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 
@@ -70,6 +71,8 @@ def main() -> int:
         print(__doc__)
         return 2
     out = sys.argv[1]
+    parent = os.path.dirname(os.path.abspath(out))
+    os.makedirs(parent, exist_ok=True)
     con = sqlite3.connect(out)
     try:
         con.execute("PRAGMA foreign_keys = OFF")

@@ -16,7 +16,7 @@
 # 数据全部落在 $env:USERPROFILE\.tokenscope（Runner 上是一次性虚拟用户目录）。
 # 退出码非 0 = 任一断言失败；每个断言实时打印 PASS/FAIL 并写入步骤摘要。
 
-#Requires -Version 5.1
+#Requires -Version 7
 param(
     [Parameter(Mandatory = $true)][string]$InstallerPath,
     [Parameter(Mandatory = $true)][string]$AppVersion,
@@ -133,6 +133,23 @@ function Get-HistoryFacts {
     }
 }
 
+function Wait-AppDbOpen {
+    # M05：等待**新启动的应用实例**实际打开历史库——WAL 连接建立时
+    # history.db-wal 文件出现，这是"新应用读取了保留数据"的可观察信号
+    #（仅靠既有事件数判定会让预置数据直接通过，应用没读也算成功）。
+    param([int]$TimeoutSeconds = 60)
+    $wal = "$HistoryDb-wal"
+    Start-Process -FilePath (Join-Path (Get-UninstallEntry).InstallLocation "TokenScope.exe")
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path $wal) {
+            return
+        }
+        Start-Sleep -Seconds 1
+    }
+    throw "应用未在 ${TimeoutSeconds}s 内打开历史库（$wal 未出现）"
+}
+
 function Wait-AppMigration {
     # 启动应用并等待历史库出现已知的三条事实（含迁移 + 幂等），超时失败。
     param([int]$TimeoutSeconds = 180)
@@ -155,6 +172,11 @@ function Assert-MigratedFacts {
     Assert-True ($null -ne $facts -and $facts.Input -eq 180) "输入 token 合计 = 180（实际 $($facts.Input)）"
     Assert-True ($null -ne $facts -and $facts.Output -eq 35) "输出 token 合计 = 35（实际 $($facts.Output)）"
     Assert-True ($null -ne $facts -and $facts.Projects -eq 2) "项目 cwd 去重 = 2（实际 $($facts.Projects)）"
+    # M06：项目 cwd 必须是**已知的那两条路径**（数量相同但路径错误不得通过）。
+    $projects = (python (Join-Path $RepoRoot "scripts\inspect_history.py") $HistoryDb "--projects") | Out-String
+    foreach ($expected in @("C:/work/alpha", "C:/work/beta")) {
+        Assert-True ($projects -match [regex]::Escape($expected)) "项目 cwd 包含 $expected"
+    }
 }
 
 $Summary = New-Object System.Collections.Generic.List[string]
@@ -207,10 +229,14 @@ try {
     # ---------- 场景 5：重新安装（保留数据仍可读，不重复计量） ----------
     Write-Host "=== 场景 5：重新安装 ==="
     Invoke-SilentInstall $InstallerPath
-    $facts = Wait-AppMigration
-    Assert-MigratedFacts $facts
-    $Summary.Add("- 重新安装：保留数据被当前程序读取，事件数不重复（仍 3 条）") | Out-Null
+    # 新应用实例必须实际打开既有历史库（-wal 出现），读取一段观察期后
+    # 事件数不重复——只查既有行数会让"应用没读"也判成功（M05）。
+    Wait-AppDbOpen
+    Start-Sleep -Seconds 8
     Stop-App
+    $facts = Get-HistoryFacts
+    Assert-MigratedFacts $facts
+    $Summary.Add("- 重新安装：保留数据被新应用实例打开并读取，事件数不重复（仍 3 条）") | Out-Null
 }
 catch {
     $Failures.Add($_.Exception.Message) | Out-Null
@@ -222,13 +248,18 @@ catch {
 if ($OldInstallerUrl -ne "") {
     Write-Host "=== 场景 6：旧版升级 ==="
     try {
+        if ($OldInstallerSha256 -eq "") {
+            throw "旧版升级已配置 OLD_INSTALLER_URL 但缺少 OLD_INSTALLER_SHA256：不允许在未校验固定旧包的情况下安装"
+        }
         $oldPath = Join-Path $env:RUNNER_TEMP "tokenscope-old-setup.exe"
         if (Test-Path $oldPath) { Remove-Item $oldPath -Force }
         Invoke-WebRequest -Uri $OldInstallerUrl -OutFile $oldPath -UseBasicParsing
-        if ($OldInstallerSha256 -ne "") {
-            $hash = (Get-FileHash $oldPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            Assert-True ($hash -eq $OldInstallerSha256.ToLowerInvariant()) "旧版本包 SHA256 匹配"
+        $hash = (Get-FileHash $oldPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        # M07：SHA 不匹配在**安装之前**中止，绝不继续安装来源不明的包。
+        if ($hash -ne $OldInstallerSha256.ToLowerInvariant()) {
+            throw "旧版本包 SHA256 不匹配：$hash != $($OldInstallerSha256.ToLowerInvariant())"
         }
+        Assert-True $true "旧版本包 SHA256 匹配"
         # 旧版安装 → 造旧版数据 → 升级安装新版 → 迁移与保留断言。
         Reset-UserHome
         Invoke-SilentInstall $oldPath
