@@ -1189,9 +1189,19 @@ defineExpose({ priceColumns });
                   新增 {{ fmtNum(ccsPreview.would_insert) }}、更新
                   {{ fmtNum(ccsPreview.would_update) }}、已存在
                   {{ fmtNum(ccsPreview.would_unchanged) }}、冲突保留现有值
-                  {{ fmtNum(ccsPreview.would_conflict) }}；净新增 token
+                  {{ fmtNum(ccsPreview.would_conflict) }}、过期跳过
+                  {{ fmtNum(ccsPreview.would_stale) }}（库内已有更晚观察的终值，
+                  I-P3-2：保证与"可导入"逐行闭合）；净新增 token
                   {{ fmtNum(netNewTokens) }}。无项目归属记录
                   {{ fmtNum(ccsPreview.records_without_project) }} 条（项目视图显示为「未知」）。
+                  <span v-if="ccsPreview.unsupported_apps.length > 0"
+                    >不支持的应用：{{
+                      ccsPreview.unsupported_apps.map(([a, n]) => `${a}×${n}`).join("、")
+                    }}。</span
+                  >
+                  <span v-if="ccsPreview.rejected_reasons.length > 0">
+                    拒绝原因：{{ ccsPreview.rejected_reasons.join("；") }}。</span
+                  >
                 </div>
               </div>
             </div>

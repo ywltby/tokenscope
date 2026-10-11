@@ -506,6 +506,66 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     expect(state(w)["hasMore"]).toBe(false);
   });
 
+  it("events_append_failure_retry_keeps_anchor：追加失败的重试仍走追加，不重置回首页（G-P3-4）", async () => {
+    const row = (ts: string, rid: string) => ({
+      ts,
+      record_id: rid,
+      cursor: `${ts}T00:00:00.000Z|${rid}`,
+      agent: "codex",
+      model: "m",
+      session_id: "s",
+      project: "p",
+      input: 1,
+      output: 1,
+      cache_write: 0,
+      cache_read: 0,
+      cost_usd: 0,
+    });
+    let appendFails = true;
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") {
+        const before = (args?.before as string | null) ?? null;
+        if (!before) {
+          return Promise.resolve({
+            rows: [row("2026-10-02 10:00:00", "b"), row("2026-10-01 09:00:00", "a")],
+            total: 3,
+            warnings: [],
+          });
+        }
+        if (appendFails) {
+          appendFails = false;
+          return Promise.reject(new Error("ipc glitch"));
+        }
+        return Promise.resolve({
+          rows: [row("2026-09-30 08:00:00", "z")],
+          total: 3,
+          warnings: [],
+        });
+      }
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    (state(w)["loadMoreEvents"] as () => void)();
+    await flushPromises();
+    expect(state(w)["eventsError"]).toBe("ipc glitch");
+    const firstPageCalls = () =>
+      invokeMock.mock.calls.filter(
+        (c) => c[0] === "query_events" && (c[1] as Record<string, unknown>).before == null,
+      ).length;
+    expect(firstPageCalls()).toBe(1);
+    const retry = w.findAll("button").find((b) => b.text() === "重试");
+    await retry!.trigger("click");
+    await flushPromises();
+    // 重试不回发首页请求（before==null 恰好 1 次）；追加成功后三行齐全。
+    expect(firstPageCalls()).toBe(1);
+    expect((state(w)["events"] as EventList).rows.map((r) => r.record_id)).toEqual(["b", "a", "z"]);
+  });
+
   it("refresh_preserves_filters：手动刷新以当前筛选重跑且筛选不动", async () => {
     mockOk();
     const w = mountDashboard();

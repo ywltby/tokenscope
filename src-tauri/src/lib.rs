@@ -220,8 +220,11 @@ fn apply_loaded_window_state(app: &tauri::AppHandle, loaded: Option<window_state
             let _ = win.maximize();
         } else {
             // G-P3-3：多显示器拔除后旧 x/y 可能完全在屏幕外——与任一
-            // 可用监视器无交集就放弃恢复（保留 tauri.conf 默认尺寸/居中），
-            // 内存基线仍保留原值（重新插回显示器后可手动找回）。
+            // 可用监视器无交集就放弃恢复（保留 tauri.conf 默认尺寸/居中）。
+            // I-P3-5 注记：内存基线仍写入旧值；托盘退出/异常终止保留它
+            // （重插显示器后可找回），X 关闭路径会以实际可见位置覆盖基线。
+            // 无论哪条路径，下次启动都会重过相交门，屏外状态不会导致
+            // 不可见窗口。
             let monitors: Vec<(i32, i32, u32, u32)> = win
                 .available_monitors()
                 .map(|list| {

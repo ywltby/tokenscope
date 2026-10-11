@@ -1276,8 +1276,11 @@ impl TimeBounds {
             });
         }
         let parse = |s: &str| -> Result<Date> {
-            s.parse::<Date>()
-                .map_err(|e| anyhow::anyhow!("日期格式应为 YYYY-MM-DD: {s:?}（{e}）"))
+            s.parse::<Date>().map_err(|e| {
+                // jiff 的 civil::Date 同时接受基本格式（YYYYMMDD，无连字符），
+                // 文案如实声明（J-P3-3），不假装只认扩展格式。
+                anyhow::anyhow!("日期格式应为 YYYY-MM-DD（YYYYMMDD 也可）: {s:?}（{e}）")
+            })
         };
         let from = opts.from.as_deref().map(parse).transpose()?;
         let to = opts.to.as_deref().map(parse).transpose()?;

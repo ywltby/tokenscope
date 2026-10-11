@@ -216,6 +216,8 @@ pub fn accept_privacy_policy(path: &Path) -> Result<()> {
 pub const SETTINGS_HEADER: &str = "\
 # TokenScope 设置文件（GUI 设置页与手工编辑共用；可直接编辑，保存后对下一次读取生效）
 # 注意：GUI 保存会重写整个文件，自定义注释会丢失；字段说明见设置页「高级配置」。
+# 本文件专属于 TokenScope：GUI 保存会删除本程序不认识的字段/表，请勿把
+# 其它工具的配置写在这里（读取时未知键被忽略仅是向前兼容，不承诺保留）。
 ";
 
 /// 全字段注释模板：open_settings_file 首次创建用（全部键注释掉，解析即默认值）。

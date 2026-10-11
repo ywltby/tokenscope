@@ -57,7 +57,15 @@ pub fn restorable_on_any_monitor(ws: &WindowState, monitors: &[(i32, i32, u32, u
     let (wx, wy) = (ws.x as i32, ws.y as i32);
     let (ww, wh) = (ws.width as i32, ws.height as i32);
     monitors.iter().any(|(mx, my, mw, mh)| {
-        wx < mx + *mw as i32 && wx + ww > *mx && wy < my + *mh as i32 && wy + wh > *my
+        // I-P3-1：状态文件是用户可编辑 JSON，width/height 可以是大到
+        // `as i32` 饱和的值——用 i64 中间量做加法，debug 构建不 panic，
+        // release 构建不回绕误判。
+        let right = (*mx) as i64 + (*mw) as i64;
+        let bottom = (*my) as i64 + (*mh) as i64;
+        (wx as i64) < right
+            && (wx as i64) + (ww as i64) > (*mx) as i64
+            && (wy as i64) < bottom
+            && (wy as i64) + (wh as i64) > (*my) as i64
     })
 }
 
@@ -158,6 +166,26 @@ mod tests {
         assert!(restorable_on_any_monitor(
             &ws(3000.0, 100.0, 400.0, 300.0),
             &[]
+        ));
+    }
+
+    #[test]
+    fn test_restorable_saturating_values_do_not_overflow() {
+        // I-P3-1：状态文件是用户可编辑 JSON，width/height/x/y 可写 1e300
+        // 量级——`as i32` 饱和后 i64 加法不得 panic（debug overflow-checks），
+        // 判定确定：与监视器相交的巨型矩形可恢复，屏外饱和值拒绝。
+        let monitors = vec![(0, 0, 1920, 1080)];
+        assert!(restorable_on_any_monitor(
+            &ws(100.0, 100.0, 1e300, 300.0),
+            &monitors
+        ));
+        assert!(!restorable_on_any_monitor(
+            &ws(1e300, 1e300, 1e300, 1e300),
+            &monitors
+        ));
+        assert!(!restorable_on_any_monitor(
+            &ws(-1e300, -1e300, 1e300, 1e300),
+            &monitors
         ));
     }
 }
