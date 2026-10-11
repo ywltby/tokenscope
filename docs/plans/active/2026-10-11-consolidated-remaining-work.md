@@ -59,6 +59,7 @@
 | N10 | P2 | 隐私原生取证工具与当前完整浏览器矩阵 | P01–P05 已实现；P06 的强验收未闭合 | 必须；最新隐私计划 P06 |
 | N11 | P2 | 最新项目/模型/CCS 原生统一验收 | 分别存在待验，合并一次执行 | 必须；A06/B03、MP06、H08、设计 Task8 |
 | N12 | P2（A01–A06 已修，待 PR CI 实跑取证；其余系统验收 P3） | 当前产物的 D5 系统、安装及发布验收 | A01–A06 全部修复：A01 启动函数改名 Launch-AppOnce 并补 -LiveLogsDir；A02 等待读 DataDir/logs（应用实际写入处）与证据目录分离，关闭后 live-logs 复制回证据随 always() 上传；A03 GUI 替身换 notepad（WM_CLOSE → 退出码 0，控制台宿主 0xC000013A 不能当优雅退出）；A04 五个日志反例接存活替身（超时路径真实覆盖）；A05 卸载后 manifest 逐条复核保留事实；A06 install-test.yml 构建前补两条契约命令（M06 unittest 22 项 + M05 生命周期 21 项 pwsh 7.6.6 实跑全绿）。待 PR CI 实跑取证 | 系统验收随发布批次；D5、RC11/AP08 |
+| 2026-10-12 | 双审计员循环第一轮（执行） | 完成 | 审计员 B（核心）：P2-1 CCS Codex 捐献按 (scheme,value) 判重修复 + 回归；P2-2 内容等值原生写升级 rank（classify_against）+ 回归；P3 query.rs 额度文案/v3 utc 同步/文档修正。审计员 A（门禁）：P2-1 失败路径复制 live-logs；P3 卸载 30s 轮询、file URI 编码、非 db 退出 2、make_legacy_cache 幂等；.gitignore 补 Python/日志模式。两个审计员均确认无 P1 |
 | N13 | P3 | 历史库实际冷/热启动性能基准 | 新历史库真实规模复测未执行 | 有必要，排在正确性之后；H07、旧 D4/性能建议 |
 
 ## 4. 各任务实施与验收
