@@ -122,6 +122,7 @@ pub fn run() {
             commands::settings_get,
             commands::settings_set_price_auto_sync,
             commands::settings_set_close_action,
+            commands::settings_set_timezone,
             commands::close_resolve,
             commands::open_settings_file,
         ])

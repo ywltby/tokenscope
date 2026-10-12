@@ -424,6 +424,47 @@ pub(crate) fn settings_set_close_action_impl(
     Ok(action)
 }
 
+/// U03：统计时区（`local` 或 IANA 名）。`None` = 清除该字段（回到缺省
+/// Asia/Shanghai）；非法值**拒绝保存**（校验先于事务，原文件字节不动）。
+#[tauri::command]
+pub async fn settings_set_timezone(
+    app: tauri::AppHandle,
+    timezone: Option<String>,
+) -> Result<Option<String>, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    run_blocking("settings_set_timezone", move || {
+        let path = tokenscope::settings::settings_path()?;
+        settings_set_timezone_impl(&path, timezone)
+    })
+    .await
+}
+
+/// U03：时区写入内核（可注入路径以便单测）。返回归一化后的落盘值
+/// （`None` = 已清除该字段）。校验失败直接返回错误，不进入 settings::update，
+/// 因此不会写盘、也不会碰其它字段。
+pub(crate) fn settings_set_timezone_impl(
+    path: &std::path::Path,
+    timezone: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    let normalized = match timezone {
+        None => None,
+        Some(v) => Some(tokenscope::settings::validate_timezone(&v).map_err(anyhow::Error::msg)?),
+    };
+    // SF02：事务内基于最新文件只改 timezone 字段。
+    let committed = tokenscope::settings::update(path, |s| {
+        s.timezone = normalized.clone();
+        Ok(normalized.clone())
+    })?;
+    match committed.as_deref() {
+        Some(v) => log::info!("统计时区已设置为 {v}"),
+        None => log::info!(
+            "统计时区已恢复缺省（{}）",
+            tokenscope::settings::default_timezone()
+        ),
+    }
+    Ok(committed)
+}
+
 /// F08：隐藏主窗口——窗口缺失或 hide 失败都返回可操作错误（前端沿
 /// 既有 await/catch 路径展示并允许重试），不再静默吞掉。
 fn hide_main_window(app: &tauri::AppHandle) -> Result<(), String> {
@@ -1623,6 +1664,57 @@ mod tests {
         tokenscope::settings::ensure_toml(&path).unwrap();
         assert!(!tokenscope::settings::load(&path).unwrap().price_auto_sync);
         assert!(dir.join("settings.json.bak").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// U03：时区命令内核——写入归一化值、清除回缺省、非法值拒绝且不落盘。
+    #[test]
+    fn test_settings_set_timezone_impl() {
+        let dir = tmp_dir("u03-timezone");
+        let path = dir.join("settings.toml");
+        // 写入：trim 归一化后落盘，返回值即落盘值
+        let out = settings_set_timezone_impl(&path, Some("  UTC ".into())).unwrap();
+        assert_eq!(out.as_deref(), Some("UTC"));
+        assert_eq!(
+            tokenscope::settings::load(&path)
+                .unwrap()
+                .timezone
+                .as_deref(),
+            Some("UTC")
+        );
+        // 事务内只改 timezone：相邻字段（关闭动作）保留
+        settings_set_close_action_impl(&path, Some("quit".into())).unwrap();
+        settings_set_timezone_impl(&path, Some("America/New_York".into())).unwrap();
+        let s = tokenscope::settings::load(&path).unwrap();
+        assert_eq!(s.timezone.as_deref(), Some("America/New_York"));
+        assert_eq!(s.close_action, Some(CloseAction::Quit), "相邻字段必须保留");
+        // None = 清除该字段（回到缺省 Asia/Shanghai 语义）
+        assert!(settings_set_timezone_impl(&path, None).unwrap().is_none());
+        assert!(
+            tokenscope::settings::load(&path)
+                .unwrap()
+                .timezone
+                .is_none()
+        );
+        // 非法值：报错、文件字节不动、已有值保持
+        settings_set_timezone_impl(&path, Some("UTC".into())).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        for bad in ["Not/AZone", "", "  "] {
+            let err = settings_set_timezone_impl(&path, Some(bad.into())).unwrap_err();
+            assert!(err.to_string().contains("时区"), "错误必须可读: {err}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "非法值不得落盘"
+        );
+        assert_eq!(
+            tokenscope::settings::load(&path)
+                .unwrap()
+                .timezone
+                .as_deref(),
+            Some("UTC")
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

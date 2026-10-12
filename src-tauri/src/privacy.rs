@@ -73,6 +73,8 @@ pub const PROTECTED_COMMANDS: &[&str] = &[
     "settings_get",
     "settings_set_price_auto_sync",
     "settings_set_close_action",
+    // U03：统计时区（settings.toml 单一来源）同样在未解锁业务时拒绝读写。
+    "settings_set_timezone",
     "close_resolve",
     "open_settings_file",
 ];

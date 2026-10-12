@@ -15,7 +15,7 @@ import dashboardSource from "./Dashboard.vue?raw";
 import TrendChart from "../components/TrendChart.vue";
 import type { Dim, EventList, Group, SummaryReport } from "../types";
 import { SNAPSHOT_VERSION, snapshotQueueIdle } from "../lib/viewSnapshot";
-import { useTimezone } from "../composables/timezone";
+import { initTimezone, resetTimezoneForTests, useTimezone } from "../composables/timezone";
 import type { RangePreset } from "../lib/rangePreset";
 
 function group(key: string, input: number): Group {
@@ -370,38 +370,42 @@ describe("Dashboard 时间预设（U01/U03）", () => {
     w.unmount();
   });
 
-  it("restored_view_never_overwrites_timezone：快照不改写全局时区，只发一批查询", async () => {
-    const { tz } = useTimezone();
-    // 先切到 UTC，让之前挂载过、未卸载的实例把 watcher 跑完，再重置调用
-    // 记录——下面的计数只属于本次挂载。
-    tz.value = "UTC";
-    await flushPromises();
+  it("restored_view_never_overwrites_timezone：时区来自 settings.toml，快照不改写它，只发一批查询", async () => {
+    // U03：时区的唯一权威来源是 settings.toml——经 initTimezone 读取后注入
+    // UTC（不再直接写全局 ref）。旧式快照带着时区字段：只允许它失效，
+    // 绝不允许写回全局时区。
+    // 时区从默认切到 UTC 会让本文件里之前挂载过、未卸载的实例（它们共享
+    // 模块级单例）各重发一批查询：先让它们跑完，再清空调用记录——下面的
+    // 计数只属于本次挂载。
+    resetTimezoneForTests();
     invokeMock.mockReset();
-    try {
-      invokeMock.mockImplementation((cmd: string) => {
-        if (cmd === "query_begin") return Promise.resolve({ ...queryInfo, timezone: "UTC" });
-        if (cmd === "view_cache_load") {
-          // 旧式快照带着时区字段：只允许它失效，绝不允许写回全局时区。
-          const p = snapshotPayload();
-          return Promise.resolve({
-            ...p,
-            filters: { by: "day", agent: "all", preset: null, drill: null, tz: "Asia/Shanghai" },
-          });
-        }
-        if (cmd === "query_summary") return Promise.resolve({ ...summaryA, timezone: "UTC" });
-        if (cmd === "query_events") return Promise.resolve(events);
-        if (cmd === "source_status") return Promise.resolve([]);
-        return Promise.resolve(null);
-      });
-      const w = mountDashboard();
-      await flushPromises();
-      expect(tz.value, "全局时区不得被快照改写").toBe("UTC");
-      expect(beginCalls().length, "时区不被改写 → 不重发查询").toBe(1);
-      expect(lastBeginArgs().tz).toBe("UTC");
-      w.unmount();
-    } finally {
-      tz.value = "Asia/Shanghai";
-    }
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "settings_get") return Promise.resolve({ timezone: "UTC" });
+      if (cmd === "query_begin") return Promise.resolve({ ...queryInfo, timezone: "UTC" });
+      if (cmd === "view_cache_load") {
+        // 旧式快照带着时区字段：只允许它失效，绝不允许写回全局时区。
+        const p = snapshotPayload();
+        return Promise.resolve({
+          ...p,
+          filters: { by: "day", agent: "all", preset: null, drill: null, tz: "Asia/Shanghai" },
+        });
+      }
+      if (cmd === "query_summary") return Promise.resolve({ ...summaryA, timezone: "UTC" });
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    await initTimezone();
+    await flushPromises();
+    invokeMock.mockClear();
+    const { tz } = useTimezone();
+    expect(tz.value, "启动时区取自 settings.toml").toBe("UTC");
+    const w = mountDashboard();
+    await flushPromises();
+    expect(tz.value, "全局时区不得被快照改写").toBe("UTC");
+    expect(beginCalls().length, "时区不被改写 → 不重发查询").toBe(1);
+    expect(lastBeginArgs().tz).toBe("UTC");
+    w.unmount();
   });
 });
 

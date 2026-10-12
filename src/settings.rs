@@ -66,6 +66,43 @@ pub struct Settings {
     /// 关闭窗口默认动作；None = 每次询问（前端弹窗，可勾选记忆）。
     #[serde(default)]
     pub close_action: Option<CloseAction>,
+    /// 统计时区：`local` 或合法 IANA 名；None = 未设置（等价默认 Asia/Shanghai）。
+    ///
+    /// U03：时区的**唯一权威来源**就是这里——前端不再用 localStorage 保存
+    /// 时区，视图快照也不携带它。写入必须经 [`validate_timezone`] 校验，
+    /// 非法值在落盘前拒绝。
+    #[serde(default)]
+    pub timezone: Option<String>,
+}
+
+/// 统计/展示时区的默认值（字段缺失、读取失败、非法值都回落到它）。
+pub fn default_timezone() -> &'static str {
+    "Asia/Shanghai"
+}
+
+/// U03：时区取值校验 + 归一化（trim；`local` 归一为小写）。
+///
+/// 合法取值：`local`（跟随本机时区）或 jiff 能解析的 IANA 时区名。
+/// 返回归一化后的字符串；非法值返回中文可读错误，调用方必须拒绝保存
+/// （文件字节不动）。
+pub fn validate_timezone(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "时区不能为空：请填 local 或 IANA 时区名（如 {}、UTC）",
+            default_timezone()
+        ));
+    }
+    if trimmed.eq_ignore_ascii_case("local") {
+        return Ok("local".to_string());
+    }
+    match jiff::tz::TimeZone::get(trimmed) {
+        Ok(_) => Ok(trimmed.to_string()),
+        Err(e) => Err(format!(
+            "未知时区 {trimmed:?}：请填 local 或 IANA 时区名（如 {}、UTC）；{e}",
+            default_timezone()
+        )),
+    }
 }
 
 fn default_true() -> bool {
@@ -91,6 +128,7 @@ impl Default for Settings {
             price_auto_sync: true,
             sources: AgentSources::default(),
             close_action: None,
+            timezone: None,
         }
     }
 }
@@ -243,6 +281,12 @@ pub const SETTINGS_TEMPLATE: &str = "\
 #     点击窗口关闭按钮的默认动作：minimize = 最小化到托盘；quit = 直接退出。
 #     删除或注释此行 = 每次关闭弹窗询问（也可在设置页「关闭窗口时」修改）。
 #
+# timezone = \"Asia/Shanghai\" | \"local\" | 其它 IANA 时区名
+#     统计与展示时区（设置页「通用」分区的下拉写的就是这里）。
+#     local = 跟随本机时区；其余必须是 IANA 时区名（如 UTC、America/New_York）。
+#     缺省/删除此行 = Asia/Shanghai。非法值会被设置页拒绝保存（不会写入本文件）；
+#     手工写入的非法值在读取时回退默认值并提示。
+#
 # [sources.claude] / [sources.codex]
 #     enabled = true | false    停用后该来源完全不参与统计。
 #     dir = \"D:/logs/claude\"    显式日志目录；省略 = 使用工具默认目录。
@@ -366,6 +410,7 @@ mod tests {
             privacy_policy_accepted: false,
             price_auto_sync: false,
             close_action: Some(CloseAction::Minimize),
+            timezone: None,
             sources: crate::settings::AgentSources {
                 claude: Some(SourceConfig {
                     enabled: false,
@@ -412,6 +457,10 @@ mod tests {
             "配置文件必须以注释头开头（可手编自解释）"
         );
         assert!(text.contains("直接编辑"), "注释头必须说明可手编: {text}");
+        assert!(
+            SETTINGS_TEMPLATE.contains("timezone"),
+            "模板必须说明 timezone 的合法取值与缺省语义"
+        );
         // 模板全部键注释化：解析即默认值（open_settings_file 首建用）
         let parsed: Settings = toml::from_str(SETTINGS_TEMPLATE).unwrap();
         assert_eq!(parsed, Settings::default());
@@ -633,6 +682,91 @@ mod tests {
         assert!(
             matches!(&blocked, ConsentRead::Unreadable(m) if m.contains("读设置失败")),
             "I/O 错误不得被吞成「新安装」: {blocked:?}"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    // ── U03：统计时区（settings.toml 为唯一事实源）─────────────────
+
+    /// 事务内设置时区（与命令层同一条读改写路径：先校验后落盘）。
+    fn set_timezone(path: &Path, value: Option<&str>) -> Result<Option<String>> {
+        let normalized = match value {
+            None => None,
+            Some(v) => Some(validate_timezone(v).map_err(anyhow::Error::msg)?),
+        };
+        update(path, |s| {
+            s.timezone = normalized.clone();
+            Ok(normalized)
+        })
+    }
+
+    /// 缺省 = 未设置（等价默认 Asia/Shanghai）；旧 TOML 无该字段可正常读取。
+    #[test]
+    fn timezone_default_unset_and_legacy_toml_reads() {
+        assert_eq!(default_timezone(), "Asia/Shanghai");
+        assert!(Settings::default().timezone.is_none());
+        let path = tmp("u03-tz-legacy");
+        std::fs::write(&path, "price_auto_sync = false\n").unwrap();
+        let s = load(&path).unwrap();
+        assert!(s.timezone.is_none(), "旧文件无该字段 → None（等价默认值）");
+        assert!(!s.price_auto_sync, "其余字段照常读取");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// 合法值：`local` 与 IANA 名；返回 trim 归一化后的字符串。
+    #[test]
+    fn timezone_validate_accepts_local_and_iana() {
+        assert_eq!(validate_timezone("Asia/Shanghai").unwrap(), "Asia/Shanghai");
+        assert_eq!(validate_timezone("  UTC\n").unwrap(), "UTC");
+        assert_eq!(
+            validate_timezone("America/New_York").unwrap(),
+            "America/New_York"
+        );
+        assert_eq!(validate_timezone("local").unwrap(), "local");
+    }
+
+    /// 非法值：空串/纯空白/未知时区名——中文可读错误。
+    #[test]
+    fn timezone_validate_rejects_empty_and_unknown() {
+        for bad in ["", "   ", "\t", "Not/AZone", "Mars/Olympus"] {
+            let err = validate_timezone(bad).unwrap_err();
+            assert!(err.contains("时区"), "错误必须中文可读: {err}");
+        }
+    }
+
+    /// 非法值拒绝保存：文件字节不动（校验失败不得落盘）。
+    #[test]
+    fn timezone_invalid_rejected_without_touching_file() {
+        let path = tmp("u03-tz-reject");
+        set_timezone(&path, Some("UTC")).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(set_timezone(&path, Some("Not/AZone")).is_err());
+        assert!(set_timezone(&path, Some("   ")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "拒绝保存时文件不得改动"
+        );
+        assert_eq!(load(&path).unwrap().timezone.as_deref(), Some("UTC"));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// 连续两次 update：重新读取等于后一次；清除后字段从文件消失。
+    #[test]
+    fn timezone_two_updates_last_one_wins() {
+        let path = tmp("u03-tz-sequence");
+        set_timezone(&path, Some("UTC")).unwrap();
+        set_timezone(&path, Some(" America/New_York ")).unwrap();
+        assert_eq!(
+            load(&path).unwrap().timezone.as_deref(),
+            Some("America/New_York"),
+            "连续两次写入后读到的必须是后一次"
+        );
+        set_timezone(&path, None).unwrap();
+        assert!(load(&path).unwrap().timezone.is_none());
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("timezone"),
+            "None 序列化为缺省（省略字段）"
         );
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }

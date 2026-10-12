@@ -26,6 +26,7 @@ import Settings from "./views/Settings.vue";
 import { createSettingsPreload, SETTINGS_PRELOAD } from "./lib/settingsPreload";
 import { useTokenColors } from "./composables/tokenColors";
 import { useAutoHideScrollbars } from "./composables/autoHideScrollbars";
+import { initTimezone } from "./composables/timezone";
 
 useAutoHideScrollbars();
 const tokenColors = useTokenColors();
@@ -41,6 +42,22 @@ provide(SETTINGS_PRELOAD, settingsPreload);
 onMounted(() => {
   settingsPreload.start();
 });
+
+// U03：时区就绪门控。主应用挂载（已在隐私同意之后）→ 读取设置得到时区 →
+// **时区就绪后才挂载汇总页**，因此时区就绪前不会有任何查询发出（首屏
+// query_begin 的 tz 一定是 settings.toml 的权威值，而不是先查一次再重发）。
+// 设置页同样等就绪：否则时区下拉会先渲染默认值、读到设置后再跳变。
+// 读取失败在 initTimezone 内部已降级为默认时区，这里只负责置位，绝不
+// 让首屏停在空白。
+const tzReady = ref(false);
+void initTimezone().then(
+  () => {
+    tzReady.value = true;
+  },
+  () => {
+    tzReady.value = true;
+  },
+);
 
 const { preference, mode, setPreference } = useTheme();
 const theme = computed<GlobalTheme | null>(() => (mode.value === "dark" ? darkTheme : null));
@@ -243,14 +260,17 @@ function onCloseCancel(): void {
             <PricingStatusBanner />
           </div>
           <main class="app-content">
-            <Dashboard
-              v-if="page === 'summary'"
-              :refresh-key="refreshKey"
-              @go-settings="page = 'settings'"
-            />
-            <KeepAlive>
-              <Settings v-if="page === 'settings'" :refresh-key="refreshKey" />
-            </KeepAlive>
+            <!-- U03：时区就绪前不挂载业务页面（时区就绪前不发任何查询） -->
+            <template v-if="tzReady">
+              <Dashboard
+                v-if="page === 'summary'"
+                :refresh-key="refreshKey"
+                @go-settings="page = 'settings'"
+              />
+              <KeepAlive>
+                <Settings v-if="page === 'settings'" :refresh-key="refreshKey" />
+              </KeepAlive>
+            </template>
           </main>
         </div>
         <!-- 关闭确认弹窗：未记忆默认动作时由后端触发 -->

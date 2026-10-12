@@ -136,7 +136,15 @@ const netNewTokens = computed(() =>
 const reportNetTokens = computed(() =>
   ccsReport.value ? totalTokens(ccsReport.value.net_new_tokens) : 0,
 );
-const { tz } = useTimezone();
+// U03：时区的权威来源是 settings.toml——下拉的读写走串行保存队列
+// （保存中/失败状态与迁移提示都在「通用」分区的时区行展示）。
+const {
+  tz,
+  saving: tzSaving,
+  error: tzError,
+  notice: tzNotice,
+  clearNotice: clearTzNotice,
+} = useTimezone();
 const autostart = ref<boolean | null>(null);
 const autostartBusy = ref(false);
 const autoSync = ref<boolean | null>(null);
@@ -916,7 +924,13 @@ defineExpose({ priceColumns });
           <div class="setting-row">
             <div class="setting-main">
               <div class="setting-label">聚合/展示时区</div>
-              <div class="setting-help">存储/计算一律 UTC，仅展示按此时区一次转换。</div>
+              <div class="setting-help">
+                存储/计算一律 UTC，仅展示按此时区一次转换。
+                <span v-if="tzSaving" class="tz-state">保存中…</span>
+                <span v-else-if="tzError" class="tz-state is-error">
+                  保存失败：{{ tzError }}（已回到上次保存的值）
+                </span>
+              </div>
             </div>
             <div class="setting-control">
               <NSelect
@@ -927,6 +941,11 @@ defineExpose({ priceColumns });
                 aria-label="聚合/展示时区"
               />
             </div>
+          </div>
+          <!-- U03：旧 localStorage 时区的一次性迁移提示（非阻断，可关闭）。 -->
+          <div v-if="tzNotice" class="ts-notice ts-notice-inline tz-notice" role="status">
+            <span class="ts-notice-content">{{ tzNotice }}</span>
+            <NButton size="tiny" @click="clearTzNotice">知道了</NButton>
           </div>
           <div class="setting-row">
             <div class="setting-main">
@@ -1659,6 +1678,20 @@ defineExpose({ priceColumns });
   line-height: 1.5;
   color: var(--ts-text-muted);
   margin: var(--ts-space-1) 0 var(--ts-space-2);
+}
+
+/* U03：时区保存状态与一次性迁移提示 */
+.tz-state {
+  margin-left: var(--ts-space-1);
+  color: var(--ts-text-muted);
+}
+
+.tz-state.is-error {
+  color: var(--ts-error);
+}
+
+.tz-notice {
+  margin: var(--ts-space-2) 0 0;
 }
 
 /* 数据源行块：块间发丝线 */
