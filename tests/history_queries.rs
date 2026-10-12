@@ -16,6 +16,15 @@ use tokenscope::report::{EventFilter, SummaryOptions};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// L-P2-1：触碰进程级查询钩子（预算/保留字节）的测试必须串行——
+/// `set_query_budget_for_tests` 是进程全局 Quota，同二进制并行测试的
+/// begin_query 会被在途注入打断（预算 Err / 会话被淘汰），造成假失败。
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// N05：建表/汇总窗口的**临时峰值**单独量测——保留预算不覆盖临时峰值
 /// （docs/stats-semantics.md §3.5）。计数分配器只存在于本测试二进制内，
 /// 真实释放仍交给系统分配器，计数只回退不下溢；百万测试以 `--ignored`
@@ -123,6 +132,7 @@ fn seed_events(history: &HistoryDb, prefix: &str, count: usize, same_ts: bool) {
 
 #[test]
 fn committed_writes_do_not_change_an_open_query() {
+    let _g = serial();
     let dir = temp_dir("frozen");
     let history = HistoryDb::open(&dir.join("data").join("history.db")).unwrap();
     seed_events(&history, "first", 3, false);
@@ -162,6 +172,7 @@ fn committed_writes_do_not_change_an_open_query() {
 
 #[test]
 fn same_timestamp_paging_covers_every_row_exactly_once() {
+    let _g = serial();
     let dir = temp_dir("paging");
     let history = HistoryDb::open(&dir.join("data").join("history.db")).unwrap();
     // 全部同一时间戳：分页必须靠 (ts, record_id, seq) 稳定决序，不重不漏。
@@ -172,6 +183,9 @@ fn same_timestamp_paging_covers_every_row_exactly_once() {
     let mut seen: Vec<String> = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
+        // L-P3-2：收敛上界——游标协议破坏时快速失败，而不是无限翻页挂死
+        // （循环需多跑一轮拿到空页才退出，故允许 seen == 25）。
+        assert!(seen.len() <= 25, "翻页必须收敛（seed=25）");
         let page = query::query_events(
             &snap.query_id,
             &EventFilter {
@@ -200,6 +214,7 @@ fn same_timestamp_paging_covers_every_row_exactly_once() {
 
 #[test]
 fn large_history_summarizes_streaming_with_bounded_retention() {
+    let _g = serial();
     // 4 万条合成事件（debug 构建下的可接受规模；性质断言与规模无关）：
     // 汇总必须走**流式读取**——判据是"会话保留的数据与事件本体无关"。
     let dir = temp_dir("large");
@@ -226,6 +241,7 @@ fn large_history_summarizes_streaming_with_bounded_retention() {
 
 #[test]
 fn read_transaction_can_be_released_and_expires_with_the_session() {
+    let _g = serial();
     let dir = temp_dir("release");
     let history = HistoryDb::open(&dir.join("data").join("history.db")).unwrap();
     seed_events(&history, "release", 2, false);
@@ -272,6 +288,7 @@ fn read_transaction_can_be_released_and_expires_with_the_session() {
 
 #[test]
 fn query_budget_still_applies() {
+    let _g = serial();
     // RC05：预算仍约束会话的保留数据——行索引超预算时明确失败。
     let dir = temp_dir("budget");
     let history = HistoryDb::open(&dir.join("data").join("history.db")).unwrap();
@@ -296,6 +313,30 @@ fn query_budget_still_applies() {
             .requests,
         5000
     );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// L-P3-1：单页上限 1000 的契约——请求超过上限也只返回 1000 行，
+/// total 仍报全量（默认套件此前对该上限零防护，mutation 可悄悄改小）。
+#[test]
+fn event_page_caps_at_1000_rows() {
+    let _g = serial();
+    let dir = temp_dir("page-cap");
+    let history = HistoryDb::open(&dir.join("data").join("history.db")).unwrap();
+    seed_events(&history, "cap", 1001, false);
+    let o = opts(&dir);
+    let snap = query::begin_query(&o).unwrap();
+
+    let page = query::query_events(
+        &snap.query_id,
+        &EventFilter {
+            limit: Some(1001),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(page.total, 1001, "total 报全量，不受单页上限影响");
+    assert_eq!(page.rows.len(), 1000, "单页上限 1000 行");
     std::fs::remove_dir_all(&dir).ok();
 }
 

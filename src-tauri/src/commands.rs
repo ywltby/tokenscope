@@ -1457,6 +1457,24 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_rollups_mode() {
+        use tokenscope::report::RollupsMode;
+        // L-P3-3：H08 新增参数的解析契约——缺省/空白 = 自动参与，
+        // detail_only 独立成档，未知值显式报错。
+        assert_eq!(parse_rollups_mode(None).unwrap(), RollupsMode::Auto);
+        assert_eq!(parse_rollups_mode(Some("")).unwrap(), RollupsMode::Auto);
+        assert_eq!(parse_rollups_mode(Some("auto")).unwrap(), RollupsMode::Auto);
+        assert_eq!(
+            parse_rollups_mode(Some(" detail_only ")).unwrap(),
+            RollupsMode::DetailOnly
+        );
+        assert_eq!(
+            parse_rollups_mode(Some("detail-only")).unwrap_err(),
+            "未知的日粒度历史模式：detail-only"
+        );
+    }
+
+    #[test]
     fn test_close_decision_from_settings() {
         // 关闭三态：未配置 = 询问；配置了默认动作 = 直接执行。
         assert!(matches!(

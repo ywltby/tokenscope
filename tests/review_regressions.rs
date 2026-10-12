@@ -28,6 +28,16 @@ use tokenscope::model::{AgentKind, TokenCounts};
 use tokenscope::query;
 use tokenscope::report::{EventFilter, SummaryOptions, summary};
 
+/// L-P2-1：本二进制内触碰进程级钩子（最大并发采集计数 swap(0)、保留字节
+/// before/after）的测试与并行采集/会话记账互斥——计数被并行测试污染会
+/// 造成 max_parallel/after-delta 假失败。cargo 逐个运行测试二进制，
+/// 二进制内互斥即全局互斥。
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn temp_dir(tag: &str) -> PathBuf {
@@ -281,6 +291,7 @@ fn synthetic_event(i: u64) -> EventWrite {
 /// 分页必须在限定时间内返回——旧实现持锁遍历、回调里再取同一把锁会挂死。
 #[test]
 fn large_detail_plus_rollup_does_not_deadlock() {
+    let _g = serial();
     let dir = temp_dir("deadlock");
     let history = history_of(&dir);
     let rollups: Vec<DailyRollupWrite> = (0..3)
@@ -363,6 +374,7 @@ fn large_detail_plus_rollup_does_not_deadlock() {
 /// 两侧直接命中同一事件（见 codex_import_and_collect_yield_the_same_union）。
 #[test]
 fn codex_overlap_candidate_requires_explicit_confirmation() {
+    let _g = serial();
     let dir = temp_dir("overlap-codex");
     let history = history_of(&dir);
     let ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
@@ -444,6 +456,7 @@ fn codex_overlap_candidate_requires_explicit_confirmation() {
 /// 交给被保留的 proxy 行——否则原生采集之后会为同一请求再建一条事件。
 #[test]
 fn deduped_session_row_donates_native_alias_to_proxy_row() {
+    let _g = serial();
     let dir = temp_dir("alias-donate");
     let history = history_of(&dir);
     let claude = dir.join("claude");
@@ -520,6 +533,7 @@ fn deduped_session_row_donates_native_alias_to_proxy_row() {
 ///（持久化身份不能含文件路径）。
 #[test]
 fn codex_moved_and_copied_rollouts_do_not_double_count() {
+    let _g = serial();
     let dir = temp_dir("codex-move");
     let codex = dir.join("codex");
     let lines = vec![
@@ -554,6 +568,7 @@ fn codex_moved_and_copied_rollouts_do_not_double_count() {
 /// 审阅 #4（迁移分支）：旧缓存迁移后重扫同一份日志，命中迁移登记的身份。
 #[test]
 fn migrated_codex_usage_is_not_recounted_on_rescan() {
+    let _g = serial();
     let dir = temp_dir("codex-migrate");
     let codex = dir.join("codex");
     let lines = vec![
@@ -636,6 +651,7 @@ fn migrated_codex_usage_is_not_recounted_on_rescan() {
 /// 新增请求照常累计。
 #[test]
 fn stale_claude_copy_cannot_lower_saved_terminal_value() {
+    let _g = serial();
     let dir = temp_dir("terminal-value");
     let claude = dir.join("claude");
     write_lines(
@@ -698,6 +714,7 @@ fn stale_claude_copy_cannot_lower_saved_terminal_value() {
 /// 必须各自保留，不折叠、不丢用量。
 #[test]
 fn rollups_with_distinct_request_model_are_not_collapsed() {
+    let _g = serial();
     let dir = temp_dir("rollup-pk");
     let history = history_of(&dir);
     seed_ccs(
@@ -749,6 +766,7 @@ fn rollups_with_distinct_request_model_are_not_collapsed() {
 /// 审阅 #7：查询限定日期时，只有日粒度的历史同样受该范围约束。
 #[test]
 fn date_filter_excludes_rollups_outside_range() {
+    let _g = serial();
     let dir = temp_dir("rollup-date");
     let history = history_of(&dir);
     let claude = dir.join("claude");
@@ -799,6 +817,7 @@ fn date_filter_excludes_rollups_outside_range() {
 /// 审阅 #8：`limit=1` 的明细分页不得物化整份历史（旧实现让保留量远超预算）。
 #[test]
 fn paged_events_respect_session_budget_without_full_materialization() {
+    let _g = serial();
     let dir = temp_dir("paging-budget");
     let history = history_of(&dir);
     let batch: Vec<EventWrite> = (0..4000u64).map(synthetic_event).collect();
@@ -828,6 +847,7 @@ fn paged_events_respect_session_budget_without_full_materialization() {
 /// 且已有历史仍可查询/展示。
 #[test]
 fn one_bad_event_does_not_roll_back_the_whole_batch() {
+    let _g = serial();
     let dir = temp_dir("bad-event");
     let claude = dir.join("claude");
     let bad_line = r#"{"type":"assistant","timestamp":"2026-10-09T08:00:01Z","sessionId":"s1","message":{"id":"bad","model":"","usage":{"input_tokens":5,"output_tokens":5}}}"#.to_string();
@@ -876,6 +896,7 @@ fn one_bad_event_does_not_roll_back_the_whole_batch() {
 /// 保持事务前状态，不留"前 N 条已提交"的半迁移。
 #[test]
 fn write_batch_with_marker_is_atomic_on_failure() {
+    let _g = serial();
     let dir = temp_dir("atomic-migration");
     let history = history_of(&dir);
     let mut batch: Vec<EventWrite> = (0..500u64).map(synthetic_event).collect();
@@ -904,6 +925,7 @@ fn write_batch_with_marker_is_atomic_on_failure() {
 /// 全部 token）。
 #[test]
 fn net_new_tokens_counts_only_newly_inserted_events() {
+    let _g = serial();
     let dir = temp_dir("net-new");
     let history = history_of(&dir);
     let ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
@@ -968,6 +990,7 @@ fn net_new_tokens_counts_only_newly_inserted_events() {
 /// 一条采集管线（启动采集/手动刷新/定时采集走同一个协调器）。
 #[test]
 fn different_query_params_do_not_run_collections_in_parallel() {
+    let _g = serial();
     let dir = temp_dir("single-flight");
     let claude = dir.join("claude");
     let codex = dir.join("codex");
@@ -1025,6 +1048,7 @@ fn different_query_params_do_not_run_collections_in_parallel() {
 /// 计划 §5.2 的恢复路径：`detail_only` 时只有日粒度的历史不参与统计。
 #[test]
 fn detail_only_mode_excludes_rollup_history() {
+    let _g = serial();
     let dir = temp_dir("detail-only");
     let history = history_of(&dir);
     seed_ccs(
@@ -1061,6 +1085,7 @@ fn detail_only_mode_excludes_rollup_history() {
 /// 预览计数渲染报错、`plan_id` 拿不到、仪表盘的时区提示整段消失。
 #[test]
 fn ipc_payload_field_names_are_snake_case() {
+    let _g = serial();
     let dir = temp_dir("ipc-fields");
     let history = history_of(&dir);
     seed_ccs(
@@ -1143,6 +1168,7 @@ fn ipc_payload_field_names_are_snake_case() {
 /// 计划 §6：结构升级前必须在数据目录留下可恢复备份。
 #[test]
 fn schema_upgrade_creates_restorable_backup() {
+    let _g = serial();
     let dir = temp_dir("upgrade-backup");
     let path = dir.join("history.db");
     {
@@ -1173,6 +1199,7 @@ fn schema_upgrade_creates_restorable_backup() {
 /// 有新写入时整批拒绝（不拿过期预览插入重复请求）。
 #[test]
 fn import_commit_rechecks_generation_inside_transaction() {
+    let _g = serial();
     let dir = temp_dir("generation-race");
     let history = history_of(&dir);
     seed_ccs(
@@ -1237,6 +1264,7 @@ fn import_commit_rechecks_generation_inside_transaction() {
 /// 别名不命中而重复入库。
 #[test]
 fn codex_proxy_session_row_donates_real_cache_write_alias() {
+    let _g = serial();
     let dir = temp_dir("p2-1-cw-donation");
     let history = history_of(&dir);
     let ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
@@ -1377,6 +1405,7 @@ fn codex_proxy_session_row_donates_real_cache_write_alias() {
 /// 原生的确认停留在低优先级，后续同请求的 CCS 变化会被静默覆盖。
 #[test]
 fn native_confirmation_blocks_later_ccs_overwrite() {
+    let _g = serial();
     let dir = temp_dir("p2-2-rank");
     let history = history_of(&dir);
     let ts: jiff::Timestamp = "2026-09-15T08:00:00Z".parse().unwrap();
@@ -1433,6 +1462,7 @@ use tokenscope::history::EventAlias;
 /// 同一事件；缺 session_id 的行仍走重叠候选（见上一测试）。
 #[test]
 fn codex_import_and_collect_yield_the_same_union() {
+    let _g = serial();
     let ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
     let ccs_row = CcsRow {
         request_id: "ccs-1".into(),
@@ -1515,6 +1545,7 @@ fn codex_import_and_collect_yield_the_same_union() {
 /// 采集（带 session_id）仍会为同一请求再建一条事件。
 #[test]
 fn deduped_codex_session_row_donates_replay_identity_to_proxy_row() {
+    let _g = serial();
     let dir = temp_dir("codex-alias-donate");
     let history = history_of(&dir);
     let ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
@@ -1579,6 +1610,7 @@ fn deduped_codex_session_row_donates_replay_identity_to_proxy_row() {
 /// 事件时间（真实终值不再被判过期）、同键日汇总仅时区不同的重复行折叠。
 #[test]
 fn upgraded_v2_history_backfills_identity_time_and_rollup_key() {
+    let _g = serial();
     let dir = temp_dir("v2-upgrade");
     let path = dir.join("data").join("history.db");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1734,6 +1766,7 @@ fn upgraded_v2_history_backfills_identity_time_and_rollup_key() {
 /// 复审 #5（运行期）：同一 CCS 库改选来源时区再次导入，日汇总不重复累计。
 #[test]
 fn changing_source_timezone_does_not_duplicate_rollups() {
+    let _g = serial();
     let dir = temp_dir("rollup-tz");
     let history = history_of(&dir);
     seed_ccs(
@@ -1778,6 +1811,7 @@ fn changing_source_timezone_does_not_duplicate_rollups() {
 /// 事件时间早于已存 CCS 值也要胜出；反向（CCS 后到）仍按冲突保留原生值。
 #[test]
 fn native_precedence_beats_observed_time() {
+    let _g = serial();
     let dir = temp_dir("precedence");
     let history = history_of(&dir);
     let t0: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
@@ -1876,6 +1910,7 @@ fn native_precedence_beats_observed_time() {
 /// 3) **不同来源请求标识**、同会话/模型/四桶：一条事件、两条来源证据。
 #[test]
 fn codex_union_identity_matrix() {
+    let _g = serial();
     // 场景 1：独立请求不被并集吞掉。
     let dir = temp_dir("n02-distinct");
     let history = history_of(&dir);
@@ -2010,6 +2045,7 @@ fn codex_union_identity_matrix() {
 /// 看到旧终值）。事实始终一条，token 不变。
 #[test]
 fn batch_preview_matches_commit_for_same_fact_updates() {
+    let _g = serial();
     let dir = temp_dir("r01-parity");
     let history = history_of(&dir);
     let t = 1_789_545_600i64;
@@ -2082,6 +2118,7 @@ fn batch_preview_matches_commit_for_same_fact_updates() {
 /// a、b 再更新——两个别名都指向**同一事实**，不得误报"别名指向不同事件"。
 #[test]
 fn batch_preview_multi_alias_of_same_fact_does_not_conflict() {
+    let _g = serial();
     let dir = temp_dir("r01-multi-alias");
     let history = history_of(&dir);
     let ts: jiff::Timestamp = "2026-09-15T08:00:00Z".parse().unwrap();
@@ -2169,6 +2206,7 @@ fn batch_preview_multi_alias_of_same_fact_does_not_conflict() {
 /// 新增。
 #[test]
 fn batch_preview_unchanged_row_claims_new_aliases() {
+    let _g = serial();
     let dir = temp_dir("r01-unchanged-claims");
     let history = history_of(&dir);
     let ts: jiff::Timestamp = "2026-09-15T08:00:00Z".parse().unwrap();
@@ -2232,6 +2270,7 @@ fn batch_preview_unchanged_row_claims_new_aliases() {
 /// （此前预览 `Ok([Unchanged])`、提交整批失败"来源记录冲突"）。
 #[test]
 fn batch_preview_rejects_origin_bound_to_another_fact() {
+    let _g = serial();
     let dir = temp_dir("r01b-origin-conflict");
     let history = history_of(&dir);
     let ts: jiff::Timestamp = "2026-09-15T08:00:00Z".parse().unwrap();
@@ -2298,6 +2337,7 @@ fn batch_preview_rejects_origin_bound_to_another_fact() {
 /// inserted=1/unchanged=1）。修复后两侧一致为 [未变化, 新增]。
 #[test]
 fn batch_preview_does_not_persist_alternate_event_keys() {
+    let _g = serial();
     let dir = temp_dir("r01b-alt-key");
     let history = history_of(&dir);
     let ts: jiff::Timestamp = "2026-09-15T08:00:00Z".parse().unwrap();
@@ -2365,6 +2405,7 @@ fn batch_preview_does_not_persist_alternate_event_keys() {
 /// 2) 已有 A/B 各自补同键不同种类的来源证据 → 两条未变化、证据各自落位。
 #[test]
 fn batch_preview_origin_identity_includes_kind() {
+    let _g = serial();
     let dir = temp_dir("t01-origin-kind");
     let history = history_of(&dir);
     let ts: jiff::Timestamp = "2026-09-15T08:00:00Z".parse().unwrap();
