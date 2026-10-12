@@ -10,7 +10,14 @@ use tokenscope::pricing::{INDEX_VERSION, Pricing};
 use tokenscope::report::{SummaryOptions, summary};
 
 fn tmp_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("tokenscope-policy-{tag}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!(
+        "tokenscope-policy-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -65,6 +72,9 @@ fn test_unknown_model_without_sources_is_unknown() {
         codex_dir: Some(dir.join("no-codex")),
         cache_dir: Some(dir.join("cache")),
         pricing_index: Some(dir.join("idx.json")),
+        // N09：价格路径全部注入临时文件——不读真实 ~/.tokenscope 下的
+        // 外置价格（否则测试结果随开发机状态漂移）。
+        pricing_path: Some(dir.join("no-pricing.toml")),
         openrouter_path: Some(dir.join("no-or.json")),
         modelsdev_path: Some(dir.join("no-md.json")),
         tz: Some("Asia/Shanghai".to_string()),

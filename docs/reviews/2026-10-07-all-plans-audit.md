@@ -1,8 +1,10 @@
 # 全部计划实现审核（2026-10-07）
 
+> **2026-10-11 历史状态：** 本文保留当时审查发现；后续修复/需求已有变化，当前完成与待办采用 [总账](../plans/README.md) 和 [整合计划](../plans/active/2026-10-11-consolidated-remaining-work.md)。不要把原“仍存在/待执行”直接当作当前缺陷。
+
 审核基线：`a42e843`，分支 `docs/product-review-plan`。本次只审核并编写修复计划，不修改实现。
 
-**结论：主体功能已落地，但不能认定“全部计划已正确实现并验收”。确认 10 类问题，其中 5 类 P1 涉及计费、日期或缓存正确性，5 类 P2 涉及异常数据、交互及诊断。** 既有完整门禁通过，但定向复现暴露了测试覆盖缺口。修复任务见 [独立修复计划](../plans/active/2026-10-07-all-plans-audit-remediation.md)。
+**结论：主体功能已落地，但不能认定“全部计划已正确实现并验收”。确认 10 类问题，其中 5 类 P1 涉及计费、日期或缓存正确性，5 类 P2 涉及异常数据、交互及诊断。** 既有完整门禁通过，但定向复现暴露了测试覆盖缺口。修复任务见 [独立修复计划](../plans/archive/implemented/2026-10-07-all-plans-audit-remediation.md)。
 
 ## 1. 审核范围与覆盖规则
 
@@ -14,28 +16,28 @@
 | --- | --- |
 | [M1 Claude Code](../plans/archive/implemented/2026-10-03-m1-claude-code-adapter.md) | 保留只读适配器、坏行统计、全局去重；当前主链与 fixture 存在，空结果时诊断展示仍有 R08。 |
 | [M2 Codex](../plans/archive/implemented/2026-10-03-m2-codex-adapter-pricing.md) | Codex 四桶归一化与去重以路线图 B1/B2、统计口径文档为准；旧 43 条内置表、旧前缀策略不再验收。 |
-| [M3 GUI](../plans/archive/implemented/2026-10-03-m3-tauri-vue-gui.md) | GUI 为唯一形态；不要求恢复 CLI；旧关窗缩托盘被三态关闭取代，见 R07。 |
-| [M4 缓存/外置价格](../plans/archive/implemented/2026-10-03-m4-cache-pricing-settings.md) | 缓存必须不改变结果；R05 违反此要求。价格格式以分段计划及三态价格为准。 |
-| [M5 OpenRouter](../plans/archive/implemented/2026-10-04-m5-openrouter-pricing-sync.md) | 保留在线同步/离线快照，来源角色改为补充；其数值缓存价应保留，见 R01。 |
+| [M3 GUI](../plans/archive/partial/2026-10-03-m3-tauri-vue-gui.md) | GUI 为唯一形态；不要求恢复 CLI；旧关窗缩托盘被三态关闭取代，见 R07。 |
+| [M4 缓存/外置价格](../plans/archive/partial/2026-10-03-m4-cache-pricing-settings.md) | 缓存必须不改变结果；R05 违反此要求。价格格式以分段计划及三态价格为准。 |
+| [M5 OpenRouter](../plans/archive/partial/2026-10-04-m5-openrouter-pricing-sync.md) | 保留在线同步/离线快照，来源角色改为补充；其数值缓存价应保留，见 R01。 |
 | [M6 时区](../plans/archive/implemented/2026-10-04-m6-timezone-resolution.md) | UTC 存储、统计时区解析继续有效；UI 的 local 与 picker 桥接有 R03。 |
-| [M7 明细](../plans/archive/implemented/2026-10-04-m7-event-drilldown.md) | 共用 report 管线、下钻、四桶/费用同源存在；后端唯一游标未用于前端行身份，见 R10。 |
-| [M8 桌面体验](../plans/archive/implemented/2026-10-04-m8-desktop-experience.md) | 单实例/托盘/窗口记忆/自启接线存在；真机验收后延，不能据此宣称本次全部通过。 |
-| [M9 models.dev](../plans/archive/implemented/2026-10-04-m9-modelsdev-source.md) | 主源、离线快照有效；取消内置兜底；非法基础价处理有 R06。 |
+| [M7 明细](../plans/archive/partial/2026-10-04-m7-event-drilldown.md) | 共用 report 管线、下钻、四桶/费用同源存在；后端唯一游标未用于前端行身份，见 R10。 |
+| [M8 桌面体验](../plans/archive/partial/2026-10-04-m8-desktop-experience.md) | 单实例/托盘/窗口记忆/自启接线存在；真机验收后延，不能据此宣称本次全部通过。 |
+| [M9 models.dev](../plans/archive/partial/2026-10-04-m9-modelsdev-source.md) | 主源、离线快照有效；取消内置兜底；非法基础价处理有 R06。 |
 | [M10 日期范围](../plans/archive/implemented/2026-10-04-m10-date-range.md) | GUI 自然日字符串契约、区间闭边界继续有效；真实 picker 行为见 R03。 |
-| [M11 索引/自动同步](../plans/archive/implemented/2026-10-04-m11-pricing-cache-autosync.md) | 持久索引/进程缓存/自动同步存在；修复 R01/R06 必须阻止旧派生索引继续携带错误结果。 |
-| [产品路线图](../plans/active/2026-10-05-product-review-and-roadmap.md) | A/B/C/D1–D4 大部分已实现；C4 快照一致性、B4 诊断和缓存身份仍有 R04/R05/R08；D5 不算已完成。 |
-| [发布阻断修复](../plans/active/2026-10-05-release-blockers-remediation.md) | 单飞 RAII、完整精度游标、v1 非零缓存价、原子写工具等存在；Task 4 内置表要求已废弃。四类落盘原子性仍漏视图缓存 R04。 |
-| [定价来源策略](../plans/active/2026-10-05-pricing-source-policy.md) | 无生产内置价格、首启横幅、models.dev 离线缓存已落地；来源优先级不能覆盖后来“独立候选、按请求估算择价”的要求。 |
-| [审阅问题修复](../plans/active/2026-10-06-review-findings-remediation.md) | 游标补充排序、目录重叠防护、部分同步、组件测试等存在；日期仍需按真实依赖复验 R03。 |
-| [二次实现审核修复](../plans/active/2026-10-06-post-implementation-audit-remediation.md) | 重叠规范化、有效签名旧索引 fixture、Settings 测试存在；UTC 锚往返测试未覆盖真实 picker R03；文档状态仍不一致。 |
-| [分段计价/费用明细](../plans/active/2026-10-06-tiered-pricing-and-request-breakdown.md) | 末段匹配、整请求切档、历史时间、同候选四项单价和 breakdown 已落地；时间档选择有 R02，价格校验有 R06。 |
-| [设计系统实施](../plans/active/2026-10-06-design-system-implementation.md) | 以重写版本及当前 DESIGN.md 第二版为准；主题 token、卡片/表格/费用浮层主体存在；R08/R09 仍违反诊断及键盘要求。 |
-| [视觉差异清单](../plans/active/2026-10-06-design-system-visual-gap.md) | 属实施前基线，不把其“现状”当当前缺陷；按现代码重新判断。 |
-| [视觉 QA](../plans/active/2026-10-06-design-system-visual-qa.md) | 有 125% dev 走查记录；100%/150% 未验收，截图目录缺失，导航透出效果需复核。 |
-| [Apple 视觉刷新](../plans/active/2026-10-06-apple-visual-refresh.md) | 早期步骤被当前 DESIGN.md 和重写后的实施计划收敛；不恢复旧 emoji、旧 token 或已被补齐的占位交互。 |
-| [Apple 剩余任务](../plans/active/2026-10-06-apple-refresh-remaining-tasks.md) | 旧“Settings 暂缓”已被后来实现覆盖；不把这条历史暂缓继续当作禁止修改。 |
-| [关闭确认/配置文件](../plans/active/2026-10-06-close-confirm-and-settings-file.md) | TOML 迁移、三态关闭、记忆、设置页入口主体符合；关闭命令失败路径缺反馈 R07。新增高级配置组不违反旧“四组”要求。 |
-| [缓存读取定价解析](../plans/active/2026-10-06-cache-read-pricing-resolution.md) | 最终口径为 Unknown / Fixed / SameAsInput、显式 model_policy、完整候选优先；R01 与 R02 表明接入和候选内部选择未完成。 |
+| [M11 索引/自动同步](../plans/archive/partial/2026-10-04-m11-pricing-cache-autosync.md) | 持久索引/进程缓存/自动同步存在；修复 R01/R06 必须阻止旧派生索引继续携带错误结果。 |
+| [产品路线图](../plans/archive/partial/2026-10-05-product-review-and-roadmap.md) | A/B/C/D1–D4 大部分已实现；C4 快照一致性、B4 诊断和缓存身份仍有 R04/R05/R08；D5 不算已完成。 |
+| [发布阻断修复](../plans/archive/partial/2026-10-05-release-blockers-remediation.md) | 单飞 RAII、完整精度游标、v1 非零缓存价、原子写工具等存在；Task 4 内置表要求已废弃。四类落盘原子性仍漏视图缓存 R04。 |
+| [定价来源策略](../plans/archive/partial/2026-10-05-pricing-source-policy.md) | 无生产内置价格、首启横幅、models.dev 离线缓存已落地；来源优先级不能覆盖后来“独立候选、按请求估算择价”的要求。 |
+| [审阅问题修复](../plans/archive/partial/2026-10-06-review-findings-remediation.md) | 游标补充排序、目录重叠防护、部分同步、组件测试等存在；日期仍需按真实依赖复验 R03。 |
+| [二次实现审核修复](../plans/archive/partial/2026-10-06-post-implementation-audit-remediation.md) | 重叠规范化、有效签名旧索引 fixture、Settings 测试存在；UTC 锚往返测试未覆盖真实 picker R03；文档状态仍不一致。 |
+| [分段计价/费用明细](../plans/archive/partial/2026-10-06-tiered-pricing-and-request-breakdown.md) | 末段匹配、整请求切档、历史时间、同候选四项单价和 breakdown 已落地；时间档选择有 R02，价格校验有 R06。 |
+| [设计系统实施](../plans/archive/partial/2026-10-06-design-system-implementation.md) | 以重写版本及当前 DESIGN.md 第二版为准；主题 token、卡片/表格/费用浮层主体存在；R08/R09 仍违反诊断及键盘要求。 |
+| [视觉差异清单](../plans/archive/superseded/2026-10-06-design-system-visual-gap.md) | 属实施前基线，不把其“现状”当当前缺陷；按现代码重新判断。 |
+| [视觉 QA](../plans/archive/partial/2026-10-06-design-system-visual-qa.md) | 有 125% dev 走查记录；100%/150% 未验收，截图目录缺失，导航透出效果需复核。 |
+| [Apple 视觉刷新](../plans/archive/superseded/2026-10-06-apple-visual-refresh.md) | 早期步骤被当前 DESIGN.md 和重写后的实施计划收敛；不恢复旧 emoji、旧 token 或已被补齐的占位交互。 |
+| [Apple 剩余任务](../plans/archive/partial/2026-10-06-apple-refresh-remaining-tasks.md) | 旧“Settings 暂缓”已被后来实现覆盖；不把这条历史暂缓继续当作禁止修改。 |
+| [关闭确认/配置文件](../plans/archive/implemented/2026-10-06-close-confirm-and-settings-file.md) | TOML 迁移、三态关闭、记忆、设置页入口主体符合；关闭命令失败路径缺反馈 R07。新增高级配置组不违反旧“四组”要求。 |
+| [缓存读取定价解析](../plans/archive/partial/2026-10-06-cache-read-pricing-resolution.md) | 最终口径为 Unknown / Fixed / SameAsInput、显式 model_policy、完整候选优先；R01 与 R02 表明接入和候选内部选择未完成。 |
 
 现行定价规则特别说明：先按末段完整/有边界前缀匹配，按**请求的历史时间和实际 token**计算可适用档位；先在完整候选中取最高总费用，没有完整候选才取已知部分最高。不能把不适用的峰值档强加给请求；不能拼接不同渠道单价；缺失缓存价不能自动当 0 或输入价。以上明确要求覆盖旧计划中不加完整性筛选的“取最高”表述。
 

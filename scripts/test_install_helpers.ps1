@@ -1,0 +1,346 @@
+﻿#Requires -Version 7
+# M05 生命周期契约测试：用受控进程替身 + 临时目录验证
+# scripts/install_test_helpers.ps1 的等待/观察/关闭判定。
+#
+# 反例先于实现（先红后绿）：旧日志借用、快启动、仅写库、提前退出 0/23、
+# 关闭失败/超时/退出非 0 全部必须失败；单实例正例必须记录同一 PID 与
+# 本次 query_id。全部使用临时目录，不触碰默认用户目录与注册表。
+
+$ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "install_test_helpers.ps1")
+
+$Failures = New-Object System.Collections.Generic.List[string]
+$Checks = 0
+
+function Test-True {
+    param([bool]$Condition, [string]$Message)
+    $script:Checks++
+    if ($Condition) {
+        Write-Host "PASS $Message"
+    }
+    else {
+        $script:Failures.Add($Message) | Out-Null
+        Write-Host "FAIL $Message"
+    }
+}
+
+function Test-Throws {
+    param([scriptblock]$Action, [string]$Message, [string]$ExpectedText = "")
+    $script:Checks++
+    try {
+        & $Action
+        Write-Host "FAIL $Message（未抛出）"
+        $script:Failures.Add($Message) | Out-Null
+    }
+    catch {
+        if ($ExpectedText -ne "" -and -not ($_.Exception.Message -like "*$ExpectedText*")) {
+            Write-Host "FAIL $Message（抛出但信息不符：$($_.Exception.Message)）"
+            $script:Failures.Add("$Message（信息不符）") | Out-Null
+        }
+        else {
+            Write-Host "PASS $Message"
+        }
+    }
+}
+
+function New-Scenario {
+    param([string]$Tag)
+    # 模拟真实布局：<root>/home/.tokenscope/logs（与 DataDir 派生一致，
+    # 使 Move-LaunchLogsToEvidence 的 ".tokenscope\logs" 校验可用）。
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) "tokenscope-helper-test-$Tag-$([System.Guid]::NewGuid().ToString('N'))"
+    $dataDir = Join-Path $root "home" | Join-Path -ChildPath ".tokenscope"
+    New-Item -ItemType Directory -Path (Join-Path $dataDir "logs") -Force | Out-Null
+    return [pscustomobject]@{
+        Root    = $root
+        DataDir = $dataDir
+        LogsDir = Join-Path $dataDir "logs"
+        Context = [pscustomobject]@{
+            Process     = $null
+            Pid         = $null
+            ExePath     = "stand-in"
+            Scenario    = $Tag
+            RunId       = "run-$Tag"
+            EvidenceDir = $root
+            LiveLogsDir = Join-Path $dataDir "logs"
+            QueryId     = $null
+            Requests    = $null
+            Stage       = "launched"
+        }
+    }
+}
+
+function Write-LogLine {
+    param([string]$LogsDir, [string]$FileName, [string]$Line, [bool]$NoNewline = $false)
+    if ($NoNewline) {
+        Add-Content -Path (Join-Path $LogsDir $FileName) -Value $Line -NoNewline -Encoding utf8NoBOM
+    }
+    else {
+        Add-Content -Path (Join-Path $LogsDir $FileName) -Value $Line -Encoding utf8NoBOM
+    }
+}
+
+function New-GuiStandInProcess {
+    # GUI 替身：notepad 有真实主窗口，CloseMainWindow（WM_CLOSE）→
+    # 干净退出、退出码 0——与真实 GUI 应用（close_action = "quit"）的
+    # 关闭语义一致。pwsh 是控制台宿主：关窗即 0xC000013A，不能作为
+    # "优雅退出 0"的替身。
+    $proc = Start-Process -FilePath "notepad.exe" -PassThru
+    try {
+        # Start-Process 返回时窗口可能尚未创建；等待本进程的有效窗口句柄，
+        # 不能让固定的一秒观察期充当 GUI 初始化完成信号。
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($watch.Elapsed.TotalSeconds -lt 30) {
+            $proc.Refresh()
+            if ($proc.HasExited) { throw "GUI 替身在窗口就绪前退出：$($proc.ExitCode)" }
+            if ($proc.MainWindowHandle -ne [System.IntPtr]::Zero) { return $proc }
+            Start-Sleep -Milliseconds 50
+        }
+        throw "GUI 替身未在 30 秒内创建本进程窗口"
+    }
+    catch {
+        if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+        throw
+    }
+}
+
+function New-StandInProcess {
+    # 存活替身：一个安静存活 60 秒的 pwsh 子进程（等待期/观察期用，
+    # 不涉及 CloseMainWindow）。
+    Start-Process -FilePath "pwsh" -ArgumentList "-NoProfile", "-Command", "Start-Sleep -Seconds 60" -WindowStyle Hidden -PassThru
+}
+
+function New-ExitProcess {
+    param([int]$Code)
+    Start-Process -FilePath "pwsh" -ArgumentList "-NoProfile", "-Command", "exit $Code" -PassThru
+}
+
+function Cleanup {
+    param($Scenario)
+    Stop-ScenarioProcess -Context $Scenario.Context
+    if (Test-Path $Scenario.Root) {
+        Remove-Item $Scenario.Root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+$SummaryOk = "汇总完成（会话 q-alpha-1）：by=day 组=3 请求=3，12 ms"
+
+# ---------- 反例 1：旧日志借用 ----------
+
+Write-Host "=== 反例：旧日志已有成功汇总，新实例无新日志 ==="
+$s = New-Scenario "old-log-borrow"
+# 旧日志写入活动目录 → Prepare-LaunchEvidence 归档移走（真实流程）→
+# 活动目录变空。归档里的旧汇总不得满足本次启动的等待判定。
+Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log.2026-10-10" -Line $SummaryOk
+# 证据根沿用生产命名（tokenscope-install-evidence），触发 Move-LaunchLogsToEvidence
+# 的目的地守卫——契约必须走与安装验收完全相同的校验路径。
+$evidence = Prepare-LaunchEvidence -DataDir $s.DataDir -EvidenceRoot (
+    Join-Path $s.Root "tokenscope-install-evidence") -Scenario "old-log-borrow" -RunId "run-1"
+Test-True ((Test-Path (Join-Path $evidence "tokenscope.log.2026-10-10")) -and
+    -not (Test-Path $s.LogsDir)) "旧日志已归档移出活动目录"
+New-Item -ItemType Directory -Path $s.LogsDir -Force | Out-Null
+$proc = New-StandInProcess
+$s.Context.Process = $proc
+$s.Context.Pid = $proc.Id
+$deadline = 2
+Test-Throws {
+    Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds $deadline
+} "旧日志借用必须等待超时失败（归档后的新日志没有汇总）" "超时"
+Cleanup $s
+
+# ---------- 反例 2：仅写"历史库写入"没有"汇总完成" ----------
+
+Write-Host "=== 反例：仅写历史库写入 ==="
+$s = New-Scenario "write-only"
+Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line "历史库写入：新增 3，更新 0，已存在 0，冲突 0，陈旧 0；别名 +0，来源 +0"
+$proc = New-StandInProcess
+$s.Context.Process = $proc
+$s.Context.Pid = $proc.Id
+Test-Throws {
+    Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 2
+} "仅写库没有汇总完成必须失败" "超时"
+Cleanup $s
+
+# ---------- 反例 3：本次汇总请求数 0 或 2 ----------
+
+Write-Host "=== 反例：汇总请求数 0 / 2 ==="
+foreach ($wrong in 0, 2) {
+    $s = New-Scenario "wrong-count-$wrong"
+    Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line (
+        "汇总完成（会话 q-wrong）：by=day 组=1 请求=$wrong，5 ms"
+    )
+    $proc = New-StandInProcess
+    $s.Context.Process = $proc
+    $s.Context.Pid = $proc.Id
+    Test-Throws {
+        Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 2
+    } "汇总请求数 $wrong != 3 必须失败" "本次汇总请求数 $wrong != 期望 3"
+    Cleanup $s
+}
+
+# ---------- 反例 4：等待期提前退出（退出码 0 与 23） ----------
+
+Write-Host "=== 反例：等待期提前退出 0 / 23 ==="
+foreach ($code in 0, 23) {
+    $s = New-Scenario "early-exit-$code"
+    Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line "价格加载：重建，3 ms"
+    $proc = New-ExitProcess -Code $code
+    $s.Context.Process = $proc
+    $s.Context.Pid = $proc.Id
+    Test-Throws {
+        Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 10
+    } "等待期提前退出（退出码 $code）必须失败" "进程在场景进行中退出"
+    Cleanup $s
+}
+
+# ---------- 反例 5：观察期提前退出 ----------
+
+Write-Host "=== 反例：观察期提前退出 ==="
+foreach ($code in 0, 23) {
+    $s = New-Scenario "observe-exit-$code"
+    Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line $SummaryOk
+    $proc = New-ExitProcess -Code $code
+    $s.Context.Process = $proc
+    $s.Context.Pid = $proc.Id
+    $s.Context.QueryId = "q-alpha-1"
+    Test-Throws {
+        Observe-ProcessAlive -Context $s.Context -DurationSeconds 1 -PollMilliseconds 100
+    } "观察期提前退出（退出码 $code）必须失败" "进程在场景进行中退出"
+    Cleanup $s
+}
+
+# ---------- 反例 6：关闭失败 / 超时 / 退出非 0 ----------
+
+Write-Host "=== 反例：关闭语义 ==="
+function New-FakeContext {
+    param([bool]$CloseResult, [bool]$WaitResult, $ExitCode)
+    $proc = [pscustomobject]@{ HasExited = $false; ExitCode = $ExitCode }
+    $proc | Add-Member -MemberType ScriptMethod -Name CloseMainWindow -Value { return $script:CloseResult }.GetNewClosure()
+    $proc | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param([int]$ms) return $script:WaitResult }.GetNewClosure()
+    return [pscustomobject]@{ Process = $proc; Pid = 0; ExePath = "fake"; Scenario = "fake"; RunId = "fake"; EvidenceDir = $null; QueryId = $null; Requests = $null; Stage = "launched" }
+}
+Test-Throws { Close-AppGracefully -Context (New-FakeContext -CloseResult $false -WaitResult $true -ExitCode $null) } "CloseMainWindow=false 必须失败" "CloseMainWindow"
+Test-Throws { Close-AppGracefully -Context (New-FakeContext -CloseResult $true -WaitResult $false -ExitCode $null) } "关闭等待超时必须失败" "30s"
+Test-Throws { Close-AppGracefully -Context (New-FakeContext -CloseResult $true -WaitResult $true -ExitCode 3) } "退出码非 0 必须失败" "退出码 3"
+
+# ---------- 反例 7：半行日志（UTF-8/写入边界）不算完整记录 ----------
+
+Write-Host "=== 反例：半行日志不算完成 ==="
+$s = New-Scenario "partial-line"
+Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line $SummaryOk -NoNewline $true
+$proc = New-StandInProcess
+$s.Context.Process = $proc
+$s.Context.Pid = $proc.Id
+Test-Throws {
+    Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 2
+} "无换行的半行汇总不得参与匹配" "超时"
+Cleanup $s
+
+# ---------- 正例 1：快启动完整汇总并存活 ----------
+
+Write-Host "=== 正例：快启动完整汇总 ==="
+$s = New-Scenario "fast-start"
+Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line $SummaryOk
+$proc = New-StandInProcess
+$s.Context.Process = $proc
+$s.Context.Pid = $proc.Id
+try {
+    $summary = Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 10
+    Test-True ($summary.QueryId -eq "q-alpha-1") "记录本次 query_id"
+    Test-True ($summary.Requests -eq 3) "记录本次请求数"
+    Test-True ($s.Context.Pid -eq $proc.Id) "全程同一进程句柄"
+    Observe-ProcessAlive -Context $s.Context -DurationSeconds 1 -PollMilliseconds 100
+    Test-True $true "观察期存活"
+}
+finally {
+    Cleanup $s
+}
+
+# ---------- 正例 2：分多次写完 + 跨文件（跨日） ----------
+
+Write-Host "=== 正例：分次写入与跨文件 ==="
+$s = New-Scenario "split-write"
+$proc = New-StandInProcess
+$s.Context.Process = $proc
+$s.Context.Pid = $proc.Id
+try {
+    # 先写半行（无换行），再在第二个文件里补完整行——半行不匹配，
+    # 完整行匹配后成功。
+    Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line $SummaryOk -NoNewline $true
+    Test-Throws {
+        Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 2
+    } "半行阶段必须继续等待" "超时"
+    Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log.1" -Line $SummaryOk
+    $summary = Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 10
+    Test-True ($summary.QueryId -eq "q-alpha-1") "跨文件完整行匹配"
+}
+finally {
+    Cleanup $s
+}
+
+# ---------- 正例 3：真实日志 writer 持续打开，完整行仍须可读 ----------
+
+Write-Host "=== 正例：读取活动写入日志 ==="
+$s = New-Scenario "live-writer"
+$proc = New-StandInProcess
+$s.Context.Process = $proc
+$s.Context.Pid = $proc.Id
+$logPath = Join-Path $s.LogsDir "tokenscope.log"
+# 与 Rust 日志文件一致：允许共享读写/删除，写入句柄整个等待期保持打开。
+$writer = [System.IO.File]::Open($logPath, [System.IO.FileMode]::Create,
+    [System.IO.FileAccess]::Write,
+    [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+try {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($SummaryOk)
+    $writer.Write($bytes, 0, $bytes.Length)
+    $writer.Flush()
+    Test-Throws {
+        Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 1
+    } "活动写入的半行不算完成" "超时"
+    $newline = [System.Text.Encoding]::UTF8.GetBytes("`n")
+    $writer.Write($newline, 0, $newline.Length)
+    $writer.Flush()
+    Test-True (@(Get-CompleteLogLines -LogsDir $s.LogsDir).Count -eq 1) "writer 未关闭时读取完整行"
+    $summary = Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 2
+    Test-True ($summary.QueryId -eq "q-alpha-1") "活动写入日志记录本次 query_id"
+    Test-True ($summary.Requests -eq 3) "活动写入日志记录请求数 3"
+}
+finally {
+    $writer.Dispose()
+    Cleanup $s
+}
+
+# ---------- 正例 4：完整生命周期（单实例 + 观察 + 优雅关闭） ----------
+
+Write-Host "=== 正例：完整生命周期 ==="
+$s = New-Scenario "full-lifecycle"
+Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line $SummaryOk
+$proc = New-GuiStandInProcess
+$s.Context.Process = $proc
+$s.Context.Pid = $proc.Id
+try {
+    $summary = Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 15
+    Observe-ProcessAlive -Context $s.Context -DurationSeconds 1 -PollMilliseconds 100
+    Close-AppGracefully -Context $s.Context
+    Test-True ($s.Context.Stage -eq "closed") "生命周期到 closed"
+    Test-True ($s.Context.Pid -eq $proc.Id) "PID 全程一致"
+    Test-True ($s.Context.QueryId -eq "q-alpha-1") "query_id 全程一致"
+}
+catch {
+    Stop-ScenarioProcess -Context $s.Context
+    throw
+}
+finally {
+    if (Test-Path $s.Root) {
+        Remove-Item $s.Root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Write-Host ""
+Write-Host "契约断言通过 $Checks 项，失败 $($Failures.Count) 项"
+if ($Failures.Count -gt 0) {
+    foreach ($f in $Failures) {
+        Write-Host "  - $f"
+    }
+    exit 1
+}
+exit 0

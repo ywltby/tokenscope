@@ -18,6 +18,8 @@ use tokenscope::report::{
 };
 use tokenscope::settings::{CloseAction, Settings};
 
+use crate::privacy;
+
 pub fn parse_by(by: &str) -> Result<GroupBy, String> {
     match by {
         "day" => Ok(GroupBy::Day),
@@ -40,16 +42,22 @@ pub fn parse_agent(agent: Option<&str>) -> Result<Option<AgentKind>, String> {
 /// **主线程纪律（用户反馈启动卡顿的根因）**：Tauri v2 的同步 command 在
 /// 主线程执行，扫描/解析/缓存/网络等重活一律 `async` + `spawn_blocking`
 /// 丢到后台线程池，GUI 主线程零阻塞。
+// 参数面由 IPC 契约决定（每个筛选项一个 invoke 参数），非设计膨胀。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn summarize(
+    app: tauri::AppHandle,
     by: String,
     days: Option<u32>,
     agent: Option<String>,
     tz: Option<String>,
     from: Option<String>,
     to: Option<String>,
+    rollups: Option<String>,
 ) -> Result<SummaryReport, String> {
-    let opts = query_opts(&by, agent, days, tz, from, to)?;
+    // P02：业务闸门——未同意（非 Ready）时不进入采集/解析/缓存/网络。
+    privacy::require_ready(&privacy::state_of(&app))?;
+    let opts = query_opts(&by, agent, days, tz, from, to, rollups)?;
     run_blocking("summarize", move || summary(&opts)).await
 }
 
@@ -58,6 +66,7 @@ pub async fn summarize(
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn list_events(
+    app: tauri::AppHandle,
     agent: Option<String>,
     days: Option<u32>,
     model: Option<String>,
@@ -69,6 +78,7 @@ pub async fn list_events(
     from: Option<String>,
     to: Option<String>,
 ) -> Result<EventList, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings()?;
     let opts = SummaryOptions {
         by: GroupBy::Day,
@@ -107,11 +117,15 @@ fn query_opts(
     tz: Option<String>,
     from: Option<String>,
     to: Option<String>,
+    rollups: Option<String>,
 ) -> Result<SummaryOptions, String> {
     let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings()?;
     Ok(SummaryOptions {
         by: parse_by(by)?,
         agent: parse_agent(agent.as_deref())?,
+        // H08：日粒度历史的参与方式——`detail_only` = 只用请求明细
+        //（来源时区与展示时区不一致时用户可选的恢复路径之一）。
+        rollups: parse_rollups_mode(rollups.as_deref())?,
         days,
         claude_dir,
         codex_dir,
@@ -124,18 +138,32 @@ fn query_opts(
     })
 }
 
+/// H08：查询参数里的日粒度历史模式（缺省 = 自动参与）。
+fn parse_rollups_mode(value: Option<&str>) -> Result<tokenscope::report::RollupsMode, String> {
+    match value.map(str::trim) {
+        None | Some("") | Some("auto") => Ok(tokenscope::report::RollupsMode::Auto),
+        Some("detail_only") => Ok(tokenscope::report::RollupsMode::DetailOnly),
+        Some(other) => Err(format!("未知的日粒度历史模式：{other}")),
+    }
+}
+
 /// SF04：创建查询会话——冻结一次采集的事件、价格修订、时间基准与来源
 /// 身份，返回 query_id 供汇总/明细（含分页）显式绑定。
+// 参数面由 IPC 契约决定（每个筛选项一个 invoke 参数），非设计膨胀。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn query_begin(
+    app: tauri::AppHandle,
     by: String,
     days: Option<u32>,
     agent: Option<String>,
     tz: Option<String>,
     from: Option<String>,
     to: Option<String>,
+    rollups: Option<String>,
 ) -> Result<tokenscope::query::QueryHandle, String> {
-    let opts = query_opts(&by, agent, days, tz, from, to)?;
+    privacy::require_ready(&privacy::state_of(&app))?;
+    let opts = query_opts(&by, agent, days, tz, from, to, rollups)?;
     run_blocking("query_begin", move || {
         tokenscope::query::begin_query_handle(&opts)
     })
@@ -144,7 +172,11 @@ pub async fn query_begin(
 
 /// SF04：从会话快照聚合汇总（不重新采集；generated_at = 冻结 as_of）。
 #[tauri::command]
-pub async fn query_summary(query_id: String) -> Result<SummaryReport, String> {
+pub async fn query_summary(
+    app: tauri::AppHandle,
+    query_id: String,
+) -> Result<SummaryReport, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("query_summary", move || {
         tokenscope::query::query_summary(&query_id)
     })
@@ -154,6 +186,7 @@ pub async fn query_summary(query_id: String) -> Result<SummaryReport, String> {
 /// SF04：从会话快照分页读取明细；游标校验 query_id/指纹/行位置归属。
 #[tauri::command]
 pub async fn query_events(
+    app: tauri::AppHandle,
     query_id: String,
     model: Option<String>,
     project: Option<String>,
@@ -161,6 +194,7 @@ pub async fn query_events(
     limit: Option<usize>,
     before: Option<String>,
 ) -> Result<EventList, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     let filter = EventFilter {
         model,
         project,
@@ -176,15 +210,20 @@ pub async fn query_events(
 
 /// SF06：启动诊断（只读）——App 挂载后取一次日志初始化状态，展示
 /// 非阻断通知；不触发任何重活。
+///
+/// P02/P03：日志在同意后才初始化，因此本命令同样受闸门保护（未 Ready
+/// 时诊断状态为 `pending`，没有业务含义）。
 #[tauri::command]
 pub fn startup_diagnostics(
-    status: tauri::State<tokenscope::logging::LogInitStatus>,
-) -> tokenscope::logging::LogInitStatus {
-    status.inner().clone()
+    app: tauri::AppHandle,
+) -> Result<tokenscope::logging::LogInitStatus, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    Ok(app.state::<crate::LogState>().status())
 }
 
 #[tauri::command]
-pub async fn source_status() -> Result<Vec<SourceStatus>, String> {
+pub async fn source_status(app: tauri::AppHandle) -> Result<Vec<SourceStatus>, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("source_status", move || {
         // AP02：严格读取——配置存在但坏掉时**拒绝**，绝不用默认来源顶替
         //（那会把用户停用的来源重新拉回统计，并谎报数据范围）。
@@ -258,6 +297,25 @@ fn source_settings() -> Result<
     source_settings_impl(load_settings_strict())
 }
 
+/// H04：由**已成功读取**的设置构造采集选项（定时采集与查询同源）。
+///
+/// 读取失败一律返回 Err——定时采集不按默认来源兜底，也不读取 CCS 库
+///（计划不变量 11）。来源目录、启停、数据目录全部与普通查询同一份解析
+/// 内核，因此"定时采集"与"用户手动查询"的采集范围不可能分叉。
+pub(crate) fn collection_opts_from(
+    loaded: anyhow::Result<tokenscope::settings::Settings>,
+) -> Result<SummaryOptions, String> {
+    let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings_impl(loaded)?;
+    Ok(SummaryOptions {
+        by: tokenscope::aggregate::GroupBy::Day,
+        claude_dir,
+        codex_dir,
+        claude_enabled: Some(claude_enabled),
+        codex_enabled: Some(codex_enabled),
+        ..Default::default()
+    })
+}
+
 // ── 关闭行为三态（关闭确认与配置文件计划）──────────────────
 
 /// 窗口关闭请求的处置。
@@ -302,7 +360,11 @@ pub(crate) fn close_decision_impl(loaded: anyhow::Result<Settings>) -> CloseDeci
 
 /// 设置页「关闭窗口时」：每次询问（None）/ 最小化到托盘 / 直接退出。
 #[tauri::command]
-pub async fn settings_set_close_action(action: Option<String>) -> Result<Option<String>, String> {
+pub async fn settings_set_close_action(
+    app: tauri::AppHandle,
+    action: Option<String>,
+) -> Result<Option<String>, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("settings_set_close_action", move || {
         let path = tokenscope::settings::settings_path()?;
         settings_set_close_action_impl(&path, action)
@@ -359,6 +421,7 @@ pub async fn close_resolve(
     minimize: bool,
     remember: bool,
 ) -> Result<(), String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     if remember {
         run_blocking("close_resolve", move || {
             let path = tokenscope::settings::settings_path()?;
@@ -396,6 +459,7 @@ fn persist_close_action(path: &std::path::Path, minimize: bool) -> anyhow::Resul
 /// 避免"打开空模板后旧设置被遮蔽"。
 #[tauri::command]
 pub async fn open_settings_file(app: tauri::AppHandle) -> Result<String, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     let path = tokenscope::settings::settings_path().map_err(|e| e.to_string())?;
     let path = run_blocking("open_settings_file", move || {
         tokenscope::settings::ensure_toml(&path)?;
@@ -412,10 +476,12 @@ pub async fn open_settings_file(app: tauri::AppHandle) -> Result<String, String>
 /// C1：保存单一来源配置（启停 + 目录覆盖；dir=None 回默认目录）。
 #[tauri::command]
 pub async fn source_config_set(
+    app: tauri::AppHandle,
     agent: String,
     enabled: bool,
     dir: Option<String>,
 ) -> Result<tokenscope::settings::SourceConfig, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("source_config_set", move || {
         let path = tokenscope::settings::settings_path()?;
         source_config_set_impl(&path, &agent, enabled, dir)
@@ -473,8 +539,121 @@ pub(crate) fn source_config_set_impl(
 }
 
 #[tauri::command]
-pub async fn cache_stats() -> Result<CacheInfo, String> {
+pub async fn cache_stats(app: tauri::AppHandle) -> Result<CacheInfo, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("cache_stats", move || cache_stats_impl(None)).await
+}
+
+/// H05：CCS 导入预览——**只在用户点击时**执行；进入设置页、显示默认路径或恢复
+/// 上次选择都不会打开来源库（计划不变量 11）。预览不写入任何用量。
+#[tauri::command]
+pub async fn ccs_import_preview(
+    app: tauri::AppHandle,
+    source_path: Option<String>,
+    source_day_timezone: Option<String>,
+) -> Result<tokenscope::import::ccs::ImportPreview, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    let path = resolve_ccs_path(source_path)?;
+    let tz = resolve_source_day_tz(source_day_timezone)?;
+    run_blocking("ccs_import_preview", move || {
+        let history = open_history_for_import()?;
+        let source = tokenscope::import::ccs::CcsSource::open(&path)?;
+        tokenscope::import::ccs::preview(&source, &history, &tz)
+    })
+    .await
+}
+
+/// H05：提交本次导入（**只执行一个批次**；计划一次性消费，重复提交明确失败）。
+///
+/// `allow_overlap` 是用户对"重叠候选"的显式决定：默认（false）拒绝提交含重叠
+/// 候选的计划，避免把"同时间同用量但身份不足"的来源记录当成新请求重复计费。
+#[tauri::command]
+pub async fn ccs_import_commit(
+    app: tauri::AppHandle,
+    plan_id: String,
+    take_source_rollups: Option<bool>,
+    allow_overlap: Option<bool>,
+) -> Result<tokenscope::import::ccs::ImportReport, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    let policy = if take_source_rollups.unwrap_or(false) {
+        tokenscope::history::RollupConflictPolicy::TakeSource
+    } else {
+        tokenscope::history::RollupConflictPolicy::KeepExisting
+    };
+    let allow = allow_overlap.unwrap_or(false);
+    run_blocking("ccs_import_commit", move || {
+        let history = open_history_for_import()?;
+        tokenscope::import::ccs::commit(&plan_id, &history, policy, allow)
+    })
+    .await
+}
+
+/// H05：取消预览（丢弃计划，不写任何用量）。
+#[tauri::command]
+pub async fn ccs_import_discard(app: tauri::AppHandle, plan_id: String) -> Result<bool, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    run_blocking("ccs_import_discard", move || {
+        Ok(tokenscope::import::ccs::discard(&plan_id))
+    })
+    .await
+}
+
+/// H05：来源库默认路径与存在性（只读路径解析，**不打开**库）。
+///
+/// 仍走统一隐私闸门：未解锁业务时不返回任何路径信息，也不接触来源库。
+#[tauri::command]
+pub fn ccs_import_defaults(app: tauri::AppHandle) -> Result<CcsImportDefaults, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    let path = tokenscope::import::ccs::default_source_path().map_err(|e| format!("{e:#}"))?;
+    Ok(CcsImportDefaults {
+        path: path.display().to_string(),
+        exists: tokenscope::import::ccs::source_exists(&path),
+        timezone: default_source_tz(),
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CcsImportDefaults {
+    pub path: String,
+    pub exists: bool,
+    /// 日汇总的来源统计时区假设（CCS 用本机日生成日键）。
+    pub timezone: String,
+}
+
+/// H05：解析来源库路径（空/缺省 → 默认路径）。
+fn resolve_ccs_path(source_path: Option<String>) -> Result<std::path::PathBuf, String> {
+    match source_path.map(|p| p.trim().to_string()) {
+        Some(p) if !p.is_empty() => Ok(std::path::PathBuf::from(p)),
+        _ => tokenscope::import::ccs::default_source_path().map_err(|e| format!("{e:#}")),
+    }
+}
+
+/// H05：导入写入的目标库（TokenScope 自己的历史库）。
+fn open_history_for_import() -> anyhow::Result<tokenscope::history::HistoryDb> {
+    let path = tokenscope::history::history_file_path()?;
+    tokenscope::history::HistoryDb::open(&path)
+}
+
+/// H05：日汇总的来源统计时区假设——CCS 用 `localtime` 生成日键，默认记录导入
+/// 时的本机时区名；用户在预览面板里改选来源时区时按用户选择记录（不宣称它是
+/// UTC，也不静默替换成展示时区）。
+fn resolve_source_day_tz(chosen: Option<String>) -> Result<String, String> {
+    match chosen.map(|s| s.trim().to_string()) {
+        Some(s) if !s.is_empty() && s != "local" => jiff::tz::TimeZone::get(&s)
+            .map(|_| s.clone())
+            .map_err(|_| format!("无法识别的来源时区：{s}")),
+        _ => Ok(default_source_tz()),
+    }
+}
+
+/// H05：日汇总的来源统计时区假设——CCS 用 `localtime` 生成日键，默认记录导入
+/// 时的本机时区名（无法解析时退回 `local`，绝不宣称它是 UTC）。
+fn default_source_tz() -> String {
+    jiff::tz::TimeZone::system()
+        .iana_name()
+        .map(str::to_string)
+        .unwrap_or_else(|| "local".to_string())
 }
 
 /// AP03：重建缓存——采集范围与普通查询**同一份**已成功读取的配置。
@@ -485,7 +664,8 @@ pub async fn cache_stats() -> Result<CacheInfo, String> {
 /// 2. 用与查询相同的来源解析内核构造采集选项；
 /// 3. 由库侧按这些选项清库重建（库不隐式读用户设置）。
 #[tauri::command]
-pub async fn refresh_cache() -> Result<CacheInfo, String> {
+pub async fn refresh_cache(app: tauri::AppHandle) -> Result<CacheInfo, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("refresh_cache", move || {
         let t = std::time::Instant::now();
         let opts = rebuild_opts(load_settings_strict()).map_err(anyhow::Error::msg)?;
@@ -520,7 +700,8 @@ pub(crate) fn rebuild_opts(
 
 /// 应用设置（M11）。
 #[tauri::command]
-pub async fn settings_get() -> Result<Settings, String> {
+pub async fn settings_get(app: tauri::AppHandle) -> Result<Settings, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("settings_get", move || {
         let path = tokenscope::settings::settings_path()?;
         tokenscope::settings::load(&path)
@@ -533,6 +714,7 @@ pub async fn settings_set_price_auto_sync(
     app: tauri::AppHandle,
     enabled: bool,
 ) -> Result<bool, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("settings_set_price_auto_sync", move || {
         let path = tokenscope::settings::settings_path()?;
         // SF02：事务内基于最新文件只改 auto_sync 字段；用户关闭自动同步的
@@ -555,7 +737,8 @@ pub async fn settings_set_price_auto_sync(
 /// 上次视图快照（M10 后启动提速）：原样存取前端渲染结果，零类型耦合。
 /// 坏文件 → None 静默忽略。
 #[tauri::command]
-pub async fn view_cache_load() -> Result<Option<serde_json::Value>, String> {
+pub async fn view_cache_load(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("view_cache_load", move || {
         let path = view_cache_path()?;
         // R04：读写共用 impl（round-trip 同源）。
@@ -565,7 +748,11 @@ pub async fn view_cache_load() -> Result<Option<serde_json::Value>, String> {
 }
 
 #[tauri::command]
-pub async fn view_cache_save(value: serde_json::Value) -> Result<(), String> {
+pub async fn view_cache_save(
+    app: tauri::AppHandle,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("view_cache_save", move || {
         let t = std::time::Instant::now();
         let path = view_cache_path()?;
@@ -605,6 +792,7 @@ pub(crate) fn view_cache_load_impl(
 /// 开机自启状态（M8；写系统自启动项属用户显式操作，默认关闭）。
 #[tauri::command]
 pub async fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("autostart_status", move || {
         app.autolaunch()
             .is_enabled()
@@ -615,6 +803,7 @@ pub async fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
 
 #[tauri::command]
 pub async fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("autostart_set", move || {
         let launch = app.autolaunch();
         if enabled {
@@ -685,7 +874,10 @@ pub struct PricingView {
 
 /// Task 2：定价可用性状态（全局横幅数据源；与 pricing_entries 同路径解析）。
 #[tauri::command]
-pub async fn pricing_status() -> Result<tokenscope::pricing::PricingStatus, String> {
+pub async fn pricing_status(
+    app: tauri::AppHandle,
+) -> Result<tokenscope::pricing::PricingStatus, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("pricing_status", move || {
         Ok(tokenscope::pricing::pricing_status(
             Some(&pricing_file_path(None)),
@@ -697,7 +889,8 @@ pub async fn pricing_status() -> Result<tokenscope::pricing::PricingStatus, Stri
 }
 
 #[tauri::command]
-pub async fn pricing_entries() -> Result<PricingView, String> {
+pub async fn pricing_entries(app: tauri::AppHandle) -> Result<PricingView, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("pricing_entries", move || {
         let t = std::time::Instant::now();
         let path = pricing_file_path(None);
@@ -748,7 +941,8 @@ pub struct SyncOutcome {
 
 /// 同步双在线源（models.dev 主源 + OpenRouter 备份）；单源失败不影响另一源。
 #[tauri::command]
-pub async fn sync_pricing_openrouter() -> Result<Vec<SyncOutcome>, String> {
+pub async fn sync_pricing_openrouter(app: tauri::AppHandle) -> Result<Vec<SyncOutcome>, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     tauri::async_runtime::spawn_blocking(|| {
         let t = std::time::Instant::now();
         log::info!("手动同步价格双源开始");
@@ -808,6 +1002,7 @@ pub async fn sync_pricing_openrouter() -> Result<Vec<SyncOutcome>, String> {
 /// D4：建模板涉及磁盘 IO，一律后台执行（主线程纪律）。
 #[tauri::command]
 pub async fn open_pricing_file(app: tauri::AppHandle) -> Result<String, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
     let path = pricing_file_path(None);
     let path = run_blocking("open_pricing_file", move || {
         if !path.exists() {
@@ -1259,6 +1454,24 @@ mod tests {
         );
         assert_eq!(parse_agent(Some("codex")).unwrap(), Some(AgentKind::Codex));
         assert!(parse_agent(Some("gemini")).is_err());
+    }
+
+    #[test]
+    fn test_parse_rollups_mode() {
+        use tokenscope::report::RollupsMode;
+        // L-P3-3：H08 新增参数的解析契约——缺省/空白 = 自动参与，
+        // detail_only 独立成档，未知值显式报错。
+        assert_eq!(parse_rollups_mode(None).unwrap(), RollupsMode::Auto);
+        assert_eq!(parse_rollups_mode(Some("")).unwrap(), RollupsMode::Auto);
+        assert_eq!(parse_rollups_mode(Some("auto")).unwrap(), RollupsMode::Auto);
+        assert_eq!(
+            parse_rollups_mode(Some(" detail_only ")).unwrap(),
+            RollupsMode::DetailOnly
+        );
+        assert_eq!(
+            parse_rollups_mode(Some("detail-only")).unwrap_err(),
+            "未知的日粒度历史模式：detail-only"
+        );
     }
 
     #[test]

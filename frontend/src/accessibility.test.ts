@@ -56,7 +56,7 @@ vi.mock("./views/Settings.vue", () => ({
   }),
 }));
 
-import App from "./App.vue";
+import MainApp from "./MainApp.vue";
 import SummaryCards from "./components/SummaryCards.vue";
 import TrendChart from "./components/TrendChart.vue";
 import type { Group } from "./types";
@@ -69,8 +69,8 @@ beforeAll(() => {
 import { beforeAll } from "vitest";
 
 describe("无障碍关键点（设计系统 Task 8）", () => {
-  it("App：分段控件 radiogroup 语义 + 主题控件带可访问名称", async () => {
-    const w = mount(App);
+  it("MainApp：分段控件 radiogroup 语义 + 主题控件带可访问名称", async () => {
+    const w = mount(MainApp);
     await flushPromises();
     // 页面切换：第一个 radiogroup
     expect(w.find('[role="radiogroup"][aria-label="页面切换"]').exists()).toBe(true);

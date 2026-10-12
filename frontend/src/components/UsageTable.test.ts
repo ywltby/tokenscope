@@ -59,6 +59,15 @@ describe("UsageTable 费用可追溯（C5）", () => {
     const w = mount(UsageTable, { props: { report: report([group("m-priced")], false) } });
     expect(w.text()).not.toContain("未知†");
   });
+
+  it("unknown_only_row_shows_unknown_not_zero：完全未计价行显示未知†而非 $0.00†（G-P3-1）", () => {
+    // 与 SummaryCards 英雄栏同口径：缺价 ≠ 免费。
+    const g = group("m-free", { input: 10 });
+    g.cost_usd = 0;
+    const w = mount(UsageTable, { props: { report: report([g], true) } });
+    expect(w.text()).toContain("未知†");
+    expect(w.text()).not.toContain("$0.00†");
+  });
 });
 
 // 设计系统 Task 5：表格语义——列对齐/tabular 数字/估算表头/键盘下钻。
@@ -128,6 +137,25 @@ describe("UsageTable 表格语义（设计系统 Task 5）", () => {
       JSON.stringify(v.children ?? "").includes("›");
     expect(hasArrow(normal)).toBe(true);
     expect(hasArrow(total)).toBe(false);
+  });
+
+  it("row_accessibility_uses_label_not_key：可访问名称用展示名，点击仍传身份键", () => {
+    const row: Group = { ...group("claudeopus55"), label: "Claude Opus 5.5" };
+    const w = mount(UsageTable, { props: { report: report([row], false) } });
+    const rp = exposed(w).rowProps(row);
+    const aria = String(rp["aria-label"]);
+    expect(aria).toContain("Claude Opus 5.5");
+    expect(aria, "屏幕阅读器不应读出压缩身份键").not.toContain("claudeopus55");
+    // 点击参数仍是后端筛选键（展示名不得当 key 用）。
+    (rp.onclick as () => void)();
+    expect(w.emitted("row-click")?.[0]).toEqual(["claudeopus55"]);
+  });
+
+  it("row_accessibility_falls_back_to_key：没有展示名时退回身份键", () => {
+    const row = group("alpha");
+    const w = mount(UsageTable, { props: { report: report([row], false) } });
+    const rp = exposed(w).rowProps(row);
+    expect(String(rp["aria-label"])).toContain("alpha");
   });
 });
 

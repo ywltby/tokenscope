@@ -12,12 +12,13 @@ use anyhow::Result;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
-use crate::aggregate::{GroupBy, aggregate, preset_days_range};
-use crate::cache::{Cache, CacheStats, mtime_ms};
+use crate::aggregate::{GroupBy, preset_days_range};
+use crate::cache::{Cache, mtime_ms};
 use crate::dedupe::dedupe_events;
 use crate::model::{AgentKind, TokenCounts, UsageEvent};
 use crate::pricing::Pricing;
 use crate::source::claude::ClaudeSource;
+use crate::source::claude_projects::ProjectMapping;
 use crate::source::codex::CodexSource;
 use crate::source::{CollectStats, Source};
 
@@ -25,6 +26,9 @@ use crate::source::{CollectStats, Source};
 pub struct SummaryOptions {
     pub by: GroupBy,
     pub agent: Option<AgentKind>,
+    /// H08：日粒度历史的参与方式（默认自动；`DetailOnly` = 只用请求明细）。
+    /// 由壳侧命令按查询参数映射（不参与 serde，避免给 `GroupBy` 强加序列化）。
+    pub rollups: RollupsMode,
     pub days: Option<u32>,
     pub claude_dir: Option<PathBuf>,
     pub codex_dir: Option<PathBuf>,
@@ -52,6 +56,14 @@ pub struct SummaryOptions {
     /// 也不出现在来源统计里。
     pub claude_enabled: Option<bool>,
     pub codex_enabled: Option<bool>,
+    /// A03：Claude 项目映射配置文件（`~/.claude.json` 形态，含 `projects`）。
+    /// `None` = 默认来源才使用对应账户的默认配置；显式给出时按该路径读取
+    ///（测试注入）。自定义来源 + `None` = 不读取任何本机映射。
+    pub claude_projects_path: Option<PathBuf>,
+    /// H04：统一用量历史库路径（`None` = `cache_dir/history.db`，再退
+    /// `~/.tokenscope/history.db`）。测试沿用既有 `cache_dir` 隔离根，
+    /// 新增的历史路径绝不落回真实数据目录（计划不变量 10）。
+    pub history_path: Option<PathBuf>,
 }
 
 impl SummaryOptions {
@@ -84,6 +96,8 @@ pub struct SummaryReport {
     pub totals: crate::aggregate::Group,
     pub sources: Vec<SourceReport>,
     pub warnings: Vec<String>,
+    /// H06：日汇总桶覆盖诊断（明细覆盖 / 汇总口径 / 未解决覆盖 / 时区提示）。
+    pub rollup_coverage: crate::aggregate::RollupCoverage,
     pub generated_at: String,
 }
 
@@ -107,6 +121,32 @@ pub fn cache_file_path(cache_dir: Option<&PathBuf>) -> PathBuf {
         .or_else(|| data_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."))
         .join("cache.db")
+}
+
+/// H04：历史库路径——显式注入 > `cache_dir` 隔离根 > 默认数据目录。
+///
+/// 测试一律经 `cache_dir` 注入临时根（计划不变量 10），因此新增的历史路径
+/// 天然落在隔离目录里，不会触碰用户真实 `~/.tokenscope`。
+pub fn history_file_path(opts: &SummaryOptions) -> Result<PathBuf> {
+    if let Some(p) = opts.history_path.as_ref() {
+        return Ok(p.clone());
+    }
+    if let Some(dir) = opts.cache_dir.as_ref() {
+        return Ok(dir.join("history.db"));
+    }
+    crate::history::history_file_path()
+}
+
+/// H03：遗留 `cache.db` 路径（迁移的只读来源，永不写入）。
+pub fn legacy_cache_file_path(opts: &SummaryOptions) -> PathBuf {
+    cache_file_path(opts.cache_dir.as_ref())
+}
+
+/// H04：打开历史库。失败即明确报错——历史库是事实源，不是可丢弃缓存，
+/// 不得静默用"现存日志的临时扫描"代替完整历史（计划不变量 7）。
+fn open_history(opts: &SummaryOptions) -> Result<crate::history::HistoryDb> {
+    let path = history_file_path(opts)?;
+    crate::history::HistoryDb::open(&path).map_err(|e| anyhow::anyhow!("打开用量历史库失败：{e:#}"))
 }
 
 /// 外置价格**文件**路径：传入即用；None = `~/.tokenscope/pricing.toml`。
@@ -142,21 +182,46 @@ pub fn pricing_file_path(pricing_file: Option<&PathBuf>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("pricing.toml"))
 }
 
-fn make_source(kind: AgentKind, dir: &Option<PathBuf>) -> Result<Box<dyn Source>> {
+fn make_source(opts: &SummaryOptions, kind: AgentKind) -> Result<Box<dyn Source>> {
     Ok(match kind {
-        AgentKind::ClaudeCode => Box::new(ClaudeSource::new(match dir {
-            Some(p) => p.clone(),
-            None => ClaudeSource::default_root()?,
-        })),
-        AgentKind::Codex => Box::new(CodexSource::new(match dir {
-            Some(p) => p.clone(),
-            None => CodexSource::default_root()?,
-        })),
+        AgentKind::ClaudeCode => {
+            let root = match opts.claude_dir.as_ref() {
+                Some(p) => p.clone(),
+                None => ClaudeSource::default_root()?,
+            };
+            Box::new(ClaudeSource::with_mapping(
+                root,
+                claude_project_mapping(opts),
+            ))
+        }
+        AgentKind::Codex => Box::new(match opts.codex_dir.as_ref() {
+            // 显式自定义根：只在选定目录内递归（单根）。
+            Some(p) => CodexSource::new(p.clone()),
+            // 默认来源：sessions + archived_sessions 两个根（H02）。
+            None => CodexSource::with_roots(CodexSource::default_roots()?),
+        }),
     })
 }
 
-/// 缓存开关解析：返回 Ok(None) 表示放弃缓存（含原因，调用方告警）。
-/// 任何降级路径都同步 warn 落日志——纯优化失效必须可追溯。
+/// A03：Claude 项目映射的加载策略——显式配置路径 > 默认来源的账户配置；
+/// 自定义来源没有明确的配置关联时一律禁用（**不**读取本机 `~/.claude.json`）。
+/// 走进程内指纹缓存：同一采集批次的键计算与解析共用一次加载结果。
+fn claude_project_mapping(opts: &SummaryOptions) -> Arc<ProjectMapping> {
+    if let Some(path) = opts.claude_projects_path.as_ref() {
+        return ProjectMapping::load_cached(path);
+    }
+    if opts.claude_dir.is_some() {
+        return Arc::new(ProjectMapping::disabled());
+    }
+    match ClaudeSource::default_mapping_path() {
+        Ok(p) => ProjectMapping::load_cached(&p),
+        Err(_) => Arc::new(ProjectMapping::disabled()),
+    }
+}
+
+/// 缓存开关解析（历史遗留）：H04 起解析缓存不再是事实源，本函数仅保留给
+/// 尚未切换的调用点；生产采集路径一律走历史库。
+#[allow(dead_code)]
 fn open_cache(opts: &SummaryOptions) -> (Option<Cache>, Vec<String>) {
     let mut warnings = Vec::new();
     if opts.cache_dir.is_none() && data_dir().is_err() {
@@ -187,7 +252,7 @@ fn open_cache(opts: &SummaryOptions) -> (Option<Cache>, Vec<String>) {
     }
 }
 
-/// 缓存状态（GUI 设置页）。
+/// H04：数据存储状态（GUI 设置页）——读的是统一历史库，不再是解析缓存。
 #[derive(Debug, Clone, Serialize)]
 pub struct CacheInfo {
     pub path: String,
@@ -196,7 +261,11 @@ pub struct CacheInfo {
 }
 
 pub fn cache_stats(cache_dir: Option<PathBuf>) -> Result<CacheInfo> {
-    let path = cache_file_path(cache_dir.as_ref());
+    let opts = SummaryOptions {
+        cache_dir,
+        ..Default::default()
+    };
+    let path = history_file_path(&opts)?;
     if !path.exists() {
         return Ok(CacheInfo {
             path: path.display().to_string(),
@@ -204,27 +273,31 @@ pub fn cache_stats(cache_dir: Option<PathBuf>) -> Result<CacheInfo> {
             events: 0,
         });
     }
-    let c = Cache::open(&path)?;
-    let CacheStats { files, events } = c.stats()?;
+    let history = crate::history::HistoryDb::open(&path)
+        .map_err(|e| anyhow::anyhow!("打开用量历史库失败：{e:#}"))?;
     Ok(CacheInfo {
         path: path.display().to_string(),
-        files,
-        events,
+        files: history.source_file_count()?,
+        events: history.event_count()?,
     })
 }
 
-/// AP03：重建缓存——按调用方给出的采集选项清库并全量重解析。
+/// AP03/H04：重扫日志——重置采集指纹并重新解析当前文件；**不**清
+/// `usage_events`／`ccs_daily_usage`（历史删除不是缓存操作，计划 §4）。
 ///
-/// 本函数**不**隐式读用户设置：来源目录、启停、缓存目录、价格路径全部由
+/// 本函数**不**隐式读用户设置：来源目录、启停、数据目录、价格路径全部由
 /// 调用方注入，GUI 用与普通查询同一份已成功读取的配置构造选项，因此
-/// 重建与查询的采集范围必然一致（修复前重建写死 `SummaryOptions::default()`，
+/// 重扫与查询的采集范围必然一致（修复前重建写死 `SummaryOptions::default()`，
 /// 停用的来源会被重新采集、自定义目录被忽略）。
 ///
-/// 顺序：先校验来源配置（冲突即失败），再清库重建——避免"清库之后才因为
-/// 配置非法失败"，留下一个空缓存。
+/// 顺序：先校验来源配置（冲突即失败），再重置指纹——避免"重置之后才因为
+/// 配置非法失败"，留下一个指纹全丢的中间状态。
 pub fn rebuild_cache(opts: &SummaryOptions) -> Result<CacheInfo> {
     let cache_dir = opts.cache_dir.clone();
     validate_opts_sources_overlap(opts)?;
+    let history = open_history(opts)?;
+    let reset = history.reset_fingerprints()?;
+    log::info!("重扫日志：重置 {reset} 条采集指纹（已保存的用量不受影响）");
     summary(&SummaryOptions {
         refresh: true,
         ..opts.clone()
@@ -235,7 +308,6 @@ pub fn rebuild_cache(opts: &SummaryOptions) -> Result<CacheInfo> {
 /// 采集产物：去重后事件 + 逐源统计 + 价格表 + 警告。summary / list_events 共用。
 struct Collected {
     generation: u64,
-    events: Vec<UsageEvent>,
     sources: Vec<SourceReport>,
     pricing: std::sync::Arc<crate::pricing::Pricing>,
     warnings: Vec<String>,
@@ -252,7 +324,6 @@ struct Collected {
 #[derive(Debug)]
 pub(crate) struct CollectionSnapshot {
     pub(crate) generation: u64,
-    pub(crate) events: Vec<UsageEvent>,
     pub(crate) sources: Vec<SourceReport>,
     pub(crate) warnings: Vec<String>,
     pub(crate) pricing: std::sync::Arc<crate::pricing::Pricing>,
@@ -344,30 +415,26 @@ pub(crate) mod retained {
 pub(crate) fn collection_retained_bytes(c: &CollectionSnapshot) -> Result<usize, String> {
     use retained::{ByteCount, string_bytes, strings_bytes, vec_bytes};
     let mut n = ByteCount::default();
-    n.add(vec_bytes(&c.events)?)?;
-    for e in &c.events {
-        n.add(string_bytes(&e.model)?)?;
-        n.add(string_bytes(&e.session_id)?)?;
-        n.add(string_bytes(&e.project)?)?;
-        n.add(string_bytes(&e.record_id)?)?;
-    }
-    // 逐源统计：CollectStats 只有 u64 计数，无堆分配。
+    // H07：事件本体不再随采集快照常驻（查询流式读取），因此只计采集元数据：
+    // 逐源统计、诊断字符串与价格表（含候选与嵌套规则）。
     n.add(vec_bytes(&c.sources)?)?;
-    // 采集诊断字符串。
     n.add(strings_bytes(&c.warnings)?)?;
-    // 价格修订号 + 价格表（含候选与嵌套规则）。
     n.add(string_bytes(&c.pricing_revision)?)?;
     n.add(c.pricing.retained_bytes()?)?;
     Ok(n.get())
 }
 
-/// 单飞槽：key → (互斥结果, 条件变量)。None = 空闲。
+/// 单飞槽：互斥结果 + 条件变量 + 该航班的等待者计数。None = 空闲。
 /// RC05：结果持有 `Arc<CollectionSnapshot>`——领队与所有跟随者共享同一份
 /// 快照，不再各自深拷贝事件（此前 `Arc::new(s.clone())`）。
-type FlightCell = Arc<(
-    Mutex<Option<Result<Arc<CollectionSnapshot>, String>>>,
-    Condvar,
-)>;
+#[derive(Default)]
+struct FlightCellInner {
+    slot: Mutex<Option<Result<Arc<CollectionSnapshot>, String>>>,
+    cv: Condvar,
+    /// 当前阻塞在本航班等待里的跟随者数（测试握手确认"已进入等待"）。
+    waiters: AtomicU64,
+}
+type FlightCell = Arc<FlightCellInner>;
 
 /// 占用中的航班表（Task 1）：key → cell。按 key 管理——不同参数的采集
 /// 可并发进行，同参跟随者共享同一航班；清理时以 cell 指针身份核对。
@@ -375,11 +442,66 @@ static INFLIGHT: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Fli
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 static COLLECT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// 采集的**统一串行闸门**（H04/H07 修订）：启动采集、手动刷新、重扫与定时
+/// 采集都要经过这里。
+///
+/// 同参调用仍然单飞（跟随者等待同一航班，零重复解析）；**不同参数**的调用
+/// 排队而不是并行——早期实现只按参数分键，换一个参数（仅改 agent 筛选或
+/// refresh）就会同时跑起第二条管线，与"同一个后台单飞协调器"的要求不符，
+/// 也会让同一批源文件被两轮解析各自入库。
+static COLLECT_SERIAL: Mutex<()> = Mutex::new(());
+/// 解析/身份规则修订（N01）：进入每个文件的缓存命中键。递增让已登记指纹的
+/// 源文件在下一轮采集**重解析一次**——v2：写入身份升级为"来源键 + 持久身份
+/// 别名"且观察时间改用事件时间，旧实现登记的指纹不再代表当前解析结果；
+/// 重解析让别名补进库内、被旧实现回退的终值按"事件时间更晚者胜出"恢复。
+pub const PARSE_RULES_REVISION: u32 = 2;
+/// 观测：当前正在跑的采集管线数与历史峰值（测试断言"不同参数不并行"）。
+static COLLECT_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+static COLLECT_MAX_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+/// N06：正在进行的采集提交数（**共享边界**观察）。手动刷新、定时采集、启动
+/// 采集与重扫的领队工作（含历史库写入提交）全部经 [`collect_flighted_with`]
+/// 登记——壳侧退出路径据此等待"已开始的提交"完成，不再只覆盖定时入口。
+static COLLECT_SUBMISSIONS_ACTIVE: AtomicU64 = AtomicU64::new(0);
+
+/// 当前正在进行的采集提交数（壳侧退出等待用；0 = 无）。
+#[doc(hidden)]
+pub fn active_collection_submissions() -> u64 {
+    COLLECT_SUBMISSIONS_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// RAII：进入时 +1、离开（含 panic）时 -1——提交观察计数必须精确配平，
+/// 否则退出等待要么错过进行中的提交、要么白白等满超时。
+struct SubmissionGuard;
+impl SubmissionGuard {
+    fn enter() -> Self {
+        COLLECT_SUBMISSIONS_ACTIVE.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+impl Drop for SubmissionGuard {
+    fn drop(&mut self) {
+        COLLECT_SUBMISSIONS_ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// 取走并清零"同时进行的采集管线数"峰值（诊断与测试）。
+#[doc(hidden)]
+pub fn take_max_concurrent_collections_for_tests() -> u64 {
+    COLLECT_MAX_IN_FLIGHT.swap(0, Ordering::SeqCst)
+}
+
 /// 采集键：只含影响**采集**的参数（by/tz/from/to/days 是采集后的过滤，
-/// 不参与——汇总与明细同参并发时必须合并为一次采集）。
+/// 不参与——汇总与明细同参并发时必须合并为一次采集）。A03：Claude 项目映射
+/// 修订属于采集输入——配置变化后必须走新采集，不能复用旧航班结果。
 pub(crate) fn collection_key(opts: &SummaryOptions) -> String {
+    // Claude 停用时映射不参与采集，键里固定为 disabled（不读账户配置）。
+    let mapping_rev = if opts.enabled(true) {
+        claude_project_mapping(opts).revision().to_string()
+    } else {
+        "disabled".to_string()
+    };
     format!(
-        "agent={:?}|cd={:?}|xd={:?}|ce={:?}|xe={:?}|refresh={}|cache={:?}|pp={:?}|or={:?}|md={:?}|idx={:?}",
+        "agent={:?}|cd={:?}|xd={:?}|ce={:?}|xe={:?}|refresh={}|cache={:?}|pp={:?}|or={:?}|md={:?}|idx={:?}|cpm={:?}|map={}",
         opts.agent,
         opts.claude_dir,
         opts.codex_dir,
@@ -390,12 +512,34 @@ pub(crate) fn collection_key(opts: &SummaryOptions) -> String {
         opts.pricing_path,
         opts.openrouter_path,
         opts.modelsdev_path,
-        opts.pricing_index
+        opts.pricing_index,
+        opts.claude_projects_path,
+        mapping_rev
     )
 }
 
+/// 测试握手（#[doc(hidden)]）：指定航班当前**已阻塞在 wait_flight 里**的
+/// 跟随者数——按航班计数，不受并行测试里其它航班影响。
+#[doc(hidden)]
+pub fn flight_waiters_for_tests(key: &str) -> u64 {
+    INFLIGHT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .map(|c| c.waiters.load(Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
 fn wait_flight(cell: &FlightCell) -> Result<Arc<CollectionSnapshot>> {
-    let mut r = cell.0.lock().unwrap();
+    struct WaiterGuard(FlightCell);
+    impl Drop for WaiterGuard {
+        fn drop(&mut self) {
+            self.0.waiters.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    cell.waiters.fetch_add(1, Ordering::SeqCst);
+    let _waiter = WaiterGuard(cell.clone());
+    let mut r = cell.slot.lock().unwrap_or_else(|e| e.into_inner());
     loop {
         if let Some(res) = r.as_ref() {
             return match res {
@@ -404,7 +548,7 @@ fn wait_flight(cell: &FlightCell) -> Result<Arc<CollectionSnapshot>> {
                 Err(e) => Err(anyhow::anyhow!(e.clone())),
             };
         }
-        r = cell.1.wait(r).unwrap();
+        r = cell.cv.wait(r).unwrap_or_else(|e| e.into_inner());
     }
 }
 
@@ -431,8 +575,19 @@ impl Source for DedupSource {
         self.inner.root()
     }
 
+    /// H02：多根语义必须转发——包装层丢掉归档根会让清理与告警只看第一个根。
+    fn roots(&self) -> Vec<PathBuf> {
+        self.inner.roots()
+    }
+
     fn discover_with_errors(&self) -> (Vec<PathBuf>, Vec<String>) {
         (self.keep.clone(), self.errors.clone())
+    }
+
+    /// A03：解析上下文修订必须转发——否则包装层会悄悄丢掉"外部配置参与
+    /// 缓存命中"这条语义（映射变化后磁盘缓存仍会命中旧归属）。
+    fn context_revision(&self) -> &str {
+        self.inner.context_revision()
     }
 
     fn parse_file(&self, path: &std::path::Path) -> crate::source::FileParse {
@@ -452,7 +607,7 @@ fn collect_flighted_with(
         match g.entry(key.clone()) {
             std::collections::hash_map::Entry::Occupied(e) => (e.get().clone(), false),
             std::collections::hash_map::Entry::Vacant(e) => {
-                let c: FlightCell = Arc::new((Mutex::new(None), Condvar::new()));
+                let c: FlightCell = Arc::new(FlightCellInner::default());
                 e.insert(c.clone());
                 (c, true)
             }
@@ -471,27 +626,27 @@ fn collect_flighted_with(
     }
     impl FlightGuard {
         fn publish_ok(&mut self, snap: Arc<CollectionSnapshot>) {
-            let mut r = self.cell.0.lock().unwrap();
+            let mut r = self.cell.slot.lock().unwrap_or_else(|e| e.into_inner());
             *r = Some(Ok(snap));
-            self.cell.1.notify_all();
+            self.cell.cv.notify_all();
             self.published = true;
         }
 
         fn publish_error(&mut self, msg: String) {
-            let mut r = self.cell.0.lock().unwrap();
+            let mut r = self.cell.slot.lock().unwrap_or_else(|e| e.into_inner());
             *r = Some(Err(msg));
-            self.cell.1.notify_all();
+            self.cell.cv.notify_all();
             self.published = true;
         }
     }
     impl Drop for FlightGuard {
         fn drop(&mut self) {
             if !self.published {
-                let mut r = self.cell.0.lock().unwrap();
+                let mut r = self.cell.slot.lock().unwrap_or_else(|e| e.into_inner());
                 if r.is_none() {
                     *r = Some(Err("采集线程异常退出".to_string()));
                 }
-                self.cell.1.notify_all();
+                self.cell.cv.notify_all();
             }
             // 释放槽位：仅当仍是本航班（旧 leader 不能清理被顶替的槽）。
             let mut g = INFLIGHT.lock().unwrap();
@@ -507,7 +662,19 @@ fn collect_flighted_with(
         published: false,
     };
     let generation = COLLECT_GENERATION.fetch_add(1, Ordering::Relaxed);
-    match leader(generation) {
+    // 串行闸门：不同参数的采集排队执行（同参跟随者不经过这里，仍在航班上等待）。
+    let result = {
+        let _serial = COLLECT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let in_flight = COLLECT_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+        COLLECT_MAX_IN_FLIGHT.fetch_max(in_flight, Ordering::SeqCst);
+        // N06：领队工作（采集 + 历史库写入提交）登记为"进行中的提交"——
+        // 手动与定时入口同样被覆盖，退出路径的等待因此完整。
+        let _submission = SubmissionGuard::enter();
+        let r = leader(generation);
+        COLLECT_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+        r
+    };
+    match result {
         Ok(snapshot) => {
             // RC05：只构造一次 Arc，领队与跟随者共享（不再深拷贝）。
             let arc = Arc::new(snapshot);
@@ -527,9 +694,14 @@ fn collect_flighted_with(
 /// Task 2：路径规范化——canonicalize 优先；不存在时用绝对路径 +
 /// 组件清理（剥离 `.` 与空组件）作为稳定 fallback（大小写保留，
 /// Windows 大小写不敏感重叠由后扫描方的精确键比对兜底）。
+///
+/// H06 修复：Windows 的 `canonicalize` 会加上 `\\?\`（UNC 为 `\\?\UNC\`）
+/// 前缀，而后备路径没有——同一位置因此出现两种写法，导致"存在的目录"与其
+/// "尚不存在的子目录"被判成互不嵌套（来源冲突漏检），缓存键也会随目录存在
+/// 与否分裂。统一剥离该前缀，保证同一位置永远得到同一字符串。
 pub(crate) fn normalize_path(p: &std::path::Path) -> PathBuf {
     match p.canonicalize() {
-        Ok(c) => c,
+        Ok(c) => strip_verbatim(c),
         // Task 2（审阅）：fallback 折叠 `.`、`..` 与空组件——`a\..\shared`
         // 与 `a\shared` 规范化到同一路径（目录不存在时 canonicalize 失败）。
         Err(_) => {
@@ -552,9 +724,23 @@ pub(crate) fn normalize_path(p: &std::path::Path) -> PathBuf {
             for s in stack {
                 out.push(s);
             }
-            out
+            strip_verbatim(out)
         }
     }
+}
+
+/// 剥离 Windows 的 `\\?\`（UNC 为 `\\?\UNC\`）逐字前缀——让
+/// `canonicalize` 结果与后备路径同构（见 [`normalize_path`]）。其他平台无此
+/// 前缀，函数等同恒等变换。
+pub(crate) fn strip_verbatim(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path
 }
 
 fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSnapshot> {
@@ -567,16 +753,11 @@ fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSna
         if !opts.enabled(kind == AgentKind::ClaudeCode) {
             continue; // C1：停用的来源零采集、零告警，状态由 source_status 呈现
         }
-        let dir = match kind {
-            AgentKind::ClaudeCode => &opts.claude_dir,
-            AgentKind::Codex => &opts.codex_dir,
-        };
-        sources.push(make_source(kind, dir)?);
+        sources.push(make_source(opts, kind)?);
     }
     let collected = collect_all_with_sources(sources, opts, generation)?;
     Ok(CollectionSnapshot {
         generation: collected.generation,
-        events: collected.events,
         sources: collected.sources,
         warnings: collected.warnings,
         pricing: collected.pricing,
@@ -606,7 +787,7 @@ fn dedup_source_overlap(sources: Vec<Box<dyn Source>>) -> Result<DedupedSources>
             match seen.get(&key) {
                 Some(prev) if *prev != src.agent() => {
                     anyhow::bail!(
-                        "文件归属冲突：{} 同时被 {} 与 {} 认领；                         来源目录不得重叠（相同或嵌套），请调整目录配置或停用其一来源",
+                        "文件归属冲突：{} 同时被 {} 与 {} 认领；来源目录不得重叠（相同或嵌套），请调整目录配置或停用其一来源",
                         norm.display(),
                         prev.as_str(),
                         src.agent().as_str()
@@ -640,14 +821,22 @@ pub struct CollectedView {
 }
 
 /// 供集成测试注入 mock source（Task 2）——走与生产完全相同的重叠去重。
+/// H07：生产采集不再回读事件（改由查询层流式读取），测试入口仍回读一份，
+/// 便于断言"这一轮到底写进了什么"。
 #[doc(hidden)]
 pub fn collect_all_with_sources_for_test(
     sources: Vec<Box<dyn Source>>,
     opts: &SummaryOptions,
 ) -> Result<CollectedView> {
     let c = collect_all_with_sources(sources, opts, 0)?;
+    let history = open_history(opts)?;
+    let events: Vec<UsageEvent> = history
+        .stored_events_filtered(opts.agent)?
+        .iter()
+        .map(usage_event_of)
+        .collect();
     Ok(CollectedView {
-        events: c.events,
+        events,
         warnings: c.warnings,
     })
 }
@@ -657,23 +846,37 @@ pub fn collect_all_with_sources_for_test(
 /// 保存校验（壳内的 `source_config_set`）与采集校验都经本函数，因此
 /// 「配置字段缺失 = 默认启用 + 默认根」这条语义在两处不会分叉：早期实现里
 /// 保存校验把 `None` 当成"不参与校验"，于是用户能保存一份采集层必然拒绝的
-/// 配置。未启用 → `Ok(None)`（用户可借停用恢复冲突）。
+/// 配置。未启用 → 空集合（用户可借停用恢复冲突）。
+/// H02：返回**全部**根——Codex 默认来源含 `sessions/` 与 `archived_sessions/`，
+/// 两者都必须参与冲突校验，不能只看第一个。
+pub fn effective_source_roots(
+    kind: AgentKind,
+    enabled: bool,
+    dir: Option<&std::path::Path>,
+) -> Result<Vec<std::path::PathBuf>> {
+    if !enabled {
+        return Ok(Vec::new());
+    }
+    Ok(match (dir, kind) {
+        (Some(d), _) => vec![d.to_path_buf()],
+        (None, AgentKind::ClaudeCode) => vec![ClaudeSource::default_root()?],
+        (None, AgentKind::Codex) => CodexSource::default_roots()?,
+    })
+}
+
+/// 兼容入口：首个有效根（单根来源）。多根来源请用
+/// [`effective_source_roots`]——只看第一个根会漏掉归档目录。
 pub fn effective_source_dir(
     kind: AgentKind,
     enabled: bool,
     dir: Option<&std::path::Path>,
 ) -> Result<Option<std::path::PathBuf>> {
-    if !enabled {
-        return Ok(None);
-    }
-    Ok(Some(match (dir, kind) {
-        (Some(d), _) => d.to_path_buf(),
-        (None, AgentKind::ClaudeCode) => ClaudeSource::default_root()?,
-        (None, AgentKind::Codex) => CodexSource::default_root()?,
-    }))
+    Ok(effective_source_roots(kind, enabled, dir)?
+        .into_iter()
+        .next())
 }
 
-/// AP01：由设置解析**全部启用来源**的有效目录（保存校验与采集入口同源）。
+/// AP01：由设置解析**全部启用来源的全部根**（保存校验与采集入口同源）。
 pub fn effective_source_dirs_from_settings(
     settings: &crate::settings::Settings,
 ) -> Result<Vec<(AgentKind, std::path::PathBuf)>> {
@@ -681,15 +884,15 @@ pub fn effective_source_dirs_from_settings(
     for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
         let cfg = settings.source_config(kind == AgentKind::ClaudeCode);
         let dir = cfg.dir.as_deref().map(std::path::Path::new);
-        if let Some(dir) = effective_source_dir(kind, cfg.enabled, dir)? {
-            out.push((kind, dir));
+        for root in effective_source_roots(kind, cfg.enabled, dir)? {
+            out.push((kind, root));
         }
     }
     Ok(out)
 }
 
 /// SF09：解析启用来源的有效目录（显式配置或工具默认根）。
-/// 未启用的来源不参与冲突检查（用户可借停用恢复）。
+/// 未启用的来源不参与冲突检查（用户可借停用恢复）；多根来源逐根展开。
 fn effective_source_dirs(opts: &SummaryOptions) -> Result<Vec<(AgentKind, std::path::PathBuf)>> {
     let mut out = Vec::new();
     for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
@@ -699,8 +902,8 @@ fn effective_source_dirs(opts: &SummaryOptions) -> Result<Vec<(AgentKind, std::p
         } else {
             opts.codex_dir.as_deref()
         };
-        if let Some(dir) = effective_source_dir(kind, opts.enabled(claude), dir)? {
-            out.push((kind, dir));
+        for root in effective_source_roots(kind, opts.enabled(claude), dir)? {
+            out.push((kind, root));
         }
     }
     Ok(out)
@@ -724,7 +927,7 @@ fn validate_opts_sources_overlap(opts: &SummaryOptions) -> Result<()> {
 fn collect_all_with_sources(
     sources: Vec<Box<dyn Source>>,
     opts: &SummaryOptions,
-    generation: u64,
+    _generation: u64,
 ) -> Result<Collected> {
     // SF09：采集前拒绝启用来源的有效目录冲突（相同/嵌套）。
     validate_opts_sources_overlap(opts)?;
@@ -754,8 +957,30 @@ fn collect_all_with_sources(
         },
         t_pricing.elapsed().as_millis()
     );
-    let (cache, mut cache_warnings) = open_cache(opts);
-    warnings.append(&mut cache_warnings);
+    // H04：打开历史库并完成一次性遗留迁移。历史库是事实源——打不开就
+    // 明确报错，不静默回退到"只扫现存日志"（计划不变量 7）。
+    let history = open_history(opts)?;
+    // H03：迁移必须先于任何旧版本缓存的版本重建/purge 执行。
+    if let Some(rep) =
+        crate::history::migrate_legacy_cache(&history, &legacy_cache_file_path(opts))?
+    {
+        log::info!(
+            "遗留缓存迁移：文件 {}，事件行 {}，新增 {}，更新 {}，已存在 {}，冲突 {}，拒绝 {}",
+            rep.files,
+            rep.events_seen,
+            rep.inserted,
+            rep.updated,
+            rep.unchanged,
+            rep.conflicts,
+            rep.rejected
+        );
+        if rep.rejected > 0 {
+            warnings.push(format!(
+                "遗留缓存有 {} 条记录字段不合法，未迁入（其余已迁移）",
+                rep.rejected
+            ));
+        }
+    }
     warnings.extend(overlap_warnings);
     #[cfg(test)]
     {
@@ -767,163 +992,170 @@ fn collect_all_with_sources(
 
     let mut reports: Vec<SourceReport> = Vec::new();
     let mut all_events: Vec<UsageEvent> = Vec::new();
+    let mut registrations: Vec<crate::history::SourceFileRecord> = Vec::new();
+    // H04：来源登记（指纹）按 (app, 来源上下文, 规范化路径) 索引——指纹一致
+    // 且**根集合未变**的来源文件本轮不重解析，其事件已在库中。换根后同一
+    // 文件必须重新解析（子目录日志的项目归属随根变化），不得沿用旧归属。
+    let known: std::collections::HashMap<
+        (AgentKind, String, String),
+        crate::history::StoredSourceFile,
+    > = history
+        .source_files()?
+        .into_iter()
+        .map(|f| ((f.key.app, f.key.root.clone(), f.key.path.clone()), f))
+        .collect();
 
     for src in sources {
         let kind = src.agent();
         let t_agent = std::time::Instant::now();
         let mut stats = CollectStats::default();
-        let mut events: Vec<UsageEvent> = Vec::new();
         let (files, discovery_errors) = src.discover_with_errors();
         // B4：发现期异常必须可见；发现失败的来源不参与缓存清理。
         for e in &discovery_errors {
             warnings.push(e.clone());
         }
-        if files.is_empty() && !src.root().is_dir() {
-            warnings.push(format!(
-                "{} 目录不存在：{}",
-                match kind {
-                    AgentKind::ClaudeCode => "Claude",
-                    AgentKind::Codex => "Codex",
-                },
-                src.root().display()
-            ));
+        if files.is_empty() && !src.roots().iter().any(|r| r.is_dir()) {
+            for root in src.roots() {
+                warnings.push(format!(
+                    "{} 目录不存在：{}",
+                    match kind {
+                        AgentKind::ClaudeCode => "Claude",
+                        AgentKind::Codex => "Codex",
+                    },
+                    root.display()
+                ));
+            }
         }
-        let mut agent_keep: Vec<String> = Vec::new();
+        let mut agent_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut cached_hits = 0u32;
         let mut reparsed = 0u32;
+        let mut parsed_events_total = 0u64;
         let mut parse_ms_total = 0u128;
-        let mut store_ms_total = 0u128;
-        let mut lookup_errs = 0u32;
-        let mut store_errs = 0u32;
         let mut unstable = 0u32;
-        // R05：缓存身份 = agent + 规范化根目录 + 规范化文件路径。换根/换
-        // agent 后文件键不同，缓存自然失效重解析；项目名等派生字段与
-        // refresh 完全一致。
-        let root_ctx = normalize_path(src.root()).to_string_lossy().to_lowercase();
+        let mut io_failed = 0u32;
+        // R05/A03/H02：来源上下文 = agent + 规范化根集合 + 解析上下文修订。
+        // 换根、换 agent、外部配置（如 Claude 项目映射）变化都会让指纹命中
+        // 失效并重新解析，不会继续把旧归属供数。
+        let root_ctx = src
+            .roots()
+            .iter()
+            .map(|r| normalize_path(r).to_string_lossy().to_lowercase())
+            .collect::<Vec<_>>()
+            .join(";");
+        // N01：解析规则修订进入缓存命中键——规则变化让已登记指纹的文件
+        // 重解析一次（存储值无该前缀 → 首轮必然失配 → 重解析并重新登记）。
+        let context_rev = format!("{}|{}", PARSE_RULES_REVISION, src.context_revision());
         for file in &files {
             let path_str = file.display().to_string();
-            let cache_key = normalize_path(file).to_string_lossy().to_lowercase();
-            agent_keep.push(cache_key.clone());
-            let mut cached: Option<crate::source::FileParse> = None;
+            let path_key = normalize_path(file).to_string_lossy().to_lowercase();
+            agent_seen.insert(path_key.clone());
+            let size = file_size(file);
+            let mt = mtime_ms(file).ok();
+            let fingerprint = size.zip(mt).map(|(s, m)| format!("{s}:{m}"));
+            // H04：指纹一致且来源上下文未变 → 本轮不重解析——该文件的事件
+            // 已经在历史库里，统计沿用上次解析结果。
             if !opts.refresh
-                && let (Some(c), Some(size), Ok(mt)) =
-                    (cache.as_ref(), file_size(file), mtime_ms(file))
+                && let Some(prev) = known.get(&(kind, root_ctx.clone(), path_key.clone()))
+                && let Some(fp) = fingerprint.as_deref()
+                && prev.state == "present"
+                && prev.fingerprint == fp
+                && prev.context_revision == context_rev
             {
-                match c.lookup_file(&cache_key, kind, &root_ctx, size, mt) {
-                    Ok(hit) => cached = hit.map(|cf| cf.parse),
-                    Err(e) => {
-                        lookup_errs += 1;
-                        warnings.push(format!("缓存读取失败（该文件全量解析）: {e:#}"));
-                    }
-                }
+                stats.add_file(&crate::source::FileParse {
+                    stats: prev.stats.clone(),
+                    events: Vec::new(),
+                });
+                cached_hits += 1;
+                continue;
             }
-            let parse = match cached {
-                Some(p) => {
-                    cached_hits += 1;
-                    p
-                }
-                None => {
-                    // B4：解析前取指纹，解析后复核——追加中的文件不写"成功"
-                    // 缓存（否则旧数据配上新指纹，此后永远命中陈旧内容）。
-                    let fp_before = if cache.is_some() {
-                        Some((file_size(file), mtime_ms(file).ok()))
-                    } else {
-                        None
-                    };
-                    let t = std::time::Instant::now();
-                    let p = src.parse_file(file);
-                    parse_ms_total += t.elapsed().as_millis();
-                    reparsed += 1;
-                    if let Some(c) = &cache {
-                        let fp_after = (file_size(file), mtime_ms(file).ok());
-                        let stable = fp_before == Some(fp_after);
-                        if !stable {
-                            unstable += 1;
-                            warnings
-                                .push(format!("采集期间文件变化，本轮不计入缓存: {}", path_str));
-                        } else if p.stats.io_errors > 0 {
-                            warnings.push(format!(
-                                "文件读取失败，本轮不缓存（不影响统计）: {}",
-                                path_str
-                            ));
-                        } else {
-                            let size = fp_after.0.unwrap_or(0);
-                            let mt = fp_after.1.unwrap_or(0);
-                            let t = std::time::Instant::now();
-                            if let Err(e) = c.store_file(&cache_key, kind, &root_ctx, size, mt, &p)
-                            {
-                                store_errs += 1;
-                                warnings.push(format!("缓存写入失败（不影响统计）: {e:#}"));
-                            }
-                            store_ms_total += t.elapsed().as_millis();
-                        }
-                    }
-                    p
-                }
-            };
-            stats.add_file(&parse);
-            events.extend(parse.events);
+            // B4：解析前取指纹、解析后复核——追加中的文件不登记成功指纹
+            //（否则旧内容配上新指纹，此后永远命中陈旧结果）。
+            let fp_before = (size, mt);
+            let t = std::time::Instant::now();
+            let parsed = src.parse_file(file);
+            parse_ms_total += t.elapsed().as_millis();
+            reparsed += 1;
+            let fp_after = (file_size(file), mtime_ms(file).ok());
+            let stable = fp_before == fp_after && fp_after.0.is_some() && fp_after.1.is_some();
+            if !stable {
+                unstable += 1;
+                warnings.push(format!("采集期间文件变化，本轮不登记指纹: {}", path_str));
+            } else if parsed.stats.io_errors > 0 {
+                io_failed += 1;
+                warnings.push(format!(
+                    "文件读取失败，本轮不登记指纹（已解析部分不影响统计）: {}",
+                    path_str
+                ));
+            } else {
+                registrations.push(crate::history::SourceFileRecord {
+                    key: crate::history::SourceFileKey {
+                        app: kind,
+                        root: root_ctx.clone(),
+                        path: path_key.clone(),
+                    },
+                    fingerprint: fingerprint.clone().unwrap_or_default(),
+                    size_bytes: fp_after.0.unwrap_or(0),
+                    mtime_ms: fp_after.1.unwrap_or(0),
+                    context_revision: context_rev.clone(),
+                    last_success_utc: Some(jiff::Timestamp::now().to_string()),
+                    stats: parsed.stats.clone(),
+                });
+            }
+            stats.add_file(&parsed);
+            parsed_events_total += parsed.events.len() as u64;
+            all_events.extend(parsed.events);
         }
         stats.files_scanned = files.len() as u64;
         log::info!(
-            "采集 {}: 文件 {}（缓存命中 {} / 重解析 {}），解析 {} ms，写缓存 {} ms，解析层事件 {}，累计 {} ms",
+            "采集 {}: 文件 {}（指纹命中 {} / 重解析 {}），解析 {} ms，解析层事件 {}，累计 {} ms",
             kind.as_str(),
             files.len(),
             cached_hits,
             reparsed,
             parse_ms_total,
-            store_ms_total,
-            events.len(),
+            parsed_events_total,
             t_agent.elapsed().as_millis()
         );
-        // 缓存错误只聚合一行 warn（逐文件明细已进 warnings 随报告返回前端）。
-        if lookup_errs > 0 {
-            log::warn!(
-                "采集 {}: {lookup_errs} 个文件缓存读取失败，均已回退全量解析",
-                kind.as_str()
-            );
-        }
-        if store_errs > 0 {
-            log::warn!(
-                "采集 {}: {store_errs} 个文件缓存写入失败（不影响统计）",
-                kind.as_str()
-            );
-        }
         if unstable > 0 {
             log::warn!(
-                "采集 {}: {unstable} 个文件采集期间持续变化，本轮未入缓存",
+                "采集 {}: {unstable} 个文件采集期间持续变化，本轮未登记指纹",
                 kind.as_str()
             );
         }
-        // B5/F06：清理只作用于本来源；发现失败绝不清理（无法区分"已删除"
-        // 与"暂时读不到"）。
-        if let Some(c) = &cache
-            && discovery_errors.is_empty()
-            && src.root().is_dir()
-        {
-            let t = std::time::Instant::now();
-            match c.purge_agent(kind, &root_ctx, &agent_keep) {
-                Ok(n) => {
-                    if n > 0 {
-                        log::info!(
-                            "缓存清理（{}）：{} 条过期行，{} ms",
-                            kind.as_str(),
-                            n,
-                            t.elapsed().as_millis()
-                        );
-                    }
-                }
-                Err(e) => warnings.push(format!("缓存清理失败（不影响统计）: {e:#}")),
+        if io_failed > 0 {
+            log::warn!(
+                "采集 {}: {io_failed} 个文件读取失败，本轮未登记指纹（下轮重试）",
+                kind.as_str()
+            );
+        }
+        // B5/F06 + H04：已消失的来源文件只标记状态，**绝不**删除已保存的
+        // 用量（不变量 3）；发现失败时不做任何标记（无法区分"已删除"与
+        // "暂时读不到"）。
+        if discovery_errors.is_empty() && src.roots().iter().any(|r| r.is_dir()) {
+            let stale: Vec<crate::history::SourceFileKey> = known
+                .values()
+                .filter(|f| {
+                    f.key.app == kind && f.key.root == root_ctx && !agent_seen.contains(&f.key.path)
+                })
+                .map(|f| f.key.clone())
+                .collect();
+            if !stale.is_empty() {
+                let n = history.mark_sources_missing(&stale)?;
+                log::info!(
+                    "来源缺失（{}）：{} 个文件标记为 missing（已保存用量保留）",
+                    kind.as_str(),
+                    n
+                );
             }
         }
         reports.push(SourceReport { agent: kind, stats });
-        all_events.extend(events);
     }
 
-    // 全局去重（跨文件、按 agent 规则），并回填 per-agent 的丢弃数与事件数。
+    // 全局去重（跨文件、按 agent 规则）。去重结果既用于统计，也用于写库：
+    // 同一请求的流式重发在内存里就按终值收敛，库内不需要再处理这种重复。
     let t_dedupe = std::time::Instant::now();
     let before = all_events.len();
-    let (events, dropped) = dedupe_events(all_events);
+    let (mut events, dropped) = dedupe_events(all_events);
     log::info!(
         "去重：{} → {}（丢弃 {}），{} ms",
         before,
@@ -931,28 +1163,437 @@ fn collect_all_with_sources(
         dropped.iter().map(|(_, n)| n).sum::<u64>(),
         t_dedupe.elapsed().as_millis()
     );
+
+    // H04：按事件时间升序写入历史库——同一请求的多份来源记录在同一批内
+    // 按"后写者胜出"合并，与全局去重"取时间戳最晚"的口径一致；写入按来源
+    // 键 + 内容指纹去重，因此重复采集幂等，且文件被替换后旧事实不被覆盖。
+    events.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.line.cmp(&b.line)));
+    // 逐条预检 + 跳过不可写入的事件：单条坏记录（如模型名为空的遗留行）不得
+    // 让整批回滚——否则一条坏事件会让**全部采集失败**，连已有历史都无法展示。
+    // 跳过的条数进诊断，与适配器层的 bad_lines 口径一致（不静默吞掉）。
+    let mut writes: Vec<crate::history::EventWrite> = Vec::with_capacity(events.len());
+    let mut skipped_unwritable = 0u64;
+    for ev in &events {
+        let write = event_write_of(ev);
+        match history.can_write(&write) {
+            Ok(true) => writes.push(write),
+            Ok(false) => {
+                skipped_unwritable += 1;
+                log::warn!(
+                    "跳过不可入库的事件（{} / {} / {:?}）：字段不合法",
+                    ev.agent.as_str(),
+                    ev.model,
+                    ev.ts
+                );
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    if skipped_unwritable > 0 {
+        warnings.push(format!(
+            "{skipped_unwritable} 条事件字段不合法，未写入历史库（其余照常入账）"
+        ));
+    }
+    let write_summary = history.write_batch(&writes)?;
+    log::info!(
+        "历史库写入：新增 {}，更新 {}，已存在 {}，冲突 {}，陈旧 {}；别名 +{}，来源 +{}",
+        write_summary.inserted,
+        write_summary.updated,
+        write_summary.unchanged,
+        write_summary.conflicts,
+        write_summary.stale,
+        write_summary.aliases_added,
+        write_summary.origins_added
+    );
+    // 指纹登记在用量提交**之后**：崩溃不会出现"指纹已成功但用量没落库"。
+    for rec in &registrations {
+        history.touch_source_file(rec)?;
+    }
+
+    // H07：采集只负责把**本轮解析出的**事件写入历史库并维护来源指纹；
+    // 查询输入不再在这里回读（那会把整份历史物化进内存）。事件由查询层从
+    // 只读快照流式读取，因此来源文件被删除、来源被停用、指纹被重置都不会让
+    // 已保存的用量消失（不变量 3）。
+    let history_generation = history.generation()?;
     for s in &mut reports {
         s.stats.duplicates_dropped = dropped
             .iter()
             .find(|(a, _)| *a == s.agent)
             .map(|(_, n)| *n)
             .unwrap_or(0);
-        s.stats.events = events.iter().filter(|e| e.agent == s.agent).count() as u64;
+        // 来源统计的“事件数”= 该应用在库中的事实数（含历史累积），用计数查询
+        // 取得，避免为统计再物化一次事件集。
+        s.stats.events = history.event_count_of(s.agent)?;
     }
     log::info!(
-        "采集完成：事件 {}，警告 {}，总计 {} ms",
-        events.len(),
+        "采集完成：本轮解析 {} 项，警告 {}，总计 {} ms",
+        registrations.len(),
         warnings.len(),
         t_total.elapsed().as_millis()
     );
     Ok(Collected {
-        generation,
-        events,
+        generation: history_generation,
         sources: reports,
         pricing,
         warnings,
         pricing_revision,
     })
+}
+
+/// H07：为查询建立一个只读快照（独立连接 + 显式读事务）。
+///
+/// 快照在 WAL 下提供一致读取视图：采集/导入提交之后，**旧查询看到的仍是事务
+/// 开始时的数据**；快照随查询会话存活，被淘汰或超时时释放（`Drop` 兜底），
+/// 不会长期占住读事务。
+pub(crate) fn open_read_snapshot(
+    opts: &SummaryOptions,
+) -> Result<std::sync::Arc<crate::history::ReadSnapshot>> {
+    let path = history_file_path(opts)?;
+    let history = crate::history::HistoryDb::open(&path)
+        .map_err(|e| anyhow::anyhow!("打开用量历史库失败：{e:#}"))?;
+    Ok(std::sync::Arc::new(history.read_snapshot()?))
+}
+
+/// H07：冻结的时间边界——`days` / `from` / `to` 在建立快照时解析**一次**，
+/// 汇总与分页共用同一份判定（不重复解析"今天"，也不因跨日界漂移）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TimeBounds {
+    from: Option<jiff::civil::Date>,
+    to: Option<jiff::civil::Date>,
+}
+
+impl TimeBounds {
+    pub(crate) fn resolve(opts: &SummaryOptions, as_of: &jiff::Zoned) -> Result<Self> {
+        use jiff::civil::Date;
+        if opts.days.is_some() && (opts.from.is_some() || opts.to.is_some()) {
+            anyhow::bail!("--days 与 --from/--to 互斥，二选一");
+        }
+        if let Some(n) = opts.days {
+            let range = preset_days_range(as_of, n)?;
+            return Ok(Self {
+                from: Some(range.from),
+                to: Some(range.to),
+            });
+        }
+        let parse = |s: &str| -> Result<Date> {
+            s.parse::<Date>().map_err(|e| {
+                // jiff 的 civil::Date 同时接受基本格式（YYYYMMDD，无连字符），
+                // 文案如实声明（J-P3-3），不假装只认扩展格式。
+                anyhow::anyhow!("日期格式应为 YYYY-MM-DD（YYYYMMDD 也可）: {s:?}（{e}）")
+            })
+        };
+        let from = opts.from.as_deref().map(parse).transpose()?;
+        let to = opts.to.as_deref().map(parse).transpose()?;
+        if let (Some(f), Some(t)) = (from, to)
+            && f > t
+        {
+            anyhow::bail!("起始日期晚于结束日期: {f} > {t}");
+        }
+        Ok(Self { from, to })
+    }
+
+    /// 事件（按查询时区解释的自然日）是否落在冻结区间内。
+    pub(crate) fn matches(&self, ts: jiff::Timestamp, tz: &TimeZone) -> bool {
+        if self.from.is_none() && self.to.is_none() {
+            return true;
+        }
+        let d = ts.to_zoned(tz.clone()).date();
+        self.from.is_none_or(|f| d >= f) && self.to.is_none_or(|t| d <= t)
+    }
+
+    /// 是否限定了时间范围（用于判断"按日视图"是否受日汇总时区影响）。
+    pub(crate) fn is_unbounded(&self) -> bool {
+        self.from.is_none() && self.to.is_none()
+    }
+
+    /// 冻结边界的两端（诊断与界面显示用）。
+    pub(crate) fn parts(&self) -> (Option<jiff::civil::Date>, Option<jiff::civil::Date>) {
+        (self.from, self.to)
+    }
+}
+
+/// H06/H07：明细桶集合（来源时区下的日期 + 应用 + 等价模型）。
+///
+/// 流式构建：内存只随**不同桶数**增长（而不是事件数），因此判定"某个日汇总桶
+/// 是否已被明细覆盖"不需要把历史读进内存。
+pub(crate) type DetailBuckets =
+    std::collections::HashMap<String, std::collections::HashSet<(String, String, String)>>;
+
+pub(crate) fn collect_detail_buckets(
+    read: &crate::history::ReadSnapshot,
+    app: Option<AgentKind>,
+    source_tzs: &[String],
+) -> Result<DetailBuckets> {
+    let mut out: DetailBuckets = std::collections::HashMap::new();
+    for tz_name in source_tzs {
+        let Ok(source_tz) = jiff::tz::TimeZone::get(tz_name) else {
+            continue;
+        };
+        let entry = out.entry(tz_name.clone()).or_default();
+        read.for_each_chunk(app, 4096, &mut |events| {
+            for e in events {
+                entry.insert((
+                    e.ts.to_zoned(source_tz.clone()).date().to_string(),
+                    e.app.as_str().to_string(),
+                    crate::model_identity::ModelIdentity::parse(&e.model_raw).identity_key(),
+                ));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(out)
+}
+
+/// H06：日汇总桶的统计来源策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RollupBucketPolicy {
+    /// 默认：桶内有明细就只统计明细（无法证明汇总被明细完整覆盖时不追加汇总）。
+    #[default]
+    PreferDetail,
+    /// 用户在本轮明确选择"以 CCS 日汇总为准"：命中桶整桶替换为汇总值。
+    PreferRollup,
+}
+
+/// H06：桶选择结果——实际参与的汇总贡献 + 覆盖诊断。
+#[derive(Debug)]
+pub struct RollupSelection {
+    pub(crate) contributions: Vec<crate::aggregate::RollupContribution>,
+    pub(crate) coverage: crate::aggregate::RollupCoverage,
+    pub(crate) warnings: Vec<String>,
+}
+
+/// H06/H08：日粒度历史的参与方式。
+///
+/// - `Auto`：按桶选择规则参与（明细优先；时区不匹配时拒绝重切日期）；
+/// - `DetailOnly`：**只用请求明细**——计划 §5.2 给恢复路径之一（来源时区与
+///   展示时区不一致时，用户可切回来源时区，或只看请求明细）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RollupsMode {
+    #[default]
+    Auto,
+    DetailOnly,
+}
+
+/// 日汇总是否落在查询的时间范围内。
+///
+/// 未限定范围 → 全部参与；设了范围：能解析日期就按日期比较，**解析不出日期
+/// 时排除**（宁可少算声明范围外的历史，也不把范围外的用量混进来）。
+fn rollup_in_bounds(r: &crate::history::StoredRollup, bounds: &TimeBounds) -> bool {
+    if bounds.is_unbounded() {
+        return true;
+    }
+    let Ok(day) = r.day.parse::<jiff::civil::Date>() else {
+        return false;
+    };
+    if bounds.from.is_some_and(|from| day < from) {
+        return false;
+    }
+    if bounds.to.is_some_and(|to| day > to) {
+        return false;
+    }
+    true
+}
+
+/// H06：按 `(CCS 原始统计日, 来源时区, 应用, 等价模型)` 桶决定统计来源。
+///
+/// 规则（计划 §5.3）：
+/// - 桶内**没有**请求明细 → 使用已去重的日汇总（计入统计，费用未知）；
+/// - 桶内**有**请求明细 → 默认只统计明细；同时存在日汇总时记为「未解决覆盖」
+///   （仅总量相等不足以证明覆盖，不追加、不按差额造"剩余请求"）；
+/// - 用户显式选择以汇总为准时，命中桶整桶替换为汇总值；
+/// - 按日筛选/分组而查询时区 ≠ 来源日时区时，日汇总**不参与**（返回可恢复
+///   提示：切回来源时区或只看请求明细），绝不把来源日期当作午夜事件重切。
+///
+/// 桶选择在建快照时固定一次，因此不同视图（汇总/明细/下钻）不会因筛选条件
+/// 改变统计优先级。
+pub(crate) fn select_rollup_contributions(
+    detail_buckets: &DetailBuckets,
+    rollups: &[crate::history::StoredRollup],
+    day_sensitive: bool,
+    tz_label: &str,
+    policy: RollupBucketPolicy,
+    bounds: &TimeBounds,
+    mode: RollupsMode,
+) -> RollupSelection {
+    let mut selection = RollupSelection {
+        contributions: Vec::new(),
+        coverage: crate::aggregate::RollupCoverage::default(),
+        warnings: Vec::new(),
+    };
+    if rollups.is_empty() || mode == RollupsMode::DetailOnly {
+        // 仅明细模式：用户显式要求不看日粒度历史（不报"缺失"，这是他的选择）。
+        return selection;
+    }
+    let mut mismatched: Vec<String> = Vec::new();
+    for r in rollups {
+        // H08：主时间范围同样作用于日汇总——只按日粒度保存的历史也必须遵守
+        // 用户选择的日期区间（早期实现让"只看 10 月 9 日"仍带出 6 月 1 日）。
+        if !rollup_in_bounds(r, bounds) {
+            continue;
+        }
+        if jiff::tz::TimeZone::get(&r.source_tz).is_err() {
+            // 认不出来源时区时不可重切日期：日汇总不参与任何按日解释。
+            if !mismatched.contains(&r.source_tz) {
+                mismatched.push(r.source_tz.clone());
+            }
+            continue;
+        }
+        if day_sensitive && r.source_tz != tz_label {
+            if !mismatched.contains(&r.source_tz) {
+                mismatched.push(r.source_tz.clone());
+            }
+            continue;
+        }
+        let empty = std::collections::HashSet::new();
+        let buckets = detail_buckets.get(&r.source_tz).unwrap_or(&empty);
+        let key = (
+            r.day.clone(),
+            r.app.as_str().to_string(),
+            crate::model_identity::ModelIdentity::parse(&r.model).identity_key(),
+        );
+        let has_detail = buckets.contains(&key);
+        match (has_detail, policy) {
+            (true, RollupBucketPolicy::PreferDetail) => {
+                // 明细优先：汇总不追加，也不按差额造请求；缺口如实披露。
+                selection.coverage.detail_buckets += 1;
+                selection.coverage.unresolved_buckets += 1;
+                if let Some(t) = selection
+                    .coverage
+                    .unresolved_covered_tokens
+                    .checked_add(&r.tokens)
+                {
+                    selection.coverage.unresolved_covered_tokens = t;
+                }
+            }
+            _ => {
+                selection.coverage.rollup_buckets += 1;
+                selection
+                    .contributions
+                    .push(crate::aggregate::RollupContribution {
+                        day: r.day.clone(),
+                        source_tz: r.source_tz.clone(),
+                        app: r.app,
+                        model: r.model.clone(),
+                        tokens: r.tokens,
+                        requests: r.request_count,
+                        source_cost_usd: r.source_cost_usd,
+                        source: r.logical_source.clone(),
+                    });
+            }
+        }
+    }
+    if !mismatched.is_empty() {
+        let list = mismatched.join("、");
+        selection.coverage.timezone_mismatch = Some(format!(
+            "日汇总按来源统计时区（{list}）生成，与当前展示时区（{tz_label}）不同；\
+             按日筛选或分组时不重切日期，这部分历史只在「不限日期」的总量视图计入。\
+             可切换展示时区到来源时区，或只看请求明细。"
+        ));
+    }
+    if selection.coverage.unresolved_buckets > 0 {
+        selection.warnings.push(format!(
+            "有 {} 个日期/模型桶同时存在请求明细与日汇总，且无法证明明细已完整覆盖汇总；\
+             这些桶按请求明细统计，未纳入的汇总共 {} token（不直接相加，避免重复计费）",
+            selection.coverage.unresolved_buckets,
+            selection.coverage.unresolved_covered_tokens.total()
+        ));
+    }
+    selection
+}
+
+/// H04：归一化事件 → 历史库写入形态。
+///
+/// 来源键 = `native|{app}|{规范化路径}|{行序}|{内容指纹}`：
+/// - 内容不变 → 同一来源键 → 重复采集幂等跳过；
+/// - 同一行内容变化（文件被替换、新请求占用同一行）→ 新来源键 → 新事件，
+///   旧事实保留，绝不用新值覆盖已保存的旧请求；
+/// - 流式终值更新由原生身份别名命中同一事件后按终值规则完成。
+fn event_write_of(ev: &UsageEvent) -> crate::history::EventWrite {
+    use crate::history::{EventOrigin, EventWrite, ORIGIN_KIND_NATIVE_FILE, WritePrecedence};
+    let position = format!("{}|{}|{}", ev.agent.as_str(), ev.source_path, ev.line);
+    let key = format!("native|{position}|{}", ev.content_fingerprint());
+    // 身份别名两类都登记：
+    // - 可证实的跨来源身份（Claude 的 `(session, message.id)`）；
+    // - 保守重播身份（Codex 的 `(session, 原始模型, 四桶)`）——**同源**去重，
+    //   使文件归档移动、复制副本与遗留缓存迁移后的重扫都命中同一事件，
+    //   不会因为路径变化而重复累计。
+    let mut aliases = Vec::new();
+    for identity in [ev.native_identity(), ev.same_source_identity()] {
+        if let Some((scheme, value)) = identity
+            && !aliases
+                .iter()
+                .any(|a: &crate::history::EventAlias| a.scheme == scheme)
+        {
+            aliases.push(crate::history::EventAlias {
+                app: ev.agent,
+                scheme: scheme.to_string(),
+                value,
+            });
+        }
+    }
+    EventWrite {
+        event_key: key.clone(),
+        app: ev.agent,
+        ts: ev.ts,
+        model_raw: ev.model.clone(),
+        model_identity: crate::model_identity::ModelIdentity::parse(&ev.model).identity_key(),
+        session_id: non_empty(&ev.session_id),
+        record_id: non_empty(&ev.record_id),
+        project_key: non_empty(&ev.project),
+        session_initial_cwd: ev.session_initial_cwd.clone(),
+        event_cwd: ev.event_cwd.clone(),
+        tokens: TokenCounts::from_event(ev),
+        precedence: WritePrecedence::NativeLog,
+        // 观察时间取**事件时间**而不是采集时刻：重新解析一份较旧的副本
+        //（归档文件、旧备份）不得把已保存的较新终值回退——终值更新因此
+        // 仍按"更晚的事件时间胜出"，且与导入侧口径一致。
+        observed_at: ev.ts,
+        aliases,
+        origins: vec![EventOrigin {
+            origin_kind: ORIGIN_KIND_NATIVE_FILE.to_string(),
+            origin_key: key,
+            app: ev.agent,
+            import_run_id: None,
+            parser_revision: crate::history::PARSER_REVISION,
+            source_model_raw: None,
+            pricing_model: None,
+            source_cost_usd: None,
+            ts_precision_seconds: false,
+        }],
+    }
+}
+
+/// H04：库内事件 → 归一化事件（查询输入形态）。
+pub(crate) fn usage_event_of(s: &crate::history::StoredEvent) -> UsageEvent {
+    UsageEvent {
+        ts: s.ts,
+        agent: s.app,
+        model: s.model_raw.clone(),
+        session_id: s.session_id.clone().unwrap_or_default(),
+        // 无项目归属（如只有日粒度的外部汇总）保持"未知"，不伪造项目。
+        project: s
+            .project_key
+            .clone()
+            .unwrap_or_else(|| "(未知)".to_string()),
+        session_initial_cwd: s.session_initial_cwd.clone(),
+        event_cwd: s.event_cwd.clone(),
+        record_id: s.record_id.clone().unwrap_or_default(),
+        line: 0,
+        source_path: String::new(),
+        input_tokens: s.tokens.input,
+        output_tokens: s.tokens.output,
+        cache_write_tokens: s.tokens.cache_write,
+        cache_read_tokens: s.tokens.cache_read,
+    }
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
 }
 
 pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
@@ -963,21 +1604,29 @@ pub fn summary(opts: &SummaryOptions) -> Result<SummaryReport> {
 }
 
 /// SF04：从查询快照聚合汇总（不重新采集；generated_at = 冻结的 as_of）。
+///
+/// H07：**流式**汇总——事件从只读事务快照分批读取，聚合状态只随分组数增长，
+/// 因此整份历史（百万级事件）也不需要先物化进内存。
 pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Result<SummaryReport> {
     let t = std::time::Instant::now();
-    // 聚合需要连续切片：按快照固定行序物化一份（每会话一次，非每页）。
-    let events: Vec<UsageEvent> = snapshot
-        .rows
-        .iter()
-        .map(|r| snapshot.event(r).clone())
-        .collect();
+    // H06：桶选择在快照建立时已固定（这里只是读取同一份输入），因此汇总、
+    // 明细与下钻不会因筛选条件改变统计优先级。
+    let selection = snapshot.rollup_selection();
     let t_agg = std::time::Instant::now();
-    let agg = aggregate(&events, snapshot.by, &snapshot.tz, snapshot.pricing())?;
+    let mut state = crate::aggregate::AggregateState::new(snapshot.by, snapshot.tz.clone());
+    let pricing = snapshot.pricing().clone();
+    snapshot.for_each_event(&mut |e| state.push_event(e, &pricing))?;
+    for r in &selection.contributions {
+        state.push_rollup(r)?;
+    }
+    let agg = state.finish(&pricing)?;
     log::info!(
-        "聚合（{}）：{} 组 / {} 请求，{} ms",
+        "聚合（{}）：{} 组 / {} 请求（日汇总桶 {}，未解决覆盖 {}），{} ms",
         agg.by,
         agg.groups.len(),
         agg.totals.requests,
+        selection.coverage.rollup_buckets,
+        selection.coverage.unresolved_buckets,
         t_agg.elapsed().as_millis()
     );
     log::info!(
@@ -988,6 +1637,8 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
         agg.totals.requests,
         t.elapsed().as_millis()
     );
+    let mut warnings = snapshot.warnings().to_vec();
+    warnings.extend(selection.warnings.iter().cloned());
     Ok(SummaryReport {
         query_id: snapshot.query_id.clone(),
         pricing_revision: snapshot.pricing_revision.clone(),
@@ -996,7 +1647,8 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
         groups: agg.groups,
         totals: agg.totals,
         sources: snapshot.sources().to_vec(),
-        warnings: snapshot.warnings().to_vec(),
+        warnings,
+        rollup_coverage: selection.coverage.clone(),
         generated_at: snapshot.as_of.to_string(),
     })
 }
@@ -1054,6 +1706,12 @@ pub struct EventRow {
     pub model: String,
     pub session_id: String,
     pub project: String,
+    /// B02：会话初始工作目录（归一化）；None = 该会话没有可信 cwd
+    ///（身份由文件身份或 `(未知)` 兜底）。
+    pub session_initial_cwd: Option<String>,
+    /// B02：该请求作用域内最近观察到的结构化工作目录（保留子目录细节；
+    /// 与 `project` 的区别是后者已按项目根归并）。
+    pub event_cwd: Option<String>,
     pub input: u64,
     pub output: u64,
     pub cache_write: u64,
@@ -1079,92 +1737,98 @@ pub struct EventList {
 
 /// SF04：从查询快照分页读取明细——下钻在固定行序上应用，游标 v2 校验
 /// 归属（query_id/主指纹/下钻指纹/行位置），不重新采集/排序/编号。
+///
+/// H08 修订：**分批读取**（每批至多 [`PAGE_SCAN_BATCH`] 条事件）——一次遍历
+/// 同时算出 `total` 与当前页，内存占用与批大小成正比，不再整份物化事件
+///（早期实现会让 `limit=1` 的请求也占住全部历史，绕过会话预算）。
 pub(crate) fn query_events_from(
     snapshot: &crate::query::QuerySnapshot,
     filter: &EventFilter,
 ) -> Result<EventList> {
+    const PAGE_SCAN_BATCH: usize = 256;
     let t = std::time::Instant::now();
     let drill_fp = crate::query::drill_fingerprint(filter);
     // 下钻过滤：在固定行序上筛匹配行（绝对位置），total 在同一快照内恒定。
-    let matched: Vec<usize> = snapshot
-        .rows
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| {
-            let e = snapshot.event(r);
-            let day_ok = filter
-                .day
-                .as_ref()
-                .is_none_or(|d| e.ts.to_zoned(snapshot.tz.clone()).date().to_string() == *d);
-            let model_ok = filter.model.as_ref().is_none_or(|m| e.model == *m);
-            let project_ok = filter.project.as_ref().is_none_or(|p| e.project == *p);
-            day_ok && model_ok && project_ok
-        })
-        .map(|(i, _)| i)
-        .collect();
-    let total = matched.len() as u64;
+    // MP04：模型筛选按**等价身份**匹配——前端传身份键（Group.key）或原始
+    // 写法都能命中，规则与聚合分组完全一致。
+    let model_key: Option<String> = filter
+        .model
+        .as_deref()
+        .map(|m| crate::model_identity::ModelIdentity::parse(m).identity_key());
     // 游标定位：返回严格位于游标行之后的匹配行（排序位次语义不变）。
     let after = match &filter.before {
         Some(cur) => crate::query::locate_cursor(snapshot, cur, &drill_fp)? + 1,
         None => 0,
     };
     let limit = filter.limit.unwrap_or(200).min(1000);
-    let rows: Vec<EventRow> = matched
-        .into_iter()
-        .filter(|&pos| pos >= after)
-        .take(limit)
-        .map(|pos| {
-            let r = &snapshot.rows[pos];
-            let e = snapshot.event(r);
-            // B3：部分计价模型的明细行展示已计价小计（unknown 分项随总计披露）。
-            // Task 6：同一次 estimate 同时产出 cost_usd 与 breakdown，
-            // 前端不重算（不变量 7）。
-            let estimate = snapshot
-                .pricing()
-                .estimate(&e.model, &TokenCounts::from_event(e), e.ts);
-            let cost_usd = estimate.as_ref().map(|est| est.cost);
-            let cost_breakdown = estimate.map(|est| EventCostBreakdown {
-                matched: est.matched.expect("estimate 命中必有候选元数据"),
-                basis: est.basis,
-                basis_value: est.basis_value,
-                segment_label: est.segment_label,
-                lines: est.lines,
-                cost_usd: est.cost,
-                unknown: est.unknown,
-                complete: est.complete,
-                excluded_candidate_warning: est.excluded_candidate_warning,
-            });
-            let cursor = serde_json::to_string(&crate::query::PageCursor {
-                v: crate::query::CURSOR_VERSION,
-                qid: snapshot.query_id.clone(),
-                mfp: snapshot.main_fingerprint.clone(),
-                dfp: drill_fp.clone(),
-                ts: e.ts.to_string(),
-                rid: e.record_id.clone(),
-                seq: r.seq,
-            })
-            .unwrap_or_default();
-            EventRow {
-                ts: e
-                    .ts
-                    .to_zoned(snapshot.tz.clone())
-                    .strftime("%F %T")
-                    .to_string(),
-                record_id: e.record_id.clone(),
-                cursor,
-                agent: e.agent.as_str(),
-                model: e.model.clone(),
-                session_id: e.session_id.clone(),
-                project: e.project.clone(),
-                input: e.input_tokens,
-                output: e.output_tokens,
-                cache_write: e.cache_write_tokens,
-                cache_read: e.cache_read_tokens,
-                cost_usd,
-                cost_breakdown,
-            }
+    let mut total: u64 = 0;
+    let mut rows: Vec<EventRow> = Vec::new();
+    let pricing = snapshot.pricing().clone();
+    snapshot.for_each_row_event(PAGE_SCAN_BATCH, &mut |row, e| {
+        let day_ok = filter
+            .day
+            .as_ref()
+            .is_none_or(|d| e.ts.to_zoned(snapshot.tz.clone()).date().to_string() == *d);
+        let model_ok = model_key.as_ref().is_none_or(|k| {
+            crate::model_identity::ModelIdentity::parse(&e.model).identity_key() == *k
+        });
+        let project_ok = filter.project.as_ref().is_none_or(|p| e.project == *p);
+        if !(day_ok && model_ok && project_ok) {
+            return Ok(());
+        }
+        let position = row.index;
+        total += 1;
+        if position < after || rows.len() >= limit {
+            return Ok(());
+        }
+        // B3：部分计价模型的明细行展示已计价小计（unknown 分项随总计披露）。
+        // Task 6：同一次 estimate 同时产出 cost_usd 与 breakdown，前端不重算。
+        let estimate = pricing.estimate(&e.model, &TokenCounts::from_event(e), e.ts);
+        let cost_usd = estimate.as_ref().map(|est| est.cost);
+        let cost_breakdown = estimate.map(|est| EventCostBreakdown {
+            matched: est.matched.expect("estimate 命中必有候选元数据"),
+            basis: est.basis,
+            basis_value: est.basis_value,
+            segment_label: est.segment_label,
+            lines: est.lines,
+            cost_usd: est.cost,
+            unknown: est.unknown,
+            complete: est.complete,
+            excluded_candidate_warning: est.excluded_candidate_warning,
+        });
+        let cursor = serde_json::to_string(&crate::query::PageCursor {
+            v: crate::query::CURSOR_VERSION,
+            qid: snapshot.query_id.clone(),
+            mfp: snapshot.main_fingerprint.clone(),
+            dfp: drill_fp.clone(),
+            ts: e.ts.to_string(),
+            rid: e.record_id.clone(),
+            seq: row.seq,
         })
-        .collect();
+        .unwrap_or_default();
+        rows.push(EventRow {
+            ts: e
+                .ts
+                .to_zoned(snapshot.tz.clone())
+                .strftime("%F %T")
+                .to_string(),
+            record_id: e.record_id.clone(),
+            cursor,
+            agent: e.agent.as_str(),
+            model: e.model.clone(),
+            session_id: e.session_id.clone(),
+            project: e.project.clone(),
+            session_initial_cwd: e.session_initial_cwd.clone(),
+            event_cwd: e.event_cwd.clone(),
+            input: e.input_tokens,
+            output: e.output_tokens,
+            cache_write: e.cache_write_tokens,
+            cache_read: e.cache_read_tokens,
+            cost_usd,
+            cost_breakdown,
+        });
+        Ok(())
+    })?;
     log::info!(
         "明细完成（会话 {}）：筛选 模型={:?} 项目={:?} 日={:?}，返回 {} 行 / 共 {} 条，{} ms",
         snapshot.query_id,
@@ -1184,8 +1848,12 @@ pub(crate) fn query_events_from(
     })
 }
 
-/// SF04：主时间过滤的索引形式——返回保留事件的下标，不复制事件
-///（查询快照建立时调用；days 区间解析用冻结 as_of，见 §3.6）。
+/// 统一时间过滤（M10，测试入口）：days（预设近 N 天）与 from/to（闭区间
+/// 自然日）二选一，日期按解析时区解释。SF05：days 分支由调用方注入**本次
+/// 查询冻结的 as_of**，区间 = `[起始自然日, as_of 今天]` 闭区间、不含未来
+/// 日期（docs/stats-semantics.md §3.6）；显式 from/to 不被截断到今天。
+/// 生产路径走 `query::begin_query` 的冻结时间边界（H07 起不再物化事件）。
+#[cfg(test)]
 pub(crate) fn time_filter_indices(
     events: &[UsageEvent],
     opts: &SummaryOptions,
@@ -1286,7 +1954,12 @@ pub fn source_status(settings: &crate::settings::Settings) -> Result<Vec<SourceS
         let dir: Option<PathBuf> = cfg.dir.map(PathBuf::from);
         let root = match dir {
             Some(p) => p,
-            None => make_source(kind, &None)?.root().to_path_buf(),
+            // 默认来源：直接取适配器默认根（不构造 source——状态查询不需要
+            // 解析上下文，也不应触发映射加载）。
+            None => match kind {
+                AgentKind::ClaudeCode => ClaudeSource::default_root()?,
+                AgentKind::Codex => CodexSource::default_root()?,
+            },
         };
         let exists = root.is_dir();
         let files = count_jsonl(&root);
@@ -1359,13 +2032,22 @@ mod tests {
                 tmp_dir(&format!("hermetic-{:?}", std::thread::current().id()))
             }));
         let pricing_index = cache_dir.as_ref().map(|d| d.join("pricing-index.json"));
+        // N09/R04：pricing=None 时必须显式指向临时不存在的价格文件——
+        // `pricing_file_path(None)` 会解析默认 `~/.tokenscope/pricing.toml`，
+        // 用户外置价格因此改变这些测试的费用/警告/来源状态。
+        let pricing_path = Some(pricing.unwrap_or_else(|| {
+            cache_dir
+                .as_ref()
+                .expect("cache_dir 已兜底")
+                .join("no-pricing.toml")
+        }));
         SummaryOptions {
             by: GroupBy::Day,
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
             cache_dir,
             pricing_index,
-            pricing_path: pricing,
+            pricing_path,
             // 固定指向不存在的快照，测试不依赖真实 ~/.tokenscope 状态
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
             modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
@@ -1383,11 +2065,18 @@ mod tests {
     }
 
     /// 剥离时间戳与会话身份后序列化，用于三路径一致性比较。
+    ///
+    /// H04：`duplicates_dropped` 是**本轮解析**的产物（指纹命中时本轮没有
+    /// 解析、自然没有可丢弃的重复行），不属于"查询数字"，比较前归零；
+    /// 请求数 / 四桶 / 费用 / 分组 / 警告全部参与比较。
     fn normalize(r: &SummaryReport) -> String {
         let mut r = r.clone();
         r.generated_at = String::new();
         // SF04：query_id 是会话身份（每次查询必然不同），不参与数字一致性。
         r.query_id = String::new();
+        for s in &mut r.sources {
+            s.stats.duplicates_dropped = 0;
+        }
         serde_json::to_string(&r).unwrap()
     }
 
@@ -1396,7 +2085,7 @@ mod tests {
         let r = summary(&opts(None, None, false)).unwrap();
         assert_eq!(r.by, "day");
         assert_eq!(r.sources.len(), 2);
-        assert_eq!(r.totals.requests, 7); // claude 3 + codex 4（去重后）
+        assert_eq!(r.totals.requests, 8); // claude 4（含子代理）+ codex 4（去重后）
         assert_eq!(r.groups.len(), 3); // 07-17、07-18、合计
         assert_eq!(r.groups[0].agents, ["claude-code", "codex"]);
         assert!(r.generated_at.contains('+'), "generated_at 带时区偏移");
@@ -1415,7 +2104,7 @@ mod tests {
         let r = summary(&opts).unwrap();
         assert_eq!(r.sources.len(), 1);
         assert_eq!(r.sources[0].agent, AgentKind::ClaudeCode);
-        assert_eq!(r.totals.requests, 3);
+        assert_eq!(r.totals.requests, 4, "H02：子代理用量并入，不再排除");
     }
 
     #[test]
@@ -1441,10 +2130,11 @@ mod tests {
         let refresh = normalize(&summary(&opts(cache_dir.clone(), None, true)).unwrap());
         assert_eq!(cold, warm, "缓存命中必须与首次全量一致");
         assert_eq!(cold, refresh, "--refresh 重建后必须一致");
-        // 缓存里确实有数据（解析层未去重总数：claude 5 + codex 5）
+        // 历史库确实有数据：来源登记 4 个文件（claude 2 + codex 2），
+        // 用量事实为去重后的 8 条请求。
         let info = cache_stats(Some(dir.clone())).unwrap();
         assert_eq!(info.files, 4); // claude 2 + codex 2
-        assert_eq!(info.events, 10);
+        assert_eq!(info.events, 8);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1497,17 +2187,16 @@ mod tests {
     }
 
     #[test]
-    fn test_report_cache_corrupt_fallback() {
-        // 坏缓存文件 → 警告 + 数字仍正确（纯优化原则）。
-        let dir = tmp_dir("corrupt");
-        std::fs::write(dir.join("cache.db"), b"this is not a sqlite database").unwrap();
-        let r = summary(&opts(Some(dir.clone()), None, false)).unwrap();
-        assert_eq!(r.totals.requests, 7);
-        assert!(
-            r.warnings.iter().any(|w| w.contains("缓存")),
-            "应有缓存降级警告: {:?}",
-            r.warnings
-        );
+    fn test_corrupt_history_db_is_reported_not_silently_replaced() {
+        // H04/不变量 7：历史库是事实源——损坏时**明确报错**，不得静默改用
+        // "现存日志的临时扫描"代替完整历史（旧实现把坏缓存降级为全量扫描，
+        // 那对缓存成立，对持久事实不成立）。
+        let dir = tmp_dir("corrupt-history");
+        std::fs::write(dir.join("history.db"), b"this is not a sqlite database").unwrap();
+        let err = summary(&opts(Some(dir.clone()), None, false))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("历史库") || err.contains("迁移"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1562,7 +2251,11 @@ cache_read = 0.4
             model: "m".into(),
             session_id: "s".into(),
             project: "p".into(),
+            session_initial_cwd: None,
+            event_cwd: None,
             record_id: String::new(),
+            line: 0,
+            source_path: String::new(),
             input_tokens: 1,
             output_tokens: 1,
             cache_write_tokens: 0,
@@ -1641,6 +2334,7 @@ cache_read = 0.4
             codex_dir: Some(fixture("codex", "basic")),
             cache_dir: Some(hermetic.join("cache")),
             pricing_index: Some(hermetic.join("pricing-index.json")),
+            pricing_path: Some(hermetic.join("no-pricing.toml")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
             modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
             tz: Some("Asia/Shanghai".to_string()),
@@ -1683,19 +2377,20 @@ cache_read = 0.4
             codex_dir: Some(fixture("codex", "basic")),
             cache_dir: Some(hermetic.join("cache")),
             pricing_index: Some(hermetic.join("pricing-index.json")),
+            pricing_path: Some(hermetic.join("no-pricing.toml")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
             // 钉住不存在的 models.dev 快照，测试不依赖真实 ~/.tokenscope 状态
             modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
             tz: Some("Asia/Shanghai".to_string()),
             ..Default::default()
         };
-        // 全量：去重后 7 行（与汇总 requests 一致），按时间倒序
+        // 全量：去重后 8 行（与汇总 requests 一致），按时间倒序
         let (all_ok, list) = {
             let l = list_events(&base, &EventFilter::default()).unwrap();
-            (l.total == 7, l)
+            (l.total == 8, l)
         };
         assert!(all_ok, "total={}", list.total);
-        assert_eq!(list.rows.len(), 7);
+        assert_eq!(list.rows.len(), 8);
         assert_eq!(list.warnings.len(), 0);
         let tss: Vec<&str> = list.rows.iter().map(|r| r.ts.as_str()).collect();
         let mut sorted = tss.clone();
@@ -1715,11 +2410,11 @@ cache_read = 0.4
         assert_eq!(l.total, 2);
         assert!(l.rows.iter().all(|r| r.model == "gpt-5.6-sol"));
 
-        // 项目过滤（C2：项目身份 = 完整 cwd）：codex e3 所在 beta 项目 1 行
+        // 项目过滤（A04：项目身份 = 归一化 cwd）：codex e3 所在 beta 项目 1 行
         let l = list_events(
             &base,
             &EventFilter {
-                project: Some(r"C:\work\beta".into()),
+                project: Some("C:/work/beta".into()),
                 ..Default::default()
             },
         )
@@ -1747,7 +2442,7 @@ cache_read = 0.4
         )
         .unwrap();
         assert_eq!(l.rows.len(), 3);
-        assert_eq!(l.total, 7);
+        assert_eq!(l.total, 8);
 
         // Task 1：该测试无任何定价来源 → 全部行 cost=None（unknown 语义）。
         let unknown: Vec<&EventRow> = list.rows.iter().filter(|r| r.cost_usd.is_none()).collect();
@@ -1763,6 +2458,7 @@ cache_read = 0.4
             codex_dir: Some(fixture("codex", "basic")),
             cache_dir: Some(hermetic.join("cache")),
             pricing_index: Some(hermetic.join("pricing-index.json")),
+            pricing_path: Some(hermetic.join("no-pricing.toml")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
             modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
             tz: Some("Asia/Shanghai".to_string()),
@@ -1815,6 +2511,44 @@ cache_read = 0.4
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// H07：保留字节记账必须覆盖**会话实际保留的数据**——采集元数据（逐源统计、
+    /// 诊断字符串、价格表）与查询侧的行索引；事件本体不再随会话常驻（汇总走
+    /// 流式读取，只有明细分页才懒物化），因此这里按这两部分断言。
+    #[test]
+    fn retained_bytes_cover_session_metadata_and_row_index() {
+        let meta_only = |warnings: Vec<String>| CollectionSnapshot {
+            generation: 0,
+            sources: Vec::new(),
+            warnings,
+            pricing: Arc::new(Pricing::default()),
+            pricing_revision: String::new(),
+        };
+        let base = collection_retained_bytes(&meta_only(Vec::new())).unwrap();
+        let with_warning =
+            collection_retained_bytes(&meta_only(vec!["诊断字符串".repeat(200)])).unwrap();
+        assert!(
+            with_warning > base,
+            "采集诊断必须计入保留字节：{with_warning} vs {base}"
+        );
+
+        // 行索引（事件主键 + 时间戳 + 记录标识 + seq）单独计入：
+        // 会话保留的行索引越多，记账越大——预算因此仍能约束分页会话。
+        let rows: Vec<crate::query::SnapshotRow> = (0..1000)
+            .map(|i| crate::query::SnapshotRow {
+                event_id: i,
+                index: i as usize,
+                seq: 0,
+                ts: "2026-09-15T08:00:00Z".parse().unwrap(),
+                record_id: format!("r{i}"),
+            })
+            .collect();
+        let row_bytes = retained::vec_bytes(&rows).unwrap();
+        assert!(
+            row_bytes >= 1000 * std::mem::size_of::<crate::query::SnapshotRow>(),
+            "行索引必须计入保留字节：{row_bytes}"
+        );
+    }
+
     #[test]
     fn test_parallel_queries_single_collection() {
         // D1：同参并发查询合并为一次采集（generation 相同 = 同一份快照）。
@@ -1851,6 +2585,7 @@ cache_read = 0.4
             codex_dir: Some(fixture("codex", "basic")),
             cache_dir: Some(hermetic.join("cache")),
             pricing_index: Some(hermetic.join("idx.json")),
+            pricing_path: Some(hermetic.join("no-pricing.toml")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
             modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
             tz: Some("Asia/Shanghai".to_string()),
@@ -1859,7 +2594,7 @@ cache_read = 0.4
         // SF04：全量与分页取自同一查询会话（游标携带该会话 query_id）。
         let snap = crate::query::begin_query(&base).unwrap();
         let full = query_events_from(&snap, &EventFilter::default()).unwrap();
-        assert_eq!(full.rows.len(), 7);
+        assert_eq!(full.rows.len(), 8);
         let mut pages: Vec<Vec<String>> = Vec::new();
         let mut seen = 0usize;
         let mut cursor: Option<String> = None;
@@ -1870,7 +2605,7 @@ cache_read = 0.4
                 ..Default::default()
             };
             let page = query_events_from(&snap, &f).unwrap();
-            assert_eq!(page.total, 7, "total 恒为过滤后全量");
+            assert_eq!(page.total, 8, "total 恒为过滤后全量");
             if page.rows.is_empty() {
                 break;
             }
@@ -1880,7 +2615,7 @@ cache_read = 0.4
             let last = page.rows.last().unwrap();
             cursor = Some(last.cursor.clone());
         }
-        assert_eq!(seen, 7, "翻页覆盖全量");
+        assert_eq!(seen, 8, "翻页覆盖全量");
         let flat: Vec<String> = pages.into_iter().flatten().collect();
         let expect: Vec<String> = full.rows.iter().map(|r| r.cursor.clone()).collect();
         assert_eq!(flat, expect);
@@ -2193,35 +2928,76 @@ cache_read = 0.0
     fn test_failed_flight_wakes_all_waiters() {
         let dir = tmp_dir("flight-wake");
         let opts = opts(Some(dir.join("cache")), None, false);
-        TEST_COLLECT_DELAY_MS.store(200, Ordering::Relaxed);
+        let key = collection_key(&opts);
         let calls = std::sync::Arc::new(AtomicU64::new(0));
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
-        let mut handles = Vec::new();
-        for _ in 0..3 {
-            let b = barrier.clone();
+        let (registered_tx, registered_rx) = std::sync::mpsc::channel::<()>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        // 领队：注册航班后等待两个跟随者**确认已进入等待**（真实握手），
+        // 再返回错误——跟随者不可能因调度延迟变成新领队。
+        let o_l = opts.clone();
+        let c_l = calls.clone();
+        let leader = std::thread::spawn(move || {
+            let leader_fn = move |_gen: u64| -> Result<CollectionSnapshot> {
+                c_l.fetch_add(1, Ordering::Relaxed);
+                registered_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+                Err(anyhow::anyhow!("boom"))
+            };
+            collect_flighted_with(&o_l, &leader_fn)
+        });
+        registered_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("领队必须先注册航班");
+        let mut followers = Vec::new();
+        for _ in 0..2 {
             let o = opts.clone();
-            let c = calls.clone();
-            handles.push(std::thread::spawn(move || {
-                b.wait();
-                let leader = move |_gen: u64| -> Result<CollectionSnapshot> {
-                    c.fetch_add(1, Ordering::Relaxed);
-                    // 重叠窗口由闭包自身制造（延迟旋钮在真实采集路径上，
-                    // 注入闭包的失败路径不经过它）。1s 保证并行测试负载下
-                    // 三个线程都进入单飞。
-                    std::thread::sleep(std::time::Duration::from_millis(1000));
-                    Err(anyhow::anyhow!("boom"))
+            let key = key.clone();
+            let rt = ready_tx.clone();
+            followers.push(std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !INFLIGHT.lock().unwrap().contains_key(&key) {
+                    assert!(std::time::Instant::now() < deadline, "等待航班注册超时");
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                rt.send(()).unwrap();
+                let f = move |_gen: u64| -> Result<CollectionSnapshot> {
+                    panic!("跟随者闭包不应被调用");
                 };
-                collect_flighted_with(&o, &leader)
+                collect_flighted_with(&o, &f)
             }));
         }
-        let mut errs = Vec::new();
-        for h in handles {
-            errs.push(
-                h.join()
-                    .unwrap()
-                    .expect_err("应返回错误而非悬挂")
-                    .to_string(),
-            );
+        drop(ready_tx);
+        for _ in 0..2 {
+            ready_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("跟随者必须确认已进入等待");
+        }
+        // N09：真实握手第二段——**本航班**等待者计数确认跟随者已经阻塞
+        // 在 wait_flight 里（"即将进入"在重载下可能迟到，迟到者会因槽位
+        // 已清而变成新领队；并行套件里其它航班的等待者不计入本航班）。
+        // 此后放行领队，槽位清空必然只唤醒已入队者。
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while flight_waiters_for_tests(&key) < 2 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "等待跟随者进入航班超时"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        go_tx.send(()).unwrap();
+        let errs = vec![
+            leader
+                .join()
+                .unwrap()
+                .expect_err("领队应返回错误而非悬挂")
+                .to_string(),
+        ];
+        let mut errs = errs;
+        for h in followers {
+            errs.push(h.join().unwrap().expect_err("等待者应被唤醒").to_string());
         }
         assert!(
             errs.iter().all(|e| e.contains("boom")),
@@ -2234,55 +3010,131 @@ cache_read = 0.0
 
     #[test]
     fn test_panicked_flight_wakes_waiter_and_clears_slot() {
-        let dir = tmp_dir("flight-panic");
-        let opts = opts(Some(dir.join("cache")), None, false);
-        // Task 6：channel 信号消除 sleep 竞态——
-        // (1) 领队闭包被调用 = 已注册航班 → 发 registered；
-        // (2) 主线程收到后，由独立定时线程在宽裕时间窗后发 go（此时主线程
-        //     已作为跟随者阻塞在 wait_flight，领队阻塞在 go 上不会提前清槽）；
-        // (3) 领队收到 go 才 panic → 守卫发布错误 + 清槽 → 跟随者唤醒。
-        let (registered_tx, registered_rx) = std::sync::mpsc::channel::<()>();
-        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-        let o1 = opts.clone();
-        let leader = std::thread::spawn(move || {
-            let leader_fn = |_gen: u64| -> Result<CollectionSnapshot> {
-                registered_tx.send(()).unwrap();
-                go_rx.recv().unwrap();
-                panic!("采集炸了");
-            };
-            let _ = collect_flighted_with(&o1, &leader_fn);
-        });
-        registered_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("领队必须先注册航班");
-        // 独立线程发 go：主测试线程此刻正以跟随者身份进入 wait_flight。
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(150));
+        // N09：真实握手替代时窗——跟随者先**确认航班已在注册表中**再进入
+        // 等待（此时领队阻塞在 go 上，不可能清槽），调度暂停不再能把跟随者
+        // 变成新领队。目标用例循环 100 次钉住该边界。
+        for _ in 0..100 {
+            let dir = tmp_dir("flight-panic");
+            let opts = opts(Some(dir.join("cache")), None, false);
+            let key = collection_key(&opts);
+            let (registered_tx, registered_rx) = std::sync::mpsc::channel::<()>();
+            let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+            let o1 = opts.clone();
+            let leader = std::thread::spawn(move || {
+                let leader_fn = move |_gen: u64| -> Result<CollectionSnapshot> {
+                    registered_tx.send(()).unwrap();
+                    go_rx.recv().unwrap();
+                    panic!("采集炸了");
+                };
+                let _ = collect_flighted_with(&o1, &leader_fn);
+            });
+            registered_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("领队必须先注册航班");
+            let o2 = opts.clone();
+            let follower_key = key.clone();
+            let follower = std::thread::spawn(move || {
+                // 真实握手：航班已在注册表中 = 本线程随后必然以跟随者身份
+                // 进入 wait_flight（领队阻塞在 go 上，槽位不可能先消失）。
+                // 超时只防真死锁；重载调度下靠放宽时限吸收（不是时窗竞态）。
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !INFLIGHT
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains_key(&follower_key)
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "跟随者等待航班注册超时"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                ready_tx.send(()).unwrap();
+                let ok_fn = move |_gen: u64| -> Result<CollectionSnapshot> {
+                    panic!("跟随者闭包不应被调用");
+                };
+                collect_flighted_with(&o2, &ok_fn)
+            });
+            ready_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("跟随者必须确认已进入等待");
+            // N09：等跟随者**已阻塞在本航班**的 wait_flight（按 key 计数）
+            // 再放行领队；并行套件里其它航班的等待者不计数。
+            {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while flight_waiters_for_tests(&key) < 1 {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "等待跟随者进入航班超时"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
             go_tx.send(()).unwrap();
+            let follower = follower.join().unwrap();
+            assert!(
+                follower.is_err() && follower.unwrap_err().to_string().contains("异常退出"),
+                "panic 必须唤醒等待者"
+            );
+            leader.join().unwrap_err();
+            // 槽位已清空：后续同参请求可重新执行（成功闭包这次成为领队）。
+            let ok2 = |_gen: u64| -> Result<CollectionSnapshot> {
+                Ok(CollectionSnapshot {
+                    generation: 9,
+                    sources: Vec::new(),
+                    warnings: Vec::new(),
+                    pricing: std::sync::Arc::new(crate::pricing::Pricing::default()),
+                    pricing_revision: "test".to_string(),
+                })
+            };
+            let r = collect_flighted_with(&opts, &ok2);
+            assert!(r.is_ok(), "panic 清槽后必须可重试: {r:?}");
+            assert_eq!(r.unwrap().generation, 9);
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    /// N06：提交观察在**共享采集边界**——领队工作（含历史库写入提交）期间
+    /// `active_collection_submissions()` 必须可见，结束后归零。手动刷新、
+    /// 重扫与定时采集都经过这里，壳侧退出等待因此覆盖全部入口。
+    /// 领队用通道握手（不用时窗），调度暂停不会让断言失效。
+    #[test]
+    fn submission_counter_covers_leader_work() {
+        let dir = tmp_dir("submission-counter");
+        let opts = opts(Some(dir.join("cache")), None, false);
+        let (start_tx, start_rx) = std::sync::mpsc::channel::<()>();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let o = opts.clone();
+        let h = std::thread::spawn(move || {
+            let leader = move |_gen: u64| -> Result<CollectionSnapshot> {
+                start_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+                Ok(CollectionSnapshot {
+                    generation: 1,
+                    sources: Vec::new(),
+                    warnings: Vec::new(),
+                    pricing: std::sync::Arc::new(crate::pricing::Pricing::default()),
+                    pricing_revision: "test".to_string(),
+                })
+            };
+            collect_flighted_with(&o, &leader).unwrap();
         });
-        let ok_fn = move |_gen: u64| -> Result<CollectionSnapshot> {
-            panic!("跟随者闭包不应被调用");
-        };
-        let follower = collect_flighted_with(&opts, &ok_fn);
-        assert!(
-            follower.is_err() && follower.unwrap_err().to_string().contains("异常退出"),
-            "panic 必须唤醒等待者"
+        start_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("领队必须先开始提交");
+        assert_eq!(
+            active_collection_submissions(),
+            1,
+            "提交观察必须在共享边界上（手动/定时入口同样被覆盖）"
         );
-        leader.join().unwrap_err();
-        // 槽位已清空：后续同参请求可重新执行（成功闭包这次成为领队）。
-        let ok2 = |_gen: u64| -> Result<CollectionSnapshot> {
-            Ok(CollectionSnapshot {
-                generation: 9,
-                events: Vec::new(),
-                sources: Vec::new(),
-                warnings: Vec::new(),
-                pricing: std::sync::Arc::new(crate::pricing::Pricing::default()),
-                pricing_revision: "test".to_string(),
-            })
-        };
-        let r = collect_flighted_with(&opts, &ok2);
-        assert!(r.is_ok(), "panic 清槽后必须可重试: {r:?}");
-        assert_eq!(r.unwrap().generation, 9);
+        go_tx.send(()).unwrap();
+        h.join().unwrap();
+        // 全局计数也覆盖其它并行测试；本航班完成后它们可能立即进入采集。
+        // 在同一个串行闸门内断言归零，既排除其它正在工作的领队，也能检出
+        // 本航班泄漏的计数，不靠全局计数恰好为零的调度时窗。
+        let _serial = COLLECT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(active_collection_submissions(), 0, "提交完成后归零");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2323,6 +3175,7 @@ cache_read = 0.0
             codex_dir: Some(codex_dir),
             cache_dir: Some(dir.join("cache")),
             pricing_index: Some(dir.join("idx.json")),
+            pricing_path: Some(dir.join("no-pricing.toml")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
             modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
             tz: Some("Asia/Shanghai".to_string()),
@@ -2425,6 +3278,7 @@ cache_read = 0.0
             codex_dir: Some(codex_dir),
             cache_dir: Some(dir.join("cache")),
             pricing_index: Some(dir.join("idx.json")),
+            pricing_path: Some(dir.join("no-pricing.toml")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
             modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
             tz: Some("Asia/Shanghai".to_string()),
@@ -2523,6 +3377,7 @@ cache_read = 0.0
             codex_dir: Some(fixture("codex", "basic")),
             cache_dir: Some(dir.join("cache")),
             pricing_index: Some(dir.join("idx.json")),
+            pricing_path: Some(dir.join("no-pricing.toml")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
             modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
             tz: Some("Asia/Shanghai".to_string()),
@@ -2532,7 +3387,7 @@ cache_read = 0.0
         };
         let _ = &mut s;
         let r = summary(&opts).unwrap();
-        assert_eq!(r.totals.requests, 3, "只剩 claude 的 3 条");
+        assert_eq!(r.totals.requests, 4, "只剩 claude 的 4 条（含子代理）");
         assert_eq!(r.sources.len(), 1);
         assert_eq!(r.sources[0].agent, AgentKind::ClaudeCode);
         std::fs::remove_dir_all(&dir).ok();
@@ -2590,7 +3445,11 @@ mod collect_stability_tests {
                     model: "m".into(),
                     session_id: "s".into(),
                     project: "p".into(),
+                    session_initial_cwd: None,
+                    event_cwd: None,
                     record_id: String::new(),
+                    line: 0,
+                    source_path: String::new(),
                     input_tokens: 1,
                     output_tokens: 1,
                     cache_write_tokens: 0,
@@ -2611,6 +3470,7 @@ mod collect_stability_tests {
             agent: Some(AgentKind::Codex),
             cache_dir: Some(dir.join("cache")),
             pricing_index: Some(dir.join("idx.json")),
+            pricing_path: Some(dir.join("no-pricing.toml")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
             modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
             tz: Some("Asia/Shanghai".to_string()),
@@ -2620,17 +3480,17 @@ mod collect_stability_tests {
             root: root.clone(),
             file: file.clone(),
         })];
-        let c = collect_all_with_sources(sources, &opts, 0).unwrap();
+        let c = collect_all_with_sources_for_test(sources, &opts).unwrap();
         assert_eq!(c.events.len(), 1, "解析结果正常入账");
         assert!(
-            c.warnings.iter().any(|w| w.contains("本轮不计入缓存")),
+            c.warnings.iter().any(|w| w.contains("本轮不登记指纹")),
             "应有文件变化警告: {:?}",
             c.warnings
         );
-        // 关键断言：不稳定文件绝不能配上"追加后"的指纹写成成功缓存——
+        // 关键断言：不稳定文件绝不能配上"追加后"的指纹写成成功登记——
         // 否则此后永远命中这份缺尾数据。
         let info = cache_stats(opts.cache_dir.clone()).unwrap();
-        assert_eq!(info.files, 0, "采集期间变化的文件不得入缓存");
+        assert_eq!(info.files, 0, "采集期间变化的文件不得登记指纹");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2670,7 +3530,11 @@ mod collect_stability_tests {
                     model: "m".into(),
                     session_id: "s".into(),
                     project: "p".into(),
+                    session_initial_cwd: None,
+                    event_cwd: None,
                     record_id: String::new(),
+                    line: 0,
+                    source_path: String::new(),
                     input_tokens: 1,
                     output_tokens: 1,
                     cache_write_tokens: 0,
@@ -2693,6 +3557,7 @@ mod collect_stability_tests {
             agent: Some(AgentKind::Codex),
             cache_dir: Some(dir.join("cache")),
             pricing_index: Some(dir.join("idx.json")),
+            pricing_path: Some(dir.join("no-pricing.toml")),
             openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
             modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
             tz: Some("Asia/Shanghai".to_string()),
@@ -2754,6 +3619,11 @@ mod retained_bytes {
         let s: Vec<String> = Vec::with_capacity(2);
         assert!(strings_bytes(&s).unwrap() >= 2 * std::mem::size_of::<String>());
     }
+
+    /// B02：新增的目录上下文字段必须计入保留字节——只改模型漏改记账会让
+    /// 预算低估，正是 RC05 禁止的情况。断言在顶层 tests 模块（那里可见
+    /// `CollectionSnapshot` 与 `collection_retained_bytes`）：
+    /// `new_cwd_fields_are_in_memory_budget`。
 
     #[test]
     fn collect_retained_leaf_helpers_reject_overflow_not_saturate() {

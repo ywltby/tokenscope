@@ -2,7 +2,7 @@
 // 每个分类标签仍必须对齐自己的数值（修复前：标签重排而 series 保持
 // 原始顺序，标签与数值错位）。
 import { describe, expect, it } from "vitest";
-import { SERIES, buildBarChartData, fullLabels, realGroups } from "./chartData";
+import { SERIES, buildBarChartData, fullLabels, realGroups, tooltipLabels } from "./chartData";
 import type { Group } from "../types";
 
 function group(key: string, input: number, output = 0): Group {
@@ -32,9 +32,12 @@ describe("buildBarChartData", () => {
       "tied",
     ]);
     expect(fullLabels(groups, by)).toEqual(data.categories);
+    // 2026-10-10 用户修订：图表与英雄栏统一为**互斥四桶**（输入 = 未缓存输入），
+    // 四类相加 = 总 token——不再用"输入含缓存"口径（那时只需加前两项）。
     expect(
       data.categories.map((_, i) => data.series.reduce((sum, s) => sum + s.values[i], 0)),
     ).toEqual([302, 201, 100, 100]);
+    expect(data.series.map((s) => s.name)).toEqual(["输入", "输出", "缓存写", "缓存命中"]);
     expect(groups.map((x) => x.key)).toEqual([
       "input-heavy",
       "cache-read-heavy",
@@ -94,6 +97,30 @@ describe("chartData 显示元数据（设计系统 Task 4）", () => {
     expect(full).toHaveLength(categories.length);
     expect(full[0]).toBe("C:/work/very-long-project-name/alpha-service");
     expect(categories[0]).toBe("alpha-service");
+  });
+
+  it("model_chart_uses_friendly_label：模型维度图表与 tooltip 都用展示名，不出现压缩身份键", () => {
+    const groups: Group[] = [
+      {
+        ...g("claudeopus55", 10),
+        label: "Claude Opus 5.5",
+      },
+      {
+        ...g("claudeopus56", 5),
+        label: "claude-opus-5-6",
+      },
+    ];
+    const { categories } = buildBarChartData(groups, "model");
+    expect(categories).toEqual(["Claude Opus 5.5", "claude-opus-5-6"]);
+    const titles = tooltipLabels(groups, "model");
+    expect(titles).toEqual(["Claude Opus 5.5", "claude-opus-5-6"]);
+    expect(titles.join("|")).not.toContain("claudeopus55");
+  });
+
+  it("tooltipLabels：项目维度保留完整路径（长名不在轴上省略）", () => {
+    const groups = [g("C:/work/very-long-project-name/alpha-service", 10)];
+    const titles = tooltipLabels(groups, "project");
+    expect(titles[0]).toBe("C:/work/very-long-project-name/alpha-service");
   });
 });
 

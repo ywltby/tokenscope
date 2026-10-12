@@ -19,7 +19,14 @@ fn list_events(
 }
 
 fn tmp_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("tokenscope-golden-{tag}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!(
+        "tokenscope-golden-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -98,6 +105,12 @@ fn normalize_json(r: &tokenscope::report::SummaryReport) -> String {
     r.generated_at = String::new();
     // SF04：query_id 是会话身份（每次查询必然不同），不参与数字一致性。
     r.query_id = String::new();
+    // H04：`duplicates_dropped` 是**本轮解析**的产物（指纹命中轮次没有解析、
+    // 自然没有可丢弃的重复行）；请求数 / 四桶 / 费用 / 分组 / 警告仍逐字段
+    // 参与比较，查询数字的三路径一致性保证不变。
+    for s in &mut r.sources {
+        s.stats.duplicates_dropped = 0;
+    }
     serde_json::to_string(&r).unwrap()
 }
 
@@ -149,12 +162,18 @@ fn test_golden_summary_events_parity() {
     let keys: Vec<&str> = m.groups.iter().map(|g| g.key.as_str()).collect();
     assert_eq!(
         keys,
-        [
-            "claude-sonnet-4-5",
-            "gpt-5.6-sol",
-            "unknown-model-x",
-            "合计"
-        ]
+        ["claudesonnet45", "gpt56sol", "unknownmodelx", "合计"],
+        "MP04：模型维度 key 是等价身份键"
+    );
+    let labels: Vec<&str> = m
+        .groups
+        .iter()
+        .map(|g| g.label.as_deref().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        labels,
+        ["claude-sonnet-4-5", "gpt-5.6-sol", "unknown-model-x", ""],
+        "展示名退回原始代表写法（合计行无 label）"
     );
     let p = summary(&SummaryOptions {
         by: GroupBy::Project,

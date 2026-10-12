@@ -123,8 +123,10 @@ describe("TrendChart（设计系统 Task 4）", () => {
     expect(opt.series).toHaveLength(4);
     for (const [index, series] of opt.series.entries()) {
       expect(series.data).toHaveLength(240);
+      // 2026-10-10 用户修订：图表为互斥四桶——「输入」= 未缓存输入（系数 1，
+      // 原"输入含缓存"口径下是 1+3+4=8）。
       expect(series.data.reduce((a: number, b: number) => a + b, 0)).toBe(
-        ((239 * 240) / 2) * (index + 1),
+        ((239 * 240) / 2) * [1, 2, 3, 4][index],
       );
     }
     if (by === "day")
@@ -223,25 +225,33 @@ describe("TrendChart 卡片化（设计系统 Task 5）", () => {
     w.unmount();
   });
 
-  it("堆叠柱仅最上段系列带圆角：日维度柱顶 [4,4,0,0]，非日维度条尾 [0,4,4,0]", async () => {
+  it("互斥四桶堆叠在同一根柱上，只有最上段带圆角", async () => {
     const wDay = mount(TrendChart, { props: { groups: [group("a", 1)], by: "day" } });
     await flushPromises();
     const optDay = setOption.mock.calls[0][0] as {
-      series: { itemStyle?: { borderRadius?: number[] } }[];
+      series: { stack?: string; itemStyle?: { borderRadius?: number[] } }[];
     };
     expect(optDay.series).toHaveLength(4);
-    expect(optDay.series[3].itemStyle?.borderRadius).toEqual([4, 4, 0, 0]);
-    for (const s of optDay.series.slice(0, 3)) {
-      expect(s.itemStyle?.borderRadius).toBeUndefined();
+    // 每类一根柱：四类堆叠（stack 相同），柱高即该类总 token。
+    for (const s of optDay.series) {
+      expect(s.stack, "四类必须堆叠在同一根柱上").toBe("tokens");
     }
+    // 只有最上段（最后一个系列）带圆角，其余段不带——否则堆叠中间出现台阶。
+    expect(optDay.series[3].itemStyle?.borderRadius).toEqual([4, 4, 0, 0]);
+    expect(optDay.series[0].itemStyle?.borderRadius).toBeUndefined();
+    expect(optDay.series[1].itemStyle?.borderRadius).toBeUndefined();
+    expect(optDay.series[2].itemStyle?.borderRadius).toBeUndefined();
     wDay.unmount();
 
     const wModel = mount(TrendChart, { props: { groups: [group("a", 1)], by: "model" } });
     await flushPromises();
     const optModel = setOption.mock.calls.at(-1)![0] as {
-      series: { itemStyle?: { borderRadius?: number[] } }[];
+      series: { stack?: string; itemStyle?: { borderRadius?: number[] } }[];
     };
     expect(optModel.series[3].itemStyle?.borderRadius).toEqual([0, 4, 4, 0]);
+    for (const s of optModel.series) {
+      expect(s.stack).toBe("tokens");
+    }
     wModel.unmount();
   });
 });

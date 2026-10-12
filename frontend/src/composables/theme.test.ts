@@ -145,17 +145,22 @@ describe("UX09 首帧主题解析（prepaint）", () => {
     localStorage.clear();
   });
 
-  it("preference_resolution_is_shared：boot 脚本与 resolver 同键同规则", async () => {
-    const { THEME_STORAGE_KEY, THEME_PREFERENCES, parsePreference, resolveMode } =
-      await import("../lib/themePreference");
+  it("preference_resolution_is_shared：boot 首帧只跟随系统，偏好恢复走显式函数", async () => {
+    const { applyResolvedThemeAttribute } = await import("../lib/themePreference");
     const boot = (await import("../../public/theme-boot.js?raw")).default;
-    // 存储键一致
-    expect(boot).toContain(THEME_STORAGE_KEY);
-    // 接受的取值一致（且只有这三个 + 回落 system）
-    for (const p of THEME_PREFERENCES) expect(boot).toContain(`"${p}"`);
-    expect(boot).toContain('"system"');
+    // P04：未同意隐私政策前不得读取持久化偏好——boot 不碰存储键
+    expect(boot).not.toContain("localStorage");
+    expect(boot).not.toContain("tokenscope-theme");
+    // 首帧只跟随系统明暗并写入 data-theme
     expect(boot).toContain("prefers-color-scheme: dark");
-    // 运行时纯函数与 boot 语义一致
+    expect(boot).toContain("data-theme");
+    // 偏好恢复收敛到显式函数（同意后、业务挂载前调用一次）
+    localStorage.setItem("tokenscope-theme", "dark");
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {} }));
+    expect(applyResolvedThemeAttribute()).toBe("dark");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    // 系统明暗仍决定 system 偏好下的解析结果
+    const { parsePreference, resolveMode } = await import("../lib/themePreference");
     expect(parsePreference("dark")).toBe("dark");
     expect(resolveMode("system", true)).toBe("dark");
     expect(resolveMode("system", false)).toBe("light");

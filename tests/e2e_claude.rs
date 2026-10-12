@@ -35,9 +35,13 @@ fn hermetic_dir() -> PathBuf {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "tokenscope-e2e-claude-{}-{}",
+        "tokenscope-e2e-claude-{}-{}-{}",
         std::process::id(),
-        n
+        n,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ))
 }
 
@@ -77,13 +81,14 @@ cache_read = 0.3
 #[test]
 fn test_e2e_summary_collection() {
     let col = basic();
-    // 采集口径：2 个 jsonl、11 行、5 个未去重事件（M4 起去重上移到 report 层）。
+    // 采集口径：2 个 jsonl、11 行、6 个未去重事件（M4 起去重上移到 report 层；
+    // H02 起子代理用量不再排除）。
     assert_eq!(col.stats.files_scanned, 2);
     assert_eq!(col.stats.lines_seen, 11);
-    assert_eq!(col.stats.events, 5);
+    assert_eq!(col.stats.events, 6);
     assert_eq!(col.stats.duplicates_dropped, 0);
     assert_eq!(col.stats.bad_lines, 3);
-    assert_eq!(col.stats.skipped_sidechain, 1);
+    assert_eq!(col.stats.skipped_sidechain, 0, "H02：子代理用量并入");
     assert_eq!(col.stats.skipped_synthetic, 1);
     assert!(col.warnings.is_empty());
 }
@@ -108,40 +113,48 @@ fn test_e2e_summary_struct() {
 
     let d2 = &groups[1];
     assert_eq!(d2.key, "2026-07-18", "UTC 16:01 应落本地次日");
-    assert_eq!(d2.requests, 2);
-    assert_eq!(d2.tokens.input, 200);
-    assert_eq!(d2.tokens.output, 150);
+    assert_eq!(d2.requests, 3, "H02：子代理请求一并计入");
+    assert_eq!(d2.tokens.input, 1199);
+    assert_eq!(d2.tokens.output, 1149);
     assert!(d2.unknown_pricing);
     assert_eq!(d2.unknown_tokens.input, 100);
     assert_eq!(d2.unknown_tokens.output, 50);
-    assert!((d2.cost_usd - 0.0018).abs() < 1e-9);
+    // 0.0018（免费模型 0 + sonnet 去重后 100/100）+ 子代理 999/999 @ 3/15
+    assert!((d2.cost_usd - 0.019782).abs() < 1e-9);
 
     let t = &r.totals;
-    assert_eq!(t.requests, 3);
-    assert_eq!(t.tokens.input, 1200);
-    assert_eq!(t.tokens.output, 350);
+    assert_eq!(t.requests, 4);
+    assert_eq!(t.tokens.input, 2199);
+    assert_eq!(t.tokens.output, 1349);
     assert_eq!(t.tokens.cache_write, 5000);
     assert_eq!(t.tokens.cache_read, 10000);
     assert_eq!(t.unknown_tokens.input, 100);
-    assert!((t.cost_usd - 0.02955).abs() < 1e-9);
+    assert!((t.cost_usd - 0.047532).abs() < 1e-9);
 
     assert_eq!(r.sources[0].stats.duplicates_dropped, 2);
     assert_eq!(r.sources[0].stats.bad_lines, 3);
-    assert_eq!(r.sources[0].stats.skipped_sidechain, 1);
+    assert_eq!(r.sources[0].stats.skipped_sidechain, 0);
     assert_eq!(r.sources[0].stats.skipped_synthetic, 1);
 }
 
 #[test]
 fn test_e2e_summary_dimensions() {
-    // 模型维度（末行为合计）
+    // 模型维度（末行为合计）：MP04 起 key 是等价身份键、label 是展示名。
     let rm = claude_report(GroupBy::Model);
     let keys: Vec<&str> = rm.groups.iter().map(|g| g.key.as_str()).collect();
+    assert_eq!(keys, ["claudesonnet4520250929", "tencent/hy3:free", "合计"]);
+    let labels: Vec<&str> = rm
+        .groups
+        .iter()
+        .map(|g| g.label.as_deref().unwrap_or(""))
+        .collect();
     assert_eq!(
-        keys,
-        ["claude-sonnet-4-5-20250929", "tencent/hy3:free", "合计"]
+        labels,
+        ["claude-sonnet-4-5-20250929", "tencent/hy3:free", ""],
+        "无可信 models.dev 名时退回原始代表写法，合计行无 label"
     );
-    assert_eq!(rm.groups[0].requests, 2);
-    assert_eq!(rm.groups[0].tokens.input, 1100);
+    assert_eq!(rm.groups[0].requests, 3, "同模型组含子代理请求");
+    assert_eq!(rm.groups[0].tokens.input, 2099);
     assert!(rm.groups[1].unknown_pricing);
 
     // 项目维度
@@ -149,7 +162,7 @@ fn test_e2e_summary_dimensions() {
     let keys: Vec<&str> = rp.groups.iter().map(|g| g.key.as_str()).collect();
     assert_eq!(keys, ["proj-alpha", "proj-beta", "合计"]);
     assert_eq!(rp.groups[0].requests, 2);
-    assert_eq!(rp.groups[1].requests, 1);
+    assert_eq!(rp.groups[1].requests, 2, "子代理请求计入所属项目");
 }
 
 #[test]
@@ -162,11 +175,11 @@ fn test_e2e_summary_json_roundtrip() {
     assert_eq!(v["groups"].as_array().unwrap().len(), 3);
     assert_eq!(v["groups"][0]["key"], "2026-07-17");
     assert_eq!(v["groups"][0]["tokens"]["input"], 1000);
-    assert_eq!(v["totals"]["requests"], 3);
+    assert_eq!(v["totals"]["requests"], 4);
     // 末行为合计行（结构体序列化含它；GUI 渲染层自行跳过）
     assert_eq!(v["groups"][2]["key"], "合计");
     assert_eq!(v["sources"][0]["stats"]["duplicates_dropped"], 2);
     assert_eq!(v["sources"][0]["stats"]["bad_lines"], 3);
-    assert_eq!(v["sources"][0]["stats"]["skipped_sidechain"], 1);
+    assert_eq!(v["sources"][0]["stats"]["skipped_sidechain"], 0);
     assert_eq!(v["sources"][0]["stats"]["skipped_synthetic"], 1);
 }

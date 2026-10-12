@@ -26,8 +26,12 @@ fn fixture(agent: &str, p: &str) -> PathBuf {
 
 fn hermetic(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
-        "tokenscope-events-range-{tag}-{}",
-        std::process::id()
+        "tokenscope-events-range-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -46,6 +50,7 @@ fn opts(
         codex_dir: Some(fixture("codex", "basic")),
         cache_dir: Some(dir.join("cache")),
         pricing_index: Some(dir.join("pricing-index.json")),
+        pricing_path: Some(dir.join("no-pricing.toml")),
         openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
         modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
         tz: Some("Asia/Shanghai".to_string()),

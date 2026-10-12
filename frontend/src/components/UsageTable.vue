@@ -4,6 +4,7 @@ import { NCollapse, NCollapseItem, NDataTable, type DataTableColumn } from "naiv
 import { AGENT_LABEL, fmtNum, type Group, type SummaryReport } from "../types";
 import { formatMoney } from "../lib/formatMoney";
 import { tokenBucketLabel } from "../lib/tokenDisplay";
+import { displayTokens, totalTokens } from "../lib/tokenUsage";
 import { buildSourceLines } from "../lib/statsView";
 import ScrollList from "./ScrollList.vue";
 
@@ -51,7 +52,7 @@ const columns = computed<DataTableColumn[]>(() => {
     key: `tokens.${path}`,
     align: "center",
     className: "ts-num",
-    render: (row) => fmtNum(asGroup(row).tokens[path]),
+    render: (row) => fmtNum(displayTokens(asGroup(row).tokens)[path]),
   });
   const cols: DataTableColumn[] = [
     first,
@@ -65,13 +66,7 @@ const columns = computed<DataTableColumn[]>(() => {
       key: "total",
       align: "center",
       className: "ts-num",
-      render: (row) =>
-        fmtNum(
-          asGroup(row).tokens.input +
-            asGroup(row).tokens.output +
-            asGroup(row).tokens.cache_write +
-            asGroup(row).tokens.cache_read,
-        ),
+      render: (row) => fmtNum(totalTokens(asGroup(row).tokens)),
     },
     {
       // 设计系统 Task 5：金额列使用估算语义表头
@@ -81,7 +76,12 @@ const columns = computed<DataTableColumn[]>(() => {
       className: "ts-num",
       render: (row) => {
         const g = asGroup(row);
-        const text = formatMoney(g.cost_usd, "summary") + (g.unknown_pricing ? "†" : "");
+        // 与 SummaryCards 同口径：完全未计价显示"未知†"而不是 $0.00
+        //（缺价 ≠ 免费，G-P3-1）。
+        const unknownOnly = g.unknown_pricing && g.cost_usd === 0;
+        const text = unknownOnly
+          ? "未知†"
+          : formatMoney(g.cost_usd, "summary") + (g.unknown_pricing ? "†" : "");
         // 未知标记用警告色显式呈现，不用 opacity 压低（DESIGN.md §1）
         return h("span", { style: g.unknown_pricing ? "color: var(--ts-warning)" : "" }, text);
       },
@@ -113,7 +113,9 @@ const rowProps = (row: object) => ({
   class: "ts-focusable",
   tabindex: 0,
   role: "button",
-  "aria-label": `查看 ${asGroup(row).key} 的请求明细`,
+  // 复核修订：可访问名称用展示名（模型维度是友好名），身份键只用于点击参数——
+  // 屏幕阅读器不应读出 `claudeopus55` 这类压缩身份键。
+  "aria-label": `查看 ${asGroup(row).label ?? asGroup(row).key} 的请求明细`,
   onclick: () => emit("row-click", asGroup(row).key),
   onkeydown: (e: KeyboardEvent) => {
     if (e.key === "Enter" || e.key === " ") {

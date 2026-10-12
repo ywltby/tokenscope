@@ -17,12 +17,23 @@ export interface Group {
   cost_usd: number;
   unknown_pricing: boolean;
   unknown_tokens: TokenCounts;
+  /** H06：未知费用的原因（`rollup_only` = 该组含只有日粒度的历史）。 */
+  unknown_reason?: "rollup_only" | null;
   agents?: string[];
 }
 
 export interface SourceStat {
   agent: "claude-code" | "codex";
   stats: Record<string, number>;
+}
+
+/** H06：日汇总桶覆盖诊断（明细覆盖 / 汇总口径 / 未解决覆盖 / 时区提示）。 */
+export interface RollupCoverage {
+  detail_buckets: number;
+  rollup_buckets: number;
+  unresolved_buckets: number;
+  unresolved_covered_tokens: TokenCounts;
+  timezone_mismatch?: string | null;
 }
 
 export interface SummaryReport {
@@ -37,6 +48,71 @@ export interface SummaryReport {
   groups: Group[];
   totals: Group;
   warnings: string[];
+  /** H06：日汇总桶覆盖诊断（缺省 = 本次查询没有日粒度历史）。 */
+  rollup_coverage?: RollupCoverage;
+}
+
+/** H05：CCS 导入的来源库默认路径与存在性（只读路径解析，不打开库）。 */
+export interface CcsImportDefaults {
+  path: string;
+  exists: boolean;
+  /** 日汇总的来源统计时区假设（CCS 用本机日生成日键）。 */
+  timezone: string;
+}
+
+/** H05：导入预览（不写入任何用量）。 */
+export interface CcsImportPreview {
+  plan_id: string;
+  logical_source: string;
+  source_path: string;
+  source_schema: string;
+  source_day_timezone: string;
+  history_generation: number;
+  generated_at: string;
+  expires_in_seconds: number;
+  requests_total: number;
+  requests_importable: number;
+  requests_skipped_other_app: number;
+  requests_skipped_duplicate_of_proxy: number;
+  requests_rejected: number;
+  rejected_reasons: string[];
+  would_insert: number;
+  would_update: number;
+  would_unchanged: number;
+  would_conflict: number;
+  would_stale: number;
+  /** H05：身份不足但库内有"同时间同用量"候选的记录数（只作核对线索）。 */
+  would_overlap: number;
+  /** H05：存在未解决的重叠候选——提交需要用户显式确认，否则后端拒绝。 */
+  overlap_unresolved: boolean;
+  /** 重叠候选样例（最多 5 条）。 */
+  overlap_examples: string[];
+  net_new_tokens: TokenCounts;
+  rollups_total: number;
+  rollups_new: number;
+  rollups_unchanged: number;
+  rollups_conflicting: number;
+  /** 不支持的应用与字段非法的日汇总行数（total 可大于其余三分量之和）。 */
+  rollups_rejected: number;
+  unsupported_apps: [string, number][];
+  records_without_project: number;
+}
+
+/** H05：导入提交结果（可核查）。 */
+export interface CcsImportReport {
+  run_id: number;
+  logical_source: string;
+  requests_inserted: number;
+  requests_updated: number;
+  requests_unchanged: number;
+  requests_conflicted: number;
+  requests_stale: number;
+  /** 本批按"新增"导入但存在重叠候选的记录数（审计用）。 */
+  requests_overlap: number;
+  rollups_snapshotted: number;
+  rollups_conflicted: number;
+  net_new_tokens: TokenCounts;
+  generation_after: number;
 }
 
 export interface SourceStatus {
@@ -238,6 +314,10 @@ export interface EventRow {
   model: string;
   session_id: string;
   project: string;
+  /** B02：会话初始工作目录（项目根归并口径的一部分）；null/缺省 = 无可信 cwd */
+  session_initial_cwd?: string | null;
+  /** B02：该请求作用域内最近观察到的结构化工作目录（保留子目录细节） */
+  event_cwd?: string | null;
   input: number;
   output: number;
   cache_write: number;
@@ -259,7 +339,10 @@ export interface EventList {
 
 export interface EventDrill {
   type: "day" | "model" | "project";
+  /** 后端筛选键（模型维度 = 等价身份键，如 `claudeopus55`）。 */
   key: string;
+  /** MP04：展示名（模型维度 = 友好名，项目维度 = 路径末段）；仅用于文案。 */
+  label?: string;
 }
 
 export type Dim = "day" | "model" | "project" | "agent";

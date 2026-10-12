@@ -27,22 +27,44 @@ const TIER_EXTERNAL: u8 = 0;
 const TIER_MODELSDEV: u8 = 1;
 const TIER_OPENROUTER: u8 = 2;
 
-/// 归一化模型标识（键与查询共用同一函数）：lowercase、`.` → `-`。
-/// 保留 `vendor/` 渠道信息（Task 2A：渠道是候选元数据，不剥前缀）；
-/// 变体后缀（`:free` 等）保留参与匹配。
+/// 归一化模型标识（键与查询共用同一函数，MP01）：按 `ModelIdentity` 解析结构后
+/// 做等价化——ASCII 转小写、删除 `-` / `.` / `_`，保留 `/` 渠道结构与 `: 变体`
+/// 结构。渠道名等**元数据展示**仍用原文，不走本函数。
 pub fn normalize_model_id(s: &str) -> String {
-    s.trim().to_ascii_lowercase().replace('.', "-")
+    crate::model_identity::ModelIdentity::parse(s).identity_key()
 }
 
-/// 匹配键：归一化后取最后一个 `/` 之后的行为准（Task 2A 候选键）。
-/// `nano-gpt/qwen/qwen3.8-27b:thinking` → `qwen3.8-27b:thinking`——
-/// 不同渠道的同名模型汇入同一候选组，由估算按费用裁决。
+/// 匹配键：末段（最后一个 `/` 之后）的等价键（Task 2A 候选键 + MP01 等价化）。
+/// `nano-gpt/qwen/qwen3.8-27b:thinking` → `qwen3827b:thinking`——不同渠道的同名
+/// 模型汇入同一候选组，由估算按费用裁决。
 fn match_key(raw: &str) -> String {
-    let norm = normalize_model_id(raw);
-    match norm.rfind('/') {
-        Some(i) => norm[i + 1..].to_string(),
-        None => norm,
-    }
+    crate::model_identity::ModelIdentity::parse(raw)
+        .leaf_key()
+        .to_string()
+}
+
+/// 展示序（稳定）：按 display 再按 name 字典序比较——用于同前缀多条目择一。
+fn entry_display_order(a: &Entry, b: &Entry) -> bool {
+    let key = |e: &Entry| {
+        (
+            e.display.clone(),
+            e.name.clone().unwrap_or_default(),
+            e.tier,
+        )
+    };
+    key(a) < key(b)
+}
+
+/// 名称是否可用：非 None 且去掉首尾空白后非空——空白名称视为缺失
+/// （否则聚合标签、图表名称会显示成空白）。
+fn usable_name(name: &Option<String>) -> bool {
+    name.as_deref().is_some_and(|n| !n.trim().is_empty())
+}
+
+/// 归一后基名为空（`provider/-._`、`-._`）→ 不是有效价格键：拒绝入库并由调用方
+/// 给出诊断（查询端同样拒绝空键，这里从源头保证空键不进入价格表）。
+fn empty_model_key(display: &str) -> bool {
+    crate::model_identity::ModelIdentity::parse(display).is_empty_key()
 }
 
 #[derive(Debug, Clone)]
@@ -1331,14 +1353,6 @@ cache_read = 0.5
 # cache_read = "same_as_input"
 "#;
 
-/// 拆出变体后缀：`"hy3:free"` → `("hy3", Some("free"))`；无变体 → `("hy3", None)`。
-fn split_variant(normalized: &str) -> (&str, Option<&str>) {
-    match normalized.find(':') {
-        Some(pos) => (&normalized[..pos], Some(&normalized[pos + 1..])),
-        None => (normalized, None),
-    }
-}
-
 /// 前缀索引：归一化前缀（字节串，避免多字节切片 panic）→ 同前缀全部条目。
 /// 查找时只枚举查询串自身的 ~30 个前缀做哈希命中，复杂度与表大小无关。
 type PrefixIndex = std::collections::HashMap<Vec<u8>, Vec<Entry>>;
@@ -1374,7 +1388,11 @@ fn default_index_v1() -> u8 {
 /// v8（SF03）：签名改为"路径+内容摘要"、读取失败结果不再发布——旧版
 /// 索引可能永久记住了无告警的读取失败产物（同 mtime/size 旧签名），
 /// **拒绝读取**，按来源重建（候选合法性校验保留）。
-pub const INDEX_VERSION: u8 = 8;
+/// v9（MP05）：匹配键改为等价键（删除 `-` `.` `_`）——v8 索引里的
+/// prefix 是旧规则（`gpt-5.6-sol`），与新查询键（`gpt56sol`）不兼容，
+/// **拒绝读取**并按来源离线重建；重建用保留的 `display` 原文重新推导键，
+/// 不从压扁后的键反推结构。
+pub const INDEX_VERSION: u8 = 9;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -1632,18 +1650,23 @@ impl SourceReads {
     }
 
     fn sig(&self) -> String {
-        [&self.external, &self.modelsdev, &self.openrouter]
-            .iter()
-            .map(|f| {
-                let p = f
-                    .path
-                    .as_deref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "-".to_string());
-                format!("{p}:{}", f.health.state_token())
-            })
-            .collect::<Vec<_>>()
-            .join("|")
+        // MP05：签名同时携带**匹配规则版本**——规则升级（等价键、边界回退）
+        // 时即使来源字节一模一样，也必须重建候选索引并让前端快照的价格修订
+        // 变化（否则旧规则算出的金额会被当成同一修订继续复用）。
+        let mut parts = vec![format!("rules:{INDEX_VERSION}")];
+        parts.extend(
+            [&self.external, &self.modelsdev, &self.openrouter]
+                .iter()
+                .map(|f| {
+                    let p = f
+                        .path
+                        .as_deref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    format!("{p}:{}", f.health.state_token())
+                }),
+        );
+        parts.join("|")
     }
 }
 
@@ -1935,6 +1958,13 @@ impl Pricing {
                                 }
                             }
                         };
+                        if empty_model_key(&e.id) {
+                            diagnostics.push(format!(
+                                "models.dev 条目 {} 的模型标识归一后为空，已拒绝",
+                                e.id
+                            ));
+                            continue;
+                        }
                         pricing.add_entry(Entry {
                             prefix: match_key(&e.id),
                             display: e.id,
@@ -2024,6 +2054,13 @@ impl Pricing {
                             ));
                             continue;
                         }
+                        if empty_model_key(&e.id) {
+                            diagnostics.push(format!(
+                                "OpenRouter 条目 {} 的模型标识归一后为空，已拒绝",
+                                e.id
+                            ));
+                            continue;
+                        }
                         pricing.add_entry(Entry {
                             prefix: match_key(&e.id),
                             display: e.id,
@@ -2074,6 +2111,10 @@ impl Pricing {
             };
             for m in parsed.model {
                 let display = m.prefix.clone();
+                if empty_model_key(&display) {
+                    diagnostics.push(format!("外置条目 {display} 的模型标识归一后为空，已忽略"));
+                    continue;
+                }
                 match external_model_plan(&m) {
                     Ok((plan, rule_warnings)) => {
                         for w in rule_warnings {
@@ -2192,21 +2233,28 @@ impl Pricing {
         })
     }
 
-    /// 候选收集（Task 2A，分阶段回退，阶段内不混匹配方式）：
-    /// 1) 完整匹配（含 variant，键完全一致）；
+    /// 候选收集（Task 2A + MP01，分阶段回退，阶段内不混匹配方式）：
+    /// 1) 完整匹配（含 variant，等价键完全一致）；
     /// 2) 完整匹配 variant 回退（查询带 variant 但条目只有基名）；
-    /// 3) 有边界前缀匹配（条目 variant 必须与查询一致）；
-    /// 4) 有边界前缀 + variant 回退。
+    /// 3) 边界前缀匹配（条目 variant 必须与查询一致）；
+    /// 4) 边界前缀 + variant 回退。
     ///
-    /// 前缀必须停在词元边界：`qwen3.8-27b` 可命中 `qwen3.8-27b-instruct`，
-    /// 不得命中 `qwen3.8-27b2`。免费（`:free`）等变体条目只在查询 variant
-    /// 完全一致时命中，基名价格对变体查询的套用仅发生在显式标记的回退段。
+    /// MP01：前缀只能在查询基名的**分隔符边界**（等价键偏移）处截断——
+    /// `opus55-20261010` 可回退到 `opus55`；`opus550` 不含边界，不得命中
+    /// `opus55`，`gpt-50` 也不得命中 `gpt5`（边界偏移 3 → 只允许 `gpt`）。
+    /// 免费（`:free`）等变体条目只在查询 variant 完全一致时命中，基名价格
+    /// 对变体查询的套用仅发生在显式标记的回退段。
     fn collect_candidates(&self, model: &str) -> Vec<(&Entry, MatchMode)> {
-        let leaf = match_key(model);
-        let (base, variant) = split_variant(&leaf);
+        let id = crate::model_identity::ModelIdentity::parse(model);
+        if id.is_empty_key() {
+            // 压缩后为空的基名不是通配价格：按未收录处理。
+            return Vec::new();
+        }
+        let leaf = id.leaf_key().to_string();
+        let variant_key = id.variant_key();
         let mut cands: Vec<(&Entry, MatchMode)> = Vec::new();
 
-        // 1) 完整匹配（含 variant）。
+        // 1) 完整匹配（等价键，含 variant）。
         if let Some(group) = self.by_prefix.get(leaf.as_bytes()) {
             cands.extend(group.iter().map(|e| (e, MatchMode::Full)));
         }
@@ -2214,48 +2262,39 @@ impl Pricing {
             return cands;
         }
         // 2) 完整匹配 variant 回退（查询带 variant、条目只有基名）。
-        if variant.is_some()
-            && let Some(group) = self.by_prefix.get(base.as_bytes())
+        if variant_key.is_some()
+            && let Some(group) = self.by_prefix.get(id.base_key().as_bytes())
         {
             cands.extend(group.iter().map(|e| (e, MatchMode::FullVariantFallback)));
         }
         if !cands.is_empty() {
             return cands;
         }
-        // 3) 有边界前缀匹配（变体一致；变体携带的条目只会精确命中）。
-        let bytes = leaf.as_bytes();
-        for k in (1..bytes.len()).rev() {
-            if let Some(group) = self.by_prefix.get(&bytes[..k]) {
-                for e in group {
-                    let (_, evar) = split_variant(&e.prefix);
-                    if evar != variant {
-                        continue;
-                    }
-                    let rest = &leaf[k..];
-                    if rest.starts_with('-') || rest.starts_with(':') {
-                        cands.push((e, MatchMode::Prefix));
-                    }
-                }
+        // 3) 边界前缀匹配（变体一致；变体携带的条目只会精确命中）。
+        for &k in id.boundaries().iter().rev() {
+            let prefix = id.base_prefix(k);
+            let key = match &variant_key {
+                Some(v) => format!("{prefix}:{v}"),
+                None => prefix,
+            };
+            if let Some(group) = self.by_prefix.get(key.as_bytes()) {
+                cands.extend(group.iter().map(|e| (e, MatchMode::Prefix)));
             }
         }
         if !cands.is_empty() {
             return cands;
         }
-        // 4) 前缀 + variant 回退（对基名做有边界前缀，条目必须无 variant）。
-        if variant.is_some() {
-            let bbytes = base.as_bytes();
-            for k in (1..bbytes.len()).rev() {
-                if let Some(group) = self.by_prefix.get(&bbytes[..k]) {
-                    for e in group {
-                        let (_, evar) = split_variant(&e.prefix);
-                        if evar.is_some() {
-                            continue;
-                        }
-                        let rest = &base[k..];
-                        if rest.starts_with('-') || rest.starts_with(':') {
-                            cands.push((e, MatchMode::PrefixVariantFallback));
-                        }
-                    }
+        // 4) 边界前缀 + variant 回退（条目必须无 variant）。
+        if variant_key.is_some() {
+            for &k in id.boundaries().iter().rev() {
+                let prefix = id.base_prefix(k);
+                if let Some(group) = self.by_prefix.get(prefix.as_bytes()) {
+                    cands.extend(
+                        group
+                            .iter()
+                            .filter(|e| !e.prefix.contains(':'))
+                            .map(|e| (e, MatchMode::PrefixVariantFallback)),
+                    );
                 }
             }
         }
@@ -2413,12 +2452,24 @@ impl Pricing {
 
     /// GUI 设置页条目（合并视图，含来源、显示名与同前缀 OpenRouter 对照价）。
     pub fn entries(&self) -> Vec<PricingEntry> {
-        // openrouter 层按归一化前缀索引，供非 openrouter 行对照（精确同前缀）。
-        let or_by_prefix: std::collections::HashMap<&str, &Entry> = self
-            .all_entries()
-            .filter(|e| e.tier == TIER_OPENROUTER)
-            .map(|e| (e.prefix.as_str(), e))
-            .collect();
+        // OpenRouter 层按等价前缀索引，供非 OpenRouter 行对照（精确同前缀）。
+        // MP02：等价化后同前缀可能有多条（不同渠道）——HashMap 的"后写覆盖"
+        // 会随条目顺序变化，这里改为按 (display, name) 稳定序择一，保证视图与
+        // 加载顺序无关；对照价仍取自**一条完整记录**，不拼接分项。
+        let mut or_by_prefix: std::collections::HashMap<&str, &Entry> =
+            std::collections::HashMap::new();
+        for e in self.all_entries().filter(|e| e.tier == TIER_OPENROUTER) {
+            match or_by_prefix.entry(e.prefix.as_str()) {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    if entry_display_order(e, slot.get()) {
+                        slot.insert(e);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(e);
+                }
+            }
+        }
         self.all_entries()
             .map(|e| {
                 let openrouter = or_by_prefix
@@ -2464,6 +2515,32 @@ impl Pricing {
 
     pub fn external_count(&self) -> usize {
         self.count_tier(TIER_EXTERNAL)
+    }
+
+    /// MP03（审查修订）：按**完整等价 ID**查询可信展示名——只认 models.dev
+    /// 的模型级 `name`（OpenRouter 渠道别名、外置条目名称不作为模型展示名），
+    /// 空白名称视为缺失。
+    ///
+    /// 与价格赢家选择独立：同一等价 ID 下按 (display, name) 稳定序择一，
+    /// 不随条目/事件顺序变化；仅前缀命中的旧版本不得冒充本模型；不同 ID
+    /// 即使 name 相同也不合并（身份由 `model_identity` 决定）。未命中返回
+    /// None——聚合层退回该组原始模型名的稳定代表写法。
+    pub fn display_name_for(&self, model: &str) -> Option<String> {
+        let id = crate::model_identity::ModelIdentity::parse(model);
+        if id.is_empty_key() {
+            return None;
+        }
+        let group = self.by_prefix.get(id.leaf_key().as_bytes())?;
+        let mut best: Option<&Entry> = None;
+        for e in group {
+            if e.tier != TIER_MODELSDEV || !usable_name(&e.name) {
+                continue;
+            }
+            if best.is_none_or(|b| entry_display_order(e, b)) {
+                best = Some(e);
+            }
+        }
+        best.and_then(|e| e.name.clone())
     }
 
     pub fn openrouter_count(&self) -> usize {
@@ -2592,6 +2669,8 @@ impl Pricing {
         // 索引文件命中（D2/F10 接线）：签名一致且版本为当前格式（R01：
         // v4/v5 可能携带错误的缓存价语义，拒绝读取、强制重建）→
         // 免解析双快照，毫秒级恢复完整价格表（含诊断）。
+        // 索引被拒时的重建原因（见下）随本次结果返回给调用方。
+        let mut index_rebuild_note: Option<String> = None;
         if let Ok(Some(index)) = load_index(index_path)
             && index.v == INDEX_VERSION
             && index.sig == sig
@@ -2604,14 +2683,34 @@ impl Pricing {
                 .entries
                 .iter()
                 .any(|e| price_plan_invalid(&index_entry_plan(e)));
-            if !has_invalid {
+            // MP05：索引里的 prefix 必须能由保留的 display 原文重新推导——
+            // 不一致说明索引写于其它匹配规则（或在传输中被改写），重建而非
+            // 猜测（避免用"丢失符号的键"当边界信息）。
+            let stale_keys = index
+                .entries
+                .iter()
+                .any(|e| e.display.trim().is_empty() || match_key(&e.display) != e.prefix);
+            // 复核修订：源文件加载时就被拒绝的空键条目（`provider/-._`）同样不得
+            // 经索引恢复回到价格表——恢复入口复用同一校验，命中即整体重建，
+            // 保证候选计数与诊断口径一致。
+            let has_empty_key = index.entries.iter().any(|e| empty_model_key(&e.display));
+            if !has_invalid && !stale_keys && !has_empty_key {
                 let arc = std::sync::Arc::new(Self::from_index(&index));
                 *guard = Some((sig.clone(), arc.clone(), index.warnings.clone()));
                 return (arc, sig, index.warnings, true);
             }
-            log::warn!("价格索引含非法单价条目，按来源重建");
+            index_rebuild_note = Some(if stale_keys {
+                "价格索引匹配键与原始名称不一致，按来源重建".to_string()
+            } else if has_empty_key {
+                "价格索引含归一后为空的模型键条目，按来源重建".to_string()
+            } else {
+                "价格索引含非法单价条目，按来源重建".to_string()
+            });
             // 落到下方重建路径——正常重建与非法索引回退共用同一缓存写入
             // 出口（cacheable 已由上方读取阶段保证）。
+        }
+        if let Some(note) = &index_rebuild_note {
+            log::warn!("{note}");
         }
         let outcome = Self::build_from_reads(reads);
         debug_assert!(outcome.cacheable);
@@ -2621,6 +2720,10 @@ impl Pricing {
             outcome.diagnostics.clone(),
         );
         let mut warnings = outcome.diagnostics.clone();
+        // 索引被拒后的重建原因随结果返回：降级状态必须对用户可见，不能只落日志。
+        if let Some(note) = index_rebuild_note.take() {
+            warnings.insert(0, note);
+        }
         if let Err(e) = save_index(index_path, &index) {
             warnings.push(format!("价格索引写入失败（不影响统计）: {e:#}"));
         }
@@ -2663,27 +2766,25 @@ mod tests {
 
     #[test]
     fn test_pricing_normalize() {
-        // Task 2A：归一化保留 vendor/ 渠道信息，匹配键另取末段。
+        // Task 2A + MP01：归一化保留 vendor/ 渠道结构，模型片段做等价化
+        // （转小写 + 删除 `-` `.` `_`）；匹配键另取末段等价键。
         assert_eq!(
             normalize_model_id("Anthropic/Claude-Sonnet-4.5"),
-            "anthropic/claude-sonnet-4-5"
+            "anthropic/claudesonnet45"
         );
         assert_eq!(
             normalize_model_id("claude-sonnet-4-5-20250929"),
-            "claude-sonnet-4-5-20250929"
+            "claudesonnet4520250929"
         );
         assert_eq!(normalize_model_id("Tencent/HY3:free"), "tencent/hy3:free");
-        assert_eq!(normalize_model_id("GPT-5.6-Sol"), "gpt-5-6-sol");
+        assert_eq!(normalize_model_id("GPT-5.6-Sol"), "gpt56sol");
         // 末段提取：最后一个 `/` 之后。
         assert_eq!(
             match_key("nano-gpt/qwen/qwen3.8-27b:thinking"),
-            "qwen3-8-27b:thinking"
+            "qwen3827b:thinking"
         );
-        assert_eq!(
-            match_key("anthropic/claude-sonnet-4.5"),
-            "claude-sonnet-4-5"
-        );
-        assert_eq!(match_key("claude-sonnet-4-5"), "claude-sonnet-4-5");
+        assert_eq!(match_key("anthropic/claude-sonnet-4.5"), "claudesonnet45");
+        assert_eq!(match_key("claude-sonnet-4-5"), "claudesonnet45");
     }
 
     #[test]
@@ -3283,7 +3384,7 @@ mod tests {
         assert_eq!(m.source, "openrouter");
         assert_eq!(m.match_mode, MatchMode::Full);
         assert_eq!(m.reason, "highest_complete_cost");
-        assert_eq!(m.matched_key, "qwen3-8-27b-obliterated:thinking");
+        assert_eq!(m.matched_key, "qwen3827bobliterated:thinking");
         assert!((est.cost - 8.0).abs() < 1e-9);
         // 查询另一渠道：同一候选组，仍是 A 胜出。
         let est = p
@@ -3355,10 +3456,10 @@ mod tests {
         let mut p3 = Pricing::empty();
         for (key, disp) in [
             (
-                "qwen3-8-27b-obliterated:thinking",
+                "qwen3827bobliterated:thinking",
                 "qwen3.8-27b-obliterated:thinking",
             ),
-            ("qwen3-8-27b", "qwen3.8-27b"),
+            ("qwen3827b", "qwen3.8-27b"),
         ] {
             p3.add_entry(Entry {
                 prefix: key.to_string(),
@@ -3382,7 +3483,7 @@ mod tests {
             )
             .unwrap();
         let m = est.matched.as_ref().unwrap();
-        assert_eq!(m.matched_key, "qwen3-8-27b-obliterated:thinking");
+        assert_eq!(m.matched_key, "qwen3827bobliterated:thinking");
         assert_eq!(m.match_mode, MatchMode::Full);
 
         // 4) 有边界前缀：`qwen3.8-27b` 命中 `qwen3.8-27b-instruct`，
@@ -3391,7 +3492,7 @@ mod tests {
             .estimate("qwen3.8-27b-instruct", &counts(1_000, 0, 0, 0), at())
             .unwrap();
         let m = est.matched.as_ref().unwrap();
-        assert_eq!(m.matched_key, "qwen3-8-27b");
+        assert_eq!(m.matched_key, "qwen3827b");
         assert_eq!(m.match_mode, MatchMode::Prefix);
         assert!(
             p3.estimate("qwen3.8-27b2", &counts(1_000, 0, 0, 0), at())
@@ -3401,7 +3502,7 @@ mod tests {
 
         // 5) 命中元数据可序列化（tooltip/breakdown 载体）。
         let json = serde_json::to_string(&m).unwrap();
-        assert!(json.contains("\"matched_key\":\"qwen3-8-27b\""));
+        assert!(json.contains("\"matched_key\":\"qwen3827b\""));
         assert!(json.contains("\"match_mode\":\"prefix\""));
         assert!(json.contains("\"source\":\"openrouter\""));
     }
@@ -3740,7 +3841,7 @@ mod tests {
             "sig": sig,
             "synced_at": "2026-10-05T00:00:00Z",
             "entries": [
-                { "prefix": "legacy-builtin-model", "display": "legacy-builtin-model",
+                { "prefix": "legacybuiltinmodel", "display": "legacy-builtin-model",
                   "name": null, "tier": 3, "input": 1.0, "output": 2.0,
                   "cache_write": 0.0, "cache_read": 0.0 }
             ]

@@ -1,0 +1,96 @@
+name: Install test
+
+# N12（安装部分）：对**当前产物**做 Actions 安装实跑。
+#
+# 触发：
+# - workflow_dispatch：手动对任意分支实跑（合并前取证）；
+# - pull_request（目标 main，且改动涉及安装包内容）：作为合并前门禁
+#   自动实跑——工作流文件随本 PR 落入 main 后，默认分支上即存在手动
+#   入口（M09：workflow_dispatch 必须先存在于默认分支才能选分支运行）。
+#
+# 本工作流不发布任何产物，与 Release workflow 的 install-test（发布
+# 门禁）分别记录结果。
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src-tauri/**'
+      - 'src/**'
+      - 'frontend/**'
+      - 'scripts/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      # K-P3-4：隐私政策经 include_str! 打进安装包——改政策即改产物。
+      - 'docs/privacy.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install-test:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Read application version
+        id: app_version
+        run: |
+          # M08：版本必须来自产物配置（tauri.conf.json），不能把分支名
+          # 当成版本传给断言。
+          $version = (python -c "import json; print(json.load(open('src-tauri/tauri.conf.json', encoding='utf-8'))['version'])").Trim()
+          if (-not $version) { throw "无法从 tauri.conf.json 读取版本" }
+          # 与 release 侧 release_metadata.py 的 SemVer 校验同口径；坏版本
+          # 在进 PS 断言参数前失败（单引号内插不容纳 `'` 等字符）。
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw "版本不是 SemVer：$version" }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+          Write-Host "应用版本：$version"
+      - name: Install acceptance workflow invocation contract (N12)
+        run: |
+          python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install acceptance fact-verifier contract (N12/M06)
+        run: |
+          python -B -m unittest discover -s scripts -p "test_inspect_history.py" -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install acceptance lifecycle contract (N12/M05)
+        run: |
+          pwsh -NoProfile -File scripts/test_install_helpers.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build production Windows x64 NSIS (without acceptance)
+        run: node .\frontend\node_modules\@tauri-apps\cli\tauri.js build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
+      - name: Run install / first-launch migration / reinstall / uninstall scenarios
+        env:
+          OLD_INSTALLER_URL: ${{ vars.OLD_INSTALLER_URL }}
+          OLD_INSTALLER_SHA256: ${{ vars.OLD_INSTALLER_SHA256 }}
+        run: |
+          $file = (Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | Select-Object -First 1).FullName
+          $installParameters = @{
+            InstallerPath = $file
+            AppVersion = '${{ steps.app_version.outputs.version }}'
+          }
+          if ($env:OLD_INSTALLER_URL) {
+            $installParameters.OldInstallerUrl = $env:OLD_INSTALLER_URL
+          }
+          if ($env:OLD_INSTALLER_SHA256) {
+            $installParameters.OldInstallerSha256 = $env:OLD_INSTALLER_SHA256
+          }
+          & .\scripts\test_install.ps1 @installParameters
+          exit $LASTEXITCODE
+      - name: Upload install evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: install-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/tokenscope-install-evidence
+          if-no-files-found: ignore
+          retention-days: 14

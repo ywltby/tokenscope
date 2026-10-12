@@ -3,6 +3,7 @@
 // 标签与数值错位（A=10、B=100 可能显示 B=10、A=100）。
 import { TOKEN_BUCKETS } from "./tokenDisplay";
 import type { Group, TokenCounts } from "../types";
+import { totalTokens } from "./tokenUsage";
 
 // UX07：显示名消费 tokenDisplay 单一来源（U14：缓存命中）。
 export const SERIES: { name: keyof TokenCounts; label: string }[] = TOKEN_BUCKETS.map((b) => ({
@@ -27,9 +28,9 @@ export function realGroups(groups: Group[]): Group[] {
   return groups.filter((g) => g.key !== "合计");
 }
 
-/// 分类顺序（单一事实源）：日维度保持时间序；其余按堆叠柱四类 token 总量降序。
+/// 日维度保持时间序；其余按总输入 + 输出降序，缓存不重复计数。
 function orderGroups(groups: Group[], by: string): Group[] {
-  const total = (g: Group): number => SERIES.reduce((sum, s) => sum + g.tokens[s.name], 0);
+  const total = (g: Group): number => totalTokens(g.tokens);
   return by === "day" ? groups : [...groups].sort((a, b) => total(b) - total(a));
 }
 
@@ -38,6 +39,9 @@ export function buildBarChartData(groups: Group[], by: string): BarChartData {
   return {
     // C2：项目维度分类显示用展示名（末段），完整路径经 key 保留。
     categories: ordered.map((g) => g.label ?? g.key),
+    // 2026-10-10 用户修订：图表与英雄栏统一用**互斥四桶**——「输入」= 未缓存
+    // 输入（不含缓存写入/缓存命中），四类相加 = 总 token，不重复计数。
+    // 排序仍按总 token（四桶之和，与展示口径一致）。
     series: SERIES.map((s) => ({
       name: s.label,
       values: ordered.map((g) => g.tokens[s.name]),
@@ -48,4 +52,11 @@ export function buildBarChartData(groups: Group[], by: string): BarChartData {
 /// 设计系统 Task 4：与分类轴同序的完整原始键（长名 tooltip 用，不参与聚合）。
 export function fullLabels(groups: Group[], by: string): string[] {
   return orderGroups(groups, by).map((g) => g.key);
+}
+
+/// MP04：tooltip 标题——项目维度保留完整路径（长名靠 tooltip 展开），其余
+/// 维度显示展示名：模型维度的 key 是等价身份键（`claudeopus55`），绝不能拿它
+/// 当标题；原始模型名仍在请求明细里可查。
+export function tooltipLabels(groups: Group[], by: string): string[] {
+  return orderGroups(groups, by).map((g) => (by === "project" ? g.key : (g.label ?? g.key)));
 }

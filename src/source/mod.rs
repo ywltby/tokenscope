@@ -4,7 +4,9 @@
 //! - 发现与解析拆为 `discover` / `parse_file` 两个能力，供缓存按文件指纹增量失效。
 
 pub mod claude;
+pub mod claude_projects;
 pub mod codex;
+pub mod project_path;
 
 use std::path::{Path, PathBuf};
 
@@ -17,7 +19,7 @@ use crate::model::{AgentKind, UsageEvent};
 /// Codex 专属计数器为 0 时不序列化；`duplicates_dropped` 自 M4 起由全局去重
 /// 步骤统计并回填，source 层恒为 0。`io_errors` 是文件级读取失败数（B4）：
 /// 读取失败的文件不写成功缓存，且在来源统计中可见。
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct CollectStats {
     pub files_scanned: u64,
     pub lines_seen: u64,
@@ -80,6 +82,16 @@ pub trait Source {
     /// 扫描根目录（缺失警告与缓存展示用）。
     fn root(&self) -> &Path;
 
+    /// H02：**全部**采集根（默认单根 = [`root`](Self::root)）。
+    ///
+    /// Codex 默认来源同时覆盖 `sessions/` 与 `archived_sessions/`；发现、
+    /// 目录缺失判定与缓存上下文都按同一份根集合处理，避免"某一根被静默
+    /// 忽略"或"换根后仍复用旧归属"。显式自定义根恒为单根——只在选定目录
+    /// 内递归，不扩大到目录之外。
+    fn roots(&self) -> Vec<PathBuf> {
+        vec![self.root().to_path_buf()]
+    }
+
     /// 发现全部 jsonl，按路径排序保证稳定顺序（B4）：子目录不可读等
     /// 发现期异常以诊断字符串返回，不再静默吞掉——"只统计到部分数据"
     /// 必须对调用方可见。
@@ -93,20 +105,30 @@ pub trait Source {
     /// 解析单个文件（不做跨文件去重；读取失败计 `io_errors` 并返回空产物）。
     fn parse_file(&self, path: &Path) -> FileParse;
 
+    /// A03：解析上下文修订——影响解析结果的**外部配置**摘要（如 Claude 项目
+    /// 映射）。变化即代表派生结果失效：文件缓存按该修订区分命中，查询复用键
+    /// 也据此分开。默认空串 = 无可变外部依赖。
+    fn context_revision(&self) -> &str {
+        ""
+    }
+
     /// 便捷全量采集：发现 + 逐文件解析，未全局去重（目录缺失 → 警告 + 空结果）。
     fn collect(&self) -> Result<Collection> {
         let mut stats = CollectStats::default();
         let mut warnings = Vec::new();
         let mut events = Vec::new();
-        if !self.root().is_dir() {
-            warnings.push(format!(
-                "{} 目录不存在：{}",
-                match self.agent() {
-                    AgentKind::ClaudeCode => "Claude",
-                    AgentKind::Codex => "Codex",
-                },
-                self.root().display()
-            ));
+        let roots = self.roots();
+        if !roots.iter().any(|r| r.is_dir()) {
+            for root in &roots {
+                warnings.push(format!(
+                    "{} 目录不存在：{}",
+                    match self.agent() {
+                        AgentKind::ClaudeCode => "Claude",
+                        AgentKind::Codex => "Codex",
+                    },
+                    root.display()
+                ));
+            }
             return Ok(Collection {
                 agent: self.agent(),
                 events,

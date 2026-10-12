@@ -22,8 +22,12 @@ use tokenscope::pricing::{Pricing, RateKind, RateSpec};
 
 fn fresh_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
-        "tokenscope-price-view-{tag}-{}",
-        std::process::id()
+        "tokenscope-price-view-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();

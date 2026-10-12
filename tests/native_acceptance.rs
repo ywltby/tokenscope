@@ -30,8 +30,12 @@ const CODE_ASSERTION: i32 = 4;
 fn temp_root(tag: &str) -> PathBuf {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let d = std::env::temp_dir().join(format!(
-        "tokenscope-acceptance-{tag}-{}-{n}",
-        std::process::id()
+        "tokenscope-acceptance-{tag}-{}-{n}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -136,7 +140,10 @@ fn acceptance_child_hermetic_paths() {
     let data = tokenscope::report::data_dir().unwrap();
     let paths: Vec<(&str, PathBuf)> = vec![
         ("data_dir", data.clone()),
-        ("cache.db", tokenscope::report::cache_file_path(None)),
+        (
+            "history.db",
+            tokenscope::report::history_file_path(&Default::default()).unwrap(),
+        ),
         (
             "pricing-index",
             tokenscope::report::pricing_index_path(None),
@@ -336,7 +343,7 @@ fn native_acceptance_paths_are_hermetic() {
     // 逐项覆盖：数据目录派生的 6 个文件 + 设置 + 日志 + 两个来源根。
     for label in [
         "data_dir=",
-        "cache.db=",
+        "history.db=",
         "pricing-index=",
         "pricing.toml=",
         "pricing-modelsdev.json=",
@@ -357,9 +364,31 @@ fn native_acceptance_paths_are_hermetic() {
     assert!(root.join("tokenscope/settings.toml").exists());
     assert!(root.join("tokenscope/logs").exists());
     assert!(
-        root.join("tokenscope/cache.db").exists(),
-        "缓存必须落在隔离根内"
+        root.join("tokenscope/history.db").exists(),
+        "用量历史库必须落在隔离根内"
     );
+    // 历史库必须是有效 SQLite 且含 H01 的全部事实表（当前运行时不再
+    // 生成旧 cache.db——它只是可选的只读迁移来源，全新隔离根不会创建）。
+    let history = rusqlite::Connection::open_with_flags(
+        root.join("tokenscope/history.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("验收根内的 history.db 必须可只读打开");
+    for table in [
+        "usage_events",
+        "event_aliases",
+        "event_origins",
+        "source_files",
+        "ccs_daily_usage",
+        "import_runs",
+        "history_meta",
+    ] {
+        history
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap_or_else(|e| panic!("历史库缺少表 {table}: {e}"));
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -409,7 +438,14 @@ fn acceptance_without_root_fails_before_collection() {
         ),
         (
             "missing".to_string(),
-            std::env::temp_dir().join(format!("tokenscope-no-such-{}", std::process::id())),
+            std::env::temp_dir().join(format!(
+                "tokenscope-no-such-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
         ),
         ("real-data".to_string(), home.join(".tokenscope")),
         ("home".to_string(), home.clone()),

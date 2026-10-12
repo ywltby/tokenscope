@@ -102,6 +102,8 @@ describe("all_token_views_share_labels_and_order（UX07 token 显示词同源）
     expect(SERIES.map((s) => s.name)).toEqual(TOKEN_BUCKETS.map((b) => b.key));
     expect(SERIES.map((s) => s.label)).toEqual(TOKEN_BUCKETS.map((b) => b.label));
     // 费用公式行（costBreakdown.KIND_LABEL）
-    expect(TOKEN_BUCKETS.map((b) => KIND_LABEL[b.key])).toEqual(TOKEN_BUCKETS.map((b) => b.label));
+    expect(TOKEN_BUCKETS.map((b) => KIND_LABEL[b.key])).toEqual(
+      TOKEN_BUCKETS.map((b) => (b.key === "input" ? "输入（扣除缓存）" : b.label)),
+    );
   });
 });

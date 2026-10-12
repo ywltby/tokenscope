@@ -186,7 +186,9 @@ describe("Settings 同步状态传播（Task 4）", () => {
       global: { provide: { [SETTINGS_PRELOAD as symbol]: preload } },
     });
     await flushPromises();
-    expect(invokeMock).toHaveBeenCalledTimes(5);
+    // source_status / cache_stats / pricing_entries / settings_get /
+    // autostart_status + H05 的来源库默认路径解析（只解析路径，不打开 CCS 库）
+    expect(invokeMock).toHaveBeenCalledTimes(6);
     expect(vmOfSettings(w).autoSync).toBe(true);
     expect(vmOfSettings(w).pricing?.modelsdev_count).toBe(10);
     expect(w.findComponent({ name: "NSpin" }).exists()).toBe(false);
@@ -480,6 +482,14 @@ describe("Settings 分组与状态（设计系统 Task 7）", () => {
     }
   });
 
+  it("计价说明与实现一致：完整候选优先，不称全部候选取最高（N08/R03）", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    expect(w.text()).toContain("有完整四桶价格的候选优先");
+    expect(w.text()).toContain("没有完整候选时才回退到部分候选中已知费用最高者");
+    expect(w.text()).not.toContain("全部候选按本次请求条件计价");
+  });
+
   it("来源身份标签用中性色（成功/警告只表达同步状态）", async () => {
     const w = mount(Settings);
     await flushPromises();
@@ -509,9 +519,17 @@ describe("Settings macOS 分组结构（设计系统 Task 7）", () => {
     const w = mount(Settings);
     await flushPromises();
     const titles = w.findAll(".group-title").map((t) => t.text());
-    expect(titles).toEqual(["Token 显示颜色", "应用", "数据源", "缓存", "价格", "高级配置"]);
+    expect(titles).toEqual([
+      "Token 显示颜色",
+      "应用",
+      "数据源",
+      "缓存",
+      "从 CCS 导入用量",
+      "价格",
+      "高级配置",
+    ]);
     const cards = w.findAll("section.ts-card");
-    expect(cards.length).toBe(6);
+    expect(cards.length).toBe(7);
     for (const t of w.findAll(".group-title")) {
       expect(t.element.closest("section.ts-card"), "组标题必须在卡片外").toBeNull();
     }
@@ -860,10 +878,12 @@ describe("Settings 目录信息与重建（UX08）", () => {
     const w = mount(Settings);
     await flushPromises();
     const inputs = w.findAll(".n-input__input-el");
-    expect(inputs.length).toBeGreaterThanOrEqual(2);
+    expect(inputs.length).toBeGreaterThanOrEqual(3);
     expect(inputs.map((i) => i.attributes("aria-label"))).toEqual([
       "Claude Code 日志目录",
       "Codex 日志目录",
+      // H05：CCS 导入的来源库路径同样给稳定可访问名称
+      "来源库路径",
     ]);
     // label[for] 指向真实 input 的 id（名称不靠 placeholder 兜底）
     for (const input of inputs) {
@@ -874,7 +894,7 @@ describe("Settings 目录信息与重建（UX08）", () => {
       expect(label.text()).toBe(input.attributes("aria-label"));
     }
     // placeholder 只说明留空语义，不再内嵌会变动的路径
-    for (const input of inputs) {
+    for (const input of inputs.slice(0, 2)) {
       expect(input.attributes("placeholder")).toBe("留空使用当前生效目录");
     }
   });
@@ -933,7 +953,7 @@ describe("Settings 目录信息与重建（UX08）", () => {
     await flushPromises();
     // 预期说明可见
     expect(w.text()).toContain("重新扫描日志，可能需要一段时间");
-    const btn = w.findAll("button").find((b) => b.text().includes("重建缓存"))!;
+    const btn = w.findAll("button").find((b) => b.text().includes("重扫日志"))!;
     expect(btn).toBeDefined();
     await btn.trigger("click");
     // 进行中：按钮处于 loading（进度反馈保留）
@@ -943,9 +963,11 @@ describe("Settings 目录信息与重建（UX08）", () => {
     resolveRebuild({ path: "p", files: 5, events: 9 });
     await flushPromises();
     expect(calls).toBe(1);
-    // AP03：成功提示必须说明范围（按当前来源配置、仅派生数据），
-    // 不能只说"已重建"让用户以为配置外来源也被采集。
-    expect(msgSpy.success).toHaveBeenCalledWith("缓存已重建（按当前来源配置，仅重建派生数据）");
+    // H04/AP03：成功提示必须说明范围（按当前来源配置重新解析）与"历史用量
+    // 不受影响"，不能只说"已重建"让用户以为配置外来源也被采集。
+    expect(msgSpy.success).toHaveBeenCalledWith(
+      "已重扫日志（按当前来源配置重新解析，已保存的历史用量不受影响）",
+    );
     expect(btn.classes()).not.toContain("n-button--loading");
   });
 

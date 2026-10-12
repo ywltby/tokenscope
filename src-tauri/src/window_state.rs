@@ -44,6 +44,31 @@ pub fn save(path: &Path, ws: &WindowState) -> Result<()> {
     Ok(())
 }
 
+/// 恢复可见性判定（G-P3-3）：保存的窗口矩形与任一可用监视器可见区域
+/// 有交集才允许恢复。多显示器拔除/改布局后，旧 x/y 可能完全落在屏幕外，
+/// 非最大化窗口会恢复到不可见位置且默认尺寸兜底因状态文件存在而不生效。
+/// 返回 false 时调用方保留 tauri.conf 的默认尺寸/居中位置。
+pub fn restorable_on_any_monitor(ws: &WindowState, monitors: &[(i32, i32, u32, u32)]) -> bool {
+    if ws.maximized || monitors.is_empty() {
+        // 最大化/拿不到监视器清单时不拦：最大化由系统落位，空清单（极
+        // 少见的枚举失败）宁可恢复也不把用户窗口钉死在默认位置。
+        return true;
+    }
+    let (wx, wy) = (ws.x as i32, ws.y as i32);
+    let (ww, wh) = (ws.width as i32, ws.height as i32);
+    monitors.iter().any(|(mx, my, mw, mh)| {
+        // I-P3-1：状态文件是用户可编辑 JSON，width/height 可以是大到
+        // `as i32` 饱和的值——用 i64 中间量做加法，debug 构建不 panic，
+        // release 构建不回绕误判。
+        let right = (*mx) as i64 + (*mw) as i64;
+        let bottom = (*my) as i64 + (*mh) as i64;
+        (wx as i64) < right
+            && (wx as i64) + (ww as i64) > (*mx) as i64
+            && (wy as i64) < bottom
+            && (wy as i64) + (wh as i64) > (*my) as i64
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +110,82 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         assert!(load(&path).is_err());
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    fn ws(x: f64, y: f64, w: f64, h: f64) -> WindowState {
+        WindowState {
+            width: w,
+            height: h,
+            x,
+            y,
+            maximized: false,
+        }
+    }
+
+    #[test]
+    fn test_restorable_on_any_monitor() {
+        // 单显示器 (0,0,1920,1080)。
+        let monitors = vec![(0, 0, 1920, 1080)];
+        assert!(restorable_on_any_monitor(
+            &ws(100.0, 50.0, 1280.0, 820.0),
+            &monitors
+        ));
+        // 部分相交（右边缘越界）→ 仍可恢复。
+        assert!(restorable_on_any_monitor(
+            &ws(1800.0, 100.0, 1280.0, 820.0),
+            &monitors
+        ));
+        // 完全在屏幕外（左侧 1920 之外）→ 拒绝恢复（G-P3-3）。
+        assert!(!restorable_on_any_monitor(
+            &ws(3000.0, 100.0, 400.0, 300.0),
+            &monitors
+        ));
+        assert!(!restorable_on_any_monitor(
+            &ws(-1000.0, -1000.0, 400.0, 300.0),
+            &monitors
+        ));
+        // 仅边角相触（间隙为 0）不算相交。
+        assert!(!restorable_on_any_monitor(
+            &ws(1920.0, 100.0, 400.0, 300.0),
+            &monitors
+        ));
+        // 第二显示器覆盖时第一屏外位置可恢复。
+        let dual = vec![(0, 0, 1920, 1080), (1920, 0, 1920, 1080)];
+        assert!(restorable_on_any_monitor(
+            &ws(3000.0, 100.0, 400.0, 300.0),
+            &dual
+        ));
+    }
+
+    #[test]
+    fn test_restorable_maximized_and_empty_monitors_never_block() {
+        let mut maximized = ws(3000.0, 100.0, 400.0, 300.0);
+        maximized.maximized = true;
+        assert!(restorable_on_any_monitor(&maximized, &[]));
+        // 监视器枚举失败（空清单）不拦：宁可恢复也不钉死默认位置。
+        assert!(restorable_on_any_monitor(
+            &ws(3000.0, 100.0, 400.0, 300.0),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn test_restorable_saturating_values_do_not_overflow() {
+        // I-P3-1：状态文件是用户可编辑 JSON，width/height/x/y 可写 1e300
+        // 量级——`as i32` 饱和后 i64 加法不得 panic（debug overflow-checks），
+        // 判定确定：与监视器相交的巨型矩形可恢复，屏外饱和值拒绝。
+        let monitors = vec![(0, 0, 1920, 1080)];
+        assert!(restorable_on_any_monitor(
+            &ws(100.0, 100.0, 1e300, 300.0),
+            &monitors
+        ));
+        assert!(!restorable_on_any_monitor(
+            &ws(1e300, 1e300, 1e300, 1e300),
+            &monitors
+        ));
+        assert!(!restorable_on_any_monitor(
+            &ws(-1e300, -1e300, 1e300, 1e300),
+            &monitors
+        ));
     }
 }

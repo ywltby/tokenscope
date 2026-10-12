@@ -65,6 +65,10 @@ let freshArrived = false;
 // 失败必须可见并可重试（计划 ipc_error_visible），不再无声吞异常。
 const summaryError = ref<string | null>(null);
 const eventsError = ref<string | null>(null);
+/// G-P3-4：记录明细失败发生在首页还是追加页——追加失败的原地重试必须
+/// 仍走追加，不把已累积分页重置回首页。仅 failure 路径写该标记；
+/// 重试前还要求末行游标仍在（loadEvents(append) 内部守卫兜底）。
+const eventsFailureWasAppend = ref(false);
 // C4（F08）：快照必须携带查询身份——修复前 report 与 events 来自各自
 // 的请求，保存时可能混搭不同筛选的两代数据，恢复时筛选已重置而数据
 // 还是旧口径。eventsKey 记录明细当前所属的筛选上下文，两者一致才落盘。
@@ -80,6 +84,9 @@ type SnapshotPayload = {
   v: number;
   saved_at: string;
   filters: SnapshotFilters;
+  /** v11：日粒度历史参与方式随快照保存——「只看请求明细」是用户显式选择，
+   * 重新进入页面必须恢复，不能静默回退成 auto 重新带入日汇总。 */
+  rollups_mode: "auto" | "detail_only";
   report: SummaryReport;
   events: EventList;
 };
@@ -144,6 +151,10 @@ const statusPill = computed<{ cls: string; text: string }>(() => {
     return { cls: "ts-pill-warning", text: "缓存数据 · 刷新失败" };
   if (stale.value && loading.value)
     return { cls: "ts-pill-warning", text: "缓存数据 · 后台刷新中" };
+  // 首载失败且无任何数据可恢复：必须显示失败而非"刷新中"（G-P2-1）——
+  // !report 分支要先看错误，否则错误态对无数据场景不可达。
+  if (!report.value && summaryError.value)
+    return { cls: "ts-pill-warning", text: "刷新失败 · 暂无数据" };
   if (loading.value || !report.value) return { cls: "ts-pill-info", text: "刷新中…" };
   if (summaryError.value) return { cls: "ts-pill-warning", text: "刷新失败 · 显示上次数据" };
   return { cls: "ts-pill-success", text: "已更新" };
@@ -153,23 +164,33 @@ const statusPill = computed<{ cls: string; text: string }>(() => {
 // 分开命名：warnings（重叠/缓存降级等）、坏行、IO 错误——不声称所有
 // warning 都表示丢数据；干净空区间不误报。
 const collectionDiagnostics = computed(() => {
-  const warns = report.value?.warnings ?? [];
+  // H06：日汇总的时区不匹配是「当前视图看不到这部分历史」的可恢复提示，
+  // 与采集警告并列展示（不混入坏行/IO 统计）。
+  const warns = [...(report.value?.warnings ?? [])];
+  const timezoneMismatch = report.value?.rollup_coverage?.timezone_mismatch ?? null;
+  if (timezoneMismatch && !warns.includes(timezoneMismatch)) warns.push(timezoneMismatch);
   const statsList = report.value?.sources.map((s) => s.stats) ?? [];
   const ioErrors = statsList.reduce((a, st) => a + (st.io_errors ?? 0), 0);
   const badLines = statsList.reduce((a, st) => a + (st.bad_lines ?? 0), 0);
-  const clean = warns.length === 0 && ioErrors === 0 && badLines === 0;
+  // H06：含只有日粒度的历史时，费用按「未知」披露（不是模型未收录）。
+  const rollupOnly = report.value?.totals.unknown_reason === "rollup_only";
+  const clean = warns.length === 0 && ioErrors === 0 && badLines === 0 && !rollupOnly;
   const summaryText = clean
     ? null
     : [
         warns.length > 0 ? `${warns.length} 条采集警告` : null,
         ioErrors > 0 ? `${ioErrors} 个文件读取失败` : null,
         badLines > 0 ? `${badLines} 行解析失败（已跳过）` : null,
+        rollupOnly ? "含只有日粒度的历史（这部分费用按未知披露）" : null,
       ]
         .filter(Boolean)
         .join("，");
-  return { clean, summaryText, warns, ioErrors, badLines };
+  return { clean, summaryText, warns, ioErrors, badLines, rollupOnly, timezoneMismatch };
 });
 const showCollectionDetails = ref(false);
+/// H08：日粒度历史是否参与统计（`detail_only` = 只看请求明细）。切换会重建
+/// 查询会话（桶选择在建快照时固定，不能事后改），因此与其它筛选项同路径。
+const rollupsMode = ref<"auto" | "detail_only">("auto");
 
 // 任务 7：来源异常通知——单条直接展示，多条合并为一条可展开通知。
 const problemSources = computed(() => sourceStatus.value.filter((x) => x.state !== "ready"));
@@ -205,6 +226,9 @@ function beginQueryForCurrentEpoch(): Promise<QueryHandle | null> {
         from: captured.from,
         to: captured.to,
         tz: captured.tz,
+        // H08：日粒度历史参与方式（`detail_only` = 只看请求明细；来源时区与
+        // 展示时区不一致时用户可选的恢复路径之一）。
+        rollups: rollupsMode.value === "detail_only" ? "detail_only" : null,
       });
       if (epoch !== refreshEpoch || disposed) return null; // 旧 begin 晚到不接管
       currentQuery.value = h;
@@ -293,7 +317,12 @@ function saveSnapshot(): void {
   const payload: SnapshotPayload = {
     v: SNAPSHOT_VERSION,
     saved_at: new Date().toISOString(),
-    filters: ek,
+    // 复核修订：下钻标签写**当前汇总解析出的**展示名，避免把过期标签带进快照。
+    filters: {
+      ...ek,
+      drill: ek.drill ? { ...ek.drill, label: resolvedDrillLabel(ek.drill) } : null,
+    },
+    rollups_mode: rollupsMode.value,
     report: report.value,
     events: events.value,
   };
@@ -422,6 +451,7 @@ async function loadEvents(append = false): Promise<void> {
   } catch (e) {
     if (seq === eventsSeq && !disposed) {
       eventsError.value = errorText(e);
+      eventsFailureWasAppend.value = append;
       // RC02：会话失效 → 恢复动作改为新建批次（局部重试无意义）。
       if (isQueryExpired(e)) sessionReady.value = false;
     }
@@ -456,6 +486,8 @@ async function loadViewCache(): Promise<void> {
     range.value = cached.filters.range ? [...cached.filters.range] : null;
     drill.value = cached.filters.drill ? { ...cached.filters.drill } : null;
     tz.value = cached.filters.tz;
+    // v11：日粒度参与方式一并恢复——「只看请求明细」是显式选择，不回退 auto。
+    rollupsMode.value = cached.rollups_mode === "detail_only" ? "detail_only" : "auto";
     eventsKey.value = cached.filters;
     report.value = cached.report;
     events.value = cached.events;
@@ -492,7 +524,14 @@ function onSummaryRowClick(key: string): void {
     drill.value = null;
     return;
   }
-  drill.value = { type: by.value as "day" | "model" | "project", key };
+  const row = report.value?.groups.find((g) => g.key === key);
+  // MP04：筛选键始终是后端身份 key；展示名另存 label（模型维度 = 友好名），
+  // 避免把压缩后的身份键或名称反过来当筛选键。
+  drill.value = {
+    type: by.value as "day" | "model" | "project",
+    key,
+    label: row?.label ?? key,
+  };
 }
 
 function clearDrill(): void {
@@ -519,6 +558,14 @@ function startRefreshBatch(): void {
   void loadEvents();
 }
 
+/// H08：切换"只看请求明细"——桶选择在建快照时固定，必须重建查询会话，
+/// 因此与其它筛选项走同一条刷新路径（不原地改已冻结的统计口径）。
+function setRollupsMode(mode: "auto" | "detail_only"): void {
+  if (rollupsMode.value === mode) return;
+  rollupsMode.value = mode;
+  startRefreshBatch();
+}
+
 /// RC02：统一错误恢复入口。
 /// - 会话级失败（begin 失败、query_expired、会话被淘汰/外会话游标）→
 ///   建立**一个新批次**：一次 query_begin，汇总与首页共享同一新 query_id；
@@ -530,6 +577,10 @@ function retryAfterFailure(scope: "summary" | "events"): void {
     startRefreshBatch();
   } else if (scope === "summary") {
     void refresh();
+  } else if (eventsFailureWasAppend.value && events.value?.rows.at(-1)?.cursor) {
+    // G-P3-4：追加页失败的重试仍走追加（首页身份与锚点均未失效），
+    // 不把用户已翻到的分页进度重置回首页。
+    void loadEvents(true);
   } else {
     void loadEvents();
   }
@@ -541,7 +592,14 @@ const moreBlockedHint = computed<string | undefined>(() =>
   hasMore.value && !liveFirstPage.value ? "刷新完成后可继续加载" : undefined,
 );
 
-const drillLabel = (d: EventDrill): string => `${d.type}: ${d.key}`;
+/// 复核修订：下钻标签**跟随当前汇总**——价格同步/模型展示名更新后，表格与
+/// 筛选提示必须同时显示新名称；汇总里找不到时回退磁盘快照里的 label，再退回
+/// 身份键。项目维度保留完整路径，避免同名不同路径产生歧义。
+function resolvedDrillLabel(d: EventDrill): string {
+  if (d.type === "project") return d.key;
+  return report.value?.groups.find((g) => g.key === d.key)?.label ?? d.label ?? d.key;
+}
+const drillLabel = (d: EventDrill): string => `${d.type}: ${resolvedDrillLabel(d)}`;
 
 // UX05：真实可绘制类别（排除"合计"行）——用 computed 缓存，避免在模板里
 // 每次渲染都 filter 生成新数组；新数组会改变 TrendChart 的 groups 身份，
@@ -751,6 +809,43 @@ startRefreshBatch();
       <div v-for="(w, i) in collectionDiagnostics.warns" :key="i" class="source-detail-line">
         {{ w }}
       </div>
+    </div>
+    <!-- H08：日粒度历史的参与方式——计划 §5.2 给的两条恢复路径在这里可操作：
+         切回来源时区（筛选栏），或只看请求明细（下面的按钮）。 -->
+    <div
+      v-if="rollupsMode === 'auto' && collectionDiagnostics.timezoneMismatch"
+      class="ts-notice source-notice"
+    >
+      <svg
+        class="ts-notice-icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 8v5" />
+        <path d="M12 16h.01" />
+      </svg>
+      <span class="ts-notice-content">{{ collectionDiagnostics.timezoneMismatch }}</span>
+      <button
+        type="button"
+        class="ts-notice-action ts-focusable"
+        @click="setRollupsMode('detail_only')"
+      >
+        只看请求明细
+      </button>
+    </div>
+    <div v-else-if="rollupsMode === 'detail_only'" class="ts-notice source-notice">
+      <span class="ts-notice-content"
+        >当前只统计请求明细（不含只有日粒度的历史）；按日视图不受来源时区影响。</span
+      >
+      <button type="button" class="ts-notice-action ts-focusable" @click="setRollupsMode('auto')">
+        恢复自动参与
+      </button>
     </div>
     <div v-if="eventsError" class="ts-notice source-notice">
       <svg

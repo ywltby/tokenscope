@@ -27,6 +27,98 @@ export function reject(message) {
   return { [REJECT]: true, message };
 }
 
+/** P06：未同意基线的政策 DTO（与 src-tauri 下发的 PrivacySnapshot.policy 同形）。 */
+export const PRIVACY_POLICY_DTO = {
+  title: "TokenScope 隐私政策",
+  date: "2026 年 10 月 10 日",
+  markdown: [
+    "# TokenScope 隐私政策",
+    "",
+    "更新日期：2026 年 10 月 10 日",
+    "",
+    "同意前不读取使用数据。",
+    "",
+    "## 一、适用范围",
+    "",
+    "本政策适用于 TokenScope 自身的日志读取、统计、缓存、设置和价格同步功能。",
+    "",
+    "## 二、读取的数据及用途",
+    "",
+    "读取已启用来源中的会话日志并提取统计字段。",
+    "",
+    "## 三、本地保存位置",
+    "",
+    "应用自身的数据保存在用户主目录的 .tokenscope 目录。",
+    "",
+    "## 四、网络请求与数据传输",
+    "",
+    "价格同步访问 models.dev 与 OpenRouter 的公开目录。",
+    "",
+    "## 五、第三方服务与运行时",
+    "",
+    "WebView2 受 Microsoft 的产品设置与政策约束。",
+    "",
+    "## 六、用户可以如何控制数据",
+    "",
+    "可以在设置中关闭某个日志来源或关闭自动价格同步。",
+    "",
+    "## 七、保留、删除与卸载",
+    "",
+    "删除本地数据需要清理数据目录。",
+    "",
+    "## 八、反馈与联系方式",
+    "",
+    "可通过项目 Issues 联系维护者。",
+    "",
+    "## 九、政策更新",
+    "",
+    "数据处理方式变化时更新本文件的日期与内容。",
+  ].join("\n"),
+};
+
+/**
+ * P06：受隐私闸门保护的业务命令（与 `src-tauri/src/privacy.rs` 的
+ * PROTECTED_COMMANDS 对齐）。未同意的 fixture 对这些命令一律返回
+ * `privacy_consent_required`，与真实后端同形——否则既测不出泄漏，
+ * 也测不出前端是否提前发业务命令。
+ */
+export const PRIVACY_PROTECTED_COMMANDS = [
+  "summarize",
+  "list_events",
+  "query_begin",
+  "query_summary",
+  "query_events",
+  "startup_diagnostics",
+  "view_cache_load",
+  "view_cache_save",
+  "source_status",
+  "source_config_set",
+  "cache_stats",
+  "refresh_cache",
+  "pricing_entries",
+  "pricing_status",
+  "open_pricing_file",
+  "sync_pricing_openrouter",
+  "autostart_status",
+  "autostart_set",
+  "settings_get",
+  "settings_set_price_auto_sync",
+  "settings_set_close_action",
+  "close_resolve",
+  "open_settings_file",
+];
+
+/** 引导状态快照（`ready` = 已有有效同意记录）。 */
+export function privacySnapshot(phase) {
+  return {
+    phase,
+    detail: null,
+    exitPromptPending: false,
+    diagnostics: [],
+    policy: PRIVACY_POLICY_DTO,
+  };
+}
+
 export function isReject(v) {
   return typeof v === "object" && v !== null && REJECT in v;
 }
@@ -680,6 +772,15 @@ export function buildFixture(name) {
 
   function common(cmd, args) {
     switch (cmd) {
+      // P06：隐私引导——普通场景等价"已有有效同意记录（ready）"，
+      // 未同意场景由 cfg.privacy === "pending" 返回 needs_consent，
+      // 业务命令在 ipc() 里统一被拒绝。
+      case "privacy_bootstrap":
+        return privacySnapshot(cfg.privacy === "pending" ? "needs_consent" : "ready");
+      case "privacy_accept":
+        return privacySnapshot("ready");
+      case "privacy_exit_resolve":
+        return null;
       case "startup_diagnostics":
         return (
           cfg.startup ?? {
@@ -783,6 +884,11 @@ export function buildFixture(name) {
   }
 
   function ipc(cmd, args) {
+    // P06：未同意基线——业务命令一律返回 privacy_consent_required（与真实
+    // 后端同形）：前端若在同意前发业务命令，契约会直接失败而不是静默通过。
+    if (cfg.privacy === "pending" && PRIVACY_PROTECTED_COMMANDS.includes(cmd)) {
+      return reject(`privacy_consent_required：尚未同意隐私政策（${cmd}）`);
+    }
     if (cmd === "query_begin") return table.begin(args);
     if (cmd === "query_summary") return table.summary(args?.queryId);
     if (cmd === "query_events") return table.events(args?.queryId, args);
@@ -845,6 +951,8 @@ const SCENARIOS = {
   "pricing-needs-sync-openrouter-only": { kind: "normal", pricing: "needs-sync-openrouter-only" },
   // AP05：主源缺失且完全无价 → 这才是"当前费用仅能显示为未知"
   "pricing-none-available": { kind: "normal", pricing: "none-available" },
+  // P06：未同意隐私政策——只有引导命令可用，业务命令统一被拒绝，业务界面不挂载
+  "privacy-consent-pending": { kind: "normal", privacy: "pending" },
 };
 
 export const FIXTURE_NAMES = Object.keys(SCENARIOS);

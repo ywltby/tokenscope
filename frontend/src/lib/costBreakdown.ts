@@ -34,7 +34,7 @@ const MATCH_LABEL: Record<MatchMode, string> = {
 
 // UX07：分项显示名消费 tokenDisplay 单一来源（U14：缓存命中）。
 export const KIND_LABEL: Record<CostLineKind, string> = Object.fromEntries(
-  TOKEN_BUCKETS.map((b) => [b.key, b.label]),
+  TOKEN_BUCKETS.map((b) => [b.key, b.key === "input" ? "输入（扣除缓存）" : b.label]),
 ) as Record<CostLineKind, string>;
 
 /** USD/百万 token 单价（UX07：unit 场景单一入口）。 */
@@ -59,7 +59,7 @@ function factRows(bd: EventCostBreakdown): BreakdownRow[] {
     { label: "请求时间", value: m.request_at ?? "暂无数据" },
     {
       label: "prompt tokens",
-      detail: `${tokenBucketLabel("input")} ${fmtNum(input)} + ${tokenBucketLabel("cache_write")} ${fmtNum(cw)} + ${tokenBucketLabel("cache_read")} ${fmtNum(cr)} = ${fmtNum(bd.basis_value)}`,
+      detail: `输入（扣除缓存） ${fmtNum(input)} + ${tokenBucketLabel("cache_write")} ${fmtNum(cw)} + ${tokenBucketLabel("cache_read")} ${fmtNum(cr)} = 总输入 ${fmtNum(bd.basis_value)}`,
     },
     { label: "命中档位", value: bd.segment_label ?? "基础价档" },
     {

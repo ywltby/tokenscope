@@ -14,6 +14,7 @@ import Dashboard from "./Dashboard.vue";
 import dashboardSource from "./Dashboard.vue?raw";
 import TrendChart from "../components/TrendChart.vue";
 import type { Dim, EventList, Group, SummaryReport } from "../types";
+import { SNAPSHOT_VERSION } from "../lib/viewSnapshot";
 
 function group(key: string, input: number): Group {
   return {
@@ -208,12 +209,86 @@ describe("Dashboard 查询编排", () => {
     onClick("合计");
     expect(state(w)["drill"]).toBeNull();
   });
+
+  it("model_group_label_and_drill_key_are_distinct：下钻键是身份键，展示标签是友好名", async () => {
+    const modelReport: SummaryReport = {
+      ...summaryA,
+      by: "model",
+      groups: [{ ...group("claudeopus55", 10), label: "Claude Opus 5.5" }, group("合计", 10)],
+      totals: group("合计", 10),
+    };
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "query_summary") return Promise.resolve(modelReport);
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    state(w)["by"] = "model";
+    await nextTick();
+    await flushPromises();
+    const onClick = state(w)["onSummaryRowClick"] as (key: string) => void;
+    onClick("claudeopus55");
+    await nextTick();
+    const drill = state(w)["drill"] as { key: string; label?: string } | null;
+    // 传后端查询的是身份键；展示用 label（绝不是把名称反过来当 key）。
+    expect(drill?.key).toBe("claudeopus55");
+    expect(drill?.label).toBe("Claude Opus 5.5");
+    expect(w.text()).toContain("Claude Opus 5.5");
+    expect(w.text()).not.toContain("claudeopus55");
+  });
+
+  it("drill_label_follows_current_summary：价格同步后筛选提示与新快照都用新展示名", async () => {
+    // 展示名由后端汇总给出：价格同步前是旧写法，同步后换成友好名。
+    let currentLabel = "claude-opus-5-5";
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "query_summary") {
+        return Promise.resolve({
+          ...summaryA,
+          by: "model",
+          groups: [{ ...group("claudeopus55", 10), label: currentLabel }, group("合计", 10)],
+          totals: group("合计", 10),
+        });
+      }
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    state(w)["by"] = "model";
+    await nextTick();
+    await flushPromises();
+    (state(w)["onSummaryRowClick"] as (k: string) => void)("claudeopus55");
+    await nextTick();
+    expect(w.text()).toContain("claude-opus-5-5");
+
+    // 价格同步后的重查：第二次汇总带回新的展示名。
+    currentLabel = "Claude Opus 5.5";
+    (state(w)["manualRefresh"] as () => void)();
+    await flushPromises();
+    await nextTick();
+    await flushPromises();
+    expect(w.text()).toContain("Claude Opus 5.5");
+    expect(w.text(), "旧标签不得继续显示").not.toContain("model: claude-opus-5-5");
+
+    // 新快照携带新展示名，不把过期标签写盘。
+    const saves = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save");
+    const last = saves.at(-1)?.[1] as { value: { filters: { drill: { label?: string } } } };
+    expect(last.value.filters.drill.label).toBe("Claude Opus 5.5");
+    w.unmount();
+  });
 });
 
-// v5 快照样例（模块级：多个 describe 共用）
+// 当前版本快照样例（模块级：多个 describe 共用）
 function snapshotPayload() {
   return {
-    v: 6,
+    v: SNAPSHOT_VERSION,
     saved_at: "2026-10-05T00:00:00Z",
     filters: {
       by: "model",
@@ -272,6 +347,70 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     // v4 被忽略：筛选不得被恢复
     expect(state(w)["agent"]).toBe("all");
     expect(state(w)["stale"]).toBe(false);
+  });
+
+  it("old_project_identity_snapshot_is_ignored：旧项目身份快照的旧分组与旧下钻 key 都不恢复", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") {
+        const p = snapshotPayload();
+        return Promise.resolve({
+          ...p,
+          // v7 及更早的快照：项目 key 是"会话初始路径/slug"口径，分组 key 与
+          // 下钻 key（老 slug）在项目根归并后都已失效——读取时必须整体忽略，
+          // 而不是恢复旧分组。
+          v: 6,
+          filters: { ...p.filters, drill: { type: "project", key: "alpha" } },
+        });
+      }
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(state(w)["agent"]).toBe("all");
+    expect(state(w)["drill"]).toBeNull();
+    expect(state(w)["stale"]).toBe(false);
+    // 走正常加载：展示的是后端新分组，而不是旧快照里的旧分组。
+    expect((state(w)["report"] as SummaryReport).groups[0].key).toBe("2026-10-01");
+  });
+
+  it("old_matching_rules_snapshot_is_ignored：旧匹配规则算出的金额不恢复，新响应后正常保存", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") {
+        const p = snapshotPayload();
+        // v8 快照：金额由旧的模型匹配规则（`-`/`.` 不等价）算出。
+        return Promise.resolve({
+          ...p,
+          v: 8,
+          report: {
+            ...summaryA,
+            groups: [group("claude-opus-5.5", 42)],
+            totals: group("合计", 42),
+          },
+        });
+      }
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    // 旧快照整体忽略：金额与分组来自新响应（而非旧规则的 42）。
+    expect(state(w)["stale"]).toBe(false);
+    const report = state(w)["report"] as SummaryReport;
+    expect(report.groups[0].key).toBe("2026-10-01");
+    // 新响应落地后按当前版本正常保存（含新的 v）。
+    const w2 = mountDashboard();
+    await flushPromises();
+    await nextTick();
+    const saves = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save");
+    expect((saves.at(-1)?.[1] as { value: { v: number } }).value.v).toBe(SNAPSHOT_VERSION);
+    w2.unmount();
   });
 
   it("late_snapshot_cannot_replace_fresh_report：晚到缓存不得覆盖新结果", async () => {
@@ -365,6 +504,66 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     >;
     expect(call.before).toBe("2026-10-01 09:00:00T00:00:00.000Z|a");
     expect(state(w)["hasMore"]).toBe(false);
+  });
+
+  it("events_append_failure_retry_keeps_anchor：追加失败的重试仍走追加，不重置回首页（G-P3-4）", async () => {
+    const row = (ts: string, rid: string) => ({
+      ts,
+      record_id: rid,
+      cursor: `${ts}T00:00:00.000Z|${rid}`,
+      agent: "codex",
+      model: "m",
+      session_id: "s",
+      project: "p",
+      input: 1,
+      output: 1,
+      cache_write: 0,
+      cache_read: 0,
+      cost_usd: 0,
+    });
+    let appendFails = true;
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") {
+        const before = (args?.before as string | null) ?? null;
+        if (!before) {
+          return Promise.resolve({
+            rows: [row("2026-10-02 10:00:00", "b"), row("2026-10-01 09:00:00", "a")],
+            total: 3,
+            warnings: [],
+          });
+        }
+        if (appendFails) {
+          appendFails = false;
+          return Promise.reject(new Error("ipc glitch"));
+        }
+        return Promise.resolve({
+          rows: [row("2026-09-30 08:00:00", "z")],
+          total: 3,
+          warnings: [],
+        });
+      }
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    (state(w)["loadMoreEvents"] as () => void)();
+    await flushPromises();
+    expect(state(w)["eventsError"]).toBe("ipc glitch");
+    const firstPageCalls = () =>
+      invokeMock.mock.calls.filter(
+        (c) => c[0] === "query_events" && (c[1] as Record<string, unknown>).before == null,
+      ).length;
+    expect(firstPageCalls()).toBe(1);
+    const retry = w.findAll("button").find((b) => b.text() === "重试");
+    await retry!.trigger("click");
+    await flushPromises();
+    // 重试不回发首页请求（before==null 恰好 1 次）；追加成功后三行齐全。
+    expect(firstPageCalls()).toBe(1);
+    expect((state(w)["events"] as EventList).rows.map((r) => r.record_id)).toEqual(["b", "a", "z"]);
   });
 
   it("refresh_preserves_filters：手动刷新以当前筛选重跑且筛选不动", async () => {
@@ -568,6 +767,24 @@ describe("视图快照查询身份（R04）", () => {
     await retry!.trigger("click");
     await flushPromises();
     expect(w.find(".page-head .ts-status-pill").text()).toContain("已更新");
+  });
+
+  it("first_load_failure_without_data_shows_failure_not_refreshing：首载失败且无数据 = 失败态（G-P2-1）", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null); // 无快照可恢复
+      if (cmd === "query_summary") return Promise.reject(new Error("settings broken"));
+      if (cmd === "query_events") return Promise.reject(new Error("settings broken"));
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    const pill = w.find(".page-head .ts-status-pill");
+    expect(pill.classes()).toContain("ts-pill-warning");
+    expect(pill.text()).toContain("刷新失败");
+    expect(pill.text()).not.toContain("刷新中");
+    expect(w.text()).toContain("settings broken");
   });
 
   it("unmounted_dashboard_cannot_overwrite_new_snapshot：卸载实例的晚到响应不落盘", async () => {

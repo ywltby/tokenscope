@@ -1,29 +1,31 @@
-// Task 4：App 集成测试——真实组件接线 + 结构化 needsSync 可见性
-//（Tauri invoke 全 mock，重子组件打桩，不复制 Naive UI 内部实现）。
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { flushPromises, mount } from "@vue/test-utils";
+// P04/P05：隐私同意引导壳（App.vue）集成测试。
+//
+// 边界断言：
+// - 一致前只允许引导 IPC（privacy_bootstrap / privacy_accept / privacy_exit_resolve）；
+// - 业务主应用（MainApp.vue → Dashboard/Settings）只在后端 Ready 后动态挂载；
+// - 未同意时不得访问 localStorage（持久化偏好），也不得发业务命令；
+// - 拒绝/关闭路径与已记忆的关闭动作、托盘完全隔离。
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { flushPromises, mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
 import { defineComponent, h } from "vue";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
-// close-requested / close-action-failed 事件监听打桩：保留回调引用供测试手动触发。
-const closeEvent = vi.hoisted(() => ({
-  fns: [] as ((ev?: unknown) => void)[],
+const events = vi.hoisted(() => ({
   byName: new Map<string, ((ev?: unknown) => void)[]>(),
   unlisten: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn((event: string, cb: (ev?: unknown) => void) => {
-    closeEvent.fns.push(cb);
-    const list = closeEvent.byName.get(event) ?? [];
+    const list = events.byName.get(event) ?? [];
     list.push(cb);
-    closeEvent.byName.set(event, list);
-    return Promise.resolve(closeEvent.unlisten);
+    events.byName.set(event, list);
+    return Promise.resolve(events.unlisten);
   }),
 }));
 
-// 布局类组件打桩：只验证 App 的接线（横幅 + 页面切换），不渲染 Naive UI 内部。
+// 布局/浮层打桩：只验证引导壳的接线，不渲染 Naive UI 内部实现。
 vi.mock("naive-ui", async (importOriginal) => {
   const { defineComponent: dc, h } = await import("vue");
   const actual = await importOriginal<typeof import("naive-ui")>();
@@ -34,7 +36,6 @@ vi.mock("naive-ui", async (importOriginal) => {
         return () => h("div", { class: `stub-${name}` }, slots.default?.());
       },
     });
-  // NModal 受 show 控制渲染（真实组件 teleport，测试不可达内容）。
   const NModalStub = dc({
     name: "NModal",
     props: { show: { type: Boolean, default: false } },
@@ -42,446 +43,379 @@ vi.mock("naive-ui", async (importOriginal) => {
       return () => (props.show ? h("div", { class: "stub-NModal" }, slots.default?.()) : null);
     },
   });
+  const NButtonStub = dc({
+    name: "NButton",
+    props: { disabled: { type: Boolean, default: false } },
+    emits: ["click"],
+    setup(props, { slots, emit }) {
+      return () =>
+        h(
+          "button",
+          {
+            class: "stub-button",
+            disabled: props.disabled,
+            onClick: () => {
+              if (!props.disabled) emit("click");
+            },
+          },
+          slots.default?.(),
+        );
+    },
+  });
   return {
     ...actual,
-    NLayout: passthrough("NLayout"),
-    NLayoutHeader: passthrough("NLayoutHeader"),
-    NLayoutContent: passthrough("NLayoutContent"),
-    NMessageProvider: passthrough("NMessageProvider"),
     NConfigProvider: passthrough("NConfigProvider"),
+    NGlobalStyle: passthrough("NGlobalStyle"),
     NModal: NModalStub,
+    NButton: NButtonStub,
   };
 });
 
+// 业务视图打桩（真实 MainApp.vue 会静态导入它们）：记录挂载时刻，
+// 用于证明"偏好恢复发生在业务挂载之前"。
+const order = vi.hoisted(() => ({ marks: [] as string[] }));
 vi.mock("./views/Dashboard.vue", () => ({
   default: defineComponent({
     name: "Dashboard",
     props: { refreshKey: { type: Number, default: 0 } },
-    setup: () => () => h("div", { class: "stub-dashboard" }),
+    setup() {
+      order.marks.push("dashboard-mount");
+      return () => h("div", { class: "stub-dashboard" });
+    },
   }),
 }));
 vi.mock("./views/Settings.vue", () => ({
   default: defineComponent({
     name: "Settings",
     props: { refreshKey: { type: Number, default: 0 } },
-    setup: () => () => h("div", { class: "stub-settings" }),
+    setup() {
+      order.marks.push("settings-mount");
+      return () => h("div", { class: "stub-settings" });
+    },
   }),
 }));
 
 import App from "./App.vue";
-import PricingStatusBanner from "./components/PricingStatusBanner.vue";
-import { useTheme } from "./composables/theme";
+import { renderPolicyMarkdown } from "./lib/policyMarkdown";
 
-const statusNeedsSync = {
-  modelsdevAvailable: false,
-  modelsdevCount: 0,
-  modelsdevSyncedAt: null,
-  openrouterAvailable: false,
+/// 打包进程序的政策全文（结构与 docs/privacy.md 同构：九章 + 列表 + 链接 +
+/// 粗体）。与源文件逐字一致由 Rust 侧 include_str! 契约
+/// （privacy_packaged_policy_matches_source）保证，前端只负责"完整渲染、
+/// 不丢内容、不引入外部资源"。
+const FULL_POLICY_MARKDOWN = [
+  "# TokenScope 隐私政策",
+  "",
+  "更新日期：2026 年 10 月 9 日",
+  "",
+  "本政策说明应用会读取什么数据、保存在哪里，以及哪些功能会联网。",
+  "",
+  "## 一、适用范围",
+  "",
+  "本政策适用于 TokenScope 自身的日志读取、统计、缓存、设置和价格同步功能。",
+  "",
+  "## 二、读取的数据及用途",
+  "",
+  "### 1. 本地会话日志",
+  "",
+  "TokenScope 读取已启用来源中的会话日志，默认来源为 `.claude/projects` 与 `.codex/sessions`。",
+  "",
+  "- 使用时间、AI 工具和模型名称",
+  "- 项目标识或工作目录路径",
+  "",
+  "## 三、本地保存位置",
+  "",
+  "TokenScope 自身的大部分数据保存在 `~/.tokenscope` 目录。",
+  "",
+  "## 四、网络请求与数据传输",
+  "",
+  "**价格自动同步默认开启。** 使用的公开接口为 [models.dev](https://models.dev/api.json)。",
+  "",
+  "## 五、第三方服务与运行时",
+  "",
+  "- **models.dev**：提供公开模型价格目录",
+  "- **Microsoft WebView2**：用于显示界面",
+  "",
+  "## 六、用户可以如何控制数据",
+  "",
+  "可以在设置中关闭某个日志来源或关闭自动价格同步。",
+  "",
+  "## 七、保留、删除与卸载",
+  "",
+  "删除本地数据需要退出应用后清理数据目录。",
+  "",
+  "## 八、反馈与联系方式",
+  "",
+  "可通过项目 Issues 联系维护者。",
+  "",
+  "## 九、政策更新",
+  "",
+  "数据处理方式发生变化时，维护者会更新本文件的日期与内容。",
+].join("\n");
+
+const POLICY_SECTIONS = [
+  "一、适用范围",
+  "二、读取的数据及用途",
+  "三、本地保存位置",
+  "四、网络请求与数据传输",
+  "五、第三方服务与运行时",
+  "六、用户可以如何控制数据",
+  "七、保留、删除与卸载",
+  "八、反馈与联系方式",
+  "九、政策更新",
+];
+
+function snapshot(phase: string, extra: Record<string, unknown> = {}) {
+  return {
+    phase,
+    detail: null,
+    exitPromptPending: false,
+    diagnostics: [],
+    policy: {
+      title: "TokenScope 隐私政策",
+      date: "2026 年 10 月 9 日",
+      markdown: FULL_POLICY_MARKDOWN,
+    },
+    ...extra,
+  };
+}
+
+const statusOk = {
+  modelsdevAvailable: true,
+  modelsdevCount: 1,
+  modelsdevSyncedAt: "2026-10-09T00:00:00Z",
+  openrouterAvailable: true,
   externalCount: 0,
-  hasAnyPricing: false,
-  needsSync: true,
+  hasAnyPricing: true,
+  needsSync: false,
   warnings: [],
 };
-const statusOk = { ...statusNeedsSync, needsSync: false, hasAnyPricing: true };
 
-function mockApp(pricingStatus: object): void {
+/** 引导期 mock：只实现引导命令，其余命令一律记录但返回 null。 */
+function mockGate(overrides: Record<string, () => Promise<unknown>> = {}): void {
   invokeMock.mockImplementation((cmd: string) => {
-    if (cmd === "pricing_status") return Promise.resolve(pricingStatus);
-    if (cmd === "view_cache_load") return Promise.resolve(null);
-    if (cmd === "summarize") return Promise.resolve({ groups: [], totals: {}, sources: [] });
-    if (cmd === "list_events") return Promise.resolve({ rows: [], total: 0, warnings: [] });
-    if (cmd === "source_status") return Promise.resolve([]);
+    const override = overrides[cmd];
+    if (override) return override();
+    if (cmd === "privacy_bootstrap") return Promise.resolve(snapshot("needs_consent"));
     return Promise.resolve(null);
   });
 }
 
-beforeEach(() => {
-  invokeMock.mockReset();
-  closeEvent.fns.length = 0;
-  closeEvent.byName.clear();
-});
+function commands(): string[] {
+  return invokeMock.mock.calls.map((call) => String(call[0]));
+}
 
-/// AP07：App 现在注册两个监听（close-requested / close-action-failed），
-/// 按事件名取回调，避免"最后一个注册的"歧义。
+function buttonByText(w: VueWrapper, text: string): DOMWrapper<Element> {
+  const found = w.findAll("button.stub-button").find((b) => b.text().includes(text));
+  if (!found) throw new Error(`未找到按钮：${text}`);
+  return found;
+}
+
 function listenerOf(event: string): (ev?: unknown) => void {
-  const list = closeEvent.byName.get(event);
+  const list = events.byName.get(event);
   if (!list?.length) throw new Error(`未注册监听: ${event}`);
   return list.at(-1)!;
 }
 
-function triggerCloseRequested(): void {
-  listenerOf("close-requested")();
-}
+beforeEach(() => {
+  invokeMock.mockReset();
+  events.byName.clear();
+  order.marks.length = 0;
+  localStorage.clear();
+  document.documentElement.removeAttribute("data-theme");
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  })) as unknown as typeof window.matchMedia;
+});
 
-describe("App 集成（Task 4）", () => {
-  it("汇总首屏已预读设置数据，切换回来复用设置实例", async () => {
-    mockApp(statusOk);
+afterEach(() => {
+  vi.restoreAllMocks();
+  localStorage.clear();
+});
+
+describe("P04 隐私同意引导壳", () => {
+  it("bootstrap_does_not_import_or_mount_business_app：未 Ready 不挂载业务视图", async () => {
+    mockGate();
     const w = mount(App);
     await flushPromises();
-    expect(w.findComponent({ name: "Settings" }).exists()).toBe(false);
-    for (const command of [
-      "source_status",
-      "cache_stats",
-      "pricing_entries",
-      "settings_get",
-      "autostart_status",
-    ]) {
-      expect(invokeMock).toHaveBeenCalledWith(command);
-    }
-    await w.get('[aria-label="页面切换"] [aria-label="设置"]').trigger("click");
-    await flushPromises();
-    const instance = w.findComponent({ name: "Settings" }).vm;
-    await w.get('[aria-label="页面切换"] [aria-label="汇总"]').trigger("click");
-    await w.get('[aria-label="页面切换"] [aria-label="设置"]').trigger("click");
-    await flushPromises();
-    expect(w.findComponent({ name: "Settings" }).vm).toBe(instance);
+    expect(w.find(".stub-dashboard").exists()).toBe(false);
+    expect(w.find(".stub-settings").exists()).toBe(false);
+    expect(order.marks).toEqual([]);
+    // 政策可见，且是唯一可交互的界面
+    expect(w.text()).toContain("TokenScope 隐私政策");
+    expect(w.text()).toContain("同意并继续");
     w.unmount();
   });
-  it("needsSync=true 时全局横幅可见", async () => {
-    mockApp(statusNeedsSync);
+
+  it("consent_screen_makes_only_bootstrap_calls：首屏只发一条引导 IPC", async () => {
+    mockGate();
     const w = mount(App);
     await flushPromises();
-    expect(w.text()).toContain("尚未获取定价");
-    expect(w.findComponent(PricingStatusBanner).exists()).toBe(true);
-  });
-
-  it("needsSync=false 时不显示横幅", async () => {
-    mockApp(statusOk);
-    const w = mount(App);
-    await flushPromises();
-    expect(w.text()).not.toContain("尚未获取定价");
-    expect(w.findComponent(PricingStatusBanner).exists()).toBe(true);
-  });
-});
-
-describe("App 应用壳（设计系统 Task 2，苹果风格分段控件）", () => {
-  beforeEach(() => {
-    localStorage.removeItem("tokenscope-theme");
-  });
-
-  it("汇总/设置分段控件可识别且选中态可见", async () => {
-    mockApp(statusOk);
-    const w = mount(App);
-    await flushPromises();
-    const items = w.findAll('[role="radio"]');
-    // 第一组是页面切换（汇总/设置），第二组是主题切换（浅色/深色/跟随系统）
-    const pageItems = items.slice(0, 2);
-    expect(pageItems.map((t) => t.text())).toEqual(["汇总", "设置"]);
-    expect(pageItems[0].attributes("aria-checked")).toBe("true");
-    await pageItems[1].trigger("click");
-    await flushPromises();
-    expect(pageItems[1].attributes("aria-checked")).toBe("true");
-    expect(w.find(".stub-settings").exists()).toBe(true);
-  });
-
-  it("主题分段控件可读出当前偏好并驱动 data-theme", async () => {
-    mockApp(statusOk);
-    const w = mount(App);
-    await flushPromises();
-    const groups = w.findAll('[role="radiogroup"]');
-    expect(groups.length).toBeGreaterThanOrEqual(2);
-    const themeGroup = groups[1]; // 第二组是主题
-    const themeItems = themeGroup.findAll('[role="radio"]');
-    // UX02：语义化名称 + 装饰 SVG 图标（不再是 ☀/☾ 字符）
-    expect(themeItems.map((t) => t.text())).toEqual(["", "", ""]);
-    expect(themeItems.map((t) => t.attributes("title"))).toEqual([
-      "浅色模式",
-      "深色模式",
-      "跟随系统",
-    ]);
-    expect(themeItems.map((t) => t.attributes("aria-label"))).toEqual([
-      "浅色模式",
-      "深色模式",
-      "跟随系统",
-    ]);
-    expect(themeItems.every((t) => t.find(".seg-icon").exists())).toBe(true);
-    // 默认 system（自动），解析为 light
-    expect(themeItems[2].attributes("aria-checked")).toBe("true");
-    expect(document.documentElement.dataset.theme).toBe("light");
-    await themeItems[1].trigger("click");
-    await flushPromises();
-    expect(document.documentElement.dataset.theme).toBe("dark");
-    expect(localStorage.getItem("tokenscope-theme")).toBe("dark");
-  });
-
-  it("横幅渲染在内容之前（不遮挡主体）", async () => {
-    mockApp(statusNeedsSync);
-    const w = mount(App);
-    await flushPromises();
-    const banner = w.find(".banner-slot").element;
-    const content = w.find(".app-content").element;
-    expect(
-      banner.compareDocumentPosition(content) & Node.DOCUMENT_POSITION_FOLLOWING,
-      "横幅必须在内容之前",
-    ).toBeTruthy();
-  });
-
-  it("导航为吸顶玻璃层，品牌是线性图标 + 文字（DESIGN.md §5）", async () => {
-    mockApp(statusOk);
-    const w = mount(App);
-    await flushPromises();
-    const nav = w.find("header.app-nav");
-    expect(nav.exists()).toBe(true);
-    expect(nav.classes()).toContain("ts-glass");
-    const brand = nav.find(".brand");
-    expect(brand.text()).toContain("TokenScope");
-    // 品牌标记必须是 SVG 图标，不允许字符/emoji 充当图标
-    expect(brand.find("svg").exists()).toBe(true);
-  });
-
-  it("分段组内左右方向键可切换选中项", async () => {
-    mockApp(statusOk);
-    const w = mount(App);
-    await flushPromises();
-    // theme.ts 是模块级单例：前一用例可能把偏好改成 dark，先复位 system
-    useTheme().setPreference("system");
-    await flushPromises();
-    const themeItems = w.findAll('[role="radiogroup"]')[1].findAll('[role="radio"]');
-    expect(themeItems[2].attributes("aria-checked")).toBe("true");
-    await themeItems[2].trigger("keydown", { key: "ArrowLeft" });
-    await flushPromises();
-    expect(themeItems[1].attributes("aria-checked")).toBe("true");
-    await themeItems[1].trigger("keydown", { key: "ArrowRight" });
-    await flushPromises();
-    expect(themeItems[2].attributes("aria-checked")).toBe("true");
-  });
-});
-
-describe("App 启动诊断（SF06：日志初始化降级非阻断通知）", () => {
-  function mockWithStartup(startup: object | Promise<never>): void {
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "startup_diagnostics") return startup as Promise<unknown>;
-      if (cmd === "pricing_status") return Promise.resolve(statusOk);
-      if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "source_status") return Promise.resolve([]);
-      return Promise.resolve(null);
-    });
-  }
-
-  it("startup_log_degraded_shows_notice：state != ok → 横幅通知可见且不阻断页面", async () => {
-    mockWithStartup(
-      Promise.resolve({
-        state: "stderr",
-        dir: null,
-        message: "日志目录创建失败: C:/x/logs（拒绝访问）",
-      }),
-    );
-    const w = mount(App);
-    await flushPromises();
-    expect(w.text()).toContain("文件日志不可用");
-    expect(w.text()).toContain("日志目录创建失败");
-    // 非阻断：汇总页照常渲染
-    expect(w.find(".stub-dashboard").exists()).toBe(true);
-  });
-
-  it("startup_log_ok_shows_no_notice：state = ok 无通知", async () => {
-    mockWithStartup(Promise.resolve({ state: "ok", dir: "C:/x/logs", message: null }));
-    const w = mount(App);
-    await flushPromises();
-    expect(w.text()).not.toContain("文件日志不可用");
-    expect(w.find(".stub-dashboard").exists()).toBe(true);
-  });
-
-  it("startup_diagnostics 失败静默跳过（非 Tauri 环境不递归报错）", async () => {
-    mockWithStartup(Promise.reject(new Error("no tauri")));
-    const w = mount(App);
-    await flushPromises();
-    expect(w.text()).not.toContain("文件日志不可用");
-    expect(w.find(".stub-dashboard").exists()).toBe(true);
-  });
-});
-
-describe("App 关闭确认（关闭确认与配置文件计划 Task 3）", () => {
-  it("close-requested 事件打开弹窗；resolve 调 close_resolve 并关闭", async () => {
-    mockApp(statusOk);
-    const w = mount(App);
-    await flushPromises();
-    // 初始（未收到关闭请求）不渲染弹窗内容
-    expect(w.find(".stub-NModal").exists()).toBe(false);
-    triggerCloseRequested();
-    await flushPromises();
-    const dialog = w.find(".stub-NModal");
-    expect(dialog.exists()).toBe(true);
-    expect(dialog.text()).toContain("关闭 TokenScope");
-    // 点「最小化到托盘」→ close_resolve 参数正确，弹窗关闭
-    invokeMock.mockClear();
-    const minimize = dialog.findAll("button").find((b) => b.text().includes("最小化到托盘"));
-    await minimize!.trigger("click");
-    await flushPromises();
-    expect(invokeMock).toHaveBeenCalledWith("close_resolve", {
-      minimize: true,
-      remember: false,
-    });
-    expect(w.find(".stub-NModal").exists()).toBe(false);
-  });
-
-  it("弹窗打开期间忽略重复 close-requested；取消不调 close_resolve", async () => {
-    mockApp(statusOk);
-    const w = mount(App);
-    await flushPromises();
-    triggerCloseRequested();
-    triggerCloseRequested();
-    await flushPromises();
-    expect(w.find(".stub-NModal").exists()).toBe(true);
-    invokeMock.mockClear();
-    const cancel = w
-      .find(".stub-NModal")
-      .findAll("button")
-      .find((b) => b.text().includes("取消"));
-    await cancel!.trigger("click");
-    await flushPromises();
-    expect(invokeMock).not.toHaveBeenCalled();
-    expect(w.find(".stub-NModal").exists()).toBe(false);
-  });
-
-  it("R07：close_resolve 失败 → 弹窗保持打开显示原因，重试成功后关闭", async () => {
-    mockApp(statusOk);
-    const w = mount(App);
-    await flushPromises();
-    triggerCloseRequested();
-    await flushPromises();
-    invokeMock.mockClear();
-    // 第一次提交失败
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "close_resolve") return Promise.reject(new Error("写配置失败"));
-      return Promise.resolve(null);
-    });
-    const dialog = w.find(".stub-NModal");
-    const minimize = dialog.findAll("button").find((b) => b.text().includes("最小化到托盘"));
-    await minimize!.trigger("click");
-    await flushPromises();
-    // 弹窗保持打开，原因可见
-    expect(w.find(".stub-NModal").exists()).toBe(true);
-    expect(w.text()).toContain("关闭操作失败");
-    expect(w.text()).toContain("写配置失败");
-    // 重试成功 → 关闭
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "close_resolve") return Promise.resolve(null);
-      return Promise.resolve(null);
-    });
-    const minimize2 = w
-      .find(".stub-NModal")
-      .findAll("button")
-      .find((b) => b.text().includes("最小化到托盘"));
-    await minimize2!.trigger("click");
-    await flushPromises();
-    expect(w.find(".stub-NModal").exists()).toBe(false);
-  });
-
-  it("F08 close_hide_failure_remains_retryable：hide 失败弹窗保持可重试", async () => {
-    // 后端 hide 失败透传（“隐藏窗口失败: …（可重试）”）：弹窗保持打开、
-    // 原因可见；重试成功后关闭。不把“无错误”当隐藏成功。
-    mockApp(statusOk);
-    const w = mount(App);
-    await flushPromises();
-    triggerCloseRequested();
-    await flushPromises();
-    invokeMock.mockClear();
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "close_resolve")
-        return Promise.reject(new Error("隐藏窗口失败: webview busy（可重试）"));
-      return Promise.resolve(null);
-    });
-    const dialog = w.find(".stub-NModal");
-    const minimize = dialog.findAll("button").find((b) => b.text().includes("最小化到托盘"));
-    await minimize!.trigger("click");
-    await flushPromises();
-    expect(w.find(".stub-NModal").exists()).toBe(true);
-    expect(w.text()).toContain("隐藏窗口失败");
-    expect(w.text()).toContain("webview busy");
-    // 重试成功 → 关闭
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "close_resolve") return Promise.resolve(null);
-      return Promise.resolve(null);
-    });
-    const minimize2 = w
-      .find(".stub-NModal")
-      .findAll("button")
-      .find((b) => b.text().includes("最小化到托盘"));
-    await minimize2!.trigger("click");
-    await flushPromises();
-    expect(w.find(".stub-NModal").exists()).toBe(false);
-  });
-
-  it("R07：提交进行中不重复 invoke（防重复提交）", async () => {
-    mockApp(statusOk);
-    const w = mount(App);
-    await flushPromises();
-    triggerCloseRequested();
-    await flushPromises();
-    let release!: () => void;
-    const gate = new Promise<void>((r) => {
-      release = r;
-    });
-    invokeMock.mockClear();
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "close_resolve") return gate;
-      return Promise.resolve(null);
-    });
-    const dialog = w.find(".stub-NModal");
-    const minimize = dialog.findAll("button").find((b) => b.text().includes("最小化到托盘"));
-    // pending 期间按钮禁用：再次点击不再派发
-    await minimize!.trigger("click");
-    await minimize!.trigger("click");
-    release();
-    await flushPromises();
-    expect(invokeMock.mock.calls.filter((c) => c[0] === "close_resolve").length).toBe(1);
-  });
-
-  it("unmount 时取消 close-requested 监听", async () => {
-    mockApp(statusOk);
-    closeEvent.unlisten.mockClear();
-    const w = mount(App);
-    await flushPromises();
+    expect(commands()).toEqual(["privacy_bootstrap"]);
     w.unmount();
-    expect(closeEvent.unlisten).toHaveBeenCalled();
   });
 
-  it("AP07 close_action_failure_is_reported_and_retryable：已记忆动作失败也有原因与重试", async () => {
-    // 后端按记忆的默认动作执行失败（例如隐藏窗口失败）时窗口仍然可见，
-    // 必须把原因送到界面并提供重试/取消——不能静默留在"点了关闭没反应"。
-    mockApp(statusOk);
+  it("consent_screen_does_not_access_local_storage：未同意不读持久化偏好", async () => {
+    const getItem = vi.spyOn(Storage.prototype, "getItem");
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    mockGate();
     const w = mount(App);
     await flushPromises();
-    expect(w.find(".stub-NModal").exists()).toBe(false);
-
-    listenerOf("close-action-failed")({
-      payload: { action: "minimize", reason: "隐藏窗口失败: webview busy（可重试）" },
-    });
-    await flushPromises();
-    expect(w.find(".stub-NModal").exists(), "失败必须弹出可操作的对话框").toBe(true);
-    expect(w.text()).toContain("关闭操作失败");
-    expect(w.text()).toContain("webview busy");
-
-    // 与未记忆路径共用结果处理：重试走 close_resolve
-    invokeMock.mockClear();
-    const minimize = w
-      .find(".stub-NModal")
-      .findAll("button")
-      .find((b) => b.text().includes("最小化到托盘"));
-    await minimize!.trigger("click");
-    await flushPromises();
-    expect(invokeMock).toHaveBeenCalledWith("close_resolve", {
-      minimize: true,
-      remember: false,
-    });
-    expect(w.find(".stub-NModal").exists()).toBe(false);
+    expect(getItem).not.toHaveBeenCalled();
+    expect(setItem).not.toHaveBeenCalled();
+    w.unmount();
   });
 
-  it("AP07 close_action_failure_can_be_cancelled：取消不触发任何关闭动作", async () => {
-    mockApp(statusOk);
+  it("policy_is_complete_and_available_offline：政策全文离线完整渲染无残留标记", async () => {
+    // 渲染器是纯函数：不依赖网络、不依赖 DOM 资源（离线可用）
+    const blocks = renderPolicyMarkdown(FULL_POLICY_MARKDOWN);
+    const headings = FULL_POLICY_MARKDOWN.split(/\r?\n/).filter((line) => /^#{1,3}\s/.test(line));
+    const renderedHeadings = blocks.filter((b) => b.type !== "ul" && b.type !== "p");
+    expect(renderedHeadings.length).toBe(headings.length);
+    const text = blocks.map((b) => (b.type === "ul" ? b.items.join("\n") : b.text)).join("\n");
+    for (const section of POLICY_SECTIONS) expect(text).toContain(section);
+    // 无未渲染的标记；链接降级为纯文本（没有可点击外链的原材料）
+    expect(text).not.toContain("**");
+    expect(text).not.toContain("](");
+    expect(text).not.toContain("<a ");
+    expect(text).not.toContain("<script");
+
+    // 弹窗里同样完整可读（后端下发的那一份）
+    mockGate();
     const w = mount(App);
     await flushPromises();
-    listenerOf("close-action-failed")({ payload: { reason: "隐藏窗口失败" } });
+    const dialog = w.text();
+    for (const section of POLICY_SECTIONS) expect(dialog).toContain(section);
+    expect(dialog).toContain("更新日期：2026 年 10 月 9 日");
+    w.unmount();
+  });
+
+  it("accept_waits_for_backend_ready：后端未 Ready 前不挂载业务", async () => {
+    const resolvers: ((value: unknown) => void)[] = [];
+    mockGate({
+      privacy_accept: () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve);
+        }),
+    });
+    const w = mount(App);
     await flushPromises();
-    invokeMock.mockClear();
-    const cancel = w
-      .find(".stub-NModal")
-      .findAll("button")
-      .find((b) => b.text().includes("取消"));
-    await cancel!.trigger("click");
+    await buttonByText(w, "同意并继续").trigger("click");
     await flushPromises();
-    expect(invokeMock).not.toHaveBeenCalled();
-    expect(w.find(".stub-NModal").exists()).toBe(false);
+    expect(w.text()).toContain("正在保存");
+    expect(w.find(".stub-dashboard").exists()).toBe(false);
+    // 后端返回 starting（保存成功但初始化中）→ 仍然不挂载
+    resolvers.at(-1)?.(snapshot("starting"));
+    await flushPromises();
+    expect(w.find(".stub-dashboard").exists()).toBe(false);
+    expect(order.marks).toEqual([]);
+    w.unmount();
+  });
+
+  it("failed_accept_keeps_policy_visible：保存失败保留政策与原因", async () => {
+    mockGate({
+      privacy_accept: () => Promise.reject("保存同意记录失败：磁盘满（合成）"),
+    });
+    const w = mount(App);
+    await flushPromises();
+    await buttonByText(w, "同意并继续").trigger("click");
+    await flushPromises();
+    expect(w.text()).toContain("保存同意记录失败");
+    expect(w.text()).toContain("磁盘满（合成）");
+    // 弹窗未消失：政策与两个选择都还在，业务未挂载
+    expect(w.text()).toContain("同意并继续");
+    expect(w.text()).toContain("不同意");
+    expect(w.find(".stub-dashboard").exists()).toBe(false);
+    w.unmount();
+  });
+
+  it("accepted_start_restores_preferences_before_main_mount：先恢复偏好再挂业务", async () => {
+    localStorage.setItem("tokenscope-theme", "dark");
+    const marks = order.marks;
+    const getItem = Storage.prototype.getItem;
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (
+      this: Storage,
+      key: string,
+    ) {
+      if (key === "tokenscope-theme") marks.push("preference-read");
+      return getItem.call(this, key);
+    });
+    mockGate({
+      privacy_accept: () => Promise.resolve(snapshot("ready")),
+      pricing_status: () => Promise.resolve(statusOk),
+      startup_diagnostics: () => Promise.resolve({ state: "ok", message: null }),
+    });
+    const w = mount(App);
+    await flushPromises();
+    // 引导阶段：不读偏好，首帧主题仍按系统（浅色）
+    expect(marks).not.toContain("preference-read");
+    await buttonByText(w, "同意并继续").trigger("click");
+    await flushPromises();
+    // Ready 后：业务视图挂载（动态 import 需要跨多个微任务周期）
+    await vi.waitFor(() => expect(marks).toContain("dashboard-mount"));
+    // 偏好先于业务视图被读取，且主题属性已按存储偏好恢复
+    expect(marks.indexOf("preference-read")).toBeGreaterThanOrEqual(0);
+    expect(marks.indexOf("preference-read")).toBeLessThan(marks.indexOf("dashboard-mount"));
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    expect(w.find(".stub-dashboard").exists()).toBe(true);
+    w.unmount();
+  });
+
+  it("reject_opens_exit_confirmation：不同意进入专属退出确认", async () => {
+    mockGate();
+    const w = mount(App);
+    await flushPromises();
+    await buttonByText(w, "不同意").trigger("click");
+    await flushPromises();
+    expect(w.text()).toContain("退出 TokenScope？");
+    expect(w.text()).toContain("返回隐私政策");
+    expect(w.text()).toContain("尚未同意隐私政策");
+    // 不提供记忆/托盘选项，且拒绝本身不发业务命令
+    expect(w.text()).not.toContain("记住我的选择");
+    expect(w.text()).not.toContain("最小化到托盘");
+    expect(commands()).toEqual(["privacy_bootstrap"]);
+    w.unmount();
+  });
+
+  it("cancel_exit_returns_to_blocked_policy：取消退出回到仍然阻断的政策", async () => {
+    mockGate();
+    const w = mount(App);
+    await flushPromises();
+    await buttonByText(w, "不同意").trigger("click");
+    await flushPromises();
+    await buttonByText(w, "返回隐私政策").trigger("click");
+    await flushPromises();
+    expect(w.text()).not.toContain("退出 TokenScope？");
+    expect(w.text()).toContain("同意并继续");
+    expect(w.find(".stub-dashboard").exists()).toBe(false);
+    // 后端只收到"清除待处理标记"，没有任何业务命令
+    expect(commands().at(-1)).toBe("privacy_exit_resolve");
+    expect(invokeMock).toHaveBeenLastCalledWith("privacy_exit_resolve", { exit: false });
+    w.unmount();
+  });
+
+  it("close_before_listener_is_recovered_by_bootstrap：监听前到达的关闭请求要恢复显示", async () => {
+    mockGate({
+      privacy_bootstrap: () =>
+        Promise.resolve(snapshot("needs_consent", { exitPromptPending: true })),
+    });
+    const w = mount(App);
+    await flushPromises();
+    expect(w.text()).toContain("退出 TokenScope？");
+    w.unmount();
+  });
+
+  it("关闭事件到达后只出现一个退出确认（重复 X 不堆叠）", async () => {
+    mockGate();
+    const w = mount(App);
+    await flushPromises();
+    listenerOf("privacy-exit-requested")();
+    listenerOf("privacy-exit-requested")();
+    await flushPromises();
+    const dialogs = w.findAll(".stub-NModal").filter((n) => n.text().includes("退出 TokenScope？"));
+    expect(dialogs.length).toBe(1);
+    w.unmount();
   });
 });

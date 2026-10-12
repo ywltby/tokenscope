@@ -34,7 +34,15 @@ fn hermetic_dir() -> PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("tokenscope-e2e-codex-{}-{}", std::process::id(), n))
+    std::env::temp_dir().join(format!(
+        "tokenscope-e2e-codex-{}-{}-{}",
+        std::process::id(),
+        n,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
 }
 
 /// Task 1：内置表已删除——外置 TOML 提供与校正后内置同值的 gpt 价。
@@ -126,8 +134,8 @@ fn test_e2e_codex_collection() {
     let e1 = &col.events[0];
     assert_eq!(e1.model, "gpt-5.6-sol");
     assert_eq!(e1.session_id, "sess-a");
-    // C2：项目身份 = 完整 cwd（fixture 里是反斜杠写法）。
-    assert_eq!(e1.project, r"C:\work\alpha");
+    // C2/A04：项目身份 = 归一化 cwd（fixture 里是反斜杠写法 → 统一为 `/`）。
+    assert_eq!(e1.project, "C:/work/alpha");
     // B1 语义修复：raw input 1000 = 750 未缓存 + 200 读 + 50 写。
     assert_eq!(e1.input_tokens, 750);
     assert_eq!(e1.output_tokens, 100);
@@ -153,7 +161,16 @@ fn test_e2e_codex_json() {
     assert_eq!(d1.tokens.output, 100);
     assert_eq!(d1.tokens.cache_write, 50);
     assert_eq!(d1.tokens.cache_read, 200);
-    assert!((d1.cost_usd - 5330.0 / 1_000_000.0).abs() < 1e-12);
+    assert!(
+        (d1.cost_usd - 5330.0 / 1_000_000.0).abs() < 1e-12,
+        "07-17 分组费用异常：cost={} groups={:?} warnings={:?}",
+        d1.cost_usd,
+        groups
+            .iter()
+            .map(|g| (g.key.clone(), g.requests, g.cost_usd, g.unknown_pricing))
+            .collect::<Vec<_>>(),
+        r.warnings
+    );
     assert!(!d1.unknown_pricing);
 
     // 07-18：16:01Z/16:06Z 落本地次日 + 次日 02:00Z。
@@ -170,10 +187,16 @@ fn test_e2e_codex_json() {
     assert_eq!(t.requests, 4);
     assert!((t.cost_usd - 6541.0 / 1_000_000.0).abs() < 1e-9);
 
-    // 模型维度：BTreeMap 序（末行为合计）。
+    // 模型维度：等价身份键序（末行为合计）；label 退回原始代表写法。
     let rm = codex_report(GroupBy::Model);
     let keys: Vec<&str> = rm.groups.iter().map(|g| g.key.as_str()).collect();
-    assert_eq!(keys, ["gpt-5.4", "gpt-5.5", "gpt-5.6-sol", "合计"]);
+    assert_eq!(keys, ["gpt54", "gpt55", "gpt56sol", "合计"]);
+    let labels: Vec<&str> = rm
+        .groups
+        .iter()
+        .map(|g| g.label.as_deref().unwrap_or(""))
+        .collect();
+    assert_eq!(labels, ["gpt-5.4", "gpt-5.5", "gpt-5.6-sol", ""]);
     let sol = &rm.groups[2];
     assert_eq!(sol.requests, 2);
     assert_eq!(sol.tokens.input, 760);
@@ -200,18 +223,18 @@ fn test_e2e_multi_agent_merge() {
     assert_eq!(r.sources.len(), 2);
     assert_eq!(r.groups.len(), 3); // claude-code、codex、合计
     assert_eq!(r.groups[0].key, "claude-code");
-    assert_eq!(r.groups[0].requests, 3);
+    assert_eq!(r.groups[0].requests, 4, "H02：子代理用量一并计入");
     assert_eq!(r.groups[1].key, "codex");
     assert_eq!(r.groups[1].requests, 4);
-    assert_eq!(r.totals.requests, 7);
+    assert_eq!(r.totals.requests, 8);
     assert_eq!(r.totals.agents, ["claude-code", "codex"]);
 
-    // 日维度合并：claude 07-17 1 条 + codex 07-17 1 条 = 2；07-18 = 2 + 3 = 5。
+    // 日维度合并：claude 07-17 1 条 + codex 07-17 1 条 = 2；07-18 = 3 + 3 = 6。
     let d = both_report(GroupBy::Day);
     assert_eq!(d.groups.len(), 3);
     assert_eq!(d.groups[0].key, "2026-07-17");
     assert_eq!(d.groups[0].requests, 2);
-    assert_eq!(d.groups[1].requests, 5);
+    assert_eq!(d.groups[1].requests, 6);
     // 多 agent 数据填充 agents 字段。
     assert_eq!(d.groups[0].agents, ["claude-code", "codex"]);
 

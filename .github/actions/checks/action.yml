@@ -42,6 +42,21 @@ runs:
     - name: frontend build
       shell: pwsh
       run: pnpm --dir frontend build
+    - name: 安装验收 workflow 调用契约（N12）
+      shell: pwsh
+      run: |
+        python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - name: 安装验收事实校验契约（N12/M06）
+      shell: pwsh
+      run: |
+        python -B -m unittest discover -s scripts -p "test_inspect_history.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - name: 安装验收生命周期契约（N12/M05）
+      shell: pwsh
+      run: |
+        pwsh -NoProfile -File scripts/test_install_helpers.ps1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: 根库 acceptance clippy
       shell: pwsh
       run: cargo clippy --locked --workspace --all-targets --features acceptance -- -D warnings

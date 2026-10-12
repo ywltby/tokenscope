@@ -17,8 +17,12 @@ fn fixture(agent: &str, p: &str) -> PathBuf {
 
 fn tmp_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
-        "tokenscope-cache-behavior-{tag}-{}",
-        std::process::id()
+        "tokenscope-cache-behavior-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -35,6 +39,7 @@ fn opts(dir: &std::path::Path, agent: Option<&str>) -> SummaryOptions {
         claude_dir: Some(fixture("claude", "basic")),
         codex_dir: Some(fixture("codex", "basic")),
         cache_dir: Some(dir.join("cache")),
+        pricing_path: Some(dir.join("no-pricing.toml")),
         pricing_index: Some(dir.join("idx.json")),
         openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
         modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
@@ -58,7 +63,7 @@ fn test_agent_filter_preserves_other_cache() {
         4,
         "查看单 agent 不得清空其他来源的缓存"
     );
-    assert_eq!(r1.totals.requests, 3);
+    assert_eq!(r1.totals.requests, 4, "H02：Claude 子代理用量一并纳入");
     // 切回全部：codex 直接命中缓存（数字不变；此处以结果一致性断言）。
     let r2 = summary(&all).unwrap();
     assert_eq!(r2.totals.requests, r0.totals.requests);
@@ -92,6 +97,7 @@ fn test_read_failure_not_cached() {
         codex_dir: Some(codex_dir.clone()),
         cache_dir: Some(dir.join("cache")),
         pricing_index: Some(dir.join("idx.json")),
+        pricing_path: Some(dir.join("no-pricing.toml")),
         openrouter_path: Some(PathBuf::from("Z:/no-such/openrouter-snapshot.json")),
         modelsdev_path: Some(PathBuf::from("Z:/no-such/modelsdev-snapshot.json")),
         tz: Some("Asia/Shanghai".to_string()),

@@ -69,7 +69,7 @@ fn display_bytes(n: usize) -> String {
 /// v1（ts|rid|seq）游标缺字段且无法验证归属，解析时直接拒绝。
 pub const CURSOR_VERSION: u8 = 2;
 
-/// 查询快照：冻结的主过滤行序 + 采集/价格上下文。
+/// 查询快照：冻结的主过滤行序 + 采集/价格上下文 + 只读事务快照。
 pub struct QuerySnapshot {
     pub query_id: String,
     pub generation: u64,
@@ -82,9 +82,16 @@ pub struct QuerySnapshot {
     /// 冻结的查询时间基准（SF05：一次查询只解析一次 today）。
     pub as_of: jiff::Zoned,
     pub by: crate::aggregate::GroupBy,
-    /// 主过滤后的固定行序（ts/rid 降序 + 组内 seq），只存事件索引。
+    /// 主过滤后的固定行序（ts/rid 降序 + 组内 seq），只存**行索引**。
     pub rows: Vec<SnapshotRow>,
+    /// H07：冻结的时间边界（days/from/to 在建立快照时解析一次并固定）。
+    time_bounds: report::TimeBounds,
+    /// H06：本次查询固定的日汇总桶选择——只有日粒度的外部历史按桶决定统计
+    /// 来源（明细覆盖 / 汇总口径），在建快照时**算一次**后冻结。
+    rollup_selection: report::RollupSelection,
     collection: Arc<report::CollectionSnapshot>,
+    /// H07：只读事务快照——汇总与分页都从它读取，采集/导入提交后旧查询不变。
+    read: Arc<crate::history::ReadSnapshot>,
     /// RC05：保留字节额度凭证——随本快照的**最后一个 Arc** 释放。
     /// 会话被淘汰但仍有读取者持有时继续占账
     ///（`evicted_but_borrowed_snapshot_stays_charged`）。
@@ -93,19 +100,78 @@ pub struct QuerySnapshot {
 
 #[derive(Debug, Clone)]
 pub struct SnapshotRow {
-    /// 采集事件集中的位置（零复制）。
+    /// 库内事件主键（H07：快照不再持有事件本体）。
+    pub event_id: i64,
+    /// 排序后的行序位置（会话内绝对位置，游标按它跳页）。
     pub index: usize,
     /// 相同 (ts, record_id) 组内的序号（0..n）——游标第三分量。
     pub seq: u64,
+    /// 事件时间戳与记录标识：游标定位与日筛选只需行元数据，
+    /// 不必为定位而读取事件本体。
+    pub ts: jiff::Timestamp,
+    pub record_id: String,
 }
 
 impl QuerySnapshot {
-    pub fn event(&self, row: &SnapshotRow) -> &UsageEvent {
-        &self.collection.events[row.index]
+    // H08 修订：不再提供"整份懒物化"的事件视图——分页与下钻一律走
+    // `for_each_row_event` / `event_by_row`（按批读取，内存与批大小成正比），
+    // 否则明细分页会绕过会话预算。
+
+    /// H07：**流式**遍历主过滤后的事件（按行序），不物化整份历史。
+    /// 供汇总聚合使用；`f` 返回 Err 时立即中止并透传。
+    pub(crate) fn for_each_event(
+        &self,
+        f: &mut dyn FnMut(&UsageEvent) -> Result<()>,
+    ) -> Result<()> {
+        let ids: Vec<i64> = self.rows.iter().map(|r| r.event_id).collect();
+        let mut by_id: std::collections::HashMap<i64, UsageEvent> =
+            std::collections::HashMap::with_capacity(ids.len().min(4096));
+        for chunk in ids.chunks(4096) {
+            by_id.clear();
+            for stored in self.read.fetch_events(chunk)? {
+                by_id.insert(stored.id, report::usage_event_of(&stored));
+            }
+            for id in chunk {
+                let e = by_id
+                    .get(id)
+                    .ok_or_else(|| anyhow::anyhow!("查询快照行 {id} 在库中不存在"))?;
+                f(e)?;
+            }
+        }
+        Ok(())
     }
 
-    pub fn events(&self) -> &[UsageEvent] {
-        &self.collection.events
+    /// H07/H08：**分批**按行序读取事件（每批至多 `batch` 条），回调拿到
+    /// `(行, 事件)`。分批而不是整份物化：明细分页因此不会绕过会话预算
+    ///（早期实现一次物化全部事件，64 KiB 预算下实际保留可达数 MB）。
+    pub(crate) fn for_each_row_event(
+        &self,
+        batch: usize,
+        f: &mut dyn FnMut(&SnapshotRow, &UsageEvent) -> Result<()>,
+    ) -> Result<()> {
+        let batch = batch.max(1);
+        for chunk in self.rows.chunks(batch) {
+            let ids: Vec<i64> = chunk.iter().map(|r| r.event_id).collect();
+            let mut by_id: std::collections::HashMap<i64, UsageEvent> =
+                std::collections::HashMap::with_capacity(ids.len());
+            for stored in self.read.fetch_events(&ids)? {
+                by_id.insert(stored.id, report::usage_event_of(&stored));
+            }
+            for row in chunk {
+                let e = by_id
+                    .get(&row.event_id)
+                    .ok_or_else(|| anyhow::anyhow!("查询快照行 {} 在库中不存在", row.event_id))?;
+                f(row, e)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 冻结的时间边界（`days`/`from`/`to` 在建快照时解析一次）——以
+    /// `(from, to)` 自然日文本返回，供界面显示与测试断言；`None` 表示该侧不限。
+    pub fn time_bounds(&self) -> (Option<String>, Option<String>) {
+        let (from, to) = self.time_bounds.parts();
+        (from.map(|d| d.to_string()), to.map(|d| d.to_string()))
     }
 
     pub fn pricing(&self) -> &Arc<crate::pricing::Pricing> {
@@ -119,13 +185,26 @@ impl QuerySnapshot {
     pub fn warnings(&self) -> &[String] {
         &self.collection.warnings
     }
+
+    /// H06：本次查询固定的日汇总桶选择（建快照时**只算一次**——汇总、明细与
+    /// 下钻读同一份结果，不因筛选条件改变统计优先级）。
+    pub fn rollup_selection(&self) -> &report::RollupSelection {
+        &self.rollup_selection
+    }
 }
 
 /// 下钻过滤指纹（模型/项目/日——明细侧子查询身份；游标/limit 不参与）。
+/// MP04：模型筛选按**等价身份**归一——同一模型的两种写法（`claude-opus-5-5`
+/// 与 `claude-opus-5.5`）视为同一子查询，游标可在其间续用；不同模型（含
+/// 变体）仍是不同指纹。
 pub(crate) fn drill_fingerprint(filter: &EventFilter) -> String {
+    let model = filter
+        .model
+        .as_deref()
+        .map(|m| crate::model_identity::ModelIdentity::parse(m).identity_key());
     format!(
         "model={:?}|project={:?}|day={:?}",
-        filter.model, filter.project, filter.day
+        model, filter.project, filter.day
     )
 }
 
@@ -230,12 +309,15 @@ impl QuotaReservation {
             .checked_add(bytes)
             .ok_or_else(|| "查询保留字节记账溢出（超出 usize 可表示范围）".to_string())?;
         if need > q.limit {
-            // RC05：建议必须与"什么才会减少保留量"一致——采集快照整份随会话
-            // 保留，时间范围只是采集后的过滤，缩小范围**不会**降低保留字节。
+            // RC05 / N05：建议必须与"什么才会减少保留量"一致——H07 起事件
+            // 本体留在 SQLite，会话保留 = 固定元数据（价格/来源诊断）+ **按
+            // 时间边界过滤后的行索引**：缩小时间范围会减少行索引与记录标识
+            // 的保留量（固定部分不变）；减少并发会话、等待 TTL 回收、停用
+            // 暂不采集的来源目录同样有效。
             return Err(format!(
                 "查询保留数据 {need}（本次 {bytes}，已保留 {used}，预算 {limit}，约合 {need_mib} MiB）：\
                  可减少同时进行的查询会话数，或稍后重试（闲置会话超过 {ttl} 秒自动回收）；\
-                 需要立即腾出额度请在设置中停用暂不采集的来源目录（缩小时间范围不会减少保留量）",
+                 缩小时间范围或在设置中停用暂不采集的来源目录也能降低保留量",
                 need = display_bytes(need),
                 bytes = display_bytes(bytes),
                 used = display_bytes(q.used),
@@ -351,15 +433,15 @@ fn register(snapshot: Arc<QuerySnapshot>) {
 /// 的一份**克隆**，同样单独计入。
 fn snapshot_retained_bytes(
     collection: &report::CollectionSnapshot,
-    rows: &Vec<SnapshotRow>,
+    rows: &[SnapshotRow],
     query_id: &str,
     tz_label: &str,
     main_fingerprint: &str,
 ) -> Result<usize, String> {
-    use report::retained::{ByteCount, string_bytes, vec_bytes};
+    use report::retained::{ByteCount, string_bytes};
     let mut n = ByteCount::default();
     n.add(report::collection_retained_bytes(collection)?)?;
-    n.add(vec_bytes(rows)?)?;
+    n.add(rows_retained_bytes(rows)?)?;
     n.add(string_bytes(&query_id.to_string())?)?;
     n.add(string_bytes(&tz_label.to_string())?)?;
     n.add(string_bytes(&main_fingerprint.to_string())?)?;
@@ -368,6 +450,22 @@ fn snapshot_retained_bytes(
     n.add(string_bytes(&collection.pricing_revision)?)?;
     n.add(std::mem::size_of::<TimeZone>())?;
     n.add(std::mem::size_of::<QuerySnapshot>())?;
+    Ok(n.get())
+}
+
+/// 行索引的堆占用：`Vec` 元素缓冲 + 每行 `record_id` 的**字符串本体**。
+/// `vec_bytes` 只算元素定长部分——`record_id` 是堆 `String`，漏计会让长
+/// 记录标识（如 Claude 的 `session|message.id`）成批绕过会话内存预算。
+fn rows_retained_bytes(rows: &[SnapshotRow]) -> Result<usize, String> {
+    use report::retained::{ByteCount, capacity_bytes, string_bytes};
+    let mut n = ByteCount::default();
+    n.add(capacity_bytes(
+        rows.len(),
+        std::mem::size_of::<SnapshotRow>(),
+    )?)?;
+    for row in rows {
+        n.add(string_bytes(&row.record_id)?)?;
+    }
     Ok(n.get())
 }
 
@@ -384,42 +482,55 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
     let collection = report::collect_flighted(opts)?;
     let main_fingerprint = main_fingerprint(opts, &tz_label);
 
-    // 主过滤（时间范围）一次应用：返回保留事件的索引，不复制事件。
-    let kept = report::time_filter_indices(&collection.events, opts, &tz, &as_of)?;
+    // H07：采集提交之后建立只读事务快照——本次查询看到的就是这一刻的库内容，
+    // 之后的采集/导入提交不会改变它（不静默换页、不混入新数据）。
+    let read = report::open_read_snapshot(opts)?;
+
+    // 冻结的时间边界：days/from/to 只解析一次（SF05），汇总与分页共用。
+    let time_bounds = report::TimeBounds::resolve(opts, &as_of)?;
+
+    // 主过滤（时间范围）在**流式读取**时应用：把通过过滤的行建成轻量索引
+    // （事件主键 + 时间戳 + 记录标识），不把事件本体读进内存。
+    let mut keyed: Vec<(i64, jiff::Timestamp, String)> = Vec::new();
+    read.stream_rows(opts.agent, &mut |row| {
+        if time_bounds.matches(row.ts, &tz) {
+            keyed.push((row.id, row.ts, row.record_id));
+        }
+        Ok(())
+    })?;
 
     // 排序（ts/rid 降序）+ 组内 seq：同一快照只计算一次。
-    let mut keyed: Vec<(usize, &jiff::Timestamp, &str)> = kept
-        .into_iter()
-        .map(|i| {
-            let e = &collection.events[i];
-            (i, &e.ts, e.record_id.as_str())
-        })
-        .collect();
-    keyed.sort_by(|a, b| b.1.cmp(a.1).then(b.2.cmp(a.2)));
+    keyed.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
     let mut rows: Vec<SnapshotRow> = Vec::with_capacity(keyed.len());
-    let mut prev: Option<(&jiff::Timestamp, &str)> = None;
+    let mut prev: Option<(jiff::Timestamp, String)> = None;
     let mut seq: u64 = 0;
-    for (index, ts, rid) in keyed {
-        let same = prev.is_some_and(|(pts, prid)| pts == ts && prid == rid);
+    for (position, (event_id, ts, rid)) in keyed.into_iter().enumerate() {
+        let same = prev
+            .as_ref()
+            .is_some_and(|(pts, prid)| *pts == ts && *prid == rid);
         seq = if same { seq + 1 } else { 0 };
-        rows.push(SnapshotRow { index, seq });
+        rows.push(SnapshotRow {
+            event_id,
+            index: position,
+            seq,
+            ts,
+            record_id: rid.clone(),
+        });
         prev = Some((ts, rid));
     }
 
-    // RC05：按**完整保留对象**记账（不是筛选命中行数）——零命中行的查询
-    // 仍保留整份采集事件、字符串与价格表。
+    // RC05：按**会话实际保留的数据**记账——H07 起事件本体不再随会话常驻
+    // （汇总与明细分页都按批流式读取），因此这里计的是行索引、元数据与价格表。
     let query_id = format!("q{namespace}-{qseq}-g{}", collection.generation);
     let charge =
         snapshot_retained_bytes(&collection, &rows, &query_id, &tz_label, &main_fingerprint)
             .map_err(|e| anyhow!(e))?;
     let limit = quota_limit();
     if charge > limit {
-        // RC05：单会话超预算——明确失败、不截断事件；建议必须真实有效：
-        // 采集到的事件整份随会话保留，时间范围是采集后的过滤，缩小范围并
-        // 不减少保留量，所以不能这样提示。
+        // RC05：单会话超预算——明确失败、不截断数据；建议必须真实有效。
         anyhow::bail!(
-            "查询保留数据 {}（约合 {:.2} MiB）超出单会话预算 {}：可在设置中停用暂不采集的来源目录后重试，\
-             或稍后重试等待闲置会话回收（缩小时间范围不会减少保留量——整份采集事件随会话保留，不按要求截断）",
+            "查询保留数据 {}（约合 {:.2} MiB）超出单会话预算 {}：可缩小时间范围后重试，\
+             或稍后重试等待闲置会话回收（不按要求截断数据）",
             display_bytes(charge),
             charge as f64 / MIB as f64,
             display_bytes(limit)
@@ -428,6 +539,28 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
     // 准入：额度原子占用（失败会按 LRU 淘汰后重试）；失败时 reservation
     // 未建立、快照未注册，额度不泄漏。
     let reservation = acquire_with_eviction(charge).map_err(|e| anyhow!(e))?;
+
+    // H06：日汇总桶选择在这里固定一次——按日筛选/分组且时区与来源时区不同时，
+    // 日汇总不参与（返回可恢复提示），绝不把来源日期当午夜事件重切。
+    // H07：明细桶集合由只读快照**流式**构建（内存随不同桶数增长，不随事件数）。
+    let day_sensitive = opts.by == crate::aggregate::GroupBy::Day || !time_bounds.is_unbounded();
+    let rollups = read.rollups(opts.agent)?;
+    let source_tzs: Vec<String> = rollups
+        .iter()
+        .map(|r| r.source_tz.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let buckets = report::collect_detail_buckets(&read, opts.agent, &source_tzs)?;
+    let rollup_selection = report::select_rollup_contributions(
+        &buckets,
+        &rollups,
+        day_sensitive,
+        &tz_label,
+        report::RollupBucketPolicy::default(),
+        &time_bounds,
+        opts.rollups,
+    );
 
     let snapshot = Arc::new(QuerySnapshot {
         // RC01：命名空间 + 序号 + generation。跨启动唯一性来自命名空间，
@@ -441,7 +574,10 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
         as_of,
         by: opts.by,
         rows,
+        time_bounds,
+        rollup_selection,
         collection,
+        read,
         _reservation: reservation,
     });
 
@@ -543,10 +679,7 @@ pub fn locate_cursor(snapshot: &QuerySnapshot, cursor_str: &str, drill_fp: &str)
     snapshot
         .rows
         .iter()
-        .position(|r| {
-            let e = snapshot.event(r);
-            e.ts == ts && e.record_id == c.rid && r.seq == c.seq
-        })
+        .position(|r| r.ts == ts && r.record_id == c.rid && r.seq == c.seq)
         .ok_or_else(|| anyhow!("游标位置在当前查询中不存在，请刷新重试"))
 }
 
@@ -586,4 +719,39 @@ pub fn query_retained_bytes_for_tests() -> usize {
 pub fn reset_query_budget_for_tests() {
     let mut q = quota().lock().unwrap_or_else(|e| e.into_inner());
     q.limit = MAX_RETAINED_QUERY_BYTES;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::report::retained::capacity_bytes;
+
+    /// 复审 #6：行索引的内存计账必须包含 `record_id` 的堆字符串——
+    /// `vec_bytes` 只算元素定长部分，漏计会让长记录标识成批绕过会话预算。
+    #[test]
+    fn row_budget_counts_record_id_heap() {
+        let long_id = "x".repeat(4096);
+        let rows = vec![
+            SnapshotRow {
+                event_id: 1,
+                index: 0,
+                seq: 0,
+                ts: jiff::Timestamp::UNIX_EPOCH,
+                record_id: long_id.clone(),
+            },
+            SnapshotRow {
+                event_id: 2,
+                index: 1,
+                seq: 0,
+                ts: jiff::Timestamp::UNIX_EPOCH,
+                record_id: long_id,
+            },
+        ];
+        let counted = rows_retained_bytes(&rows).unwrap();
+        let bare = capacity_bytes(rows.len(), std::mem::size_of::<SnapshotRow>()).unwrap();
+        assert!(
+            counted >= bare + 2 * 4096,
+            "record_id 堆内存必须计入预算（counted={counted}, bare={bare}）"
+        );
+    }
 }
