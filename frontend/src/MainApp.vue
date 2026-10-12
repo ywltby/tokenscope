@@ -5,7 +5,16 @@
 // 因此不能出现在未同意的首屏路径上（静态导入会绕过 v-if）。
 //
 // 视觉改造不改数据流：回到汇总页仍强制刷新一次（设置页可能重建了缓存）。
-import { computed, onBeforeUnmount, onMounted, provide, ref, watch, watchEffect } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  provide,
+  ref,
+  watch,
+  watchEffect,
+} from "vue";
 import {
   dateZhCN,
   zhCN,
@@ -69,10 +78,25 @@ watchEffect(() => {
 });
 
 const page = ref<"summary" | "settings">("summary");
-// 回到汇总页时强制刷新一次数据（设置页可能重建了缓存）。
+// U04：切页不再强制刷新。汇总页改为 KeepAlive 保留（筛选、下钻与滚动位置
+// 都留在实例里），回到页面时只在有"待刷新标记"时发起一批刷新——标记由
+// useUsageQuery 累积隐藏期间的所有触发（时区变化、refreshKey、设置保存、
+// usage-updated、时钟检查）。refreshKey 保留给程序触发（价格同步、设置
+// 保存成功等），不再由切页递增。
+// 「设置保存后刷新」的接线留在这里：设置页保存成功（U05 加 emit）时递增
+// refreshKey 即可——汇总页可见时立刻刷新，隐藏时只置待刷新标记。
 const refreshKey = ref(0);
-watch(page, (p) => {
-  if (p === "summary") refreshKey.value += 1;
+
+// U04 切页保留：滚动容器在应用壳里（汇总页与设置页共用），离开某页时记录
+// 它的 scrollTop，进入时恢复——否则切页会把新页面留在上一页的滚动位置。
+type PageId = "summary" | "settings";
+const scrollEl = ref<HTMLElement | null>(null);
+const scrollPositions: Record<PageId, number> = { summary: 0, settings: 0 };
+watch(page, (next, prev) => {
+  if (scrollEl.value) scrollPositions[prev] = scrollEl.value.scrollTop;
+  void nextTick(() => {
+    if (scrollEl.value) scrollEl.value.scrollTop = scrollPositions[next] ?? 0;
+  });
 });
 
 const pageOptions = [
@@ -172,7 +196,7 @@ function onCloseCancel(): void {
     <NMessageProvider>
       <div class="app-shell">
         <div class="ts-ambient" aria-hidden="true"></div>
-        <div class="scroll-container">
+        <div ref="scrollEl" class="scroll-container">
           <!-- R04 审核：导航与内容同一滚动上下文——内容滚动时从导航后方
                经过，玻璃模糊才真正有内容可透（吸顶 header 在滚动容器内） -->
           <header class="app-nav ts-glass">
@@ -262,13 +286,15 @@ function onCloseCancel(): void {
           <main class="app-content">
             <!-- U03：时区就绪前不挂载业务页面（时区就绪前不发任何查询） -->
             <template v-if="tzReady">
-              <Dashboard
-                v-if="page === 'summary'"
-                :refresh-key="refreshKey"
-                @go-settings="page = 'settings'"
-              />
+              <!-- U04：两页都由 KeepAlive 保留——汇总页的筛选、下钻、滚动位置
+                   与设置页的未保存草稿都在切页后原样回来。 -->
               <KeepAlive>
-                <Settings v-if="page === 'settings'" :refresh-key="refreshKey" />
+                <Dashboard
+                  v-if="page === 'summary'"
+                  :refresh-key="refreshKey"
+                  @go-settings="page = 'settings'"
+                />
+                <Settings v-else :refresh-key="refreshKey" />
               </KeepAlive>
             </template>
           </main>

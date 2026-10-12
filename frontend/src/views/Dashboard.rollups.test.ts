@@ -15,6 +15,8 @@ import {
   resetSnapshotQueueForTests,
   snapshotQueueIdle,
 } from "../lib/viewSnapshot";
+import { VIEW_FILTERS_KEY } from "../lib/viewFilters";
+import { resetTimezoneForTests } from "../composables/timezone";
 import type { EventList, Group, SummaryReport } from "../types";
 
 function group(key: string, input: number): Group {
@@ -79,6 +81,9 @@ beforeEach(() => {
   invokeMock.mockReset();
   localStorage.clear();
   resetSnapshotQueueForTests();
+  // U04：时区是模块级单例，参与"快照是否可用于首帧"的比较——每个用例从默认
+  // 时区起步。
+  resetTimezoneForTests();
   invokeMock.mockImplementation((cmd: string) => {
     if (cmd === "query_begin") return Promise.resolve(queryInfo);
     if (cmd === "view_cache_load") return Promise.resolve(null);
@@ -154,7 +159,19 @@ describe("Dashboard 日粒度历史（H08）", () => {
     w.unmount();
   });
 
-  it("重新进入页面恢复快照中的仅明细模式，不回退 auto（复审 #7）", async () => {
+  it("重新进入页面恢复偏好中的仅明细模式，不回退 auto（U04 / 复审 #7）", async () => {
+    // U04：日粒度参与方式是**筛选偏好**（localStorage），不再依赖视图快照恢复
+    // ——偏好决定"查什么"，视图快照只在偏好与时区逐项相等时用于首帧展示。
+    localStorage.setItem(
+      VIEW_FILTERS_KEY,
+      JSON.stringify({
+        by: "day",
+        agent: "all",
+        preset: null,
+        rollupsMode: "detail_only",
+        drill: null,
+      }),
+    );
     const events: EventList = {
       query_id: "q-test-a",
       pricing_revision: "rev-test",
@@ -165,15 +182,7 @@ describe("Dashboard 日粒度历史（H08）", () => {
     const report = reportWithMismatch();
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "query_begin") return Promise.resolve(queryInfo);
-      if (cmd === "view_cache_load")
-        return Promise.resolve({
-          v: SNAPSHOT_VERSION,
-          saved_at: "2026-10-10T00:00:00Z",
-          filters: { by: "day", agent: "all", preset: null, drill: null },
-          rollups_mode: "detail_only",
-          report,
-          events,
-        });
+      if (cmd === "view_cache_load") return Promise.resolve(null);
       if (cmd === "query_summary") return Promise.resolve(report);
       if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
@@ -181,9 +190,9 @@ describe("Dashboard 日粒度历史（H08）", () => {
     });
     const w = mountDashboard();
     await flushPromises();
-    expect(w.text(), "恢复的模式必须生效").toContain("当前只统计请求明细");
+    expect(w.text(), "偏好里的模式必须生效").toContain("当前只统计请求明细");
     const begins = invokeMock.mock.calls.filter((c) => c[0] === "query_begin");
-    expect(begins.length, "恢复后启动的后台刷新必须重建会话").toBeGreaterThan(0);
+    expect(begins.length, "首批查询必须重建会话").toBeGreaterThan(0);
     const last = begins[begins.length - 1][1] as { rollups: string | null };
     expect(last.rollups).toBe("detail_only");
     w.unmount();

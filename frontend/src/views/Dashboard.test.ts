@@ -4,7 +4,7 @@
 // 首个汇总响应被作废（无快照 → 永久转圈；有快照 → 永久停留旧数据）。
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
-import { nextTick } from "vue";
+import { KeepAlive, defineComponent, h, nextTick, ref } from "vue";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
@@ -14,8 +14,13 @@ import Dashboard from "./Dashboard.vue";
 import dashboardSource from "./Dashboard.vue?raw";
 import TrendChart from "../components/TrendChart.vue";
 import type { Dim, EventList, Group, SummaryReport } from "../types";
-import { SNAPSHOT_VERSION, snapshotQueueIdle } from "../lib/viewSnapshot";
+import {
+  SNAPSHOT_VERSION,
+  resetSnapshotQueueForTests,
+  snapshotQueueIdle,
+} from "../lib/viewSnapshot";
 import { initTimezone, resetTimezoneForTests, useTimezone } from "../composables/timezone";
+import { VIEW_FILTERS_KEY } from "../lib/viewFilters";
 import type { RangePreset } from "../lib/rangePreset";
 
 function group(key: string, input: number): Group {
@@ -98,9 +103,29 @@ function state(w: VueWrapper): Record<string, unknown> {
   return w.vm as unknown as Record<string, unknown>;
 }
 
+/// U04：筛选偏好（localStorage `tokenscope-view-filters`）——偏好决定"查什么"，
+/// 视图快照只在"偏好 + 时区"逐项相等时用于首帧展示。需要"恢复态"的用例先把
+/// 偏好写成与 `snapshotPayload()` 的 filters 一致。
+function useMatchingPreferences(): void {
+  localStorage.setItem(
+    VIEW_FILTERS_KEY,
+    JSON.stringify({
+      by: "model",
+      agent: "claude",
+      preset: null,
+      rollupsMode: "auto",
+      drill: { type: "model", key: "claude-sonnet-4-5" },
+    }),
+  );
+}
+
 beforeEach(() => {
   invokeMock.mockReset();
   localStorage.clear();
+  resetSnapshotQueueForTests();
+  // U04：时区是模块级单例，且参与"快照是否可用于首帧"的逐项比较——每个用例
+  // 从默认时区（Asia/Shanghai）起步，避免上一个用例的 initTimezone 结果串味。
+  resetTimezoneForTests();
 });
 
 describe("Dashboard 查询编排", () => {
@@ -198,7 +223,7 @@ describe("Dashboard 查询编排", () => {
     expect(state(w)["summaryError"]).toBeNull();
   });
 
-  it("total_row_clears_drill：点击合计行不生成字面“合计”过滤", async () => {
+  it("total_row_clears_drill：合计行经独立事件清空下钻，不生成字面“合计”过滤", async () => {
     mockOk();
     const w = mountDashboard();
     await flushPromises();
@@ -208,9 +233,48 @@ describe("Dashboard 查询编排", () => {
     const onClick = state(w)["onSummaryRowClick"] as (key: string) => void;
     onClick("claude-sonnet-4-5");
     expect((state(w)["drill"] as { key: string } | null)?.key).toBe("claude-sonnet-4-5");
-    onClick("合计");
+    // U04：合计行由 UsageTable 的 `total-row` 事件单独通知——Dashboard 不再靠
+    // 字面量「合计」判断，因此这里走合计行的专属入口。
+    (state(w)["onTotalRowClick"] as () => void)();
     expect(state(w)["drill"]).toBeNull();
   });
+
+  it.each([
+    ["day", "2026-10-01", "日期"],
+    ["model", "claudeopus55", "模型"],
+    ["project", "C:/work/alpha", "项目"],
+  ] as const)(
+    "drill_hint_uses_chinese_type_name_%s：下钻提示用中文类型名",
+    async (dim: string, key: string, zh: string) => {
+      const report: SummaryReport = {
+        ...summaryA,
+        by: dim,
+        groups: [{ ...group(key, 10), label: key }, group("合计", 10)],
+        totals: group("合计", 10),
+      };
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === "query_begin") return Promise.resolve(queryInfo);
+        if (cmd === "query_summary") return Promise.resolve(report);
+        if (cmd === "query_events") return Promise.resolve(events);
+        if (cmd === "view_cache_load") return Promise.resolve(null);
+        if (cmd === "source_status") return Promise.resolve([]);
+        return Promise.resolve(null);
+      });
+      const w = mountDashboard();
+      await flushPromises();
+      state(w)["by"] = dim;
+      await nextTick();
+      await flushPromises();
+      (state(w)["onSummaryRowClick"] as (k: string) => void)(key);
+      await nextTick();
+      expect(w.text()).toContain(`已筛选 ${zh}：${key}`);
+      // 不再是 `${type}: ${label}` 形态
+      expect(w.text()).not.toContain("model: ");
+      expect(w.text()).not.toContain("project: ");
+      expect(w.text()).not.toContain("day: ");
+      w.unmount();
+    },
+  );
 
   it("model_group_label_and_drill_key_are_distinct：下钻键是身份键，展示标签是友好名", async () => {
     const modelReport: SummaryReport = {
@@ -410,7 +474,10 @@ describe("Dashboard 时间预设（U01/U03）", () => {
 });
 
 describe("Dashboard 视图快照与刷新（C4/F08）", () => {
-  it("view_cache_query_mismatch：v6 快照连同筛选一起恢复，口径一致", async () => {
+  it("view_cache_used_when_preferences_match：偏好与快照逐项相等时快照用于首帧（stale），偏好不被改写", async () => {
+    // U04：筛选偏好决定"查什么"；视图快照只在"偏好 + 时区"逐项相等时用于首帧
+    // 展示，并标记 stale——它不再反向改写偏好，也不写时区。
+    useMatchingPreferences();
     let resolveSummary!: (v: SummaryReport) => void;
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "query_begin") return Promise.resolve(queryInfo);
@@ -423,11 +490,10 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     });
     const w = mountDashboard();
     await flushPromises();
-    // 筛选被恢复（数据与口径必然一致）
+    // 偏好在挂载前就已确定（同步读取），数据以"缓存数据"过期标记展示
     expect(state(w)["agent"]).toBe("claude");
     expect(state(w)["by"]).toBe("model");
     expect((state(w)["drill"] as { key: string } | null)?.key).toBe("claude-sonnet-4-5");
-    // 数据以"缓存数据"过期标记展示，等待后台刷新
     expect(state(w)["report"]).not.toBeNull();
     expect(state(w)["stale"]).toBe(true);
     expect(w.text()).toContain("缓存数据");
@@ -435,6 +501,29 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
     await flushPromises();
     // 后台刷新落地后过期标记清除
     expect(state(w)["stale"]).toBe(false);
+  });
+
+  it("view_cache_ignored_when_preferences_differ：偏好与快照不一致时快照不用于首帧，也不改写筛选", async () => {
+    // 快照是 model/claude + 下钻，偏好是默认值（day/all/无下钻）→ 不展示旧数据。
+    let resolveSummary!: (v: SummaryReport) => void;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(snapshotPayload());
+      if (cmd === "query_summary") return new Promise((r) => (resolveSummary = r));
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(state(w)["by"], "偏好不被快照改写").toBe("day");
+    expect(state(w)["agent"]).toBe("all");
+    expect(state(w)["drill"]).toBeNull();
+    expect(state(w)["report"], "不匹配的快照不得当首帧").toBeNull();
+    expect(state(w)["stale"]).toBe(false);
+    resolveSummary(summaryA);
+    await flushPromises();
+    expect(state(w)["report"]).not.toBeNull();
   });
 
   it("v4 旧快照（可能含混代拼接/晚到接管残留）被忽略，走正常加载", async () => {
@@ -851,6 +940,8 @@ describe("视图快照查询身份（R04）", () => {
   });
 
   it("stale_failure_shows_retry_state：旧数据 + 刷新失败 = 失败态（非后台刷新中）", async () => {
+    // U04：先让偏好与快照一致，才有"恢复旧数据"的展示态。
+    useMatchingPreferences();
     let fail = true;
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "query_begin") return Promise.resolve(queryInfo);
@@ -1120,6 +1211,8 @@ describe("Dashboard 页头与通知（设计系统 Task 3）", () => {
   });
 
   it("stale 快照 → 标题行警告胶囊；后台刷新落地 → 成功胶囊", async () => {
+    // U04：快照仅在偏好与时区逐项相等时用于首帧（这里让偏好与快照一致）。
+    useMatchingPreferences();
     let resolveSummary!: (v: SummaryReport) => void;
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "query_begin") return Promise.resolve(queryInfo);
@@ -1224,6 +1317,81 @@ describe("Dashboard 页头与通知（设计系统 Task 3）", () => {
     // 展开后逐条明细可见
     expect(w.text()).toContain("数据目录不存在");
     expect(w.text()).toContain("没有发现会话日志");
+  });
+
+  it("notices_merge_into_one_row：三类问题并存时只渲染一条通知，展开后逐条且动作可用", async () => {
+    // U04：页面上只显示一条通知（原来最多七种通知条并存）——展示最高严重级别
+    // 与条数，展开后逐条列出；动作保留在各自的条目上。
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.reject(new Error("sum boom"));
+      if (cmd === "query_events") return Promise.reject(new Error("ev boom"));
+      if (cmd === "source_status")
+        return Promise.resolve([
+          {
+            agent: "codex",
+            dir: "C:/codex",
+            enabled: true,
+            exists: false,
+            files: 0,
+            state: "missing",
+          },
+        ]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    const noticeRows = w.findAll(".ts-notice");
+    expect(noticeRows.length, "只允许一条合并通知").toBe(1);
+    expect(noticeRows[0].attributes("role"), "最高严重级别驱动语义").toBe("alert");
+    expect(noticeRows[0].text()).toContain("共 3 条通知");
+    // 折叠态不铺开逐条明细
+    expect(w.text()).not.toContain("数据目录不存在");
+
+    const toggle = noticeRows[0].findAll("button").find((b) => b.text().includes("详情"))!;
+    expect(toggle, "多条通知必须可展开").toBeDefined();
+    await toggle.trigger("click");
+    const lines = w.findAll(".source-detail-line");
+    expect(lines.length).toBe(3);
+    expect(lines.map((l) => l.text()).join("\n")).toContain("Codex 数据目录不存在");
+
+    // 动作保留在各自条目上：来源异常 → 去设置；两条失败 → 各自重试
+    const goSettings = lines
+      .find((l) => l.text().includes("数据目录不存在"))!
+      .findAll("button")
+      .find((b) => b.text().includes("去设置"))!;
+    await goSettings.trigger("click");
+    expect(w.emitted("go-settings")).toBeTruthy();
+    const retries = w.findAll(".source-detail-line button").filter((b) => b.text() === "重试");
+    expect(retries.length, "汇总与明细各自可重试").toBe(2);
+  });
+
+  it("instant_range_hint_enters_merged_notice：时刻模式提示进入合并通知", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary")
+        return Promise.resolve({
+          ...summaryA,
+          rollup_coverage: {
+            detail_buckets: 1,
+            rollup_buckets: 2,
+            unresolved_buckets: 0,
+            unresolved_covered_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+            rollups_excluded_for_instant_range: true,
+          },
+        });
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    const noticeRows = w.findAll(".ts-notice");
+    expect(noticeRows.length).toBe(1);
+    expect(noticeRows[0].text()).toContain("只统计请求明细，不含只有日粒度的历史");
+    w.unmount();
   });
 
   it("汇总加载失败渲染为可重试内联通知（非 NAlert）", async () => {
@@ -1383,6 +1551,8 @@ describe("Dashboard 恢复分页资格与过期恢复（RC02）", () => {
   }
 
   it("restored_view_cannot_page_before_current_first_page_succeeds：恢复视图无 live 分页资格", async () => {
+    // U04：恢复态要求偏好与快照一致（快照只是首帧兜底，不再改写偏好）。
+    useMatchingPreferences();
     const newHandle = { ...queryInfo, queryId: "q-new-session" };
     // 新批次首页在被显式放行前一律拒绝（恢复后的批次刷新也可能发起首页）。
     let allowFirstPage = false;
@@ -1722,6 +1892,109 @@ describe("Dashboard 来源检测失败（AP06）", () => {
     expect(w.text()).toContain("来源目录检测失败");
     expect(w.text(), "必须标注旧状态可能过期，而不是当作最新").toContain("可能已过期");
     expect(w.text()).toContain("读取超时");
+    w.unmount();
+  });
+});
+
+// ── U04：切页保留（KeepAlive 实例保留、隐藏期间合并、回到页面只发一批） ──
+describe("Dashboard 切页保留（U04）", () => {
+  function mountKeepAliveHost(): {
+    w: VueWrapper;
+    setPage: (p: "summary" | "settings") => void;
+    bumpRefreshKey: () => void;
+  } {
+    const page = ref<"summary" | "settings">("summary");
+    const refreshKey = ref(0);
+    const Host = defineComponent({
+      render: () =>
+        h(KeepAlive, null, {
+          default: () =>
+            page.value === "summary"
+              ? h(Dashboard, { refreshKey: refreshKey.value })
+              : h("div", { class: "stub-other" }, "设置"),
+        }),
+    });
+    const w = mount(Host, {
+      global: {
+        stubs: {
+          SummaryCards: true,
+          UsageTable: true,
+          TrendChart: true,
+          EventTable: true,
+          AgentIcon: true,
+          DateRangeSelect: true,
+        },
+      },
+    });
+    return {
+      w,
+      setPage: (p: "summary" | "settings"): void => {
+        page.value = p;
+      },
+      bumpRefreshKey: (): void => {
+        refreshKey.value += 1;
+      },
+    };
+  }
+
+  function beginCalls(): number {
+    return invokeMock.mock.calls.filter((c) => c[0] === "query_begin").length;
+  }
+
+  it("keepalive_preserves_filters_and_coalesces_hidden_refresh：筛选/下钻保留，隐藏触发合并为一批", async () => {
+    mockOk();
+    const { w, setPage, bumpRefreshKey } = mountKeepAliveHost();
+    await flushPromises();
+    const dash = (): Record<string, unknown> =>
+      w.findComponent(Dashboard).vm as unknown as Record<string, unknown>;
+    const beginsAfterLoad = beginCalls();
+    expect(dash()["report"] as SummaryReport | null).not.toBeNull();
+
+    // 用户筛选 + 下钻
+    dash()["agent"] = "claude";
+    await nextTick();
+    await flushPromises();
+    (dash()["onSummaryRowClick"] as (k: string) => void)("2026-10-01");
+    await nextTick();
+    await flushPromises();
+    const beginsAfterDrill = beginCalls();
+    expect(beginsAfterDrill).toBeGreaterThan(beginsAfterLoad);
+
+    // 切到设置再回来：无待刷新标记 → 不发查询，筛选与下钻保留
+    setPage("settings");
+    await nextTick();
+    await flushPromises();
+    expect(w.find(".stub-other").exists()).toBe(true);
+    setPage("summary");
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "无待刷新标记时不发查询").toBe(beginsAfterDrill);
+    expect(dash()["agent"]).toBe("claude");
+    expect((dash()["drill"] as { key: string } | null)?.key).toBe("2026-10-01");
+
+    // 隐藏期间的多次触发（自动刷新入口 ×2 + usage-updated ×1 + refreshKey ×1）：
+    // 只置标记
+    const requestAutoRefresh = dash()["requestAutoRefresh"] as () => void;
+    const notifyUsageUpdated = dash()["notifyUsageUpdated"] as (g: number) => void;
+    setPage("settings");
+    await nextTick();
+    await flushPromises();
+    requestAutoRefresh();
+    requestAutoRefresh();
+    notifyUsageUpdated(9);
+    bumpRefreshKey();
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "隐藏期间不发查询").toBe(beginsAfterDrill);
+
+    // 回到页面：只发一批，筛选与下钻仍保留
+    setPage("summary");
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "回到页面只发一批").toBe(beginsAfterDrill + 1);
+    expect(dash()["agent"]).toBe("claude");
+    expect((dash()["drill"] as { key: string } | null)?.key).toBe("2026-10-01");
+    expect(dash()["pendingRefresh"], "标记已消费").toBe(false);
     w.unmount();
   });
 });

@@ -486,3 +486,49 @@ describe("App 关闭确认（关闭确认与配置文件计划 Task 3）", () =>
     expect(w.find(".stub-NModal").exists()).toBe(false);
   });
 });
+
+// ── U04：切页保留（KeepAlive 保留两页实例、滚动容器位置按页记录/恢复、
+// 切页不再强制刷新） ──
+describe("App 切页保留（U04）", () => {
+  it("keepalive_keeps_page_instances_and_restores_scroll：两页实例保留且各自滚动位置恢复", async () => {
+    mockApp(statusOk);
+    const w = mount(MainApp);
+    await flushPromises();
+    const scroller = w.get(".scroll-container").element as HTMLElement;
+    expect(w.find(".stub-dashboard").exists()).toBe(true);
+    const dashboard = w.findComponent({ name: "Dashboard" }).vm;
+
+    scroller.scrollTop = 320;
+    await w.get('[aria-label="页面切换"] [aria-label="设置"]').trigger("click");
+    await flushPromises();
+    expect(w.find(".stub-settings").exists()).toBe(true);
+    expect(w.find(".stub-dashboard").exists()).toBe(false);
+    // 设置页滚到自己记住的位置（首次进入为 0）
+    expect(scroller.scrollTop).toBe(0);
+    scroller.scrollTop = 40;
+
+    await w.get('[aria-label="页面切换"] [aria-label="汇总"]').trigger("click");
+    await flushPromises();
+    // KeepAlive：汇总页实例原样回来（不是重新挂载）
+    expect(w.findComponent({ name: "Dashboard" }).vm).toBe(dashboard);
+    expect(scroller.scrollTop, "汇总页滚动位置恢复").toBe(320);
+
+    await w.get('[aria-label="页面切换"] [aria-label="设置"]').trigger("click");
+    await flushPromises();
+    expect(scroller.scrollTop, "设置页滚动位置恢复").toBe(40);
+    w.unmount();
+  });
+
+  it("switch_does_not_force_refresh：切页不再递增 refreshKey（刷新交给待刷新标记）", async () => {
+    mockApp(statusOk);
+    const w = mount(MainApp);
+    await flushPromises();
+    expect(w.findComponent({ name: "Dashboard" }).props("refreshKey")).toBe(0);
+    await w.get('[aria-label="页面切换"] [aria-label="设置"]').trigger("click");
+    await flushPromises();
+    await w.get('[aria-label="页面切换"] [aria-label="汇总"]').trigger("click");
+    await flushPromises();
+    expect(w.findComponent({ name: "Dashboard" }).props("refreshKey")).toBe(0);
+    w.unmount();
+  });
+});
