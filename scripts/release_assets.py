@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 from urllib.request import urlopen
+from urllib.parse import quote
 
 from bump_version import declaration, historical_versions, resolve, uniform
 from release_metadata import read_versions
@@ -244,6 +245,7 @@ class Github:
             raise ValueError("仓库名称非法")
         self.repository = repository
         self.api = "repos/" + repository
+        self.release_ids = {}
 
     def run(self, *args, optional=False):
         result = subprocess.run(["gh", *args], capture_output=True, encoding="utf-8", check=False)
@@ -261,41 +263,73 @@ class Github:
         return json.loads(self.run("api", f"{self.api}/commits/{tag}"))["sha"]
 
     def get_release(self, tag):
+        if tag in self.release_ids:
+            release = json.loads(self.run("api", f"{self.api}/releases/{self.release_ids[tag]}"))
+            return self.remember_release(tag, release)
         result = self.run("api", f"{self.api}/releases/tags/{tag}", optional=True)
         if result is not None:
-            return json.loads(result)
+            return self.remember_release(tag, json.loads(result))
         # by-tag 文档只保证已发布版本；认证的 list 接口可读取本仓草稿。
         page = 1
         while True:
             releases = json.loads(self.run("api", f"{self.api}/releases?per_page=100&page={page}"))
             for release in releases:
                 if release.get("tag_name") == tag:
-                    return release
+                    return self.remember_release(tag, release)
             if len(releases) < 100:
                 return None
             page += 1
+
+    def remember_release(self, tag, release):
+        if (not isinstance(release, dict) or release.get("tag_name") != tag
+                or type(release.get("id")) is not int or release["id"] <= 0):
+            raise ValueError("GitHub Release 身份与目标标签不一致")
+        known = self.release_ids.get(tag)
+        if known is not None and known != release["id"]:
+            raise ValueError("GitHub Release ID 在本次发布中改变")
+        self.release_ids[tag] = release["id"]
+        return release
 
     def create_tag(self, tag, sha):
         self.run("api", "--method", "POST", f"{self.api}/git/refs",
                  "-f", "ref=refs/tags/" + tag, "-f", "sha=" + sha)
 
     def create_draft(self, tag, sha, notes):
+        if self.get_tag(tag) != sha:
+            raise ValueError("草稿创建前固定标签身份改变")
         with tempfile.TemporaryDirectory(prefix="tokenscope-release-notes-") as temporary:
-            path = Path(temporary) / "notes.md"
-            path.write_text(notes, encoding="utf-8")
-            self.run("release", "create", tag, "--repo", self.repository, "--draft",
-                     "--target", "main", "--verify-tag", "--title", "TokenScope " + tag,
-                     "--prerelease", "--latest=false", "--notes-file", str(path))
+            path = Path(temporary) / "release.json"
+            path.write_text(json.dumps({"tag_name": tag, "target_commitish": "main",
+                            "name": "TokenScope " + tag, "body": notes, "draft": True,
+                            "prerelease": True, "make_latest": "false"}, ensure_ascii=False), encoding="utf-8")
+            created = json.loads(self.run("api", "--method", "POST", f"{self.api}/releases",
+                                         "--input", str(path)))
+            if created.get("draft") is not True:
+                raise ValueError("GitHub 未按请求创建发布草稿")
+            self.remember_release(tag, created)
 
     def upload(self, tag, paths):
-        existing = {a["name"] for a in self.get_release(tag)["assets"]}
-        missing = [str(p) for p in paths if p.name not in existing]
-        if missing:
-            self.run("release", "upload", tag, *missing, "--repo", self.repository)
+        release = self.get_release(tag)
+        if release is None or release.get("draft") is not True:
+            raise ValueError("只允许向身份已确认的草稿上传资产")
+        existing = {a["name"] for a in release["assets"]}
+        for path in paths:
+            if path.name in existing:
+                continue
+            endpoint = (f"https://uploads.github.com/{self.api}/releases/{release['id']}/assets"
+                        "?name=" + quote(safe_name(path.name), safe=""))
+            uploaded = json.loads(self.run("api", "--method", "POST", endpoint,
+                                          "-H", "Content-Type: application/octet-stream",
+                                          "--input", str(path)))
+            if uploaded.get("name") != path.name or uploaded.get("digest") != "sha256:" + digest(path):
+                raise ValueError("GitHub 上传响应中的资产身份或 SHA256 不一致")
 
     def publish(self, tag):
-        self.run("release", "edit", tag, "--repo", self.repository,
-                 "--draft=false", "--prerelease", "--latest=false")
+        release = self.get_release(tag)
+        if release is None or release.get("draft") is not True:
+            raise ValueError("只允许公开已确认身份的草稿")
+        self.run("api", "--method", "PATCH", f"{self.api}/releases/{release['id']}",
+                 "-F", "draft=false", "-F", "prerelease=true", "-f", "make_latest=false")
 
 
 def publish(directory, commit, version):

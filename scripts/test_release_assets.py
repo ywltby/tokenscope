@@ -151,7 +151,7 @@ class ReleaseAssetCase(unittest.TestCase):
 
     def test_github_protocol_finds_drafts_and_creates_release_from_already_fixed_tag(self):
         github=assets.Github("ywltby/tokenscope")
-        draft={"tag_name":"v0.1.0","draft":True,"target_commitish":"main","assets":[]}
+        draft={"id":123,"tag_name":"v0.1.0","draft":True,"target_commitish":"main","assets":[]}
         calls=[]
 
         def response(*args,optional=False):
@@ -165,11 +165,66 @@ class ReleaseAssetCase(unittest.TestCase):
         with patch.object(github,"run",side_effect=response):
             self.assertEqual(github.get_release("v0.1.0"),draft)
         self.assertEqual(len(calls),3)
-        with patch.object(github,"run") as run:
+        with patch.object(github,"run",return_value=json.dumps(draft)) as run, patch.object(github,"get_tag",return_value=SHA):
             github.create_draft("v0.1.0",SHA,"historical notes")
         args=run.call_args.args
-        self.assertEqual(args[args.index("--target")+1],"main")
-        self.assertIn("--verify-tag",args)
+        self.assertIn("POST",args)
+        self.assertEqual(args[0],"api")
+
+    def test_created_draft_uses_returned_id_without_eventually_consistent_tag_or_list(self):
+        github=assets.Github("ywltby/tokenscope")
+        draft={"id":123,"tag_name":"v0.2.1","draft":True,"assets":[]}
+        calls=[]
+        def run(*args,**kwargs):
+            calls.append(args)
+            endpoint=args[1] if args[1].startswith("repos/") else args[args.index("POST")+1]
+            if "POST" in args:
+                with open(args[args.index("--input")+1],encoding="utf-8") as fh:
+                    request=json.load(fh)
+                self.assertEqual(request["tag_name"],"v0.2.1")
+                self.assertEqual(request["target_commitish"],"main")
+                self.assertEqual(request["body"],"本次发布")
+                return json.dumps(draft)
+            if endpoint.endswith("/releases/123"):
+                return json.dumps(draft)
+            self.fail("新建草稿不应重新依赖 by-tag 或 list")
+        with patch.object(github,"run",side_effect=run),patch.object(github,"get_tag",return_value=SHA):
+            github.create_draft("v0.2.1",SHA,"本次发布")
+            self.assertEqual(github.get_release("v0.2.1"),draft)
+        self.assertEqual(len(calls),2)
+
+    def test_exact_release_id_is_retained_for_upload_and_publication(self):
+        github=assets.Github("ywltby/tokenscope")
+        draft={"id":123,"tag_name":"v0.2.1","draft":True,"assets":[]}
+        calls=[]
+        def run(*args,**kwargs):
+            calls.append(args)
+            if "uploads.github.com" in " ".join(args):
+                self.assertIn("/releases/123/assets?name="+self.exe.name," ".join(args))
+                self.assertEqual(args[args.index("--input")+1],str(self.exe))
+                self.assertIn("Content-Type: application/octet-stream",args)
+                return json.dumps({"name":self.exe.name,"digest":"sha256:"+assets.digest(self.exe)})
+            if "PATCH" in args:
+                self.assertIn("repos/ywltby/tokenscope/releases/123",args)
+                return json.dumps({**draft,"draft":False})
+            return json.dumps(draft)
+        with patch.object(github,"run",side_effect=run):
+            github.get_release("v0.2.1")
+            github.upload("v0.2.1",[self.exe])
+            github.publish("v0.2.1")
+        self.assertTrue(any("POST" in args for args in calls))
+        self.assertTrue(any("PATCH" in args for args in calls))
+
+    def test_release_identity_change_is_rejected_before_mutation(self):
+        github=assets.Github("ywltby/tokenscope")
+        for release in ({"id":True,"tag_name":"v0.2.1"},
+                        {"id":123,"tag_name":"v0.2.0"},
+                        {"id":0,"tag_name":"v0.2.1"}):
+            with self.subTest(release=release),self.assertRaises(ValueError):
+                github.remember_release("v0.2.1",release)
+        github.remember_release("v0.2.1",{"id":123,"tag_name":"v0.2.1"})
+        with self.assertRaises(ValueError):
+            github.remember_release("v0.2.1",{"id":456,"tag_name":"v0.2.1"})
 
     def test_baseline_pins_source_original_three_assets_and_expected_fixture(self):
         baseline = assets.load_baseline(Path(__file__).parent / "fixtures/upgrade_baseline.json")
