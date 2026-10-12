@@ -2,7 +2,7 @@
 
 > 2026-10-11 整理。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
 > 当前唯一待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)；逐份事实核对：[审计索引](audits/README.md)。
-> 最新复核：[安装设计实施独立复核](../reviews/2026-10-11-main-merge-readiness.md#install-design-recheck)——`a64d340` 所列 A01–A06 六项安装门禁缺口已由 `b855021` 全部修复、`788905a` 记账，双审计员挑刺循环收敛至 `6fab12f`：M06 严格事实校验与 fixture 契约 **29 项**、M05 生命周期契约 **22 项** pwsh 7.6.6 实跑全绿，N12 唯一待办为 PR CI 实跑取证；[a58684c 的 M01 已闭合](../reviews/2026-10-11-main-merge-readiness.md#m01-closed)，此前各轮结果保留为历史。
+> 最新独立复核：[当前 main 合并门槛](../reviews/2026-10-11-main-merge-readiness.md#current-merge-readiness)（2026-10-12，代码 231f667，后续 e31d1b6 仅改文档）：A01–A06 已闭合；根库普通/acceptance 各 462/10 忽略、壳 46/51、前端 364、Python 36、PS7 22 及完整本地门禁全部通过。代码与本地门禁就绪，正式合并仍缺当前 PR 的 CI 与 Install test 绿灯；[M01 保持关闭](../reviews/2026-10-11-main-merge-readiness.md#m01-closed)，此前结果保留为历史。
 
 ## 现在执行什么
 
@@ -14,7 +14,7 @@
 
 按用户要求补齐的 [M05/M06 安装验收修复设计与实施步骤](active/2026-10-11-consolidated-remaining-work.md#n12-install-design)已完整落地：逐身份 JSON 事实、生成器契约、实际启动、日志路由、PS7 正例、反例覆盖与工作流前置执行全部闭合，`a64d340` 独立复核所列 A01–A06 六项已逐条修复；剩余唯一条件是当前产物的 CI 实跑证据，不据脚本存在关闭任务。
 
-保留 13 个责任编号；双审计员挑刺循环收敛后（最新 `6fab12f`）为 **9 项完成、1 项部分完成、3 项本轮验收未执行**，共 4 项待办。N01–N09 已完成，N12 部分完成且只剩 PR CI 实跑取证；N10/N11/N13 保留未执行状态。每项已有旧任务来源、必要性、文件、验证方法与通过标准；暂缓/被取代的内容单列在新计划第 5 节。
+保留 13 个责任编号；当前为 **9 项完成、1 项部分完成、3 项本轮验收未执行**，共 4 项待办。N01–N09 已完成，N12 安装部分待当前 PR CI 与安装实跑，其余系统/发布签字仍按原排期；N10/N11/N13 保留未执行状态。每项已有旧任务来源、必要性、文件、验证方法与通过标准；暂缓/被取代的内容单列在新计划第 5 节。
 
 必须保持用户定稿：一个 `~/.tokenscope/history.db`，只保存精简 token/cwd 元数据；全部代理有效用量纳入，不做主子关系产品；源日志删除/停用仍查得到已保存历史；CCS 设置页只手动单次导入；已有事实与导入求并集，重复导入不增加用量。较新历史库规则优先于旧“源日志是唯一事实/sidechain 排除”规则。
 
@@ -33,7 +33,7 @@
 
 `a58684c` 普通与 acceptance 完整门禁保留为时点基线：普通根库 **456 通过/10 忽略**、壳 **42 通过**、前端 **361 通过**；acceptance 根库 **456 通过/10 忽略**、壳 **47 通过**。双 manifest fmt、普通/acceptance Clippy（`-D warnings`）、前端 typecheck/format:check/build 和发布元数据 **7 项**通过，Cargo 均带 `--locked`，详见[M01 修复复核](../reviews/2026-10-11-main-merge-readiness.md#m01-closed)。随后安装提交未改产品源码。该轮实际迁移 **8 通过**、native_acceptance **3 通过/2 忽略**、review_regressions **29 通过**、metadata **7 通过**；未重复全套。main 可快进；安装接线不能代替验收实跑。门禁终态（双审计循环收敛，`6fab12f`）：根库 **461 + acceptance**、壳库 **45**、前端 **364**、python **36**、pwsh 契约 **22** 全绿，此前数字保留为时点基线。本批索引随 A01–A06 修复入库，当时的“验证失败例外”已消失。
 
-最新受控核验（2026-10-12，双审计员循环收敛）：M06 严格事实校验及 fixture 契约 **29 项**、M05 生命周期契约 **22 项**在 PowerShell 7.6.6 下实跑全绿；`a64d340` 复现的六项缺口（`Launch-AppOnce` 未定义、等待目录落在 `evidence/logs/logs`、替身退出码 0xC000013A、日志反例缺句柄、构建前无契约、卸载后无 manifest 校验）已逐条修复。main 可快进：截至 `231f667` 为 **0 behind / 71 ahead**；该时点无打开 PR、无 Actions 运行。仍未实跑安装，N12 待 PR CI 实跑取证，保持部分完成；详见[设计实施独立复核](../reviews/2026-10-11-main-merge-readiness.md#install-design-recheck)。
+最新独立核验（2026-10-12）：普通与 acceptance 根库各 **462 通过/10 忽略**，壳 **46/51**、前端 **364**、Python **36**、PS7 **22** 和全部格式/Clippy/typecheck/build 通过；实际安装编排的仓外探针通过当前日志/单实例/关闭前后事实/证据/环境恢复。外部启动和关闭被替换，未实跑 NSIS。A01–A06 已独立确认关闭；231f667 及后续仅文档 e31d1b6 均无 PR/Actions 结果，main 仍祖先。代码与本地门禁就绪，但正式合并须当前 PR 的 CI/gate 和 Install test/install-test 绿灯。N12 保持部分完成；一条 P3 设置页内部审计文案归 N11 清理，不成为新合并阻断。详见[最新复核](../reviews/2026-10-11-main-merge-readiness.md#current-merge-readiness)。
 
 ## 原 active 计划：逐份归档
 

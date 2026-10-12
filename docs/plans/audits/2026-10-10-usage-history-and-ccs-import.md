@@ -6,6 +6,8 @@
 
 **结论：** 部分完成。按下表区分实现、验证和待验；不用函数/测试/提交存在推导全部通过。
 
+2026-10-12 [最新独立门禁复核](../../reviews/2026-10-11-main-merge-readiness.md#current-merge-readiness)：代码 231f667、后续仅文档 e31d1b6；普通/acceptance 根库各 462/10 忽略、壳 46/51、前端 364、Python 36、PS7 22 全部通过。N01–N09 保持完成，原生/真实性能仍归 N11/N13，H01–H08 不全部关闭；当前 PR 安装证据仍待验。后文门禁数量保留为原时点记录。
+
 | 原任务 / 范围 | 当前状态 | 剩余任务承接 |
 | --- | --- | --- |
 | H01 历史库/升级 | v4 旧污染纠错、备份与回滚通过 | [N01 已完成](../active/2026-10-11-consolidated-remaining-work.md#n01)、[N07 已完成](../active/2026-10-11-consolidated-remaining-work.md#n07) |
