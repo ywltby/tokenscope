@@ -215,6 +215,25 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   const stale = ref(false);
   const cachedAt = ref<string | null>(null);
   const currentQuery = ref<QueryHandle | null>(null);
+  const displayedQuery = ref<QueryHandle | null>(null);
+  // 新批次两侧先暂存，展示结果只在同一会话齐备后一起替换。
+  let stagedReport: SummaryReport | null = null;
+  let stagedEvents: EventList | null = null;
+  function publishBatch(): void {
+    if (!stagedReport || !stagedEvents || !currentQuery.value) return;
+    if (
+      stagedReport.query_id !== currentQuery.value.queryId ||
+      stagedEvents.query_id !== currentQuery.value.queryId ||
+      stagedReport.pricing_revision !== stagedEvents.pricing_revision
+    )
+      return;
+    report.value = stagedReport;
+    events.value = stagedEvents;
+    displayedQuery.value = currentQuery.value;
+    batchRange.value = currentQuery.value.range ?? null;
+    stale.value = false;
+    saveSnapshot();
+  }
   /// RC02：当前批次是否已成功建立后端会话（begin 成功）。
   const sessionReady = ref(false);
   const liveFirstPage = ref<LiveFirstPage | null>(null);
@@ -246,6 +265,8 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   const visible = ref(true);
   /// 待刷新标记：隐藏期间的所有刷新触发都只置位，回到页面时合并成一批。
   const pendingRefresh = ref(false);
+  let pendingManual = false;
+  let pendingAuto: AutoReason | null = null;
   /// U06：最近一次已知的历史库代次——收到的 `usage-updated` 与查询句柄的
   /// `generation` 两者取最大（只反映"历史库到哪一代"）。
   const latestGeneration = ref(0);
@@ -355,7 +376,6 @@ export function useUsageQuery(opts: UsageQueryOptions) {
         if (epoch !== refreshEpoch || disposed) return null; // 旧 begin 晚到不接管
         currentQuery.value = h;
         // U01：范围的唯一来源是后端冻结结果（标签只做展示，不参与查询）。
-        batchRange.value = h.range ?? null;
         // U06：句柄代次并入 latestGeneration（"历史库到哪一代"的最大值）。
         if (typeof h.generation === "number" && Number.isFinite(h.generation)) {
           latestGeneration.value = Math.max(latestGeneration.value, h.generation);
@@ -393,11 +413,10 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       const fresh = await invoke<SummaryReport>("query_summary", { queryId: h.queryId });
       if (seq !== summarySeq || disposed || epoch !== refreshEpoch) return;
       if (h.queryId !== currentQuery.value?.queryId) return; // 会话已被新批次替换
-      report.value = fresh;
-      stale.value = false;
+      stagedReport = fresh;
       summaryBatchEpoch = epoch;
       summaryKey = captured;
-      saveSnapshot();
+      publishBatch();
     } catch (e) {
       if (seq === summarySeq && !disposed) {
         summaryError.value = errorText(e);
@@ -418,6 +437,8 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       if (eventsLoading.value || !eventsKey.value) return;
       const live = liveFirstPage.value;
       if (!live || live.queryId !== currentQuery.value?.queryId) return;
+      if (events.value?.query_id !== live.queryId || report.value?.query_id !== live.queryId)
+        return;
       const current = eventIdentity();
       if (!sameMainIdentity(live.filters, current)) return;
       if (!sameDrill(live.filters.drill, current.drill)) return;
@@ -426,6 +447,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     } else {
       // RC02：新的首页请求开始即作废旧首页身份——成功前不得续页。
       liveFirstPage.value = null;
+      stagedEvents = null;
     }
     const seq = ++eventsSeq;
     const epoch = refreshEpoch;
@@ -454,11 +476,11 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       if (seq !== eventsSeq || disposed) return;
       if (h.queryId !== currentQuery.value?.queryId) return; // 旧会话响应不落地
       if (append && events.value) {
-        events.value = { ...list, rows: [...events.value.rows, ...list.rows] };
+        stagedEvents = { ...list, rows: [...events.value.rows, ...list.rows] };
         // U06：本会话已有续页内容——自动刷新会作废它，改走翻页保护提示。
         appendedInSession.value = true;
       } else {
-        events.value = list;
+        stagedEvents = list;
         eventsKey.value = captured;
         eventsBatchEpoch = epoch;
         // RC02：成功首页才赋予 live 分页资格（恢复视图永不进入本分支）。
@@ -469,7 +491,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
           filters: captured,
         };
       }
-      saveSnapshot();
+      publishBatch();
     } catch (e) {
       if (seq === eventsSeq && !disposed) {
         eventsError.value = errorText(e);
@@ -527,6 +549,8 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   // U06：批次来源决定 `collect`/`trigger`（见 `BatchSource`），并重置
   // 翻页保护与"批次期间是否有新写入"的判定。
   function startRefreshBatch(source: BatchSource = "manual"): void {
+    stagedReport = null;
+    stagedEvents = null;
     refreshEpoch++;
     batchSource = source;
     batchInFlight = 2; // 本批次恰好两条请求：汇总 + 明细首页
@@ -558,11 +582,12 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   ///
   /// 判据用"批次开始时已知的通知代次"而不是句柄代次：批次开始时已收到的
   /// 通知，其写入在批次的快照里必然已可见（后端先写历史库再发事件）；只有
-  /// 批次**执行期间**到达的通知才可能没被覆盖。按句柄代次判定会在后端返回
-  /// 稳定代次时反复重发，并与 U04"回到页面只发一批"冲突。
+  /// 批次**执行期间**到达的通知才可能没被覆盖。再检查句柄的冻结事务代次，
+  /// 已覆盖通知时不补发；失败时也不因旧通知无限重试。
   function maybeCatchUpAfterBatch(): void {
     if (disposed) return;
     if (notifiedGeneration <= notifiedAtBatchStart) return;
+    if ((currentQuery.value?.generation ?? -1) >= notifiedGeneration) return;
     requestAutoRefresh("data");
   }
 
@@ -586,6 +611,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   function scheduleBatchRefresh(): void {
     if (!visible.value) {
       pendingRefresh.value = true;
+      pendingManual = true;
       return;
     }
     startRefreshBatch("manual");
@@ -708,20 +734,24 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   // U06：正常态显示本次查询的 `as_of`（按统计时区），悬停提示写自动读取间隔。
   const statusPill = computed<{ cls: string; text: string; title: string }>(() => {
     const title = `每 ${collectIntervalText(intervalSecs.value)}自动读取`;
+    const failed = summaryError.value || eventsError.value;
     // R04 状态机：stale + 失败 = 旧数据/刷新失败（不能谎称"后台刷新中"）；
     // stale + 刷新中才显示后台刷新。
-    if (stale.value && summaryError.value)
+    if (stale.value && failed)
       return { cls: "ts-pill-warning", text: "缓存数据 · 刷新失败", title };
-    if (stale.value && loading.value)
+    if (stale.value && (loading.value || eventsLoading.value))
       return { cls: "ts-pill-warning", text: "缓存数据 · 后台刷新中", title };
     // 首载失败且无任何数据可恢复：必须显示失败而非"刷新中"（G-P2-1）。
-    if (!report.value && summaryError.value)
+    if (!report.value && failed)
       return { cls: "ts-pill-warning", text: "刷新失败 · 暂无数据", title };
-    if (loading.value || !report.value) return { cls: "ts-pill-info", text: "刷新中…", title };
-    if (summaryError.value)
-      return { cls: "ts-pill-warning", text: "刷新失败 · 显示上次数据", title };
+    if (loading.value || eventsLoading.value || !report.value)
+      return { cls: "ts-pill-info", text: "刷新中…", title };
+    if (failed) return { cls: "ts-pill-warning", text: "刷新失败 · 显示上次数据", title };
     // 更新时间取本次查询冻结的 `as_of`（与汇总数字同源），按统计时区显示。
-    const updatedAt = clockInTz(currentQuery.value?.asOf, tz.value);
+    const updatedAt = clockInTz(
+      displayedQuery.value?.asOf ?? report.value?.generated_at,
+      report.value?.timezone ?? tz.value,
+    );
     return {
       cls: "ts-pill-success",
       text: updatedAt ? `更新于 ${updatedAt}` : "已更新",
@@ -911,12 +941,22 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     // 补齐，比如隐藏期间外部递增的 refreshKey）——统一推迟一帧再合并处理，
     // 保证"回到页面只发起一批"，不依赖 activated 钩子与 watcher 的先后顺序。
     void nextTick(() => {
-      if (disposed || !visible.value || !pendingRefresh.value) return;
+      if (disposed || !visible.value) return;
+      const manual = pendingManual;
+      const auto = pendingAuto;
       pendingRefresh.value = false;
+      pendingManual = false;
+      pendingAuto = null;
       // 回到页面：只发起一批刷新，筛选、下钻与滚动位置都不动；顺带重查来源
       // 状态（隐藏期间可能改过来源目录）。
-      void loadSources();
-      startRefreshBatch("manual");
+      if (manual) {
+        void loadSources();
+        startRefreshBatch("manual");
+      } else if (auto) {
+        requestAutoRefresh(auto);
+      } else {
+        checkTimeWindow();
+      }
     });
   }
 
@@ -928,6 +968,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   function requestAutoRefresh(reason: AutoReason = "data"): void {
     if (!visible.value) {
       pendingRefresh.value = true;
+      pendingAuto = reason;
       return;
     }
     if (batchInFlight > 0) return;
@@ -1035,6 +1076,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     persistFilters();
     if (!visible.value) {
       pendingRefresh.value = true;
+      pendingManual = true;
       return;
     }
     void loadEvents();
@@ -1092,6 +1134,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       if (!cached.report.timezone || cached.report.timezone !== resolvedTzId(tz.value)) return;
       report.value = cached.report;
       events.value = cached.events ?? null;
+      batchRange.value = cached.report.range ?? null;
       eventsKey.value = {
         by: restored.by,
         agent: restored.agent,

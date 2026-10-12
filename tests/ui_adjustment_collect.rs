@@ -247,3 +247,22 @@ fn begin_query_default_collects_and_carries_auto_trigger() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn cached_generation_matches_fresh_history_snapshot() {
+    let dir = tmp_dir("snapshot-generation");
+    let opts = base_opts(&dir);
+    write_claude_session(&dir.join("claude"), "s1", &[("m1", 10)]);
+    let initial = report::collect_only(&opts).unwrap();
+    write_claude_session(&dir.join("claude"), "s2", &[("m2", 20)]);
+    let manual = query::begin_query_with(&opts, true).unwrap();
+    assert!(manual.generation > initial.generation);
+    let automatic = query::begin_query_with(&opts, false).unwrap();
+    let facts = query::query_summary(&automatic.query_id).unwrap();
+    assert_eq!(facts.totals.requests, 2);
+    assert_eq!(
+        automatic.generation, manual.generation,
+        "current facts must carry current generation"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

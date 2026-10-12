@@ -81,8 +81,8 @@ const page = ref<"summary" | "settings">("summary");
 // useUsageQuery 累积隐藏期间的所有触发（时区变化、refreshKey、设置保存、
 // usage-updated、时钟检查）。refreshKey 保留给程序触发（价格同步、设置
 // 保存成功等），不再由切页递增。
-// 「设置保存后刷新」的接线留在这里：设置页保存成功（U05 加 emit）时递增
-// refreshKey 即可——汇总页可见时立刻刷新，隐藏时只置待刷新标记。
+// 设置页 data-changed 在来源保存、重扫、导入或价格同步后递增 refreshKey；
+// 汇总页可见时立刻刷新，隐藏时只置待刷新标记。
 const refreshKey = ref(0);
 
 // U04 切页保留：滚动容器在应用壳里（汇总页与设置页共用），离开某页时记录
@@ -292,7 +292,7 @@ function onCloseCancel(): void {
                   :refresh-key="refreshKey"
                   @go-settings="page = 'settings'"
                 />
-                <Settings v-else :refresh-key="refreshKey" />
+                <Settings v-else :refresh-key="refreshKey" @data-changed="refreshKey++" />
               </KeepAlive>
             </template>
           </main>

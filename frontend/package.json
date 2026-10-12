@@ -11,7 +11,8 @@
     "format": "prettier --write \"src/**/*.{ts,vue,json}\"",
     "format:check": "prettier --check \"src/**/*.{ts,vue,json}\"",
     "test": "vitest --run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "node scripts/run-ui-refresh-e2e.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.1",

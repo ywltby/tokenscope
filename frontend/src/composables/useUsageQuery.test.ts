@@ -669,6 +669,21 @@ describe("useUsageQuery 自动刷新调度（U06）", () => {
     w.unmount();
   });
 
+  it("notification_already_in_snapshot_needs_no_catch_up", async () => {
+    let releaseSummary!: (v: SummaryReport) => void;
+    okMock({
+      query_begin: () => Promise.resolve({ ...handle, generation: 5 }),
+      query_summary: () => new Promise<SummaryReport>((r) => (releaseSummary = r)),
+    });
+    const w = mountHost();
+    await flushPromises();
+    emitUsageUpdated(5);
+    releaseSummary(reportA);
+    await flushPromises();
+    expect(beginCalls(), "本批次已读到通知对应的事务，无需补发").toBe(1);
+    w.unmount();
+  });
+
   it("rolling_preset_refreshes_on_every_clock_check：rolling 预设每次时钟检查都刷新", async () => {
     fakeClock("2026-10-05T12:00:00+08:00");
     setPreferences({ kind: "rolling", hours: 24 });
@@ -754,7 +769,7 @@ describe("useUsageQuery 自动刷新调度（U06）", () => {
     api.setVisible(true);
     await flushPromises();
     expect(beginCalls(), "回到页面只发一批").toBe(2);
-    expect(lastBegin()).toMatchObject({ collect: true, trigger: "manual" });
+    expect(lastBegin()).toMatchObject({ collect: false, trigger: "auto" });
     expect(api.pendingRefresh.value).toBe(false);
     w.unmount();
   });
@@ -865,5 +880,73 @@ describe("useUsageQuery 自动刷新调度（U06）", () => {
     await flushPromises();
     expect(beginCalls(), "监听失败不影响查询").toBe(before + 1);
     w2.unmount();
+  });
+});
+
+describe("query coherence and reactivation regressions", () => {
+  it("first-page failure reports an error instead of endless refresh", async () => {
+    okMock({ query_events: () => Promise.reject(new Error("events unavailable")) });
+    const w = mountHost();
+    await flushPromises();
+    expect(api.report.value).toBeNull();
+    expect(api.statusPill.value.text).toBe("刷新失败 · 暂无数据");
+    w.unmount();
+  });
+  it("keeps displayed query identity atomic", async () => {
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    let releaseEvents!: (v: EventList) => void;
+    okMock({
+      query_begin: () => Promise.resolve({ ...handle, queryId: "q-2", generation: 2 }),
+      query_summary: () => Promise.resolve({ ...reportB, query_id: "q-2" }),
+      query_events: () =>
+        new Promise<EventList>((r) => {
+          releaseEvents = r;
+        }),
+    });
+    api.manualRefresh();
+    await flushPromises();
+    const pair = [api.report.value?.query_id, api.events.value?.query_id];
+    releaseEvents({ ...emptyList, query_id: "q-2" });
+    await flushPromises();
+    w.unmount();
+    expect(pair[0], `displayed identities: ${pair}`).toBe(pair[1]);
+  });
+  it("preserves paged session across hidden data notification", async () => {
+    okMock({ query_events: () => Promise.resolve(listOf(["first"], 500)) });
+    const w = mountHost();
+    await flushPromises();
+    await api.loadEvents(true);
+    await flushPromises();
+    const before = beginCalls();
+    api.setVisible(false);
+    api.notifyUsageUpdated(2);
+    api.setVisible(true);
+    await flushPromises();
+    const after = beginCalls();
+    const hint = api.autoRefreshHint.value;
+    w.unmount();
+    expect(after).toBe(before);
+    expect(hint).toBeTruthy();
+  });
+  it("checks midnight immediately on page activation", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    vi.setSystemTime(new Date("2026-10-05T15:59:00Z"));
+    setPreferences({ kind: "days", days: 1 });
+    okMock({
+      query_begin: () => Promise.resolve({ ...handle, asOf: "2026-10-05T23:59:00+08:00" }),
+    });
+    const w = mountHost();
+    await flushPromises();
+    const before = beginCalls();
+    api.setVisible(false);
+    vi.setSystemTime(new Date("2026-10-05T16:01:00Z"));
+    api.setVisible(true);
+    await flushPromises();
+    const after = beginCalls();
+    w.unmount();
+    vi.useRealTimers();
+    expect(after).toBe(before + 1);
   });
 });

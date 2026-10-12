@@ -55,6 +55,16 @@ runs:
     - name: frontend build
       shell: pwsh
       run: pnpm --dir frontend build
+    - name: Browser UI refresh E2E
+      shell: pwsh
+      run: pnpm --dir frontend test:e2e
+    - name: Upload browser UI evidence
+      if: always()
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+      with:
+        name: browser-ui-${{ github.job }}
+        path: qa-artifacts/ui-adjustment/ci-e2e
+        if-no-files-found: warn
     - name: 安装验收 workflow 调用契约（N12）
       shell: pwsh
       run: |

@@ -981,8 +981,7 @@ writeFileSync(
       browserVersion,
       commit: commitHash,
       required_contracts: REQUIRED_CONTRACTS,
-      contracts: contractResults,
-      required_contracts: REQUIRED_CONTRACTS,
+      selected_contracts: args.contracts,
       contracts: contractResults,
       results,
     },
@@ -1003,9 +1002,9 @@ console.log(
 
 console.log(
   `
-${contractsOk ? "PASS" : "FAIL"} rc09_named_interaction_contracts（${REQUIRED_CONTRACTS.length} 条必需契约）`,
+${contractsOk ? "PASS" : "FAIL"} rc09_named_interaction_contracts（本次选择 ${args.contracts.length}/${REQUIRED_CONTRACTS.length} 条契约）`,
 );
-for (const name of REQUIRED_CONTRACTS) {
+for (const name of args.contracts) {
   const rows = contractsByGroup.get(name) ?? [];
   const bad = rows.filter((x) => !x.pass);
   const mark = rows.length && bad.length === 0 ? "✓" : "✗";

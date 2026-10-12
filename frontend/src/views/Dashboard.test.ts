@@ -164,7 +164,7 @@ describe("Dashboard 查询编排", () => {
     resolveEvents(events);
     await flushPromises();
     // 明细已回，汇总仍等待：此时 loading 必须仍为 true（独立状态）
-    expect(state(w)["events"]).not.toBeNull();
+    expect(state(w)["events"]).toBeNull();
     expect(state(w)["report"]).toBeNull();
     expect(state(w)["eventsLoading"]).toBe(false);
     resolveSummary(summaryA);
@@ -674,12 +674,14 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
         const before = (args?.before as string | null) ?? null;
         if (!before) {
           return Promise.resolve({
+            ...events,
             rows: [row("2026-10-02 10:00:00", "b"), row("2026-10-01 09:00:00", "a")],
             total: 3,
             warnings: [],
           });
         }
         return Promise.resolve({
+          ...events,
           rows: [row("2026-09-30 08:00:00", "z")],
           total: 3,
           warnings: [],
@@ -729,6 +731,7 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
         const before = (args?.before as string | null) ?? null;
         if (!before) {
           return Promise.resolve({
+            ...events,
             rows: [row("2026-10-02 10:00:00", "b"), row("2026-10-01 09:00:00", "a")],
             total: 3,
             warnings: [],
@@ -739,6 +742,7 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
           return Promise.reject(new Error("ipc glitch"));
         }
         return Promise.resolve({
+          ...events,
           rows: [row("2026-09-30 08:00:00", "z")],
           total: 3,
           warnings: [],
@@ -789,6 +793,7 @@ describe("Dashboard 视图快照与刷新（C4/F08）", () => {
 describe("Dashboard 状态（设计系统 Task 7）", () => {
   function emptyReport(warnings: string[] = [], sources: object[] = []) {
     return {
+      ...summaryA,
       timezone: "UTC",
       generated_at: "t",
       sources,
@@ -810,7 +815,8 @@ describe("Dashboard 状态（设计系统 Task 7）", () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "query_summary") return Promise.resolve(emptyReport(warnings, sources));
-      if (cmd === "query_events") return Promise.resolve({ rows: [], total: 0, warnings: [] });
+      if (cmd === "query_events")
+        return Promise.resolve({ ...events, rows: [], total: 0, warnings: [] });
       if (cmd === "source_status") return Promise.resolve([]);
       if (cmd === "view_cache_load") return Promise.resolve(null);
       return Promise.resolve(null);
@@ -1144,12 +1150,14 @@ describe("视图快照批次与恢复所有权（F03）", () => {
         const n = invokeMock.mock.calls.filter((c) => c[0] === "query_events").length;
         if (n === 1)
           return Promise.resolve({
+            ...events,
             rows: [row("2026-10-02 10:00:00", "a")],
             total: 3,
             warnings: [],
           });
         if (n === 2) return firstModelPage; // model 首批挂起
         return Promise.resolve({
+          ...events,
           rows: [row("2026-10-01 09:00:00", "z")],
           total: 3,
           warnings: [],
@@ -1562,7 +1570,8 @@ describe("Dashboard 恢复分页资格与过期恢复（RC02）", () => {
     invokeMock.mockImplementation((cmd: string, args?: { before?: string | null }) => {
       if (cmd === "query_begin") return Promise.resolve(newHandle);
       if (cmd === "view_cache_load") return Promise.resolve(restoredPayload());
-      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_summary")
+        return Promise.resolve({ ...summaryA, query_id: newHandle.queryId });
       if (cmd === "query_events") {
         if (!args?.before && !allowFirstPage) return Promise.reject(new Error("first page down"));
         return Promise.resolve({
@@ -1617,7 +1626,8 @@ describe("Dashboard 恢复分页资格与过期恢复（RC02）", () => {
         return Promise.resolve({ ...queryInfo, queryId: `q-batch-${beginSeq}` });
       }
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_summary")
+        return Promise.resolve({ ...summaryA, query_id: `q-batch-${beginSeq}` });
       if (cmd === "query_events") {
         eventsSeqN += 1;
         if (eventsSeqN === 2) {
@@ -1674,7 +1684,7 @@ describe("Dashboard 恢复分页资格与过期恢复（RC02）", () => {
         return Promise.resolve({ ...queryInfo, queryId: "q-ok" });
       }
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_summary") return Promise.resolve({ ...summaryA, query_id: "q-ok" });
       if (cmd === "query_events") {
         return Promise.resolve({
           query_id: "q-ok",
@@ -1712,7 +1722,8 @@ describe("Dashboard 恢复分页资格与过期恢复（RC02）", () => {
         return Promise.resolve({ ...queryInfo, queryId: `q-batch-${beginSeq}` });
       }
       if (cmd === "view_cache_load") return Promise.resolve(null);
-      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_summary")
+        return Promise.resolve({ ...summaryA, query_id: `q-batch-${beginSeq}` });
       if (cmd === "query_events") {
         eventsSeqN += 1;
         if (eventsSeqN === 2) return latePage; // 旧批次的追加页挂起

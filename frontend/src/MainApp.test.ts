@@ -532,3 +532,16 @@ describe("App 切页保留（U04）", () => {
     w.unmount();
   });
 });
+
+it("settings changes reach the retained dashboard", async () => {
+  mockApp(statusOk);
+  const w = mount(MainApp);
+  await flushPromises();
+  await w.get('[aria-label="页面切换"] [aria-label="设置"]').trigger("click");
+  await flushPromises();
+  w.findComponent({ name: "Settings" }).vm.$emit("data-changed");
+  await w.get('[aria-label="页面切换"] [aria-label="汇总"]').trigger("click");
+  await flushPromises();
+  expect(w.findComponent({ name: "Dashboard" }).props("refreshKey")).toBe(1);
+  w.unmount();
+});

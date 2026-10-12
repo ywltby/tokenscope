@@ -11,11 +11,14 @@
 // - 每个契约记录断言列表、输入 fixture、提交 hash、浏览器版本与截图路径；
 // - 未处理拒绝、未知 IPC command、外联请求都算硬失败。
 import { join } from "node:path";
+import { uiRefreshLifecycle, uiRefreshClock } from "./ui-refresh-contract.mjs";
 
 import { PRIVACY_PROTECTED_COMMANDS } from "../fixtures/ui-contracts.mjs";
 
 /** 计划 §3 RC09 表格的必需契约清单——一个都不能少。 */
 export const REQUIRED_CONTRACTS = [
+  "ui_refresh_lifecycle",
+  "ui_refresh_clock",
   "large_pricing_does_not_block_settings_navigation",
   "token_colors_customize_persist_and_reset",
   "empty_unknown_partial_have_correct_content",
@@ -254,6 +257,8 @@ async function waitTipState(session, selector, shown, timeoutMs = 2000) {
 // ── 契约实现 ────────────────────────────────────────────────────────
 
 const IMPL = {
+  ui_refresh_lifecycle: uiRefreshLifecycle,
+  ui_refresh_clock: uiRefreshClock,
   async large_pricing_does_not_block_settings_navigation(ctx) {
     const name = "large_pricing_does_not_block_settings_navigation";
     const session = await ctx.open({ fixture: "large-pricing", viewport: VIEWPORTS.desktop });

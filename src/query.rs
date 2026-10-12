@@ -542,6 +542,7 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
     // H07：采集提交之后建立只读事务快照——本次查询看到的就是这一刻的库内容，
     // 之后的采集/导入提交不会改变它（不静默换页、不混入新数据）。
     let read = report::open_read_snapshot(opts)?;
+    let history_generation = read.generation()?;
 
     // 冻结的时间边界：days/from/to 只解析一次（SF05），汇总与分页共用。
     let time_bounds = report::TimeBounds::resolve(opts, &as_of)?;
@@ -578,7 +579,7 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
 
     // RC05：按**会话实际保留的数据**记账——H07 起事件本体不再随会话常驻
     // （汇总与明细分页都按批流式读取），因此这里计的是行索引、元数据与价格表。
-    let query_id = format!("q{namespace}-{qseq}-g{}", collection.generation);
+    let query_id = format!("q{namespace}-{qseq}-g{history_generation}");
     let charge =
         snapshot_retained_bytes(&collection, &rows, &query_id, &tz_label, &main_fingerprint)
             .map_err(|e| anyhow!(e))?;
@@ -624,7 +625,7 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
         // RC01：命名空间 + 序号 + generation。跨启动唯一性来自命名空间，
         // generation 仅用于诊断（同参并发采集合并时相同）。
         query_id,
-        generation: collection.generation,
+        generation: history_generation,
         pricing_revision: collection.pricing_revision.clone(),
         main_fingerprint,
         trigger: opts.trigger,

@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+import { nativeUiRefresh } from "./contracts/native-ui-refresh.mjs";
 
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
 const EXE_DEFAULT = path.join(REPO, "src-tauri", "target", "release", "tokenscope.exe");
@@ -88,7 +89,7 @@ function listFiles(dir) {
   return out;
 }
 function ps(scriptPath, argsArray) {
-  return spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...argsArray], {
+  return spawnSync("pwsh", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...argsArray], {
     encoding: "utf8",
   });
 }
@@ -526,6 +527,7 @@ async function measureA11y(page) {
 
 // ── 场景 ──────────────────────────────────────────────────────────
 const scenarios = {
+  "ui-refresh": nativeUiRefresh,
   // 在同一个驱动进程内完成等待；部分终端会在父进程结束时回收其原生子进程。
   async "expire-cycle"(context) {
     await scenarios["expire-start"](context);
@@ -1523,7 +1525,13 @@ async function main() {
     ev.manifest_sha_first = manifest.files ? Object.values(manifest.files).map((f) => f.sha256.slice(0, 12)) : [];
     if (SCENARIO === "first-frame") ev.expectStored = EXPECT_STORED;
     hb("启动 release/acceptance 实例并连接 CDP");
-    const info = await inst.launch();
+    let info;
+    try {
+      info = await inst.launch();
+    } catch (error) {
+      await inst.stop();
+      throw error;
+    }
     hb(`PID=${info.pid}`);
     if (SCENARIO === "fault-pricing-locked") {
       // 在进程启动前独占打开 pricing.toml（FileShare=None），让真实后端读取失败
@@ -1614,6 +1622,12 @@ async function main() {
     } catch {}
   } else {
     await inst.stop();
+  }
+
+  // UI 刷新验收保留合成来源的应用日志，失败也能核对采集/查询实际发生过。
+  if (SCENARIO === "ui-refresh") {
+    const logs = path.join(root, "tokenscope", "logs");
+    if (fs.existsSync(logs)) fs.cpSync(logs, path.join(stampDir, "app-logs"), { recursive: true });
   }
 
   const realAfter = fingerprint(REAL_DATA);

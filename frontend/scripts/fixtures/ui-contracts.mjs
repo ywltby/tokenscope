@@ -788,6 +788,7 @@ export function buildFixture(name) {
     statusReads: 0,
     sourceReads: 0,
     sourceWrites: 0,
+    savedSources: {},
     closeWrites: 0,
   };
 
@@ -837,7 +838,7 @@ export function buildFixture(name) {
       if (n === 2) return reject("设置读取失败（合成）");
       return defer(`settings_get#${n}`);
     }
-    return { close_action: null, price_auto_sync: true, collect_interval_secs: 300 };
+    return { close_action: null, price_auto_sync: true, collect_interval_secs: 300, sources: structuredClone(state.savedSources) };
   }
 
   /** 挂起的第二次 settings_get 在测试里被释放时使用的"旧值"载荷。 */
@@ -945,6 +946,8 @@ export function buildFixture(name) {
         // AP04/Task 2：后端按行拒绝（目录冲突）——错误必须只归属该来源行。
         if (cfg.sourceWrite === "fail-then-ok" && state.sourceWrites === 1)
           return reject("来源目录冲突：两个启用的来源不能指向同一目录（合成）");
+        // 成功写入必须可读回；设置保存通知刷新后不能凭空退回旧目录。
+        state.savedSources[args.agent] = { enabled: args.enabled, dir: args.dir };
         return null;
       }
       case "sync_pricing_openrouter": {

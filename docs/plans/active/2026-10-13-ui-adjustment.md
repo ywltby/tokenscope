@@ -1,6 +1,6 @@
 # UI 调整计划：时间筛选、自动读取、汇总页状态与设置页
 
-> 状态：**第四版，待用户确认后交由执行模型实施。** 本文是执行契约：执行者按第 0 节的规则逐项完成 U01 → U07，不自行扩大或缩小范围。
+> 状态：**第四版已实施；复核缺口已修复并补充自动化验收，剩余验收见第 7 节。** 本文是执行契约：执行者按第 0 节的规则逐项完成 U01 → U07，不自行扩大或缩小范围。
 >
 > 修订记录（均为 2026-10-13）：
 > - 第一版：初稿。
@@ -439,13 +439,35 @@ type RangePreset =
 
 1. **U01 后端遗留测试入口**：`report.rs` 的 `#[cfg(test)] time_filter_indices` / `apply_time_filter` 只按自然日比较，其既有断言（上海 20:00 的事件计入 `from = 当天`）与新增的 `ts ≤ as_of` 收紧冲突。该断言不在第 0 节第 4 条的取代表内，因此**未改行为**，只在注释标明"生产语义以 `TimeBounds::matches` 为准"。
 2. **U04 表外断言改写（3 处，均为计划授权变化的连带）**：`total_row_clears_drill` 改走新的 `onTotalRowClick()`（U04 要求不再靠字面量"合计"）；rollups 的"恢复仅明细模式"改由筛选偏好驱动（U04 把 `rollupsMode` 归入偏好）；`collectionDiagnostics.clean` 不再把 `timezone_mismatch` 计入"采集警告"计数（否则同一事实会同时出现两条通知）。
-3. **U06 "补发一批"判据**：实现为"批次执行期间收到更高的 `usage-updated` 代次 → 完成后补发一批"，而非字面的 `handle.generation < latestGeneration`。后者与 U04"回到页面只发一批"的既有断言冲突，且在代次稳定时会无限补发；实现口径更严格（批次开始前已收到的通知，其写入必然已进入该批次快照）。
+3. **U06 "补发一批"判据（复核修正）**：批次执行期间收到更高的 `usage-updated` 代次，并且本批次冻结事务的 `handle.generation` 未覆盖该通知时，完成后补发一批。后端句柄代次改从同一只读事务读取，不再使用最近采集缓存的旧代次。此前“稳定代次必然无限补发”的解释不成立：旧实现存在代次与事实不一致的问题，已修复。失败时不因同一旧通知自动无限重试。
 4. **U03 触及 `src-tauri/src/lib.rs` 与 `src-tauri/src/privacy.rs`**：各加一行（命令注册 + 隐私受保护命令分类），否则新命令在真机不可用，且分类表缺项会让既有隐私测试变红。其余 `lib.rs` 内容未动。
 5. **预读启动时机（U07 修复）**：U03 的时区门控把业务页挂载推迟到设置读取之后，`settingsPreload` 若仍随挂载启动，会抢在汇总页自身之前调用 `source_status` 等命令，使首屏失败态与重试路径整体错位（浏览器契约实测复现，8 个场景报未知命令/首屏失败态）。现在预读排在"时区就绪 → 业务页渲染"之后的 `nextTick`，恢复"业务页先、预读后"的稳定顺序。
 6. **契约与夹具更新（U07）**：`ui-contracts.mjs` 的 settings 读取计数改为"第 1 次是启动时区读取、设置页首读是第 2 次"；补 `settings_set_timezone` 与 `ccs_import_defaults` / `ccs_import_preview` / `ccs_import_commit` / `ccs_import_discard` 的 mock；`query_begin` / `query_summary` 回传冻结的 `range`。`interaction-contracts.mjs` 新增契约 `ui_adjustment_shapes`（13 条断言：日期按钮三态与 IPC 参数、内联时刻面板与单层材质、状态胶囊"更新于"与自动读取提示、设置页读取间隔六档、通知合并唯一性）与 `lastQueryBegin` 辅助。
 
-### 未执行 / 待人工
+### 复核修复与 E2E（2026-10-13，用户授权直接修复）
 
-- **真机（`tauri dev`）7 项**：跨日后自然日预设自动跟随今天、24h 随时间移动、切页保留下钻与滚动位置、旧 localStorage 时区迁移一次、读取间隔设为 5s 后新会话的可见时延、空闲 2 分钟 `~/.tokenscope/logs/` 无新增 info 行、连续快速切换读取间隔后重启读回最后一次选择。这些需要真实窗口与真实日志，本次未执行。
-- **`native-acceptance.mjs`**（release + `acceptance` 特性构建 + 隔离根）未跑。
-- 视觉截图的产物目录：`qa-artifacts/ui-adjustment/final/`（未入库，`.gitignore` 已忽略）。
+必须保持的不变量：同屏汇总、明细、更新时间和冻结范围属于同一查询；隐藏期间的自动通知仍受分页保护；句柄 generation 与查询读取的历史事务一致；测试仅使用合成来源和隔离目录。
+
+| 复核缺口 | 修复与回归覆盖 |
+| --- | --- |
+| 新汇总与旧明细短暂或永久混显 | 两侧暂存，同 query_id/价格修订齐备后原子提交，落盘及更新时间使用已展示批次；失败保留完整旧批次，禁止拿旧明细游标续新会话。Vue 延迟响应测试及浏览器 E2E 覆盖 |
+| 设置保存后汇总页不更新 | 来源保存、重扫、CCS 导入、价格同步通知 MainApp 递增 refreshKey；隐藏页合并成一批。组件测试验证接线，浏览器点击来源保存后返回验证实际刷新 |
+| 隐藏的新数据通知绕过分页保护 | 分开保存手动变更与自动通知，激活后继续走自动保护；组件测试与真实页面分页→切页→通知→返回覆盖 |
+| collect=false 返回旧 generation | 从查询只读事务读取代次；Rust 测试验证手动新增事实后，自动查询的事实与代次一致 |
+| 隐藏跨午夜后未立即刷新 | 激活时立即检查时钟；浏览器可控时钟验证跨午夜、24h 分钟刷新及全部时间不刷新 |
+| 原子提交后明细失败仍显示刷新中 | 状态胶囊同时采用汇总与明细错误；先写失败测试，再修复首载失败状态 |
+
+自动化分层与复跑方式：
+
+- **浏览器 E2E**：`pnpm --dir frontend build` 后运行 `pnpm --dir frontend test:e2e`。自行启动本次产物的 preview，端口冲突即失败；覆盖浅/深色 × 1280×820/980×620 四组布局，以及 `ui_refresh_lifecycle`、`ui_refresh_clock`、`ui_adjustment_shapes`。使用真实 Vue/Naive UI，IPC 响应可控；不把浏览器模拟时钟称为原生后端时钟验收。
+- **原生 E2E**：先 `cargo build --locked --manifest-path src-tauri/Cargo.toml --release --features acceptance,tauri/custom-protocol --bin tokenscope`，再 `node frontend/scripts/native-acceptance.mjs --scenario ui-refresh --events 4 --port 9451 --out qa-artifacts/ui-adjustment/final-native`。真实 WebView2 + Rust + SQLite，临时来源追加合成 JSONL，真实等待 120 秒；覆盖自动可见、同屏查询身份、空闲日志、重复采集不增量、连续选择间隔后重启、旧时区迁移与再次启动不被冲突旧键覆盖。驱动器核对真实数据目录指纹。
+- **CI**：通用 checks 增加浏览器 E2E；`Native UI E2E` workflow 在 PR/main push/manual dispatch 上构建隔离验收 EXE 并实跑，不执行安装卸载。两条路径都上传证据；原生记录 EXE 哈希、断言、截图与合成来源的应用日志。
+
+本轮本地结果：前端 **465 项通过**，根库及壳普通/acceptance 门禁通过（壳普通 52、acceptance 57）；浏览器四组布局零违例、三项刷新/形态契约 **28 条断言通过**；最终原生产物 **10/10**，真实目录指纹未变。完整交互契约首跑 23/24 通过，唯一失败为旧 fixture 对来源写入成功却未保存新值；修正 fixture 的读回行为，保留原断言，定向复跑来源保存及刷新生命周期 **17 条断言通过**（`source-save-regression/`）。原生重启改走 WM_CLOSE→直接退出→退出码 0，避免强杀丢失刚写入的 WebView 旧偏好夹具；首轮与最终产物证据分开保留，不把中间失败计作通过。
+
+### 剩余验收边界
+
+- 原生长时间跨真实午夜、系统休眠恢复、不同 DPI/显示器下的滚动体验仍未实跑；浏览器模拟时钟与组件测试不能替代这些系统验收。
+- 原生时区迁移/冲突旧值已覆盖；设置页手动更换时区后重启的完整点击路径仍由单元测试覆盖，尚无专门原生 E2E。
+- 本地通过不代表远程 Actions 已通过；远程结果需在推送后按同一提交核对。N10/N11/N12 其余项/N13 不因本轮 UI E2E 自动闭合。
+- 证据保存在忽略目录 `qa-artifacts/ui-adjustment/`，不提交用户日志或运行工件；早期截图位于 `final/`，本轮浏览器位于 `ci-e2e/`，原生位于 `final-native/`。

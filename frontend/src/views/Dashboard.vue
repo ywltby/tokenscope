@@ -189,7 +189,11 @@ defineExpose({
 </script>
 
 <template>
-  <div>
+  <div
+    :data-summary-query="report?.query_id"
+    :data-events-query="events?.query_id"
+    :data-requests="report?.totals.requests"
+  >
     <!-- 页面标题行：先回答"覆盖什么时间"，右侧状态胶囊 + 刷新动作 -->
     <div class="page-head">
       <div class="head-left">
@@ -218,8 +222,8 @@ defineExpose({
           size="small"
           secondary
           class="ts-focusable"
-          :loading="loading"
-          :disabled="loading"
+          :loading="loading || eventsLoading"
+          :disabled="loading || eventsLoading"
           @click="manualRefresh"
         >
           <template #icon>

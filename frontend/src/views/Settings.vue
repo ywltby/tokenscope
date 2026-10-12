@@ -70,6 +70,7 @@ const preload = inject(SETTINGS_PRELOAD, null);
 const readInitial = preload ? preload.read : invoke;
 
 const props = defineProps<{ refreshKey: number }>();
+const emit = defineEmits<{ (e: "data-changed"): void }>();
 const msg = useMessage();
 
 // ── U05：分区导航 ────────────────────────────────────────────────
@@ -404,6 +405,7 @@ async function commitCcsImport(): Promise<void> {
       allowOverlap: ccsAllowOverlap.value,
     });
     ccsReport.value = report;
+    emit("data-changed");
     ccsPreview.value = null;
     ccsAllowOverlap.value = false;
     msg.success("CCS 用量已导入（与已有历史去重求并集）");
@@ -576,6 +578,7 @@ async function saveSource(agent: string): Promise<void> {
       dir: d.dir.trim() === "" ? null : d.dir.trim(),
     });
     if (disposed) return; // AP04：卸载后不弹通知、不写局部状态
+    emit("data-changed");
     msg.success(`已保存 ${AGENT_LABEL[id] ?? id} 来源配置`);
     // RC03：只清除"提交时版本一致"的 dirty——保存期间的新编辑保留。
     if (sourceEditRevOf(id) === submittedRev) dirtySources.delete(id);
@@ -608,6 +611,7 @@ async function rebuild(): Promise<void> {
     const info = await invoke<CacheInfo>("refresh_cache");
     if (disposed) return; // AP04：卸载后不写状态或弹通知
     cache.value = info;
+    emit("data-changed");
     // H04：重扫 = 重置采集指纹并重新解析当前文件；范围 = 当前生效的来源配置，
     // 且**不删除**已保存的历史用量（历史删除不是缓存操作）。
     msg.success("已重扫日志（按当前来源配置重新解析，已保存的历史用量不受影响）");
@@ -639,7 +643,10 @@ async function syncPricing(): Promise<void> {
     try {
       await loadPricing();
     } finally {
-      if (!disposed) window.dispatchEvent(new Event("pricing-status-changed"));
+      if (!disposed) {
+        window.dispatchEvent(new Event("pricing-status-changed"));
+        emit("data-changed");
+      }
       syncing.value = false;
     }
   }
