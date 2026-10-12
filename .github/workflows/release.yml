@@ -63,7 +63,12 @@ jobs:
           $name = "TokenScope_${env:RELEASE_TAG}_windows-x64-setup.exe"
           Copy-Item $installers[0].FullName "release-assets/$name"
           $hash = (Get-FileHash "release-assets/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $name" | Set-Content release-assets/SHA256SUMS.txt -Encoding utf8NoBOM
+          # K-P3-2：WriteAllText 写 LF 行尾——Set-Content 的 CRLF 会让旧版
+          # coreutils 的 sha256sum --check 把 \r 并进文件名而失败。
+          [System.IO.File]::WriteAllText(
+            (Join-Path (Get-Location) "release-assets/SHA256SUMS.txt"),
+            "$hash  $name`n"
+          )
       - name: Attest installer and checksums
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4

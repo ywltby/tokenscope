@@ -12,7 +12,8 @@ function Assert-HelperTrue {
 }
 
 function Get-AliveTokenScopeProcesses {
-    Get-Process -Name "TokenScope" -ErrorAction SilentlyContinue
+    # K-P3-3：进程名 = cargo bin 名 tokenscope（Get-Process 本就不分大小写）。
+    Get-Process -Name "tokenscope" -ErrorAction SilentlyContinue
 }
 
 function Assert-NoAliveTokenScope {

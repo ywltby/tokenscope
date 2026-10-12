@@ -114,7 +114,7 @@ function Reset-UserHome {
 }
 
 function Stop-App {
-    Stop-Process -Name "TokenScope" -Force -ErrorAction SilentlyContinue
+    Stop-Process -Name "tokenscope" -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 }
 
@@ -169,7 +169,8 @@ function Run-AppLifecycle {
     $logsDir = Join-Path $DataDir "logs"
     $evidenceDir = Prepare-LaunchEvidence -DataDir $DataDir `
         -EvidenceRoot $EvidenceRoot -Scenario $Scenario -RunId $RunId
-    $exe = Join-Path (Get-UninstallEntry).InstallLocation "TokenScope.exe"
+    # K-P3-3：cargo bin 名是小写 tokenscope（NSIS 沿用），断言与实际一致。
+    $exe = Join-Path (Get-UninstallEntry).InstallLocation "tokenscope.exe"
     $context = Launch-AppOnce -ExePath $exe -Scenario $Scenario `
         -RunId $RunId -EvidenceDir $evidenceDir `
         -LiveLogsDir (Join-Path $DataDir "logs")
@@ -214,7 +215,7 @@ try {
     Assert-True ($null -ne $entry) "卸载注册项存在（HKCU Uninstall）"
     Assert-True ($null -ne $entry -and $entry.DisplayVersion -eq $AppVersion) "DisplayVersion = $AppVersion（实际 $($entry.DisplayVersion)）"
     $installLocation = $entry.InstallLocation
-    Assert-True ($null -ne $installLocation -and (Test-Path (Join-Path $installLocation "TokenScope.exe"))) "主程序 TokenScope.exe 存在（$installLocation）"
+    Assert-True ($null -ne $installLocation -and (Test-Path (Join-Path $installLocation "tokenscope.exe"))) "主程序 tokenscope.exe 存在（$installLocation）"
     $startMenuLnk = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\TokenScope.lnk"
     Assert-True (Test-Path $startMenuLnk) "开始菜单快捷方式存在"
     $Summary.Add("- 全新安装：程序/注册项/快捷方式/版本 $($entry.DisplayVersion) 正确") | Out-Null
@@ -243,14 +244,14 @@ try {
     # 退出——固定 2 秒睡眠在慢节点上有假失败风险，改为 30 秒内轮询。
     $uninstallDeadline = (Get-Date).AddSeconds(30)
     while ((Get-Date) -lt $uninstallDeadline) {
-        if (-not (Test-Path (Join-Path $entry.InstallLocation "TokenScope.exe")) -and
+        if (-not (Test-Path (Join-Path $entry.InstallLocation "tokenscope.exe")) -and
             $null -eq (Get-UninstallEntry)) {
             break
         }
         Start-Sleep -Milliseconds 500
     }
     Assert-True ($proc.ExitCode -eq 0) "卸载器退出码 0（实际 $($proc.ExitCode)）"
-    Assert-True (-not (Test-Path (Join-Path $entry.InstallLocation "TokenScope.exe"))) "卸载后主程序已清除"
+    Assert-True (-not (Test-Path (Join-Path $entry.InstallLocation "tokenscope.exe"))) "卸载后主程序已清除"
     Assert-True ($null -eq (Get-UninstallEntry)) "卸载后注册项已清除"
     Assert-True ((Test-Path $SettingsToml) -and (Test-Path $PricingToml) -and (Test-Path $HistoryDb)) "卸载后 ~/.tokenscope 数据保留"
     # 复核要求：卸载后不只检查文件存在——保留的事实逐条校验。

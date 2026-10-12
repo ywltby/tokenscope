@@ -23,6 +23,8 @@ on:
       - 'Cargo.lock'
       - '.github/workflows/**'
       - '.github/actions/**'
+      # K-P3-4：隐私政策经 include_str! 打进安装包——改政策即改产物。
+      - 'docs/privacy.md'
 
 permissions:
   contents: read
