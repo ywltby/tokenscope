@@ -26,7 +26,7 @@ try {
         ExpectedManifest=$manifest; ExpectedRequests=(Get-Content -LiteralPath $manifest -Raw -Encoding utf8 | ConvertFrom-Json).events.Count;
         InstallerPath=$InstallerPath; AppVersion=$AppVersion; ExpectedCommit=$ExpectedCommit; SourceState=$SourceState;
         SourcesRoot=(Join-Path $env:RUNNER_TEMP ("tokenscope-upgrade-sources-"+$SourceState));
-        OldInstallerPath=$null; OldExeHash=$null; CacheHash=$null; SettingsHash=$null; PricingHash=$null }
+        OldInstallerPath=$null; OldExeHash=$null; InstalledExeHash=$null; CacheHash=$null; SettingsHash=$null; PricingHash=$null }
     Invoke-UpgradeScenario -Case $case
     $message = "真实升级 $($baseline.version) -> $AppVersion / $SourceState：旧程序产数、迁移、四桶、配置保留与重启幂等全部通过"
     Write-Host "PASS $message"

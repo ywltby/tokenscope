@@ -191,12 +191,44 @@ class ReleaseAssetCase(unittest.TestCase):
         binary = self.directory / "tokenscope.exe"
         binary.write_bytes(b"current application")
         target = self.directory / "collected"
-        with patch.object(assets, "resolve", return_value=SHA), patch.object(assets, "read_versions", return_value={"app":"0.2.0"}):
+        bundled = self.directory / "bundled.exe"
+        bundled.write_bytes(b"application patched for NSIS")
+        with patch.object(assets, "resolve", return_value=SHA), patch.object(assets, "read_versions", return_value={"app":"0.2.0"}), patch.object(assets,"extract_payload",return_value=bundled,create=True) as extract:
             assets.collect(bundle,binary,target,SHA,"0.2.0")
         installer = next(target.glob("*-setup.exe"))
         self.assertEqual(installer.read_bytes(),b"current")
         self.assertEqual(assets.verify_current(target,SHA,"0.2.0")["executable_sha256"],
-                         hashlib.sha256(binary.read_bytes()).hexdigest())
+                         hashlib.sha256(bundled.read_bytes()).hexdigest())
+        extract.assert_called_once()
+
+    def test_payload_extraction_selects_one_root_binary_without_running_installer(self):
+        directory=self.directory/"payload"
+        commands=[]
+        def run(args,**kwargs):
+            commands.append(args)
+            self.assertEqual(args[0],"controlled-7z")
+            if args[1]=="l":
+                return assets.subprocess.CompletedProcess(args,0,"Path = tokenscope.exe\nSize = 7\n","")
+            self.assertEqual(args[1],"x")
+            self.assertIn("-r-",args)
+            (directory/"tokenscope.exe").write_bytes(b"bundled")
+            return assets.subprocess.CompletedProcess(args,0,"","")
+        with patch.object(assets.subprocess,"run",side_effect=run):
+            payload=assets.extract_payload(self.exe,directory,command="controlled-7z")
+        self.assertEqual(payload.read_bytes(),b"bundled")
+        self.assertEqual(len(commands),2)
+
+    def test_payload_extraction_rejects_missing_duplicate_traversal_and_failed_reader(self):
+        for listing in ("", "Path = tokenscope.exe\nPath = tokenscope.exe\n",
+                        "Path = ../tokenscope.exe\n", "Path = other/tokenscope.exe\n"):
+            with self.subTest(listing=listing),tempfile.TemporaryDirectory() as destination:
+                with patch.object(assets.subprocess,"run",return_value=assets.subprocess.CompletedProcess([],0,listing,"")) as run:
+                    with self.assertRaises(ValueError):
+                        assets.extract_payload(self.exe,destination,command="controlled-7z")
+                    self.assertEqual(run.call_count,1)
+        with patch.object(assets.subprocess,"run",return_value=assets.subprocess.CompletedProcess([],2,"","bad archive")):
+            with self.assertRaises(RuntimeError):
+                assets.extract_payload(self.exe,self.directory/"invalid",command="controlled-7z")
 
     def test_bad_download_hash_never_becomes_a_usable_old_package(self):
         import io

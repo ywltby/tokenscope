@@ -109,6 +109,10 @@ function Assert-InstalledUpgrade {
         throw "覆盖升级后的注册版本不一致"
     }
     $hash = (Get-FileHash -LiteralPath (Join-Path $entry.InstallLocation "tokenscope.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+    $Case.InstalledExeHash = $hash
+    @{ registered_version=$entry.DisplayVersion; installed_executable_sha256=$hash;
+        expected_executable_sha256=$Case.Metadata.executable_sha256; old_executable_sha256=$Case.OldExeHash } |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Case.EvidenceRoot "installed-build.json") -Encoding utf8NoBOM
     if ($hash -ne $Case.Metadata.executable_sha256 -or $hash -eq $Case.OldExeHash) {
         throw "覆盖升级没有安装当前构建的主程序"
     }
@@ -168,6 +172,7 @@ function Save-UpgradeCaseResult {
         baseline_version=$Case.Baseline.version; baseline_commit=$Case.Baseline.commit;
         current_version=$Case.AppVersion; current_commit=$Case.ExpectedCommit;
         old_executable_sha256=$Case.OldExeHash; current_executable_sha256=$Case.Metadata.executable_sha256;
+        installed_executable_sha256=$Case.InstalledExeHash;
         old_cache_sha256=$Case.CacheHash; settings_sha256=$Case.SettingsHash; pricing_sha256=$Case.PricingHash }
     $payload | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Case.EvidenceRoot "upgrade-result.json") -Encoding utf8NoBOM
 }

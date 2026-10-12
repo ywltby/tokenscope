@@ -133,6 +133,39 @@ def build_metadata(executable, commit, output, root=ROOT):
     return payload
 
 
+def extract_payload(installer, directory, name="tokenscope.exe", command=None):
+    """只读 NSIS 容器，提取唯一根目录主程序；不执行安装器或载荷。"""
+    safe_name(name)
+    command = command or shutil.which("7z") or shutil.which("7z.exe")
+    if command is None:
+        bundled = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "7-Zip/7z.exe"
+        if not bundled.is_file():
+            raise RuntimeError("缺少 7-Zip，不能核对 NSIS 实际主程序载荷")
+        command = str(bundled)
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    if any(directory.iterdir()):
+        raise ValueError("主程序提取目录必须为空")
+
+    def run(*args):
+        result = subprocess.run([command, *args], capture_output=True,
+                                encoding="utf-8-sig", check=False)
+        if result.returncode:
+            raise RuntimeError(f"NSIS 载荷读取失败：{result.stderr.strip()}")
+        return result.stdout
+
+    listing = run("l", "-slt", "-ba", "-sccUTF-8", "-r-", str(installer), name)
+    paths = [line[7:] for line in listing.splitlines() if line.startswith("Path = ")]
+    if paths != [name]:
+        raise ValueError("NSIS 必须包含唯一根目录主程序，拒绝缺失、重复或嵌套路径")
+    run("x", "-y", "-sccUTF-8", "-r-", "-o" + str(directory), str(installer), name)
+    payload = directory / name
+    if (payload.is_symlink() or not payload.is_file() or not payload.stat().st_size
+            or not payload.resolve().is_relative_to(directory.resolve())):
+        raise ValueError("NSIS 主程序没有被完整提取到临时目录")
+    return payload
+
+
 def collect(bundle, executable, directory, commit, version):
     uniform({"version": version})
     product = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))["productName"]
@@ -146,7 +179,12 @@ def collect(bundle, executable, directory, commit, version):
     target = directory / f"TokenScope_v{version}_windows-x64-setup.exe"
     shutil.copyfile(installer, target)
     metadata = directory / "build-metadata.json"
-    build_metadata(executable, commit, metadata)
+    # Tauri 打包前写入包类型，打包后还原编译目录的 exe；哈希取安装包的实际字节。
+    with tempfile.TemporaryDirectory(prefix="tokenscope-nsis-payload-") as temporary:
+        payload = extract_payload(target, temporary, name=Path(executable).name)
+        data = build_metadata(payload, commit, metadata)
+    data["unbundled_executable_sha256"] = digest(executable)
+    metadata.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     write_checksums(directory, [target, metadata])
     return verify_current(directory, commit, version)
 

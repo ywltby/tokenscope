@@ -2,7 +2,7 @@
 
 > 2026-10-11 整理。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
 > 当前唯一待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)；逐份事实核对：[审计索引](audits/README.md)。
-> 最新进展：PR #4 已合并为 main b1f8b635，main CI/Release 与五场景安装均成功；N12 安装已验。用户确认的 [0.x 版本与真实旧包升级方案](active/2026-10-11-consolidated-remaining-work.md#n12-versioning-design)正在实施，工作区版本 0.2.0，真实升级/版本发布的当前产物仍待 Actions 取证；其余系统签字及 N10/N11/N13 不关闭。
+> 最新进展：PR #4 已合并为 main b1f8b635，main CI/Release 与五场景安装均成功；N12 安装已验。用户确认的 [0.x 版本与真实旧包升级方案](active/2026-10-11-consolidated-remaining-work.md#n12-versioning-design)已创建 PR #5，版本 0.2.0；首次 CI 与五场景成功，升级因 Tauri 打包后的 exe 哈希口径受阻，已补修为实际 NSIS 载荷哈希，待新 HEAD 的实跑取证；其余系统签字及 N10/N11/N13 不关闭。
 
 ## 现在执行什么
 
