@@ -2,17 +2,19 @@
 
 > 2026-10-11 整理。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
 > 当前唯一待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)；逐份事实核对：[审计索引](audits/README.md)。
-> 最新实施后复核：[85edad2 复核记录](../reviews/2026-10-11-consolidated-plan-recheck.md)。
+> 最新复核：[安装设计实施独立复核](../reviews/2026-10-11-main-merge-readiness.md#install-design-recheck)——`a64d340` 所列 A01–A06 六项安装门禁缺口已由 `b855021` 全部修复、`788905a` 记账，双审计员挑刺循环收敛至 `6fab12f`：M06 严格事实校验与 fixture 契约 **29 项**、M05 生命周期契约 **22 项** pwsh 7.6.6 实跑全绿，N12 唯一待办为 PR CI 实跑取证；[a58684c 的 M01 已闭合](../reviews/2026-10-11-main-merge-readiness.md#m01-closed)，此前各轮结果保留为历史。
 
 ## 现在执行什么
 
-原 active 的 25 份计划全部归档；M1–M11 重新核对自身验收条件。历史计划共 **36 份：8 份已实现、26 份部分完成、2 份已被取代**。部分完成通常是“实现已完成、验收有尾项”，用量历史计划则仍有实现缺口。`active/` 只保留上述整合计划，不再分别追逐旧计划的尾项。
+原 active 的 25 份计划全部归档；M1–M11 重新核对自身验收条件。历史计划共 **36 份：8 份已实现、26 份部分完成、2 份已被取代**。部分完成通常是“实现已完成、验收有尾项”；用量历史计划仍有原生及真实性能验收责任。`active/` 只保留上述整合计划，不再分别追逐旧计划的尾项。
 
-- **P1：N02**，先修批量预览与提交的请求并集处置差异；N01 的旧污染纠错已通过。
-- **P2：N05、N06、N08、N09**，补查询峰值/准确说明、采集退出并发验收、完整候选文案与价格路径隔离；**N10–N11**，当前隐私和原生统一验收。
-- **P3：N12–N13**，随实际发布做 D5/安装/系统验收，正确性闭合后复测性能。
+- **优先取得 N12 的 PR CI 实跑取证**：A01–A06 六项安装门禁缺口已由 `b855021` 全部修复（启动函数改名 `Launch-AppOnce` 并补 `-LiveLogsDir`、等待目录改读 `DataDir\logs` 且当前日志随证据上传、GUI 替身换 `notepad`、五个日志反例接存活替身、构建前补两条契约、卸载后按 manifest 逐条复核），`788905a` 已同步状态。剩余条件是当前安装产物的 PR 安装与普通 CI 实跑结果；截至 `231f667` 无打开的 PR、该 SHA 无 Actions 运行，main 可快进。N09 保持完成。
+- **P2：N10–N11**，当前隐私强取证和原生统一验收；N01–N09 不重复实施。
+- **P3：N12 其余系统验收、N13**，随实际发布做 D5/系统签字，正确性闭合后复测性能。
 
-保留 13 个责任编号；`85edad2` 实施后复核为 **4 项完成、5 项部分完成、4 项本轮验收未执行**，共 9 项待办。N01/N03/N04/N07 已完成；N02/N05/N06/N08/N09 仍有实现或验收缺口；N10–N13 未在实施批次执行。每项已有旧任务来源、必要性、文件、验证方法与通过标准；暂缓/被取代的内容单列在新计划第 5 节。
+按用户要求补齐的 [M05/M06 安装验收修复设计与实施步骤](active/2026-10-11-consolidated-remaining-work.md#n12-install-design)已完整落地：逐身份 JSON 事实、生成器契约、实际启动、日志路由、PS7 正例、反例覆盖与工作流前置执行全部闭合，`a64d340` 独立复核所列 A01–A06 六项已逐条修复；剩余唯一条件是当前产物的 CI 实跑证据，不据脚本存在关闭任务。
+
+保留 13 个责任编号；双审计员挑刺循环收敛后（最新 `6fab12f`）为 **9 项完成、1 项部分完成、3 项本轮验收未执行**，共 4 项待办。N01–N09 已完成，N12 部分完成且只剩 PR CI 实跑取证；N10/N11/N13 保留未执行状态。每项已有旧任务来源、必要性、文件、验证方法与通过标准；暂缓/被取代的内容单列在新计划第 5 节。
 
 必须保持用户定稿：一个 `~/.tokenscope/history.db`，只保存精简 token/cwd 元数据；全部代理有效用量纳入，不做主子关系产品；源日志删除/停用仍查得到已保存历史；CCS 设置页只手动单次导入；已有事实与导入求并集，重复导入不增加用量。较新历史库规则优先于旧“源日志是唯一事实/sidechain 排除”规则。
 
@@ -22,22 +24,24 @@
 | --- | --- |
 | Claude/Codex 解析、四桶归一化、时间/项目/模型聚合、冻结查询与分页 | 主体与多轮修复已经实现；历史并集/升级/规模边界见 N01–N07 |
 | GUI、设置 TOML/事务、关闭三态、导航/日期控件/费用浮层、窗口/托盘/自启接线 | 既有功能实现完成；自身未闭合的原生操作/系统验收合并至 N10–N12 |
-| 无内置价、三来源独立候选、完整优先/最高请求费用、分段峰谷/缓存三态 | 已实现；跨应用与有价分页断言通过；完整候选文案与普通测试价格隔离仍需 N08/N09 |
+| 无内置价、三来源独立候选、完整优先/最高请求费用、分段峰谷/缓存三态 | 已实现；跨应用、有价分页、完整候选文案及普通价格隔离通过，N08 完成；当前原生验收由 N11 承接 |
 | 项目路径统一、子目录归根/越界切换、模型等价/可信名称 | 核心与多轮边界修复已经实现；跨应用和原始模型分页已验证，当前原生链见 N11 |
 | 隐私同意闸门 | P01–P05 已实现；P06 强取证与当前完整矩阵仍未闭合，不能写成全部通过 |
-| 历史库与 CCS 手动预览/确认、全部代理、Codex 归档发现 | 旧污染纠错、非法迁移、读取期容量限制通过；批量预览、百万构建峰值及退出并发验收仍有责任，H01–H08 不能全部关闭 |
+| 历史库与 CCS 手动预览/确认、全部代理、Codex 归档发现 | 旧污染纠错、非法迁移、容量、百万 Rust 峰值、退出、证据登记、价格隔离及普通/acceptance 门禁已验证；原生/性能仍有责任，H01–H08 不能全部关闭 |
 | 既有浏览器/原生 QA | 历史 60 场景/17 契约/243 断言、CSP、真实 TTL、无强制当前显示器 150% 有产物；不证明最新功能/安装包全验 |
 | CI / main 预发布 | 实际远程 PR/main 成功及 exe/校验和/attestation 发布有证据；当前 SHA、正式 v*、安装和验签未冒充已验 |
 
-最新复跑：根库 **448 通过/10 忽略**，壳 **41 通过**，前端 **360 通过**；根/壳 fmt/Clippy、前端 typecheck/format:check/build 全部通过，根/壳使用默认并行测试。详情见[实施后复核记录](../reviews/2026-10-11-consolidated-plan-recheck.md)。此前旧污染事实与负数迁移反例现已通过；新增批量预览/提交反例失败，百万峰值、说明、价格隔离和当前原生验收仍未闭合，不能写“代码无未完成项/只剩真机”。[前次 7 项复核](../reviews/2026-10-11-history-seven-fixes-recheck.md)保留发生时的验证结果。
+`a58684c` 普通与 acceptance 完整门禁保留为时点基线：普通根库 **456 通过/10 忽略**、壳 **42 通过**、前端 **361 通过**；acceptance 根库 **456 通过/10 忽略**、壳 **47 通过**。双 manifest fmt、普通/acceptance Clippy（`-D warnings`）、前端 typecheck/format:check/build 和发布元数据 **7 项**通过，Cargo 均带 `--locked`，详见[M01 修复复核](../reviews/2026-10-11-main-merge-readiness.md#m01-closed)。随后安装提交未改产品源码。该轮实际迁移 **8 通过**、native_acceptance **3 通过/2 忽略**、review_regressions **29 通过**、metadata **7 通过**；未重复全套。main 可快进；安装接线不能代替验收实跑。门禁终态（双审计循环收敛，`6fab12f`）：根库 **461 + acceptance**、壳库 **45**、前端 **364**、python **36**、pwsh 契约 **22** 全绿，此前数字保留为时点基线。本批索引随 A01–A06 修复入库，当时的“验证失败例外”已消失。
+
+最新受控核验（2026-10-12，双审计员循环收敛）：M06 严格事实校验及 fixture 契约 **29 项**、M05 生命周期契约 **22 项**在 PowerShell 7.6.6 下实跑全绿；`a64d340` 复现的六项缺口（`Launch-AppOnce` 未定义、等待目录落在 `evidence/logs/logs`、替身退出码 0xC000013A、日志反例缺句柄、构建前无契约、卸载后无 manifest 校验）已逐条修复。main 可快进：截至 `231f667` 为 **0 behind / 71 ahead**；该时点无打开 PR、无 Actions 运行。仍未实跑安装，N12 待 PR CI 实跑取证，保持部分完成；详见[设计实施独立复核](../reviews/2026-10-11-main-merge-readiness.md#install-design-recheck)。
 
 ## 原 active 计划：逐份归档
 
 | 历史计划 | 状态 | 当前剩余责任 |
 | --- | --- | --- |
-| [定价来源策略](archive/partial/2026-10-05-pricing-source-policy.md) | 部分完成 | N08、N09、N11 |
+| [定价来源策略](archive/partial/2026-10-05-pricing-source-policy.md) | 部分完成 | N11；N08/N09 已完成 |
 | [产品审查与路线图](archive/partial/2026-10-05-product-review-and-roadmap.md) | 部分完成 | N12、N13 |
-| [发布阻断问题修复](archive/partial/2026-10-05-release-blockers-remediation.md) | 部分完成 | N09、N12 |
+| [发布阻断问题修复](archive/partial/2026-10-05-release-blockers-remediation.md) | 部分完成 | N12；N09 已完成 |
 | [Apple 视觉刷新剩余任务](archive/partial/2026-10-06-apple-refresh-remaining-tasks.md) | 部分完成 | N11、N12 |
 | [Apple 视觉刷新早期方案](archive/superseded/2026-10-06-apple-visual-refresh.md) | 已被取代 | N11、N12 |
 | [缓存读取价格语义](archive/partial/2026-10-06-cache-read-pricing-resolution.md) | 部分完成 | N11 |
@@ -46,8 +50,8 @@
 | [设计系统视觉差异基线](archive/superseded/2026-10-06-design-system-visual-gap.md) | 已被取代 | N12 |
 | [设计系统视觉 QA 历史记录](archive/partial/2026-10-06-design-system-visual-qa.md) | 部分完成 | N11、N12 |
 | [实现后审计修复](archive/partial/2026-10-06-post-implementation-audit-remediation.md) | 部分完成 | N12 |
-| [审查发现问题修复](archive/partial/2026-10-06-review-findings-remediation.md) | 部分完成 | N09、N12 |
-| [分段计价与请求费用明细](archive/partial/2026-10-06-tiered-pricing-and-request-breakdown.md) | 部分完成 | N08、N11、N12 |
+| [审查发现问题修复](archive/partial/2026-10-06-review-findings-remediation.md) | 部分完成 | N12；N09 已完成 |
+| [分段计价与请求费用明细](archive/partial/2026-10-06-tiered-pricing-and-request-breakdown.md) | 部分完成 | N11、N12；N08 已完成 |
 | [全计划审计修复 R01–R10](archive/implemented/2026-10-07-all-plans-audit-remediation.md) | 已实现 | 无独立待办 |
 | [修复后复核 F01–F08](archive/implemented/2026-10-07-post-remediation-recheck-fixes.md) | 已实现 | 无独立待办 |
 | [UI/UX 与统计基础修复](archive/partial/2026-10-07-ui-ux-review-remediation.md) | 部分完成 | N10、N11、N12 |
@@ -58,8 +62,8 @@
 | [CI 与发布自动化](archive/implemented/2026-10-09-ci-release-automation.md) | 已实现 | N12 |
 | [首次启动隐私同意](archive/partial/2026-10-09-first-launch-privacy-consent.md) | 部分完成 | N10、N12 |
 | [跨工具项目路径统一](archive/partial/2026-10-09-project-path-unification.md) | 部分完成 | N11 |
-| [模型名称等价分组与计价](archive/partial/2026-10-10-model-pricing-name-equivalence.md) | 部分完成 | N08、N11 |
-| [用量历史库与 CCS 手动导入](archive/partial/2026-10-10-usage-history-and-ccs-import.md) | 部分完成 | N01、N02、N03、N04、N05、N06、N09、N11、N13；N07 已完成 |
+| [模型名称等价分组与计价](archive/partial/2026-10-10-model-pricing-name-equivalence.md) | 部分完成 | N11；N08 已完成 |
+| [用量历史库与 CCS 手动导入](archive/partial/2026-10-10-usage-history-and-ccs-import.md) | 部分完成 | N11、N13；N01–N09 已完成 |
 
 ## M1–M11：自身验收复核
 

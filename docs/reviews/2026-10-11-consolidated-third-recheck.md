@@ -1,6 +1,6 @@
 # 整合计划第三轮修复复核
 
-> 以下为 `6688466` 的历史复核；T01/T02 已由 `16beea1` 修复并通过独立验证，`a58684c` 的[M01 已闭合](2026-10-11-main-merge-readiness.md#m01-closed)。当前 `a64d340` 状态见[安装设计实施独立复核](2026-10-11-main-merge-readiness.md#install-design-recheck)，保留本轮发生时的结果。
+> 以下为 `6688466` 的历史复核；T01/T02 已由 `16beea1` 修复并通过独立验证，`a58684c` 的[M01 已闭合](2026-10-11-main-merge-readiness.md#m01-closed)。当前状态（A01–A06 已由 `b855021` 修复、循环收敛至 `6fab12f`）见[安装设计实施独立复核](2026-10-11-main-merge-readiness.md#install-design-recheck)，保留本轮发生时的结果。
 
 - 日期：2026-10-11。
 - 被审实现：`6688466e75f3344868ba2432b45745e7fcdd6233`，`fix(历史库): 闭合第二轮复核 R01/R03/R04 三项缺口`。

@@ -12,7 +12,7 @@
 - 状态：**双审计员挑刺循环已收敛（用户指示收尾，最新 `6fab12f`）：9 项完成、1 项部分完成、3 项本轮验收未执行，共 4 项待办。** N01–N09 已完成，M10 保持闭合。六轮循环 12 名审计员（核心/门禁/集成/GUI/解析计价/回归复核/渲染时区/打包安全/测试质量）全部确认无 P1；第三轮起无产品 P2（第六轮仅测试质量 P2 已修）；修复累计 15 个提交（`d7ee94b`…`6fab12f`），最终轮仅剩 P3 且全部修复。M06 严格事实校验与 fixture 契约 unittest 29 项通过；M05 生命周期契约 22 项 pwsh 7.6.6 实跑全绿。不能认定五步已全部实施，N12 待 PR CI 实跑取证，当前暂不建议合并 main。详见[设计实施独立复核](../../reviews/2026-10-11-main-merge-readiness.md#install-design-recheck)，此前各轮结果保留为历史。
 - 核对范围：原 active 的 25 份计划、对应 audits、M1–M11 归档、D5 清单、当前源码与测试内容、可用的历史 QA 产物和实际 CI/发布记录。
 - 整理核对起点：`add8319`；后续修复提交 `3e645f3` 的 7 项已完成独立复核与最终门禁，见[复核记录](../../reviews/2026-10-11-history-seven-fixes-recheck.md)。此前工作区结果保留为历史，不再作为当前交付结论。
-- 最近独立复核实现：`a64d3400fa1874659be6351a2a4d7a380a39ef3a`，复核日期 2026-10-12。M01 的完整本地门禁基线为 `a58684c`；本轮只跑新的两类安装契约及相关定向回归，没有重复完整 Rust/前端门禁。下方早期反例与执行账保留发生时的结果，当前状态以任务表及最新复核为准。执行者声明不能代替独立验证。
+- 最近独立复核实现：`a64d3400fa1874659be6351a2a4d7a380a39ef3a`（复核日期 2026-10-12），其 A01–A06 六项安装门禁缺口已由 `b855021` 修复、`788905a` 记账，双审计员挑刺循环收敛至 `6fab12f`。M01 的完整本地门禁基线为 `a58684c`；该轮只跑新的两类安装契约及相关定向回归，没有重复完整 Rust/前端门禁。下方早期反例与执行账保留发生时的结果，当前状态以任务表及最新复核为准。执行者声明不能代替独立验证。
 - 修复设计：[N12 安装验收修复设计](#n12-install-design)已完成，M06 校验器与生成器通过；M05 集成和第五步门禁（构建前契约命令）已闭合，PR CI 实跑取证待完成。不新增第二份 active 计划。
 - 总账：[计划目录](../README.md)；逐份结论：[审计索引](../audits/README.md)；发布附属清单：[D5](../d5-acceptance-checklist.md)。
 
@@ -58,7 +58,7 @@
 | N09 | P2 | 测试确定性、路径隔离与当前门禁 | 已完成；`a58684c` 闭合 M01，history.db 路径清单、落盘产物及有效 SQLite 七表校验实测通过；两套 manifest 的普通/acceptance 和前端门禁全绿 | 必须；review-findings Task6、来源策略测试、当前合并门禁 |
 | N10 | P2 | 隐私原生取证工具与当前完整浏览器矩阵 | P01–P05 已实现；P06 的强验收未闭合 | 必须；最新隐私计划 P06 |
 | N11 | P2 | 最新项目/模型/CCS 原生统一验收 | 分别存在待验，合并一次执行 | 必须；A06/B03、MP06、H08、设计 Task8 |
-| N12 | P2（A01–A06 已修，待 PR CI 实跑取证；其余系统验收 P3） | 当前产物的 D5 系统、安装及发布验收 | A01–A06 全部修复：A01 启动函数改名 Launch-AppOnce 并补 -LiveLogsDir；A02 等待读 DataDir/logs（应用实际写入处）与证据目录分离，关闭后 live-logs 复制回证据随 always() 上传；A03 GUI 替身换 notepad（WM_CLOSE → 退出码 0，控制台宿主 0xC000013A 不能当优雅退出）；A04 五个日志反例接存活替身并钉住错误文本（超时/请求数/提前退出的真实路径覆盖）；A05 卸载后 manifest 逐条复核保留事实；A06 install-test.yml 构建前补两条契约命令（M06 unittest 29 项 + M05 生命周期 22 项 pwsh 7.6.6 实跑全绿）。待 PR CI 实跑取证 | 系统验收随发布批次；D5、RC11/AP08 |
+| N12 | P2（A01–A06 已修，待 PR CI 实跑取证；其余系统验收 P3） | 当前产物的 D5 系统、安装及发布验收 | A01–A06 全部修复：A01 启动函数改名 Launch-AppOnce 并补 -LiveLogsDir；A02 等待读 DataDir/logs（应用实际写入处）与证据目录分离，关闭后 live-logs 复制回证据随 always() 上传；A03 GUI 替身换 notepad（WM_CLOSE → 退出码 0，控制台宿主 0xC000013A 不能当优雅退出）；A04 五个日志反例接存活替身并钉住错误文本（超时/请求数/提前退出的真实路径覆盖）；A05 install-test.yml 构建前补两条契约命令（M06 unittest 29 项 + M05 生命周期 22 项 pwsh 7.6.6 实跑全绿）；A06 卸载后 manifest 逐条复核保留事实。待 PR CI 实跑取证 | 系统验收随发布批次；D5、RC11/AP08 |
 | 2026-10-12 | 双审计员循环第一轮（执行） | 完成 | 审计员 B（核心）：P2-1 CCS Codex 捐献按 (scheme,value) 判重修复 + 回归；P2-2 内容等值原生写升级 rank（classify_against）+ 回归；P3 query.rs 额度文案/v3 utc 同步/文档修正。审计员 A（门禁）：P2-1 失败路径复制 live-logs；P3 卸载 30s 轮询、file URI 编码、非 db 退出 2、make_legacy_cache 幂等；.gitignore 补 Python/日志模式。两个审计员均确认无 P1 |
 | 2026-10-12 | 双审计员循环第二轮（执行） | 完成 | 审计员 C（热路径+契约）：P2 热路径 7 处 DBG eprintln 删除；P2 M05 反例"错因通过"修复——四个反例接 New-StandInProcess、全部 Test-Throws 钉住 -ExpectedText、反例 1 重构为"归档旧日志→等待超时"并沿用生产证据根命名。审计员 D（集成）：确证同一 P2 并补 P3——test_install.ps1 失败模型注释、安装失败写证据说明、ExpectedRequests 从 manifest 事件数推导、非 CI 运行守卫（Reset-UserHome 保护）、证据动作不掩盖原始异常；v3 迁移 observed_at_utc 回填改 RFC3339（strftime）+ 回归（口径更正见第三轮：回填 SQL 实际在 SCHEMA_V3）；inspect_history 模式查询统一 DatabaseError 守卫与 NULL/空串区分显示（26 项 unittest）。两审计员均确认无 P1 |
 | 2026-10-12 | 双审计员循环第三轮（执行） | 完成 | 审计员 E（核心）：无 P1/P2，前两轮修复经对抗探针成立；P3——inspect_history 默认汇总改受检解析累加（SQLite SUM 在 u64 规模隐式转 REAL、坏值静默计 0）+ 3 项回归、absent 库行式模式不输出空行、aggregate 每事件两次 estimate 合并为一次（首次重构误改 unknown_pricing 累积语义，被金标对账测试抓出后修正）、四处错误文案空格串清理、utc 回填口径更正为 v3（回归测试改名 v3_backfill_*）。审计员 F（门禁）：无 P1/P2；P3——CONSENT=1 本机调试路径补 TEMP 回退、Copy-LiveLogsToEvidence 补 -Recurse、反例 1 归档前置断言改 Test-True 计账（契约 21→22 项）、install-test.yml 版本读取加 SemVer 强校验。两审计员均确认无 P1 |
@@ -202,8 +202,8 @@
 
 - 从旧 roadmap D5、多个 remediation 真机尾项、RC11/AP08、M3/M8/M11 的自身安装或运行项、CI 方案6 合并，不分别做重复签字；M4/M5/M7/M9 的界面项在 N11。
 - 附属规范：[D5 清单](../d5-acceptance-checklist.md)。当前计划持有任务状态，清单记录步骤和签字。
-- 最新安装门禁：`a64d340` 的 M06 逐事实校验器及生成器契约实跑 22 项通过，旧的单条 NULL/互换/字面 NULL 反例已能检出；M10、版本、PR 入口及 Release 依赖保持闭合。M05 集成和契约仍有三个 P1 阻断，详见[本轮独立复核](../../reviews/2026-10-11-main-merge-readiness.md#install-design-recheck)。
-- 仍需修复：A01 主脚本调用不存在的 Launch-AppOnce；A02 等待 evidence/logs/logs 而应用写 DataDir/logs，且没有上传当前日志；A03 PS7 正例仍以 0xC000013A 退出。A04 五个日志反例缺 Process，须提供存活句柄并限定失败原因；A05 PR 安装构建前缺两条契约命令；A06 卸载后缺 manifest 校验。全部归本项，不恢复旧计划。当前分支无打开 PR，当前 SHA 全事件 Actions runs=0；本轮未执行真实安装或修改用户数据。
+- 最新安装门禁（`6fab12f` 收敛态）：`a64d340` 复现的 A01–A06 六项已由 `b855021` 全部修复——A01 启动函数改名 `Launch-AppOnce` 并补 `-LiveLogsDir`；A02 等待改读 `DataDir\logs`、与证据目录分离且当前日志随 `always()` 上传；A03 GUI 替身换 `notepad`（`WM_CLOSE` → 退出码 0，控制台宿主 0xC000013A 不能当优雅退出）；A04 五个日志反例接存活替身并钉住错误文本；A05 `install-test.yml` 构建前补两条契约命令；A06 卸载后按 manifest 逐条复核保留事实。M06 严格事实校验与 fixture 契约 unittest **29 项**、M05 生命周期契约 **22 项** pwsh 7.6.6 实跑全绿；M10、版本、PR 入口及 Release 依赖保持闭合。详见[设计实施独立复核](../../reviews/2026-10-11-main-merge-readiness.md#install-design-recheck)。
+- 唯一剩余条件：取得当前安装产物的 PR 安装与普通 CI 实跑证据（该时点无打开 PR、当前 SHA 全事件 Actions runs=0；main 可快进 0 behind / 71 ahead）。全部归本项，不恢复旧计划；本轮未执行真实安装或修改用户数据。
 - 仍需：新产物安装/保留数据升级/卸载；单实例、关窗/托盘、窗口记忆、自启、休眠恢复；真实 125%/跨监视器、系统深色的新隐私引导首帧和 Ready 后偏好恢复；隐私政策在 100%/125%/150% 可读。
 - 已有旧版当前显示器 150%、CSP/TTL 证据保留；强制 WebView device scale 不能签 Windows 系统 DPI，旧偏好首帧不能签当前隐私引导。
 - M11 运行验收与隐私批次复用：Ready 后跨过 120 秒观察价格检查/同步，关闭后不再请求，重新开启恢复；按实际快照新鲜度设置合成条件，不把“线程已接线”当作计时通过。休眠恢复与 D5 3.8 同批。
