@@ -104,6 +104,10 @@ export const PRIVACY_PROTECTED_COMMANDS = [
   "settings_get",
   "settings_set_price_auto_sync",
   "settings_set_close_action",
+  // U06：自动读取间隔（settings.toml 单一来源）同样受隐私闸门保护。
+  "settings_set_collect_interval",
+  // U03：统计时区（settings.toml 单一来源）同样受隐私闸门保护。
+  "settings_set_timezone",
   "close_resolve",
   "open_settings_file",
 ];
@@ -736,6 +740,8 @@ export function buildFixture(name) {
       return {
         close_action: "quit",
         price_auto_sync: true,
+        // U06：自动读取间隔（后端缺省 300）。
+        collect_interval_secs: 300,
         sources: {
           claude: { enabled: true, dir: "C:/restored/claude" },
           codex: { enabled: false, dir: "C:/restored/codex" },
@@ -747,6 +753,7 @@ export function buildFixture(name) {
       return {
         close_action: "quit",
         price_auto_sync: true,
+        collect_interval_secs: 300,
         sources: {
           claude: { enabled: true, dir: "C:/confirmed/claude" },
           codex: { enabled: false, dir: "C:/confirmed/codex" },
@@ -760,7 +767,7 @@ export function buildFixture(name) {
       if (n === 1) return reject("设置读取失败（合成）");
       return defer(`settings_get#${n}`);
     }
-    return { close_action: null, price_auto_sync: true };
+    return { close_action: null, price_auto_sync: true, collect_interval_secs: 300 };
   }
 
   /** 挂起的第二次 settings_get 在测试里被释放时使用的"旧值"载荷。 */
@@ -833,6 +840,14 @@ export function buildFixture(name) {
         if (cfg.closeWrite === "fail-then-ok" && state.closeWrites === 1)
           return reject("写入设置失败：磁盘不可写（合成）");
         return null;
+      }
+      case "settings_set_collect_interval": {
+        // U06：自动读取间隔（白名单 5/10/30/60/300/600）——返回落盘值；
+        // 界面写入走串行保存队列，白名单外的值后端会拒绝（这里同形拒绝）。
+        const secs = args?.secs;
+        if (![5, 10, 30, 60, 300, 600].includes(secs))
+          return reject(`自动读取间隔只能是 5/10/30/60/300/600 秒（收到 ${secs}）`);
+        return secs;
       }
       case "settings_set_price_auto_sync":
         return args?.enabled ?? true;

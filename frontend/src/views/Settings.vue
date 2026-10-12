@@ -39,6 +39,11 @@ import {
   type SourceStatus,
 } from "../types";
 import { TZ_OPTIONS, useTimezone } from "../composables/timezone";
+import {
+  COLLECT_INTERVAL_OPTIONS,
+  adoptCollectInterval,
+  useCollectInterval,
+} from "../composables/collectInterval";
 import { totalTokens } from "../lib/tokenUsage";
 import { fmtPriceOrUnknown, formatTieredPricing } from "../lib/tieredPrice";
 import {
@@ -145,6 +150,10 @@ const {
   notice: tzNotice,
   clearNotice: clearTzNotice,
 } = useTimezone();
+// U06：自动读取间隔的唯一来源也是 settings.toml——下拉读写走同一条串行保存
+// 队列（`lib/settingQueue`）；权威值由下方 loadSettings 的 settings_get 灌入，
+// 不额外发一次设置读取（设置首读失败/挂起场景依赖"首读发生在设置页"）。
+const { intervalSecs, saving: intervalSaving, error: intervalError } = useCollectInterval();
 const autostart = ref<boolean | null>(null);
 const autostartBusy = ref(false);
 const autoSync = ref<boolean | null>(null);
@@ -499,6 +508,8 @@ type SettingsPayload = {
   close_action?: "minimize" | "quit" | null;
   price_auto_sync?: boolean;
   sources?: Record<string, { enabled?: boolean; dir?: string | null }>;
+  /** U06：后台自动读取 JSONL 的间隔（秒）；缺省 300。 */
+  collect_interval_secs?: number;
 };
 
 /**
@@ -533,6 +544,8 @@ async function loadSettings(): Promise<void> {
     closeAction.value = s.close_action ?? "ask";
     closeActionKnown.value = true;
     autoSync.value = s.price_auto_sync ?? null;
+    // U06：自动读取间隔的权威值（缺字段、白名单外的脏值都在 adopt 内回缺省）。
+    adoptCollectInterval(s.collect_interval_secs);
     const src = s.sources ?? {};
     const fresh: typeof drafts.value = {
       claude: { enabled: src.claude?.enabled ?? true, dir: src.claude?.dir ?? "" },
@@ -1107,6 +1120,29 @@ defineExpose({ priceColumns });
             <div class="setting-help">
               留空则回到该来源的默认目录（上方「当前生效目录」是实际使用的目录，
               可能来自显式覆盖）；停用后该来源完全不参与统计。两个来源不能指向同一目录。
+            </div>
+          </div>
+          <!-- U06：自动读取间隔——后台按此间隔读取 JSONL 日志；界面在新数据
+               写入后自动刷新（间隔越短，新会话出现在界面上的延迟越短）。 -->
+          <div class="setting-row interval-row">
+            <div class="setting-main">
+              <div class="setting-label">自动读取间隔</div>
+              <div class="setting-help">
+                后台按此间隔读取日志并在有新数据时刷新界面；修改后立即生效。
+                <span v-if="intervalSaving" class="tz-state">保存中…</span>
+                <span v-else-if="intervalError" class="tz-state is-error">
+                  保存失败：{{ intervalError }}（已回到上次保存的值）
+                </span>
+              </div>
+            </div>
+            <div class="setting-control">
+              <NSelect
+                v-model:value="intervalSecs"
+                :options="COLLECT_INTERVAL_OPTIONS"
+                size="small"
+                style="width: 140px"
+                aria-label="自动读取间隔"
+              />
             </div>
           </div>
         </section>
@@ -1699,6 +1735,11 @@ defineExpose({ priceColumns });
   padding: var(--ts-space-2) 0;
 }
 .source-block.has-divider {
+  border-top: 1px solid var(--ts-separator);
+}
+
+/* U06：自动读取间隔行与来源块之间用发丝线分隔（沿用 .setting-row 的行样式） */
+.interval-row {
   border-top: 1px solid var(--ts-separator);
 }
 

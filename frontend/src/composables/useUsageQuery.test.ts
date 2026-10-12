@@ -9,12 +9,21 @@
 // 5. 隐藏期间多次触发只合并成一批；
 // 6. 无待刷新标记时不发查询、筛选与下钻保留；
 // 7. 快照只在"偏好 + 时区"逐项相等时用于首帧展示。
-import { beforeEach, describe, expect, it, vi } from "vitest";
+//
+// U06 追加（自动刷新调度）：`usage-updated` 触发 `collect:false` 自动批次、
+// 批次在途收到更高代次后补发一批、rolling 与跨午夜的时钟检查、可见性/焦点
+// 立即检查、隐藏时只置标记、翻页保护改为提示按钮、卸载取消监听与静默降级。
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { defineComponent, h, nextTick } from "vue";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+
+/// U06：`usage-updated` 事件监听——测试直接持有注册的处理器并派发合成事件
+/// （真实 Tauri 事件总线在测试环境不存在，这里只验证调度语义）。
+const listenMock = vi.hoisted(() => vi.fn());
+vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 
 import { useUsageQuery, type UsageQueryApi } from "./useUsageQuery";
 import { resetTimezoneForTests, useTimezone } from "./timezone";
@@ -108,6 +117,28 @@ function okMock(overrides: Partial<Record<string, () => Promise<unknown>>> = {})
 let api: UsageQueryApi;
 let goSettingsCalls = 0;
 
+/// U06：已注册的 `usage-updated` 处理器与取消监听次数。
+type UsageHandler = (ev: { payload?: { generation?: number } }) => void;
+let usageHandlers: UsageHandler[] = [];
+let unlistenCount = 0;
+
+function emitUsageUpdated(generation: number): void {
+  for (const h of [...usageHandlers]) h({ payload: { generation } });
+}
+
+/** 最近一次 `query_begin` 的参数。 */
+function lastBegin(): Record<string, unknown> {
+  return callsOf("query_begin").at(-1)![1] as Record<string, unknown>;
+}
+
+/** U06：写入筛选偏好（新实例启动时同步读取，决定"查什么"）。 */
+function setPreferences(preset: unknown, drill: unknown = null): void {
+  localStorage.setItem(
+    VIEW_FILTERS_KEY,
+    JSON.stringify({ by: "model", agent: "codex", preset, rollupsMode: "auto", drill }),
+  );
+}
+
 const Host = defineComponent({
   props: { refreshKey: { type: Number, default: 0 } },
   setup(props) {
@@ -143,6 +174,16 @@ beforeEach(() => {
   resetSnapshotQueueForTests();
   resetTimezoneForTests();
   goSettingsCalls = 0;
+  // U06：事件监听默认成功注册，测试通过 emitUsageUpdated 派发。
+  usageHandlers = [];
+  unlistenCount = 0;
+  listenMock.mockReset();
+  listenMock.mockImplementation((event: string, handler: UsageHandler) => {
+    if (event === "usage-updated") usageHandlers.push(handler);
+    return Promise.resolve(() => {
+      unlistenCount += 1;
+    });
+  });
 });
 
 describe("useUsageQuery 单一查询身份（U04）", () => {
@@ -540,5 +581,289 @@ describe("useUsageQuery 通知合并（U04）", () => {
     expect(texts.some((t) => t.includes("精确到时刻"))).toBe(true);
     expect(api.collectionDiagnostics.value.clean, "时刻提示不是采集警告").toBe(true);
     w.unmount();
+  });
+});
+
+// ── U06：自动刷新调度（变化通知 / 时间窗口到期 / 翻页保护 / 可见性） ──
+describe("useUsageQuery 自动刷新调度（U06）", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /// 只伪造定时器与时钟：`flushPromises` 依赖真实 setTimeout。
+  function fakeClock(at: string | Date): void {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    vi.setSystemTime(typeof at === "string" ? new Date(at) : at);
+  }
+
+  /// 每 60 秒一次的时钟检查：推进一个周期并让批次落地。
+  async function advanceOneCheck(): Promise<void> {
+    vi.advanceTimersByTime(60_000);
+    await flushPromises();
+  }
+
+  it("usage_event_triggers_auto_batch_keeping_filters_and_drill：事件触发 collect:false 自动批次，筛选与下钻保留", async () => {
+    setPreferences({ kind: "days", days: 7 }, { type: "model", key: "m1", label: "M1" });
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    expect(beginCalls()).toBe(1);
+    expect(lastBegin(), "启动首批查询").toMatchObject({ collect: true, trigger: "startup" });
+
+    emitUsageUpdated(4);
+    await flushPromises();
+
+    expect(beginCalls()).toBe(2);
+    expect(lastBegin(), "自动批次不重复采集且带 auto 触发源").toMatchObject({
+      collect: false,
+      trigger: "auto",
+      by: "model",
+      agent: "codex",
+      days: 7,
+    });
+    const events = callsOf("query_events").at(-1)![1] as Record<string, unknown>;
+    expect(events, "下钻保留").toMatchObject({ model: "m1" });
+    expect(api.drill.value?.key).toBe("m1");
+    w.unmount();
+  });
+
+  it("higher_generation_during_batch_triggers_one_catch_up_batch：在途收到更高代次 → 完成后补发一批，仅一批", async () => {
+    let summaryCalls = 0;
+    let releaseFirst!: (v: SummaryReport) => void;
+    okMock({
+      query_summary: () => {
+        summaryCalls += 1;
+        if (summaryCalls === 1) return new Promise<SummaryReport>((r) => (releaseFirst = r));
+        return Promise.resolve(reportA);
+      },
+    });
+    const w = mountHost();
+    await flushPromises();
+    expect(beginCalls()).toBe(1);
+
+    emitUsageUpdated(5); // 批次在途
+    await flushPromises();
+    expect(beginCalls(), "在途只更新 latestGeneration，不并发第二批").toBe(1);
+    expect(api.latestGeneration.value).toBe(5);
+
+    releaseFirst(reportA);
+    await flushPromises();
+    expect(beginCalls(), "完成后补发一批").toBe(2);
+    expect(lastBegin()).toMatchObject({ collect: false, trigger: "auto" });
+
+    await flushPromises();
+    expect(beginCalls(), "补发批次的数据已覆盖该代次，不再重复").toBe(2);
+    w.unmount();
+  });
+
+  it("settled_batch_without_higher_generation_sends_nothing：在途没收到更高代次则不补发", async () => {
+    let releaseSummary!: (v: SummaryReport) => void;
+    okMock({ query_summary: () => new Promise<SummaryReport>((r) => (releaseSummary = r)) });
+    const w = mountHost();
+    await flushPromises();
+    expect(beginCalls()).toBe(1);
+
+    releaseSummary(reportA);
+    await flushPromises();
+    expect(beginCalls(), "没有新数据通知时不补发").toBe(1);
+    w.unmount();
+  });
+
+  it("rolling_preset_refreshes_on_every_clock_check：rolling 预设每次时钟检查都刷新", async () => {
+    fakeClock("2026-10-05T12:00:00+08:00");
+    setPreferences({ kind: "rolling", hours: 24 });
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    expect(beginCalls()).toBe(1);
+
+    await advanceOneCheck();
+    expect(beginCalls(), "60 秒检查 → 一批").toBe(2);
+    expect(lastBegin()).toMatchObject({ collect: false, trigger: "auto", rollingHours: 24 });
+
+    await advanceOneCheck();
+    expect(beginCalls(), "下一次检查再一批（24h 窗口持续移动）").toBe(3);
+    expect(api.pendingRefresh.value).toBe(false);
+    w.unmount();
+  });
+
+  it("natural_day_preset_refreshes_after_stats_timezone_midnight：跨日后自然日预设刷新", async () => {
+    fakeClock("2026-10-05T23:30:00+08:00");
+    setPreferences({ kind: "days", days: 7 });
+    okMock(); // 句柄 as_of = 2026-10-05T00:00:00+08:00
+    const w = mountHost();
+    await flushPromises();
+    expect(beginCalls()).toBe(1);
+
+    await advanceOneCheck();
+    expect(beginCalls(), "统计时区的今天与 as_of 同日 → 不刷新").toBe(1);
+
+    vi.setSystemTime(new Date("2026-10-06T00:30:00+08:00"));
+    await advanceOneCheck();
+    expect(beginCalls(), "跨过统计时区午夜 → 刷新").toBe(2);
+    expect(lastBegin()).toMatchObject({ collect: false, trigger: "auto", days: 7 });
+    w.unmount();
+  });
+
+  it("all_time_range_never_refreshes_on_clock_check：全部时间不因时钟刷新", async () => {
+    fakeClock("2026-10-05T12:00:00+08:00");
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    expect(beginCalls()).toBe(1);
+
+    await advanceOneCheck();
+    vi.setSystemTime(new Date("2026-10-08T12:00:00+08:00"));
+    await advanceOneCheck();
+    expect(beginCalls(), "全部时间不设范围也不截断，无到期概念").toBe(1);
+    w.unmount();
+  });
+
+  it("visibilitychange_and_focus_check_immediately：可见性与窗口焦点立即检查一次", async () => {
+    fakeClock("2026-10-05T12:00:00+08:00");
+    setPreferences({ kind: "rolling", hours: 24 });
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    expect(beginCalls()).toBe(1);
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flushPromises();
+    expect(beginCalls(), "visibilitychange 恢复可见 → 立即刷新一次").toBe(2);
+
+    window.dispatchEvent(new Event("focus"));
+    await flushPromises();
+    expect(beginCalls(), "窗口获得焦点 → 立即刷新一次").toBe(3);
+    w.unmount();
+  });
+
+  it("hidden_usage_event_only_marks_pending：隐藏时只置待刷新标记（不发查询）", async () => {
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    expect(beginCalls()).toBe(1);
+
+    api.setVisible(false);
+    await nextTick();
+    emitUsageUpdated(9);
+    await flushPromises();
+    expect(beginCalls(), "隐藏期间不发查询").toBe(1);
+    expect(api.pendingRefresh.value).toBe(true);
+    expect(api.latestGeneration.value).toBe(9);
+
+    api.setVisible(true);
+    await flushPromises();
+    expect(beginCalls(), "回到页面只发一批").toBe(2);
+    expect(lastBegin()).toMatchObject({ collect: true, trigger: "manual" });
+    expect(api.pendingRefresh.value).toBe(false);
+    w.unmount();
+  });
+
+  it("paged_session_defers_auto_refresh_into_hint_button：已加载更多时自动刷新不执行，改显示提示按钮", async () => {
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "query_begin") return Promise.resolve(handle);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(reportA);
+      if (cmd === "source_status") return Promise.resolve([]);
+      if (cmd === "query_events") {
+        return Promise.resolve(args?.before ? listOf(["p2"], 3) : listOf(["p1"], 3));
+      }
+      return Promise.resolve(null);
+    });
+    const w = mountHost();
+    await flushPromises();
+    expect(beginCalls()).toBe(1);
+
+    api.loadMoreEvents();
+    await flushPromises();
+    expect(api.events.value?.rows.map((r) => r.record_id)).toEqual(["p1", "p2"]);
+
+    emitUsageUpdated(6);
+    await flushPromises();
+    expect(beginCalls(), "已加载更多：自动刷新不执行").toBe(1);
+    expect(api.autoRefreshHint.value, "改为提示按钮").toBe("有新数据 · 刷新");
+
+    api.manualRefresh();
+    await flushPromises();
+    expect(beginCalls(), "点击提示等同手动刷新").toBe(2);
+    expect(lastBegin()).toMatchObject({ collect: true, trigger: "manual" });
+    expect(api.autoRefreshHint.value, "新批次后提示消失").toBeNull();
+    w.unmount();
+  });
+
+  it("window_expiry_while_paged_hints_time_range_updated：翻页保护下时间窗口到期显示专用文案", async () => {
+    fakeClock("2026-10-05T12:00:00+08:00");
+    setPreferences({ kind: "rolling", hours: 24 });
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "query_begin") return Promise.resolve(handle);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(reportA);
+      if (cmd === "source_status") return Promise.resolve([]);
+      if (cmd === "query_events") {
+        return Promise.resolve(args?.before ? listOf(["p2"], 3) : listOf(["p1"], 3));
+      }
+      return Promise.resolve(null);
+    });
+    const w = mountHost();
+    await flushPromises();
+    api.loadMoreEvents();
+    await flushPromises();
+    expect(beginCalls()).toBe(1);
+
+    await advanceOneCheck();
+    expect(beginCalls(), "翻页保护下时钟到期也不刷新").toBe(1);
+    expect(api.autoRefreshHint.value).toBe("时间范围已更新 · 刷新");
+    w.unmount();
+  });
+
+  it("loading_more_in_flight_blocks_auto_refresh：加载更多在途同样阻止自动刷新", async () => {
+    let appendGate: ((v: EventList) => void) | null = null;
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "query_begin") return Promise.resolve(handle);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(reportA);
+      if (cmd === "source_status") return Promise.resolve([]);
+      if (cmd === "query_events") {
+        if (args?.before) return new Promise<EventList>((r) => (appendGate = r));
+        return Promise.resolve(listOf(["p1"], 3));
+      }
+      return Promise.resolve(null);
+    });
+    const w = mountHost();
+    await flushPromises();
+
+    api.loadMoreEvents();
+    await flushPromises();
+    expect(api.moreLoading.value, "追加页在途").toBe(true);
+
+    emitUsageUpdated(3);
+    await flushPromises();
+    expect(beginCalls(), "加载更多在途：自动刷新让位").toBe(1);
+    expect(api.autoRefreshHint.value).toBe("有新数据 · 刷新");
+
+    appendGate!(listOf(["p2"], 3));
+    await flushPromises();
+    expect(api.moreLoading.value).toBe(false);
+    w.unmount();
+  });
+
+  it("usage_listener_is_removed_on_unmount_and_degrades_silently：卸载取消监听；非 Tauri 环境静默降级", async () => {
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    expect(usageHandlers.length, "注册了 usage-updated 监听").toBe(1);
+    expect(unlistenCount).toBe(0);
+    w.unmount();
+    await flushPromises();
+    expect(unlistenCount, "卸载时取消监听").toBe(1);
+
+    // 事件系统不可用（非 Tauri 环境）：不得抛出、不得产生未处理 rejection
+    listenMock.mockRejectedValue(new Error("not a tauri environment"));
+    okMock();
+    const before = beginCalls();
+    const w2 = mountHost();
+    await flushPromises();
+    expect(beginCalls(), "监听失败不影响查询").toBe(before + 1);
+    w2.unmount();
   });
 });

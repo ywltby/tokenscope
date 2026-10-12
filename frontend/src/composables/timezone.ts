@@ -16,6 +16,7 @@ import { computed, ref, type Ref, type WritableComputedRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { readItem, removeItem } from "../lib/localStorage";
 import { createSettingQueue } from "../lib/settingQueue";
+import { adoptCollectInterval } from "./collectInterval";
 
 /** 旧键（历史遗留，仅用于一次性迁移）。 */
 const STORAGE_KEY = "tokenscope-tz";
@@ -77,10 +78,12 @@ function textOf(e: unknown): string {
 ///    显示非阻断提示。
 async function boot(): Promise<void> {
   const legacy = readItem(STORAGE_KEY);
-  let settings: { timezone?: unknown } | null = null;
+  let settings: { timezone?: unknown; collect_interval_secs?: unknown } | null = null;
   let readFailed = false;
   try {
-    settings = await invoke<{ timezone?: unknown } | null>("settings_get");
+    settings = await invoke<{ timezone?: unknown; collect_interval_secs?: unknown } | null>(
+      "settings_get",
+    );
   } catch (e) {
     readFailed = true;
     console.warn("读取设置失败，时区改用本地兜底:", e);
@@ -100,6 +103,10 @@ async function boot(): Promise<void> {
     ready.value = true;
     return;
   }
+  // U06：同一次启动读取顺带采用自动读取间隔——不新增 `settings_get` 调用，
+  // 因此不改变"启动后第一次设置读取发生在设置页"的既有契约语义；界面在首次
+  // 进入设置页之前也能显示真实的间隔文案（设置页那次读取会再 adopt 一次）。
+  adoptCollectInterval(settings?.collect_interval_secs);
   const stored = typeof settings?.timezone === "string" ? settings.timezone.trim() : "";
   if (stored !== "") {
     // 分支 1：TOML 为准；非法值（手工编辑）回退默认并提示。

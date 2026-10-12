@@ -71,10 +71,11 @@ const {
   clearDrill,
   loadSources,
   saveSnapshot,
-  // U06 接入点：可见性、待刷新标记、自动刷新入口
+  // U06 接入点：可见性、待刷新标记、自动刷新入口与让位提示
   visible,
   pendingRefresh,
   latestGeneration,
+  autoRefreshHint,
   setVisible,
   requestAutoRefresh,
   notifyUsageUpdated,
@@ -129,8 +130,9 @@ onActivated(() => setVisible(true));
 onDeactivated(() => setVisible(false));
 
 // U04 契约：这些绑定名与重构前保持一致（既有 `Dashboard.test.ts` 按
-// `state(w)["report"]` / `state(w)["stale"]` 之类的写法读取；U06 会用到
-// `pendingRefresh` / `requestAutoRefresh` / `notifyUsageUpdated`）。
+// `state(w)["report"]` / `state(w)["stale"]` 之类的写法读取；U06 的
+// `pendingRefresh` / `autoRefreshHint` / `requestAutoRefresh` /
+// `notifyUsageUpdated` 同样经这里暴露，供模板 ref 程序化调用）。
 // 模板不直接使用其中一部分，这里显式聚合暴露一次：既避免被 noUnusedLocals
 // 判成死绑定，也给父组件（模板 ref）一个明确的程序化入口。
 defineExpose({
@@ -179,6 +181,7 @@ defineExpose({
   visible,
   pendingRefresh,
   latestGeneration,
+  autoRefreshHint,
   setVisible,
   requestAutoRefresh,
   notifyUsageUpdated,
@@ -194,10 +197,50 @@ defineExpose({
         <div v-if="drill" class="page-sub">已筛选 {{ drillLabel(drill) }}</div>
       </div>
       <div class="head-right">
-        <span class="ts-pill ts-status-pill" :class="statusPill.cls" role="status">{{
-          statusPill.text
-        }}</span>
-        <NButton size="small" secondary class="ts-focusable" @click="manualRefresh">刷新</NButton>
+        <!-- U06：正常态显示本次查询的更新时间，悬停提示写自动读取间隔 -->
+        <span
+          class="ts-pill ts-status-pill"
+          :class="statusPill.cls"
+          :title="statusPill.title"
+          role="status"
+          >{{ statusPill.text }}</span
+        >
+        <!-- U06 翻页保护：已加载更多时自动刷新不执行，改为提示；点击等同手动刷新 -->
+        <button
+          v-if="autoRefreshHint"
+          type="button"
+          class="ts-notice-action ts-focusable ts-refresh-hint"
+          @click="manualRefresh"
+        >
+          {{ autoRefreshHint }}
+        </button>
+        <NButton
+          size="small"
+          secondary
+          class="ts-focusable"
+          :loading="loading"
+          :disabled="loading"
+          @click="manualRefresh"
+        >
+          <template #icon>
+            <!-- 装饰性刷新图标：可访问名称由按钮文字「刷新」承载 -->
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M20 12a8 8 0 1 1-2.4-5.7" />
+              <path d="M20 4.2V9h-4.8" />
+            </svg>
+          </template>
+          刷新
+        </NButton>
       </div>
     </div>
     <!-- 固定两行：来源；日期 / 聚合维度。时区在设置页调整。 -->
@@ -440,6 +483,17 @@ defineExpose({
   font: inherit;
   font-size: 13px;
   padding: 0;
+}
+
+/* U06：翻页保护下的自动刷新提示按钮（「有新数据 · 刷新」/「时间范围已更新 · 刷新」）
+   与通知条动作同族：强调色文字按钮，材质由 .ts-notice-action 承载。 */
+.ts-refresh-hint {
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  padding: 0;
+  white-space: nowrap;
 }
 
 .filter-row {

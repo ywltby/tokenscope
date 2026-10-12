@@ -46,6 +46,11 @@ vi.mock("naive-ui", async (importOriginal) => {
 
 import Settings from "./Settings.vue";
 import { createSettingsPreload, SETTINGS_PRELOAD } from "../lib/settingsPreload";
+import {
+  COLLECT_INTERVAL_OPTIONS,
+  resetCollectIntervalForTests,
+  useCollectInterval,
+} from "../composables/collectInterval";
 // UX08：样式契约断言需要 SFC 源文本（项目无 @types/node，用 Vite ?raw）
 import settingsSource from "./Settings.vue?raw";
 
@@ -219,6 +224,8 @@ beforeEach(() => {
   invokeMock.mockReset();
   mockBase();
   installLayoutMedia();
+  // U06：自动读取间隔是模块级单例（缺省 5 分钟）——每个用例从缺省起步。
+  resetCollectIntervalForTests();
 });
 
 describe("Settings 同步状态传播（Task 4）", () => {
@@ -1965,6 +1972,91 @@ describe("Settings 分区导航与文案（U05）", () => {
         .find((b) => b.attributes("aria-current") !== undefined)!
         .text(),
     ).toBe("价格");
+    w.unmount();
+  });
+});
+
+// ── U06：数据源分区的自动读取间隔（唯一来源 settings.toml + 串行保存） ──
+describe("Settings 自动读取间隔（U06）", () => {
+  /** 挂载设置页并切到「数据源」分区（一次只显示一个分区）。 */
+  async function mountSources(): Promise<VueWrapper> {
+    const w = mount(Settings);
+    await flushPromises();
+    await openSection(w, "sources");
+    return w;
+  }
+
+  function settingsBase(
+    overrides: Record<string, (args?: Record<string, unknown>) => Promise<unknown>>,
+  ): void {
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) =>
+      overrides[cmd]
+        ? overrides[cmd](args)
+        : (base as (c: string, a?: Record<string, unknown>) => unknown)(cmd, args),
+    );
+  }
+
+  function intervalRow(w: VueWrapper) {
+    return w.findAll(".setting-row").find((r) => r.text().includes("自动读取间隔"));
+  }
+
+  it("interval_select_renders_in_sources_section：下拉在「数据源」分区且只用白名单六档", async () => {
+    const w = await mountSources();
+    const row = intervalRow(w);
+    expect(row, "「数据源」分区必须有自动读取间隔设置项").toBeDefined();
+    const select = row!.findComponent({ name: "Select" });
+    expect(select.exists()).toBe(true);
+    expect(select.props("options")).toEqual(COLLECT_INTERVAL_OPTIONS);
+    w.unmount();
+  });
+
+  it("initial_value_comes_from_settings_get：初始值取自 collect_interval_secs（缺省 300）", async () => {
+    settingsBase({ settings_get: () => Promise.resolve({ collect_interval_secs: 60 }) });
+    const w = await mountSources();
+    expect(useCollectInterval().intervalSecs.value).toBe(60);
+    expect(intervalRow(w)!.findComponent({ name: "Select" }).props("value")).toBe(60);
+    w.unmount();
+
+    resetCollectIntervalForTests();
+    settingsBase({ settings_get: () => Promise.resolve({ price_auto_sync: true, sources: {} }) });
+    const w2 = await mountSources();
+    expect(useCollectInterval().intervalSecs.value, "旧设置文件缺该字段 → 缺省 300").toBe(300);
+    w2.unmount();
+  });
+
+  it("selecting_saves_through_serial_queue：选择值走 settings_set_collect_interval 保存", async () => {
+    const written: unknown[] = [];
+    settingsBase({
+      settings_set_collect_interval: (args) => {
+        written.push(args);
+        return Promise.resolve(args?.secs);
+      },
+    });
+    const w = await mountSources();
+    intervalRow(w)!.findComponent({ name: "Select" }).vm.$emit("update:value", 5);
+    await flushPromises();
+
+    expect(written, "只发一次保存且参数是白名单值").toEqual([{ secs: 5 }]);
+    expect(useCollectInterval().intervalSecs.value).toBe(5);
+    expect(useCollectInterval().error.value).toBeNull();
+    w.unmount();
+  });
+
+  it("save_failure_rolls_back_and_shows_error_only_in_that_row：失败回滚到已落盘值并只在该行提示", async () => {
+    settingsBase({
+      settings_set_collect_interval: () => Promise.reject(new Error("写入设置失败：磁盘不可写")),
+    });
+    const w = await mountSources();
+    intervalRow(w)!.findComponent({ name: "Select" }).vm.$emit("update:value", 30);
+    await flushPromises();
+
+    expect(useCollectInterval().intervalSecs.value, "回滚到已落盘值").toBe(300);
+    const row = intervalRow(w)!;
+    expect(row.text()).toContain("保存失败");
+    expect(row.text()).toContain("磁盘不可写");
+    // 局部错误：其他分区不出现该提示
+    expect(w.find("[data-section='general']").text()).not.toContain("磁盘不可写");
     w.unmount();
   });
 });

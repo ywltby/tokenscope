@@ -20,6 +20,7 @@ import {
   snapshotQueueIdle,
 } from "../lib/viewSnapshot";
 import { initTimezone, resetTimezoneForTests, useTimezone } from "../composables/timezone";
+import { adoptCollectInterval, resetCollectIntervalForTests } from "../composables/collectInterval";
 import { VIEW_FILTERS_KEY } from "../lib/viewFilters";
 import type { RangePreset } from "../lib/rangePreset";
 
@@ -126,6 +127,8 @@ beforeEach(() => {
   // U04：时区是模块级单例，且参与"快照是否可用于首帧"的逐项比较——每个用例
   // 从默认时区（Asia/Shanghai）起步，避免上一个用例的 initTimezone 结果串味。
   resetTimezoneForTests();
+  // U06：自动读取间隔同样是模块级单例（缺省 5 分钟）。
+  resetCollectIntervalForTests();
 });
 
 describe("Dashboard 查询编排", () => {
@@ -959,12 +962,12 @@ describe("视图快照查询身份（R04）", () => {
     expect(pill.classes()).toContain("ts-pill-warning");
     expect(pill.text()).toContain("刷新失败");
     expect(w.text()).toContain("net down");
-    // 重试成功 → 已更新
+    // 重试成功 → 状态胶囊给出本次查询的更新时间
     fail = false;
     const retry = w.findAll("button").find((b) => b.text() === "重试");
     await retry!.trigger("click");
     await flushPromises();
-    expect(w.find(".page-head .ts-status-pill").text()).toContain("已更新");
+    expect(w.find(".page-head .ts-status-pill").text()).toContain("更新于");
   });
 
   it("first_load_failure_without_data_shows_failure_not_refreshing：首载失败且无数据 = 失败态（G-P2-1）", async () => {
@@ -1206,7 +1209,7 @@ describe("Dashboard 页头与通知（设计系统 Task 3）", () => {
     expect(head.find(".page-sub").exists()).toBe(false);
     const pill = head.find(".ts-status-pill");
     expect(pill.exists()).toBe(true);
-    expect(pill.text()).toContain("已更新");
+    expect(pill.text()).toContain("更新于");
     expect(head.findAll("button").some((b) => b.text() === "刷新")).toBe(true);
   });
 
@@ -1995,6 +1998,150 @@ describe("Dashboard 切页保留（U04）", () => {
     expect(dash()["agent"]).toBe("claude");
     expect((dash()["drill"] as { key: string } | null)?.key).toBe("2026-10-01");
     expect(dash()["pendingRefresh"], "标记已消费").toBe(false);
+    w.unmount();
+  });
+});
+
+// ── U06：自动读取的状态与按钮（更新时间胶囊 / 刷新按钮 / 翻页保护提示） ──
+describe("Dashboard 自动读取状态（U06）", () => {
+  function eventRow(rid: string) {
+    return {
+      ts: "2026-10-02 10:00:00",
+      record_id: rid,
+      cursor: `2026-10-02T10:00:00.000Z|${rid}`,
+      agent: "codex",
+      model: "m",
+      session_id: "s",
+      project: "p",
+      input: 1,
+      output: 1,
+      cache_write: 0,
+      cache_read: 0,
+      cost_usd: 0,
+    };
+  }
+
+  function mockWithAsOf(asOf: string): void {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve({ ...queryInfo, asOf });
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+  }
+
+  it("状态胶囊显示本次查询的 as_of（按统计时区）", async () => {
+    mockWithAsOf("2026-10-05T22:34:56+08:00");
+    const w = mountDashboard();
+    await flushPromises();
+    const pill = w.find(".page-head .ts-status-pill");
+    expect(pill.text()).toBe("更新于 22:34:56");
+    expect(pill.classes()).toContain("ts-pill-success");
+    expect(pill.attributes("title"), "悬停提示随读取间隔设置").toBe("每 5 分钟自动读取");
+    w.unmount();
+  });
+
+  it("as_of 按统计时区换算：UTC 下显示同一时刻的 UTC 时间", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "settings_get") return Promise.resolve({ timezone: "UTC" });
+      if (cmd === "query_begin") return Promise.resolve({ ...queryInfo, timezone: "UTC" });
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve({ ...summaryA, timezone: "UTC" });
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const { initTimezone } = await import("../composables/timezone");
+    await initTimezone();
+    const w = mountDashboard();
+    await flushPromises();
+    expect(useTimezone().tz.value).toBe("UTC");
+    expect(w.find(".page-head .ts-status-pill").text()).toBe("更新于 16:00:00");
+    w.unmount();
+  });
+
+  it("读取间隔设置变化后悬停提示跟随（5 秒）", async () => {
+    adoptCollectInterval(5);
+    mockWithAsOf("2026-10-05T09:05:00+08:00");
+    const w = mountDashboard();
+    await flushPromises();
+    const pill = w.find(".page-head .ts-status-pill");
+    expect(pill.text()).toBe("更新于 09:05:00");
+    expect(pill.attributes("title")).toBe("每 5 秒自动读取");
+    w.unmount();
+  });
+
+  it("刷新按钮带装饰性图标与文字标签，刷新中显示加载态并禁用", async () => {
+    mockOk();
+    const w = mountDashboard();
+    await flushPromises();
+    const btn = w.findAll("button").find((b) => b.text() === "刷新")!;
+    expect(btn, "保留文字标签与可访问名称").toBeDefined();
+    expect(btn.find("svg[aria-hidden='true']").exists(), "刷新图标是装饰图形").toBe(true);
+    expect(btn.attributes("disabled")).toBeUndefined();
+
+    // 手动刷新：汇总挂起 → 加载态 + 禁用
+    let release!: (v: SummaryReport) => void;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return new Promise<SummaryReport>((r) => (release = r));
+      if (cmd === "query_events") return Promise.resolve(events);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    await btn.trigger("click");
+    await flushPromises();
+    expect(btn.classes(), "刷新中显示加载态").toContain("n-button--loading");
+    expect(btn.attributes("disabled"), "刷新中禁用").toBeDefined();
+    release(summaryA);
+    await flushPromises();
+    expect(btn.classes()).not.toContain("n-button--loading");
+    expect(btn.attributes("disabled")).toBeUndefined();
+    w.unmount();
+  });
+
+  it("翻页保护：自动刷新改为「有新数据 · 刷新」提示按钮，点击等同手动刷新", async () => {
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(summaryA);
+      if (cmd === "source_status") return Promise.resolve([]);
+      if (cmd === "query_events") {
+        const rows = args?.before ? [eventRow("p2")] : [eventRow("p1")];
+        return Promise.resolve({
+          query_id: "q-test-a",
+          pricing_revision: "rev-test",
+          rows,
+          total: 3,
+          warnings: [],
+        });
+      }
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    (state(w)["loadMoreEvents"] as () => void)();
+    await flushPromises();
+    expect(
+      (state(w)["events"] as EventList).rows.map((r) => r.record_id),
+      "已加载更多",
+    ).toEqual(["p1", "p2"]);
+
+    (state(w)["notifyUsageUpdated"] as (g: number) => void)(7);
+    await flushPromises();
+    const hint = w.findAll("button").find((b) => b.text() === "有新数据 · 刷新");
+    expect(hint, "翻页后改为提示按钮").toBeDefined();
+    const beginsBefore = invokeMock.mock.calls.filter((c) => c[0] === "query_begin").length;
+
+    await hint!.trigger("click");
+    await flushPromises();
+    const begins = invokeMock.mock.calls.filter((c) => c[0] === "query_begin");
+    expect(begins.length).toBe(beginsBefore + 1);
+    expect(begins.at(-1)![1]).toMatchObject({ collect: true, trigger: "manual" });
+    expect(w.findAll("button").some((b) => b.text() === "有新数据 · 刷新")).toBe(false);
     w.unmount();
   });
 });
