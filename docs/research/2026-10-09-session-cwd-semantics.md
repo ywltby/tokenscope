@@ -6,9 +6,11 @@
 
 ## 1. 方法与样本
 
-- 对象：本机 `~/.claude/projects/**/*.jsonl`（20 个 session）与
-  `~/.codex/sessions/**/*.jsonl`（56 文件 / 66 个 session）；只读扫描，不写入
-  任何被扫描目录，也不改动 TokenScope 缓存。
+- 对象：本机 `~/.claude/projects/**/*.jsonl`（20 个 session；按文件计数——子代理
+  `agent-*.jsonl` 与父会话共享 sessionId，按唯一 sessionId 归并少于该数）与
+  `~/.codex/sessions/**/*.jsonl`（56 文件 / 66 条 `session_meta`，session 数按
+  `session_meta` 行计）；只读扫描，不写入任何被扫描目录，也不改动 TokenScope 缓存。
+  （口径标注为 2026-10-11 复核补充。）
 - 口径：按行提取结构化字段——Claude 顶层 `cwd` / `sessionId` / `type` /
   `isSidechain`；Codex `session_meta`、`turn_context` 的 `payload.cwd`——按
   session 分组比较 cwd 序列，变化符号化：`F` 回到首值、`S` 首值的子目录、
@@ -31,8 +33,9 @@
   `assistant`，其后 83% 的行保持首值。
 - 结论 1：Claude 的 `cwd` 是行级快照，主线漂移在本机表现为「短暂进入子目录
   再返回」。
-- 结论 2：sidechain 行的 cwd 与主线不同属常态 → 身份采样必须排除 sidechain
-  （阶段 A 已按此实现，见 `src/source/claude.rs`）。
+- 结论 2：sidechain 行的 cwd 与主线不同属常态 → 身份采样不得把 sidechain 的 cwd
+  混入主会话身份。阶段 A 曾按「排除 sidechain」实现；2026-10-10 的 H02 修订已改为
+  「sidechain 用量照收、身份上下文隔离」（见 `src/source/claude.rs`）。
 - 结论 3（一致解释）：若 `cwd` 会随 Bash 工具内的 `cd` 变化，应出现频繁且与
   工具调用成对的变化；实测变化稀疏（4/20，其中 3 个来自 sidechain）且长区间
   稳定——与「随 shell 子进程 `cd` 变化」不符，更符合「随会话进程工作目录
@@ -139,3 +142,19 @@ Codex 按**当前轮次 cwd**归属（A → B → A 保留，`session_meta` 重�
 - 若选择选项 B（事件级精确分组），必须同时接受「同一仓库因短暂子目录而分成
   两行」以及「不做父子目录归并」的后果；仓库级项目的还原需要可靠根身份或
   显式映射，不在本阶段。
+
+## 7. 复核修订记录（2026-10-11）
+
+只读复算（快照后数据自然增长，均可对账）确认本文全部定性结论成立：
+
+- Claude 现为 21 个文件（+1；新增文件含 1 attachment + 4 system cwd 行，恰为
+  attachment 300→301、system 24→28 的全部增量）；assistant 1046 / user 795 两项
+  与快照逐字一致。3 个纯 sidechain 多值文件的行数（86/86、91/91、78/78）与形态
+  （P/P/O）、337 行 S F 漂移会话的变化位置（0-based 31/337 ≈ 9.2%、55/337 ≈
+  16.3%）与前后行型（user 行、前驱 assistant 行、尾部 83.4% 保持首值）全部复现。
+- Codex 现为 61 文件 / 75 条 `session_meta`（75/75 带 cwd）/ 951 条
+  `turn_context`（951/951 带 cwd、无空值，同行仍带 model 等轮级字段）；唯一 cwd
+  切换会话仍为同一会话（6 条记录，第 5 条起完全切换）。
+- 修订 1：§1 补标 session 计数口径（Claude 按文件；Codex 按 `session_meta` 行）。
+- 修订 2：§2 结论 2 的「排除 sidechain」更新为与现行代码一致的「隔离」表述
+  （H02 修订，2026-10-10）。

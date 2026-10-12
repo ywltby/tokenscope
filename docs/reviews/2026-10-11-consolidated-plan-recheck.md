@@ -1,5 +1,7 @@
 # 剩余任务整合计划实施后复核
 
+> 以下为 `85edad2` 的历史复核；后续见[第二轮](2026-10-11-consolidated-five-fixes-recheck.md)与[第三轮](2026-10-11-consolidated-third-recheck.md)。`a58684c` 的[M01 已闭合](2026-10-11-main-merge-readiness.md#m01-closed)，当前 `a64d340` 状态见[安装设计实施独立复核](2026-10-11-main-merge-readiness.md#install-design-recheck)。保留当时结果，不作为当前门禁结论。
+
 - 日期：2026-10-11。
 - 被审实现：`85edad283debaeb983fee664dd6268ac7996cfac`，`fix(历史库): 执行剩余任务计划 N01–N06、N08、N09`。
 - 依据：[当前整合计划](../plans/active/2026-10-11-consolidated-remaining-work.md)及用户定稿。保持单库、精简元数据、全部代理用量、手动一次 CCS 导入和并集要求；不重新引入代理关系或旧外置价格无条件覆盖。
