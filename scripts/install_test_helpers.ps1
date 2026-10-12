@@ -74,23 +74,9 @@ function Launch-AppOnce {
         [Parameter(Mandatory = $true)][string]$LiveLogsDir
     )
     Assert-NoAliveTokenScope
-    $previousRustLog = $env:RUST_LOG
-    try {
-        $env:RUST_LOG = "info"
-        $process = Start-Process -FilePath $ExePath -PassThru
-    }
-    finally {
-        if ($null -ne $previousRustLog) {
-            $env:RUST_LOG = $previousRustLog
-        }
-        else {
-            Remove-Item Env:RUST_LOG -ErrorAction SilentlyContinue
-        }
-    }
-    Assert-HelperTrue (-not $process.HasExited) "启动后进程立即退出（退出码 $($process.ExitCode)）"
-    return [pscustomobject]@{
-        Process     = $process
-        Pid         = $process.Id
+    $context = [pscustomobject]@{
+        Process     = $null
+        Pid         = $null
         ExePath     = $ExePath
         Scenario    = $Scenario
         RunId       = $RunId
@@ -98,7 +84,37 @@ function Launch-AppOnce {
         LiveLogsDir = $LiveLogsDir
         QueryId     = $null
         Requests    = $null
-        Stage       = "launched"
+        Stage       = "launching"
+    }
+    $previousRustLog = $env:RUST_LOG
+    try {
+        try {
+            $env:RUST_LOG = "info"
+            $process = Start-Process -FilePath $ExePath -PassThru
+        }
+        finally {
+            if ($null -ne $previousRustLog) {
+                $env:RUST_LOG = $previousRustLog
+            }
+            else {
+                Remove-Item Env:RUST_LOG -ErrorAction SilentlyContinue
+            }
+        }
+        $context.Process = $process
+        $context.Pid = $process.Id
+        Assert-HelperTrue (-not $process.HasExited) "启动后进程立即退出（退出码 $($process.ExitCode)）"
+        $context.Stage = "launched"
+        return $context
+    }
+    catch {
+        $detail = $_.Exception.Message
+        Stop-ScenarioProcess -Context $context
+        try {
+            Copy-LiveLogsToEvidence -Context $context
+            Save-ScenarioResult -Context $context -Pass $false -Stage "launching" -Detail $detail
+        }
+        catch { Write-Host "::warning::启动失败证据保存失败：$($_.Exception.Message)" }
+        throw
     }
 }
 
@@ -267,6 +283,7 @@ function Save-ScenarioResult {
         [string]$Detail = ""
     )
     if ($null -ne $Context -and $null -ne $Context.EvidenceDir) {
+        New-Item -ItemType Directory -Path $Context.EvidenceDir -Force | Out-Null
         $payload = [pscustomobject]@{
             scenario = $Context.Scenario
             run_id   = $Context.RunId

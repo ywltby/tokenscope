@@ -103,6 +103,8 @@ $env:TOKENSCOPE_REAL_PERF = "1"; cargo test --release --test perf_real_data -- -
 
 ## 提交流程
 
+- **main 版本递增（用户 2026-10-12 定稿）**：每个准备合入 main 的批次必须递增一次 `0.x.y`，暂不发 `1.x`；修复/文档/维护选 patch，新功能或不兼容变化选 minor，混合取更高等级。同一个 PR 的补修不重复加号。先 fetch 最新 main，再执行 `python -B scripts/bump_version.py --bump minor --summary "本轮变更说明"`（修复改用 patch），工具同步四配置/两份 Cargo.lock/声明；用 `--check --base-ref origin/main` 自查。不要单改版本字符串或顺手更新第三方依赖。尚待确认的方案文档不分配发行版本；准备合入 main 的文档 PR 也须 patch。
+- **发布与升级**：main 的 gate/build/五场景安装/两项真实旧版升级通过后由同一流水线创建 `v0.x.y` 和预发布，标签与资产不可覆盖；历史 0.1.0 固定 8d1d90de 的原资产，不重新构建历史包。新 main 提交不取消另一个提交的发布。真实安装、卸载和升级脚本只在 GitHub-hosted 一次性 Runner 执行，本机仅测试契约，不能删除真实 `~/.tokenscope`；不恢复可选旧包变量跳过分支。实际来源以标签解引用的提交和固定资产哈希判断，已有标签时 Release 的 target_commitish 只是创建提示。
 - **默认自动提交推送**：完成任何文件修改后，除非用户明确说"不 commit / 暂不提交 / 先别提交 / 不要 push"等同义要求，或存在验证失败/未解决阻断，自动执行验证 → commit → push，不再等待用户额外提醒。文档修改也算一批文件修改。
 - 完成修改后：先自查（`cargo fmt --check` + `cargo clippy` + `cargo test` + 前端 `typecheck`/`format:check` 全绿；pre-commit 钩子会再自动跑一遍）→ `git add`（优先具体文件名，避免目录级 add）→ `git commit` → `git push`，**严格串行执行，禁止并行**。
 - commit message 遵循 **Conventional Commits 且必须有中文正文**，说明改了什么、为什么、影响范围（例：`feat(解析): 接入 Claude Code 会话日志适配器`）。

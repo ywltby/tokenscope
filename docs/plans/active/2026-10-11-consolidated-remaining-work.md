@@ -9,11 +9,12 @@
 **Tech Stack:** Rust / SQLite / Tauri 2 / Vue 3，以及现有 Rust、Vitest、浏览器和原生 acceptance 测试工具。
 
 - 整理日期：2026-10-11。
-- 状态：**9 项完成、1 项部分完成、3 项本轮验收未执行，共 4 项待办。** fa911dd 的两套检查成功，五个必需场景、六次严格 manifest 和成功工件均已核验；main 未合并。后续同步文档及 cfg(test) 并行断言，运行时不变，合并仍核对最新 HEAD 两套检查。N12 安装部分已验，整项仍部分完成，固定旧包/系统/发布签字及 N10/N11/N13 继续待验。详见[Actions 成功取证](../../reviews/2026-10-11-main-merge-readiness.md#pr4-fa911dd-green)，此前各轮保留为历史。
+- 状态：**9 项完成、1 项部分完成、3 项本轮验收未执行，共 4 项待办。** PR #4 已合并为 main b1f8b635。用户已确认 [0.x 版本递增及真实旧包升级](#n12-versioning-design)实施，当前源码 0.2.0，版本工具、不可变发布与两种来源状态的升级编排已落地；PR #5 的 c6e6dba 已取得完整 CI、五场景安装、两项真实升级及下载工件证据。历史标签回补与版本发布由 [main Release 门禁](https://github.com/ywltby/tokenscope/actions/workflows/release.yml)执行，公开资产须通过不可变身份校验；系统签字及 N10/N11/N13 继续待验。
+- PR #5 首轮 `64695a1` 的升级哈希失败保留为历史记录；c6e6dba 已修复为实际 NSIS 载荷哈希，安装后严格相等断言成立。状态记账后最新 HEAD 的合并条件仍是其自己的 CI、五个安装场景和两项升级全绿，不用旧 HEAD 成功替代。
 - 核对范围：原 active 的 25 份计划、对应 audits、M1–M11 归档、D5 清单、当前源码与测试内容、可用的历史 QA 产物和实际 CI/发布记录。
 - 整理核对起点：`add8319`；后续修复提交 `3e645f3` 的 7 项已完成独立复核与最终门禁，见[复核记录](../../reviews/2026-10-11-history-seven-fixes-recheck.md)。此前工作区结果保留为历史，不再作为当前交付结论。
 - 最近独立复核代码基线：`231f667099aff035ee2ef240dd6d356a843e8de7`；复核期间新增 `e31d1b67c0323cb1ed5466bff61ecb1819cd99d6`，仅改文档，未改变被测代码。本轮重跑完整普通与 acceptance 根/壳和前端门禁、Python/PS7 安装契约；A01–A06 已独立确认关闭。M01 的 a58684c 及后续审计循环结果保留为历史，不代替本轮实跑或当前 PR CI。
-- 修复设计：[N12 安装验收修复设计](#n12-install-design)已完成，M06 校验器与生成器通过；M05 集成和第五步门禁（构建前契约命令）已闭合，PR CI 实跑取证待完成。不新增第二份 active 计划。
+- 修复设计：[N12 安装验收修复设计](#n12-install-design)已实施并取得 PR/main 的真实成功结果；新版本及旧包升级设计继续并入 [N12](#n12-versioning-design)，不新增第二份 active 计划。
 - 总账：[计划目录](../README.md)；逐份结论：[审计索引](../audits/README.md)；发布附属清单：[D5](../d5-acceptance-checklist.md)。
 
 ## 1. 优先级与状态规则
@@ -43,7 +44,7 @@
 
 ## 3. 唯一任务状态表
 
-保留 13 个稳定责任编号，其中 N01–N09 已完成，N12 部分完成，N10/N11/N13 本轮验收未执行，共 4 项仍有待办。版本、合并前 PR 入口及 M10 过滤保持关闭，M06 严格校验器与 fixture 已通过；M05 契约、构建前契约命令与卸载后事实验证已闭合（三轮挑刺审计后全绿），当前只剩当前产物的 PR CI 实跑取证（安装工作流与普通 CI 各自记账）；其他系统/性能验收仍按原排期。
+保留 13 个稳定责任编号，其中 N01–N09 已完成，N12 部分完成，N10/N11/N13 本轮验收未执行，共 4 项仍有待办。原版本读取、合并前 PR 入口及 M10 过滤保持关闭；M06、M05 及五个必需安装场景已有 PR/main 的成功证据。本轮新增的版本递增与历史 0.1.0 升级要求由 N12 承接，不能用旧版本读取断言代替；其他系统/性能验收仍按原排期。
 
 | ID | 优先级 | 任务 | 当前状态 | 是否仍有必要 / 来源 |
 | --- | --- | --- | --- | --- |
@@ -58,7 +59,7 @@
 | N09 | P2 | 测试确定性、路径隔离与当前门禁 | 已完成；`a58684c` 闭合 M01，history.db 路径清单、落盘产物及有效 SQLite 七表校验实测通过；两套 manifest 的普通/acceptance 和前端门禁全绿 | 必须；review-findings Task6、来源策略测试、当前合并门禁 |
 | N10 | P2 | 隐私原生取证工具与当前完整浏览器矩阵 | P01–P05 已实现；P06 的强验收未闭合 | 必须；最新隐私计划 P06 |
 | N11 | P2 | 最新项目/模型/CCS 原生统一验收 | 分别存在待验，合并一次执行 | 必须；A06/B03、MP06、H08、设计 Task8 |
-| N12 | P3（必需安装实跑已验；固定旧包/系统/发布签字待验） | 当前产物的 D5 系统、安装及发布验收 | 部分完成；fa911dd 两套 CI 与五个必需安装场景成功，六次严格 manifest 的 3/180/35/2 和两份 closed/pass=true 当前日志工件已核验，安装部分已验。合并仍核对最新 HEAD 两套检查；固定旧包实际告警跳过，其余系统/发布签字待验 | 系统验收随发布批次；D5、RC11/AP08 |
+| N12 | P2（用户要求的版本递增与旧版升级）；其余系统尾项 P3 | 当前产物的 D5 系统、安装及发布验收 | 部分完成；本轮源码 0.2.0、版本工具与不可变发布已实现，c6e6dba 的 PR CI/五场景/两项真实升级及工件已验；历史标签与版本资产经 main 发布门禁核验后公开，其余系统签字不关闭 | 用户 2026-10-12 最新要求优先；D5、RC11/AP08 |
 | 2026-10-12 | 双审计员循环第一轮（执行） | 完成 | 审计员 B（核心）：P2-1 CCS Codex 捐献按 (scheme,value) 判重修复 + 回归；P2-2 内容等值原生写升级 rank（classify_against）+ 回归；P3 query.rs 额度文案/v3 utc 同步/文档修正。审计员 A（门禁）：P2-1 失败路径复制 live-logs；P3 卸载 30s 轮询、file URI 编码、非 db 退出 2、make_legacy_cache 幂等；.gitignore 补 Python/日志模式。两个审计员均确认无 P1 |
 | 2026-10-12 | 双审计员循环第二轮（执行） | 完成 | 审计员 C（热路径+契约）：P2 热路径 7 处 DBG eprintln 删除；P2 M05 反例"错因通过"修复——四个反例接 New-StandInProcess、全部 Test-Throws 钉住 -ExpectedText、反例 1 重构为"归档旧日志→等待超时"并沿用生产证据根命名。审计员 D（集成）：确证同一 P2 并补 P3——test_install.ps1 失败模型注释、安装失败写证据说明、ExpectedRequests 从 manifest 事件数推导、非 CI 运行守卫（Reset-UserHome 保护）、证据动作不掩盖原始异常；v3 迁移 observed_at_utc 回填改 RFC3339（strftime）+ 回归（口径更正见第三轮：回填 SQL 实际在 SCHEMA_V3）；inspect_history 模式查询统一 DatabaseError 守卫与 NULL/空串区分显示（26 项 unittest）。两审计员均确认无 P1 |
 | 2026-10-12 | 双审计员循环第三轮（执行） | 完成 | 审计员 E（核心）：无 P1/P2，前两轮修复经对抗探针成立；P3——inspect_history 默认汇总改受检解析累加（SQLite SUM 在 u64 规模隐式转 REAL、坏值静默计 0）+ 3 项回归、absent 库行式模式不输出空行、aggregate 每事件两次 estimate 合并为一次（首次重构误改 unknown_pricing 累积语义，被金标对账测试抓出后修正）、四处错误文案空格串清理、utc 回填口径更正为 v3（回归测试改名 v3_backfill_*）。审计员 F（门禁）：无 P1/P2；P3——CONSENT=1 本机调试路径补 TEMP 回退、Copy-LiveLogsToEvidence 补 -Recurse、反例 1 归档前置断言改 Test-True 计账（契约 21→22 项）、install-test.yml 版本读取加 SemVer 强校验。两审计员均确认无 P1 |
@@ -173,7 +174,7 @@
 - 第三轮 T02 已由 `16beea1` 给 9 处直接构造/fixture 显式注入临时 pricing_path 闭合。隔离默认价下修复选项 8 行全部未知，省略选项的对照组 2 行有价；复用当前筛选测试原函数体也通过。不编辑用户真实价格，不把纯时间过滤的无 I/O 选项算入。
 - M01 已闭合：`a58684c` 将子进程路径清单、父进程量测标签和落盘产物断言更新为 history.db，保留用户目录指纹与来源隔离检查，并只读验证七张历史表。仓库实际 native_acceptance 三项父测试通过，两个子进程阶段仍按设计忽略；根库全量 acceptance 通过。N10 强取证继续独立待验。
 - 步骤：先写/复现调度屏障边界，用真实握手替代时窗；核对路径注入；同步正在推进的版本/DTO 回归，按两个 manifest 与前端门禁完成交付。
-- 验收：目标单飞循环和普通价格隔离证据已保留。最新普通根库 456 pass / 10 ignored、壳 42、前端 361 全绿；acceptance 根库 456 pass / 10 ignored、壳 47 通过。双 manifest fmt、普通/acceptance Clippy（`-D warnings`）、前端 typecheck/format:check/build 与 Release metadata 七项通过；Cargo 使用 `--locked`。远端已包含修复，但尚无打开的 PR 或该提交的 PR CI 记录，不能写成远端 CI 已通过。
+- 验收：目标单飞循环和普通价格隔离证据已保留。此前本地普通根库 456 pass / 10 ignored、壳 42、前端 361，acceptance 根库 456 pass / 10 ignored、壳 47，以及双 manifest fmt/Clippy、前端 typecheck/format/build 和 Release metadata 七项均通过；Cargo 使用 `--locked`。后续 4cde2b33 的 PR 两套检查与 main b1f8b635 的 CI/Release 实跑成功并已合并，原“尚无 PR CI”仅保留在执行账的历史条目中。
 
 <a id="n10"></a>
 
@@ -203,12 +204,96 @@
 - 从旧 roadmap D5、多个 remediation 真机尾项、RC11/AP08、M3/M8/M11 的自身安装或运行项、CI 方案6 合并，不分别做重复签字；M4/M5/M7/M9 的界面项在 N11。
 - 附属规范：[D5 清单](../d5-acceptance-checklist.md)。当前计划持有任务状态，清单记录步骤和签字。
 - 此前安装门禁（`6fab12f` 时点）：`a64d340` 的 A01–A06 已由 `b855021` 修复，M06 29 项、M05 22 项本地通过；当时无打开 PR/当前 SHA 无 Actions，是历史局部证据。详见[设计实施独立复核](../../reviews/2026-10-11-main-merge-readiness.md#install-design-recheck)。
-- 当前安装实跑：fa911dd 的 PR 两套检查与真实 NSIS 五场景已成功，六次严格 manifest 稳定为 3/180/35/2，工件哈希、两次本次汇总和 closed/pass=true 结果均已核验；必需安装部分已验。现有契约为 M06 33 项、调用/注册目录 3 项、M05 26 项，详情见[成功取证](../../reviews/2026-10-11-main-merge-readiness.md#pr4-fa911dd-green)。合并仍核对 PR 最新 HEAD 两套检查。
-- 仍需：配置固定旧包 URL/SHA 后的升级；单实例、关窗/托盘完整矩阵、窗口记忆、自启、休眠恢复；真实 125%/跨监视器、系统深色的新隐私引导首帧和 Ready 后偏好恢复；隐私政策在 100%/125%/150% 可读。
+- 当前安装实跑：最新来源 4cde2b33 的 PR 两套检查成功并已合入 main b1f8b635；[main CI](https://github.com/ywltby/tokenscope/actions/runs/38211774185)、[Release](https://github.com/ywltby/tokenscope/actions/runs/38211774120) 全部成功。Release 安装日志中五个必需场景通过，六次严格 manifest 稳定为 3/180/35/2；安装工件 `11730496932` 已上传。此前 fa911dd 的完整工件核验保留在[成功取证](../../reviews/2026-10-11-main-merge-readiness.md#pr4-fa911dd-green)。现有契约为 M06 33 项、调用/注册目录 3 项、M05 26 项；固定旧包实际告警跳过，不算升级通过。
+- 版本专项：历史 0.1.0 固定原资产、0.2.0 构建、版本递增门禁与两项真实旧包升级已在 c6e6dba 的 PR 验证；最新 HEAD 和 main 发布仍各走自己的门禁。其余仍需：单实例、关窗/托盘完整矩阵、窗口记忆、自启、休眠恢复；真实 125%/跨监视器、系统深色的新隐私引导首帧和 Ready 后偏好恢复；隐私政策在 100%/125%/150% 可读。
 - 已有旧版当前显示器 150%、CSP/TTL 证据保留；强制 WebView device scale 不能签 Windows 系统 DPI，旧偏好首帧不能签当前隐私引导。
 - M11 运行验收与隐私批次复用：Ready 后跨过 120 秒观察价格检查/同步，关闭后不再请求，重新开启恢复；按实际快照新鲜度设置合成条件，不把“线程已接线”当作计时通过。休眠恢复与 D5 3.8 同批。
-- 真正决定发布时才检查当前 SHA 的 CI、NSIS/校验和/来源证明，以及首次正式 `v*` tag 路线。已有 main 预发布成功，正式 tag 无实跑不等于功能未实现；本轮不制造 tag 或公开 Release 补证据。
+- 原先将正式 `v*` tag 后延的排期被用户本轮版本要求取代：每次 main 合并具有递增的应用版本，通过门禁后发布该版本标签。现有 `pre-*` 发布保留；历史版本回补与新增发布必须按下方设计执行，不能把旧包改名当成新版。
 - 验收：产物 SHA/版本、日期、场景结果、接受限制及签字齐全；升级不按缓存规则清历史，来源停用不隐藏已存用量；按用户后延决定排期。
+
+<a id="n12-versioning-design"></a>
+
+#### 0.x 版本递增、历史 0.1.0 与真实升级设计
+
+设计日期：2026-10-12。来源：用户要求每次合入 main 都有新版本，暂时维持 0.x.y，追认较早提交为 0.1.0，并用该历史安装包验证当前版本升级。**用户已确认实施；V01–V04 代码已落地，工作区六份版本为 0.2.0，本地完整门禁与契约通过，c6e6dba 的 PR 安装及两项真实升级工件已验。V05 状态交付已同步，最新 HEAD 门禁和 main 发布各以当前结果判定。** 本节是 N12 的最新专项设计，优先于旧的可选 URL/SHA 变量方案；其余已完成安装契约继续有效。
+
+**Goal:** 将旧版 0.1.0 与当前功能轮次的 0.2.0 明确区分，每次 main 合并都有递增且可追溯的应用版本，并验证真实旧程序产生的数据可被新版保留。
+
+**Architecture:** 在 PR 中完成版本递增并检查，与功能改动一同审查和测试；main 发布使用同一提交的版本与构建产物，安装门禁通过后创建不可变的版本标签。历史基线复用已发布旧资产及来源证明；旧包升级在独立 Windows Runner 上执行，不经过先装新版再降级的路径。
+
+**Tech Stack:** Python 标准库 tomllib/json/unittest、Git、现有 PowerShell 7 生命周期、Tauri NSIS 与 GitHub Actions/gh。
+
+##### 已核实的基线与限制
+
+| 项目 | 固定事实 |
+| --- | --- |
+| 历史版本 | `0.1.0`，候选标签 `v0.1.0` |
+| 历史源码 | `8d1d90de29aa00d10b9a7e4b8f906d909726446b`，即 PR #4 合并前的 main |
+| 已发布资产 | [pre-8d1d90de](https://github.com/ywltby/tokenscope/releases/tag/pre-8d1d90de29aa00d10b9a7e4b8f906d909726446b)，2026-10-09 发布；不依赖 GitHub Release 列表的显示排序选择旧包 |
+| 安装包 SHA256 | `798e7722120b414d2014cc80e987c831914f11d211abd8b5595f95184b62ece6`，来自该资产元数据，运行时必须重新计算验证 |
+| 历史缓存 | 该提交 `src/cache.rs` 的解析版本为 `6`；无 `session_initial_cwd`/`event_cwd`，项目身份沿用当时目录标识 |
+| 当前源码 | main `b1f8b635e7b8177b4e5048fa1c096173dc7c1351`，运行时基于已审来源 `4cde2b33` |
+| 当前发布状态 | 该 main 的四个版本字段与现有 pre-b1f8b635 安装包均仍为 `0.1.0`；不能仅加 `v0.2.0` 标签冒充新版本 |
+| 新功能轮次 | 历史库、CCS 导入及项目/模型统一按项目的 minor 规则升为 `0.2.0`；通过后续版本 PR 同步源码并重新构建，产生新的提交和安装包 |
+
+2026-10-12 的 `git ls-remote --tags origin refs/tags/v*` 未返回版本标签。实施前须重新检查；存在标签或非草稿 Release 时按目标提交和资产哈希验证，不能覆盖或移动它们。旧基线的安装包下载地址固定为：
+
+```text
+https://github.com/ywltby/tokenscope/releases/download/pre-8d1d90de29aa00d10b9a7e4b8f906d909726446b/TokenScope_pre-8d1d90de29aa00d10b9a7e4b8f906d909726446b_windows-x64-setup.exe
+```
+
+##### 版本不变量
+
+1. 暂只允许无后缀的 `0.x.y` 应用版本；主版本升为 1 必须另按用户后续决定推进。[SemVer](https://semver.org/lang/zh-CN/) 将 0.y.z 定义为初始开发阶段；本项目约定新功能或不兼容变化递增 minor 并将 patch 归零，修复及独立维护批次递增 patch。混合改动取更高等级，不能把不兼容变化伪装为 patch。
+2. 每个合入 main 的批次递增一次。PR 中声明本次 `minor` 或 `patch`，执行版本工具；四份应用配置及两份 Cargo.lock 必须一致。功能分支中的提交数不决定版本号，合并后不再另造自动递增提交。
+3. PR CI 对比实际最新 main 的版本，只允许声明的下一版本。目标 main 已推进时须重新计算、更新并取得新 HEAD 的检查；main push 另用事件 `before` 提交核对递增，不能假设总是 merge commit 或总是快进。
+4. 当前版本号写入源码、安装包、卸载注册项、构建元数据和 `v0.x.y` 标签，全部指向同一实际发布提交。已发布的旧版本及 `pre-*` 包保持不变。
+5. main 每次合并分配版本；只有检查、构建及必需安装/升级成功，才公开该版本 Release。失败时保留该提交的版本和失败证据，修复后重试同一身份，不静默重新编号。
+6. 初始 0.x 发布沿用 GitHub 预发布标记；`v0.2.0` 是版本身份，GitHub 的 prerelease 标记不替代应用版本字段。不要把平台标记与 SemVer 的 `-rc` 后缀混用。
+7. 发布并发按提交隔离，新的 main 合并不取消另一个提交的发布；相同 SHA 的重复执行校验已有标签/资产，身份不一致就失败。生成版本标签使用 workflow 的 `GITHUB_TOKEN`，由同一发布任务完成发布，避免再触发第二轮 tag 构建；机制依据 [GitHub 的 workflow 触发规则](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)。
+
+实现核对补充：GitHub 的 [Release API](https://docs.github.com/en/rest/releases/releases) 对历史 target_commitish 的工作流差异有权限限制，GITHUB_TOKEN 不能取得 Workflows 写权限。实现先创建并核对固定版本标签，再以 main 为创建提示，实际来源始终检查标签解引用的 SHA 与资产哈希；标签已存在时 target_commitish 是被忽略的创建提示，不把它当作身份。草稿使用认证的分页 list 接口读取，不能假设 by-tag 接口能返回草稿。此调整保留原历史源码和资产，不引入新凭据；实际平台行为仍由首次发布实跑核验。
+
+##### 步骤 V01：版本工具和 PR/main 校验
+
+- 创建 `scripts/bump_version.py`、`scripts/test_bump_version.py`，复用 `scripts/release_metadata.py` 的版本读取；创建简短的 `release-change.json`，只声明本轮 `kind` 和用户可读摘要，不再保存一个重复的应用版本字段。
+- 修改文件：`Cargo.toml`、`src-tauri/Cargo.toml`、`frontend/package.json`、`src-tauri/tauri.conf.json`、`Cargo.lock`、`src-tauri/Cargo.lock`；本轮通过工具升为 `0.2.0`。锁文件仅同步本项目包版本，不能顺手更新第三方依赖。
+- 先写并观察失败回归：minor/patch 的下一版本、minor 清零 patch、四配置或两个锁文件不一致、未递增/倒退/跳号/major 非 0、无效声明、最新 main 已推进、同一分支多提交；确认快进与 merge commit 都以真实 `before` 比较。
+- 再实现原子写入与只读 `--check` 模式；失败时不留下部分版本文件更新。命令契约：`python -B scripts/bump_version.py --bump minor` 同步版本，`python -B scripts/bump_version.py --check --base-ref <SHA>` 校验本次声明及六份文件。
+- 将版本契约接入 `.github/actions/checks/action.yml`，在 `.github/workflows/ci.yml` 的 PR/main 入口取得并冻结基线 SHA，运行只读版本校验。失败阻断现有 CI/gate。PR 合并操作必须要求该 gate 成功，不能把 workflow 存在写成仓库分支保护已配置。
+
+##### 步骤 V02：main 发布身份及历史版本回补
+
+- 修改 `scripts/release_metadata.py`、`scripts/test_release_metadata.py`、`.github/workflows/release.yml`：main 的标签从 `pre-<SHA>` 改为 `v<应用版本>`，标题包含版本和来源 SHA；保留已有校验、不可变标签检查、安装门禁与来源证明。增加提交、版本、安装后主程序 SHA256 的构建元数据，供升级验收核对实际替换结果。
+- 为历史基线创建 `scripts/fixtures/upgrade_baseline.json`，固定版本、来源 SHA、原发布标签、原资产名/下载地址及三份资产各自的哈希，禁止自动选择 latest Release。历史缓存格式与专用期望文件一并声明。
+- 历史回补由新的发布任务使用 `GITHUB_TOKEN` 执行：创建 `v0.1.0` 指向 8d1d90de，复用原 exe、SHA256SUMS 和 provenance 的相同字节及原文件名，说明这是历史版本身份回补，沿用当时的验收边界。避免在用户终端直接 push 历史 `v*` 标签而触发该旧提交的旧 Release workflow 重新构建。
+- 历史 tag 的首次创建权限必须以真实 Runner 结果判定。独立复核未确认代码缺陷，但模拟 API 契约不能证明 `GITHUB_TOKEN` 有权为历史提交创建 ref；权限失败时保留失败结果，不移动标签或公开当前版本。已有 Release 的 `target_commitish` 不是源码身份，源码以标签解引用结果判定。
+- 回补前验证四个历史版本字段均为 0.1.0、来源是当前 main 祖先、原资产全部哈希正确；目标标签/发布已有时严格对比身份。失败不继续公开 0.2.0。第一次 0.2.0 的升级门禁从固定原 pre-8d1d90de 地址下载，不依赖尚未回补的 v0.1.0 Release，避免循环依赖。
+- 先写失败回归，再实现：main tag 正确、不同提交复用同版本拒绝、历史引用/任一资产哈希错误拒绝、同身份重试幂等、已有发布不得 clobber、生成 tag 不依赖第二个 workflow run。完整测试命令：`python -B -m unittest discover -s scripts -p "test_release_metadata.py" -v` 及新增回补契约文件。
+
+##### 步骤 V03：由旧程序产生真实旧数据
+
+- 创建 `scripts/fixtures/upgrade-0.1.0/` 下的合成日志与独立期望 JSON、只读旧缓存校验契约。使用两个明确目录、三个有效请求，保持已知身份和四桶计数；缓存桶包含非零值，避免遗漏缓存计量仍通过。期望来自 fixture 规格，不从实际数据库生成期望值。
+- fixture 的项目目录标识为已知 alpha/beta；真实 v6 未记录的两个 cwd 字段期望为 NULL，不能借用 v10 的绝对路径、初始 cwd 或子目录值。现有 v10 manifest 和 33 项校验器契约继续保留，分别证明不同数据格式。
+- 在干净 Windows Runner 安装真实旧包，校验注册版本 0.1.0 与主程序存在；写入旧版支持的设置及非空有效价格文件，指向合成来源。启动旧程序，复用本次汇总、同一 PID、存活观察及退出码 0 的生命周期判定；只读验证它实际写出的 cache.db 格式为 6，逐条事实与规格一致。
+- 正常退出后归档旧日志、记录旧 exe 哈希、缓存哈希及设置/价格内容。不能调用 make_legacy_cache.py 冒充由旧程序生成的数据库；不能在安装新版前重置数据目录。
+- 旧版无当前隐私同意字段。先验证覆盖安装保留的原设置内容，再由验收夹具显式添加当前启动所需的同意状态；不把测试夹具的同意写入宣称为旧安装器保留了历史隐私同意，也不关闭 N10。
+
+##### 步骤 V04：两个隔离升级场景成为强制门禁
+
+- 从 `scripts/test_install.ps1` 移除旧的场景 6 可选变量入口；创建 `scripts/test_upgrade.ps1`，复用 `install_test_helpers.ps1` 与严格事实校验器，增加可安全执行的升级编排契约。旧包 SHA 校验在安装前完成，安装器/应用退出异常均失败。
+- `.github/workflows/install-test.yml` 与 Release 新增独立 `upgrade-test` matrix：`source_state=present/deleted` 各用全新的 Windows Runner。两项都按“安装旧版 → 旧版生成数据 → 正常退出 → 覆盖安装当前版本 → 当前生命周期/事实验证 → 再启动/再验证”执行。
+- present 保留原合成日志，验证迁移与重扫的并集不重复；deleted 只清理经绝对路径和边界检查的合成来源目录，验证源日志消失后旧用量仍在。两项都不得清理 TokenScope 数据目录、卸载旧版后再装新版或先装新版再降级。
+- 覆盖后注册版本与应用版本至少为 0.2.0，安装 exe 的哈希必须等于当前构建元数据并区别于旧 exe；四桶、模型、请求身份、项目标识、NULL 语义及设置/价格保留逐项核对。旧缓存只读迁移，退出后验证旧缓存哈希不变。
+- PR 必需检查包含五个现有安装场景及两项真实升级；Release publish 直接依赖 gate/build/install-test/upgrade-test。配置缺失、下载失败、事实差异均阻断，替代当前“未配置变量即跳过”。每个 matrix 入口 always 上传来源/版本/哈希、旧库读数、当前日志、同 PID/query_id 的结果和失败证据。
+- 本机只运行 temp fixture、只读校验及受控进程/外部动作替身契约；真实安装/卸载及数据目录重置仅在一次性 Actions Runner 执行。
+
+##### 步骤 V05：交付与验收记账
+
+- 同步 `README.md`、`CLAUDE.md`、`docs/plans/README.md` 及本节，解释版本规则、唯一 bump 命令、PR 基线重验、历史发布回补与最旧支持基线；更新代理提交流程，使每个待合入 main 的批次包含版本声明和同步更新。
+- 本地按红绿测试顺序完成 Python/PS7 契约、两套 Rust manifest 的 fmt/clippy/test（含必要 acceptance）、前端 typecheck/format/test/build；提交钩子不得绕过，验证失败不写成实现完成。
+- 创建针对 main 的版本与升级 PR，取得当前 HEAD 的 CI、五个安装场景和两项真实升级结果，并下载核对升级证据。合并后核实 0.2.0 源码/版本/tag/安装包/注册项/Release 均同源；历史 v0.1.0 指向 8d1d90de，复制资产哈希与原发布一致。
+- 只有上述证据成立才关闭 N12 的版本/旧包升级子项。N12 其他系统/发布签字、N10/N11/N13 保持原责任；一个版本发布成功不等于所有当前版本验收完成。
 
 <a id="n12-install-design"></a>
 
@@ -512,3 +597,10 @@ python -B -m unittest discover -s scripts -p "test_release_metadata.py" -v
 | 2026-10-12 | fa911dd Actions 成功取证 | 约定合并验收通过，N12 安装部分已验 | CI 38203057083 与 Install 38203057088 均成功，来源 HEAD 一致；生产打包与五个必需场景实跑 11 断言通过/0 失败，六次严格 manifest 均 3/180/35/2。成功工件 11726496236 已下载、ZIP SHA256 相符，两份 result 均 closed/pass=true/requests=3，与各自当前 live-logs 的 query_id 吻合，PID 不同。旧包变量未配置实际告警跳过；main 8d1d90d 未合并，0 behind/78 ahead。后续仅同步文档、合并仍核对最新 HEAD 两套检查；9 完成/1 部分/3 待验不变 |
 | 2026-10-12 | 状态提交钩子的全局提交计数并行断言修复 | 单元测试同步修复，本地通过，最新 PR 检查待验 | 钩子捕获本航班结束后其它测试采集令全局计数为 1，原无锁归零断言有观察窗口；仅 cfg(test) 改在 COLLECT_SERIAL 锁内严格断言 0，起始握手直接断言 1，生产 RAII/运行时不变。默认并行 208 单元测试五轮通过，原 5s 握手超时下 workspace acceptance 462/10 及 Clippy 通过。N09 保持关闭；fa911dd 安装证据保留，合并仍须最新 HEAD 两套检查 |
 | 2026-10-12 | bb6b795 实跑与 GUI 替身窗口握手修复 | 真实安装成功，CI 替身关闭失败；窗口握手三轮通过，最新检查待验 | Install 38205913148 成功；CI 38205913143 的 Rust 普通通过，记事本替身尚未确认窗口就绪即 CloseMainWindow，返回 false。New-GuiStandInProcess 改为同一进程 Refresh/存活/非零 HWND 的 30s 条件握手，未就绪失败并清理自身，正式安装与关闭守卫不变。PS7 三轮各 26 及脚本 UTF-8 语法通过。原失败保留，不重跑碰绿，最新两套检查仍为合并条件 |
+| 2026-10-12 | PR #4 合并及 main 发布只读核实 | 已合并；main CI 与 Release 全绿 | 来源 4cde2b33 两套最终检查成功，14:17（北京时间）合并为 b1f8b635，Git 树相同。main CI 38211774185 与 Release 38211774120 全部成功；安装日志五场景通过、六次 manifest 为 3/180/35/2，工件 11730496932 已上传，pre-b1f8b635 已发布。固定旧包 URL/SHA 实际为空并告警跳过，不记为升级通过 |
+| 2026-10-12 | 用户要求的 0.x 版本递增与真实历史升级设计 | 方案完成，待确认实施 | 归入 N12，优先于可选旧包变量方案；选择真实已发布的 8d1d90de/v6 作为历史 0.1.0，当前功能轮次改为 0.2.0 并重新构建；PR 先递增并校验，main 门禁通过后创建版本标签，历史包复用原字节；独立 Runner 的两种来源状态验证真实旧程序写出的缓存升级。仅修改本计划，未修改版本/脚本/workflow/tag/Release，9 完成/1 部分/3 待验不变 |
+| 2026-10-12 | 经用户确认实施版本与真实历史升级 | 本地实现及完整门禁通过；远端实跑待验 | 六份应用版本同步为 0.2.0，版本声明/PR 最新 main 和 main push.before 校验、精确 NSIS 选包/主程序 SHA、不可变发布及历史资产回补已实现；旧 v6 缓存由真实旧程序生成的两项升级入口接入 PR/Release，旧可选 URL/SHA 跳过分支移除。Python 3.12 强制 CP1252 69 项、PS7 生命周期 26 项、升级编排 47 项通过；双 manifest 普通/acceptance fmt/Clippy/test、前端 typecheck/format/364 项/build 通过。前端全量首次捕获动态导入超时后的组件残留，测试等待真实导入并自动卸载后通过，产品逻辑未改。独立复核发现的失败 JSON/PID/日志证据及首次证据父目录缺口以先红后绿契约闭合；历史 tag 权限和当前产物仍待 Runner。未在本机安装/卸载或改用户数据，9 完成/1 部分/3 待验不变 |
+| 2026-10-12 | 版本实施批次提交钩子的本机资源失败 | 首次提交未生成；限并发后的同范围前端通过 | 根/壳 fmt、Clippy/test 和前端 typecheck/format 已通过；默认 Vitest 并发阶段触发 Node 分配失败与 spawn UNKNOWN，系统可用物理内存约 96 MB、剩余虚拟提交额度约 2.2 GB，未产生提交。单次命令注入 VITEST_MAX_WORKERS=2 后全部 33 文件/364 项通过；不改测试范围、产品代码或 CI 设置，完整提交钩子随后重新执行 |
+| 2026-10-12 | 本机资源故障根因与恢复 | 遗留测试进程已终止；完整钩子重验 | 第二次提交在壳 rustdoc 分配失败处中止，未生成提交。核实本轮 17:33 启动的 unittest/test_release_assets.py 遗留 PID 26360、当前目录与本仓一致，独占约 33 GB 私有内存；当前修订的 69 项契约已正常结束。仅终止该遗留测试进程，保留两次失败记录，恢复后完整运行原提交钩子，不跳过检查或改 CI 并发设置 |
+| 2026-10-12 | 64695a1／PR #5 首轮真实升级及载荷哈希修复 | CI、五场景通过；升级失败保留，修复待新实跑 | CI 38236900562 成功；Install test 38236900518 五场景成功，两个 upgrade matrix 在安装后的 exe SHA 断言失败。生产工件 11740823637 ZIP SHA f15d4e33 已下载核验，来源为实际 PR merge 55f96017；失败工件 11741438180 只读复核旧 v6 缓存与规格完全一致：3/180/35、缓存写 12/读 20、2 项目。Tauri 打包时改写类型标记后还原编译目录 exe，原元数据 e419c8c7 与 NSIS 实际载荷 12f9cff0 不同；collect 改用 7-Zip 从同一个 NSIS 容器提取唯一根程序并取 SHA，编译目录哈希仅诊断，安装后严格匹配及旧/新版不同的守卫保留。13 项发布契约先红后绿，实际包无执行提取验证 19,735,040 字节；新增缺失/重复/嵌套/坏容器反例和已安装身份诊断。未重跑旧失败、不合并，当前版本仍 0.2.0 |
+| 2026-10-12 | c6e6dba／PR #5 升级修复实跑取证 | CI、五个安装场景、两项真实升级全部通过；工件已验 | CI 38239487761、Install test 38239487856 成功，实际构建来源为 PR merge 24872b82。生产工件 11742862386、安装证据 11742482997、删除日志升级 11742932479、保留日志升级 11742692826 全部下载且 ZIP SHA 与 GitHub digest 一致。两种状态各旧/新/重启三生命周期均 closed/pass=true/请求3，PID 与当前日志 query_id 对应；各六份关闭前后事实校验成功，四份设置校验成功。旧缓存只读读回为 v6、3/180/35、写12/读20/项目2，与规格逐条一致；实际安装主程序 SHA 4f4d9381 与 NSIS 元数据严格一致且不同于旧 exe。Python 3.12 CP1252 71 项、PS7 26/47 项和完整提交钩子通过。V05 状态记账不改产品或版本，最新 HEAD 仍重验，main 的历史回补/发布按不可变门禁执行；其余系统和 N10/N11/N13 不关闭 |

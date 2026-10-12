@@ -6,7 +6,13 @@
 // - 未同意时不得访问 localStorage（持久化偏好），也不得发业务命令；
 // - 拒绝/关闭路径与已记忆的关闭动作、托盘完全隔离。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { flushPromises, mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
+import {
+  enableAutoUnmount,
+  flushPromises,
+  mount,
+  type DOMWrapper,
+  type VueWrapper,
+} from "@vue/test-utils";
 import { defineComponent, h } from "vue";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -216,6 +222,9 @@ function listenerOf(event: string): (ev?: unknown) => void {
   return list.at(-1)!;
 }
 
+// 断言抛错也必须卸载，避免晚到的动态导入挂载到下一项测试的 IPC mock。
+enableAutoUnmount(afterEach);
+
 beforeEach(() => {
   invokeMock.mockReset();
   events.byName.clear();
@@ -353,7 +362,9 @@ describe("P04 隐私同意引导壳", () => {
     expect(marks).not.toContain("preference-read");
     await buttonByText(w, "同意并继续").trigger("click");
     await flushPromises();
-    // Ready 后：业务视图挂载（动态 import 需要跨多个微任务周期）
+    // 等待真实的动态导入完成；不把默认 1 秒轮询当作加载已完成的信号。
+    await vi.dynamicImportSettled();
+    await flushPromises();
     await vi.waitFor(() => expect(marks).toContain("dashboard-mount"));
     // 偏好先于业务视图被读取，且主题属性已按存储偏好恢复
     expect(marks.indexOf("preference-read")).toBeGreaterThanOrEqual(0);

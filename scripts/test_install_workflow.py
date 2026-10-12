@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = (
     ("install-test.yml",
      "Run install / first-launch migration / reinstall / uninstall scenarios",
-     "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis",
+     "current-installer",
      "${{ steps.app_version.outputs.version }}"),
     ("release.yml",
      "Install / first-launch migration / reinstall / uninstall scenarios",
@@ -59,8 +59,6 @@ def parameter_probe() -> str:
 $payload = @{
     installer = $InstallerPath
     version = $AppVersion
-    old_url = $OldInstallerUrl
-    old_hash = $OldInstallerSha256
     extra_arguments = @($args)
 }
 [System.IO.File]::WriteAllText(
@@ -117,7 +115,6 @@ class InstallWorkflowCase(unittest.TestCase):
             self.assertTrue(actual_installer.samefile(installer), "必须调用预期安装产物")
             self.assertEqual(bound, {
                 "version": VERSION,
-                "old_url": old_url, "old_hash": old_hash,
                 "extra_arguments": [],
             })
 
@@ -129,14 +126,14 @@ class InstallWorkflowCase(unittest.TestCase):
                                   old_hash=old_hash, exit_code=exit_code):
                     self.invoke(*workflow, old_url, old_hash, exit_code)
 
-    def test_required_and_optional_arguments_bind_by_name(self):
+    def test_required_arguments_bind_by_name_and_legacy_variables_are_ignored(self):
         self.check_workflows(exit_code=0)
 
     def test_installer_failure_exit_code_is_propagated(self):
         self.check_workflows(exit_code=37)
 
     def test_installed_directory_handles_nsis_quotes(self):
-        production = (ROOT / "scripts/test_install.ps1").read_text(encoding="utf-8-sig")
+        production = (ROOT / "scripts/installer_helpers.ps1").read_text(encoding="utf-8-sig")
         function = re.search(r"^function Get-UninstallEntry \{\n.*?^\}",
                              production, re.M | re.S)
         self.assertIsNotNone(function, "缺少生产注册项读取函数")

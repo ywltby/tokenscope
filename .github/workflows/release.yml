@@ -8,10 +8,9 @@ on:
 permissions:
   contents: read
 
-# Independent from CI. New main pushes replace old main releases; tags only
-# replace another run for that exact tag. Generated pre-* tags do not match v*.
+# 每个 main 提交独立完成发布；重跑同一提交才互相替换。
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -32,6 +31,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup
+      - name: Validate one version increment for this main merge
+        run: |
+          python -B scripts/bump_version.py --check --event-file "$env:GITHUB_EVENT_PATH"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Validate release identity and versions
         id: metadata
         run: python scripts/release_metadata.py
@@ -52,24 +55,12 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
       - name: Build production Windows x64 NSIS (without acceptance)
-        run: node .\frontend\node_modules\@tauri-apps\cli\tauri.js build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
+        run: node ./frontend/node_modules/@tauri-apps/cli/tauri.js build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
       - name: Collect installer and checksums
-        env:
-          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
         run: |
-          $installers = @(Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe)
-          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer" }
-          New-Item -ItemType Directory -Path release-assets | Out-Null
-          $name = "TokenScope_${env:RELEASE_TAG}_windows-x64-setup.exe"
-          Copy-Item $installers[0].FullName "release-assets/$name"
-          $hash = (Get-FileHash "release-assets/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
-          # K-P3-2：WriteAllText 写 LF 行尾——Set-Content 的 CRLF 会让旧版
-          # coreutils 的 sha256sum --check 把 \r 并进文件名而失败。
-          [System.IO.File]::WriteAllText(
-            (Join-Path (Get-Location) "release-assets/SHA256SUMS.txt"),
-            "$hash  $name`n"
-          )
-      - name: Attest installer and checksums
+          python -B scripts/release_assets.py collect --bundle src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis --executable src-tauri/target/x86_64-pc-windows-msvc/release/tokenscope.exe --directory release-assets --commit '${{ needs.gate.outputs.sha }}' --version '${{ needs.gate.outputs.version }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Attest installer checksums and build identity
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
@@ -78,7 +69,7 @@ jobs:
       - name: Include downloadable attestation bundle
         env:
           BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
-        run: Copy-Item $env:BUNDLE_PATH release-assets/provenance.sigstore.json
+        run: Copy-Item -LiteralPath $env:BUNDLE_PATH -Destination release-assets/provenance.sigstore.json
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: release-${{ needs.gate.outputs.sha }}
@@ -87,10 +78,6 @@ jobs:
           retention-days: 14
           overwrite: true
 
-  # N12（安装部分）：发布前在独立 Windows job 上对**将要发布的同一个**
-  # 安装包做安装/首次启动迁移/重复安装/卸载/重新安装验收；旧版升级场景
-  # 使用仓库变量 OLD_INSTALLER_URL + OLD_INSTALLER_SHA256 钉住的固定旧包
-  #（未配置时该场景跳过并告警，其余场景照常强制）。失败即不发布。
   install-test:
     needs: [gate, build]
     runs-on: windows-latest
@@ -100,37 +87,26 @@ jobs:
         with:
           ref: ${{ needs.gate.outputs.sha }}
           persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: release-${{ needs.gate.outputs.sha }}
           path: installer
-      - name: Verify installer checksums
+      - name: Verify current installer and build identity
         run: |
-          $expected = Get-Content installer/SHA256SUMS.txt
-          $file = Get-ChildItem installer/*-setup.exe | Select-Object -First 1
-          $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          $line = $expected | Where-Object { $_ -like "*$($file.Name)" }
-          if (-not $line) { throw "SHA256SUMS.txt 缺少 $($file.Name)" }
-          $expectedHash = ($line -split '\s+')[0]
-          if ($hash -ne $expectedHash) { throw "SHA256 不匹配：$hash != $expectedHash" }
-          Write-Host "SHA256 校验通过：$hash"
+          python -B scripts/release_assets.py verify --directory installer --commit '${{ needs.gate.outputs.sha }}' --version '${{ needs.gate.outputs.version }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install / first-launch migration / reinstall / uninstall scenarios
-        env:
-          OLD_INSTALLER_URL: ${{ vars.OLD_INSTALLER_URL }}
-          OLD_INSTALLER_SHA256: ${{ vars.OLD_INSTALLER_SHA256 }}
         run: |
-          $file = (Get-ChildItem installer/*-setup.exe | Select-Object -First 1).FullName
+          $files = @(Get-ChildItem installer/*-setup.exe)
+          if ($files.Count -ne 1) { throw "必须有唯一当前安装包" }
           $installParameters = @{
-            InstallerPath = $file
+            InstallerPath = $files[0].FullName
             AppVersion = '${{ needs.gate.outputs.version }}'
           }
-          if ($env:OLD_INSTALLER_URL) {
-            $installParameters.OldInstallerUrl = $env:OLD_INSTALLER_URL
-          }
-          if ($env:OLD_INSTALLER_SHA256) {
-            $installParameters.OldInstallerSha256 = $env:OLD_INSTALLER_SHA256
-          }
-          & .\scripts\test_install.ps1 @installParameters
+          & ./scripts/test_install.ps1 @installParameters
           exit $LASTEXITCODE
       - name: Upload install evidence
         if: always()
@@ -141,78 +117,67 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  upgrade-test:
+    needs: [gate, build]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        source_state: [present, deleted]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release-${{ needs.gate.outputs.sha }}
+          path: installer
+      - name: Run real 0.1.0 upgrade
+        run: |
+          $files = @(Get-ChildItem installer/*-setup.exe)
+          if ($files.Count -ne 1) { throw "必须有唯一当前安装包" }
+          $upgradeParameters = @{
+            InstallerPath = $files[0].FullName
+            AppVersion = '${{ needs.gate.outputs.version }}'
+            ExpectedCommit = '${{ needs.gate.outputs.sha }}'
+            SourceState = '${{ matrix.source_state }}'
+          }
+          & ./scripts/test_upgrade.ps1 @upgradeParameters
+          exit $LASTEXITCODE
+      - name: Upload real upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: upgrade-evidence-release-${{ needs.gate.outputs.sha }}-${{ matrix.source_state }}
+          path: ${{ runner.temp }}/tokenscope-install-evidence
+          if-no-files-found: ignore
+          retention-days: 14
+
   publish:
-    needs: [gate, build, install-test]
+    needs: [gate, build, install-test, upgrade-test]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: release-${{ needs.gate.outputs.sha }}
           path: release-assets
-      - name: Publish complete release
-        shell: bash
+      - name: Backfill immutable 0.1.0 and publish current version
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
-          RELEASE_SHA: ${{ needs.gate.outputs.sha }}
-          RELEASE_TITLE: ${{ needs.gate.outputs.title }}
-          PRERELEASE: ${{ needs.gate.outputs.prerelease }}
-          LATEST: ${{ needs.gate.outputs.latest }}
-          REF_TYPE: ${{ github.ref_type }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          cd release-assets
-          sha256sum --check SHA256SUMS.txt
-          test -s provenance.sigstore.json
-          # A tag can pre-exist without a release. Never publish another SHA's tag.
-          if gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" > tag-ref.json 2> api-error.txt; then
-            gh api "repos/$GH_REPO/commits/$RELEASE_TAG" > tag.json
-            test "$(jq -r .sha tag.json)" = "$RELEASE_SHA"
-          elif [ "$REF_TYPE" = tag ] || ! grep -q 'HTTP 404' api-error.txt; then
-            cat api-error.txt >&2
-            exit 1
-          fi
-          # Draft releases can exist before their generated pre-* tag exists.
-          if gh release view "$RELEASE_TAG" --json isDraft,targetCommitish > release.json 2> api-error.txt; then
-            if [ "$(jq -r .isDraft release.json)" = false ]; then
-              test "$(jq -r .sha tag.json)" = "$RELEASE_SHA"
-              echo "Release already published for $RELEASE_SHA; leaving it unchanged."
-              exit 0
-            fi
-            test "$(jq -r .targetCommitish release.json)" = "$RELEASE_SHA"
-          else
-            # gh release view reports a missing release as 'release not found'.
-            if ! grep -qiE 'release not found|HTTP 404' api-error.txt; then
-              cat api-error.txt >&2
-              exit 1
-            fi
-            args=(--draft --target "$RELEASE_SHA" --title "$RELEASE_TITLE" --generate-notes --latest=false)
-            if [ "$PRERELEASE" = true ]; then args+=(--prerelease); fi
-            gh release create "$RELEASE_TAG" "${args[@]}"
-          fi
-          gh release view "$RELEASE_TAG" --json body --jq .body > notes.md
-          cat >> notes.md <<NOTES
-
-          ---
-          Source commit: $RELEASE_SHA
-          Build and checks: $RUN_URL
-          Windows x64 NSIS installer, SHA-256 checksums, and Sigstore provenance are attached.
-          Verify provenance: gh attestation verify TokenScope_${RELEASE_TAG}_windows-x64-setup.exe --repo $GH_REPO
-          The installer is not Authenticode-signed; provenance does not remove Windows SmartScreen warnings.
-          NOTES
-          gh release upload "$RELEASE_TAG" ./*.exe SHA256SUMS.txt provenance.sigstore.json --clobber
-          # Recheck tag identity after uploads, including deleted/moved version tags.
-          if gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" > tag-ref.json 2> api-error.txt; then
-            gh api "repos/$GH_REPO/commits/$RELEASE_TAG" > tag.json
-            test "$(jq -r .sha tag.json)" = "$RELEASE_SHA"
-          elif [ "$REF_TYPE" = tag ] || ! grep -q 'HTTP 404' api-error.txt; then
-            cat api-error.txt >&2
-            exit 1
-          fi
-          # Publication is the final operation, after all assets and proof exist.
-          gh release edit "$RELEASE_TAG" --notes-file notes.md --prerelease="$PRERELEASE" --latest="$LATEST" --draft=false
+        run: python -B scripts/release_assets.py publish --directory release-assets --commit '${{ needs.gate.outputs.sha }}' --version '${{ needs.gate.outputs.version }}'

@@ -1,15 +1,5 @@
 name: Install test
 
-# N12（安装部分）：对**当前产物**做 Actions 安装实跑。
-#
-# 触发：
-# - workflow_dispatch：手动对任意分支实跑（合并前取证）；
-# - pull_request（目标 main，且改动涉及安装包内容）：作为合并前门禁
-#   自动实跑——工作流文件随本 PR 落入 main 后，默认分支上即存在手动
-#   入口（M09：workflow_dispatch 必须先存在于默认分支才能选分支运行）。
-#
-# 本工作流不发布任何产物，与 Release workflow 的 install-test（发布
-# 门禁）分别记录结果。
 on:
   workflow_dispatch:
   pull_request:
@@ -21,9 +11,9 @@ on:
       - 'scripts/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'release-change.json'
       - '.github/workflows/**'
       - '.github/actions/**'
-      # K-P3-4：隐私政策经 include_str! 打进安装包——改政策即改产物。
       - 'docs/privacy.md'
 
 permissions:
@@ -37,6 +27,9 @@ jobs:
   install-test:
     runs-on: windows-latest
     timeout-minutes: 75
+    outputs:
+      version: ${{ steps.app_version.outputs.version }}
+      sha: ${{ steps.app_version.outputs.sha }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -45,52 +38,95 @@ jobs:
       - name: Read application version
         id: app_version
         run: |
-          # M08：版本必须来自产物配置（tauri.conf.json），不能把分支名
-          # 当成版本传给断言。
           $version = (python -c "import json; print(json.load(open('src-tauri/tauri.conf.json', encoding='utf-8'))['version'])").Trim()
-          if (-not $version) { throw "无法从 tauri.conf.json 读取版本" }
-          # 与 release 侧 release_metadata.py 的 SemVer 校验同口径；坏版本
-          # 在进 PS 断言参数前失败（单引号内插不容纳 `'` 等字符）。
-          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw "版本不是 SemVer：$version" }
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
-          Write-Host "应用版本：$version"
-      - name: Install acceptance workflow invocation contract (N12)
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw "版本不是 0.x.y" }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
+          $sha = (git rev-parse HEAD).Trim()
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "sha=$sha"
+      - name: Install and upgrade contracts before production build
         run: |
+          python -B -m unittest discover -s scripts -p "test_*version.py" -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B -m unittest discover -s scripts -p "test_release_assets.py" -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Install acceptance fact-verifier contract (N12/M06)
-        run: |
           python -B -m unittest discover -s scripts -p "test_inspect_history.py" -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Install acceptance lifecycle contract (N12/M05)
-        run: |
+          python -B -m unittest discover -s scripts -p "test_upgrade*.py" -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pwsh -NoProfile -File scripts/test_install_helpers.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File scripts/test_upgrade_helpers.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build production Windows x64 NSIS (without acceptance)
-        run: node .\frontend\node_modules\@tauri-apps\cli\tauri.js build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
-      - name: Run install / first-launch migration / reinstall / uninstall scenarios
-        env:
-          OLD_INSTALLER_URL: ${{ vars.OLD_INSTALLER_URL }}
-          OLD_INSTALLER_SHA256: ${{ vars.OLD_INSTALLER_SHA256 }}
+        run: node ./frontend/node_modules/@tauri-apps/cli/tauri.js build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
+      - name: Collect current installer and build identity
         run: |
-          $file = (Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | Select-Object -First 1).FullName
+          python -B scripts/release_assets.py collect --bundle src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis --executable src-tauri/target/x86_64-pc-windows-msvc/release/tokenscope.exe --directory current-installer --commit '${{ steps.app_version.outputs.sha }}' --version '${{ steps.app_version.outputs.version }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload current installer for isolated upgrade jobs
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: install-build-${{ github.run_id }}
+          path: current-installer/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Run install / first-launch migration / reinstall / uninstall scenarios
+        run: |
+          $files = @(Get-ChildItem current-installer/*-setup.exe)
+          if ($files.Count -ne 1) { throw "必须有唯一当前安装包" }
           $installParameters = @{
-            InstallerPath = $file
+            InstallerPath = $files[0].FullName
             AppVersion = '${{ steps.app_version.outputs.version }}'
           }
-          if ($env:OLD_INSTALLER_URL) {
-            $installParameters.OldInstallerUrl = $env:OLD_INSTALLER_URL
-          }
-          if ($env:OLD_INSTALLER_SHA256) {
-            $installParameters.OldInstallerSha256 = $env:OLD_INSTALLER_SHA256
-          }
-          & .\scripts\test_install.ps1 @installParameters
+          & ./scripts/test_install.ps1 @installParameters
           exit $LASTEXITCODE
       - name: Upload install evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: install-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/tokenscope-install-evidence
+          if-no-files-found: ignore
+          retention-days: 14
+
+  upgrade-test:
+    needs: install-test
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        source_state: [present, deleted]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: install-build-${{ github.run_id }}
+          path: installer
+      - name: Run real 0.1.0 upgrade
+        run: |
+          $files = @(Get-ChildItem installer/*-setup.exe)
+          if ($files.Count -ne 1) { throw "必须有唯一当前安装包" }
+          $upgradeParameters = @{
+            InstallerPath = $files[0].FullName
+            AppVersion = '${{ needs.install-test.outputs.version }}'
+            ExpectedCommit = '${{ needs.install-test.outputs.sha }}'
+            SourceState = '${{ matrix.source_state }}'
+          }
+          & ./scripts/test_upgrade.ps1 @upgradeParameters
+          exit $LASTEXITCODE
+      - name: Upload real upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: upgrade-evidence-${{ github.run_id }}-${{ matrix.source_state }}
           path: ${{ runner.temp }}/tokenscope-install-evidence
           if-no-files-found: ignore
           retention-days: 14

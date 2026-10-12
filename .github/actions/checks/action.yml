@@ -3,6 +3,19 @@ description: Default and acceptance Rust coverage plus frontend checks
 runs:
   using: composite
   steps:
+    - name: Version and immutable release contracts
+      shell: pwsh
+      run: |
+        python -B -m unittest discover -s scripts -p "test_bump_version.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_release_assets.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_upgrade_fixture.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_upgrade_workflow.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        pwsh -NoProfile -File scripts/test_upgrade_helpers.ps1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: 根库 cargo fmt --check
       shell: pwsh
       run: cargo fmt --all -- --check

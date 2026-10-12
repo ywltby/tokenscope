@@ -24,7 +24,7 @@ def metadata(ref, sha, versions):
     if not isinstance(version, str) or not SEMVER.fullmatch(version):
         raise ValueError("Application version must be SemVer")
     if ref == "refs/heads/main":
-        tag = f"pre-{sha}"
+        tag = f"v{version}"
         prerelease = True
         title = f"TokenScope {version} main ({sha[:12]})"
     elif ref.startswith("refs/tags/v"):
