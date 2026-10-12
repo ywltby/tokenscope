@@ -1,7 +1,7 @@
 # 计划审计事实复核
 
 > 2026-10-11 重新核对。整理基线：`add8319` 与当日工作区；后续修复 `3e645f3` 的 7 项已完成独立复核和最终门禁，见[复核记录](../../reviews/2026-10-11-history-seven-fixes-recheck.md)。
-> 最新进展：[PR #4 活动日志共享读取修复](../../reviews/2026-10-11-main-merge-readiness.md#pr4-live-log-sharing-fix)：a440dec 普通 CI/全新安装通过，工件已核验，应用迁移/汇总 3 请求；门禁因 ReadAllText 无法读活动 writer 超时。显式只读共享读取和持续 writer 回归通过 PS7 26 项。正式合并须最新两套 CI 与真实五场景证据。N12 及 N10/N11/N13 不关闭，历史结果保留原时点。
+> 最新进展：[PR #4 Actions 成功取证](../../reviews/2026-10-11-main-merge-readiness.md#pr4-fa911dd-green)：fa911dd 的两套检查与真实五场景成功，六次 manifest 和工件哈希/当前日志/closed 结果均已核验。后续同步文档及 cfg(test) 并行断言，运行时不变，合并仍核对最新 HEAD；N12 安装已验，固定旧包/系统/发布签字及 N10/N11/N13 继续待验。
 > [唯一剩余计划](../active/2026-10-11-consolidated-remaining-work.md) ｜ [完成/待办总账](../README.md) ｜ [归档说明](../archive/README.md)
 
 ## 修正后的结论

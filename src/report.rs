@@ -3123,10 +3123,6 @@ cache_read = 0.0
         start_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("领队必须先开始提交");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while active_collection_submissions() == 0 && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
         assert_eq!(
             active_collection_submissions(),
             1,
@@ -3134,10 +3130,10 @@ cache_read = 0.0
         );
         go_tx.send(()).unwrap();
         h.join().unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while active_collection_submissions() > 0 && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        // 全局计数也覆盖其它并行测试；本航班完成后它们可能立即进入采集。
+        // 在同一个串行闸门内断言归零，既排除其它正在工作的领队，也能检出
+        // 本航班泄漏的计数，不靠全局计数恰好为零的调度时窗。
+        let _serial = COLLECT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(active_collection_submissions(), 0, "提交完成后归零");
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -1,6 +1,6 @@
 # 整合计划修复复核与 main 合并可行性
 
-> 最新状态（2026-10-12）：a440dec 的普通 CI 成功，实际全新安装四项通过，首次启动已迁移 3 条并汇总 3 请求，但门禁因 ReadAllText 的 Windows 共享方式读不到活动日志而超时。工件已下载并核对 SHA256；读取已改为只读共享写入/轮转，新增真实持有 writer 的回归先红后绿，PS7 全部 26 项通过。详见[活动日志共享读取修复](#pr4-live-log-sharing-fix)。正式合并仍须最新提交的两套检查和五场景证据；N12 保持部分完成，其余系统及 N10/N11/N13 不关闭。
+> 最新结论（2026-10-12，已实跑运行时基线 `fa911dd`）：**PR #4 两套检查全部成功，五个必需安装场景、六次严格 manifest 与成功工件均已核验，main 尚未合并。** 详见[Actions 成功取证](#pr4-fa911dd-green)。后续同步文档并修正一处 cfg(test) 并行断言，运行时不变；正式合并核对最新 HEAD 两套检查。N12 安装部分已验，整体仍部分完成，固定旧包/系统签字及 N10/N11/N13 继续待验。
 
 ## `16beea1` 第四轮历史复核
 
@@ -506,3 +506,23 @@ Cargo 命令与 checks action 对齐，额外使用 --offline 防止验证时改
 修复使用 FileAccess.Read 的 FileStream，并显式 FileShare.ReadWrite/Delete，再用 UTF-8 StreamReader 读取；所有句柄在 finally 释放。完整行过滤、归档旧日志、预期请求数、同一进程存活与退出码要求全部保留；文件轮转等 IOException 仍下一轮重读。[生命周期契约](../../scripts/test_install_helpers.ps1) 新增持续打开真实 writer 的四项断言，半行超时、写入换行后读取/本次 query_id/请求数 3 均验证；控制台替身隐藏运行。
 
 旧实现的新正例失败，修复后 PS7 契约 **26 项**全绿；真实工件重放在 writer 打开/关闭时均读 **27 行**，两份 PS1 的 UTF-8 语法解析通过。Python 43 项及 a440dec 的普通 CI 证据保留，Python/Rust/前端实现未改变。此处只确认读取修复，推送后最新远程状态以 PR Checks 为准；仍须最新两套检查、真实五场景与工件，不关闭 N12。
+
+<a id="pr4-fa911dd-green"></a>
+
+## fa911dd 的 Actions 成功取证与合并结论
+
+来源 HEAD=`fa911dd6445cee2c55279ea43008dcd60d936515`。[CI/gate](https://github.com/ywltby/tokenscope/actions/runs/38203057083/job/114660447156) 与 [Install test/install-test](https://github.com/ywltby/tokenscope/actions/runs/38203057088/job/114660447331) 均 completed/success，来源 SHA 一致；原失败按原 SHA 保留，未手动重跑碰绿。
+
+安装 job 实际完成生产 NSIS 打包及全新安装、首次启动迁移、重复安装、卸载、重新安装五个必需场景，**11 项断言通过/0 失败**。首次启动和重新安装各在关闭前后严格校验全部事实，重复安装、卸载后也校验，共六次 manifest 全部 ok=true/problems=[]，读数稳定为 **3 请求 / 180 输入 / 35 输出 / 2 项目**，各记录身份/原始模型/三 cwd/四桶及 NULL 语义均按规格核对。
+
+[成功工件](https://github.com/ywltby/tokenscope/actions/runs/38203057088/artifacts/11726496236) 已下载读取，ZIP SHA256=`016c28b2fc4832713bd816051f33a960d7a7f48fc896dbab652d7cb185b51630` 与 GitHub 元数据一致。五个文件包含两次启动的 live-logs、两份 result.json 及归档旧日志；两个结果均 stage=closed、pass=true、requests=3。fresh-migrate PID=5488，reinstall PID=6968，query_id 不同且分别与各自本次日志的成功汇总吻合；正常关闭已在脚本中通过退出码 0 守卫，未用强制结束补成功。
+
+普通 CI 包含两套 manifest 的普通/acceptance 与前端完整门禁，调用/注册目录 3 项、事实 33 项、metadata 7 项及 PS7 生命周期 **26 项**全部成功。PR #4 仍 open、merged=false、mergeable=true/clean；远端 main=`8d1d90d`，0 个 main 独有提交/78 个分支独有提交，main 仍是来源 HEAD 的祖先，工作区干净。
+
+**结论：fa911dd 的运行时实现和已约定的合并验收通过。** 后续同步状态文档并修正单元测试的并行断言，安装脚本/运行时基线不变；合并时仍核对 PR 最新 HEAD 的两套检查。固定旧包升级因 OLD_INSTALLER_URL/SHA256 未配置而实际告警跳过，保持待验；DPI/跨显示器/休眠/自启及发布签字、N10/N11/N13 均按原排期，N12 整项不关闭。
+
+### 状态同步时捕获的并行断言与修复
+
+文档提交钩子捕获 submission_counter_covers_leader_work 的归零断言失败（1 != 0）。COLLECT_SUBMISSIONS_ACTIVE 是进程级计数；本航班结束后其它并行单元测试可立即进入采集，原“等待全局 0 后无锁断言”存在观察窗口。生产 SubmissionGuard 在释放 COLLECT_SERIAL 及发布结果前已析构，没有发现计数泄漏。
+
+修复仅位于 src/report.rs 的 cfg(test) 模块：起始通道握手后直接严格断言 1；本航班 join 后取得相同 COLLECT_SERIAL 锁，阻止其它领队在归零断言期间进入，再严格断言 0。保留原握手超时，未清零计数或改成宽松范围，运行时未改。默认并行根库单元测试五轮各 208 通过；恢复原 5s 握手超时后的完整 workspace acceptance 462/10 忽略及 acceptance Clippy 通过。此提交仍需最新两套 PR 检查，不用前一 SHA 的绿灯代替。
