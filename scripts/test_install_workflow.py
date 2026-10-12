@@ -135,6 +135,59 @@ class InstallWorkflowCase(unittest.TestCase):
     def test_installer_failure_exit_code_is_propagated(self):
         self.check_workflows(exit_code=37)
 
+    def test_installed_directory_handles_nsis_quotes(self):
+        production = (ROOT / "scripts/test_install.ps1").read_text(encoding="utf-8-sig")
+        function = re.search(r"^function Get-UninstallEntry \{\n.*?^\}",
+                             production, re.M | re.S)
+        self.assertIsNotNone(function, "缺少生产注册项读取函数")
+        probe = function[0] + r'''
+function Get-ChildItem {
+    [CmdletBinding()] param([string]$Path)
+    [pscustomobject]@{ PSPath = "foreign" }
+    [pscustomobject]@{ PSPath = "tokenscope" }
+}
+function Get-ItemProperty {
+    [CmdletBinding()] param([string]$Path)
+    if ($Path -eq "foreign") { return [pscustomobject]@{ DisplayName = "Other" } }
+    return (Get-Content $env:TOKENSCOPE_REGISTRY_INPUT -Raw | ConvertFrom-Json)
+}
+$UninstallKeyRoot = "mock-registry"
+$entry = Get-UninstallEntry
+$exe = Join-Path $entry.InstallLocation "tokenscope.exe"
+[System.IO.File]::WriteAllText(
+    $env:TOKENSCOPE_BINDING_RESULT,
+    (@{ entry = $entry; exe = $exe } | ConvertTo-Json -Depth 4),
+    [System.Text.UTF8Encoding]::new($false)
+)
+'''
+        for quoted in (False, True):
+            with self.subTest(quoted=quoted), tempfile.TemporaryDirectory() as parent:
+                directory = Path(parent) / "TokenScope 中文目录"
+                directory.mkdir()
+                exe = directory / "tokenscope.exe"
+                exe.write_bytes(b"inert fixture, never executed")
+                original = {"DisplayName": "TokenScope", "DisplayVersion": VERSION,
+                            "InstallLocation": f'"{directory}"' if quoted else str(directory),
+                            "UninstallString": f'"{directory / "uninstall.exe"}"'}
+                source = Path(parent) / "registry.json"
+                source.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
+                runner = Path(parent) / "registry-probe.ps1"
+                runner.write_text('$ErrorActionPreference = "Stop"\n' + probe, encoding="utf-8")
+                result_path = Path(parent) / "result.json"
+                env = os.environ.copy()
+                env.update(TOKENSCOPE_REGISTRY_INPUT=str(source),
+                           TOKENSCOPE_BINDING_RESULT=str(result_path))
+                result = subprocess.run(
+                    [self.pwsh, "-NoProfile", "-NonInteractive", "-File", str(runner)],
+                    env=env, capture_output=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0,
+                                 result.stderr.decode("utf-8", errors="replace"))
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+                self.assertTrue(Path(payload["exe"]).samefile(exe))
+                expected = dict(original, InstallLocation=str(directory))
+                self.assertEqual(payload["entry"], expected)
+
 
 if __name__ == "__main__":
     unittest.main()

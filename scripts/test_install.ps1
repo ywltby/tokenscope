@@ -78,6 +78,12 @@ function Get-UninstallEntry {
     foreach ($key in Get-ChildItem $UninstallKeyRoot -ErrorAction SilentlyContinue) {
         $entry = Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue
         if ($entry.DisplayName -like "TokenScope*") {
+            # Tauri NSIS 把 InstallLocation 写为带外层双引号的 $INSTDIR。
+            # 在读取结果中解包供 Join-Path 使用，不改动实际注册项。
+            $location = [string]$entry.InstallLocation
+            if ($location.Length -ge 2 -and $location.StartsWith('"') -and $location.EndsWith('"')) {
+                $entry.InstallLocation = $location.Substring(1, $location.Length - 2)
+            }
             return $entry
         }
     }

@@ -1,6 +1,6 @@
 # 整合计划修复复核与 main 合并可行性
 
-> 最新状态（2026-10-12）：PR #4 的编码与两处 workflow 参数绑定已修复；849c9be 新增调用契约在 Runner 的 8.3 短/长路径上误判，挡住两套检查。测试已改为验证同一实际文件并严格核对其余参数；本地使用真实短名 TEMP 复现全红后，Python 3.12 + CP1252 的全部 42 项通过。详见[workflow 参数绑定修复及短路径补充](#pr4-workflow-binding-fix)。正式合并仍须最新提交的两套检查和真实安装证据；N12 保持部分完成，其余系统及 N10/N11/N13 不关闭。
+> 最新状态（2026-10-12）：56592a5 的普通 CI 成功，三条安装契约及打包通过，实际安装通过注册项/版本后因 NSIS InstallLocation 外层引号拼接路径失败。读取入口已统一解包目录，带引号/不带引号的实际函数回归先红后绿；真实短名 TEMP + Python 3.12 CP1252 全部 43 项通过。详见[NSIS 注册目录修复](#pr4-nsis-directory-fix)。正式合并仍须最新提交的两套检查和真实安装证据；N12 保持部分完成，其余系统及 N10/N11/N13 不关闭。
 
 ## `16beea1` 第四轮历史复核
 
@@ -480,3 +480,15 @@ Cargo 命令与 checks action 对齐，额外使用 --offline 防止验证时改
 本地用 GetShortPathNameW 得到真实临时根短名（TO68CE~1），将 TEMP/TMP 指向它，先重现 16 个组合全红。修复只调整路径验证：要求绝对路径、真实文件存在，并以 Path.samefile 确认文件身份；版本、旧包 URL/SHA、多余参数仍严格相等，0/37 退出码继续核对。错误参数名或另一安装产物仍不能通过。相同短名 TEMP 加 Python 3.12.13、CP1252/UTF8=0 的全部 **42 项**通过，不依赖修改 Runner 的临时目录来掩盖问题。
 
 第三次运行按原失败保留，修复提交触发新运行。此补充仍只确认调用契约修复，最新 CI 与实际安装及工件须重新取得，不关闭 N12。
+
+<a id="pr4-nsis-directory-fix"></a>
+
+## 56592a5 实跑与 NSIS 注册目录修复
+
+[CI/gate](https://github.com/ywltby/tokenscope/actions/runs/38200032886/job/114651173150) 已全部成功；[Install test](https://github.com/ywltby/tokenscope/actions/runs/38200032829/job/114651172940) 的调用、事实、生命周期三条契约及生产 NSIS 打包通过。安装器实际执行，HKCU 注册项与 DisplayVersion=0.1.0 两项通过，随后的 Join-Path 报 `Cannot find drive. A drive with the name '"C' does not exist.`；场景 1 中断、后续及旧包升级未执行、无工件。
+
+本机已生成的 `src-tauri/target/release/nsis/x64/installer.nsi` 第 676 行确认 Tauri NSIS 给 InstallLocation 写入了带外层双引号的 INSTDIR，这是合法注册值格式；原测试直接把它作为目录拼接。[test_install.ps1](../../scripts/test_install.ps1) 的 Get-UninstallEntry 现仅在读取结果中去掉成对外层引号，安装/启动/卸载所有消费者共用正确路径，注册表和 UninstallString 保持原值。
+
+[调用契约测试](../../scripts/test_install_workflow.py) 新增实际 Get-UninstallEntry 函数回归：只替代注册表读取，输入同时含其他应用与 TokenScope 注册项；验证带引号/普通目录都能拼接到预期真实文件、版本及卸载字符串保留。旧实现的引号用例复现相同 `"C` 错误，修复后通过。真实短名 TEMP + Python 3.12.13 CP1252/UTF8=0 下全部 **43 项**通过（事实 33 + 调用/注册目录 3 + metadata 7），完整 PS1 的 UTF-8 语法解析通过；未执行本机 NSIS 或改用户注册表/历史数据。
+
+原失败运行保留，最新修复提交须重新取得 CI 和真实五场景及工件。此处记录修复时的现场，后续远程状态以 PR Checks 为准；N12 及其他待验项不关闭。
