@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::aggregate::resolve_tz;
 use crate::model::UsageEvent;
-use crate::report::{self, EventFilter, SourceReport, SummaryOptions};
+use crate::report::{self, EventFilter, SourceReport, SummaryOptions, path_info};
 
 pub const MAX_ACTIVE_QUERIES: usize = 8;
 /// RC05：查询子系统保留数据的字节预算（见模块文档的边界说明）。
@@ -77,6 +77,9 @@ pub struct QuerySnapshot {
     pub pricing_revision: String,
     /// 主查询指纹（采集参数 + 时间范围 + 时区）。
     pub main_fingerprint: String,
+    /// U06：建立本快照的触发来源（从 `SummaryOptions` 复制）——供汇总与明细
+    /// 的日志分级（`Trigger::Auto` 降为 debug）。
+    pub trigger: report::Trigger,
     pub tz: TimeZone,
     pub tz_label: String,
     /// 冻结的查询时间基准（SF05：一次查询只解析一次 today）。
@@ -220,6 +223,12 @@ pub(crate) fn drill_fingerprint(filter: &EventFilter) -> String {
 fn main_fingerprint(opts: &SummaryOptions, tz_label: &str) -> String {
     // U01：四组时间参数全部参与主指纹——否则不同预设（如 7d 与 24h）会共用
     // 同一指纹，旧游标就能在另一个时间范围上被错误接受。
+    //
+    // U06：`collect` **不参与**主指纹。指纹表达的是"查的是哪个行集"（来源配置
+    // + 时间范围 + 时区），不是"数据有多新"：自动刷新（`collect = false`）与
+    // 手动刷新（`collect = true`）在同一筛选条件下的行集语义完全相同，数据
+    // 新鲜度由句柄的 `generation` 表达。把 `collect` 混进指纹会把"数据新鲜度"
+    // 误判成"筛选已变化"，让同一筛选条件的游标在自动刷新后被无谓拒绝。
     format!(
         "{}|days={:?}|from={:?}|to={:?}|rolling_hours={:?}|start_at={:?}|end_at={:?}|until_now={}|tz={tz_label}",
         report::collection_key(opts),
@@ -383,7 +392,7 @@ fn reclaimable_key(reg: &HashMap<String, Session>) -> Option<String> {
 /// RC05：额度准入——先原子尝试；不足则淘汰一个**仅注册表持有**的会话
 ///（淘汰即释放额度）后重试，直到腾出或没有可回收的会话。全部失败时返回
 /// 可读错误，不超预算接受，也不会为一次注定失败的准入牺牲活跃会话。
-fn acquire_with_eviction(bytes: usize) -> Result<QuotaReservation, String> {
+fn acquire_with_eviction(bytes: usize, auto: bool) -> Result<QuotaReservation, String> {
     let mut last = String::new();
     for _ in 0..=MAX_ACTIVE_QUERIES {
         match QuotaReservation::acquire(bytes) {
@@ -396,7 +405,8 @@ fn acquire_with_eviction(bytes: usize) -> Result<QuotaReservation, String> {
                 };
                 match removed {
                     Some(s) => {
-                        log::info!(
+                        path_info!(
+                            auto,
                             "查询会话 {} 被淘汰（保留字节预算），其游标将显式过期",
                             s.snapshot.query_id
                         );
@@ -423,7 +433,10 @@ fn register(snapshot: Arc<QuerySnapshot>) {
             let Some(oldest) = oldest_key(&reg) else {
                 break;
             };
-            log::info!("查询会话 {oldest} 被淘汰（容量策略），其游标将显式过期");
+            path_info!(
+                snapshot.trigger.is_auto(),
+                "查询会话 {oldest} 被淘汰（容量策略），其游标将显式过期"
+            );
             if let Some(s) = reg.remove(&oldest) {
                 evicted.push(s);
             }
@@ -486,7 +499,24 @@ fn rows_retained_bytes(rows: &[SnapshotRow]) -> Result<usize, String> {
 
 /// 创建查询会话：单飞采集（复用现有缓存/单飞管线）→ 主过滤一次 →
 /// 排序与 seq 只算一次 → 注册。返回的 Arc 快照供汇总/分页共享。
+///
+/// 等价于 `begin_query_with(opts, true)`——既有调用点（命令层、汇总入口、
+/// 测试）语义不变：查询总是先采集。
 pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
+    begin_query_with(opts, true)
+}
+
+/// U06：创建查询会话，可选择**不采集**（自动刷新路径）。
+///
+/// - `collect = true`：与既有行为一致，先经单飞协调器采集（启动、手动刷新、
+///   筛选变化）。
+/// - `collect = false`：不跑采集管线，直接复用 [`report::recent_collection`]
+///   的"最近一次采集结果"（来源统计与价格表都取那一份）；`open_read_snapshot`
+///   照常新建——读的是**已提交**的历史，因此自动刷新不会重复解析日志。
+///   缓存缺失或采集键不一致（来源配置/目录/价格路径/刷新标记已变）时退回
+///   `collect = true` 的行为，并记一条 debug 说明原因，绝不返回空快照。
+///   返回的句柄仍带 `generation`（取自所用采集结果），前端据此判断数据覆盖。
+pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<QuerySnapshot>> {
     // RC01：先解析进程命名空间与序号——随机源不可用/计数耗尽时在采集前
     // 就明确失败，不做任何昂贵工作，也不产生可能被误认的身份。
     let namespace = query_namespace()?;
@@ -494,7 +524,19 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
 
     let (tz, tz_label) = resolve_tz(opts.tz.as_deref())?;
     let as_of = jiff::Zoned::now().with_time_zone(tz.clone());
-    let collection = report::collect_flighted(opts)?;
+    let collection = if collect {
+        report::collect_flighted(opts)?
+    } else {
+        match report::recent_collection(opts) {
+            Some(snapshot) => snapshot,
+            None => {
+                log::debug!(
+                    "自动刷新要求复用最近一次采集结果，但采集键未命中（尚未采集或来源配置已变）：退回采集"
+                );
+                report::collect_flighted(opts)?
+            }
+        }
+    };
     let main_fingerprint = main_fingerprint(opts, &tz_label);
 
     // H07：采集提交之后建立只读事务快照——本次查询看到的就是这一刻的库内容，
@@ -553,7 +595,8 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
     }
     // 准入：额度原子占用（失败会按 LRU 淘汰后重试）；失败时 reservation
     // 未建立、快照未注册，额度不泄漏。
-    let reservation = acquire_with_eviction(charge).map_err(|e| anyhow!(e))?;
+    let reservation =
+        acquire_with_eviction(charge, opts.trigger.is_auto()).map_err(|e| anyhow!(e))?;
 
     // H06：日汇总桶选择在这里固定一次——按日筛选/分组且时区与来源时区不同时，
     // 日汇总不参与（返回可恢复提示），绝不把来源日期当午夜事件重切。
@@ -584,6 +627,7 @@ pub fn begin_query(opts: &SummaryOptions) -> Result<Arc<QuerySnapshot>> {
         generation: collection.generation,
         pricing_revision: collection.pricing_revision.clone(),
         main_fingerprint,
+        trigger: opts.trigger,
         tz,
         tz_label,
         as_of,
@@ -641,8 +685,16 @@ pub struct QueryHandle {
 }
 
 /// 创建查询会话并返回句柄（GUI 命令入口：一次批次调用一次）。
+///
+/// 等价于 `begin_query_handle_with(opts, true)`（既有调用点零改动）。
 pub fn begin_query_handle(opts: &SummaryOptions) -> Result<QueryHandle> {
-    let s = begin_query(opts)?;
+    begin_query_handle_with(opts, true)
+}
+
+/// U06：命令入口的句柄形态——`collect = false` 供自动刷新复用**已提交**的
+/// 历史（不重复采集）；缓存缺失时退回采集（见 [`begin_query_with`]）。
+pub fn begin_query_handle_with(opts: &SummaryOptions, collect: bool) -> Result<QueryHandle> {
+    let s = begin_query_with(opts, collect)?;
     Ok(QueryHandle {
         query_id: s.query_id.clone(),
         generation: s.generation,

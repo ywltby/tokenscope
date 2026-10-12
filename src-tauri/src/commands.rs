@@ -163,8 +163,25 @@ fn parse_rollups_mode(value: Option<&str>) -> Result<tokenscope::report::Rollups
     }
 }
 
+/// U06：查询触发来源（IPC 取值 `manual` / `startup` / `auto`，缺省 = 手动）。
+///
+/// 只影响采集与查询路径的日志分级（`auto` 降为 debug），不改变数字口径；
+/// 非法值显式报错，不静默降级成某一个来源。
+fn parse_trigger(value: Option<&str>) -> Result<tokenscope::report::Trigger, String> {
+    match value.map(str::trim) {
+        None | Some("") | Some("manual") => Ok(tokenscope::report::Trigger::Manual),
+        Some("startup") => Ok(tokenscope::report::Trigger::Startup),
+        Some("auto") => Ok(tokenscope::report::Trigger::Auto),
+        Some(other) => Err(format!("未知的查询触发来源：{other}")),
+    }
+}
+
 /// SF04：创建查询会话——冻结一次采集的事件、价格修订、时间基准与来源
 /// 身份，返回 query_id 供汇总/明细（含分页）显式绑定。
+///
+/// U06：`collect = false`（自动刷新）不重复采集，直接复用后台定时线程
+/// “最近一次采集结果”并读**已提交**的历史；缓存缺失时自动退回采集。
+/// `trigger` 只决定日志分级（`auto` = 后台自动读取）。
 // 参数面由 IPC 契约决定（每个筛选项一个 invoke 参数），非设计膨胀。
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
@@ -181,9 +198,11 @@ pub async fn query_begin(
     start_at: Option<String>,
     end_at: Option<String>,
     until_now: Option<bool>,
+    collect: Option<bool>,
+    trigger: Option<String>,
 ) -> Result<tokenscope::query::QueryHandle, String> {
     privacy::require_ready(&privacy::state_of(&app))?;
-    let opts = query_opts(
+    let mut opts = query_opts(
         &by,
         agent,
         days,
@@ -196,8 +215,11 @@ pub async fn query_begin(
         end_at,
         until_now,
     )?;
+    opts.trigger = parse_trigger(trigger.as_deref())?;
+    // 缺省 = 采集（启动、手动刷新、筛选变化的既有行为）。
+    let collect = collect.unwrap_or(true);
     run_blocking("query_begin", move || {
-        tokenscope::query::begin_query_handle(&opts)
+        tokenscope::query::begin_query_handle_with(&opts, collect)
     })
     .await
 }
@@ -462,6 +484,40 @@ pub(crate) fn settings_set_timezone_impl(
             tokenscope::settings::default_timezone()
         ),
     }
+    Ok(committed)
+}
+
+/// U06：JSONL 自动读取间隔（秒）。只接受 5 / 10 / 30 / 60 / 300 / 600；
+/// 非法值**拒绝保存**（校验先于事务，原文件字节不动）。保存成功后唤醒
+/// 定时采集线程，按新间隔重新计时（不必等完旧周期）。
+#[tauri::command]
+pub async fn settings_set_collect_interval(
+    app: tauri::AppHandle,
+    secs: u32,
+) -> Result<u32, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    let committed = run_blocking("settings_set_collect_interval", move || {
+        let path = tokenscope::settings::settings_path()?;
+        settings_set_collect_interval_impl(&path, secs)
+    })
+    .await?;
+    crate::wake_collection_scheduler();
+    Ok(committed)
+}
+
+/// U06：间隔写入内核（可注入路径以便单测）。校验失败在进入 `settings::update`
+/// 之前返回错误，因此不会写盘、也不会碰其它字段；事务内只改这一个字段。
+pub(crate) fn settings_set_collect_interval_impl(
+    path: &std::path::Path,
+    secs: u32,
+) -> anyhow::Result<u32> {
+    let validated =
+        tokenscope::settings::validate_collect_interval_secs(secs).map_err(anyhow::Error::msg)?;
+    let committed = tokenscope::settings::update(path, |s| {
+        s.collect_interval_secs = Some(validated);
+        Ok(validated)
+    })?;
+    log::info!("自动读取间隔已设置为 {committed} 秒");
     Ok(committed)
 }
 
@@ -1714,6 +1770,44 @@ mod tests {
                 .timezone
                 .as_deref(),
             Some("UTC")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// U06：自动读取间隔——非法值拒绝保存（文件字节不动），合法值落盘可读回；
+    /// 连续保存后读到的等于最后一次。
+    #[test]
+    fn settings_set_collect_interval_validates_and_commits() {
+        let dir = tmp_dir("u06-interval");
+        let path = dir.join("settings.toml");
+        // 事务内只改间隔：相邻字段（时区）保留。
+        settings_set_timezone_impl(&path, Some("UTC".into())).unwrap();
+        assert_eq!(settings_set_collect_interval_impl(&path, 30).unwrap(), 30);
+        let s = tokenscope::settings::load(&path).unwrap();
+        assert_eq!(s.collect_interval_secs, Some(30));
+        assert_eq!(s.timezone.as_deref(), Some("UTC"), "相邻字段必须保留");
+
+        let before = std::fs::read_to_string(&path).unwrap();
+        for bad in [0u32, 7, 45, 601] {
+            let err = settings_set_collect_interval_impl(&path, bad).unwrap_err();
+            assert!(
+                err.to_string().contains("自动读取间隔"),
+                "错误必须中文可读: {err}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "非法值不得落盘（文件字节不动）"
+        );
+
+        assert_eq!(settings_set_collect_interval_impl(&path, 600).unwrap(), 600);
+        assert_eq!(
+            tokenscope::settings::load(&path)
+                .unwrap()
+                .collect_interval_secs,
+            Some(600),
+            "连续保存后读到的必须等于最后一次选择"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

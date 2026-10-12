@@ -22,6 +22,43 @@ use crate::source::claude_projects::ProjectMapping;
 use crate::source::codex::CodexSource;
 use crate::source::{CollectStats, Source};
 
+/// U06：采集与查询路径上的进度日志——`Trigger::Auto`（后台定时自动读取）
+/// 触发时降为 `debug`：默认 5 秒一轮的自动读取会把 info 刷屏，排障时真正
+/// 需要的"哪一轮有写入"由唯一例外保留（见 [`collect_all_with_sources`] 的
+/// 历史库写入摘要）。手动/启动触发保持 `info`。
+macro_rules! path_info {
+    ($auto:expr, $($arg:tt)+) => {
+        if $auto {
+            log::debug!($($arg)+);
+        } else {
+            log::info!($($arg)+);
+        }
+    };
+}
+pub(crate) use path_info;
+
+/// U06：采集与查询的触发来源——决定采集/查询路径上的日志级别。
+///
+/// `Default` 是 [`Trigger::Manual`]：绝大多数既有调用点是用户或程序触发的
+/// 普通查询，默认必须是"非自动"，否则这些路径的 info 会被误降级。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Trigger {
+    /// 应用启动时的首次采集/查询。
+    Startup,
+    /// 用户或程序触发的普通查询（默认）。
+    #[default]
+    Manual,
+    /// 后台定时自动读取（降级日志、发出变化通知）。
+    Auto,
+}
+
+impl Trigger {
+    /// 是否为后台自动触发（进度日志因此降为 debug）。
+    pub fn is_auto(self) -> bool {
+        self == Trigger::Auto
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct SummaryOptions {
     pub by: GroupBy,
@@ -76,6 +113,10 @@ pub struct SummaryOptions {
     /// `~/.tokenscope/history.db`）。测试沿用既有 `cache_dir` 隔离根，
     /// 新增的历史路径绝不落回真实数据目录（计划不变量 10）。
     pub history_path: Option<PathBuf>,
+    /// U06：本轮采集/查询的触发来源（默认 [`Trigger::Manual`]）。`Auto`
+    /// 时采集与查询路径上的进度日志降级为 `debug`（唯一例外：本轮历史库
+    /// 确有写入时保留一条 info 摘要）。
+    pub trigger: Trigger,
 }
 
 impl SummaryOptions {
@@ -323,6 +364,9 @@ pub fn rebuild_cache(opts: &SummaryOptions) -> Result<CacheInfo> {
 /// 采集产物：去重后事件 + 逐源统计 + 价格表 + 警告。summary / list_events 共用。
 struct Collected {
     generation: u64,
+    /// U06：本轮历史库是否确有新增或更新（`inserted + updated > 0`）——
+    /// 决定定时线程是否向前端发变化通知，以及保留哪一条 info 摘要。
+    changed: bool,
     sources: Vec<SourceReport>,
     pricing: std::sync::Arc<crate::pricing::Pricing>,
     warnings: Vec<String>,
@@ -339,6 +383,9 @@ struct Collected {
 #[derive(Debug)]
 pub(crate) struct CollectionSnapshot {
     pub(crate) generation: u64,
+    /// U06：本轮历史库是否确有新增或更新（数值/布尔字段，无堆分配，
+    /// 因此不进入 [`collection_retained_bytes`] 的字节记账）。
+    pub(crate) changed: bool,
     pub(crate) sources: Vec<SourceReport>,
     pub(crate) warnings: Vec<String>,
     pub(crate) pricing: std::sync::Arc<crate::pricing::Pricing>,
@@ -574,6 +621,84 @@ pub(crate) fn collect_flighted(opts: &SummaryOptions) -> Result<Arc<CollectionSn
     collect_flighted_with(opts, &|generation| collect_inner(opts, generation))
 }
 
+/// U06：一次"只采集"的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CollectOutcome {
+    /// 本轮采集后历史库的 generation（有写入时已递增）。
+    pub generation: u64,
+    /// 本轮历史库是否确有新增或更新（`false` = 没有新数据，界面无需刷新）。
+    pub changed: bool,
+}
+
+/// U06：**只做采集与历史库写入**——经与查询同一个 [`collect_flighted`]
+/// 单飞协调器（不另起管线、不重复解析），不建查询快照、不聚合。
+///
+/// 同时把该轮采集结果登记为"最近一次采集结果"（[`recent_collection`]），
+/// 供 `collect = false` 的自动刷新复用：自动刷新只基于**已提交**的历史建
+/// 查询，不重复采集。
+pub fn collect_only(opts: &SummaryOptions) -> Result<CollectOutcome> {
+    let snapshot = collect_flighted(opts)?;
+    let outcome = CollectOutcome {
+        generation: snapshot.generation,
+        changed: snapshot.changed,
+    };
+    remember_collection(opts, snapshot);
+    Ok(outcome)
+}
+
+/// U06："最近一次采集结果"槽位：采集键 + 该轮采集快照（进程级单份）。
+///
+/// 持锁只做读取/赋值——采集由单飞协调器在锁外完成后再写入，本锁从不嵌套
+/// 采集内部锁，因此不存在锁序问题；`collection_key` 也在锁外求值（它可能
+/// 读取 Claude 项目映射文件）。
+/// U06："最近一次采集结果"槽位的类型：采集键 + 该轮采集快照。
+type RecentCollection = Option<(String, Arc<CollectionSnapshot>)>;
+
+static RECENT_COLLECTION: std::sync::LazyLock<Mutex<RecentCollection>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+fn remember_collection(opts: &SummaryOptions, snapshot: Arc<CollectionSnapshot>) {
+    let key = collection_key(opts);
+    let mut slot = RECENT_COLLECTION.lock().unwrap_or_else(|e| e.into_inner());
+    *slot = Some((key, snapshot));
+}
+
+/// U06：最近一次采集结果——**只在该采集键命中时**返回（来源配置、目录、
+/// 价格路径或刷新标记不同都不复用）。未命中返回 `None`，调用方退回采集。
+pub(crate) fn recent_collection(opts: &SummaryOptions) -> Option<Arc<CollectionSnapshot>> {
+    let key = collection_key(opts);
+    let slot = RECENT_COLLECTION.lock().unwrap_or_else(|e| e.into_inner());
+    match slot.as_ref() {
+        Some((stored, snapshot)) if *stored == key => Some(snapshot.clone()),
+        _ => None,
+    }
+}
+
+/// 测试专用（#[doc(hidden)]）：本进程内该采集键已经跑过的采集轮数。
+///
+/// 按**采集键**计数而不是全局峰值：并行测试各自使用独立临时来源目录，
+/// 只观察自己的键，不受其它用例干扰。用于证明 `collect = false` 不触发
+/// 采集、缓存缺失时必须退回采集。
+#[doc(hidden)]
+pub fn collect_rounds_for_tests(opts: &SummaryOptions) -> u64 {
+    let key = collection_key(opts);
+    COLLECT_ROUNDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+        .copied()
+        .unwrap_or(0)
+}
+
+static COLLECT_ROUNDS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, u64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// 登记一轮采集（领队工作开始时）。只在测试观察口径上使用，生产不做判定。
+fn note_collect_round(key: &str) {
+    let mut map = COLLECT_ROUNDS.lock().unwrap_or_else(|e| e.into_inner());
+    *map.entry(key.to_string()).or_insert(0) += 1;
+}
+
 /// Task 2：来源包装器——discover 结果已被防御性去重（固定文件清单）。
 struct DedupSource {
     inner: Box<dyn Source>,
@@ -616,6 +741,8 @@ fn collect_flighted_with(
     leader: &dyn Fn(u64) -> Result<CollectionSnapshot>,
 ) -> Result<Arc<CollectionSnapshot>> {
     let key = collection_key(opts);
+    // U06：探针用键的副本（`key` 随后被移进航班守卫）。
+    let probe_key = key.clone();
     // entry 分支一次性决定身份：插入者 = 领队，命中者 = 跟随者。
     let (cell, is_leader): (FlightCell, bool) = {
         let mut g = INFLIGHT.lock().unwrap();
@@ -680,6 +807,8 @@ fn collect_flighted_with(
     // 串行闸门：不同参数的采集排队执行（同参跟随者不经过这里，仍在航班上等待）。
     let result = {
         let _serial = COLLECT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // U06 测试观察：领队工作开始计一轮（跟随者不计——它们没有真的采集）。
+        note_collect_round(&probe_key);
         let in_flight = COLLECT_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
         COLLECT_MAX_IN_FLIGHT.fetch_max(in_flight, Ordering::SeqCst);
         // N06：领队工作（采集 + 历史库写入提交）登记为"进行中的提交"——
@@ -773,6 +902,7 @@ fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSna
     let collected = collect_all_with_sources(sources, opts, generation)?;
     Ok(CollectionSnapshot {
         generation: collected.generation,
+        changed: collected.changed,
         sources: collected.sources,
         warnings: collected.warnings,
         pricing: collected.pricing,
@@ -944,6 +1074,9 @@ fn collect_all_with_sources(
     opts: &SummaryOptions,
     _generation: u64,
 ) -> Result<Collected> {
+    // U06：自动读取的进度日志降级（见 `path_info!`）；唯一例外是"本轮确有
+    // 历史库写入"的那条摘要。
+    let auto = opts.trigger.is_auto();
     // SF09：采集前拒绝启用来源的有效目录冲突（相同/嵌套）。
     validate_opts_sources_overlap(opts)?;
     // SF09：跨 adapter 认领同一规范化文件 → 明确归属冲突（移除
@@ -963,7 +1096,8 @@ fn collect_all_with_sources(
         Some(&openrouter_path),
         &index_path,
     );
-    log::info!(
+    path_info!(
+        auto,
         "价格加载：{}，{:.0} ms",
         if cache_hit {
             "进程内缓存命中"
@@ -979,7 +1113,8 @@ fn collect_all_with_sources(
     if let Some(rep) =
         crate::history::migrate_legacy_cache(&history, &legacy_cache_file_path(opts))?
     {
-        log::info!(
+        path_info!(
+            auto,
             "遗留缓存迁移：文件 {}，事件行 {}，新增 {}，更新 {}，已存在 {}，冲突 {}，拒绝 {}",
             rep.files,
             rep.events_seen,
@@ -1121,7 +1256,8 @@ fn collect_all_with_sources(
             all_events.extend(parsed.events);
         }
         stats.files_scanned = files.len() as u64;
-        log::info!(
+        path_info!(
+            auto,
             "采集 {}: 文件 {}（指纹命中 {} / 重解析 {}），解析 {} ms，解析层事件 {}，累计 {} ms",
             kind.as_str(),
             files.len(),
@@ -1156,7 +1292,8 @@ fn collect_all_with_sources(
                 .collect();
             if !stale.is_empty() {
                 let n = history.mark_sources_missing(&stale)?;
-                log::info!(
+                path_info!(
+                    auto,
                     "来源缺失（{}）：{} 个文件标记为 missing（已保存用量保留）",
                     kind.as_str(),
                     n
@@ -1171,7 +1308,8 @@ fn collect_all_with_sources(
     let t_dedupe = std::time::Instant::now();
     let before = all_events.len();
     let (mut events, dropped) = dedupe_events(all_events);
-    log::info!(
+    path_info!(
+        auto,
         "去重：{} → {}（丢弃 {}），{} ms",
         before,
         events.len(),
@@ -1210,7 +1348,11 @@ fn collect_all_with_sources(
         ));
     }
     let write_summary = history.write_batch(&writes)?;
-    log::info!(
+    // U06：`changed` = 本轮确有新增或更新——决定定时线程是否发变化通知，
+    // 也是自动触发下**唯一**保留 info 的依据（没有新数据就没有排障价值）。
+    let changed = write_summary.changed_events() > 0;
+    path_info!(
+        auto && !changed,
         "历史库写入：新增 {}，更新 {}，已存在 {}，冲突 {}，陈旧 {}；别名 +{}，来源 +{}",
         write_summary.inserted,
         write_summary.updated,
@@ -1240,7 +1382,8 @@ fn collect_all_with_sources(
         // 取得，避免为统计再物化一次事件集。
         s.stats.events = history.event_count_of(s.agent)?;
     }
-    log::info!(
+    path_info!(
+        auto,
         "采集完成：本轮解析 {} 项，警告 {}，总计 {} ms",
         registrations.len(),
         warnings.len(),
@@ -1248,6 +1391,7 @@ fn collect_all_with_sources(
     );
     Ok(Collected {
         generation: history_generation,
+        changed,
         sources: reports,
         pricing,
         warnings,
@@ -1946,7 +2090,10 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
         state.push_rollup(r)?;
     }
     let agg = state.finish(&pricing)?;
-    log::info!(
+    // U06：自动刷新（`Trigger::Auto`）的查询路径日志降级为 debug。
+    let auto = snapshot.trigger.is_auto();
+    path_info!(
+        auto,
         "聚合（{}）：{} 组 / {} 请求（日汇总桶 {}，未解决覆盖 {}），{} ms",
         agg.by,
         agg.groups.len(),
@@ -1955,7 +2102,8 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
         selection.coverage.unresolved_buckets,
         t_agg.elapsed().as_millis()
     );
-    log::info!(
+    path_info!(
+        auto,
         "汇总完成（会话 {}）：by={} 组={} 请求={}，{} ms",
         snapshot.query_id,
         agg.by,
@@ -2156,7 +2304,8 @@ pub(crate) fn query_events_from(
         });
         Ok(())
     })?;
-    log::info!(
+    path_info!(
+        snapshot.trigger.is_auto(),
         "明细完成（会话 {}）：筛选 模型={:?} 项目={:?} 日={:?}，返回 {} 行 / 共 {} 条，{} ms",
         snapshot.query_id,
         filter.model,
@@ -2849,6 +2998,7 @@ cache_read = 0.4
     fn retained_bytes_cover_session_metadata_and_row_index() {
         let meta_only = |warnings: Vec<String>| CollectionSnapshot {
             generation: 0,
+            changed: false,
             sources: Vec::new(),
             warnings,
             pricing: Arc::new(Pricing::default()),
@@ -3413,6 +3563,7 @@ cache_read = 0.0
             let ok2 = |_gen: u64| -> Result<CollectionSnapshot> {
                 Ok(CollectionSnapshot {
                     generation: 9,
+                    changed: false,
                     sources: Vec::new(),
                     warnings: Vec::new(),
                     pricing: std::sync::Arc::new(crate::pricing::Pricing::default()),
@@ -3443,6 +3594,7 @@ cache_read = 0.0
                 go_rx.recv().unwrap();
                 Ok(CollectionSnapshot {
                     generation: 1,
+                    changed: false,
                     sources: Vec::new(),
                     warnings: Vec::new(),
                     pricing: std::sync::Arc::new(crate::pricing::Pricing::default()),
@@ -3722,6 +3874,83 @@ cache_read = 0.0
         assert_eq!(r.sources.len(), 1);
         assert_eq!(r.sources[0].agent, AgentKind::ClaudeCode);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── U06：collect_only 与"最近一次采集结果" ────────────────
+
+    /// U06："最近一次采集结果"**只在该采集键命中时**返回；采集键不同
+    ///（换来源目录/缓存目录）不得复用别人的采集结果。
+    #[test]
+    fn recent_collection_hits_only_matching_key() {
+        let cache = tmp_dir("u06-recent");
+        let o = opts(Some(cache.clone()), None, false);
+        assert!(
+            recent_collection(&o).is_none(),
+            "尚未采集过时不得有最近一次采集结果"
+        );
+
+        let first = collect_only(&o).unwrap();
+        let hit = recent_collection(&o).expect("同一采集键必须命中");
+        assert_eq!(hit.generation, first.generation);
+        assert_eq!(hit.changed, first.changed, "缓存必须就是那一轮的结果");
+
+        // 采集键不同：另一份来源配置不得复用别人的结果。
+        let other = opts(Some(tmp_dir("u06-recent-other")), None, false);
+        assert!(recent_collection(&other).is_none(), "采集键不同不得复用");
+
+        // 再次 collect_only：仍走同一个单飞协调器（一轮一次），并刷新缓存。
+        let rounds = collect_rounds_for_tests(&o);
+        let second = collect_only(&o).unwrap();
+        assert_eq!(
+            collect_rounds_for_tests(&o),
+            rounds + 1,
+            "每次 collect_only 恰好跑一轮采集"
+        );
+        assert_eq!(
+            recent_collection(&o).unwrap().generation,
+            second.generation,
+            "缓存必须刷新为最近一轮"
+        );
+        std::fs::remove_dir_all(&cache).ok();
+    }
+
+    /// U06：同参并发 `collect_only` 由单飞协调器合并为**一轮**采集
+    ///（跟随者复用同一航班结果）；缓存写入在锁内只做赋值、不调用采集。
+    #[test]
+    fn concurrent_collect_only_runs_single_round() {
+        let cache = tmp_dir("u06-singleflight");
+        let o = opts(Some(cache.clone()), None, false);
+        // 让领队工作足够长：四个线程必然重叠在同一次航班上。
+        TEST_COLLECT_DELAY_MS.store(300, Ordering::Relaxed);
+        let before = collect_rounds_for_tests(&o);
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let o = o.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    collect_only(&o).unwrap()
+                })
+            })
+            .collect();
+        let outcomes: Vec<CollectOutcome> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+        TEST_COLLECT_DELAY_MS.store(0, Ordering::Relaxed);
+
+        assert_eq!(
+            collect_rounds_for_tests(&o),
+            before + 1,
+            "同参并发必须只跑一轮采集"
+        );
+        assert!(
+            outcomes
+                .iter()
+                .all(|r| r.generation == outcomes[0].generation),
+            "跟随者必须拿到同一轮结果"
+        );
+        assert!(outcomes[0].changed, "首次采集 fixture 必然有写入");
+        std::fs::remove_dir_all(&cache).ok();
     }
 }
 

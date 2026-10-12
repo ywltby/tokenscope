@@ -9,7 +9,7 @@ mod window_state;
 mod acceptance;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use tauri::{
@@ -123,6 +123,7 @@ pub fn run() {
             commands::settings_set_price_auto_sync,
             commands::settings_set_close_action,
             commands::settings_set_timezone,
+            commands::settings_set_collect_interval,
             commands::close_resolve,
             commands::open_settings_file,
         ])
@@ -416,76 +417,238 @@ fn persist_window_state(app: &tauri::AppHandle) {
     }
 }
 
-// ── H04：原生日志定时采集（5 分钟）─────────────────────────
+// ── U06：原生日志定时采集（间隔可调 + 变化通知）───────────────
 // 与启动采集、手动刷新共用 `report::collect_flighted` 的后台单飞协调器：
-// 三者并发时只会真正采集一次。定时线程只走原生日志，**不**读取、也不导入
-// CCS 库（计划不变量 11），且只在业务解锁（Ready）后运行。
-const COLLECT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
-/// 首查延迟：启动本身已经采集过一次，避开启动瞬间的磁盘竞争。
-const COLLECT_FIRST_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
-/// 停止轮询粒度（退出时快速响应）。
-const COLLECT_STOP_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+// 并发时只会真正采集一次。定时线程每轮只做「采集 + 写历史库」
+// （`report::collect_only`，不建查询快照、不聚合），只有本轮确有新增或更新
+// 时才向前端发 `usage-updated`。只走原生日志，**不**读取、也不导入 CCS 库
+//（计划不变量 11），且只在业务解锁（Ready）后运行。
+
+/// 首轮延迟上限：启动本身已经采集过一次，避开启动瞬间的磁盘竞争；
+/// 实际首轮延迟 = min(当前间隔, 30s)。
+const COLLECT_FIRST_DELAY_CAP: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// U06：一次可中断等待的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitOutcome {
+    /// 等满整个时长（该采集了）。
+    Elapsed,
+    /// 被设置变更唤醒：按新间隔重新计时。
+    Woken,
+    /// 应用正在退出：立即结束循环。
+    Stop,
+}
+
+/// U06：定时采集的等待信号——「退出中断」与「设置变更唤醒」统一到一次
+/// 可中断等待上（条件变量，不做分片轮询）：退出与设置保存都在毫秒级生效。
+#[derive(Clone)]
+struct CollectSignal {
+    inner: Arc<CollectSignalInner>,
+}
+
+struct CollectSignalInner {
+    /// 间隔版本：`wake()` 递增，等待者据此判断"按新间隔重新计时"。
+    version: Mutex<u64>,
+    cv: Condvar,
+    stop: AtomicBool,
+}
+
+impl CollectSignal {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(CollectSignalInner {
+                version: Mutex::new(0),
+                cv: Condvar::new(),
+                stop: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// 等待 `total`：被设置变更唤醒 → `Woken`；退出请求 → `Stop`；否则 `Elapsed`。
+    fn wait(&self, total: Duration) -> WaitOutcome {
+        let mut version = self.inner.version.lock().unwrap_or_else(|e| e.into_inner());
+        let baseline = *version;
+        let deadline = std::time::Instant::now() + total;
+        loop {
+            if self.inner.stop.load(Ordering::SeqCst) {
+                return WaitOutcome::Stop;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return WaitOutcome::Elapsed;
+            }
+            let (guard, _) = self
+                .inner
+                .cv
+                .wait_timeout(version, left)
+                .unwrap_or_else(|e| e.into_inner());
+            version = guard;
+            if *version != baseline {
+                return WaitOutcome::Woken;
+            }
+        }
+    }
+
+    /// 设置保存成功后的唤醒：等待者按新间隔重新计时。
+    fn wake(&self) {
+        let mut version = self.inner.version.lock().unwrap_or_else(|e| e.into_inner());
+        *version = version.wrapping_add(1);
+        self.inner.cv.notify_all();
+    }
+
+    /// 退出请求：立即中断等待（幂等）。
+    fn request_stop(&self) {
+        self.inner.stop.store(true, Ordering::SeqCst);
+        self.inner.cv.notify_all();
+    }
+}
+
+/// U06：一轮采集的处置。
+enum CollectRound {
+    /// 本轮不采集（业务未解锁、退出中或设置不可用）。
+    Skipped,
+    /// 完成一轮采集。
+    Done(tokenscope::report::CollectOutcome),
+}
+
+/// U06：定时采集循环——**可注入**（间隔读取、采集、通知均经闭包），
+/// 不依赖 `tauri::AppHandle`，因此测试可用毫秒级间隔驱动两条关键断言：
+/// 改设置后按新间隔触发、采集耗时超过间隔时**不并发**（同一时刻只有一个
+/// 采集在跑）。
+///
+/// 时序：
+/// - 每轮等待前读取**当前**间隔（设置页改动下一轮即生效）；
+/// - 首轮延迟 = min(间隔, 30s)；
+/// - 等待排在采集**之后**，所以间隔从上一轮结束开始计时（不叠加）；
+/// - 设置保存成功唤醒 → 立即按新间隔重新计时；
+/// - 退出请求 → 立即结束（不忙轮询、不等满整周期）。
+fn run_collect_loop<I, C, N>(
+    signal: &CollectSignal,
+    mut next_interval: I,
+    mut collect: C,
+    mut notify: N,
+) where
+    I: FnMut() -> Duration,
+    C: FnMut() -> CollectRound,
+    N: FnMut(u64),
+{
+    let mut first_round = true;
+    loop {
+        let interval = next_interval();
+        let delay = if first_round {
+            interval.min(COLLECT_FIRST_DELAY_CAP)
+        } else {
+            interval
+        };
+        match signal.wait(delay) {
+            WaitOutcome::Stop => break,
+            WaitOutcome::Woken => {
+                // 设置变更：按新间隔重新计时（不再享受首轮缩短）。
+                first_round = false;
+                continue;
+            }
+            WaitOutcome::Elapsed => {}
+        }
+        first_round = false;
+        match collect() {
+            CollectRound::Skipped => {}
+            CollectRound::Done(outcome) => {
+                if outcome.changed {
+                    notify(outcome.generation);
+                }
+            }
+        }
+    }
+}
+
+/// 进程级信号：生产路径共用（测试自行构造实例，避免相互干扰）。
+fn collect_signal() -> &'static CollectSignal {
+    static SIGNAL: std::sync::OnceLock<CollectSignal> = std::sync::OnceLock::new();
+    SIGNAL.get_or_init(CollectSignal::new)
+}
+
+/// U06：设置保存成功后唤醒定时线程，按新间隔重新计时（幂等；未启动线程时
+/// 只是记下一次版本，不产生副作用）。
+pub(crate) fn wake_collection_scheduler() {
+    collect_signal().wake();
+}
+
+/// U06：向前端的变化通知载荷（字段名 `generation`，与前端约定一致）。
+#[derive(Clone, serde::Serialize)]
+struct UsageUpdated {
+    generation: u64,
+}
+
+/// U06：每轮的生效间隔——每轮从设置读取；手工写入的非法值由 settings 层
+/// 回退默认并 warn。设置整体不可用时按默认间隔计时（不重复 warn：同一原因
+/// 由本轮采集的跳过告警给出），只记 debug 说明间隔来源。
+fn collect_interval() -> Duration {
+    match commands::load_settings_strict() {
+        Ok(s) => Duration::from_secs(u64::from(tokenscope::settings::collect_interval_secs_from(
+            &s,
+        ))),
+        Err(e) => {
+            let fallback = tokenscope::settings::default_collect_interval_secs();
+            log::debug!("定时采集间隔读取失败，本轮按默认 {fallback} 秒计时: {e:#}");
+            Duration::from_secs(u64::from(fallback))
+        }
+    }
+}
+
+/// U06：一轮采集（装配层只做"解锁判定 → 读设置 → collect_only"的接线）。
+fn collect_round(app: &tauri::AppHandle) -> CollectRound {
+    let phase = privacy::phase_of(app);
+    if !phase.allows_business() {
+        // 未同意/退出中：不打开历史库、不读任何来源日志。
+        log::debug!(
+            "定时采集轮询：phase={} → 跳过（未解锁业务）",
+            phase.as_str()
+        );
+        return CollectRound::Skipped;
+    }
+    let loaded = commands::load_settings_strict();
+    match commands::collection_opts_from(loaded) {
+        Err(e) => {
+            log::warn!("定时采集跳过（设置不可用）: {e}");
+            CollectRound::Skipped
+        }
+        Ok(mut opts) => {
+            // 自动触发：采集路径的 info 降为 debug（唯一例外是确有写入的摘要）。
+            opts.trigger = tokenscope::report::Trigger::Auto;
+            match tokenscope::report::collect_only(&opts) {
+                Ok(outcome) => CollectRound::Done(outcome),
+                Err(e) => {
+                    tokenscope::logging::log_error("定时采集失败", &e);
+                    CollectRound::Skipped
+                }
+            }
+        }
+    }
+}
 
 static COLLECT_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static COLLECT_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn start_periodic_collection(app: tauri::AppHandle) {
-    use std::sync::atomic::Ordering;
     if COLLECT_STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
+    let signal = collect_signal().clone();
     std::thread::spawn(move || {
-        sleep_interruptible(COLLECT_FIRST_DELAY);
-        loop {
-            if COLLECT_STOP.load(Ordering::SeqCst) {
-                break;
-            }
-            let phase = privacy::phase_of(&app);
-            if !phase.allows_business() {
-                // 未同意/退出中：不打开历史库、不读任何来源日志。
-                log::debug!(
-                    "定时采集轮询：phase={} → 跳过（未解锁业务）",
-                    phase.as_str()
-                );
-            } else {
-                let loaded = commands::load_settings_strict();
-                match commands::collection_opts_from(loaded) {
-                    Err(e) => log::warn!("定时采集跳过（设置不可用）: {e}"),
-                    Ok(opts) => {
-                        let t = std::time::Instant::now();
-                        // 提交观察在共享采集边界（report::collect_flighted）登记，
-                        // 手动/定时/启动入口统一被退出等待覆盖（N06）。
-                        let result = tokenscope::report::summary(&opts);
-                        match result {
-                            Ok(r) => log::debug!(
-                                "定时采集完成：请求 {}，警告 {}，{} ms",
-                                r.totals.requests,
-                                r.warnings.len(),
-                                t.elapsed().as_millis()
-                            ),
-                            Err(e) => tokenscope::logging::log_error("定时采集失败", &e),
-                        }
-                    }
+        let app_for_loop = app;
+        run_collect_loop(
+            &signal,
+            collect_interval,
+            || collect_round(&app_for_loop),
+            |generation| {
+                // 只有本轮确有新增或更新才通知（`collect_only` 的 changed 判定）。
+                log::debug!("定时采集有变化：generation={generation}，通知界面刷新");
+                if let Err(e) = app_for_loop.emit("usage-updated", UsageUpdated { generation }) {
+                    log::warn!("发送用量变化通知失败: {e}");
                 }
-            }
-            sleep_interruptible(COLLECT_INTERVAL);
-        }
+            },
+        );
         log::info!("定时采集线程已退出");
     });
-}
-
-/// 分片睡眠：退出请求可在一个分片内被观察到（否则最长要等整个周期）。
-fn sleep_interruptible(total: std::time::Duration) {
-    use std::sync::atomic::Ordering;
-    let mut left = total;
-    while left > std::time::Duration::ZERO {
-        if COLLECT_STOP.load(Ordering::SeqCst) {
-            return;
-        }
-        let slice = left.min(COLLECT_STOP_POLL);
-        std::thread::sleep(slice);
-        left = left.saturating_sub(slice);
-    }
 }
 
 /// 退出路径：请求停止定时采集，并等待**已经开始的提交**完成（有限等待，
@@ -493,8 +656,8 @@ fn sleep_interruptible(total: std::time::Duration) {
 /// 等待观察在共享采集边界上（N06）：手动刷新、重扫与定时采集的领队工作
 /// 全部登记，任何入口的进行中提交都被等待。
 pub(crate) fn stop_periodic_collection(wait: std::time::Duration) {
-    use std::sync::atomic::Ordering;
-    COLLECT_STOP.store(true, Ordering::SeqCst);
+    // U06：退出中断与设置唤醒共用同一次可中断等待——先让定时线程立即结束等待。
+    collect_signal().request_stop();
     let deadline = std::time::Instant::now() + wait;
     while tokenscope::report::active_collection_submissions() > 0
         && std::time::Instant::now() < deadline
@@ -1014,5 +1177,199 @@ mod tests {
         assert!(t.elapsed() < Duration::from_secs(1), "无提交时立即返回");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── U06：定时采集调度（可注入间隔与采集实现）────────────────
+
+    /// 收满 `n` 轮触发时刻；超时即断言失败（不静默跳过）。
+    fn drain_triggers(rx: &std::sync::mpsc::Receiver<Instant>, n: usize) -> Vec<Instant> {
+        let mut out = Vec::new();
+        while out.len() < n {
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(t) => out.push(t),
+                Err(e) => panic!("等待第 {} 轮触发超时: {e}", out.len() + 1),
+            }
+        }
+        out
+    }
+
+    /// U06：设置保存成功后的唤醒必须让定时线程**按新间隔重新计时**，
+    /// 而不是等完旧间隔；首轮延迟 = min(间隔, 30s)；后续间隔不叠加。
+    #[test]
+    fn collect_loop_follows_updated_interval_after_wake() {
+        let signal = CollectSignal::new();
+        let interval_ms = Arc::new(std::sync::atomic::AtomicU64::new(500));
+        let (tx, rx) = std::sync::mpsc::channel::<Instant>();
+        let handle = std::thread::spawn({
+            let signal = signal.clone();
+            let interval_ms = interval_ms.clone();
+            move || {
+                run_collect_loop(
+                    &signal,
+                    || Duration::from_millis(interval_ms.load(Ordering::SeqCst)),
+                    || {
+                        let _ = tx.send(Instant::now());
+                        CollectRound::Done(tokenscope::report::CollectOutcome {
+                            generation: 1,
+                            changed: false,
+                        })
+                    },
+                    |_| {},
+                )
+            }
+        });
+
+        let first = drain_triggers(&rx, 2);
+        let before = first[1].duration_since(first[0]);
+        assert!(
+            before >= Duration::from_millis(350),
+            "初始间隔应约 500ms（首轮延迟 = min(间隔, 30s)）：{before:?}"
+        );
+
+        // 等价于 settings_set_collect_interval 保存成功后的唤醒。
+        interval_ms.store(60, Ordering::SeqCst);
+        signal.wake();
+
+        let after = drain_triggers(&rx, 2);
+        let woken = after[0].duration_since(first[1]);
+        assert!(
+            woken < Duration::from_millis(300),
+            "唤醒后必须按新间隔重新计时（实测 {woken:?}，旧间隔 500ms）"
+        );
+        let next = after[1].duration_since(after[0]);
+        assert!(
+            next >= Duration::from_millis(20) && next < Duration::from_millis(400),
+            "后续轮次按新间隔触发（不叠加）：{next:?}"
+        );
+
+        signal.request_stop();
+        handle.join().unwrap();
+    }
+
+    /// U06：单轮采集耗时超过间隔时**不并发**——同一时刻只有一个采集在跑，
+    /// 轮数由“采集耗时 + 间隔”决定，而不是按间隔堆积。
+    #[test]
+    fn collect_loop_rounds_never_overlap_when_slow() {
+        let signal = CollectSignal::new();
+        let running = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let max_running = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let rounds = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let handle = std::thread::spawn({
+            let signal = signal.clone();
+            let running = running.clone();
+            let max_running = max_running.clone();
+            let rounds = rounds.clone();
+            move || {
+                run_collect_loop(
+                    &signal,
+                    || Duration::from_millis(20),
+                    || {
+                        let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_running.fetch_max(now, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(80));
+                        running.fetch_sub(1, Ordering::SeqCst);
+                        rounds.fetch_add(1, Ordering::SeqCst);
+                        CollectRound::Done(tokenscope::report::CollectOutcome {
+                            generation: 0,
+                            changed: false,
+                        })
+                    },
+                    |_| {},
+                )
+            }
+        });
+
+        std::thread::sleep(Duration::from_millis(600));
+        signal.request_stop();
+        handle.join().unwrap();
+
+        assert_eq!(
+            max_running.load(Ordering::SeqCst),
+            1,
+            "同一时刻只能有一个采集在跑（同轮不得重叠）"
+        );
+        let n = rounds.load(Ordering::SeqCst);
+        assert!(n >= 2, "慢采集期间仍要按间隔轮转（实测 {n} 轮）");
+        assert!(
+            n <= 10,
+            "轮数必须由“采集耗时 + 间隔”决定（600ms / 100ms ≈ 6，实测 {n} 轮）"
+        );
+    }
+
+    /// U06：只有历史库确有写入的轮次才发变化通知，恰好一次且携带该轮
+    /// generation；无变化的轮次不发。
+    #[test]
+    fn collect_loop_notifies_only_on_change() {
+        let signal = CollectSignal::new();
+        let (tx, rx) = std::sync::mpsc::channel::<u64>();
+        let rounds = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let handle = std::thread::spawn({
+            let signal = signal.clone();
+            let rounds = rounds.clone();
+            move || {
+                run_collect_loop(
+                    &signal,
+                    || Duration::from_millis(10),
+                    || {
+                        let n = rounds.fetch_add(1, Ordering::SeqCst) + 1;
+                        CollectRound::Done(tokenscope::report::CollectOutcome {
+                            generation: n,
+                            changed: n.is_multiple_of(2),
+                        })
+                    },
+                    move |generation| {
+                        let _ = tx.send(generation);
+                    },
+                )
+            }
+        });
+
+        let mut events = Vec::new();
+        for _ in 0..3 {
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(g) => events.push(g),
+                Err(e) => panic!("等待变化通知超时: {e}"),
+            }
+        }
+        signal.request_stop();
+        handle.join().unwrap();
+
+        assert_eq!(
+            events,
+            vec![2, 4, 6],
+            "只有 changed 轮次发通知，且携带该轮 generation"
+        );
+        assert!(
+            rounds.load(Ordering::SeqCst) >= 6,
+            "收到第 3 个变化通知时至少已完成 6 轮（其中 3 轮无变化、未发通知）"
+        );
+        let extra: Vec<u64> = rx.try_iter().collect();
+        assert!(
+            extra.iter().all(|g| g.is_multiple_of(2)),
+            "无变化轮次不得发通知：{extra:?}"
+        );
+    }
+
+    /// U06：退出中断与设置唤醒共用同一次等待——请求停止后立即结束等待
+    ///（不忙轮询、不等满整个周期）。
+    #[test]
+    fn collect_signal_wait_returns_immediately_on_stop() {
+        let signal = CollectSignal::new();
+        let waiter = {
+            let signal = signal.clone();
+            std::thread::spawn(move || {
+                let t = Instant::now();
+                let outcome = signal.wait(Duration::from_secs(30));
+                (outcome, t.elapsed())
+            })
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        signal.request_stop();
+        let (outcome, elapsed) = waiter.join().unwrap();
+        assert_eq!(outcome, WaitOutcome::Stop, "停止必须中断等待");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "停止必须立即中断等待（实测 {elapsed:?}）"
+        );
     }
 }

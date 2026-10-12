@@ -75,6 +75,8 @@ pub const PROTECTED_COMMANDS: &[&str] = &[
     "settings_set_close_action",
     // U03：统计时区（settings.toml 单一来源）同样在未解锁业务时拒绝读写。
     "settings_set_timezone",
+    // U06：JSONL 自动读取间隔（settings.toml 单一来源）同样受闸门保护。
+    "settings_set_collect_interval",
     "close_resolve",
     "open_settings_file",
 ];
