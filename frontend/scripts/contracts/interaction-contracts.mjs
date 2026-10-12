@@ -76,6 +76,26 @@ async function gotoPage(page, label) {
   await page.waitForTimeout(400);
 }
 
+/**
+ * U05：切到设置页的某个分区。设置页一次只显示一个分区（未选中的用 v-show
+ * 隐藏——隐藏时 `innerText` 与可见性断言都拿不到内容），因此任何针对具体
+ * 控件的操作都要先切到它所在的分区。宽窗口是左侧导航，窄窗口是顶部分段控件。
+ */
+async function gotoSettingsSection(page, label) {
+  const candidates = [
+    page.locator(".settings-nav-item").filter({ hasText: label }).first(),
+    page.locator(".settings-nav .ts-segmented button").filter({ hasText: label }).first(),
+  ];
+  for (const btn of candidates) {
+    if ((await btn.count()) > 0) {
+      await realClick(page, btn);
+      await page.waitForTimeout(300);
+      return true;
+    }
+  }
+  return false;
+}
+
 /** 量测第一个**不透明**绘制面的亮度；没有不透明面（样式未加载）时 available=false。 */
 async function probeCanvasLuma(page, expect) {
   return page.evaluate((expected) => {
@@ -230,6 +250,8 @@ const IMPL = {
       const start = Date.now();
       await gotoPage(session.page, "设置");
       const elapsed = Date.now() - start;
+      // U05：价格表只在首次进入「价格」分区时挂载，先切分区再数行。
+      await gotoSettingsSection(session.page, "价格");
       const rows = await session.page.locator('.ts-auto-table-pricing tbody tr').count();
       ctx.record(name, "8466 条价格首批只渲染 200 行", rows === 200, `rendered=${rows}, navigation=${elapsed}ms`);
       ctx.record(name, "进入设置在 3 秒内完成", elapsed < 3000, `${elapsed}ms`);
@@ -256,6 +278,8 @@ const IMPL = {
       await openDashboard(session);
       const page = session.page;
       await gotoPage(page, "设置");
+      // U05：Token 显示颜色在「外观」分区。
+      await gotoSettingsSection(page, "外观");
       const picker = page.getByLabel("缓存命中显示颜色", { exact: true });
       ctx.record(name, "四类颜色都有独立选择器", await page.locator('input[type="color"]').count() === 4, "输入/输出/缓存写/缓存命中");
       await picker.fill("#b42266");
@@ -274,6 +298,7 @@ const IMPL = {
       const restored = await readColors();
       ctx.record(name, "重载后仍保留自定义颜色", restored.legend === changed.legend && restored.summary === changed.summary, JSON.stringify(restored));
       await gotoPage(page, "设置");
+      await gotoSettingsSection(page, "外观");
       await page.getByRole('button', { name: '恢复默认颜色', exact: true }).click();
       await gotoPage(page, "汇总");
       const reset = await readColors();
@@ -362,13 +387,8 @@ const IMPL = {
     try {
       await openSettings(session);
       const page = session.page;
-      const text = await page.locator("#app").innerText();
-      ctx.record(
-        "settings_failure_retry_restores_all_controls",
-        "失败态：设置错误条可见并带原因",
-        text.includes("设置读取失败") && text.includes("设置文件损坏（合成）"),
-        text.match(/设置读取失败[^\n]{0,60}/)?.[0] ?? "未找到错误条",
-      );
+      // U05：关闭动作在「通用」分区；设置错误条与来源控件在「数据源」分区。
+      const generalText = await page.locator("#app").innerText();
       const closeControl = page.locator('[aria-label="关闭窗口时"]').first();
       const closeDisabled = await closeControl.evaluate((el) => {
         const node = el.closest(".n-select") ?? el;
@@ -377,8 +397,22 @@ const IMPL = {
       ctx.record(
         "settings_failure_retry_restores_all_controls",
         "失败态：关闭动作控件不可操作（未知不得变成可保存默认值）",
-        closeDisabled === true || text.includes("关闭动作未知"),
-        `select disabled=${closeDisabled} 说明含"未知"=${text.includes("关闭动作未知")}`,
+        closeDisabled === true || generalText.includes("关闭动作未知"),
+        `select disabled=${closeDisabled} 说明含"未知"=${generalText.includes("关闭动作未知")}`,
+      );
+      const sourceNavOk = await gotoSettingsSection(page, "数据源");
+      ctx.record(
+        "settings_failure_retry_restores_all_controls",
+        "失败态：分区导航可用（切到数据源分区）",
+        sourceNavOk === true,
+        "左栏 / 顶部分段控件切分区",
+      );
+      const text = await page.locator("#app").innerText();
+      ctx.record(
+        "settings_failure_retry_restores_all_controls",
+        "失败态：设置错误条可见并带原因",
+        text.includes("设置读取失败") && text.includes("设置文件损坏（合成）"),
+        text.match(/设置读取失败[^\n]{0,60}/)?.[0] ?? "未找到错误条",
       );
       const saveButtons = page.locator("button", { hasText: "保存" });
       const firstDisabled = await saveButtons
@@ -402,31 +436,37 @@ const IMPL = {
       await retry.click();
       await page.waitForTimeout(600);
 
-      const after = await page.locator("#app").innerText();
       const dirClaude = page.locator('[aria-label="Claude Code 日志目录"]').first();
       const dirCodex = page.locator('[aria-label="Codex 日志目录"]').first();
       const claudeValue = await dirClaude.inputValue();
       const codexValue = await dirCodex.inputValue();
-      const autoSync = page.locator('[role="switch"][aria-label="自动同步价格"]').first();
-      const autoSyncChecked = await autoSync.getAttribute("aria-checked");
       ctx.record(
         "settings_failure_retry_restores_all_controls",
         "重试后：来源目录恢复为成功读取值（断言真实输入值）",
         claudeValue === "C:/restored/claude" && codexValue === "C:/restored/codex",
         `claude=${claudeValue} codex=${codexValue}`,
       );
+      // U05：自动同步开关在「价格」分区。
+      await gotoSettingsSection(page, "价格");
+      const autoSync = page.locator('[role="switch"][aria-label="自动同步价格"]').first();
+      const autoSyncChecked = await autoSync.getAttribute("aria-checked");
       ctx.record(
         "settings_failure_retry_restores_all_controls",
         "重试后：自动同步开关恢复（aria-checked=true）",
         autoSyncChecked === "true",
         `aria-checked=${autoSyncChecked}`,
       );
+      // U05：关闭动作在「通用」分区。
+      await gotoSettingsSection(page, "通用");
+      const afterGeneral = await page.locator("#app").innerText();
       ctx.record(
         "settings_failure_retry_restores_all_controls",
         "重试后：关闭动作恢复为已保存值且错误清除",
-        after.includes("直接退出") && !after.includes("设置读取失败"),
-        `含"直接退出"=${after.includes("直接退出")} 错误残留=${after.includes("设置读取失败")}`,
+        afterGeneral.includes("直接退出") && !afterGeneral.includes("设置读取失败"),
+        `含"直接退出"=${afterGeneral.includes("直接退出")} 错误残留=${afterGeneral.includes("设置读取失败")}`,
       );
+      // U05：来源保存按钮在「数据源」分区。
+      await gotoSettingsSection(page, "数据源");
       const enabledAfter = await saveButtons
         .first()
         .evaluate((el) => el.disabled === false && !el.className.includes("disabled"));
@@ -451,6 +491,8 @@ const IMPL = {
     const cases = [
       {
         key: "source",
+        // U05：来源目录在「数据源」分区。
+        section: "数据源",
         action: async (session) => {
           const input = session.page.locator('[aria-label="Claude Code 日志目录"]').first();
           await input.fill("C:/saved-by-user");
@@ -469,6 +511,8 @@ const IMPL = {
         // IPC；晚到的旧读取也不得把它伪装成已知值（浏览器侧真实可操作路径
         // 只有"错误条重试挂起"这一条，页面级 loading 遮罩期间点不到任何东西）。
         key: "close-action",
+        // U05：关闭动作在「通用」分区。
+        section: "通用",
         action: async (session) => {
           const select = session.page.locator('[aria-label="关闭窗口时"]').first();
           // naive 的禁用标记在内部 .n-base-selection（root 只有 .n-select），
@@ -507,6 +551,8 @@ const IMPL = {
       {
         // 自动同步：同样必须保持未知且不可操作，晚到旧读取不改写状态。
         key: "auto-sync",
+        // U05：自动同步开关在「价格」分区。
+        section: "价格",
         action: async (session) => {
           const sw = session.page.locator('[role="switch"][aria-label="自动同步价格"]').first();
           const disabled = await sw.evaluate((el) =>
@@ -552,6 +598,8 @@ const IMPL = {
       try {
         await openSettings(session);
         const page = session.page;
+        // U05：设置错误条在「数据源」分区（隐藏分区的文本与控件都不可用）。
+        await gotoSettingsSection(page, "数据源");
         // 首读失败 → 点击错误条"重试"发起第二次读取（挂起中）
         const retry = retryButtonIn(session, "设置读取失败");
         ctx.record(
@@ -569,7 +617,9 @@ const IMPL = {
           pending.length === 1 && pending[0].startsWith("settings_get#"),
           `挂起键=${pending.join(",")}`,
         );
-        // 挂起期间执行用户动作（来源=编辑并保存；关闭动作/自动同步=尝试写入）
+        // 挂起期间执行用户动作（来源=编辑并保存；关闭动作/自动同步=尝试写入）；
+        // U05：各 case 的控件在不同分区，先切过去（隐藏分区的控件不可操作）。
+        await gotoSettingsSection(page, c.section);
         const acted = await c.action(session);
         const saved = session.ipcCalls.filter(
           (x) => x.cmd === "source_config_set" || x.cmd.startsWith("settings_set_"),
@@ -592,6 +642,7 @@ const IMPL = {
         // 释放旧读取（内容是编辑前的旧值）
         session.fixture.settleDeferred(pending[0], session.fixture.staleSettings());
         await page.waitForTimeout(500);
+        await gotoSettingsSection(page, c.section);
         const v = await c.verify(session);
         ctx.record(
           "saved_settings_survive_delayed_read",
@@ -871,6 +922,8 @@ const IMPL = {
       const s2 = await ctx.open({ fixture: "normal", viewport: VIEWPORTS.desktop, theme: "dark" });
       try {
         await openSettings(s2);
+        // U05：单价说明与候选规则说明都在「价格」分区（隐藏元素不可聚焦）。
+        await gotoSettingsSection(s2.page, "价格");
         const labels = await s2.page
           .locator(".help-trigger")
           .evaluateAll((els) => els.map((e) => e.getAttribute("aria-label") ?? ""));
@@ -1496,6 +1549,8 @@ const IMPL = {
     try {
       await openSettings(session);
       const page = session.page;
+      // U05：来源行与行内错误都在「数据源」分区。
+      await gotoSettingsSection(page, "数据源");
       const claude = sourceBlockOf(page, "Claude Code");
       const codex = sourceBlockOf(page, "Codex");
       const input = page.locator('[aria-label="Claude Code 日志目录"]').first();
@@ -1672,6 +1727,8 @@ const IMPL = {
     try {
       await openSettings(session);
       const page = session.page;
+      // U05：设置错误条与来源控件都在「数据源」分区。
+      await gotoSettingsSection(page, "数据源");
       const firstText = await page.locator("#app").innerText();
       ctx.record(
         "late_failed_settings_read_does_not_downgrade_saved",

@@ -245,6 +245,13 @@ body {
   font-variant-numeric: tabular-nums lining-nums;
 }
 
+/* 正文内强调：说明文字里的关键限定（如「只在点击后只读打开」）用字重 +
+   主文字色表达，不新增颜色 token，也不使用 markdown 星号。 */
+.ts-strong {
+  font-weight: 600;
+  color: var(--ts-text);
+}
+
 /* 玻璃吸顶导航栏：内容滚过时透出模糊 */
 .ts-glass {
   background: var(--ts-glass);

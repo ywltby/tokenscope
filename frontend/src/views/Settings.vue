@@ -50,6 +50,7 @@ import {
 } from "../lib/tokenDisplay";
 import HelpTooltip from "../components/HelpTooltip.vue";
 import ScrollList from "../components/ScrollList.vue";
+import SegmentedControl from "../components/SegmentedControl.vue";
 import { SETTINGS_PRELOAD } from "../lib/settingsPreload";
 import { useTokenColors } from "../composables/tokenColors";
 
@@ -65,6 +66,45 @@ const readInitial = preload ? preload.read : invoke;
 
 const props = defineProps<{ refreshKey: number }>();
 const msg = useMessage();
+
+// ── U05：分区导航 ────────────────────────────────────────────────
+// 一次只显示一个分区（v-show，未选中的分区保留挂载，未保存草稿不丢）；
+// 窗口 ≤ 1100px 时导航改为顶部分段控件（与 DESIGN.md §4 的边距断点一致）。
+const SECTIONS = [
+  { id: "general", label: "通用" },
+  { id: "sources", label: "数据源" },
+  { id: "usage", label: "用量数据" },
+  { id: "pricing", label: "价格" },
+  { id: "appearance", label: "外观" },
+  { id: "advanced", label: "高级" },
+] as const;
+type SectionId = (typeof SECTIONS)[number]["id"];
+const sectionOptions: { value: SectionId; label: string }[] = SECTIONS.map((s) => ({
+  value: s.id,
+  label: s.label,
+}));
+
+const activeSection = ref<SectionId>("general");
+/** 首次进入「价格」分区才挂载价格表并发起首次读取（进入前不发价格表请求）。 */
+const pricingVisited = ref(false);
+
+const NARROW_NAV_QUERY = "(max-width: 1100px)";
+const narrowNav = ref(false);
+const navMode = computed<"side" | "top">(() => (narrowNav.value ? "top" : "side"));
+let narrowMedia: MediaQueryList | null = null;
+
+function onNarrowChange(e: MediaQueryListEvent): void {
+  narrowNav.value = e.matches;
+}
+
+/** U05：切换分区；首次进入「价格」分区时挂载并读取价格表。 */
+function selectSection(id: SectionId): void {
+  activeSection.value = id;
+  if (id === "pricing" && !pricingVisited.value) {
+    pricingVisited.value = true;
+    void loadPricing();
+  }
+}
 
 const sources = ref<SourceStatus[]>([]);
 const cache = ref<CacheInfo | null>(null);
@@ -396,13 +436,11 @@ async function loadAll(): Promise<void> {
   // 各独立读取并发发起、各自处理失败——不用一个共享 loading/error
   // 覆盖全部结果。RC03：设置配置（来源草稿 + 自动同步 + 关闭动作）
   // 由**同一次** settings_get 初始化，不再分三个消费点各读一遍。
-  await Promise.allSettled([
-    loadSources(),
-    loadCache(),
-    loadPricing(),
-    loadSettings(),
-    loadCcsDefaults(),
-  ]);
+  const tasks: Promise<unknown>[] = [loadSources(), loadCache(), loadSettings(), loadCcsDefaults()];
+  // U05：价格视图推迟到首次进入「价格」分区（进入前不发价格表请求、不挂载
+  // 价格表）；已访问过后，后台刷新（切页 / refreshKey）照常重读。
+  if (pricingVisited.value) tasks.push(loadPricing());
+  await Promise.allSettled(tasks);
 }
 
 // C1：来源配置草稿（编辑后按行保存）
@@ -660,6 +698,17 @@ onDeactivated(() => {
   active = false;
 });
 onMounted(() => {
+  // U05：布局断点监听。非浏览器 / 测试环境可能没有 matchMedia——按宽窗口
+  // 处理，不抛异常。
+  if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
+    narrowMedia = window.matchMedia(NARROW_NAV_QUERY);
+    narrowNav.value = narrowMedia.matches;
+    if (typeof narrowMedia.addEventListener === "function") {
+      narrowMedia.addEventListener("change", onNarrowChange);
+    } else if (typeof narrowMedia.addListener === "function") {
+      narrowMedia.addListener(onNarrowChange);
+    }
+  }
   // RC03：设置配置只读一次（loadAll → loadSettings）。
   void loadAll().then(() => {
     // 久未打开的启动预读先展示，再校验新鲜度，不遮挡现有界面。
@@ -675,6 +724,12 @@ watch(
 );
 onUnmounted(() => {
   disposed = true; // RC03：卸载后请求不得写状态或发通知
+  const mq = narrowMedia;
+  narrowMedia = null;
+  if (!mq) return;
+  if (typeof mq.removeEventListener === "function")
+    mq.removeEventListener("change", onNarrowChange);
+  else if (typeof mq.removeListener === "function") mq.removeListener(onNarrowChange);
 });
 
 /// RC06：单价列由**显式四桶 key** 决定名称与取值。
@@ -806,39 +861,41 @@ defineExpose({ priceColumns });
 </script>
 
 <template>
-  <div class="settings-view">
-    <!-- 首次读取尚未完成时保留稳定布局，各区块独立显示状态。 -->
-    <div style="min-height: 380px">
-      <section class="settings-group token-color-settings">
-        <h2 class="group-title">Token 显示颜色</h2>
-        <section class="ts-card settings-card">
-          <div class="setting-help">
-            用于趋势图、图例和用量比例条。修改即时生效并自动保存，自定义颜色在明暗模式下共用。
-          </div>
-          <div v-for="bucket in TOKEN_BUCKETS" :key="bucket.key" class="setting-row">
-            <label :for="`token-color-${bucket.key}`" class="setting-label">{{
-              bucket.label
-            }}</label>
-            <div class="setting-control token-color-control">
-              <span class="ts-num">{{ tokenColors[bucket.key] }}</span>
-              <input
-                :id="`token-color-${bucket.key}`"
-                type="color"
-                :value="tokenColors[bucket.key]"
-                :aria-label="`${bucket.label}显示颜色`"
-                @input="setTokenColor(bucket.key, ($event.target as HTMLInputElement).value)"
-              />
-            </div>
-          </div>
-          <NButton size="small" @click="resetColors">恢复默认颜色</NButton>
-          <div v-if="colorSaveError" class="setting-help" role="alert">
-            颜色已应用，但本机偏好保存失败；请重新选择颜色后重试。
-          </div>
-        </section>
-      </section>
-      <!-- 任务 7：macOS 系统设置式分组——组标题在卡片外，每组一张 .ts-card -->
-      <section class="settings-group">
-        <h2 class="group-title">应用</h2>
+  <div class="settings-view" :data-nav-mode="navMode" :class="{ 'is-top-nav': navMode === 'top' }">
+    <!-- U05：分区导航——窗口 ≤ 1100px 改为顶部分段控件。导航只切换显示，
+         不销毁分区（未选中的分区用 v-show 隐藏，未保存草稿留在实例里）。 -->
+    <div class="settings-nav">
+      <nav v-if="navMode === 'side'" class="settings-nav-rail ts-card" aria-label="设置分区">
+        <button
+          v-for="s in SECTIONS"
+          :key="s.id"
+          type="button"
+          class="settings-nav-item"
+          :class="{ 'is-active': activeSection === s.id }"
+          :aria-current="activeSection === s.id ? 'true' : undefined"
+          @click="selectSection(s.id)"
+        >
+          {{ s.label }}
+        </button>
+      </nav>
+      <SegmentedControl
+        v-else
+        class="settings-nav-segmented"
+        :model-value="activeSection"
+        :options="sectionOptions"
+        aria-label="设置分区"
+        @update:model-value="selectSection"
+      />
+    </div>
+    <!-- 首次读取尚未完成时保留稳定布局，各分区独立显示状态。 -->
+    <div class="settings-panels">
+      <!-- 任务 7：macOS 系统设置式分组——分区标题在卡片外，每组一张 .ts-card -->
+      <section
+        class="settings-group settings-panel"
+        v-show="activeSection === 'general'"
+        data-section="general"
+      >
+        <h2 class="group-title">通用</h2>
         <div v-if="autostartError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
             class="ts-notice-icon is-error"
@@ -914,7 +971,11 @@ defineExpose({ priceColumns });
         </section>
       </section>
 
-      <section class="settings-group">
+      <section
+        class="settings-group settings-panel"
+        v-show="activeSection === 'sources'"
+        data-section="sources"
+      >
         <h2 class="group-title">数据源</h2>
         <!-- UX06：区块独立错误 + 局部重试 -->
         <div v-if="settingsError" class="ts-notice ts-notice-inline block-error" role="alert">
@@ -1027,14 +1088,17 @@ defineExpose({ priceColumns });
             <div class="setting-help">
               留空则回到该来源的默认目录（上方「当前生效目录」是实际使用的目录，
               可能来自显式覆盖）；停用后该来源完全不参与统计。两个来源不能指向同一目录。
-              保存后回到汇总页生效。
             </div>
           </div>
         </section>
       </section>
 
-      <section class="settings-group">
-        <h2 class="group-title">缓存</h2>
+      <section
+        class="settings-group settings-panel"
+        v-show="activeSection === 'usage'"
+        data-section="usage"
+      >
+        <h2 class="group-title">用量数据</h2>
         <div v-if="cacheError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
             class="ts-notice-icon is-error"
@@ -1048,24 +1112,26 @@ defineExpose({ priceColumns });
             <circle cx="12" cy="12" r="9" />
             <path d="m9 9 6 6M15 9l-6 6" />
           </svg>
-          <span class="ts-notice-content">缓存统计读取失败：{{ cacheError }}</span>
+          <span class="ts-notice-content">用量数据统计读取失败：{{ cacheError }}</span>
           <NButton size="tiny" :loading="cacheLoading" @click="loadCache">重试</NButton>
         </div>
         <section class="ts-card settings-card">
           <div class="setting-row">
             <div class="setting-main">
-              <div class="setting-label">缓存文件</div>
+              <div class="setting-label">已采集文件</div>
             </div>
             <span class="setting-value ts-num">{{ cache ? fmtNum(cache.files) : "—" }}</span>
           </div>
           <div class="setting-row">
             <div class="setting-main">
-              <div class="setting-label">缓存事件</div>
+              <div class="setting-label">已保存请求</div>
             </div>
             <span class="setting-value ts-num">{{ cache ? fmtNum(cache.events) : "—" }}</span>
           </div>
           <div class="setting-help">
-            缓存是纯优化：任何故障都会自动退回全量扫描，统计数字不受影响。
+            用量保存在
+            <span class="ts-mono">history.db</span
+            >；来源日志删除或停用后，已保存的用量仍保留；重扫只重新解析日志，不删除历史。
           </div>
           <NCollapse class="tech-collapse">
             <NCollapseItem title="技术详情" name="tech">
@@ -1073,7 +1139,7 @@ defineExpose({ priceColumns });
               <div v-for="s in sources" :key="`eff-${s.agent}`" class="tech-line">
                 {{ AGENT_LABEL[s.agent] ?? s.agent }} 当前生效目录：{{ s.dir }}
               </div>
-              <div class="tech-line">缓存路径：{{ cache?.path ?? "—" }}</div>
+              <div class="tech-line">历史库路径：{{ cache?.path ?? "—" }}</div>
               <div class="tech-line">models.dev 快照：{{ pricing?.modelsdev_path ?? "—" }}</div>
               <div class="tech-line">OpenRouter 快照：{{ pricing?.openrouter_path ?? "—" }}</div>
               <div class="tech-line">外置价格文件：{{ pricing?.path ?? "—" }}</div>
@@ -1094,10 +1160,8 @@ defineExpose({ priceColumns });
             >
           </div>
         </section>
-      </section>
 
-      <section class="settings-group">
-        <h2 class="group-title">从 CCS 导入用量</h2>
+        <!-- U05：CCS 手动导入并入「用量数据」分区（同一分区里的第二张卡） -->
         <section class="ts-card settings-card">
           <div class="setting-help">
             手动一次性导入 cc-switch 的历史用量（请求明细 + 日汇总）：只在点击后<span
@@ -1135,7 +1199,8 @@ defineExpose({ priceColumns });
             <div class="setting-main">
               <div class="setting-label">来源统计时区</div>
               <div class="setting-help">
-                来源库按本机时区生成日键：日汇总只在**这个时区**下与展示时区一致时才参与按日统计（不一致时按日视图会提示切换或只看请求明细）。
+                来源库按本机时区生成日键：日汇总只在<span class="ts-strong">这个时区</span
+                >下与展示时区一致时才参与按日统计（不一致时按日视图会提示切换或只看请求明细）。
               </div>
             </div>
             <NSelect
@@ -1190,9 +1255,8 @@ defineExpose({ priceColumns });
                   {{ fmtNum(ccsPreview.would_update) }}、已存在
                   {{ fmtNum(ccsPreview.would_unchanged) }}、冲突保留现有值
                   {{ fmtNum(ccsPreview.would_conflict) }}、过期跳过
-                  {{ fmtNum(ccsPreview.would_stale) }}（库内已有更晚观察的终值，
-                  I-P3-2：保证与"可导入"逐行闭合）；净新增 token
-                  {{ fmtNum(netNewTokens) }}。无项目归属记录
+                  {{ fmtNum(ccsPreview.would_stale) }}（库内已有更晚观察的终值，已跳过）； 净新增
+                  token {{ fmtNum(netNewTokens) }}。无项目归属记录
                   {{ fmtNum(ccsPreview.records_without_project) }} 条（项目视图显示为「未知」）。
                   <span v-if="ccsPreview.unsupported_apps.length > 0"
                     >不支持的应用：{{
@@ -1254,7 +1318,11 @@ defineExpose({ priceColumns });
         </section>
       </section>
 
-      <section class="settings-group">
+      <section
+        class="settings-group settings-panel"
+        v-show="activeSection === 'pricing'"
+        data-section="pricing"
+      >
         <h2 class="group-title">价格</h2>
         <div v-if="pricingError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
@@ -1286,11 +1354,17 @@ defineExpose({ priceColumns });
               pricing?.modelsdev_count ?? 0
             }}
             条，主源）+ OpenRouter（{{ pricing?.openrouter_count ?? 0 }} 条，补充源）；
-            同一模型的候选按本次请求条件计价：有完整四桶价格的候选优先，在其中取总费用
-            最高者；没有完整候选时才回退到部分候选中已知费用最高者（并列按来源优先级 &gt; 完整匹配
-            &gt; 前缀更长打破），四桶单价取自同一候选、不跨候选拼价；
-            未收录模型按未知价格处理（无内置兜底）。本地快照是离线缓存：断网时继续按
-            上次同步数据计价；同步时间与快照路径见"缓存"组的技术详情。
+            同一模型的候选按本次请求条件计价，未收录模型按未知价格处理（无内置兜底）。
+            <HelpTooltip label="价格候选选择规则" content-label="价格候选选择规则">
+              <template #trigger>候选选择规则</template>
+              <div>
+                有完整四桶价格的候选优先，在其中取总费用最高者；没有完整候选时才回退到部分候选中已知费用最高者（并列按来源优先级
+                &gt; 完整匹配 &gt; 前缀更长打破），四桶单价取自同一候选、不跨候选拼价。
+              </div>
+              <div>
+                本地快照是离线缓存：断网时继续按上次同步数据计价；同步时间与快照路径见「用量数据」分区的技术详情。
+              </div>
+            </HelpTooltip>
           </div>
           <!-- 任务 7：主源缺失/损坏与快照警告 = .ts-notice（不再用高饱和 NAlert） -->
           <div
@@ -1354,14 +1428,21 @@ defineExpose({ priceColumns });
             </div>
           </div>
           <div class="setting-help">
-            {{ pricing?.path }}（TOML；候选来源之一，同价并列时优先，保存后下次统计生效）
+            {{ pricing?.path ?? "—" }}（TOML；候选来源之一，同价并列时优先，保存后下次统计生效）
           </div>
           <!-- RC07：单价量纲显式说明（列头同样标注 $/M）。 -->
           <div class="setting-help unit-note">
             单价单位：{{ UNIT_PRICE_DENOMINATOR }}（每百万
             token）；四桶单价来自同一选中候选（不跨候选拼价）。
           </div>
-          <ScrollList :rows="pricing?.entries ?? []" label="价格列表" class="ts-auto-table-pricing">
+          <!-- U05：价格表只在首次进入「价格」分区时挂载（进入前不发价格表请求、
+               不挂载价格表组件）。 -->
+          <ScrollList
+            v-if="pricingVisited"
+            :rows="pricing?.entries ?? []"
+            label="价格列表"
+            class="ts-auto-table-pricing"
+          >
             <template #default="{ rows }">
               <NDataTable
                 :columns="priceColumns"
@@ -1377,9 +1458,45 @@ defineExpose({ priceColumns });
         </section>
       </section>
 
-      <!-- 关闭确认与配置文件计划 Task 4：高级配置 = 直接编辑设置文件 -->
-      <section class="settings-group">
-        <h2 class="group-title">高级配置</h2>
+      <section
+        class="settings-group settings-panel token-color-settings"
+        v-show="activeSection === 'appearance'"
+        data-section="appearance"
+      >
+        <h2 class="group-title">外观</h2>
+        <section class="ts-card settings-card">
+          <div class="setting-help">
+            用于趋势图、图例和用量比例条。修改即时生效并自动保存，自定义颜色在明暗模式下共用。
+          </div>
+          <div v-for="bucket in TOKEN_BUCKETS" :key="bucket.key" class="setting-row">
+            <label :for="`token-color-${bucket.key}`" class="setting-label">{{
+              bucket.label
+            }}</label>
+            <div class="setting-control token-color-control">
+              <span class="ts-num">{{ tokenColors[bucket.key] }}</span>
+              <input
+                :id="`token-color-${bucket.key}`"
+                type="color"
+                :value="tokenColors[bucket.key]"
+                :aria-label="`${bucket.label}显示颜色`"
+                @input="setTokenColor(bucket.key, ($event.target as HTMLInputElement).value)"
+              />
+            </div>
+          </div>
+          <NButton size="small" @click="resetColors">恢复默认颜色</NButton>
+          <div v-if="colorSaveError" class="setting-help" role="alert">
+            颜色已应用，但本机偏好保存失败；请重新选择颜色后重试。
+          </div>
+        </section>
+      </section>
+
+      <!-- 关闭确认与配置文件计划 Task 4：高级 = 直接编辑设置文件 -->
+      <section
+        class="settings-group settings-panel"
+        v-show="activeSection === 'advanced'"
+        data-section="advanced"
+      >
+        <h2 class="group-title">高级</h2>
         <section class="ts-card settings-card">
           <div class="setting-help">
             设置配置文件：~/.tokenscope/settings.toml（TOML，带字段注释，可直接编辑）。
@@ -1393,6 +1510,77 @@ defineExpose({ priceColumns });
   </div>
 </template>
 <style scoped>
+/* U05：分区布局——宽窗口左侧导航 + 右侧内容；≤1100px 改为顶部分段控件。 */
+.settings-view {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ts-space-5);
+}
+.settings-view.is-top-nav {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.settings-nav {
+  flex: 0 0 168px;
+  position: sticky;
+  /* 吸顶导航栏高 52px（MainApp.vue）+ 16px 间距：滚动时导航不被顶栏盖住 */
+  top: calc(52px + var(--ts-space-4));
+  z-index: 1;
+}
+.settings-view.is-top-nav .settings-nav {
+  flex: 0 0 auto;
+  position: static;
+}
+
+/* 分区导航沿用 .ts-card 材质与分段控件的交互 token，不新增材质。 */
+.settings-nav-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--ts-space-2);
+}
+.settings-nav-item {
+  display: block;
+  width: 100%;
+  padding: var(--ts-space-2) var(--ts-space-3);
+  border: none;
+  border-radius: var(--ts-radius-control);
+  background: transparent;
+  color: var(--ts-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    color var(--ts-motion) var(--ts-ease),
+    background var(--ts-motion) var(--ts-ease);
+}
+.settings-nav-item:hover {
+  background: var(--ts-fill-hover);
+  color: var(--ts-text);
+}
+.settings-nav-item.is-active {
+  background: var(--ts-accent-soft);
+  color: var(--ts-text);
+  font-weight: 600;
+}
+.settings-nav-item:focus-visible {
+  outline: 2px solid var(--ts-accent);
+  outline-offset: 2px;
+}
+.settings-nav-segmented {
+  max-width: 100%;
+}
+
+.settings-panels {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* 首次读取尚未完成时保留稳定布局（各分区独立显示状态）。 */
+  min-height: 380px;
+}
+
 .token-color-control {
   display: flex;
   align-items: center;
@@ -1417,6 +1605,10 @@ defineExpose({ priceColumns });
 }
 .settings-group:last-child {
   margin-bottom: 0;
+}
+/* U05：同一分区里多张卡（「用量数据」= 历史统计 + CCS 导入）之间留出间距 */
+.settings-panel .ts-card + .ts-card {
+  margin-top: var(--ts-space-4);
 }
 
 .block-error {
