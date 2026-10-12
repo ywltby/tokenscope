@@ -9,7 +9,7 @@
 **Tech Stack:** Rust / SQLite / Tauri 2 / Vue 3，以及现有 Rust、Vitest、浏览器和原生 acceptance 测试工具。
 
 - 整理日期：2026-10-11。
-- 状态：**9 项完成、1 项部分完成、3 项本轮验收未执行，共 4 项待办。** PR #4 已创建，804230f 的两套 Actions 均因 Python 3.12 Windows 标准流编码在事实契约失败，未构建或实跑安装。校验器已固定 UTF-8，新增四项回归先红后绿；3.12 强制 CP1252 与 3.14 全部 Python 40 项通过，根/壳/前端/PS7 门禁通过。N01–N09、A01–A06、M10 保持关闭；合并须修复提交对应的 PR CI 与安装成功证据，N12 系统及 N10/N11/N13 不关闭。详见[PR #4 编码阻断修复](../../reviews/2026-10-11-main-merge-readiness.md#pr4-utf8-ci-fix)，此前各轮保留为历史。
+- 状态：**9 项完成、1 项部分完成、3 项本轮验收未执行，共 4 项待办。** PR #4 的 dceee11 普通 CI 成功，两条安装契约及生产 NSIS 打包通过，实际安装因 workflow 参数数组展开失败，没有工件。PR/Release 两处已改为按名称绑定，新增实际调用 16 组合先红后绿，Python 3.12 强制 CP1252 全部 42 项通过。正式合并须最新修复提交的两套 CI、真实安装场景及工件；N12 及 N10/N11/N13 不关闭。详见[workflow 参数绑定修复](../../reviews/2026-10-11-main-merge-readiness.md#pr4-workflow-binding-fix)，此前各轮保留为历史。
 - 核对范围：原 active 的 25 份计划、对应 audits、M1–M11 归档、D5 清单、当前源码与测试内容、可用的历史 QA 产物和实际 CI/发布记录。
 - 整理核对起点：`add8319`；后续修复提交 `3e645f3` 的 7 项已完成独立复核与最终门禁，见[复核记录](../../reviews/2026-10-11-history-seven-fixes-recheck.md)。此前工作区结果保留为历史，不再作为当前交付结论。
 - 最近独立复核代码基线：`231f667099aff035ee2ef240dd6d356a843e8de7`；复核期间新增 `e31d1b67c0323cb1ed5466bff61ecb1819cd99d6`，仅改文档，未改变被测代码。本轮重跑完整普通与 acceptance 根/壳和前端门禁、Python/PS7 安装契约；A01–A06 已独立确认关闭。M01 的 a58684c 及后续审计循环结果保留为历史，不代替本轮实跑或当前 PR CI。
@@ -58,7 +58,7 @@
 | N09 | P2 | 测试确定性、路径隔离与当前门禁 | 已完成；`a58684c` 闭合 M01，history.db 路径清单、落盘产物及有效 SQLite 七表校验实测通过；两套 manifest 的普通/acceptance 和前端门禁全绿 | 必须；review-findings Task6、来源策略测试、当前合并门禁 |
 | N10 | P2 | 隐私原生取证工具与当前完整浏览器矩阵 | P01–P05 已实现；P06 的强验收未闭合 | 必须；最新隐私计划 P06 |
 | N11 | P2 | 最新项目/模型/CCS 原生统一验收 | 分别存在待验，合并一次执行 | 必须；A06/B03、MP06、H08、设计 Task8 |
-| N12 | P2（编码阻断已本地修复，待 PR #4 新版本实跑；系统验收 P3） | 当前产物的 D5 系统、安装及发布验收 | 部分完成；A01–A06 保持关闭。PR #4 首次两套 Actions 在 Python 编码契约失败，未实跑安装；UTF-8 输出修复及四项非 UTF-8 回归通过，事实契约 33 + metadata 7、PS7 22 与完整本地门禁通过。须修复提交对应的 CI/gate、Install test/install-test 绿灯和场景工件；固定旧包及系统/发布签字仍待验 | 系统验收随发布批次；D5、RC11/AP08 |
+| N12 | P2（workflow 调用已修复，待 PR #4 新版本实跑；系统验收 P3） | 当前产物的 D5 系统、安装及发布验收 | 部分完成；A01–A06 保持关闭。dceee11 普通 CI 成功，安装契约及打包通过，但 workflow 参数绑定失败。PR/Release 已同步名称绑定，新增真实调用契约接入门禁，Python 全部 42 项通过。须最新提交的 CI/gate、Install test/install-test 绿灯和真实场景工件；固定旧包及系统/发布签字仍待验 | 系统验收随发布批次；D5、RC11/AP08 |
 | 2026-10-12 | 双审计员循环第一轮（执行） | 完成 | 审计员 B（核心）：P2-1 CCS Codex 捐献按 (scheme,value) 判重修复 + 回归；P2-2 内容等值原生写升级 rank（classify_against）+ 回归；P3 query.rs 额度文案/v3 utc 同步/文档修正。审计员 A（门禁）：P2-1 失败路径复制 live-logs；P3 卸载 30s 轮询、file URI 编码、非 db 退出 2、make_legacy_cache 幂等；.gitignore 补 Python/日志模式。两个审计员均确认无 P1 |
 | 2026-10-12 | 双审计员循环第二轮（执行） | 完成 | 审计员 C（热路径+契约）：P2 热路径 7 处 DBG eprintln 删除；P2 M05 反例"错因通过"修复——四个反例接 New-StandInProcess、全部 Test-Throws 钉住 -ExpectedText、反例 1 重构为"归档旧日志→等待超时"并沿用生产证据根命名。审计员 D（集成）：确证同一 P2 并补 P3——test_install.ps1 失败模型注释、安装失败写证据说明、ExpectedRequests 从 manifest 事件数推导、非 CI 运行守卫（Reset-UserHome 保护）、证据动作不掩盖原始异常；v3 迁移 observed_at_utc 回填改 RFC3339（strftime）+ 回归（口径更正见第三轮：回填 SQL 实际在 SCHEMA_V3）；inspect_history 模式查询统一 DatabaseError 守卫与 NULL/空串区分显示（26 项 unittest）。两审计员均确认无 P1 |
 | 2026-10-12 | 双审计员循环第三轮（执行） | 完成 | 审计员 E（核心）：无 P1/P2，前两轮修复经对抗探针成立；P3——inspect_history 默认汇总改受检解析累加（SQLite SUM 在 u64 规模隐式转 REAL、坏值静默计 0）+ 3 项回归、absent 库行式模式不输出空行、aggregate 每事件两次 estimate 合并为一次（首次重构误改 unknown_pricing 累积语义，被金标对账测试抓出后修正）、四处错误文案空格串清理、utc 回填口径更正为 v3（回归测试改名 v3_backfill_*）。审计员 F（门禁）：无 P1/P2；P3——CONSENT=1 本机调试路径补 TEMP 回退、Copy-LiveLogsToEvidence 补 -Recurse、反例 1 归档前置断言改 Test-True 计账（契约 21→22 项）、install-test.yml 版本读取加 SemVer 强校验。两审计员均确认无 P1 |
@@ -366,12 +366,13 @@ def compare_events(actual_rows, expected_rows):
 2. **增强真实旧缓存 fixture。** 修改 `scripts/make_legacy_cache.py`，按上表造两个文件/两个会话，含 null 与非空 event_cwd；把生成器读回及 3/180/35/2 断言加入同一个 Python 测试文件。输入生成与输出期望保持可独立核对。
 3. **抽出可测的 M05 生命周期。** 新建 `scripts/install_test_helpers.ps1` 与 `scripts/test_install_helpers.ps1`。前者只定义函数，不含安装、注册表操作、默认用户目录写入或顶层执行；后者只使用临时目录和受控进程替身。先复现旧日志、快启动、仅写库、早退 0/23、关闭失败，再落实上述单次启动控制流。测试须调用脚本实际使用的同一函数，不能另写一份正确逻辑代替。
 4. **接回真实安装场景。** 修改 `scripts/test_install.ps1`，场景 2/5/6 调用同一启动与关闭流程，场景 2/3/4/5/6 使用同一事实校验器。删除等待函数内的第二次启动、将已自行退出 0 当健康的分支，以及数据错误后的默认成功回退；仅在完整成功后生成 PASS 摘要。
-5. **接入门禁并签验。** 修改 `.github/actions/checks/action.yml` 加入下面两条定向命令；`.github/workflows/install-test.yml` 在生产构建之前也运行这两条，以免单独手动运行绕过单测。Release 已依赖 gate，因此沿用共享质量门禁与同一安装脚本；在两个安装 job 所在的 install-test.yml/release.yml 中增加 always() 的证据上传步骤，复用仓库已有钉住 SHA 的 upload-artifact 动作。现有 Python/PowerShell 环境配置与依赖锁保持一致，PS1 统一 UTF-8 且 RequiresVersion=7。
+5. **接入门禁并签验。** 修改 `.github/actions/checks/action.yml` 加入下面三条定向命令；`.github/workflows/install-test.yml` 在生产构建之前也运行这三条，以免单独手动运行绕过单测。第三条是 PR #4 实跑后补充的 workflow 调用契约，直接验证 PR/Release 的真实 run 块与生产参数声明。Release 已依赖 gate，因此沿用共享质量门禁与同一安装脚本；在两个安装 job 所在的 install-test.yml/release.yml 中增加 always() 的证据上传步骤，复用仓库已有钉住 SHA 的 upload-artifact 动作。现有 Python/PowerShell 环境配置与依赖锁保持一致，PS1 统一 UTF-8 且 RequiresVersion=7。
 
 ```powershell
 python -B -m unittest discover -s scripts -p "test_inspect_history.py" -v
 # 必须立即检查 LASTEXITCODE，非 0 退出该门禁步骤
 pwsh -NoProfile -File scripts/test_install_helpers.ps1
+python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
 # 必须立即检查 LASTEXITCODE，非 0 退出该门禁步骤
 ```
 
@@ -504,3 +505,4 @@ python -B -m unittest discover -s scripts -p "test_release_metadata.py" -v
 | 2026-10-12 | a64d340 N12 设计实施独立复核 | M06 契约通过，M05 集成及门禁未完成 | Python 22/metadata 7、Rust 迁移 8/acceptance 3（2 忽略）/回归 29 通过；实际 PS7 7.6.6 契约退出 1、完整生命周期正例退出 0xC000013A。真实 Run-AppLifecycle 抽取复现启动函数不存在；当前日志写入临时 DataDir/logs 仍等待超时；五个日志反例都因缺 Process 抛错。PR 安装 workflow 无两条前置契约，卸载后无 manifest。无打开 PR/当前 SHA 全事件 Actions 0，main 0 behind/57 ahead；9 完成/1 部分/3 待验。详见设计实施复核 A01–A06；本批不提交推送 |
 | 2026-10-12 | 231f667 代码 / e31d1b6 文档的 main 合并门槛独立复核 | 本地就绪；PR CI 与安装实跑待验 | A01–A06 全部关闭；普通/acceptance 根库各 462/10 忽略、壳 46/51、前端 364、Python 36、PS7 22 和双 manifest 全部门禁通过。实际编排隔离探针证实一次启动、当前 query_id/3 请求、关闭前后 manifest、当前日志与结果保存；外部启动/关闭替换、观察缩短，未执行 NSIS 或真实产品。两 SHA 全事件 Actions 均 0、无打开 PR、main 仍祖先。N12 安装部分待当前 PR CI+Install test 绿灯，其余系统及 N10/N11/N13 不关闭；发现一条非阻断 P3 内部文案残留，归 N11 验收。完整证据见最新合并门槛复核 |
 | 2026-10-12 | PR #4 首次 Actions 编码阻断与修复 | 原两套运行失败；修复本地通过，新提交远程结果待验 | 804230f 的 CI 38195571861 与 Install test 38195571882 同样两项失败，事实契约之后的安装构建/场景及工件未执行。Python 3.12 管道沿用系统编码，使中文 stderr 转义、stdout 抛 UnicodeEncodeError 覆盖退出码。脚本入口固定 UTF-8；新增四项/12 组合先红后绿。3.12 强制 CP1252、3.14 全部 Python 各 40 通过；完整根/壳普通+acceptance、前端和 PS7 门禁通过。推送修复提交触发 PR 新运行，不重跑旧失败、不合并；详见 PR #4 编码阻断修复 |
+| 2026-10-12 | PR #4 第二次安装失败与 workflow 调用修复 | dceee11 CI 成功，安装失败；调用修复定向通过，新提交待验 | CI 38198245109 全部成功，Install 38198244797 两条契约及 NSIS 打包通过，场景 1 的路径被数组展开绑定为 -InstallerPath，0 断言通过/1 失败，无工件。PR/Release 两处改为名称哈希绑定；提取真实 run 块与生产参数声明的临时替身契约覆盖 16 组合，旧写法全红、修复全绿。Python 3.12 CP1252 共 42 项及三份 YAML/diff 检查通过，调用契约接入生产构建前。未实跑本机 NSIS 或改用户数据，未重跑旧失败、未合并；最新远程结果以 PR Checks 为准 |

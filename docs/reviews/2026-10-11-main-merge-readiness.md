@@ -1,6 +1,6 @@
 # 整合计划修复复核与 main 合并可行性
 
-> 最新状态（2026-10-12）：PR #4 已创建，804230f 的两套 Actions 均在事实校验契约失败，尚未构建 NSIS 或执行安装。根因是 Python 3.12 的 Windows 管道编码，校验器已固定 UTF-8；新增四项回归先红后绿，Python 3.12 强制 CP1252 与 Python 3.14 均 40 项通过，其他完整本地门禁保持通过。详见[PR #4 编码阻断修复](#pr4-utf8-ci-fix)。A01–A06 保持闭合，正式合并须 PR 最新版本的两套检查成功及安装证据；N12 系统与 N10/N11/N13 不关闭。
+> 最新状态（2026-10-12）：PR #4 的 `dceee11` 普通 CI 已成功，两条安装契约与生产 NSIS 打包通过；实际安装因 workflow 数组展开把参数名当成路径而失败，没有工件。PR/Release 两处已改为名称绑定，新增实际调用契约 16 个组合先红后绿，Python 3.12 强制 CP1252 的全部 42 项通过。详见[workflow 参数绑定修复](#pr4-workflow-binding-fix)。正式合并仍须最新提交的两套检查和真实安装证据；N12 保持部分完成，其余系统及 N10/N11/N13 不关闭。
 
 ## `16beea1` 第四轮历史复核
 
@@ -456,3 +456,19 @@ Cargo 命令与 checks action 对齐，额外使用 --offline 防止验证时改
 - 根库普通/acceptance 各 462 通过/10 忽略；壳 46/51；前端 364；PS7 22；双 manifest fmt/Clippy（-D warnings）、前端 typecheck/format/build 全部通过。
 
 修复推送来源分支后，由 PR synchronize 自动触发新的两套运行，原失败记录保留。合并须检查修复提交所对应的最新 CI/gate 与 Install test/install-test，以及真实安装场景和工件；此处只记录失败与修复时的本地验证，后续远程结果以 PR Checks 为准。未手工重跑原失败、修改检查规则或执行合并；N12 保持部分完成，其他系统/隐私/原生/性能任务不关闭。
+
+<a id="pr4-workflow-binding-fix"></a>
+
+## PR #4 第二次安装失败与 workflow 参数绑定修复
+
+编码修复提交为 `dceee11c50daacf0f8134143d020d8905844a125`。[CI/gate](https://github.com/ywltby/tokenscope/actions/runs/38198245109/job/114645639181) 全部成功；[Install test/install-test](https://github.com/ywltby/tokenscope/actions/runs/38198244797/job/114645637716) 的事实契约 33 项、生命周期 22 项与生产 NSIS 构建通过，随后场景 1 在真正执行安装器之前失败：Start-Process 收到的程序路径是字面量 `-InstallerPath`。断言 0 通过/1 失败，后续场景和旧包升级未执行，上传仍无工件。
+
+原因是 PowerShell 的数组展开按位置绑定：`@('-InstallerPath', $file, '-AppVersion', '0.1.0')` 不能作为脚本的名称参数展开，数组中的参数名会成为普通字符串值。PR 安装和 Release 安装步骤都有这段写法。它属于真实 workflow 调用缺陷，已通过生产参数声明与实际 run 块在临时工作区复现，不重跑碰绿。
+
+两处调用改为 `$installParameters` 哈希表，InstallerPath/AppVersion 及可选 OldInstallerUrl/OldInstallerSha256 按名称绑定，子脚本退出码仍直接传给 job。未修改安装器、事实和生命周期判定，也未放宽 CI。
+
+新增 [test_install_workflow.py](../../scripts/test_install_workflow.py)：提取两份 workflow 的真实安装 run 块，并提取生产 test_install.ps1 的参数声明；在中文及空格路径的临时影子工作区中，用只记录参数的脚本替身执行。覆盖两份 workflow × 四种旧包变量配置 × 成功/失败退出码，共 16 个组合；确认安装器路径、版本、可选值及无多余参数均正确，退出码 37 也原样传递。旧实现 16 组合失败，修复后全部通过。整个测试不执行 NSIS、不改注册表、不清空真实用户数据。
+
+该契约已接入共享 checks 和 PR 安装工作流的生产构建之前，Release gate 同时使用共享 checks。Python 3.12.13 强制 CP1252/UTF8=0 的全部 Python **42 项**通过（事实 33 + 调用 2 + metadata 7），三份修改过的 YAML 解析与 diff --check 通过；Rust/壳/前端实现未改变，上轮完整本地门禁及 dceee11 的远程 CI 成功证据保留。
+
+本条记录对应修复时的现场与定向验证；推送后最新远程状态以 PR Checks 为准。dceee11 的安装失败不能签合并，须最新版本的 CI 与 Install test 同时成功并核对实际场景和工件。main 未合并，N12/其余待验项不关闭。

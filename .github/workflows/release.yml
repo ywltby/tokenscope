@@ -120,17 +120,17 @@ jobs:
           OLD_INSTALLER_SHA256: ${{ vars.OLD_INSTALLER_SHA256 }}
         run: |
           $file = (Get-ChildItem installer/*-setup.exe | Select-Object -First 1).FullName
-          $args = @(
-            '-InstallerPath', $file,
-            '-AppVersion', '${{ needs.gate.outputs.version }}'
-          )
+          $installParameters = @{
+            InstallerPath = $file
+            AppVersion = '${{ needs.gate.outputs.version }}'
+          }
           if ($env:OLD_INSTALLER_URL) {
-            $args += @('-OldInstallerUrl', $env:OLD_INSTALLER_URL)
+            $installParameters.OldInstallerUrl = $env:OLD_INSTALLER_URL
           }
           if ($env:OLD_INSTALLER_SHA256) {
-            $args += @('-OldInstallerSha256', $env:OLD_INSTALLER_SHA256)
+            $installParameters.OldInstallerSha256 = $env:OLD_INSTALLER_SHA256
           }
-          & .\scripts\test_install.ps1 @args
+          & .\scripts\test_install.ps1 @installParameters
           exit $LASTEXITCODE
       - name: Upload install evidence
         if: always()

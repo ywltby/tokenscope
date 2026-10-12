@@ -54,6 +54,10 @@ jobs:
           if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw "版本不是 SemVer：$version" }
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
           Write-Host "应用版本：$version"
+      - name: Install acceptance workflow invocation contract (N12)
+        run: |
+          python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install acceptance fact-verifier contract (N12/M06)
         run: |
           python -B -m unittest discover -s scripts -p "test_inspect_history.py" -v
@@ -70,17 +74,17 @@ jobs:
           OLD_INSTALLER_SHA256: ${{ vars.OLD_INSTALLER_SHA256 }}
         run: |
           $file = (Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | Select-Object -First 1).FullName
-          $args = @(
-            '-InstallerPath', $file,
-            '-AppVersion', '${{ steps.app_version.outputs.version }}'
-          )
+          $installParameters = @{
+            InstallerPath = $file
+            AppVersion = '${{ steps.app_version.outputs.version }}'
+          }
           if ($env:OLD_INSTALLER_URL) {
-            $args += @('-OldInstallerUrl', $env:OLD_INSTALLER_URL)
+            $installParameters.OldInstallerUrl = $env:OLD_INSTALLER_URL
           }
           if ($env:OLD_INSTALLER_SHA256) {
-            $args += @('-OldInstallerSha256', $env:OLD_INSTALLER_SHA256)
+            $installParameters.OldInstallerSha256 = $env:OLD_INSTALLER_SHA256
           }
-          & .\scripts\test_install.ps1 @args
+          & .\scripts\test_install.ps1 @installParameters
           exit $LASTEXITCODE
       - name: Upload install evidence
         if: always()
