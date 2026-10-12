@@ -472,6 +472,92 @@ class SummaryModesCase(unittest.TestCase):
         self.assertIn("无法按 SQLite 打开", r.stderr)
 
 
+class Utf8OutputCase(unittest.TestCase):
+    """CLI 输出必须是 UTF-8，不能随 Windows 管道的系统编码改变。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name) / "中文路径"
+        self.dir.mkdir()
+        self.events = expected_events()
+        for event in self.events:
+            event["model_raw"] = "模型-测试"
+            for field in ("project_key", "session_initial_cwd", "event_cwd"):
+                if event[field] is not None:
+                    event[field] = event[field].replace("/work/", "/工作/")
+        self.expected_path = self.dir / "期望.json"
+        self.expected_path.write_text(
+            json.dumps({"schema_version": 1, "events": self.events},
+                       ensure_ascii=False), encoding="utf-8",
+        )
+
+    def make_db(self, name: str) -> str:
+        db = str(self.dir / f"{name}.db")
+        insert_events(db, self.events)
+        return db
+
+    def run_cli(self, *args: str) -> subprocess.CompletedProcess:
+        env = os.environ.copy()
+        # 显式覆盖调用者的 UTF-8 设置；旧实现即使在现代 Python 上也会红。
+        # capture_output 读取原始字节，随后严格按 CLI 的 UTF-8 契约解码。
+        env.update(PYTHONIOENCODING="cp1252", PYTHONUTF8="0")
+        return subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), *args],
+            capture_output=True, env=env, check=False,
+        )
+
+    def test_manifest_emits_utf8_with_unicode_paths_and_model(self):
+        r = self.run_cli(self.make_db("valid"), "--verify-manifest",
+                         str(self.expected_path))
+        self.assertEqual(r.returncode, 0, r.stderr.decode("utf-8"))
+        payload = json.loads(r.stdout.decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["expected_file"], str(self.expected_path))
+        self.assertEqual(payload["summary"]["requests"], 3)
+
+    def test_invalid_token_preserves_exit_2_and_utf8_diagnostics(self):
+        for field in ("input_tokens", "output_tokens",
+                      "cache_write_tokens", "cache_read_tokens"):
+            with self.subTest(field=field):
+                db = self.make_db(field)
+                con = sqlite3.connect(db)
+                try:
+                    con.execute(f"UPDATE usage_events SET {field} = ? "
+                                "WHERE record_id = ?", ("not-a-number", "m1"))
+                    con.commit()
+                finally:
+                    con.close()
+                r = self.run_cli(db, "--verify-manifest", str(self.expected_path))
+                self.assertEqual(r.returncode, 2, r.stderr.decode("utf-8"))
+                payload = json.loads(r.stdout.decode("utf-8"))
+                self.assertFalse(payload["ok"])
+                problem = next(p for p in payload["problems"] if p["field"] == field)
+                self.assertEqual(problem["expected"], "非负十进制")
+                self.assertEqual(problem["actual"], "not-a-number")
+
+    def test_corrupt_db_preserves_exit_2_and_utf8_stderr(self):
+        db = self.dir / "损坏.db"
+        db.write_text("not a SQLite database", encoding="utf-8")
+        for mode in ((), ("--projects",), ("--cwd",), ("--records",)):
+            with self.subTest(mode=mode):
+                r = self.run_cli(str(db), *mode)
+                self.assertEqual(r.returncode, 2)
+                self.assertEqual(r.stdout, b"")
+                diagnostic = r.stderr.decode("utf-8")
+                self.assertIn("无法按 SQLite 打开", diagnostic)
+                self.assertIn(str(db), diagnostic)
+                self.assertNotIn("Traceback", diagnostic)
+
+    def test_line_modes_emit_utf8(self):
+        db = self.make_db("line-modes")
+        for mode in ("--projects", "--cwd", "--records"):
+            with self.subTest(mode=mode):
+                r = self.run_cli(db, mode)
+                self.assertEqual(r.returncode, 0, r.stderr.decode("utf-8"))
+                self.assertIn("C:/工作/", r.stdout.decode("utf-8"))
+
+
 class GeneratorContractCase(unittest.TestCase):
     """生成器读回契约：旧缓存输入必须与期望文件逐条一致。"""
 

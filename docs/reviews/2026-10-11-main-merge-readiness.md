@@ -1,6 +1,6 @@
 # 整合计划修复复核与 main 合并可行性
 
-> 最新独立复核（2026-10-12，代码基线 `231f667`，随后 `e31d1b6` 仅修改文档）：**A01–A06 已闭合，代码与本地门禁具备合并条件；当前仍缺对应 PR 的普通 CI 和 Install test 实跑绿灯，不能签已满足全部合并门槛。** 普通/acceptance 根库各 462 通过/10 忽略，壳 46/51、前端 364、Python 36、PS7 22 全部通过。详见[最新合并门槛复核](#current-merge-readiness)。N12 安装部分待 Actions，其余系统/发布签字及 N10/N11/N13 继续待验；各轮结果保留为历史。
+> 最新状态（2026-10-12）：PR #4 已创建，804230f 的两套 Actions 均在事实校验契约失败，尚未构建 NSIS 或执行安装。根因是 Python 3.12 的 Windows 管道编码，校验器已固定 UTF-8；新增四项回归先红后绿，Python 3.12 强制 CP1252 与 Python 3.14 均 40 项通过，其他完整本地门禁保持通过。详见[PR #4 编码阻断修复](#pr4-utf8-ci-fix)。A01–A06 保持闭合，正式合并须 PR 最新版本的两套检查成功及安装证据；N12 系统与 N10/N11/N13 不关闭。
 
 ## `16beea1` 第四轮历史复核
 
@@ -429,3 +429,30 @@ Cargo 命令与 checks action 对齐，额外使用 --offline 防止验证时改
 发现一项非阻断的 P3 文案残留：[Settings.vue](../../frontend/src/views/Settings.vue) 第 1194 行把 I-P3-2 审计编号及“逐行闭合”说明写入设置页文本。它不改变导入或计量行为，可在 N11 的文案验收中清理；本次没有改产品源码，也不将其扩大为新的合并阻断。
 
 总账保持 9 完成 / 1 部分完成 / 3 本轮验收未执行，共四项待办。N12 **安装部分**的剩余合并条件是当前 PR Actions 实跑；N12 其余 DPI/系统/发布签字、N10 隐私强取证、N11 原生统一验收、N13 真实历史性能继续按原排期，不因本地全绿关闭。当前没有本地验证失败，复核文档按 CLAUDE.md 的默认提交流程提交推送。
+
+<a id="pr4-utf8-ci-fix"></a>
+
+## PR #4 首次 Actions 失败与 UTF-8 输出修复
+
+日期：2026-10-12；失败源 HEAD 为 `804230f43ecef68b26902c04fef86998bba715ca`。[PR #4](https://github.com/ywltby/tokenscope/pull/4) 为正式 PR，base=main、head=feat/project-path-unification，未合并。[CI/gate](https://github.com/ywltby/tokenscope/actions/runs/38195571861/job/114637322957) 与 [Install test/install-test](https://github.com/ywltby/tokenscope/actions/runs/38195571882/job/114637323311) 的实际日志都显示同样两项失败：
+
+- `test_mode_query_on_corrupted_db_is_exit_2`：错误文字应包含“无法按 SQLite 打开”，重定向 stderr 却得到字面量 Unicode 转义。
+- `test_non_numeric_token_text_is_exit_2`：受检 token 错误应返回 2，实际返回 1。
+
+安装 workflow 在生产构建前的 M06 契约步骤终止；M05 契约、NSIS 构建、五个必需安装场景未执行，always 上传未找到证据。旧包升级未执行，不能标为“已确认的可选跳过”。先前本地通过和源码复核不替代这次失败，804230f 不满足合并门槛。
+
+### 根因及可重复验证
+
+校验器采用 ensure_ascii=False 输出 JSON，中文错误也直接写 stderr，但没有指定标准流编码。Windows Python 3.12 的重定向管道可能沿用系统编码：stderr 的 backslashreplace 会把中文转义；stdout 的严格编码会抛 UnicodeEncodeError，程序来不及返回原定的 2，进程以未处理异常的 1 结束。原本地验证使用 Python 3.14 与 UTF-8 环境，遗漏了这一环境条件。
+
+本轮以本机 Python 3.12.13，设置 PYTHONIOENCODING=cp1252、PYTHONUTF8=0，先复现原两项失败。中文仓库路径还使一项 JSON 事实差异输出为空，这是同源问题。新增 Utf8OutputCase 的四项回归在旧实现中有 12 个组合失败，均因诊断转义或 UnicodeEncodeError，修复后全部通过。
+
+### 修复及本地门禁
+
+[inspect_history.py](../../scripts/inspect_history.py) 在 CLI 入口、任何输出前将 stdout/stderr 的编码固定为 UTF-8，保留 JSON/逐行格式和 0/1/2 退出码语义。[test_inspect_history.py](../../scripts/test_inspect_history.py) 用真实子进程强制 CP1252，按原始字节严格解码 UTF-8，覆盖中文路径/模型的成功 JSON、四桶非法值的退出码 2、四种坏库查询的中文 stderr，以及三种逐行模式。原有断言没有放宽，未通过设置全局 CI 编码掩盖问题。
+
+- Python 3.12.13 + CP1252/UTF8=0：事实契约 33 项通过；连同 metadata 共 40 项通过。
+- Python 3.14 + UTF-8：全部 Python 40 项通过；新增回归自身仍强制子进程使用 CP1252。
+- 根库普通/acceptance 各 462 通过/10 忽略；壳 46/51；前端 364；PS7 22；双 manifest fmt/Clippy（-D warnings）、前端 typecheck/format/build 全部通过。
+
+修复推送来源分支后，由 PR synchronize 自动触发新的两套运行，原失败记录保留。合并须检查修复提交所对应的最新 CI/gate 与 Install test/install-test，以及真实安装场景和工件；此处只记录失败与修复时的本地验证，后续远程结果以 PR Checks 为准。未手工重跑原失败、修改检查规则或执行合并；N12 保持部分完成，其他系统/隐私/原生/性能任务不关闭。

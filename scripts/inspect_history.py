@@ -24,6 +24,7 @@
       区分；缺失、额外、重复、空身份、任一字段错误都失败。
       退出码：0 = 完整通过；1 = 事实差异（JSON 结果打到 stdout）；
       2 = 打开/查询/参数/期望文件错误（消息打到 stderr）。
+  stdout / stderr 固定使用 UTF-8，包括管道重定向；调用者应按 UTF-8 解码。
 """
 
 from __future__ import annotations
@@ -331,4 +332,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Windows Python 3.12 的重定向管道可能使用系统编码；中文诊断写入
+    # stdout 会抛 UnicodeEncodeError 并覆盖退出码，stderr 则可能被转义。
+    # 在任何输出前固定协议编码，不依赖调用者的 locale/PYTHONIOENCODING。
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     sys.exit(main())
