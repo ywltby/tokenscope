@@ -109,8 +109,14 @@ class InstallWorkflowCase(unittest.TestCase):
                              result.stderr.decode("utf-8", errors="replace"))
             self.assertTrue(result_path.is_file(), "安装替身未被调用")
             bound = json.loads(result_path.read_text(encoding="utf-8"))
+            # Runner 的 TEMP 可用 8.3 短名，Get-ChildItem.FullName 会展开长名。
+            # 必须指向同一个实际产物；字符串不同不代表安装器不同。
+            actual_installer = Path(bound.pop("installer"))
+            self.assertTrue(actual_installer.is_absolute(), "安装器路径必须是绝对路径")
+            self.assertTrue(actual_installer.is_file(), "安装器路径必须存在")
+            self.assertTrue(actual_installer.samefile(installer), "必须调用预期安装产物")
             self.assertEqual(bound, {
-                "installer": str(installer), "version": VERSION,
+                "version": VERSION,
                 "old_url": old_url, "old_hash": old_hash,
                 "extra_arguments": [],
             })

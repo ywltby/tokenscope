@@ -1,6 +1,6 @@
 # 整合计划修复复核与 main 合并可行性
 
-> 最新状态（2026-10-12）：PR #4 的 `dceee11` 普通 CI 已成功，两条安装契约与生产 NSIS 打包通过；实际安装因 workflow 数组展开把参数名当成路径而失败，没有工件。PR/Release 两处已改为名称绑定，新增实际调用契约 16 个组合先红后绿，Python 3.12 强制 CP1252 的全部 42 项通过。详见[workflow 参数绑定修复](#pr4-workflow-binding-fix)。正式合并仍须最新提交的两套检查和真实安装证据；N12 保持部分完成，其余系统及 N10/N11/N13 不关闭。
+> 最新状态（2026-10-12）：PR #4 的编码与两处 workflow 参数绑定已修复；849c9be 新增调用契约在 Runner 的 8.3 短/长路径上误判，挡住两套检查。测试已改为验证同一实际文件并严格核对其余参数；本地使用真实短名 TEMP 复现全红后，Python 3.12 + CP1252 的全部 42 项通过。详见[workflow 参数绑定修复及短路径补充](#pr4-workflow-binding-fix)。正式合并仍须最新提交的两套检查和真实安装证据；N12 保持部分完成，其余系统及 N10/N11/N13 不关闭。
 
 ## `16beea1` 第四轮历史复核
 
@@ -472,3 +472,11 @@ Cargo 命令与 checks action 对齐，额外使用 --offline 防止验证时改
 该契约已接入共享 checks 和 PR 安装工作流的生产构建之前，Release gate 同时使用共享 checks。Python 3.12.13 强制 CP1252/UTF8=0 的全部 Python **42 项**通过（事实 33 + 调用 2 + metadata 7），三份修改过的 YAML 解析与 diff --check 通过；Rust/壳/前端实现未改变，上轮完整本地门禁及 dceee11 的远程 CI 成功证据保留。
 
 本条记录对应修复时的现场与定向验证；推送后最新远程状态以 PR Checks 为准。dceee11 的安装失败不能签合并，须最新版本的 CI 与 Install test 同时成功并核对实际场景和工件。main 未合并，N12/其余待验项不关闭。
+
+### 849c9be 实跑补充：调用契约的 8.3 路径误判
+
+[第三次 Install test](https://github.com/ywltby/tokenscope/actions/runs/38199434645/job/114649314560) 与 [CI/gate](https://github.com/ywltby/tokenscope/actions/runs/38199434648/job/114649314598) 在新增调用契约失败：安装器已按名称正确绑定，版本/可选值/退出码均正确，但 Python 临时目录保留 `C:/Users/RUNNER~1/...`，PowerShell 的 Get-ChildItem.FullName 返回 `C:/Users/runneradmin/...`。测试要求路径字符串相等，将同一个实际文件的两个名称误判为不同安装器；这是本轮新增测试的缺陷，未执行本次 NSIS 构建或安装，仍无工件。
+
+本地用 GetShortPathNameW 得到真实临时根短名（TO68CE~1），将 TEMP/TMP 指向它，先重现 16 个组合全红。修复只调整路径验证：要求绝对路径、真实文件存在，并以 Path.samefile 确认文件身份；版本、旧包 URL/SHA、多余参数仍严格相等，0/37 退出码继续核对。错误参数名或另一安装产物仍不能通过。相同短名 TEMP 加 Python 3.12.13、CP1252/UTF8=0 的全部 **42 项**通过，不依赖修改 Runner 的临时目录来掩盖问题。
+
+第三次运行按原失败保留，修复提交触发新运行。此补充仍只确认调用契约修复，最新 CI 与实际安装及工件须重新取得，不关闭 N12。
