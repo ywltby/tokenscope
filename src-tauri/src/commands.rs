@@ -57,7 +57,11 @@ pub async fn summarize(
 ) -> Result<SummaryReport, String> {
     // P02：业务闸门——未同意（非 Ready）时不进入采集/解析/缓存/网络。
     privacy::require_ready(&privacy::state_of(&app))?;
-    let opts = query_opts(&by, agent, days, tz, from, to, rollups)?;
+    // 旧入口不带 U01 的时间预设参数（界面用 query_begin）；四组时间参数
+    // 仍由 days/from/to 三个既有参数表达。
+    let opts = query_opts(
+        &by, agent, days, tz, from, to, rollups, None, None, None, None,
+    )?;
     run_blocking("summarize", move || summary(&opts)).await
 }
 
@@ -110,6 +114,8 @@ pub async fn list_events(
 // ── SF04：查询快照命令（query_begin → query_summary/query_events）──
 
 /// 主筛选参数 → SummaryOptions（query_begin 与旧 summarize/list_events 共用）。
+// 参数面由 IPC 契约决定（每个筛选项一个 invoke 参数），非设计膨胀。
+#[allow(clippy::too_many_arguments)]
 fn query_opts(
     by: &str,
     agent: Option<String>,
@@ -118,6 +124,10 @@ fn query_opts(
     from: Option<String>,
     to: Option<String>,
     rollups: Option<String>,
+    rolling_hours: Option<u32>,
+    start_at: Option<String>,
+    end_at: Option<String>,
+    until_now: Option<bool>,
 ) -> Result<SummaryOptions, String> {
     let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings()?;
     Ok(SummaryOptions {
@@ -134,6 +144,12 @@ fn query_opts(
         tz,
         from,
         to,
+        // U01：四组时间参数原样传给内核（分组互斥、取值校验与边界换算全在
+        // report 层，命令层零业务逻辑）。
+        rolling_hours,
+        start_at,
+        end_at,
+        until_now: until_now.unwrap_or(false),
         ..Default::default()
     })
 }
@@ -161,9 +177,25 @@ pub async fn query_begin(
     from: Option<String>,
     to: Option<String>,
     rollups: Option<String>,
+    rolling_hours: Option<u32>,
+    start_at: Option<String>,
+    end_at: Option<String>,
+    until_now: Option<bool>,
 ) -> Result<tokenscope::query::QueryHandle, String> {
     privacy::require_ready(&privacy::state_of(&app))?;
-    let opts = query_opts(&by, agent, days, tz, from, to, rollups)?;
+    let opts = query_opts(
+        &by,
+        agent,
+        days,
+        tz,
+        from,
+        to,
+        rollups,
+        rolling_hours,
+        start_at,
+        end_at,
+        until_now,
+    )?;
     run_blocking("query_begin", move || {
         tokenscope::query::begin_query_handle(&opts)
     })

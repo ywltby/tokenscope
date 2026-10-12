@@ -167,11 +167,20 @@ impl QuerySnapshot {
         Ok(())
     }
 
-    /// 冻结的时间边界（`days`/`from`/`to` 在建快照时解析一次）——以
-    /// `(from, to)` 自然日文本返回，供界面显示与测试断言；`None` 表示该侧不限。
+    /// 冻结的时间边界（`days`/`from`/`to`/`rolling_hours`/自定义时刻在建快照
+    /// 时解析一次）——以 `(from, to)` 自然日文本返回，供界面显示与测试断言；
+    /// `None` 表示该侧不限。U01：**时刻模式返回该区间按查询时区覆盖的自然日
+    /// 两端**（不是时刻本身），是展示用近似，过滤一律走冻结的 `matches`。
     pub fn time_bounds(&self) -> (Option<String>, Option<String>) {
         let (from, to) = self.time_bounds.parts();
         (from.map(|d| d.to_string()), to.map(|d| d.to_string()))
+    }
+
+    /// U01：本次查询冻结的时间范围（全部时间 = `None`）。界面的范围显示必须
+    /// 取自这里（与汇总/明细同一份冻结结果），不自行计算边界。由冻结的
+    /// `TimeBounds` **派生**（不另存副本），因此与过滤判定不可能分叉。
+    pub fn range(&self) -> Option<report::RangeView> {
+        self.time_bounds.range_view()
     }
 
     pub fn pricing(&self) -> &Arc<crate::pricing::Pricing> {
@@ -209,12 +218,18 @@ pub(crate) fn drill_fingerprint(filter: &EventFilter) -> String {
 }
 
 fn main_fingerprint(opts: &SummaryOptions, tz_label: &str) -> String {
+    // U01：四组时间参数全部参与主指纹——否则不同预设（如 7d 与 24h）会共用
+    // 同一指纹，旧游标就能在另一个时间范围上被错误接受。
     format!(
-        "{}|days={:?}|from={:?}|to={:?}|tz={tz_label}",
+        "{}|days={:?}|from={:?}|to={:?}|rolling_hours={:?}|start_at={:?}|end_at={:?}|until_now={}|tz={tz_label}",
         report::collection_key(opts),
         opts.days,
         opts.from,
-        opts.to
+        opts.to,
+        opts.rolling_hours,
+        opts.start_at,
+        opts.end_at,
+        opts.until_now
     )
 }
 
@@ -621,6 +636,8 @@ pub struct QueryHandle {
     pub timezone: String,
     /// 冻结的时间基准（与 SF05 语义一致，供诊断）。
     pub as_of: String,
+    /// U01：冻结的时间范围（全部时间 = `None`，序列化为 `null`）。
+    pub range: Option<report::RangeView>,
 }
 
 /// 创建查询会话并返回句柄（GUI 命令入口：一次批次调用一次）。
@@ -632,6 +649,7 @@ pub fn begin_query_handle(opts: &SummaryOptions) -> Result<QueryHandle> {
         pricing_revision: s.pricing_revision.clone(),
         timezone: s.tz_label.clone(),
         as_of: s.as_of.to_string(),
+        range: s.range(),
     })
 }
 

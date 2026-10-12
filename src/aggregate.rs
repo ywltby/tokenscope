@@ -145,6 +145,11 @@ pub struct RollupCoverage {
     /// 筛选/分组的查询里计入；按日视图需要切回来源时区或只看请求明细）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timezone_mismatch: Option<String>,
+    /// U01：时刻范围（滚动 24h / 自定义到分钟）不选取任何日汇总桶——所涉
+    /// 自然日**确有**日汇总时为 true，界面据此提示"当前范围只统计请求明细"。
+    /// 只在确有日汇总时为 true：没有日粒度历史就不提示。界面文案由前端写。
+    #[serde(default)]
+    pub rollups_excluded_for_instant_range: bool,
 }
 
 #[derive(Debug, Serialize)]
