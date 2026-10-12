@@ -47,26 +47,24 @@ watchEffect(() => {
 
 const settingsPreload = createSettingsPreload(invoke);
 provide(SETTINGS_PRELOAD, settingsPreload);
-// 首屏先挂载；只预读数据，不提前渲染隐藏的价格表。
-onMounted(() => {
-  settingsPreload.start();
-});
+// 首屏先挂载；只预读数据，不提前渲染隐藏的价格表（启动时机见 releaseTimezoneGate）。
+const tzReady = ref(false);
+/// 时区就绪 → 放行业务页 → 再启动预读。顺序固定为"业务页先、预读后"：
+/// 汇总页挂载时会自查来源状态（`source_status`）等命令，若预读抢在前面，
+/// 业务页自身的首次调用会落到第二次上，失败态/重试路径整体错位。`nextTick`
+/// 让预读排在本次渲染（含仪表盘的 setup 与首次查询）之后。
+function releaseTimezoneGate(): void {
+  tzReady.value = true;
+  void nextTick(() => settingsPreload.start());
+}
+void initTimezone().then(releaseTimezoneGate, releaseTimezoneGate);
 
 // U03：时区就绪门控。主应用挂载（已在隐私同意之后）→ 读取设置得到时区 →
 // **时区就绪后才挂载汇总页**，因此时区就绪前不会有任何查询发出（首屏
 // query_begin 的 tz 一定是 settings.toml 的权威值，而不是先查一次再重发）。
 // 设置页同样等就绪：否则时区下拉会先渲染默认值、读到设置后再跳变。
 // 读取失败在 initTimezone 内部已降级为默认时区，这里只负责置位，绝不
-// 让首屏停在空白。
-const tzReady = ref(false);
-void initTimezone().then(
-  () => {
-    tzReady.value = true;
-  },
-  () => {
-    tzReady.value = true;
-  },
-);
+// 让首屏停在空白。预读（上面）与门控共用同一次就绪回调。
 
 const { preference, mode, setPreference } = useTheme();
 const theme = computed<GlobalTheme | null>(() => (mode.value === "dark" ? darkTheme : null));

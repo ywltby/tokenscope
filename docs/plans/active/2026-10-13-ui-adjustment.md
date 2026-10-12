@@ -406,12 +406,46 @@ type RangePreset =
 
 ## 6. 状态
 
+> 2026-10-13 执行记录：按用户指示在 `docs/ui-adjustment-plan` 分支上实施（未按第 0 节切 `feat/ui-adjustment`），**不合并 main**。每项完成后跑双 manifest 的 fmt/clippy/test 与前端 typecheck/format:check/test/build（pre-commit 钩子再跑一遍），验证、提交、推送串行执行。
+
 | 项 | 状态 | 提交 / 验证 |
 | --- | --- | --- |
-| U01 时间预设与查询边界 | 未开始 | — |
-| U02 日期弹层简化 | 未开始 | — |
-| U03 时区与串行保存 | 未开始 | — |
-| U04 汇总页状态与切页 | 未开始 | — |
-| U05 设置页分区与文案 | 未开始 | — |
-| U06 自动读取与刷新调度 | 未开始 | — |
-| U07 验收与交付 | 未开始 | — |
+| U01 时间预设与查询边界 | 已完成 | 后端 `7b0629a`、前端 `512bade`；新增 `tests/query_time_range.rs`（6 条 e2e）与 report 层 6 条单测；根库 226 / 壳 52 / 前端 459 全绿 |
+| U02 日期弹层简化 | 已完成 | 与 U01 前端同一提交 `512bade`（同一组件的整体重构，旧 `value/update:value` 契约一并换新）；`datetimerange` + `panel` 已在 naive-ui 2.45.3 真组件上验证 |
+| U03 时区与串行保存 | 已完成 | `84af3e0`；迁移三分支、串行保存、启动时序、非法值拒绝均有测试；`lib.rs` / `privacy.rs` 各加一行命令注册与分类（见第 7 节偏离 4） |
+| U04 汇总页状态与切页 | 已完成 | `55e39ff`；`useUsageQuery` 集中状态、单一查询身份、通知合并为一条、KeepAlive + 滚动保留 + 待刷新标记；表外断言改写见第 7 节偏离 2 |
+| U05 设置页分区与文案 | 已完成 | `fea16dd`；分区导航（≤1100px 转顶部分段控件）、价格懒挂载、文案修正；契约脚本按分区调整量测前置 |
+| U06 自动读取与刷新调度 | 已完成 | 后端 `27b40b5`、前端 `3717413`；`collect_only` / `Trigger` / `usage-updated` + 界面调度、状态胶囊与间隔设置；补发判据见第 7 节偏离 3 |
+| U07 验收与交付 | 进行中 | 双门禁通过；UI 契约 `check-ui-contracts.mjs` 已适配并重跑（见第 7 节偏离 6）；`DESIGN.md` / `docs/stats-semantics.md` / `CLAUDE.md` 已同步；真机与版本项见第 7 节 |
+
+## 7. 实施记录与偏离（2026-10-13 执行）
+
+执行分支：`docs/ui-adjustment-plan`（用户指示"在本分支执行、**不合并 main**"；第 0 节原定切 `feat/ui-adjustment`，以用户指示为准）。
+
+### 提交
+
+| 顺序 | 提交 | 内容 |
+| --- | --- | --- |
+| 1 | `7b0629a` | U01 后端：四组时间参数、两种边界模式、`range` 回传 |
+| 2 | `512bade` | U01 前端 + U02：预设模型、日期按钮与弹层、快照 v12 |
+| 3 | `fea16dd` | U05：设置页分区导航与文案 |
+| 4 | `84af3e0` | U03：时区单一来源与串行保存 |
+| 5 | `27b40b5` | U06 后端：`collect_only`、`Trigger`、定时线程与变化事件 |
+| 6 | `55e39ff` | U04：状态集中、切页保留、通知合并 |
+| 7 | `3717413` | U06 前端：自动刷新调度、状态胶囊、读取间隔设置 |
+| 8 | U07 提交 | 文档同步、契约脚本与夹具、版本递增 |
+
+### 与计划的偏离（逐条登记）
+
+1. **U01 后端遗留测试入口**：`report.rs` 的 `#[cfg(test)] time_filter_indices` / `apply_time_filter` 只按自然日比较，其既有断言（上海 20:00 的事件计入 `from = 当天`）与新增的 `ts ≤ as_of` 收紧冲突。该断言不在第 0 节第 4 条的取代表内，因此**未改行为**，只在注释标明"生产语义以 `TimeBounds::matches` 为准"。
+2. **U04 表外断言改写（3 处，均为计划授权变化的连带）**：`total_row_clears_drill` 改走新的 `onTotalRowClick()`（U04 要求不再靠字面量"合计"）；rollups 的"恢复仅明细模式"改由筛选偏好驱动（U04 把 `rollupsMode` 归入偏好）；`collectionDiagnostics.clean` 不再把 `timezone_mismatch` 计入"采集警告"计数（否则同一事实会同时出现两条通知）。
+3. **U06 "补发一批"判据**：实现为"批次执行期间收到更高的 `usage-updated` 代次 → 完成后补发一批"，而非字面的 `handle.generation < latestGeneration`。后者与 U04"回到页面只发一批"的既有断言冲突，且在代次稳定时会无限补发；实现口径更严格（批次开始前已收到的通知，其写入必然已进入该批次快照）。
+4. **U03 触及 `src-tauri/src/lib.rs` 与 `src-tauri/src/privacy.rs`**：各加一行（命令注册 + 隐私受保护命令分类），否则新命令在真机不可用，且分类表缺项会让既有隐私测试变红。其余 `lib.rs` 内容未动。
+5. **预读启动时机（U07 修复）**：U03 的时区门控把业务页挂载推迟到设置读取之后，`settingsPreload` 若仍随挂载启动，会抢在汇总页自身之前调用 `source_status` 等命令，使首屏失败态与重试路径整体错位（浏览器契约实测复现，8 个场景报未知命令/首屏失败态）。现在预读排在"时区就绪 → 业务页渲染"之后的 `nextTick`，恢复"业务页先、预读后"的稳定顺序。
+6. **契约与夹具更新（U07）**：`ui-contracts.mjs` 的 settings 读取计数改为"第 1 次是启动时区读取、设置页首读是第 2 次"；补 `settings_set_timezone` 与 `ccs_import_defaults` / `ccs_import_preview` / `ccs_import_commit` / `ccs_import_discard` 的 mock；`query_begin` / `query_summary` 回传冻结的 `range`。`interaction-contracts.mjs` 新增契约 `ui_adjustment_shapes`（13 条断言：日期按钮三态与 IPC 参数、内联时刻面板与单层材质、状态胶囊"更新于"与自动读取提示、设置页读取间隔六档、通知合并唯一性）与 `lastQueryBegin` 辅助。
+
+### 未执行 / 待人工
+
+- **真机（`tauri dev`）7 项**：跨日后自然日预设自动跟随今天、24h 随时间移动、切页保留下钻与滚动位置、旧 localStorage 时区迁移一次、读取间隔设为 5s 后新会话的可见时延、空闲 2 分钟 `~/.tokenscope/logs/` 无新增 info 行、连续快速切换读取间隔后重启读回最后一次选择。这些需要真实窗口与真实日志，本次未执行。
+- **`native-acceptance.mjs`**（release + `acceptance` 特性构建 + 隔离根）未跑。
+- 视觉截图的产物目录：`qa-artifacts/ui-adjustment/final/`（未入库，`.gitignore` 已忽略）。

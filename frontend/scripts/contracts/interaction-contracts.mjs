@@ -39,6 +39,9 @@ export const REQUIRED_CONTRACTS = [
   // P06：首次启动隐私同意——未同意时零业务副作用、拒绝退出不残留业务进程
   "privacy_no_business_effects_before_acceptance",
   "privacy_denied_ipc_has_no_filesystem_or_network_effect",
+  // U01/U02/U06（UI 调整计划）：日期预设按钮与内联时刻面板、状态胶囊
+  // 「更新于」与自动读取提示、合并通知唯一性、设置页读取间隔六档。
+  "ui_adjustment_shapes",
 ];
 
 const VIEWPORTS = {
@@ -200,6 +203,15 @@ function retryButtonIn(session, text) {
 
 function noticeWith(session, text) {
   return session.page.locator(".ts-notice").filter({ hasText: text }).first();
+}
+
+/**
+ * U01：最近一次 `query_begin` 的 invoke 参数——前端只发预设（days /
+ * rollingHours / startAt+endAt+untilNow），断言"没有把近 N 天存成固定日期"。
+ */
+function lastQueryBegin(session) {
+  const calls = session.ipcCalls.filter((x) => x.cmd === "query_begin");
+  return calls.length > 0 ? calls[calls.length - 1].args : null;
 }
 
 /** 设置页某个来源行（按可见来源名过滤，例如 "Claude Code" / "Codex"）。 */
@@ -2112,6 +2124,168 @@ const IMPL = {
       await ctx.finishSession(session);
     } finally {
       await session.close();
+    }
+  },
+
+  /**
+   * U01/U02/U06（UI 调整计划 2026-10-13）：日期预设按钮与内联时刻面板、
+   * 状态胶囊"更新于"与自动读取提示、合并通知的唯一性、设置页「数据源」分区
+   * 的自动读取间隔——都在真实浏览器里量测，并留下截图证据。
+   */
+  async ui_adjustment_shapes(ctx) {
+    const session = await ctx.open({
+      fixture: "normal",
+      viewport: VIEWPORTS.desktop,
+      theme: "light",
+    });
+    try {
+      await openDashboard(session);
+      const page = session.page;
+      const trigger = page.locator(".range-trigger").first();
+
+      const initialClass = (await trigger.getAttribute("class")) ?? "";
+      const initialSvg = await trigger.locator("svg").count();
+      ctx.record(
+        "ui_adjustment_shapes",
+        "全部时间：只显示日历图标、不着色（无 has-preset）",
+        initialSvg === 1 && !initialClass.includes("has-preset"),
+        `svg=${initialSvg} class=${initialClass}`,
+      );
+      await ctx.shot("ui_adjustment_shapes", session, "date-trigger-icon");
+
+      // 7d：一次点击即生效并关闭弹层；下发 days=7（不是固定日期区间）。
+      await realClick(page, trigger);
+      await page.waitForTimeout(200);
+      await realClick(page, page.getByRole("button", { name: "7d", exact: true }));
+      await page.waitForTimeout(400);
+      const label7 = (await trigger.innerText()).trim();
+      const class7 = (await trigger.getAttribute("class")) ?? "";
+      const begin7 = lastQueryBegin(session);
+      ctx.record(
+        "ui_adjustment_shapes",
+        "7d：按钮显示语义标签并着色，query_begin 收到 days=7",
+        label7 === "7d" && class7.includes("has-preset") && begin7?.days === 7,
+        `label=${label7} class=${class7} days=${begin7?.days}`,
+      );
+      await ctx.shot("ui_adjustment_shapes", session, "date-trigger-7d");
+
+      // 24h：滚动窗口（真正的过去 24 小时）。
+      await realClick(page, trigger);
+      await page.waitForTimeout(200);
+      await realClick(page, page.getByRole("button", { name: "24h", exact: true }));
+      await page.waitForTimeout(400);
+      const label24 = (await trigger.innerText()).trim();
+      const begin24 = lastQueryBegin(session);
+      ctx.record(
+        "ui_adjustment_shapes",
+        "24h：按钮显示 24h，query_begin 收到 rollingHours=24",
+        label24 === "24h" && begin24?.rollingHours === 24,
+        `label=${label24} rollingHours=${begin24?.rollingHours}`,
+      );
+      await ctx.shot("ui_adjustment_shapes", session, "date-trigger-24h");
+
+      // 自定义：内联的日期+时刻面板（不再套第二层触发式选择器）。
+      await realClick(page, trigger);
+      await page.waitForTimeout(500);
+      const inlinePanel = await page.locator(".n-date-panel--datetimerange").count();
+      const innerGlass = await page.evaluate(() => {
+        const panel = document.querySelector(".range-panel");
+        if (!panel) return "无 .range-panel";
+        const cs = getComputedStyle(panel);
+        return `${cs.backgroundColor}|${cs.backdropFilter}`;
+      });
+      ctx.record(
+        "ui_adjustment_shapes",
+        "自定义区是内联的日期+时刻面板",
+        inlinePanel > 0,
+        `内联面板数=${inlinePanel}`,
+      );
+      ctx.record(
+        "ui_adjustment_shapes",
+        "浮层材质只有一层（内容面板透明、无二次模糊）",
+        innerGlass.startsWith("rgba(0, 0, 0, 0)") && innerGlass.endsWith("|none"),
+        `内层背景|模糊=${innerGlass}`,
+      );
+      await ctx.shot("ui_adjustment_shapes", session, "date-panel-inline");
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(300);
+
+      // 状态胶囊：更新于 HH:MM:SS + 自动读取间隔提示。
+      const pill = page.locator(".ts-status-pill").first();
+      const pillText = (await pill.innerText()).trim();
+      const pillTitle = (await pill.getAttribute("title")) ?? "";
+      ctx.record(
+        "ui_adjustment_shapes",
+        "状态胶囊显示「更新于 HH:MM:SS」且提示自动读取间隔",
+        /^更新于 \d{2}:\d{2}:\d{2}$/.test(pillText) && /自动读取/.test(pillTitle),
+        `胶囊="${pillText}" title="${pillTitle}"`,
+      );
+      await ctx.shot("ui_adjustment_shapes", session, "status-pill");
+
+      // 设置页：「数据源」分区的自动读取间隔六档（选项在下拉弹层里，必须打开）。
+      await gotoPage(page, "设置");
+      await page.waitForTimeout(500);
+      const okSection = await gotoSettingsSection(page, "数据源");
+      const intervalSelect = page.locator('[aria-label="自动读取间隔"]').first();
+      const hasSelect = (await intervalSelect.count()) > 0;
+      const currentInterval = hasSelect ? (await intervalSelect.innerText()).trim() : "";
+      await realClick(page, intervalSelect);
+      await page.waitForTimeout(500);
+      // naive 的 NSelect 选项在 body 的弹层里（虚拟列表，逐项 class 不稳定）：
+      // 直接读弹层文本按行切开。
+      const menuText = await page
+        .locator(".n-base-select-menu")
+        .first()
+        .innerText()
+        .catch(() => "");
+      const optionTexts = menuText
+        .split("\n")
+        .map((t) => t.trim())
+        .filter(Boolean);
+      const intervals = ["5 秒", "10 秒", "30 秒", "1 分钟", "5 分钟", "10 分钟"];
+      const missingIntervals = intervals.filter((t) => !optionTexts.includes(t));
+      ctx.record(
+        "ui_adjustment_shapes",
+        "设置页「数据源」分区含自动读取间隔下拉（六档齐全）",
+        okSection && hasSelect && missingIntervals.length === 0 && intervals.includes(currentInterval),
+        `切分区=${okSection} 下拉=${hasSelect} 当前值=${currentInterval} 缺失档位=${
+          missingIntervals.join("、") || "无"
+        }`,
+      );
+      await ctx.shot("ui_adjustment_shapes", session, "settings-interval-select");
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(200);
+      await ctx.shot("ui_adjustment_shapes", session, "settings-sources");
+      await gotoSettingsSection(page, "用量数据");
+      await ctx.shot("ui_adjustment_shapes", session, "settings-usage");
+      await gotoSettingsSection(page, "价格");
+      await ctx.shot("ui_adjustment_shapes", session, "settings-pricing");
+      await ctx.finishSession(session);
+    } finally {
+      await session.close();
+    }
+
+    // 合并通知：来源目录异常只渲染一条通知（折叠态），不铺开逐条。
+    const noticeSession = await ctx.open({
+      fixture: "source-status-missing-then-ready",
+      viewport: VIEWPORTS.desktop,
+      theme: "light",
+    });
+    try {
+      await openDashboard(noticeSession);
+      const page = noticeSession.page;
+      const noticeCount = await page.locator(".ts-notice").count();
+      const text = await page.locator("#app").innerText();
+      ctx.record(
+        "ui_adjustment_shapes",
+        "通知合并为一条：来源目录异常只渲染单条通知条",
+        noticeCount === 1 && /没有发现会话日志|数据目录不存在|个来源异常/.test(text),
+        `通知条数=${noticeCount}`,
+      );
+      await ctx.shot("ui_adjustment_shapes", noticeSession, "merged-notice");
+      await ctx.finishSession(noticeSession);
+    } finally {
+      await noticeSession.close();
     }
   },
 };
