@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
-  "kind": "minor",
-  "summary": "统一项目与模型身份、保存历史用量并支持 CCS 手动导入"
+  "kind": "patch",
+  "summary": "修复新建发布草稿的身份读取和断点续传"
 }
