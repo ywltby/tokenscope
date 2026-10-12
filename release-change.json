@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "kind": "minor",
+  "summary": "统一项目与模型身份、保存历史用量并支持 CCS 手动导入"
+}

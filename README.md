@@ -77,6 +77,21 @@ pnpm --dir frontend build          # 生产构建
 
 提交钩子：`git config core.hooksPath .githooks` 启用后，分别运行根库与壳的 fmt/clippy/test，以及前端 typecheck/format:check/test。
 
+## 版本与发布
+
+初始开发阶段使用 `0.x.y`。每个准备合入 main 的批次递增一次版本：修复、文档或维护使用 patch，新功能或不兼容变化使用 minor 并将 patch 归零。混合改动取更高等级，同一个 PR 的补修提交不重复加号；暂不发布 `1.x`。
+
+```powershell
+git fetch origin main
+python -B scripts/bump_version.py --bump minor --summary "本轮新增功能说明"
+# 修复或维护批次使用 --bump patch
+python -B scripts/bump_version.py --check --base-ref origin/main
+```
+
+工具同步四份应用版本配置、两个 Cargo.lock 和 `release-change.json`；第三方依赖不随版本更新漂移。PR 的 CI 对比最新 main，拒绝未递增、版本不一致及过时基线；main push 再按实际 before 提交校验。main 通过检查、生产构建、五个安装场景及两项真实旧包升级后发布 `v0.x.y`，0.x Release 保持预发布标记，已发布标签和资产不覆盖。
+
+历史 `0.1.0` 固定到 `8d1d90de29aa00d10b9a7e4b8f906d909726446b`，复用原 pre-* 发布的同一安装包、校验和和来源证明；本轮源码版本为 `0.2.0`。Actions 分别在原日志保留、原日志已删除的独立 Runner 中验证升级与再次启动，旧数据由真实 0.1.0 程序产生。基线在 `scripts/fixtures/upgrade_baseline.json`，无需 GitHub 旧包变量；版本标签与发布实跑状态见 [N12](docs/plans/active/2026-10-11-consolidated-remaining-work.md#n12-versioning-design)。真实安装脚本只允许一次性 GitHub-hosted Runner，本机只运行契约测试。
+
 ## License
 
 [MIT](LICENSE)

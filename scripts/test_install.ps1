@@ -14,31 +14,25 @@
 #   3. 重复安装   安装成功，历史事实保留（manifest 复核）
 #   4. 卸载       程序与注册项清除，~/.tokenscope 数据保留
 #   5. 重新安装   保留的数据仍被新实例读取（汇总 + manifest 复核，不重复）
-#   6. 旧版升级   （可选）固定旧版本包：装旧版 → 造旧数据 → 升级安装新版 →
-#                 同一生命周期与事实校验；未配置 OLD_INSTALLER_URL 时告警跳过
+# 真实旧包升级由独立 Runner 的 scripts/test_upgrade.ps1 强制执行。
 #
 # 数据全部落在 $env:USERPROFILE\.tokenscope（Runner 上是一次性虚拟用户
 # 目录）；每次启动前旧日志归档进 Runner 临时证据目录（always() 上传）。
 
 param(
     [Parameter(Mandatory = $true)][string]$InstallerPath,
-    [Parameter(Mandatory = $true)][string]$AppVersion,
-    [string]$OldInstallerUrl = "",
-    [string]$OldInstallerSha256 = ""
+    [Parameter(Mandatory = $true)][string]$AppVersion
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "install_test_helpers.ps1")
+. (Join-Path $PSScriptRoot "installer_helpers.ps1")
 
 # Reset-UserHome 会整目录删除 $env:USERPROFILE\.tokenscope——开发机上这是
-# 真实数据。本脚本只在 CI Runner（RUNNER_TEMP 存在）上运行；本机调试必须
-# 显式设置 TOKENSCOPE_INSTALL_TEST_CONSENT=1，确认该目录可删。
-if (-not $env:RUNNER_TEMP -and $env:TOKENSCOPE_INSTALL_TEST_CONSENT -ne "1") {
-    throw "拒绝运行：本脚本会清空 $env:USERPROFILE\.tokenscope。仅 CI Runner 可直接运行；本机调试请设置 TOKENSCOPE_INSTALL_TEST_CONSENT=1（并确认该目录数据可删除）。"
-}
-# 证据与临时来源目录的根：CI 用 Runner 临时目录；CONSENT=1 的本机调试
-# 回退系统 TEMP（Join-Path 对 $null 直接抛绑定错误，必须先兜底）。
-$TempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
+# 真实数据。真实安装只允许 GitHub-hosted 的一次性 Runner；本机只运行契约。
+Assert-HostedInstallRunner
+# 一次性 Runner 的证据与临时来源目录。
+$TempRoot = $env:RUNNER_TEMP
 
 $DataDir = Join-Path $env:USERPROFILE ".tokenscope"
 $UninstallKeyRoot = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -74,36 +68,6 @@ function Write-StepSummary {
     }
 }
 
-function Get-UninstallEntry {
-    foreach ($key in Get-ChildItem $UninstallKeyRoot -ErrorAction SilentlyContinue) {
-        $entry = Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue
-        if ($entry.DisplayName -like "TokenScope*") {
-            # Tauri NSIS 把 InstallLocation 写为带外层双引号的 $INSTDIR。
-            # 在读取结果中解包供 Join-Path 使用，不改动实际注册项。
-            $location = [string]$entry.InstallLocation
-            if ($location.Length -ge 2 -and $location.StartsWith('"') -and $location.EndsWith('"')) {
-                $entry.InstallLocation = $location.Substring(1, $location.Length - 2)
-            }
-            return $entry
-        }
-    }
-    return $null
-}
-
-function Invoke-SilentInstall {
-    param([string]$Path)
-    $proc = Start-Process -FilePath $Path -ArgumentList "/S" -Wait -PassThru
-    if ($proc.ExitCode -ne 0) {
-        # NSIS 静默安装失败常无日志落盘（证据目录会空到 if-no-files-found
-        # 都没得传）——把退出码与安装器路径写成失败说明，保证有证据可查。
-        $note = Join-Path $EvidenceRoot "install-failure.txt"
-        New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
-        "installer=$Path`nexit_code=$($proc.ExitCode)`nutc=$((Get-Date).ToUniversalTime().ToString('o'))" |
-            Set-Content -Path $note -Encoding utf8NoBOM
-        throw "安装器退出码异常（$Path）：$($proc.ExitCode)"
-    }
-}
-
 function Get-UninstallerExe {
     param([string]$UninstallString)
     $value = $UninstallString.Trim()
@@ -114,9 +78,7 @@ function Get-UninstallerExe {
 }
 
 function Reset-UserHome {
-    if (Test-Path $DataDir) {
-        Remove-Item $DataDir -Recurse -Force
-    }
+    Reset-InstallData -DataDir $DataDir -UserRoot $env:USERPROFILE
 }
 
 function Stop-App {
@@ -216,7 +178,7 @@ try {
     # ---------- 场景 1：全新安装 ----------
     Write-Host "=== 场景 1：全新安装 ==="
     Reset-UserHome
-    Invoke-SilentInstall $InstallerPath
+    Invoke-SilentInstall -Path $InstallerPath -EvidenceRoot $EvidenceRoot
     $entry = Get-UninstallEntry
     Assert-True ($null -ne $entry) "卸载注册项存在（HKCU Uninstall）"
     Assert-True ($null -ne $entry -and $entry.DisplayVersion -eq $AppVersion) "DisplayVersion = $AppVersion（实际 $($entry.DisplayVersion)）"
@@ -235,7 +197,7 @@ try {
 
     # ---------- 场景 3：重复安装（数据保留） ----------
     Write-Host "=== 场景 3：重复安装 ==="
-    Invoke-SilentInstall $InstallerPath
+    Invoke-SilentInstall -Path $InstallerPath -EvidenceRoot $EvidenceRoot
     Verify-HistoryManifest
     Assert-True ($null -ne (Get-UninstallEntry)) "重复安装后卸载注册项存在"
     $Summary.Add("- 重复安装：成功且历史事实逐条保留") | Out-Null
@@ -266,41 +228,11 @@ try {
 
     # ---------- 场景 5：重新安装（保留数据仍可读，不重复计量） ----------
     Write-Host "=== 场景 5：重新安装 ==="
-    Invoke-SilentInstall $InstallerPath
+    Invoke-SilentInstall -Path $InstallerPath -EvidenceRoot $EvidenceRoot
     Run-AppLifecycle -Scenario "reinstall" -RunId "reinstall-1"
     Assert-True $true "重新安装：保留数据被新实例读取（manifest 复核，不重复计量）"
     $Summary.Add("- 重新安装：保留数据被新实例读取（manifest 复核一致，事件数不重复）") | Out-Null
 
-    # ---------- 场景 6：旧版升级（固定旧版本包，可选） ----------
-    if ($OldInstallerUrl -ne "") {
-        Write-Host "=== 场景 6：旧版升级 ==="
-        if ($OldInstallerSha256 -eq "") {
-            throw "旧版升级已配置 OLD_INSTALLER_URL 但缺少 OLD_INSTALLER_SHA256：不允许在未校验固定旧包的情况下安装"
-        }
-        $oldPath = Join-Path $env:RUNNER_TEMP "tokenscope-old-setup.exe"
-        if (Test-Path $oldPath) { Remove-Item $oldPath -Force }
-        Invoke-WebRequest -Uri $OldInstallerUrl -OutFile $oldPath -UseBasicParsing
-        $hash = (Get-FileHash $oldPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($hash -ne $OldInstallerSha256.ToLowerInvariant()) {
-            throw "旧版本包 SHA256 不匹配：$hash != $($OldInstallerSha256.ToLowerInvariant())"
-        }
-        Assert-True $true "旧版本包 SHA256 匹配"
-        # 旧版安装 → 造旧版数据 → 升级安装新版 → 同一生命周期与事实校验。
-        Reset-UserHome
-        Invoke-SilentInstall $oldPath
-        Write-SeedData
-        Invoke-SilentInstall $InstallerPath
-        $entry = Get-UninstallEntry
-        Assert-True ($null -ne $entry -and $entry.DisplayVersion -eq $AppVersion) "升级后版本 = $AppVersion（实际 $($entry.DisplayVersion)）"
-        Run-AppLifecycle -Scenario "upgrade" -RunId "upgrade-1"
-        Assert-True ((Test-Path $SettingsToml) -and ((Get-Content $SettingsToml -Raw) -match "privacy_policy_accepted = true")) "升级后设置保留"
-        Assert-True (Test-Path $PricingToml) "升级后价格文件保留"
-        $Summary.Add("- 旧版升级：固定旧包升级后历史用量/设置/价格保留，迁移计数一致") | Out-Null
-    }
-    else {
-        Write-Host "::warning::未配置 OLD_INSTALLER_URL/OLD_INSTALLER_SHA256（仓库变量）：固定旧版本包的升级场景跳过；迁移与保留已由合成 v10 旧数据 + 新安装包覆盖。N12 的该项需在配置变量后复跑。"
-        $Summary.Add("- 旧版升级：跳过（未配置 OLD_INSTALLER_URL 仓库变量）；迁移与保留由合成旧数据覆盖") | Out-Null
-    }
 }
 catch {
     $Failures.Add($_.Exception.Message) | Out-Null

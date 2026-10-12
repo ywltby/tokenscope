@@ -10,12 +10,13 @@ class ReleaseMetadataTests(unittest.TestCase):
     def make(self, ref, version="0.1.0", sha=SHA):
         return metadata(ref, sha, {"app": version, "frontend": version})
 
-    def test_main_is_unique_prerelease_never_latest(self):
+    def test_main_uses_application_version_and_stays_prerelease(self):
         result = self.make("refs/heads/main")
-        self.assertEqual(result["tag"], "pre-" + SHA)
+        self.assertEqual(result["tag"], "v0.1.0")
         self.assertEqual(result["prerelease"], "true")
         self.assertEqual(result["latest"], "false")
-        self.assertNotEqual(result["tag"], self.make("refs/heads/main", sha="b" * 40)["tag"])
+        self.assertEqual(result["tag"], self.make("refs/heads/main", sha="b" * 40)["tag"])
+        self.assertEqual(self.make("refs/heads/main", version="0.2.0")["tag"], "v0.2.0")
 
     def test_stable_tag_is_latest(self):
         result = self.make("refs/tags/v0.1.0")
