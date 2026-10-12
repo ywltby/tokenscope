@@ -1,116 +1,121 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { NButton, NCheckbox, NDatePicker, NPopover } from "naive-ui";
-import { addDays, rangeLabel, todayInTz } from "../lib/dates";
+import { presetAriaLabel, presetKey, presetLabel, type RangePreset } from "../lib/rangePreset";
+import type { RangeView } from "../types";
 
 /**
- * ccs 风格的日期区间选择（M10；C3 修复 F07）：
- * - 弹层受控（:show 双向绑定）——修复前 show 未绑定，取消/确定关不掉、
- *   打开时的草稿同步 watch 永不触发；
- * - 「清除」显式入口（修复前清空起始日后确定被禁用，"全部时间"不可达）；
- * - 快捷条全部按自然日口径命名（原 "24h" 实为昨天+今天两个自然日，更名
- *   "近2天"，不与滚动小时窗口混称）；
- * 日期粒度（存储/过滤均为自然日，换算由 Dashboard 按解析时区完成）。
+ * U01/U02（UI 调整计划 2026-10-13）：时间预设触发器与日期弹层。
+ *
+ * - 全部时间（无预设）只显示日历图标、不着色；其余显示语义标签（32px 高、
+ *   强调色底、最长 220px 省略）；
+ * - 快捷项（当日 / 24h / 7d / 14d / 30d / 全部时间）**点一下立即生效并关闭**；
+ * - 自定义区间用**一个**内联的 `type="datetimerange"` 面板（naive 2.45.3 的
+ *   `panel` 组合，已在真实组件上验证：选择即回吐 formatted-value），
+ *   `default-time` 让"只选日期"落在 00:00 / 23:59，前端不做任何加减；
+ * - 只有自定义需要点「确定」；取消与 Escape 丢弃草稿、不改变当前值。
  */
-// Task 6：对外契约 = 统计时区下的日历字符串（YYYY-MM-DD），不再传
-// 本机零点毫秒（本机时区与统计时区不同会导致"今天"错日）。
 const props = defineProps<{
-  value: [string, string] | null;
+  preset: RangePreset | null;
   tz: string;
-  iconOnly?: boolean;
+  range?: RangeView | null;
 }>();
-const emit = defineEmits<{ (e: "update:value", v: [string, string] | null): void }>();
+const emit = defineEmits<{ (e: "update:preset", v: RangePreset | null): void }>();
 
 const show = ref(false);
-const draftFrom = ref<string | null>(null);
-const draftTo = ref<string | null>(null);
-const followToday = ref(false);
+/** 草稿：统计时区本地时刻 "YYYY-MM-DDTHH:MM" 字符串（无时区重解释）。 */
+const draft = ref<[string, string] | null>(null);
+const untilNow = ref(false);
 
-function todayStr(): string {
-  return todayInTz(props.tz);
-}
+const view = computed<RangeView | null>(() => props.range ?? null);
+const label = computed(() => presetLabel(props.preset, view.value, props.tz));
+const ariaLabel = computed(() => presetAriaLabel(props.preset, view.value, props.tz));
+/// 全部时间（无预设）显示日历图标；其余显示语义标签。
+const iconOnly = computed(() => !props.preset || props.preset.kind === "all");
 
-// SF05：快捷项只声明起始日的偏移——两端由**同一次** today 读取派生，
-// 一次操作（点击/比较/确认）跨午夜也不会取到两个不同的"今天"。
-const shortcuts: { label: string; fromOffset: number }[] = [
-  { label: "当天", fromOffset: 0 },
-  { label: "近2天", fromOffset: -1 },
-  { label: "近7天", fromOffset: -6 },
-  { label: "近14天", fromOffset: -13 },
-  { label: "近30天", fromOffset: -29 },
+/// 快捷项顺序固定：当日 / 24h / 7d / 14d / 30d / 全部时间。
+const SHORTCUTS: { label: string; preset: RangePreset }[] = [
+  { label: "当日", preset: { kind: "days", days: 1 } },
+  { label: "24h", preset: { kind: "rolling", hours: 24 } },
+  { label: "7d", preset: { kind: "days", days: 7 } },
+  { label: "14d", preset: { kind: "days", days: 14 } },
+  { label: "30d", preset: { kind: "days", days: 30 } },
+  { label: "全部时间", preset: { kind: "all" } },
 ];
 
-/// 一次操作只读取一次 today，再计算两端（近 N 天 = [今天-(N-1), 今天]）。
-function shortcutRange(sc: { fromOffset: number }): [string, string] {
-  const today = todayStr();
-  return [addDays(today, sc.fromOffset), today];
-}
+/// 自带操作行交给本组件的「清除 / 取消 / 确定」——不出现两套确认入口。
+const NO_ACTIONS: ("clear" | "confirm" | "now")[] = [];
+/// 只选日期时的默认时刻（naive `defaultTime`），结束端 = 选中日的最后一分钟。
+const DEFAULT_TIME: [string, string] = ["00:00:00", "23:59:59"];
 
-function applyShortcut(sc: { label: string; fromOffset: number }): void {
-  const [from, to] = shortcutRange(sc);
-  draftFrom.value = from;
-  draftTo.value = to;
-  followToday.value = false;
-}
-
-// 受控开关：打开时草稿同步自当前值；取消/确定经 show 关闭。
-// SF05：打开面板是一次操作，today 只读取一次。
-watch(show, (open) => {
-  if (!open) return;
-  const today = todayStr();
-  if (props.value) {
-    draftFrom.value = props.value[0];
-    draftTo.value = props.value[1];
-    // 结束日为今天视为"跟随今天"勾选态
-    followToday.value = draftTo.value >= today;
-  } else {
-    draftFrom.value = null;
-    draftTo.value = null;
-    followToday.value = false;
+/// 打开弹层时草稿同步自当前预设：自定义直接回填选定值；其余预设用后端回传的
+/// 冻结范围回填（没有范围可回填时留空，由 naive 的默认时刻补 00:00 / 23:59）。
+function resetDraft(): void {
+  const p = props.preset;
+  if (p && p.kind === "custom") {
+    untilNow.value = p.end === "now";
+    draft.value = [p.start, p.end === "now" ? p.start : p.end];
+    return;
   }
+  untilNow.value = false;
+  const r = view.value;
+  if (r?.granularity === "day" && r.from && r.to) {
+    draft.value = [`${r.from}T00:00`, `${r.to}T23:59`];
+  } else if (r?.granularity === "instant") {
+    draft.value = [r.start_local, r.end_local];
+  } else {
+    draft.value = null;
+  }
+}
+
+// 打开时一次性同步草稿：取消/Escape 关闭不改值，重开回到当前预设。
+watch(show, (open) => {
+  if (open) resetDraft();
 });
 
-function confirm(): void {
-  // SF05：确认是一次操作，today 只读取一次（跟随今天分支派生其结束日）。
-  const today = todayStr();
-  if (draftFrom.value == null) {
-    emit("update:value", null);
-  } else if (followToday.value) {
-    // 结束日跟随今天：自然日粒度下等价于"从起始日至今（含未来）"
-    emit("update:value", [draftFrom.value, today]);
-  } else if (draftTo.value == null) {
-    emit("update:value", [draftFrom.value, draftFrom.value]);
-  } else {
-    emit("update:value", [draftFrom.value, draftTo.value]);
-  }
+const draftReady = computed(() => {
+  const d = draft.value;
+  if (!d || !d[0]) return false;
+  return untilNow.value || !!d[1];
+});
+
+function close(): void {
+  // 草稿丢弃：下次打开时由 resetDraft 重新同步（Escape / 取消语义一致）。
   show.value = false;
 }
 
-function clear(): void {
-  draftFrom.value = null;
-  draftTo.value = null;
-  followToday.value = false;
+function applyShortcut(preset: RangePreset): void {
+  emit("update:preset", preset);
+  show.value = false;
 }
 
-// 触发器标签从 props 派生（修复前是 ref，只在 confirm 更新，外部重置会失同步）。
-// SF05：一次标签求值只读取一次 today。
-// UX04：跨年/非当前年保留年份，"同日"按完整 ISO 日期比较（见 rangeLabel）。
-const label = computed<string>(() => {
-  const v = props.value;
-  if (!v) return "全部时间";
-  return rangeLabel(v[0], v[1], todayStr());
-});
+function confirmCustom(): void {
+  const d = draft.value;
+  if (!d || !d[0] || (!untilNow.value && !d[1])) return;
+  emit("update:preset", { kind: "custom", start: d[0], end: untilNow.value ? "now" : d[1] });
+  show.value = false;
+}
 
-// R03：NDatePicker 用 v-model:formatted-value + value-format 直接桥接
-// **字符串**（yyyy-MM-dd）——毫秒值在本机日历与 UTC 锚之间有日常一天
-// 的歧义，是手选日期偏一天的根因。控件吐什么字符串就存什么字符串，
-// 统计语义 = 控件日历语义，无任何时区重解释。
+function clearAll(): void {
+  emit("update:preset", null);
+  show.value = false;
+}
 
-const shortcutActive = (sc: { fromOffset: number }): boolean => {
-  if (draftFrom.value == null || draftTo.value == null) return false;
-  const [from, to] = shortcutRange(sc);
-  return draftFrom.value === from && draftTo.value === to;
+const shortcutActive = (preset: RangePreset): boolean =>
+  presetKey(preset) === presetKey(props.preset);
+
+// 「结束于现在」：结束端整体禁用（值非 null 时 naive 会按 end 位置询问规则）。
+const isDateDisabled = (_ts: number, position: "start" | "end"): boolean =>
+  untilNow.value && position === "end";
+
+const DISABLED_TIME = {
+  isHourDisabled: () => true,
+  isMinuteDisabled: () => true,
+  isSecondDisabled: () => true,
 };
+
+const isTimeDisabled = (_ts: number, position: "start" | "end") =>
+  untilNow.value && position === "end" ? DISABLED_TIME : {};
 </script>
 
 <template>
@@ -126,10 +131,10 @@ const shortcutActive = (sc: { fromOffset: number }): boolean => {
       <button
         type="button"
         class="range-trigger ts-focusable"
-        :class="{ 'is-icon-only': iconOnly, 'has-range': iconOnly && value }"
-        :aria-label="label"
+        :class="{ 'is-icon': iconOnly, 'has-preset': !iconOnly }"
+        :aria-label="ariaLabel"
         :aria-expanded="show"
-        :title="iconOnly ? label : undefined"
+        :title="ariaLabel"
       >
         <svg
           v-if="iconOnly"
@@ -149,48 +154,48 @@ const shortcutActive = (sc: { fromOffset: number }): boolean => {
         <span v-else class="range-trigger-label">{{ label }}</span>
       </button>
     </template>
-    <div class="range-panel">
+    <div class="range-panel" @keydown.esc="close">
       <div class="shortcut-row">
         <NButton
-          v-for="sc in shortcuts"
-          :key="sc.label"
+          v-for="s in SHORTCUTS"
+          :key="s.label"
           size="tiny"
           class="shortcut-btn"
-          :type="shortcutActive(sc) ? 'primary' : 'default'"
-          @click="applyShortcut(sc)"
+          :type="shortcutActive(s.preset) ? 'primary' : 'default'"
+          @click="applyShortcut(s.preset)"
         >
-          {{ sc.label }}
+          {{ s.label }}
         </NButton>
       </div>
-      <div class="field-label">开始日期</div>
-      <NDatePicker
-        v-model:formatted-value="draftFrom"
-        type="date"
-        clearable
-        value-format="yyyy-MM-dd"
-        placeholder="开始日期"
-      />
-      <div class="field-label field-label-gap">结束日期</div>
-      <NDatePicker
-        v-model:formatted-value="draftTo"
-        type="date"
-        clearable
-        :disabled="followToday"
-        value-format="yyyy-MM-dd"
-        placeholder="结束日期"
-      />
-      <div class="follow-row">
-        <NCheckbox v-model:checked="followToday">结束日跟随今天</NCheckbox>
+      <!-- 自定义区间：一个日期+时刻面板（精确到分钟），不再套第二层弹层 -->
+      <div class="custom-block">
+        <NDatePicker
+          v-model:formatted-value="draft"
+          class="custom-picker"
+          type="datetimerange"
+          panel
+          :actions="NO_ACTIONS"
+          value-format="yyyy-MM-dd'T'HH:mm"
+          format="yyyy-MM-dd HH:mm"
+          time-picker-format="HH:mm"
+          :default-time="DEFAULT_TIME"
+          :is-date-disabled="isDateDisabled"
+          :is-time-disabled="isTimeDisabled"
+        />
+        <div class="follow-row">
+          <NCheckbox v-model:checked="untilNow">结束于现在</NCheckbox>
+          <span class="follow-hint">统计到当前时刻，不使用右侧结束日期</span>
+        </div>
       </div>
       <div class="actions-row">
-        <!-- 清除入口（F07）：一键回"全部时间"，确定时提交 null -->
-        <NButton v-if="draftFrom != null || draftTo != null" size="small" quaternary @click="clear">
-          清除
-        </NButton>
+        <!-- 清除入口：一键回"全部时间"并关闭 -->
+        <NButton v-if="!iconOnly" size="small" quaternary @click="clearAll">清除</NButton>
         <span v-else></span>
         <span class="actions-group">
-          <NButton size="small" @click="show = false">取消</NButton>
-          <NButton size="small" type="primary" @click="confirm">确定</NButton>
+          <NButton size="small" @click="close">取消</NButton>
+          <NButton size="small" type="primary" :disabled="!draftReady" @click="confirmCustom">
+            确定
+          </NButton>
         </span>
       </div>
     </div>
@@ -200,10 +205,11 @@ const shortcutActive = (sc: { fromOffset: number }): boolean => {
 <style scoped>
 /* 弹层：elevated 玻璃表面（NPopover 浮层内容） */
 .range-panel {
-  /* UX04：宽度随内容增长（快捷项不裁字），并受视口约束不产生横向滚动 */
+  /* UX04：宽度随内容增长（快捷项不裁字），并受视口约束不产生横向滚动；
+     U02：自定义区是内联的双月日历（约 600px），上限放宽到 720px 以免压缩日历。 */
   width: max-content;
   min-width: 300px;
-  max-width: min(380px, calc(100vw - 32px));
+  max-width: min(720px, calc(100vw - 32px));
   padding: var(--ts-space-3);
   border-radius: var(--ts-radius-popover);
   /* RC09（date_outer_surface_matches_contract）：材质只保留**一层**——
@@ -228,23 +234,30 @@ const shortcutActive = (sc: { fromOffset: number }): boolean => {
   cursor: pointer;
   display: inline-flex;
   align-items: center;
+  /* 语义标签最长 220px，超出省略（不撑破筛选行） */
+  max-width: 220px;
+  min-width: 0;
 }
 .range-trigger:hover {
   color: var(--ts-text);
 }
 
-.range-trigger.is-icon-only {
+.range-trigger.is-icon {
   width: 32px;
   padding: 0;
   justify-content: center;
 }
-.range-trigger.has-range {
+/* 选了时间范围后才是强调色底：全部时间（图标态）不着色 */
+.range-trigger.has-preset {
   background: var(--ts-accent-soft);
   color: var(--ts-accent);
 }
 
 .range-trigger-label {
   margin-right: var(--ts-space-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .shortcut-row {
@@ -277,18 +290,28 @@ const shortcutActive = (sc: { fromOffset: number }): boolean => {
   border-left: 1px solid var(--ts-separator);
 }
 
-.field-label {
-  font-size: 12px;
-  color: var(--ts-text-muted);
-  margin-bottom: var(--ts-space-1);
+/* 内联日期面板只做排版：玻璃材质由弹层外壳承担（避免面板自己再上一块实色） */
+.custom-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
 }
-.field-label-gap {
-  margin-top: var(--ts-space-3);
+.custom-picker :deep(.n-date-panel) {
+  background-color: transparent;
+  box-shadow: none;
 }
 
 .follow-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ts-space-2);
   margin-top: var(--ts-space-2);
 }
+.follow-hint {
+  font-size: 12px;
+  color: var(--ts-text-muted);
+}
+
 .actions-row {
   display: flex;
   justify-content: space-between;

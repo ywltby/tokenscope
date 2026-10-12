@@ -14,7 +14,9 @@ import Dashboard from "./Dashboard.vue";
 import dashboardSource from "./Dashboard.vue?raw";
 import TrendChart from "../components/TrendChart.vue";
 import type { Dim, EventList, Group, SummaryReport } from "../types";
-import { SNAPSHOT_VERSION } from "../lib/viewSnapshot";
+import { SNAPSHOT_VERSION, snapshotQueueIdle } from "../lib/viewSnapshot";
+import { useTimezone } from "../composables/timezone";
+import type { RangePreset } from "../lib/rangePreset";
 
 function group(key: string, input: number): Group {
   return {
@@ -285,7 +287,9 @@ describe("Dashboard 查询编排", () => {
   });
 });
 
-// 当前版本快照样例（模块级：多个 describe 共用）
+// 当前版本快照样例（模块级：多个 describe 共用）。
+// v12：filters = { by, agent, preset, drill }——不再含 range/tz，时间范围以
+// **预设**形式保存（跨日仍按相对口径重算）。
 function snapshotPayload() {
   return {
     v: SNAPSHOT_VERSION,
@@ -293,14 +297,113 @@ function snapshotPayload() {
     filters: {
       by: "model",
       agent: "claude",
-      range: null,
+      preset: null,
       drill: { type: "model", key: "claude-sonnet-4-5" },
-      tz: "Asia/Shanghai",
     },
+    rollups_mode: "auto",
     report: summaryA,
     events,
   };
 }
+
+// ── U01/U03：时间预设的参数契约与快照时区隔离 ──────────────────────
+describe("Dashboard 时间预设（U01/U03）", () => {
+  function beginCalls(): unknown[][] {
+    return invokeMock.mock.calls.filter((c) => c[0] === "query_begin");
+  }
+  function lastBeginArgs(): Record<string, unknown> {
+    return beginCalls().at(-1)![1] as Record<string, unknown>;
+  }
+
+  it("days_preset_stays_relative_across_days：7d 预设跨日后仍发 days: 7", async () => {
+    // 只接管 Date，不接管 setTimeout（flushPromises 依赖真实定时器）。
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-10-12T04:00:00Z"));
+      mockOk();
+      const w = mountDashboard();
+      await flushPromises();
+      state(w)["preset"] = { kind: "days", days: 7 } as RangePreset;
+      await nextTick();
+      await flushPromises();
+      expect(lastBeginArgs()).toMatchObject({ days: 7 });
+      expect(lastBeginArgs(), "不得把预设折成固定日期").not.toHaveProperty("from");
+      expect(lastBeginArgs().startAt).toBeNull();
+      w.unmount();
+
+      // 快照保存的是**预设**本身
+      await snapshotQueueIdle();
+      const saves = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save");
+      const saved = (saves.at(-1)![1] as { value: { filters: { preset: RangePreset | null } } })
+        .value;
+      expect(saved.filters.preset).toEqual({ kind: "days", days: 7 });
+
+      // 时钟推进一天后重新进入页面：恢复的仍是相对预设（后端按当天重算近 7 天）
+      vi.setSystemTime(new Date("2026-10-13T04:00:00Z"));
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === "query_begin") return Promise.resolve(queryInfo);
+        if (cmd === "view_cache_load") return Promise.resolve(saved);
+        if (cmd === "query_summary") return Promise.resolve(summaryA);
+        if (cmd === "query_events") return Promise.resolve(events);
+        if (cmd === "source_status") return Promise.resolve([]);
+        return Promise.resolve(null);
+      });
+      const w2 = mountDashboard();
+      await flushPromises();
+      expect(state(w2)["preset"], "恢复的必须是相对预设").toEqual({ kind: "days", days: 7 });
+      expect(lastBeginArgs(), "跨日后仍然只发相对预设").toMatchObject({ days: 7 });
+      w2.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rolling_preset_sends_rolling_hours：24h 发 rollingHours: 24", async () => {
+    mockOk();
+    const w = mountDashboard();
+    await flushPromises();
+    state(w)["preset"] = { kind: "rolling", hours: 24 } as RangePreset;
+    await nextTick();
+    await flushPromises();
+    expect(lastBeginArgs()).toMatchObject({ rollingHours: 24, days: null });
+    expect(lastBeginArgs().untilNow).toBeNull();
+    w.unmount();
+  });
+
+  it("restored_view_never_overwrites_timezone：快照不改写全局时区，只发一批查询", async () => {
+    const { tz } = useTimezone();
+    // 先切到 UTC，让之前挂载过、未卸载的实例把 watcher 跑完，再重置调用
+    // 记录——下面的计数只属于本次挂载。
+    tz.value = "UTC";
+    await flushPromises();
+    invokeMock.mockReset();
+    try {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === "query_begin") return Promise.resolve({ ...queryInfo, timezone: "UTC" });
+        if (cmd === "view_cache_load") {
+          // 旧式快照带着时区字段：只允许它失效，绝不允许写回全局时区。
+          const p = snapshotPayload();
+          return Promise.resolve({
+            ...p,
+            filters: { by: "day", agent: "all", preset: null, drill: null, tz: "Asia/Shanghai" },
+          });
+        }
+        if (cmd === "query_summary") return Promise.resolve({ ...summaryA, timezone: "UTC" });
+        if (cmd === "query_events") return Promise.resolve(events);
+        if (cmd === "source_status") return Promise.resolve([]);
+        return Promise.resolve(null);
+      });
+      const w = mountDashboard();
+      await flushPromises();
+      expect(tz.value, "全局时区不得被快照改写").toBe("UTC");
+      expect(beginCalls().length, "时区不被改写 → 不重发查询").toBe(1);
+      expect(lastBeginArgs().tz).toBe("UTC");
+      w.unmount();
+    } finally {
+      tz.value = "Asia/Shanghai";
+    }
+  });
+});
 
 describe("Dashboard 视图快照与刷新（C4/F08）", () => {
   it("view_cache_query_mismatch：v6 快照连同筛选一起恢复，口径一致", async () => {

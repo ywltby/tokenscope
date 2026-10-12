@@ -1,7 +1,7 @@
 // H08 + 审阅回归：日报粒度历史的展示与"仅明细查询"恢复路径。
 // 断言：时区不匹配提示来自 `rollup_coverage.timezone_mismatch`（蛇形字段，
 // 早期 camelCase 改名会让这段提示整段消失）；点击「只看请求明细」后新建查询
-// 会话并带 `rollups: "detail_only"`；该模式随视图快照保存/恢复（v11）——
+// 会话并带 `rollups: "detail_only"`；该模式随视图快照保存/恢复（v12）——
 // 重新进入页面不得静默回退成 auto。
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
@@ -169,7 +169,7 @@ describe("Dashboard 日粒度历史（H08）", () => {
         return Promise.resolve({
           v: SNAPSHOT_VERSION,
           saved_at: "2026-10-10T00:00:00Z",
-          filters: { by: "day", agent: "all", range: null, drill: null, tz: "UTC" },
+          filters: { by: "day", agent: "all", preset: null, drill: null },
           rollups_mode: "detail_only",
           report,
           events,
@@ -204,7 +204,7 @@ describe("Dashboard 日粒度历史（H08）", () => {
         return Promise.resolve({
           v: SNAPSHOT_VERSION - 1,
           saved_at: "2026-10-10T00:00:00Z",
-          filters: { by: "day", agent: "all", range: null, drill: null, tz: "UTC" },
+          filters: { by: "day", agent: "all", preset: null, drill: null },
           rollups_mode: "detail_only",
           report,
           events,

@@ -8,6 +8,7 @@ import {
   type Dim,
   type EventDrill,
   type EventList,
+  type RangeView,
   type SourceStatus,
   type SummaryReport,
 } from "../types";
@@ -18,6 +19,12 @@ import EventTable from "../components/EventTable.vue";
 import SegmentedControl from "../components/SegmentedControl.vue";
 import DateRangeSelect from "../components/DateRangeSelect.vue";
 import { useTimezone } from "../composables/timezone";
+import {
+  normalizePreset,
+  presetKey,
+  presetToQueryParams,
+  type RangePreset,
+} from "../lib/rangePreset";
 import { SNAPSHOT_VERSION, enqueueSnapshotSave } from "../lib/viewSnapshot";
 import { errorText, isQueryExpired } from "../lib/queryError";
 import { realGroups } from "../lib/chartData";
@@ -29,7 +36,11 @@ const emit = defineEmits<{ (e: "go-settings"): void }>();
 
 const by = ref<Dim>("day");
 const agent = ref<AgentFilter>("all");
-const range = ref<[string, string] | null>(null);
+/// U01：时间以**预设**表示（null 等价 `{kind:"all"}`）；前端不计算查询边界，
+/// 只把预设翻译成 query_begin 参数，边界由后端在查询入口冻结后回传。
+const preset = ref<RangePreset | null>(null);
+/// U01：本批次后端回传的冻结范围——日期按钮的标签/悬停提示与汇总数字同源。
+const batchRange = ref<RangeView | null>(null);
 const { tz } = useTimezone();
 const report = ref<SummaryReport | null>(null);
 const loading = ref(false);
@@ -75,10 +86,9 @@ const eventsFailureWasAppend = ref(false);
 type SnapshotFilters = {
   by: Dim;
   agent: AgentFilter;
-  /** v4：统计时区日历字符串 */
-  range: [string, string] | null;
+  /** v12：时间预设（取代固定 [from, to]；快照不再含时区） */
+  preset: RangePreset | null;
   drill: EventDrill | null;
-  tz: string;
 };
 type SnapshotPayload = {
   v: number;
@@ -98,12 +108,19 @@ type QueryHandle = {
   pricingRevision: string;
   timezone: string;
   asOf: string;
+  /** U01：后端冻结的时间范围（全部时间为 null/缺省）。 */
+  range?: RangeView | null;
 };
 const currentQuery = ref<QueryHandle | null>(null);
 // SF05/SF04：每批次共享一次 begin_query Promise，汇总/明细并发读取同一
 // 会话；跨午夜/手动刷新的批次重建会话。
 let beginPromise: Promise<QueryHandle | null> | null = null;
 let beginEpoch = -1;
+/// U01/U03：本批次已捕获的查询身份——快照恢复时据此判断能否复用（筛选与
+/// 恢复结果逐项相等就没有理由重发一批）。
+let batchKey: SnapshotFilters | null = null;
+/// H08：本批次捕获的日粒度参与方式（恢复它需要重建会话，复用要一起比）。
+let batchRollups: "auto" | "detail_only" = "auto";
 
 // RC02：当前批次是否已成功建立后端会话（begin 成功）。begin 失败或观察到
 // query_expired 后为 false——错误条的恢复动作据此决定"新建批次"还是
@@ -210,28 +227,26 @@ function beginQueryForCurrentEpoch(): Promise<QueryHandle | null> {
   if (beginPromise && beginEpoch === epoch) return beginPromise;
   beginEpoch = epoch;
   sessionReady.value = false;
-  const captured = {
-    by: by.value,
-    agent: agent.value,
-    from: range.value?.[0] ?? null,
-    to: range.value?.[1] ?? null,
-    tz: tz.value,
-  };
+  const captured: SnapshotFilters = currentFilters();
+  batchKey = captured;
+  batchRollups = rollupsMode.value;
   beginPromise = (async () => {
     try {
       const h = await invoke<QueryHandle>("query_begin", {
         by: captured.by,
         agent: captured.agent,
-        days: null,
-        from: captured.from,
-        to: captured.to,
-        tz: captured.tz,
+        // U01：只发时间预设（days / rollingHours / startAt+endAt / untilNow）——
+        // 四组互斥由后端判定，前端不做边界计算、不再发 from/to。
+        ...presetToQueryParams(captured.preset),
+        tz: tz.value,
         // H08：日粒度历史参与方式（`detail_only` = 只看请求明细；来源时区与
         // 展示时区不一致时用户可选的恢复路径之一）。
         rollups: rollupsMode.value === "detail_only" ? "detail_only" : null,
       });
       if (epoch !== refreshEpoch || disposed) return null; // 旧 begin 晚到不接管
       currentQuery.value = h;
+      // U01：范围的唯一来源是后端冻结结果（标签只做展示，不参与查询）。
+      batchRange.value = h.range ?? null;
       sessionReady.value = true;
       return h;
     } catch (e) {
@@ -252,17 +267,16 @@ function beginQueryForCurrentEpoch(): Promise<QueryHandle | null> {
   return beginPromise;
 }
 
+/// 当前主筛选身份（不含下钻）——快照恢复与批次复用都按它比较。
+function currentFilters(): SnapshotFilters {
+  return { by: by.value, agent: agent.value, preset: preset.value, drill: null };
+}
+
 async function refresh(): Promise<void> {
   const seq = ++summarySeq;
   const epoch = refreshEpoch;
   // R04：请求发起时捕获不可变查询身份（批次 = epoch）。
-  const captured: SnapshotFilters = {
-    by: by.value,
-    agent: agent.value,
-    range: range.value ? [...range.value] : null,
-    drill: null,
-    tz: tz.value,
-  };
+  const captured: SnapshotFilters = currentFilters();
   loading.value = true;
   summaryError.value = null;
   try {
@@ -290,13 +304,9 @@ async function refresh(): Promise<void> {
 }
 
 function sameMainIdentity(a: SnapshotFilters, b: SnapshotFilters): boolean {
-  return (
-    a.by === b.by &&
-    a.agent === b.agent &&
-    a.tz === b.tz &&
-    a.range?.[0] === b.range?.[0] &&
-    a.range?.[1] === b.range?.[1]
-  );
+  // U01：时间按**预设**比较（v12 起快照不再保存固定日期区间）；时区不在
+  // 快照里（单一来源是 settings.toml），不作为筛选身份的一部分。
+  return a.by === b.by && a.agent === b.agent && presetKey(a.preset) === presetKey(b.preset);
 }
 
 function saveSnapshot(): void {
@@ -387,9 +397,8 @@ async function loadEvents(append = false): Promise<void> {
     const current: SnapshotFilters = {
       by: by.value,
       agent: agent.value,
-      range: range.value ? [...range.value] : null,
+      preset: preset.value,
       drill: drill.value ? { ...drill.value } : null,
-      tz: tz.value,
     };
     if (!sameMainIdentity(live.filters, current)) return;
     if (!sameMainIdentity(eventsKey.value, current)) return;
@@ -405,9 +414,8 @@ async function loadEvents(append = false): Promise<void> {
   const captured: SnapshotFilters = {
     by: by.value,
     agent: agent.value,
-    range: range.value ? [...range.value] : null,
+    preset: preset.value,
     drill: drill.value ? { ...drill.value } : null,
-    tz: tz.value,
   };
   const anchor = append ? (events.value?.rows.at(-1)?.cursor ?? null) : null;
   if (!append) eventsLoading.value = true;
@@ -481,25 +489,42 @@ async function loadViewCache(): Promise<void> {
     if (!cached || cached.v !== SNAPSHOT_VERSION || !cached.report || !cached.filters) return;
     applyingRestore = true;
     // 连同筛选一起恢复：数据与筛选必然同口径（保存时已做过一致性检查）。
-    by.value = cached.filters.by;
-    agent.value = cached.filters.agent;
-    range.value = cached.filters.range ? [...cached.filters.range] : null;
-    drill.value = cached.filters.drill ? { ...cached.filters.drill } : null;
-    tz.value = cached.filters.tz;
+    // v12：时间以**预设**恢复（非法/旧形态回退"全部时间"）；快照不再包含、
+    // 也不再写入时区——恢复绝不改写全局时区（时区唯一来源是 settings.toml）。
+    const restored: SnapshotFilters = {
+      by: cached.filters.by,
+      agent: cached.filters.agent,
+      preset: normalizePreset(cached.filters.preset),
+      drill: cached.filters.drill ? { ...cached.filters.drill } : null,
+    };
+    by.value = restored.by;
+    agent.value = restored.agent;
+    preset.value = restored.preset;
+    drill.value = restored.drill;
     // v11：日粒度参与方式一并恢复——「只看请求明细」是显式选择，不回退 auto。
-    rollupsMode.value = cached.rollups_mode === "detail_only" ? "detail_only" : "auto";
-    eventsKey.value = cached.filters;
+    const restoredRollups: "auto" | "detail_only" =
+      cached.rollups_mode === "detail_only" ? "detail_only" : "auto";
+    rollupsMode.value = restoredRollups;
+    eventsKey.value = restored;
     report.value = cached.report;
     events.value = cached.events;
     // RC02：恢复的旧视图没有当前后端会话的 live 首页身份——旧游标只能
-    // 作 stale 展示，续页必须等本批次首页成功（随后 startRefreshBatch）。
+    // 作 stale 展示，续页必须等本批次首页成功。
     liveFirstPage.value = null;
     cachedAt.value = cached.saved_at;
     stale.value = true;
     await nextTick();
     applyingRestore = false;
-    // 恢复后恰好启动一批后台刷新（单一入口；watcher 已跳过，不重复查询）
-    startRefreshBatch();
+    // 恢复后启动（或复用）一批查询：本批次已在途且身份（筛选 + 日粒度参与
+    // 方式）与恢复结果一致时直接复用它——恢复本身不该额外制造一批查询；
+    // 身份不同才重发新批次（数据口径必须与恢复后的筛选一致）。
+    const reusable =
+      beginPromise != null &&
+      beginEpoch === refreshEpoch &&
+      batchKey != null &&
+      sameMainIdentity(batchKey, currentFilters()) &&
+      restoredRollups === batchRollups;
+    if (!reusable) startRefreshBatch();
   } catch {
     applyingRestore = false;
     // 视图缓存损坏：静默忽略，走正常加载
@@ -610,7 +635,7 @@ const chartGroups = computed(() => realGroups(report.value?.groups ?? []));
 // 用户操作，不递增 interactionEpoch）；恢复应用期间 watcher 跳过查询。
 // 主筛选变化走 startRefreshBatch（同一 epoch 两条查询），不另设明细
 // watcher——否则每次筛选变化发起两次明细查询。
-watch([by, agent, range, tz], () => {
+watch([by, agent, preset, tz], () => {
   if (applyingRestore) return;
   interactionEpoch++;
   startRefreshBatch();
@@ -659,7 +684,7 @@ startRefreshBatch();
         <SegmentedControl v-model="agent" :options="agentOptions" aria-label="数据来源" icon-only />
       </div>
       <div class="filter-line">
-        <DateRangeSelect v-model:value="range" :tz="tz" icon-only />
+        <DateRangeSelect v-model:preset="preset" :tz="tz" :range="batchRange" />
         <SegmentedControl v-model="by" :options="dimOptions" aria-label="聚合维度" />
       </div>
     </div>
