@@ -124,11 +124,23 @@ function Get-CompleteLogLines {
         return $lines
     }
     foreach ($logFile in Get-ChildItem $LogsDir -File -ErrorAction SilentlyContinue) {
+        $stream = $null
+        $reader = $null
         try {
-            $text = [System.IO.File]::ReadAllText($logFile.FullName, [System.Text.Encoding]::UTF8)
+            # 应用的日志 writer 持续打开。Windows 上 ReadAllText 默认仅共享
+            # 读取，会和既有写入句柄冲突；读取句柄仍只读，允许共享写入/轮转。
+            $stream = [System.IO.File]::Open($logFile.FullName,
+                [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+            $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8)
+            $text = $reader.ReadToEnd()
         }
         catch [System.IO.IOException] {
-            continue  # 写入方持锁：下一轮轮询再读。
+            continue  # 文件在枚举后轮转/删除等：下一轮轮询再读。
+        }
+        finally {
+            if ($null -ne $reader) { $reader.Dispose() }
+            if ($null -ne $stream) { $stream.Dispose() }
         }
         if ($text -eq "") {
             continue

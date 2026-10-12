@@ -1,7 +1,7 @@
 # 计划审计事实复核
 
 > 2026-10-11 重新核对。整理基线：`add8319` 与当日工作区；后续修复 `3e645f3` 的 7 项已完成独立复核和最终门禁，见[复核记录](../../reviews/2026-10-11-history-seven-fixes-recheck.md)。
-> 最新进展：[PR #4 NSIS 注册目录修复](../../reviews/2026-10-11-main-merge-readiness.md#pr4-nsis-directory-fix)：56592a5 普通 CI 成功，安装三条契约及打包通过，实际安装因带引号目录失败。读取入口解包及实际函数回归通过，短名 TEMP + Python 3.12 CP1252 共 43 项通过。正式合并须最新提交的两套 CI 与真实安装证据。N12 及 N10/N11/N13 不关闭，历史结果保留原时点。
+> 最新进展：[PR #4 活动日志共享读取修复](../../reviews/2026-10-11-main-merge-readiness.md#pr4-live-log-sharing-fix)：a440dec 普通 CI/全新安装通过，工件已核验，应用迁移/汇总 3 请求；门禁因 ReadAllText 无法读活动 writer 超时。显式只读共享读取和持续 writer 回归通过 PS7 26 项。正式合并须最新两套 CI 与真实五场景证据。N12 及 N10/N11/N13 不关闭，历史结果保留原时点。
 > [唯一剩余计划](../active/2026-10-11-consolidated-remaining-work.md) ｜ [完成/待办总账](../README.md) ｜ [归档说明](../archive/README.md)
 
 ## 修正后的结论

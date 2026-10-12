@@ -1,6 +1,6 @@
 # 整合计划修复复核与 main 合并可行性
 
-> 最新状态（2026-10-12）：56592a5 的普通 CI 成功，三条安装契约及打包通过，实际安装通过注册项/版本后因 NSIS InstallLocation 外层引号拼接路径失败。读取入口已统一解包目录，带引号/不带引号的实际函数回归先红后绿；真实短名 TEMP + Python 3.12 CP1252 全部 43 项通过。详见[NSIS 注册目录修复](#pr4-nsis-directory-fix)。正式合并仍须最新提交的两套检查和真实安装证据；N12 保持部分完成，其余系统及 N10/N11/N13 不关闭。
+> 最新状态（2026-10-12）：a440dec 的普通 CI 成功，实际全新安装四项通过，首次启动已迁移 3 条并汇总 3 请求，但门禁因 ReadAllText 的 Windows 共享方式读不到活动日志而超时。工件已下载并核对 SHA256；读取已改为只读共享写入/轮转，新增真实持有 writer 的回归先红后绿，PS7 全部 26 项通过。详见[活动日志共享读取修复](#pr4-live-log-sharing-fix)。正式合并仍须最新提交的两套检查和五场景证据；N12 保持部分完成，其余系统及 N10/N11/N13 不关闭。
 
 ## `16beea1` 第四轮历史复核
 
@@ -492,3 +492,17 @@ Cargo 命令与 checks action 对齐，额外使用 --offline 防止验证时改
 [调用契约测试](../../scripts/test_install_workflow.py) 新增实际 Get-UninstallEntry 函数回归：只替代注册表读取，输入同时含其他应用与 TokenScope 注册项；验证带引号/普通目录都能拼接到预期真实文件、版本及卸载字符串保留。旧实现的引号用例复现相同 `"C` 错误，修复后通过。真实短名 TEMP + Python 3.12.13 CP1252/UTF8=0 下全部 **43 项**通过（事实 33 + 调用/注册目录 3 + metadata 7），完整 PS1 的 UTF-8 语法解析通过；未执行本机 NSIS 或改用户注册表/历史数据。
 
 原失败运行保留，最新修复提交须重新取得 CI 和真实五场景及工件。此处记录修复时的现场，后续远程状态以 PR Checks 为准；N12 及其他待验项不关闭。
+
+<a id="pr4-live-log-sharing-fix"></a>
+
+## a440dec 实跑与活动日志共享读取修复
+
+[CI/gate](https://github.com/ywltby/tokenscope/actions/runs/38201212010/job/114654827990) 全绿；[Install test](https://github.com/ywltby/tokenscope/actions/runs/38201212017/job/114654827326) 三条契约/生产打包通过，实际全新安装的注册项、版本、主程序及快捷方式四项通过。场景 2 启动后存活，却在等本次汇总 180 秒后超时；后续安装场景及旧包升级未执行，本轮 manifest 与正常退出未获验证。
+
+[失败工件](https://github.com/ywltby/tokenscope/actions/runs/38201212017/artifacts/11725353819) 已实际下载读取，ZIP SHA256=`54d816dc0842f2167f0e50675e603b5156308de50d26e4c818e695ab3f2e3f40` 与 GitHub 工件元数据一致。内含本次 live-logs 与 result.json：应用日志确认旧库迁移 3 条、两次成功“汇总完成”，请求均为 3；结果却是 stage=launched、query_id/requests=null、pass=false。不是应用未查询，真实汇总行与原正则也匹配。
+
+问题在 [Get-CompleteLogLines](../../scripts/install_test_helpers.ps1)：ReadAllText 默认 FileShare.Read，Windows 的新读取句柄不允许既有 writer 的写访问，抛 IOException 后被循环跳过。以本次工件的真实日志和持续持有的 FileShare.ReadWrite/Delete 写句柄本地复现：writer 打开时 helper 读 0 行，关闭后读 27 行。之前合成日志测试都在写完后关闭句柄，遗漏了运行中的 logger。
+
+修复使用 FileAccess.Read 的 FileStream，并显式 FileShare.ReadWrite/Delete，再用 UTF-8 StreamReader 读取；所有句柄在 finally 释放。完整行过滤、归档旧日志、预期请求数、同一进程存活与退出码要求全部保留；文件轮转等 IOException 仍下一轮重读。[生命周期契约](../../scripts/test_install_helpers.ps1) 新增持续打开真实 writer 的四项断言，半行超时、写入换行后读取/本次 query_id/请求数 3 均验证；控制台替身隐藏运行。
+
+旧实现的新正例失败，修复后 PS7 契约 **26 项**全绿；真实工件重放在 writer 打开/关闭时均读 **27 行**，两份 PS1 的 UTF-8 语法解析通过。Python 43 项及 a440dec 的普通 CI 证据保留，Python/Rust/前端实现未改变。此处只确认读取修复，推送后最新远程状态以 PR Checks 为准；仍须最新两套检查、真实五场景与工件，不关闭 N12。

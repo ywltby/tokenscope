@@ -90,7 +90,7 @@ function New-GuiStandInProcess {
 function New-StandInProcess {
     # 存活替身：一个安静存活 60 秒的 pwsh 子进程（等待期/观察期用，
     # 不涉及 CloseMainWindow）。
-    Start-Process -FilePath "pwsh" -ArgumentList "-NoProfile", "-Command", "Start-Sleep -Seconds 60" -PassThru
+    Start-Process -FilePath "pwsh" -ArgumentList "-NoProfile", "-Command", "Start-Sleep -Seconds 60" -WindowStyle Hidden -PassThru
 }
 
 function New-ExitProcess {
@@ -261,7 +261,39 @@ finally {
     Cleanup $s
 }
 
-# ---------- 正例 3：完整生命周期（单实例 + 观察 + 优雅关闭） ----------
+# ---------- 正例 3：真实日志 writer 持续打开，完整行仍须可读 ----------
+
+Write-Host "=== 正例：读取活动写入日志 ==="
+$s = New-Scenario "live-writer"
+$proc = New-StandInProcess
+$s.Context.Process = $proc
+$s.Context.Pid = $proc.Id
+$logPath = Join-Path $s.LogsDir "tokenscope.log"
+# 与 Rust 日志文件一致：允许共享读写/删除，写入句柄整个等待期保持打开。
+$writer = [System.IO.File]::Open($logPath, [System.IO.FileMode]::Create,
+    [System.IO.FileAccess]::Write,
+    [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+try {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($SummaryOk)
+    $writer.Write($bytes, 0, $bytes.Length)
+    $writer.Flush()
+    Test-Throws {
+        Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 1
+    } "活动写入的半行不算完成" "超时"
+    $newline = [System.Text.Encoding]::UTF8.GetBytes("`n")
+    $writer.Write($newline, 0, $newline.Length)
+    $writer.Flush()
+    Test-True (@(Get-CompleteLogLines -LogsDir $s.LogsDir).Count -eq 1) "writer 未关闭时读取完整行"
+    $summary = Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 2
+    Test-True ($summary.QueryId -eq "q-alpha-1") "活动写入日志记录本次 query_id"
+    Test-True ($summary.Requests -eq 3) "活动写入日志记录请求数 3"
+}
+finally {
+    $writer.Dispose()
+    Cleanup $s
+}
+
+# ---------- 正例 4：完整生命周期（单实例 + 观察 + 优雅关闭） ----------
 
 Write-Host "=== 正例：完整生命周期 ==="
 $s = New-Scenario "full-lifecycle"
