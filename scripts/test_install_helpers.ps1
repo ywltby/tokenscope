@@ -84,7 +84,23 @@ function New-GuiStandInProcess {
     # 干净退出、退出码 0——与真实 GUI 应用（close_action = "quit"）的
     # 关闭语义一致。pwsh 是控制台宿主：关窗即 0xC000013A，不能作为
     # "优雅退出 0"的替身。
-    return Start-Process -FilePath "notepad.exe" -PassThru
+    $proc = Start-Process -FilePath "notepad.exe" -PassThru
+    try {
+        # Start-Process 返回时窗口可能尚未创建；等待本进程的有效窗口句柄，
+        # 不能让固定的一秒观察期充当 GUI 初始化完成信号。
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($watch.Elapsed.TotalSeconds -lt 30) {
+            $proc.Refresh()
+            if ($proc.HasExited) { throw "GUI 替身在窗口就绪前退出：$($proc.ExitCode)" }
+            if ($proc.MainWindowHandle -ne [System.IntPtr]::Zero) { return $proc }
+            Start-Sleep -Milliseconds 50
+        }
+        throw "GUI 替身未在 30 秒内创建本进程窗口"
+    }
+    catch {
+        if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+        throw
+    }
 }
 
 function New-StandInProcess {

@@ -526,3 +526,9 @@ Cargo 命令与 checks action 对齐，额外使用 --offline 防止验证时改
 文档提交钩子捕获 submission_counter_covers_leader_work 的归零断言失败（1 != 0）。COLLECT_SUBMISSIONS_ACTIVE 是进程级计数；本航班结束后其它并行单元测试可立即进入采集，原“等待全局 0 后无锁断言”存在观察窗口。生产 SubmissionGuard 在释放 COLLECT_SERIAL 及发布结果前已析构，没有发现计数泄漏。
 
 修复仅位于 src/report.rs 的 cfg(test) 模块：起始通道握手后直接严格断言 1；本航班 join 后取得相同 COLLECT_SERIAL 锁，阻止其它领队在归零断言期间进入，再严格断言 0。保留原握手超时，未清零计数或改成宽松范围，运行时未改。默认并行根库单元测试五轮各 208 通过；恢复原 5s 握手超时后的完整 workspace acceptance 462/10 忽略及 acceptance Clippy 通过。此提交仍需最新两套 PR 检查，不用前一 SHA 的绿灯代替。
+
+### bb6b795 实跑与 GUI 替身窗口握手
+
+[Install test](https://github.com/ywltby/tokenscope/actions/runs/38205913148/job/114669249575) 已成功；[CI/gate](https://github.com/ywltby/tokenscope/actions/runs/38205913143/job/114669249543) 的 Rust 普通测试通过，生命周期正例却在 CloseMainWindow 返回 false 处失败，后续 acceptance 跳过。GUI 替身原本 Start-Process 后立即返回，固定一秒观察没有确认记事本已创建窗口。
+
+New-GuiStandInProcess 现等待同一个 Process 的非零 MainWindowHandle，每次 Refresh 并检查提前退出；30 秒内未就绪明确失败且仅清理自己创建的进程。正式安装脚本和关闭失败守卫未改变。替身就绪后再执行完整生命周期，不重跑原失败碰绿。修改后 PS7 契约连续三轮各 26 通过，完整脚本 UTF-8 语法解析通过；最新修复仍需两套 PR 检查。
