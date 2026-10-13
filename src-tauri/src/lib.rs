@@ -168,6 +168,12 @@ pub fn run() {
                     && let Some(w) = window.get_webview_window("main")
                 {
                     update_window_state(&w);
+                    emit_window_visibility(&w);
+                }
+            }
+            tauri::WindowEvent::Focused(_) => {
+                if let Some(w) = window.get_webview_window("main") {
+                    emit_window_visibility(&w);
                 }
             }
             _ => {}
@@ -785,7 +791,10 @@ fn hide_main_window_on_main_thread(app: &tauri::AppHandle) -> Result<(), String>
     let app_for_main = app.clone();
     app.run_on_main_thread(move || {
         let out = match app_for_main.get_webview_window("main") {
-            Some(w) => w.hide().map_err(|e| format!("隐藏窗口失败: {e}")),
+            Some(w) => w
+                .hide()
+                .map(|()| emit_window_visibility(&w))
+                .map_err(|e| format!("隐藏窗口失败: {e}")),
             None => Err("主窗口不存在，无法最小化".to_string()),
         };
         let _ = tx.send(out);
@@ -990,6 +999,17 @@ fn show_main(app: &tauri::AppHandle) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+        emit_window_visibility(&w);
+    }
+}
+
+/// 失焦不等于隐藏。宿主状态覆盖最小化与托盘隐藏，不依赖 WebView DOM 事件。
+fn emit_window_visibility(window: &tauri::WebviewWindow) {
+    if privacy::phase_of(window.app_handle()) != privacy::Phase::Ready {
+        return;
+    }
+    if let (Ok(shown), Ok(minimized)) = (window.is_visible(), window.is_minimized()) {
+        let _ = window.emit("window-visibility", shown && !minimized);
     }
 }
 

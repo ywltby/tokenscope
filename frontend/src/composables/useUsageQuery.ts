@@ -268,6 +268,10 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   // ── 可见性与刷新调度（U04/U06）────────────────────────────
   /// 汇总页是否可见（KeepAlive 停用期间为 false）。
   const visible = ref(true);
+  let pageVisible = true;
+  let hostVisible = true;
+  let nativeVisibilityKnown = false;
+  let documentVisible = typeof document === "undefined" || document.visibilityState !== "hidden";
   /// 待刷新标记：隐藏期间的所有刷新触发都只置位，回到页面时合并成一批。
   const pendingRefresh = ref(false);
   let pendingManual = false;
@@ -297,6 +301,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   /// `usage-updated` 的取消监听句柄（非 Tauri 环境保持 null）。
   let unlistenUsage: (() => void) | null = null;
   let unlistenNativeFocus: (() => void) | null = null;
+  let unlistenWindowVisibility: (() => void) | null = null;
 
   /// U06：自动读取间隔（`settings.toml`）——只用于状态胶囊的悬停提示；
   /// 真正的读取节奏由后端定时线程决定。
@@ -937,6 +942,13 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   /// - 独立 mount 该组合式函数（无 KeepAlive）时两个钩子都不触发，
   ///   `visible` 保持默认 true，行为与"页面一直可见"一致。
   function setVisible(next: boolean): void {
+    pageVisible = next;
+    updateVisibility();
+  }
+
+  function updateVisibility(): void {
+    // 原生事件到达后以宿主为准；WebView 的 visibilitychange 可能缺失或滞后。
+    const next = pageVisible && (nativeVisibilityKnown ? hostVisible : documentVisible);
     if (next === visible.value) return;
     visible.value = next;
     // U06：时钟检查只跟随"汇总页可见"——隐藏时没有要自动刷新的页面。
@@ -1042,14 +1054,32 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   }
 
   function onVisibilityChange(): void {
-    // 只在"变为可见"时检查；隐藏事件不触发（隐藏时不发查询）。
-    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-    checkTimeWindow();
+    const wasVisible = visible.value;
+    documentVisible = document.visibilityState !== "hidden";
+    updateVisibility();
+    if (wasVisible && visible.value && documentVisible) checkTimeWindow();
   }
 
   /// 历史库变化通知（U06）：非 Tauri 环境（测试 / 浏览器预览）没有事件系统，
   /// 必须静默降级——不得抛出、不得留下未处理 rejection。
   function attachUsageListener(): void {
+    try {
+      void listen<boolean>("window-visibility", (event) => {
+        if (disposed || typeof event.payload !== "boolean") return;
+        nativeVisibilityKnown = true;
+        hostVisible = event.payload;
+        updateVisibility();
+      })
+        .then((un) => {
+          if (disposed) un();
+          else unlistenWindowVisibility = un;
+        })
+        .catch(() => {
+          /* 浏览器预览没有宿主窗口。 */
+        });
+    } catch {
+      /* 非 Tauri 环境。 */
+    }
     // WebView2 的宿主窗口恢复不保证派发 DOM focus/visibilitychange。
     // Tauri 原生焦点事件也走同一调度器，保留在途合并和分页保护。
     try {
@@ -1132,6 +1162,8 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     }
     unlistenNativeFocus?.();
     unlistenNativeFocus = null;
+    unlistenWindowVisibility?.();
+    unlistenWindowVisibility = null;
   });
 
   // 视图快照：只在"偏好 + 时区"逐项相等时用于首帧展示（标记 stale），

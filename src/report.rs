@@ -642,7 +642,6 @@ pub fn collect_only(opts: &SummaryOptions) -> Result<CollectOutcome> {
         generation: snapshot.generation,
         changed: snapshot.changed,
     };
-    remember_collection(opts, snapshot);
     Ok(outcome)
 }
 
@@ -657,8 +656,7 @@ type RecentCollection = Option<(String, Arc<CollectionSnapshot>)>;
 static RECENT_COLLECTION: std::sync::LazyLock<Mutex<RecentCollection>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
 
-fn remember_collection(opts: &SummaryOptions, snapshot: Arc<CollectionSnapshot>) {
-    let key = collection_key(opts);
+fn remember_collection(key: String, snapshot: Arc<CollectionSnapshot>) {
     let mut slot = RECENT_COLLECTION.lock().unwrap_or_else(|e| e.into_inner());
     *slot = Some((key, snapshot));
 }
@@ -680,6 +678,7 @@ pub(crate) fn recent_collection(opts: &SummaryOptions) -> Option<Arc<CollectionS
 /// 只观察自己的键，不受其它用例干扰。用于证明 `collect = false` 不触发
 /// 采集、缓存缺失时必须退回采集。
 #[doc(hidden)]
+#[cfg(test)]
 pub fn collect_rounds_for_tests(opts: &SummaryOptions) -> u64 {
     let key = collection_key(opts);
     COLLECT_ROUNDS
@@ -690,10 +689,12 @@ pub fn collect_rounds_for_tests(opts: &SummaryOptions) -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 static COLLECT_ROUNDS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, u64>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// 登记一轮采集（领队工作开始时）。只在测试观察口径上使用，生产不做判定。
+#[cfg(test)]
 fn note_collect_round(key: &str) {
     let mut map = COLLECT_ROUNDS.lock().unwrap_or_else(|e| e.into_inner());
     *map.entry(key.to_string()).or_insert(0) += 1;
@@ -808,20 +809,24 @@ fn collect_flighted_with(
     let result = {
         let _serial = COLLECT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         // U06 测试观察：领队工作开始计一轮（跟随者不计——它们没有真的采集）。
+        #[cfg(test)]
         note_collect_round(&probe_key);
         let in_flight = COLLECT_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
         COLLECT_MAX_IN_FLIGHT.fetch_max(in_flight, Ordering::SeqCst);
         // N06：领队工作（采集 + 历史库写入提交）登记为"进行中的提交"——
         // 手动与定时入口同样被覆盖，退出路径的等待因此完整。
         let _submission = SubmissionGuard::enter();
-        let r = leader(generation);
+        let r = leader(generation).map(|snapshot| {
+            let snapshot = Arc::new(snapshot);
+            // 所有入口共用；在串行锁内发布，旧航班的迟到跟随者不再覆盖新价格。
+            remember_collection(probe_key.clone(), snapshot.clone());
+            snapshot
+        });
         COLLECT_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
         r
     };
     match result {
-        Ok(snapshot) => {
-            // RC05：只构造一次 Arc，领队与跟随者共享（不再深拷贝）。
-            let arc = Arc::new(snapshot);
+        Ok(arc) => {
             guard.publish_ok(arc.clone());
             drop(guard);
             Ok(arc)

@@ -1,7 +1,7 @@
 # TokenScope 计划与完成状态总账
 
 > 2026-10-11 整理。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
-> 当前待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)。[UI 调整计划](active/2026-10-13-ui-adjustment.md)本轮范围已完成，产品提交 `b302a9a` 的三套远程检查通过，PR #7 未合并；真实跨午夜、长时间休眠、跨显示器已按用户决定移至[独立系统验收待办](system-acceptance-todo.md)，本轮不执行。逐份事实核对：[审计索引](audits/README.md)。
+> 当前待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)。[UI 调整计划](active/2026-10-13-ui-adjustment.md)本轮功能及价格/窗口隐藏复核补修已完成、本地验收通过，最新补修仍需自身 HEAD 的远程门禁，PR #7 未合并；真实跨午夜、长时间休眠、跨显示器已按用户决定移至[独立系统验收待办](system-acceptance-todo.md)，本轮不执行。逐份事实核对：[审计索引](audits/README.md)。
 > 最新进展：PR #5 最终 19c634b 的 CI、五场景、两项升级及工件已验，合并为 main 8d17a47。main 同样全部通过，历史 [v0.1.0](https://github.com/ywltby/tokenscope/releases/tag/v0.1.0) 与 [v0.2.0](https://github.com/ywltby/tokenscope/releases/tag/v0.2.0) 已公开；新建草稿读取延迟曾阻断上传，确认既有草稿后分阶段恢复了同一产物。防复发的 0.2.1 补修已改为固定创建响应 Release ID，当前门禁仍按新 HEAD 和 [Release](https://github.com/ywltby/tokenscope/actions/workflows/release.yml)判定；其余系统签字及 N10/N11/N13 不关闭。
 
 ## 现在执行什么

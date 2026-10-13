@@ -32,7 +32,7 @@ export async function nativeUiSystem({ inst, ck, ev }) {
     await page().getByRole("button", { name: label, exact: true }).click();
     await waitQuery(old);
   };
-  const restore = async () => {
+  const restore = async (checkHidden = false) => {
     const action = fileURLToPath(
       new URL("../../../scripts/native-window-action.ps1", import.meta.url),
     );
@@ -48,6 +48,23 @@ export async function nativeUiSystem({ inst, ck, ev }) {
     change("minimize");
     ev.minimizedVisibility = await page().evaluate(() => document.visibilityState);
     await new Promise((resolve) => setTimeout(resolve, 1200));
+    if (checkHidden) {
+      const hiddenQuery = await query();
+      await page().evaluate(async () => {
+        for (let n = 0; n < 3; n++) {
+          await window.__TAURI_INTERNALS__.invoke("plugin:event|emit", {
+            event: "usage-updated",
+            payload: { generation: 0 },
+          });
+        }
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      ck.add(
+        "native_minimized_notifications_do_not_query",
+        (await query()) === hiddenQuery,
+        `${hiddenQuery} -> ${await query()}; synthetic notifications via real event bus`,
+      );
+    }
     const started = Date.now();
     change("restore");
     await page().bringToFront();
@@ -78,7 +95,7 @@ export async function nativeUiSystem({ inst, ck, ev }) {
   await inst.waitForData();
   await range("24h");
   const before = await query();
-  const resumed = await restore();
+  const resumed = await restore(true);
   await waitQuery(before);
   ev.restoreLatencyMs = Date.now() - resumed;
   ck.add(
@@ -163,6 +180,45 @@ export async function nativeUiSystem({ inst, ck, ev }) {
     "TOML and restarted dropdown both UTC",
   );
   await page().screenshot({ path: path.join(inst.opts.shots, "timezone-restarted.png") });
+  await navigate("汇总");
+  await inst.waitForData();
+  await range("24h");
+  ev.beforeTrayHideQuery = await query();
+  const trayClose = spawnSync(
+    "pwsh",
+    ["-NoProfile", "-File", action, "-ProcessId", String(inst.proc.pid), "-Action", "close"],
+    { encoding: "utf8", windowsHide: true },
+  );
+  if (trayClose.status !== 0 || !/CLOSED true/i.test(trayClose.stdout))
+    throw new Error("tray WM_CLOSE failed");
+  await page().getByRole("button", { name: "最小化到托盘", exact: true }).click();
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  const trayVisible = await page().evaluate(() =>
+    window.__TAURI_INTERNALS__.invoke("plugin:window|is_visible", { label: "main" }),
+  );
+  ck.add("tray_window_is_hidden", trayVisible === false, String(trayVisible));
+  // 隐藏前因焦点变化发出的在途查询允许完成；从确认隐藏后开始量测新请求。
+  const trayQuery = await query();
+  await page().evaluate(() => {
+    const original = window.__TAURI_INTERNALS__.invoke;
+    window.__trayQueryBegins = 0;
+    window.__TAURI_INTERNALS__.invoke = function (cmd, ...args) {
+      if (cmd === "query_begin") window.__trayQueryBegins++;
+      return original.call(this, cmd, ...args);
+    };
+  });
+  await page().evaluate(() =>
+    window.__TAURI_INTERNALS__.invoke("plugin:event|emit", {
+      event: "usage-updated",
+      payload: { generation: 0 },
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  ck.add(
+    "tray_notifications_do_not_query",
+    (await page().evaluate(() => window.__trayQueryBegins)) === 0,
+    `${trayQuery} -> ${await query()}; new queries=${await page().evaluate(() => window.__trayQueryBegins)}`,
+  );
   ev.scope =
     "real minimize/restore and focus; not OS sleep; explicit --scale is layout emulation only";
 }

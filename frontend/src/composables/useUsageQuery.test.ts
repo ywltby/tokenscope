@@ -870,7 +870,7 @@ describe("useUsageQuery 自动刷新调度（U06）", () => {
     expect(unlistenCount).toBe(0);
     w.unmount();
     await flushPromises();
-    expect(unlistenCount, "卸载时取消用量与原生焦点监听").toBe(2);
+    expect(unlistenCount, "卸载时取消用量、原生焦点与宿主可见性监听").toBe(3);
 
     // 事件系统不可用（非 Tauri 环境）：不得抛出、不得产生未处理 rejection
     listenMock.mockRejectedValue(new Error("not a tauri environment"));
@@ -884,6 +884,41 @@ describe("useUsageQuery 自动刷新调度（U06）", () => {
 });
 
 describe("query coherence and reactivation regressions", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+  it("native hidden window defers notifications and clock checks until restored", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    vi.setSystemTime(new Date("2026-10-05T12:00:00+08:00"));
+    setPreferences({ kind: "rolling", hours: 24 });
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    const listener = listenMock.mock.calls.find(([event]) => event === "window-visibility");
+    expect(listener).toBeTruthy();
+    const before = beginCalls();
+    listener![1]({ payload: false });
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    document.dispatchEvent(new Event("visibilitychange"));
+    api.notifyUsageUpdated(20);
+    api.notifyUsageUpdated(21);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushPromises();
+    expect(beginCalls()).toBe(before);
+    expect(api.pendingRefresh.value).toBe(true);
+    // 切页激活不能绕过宿主不可见状态。
+    api.setVisible(false);
+    api.setVisible(true);
+    await flushPromises();
+    expect(beginCalls()).toBe(before);
+    // WebView DOM 状态仍滞后时，原生恢复信号应当足以恢复刷新。
+    listener![1]({ payload: true });
+    await flushPromises();
+    expect(beginCalls()).toBe(before + 1);
+    expect(lastBegin()).toMatchObject({ collect: false, trigger: "auto" });
+    w.unmount();
+  });
   it("native focus refreshes rolling without a DOM focus event", async () => {
     setPreferences({ kind: "rolling", hours: 24 });
     okMock();
@@ -927,23 +962,33 @@ describe("query coherence and reactivation regressions", () => {
     w.unmount();
     expect(pair[0], `displayed identities: ${pair}`).toBe(pair[1]);
   });
-  it("preserves paged session across hidden data notification", async () => {
-    okMock({ query_events: () => Promise.resolve(listOf(["first"], 500)) });
-    const w = mountHost();
-    await flushPromises();
-    await api.loadEvents(true);
-    await flushPromises();
-    const before = beginCalls();
-    api.setVisible(false);
-    api.notifyUsageUpdated(2);
-    api.setVisible(true);
-    await flushPromises();
-    const after = beginCalls();
-    const hint = api.autoRefreshHint.value;
-    w.unmount();
-    expect(after).toBe(before);
-    expect(hint).toBeTruthy();
-  });
+  it.each(["page", "window"])(
+    "preserves paged session across hidden %s notification",
+    async (scope) => {
+      okMock({ query_events: () => Promise.resolve(listOf(["first"], 500)) });
+      const w = mountHost();
+      await flushPromises();
+      await api.loadEvents(true);
+      await flushPromises();
+      const before = beginCalls();
+      const setHidden = (visible: boolean) => {
+        if (scope === "page") api.setVisible(visible);
+        else
+          listenMock.mock.calls.find(([event]) => event === "window-visibility")![1]({
+            payload: visible,
+          });
+      };
+      setHidden(false);
+      api.notifyUsageUpdated(2);
+      setHidden(true);
+      await flushPromises();
+      const after = beginCalls();
+      const hint = api.autoRefreshHint.value;
+      w.unmount();
+      expect(after).toBe(before);
+      expect(hint).toBeTruthy();
+    },
+  );
   it("checks midnight immediately on page activation", async () => {
     vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
     vi.setSystemTime(new Date("2026-10-05T15:59:00Z"));

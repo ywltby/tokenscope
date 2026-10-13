@@ -540,6 +540,11 @@ it("settings changes reach the retained dashboard", async () => {
   await w.get('[aria-label="页面切换"] [aria-label="设置"]').trigger("click");
   await flushPromises();
   w.findComponent({ name: "Settings" }).vm.$emit("data-changed");
+  await flushPromises();
+  expect(
+    w.findComponent({ name: "Settings" }).props("refreshKey"),
+    "自身保存不应回灌整页重读",
+  ).toBe(0);
   await w.get('[aria-label="页面切换"] [aria-label="汇总"]').trigger("click");
   await flushPromises();
   expect(w.findComponent({ name: "Dashboard" }).props("refreshKey")).toBe(1);

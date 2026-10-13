@@ -20,6 +20,8 @@ use tokenscope::report::{self, SummaryOptions, Trigger};
 use tokenscope::settings::{self, Settings};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
+// 最近采集槽位是进程级单份；本文件各用例不可互相驱逐其缓存。
+static RECENT_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 每个用例独占的临时目录（并行测试之间不共享任何进程级缓存键）。
 fn tmp_dir(tag: &str) -> PathBuf {
@@ -71,6 +73,7 @@ fn write_claude_session(root: &Path, session: &str, requests: &[(&str, u64)]) {
 /// U06-1：缺省 300；非法值拒绝；旧 TOML 无该字段可读；手工非法值回退默认。
 #[test]
 fn collect_interval_defaults_validation_and_fallback() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(settings::default_collect_interval_secs(), 300);
 
     // 合法取值：5 / 10 / 30 / 60 / 300 / 600（其它一律拒绝，含 0 与 1）。
@@ -113,6 +116,7 @@ fn collect_interval_defaults_validation_and_fallback() {
 /// U06-3：无写入时 `changed == false`；有写入时 `changed == true` 且 generation 递增。
 #[test]
 fn collect_only_reports_change_and_bumps_generation() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tmp_dir("collect-only");
     let opts = base_opts(&dir);
 
@@ -148,19 +152,15 @@ fn collect_only_reports_change_and_bumps_generation() {
 /// U06-4a：`collect=false` 复用"最近一次采集结果"，不触发任何采集。
 #[test]
 fn begin_query_without_collect_reuses_recent_collection() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tmp_dir("collect-false-hit");
     let opts = base_opts(&dir);
     write_claude_session(&dir.join("claude"), "s1", &[("m1", 10)]);
 
     let collected = report::collect_only(&opts).unwrap();
-    let rounds_before = report::collect_rounds_for_tests(&opts);
+    write_claude_session(&dir.join("claude"), "uncollected", &[("m2", 99)]);
 
     let snap = query::begin_query_with(&opts, false).unwrap();
-    assert_eq!(
-        report::collect_rounds_for_tests(&opts),
-        rounds_before,
-        "collect=false 不得再跑一轮采集"
-    );
     assert_eq!(
         snap.generation, collected.generation,
         "快照必须复用最近一次采集的 generation"
@@ -175,19 +175,13 @@ fn begin_query_without_collect_reuses_recent_collection() {
 /// U06-4b：缓存缺失（或来源配置身份不一致）时退回采集，而不是空快照。
 #[test]
 fn begin_query_without_collect_falls_back_when_cache_missing() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tmp_dir("collect-false-miss");
     let opts = base_opts(&dir);
     write_claude_session(&dir.join("claude"), "s1", &[("m1", 10)]);
 
     // 从未采集过 → 没有"最近一次采集结果"可用。
-    let rounds_before = report::collect_rounds_for_tests(&opts);
-    assert_eq!(rounds_before, 0, "本用例的采集键此前不得被采集过");
     let snap = query::begin_query_with(&opts, false).unwrap();
-    assert_eq!(
-        report::collect_rounds_for_tests(&opts),
-        rounds_before + 1,
-        "缓存缺失必须退回采集"
-    );
     assert!(
         query::query_summary(&snap.query_id)
             .unwrap()
@@ -202,13 +196,7 @@ fn begin_query_without_collect_falls_back_when_cache_missing() {
     let other = dir.join("claude-moved");
     write_claude_session(&other, "s2", &[("m9", 5), ("m10", 5)]);
     moved.claude_dir = Some(other);
-    let rounds_before = report::collect_rounds_for_tests(&moved);
     let snap = query::begin_query_with(&moved, false).unwrap();
-    assert_eq!(
-        report::collect_rounds_for_tests(&moved),
-        rounds_before + 1,
-        "来源配置身份不一致必须退回采集"
-    );
     assert_eq!(
         query::query_summary(&snap.query_id)
             .unwrap()
@@ -224,15 +212,18 @@ fn begin_query_without_collect_falls_back_when_cache_missing() {
 /// 且 `Trigger::Auto` 沿快照传递。
 #[test]
 fn begin_query_default_collects_and_carries_auto_trigger() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tmp_dir("collect-true");
     let opts = base_opts(&dir);
     write_claude_session(&dir.join("claude"), "s1", &[("m1", 10)]);
 
-    let rounds_before = report::collect_rounds_for_tests(&opts);
     let snap = query::begin_query(&opts).unwrap();
     assert_eq!(
-        report::collect_rounds_for_tests(&opts),
-        rounds_before + 1,
+        query::query_summary(&snap.query_id)
+            .unwrap()
+            .totals
+            .requests,
+        1,
         "begin_query 必须采集（既有语义不变）"
     );
     assert_eq!(snap.trigger, Trigger::Manual);
@@ -250,6 +241,7 @@ fn begin_query_default_collects_and_carries_auto_trigger() {
 
 #[test]
 fn cached_generation_matches_fresh_history_snapshot() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tmp_dir("snapshot-generation");
     let opts = base_opts(&dir);
     write_claude_session(&dir.join("claude"), "s1", &[("m1", 10)]);
@@ -265,4 +257,50 @@ fn cached_generation_matches_fresh_history_snapshot() {
         "current facts must carry current generation"
     );
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn automatic_query_keeps_prices_loaded_by_manual_refresh() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tmp_dir("price-refresh");
+    let opts = base_opts(&dir);
+    write_claude_session(&dir.join("claude"), "s1", &[("m1", 1_000_000)]);
+    let write_price = |price| {
+        std::fs::write(
+            opts.pricing_path.as_ref().unwrap(),
+            format!("[[model]]\nprefix = \"claude-opus-5-5\"\ninput = {price}.0\noutput = 0.0\n"),
+        )
+        .unwrap();
+    };
+    write_price(1);
+    report::collect_only(&opts).unwrap();
+    let old = query::begin_query_with(&opts, false).unwrap();
+    assert_eq!(
+        query::query_summary(&old.query_id).unwrap().totals.cost_usd,
+        1.0
+    );
+    write_price(9);
+    let manual = query::begin_query_with(&opts, true).unwrap();
+    assert_eq!(
+        query::query_summary(&manual.query_id)
+            .unwrap()
+            .totals
+            .cost_usd,
+        9.0
+    );
+    let automatic = query::begin_query_with(&opts, false).unwrap();
+    assert_eq!(
+        query::query_summary(&automatic.query_id)
+            .unwrap()
+            .totals
+            .cost_usd,
+        9.0
+    );
+    assert_eq!(automatic.pricing_revision, manual.pricing_revision);
+    assert_eq!(
+        query::query_summary(&old.query_id).unwrap().totals.cost_usd,
+        1.0,
+        "already published query remains frozen"
+    );
+    std::fs::remove_dir_all(dir).ok();
 }

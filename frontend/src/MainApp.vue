@@ -292,7 +292,7 @@ function onCloseCancel(): void {
                   :refresh-key="refreshKey"
                   @go-settings="page = 'settings'"
                 />
-                <Settings v-else :refresh-key="refreshKey" @data-changed="refreshKey++" />
+                <Settings v-else :refresh-key="0" @data-changed="refreshKey++" />
               </KeepAlive>
             </template>
           </main>

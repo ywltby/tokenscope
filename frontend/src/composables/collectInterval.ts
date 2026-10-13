@@ -7,11 +7,8 @@
 // 局部错误。取值只用后端白名单那六档，界面文案 `5 秒 / 10 秒 / 30 秒 /
 // 1 分钟 / 5 分钟 / 10 分钟`。
 //
-// 权威值从哪来：设置页那次 `settings_get`（`loadSettings`）读取后 `adopt`。
-// **刻意不在启动时多发一次 `settings_get`**：设置首读失败/挂起场景
-// （`settings-read-failure` / `settings-deferred-race` 契约）依赖"应用启动后
-// 第一次设置读取发生在设置页"，提前读一次会把失败/挂起挪到设置页之外，让
-// 恢复分支走反。因此在用户进入设置页之前用缺省 300（与后端缺省一致）。
+// 启动时复用时区初始化的 settings_get 结果 adopt 间隔；设置页后续读取时
+// 再 adopt 最新值。本模块不额外发启动读取，尚无成功读取时用缺省 300。
 import { computed, type Ref, type WritableComputedRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { createSettingQueue } from "../lib/settingQueue";
