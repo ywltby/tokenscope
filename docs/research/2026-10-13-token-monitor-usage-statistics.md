@@ -693,6 +693,8 @@ History（热力图/连续天数）数据来源 = tokscale `graph` 扫描 + 日�
 
 `provider_identity.rs` 负责供应商拼写归一（阻止把区域变体（如 `alibaba-cn`）折叠进总部键），
 影响选价与证据等级；`model_alias.rs` 明确只做**展示合并**、不影响计价。
+三源仲裁实际分两层实现（`pricing/lookup.rs:3637` 的 `choose_best_source_result` 与 `:3696` 附近的第二层），
+复刻这套优先级时两层都要处理。
 
 ### 7.4 费率结构、分档与缓存写价
 
@@ -735,6 +737,8 @@ History（热力图/连续天数）数据来源 = tokscale `graph` 扫描 + 日�
 - 写入链：renderer 保存设置 → `settings:update` → `applySettingsPatch` → 价格数组变化时
   `regenerateTokscalePricing()` 并触发一次 `tick('manual', { forceHistory: true })`
   （`src/electron/renderer/app.js:16789`、`src/electron/main.js:7488`、`:7736`、`:6495`）。
+  刷新前有 `ownsUsageRuntime()` 前置判断（`src/electron/main.js:6508`）：没有本地 usage runtime
+  时只落盘文件、不触发刷新。
 
 **TK 侧**：在构造 `PricingService` 时按默认路径读取该文件（`pricing/mod.rs:430`），custom 表置于
 所有目录源之前（`:560`、`:692`）。覆盖语义是「整条消息成本替换，但要求价格覆盖该行的**全部**
@@ -840,6 +844,9 @@ History（热力图/连续天数）数据来源 = tokscale `graph` 扫描 + 日�
     完整上下文；扫描线程池的真实上限可能受运行环境影响。
 12. **03 报告中的少量路径映射属推断**（例如某些 Windows 兜底根、`trae` 是否真正启用用量），
     已在对应报告的存疑节列出；本文只采纳其中可由代码常量直接支撑的部分。
+13. **`cost_source` 还有一条非定价的改写路径**：缓存恢复路径会把成本重新标记为 `Estimated`
+    （`crates/tokscale-core/src/recovery.rs:487` 附近），因此比对 `cost_source` 时要把该路径排除在外，
+    否则会把「恢复出来的估算值」误判成正常计价结果。
 
 ## 10. 与 TokenScope 的对照要点
 
