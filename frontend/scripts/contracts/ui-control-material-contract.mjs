@@ -262,6 +262,7 @@ export async function uiControlMaterial(ctx) {
 
       // 截图 1：汇总页标题行与筛选栏
       await page.screenshot({ path: join(ARTIFACT_DIR, `${theme}-dashboard-head.png`) });
+      await page.screenshot({ path: join(ARTIFACT_DIR, `after-${theme}-dashboard-head.png`) });
 
       // 打开日期浮层
       await realClick(page, dateTrigger);
@@ -367,6 +368,7 @@ export async function uiControlMaterial(ctx) {
 
       // 截图 2：日期浮层（含展开的时间列）
       await page.screenshot({ path: join(ARTIFACT_DIR, `${theme}-date-popover-time.png`) });
+      await page.screenshot({ path: join(ARTIFACT_DIR, `after-${theme}-date-popover-time.png`) });
 
       const timePanelResult = await page.evaluate(() => {
         const panel = document.querySelector(".n-time-picker-panel");
@@ -490,6 +492,7 @@ export async function uiControlMaterial(ctx) {
 
       // 截图 3：设置页“价格”分区按钮区
       await page.screenshot({ path: join(ARTIFACT_DIR, `${theme}-settings-pricing.png`) });
+      await page.screenshot({ path: join(ARTIFACT_DIR, `after-${theme}-settings-pricing.png`) });
 
       // 切到通用分区，测量 NSwitch
       await gotoSettingsSection(page, "通用");
@@ -535,12 +538,31 @@ export async function uiControlMaterial(ctx) {
 
       // 截图 4：关闭确认对话框
       await page.screenshot({ path: join(ARTIFACT_DIR, `${theme}-close-dialog.png`) });
+      await page.screenshot({ path: join(ARTIFACT_DIR, `after-${theme}-close-dialog.png`) });
 
       // 关闭对话框
       await page.locator(".close-actions button", { hasText: "取消" }).first().click();
       await page.waitForSelector(".close-dialog", { state: "hidden", timeout: 5000 });
 
       ctx.finishSession(session);
+
+      // 抽查 150% 缩放截图
+      const session150 = await ctx.open({
+        fixture: "normal",
+        viewport: VIEWPORTS.desktop,
+        theme,
+        reducedMotion: "reduce",
+        deviceScaleFactor: 1.5,
+      });
+      try {
+        await openDashboard(session150);
+        await session150.page.screenshot({
+          path: join(ARTIFACT_DIR, `after-${theme}-1280x820-150pct.png`),
+        });
+        ctx.finishSession(session150);
+      } finally {
+        await session150.close();
+      }
     } finally {
       await session.close();
     }

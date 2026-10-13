@@ -664,6 +664,7 @@ async function openSession(opts) {
   const contextOptions = { viewport: { width: vp.width, height: vp.height } };
   if (opts.colorScheme) contextOptions.colorScheme = opts.colorScheme;
   if (opts.reducedMotion) contextOptions.reducedMotion = opts.reducedMotion;
+  if (opts.deviceScaleFactor) contextOptions.deviceScaleFactor = opts.deviceScaleFactor;
   const context = await browser.newContext(contextOptions);
 
   const externalRequests = [];
