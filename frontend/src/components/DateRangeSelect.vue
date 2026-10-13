@@ -210,7 +210,7 @@ const isTimeDisabled = (_ts: number, position: "start" | "end") =>
       </div>
       <div class="actions-row">
         <!-- 清除入口：一键回"全部时间"并关闭 -->
-        <NButton v-if="!iconOnly" size="small" quaternary @click="clearAll">清除</NButton>
+        <NButton v-if="!iconOnly" size="small" text @click="clearAll">清除</NButton>
         <span v-else></span>
         <span class="actions-group">
           <NButton size="small" @click="close">取消</NButton>

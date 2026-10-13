@@ -67,16 +67,10 @@ function resolve(minimize: boolean): void {
       <div class="close-actions">
         <NButton size="small" :disabled="submitting" @click="emit('cancel')">取消</NButton>
         <span class="close-actions-spacer" />
-        <NButton
-          size="small"
-          type="primary"
-          secondary
-          :disabled="submitting"
-          @click="resolve(true)"
-        >
+        <NButton size="small" type="primary" :disabled="submitting" @click="resolve(true)">
           最小化到托盘
         </NButton>
-        <NButton size="small" type="error" secondary :disabled="submitting" @click="resolve(false)">
+        <NButton size="small" type="error" :disabled="submitting" @click="resolve(false)">
           直接退出
         </NButton>
       </div>
