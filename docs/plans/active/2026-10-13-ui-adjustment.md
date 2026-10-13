@@ -475,6 +475,15 @@ type RangePreset =
 - **证据及测试时序**：`qa-artifacts/ui-adjustment/price-review-red.log` / `price-review-green.log`、`review-gates.log`、`review-browser-final.log`、`review-native-final/ui-system/evidence.json`。原生首轮 13/14：托盘断言将隐藏前在途查询完成误算为新查询；改为确认隐藏后统计真实 `query_begin` 调用，最终为 0。保留首轮失败证据，不把首轮记作通过。
 - **交付边界**：版本保持 0.3.0；本次修改需要新的 PR CI、安装/升级及 Native UI E2E，不能沿用 `b302a9a` 的绿灯。三项独立系统待办不执行，PR #7 不自行合并。
 
+### 再次复核：并行测试隔离与应用筛选复用（2026-10-13）
+
+- **并行失败已复现**：修复前连续 5 次 `cargo test --locked --lib`，第 4 次在 `recent_collection_hits_only_matching_key` 的“同一采集键必须命中”处失败。原因是其它并行单元测试合法覆盖进程级单槽；上一轮只隔离了集成测试，漏掉此项。
+- **测试修正**：将同键命中、异键隔离、连续采集发布的公共 API 契约迁入 `tests/ui_adjustment_collect.rs`，与该测试二进制内所有采集共用既有互斥域。通过追加“尚未采集”的事件验证自动查询未重扫，并断言异目录事实不串用、第二轮代次与事实均更新。未禁用测试、未将全量库测试改为串行，也未为测试增加生产缓存或公开测试接口。
+- **应用筛选修复**：保留采集键中的 agent，因为它确实决定扫描范围；最近快照仅增加“全应用 → 单应用”的覆盖匹配。返回的来源统计按所选应用过滤，价格 Arc 与修订号沿用原快照，采集级警告保留。单应用 → 全应用、单应用 → 另一应用不作覆盖，来源配置变化仍须重新采集，共享原快照不被过滤操作修改。
+- **红绿与稳定性证据**：筛选回归先复现意外重采集（generation 从 1 变 2），修复后 10 项集成测试通过。全量库测试连续 **10/10**（前 5 轮默认并行、后 5 轮 32 线程）通过；同一循环中集成测试以 32 线程运行亦 **10/10**。日志在 `qa-artifacts/ui-adjustment/review2-lib-before-*.log`、`review2-filter-red.log`、`review2-lib-after-*.log` 与 `review2-integration-after-*.log`。
+- **远程边界**：已核实上一提交 `3722b81` 的 CI、安装/升级、Native UI E2E 均成功；随机缺陷仍需修复，单次 CI 通过不能代替稳定性验证。本次补修必须等待自身 HEAD 的三套远程门禁，PR #7 保持草稿且不合并，版本保持 0.3.0。
+- **完整门禁**：本次根库与壳 fmt/clippy/test、前端 typecheck/format/468 项测试及 build 通过（`review2-gates.log`、`review2-build.log`）。本轮未修改前端或原生窗口行为，本地未重复 UI E2E；新的远程 Native UI E2E 仍须通过。
+
 ### 验收边界（系统尾项已转独立待办）
 
 - 真实跨午夜、长时间休眠、不同 DPI/显示器验收仍未实跑，按用户决定移至[独立待办](../system-acceptance-todo.md)，不再计作本计划未闭合项。本机单次 S4 休眠/定时唤醒/应用恢复已通过（见下文）；浏览器模拟时钟与组件测试不能替代移出的系统验收。

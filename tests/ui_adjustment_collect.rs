@@ -172,6 +172,65 @@ fn begin_query_without_collect_reuses_recent_collection() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// 全应用采集覆盖单应用自动查询；来源统计随查询应用筛选。
+#[test]
+fn filtered_automatic_query_reuses_all_app_collection() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tmp_dir("filtered-reuse");
+    let mut all = base_opts(&dir);
+    all.agent = None;
+    all.codex_enabled = Some(true);
+    write_claude_session(&dir.join("claude"), "collected", &[("m1", 10)]);
+    let collected = report::collect_only(&all).unwrap();
+    // 如果应用筛选导致重新采集，下面这条不应可见的记录就会暴露它。
+    write_claude_session(&dir.join("claude"), "uncollected", &[("m2", 99)]);
+    for agent in [AgentKind::ClaudeCode, AgentKind::Codex] {
+        let mut filtered = all.clone();
+        filtered.agent = Some(agent);
+        let snap = query::begin_query_with(&filtered, false).unwrap();
+        assert_eq!(snap.generation, collected.generation, "应用筛选不得重采集");
+        let summary = query::query_summary(&snap.query_id).unwrap();
+        assert_eq!(
+            summary.totals.requests,
+            if agent == AgentKind::ClaudeCode { 1 } else { 0 }
+        );
+        assert_eq!(summary.sources.len(), 1);
+        assert_eq!(summary.sources[0].agent, agent);
+    }
+    let snap = query::begin_query_with(&all, false).unwrap();
+    assert_eq!(snap.sources().len(), 2, "筛选视图不得修改共享采集结果");
+    assert_eq!(
+        query::query_summary(&snap.query_id)
+            .unwrap()
+            .totals
+            .requests,
+        1
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 单应用采集不能充当全部应用采集；改变采集范围必须补采集。
+#[test]
+fn filtered_collection_does_not_cover_all_apps() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tmp_dir("filtered-not-all");
+    let filtered = base_opts(&dir);
+    write_claude_session(&dir.join("claude"), "s1", &[("m1", 10)]);
+    report::collect_only(&filtered).unwrap();
+    write_claude_session(&dir.join("claude"), "s2", &[("m2", 20)]);
+    let mut all = filtered.clone();
+    all.agent = None;
+    let snap = query::begin_query_with(&all, false).unwrap();
+    assert_eq!(
+        query::query_summary(&snap.query_id)
+            .unwrap()
+            .totals
+            .requests,
+        2
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// U06-4b：缓存缺失（或来源配置身份不一致）时退回采集，而不是空快照。
 #[test]
 fn begin_query_without_collect_falls_back_when_cache_missing() {
@@ -206,6 +265,55 @@ fn begin_query_without_collect_falls_back_when_cache_missing() {
         "换目录后按新目录重新采集（同一历史库累计两个来源目录的事实：1 + 2）"
     );
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 从 report 单元测试迁入：覆盖同键命中、异键隔离和连续成功采集的发布。
+/// 必须与本测试二进制内所有采集共享互斥域，不能依赖全量 lib 测试的调度时序。
+#[test]
+fn recent_collection_hits_only_matching_key() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tmp_dir("recent-key");
+    let other_dir = tmp_dir("recent-other-key");
+    let opts = base_opts(&dir);
+    write_claude_session(&dir.join("claude"), "first", &[("m1", 10)]);
+    let first = report::collect_only(&opts).unwrap();
+    assert!(first.changed);
+    write_claude_session(&dir.join("claude"), "second", &[("m2", 20)]);
+    let hit = query::begin_query_with(&opts, false).unwrap();
+    assert_eq!(hit.generation, first.generation);
+    assert_eq!(
+        query::query_summary(&hit.query_id).unwrap().totals.requests,
+        1
+    );
+
+    // 不同目录绝不能拿前一个目录的快照冒充已采集；缺失时必须采集自己的事实。
+    let other = base_opts(&other_dir);
+    write_claude_session(
+        &other_dir.join("claude"),
+        "other",
+        &[("m3", 30), ("m4", 40), ("m5", 50)],
+    );
+    let other_hit = query::begin_query_with(&other, false).unwrap();
+    assert_eq!(
+        query::query_summary(&other_hit.query_id)
+            .unwrap()
+            .totals
+            .requests,
+        3
+    );
+
+    let second = report::collect_only(&opts).unwrap();
+    assert!(second.changed);
+    assert!(second.generation > first.generation);
+    write_claude_session(&dir.join("claude"), "third", &[("m6", 60)]);
+    let hit = query::begin_query_with(&opts, false).unwrap();
+    assert_eq!(hit.generation, second.generation);
+    assert_eq!(
+        query::query_summary(&hit.query_id).unwrap().totals.requests,
+        2
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&other_dir).ok();
 }
 
 /// U06-4c：`begin_query` 仍等价于 `begin_query_with(_, true)`（既有调用点零改动），

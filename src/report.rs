@@ -647,9 +647,8 @@ pub fn collect_only(opts: &SummaryOptions) -> Result<CollectOutcome> {
 
 /// U06："最近一次采集结果"槽位：采集键 + 该轮采集快照（进程级单份）。
 ///
-/// 持锁只做读取/赋值——采集由单飞协调器在锁外完成后再写入，本锁从不嵌套
-/// 采集内部锁，因此不存在锁序问题；`collection_key` 也在锁外求值（它可能
-/// 读取 Claude 项目映射文件）。
+/// 持锁只做快照读取/投影/赋值，不在持锁期间调用采集；发布发生在采集串行锁
+/// 内，读取不反向获取该锁。`collection_key` 在槽位锁外求值（可能读项目映射）。
 /// U06："最近一次采集结果"槽位的类型：采集键 + 该轮采集快照。
 type RecentCollection = Option<(String, Arc<CollectionSnapshot>)>;
 
@@ -661,13 +660,36 @@ fn remember_collection(key: String, snapshot: Arc<CollectionSnapshot>) {
     *slot = Some((key, snapshot));
 }
 
-/// U06：最近一次采集结果——**只在该采集键命中时**返回（来源配置、目录、
-/// 价格路径或刷新标记不同都不复用）。未命中返回 `None`，调用方退回采集。
+/// U06：最近一次采集结果——同键或仅应用范围为其子集时返回；来源配置、目录、
+/// 价格路径或刷新标记不同都不复用。未命中返回 `None`，调用方退回采集。
 pub(crate) fn recent_collection(opts: &SummaryOptions) -> Option<Arc<CollectionSnapshot>> {
     let key = collection_key(opts);
+    // agent 同时决定扫描范围，不能从采集键中删除。只有全应用快照覆盖单应用，
+    // 反向（或 Claude -> Codex）必须未命中；其它采集参数仍须完全一致。
+    let all_key = opts.agent.map(|_| {
+        let mut all = opts.clone();
+        all.agent = None;
+        collection_key(&all)
+    });
     let slot = RECENT_COLLECTION.lock().unwrap_or_else(|e| e.into_inner());
     match slot.as_ref() {
         Some((stored, snapshot)) if *stored == key => Some(snapshot.clone()),
+        Some((stored, snapshot)) if all_key.as_ref() == Some(stored) => {
+            Some(Arc::new(CollectionSnapshot {
+                generation: snapshot.generation,
+                changed: snapshot.changed,
+                sources: snapshot
+                    .sources
+                    .iter()
+                    .filter(|source| Some(source.agent) == opts.agent)
+                    .cloned()
+                    .collect(),
+                // 警告属于整轮采集（包含价格/迁移等全局信息），不猜测文本归属。
+                warnings: snapshot.warnings.clone(),
+                pricing: snapshot.pricing.clone(),
+                pricing_revision: snapshot.pricing_revision.clone(),
+            }))
+        }
         _ => None,
     }
 }
@@ -3883,41 +3905,8 @@ cache_read = 0.0
 
     // ── U06：collect_only 与"最近一次采集结果" ────────────────
 
-    /// U06："最近一次采集结果"**只在该采集键命中时**返回；采集键不同
-    ///（换来源目录/缓存目录）不得复用别人的采集结果。
-    #[test]
-    fn recent_collection_hits_only_matching_key() {
-        let cache = tmp_dir("u06-recent");
-        let o = opts(Some(cache.clone()), None, false);
-        assert!(
-            recent_collection(&o).is_none(),
-            "尚未采集过时不得有最近一次采集结果"
-        );
-
-        let first = collect_only(&o).unwrap();
-        let hit = recent_collection(&o).expect("同一采集键必须命中");
-        assert_eq!(hit.generation, first.generation);
-        assert_eq!(hit.changed, first.changed, "缓存必须就是那一轮的结果");
-
-        // 采集键不同：另一份来源配置不得复用别人的结果。
-        let other = opts(Some(tmp_dir("u06-recent-other")), None, false);
-        assert!(recent_collection(&other).is_none(), "采集键不同不得复用");
-
-        // 再次 collect_only：仍走同一个单飞协调器（一轮一次），并刷新缓存。
-        let rounds = collect_rounds_for_tests(&o);
-        let second = collect_only(&o).unwrap();
-        assert_eq!(
-            collect_rounds_for_tests(&o),
-            rounds + 1,
-            "每次 collect_only 恰好跑一轮采集"
-        );
-        assert_eq!(
-            recent_collection(&o).unwrap().generation,
-            second.generation,
-            "缓存必须刷新为最近一轮"
-        );
-        std::fs::remove_dir_all(&cache).ok();
-    }
+    // 最近采集槽位为进程级单份。命中/失效与连续发布的公共 API 契约放在
+    // tests/ui_adjustment_collect.rs 的互斥域中，避免与本模块并行采集互相驱逐。
 
     /// U06：同参并发 `collect_only` 由单飞协调器合并为**一轮**采集
     ///（跟随者复用同一航班结果）；缓存写入在锁内只做赋值、不调用采集。
