@@ -898,7 +898,7 @@ defineExpose({ priceColumns });
           v-for="s in SECTIONS"
           :key="s.id"
           type="button"
-          class="settings-nav-item"
+          class="settings-nav-item ts-focusable"
           :class="{ 'is-active': activeSection === s.id }"
           :aria-current="activeSection === s.id ? 'true' : undefined"
           @click="selectSection(s.id)"
@@ -1624,13 +1624,12 @@ defineExpose({ priceColumns });
   color: var(--ts-text);
 }
 .settings-nav-item.is-active {
-  background: var(--ts-accent-soft);
+  background: var(--ts-selected-bg);
+  box-shadow:
+    inset 0 0 0 1px var(--ts-selected-stroke),
+    var(--ts-selected-glow);
   color: var(--ts-text);
   font-weight: 600;
-}
-.settings-nav-item:focus-visible {
-  outline: 2px solid var(--ts-accent);
-  outline-offset: 2px;
 }
 .settings-nav-segmented {
   max-width: 100%;

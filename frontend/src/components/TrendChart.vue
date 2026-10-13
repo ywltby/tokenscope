@@ -344,7 +344,9 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
         role="img"
         :aria-label="titleText"
       />
-      <button class="chart-reset" type="button" @click="resetZoom">显示全部</button>
+      <button class="ts-btn ts-btn-sm chart-reset" type="button" @click="resetZoom">
+        显示全部
+      </button>
     </div>
   </section>
 </template>
@@ -362,28 +364,10 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
   position: absolute;
   right: 4px;
   bottom: 12px;
-  width: 64px;
-  height: 28px;
-  color: var(--ts-text-secondary);
-  background: transparent;
-  border: none;
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  padding: 4px;
 }
 .chart-body-time .chart-reset {
   right: 12px;
   bottom: 8px;
-}
-.chart-reset:hover {
-  color: var(--ts-text);
-  background: var(--ts-row-hover);
-  border-radius: var(--ts-radius-control);
-}
-.chart-reset:focus-visible {
-  outline: 2px solid var(--ts-accent);
-  outline-offset: 2px;
 }
 .chart-body:focus-visible {
   outline: 2px solid var(--ts-accent);

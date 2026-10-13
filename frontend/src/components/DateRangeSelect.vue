@@ -147,12 +147,11 @@ const isTimeDisabled = (_ts: number, position: "start" | "end") =>
     @update:show="show = $event"
   >
     <template #trigger>
-      <!-- 任务 3：与分段控件同族——32px、--ts-fill 底、无描边、8px 圆角 -->
       <button
         ref="triggerElement"
         type="button"
-        class="range-trigger ts-focusable"
-        :class="{ 'is-icon': iconOnly, 'has-preset': !iconOnly }"
+        class="range-trigger ts-btn ts-focusable"
+        :class="{ 'is-icon': iconOnly, 'has-preset': !iconOnly, 'ts-selected-surface': !iconOnly }"
         :aria-label="ariaLabel"
         :aria-expanded="show"
         :title="ariaLabel"
@@ -177,16 +176,16 @@ const isTimeDisabled = (_ts: number, position: "start" | "end") =>
     </template>
     <div class="range-panel" :style="{ maxHeight: panelMaxHeight }" @keydown.esc="close">
       <div class="shortcut-row">
-        <NButton
+        <button
           v-for="s in SHORTCUTS"
           :key="s.label"
-          size="tiny"
-          class="shortcut-btn"
-          :type="shortcutActive(s.preset) ? 'primary' : 'default'"
+          type="button"
+          class="ts-btn ts-choice shortcut-btn"
+          :aria-pressed="shortcutActive(s.preset)"
           @click="applyShortcut(s.preset)"
         >
           {{ s.label }}
-        </NButton>
+        </button>
       </div>
       <!-- 自定义区间：一个日期+时刻面板（精确到分钟），不再套第二层弹层 -->
       <div class="custom-block">
@@ -249,32 +248,15 @@ const isTimeDisabled = (_ts: number, position: "start" | "end") =>
 .range-trigger {
   height: 32px;
   padding: 0 var(--ts-space-3);
-  border: none;
-  border-radius: var(--ts-radius-control);
-  background: var(--ts-fill);
-  color: var(--ts-text-secondary);
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
   /* 语义标签最长 220px，超出省略（不撑破筛选行） */
   max-width: 220px;
   min-width: 0;
-}
-.range-trigger:hover {
-  color: var(--ts-text);
 }
 
 .range-trigger.is-icon {
   width: 32px;
   padding: 0;
   justify-content: center;
-}
-/* 选了时间范围后才是强调色底：全部时间（图标态）不着色 */
-.range-trigger.has-preset {
-  background: var(--ts-accent-soft);
-  color: var(--ts-accent);
 }
 
 .range-trigger-label {
@@ -285,34 +267,15 @@ const isTimeDisabled = (_ts: number, position: "start" | "end") =>
 }
 
 .shortcut-row {
-  flex-shrink: 0;
-  display: inline-flex;
-  /* UX04：组宽不足整组换行（不挤压、裁字）；各按钮宽度由文案 + 水平内边距决定 */
+  display: flex;
   flex-wrap: wrap;
-  max-width: 100%;
-  border: 1px solid var(--ts-separator);
-  border-radius: var(--ts-radius-control);
-  overflow: hidden;
+  gap: var(--ts-space-1);
   margin-bottom: var(--ts-space-3);
 }
 .shortcut-btn {
-  /* 宽度由文案 + 水平内边距决定；外高 32px（与筛选栏其它控件一致） */
-  width: auto;
-  min-width: 0;
   height: 32px;
-  padding: 0 var(--ts-space-3);
   font-size: 12px;
   white-space: nowrap;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 0;
-  flex: 0 0 auto;
-}
-/* 相邻快捷项之间的细分隔线 */
-.shortcut-btn + .shortcut-btn {
-  border-left: 1px solid var(--ts-separator);
 }
 
 /* 内联日期面板只做排版：玻璃材质由弹层外壳承担（避免面板自己再上一块实色） */
