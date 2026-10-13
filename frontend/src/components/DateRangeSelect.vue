@@ -23,6 +23,18 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: "update:preset", v: RangePreset | null): void }>();
 
 const show = ref(false);
+const triggerElement = ref<HTMLButtonElement | null>(null);
+const panelMaxHeight = ref<string>();
+function updatePanelHeight(): void {
+  const rect = triggerElement.value?.getBoundingClientRect();
+  if (!rect) return;
+  // 交给 NPopover 在上下两侧自动翻转；预留外壳 padding、间隙和视口边距。
+  const available = Math.min(
+    window.innerHeight,
+    Math.max(rect.top, window.innerHeight - rect.bottom),
+  );
+  panelMaxHeight.value = `${Math.max(0, available - 40)}px`;
+}
 /** 草稿：统计时区本地时刻 "YYYY-MM-DDTHH:MM" 字符串（无时区重解释）。 */
 const draft = ref<[string, string] | null>(null);
 const untilNow = ref(false);
@@ -69,8 +81,16 @@ function resetDraft(): void {
 }
 
 // 打开时一次性同步草稿：取消/Escape 关闭不改值，重开回到当前预设。
-watch(show, (open) => {
-  if (open) resetDraft();
+watch(show, (open, _previous, onCleanup) => {
+  if (!open) return;
+  resetDraft();
+  updatePanelHeight();
+  window.addEventListener("resize", updatePanelHeight);
+  document.addEventListener("scroll", updatePanelHeight, true);
+  onCleanup(() => {
+    window.removeEventListener("resize", updatePanelHeight);
+    document.removeEventListener("scroll", updatePanelHeight, true);
+  });
 });
 
 const draftReady = computed(() => {
@@ -129,6 +149,7 @@ const isTimeDisabled = (_ts: number, position: "start" | "end") =>
     <template #trigger>
       <!-- 任务 3：与分段控件同族——32px、--ts-fill 底、无描边、8px 圆角 -->
       <button
+        ref="triggerElement"
         type="button"
         class="range-trigger ts-focusable"
         :class="{ 'is-icon': iconOnly, 'has-preset': !iconOnly }"
@@ -154,7 +175,7 @@ const isTimeDisabled = (_ts: number, position: "start" | "end") =>
         <span v-else class="range-trigger-label">{{ label }}</span>
       </button>
     </template>
-    <div class="range-panel" @keydown.esc="close">
+    <div class="range-panel" :style="{ maxHeight: panelMaxHeight }" @keydown.esc="close">
       <div class="shortcut-row">
         <NButton
           v-for="s in SHORTCUTS"
@@ -205,6 +226,9 @@ const isTimeDisabled = (_ts: number, position: "start" | "end") =>
 <style scoped>
 /* 弹层：elevated 玻璃表面（NPopover 浮层内容） */
 .range-panel {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
   /* UX04：宽度随内容增长（快捷项不裁字），并受视口约束不产生横向滚动；
      U02：自定义区是内联的双月日历（约 600px），上限放宽到 720px 以免压缩日历。 */
   width: max-content;
@@ -261,6 +285,7 @@ const isTimeDisabled = (_ts: number, position: "start" | "end") =>
 }
 
 .shortcut-row {
+  flex-shrink: 0;
   display: inline-flex;
   /* UX04：组宽不足整组换行（不挤压、裁字）；各按钮宽度由文案 + 水平内边距决定 */
   flex-wrap: wrap;
@@ -292,6 +317,8 @@ const isTimeDisabled = (_ts: number, position: "start" | "end") =>
 
 /* 内联日期面板只做排版：玻璃材质由弹层外壳承担（避免面板自己再上一块实色） */
 .custom-block {
+  min-height: 0;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -313,6 +340,7 @@ const isTimeDisabled = (_ts: number, position: "start" | "end") =>
 }
 
 .actions-row {
+  flex-shrink: 0;
   display: flex;
   justify-content: space-between;
   margin-top: var(--ts-space-4);

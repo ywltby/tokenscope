@@ -416,7 +416,7 @@ type RangePreset =
 | U04 汇总页状态与切页 | 已完成 | `55e39ff`；`useUsageQuery` 集中状态、单一查询身份、通知合并为一条、KeepAlive + 滚动保留 + 待刷新标记；表外断言改写见第 7 节偏离 2 |
 | U05 设置页分区与文案 | 已完成 | `fea16dd`；分区导航（≤1100px 转顶部分段控件）、价格懒挂载、文案修正；契约脚本按分区调整量测前置 |
 | U06 自动读取与刷新调度 | 已完成 | 后端 `27b40b5`、前端 `3717413`；`collect_only` / `Trigger` / `usage-updated` + 界面调度、状态胶囊与间隔设置；补发判据见第 7 节偏离 3 |
-| U07 验收与交付 | 进行中 | 双门禁通过；UI 契约 `check-ui-contracts.mjs` 已适配并重跑（见第 7 节偏离 6）；`DESIGN.md` / `docs/stats-semantics.md` / `CLAUDE.md` 已同步；真机与版本项见第 7 节 |
+| U07 验收与交付 | 部分完成，系统边界待验 | 版本 0.3.0、草稿 PR #7 已交付；浏览器/原生/安装验收与单次真实 S4 证据见第 7 节；完整日期形态和键盘验收补测见本节末；真实跨午夜、长时多轮休眠、跨显示器仍未闭合，不自行合并 main |
 
 ## 7. 实施记录与偏离（2026-10-13 执行）
 
@@ -459,7 +459,7 @@ type RangePreset =
 
 自动化分层与复跑方式：
 
-- **浏览器 E2E**：`pnpm --dir frontend build` 后运行 `pnpm --dir frontend test:e2e`。自行启动本次产物的 preview，端口冲突即失败；覆盖浅/深色 × 1280×820/980×620 四组布局，以及 `ui_refresh_lifecycle`、`ui_refresh_clock`、`ui_adjustment_shapes`。使用真实 Vue/Naive UI，IPC 响应可控；不把浏览器模拟时钟称为原生后端时钟验收。
+- **浏览器 E2E**：`pnpm --dir frontend build` 后运行 `pnpm --dir frontend test:e2e`。自行启动本次产物的 preview，端口冲突即失败；覆盖浅/深色 × 1280×820/980×620 四组布局，以及 `ui_refresh_lifecycle`、`ui_refresh_clock`、`ui_adjustment_shapes`、`ui_date_keyboard_matrix`。使用真实 Vue/Naive UI，IPC 响应可控；不把浏览器模拟时钟称为原生后端时钟验收。
 - **原生 E2E**：先 `cargo build --locked --manifest-path src-tauri/Cargo.toml --release --features acceptance,tauri/custom-protocol --bin tokenscope`，再 `node frontend/scripts/native-acceptance.mjs --scenario ui-refresh --events 4 --port 9451 --out qa-artifacts/ui-adjustment/final-native`。真实 WebView2 + Rust + SQLite，临时来源追加合成 JSONL，真实等待 120 秒；覆盖自动可见、同屏查询身份、空闲日志、重复采集不增量、连续选择间隔后重启、旧时区迁移与再次启动不被冲突旧键覆盖。驱动器核对真实数据目录指纹。
 - **CI**：通用 checks 增加浏览器 E2E；`Native UI E2E` workflow 在 PR/main push/manual dispatch 上构建隔离验收 EXE 并实跑，不执行安装卸载。两条路径都上传证据；原生记录 EXE 哈希、断言、截图与合成来源的应用日志。
 
@@ -494,3 +494,12 @@ type RangePreset =
 - **真实 S4 与自动唤醒**：Power-Troubleshooter Event 1 的 `SleepTime=2026-10-13T02:57:20.3234506Z`、`WakeTime=2026-10-13T02:59:05.0584420Z`（北京时间 10:57:20 → 10:59:05），`TargetState=EffectiveState=5`；Kernel-Power 42/107 同时确认状态 5。定时器计划于 10:58:50 到期，恢复完成于 10:59:05；`WakeSourceType=6`、`WakeSourceText=pwsh.exe`、`WakeTimerOwner` 为测试 PowerShell，确认由本次定时器唤醒。约 105 秒是整个进入/恢复跨度，不能当作纯断电驻留时间。
 - **应用恢复 9/9**：同一 PID 17512 存活；恢复后尚未追加数据时，查询由同一实例的 `-1-g1` 变为 `-3-g1`，24h 范围及更新时间从 10:57 更新到 10:59，原请求数保持 1；随后追加第二条合成请求，约 4.9 秒内自动显示 2 请求，汇总/明细均为 `-4-g2`。客户区 1470×930 = viewport 980×620 × DPR 1.5，截图正常；WM_CLOSE 正常退出码 0。真实目录指纹前后均为 `a539182b7be4df0a`。
 - **证据与边界**：原始电源事件、应用状态、脚本和截图保存在忽略目录 `qa-artifacts/real-hibernate/`，补测结果位于 `round2/app-result.json`、`round2/power-result.json`、`round2/after.png`，不提交机器事件 XML 或用户运行工件。本机这一次 S4 恢复已闭合；跨真实午夜、S0/长时多轮休眠、跨显示器及 N10/N11/N12 其余项/N13 仍不因此标完成。
+
+### U07 日期视觉矩阵与键盘全流程补验（2026-10-13）
+
+- **纠正完成口径**：先前的组件测试仅证明原生控件和 Escape 事件，不等于完整键盘 E2E；原形态截图也未覆盖自定义整日、分钟、至今和跨年。本轮新增 `ui_date_keyboard_matrix`，已接入 `test:e2e`，与既有三项契约一起进入 CI。
+- **覆盖**：浅/深色 × 1280×820/980×620，四组均用 Tab/Enter/Space 和键盘输入完成日期流程，核对 `query_begin` 的分钟和边界参数、冻结范围标签、取消/Escape 草稿丢弃；补齐全部日期形态、时刻模式日汇总排除通知、更新/刷新中/续页新数据提示及六个设置分区，共 84 张新截图。IPC 和时间为合成输入，不充当真实跨午夜或后台解析证据。截图保存失败会使契约失败。
+- **发现并修复真实缺陷**：980×620 下自定义日期浮层底边约 707px，确认/取消超出视口；新增边界断言先稳定复现浅/深色共 8 个失败，再按触发按钮上下可用空间限制面板高度，日期区内部滚动，操作区保持可见；打开期间随窗口与滚动更新高度，关闭后移除监听。
+- **本地结果**：根库/壳 fmt、clippy、test，前端 typecheck、format、466 项测试与 build 通过。浏览器四组布局零违例，四项 E2E 共 **149 条断言通过**（新增矩阵 **121 条**）。复现证据 `qa-artifacts/ui-adjustment/date-overflow-red/`；最终截图/测量 `qa-artifacts/ui-adjustment/ci-e2e/`，日志 `final-date-e2e.log`、`date-gates.log`。已抽查宽窄窗口的真实截图，非只检查文件存在。
+- **远程与交付**：上一提交 `09762b3` 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/38339892044)、[安装及两项固定旧包升级](https://github.com/ywltby/tokenscope/actions/runs/38339892055)、[原生 UI E2E](https://github.com/ywltby/tokenscope/actions/runs/38339892049) 均已通过。本次浮层补修需以推送后对应 HEAD 的 CI 为准，不沿用上一提交的通过状态；同一 PR 保持版本 0.3.0，PR #7 不自行合并。
+- **尚未闭合**：本计划的系统边界仍是跨真实午夜、长时多轮休眠、跨显示器（含真实系统 DPI 切换）。单次 S4 已验证；S0 未额外验证。U01–U06 实现完成，U07 的上述系统边界和本次提交远程验证继续待验；不扩张为其他整合计划 N10/N11/N12/N13 全部完成。

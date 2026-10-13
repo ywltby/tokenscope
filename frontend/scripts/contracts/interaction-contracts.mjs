@@ -12,6 +12,7 @@
 // - 未处理拒绝、未知 IPC command、外联请求都算硬失败。
 import { join } from "node:path";
 import { uiRefreshLifecycle, uiRefreshClock } from "./ui-refresh-contract.mjs";
+import { uiDateKeyboardMatrix } from "./ui-date-keyboard-contract.mjs";
 
 import { PRIVACY_PROTECTED_COMMANDS } from "../fixtures/ui-contracts.mjs";
 
@@ -45,6 +46,7 @@ export const REQUIRED_CONTRACTS = [
   // U01/U02/U06（UI 调整计划）：日期预设按钮与内联时刻面板、状态胶囊
   // 「更新于」与自动读取提示、合并通知唯一性、设置页读取间隔六档。
   "ui_adjustment_shapes",
+  "ui_date_keyboard_matrix",
 ];
 
 const VIEWPORTS = {
@@ -257,6 +259,7 @@ async function waitTipState(session, selector, shown, timeoutMs = 2000) {
 // ── 契约实现 ────────────────────────────────────────────────────────
 
 const IMPL = {
+  ui_date_keyboard_matrix: uiDateKeyboardMatrix,
   ui_refresh_lifecycle: uiRefreshLifecycle,
   ui_refresh_clock: uiRefreshClock,
   async large_pricing_does_not_block_settings_navigation(ctx) {
@@ -2322,8 +2325,8 @@ export async function runContracts({ open, output, meta, only = REQUIRED_CONTRAC
         await session.page.screenshot({ path: join(output, file) });
         const last = results[results.length - 1];
         if (last) last.screenshot = file;
-      } catch {
-        /* 截图失败不改变断言结论 */
+      } catch (error) {
+        ctx.record(contract, `截图保存 ${file}`, false, String(error));
       }
     },
     finishSession(session) {
