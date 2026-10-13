@@ -484,3 +484,4 @@ type RangePreset =
 - 远程首轮 `c2699eb`：CI 与安装/两项真实旧版升级通过；Native UI E2E 在窄屏设置分区定位失败（控件角色从 button 变为 radio）。修复选择器并在本地固定窄屏复跑；最终远程结论须等待补修提交，不沿用首轮状态。
 - 补修本地验收：前端 466 项、根库/壳 fmt/clippy/test、前端 typecheck/format/build 全部通过；浏览器四组布局零违例、刷新契约 28 条通过。`ui-system` 默认及 `--scale 1/1.5/2` 四次各 11/11，通过实际宿主客户区尺寸与更新时间断言；窗口恢复后滚动范围重新查询，UTC 设置经正常退出重启保留。对应工作树产物 SHA256 `af3fadc73a01797989e5067068572db14b4234a01723862289efa0fa6e19105c`，证据 `qa-artifacts/ui-adjustment/final-system*/`；真实目录指纹均未变。
 - 同一产物 `ui-refresh` 再验 10/10（含两分钟空闲观测），证据 `qa-artifacts/ui-adjustment/final-refresh-fixed/`；源日志追加、读取间隔保存与重启、自动刷新同批次、空闲日志、重复采集及旧时区迁移断言通过。
+- `5a53017` 远程复跑：CI、安装和两项旧版升级通过，原生刷新 10/10；`ui-system` 恢复后的宿主检查失败，读取到 0×0 辅助窗口。原选择器仅按 PID/可见/顶层取枚举首项，受控同进程双窗口用例已复现误选。改为再匹配配置中的 `TokenScope` 主窗口标题，新增 `scripts/test_native_window_action.ps1` 在构建前验证零尺寸辅助窗口不能抢占主窗口读取与缩放；真实原生复跑 11/11，证据 `owned-main-window/`。保留失败记录，补修后的远程结果另行核对。

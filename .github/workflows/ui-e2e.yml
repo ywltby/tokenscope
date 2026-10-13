@@ -23,6 +23,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
+      - name: Owned native window selection contract
+        shell: pwsh
+        run: ./scripts/test_native_window_action.ps1
       - name: Build embedded frontend and isolated acceptance executable
         shell: pwsh
         run: |

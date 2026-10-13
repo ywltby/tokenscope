@@ -25,12 +25,14 @@ $ErrorActionPreference = 'Stop'
 if (-not ('TsActWin' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public static class TsActWin {
     public delegate bool EnumProc(IntPtr h, IntPtr l);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder text, int count);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int height, uint flags);
@@ -69,7 +71,11 @@ public static class TsActWin {
         _found = IntPtr.Zero;
         EnumWindows((h, l) => {
             uint wp; GetWindowThreadProcessId(h, out wp);
-            if ((int)wp == pid && IsWindowVisible(h) && GetParent(h) == IntPtr.Zero) { _found = h; return false; }
+            if ((int)wp != pid || !IsWindowVisible(h) || GetParent(h) != IntPtr.Zero) return true;
+            // WebView2 may create visible, zero-sized auxiliary top-level windows.
+            // Bind all operations to the configured application title, not enumeration order.
+            var title = new StringBuilder(256); GetWindowText(h, title, title.Capacity);
+            if (title.ToString() == "TokenScope") { _found = h; return false; }
             return true;
         }, IntPtr.Zero);
         return _found;
