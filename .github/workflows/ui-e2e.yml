@@ -33,6 +33,15 @@ jobs:
       - name: Real WebView2 and Rust refresh lifecycle
         shell: pwsh
         run: node frontend/scripts/native-acceptance.mjs --scenario ui-refresh --events 4 --port 9451 --out qa-artifacts/ui-adjustment/native-e2e
+      - name: Native window restore and settings persistence
+        shell: pwsh
+        run: |
+          node frontend/scripts/native-acceptance.mjs --scenario ui-system --events 4 --port 9452 --out qa-artifacts/ui-adjustment/native-e2e/system
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($scale in @('1', '1.5', '2')) {
+            node frontend/scripts/native-acceptance.mjs --scenario ui-system --events 4 --scale $scale --port 9452 --out "qa-artifacts/ui-adjustment/native-e2e/layout-$scale"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Upload native UI evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7

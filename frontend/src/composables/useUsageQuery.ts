@@ -165,10 +165,15 @@ type BatchSource = "startup" | "manual" | "auto";
 /// 自动刷新被让位的原因：`data` = 有新数据；`window` = 时间范围到期。
 type AutoReason = "data" | "window";
 
+/** Jiff Zoned 输出带 IANA 注释；偏移已确定时刻，Date.parse 不支持末尾注释。 */
+function queryTimeMs(iso: string): number {
+  return Date.parse(iso.replace(/(?<=(?:Z|[+-]\d{2}:\d{2}))\[[^\[\]]+\]$/, ""));
+}
+
 /** 时刻串在统计时区下的日历日（"YYYY-MM-DD"）；缺失/非法返回 null。 */
 function dayInTz(iso: string | null | undefined, tz: string): string | null {
   if (!iso) return null;
-  const ms = Date.parse(iso);
+  const ms = queryTimeMs(iso);
   if (!Number.isFinite(ms)) return null;
   return tzDate(ms, tz);
 }
@@ -176,7 +181,7 @@ function dayInTz(iso: string | null | undefined, tz: string): string | null {
 /** 时刻串在统计时区下的钟点（"HH:MM:SS"）；缺失/非法返回 null。 */
 function clockInTz(iso: string | null | undefined, tz: string): string | null {
   if (!iso) return null;
-  const ms = Date.parse(iso);
+  const ms = queryTimeMs(iso);
   if (!Number.isFinite(ms)) return null;
   // sv-SE 是 24 小时制，`local` 特判避免把 "local" 传给 Intl（RangeError）。
   if (tz === "local") return new Date(ms).toLocaleTimeString("sv-SE");
@@ -291,6 +296,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   let clockTimer: ReturnType<typeof setInterval> | null = null;
   /// `usage-updated` 的取消监听句柄（非 Tauri 环境保持 null）。
   let unlistenUsage: (() => void) | null = null;
+  let unlistenNativeFocus: (() => void) | null = null;
 
   /// U06：自动读取间隔（`settings.toml`）——只用于状态胶囊的悬停提示；
   /// 真正的读取节奏由后端定时线程决定。
@@ -1044,6 +1050,20 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   /// 历史库变化通知（U06）：非 Tauri 环境（测试 / 浏览器预览）没有事件系统，
   /// 必须静默降级——不得抛出、不得留下未处理 rejection。
   function attachUsageListener(): void {
+    // WebView2 的宿主窗口恢复不保证派发 DOM focus/visibilitychange。
+    // Tauri 原生焦点事件也走同一调度器，保留在途合并和分页保护。
+    try {
+      void listen("tauri://focus", onWindowResume)
+        .then((un) => {
+          if (disposed) un();
+          else unlistenNativeFocus = un;
+        })
+        .catch(() => {
+          /* 浏览器预览没有原生事件总线。 */
+        });
+    } catch {
+      /* 非 Tauri 环境。 */
+    }
     try {
       void listen<{ generation?: number }>("usage-updated", (ev) => {
         if (disposed) return;
@@ -1110,6 +1130,8 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       unlistenUsage();
       unlistenUsage = null;
     }
+    unlistenNativeFocus?.();
+    unlistenNativeFocus = null;
   });
 
   // 视图快照：只在"偏好 + 时区"逐项相等时用于首帧展示（标记 stale），

@@ -870,7 +870,7 @@ describe("useUsageQuery 自动刷新调度（U06）", () => {
     expect(unlistenCount).toBe(0);
     w.unmount();
     await flushPromises();
-    expect(unlistenCount, "卸载时取消监听").toBe(1);
+    expect(unlistenCount, "卸载时取消用量与原生焦点监听").toBe(2);
 
     // 事件系统不可用（非 Tauri 环境）：不得抛出、不得产生未处理 rejection
     listenMock.mockRejectedValue(new Error("not a tauri environment"));
@@ -884,6 +884,20 @@ describe("useUsageQuery 自动刷新调度（U06）", () => {
 });
 
 describe("query coherence and reactivation regressions", () => {
+  it("native focus refreshes rolling without a DOM focus event", async () => {
+    setPreferences({ kind: "rolling", hours: 24 });
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    const listener = listenMock.mock.calls.find(([event]) => event === "tauri://focus");
+    expect(listener, "WebView2 恢复必须接原生焦点事件").toBeTruthy();
+    const before = beginCalls();
+    listener![1]({ payload: null });
+    await flushPromises();
+    expect(beginCalls()).toBe(before + 1);
+    expect(lastBegin()).toMatchObject({ collect: false, trigger: "auto" });
+    w.unmount();
+  });
   it("first-page failure reports an error instead of endless refresh", async () => {
     okMock({ query_events: () => Promise.reject(new Error("events unavailable")) });
     const w = mountHost();
@@ -935,10 +949,12 @@ describe("query coherence and reactivation regressions", () => {
     vi.setSystemTime(new Date("2026-10-05T15:59:00Z"));
     setPreferences({ kind: "days", days: 1 });
     okMock({
-      query_begin: () => Promise.resolve({ ...handle, asOf: "2026-10-05T23:59:00+08:00" }),
+      query_begin: () =>
+        Promise.resolve({ ...handle, asOf: "2026-10-05T23:59:00+08:00[Asia/Shanghai]" }),
     });
     const w = mountHost();
     await flushPromises();
+    expect(api.statusPill.value.text).toBe("更新于 23:59:00");
     const before = beginCalls();
     api.setVisible(false);
     vi.setSystemTime(new Date("2026-10-05T16:01:00Z"));

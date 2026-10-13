@@ -15,8 +15,10 @@
 param(
     [int]$ProcessId = 0,
     [string]$Name = 'tokenscope',
-    [ValidateSet('rect', 'close', 'mainrect', 'dpi')]
-    [string]$Action = 'rect'
+    [ValidateSet('rect', 'close', 'mainrect', 'dpi', 'minimize', 'restore', 'geometry', 'resize')]
+    [string]$Action = 'rect',
+    [int]$Width = 0,
+    [int]$Height = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,10 +32,37 @@ public static class TsActWin {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int height, uint flags);
+    public static string Geometry(int pid) {
+        IntPtr h = Find(pid); RECT r;
+        if (h == IntPtr.Zero || !GetClientRect(h, out r)) throw new Exception("Missing owned window");
+        return string.Format("{{\"width\":{0},\"height\":{1},\"dpi\":{2}}}", r.Right-r.Left, r.Bottom-r.Top, GetDpiForWindow(h));
+    }
+    public static bool Resize(int pid, int width, int height) {
+        IntPtr h = Find(pid); RECT outer, client;
+        if (h == IntPtr.Zero || width <= 0 || height <= 0) return false;
+        ShowWindowAsync(h, 9);
+        if (!GetWindowRect(h, out outer) || !GetClientRect(h, out client)) return false;
+        return SetWindowPos(h, IntPtr.Zero, 0, 0,
+            width + (outer.Right-outer.Left) - (client.Right-client.Left),
+            height + (outer.Bottom-outer.Top) - (client.Bottom-client.Top), 0x0006);
+    }
     [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr h);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int command);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    public static bool ChangeState(int pid, bool minimized) {
+        IntPtr h = Find(pid);
+        if (h == IntPtr.Zero) return false;
+        ShowWindowAsync(h, minimized ? 6 : 9);
+        for (int i = 0; i < 40 && IsIconic(h) != minimized; i++) System.Threading.Thread.Sleep(50);
+        if (!minimized) SetForegroundWindow(h);
+        return IsIconic(h) == minimized;
+    }
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     static IntPtr _found = IntPtr.Zero;
     public static IntPtr Find(int pid) {
@@ -77,12 +106,27 @@ public static class TsActWin {
 [void][TsActWin]::SetProcessDPIAware()
 
 $target = $ProcessId
+if ($Action -in @('minimize', 'restore', 'resize', 'geometry') -and $target -le 0) {
+    throw 'State changes require an explicit owned ProcessId'
+}
 if ($target -le 0) {
     $cand = @(Get-Process -Name $Name -ErrorAction SilentlyContinue | Sort-Object StartTime -Descending)
     if ($cand.Count -eq 0) { Write-Output "PID none"; exit 4 }
     $target = $cand[0].Id
 }
-if ($Action -eq 'dpi') {
+if ($Action -eq 'geometry') {
+    Write-Output ([TsActWin]::Geometry($target))
+}
+elseif ($Action -eq 'resize') {
+    if (-not [TsActWin]::Resize($target, $Width, $Height)) { throw 'Native resize failed' }
+    Write-Output ([TsActWin]::Geometry($target))
+}
+elseif ($Action -in @('minimize', 'restore')) {
+    $changed = [TsActWin]::ChangeState($target, $Action -eq 'minimize')
+    Write-Output ("PID {0} STATE_CHANGED {1}" -f $target, $changed)
+    if (-not $changed) { exit 5 }
+}
+elseif ($Action -eq 'dpi') {
     Write-Output ("PID {0} DPI {1}" -f $target, [TsActWin]::GetDpiForWindow([TsActWin]::Find($target)))
 }
 elseif ($Action -eq 'mainrect') {

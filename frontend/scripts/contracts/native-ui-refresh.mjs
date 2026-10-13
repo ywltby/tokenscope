@@ -16,7 +16,17 @@ export async function nativeUiRefresh({ inst, ck, ev }) {
     click(
       page().locator('[aria-label="页面切换"]').getByRole("radio", { name: label, exact: true }),
     );
-  const section = (label) => click(page().getByRole("button", { name: label, exact: true }));
+  const section = (label) =>
+    click(
+      page()
+        .locator('[aria-label="设置分区"]')
+        .getByRole("button", { name: label, exact: true })
+        .or(
+          page()
+            .locator('[aria-label="设置分区"]')
+            .getByRole("radio", { name: label, exact: true }),
+        ),
+    );
   const interval = async (label) => {
     await click(page().locator('[aria-label="自动读取间隔"]'));
     await click(
@@ -62,6 +72,12 @@ export async function nativeUiRefresh({ inst, ck, ev }) {
     } catch {}
   };
   await inst.waitForData();
+  await inst.setWindowSize(980, 620);
+  ev.initialViewport = await page().evaluate(() => ({
+    width: innerWidth,
+    height: innerHeight,
+    dpr: devicePixelRatio,
+  }));
   const before = Number(await root().getAttribute("data-requests"));
   await navigate("设置");
   await section("数据源");
