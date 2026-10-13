@@ -378,7 +378,7 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
 }
 .chart-reset:hover {
   color: var(--ts-text);
-  background: var(--ts-fill-hover);
+  background: var(--ts-row-hover);
   border-radius: var(--ts-radius-control);
 }
 .chart-reset:focus-visible {

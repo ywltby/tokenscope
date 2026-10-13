@@ -1620,7 +1620,7 @@ defineExpose({ priceColumns });
     background var(--ts-motion) var(--ts-ease);
 }
 .settings-nav-item:hover {
-  background: var(--ts-fill-hover);
+  background: var(--ts-row-hover);
   color: var(--ts-text);
 }
 .settings-nav-item.is-active {
