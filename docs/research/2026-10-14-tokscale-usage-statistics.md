@@ -748,8 +748,8 @@ pub fn normalize_model_for_grouping(model_id: &str) -> String {
 **费率结构**（`pricing/litellm.rs:10-28`）：`ModelPricing` 17 个 `Option<f64>` 字段，
 单位统一为**每 token 美元**（`input_cost_per_token`、`output_cost_per_token`、
 `cache_creation_input_token_cost`(±above_200k / above_1hr / above_1hr_above_200k)、
-`cache_read_input_token_cost`(±above_200k / above_272k)、以及 input/output 的 128k/200k/256k/272k
-长上下文档）。`custom.rs` 允许 `*_per_million_tokens` 写法并在装载时 `/1e6`
+`cache_read_input_token_cost`(±above_200k / above_272k)、以及 input/output 的
+128k/200k/256k/272k 长上下文分档）。`custom.rs` 允许 `*_per_million_tokens` 写法并在装载时 `/1e6`
 （`custom.rs:351-378`，上限校验 `:367-373`）。**只有美元，没有汇率换算代码。**
 
 ### 9.2 匹配链：模型标识 → 价格条目
