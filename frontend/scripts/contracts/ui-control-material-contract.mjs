@@ -171,12 +171,8 @@ export async function measureBoundary(page, locator) {
     const r1 = contrastRatio(inner1, outer);
     const r0Near = contrastRatio(inner0, outerNear);
     const r1Near = contrastRatio(inner1, outerNear);
-    // 按 WCAG 2.1 SC 1.4.11，边框与相邻任一色彩（外侧背景或内侧填充）对比度 ≥ 3:1 即具备清晰边界
-    const rInner01 = contrastRatio(inner0, inner1);
-    const rInner02 = contrastRatio(inner0, inner2);
-    const rInner12 = contrastRatio(inner1, inner2);
 
-    const ratio = Math.max(r0, r1, r0Near, r1Near, rInner01, rInner02, rInner12);
+    const ratio = Math.max(r0, r1, r0Near, r1Near);
     return { side, fraction, ratio, outer, inner0, inner1, r0, r1 };
   }
 
@@ -466,11 +462,14 @@ export async function uiControlMaterial(ctx) {
         document.body.appendChild(dummy);
         const expectedAccent = getComputedStyle(dummy).color;
         dummy.remove();
+        const hasFocusHalo = /rgba\(\s*0,\s*113,\s*227|rgba\(\s*77,\s*163,\s*255/.test(cs.boxShadow);
         return {
           matchesFocusVisible,
           outlineStyle: cs.outlineStyle,
           outlineWidth: cs.outlineWidth,
           outlineColor: cs.outlineColor,
+          boxShadow: cs.boxShadow,
+          hasFocusHalo,
           expectedAccent,
         };
       });
@@ -479,11 +478,12 @@ export async function uiControlMaterial(ctx) {
         keyData.matchesFocusVisible &&
         keyData.outlineStyle === "solid" &&
         keyData.outlineWidth === "2px" &&
-        keyData.outlineColor === keyData.expectedAccent;
+        keyData.outlineColor === keyData.expectedAccent &&
+        keyData.hasFocusHalo;
       record(
         "keyboard_focus_shows_ring",
         keyOk,
-        `:focus-visible=${keyData.matchesFocusVisible} outline=${keyData.outlineWidth} ${keyData.outlineStyle} ${keyData.outlineColor} (expected ${keyData.expectedAccent})`,
+        `:focus-visible=${keyData.matchesFocusVisible} outline=${keyData.outlineWidth} ${keyData.outlineStyle} ${keyData.outlineColor} halo=${keyData.hasFocusHalo} (${keyData.boxShadow}) (expected ${keyData.expectedAccent})`,
       );
 
       // 切到价格分区

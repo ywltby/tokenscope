@@ -67,7 +67,7 @@ const PALETTES: Record<ThemeMode, TsPalette> = {
     controlBg: "rgba(255, 255, 255, 0.92)",
     controlBgHover: "#ffffff",
     controlBgPressed: "rgba(118, 118, 128, 0.16)",
-    controlStroke: "rgba(0, 0, 0, 0.44)",
+    controlStroke: "rgba(0, 0, 0, 0.52)",
     controlStrokeHover: "rgba(0, 0, 0, 0.56)",
     popoverSolid: "#ffffff",
     focusHalo: "rgba(0, 113, 227, 0.18)",

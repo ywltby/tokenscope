@@ -188,7 +188,7 @@ describe("themeContract：适配器与 CSS 语义 token 对齐（UX01）", () =>
         dark: "rgba(255, 255, 255, 0.04)",
       },
       "--ts-control-stroke": {
-        light: "rgba(0, 0, 0, 0.44)",
+        light: "rgba(0, 0, 0, 0.52)",
         dark: "rgba(255, 255, 255, 0.34)",
       },
       "--ts-control-stroke-hover": {

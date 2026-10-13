@@ -20,7 +20,7 @@
   --ts-control-bg: rgba(255, 255, 255, 0.92);
   --ts-control-bg-hover: #ffffff;
   --ts-control-bg-pressed: rgba(118, 118, 128, 0.16);
-  --ts-control-stroke: rgba(0, 0, 0, 0.44);
+  --ts-control-stroke: rgba(0, 0, 0, 0.52);
   --ts-control-stroke-hover: rgba(0, 0, 0, 0.56);
   --ts-control-rim: inset 0 1px 0 rgba(255, 255, 255, 0.9);
   --ts-control-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
@@ -611,13 +611,27 @@ body {
   box-shadow: var(--ts-selected-glow);
 }
 
+/* Naive 按钮补上沿受光和阴影（只给渲染了边框的变体：默认、主、危险；文字按钮没有 __border）。
+   排除 :focus-visible，确保键盘聚焦时不覆盖焦点柔光。 */
+.n-button:not(.n-button--disabled):not(:focus-visible):has(> .n-button__border) {
+  box-shadow: var(--ts-control-rim), var(--ts-control-shadow);
+}
+.n-button:not(.n-button--disabled):not(:focus-visible):has(> .n-button__border):hover {
+  box-shadow: var(--ts-control-rim), var(--ts-control-shadow), var(--ts-control-glow-hover);
+}
+.n-button:not(.n-button--disabled):not(:focus-visible):has(> .n-button__border):active {
+  box-shadow: none;
+}
+
 /* 键盘焦点：2px 强调色 outline（偏移 2px）+ 柔光；不再使用画布色间隙。
-   :root 前缀把特异性抬到 (0,3,0)，以压过 Naive 运行时注入的同级规则。 */
+   :root 前缀把特异性抬到 (0,3,0) 以上，以压过 Naive 运行时注入的同级规则与阴影规则。 */
 :root .ts-focusable:focus-visible,
 :root .ts-btn:focus-visible,
 :root .ts-btn-text:focus-visible,
 :root .ts-segmented-item:focus-visible,
-:root .n-button:focus-visible {
+:root .n-button:focus-visible,
+:root .n-button:has(> .n-button__border):focus-visible,
+:root .n-button:has(> .n-button__border):focus-visible:hover {
   outline: 2px solid var(--ts-accent);
   outline-offset: 2px;
   box-shadow: var(--ts-focus-halo);
@@ -625,17 +639,6 @@ body {
 /* 保留原 .ts-focusable 的圆角行为：行内触发器聚焦时轮廓也是圆角。 */
 :root .ts-focusable:focus-visible {
   border-radius: var(--ts-radius-control);
-}
-
-/* Naive 按钮补上沿受光和阴影（只给渲染了边框的变体：默认、主、危险；文字按钮没有 __border）。 */
-.n-button:not(.n-button--disabled):has(> .n-button__border) {
-  box-shadow: var(--ts-control-rim), var(--ts-control-shadow);
-}
-.n-button:not(.n-button--disabled):has(> .n-button__border):hover {
-  box-shadow: var(--ts-control-rim), var(--ts-control-shadow), var(--ts-control-glow-hover);
-}
-.n-button:not(.n-button--disabled):has(> .n-button__border):active {
-  box-shadow: none;
 }
 
 /* 操作型浮层（DESIGN.md §2 浮层分类）：实色 + 描边，无模糊。
