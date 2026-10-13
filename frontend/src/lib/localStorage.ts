@@ -29,3 +29,14 @@ export function writeItem(key: string, value: string, onError?: (e: unknown) => 
     return false;
   }
 }
+
+/** 删除；不可用或失败返回 false，绝不抛错。 */
+export function removeItem(key: string, onError?: (e: unknown) => void): boolean {
+  try {
+    window.localStorage.removeItem(key);
+    return true;
+  } catch (e) {
+    onError?.(e);
+    return false;
+  }
+}

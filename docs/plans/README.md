@@ -1,12 +1,12 @@
 # TokenScope 计划与完成状态总账
 
 > 2026-10-11 整理。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
-> 当前唯一待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)；逐份事实核对：[审计索引](audits/README.md)。
+> 当前待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)。[UI 调整计划](active/2026-10-13-ui-adjustment.md)本轮功能及价格/窗口隐藏复核补修已完成、本地验收通过，最新补修仍需自身 HEAD 的远程门禁，PR #7 未合并；真实跨午夜、长时间休眠、跨显示器已按用户决定移至[独立系统验收待办](system-acceptance-todo.md)，本轮不执行。逐份事实核对：[审计索引](audits/README.md)。
 > 最新进展：PR #5 最终 19c634b 的 CI、五场景、两项升级及工件已验，合并为 main 8d17a47。main 同样全部通过，历史 [v0.1.0](https://github.com/ywltby/tokenscope/releases/tag/v0.1.0) 与 [v0.2.0](https://github.com/ywltby/tokenscope/releases/tag/v0.2.0) 已公开；新建草稿读取延迟曾阻断上传，确认既有草稿后分阶段恢复了同一产物。防复发的 0.2.1 补修已改为固定创建响应 Release ID，当前门禁仍按新 HEAD 和 [Release](https://github.com/ywltby/tokenscope/actions/workflows/release.yml)判定；其余系统签字及 N10/N11/N13 不关闭。
 
 ## 现在执行什么
 
-原 active 的 25 份计划全部归档；M1–M11 重新核对自身验收条件。历史计划共 **36 份：8 份已实现、26 份部分完成、2 份已被取代**。部分完成通常是“实现已完成、验收有尾项”；用量历史计划仍有原生及真实性能验收责任。`active/` 只保留上述整合计划，不再分别追逐旧计划的尾项。
+原 active 的 25 份计划全部归档；M1–M11 重新核对自身验收条件。历史计划共 **36 份：8 份已实现、26 份部分完成、2 份已被取代**。部分完成通常是“实现已完成、验收有尾项”；用量历史计划仍有原生及真实性能验收责任。`active/` 只保留上述整合计划与 2026-10-13 的 UI 调整计划，不再分别追逐旧计划的尾项。
 
 - **PR #4 已合并**：4cde2b33 的最终两套检查成功，main b1f8b635 的 CI/Release 与五个安装场景成功。A01–A06、M01、N09 保持关闭。
 - **P2：N12 版本与真实旧包升级**，历史 0.1.0 与功能轮次 0.2.0 已发布；版本工具、不可变发布和日志保留/删除两场景升级已实跑通过。当前 0.2.1 修复新建草稿身份读取，仍需自己的 PR/main 发布门禁。
@@ -34,7 +34,7 @@
 
 `a58684c` 普通与 acceptance 完整门禁保留为时点基线：普通根库 **456 通过/10 忽略**、壳 **42 通过**、前端 **361 通过**；acceptance 根库 **456 通过/10 忽略**、壳 **47 通过**。双 manifest fmt、普通/acceptance Clippy（`-D warnings`）、前端 typecheck/format:check/build 和发布元数据 **7 项**通过，Cargo 均带 `--locked`，详见[M01 修复复核](../reviews/2026-10-11-main-merge-readiness.md#m01-closed)。随后安装提交未改产品源码。该轮实际迁移 **8 通过**、native_acceptance **3 通过/2 忽略**、review_regressions **29 通过**、metadata **7 通过**；未重复全套。main 可快进；安装接线不能代替验收实跑。门禁终态（双审计循环收敛，`6fab12f`）：根库 **461 + acceptance**、壳库 **45**、前端 **364**、python **36**、pwsh 契约 **22** 全绿，此前数字保留为时点基线。本批索引随 A01–A06 修复入库，当时的“验证失败例外”已消失。
 
-最新独立核验（2026-10-12）：普通与 acceptance 根库各 **462 通过/10 忽略**，壳 **46/51**、前端 **364**、Python **36**、PS7 **22** 和全部格式/Clippy/typecheck/build 通过；实际安装编排的仓外探针通过当前日志/单实例/关闭前后事实/证据/环境恢复。外部启动和关闭被替换，未实跑 NSIS。A01–A06 已独立确认关闭；231f667 及后续仅文档 e31d1b6 均无 PR/Actions 结果，main 仍祖先。代码与本地门禁就绪，但正式合并须当前 PR 的 CI/gate 和 Install test/install-test 绿灯。N12 保持部分完成；一条 P3 设置页内部审计文案归 N11 清理，不成为新合并阻断。详见[最新复核](../reviews/2026-10-11-main-merge-readiness.md#current-merge-readiness)。
+最新独立核验（2026-10-12）：普通与 acceptance 根库各 **462 通过/10 忽略**，壳 **46/51**、前端 **364**、Python **36**、PS7 **22** 和全部格式/Clippy/typecheck/build 通过；实际安装编排的仓外探针通过当前日志/单实例/关闭前后事实/证据/环境恢复。外部启动和关闭被替换，未实跑 NSIS。A01–A06 已独立确认关闭；231f667 及后续仅文档 e31d1b6 均无 PR/Actions 结果，main 仍祖先。代码与本地门禁就绪，但正式合并须当前 PR 的 CI/gate 和 Install test/install-test 绿灯。N12 保持部分完成；一条 P3 设置页内部审计文案原归 N11 清理，2026-10-13 起改由 UI 调整计划 U05 承担，不成为新合并阻断。详见[最新复核](../reviews/2026-10-11-main-merge-readiness.md#current-merge-readiness)。
 
 ## 原 active 计划：逐份归档
 

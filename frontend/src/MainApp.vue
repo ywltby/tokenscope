@@ -5,7 +5,16 @@
 // 因此不能出现在未同意的首屏路径上（静态导入会绕过 v-if）。
 //
 // 视觉改造不改数据流：回到汇总页仍强制刷新一次（设置页可能重建了缓存）。
-import { computed, onBeforeUnmount, onMounted, provide, ref, watch, watchEffect } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  provide,
+  ref,
+  watch,
+  watchEffect,
+} from "vue";
 import {
   dateZhCN,
   zhCN,
@@ -26,6 +35,7 @@ import Settings from "./views/Settings.vue";
 import { createSettingsPreload, SETTINGS_PRELOAD } from "./lib/settingsPreload";
 import { useTokenColors } from "./composables/tokenColors";
 import { useAutoHideScrollbars } from "./composables/autoHideScrollbars";
+import { initTimezone } from "./composables/timezone";
 
 useAutoHideScrollbars();
 const tokenColors = useTokenColors();
@@ -37,10 +47,24 @@ watchEffect(() => {
 
 const settingsPreload = createSettingsPreload(invoke);
 provide(SETTINGS_PRELOAD, settingsPreload);
-// 首屏先挂载；只预读数据，不提前渲染隐藏的价格表。
-onMounted(() => {
-  settingsPreload.start();
-});
+// 首屏先挂载；只预读数据，不提前渲染隐藏的价格表（启动时机见 releaseTimezoneGate）。
+const tzReady = ref(false);
+/// 时区就绪 → 放行业务页 → 再启动预读。顺序固定为"业务页先、预读后"：
+/// 汇总页挂载时会自查来源状态（`source_status`）等命令，若预读抢在前面，
+/// 业务页自身的首次调用会落到第二次上，失败态/重试路径整体错位。`nextTick`
+/// 让预读排在本次渲染（含仪表盘的 setup 与首次查询）之后。
+function releaseTimezoneGate(): void {
+  tzReady.value = true;
+  void nextTick(() => settingsPreload.start());
+}
+void initTimezone().then(releaseTimezoneGate, releaseTimezoneGate);
+
+// U03：时区就绪门控。主应用挂载（已在隐私同意之后）→ 读取设置得到时区 →
+// **时区就绪后才挂载汇总页**，因此时区就绪前不会有任何查询发出（首屏
+// query_begin 的 tz 一定是 settings.toml 的权威值，而不是先查一次再重发）。
+// 设置页同样等就绪：否则时区下拉会先渲染默认值、读到设置后再跳变。
+// 读取失败在 initTimezone 内部已降级为默认时区，这里只负责置位，绝不
+// 让首屏停在空白。预读（上面）与门控共用同一次就绪回调。
 
 const { preference, mode, setPreference } = useTheme();
 const theme = computed<GlobalTheme | null>(() => (mode.value === "dark" ? darkTheme : null));
@@ -52,10 +76,25 @@ watchEffect(() => {
 });
 
 const page = ref<"summary" | "settings">("summary");
-// 回到汇总页时强制刷新一次数据（设置页可能重建了缓存）。
+// U04：切页不再强制刷新。汇总页改为 KeepAlive 保留（筛选、下钻与滚动位置
+// 都留在实例里），回到页面时只在有"待刷新标记"时发起一批刷新——标记由
+// useUsageQuery 累积隐藏期间的所有触发（时区变化、refreshKey、设置保存、
+// usage-updated、时钟检查）。refreshKey 保留给程序触发（价格同步、设置
+// 保存成功等），不再由切页递增。
+// 设置页 data-changed 在来源保存、重扫、导入或价格同步后递增 refreshKey；
+// 汇总页可见时立刻刷新，隐藏时只置待刷新标记。
 const refreshKey = ref(0);
-watch(page, (p) => {
-  if (p === "summary") refreshKey.value += 1;
+
+// U04 切页保留：滚动容器在应用壳里（汇总页与设置页共用），离开某页时记录
+// 它的 scrollTop，进入时恢复——否则切页会把新页面留在上一页的滚动位置。
+type PageId = "summary" | "settings";
+const scrollEl = ref<HTMLElement | null>(null);
+const scrollPositions: Record<PageId, number> = { summary: 0, settings: 0 };
+watch(page, (next, prev) => {
+  if (scrollEl.value) scrollPositions[prev] = scrollEl.value.scrollTop;
+  void nextTick(() => {
+    if (scrollEl.value) scrollEl.value.scrollTop = scrollPositions[next] ?? 0;
+  });
 });
 
 const pageOptions = [
@@ -155,7 +194,7 @@ function onCloseCancel(): void {
     <NMessageProvider>
       <div class="app-shell">
         <div class="ts-ambient" aria-hidden="true"></div>
-        <div class="scroll-container">
+        <div ref="scrollEl" class="scroll-container">
           <!-- R04 审核：导航与内容同一滚动上下文——内容滚动时从导航后方
                经过，玻璃模糊才真正有内容可透（吸顶 header 在滚动容器内） -->
           <header class="app-nav ts-glass">
@@ -243,14 +282,19 @@ function onCloseCancel(): void {
             <PricingStatusBanner />
           </div>
           <main class="app-content">
-            <Dashboard
-              v-if="page === 'summary'"
-              :refresh-key="refreshKey"
-              @go-settings="page = 'settings'"
-            />
-            <KeepAlive>
-              <Settings v-if="page === 'settings'" :refresh-key="refreshKey" />
-            </KeepAlive>
+            <!-- U03：时区就绪前不挂载业务页面（时区就绪前不发任何查询） -->
+            <template v-if="tzReady">
+              <!-- U04：两页都由 KeepAlive 保留——汇总页的筛选、下钻、滚动位置
+                   与设置页的未保存草稿都在切页后原样回来。 -->
+              <KeepAlive>
+                <Dashboard
+                  v-if="page === 'summary'"
+                  :refresh-key="refreshKey"
+                  @go-settings="page = 'settings'"
+                />
+                <Settings v-else :refresh-key="0" @data-changed="refreshKey++" />
+              </KeepAlive>
+            </template>
           </main>
         </div>
         <!-- 关闭确认弹窗：未记忆默认动作时由后端触发 -->

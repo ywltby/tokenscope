@@ -66,6 +66,93 @@ pub struct Settings {
     /// 关闭窗口默认动作；None = 每次询问（前端弹窗，可勾选记忆）。
     #[serde(default)]
     pub close_action: Option<CloseAction>,
+    /// 统计时区：`local` 或合法 IANA 名；None = 未设置（等价默认 Asia/Shanghai）。
+    ///
+    /// U03：时区的**唯一权威来源**就是这里——前端不再用 localStorage 保存
+    /// 时区，视图快照也不携带它。写入必须经 [`validate_timezone`] 校验，
+    /// 非法值在落盘前拒绝。
+    #[serde(default)]
+    pub timezone: Option<String>,
+    /// U06：JSONL 自动读取间隔（秒）——合法值见 [`COLLECT_INTERVAL_CHOICES`]，
+    /// 缺省（或手工写入非法值）回退 [`default_collect_interval_secs`]。
+    /// 写入必须经 [`validate_collect_interval_secs`] 校验：非法值在落盘前拒绝。
+    #[serde(default)]
+    pub collect_interval_secs: Option<u32>,
+}
+
+/// U06：JSONL 自动读取间隔的可选值（秒；界面显示为 5s、10s、30s、1m、5m、10m）。
+pub const COLLECT_INTERVAL_CHOICES: [u32; 6] = [5, 10, 30, 60, 300, 600];
+
+/// U06：自动读取间隔的默认值（秒）——与既有行为一致（5 分钟）。
+pub fn default_collect_interval_secs() -> u32 {
+    300
+}
+
+/// U06：间隔取值校验：只接受 [`COLLECT_INTERVAL_CHOICES`]；非法值返回中文
+/// 可读错误，调用方必须拒绝保存（文件字节不动）。
+pub fn validate_collect_interval_secs(value: u32) -> Result<u32, String> {
+    if COLLECT_INTERVAL_CHOICES.contains(&value) {
+        return Ok(value);
+    }
+    Err(format!(
+        "自动读取间隔 {value} 秒不受支持：只接受 5 / 10 / 30 / 60 / 300 / 600 秒（界面显示为 5s、10s、30s、1m、5m、10m）"
+    ))
+}
+
+/// U06：读取侧回退点（**纯函数**，可单测）——字段缺失用默认值；手工编辑写入
+/// 的非法值回退默认值并标记"需要告警"，绝不因为一个间隔值阻断启动。
+///
+/// 返回 `(生效间隔秒数, 是否需要告警)`。
+pub fn resolve_collect_interval_secs(value: Option<u32>) -> (u32, bool) {
+    match value {
+        None => (default_collect_interval_secs(), false),
+        Some(v) => match validate_collect_interval_secs(v) {
+            Ok(v) => (v, false),
+            Err(_) => (default_collect_interval_secs(), true),
+        },
+    }
+}
+
+/// U06：从设置取生效间隔；非法值回退默认并 warn（不阻断启动）。
+pub fn collect_interval_secs_from(s: &Settings) -> u32 {
+    let (value, invalid) = resolve_collect_interval_secs(s.collect_interval_secs);
+    if invalid {
+        log::warn!(
+            "设置中的自动读取间隔非法（{:?}），已回退默认 {value} 秒；可选值：5 / 10 / 30 / 60 / 300 / 600 秒",
+            s.collect_interval_secs
+        );
+    }
+    value
+}
+
+/// 统计/展示时区的默认值（字段缺失、读取失败、非法值都回落到它）。
+pub fn default_timezone() -> &'static str {
+    "Asia/Shanghai"
+}
+
+/// U03：时区取值校验 + 归一化（trim；`local` 归一为小写）。
+///
+/// 合法取值：`local`（跟随本机时区）或 jiff 能解析的 IANA 时区名。
+/// 返回归一化后的字符串；非法值返回中文可读错误，调用方必须拒绝保存
+/// （文件字节不动）。
+pub fn validate_timezone(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "时区不能为空：请填 local 或 IANA 时区名（如 {}、UTC）",
+            default_timezone()
+        ));
+    }
+    if trimmed.eq_ignore_ascii_case("local") {
+        return Ok("local".to_string());
+    }
+    match jiff::tz::TimeZone::get(trimmed) {
+        Ok(_) => Ok(trimmed.to_string()),
+        Err(e) => Err(format!(
+            "未知时区 {trimmed:?}：请填 local 或 IANA 时区名（如 {}、UTC）；{e}",
+            default_timezone()
+        )),
+    }
 }
 
 fn default_true() -> bool {
@@ -91,6 +178,8 @@ impl Default for Settings {
             price_auto_sync: true,
             sources: AgentSources::default(),
             close_action: None,
+            timezone: None,
+            collect_interval_secs: None,
         }
     }
 }
@@ -243,6 +332,19 @@ pub const SETTINGS_TEMPLATE: &str = "\
 #     点击窗口关闭按钮的默认动作：minimize = 最小化到托盘；quit = 直接退出。
 #     删除或注释此行 = 每次关闭弹窗询问（也可在设置页「关闭窗口时」修改）。
 #
+# timezone = \"Asia/Shanghai\" | \"local\" | 其它 IANA 时区名
+#     统计与展示时区（设置页「通用」分区的下拉写的就是这里）。
+#     local = 跟随本机时区；其余必须是 IANA 时区名（如 UTC、America/New_York）。
+#     缺省/删除此行 = Asia/Shanghai。非法值会被设置页拒绝保存（不会写入本文件）；
+#     手工写入的非法值在读取时回退默认值并提示。
+#
+# collect_interval_secs = 5 | 10 | 30 | 60 | 300 | 600
+#     JSONL 自动读取间隔（秒；设置页显示为 5s、10s、30s、1m、5m、10m）。
+#     后台线程按该间隔采集原生日志并写入用量历史库，确有新增或更新时通知界面；
+#     间隔从上一轮采集结束开始计时，首轮延迟取该间隔与 30 秒中的较小者。
+#     缺省/删除此行 = 300（5 分钟）。其它值会被设置页拒绝保存（不会写入本文件）；
+#     手工写入的非法值在读取时回退 300 并记一条 warn（不阻断启动）。
+#
 # [sources.claude] / [sources.codex]
 #     enabled = true | false    停用后该来源完全不参与统计。
 #     dir = \"D:/logs/claude\"    显式日志目录；省略 = 使用工具默认目录。
@@ -366,6 +468,8 @@ mod tests {
             privacy_policy_accepted: false,
             price_auto_sync: false,
             close_action: Some(CloseAction::Minimize),
+            timezone: None,
+            collect_interval_secs: None,
             sources: crate::settings::AgentSources {
                 claude: Some(SourceConfig {
                     enabled: false,
@@ -412,6 +516,10 @@ mod tests {
             "配置文件必须以注释头开头（可手编自解释）"
         );
         assert!(text.contains("直接编辑"), "注释头必须说明可手编: {text}");
+        assert!(
+            SETTINGS_TEMPLATE.contains("timezone"),
+            "模板必须说明 timezone 的合法取值与缺省语义"
+        );
         // 模板全部键注释化：解析即默认值（open_settings_file 首建用）
         let parsed: Settings = toml::from_str(SETTINGS_TEMPLATE).unwrap();
         assert_eq!(parsed, Settings::default());
@@ -633,6 +741,186 @@ mod tests {
         assert!(
             matches!(&blocked, ConsentRead::Unreadable(m) if m.contains("读设置失败")),
             "I/O 错误不得被吞成「新安装」: {blocked:?}"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    // ── U03：统计时区（settings.toml 为唯一事实源）─────────────────
+
+    /// 事务内设置时区（与命令层同一条读改写路径：先校验后落盘）。
+    fn set_timezone(path: &Path, value: Option<&str>) -> Result<Option<String>> {
+        let normalized = match value {
+            None => None,
+            Some(v) => Some(validate_timezone(v).map_err(anyhow::Error::msg)?),
+        };
+        update(path, |s| {
+            s.timezone = normalized.clone();
+            Ok(normalized)
+        })
+    }
+
+    /// 缺省 = 未设置（等价默认 Asia/Shanghai）；旧 TOML 无该字段可正常读取。
+    #[test]
+    fn timezone_default_unset_and_legacy_toml_reads() {
+        assert_eq!(default_timezone(), "Asia/Shanghai");
+        assert!(Settings::default().timezone.is_none());
+        let path = tmp("u03-tz-legacy");
+        std::fs::write(&path, "price_auto_sync = false\n").unwrap();
+        let s = load(&path).unwrap();
+        assert!(s.timezone.is_none(), "旧文件无该字段 → None（等价默认值）");
+        assert!(!s.price_auto_sync, "其余字段照常读取");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// 合法值：`local` 与 IANA 名；返回 trim 归一化后的字符串。
+    #[test]
+    fn timezone_validate_accepts_local_and_iana() {
+        assert_eq!(validate_timezone("Asia/Shanghai").unwrap(), "Asia/Shanghai");
+        assert_eq!(validate_timezone("  UTC\n").unwrap(), "UTC");
+        assert_eq!(
+            validate_timezone("America/New_York").unwrap(),
+            "America/New_York"
+        );
+        assert_eq!(validate_timezone("local").unwrap(), "local");
+    }
+
+    /// 非法值：空串/纯空白/未知时区名——中文可读错误。
+    #[test]
+    fn timezone_validate_rejects_empty_and_unknown() {
+        for bad in ["", "   ", "\t", "Not/AZone", "Mars/Olympus"] {
+            let err = validate_timezone(bad).unwrap_err();
+            assert!(err.contains("时区"), "错误必须中文可读: {err}");
+        }
+    }
+
+    /// 非法值拒绝保存：文件字节不动（校验失败不得落盘）。
+    #[test]
+    fn timezone_invalid_rejected_without_touching_file() {
+        let path = tmp("u03-tz-reject");
+        set_timezone(&path, Some("UTC")).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(set_timezone(&path, Some("Not/AZone")).is_err());
+        assert!(set_timezone(&path, Some("   ")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "拒绝保存时文件不得改动"
+        );
+        assert_eq!(load(&path).unwrap().timezone.as_deref(), Some("UTC"));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// 连续两次 update：重新读取等于后一次；清除后字段从文件消失。
+    #[test]
+    fn timezone_two_updates_last_one_wins() {
+        let path = tmp("u03-tz-sequence");
+        set_timezone(&path, Some("UTC")).unwrap();
+        set_timezone(&path, Some(" America/New_York ")).unwrap();
+        assert_eq!(
+            load(&path).unwrap().timezone.as_deref(),
+            Some("America/New_York"),
+            "连续两次写入后读到的必须是后一次"
+        );
+        set_timezone(&path, None).unwrap();
+        assert!(load(&path).unwrap().timezone.is_none());
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("timezone"),
+            "None 序列化为缺省（省略字段）"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    // ── U06：JSONL 自动读取间隔（settings.toml 单一来源）──────────
+
+    /// 读取回退点：缺省 → 默认值；非法值 → 回退默认并标记需要告警。
+    #[test]
+    fn collect_interval_resolution_falls_back_on_invalid() {
+        assert_eq!(
+            resolve_collect_interval_secs(None),
+            (default_collect_interval_secs(), false)
+        );
+        for ok in COLLECT_INTERVAL_CHOICES {
+            assert_eq!(resolve_collect_interval_secs(Some(ok)), (ok, false));
+        }
+        for bad in [0u32, 1, 7, 45, 601, 3600] {
+            assert_eq!(
+                resolve_collect_interval_secs(Some(bad)),
+                (default_collect_interval_secs(), true),
+                "{bad} 必须回退默认值并标记需要告警"
+            );
+        }
+    }
+
+    /// 校验函数：只接受 5 / 10 / 30 / 60 / 300 / 600，错误中文可读。
+    #[test]
+    fn collect_interval_validation_rejects_unsupported_values() {
+        for ok in [5u32, 10, 30, 60, 300, 600] {
+            assert_eq!(validate_collect_interval_secs(ok).unwrap(), ok);
+        }
+        for bad in [0u32, 2, 7, 59, 61, 299, 301, 6000, u32::MAX] {
+            let err = validate_collect_interval_secs(bad).unwrap_err();
+            assert!(
+                err.contains("自动读取间隔") && err.contains("600"),
+                "错误必须中文可读且列出可选值: {err}"
+            );
+        }
+    }
+
+    /// 模板必须说明该字段，且模板本身解析 = `Settings::default()`。
+    #[test]
+    fn collect_interval_template_documents_choices_and_parses_to_default() {
+        assert!(
+            SETTINGS_TEMPLATE.contains("collect_interval_secs"),
+            "模板必须说明自动读取间隔"
+        );
+        for choice in ["5", "10", "30", "60", "300", "600"] {
+            assert!(
+                SETTINGS_TEMPLATE.contains(choice),
+                "模板必须列出可选值 {choice}"
+            );
+        }
+        let parsed: Settings = toml::from_str(SETTINGS_TEMPLATE).unwrap();
+        assert_eq!(parsed, Settings::default());
+    }
+
+    /// 落盘往返：显式值可读回；None 序列化为缺省（省略字段）。
+    #[test]
+    fn collect_interval_roundtrip_and_omitted_when_unset() {
+        let path = tmp("u06-interval");
+        let s = Settings {
+            collect_interval_secs: Some(30),
+            ..Default::default()
+        };
+        save_unlocked(&path, &s).unwrap();
+        assert_eq!(load(&path).unwrap().collect_interval_secs, Some(30));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("collect_interval_secs = 30"),
+            "显式值必须落盘"
+        );
+        save_unlocked(&path, &Settings::default()).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("collect_interval_secs"),
+            "None 序列化为缺省（省略字段）"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// 手工写入的非法值在读取时回退默认并告警，不阻断启动。
+    #[test]
+    fn collect_interval_manual_invalid_value_falls_back_with_warning() {
+        let path = tmp("u06-interval-invalid");
+        std::fs::write(&path, "collect_interval_secs = 45\n").unwrap();
+        let s = load(&path).unwrap();
+        assert_eq!(s.collect_interval_secs, Some(45), "字段本身照常解析");
+        assert_eq!(collect_interval_secs_from(&s), 300, "非法值必须回退默认值");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "collect_interval_secs = 45\n",
+            "读取不得改写用户文件"
         );
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }

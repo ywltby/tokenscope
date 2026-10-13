@@ -157,6 +157,28 @@ describe("UsageTable 表格语义（设计系统 Task 5）", () => {
     const rp = exposed(w).rowProps(row);
     expect(String(rp["aria-label"])).toContain("alpha");
   });
+
+  it("total_row_emits_total_row_event：合计行走独立事件，不发 row-click（U04）", () => {
+    // U04：合计行不是维度值——由 UsageTable 发 `total-row`，父级不再靠字面量
+    // 「合计」判断；键盘 Enter/Space 与点击等价。
+    const w = mount(UsageTable, {
+      props: { report: report([group("m1"), group("合计")], false) },
+    });
+    const total = exposed(w).rowProps(group("合计"));
+    (total.onclick as () => void)();
+    expect(w.emitted("total-row"), "合计行点击发 total-row").toBeTruthy();
+    expect(w.emitted("row-click"), "合计行不得发 row-click").toBeUndefined();
+    (total.onkeydown as (e: { key: string; preventDefault: () => void }) => void)({
+      key: " ",
+      preventDefault: () => {},
+    });
+    expect(w.emitted("total-row")?.length).toBe(2);
+
+    const normal = exposed(w).rowProps(group("m1"));
+    (normal.onclick as () => void)();
+    expect(w.emitted("row-click")?.[0]).toEqual(["m1"]);
+    expect(w.emitted("total-row")?.length, "维度行不得发 total-row").toBe(2);
+  });
 });
 
 // UX01：合计行字重 600 必须命中真实单元格（修复前是死选择器 .total-row strong，

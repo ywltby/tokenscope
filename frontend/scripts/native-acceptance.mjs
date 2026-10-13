@@ -16,6 +16,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+import { nativeUiRefresh } from "./contracts/native-ui-refresh.mjs";
+import { nativeUiSystem } from "./contracts/native-ui-system.mjs";
 
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
 const EXE_DEFAULT = path.join(REPO, "src-tauri", "target", "release", "tokenscope.exe");
@@ -88,7 +90,7 @@ function listFiles(dir) {
   return out;
 }
 function ps(scriptPath, argsArray) {
-  return spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...argsArray], {
+  return spawnSync("pwsh", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...argsArray], {
     encoding: "utf8",
   });
 }
@@ -310,30 +312,66 @@ class Instance {
       { timeout: timeoutMs, polling: 250 },
     );
   }
-  /** 窗口尺寸：CDP 给逻辑（DIP）尺寸，物理尺寸按实测 dpr 换算，不再为此启 PowerShell。 */
+  /** 读取宿主客户区物理尺寸；CDP window bounds 不是 Tauri 宿主窗口。 */
   async windowInfo() {
     try {
-      const w = await this.cdp.send("Browser.getWindowForTarget");
+      const w = this.nativeGeometry();
       const dpr = await this.page.evaluate(() => devicePixelRatio);
       return {
-        logical: `${w.bounds.width}x${w.bounds.height}+${w.bounds.left}+${w.bounds.top} DIP`,
+        logical: `${w.width / dpr}x${w.height / dpr} CSS px (client)`,
         dpr,
-        physical: `${Math.round(w.bounds.width * dpr)}x${Math.round(w.bounds.height * dpr)} px`,
+        physical: `${w.width}x${w.height} px (client)`,
       };
     } catch (e) {
       return { logical: `error:${e.message}`, dpr: null, physical: "unknown" };
     }
   }
-  /** 真实改变原生窗口尺寸（CDP Browser.setWindowBounds），返回改前 bounds。 */
+  nativeGeometry(action = "geometry", extra = []) {
+    const result = spawnSync(
+      "pwsh",
+      [
+        "-NoProfile",
+        "-File",
+        WINDOW_ACTION,
+        "-ProcessId",
+        String(this.proc.pid),
+        "-Action",
+        action,
+        ...extra,
+      ],
+      { encoding: "utf8", windowsHide: true },
+    );
+    if (result.status !== 0) throw new Error(`Native geometry: ${result.stderr}`);
+    return JSON.parse(result.stdout);
+  }
+  /** 调整真实宿主客户区；CDP setWindowBounds 在 WebView2 中只会移动内嵌视图。 */
   async setWindowSize(width, height) {
-    const w = await this.cdp.send("Browser.getWindowForTarget");
-    const prev = { ...w.bounds };
-    await this.cdp.send("Browser.setWindowBounds", {
-      windowId: w.windowId,
-      bounds: { width, height, windowState: "normal" },
-    });
+    const before = this.nativeGeometry();
+    const dpr = await this.page.evaluate(() => devicePixelRatio);
+    const prev = { width: before.width / dpr, height: before.height / dpr };
+    this.nativeGeometry("resize", [
+      "-Width",
+      String(Math.round(width * dpr)),
+      "-Height",
+      String(Math.round(height * dpr)),
+    ]);
     await sleep(800);
+    await this.assertHostFilled();
     return prev;
+  }
+  async assertHostFilled() {
+    const client = this.nativeGeometry();
+    const view = await this.page.evaluate(() => ({
+      width: innerWidth,
+      height: innerHeight,
+      dpr: devicePixelRatio,
+    }));
+    if (
+      Math.abs(client.width - view.width * view.dpr) > 2 ||
+      Math.abs(client.height - view.height * view.dpr) > 2
+    )
+      throw new Error(`WebView does not fill native client: ${JSON.stringify({ client, view })}`);
+    return { client, view };
   }
   async stop({ kill = true } = {}) {
     if (!kill || !this.proc) return;
@@ -526,6 +564,8 @@ async function measureA11y(page) {
 
 // ── 场景 ──────────────────────────────────────────────────────────
 const scenarios = {
+  "ui-refresh": nativeUiRefresh,
+  "ui-system": nativeUiSystem,
   // 在同一个驱动进程内完成等待；部分终端会在父进程结束时回收其原生子进程。
   async "expire-cycle"(context) {
     await scenarios["expire-start"](context);
@@ -1523,7 +1563,13 @@ async function main() {
     ev.manifest_sha_first = manifest.files ? Object.values(manifest.files).map((f) => f.sha256.slice(0, 12)) : [];
     if (SCENARIO === "first-frame") ev.expectStored = EXPECT_STORED;
     hb("启动 release/acceptance 实例并连接 CDP");
-    const info = await inst.launch();
+    let info;
+    try {
+      info = await inst.launch();
+    } catch (error) {
+      await inst.stop();
+      throw error;
+    }
     hb(`PID=${info.pid}`);
     if (SCENARIO === "fault-pricing-locked") {
       // 在进程启动前独占打开 pricing.toml（FileShare=None），让真实后端读取失败
@@ -1596,6 +1642,21 @@ async function main() {
   } catch (e) {
     ck.add("scenario_executed", false, String(e.message ?? e));
     ev.error = String(e.stack ?? e).slice(0, 800);
+    if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system") {
+      try {
+        ev.failureViewport = await inst.page.evaluate(() => ({
+          width: innerWidth,
+          height: innerHeight,
+          dpr: devicePixelRatio,
+          navigation: [...document.querySelectorAll('[aria-label="设置分区"] button')].map(
+            (el) => ({ text: el.textContent, role: el.getAttribute("role") }),
+          ),
+        }));
+        await inst.page.screenshot({ path: path.join(shots, "failure.png") });
+      } catch {
+        /* 已退出的进程仍保留原失败原因。 */
+      }
+    }
   } finally {
     clearTimeout(scenarioTimer);
   }
@@ -1614,6 +1675,12 @@ async function main() {
     } catch {}
   } else {
     await inst.stop();
+  }
+
+  // UI 刷新验收保留合成来源的应用日志，失败也能核对采集/查询实际发生过。
+  if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system") {
+    const logs = path.join(root, "tokenscope", "logs");
+    if (fs.existsSync(logs)) fs.cpSync(logs, path.join(stampDir, "app-logs"), { recursive: true });
   }
 
   const realAfter = fingerprint(REAL_DATA);

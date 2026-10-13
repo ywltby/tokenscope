@@ -1,0 +1,54 @@
+name: Native UI E2E
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-ui:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Owned native window selection contract
+        shell: pwsh
+        run: ./scripts/test_native_window_action.ps1
+      - name: Build embedded frontend and isolated acceptance executable
+        shell: pwsh
+        run: |
+          pnpm --dir frontend build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --manifest-path src-tauri/Cargo.toml --release --features acceptance,tauri/custom-protocol --bin tokenscope
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Real WebView2 and Rust refresh lifecycle
+        shell: pwsh
+        run: node frontend/scripts/native-acceptance.mjs --scenario ui-refresh --events 4 --port 9451 --out qa-artifacts/ui-adjustment/native-e2e
+      - name: Native window restore and settings persistence
+        shell: pwsh
+        run: |
+          node frontend/scripts/native-acceptance.mjs --scenario ui-system --events 4 --port 9452 --out qa-artifacts/ui-adjustment/native-e2e/system
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($scale in @('1', '1.5', '2')) {
+            node frontend/scripts/native-acceptance.mjs --scenario ui-system --events 4 --scale $scale --port 9452 --out "qa-artifacts/ui-adjustment/native-e2e/layout-$scale"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Upload native UI evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+        with:
+          name: native-ui-evidence
+          path: qa-artifacts/ui-adjustment/native-e2e
+          if-no-files-found: warn

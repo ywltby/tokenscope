@@ -104,6 +104,10 @@ export const PRIVACY_PROTECTED_COMMANDS = [
   "settings_get",
   "settings_set_price_auto_sync",
   "settings_set_close_action",
+  // U06：自动读取间隔（settings.toml 单一来源）同样受隐私闸门保护。
+  "settings_set_collect_interval",
+  // U03：统计时区（settings.toml 单一来源）同样受隐私闸门保护。
+  "settings_set_timezone",
   "close_resolve",
   "open_settings_file",
 ];
@@ -134,6 +138,17 @@ export function isDeferred(v) {
 
 const TZ = "Asia/Shanghai";
 const AS_OF = "2026-10-07T22:00:00+08:00";
+/** U01：同一冻结基准的统计时区自然日与本地分钟（`range` 回传用）。 */
+const AS_OF_DAY = AS_OF.slice(0, 10);
+const AS_OF_LOCAL_MINUTE = `${AS_OF_DAY}T${AS_OF.slice(11, 16)}`;
+/** 纯日历减法（与前端 `addDays` 同语义，不受本机时区影响）。 */
+function dayMinus(day, n) {
+  const [y, m, d] = day.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d) - n * 86400e3).toISOString().slice(0, 10);
+}
+/** 滚动 24 小时的起点（本地时刻与 UTC），固定值——只用于形态断言。 */
+const ROLLING_START_LOCAL = `${dayMinus(AS_OF_DAY, 1)}T${AS_OF.slice(11, 16)}`;
+const ROLLING_START_UTC = `${dayMinus(AS_OF_DAY, 1)}T14:00:00Z`;
 const PRICING_REVISION = "rev-synthetic-1";
 
 /** 构造一个合成 Group。 */
@@ -586,13 +601,59 @@ function createSessionTable(cfg) {
   const sessions = new Map();
   let counter = 0;
 
+  /**
+   * U01：按请求的时间参数回传**冻结的范围**（与后端 `RangeView` 同形）——
+   * 界面标签/悬停提示只读它，契约才能断言"范围与汇总同源"。
+   * 四组参数（days / rollingHours / startAt+endAt / untilNow）与后端一致。
+   */
+  function rangeOf(args) {
+    const rolling = args?.rollingHours;
+    const startAt = typeof args?.startAt === "string" ? args.startAt : null;
+    const endAt = typeof args?.endAt === "string" ? args.endAt : null;
+    const untilNow = args?.untilNow === true;
+    if (rolling != null) {
+      return {
+        granularity: "instant",
+        start_local: ROLLING_START_LOCAL,
+        end_local: AS_OF_LOCAL_MINUTE,
+        start: ROLLING_START_UTC,
+        end: AS_OF,
+      };
+    }
+    if (startAt) {
+      const midnight = startAt.slice(11) === "00:00";
+      const lastMinute = endAt != null && endAt.slice(11) === "23:59";
+      if (midnight && (lastMinute || untilNow)) {
+        return {
+          granularity: "day",
+          from: startAt.slice(0, 10),
+          to: lastMinute ? endAt.slice(0, 10) : AS_OF_DAY,
+        };
+      }
+      return {
+        granularity: "instant",
+        start_local: startAt,
+        end_local: untilNow ? AS_OF_LOCAL_MINUTE : endAt,
+        start: AS_OF,
+        end: AS_OF,
+      };
+    }
+    if (args?.days != null) {
+      const n = Math.max(1, Number(args.days) || 1);
+      return { granularity: "day", from: dayMinus(AS_OF_DAY, n - 1), to: AS_OF_DAY };
+    }
+    return null;
+  }
+
   function begin(args) {
     counter += 1;
     // 每个会话有独立 query_id（跨会话不复用），并**冻结**建会话时的参数。
     const id = `q-syn-${counter}-g1`;
+    const range = rangeOf(args);
     sessions.set(id, {
       by: args?.by ?? "day",
       tz: args?.tz ?? TZ,
+      range,
       frozenRows: cfg.rows.slice(),
       pagesServed: 0,
       cursors: new Set(),
@@ -603,6 +664,7 @@ function createSessionTable(cfg) {
       pricingRevision: PRICING_REVISION,
       timezone: args?.tz ?? TZ,
       asOf: AS_OF,
+      range,
     };
   }
 
@@ -616,6 +678,8 @@ function createSessionTable(cfg) {
       pricing_revision: PRICING_REVISION,
       timezone: s.tz,
       generated_at: AS_OF,
+      // U01：范围与汇总同源（界面显示必须取自这里）。
+      range: s.range ?? null,
       sources: [
         {
           agent: "claude-code",
@@ -724,18 +788,27 @@ export function buildFixture(name) {
     statusReads: 0,
     sourceReads: 0,
     sourceWrites: 0,
+    savedSources: {},
     closeWrites: 0,
   };
 
-  /** 设置读取响应（按 cfg.settings 模式）。 */
+  /** 设置读取响应（按 cfg.settings 模式）。
+   *
+   * U03 起应用启动时会先读一次 `settings_get`（统计时区的唯一来源），
+   * 因此这里的第 1 次调用属于启动，**设置页的首次读取是第 2 次**：
+   * 错误恢复类场景必须把失败点放在第 2 次，否则失败会被启动读取吃掉，
+   * 设置页永远看不到首读错误条。
+   */
   function settingsResponse() {
     state.settingsGets += 1;
     const n = state.settingsGets;
     if (cfg.settings === "fail-then-ok") {
-      if (n === 1) return reject("设置文件损坏（合成）");
+      if (n === 2) return reject("设置文件损坏（合成）");
       return {
         close_action: "quit",
         price_auto_sync: true,
+        // U06：自动读取间隔（后端缺省 300）。
+        collect_interval_secs: 300,
         sources: {
           claude: { enabled: true, dir: "C:/restored/claude" },
           codex: { enabled: false, dir: "C:/restored/codex" },
@@ -747,6 +820,7 @@ export function buildFixture(name) {
       return {
         close_action: "quit",
         price_auto_sync: true,
+        collect_interval_secs: 300,
         sources: {
           claude: { enabled: true, dir: "C:/confirmed/claude" },
           codex: { enabled: false, dir: "C:/confirmed/codex" },
@@ -757,10 +831,14 @@ export function buildFixture(name) {
       // RC09：首读失败（错误条出现、页面级 loading 已结束）→ 用户点重试发起
       // 第二次读取并挂起 → 期间编辑并保存 → 测试释放"旧值"读取。
       // 这一步必须是物理上可操作的：页面遮罩还在时用户根本点不到保存。
-      if (n === 1) return reject("设置读取失败（合成）");
+      // U03：第 1 次是应用启动的时区读取，**必须成功**（时区门控靠它放行
+      // 业务页）；设置页首读是第 2 次（失败），重试的第 3 次起才挂起。
+      if (n === 1)
+        return { close_action: null, price_auto_sync: true, collect_interval_secs: 300 };
+      if (n === 2) return reject("设置读取失败（合成）");
       return defer(`settings_get#${n}`);
     }
-    return { close_action: null, price_auto_sync: true };
+    return { close_action: null, price_auto_sync: true, collect_interval_secs: 300, sources: structuredClone(state.savedSources) };
   }
 
   /** 挂起的第二次 settings_get 在测试里被释放时使用的"旧值"载荷。 */
@@ -834,6 +912,14 @@ export function buildFixture(name) {
           return reject("写入设置失败：磁盘不可写（合成）");
         return null;
       }
+      case "settings_set_collect_interval": {
+        // U06：自动读取间隔（白名单 5/10/30/60/300/600）——返回落盘值；
+        // 界面写入走串行保存队列，白名单外的值后端会拒绝（这里同形拒绝）。
+        const secs = args?.secs;
+        if (![5, 10, 30, 60, 300, 600].includes(secs))
+          return reject(`自动读取间隔只能是 5/10/30/60/300/600 秒（收到 ${secs}）`);
+        return secs;
+      }
       case "settings_set_price_auto_sync":
         return args?.enabled ?? true;
       case "cache_stats":
@@ -860,6 +946,8 @@ export function buildFixture(name) {
         // AP04/Task 2：后端按行拒绝（目录冲突）——错误必须只归属该来源行。
         if (cfg.sourceWrite === "fail-then-ok" && state.sourceWrites === 1)
           return reject("来源目录冲突：两个启用的来源不能指向同一目录（合成）");
+        // 成功写入必须可读回；设置保存通知刷新后不能凭空退回旧目录。
+        state.savedSources[args.agent] = { enabled: args.enabled, dir: args.dir };
         return null;
       }
       case "sync_pricing_openrouter": {
@@ -874,6 +962,24 @@ export function buildFixture(name) {
         }
         return [];
       }
+      // U03：统计时区保存（settings.toml 单一来源）——返回归一化后的落盘值。
+      case "settings_set_timezone":
+        return typeof args?.timezone === "string" ? args.timezone : null;
+      // H05/U05：CCS 导入面板进入「用量数据」分区后才解析默认路径（只读路径
+      // 解析，不打开来源库）。本契约矩阵不驱动导入流程，因此预览/提交显式
+      // 拒绝——一旦误触发立刻可见，而不是静默返回空数据。
+      case "ccs_import_defaults":
+        return {
+          path: "C:/Users/dev/AppData/Roaming/cc-switch/cc-switch.db",
+          exists: true,
+          timezone: "Asia/Shanghai",
+        };
+      case "ccs_import_preview":
+        return reject("CCS 预览未在本契约矩阵中启用（合成）");
+      case "ccs_import_commit":
+        return reject("CCS 提交未在本契约矩阵中启用（合成）");
+      case "ccs_import_discard":
+        return false;
       case "open_settings_file":
         return "C:/Users/dev/AppData/Roaming/tokenscope/settings.toml";
       case "open_pricing_file":

@@ -57,7 +57,11 @@ pub async fn summarize(
 ) -> Result<SummaryReport, String> {
     // P02：业务闸门——未同意（非 Ready）时不进入采集/解析/缓存/网络。
     privacy::require_ready(&privacy::state_of(&app))?;
-    let opts = query_opts(&by, agent, days, tz, from, to, rollups)?;
+    // 旧入口不带 U01 的时间预设参数（界面用 query_begin）；四组时间参数
+    // 仍由 days/from/to 三个既有参数表达。
+    let opts = query_opts(
+        &by, agent, days, tz, from, to, rollups, None, None, None, None,
+    )?;
     run_blocking("summarize", move || summary(&opts)).await
 }
 
@@ -110,6 +114,8 @@ pub async fn list_events(
 // ── SF04：查询快照命令（query_begin → query_summary/query_events）──
 
 /// 主筛选参数 → SummaryOptions（query_begin 与旧 summarize/list_events 共用）。
+// 参数面由 IPC 契约决定（每个筛选项一个 invoke 参数），非设计膨胀。
+#[allow(clippy::too_many_arguments)]
 fn query_opts(
     by: &str,
     agent: Option<String>,
@@ -118,6 +124,10 @@ fn query_opts(
     from: Option<String>,
     to: Option<String>,
     rollups: Option<String>,
+    rolling_hours: Option<u32>,
+    start_at: Option<String>,
+    end_at: Option<String>,
+    until_now: Option<bool>,
 ) -> Result<SummaryOptions, String> {
     let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings()?;
     Ok(SummaryOptions {
@@ -134,6 +144,12 @@ fn query_opts(
         tz,
         from,
         to,
+        // U01：四组时间参数原样传给内核（分组互斥、取值校验与边界换算全在
+        // report 层，命令层零业务逻辑）。
+        rolling_hours,
+        start_at,
+        end_at,
+        until_now: until_now.unwrap_or(false),
         ..Default::default()
     })
 }
@@ -147,8 +163,25 @@ fn parse_rollups_mode(value: Option<&str>) -> Result<tokenscope::report::Rollups
     }
 }
 
+/// U06：查询触发来源（IPC 取值 `manual` / `startup` / `auto`，缺省 = 手动）。
+///
+/// 只影响采集与查询路径的日志分级（`auto` 降为 debug），不改变数字口径；
+/// 非法值显式报错，不静默降级成某一个来源。
+fn parse_trigger(value: Option<&str>) -> Result<tokenscope::report::Trigger, String> {
+    match value.map(str::trim) {
+        None | Some("") | Some("manual") => Ok(tokenscope::report::Trigger::Manual),
+        Some("startup") => Ok(tokenscope::report::Trigger::Startup),
+        Some("auto") => Ok(tokenscope::report::Trigger::Auto),
+        Some(other) => Err(format!("未知的查询触发来源：{other}")),
+    }
+}
+
 /// SF04：创建查询会话——冻结一次采集的事件、价格修订、时间基准与来源
 /// 身份，返回 query_id 供汇总/明细（含分页）显式绑定。
+///
+/// U06：`collect = false`（自动刷新）不重复采集，直接复用后台定时线程
+/// “最近一次采集结果”并读**已提交**的历史；缓存缺失时自动退回采集。
+/// `trigger` 只决定日志分级（`auto` = 后台自动读取）。
 // 参数面由 IPC 契约决定（每个筛选项一个 invoke 参数），非设计膨胀。
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
@@ -161,11 +194,32 @@ pub async fn query_begin(
     from: Option<String>,
     to: Option<String>,
     rollups: Option<String>,
+    rolling_hours: Option<u32>,
+    start_at: Option<String>,
+    end_at: Option<String>,
+    until_now: Option<bool>,
+    collect: Option<bool>,
+    trigger: Option<String>,
 ) -> Result<tokenscope::query::QueryHandle, String> {
     privacy::require_ready(&privacy::state_of(&app))?;
-    let opts = query_opts(&by, agent, days, tz, from, to, rollups)?;
+    let mut opts = query_opts(
+        &by,
+        agent,
+        days,
+        tz,
+        from,
+        to,
+        rollups,
+        rolling_hours,
+        start_at,
+        end_at,
+        until_now,
+    )?;
+    opts.trigger = parse_trigger(trigger.as_deref())?;
+    // 缺省 = 采集（启动、手动刷新、筛选变化的既有行为）。
+    let collect = collect.unwrap_or(true);
     run_blocking("query_begin", move || {
-        tokenscope::query::begin_query_handle(&opts)
+        tokenscope::query::begin_query_handle_with(&opts, collect)
     })
     .await
 }
@@ -390,6 +444,81 @@ pub(crate) fn settings_set_close_action_impl(
     })?;
     log::info!("关闭窗口默认动作已设置: {:?}", parsed);
     Ok(action)
+}
+
+/// U03：统计时区（`local` 或 IANA 名）。`None` = 清除该字段（回到缺省
+/// Asia/Shanghai）；非法值**拒绝保存**（校验先于事务，原文件字节不动）。
+#[tauri::command]
+pub async fn settings_set_timezone(
+    app: tauri::AppHandle,
+    timezone: Option<String>,
+) -> Result<Option<String>, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    run_blocking("settings_set_timezone", move || {
+        let path = tokenscope::settings::settings_path()?;
+        settings_set_timezone_impl(&path, timezone)
+    })
+    .await
+}
+
+/// U03：时区写入内核（可注入路径以便单测）。返回归一化后的落盘值
+/// （`None` = 已清除该字段）。校验失败直接返回错误，不进入 settings::update，
+/// 因此不会写盘、也不会碰其它字段。
+pub(crate) fn settings_set_timezone_impl(
+    path: &std::path::Path,
+    timezone: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    let normalized = match timezone {
+        None => None,
+        Some(v) => Some(tokenscope::settings::validate_timezone(&v).map_err(anyhow::Error::msg)?),
+    };
+    // SF02：事务内基于最新文件只改 timezone 字段。
+    let committed = tokenscope::settings::update(path, |s| {
+        s.timezone = normalized.clone();
+        Ok(normalized.clone())
+    })?;
+    match committed.as_deref() {
+        Some(v) => log::info!("统计时区已设置为 {v}"),
+        None => log::info!(
+            "统计时区已恢复缺省（{}）",
+            tokenscope::settings::default_timezone()
+        ),
+    }
+    Ok(committed)
+}
+
+/// U06：JSONL 自动读取间隔（秒）。只接受 5 / 10 / 30 / 60 / 300 / 600；
+/// 非法值**拒绝保存**（校验先于事务，原文件字节不动）。保存成功后唤醒
+/// 定时采集线程，按新间隔重新计时（不必等完旧周期）。
+#[tauri::command]
+pub async fn settings_set_collect_interval(
+    app: tauri::AppHandle,
+    secs: u32,
+) -> Result<u32, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    let committed = run_blocking("settings_set_collect_interval", move || {
+        let path = tokenscope::settings::settings_path()?;
+        settings_set_collect_interval_impl(&path, secs)
+    })
+    .await?;
+    crate::wake_collection_scheduler();
+    Ok(committed)
+}
+
+/// U06：间隔写入内核（可注入路径以便单测）。校验失败在进入 `settings::update`
+/// 之前返回错误，因此不会写盘、也不会碰其它字段；事务内只改这一个字段。
+pub(crate) fn settings_set_collect_interval_impl(
+    path: &std::path::Path,
+    secs: u32,
+) -> anyhow::Result<u32> {
+    let validated =
+        tokenscope::settings::validate_collect_interval_secs(secs).map_err(anyhow::Error::msg)?;
+    let committed = tokenscope::settings::update(path, |s| {
+        s.collect_interval_secs = Some(validated);
+        Ok(validated)
+    })?;
+    log::info!("自动读取间隔已设置为 {committed} 秒");
+    Ok(committed)
 }
 
 /// F08：隐藏主窗口——窗口缺失或 hide 失败都返回可操作错误（前端沿
@@ -1591,6 +1720,95 @@ mod tests {
         tokenscope::settings::ensure_toml(&path).unwrap();
         assert!(!tokenscope::settings::load(&path).unwrap().price_auto_sync);
         assert!(dir.join("settings.json.bak").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// U03：时区命令内核——写入归一化值、清除回缺省、非法值拒绝且不落盘。
+    #[test]
+    fn test_settings_set_timezone_impl() {
+        let dir = tmp_dir("u03-timezone");
+        let path = dir.join("settings.toml");
+        // 写入：trim 归一化后落盘，返回值即落盘值
+        let out = settings_set_timezone_impl(&path, Some("  UTC ".into())).unwrap();
+        assert_eq!(out.as_deref(), Some("UTC"));
+        assert_eq!(
+            tokenscope::settings::load(&path)
+                .unwrap()
+                .timezone
+                .as_deref(),
+            Some("UTC")
+        );
+        // 事务内只改 timezone：相邻字段（关闭动作）保留
+        settings_set_close_action_impl(&path, Some("quit".into())).unwrap();
+        settings_set_timezone_impl(&path, Some("America/New_York".into())).unwrap();
+        let s = tokenscope::settings::load(&path).unwrap();
+        assert_eq!(s.timezone.as_deref(), Some("America/New_York"));
+        assert_eq!(s.close_action, Some(CloseAction::Quit), "相邻字段必须保留");
+        // None = 清除该字段（回到缺省 Asia/Shanghai 语义）
+        assert!(settings_set_timezone_impl(&path, None).unwrap().is_none());
+        assert!(
+            tokenscope::settings::load(&path)
+                .unwrap()
+                .timezone
+                .is_none()
+        );
+        // 非法值：报错、文件字节不动、已有值保持
+        settings_set_timezone_impl(&path, Some("UTC".into())).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        for bad in ["Not/AZone", "", "  "] {
+            let err = settings_set_timezone_impl(&path, Some(bad.into())).unwrap_err();
+            assert!(err.to_string().contains("时区"), "错误必须可读: {err}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "非法值不得落盘"
+        );
+        assert_eq!(
+            tokenscope::settings::load(&path)
+                .unwrap()
+                .timezone
+                .as_deref(),
+            Some("UTC")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// U06：自动读取间隔——非法值拒绝保存（文件字节不动），合法值落盘可读回；
+    /// 连续保存后读到的等于最后一次。
+    #[test]
+    fn settings_set_collect_interval_validates_and_commits() {
+        let dir = tmp_dir("u06-interval");
+        let path = dir.join("settings.toml");
+        // 事务内只改间隔：相邻字段（时区）保留。
+        settings_set_timezone_impl(&path, Some("UTC".into())).unwrap();
+        assert_eq!(settings_set_collect_interval_impl(&path, 30).unwrap(), 30);
+        let s = tokenscope::settings::load(&path).unwrap();
+        assert_eq!(s.collect_interval_secs, Some(30));
+        assert_eq!(s.timezone.as_deref(), Some("UTC"), "相邻字段必须保留");
+
+        let before = std::fs::read_to_string(&path).unwrap();
+        for bad in [0u32, 7, 45, 601] {
+            let err = settings_set_collect_interval_impl(&path, bad).unwrap_err();
+            assert!(
+                err.to_string().contains("自动读取间隔"),
+                "错误必须中文可读: {err}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "非法值不得落盘（文件字节不动）"
+        );
+
+        assert_eq!(settings_set_collect_interval_impl(&path, 600).unwrap(), 600);
+        assert_eq!(
+            tokenscope::settings::load(&path)
+                .unwrap()
+                .collect_interval_secs,
+            Some(600),
+            "连续保存后读到的必须等于最后一次选择"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

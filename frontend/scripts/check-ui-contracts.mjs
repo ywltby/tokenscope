@@ -358,6 +358,20 @@ const GOTO_SETTINGS = () => {
   return { ok: true };
 };
 
+/**
+ * U05：切到设置页的某个分区（宽窗口是左侧导航，窄窗口是顶部分段控件）。
+ * 分区内容用 v-show 保留挂载，但隐藏分区不参与布局——量测前必须真的切过去。
+ */
+const OPEN_SETTINGS_SECTION = (label) => {
+  const items = [
+    ...document.querySelectorAll(".settings-nav-item, .settings-nav .ts-segmented-item"),
+  ];
+  const hit = items.find((b) => b.textContent.trim() === label);
+  if (!hit) return { ok: false };
+  hit.click();
+  return { ok: true };
+};
+
 /** 量测当前页面内第一张 DataTable 的排版（设置页用）。 */
 const READ_FIRST_TABLE_TYPO = () => {
   const root = document.querySelector(".n-data-table");
@@ -437,7 +451,10 @@ function buildChecks(m, ctx) {
   if (ctx.fixture === "normal") {
     checks.push([
       "settings_preloads_before_navigation_without_duplicate_read_or_overlay",
-      m.settingsPreload?.before > 0 && m.settingsPreload?.before === m.settingsPreload?.after && !m.settingsPreload?.overlay,
+      m.settingsPreload?.before > 0 &&
+        m.settingsPreload?.before === m.settingsPreload?.after &&
+        !m.settingsPreload?.overlay &&
+        m.settingsPreload?.pricingSection === true,
       JSON.stringify(m.settingsPreload),
     ]);
     checks.push([
@@ -836,15 +853,23 @@ for (const fixtureName of args.fixtures) {
           const goto = await page.evaluate(GOTO_SETTINGS);
           if (goto.ok) {
             await page.waitForTimeout(600);
+            // U05：价格表只在首次进入「价格」分区时挂载；这里改为先切分区再量测，
+            // 同时验证分区切换不重复发起预读命令（settings_get 计数不变）。
+            const openPricing = await page.evaluate(OPEN_SETTINGS_SECTION, "价格");
+            await page.waitForTimeout(600);
             m.settingsPreload = {
               before: readsBefore,
               after: session.ipcCalls.filter(c => c.cmd === "settings_get").length,
               overlay: await page.locator(".settings-view .n-spin-container").count() > 0,
+              pricingSection: openPricing.ok,
             };
             await page.locator(".ts-auto-table-pricing").screenshot({ path: join(args.output, `${label}-pricing.png`) });
             if (fixtureName === "normal") {
               m.settingsTable = await page.evaluate(READ_FIRST_TABLE_TYPO);
             } else {
+              // U05：来源目录输入在「数据源」分区（隐藏分区不计布局，需真的切过去）。
+              await page.evaluate(OPEN_SETTINGS_SECTION, "数据源");
+              await page.waitForTimeout(400);
               m.sourceDirs = await page.evaluate(READ_SOURCE_DIRS);
             }
             await page.evaluate(CLICK_SEGMENT, "汇总");
@@ -956,8 +981,7 @@ writeFileSync(
       browserVersion,
       commit: commitHash,
       required_contracts: REQUIRED_CONTRACTS,
-      contracts: contractResults,
-      required_contracts: REQUIRED_CONTRACTS,
+      selected_contracts: args.contracts,
       contracts: contractResults,
       results,
     },
@@ -978,9 +1002,9 @@ console.log(
 
 console.log(
   `
-${contractsOk ? "PASS" : "FAIL"} rc09_named_interaction_contracts（${REQUIRED_CONTRACTS.length} 条必需契约）`,
+${contractsOk ? "PASS" : "FAIL"} rc09_named_interaction_contracts（本次选择 ${args.contracts.length}/${REQUIRED_CONTRACTS.length} 条契约）`,
 );
-for (const name of REQUIRED_CONTRACTS) {
+for (const name of args.contracts) {
   const rows = contractsByGroup.get(name) ?? [];
   const bad = rows.filter((x) => !x.pass);
   const mark = rows.length && bad.length === 0 ? "✓" : "✗";

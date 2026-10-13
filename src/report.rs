@@ -22,6 +22,43 @@ use crate::source::claude_projects::ProjectMapping;
 use crate::source::codex::CodexSource;
 use crate::source::{CollectStats, Source};
 
+/// U06：采集与查询路径上的进度日志——`Trigger::Auto`（后台定时自动读取）
+/// 触发时降为 `debug`：默认 5 秒一轮的自动读取会把 info 刷屏，排障时真正
+/// 需要的"哪一轮有写入"由唯一例外保留（见 [`collect_all_with_sources`] 的
+/// 历史库写入摘要）。手动/启动触发保持 `info`。
+macro_rules! path_info {
+    ($auto:expr, $($arg:tt)+) => {
+        if $auto {
+            log::debug!($($arg)+);
+        } else {
+            log::info!($($arg)+);
+        }
+    };
+}
+pub(crate) use path_info;
+
+/// U06：采集与查询的触发来源——决定采集/查询路径上的日志级别。
+///
+/// `Default` 是 [`Trigger::Manual`]：绝大多数既有调用点是用户或程序触发的
+/// 普通查询，默认必须是"非自动"，否则这些路径的 info 会被误降级。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Trigger {
+    /// 应用启动时的首次采集/查询。
+    Startup,
+    /// 用户或程序触发的普通查询（默认）。
+    #[default]
+    Manual,
+    /// 后台定时自动读取（降级日志、发出变化通知）。
+    Auto,
+}
+
+impl Trigger {
+    /// 是否为后台自动触发（进度日志因此降为 debug）。
+    pub fn is_auto(self) -> bool {
+        self == Trigger::Auto
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct SummaryOptions {
     pub by: GroupBy,
@@ -50,6 +87,18 @@ pub struct SummaryOptions {
     pub from: Option<String>,
     /// 自然日区间上界（YYYY-MM-DD，解析时区，闭区间；与 days 互斥）。
     pub to: Option<String>,
+    /// U01：滚动窗口（小时）——**只接受 24**（真正的"过去 24 小时"），
+    /// 时刻模式 `[as_of - 24h, as_of]`；与其它时间参数互斥。
+    pub rolling_hours: Option<u32>,
+    /// U01：自定义时刻区间起点——统计时区本地时刻 `YYYY-MM-DDTHH:MM`（含该
+    /// 分钟）；与其它时间参数互斥，且必须与 `end_at` 或 `until_now` 配对。
+    pub start_at: Option<String>,
+    /// U01：自定义时刻区间终点——统计时区本地时刻，表示用户选中的**最后一
+    /// 分钟（含）**；与 `until_now` 二选一。
+    pub end_at: Option<String>,
+    /// U01：区间终点为"现在"（与 `end_at` 二选一）。`Default` = 未使用，
+    /// 触发条件是"给了 `start_at` 且显式要求至今"，不是布尔反转语义。
+    pub until_now: bool,
     /// 强制全量重解析并重建缓存。
     pub refresh: bool,
     /// C1：来源启停（GUI 从设置注入；None = 启用）。停用的来源完全不采集，
@@ -64,6 +113,10 @@ pub struct SummaryOptions {
     /// `~/.tokenscope/history.db`）。测试沿用既有 `cache_dir` 隔离根，
     /// 新增的历史路径绝不落回真实数据目录（计划不变量 10）。
     pub history_path: Option<PathBuf>,
+    /// U06：本轮采集/查询的触发来源（默认 [`Trigger::Manual`]）。`Auto`
+    /// 时采集与查询路径上的进度日志降级为 `debug`（唯一例外：本轮历史库
+    /// 确有写入时保留一条 info 摘要）。
+    pub trigger: Trigger,
 }
 
 impl SummaryOptions {
@@ -99,6 +152,9 @@ pub struct SummaryReport {
     /// H06：日汇总桶覆盖诊断（明细覆盖 / 汇总口径 / 未解决覆盖 / 时区提示）。
     pub rollup_coverage: crate::aggregate::RollupCoverage,
     pub generated_at: String,
+    /// U01：本次查询冻结的时间范围（与数字同源；全部时间 = `None`，
+    /// 序列化为 `null`——不产生空对象）。
+    pub range: Option<RangeView>,
 }
 
 /// TokenScope 自有数据目录（M4）：`~/.tokenscope`。
@@ -308,11 +364,37 @@ pub fn rebuild_cache(opts: &SummaryOptions) -> Result<CacheInfo> {
 /// 采集产物：去重后事件 + 逐源统计 + 价格表 + 警告。summary / list_events 共用。
 struct Collected {
     generation: u64,
+    /// U06：本轮历史库是否确有新增或更新（`inserted + updated > 0`）——
+    /// 决定定时线程是否向前端发变化通知，以及保留哪一条 info 摘要。
+    changed: bool,
     sources: Vec<SourceReport>,
     pricing: std::sync::Arc<crate::pricing::Pricing>,
-    warnings: Vec<String>,
+    warnings: Vec<CollectionWarning>,
     /// SF04：价格签名（内容摘要）——进入查询快照作为价格修订号。
     pricing_revision: String,
+}
+
+/// 采集期即确定作用域；不通过文案/路径猜测来源，None 表示价格、迁移等全局信息。
+#[derive(Debug, Clone)]
+pub(crate) struct CollectionWarning {
+    pub(crate) agent: Option<AgentKind>,
+    pub(crate) message: String,
+}
+
+impl CollectionWarning {
+    fn global(message: String) -> Self {
+        Self {
+            agent: None,
+            message,
+        }
+    }
+
+    fn source(agent: AgentKind, message: String) -> Self {
+        Self {
+            agent: Some(agent),
+            message,
+        }
+    }
 }
 
 /// D1：采集快照（不可变共享）——并发同参查询复用同一次采集，
@@ -324,8 +406,11 @@ struct Collected {
 #[derive(Debug)]
 pub(crate) struct CollectionSnapshot {
     pub(crate) generation: u64,
+    /// U06：本轮历史库是否确有新增或更新（数值/布尔字段，无堆分配，
+    /// 因此不进入 [`collection_retained_bytes`] 的字节记账）。
+    pub(crate) changed: bool,
     pub(crate) sources: Vec<SourceReport>,
-    pub(crate) warnings: Vec<String>,
+    pub(crate) warnings: Vec<CollectionWarning>,
     pub(crate) pricing: std::sync::Arc<crate::pricing::Pricing>,
     pub(crate) pricing_revision: String,
 }
@@ -413,12 +498,15 @@ pub(crate) mod retained {
 /// 不含快照行索引与查询身份——那部分由 `query::snapshot_retained_bytes`
 /// 一起计入。
 pub(crate) fn collection_retained_bytes(c: &CollectionSnapshot) -> Result<usize, String> {
-    use retained::{ByteCount, string_bytes, strings_bytes, vec_bytes};
+    use retained::{ByteCount, string_bytes, vec_bytes};
     let mut n = ByteCount::default();
     // H07：事件本体不再随采集快照常驻（查询流式读取），因此只计采集元数据：
     // 逐源统计、诊断字符串与价格表（含候选与嵌套规则）。
     n.add(vec_bytes(&c.sources)?)?;
-    n.add(strings_bytes(&c.warnings)?)?;
+    n.add(vec_bytes(&c.warnings)?)?;
+    for warning in &c.warnings {
+        n.add(string_bytes(&warning.message)?)?;
+    }
     n.add(string_bytes(&c.pricing_revision)?)?;
     n.add(c.pricing.retained_bytes()?)?;
     Ok(n.get())
@@ -559,6 +647,111 @@ pub(crate) fn collect_flighted(opts: &SummaryOptions) -> Result<Arc<CollectionSn
     collect_flighted_with(opts, &|generation| collect_inner(opts, generation))
 }
 
+/// U06：一次"只采集"的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CollectOutcome {
+    /// 本轮采集后历史库的 generation（有写入时已递增）。
+    pub generation: u64,
+    /// 本轮历史库是否确有新增或更新（`false` = 没有新数据，界面无需刷新）。
+    pub changed: bool,
+}
+
+/// U06：**只做采集与历史库写入**——经与查询同一个 [`collect_flighted`]
+/// 单飞协调器（不另起管线、不重复解析），不建查询快照、不聚合。
+///
+/// 同时把该轮采集结果登记为"最近一次采集结果"（[`recent_collection`]），
+/// 供 `collect = false` 的自动刷新复用：自动刷新只基于**已提交**的历史建
+/// 查询，不重复采集。
+pub fn collect_only(opts: &SummaryOptions) -> Result<CollectOutcome> {
+    let snapshot = collect_flighted(opts)?;
+    let outcome = CollectOutcome {
+        generation: snapshot.generation,
+        changed: snapshot.changed,
+    };
+    Ok(outcome)
+}
+
+/// U06："最近一次采集结果"槽位：采集键 + 该轮采集快照（进程级单份）。
+///
+/// 持锁只做快照读取/投影/赋值，不在持锁期间调用采集；发布发生在采集串行锁
+/// 内，读取不反向获取该锁。`collection_key` 在槽位锁外求值（可能读项目映射）。
+/// U06："最近一次采集结果"槽位的类型：采集键 + 该轮采集快照。
+type RecentCollection = Option<(String, Arc<CollectionSnapshot>)>;
+
+static RECENT_COLLECTION: std::sync::LazyLock<Mutex<RecentCollection>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+fn remember_collection(key: String, snapshot: Arc<CollectionSnapshot>) {
+    let mut slot = RECENT_COLLECTION.lock().unwrap_or_else(|e| e.into_inner());
+    *slot = Some((key, snapshot));
+}
+
+/// U06：最近一次采集结果——同键或仅应用范围为其子集时返回；来源配置、目录、
+/// 价格路径或刷新标记不同都不复用。未命中返回 `None`，调用方退回采集。
+pub(crate) fn recent_collection(opts: &SummaryOptions) -> Option<Arc<CollectionSnapshot>> {
+    let key = collection_key(opts);
+    // agent 同时决定扫描范围，不能从采集键中删除。只有全应用快照覆盖单应用，
+    // 反向（或 Claude -> Codex）必须未命中；其它采集参数仍须完全一致。
+    let all_key = opts.agent.map(|_| {
+        let mut all = opts.clone();
+        all.agent = None;
+        collection_key(&all)
+    });
+    let slot = RECENT_COLLECTION.lock().unwrap_or_else(|e| e.into_inner());
+    match slot.as_ref() {
+        Some((stored, snapshot)) if *stored == key => Some(snapshot.clone()),
+        Some((stored, snapshot)) if all_key.as_ref() == Some(stored) => {
+            Some(Arc::new(CollectionSnapshot {
+                generation: snapshot.generation,
+                changed: snapshot.changed,
+                sources: snapshot
+                    .sources
+                    .iter()
+                    .filter(|source| Some(source.agent) == opts.agent)
+                    .cloned()
+                    .collect(),
+                warnings: snapshot
+                    .warnings
+                    .iter()
+                    .filter(|warning| warning.agent.is_none() || warning.agent == opts.agent)
+                    .cloned()
+                    .collect(),
+                pricing: snapshot.pricing.clone(),
+                pricing_revision: snapshot.pricing_revision.clone(),
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// 测试专用（#[doc(hidden)]）：本进程内该采集键已经跑过的采集轮数。
+///
+/// 按**采集键**计数而不是全局峰值：并行测试各自使用独立临时来源目录，
+/// 只观察自己的键，不受其它用例干扰。用于证明 `collect = false` 不触发
+/// 采集、缓存缺失时必须退回采集。
+#[doc(hidden)]
+#[cfg(test)]
+pub fn collect_rounds_for_tests(opts: &SummaryOptions) -> u64 {
+    let key = collection_key(opts);
+    COLLECT_ROUNDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+static COLLECT_ROUNDS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, u64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// 登记一轮采集（领队工作开始时）。只在测试观察口径上使用，生产不做判定。
+#[cfg(test)]
+fn note_collect_round(key: &str) {
+    let mut map = COLLECT_ROUNDS.lock().unwrap_or_else(|e| e.into_inner());
+    *map.entry(key.to_string()).or_insert(0) += 1;
+}
+
 /// Task 2：来源包装器——discover 结果已被防御性去重（固定文件清单）。
 struct DedupSource {
     inner: Box<dyn Source>,
@@ -601,6 +794,8 @@ fn collect_flighted_with(
     leader: &dyn Fn(u64) -> Result<CollectionSnapshot>,
 ) -> Result<Arc<CollectionSnapshot>> {
     let key = collection_key(opts);
+    // U06：探针用键的副本（`key` 随后被移进航班守卫）。
+    let probe_key = key.clone();
     // entry 分支一次性决定身份：插入者 = 领队，命中者 = 跟随者。
     let (cell, is_leader): (FlightCell, bool) = {
         let mut g = INFLIGHT.lock().unwrap();
@@ -665,19 +860,25 @@ fn collect_flighted_with(
     // 串行闸门：不同参数的采集排队执行（同参跟随者不经过这里，仍在航班上等待）。
     let result = {
         let _serial = COLLECT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // U06 测试观察：领队工作开始计一轮（跟随者不计——它们没有真的采集）。
+        #[cfg(test)]
+        note_collect_round(&probe_key);
         let in_flight = COLLECT_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
         COLLECT_MAX_IN_FLIGHT.fetch_max(in_flight, Ordering::SeqCst);
         // N06：领队工作（采集 + 历史库写入提交）登记为"进行中的提交"——
         // 手动与定时入口同样被覆盖，退出路径的等待因此完整。
         let _submission = SubmissionGuard::enter();
-        let r = leader(generation);
+        let r = leader(generation).map(|snapshot| {
+            let snapshot = Arc::new(snapshot);
+            // 所有入口共用；在串行锁内发布，旧航班的迟到跟随者不再覆盖新价格。
+            remember_collection(probe_key.clone(), snapshot.clone());
+            snapshot
+        });
         COLLECT_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
         r
     };
     match result {
-        Ok(snapshot) => {
-            // RC05：只构造一次 Arc，领队与跟随者共享（不再深拷贝）。
-            let arc = Arc::new(snapshot);
+        Ok(arc) => {
             guard.publish_ok(arc.clone());
             drop(guard);
             Ok(arc)
@@ -758,6 +959,7 @@ fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSna
     let collected = collect_all_with_sources(sources, opts, generation)?;
     Ok(CollectionSnapshot {
         generation: collected.generation,
+        changed: collected.changed,
         sources: collected.sources,
         warnings: collected.warnings,
         pricing: collected.pricing,
@@ -837,7 +1039,7 @@ pub fn collect_all_with_sources_for_test(
         .collect();
     Ok(CollectedView {
         events,
-        warnings: c.warnings,
+        warnings: c.warnings.into_iter().map(|w| w.message).collect(),
     })
 }
 
@@ -929,6 +1131,9 @@ fn collect_all_with_sources(
     opts: &SummaryOptions,
     _generation: u64,
 ) -> Result<Collected> {
+    // U06：自动读取的进度日志降级（见 `path_info!`）；唯一例外是"本轮确有
+    // 历史库写入"的那条摘要。
+    let auto = opts.trigger.is_auto();
     // SF09：采集前拒绝启用来源的有效目录冲突（相同/嵌套）。
     validate_opts_sources_overlap(opts)?;
     // SF09：跨 adapter 认领同一规范化文件 → 明确归属冲突（移除
@@ -942,13 +1147,18 @@ fn collect_all_with_sources(
     // M11：签名一致时复用进程内缓存/索引文件，仅签名变化才重解析双快照。
     // SF04：签名同时作为价格修订号进入采集快照/查询会话。
     let t_pricing = std::time::Instant::now();
-    let (pricing, pricing_revision, mut warnings, cache_hit) = Pricing::load_cached_revision(
+    let (pricing, pricing_revision, pricing_warnings, cache_hit) = Pricing::load_cached_revision(
         Some(&pricing_path),
         Some(&modelsdev_path),
         Some(&openrouter_path),
         &index_path,
     );
-    log::info!(
+    let mut warnings: Vec<CollectionWarning> = pricing_warnings
+        .into_iter()
+        .map(CollectionWarning::global)
+        .collect();
+    path_info!(
+        auto,
         "价格加载：{}，{:.0} ms",
         if cache_hit {
             "进程内缓存命中"
@@ -964,7 +1174,8 @@ fn collect_all_with_sources(
     if let Some(rep) =
         crate::history::migrate_legacy_cache(&history, &legacy_cache_file_path(opts))?
     {
-        log::info!(
+        path_info!(
+            auto,
             "遗留缓存迁移：文件 {}，事件行 {}，新增 {}，更新 {}，已存在 {}，冲突 {}，拒绝 {}",
             rep.files,
             rep.events_seen,
@@ -975,13 +1186,13 @@ fn collect_all_with_sources(
             rep.rejected
         );
         if rep.rejected > 0 {
-            warnings.push(format!(
+            warnings.push(CollectionWarning::global(format!(
                 "遗留缓存有 {} 条记录字段不合法，未迁入（其余已迁移）",
                 rep.rejected
-            ));
+            )));
         }
     }
-    warnings.extend(overlap_warnings);
+    warnings.extend(overlap_warnings.into_iter().map(CollectionWarning::global));
     #[cfg(test)]
     {
         let d = TEST_COLLECT_DELAY_MS.load(Ordering::Relaxed);
@@ -1012,17 +1223,20 @@ fn collect_all_with_sources(
         let (files, discovery_errors) = src.discover_with_errors();
         // B4：发现期异常必须可见；发现失败的来源不参与缓存清理。
         for e in &discovery_errors {
-            warnings.push(e.clone());
+            warnings.push(CollectionWarning::source(kind, e.clone()));
         }
         if files.is_empty() && !src.roots().iter().any(|r| r.is_dir()) {
             for root in src.roots() {
-                warnings.push(format!(
-                    "{} 目录不存在：{}",
-                    match kind {
-                        AgentKind::ClaudeCode => "Claude",
-                        AgentKind::Codex => "Codex",
-                    },
-                    root.display()
+                warnings.push(CollectionWarning::source(
+                    kind,
+                    format!(
+                        "{} 目录不存在：{}",
+                        match kind {
+                            AgentKind::ClaudeCode => "Claude",
+                            AgentKind::Codex => "Codex",
+                        },
+                        root.display()
+                    ),
                 ));
             }
         }
@@ -1079,12 +1293,18 @@ fn collect_all_with_sources(
             let stable = fp_before == fp_after && fp_after.0.is_some() && fp_after.1.is_some();
             if !stable {
                 unstable += 1;
-                warnings.push(format!("采集期间文件变化，本轮不登记指纹: {}", path_str));
+                warnings.push(CollectionWarning::source(
+                    kind,
+                    format!("采集期间文件变化，本轮不登记指纹: {}", path_str),
+                ));
             } else if parsed.stats.io_errors > 0 {
                 io_failed += 1;
-                warnings.push(format!(
-                    "文件读取失败，本轮不登记指纹（已解析部分不影响统计）: {}",
-                    path_str
+                warnings.push(CollectionWarning::source(
+                    kind,
+                    format!(
+                        "文件读取失败，本轮不登记指纹（已解析部分不影响统计）: {}",
+                        path_str
+                    ),
                 ));
             } else {
                 registrations.push(crate::history::SourceFileRecord {
@@ -1106,7 +1326,8 @@ fn collect_all_with_sources(
             all_events.extend(parsed.events);
         }
         stats.files_scanned = files.len() as u64;
-        log::info!(
+        path_info!(
+            auto,
             "采集 {}: 文件 {}（指纹命中 {} / 重解析 {}），解析 {} ms，解析层事件 {}，累计 {} ms",
             kind.as_str(),
             files.len(),
@@ -1141,7 +1362,8 @@ fn collect_all_with_sources(
                 .collect();
             if !stale.is_empty() {
                 let n = history.mark_sources_missing(&stale)?;
-                log::info!(
+                path_info!(
+                    auto,
                     "来源缺失（{}）：{} 个文件标记为 missing（已保存用量保留）",
                     kind.as_str(),
                     n
@@ -1156,7 +1378,8 @@ fn collect_all_with_sources(
     let t_dedupe = std::time::Instant::now();
     let before = all_events.len();
     let (mut events, dropped) = dedupe_events(all_events);
-    log::info!(
+    path_info!(
+        auto,
         "去重：{} → {}（丢弃 {}），{} ms",
         before,
         events.len(),
@@ -1172,13 +1395,20 @@ fn collect_all_with_sources(
     // 让整批回滚——否则一条坏事件会让**全部采集失败**，连已有历史都无法展示。
     // 跳过的条数进诊断，与适配器层的 bad_lines 口径一致（不静默吞掉）。
     let mut writes: Vec<crate::history::EventWrite> = Vec::with_capacity(events.len());
-    let mut skipped_unwritable = 0u64;
+    let mut skipped_unwritable: Vec<(AgentKind, u64)> = Vec::new();
     for ev in &events {
         let write = event_write_of(ev);
         match history.can_write(&write) {
             Ok(true) => writes.push(write),
             Ok(false) => {
-                skipped_unwritable += 1;
+                if let Some((_, count)) = skipped_unwritable
+                    .iter_mut()
+                    .find(|(agent, _)| *agent == ev.agent)
+                {
+                    *count += 1;
+                } else {
+                    skipped_unwritable.push((ev.agent, 1));
+                }
                 log::warn!(
                     "跳过不可入库的事件（{} / {} / {:?}）：字段不合法",
                     ev.agent.as_str(),
@@ -1189,13 +1419,18 @@ fn collect_all_with_sources(
             Err(e) => return Err(e),
         }
     }
-    if skipped_unwritable > 0 {
-        warnings.push(format!(
-            "{skipped_unwritable} 条事件字段不合法，未写入历史库（其余照常入账）"
+    for (agent, count) in skipped_unwritable {
+        warnings.push(CollectionWarning::source(
+            agent,
+            format!("{count} 条事件字段不合法，未写入历史库（其余照常入账）"),
         ));
     }
     let write_summary = history.write_batch(&writes)?;
-    log::info!(
+    // U06：`changed` = 本轮确有新增或更新——决定定时线程是否发变化通知，
+    // 也是自动触发下**唯一**保留 info 的依据（没有新数据就没有排障价值）。
+    let changed = write_summary.changed_events() > 0;
+    path_info!(
+        auto && !changed,
         "历史库写入：新增 {}，更新 {}，已存在 {}，冲突 {}，陈旧 {}；别名 +{}，来源 +{}",
         write_summary.inserted,
         write_summary.updated,
@@ -1225,7 +1460,8 @@ fn collect_all_with_sources(
         // 取得，避免为统计再物化一次事件集。
         s.stats.events = history.event_count_of(s.agent)?;
     }
-    log::info!(
+    path_info!(
+        auto,
         "采集完成：本轮解析 {} 项，警告 {}，总计 {} ms",
         registrations.len(),
         warnings.len(),
@@ -1233,6 +1469,7 @@ fn collect_all_with_sources(
     );
     Ok(Collected {
         generation: history_generation,
+        changed,
         sources: reports,
         pricing,
         warnings,
@@ -1254,61 +1491,349 @@ pub(crate) fn open_read_snapshot(
     Ok(std::sync::Arc::new(history.read_snapshot()?))
 }
 
-/// H07：冻结的时间边界——`days` / `from` / `to` 在建立快照时解析**一次**，
-/// 汇总与分页共用同一份判定（不重复解析"今天"，也不因跨日界漂移）。
+/// 本次查询冻结的时间范围（U01，回传给界面显示，与汇总数字同源）。
+///
+/// 字段保持**蛇形**命名：与 `SummaryReport`/`EventRow` 等既有 IPC 载荷一致；
+/// 外层结构（`QueryHandle`）的 `camelCase` 改名不波及枚举内部字段。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "granularity", rename_all = "snake_case")]
+pub enum RangeView {
+    /// 自然日模式：冻结的自然日闭区间（`None` = 该侧不限）。
+    Day {
+        from: Option<String>,
+        to: Option<String>,
+    },
+    /// 时刻模式：`start_local`/`end_local` 是统计时区的本地时刻（精确到分钟，
+    /// `end_local` 为用户选中的最后一分钟或 `as_of` 所在分钟），
+    /// `start`/`end` 是 UTC 时刻（RFC3339，诊断用）。
+    Instant {
+        start_local: String,
+        end_local: String,
+        start: String,
+        end: String,
+    },
+}
+
+/// U01：四组时间参数（自然日预设 / 自然日区间 / 滚动窗口 / 自定义时刻）的
+/// 分组标签——组间互斥，冲突时报出是哪几组。
+const TIME_GROUP_DAYS_PRESET: &str = "自然日预设（days）";
+const TIME_GROUP_DAYS_RANGE: &str = "自然日区间（from/to）";
+const TIME_GROUP_ROLLING: &str = "滚动窗口（rolling_hours）";
+const TIME_GROUP_CUSTOM: &str = "自定义时刻（start_at + end_at/until_now）";
+
+/// H07/U01：冻结的时间边界——四组时间参数在建立快照时解析**一次**，汇总与
+/// 分页共用同一份判定（不重复解析"今天"，也不因跨日界漂移）。
+///
+/// 两种边界模式（外加"全部时间"）：
+/// - **自然日模式**：事件在统计时区的日期属于 `[from, to]` **且** `ts ≤ as_of`；
+///   包含今天时同样包含今天已有的日汇总（既有语义，不当作时刻范围处理）。
+/// - **时刻模式**：`start ≤ ts < end_exclusive`（`end_exclusive` 为 `None` 时以
+///   `ts ≤ as_of` 截止，即 24h 与"至今"），且日汇总一律不参与。
+/// - **全部时间**（无任何时间参数）：不设范围，也不按 `as_of` 截断——没有范围
+///   不等于"以现在为上界的范围"。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TimeBounds {
-    from: Option<jiff::civil::Date>,
-    to: Option<jiff::civil::Date>,
+pub(crate) enum TimeBounds {
+    /// 全部时间：无任何时间参数。
+    Unbounded,
+    /// 自然日模式（`days` 预设、`from`/`to` 区间、整日对齐的自定义区间）。
+    Days {
+        from: Option<jiff::civil::Date>,
+        to: Option<jiff::civil::Date>,
+        as_of: jiff::Timestamp,
+    },
+    /// 时刻模式（滚动 24h、非整日的自定义区间）。
+    Instant {
+        start: jiff::Timestamp,
+        /// `None` = 以 `ts ≤ as_of` 截止（24h 与"至今"）。
+        end_exclusive: Option<jiff::Timestamp>,
+        as_of: jiff::Timestamp,
+        /// 区间按查询时区覆盖的自然日两端（诊断与排除提示用；**不**用于过滤）。
+        covers_from: jiff::civil::Date,
+        covers_to: jiff::civil::Date,
+        /// 展示用本地时刻（`YYYY-MM-DDTHH:MM`）。
+        start_local: String,
+        end_local: String,
+        /// 展示用区间上界时刻：`end_exclusive - 1 分钟`（24h / 至今时 = `as_of`），
+        /// 满足 `end + 1 分钟 == end_exclusive`。
+        end: jiff::Timestamp,
+    },
+}
+
+/// U01：本地时刻（分钟）→ 时刻，统一用 jiff 的 `compatible` 规则：
+/// 夏令时**不存在的时刻往后取**（间隙后），**重复的时刻取较早的那个**（折叠前）。
+fn local_minute_to_instant(
+    dt: jiff::civil::DateTime,
+    tz: &TimeZone,
+    label: &str,
+) -> Result<jiff::Timestamp> {
+    tz.to_ambiguous_timestamp(dt)
+        .compatible()
+        .map_err(|e| anyhow::anyhow!("本地时刻 {label} 换算为时刻失败（{dt}）：{e}"))
+}
+
+/// U01：解析统计时区本地时刻参数（`YYYY-MM-DDTHH:MM`），截断到分钟
+/// （用户只发分钟值；多余精度按分钟归一，不报错也不做加减）。
+fn parse_local_minute(value: &str, label: &str) -> Result<jiff::civil::DateTime> {
+    let dt: jiff::civil::DateTime = value.trim().parse().map_err(|e| {
+        anyhow::anyhow!("{label} 应为统计时区本地时刻 YYYY-MM-DDTHH:MM：{value:?}（{e}）")
+    })?;
+    Ok(dt.date().at(dt.hour(), dt.minute(), 0, 0))
+}
+
+fn format_local_minute(dt: jiff::civil::DateTime) -> String {
+    dt.strftime("%Y-%m-%dT%H:%M").to_string()
 }
 
 impl TimeBounds {
     pub(crate) fn resolve(opts: &SummaryOptions, as_of: &jiff::Zoned) -> Result<Self> {
         use jiff::civil::Date;
-        if opts.days.is_some() && (opts.from.is_some() || opts.to.is_some()) {
-            anyhow::bail!("--days 与 --from/--to 互斥，二选一");
+        let as_of_ts = as_of.timestamp();
+        let tz = as_of.time_zone();
+
+        // ── 四组参数互斥：先判组冲突，再判组内的值 ──
+        let wants_custom = opts.start_at.is_some() || opts.end_at.is_some() || opts.until_now;
+        let mut active: Vec<&str> = Vec::new();
+        if opts.days.is_some() {
+            active.push(TIME_GROUP_DAYS_PRESET);
         }
+        if opts.from.is_some() || opts.to.is_some() {
+            active.push(TIME_GROUP_DAYS_RANGE);
+        }
+        if opts.rolling_hours.is_some() {
+            active.push(TIME_GROUP_ROLLING);
+        }
+        if wants_custom {
+            active.push(TIME_GROUP_CUSTOM);
+        }
+        if active.len() > 1 {
+            anyhow::bail!(
+                "时间参数只能选一组（互斥）：{}。四组分别为 {TIME_GROUP_DAYS_PRESET}、\
+                 {TIME_GROUP_DAYS_RANGE}、{TIME_GROUP_ROLLING}、{TIME_GROUP_CUSTOM}",
+                active.join("、")
+            );
+        }
+        if active.is_empty() {
+            return Ok(Self::Unbounded);
+        }
+
+        // ── 组 1：自然日预设 days ──
         if let Some(n) = opts.days {
             let range = preset_days_range(as_of, n)?;
-            return Ok(Self {
+            return Ok(Self::Days {
                 from: Some(range.from),
                 to: Some(range.to),
+                as_of: as_of_ts,
             });
         }
-        let parse = |s: &str| -> Result<Date> {
-            s.parse::<Date>().map_err(|e| {
-                // jiff 的 civil::Date 同时接受基本格式（YYYYMMDD，无连字符），
-                // 文案如实声明（J-P3-3），不假装只认扩展格式。
-                anyhow::anyhow!("日期格式应为 YYYY-MM-DD（YYYYMMDD 也可）: {s:?}（{e}）")
-            })
-        };
-        let from = opts.from.as_deref().map(parse).transpose()?;
-        let to = opts.to.as_deref().map(parse).transpose()?;
-        if let (Some(f), Some(t)) = (from, to)
-            && f > t
-        {
-            anyhow::bail!("起始日期晚于结束日期: {f} > {t}");
+
+        // ── 组 2：自然日区间 from/to（保持原有解析与校验）──
+        if opts.from.is_some() || opts.to.is_some() {
+            let parse = |s: &str| -> Result<Date> {
+                s.parse::<Date>().map_err(|e| {
+                    // jiff 的 civil::Date 同时接受基本格式（YYYYMMDD，无连字符），
+                    // 文案如实声明（J-P3-3），不假装只认扩展格式。
+                    anyhow::anyhow!("日期格式应为 YYYY-MM-DD（YYYYMMDD 也可）: {s:?}（{e}）")
+                })
+            };
+            let from = opts.from.as_deref().map(parse).transpose()?;
+            let to = opts.to.as_deref().map(parse).transpose()?;
+            if let (Some(f), Some(t)) = (from, to)
+                && f > t
+            {
+                anyhow::bail!("起始日期晚于结束日期: {f} > {t}");
+            }
+            return Ok(Self::Days {
+                from,
+                to,
+                as_of: as_of_ts,
+            });
         }
-        Ok(Self { from, to })
+
+        // ── 组 3：滚动窗口（只接受 24）──
+        if let Some(hours) = opts.rolling_hours {
+            if hours != 24 {
+                anyhow::bail!(
+                    "滚动窗口只支持 24 小时（rolling_hours = {hours}）：\
+                     界面只提供「过去 24 小时」，其它窗口请用自定义时刻区间"
+                );
+            }
+            let start = as_of_ts
+                .checked_sub(jiff::Span::new().hours(24))
+                .map_err(|e| anyhow::anyhow!("过去 24 小时的起点超出可表示范围：{e}"))?;
+            let start_zoned = start.to_zoned(tz.clone());
+            return Ok(Self::Instant {
+                start,
+                end_exclusive: None,
+                as_of: as_of_ts,
+                covers_from: start_zoned.date(),
+                covers_to: as_of.date(),
+                start_local: start_zoned.strftime("%Y-%m-%dT%H:%M").to_string(),
+                end_local: as_of.strftime("%Y-%m-%dT%H:%M").to_string(),
+                end: as_of_ts,
+            });
+        }
+
+        // ── 组 4：自定义时刻区间 ──
+        let Some(start_raw) = opts.start_at.as_deref() else {
+            anyhow::bail!(
+                "自定义时刻区间需要起点：{TIME_GROUP_CUSTOM} 允许的参数是 \
+                 start_at +（end_at 或 until_now=true），当前缺少 start_at"
+            );
+        };
+        let start_at = parse_local_minute(start_raw, "start_at")?;
+        if opts.end_at.is_some() && opts.until_now {
+            anyhow::bail!("自定义时刻区间的 end_at 与 until_now=true 互斥，二选一");
+        }
+        let end_at = opts
+            .end_at
+            .as_deref()
+            .map(|s| parse_local_minute(s, "end_at"))
+            .transpose()?;
+        if end_at.is_none() && !opts.until_now {
+            anyhow::bail!(
+                "自定义时刻区间需要终点：给出 end_at（用户选中的最后一分钟，含）\
+                 或 until_now=true"
+            );
+        }
+
+        // 整日对齐检测（本地时刻上判断）：00:00 起、23:59 止或至今 → 自然日模式。
+        let start_is_midnight = start_at.hour() == 0 && start_at.minute() == 0;
+        let end_is_last_minute = end_at.is_some_and(|e| e.hour() == 23 && e.minute() == 59);
+        if start_is_midnight && (end_is_last_minute || opts.until_now) {
+            let from = start_at.date();
+            let to = end_at.map(|e| e.date()).unwrap_or_else(|| as_of.date());
+            if from > to {
+                anyhow::bail!("自定义区间的起始日期晚于结束日期: {from} > {to}");
+            }
+            return Ok(Self::Days {
+                from: Some(from),
+                to: Some(to),
+                as_of: as_of_ts,
+            });
+        }
+
+        // 时刻模式换算：起点 = 本地(start_at)；终点 = 本地(end_at) + 1 分钟。
+        let start = local_minute_to_instant(start_at, tz, "start_at")?;
+        if start > as_of_ts {
+            anyhow::bail!(
+                "自定义时刻区间的起点晚于本次查询的时间基准（{start_raw} > {as_of}）：\
+                 起点不能在未来"
+            );
+        }
+        let (end_exclusive, end, end_local, covers_to) = match end_at {
+            Some(e) => {
+                let next_local = e
+                    .checked_add(jiff::Span::new().minutes(1))
+                    .map_err(|err| anyhow::anyhow!("结束时刻加 1 分钟超出可表示范围：{err}"))?;
+                let end_exclusive = local_minute_to_instant(next_local, tz, "end_at + 1 分钟")?;
+                if start >= end_exclusive {
+                    anyhow::bail!(
+                        "自定义时刻区间的起点必须早于终点（含最后一分钟）：{}（结束于 {}）",
+                        format_local_minute(start_at),
+                        format_local_minute(e)
+                    );
+                }
+                let end = end_exclusive
+                    .checked_sub(jiff::Span::new().minutes(1))
+                    .map_err(|err| anyhow::anyhow!("结束时刻换算超出可表示范围：{err}"))?;
+                (Some(end_exclusive), end, format_local_minute(e), e.date())
+            }
+            None => (
+                // 至今：以 `ts ≤ as_of` 截止，展示值就是冻结基准本身。
+                None,
+                as_of_ts,
+                as_of.strftime("%Y-%m-%dT%H:%M").to_string(),
+                as_of.date(),
+            ),
+        };
+        Ok(Self::Instant {
+            start,
+            end_exclusive,
+            as_of: as_of_ts,
+            covers_from: start_at.date(),
+            covers_to,
+            start_local: format_local_minute(start_at),
+            end_local,
+            end,
+        })
     }
 
-    /// 事件（按查询时区解释的自然日）是否落在冻结区间内。
+    /// 事件是否落在冻结区间内。**两种模式都先排除晚于 `as_of` 的记录**——
+    /// 采集/解析可能带来未来时间戳（时钟偏移、伪造行），范围查询不得把
+    /// "还没发生"的用量算进来（U01）。全部时间不设范围。
     pub(crate) fn matches(&self, ts: jiff::Timestamp, tz: &TimeZone) -> bool {
-        if self.from.is_none() && self.to.is_none() {
-            return true;
+        match self {
+            Self::Unbounded => true,
+            Self::Days { from, to, as_of } => {
+                if ts > *as_of {
+                    return false;
+                }
+                if from.is_none() && to.is_none() {
+                    return true;
+                }
+                let d = ts.to_zoned(tz.clone()).date();
+                from.is_none_or(|f| d >= f) && to.is_none_or(|t| d <= t)
+            }
+            Self::Instant {
+                start,
+                end_exclusive,
+                as_of,
+                ..
+            } => {
+                if ts > *as_of {
+                    return false;
+                }
+                ts >= *start && end_exclusive.is_none_or(|e| ts < e)
+            }
         }
-        let d = ts.to_zoned(tz.clone()).date();
-        self.from.is_none_or(|f| d >= f) && self.to.is_none_or(|t| d <= t)
     }
 
     /// 是否限定了时间范围（用于判断"按日视图"是否受日汇总时区影响）。
     pub(crate) fn is_unbounded(&self) -> bool {
-        self.from.is_none() && self.to.is_none()
+        match self {
+            Self::Unbounded => true,
+            Self::Days { from, to, .. } => from.is_none() && to.is_none(),
+            Self::Instant { .. } => false,
+        }
     }
 
-    /// 冻结边界的两端（诊断与界面显示用）。
+    /// 与 `QuerySnapshot::time_bounds()` 共用的自然日两端：
+    /// 自然日模式 = 冻结的 `[from, to]`；时刻模式 = 区间按查询时区**覆盖**的
+    /// `[起始日, 结束日]`（是近似展示，过滤一律走 [`Self::matches`]，不从自然日
+    /// 反推时刻）；全部时间 = `(None, None)`。
     pub(crate) fn parts(&self) -> (Option<jiff::civil::Date>, Option<jiff::civil::Date>) {
-        (self.from, self.to)
+        match self {
+            Self::Unbounded => (None, None),
+            Self::Days { from, to, .. } => (*from, *to),
+            Self::Instant {
+                covers_from,
+                covers_to,
+                ..
+            } => (Some(*covers_from), Some(*covers_to)),
+        }
+    }
+
+    /// U01：回传给界面的冻结范围（全部时间 = `None`，序列化为 `null`）。
+    pub(crate) fn range_view(&self) -> Option<RangeView> {
+        match self {
+            Self::Unbounded => None,
+            Self::Days { from, to, .. } => Some(RangeView::Day {
+                from: from.map(|d| d.to_string()),
+                to: to.map(|d| d.to_string()),
+            }),
+            Self::Instant {
+                start_local,
+                end_local,
+                start,
+                end,
+                ..
+            } => Some(RangeView::Instant {
+                start_local: start_local.clone(),
+                end_local: end_local.clone(),
+                start: start.to_string(),
+                end: end.to_string(),
+            }),
+        }
     }
 }
 
@@ -1377,22 +1902,26 @@ pub enum RollupsMode {
 
 /// 日汇总是否落在查询的时间范围内。
 ///
-/// 未限定范围 → 全部参与；设了范围：能解析日期就按日期比较，**解析不出日期
-/// 时排除**（宁可少算声明范围外的历史，也不把范围外的用量混进来）。
+/// 未限定范围 → 全部参与；设了自然日范围：能解析日期就按日期比较，**解析不出
+/// 日期时排除**（宁可少算声明范围外的历史，也不把范围外的用量混进来）。
+/// 时刻范围在选桶入口处已整体早返回（日汇总一律不参与），这里只是兜底。
 fn rollup_in_bounds(r: &crate::history::StoredRollup, bounds: &TimeBounds) -> bool {
-    if bounds.is_unbounded() {
-        return true;
+    match bounds {
+        TimeBounds::Unbounded => true,
+        TimeBounds::Days { from, to, .. } => {
+            let Ok(day) = r.day.parse::<jiff::civil::Date>() else {
+                return false;
+            };
+            if from.is_some_and(|f| day < f) {
+                return false;
+            }
+            if to.is_some_and(|t| day > t) {
+                return false;
+            }
+            true
+        }
+        TimeBounds::Instant { .. } => false,
     }
-    let Ok(day) = r.day.parse::<jiff::civil::Date>() else {
-        return false;
-    };
-    if bounds.from.is_some_and(|from| day < from) {
-        return false;
-    }
-    if bounds.to.is_some_and(|to| day > to) {
-        return false;
-    }
-    true
 }
 
 /// H06：按 `(CCS 原始统计日, 来源时区, 应用, 等价模型)` 桶决定统计来源。
@@ -1403,7 +1932,10 @@ fn rollup_in_bounds(r: &crate::history::StoredRollup, bounds: &TimeBounds) -> bo
 ///   （仅总量相等不足以证明覆盖，不追加、不按差额造"剩余请求"）；
 /// - 用户显式选择以汇总为准时，命中桶整桶替换为汇总值；
 /// - 按日筛选/分组而查询时区 ≠ 来源日时区时，日汇总**不参与**（返回可恢复
-///   提示：切回来源时区或只看请求明细），绝不把来源日期当作午夜事件重切。
+///   提示：切回来源时区或只看请求明细），绝不把来源日期当作午夜事件重切；
+/// - U01：时刻范围（滚动 24h / 自定义到分钟）**一律不选取**日汇总桶（日粒度
+///   无法与分钟区间对齐，也不按比例估算），只在覆盖到的自然日确有日汇总时
+///   置 `rollups_excluded_for_instant_range`。
 ///
 /// 桶选择在建快照时固定一次，因此不同视图（汇总/明细/下钻）不会因筛选条件
 /// 改变统计优先级。
@@ -1423,6 +1955,22 @@ pub(crate) fn select_rollup_contributions(
     };
     if rollups.is_empty() || mode == RollupsMode::DetailOnly {
         // 仅明细模式：用户显式要求不看日粒度历史（不报"缺失"，这是他的选择）。
+        return selection;
+    }
+    // U01：时刻范围（滚动 24h / 自定义到分钟）不选取任何日汇总桶——区间语义
+    // 精确到分钟，日粒度历史无法对齐，也**不按比例估算**。只有粒度的历史
+    // 若确实覆盖到本区间所在自然日，如实提示（界面文案由前端写）。
+    if let TimeBounds::Instant {
+        covers_from,
+        covers_to,
+        ..
+    } = bounds
+    {
+        selection.coverage.rollups_excluded_for_instant_range = rollups.iter().any(|r| {
+            r.day
+                .parse::<jiff::civil::Date>()
+                .is_ok_and(|day| day >= *covers_from && day <= *covers_to)
+        });
         return selection;
     }
     let mut mismatched: Vec<String> = Vec::new();
@@ -1620,7 +2168,10 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
         state.push_rollup(r)?;
     }
     let agg = state.finish(&pricing)?;
-    log::info!(
+    // U06：自动刷新（`Trigger::Auto`）的查询路径日志降级为 debug。
+    let auto = snapshot.trigger.is_auto();
+    path_info!(
+        auto,
         "聚合（{}）：{} 组 / {} 请求（日汇总桶 {}，未解决覆盖 {}），{} ms",
         agg.by,
         agg.groups.len(),
@@ -1629,7 +2180,8 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
         selection.coverage.unresolved_buckets,
         t_agg.elapsed().as_millis()
     );
-    log::info!(
+    path_info!(
+        auto,
         "汇总完成（会话 {}）：by={} 组={} 请求={}，{} ms",
         snapshot.query_id,
         agg.by,
@@ -1637,7 +2189,7 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
         agg.totals.requests,
         t.elapsed().as_millis()
     );
-    let mut warnings = snapshot.warnings().to_vec();
+    let mut warnings = snapshot.warnings();
     warnings.extend(selection.warnings.iter().cloned());
     Ok(SummaryReport {
         query_id: snapshot.query_id.clone(),
@@ -1650,6 +2202,7 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
         warnings,
         rollup_coverage: selection.coverage.clone(),
         generated_at: snapshot.as_of.to_string(),
+        range: snapshot.range(),
     })
 }
 
@@ -1829,7 +2382,8 @@ pub(crate) fn query_events_from(
         });
         Ok(())
     })?;
-    log::info!(
+    path_info!(
+        snapshot.trigger.is_auto(),
         "明细完成（会话 {}）：筛选 模型={:?} 项目={:?} 日={:?}，返回 {} 行 / 共 {} 条，{} ms",
         snapshot.query_id,
         filter.model,
@@ -1844,7 +2398,7 @@ pub(crate) fn query_events_from(
         pricing_revision: snapshot.pricing_revision.clone(),
         rows,
         total,
-        warnings: snapshot.warnings().to_vec(),
+        warnings: snapshot.warnings(),
     })
 }
 
@@ -1853,6 +2407,10 @@ pub(crate) fn query_events_from(
 /// 查询冻结的 as_of**，区间 = `[起始自然日, as_of 今天]` 闭区间、不含未来
 /// 日期（docs/stats-semantics.md §3.6）；显式 from/to 不被截断到今天。
 /// 生产路径走 `query::begin_query` 的冻结时间边界（H07 起不再物化事件）。
+///
+/// U01 说明：本入口**只按自然日过滤**，不跟随生产路径新增的 `ts ≤ as_of`
+/// 排除——它服务的是既有断言 `test_apply_time_filter_range`（显式 from/to
+/// 的日期语义），收紧会改写该断言；生产语义一律以 `TimeBounds::matches` 为准。
 #[cfg(test)]
 pub(crate) fn time_filter_indices(
     events: &[UsageEvent],
@@ -2518,8 +3076,12 @@ cache_read = 0.4
     fn retained_bytes_cover_session_metadata_and_row_index() {
         let meta_only = |warnings: Vec<String>| CollectionSnapshot {
             generation: 0,
+            changed: false,
             sources: Vec::new(),
-            warnings,
+            warnings: warnings
+                .into_iter()
+                .map(CollectionWarning::global)
+                .collect(),
             pricing: Arc::new(Pricing::default()),
             pricing_revision: String::new(),
         };
@@ -3082,6 +3644,7 @@ cache_read = 0.0
             let ok2 = |_gen: u64| -> Result<CollectionSnapshot> {
                 Ok(CollectionSnapshot {
                     generation: 9,
+                    changed: false,
                     sources: Vec::new(),
                     warnings: Vec::new(),
                     pricing: std::sync::Arc::new(crate::pricing::Pricing::default()),
@@ -3112,6 +3675,7 @@ cache_read = 0.0
                 go_rx.recv().unwrap();
                 Ok(CollectionSnapshot {
                     generation: 1,
+                    changed: false,
                     sources: Vec::new(),
                     warnings: Vec::new(),
                     pricing: std::sync::Arc::new(crate::pricing::Pricing::default()),
@@ -3392,6 +3956,50 @@ cache_read = 0.0
         assert_eq!(r.sources[0].agent, AgentKind::ClaudeCode);
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // ── U06：collect_only 与"最近一次采集结果" ────────────────
+
+    // 最近采集槽位为进程级单份。命中/失效与连续发布的公共 API 契约放在
+    // tests/ui_adjustment_collect.rs 的互斥域中，避免与本模块并行采集互相驱逐。
+
+    /// U06：同参并发 `collect_only` 由单飞协调器合并为**一轮**采集
+    ///（跟随者复用同一航班结果）；缓存写入在锁内只做赋值、不调用采集。
+    #[test]
+    fn concurrent_collect_only_runs_single_round() {
+        let cache = tmp_dir("u06-singleflight");
+        let o = opts(Some(cache.clone()), None, false);
+        // 让领队工作足够长：四个线程必然重叠在同一次航班上。
+        TEST_COLLECT_DELAY_MS.store(300, Ordering::Relaxed);
+        let before = collect_rounds_for_tests(&o);
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let o = o.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    collect_only(&o).unwrap()
+                })
+            })
+            .collect();
+        let outcomes: Vec<CollectOutcome> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+        TEST_COLLECT_DELAY_MS.store(0, Ordering::Relaxed);
+
+        assert_eq!(
+            collect_rounds_for_tests(&o),
+            before + 1,
+            "同参并发必须只跑一轮采集"
+        );
+        assert!(
+            outcomes
+                .iter()
+                .all(|r| r.generation == outcomes[0].generation),
+            "跟随者必须拿到同一轮结果"
+        );
+        assert!(outcomes[0].changed, "首次采集 fixture 必然有写入");
+        std::fs::remove_dir_all(&cache).ok();
+    }
 }
 
 /// B4 测试：解析期间文件被追加 → 指纹复核失败 → 不写成功缓存。
@@ -3580,6 +4188,322 @@ mod collect_stability_tests {
             "第二次采集必须缓存命中，不得重复解析"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── U01：四组时间参数与两种边界模式 ───────────────────────────────
+
+    /// 时间参数测试用的隔离选项：只解析冻结边界、不采集；`cache_dir` /
+    /// `pricing_index` 仍注入临时根（密闭性约定：测试绝不落回真实数据目录）。
+    fn time_opts(tag: &str) -> SummaryOptions {
+        let dir = tmp_dir(tag);
+        SummaryOptions {
+            cache_dir: Some(dir.clone()),
+            pricing_index: Some(dir.join("pricing-index.json")),
+            pricing_path: Some(dir.join("no-pricing.toml")),
+            tz: Some("Asia/Shanghai".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn zoned(s: &str) -> jiff::Zoned {
+        s.parse().unwrap()
+    }
+
+    fn date(s: &str) -> jiff::civil::Date {
+        s.parse().unwrap()
+    }
+
+    /// U01：四组时间参数两两互斥——冲突必须报错，并指明是哪两组。
+    #[test]
+    fn time_bounds_rejects_conflicting_time_groups() {
+        let as_of = zoned("2026-08-02T12:00:00+08:00[Asia/Shanghai]");
+
+        let mut days_and_range = time_opts("tb-conflict-1");
+        days_and_range.days = Some(7);
+        days_and_range.from = Some("2026-08-01".to_string());
+
+        let mut days_and_rolling = time_opts("tb-conflict-2");
+        days_and_rolling.days = Some(7);
+        days_and_rolling.rolling_hours = Some(24);
+
+        let mut days_and_custom = time_opts("tb-conflict-3");
+        days_and_custom.days = Some(7);
+        days_and_custom.start_at = Some("2026-08-01T09:00".to_string());
+        days_and_custom.until_now = true;
+
+        let mut range_and_rolling = time_opts("tb-conflict-4");
+        range_and_rolling.to = Some("2026-08-01".to_string());
+        range_and_rolling.rolling_hours = Some(24);
+
+        let mut range_and_custom = time_opts("tb-conflict-5");
+        range_and_custom.from = Some("2026-08-01".to_string());
+        range_and_custom.start_at = Some("2026-08-01T09:00".to_string());
+        range_and_custom.end_at = Some("2026-08-01T18:00".to_string());
+
+        let mut rolling_and_custom = time_opts("tb-conflict-6");
+        rolling_and_custom.rolling_hours = Some(24);
+        rolling_and_custom.start_at = Some("2026-08-01T09:00".to_string());
+        rolling_and_custom.end_at = Some("2026-08-01T18:00".to_string());
+
+        for (a, b, o) in [
+            ("days", "from/to", days_and_range),
+            ("days", "rolling_hours", days_and_rolling),
+            ("days", "until_now", days_and_custom),
+            ("from/to", "rolling_hours", range_and_rolling),
+            ("from/to", "start_at", range_and_custom),
+            ("rolling_hours", "end_at", rolling_and_custom),
+        ] {
+            let err = TimeBounds::resolve(&o, &as_of).unwrap_err().to_string();
+            assert!(
+                err.contains(a) && err.contains(b),
+                "冲突 {a} × {b} 的错误必须指明两组：{err}"
+            );
+        }
+    }
+
+    /// U01：滚动窗口只支持 24 小时；自定义区间必须给出起点与终点。
+    #[test]
+    fn time_bounds_rejects_unsupported_rolling_and_incomplete_custom_ranges() {
+        let as_of = zoned("2026-08-02T12:00:00+08:00[Asia/Shanghai]");
+
+        for hours in [1u32, 12, 25, 48] {
+            let mut o = time_opts("tb-rolling");
+            o.rolling_hours = Some(hours);
+            let err = TimeBounds::resolve(&o, &as_of).unwrap_err().to_string();
+            assert!(err.contains("24"), "滚动窗口只支持 24 小时：{err}");
+        }
+
+        // start_at 有、end_at 缺、until_now=false：终点不明。
+        let mut missing_end = time_opts("tb-custom-1");
+        missing_end.start_at = Some("2026-08-01T09:00".to_string());
+        assert!(TimeBounds::resolve(&missing_end, &as_of).is_err());
+
+        // 只给 end_at：起点不明。
+        let mut missing_start = time_opts("tb-custom-2");
+        missing_start.end_at = Some("2026-08-01T18:00".to_string());
+        assert!(TimeBounds::resolve(&missing_start, &as_of).is_err());
+
+        // 只给 until_now：起点不明。
+        let mut only_until = time_opts("tb-custom-3");
+        only_until.until_now = true;
+        assert!(TimeBounds::resolve(&only_until, &as_of).is_err());
+
+        // end_at 与 until_now 同时给出：终点二义。
+        let mut two_ends = time_opts("tb-custom-4");
+        two_ends.start_at = Some("2026-08-01T09:00".to_string());
+        two_ends.end_at = Some("2026-08-01T18:00".to_string());
+        two_ends.until_now = true;
+        assert!(TimeBounds::resolve(&two_ends, &as_of).is_err());
+    }
+
+    /// U01：`start >= end_exclusive` 与"起点在未来"必须报错；非法格式报错。
+    #[test]
+    fn time_bounds_rejects_reversed_or_future_instant_ranges() {
+        let as_of = zoned("2026-08-02T12:00:00+08:00[Asia/Shanghai]");
+        let mk = |start: &str, end: &str| {
+            let mut o = time_opts("tb-instant-bad");
+            o.start_at = Some(start.to_string());
+            o.end_at = Some(end.to_string());
+            o
+        };
+
+        // 起点晚于终点：本地 11:00 > 本地(10:30) + 1 分钟。
+        let err = TimeBounds::resolve(&mk("2026-08-02T11:00", "2026-08-02T10:30"), &as_of)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("起点"), "起点晚于终点的错误要说清：{err}");
+        // 起点恰落在 end_exclusive 上（10:59 + 1 分钟 = 11:00）同样拒绝。
+        assert!(TimeBounds::resolve(&mk("2026-08-02T11:00", "2026-08-02T10:59"), &as_of).is_err());
+        // 起点晚于本次查询冻结的时间基准。
+        let err = TimeBounds::resolve(&mk("2026-08-02T12:30", "2026-08-02T13:00"), &as_of)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("起点") && err.contains("2026-08-02T12:00"),
+            "起点在未来的错误必须给出基准：{err}"
+        );
+        // 起点格式非法。
+        assert!(TimeBounds::resolve(&mk("2026/08/02 09:00", "2026-08-02T18:00"), &as_of).is_err());
+    }
+
+    /// U01：整日对齐检测（本地时刻上判断）——00:00–23:59 / 00:00 至今转自然日模式。
+    #[test]
+    fn time_bounds_detects_whole_day_alignment() {
+        let as_of = zoned("2026-08-02T12:00:00+08:00[Asia/Shanghai]");
+        let mk = |start: &str, end: Option<&str>, until_now: bool| {
+            let mut o = time_opts("tb-align");
+            o.start_at = Some(start.to_string());
+            o.end_at = end.map(str::to_string);
+            o.until_now = until_now;
+            o
+        };
+
+        let b = TimeBounds::resolve(
+            &mk("2026-08-01T00:00", Some("2026-08-01T23:59"), false),
+            &as_of,
+        )
+        .unwrap();
+        assert!(
+            matches!(b, TimeBounds::Days { .. }),
+            "00:00–23:59 应为自然日模式"
+        );
+        assert_eq!(
+            b.parts(),
+            (Some(date("2026-08-01")), Some(date("2026-08-01")))
+        );
+
+        let b = TimeBounds::resolve(&mk("2026-08-01T00:00", None, true), &as_of).unwrap();
+        assert!(
+            matches!(b, TimeBounds::Days { .. }),
+            "00:00 至今应为自然日模式"
+        );
+        assert_eq!(
+            b.parts(),
+            (Some(date("2026-08-01")), Some(date("2026-08-02")))
+        );
+
+        for (start, end, until) in [
+            ("2026-08-01T00:01", Some("2026-08-01T23:59"), false),
+            ("2026-08-01T00:00", Some("2026-08-01T23:58"), false),
+            ("2026-08-01T00:00", Some("2026-08-02T00:00"), false),
+            ("2026-08-01T09:00", None, true),
+        ] {
+            let b = TimeBounds::resolve(&mk(start, end, until), &as_of).unwrap();
+            assert!(
+                matches!(b, TimeBounds::Instant { .. }),
+                "{start}–{end:?}（until_now={until}）应为时刻模式"
+            );
+        }
+
+        // 起点晚于今天：整日检测不能绕过"起点在未来"的校验。
+        assert!(TimeBounds::resolve(&mk("2026-08-03T00:00", None, true), &as_of).is_err());
+    }
+
+    /// U01：本地时刻 → 时刻一律用 `compatible`（间隙往后取、折叠取较早）。
+    #[test]
+    fn time_bounds_uses_compatible_disambiguation_for_local_minutes() {
+        let as_of = zoned("2026-11-01T23:00:00-05:00[America/New_York]");
+        let mk = |start: &str, end: &str| {
+            let mut o = time_opts("tb-dst");
+            o.tz = Some("America/New_York".to_string());
+            o.start_at = Some(start.to_string());
+            o.end_at = Some(end.to_string());
+            o
+        };
+
+        // 春季前跳：本地 02:30 不存在 → 取跳变之后（03:30 EDT, UTC-4）= 07:30Z。
+        match TimeBounds::resolve(&mk("2026-03-08T02:30", "2026-03-08T04:00"), &as_of).unwrap() {
+            TimeBounds::Instant {
+                start,
+                end_exclusive,
+                ..
+            } => {
+                assert_eq!(start.to_string(), "2026-03-08T07:30:00Z");
+                assert_eq!(
+                    end_exclusive.unwrap().to_string(),
+                    "2026-03-08T08:01:00Z",
+                    "end_exclusive = 本地 04:01 换算（EDT）"
+                );
+            }
+            other => panic!("必须是时刻模式：{other:?}"),
+        }
+        // 间隙里被"往后取"的起点会晚于同段内的终点 → 区间为空，必须报错
+        // （换算不做特殊补偿，宁可拒绝也不悄悄算出一个倒置区间）。
+        assert!(
+            TimeBounds::resolve(&mk("2026-03-08T02:30", "2026-03-08T03:00"), &as_of).is_err(),
+            "起点按 compatible 取到 03:30，晚于 03:00 的终点，应报错"
+        );
+
+        // 秋季折叠：本地 01:30 出现两次 → 取较早（EDT, UTC-4）= 05:30Z；
+        // 结束于 01:59 → 先在本地加 1 分钟得 02:00（EST, UTC-5）= 07:00Z。
+        match TimeBounds::resolve(&mk("2026-11-01T01:30", "2026-11-01T01:59"), &as_of).unwrap() {
+            TimeBounds::Instant {
+                start,
+                end_exclusive,
+                end_local,
+                ..
+            } => {
+                assert_eq!(start.to_string(), "2026-11-01T05:30:00Z");
+                assert_eq!(
+                    end_exclusive.unwrap().to_string(),
+                    "2026-11-01T07:00:00Z",
+                    "结束于 01:59 时 end_exclusive = 本地 02:00 换算"
+                );
+                assert_eq!(end_local, "2026-11-01T01:59");
+            }
+            other => panic!("必须是时刻模式：{other:?}"),
+        }
+    }
+
+    /// U01：两种模式都排除晚于 `as_of` 的记录；全部时间不设范围。
+    #[test]
+    fn time_bounds_matches_excludes_records_after_as_of_in_both_modes() {
+        let tz = jiff::tz::TimeZone::get("Asia/Shanghai").unwrap();
+        let as_of = zoned("2026-08-02T12:00:00+08:00[Asia/Shanghai]");
+        let at = |s: &str| -> jiff::Timestamp { s.parse().unwrap() };
+
+        // 自然日模式：同一天内、晚于 as_of 的记录同样被排除。
+        let days = SummaryOptions {
+            days: Some(1),
+            ..time_opts("tb-match-days")
+        };
+        let b = TimeBounds::resolve(&days, &as_of).unwrap();
+        assert!(
+            b.matches(at("2026-08-02T10:00:00+08:00"), &tz),
+            "当天且早于 as_of"
+        );
+        assert!(
+            b.matches(at("2026-08-02T12:00:00+08:00"), &tz),
+            "等于 as_of 仍纳入"
+        );
+        assert!(
+            !b.matches(at("2026-08-02T12:00:01+08:00"), &tz),
+            "自然日模式必须排除晚于 as_of 的记录"
+        );
+        assert!(
+            !b.matches(at("2026-08-01T20:00:00+08:00"), &tz),
+            "昨天不在近 1 天内"
+        );
+
+        // 时刻模式：区间内但晚于 as_of 的记录同样被排除。
+        let inst = SummaryOptions {
+            start_at: Some("2026-08-02T09:00".to_string()),
+            end_at: Some("2026-08-02T23:59".to_string()),
+            ..time_opts("tb-match-inst")
+        };
+        let b = TimeBounds::resolve(&inst, &as_of).unwrap();
+        assert!(b.matches(at("2026-08-02T11:59:00+08:00"), &tz));
+        assert!(
+            !b.matches(at("2026-08-02T12:30:00+08:00"), &tz),
+            "晚于 as_of"
+        );
+        assert!(!b.matches(at("2026-08-02T08:00:00+08:00"), &tz), "早于起点");
+
+        // 24h 窗口是闭区间：起点与 as_of 都在内。
+        let rolling = SummaryOptions {
+            rolling_hours: Some(24),
+            ..time_opts("tb-match-rolling")
+        };
+        let b = TimeBounds::resolve(&rolling, &as_of).unwrap();
+        assert!(
+            b.matches(at("2026-08-01T12:00:00+08:00"), &tz),
+            "窗口起点闭区间"
+        );
+        assert!(
+            b.matches(at("2026-08-02T12:00:00+08:00"), &tz),
+            "窗口终点闭区间"
+        );
+        assert!(!b.matches(at("2026-08-01T11:59:00+08:00"), &tz));
+        assert!(!b.matches(at("2026-08-02T12:00:01+08:00"), &tz));
+
+        // 全部时间：无范围，也不做 as_of 截断。
+        let unbounded = TimeBounds::resolve(&time_opts("tb-match-all"), &as_of).unwrap();
+        assert!(unbounded.is_unbounded());
+        assert_eq!(unbounded.parts(), (None, None));
+        assert!(
+            unbounded.matches(at("2026-08-02T20:00:00+08:00"), &tz),
+            "全部时间不排除任何已保存记录"
+        );
     }
 }
 

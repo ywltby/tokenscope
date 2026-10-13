@@ -1,132 +1,109 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+// U04（UI 调整计划 2026-10-13）：汇总页的状态与查询编排已集中到
+// `composables/useUsageQuery.ts`——本组件只保留模板渲染、UI 局部状态
+// （合并通知的展开态）与可见性转达。
+//
+// **顶层绑定名保持与重构前一致**（report / events / loading / …）：既有
+// `Dashboard.test.ts` 约 45 条断言按 `state(w)["report"]` 的方式读取它们，
+// 因此这里用解构 + 同名暴露（`<script setup>` 的顶层绑定会挂到 vm 上）。
+import { computed, onActivated, onDeactivated, ref } from "vue";
 import { NButton, NSpin } from "naive-ui";
-import {
-  AGENT_LABEL,
-  type AgentFilter,
-  type Dim,
-  type EventDrill,
-  type EventList,
-  type SourceStatus,
-  type SummaryReport,
-} from "../types";
+import type { AgentFilter, Dim } from "../types";
 import SummaryCards from "../components/SummaryCards.vue";
 import UsageTable from "../components/UsageTable.vue";
 import TrendChart from "../components/TrendChart.vue";
 import EventTable from "../components/EventTable.vue";
 import SegmentedControl from "../components/SegmentedControl.vue";
 import DateRangeSelect from "../components/DateRangeSelect.vue";
+import { useUsageQuery, type NoticeAction } from "../composables/useUsageQuery";
 import { useTimezone } from "../composables/timezone";
-import { SNAPSHOT_VERSION, enqueueSnapshotSave } from "../lib/viewSnapshot";
-import { errorText, isQueryExpired } from "../lib/queryError";
 import { realGroups } from "../lib/chartData";
-import { onUnmounted } from "vue";
 
 const props = defineProps<{ refreshKey: number }>();
 /// 任务 3：来源异常通知的「去设置 ›」动作——由应用壳切换到设置页。
 const emit = defineEmits<{ (e: "go-settings"): void }>();
 
-const by = ref<Dim>("day");
-const agent = ref<AgentFilter>("all");
-const range = ref<[string, string] | null>(null);
-const { tz } = useTimezone();
-const report = ref<SummaryReport | null>(null);
-const loading = ref(false);
-const sourceStatus = ref<SourceStatus[]>([]);
-const drill = ref<EventDrill | null>(null);
-const events = ref<EventList | null>(null);
-const eventsLoading = ref(false);
-// D1 游标分页：「加载更多」状态
-const moreLoading = ref(false);
-const hasMore = computed(() => !!events.value && events.value.rows.length < events.value.total);
-// F01（计划 A2）：汇总与明细各自持有请求代次——曾共用一个 runSeq，两个
-// immediate watcher 依次启动使后者作废前者，首屏永远转圈或停在旧快照。
-let summarySeq = 0;
-let eventsSeq = 0;
-// F03：共享刷新批次——主筛选/refreshKey/手动刷新同步生成单一 epoch，两条
-// 查询携带同一 epoch；请求代次只负责丢弃旧响应，保存门槛用 epoch 判定
-// 「两侧均成功且属于当前批次」，杜绝新汇总 + 旧明细的同筛选拼接。
-let refreshEpoch = 0;
-let summaryBatchEpoch = -1;
-let eventsBatchEpoch = -1;
-// F03：用户操作版本——启动缓存读取前捕获；任何筛选/下钻/手动刷新立即
-// 递增并撤销晚到缓存的恢复资格（即使新查询尚未返回）。
-let interactionEpoch = 0;
-// F03：恢复应用期间 watcher 跳过查询（恢复后恰好启动一批刷新，不重复触发）。
-let applyingRestore = false;
-// R04（Task 4）：实例 disposal——App 用 v-if 切页，卸载后晚到的响应
-// 不得更新状态或落盘快照（新实例的查询/保存才是权威）。
-let disposed = false;
-// R04：freshArrived 守卫——任何新查询结果落地后，晚到的视图缓存不再
-// 接管（并发初始化 + 守卫；缓存恢复改筛选触发的后台刷新由 watcher
-// 自然完成）。
-let freshArrived = false;
-// 失败必须可见并可重试（计划 ipc_error_visible），不再无声吞异常。
-const summaryError = ref<string | null>(null);
-const eventsError = ref<string | null>(null);
-/// G-P3-4：记录明细失败发生在首页还是追加页——追加失败的原地重试必须
-/// 仍走追加，不把已累积分页重置回首页。仅 failure 路径写该标记；
-/// 重试前还要求末行游标仍在（loadEvents(append) 内部守卫兜底）。
-const eventsFailureWasAppend = ref(false);
-// C4（F08）：快照必须携带查询身份——修复前 report 与 events 来自各自
-// 的请求，保存时可能混搭不同筛选的两代数据，恢复时筛选已重置而数据
-// 还是旧口径。eventsKey 记录明细当前所属的筛选上下文，两者一致才落盘。
-type SnapshotFilters = {
-  by: Dim;
-  agent: AgentFilter;
-  /** v4：统计时区日历字符串 */
-  range: [string, string] | null;
-  drill: EventDrill | null;
-  tz: string;
-};
-type SnapshotPayload = {
-  v: number;
-  saved_at: string;
-  filters: SnapshotFilters;
-  /** v11：日粒度历史参与方式随快照保存——「只看请求明细」是用户显式选择，
-   * 重新进入页面必须恢复，不能静默回退成 auto 重新带入日汇总。 */
-  rollups_mode: "auto" | "detail_only";
-  report: SummaryReport;
-  events: EventList;
-};
-// SF04：查询会话句柄（query_begin 返回）——同一批次的汇总/明细/分页
-// 都绑定同一 query_id；价格修订随会话冻结。
-type QueryHandle = {
-  queryId: string;
-  generation: number;
-  pricingRevision: string;
-  timezone: string;
-  asOf: string;
-};
-const currentQuery = ref<QueryHandle | null>(null);
-// SF05/SF04：每批次共享一次 begin_query Promise，汇总/明细并发读取同一
-// 会话；跨午夜/手动刷新的批次重建会话。
-let beginPromise: Promise<QueryHandle | null> | null = null;
-let beginEpoch = -1;
+const {
+  // 筛选偏好（来源 / 维度 / 时间预设 / 日粒度参与方式 / 下钻）
+  by,
+  agent,
+  preset,
+  drill,
+  rollupsMode,
+  batchRange,
+  // 数据与状态
+  report,
+  events,
+  loading,
+  eventsLoading,
+  moreLoading,
+  hasMore,
+  stale,
+  cachedAt,
+  summaryError,
+  eventsError,
+  sessionReady,
+  liveFirstPage,
+  currentQuery,
+  // 来源状态
+  sourceStatus,
+  sourceError,
+  sourcesLoading,
+  problemSources,
+  // 派生
+  statusPill,
+  collectionDiagnostics,
+  instantRangeHint,
+  notices,
+  noticeHeadline,
+  moreBlockedHint,
+  drillLabel,
+  // 动作
+  refresh,
+  manualRefresh,
+  startRefreshBatch,
+  retryAfterFailure,
+  loadEvents,
+  loadMoreEvents,
+  setRollupsMode,
+  onSummaryRowClick,
+  onTotalRowClick,
+  clearDrill,
+  loadSources,
+  saveSnapshot,
+  // U06 接入点：可见性、待刷新标记、自动刷新入口与让位提示
+  visible,
+  pendingRefresh,
+  latestGeneration,
+  autoRefreshHint,
+  setVisible,
+  requestAutoRefresh,
+  notifyUsageUpdated,
+} = useUsageQuery({
+  refreshKey: () => props.refreshKey,
+  goSettings: () => emit("go-settings"),
+});
 
-// RC02：当前批次是否已成功建立后端会话（begin 成功）。begin 失败或观察到
-// query_expired 后为 false——错误条的恢复动作据此决定"新建批次"还是
-// "局部重试"（不把所有失败都当成会话失效）。
-const sessionReady = ref(false);
-// RC02：**成功首页身份**——只有它存在时"加载更多"才有分页资格。它记录
-// 本进程内一次真实成功的首页响应所属的 query_id/价格修订/主与下钻身份/
-// 批次 epoch；磁盘恢复的旧视图**不赋予**该身份，因此其旧游标（属于保存时
-// 的旧 query_id）不得用于当前后端会话续页。
-type LiveFirstPage = {
-  queryId: string;
-  pricingRevision: string;
-  epoch: number;
-  filters: SnapshotFilters;
-};
-const liveFirstPage = ref<LiveFirstPage | null>(null);
-// R04：汇总/明细各自的**请求时捕获键**（不可变）——响应返回时不再读
-// currentFilters() 冒充请求身份（混代数据保存的根因）。
-let summaryKey: SnapshotFilters | null = null;
-const eventsKey = ref<SnapshotFilters | null>(null);
-// 启动提速（用户 2026-10-04）：先渲染上次视图快照，再后台刷新替换
-const stale = ref(false);
-const cachedAt = ref<string | null>(null);
+/// U01：日期按钮的悬停提示与可访问名称按统计时区渲染（时区本身在设置页改）。
+const { tz } = useTimezone();
+
+/// U04：合并通知的展开态。`showSourceDetails` 是历史绑定名（既有回归测试按
+/// 它读取/写入展开态），与 `showNoticeDetails` 指向同一状态。
+const showNoticeDetails = ref(false);
+const showSourceDetails = showNoticeDetails;
+
+type NoticeRow = { key: string; text: string; actions: NoticeAction[] };
+
+/// 展开后的逐条内容：多条通知时每条一行（带自己的动作），单条时列出它的细节。
+const noticeDetailRows = computed<NoticeRow[]>(() => {
+  if (!showNoticeDetails.value) return [];
+  const rows: NoticeRow[] = [];
+  for (const n of notices.value) {
+    rows.push({ key: n.id, text: n.text, actions: n.actions });
+    (n.details ?? []).forEach((d, i) => rows.push({ key: `${n.id}-d${i}`, text: d, actions: [] }));
+  }
+  return rows;
+});
 
 const dimOptions: { label: string; value: Dim }[] = [
   { label: "按时间", value: "day" },
@@ -135,511 +112,88 @@ const dimOptions: { label: string; value: Dim }[] = [
   { label: "按应用", value: "agent" },
 ];
 
-// Task 6：日期控件直接传统计时区日历字符串，无需毫秒换算。
-
 const agentOptions: { label: string; value: AgentFilter; icon: string }[] = [
   { label: "全部", value: "all", icon: "all" },
   { label: "Claude Code", value: "claude", icon: "claude" },
   { label: "Codex", value: "codex", icon: "openai" },
 ];
 
-// 任务 3：标题行状态胶囊——stale / 刷新中 / 刷新失败 / 已更新四态可见。
-const statusPill = computed<{ cls: string; text: string }>(() => {
-  // R04 状态机：stale + 失败 = 旧数据/刷新失败（不能谎称"后台刷新中"）；
-  // stale + 刷新中才显示后台刷新。
-  if (stale.value && summaryError.value)
-    return { cls: "ts-pill-warning", text: "缓存数据 · 刷新失败" };
-  if (stale.value && loading.value)
-    return { cls: "ts-pill-warning", text: "缓存数据 · 后台刷新中" };
-  // 首载失败且无任何数据可恢复：必须显示失败而非"刷新中"（G-P2-1）——
-  // !report 分支要先看错误，否则错误态对无数据场景不可达。
-  if (!report.value && summaryError.value)
-    return { cls: "ts-pill-warning", text: "刷新失败 · 暂无数据" };
-  if (loading.value || !report.value) return { cls: "ts-pill-info", text: "刷新中…" };
-  if (summaryError.value) return { cls: "ts-pill-warning", text: "刷新失败 · 显示上次数据" };
-  return { cls: "ts-pill-success", text: "已更新" };
-});
-
-// R08（Task 8）：采集诊断——空结果/部分结果都必须可见，不依赖表格挂载。
-// 分开命名：warnings（重叠/缓存降级等）、坏行、IO 错误——不声称所有
-// warning 都表示丢数据；干净空区间不误报。
-const collectionDiagnostics = computed(() => {
-  // H06：日汇总的时区不匹配是「当前视图看不到这部分历史」的可恢复提示，
-  // 与采集警告并列展示（不混入坏行/IO 统计）。
-  const warns = [...(report.value?.warnings ?? [])];
-  const timezoneMismatch = report.value?.rollup_coverage?.timezone_mismatch ?? null;
-  if (timezoneMismatch && !warns.includes(timezoneMismatch)) warns.push(timezoneMismatch);
-  const statsList = report.value?.sources.map((s) => s.stats) ?? [];
-  const ioErrors = statsList.reduce((a, st) => a + (st.io_errors ?? 0), 0);
-  const badLines = statsList.reduce((a, st) => a + (st.bad_lines ?? 0), 0);
-  // H06：含只有日粒度的历史时，费用按「未知」披露（不是模型未收录）。
-  const rollupOnly = report.value?.totals.unknown_reason === "rollup_only";
-  const clean = warns.length === 0 && ioErrors === 0 && badLines === 0 && !rollupOnly;
-  const summaryText = clean
-    ? null
-    : [
-        warns.length > 0 ? `${warns.length} 条采集警告` : null,
-        ioErrors > 0 ? `${ioErrors} 个文件读取失败` : null,
-        badLines > 0 ? `${badLines} 行解析失败（已跳过）` : null,
-        rollupOnly ? "含只有日粒度的历史（这部分费用按未知披露）" : null,
-      ]
-        .filter(Boolean)
-        .join("，");
-  return { clean, summaryText, warns, ioErrors, badLines, rollupOnly, timezoneMismatch };
-});
-const showCollectionDetails = ref(false);
-/// H08：日粒度历史是否参与统计（`detail_only` = 只看请求明细）。切换会重建
-/// 查询会话（桶选择在建快照时固定，不能事后改），因此与其它筛选项同路径。
-const rollupsMode = ref<"auto" | "detail_only">("auto");
-
-// 任务 7：来源异常通知——单条直接展示，多条合并为一条可展开通知。
-const problemSources = computed(() => sourceStatus.value.filter((x) => x.state !== "ready"));
-const showSourceDetails = ref(false);
-function sourceNoticeText(s: SourceStatus): string {
-  if (s.state === "disabled")
-    return `${AGENT_LABEL[s.agent] ?? s.agent} 已在设置中停用，不参与统计。`;
-  if (s.state === "missing")
-    return `${AGENT_LABEL[s.agent] ?? s.agent} 数据目录不存在（${s.dir}）。`;
-  return `${AGENT_LABEL[s.agent] ?? s.agent} 目录存在但没有发现会话日志（${s.dir}）。`;
-}
-// SF04：创建（或复用）当前批次的查询会话。同一 epoch 只发起一次
-// begin_query，refresh/loadEvents 共享该 Promise；晚到的旧 begin 不得
-// 接管新批次（epoch/queryId 双重守卫）。
-function beginQueryForCurrentEpoch(): Promise<QueryHandle | null> {
-  const epoch = refreshEpoch;
-  if (beginPromise && beginEpoch === epoch) return beginPromise;
-  beginEpoch = epoch;
-  sessionReady.value = false;
-  const captured = {
-    by: by.value,
-    agent: agent.value,
-    from: range.value?.[0] ?? null,
-    to: range.value?.[1] ?? null,
-    tz: tz.value,
-  };
-  beginPromise = (async () => {
-    try {
-      const h = await invoke<QueryHandle>("query_begin", {
-        by: captured.by,
-        agent: captured.agent,
-        days: null,
-        from: captured.from,
-        to: captured.to,
-        tz: captured.tz,
-        // H08：日粒度历史参与方式（`detail_only` = 只看请求明细；来源时区与
-        // 展示时区不一致时用户可选的恢复路径之一）。
-        rollups: rollupsMode.value === "detail_only" ? "detail_only" : null,
-      });
-      if (epoch !== refreshEpoch || disposed) return null; // 旧 begin 晚到不接管
-      currentQuery.value = h;
-      sessionReady.value = true;
-      return h;
-    } catch (e) {
-      // 会话建立失败：保留旧视图（不伪装已更新），错误在汇总侧可见。
-      if (epoch === refreshEpoch && !disposed) {
-        summaryError.value = errorText(e);
-        // RC02：失败的 Promise 不得留在缓存里——否则同一 epoch 的"重试"
-        // 会复用已失败的 begin，永远不重发（failed_begin_can_be_retried）。
-        if (beginEpoch === epoch) {
-          beginPromise = null;
-          beginEpoch = -1;
-        }
-        sessionReady.value = false;
-      }
-      return null;
-    }
-  })();
-  return beginPromise;
-}
-
-async function refresh(): Promise<void> {
-  const seq = ++summarySeq;
-  const epoch = refreshEpoch;
-  // R04：请求发起时捕获不可变查询身份（批次 = epoch）。
-  const captured: SnapshotFilters = {
-    by: by.value,
-    agent: agent.value,
-    range: range.value ? [...range.value] : null,
-    drill: null,
-    tz: tz.value,
-  };
-  loading.value = true;
-  summaryError.value = null;
-  try {
-    const h = await beginQueryForCurrentEpoch();
-    if (seq !== summarySeq || disposed || epoch !== refreshEpoch) return;
-    if (!h) return; // begin 失败已写入 summaryError；保留旧视图
-    const fresh = await invoke<SummaryReport>("query_summary", { queryId: h.queryId });
-    if (seq !== summarySeq || disposed || epoch !== refreshEpoch) return;
-    if (h.queryId !== currentQuery.value?.queryId) return; // 会话已被新批次替换
-    report.value = fresh;
-    stale.value = false;
-    freshArrived = true;
-    summaryBatchEpoch = epoch;
-    summaryKey = captured;
-    saveSnapshot();
-  } catch (e) {
-    if (seq === summarySeq && !disposed) {
-      summaryError.value = errorText(e);
-      // RC02：会话已失效 → 本批次不再有 live 会话，恢复动作必须新建批次。
-      if (isQueryExpired(e)) sessionReady.value = false;
-    }
-  } finally {
-    if (seq === summarySeq && !disposed) loading.value = false;
-  }
-}
-
-function sameMainIdentity(a: SnapshotFilters, b: SnapshotFilters): boolean {
-  return (
-    a.by === b.by &&
-    a.agent === b.agent &&
-    a.tz === b.tz &&
-    a.range?.[0] === b.range?.[0] &&
-    a.range?.[1] === b.range?.[1]
-  );
-}
-
-function saveSnapshot(): void {
-  // F03：保存门槛 = 汇总与明细均成功且属于**当前批次**（epoch 一致），
-  // 主键完全一致（含 by），且 report.by 与键一致。任一侧失败/旧批次 →
-  // 保留上一份一致快照，不由另一侧成功写新旧拼接；分页追加只延长同
-  // 批次明细，drill 是明细侧子查询身份（汇总无 drill 概念）。
-  if (!report.value || !events.value || !eventsKey.value || !summaryKey) return;
-  if (summaryBatchEpoch !== refreshEpoch || eventsBatchEpoch !== refreshEpoch) return;
-  const sk = summaryKey;
-  const ek = eventsKey.value;
-  if (!sameMainIdentity(sk, ek)) return;
-  if (report.value.by !== sk.by) return;
-  // SF04：两侧必须来自同一后端会话（query_id/价格修订一致）——
-  // 跨会话拼接的 report/events 不落盘。
-  if (report.value.query_id !== events.value.query_id) return;
-  if (report.value.pricing_revision !== events.value.pricing_revision) return;
-  const payload: SnapshotPayload = {
-    v: SNAPSHOT_VERSION,
-    saved_at: new Date().toISOString(),
-    // 复核修订：下钻标签写**当前汇总解析出的**展示名，避免把过期标签带进快照。
-    filters: {
-      ...ek,
-      drill: ek.drill ? { ...ek.drill, label: resolvedDrillLabel(ek.drill) } : null,
-    },
-    rollups_mode: rollupsMode.value,
-    report: report.value,
-    events: events.value,
-  };
-  enqueueSnapshotSave(payload);
-}
-
-// AP06：来源检测独立状态。此前 `void loadSources()` 没有 catch——source_status
-// 拒绝会成为未处理 Promise，且旧 missing/empty 状态会一直留着（目录修好、
-// 点"刷新"也不会重查）。现在：独立错误态 + 读代次/在途合并 + 卸载守卫，
-// 手动刷新与外部刷新都重查；读取失败**不**清空已成功的汇总数据，只标注
-// 来源状态可能过期。
-const sourceError = ref<string | null>(null);
-const sourcesLoading = ref(false);
-let sourcesInflight: Promise<void> | null = null;
-let sourcesAgain = false;
-
-async function loadSources(): Promise<void> {
-  if (sourcesInflight) {
-    // 合并连点/连发：在途期间只记一次补读意图，不并发第二条请求。
-    sourcesAgain = true;
-    await sourcesInflight;
-    return;
-  }
-  const round = (async () => {
-    sourcesLoading.value = true;
-    try {
-      const fresh = await invoke<SourceStatus[]>("source_status");
-      if (disposed) return;
-      sourceStatus.value = fresh;
-      sourceError.value = null;
-    } catch (e) {
-      if (disposed) return;
-      // 失败 ≠ 旧状态仍然有效：保留列表供参考，同时明确标注可能过期。
-      sourceError.value = errorText(e);
-    } finally {
-      sourcesLoading.value = false;
-    }
-  })();
-  sourcesInflight = round;
-  try {
-    await round;
-  } finally {
-    sourcesInflight = null;
-    if (sourcesAgain && !disposed) {
-      sourcesAgain = false;
-      await loadSources();
-    }
-  }
-}
-
-async function loadEvents(append = false): Promise<void> {
-  if (append) {
-    // F03：追加页仅允许在所属明细首批完成后执行，且锚点必须与当前显示
-    // 的明细同主身份（by/agent/range/tz/drill）——旧筛选的游标不得用于
-    // 新筛选，新筛选首批也不得被追加响应作废。
-    if (eventsLoading.value || !eventsKey.value) return;
-    // RC02：必须有**当前后端会话**的成功首页身份才允许续页。磁盘恢复的
-    // 旧视图（或本批次首页尚未成功）没有该身份 → 拒绝发起带旧 before 的
-    // query_events（旧游标属于保存时的旧 query_id）。
-    const live = liveFirstPage.value;
-    if (!live || live.queryId !== currentQuery.value?.queryId) return;
-    const current: SnapshotFilters = {
-      by: by.value,
-      agent: agent.value,
-      range: range.value ? [...range.value] : null,
-      drill: drill.value ? { ...drill.value } : null,
-      tz: tz.value,
-    };
-    if (!sameMainIdentity(live.filters, current)) return;
-    if (!sameMainIdentity(eventsKey.value, current)) return;
-    if ((eventsKey.value.drill?.type ?? null) !== (current.drill?.type ?? null)) return;
-    if ((eventsKey.value.drill?.key ?? null) !== (current.drill?.key ?? null)) return;
-  } else {
-    // RC02：新的首页请求开始即作废旧首页身份——成功前不得续页。
-    liveFirstPage.value = null;
-  }
-  const seq = ++eventsSeq;
-  const epoch = refreshEpoch;
-  // R04：分页追加只作用于所属明细查询——捕获含游标锚的完整身份。
-  const captured: SnapshotFilters = {
-    by: by.value,
-    agent: agent.value,
-    range: range.value ? [...range.value] : null,
-    drill: drill.value ? { ...drill.value } : null,
-    tz: tz.value,
-  };
-  const anchor = append ? (events.value?.rows.at(-1)?.cursor ?? null) : null;
-  if (!append) eventsLoading.value = true;
-  moreLoading.value = append;
-  eventsError.value = null;
-  try {
-    // SF04：共享本批次的会话；下钻/翻页在同一 query_id 上执行。
-    const h = await beginQueryForCurrentEpoch();
-    if (seq !== eventsSeq || disposed || epoch !== refreshEpoch) return;
-    if (!h) {
-      // 会话建立失败：保留旧明细（不伪装已更新），错误在汇总侧可见。
-      eventsError.value = summaryError.value;
-      return;
-    }
-    const list = await invoke<EventList>("query_events", {
-      queryId: h.queryId,
-      model: captured.drill?.type === "model" ? captured.drill.key : null,
-      project: captured.drill?.type === "project" ? captured.drill.key : null,
-      day: captured.drill?.type === "day" ? captured.drill.key : null,
-      limit: 200,
-      before: anchor,
-    });
-    if (seq !== eventsSeq || disposed) return;
-    if (h.queryId !== currentQuery.value?.queryId) return; // 旧会话响应不落地
-    if (append && events.value) {
-      events.value = { ...list, rows: [...events.value.rows, ...list.rows] };
-    } else {
-      events.value = list;
-      eventsKey.value = captured;
-      eventsBatchEpoch = epoch;
-      // RC02：成功首页才赋予 live 分页资格（恢复视图永不进入本分支）。
-      liveFirstPage.value = {
-        queryId: h.queryId,
-        pricingRevision: list.pricing_revision,
-        epoch,
-        filters: captured,
-      };
-    }
-    freshArrived = true;
-    saveSnapshot();
-  } catch (e) {
-    if (seq === eventsSeq && !disposed) {
-      eventsError.value = errorText(e);
-      eventsFailureWasAppend.value = append;
-      // RC02：会话失效 → 恢复动作改为新建批次（局部重试无意义）。
-      if (isQueryExpired(e)) sessionReady.value = false;
-    }
-  } finally {
-    if (seq === eventsSeq && !disposed) {
-      eventsLoading.value = false;
-      moreLoading.value = false;
-    }
-  }
-}
-
-function loadMoreEvents(): void {
-  void loadEvents(true);
-}
-
-async function loadViewCache(): Promise<void> {
-  // F03：恢复所有权——读取前捕获用户操作版本；任何筛选/下钻/手动刷新
-  // 都会在等待期间递增 interactionEpoch，晚到缓存随即失去接管资格。
-  const epochAtRead = interactionEpoch;
-  try {
-    const cached = await invoke<SnapshotPayload | null>("view_cache_load");
-    // R04：晚到的缓存不得覆盖已落地的新结果（新汇总/明细先到 = 缓存
-    // 不再接管）；卸载实例同样不恢复。
-    if (disposed || freshArrived || report.value || events.value) return;
-    if (interactionEpoch !== epochAtRead) return;
-    // 只接受当前版快照；旧版本可能含混代数据，一律走正常加载。
-    if (!cached || cached.v !== SNAPSHOT_VERSION || !cached.report || !cached.filters) return;
-    applyingRestore = true;
-    // 连同筛选一起恢复：数据与筛选必然同口径（保存时已做过一致性检查）。
-    by.value = cached.filters.by;
-    agent.value = cached.filters.agent;
-    range.value = cached.filters.range ? [...cached.filters.range] : null;
-    drill.value = cached.filters.drill ? { ...cached.filters.drill } : null;
-    tz.value = cached.filters.tz;
-    // v11：日粒度参与方式一并恢复——「只看请求明细」是显式选择，不回退 auto。
-    rollupsMode.value = cached.rollups_mode === "detail_only" ? "detail_only" : "auto";
-    eventsKey.value = cached.filters;
-    report.value = cached.report;
-    events.value = cached.events;
-    // RC02：恢复的旧视图没有当前后端会话的 live 首页身份——旧游标只能
-    // 作 stale 展示，续页必须等本批次首页成功（随后 startRefreshBatch）。
-    liveFirstPage.value = null;
-    cachedAt.value = cached.saved_at;
-    stale.value = true;
-    await nextTick();
-    applyingRestore = false;
-    // 恢复后恰好启动一批后台刷新（单一入口；watcher 已跳过，不重复查询）
-    startRefreshBatch();
-  } catch {
-    applyingRestore = false;
-    // 视图缓存损坏：静默忽略，走正常加载
-  }
-}
-void loadViewCache();
-
-onUnmounted(() => {
-  disposed = true;
-});
-
-function onSummaryRowClick(key: string): void {
-  // 合计行不是真实维度值，不得生成字面“合计”过滤（计划 total_row_clears_drill）。
-  if (key === "合计") {
-    if (by.value === "agent") agent.value = "all";
-    drill.value = null;
-    return;
-  }
-  if (by.value === "agent") {
-    // Agent 行：切换顶部 agent 过滤，不进入明细下钻
-    agent.value = key === "claude-code" ? "claude" : key === "codex" ? "codex" : "all";
-    drill.value = null;
-    return;
-  }
-  const row = report.value?.groups.find((g) => g.key === key);
-  // MP04：筛选键始终是后端身份 key；展示名另存 label（模型维度 = 友好名），
-  // 避免把压缩后的身份键或名称反过来当筛选键。
-  drill.value = {
-    type: by.value as "day" | "model" | "project",
-    key,
-    label: row?.label ?? key,
-  };
-}
-
-function clearDrill(): void {
-  drill.value = null;
-}
-
-// C4/F03：手动刷新——以当前筛选重跑两条查询；也是用户操作，撤销启动
-// 缓存的恢复资格。共享批次入口保证两条查询属于同一 epoch。
-function manualRefresh(): void {
-  interactionEpoch++;
-  // AP06：手动刷新同时重查来源状态——目录修好后旧通知必须消失。
-  void loadSources();
-  startRefreshBatch();
-}
-
-// F03：主刷新协调入口——同一 epoch 传给汇总与明细两条查询。
-function startRefreshBatch(): void {
-  refreshEpoch++;
-  // RC02：新批次 = 新会话——旧首页身份与"会话已就绪"标记立即作废，
-  // 直到本批次的 begin 与首页都成功。
-  liveFirstPage.value = null;
-  sessionReady.value = false;
-  void refresh();
-  void loadEvents();
-}
-
-/// H08：切换"只看请求明细"——桶选择在建快照时固定，必须重建查询会话，
-/// 因此与其它筛选项走同一条刷新路径（不原地改已冻结的统计口径）。
-function setRollupsMode(mode: "auto" | "detail_only"): void {
-  if (rollupsMode.value === mode) return;
-  rollupsMode.value = mode;
-  startRefreshBatch();
-}
-
-/// RC02：统一错误恢复入口。
-/// - 会话级失败（begin 失败、query_expired、会话被淘汰/外会话游标）→
-///   建立**一个新批次**：一次 query_begin，汇总与首页共享同一新 query_id；
-/// - 普通当前会话请求失败 → 局部重试（只重发失败的那一侧）。
-/// 新批次仍可能失败，用户可再次点击重试（不自动无限重试）。
-function retryAfterFailure(scope: "summary" | "events"): void {
-  const err = scope === "summary" ? summaryError.value : eventsError.value;
-  if (!sessionReady.value || isQueryExpired(err)) {
-    startRefreshBatch();
-  } else if (scope === "summary") {
-    void refresh();
-  } else if (eventsFailureWasAppend.value && events.value?.rows.at(-1)?.cursor) {
-    // G-P3-4：追加页失败的重试仍走追加（首页身份与锚点均未失效），
-    // 不把用户已翻到的分页进度重置回首页。
-    void loadEvents(true);
-  } else {
-    void loadEvents();
-  }
-}
-
-/// RC02：恢复视图 / 新批次首页未成功时没有分页资格——按钮禁用并说明原因，
-/// 不允许"点击无反馈"。
-const moreBlockedHint = computed<string | undefined>(() =>
-  hasMore.value && !liveFirstPage.value ? "刷新完成后可继续加载" : undefined,
-);
-
-/// 复核修订：下钻标签**跟随当前汇总**——价格同步/模型展示名更新后，表格与
-/// 筛选提示必须同时显示新名称；汇总里找不到时回退磁盘快照里的 label，再退回
-/// 身份键。项目维度保留完整路径，避免同名不同路径产生歧义。
-function resolvedDrillLabel(d: EventDrill): string {
-  if (d.type === "project") return d.key;
-  return report.value?.groups.find((g) => g.key === d.key)?.label ?? d.label ?? d.key;
-}
-const drillLabel = (d: EventDrill): string => `${d.type}: ${resolvedDrillLabel(d)}`;
-
 // UX05：真实可绘制类别（排除"合计"行）——用 computed 缓存，避免在模板里
 // 每次渲染都 filter 生成新数组；新数组会改变 TrendChart 的 groups 身份，
 // 触发图表不必要的 dispose/init。
 const chartGroups = computed(() => realGroups(report.value?.groups ?? []));
 
-// F03：watcher 不再 immediate——启动批次由 setup 末尾显式开启（不属于
-// 用户操作，不递增 interactionEpoch）；恢复应用期间 watcher 跳过查询。
-// 主筛选变化走 startRefreshBatch（同一 epoch 两条查询），不另设明细
-// watcher——否则每次筛选变化发起两次明细查询。
-watch([by, agent, range, tz], () => {
-  if (applyingRestore) return;
-  interactionEpoch++;
-  startRefreshBatch();
+// U04：切页保留——汇总页由 KeepAlive 保留，隐藏期间 watcher 仍会运行，
+// 必须显式把可见性交给查询状态机（隐藏时只置"待刷新"标记）。
+// 选择 onActivated/onDeactivated 的理由见 useUsageQuery.setVisible 的注释。
+onActivated(() => setVisible(true));
+onDeactivated(() => setVisible(false));
+
+// U04 契约：这些绑定名与重构前保持一致（既有 `Dashboard.test.ts` 按
+// `state(w)["report"]` / `state(w)["stale"]` 之类的写法读取；U06 的
+// `pendingRefresh` / `autoRefreshHint` / `requestAutoRefresh` /
+// `notifyUsageUpdated` 同样经这里暴露，供模板 ref 程序化调用）。
+// 模板不直接使用其中一部分，这里显式聚合暴露一次：既避免被 noUnusedLocals
+// 判成死绑定，也给父组件（模板 ref）一个明确的程序化入口。
+defineExpose({
+  by,
+  agent,
+  preset,
+  drill,
+  rollupsMode,
+  batchRange,
+  report,
+  events,
+  loading,
+  eventsLoading,
+  moreLoading,
+  hasMore,
+  stale,
+  cachedAt,
+  summaryError,
+  eventsError,
+  sessionReady,
+  liveFirstPage,
+  currentQuery,
+  sourceStatus,
+  sourceError,
+  sourcesLoading,
+  problemSources,
+  statusPill,
+  collectionDiagnostics,
+  instantRangeHint,
+  notices,
+  noticeHeadline,
+  moreBlockedHint,
+  drillLabel,
+  refresh,
+  manualRefresh,
+  startRefreshBatch,
+  retryAfterFailure,
+  loadEvents,
+  loadMoreEvents,
+  setRollupsMode,
+  onSummaryRowClick,
+  onTotalRowClick,
+  clearDrill,
+  loadSources,
+  saveSnapshot,
+  visible,
+  pendingRefresh,
+  latestGeneration,
+  autoRefreshHint,
+  setVisible,
+  requestAutoRefresh,
+  notifyUsageUpdated,
 });
-// 下钻是用户操作：撤销启动缓存的恢复资格；明细作为当前主 epoch 的
-// 子查询重扫（drill 版本），汇总沿用同批次结果。
-watch(drill, () => {
-  if (applyingRestore) return;
-  interactionEpoch++;
-  void loadEvents();
-});
-// refreshKey 是程序触发（价格同步等）：新批次但不算用户操作。
-watch(
-  () => props.refreshKey,
-  () => {
-    if (applyingRestore) return;
-    // AP06：程序触发的刷新（价格同步等）同样重查来源状态。
-    void loadSources();
-    startRefreshBatch();
-  },
-);
-void loadSources();
-// 启动首批查询（等价旧 immediate watcher，且在 loadViewCache 捕获
-// interactionEpoch 之后执行，不撤销恢复资格）。
-startRefreshBatch();
 </script>
 
 <template>
-  <div>
+  <div
+    :data-summary-query="report?.query_id"
+    :data-events-query="events?.query_id"
+    :data-requests="report?.totals.requests"
+  >
     <!-- 页面标题行：先回答"覆盖什么时间"，右侧状态胶囊 + 刷新动作 -->
     <div class="page-head">
       <div class="head-left">
@@ -647,10 +201,50 @@ startRefreshBatch();
         <div v-if="drill" class="page-sub">已筛选 {{ drillLabel(drill) }}</div>
       </div>
       <div class="head-right">
-        <span class="ts-pill ts-status-pill" :class="statusPill.cls" role="status">{{
-          statusPill.text
-        }}</span>
-        <NButton size="small" secondary class="ts-focusable" @click="manualRefresh">刷新</NButton>
+        <!-- U06：正常态显示本次查询的更新时间，悬停提示写自动读取间隔 -->
+        <span
+          class="ts-pill ts-status-pill"
+          :class="statusPill.cls"
+          :title="statusPill.title"
+          role="status"
+          >{{ statusPill.text }}</span
+        >
+        <!-- U06 翻页保护：已加载更多时自动刷新不执行，改为提示；点击等同手动刷新 -->
+        <button
+          v-if="autoRefreshHint"
+          type="button"
+          class="ts-notice-action ts-focusable ts-refresh-hint"
+          @click="manualRefresh"
+        >
+          {{ autoRefreshHint }}
+        </button>
+        <NButton
+          size="small"
+          secondary
+          class="ts-focusable"
+          :loading="loading || eventsLoading"
+          :disabled="loading || eventsLoading"
+          @click="manualRefresh"
+        >
+          <template #icon>
+            <!-- 装饰性刷新图标：可访问名称由按钮文字「刷新」承载 -->
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M20 12a8 8 0 1 1-2.4-5.7" />
+              <path d="M20 4.2V9h-4.8" />
+            </svg>
+          </template>
+          刷新
+        </NButton>
       </div>
     </div>
     <!-- 固定两行：来源；日期 / 聚合维度。时区在设置页调整。 -->
@@ -659,13 +253,23 @@ startRefreshBatch();
         <SegmentedControl v-model="agent" :options="agentOptions" aria-label="数据来源" icon-only />
       </div>
       <div class="filter-line">
-        <DateRangeSelect v-model:value="range" :tz="tz" icon-only />
+        <DateRangeSelect v-model:preset="preset" :tz="tz" :range="batchRange" />
         <SegmentedControl v-model="by" :options="dimOptions" aria-label="聚合维度" />
       </div>
     </div>
-    <!-- AP06：来源检测失败——可见、可重试，且不改动已成功的汇总数据 -->
-    <div v-if="sourceError" class="ts-notice source-notice" role="alert">
+    <!-- U04：合并通知——页面上只显示一条（原来最多七种通知条并存），展示最高
+         严重级别与条数；展开后逐条列出，动作保留在各自条目上。
+         条目来源：来源检测失败（重试）、来源异常（去设置）、汇总/明细失败（重试）、
+         采集诊断（详情）、时刻范围提示、时区不匹配（只看请求明细）、
+         仅明细模式（恢复自动参与）。时区的取值见 useUsageQuery。 -->
+    <div
+      v-if="noticeHeadline"
+      class="ts-notice source-notice notice-merged"
+      :data-expanded="showSourceDetails ? 'true' : 'false'"
+      :role="noticeHeadline.severity === 'error' ? 'alert' : 'status'"
+    >
       <svg
+        v-if="noticeHeadline.severity === 'error'"
         class="ts-notice-icon is-error"
         viewBox="0 0 24 24"
         fill="none"
@@ -677,108 +281,8 @@ startRefreshBatch();
         <circle cx="12" cy="12" r="9" />
         <path d="m9 9 6 6M15 9l-6 6" />
       </svg>
-      <span class="ts-notice-content">
-        来源目录检测失败{{ sourceStatus.length > 0 ? "（下方来源状态可能已过期）" : "" }}：{{
-          sourceError
-        }}
-      </span>
-      <button
-        type="button"
-        class="ts-notice-action ts-focusable"
-        :disabled="sourcesLoading"
-        @click="loadSources"
-      >
-        {{ sourcesLoading ? "重试中…" : "重试" }}
-      </button>
-    </div>
-    <!-- 任务 3/7：异常与来源四态 = 内联通知条；多条来源异常合并为一条可展开 -->
-    <template v-if="problemSources.length === 1">
-      <div class="ts-notice source-notice">
-        <svg
-          class="ts-notice-icon"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.5"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M12 3.5 21 19.5H3z" />
-          <path d="M12 10v4" />
-          <path d="M12 17h.01" />
-        </svg>
-        <span class="ts-notice-content">{{ sourceNoticeText(problemSources[0]) }}</span>
-        <button
-          v-if="problemSources[0].state !== 'disabled'"
-          type="button"
-          class="ts-notice-action ts-focusable"
-          @click="emit('go-settings')"
-        >
-          去设置 ›
-        </button>
-      </div>
-    </template>
-    <template v-else-if="problemSources.length > 1">
-      <div class="ts-notice source-notice">
-        <svg
-          class="ts-notice-icon"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.5"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M12 3.5 21 19.5H3z" />
-          <path d="M12 10v4" />
-          <path d="M12 17h.01" />
-        </svg>
-        <span class="ts-notice-content">
-          {{ problemSources.length }} 个来源异常，统计可能不完整。
-        </span>
-        <button
-          type="button"
-          class="ts-notice-action ts-focusable"
-          :aria-expanded="showSourceDetails"
-          @click="showSourceDetails = !showSourceDetails"
-        >
-          详情
-        </button>
-      </div>
-      <div v-if="showSourceDetails" class="source-details">
-        <div v-for="s in problemSources" :key="s.agent" class="source-detail-line">
-          {{ sourceNoticeText(s) }}
-        </div>
-      </div>
-    </template>
-    <!-- 失败可见并可重试（计划 A2）：保留已有数据展示，不整体灰罩 -->
-    <div v-if="summaryError" class="ts-notice source-notice">
       <svg
-        class="ts-notice-icon is-error"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.5"
-        stroke-linecap="round"
-        aria-hidden="true"
-      >
-        <circle cx="12" cy="12" r="9" />
-        <path d="m9 9 6 6M15 9l-6 6" />
-      </svg>
-      <span class="ts-notice-content">汇总加载失败：{{ summaryError }}</span>
-      <button
-        type="button"
-        class="ts-notice-action ts-focusable"
-        @click="retryAfterFailure('summary')"
-      >
-        重试
-      </button>
-    </div>
-    <!-- R08：采集诊断（空结果/部分结果均可见，不依赖表格挂载） -->
-    <div v-if="!collectionDiagnostics.clean" class="ts-notice source-notice">
-      <svg
+        v-else
         class="ts-notice-icon"
         viewBox="0 0 24 24"
         fill="none"
@@ -792,82 +296,41 @@ startRefreshBatch();
         <path d="M12 10v4" />
         <path d="M12 17h.01" />
       </svg>
-      <span class="ts-notice-content">
-        本轮采集存在部分问题（{{ collectionDiagnostics.summaryText }}）；已采集数据仍有效。
-      </span>
+      <span class="ts-notice-content">{{ noticeHeadline.text }}</span>
       <button
-        v-if="collectionDiagnostics.warns.length > 0"
+        v-if="noticeHeadline.expandable"
         type="button"
         class="ts-notice-action ts-focusable"
-        :aria-expanded="showCollectionDetails"
-        @click="showCollectionDetails = !showCollectionDetails"
+        :aria-expanded="showNoticeDetails"
+        @click="showNoticeDetails = !showNoticeDetails"
       >
-        详情
+        {{ showNoticeDetails ? "收起" : "详情" }}
+      </button>
+      <button
+        v-for="a in noticeHeadline.actions"
+        :key="a.label"
+        type="button"
+        class="ts-notice-action ts-focusable"
+        :disabled="a.disabled"
+        @click="a.run()"
+      >
+        {{ a.label }}
       </button>
     </div>
-    <div v-if="showCollectionDetails" class="source-details">
-      <div v-for="(w, i) in collectionDiagnostics.warns" :key="i" class="source-detail-line">
-        {{ w }}
+    <div v-if="noticeDetailRows.length > 0" class="source-details">
+      <div v-for="row in noticeDetailRows" :key="row.key" class="source-detail-line">
+        <span class="source-detail-text">{{ row.text }}</span>
+        <button
+          v-for="a in row.actions"
+          :key="a.label"
+          type="button"
+          class="ts-notice-action ts-focusable"
+          :disabled="a.disabled"
+          @click="a.run()"
+        >
+          {{ a.label }}
+        </button>
       </div>
-    </div>
-    <!-- H08：日粒度历史的参与方式——计划 §5.2 给的两条恢复路径在这里可操作：
-         切回来源时区（筛选栏），或只看请求明细（下面的按钮）。 -->
-    <div
-      v-if="rollupsMode === 'auto' && collectionDiagnostics.timezoneMismatch"
-      class="ts-notice source-notice"
-    >
-      <svg
-        class="ts-notice-icon"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.5"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <circle cx="12" cy="12" r="9" />
-        <path d="M12 8v5" />
-        <path d="M12 16h.01" />
-      </svg>
-      <span class="ts-notice-content">{{ collectionDiagnostics.timezoneMismatch }}</span>
-      <button
-        type="button"
-        class="ts-notice-action ts-focusable"
-        @click="setRollupsMode('detail_only')"
-      >
-        只看请求明细
-      </button>
-    </div>
-    <div v-else-if="rollupsMode === 'detail_only'" class="ts-notice source-notice">
-      <span class="ts-notice-content"
-        >当前只统计请求明细（不含只有日粒度的历史）；按日视图不受来源时区影响。</span
-      >
-      <button type="button" class="ts-notice-action ts-focusable" @click="setRollupsMode('auto')">
-        恢复自动参与
-      </button>
-    </div>
-    <div v-if="eventsError" class="ts-notice source-notice">
-      <svg
-        class="ts-notice-icon is-error"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.5"
-        stroke-linecap="round"
-        aria-hidden="true"
-      >
-        <circle cx="12" cy="12" r="9" />
-        <path d="m9 9 6 6M15 9l-6 6" />
-      </svg>
-      <span class="ts-notice-content">明细加载失败：{{ eventsError }}</span>
-      <button
-        type="button"
-        class="ts-notice-action ts-focusable"
-        @click="retryAfterFailure('events')"
-      >
-        重试
-      </button>
     </div>
     <!-- 有数据时不再全屏灰罩：数据原地更新，标题行胶囊提示刷新中 -->
     <NSpin :show="loading && !report">
@@ -887,7 +350,11 @@ startRefreshBatch();
           <div v-else class="chart-empty" role="status">
             <span class="chart-empty-text">暂无可绘制的类别（仅有合计行）。</span>
           </div>
-          <UsageTable :report="report" @row-click="onSummaryRowClick" />
+          <UsageTable
+            :report="report"
+            @row-click="onSummaryRowClick"
+            @total-row="onTotalRowClick"
+          />
           <EventTable
             v-if="events"
             :list="events"
@@ -982,6 +449,11 @@ startRefreshBatch();
   margin-bottom: var(--ts-space-3);
 }
 
+/* 合并通知：一条通知条 + 展开后的逐条明细 */
+.notice-merged {
+  flex-wrap: wrap;
+}
+
 /* 合并通知展开后的逐条明细 */
 .source-details {
   margin: calc(-1 * var(--ts-space-2)) 0 var(--ts-space-3);
@@ -992,6 +464,10 @@ startRefreshBatch();
 }
 
 .source-detail-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--ts-space-2);
   font-size: 12px;
   line-height: 1.8;
   color: var(--ts-text-secondary);
@@ -1011,6 +487,17 @@ startRefreshBatch();
   font: inherit;
   font-size: 13px;
   padding: 0;
+}
+
+/* U06：翻页保护下的自动刷新提示按钮（「有新数据 · 刷新」/「时间范围已更新 · 刷新」）
+   与通知条动作同族：强调色文字按钮，材质由 .ts-notice-action 承载。 */
+.ts-refresh-hint {
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  padding: 0;
+  white-space: nowrap;
 }
 
 .filter-row {

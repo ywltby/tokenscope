@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
-  "kind": "patch",
-  "summary": "修复新建发布草稿的身份读取和断点续传"
+  "kind": "minor",
+  "summary": "UI 调整：时间筛选、自动读取、汇总页状态与设置页"
 }

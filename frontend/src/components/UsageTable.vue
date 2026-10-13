@@ -9,7 +9,12 @@ import { buildSourceLines } from "../lib/statsView";
 import ScrollList from "./ScrollList.vue";
 
 const props = defineProps<{ report: SummaryReport }>();
-const emit = defineEmits<{ (e: "row-click", key: string): void }>();
+/// U04：合计行不是维度值——用**独立事件**通知父级，父级不再靠字面量「合计」
+/// 判断（真实维度行走 `row-click`，合计行走 `total-row`）。
+const emit = defineEmits<{ (e: "row-click", key: string): void; (e: "total-row"): void }>();
+
+/// 后端契约：groups 含合计行，key 为字面「合计」（行样式、`›` 指示与事件分流用）。
+const TOTAL_ROW_KEY = "合计";
 
 /// Naive UI 表格行类型是 Record<string, unknown>，统一经 unknown 转 Group。
 const asGroup = (row: object): Group => row as unknown as Group;
@@ -29,7 +34,7 @@ const columns = computed<DataTableColumn[]>(() => {
     // 任务 5：可点击行右侧 › 指示（合计行不可点，不带）。
     render: (row) => {
       const g = asGroup(row);
-      const isTotal = g.key === "合计";
+      const isTotal = g.key === TOTAL_ROW_KEY;
       return h("span", { class: "dim-cell" }, [
         g.label ?? g.key,
         ...(isTotal ? [] : [h("span", { class: "drill-arrow", "aria-hidden": "true" }, " ›")]),
@@ -105,7 +110,13 @@ const columns = computed<DataTableColumn[]>(() => {
 
 const rows = computed<Group[]>(() => props.report.groups);
 const rowKey = (row: object): string => asGroup(row).key;
-const rowClass = (row: object): string => (asGroup(row).key === "合计" ? "total-row" : "");
+const rowClass = (row: object): string => (asGroup(row).key === TOTAL_ROW_KEY ? "total-row" : "");
+/// U04：行激活统一入口——合计行发 `total-row`（不是维度值，不可下钻），
+/// 其余行走 `row-click`。
+function activate(g: Group): void {
+  if (g.key === TOTAL_ROW_KEY) emit("total-row");
+  else emit("row-click", g.key);
+}
 // 设计系统 Task 5：行可聚焦，Enter/Space 与点击等价下钻（键盘路径）；
 // ts-focusable 提供 2px 焦点环。
 const rowProps = (row: object) => ({
@@ -116,11 +127,11 @@ const rowProps = (row: object) => ({
   // 复核修订：可访问名称用展示名（模型维度是友好名），身份键只用于点击参数——
   // 屏幕阅读器不应读出 `claudeopus55` 这类压缩身份键。
   "aria-label": `查看 ${asGroup(row).label ?? asGroup(row).key} 的请求明细`,
-  onclick: () => emit("row-click", asGroup(row).key),
+  onclick: () => activate(asGroup(row)),
   onkeydown: (e: KeyboardEvent) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      emit("row-click", asGroup(row).key);
+      activate(asGroup(row));
     }
   },
 });

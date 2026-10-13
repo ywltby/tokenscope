@@ -11,11 +11,15 @@
 // - 每个契约记录断言列表、输入 fixture、提交 hash、浏览器版本与截图路径；
 // - 未处理拒绝、未知 IPC command、外联请求都算硬失败。
 import { join } from "node:path";
+import { uiRefreshLifecycle, uiRefreshClock } from "./ui-refresh-contract.mjs";
+import { uiDateKeyboardMatrix } from "./ui-date-keyboard-contract.mjs";
 
 import { PRIVACY_PROTECTED_COMMANDS } from "../fixtures/ui-contracts.mjs";
 
 /** 计划 §3 RC09 表格的必需契约清单——一个都不能少。 */
 export const REQUIRED_CONTRACTS = [
+  "ui_refresh_lifecycle",
+  "ui_refresh_clock",
   "large_pricing_does_not_block_settings_navigation",
   "token_colors_customize_persist_and_reset",
   "empty_unknown_partial_have_correct_content",
@@ -39,6 +43,10 @@ export const REQUIRED_CONTRACTS = [
   // P06：首次启动隐私同意——未同意时零业务副作用、拒绝退出不残留业务进程
   "privacy_no_business_effects_before_acceptance",
   "privacy_denied_ipc_has_no_filesystem_or_network_effect",
+  // U01/U02/U06（UI 调整计划）：日期预设按钮与内联时刻面板、状态胶囊
+  // 「更新于」与自动读取提示、合并通知唯一性、设置页读取间隔六档。
+  "ui_adjustment_shapes",
+  "ui_date_keyboard_matrix",
 ];
 
 const VIEWPORTS = {
@@ -74,6 +82,26 @@ async function gotoPage(page, label) {
   await btn.waitFor({ state: "visible", timeout: 5000 });
   await btn.click({ timeout: 10000 });
   await page.waitForTimeout(400);
+}
+
+/**
+ * U05：切到设置页的某个分区。设置页一次只显示一个分区（未选中的用 v-show
+ * 隐藏——隐藏时 `innerText` 与可见性断言都拿不到内容），因此任何针对具体
+ * 控件的操作都要先切到它所在的分区。宽窗口是左侧导航，窄窗口是顶部分段控件。
+ */
+async function gotoSettingsSection(page, label) {
+  const candidates = [
+    page.locator(".settings-nav-item").filter({ hasText: label }).first(),
+    page.locator(".settings-nav .ts-segmented button").filter({ hasText: label }).first(),
+  ];
+  for (const btn of candidates) {
+    if ((await btn.count()) > 0) {
+      await realClick(page, btn);
+      await page.waitForTimeout(300);
+      return true;
+    }
+  }
+  return false;
 }
 
 /** 量测第一个**不透明**绘制面的亮度；没有不透明面（样式未加载）时 available=false。 */
@@ -182,6 +210,15 @@ function noticeWith(session, text) {
   return session.page.locator(".ts-notice").filter({ hasText: text }).first();
 }
 
+/**
+ * U01：最近一次 `query_begin` 的 invoke 参数——前端只发预设（days /
+ * rollingHours / startAt+endAt+untilNow），断言"没有把近 N 天存成固定日期"。
+ */
+function lastQueryBegin(session) {
+  const calls = session.ipcCalls.filter((x) => x.cmd === "query_begin");
+  return calls.length > 0 ? calls[calls.length - 1].args : null;
+}
+
 /** 设置页某个来源行（按可见来源名过滤，例如 "Claude Code" / "Codex"）。 */
 function sourceBlockOf(page, label) {
   return page
@@ -222,6 +259,9 @@ async function waitTipState(session, selector, shown, timeoutMs = 2000) {
 // ── 契约实现 ────────────────────────────────────────────────────────
 
 const IMPL = {
+  ui_date_keyboard_matrix: uiDateKeyboardMatrix,
+  ui_refresh_lifecycle: uiRefreshLifecycle,
+  ui_refresh_clock: uiRefreshClock,
   async large_pricing_does_not_block_settings_navigation(ctx) {
     const name = "large_pricing_does_not_block_settings_navigation";
     const session = await ctx.open({ fixture: "large-pricing", viewport: VIEWPORTS.desktop });
@@ -230,6 +270,8 @@ const IMPL = {
       const start = Date.now();
       await gotoPage(session.page, "设置");
       const elapsed = Date.now() - start;
+      // U05：价格表只在首次进入「价格」分区时挂载，先切分区再数行。
+      await gotoSettingsSection(session.page, "价格");
       const rows = await session.page.locator('.ts-auto-table-pricing tbody tr').count();
       ctx.record(name, "8466 条价格首批只渲染 200 行", rows === 200, `rendered=${rows}, navigation=${elapsed}ms`);
       ctx.record(name, "进入设置在 3 秒内完成", elapsed < 3000, `${elapsed}ms`);
@@ -256,6 +298,8 @@ const IMPL = {
       await openDashboard(session);
       const page = session.page;
       await gotoPage(page, "设置");
+      // U05：Token 显示颜色在「外观」分区。
+      await gotoSettingsSection(page, "外观");
       const picker = page.getByLabel("缓存命中显示颜色", { exact: true });
       ctx.record(name, "四类颜色都有独立选择器", await page.locator('input[type="color"]').count() === 4, "输入/输出/缓存写/缓存命中");
       await picker.fill("#b42266");
@@ -274,6 +318,7 @@ const IMPL = {
       const restored = await readColors();
       ctx.record(name, "重载后仍保留自定义颜色", restored.legend === changed.legend && restored.summary === changed.summary, JSON.stringify(restored));
       await gotoPage(page, "设置");
+      await gotoSettingsSection(page, "外观");
       await page.getByRole('button', { name: '恢复默认颜色', exact: true }).click();
       await gotoPage(page, "汇总");
       const reset = await readColors();
@@ -362,13 +407,8 @@ const IMPL = {
     try {
       await openSettings(session);
       const page = session.page;
-      const text = await page.locator("#app").innerText();
-      ctx.record(
-        "settings_failure_retry_restores_all_controls",
-        "失败态：设置错误条可见并带原因",
-        text.includes("设置读取失败") && text.includes("设置文件损坏（合成）"),
-        text.match(/设置读取失败[^\n]{0,60}/)?.[0] ?? "未找到错误条",
-      );
+      // U05：关闭动作在「通用」分区；设置错误条与来源控件在「数据源」分区。
+      const generalText = await page.locator("#app").innerText();
       const closeControl = page.locator('[aria-label="关闭窗口时"]').first();
       const closeDisabled = await closeControl.evaluate((el) => {
         const node = el.closest(".n-select") ?? el;
@@ -377,8 +417,22 @@ const IMPL = {
       ctx.record(
         "settings_failure_retry_restores_all_controls",
         "失败态：关闭动作控件不可操作（未知不得变成可保存默认值）",
-        closeDisabled === true || text.includes("关闭动作未知"),
-        `select disabled=${closeDisabled} 说明含"未知"=${text.includes("关闭动作未知")}`,
+        closeDisabled === true || generalText.includes("关闭动作未知"),
+        `select disabled=${closeDisabled} 说明含"未知"=${generalText.includes("关闭动作未知")}`,
+      );
+      const sourceNavOk = await gotoSettingsSection(page, "数据源");
+      ctx.record(
+        "settings_failure_retry_restores_all_controls",
+        "失败态：分区导航可用（切到数据源分区）",
+        sourceNavOk === true,
+        "左栏 / 顶部分段控件切分区",
+      );
+      const text = await page.locator("#app").innerText();
+      ctx.record(
+        "settings_failure_retry_restores_all_controls",
+        "失败态：设置错误条可见并带原因",
+        text.includes("设置读取失败") && text.includes("设置文件损坏（合成）"),
+        text.match(/设置读取失败[^\n]{0,60}/)?.[0] ?? "未找到错误条",
       );
       const saveButtons = page.locator("button", { hasText: "保存" });
       const firstDisabled = await saveButtons
@@ -402,31 +456,37 @@ const IMPL = {
       await retry.click();
       await page.waitForTimeout(600);
 
-      const after = await page.locator("#app").innerText();
       const dirClaude = page.locator('[aria-label="Claude Code 日志目录"]').first();
       const dirCodex = page.locator('[aria-label="Codex 日志目录"]').first();
       const claudeValue = await dirClaude.inputValue();
       const codexValue = await dirCodex.inputValue();
-      const autoSync = page.locator('[role="switch"][aria-label="自动同步价格"]').first();
-      const autoSyncChecked = await autoSync.getAttribute("aria-checked");
       ctx.record(
         "settings_failure_retry_restores_all_controls",
         "重试后：来源目录恢复为成功读取值（断言真实输入值）",
         claudeValue === "C:/restored/claude" && codexValue === "C:/restored/codex",
         `claude=${claudeValue} codex=${codexValue}`,
       );
+      // U05：自动同步开关在「价格」分区。
+      await gotoSettingsSection(page, "价格");
+      const autoSync = page.locator('[role="switch"][aria-label="自动同步价格"]').first();
+      const autoSyncChecked = await autoSync.getAttribute("aria-checked");
       ctx.record(
         "settings_failure_retry_restores_all_controls",
         "重试后：自动同步开关恢复（aria-checked=true）",
         autoSyncChecked === "true",
         `aria-checked=${autoSyncChecked}`,
       );
+      // U05：关闭动作在「通用」分区。
+      await gotoSettingsSection(page, "通用");
+      const afterGeneral = await page.locator("#app").innerText();
       ctx.record(
         "settings_failure_retry_restores_all_controls",
         "重试后：关闭动作恢复为已保存值且错误清除",
-        after.includes("直接退出") && !after.includes("设置读取失败"),
-        `含"直接退出"=${after.includes("直接退出")} 错误残留=${after.includes("设置读取失败")}`,
+        afterGeneral.includes("直接退出") && !afterGeneral.includes("设置读取失败"),
+        `含"直接退出"=${afterGeneral.includes("直接退出")} 错误残留=${afterGeneral.includes("设置读取失败")}`,
       );
+      // U05：来源保存按钮在「数据源」分区。
+      await gotoSettingsSection(page, "数据源");
       const enabledAfter = await saveButtons
         .first()
         .evaluate((el) => el.disabled === false && !el.className.includes("disabled"));
@@ -451,6 +511,8 @@ const IMPL = {
     const cases = [
       {
         key: "source",
+        // U05：来源目录在「数据源」分区。
+        section: "数据源",
         action: async (session) => {
           const input = session.page.locator('[aria-label="Claude Code 日志目录"]').first();
           await input.fill("C:/saved-by-user");
@@ -469,6 +531,8 @@ const IMPL = {
         // IPC；晚到的旧读取也不得把它伪装成已知值（浏览器侧真实可操作路径
         // 只有"错误条重试挂起"这一条，页面级 loading 遮罩期间点不到任何东西）。
         key: "close-action",
+        // U05：关闭动作在「通用」分区。
+        section: "通用",
         action: async (session) => {
           const select = session.page.locator('[aria-label="关闭窗口时"]').first();
           // naive 的禁用标记在内部 .n-base-selection（root 只有 .n-select），
@@ -507,6 +571,8 @@ const IMPL = {
       {
         // 自动同步：同样必须保持未知且不可操作，晚到旧读取不改写状态。
         key: "auto-sync",
+        // U05：自动同步开关在「价格」分区。
+        section: "价格",
         action: async (session) => {
           const sw = session.page.locator('[role="switch"][aria-label="自动同步价格"]').first();
           const disabled = await sw.evaluate((el) =>
@@ -552,6 +618,8 @@ const IMPL = {
       try {
         await openSettings(session);
         const page = session.page;
+        // U05：设置错误条在「数据源」分区（隐藏分区的文本与控件都不可用）。
+        await gotoSettingsSection(page, "数据源");
         // 首读失败 → 点击错误条"重试"发起第二次读取（挂起中）
         const retry = retryButtonIn(session, "设置读取失败");
         ctx.record(
@@ -569,7 +637,9 @@ const IMPL = {
           pending.length === 1 && pending[0].startsWith("settings_get#"),
           `挂起键=${pending.join(",")}`,
         );
-        // 挂起期间执行用户动作（来源=编辑并保存；关闭动作/自动同步=尝试写入）
+        // 挂起期间执行用户动作（来源=编辑并保存；关闭动作/自动同步=尝试写入）；
+        // U05：各 case 的控件在不同分区，先切过去（隐藏分区的控件不可操作）。
+        await gotoSettingsSection(page, c.section);
         const acted = await c.action(session);
         const saved = session.ipcCalls.filter(
           (x) => x.cmd === "source_config_set" || x.cmd.startsWith("settings_set_"),
@@ -592,6 +662,7 @@ const IMPL = {
         // 释放旧读取（内容是编辑前的旧值）
         session.fixture.settleDeferred(pending[0], session.fixture.staleSettings());
         await page.waitForTimeout(500);
+        await gotoSettingsSection(page, c.section);
         const v = await c.verify(session);
         ctx.record(
           "saved_settings_survive_delayed_read",
@@ -871,6 +942,8 @@ const IMPL = {
       const s2 = await ctx.open({ fixture: "normal", viewport: VIEWPORTS.desktop, theme: "dark" });
       try {
         await openSettings(s2);
+        // U05：单价说明与候选规则说明都在「价格」分区（隐藏元素不可聚焦）。
+        await gotoSettingsSection(s2.page, "价格");
         const labels = await s2.page
           .locator(".help-trigger")
           .evaluateAll((els) => els.map((e) => e.getAttribute("aria-label") ?? ""));
@@ -1496,6 +1569,8 @@ const IMPL = {
     try {
       await openSettings(session);
       const page = session.page;
+      // U05：来源行与行内错误都在「数据源」分区。
+      await gotoSettingsSection(page, "数据源");
       const claude = sourceBlockOf(page, "Claude Code");
       const codex = sourceBlockOf(page, "Codex");
       const input = page.locator('[aria-label="Claude Code 日志目录"]').first();
@@ -1672,6 +1747,8 @@ const IMPL = {
     try {
       await openSettings(session);
       const page = session.page;
+      // U05：设置错误条与来源控件都在「数据源」分区。
+      await gotoSettingsSection(page, "数据源");
       const firstText = await page.locator("#app").innerText();
       ctx.record(
         "late_failed_settings_read_does_not_downgrade_saved",
@@ -2057,6 +2134,168 @@ const IMPL = {
       await session.close();
     }
   },
+
+  /**
+   * U01/U02/U06（UI 调整计划 2026-10-13）：日期预设按钮与内联时刻面板、
+   * 状态胶囊"更新于"与自动读取提示、合并通知的唯一性、设置页「数据源」分区
+   * 的自动读取间隔——都在真实浏览器里量测，并留下截图证据。
+   */
+  async ui_adjustment_shapes(ctx) {
+    const session = await ctx.open({
+      fixture: "normal",
+      viewport: VIEWPORTS.desktop,
+      theme: "light",
+    });
+    try {
+      await openDashboard(session);
+      const page = session.page;
+      const trigger = page.locator(".range-trigger").first();
+
+      const initialClass = (await trigger.getAttribute("class")) ?? "";
+      const initialSvg = await trigger.locator("svg").count();
+      ctx.record(
+        "ui_adjustment_shapes",
+        "全部时间：只显示日历图标、不着色（无 has-preset）",
+        initialSvg === 1 && !initialClass.includes("has-preset"),
+        `svg=${initialSvg} class=${initialClass}`,
+      );
+      await ctx.shot("ui_adjustment_shapes", session, "date-trigger-icon");
+
+      // 7d：一次点击即生效并关闭弹层；下发 days=7（不是固定日期区间）。
+      await realClick(page, trigger);
+      await page.waitForTimeout(200);
+      await realClick(page, page.getByRole("button", { name: "7d", exact: true }));
+      await page.waitForTimeout(400);
+      const label7 = (await trigger.innerText()).trim();
+      const class7 = (await trigger.getAttribute("class")) ?? "";
+      const begin7 = lastQueryBegin(session);
+      ctx.record(
+        "ui_adjustment_shapes",
+        "7d：按钮显示语义标签并着色，query_begin 收到 days=7",
+        label7 === "7d" && class7.includes("has-preset") && begin7?.days === 7,
+        `label=${label7} class=${class7} days=${begin7?.days}`,
+      );
+      await ctx.shot("ui_adjustment_shapes", session, "date-trigger-7d");
+
+      // 24h：滚动窗口（真正的过去 24 小时）。
+      await realClick(page, trigger);
+      await page.waitForTimeout(200);
+      await realClick(page, page.getByRole("button", { name: "24h", exact: true }));
+      await page.waitForTimeout(400);
+      const label24 = (await trigger.innerText()).trim();
+      const begin24 = lastQueryBegin(session);
+      ctx.record(
+        "ui_adjustment_shapes",
+        "24h：按钮显示 24h，query_begin 收到 rollingHours=24",
+        label24 === "24h" && begin24?.rollingHours === 24,
+        `label=${label24} rollingHours=${begin24?.rollingHours}`,
+      );
+      await ctx.shot("ui_adjustment_shapes", session, "date-trigger-24h");
+
+      // 自定义：内联的日期+时刻面板（不再套第二层触发式选择器）。
+      await realClick(page, trigger);
+      await page.waitForTimeout(500);
+      const inlinePanel = await page.locator(".n-date-panel--datetimerange").count();
+      const innerGlass = await page.evaluate(() => {
+        const panel = document.querySelector(".range-panel");
+        if (!panel) return "无 .range-panel";
+        const cs = getComputedStyle(panel);
+        return `${cs.backgroundColor}|${cs.backdropFilter}`;
+      });
+      ctx.record(
+        "ui_adjustment_shapes",
+        "自定义区是内联的日期+时刻面板",
+        inlinePanel > 0,
+        `内联面板数=${inlinePanel}`,
+      );
+      ctx.record(
+        "ui_adjustment_shapes",
+        "浮层材质只有一层（内容面板透明、无二次模糊）",
+        innerGlass.startsWith("rgba(0, 0, 0, 0)") && innerGlass.endsWith("|none"),
+        `内层背景|模糊=${innerGlass}`,
+      );
+      await ctx.shot("ui_adjustment_shapes", session, "date-panel-inline");
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(300);
+
+      // 状态胶囊：更新于 HH:MM:SS + 自动读取间隔提示。
+      const pill = page.locator(".ts-status-pill").first();
+      const pillText = (await pill.innerText()).trim();
+      const pillTitle = (await pill.getAttribute("title")) ?? "";
+      ctx.record(
+        "ui_adjustment_shapes",
+        "状态胶囊显示「更新于 HH:MM:SS」且提示自动读取间隔",
+        /^更新于 \d{2}:\d{2}:\d{2}$/.test(pillText) && /自动读取/.test(pillTitle),
+        `胶囊="${pillText}" title="${pillTitle}"`,
+      );
+      await ctx.shot("ui_adjustment_shapes", session, "status-pill");
+
+      // 设置页：「数据源」分区的自动读取间隔六档（选项在下拉弹层里，必须打开）。
+      await gotoPage(page, "设置");
+      await page.waitForTimeout(500);
+      const okSection = await gotoSettingsSection(page, "数据源");
+      const intervalSelect = page.locator('[aria-label="自动读取间隔"]').first();
+      const hasSelect = (await intervalSelect.count()) > 0;
+      const currentInterval = hasSelect ? (await intervalSelect.innerText()).trim() : "";
+      await realClick(page, intervalSelect);
+      await page.waitForTimeout(500);
+      // naive 的 NSelect 选项在 body 的弹层里（虚拟列表，逐项 class 不稳定）：
+      // 直接读弹层文本按行切开。
+      const menuText = await page
+        .locator(".n-base-select-menu")
+        .first()
+        .innerText()
+        .catch(() => "");
+      const optionTexts = menuText
+        .split("\n")
+        .map((t) => t.trim())
+        .filter(Boolean);
+      const intervals = ["5 秒", "10 秒", "30 秒", "1 分钟", "5 分钟", "10 分钟"];
+      const missingIntervals = intervals.filter((t) => !optionTexts.includes(t));
+      ctx.record(
+        "ui_adjustment_shapes",
+        "设置页「数据源」分区含自动读取间隔下拉（六档齐全）",
+        okSection && hasSelect && missingIntervals.length === 0 && intervals.includes(currentInterval),
+        `切分区=${okSection} 下拉=${hasSelect} 当前值=${currentInterval} 缺失档位=${
+          missingIntervals.join("、") || "无"
+        }`,
+      );
+      await ctx.shot("ui_adjustment_shapes", session, "settings-interval-select");
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(200);
+      await ctx.shot("ui_adjustment_shapes", session, "settings-sources");
+      await gotoSettingsSection(page, "用量数据");
+      await ctx.shot("ui_adjustment_shapes", session, "settings-usage");
+      await gotoSettingsSection(page, "价格");
+      await ctx.shot("ui_adjustment_shapes", session, "settings-pricing");
+      await ctx.finishSession(session);
+    } finally {
+      await session.close();
+    }
+
+    // 合并通知：来源目录异常只渲染一条通知（折叠态），不铺开逐条。
+    const noticeSession = await ctx.open({
+      fixture: "source-status-missing-then-ready",
+      viewport: VIEWPORTS.desktop,
+      theme: "light",
+    });
+    try {
+      await openDashboard(noticeSession);
+      const page = noticeSession.page;
+      const noticeCount = await page.locator(".ts-notice").count();
+      const text = await page.locator("#app").innerText();
+      ctx.record(
+        "ui_adjustment_shapes",
+        "通知合并为一条：来源目录异常只渲染单条通知条",
+        noticeCount === 1 && /没有发现会话日志|数据目录不存在|个来源异常/.test(text),
+        `通知条数=${noticeCount}`,
+      );
+      await ctx.shot("ui_adjustment_shapes", noticeSession, "merged-notice");
+      await ctx.finishSession(noticeSession);
+    } finally {
+      await noticeSession.close();
+    }
+  },
 };
 
 /**
@@ -2086,8 +2325,8 @@ export async function runContracts({ open, output, meta, only = REQUIRED_CONTRAC
         await session.page.screenshot({ path: join(output, file) });
         const last = results[results.length - 1];
         if (last) last.screenshot = file;
-      } catch {
-        /* 截图失败不改变断言结论 */
+      } catch (error) {
+        ctx.record(contract, `截图保存 ${file}`, false, String(error));
       }
     },
     finishSession(session) {

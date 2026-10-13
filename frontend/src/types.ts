@@ -34,7 +34,26 @@ export interface RollupCoverage {
   unresolved_buckets: number;
   unresolved_covered_tokens: TokenCounts;
   timezone_mismatch?: string | null;
+  /** U01：时刻范围（24h/自定义到分钟）不取日汇总——所涉自然日确有日汇总时为 true。 */
+  rollups_excluded_for_instant_range?: boolean;
 }
+
+/**
+ * U01：后端在查询入口冻结的时间范围（与 Rust 侧逐字段一致）。
+ * `granularity: "day"` = 自然日模式；`"instant"` = 时刻模式（含 24h 与自定义
+ * 到分钟的区间，`end` 为用户选中的最后一分钟，含）；全部时间为 `null`。
+ */
+export type RangeView =
+  | { granularity: "day"; from: string | null; to: string | null }
+  | {
+      granularity: "instant";
+      /** 统计时区本地时刻 "YYYY-MM-DDTHH:MM" */
+      start_local: string;
+      end_local: string;
+      /** RFC3339 UTC（诊断用） */
+      start: string;
+      end: string;
+    };
 
 export interface SummaryReport {
   /** SF04：所属查询会话 ID（同批次的明细分页必须携带同一 query_id）。 */
@@ -50,6 +69,8 @@ export interface SummaryReport {
   warnings: string[];
   /** H06：日汇总桶覆盖诊断（缺省 = 本次查询没有日粒度历史）。 */
   rollup_coverage?: RollupCoverage;
+  /** U01：本次查询冻结的时间范围（全部时间为 null/缺省）。 */
+  range?: RangeView | null;
 }
 
 /** H05：CCS 导入的来源库默认路径与存在性（只读路径解析，不打开库）。 */

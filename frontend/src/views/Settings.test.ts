@@ -46,6 +46,11 @@ vi.mock("naive-ui", async (importOriginal) => {
 
 import Settings from "./Settings.vue";
 import { createSettingsPreload, SETTINGS_PRELOAD } from "../lib/settingsPreload";
+import {
+  COLLECT_INTERVAL_OPTIONS,
+  resetCollectIntervalForTests,
+  useCollectInterval,
+} from "../composables/collectInterval";
 // UX08：样式契约断言需要 SFC 源文本（项目无 @types/node，用 Vite ?raw）
 import settingsSource from "./Settings.vue?raw";
 
@@ -151,9 +156,76 @@ function mockBase(): void {
   });
 }
 
+// ── U05：设置页分区布局的可控断点 ─────────────────────────────
+// 设置页在窗口 ≤ 1100px 时把左侧分区导航换成顶部分段控件。happy-dom 的
+// matchMedia 行为不稳定（也可能缺失），因此测试统一安装可控实现：默认宽
+// 窗口，需要时切换并派发 change，形态由 data-nav-mode 可断言。
+let layoutNarrow = false;
+type MediaListener = (e: { matches: boolean }) => void;
+const layoutListeners = new Set<MediaListener>();
+
+function installLayoutMedia(): void {
+  layoutNarrow = false;
+  layoutListeners.clear();
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: (query: string) => ({
+      get matches() {
+        return layoutNarrow;
+      },
+      media: query,
+      onchange: null,
+      addEventListener: (_t: string, cb: MediaListener) => {
+        layoutListeners.add(cb);
+      },
+      removeEventListener: (_t: string, cb: MediaListener) => {
+        layoutListeners.delete(cb);
+      },
+      addListener: (cb: MediaListener) => {
+        layoutListeners.add(cb);
+      },
+      removeListener: (cb: MediaListener) => {
+        layoutListeners.delete(cb);
+      },
+      dispatchEvent: () => false,
+    }),
+  });
+}
+
+/** 切换宽/窄窗口并通知监听者（等价于窗口尺寸跨过断点）。 */
+function setLayoutNarrow(v: boolean): void {
+  layoutNarrow = v;
+  for (const cb of [...layoutListeners]) cb({ matches: v });
+}
+
+/** U05：切到某个分区（等价于点击导航项）。 */
+async function openSection(w: VueWrapper, id: string): Promise<void> {
+  (w.vm as unknown as { selectSection: (s: string) => void }).selectSection(id);
+  await flushPromises();
+}
+
+/** 打开说明浮层并读取其文本（浮层内容只在打开时进入 DOM）。 */
+async function openHelpTip(trigger: {
+  trigger: (event: string) => Promise<unknown>;
+}): Promise<string> {
+  await trigger.trigger("focus");
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline) {
+    const body = document.querySelector(".help-tooltip-body");
+    if (body?.textContent) return body.textContent;
+    await flushPromises();
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return document.querySelector(".help-tooltip-body")?.textContent ?? "";
+}
+
 beforeEach(() => {
   invokeMock.mockReset();
   mockBase();
+  installLayoutMedia();
+  // U06：自动读取间隔是模块级单例（缺省 5 分钟）——每个用例从缺省起步。
+  resetCollectIntervalForTests();
 });
 
 describe("Settings 同步状态传播（Task 4）", () => {
@@ -171,6 +243,8 @@ describe("Settings 同步状态传播（Task 4）", () => {
       props: { refreshKey: 0 },
     });
     await flushPromises();
+    // U05：价格表只在首次进入「价格」分区时挂载。
+    await openSection(w, "pricing");
     const scroll = w.findComponent({ name: "ScrollList" });
     expect(scroll.props("rows")).toHaveLength(401);
     expect(w.find(".pricing-pagination").exists()).toBe(false);
@@ -190,7 +264,12 @@ describe("Settings 同步状态传播（Task 4）", () => {
     // autostart_status + H05 的来源库默认路径解析（只解析路径，不打开 CCS 库）
     expect(invokeMock).toHaveBeenCalledTimes(6);
     expect(vmOfSettings(w).autoSync).toBe(true);
+    // U05：价格视图推迟到首次进入「价格」分区才消费——仍复用**同一次**预读，
+    // 不重复发起 pricing_entries（总调用次数保持 6）。
+    expect(vmOfSettings(w).pricing).toBeNull();
+    await openSection(w, "pricing");
     expect(vmOfSettings(w).pricing?.modelsdev_count).toBe(10);
+    expect(invokeMock).toHaveBeenCalledTimes(6);
     expect(w.findComponent({ name: "NSpin" }).exists()).toBe(false);
     w.unmount();
   });
@@ -474,20 +553,30 @@ describe("Settings 数据来源（claude-code 行修复）", () => {
 });
 
 describe("Settings 分组与状态（设计系统 Task 7）", () => {
-  it("设置页按 应用/数据源/缓存/价格 四组渲染", async () => {
+  it("设置页按 通用/数据源/用量数据/价格/外观/高级 分区渲染（U05）", async () => {
     const w = mount(Settings);
     await flushPromises();
-    for (const title of ["应用", "数据源", "缓存", "价格"]) {
-      expect(w.text()).toContain(title);
+    const titles = w.findAll(".group-title").map((t) => t.text());
+    for (const title of ["通用", "数据源", "用量数据", "价格", "外观", "高级"]) {
+      expect(titles, `分区 ${title} 应存在`).toContain(title);
     }
+    // U05：旧「缓存」计数标签不再出现（改名「已采集文件 / 已保存请求」）
+    expect(w.text()).not.toContain("缓存文件");
+    expect(w.text()).not.toContain("缓存事件");
   });
 
-  it("计价说明与实现一致：完整候选优先，不称全部候选取最高（N08/R03）", async () => {
-    const w = mount(Settings);
+  it("计价规则收进说明浮层：页面只留结论，规则原文完整可读（N08/R03/U05）", async () => {
+    const w = mount(Settings, { attachTo: document.body });
     await flushPromises();
-    expect(w.text()).toContain("有完整四桶价格的候选优先");
-    expect(w.text()).toContain("没有完整候选时才回退到部分候选中已知费用最高者");
-    expect(w.text()).not.toContain("全部候选按本次请求条件计价");
+    await openSection(w, "pricing");
+    // U05：长说明不再铺在页面上，只在浮层里给出。
+    const trigger = w.find("button.help-trigger[aria-label='价格候选选择规则']");
+    expect(trigger.exists(), "候选规则说明触发器应存在").toBe(true);
+    const body = await openHelpTip(trigger);
+    expect(body, "浮层必须给出完整规则").toContain("有完整四桶价格的候选优先");
+    expect(body).toContain("没有完整候选时才回退到部分候选中已知费用最高者");
+    expect(body).not.toContain("全部候选按本次请求条件计价");
+    expect(w.text(), "页面不重复铺长说明").not.toContain("没有完整候选时才回退到部分候选中");
   });
 
   it("来源身份标签用中性色（成功/警告只表达同步状态）", async () => {
@@ -515,19 +604,12 @@ describe("Settings 分组与状态（设计系统 Task 7）", () => {
 });
 
 describe("Settings macOS 分组结构（设计系统 Task 7）", () => {
-  it("每组一张 .ts-card，组标题（.group-title）在卡片外", async () => {
+  it("每个分区一张 .ts-card，分区标题（.group-title）在卡片外", async () => {
     const w = mount(Settings);
     await flushPromises();
+    // U05：一次只显示一个分区——DOM 顺序即分区顺序（未选中的用 v-show 保留草稿）。
     const titles = w.findAll(".group-title").map((t) => t.text());
-    expect(titles).toEqual([
-      "Token 显示颜色",
-      "应用",
-      "数据源",
-      "缓存",
-      "从 CCS 导入用量",
-      "价格",
-      "高级配置",
-    ]);
+    expect(titles).toEqual(["通用", "数据源", "用量数据", "价格", "外观", "高级"]);
     const cards = w.findAll("section.ts-card");
     expect(cards.length).toBe(7);
     for (const t of w.findAll(".group-title")) {
@@ -539,7 +621,7 @@ describe("Settings macOS 分组结构（设计系统 Task 7）", () => {
     const w = mount(Settings);
     await flushPromises();
     const rows = w.findAll(".setting-row");
-    // 至少：时区、自启、缓存文件、缓存事件、自动同步价格
+    // 至少：时区、自启、已采集文件、已保存请求、自动同步价格
     expect(rows.length).toBeGreaterThanOrEqual(5);
     const tzRow = rows.find((r) => r.text().includes("聚合/展示时区"));
     expect(tzRow).toBeDefined();
@@ -564,6 +646,7 @@ describe("Settings macOS 分组结构（设计系统 Task 7）", () => {
     });
     const w = mount(Settings);
     await flushPromises();
+    await openSection(w, "pricing");
     const notices = w.findAll(".ts-notice");
     expect(notices.some((n) => n.text().includes("主源（models.dev）尚未就绪"))).toBe(true);
     expect(notices.some((n) => n.text().includes("OpenRouter 快照损坏"))).toBe(true);
@@ -614,7 +697,7 @@ describe("Settings 关闭行为与高级配置（关闭确认与配置文件计�
     expect(vmOf(w).closeAction).toBe("quit");
   });
 
-  it("高级配置组：底部标题 + 打开设置配置文件按钮调用 open_settings_file", async () => {
+  it("高级分区：底部标题 + 打开设置配置文件按钮调用 open_settings_file", async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "open_settings_file")
         return Promise.resolve("C:/Users/x/.tokenscope/settings.toml");
@@ -623,7 +706,7 @@ describe("Settings 关闭行为与高级配置（关闭确认与配置文件计�
     const w = mount(Settings);
     await flushPromises();
     const titles = w.findAll(".group-title").map((t) => t.text());
-    expect(titles.at(-1)).toBe("高级配置");
+    expect(titles.at(-1)).toBe("高级");
     expect(w.text()).toContain("settings.toml");
     const btn = w.findAll("button").find((b) => b.text().includes("打开设置配置文件"));
     expect(btn).toBeDefined();
@@ -662,8 +745,8 @@ describe("Settings 首载错误恢复（UX06）", () => {
     // 失败区块：错误可见 + 重试按钮。
     expect(w.text()).toContain("来源状态读取失败");
     expect(w.text()).toContain("boom-status");
-    // 其他成功区块照常显示（缓存统计、价格表）。
-    expect(w.text()).toContain("缓存文件");
+    // 其他成功区块照常显示（用量数据统计、价格表）。
+    expect(w.text()).toContain("已采集文件");
     expect(w.text()).toContain("同步在线价格");
     // 重试成功后错误清除。
     invokeMock.mockImplementation((cmd: string) => {
@@ -986,7 +1069,8 @@ describe("Settings 目录信息与重建（UX08）", () => {
     msgSpy.success.mockClear();
     const w = mount(Settings);
     await flushPromises();
-    // 先制造两处已有错误：价格区块 + codex 行
+    // 先制造两处已有错误：价格区块 + codex 行（U05：价格区块需先进入分区）
+    await openSection(w, "pricing");
     expect(w.text()).toContain("价格列表读取失败");
     const codexSave = w
       .findAll("button")
@@ -1076,7 +1160,7 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
     const cases: [string, string][] = [
       ["settings_get", "设置读取失败，来源配置暂不可保存"],
       ["source_status", "来源状态读取失败"],
-      ["cache_stats", "缓存统计读取失败"],
+      ["cache_stats", "用量数据统计读取失败"],
       ["pricing_entries", "价格列表读取失败"],
       ["autostart_status", "自启状态读取失败"],
     ];
@@ -1087,10 +1171,12 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
       );
       const w = mount(Settings);
       await settleAsync();
+      // U05：价格视图推迟到首次进入「价格」分区才读取（错误条随之出现）。
+      if (failing === "pricing_entries") await openSection(w, "pricing");
       expect(w.text(), failing).toContain(expected);
       expect(w.text(), failing).toContain(`${failing} down`);
-      // 其他成功区块照常渲染（缓存/价格/数据源三组都在）
-      expect(w.text(), failing).toContain("缓存文件");
+      // 其他成功区块照常渲染（用量数据/价格/数据源三组都在）
+      expect(w.text(), failing).toContain("已采集文件");
       expect(w.text(), failing).toContain("同步在线价格");
       expect(w.text(), failing).toContain("数据源");
       expect(probe.reasons, failing).toEqual([]);
@@ -1105,7 +1191,7 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "settings_get" && fail) return Promise.reject(new Error("设置读取失败"));
       if (cmd === "source_status" && fail) return Promise.reject(new Error("来源状态读取失败"));
-      if (cmd === "cache_stats" && fail) return Promise.reject(new Error("缓存统计读取失败"));
+      if (cmd === "cache_stats" && fail) return Promise.reject(new Error("用量数据统计读取失败"));
       if (cmd === "pricing_entries" && fail) return Promise.reject(new Error("价格列表读取失败"));
       if (cmd === "autostart_status" && fail) return Promise.reject(new Error("自启状态读取失败"));
       if (cmd === "settings_get")
@@ -1114,11 +1200,13 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
     });
     const w = mount(Settings);
     await flushPromises();
+    // U05：价格区块的错误条只在首次进入「价格」分区后出现（此时仍处失败态）。
+    await openSection(w, "pricing");
     fail = false;
     for (const notice of [
       "设置读取失败",
       "来源状态读取失败",
-      "缓存统计读取失败",
+      "用量数据统计读取失败",
       "价格列表读取失败",
       "自启状态读取失败",
     ]) {
@@ -1153,6 +1241,8 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
     const w = mount(Settings);
     await flushPromises();
     const vm = vmOfSettings(w);
+    // U05：价格读取由首次进入「价格」分区触发（本条第一次调用挂起）。
+    await openSection(w, "pricing");
     expect(vm.pricing, "读取挂起期间不得提前提交价格数据").toBeNull();
     // 首载读取仍挂起时触发刷新（refreshKey）→ 不得并发第二条请求
     await w.setProps({ refreshKey: 1 });
@@ -1488,7 +1578,9 @@ describe("Settings 价格同步（RC04）", () => {
     const w = mount(Settings);
     await flushPromises();
     const vm = vmOfSettings(w);
-    expect(vm.pricing?.entries.length, "首载已有 1 条价格").toBe(1);
+    // U05：价格视图在首次进入「价格」分区后读取。
+    await openSection(w, "pricing");
+    expect(vm.pricing?.entries.length, "进入价格分区后已有 1 条价格").toBe(1);
 
     await w
       .findAll("button")
@@ -1690,6 +1782,281 @@ describe("Settings 写入生命周期与晚到失败（AP04）", () => {
     expect(msgSpy.error).toHaveBeenCalled();
     expect(vm.closeAction, "失败不得让界面停留在一个并未写入的选择").toBe("ask");
     expect(vm.closeActionKnown).toBe(true);
+    w.unmount();
+  });
+});
+
+// ── U05：设置页分区导航与用户可见文案 ─────────────────────────────
+// 契约：左侧分区导航一次只显示一个分区（v-show 保留未保存草稿）；窄窗口
+// 改为顶部分段控件；价格表在首次进入「价格」分区才挂载；页面上不得残留
+// 内部审计编号与 markdown 星号。
+describe("Settings 分区导航与文案（U05）", () => {
+  /** 触发一次 CCS 预览：该段文案在修复前含审计编号 I-P3-2。 */
+  const ccsPreview = {
+    plan_id: "plan-u05",
+    logical_source: "ccs",
+    source_path: "C:/Users/x/.cc-switch/cc-switch.db",
+    source_schema: "ccs-user-version-20",
+    source_day_timezone: "Asia/Shanghai",
+    history_generation: 3,
+    generated_at: "2026-10-13T00:00:00Z",
+    expires_in_seconds: 600,
+    requests_total: 10,
+    requests_importable: 8,
+    requests_skipped_other_app: 1,
+    requests_skipped_duplicate_of_proxy: 1,
+    requests_rejected: 0,
+    rejected_reasons: [],
+    would_insert: 6,
+    would_update: 0,
+    would_unchanged: 2,
+    would_conflict: 0,
+    would_stale: 1,
+    would_overlap: 0,
+    overlap_unresolved: false,
+    overlap_examples: [],
+    net_new_tokens: { input: 100, output: 10, cache_write: 0, cache_read: 0 },
+    rollups_total: 2,
+    rollups_new: 2,
+    rollups_unchanged: 0,
+    rollups_conflicting: 0,
+    rollups_rejected: 0,
+    unsupported_apps: [],
+    records_without_project: 0,
+  };
+
+  function u05Base(cmd: string): Promise<unknown> {
+    if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+    if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+    if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+    if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+    if (cmd === "autostart_status") return Promise.resolve(false);
+    return Promise.resolve(null);
+  }
+
+  it("section_text_has_no_audit_id_or_markdown_stars：页面文本不含审计编号与字面星号", async () => {
+    invokeMock.mockImplementation((cmd: string) =>
+      cmd === "ccs_import_preview" ? Promise.resolve(ccsPreview) : u05Base(cmd),
+    );
+    const w = mount(Settings);
+    await flushPromises();
+    // 进入「用量数据」分区并展开预览（该段在修复前含 I-P3-2）
+    await openSection(w, "usage");
+    await w
+      .findAll("button")
+      .find((b) => b.text().includes("从 CCS 导入用量"))!
+      .trigger("click");
+    await flushPromises();
+    expect(w.text(), "预览段应已渲染").toContain("过期跳过");
+    expect(w.text()).not.toContain("I-P3-2");
+    expect(w.text(), "页面不得残留 markdown 星号").not.toContain("**");
+    expect(settingsSource, "源文本不得残留内部审计编号").not.toContain("I-P3-2");
+    // `**这个时区**` 的星号改为 .ts-strong 强调（不是把星号显示出来）
+    expect(w.findAll(".ts-strong").map((el) => el.text())).toContain("这个时区");
+    w.unmount();
+  });
+
+  it("switching_sections_keeps_unsaved_drafts_without_saving", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    await openSection(w, "sources");
+    const dirInput = () =>
+      w.findAll("input").find((i) => i.attributes("aria-label") === "Claude Code 日志目录")!;
+    await dirInput().setValue("D:/draft-kept");
+    await openSection(w, "pricing");
+    // v-show 保留挂载：切走的分区节点仍在 DOM 中，组件状态（草稿）不销毁
+    expect(w.find("[data-section='sources']").exists()).toBe(true);
+    await openSection(w, "sources");
+    expect((dirInput().element as HTMLInputElement).value, "切分区不得清空未保存草稿").toBe(
+      "D:/draft-kept",
+    );
+    expect(
+      invokeMock.mock.calls.some((c) => c[0] === "source_config_set"),
+      "切分区不得触发保存",
+    ).toBe(false);
+    w.unmount();
+  });
+
+  it("pricing_table_mounts_only_after_first_visit_to_pricing_section", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    expect(
+      invokeMock.mock.calls.some((c) => c[0] === "pricing_entries"),
+      "进入价格分区前不得发起价格表读取",
+    ).toBe(false);
+    expect(w.find(".ts-auto-table-pricing").exists()).toBe(false);
+    expect(w.findComponent({ name: "ScrollList" }).exists()).toBe(false);
+
+    await openSection(w, "pricing");
+    expect(invokeMock.mock.calls.filter((c) => c[0] === "pricing_entries").length).toBe(1);
+    expect(w.find(".ts-auto-table-pricing").exists()).toBe(true);
+
+    // 来回切换不重复请求、不重新挂载
+    await openSection(w, "general");
+    await openSection(w, "pricing");
+    expect(invokeMock.mock.calls.filter((c) => c[0] === "pricing_entries").length).toBe(1);
+    w.unmount();
+  });
+
+  it("one_section_visible_at_a_time_keeping_all_panels_mounted", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    const panels = w.findAll(".settings-panel");
+    expect(panels.length, "六个分区都在 DOM 中（v-show 不销毁草稿）").toBe(6);
+    const hidden = panels.filter((p) => (p.attributes("style") ?? "").includes("display: none"));
+    expect(hidden.length, "恰好五个分区处于隐藏态").toBe(5);
+    const shown = panels.filter((p) => !(p.attributes("style") ?? "").includes("display: none"));
+    expect(shown.map((p) => p.attributes("data-section"))).toEqual(["general"]);
+    w.unmount();
+  });
+
+  it("narrow_window_switches_nav_to_top_segmented_control", async () => {
+    const w = mount(Settings, { attachTo: document.body });
+    await flushPromises();
+    // 宽窗口：左侧纵向导航（原生 button + 当前项语义）
+    expect(w.find("[data-nav-mode='side']").exists()).toBe(true);
+    expect(w.find(".settings-nav nav.settings-nav-rail").attributes("aria-label")).toBe("设置分区");
+    expect(w.find(".settings-nav .settings-nav-item").exists()).toBe(true);
+    expect(w.find(".settings-nav .ts-segmented").exists()).toBe(false);
+
+    setLayoutNarrow(true);
+    await flushPromises();
+    expect(w.find("[data-nav-mode='top']").exists()).toBe(true);
+    expect(w.find(".settings-nav .ts-segmented").exists(), "窄窗口用顶部分段控件").toBe(true);
+    expect(w.find(".settings-nav .settings-nav-item").exists()).toBe(false);
+
+    setLayoutNarrow(false);
+    await flushPromises();
+    expect(w.find("[data-nav-mode='side']").exists()).toBe(true);
+    w.unmount();
+  });
+
+  it("missing_match_media_falls_back_to_side_nav_without_throwing", async () => {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+    const probe = rejectionProbe();
+    const w = mount(Settings);
+    await settleAsync();
+    expect(w.find("[data-nav-mode='side']").exists(), "matchMedia 缺失时按宽窗口").toBe(true);
+    expect(probe.reasons).toEqual([]);
+    probe.stop();
+    w.unmount();
+  });
+
+  it("section_nav_is_named_marks_current_and_is_keyboard_activatable", async () => {
+    const w = mount(Settings, { attachTo: document.body });
+    await flushPromises();
+    const itemsOf = () => w.find(".settings-nav").findAll("button.settings-nav-item");
+    expect(itemsOf().map((b) => b.text())).toEqual([
+      "通用",
+      "数据源",
+      "用量数据",
+      "价格",
+      "外观",
+      "高级",
+    ]);
+    // 键盘可操作：原生 button（Tab 可达、Enter/Space 由浏览器合成 click）
+    expect(itemsOf().every((b) => b.element.tagName === "BUTTON")).toBe(true);
+    const current = itemsOf().filter((b) => b.attributes("aria-current") !== undefined);
+    expect(current.length, "有且只有一个当前分区").toBe(1);
+    expect(current[0].text()).toBe("通用");
+    await itemsOf()
+      .find((b) => b.text() === "价格")!
+      .trigger("click");
+    await flushPromises();
+    expect(
+      itemsOf()
+        .find((b) => b.attributes("aria-current") !== undefined)!
+        .text(),
+    ).toBe("价格");
+    w.unmount();
+  });
+});
+
+// ── U06：数据源分区的自动读取间隔（唯一来源 settings.toml + 串行保存） ──
+describe("Settings 自动读取间隔（U06）", () => {
+  /** 挂载设置页并切到「数据源」分区（一次只显示一个分区）。 */
+  async function mountSources(): Promise<VueWrapper> {
+    const w = mount(Settings);
+    await flushPromises();
+    await openSection(w, "sources");
+    return w;
+  }
+
+  function settingsBase(
+    overrides: Record<string, (args?: Record<string, unknown>) => Promise<unknown>>,
+  ): void {
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) =>
+      overrides[cmd]
+        ? overrides[cmd](args)
+        : (base as (c: string, a?: Record<string, unknown>) => unknown)(cmd, args),
+    );
+  }
+
+  function intervalRow(w: VueWrapper) {
+    return w.findAll(".setting-row").find((r) => r.text().includes("自动读取间隔"));
+  }
+
+  it("interval_select_renders_in_sources_section：下拉在「数据源」分区且只用白名单六档", async () => {
+    const w = await mountSources();
+    const row = intervalRow(w);
+    expect(row, "「数据源」分区必须有自动读取间隔设置项").toBeDefined();
+    const select = row!.findComponent({ name: "Select" });
+    expect(select.exists()).toBe(true);
+    expect(select.props("options")).toEqual(COLLECT_INTERVAL_OPTIONS);
+    w.unmount();
+  });
+
+  it("initial_value_comes_from_settings_get：初始值取自 collect_interval_secs（缺省 300）", async () => {
+    settingsBase({ settings_get: () => Promise.resolve({ collect_interval_secs: 60 }) });
+    const w = await mountSources();
+    expect(useCollectInterval().intervalSecs.value).toBe(60);
+    expect(intervalRow(w)!.findComponent({ name: "Select" }).props("value")).toBe(60);
+    w.unmount();
+
+    resetCollectIntervalForTests();
+    settingsBase({ settings_get: () => Promise.resolve({ price_auto_sync: true, sources: {} }) });
+    const w2 = await mountSources();
+    expect(useCollectInterval().intervalSecs.value, "旧设置文件缺该字段 → 缺省 300").toBe(300);
+    w2.unmount();
+  });
+
+  it("selecting_saves_through_serial_queue：选择值走 settings_set_collect_interval 保存", async () => {
+    const written: unknown[] = [];
+    settingsBase({
+      settings_set_collect_interval: (args) => {
+        written.push(args);
+        return Promise.resolve(args?.secs);
+      },
+    });
+    const w = await mountSources();
+    intervalRow(w)!.findComponent({ name: "Select" }).vm.$emit("update:value", 5);
+    await flushPromises();
+
+    expect(written, "只发一次保存且参数是白名单值").toEqual([{ secs: 5 }]);
+    expect(useCollectInterval().intervalSecs.value).toBe(5);
+    expect(useCollectInterval().error.value).toBeNull();
+    w.unmount();
+  });
+
+  it("save_failure_rolls_back_and_shows_error_only_in_that_row：失败回滚到已落盘值并只在该行提示", async () => {
+    settingsBase({
+      settings_set_collect_interval: () => Promise.reject(new Error("写入设置失败：磁盘不可写")),
+    });
+    const w = await mountSources();
+    intervalRow(w)!.findComponent({ name: "Select" }).vm.$emit("update:value", 30);
+    await flushPromises();
+
+    expect(useCollectInterval().intervalSecs.value, "回滚到已落盘值").toBe(300);
+    const row = intervalRow(w)!;
+    expect(row.text()).toContain("保存失败");
+    expect(row.text()).toContain("磁盘不可写");
+    // 局部错误：其他分区不出现该提示
+    expect(w.find("[data-section='general']").text()).not.toContain("磁盘不可写");
     w.unmount();
   });
 });
