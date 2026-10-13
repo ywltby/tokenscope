@@ -519,15 +519,13 @@ function buildChecks(m, ctx) {
         : "no-panel",
     ]);
     checks.push([
-      // RC09：日期弹层只有**一层**有效 elevated 材质——外壳 85% + 16px 模糊 +
-      // 12px 圆角，内层面板保持透明（此前两层都上玻璃 = 双层玻璃）。
-      "date_panel_matches_elevated_contract",
+      "date_panel_matches_solid_operation_contract",
       m.datePanel?.available === true &&
-        Math.abs(parseColorAlpha(m.datePanel.shellBackground) - 0.85) <= 0.06 &&
-        /blur\(16px\)/.test(m.datePanel.shellBackdrop ?? "") &&
+        Math.abs(parseColorAlpha(m.datePanel.shellBackground) - 1) <= 0.01 &&
+        (!m.datePanel.shellBackdrop || m.datePanel.shellBackdrop === "none") &&
         /12px/.test(m.datePanel.shellRadius ?? "") &&
         Math.abs(parseColorAlpha(m.datePanel.backgroundColor) - 0) <= 0.01 &&
-        !/blur\(16px\)/.test(m.datePanel.backdropFilter ?? ""),
+        (!m.datePanel.backdropFilter || m.datePanel.backdropFilter === "none"),
       m.datePanel
         ? `外壳=${m.datePanel.shellBackground} ${m.datePanel.shellBackdrop} ${m.datePanel.shellRadius}；内层=${m.datePanel.backgroundColor} ${m.datePanel.backdropFilter}`
         : "no-panel",
