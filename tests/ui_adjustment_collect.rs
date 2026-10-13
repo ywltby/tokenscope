@@ -209,7 +209,67 @@ fn filtered_automatic_query_reuses_all_app_collection() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 单应用采集不能充当全部应用采集；改变采集范围必须补采集。
+/// 来源警告按应用投影，全局价格警告保留；自动/手动查询口径一致。
+#[test]
+fn filtered_warnings_match_manual_query_and_preserve_global_diagnostics() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tmp_dir("warning-scope");
+    let mut all = base_opts(&dir);
+    all.agent = None;
+    all.codex_enabled = Some(true);
+    // 两个来源均不存在；价格文件有确定的语法错误（全局警告）。
+    std::fs::write(all.pricing_path.as_ref().unwrap(), "[invalid").unwrap();
+    report::collect_only(&all).unwrap();
+    let all_snap = query::begin_query_with(&all, false).unwrap();
+    let all_warnings = query::query_summary(&all_snap.query_id).unwrap().warnings;
+    assert!(all_warnings.iter().any(|w| w.contains("Claude 目录不存在")));
+    assert!(all_warnings.iter().any(|w| w.contains("Codex 目录不存在")));
+    let global_warnings: Vec<_> = all_warnings
+        .iter()
+        .filter(|warning| warning.contains("pricing.toml"))
+        .cloned()
+        .collect();
+    assert!(!global_warnings.is_empty(), "必须存在价格全局警告");
+    for (agent, own, other) in [
+        (AgentKind::ClaudeCode, "Claude", "Codex"),
+        (AgentKind::Codex, "Codex", "Claude"),
+    ] {
+        // 每次先还原全应用快照，避免上一轮手动查询改变最近槽位。
+        report::collect_only(&all).unwrap();
+        let mut filtered = all.clone();
+        filtered.agent = Some(agent);
+        let auto = query::begin_query_with(&filtered, false).unwrap();
+        let auto_warnings = query::query_summary(&auto.query_id).unwrap().warnings;
+        assert!(
+            auto_warnings
+                .iter()
+                .any(|w| w.contains(&format!("{own} 目录不存在")))
+        );
+        assert!(
+            !auto_warnings
+                .iter()
+                .any(|w| w.contains(&format!("{other} 目录不存在")))
+        );
+        let manual = query::begin_query(&filtered).unwrap();
+        assert_eq!(
+            auto_warnings,
+            query::query_summary(&manual.query_id).unwrap().warnings
+        );
+        assert!(
+            global_warnings
+                .iter()
+                .all(|warning| auto_warnings.contains(warning)),
+            "全局价格警告不得丢失"
+        );
+    }
+    assert_eq!(
+        query::query_summary(&all_snap.query_id).unwrap().warnings,
+        all_warnings,
+        "已有全应用查询的警告必须保持冻结"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn filtered_collection_does_not_cover_all_apps() {
     let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());

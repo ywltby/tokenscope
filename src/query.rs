@@ -194,8 +194,12 @@ impl QuerySnapshot {
         &self.collection.sources
     }
 
-    pub fn warnings(&self) -> &[String] {
-        &self.collection.warnings
+    pub fn warnings(&self) -> Vec<String> {
+        self.collection
+            .warnings
+            .iter()
+            .map(|warning| warning.message.clone())
+            .collect()
     }
 
     /// H06：本次查询固定的日汇总桶选择（建快照时**只算一次**——汇总、明细与

@@ -369,9 +369,32 @@ struct Collected {
     changed: bool,
     sources: Vec<SourceReport>,
     pricing: std::sync::Arc<crate::pricing::Pricing>,
-    warnings: Vec<String>,
+    warnings: Vec<CollectionWarning>,
     /// SF04：价格签名（内容摘要）——进入查询快照作为价格修订号。
     pricing_revision: String,
+}
+
+/// 采集期即确定作用域；不通过文案/路径猜测来源，None 表示价格、迁移等全局信息。
+#[derive(Debug, Clone)]
+pub(crate) struct CollectionWarning {
+    pub(crate) agent: Option<AgentKind>,
+    pub(crate) message: String,
+}
+
+impl CollectionWarning {
+    fn global(message: String) -> Self {
+        Self {
+            agent: None,
+            message,
+        }
+    }
+
+    fn source(agent: AgentKind, message: String) -> Self {
+        Self {
+            agent: Some(agent),
+            message,
+        }
+    }
 }
 
 /// D1：采集快照（不可变共享）——并发同参查询复用同一次采集，
@@ -387,7 +410,7 @@ pub(crate) struct CollectionSnapshot {
     /// 因此不进入 [`collection_retained_bytes`] 的字节记账）。
     pub(crate) changed: bool,
     pub(crate) sources: Vec<SourceReport>,
-    pub(crate) warnings: Vec<String>,
+    pub(crate) warnings: Vec<CollectionWarning>,
     pub(crate) pricing: std::sync::Arc<crate::pricing::Pricing>,
     pub(crate) pricing_revision: String,
 }
@@ -475,12 +498,15 @@ pub(crate) mod retained {
 /// 不含快照行索引与查询身份——那部分由 `query::snapshot_retained_bytes`
 /// 一起计入。
 pub(crate) fn collection_retained_bytes(c: &CollectionSnapshot) -> Result<usize, String> {
-    use retained::{ByteCount, string_bytes, strings_bytes, vec_bytes};
+    use retained::{ByteCount, string_bytes, vec_bytes};
     let mut n = ByteCount::default();
     // H07：事件本体不再随采集快照常驻（查询流式读取），因此只计采集元数据：
     // 逐源统计、诊断字符串与价格表（含候选与嵌套规则）。
     n.add(vec_bytes(&c.sources)?)?;
-    n.add(strings_bytes(&c.warnings)?)?;
+    n.add(vec_bytes(&c.warnings)?)?;
+    for warning in &c.warnings {
+        n.add(string_bytes(&warning.message)?)?;
+    }
     n.add(string_bytes(&c.pricing_revision)?)?;
     n.add(c.pricing.retained_bytes()?)?;
     Ok(n.get())
@@ -684,8 +710,12 @@ pub(crate) fn recent_collection(opts: &SummaryOptions) -> Option<Arc<CollectionS
                     .filter(|source| Some(source.agent) == opts.agent)
                     .cloned()
                     .collect(),
-                // 警告属于整轮采集（包含价格/迁移等全局信息），不猜测文本归属。
-                warnings: snapshot.warnings.clone(),
+                warnings: snapshot
+                    .warnings
+                    .iter()
+                    .filter(|warning| warning.agent.is_none() || warning.agent == opts.agent)
+                    .cloned()
+                    .collect(),
                 pricing: snapshot.pricing.clone(),
                 pricing_revision: snapshot.pricing_revision.clone(),
             }))
@@ -1009,7 +1039,7 @@ pub fn collect_all_with_sources_for_test(
         .collect();
     Ok(CollectedView {
         events,
-        warnings: c.warnings,
+        warnings: c.warnings.into_iter().map(|w| w.message).collect(),
     })
 }
 
@@ -1117,12 +1147,16 @@ fn collect_all_with_sources(
     // M11：签名一致时复用进程内缓存/索引文件，仅签名变化才重解析双快照。
     // SF04：签名同时作为价格修订号进入采集快照/查询会话。
     let t_pricing = std::time::Instant::now();
-    let (pricing, pricing_revision, mut warnings, cache_hit) = Pricing::load_cached_revision(
+    let (pricing, pricing_revision, pricing_warnings, cache_hit) = Pricing::load_cached_revision(
         Some(&pricing_path),
         Some(&modelsdev_path),
         Some(&openrouter_path),
         &index_path,
     );
+    let mut warnings: Vec<CollectionWarning> = pricing_warnings
+        .into_iter()
+        .map(CollectionWarning::global)
+        .collect();
     path_info!(
         auto,
         "价格加载：{}，{:.0} ms",
@@ -1152,13 +1186,13 @@ fn collect_all_with_sources(
             rep.rejected
         );
         if rep.rejected > 0 {
-            warnings.push(format!(
+            warnings.push(CollectionWarning::global(format!(
                 "遗留缓存有 {} 条记录字段不合法，未迁入（其余已迁移）",
                 rep.rejected
-            ));
+            )));
         }
     }
-    warnings.extend(overlap_warnings);
+    warnings.extend(overlap_warnings.into_iter().map(CollectionWarning::global));
     #[cfg(test)]
     {
         let d = TEST_COLLECT_DELAY_MS.load(Ordering::Relaxed);
@@ -1189,17 +1223,20 @@ fn collect_all_with_sources(
         let (files, discovery_errors) = src.discover_with_errors();
         // B4：发现期异常必须可见；发现失败的来源不参与缓存清理。
         for e in &discovery_errors {
-            warnings.push(e.clone());
+            warnings.push(CollectionWarning::source(kind, e.clone()));
         }
         if files.is_empty() && !src.roots().iter().any(|r| r.is_dir()) {
             for root in src.roots() {
-                warnings.push(format!(
-                    "{} 目录不存在：{}",
-                    match kind {
-                        AgentKind::ClaudeCode => "Claude",
-                        AgentKind::Codex => "Codex",
-                    },
-                    root.display()
+                warnings.push(CollectionWarning::source(
+                    kind,
+                    format!(
+                        "{} 目录不存在：{}",
+                        match kind {
+                            AgentKind::ClaudeCode => "Claude",
+                            AgentKind::Codex => "Codex",
+                        },
+                        root.display()
+                    ),
                 ));
             }
         }
@@ -1256,12 +1293,18 @@ fn collect_all_with_sources(
             let stable = fp_before == fp_after && fp_after.0.is_some() && fp_after.1.is_some();
             if !stable {
                 unstable += 1;
-                warnings.push(format!("采集期间文件变化，本轮不登记指纹: {}", path_str));
+                warnings.push(CollectionWarning::source(
+                    kind,
+                    format!("采集期间文件变化，本轮不登记指纹: {}", path_str),
+                ));
             } else if parsed.stats.io_errors > 0 {
                 io_failed += 1;
-                warnings.push(format!(
-                    "文件读取失败，本轮不登记指纹（已解析部分不影响统计）: {}",
-                    path_str
+                warnings.push(CollectionWarning::source(
+                    kind,
+                    format!(
+                        "文件读取失败，本轮不登记指纹（已解析部分不影响统计）: {}",
+                        path_str
+                    ),
                 ));
             } else {
                 registrations.push(crate::history::SourceFileRecord {
@@ -1352,13 +1395,20 @@ fn collect_all_with_sources(
     // 让整批回滚——否则一条坏事件会让**全部采集失败**，连已有历史都无法展示。
     // 跳过的条数进诊断，与适配器层的 bad_lines 口径一致（不静默吞掉）。
     let mut writes: Vec<crate::history::EventWrite> = Vec::with_capacity(events.len());
-    let mut skipped_unwritable = 0u64;
+    let mut skipped_unwritable: Vec<(AgentKind, u64)> = Vec::new();
     for ev in &events {
         let write = event_write_of(ev);
         match history.can_write(&write) {
             Ok(true) => writes.push(write),
             Ok(false) => {
-                skipped_unwritable += 1;
+                if let Some((_, count)) = skipped_unwritable
+                    .iter_mut()
+                    .find(|(agent, _)| *agent == ev.agent)
+                {
+                    *count += 1;
+                } else {
+                    skipped_unwritable.push((ev.agent, 1));
+                }
                 log::warn!(
                     "跳过不可入库的事件（{} / {} / {:?}）：字段不合法",
                     ev.agent.as_str(),
@@ -1369,9 +1419,10 @@ fn collect_all_with_sources(
             Err(e) => return Err(e),
         }
     }
-    if skipped_unwritable > 0 {
-        warnings.push(format!(
-            "{skipped_unwritable} 条事件字段不合法，未写入历史库（其余照常入账）"
+    for (agent, count) in skipped_unwritable {
+        warnings.push(CollectionWarning::source(
+            agent,
+            format!("{count} 条事件字段不合法，未写入历史库（其余照常入账）"),
         ));
     }
     let write_summary = history.write_batch(&writes)?;
@@ -2138,7 +2189,7 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
         agg.totals.requests,
         t.elapsed().as_millis()
     );
-    let mut warnings = snapshot.warnings().to_vec();
+    let mut warnings = snapshot.warnings();
     warnings.extend(selection.warnings.iter().cloned());
     Ok(SummaryReport {
         query_id: snapshot.query_id.clone(),
@@ -2347,7 +2398,7 @@ pub(crate) fn query_events_from(
         pricing_revision: snapshot.pricing_revision.clone(),
         rows,
         total,
-        warnings: snapshot.warnings().to_vec(),
+        warnings: snapshot.warnings(),
     })
 }
 
@@ -3027,7 +3078,10 @@ cache_read = 0.4
             generation: 0,
             changed: false,
             sources: Vec::new(),
-            warnings,
+            warnings: warnings
+                .into_iter()
+                .map(CollectionWarning::global)
+                .collect(),
             pricing: Arc::new(Pricing::default()),
             pricing_revision: String::new(),
         };
