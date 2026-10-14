@@ -28,8 +28,8 @@
 
 | 当前实现 | 本轮要求 |
 | --- | --- |
-| `src/settings.rs::SourceConfig` 只有 `enabled`、`dir` | 改为自动发现开关、追加项、自动项停用清单，并兼容旧设置 |
-| `src/report.rs::SummaryOptions` 传入单个 `claude_dir` / `codex_dir` | 生产入口统一传递解析后的多根来源集合 |
+| `crates/tokenscope-core/src/settings.rs::SourceConfig` 只有 `enabled`、`dir` | 改为自动发现开关、追加项、自动项停用清单，并兼容旧设置 |
+| `crates/tokenscope-core/src/report.rs::SummaryOptions` 传入单个 `claude_dir` / `codex_dir` | 生产入口统一传递解析后的多根来源集合 |
 | `make_source` 按应用构造单一来源 | Claude 每根绑定自己的映射；Codex 多根扫描 |
 | `claude_project_mapping` 默认使用当前账户 `.claude.json` | 多用户发现必须使用该目录所属账户的映射，禁止借用当前账户 |
 | Codex 默认根包括 `sessions` 与 `archived_sessions` | 两者都保留并分别可见；不退回只读 sessions |
@@ -145,25 +145,25 @@ enabled = true
 
 ### S01 配置集合与迁移
 
-- 修改：`src/settings.rs`；新增：`tests/source_paths_settings.rs`。
+- 修改：`crates/tokenscope-core/src/settings.rs`；新增：`crates/tokenscope-core/tests/source_paths_settings.rs`。
 - 测试旧空值/非空值/停用、新数组为空、新旧并存、重复加载、保存失败及两个并发单项更新不互相覆盖。
-- 命令：`cargo test --test source_paths_settings`。通过标准：追加项只迁移一次，失败不扩大采集范围，其他设置逐字段保留。
+- 命令：`cargo test -p tokenscope --test source_paths_settings`。通过标准：追加项只迁移一次，失败不扩大采集范围，其他设置逐字段保留。
 - 提交：`feat(来源): 支持追加目录配置及旧覆盖目录迁移`。
 
 ### S02 可注入的多用户发现器
 
-- 新增：`src/source/discovery.rs`、`tests/source_discovery.rs`；修改：`src/source/mod.rs`、`src/acceptance.rs`。
+- 新增：`crates/tokenscope-core/src/source/discovery.rs`、`crates/tokenscope-core/tests/source_discovery.rs`；修改：`crates/tokenscope-core/src/source/mod.rs`、`crates/tokenscope-core/src/acceptance.rs`。
 - 生产 profile 枚举和文件系统探测封装为可替换提供者；调用方不散落注册表或环境读取。
 - 测试两个用户、非 C 盘、当前环境根、Codex 双根、权限拒绝、无标准目录、模板目录、别名、发现部分失败；用计数提供者证明定时采集不重复枚举。
-- 命令：`cargo test --test source_discovery`。测试一律合成目录，提供者未注入时测试模式拒绝真实发现。
+- 命令：`cargo test -p tokenscope --test source_discovery`。测试一律合成目录，提供者未注入时测试模式拒绝真实发现。
 - 提交：`feat(来源): 自动发现多用户标准日志目录`。
 
 ### S03 多根解析、采集与历史并集
 
-- 修改：`src/report.rs`、`src/source/claude.rs`、`src/source/codex.rs`、`src/source/claude_projects.rs`；新增：`tests/source_paths_collection.rs`。
+- 修改：`crates/tokenscope-core/src/report.rs`、`crates/tokenscope-core/src/source/claude.rs`、`crates/tokenscope-core/src/source/codex.rs`、`crates/tokenscope-core/src/source/claude_projects.rs`；新增：`crates/tokenscope-core/tests/source_paths_collection.rs`。
 - 根集合排序及指纹稳定；同根/别名/嵌套只解析一次；多用户 Claude 各自绑定 `.claude.json`；冲突隔离与错误来源归属明确。
 - 测试复制同一事件、迁移前后同一事件、父子根、别名、独立真实事件不误合并、缺 cwd 的两个账户同 slug 不串映射、单根失败其他根仍入库、停用后历史保留、映射变更令采集缓存失效。
-- 命令：`cargo test --test source_paths_collection` 与 `cargo test --test ui_adjustment_collect`。冻结查询仍一致，不改既有 Codex 身份语义。
+- 命令：`cargo test -p tokenscope --test source_paths_collection` 与 `cargo test -p tokenscope --test ui_adjustment_collect`。冻结查询仍一致，不改既有 Codex 身份语义。
 - 提交：`feat(采集): 汇合多根来源并防止重复扫描`。
 
 ### S04 后端事务接口与调度
@@ -226,12 +226,30 @@ enabled = true
 
 ### 10.2 目标配置与不变量
 
-根目录继续保留 `[package]`，不搬迁源码、不改包名，添加：
+2026-10-15 用户确认完整目录整理，取代此前“不搬迁源码”的方案：根目录改为虚拟 workspace，核心库迁入 `crates/tokenscope-core/`，前端和桌面壳继续独立。目录名称明确职责，本轮保留核心 package 名 `tokenscope`，避免无收益的全仓 import 改名；壳 package 仍为 `tokenscope-app`，exe 仍为 `tokenscope.exe`。
+
+```text
+tokenscope/
+├── Cargo.toml                    # 虚拟 workspace、共享依赖
+├── Cargo.lock                    # 唯一锁文件
+├── crates/tokenscope-core/
+│   ├── Cargo.toml                # 核心 package，name = "tokenscope"
+│   ├── src/                      # 原根 src/，不依赖 Tauri
+│   └── tests/                    # 原根 tests/，含完整 fixtures
+├── frontend/                     # Vue 与前端 package/lock
+├── src-tauri/                    # Tauri package、配置、图标、权限
+│   └── src/                      # IPC、窗口、托盘、生命周期
+├── scripts/
+├── docs/
+└── target/                       # 默认共享输出
+```
+
+根 manifest 不再含 `[package]`、包级 dependencies/dev-dependencies/features；这些随核心库迁移。根配置：
 
 ```toml
 [workspace]
-members = [".", "src-tauri"]
-default-members = [".", "src-tauri"]
+members = ["crates/tokenscope-core", "src-tauri"]
+default-members = ["crates/tokenscope-core", "src-tauri"]
 resolver = "3"
 ```
 
@@ -239,7 +257,7 @@ resolver = "3"
 
 把共同使用的 `anyhow`、`serde`、`serde_json`、`log`、`jiff` 等依赖声明集中到 `[workspace.dependencies]`，成员以 `workspace = true` 继承。版本约束选择满足现有两侧要求且不改变锁定版本的交集；各成员需要的 features 继续显式保留。根库 dev-dependency 与普通 dependency 的共享项也检查一致性。仅壳使用的 Tauri/plugin 依赖留在壳中，不为追求统一机械上移全部依赖。
 
-本轮保留两包各自显式 package version，以兼容既有版本工具与历史提交读取；不顺带引入 `workspace.package` 版本继承。统一锁必须恰好包含两个无 source 的本地包、版本与四份应用配置一致。第三方版本、checksum、source 不应漂移；必要差异必须逐项解释，不运行无范围的 `cargo update`。
+本轮保留两包各自显式 package version，不顺带引入 `workspace.package` 版本继承。四份版本配置为 `crates/tokenscope-core/Cargo.toml`、`src-tauri/Cargo.toml`、`frontend/package.json`、`src-tauri/tauri.conf.json`，根虚拟 manifest 没有应用版本。统一锁必须恰好包含两个无 source 的本地包、版本与四配置一致。第三方版本、checksum、source 不应漂移；必要差异必须逐项解释，不运行无范围的 `cargo update`。
 
 生产构建仍默认不含 acceptance；`tokenscope-app/acceptance` 继续透传根库 feature。验证全 workspace acceptance 覆盖两个 package，正常发布构建显式不带验收 feature，不能用验收包作为发布包。
 
@@ -250,19 +268,22 @@ resolver = "3"
 3. 更新 `scripts/test_bump_version.py` 的合成仓库 fixture：一个根锁包含两个本地包，删掉子锁 fixture。先运行并记录旧工具因要求第二锁而失败。
 4. 补充有意义的失败用例：统一锁缺壳包、任一本地包版本错误/重复、第三方同名带 source 的包不误改；保留原子回滚、重复 bump 幂等、历史 main 基线读取测试。
 5. 检查现有工作流/发布契约覆盖位置。为真实路径接线补测试，不用单纯断言某段字符串代替实际 metadata、构建与产物验证。
+6. 新增核心库目录迁移清单：`CARGO_MANIFEST_DIR`、`include_str!`/`include_bytes!`、测试 fixture 相对路径、脚本工作目录、工作流 paths、文档源码链接。先设计“虚拟 workspace 新布局＋旧布局历史基线”的版本工具 fixture，证明旧工具不能正确处理新布局。
 
 ### W02：合并 workspace、依赖和锁文件
 
-1. 修改 `Cargo.toml`、`src-tauri/Cargo.toml`，按 10.2 配置共享依赖，删除全部旧 CLI 同名规避注释。
+1. 用 `git mv` 将根 `src/`、`tests/` 整体迁入 `crates/tokenscope-core/`，包含 fixture；从原根 manifest 拆出核心 package manifest，根改虚拟 workspace。壳核心依赖改为 `tokenscope = { path = "../crates/tokenscope-core" }`，按 10.2 配置共享依赖，删除旧 CLI 同名规避注释。不保留旧路径转发副本、junction 或重复测试目录。
 2. 保存两份旧锁的比较基线，将完整壳锁内容作为根锁候选，删除受版本管理的 `src-tauri/Cargo.lock`；不删除 target。
 3. 先运行 `cargo metadata --offline --locked --format-version 1` 和 `cargo check --offline --locked --workspace`。若 Cargo 要求刷新锁，单独解析并审阅差异后重跑 locked 检查；网络确有需要时遵守项目代理约定。
 4. 核对 metadata 恰有两个成员、默认选择包含两者、target_directory 为预期根目录；使用 `cargo tree --workspace -d` 分析剩余重复版本，不强制消灭合法的多版本依赖。
 5. 对比最终锁与迁移前完整壳锁的第三方包版本/source/checksum，解释任何差异。运行根库和壳定向测试，确认无循环依赖。
+6. 核心源码和 tests 同级关系保持，逐项验证 fixture 实际加载内容；不要把所有 `CARGO_MANIFEST_DIR` 盲目改成仓库根。确需仓库根的工具入口显式解析 workspace root，核心测试仍以 crate 根为基准。从根目录和核心 crate 目录分别运行代表性测试，确认不依赖启动 cwd。
+7. 检查依赖方向：核心库不引入 Tauri，壳依赖核心库，前端仍通过 IPC；本轮目录迁移不混入业务逻辑重构，也不把 source/history/pricing 拆成更多 crate。
 
 ### W03：版本工具迁移为单锁契约
 
-1. 修改 `scripts/bump_version.py`：LOCKS 仅根锁；`validate_locks` 不再按锁索引决定包集合，必须验证两个本地包。
-2. 同步 `scripts/test_bump_version.py`：四配置＋一锁＋声明原子更新；测试命名不再声称六个版本文件。保留历史双工程提交作为 base-ref 的读取兼容，因为读取的是四配置而非历史锁数量。
+1. 修改 `scripts/bump_version.py` 和 `scripts/release_metadata.py`：当前四配置读取新核心 manifest，LOCKS 仅根锁；`validate_locks` 不再按锁索引决定包集合，必须验证两个本地包；禁止对根虚拟 manifest 写 version。
+2. 同步 `scripts/test_bump_version.py`、`scripts/test_release_metadata.py`：四配置＋一锁＋声明原子更新。历史版本解析须读取指定 Git ref 自身的文件布局：旧提交从根 `[package]` 取版本，新提交从核心 manifest 取版本；当前布局不能决定历史布局。缺文件与 Git 执行错误区分处理，新布局文件损坏不得静默回退。分别测试迁移前 main→新布局分支、新布局 main→后续 bump、两布局版本不一致/损坏的拒绝路径。
 3. 在临时 Git fixture 运行 bump/check/失败回滚，证明只改本地包版本、无子锁生成、第三方依赖不漂移。
 4. 运行 `python -B -m unittest discover -s scripts -p "test_bump_version.py" -v` 与 `test_release_metadata.py`，要求全部通过。草稿阶段不执行产品版本递增。
 
@@ -278,6 +299,7 @@ resolver = "3"
 | `.github/workflows/install-test.yml` | 与 Release 使用同一产物路径规则，仍校验将发布的同一安装包 |
 | `scripts/release_assets.py` 及测试 | 核对是否已有路径无关接口；无需改的实现不改，只同步确有旧路径的调用和 fixture |
 | `.gitignore` | 保留所有层级 target 忽略，可规范为 `target/`；不缩成仅根 `/target` |
+| 工作流 paths、脚本 fixture/源码引用、当前开发文档 | 根 `src/**`、`tests/**` 改为 `crates/tokenscope-core/**`；构建配置保留独立触发。检查删除/重命名也能触发 CI；旧历史报告不改写事实 |
 
 不要假设所有构建都带三元组：不带 `--target` 的原生验收路径与显式 target 的发布路径分别取证。若用户显式设置 CARGO_TARGET_DIR，支持现有 exe 参数覆盖，不静默忽略用户配置；标准 CI 验证无覆盖时根 target 行为。
 
@@ -299,7 +321,7 @@ resolver = "3"
 | 暂存区文件类别 | 最小检查集合 |
 | --- | --- |
 | 仅 `.md` 文档，包括规约/计划 | staged whitespace、UTF-8、基础文档格式和新增/变更的本地链接检查；不跑 Rust/前端代码测试 |
-| 根 `src/**`、`tests/**` 的 Rust 代码/fixture | Rust 格式、workspace clippy 和 workspace 测试，覆盖壳依赖核心库的影响 |
+| `crates/tokenscope-core/src/**`、`crates/tokenscope-core/tests/**` 的 Rust 代码/fixture | Rust 格式、workspace clippy 和 workspace 测试，覆盖壳依赖核心库的影响；迁移提交中旧根路径的删除/重命名也按核心库分类 |
 | 仅 `src-tauri/src/**` Rust 代码 | Rust 格式、`tokenscope-app` clippy/test；涉及验收隔离模块时追加 acceptance 检查 |
 | `frontend/src/**`、前端普通类型/格式/构建配置及前端依赖清单/锁 | 前端 typecheck、format:check、test、build；涉及 E2E 编排时并入脚本规则 |
 | `scripts/**` 的 Python/PowerShell、`frontend/scripts/**` | 明确映射的脚本语法和契约测试；共享 helper 取全部消费者契约并集，未登记脚本走完整模式，不只测试被改文件本身 |
@@ -359,6 +381,7 @@ W05a/W05b 当前均未实施。完成标准：文档提交只运行文档检查�
 | W07 文档与交付 | 未开始 | — |
 
 - [ ] metadata 两个成员、正确默认成员与统一 target_directory。
+- [ ] 根是虚拟 workspace，核心源码/测试/fixture 完整迁移，无旧路径副本；跨 cwd 测试、旧/新 Git 基线版本读取均通过。
 - [ ] 仅一个受版本管理的 Cargo.lock，两个本地包版本正确，第三方依赖无未解释漂移。
 - [ ] 旧 CLI 同名规避配置和当前文档说明全部清除，共享依赖 features 保持正确。
 - [ ] 钩子、CI、缓存、NSIS 收集与原生验收统一新布局；普通/acceptance 覆盖无损。
@@ -405,7 +428,7 @@ F 组任务只改扫描反馈，不改变用量解析、去重、价格、自动
 
 #### 3.1 真实边界与单飞
 
-修改 `src/report.rs` 的 `collect_flighted_with`：仅领队取得 `COLLECT_SERIAL` 串行锁后进入 running，结束采集工作后进入终态；单飞跟随者不创建轮次，等待串行锁不算正在读取。启动、手动刷新、定时采集共用这一边界，避免定时入口动画遗漏手动采集或把排队时间算成扫描。
+修改 `crates/tokenscope-core/src/report.rs` 的 `collect_flighted_with`：仅领队取得 `COLLECT_SERIAL` 串行锁后进入 running，结束采集工作后进入终态；单飞跟随者不创建轮次，等待串行锁不算正在读取。启动、手动刷新、定时采集共用这一边界，避免定时入口动画遗漏手动采集或把排队时间算成扫描。
 
 根库提供可注入的状态观察接口及内存快照，不依赖 Tauri。状态更新后释放状态锁，再通知观察者；观察者失败不能改变采集结果。终态覆盖成功、返回错误与 unwind，RAII 收尾不能在 panic 时伪报成功；进程直接终止不承诺发结束事件。无业务权限时跳过定时轮次，不制造成功扫描。退出中不启动新轮次。
 
@@ -442,8 +465,8 @@ type CollectionStatus = {
 
 #### F01：根库真实采集生命周期
 
-- 修改 `src/report.rs`；必要时将状态类型单独放入 `src/collection_status.rs` 并在 `src/lib.rs` 导出。
-- 扩展 `tests/ui_adjustment_collect.rs` 的串行隔离测试：真实领队 start/end 一对、无变化也有 end、有变化代次、失败/unwind 收尾、跟随者不重复、排队不提前 start。
+- 修改 `crates/tokenscope-core/src/report.rs`；必要时将状态类型单独放入 `crates/tokenscope-core/src/collection_status.rs` 并在 `crates/tokenscope-core/src/lib.rs` 导出。
+- 扩展 `crates/tokenscope-core/tests/ui_adjustment_collect.rs` 的串行隔离测试：真实领队 start/end 一对、无变化也有 end、有变化代次、失败/unwind 收尾、跟随者不重复、排队不提前 start。
 - 观察接口使用隔离实例；若必须接进程单例，所有相关测试共享已有锁，不新增并行全局状态污染。
 - 运行 `cargo test --locked --test ui_adjustment_collect`，预期全部通过且无用户目录读写。
 
