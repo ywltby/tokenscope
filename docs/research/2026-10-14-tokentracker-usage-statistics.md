@@ -3,7 +3,9 @@
 > 研究对象：开源项目 [`xiufengsun/TokenTracker`](https://github.com/xiufengsun/TokenTracker)，
 > HEAD `b19d27b0ccd59ce621f4fa17207b06358e67987c`（v1.3.14，提交时间 2026-10-13 21:49:05 +0800，
 > npm 包名 `tokentracker-cli`）。浅克隆到临时目录后逐文件精读，**未运行其程序、未执行仓库内脚本、
-> 未安装依赖、未读取任何真实会话数据、未改动本机 `~/.tokentracker`**。
+> 未安装依赖、未改动本机 `~/.tokentracker`**。后续「存疑攻坚」阶段（2026-10-14）另做两类**只读**补证：
+> 以合成 fixture 加载样本仓导出函数的一次性实验，以及对本机 agent 日志的**全量计数扫描**（只落统计数字，
+> 不含任何会话内容，边界见 §1.4）。
 >
 > 证据分档：**已验证**（源码可证，且行号经至少一轮对抗式复核）／**一致解释**（多条代码证据指向同一结论，
 > 无单点直证）／**未验证**（结构推断或需运行时/语料才能判定；全文统一写成 `【未能确认】` 并附判定条件）。
@@ -39,6 +41,10 @@
    （无机制性错误、无幻觉）；修正后进入末轮验收（§13.5–§13.6）。
 7. **末轮验收复核（R4）**：两个独立复核单元验证「R3 修正是否真的落到文本里」并做全新抽样——
    修正点验收 29/29 与 31/32 通过，全新抽样命中率 94.0% 与 97.7%，只剩 7 处引用级校准，全部已修正（§13.7）。
+8. **存疑攻坚（OPEN-Q 轮）**：针对本文自己登记的 `【未能确认】` 项做四路攻关——源码补读、壳与 API、
+   **本机真实语料统计**、只读实验（合成 fixture 加载样本仓导出函数）——把 A 类 18 条中的 12 条、
+   B 类 10 条中的 4 条变为已判定，1 条迁入缺陷清单，并新增 §12.E「本机真实语料实证」；随后又做一轮
+   回写复核（R6，§13.10）。这一轮的边界是：**只落计数与字段名，不落任何会话内容**（§1.4）。
 
 读者可以据此判断每一条结论的可信度层级。**凡本文与源码冲突，以源码为准**（仓库为移动目标，本文锚定上述 HEAD）。
 
@@ -56,7 +62,7 @@
 10. 与 TokenScope 的对照：可抄与需避
 11. 关键常量与阈值速查
 12. 未验证项与风险清单
-13. 复核记录（R1–R4 问题台账与修正结果）
+13. 复核记录（R1–R6 问题台账、存疑攻坚与修正结果）
 - 附录 A：45 个解析器行号索引
 - 附录 B：术语表
 
@@ -71,7 +77,7 @@
 | HEAD | `b19d27b0ccd59ce621f4fa17207b06358e67987c`（tag `v1.3.14`，工作树干净） |
 | npm 包名 | `tokentracker-cli` |
 | 交付形态 | Node.js CLI（CommonJS，`src/`）+ React Dashboard（`dashboard/`）+ macOS Swift 壳（`TokenTrackerBar/`）+ Windows .NET 壳（`TokenTrackerWin/`）+ Linux Tauri 壳（`TokenTrackerLinux/`） |
-| 研究方式 | 只读：`read` / `Select-String` / `grep` / `glob` / `Get-Item`；未修改样本仓库、未执行仓库内脚本、未 `npm install`；覆盖采集与调度全链路、解析骨架与队列契约（三个原生壳内部的调度实现不在范围内） |
+| 研究方式 | 只读：`read` / `Select-String` / `grep` / `glob` / `Get-Item`；攻坚阶段另加「`node` 加载样本仓导出函数跑合成 fixture」的只读实验与只读日志计数扫描（边界见 §1.4）；未修改样本仓库、未执行仓库内脚本、未 `npm install`；覆盖采集与调度全链路、解析骨架与队列契约，以及三个原生壳的取数与日志落盘链（壳内 UI 实现细节不在范围内） |
 
 规模实测（口径「仓库跟踪文件数」）：`git ls-files src` = 112，`Get-ChildItem -Recurse -File -Force src` 同为 112。采集直接相关的核心模块：`rollout.js`（942,266 字节，全部 provider 的 `parse*Incremental`）、`local-api.js`（156 KB）、`session-analytics.js`（138 KB）、`cursor-store.js`（62 KB，游标持久化）、`fs.js`（15 KB，锁与原子写）、`upload-queue.js`、`async-queue-reader.js`、`jsonl-lines.js`、`scan-roots.js`、`wsl-probe.js`、`install-resolver.js`、`multi-install-parser.js`；`src/lib/pricing/` 另含 `index.js`、`matcher.js`、`litellm-fetcher.js`、`seed-snapshot.json`、`curated-overrides.json`。
 
@@ -112,9 +118,9 @@
 
 ### 1.4 数据来源限定
 
-- 全文结论**仅来自样本仓库源码的只读阅读**；未运行仓库内任何脚本、未安装依赖、未修改样本仓库任何文件。
-- **未读取任何真实会话数据**：本机 `~/.claude/projects/**`、`~/.codex/sessions/**` 及各 provider 的 SQLite 库均未纳入证据。凡须真实语料才能定的语义（例如某字段在真实日志中的出现率）一律进 `【未能确认】`。
-- 明确不在本文范围：逐 provider 的解析算法细节（Claude Code 与 Codex 两条主线除外，仅骨架层）、定价计算、Dashboard 前端渲染、云侧 ingest schema、三个原生壳。
+- 全文结论的主体来自**样本仓库源码的只读阅读**；未运行仓库内任何脚本、未安装依赖、未修改样本仓库任何文件。
+- **真实会话内容始终未纳入证据**。正文结论阶段（源码只读阅读）未读取本机 `~/.claude/projects/**`、`~/.codex/sessions/**` 及各 provider 的 SQLite 库；2026-10-14 的「存疑攻坚」阶段为闭合语料类问题，另做了两类**只读补证**：① 以合成 fixture 直接加载样本仓导出函数的一次性只读实验（脚本落在 `%TEMP%`，未改样本仓、未触碰真实日志）；② 对本机 agent 日志的**全量计数扫描**（Claude 22 个 `*.jsonl` / 4609 行、Codex 64 个 `rollout-*.jsonl` / 179776 行、`~/.gemini` 下 207 个文件）——**只输出计数、字段存在性与大小关系，未记录、未复述任何会话文本、代码、模型串或项目名**。本机 `~/.tokentracker` 全程未被改动。凡仍须真实语料（或运行时/线上部署）才能定的语义一律保留 `【未能确认】` 与判定条件。
+- 明确不在本文范围：逐 provider 的解析算法细节（Claude Code 与 Codex 两条主线除外，仅骨架层）、定价计算、Dashboard 前端渲染、云侧 ingest schema；三个原生壳的**取数链与日志落盘**已在攻坚阶段补读（§2、§9），壳内 UI 实现细节仍不在范围。
 
 ---
 
@@ -127,9 +133,9 @@
 | Node CLI | `bin/tracker.js`（60 行）+ `src/cli.js`（107 行）+ `src/commands/*` | 全部真实工作：init 装 hook、sync 采集上传、status 上报、serve 起服务 | `bin/tracker.js:5-59`、`src/cli.js:12-66` |
 | 本地 Dashboard 服务 | `src/commands/serve.js` + `src/lib/local-api.js` | 托管 React 产物与 SPA 回退、暴露本地 HTTP API；首次启动自动 `init --yes`；Windows 上跑 60s 后台轮询 | `src/commands/serve.js:69,80-90,257-260` |
 | React Dashboard | `dashboard/` | 展示层；只从本地 API 读队列行，不参与解析 | `src/lib/local-api.js:202-211` |
-| macOS Swift 壳 | `TokenTrackerBar/` | 自管唤醒循环（决定 serve 侧 60s 轮询是否启用） | 注释见 `src/commands/serve.js:248-256`；壳代码本轮未读 |
-| Windows .NET 壳 | `TokenTrackerWin/` | 托盘宿主，自带 5 分钟后台 sync 计时器；被托管时 serve 侧轮询让位 | 注释见 `src/commands/serve.js:305-309`；**壳内计时器【未能确认】** |
-| Linux Tauri 壳 | `TokenTrackerLinux/` | 壳层交付 | 实现细节本轮未读 |
+| macOS Swift 壳 | `TokenTrackerBar/` | 自管唤醒循环；只注入 `TOKENTRACKER_APP_SHELL=macos`，**serve 侧 60s 兜底分支根本不会进入**（该分支要求 `appShell === "windows"`，`src/commands/serve.js:304`） | 注释见 `src/commands/serve.js:248-256`；壳内注入 `TokenTrackerBar/TokenTrackerBar/Services/ServerManager.swift:203`（`:233` 是登录 shell 兜底分支） |
+| Windows .NET 壳 | `TokenTrackerWin/` | 托盘宿主，**自带 5 分钟后台 sync 计时器**（壳内实现已核实）；被托管时 serve 侧轮询让位 | 计时器 `TokenTrackerWin/TrayApplicationContext.cs:84`（Tick 绑 `:240`；服务就绪即启动并立即触发一次 `:965-971`，`Failed` 时停止 `:972-974`）；双环境变量注入 `TokenTrackerWin/ServerManager.cs:694,700`；Linux/Tauri 只有 `TOKENTRACKER_APP_SHELL=linux`（`TokenTrackerLinux/src-tauri/src/server.rs:700`） |
+| Linux Tauri 壳 | `TokenTrackerLinux/` | 壳层交付：Tauri 壳管理内嵌 server 生命周期，GNOME 扩展直连 HTTP 取数 | `src-tauri/src/server.rs`（server 记录/回收与日志路径轮转 `:587-604`、`:116`）、`gnome-extension/.../extension.js`（`BASE_URL` 与 `_getJson` 取数 `:18-19`、`:997`）；壳内 UI 实现细节仍未读 |
 
 Windows 侧一条平台特殊性：服务默认监听 `127.0.0.1:7680`，而 Windows 的 Delivery Optimization 服务占用 7680 并会接受 TCP 连接后丢弃 HTTP 请求，于是 WSL 下默认改用 `7681`；`EADDRINUSE/EACCES/EPERM` 时自动 +1 重试、最多 20 次（`src/commands/serve.js:14-22,679-714`）。**但 +1 回退只发生在默认启动**：显式传 `--port`（或 `PORT`）时 `allowFallback: !opts.portExplicit` 为假、并挂 `ensurePortFree`，端口被占即严格失败——打印 `buildPortInUseHint` 后 `process.exitCode = 1`（`src/commands/serve.js:209-224`）。
 
@@ -189,7 +195,7 @@ async function resolveTrackerPaths({ home = os.homedir() } = {}) {
     └── {codex,acode,code}_notify_original.json | openclaw-plugin/ | openclaw-hook/  # 用户原 notify / OpenClaw 插件与 legacy hook（后者仅探测与移除）
 ```
 
-一处缺口：任务清单里出现过的 `logs/`，在 `src/` 内**没有任何创建点**（全库检索 `path.join(<trackerDir>, "logs")` 类写入零命中）。它在 `~/.tokentracker/**` 下是否存在取决于本轮未读的三个原生壳——**【未能确认】**；判定条件：打开 `TokenTrackerWin/`、`TokenTrackerBar/`、`TokenTrackerLinux/` 检索日志目录常量。
+**`~/.tokentracker/logs/` 以仓库为准不存在**：路径解析器只产出四个目录，没有 `logs`（`src/lib/tracker-paths.js:5-11` 返回 `rootDir` / `trackerDir` / `binDir` / `cacheDir`），`src/` 内检索 `path.join(<trackerDir>, "logs")` 类写入**零命中**。三个原生壳的日志各落别处：Windows `%LOCALAPPDATA%\TokenTracker\windows-host.log`（`TokenTrackerWin/Diag.cs:11-13`，按大小轮转保留一代）、Linux `$XDG_STATE_HOME/tokentracker/server.log` → `$HOME/.local/state/tokentracker/server.log` → `/tmp/tokentracker-server.log`（`TokenTrackerLinux/src-tauri/src/server.rs:587-604`）、macOS 走 `os.Logger` 统一日志（不落普通日志目录）。此前把该目录记为未知，是因为三个壳未读；2026-10-14 攻坚阶段已读三壳源码，判定闭环。
 
 ---
 
@@ -344,7 +350,7 @@ const PRIORITY_LOCK_POLL_MS = 250;
 
 `waitForLock` / `drain` / `publishAccount` → **优先级等待** 90s，每 250ms 重试，超时抛 `SYNC_BUSY`；`fromNotify` → 走低频合并闸 `${lockPath}.notify-wait`，最多等 130s，保证「一次 notify 不丢 Codex 最后一轮」且避免几百个 notify 进程空转；其它（含 `--auto`）→ 立即返回 null：写 marker + stderr 一行，调用方 return，不抛错。
 
-锁文件协议本身比「PID + 超时」多两层（`src/lib/fs.js:69-74,296-306,206-224,105-144,342-368,264-275`）：常量 `LOCK_STALE_MS = 5min`、`LOCK_HEARTBEAT_MS = 30s`、`MAX_RECLAIM_DEPTH = 4`、`MAX_RECLAIM_SWEEP_DEPTH = 64`；加锁用 `fs.open(lockPath, "wx")`（O_EXCL 语义），锁文件与心跳文件都带**随机 token**（心跳路径 `${lockPath}.heartbeat.${sha256(token)}`），心跳 30s 一次并 `utimes` 两个文件、`timer.unref()`；回收判定先看 PID 是否存活（`process.kill(pid, 0)`，只有 `ESRCH` 算死，`EPERM` 保守当存活），再看 token 专属心跳是否超过 `LOCK_STALE_MS`，老格式锁（无心跳）退回 mtime 超期；回收动作本身用 `.reclaim` 次级锁串行化且**持闸后重新校验一次**（TOCTOU），释放时同样持闸且**只有 token 匹配才 unlink**。被 kill 留下的嵌套 `.reclaim` 闸会永久堵死后续加锁（issue #431），因此有一次性迭代清扫：从深到浅只删「owner 已死或心跳超期」的那一级（`:178-204`）。这套设计的价值在于把「这个锁还活着吗」从「PID 是否存活 + 时间阈值」解耦成「**这个 token 的心跳还新鲜吗**」——PID 复用与长时间健康运行因此不再混淆。
+锁文件协议本身比「PID + 超时」多三层（`src/lib/fs.js:69-74,296-307,117-136,244-254,342-368,264-275`）：常量 `LOCK_STALE_MS = 5 min`、`LOCK_HEARTBEAT_MS = 30 s`、`MAX_RECLAIM_DEPTH = 4`、`MAX_RECLAIM_SWEEP_DEPTH = 64`，外加释放侧过渡闸的 `TRANSITION_GUARD_RETRY_MS = 5` × `TRANSITION_GUARD_ATTEMPTS = 1000`（≈5 s 上限，`:73-74`、`:244-254`）。加锁是 `fs.open(lockPath, "wx")`（O_EXCL 语义）后写入 `{pid, token, createdAt}`，再以同样 `wx` 建心跳文件 `${lockPath}.heartbeat.${sha256(token)}` 并写入 token 本身（`:296-307`）；心跳 30 s 一次，同时 `utimes` 锁文件与心跳文件、`timer.unref()`（`:206-224`）。**陈旧判定是三分支**：① 锁文件里的 owner 进程不存在（`process.kill(pid, 0)`，只有 `ESRCH` 算死、`EPERM` 保守当存活）→ 即刻可回收；② owner 存活 → **只看该 token 专属心跳的 mtime** 是否超过 `LOCK_STALE_MS`，心跳文件读不到即判活（`:117-134`）；③ 锁文件没有可解析的 owner 记录（空文件 / 坏 JSON）→ 退回锁文件自身 mtime 超期（`:136`）。回收动作本身用 `.reclaim` 次级锁串行化且**持闸后重新校验一次**（TOCTOU），搬移用 `rename` 到 `.stale.<pid>.<uuid>` quarantine 名（原子），释放时同样持闸且**只有 token 匹配才 unlink**。另有一条独立于上述协议的路径：`updateJsonLocked` 用 `<file>.lock` 做读-改-写整体互斥，其唯一超时参数默认 **30 s**、10 ms 轮询（`:416-443`）。被 kill 留下的嵌套 `.reclaim` 闸会永久堵死后续加锁（issue #431），因此有一次性迭代清扫：从深到浅只删「owner 已死或心跳超期」的那一级（`:178-204`）。这套设计的价值在于把「这个锁还活着吗」从「PID 是否存活 + 时间阈值」解耦成「**这个 token 的心跳还新鲜吗**」——PID 复用与长时间健康运行因此不再混淆。
 
 **抢锁失败的可见化**（`src/commands/sync.js:484-506`）：
 
@@ -381,7 +387,7 @@ if (!skipNoOpCursorCommit) {
 | ② 目录去重 | `uniqueSources` 按 `sessionsDir` 去重 | `src/commands/sync.js:864-870` |
 | ③ 文件级 | Claude：`fileId = claudeFileIdentityHash(path, st)`（前 64 KB sha256 + size）；**只有「该文件从无游标（`!prev`）且本运行内该 `fileId` 已被先到的文件认领」时**，才标 `duplicateOf` 并把 offset 直接推到 `st.size`（`:1073-1081`）。**已有游标的重复文件不走这条**——它仍按正常增量解析，重复计数由第 ④ 层的消息哈希兜底 | `src/lib/rollout.js:937,1056-1105` |
 | ④ 事件/消息级 | Codex `sessionUUID:eventTimestamp`；Claude `${message.id}:${requestId}`（无 requestId 时退化为 `message.id`），持久化时截断到最近 10 万条 | `src/lib/rollout.js:292-295,4914-4919,1233-1237` |
-| ⑤ 同 session 多路径 | `needsHistoricalRolloutDedup` 强制改用持久化事件集合（本轮集合只知道本次运行写入的键） | `src/lib/rollout.js:428-461` |
+| ⑤ 同 session 多路径 | `needsHistoricalRolloutDedup` 强制改用持久化事件集合（本轮集合只知道本次运行写入的键）；末尾两层兜底——稳态四条件（单路径 + 同 inode + 未截断 + `startOffset > 0`）成立才返回 `false` 走廉价集合，否则**只要游标带累计基线 `prev.lastTotal` 就保守返回 `true`**（重扫会把已计过的事件再加一遍），只有新文件（无 `prev`）才返回 `false` | `src/lib/rollout.js:428-461`（兜底在 `:458-460`） |
 
 服务端也有对应保证：ingest 按桶键**整行 upsert**，因此重放幂等（`src/commands/sync.js:249-256` 注释）。
 
@@ -640,7 +646,7 @@ function isRolloutFileName(name) {
 | 首次见到 | 否 | — | 0 | 全新文件全量读 |
 | 稳态追加 | 是 | 否 | `prev.offset` | 只读尾部新增字节 |
 | 文件被截断/变小 | 是 | 是 | 0 | 重读全文 |
-| 游标缺 `lastTotal`（老格式） | 是 | 否 | 0 | `rebuildingCodexBaseline` 强制重建累计基线（`:493-500`）；原子替换（新 inode）则 `sameInode=false` → 起点 0、`lastTotal=null`，全量重读 |
+| 游标缺 `lastTotal`（老格式） | 是 | 否 | 0 | `rebuildingCodexBaseline` 强制重建累计基线（`:493-500`）：触发条件是**同 inode、未截断、已读过部分字节（`0 < prevOffset < st.size`）、但游标里的 `lastTotal` 缺失或不是对象**——Codex 的 `total_token_usage` 是累计快照，增量必须减去上次基线，基线没了只能从 0 重扫重建（连带 `lastTotal = null`、`tokenUsageBaselines = null`，`:501-507`；基线缺失的来源是 pre-#652 老游标，`:513-517`）。该判定在 `needsHistoricalRolloutDedup` 里是**第一优先**（`:436` 无条件 `return true`），所以「因基线缺失而重扫」必然携带持久事件去重集——**防累计快照差值口径断裂**与**防重扫双计**是这两条兜底各自解决的问题。原子替换（新 inode）则 `sameInode=false` → 起点 0、`lastTotal=null`，全量重读 |
 
 稳态短路（「文件没长就跳过」，`:538-555`）：
 
@@ -1510,7 +1516,7 @@ function totalsKey(totals) {                                           // src/li
 |------|----|------|------|
 | **A. 可从源码推出 $0 退化路径（3 家）** | `gemini` | `total = max(上报值, 分桶和)`（`4743`）+ 闸门把 `total_tokens` 当非零（`4945`、`2971`）→ 若日志只写 `tokens.total`，产出 input/output/cache 全 0 的队列行；此时 `thoughts` 同为 0，故该行**确实为 $0** | `4734`、`4743`、`2971`、`4945` |
 | ↑ 同 A 类 | `grok` | 归一化器**先取上报 `totalTokens`、仅当 ≤0 才回退求和**，唯一拒绝条件是 `total <= 0`（`grok-usage.js:63-71`）→ `usage = {totalTokens: N}`（分量字段缺失）即得「分量全 0、total=N」；消费侧**没有任何分量闸门**，把 `event.total_tokens` 等直接写进 delta 并落桶（`20217`–`20228`，`conversation_count: event.conversation_count \|\| 1`） | `grok-usage.js:63-71`、`20217`–`20228` |
-| ↑ 同 A 类 | `codex`（含 acode / every-code 同格式） | `normalizeUsage` 只对 input 做缓存减法、**total 原样保留**，注释自述保留理由包含「`some component fields are absent`」（`4873`–`4876`）；唯一前置拒绝是 `isCodexTotalOnlyResetSentinel`（`4881`–`4893`），它只拒「last 有 total 而累计 total 归零」这一特定 reset 形态，**不拒「分量全 0、total>0」的普通增量**；随后的闸门 `isAllZeroUsage` 也把 `total_tokens` 算作非零（`4945`–`4953`、`2553`）→ 同样落出 $0 行 | `4851`–`4879`、`4873`–`4876`、`4881`–`4893`、`2553` |
+| ↑ 同 A 类 | `codex`（含 acode / every-code 同格式） | `normalizeUsage` 只对 input 做缓存减法、**total 原样保留**，注释自述保留理由包含「`some component fields are absent`」（`4873`–`4876`）；唯一前置拒绝是 `isCodexTotalOnlyResetSentinel`（`4881`–`4893`），它只拒「last 有 total 而累计 total 归零」这一特定 reset 形态，**不拒「分量全 0、total>0」的普通增量**；随后的闸门 `isAllZeroUsage` 也把 `total_tokens` 算作非零（`4945`–`4953`、`2553`）→ 同样落出 $0 行。**本机真实语料已观测到该形态**（分量缺项而 total 有值；见下段语料证据） | `4851`–`4879`、`4873`–`4876`、`4881`–`4893`、`2553` |
 | **B. 弱化版（2 家）**：可产出 `input=0/output=0/reasoning>0`；因不在上述五家集合内，**不为 $0** | `goose` | `reasoningDelta = max(0, dTotal − dInput − dOutput)`（`14711`），`dTotal > 0` 即落桶，continue 条件为三项皆 0（`14686`） | `14711`、`14686` |
 | ↑ 同 B 类 | `kiro`（CLI 会话支路） | 会话支路零值闸门只检 4 列、**不含 reasoning**（`9414`），随后 delta 含 `total_tokens: … + reasoning`（`9446`）→ 同形；SQLite 支路有 `approx* > 0` 闸门（`9209`），不产该形态 | `9414`、`9446`、`9209` |
 | **C. 明确规避（3 家）** | `droid` | `applyDroidTotalFallback`（`14972`）把 total 缺口填进 `output` 或 `thinking`，结构性规避 | `14972`–`14979` |
@@ -1519,7 +1525,11 @@ function totalsKey(totals) {                                           // src/li
 | **E. 结构上不可能出现「六列全零 + total>0」（3 家）** | `zed`（`12598`、`12752`）、`hermes`（SQL `WHERE`，`7718`）、`opencode`（`3109`） | 限定：仅指上述六列全零形态；**Zed 在只有缓存列增长时仍会落出 `input=0/output=0/total>0` 的行**（`totalDelta` 只由 4 桶求和 `12751`、`<= 0` 跳过 `12752`），Cline 同理（`12403` 的 `total_tokens: deltaTotal`）——下游不得把 E 类读成无条件安全 | 括号内行号 |
 | **F. 未判定** | — | **0 家**（原唯一存疑的 Codebuddy 两条支路都有零值闸门，已并入 D 类） | `10345`、`10476`–`10485` |
 
-`【未能确认】` **A 类的真实触发频率**：本类是**条件形态**——「若日志里出现只写 total 的行，就会落出 $0 行」由源码可证，但三家（`gemini` / `grok` / `codex`）的日志里是否真会出现这种行、出现多少，本轮无真实语料，**不能读成「这三家一定在产 $0 行」**。判定条件：对三家各取一段真实会话日志（Gemini `session-*.json`、Grok `updates.jsonl`、Codex `rollout-*.jsonl`），统计「`total` > 0 且 input/output/cache/reasoning 全 0」的行占比；或用同形 fixture 跑对应 parser 后检查队列行。
+**A 类的真实语料证据（2026-10-14 攻坚补记；下列数字来源均为「本机真实语料统计」，全量只读扫描，不含任何会话内容）**：
+
+- **`codex`：已观测到该形态（弱化版）**。65381 对用量对象（`event_msg.token_count.info` 的 `last_token_usage` / `total_token_usage` 各 27802 对，加 `token_usage_record` 的 `usage` / `turn_token_usage` / `thread_token_usage` 各 3259 对）中，**321 对出现 `output_tokens == 0` 且 `total_tokens > input_tokens`**（`last_token_usage` 320 对、`total_token_usage` 1 对；差值范围 6456–205888）——「total 有值而分量缺项」在真实语料中确实存在，不是理论构造。**对 $0 风险的具体含义**：这 321 对仍带非零 input，所以它们本身不是 $0 行（成本不为 0），性质是**少计而非 $0**——`total` 与可计费分量之间的差额既不在 input 也不在 output，按分量计价的算式覆盖不到它；而 §5.6.1 A 类那一行正是「差额等于全部分量」时的极限情形，其成立前提（分量缺项 + `isAllZeroUsage` 把 `total_tokens` 计为非零）由同一批源码证据给出。
+- **`gemini`：本机语料不成立**。本机 `~/.gemini` 是 Antigravity 布局（207 个 `.jsonl`+`.json` / 8052 行），**total 类键 0 命中**，分量字段 `input_tokens` / `output_tokens` 在 3632 行上 100% 非零（仅 `cache_read_tokens` 有 132 行为 0），「只写 total、分量全 0」的行 **0 行**。限定：本机没有经典 Gemini CLI 的 `tmp/**/chats/session-*.json` 语料，该形态在经典布局上仍无样本可验。
+- **`grok`：本轮未取语料**，真实触发频率仍未确认。判定条件不变：统计 `updates.jsonl` 中「`total > 0` 且 input/output/cache/reasoning 全 0」的行占比，或用同形 fixture 跑对应 parser 后检查队列行。
 
 **数据库 / API 子集的对照结论**：这一子集里**确实存在「只填 total 而不填 input/output」的家**，不能一概说「没有任何一家」——
 
@@ -1542,9 +1552,16 @@ function totalsKey(totals) {                                           // src/li
 
 **反例（易误报）**：`craft` **不会**产生该形态——`17199`–`17212` 在四分量 delta 全 0 时直接 `continue`，走到 `17243`（`conversation_count: prev.total === 0 ? 1 : 0`）时至少一个 token 分量 > 0。
 
-影响：该桶的 `conversation_count` 会增加，但所有 token 列为 0 → 该会话行的成本贡献为 $0。该行是否最终入队还取决于 `enqueueTouchedBuckets` 的 `queuedKey` 比较（`3325`–`3347`），但**桶 totals 确实被改动了**。
+影响：该桶的 `conversation_count` 会增加，但所有 token 列为 0 → 该会话行的成本贡献为 $0。**该行确实会入队**（只读实验已证实，见下段）；零值行不会被 `pickDominantModel` 或 `queuedKey` 短路吞掉——`pickDominantModel` 只要组内存在非 `unknown` 模型名就返回该名，与 token 是否为 0 无关，而 `totalsKey` 指纹包含 `conversation_count`（`3325`–`3347`、`4155`–`4171`），所以「token 全 0 但会话数 +1」本身就是一次有效变更。
 
-`【未能确认】` **trae-cn 真实响应里是否真会出现 `input_token=0` 且 `output_token=0` 的会话行**：源码层「允许」已确认，真实频率未知。**判定条件**：取得一次真实 `query_user_usage_group_by_session` 响应样本（含全部 token 字段为 0 的会话行），或用同形 fixture 跑完整 `parseTraeCnApiIncremental` 并检查队列是否出现全零 `total_tokens` 且 `conversation_count = 1` 的桶行。
+**全零行入队的实验依据（2026-10-14 攻坚补记）**：以合成 fixture 直接加载样本仓导出函数跑完整解析（`node` 只读，未改样本仓、未触碰真实日志），两条都从「源码允许」升级为「已验证」：
+
+| 项 | 实验形态 | 结果 |
+| --- | --- | --- |
+| **A11 `qoder`（新 JSONL）** | 单行 assistant 记录 + 三种 `usage`：`{billable:true, credits:3}`（无任何 token 字段）、`{billable:true, input_tokens:0, output_tokens:0, …}`（显式全零）、`{billable:false, credits:3}`（对照） | 前两组均 `messagesProcessed:1, eventsAggregated:1, bucketsQueued:1`，队列写出 **1 行**全零 totals + `conversation_count: 1`，模型名取真实模型（非 `unknown`）；对照组 0 行（`billable:false` 被 `:6639`–`6660` 分支挡住） |
+| **A12 `trae-cn`** | 三条会话行：全零会话 / 正常用量会话 / 缺 `model_name` 的全零会话 | 全零会话 `recordsProcessed:1, eventsAggregated:1, bucketsQueued:1, skippedRows:0` → 队列 **2 行**：桶行（六列全 0、`conversation_count: 1`）+ 一条同样全零的 `kind:"account_session_state"` 控制记录；缺 `model_name` 时模型回落 `trae-cn-unknown`，**仍写全零桶行**；`skippedRows: 0` 说明该形态不会被动 `fail-closed` 拦住 |
+
+`【未能确认】`（已收窄）**trae-cn 真实响应里全零会话行的出现频率**：fixture 路径已证明「会完整落盘」，剩下的只是频次问题。**判定条件**：取得一次真实 `query_user_usage_group_by_session` 响应样本，统计全部 token 字段为 0 的会话行占比。
 
 #### 5.6.3 缓存字段（`cache_read` / `cache_write`）落空的分布
 
@@ -1580,6 +1597,8 @@ function totalsKey(totals) {                                           // src/li
 
 **历史坑（必读）**：早期 Cursor 行把 `billable_total_tokens` 写成 0，导致聚合侧「把非计费 Cursor 用量整体隐藏」，因此有一次性的局部修复与重算（`src/lib/local-api.js:179`–`182` 注释）。**结论：这个字段是「可计费口径」的开关，任何「写 0 而不是留空」的实现都会污染聚合结果。**
 
+**云侧补记（2026-10-14 攻坚）**：`billable_total_tokens` 是**桶行**的列，**不是榜单口径**——云端榜单聚合链（`leaderboard_hourly_dedup_v2` → `tokentracker_leaderboard_rollup_daily_v2` → `..._rollup_total_v2` → grouped RPC）**完全不读它**（`migrations/20260817120000_account-session-states.sql:202-248`、`migrations/20260904064000_cache-leaderboard-total-rollup.sql:53-85`），该列在 `migrations/` 下只出现在隔离拷贝、归档与账号级去重三处。仓库内的服务端脚本 `scripts/ops/billable-total-tokens-migration.sql` **全文 7 行**：只加 `billable_total_tokens bigint` 与 `billable_rule_version smallint` 两列 + 一个部分索引，**不写值**；`billable_rule_version` 全仓**无写入方**。守护它的 `test/billable-total-tokens-migration.test.js` 只有 9 行、**不注册任何 `test()`**，靠 `npm test`（`node --test test/*.test.js`，`package.json:41`）的 glob 随套件执行，两条顶层断言仅到「SQL 文本里含这两个字段名」——**它不是语义校验**；服务端回填语句不在本仓（取值只由客户端与 ingest 产生）。
+
 #### 5.6.5 `conversation_count` 语义不可比（各家口径清单）
 
 同一列名称在 45 家里至少有 **10 种语义**（下表逐行列出，其中两行来自 §6 的两条主线——claude 与 codex——不再单列），dashboard 若直接当「会话数」展示会同时高估与低估：
@@ -1612,7 +1631,7 @@ function totalsKey(totals) {                                           // src/li
 #### 5.6.7 给下游（TokenScope 侧）的检查清单（按优先级）
 
 1. **不要把 `conversation_count` 当可加指标**：45 家里至少 10 种语义（§5.6.5），跨来源汇总必然同时高估与低估；需要「会话数」时按 `source` 分别定义，或自行从请求明细派生。
-2. **`total_tokens > 0` 不等于「有分桶」**：**至少 3 家**可产 $0 行（§5.6.1 A 类：`gemini` / `grok` / `codex`），另有**至少 5 处**「全零 token 仍落桶」的解析器构造点（§5.6.2：`qoder` 新旧两套 / `trae-cn` / `claude` 用户轮次桶 / `reasonix`），外加写入端的撤回与对齐零行（§4.6、§5.6.2 末）。解析侧应把「非零桶全为 0 而 total > 0」显式判为异常行并计数——TokenTracker 自己只做丢弃/放行，**不做标记**。
+2. **`total_tokens > 0` 不等于「有分桶」**：**至少 3 家**可产 $0 行（§5.6.1 A 类：`gemini` / `grok` / `codex`），另有**至少 5 处**「全零 token 仍落桶」的解析器构造点（§5.6.2：`qoder` 新旧两套 / `trae-cn` / `claude` 用户轮次桶 / `reasonix`），外加写入端的撤回与对齐零行（§4.6、§5.6.2 末）。本机语料统计给这条加了两侧证据：Codex 侧已观测到**分量缺项的弱形态**（65381 对里 321 对 `output_tokens == 0` 且 `total_tokens > input_tokens`），Gemini 侧（Antigravity 布局）**未观测到** total-only 行——所以这条既不是纯理论，也不是「三家都在产 $0 行」。解析侧应把「非零桶全为 0 而 total > 0」显式判为异常行并计数——TokenTracker 自己只做丢弃/放行，**不做标记**。
 3. **缓存列 0 有两种含义（真无缓存 vs 存在但不可得）**：`gemini`、`qoder`(旧)、`copilot`(App DB)、`antigravity` 属后者（§5.6.3）。若用「缓存命中率」做展示，须按来源区分，否则会给出「该模型从不缓存」的错误结论。
 4. **`billable_total_tokens` 必须走兜底而不是写 0**：`?? total_tokens` 兜底（`4110`）与 Cursor 的历史修复（`src/lib/local-api.js:179`–`182`）都指向同一结论（§5.6.4）。
 5. **模型名是展示名，不是计价键**：`kilo-code` 只报 `provider:<slug>`（`11730`）、`kimi` 一族来自配置文件（`9540`）、`trae` 与 `antigravity` 会做别名改写（`trae-usage.js:98`–`105`、`rollout.js:21929`–`21949`）——必须先做等价归一（小写 + 去 `-` / `.` / `_`）再匹配价格。
@@ -1706,7 +1725,7 @@ return {
 
 关键不对称：**`total_tokens` 用未减 reasoning 的 output 计算**，而 output 列已拆走推理——两列互补，保证 `input + cached + cacheCreate + output + reasoning == total`（`test/claude-reasoning-usage.test.js:44` 显式断言）。`toNonNegativeInt`（`:4964`）把非有限值与负数吸收为 0、其余 `Math.floor`，所以小数/负 token 都落成确定值。缓存字段只认两个名字：Claude 路径读 `cache_read_input_tokens` / `cache_creation_input_tokens`（`:4927-4928`），**不兼容** `cache_write_input_tokens` 别名；别名兜底只存在于 Codex 路径（`src/lib/codex-token-usage.js:25-27`）。
 
-【未能确认】跨 provider（Kimi/DeepSeek/Mimo/MiniMax 等 anthropic 兼容端点）若用 `cache_write_input_tokens` 写缓存写量，Claude 路径会静默丢为 0。判定条件：统计 Claude 会话行里该键的出现率——同行为 `cache_write_input_tokens` 非 0 且缺 `cache_creation_input_tokens` 才成立；两者同时出现或同时缺失则实际影响为零。现无真实样本，只记为条件性风险。
+**【条件性风险，本机语料不成立】**跨 provider（Kimi/DeepSeek/Mimo/MiniMax 等 anthropic 兼容端点）若用 `cache_write_input_tokens` 写缓存写量，Claude 路径会静默丢为 0。本机真实语料统计（22 个 Claude `*.jsonl` / 4609 行、1520 条 assistant 行）：`message.usage.cache_write_input_tokens` **0 行命中、0 次两键同现**，而 `cache_creation_input_tokens` 出现在全部 1520 条 assistant 行（其中 1164 条非零）——本机不存在「两键并存导致漏计/双计」的形态。**判定条件保留**（对使用该别名的第三方端点统计）：「`cache_write_input_tokens` 非 0 且缺 `cache_creation_input_tokens`」的行占比，命中才升级为确定性丢量。
 
 零用量与写入判定（`:2861-2865`）：`normalizeClaudeUsage` 后 `isAllZeroUsage(delta)` 为真则整行跳过（`:4945` 定义，六桶全 0 才算），且 **assistant 行的 `conversation_count` 恒置 0**。会话计数只来自 user 文本行（`:2810-2831`）：仅主会话、`type === "user"`、`message.content` 是字符串或含 `{type:"text"}` 块之一 → `conversation_count += 1`，并记进 `unknown` 模型桶（`:2831` 的 `const userModel = DEFAULT_MODEL;`），与 token 桶分离；只有 `tool_result` 块的工具结果行被明确排除（`:2807-2809` 注释）。
 
@@ -1963,6 +1982,8 @@ const rawDelta = consumeUsageDelta(usageDeltaState, lastUsage, totalUsage);
 
 `total` 与 `last` 的选择顺序：`total_token_usage` 非空对象时刷新 `latestTotal`（`src/lib/rollout.js:2547`）——它是**文件级权威累计**；增量取 `consumeUsageDelta(state, lastUsage, totalUsage)`；若事件推进了累计谱系但被判重复，返回 `null` 且**游标/基线仍已推进**（注释 `:2570-2571`：`usageDeltaState is already advanced above`），保证后续行血缘正确。测试语义（`test/rollout-parser.test.js:104-158`）：4 条 `token_count`、第 2 与第 4 条是同一累计值的重复推送，断言 `eventsAggregated === 2`、`bucketsQueued === 1`、`model === "unknown"`、队列合计等于 `usage1 + usage2` 的 `total_tokens` 之和；注释逐字：`The cumulative total_token_usage value is authoritative for a file; if it did not move, the repeated last_token_usage must not be counted again.`（`:105-107`）
 
+**本机语料的落地口径（2026-10-14 攻坚补记；数字来源＝本机真实语料统计，全量只读扫描）**：64 个 rollout / 179776 行——`total_token_usage` 与 `last_token_usage` **100% 同现**（各 27802 条，单侧出现 0 条）；`total` 是累计量（52 个含 ≥2 点的文件中 **49 个单调不减**，3 次回退为 −2965231 / −3780242 / −34082848，属跨会话/段重置量级），`last` 是逐请求增量（同口径下 36 个文件出现过回退，值域 −39…−204437）。**把 `total_token_usage` 逐条累加会把约 2000 倍用量重复计入**：本机 `total_tokens` 求和 9,740,950,476,478 vs 增量字段求和 4,578,527,502（比值 ≈ **2128**；只比 output 列则 35,351,865,647 vs 16,395,234 ≈ 2156）——**累计字段只能取末值，逐事件累加只能用增量字段**（`last_token_usage` / `token_usage_record.payload.usage`）。跨形态交叉校验同向：`sum(payload.usage.total_tokens)` 与 `thread_token_usage.total_tokens` 最终值在 17 个同时含两形态的文件里 **16 个精确相等**（1 个偏差 >5%）。
+
 #### 6.2.4 compaction 计费：`token_usage_record`
 
 ```js
@@ -2042,6 +2063,8 @@ const reasoningCost = reasoningIncludedInOutput
 
 变量名本身就是判据："reasoning **已含于** output"。`computeRowCost` 中 reasoning 相关项共 3 处（`:254` 基础费、`:297-299` 长上下文溢价、`:325-327` priority 溢价），**三处全部用同一个门控**——没有漏掉、也没有反向叠加，因此不存在双计路径。
 
+**本机真实语料给同一结论补了实证（2026-10-14 攻坚补记，数字来源＝本机真实语料统计）**：65381 对用量对象（六键形态固定、`reasoning_output_tokens` 与 `output_tokens` 100% 同现）中 **`reasoning_output_tokens > output_tokens` 零反例**，比值上界 **1.0000**，其中 `reasoning > 0` **60715 对**、`reasoning == output` 328 对。因此「reasoning 是 output 的子集标记」从**源码推断**升级为**源码 + 本机语料双重证据**；本机也不存在任何「reasoning 需与 output 分别计价或相加」的证据。
+
 Claude 侧写法**相反**（`src/lib/rollout.js:4930-4939`，逐字节选）：
 
 ```js
@@ -2072,7 +2095,9 @@ Claude 原生 output **同样**包含推理，但工具选择**显式拆出**，
 
 规则：`turn_context.payload.model` → `selectedModel`，并清 `rerouted`（`:82-92`）；`session_meta.payload.model` **只在 `selectedModel` 为空时**采纳，且**永不覆盖** `turn_context`（`:96-102`，注释指出 fork 会重放父级 `session_meta`）；`thread_settings_applied` **被刻意排除在模型归属之外**（`:11-15`）——UI 选择领先生效数秒到分钟，正在流出的用量仍属上一模型。实测量级（注释给出）：`0 of 10310 session_meta rows across 5849 local rollouts carry the field (codex-cli 0.151.0)`（`:18-20`）。调用点在 `src/lib/rollout.js:2476-2477`，模型状态**持久化进文件游标**（`modelAttributionState`，`:639`），跨增量续用，初值由 `lastModel` 注入（`:2320-2322`）。
 
-【未能确认】`model/rerouted` 分支从未在真实语料验证（`src/lib/codex-model-attribution.js:47-51` 自述命中 0）；一旦被真实触发，其 8 种信封形态与字段名（`fromModel/toModel/from_model/to_model`）都属推断。判定条件：检索本机 rollout 中是否出现 `model/rerouted` / `model_rerouted`。
+**本机语料实测（2026-10-14 攻坚补记，数字来源＝本机真实语料统计）**：78 条 `session_meta` 中 `payload.model` 命中 **0 条**（与上游注释的 0 命中同向），模型串另有落点 `base_instructions.provenance.model`（**30/78** 条）；`turn_context.payload.model` 出现在 **62/64 个文件**；两侧可比（同文件既有 provenance 又有 `turn_context`）的 **21 个文件中 20 个一致**、1 个不一致；**4 个文件在同一文件内出现 2 个不同 `turn_context.model` 值**（58 个文件单值、2 个文件无该字段）——**「每文件单一模型」的隐含假设不成立**，模型归属必须按 `turn_context` 逐轮推进。
+
+**`model/rerouted` 已由本机语料确认不存在**：64 个 rollout / 179776 行逐行匹配 `rerouted` 子串 **0 命中**（`model/rerouted` 与 `model_rerouted` 两种写法均为 0），与 `src/lib/codex-model-attribution.js:47-51` 的自述一致。限定仍然成立：该分支一旦在未来版本被真实触发，其 8 种信封形态与字段名（`fromModel/toModel/from_model/to_model`）仍属**推断**，不得当作已验证事实引用。
 
 #### 6.2.8 provider / base_url 不进桶键
 
@@ -2097,7 +2122,7 @@ const PRIORITY_SERVICE_TIERS = new Set(["priority", "fast"]);
 
 归属规则：`a token_count row belongs to the most recent preceding thread_settings_applied`（`:12-13`）；无前置记录即 `null`，`null` **按 Standard 计**，从不猜（`:12-15`）。落桶是**子集标记**而非独立桶（`src/lib/rollout.js:4073-4088` 的 `PRIORITY_SUBSET_FIELDS`：`priority_input_tokens` / `priority_cached_input_tokens` / `priority_cache_creation_input_tokens` / `priority_output_tokens` / `priority_reasoning_output_tokens`）；注释（`:4067-4072`）强调这些列**永不参与任何求和**，`total_tokens` 仍等于五桶之和，为零时整列省略。
 
-【未能确认】覆盖率数字（1213 个本地文件中 167 个带该事件、覆盖 25% 的 `token_count`；`default` 814 / `priority` 58）出自上游源码注释里的**维护者本机语料观测**，非本次实测，不能外推为任意用户环境。判定条件：在本机 `~/.codex/sessions/**` 重跑同样计数（分母 = 含 `token_count` 的文件数，分子 = 含 `thread_settings_applied` 的文件数）。代码侧规则与结构（归属、`null` 按 Standard、子集列不参与求和）本次逐行核对通过。
+**本机语料实测（2026-10-14 攻坚补记；数字来源＝本机真实语料统计，全量只读扫描）**：64 个 rollout / 179776 行中，含 `thread_settings_applied` 的文件 **32/64（50.0%）**、该类型事件 **445 条**（其中 12 条无 `service_tier` 键），值分布 **`default` 385 / `priority` 48**。落点路径是 `event_msg.payload.thread_settings.service_tier`（`token_count` / `token_usage_record` 的 payload 直层**不含**该字段；另有 4 次出现在 `response_item` 的工具参数 schema 里，属非用量字段，应排除）。按「归属最近一条前置 `thread_settings_applied`」归类，27822 条 `token_count` 事件为 **`default` 19174 / `priority` 960 / 无前置记录 7688**（无前置记录按标准档计，从不猜）。**上游注释里的「1213 个本地文件 / 167 命中 / 覆盖 25%、`default` 814 / `priority` 58」是维护者另一套环境的观测，不可外推**——本机同一口径给出的是 50%（32/64），这本身就是「环境相关」的证据；引用任一数字都必须标注语料来源。代码侧规则与结构（归属、`null` 按 Standard、子集列不参与求和）已逐行核对通过。
 
 #### 6.2.10 家族关系：Every Code / OmO / acode / cline
 
@@ -3069,7 +3094,7 @@ cost = 150 000 / 1_000_000    = 0.150000 USD
 | 7 | `-usage-category-breakdown` | GET | `from`,`to`,`source` | 类别分解（可带降级标注） | 语义类别 | `:2668` |
 | 8 | `-wrapped` | GET | `year` | `scope,excluded_sources,` + 年度结构 | 年度报告 | `:2330` |
 | 9 | `-outcomes` | GET | `from`,`to` | `available,by_model,by_tool,totals` | 产出质量 | `:2441` |
-| 10 | `-context-health` | GET | — | `computeContextHealth({home,cwd,env})` 原样 | 上下文健康 | `:2526` |
+| 10 | `-context-health` | GET | — | `computeContextHealth({home,cwd,env})` 原样，**无包装无额外键**：`generated_at`、`estimated_fixed_tokens`、`severity`（high≥50000 / medium≥20000 / 否则 low）、`breakdown{instruction_files,instruction_tokens,skills,skill_tokens,mcp_servers,mcp_schema_tokens}`、`largest_items[]`（按估算 token 倒序取前 **10**，元素 `{kind,name,bytes,estimated_tokens}`，`kind ∈ {instruction,skill}`）、`provenance{confidence:"inferred",source:"local-config-metadata",mcp_assumption{tools_per_server,tokens_per_tool_schema},content_retained:false}` | 上下文健康 | `:2526-2530`；结构 `src/lib/context-health.js:91-118` |
 | 11 | `-session-insights` | GET | `from`,`to`,`refresh`,`include_sessions`,`format=csv` | `from,to,` + 会话摘要 | 会话效率 | `:2470` |
 | 12 | `-sessions` | GET | `from`,`to`,`refresh`,`limit` | `from,to,` + 会话浏览结果 | 会话浏览器（本地专用） | `:2500` |
 | 13 | `-project-usage-summary` | GET | `from`,`to`,`tz*`,`limit` | `generated_at,entries[]` | 项目汇总 | `:2731` |
@@ -3081,7 +3106,7 @@ cost = 150 000 / 1_000_000    = 0.150000 USD
 | 19 | `-pets` | GET/POST | GET `scope=codex`；POST `install_url\|remove\|import_codex` | `pets[],hiddenBuiltinIds[]` 或 `importable[],codexDetected` | 桌宠 | `:3192` |
 | 20 | `-user-status` | GET | — | `user_id,email,name,is_public,pro{},account{}` | 本地 stub 用户态 | `:2920` |
 | 21 | `-cloud-session` | POST | `{clear?,session_id?,expectedOwnerId,insforgeBaseUrl?}` | `session_id,device_id,created_at` | 云会话 | `:2137` |
-| 22 | `-local-sync` | POST | 多个布尔开关（`auto`/`background`/`lightweight`/`drain`/`publishAccount`/`allLocalSources`/…） | 成功 `ok,uploaded,pending,next_allowed_at?`；失败 `ok:false,error,code,recovery_url,next_allowed_at,retry_after_seconds,stdout,stderr` | 触发同步 | `:2166` |
+| 22 | `-local-sync` | POST | 多个布尔开关（`auto`/`background`/`lightweight`/`drain`/`publishAccount`/`allLocalSources`/…） | 成功是**顶层展开**：`{ok:true, code, stdout, stderr, uploaded, pending, next_allowed_at?}`（子进程结果 `code/stdout/stderr` + 云端访问 `uploaded/pending/next_allowed_at?`；**全库不存在 `syncResult` 键**，该名字只在 `dashboard/src/lib/cloud-sync.test.ts` 里作为测试局部变量出现）；失败 `ok:false,error,code,recovery_url,next_allowed_at,retry_after_seconds,stdout,stderr` | 触发同步 | `:2166`；成功组装 `:2313-2322`；失败 `:2324` |
 | 23 | `-cloud-sync-pref` | GET/POST | POST `{enabled}` | GET `enabled,account_available`；POST `ok,enabled` | 云同步开关 | `:2940` |
 | 24 | `-machine-id` | GET | — | `machineId,deviceName`（deviceName = 主机名，截断 128） | 设备标识 | `:3137`、`:31-41` |
 | 25 | `-telemetry-pref` | GET | — | `disabled` | 心跳偏好 | `:3121` |
@@ -3099,7 +3124,7 @@ cost = 150 000 / 1_000_000    = 0.150000 USD
 | `/api/pets/local/:id/spritesheet.webp`、`/api/pets/codex/:id/spritesheet.webp` | GET/HEAD | — | `image/webp` + `no-cache` + `nosniff` | `:1698`、`:1724` |
 | `/api/pets/import` | POST | body 上限 `pets.MAX_PACKAGE_BYTES` | 导入结果 | `:1747` |
 | `/api/auth-bridge/verifier` | GET/PUT/POST | body `{native:boolean}` | `{native}`（一次性读取，TTL 5 分钟） | `:1767-1788` |
-| `/api/auth/*` | 任意 | 透传到 InsForge；`refresh\|logout` 有 csrf/relay 特例 | 上游响应原样 | `:1792` 起 |
+| `/api/auth/*` | 任意 | 透传到 InsForge；**8 条转发规则**（`local-api.js:1792` 起全段）：①**入口预检**（先于 OPTIONS）——`origin`/`referer` 须为 `http:` 且主机 ∈ {127.0.0.1, localhost, ::1}，或 `sec-fetch-site: cross-site` → 403 `untrusted_auth_origin` ②浏览器自带 cookie 存在时用本实例捕获的 relay 集**覆盖**，不存在则清空该头 ③`x-csrf-token` 与 relay 值不等 → 删除；`/api/auth/refresh` 在 relay csrf 存在且非回退分支时**强制改用 relay csrf** ④relay 注入条件 `p !== "/api/auth/refresh" \|\| hasClientCookie \|\| hasEffectiveCsrfHeader` ⑤**relay 回退**（cookie-less 客户端）：refresh + 无客户端 cookie + 有持久化 refresh token → 改打 `?client_type=mobile`、body 换 `{refresh_token}`、**禁用** relay cookie 注入 ⑥**stale-CSRF 救援**：refresh 得 403 且响应体匹配 `/invalid csrf token/i` → 去掉 cookie 与 csrf 头重放一次 ⑦响应侧：`set-cookie` 的 `Domain=` 一律重写为 `Domain=localhost`，**仅 2xx 才捕获** relay cookie（3xx/4xx 的删除型 set-cookie 不得破坏在效会话）；`logout` 清空 relay ⑧**一致性闸门**：`apikey` 必须等于 runtime `anonKey`，baseUrl/anonKey 或账号会话代际变化 → 409（`instance_changed` / `auth_session_changed`） | 上游响应原样 | `:1644-1657`、`:1809-1841`、`:1864-1869`、`:1884-1907`、`:1922-1942` |
 | `/api/avatar-proxy` | GET | `?url=` | 图片字节（内存 LRU：1h TTL、512 KiB/条、64 条） | `:2038`、`:43-48` |
 | `/api/geoip/`、`/api/geoip-batch`、`/api/iprisk/`、`/api/dns/result/` | 任意 | 代理到 `ip.net.coffee` 对应接口 | 上游响应 | `:1973-1976` |
 | `/proxy/ipcheck` | 任意 | 透传到 `https://ip.net.coffee`，剥离 hop-by-hop 头 | 上游响应 | `:939-1001` |
@@ -3147,6 +3172,7 @@ cost = 150 000 / 1_000_000    = 0.150000 USD
 | `usage-heatmap.streak_days` | 本地端点**硬编码 0**（见 9.3.3） | `:2588` |
 | `category-breakdown` 降级 | `codex` 分支总量为 0 时改用队列行降级口径，返回带 `breakdown_status:"queue_fallback"`、`fallback:"queue_totals"`，并声明 `includes_content=false`/`includes_inputs=false` | `:2692-2698`、`:329-395`（`:376-379`、`:386-389`） |
 | `-sessions` 的本地性 | 注释写明 LOCAL ONLY 且 never proxied to the cloud account view；出错时把 fs 错误挡在响应体外（避免绝对路径泄漏），只回 `{available:false, error:"Session browser failed"}` | `:2495-2499`、`:2509`、`:2516-2521` |
+| `-session-insights` / `-sessions` 的 `usage_precision` | 取值域是**七态**：`"reported"` / `"reported_incomplete"` / `"estimated"` / `"mixed"` / `"unavailable"` / `null` / `undefined`（末者只出现在写入侧 `\|\| undefined`，序列化后等于键缺失）。**前端类型联合缺 `"estimated"`**（只声明四态 + `null`），而 `estimated` 由 `trae` 与 `grok` 两条路径真实写入；前端目前只以真值判断消费该字段（不区分精度种类） | `src/lib/session-analytics.js:1155`、`:1338`、`:1730`、`:2640`、`:2709`；`src/lib/trae-usage.js:94`；`src/lib/rollout.js:20286`；`dashboard/src/lib/sessions-api.ts:113` |
 
 ### 9.3 Dashboard 如何消费
 
@@ -3280,7 +3306,7 @@ cost = 150 000 / 1_000_000    = 0.150000 USD
 
 仅 `npm run dev` 时存在：插件**直接读 `~/.tokentracker/tracker/queue.jsonl`**（`dashboard/vite.config.js:418` 注释、路径常量 `:570`），复刻主链的 last-wins 去重与 codex 旧行修正（`:572-604`：`seen.set(\`${row.source||""}|${row.model||""}|${row.hour_start||""}\`, normalizeQueueRow(row))`），并自带日聚合（`:610-639`）。**它不复制价格表**——通过 `createRequire(import.meta.url)` 直接 require 同一份 `src/lib/pricing`（`getModelPricing`/`computeRowCost` 均来自该模块），`:508-514` 注释逐字写明「Per-model pricing — delegated to `src/lib/pricing/` (CJS)」。唯一已知差异：dev mock 对**按模型聚合后的 totals 只计一次价**（`:1052-1057`），与 `src/lib/local-api.js:2634-2640` 修掉的写法相同，仅影响 dev。
 
-`【未能确认】` dev 中间件对外暴露的具体路径前缀集合（判定条件：读 `configureServer` 的 `server.middlewares.use(...)` 注册串）。
+**dev 中间件的前缀集合已核实（2026-10-14）**：只有一个 `configureServer`（`dashboard/vite.config.js:1200`）与一次 `server.middlewares.use(...)`（`:1202`），按三档分流——①**走本 checkout 的 `createLocalApiHandler`** 的精确路径共 14 条：`/api/local-auth`、`/functions/tokentracker-pets`、`/functions/tokentracker-subscription-manager`、`/api/pets/import`、`/api/pets/local/`（前缀）、`/api/pets/codex/`（前缀）、`/functions/tokentracker-project-usage-summary`、`-project-usage-detail`、`-achievements`、`-session-insights`、`-context-health`、`-outcomes`、`-sessions`、`-skills`（`:1208-1242`）；②其余 `/functions/` 前缀先交给 dev mock，未识别则 `proxyToLocalCli` 原样转发到 `http://127.0.0.1:7680`（`:1249`、`:1141-1151`），不可达时回 502（`:1161-1168`）；③其余路径 `next()`（`:1259`）。**该中间件对外的前缀集合 = `/functions/`（全量前缀）+ 4 条非 `/functions/` 路径**；`/api/auth` 不在其中，由 vite 原生 `server.proxy` 转发到云端 `backendConfiguration.baseUrl`（`changeOrigin: true`、`cookieDomainRewrite: ""`，`:1341-1347`），另有 `/proxy/ipcheck` → `https://ip.net.coffee`（`:1332-1336`）；`historyApiFallback` 另把 `/functions/*` 重写为自身，避免 SPA 兜底吞掉 API（`:1321-1325`）。
 
 ### 9.4 数据导出与分享、成就与宠物等衍生面
 
@@ -3469,11 +3495,15 @@ Windows 偏好 17680 的理由是三条约束的交集（源码注释逐字，`T
 
 菜单栏/弹出层由 `StatusBarController`（1507 行）与 `DashboardViewModel`（1151 行）驱动，后者是唯一取数状态机。小组件（`TokenTrackerWidget/`）**不联网**，读 App Group 里的快照：容器 `group.com.tokentracker.bar`、文件 `widget-snapshot.json`、schema 版本 2（`TokenTrackerBar/Shared/WidgetSnapshot.swift:18-30`）；字段含 `serverOnline`、`today`/`last7d`/`last30d`/`total`/`selected` 的 `PeriodTotals`、`dailyTrend[]`、`topModels[]`、`sources[]`、`heatmap`、`limits[]`（`:35-66`）；写入时机为 `DashboardViewModel.loadAll()` 后 `WidgetSnapshotWriter.update(from:capturedAt:)` 原子写入并 `WidgetCenter.reloadAllTimelines()`（`WidgetSnapshotWriter.swift:54-110`）。**唯一直接触碰本地文件的路径**是活动监听（不解析内容）：`QueueActivityMonitor` 以 `O_EVTONLY` 打开 `queue.jsonl` 监听写入/替换，第二实例监听 `queue.state.json` 发布「上传完成」（`QueueActivityMonitor.swift:1-36`）。
 
+**小组件快照的版本与刷新契约（2026-10-14 攻坚，已核实）**：**不存在 schemaVersion 的兼容迁移分支**——读取侧对版本做**严格相等**过滤（`snapshot.schemaVersion == WidgetSharedConstants.snapshotSchemaVersion`，`Shared/WidgetSnapshot.swift:362`；函数注释自述「decoding fails (e.g. schema mismatch from an old install)」即返回 `nil`，`:354-356`），`Shared/` 下 `CodingKeys` / `decodeIfPresent` / 自定义 `init(from:)` 三项检索**零命中**，所以旧版本快照只要缺一个必填键就整体解码失败 → provider 回落 `.placeholder` / `.empty`（`StaticSnapshotProvider.swift:20,25`）。刷新分三层：写侧每次成功写盘即 `WidgetCenter.shared.reloadAllTimelines()`（`WidgetSnapshotWriter.swift:108-110`），另有 4 处设置桥消息（`locale` / `currency` / `currencySymbol` / `exchangeRate`）触发全量重载（`NativeBridge.swift:452,457,468,484`）；写侧节奏被注释标为「pre-existing five-minute widget freshness contract」（`WidgetSnapshotWriter.swift:36-38`，`hasConfiguredWidgets()` 失败方向为「宁可刷新」），小组件自身时间线请求的下一次刷新是 **`.after(now + 15 分钟)`**（`TokenTrackerWidget/Providers/StaticSnapshotProvider.swift:24-29`）。**WidgetKit 系统侧的实际刷新预算/节流在仓库内零证据**——「`reloadAllTimelines()` 之后系统多久真刷一次」需运行时观测或 Apple 文档。
+
 #### 9.6.3 Windows：宿主定端口，托盘自建 HttpClient
 
-端口由宿主决定：`Port = PickServerPort()`、`BaseUrl => http://127.0.0.1:{Port}`（`ServerManager.cs:12-20`、`:34-38`、`:157`）；健康循环 30 s、启动等待 20 s（`Constants.cs:14-18`）。托盘取数用 `UsagePoller`（自建 `HttpClient`，`UseProxy=false`，6 s 超时，`:38-40`）：`FetchLimitsAsync` → `-usage-limits`（`:182-187`）；`FetchAsync` → `-usage-summary?from&to...`（`:226-250`）；`FetchHeatmapAsync` → `-usage-heatmap?weeks=52&tz...&account=...`（`:316-328`）；`FetchTopModelsAsync` → `-usage-model-breakdown?...`（`:340-354`）。UI 与桥接：`DashboardWindow.cs`（WebView2，1235 行）、`WidgetWebViewEnvironment.cs`、`QuotaWidgetWindow.cs`（配额小组件）、`TrayApplicationContext.cs`（托盘与菜单）、`LocalSyncPublisher.cs`（同步结果广播）。宿主还驱动后台同步（`ServerManager.cs:313` 在服务器就绪后发布），与 CLI 侧 `TOKENTRACKER_NATIVE_SYNC_OWNER=windows-host` 判定互斥（`src/commands/serve.js:305-309`），避免双份自动采集。
+端口由宿主决定：`Port = PickServerPort()`、`BaseUrl => http://127.0.0.1:{Port}`（`ServerManager.cs:12-20`、`:34-38`、`:157`）；健康循环 30 s、启动等待 20 s（`Constants.cs:14-18`）。托盘取数用 `UsagePoller`（自建 `HttpClient`，`UseProxy=false`，6 s 超时，`:38-40`）：`FetchLimitsAsync` → `-usage-limits`（`:182-187`）；`FetchAsync` → `-usage-summary?from&to...`（`:226-250`）；`FetchHeatmapAsync` → `-usage-heatmap?weeks=52&tz...&account=...`（`:316-328`）；`FetchTopModelsAsync` → `-usage-model-breakdown?...`（`:340-354`）。UI 与桥接：`DashboardWindow.cs`（WebView2，1235 行）、`WidgetWebViewEnvironment.cs`、`QuotaWidgetWindow.cs`（配额小组件）、`TrayApplicationContext.cs`（托盘与菜单）、`LocalSyncPublisher.cs`（同步结果广播）。宿主还驱动后台同步（`ServerManager.cs:313` 在服务器就绪后发布），与 CLI 侧 `TOKENTRACKER_NATIVE_SYNC_OWNER=windows-host` 判定互斥（`src/commands/serve.js:305-309`），避免双份自动采集：**该环境变量只由 Windows 壳注入**（`ServerManager.cs:694,700`，且仅对 `serve` 参数、非 native-only WSL 分支），macOS（`ServerManager.swift:203`）与 Linux（`server.rs:700`）只注入 `TOKENTRACKER_APP_SHELL`，因此 **serve 侧的一分钟兜底只有 Windows 壳这一条路径会进入**（`serve.js:304` 的 `normalizedShell !== "windows"` 直接 `return null`）。
 
-`【未能确认】` `TokenTrackerWin/QuotaWidgetWindow.cs` 的数据来源（判定条件：读该文件；推测同为本地 API 或经 `UsagePoller` 推送，未验证）。
+**5 分钟计时器在壳内、且已核实**：`TrayApplicationContext.cs:84` 定义 `_syncTimer` 间隔 `5 * 60 * 1000`，Tick 绑 `TriggerBackgroundSync`（`:240`）；只在本地服务状态转 `Running` 时启动并**立即触发一次**（`:965-971`），`Failed` 时停止（`:972-974`）。`src/commands/serve.js:305-309` 注释的三句（托盘自持 5 分钟计时器／接收完成事件／并行会造成两个独立 sync 生产者争 `sync.lock`）**逐句属实**：完成事件订阅在 `TrayApplicationContext.cs:234-235`，回流 UI 在 `:996-1006`。
+
+**`QuotaWidgetWindow` 的数据来源已核实——「本地 API 取数 + 轮询器推送」，组件自身零取数**：`UsagePoller.FetchLimitsAsync` → `GET /functions/tokentracker-usage-limits`（`UsagePoller.cs:182-195`，取数在 `:187`）→ `RaiseLimitsUpdated`（`:155`）→ `TrayApplicationContext.OnLimitsUpdated`（`:1014-1024`）→ `_quotaWindow.ApplyLimits(json)`（`:1022`）→ 组件 `ApplyLimits`（`QuotaWidgetWindow.cs:126-131`）→ `PushContext` 发 `{type:"quota:context", limits, failed, selected, locale, light}`（`:396-409`）。组件只做 WebView2 导航到 `${BaseUrl}/quota.html?app=1`（`:389-394`）与 postMessage 注入；前端 `dashboard/src/quota.jsx` 只监听 `quota:context`、只发 `quota:ready` 等控制消息，**全文零 `fetch`**（`:17-27`、`:71`）。失败态同样不来自组件自建请求（`LimitsFailed` 事件 → `MarkFailed()`，`TrayApplicationContext.cs:238`、`QuotaWidgetWindow.cs:151-155`）；轮询是否包含限额由可见性决定（`UpdateLimitsPolling`：`IncludeLimits = 宠物可见 \|\| 配额组件启用`，`TrayApplicationContext.cs:286`；取数在 `UsagePoller.cs:144-158`）。
 
 #### 9.6.4 Linux：Tauri 壳 + GNOME 扩展
 
@@ -3532,24 +3562,24 @@ Tauri 壳 `src-tauri/src/server.rs` 负责 spawn/记录/回收内嵌 server（�
 
 要与其他工具对账 TokenTracker 的数字，按此顺序定位分歧命中率最高：**① 时区基准**（`wrapped` 恒 UTC；Dashboard 与三端壳按传参 tz；裸调 API 分两族）；**② 去重语义**（本地 last-wins vs 云端批内 MAX）；**③ token 口径**（`billable_total_tokens` vs `total_tokens`）；**④ 来源范围**（`scope` 是否含账号级来源 `cursor`/`trae-cn`；账号视图是跨设备去重而非相加）；**⑤ 是否账号视图**（看 `X-TokenTracker-Account-View` 与 `-Fallback` 头）；**⑥ 成本来源**（本地逐行计价求和 vs 云端自带定价实现）。
 
-#### 9.7.4 本章未能确认项与判定条件
+#### 9.7.4 本章未确认项与判定条件（含 2026-10-14 攻坚结案追记）
 
-| # | 未确认内容 | 判定条件 |
+| # | 事项 | 结论 / 仍未确认部分的判定条件 |
 | --- | --- | --- |
-| 1 | Windows 托盘在本地模式下「连续天数」的实际显示值（源码可证本地端点恒 0、托盘直读该字段） | 运行 Windows 壳 → 非账号视图 → 观察托盘/小组件；若显示真实值则说明另有来源 |
-| 2 | 云端 `tokentracker-account-heatmap.ts` 是否返回真实 `streak_days` | 读该文件全篇，或账号视图下抓响应体查 `streak_days` |
-| 3 | `-local-sync` 成功响应中 `syncResult` 的具体键名 | 读 `src/commands/sync.js` 的 drain 返回值；本章只确认 `{ok, uploaded, pending, next_allowed_at?}` 与失败形状（`src/lib/local-api.js:2322`、`:2324`） |
-| 4 | `-context-health` 的字段结构 | 读 `src/lib/context-health.js` |
-| 5 | `/api/auth/*` 的完整转发规则（cookie relay、csrf 优先级、relay 回退条件） | 读 `src/lib/local-api.js:1792-1940` 全段 |
-| 6 | `src/lib/git-outcomes.js` 的「只用 subject 检测 revert」是否逐行成立 | 读该模块并与 `docs/PRIVACY.md:21` 对照 |
-| 7 | Vite dev 中间件对外暴露的路径前缀集合 | 读 `dashboard/vite.config.js` 中 `configureServer` 的中间件注册串 |
-| 8 | `usage-limits` 的 provider 计数口径；`ark` 两家与 `qoder` 两家是否共用凭据 | 读 `:4055` 解构段与 `:4406-4440`、各 `*-limits.js` 凭据读取 |
-| 9 | 榜单/社区表的 SQL 细节 | 读 `scripts/ops/*.sql`、`migrations/` |
-| 10 | 「compressed usage metrics 可长期保留」的保留期限数值 | 源码/文档未见最终数值；`docs/cloud-usage-archive.md:74-83` 明确未启用 |
-| 11 | macOS 小组件刷新频率与快照 schemaVersion 2 的兼容迁移细节 | 读 `WidgetSnapshotWriter.swift` 与 Widget 侧读取段 |
-| 12 | `TokenTrackerWin/QuotaWidgetWindow.cs` 的数据来源 | 读该文件；推测同为本地 API 或经 `UsagePoller` 推送，未验证 |
+| 1 | Windows 托盘在本地模式下「连续天数」的实际显示值（源码可证本地端点恒 0、托盘直读该字段） | 仍未确认：运行 Windows 壳 → 非账号视图 → 观察托盘/小组件；若显示真实值则说明另有来源 |
+| 2 | 云端 `tokentracker-account-heatmap.ts` 是否返回真实 `streak_days` | 仍未确认：读该文件全篇，或账号视图下抓响应体查 `streak_days` |
+| 3 | `-local-sync` 成功响应中 `syncResult` 的具体键名 | **已结案（前提不成立）**：**全库不存在 `syncResult` 键**（该名字只在 `dashboard/src/lib/cloud-sync.test.ts` 里作为测试局部变量），成功响应是**顶层展开** `{ok:true, code, stdout, stderr, uploaded, pending, next_allowed_at?}`——见 §9.2.3 第 22 行 |
+| 4 | `-context-health` 的字段结构 | **已结案**：直接回写 `computeContextHealth(...)` 的返回值，无包装无额外键（六个顶层键与本文件行号见 §9.2.3 第 10 行） |
+| 5 | `/api/auth/*` 的完整转发规则（cookie relay、csrf 优先级、relay 回退条件） | **已结案**：8 条规则逐条可核对——入口预检、cookie relay 覆盖、csrf 优先级、注入条件、mobile 回退、stale-CSRF 救援、响应侧 `Domain=localhost` 重写与「仅 2xx 才捕获」、一致性闸门 409（见 §9.2.4） |
+| 6 | `src/lib/git-outcomes.js` 的「只用 subject 检测 revert」是否逐行成立 | 仍未确认：读该模块并与 `docs/PRIVACY.md:21` 对照 |
+| 7 | Vite dev 中间件对外暴露的路径前缀集合 | **已结案**：**`/functions/`（全量前缀）+ 4 条非 `/functions/` 路径**（`/api/local-auth`、`/api/pets/import` 两条精确路径，加 `/api/pets/local/`、`/api/pets/codex/` 两条前缀）；`/api/auth` 由 vite 原生 proxy 转发、不在此中间件内（见 §9.3.8） |
+| 8 | `usage-limits` 的 provider 计数口径；`ark` 两家与 `qoder` 两家是否共用凭据 | **源码侧已结案**：18 个并发位 ↔ `data` 17 家，差额的去向是 `claudeServiceStatus` **不是独立 provider**，而是挂到 `claude.service_status` 的**子字段**（仅 `claude.configured === true` 且 `indicator !== "none"` 时挂载，`src/lib/usage-limits.js:4279-4280`；无 token 时探针直接 `Promise.resolve(null)`，`:4183-4185`）。**Ark 两家共用同一凭据族**（同一 `arkcli` 二进制、同一 `usage plan --format json` 命令、同一 `~/.arkcli` 配置目录族，仅按 `product` 过滤区分）；**Qoder 两家不共用**（appDir / envPrefix / 站点 / 缓存命名空间 / CLI 凭据模块全部分离，`src/lib/qoder-limits.js:819-827`）。**账号层面的同一性仍未确认**（两家 Ark / 两家 Qoder 是否指向同一订阅账号）；附带口径提醒：`data` 里统一后加的 `provenance.stale` 门槛是 `ageMs > 10 分钟`（`:4442-4461`），与 Claude 侧 5 分钟磁盘缓存不是同一尺度 |
+| 9 | 榜单/社区表的 SQL 细节 | **仓库内已结案**：**没有 SQL 视图**，链路是 `tokentracker_hourly` → 小时级去重函数 `leaderboard_hourly_dedup_v2`（键 `(user_id, COALESCE(machine_cluster_id, device_id::text), source, model, hour_start)`；簇内先 `DISTINCT ON … ORDER BY total_tokens DESC, updated_at DESC` 取整行、再跨簇 SUM）→ UTC 日物化表 `..._rollup_daily_v2` → 全时段物化表 `..._rollup_total_v2`（三条语句级触发器增量维护）→ RPC `leaderboard_usage_grouped{,_total_shard}`（UUID 区间 8 片、`statement_timeout 8s`）。两条必须记住的口径：**聚合层不读反作弊表**（异常排除走封禁迁移 / 快照协调 / 社区统计整账号排除 / edge 内存过滤四条外部路径）、**榜单链不读 `billable_total_tokens`**；账号级来源不走设备过滤（`cursor` 整行 MAX、`trae-cn` 改从 `tokentracker_account_session_states` 求和，其 hourly 行永不进榜）。**仓库外未确认 5 项**：托管库基础表 DDL、`..._rollup_daily_v2.pricing_tier` 列由仓库外变更添加、`detect_leaderboard_anomalies()` 正文、`machine_cluster_id` 写入方、`billable_*` 服务端回填语句 |
+| 10 | 「compressed usage metrics 可长期保留」的保留期限数值 | 仍未确认：源码/文档未见最终数值；`docs/cloud-usage-archive.md:74-83` 明确未启用 |
+| 11 | macOS 小组件刷新频率与快照 schemaVersion 2 的兼容迁移细节 | **迁移已结案**：**不存在迁移分支**（读取侧严格相等过滤、解码失败即整体 `nil`，见 §9.6.2）；**系统侧刷新预算仍未确认**：需运行时观测或 Apple 官方文档（仓库内零证据） |
+| 12 | `TokenTrackerWin/QuotaWidgetWindow.cs` 的数据来源 | **已结案**：本地 API 取数 + `UsagePoller` 推送，组件自身零取数（完整推送链与行号见 §9.6.3） |
 
-上述 12 项均不影响本章已给结论：每条结论要么有源码行号支撑，要么已在本表标明边界。
+上表已按 2026-10-14 攻坚结果分区：#3 / #4 / #5 / #7 / #12 全结案，#8 / #9 在源码与仓库范围内结案（剩余的是账号层面与仓库外数据库事实），#11 迁移部分结案、系统刷新频率仍需运行时证据；仍未确认的条目都写明判定条件，且都不影响本章已给结论。
 
 ## 10. 与 TokenScope 的对照：可抄与需避
 
@@ -3563,7 +3593,7 @@ Tauri 壳 `src-tauri/src/server.rs` 负责 spawn/记录/回收内嵌 server（�
 
 问题：多个生产者（hook 触发的 sync、后台轮询、本地 API 触发的 sync、自动重试）会同时抢跑同一份解析，还要处理 `kill -9` 残留、PID 复用、以及「回收残留锁」这个动作自身的互斥。
 
-要点（`src/lib/fs.js:69-74,284-414`）：`LOCK_STALE_MS = 5 min`、`LOCK_HEARTBEAT_MS = 30 s`、`MAX_RECLAIM_DEPTH = 4`、`MAX_RECLAIM_SWEEP_DEPTH = 64`（`:69-72`）。
+要点（`src/lib/fs.js:69-74,284-414`）：`LOCK_STALE_MS = 5 min`、`LOCK_HEARTBEAT_MS = 30 s`、`MAX_RECLAIM_DEPTH = 4`、`MAX_RECLAIM_SWEEP_DEPTH = 64`，释放侧过渡闸另有 `TRANSITION_GUARD_RETRY_MS = 5` × `TRANSITION_GUARD_ATTEMPTS = 1000`（≈5 s 上限）（`:69-74`）。
 ```js
 const handle = await fs.open(lockPath, "wx");        // O_EXCL 语义
 const token = crypto.randomUUID();
@@ -3571,7 +3601,7 @@ const heartbeatPath = heartbeatPathFor(lockPath, token);   // ${lockPath}.heartb
 await handle.writeFile(JSON.stringify({ pid: process.pid, token, createdAt }) + "\n", "utf8");
 ```
 - 心跳 30s 一次，同时 `utimes` 锁文件与心跳文件，`timer.unref()`（`:206-224`）。
-- 回收判定：先看 PID 是否存活（`process.kill(pid, 0)`，`ESRCH` 才算死，`EPERM` 保守当作存活），再看 **token 专属心跳**是否超过 `LOCK_STALE_MS`；老格式锁（无心跳）退回 mtime 超期判断（`:105-144`）。
+- 回收判定是**三分支**：① owner 进程不存在（`process.kill(pid, 0)`，`ESRCH` 才算死，`EPERM` 保守当作存活）→ 立即可回收；② owner 存活 → 只看 **token 专属心跳的 mtime** 是否超过 `LOCK_STALE_MS`（心跳文件读不到即判活）；③ 锁文件没有可解析的 owner 记录（空 / 坏 JSON）→ 退回锁文件自身 mtime 超期（`:105-144`、`:117-136`）。同族的 `updateJsonLocked`（`<file>.lock`）用的是同一个 `openLock`，其唯一超时参数默认 **30 s**、10 ms 轮询（`:416-443`）。
 - 回收动作本身用 `.reclaim` 次级锁串行化，且**持闸后重新校验一次**（TOCTOU，`:342-368`）。
 - 释放时同样持闸，**只有 token 匹配才 unlink**（`:264-275`）；先关句柄再删文件（Windows 上文件被打开时无法 unlink）。
 
@@ -3700,7 +3730,7 @@ const recordNewEvent = (key) => {
 };
 const getAppendOnlyEvents = () => ({ has: (key) => Boolean(newEventKeySet?.has(key) || seenEvents?.has(key)), add: recordNewEvent });
 ```
-关键在**何时选历史视图**（`:428-461`）：只有「单路径 + 同 inode + 未截断 + 有历史 offset」四条同时成立才允许走廉价的本轮集合；四条之后还有两条兜底——`if (prev?.lastTotal) return true;`（`:459`）与 `return false;`（`:460`）。含义是：稳态四条件不成立时，**只要游标里带着 `prev.lastTotal`（Codex 累计基线）就仍然动用持久集合**。【未能确认】`:459` 这条兜底的确切动机源码未加注释，推测与 `rebuildingCodexBaseline` 那条「从 0 重读」的路径有关。
+关键在**何时选历史视图**（`:428-461`）：只有「单路径 + 同 inode + 未截断 + 有历史 offset」四条同时成立才允许走廉价的本轮集合；四条之后还有两条兜底——`if (prev?.lastTotal) return true;`（`:459`）与 `return false;`（`:460`）。含义是：稳态四条件不成立时，**只要游标里带着 `prev.lastTotal`（Codex 累计基线）就仍然动用持久集合**。**【`:459` 的动机已核实（2026-10-14）】**：稳态四条件不成立、且游标带着累计基线 `prev.lastTotal` 时，说明该文件此前确实被解析过——此时任何重扫都会把已计入的事件再加一遍，所以保守返回 `true` 强制启用持久事件集；而真正触发重扫的 `rebuildingCodexBaseline`（同 inode、未截断、`0 < prevOffset < st.size`、`lastTotal` 缺失 → 起点归 0）在 `needsHistoricalRolloutDedup` 里是**第一优先判据**（`src/lib/rollout.js:436` 无条件 `return true`）。两者协同的结果是：**凡因基线缺失而重扫的轮次必然携带持久去重集**——`:459` 兜底防的是「累计快照差值口径断裂后重扫双计」，不是冗余判断，可在移植时照抄。
 
 两套身份键（按 provider 不同粒度）：Codex 用 `sessionUUID:eventTimestamp`（`:292-295`）；Claude 用 `claudeMessageDedupKey = msgId ? (reqId ? \`${msgId}:${reqId}\` : msgId) : null`（`:4914-4919`），持久化时截断到最近 10 万条（`:1233-1237`）。
 
@@ -3933,7 +3963,7 @@ const BACKGROUND_AUTO_SYNC_SOURCES = new Set(["acode", "codex", "every-code", "r
 11. **测试专用钩子进入生产函数签名**（`context.traeCnFetchImpl`、`context.cursorSyncDeps`、`context.scanSources`，`src/commands/sync.js:519-538`）。成本低但持续污染 API 表面积；更干净的做法是把依赖收进一个 `Deps` 结构体，或用 `#[cfg(test)]` / 依赖注入容器统一管理。
 12. **依赖 `st.ino` 的变化来检测原子替换**（`src/lib/rollout.js:489-492`）。在 inode 语义不可靠的环境（某些网络盘、容器叠加文件系统、WSL UNC）上 `ino` 可能恒为 0 或恒定，导致「替换后从 0 重读」的检测失效，此时只能靠事件哈希兜底。**建议：把「文件身份」做成可配置策略（inode → file-id → 内容抽样哈希），并在启动诊断里显示实际采用的策略。**
 13. **把 Windows 侧 7680 端口占用交给「WSL 默认换端口 7681」**（`src/commands/serve.js:15-21`）。这是对 Delivery Optimization 服务行为的补偿性绕行，但仍会与其它占用 7681 的进程冲突。**建议：端口发现走「嗅探 + 用户可见提示」，而不是固定的 +1 规则。**
-14. **`status` 的 `hookStatus` 传参里有 3 个键在 passive 判定中永不使用**（`src/commands/status.js:1024-1036` 传入 **11 键**，`detectPassiveProviders` 只消费 8 个：`claude`/`gemini`/`codex_notify`/`acode_notify`/`every_code_notify`/`codebuddy`/`workbuddy`/`workbuddy-ai`；未消费的是 `opencode_plugin`、`openclaw_session_plugin`、`grok`，消费面 `src/lib/passive-mode.js:93-186`），以及 `workbuddy-ai` 这个带连字符的特殊键名。另有一处**双向漂移**：`passive-mode.js:88-90` 的 JSDoc 自述形状是 `{claude, gemini, codex, every_code, opencode, openclaw, codebuddy, workbuddy, grok}`——JSDoc 里的 `opencode`/`openclaw`/`grok` 并未被实现读取，实现真正读的 `acode_notify`/`workbuddy-ai` 又不在 JSDoc 里。这类「传参与消费不一致」的接口会随 provider 增加持续腐化。**建议：hook 状态用显式 provider 枚举 + 结构体，编译期保证双方一致（Rust 的 enum 天然能做到）。**
+14. **`status` 的 `hookStatus` 传参里有 3 个键在 passive 判定中永不使用**（`src/commands/status.js:1024-1036` 传入 **11 键**，`detectPassiveProviders` 只消费 8 个：`claude`/`gemini`/`codex_notify`/`acode_notify`/`every_code_notify`/`codebuddy`/`workbuddy`/`workbuddy-ai`；未消费的是 `opencode_plugin`、`openclaw_session_plugin`、`grok`，消费面 `src/lib/passive-mode.js:93-186`），以及 `workbuddy-ai` 这个带连字符的特殊键名。另有一处**双向漂移**：`passive-mode.js:88-90` 的 JSDoc 自述形状是 `{claude, gemini, codex, every_code, opencode, openclaw, codebuddy, workbuddy, grok}`——JSDoc 里的 `opencode`/`openclaw`/`grok` 并未被实现读取，实现真正读的 `acode_notify`/`workbuddy-ai` 又不在 JSDoc 里。这类「传参与消费不一致」的接口会随 provider 增加持续腐化。**2026-10-14 复核补充**：实现里的三个**别名键** `codex` / `acode` / `every_code`（`hookStatus?.codex_notify ?? hookStatus?.codex` 那种写法）**只存在于实现、`status.js` 从不传入**，是**死回退**；`passive-mode.js:88-90` 的 JSDoc 还漏记了实现确实使用的第三个形参 `env`（`:93`、`:132`、`:176`）。因此「传 11 键」与「消费 8 键」的关系应读成**8 家有效 + 3 家冗余**（且 8 条 entry 与 8 个消费键严格对齐，`:97-184`），不是「11 家中有 3 家漏读」。**建议：hook 状态用显式 provider 枚举 + 结构体，编译期保证双方一致（Rust 的 enum 天然能做到）。**
 15. **关键常量双份定义、无测试绑定**。`OPENAI_LONG_CONTEXT_INPUT_THRESHOLD` 在 `src/lib/pricing/index.js:31` 定义并 `:375` 导出，但**在本文件内从未被读取**；真正生效的是 `src/lib/codex-rollout-parser.js:51` 的另一份同名常量（用于 `:733`）。两处目前都是 `272_000`，改一处不另一处不会有测试失败。同类：半小时桶的 `toUtcHalfHourStart` 有两份实现（`src/lib/rollout.js:4173-4190` 与 `src/lib/claude-categorizer.js:1175-1191`，**语义等价、文本不同**），`test/` 下两个测试都只指向 `rollout.js` 那份，副本**无人测**——真值修复与增量解析一旦分叉，队列会出现两套时间分桶。
 16. **「不变量」式识别若无对等回归测试，会静默双计**。Codex 侧的 reasoning 不并入 output 依赖 `src/lib/pricing/index.js:248-256` 的 `source` 白名单硬编码（`codex`/`acode`/`every-code`/`omo`/`cline`）；一旦上游新增一个 `*-code` 变体而白名单漏加，就会**静默双计**每条 reasoning token，而现有测试全绿（`test/claude-reasoning-usage.test.js:45-47` 只锁定了 Claude 的「列分布可换、费用不变」）。**建议白名单改为结构性判定**（如 `source.endsWith("-code") || source === "codex"`）并补对等断言。
 17. **回退链的本地/云端能力不对等**。云端 `computeRowCost`（`dashboard/edge-patches/tokentracker-leaderboard-refresh.ts:569-613`）只有纯四桶 + 条件性推理折叠，**没有**长上下文 / Fast 溢价分支；该表与 `curated-overrides.json` 存在 **9 键**差集，其中 `grok-build-free`（本地 $0 vs 云端按 `grok-build` = 1.25/2.5/0.2 计）与 `grok-4.5-build-free`（本地 $0 vs 云端 `cursor-grok-4.5` = 2/6/0.5）是**价格层面的实际分歧**。parity 测试（`test/edge-pricing-parity.test.js:76-85`）只做 edge↔edge 字节比对，**不含**「edge ⊇ curated」断言，抓不到这类漂移。
@@ -4022,51 +4052,77 @@ TokenTracker 的去重分层达七层，其中两个概念 TokenScope 目前没�
 
 ## 12. 未验证项与风险清单
 
-分类口径：**A**＝需运行时/真实语料才能判定；**B**＝需外部信息（上游 API、线上部署、真实壳行为）；**C**＝已知设计缺陷（有源码证据但当前版本未修）；**D**＝已结案（列出结论）。每条给判定条件。
+分类口径：**A**＝需运行时/真实语料才能判定；**B**＝需外部信息（上游 API、线上部署、真实壳行为）；**C**＝已知设计缺陷（有源码证据但当前版本未修）；**D**＝已结案（列出结论）；**E**＝本机真实语料实证（新增证据层）。
+
+> **本轮 OPEN-Q 攻坚更新（2026-10-14）**：针对 A / B 两类存疑做了四路只读攻坚（W1 源码补读 / W2 壳与 API · SQL / W3 真实语料统计 / W4 只读实验），依据 `tokentracker-draft/OPENQ-W1-source-reads.md`、`OPENQ-W2-shells-api.md`、`OPENQ-W3-corpus-stats.md`、`OPENQ-W4-experiments.md`。结果：**A 类 18 条中 12 条已判定（其中 A16 迁入 C 类）、1 条部分解决（A7）、5 条维持；B 类 10 条中 4 条已判定、6 条维持**。A / B 两节据此拆为「已判定」与「部分解决 / 尚需判定」两张子表；判定条件未关闭的条目保留原文并补上本轮给出的更强判定路径。各路计数与处置见 §13.9。
 
 ### A. 需运行时或真实语料才能判定（18 条）
 
-| # | 事项 | 判定条件 |
-| --- | --- | --- |
-| A1 | **Claude 增量游标无行边界提交**：`const endOffset = st.size;` 共 3 处（`src/lib/rollout.js:2291`、`:2682`、`:2793`），只有 `:2793` 落到 token 游标（`:1194`）。若同步瞬间读到半行，`readline` 会 yield 未闭合尾行、`JSON.parse` 失败被吞（`:2843-2847`），游标仍推进到文件尾，该行字节被跳过。非对称性：Codex 的 token 路径用 `committedEndOffset`（`:2652`），连项目上下文扫描位也做了提交保护（`:2765`），OpenClaw 另有 `openclawOffsetEndsAtLineBoundary`（`:1949`）——**只有 Claude 一条路径完全没有** | 构造「写入半行 JSONL → 跑 `parseClaudeIncremental` → 补全该行 → 再跑」的定向测试，看补全后的行是否被计入。**注意收窄**：该跳过会在该文件下次 inode 变化或截断时被全量重扫抵消（`:488-504` 的三态判定重置 `startOffset=0`），准确说法是「本代文件内不可恢复」而非严格永久 |
-| A2 | **Claude 缓存字段别名未兼容**：`src/lib/rollout.js:4927-4928` 只读 `cache_creation_input_tokens`，而 `src/lib/codex-token-usage.js:25-27` 侧存在 `cache_write_input_tokens` 写法。anthropic 兼容端点（Kimi/DeepSeek/Mimo/MiniMax）若用别名，缓存写会被静默丢为 0 | 统计这些 provider 的合成 fixture 或真实样本里 `cache_write_input_tokens` 的出现率；若该字段非 0 而 `cache_creation_input_tokens` 缺失，即为确定性丢量 |
-| A3 | **`<synthetic>` 模型行**：全库 3 处出现（`src/lib/session-analytics.js:101` 集合、`:621-624`、`:1968-1971` 注释），无显式 usage 处理 | 在本机 `~/.claude/projects/**` 里检索 `"model":"<synthetic>"` 并看同行 usage 是否非零；若非零，面板会出现名为 `<synthetic>` 的模型行 |
-| A4 | **`legacyGroups`/`groupQueued` 分支对现有安装是否死代码**：`src/lib/rollout.js:3181-3194,3430-3480` 存在「整小时聚合成 `model=DEFAULT_MODEL`」路径，`src/commands/sync.js:216-220` 注释说 `groupQueued` 的存在本身就是 legacy 标记 | 构造含 `groupQueued` 的 v1 游标 fixture，跑 `enqueueTouchedBuckets` 观察输出行数与模型名；若不写该键则为死代码，若会写则存在与修复意图冲突的再膨胀路径 |
-| A5 | **同批内同键双行的覆盖方向**：`readQueueBatch`（`src/commands/sync.js:4422-4512`）在同一批内用 `bucketMap.set(...)` 覆盖，取决于文件顺序 | 构造同键双行（旧在前、新在后）的队列 fixture 直接跑 `readQueueBatch`，确认是否以旧覆盖新 |
-| A6 | **压缩与上传 offset 的交互边界**：`compactPendingQueue` 只重写 `[offset, size)` 并原样复制 `[0, offset)`（`src/lib/upload-queue.js:97-110`） | 测「pending 区出现跨行边界残缺（写者正在写）时 `iterateQueueLines` 的行为」与「压缩后 offset 恰落在文件末尾」的边界（`input.close()` 与 `fs.stat` 校验之间存在窗口） |
-| A7 | **`multiInstallParse` 异常分支的写回语义** | 读 `src/lib/multi-install-parser.js:49-54` 并构造异常路径 fixture |
-| A8 | **`claudeHashes` 10 万上限的淘汰窗口**：`src/lib/rollout.js:1236-1237` 超限保留最后 10 万；`fileId` 第二层去重只在「同一次运行内同时看到 `\\wsl$` 与本地路径」时启用（`sawUncFile && sawLocalFile`，`:1035`） | 构造 >100k 哈希 + 同内容双路径的用例，验证是否双计 |
-| A9 | **`rebuildingCodexBaseline` 与 `prev.lastTotal` 兜底**（`src/lib/rollout.js:459`） | 读 `:459` 附近上下文与 `rebuildingCodexBaseline` 路径，确认兜底动机 |
-| A10 | **Copilot 三通道互斥完备性**：三份实现共用 `source = "copilot"`，靠 `usageClaims`（OTEL↔store）、`shouldCountCopilotAppSession`（app-db 跳过 CLI/VS Code）、`usageClaimsComplete` 三重机制分工 | 给出 `test/copilot-app-parser.test.js` 与 `test/copilot-session-store-parser.test.js` 的**交叉通道用例断言清单**（含「同时活跃」场景的输入与期望输出）；缺该清单则维持未确认 |
-| A11 | **`qoder(new)` 全零 token 行是否真的入队**：`src/lib/rollout.js:6639-6660` 构造 `conversation_count = 1`（token 全 0）的 totals 并 `addTotals` 到桶，是否入队取决于 `totalsKey` 比较（`:3325-3347`） | 以 fixture 复现「billable 零 token 行」跑完整 `parseQoderNewIncremental` + 入队，检查队列行是否出现全零 `total_tokens` 且 `conversation_count = 1` |
-| A12 | **`trae-cn` 真实响应是否出现全零会话行**：源码层「允许」已确认（`src/lib/rollout.js:22477-22492` 只校验 `Number.isSafeInteger(value) && value >= 0`，`:22500-22508` 写全零 totals，`:22749-22751` 无零值护栏直接 `addTotals`） | 取得一次真实 `query_user_usage_group_by_session` 响应样本（含全零 token 字段的会话行），或用同形 fixture 跑完整 `parseTraeCnApiIncremental` 并检查桶行 |
-| A13 | **`reasonix` 跨 home 重复计数**：`reasonixHomeCandidates` 同时返回 `~/.reasonix` 与 `%APPDATA%\reasonix`（`src/lib/rollout.js:16925-16934`），`resolveReasonixTelemetryFiles` 只去重**路径**（`:16970-16975`），**没有按 inode/内容去重**（对比 Copilot 的 `uniqueCopilotDbPaths` 用 `dev:ino`） | Windows 上实测双目录并存且互为拷贝时的表现 |
-| A14 | **`trae` 的 `T_STORE` 冲突裁决在三份以上拷贝时**：冲突规则只处理「两份拷贝」（`src/lib/rollout.js:22111`：`previous[T_STORE] !== store && modifiedAt <= previous[T_MODIFIED]`） | 三份以上拷贝轮流被扫描时的最终归属收敛性；注释只声明「不能让陈旧库回撤更新的用量」，未给收敛性证明 |
-| A15 | **`grok` 兜底路径的时间归属**：桶起点为 `toUtcHalfHourStart(event.timestamp) \|\| toUtcHalfHourStart(lastActive) \|\| toUtcHalfHourStart(Date.now())`（`src/lib/rollout.js:20249-20252`、`:20265`）；`lastActive` 也缺失时回落 `new Date().toISOString()`（`:19691`），**历史用量会被记进「当前」半小时桶** | 统计该组合在真实老会话上的触发频率 |
-| A16 | **`craft` 与 `reasonix` 在极端截断下 `total_tokens` 失真**：两家都用「累计快照 clamp 差值」，Craft 注释承认负面差值是截断信号并 clamp 到 0（`src/lib/rollout.js:17189-17195`），Reasonix 同样 clamp（`:17011`）。若上游重置后在短时间内又累积回原量级，该段「重放」差值会被再次计入；两家都没有 Qoder 那样的「先减旧再加新」回撤路径 | 实测截断/重置场景 |
-| A17 | **`mainUsageHourTotalsFromQueueRows` 用 `setMaxTotal` 而非「最后一条」**（`src/commands/sync.js:6540`），与 `readQueueData` 的 last-wins（`src/lib/local-api.js:207`）语义不同 | 确认该函数的所有调用点是否都作用于「已被重写过的干净队列」（真值修复是原子重写，理论上不会出现同键数值回退） |
-| A18 | **`model/rerouted` 归属路径从未在真实语料验证**：`src/lib/codex-model-attribution.js:47-51` 自述 `0` 命中；该分支一旦被真实触发，其信封形状与字段名（`fromModel/toModel/from_model/to_model`）都属推断 | 检索本机 rollout 中是否出现 `model/rerouted` / `model_rerouted` |
+#### A-1. 已判定（12 条，判定条件已关闭）
 
-补充登记（同属 A 类）：`passive-mode.js` 只覆盖 8 个 hook 驱动 provider（`src/lib/passive-mode.js:96-185`），Grok / OpenCode / OpenClaw / omp 的「hook 缺失但日志在」状态由 `src/commands/status.js` 的独立路径分头上报（omp 在 `:1317-1318`、OpenCode 在 `:1363`、Grok 在 `:1452`；OpenClaw 是 hook 状态行 `:1296-1298`，不是「日志在」reader 行），**未逐一核对**；CodeBuddy / WorkBuddy 是否真的消费 `settings.json` 的 `SessionEnd` 只有源码内「fork 同 schema」注释断言（`src/commands/init.js:623-625,1034-1036,1048-1049`），无 schema 校验、无第三方验证；`usage_precision` 的取值域与全部消费方未追踪完整（全文件出现点 16 行、按自然语句计 **15** 条——`:20286-20287` 是一条跨两行赋值——已在 `src/lib/rollout.js` 内清点，「无 antigravity 写入点」这一否定性结论依赖该清单完备）；`codexServiceTier` 的语料统计（1213 文件 / 167 命中 / 25%；814 default / 58 priority）是**上游源码注释里的本机观测**而非本轮实测（`src/lib/codex-service-tier.js:8-15`）。
+| # | 事项 | 结论与证据 |
+| --- | --- | --- |
+| A1 ✅ | **Claude 增量游标无行边界提交 → 真实缺陷（会丢，且本代文件内不可恢复）**。`const endOffset = st.size;` 共 3 处（`src/lib/rollout.js:2291`、`:2682`、`:2793`），只有 `:2793` 落到 token 游标（`:1194`）；同步瞬间读到半行时 `readline` yield 未闭合尾行、`JSON.parse` 失败被吞（`:2843-2847`），游标仍推进到文件尾 | 实验（合成 fixture，同一半小时桶三条行 a=100 / b=500 / c=7 tokens）：半行写入后游标 `offset = 381` 等于文件大小（`offsetEqualsFileSize: true`，半行字节已计入游标）；补全后再跑 `startOffset = 381` 落在 b 行中间、`eventsAggregated: 0`、桶仍 = 100；再追加 c 后桶 = **107**（若 b 被计入应为 607），`claudeHashes` 仅含 a、c 两行指纹（无 msg-b）。对照：同一 inode 截断重写（714 → 239 字节）触发全量重读、b 被找回（桶 = 607）；「JSON 完整但缺尾换行」不受影响（sync1 即计入、无重复）→ 危害仅限「JSON 未闭合」的半个对象。非对称性保留：Codex 的 token 路径用 `committedEndOffset`（`:2652`）、OpenClaw 另有 `openclawOffsetEndsAtLineBoundary`（`:1949`）——**只有 Claude 一条路径完全没有**；`src/lib/rollout.js:2291`、`:2682`、`:2793`、`:1194`、`:2843-2847`、`:488-504`；`OPENQ-W4-experiments.md` §A1 |
+| A2 ✅ | **Claude 缓存字段别名 `cache_write_input_tokens` → 条件性风险：本机不成立**。本机 22 个 claude jsonl / 4609 行（assistant 行 1520）中 `message.usage.cache_write_input_tokens` **0 行命中**、两键同现 0 行；缓存写入语义全部由 `cache_creation_input_tokens` 承载（1520 行出现 / 1164 行非零 / 数值上界 225051，`cache_read_input_tokens` 对照 1520 / 1228） | 若按 `cache_write_input_tokens` 兜底取值，本机会永远命中兜底分支 → 「按 `cache_creation_input_tokens` 为主键」是正确口径。**风险仅在其它环境出现该别名形态时成立**（anthropic 兼容端点的真实样本本轮未覆盖）；`src/lib/rollout.js:4927-4928`、`src/lib/codex-token-usage.js:25-27`；`OPENQ-W3-corpus-stats.md` §5 |
+| A3 ✅ | **`<synthetic>` 模型行 → 已判定（本机无害）**。本机 6 行 `message.model == "<synthetic>"`（分布于 4 个文件），其中 usage 缺失 0 行、**usage 任意字段非零 0 行**（12 个键各 6 次全为 0） | 不构成 $0 风险行、不产生费用；但其存在说明 `<synthetic>` 行应按 0 用量**正常处理而非跳过**，否则会丢 / 串会话计数；`src/lib/session-analytics.js:101`、`:621-624`、`:1968-1971`；`OPENQ-W3-corpus-stats.md` §6 |
+| A4 ✅ | **`legacyGroups` / `groupQueued` 不是死代码，命中即写出合并行（丢失该小时的模型维度）**。实验三组：(a) v1 游标（旧键 `claude\|<hour>` + `bucket.queuedKey`）经 `normalizeHourlyState` 升 v3、键归一为 `claude\|unknown\|<hour>` 并据 `queuedKey` 重建 `groupQueued` → 写出 1 行 `{source:"claude", model:"unknown", input_tokens:600, output_tokens:60, conversation_count:3}`（旧 100 + 新 500 合并）；(b) v3 显式 `groupQueued` 且组内单一真实模型名 → 写出 1 行、`model: "claude-opus-5-5"`、input 600；(c) 组内两个真实模型名 → 写出 1 行、`model: "unknown"`、input 700 | 即 **`unknown` 仅在组内 ≥2 个模型名时出现，单模型组的模型名被保留**；语义是把同一 (source, 半小时) 的所有模型桶累加合并成一行 → 属「按 (source, 小时) 聚合的遗留写入路径」，会丢失该小时的模型维度（不再是「与修复意图冲突的再膨胀路径」这一假设分支）；`src/lib/rollout.js:3181-3194,3430-3480`、`src/commands/sync.js:216-220`；`OPENQ-W4-experiments.md` §A4 |
+| A5 ✅ | **同批内同键双行的覆盖方向 = 新行胜出（last-wins）**。实验：同键两行（旧 900 在前、新 400 在后）跑 `readQueueBatch(queuePath, 0, 200)` → `buckets.length = 1`、`total_tokens = 400`、`nextOffset = 592 = st.size`（两行字节均计入偏移） | `readQueueBatch` 与 `readQueueData` 方向一致。真正风险不是覆盖方向，而是**同键两行分属不同批次时会各自上传**（`maxBuckets = 1` 时第一批 `[900]` offset 296、第二批 `[400]` offset 592，去重责任落在服务端 upsert）；`src/commands/sync.js:4422-4512`（导出点 `:3824`）、`src/lib/local-api.js:202-211`；`OPENQ-W4-experiments.md` §A5 |
+| A8 ✅ | **`claudeHashes` 10 万上限淘汰后可复现双计（端到端闭环）**。裁剪语义：100001 → 100000，`seed-0` / `seed-1` 被丢弃（`firstElement = "seed-2"`）；淘汰后同一 `(message.id, requestId)` 在另一路径再解析 `eventsAggregated: 1`（重新计入），未被淘汰的 `seed-100000` 仍被拦住（`0`） | 端到端：副本 A 首解析 → 副本 B 被去重（0）→ 灌 10 万条 filler 触发裁剪（`dup-x` 被挤出，100002 → 100000）→ 副本 B 重扫 `eventsAggregated: 1`、桶 400 → **双计成立**。触发三件套：历史消息数 > 10 万 + 存在同内容副本 + 两副本不在同一次扫描内以 UNC+本地混合形态出现（混合形态时 `fileId` 层实测拦住：`filesProcessed: 1`、桶 = 400；纯本地双副本 `hasFileId: false`，`sawUncFile && sawLocalFile` 为假时该层恒不启用）；`src/lib/rollout.js:1236-1237`、`:1035`、`:1021-1025`；`OPENQ-W4-experiments.md` §A8 |
+| A9 ✅ | **两条兜底的动机 = 防「基线缺失导致增量口径断裂」与「重扫双计」**。`rebuildingCodexBaseline` 判定条件：同 inode、未截断、已读过部分字节（`0 < prevOffset < size`）、但游标 `lastTotal` 缺失或不是对象（`src/lib/rollout.js:493-500`）→ 命中即强制 `startOffset = 0`、`lastTotal = null`、`tokenUsageBaselines = null` 整文件重扫（Codex `total_token_usage` 是累计快照，增量必须减上次基线，基线没了只能重扫重建） | `prev?.lastTotal` 兜底在稳态短路之后（`:456-460`）：`sameInode && !truncated && startOffset > 0` 表示纯追加、直接返回 `false` 省掉持久去重集构造；落到 `:459` 时若游标仍带 `lastTotal` 则保守返回 `true` 强制用持久事件集，防重扫把已计事件再加一遍。协同：`rebuildingBaseline` 在 `needsHistoricalRolloutDedup` 内第一优先 `return true`（`:436`）并经 `:584` 传入 → 「因基线缺失而重扫」必然携带持久去重集。基线缺失来源 = pre-#652 老游标（`:513-517`）；`src/lib/rollout.js:493-504`、`:456-460`、`:428-437`、`:577-587`、`:513-517`；`OPENQ-W1-source-reads.md` §9 |
+| A11 ✅ | **`qoder(new)` 全零 token 行确认会入队（fixture 已复现）**。两组零用量形态（`{billable:true, credits:3}` 无 token 字段、`{billable:true, input_tokens:0, output_tokens:0, …}` 显式全零）均 `messagesProcessed: 1, eventsAggregated: 1, bucketsQueued: 1`，队列行六列全 0 + `conversation_count: 1`、模型名取真实模型（`qmodel_38max`） | 对照组 `{billable:false, credits:3}` 为 0 处理。零值行不会被 `pickDominantModel` / `queuedKey` 短路吞掉（前者在存在非 `unknown` 模型名时即返回该名，与 total 是否为 0 无关）。剩余未覆盖维度：真实 qoder 日志中该形态的出现频率；`src/lib/rollout.js:6639-6660`、`:3325-3347`；`OPENQ-W4-experiments.md` §A11 |
+| A12 ✅ | **`trae-cn` 全零行确认会落盘（fixture 已复现）**。`input_token: 0` / `output_token: 0` 通过全部校验（只校验 `Number.isSafeInteger(x) && x >= 0`），写出全零 totals + `conversation_count: 1` 并原样写进队列（`recordsProcessed: 1, eventsAggregated: 1, bucketsQueued: 1, skippedRows: 0`，即不被 fail-closed 拦住） | 同时额外产出一条同样全零的 `kind:"account_session_state"` 控制记录；缺 `model_name` 时回落 `trae-cn-unknown` 仍写全零行。剩余未覆盖维度：真实 `query_user_usage_group_by_session` 响应中全零会话行的出现频率；`src/lib/rollout.js:22477-22492`、`:22500-22508`、`:22749-22751`；`OPENQ-W4-experiments.md` §A12 |
+| A16 ✅ | **`craft` / `reasonix` 截断重放确认会虚增，量值 = 截断差额（本轮实测 550 tokens）→ 已迁入 C 类（C25）**。三轮改写同一累计快照（1000 → **500 截断** → 1200 升回） | craft：step1 桶 1100 →（截断时 `eventsAggregated: 0`、桶不动）→ step3 桶 **1870**（真实累计 1320 → 虚增 550）；reasonix 同形（1100 → 1870，虚增 550；带 / 不带 cache 字段两种 usage 形态结论一致，仅列归属不同）。机制：`Math.max(0, current - prev)` 把负差额 clamp 为 0，同时快照无条件替换成回退后的较小值，回升段（1200 − 500 = 700）全额计入而桶里仍留着旧的 1000；两家都没有 Qoder 式的「先减旧再加新」回撤路径；`src/lib/rollout.js:17189-17195`、`:17011`；`OPENQ-W4-experiments.md` §A16；C 类第 25 条 |
+| A17 ✅ | **`setMaxTotal`(MAX) 与 last-wins 确实分叉，且同键回退行可达**。实验：同键双行（900 前 / 400 后）→ `mainUsageHourTotalsFromQueueRows` = **900**（MAX），`readQueueData` 等价读 = **400**、`readQueueBatch` = **400**（`divergent: true`）；可达性实验：qoder 同一 `message.id` 两轮同步（1000 → 500）实际写出 `1010` 后接 `510` 的同键更小行 | 调用点静态核对：MAX 族（`mainUsageHourTotalsFromQueueRows` / `FromQueuePath` / `FromState`）**仅服务于 codex rescan repair 的「重建 vs 现状」守门**（`src/commands/sync.js:5848-5873`，`rebuilt < existing` 即放弃 repair），MAX 在此方向偏保守（更易判定 rebuild 降低了已有桶从而放弃 repair）→ 属**刻意取舍而非缺陷**；文档需声明「展示值与守门值在回退场景下会分叉」，且 qoder / trae-cn 的先减后加回撤语义会产生这类回退行；`src/commands/sync.js:6529-6589`（`:6540`）、`:5848-5873`；`src/lib/local-api.js:202-211`；`OPENQ-W4-experiments.md` §A17 |
+| A18 ✅ | **`model/rerouted` 归属路径 → 条件性风险：本机不成立**。本机 64 个 rollout / 179776 行中 `model/rerouted` 与 `model_rerouted` **0 命中**（该分支一旦被真实触发，其信封形状与字段名 `fromModel/toModel/from_model/to_model` 仍属推断） | **风险仅在其它环境出现该形态时成立**。另附模型字段一致性实测：`session_meta.payload.model` 存在 0 / 78；模型只在 `payload.base_instructions.provenance.model`（30 / 78）与 `turn_context.payload.model`（62 / 64 文件）两处；两侧都有时 20 / 21 一致、1 个文件不一致；4 个文件内部出现 2 个不同模型值 → **适配器不可假设「每文件单一模型」**；`src/lib/codex-model-attribution.js:47-51`；`OPENQ-W3-corpus-stats.md` §4 |
+
+#### A-2. 部分解决 / 尚需判定（6 条）
+
+| # | 事项 | 判定条件（含本轮进展） |
+| --- | --- | --- |
+| A6 | **压缩与上传 offset 的交互边界**：`compactPendingQueue` 只重写 `[offset, size)` 并原样复制 `[0, offset)`（`src/lib/upload-queue.js:97-110`） | 测「pending 区出现跨行边界残缺（写者正在写）时 `iterateQueueLines` 的行为」与「压缩后 offset 恰落在文件末尾」的边界（`input.close()` 与 `fs.stat` 校验之间存在窗口）。本轮四路攻坚未覆盖，判定条件不变 |
+| A7 | **`multiInstallParse` 异常分支的写回语义**（**部分解决**）。已确认：`catch` 分支只在错误码**不是** `TOKENTRACKER_CURSOR_STORE_RETRY` 时执行 `cursors[providerName] = ns`——把 provider 槽位写回**命名空间表**（含此前成功 install 的游标），随后原样抛出；RETRY 时**不写回**，保留 parserFn 刚写入的现场交上层重试（重试消费点 `src/commands/sync.js:1443-1445` opencode、`:1069-1085` Codex）。异常**不回滚已完成 install 的进度**、也不重置游标 | **未确认部分**：「抛错 install 是否重复解析」取决于该 provider 的 parserFn 是否「先写桶、后提交游标」，无法从 `multi-install-parser.js` 本身判定。**更强的判定路径（本轮给出）**：按 provider 逐一构造「第一个 install 正常 + 第二个 install 在写桶与提交游标之间抛异常」的 fixture，跑完 `multiInstallParse` 后再跑一次同步，检查该 install 对应桶是否被二次累加；生产调用点共 11 处、全在 `src/commands/sync.js`：opencode `:1419/:1467/:1545`、kilo `:1686`、mimo `:1722`、zcode `:1776`、goose `:1994`、zed `:2063`、kiro `:2325`、hermes `:2379`、kiro-cli `:2478`。依据 `OPENQ-W1-source-reads.md` §8；`src/lib/multi-install-parser.js:49-54`；`test/multi-install-parser.test.js:107`、`:127-130` |
+| A10 | **Copilot 三通道互斥完备性**：三份实现共用 `source = "copilot"`，靠 `usageClaims`（OTEL↔store）、`shouldCountCopilotAppSession`（app-db 跳过 CLI/VS Code）、`usageClaimsComplete` 三重机制分工 | 给出 `test/copilot-app-parser.test.js` 与 `test/copilot-session-store-parser.test.js` 的**交叉通道用例断言清单**（含「同时活跃」场景的输入与期望输出）；缺该清单则维持未确认。本轮四路攻坚未覆盖，判定条件不变 |
+| A13 | **`reasonix` 跨 home 重复计数**：`reasonixHomeCandidates` 同时返回 `~/.reasonix` 与 `%APPDATA%\reasonix`（`src/lib/rollout.js:16925-16934`），`resolveReasonixTelemetryFiles` 只去重**路径**（`:16970-16975`），**没有按 inode/内容去重**（对比 Copilot 的 `uniqueCopilotDbPaths` 用 `dev:ino`） | Windows 上实测双目录并存且互为拷贝时的表现。本轮四路攻坚未覆盖，判定条件不变 |
+| A14 | **`trae` 的 `T_STORE` 冲突裁决在三份以上拷贝时**：冲突规则只处理「两份拷贝」（`src/lib/rollout.js:22111`：`previous[T_STORE] !== store && modifiedAt <= previous[T_MODIFIED]`） | 三份以上拷贝轮流被扫描时的最终归属收敛性；注释只声明「不能让陈旧库回撤更新的用量」，未给收敛性证明。本轮四路攻坚未覆盖，判定条件不变 |
+| A15 | **`grok` 兜底路径的时间归属**：桶起点为 `toUtcHalfHourStart(event.timestamp) \|\| toUtcHalfHourStart(lastActive) \|\| toUtcHalfHourStart(Date.now())`（`src/lib/rollout.js:20249-20252`、`:20265`）；`lastActive` 也缺失时回落 `new Date().toISOString()`（`:19691`），**历史用量会被记进「当前」半小时桶** | 统计该组合在真实老会话上的触发频率。本轮四路攻坚未覆盖，判定条件不变 |
+
+补充登记（同属 A 类，本轮四项全部结项或升级）：
+
+- **Grok / OpenCode / OpenClaw / omp 的「hook 缺失但日志在」分头上报 —— 已核对，四家行号与消费一致**。`passive-mode.js` 只覆盖 8 个 hook 驱动 provider（`src/lib/passive-mode.js:96-184`），四家由 `src/commands/status.js` 的独立路径分头上报，逐字命中：omp `:1317-1318`、OpenCode `:1363`（条件行 `:1362`）、Grok `:1452`（条件行 `:1451`）、OpenClaw `:1296-1298`（三行 hook 状态行，不是「日志在」reader 行）；四者与 `Passive mode:` 汇总行（`:1445-1450`）同属 `cmdStatus` 的报告数组。`status.js:1024-1036` 传入 11 键、`passive-mode.js` 实际消费 8 键，未消费的 3 键 = `opencode_plugin` / `openclaw_session_plugin` / `grok`（冗余传参）；三个别名键（`hookStatus?.codex` / `?.acode` / `?.every_code`）是**只存在于实现、从未被 status.js 传入**的死回退。依据 `OPENQ-W1-source-reads.md` §7、`OPENQ-W2-shells-api.md` §9。
+- **`usage_precision` 取值域与全部消费方 —— 已追踪完整（两项复核成立）**。取值域 = `"reported" | "reported_incomplete" | "estimated" | "mixed" | "unavailable" | null | undefined`（`undefined` 只出现在写入侧 `|| undefined`，JSON 序列化后等于键缺失）；写入源头只有三处——`src/lib/trae-usage.js:94`（`"estimated"`）、`src/lib/rollout.js` 的 grok / trae 账本 / qoder-new 分支（经 `mergeGrokUsagePrecision` 合并出 `reported|estimated|mixed`，trae 落盘归一 `reported → null`）、`src/lib/session-analytics.js`（`:1155` 出 `reported_incomplete|reported|unavailable`，`:2709` 跨源聚合改写为 `mixed`）；前端消费两点——`dashboard/src/lib/sessions-api.ts:113` 的类型联合**不含 `"estimated"`**（而 `estimated` 由 trae 国际版与 grok 估算分支真实写入），`SessionDetailModal.jsx:257` 只做真值判断；`dashboard/edge-patches/`、`migrations/`、`scripts/` 全仓零命中 → 仓库内不存在云端消费点。「全文件 16 行、按自然语句 **15** 条」（`:20286-20287` 是一条跨两行赋值）复核**成立**；「无 antigravity 写入点」复核**成立**。依据 `OPENQ-W1-source-reads.md` §6。
+- **`codexServiceTier` 语料统计 —— 已换为本机实测**。本机 64 文件 / 179776 行中 **32/64 文件**含该字段、**433 事件**、`default` 385 / `priority` 48；落点 `event_msg.payload.thread_settings.service_tier`（来源事件 `thread_settings_applied` 共 445 条、其中 12 条无该键），`token_count` / `token_usage_record` 的 payload 直层不含该字段（另有 4 次出现在 `response_item` 的工具参数 schema 中，非用量字段，应排除）。**归类口径**：27822 条 `token_count` 事件按「归属最近一条前置 `thread_settings_applied`」得 `default` 19174 / `priority` 960 / 无前置记录 7688（无前置记录按标准档计、从不猜，与 §6.2.9 同源）。**上游注释的「1213 文件 / 167 命中 / 25%、814 default / 58 priority」对应另一批语料，不可外推**（`src/lib/codex-service-tier.js:8-15`）。依据 `OPENQ-W3-corpus-stats.md` §3。
+- **CodeBuddy / WorkBuddy 是否真的消费 `settings.json` 的 `SessionEnd` —— 仍属未确认，且本机已取得否证据**。源码侧仍只有「fork 同 schema」注释断言（`src/commands/init.js:623-625,1034-1036,1048-1049`），无 schema 校验、无第三方验证；本机语料侧 workbuddy / codebuddy / zcode **三处均无 `SessionEnd` hook 配置**（workbuddy 的 `settings.json` 顶层键里没有 `hooks`，另二家连 `settings.json` 都不存在）→ **不应据源码注释推断其支持该 hook**。依据 `OPENQ-W3-corpus-stats.md` §10。
 
 ### B. 需外部信息才能判定（10 条）
 
+#### B-1. 已判定（4 条，判定条件已关闭）
+
+| # | 事项 | 结论与证据 |
+| --- | --- | --- |
+| B6 ✅ | **`usage-limits` 的 provider 数量口径 → 结案**：18 个并发位 ↔ `data` 17 家的关系成立，差额去向已定位——`claudeServiceStatus` **不是独立 provider，而是 `claude.service_status` 的字段**，且仅在 `claude.configured === true` 且 `indicator !== "none"` 时挂载（`src/lib/usage-limits.js:4279-4280`）；状态探针本身只对已配置 Claude 账号发起、无 token 时直接 `Promise.resolve(null)`（`:4183-4185`）。`data` 17 家 = `fetched_at` + claude、codex、cursor、kimi、gemini、kiro、antigravity、copilot、grok、zcode、opencodeGo、commandCode、devin、qoder、qoderCn、codingPlan、agentPlan（`:4406-4440`） | **Ark 两家共用同一凭据**（同一 `arkcli` 二进制、同一 `usage plan --format json` 命令、同一 `~/.arkcli` 配置目录族，仅按 `product` 过滤区分）；**Qoder 两家不共用**（appDir / envPrefix / 手工 cookie 键 / 缓存命名空间 / CLI 凭据模块全部分离，`src/lib/qoder-limits.js:819-827`）。源码不可判的仅剩「两家 Ark / 两家 Qoder 是否指向同一账号」这一账号层面同一性。附口径：`data` 里的 `provenance` 是统一后加的派生字段（`source`/`confidence`/`captured_at`/`stale`/`age_seconds`），`ageMs > 10 * 60 * 1000` 强判 `stale`（面板「未过期」窗口 10 分钟），与 Claude 侧 5 分钟磁盘缓存（`:4044-4052`）不是同一口径。`src/lib/usage-limits.js:4055`、`:4279-4280`、`:4406-4440`；`src/lib/ark-coding-plan-limits.js:410-413,65,297-301`；`src/lib/ark-agent-plan-limits.js:330-333,51`；`src/lib/qoder-limits.js:819-827`；`OPENQ-W2-shells-api.md` §5 |
+| B7 ✅ | **Windows 壳「5 分钟后台 sync 计时器」属实（计时器在壳内、不在 serve 内）**：`TokenTrackerWin/TrayApplicationContext.cs:84` 定义 `_syncTimer` 间隔 `5 * 60 * 1000`，Tick 绑 `TriggerBackgroundSync`（`:240`），只在本地服务状态转 `Running` 时启动并**立即触发一次**（`:965-971`）、`Failed` 时停止（`:972-974`）、Dispose 时停止并释放（`:1186,1198`）。壳启动 serve 子进程时同批注入 `TOKENTRACKER_APP_SHELL=windows` 与 `TOKENTRACKER_NATIVE_SYNC_OWNER=windows-host`（`ServerManager.cs:694,700`，仅对 `serve` 且非 native-only WSL 分支），使 serve 侧一分钟兜底自禁用；serve 侧注释三句（托盘自持 5 分钟计时器 / 接收完成事件 / 并行会造成两个独立 sync 生产者争 `sync.lock`）**逐句属实** | **反向口径（必须并写）**：serve 侧的一分钟兜底**仅对 Windows 壳存在**——`src/commands/serve.js:304` `if (normalizedShell !== "windows") return null;`，macOS（`TokenTrackerBar/TokenTrackerBar/Services/ServerManager.swift:203`）与 Linux（`TokenTrackerLinux/src-tauri/src/server.rs:700`）只设 `TOKENTRACKER_APP_SHELL=macos\|linux`，其 serve 进程**根本不会**进入该兜底分支。争锁机制：`sync.lock` 落在 `trackerDir`（`src/commands/sync.js:552`，文件锁）；壳侧另有 `BackgroundSyncDeadline = 5 min`（`ServerManager.cs:83`）与 `_syncInFlight` 单飞（`:212-228`），完成事件回流 UI（`TrayApplicationContext.cs:234-235`、`:996-1006`）。残余边界：注释给出的「stale and needlessly expensive」属运行时表现，静态不可证。`TokenTrackerWin/TrayApplicationContext.cs:84,239-241,965-974,1186,1198`；`TokenTrackerWin/ServerManager.cs:83,89,92,212-228,694,700`；`src/commands/serve.js:35,304-309,314-315`；`OPENQ-W2-shells-api.md` §1 |
+| B8 ✅ | **本地 API 若干端点的字段结构 → 已逐端点读完；原「`syncResult` 键名」这一前提被推翻**。① `/functions/tokentracker-local-sync` 成功响应：**全库不存在 `syncResult` 键**（该串仅作为测试局部变量名出现在 `dashboard/src/lib/cloud-sync.test.ts:9`，生产代码零命中）；实际形态是**顶层展开** `json(res, { ok: true, ...result, ...cloudAccess })` → `{ok: true, code, stdout, stderr, uploaded, pending, next_allowed_at?}`（`result` = `runSyncCommand` 的 `{code, stdout, stderr}`，`src/lib/local-api.js:794-796`；`cloudAccess` 初始 `{uploaded:false, pending:true}`，能从 `upload.throttle.json` / `queue.state.json` 读出时补 `next_allowed_at`，`:2313-2321`）；失败形态 `ok:false, error, code, recovery_url, next_allowed_at, retry_after_seconds, stdout, stderr`（`:2324`）；授权 = POST + `x-tokentracker-local-auth` 头（或 `tokentracker_local_auth` cookie）等于进程内 `localAuthToken` 且 origin/referer 为 loopback（`:1629-1637`、`:691-703`） | ② `/functions/tokentracker-context-health` **直接回写 `computeContextHealth(...)` 的返回值**、无包装、无额外键（`:2526-2530`）：`generated_at` / `estimated_fixed_tokens` / `severity`（high ≥ 50000、medium ≥ 20000、否则 low）/ `breakdown{instruction_files, instruction_tokens, skills, skill_tokens, mcp_servers, mcp_schema_tokens}` / `largest_items`（按估算 token 倒序前 10，元素 `{kind, name, bytes, estimated_tokens}`，`kind ∈ {instruction, skill}`）/ `provenance{confidence:"inferred", source:"local-config-metadata", mcp_assumption{…}, content_retained:false}`；两个 MCP 假设默认 400 token/schema、5 servers（下限 1），进程内缓存 5 分钟 / 最多 8 键。③ `/api/auth/*` **8 条转发规则**全部落地：入口预检（先于 OPTIONS，判据 = `!hasAllowedLoopbackOrigin(origin/referer) \|\| sec-fetch-site === "cross-site"` → 403 `untrusted_auth_origin`）、cookie relay 覆盖语义、csrf 优先级与强制改用 relay csrf、relay 注入条件、cookie-less 的 `?client_type=mobile` 回退、stale-CSRF 403 救援重放、响应侧 `Domain=localhost` 重写 + 仅 2xx 才 `captureSetCookies`、一致性闸门（`apikey` ≠ runtime `anonKey` → 409 `instance_changed`；refresh/logout 期间会话代际变化 → 409 `auth_session_changed`）。`src/lib/local-api.js:2313-2324,794-796,1629-1637,2526-2530,1644-1657,1809-1841,1864-1869,1884-1907,1922-1942`；`src/lib/context-health.js:91-118`；`dashboard/src/lib/cloud-sync.ts:67,90,159-162,180-183`；`OPENQ-W2-shells-api.md` §4 |
+| B9 ✅ | **榜单 / 社区表 SQL → 已逐行读完**。总口径：**没有 SQL 视图**，链路 = `tokentracker_hourly` → 小时级设备/机器簇去重函数 `leaderboard_hourly_dedup_v2` → UTC 日物化表 `tokentracker_leaderboard_rollup_daily_v2` → 全时段物化表 `..._rollup_total_v2` → RPC `leaderboard_usage_grouped{,_total_shard}` / `leaderboard_usage_compact*` 返回 jsonb。设备维度**只出现在小时级去重**（键 = `(user_id, COALESCE(machine_cluster_id, device_id::text), source, model, hour_start)`，簇内先 `DISTINCT ON … ORDER BY total_tokens DESC, updated_at DESC` 取整行规范行、再跨簇 `SUM`），最终榜单不含设备；账号级来源 `cursor` / `trae-cn` 不走设备过滤（`trae-cn` 改从 `tokentracker_account_session_states` 按 `(user_id, source, model, bucket_start)` 聚合，注释明确**其 hourly 行永不进榜**） | **两条必须并写的口径**：① 榜单 SQL 层**不读反作弊表**（`tokentracker_leaderboard_anomaly_flags`）——聚合路径上的过滤只有「设备未吊销」与「账号级来源排除」两条，反作弊经**四条外部路径**生效（封禁物理搬移 quarantine、快照协调删除、社区统计整账号排除、edge 内存过滤 fail-open）；② **榜单聚合链完全不读 `billable_total_tokens`**（该列在 `migrations/` 只出现在隔离拷贝、归档与云端去重三处）。社区统计为单行表（`id text PRIMARY KEY CHECK (id='total')`），pg_cron 每小时 17 分刷新，读日物化表闭合日 + 活尾，三重过滤（`model <> ''`、`lower(model) <> 'auto'`、整账号排除）；**增长口径的落库值由 `BEFORE INSERT OR UPDATE OF daily_growth` 触发器强制为「最近 7 个已完成 UTC 日 vs 更前 7 个已完成日」**（刷新函数内部含当日窗口的两段计算不是最终展示值）。另：`scripts/ops/leaderboard-usage-grouped-rpc.sql` 文件头自标 **SUPERSEDED**，不得当现行实现引用；`usage-daily-rollup-backfill.sql` 重建的是**另一张旧表** `tokentracker_daily_rollup`（无 revoked 过滤 / 无簇去重 / 无账号级分支），不可与榜单日表混用。**仓库外未确认 5 项**（基础表 DDL、`..._rollup_daily_v2.pricing_tier` 列的仓库外变更、`detect_leaderboard_anomalies()` 正文、`machine_cluster_id` 聚类算法、服务端回填语句）见 `OPENQ-W2-shells-api.md` §6.6。`migrations/20260817120000_account-session-states.sql:166-172,202-248`；`migrations/20260821060000_ban-confirmed-leaderboard-manipulation.sql:19-23,49-78,98-111`；`migrations/20260825053000_reconcile-anticheat-snapshot-exclusions.sql:39-49`；`migrations/20260923093000_community-stats-v2-rollup-exclusions.sql:49-95,352-359`；`migrations/20260718082000_use-completed-days-for-community-growth.sql:20-24,59-63`；`migrations/20260904064000_cache-leaderboard-total-rollup.sql`、`migrations/20260904064500_shard-leaderboard-total-read.sql`；`scripts/ops/community-stats-refresh-cron.sql:8-12`；`OPENQ-W2-shells-api.md` §6 |
+
+#### B-2. 尚需外部信息（6 条）
+
 | # | 事项 | 判定条件 |
 | --- | --- | --- |
-| B1 | **云端 ingest 是否会从 `cursors.files[].usageSource` 反推估算行**。「`antigravity` 估算行对下游不可见」这一结论建立在「`usage_precision` 全部写入点清单里没有 antigravity」的**否定性证据**上 | 取得云端 ingest 侧读取 `cursors.files[].usageSource` 的代码或运行证据——能反推则该披露缺口不成立，不能则维持现状 |
+| B1 | **云端 ingest 是否会从 `cursors.files[].usageSource` 反推估算行**。「`antigravity` 估算行对下游不可见」这一结论建立在「`usage_precision` 全部写入点清单里没有 antigravity」的**否定性证据**上（该清单本轮已在 `OPENQ-W1-source-reads.md` §6 复核成立） | 取得云端 ingest 侧读取 `cursors.files[].usageSource` 的代码或运行证据——能反推则该披露缺口不成立，不能则维持现状 |
 | B2 | **edge 五份价格表的线上部署修订**。仓库内无部署产物或版本指针，仅 `CLAUDE.md:42` 提示人工部署（"Deploy the touched edge functions after editing"） | 取线上函数代码或版本指针，与 `dashboard/edge-patches/` 逐份比对 |
 | B3 | **`curated-overrides.json` 各 `note` 引用的第三方定价页与表内数字是否一致** | 该表运行在虚构时间线（`claude-opus-5-5`、`gpt-6-astra`、`deepseek-v4` 等），**不存在可核对的外部真实价页**，联网核对无事实源——只能核对表内自洽性 |
 | B4 | **LiteLLM 上游当前是否仍以 `model_prices_and_context_window.json` 为唯一价目文件、字段名是否仍为那 4 个成本字段** | 联网核对上游仓库（本轮未做） |
 | B5 | **Windows 托盘在本地模式下连续天数是否显示 0**。两侧源码已确认：本地端点硬编码 `streak_days: 0`（`src/lib/local-api.js:2588`，同响应 `:2587` 另给真实 `active_days`），前端 `dashboard/src/hooks/use-activity-heatmap.ts:206,220,284,295` 自行重算覆盖；`dashboard/src/lib/pet-linux-host.js:198` 直读该字段 | 运行 Windows 壳实测显示值 |
-| B6 | **`usage-limits` 的 provider 数量口径**：`fetchUsageLimitsUncached` 的 `Promise.all` 解构出 18 个结果变量（`src/lib/usage-limits.js:4055`），但 `data` 对象只收录 17 家（`claudeServiceStatus` 未进入 `data`，`:4406-4440`） | 核对 `ark` 两家与 `qoder` 两家是否共用同一凭据 |
-| B7 | **Windows 壳「5 分钟后台 sync 计时器」**：只在 `src/commands/serve.js:305-309` 注释中被提及，**未在壳代码中核实** | 读 `TokenTrackerWin/` 目录源码 |
-| B8 | **本地 API 若干端点的字段结构**：`/functions/tokentracker-local-sync` 成功响应的 `syncResult` 键名、`/functions/tokentracker-context-health` 的字段结构、`/api/auth/*` 的完整转发规则（cookie relay、csrf 优先级、relay 回退条件，只读到 `src/lib/local-api.js:1792-1940` 片段） | 逐端点读对应 `if (p === ...)` 分支的参数与响应载荷 |
-| B9 | **榜单/社区表的 SQL 细节**（`scripts/ops/*.sql`、`migrations/`） | 只通过测试注释间接确认，需逐行读 SQL 正文 |
 | B10 | **云端压缩表的保留期限**：`docs/PRIVACY.md` 与 `docs/cloud-guide.md` 提到「compressed usage metrics 可长期保留」，但 `docs/cloud-usage-archive.md:74-83` 明确写「未启用」 | 取云端归档表的实际启用状态与保留策略 |
 
-补充登记（同属 B 类）：macOS 菜单栏小组件的刷新频率（`WidgetCenter.reloadAllTimelines` 之后的系统策略）与「快照 schemaVersion 2 的兼容迁移」细节；`TokenTrackerWin/QuotaWidgetWindow.cs` 的数据来源（推测同为本地 API 或经 `UsagePoller` 推送，**未验证**）。
+补充登记（同属 B 类，本轮三项：两项升级为已判定 / 部分解决，一项结项）：
 
-### C. 已知设计缺陷（有源码证据，当前版本未修）（24 条）
+- **macOS 菜单栏小组件快照迁移 —— 已解决（明确不存在 v1 → v2 迁移分支）**。`WidgetSnapshot.read()` 对版本做**严格相等**过滤（`TokenTrackerBar/Shared/WidgetSnapshot.swift:362`，函数注释 `:356` 自述「decoding fails (e.g. schema mismatch from an old install)」即返回 `nil`）；`WidgetSnapshot` 是合成 Codable，`Shared/` 下无 `CodingKeys` / `decodeIfPresent` / 自定义 `init(from:)`（三项检索零命中）→ 旧版本快照只要缺一个必填键就整体解码失败、`read()` 返回 nil，provider 回落到 `.placeholder` / `.empty`（`StaticSnapshotProvider.swift:20,25`）。
+- **macOS 小组件刷新频率 —— 部分解决（源码侧已给全，系统侧仍缺证据）**。写侧每次成功写盘即 `WidgetCenter.shared.reloadAllTimelines()`（`WidgetSnapshotWriter.swift:108-110`）；另有 4 处设置桥消息（`locale` / `currency` / `currencySymbol` / `exchangeRate`）触发全量重载（`NativeBridge.swift:452,457,468,484`）；写侧节奏被注释标为「pre-existing five-minute widget freshness contract」（`WidgetSnapshotWriter.swift:36-38`），小组件自身时间线的下一次刷新是 `.after(now + 15 分钟)`（`StaticSnapshotProvider.swift:24-29`）。**未确认部分（维持）**：「`reloadAllTimelines` 之后 WidgetKit 系统侧实际多久刷新一次」在仓库内无注释、无常量——判定路径：真机运行时观测小组件实际刷新间隔 / WidgetKit 控制台日志，或 Apple 官方关于 `reloadAllTimelines` 预算的条款。
+- **`TokenTrackerWin/QuotaWidgetWindow.cs` 的数据来源 —— 已解决（本地 API 取数 + 轮询器推送，组件零取数）**。组件自身不抓取任何端点，只做 WebView2 导航到 `${BaseUrl}/quota.html?app=1`（`:389-394`）与 postMessage 注入；完整链路 = `UsagePoller.FetchLimitsAsync` → `GET /functions/tokentracker-usage-limits`（`UsagePoller.cs:182-195`，取数在 `:187`）→ `RaiseLimitsUpdated`（`:155`）→ `TrayApplicationContext.OnLimitsUpdated`（`:1014-1024`，`:1022` 调 `ApplyLimits`）→ 组件 `ApplyLimits`（`:126-131`）→ `PushContext` 发 `{type:"quota:context", limits, failed, selected, locale, light}`（`:396-409`）；前端 `dashboard/src/quota.jsx` 只监听 `quota:context`、只发控制消息，**全文零 `fetch`**（`:17-27,71`）。轮询开关由可见性决定：`IncludeLimits = 宠物可见 \|\| 配额组件启用`（`TrayApplicationContext.cs:286`）；失败态同样不来自组件自己的请求（`LimitsFailed` → `MarkFailed()`）。依据 `OPENQ-W2-shells-api.md` §2、§8。
+- **`~/.tokentracker/logs/` —— 已结项（以仓库为准不存在创建点）**。路径解析器只产出四个目录（`rootDir` / `trackerDir` / `binDir` / `cacheDir`，`src/lib/tracker-paths.js:5-11`），全库检索 `logs` 常量只命中各 provider 自己的日志目录（CodeBuddy `logs`、ZCode `v2/logs`、Qoder `logs`、Antigravity `.system_generated/logs`、LM Studio `server-logs`），**没有一条挂在 `.tokentracker` 下**；三个原生壳各自落盘到别处——Windows `%LOCALAPPDATA%\TokenTracker\windows-host.log`（`TokenTrackerWin/Diag.cs:11-13`）、Linux `$XDG_STATE_HOME/tokentracker/server.log`（回退 `$HOME/.local/state/tokentracker/server.log` → `/tmp/tokentracker-server.log`，另有 `servers/` 子目录，`TokenTrackerLinux/src-tauri/src/server.rs:587-604,116`）、macOS 走 `os.Logger`、不落普通日志目录。macOS 的 `EmbeddedServer` 在仓库内无源码，故「以仓库为准」判定闭环；§3 中该条的【未能确认】据此结项。依据 `OPENQ-W2-shells-api.md` §3。
+
+### C. 已知设计缺陷（有源码证据，当前版本未修）（25 条）
 
 1. **`cmdSync` 巨型编排**：**3194** 行单函数、`skipNoOpCursorCommit` 引用 13 个条件项（`src/commands/sync.js:516-3709`、`:3424-3437`）。
 2. **`.reclaim` 闸链需迭代清扫才能自愈**（`src/lib/fs.js:178-204`，issue #431）。
@@ -4092,6 +4148,7 @@ TokenTracker 的去重分层达七层，其中两个概念 TokenScope 目前没�
 22. **同一面板两套时间口径**：热力图网格的日期轴与单元格键按 UTC 日（`src/lib/local-api.js:2540`、`:2563`），网格数据却来自按请求时区聚合的 `aggregateByDay`（`:2537`、`:2545`），`night_owl` 徽章按请求时区小时（`:482`）；另有 `hourly` 端点 `day` 默认值（UTC 今天）与其过滤谓词（当地日键）**基准不同**。
 23. **`pricing.source` 元数据在多端点是硬编码标签而非真实来源**；`streak_days` 恒 0、`week_starts_on` 恒 `"sun"`（`src/lib/local-api.js:2586,2588`），而云端 compact 载荷会带真实值（`src/lib/heatmap-compact.js:108-109` 透传）——同一 UI 在本地/云两条路径下显示可能不一致。
 24. **Claude 真值修复与增量解析的口径不一致**（至少三处：usage 取值路径 `obj.message.usage \|\| obj.usage` vs 仅 `obj.message.usage`；reasoning 字段名 `output_tokens_details.thinking_tokens` vs `usage.reasoning_output_tokens`；output 是否拆分），且修复是**一次性且不可逆**（重写 `queue.jsonl` + `cursors.claudeHashes` 全替换，`src/commands/sync.js:6871-6921`）。
+25. **`craft` / `reasonix` 的截断重放虚增**（**来源：原 A 类 A16，经只读实验判定后迁入**）。两家都用「累计快照 clamp 差值」计增量——`Math.max(0, current - prev)` 把负差额（上游截断）clamp 为 0，同时把快照无条件替换为回退后的较小值，回升段因此被全额重复计入且桶里仍留着旧值；两家都没有 Qoder 式的「先减旧再加新」回撤路径。本轮实测：快照 1000 → 500（截断）→ 1200 的三轮序列下，craft 与 reasonix 的桶均从 1100 升到 **1870**，对真实累计 1320 **虚增 550 tokens**（恰等于被 clamp 掉的截断差额）。触发条件 = 上游重置后短时间内又累积回原量级（真实会话发生率未统计）。（`src/lib/rollout.js:17189-17195`、`:17011`；`OPENQ-W4-experiments.md` §A16）
 
 补充登记：项目队列丢失模型信息——项目行的 `model` 列被裁剪（`src/lib/rollout.js:3515-3532`），而项目详情端点的 `models` 字段实际装的是 **source**（`src/lib/local-api.js:2877`），下游若按「按模型」理解会出错；`projectBucketKey` 布局 `projectKey|source|hourStart` 与 `parseBucketKey` 的 `source|model|hourStart` 不通用，两套键共用一个分隔符而解析器不匹配（`src/lib/rollout.js:4228` vs `:4238`）；Claude 项目身份的 `.git` 后缀不剥离（`src/lib/rollout.js:4429-4442`）；`src/lib/rollout.js:6726` 悬空注释（称 credits 会累积，但下一行即 `touchedBuckets.add`，上下文无实现）。
 
@@ -4113,9 +4170,34 @@ TokenTracker 的去重分层达七层，其中两个概念 TokenScope 目前没�
 | D12 | 三份 UTC 半小时桶实现**语义等价**（`rollout` 权威、`claude-categorizer` 副本、sync 的 grok 毫秒版），此前自标的「未确认」已解除 | `src/lib/rollout.js:4173-4190`、`src/lib/claude-categorizer.js:1175-1191`、`src/commands/sync.js:4538-4549` |
 | D13 | 关键行数断言经逐字重算：`rollout.js` **24932**、`sync.js` **7251**、`init.js` **2427**、`local-api.js` **3543**、`session-analytics.js` **2934**、`status.js` **1729**、`pricing/index.js` **378**、`pricing/matcher.js` **439**、`curated-overrides.json` **775**、`upload-queue.js` **134** | `[System.IO.File]::ReadAllLines(...,UTF8)` 逐个重取 |
 
+### E. 本机真实语料实证（新增证据层）
+
+本轮唯一一次**真实语料统计**（依据 `tokentracker-draft/OPENQ-W3-corpus-stats.md`）。方法：全量流式扫描（Node `readline` 逐行，不整文件读入）+ 真实 JSON 解析，解析失败行如实计数；**全程只读**——未修改、未复制、未入库、未联网；报告只输出计数、字段名与数值分布，**不含任何会话内容**（无会话文本、无代码、无模型串、无项目名，路径与 UUID 已模板化）；临时脚本只落 `%TEMP%\tt-w3\`，用完即弃，不进任何仓库。关键数字由两轮独立扫描交叉复算一致。
+
+**语料范围**：Claude `~/.claude/projects` 22 个 `*.jsonl` / 4609 行（0 解析失败）；Codex `~/.codex/sessions/**/rollout-*.jsonl` 64 文件 / 179776 行 / 1272.1 MB（0 解析失败）；Gemini（Antigravity 布局）`~/.gemini` 207 文件 / 8052 行；zcode 3 文件 / 97 行。其余 provider 无可解析会话日志（workbuddy 为按 PID 命名的会话目录 + 大体量 blobs，codebuddy 只有 memwatch 日志）。
+
+| # | 实证 | 数值与结论 |
+| --- | --- | --- |
+| E1 | **Codex `reasoning_output_tokens ≤ output_tokens` 零反例** | 5 类计数字段共 **65381 对**（`last_token_usage` 27802 / `total_token_usage` 27802 / `token_usage_record.payload.usage` 3259 / `turn_token_usage` 3259 / `thread_token_usage` 3259）中 **0 反例**、比值上界 **1.0000**，其中 `reasoning > 0` **60715 对**、`reasoning == output` 328 对、两者同为 0 322 对；且 `reasoning_output_tokens` 与 `output_tokens` 在全部 65381 对中 **100% 同现** → **直接支撑「Codex reasoning 是 output 子集、计价置 0 不双计」这一核心假设**，本机不存在 reasoning 与 output 需分别计价或相加的证据 |
+| E2 | **`total_token_usage` 与 `last_token_usage` 100% 同现** | 各 27802 条、同现 27802 / 27802（单侧出现 0 条、双侧皆无 0 条）；`total` 是累计量（52 个 ≥2 点文件中 **49 单调不减、3 次重置回退**，幅度 −2965231 / −3780242 / −34082848），`last` 不是累计量（36 文件有回退）；`thread_token_usage.total_tokens` 17 文件全部单调不减 |
+| E3 | **累计字段逐条累加会约 2000 倍重复计费** | `total_token_usage` 的 output 求和 **35351865647** vs 增量求和 **16395234** → 逐事件累加只能用增量字段（`last_token_usage` / `payload.usage`），累计字段只能取末值、或在段内重置处切段 |
+| E4 | **321 条 `output_tokens = 0` 而 `total_tokens > input_tokens`** | 差值范围 **6456 – 205888**、方向恒为 `total > input`（按来源拆分：`last_token_usage` 320 条 + `total_token_usage` 1 条 = **321 条**）→ 若按 `output_tokens` 计价，这些行会**少计** |
+| E5 | **`service_tier` 落点与源码一致、语料统计改用本机口径** | 路径 = `event_msg.payload.thread_settings.service_tier`（来源事件 `thread_settings_applied`），实测 **32 / 64 文件**、**433 事件**、`default` 385 / `priority` 48；按「归属最近一条前置 `thread_settings_applied`」归类，**27822 条 `token_count` 事件为 `default` 19174 / `priority` 960 / 无前置记录 7688**（无前置记录按标准档计、从不猜，同 §6.2.9）；上游注释的「1213 文件 / 167 命中 / 25%、814:58」属另一批语料，**不可外推** |
+| E6 | **关键字段形态实测** | `cache_write_input_tokens` **0 命中**；`model/rerouted` / `model_rerouted` **0 命中**；`<synthetic>` **6 行且 usage 全字段为 0**；Claude usage 仅存在于 `message.usage`（**顶层 `usage` 0 行**）；`output_tokens_details.thinking_tokens` **1288 行（406 行非零）**而 `reasoning_output_tokens` **0 行**（任何路径）；Antigravity 侧 total 类键 **0 行 / 0 个键路径**（即无「只写 total、分量全 0」行）；zcode 侧 `cacheWriteTokens` 87/87 行全为 0 |
+| E7 | **Claude 子代理 token 照计成立** | `subagents/agent-*.jsonl` 覆盖 **14 / 22** 文件（1098 行），其中 **535 条 assistant 记录全部带完整 usage**（token 照计成立）；`assistant` 行 1520 条中 `isSidechain=true` 535 条、与该路径集合 535/535 完全重合；`subagents/*.meta.json` 无任何 token 字段（不应作为用量来源） |
+| E8 | **三处 `SessionEnd` hook 无配置证据** | workbuddy / codebuddy / zcode **均无 `SessionEnd` hook 配置**（workbuddy 的 `settings.json` 顶层无 `hooks` 键，另二家连 `settings.json` 都不存在）→ 不应据源码注释推断其支持该 hook |
+
+未覆盖维度（已随条目留在 §12 A 类，不视为已判定）：全零行在真实 qoder / trae-cn 语料中的出现频率（A11 / A12）、craft / reasonix 虚增的真实触发频率（A16 → C25）、A2 的别名形态在 anthropic 兼容端点上的真实出现率。
+
+**口径与出处注（R6 复核后补）**：
+
+1. 上表 E5 的三个细分数字（`token_count` 按当时 tier 归类的 **default 19174 / priority 960 / 无前置 7688**）以及 §6.2.3 的「≈2128 倍」比值，是**在本机语料上独立复算**得到的，未包含在 `OPENQ-W3-corpus-stats.md` 的正文里（该报告给出的是文件级与事件级计数）；复核时已逐项重算确认成立，故保留并在此标明出处口径。
+2. E6 的「`cache_write_input_tokens` 0 命中」是**按键路径**统计（`message.usage.cache_write_input_tokens`）；若改用「整行文本包含该字符串」的宽口径，则有 43 行命中——那属于会话内容里提到该词（例如讨论本身），不构成「Claude 解析路径收到该字段」的证据。两个口径在此一并披露，避免读者误用。
+3. 本机语料统计的完整范围：Claude 22 个 `*.jsonl`（4609 行）、Codex 64 个 `rollout-*.jsonl`（179776 行 / 1272 MB）、Antigravity 布局 207 文件（8052 行）、zcode 3 文件（97 行）；其余 provider 目录内**不存在**可解析的会话日志（workbuddy 为 PID 命名会话目录、codebuddy 仅有 memwatch 日志）。
+
 ---
 
-## 13. 复核记录（R1 / R2 / R3 / R4）
+## 13. 复核记录（R1–R6）
 
 本研究不是单轮产物，而是**研究 → 对抗式复核 → 修正 → 再复核**的滚动闭环（截至本文共三轮：R1 六单元、R2 三单元、R3 四单元）。以下台账数字取自各复核报告自报的「抽样统计」节；每轮样本仓库 HEAD 全程未变（`b19d27b0ccd59ce621f4fa17207b06358e67987c`），复核过程**未修改样本仓库**。
 
@@ -4240,6 +4322,38 @@ R4 修正之后再派一个独立 agent 做终检，方法与结果：
 - **R5 提出的 4 条非阻塞遗留（J1–J4）已由主线全部收尾**：J1 删除 §7.5 中与源码 `:3925-3927` 抵触的「不在尾部追加规范行」（唯一一处内部矛盾）；J2 统一 goose 引用为 `14674-14686`；J3 把 opencode 求和引用放宽为 `:1385-1388`（求和表达式实际跨该区间）；J4 给 §9.6.2 的 macOS 表头补上文件名 `APIClient.swift`，并逐行复核该表 11 个行号（`:43`/`:66`/`:73`/`:79`/`:86`/`:94`/`:101`/`:110`/`:119`/`:127`/`:148`）与源码函数一一对应。
 
 **最终状态**：全文 4323 行、1047 处 `路径:行号` 引用，机械检查确认**全部引用无越界、无指向不存在文件**；四轮复核 + 终检共发现问题 100% 处置完毕（含 3 条被反向否定的复核结论），无遗留「必须修」项。
+
+### 13.9 存疑攻坚（OPEN-Q 轮）
+
+§12 的 A / B 两类存疑在本轮做了**四路并行攻坚**，全部只读（未修改样本仓库、未在仓库内新建任何文件、未触碰真实日志内容；W4 中凡 `require` 了 `src/commands/sync.js` 的实验都在加载前把 `USERPROFILE` / `HOME` / `APPDATA` / `LOCALAPPDATA` 重定向到临时 home，并在结束后确认该目录为空）。四处依据：`tokentracker-draft/OPENQ-W1-source-reads.md`（源码补读 9 项）、`OPENQ-W2-shells-api.md`（原生壳 / 本地 API / SQL / dev 中间件 9 项）、`OPENQ-W3-corpus-stats.md`（本机真实语料统计 10 项）、`OPENQ-W4-experiments.md`（合成 fixture 只读实验 8 项）。
+
+| 路 | 范围 | 已判定 | 部分解决 | 维持 |
+| --- | --- | --- | --- | --- |
+| W1 源码补读 | `fs.js` 锁实现、`codexHashes` 键、Claude 跨根并入键、Copilot 桶粒度、迁移测试用途、`usage_precision`、passive-mode 8 provider 与 status 行号、`multiInstallParse`、两条兜底动机 | **8** | **1** | 0 |
+| W2 壳与 API / SQL | Windows 5 分钟计时器、`QuotaWidgetWindow` 数据来源、`.tokentracker/logs`、local-sync / context-health / `/api/auth/*`、`usage-limits` 17 家、榜单与社区 SQL、dev 中间件前缀集合、macOS 小组件快照 | **8** | **1** | 0 |
+| W3 真实语料统计 | Codex reasoning 子集、total / last 形态、`service_tier`、`model/rerouted`、Claude 缓存别名、`<synthetic>`、usage 形态、子代理、Antigravity 布局、三 provider 路径形态与 hook 配置 | **10** | 0 | 0 |
+| W4 只读实验 | A1 / A4 / A5 / A8 / A11 / A12 / A16 / A17 | **8** | 0 | 0 |
+
+**处置结果**：
+
+- **A 类 18 条：12 条已判定（A1 / A2 / A3 / A4 / A5 / A8 / A9 / A11 / A12 / A16 / A17 / A18）、1 条部分解决（A7）、5 条维持（A6 / A10 / A13 / A14 / A15）**——A 节已拆为「A-1 已判定」与「A-2 部分解决 / 尚需判定」两张子表，未关闭的条目保留原判定条件并补上更强的判定路径。
+- **B 类 10 条：4 条已判定（B6 / B7 / B8 / B9）、6 条维持（B1–B5、B10）**——B8 的「`syncResult` 键名」前提被**推翻**（全库不存在该键，成功响应是顶层展开 `{ok, code, stdout, stderr, uploaded, pending, next_allowed_at?}`），B 节已改写并补上 `context-health` 与 `/api/auth/*` 的实际结构；B7 补上「serve 侧一分钟兜底仅对 Windows 壳存在」这一反向口径。
+- **一条从 A 类迁入 C 类**：A16（craft / reasonix 截断重放虚增）经实验确认，登记为 **C 类第 25 条**；A 类表中该行保留编号并标注迁出去向。
+- **一处结项（原在 §3 标记为【未能确认】）**：`~/.tokentracker/logs/` 以三壳源码为准不存在创建点，三壳各自落盘到别处——该结论已登记进 §12 B 类补充登记，§3 相应文字由主线同步。
+- **新增一层证据**：§12.E「本机真实语料实证」8 项，含 E1 的「65381 对零反例、比值上界 1.0000」这类直接支撑核心计价假设的实测数字，以及 E3 的「累计字段逐条累加会约 2000 倍重复计费」这类必须避免的路径。
+- **本机真实语料统计的方法与隐私边界**：全量流式扫描（Node `readline` 逐行 + 真实 JSON 解析，非抽样、非整文件读入），解析失败行如实计数；**只读**打开——未修改、未复制、未入库、未联网；报告只含计数、字段名与数值分布，**不含任何会话文本 / 代码 / 模型串 / 项目名**（路径与 UUID 已模板化）；临时脚本落 `%TEMP%\tt-w3\`，用完即弃，不进任何仓库；关键数字经两轮独立扫描交叉复算一致。
+- **改动范围**：本轮回写覆盖 §1–§13——§12（A / B 两节重排为四张子表、补充登记改写、新增 §12.E、C 类 +1）与本节 13.9 由回写组 A 完成；§2.4、§3.3、§4.2、§5.6、§6.1.2、§6.2.3/6/7/9、§9.2.3/9.2.4/9.2.7、§9.3.8、§9.6.2/9.6.3、§9.7.4、§10 由回写组 B 完成（含前言与 §1.4 的两阶段口径改写）；未改动任何既有行号引用的**指向**（新增引用均已回源核对）。§13.8 记账的「全文 4323 行」是 R5 时点的历史快照，本轮回写后行数相应增加。
+
+### 13.10 存疑攻坚回写的复核（R6）
+
+回写完成后又派一个独立 agent 复核（对象：§12 新结构、§12.E、§13.9，以及被回写的正文段落）：
+
+- **核验规模**：§12 逐条 28 条（A-1 12 / A-2 6 / B-1 4 / B-2 6）+ C25 + E1–E8 + §13.9 计数；正文抽查 21 组；行号回源抽样 40 处**全命中**。
+- **判定一致性**：无「部分解决写成已判定」或反向；A2/A18 均为条件性风险措辞；§13.9 的计数与 §12 正文自洽。
+- **独立计数复核**（只读、只计数）：Codex 语料 `reasoning_output_tokens > output_tokens` **反例 0**（64 文件 / 179776 行，两套口径均为 0）；`cache_write_input_tokens` 键路径 **0 命中**；`433 vs 445` 事件口径自洽（445 = 433 + 12 条无键）。
+- **发现的 6 项已全部修正**：① §12.E 的 E4 表头 `320 条` → **321 条**（独立复算裁定：320 条落在 `last_token_usage` + 1 条落在 `total_token_usage`），与 §5.6 的正文口径统一；② A7 的 `multiInstallParse` 生产调用点 `12 处` → **11 处**（列出的行号本身就是 11 个）；③ §13.9 的「改动范围」表述与事实不符（正文多处也被回写），已改为逐章节列明两个回写组的分工；④–⑥ 新增「口径与出处注」：来历不在 `OPENQ-W3` 正文的三个细分数字（19174 / 960 / 7688 与 ≈2128 倍）已标明是**独立复算**并已重算确认，`cache_write_input_tokens` 的「0 命中」明确为**按键路径**口径（宽口径整行子串命中 43 行属内容层，不构成字段证据），并补出本机语料的完整范围。
+
+至此，「存疑攻坚 → 回写 → 复核 → 修正」闭环完成：**§12 的 A 类 18 条中 12 条已判定、B 类 10 条中 4 条已判定**，1 条（A16）迁入 C 类缺陷清单，1 条（B8）前提被推翻后改写，`~/.tokentracker/logs/` 与四家分头上报两项结项；剩余维持项均带明确判定条件。
 
 ---
 
