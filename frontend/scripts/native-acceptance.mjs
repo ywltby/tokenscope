@@ -37,7 +37,7 @@ function flag(name) {
   return argv.includes(`--${name}`);
 }
 const SCENARIO = arg("scenario");
-const OUT = arg("out", path.join(REPO, "qa-artifacts", "native-recheck-2026-10-08"));
+const OUT = path.resolve(REPO, arg("out", path.join(REPO, "qa-artifacts", "native-recheck-2026-10-08")));
 const PORT = Number(arg("port", "9411"));
 const EXE = arg("exe", EXE_DEFAULT);
 const THEME = arg("theme", "system"); // light | dark | system（--force-*-mode 通道）
@@ -89,6 +89,20 @@ function listFiles(dir) {
   };
   walk(dir, "");
   return out;
+}
+/** 纯 JS 递归拷贝目录，避免 Windows GBK 环境下 Node fs.cpSync C++ 绑定的中文路径乱码缺陷 */
+function copyDirSync(src, dst) {
+  if (!fs.existsSync(src)) return;
+  fs.mkdirSync(dst, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const srcPath = path.join(src, entry.name);
+    const dstPath = path.join(dst, entry.name);
+    if (entry.isDirectory()) {
+      copyDirSync(srcPath, dstPath);
+    } else {
+      fs.copyFileSync(srcPath, dstPath);
+    }
+  }
 }
 function ps(scriptPath, argsArray) {
   return spawnSync("pwsh", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...argsArray], {
@@ -1638,9 +1652,10 @@ async function main() {
   }
 
   // UI 刷新验收保留合成来源的应用日志，失败也能核对采集/查询实际发生过。
+  // 使用 copyDirSync 代替 fs.cpSync 避免 Windows GBK 环境下 C++ 绑定因中文路径编码产生乱码目录。
   if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system") {
     const logs = path.join(root, "tokenscope", "logs");
-    if (fs.existsSync(logs)) fs.cpSync(logs, path.join(stampDir, "app-logs"), { recursive: true });
+    if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
   }
 
   const realAfter = fingerprint(REAL_DATA);
