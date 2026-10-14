@@ -182,7 +182,7 @@ workers      = min(cores − 1,
 | 34 | `devin` | `~/.local/share/devin/cli/sessions.db`（`DEFAULT_DEVIN_CLI_DIR`，`devin.ts:159-165`）+ `transcripts/*.json` | SQLite 优先，JSON 兜底 | 虚路径 `<dbPath>:<id>`（`devin.ts:754`） | 真实（`prompt/completion/cached_tokens`） |
 | 35 | `droid` | `FACTORY_DIR\|~/.factory` 下 `sessions/<subDir>/*.jsonl`（首行必须 `session_start`） | JSONL | 文件 | 真实 |
 | 36 | `lingtai-tui` | `~/.lingtai/<agent>/logs/token_ledger.jsonl` + `~/.lingtai-tui/registry.jsonl` 注册的项目 | JSONL | 文件 | 真实（`input − cached` 归一） |
-| 37 | `antigravity` | `~/.gemini/{antigravity,antigravity-cli,antigravity-ide}/conversations`（`.pb`/`.db`）+ `implicit` + statusline 合成源；另有本地语言服务器 RPC | protobuf / JSONL | 文件 | 混合（statusline 带真实 `current_usage`） |
+| 37 | `antigravity` | `~/.gemini/{antigravity,antigravity-cli,antigravity-ide}/conversations`（`.pb`/`.db`）+ `implicit` + statusline 合成源；另有**可选**的本地语言服务器 RPC（仅在进程枚举发现 `language_server` 时启用，失败回退 statusline/缓存） | protobuf / JSONL | 文件 | 混合（statusline 带真实 `current_usage`） |
 | 38 | `forge` | `~/.forge/.forge.db`（表 `conversations`） | SQLite | 虚路径 `<dbPath>:<conversation_id>`（`forge.ts:249`） | 真实（assistant usage） |
 | 39 | `goose` | `GOOSE_PATH_ROOT/data/sessions/sessions.db` 或平台数据目录 | SQLite | 虚路径 `<dbPath>:<id>`（`goose.ts:252`） | 真实 |
 | 40 | `crush` | `CRUSH_GLOBAL_DATA/projects.json` 注册表 → 每项目 SQLite | JSON + SQLite | 虚路径 `<dbPath>:<id>`（`crush.ts:217`） | 真实 |
@@ -219,12 +219,29 @@ workers      = min(cores − 1,
 | `docs/how-it-works.md:39-40` Claude 只列 `~/.claude/projects` | 实际还有 `config.json` 的 `claudeConfigDirs`、WSL homes、Claude Desktop `local-agent-mode-sessions` 与 `usage-ledger/*.ndjson`；且 transcript 类 source 的 `path` 是**项目目录**而非 `.jsonl`（ledger 类 source 则是**文件**，`claude.ts:599-608`） |
 | `README.md:201`「All 42 tools」 | 与 `getAllProviders()` 的 43 个不一致（差 `vercel-gateway`，README 自己单列） |
 
-### 3.7 读取层未决点
+### 3.7 读取层未决点（专项复核后收敛）
 
-1. **【未验证推论】** `failedProviders` 的最终消费点未追踪（候选：`src/parser.ts`、
-   `src/serve.ts`、`src/menubar-json.ts`、`src/doctor.ts`）。
-2. **【一致解释】** `crush`/`forge`/`goose` 的 `discoverFromDb` 内部（SELECT 与身份构造）只读到函数签名层级。
-3. **【未验证推论】** `amp` 的 `usage-ledger-v2` 解析版本语义只读注释，未逐一比对实现。
+1. **【已验证：传播链已查清】** `failedProviders` 全仓唯一消费点是 `src/parser.ts:6687`
+   （`discoveryFailed`）：`:6692` 据此跳过 `markProviderComplete`、`:6696` 抑制
+   `diskCache.complete`，后果限于「冷/热判定与常驻 `serve` 的首屏 floor」
+   （`session-cache.ts:1064/1109`、`serve.ts:795/887`）；`failedProviders` **本身**不进
+   payload、退出码或 `codeburn doctor`（doctor 走自己的发现，`doctor.ts:282`）。
+   用户可见提示走平行通道：
+   `recordProviderIssue`（`index.ts:274`）→ `provider-issues.ts:26` → `main.ts:1418-1423`
+   → `bridge-handlers.ts:519`（遥测）。
+   附注：`parser.ts:6732` 的 `sessionHydrationComplete` 不含 `discoveryFailed`，
+   发现失败的 provider 会出现「零用量但 hydration=complete」的组合。
+2. **【已验证】`crush` / `forge` / `goose` 的 DB 发现细节**（三家都是每会话一条源，
+   `path = <dbPath>:<id>`，右切以兼容盘符）：
+   `crush` 过滤 `WHERE parent_session_id IS NULL AND (cost > 0 OR prompt_tokens > 0
+   OR completion_tokens > 0)`，project 取注册表路径 sanitize（`crush.ts:210-217`、`:251`）；
+   `forge` 过滤 `WHERE context IS NOT NULL`，project = `title ?? workspace_id`（`forge.ts:243-250`）；
+   `goose` 全表读后内存过滤（累计 token > 0），project = `sanitize(working_dir) || 'goose'`
+   （`goose.ts:245-253`）。
+3. **【已验证（注释↔实现一致）】** `amp` 的 v2 口径与注释一致：
+   `billedOutput = output + max(0, total − input − output − 两 cache 桶)`，cache 桶经
+   `toMessageId` 回连（`amp.ts:162-163`、`:127-139`），`usageLedger.events` 优先。
+   **v1→v2 的具体新增项无法证实**（克隆为 `--depth 1`，无历史可比），此处如实标为未证。
 
 ## 4. 解析层：原始日志 → 统一用量事件
 
@@ -385,13 +402,25 @@ reasoning 单独成桶但通过 `billableOutputTokens` 保证与 output 不重�
 | OpenCode 文件 ↔ SQLite | 消息 id 相同即跳过 | `<provider>:<sid>:<msgId>` |
 | Claude Desktop ledger ↔ transcript | 30 s 窗口 + 模型身份 + 用量键比对 | — |
 
-### 4.7 解析层未决点（本文档标注）
+### 4.7 解析层未决点（专项复核后收敛）
 
-1. **【未验证推论】** Codex `hasTokenUsageRecord` 一旦置位即永久跳过后续 `token_count`
-   （`codex.ts:1359`）——若某构建中途从「有 record」退回「无 record」，后半段用量会丢失。
-2. **【未验证推论】** Claude 的 `fallback_message` 迭代（换模型重试）不记账，
-   源码注释自认这是既有缺口（`parser.ts:1186-1188`）。
-3. **【未验证推论】** `cachedInputTokens` 与 `cacheReadInputTokens` 同值冗余列的下游消费面未完全追踪。
+1. **【机制已验证；风险带条件】** Codex `hasTokenUsageRecord` 的置位条件是首个**可用**的
+   `token_usage_record`（`codex.ts:1341-1345`）；此后**本文件**的全部 `token_count`
+   被跳过（`:1359`），且该标志经 resume state 跨 append 持久（`:1152` ↔ `:829`）。
+   即：只有当同一 rollout **代次回退**（先有 record、后无 record）时才会丢量；
+   该情形在实际语料中未见观测记录，属机制上可达的条件性风险，且该语义已被
+   `tests/providers/codex-resume.test.ts:131-169` 直接断言（续扫段中 `token_count(999)`
+   被丢弃、总量 190）——属**有意设计并被测试固定**，不是偶发缺陷。
+2. **【丢弃已验证；是否等于丢量仍属一致解释】** `compactEntry` 只保留 `advisor_message`
+   迭代（`parser.ts:1189-1210`），源码注释自认 `fallback_message` 是既有缺口
+   （`:1184-1188`），全仓零实现零测试；advisor 之所以被单独产出，是因为它的 token
+   不在顶层 `usage` 总量内（`:1590-1595`）。缓存层同样不保留该迭代，且 claude 的
+   `PROVIDER_PARSE_VERSIONS` 未因此 bump（`session-cache.ts:380`）；
+   「fallback 重试是否另写独立 usage 行」仍未证。
+3. **【已验证：确有消费】** `cachedInputTokens` 是 OpenAI 词汇的别名列，**5 个文件共 6 处**
+   读取以 `max(cacheRead, cached)` 归并以防双计：`models-report.ts:247/258`、
+   `audit-report.ts:109`、`export.ts:128`、`sync/otlp.ts:323`、`sync/cli.ts:415`
+   （`audit-report.ts:105` 是 raw 累加、不是归并；GUI 无生产读取）。
 
 ## 5. 聚合层：会话 → 日 → 周期
 
@@ -459,7 +488,7 @@ turn 内出现多 provider 时，cost 各归各家，但 turn 级计数只归**�
 | 会话（周期唯一计数） | `` `${provider}\0${loc}\0${sessionId}` `` | `src/usage-aggregator.ts:1101-1104` |
 | 会话（跨项目折回） | `` `${projectSplit.primaryProjectPath}\0${sessionId}` `` | `src/parser.ts:5191`、`src/day-aggregator.ts:89` |
 | 任务分类 | `turn.category`（13 类，正则常量、不可配置） | `src/classifier.ts:200`、`src/types.ts:195-208` |
-| 分支 | 分支名原样 + turn 级 carry-forward，行键 `(projectId, branch)` | `src/branch-spend.ts:238-244`、`:286-312` |
+| 分支 | 分支名原样 + turn 级 carry-forward；**行标识 = `projectId` + `branch` 两字段**（累加键只有 branch，项目隔离靠逐项目调用） | `src/branch-spend.ts:299-302`、`:241-244`、`:343-345` |
 
 ### 5.4 缓存分层与「绝不缩水」
 
@@ -569,7 +598,9 @@ overlayProviderDaySlices(baseline, fresh, provider)                 src/usage-ag
 日键比较用零填充字符串的 `>=`/`<=`（`src/daily-cache.ts:1697-1701`），
 **没有左闭右开路径**；**③ DST 安全**：日期推进用 `new Date(y, m, d ± N)` 的日历算术
 （`src/usage-aggregator.ts:697`、`src/daily-cache.ts:1814`、`:1948`），唯一毫秒回退是
-`--from` 缺省（`src/cli-date.ts:128-131`）。
+`--from` 缺省（`src/cli-date.ts:128-131`）。已在运行时对照验证（`TZ=America/New_York`，
+跨 2026-11-01 fallback）：日历算术保持本地 00:00，毫秒算术偏移 1 小时，
+`dateKey`/`dateKeyInTz` 在 fallback 日的四个时刻都归入同一日期键（详见 §5.9）。
 缓存永远不含今天；今天由 live 提供，并集前先用 `filterProjectsByDays` 重锚跨午夜 turn，
 避免今天的分类/turn 数留在昨天（`src/usage-aggregator.ts:943-957`）。
 另一个「今天」的不同义：durable 实时扫描窗口是 `[今日 00:00, now]`（`:917-919`），
@@ -590,17 +621,26 @@ overlayProviderDaySlices(baseline, fresh, provider)                 src/usage-ag
   `identity` = 精确、`partial` = 下界；`models[].inputTokens` 等可选字段的契约是
   **缺失必须渲染为「未知」，不得当 0，也不得用周期总数顶替**（`:41-54`）。
 
-### 5.9 聚合层未决点
+### 5.9 聚合层未决点（专项复核后收敛）
 
-1. **【未验证推论】** `.hb-next` 心跳残留文件没有任何清理器覆盖（全仓 grep 只命中写入处，
-   `src/cache-refresh-lock.ts:408`）。
-2. **【一致解释】** DST 在**趋势/周期对比**层已有定向测试
-   （`tests/granular-history.test.ts:424` 的 DST fallback 重复小时、
-   `tests/period-diff.test.ts:259` 的跨 DST 天数），但**日聚合分桶**本身没有定向测试，
-   该层仍属结构推断（依据：所有日期派生点均为日历算术）。
-3. **【一致解释】** 进程内并发 `loadCache` 无 promise 级 single-flight；
-   全量读与范围读的成员级容错不对称（`src/session-cache.ts:1693-1701` 的 `continue`
-   跳过坏成员，与全量读路径的处理强度不同）且缺测试。
+1. **【已验证：无清理器，可能永久残留】** `.hb-next` 是固定名
+   `session-refresh.lock.hb-next`（`src/cache-refresh-lock.ts:408`），只有成功 rename 才消费它
+   （`:411`）；失败分支仅有一次机会性 `unlink`（`:416`）。信号清理路径（`:83-114`）、
+   `cache-sweep.ts:17` 的文件名正则、`session-cache.ts:2716-2775` 的 `.tmp` 清扫
+   **均不覆盖**它——进程若恰在 `writeFile` ↔ `rename` 窗口内被杀则会残留。
+   因为是固定名、同名覆盖，故不累积，但可永久留存。
+2. **【已验证（运行时对照）】** DST 行为：在 `TZ=America/New_York` 下对照了两种日期推进——
+   日历算术（`new Date(y, m, d − N)`）跨 2026-11-01 fallback 时保持本地 00:00，
+   而毫秒算术（`− N × 86400000`）会偏移 1 小时；`dateKey` / `dateKeyInTz` 在 fallback 日
+   的四个时刻（含重复出现的 01:30 两次）都归入同一个日期键。
+   趋势/周期对比层另有 `tests/granular-history.test.ts:424`、`tests/period-diff.test.ts:259`
+   的定向测试；**日聚合分桶**本身仍无专门测试（本条由结构推断升级为运行时对照验证）。
+3. **【已验证】** 进程内并发 `loadCache` **无 promise 级 single-flight**：
+   `src/session-cache.ts:1805-1867` 的 memo 在完成后才写入（`:1865`），同 scope 并发会各读一次
+   （对照 `codex-cache.ts:203-216` 有 `inFlightLoads`）。**容错不对称同样确认**：
+   全量读按整片 `validateFiles`（`:1260-1263`、`:1666-1674`）失败即整片判 dirty，
+   范围读逐成员 `continue`（`:1693-1701`）只丢坏成员；构造「坏成员 + 源已删除的好成员」
+   即可让同一份缓存出现两种结果，用 `CODEBURN_CACHE_SCOPE=all`（`:1806`）可开关对照。
 
 ## 6. 计价层：token → USD
 
@@ -736,8 +776,11 @@ costUSD = M × ( safe(input) × tiered.inputCostPerToken
   但显式写价条目未必是 1.25×（实测 826 条显式写价条目中，`input > 0` 的 822 条里有 240 条
   比率 ≠ 1.25），两种说法不可混用。
   该乘法**无模型/厂商判断**（`:1560`），
-  但 1h 桶只由 Claude 解析路径填充（`src/parser.ts:1296-1315`），实践上等价于「仅 Anthropic」
-  （【一致解释】）。
+  但 1h 桶只由 **`claude` provider 的解析路径**填充（`src/parser.ts:1296-1315` →
+  缓存 `:2874` → 回放 `:3013`；`ParsedProviderCall` 根本没有该字段，
+  `src/providers/types.ts:32-38`，其它 provider 显式写 0，`:2819`；
+  展示层 `session-why.ts:167/202/712` 只读不构造）。注意不能简写成「仅 Anthropic」——
+  经代理路由时 Claude 也可能跑非 Anthropic 模型（【已验证】）。
 - `M` 乘**整条和**（含 cache、web search），不是只乘 input/output。
 - 负值/NaN/Infinity 一律夹到 0（`:1543`，防坏 JSONL 反向扣钱）；单价另夹进 `[0, 1]` USD/token
   （`safePerTokenRate`，`:305-309`；作用于 **live 拉取解析与用户价格覆盖**两条路径，
@@ -811,7 +854,10 @@ Copilot 的 `inputTokens` 是 cache 包含式，计价前先减去 cache read/wr
 取不到汇率回退 USD 并保留旧缓存（`:111-137`）；汇率必须有限且在 `[1e-4, 1e6]`（`:18-26`）。
 `convertCost` 只在展示/导出边界调用（`:182-190`），且**故意不四舍五入**
 （四舍五入交给 `roundForActiveCurrency` / `formatCost`，`:68-73`、`:192-203`）。
-⇒ 缓存与历史库里**永远是 USD**，切换币种只改渲染。
+⇒ **用量事实的存储恒为 USD**（同步与 OTLP 路径同样传原值，`sync/push.ts:405`、
+`sync/otlp.ts:285`），切换币种只改渲染。**例外**：导出产物与 renderer 持久化的**所有 complete report 快照**会保留换算后的展示值
+（`export.ts:89/129/165`、`usePolled.ts:135-199`、`overviewSnapshot.ts:88-94`）——
+因此「永远 USD」只对**用量事实存储**成立。
 
 ### 6.10 官方文档与源码不符之处（以源码为准）
 
@@ -823,15 +869,30 @@ Copilot 的 `inputTokens` 是 cache 包含式，计价前先减去 cache read/wr
 | `docs/architecture.md:277` 只提 `bundle-litellm.mjs` 拉 LiteLLM + MiniMax 手工覆盖 | 漏了 models.dev/OpenRouter 缺口表、`fillsOnly` 只补空槽、carry-forward 搬运 |
 | `docs/architecture.md:141` 缓存文件写作 `daily-cache.json` | 实际是版本化文件名 `daily-cache.v75.json` |
 
-### 6.11 计价层未决点
+### 6.11 计价层未决点（专项复核后收敛）
 
-1. **【未验证推论】** 缺口表没有前缀回退：只在缺口表里的带后缀历史串（如
-   `minimax-m3-custom`）会落到未定价。
-2. **【未验证推论】** `BUILTIN_PRICE_OVERRIDES` 只打 `pricingCache`、不打 `fallbackCosts`，
-   因此同一 key 若只存在于缺口表，运行时仍走主表侧（结构可推，未做定向运行验证）。
-3. **【未验证推论】** `grok-4.6` 硬编码 200k 阈值对别名（`grok-4.6-high`）与导入行的实际生效未跑测。
-4. **【未验证推论】** `webSearchCostPerRequest` 固定 0.01，对 Anthropic 以外的 provider
-   可能偏高，代码没有按 provider 分档。
+1. **【已验证（结构 + 运行时）】** 缺口表没有前缀回退：结构上 `fallbackCosts` 只在
+   大小写索引（`:288`）与命名空间推导（`:1174`）被引用，而索引只做精确 `get`；
+   运行时实测——缺口表独有键（`qvq-max`、`qwen-flash`、`qwen-mt-turbo` 等）精确命中且
+   大小写不敏感（`QVQ-MAX` 同值）；对**任何前缀段都不在主表**的键，加后缀 `-zzz`
+   返回 `null`（`qvq-max-zzz`、`qwen-flash-zzz`、`qwen-mt-turbo-zzz` 等实测），
+   符合「无前缀回退」；一旦某个前缀段本身在主表，则仍会被主表回退命中（见下条）。
+   **订正**：本文早先举的 `minimax-m3-custom` 是**错误示例**——`minimax-m3` 本身在主表，
+   该串靠**主表前缀回退**命中。并补充限定：即使目标键只在缺口表，**主表的更短键**仍可能截胡
+   （实测 `qwen-plus-character-ja-zzz` 命中的是主表 `qwen-plus` 费率，而非缺口表的
+   `qwen-plus-character-ja`）。因此「未定价」的准确条件是**该 id 的任何前缀段都不在主表**。
+2. **【已验证】** `BUILTIN_PRICE_OVERRIDES` 的表归属：实测 7 个覆盖 key 中，
+   `deepseek-v3.2`、`kimi-k2.7-code-highspeed` 在主表（取值被覆盖重写），
+   `swe-2`、`composer-1/1.5/2/2.5` **不在任何表**（完全由覆盖提供）。
+   由于没有任何 key 同时存在于缺口表与覆盖名单，`fallbackCosts` 未打补丁这一差别
+   **在实践中不可观测**（「覆盖只作用于 `pricingCache`」是结构事实）。
+3. **【已验证（运行时）】** `grok-4.6` 的 200k 阈值与别名传播：
+   `resolveCanonicalModelId('grok-4.6-high')` = `grok-4.6`；
+   `tieredCostsFor('grok-4.6', costs, 199_999)` 返回基础价（$2/$6 每 1M），
+   `200_000` 返回高价档（$4/$12 每 1M）；别名 `grok-4.6-high` 同样命中高价档。
+4. **【已验证：确无分档】** `webSearchCostPerRequest` 实测 5 个不同厂商模型
+   （claude-opus-4-6、gpt-5.5、gemini-2.5-pro、deepseek-v3.2、grok-4.6）全部为 `0.01`；
+   代码侧 `WEB_SEARCH_COST` 是常量（`models.ts:111`），无 provider 分支。
 
 ## 7. 总览与速查
 
@@ -890,7 +951,9 @@ Copilot 的 `inputTokens` 是 cache 包含式，计价前先减去 cache read/wr
    缓存历史日在源文件消失后仍保留（adopt + 不缩水守卫）。
 5. **同一会话有三种日锚**（会话计数锚首日、turn 级计数锚 turn 日、call 级数值锚各 call 日），
    跨午夜 turn 在两天都记 turn 数——这是文档化的既有语义，不是 bug。
-6. **价格匹配是一条 11 级阶梯**，且缺口表（models.dev/OpenRouter）**只能小写精确命中、无前缀回退**；
+6. **价格匹配是一条 11 级阶梯**，缺口表（models.dev/OpenRouter）只能**小写精确**命中、
+   没有自己的前缀回退；但**主表的更短键**仍可能截胡
+   （实测 `qwen-plus-character-ja-zzz` 命中主表 `qwen-plus`）。
    未定价模型一律计 0 且默认静默。
 7. **日期区间是单一闭区间模型**（`start 00:00` 至 `end 23:59:59.999`），
    没有滚动窗口或半开区间；`week` 覆盖 8 个日期键、`all` 是「近 6 个月」而非全部。
@@ -924,5 +987,23 @@ Copilot 的 `inputTokens` 是 cache 包含式，计价前先减去 cache read/wr
   第三轮未发现新的机制性错误，独立回查 120+ 处引用全部命中，编辑副作用扫描零异常。
 - **终检**：逐项验证第三轮后的全部改动（数字、限定条件、函数边界）与全文骨架，
   确认旧值零残留、括号/表格/跨行格式无破损。
+- **存疑专项复核（第四轮）**：先做静态深挖（`failedProviders` 传播链、三家 DB 发现的
+  SQL 与身份构造、`amp` v2 口径、Codex `token_usage_record` 置位语义、
+  Claude `fallback_message` 丢弃行为、`cachedInputTokens` 下游、
+  `.hb-next` 清理器穷举、`loadCache` 并发与容错、antigravity RPC 触发条件、
+  分支行标识、货币换算边界、1h 桶来源、Frankfurter 数据源），
+  再做**运行时验证**：安装依赖后以只读探针直接调用被测模块
+  （缺口表前缀回退、内置覆盖表归属、`grok-4.6` 阈值与别名、web search 分档、
+  1h 写价数值、DST 日历算术对照），并跑 codeburn 自带测试 **369 项**——9 个测试文件：
+  `models`／`day-aggregator`／`session-period-count`／`daily-cache-carry-forward`／
+  `vercel-gateway-excluded-totals`／`codex-pricing-1075`／`parser-advisor-usage`／
+  `warp-billing-cost-cache`／`usage-aggregator-freshness`，全部通过。
+  13 条存疑中 11 条升级为**已验证**、2 条收窄为带限定的一致解释；并订正一处错误示例
+  （`minimax-m3-custom` 实际命中主表前缀，非「未定价」形态）。验证全程未触碰用户数据：
+  探针把 `CODEBURN_CACHE_DIR` 指向临时目录、并锁定内置快照模式。
+- **第五轮复核（存疑专项终检）**：逐条回查上述改写与 5 处正文同步，复跑只读探针与部分
+  自带测试；确认两处数字订正（测试项数 **369**、`cachedInputTokens` 实为 **5 文件 6 处**）
+  与三处「话说满」的收窄（`.hb-next` 的残留条件、缺口表后缀命中的前提、
+  Codex 代次回退风险）均已落实，无机制性新错误。
 - 复核结论分档与本文一致；凡复核未能确证的条目已在各节「未决点」中如实标注，
   不以推测替代证据。
