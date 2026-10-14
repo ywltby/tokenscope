@@ -1036,7 +1036,7 @@ function totalsKey(totals) {                                           // src/li
 - 模型：兼容 `modelID` / `model`(字符串) / `model: { id }`（`src/lib/rollout.js:4272`）；落桶兜底 `DEFAULT_MODEL`（`3143`）。
 - 时间与桶：`msg.time.completed` → `msg.time.created`，两者皆无则不产事件（`src/lib/rollout.js:3122`）。
 - 增量判据：`cursors.files[key]`（`1513`）存 `lastTotals/fingerprint/messageKey/dedupedForkCopy`；差分复用 `diffGeminiTotals`（`3109`）；fork 副本去重（`3805`），副本「复活」时整份重加而非只补差（`3105`）。
-- 特殊：同寄主另有 **SQLite 支路**（`src/lib/rollout.js:5038` 起，见 §5.3），两路结果在 `src/commands/sync.js:1385-1386` 相加；纯 total 行会被静默丢弃（差分函数对全 0 返回 `null`）。
+- 特殊：同寄主另有 **SQLite 支路**（`src/lib/rollout.js:5038` 起，见 §5.3），两路结果在 `src/commands/sync.js:1385-1388` 相加；纯 total 行会被静默丢弃（差分函数对全 0 返回 `null`）。
 
 #### 5.2.3 OpenClaw（`parseOpenclawIncremental`，`src/lib/rollout.js:1654`）
 
@@ -1550,7 +1550,7 @@ function totalsKey(totals) {                                           // src/li
 
 | 形态 | 家 | 说明与行号 |
 |------|----|------------|
-| **两个缓存桶都恒 0** | `kiro`(IDE)、`goose`、`anythingllm` | Kiro 连 `cache_creation_input_tokens` 键都缺失（`7545`）；Goose 无缓存列（`14678-14686`/`14708`）；AnythingLLM 的 metrics 只有 prompt/completion/total（`14013`/`14042`） |
+| **两个缓存桶都恒 0** | `kiro`(IDE)、`goose`、`anythingllm` | Kiro 连 `cache_creation_input_tokens` 键都缺失（`7545`）；Goose 无缓存列（`14674-14686`/`14708`）；AnythingLLM 的 metrics 只有 prompt/completion/total（`14013`/`14042`） |
 | **有 cache_read、无 cache_write（恒 0）** | `gemini`（`4743` 区域，`cache_creation` 恒 0）、`qoder`（旧库，`6173` 写 `cache_creation_input_tokens: 0`）、`copilot`（App DB，注释明确「App DB 没有 cache write 列」，`19357`–`19379`）、`antigravity`（两条路径都没有 cache write 来源，走 `initTotals` 默认 0） | 缓存写入量在这些家里**不可得**，不是零 |
 | **表级投影写死** | `unsloth` | `api_usage_events` 的 SELECT 直接写 `0 AS cached_tokens, 0 AS cache_write_tokens, 0 AS reasoning_tokens`（`13634`–`13636`）——即便上游有列也不读 |
 | **reasoning 恒 0（无推理桶）** | `kimi`、`kimi`(KimiCode)、`openclaw`、`zed`、`roocode`、`kilo-code`、`kiro`(IDE)、`qoder`（新旧两套）、`cursor`、`devin`、`trae-cn`、`craft`、`command-code`、`claude-science` | 列在 `normalize*` 的返回块里写死 0。`devin` 更极端：**SQL 投影只选四个 metrics 字段**（`src/lib/devin-usage.js:48`–`51`），未来若上游新增 reasoning 列会被静默丢弃 |
@@ -2402,7 +2402,7 @@ function toUtcHalfHourStart(ts) {
 
 数字自洽性验算：事件规模 **2.17B = 21.7 亿**；分项求和 `1270M + 474M + 376M + 48M + 6M = 2174M ≈ 2.174B`，与源码的 2.17B 一致。回退事实：`0.26.4 HALTS back at v4`（`:242`），key 仍为 `claudeGroundTruthRepair_2026_05_v4`（`:248`）。**根因结构**：`queue.jsonl` 是**唯一**持有某些历史的副本。当上游 agent 自己清理了会话日志（Claude Code 的 cleanup），「从磁盘重建」就等于「以磁盘为空为由删除历史」；上传偏移清零后又把删掉的结果推到云端。这条对任何「本地汇总 + 云上传」的设计都成立。
 
-**四种安全模式（同一仓库都用过）**：只追加撤回行（最安全：`retractStaleSourceQueueRows` `src/lib/rollout.js:19990`、`migrateCursorUnknownBuckets` `src/commands/sync.js:5207`）；原子重写 + 前置备份（`backupExistingFile` `:4711` → tmp+rename `:6772`）；原子重写 + 不可复现守卫（磁盘缺文件就整轮跳过，`:264`）；清空重扫（最危险，仅用于误标修复：`dropMimoQueueRows` `:4744`，仅在「磁盘一定还在」时安全）。另有一处**不属于上述四档**的形态：`migrateLegacyDeepseekHarnessSource`（`:3865-3962`）是「原子重写但全量保留既有行」——它把原文件的每一行都原样保留（`:3887`、`:3905`），**既不在尾部追加规范行**、也不删任何既有行；不过它会对每个受影响旧键**追加一条零值撤回行**并重排该键的规范行（`:3929-3943`），与「只往文件尾追加」是两回事。
+**四种安全模式（同一仓库都用过）**：只追加撤回行（最安全：`retractStaleSourceQueueRows` `src/lib/rollout.js:19990`、`migrateCursorUnknownBuckets` `src/commands/sync.js:5207`）；原子重写 + 前置备份（`backupExistingFile` `:4711` → tmp+rename `:6772`）；原子重写 + 不可复现守卫（磁盘缺文件就整轮跳过，`:264`）；清空重扫（最危险，仅用于误标修复：`dropMimoQueueRows` `:4744`，仅在「磁盘一定还在」时安全）。另有一处**不属于上述四档**的形态：`migrateLegacyDeepseekHarnessSource`（`:3865-3962`）是「原子重写但全量保留既有行」——它把原文件的每一行都原样保留（`:3887`、`:3905`），不删任何既有行；并会对每个受影响旧键**重加一条规范行**（`:3925-3927`）与一条零值撤回行（`:3929-3943`）后重排，与「只往文件尾追加」是两回事。
 
 另有一条被多处沿用的设计路径：**上传偏移清零会把本地修复结果广播到云端**。`CLOUD_CONVERSATIONS_BACKFILL_KEY` 的注释明说云端历史**只能**靠本地队列重放修复（`src/commands/sync.js:249-256`）。这意味着「本地算错 → 修好 → 云被覆盖」是设计路径；反过来，若本地修复本身错误，云端也会被污染。
 
@@ -3456,7 +3456,7 @@ Windows 偏好 17680 的理由是三条约束的交集（源码注释逐字，`T
 
 启动内嵌 server：找 CLI 入口后 spawn `[entryPath, "serve", "--port", "<7680>", "--no-sync", "--no-open"]`（`TokenTrackerBar/.../ServerManager.swift:195`），走登录 shell 的兜底分支为 `zsh -lc "<bin> serve --port <7680> --no-sync"`（`:228`），启动前用 `lsof -ti tcp:<port> -sTCP:LISTEN` 清占用者（`:83-99`）。**数据入口是 HTTP，不是直读文件**：
 
-| 方法 | 路径 | 行号 |
+| 方法 | 路径 | 行号（`TokenTrackerBar/TokenTrackerBar/Services/APIClient.swift`） |
 | --- | --- | --- |
 | `fetchSummary` / `fetchDaily` | `-usage-summary?from&to` / `-usage-daily` | `:43-52` / `:66-69` |
 | `fetchHeatmap` | `-usage-heatmap?weeks=52`（`tz`/`tz_offset_minutes`/`account=1` 由 helper 追加） | `:73-77` + `:241-254` |
@@ -4229,6 +4229,17 @@ R4 只做两件事：**验证 R3 修正是否真的落到文本里**，以及**�
 - 三处低级引用校准：goose 五桶 `14670` → `14674-14686`（两处）；qoder 旧库 `cache_creation_input_tokens: 0` 的 `6177-6178` → `6173`；opencode 双支路求和 `sync.js:1384` → `:1385-1386`。
 
 **至此四轮复核全部闭环**：R4 之后无「必须修」级别遗留，且三轮全新抽样的命中率稳定在 94%–99.5% 区间，未再出现机制性错误或幻觉。**残留的只是 §12 已登记的 `【未能确认】` 项（需运行时/语料/线上部署才能判定），它们不是缺陷，而是有明确判定条件的开放问题。**
+
+### 13.8 最终验证（R5）
+
+R4 修正之后再派一个独立 agent 做终检，方法与结果：
+
+- **最后 7 处修正逐条回源**：全部确认写对（守卫归属、DeepSeek 迁移的写盘三要素、`status` 的 10 个路径常量、热力图 `byDay` 构建/查表/构造三行、goose 五桶区间、qoder `cache_creation: 0` 行、opencode 双支路求和）。
+- **确定性抽样 30 条**（930 条去重引用按字符串排序、步长 31 取索引 7/38/…/906，避免主观挑选）：**30/30 命中（100%）**，错例 0。
+- **结构检查**：96 个代码围栏全部闭合、116 张表格列数与分隔行全部一致、55 处 `§X.Y` 交叉引用全部命中真实标题、160 处裸行号抽样 22 条全部可锚定。
+- **R5 提出的 4 条非阻塞遗留（J1–J4）已由主线全部收尾**：J1 删除 §7.5 中与源码 `:3925-3927` 抵触的「不在尾部追加规范行」（唯一一处内部矛盾）；J2 统一 goose 引用为 `14674-14686`；J3 把 opencode 求和引用放宽为 `:1385-1388`（求和表达式实际跨该区间）；J4 给 §9.6.2 的 macOS 表头补上文件名 `APIClient.swift`，并逐行复核该表 11 个行号（`:43`/`:66`/`:73`/`:79`/`:86`/`:94`/`:101`/`:110`/`:119`/`:127`/`:148`）与源码函数一一对应。
+
+**最终状态**：全文 4323 行、1047 处 `路径:行号` 引用，机械检查确认**全部引用无越界、无指向不存在文件**；四轮复核 + 终检共发现问题 100% 处置完毕（含 3 条被反向否定的复核结论），无遗留「必须修」项。
 
 ---
 
