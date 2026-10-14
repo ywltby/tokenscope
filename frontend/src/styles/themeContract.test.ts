@@ -52,6 +52,18 @@ const TOKENS: Record<ThemeMode, Record<string, string>> = {
 
 const norm = (v: string): string => v.trim().toLowerCase().replace(/\s+/g, "");
 
+function parseAlpha(color: string | undefined): number {
+  if (!color) return 0;
+  const trimmed = color.trim();
+  if (/^#[0-9a-f]{6}$/i.test(trimmed) || /^#[0-9a-f]{3}$/i.test(trimmed)) return 1;
+  const hex8 = /^#[0-9a-f]{6}([0-9a-f]{2})$/i.exec(trimmed);
+  if (hex8) return parseInt(hex8[1], 16) / 255;
+  const rgba = /rgba?\([^)]*,\s*([\d.]+)\)/i.exec(trimmed);
+  if (rgba) return Number(rgba[1]);
+  if (/^rgb\([^)]+\)$/i.test(trimmed)) return 1;
+  return 1;
+}
+
 type Overrides = Record<string, Record<string, string>>;
 const naive = (mode: ThemeMode): Overrides => naiveThemeOverrides(mode) as unknown as Overrides;
 
@@ -72,6 +84,15 @@ const NAIVE_MAP: [string, (o: Overrides) => string | undefined][] = [
   ["--ts-error", (o) => o.common.errorColor],
   ["--ts-warning", (o) => o.common.warningColor],
   ["--ts-success", (o) => o.common.successColor],
+  ["--ts-control-bg", (o) => (o as any).Button?.color],
+  ["--ts-control-bg", (o) => (o as any).Input?.color],
+  ["--ts-accent-fill", (o) => (o as any).Button?.colorPrimary],
+  ["--ts-surface-popover-solid", (o) => (o as any).TimePicker?.panelColor],
+  ["--ts-surface-popover-solid", (o) => (o as any).DatePicker?.panelColor],
+  [
+    "--ts-surface-popover-solid",
+    (o) => ((o as any).Select?.peers as any)?.InternalSelectMenu?.color,
+  ],
 ];
 
 describe("themeContract：适配器与 CSS 语义 token 对齐（UX01）", () => {
@@ -150,6 +171,166 @@ describe("themeContract：适配器与 CSS 语义 token 对齐（UX01）", () =>
     }
     // 浮层模糊配方 16px（Naive CSS 与 ECharts extraCssText 同源）
     expect(norm(TOKENS.light["--ts-glass-blur-popover"])).toBe("blur(16px)saturate(150%)");
+  });
+
+  it("control_tokens_exist_in_both_themes", () => {
+    const CONTROL_TOKENS: Record<string, { light: string; dark: string }> = {
+      "--ts-control-bg": {
+        light: "rgba(255, 255, 255, 0.92)",
+        dark: "rgba(255, 255, 255, 0.07)",
+      },
+      "--ts-control-bg-hover": {
+        light: "#ffffff",
+        dark: "rgba(255, 255, 255, 0.12)",
+      },
+      "--ts-control-bg-pressed": {
+        light: "rgba(118, 118, 128, 0.16)",
+        dark: "rgba(255, 255, 255, 0.04)",
+      },
+      "--ts-control-stroke": {
+        light: "rgba(0, 0, 0, 0.52)",
+        dark: "rgba(255, 255, 255, 0.34)",
+      },
+      "--ts-control-stroke-hover": {
+        light: "rgba(0, 0, 0, 0.56)",
+        dark: "rgba(255, 255, 255, 0.46)",
+      },
+      "--ts-control-rim": {
+        light: "inset 0 1px 0 rgba(255, 255, 255, 0.9)",
+        dark: "inset 0 1px 0 rgba(255, 255, 255, 0.12)",
+      },
+      "--ts-control-shadow": {
+        light: "0 1px 2px rgba(0, 0, 0, 0.1)",
+        dark: "0 1px 2px rgba(0, 0, 0, 0.45)",
+      },
+      "--ts-control-glow-hover": {
+        light: "0 2px 8px rgba(0, 0, 0, 0.08)",
+        dark: "0 0 10px rgba(255, 255, 255, 0.06)",
+      },
+      "--ts-accent-fill-hover": {
+        light: "#0062c4",
+        dark: "#0057cc",
+      },
+      "--ts-accent-fill-pressed": {
+        light: "#00539f",
+        dark: "#004bb0",
+      },
+      "--ts-selected-bg": {
+        light: "var(--ts-accent-soft)",
+        dark: "var(--ts-accent-soft)",
+      },
+      "--ts-selected-stroke": {
+        light: "var(--ts-accent)",
+        dark: "var(--ts-accent)",
+      },
+      "--ts-selected-glow": {
+        light: "0 0 0 3px rgba(0, 113, 227, 0.12)",
+        dark: "0 0 12px rgba(77, 163, 255, 0.28)",
+      },
+      "--ts-focus-halo": {
+        light: "0 0 0 6px rgba(0, 113, 227, 0.18)",
+        dark: "0 0 0 6px rgba(77, 163, 255, 0.24)",
+      },
+      "--ts-surface-popover-solid": {
+        light: "#ffffff",
+        dark: "#2c2c2e",
+      },
+      "--ts-popover-stroke": {
+        light: "rgba(0, 0, 0, 0.12)",
+        dark: "rgba(255, 255, 255, 0.14)",
+      },
+      "--ts-row-hover": {
+        light: "rgba(118, 118, 128, 0.08)",
+        dark: "rgba(118, 118, 128, 0.16)",
+      },
+    };
+
+    for (const [token, expected] of Object.entries(CONTROL_TOKENS)) {
+      for (const mode of ["light", "dark"] as ThemeMode[]) {
+        const val = TOKENS[mode][token];
+        expect(val, `${mode} 缺少 ${token}`).toBeTruthy();
+        expect(norm(val), `${mode} ${token} 值不匹配`).toBe(norm(expected[mode]));
+      }
+    }
+  });
+
+  it("focus_styles_do_not_use_canvas_gap", () => {
+    expect(css).not.toContain("--ts-focus-ring");
+    expect(css).toMatch(/outline:\s*2px\s+solid\s+var\(--ts-accent\)/);
+    expect(css).toMatch(/box-shadow:[^;]*var\(--ts-focus-halo\)/);
+  });
+
+  it("renamed_tokens_have_no_stale_references", () => {
+    const staleTokens = [
+      "--ts-fill-hover",
+      "--ts-segment-thumb",
+      "--ts-shadow-segment-thumb",
+      "--ts-focus-ring",
+    ];
+    const sources = import.meta.glob<string>("../**/*.{vue,ts,css}", {
+      query: "?raw",
+      import: "default",
+      eager: true,
+    });
+    for (const [path, content] of Object.entries(sources)) {
+      if (path.includes("themeContract.test.ts")) continue;
+      for (const token of staleTokens) {
+        expect(content.includes(token), `文件 ${path} 仍包含已废弃/重命名的 token: ${token}`).toBe(
+          false,
+        );
+      }
+    }
+  });
+
+  it("button_focus_states_equal_rest_states", () => {
+    for (const mode of ["light", "dark"] as ThemeMode[]) {
+      const btn = (naive(mode) as any).Button;
+      expect(btn, `${mode} 缺少 Button 覆盖配置`).toBeTruthy();
+      // default
+      expect(btn.colorFocus).toBe(btn.color);
+      expect(btn.textColorFocus).toBe(btn.textColor);
+      expect(btn.borderFocus).toBe(btn.border);
+      expect(btn.rippleColor).toBe("#0000");
+
+      // Primary
+      expect(btn.colorFocusPrimary).toBe(btn.colorPrimary);
+      expect(btn.textColorFocusPrimary).toBe(btn.textColorPrimary);
+      expect(btn.borderFocusPrimary).toBe(btn.borderPrimary);
+      expect(btn.rippleColorPrimary).toBe("#0000");
+
+      // Error
+      expect(btn.colorFocusError).toBe(btn.colorError);
+      expect(btn.textColorFocusError).toBe(btn.textColorError);
+      expect(btn.borderFocusError).toBe(btn.borderError);
+      expect(btn.rippleColorError).toBe("#0000");
+    }
+  });
+
+  it("button_borders_reach_control_stroke", () => {
+    for (const mode of ["light", "dark"] as ThemeMode[]) {
+      const o = naive(mode) as any;
+      const expectedBorder = `1px solid ${TOKENS[mode]["--ts-control-stroke"]}`;
+      expect(o.Button?.border).toBe(expectedBorder);
+      expect(o.Input?.border).toBe(expectedBorder);
+      expect(o.Select?.peers?.InternalSelection?.border).toBe(expectedBorder);
+      expect(o.Checkbox?.border).toBe(expectedBorder);
+    }
+  });
+
+  it("operation_panels_are_opaque", () => {
+    for (const mode of ["light", "dark"] as ThemeMode[]) {
+      const o = naive(mode) as any;
+      const panels: [string, string | undefined][] = [
+        ["TimePicker.panelColor", o.TimePicker?.panelColor],
+        ["DatePicker.panelColor", o.DatePicker?.panelColor],
+        ["DatePicker.peers.TimePicker.panelColor", o.DatePicker?.peers?.TimePicker?.panelColor],
+        ["Select.peers.InternalSelectMenu.color", o.Select?.peers?.InternalSelectMenu?.color],
+      ];
+      for (const [name, color] of panels) {
+        expect(color, `${mode} 缺少 ${name}`).toBeTruthy();
+        expect(parseAlpha(color), `${mode} ${name} (${color}) 应为实色 (alpha = 1)`).toBe(1);
+      }
+    }
   });
 });
 

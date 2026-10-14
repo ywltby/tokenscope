@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
-  "kind": "minor",
-  "summary": "UI 调整：时间筛选、自动读取、汇总页状态与设置页"
+  "kind": "patch",
+  "summary": "控件材质与浮层可读性"
 }

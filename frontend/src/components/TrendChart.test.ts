@@ -111,6 +111,24 @@ describe("TrendChart（设计系统 Task 4）", () => {
     });
     w.unmount();
   });
+  it("显示全部按钮带 ts-btn 类，点击仍调用复位", async () => {
+    const w = mount(TrendChart, {
+      props: { groups: [group("a", 10)], by: "model" },
+    });
+    try {
+      await flushPromises();
+      const reset = w.find(".chart-reset");
+      expect(reset.classes()).toContain("ts-btn");
+      await reset.trigger("click");
+      expect(echartsMock.dispatchAction).toHaveBeenCalledWith({
+        type: "dataZoom",
+        start: 0,
+        end: 100,
+      });
+    } finally {
+      w.unmount();
+    }
+  });
   it.each(["day", "model", "project", "agent"])("%s 超过200类仍保留每类的四项数据", async (by) => {
     const groups = Array.from({ length: 240 }, (_, i) => ({
       ...group(`category-${i}`, i),

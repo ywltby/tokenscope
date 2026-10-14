@@ -13,6 +13,7 @@
 import { join } from "node:path";
 import { uiRefreshLifecycle, uiRefreshClock } from "./ui-refresh-contract.mjs";
 import { uiDateKeyboardMatrix } from "./ui-date-keyboard-contract.mjs";
+import { uiControlMaterial } from "./ui-control-material-contract.mjs";
 
 import { PRIVACY_PROTECTED_COMMANDS } from "../fixtures/ui-contracts.mjs";
 
@@ -47,6 +48,8 @@ export const REQUIRED_CONTRACTS = [
   // 「更新于」与自动读取提示、合并通知唯一性、设置页读取间隔六档。
   "ui_adjustment_shapes",
   "ui_date_keyboard_matrix",
+  // C06（控件材质与浮层可读性计划）：像素级边界对比度与焦点契约。
+  "ui_control_material",
 ];
 
 const VIEWPORTS = {
@@ -259,6 +262,7 @@ async function waitTipState(session, selector, shown, timeoutMs = 2000) {
 // ── 契约实现 ────────────────────────────────────────────────────────
 
 const IMPL = {
+  ui_control_material: uiControlMaterial,
   ui_date_keyboard_matrix: uiDateKeyboardMatrix,
   ui_refresh_lifecycle: uiRefreshLifecycle,
   ui_refresh_clock: uiRefreshClock,

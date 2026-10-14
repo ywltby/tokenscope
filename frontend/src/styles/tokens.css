@@ -14,8 +14,25 @@
   --ts-surface-elevated: rgba(255, 255, 255, 0.85);
   --ts-glass: rgba(255, 255, 255, 0.72);
   --ts-fill: rgba(118, 118, 128, 0.12);
-  --ts-fill-hover: rgba(118, 118, 128, 0.08);
-  --ts-segment-thumb: #ffffff;
+  --ts-row-hover: rgba(118, 118, 128, 0.08);
+
+  /* 控件材质（DESIGN.md §2 控件材质） */
+  --ts-control-bg: rgba(255, 255, 255, 0.92);
+  --ts-control-bg-hover: #ffffff;
+  --ts-control-bg-pressed: rgba(118, 118, 128, 0.16);
+  --ts-control-stroke: rgba(0, 0, 0, 0.52);
+  --ts-control-stroke-hover: rgba(0, 0, 0, 0.56);
+  --ts-control-rim: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --ts-control-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  --ts-control-glow-hover: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --ts-accent-fill-hover: #0062c4;
+  --ts-accent-fill-pressed: #00539f;
+  --ts-selected-bg: var(--ts-accent-soft);
+  --ts-selected-stroke: var(--ts-accent);
+  --ts-selected-glow: 0 0 0 3px rgba(0, 113, 227, 0.12);
+  --ts-focus-halo: 0 0 0 6px rgba(0, 113, 227, 0.18);
+  --ts-surface-popover-solid: #ffffff;
+  --ts-popover-stroke: rgba(0, 0, 0, 0.12);
 
   /* 边界 */
   --ts-separator: rgba(0, 0, 0, 0.08);
@@ -65,9 +82,6 @@
   --ts-radius-popover: 12px;
   --ts-radius-pill: 999px;
 
-  /* 焦点环：2px 高对比轮廓 */
-  --ts-focus-ring: 0 0 0 2px var(--ts-canvas), 0 0 0 4px var(--ts-accent);
-
   /* 玻璃拟态：blur(20px) 让背景透出 */
   --ts-glass-blur: blur(20px) saturate(180%);
   /* 浮层（菜单、tooltip）：85% elevated + 16px 模糊（DESIGN.md §2） */
@@ -83,7 +97,6 @@
   /* 阴影 */
   --ts-shadow-card: 0 8px 32px rgba(0, 0, 0, 0.08);
   --ts-shadow-elevated: 0 12px 48px rgba(0, 0, 0, 0.15);
-  --ts-shadow-segment-thumb: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 1px 2px rgba(0, 0, 0, 0.12);
 
   /* 动效：160–240ms，缓动 cubic-bezier(0.25, 0.1, 0.25, 1) */
   --ts-motion-fast: 160ms;
@@ -110,8 +123,25 @@
   --ts-surface-elevated: rgba(44, 44, 46, 0.85);
   --ts-glass: rgba(28, 28, 30, 0.72);
   --ts-fill: rgba(118, 118, 128, 0.24);
-  --ts-fill-hover: rgba(118, 118, 128, 0.16);
-  --ts-segment-thumb: #636366;
+  --ts-row-hover: rgba(118, 118, 128, 0.16);
+
+  /* 控件材质（DESIGN.md §2 控件材质） */
+  --ts-control-bg: rgba(255, 255, 255, 0.07);
+  --ts-control-bg-hover: rgba(255, 255, 255, 0.12);
+  --ts-control-bg-pressed: rgba(255, 255, 255, 0.04);
+  --ts-control-stroke: rgba(255, 255, 255, 0.34);
+  --ts-control-stroke-hover: rgba(255, 255, 255, 0.46);
+  --ts-control-rim: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  --ts-control-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --ts-control-glow-hover: 0 0 10px rgba(255, 255, 255, 0.06);
+  --ts-accent-fill-hover: #0057cc;
+  --ts-accent-fill-pressed: #004bb0;
+  --ts-selected-bg: var(--ts-accent-soft);
+  --ts-selected-stroke: var(--ts-accent);
+  --ts-selected-glow: 0 0 12px rgba(77, 163, 255, 0.28);
+  --ts-focus-halo: 0 0 0 6px rgba(77, 163, 255, 0.24);
+  --ts-surface-popover-solid: #2c2c2e;
+  --ts-popover-stroke: rgba(255, 255, 255, 0.14);
 
   --ts-separator: rgba(255, 255, 255, 0.08);
   --ts-separator-strong: rgba(255, 255, 255, 0.16);
@@ -139,7 +169,6 @@
   --ts-chart-cache-write: #6fd38d;
   --ts-chart-cache-read: #f080ab;
 
-  --ts-focus-ring: 0 0 0 2px var(--ts-canvas), 0 0 0 4px var(--ts-accent);
   --ts-glass-stroke: rgba(255, 255, 255, 0.1);
   --ts-glass-highlight: rgba(255, 255, 255, 0.08);
   --ts-ambient-1: rgba(10, 132, 255, 0.18);
@@ -147,7 +176,6 @@
   --ts-ambient-3: rgba(48, 209, 88, 0.06);
   --ts-shadow-card: 0 8px 32px rgba(0, 0, 0, 0.4);
   --ts-shadow-elevated: 0 12px 48px rgba(0, 0, 0, 0.6);
-  --ts-shadow-segment-thumb: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 1px 2px rgba(0, 0, 0, 0.28);
 }
 
 /* 不支持 backdrop-filter 的系统：玻璃退化实色，布局与对比度不变 */
@@ -291,8 +319,9 @@ body {
   display: inline-flex;
   gap: 2px;
   background: var(--ts-fill);
+  border: 1px solid var(--ts-control-stroke);
   border-radius: var(--ts-radius-control);
-  padding: 2px;
+  padding: 1px;
   /* UX02：局部 border-box —— 外高严格 32px（修复前 32 + 上下 padding = 36）。
      不全局重置盒模型，避免影响其它组件。 */
   box-sizing: border-box;
@@ -324,19 +353,16 @@ body {
   color: var(--ts-text);
   font-weight: 600;
 }
-/* UX02：公共焦点环——2px accent、offset 2px；底槽 overflow 可见不裁剪 */
-.ts-segmented-item:focus-visible {
-  outline: 2px solid var(--ts-accent);
-  outline-offset: 2px;
-}
 .ts-segmented-thumb {
   position: absolute;
-  top: 2px;
+  top: 1px;
   left: 0;
   height: 28px;
-  background: var(--ts-segment-thumb);
+  box-sizing: border-box;
+  border: 1px solid var(--ts-selected-stroke);
+  background: var(--ts-selected-bg);
   border-radius: var(--ts-radius-thumb);
-  box-shadow: var(--ts-shadow-segment-thumb);
+  box-shadow: var(--ts-selected-glow);
   transition:
     transform var(--ts-motion) var(--ts-ease),
     width var(--ts-motion) var(--ts-ease);
@@ -380,10 +406,8 @@ body {
  * （DESIGN.md §2）。Popover / Tooltip / Select 菜单 / 日期面板共用同一外壳配方；
  * 不支持的平台由 @supports 降级为 95% 实色（tokens.css 顶部）。
  */
-.n-popover,
-.n-tooltip,
-.n-base-select-menu,
-.n-date-panel {
+.n-popover:not(.ts-popover-solid),
+.n-tooltip {
   -webkit-backdrop-filter: var(--ts-glass-blur-popover);
   backdrop-filter: var(--ts-glass-blur-popover);
 }
@@ -487,10 +511,13 @@ body {
   color: var(--ts-accent);
   text-decoration: none;
   font-weight: 500;
+  padding: 2px var(--ts-space-1);
+  border-radius: var(--ts-radius-thumb);
   cursor: pointer;
+  transition: background-color var(--ts-motion-fast) var(--ts-ease);
 }
 .ts-notice-action:hover {
-  text-decoration: underline;
+  background: var(--ts-row-hover);
 }
 
 /*
@@ -509,9 +536,118 @@ body {
   box-shadow: none;
 }
 
-/* 键盘焦点轮廓（hover 不改变文字颜色；focus 高对比可见） */
-.ts-focusable:focus-visible {
-  outline: none;
-  box-shadow: var(--ts-focus-ring);
+/* ── 控件材质（DESIGN.md §2 控件材质）────────────────────────── */
+
+/* 次按钮材质：底 + 描边 + 上沿受光 + 抬起阴影。手写按钮用它，Naive 按钮由主题映射。 */
+.ts-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ts-space-1);
+  height: 32px;
+  padding: 0 var(--ts-space-3);
+  box-sizing: border-box;
+  border: 1px solid var(--ts-control-stroke);
   border-radius: var(--ts-radius-control);
+  background: var(--ts-control-bg);
+  color: var(--ts-text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: var(--ts-control-rim), var(--ts-control-shadow);
+  transition:
+    background-color var(--ts-motion-fast) var(--ts-ease),
+    border-color var(--ts-motion-fast) var(--ts-ease),
+    box-shadow var(--ts-motion-fast) var(--ts-ease);
+}
+.ts-btn:hover:not(:disabled) {
+  background: var(--ts-control-bg-hover);
+  border-color: var(--ts-control-stroke-hover);
+  box-shadow: var(--ts-control-rim), var(--ts-control-shadow), var(--ts-control-glow-hover);
+}
+.ts-btn:active:not(:disabled) {
+  background: var(--ts-control-bg-pressed);
+  border-color: var(--ts-control-stroke-hover);
+  box-shadow: none;
+}
+.ts-btn:disabled {
+  opacity: 0.5;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+.ts-btn-sm {
+  height: 28px;
+  padding: 0 var(--ts-space-2);
+  font-size: 12px;
+}
+
+/* 文字按钮：只用于行内/通知条；必须是强调色，悬停出现底色。 */
+.ts-btn-text {
+  border: none;
+  background: transparent;
+  color: var(--ts-accent);
+  font: inherit;
+  font-weight: 500;
+  padding: 2px var(--ts-space-1);
+  border-radius: var(--ts-radius-thumb);
+  cursor: pointer;
+  transition: background-color var(--ts-motion-fast) var(--ts-ease);
+}
+.ts-btn-text:hover:not(:disabled) {
+  background: var(--ts-row-hover);
+}
+
+/* 选择型：静止是次按钮材质（与 .ts-btn 同用），选中是选中材质。
+   带 :hover 的选择器保证悬停时仍是选中材质：特异性 (0,4,0) 高于 .ts-btn:hover:not(:disabled)
+   的 (0,3,0)；.ts-selected-surface 的两条与 .ts-btn 规则同级，所以本块必须写在 .ts-btn 规则之后。 */
+.ts-choice[aria-pressed="true"],
+.ts-choice[aria-pressed="true"]:hover:not(:disabled),
+.ts-selected-surface,
+.ts-selected-surface:hover:not(:disabled) {
+  background: var(--ts-selected-bg);
+  border-color: var(--ts-selected-stroke);
+  color: var(--ts-text);
+  font-weight: 600;
+  box-shadow: var(--ts-selected-glow);
+}
+
+/* Naive 按钮补上沿受光和阴影（只给渲染了边框的变体：默认、主、危险；文字按钮没有 __border）。
+   排除 :focus-visible，确保键盘聚焦时不覆盖焦点柔光。 */
+.n-button:not(.n-button--disabled):not(:focus-visible):has(> .n-button__border) {
+  box-shadow: var(--ts-control-rim), var(--ts-control-shadow);
+}
+.n-button:not(.n-button--disabled):not(:focus-visible):has(> .n-button__border):hover {
+  box-shadow: var(--ts-control-rim), var(--ts-control-shadow), var(--ts-control-glow-hover);
+}
+.n-button:not(.n-button--disabled):not(:focus-visible):has(> .n-button__border):active {
+  box-shadow: none;
+}
+
+/* 键盘焦点：2px 强调色 outline（偏移 2px）+ 柔光；不再使用画布色间隙。
+   :root 前缀把特异性抬到 (0,3,0) 以上，以压过 Naive 运行时注入的同级规则与阴影规则。 */
+:root .ts-focusable:focus-visible,
+:root .ts-btn:focus-visible,
+:root .ts-btn-text:focus-visible,
+:root .ts-segmented-item:focus-visible,
+:root .n-button:focus-visible,
+:root .n-button:has(> .n-button__border):focus-visible,
+:root .n-button:has(> .n-button__border):focus-visible:hover {
+  outline: 2px solid var(--ts-accent);
+  outline-offset: 2px;
+  box-shadow: var(--ts-focus-halo);
+}
+/* 保留原 .ts-focusable 的圆角行为：行内触发器聚焦时轮廓也是圆角。 */
+:root .ts-focusable:focus-visible {
+  border-radius: var(--ts-radius-control);
+}
+
+/* 操作型浮层（DESIGN.md §2 浮层分类）：实色 + 描边，无模糊。
+   Naive 的 .n-popover:not(.n-popover--raw) 特异性为 (0,2,0)，这里用 :root 抬到 (0,3,0)。 */
+:root .n-popover.ts-popover-solid,
+:root .n-time-picker-panel,
+:root .n-base-select-menu {
+  background-color: var(--ts-surface-popover-solid);
+  border: 1px solid var(--ts-popover-stroke);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }

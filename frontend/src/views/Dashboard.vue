@@ -220,8 +220,6 @@ defineExpose({
         </button>
         <NButton
           size="small"
-          secondary
-          class="ts-focusable"
           :loading="loading || eventsLoading"
           :disabled="loading || eventsLoading"
           @click="manualRefresh"

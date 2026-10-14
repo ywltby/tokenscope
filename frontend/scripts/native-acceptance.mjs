@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import { nativeUiRefresh } from "./contracts/native-ui-refresh.mjs";
 import { nativeUiSystem } from "./contracts/native-ui-system.mjs";
+import { decodePng } from "./lib/png.mjs";
 
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
 const EXE_DEFAULT = path.join(REPO, "src-tauri", "target", "release", "tokenscope.exe");
@@ -108,59 +109,18 @@ function hb(msg) {
  */
 function pngLuma(buf) {
   try {
-    if (!(buf[0] === 0x89 && buf.toString("ascii", 1, 4) === "PNG")) return null;
-    let pos = 8;
-    let w = 0;
-    let h = 0;
-    let colorType = 0;
-    let bitDepth = 0;
-    const idat = [];
-    while (pos < buf.length) {
-      const len = buf.readUInt32BE(pos);
-      const type = buf.toString("ascii", pos + 4, pos + 8);
-      const data = buf.subarray(pos + 8, pos + 8 + len);
-      if (type === "IHDR") {
-        w = data.readUInt32BE(0);
-        h = data.readUInt32BE(4);
-        bitDepth = data[8];
-        colorType = data[9];
-        if (data[12] !== 0 || bitDepth !== 8 || (colorType !== 6 && colorType !== 2)) return null;
-      } else if (type === "IDAT") idat.push(data);
-      else if (type === "IEND") break;
-      pos += 12 + len;
-    }
-    const raw = zlib.inflateSync(Buffer.concat(idat));
-    const bpp = colorType === 6 ? 4 : 3;
-    const stride = w * bpp;
-    let prev = Buffer.alloc(stride);
+    const png = decodePng(buf);
+    if (!png) return null;
+    const { width: w, height: h, channels, data } = png;
+    const stride = w * channels;
     let sum = 0;
     let n = 0;
-    const paeth = (a, b, c) => {
-      const pa = Math.abs(b - c);
-      const pb = Math.abs(a - c);
-      const pc = Math.abs(a + b - 2 * c);
-      return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
-    };
     for (let y = 0; y < h; y++) {
-      const line = Buffer.from(raw.subarray(y * (stride + 1), y * (stride + 1) + stride + 1));
-      const filter = line[0];
-      const cur = line.subarray(1);
-      for (let x = 0; x < stride; x++) {
-        const a = x >= bpp ? cur[x - bpp] : 0;
-        const b = prev[x];
-        const c = x >= bpp ? prev[x - bpp] : 0;
-        let v = cur[x];
-        if (filter === 1) v = (v + a) & 0xff;
-        else if (filter === 2) v = (v + b) & 0xff;
-        else if (filter === 3) v = (v + ((a + b) >> 1)) & 0xff;
-        else if (filter === 4) v = (v + paeth(a, b, c)) & 0xff;
-        cur[x] = v;
-      }
-      for (let x = 0; x < stride; x += bpp * 53) {
+      const cur = data.subarray(y * stride, (y + 1) * stride);
+      for (let x = 0; x < stride; x += channels * 53) {
         sum += 0.2126 * cur[x] + 0.7152 * cur[x + 1] + 0.0722 * cur[x + 2];
         n++;
       }
-      prev = cur;
     }
     return n ? Math.round((sum / n) * 10) / 10 : null;
   } catch {

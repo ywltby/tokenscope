@@ -37,14 +37,7 @@ const emit = defineEmits<{
       <div class="exit-actions">
         <NButton size="small" :disabled="busy" @click="emit('cancel')">返回隐私政策</NButton>
         <span class="exit-actions-spacer" />
-        <NButton
-          size="small"
-          type="error"
-          secondary
-          :loading="busy"
-          :disabled="busy"
-          @click="emit('exit')"
-        >
+        <NButton size="small" type="error" :loading="busy" :disabled="busy" @click="emit('exit')">
           退出程序
         </NButton>
       </div>

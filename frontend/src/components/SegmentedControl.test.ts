@@ -207,4 +207,17 @@ describe("SegmentedControl（UX02）", () => {
     expect(w.emitted("update:modelValue")).toBeUndefined();
     w.unmount();
   });
+
+  it("thumb_uses_selected_material_class_contract", async () => {
+    const w = mountCtl("a");
+    await flushPromises();
+    expect(w.classes()).toContain("ts-segmented");
+    expect(w.find(".ts-segmented-thumb").exists()).toBe(true);
+    const selected = w
+      .findAll(".ts-segmented-item")
+      .find((i) => i.attributes("aria-checked") === "true");
+    expect(selected).toBeDefined();
+    expect(selected!.attributes("aria-checked")).toBe("true");
+    w.unmount();
+  });
 });

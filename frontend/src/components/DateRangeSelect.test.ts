@@ -228,6 +228,33 @@ describe("日期弹层（U02）", () => {
     expect(w.emitted("update:preset")).toBeUndefined();
     expect(w.find(".range-panel").exists()).toBe(false);
   });
+
+  it("shortcuts_are_separate_choice_buttons", async () => {
+    const w = mountRange({ kind: "days", days: 7 });
+    try {
+      await open(w);
+      const shortcuts = w.findAll("button.ts-choice");
+      expect(shortcuts.length).toBe(6);
+      for (const b of shortcuts) {
+        if (b.text() === "7d") {
+          expect(b.attributes("aria-pressed")).toBe("true");
+        } else {
+          expect(b.attributes("aria-pressed")).toBe("false");
+        }
+      }
+      const clearBtn = w.findAll(".actions-row .n-button").find((b) => b.text().includes("清除"));
+      expect(clearBtn).toBeDefined();
+      expect(clearBtn?.find(".n-button__border").exists()).toBe(false);
+
+      const btn7d = shortcuts.find((b) => b.text() === "7d");
+      expect(btn7d).toBeDefined();
+      await btn7d!.trigger("click");
+      expect(lastPreset(w)).toEqual({ kind: "days", days: 7 });
+      expect(w.find(".range-panel").exists()).toBe(false);
+    } finally {
+      w.unmount();
+    }
+  });
 });
 
 describe("日期按钮标签（U01）", () => {
