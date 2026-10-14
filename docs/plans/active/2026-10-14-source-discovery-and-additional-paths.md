@@ -1,75 +1,42 @@
-# 来源目录、扫描状态反馈与 Cargo Workspace 统一实施计划
+# PR3：当前用户日志目录发现与追加路径管理
 
-> 状态：**设计草案，待用户审阅；本轮不实施。**
-> 2026-10-15 整合：目录发现 S01–S07、扫描反馈 F01–F05、构建整理 W01–W07 统一在本计划维护，全部未实施。原扫描反馈独立草稿已并入第 11 节，不再保留第二份待审计划。
-> 执行时使用 executing-plans 技能逐项落实；用户明确要求优先于本计划。分支：`docs/source-discovery-plan`，基线为 main `e34495b`（0.3.1）。
+> 状态：按 [1eaede7 审阅意见](../../reviews/2026-10-15-source-discovery-plan-review.md)修订，待复审；S01–S07 均未实施。
+> 前置条件：[PR1 目录迁移](2026-10-15-workspace-layout.md)和 [PR2 扫描反馈](2026-10-15-collection-status.md)依次合入 main。届时从最新 main 创建 `feat/source-paths`，独立 minor 版本、独立 PR 和验收。当前设计修订仍提交到 `docs/source-discovery-plan`。
 
-**Goal：** 默认发现本机各用户可访问的 Claude Code / Codex 标准日志目录，设置页输入用于追加路径，以列表管理全部来源，重复目录和重复日志不重复计量。
+**Goal：** 默认发现当前用户的标准日志目录与环境变量指定的目录，以追加列表管理来源；来源重叠不重复解析或计量，遍历链接不会死循环。
 
-同时让扫描开始/结束在界面上有真实状态反馈，并统一 Cargo workspace、锁文件、构建产物与门禁，清除旧 CLI 同名规避配置。
+**Architecture：** 每轮采集探测固定候选并冻结来源集合；路径、链接和文件物理身份去重后交给既有适配器。历史事实、查询会话和 PR2 扫描生命周期保持既有语义。
 
-**统一执行顺序：** 用户批准后先 W01–W05 完成构建基础迁移，W06 验证基础产物；再 S01–S04 接通多根来源，F01–F02 接通真实采集状态；随后 S05 与 F03 完成界面；最后 S06 与 F04 联合 E2E。S07、F05、W07 合并为一次文档/版本/交付收尾，W06 的安装升级与当前 HEAD 取证在最终提交重验。三个任务组分别登记证据，不重复提版本、不重复建立同类门禁。
+**Tech Stack：** Rust workspace、Tauri 2、Vue 3 / Naive UI、TOML、SQLite、Vitest、隔离原生 E2E。
 
-**Architecture：** 增加独立目录发现与解析层，将自动发现、手动追加、停用规则解析成带身份及诊断的来源集合。采集、状态展示、查询缓存使用同一份不可变解析结果；历史库的事件身份和保留语义不变。
+## 1. 范围与入口
 
-**Tech Stack：** Rust、Windows 用户配置文件发现、Tauri 2 IPC、Vue 3 / Naive UI、TOML、现有 SQLite 历史库、Vitest / Playwright 合成验收。
+- 自动候选仅为当前用户标准根、启动时的 CODEX_HOME、启动时的 CLAUDE_CONFIG_DIR。其余通过手动追加；不扩展自动搜索范围，不做整盘、远程工具或 glob 发现。
+- 取消“重新发现”按钮和 source_paths_discover 接口。每轮只探测少量固定路径，新装工具的目录下一轮出现；没有独立发现任务、发现修订或发现迟到响应状态机。
+- 启停和移除只影响后续读取，历史库不删数据；所有有效代理用量均纳入。不新增同意流程，不改变 CCS 手动导入、日汇总或费用冻结。
+- PR1 后修改入口：`crates/tokenscope-core/src/settings.rs`、`report.rs`、`source/{mod,claude,codex,claude_projects}.rs`；壳 commands/lib/privacy 和前端 Settings/useUsageQuery。必须覆盖启动、手动、定时、来源状态、诊断与验收调用点。
 
-## 1. 已确认需求与范围
+## 2. 固定候选、环境与映射
 
-- 默认发现 `C:\Users\*` 所代表的本机用户目录下的标准日志位置；不递归搜索整个用户目录，更不扫描整盘。
-- 当前单目录输入改为“追加读取目录”，添加不会替换默认来源，全部路径以列表显示。
-- 无论主代理、子代理、归档会话，只要是已有解析器支持的有效用量均纳入。
-- 保留统一 `~/.tokenscope/history.db`，不按账户或来源目录拆库，不保存完整会话正文。
-- 停用、删除配置或源日志消失只影响后续采集，已经保存的历史用量不删除。
-- 目录发现部分只覆盖 Windows 多用户发现。其他平台继续发现当前用户的标准目录，手动追加多目录可用；不顺带开发 WSL、容器、SSH 或远程共享的自动发现。
-- 本计划待确认，不分配发行版本；后续功能实现准备合入 main 时按当时最新基线递增 minor，同一 PR 不重复递增。
-
-## 2. 现状与必须一起改的入口
-
-| 当前实现 | 本轮要求 |
-| --- | --- |
-| `crates/tokenscope-core/src/settings.rs::SourceConfig` 只有 `enabled`、`dir` | 改为自动发现开关、追加项、自动项停用清单，并兼容旧设置 |
-| `crates/tokenscope-core/src/report.rs::SummaryOptions` 传入单个 `claude_dir` / `codex_dir` | 生产入口统一传递解析后的多根来源集合 |
-| `make_source` 按应用构造单一来源 | Claude 每根绑定自己的映射；Codex 多根扫描 |
-| `claude_project_mapping` 默认使用当前账户 `.claude.json` | 多用户发现必须使用该目录所属账户的映射，禁止借用当前账户 |
-| Codex 默认根包括 `sessions` 与 `archived_sessions` | 两者都保留并分别可见；不退回只读 sessions |
-| `source_config_set` 保存一个覆盖目录 | 追加/启停/移除需在现有 settings 事务内完成 |
-| `Settings.vue` 显示“当前生效目录” | 改为多根列表，状态与采集来源使用同一集合 |
-| 最近采集复用键包含来源配置 | 键包含来源集合、目录启停、映射与发现修订，防止复用旧结果 |
-
-必须检查手动刷新、后台采集、启动读取、source_status、诊断导出和 native 验收的所有调用点，不能只改设置页。
-
-## 3. 自动发现规则
-
-### 3.1 用户目录候选
-
-1. Windows 生产实现从系统用户配置位置取得配置文件根目录与已登记的账户主目录，补充配置文件根目录的直接子目录（覆盖未登记但保留下来的用户目录）。不得硬编码 `C:`，也不得由显示用户名拼接路径。
-2. 当前用户主目录始终作为候选补充；ProfileList 不可读时降级为可访问的配置文件根目录和当前用户，并给出一次发现诊断。系统根同样无法定位时只检查当前用户，不猜盘符、不扩展全盘。
-3. 对候选只探测下表的固定相对路径。排除系统明确标识的模板/公共配置目录；目录联接或符号链接做物理身份去重，不递归枚举账户根下的任意子树。
-4. 不读取其他账户的进程环境，也不加载其他账户注册表 hive。读取当前进程显式提供的 `CODEX_HOME`，追加其标准子目录，不替换其他已发现默认根。
-5. 本轮不新增未经项目验证的 Claude 环境变量约定；非标准 Claude 日志通过手动追加解决。
-
-| 应用 | 每个用户目录探测的日志根 | 关联元数据 |
+| 来源 | 日志根 | Claude 映射 |
 | --- | --- | --- |
-| Claude Code | `<profile>/.claude/projects` | 仅 `<profile>/.claude.json` 的既有项目映射 |
-| Codex | `<profile>/.codex/sessions` | 无额外账户映射 |
-| Codex | `<profile>/.codex/archived_sessions` | 无额外账户映射 |
-| Codex 当前环境位置 | `<CODEX_HOME>/sessions`、`archived_sessions` | 来源标记“环境变量”；与标准位置合并去重 |
+| 默认 Claude | `~/.claude/projects` | `~/.claude.json` |
+| 默认 Codex | `~/.codex/sessions`、`~/.codex/archived_sessions` | 无 |
+| CODEX_HOME | `<CODEX_HOME>/sessions`、`<CODEX_HOME>/archived_sessions` | 无 |
+| CLAUDE_CONFIG_DIR | `<CLAUDE_CONFIG_DIR>/projects` | 实施前核实 |
+| 手动追加 | 用户明确指定的绝对日志根 | 禁用映射，沿用 A03 |
 
-不存在的标准路径默认不生成空列表行；遇到权限拒绝时不能假称不存在，应显示“无法访问/未确认”。发现任务在后台执行，单个目录失败不阻塞其他来源。不得为了遍历其他账户自动请求管理员权限。
+CLAUDE_CONFIG_DIR 映射文件位置必须在 S02 实施前通过官方文档或隔离合成实测核实，将证据回填本节；目前不假定为 `<CLAUDE_CONFIG_DIR>/.claude.json`。无法核实则禁用该根映射，不借用默认映射。默认和环境根同名 slug 必须测试不串映射；相同物理根合并时优先已核实默认绑定，冲突不猜测、需诊断。
 
-### 3.2 发现时机
+环境变量只使用 TokenScope 启动时继承的值：空串忽略，相对路径忽略并诊断，不存在的绝对根显示缺失、不每轮报错。修改后需要重启；自启进程未必继承交互 shell 中设置的变量，设置帮助和文档必须说明。测试和 acceptance 注入主目录、环境及探测器，完全忽略真实主目录和环境变量。
 
-- 仅在现有隐私同意闸门 Ready 后：启动时发现一次；设置页“重新发现”按钮显式重新发现。
-- 定时采集只使用当前已解析来源集合，不随 5 秒等采集间隔重做账户枚举。
-- 手动追加/移除/启停只更新来源解析，不隐式扫描所有账户；手动刷新用量沿用已发现集合。
-- 新建账户或新装工具的目录通过“重新发现”或重启出现。发现中按钮显示加载态；完成时显示发现时间和部分失败提示。
-- 单次采集冻结来源集合。配置变更发生在采集中时，当前批次完整结束，下一批使用新配置；不同时启动第二批采集。
-- 测试和 acceptance 模式必须注入合成 profile 列表、环境与文件系统探测，覆盖全部真实发现入口，绝不回退本机用户目录或注册表。
+隐私 Ready 后，每轮开始探测固定路径并冻结集合及映射。来源状态查询使用同一解析逻辑但不扫描用量。默认根不存在可不显示；环境/手动缺失根保留行，权限失败显示无权限。采集中配置变化只影响下一轮，始终串行。根规范化和物理身份按集合缓存；存在性/链接元数据变化、配置变化、别名目标变化需失效，不能只按路径字符串永久缓存。复用键包含实际集合、启停、映射和上下文签名。
 
-## 4. 配置模型与迁移
+**行为变更：** 旧 CODEX_HOME 替代默认 `.codex`，新行为追加到默认根；升级后默认根旧日志可能进入统计使总量增加。相对 CODEX_HOME 原先按 cwd 解释，新行为忽略并诊断。CLAUDE_CONFIG_DIR 是新增支持，采用同样追加语义。写入 stats-semantics 来源章节、设置帮助、PR3“行为变更”及版本摘要。
 
-建议 TOML 结构（字段名实施时按此固定，序列化测试覆盖）：
+两种环境变量均测试：两处有日志取并集；大小写/尾分隔符/联接同根合并一行且保留来源标签；空值、相对值、缺失、重叠；acceptance 忽略真实环境。Codex 另验证旧版只读环境根、新版默认与环境都读的升级用量并集。
+
+## 3. 配置与迁移
 
 ```toml
 [sources.claude]
@@ -84,429 +51,120 @@ enabled = true
 [sources.codex]
 enabled = true
 auto_discover = true
-excluded_auto_paths = ["C:/Users/work/.codex/archived_sessions"]
+excluded_auto_paths = []
 
 [[sources.codex.additional_paths]]
 path = "D:/history/codex/sessions"
 enabled = true
 ```
 
-- 新安装默认两个应用启用、自动发现开启、追加列表为空。应用总开关只控制采集，不排除历史库中的旧用量。
-- 自动项停用存入 `excluded_auto_paths`，以规范化路径比较；重新发现、重启不能自动重新启用。关闭自动发现后可仅使用手动项。
-- 自动结果本身不写入 settings；只持久化用户选择。运行期保留上一轮发现记录，以显示本轮消失项；重启后未再发现的项可以不显示，但停用清单保留。
-- 旧 `dir` 非空：按原有“递归日志根”语义迁入一个追加项，保留 `enabled`；自动发现开启。旧应用总开关为 false 时仍禁止任何实际采集。
-- 旧 `dir` 为空：迁为默认发现，无手动项。旧路径与自动项重合只显示/扫描一份，并标记“自动发现、手动添加”。
-- 使用可区分“旧字段缺失”和“新数组为空”的反序列化模型；新配置已存在时以新配置为准，不能每次加载又从旧 `dir` 导入。
-- 迁移通过现有 `settings::update` 原子事务保存，成功后不再输出旧字段；失败时不启动扩大范围的采集、不覆盖坏配置、不丢弃其他已支持的设置。连续迁移不新增重复项。
-- 迁移后设置页显示一次说明：“原自定义目录已保留为追加目录；已启用自动发现”，提供自动发现开关，不要求再次手工填写目录。
+自动开关管理默认和环境候选，停用项持久化于 excluded_auto_paths，探测/重启不能重启用。自动结果不存为配置，仅保存用户选择。应用总开关优先。
 
-## 5. 路径、事件与账户映射规则
+旧非空 dir 按原递归语义迁成一个追加项、保留 enabled、自动发现开启；旧空值无追加项。新字段优先，空数组不当成旧配置。settings::update 原子迁移成功后不再输出 dir；失败不扩大读取范围、不覆盖坏配置、不丢其他字段，重复加载不再迁移。
 
-### 5.1 路径身份和重复扫描
+旧根等于自动根则合并来源标签；旧 Codex dir 为 `~/.codex`、包含自动 sessions/archive 子根时仍迁移成功，标为“与 X 重叠”，在一次性迁移说明中提示移除/停用。总开关原本关闭时不开始采集。说明“原自定义目录已保留为追加目录；自动发现已开启”，提供关闭自动发现入口。
 
-- 展示路径保留完整可复制文本；逻辑比较采用项目既有 Windows 规范化规则（分隔符、盘符、大小写、尾分隔符）。存在且可访问的目录再解析物理身份，用于联接/符号链接别名消重。
-- 文件系统身份解析失败时不把不同目录冒认成同一目录；保留显式诊断，不因 canonicalize 失败将全轮判空。
-- 同应用相同根合并 origins；同应用父子根保留配置行，采集分配为互斥子树：子根先认领，父根跳过所有更具体的已启用子根。列表注明覆盖关系，文件最多解析一次。
-- 同一物理文件通过别名出现时按物理身份消重。不要先扫描两遍再仅靠事件库去重掩盖性能问题。
-- 跨应用相同或嵌套根继续拒绝。手动保存时事务失败并明确冲突项；自动重新发现产生冲突时隔离冲突集合、显示错误，其他无冲突根继续采集，不执行“先到者获胜”。
-- 同一采集批次对每个来源根冻结对应映射，不跨账户借用 Claude 项目表。手动日志根没有显式可信关联时沿用“映射禁用”的旧规则，不猜其所属账户。
+## 4. 嵌套、遍历与三层去重
 
-### 5.2 历史事实与费用
+### 4.1 嵌套规则
 
-- 不将用户目录、账户名、来源 ID 加进原生事件身份。Claude 原有 message 身份、Codex 原有保守重播指纹保持不变；不声称 Codex 获得了独立请求强身份。
-- 同一日志复制到默认目录和追加目录，事件取并集；来源溯源仍可记录多个位置。不得改变 CCS 手动导入、日汇总或费用冻结口径。
-- 源停用/删除配置后，历史用量仍可查询。设置文案统一为“停止后续读取”，修掉旧的“完全不参与统计”等误导语句。
-- 不新增“按账户统计”或账户筛选；profile 信息仅用于来源解释和元数据关联。
+同应用手动添加与全部已有行比较（默认、环境、手动、停用、缺失均包含）：同根返回已有行并提示“目录已在列表中”，不新增；上级或子目录直接拒绝，注明冲突行。可访问时同时比较物理目标，防止联接别名绕过；不可访问时执行逻辑路径边界比较并显示身份未确认。
 
-## 6. 设置页与后端接口
+迁移和环境变化产生的同应用嵌套不阻断，标重叠、提示移除手动行或停用自动行，文件层确保只解析一次；不采用子根覆盖父根。跨应用相同/嵌套继续拒绝手动事务；自动出现时隔离冲突集合，其余正常读取，不用“先到者获胜”。
 
-每个应用一组：总开关、自动发现开关、“重新发现”按钮；其下“追加读取目录”输入/目录选择按钮与“添加”按钮；再下方是统一路径列表。
+### 4.2 遍历环必修
 
-| 列 | 内容 |
-| --- | --- |
-| 目录 | 完整路径、支持换行复制，不以省略号遮住差异 |
-| 来源 | 自动发现 / 环境变量 / 手动添加，可多标记 |
-| 状态 | 待读取、可读取、缺失、无权限、部分失败、已停用、冲突、被子根覆盖；不能把“目录存在”写成“读取成功” |
-| 操作 | 启停；手动项可移除，自动项不可删除；自动与手动重合时移除只移除手动来源 |
+现有 walk_jsonl 以 child.is_dir() 跟随目录链接且无访问集合，祖先联接会无限递归。改用 DirEntry::file_type() 不跟随分型，显式解析链接目标；维护整轮已访问目录物理身份。已访问或归另一个已启用根负责的目标跳过，其他目标只跟随一次；跳过需确保目标确实由其他根遍历，不漏读。无稳定身份时用解析目标路径防环，无法解析链接则跳过并诊断，不能无界递归。
 
-- 手动输入指向**日志根**，不是工作项目 cwd。提示 Claude 通常选择 `projects`，Codex 选择 `sessions` 或 `archived_sessions`，两者可分别添加；旧自定义任意根仍保持原递归语义。
-- 保存前拒绝空值、相对路径、明显整盘/整个用户总目录及跨应用冲突；不存在的绝对日志路径允许保存，列表标为缺失。输入不会被静默改写成另一个目录。
-- 不引入任意 glob 输入。目录选择可用系统选择器，取消不保存；前端草稿不直接决定后端扫描范围。
-- 添加重复项返回已有行并提示“目录已在列表中”，不产生新行。失败保留输入，成功清空；保存请求期间防重复点击。
-- 增加 `source_paths_list`、`source_paths_discover`、`source_path_add`、`source_path_remove`、`source_path_set_enabled` 业务 IPC；应用开关和自动发现开关走既有 settings 原子更新。
-- 解析结果建议为 `ResolvedSourceRoot { id, agent, path, canonical_identity, origins, mapping_path, enabled, diagnostic }`；来源 ID 是配置/展示身份，绝不当请求事实身份。
-- 每个写接口在后端对最新 settings 做单项事务操作，禁止前端整组旧快照覆盖。以来源修订号丢弃迟到的发现/状态响应；配置修改后失效最近采集键，串行请求新一轮采集，沿用 usage-updated 通知与汇总/明细冻结协议。
-- 单应用视图只显示对应应用来源警告；全局配置/价格警告保留。重复无变化的权限错误不在每次采集刷 info。
-- `docs/privacy.md` 明确读取范围扩展为本机可访问账户的标准日志目录；继续遵守现有同意闸门，不新增本计划外的强制重复同意流程。
+使用显式栈避免深目录耗尽调用栈；read_dir 子项错误需保留，不能 entries.flatten 静默吞错。祖先联接回归放在有超时的受控子进程，修复前失败不得拖死测试 runner，修复后断言终止、文件齐全且只一次。
 
-## 7. 实施任务（每项先红后绿，再提交）
+### 4.3 文件身份与缓存
 
-各任务都按：补失败测试 → 运行确认失败原因 → 最小实现 → 对应测试通过 → 必需门禁 → 独立提交。不得以改测试门槛来绕过重复计量或真实目录隔离。
+1. **先路径**：规范化绝对路径，处理分隔符、盘符、Windows 大小写、尾分隔符；可访问时统一 canonicalize 的 `\\?\` 前缀/UNC、8.3 短名。非 Windows 不折叠大小写；Windows 敏感目录必要时用身份确认，不能误合并独立文件。
+2. **再链接**：目录链接按 4.2 防环；文件符号链接用目标身份。路径去重先于昂贵句柄操作。
+3. **最后硬链接**：Windows 卷序列号＋128 位 FILE_ID_INFO 优先，取不到才诊断并退 64 位文件索引；FAT/exFAT/共享等无稳定 ID 时退路径、标“身份未确认”，不按内容猜同文件。其他平台使用对应物理身份。
+
+文件 ID 按（路径、大小、修改时间）缓存，仅新增/变化文件打开句柄；消失/重现、链接目标和上下文变化使缓存失效。不得宣称三元组能识别所有保持大小/时间的替换，记录限制并测试可观察失效情况。
+
+同物理文件以规范化路径最小者认领，解析指纹/进度按物理身份＋规则及映射上下文维护；路径改变但上下文不变不重解析，上下文改变必须重解析以保归属。Codex 同卷 sessions→archived_sessions 身份保持的复用纳入本轮。不能先重复解析再靠历史库掩盖开销。
+
+每根映射冻结，手动根不猜映射。物理文件身份不是请求身份：Claude message 身份、Codex 保守重播指纹不变；复制为不同文件仍由事实层求并集。停用和删除不删除历史。
+
+### 4.4 性能预算
+
+- 同机同数据 release 改前/改后各测多次中位数，记录数据规模与文件缓存条件。热目标仍约 0.1–0.2 秒量级，冷历史参考约 5.5 秒；两者相较本次实测基线不超过 +10%，不能用历史单次数字冒充本轮基线。
+- 合成：2 根、约 2 万文件、约 1 千硬链接、1 个联接环。记录热轮耗时和身份句柄次数，第二轮未变文件的身份句柄次数应为 0，固定根探测单列，整体接近 0。
+- 固定来源解析应为毫秒级，来源解析/文件身份阶段各自计时；auto debug、手动/启动 info，不逐文件刷屏。
+- perf_real_data 仍须显式 opt-in；执行前说明真实来源读取和历史库写入影响，优先只读来源＋隔离数据库对比。其他自动化测试禁止访问真实数据。真实基准未跑就标待验，不用合成测试替代。
+
+## 5. 设置页、接口与隐私
+
+每应用总开关、自动开关；追加输入/目录选择/添加；下方列表，没有重新发现按钮。目录完整可复制换行；来源为默认自动/环境/手动多标签；状态为待读取、可读取、缺失、无权限、部分失败、停用、冲突、与 X 重叠。仅手动来源可移除，合并行移除只删手动标签；自动行可停用。
+
+拒绝空值、相对路径、明显整盘/整个用户主目录、同应用嵌套和跨应用冲突；合法缺失绝对根可保存。选择取消不保存，输入不静默改写；错误保留草稿、成功清空、防重复提交。
+
+IPC 保留 source_paths_list、source_path_add、source_path_remove、source_path_set_enabled，总开关走 settings 事务。写接口对最新 settings 单项修改，前端串行提交、完成后重读，用普通请求序号避免旧列表覆盖；不建立独立发现修订。配置成功失效采集复用键，串行请求新采集，沿用 PR2 状态和冻结查询。
+
+解析行包含 id/agent/path/canonical_identity/origins/mapping_path/enabled/diagnostic，id 仅为配置展示身份。单应用过滤来源警告、全局警告保留，权限状态不伪报缺失，不请求额外权限，不重复刷 info。
+
+docs/privacy.md 只补充当前用户默认、环境和多个手动路径，不新增同意流程。该文件通过 include_str! 编译进壳，必须命中 PR1 的构建输入清单和壳检查。
+
+## 6. S01–S07 实施任务
+
+每项使用 executing-plans 技能：失败测试→确认原因→最小实现→定向与必要门禁→独立提交。路径按 PR1 迁移后布局。
 
 ### S01 配置集合与迁移
 
-- 修改：`crates/tokenscope-core/src/settings.rs`；新增：`crates/tokenscope-core/tests/source_paths_settings.rs`。
-- 测试旧空值/非空值/停用、新数组为空、新旧并存、重复加载、保存失败及两个并发单项更新不互相覆盖。
-- 命令：`cargo test -p tokenscope --test source_paths_settings`。通过标准：追加项只迁移一次，失败不扩大采集范围，其他设置逐字段保留。
-- 提交：`feat(来源): 支持追加目录配置及旧覆盖目录迁移`。
+- 修改 `crates/tokenscope-core/src/settings.rs`，新增 `crates/tokenscope-core/tests/source_paths_settings.rs`。
+- 覆盖旧空/非空/停用、新旧并存、空数组、幂等、原子失败、并发事务、父根迁移重叠保留和说明、手动父/子拒绝（含停用和缺失行）。
+- `cargo test --locked -p tokenscope --test source_paths_settings`。
 
-### S02 可注入的多用户发现器
+### S02 固定候选与环境发现
 
-- 新增：`crates/tokenscope-core/src/source/discovery.rs`、`crates/tokenscope-core/tests/source_discovery.rs`；修改：`crates/tokenscope-core/src/source/mod.rs`、`crates/tokenscope-core/src/acceptance.rs`。
-- 生产 profile 枚举和文件系统探测封装为可替换提供者；调用方不散落注册表或环境读取。
-- 测试两个用户、非 C 盘、当前环境根、Codex 双根、权限拒绝、无标准目录、模板目录、别名、发现部分失败；用计数提供者证明定时采集不重复枚举。
-- 命令：`cargo test -p tokenscope --test source_discovery`。测试一律合成目录，提供者未注入时测试模式拒绝真实发现。
-- 提交：`feat(来源): 自动发现多用户标准日志目录`。
+- 新增 `crates/tokenscope-core/src/source/discovery.rs`、`crates/tokenscope-core/tests/source_discovery.rs`；修改 source/mod.rs、acceptance.rs。
+- 注入主目录、启动环境、探测器；第 2 节环境/映射全部用例、新目录下一轮出现、权限/缺失区分、根身份缓存失效、毫秒级解析。CLAUDE_CONFIG_DIR 映射证据回填第 2 节。
+- `cargo test --locked -p tokenscope --test source_discovery`。
 
-### S03 多根解析、采集与历史并集
+### S03 防环、多根与去重
 
-- 修改：`crates/tokenscope-core/src/report.rs`、`crates/tokenscope-core/src/source/claude.rs`、`crates/tokenscope-core/src/source/codex.rs`、`crates/tokenscope-core/src/source/claude_projects.rs`；新增：`crates/tokenscope-core/tests/source_paths_collection.rs`。
-- 根集合排序及指纹稳定；同根/别名/嵌套只解析一次；多用户 Claude 各自绑定 `.claude.json`；冲突隔离与错误来源归属明确。
-- 测试复制同一事件、迁移前后同一事件、父子根、别名、独立真实事件不误合并、缺 cwd 的两个账户同 slug 不串映射、单根失败其他根仍入库、停用后历史保留、映射变更令采集缓存失效。
-- 命令：`cargo test -p tokenscope --test source_paths_collection` 与 `cargo test -p tokenscope --test ui_adjustment_collect`。冻结查询仍一致，不改既有 Codex 身份语义。
-- 提交：`feat(采集): 汇合多根来源并防止重复扫描`。
+- 修改 `crates/tokenscope-core/src/report.rs`、`source/{mod,claude,codex,claude_projects}.rs`；新增 `crates/tokenscope-core/tests/source_paths_collection.rs`。
+- 环/深目录/断链/读错、重复路径/短名/前缀/符号链接/硬链接、稳定认领者、归档移动、上下文改变、默认环境同 slug 不串映射、无 ID 降级均测试。
+- 覆盖迁移/环境重叠仅解析一次、手动嵌套拒绝、跨应用冲突隔离、复制求并集、独立事件不丢、停用保留、CODEX_HOME 升级。
+- `cargo test --locked -p tokenscope --test source_paths_collection` 与 `cargo test --locked -p tokenscope --test ui_adjustment_collect`；执行第 4.4 节预算。
 
-### S04 后端事务接口与调度
+### S04 壳事务与调度
 
-- 修改：`src-tauri/src/commands.rs`、`src-tauri/src/lib.rs`（命令注册及后台读取）、`src-tauri/src/privacy.rs`（闸门测试范围）。
-- 测试未同意时不能发现或读取真实目录；重新发现/追加/移除与定时读取交错、旧修订响应迟到、应用关闭后不触发采集、配置成功后正确失效缓存。
-- 命令：`cargo test --manifest-path src-tauri/Cargo.toml`。同一时刻最多一个采集批次，所有路径状态与实际解析集合一致。
-- 提交：`feat(设置): 接入多目录事务和来源发现命令`。
+- 修改 `src-tauri/src/{commands,lib,privacy}.rs`，测 Ready 前拒绝、每轮冻结、配置与采集交错、事务失败不扩范围、退出后不采集、PR2 状态一致。
+- `cargo test --locked -p tokenscope-app`。
 
-### S05 设置页列表与行为测试
+### S05 来源列表
 
-- 修改：`frontend/src/types.ts`、`frontend/src/views/Settings.vue`、`Settings.test.ts`、`frontend/src/composables/useUsageQuery.ts` 及对应测试。
-- 测试自动与手动标签、添加不覆盖、重复项、移除只删手动来源、自动项停用持久化、读取失败保留草稿、并发操作不回滚新状态、完整路径可访问名称及长路径换行。
-- 命令：`pnpm --dir frontend test`、`pnpm --dir frontend typecheck`、`pnpm --dir frontend format:check`。
-- 提交：`feat(设置): 用来源列表管理自动与追加目录`。
+- 修改 `frontend/src/types.ts`、Settings.vue/Settings.test.ts、useUsageQuery.ts 及测试。
+- 多来源标签、追加不覆盖、父/子拒绝、同根提示、非手动重叠、启停/移除、错误保草稿、保存重读、长路径和可访问名称、无发现按钮、环境重启提示。
+- `pnpm --dir frontend test`、`pnpm --dir frontend typecheck`、`pnpm --dir frontend format:check`。
 
-### S06 浏览器与原生隔离验收
+### S06 浏览器、原生与性能
 
-- 修改：`frontend/scripts/fixtures/ui-contracts.mjs`、`frontend/scripts/contracts/interaction-contracts.mjs`、`frontend/scripts/run-ui-refresh-e2e.mjs`、`frontend/scripts/native-acceptance.mjs`；新增来源列表具名契约与必要的隔离 fixture。
-- 浏览器：明暗主题、1280×820 / 980×620；新增/重复/停用/移除/权限失败/迟到响应；不得只断言文件存在或空列表。
-- 原生：注入两个合成 profile、一个追加根；预期事件清单逐请求核对；复制同一日志后请求数/token 不变；新增独立事件后增加；停用再重启历史仍在；Codex archive 与 Claude 子代理均纳入。
-- 真机与 Actions 均禁止枚举真实 Profiles；用户目录指纹不变。复用安装/升级 manifest 校验及现有验收隔离入口，不能绕过闸门。
-- 命令：`pnpm --dir frontend build`、`pnpm --dir frontend test:e2e`；原生用新增具名场景接入现有 Native UI E2E workflow，分别记录浏览器和原生结果。
-- 提交：`test(来源): 覆盖多用户发现与追加目录生命周期`。
+- 扩展 `frontend/scripts/fixtures/ui-contracts.mjs`、`contracts/interaction-contracts.mjs`、`run-ui-refresh-e2e.mjs`、`native-acceptance.mjs`，接入 Native UI E2E。
+- 合成当前主目录、两个环境根和手动根，逐请求 manifest/token/cwd/映射检查，归档及子代理、重复刷新/重启不增量；不回退真实主目录/环境。明暗主题、1280×820 / 980×620、键盘与长路径。
+- 两万文件/硬链接/环、热轮句柄次数及真实 opt-in 基准按 4.4 执行，失败不降低预算；实跑前后结果回填。
+- `pnpm --dir frontend build`、`pnpm --dir frontend test:e2e`，原生隔离工件单独记录。
 
-### S07 文档、版本与交付
+### S07 PR3 文档、版本与交付
 
-- 修改：`CLAUDE.md`、`DESIGN.md`、`docs/stats-semantics.md`、`docs/privacy.md`、本计划、`docs/plans/README.md`；检查隐私页面是否有对应测试需同步。
-- 全量门禁：W01–W05 完成后统一 workspace fmt、clippy `-D warnings`、test；前端 typecheck、format:check、test、build、test:e2e；acceptance 与安装升级契约按 CI 同口径运行。
-- 用户确认实施后才在功能分支执行 `python -B scripts/bump_version.py --bump minor --summary "多用户日志自动发现与追加目录管理"`，随后 `--check --base-ref origin/main`。
-- PR 的 CI、安装/升级、Native UI E2E 必须针对同一 HEAD 成功；真实跨显示器等既有待办不被此计划顺带勾选。
-- 提交：`docs(来源): 同步多目录统计语义与验收记录`。
+- 更新 CLAUDE.md、DESIGN.md、docs/stats-semantics.md、docs/privacy.md、计划和总账；新增引用按 PR1 更新构建输入清单。
+- fetch 最新 main，独立 minor bump，摘要明确“日志目录自动发现与追加目录管理；CODEX_HOME 追加默认根，相对环境路径不再读取”；不预定版本号。
+- 门禁：`cargo fmt --all -- --check`；`cargo clippy --locked --workspace --all-targets -- -D warnings`；`cargo test --locked --workspace`；clippy/test 再加 `--features acceptance`；前端 typecheck/format:check/test/build/test:e2e；脚本契约和清单检查。
+- 同一 HEAD 的 CI、安装升级、Native UI E2E 与有效工件通过才就绪，不自行合并。真实跨午夜/长时间休眠/跨显示器仍在独立系统 todo，不混入本 PR。
 
-## 8. 验收与审阅清单
+## 7. 状态与验收
 
-- [ ] 用户批准本设计，才开始 S01–S07。
-- [ ] 默认可发现两个合成用户的标准日志根，且未读取测试边界外的任何目录。
-- [ ] 自动发现和手动追加同时生效；旧配置迁移不丢目录、不重复迁移。
-- [ ] 来源列表、采集集合、诊断归属一致；权限失败不拖垮其他根。
-- [ ] 同文件不重复解析、同事件不重复入库、独立事件不丢失；账户映射不串用。
-- [ ] 移除/停用后历史仍可查，重复刷新/重启/导入不增加既有用量。
-- [ ] 发现只在启动/显式重新发现发生，短间隔采集不做全账户扫描。
-- [ ] 两种主题、窄窗口、键盘操作、全部回归及当前 HEAD 远程门禁通过。
+S01–S07 全部未开始，版本未分配。实施后逐项记 commit、命令、失败→通过及远程 run/artifact，计划审阅不代表实现。
 
-## 9. 同分支的独立维护提交
-
-用户要求将主工作区已有的 `frontend/scripts/native-acceptance.mjs` 未提交改动带到本分支，**单独 commit**：输出路径绝对化、验收日志目录使用显式递归拷贝。该提交是已有验收脚本维护，不代表本计划任何功能已实施；本计划文档另行提交。原工作区文件保留，避免覆盖其他工作。
-
-## 10. 追加：单一 Cargo Workspace 与旧 CLI 构建补丁清理
-
-> 2026-10-15 用户要求：在 `docs/source-discovery-plan` 分支、同一计划内设计全部迁移步骤，不另开分支。W01–W07 仅规划，尚未实施。建议先完成 W01–W06，再执行 S01–S06；S07 与 W07 合并交付。若来源功能已开工，先记录实际基线，禁止覆盖其他工作。
-
-### 10.1 已核实的现状与目标
-
-- 根 crate `tokenscope` 是库，根 `src/main.rs` 已不存在；桌面 package 为 `tokenscope-app`，唯一应用二进制为 `tokenscope.exe`。保留二进制名称和应用标识，不影响安装升级。
-- 根 manifest 仍以旧 CLI 同名为理由 `exclude = ["src-tauri"]`，壳 manifest 仍声明独立 `[workspace]`，相关注释已过时。
-- 根锁文件中的全部包身份（name/version/source）均已存在于当前壳锁文件；实施时须重新核实，以最新内容为准。可优先使用包含完整依赖图的壳锁文件作为统一锁候选，再由 Cargo 验证，不能手工拼接锁文件。
-- 目标为一个 workspace、一个根 `Cargo.lock`、默认一个根 `target/`；同一依赖在相同构建条件下复用。不同 profile、features、目标平台以及 host/build 依赖仍可能分别构建，不承诺全部消除重复编译或节省固定比例空间。
-- “两个 target 共约 76GB”尚未实测。清理前记录真实大小、路径和链接关系，区分实际目录、junction 与共享 worktree 缓存，不能把逻辑路径大小直接相加。
-
-### 10.2 目标配置与不变量
-
-2026-10-15 用户确认完整目录整理，取代此前“不搬迁源码”的方案：根目录改为虚拟 workspace，核心库迁入 `crates/tokenscope-core/`，前端和桌面壳继续独立。目录名称明确职责，本轮保留核心 package 名 `tokenscope`，避免无收益的全仓 import 改名；壳 package 仍为 `tokenscope-app`，exe 仍为 `tokenscope.exe`。
-
-```text
-tokenscope/
-├── Cargo.toml                    # 虚拟 workspace、共享依赖
-├── Cargo.lock                    # 唯一锁文件
-├── crates/tokenscope-core/
-│   ├── Cargo.toml                # 核心 package，name = "tokenscope"
-│   ├── src/                      # 原根 src/，不依赖 Tauri
-│   └── tests/                    # 原根 tests/，含完整 fixtures
-├── frontend/                     # Vue 与前端 package/lock
-├── src-tauri/                    # Tauri package、配置、图标、权限
-│   └── src/                      # IPC、窗口、托盘、生命周期
-├── scripts/
-├── docs/
-└── target/                       # 默认共享输出
-```
-
-根 manifest 不再含 `[package]`、包级 dependencies/dev-dependencies/features；这些随核心库迁移。根配置：
-
-```toml
-[workspace]
-members = ["crates/tokenscope-core", "src-tauri"]
-default-members = ["crates/tokenscope-core", "src-tauri"]
-resolver = "3"
-```
-
-删除根 exclude 和壳独立 workspace。`default-members` 明确根目录普通 build/test 覆盖两个 package；只查核心库使用 `cargo test -p tokenscope`，只构建 GUI 使用 `cargo build -p tokenscope-app --bin tokenscope`。CI 仍显式使用 `--workspace`，不依赖工作目录的默认选择。
-
-把共同使用的 `anyhow`、`serde`、`serde_json`、`log`、`jiff` 等依赖声明集中到 `[workspace.dependencies]`，成员以 `workspace = true` 继承。版本约束选择满足现有两侧要求且不改变锁定版本的交集；各成员需要的 features 继续显式保留。根库 dev-dependency 与普通 dependency 的共享项也检查一致性。仅壳使用的 Tauri/plugin 依赖留在壳中，不为追求统一机械上移全部依赖。
-
-本轮保留两包各自显式 package version，不顺带引入 `workspace.package` 版本继承。四份版本配置为 `crates/tokenscope-core/Cargo.toml`、`src-tauri/Cargo.toml`、`frontend/package.json`、`src-tauri/tauri.conf.json`，根虚拟 manifest 没有应用版本。统一锁必须恰好包含两个无 source 的本地包、版本与四配置一致。第三方版本、checksum、source 不应漂移；必要差异必须逐项解释，不运行无范围的 `cargo update`。
-
-生产构建仍默认不含 acceptance；`tokenscope-app/acceptance` 继续透传根库 feature。验证全 workspace acceptance 覆盖两个 package，正常发布构建显式不带验收 feature，不能用验收包作为发布包。
-
-### W01：基线、失败契约与路径清单
-
-1. 读取当前 Git 状态、锁文件、Cargo/Tauri 配置、环境 `CARGO_TARGET_DIR`、用户/项目 Cargo target-dir 配置；仅检查相关键，不输出无关凭证。记录当前 metadata 的 workspace_members/default_members/target_directory 与依赖版本集合。
-2. 全仓搜索 `src-tauri/target`、反斜杠形式、`path.join(..., "src-tauri", "target", ...)`、双 Cargo.lock、独立 workspace、旧 CLI 同名等引用；区分运行入口与历史证据，历史报告不伪改成新路径。
-3. 更新 `scripts/test_bump_version.py` 的合成仓库 fixture：一个根锁包含两个本地包，删掉子锁 fixture。先运行并记录旧工具因要求第二锁而失败。
-4. 补充有意义的失败用例：统一锁缺壳包、任一本地包版本错误/重复、第三方同名带 source 的包不误改；保留原子回滚、重复 bump 幂等、历史 main 基线读取测试。
-5. 检查现有工作流/发布契约覆盖位置。为真实路径接线补测试，不用单纯断言某段字符串代替实际 metadata、构建与产物验证。
-6. 新增核心库目录迁移清单：`CARGO_MANIFEST_DIR`、`include_str!`/`include_bytes!`、测试 fixture 相对路径、脚本工作目录、工作流 paths、文档源码链接。先设计“虚拟 workspace 新布局＋旧布局历史基线”的版本工具 fixture，证明旧工具不能正确处理新布局。
-
-### W02：合并 workspace、依赖和锁文件
-
-1. 用 `git mv` 将根 `src/`、`tests/` 整体迁入 `crates/tokenscope-core/`，包含 fixture；从原根 manifest 拆出核心 package manifest，根改虚拟 workspace。壳核心依赖改为 `tokenscope = { path = "../crates/tokenscope-core" }`，按 10.2 配置共享依赖，删除旧 CLI 同名规避注释。不保留旧路径转发副本、junction 或重复测试目录。
-2. 保存两份旧锁的比较基线，将完整壳锁内容作为根锁候选，删除受版本管理的 `src-tauri/Cargo.lock`；不删除 target。
-3. 先运行 `cargo metadata --offline --locked --format-version 1` 和 `cargo check --offline --locked --workspace`。若 Cargo 要求刷新锁，单独解析并审阅差异后重跑 locked 检查；网络确有需要时遵守项目代理约定。
-4. 核对 metadata 恰有两个成员、默认选择包含两者、target_directory 为预期根目录；使用 `cargo tree --workspace -d` 分析剩余重复版本，不强制消灭合法的多版本依赖。
-5. 对比最终锁与迁移前完整壳锁的第三方包版本/source/checksum，解释任何差异。运行根库和壳定向测试，确认无循环依赖。
-6. 核心源码和 tests 同级关系保持，逐项验证 fixture 实际加载内容；不要把所有 `CARGO_MANIFEST_DIR` 盲目改成仓库根。确需仓库根的工具入口显式解析 workspace root，核心测试仍以 crate 根为基准。从根目录和核心 crate 目录分别运行代表性测试，确认不依赖启动 cwd。
-7. 检查依赖方向：核心库不引入 Tauri，壳依赖核心库，前端仍通过 IPC；本轮目录迁移不混入业务逻辑重构，也不把 source/history/pricing 拆成更多 crate。
-
-### W03：版本工具迁移为单锁契约
-
-1. 修改 `scripts/bump_version.py` 和 `scripts/release_metadata.py`：当前四配置读取新核心 manifest，LOCKS 仅根锁；`validate_locks` 不再按锁索引决定包集合，必须验证两个本地包；禁止对根虚拟 manifest 写 version。
-2. 同步 `scripts/test_bump_version.py`、`scripts/test_release_metadata.py`：四配置＋一锁＋声明原子更新。历史版本解析须读取指定 Git ref 自身的文件布局：旧提交从根 `[package]` 取版本，新提交从核心 manifest 取版本；当前布局不能决定历史布局。缺文件与 Git 执行错误区分处理，新布局文件损坏不得静默回退。分别测试迁移前 main→新布局分支、新布局 main→后续 bump、两布局版本不一致/损坏的拒绝路径。
-3. 在临时 Git fixture 运行 bump/check/失败回滚，证明只改本地包版本、无子锁生成、第三方依赖不漂移。
-4. 运行 `python -B -m unittest discover -s scripts -p "test_bump_version.py" -v` 与 `test_release_metadata.py`，要求全部通过。草稿阶段不执行产品版本递增。
-
-### W04：产物路径与构建命令统一
-
-逐项修改并验证：
-
-| 文件 | 处理 |
-| --- | --- |
-| `frontend/scripts/native-acceptance.mjs` | EXE_DEFAULT 改根 `target/release/tokenscope.exe`；保留 c16e023 的输出路径及日志复制修复 |
-| `.github/workflows/ui-e2e.yml` | 明确 GUI package、release、acceptance/custom-protocol；构建位置与脚本默认路径一致 |
-| `.github/workflows/release.yml` | NSIS 与 exe 收集改根 `target/x86_64-pc-windows-msvc/release/...`，保留显式目标三元组 |
-| `.github/workflows/install-test.yml` | 与 Release 使用同一产物路径规则，仍校验将发布的同一安装包 |
-| `scripts/release_assets.py` 及测试 | 核对是否已有路径无关接口；无需改的实现不改，只同步确有旧路径的调用和 fixture |
-| `.gitignore` | 保留所有层级 target 忽略，可规范为 `target/`；不缩成仅根 `/target` |
-| 工作流 paths、脚本 fixture/源码引用、当前开发文档 | 根 `src/**`、`tests/**` 改为 `crates/tokenscope-core/**`；构建配置保留独立触发。检查删除/重命名也能触发 CI；旧历史报告不改写事实 |
-
-不要假设所有构建都带三元组：不带 `--target` 的原生验收路径与显式 target 的发布路径分别取证。若用户显式设置 CARGO_TARGET_DIR，支持现有 exe 参数覆盖，不静默忽略用户配置；标准 CI 验证无覆盖时根 target 行为。
-
-### W05：按变更选择本地检查，去掉重复门禁和缓存映射
-
-1. `.githooks/pre-commit` 按下述暂存区规则选择检查；完整模式合并为一次 workspace fmt/clippy/test，保留前端门禁；Cargo 检查使用 `--locked`，不漏掉壳测试。
-2. `.github/actions/checks/action.yml` 保留普通、acceptance 两套 workspace clippy/test，删除重复壳轮次；fmt 只执行一次 `--all`。保留全部 Python、PowerShell、前端与 E2E 门禁。
-3. `.github/actions/setup/action.yml` Rust cache 只配置 `. -> target`；迁移时增加缓存键版本以免恢复旧布局。保留各 job 区分，不能把不同构建场景视作同一完整缓存。
-4. 检查 `ci.yml`、`install-test.yml`、`ui-e2e.yml` 的 paths 过滤是否覆盖改动入口，避免“改了构建配置却跳过验收”。
-5. 本地验证命令：`cargo fmt --all -- --check`、`cargo clippy --locked --workspace --all-targets -- -D warnings`、`cargo test --locked --workspace`；再分别以 `--features acceptance` 跑 clippy/test。
-6. 验证根目录普通 `cargo test --locked` 确实选择两个默认成员；不再反复跑第二套独立 manifest 门禁。
-
-#### W05a：暂存区驱动的检查选择（2026-10-15 用户确认加入）
-
-目标：纯文档提交不跑 Rust/前端测试；代码提交按影响范围运行已有检查，未知类别保守兜底。PR 的 CI 保留完整普通/acceptance、前端及验收门禁，不以本地跳过结果作为免检依据。不做函数级或单文件测试依赖推断，不引入“上次通过即永久跳过”的结果缓存。
-
-实现文件：`.githooks/pre-commit` 保留轻量入口；新增 `scripts/pre_commit_checks.py` 集中分类和命令编排，新增 `scripts/test_pre_commit_checks.py` 覆盖临时 Git 仓库契约；文档校验可置于独立 `scripts/check_staged_docs.py` 并有对应测试。使用现有 Python 标准库，先核对开发环境可用；缺解释器或分类执行异常必须明确失败，不能静默放行。
-
-| 暂存区文件类别 | 最小检查集合 |
-| --- | --- |
-| 仅 `.md` 文档，包括规约/计划 | staged whitespace、UTF-8、基础文档格式和新增/变更的本地链接检查；不跑 Rust/前端代码测试 |
-| `crates/tokenscope-core/src/**`、`crates/tokenscope-core/tests/**` 的 Rust 代码/fixture | Rust 格式、workspace clippy 和 workspace 测试，覆盖壳依赖核心库的影响；迁移提交中旧根路径的删除/重命名也按核心库分类 |
-| 仅 `src-tauri/src/**` Rust 代码 | Rust 格式、`tokenscope-app` clippy/test；涉及验收隔离模块时追加 acceptance 检查 |
-| `frontend/src/**`、前端普通类型/格式/构建配置及前端依赖清单/锁 | 前端 typecheck、format:check、test、build；涉及 E2E 编排时并入脚本规则 |
-| `scripts/**` 的 Python/PowerShell、`frontend/scripts/**` | 明确映射的脚本语法和契约测试；共享 helper 取全部消费者契约并集，未登记脚本走完整模式，不只测试被改文件本身 |
-| Cargo manifest/锁、`build.rs`、`.cargo/**`、Rust 工具链、Tauri 配置/capabilities、`.github/**`、`.githooks/**`、检查选择器及其测试、发布声明等构建/门禁入口 | 完整模式，包含普通与 acceptance Rust 检查、前端门禁和现有相关脚本契约 |
-| 其他未明确分类的文件 | 完整模式兜底，输出未识别路径及原因 |
-
-分类用有顺序的显式规则，构建/门禁入口优先于宽泛目录规则；多类改动取并集、同一检查只执行一次。普通代码最小检查不代表可免除最终完整门禁；完整模式命令与 W05 的 CI 门禁维护同一语义，不复制旧双 workspace 冗余命令。本地完整模式禁止运行真实安装/卸载/休眠，只运行安全契约与隔离验收；安装升级仍由一次性 Actions Runner 承担。
-
-读取 `git diff --cached --name-status -z --find-renames` 的 NUL 分隔结果，支持新增、修改、删除、重命名及中文/空格路径。重命名旧路径和新路径都参与分类，防止 Rust 文件改名成 Markdown 后逃过检查。首次提交使用空树基线；Git 查询失败不能当作空提交。空暂存区只报告无文件检查，不擅自操作 Git index。
-
-默认 `auto`；提供 `TOKENSCOPE_PRECOMMIT_MODE=full` 强制完整检查，非法值报错，不提供关闭全部检查的模式。提供只打印选中检查的 `--explain` 入口用于审阅，hook 正常路径必须实际执行。输出选中项、触发文件/规则、跳过原因和执行结果；任一检查非零立即阻止提交。
-
-分类依据暂存区，但多数工具读取工作区：必须处理部分暂存，不能把“测了未提交修复”声称为“已验证暂存代码”。实施初版选择简单可靠规则：运行代码检查时，如被选检查会读取的受版本管理输入存在未暂存差异，明确阻止并列出需处理文件；不得自动 stash、reset、补暂存或覆盖用户修改。纯文档检查直接读取 index 内容，不因无关未暂存代码阻止文档提交。检测范围应覆盖共享配置和跨 crate 依赖，使用临时仓库测试其边界；若未来改成隔离 index 快照执行，另行设计缓存/环境成本。
-
-文档检查必须检查暂存版本与暂存树中的链接目标：识别代码围栏，支持相对路径、目录、图片、URL 编码及可解析的标题锚点；网络链接不在 hook 联网验证。历史文档已有失效链接不突然全仓阻断，只校验此次新增/变更链接及本次删除/重命名明确影响到的本地引用。不能用正则盲扫所有括号；对不支持的语法明确说明检查边界，不假报通过。只检查，不自动格式化未暂存内容。
-
-#### W05b：选择器和实际 hook 的验收
-
-1. 先写临时 Git 仓库失败测试，覆盖纯文档、核心库、壳、前端、脚本共享依赖、混合改动、构建配置、未知文件、删除、跨类别重命名、中文/空格路径、首次提交、空 index 与 Git 查询错误。
-2. 覆盖暂存文档与工作区不同、暂存代码与工作区不同、无关未暂存文件、强制 full、非法模式；证明不会 stash/reset、更改 index 或写用户目录。
-3. 对命令执行器使用记录参数的替身，验证选择的命令及去重、失败退出码传播、未选择的命令未运行。模拟完整检查失败时必须阻止真实临时仓库 `git commit`；纯文档提交不得启动 Cargo/pnpm。
-4. 文档校验测试包含有效/失效相对链接、删除目标、中文路径、围栏代码、历史失效链接及暂存树与工作区目标不一致，拒绝假通过和大量误报。
-5. 运行 `python -B -m unittest discover -s scripts -p "test_pre_commit_checks.py" -v` 及文档校验测试；加入 CI 完整门禁，防止选择器修改只靠自己放行。
-6. 在真实仓库分别记录文档模式和强制完整模式的命令清单与耗时；首次切换 hook 的提交必须实际跑完整模式验证，禁止以修改后的分类器自动减少自身验证。
-7. 更新 `CLAUDE.md` 提交流程：本地按暂存区选择，未知变更/full 保守检查；PR CI 完整门禁不减。同步修改现有“任何修改提交前必须全部跑一遍”的规定，否则仅智能化 hook 仍无法减少重复工作。保留禁止 `--no-verify`、默认验证后提交推送及失败不得提交等约束。
-
-W05a/W05b 当前均未实施。完成标准：文档提交只运行文档检查，核心库变更仍覆盖壳，混合变更不漏检，未知路径/失败/部分暂存不能静默绕过，当前 PR CI 仍执行完整门禁。
-
-### W06：构建与缓存隔离验收，最后处理旧 target
-
-1. 在没有旧编译产物的隔离 checkout 或一次性 Actions Runner 上运行 metadata、普通/acceptance 门禁，证明结果不依赖旧 `src-tauri/target`。
-2. 生产 `tauri build` 不带 acceptance，生成 NSIS；执行 release_assets 收集/哈希契约，确认实际 exe 与安装包路径均正确。
-3. 另行构建 acceptance 包并跑 Native UI E2E，证明隔离根仍生效且不会读取/污染用户真实数据；生产与验收产物按不同 job/工件分开记录。
-4. Actions 跑五项安装验收和两项固定旧版升级；本机禁止运行真实安装/卸载脚本。检查上传工件非空、当前 HEAD 与版本匹配，而不只看 job 成功。
-5. 记录从根和 src-tauri 发起 Cargo/Tauri 命令后都未新建子 target/子锁。更换构建入口不能回到旧布局。
-6. 新构建验证通过后再清理旧 target：先核实绝对路径处于仓库内、是否为链接、是否被运行中的 TokenScope 或其他构建/worktree 引用。当前运行实例可能来自旧 debug exe，不能直接删除其目录。
-7. 不把两套 target 文件复制拼接；不为迁移先清空根 target。对可安全清理的旧目录执行单一 PowerShell 文件操作；仍被使用则登记待清理路径与原因，不强杀用户实例。清理后记录实际回收空间。
-
-### W07：规约、版本与同分支交付
-
-- 更新 `CLAUDE.md` 的 workspace、命令、提交钩子、单锁版本规约；检查 README、开发/发布说明中的当前构建步骤。历史审核证据中的旧产物路径保留并注明历史上下文，不重写旧成功记录。
-- 本计划 S04/S07 和第 11 节统一遵循 workspace 门禁；`--manifest-path` 本身仍合法，不把正常包选择命令误当补丁清除。
-- 目录发现、扫描反馈和构建整理分别记录完成状态与提交，均留在用户指定分支。未实施的计划不因构建整理完成而勾选。
-- 本批准备合入 main 时 fetch 最新 main，按实际范围递增一次版本：若包含来源发现功能选 minor，若仅构建维护选 patch。使用迁移后的版本工具，不手改版本、不为同一个 PR 多次递增。
-- 全部普通/acceptance 门禁、前端构建、版本/发布契约、本次 HEAD 的 CI/安装升级/Native UI E2E 通过后才报告合并就绪；不自行合并。
-
-### 10.3 进度与完成标准
-
-| 任务 | 状态 | 证据 |
-| --- | --- | --- |
-| W01 基线与失败契约 | 未开始（已做只读初步配置核查） | 尚无迁移测试 |
-| W02 单 workspace 与锁 | 未开始 | — |
-| W03 版本工具 | 未开始 | — |
-| W04 路径接线 | 未开始 | — |
-| W05 门禁与缓存 | 未开始 | — |
-| W06 构建验收与旧目录清理 | 未开始 | — |
-| W07 文档与交付 | 未开始 | — |
-
-- [ ] metadata 两个成员、正确默认成员与统一 target_directory。
-- [ ] 根是虚拟 workspace，核心源码/测试/fixture 完整迁移，无旧路径副本；跨 cwd 测试、旧/新 Git 基线版本读取均通过。
-- [ ] 仅一个受版本管理的 Cargo.lock，两个本地包版本正确，第三方依赖无未解释漂移。
-- [ ] 旧 CLI 同名规避配置和当前文档说明全部清除，共享依赖 features 保持正确。
-- [ ] 钩子、CI、缓存、NSIS 收集与原生验收统一新布局；普通/acceptance 覆盖无损。
-- [ ] 生产包、验收包、固定旧版升级均取得当前提交的实跑证据。
-- [ ] 旧 target 已安全清理，或明确记录被占用/共享而暂缓；不把待清理写成已释放空间。
-
-<a id="collection-feedback"></a>
-
-## 11. 扫描状态反馈与自动刷新
-
-本节取代 2026-10-13 UI 调整计划 U06 中常驻“更新于 HH:MM:SS”的要求；其余时间口径、分页保护和查询一致性继续有效。F01–F05 未开始，交互方向已确认，具体实施设计随整份计划审阅。
-
-### 11.1 原因与范围
-
-“每 5 秒自动读取”指上一轮采集结束后等待 5 秒，再扫描来源；不是每 5 秒必然产生新的 token 用量。现有状态时间来自统计查询的 `as_of`，不代表最近扫描时间。没有新事实时，后台不发 `usage-updated`，界面时间保持不变，用户无法据此判断采集是否正常工作。
-
-2026-10-15 本机只读排查：源日志用量记录时间 00:16:01.265，对应入库 00:16:05.041；截图 00:16:27 显示“更新于 00:16:05”；下一笔源用量时间 00:16:46.565，入库 00:16:52.082。该片段没有证实 UI 漏刷。源记录时间不等同于操作系统实际落盘时间，现有 info 日志也不能证明无变化期间每一轮扫描执行时刻。原始会话内容、身份和路径不纳入文档或 fixture。
-
-F 组任务只改扫描反馈，不改变用量解析、去重、价格、自动读取间隔或 CCS 手动导入规则。不改成定时强刷统计，不新增常驻时间字段，不增加每轮 info 日志。
-
-### 11.2 界面契约
-
-| 实际状态 | 状态区 | 统计数据 |
-| --- | --- | --- |
-| 初始状态尚未获取 | 正在确认状态，静态 | 保留已有视图，不假称扫描中 |
-| 等待下轮，已有有效统计，无错误 | 静态绿点“已更新” | 不变 |
-| 后台实际开始采集 | 旋转图标“正在读取” | 保留已有视图 |
-| 采集结束，无新用量 | 立即停止读取动画，恢复静态状态 | 不触发新查询 |
-| 采集结束，有新用量 | 读取动画停止；统计查询在途时显示“刷新中…”及其加载状态 | 汇总与明细同批成功后一起替换 |
-| 有新用量，但明细已加载更多 | 静态“有新数据 · 刷新” | 保留已加载页，用户点击后刷新 |
-| 采集失败 | 动画停止，“读取失败”，提供可操作错误提示 | 保留旧统计；不能显示正常“已更新” |
-| 采集成功但存在部分来源/坏行问题 | 动画停止，沿用采集诊断提示，状态体现部分异常 | 有效用量仍可更新 |
-| 查询失败 | 查询加载停止，“刷新失败 · 显示上次数据” | 不覆盖旧统计 |
-
-状态优先规则：活动阶段显示当前工作；错误持续保留在独立提示中，不能被另一路成功清除。后台下一次成功只能清除采集错误，成功查询才能清除查询错误。没有首批有效统计时不能显示“已更新”。
-
-悬停说明：“每 5 秒自动读取；无新用量时保持统计不变”（间隔使用已保存的有效配置）。取消常驻具体更新时间；内部 `as_of`、快照时间及日志不删除。设置页帮助文案同步解释自动保存、扫描频率及有变化才刷新。
-
-动画只在真实活动阶段播放，不用读取间隔定时模拟，不设置最短播放时长；快速扫描允许动画短暂出现。减少动态效果偏好下采用静态读取图标及文字。图标不影响布局、不抢焦点；避免屏幕阅读器每 5 秒朗读扫描开始/结束，错误和用户操作结果才使用适当通知。
-
-窗口隐藏时不执行统计刷新、不播放动画；后端照常采集。恢复时查询当前状态，按代次补齐变化，并保留分页保护；不得补播隐藏期间已经完成的扫描。
-
-### 11.3 后端状态与事件
-
-#### 3.1 真实边界与单飞
-
-修改 `crates/tokenscope-core/src/report.rs` 的 `collect_flighted_with`：仅领队取得 `COLLECT_SERIAL` 串行锁后进入 running，结束采集工作后进入终态；单飞跟随者不创建轮次，等待串行锁不算正在读取。启动、手动刷新、定时采集共用这一边界，避免定时入口动画遗漏手动采集或把排队时间算成扫描。
-
-根库提供可注入的状态观察接口及内存快照，不依赖 Tauri。状态更新后释放状态锁，再通知观察者；观察者失败不能改变采集结果。终态覆盖成功、返回错误与 unwind，RAII 收尾不能在 panic 时伪报成功；进程直接终止不承诺发结束事件。无业务权限时跳过定时轮次，不制造成功扫描。退出中不启动新轮次。
-
-建议统一状态 DTO：
-
-```typescript
-type CollectionStatus = {
-  revision: number; // 进程内每次状态转换单调递增，IPC 限安全整数
-  runId: number; // 仅真正执行的领队递增
-  phase: "idle" | "running" | "succeeded" | "failed";
-  trigger: "startup" | "manual" | "auto" | null;
-  latestGeneration: number | null; // 最近成功采集的历史代次，失败不清空
-  changed: boolean; // 本轮是否有事实变动，不以文件 mtime 代替
-  hasWarnings: boolean;
-  error: string | null; // 精简可展示错误，完整链仅写现有日志
-};
-```
-
-初始 idle 不意味着统计已经更新。保存最近成功代次，使最后一轮无变化时仍能修复前端漏掉更早通知的情况。普通状态不带文件路径、模型列表或用量事实；诊断内容沿用既有查询渠道。
-
-#### 3.2 Tauri 接线与恢复
-
-`src-tauri/src/lib.rs` 在业务 Ready 后注册一次观察者并发送 `collection-status` 事件；状态终态发出不等于统计查询已经完成。保留 `usage-updated`，不重复增加第二条无条件刷新链路。
-
-`src-tauri/src/commands.rs` 新增只读 `collection_status`，仅返回内存快照；在命令注册和 `src-tauri/src/privacy.rs` 中接入 Ready 权限检查。查询状态不能扫描目录、打开历史库或导入 CCS。
-
-前端先订阅，再调用状态查询；只接收较新 revision，避免查询晚到覆盖刚收到的事件。监听失败不得静默显示正常状态，显示“读取状态不可用”，允许重试。窗口恢复、组件重新挂载时重查；可见期间每 30 秒仅查询一次内存状态以纠正漏失结束事件，失败时停止假定动画并提示状态不可用，不把超时假判为采集失败。隐藏时停止该校验计时器，卸载时清理订阅和计时器。
-
-状态恢复得到比当前统计快照更高的 latestGeneration 时走现有自动刷新合并入口；与 `usage-updated` 交叉到达时，同一已覆盖代次不再重复建查询。查询在途、分页、隐藏保护继续有效。状态 revision 和历史 generation 各自独立，不能混用。
-
-### 11.4 实施步骤（先红后绿）
-
-每项先添加能失败的定向用例，保存失败断言，再最小实现、运行相关测试并单独提交。执行时使用 executing-plans 技能；本设计未批准前不实施。
-
-#### F01：根库真实采集生命周期
-
-- 修改 `crates/tokenscope-core/src/report.rs`；必要时将状态类型单独放入 `crates/tokenscope-core/src/collection_status.rs` 并在 `crates/tokenscope-core/src/lib.rs` 导出。
-- 扩展 `crates/tokenscope-core/tests/ui_adjustment_collect.rs` 的串行隔离测试：真实领队 start/end 一对、无变化也有 end、有变化代次、失败/unwind 收尾、跟随者不重复、排队不提前 start。
-- 观察接口使用隔离实例；若必须接进程单例，所有相关测试共享已有锁，不新增并行全局状态污染。
-- 运行 `cargo test --locked --test ui_adjustment_collect`，预期全部通过且无用户目录读写。
-
-#### F02：宿主事件与当前状态查询
-
-- 修改 `src-tauri/src/lib.rs`、`src-tauri/src/commands.rs`、`src-tauri/src/privacy.rs`。
-- 测试 Ready 前拒绝、状态查询不触发采集、观察者只注册一次、发事件失败不影响用量提交、失败后下一轮成功恢复。
-- 运行 `cargo test --locked --manifest-path src-tauri/Cargo.toml`。
-
-#### F03：前端状态与展示
-
-- 新增 `frontend/src/composables/collectionStatus.ts` 及对应测试，集中订阅、版本判定、重同步及卸载清理。
-- 修改 `frontend/src/composables/useUsageQuery.ts` 和测试、`frontend/src/views/Dashboard.vue`、`frontend/src/views/Settings.vue`；样式遵循 `DESIGN.md`，实施时明确实际共享样式落点。
-- 测试 start→无变化 end 不发 query_begin、不改统计；start→有变化仅一个刷新批次；读取结束且查询未完仍显示刷新中；两类错误互不覆盖；事件乱序、订阅与查询竞态、漏通知恢复、分页保护、窗口隐藏恢复、计时器清理。
-- 测试状态文案与 tooltip 无常驻时间、动态效果偏好、无首批结果时不得显示已更新。
-- 运行 `pnpm --dir frontend test`、`typecheck`、`format:check`、`build`。
-
-#### F04：端到端验收
-
-- 扩展 `frontend/scripts/native-acceptance.mjs` 的隔离刷新验收及现有浏览器 E2E；只用合成 JSONL、隔离数据根，不改真实日志或数据库。
-- 无变化：观察真实 start/end，动画停下，统计和查询身份不变；至少两轮，不能只模拟前端事件证明后台接线。
-- 有变化：追加一条合法合成用量，断言 start/end、代次增加、统计增加一次、汇总与明细同 query_id；不手动点击刷新。
-- 短扫描：状态生命周期可完整取证，不要求截图必然抓到瞬时动画；用受控慢采集验证动画实际可见及结束后停止，延迟注入不得进入生产构建。
-- 失败恢复、运行时切换 5 秒间隔、分页后新数据提示、隐藏恢复分别验收。采集 revision/runId/generation、查询身份及断言结果进入工件，不保存真实会话内容。
-- 现有 mjs 维护提交 c16e023 是本计划前置已有改动，不记作 F04 已完成。
-
-#### F05：文档、门禁与交付
-
-- 更新 `DESIGN.md` 状态反馈规范、`docs/stats-semantics.md` 扫描与查询时间区别及相关设置说明；旧 UI 计划标注被本计划替代的要求，不回写旧验收结果。
-- 完成统一 workspace fmt/clippy/test、前端全门禁和相关 E2E。保留定向失败→通过证据；当前 HEAD 的远程 CI、安装和 Native UI 检查另行取证。
-- 本次设计草稿不分配版本；实施准备合入 main 时按批次执行版本工具，若与目录发现功能同批发布取 minor，同一个 PR 不重复加号。未经授权不合并。
-
-### 11.5 任务状态
-
-| 任务 | 状态 | 完成证据 |
-| --- | --- | --- |
-| F01 生命周期 | 未开始 | — |
-| F02 宿主事件与查询 | 未开始 | — |
-| F03 状态与动画 | 未开始 | — |
-| F04 E2E | 未开始 | — |
-| F05 文档与交付 | 未开始 | — |
-
-来源发现、扫描反馈与构建整理分别验收，统一交付。真实跨午夜、长时间休眠和跨显示器继续留在独立系统验收 todo，不因本计划关闭或重新引入本轮。
+- [ ] 固定候选、两种环境变量、映射核实和隔离全部验证。
+- [ ] 手动嵌套拒绝；迁移/环境重叠不阻断且只解析一次。
+- [ ] 联接环闭合；三层去重不丢独立事件。
+- [ ] 来源集合、列表、诊断一致；停用历史保留。
+- [ ] 性能预算、合成句柄次数、真实基准分别有证据或待验标记。
+- [ ] CODEX_HOME 行为变更、重启说明、隐私范围及清单齐全。
+- [ ] PR3 自身版本、完整门禁、安装升级与原生工件验证。
