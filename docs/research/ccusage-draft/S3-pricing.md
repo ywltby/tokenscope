@@ -1,6 +1,6 @@
 ## S3 定价与金额计算
 
-> 研究对象：ccusage 仓库浅克隆（HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31），只读、未构建、未运行。
+> 研究对象：ccusage 仓库浅克隆（HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31）。第 1–7 轮为静态阅读；第 8 轮已构建并运行（见 §13.5）。
 > 主文件：`rust/crates/ccusage-core/src/pricing.rs`（6181 行；1–2894 逻辑、2895–6181 测试）、`build.rs`（255）、`cost.rs`（664）。行号均为该克隆中的实际行号。
 
 ### 0. 结论速览
@@ -276,7 +276,7 @@ fn suffix_allows_pricing_key_match(key, suffix) -> bool {
 
 #### 4.5 四个给定名字的命中推演
 
-**(a) `claude-sonnet-4-20250514`**：阶段 A 精确命中即可（测试 `pricing.rs:4931-4955` 直接断言该 id、`claude-sonnet-4-5-20250929`、`anthropic.claude-sonnet-4-20250514-v1:0`、`claude-3-5-haiku-20241022` 都存在且 input 一致）。若快照只有 `claude-sonnet-4`，8 位日期后缀在 `suffix_starts_with_numeric_model_version` 中被放行（`:2703-2722`），fuzzy 命中基础键（等价证据 `:5731` 用 `claude-opus-4-20250514`）；若同时存在更长日期键，取最长（`:5853-5898`）。
+**(a) `claude-sonnet-4-20250514`**：**实测修正（第 8 轮）——不是精确命中，而是模糊命中**。内嵌表（534 键，见 §13.5）里**没有**该裸键（`claude-*` 裸键只覆盖 4.5 代及以后）；真实路径是双向子串落到区域前缀的 Bedrock 键——实测命中最长键 `global.anthropic.claude-sonnet-4-20250514-v1:0`（长度 46），候选另含 `anthropic.` / `us.` / `eu.` 三个前缀的变体（**`apac.` 不在内嵌表**——裁剪白名单不含该前缀，它只存在于未裁剪的完整 LiteLLM）。仓库测试 `embedded_pricing_resolves_overlapping_model_keys_exactly`（`pricing.rs:4931-4955`）正是这项行为的断言：它比较 `find("claude-sonnet-4-20250514")` 与 `find("anthropic.claude-sonnet-4-20250514-v1:0")` 的 **input 相等**，而非断言裸键存在。8 位日期后缀放行规则（`suffix_starts_with_numeric_model_version`，`:2703-2722`）与「取最长键」（`:5853-5898`）仍如原述；`claude-3-5-haiku-20241022` 同理实测命中 `us.anthropic.claude-3-5-haiku-20241022-v1:0`（input `0.8e-6`，与测试一致）。
 
 **(b) `claude-opus-4-6-fast`**：models.dev 快照中**没有**该键（只有 `claude-opus-4-8-fast`:7504、`claude-opus-5-5-fast`:7598、`claude-opus-5-fast`:7634，三者均带 `"exactOnly": true`，见 `models-dev-pricing.json:7504-7515`、`:7598-7609`、`:7634-7645`）。精确 miss 后 fuzzy：`contains_pricing_key("claude-opus-4-6-fast", "claude-opus-4-6")` 成立（前边界为空、后缀 `-fast` 首字节是边界、key 末位非数字）→ 命中基础条目 `claude-opus-4-6`（`:2667-2722`）。前提是该拼写不是 exact-only，否则 `allows_fuzzy_lookup_with_fallbacks` 拒绝 fuzzy 并转内嵌 models.dev（`:1664-1683`、`:1450-1453`）。fast 倍率由 `fast-multiplier-overrides.json` 的 `normalized_prefix["claude-opus-4-6"]=6.0` 提供（`SpeedMultiplierOverrides::multiplier_for` `:944-978`、`matches_model_suffix` `:2802-2808`），测试 `:5782-5842`（`claude-opus-4.7-20260416` → 6.0，无 tier 关系的 `claude-opus-4-70` → 1.0）。现实入口是 Claude adapter 在 `speed: fast` 时把**展示名**写成 `{model}-fast`（`claude/src/lib.rs:535-543`），金额仍按原始模型名 + `Speed::Fast`（`:525` → `cost.rs:110-115`）。
 
@@ -579,7 +579,9 @@ pub fn json_float(value: f64) -> Value {
 
 ### 未验证 / 存疑
 
-1. **内嵌 LiteLLM 快照的键集未直接检视**：`$OUT_DIR/litellm-pricing.json.deflate` 是编译产物，本次遵守「只读、不构建、不运行」约束未生成它；`claude-sonnet-4-20250514`、`claude-opus-4-6-fast` 等在该快照中的存在性结论来自仓库内测试断言（如 `pricing.rs:4931-4955`）与算法推演。复核方式：设 `CCUSAGE_PRICING_JSON_PATH` 指向一份 LiteLLM 快照后构建，或运行 `ccusage … --json` 观察 `modelBreakdowns`。
+> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
+
+1. **内嵌 LiteLLM 快照的键集未直接检视**：`$OUT_DIR/litellm-pricing.json.deflate` 是编译产物，当时（第 1–7 轮）遵守「只读、不构建、不运行」约束未生成它；`claude-sonnet-4-20250514`、`claude-opus-4-6-fast` 等在该快照中的存在性结论来自仓库内测试断言（如 `pricing.rs:4931-4955`）与算法推演。**（第 8 轮已闭环：见 §13.5——构建产物被解压后与重放键集逐键逐值 0 差异，534 键。）**
 2. **`format_currency` 舍入模式未实验**：`{:.2}` 对 `x.xx5` 的边界行为未在测试中断言，本文只描述为「Rust 标准库浮点格式化」。
 3. **models.dev 在线结果与内嵌快照的一致性**依赖生成期规则逐条对齐；本次核对了规则代码（`pricing.rs:653-744`）与若干快照条目，未做 34K 行全量比对，也未审阅 `nix/tools/models-dev-gen` 生成器的实现细节（仅确认其测试文件存在）。
 4. **并发语义未压力验证**：`find_cache` 的「锁外计算 + 锁内写回」与 `clear_find_cache` 的交互只在单线程测试覆盖。

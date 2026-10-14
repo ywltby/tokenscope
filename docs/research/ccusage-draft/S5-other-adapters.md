@@ -1,12 +1,10 @@
-# S5 其余 16 个 adapter 的本地数据读取实现（ccusage 源码精读）
+## S5 其余 16 个 adapter 的本地数据读取实现
 
 - 仓库：`ccusage`（只读样本）HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31
 - 证据约定：所有 `path:line` 均相对仓库根；行号取实际文件行号（用 `read` 逐文件核对）
-- 方法：纯静态阅读（`read` / `grep` / `glob`），未运行该仓库任何二进制、未修改样本
+- 方法：静态阅读（`read` / `grep` / `glob`）为主；第 8 轮已构建并运行 ccusage（`--offline`，见 §13.5），未修改任何样本
 - 覆盖：`rust/adapters/{opencode,copilot,antigravity,pi,grok,kimi,openclaw,codebuff,hermes,zcode,qwen,droid,kilo,goose,gemini,amp}`、`rust/adapters/common/src/{jsonl.rs,lib.rs,report.rs}`、`rust/crates/ccusage-adapter-all/src/{loader.rs,report.rs,types.rs}`，并以 `ccusage-core` 的 `types/cost/utils/home/date_utils/progress` 作为公共零件参照
 - 边界：Claude（`rust/adapters/claude/`）与 Codex（`rust/adapters/codex/`）另见 §4 与 §5，本章只在跨适配器对比处引用其行号，不重复展开
-
-## S5 其余 16 个 adapter 的本地数据读取实现
 
 ### 0. 结论速览
 
@@ -402,6 +400,8 @@ crate 与版本：`rust/Cargo.toml:65` → `sqlite = { version = "0.37.4", defau
 | 配置目录重叠（跨来源重复读）→ **报错** | `pi.stores` 与默认 pi 路径／彼此重叠 | `ccusage-adapter-all/src/loader.rs:503-553`（`paths_overlap` `:551-553`） |
 
 ### 5. 未验证 / 存疑
+
+> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
 
 - `antigravity` 的 `event_to_loaded`（`antigravity/src/parser.rs:960-1022`）未逐行读：`project` / `project_path`（是否固定 `"Antigravity"`）、`credits` 字段取值、`extra_total_tokens` 是否使用 `reasoning_tokens` 均**未验证**。
 - `gemini` 的 `parse_json_file` / `parse_stats_events` 的完整分支（`gemini/src/parser.rs:115-320`）只读了函数名与部分字段别名，`stats`/`result` 两条路径的优先级**未逐行核对**。

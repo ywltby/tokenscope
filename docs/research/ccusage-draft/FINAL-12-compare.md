@@ -30,7 +30,7 @@
 1. **同一语义两份实现**：Claude 的 `load_entries`（`claude/src/lib.rs`）与 `load_daily_summaries`（`claude/src/daily.rs`）是两套解析代码，靠 7 个等价性测试维持；但复核发现两者在 sidechain 回放路由上**确有结构差异**（daily 缺 timestamp 守卫，`daily.rs:493-496` vs `lib.rs:436-440`）——测试没覆盖的样本形态会给出不同总量。TokenScope 用单一管线 + 不变量测试是更稳的取向。
 2. **「兜底表」语义与注释不一致**：`put_builtin_pricing` 声明只补缺键，实际有 3 处无条件覆盖（`pricing.rs:2369-2370`、`:2386-2387`、`:2400-2408`）。若抄这套结构，要么保持纯粹 `or_insert`，要么显式标注例外。
 3. **厂商特例硬编码的规模**：`codex-auto-review` 的日期回退表、DeepSeek V4 三段价与 UTC 峰谷窗口（`pricing.rs:252-347`）、`pricing_alias` 三条别名——这些会随时间腐化。TokenScope 的「外置规则 + 数据文件」方向更好，但需要同样的测试覆盖才能保证不腐化。
-4. **文档与代码无门禁**：§11 列了 8 条「文档与实现不符」（另 2 条是文档与代码一致的正面例子）。TokenScope 的 `config-schema.json` 式「构建期生成 + CI 校验」正是 ccusage 只在 schema 与帮助文本上做到、而指南文本没做到的事。
+4. **文档与代码无门禁**：§11 列了 9 条「文档与实现不符」（另 2 条是文档与代码一致的正面例子）。TokenScope 的 `config-schema.json` 式「构建期生成 + CI 校验」正是 ccusage 只在 schema 与帮助文本上做到、而指南文本没做到的事。
 5. **`exact_only` 门禁的复杂度**：为了防止 `claude-opus-5-fast` 被基础模型价抢走，ccusage 引入跨数据源的门禁集合与三种查询语义（`contains` / `contains_any_spelling` / `id_spelled_by`，`pricing.rs:501-521`、`:1617-1683`）。TokenScope 的候选模型天然避免了这个问题（不覆盖、取最高），**不要**再引入单表覆盖语义。
 
 ### 12.4 一句话总结

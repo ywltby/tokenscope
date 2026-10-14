@@ -1,11 +1,9 @@
-# S1 主干与 Claude Code 适配器（ccusage v20.0.31 精读）
+## S1 主干与 Claude Code 适配器
 
-> 只读仓库（未运行其二进制、未改动任何文件）：`C:\Users\admin\AppData\Local\Temp\ccusage-research\ccusage`
+> 只读仓库（第 1–7 轮为静态阅读；第 8 轮已构建并运行，见 §13.5）：`C:\Users\admin\AppData\Local\Temp\ccusage-research\ccusage`
 > HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31（Rust workspace：`rust/crates/*` + `rust/adapters/*`）。
 > 路径相对仓库根；行号一律为 `read` 实测（任务书给的若干行数来自 `Measure-Object -Line` 口径，偏小：`cost.rs` 实测 664 / `adapter-all/loader.rs` 1637 / `pricing.rs` 6181）。
 > 关键文件实测行数：`claude/src/lib.rs` 1582、`claude/src/daily.rs` 1182、`claude/src/paths.rs` 555、`ccusage/src/main.rs` 1063、`ccusage/src/commands/mod.rs` 1411、`adapter-all/src/loader.rs` 1637、`adapter-all/src/types.rs` 208、`core/src/cost.rs` 664、`core/src/types.rs` 219、`core/src/summary.rs` 759。
-
-## S1 主干与 Claude Code 适配器
 
 ### 0. 主干坐标
 
@@ -549,6 +547,8 @@ let mut buckets = summarize_summaries_by_bucket(&daily, kind, WeekDay::Sunday);
 10. **`--offline`/`--no-cost`/`--json` 都不改变用量口径**（分别是价格刷新、输出剥离、进度与格式）。
 
 ## 未验证/存疑
+
+> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
 
 - **progress 包装行的双路径分叉**：`read_usage_file` 用严格 `UsageEntry`（`lib.rs:514`，`message` 必填 `core/src/types.rs:13/23`），daily 用无标签联合接受 `data.message.message`（`daily.rs:182-204`）。「progress 行有 subagents 副本」时两者收敛（`main.rs:570-595` 断言相等），但**没有**测试覆盖「progress 行无任何副本」的情形——按代码推断两条路径 token 总量会不同，未实测。
 - **`Speed` 枚举严格性**：`speed` 只接受小写 `standard`/`fast`（`core/src/types.rs:36/60-65`），其它取值会让整行被静默丢弃；仓库内无该取值 fixture，属推断。

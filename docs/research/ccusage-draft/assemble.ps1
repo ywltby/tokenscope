@@ -86,6 +86,9 @@ Add-Raw $part11
 Add-Raw (Get-Content (Join-Path $d "FINAL-12-compare.md") -Encoding UTF8)
 Add-Raw $part13
 
+# §13.5 第 8 轮实测复核实录
+Add-Raw (Get-Content (Join-Path $d "FINAL-round8.md") -Encoding UTF8)
+
 # §14 横向专题（第 6 轮补充）
 Add-Raw (Get-Content (Join-Path $d "FINAL-supplement.md") -Encoding UTF8)
 

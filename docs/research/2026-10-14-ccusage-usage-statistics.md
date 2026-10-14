@@ -5,8 +5,10 @@
 > 提交时间 2026-10-13 22:29 +0100，monorepo 版本 `20.0.31`）。
 > 迁移对照对象：`v19.0.3`（HEAD `4aedac0622232f4b8e93650e9b7b54535ef9cf2b`，TypeScript 实现）。
 >
-> 研究方式：浅克隆到临时目录后逐文件精读（`read` / `grep` / `glob`），
-> **未运行其二进制、未构建、未读取任何真实会话内容、未改动本机 `~/.claude` 与 `~/.codex`**。
+> 研究方式：浅克隆到临时目录后逐文件精读（`read` / `grep` / `glob`）；第 8 轮更进一步——
+> **真的构建并运行了它**（`cargo build -p ccusage` + `--offline` 运行，数据源为本机 `~/.claude`
+> 与 `~/.codex`，全程只读），并把 `build.rs` 与价格匹配算法用脚本离线重放（见 §13.5）。
+> 未读取或记录任何会话内容，未改动本机任何数据目录。
 > 结论一律落 `文件:行号`；关键断言由独立复核代理做对抗性证伪（见 §13）。
 >
 > 证据分档：**已验证**（源码可证且行号经复核）／**一致解释**（多条代码证据指向同一结论）／**未验证**（结构推断，未实测）。
@@ -185,14 +187,13 @@ pub struct LoadedFile { pub timestamp: Option<TimestampMs>, pub entries: Vec<Loa
 `models_used`（去重后的模型名列表）+ `model_breakdowns`（每模型一行 token 与费用）。
 `extra_total_tokens` 同样 `skip_serializing`：参与 `total_tokens()` 但不进 JSON。
 
-> 只读仓库（未运行其二进制、未改动任何文件）：`C:\Users\admin\AppData\Local\Temp\ccusage-research\ccusage`
+## 4. 主干与 Claude Code 适配器
+
+
+> 只读仓库（第 1–7 轮为静态阅读；第 8 轮已构建并运行，见 §13.5）：`C:\Users\admin\AppData\Local\Temp\ccusage-research\ccusage`
 > HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31（Rust workspace：`rust/crates/*` + `rust/adapters/*`）。
 > 路径相对仓库根；行号一律为 `read` 实测（任务书给的若干行数来自 `Measure-Object -Line` 口径，偏小：`cost.rs` 实测 664 / `adapter-all/loader.rs` 1637 / `pricing.rs` 6181）。
 > 关键文件实测行数：`claude/src/lib.rs` 1582、`claude/src/daily.rs` 1182、`claude/src/paths.rs` 555、`ccusage/src/main.rs` 1063、`ccusage/src/commands/mod.rs` 1411、`adapter-all/src/loader.rs` 1637、`adapter-all/src/types.rs` 208、`core/src/cost.rs` 664、`core/src/types.rs` 219、`core/src/summary.rs` 759。
-
-
-## 4. 主干与 Claude Code 适配器
-
 
 ### 0. 主干坐标
 
@@ -737,6 +738,8 @@ let mut buckets = summarize_summaries_by_bucket(&daily, kind, WeekDay::Sunday);
 
 ### 未验证/存疑
 
+> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
+
 - **progress 包装行的双路径分叉**：`read_usage_file` 用严格 `UsageEntry`（`lib.rs:514`，`message` 必填 `core/src/types.rs:13/23`），daily 用无标签联合接受 `data.message.message`（`daily.rs:182-204`）。「progress 行有 subagents 副本」时两者收敛（`main.rs:570-595` 断言相等），但**没有**测试覆盖「progress 行无任何副本」的情形——按代码推断两条路径 token 总量会不同，未实测。
 - **`Speed` 枚举严格性**：`speed` 只接受小写 `standard`/`fast`（`core/src/types.rs:36/60-65`），其它取值会让整行被静默丢弃；仓库内无该取值 fixture，属推断。
 - **6 位微秒时间戳**：`parse_ts_timestamp` 只接受整秒（长度 20/25）或 3 位毫秒（24/29）（`core/src/date_utils.rs:113-117`），其它长度直接 `None` → 整行丢弃；无相应 fixture，未实测。
@@ -745,14 +748,13 @@ let mut buckets = summarize_summaries_by_bucket(&daily, kind, WeekDay::Sunday);
 - **Codex `group.total_tokens` 与四列之和是否恒等**：`loader.rs:876` 直接透传，未深挖 `rust/adapters/codex` 内部是否已含 reasoning（不影响 Claude 主线）。
 - **行数口径**：任务书给出的若干行数（`cost.rs` 618、`pricing.rs` 5759、`adapter-all/loader.rs` 1532）与实测（664、6181、1637）不符；本文一律采用实测行号。
 
-- 仓库：`ccusage`（只读样本）HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31
-- 证据约定：所有 `path:line` 相对 ccusage 仓库根（`C:\Users\admin\AppData\Local\Temp\ccusage-research\ccusage`），行号取实际文件行号（`read` 工具核对；`Measure-Object -Line` 会少算末行，不采用）
-- 方法：纯静态阅读（`read` / `grep` / `glob`），未运行样本仓库任何二进制、未修改样本
-- 覆盖：`rust/adapters/codex/src/{loader,parser,aggregate,types,replay,report,speed,paths,lib,compaction_tests}.rs`、`rust/adapters/codex/{README.md,src/README.md}`、`rust/adapters/common/src/lib.rs`、`rust/crates/ccusage-core/src/{pricing,model_aliases}.rs`、`rust/crates/ccusage-adapter-all/src/{loader,report}.rs`、`rust/crates/ccusage-cli*/src/*`、`docs/guide/codex/index.md`
-
-
 ## 5. Codex 适配器
 
+
+- 仓库：`ccusage`（只读样本）HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31
+- 证据约定：所有 `path:line` 相对 ccusage 仓库根（`C:\Users\admin\AppData\Local\Temp\ccusage-research\ccusage`），行号取实际文件行号（`read` 工具核对；`Measure-Object -Line` 会少算末行，不采用）
+- 方法：静态阅读（`read` / `grep` / `glob`）为主；第 8 轮已构建并运行 ccusage（`--offline`，见 §13.5），未修改任何样本
+- 覆盖：`rust/adapters/codex/src/{loader,parser,aggregate,types,replay,report,speed,paths,lib,compaction_tests}.rs`、`rust/adapters/codex/{README.md,src/README.md}`、`rust/adapters/common/src/lib.rs`、`rust/crates/ccusage-core/src/{pricing,model_aliases}.rs`、`rust/crates/ccusage-adapter-all/src/{loader,report}.rs`、`rust/crates/ccusage-cli*/src/*`、`docs/guide/codex/index.md`
 
 ### 0. 结论速览
 
@@ -1062,6 +1064,8 @@ match line_kind {
 
 ### 未验证/存疑
 
+> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
+
 1. **`src/README.md:47-53` 描述的 MultiAgent V2 边界在代码里不存在**：文档说用 `event_msg.task_started` 作为「重放前缀结束」、用 `inter_agent_communication_metadata`（旧名 `inter_agent_communication`）的 `trigger_turn === true` 作为「子回合开始」来切分。全仓 grep（`task_started` / `trigger_turn` / `inter_agent_communication`）**只命中该 README**，解析器没有任何相关字符串或状态。实际实现是 §5.1 的「父前缀逐条相等 + 重写突发」。两者结论方向一致但机制不同，属于文档与代码不一致；因浅克隆（`git log` 仅 1 个提交）无法判定谁先谁后。
 2. **`docs/guide/codex/index.md:50` 与 `:116` 说「缺模型元数据的会话被跳过」，与代码冲突**：`parser.rs:813-818` 在无模型时回退 `gpt-5` 并标记 fallback（`src/README.md:63` 与同文档 `:54` 也是这么说的）。`aggregate.rs:328` 的 `model == None → skip` 分支在解析链上几乎不可达，目前只有手工构造事件的快照用例会命中（`lib.rs:1055-1068`）。
 3. **replay 前缀匹配的精确性未在真实日志上验证**：`parser.rs:236` 要求 6 个字段完全相等；父日志被压缩/改写后完全走启发式。阈值常量本身与两处使用点已核实（定义 `parser.rs:122`，使用点 `parser.rs:171-173` 与 `parser.rs:256-261`），但注释给出的实测区间（10–40 ms vs 5.8–15.3 s）只来自源码注释（`parser.rs:114-118`），我未独立复现。
@@ -1073,15 +1077,14 @@ match line_kind {
 
 已复核确认（原存疑项已撤销）：`.jsonl.zst` 无支持（全仓 grep `zstd` 零命中，`flate2` 仅 `ureq` 传递依赖）；速度旗标确为 `--speed`；`CODEX_REWRITTEN_BURST_PAUSE_MS = 1_000` 与两处使用点一致（`parser.rs:122`, `:171-173`, `:256-261`）；Codex 的增量语义与输出层 cached 扣减（`report.rs:123-129`）不矛盾——内部保留总 input、仅在渲染时做 `input - cached - cache_creation`。
 
-- 仓库：`ccusage`（只读样本）HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31
-- 证据约定：所有 `path:line` 均相对仓库根；行号取实际文件行号（用 `read` 逐文件核对）
-- 方法：纯静态阅读（`read` / `grep` / `glob`），未运行该仓库任何二进制、未修改样本
-- 覆盖：`rust/adapters/{opencode,copilot,antigravity,pi,grok,kimi,openclaw,codebuff,hermes,zcode,qwen,droid,kilo,goose,gemini,amp}`、`rust/adapters/common/src/{jsonl.rs,lib.rs,report.rs}`、`rust/crates/ccusage-adapter-all/src/{loader.rs,report.rs,types.rs}`，并以 `ccusage-core` 的 `types/cost/utils/home/date_utils/progress` 作为公共零件参照
-- 边界：Claude（`rust/adapters/claude/`）与 Codex（`rust/adapters/codex/`）另见 §4 与 §5，本章只在跨适配器对比处引用其行号，不重复展开
-
-
 ## 6. 其余 16 个适配器的数据面矩阵
 
+
+- 仓库：`ccusage`（只读样本）HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31
+- 证据约定：所有 `path:line` 均相对仓库根；行号取实际文件行号（用 `read` 逐文件核对）
+- 方法：静态阅读（`read` / `grep` / `glob`）为主；第 8 轮已构建并运行 ccusage（`--offline`，见 §13.5），未修改任何样本
+- 覆盖：`rust/adapters/{opencode,copilot,antigravity,pi,grok,kimi,openclaw,codebuff,hermes,zcode,qwen,droid,kilo,goose,gemini,amp}`、`rust/adapters/common/src/{jsonl.rs,lib.rs,report.rs}`、`rust/crates/ccusage-adapter-all/src/{loader.rs,report.rs,types.rs}`，并以 `ccusage-core` 的 `types/cost/utils/home/date_utils/progress` 作为公共零件参照
+- 边界：Claude（`rust/adapters/claude/`）与 Codex（`rust/adapters/codex/`）另见 §4 与 §5，本章只在跨适配器对比处引用其行号，不重复展开
 
 ### 0. 结论速览
 
@@ -1478,6 +1481,8 @@ crate 与版本：`rust/Cargo.toml:65` → `sqlite = { version = "0.37.4", defau
 
 ### 5. 未验证 / 存疑
 
+> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
+
 - `antigravity` 的 `event_to_loaded`（`antigravity/src/parser.rs:960-1022`）未逐行读：`project` / `project_path`（是否固定 `"Antigravity"`）、`credits` 字段取值、`extra_total_tokens` 是否使用 `reasoning_tokens` 均**未验证**。
 - `gemini` 的 `parse_json_file` / `parse_stats_events` 的完整分支（`gemini/src/parser.rs:115-320`）只读了函数名与部分字段别名，`stats`/`result` 两条路径的优先级**未逐行核对**。
 - `copilot` 的 `credit_gap_entries`（`loader.rs:289-433`）与 `reconcile_session_state_entries`（`:201-288`）的内部算法只读了入口与注释，**窗口边界与 credits 归因的精确规则未验证**；`should_emit_candidate`（`parser.rs:145`）的去重分支同理。
@@ -1490,14 +1495,13 @@ crate 与版本：`rust/Cargo.toml:65` → `sqlite = { version = "0.37.4", defau
 - 并行度与顺序结论基于 `read_files_parallel` 的代码语义（`common/src/lib.rs:113-124` 按 index 回填）；未运行任何测试验证。
 - 本文全部结论来自静态阅读；`antigravity` 的 protobuf 字段号映射（`parser.rs:689-703`）是**代码事实**，但其与真实 Antigravity 版本 schema 的对应关系无法在仓库内验证。
 
-- 仓库：`ccusage`（只读样本）HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31
-- 证据约定：所有 `path:line` 均相对仓库根；行号取实际文件行号（用 `read` 逐文件核对，不用 `Measure-Object -Line`，该命令会漏掉末行）
-- 方法：纯静态阅读（`read` / `grep` / `glob`），未运行该仓库任何二进制、未修改样本
-- 覆盖：`ccusage-core`（summary / date_utils / last_window / output / agent_report / types）、`ccusage`（blocks / commands / cli）、`ccusage-adapter-all`（loader / report / types）、`ccusage-cli-parser`（parser）、`ccusage-cli`（types）、`ccusage-config`（config），并以 `docs/guide/*.md` 交叉验证
-
-
 ## 7. 聚合、时间与报告形态
 
+
+- 仓库：`ccusage`（只读样本）HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31
+- 证据约定：所有 `path:line` 均相对仓库根；行号取实际文件行号（用 `read` 逐文件核对，不用 `Measure-Object -Line`，该命令会漏掉末行）
+- 方法：静态阅读（`read` / `grep` / `glob`）为主；第 8 轮已构建并运行 ccusage（`--offline`，见 §13.5），未修改任何样本
+- 覆盖：`ccusage-core`（summary / date_utils / last_window / output / agent_report / types）、`ccusage`（blocks / commands / cli）、`ccusage-adapter-all`（loader / report / types）、`ccusage-cli-parser`（parser）、`ccusage-cli`（types）、`ccusage-config`（config），并以 `docs/guide/*.md` 交叉验证
 
 ### 0. 结论速览
 
@@ -2133,6 +2137,8 @@ aggregate_rows（:888-908）: period 归一（Daily 原样 / Monthly [..7] / Wee
 
 ### 未验证 / 存疑
 
+> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
+
 1. **blocks 默认排序与文档冲突**：代码默认 `SortOrder::Asc`（`ccusage-cli/src/types.rs:63-70`），`sort_blocks` 升序后再按需反转（`blocks.rs:177-182`），即默认最旧块在前；但 `docs/guide/blocks-reports.md:147-155` 写"Show newest blocks first (default)"。我没有运行二进制确认实际输出顺序，也未找到任何把 blocks 默认改为 Desc 的赋值点（`run_session` 才显式改 Desc，`commands/mod.rs:153`）。**结论以代码为准，文档疑为过时**。
 2. **`TZ` 环境变量语义**：ccusage 自身不读 `TZ`；仅当最终落到 jiff `TimeZone::system()` 时由 jiff 读取（证据为 registry 中 jiff-0.2.38 源码 `src/tz/system/mod.rs:185` 与其文档 `src/tz/timezone.rs:291-311`）。我未运行 ccusage 验证 `TZ=Asia/Tokyo ccusage daily` 的实际日期归属，也未核对 Windows 平台 jiff 的 `system()` 分支实现细节（`src/tz/system/windows/mod.rs` 仅见片段）。
 3. **`--active` 单块详情的时区不一致**：`Block Started` 用 `format_utc_second`（`blocks.rs:475`），表格用 `local_parts`（`blocks.rs:292-315`），两者口径不同。未实测；推断为有意（详情对齐 JSON 的 UTC 口径）或历史遗留。
@@ -2145,7 +2151,7 @@ aggregate_rows（:888-908）: period 归一（Daily 原样 / Monthly [..7] / Wee
 ## 8. 定价数据来源、匹配链与金额计算
 
 
-> 研究对象：ccusage 仓库浅克隆（HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31），只读、未构建、未运行。
+> 研究对象：ccusage 仓库浅克隆（HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31）。第 1–7 轮为静态阅读；第 8 轮已构建并运行（见 §13.5）。
 > 主文件：`rust/crates/ccusage-core/src/pricing.rs`（6181 行；1–2894 逻辑、2895–6181 测试）、`build.rs`（255）、`cost.rs`（664）。行号均为该克隆中的实际行号。
 
 ### 0. 结论速览
@@ -2421,7 +2427,7 @@ fn suffix_allows_pricing_key_match(key, suffix) -> bool {
 
 #### 4.5 四个给定名字的命中推演
 
-**(a) `claude-sonnet-4-20250514`**：阶段 A 精确命中即可（测试 `pricing.rs:4931-4955` 直接断言该 id、`claude-sonnet-4-5-20250929`、`anthropic.claude-sonnet-4-20250514-v1:0`、`claude-3-5-haiku-20241022` 都存在且 input 一致）。若快照只有 `claude-sonnet-4`，8 位日期后缀在 `suffix_starts_with_numeric_model_version` 中被放行（`:2703-2722`），fuzzy 命中基础键（等价证据 `:5731` 用 `claude-opus-4-20250514`）；若同时存在更长日期键，取最长（`:5853-5898`）。
+**(a) `claude-sonnet-4-20250514`**：**实测修正（第 8 轮）——不是精确命中，而是模糊命中**。内嵌表（534 键，见 §13.5）里**没有**该裸键（`claude-*` 裸键只覆盖 4.5 代及以后）；真实路径是双向子串落到区域前缀的 Bedrock 键——实测命中最长键 `global.anthropic.claude-sonnet-4-20250514-v1:0`（长度 46），候选另含 `anthropic.` / `us.` / `eu.` 三个前缀的变体（**`apac.` 不在内嵌表**——裁剪白名单不含该前缀，它只存在于未裁剪的完整 LiteLLM）。仓库测试 `embedded_pricing_resolves_overlapping_model_keys_exactly`（`pricing.rs:4931-4955`）正是这项行为的断言：它比较 `find("claude-sonnet-4-20250514")` 与 `find("anthropic.claude-sonnet-4-20250514-v1:0")` 的 **input 相等**，而非断言裸键存在。8 位日期后缀放行规则（`suffix_starts_with_numeric_model_version`，`:2703-2722`）与「取最长键」（`:5853-5898`）仍如原述；`claude-3-5-haiku-20241022` 同理实测命中 `us.anthropic.claude-3-5-haiku-20241022-v1:0`（input `0.8e-6`，与测试一致）。
 
 **(b) `claude-opus-4-6-fast`**：models.dev 快照中**没有**该键（只有 `claude-opus-4-8-fast`:7504、`claude-opus-5-5-fast`:7598、`claude-opus-5-fast`:7634，三者均带 `"exactOnly": true`，见 `models-dev-pricing.json:7504-7515`、`:7598-7609`、`:7634-7645`）。精确 miss 后 fuzzy：`contains_pricing_key("claude-opus-4-6-fast", "claude-opus-4-6")` 成立（前边界为空、后缀 `-fast` 首字节是边界、key 末位非数字）→ 命中基础条目 `claude-opus-4-6`（`:2667-2722`）。前提是该拼写不是 exact-only，否则 `allows_fuzzy_lookup_with_fallbacks` 拒绝 fuzzy 并转内嵌 models.dev（`:1664-1683`、`:1450-1453`）。fast 倍率由 `fast-multiplier-overrides.json` 的 `normalized_prefix["claude-opus-4-6"]=6.0` 提供（`SpeedMultiplierOverrides::multiplier_for` `:944-978`、`matches_model_suffix` `:2802-2808`），测试 `:5782-5842`（`claude-opus-4.7-20260416` → 6.0，无 tier 关系的 `claude-opus-4-70` → 1.0）。现实入口是 Claude adapter 在 `speed: fast` 时把**展示名**写成 `{model}-fast`（`claude/src/lib.rs:535-543`），金额仍按原始模型名 + `Speed::Fast`（`:525` → `cost.rs:110-115`）。
 
@@ -2724,7 +2730,9 @@ pub fn json_float(value: f64) -> Value {
 
 ### 未验证 / 存疑
 
-1. **内嵌 LiteLLM 快照的键集未直接检视**：`$OUT_DIR/litellm-pricing.json.deflate` 是编译产物，本次遵守「只读、不构建、不运行」约束未生成它；`claude-sonnet-4-20250514`、`claude-opus-4-6-fast` 等在该快照中的存在性结论来自仓库内测试断言（如 `pricing.rs:4931-4955`）与算法推演。复核方式：设 `CCUSAGE_PRICING_JSON_PATH` 指向一份 LiteLLM 快照后构建，或运行 `ccusage … --json` 观察 `modelBreakdowns`。
+> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
+
+1. **内嵌 LiteLLM 快照的键集未直接检视**：`$OUT_DIR/litellm-pricing.json.deflate` 是编译产物，当时（第 1–7 轮）遵守「只读、不构建、不运行」约束未生成它；`claude-sonnet-4-20250514`、`claude-opus-4-6-fast` 等在该快照中的存在性结论来自仓库内测试断言（如 `pricing.rs:4931-4955`）与算法推演。**（第 8 轮已闭环：见 §13.5——构建产物被解压后与重放键集逐键逐值 0 差异，534 键。）**
 2. **`format_currency` 舍入模式未实验**：`{:.2}` 对 `x.xx5` 的边界行为未在测试中断言，本文只描述为「Rust 标准库浮点格式化」。
 3. **models.dev 在线结果与内嵌快照的一致性**依赖生成期规则逐条对齐；本次核对了规则代码（`pricing.rs:653-744`）与若干快照条目，未做 34K 行全量比对，也未审阅 `nix/tools/models-dev-gen` 生成器的实现细节（仅确认其测试文件存在）。
 4. **并发语义未压力验证**：`find_cache` 的「锁外计算 + 锁内写回」与 `clear_find_cache` 的交互只在单线程测试覆盖。
@@ -3299,6 +3307,8 @@ v20（`rust/crates/ccusage-core/src/cost.rs`）：
 
 ### 未验证/存疑（本节同时覆盖配置/CLI/输出章与版本史章的未决项）
 
+> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
+
 1. **`--jq` 是否应在帮助里出现**：`cli-help.json` 无 jq 条目（grep `jq` 只命中 parser/tests/snapshots），但选项确实可解析。无法从源码判断这是「故意隐藏」还是「漏写」，需要看 v20 的 release note 或 changelog（本仓未查）。
 2. **`docs/guide/config-files.md`（614 行）未逐行精读**：只核对了它的 `$schema` 示例与 `jq` 校验说明（`:13`、`:593`），其中关于「多文件回退」的表述与实现（只取第一个可用文件）可能有出入，建议 S7/父代理核对。
 3. **v19 → v20 的 entry 级 cost 计算路径**没有逐行对齐：v20 的 `cost.rs` 只读了结构段（`31-59`、`118`、`201`），`calculate_cost_from_tokens` 与 `find_at`（按事件时间选价，`pricing.rs:1461`）的内部规则未展开；若需要「某一具体模型两版钞票差异」级别的结论，需补读 `cost.rs:93-200`。
@@ -3307,7 +3317,7 @@ v20（`rust/crates/ccusage-core/src/cost.rs`）：
 6. **`ccusage blocks` 的 JSON 字段全集**未穷举：只确认 `isGap`（`blocks.rs:211`）与 `block_json`（`rust/crates/ccusage/src/main.rs:11` 导出），burn rate / 预测字段的键名未逐项核对。
 7. **v20 `--last` 与配置 `since` 的交互**：`--last` 解析发生在 CLI 之后（`rust/crates/ccusage/src/cli.rs:29-31`，`last_window.rs:15-23`），会覆盖配置里已应用的 `since`；如果配置只给了 `until`，行为是「since 由 --last 推出 + until 保留」，此组合没有专门测试覆盖（`last_window.rs` 测试只覆盖了 `--last` 单独使用）。
 8. **`--jq` 与 `--no-cost` 的组合**：`strip_cost_json` 在 jq 之前执行（`output.rs:159-161`），因此 jq 过滤器看不到被删字段——这是实现事实，但未在文档中声明。
-9. **本文档未运行任何 ccusage 二进制**：所有结论均来自源码阅读，未做运行期验证；行号基于 HEAD `57afdc2`（v20.0.31）与 `4aedac0`（v19.0.3），若仓库前进需重新核对。
+9. **运行期验证状态**：第 1–7 轮为纯源码阅读；**第 8 轮已构建并运行 ccusage**（`--offline`，见 §13.5），本节与运行期相关的结论（CLI 解析、帮助文本、`--jq` 隐藏性）均已实测。行号基于 HEAD `57afdc2`（v20.0.31）与 `4aedac0`（v19.0.3），若仓库前进需重新核对。
 
 ## 11. 实现与官方文档的差异清单
 
@@ -3325,6 +3335,7 @@ v20（`rust/crates/ccusage-core/src/cost.rs`）：
 | 8 | `--help` 输出 | — | `--jq` 可被解析并生效，但**未出现在帮助文本**（`cli-help.json` 无该条目） | 隐藏选项 |
 | 9 | `docs/guide/cost-modes.md:198-205` | 成本公式（含 1 小时缓存 = input × 2） | 与 `cost.rs` 一致（`rust/crates/ccusage-core/src/cost.rs:7`、`:128-131`） | **一致**（正面例子） |
 | 10 | `docs/guide/codex/index.md:55` | 缓存读价缺失时回退 input 价 | 与 `rust/adapters/codex/src/report.rs:344-348` 一致 | **一致** |
+| 11 | `ccusage daily --help` | 列出 `--by-agent` | 顶层 `daily` 下**生效**（行级 `agents` 数组；实测不带该标志时无此键），但 `ccusage claude daily --by-agent` 直接报 `Unknown daily option '--by-agent'`（exit 2）——Claude 专属 daily 走 `DailyArgs`，无该字段（`rust/crates/ccusage/src/commands/mod.rs:33-70`） | 同一选项在两个入口能力不同：**顶层可用、`claude` 子命令不可用** |
 
 推论（**一致解释**）：ccusage 的文档随 PR 演进，但 `docs/` 与 `rust/` 之间没有强制一致性的门禁——
 只有 `config-schema.json` 与 CLI 帮助是构建期生成的（§9），其余指南文本靠人维护。
@@ -3362,7 +3373,7 @@ v20（`rust/crates/ccusage-core/src/cost.rs`）：
 1. **同一语义两份实现**：Claude 的 `load_entries`（`claude/src/lib.rs`）与 `load_daily_summaries`（`claude/src/daily.rs`）是两套解析代码，靠 7 个等价性测试维持；但复核发现两者在 sidechain 回放路由上**确有结构差异**（daily 缺 timestamp 守卫，`daily.rs:493-496` vs `lib.rs:436-440`）——测试没覆盖的样本形态会给出不同总量。TokenScope 用单一管线 + 不变量测试是更稳的取向。
 2. **「兜底表」语义与注释不一致**：`put_builtin_pricing` 声明只补缺键，实际有 3 处无条件覆盖（`pricing.rs:2369-2370`、`:2386-2387`、`:2400-2408`）。若抄这套结构，要么保持纯粹 `or_insert`，要么显式标注例外。
 3. **厂商特例硬编码的规模**：`codex-auto-review` 的日期回退表、DeepSeek V4 三段价与 UTC 峰谷窗口（`pricing.rs:252-347`）、`pricing_alias` 三条别名——这些会随时间腐化。TokenScope 的「外置规则 + 数据文件」方向更好，但需要同样的测试覆盖才能保证不腐化。
-4. **文档与代码无门禁**：§11 列了 8 条「文档与实现不符」（另 2 条是文档与代码一致的正面例子）。TokenScope 的 `config-schema.json` 式「构建期生成 + CI 校验」正是 ccusage 只在 schema 与帮助文本上做到、而指南文本没做到的事。
+4. **文档与代码无门禁**：§11 列了 9 条「文档与实现不符」（另 2 条是文档与代码一致的正面例子）。TokenScope 的 `config-schema.json` 式「构建期生成 + CI 校验」正是 ccusage 只在 schema 与帮助文本上做到、而指南文本没做到的事。
 5. **`exact_only` 门禁的复杂度**：为了防止 `claude-opus-5-fast` 被基础模型价抢走，ccusage 引入跨数据源的门禁集合与三种查询语义（`contains` / `contains_any_spelling` / `id_spelled_by`，`pricing.rs:501-521`、`:1617-1683`）。TokenScope 的候选模型天然避免了这个问题（不覆盖、取最高），**不要**再引入单表覆盖语义。
 
 ### 12.4 一句话总结
@@ -3386,6 +3397,7 @@ TokenScope 的强项是**候选式定价与非破坏性历史库**；若要对�
 | 第 5 轮 | 主研究员修正 + 2 个验证代理 | 逐条修复终审清单并重新装配；R5 验证「必改项是否落地」，R6 审查「覆盖度与结构性缺口」 | R5：13 条必改项全部已修、0 未修，判定达到可交付标准；R6：3 个真缺口（项目名清洗链、行级容错横向表、符号链接立场）+ 2 处高价值漏项（选源判据、测试基建） |
 | 第 6 轮 | 1 个补充研究代理（S7） | 按 R6 清单补齐缺口与漏项，写成 §14 横向专题 | 见 §14 |
 | 第 7 轮 | 1 个复验代理（R7） | 复验 §14（22 条抽查）、第 5–6 轮改动（10 条逐条）、§12 的 TokenScope 侧引用（8 条）与全文结构 | 未落地项 0；4 处低危细节（阅读约定章号、§14.6 步号、zcode 分支描述、grep 计数）已修；判定**可交付** |
+| 第 8 轮 | 主研究员（实测轮）+ 1 个复核员 | **构建 ccusage 并用本机日志真实运行**（`--help` / `daily` / `claude daily` / `codex daily` / `session` / `blocks` / `--mode` 三态 / `--no-cost` / `--by-agent` 两处入口），用脚本离线重放 `build.rs` 的裁剪逻辑与 `pricing.rs` 的匹配算法、用 `rustc` 复现金额格式化，并跑仓库自测（188 passed） | 闭环 7 条存疑项、修正 §8 一处实质错误；复核员独立复现（含解压真实构建产物逐键比对），推翻并改正了本轮一处关于 `--by-agent` 的错误结论；详见 §13.5 |
 
 ### 13.2 第 2 轮发现的典型问题（保留以示证据强度）
 
@@ -3406,11 +3418,17 @@ TokenScope 的强项是**候选式定价与非破坏性历史库**；若要对�
 
 ### 13.3 残留未决问题（未验证项，按影响排序）
 
-1. **内嵌 LiteLLM 快照的真实键集未直接检视**：`$OUT_DIR/litellm-pricing.json.deflate` 是编译产物，
-   本次遵守「只读、不构建」约束未生成它；「某模型在不在内嵌表里」的结论来自测试断言与匹配算法推演。
-   复现方式：设 `CCUSAGE_PRICING_JSON_PATH` 指向一份 LiteLLM 快照后构建，或运行 `--json` 看 `modelBreakdowns`。
-2. **未做运行时实测**：本报告全部结论来自静态阅读与仓库内测试断言，
-   **未运行 ccusage 二进制、未与本机真实日志比对**；凡涉及「真实数据上两实现是否分叉」的判断均为推断。
+> **状态更新（第 8 轮）**：下列 10 条中已有 7 条经实测闭环或部分闭环，
+> 逐条状态与实测证据见 §13.5 的对照表；仍完全未闭环的是第 5、9、10 条（并发压力、
+> antigravity 的 protobuf 映射、Codex 重写突发阈值的经验依据）。
+
+1. **内嵌 LiteLLM 快照的真实键集**：`$OUT_DIR/litellm-pricing.json.deflate` 是编译产物。
+   **（第 8 轮已闭环）** 该产物已被解压并与离线重放的键集**逐键逐值比对（534 键、0 差异）**，
+   详见 §13.5；原「来自测试断言与推演」的限制已解除。
+2. **运行时实测已完成（第 8 轮）**：本报告结论原为静态阅读 + 仓库内测试断言；
+   第 8 轮已构建并运行 ccusage（`--offline`，本机 `~/.claude` / `~/.codex`），
+   并跑了仓库自测（`cargo test -p ccusage-core --lib`：188 passed / 0 failed）。
+   仍属推断的只剩「两套实现（entries / daily）在真实数据上是否分叉」这类需要跨实现对照样本的判断。
 3. **`format_currency` 的舍入边界**（`{:.2}` 对 `x.xx5`）未做实验。
 4. **在线端点与内嵌快照的差异**：`https://models.dev/api.json` 与 LiteLLM `main` 的实时内容未抓取比对。
 5. **并发语义未压力验证**：`PricingMap.find_cache` 的「锁内读 → 锁外算 → 锁内写回」只在单线程测试中覆盖。
@@ -3423,19 +3441,120 @@ TokenScope 的强项是**候选式定价与非破坏性历史库**；若要对�
 
 ### 13.4 未决问题的性质
 
-上述 10 条的共同点是：**它们都要求「运行」或「外部数据」才能闭环**，
-而本次研究被限定为「只读源码」。凡不满足这条限定就无法验证的，都已明确标注，
-未以「推断」冒充「已验证」。
+第 8 轮把「要求运行」的那部分逐条实测（§13.5）：内嵌键集、`format_currency` 舍入、
+在线端点差异、models.dev 全量比对、模型名形态、statusline 默认值、models.dev 生成器实现
+都已给出**确定结论**；余下 3 条（并发压力、antigravity 的 protobuf 映射、
+Codex 重写突发阈值的经验依据）需要真实触发条件或额外数据，本次环境不具备，仍按未验证标注。
 
-七轮复核（约 300 条抽查与 30 余处修正）后，**没有发现阻断性问题**；
+八轮复核（约 300 条静态抽查 + 30 余处修正 + 一轮构建/运行实测）后，**没有发现阻断性问题**；
 本报告的行号均以 HEAD `57afdc2` 为基准，源码一旦推进即需重新核对。
+
+### 13.5 第 8 轮：实测复核实录（构建 + 运行 + 离线重放）
+
+前七轮全部是静态阅读。本轮把 §13.3 的残留未决项尽量闭环：**真的构建了 ccusage、真的用本机日志运行了它、并把编译期逻辑用脚本离线重放**，最后由第 8 轮复核员独立复现（复现一致率 7/8，其中一处结论被推翻并已改正，见本节末）。
+
+**环境与方法**（可复现，脚本见 `ccusage-draft/evidence-round8/`）：
+
+- 构建：`cargo build -p ccusage`（Rust 1.99.0）。`rust/crates/ccusage-core/build.rs` 要求
+  `CCUSAGE_PRICING_JSON_PATH`，故先按仓库 `flake.lock` 里
+  `nodes.litellm.locked.rev = d9123f459561754f41fd598a73b405b091d3bf84` 取
+  `model_prices_and_context_window.json`（2 797 533 字节）注入；构建耗时 1 分 17 秒。
+  **该 rev 的文件与 LiteLLM 当日 main 的 sha256 相同**，因此内嵌快照与线上现状一致。
+- 产物核对（复核员补充的最硬证据）：直接解压构建产出的
+  `target/debug/build/…/out/litellm-pricing.json.deflate`，其 **534 键与离线重放的键集
+  逐键、逐字段、逐值 0 差异**——「重放等价」由推断升级为实测；内嵌 models.dev 快照
+  也与其源文件深度相等。
+- 运行：全部加 `--offline`（不联网、不写 HTTP 缓存），数据源为本机 `~/.claude` 与 `~/.codex`；
+  本节只记录**结构、字段名与行为**，不含任何会话内容或用量数字明细。
+- 离线重放：用 Node 脚本逐行复现 `build.rs:155-221`（裁剪 + 改名）与 `pricing.rs:2667-2808`
+  （`pricing_key_matches` / `contains_pricing_key` / `suffix_starts_with_numeric_model_version` / `max_by`）。
+- 仓库自测：`cargo test -p ccusage-core --lib` → **188 passed / 0 failed**（文档引用的测试确实存在且通过）。
+- 格式化实验：用 `rustc` 编译一段复现 `output.rs:548-550` 的小程序。
+
+**闭环结论（逐条对应 §13.3）**：
+
+| # | 原存疑项 | 实测结果 | 状态 |
+| --- | --- | --- | --- |
+| 1 | 内嵌 LiteLLM 快照的真实键集 | 4084 条目经白名单裁剪后 **534 键**（筛掉 3550）；构成：`azure/` 260、`gpt-` 108、`claude-` 裸键 **23**、`o3`/`o4-mini` 12、`zai/` 16、anthropic 前缀族 115（区域前缀 86 + `anthropic.` 29）。**`claude-*` 裸键只覆盖 4.5 代及以后** | **已验证**（并与构建产物逐键比对） |
+| 2 | 未做运行时实测 | 已运行 `--help`、`daily`、`claude daily`、`codex daily`、`session`、`blocks`（均 `--json --offline`），以及 `--mode` 三态、`--no-cost`、`--by-agent` 两处入口 | **已验证** |
+| 3 | `format_currency` 的舍入边界 | Rust `{:.2}` 按 **f64 二进制真值**做 round-half-to-even：`0.005→$0.01`、`0.015→$0.01`、`0.025→$0.03`、`0.125→$0.12`、`1.005→$1.00`、`2.675→$2.67`；复核员另用真中值 `0.125/0.375/0.625/0.875/1.125/2.625/3.375` 全部取偶，独立证明 half-to-even | **已验证** |
+| 4 | 在线端点与内嵌快照的差异 | `https://models.dev/api.json`（5 632 590 字节）：229 个 provider、8830 条条目、**4043 个去重 id**；内嵌快照 3049 键中 **3021 键名仍在在线目录**、28 个已消失（长尾）。**边界**：这里只比了**键名集合**，价格/档位/上限/`exactOnly` 未逐项比对 | **部分闭环** |
+| 5 | 并发语义（`find_cache` 锁外计算） | 未做压力测试 | **未闭环** |
+| 6 | `models-dev-pricing.json` 未全量比对 | 已做键集层面比对（见 4）；内嵌快照与源文件深度相等由复核员确认 | **部分闭环** |
+| 7 | `models.dev` 生成器与运行期规则的对齐 | **已读生成器实现**：`nix/tools/models-dev-gen/gen.ts`（240 行）+ `compact.ts`（457 行）。信任分级与运行期一致（`MODELS_DEV_PROVIDER_TRUST` = owner 3 / platform 2 / reseller 1，`compact.ts:22-38` 对 `pricing.rs:649-651`）；候选裁决键为 trust → 长上下文档 → 显式 cache_read → 显式 cache_write → 上下文上限 → provider id / model id（字典序小者胜，`compact.ts:403-430`） | **已验证** |
+| 8 | 各 agent 的模型名形态 | 已实测主链路（见下）；其余 adapter 未逐一实测 | **部分闭环** |
+| 9 | antigravity 的 protobuf 字段号映射 | 本机无 Antigravity 数据 | **未闭环** |
+| 10 | `CODEX_REWRITTEN_BURST_PAUSE_MS = 1000` 的经验依据 | 本机 Codex 日志未识别到「日志被重写」事件 | **未闭环** |
+
+**由此修正的一处实质错误（§8 §4.5(a)）**：原文称 `claude-sonnet-4-20250514`
+「阶段 A 精确命中即可」——**错**。实测：内嵌表没有该裸键，真实路径是**模糊匹配**
+命中区域前缀的 Bedrock 键（实测命中 `global.anthropic.claude-sonnet-4-20250514-v1:0`，长度 46 为最长；
+候选另含 `anthropic.` / `us.` / `eu.` 三个前缀的变体——**`apac.` 只存在于未裁剪的完整 LiteLLM，
+不在内嵌表**，白名单不含该前缀）。仓库测试
+`embedded_pricing_resolves_overlapping_model_keys_exactly`（`pricing.rs:4931-4955`）
+本身就在证明这一点——它断言的是 `find("claude-sonnet-4-20250514")` 与
+`find("anthropic.claude-sonnet-4-20250514-v1:0")` 的 **input 相等**（即前者落到了后者的价上），
+而不是断言裸键存在。`claude-3-5-haiku-20241022` 同理：实测模糊命中
+`us.anthropic.claude-3-5-haiku-20241022-v1:0`，input `0.8e-6` 与测试断言一致。
+**推论**：`claude-*` 裸键缺旧型号时，ccusage 仍能给出价格，但给的是**区域/Bedrock 渠道价**——
+这解释了两件事：为什么旧模型不会报 `unpricedModels`，以及为什么其单价可能与 Anthropic 直连账单不同。
+
+**版本边界保护的实证（归因修正）**：真正的样例是 `gpt-5.4-9` 与 `claude-opus-5-9`——
+表内有 `gpt-5.4` / `claude-opus-5`，后缀 `-9` 命中
+`suffix_starts_with_numeric_model_version` 的拒绝分支，两者在 534 键表上均**无模糊命中**。
+此前举例的 `gpt-500` 其实是被**边界检查**挡住的（后缀以 `'0'` 开头，属字母数字而非边界），
+`opus550` 则连双向子串关系都不成立——两者都不能证明版本保护。另：`claude-opus-4-6-fast`
+无精确键，模糊命中基础键 `claude-opus-4-6`，fast 倍率由 `fast-multiplier-overrides.json` 的
+`normalized_prefix["claude-opus-4-6"] = 6.0` 提供（复现 `matches_model_suffix` 的 `rfind` + `-` 判定）。
+
+**旧模型的两道防线（实测补充）**：内嵌 models.dev 快照里，旧模型以**带目录前缀**的键存在——
+实测查到 `anthropic/claude-sonnet-4-20250514`、`eu./global./us.anthropic.claude-sonnet-4-20250514-v1:0`。
+因此即使主表（LiteLLM）失手，模糊匹配仍能在第二道防线命中 `anthropic/claude-sonnet-4-20250514`
+（`/` 是合法边界）。生成器注释也解释了这类保留策略：reseller 的价是「可信目录不再发布时的最后手段」，
+并明确举了"退役的 Claude 3 发布版只有 reseller 还在列"（`compact.ts:31-37`）。
+注意归一化后的拼写（`anthropic--claude-3-haiku` 这类）也出现在快照里，说明同一目录内存在多种拼写形态。
+
+**运行时行为验证（与文档既有描述逐项对照）**：
+
+| 观察点 | 实测 | 对应文档 |
+| --- | --- | --- |
+| `claude daily --json` 顶层键 | `daily`、`totals` | §7 §8.1 一致 |
+| 日行的键 | `cacheCreationTokens, cacheReadTokens, date, inputTokens, modelBreakdowns, modelsUsed, outputTokens, totalCost, totalTokens` | §7 §8.1 一致 |
+| `codex daily --json` 日行的键 | 额外含 `costUSD`、`models`、`reasoningOutputTokens` | §5 §10 一致 |
+| `session --json` 顶层与行键 | `session` / `totals`；行含 `agent`、`metadata`、`period` | §7 §10 一致 |
+| `blocks --json` 块键 | `actualEndTime, burnRate, costUSD, endTime, entries, id, isActive, isGap, models, projection, startTime, tokenCounts, totalTokens` | §7 §6 一致（含 `isGap`、`burnRate`、`projection`） |
+| `--no-cost` | 输出中 `totalCost`/`costUSD`/`cost` 全部消失 | §7 §8.3 一致 |
+| `--mode` 三态 | `display` → `totals.totalCost = 0.0`；`auto` 与 `calculate` 数值完全相同。**边界**：本机日志没有 `costUSD` 字段，所以「display 给 0 是因为它只信 `costUSD`」是**一致解释**而非直接实测 | §8 §6 一致 |
+| `--jq` | **不在** `--help` 文本里（但选项可解析） | §11 第 8 条一致 |
+| `claude statusline --help` | `--offline` 默认 **true**、`--cache` 默认 true、`--refresh-interval` 默认 1 | 闭环 §8「未验证 / 存疑」第 8 条的疑问 |
+| `codex daily --help` | `--speed [auto\|standard\|flex\|fast]`，默认 auto | §5 §6 一致 |
+| `codex daily --speed` 三态 | `standard` 与 `auto` 数值相同、`fast` 数值更高（本机日志未记录 service tier，故差异来自 `--speed` 强制档） | §5 §6 一致 |
+
+**`--by-agent` 的适用范围（本条曾被本轮实测误判，已按复核结论改正）**：
+该选项在**顶层 `daily` 与无子命令路径**下**生效**——`ccusage daily --json --by-agent --offline`
+的行级键包含 `agents`（数组，实测元素数 ≥1），不带该标志时同一位置只有 `agent`；
+`ccusage --json --by-agent --offline` 同理。它**不被 `claude` 子命令接受**：
+`ccusage claude daily --json --by-agent --offline` 直接报
+`Unknown daily option '--by-agent'` 并以 exit 2 退出（Claude 专属的 `DailyArgs` 没有该字段，
+见 `rust/crates/ccusage/src/commands/mod.rs:33-70`；统一报告侧由
+`ccusage-cli-parser/src/parser.rs:375`、`:440-473` 解析，`ccusage-adapter-all/src/lib.rs:41` 消费）。
+**教训记录**：本轮初次实测把检查点放在**顶层键**（顶层只有 `daily`/`totals`），因此误得
+「选项被接受但静默无效」的结论；复核员用**行级键**复现才暴露问题——`agents` 是行级键。
+
+**仍未闭环的 3 条**（保留在 §13.3）：并发压力、antigravity 的 protobuf 映射、
+Codex 重写突发阈值的经验依据——它们都需要真实触发条件或额外数据，本次环境不具备。
+
+**重放脚本的适用边界**（写入证据目录，避免误用）：
+`replay-match.js` 实现了 `pricing_key_matches` 与最长键裁决，但**未实现 `exact_only` 门禁**——
+因此它会把 `claude-opus-5-fast` 判成命中 `claude-opus-5`，而真实运行时由 models.dev 的档位条目作答
+（§8 §4.4）。用它下结论时必须叠加这一层。
 
 ## 14. 横向专题：项目名、坏行容错、路径立场与测试基建
 
 本节补齐第 5 轮审查（R6）列出的 3 个横向缺口与 2 处高价值漏项，作为 §1–§13 的横向补充：项目名的推导与清洗链（§14.1）、行级坏数据策略对照（§14.2）、符号链接与路径规范化立场（§14.3）、选源准入判据（§14.4）、测试基建（§14.5）。
 
 - 样本：`ccusage` 只读仓库 HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`（v20.0.31）；本节所有行号均为本次实测（`read` / `grep` 逐文件核对），与各分片既有编号独立。
-- 方法：静态阅读。未运行该仓库任何二进制、未修改样本。
+- 方法：静态阅读为主；第 8 轮已构建并运行 ccusage（`--offline`，见 §13.5）。未修改任何样本或源码。
 - 口径：涉 18 家适配器时，Claude / Codex 与 §4、§5 互相引用，不重复展开；凡本节未逐行读到的分支，在表中标注核实方式并在 §14.6 列明。
 
 ### 14.1 项目名的推导、清洗与别名
@@ -3703,7 +3822,7 @@ TokenScope 的强项是**候选式定价与非破坏性历史库**；若要对�
 7. **`is_project_path_segment` 之外的分支**：`--project` 过滤若传入含分隔符或 `..` 的值会落回全量扫描（`claude/src/paths.rs:65-79`、`:248-254`），该路径下的 `entry.project == filter` 精确比较必然全不命中——这一「用户输错即得空报告」的行为**未实测**。
 8. **26 个 manifest 命中数的构成未逐项区分**：`ccusage-test-support` 的引用落在 19 个 `rust/adapters/*` 目录 + 5 个 crate + 自身 + workspace 根，但未逐个打开确认是否都写在 `[dev-dependencies]`（`grep` 命中计数，非逐文件核对）。
 9. **§14.2 中标注「grep 定位 + 邻段」的 8 家**（opencode、copilot、pi、qwen、kimi、openclaw、hermes、goose）未逐行读全部分支：其丢字段判定「哪些字段缺失会产生语义影响（而非仅取值 0）」未逐条枚举；本节只确认了它们的档位与证据行号。
-10. **未运行任何 ccusage 二进制**：全部结论为静态判读，尤其「坏行被静默丢弃后报告数值如何变化」缺少运行时验证。
+10. **运行时行为**：第 8 轮已运行验证 CLI 与聚合路径（见 §13.5）；但「坏行被静默丢弃后报告数值如何变化」仍缺少用合成坏行样本跑出来的运行验证。
 
 ## 附录 A：关键常量与阈值速查
 

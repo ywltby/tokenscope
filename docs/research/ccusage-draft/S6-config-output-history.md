@@ -557,6 +557,8 @@ v20（`rust/crates/ccusage-core/src/cost.rs`）：
 
 ## 未验证/存疑（本节同时覆盖配置/CLI/输出章与版本史章的未决项）
 
+> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
+
 1. **`--jq` 是否应在帮助里出现**：`cli-help.json` 无 jq 条目（grep `jq` 只命中 parser/tests/snapshots），但选项确实可解析。无法从源码判断这是「故意隐藏」还是「漏写」，需要看 v20 的 release note 或 changelog（本仓未查）。
 2. **`docs/guide/config-files.md`（614 行）未逐行精读**：只核对了它的 `$schema` 示例与 `jq` 校验说明（`:13`、`:593`），其中关于「多文件回退」的表述与实现（只取第一个可用文件）可能有出入，建议 S7/父代理核对。
 3. **v19 → v20 的 entry 级 cost 计算路径**没有逐行对齐：v20 的 `cost.rs` 只读了结构段（`31-59`、`118`、`201`），`calculate_cost_from_tokens` 与 `find_at`（按事件时间选价，`pricing.rs:1461`）的内部规则未展开；若需要「某一具体模型两版钞票差异」级别的结论，需补读 `cost.rs:93-200`。
@@ -565,4 +567,4 @@ v20（`rust/crates/ccusage-core/src/cost.rs`）：
 6. **`ccusage blocks` 的 JSON 字段全集**未穷举：只确认 `isGap`（`blocks.rs:211`）与 `block_json`（`rust/crates/ccusage/src/main.rs:11` 导出），burn rate / 预测字段的键名未逐项核对。
 7. **v20 `--last` 与配置 `since` 的交互**：`--last` 解析发生在 CLI 之后（`rust/crates/ccusage/src/cli.rs:29-31`，`last_window.rs:15-23`），会覆盖配置里已应用的 `since`；如果配置只给了 `until`，行为是「since 由 --last 推出 + until 保留」，此组合没有专门测试覆盖（`last_window.rs` 测试只覆盖了 `--last` 单独使用）。
 8. **`--jq` 与 `--no-cost` 的组合**：`strip_cost_json` 在 jq 之前执行（`output.rs:159-161`），因此 jq 过滤器看不到被删字段——这是实现事实，但未在文档中声明。
-9. **本文档未运行任何 ccusage 二进制**：所有结论均来自源码阅读，未做运行期验证；行号基于 HEAD `57afdc2`（v20.0.31）与 `4aedac0`（v19.0.3），若仓库前进需重新核对。
+9. **运行期验证状态**：第 1–7 轮为纯源码阅读；**第 8 轮已构建并运行 ccusage**（`--offline`，见 §13.5），本节与运行期相关的结论（CLI 解析、帮助文本、`--jq` 隐藏性）均已实测。行号基于 HEAD `57afdc2`（v20.0.31）与 `4aedac0`（v19.0.3），若仓库前进需重新核对。
