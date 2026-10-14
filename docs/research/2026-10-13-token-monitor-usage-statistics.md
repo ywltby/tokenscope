@@ -8,12 +8,33 @@
 >   [`Javis603/tokscale`](https://github.com/Javis603/tokscale)，pin
 >   `fa5f0c13324838d1a988fda317597f9b90da7ad0`（2026-10-10，基线 v4.18.0，release tag
 >   `token-monitor-fa5f0c13`）；上游为 [`junhoyeo/tokscale`](https://github.com/junhoyeo/tokscale)。
-> - 两仓均浅克隆到临时目录后逐文件精读；**未运行任何二进制、未改动本机任何数据目录**。
+> - 两仓均浅克隆到临时目录后逐文件精读；此后又在**隔离环境**里跑过 pin 的
+>   `tokscale-win32-x64.exe` 做端到端实证（范围与隔离方式见下），**未改动本机任何数据目录**。
 >
-> **证据分档**：**已验证**（源码直读，给出 `路径:行号`）／**一致解释**（多条代码证据指向同一
+> **证据分档**：**实证**（在隔离环境里运行 pin 的 tokscale 二进制得到的结果，定义见下）／
+> **已验证**（源码直读，给出 `路径:行号`）／**一致解释**（多条代码证据指向同一
 > 结论，无单点直证）／**未见实现**（明确检索后判定「本 pin 不存在该机制」的否定结论）／
-> **存疑**（无法从静态源码定论，集中列在 §9）。TM 内路径相对 token-monitor 根，TK 内路径相对
-> tokscale 根。
+> **仍存的边界**（无法用现有手段定论的部分，集中列在 §9 的第三层，见 §9.3）。TM 内路径相对
+> token-monitor 根，TK 内路径相对 tokscale 根。
+>
+> **「实证」的定义与范围**：在隔离环境（临时 `TOKSCALE_CONFIG_DIR` + 临时 home + 合成 fixture）
+> 里运行 **pin 的 tokscale 二进制**得到的结果。被验证的二进制是 fork release
+> `token-monitor-fa5f0c13` 的 `tokscale-win32-x64.exe`（26,491,904 字节，sha256
+> `5887f4fae41d5ae4ca684c4a50af96dff9b633fbf9942cd827eca9736765d97a`，与 manifest 声明、release 的
+> `SHA256SUMS` 三方一致，tag 解引用到 manifest 记录的同一 commit，`--version` 回
+> `tokscale 4.18.0` 且不暴露 fork/commit 标识）。隔离方式：每次调用注入临时
+> `TOKSCALE_CONFIG_DIR` 与 `TOKSCALE_PRICING_CACHE_ONLY=1`（其边界见 §7.2：只约束本地解析，
+> `pricing` 子命令不受约束），把 `HOME`/`USERPROFILE` 指向临时 home，删除 `DSH_HOME`/
+> `CLAUDE_CONFIG_DIR`/`CODEX_HOME`/`GEMINI_CLI_HOME`/`XDG_DATA_HOME`/`TOKSCALE_EXTRA_DIRS` 等
+> 21 个可能把扫描指回真实 profile 的变量，扫描类命令一律显式带 `--home <临时 home>`（`pricing`
+> 子命令不接受 `--home`）。覆盖范围：Claude / Codex / Zed 三个客户端的端到端扫描、`.jsonl.zst`、
+> SQLite 只读与 WAL 侧车、错误路径与 `--help` 取值表、`pricing` 子命令的联网行为。
+>
+> **一处隔离偏差（如实披露）**：交叉验证扫描路径时执行过 `clients`（不带 `--home`），进程内残留的
+> `DSH_HOME` 因此生效，该命令列出了**真实** `C:\Users\admin\.dsh\sessions` 的路径并显示
+> `messages: 13.3K` 计数；读数仅到路径存在性与消息计数，未读取任何会话内容。发现后已清除全部
+> `*_HOME` 类变量，其后所有命令（含后续扫描与压缩会话实验）均未再触达真实目录；沿用该隔离环境的
+> 人都必须保持这批变量被清除，否则 `clients` 与不带 `--home` 的扫描仍会读到真实 profile。
 >
 > **本文只记录结构、字段名、路径规则与计算口径，不含任何真实会话内容。**
 
@@ -54,9 +75,11 @@
    API 或本地缓存导出（Cursor 的账户级 usage 缓存、Antigravity 的 protobuf 生成库、
    Copilot 的 OTEL / data.db / session-store.db / VS Code chatSessions 四路）。
 9. TK 注册了 **56 个 client id**（`crates/tokscale-core/src/clients.rs:320-1106`，`ClientId::COUNT == 56`
-   见 `:1220`），其中 TM 的 catalog 只启用 36 个；fork 新增 3 个上游不认的客户端
-   （`proma`、`catpaw`、`qodercn`，见 `crates/tokscale-core/src/token_monitor/`），并给
-   `mcode` 补了上游缺失的本地运行时库解析。
+   见 `:1220`），其中 TM 的 catalog 只启用 36 个；fork 另加 3 个上游不认的客户端
+   （`proma`、`catpaw`、`qodercn`，见 `crates/tokscale-core/src/token_monitor/`），**它们不在
+   `ClientId` 注册表内**（`token_monitor/mod.rs:1-18`、`:44-57`，因此既不进连续索引也不出现在
+   CLI 取值表里），并给 `mcode` 补了上游缺失的本地运行时库解析（supplement，同文件 `:110-113`）。
+   CLI 的 `--client` 取值数因此不是 56 而是 58（与注册表、与这三者的关系见 §4.1）。
 10. **金额在 TK 里逐条消息算好**（`apply_pricing_if_available`，`crates/tokscale-core/src/lib.rs:5823-5845`），
     聚合阶段只做求和（`--json` 路径 `crates/tokscale-core/src/lib.rs:4644-4650`，
     `graph` 路径 `crates/tokscale-core/src/aggregator.rs:289`）。
@@ -74,7 +97,9 @@
     （`src/shared/tokscaleCustomPricing.js:40-52`）。TM 运行时不传价格相关 CLI 参数、不设价格环境变量；
     写价一律经这个文件（唯一例外在构建期：`npm run ensure:tokscale` 的 vendored 二进制校验脚本为离线冒烟
     会设 `TOKSCALE_PRICING_CACHE_ONLY=1`，`scripts/verify-vendored-tokscale.js:459`、`package.json:14`，
-    与运行时无关）。
+    与运行时无关）。**实证（边界）**：`TOKSCALE_PRICING_CACHE_ONLY=1` 并不能保证「不联网」：它只让
+    本地解析（扫描）走 `load_cached_any_age()`，`pricing` 子命令不受它约束，空 config 下仍会联网抓价
+    并落盘（详见 §7.2）；把该开关当作离线隔离手段不成立。
 14. **价格/二进制一变，成本锚即失效**：`pricingFingerprint()` 把价格文件字节 + 二进制
     identity + 二进制 `stat(size/mtime/ctime)` 拼进 `configFingerprint`，每个 tick 开头比对，
     变化即清锚点、重置全扫与 history 时间戳（`src/shared/collector.js:2151-2186`、`:2774-2788`）。
@@ -93,7 +118,9 @@
     `src/shared/sessionDetailResolver.js` 与 `sessionDetailWorker.js`），不进周期统计。
 17. **未知模型不得按 0 静默丢弃**：TK 对未命中价格的模型保留 `cost_source`（`Unknown`）且成本 0，
     由上层展示「未知」；只有提交（leaderboard）路径才强制要求价格覆盖
-    （`crates/tokscale-core/src/sessions/mod.rs:71-78`、`pricing/mod.rs:659-669`）。
+    （`crates/tokscale-core/src/sessions/mod.rs:71-78`、`pricing/mod.rs:659-669`）。**实证**：无价源时
+    扫描照常 exit 0、`cost`/`totalCost` 记 `0.0` 且不告警，`--json` 的输出里**没有 `cost_source` 键**，
+    上层只能由 `cost == 0` 推断，因此 `0` 只能读作「未知」、不能读作「免费」（见 §7.6）。
 18. 缓存写价分档：`cache_write_1h` 与 5 分钟档分开计价，1h 档使用
     `cache_creation_input_token_cost_above_1hr`，阈值 200k
     （`crates/tokscale-core/src/pricing/lookup.rs:2337-2459`）。
@@ -187,20 +214,36 @@ TM 不做 per-agent 的统计分离：所有客户端解析完都变成同一种
 ① 判据是**两个条件**——exit code 2 **且** stderr 命中 `/--client/i`（`isUnknownTokscaleClientError()`，
 `src/shared/collector.js:474-478`；常量 `TOKSCALE_UNKNOWN_CLIENT_EXIT_CODE = 2`，`:318`）。
 只要 exit code 2 不够：那是 clap 的通用参数错误码，别的 flag 写坏也是它（注释 `:446-450`）。
+**实证两个条件都必要**：未知 `--client definitely-not-a-client` 得 exit 2，stderr 首行是
+`error: invalid value 'definitely-not-a-client' for '--client <CLIENTS>'` 后跟
+`[possible values: …]`（58 项），stdout 全空；换成完全不存在的选项（`--not-a-flag-at-all`）同样
+exit 2，但 stderr 是 `error: unexpected argument '--not-a-flag-at-all' found` 加 `Usage: …` 与
+`For more information, try '--help'.` 三行、不含 `--client`；两段合取因此不可省，只看退出码会把无关的
+参数错误误判成「未知 client」。
 ② 命中后做能力探测：先跑 `tokscale --help`，**锚定 `--client` 自己的 stanza** 解析
 `[possible values: …]`（`src/shared/tokscaleCapabilities.js:10-34`，扫描截到下一个选项行为止，
 免得把别的 flag 的取值表读成 `--client` 的；探测超时 10s，`collector.js:314`、`:320-321`），
 再用空 home 加 `--home` 的最小扫描确认 fork 专属 id 是否被接受（`:387-409`、`:411-426`，
-因为 fork-only id 被 clap 前剥掉、不出现在 `--help` 里）。
+因为 fork 自有 id 走的是另一条通路：它们在 clap 解析前被 CLI 从 `--client` 值里摘出、从不进取值表，
+见 §4.1 末段）。
 ③ 结果按**二进制 identity** 缓存，**成功与失败都缓存**：resolver 把探测结果写进 `settled`（成功）、
 失败写 `null` 并只 warn 一次（`tokscaleCapabilities.js:51-93`、`:70-78`），进程内按 identity 复用；
 本 tick 用过滤后的 client 集重试一次，之后的 tick 直接按缓存**主动**过滤、不再先撞一次错
 （`collector.js:514-532`、`:534-537`、注释 `:504-513`）。
-`--group-by` 有同构回退：fork 的 `client,workspace,session,model` 被旧二进制拒绝
-（clap 以 `invalid group-by value` 报错，`:470-472`）时，记该 identity 不支持并立刻改用
-`client,session,model` 重跑一次（`:584-595`、`:586`），拒绝结论同样按 identity 缓存
-（`:458-461`、`:461-465`），换二进制后 identity 变化即换缓存槽；`resetTokscaleCapabilityCache()`
-（`:439-444`）只被测试调用（`tests/shared/collectorForceLimits.test.js:417`），生产路径不主动清缓存。
+`--group-by` 有同构回退，但**判据与退出码都不同族**：fork 的 `client,workspace,session,model`
+被旧二进制拒绝时，TM 只匹配 stderr 文本、不读退出码（`isUnknownTokscaleGroupByError()` 用
+`/invalid group-by value/i`，`src/shared/collector.js:470-472`，注释 `:467-469`），命中才记该
+identity 不支持并立刻改用 `client,session,model` 重跑一次（`:584-595`、`:586`），拒绝结论同样按
+identity 缓存（`:458-461`、`:461-465`），换二进制后 identity 变化即换缓存槽；
+`resetTokscaleCapabilityCache()`（`:439-444`）只被测试调用
+（`tests/shared/collectorForceLimits.test.js:417`），生产路径不主动清缓存。
+**实证两者不是同一个错误族**：坏 `--group-by definitely-not-a-grouping` 得 **exit 1**（不是 2），
+stderr 为 `Error: Invalid group-by value: 'definitely-not-a-grouping'. Valid options: model,
+client,model, client,provider,model, workspace,model, session,model, client,session,model,
+client,workspace,session,model`（大写 `Error:` 前缀，区别于 clap 的 `error:`；该值是应用层
+`GroupBy::from_str` 的拒绝，CLI 侧落点 `crates/tokscale-cli/src/main.rs:683-686`，错误文本常量
+`crates/tokscale-core/src/lib.rs:257`）。TM 只认文本、不认退出码，因此这一层判据本身是稳的，
+但任何「坏参数一律 exit 2」的假设会被这条推翻。
 
 ### 3.2 一次完整 tick：串行三窗口
 
@@ -355,6 +398,35 @@ watch 事件只会命名「变化的路径」，TM 把它们映射回 client 集
 （`scanner.rs:2182-2203`，口径注释见 `:2851`）；`--home` 只被本地报告命令接受，其他子命令显式拒绝
 （`main.rs:1827-1836`）。这解释了 WSL 扫描（§3.1）为何不继承宿主的环境变量根。
 
+**补充（CLI 的 `--client` 取值表比注册表多两项；源码 + 实证）**：`--help` 里 `--client <CLIENTS>`
+的 `[possible values: …]` 有 **58 项**，不是 56：多出的两项是 CLI 层独有的 `9router` 与
+`synthetic`（`crates/tokscale-cli/src/main.rs:1091-1159` 的 `ClientFilter` 枚举，其余 56 项与
+`tokscale_core::ClientId` 同序、`9router` 插在 `gjc` 之前、`synthetic` 追加在末尾，顺序注释见
+`:1084-1088`）。实证：`--help` 的取值表与未知 client 的 stderr
+`[possible values: …]` 都是 58 项、逐字同序。两者都不是独立的本地扫描源：
+
+- `9router`（`ClientFilter::NineRouter`，`main.rs:1119-1120`）落到 core 的 `ClientId::Gjc`
+  （`to_client_id()` `:1263`），即「9Router bridge 脚本产出、gjc 格式」的那批数据
+  （`scanner.rs:1947-1950`）；消息级过滤仍分得开：请求 `gjc` 会连带保留 `client == "9router"`
+  的消息（gjc 是超集请求），反向不成立（`crates/tokscale-core/src/lib.rs:189-204`），而
+  `sessions/gjc.rs:51` 允许行内 `source` 字段把 client 改写成 `9router`（`gjc.rs:524-533` 的测试
+  即此用法）。
+- `synthetic`（`ClientFilter::Synthetic`，`main.rs:1158`）是**没有扫描路径的 meta-client**：
+  `to_client_id()` 返回 `None`（`:1293`），`default_set()` 把 `Synthetic` 与 `NineRouter` 两者
+  一并排除（`:1388-1394`；函数上方注释 `:1377-1381` 说明 synthetic 检测一直是 opt-in，因为它会把
+  别的 client 的消息重新归因）。它做的是「在既有 client 的消息里识别 synthetic.new 网关」的再归因
+  （`crates/tokscale-core/src/sessions/synthetic.rs:1-4`
+  的检测函数，core 侧过滤条件在 `lib.rs:202-203`）；`default_submit_clients()` 会把它加进提交集合
+  （`main.rs:1818-1825`）。
+
+fork 自有的 `proma`/`catpaw`/`qodercn` **一个都不在这 58 项里**（实证核对 `--help` 列表），机制上
+也不会进：它们是 `token_monitor::CLIENTS` 的条目（`token_monitor/mod.rs:44-57`），主路径由 CLI 在
+clap 解析前从 `--client` 值里摘出（`crates/tokscale-cli/src/token_monitor.rs:55-115` 的
+`split_cli_clients`，入口 `parse_cli` `:21-37`），且只在 `models`/`monthly`/`hourly`/`graph`/`tui`/
+`wrapped`/`time-metrics` 与无子命令形态上被接受（`:39-53`），其余子命令（如 `submit`）回退到原始
+argv、按 clap 自己的错误失败（`:8-11`）。这正是 §3.1 的能力探测必须用「空 home 最小扫描」而不是
+解析 `--help` 来发现它们的原因。
+
 ### 4.2 统一记录模型
 
 所有解析器产出同一种记录（**已验证**）：
@@ -386,7 +458,20 @@ pub struct UnifiedMessage {
   cache_creation_input_tokens`（`claudecode.rs:696-709`）。
 - 1 小时缓存写档单独取 `cache_creation.ephemeral_1h_input_tokens`（`sessions/utils.rs:677`、`:738-744`）。
 - 去重键：`"<message.id>:<requestId>"` 组合（`claudecode.rs:632-636`），跨文件重复观测按字段
-  取大合并（合并规则 `:988-1045`）。
+  取大合并（合并规则 `:988-1045`，`merge_claude_duplicate` 只处理 token 桶与 duration，不涉及
+  `session_id`）。
+- **会话身份取文件名 stem，不取文件内的 `sessionId` 字段**（源码 + 实证）：`session_id` 由
+  `path.file_stem()` 得出（`claudecode.rs:444-448`）；JSONL 行内的 `sessionId` 只在**子代理
+  （sidechain）文件**里被采信：首个可解析行的 `is_sidechain` 为真时改用该行的 `session_id`
+  （parent id）修正会话计数（`:526-541`，赋值点 `:533`）。**实证**：文件 `session-1111.jsonl` 内部
+  `sessionId` 写着另一个 UUID，`--group-by client,session,model` 输出的仍是 `session-1111`；另一
+  文件内部写 `internal-only-zzz`，输出的是它的文件名 `2222…6666`。影响面：会话桶边界锚在**文件名**
+  上，重命名文件即换一套身份、同一份内容会被切成两个会话；因此「`(session_id, message.id)` 式」
+  的原生去重键（本仓 TokenScope 口径的原生身份：Claude 取 `(session_id, message.id)`）若
+  `session_id` 取自 TK 输出，其稳定性只到「文件不改名」为止，要稳就得自己从转录内容里取
+  `sessionId`。相应的 `sessions[]` 输出键名也已实证为 camelCase
+  `firstActiveMs`/`lastActiveMs`（`title`/`parentSessionId` 需带标题与父子关系的 fixture 才会出现，
+  本次未触发）。
 - 不按字符估算 token：tool_result 之类的文本即使缺 usage 也不进估算
   （`claudecode.rs:450-458`；对照 TK issue #1011）。
 - Advisor / 迭代用量从 `usage.iterations` 拆出（`:829-871`）。
@@ -408,9 +493,32 @@ pub struct UnifiedMessage {
 - 增量读法主路径只采信 `last_token_usage`（累计快照 `total_token_usage` 用于去重与单调性校验，
   `:914-917`、`:954-970`）；若某行只有累计值而无 `last`，存在 **total-delta 降级分支**（`:973-985`）。
 - 去重键形如 `codex:token_count-total:…`（`:1371-1380`），fork 额外做父作用域处理（`:1072-1090`）。
-- **不存在独立的「压缩会话」文件格式**：`.zst` 是整文件压缩；compaction 只是改写
-  `total_token_usage` 快照 —— 这一点纠正了「压缩 transcript 是另一种解析路径」的常见误解
-  （存疑项见 §9）。
+- **不存在独立的「压缩会话」解析路径**（源码）：`.zst` 与 `.jsonl` 共用同一个
+  `parse_codex_reader`，差别只在解压入口（`codex.rs:1498-1559`；`is_zst_path` 是纯后缀判断，
+  `sessions/utils.rs:547-551`）。解压有三道边界与一条拒绝：① zstd 解压窗口 ≤ 2^26
+  （`window_log_max(26)`，`:1539`）；② 解码后字节数 ≤ `MAX_ARCHIVE_BYTES` = 256 MiB
+  （`utils.rs:544-545`，用 `take(MAX_ARCHIVE_BYTES + 1)` 探测越界，`:1551`）；③ 超限或解析未完成即
+  **清空全部结果**并置 `parse_succeeded = false`（`:1553-1557`，不截断、不部分保留）；④ 打开失败、
+  decoder 初始化失败、`window_log_max` 失败三类都退化为「warn + 空结果」、不 panic 不重试
+  （`:1510-1549`）。**实证**：277 字节的 `.jsonl.zst` fixture 被正常发现并解析（exit 0、
+  `messageCount=1`；`input=800` 是 Codex 口径的 `input_tokens − cached_input_tokens`）。
+- **`.zst` 不支持增量续读**（源码）：非零 `start_offset` 直接返回空结果 +
+  `parse_succeeded = false`（`codex.rs:1499-1508`）：zst 分支里 `consumed_offset` 是解码流内偏移、
+  与压缩文件偏移不是同一坐标，解析器选择拒绝而不是换算；压缩会话因此每次都走**整文件重解析**
+  （`parse_codex_file` 固定以 0 偏移做入口，`:1450-1453`）。
+- **compaction 靠「增量源选择 + 回退分档」去重，没有独立的事件分支**（源码）：`total_token_usage`
+  被明确降级为基线/单调性校验，`last_token_usage` 是唯一直接增量源（注释 `codex.rs:914-917`）；
+  判定基础是 `CodexTotals::delta_from`，任一桶小于 previous 即 `None`（`:196-211`）。四档处理：
+  ① 快照与基线完全相同 → 跳过、不推进基线（`:958-960`）；② total 回退但幅度小
+  （`looks_like_stale_regression`：`current * 100 >= previous * 98` 或
+  `current + 2 * last >= previous`，`:236-251`）→ 判为乱序陈旧快照并跳过，避免把 `last_token_usage`
+  重复计一次（注释 `:245-248`）；③ total 大幅回退（compaction 重写快照的典型形态）→ 把 `last` 计为
+  本次增量、把回退后的 total 设为**新基线**（`:966`，测试
+  `test_compaction_total_drop_uses_last_as_increment` `:4039`）；④ 全零快照跳过且**不推进基线**，
+  防 post-compaction 的零 total 抬高后续 delta（`:996-1004`）。首个事件即带 total 时也只用 `last`，
+  避免把 resume 继承的历史 token 全量计入（`:968-970`）。全仓没有名为 `resets` 的字段或独立事件
+  类型：`resets` 的命中只落在注释、测试名、额度窗口字段 `resets_at` 与展示文案上，去重不依赖
+  任何「resets 语义」，靠的就是上面这套「增量源 + 回退分档 + 基线不推进」的组合。
 
 #### OpenCode（`sessions/opencode.rs` + `opencode_schema.rs`）
 
@@ -829,8 +937,20 @@ OpenRouter 源带**作者前缀硬过滤**：`get_author_provider_name`（`prici
 （`pricing/cache.rs:6`、`:43-49`、`:86-96`）；抓取超时 30 秒 / 连接 10 秒（`pricing/fetch.rs:9-10`），
 最多 3 次尝试，两次尝试之间只退避 200ms 与 400ms（`:4` 为 `MAX_RETRIES = 3`，`:22` 的
 `for attempt in 0..MAX_RETRIES` 配 `:40-42` 的 `INITIAL_BACKOFF_MS * (1 << attempt)` 被
-`attempt < MAX_RETRIES - 1` 截断，**800ms 分支不可达**）。离线开关
-`TOKSCALE_PRICING_CACHE_ONLY=1` 只读缓存（`lib.rs:5896-5911`）。
+`attempt < MAX_RETRIES - 1` 截断，**800ms 分支不可达**）。
+
+离线开关 `TOKSCALE_PRICING_CACHE_ONLY=1` 的边界要说准（源码 + 实证）：它只作用于**本地解析
+（扫描）**路径：`load_pricing_for_local_parse()` 命中该变量即改走 `load_cached_any_age()`
+（`crates/tokscale-core/src/lib.rs:5896-5911`，判定 `:5897-5902`），空缓存下不抓取、不落价格文件、
+`cost` 记 0（实证：该路径只写出 `cache/source-message-cache*`，不产出 `pricing-*.json`）。
+**`pricing` 子命令不受它约束**：全仓生产代码检索该变量只有 `lib.rs:5897` 一处命中，而 `pricing`
+走 `PricingService::get_or_init()`（`crates/tokscale-cli/src/main.rs:3857`，即三源并发抓取
+`pricing/mod.rs:416-427`）。实证：全新空 config + 该变量为 1 时执行
+`pricing claude-sonnet-4-5 --json --no-spinner` 仍 exit 0 并返回 `source: LiteLLM`，同时往
+`<config>/cache/` 写入 `pricing-litellm.json`（2,741,427 B）、`pricing-models-dev.json`
+（6,934,570 B）、`pricing-openrouter.json`（257,108 B）；TK 自己的测试注释也写明「`pricing`
+intentionally bypasses TOKSCALE_PRICING_CACHE_ONLY」（`crates/tokscale-cli/tests/cli_tests.rs:1027-1029`）。
+结论：把该开关当作「离线/隔离」的保证**不成立**，任何包含 `pricing` 调用的链路仍会联网并落盘。
 
 本 pin 的**生产路径没有**编译期打包的价格数据集：全仓 `include_str!` / `include_bytes!` 只有 4 处，
 且全部位于测试或 fixture——`pricing/mod.rs:770`（在 `#[cfg(test)]` 模块内，该模块自 `:718` 起，
@@ -839,7 +959,7 @@ OpenRouter 源带**作者前缀硬过滤**：`get_author_provider_name`（`prici
 唯一的 `crates/tokscale-cli/build.rs` 只处理 macOS `apple-fm` 动态库，与价格无关。
 `pricing/mod.rs:470` 注释里的「custom and bundled pricing」指的是**编译期硬编码兜底表**
 （Cursor `:123`、Sakana `:227`、archive `:285`，加 `pricing/self_hosted.rs:7`），不是打包的数据集；
-`lib.rs:5708` 的「bundled LiteLLM dataset」是同一措辞的遗留用法（见 §9.2）。
+`lib.rs:5708` 的「bundled LiteLLM dataset」是同一措辞的遗留用法（见 §9 第 15 条）。
 
 ### 7.3 模型匹配与别名
 
@@ -890,8 +1010,8 @@ OpenRouter 源带**作者前缀硬过滤**：`get_author_provider_name`（`prici
    不是家族价，拿它回答一个谁都没发布过的 id，会把这个未知 SKU 按邻居的费率计价）；前缀剥离的
    候选仍保留 archive（它本身是有人真实发布过的 id、只是被客户端打了前缀，`:3057-3059`）。
 
-`provider_identity.rs` 负责供应商拼写归一（阻止把区域变体（如 `alibaba-cn`）折叠进总部键），
-影响选价与证据等级；`model_alias.rs` 明确只做**展示合并**、不影响计价。
+`crates/tokscale-core/src/provider_identity.rs` 负责供应商拼写归一（阻止把区域变体（如 `alibaba-cn`）折叠进总部键），
+影响选价与证据等级；`crates/tokscale-core/src/model_alias.rs` 明确只做**展示合并**、不影响计价。
 分层仲裁的调用点：`lookup.rs:871`、`:910`、`:961`、`:1016` 走两层；
 `:1148`（模糊匹配分支）与 `:1348`（provider-scoped 路径）只调第一层，因为该两处的候选集合只有
 LiteLLM 与 OpenRouter。复刻这套优先级时两层都要处理。
@@ -980,6 +1100,14 @@ LiteLLM 与 OpenRouter。复刻这套优先级时两层都要处理。
 
 - 未命中价格：解析期成本为 0，`cost_source` 保持 `Unknown`（`crates/tokscale-core/src/sessions/mod.rs:71-78`），
   聚合只把 0 加进去；上层展示时必须按「未知」呈现，而不是当作免费。
+- **无价源时同样是 0 且不报错（实证）**：隔离 config + `TOKSCALE_PRICING_CACHE_ONLY=1`（缓存为空）
+  下扫描 exit 0，`cost` 与 `totalCost` 都是 `0.0`、stdout 无任何告警；同一 fixture 写入
+  `custom-pricing.json` 后同一条命令立刻给出 `43100.0`（与手算逐位相同），移除自定义价改由目录源
+  （LiteLLM）计价则是 `0.04515`。也就是说 `cost == 0` 同时覆盖三种情形：模型未收录、价格源整体
+  缺失、显式免费价，而 `--json` 的 entry **不输出 `cost_source` 键**（实证，与 §1 第 3 条的字段
+  清单一致），上层从输出里拿不到「这 0 是未知还是免费」的标记。落地口径：`cost = 0` 只读作「未知」，
+  展示与聚合都不得把它当免费或当精确值；要区分就得在 TK 之外自己记录价源是否在场（TM 的做法是
+  `pricingFingerprint`，见 §7.7）。
 - 只有提交（leaderboard/submit）路径才强制要求价格覆盖，并把不完整成本记为
   `incomplete_cost_dates`（`lib.rs:5378-5443`、`pricing/mod.rs:659-669` 的
   `covers_usage_with_provider`）。
@@ -1056,85 +1184,252 @@ LiteLLM 与 OpenRouter。复刻这套优先级时两层都要处理。
     renderer 按需单独拉取（`src/shared/usage.js:184-224` 的 `stripSessionTextFromPeriod` /
     `stripSessionTextFromDeviceRecord`）。
 
-## 9. 未验证与存疑
+## 9. 实证结论、源码定论与仍存的边界
 
-静态阅读无法定论、或上下游契约依赖外部实现的地方，逐条列出：
+本节分三层：**已实证**（在隔离环境里真实运行 pin 的二进制得到的行为，附执行要点与源码对照）、
+**已由源码定论**（只读源码即可判定、没有未决分支）、**仍存在的边界**（证据不足或运行面未覆盖，
+显式保留而不下结论）。三层条目连续编号，每条标注证据档位。
 
-1. **`exit code 2` 的语义没有在 TK 源码中找到显式设置**：TM 的判据其实是**两个条件的合取**——
-   exit code 2 **且** stderr 命中 `/--client/i`（`isUnknownTokscaleClientError()`，
-   `src/shared/collector.js:474-478`；常量 `TOKSCALE_UNKNOWN_CLIENT_EXIT_CODE = 2` 在 `:318`，
-   其注释注明在 tokscale **4.7.0 与 4.8.0** 上实测过，`:316-318`）。只按退出码判定不够，
-   因为 exit 2 是 clap 的通用「参数解析失败」码，别的 flag 写坏也是它（注释 `:446-450`）。
-   TK 侧 `--client` 是 clap `value_enum`
-   （`crates/tokscale-cli/src/main.rs:1401-1412`），同文件**没有 `exit(2)`**：显式退出码只有
-   13 处 `std::process::exit(1)`（其中 `main.rs:683-686` 是 group-by 解析失败），另有
-   headless 超时的 `exit(124)`（`:7417`）与转发子进程退出码的 `exit(outcome.exit_code)`
-   （`:7427`，理论可取任意值）。**一致解释**：exit 2 由 clap 的参数校验失败产生；
-   上游若改错误码或不再在 stderr 里提 `--client`，TM 的能力探测与重试会整体失配
-   （完整链路见 §3.1 末段）。
-2. **「bundled」措辞与打包数据无关（已收敛为确定结论）**：`crates/tokscale-core/src/lib.rs:5708`
-   的「bundled LiteLLM dataset」是描述运行时那套 LiteLLM 数据的注释措辞；
-   `crates/tokscale-core/src/pricing/mod.rs:470` 的「custom and bundled pricing」指的是**编译期
-   硬编码兜底表**（Cursor `:123`、Sakana `:227`、archive `:285`，加 `self_hosted.rs:7`）。
-   生产路径确实没有打包数据集：全仓 `include_str!` / `include_bytes!` 仅 4 处且全在测试/fixture
-   （`pricing/mod.rs:770` 在 `#[cfg(test)]` 内、`sessions/codex.rs:1844`/`:1846`、
-   `crates/tokscale-core/tests/anthropic_catalog.rs:31`），`tokscale-core` 无 `build.rs`，
-   唯一构建脚本 `crates/tokscale-cli/build.rs` 只处理 macOS `apple-fm` 动态库。结论：**已验证**
-   「无编译期价格数据集」，不必为「构建特性注入数据」保留余地。
-3. **Claude 的 5 分钟缓存写档在计价层显式成立（已收敛为确定结论）**：解析层只取 1 小时子集
-   （`sessions/utils.rs:738-744` 的 `cache_write_1h_raw()` 读 `ephemeral_1h_input_tokens`，
-   经 `:730` 的 `min(cache_write)` 截断；全仓检索 `ephemeral_5m_input_tokens` 只命中
-   `claudecode.rs:2016` 起的测试 fixture，生产代码不读它）。计价层按差额还原两档：
-   `pricing/lookup.rs:2341-2342` 算 `cache_write_5m = cache_write − cache_write_1h`，`cache_write_1h`
-   先被 `min` 截断到不超过 `cache_write`，再各自分档计价后相加（`:2431-2459`）。即
-   `cache_write` 桶是「5 分钟档 + 1 小时档」的合计，1 小时桶是其子集。
-4. **Codex 不存在独立的「压缩会话」解析路径**：`.zst` 是整文件压缩、compaction 只改写
-   `total_token_usage` 快照；此前文档口径里的「compressed transcripts」指的是这一现象而不是
-   第二种格式。
-5. **Antigravity 没有 ledger reconciliation**：该机制属于 `sessions/amp.rs`
-   （`parse_amp_ledger_records` `:125` → `find_matching_ledger_record` `:218` →
-   `merge_amp_records` `:243`，由 `parse_amp_file` `:275` 的 `:302-338` 循环完成对账）；
-   把「ledger」按字面安到 Antigravity 上会得出错误结论（`sessions/antigravity*.rs` 检索 `ledger` 零命中）。
-6. **`graph` 子命令的完整输出形状已逐字段核对（已收敛为确定结论）**：13 个 `serde::Serialize`
-   结构全在 `main.rs:4851-4992`，除 `DateRange` 外都带 `rename_all = "camelCase"`——顶层
-   `TsTokenContributionData`（`:4975-4992`：`meta`/`summary`/`years`/`contributions` 必填，
-   `device`/`scanScope`/`timeMetrics`/`mcpServers`/`provenance` 走 `skip_serializing_if`
-   可省），子结构 `TsTokenBreakdown`（`:4851-4859`）、`TsSourceContribution`（`:4861-4871`）、
-   `TsDailyTotals`（`:4873-4883`）、`TsDailyContribution`（`:4885-4895`）、`DateRange`
-   （`:4897-4901`）、`TsYearSummary`（`:4903-4910`）、`TsDataSummary`（`:4912-4923`）、
-   `TsExportMeta`（`:4925-4931`）、`TsSubmitDevice`（`:4933-4939`）、`TsTimeMetrics`
-   （`:4941-4948`）、`TsScanScope`（`:4957-4962`）、`TsSubmissionProvenance`（`:4964-4973`）；
-   组装在 `to_ts_token_contribution_data`（`:4994-5099`：日汇总的 `costIsComplete` 由
-   `incomplete_cost_dates` 反推 `:5045-5048`、`mcpServers` 来自本地 MCP 发现 `:5089-5096`），
-   输出路径 `run_graph_command`（`:5561-5653`：`:5584-5588` 生成、`:5597-5598` 序列化、
-   `:5600-5601` 落盘、`:5649` 无 `--output` 时打印到 stdout）。TM 侧对它只做
-   `contributions` + `summary` 的容错消费（`src/shared/collector.js:812-819`）。
-7. **shim 链路证据取自 TK 仓库的同名包源文件**：TM 工作副本没有 `node_modules`，
-   无法读取实际安装后的 `tokscale/bin.js`；`packages/tokscale/bin.js:1-2` 与
-   `packages/cli/src/index.ts:226-238` 是同一发布物的源文件，属**一致解释**。
-8. **所有结论均为静态分析**：未运行 TM/TK 任何二进制，未实测任何 JSON 输出、缓存文件与
-   归档数据库；涉及「运行时实际写出什么」的字段（如 `codex-local-usage.sqlite` 的表结构）以
-   代码中的建表语句为准。
-9. **SQLite 只读打开口径**：TK 统一 `READ_ONLY | NO_MUTEX`（`sessions/utils.rs:301-306`），
-   不写 `journal_mode`；WAL 侧车文件仍会被只读回放（`sessions/cherrystudio.rs:647-651` 注释），
-   少数解析器额外设 `busy_timeout`/`query_only`。对「读会不会扰动来源库」这一点，代码层面是
-   只读的，但对 WAL 副作用没有实测。
-10. **`crates/tokscale-core/src/token_monitor/js.rs` 不是 JS 引擎（已验证）**：模块头注释即
-    自述这是「ports of Token Monitor's JavaScript adapters」共用的值强制层（`:1-6`）；实现是
-    JS 弱类型语义的 Rust 复刻——`MAX_SAFE_INTEGER` 上界（`:14`）、`Date` 上界（`:17`）、
+**实证环境与隔离方式**：全部命令在临时根目录
+`C:\Users\admin\AppData\Local\Temp\tm-research\empirical\` 内执行。被验证的二进制是 release tag
+`token-monitor-fa5f0c13` 的 `tokscale-win32-x64.exe`（26,491,904 字节），其 sha256 与实际下载
+文件、manifest 声明、Release `SHA256SUMS` 三方一致
+（`5887f4fae41d5ae4ca684c4a50af96dff9b633fbf9942cd827eca9736765d97a`），tag 也解引用到 manifest
+记录的同一 commit。每次调用前注入 `TOKSCALE_CONFIG_DIR`（配置与 `cache\` 全部落在临时目录）、
+`TOKSCALE_PRICING_CACHE_ONLY=1`，把 `HOME`/`USERPROFILE` 重定向到临时 home，并删除 `DSH_HOME`、
+`CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`GEMINI_CLI_HOME`、`XDG_DATA_HOME`、`TOKSCALE_EXTRA_DIRS`
+等 21 个 ambient 变量；扫描类命令一律显式带 `--home <临时 home>`；fixture 全部手工合成，不含
+任何真实会话内容。
+
+**隔离偏差（如实记录）**：执行 `clients` 的一次调用没有带 `--home`，进程内 ambient 的
+`DSH_HOME=C:\Users\admin\.dsh` 生效，该命令列出了真实 `C:\Users\admin\.dsh\sessions` 的路径并
+显示 `messages: 13.3K` 计数。这只是一次路径存在性加消息计数的读取，没有读到任何会话内容；
+发现后立即清除该类变量（含全部 `*_HOME`），其后所有命令（含实验 7、8）均未再触达真实目录。
+复现该环境时必须保持这些变量被清除，否则 `clients` 与不带 `--home` 的扫描仍会读到真实 profile。
+
+### 9.1 已实证（第 1 至 9 条）
+
+1. **未知 `--client` 的判据成立，两段判据都不可省（实证）**。执行
+   `--client definitely-not-a-client --today` 得 `exit 2`，stderr 首行为
+   `error: invalid value 'definitely-not-a-client' for '--client <CLIENTS>'`，stdout 全空，
+   TM 的「exit 2 且 stderr 命中 `/--client/i`」合取判据（`src/shared/collector.js:474-478`，常量
+   与注释 `:316-318`）因此成立。但 `--not-a-flag-at-all` 同样 `exit 2` 而 stderr 不含 `--client`
+   （首行是 `error: unexpected argument '--not-a-flag-at-all' found`，其后为 usage 与 `--help`
+   提示两行），证明 exit 2 是 clap 的通用参数错误码（TM 注释 `:446-450` 判断正确），只看退出码
+   会把无关的参数错误误判成「未知 client」。
+   坏 `--group-by` 走**应用层** `GroupBy::from_str`：文本由
+   `crates/tokscale-core/src/lib.rs:256-259` 产出，CLI 在
+   `crates/tokscale-cli/src/main.rs:683-686` 打印 `Error: <文本>` 后 `std::process::exit(1)`，
+   实测**退出码 1**（不是 2）。因此 TM 对 group-by 只匹配文本、不匹配退出码
+   （`collector.js:467-472`）是必要写法；「坏参数一律 exit 2」在此被推翻。探测与重试链路见 §3.1。
+2. **`--version` 不暴露 fork 身份（实证）**。输出为 `tokscale 4.18.0`，与 manifest `baseVersion`
+   一致；只有基线版本号，不含 fork/commit 标识，无法用它区分 fork 与上游同版本构建。资产
+   sha256 三方一致见本节导语。
+3. **`--client` 可用值实为 58 项（实证 + 源码）**。`--help` 的 `[possible values]` 与未知 client
+   的 stderr 列表逐项有序相同（58 = 58，输出为 UTF-8 无 BOM）。构成是 core 的 56 个 `ClientId`
+   （`crates/tokscale-core/src/clients.rs:320-1106`，`ClientId::COUNT == 56` 断言在 `:1218-1221`）
+   加 CLI 层独有的两项：`9router`（`main.rs:1119-1120` 的 `#[value(name = "9router")]`，`:1263`
+   把它映射到 `ClientId::Gjc`，是筛选别名）与 `synthetic`（`main.rs:1158` 声明、`:1224` 给出
+   `"synthetic"` 值映射的 meta-client，`:1293` 没有对应 `ClientId`，扫描期 opt-in，默认集
+   `main.rs:1388-1394` 排除两者）。fork 独有的
+   `proma`/`catpaw`/`qodercn` 一个都不在 help 里；TM 自己的 catalog 是另一张 36 项的表
+   （`src/shared/clientCatalog.js:50-95`，含这三个 `forkOnly: true` 项），所以发现 fork-only
+   客户端不能靠解析 help。
+4. **Claude fixture 端到端（实证 + 源码）**。合成 JSONL（1 条 user、2 条 assistant）扫描结果：
+   `input=1500`、`output=300`、`cacheRead=3000`、`cacheWrite=7000`（写入的 1 小时子集 4000 计入
+   总数）、`reasoning=0`、`messageCount=2`、`provider=anthropic`，顶层 `total*` 与 entries 一致；
+   `--group-by client,session,model` 下 `sessions[]` 的键为 camelCase
+   `client`/`sessionId`/`firstActiveMs`/`lastActiveMs`。输出 JSON 全文**没有** `cacheWrite1h` 键
+   （core 的 `TokenBreakdown` 有该字段，`--json` 不导出）。会话身份取**文件名 stem**：文件
+   `session-1111.jsonl` 内部 `sessionId` 写 UUID 时输出仍是 `session-1111`，另一文件内部写
+   `internal-only-zzz`、输出仍是文件名 UUID，与 `sessions/claudecode.rs:444-448` 的
+   `path.file_stem()` 一致（只有子代理回放分支改用 parent id）。TK 的 Claude 去重键是
+   `"<message.id>:<requestId>"`（`claudecode.rs:632-636`），而会话身份来自文件名，所以重命名文件
+   即换身份。
+5. **自定义价格的换算、优先级与 1 小时档（实证 + 源码）**。写入 `<config>/custom-pricing.json`
+   （键名取自 `crates/tokscale-core/src/pricing/custom.rs:39-72`）后，`pricing <model> --json`
+   返回 `source: Custom`、`inputCostPerToken = 1.0`，即「每百万价 ÷ 1e6」精确成立；同一 fixture
+   扫描得 `cost = 43100.0`，与手算（1500×1 + 300×2 + 3000×3 + 3000×4 + 4000×5）逐位相同，说明
+   1 小时档独立计价且仍并入 `cacheWrite` 输出。移除该文件后回落到 `source: LiteLLM`、
+   `cost = 0.04515`，反解出的 1 小时档价 6e-6 与 `cache/pricing-litellm.json` 里该模型的
+   `cache_creation_input_token_cost_above_1hr` 逐位一致（5 分钟档 3.75e-6）。此时 `cache\` 已由
+   先前的 `pricing` 调用落盘三份目录源快照，所以这是「自定义价优先于目录源」的直接证据（优先级
+   判定在查找顺序上：`pricing/mod.rs:559-563` 未强制来源时先查 `lookup_custom`、命中即返回；
+   `custom.rs:76-88` 只是条目到 `ModelPricing` 的换算，不是判定点）。`pricing` 子命令的返回体
+   只暴露 4 个价字段，1 小时档价只能由扫描结果反推。
+6. **`.jsonl.zst` 能被正常发现并解压解析（实证）**。Codex 风格 `.jsonl.zst`（277 字节）扫描成功：
+   `input=800`（Codex 口径的 `input_tokens − cached_input_tokens`）、`cacheRead=200`、`output=50`、
+   `messageCount=1`、`cost > 0`（价格缓存已在场）。解压实现见第 10 条。
+7. **无价源时 `cost=0` 且不报错（实证）**。空 config 加 `TOKSCALE_PRICING_CACHE_ONLY=1` 时扫描仍
+   成功（exit 0），`cost`/`totalCost` 记 `0.0`，stdout 无告警；同一 fixture 一旦有价格缓存立刻
+   变成 0.04515。上层不能把 `cost=0` 读作「免费」，只能读作「未知」。
+8. **`TOKSCALE_PRICING_CACHE_ONLY=1` 只约束本地解析路径（实证 + 源码）**。空 config 下扫描不抓价、
+   不落价格文件，与 `lib.rs:5896-5902`（命中该变量即改走 `load_cached_any_age()`）一致。但
+   `pricing` 子命令**不受该开关约束**：空 config 加该变量为 1 时仍联网抓取并写入
+   `cache\pricing-litellm.json`（2.7 MB）、`pricing-models-dev.json`（6.9 MB）、
+   `pricing-openrouter.json`（257 KB），然后返回 `source: LiteLLM`。任何「离线/隔离」假设只要
+   包含 `pricing` 调用就不成立。
+9. **只读扫描不改动 `.db` 与 `-wal`，但会重写 `-shm`（实证 + 源码）**。Zed 的 WAL 库
+   （`wal_autocheckpoint=0`，写入 1 行后保持连接不 checkpoint）在扫描前后做同进程快照：
+   `threads.db` 与 `threads.db-wal` 的 size/mtime_ns/sha256 三者全同（未 checkpoint、未追加、
+   未截断），`threads.db-shm` 的 sha256 变化（`f8677332…` 变 `c8b41a24…`）而 size/mtime_ns 不变；
+   不扫描的对照组三者全不变，证明 `-shm` 改写由本次读取引起。代码侧只保证扫描层不吃侧车文件
+   （`scanner.rs:676-679` 排除 `.db-wal`/`.db-shm`/`.db-journal`），只读打开会按 SQLite 语义回放
+   `-wal`（`sessions/cherrystudio.rs:647-651` 注释）。判「来源未变」时，对 `.db` 与 `-wal` 用
+   size+mtime 或内容哈希都安全，对 `-shm` 用内容哈希会在每次扫描后误判为「已变」。附带实测：
+   扫描会写 TK 自己的配置目录缓存（`cache\source-message-cache-v2\<client>\shard-*.bin` 与空
+   锁文件）；只读原则覆盖的是各 agent 的来源目录，不是 TK 自己的 config 目录。
+
+### 9.2 已由源码定论（第 10 至 19 条）
+
+10. **Codex 的 `.zst` 与 compaction 机制（精化原第 4 条）**。`.zst` 是整文件压缩，解压在
+    `parse_codex_file_incremental` 内联完成（`crates/tokscale-core/src/sessions/codex.rs:1498-1559`），
+    不是逐帧、也不是独立模块。两道硬上限：zstd 解压窗口 ≤ 2^26
+    （`decoder.window_log_max(26)`，`:1539`），解码后字节数 ≤ 256 MiB（`MAX_ARCHIVE_BYTES`，
+    `sessions/utils.rs:544-545`，配 `take(MAX_ARCHIVE_BYTES + 1)` 探测越界，`codex.rs:1551`）；
+    超限或解析未完成即清空全部结果（`:1553-1557`），是丢弃而不是截断；`File::open`、
+    `Decoder::new`、`window_log_max` 三种失败都退化为「空结果 + `parse_succeeded: false` + warn」
+    （`:1510-1549`），不 panic、不重试。**`.zst` 不支持增量续读**：非零 `start_offset` 直接返回
+    失败（`:1499-1508`），因为分支内 `consumed_offset` 是解码流偏移，与压缩文件偏移不是同一
+    坐标，解析器选择拒绝而不是换算，`.zst` 因此只能整文件重解析。compaction 没有专门的事件分支：
+    `(?i)compact` 在 `codex.rs` 只命中注释与一个测试名（`:883`、`:915`、`:997`、`:4279` 注释，
+    `:4039` 测试名）。防重复计数靠「增量源选择 + 回退分档 + 基线不推进」三件事：`last_token_usage`
+    是唯一增量源、`total_token_usage` 降级为基线校验（`:914-919`）；`total == previous` 直接跳过
+    （`:958-960`）；小回退（`current×100 ≥ previous×98` 或 `current + 2×last ≥ previous`，
+    `:236-251`）判为乱序陈旧快照并跳过，避免把 `last` 重复计两次；大回退把 `last` 计为本次增量、
+    把回退后的 total 设为新基线（`:961-966`）；零快照跳过且不推进基线（`:996-1004`）；首个事件
+    即带 total 时也只用 `last`（`:968-970`）。另需与 TM 自己的
+    `src/shared/providers/codex/transcript.js:7-13` 多帧解压实现区分（32 MiB 输入 / 64 MiB 解码 /
+    4096 帧上限），它与 TK 的 `.zst` 不是同一条链路。
+11. **Antigravity 没有 ledger，跨 surface 去重靠 responseId 家族级（精化原第 5 条）**。
+    `sessions/antigravity*.rs` 与 `src/token_monitor/` 检索 `ledger|reconcil` 零命中；ledger 对账
+    只属于 Amp（`sessions/amp.rs:125` 的 `parse_amp_ledger_records`、`:218` 的
+    `find_matching_ledger_record`、`:243` 的 `merge_amp_records`，对账循环 `:302-338`）。用量来自
+    三条物理通道、各有独立 client id：IDE 腿吃 RPC 同步落下的 JSONL 缓存（`clients.rs:619-628`，
+    `relative: antigravity-cache/sessions`），CLI 腿与 IDE 扩展腿直读各自的 `conversations/*.db`
+    （`clients.rs:738-756`、`:1091-1105`），两条 DB 腿共用同一解析器，读数是
+    `SELECT idx, data FROM gen_metadata`（SQL 在 `antigravity_cli.rs:113`；模块头与解析入口见
+    `:1-14`、`:84-92`）里的 protobuf wire 字段。跨 surface 去重是两半互补：有 `responseId` 的行
+    走家族级去重（`lib.rs:7362-7395`；缺 ID 的行不合并，注释理由是「token 数与时间相同不足以
+    证明是同一次调用」）；缺 `responseId` 时靠
+    TM「一个 custom root 只交给一个解析器」的交付策略（`src/shared/tokscaleClientMapping.js:8-13`，
+    `customScanIds: ['antigravity', 'antigravity-cli']`）。
+12. **SQLite 只读口径修正（精化原第 9 条）**。「TK 统一 `READ_ONLY | NO_MUTEX`」的准确范围是
+    **core 侧来源库解析**：唯一 opener 在 `sessions/utils.rs:296-306`（`Connection::open_with_flags`
+    在生产码仅此一处），`sqlite_for_each_row`（`:477-498`）等调用点全部复用它。需要列出的例外：
+    `wiki.rs:94-96`（自家库，可创建、可写、显式设 WAL）；`crates/tokscale-cli/src/cursor.rs:417-425`
+    （独立的 URI 只读 opener，注释明说**刻意不带** `NO_MUTEX`）；`token_monitor/catpaw.rs:386-390`
+    （只读 opener 之上追加 `busy_timeout(3s)` 与 `PRAGMA query_only=ON`）；
+    `sessions/antigravity_cli.rs:88-92`（`busy_timeout(100ms)` 加显式 `BEGIN`）、
+    `sessions/openclaw.rs:624`（`busy_timeout` 常量）、`sessions/micode.rs:475-483`
+    （`BEGIN DEFERRED`）。`journal_mode` 的写入除 wiki 自家库外全部落在测试段或测试文件；全仓没有
+    SQL `ATTACH`。WAL 回放与 `-shm` 副作用见第 9 条。
+13. **`cost_source` 恢复路径精化（精化原第 13 条）**。`recovered-usage-v1.json` 是本机灾难恢复
+    overlay，触发面很窄：文件存在、`TOKSCALE_RECOVERY_DISABLE` 未设（`recovery.rs:19-24`），且
+    文件内 `version == 1`、`home` 与本机一致（`applicable()` `:94-109`）。它只把**日兜底行**的
+    `cost_source` 改写为 `Estimated`（`:487`），同时覆写 `agent`（`:489`）、
+    `session_id = dedup_key`（`:493`、`:495`）、`timestamp = 0`（`:498`）；**请求级恢复行不改
+    `cost_source`**，只加 `local-recovery:` 前缀并把 `agent` 写成 `Recovered request archive`
+    （`:390-392`）。因此仅凭 `cost_source == Estimated` 无法与正常计价区分，判定要用结构标记
+    `recovery::is_daily`（要求 `session_id == dedup_key` 且键以 `local-recovery:daily:` 开头，
+    `:51-58`，注释解释了为什么不能只做朴素前缀判断）。日兜底行只在 native 合计低于台账 floor
+    时才生成（`gap = (target - current).max(0)`，`:443-446`），所以「overlay 生效」不等于「一定
+    有兜底行」。生产码没有该文件的写入者：该文件名的读取只有 `recovery.rs:20` 一处，其余命中都
+    在说明文档与测试里（`README.md:1046`/`:2090` 与各语种译本的同段、`lib.rs:5531` 的注释、
+    `cli_tests.rs:2005`/`:2039`），唯一构造它的是测试辅助 `cli_tests.rs:2005-2043`；提交与
+    「本机是否已上报」路径明确不看 overlay（`lib.rs:5527-5535`），`Lenient` 模式遇到可用 overlay
+    时改走非流式收集（`:5061-5076`），TUI 用 `is_daily` 区别对待
+    （`crates/tokscale-cli/src/tui/data/mod.rs:833`、`:1196`、`:1285`）。
+14. **03 报告 8 条推断的处置（精化原第 12 条）**。6 条可定论。`trae` 在 TM 侧未启用：36 项
+    catalog 无 trae、`clientSources.js` 检索 `trae` 零命中、README 只给它额度列不给用量列；但
+    TK 侧有完整通道且默认会扫：`clients.rs:649-658` 注册 `root: PathRoot::Config` 加
+    `trae-cache/sessions/*.json`、`parse_local: true`，缓存由 CLI 自建
+    （`crates/tokscale-cli/src/trae.rs:126-129`），`main.rs:1115-1116` 是合法 `--client trae`，
+    默认全量走 `ClientId::ALL` 加 `synthetic`（`lib.rs:5044-5051`），而 `scanner.rs:1998-2029`
+    的特殊跳过表不含 Trae。Hermes、Devin、Zed、Reasonix、Kiro 的 Windows 兜底在 TK 全部找到
+    实现（`scanner.rs:1131-1167`、`:1546-1562`、`:2613-2646`、`:2758-2770`、`clients.rs:101-129`）。
+    openclaw 三个历史拼写确实会被扫（`scanner.rs:2382-2392`，`clients` 命令输出同样列出，
+    `main.rs:4502-4508`）。qoder、zaiteam、thirdparty 全走网络、没有本地库读取分支（只有
+    env/settings 与 HTTP 端点）。micode 与 micode-desktop 是同库两身份，按 `session.version` 的
+    `desktop-` 前缀拆分（`sessions/micode.rs:26-38`、`clients.rs:728-737`、`:1060-1075`），TM 侧
+    同步点为 `tokscaleClientMapping.js:26-29`。仍存疑三点：`providers/antigravity/probe.js`
+    （996 行）只拆读到 `:123`，额度端点、CSRF 与端口探测段未亲读；`providers/cursor/auth.js`
+    （422 行）只确认 spawn 形状（`:202` 的 `[...prefixArgs, 'cursor', ...args]`）与两个调用点
+    （`:396` 的 `sync --json`、`:404` 的 `status`），其余调用点未穷举；
+    `micode`/`micode-desktop`/`antigravity-cli`/`antigravity-extension` 等 id 的跨仓同步是
+    **版本契约**，本 pin 上一致，但静态分析无法排除上游未来漂移（TM 侧的防护是
+    `tokscaleClientMapping.js` 单点同步）。
+15. **「bundled」措辞与打包数据无关（保留原第 2 条）**：`crates/tokscale-core/src/lib.rs:5708`
+    的「bundled LiteLLM dataset」是描述运行时那套 LiteLLM 数据的注释措辞；
+    `crates/tokscale-core/src/pricing/mod.rs:470` 的「custom and bundled pricing」指的是**编译期
+    硬编码兜底表**（Cursor `:123`、Sakana `:227`、archive `:285`，加 `self_hosted.rs:7`）。生产
+    路径确实没有打包数据集：全仓 `include_str!` / `include_bytes!` 仅 4 处且全在测试/fixture
+    （`pricing/mod.rs:770` 在 `#[cfg(test)]` 内、`sessions/codex.rs:1844`/`:1846`、
+    `crates/tokscale-core/tests/anthropic_catalog.rs:31`），`tokscale-core` 无 `build.rs`，唯一构建
+    脚本 `crates/tokscale-cli/build.rs` 只处理 macOS `apple-fm` 动态库。结论：**已验证**「无编译期
+    价格数据集」，不必为「构建特性注入数据」保留余地。
+16. **Claude 的 5 分钟缓存写档在计价层显式成立（保留原第 3 条）**：解析层只取 1 小时子集
+    （`sessions/utils.rs:738-744` 的 `cache_write_1h_raw()` 读 `ephemeral_1h_input_tokens`，经
+    `:730` 的 `min(cache_write)` 截断；全仓检索 `ephemeral_5m_input_tokens` 只命中
+    `claudecode.rs:2016` 起的测试 fixture，生产代码不读它）。计价层按差额还原两档：
+    `pricing/lookup.rs:2341-2342` 算 `cache_write_5m = cache_write − cache_write_1h`，
+    `cache_write_1h` 先被 `min` 截断到不超过 `cache_write`，再各自分档计价后相加（`:2431-2459`，
+    求和 `:2461`）。即 `cache_write` 桶是「5 分钟档 + 1 小时档」的合计，1 小时桶是其子集。
+17. **`graph` 子命令的完整输出形状已逐字段核对（保留原第 6 条）**：13 个 `serde::Serialize`
+    结构全在 `main.rs:4851-4992`，除 `DateRange`（`:4897-4901`）外都带
+    `rename_all = "camelCase"`。顶层 `TsTokenContributionData`（`:4975-4992`：`meta`/`summary`/
+    `years`/`contributions` 必填，`device`/`scanScope`/`timeMetrics`/`mcpServers`/`provenance`
+    走 `skip_serializing_if` 可省），子结构 `TsTokenBreakdown`（`:4851-4859`）、
+    `TsSourceContribution`（`:4861-4871`）、`TsDailyTotals`（`:4873-4883`）、
+    `TsDailyContribution`（`:4885-4895`）、`DateRange`（`:4897-4901`）、`TsYearSummary`
+    （`:4903-4910`）、`TsDataSummary`（`:4912-4923`）、`TsExportMeta`（`:4925-4931`）、
+    `TsSubmitDevice`（`:4933-4939`）、`TsTimeMetrics`（`:4941-4948`）、`TsScanScope`（`:4957-4962`）、
+    `TsSubmissionProvenance`（`:4964-4973`）；组装在 `to_ts_token_contribution_data`
+    （`:4994-5099`：日汇总的 `costIsComplete` 由 `incomplete_cost_dates` 反推 `:5045-5048`、
+    `mcpServers` 来自本地 MCP 发现 `:5089-5096`），输出路径 `run_graph_command`
+    （`:5561-5653`：`:5584-5588` 生成、`:5597-5598` 序列化、`:5600-5601` 落盘、`:5649` 无
+    `--output` 时打印到 stdout）。TM 侧对它只做 `contributions` + `summary` 的容错消费
+    （`src/shared/collector.js:812-819`）。
+18. **`crates/tokscale-core/src/token_monitor/js.rs` 不是 JS 引擎（保留原第 10 条）**：模块头注释
+    即自述这是「ports of Token Monitor's JavaScript adapters」共用的值强制层（`:1-6`）；实现是
+    JS 弱类型语义的 Rust 复刻：`MAX_SAFE_INTEGER` 上界（`:14`）、`Date` 上界（`:17`）、
     truthiness（`:20-28`）、`a || b || …` 取首个真值（`:31-35`）、
-    `sha256(path.normalize(path)).slice(0, 12)` 的 session 命名空间（`:158-162`），用于复现
-    TM 侧既有解析行为与既有 session id。
-11. **扫描并发上限已定论：`min(可用核数, 4)`，拿不到核数时回退 2（已收敛为确定结论）**：
-    常量与理由在 `scanner.rs:1985-1989`（目录遍历阻塞在文件系统上，超过少数线程只会停摆争用），
-    使用点 `:2915-2920` 为 `available_parallelism().map_or(2, |cores| cores.get().min(SCAN_WORKER_CEILING))`，
-    并据此建 rayon 线程池；池构建失败时退回全局池（`:2923-2926`，只多争用、不影响结果）。
-    运行环境只影响「核数」，4 这个上限本身是常量。
-12. **03 报告中的少量路径映射属推断**（例如某些 Windows 兜底根、`trae` 是否真正启用用量），
-    已在对应报告的存疑节列出；本文只采纳其中可由代码常量直接支撑的部分。
-13. **`cost_source` 还有一条非定价的改写路径**：缓存恢复路径会把成本重新标记为 `Estimated`
-    （`crates/tokscale-core/src/recovery.rs:487` 附近），因此比对 `cost_source` 时要把该路径排除在外，
-    否则会把「恢复出来的估算值」误判成正常计价结果。
+    `sha256(path.normalize(path)).slice(0, 12)` 的 session 命名空间（`:158-166`，取 6 字节即 12 个
+    十六进制字符），用于复现 TM 侧既有解析行为与既有 session id。
+19. **扫描并发上限已定论：`min(可用核数, 4)`（保留原第 11 条）**：常量与理由在
+    `scanner.rs:1985-1989`（目录遍历阻塞在文件系统上，超过少数线程只会停摆争用），使用点
+    `:2915-2916` 为 `available_parallelism().map_or(2, |cores| cores.get().min(SCAN_WORKER_CEILING))`，
+    并据此建 rayon 线程池；池构建失败时退回全局池（`:2922-2926`，只多争用、不影响结果）。运行
+    环境只影响「核数」，4 这个上限本身是常量。
+
+### 9.3 仍存在的边界（第 20 至 22 条）
+
+20. **shim 链路只有 TK 仓库的同源文件为证（保留原第 7 条）**：TM 工作副本没有 `node_modules`
+    （也没有 `packages/` 目录），无法读取实际安装后的 `tokscale/bin.js`；
+    `packages/tokscale/bin.js:1-2` 与 `packages/cli/src/index.ts:226-238` 只是同一发布物的源文件，
+    这条链路属**一致解释**，不是实测。这条边界的性质是「安装产物不可读」，与第 21 条的
+    「运行未启动」不是同一件事。
+21. **TM 本体（Electron 应用）没有真正跑起来（更新原第 8 条）**：TK 侧已覆盖到二进制与源码两个
+    层面，TM 侧仍只有源码证据。未启动 Electron 应用，因此采集 tick 的 IPC、渲染层行为、归档写盘
+    （会话 SQLite、客户端/日历史 JSON）、self-sync 的实际落盘，以及 `clients` 之外的运行时发现
+    路径都还没有实测；涉及「运行时实际写出什么」的字段（如 `codex-local-usage.sqlite` 的表结构）
+    仍以代码中的建表语句为准。
+22. **实证覆盖面的明确缺口（新增）**：未实测 `9router` 与 `synthetic` 的扫描语义差异（两者在 help
+    里是独立值，`9router` 是 `gjc` 的筛选别名、`synthetic` 是 opt-in 后处理，但没有对照跑）；
+    `-shm` 改写只在 Zed 一个 WAL 库上复现过，其它 client 与 `journal_mode=DELETE` 的库未重复
+    实验；`sessions[]` 的 `title`/`parentSessionId` 与 `workspaces[]` 的键名未实测（fixture 没有
+    标题与父子关系，也没触发 workspace 分组）；`--since`/`--until` 的边界语义未单独实测（只跑了
+    `--today`，按本机分桶时区命中）；release 的另外 8 个平台资产未下载校验；压缩型来源只构造了
+    Codex 的 `.jsonl.zst`；SQLite 类来源只实测了 Zed 一个 client。
+
+### 9.4 复核方式
+
+第一层 9 条来自隔离环境真实执行 pin 二进制（命令与输出留痕在
+`C:\Users\admin\AppData\Local\Temp\tm-research\findings\empirical-1.md`），并与源码行逐一对照；
+第二层为源码直读：第 10 至 14 条另经一轮独立源码复核（同目录 `source-recheck-1.md`，逐条核到
+行）；第 15 至 19 条中，第 15、17、19 条属该报告的抽查范围，第 16、18 条另经补核，五条引用行均
+未发现偏移；第三层是显式列出的未覆盖面，不下结论。
+三层之间未发现冲突；若未来出现冲突，以可复现的实证结果为准。
 
 ## 10. 与 TokenScope 的对照要点
 
