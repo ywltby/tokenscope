@@ -206,3 +206,118 @@ enabled = true
 ## 9. 同分支的独立维护提交
 
 用户要求将主工作区已有的 `frontend/scripts/native-acceptance.mjs` 未提交改动带到本分支，**单独 commit**：输出路径绝对化、验收日志目录使用显式递归拷贝。该提交是已有验收脚本维护，不代表本计划任何功能已实施；本计划文档另行提交。原工作区文件保留，避免覆盖其他工作。
+
+## 10. 追加：单一 Cargo Workspace 与旧 CLI 构建补丁清理
+
+> 2026-10-15 用户要求：在 `docs/source-discovery-plan` 分支、同一计划内设计全部迁移步骤，不另开分支。W01–W07 仅规划，尚未实施。建议先完成 W01–W06，再执行 S01–S06；S07 与 W07 合并交付。若来源功能已开工，先记录实际基线，禁止覆盖其他工作。
+
+### 10.1 已核实的现状与目标
+
+- 根 crate `tokenscope` 是库，根 `src/main.rs` 已不存在；桌面 package 为 `tokenscope-app`，唯一应用二进制为 `tokenscope.exe`。保留二进制名称和应用标识，不影响安装升级。
+- 根 manifest 仍以旧 CLI 同名为理由 `exclude = ["src-tauri"]`，壳 manifest 仍声明独立 `[workspace]`，相关注释已过时。
+- 根锁文件中的全部包身份（name/version/source）均已存在于当前壳锁文件；实施时须重新核实，以最新内容为准。可优先使用包含完整依赖图的壳锁文件作为统一锁候选，再由 Cargo 验证，不能手工拼接锁文件。
+- 目标为一个 workspace、一个根 `Cargo.lock`、默认一个根 `target/`；同一依赖在相同构建条件下复用。不同 profile、features、目标平台以及 host/build 依赖仍可能分别构建，不承诺全部消除重复编译或节省固定比例空间。
+- “两个 target 共约 76GB”尚未实测。清理前记录真实大小、路径和链接关系，区分实际目录、junction 与共享 worktree 缓存，不能把逻辑路径大小直接相加。
+
+### 10.2 目标配置与不变量
+
+根目录继续保留 `[package]`，不搬迁源码、不改包名，添加：
+
+```toml
+[workspace]
+members = [".", "src-tauri"]
+default-members = [".", "src-tauri"]
+resolver = "3"
+```
+
+删除根 exclude 和壳独立 workspace。`default-members` 明确根目录普通 build/test 覆盖两个 package；只查核心库使用 `cargo test -p tokenscope`，只构建 GUI 使用 `cargo build -p tokenscope-app --bin tokenscope`。CI 仍显式使用 `--workspace`，不依赖工作目录的默认选择。
+
+把共同使用的 `anyhow`、`serde`、`serde_json`、`log`、`jiff` 等依赖声明集中到 `[workspace.dependencies]`，成员以 `workspace = true` 继承。版本约束选择满足现有两侧要求且不改变锁定版本的交集；各成员需要的 features 继续显式保留。根库 dev-dependency 与普通 dependency 的共享项也检查一致性。仅壳使用的 Tauri/plugin 依赖留在壳中，不为追求统一机械上移全部依赖。
+
+本轮保留两包各自显式 package version，以兼容既有版本工具与历史提交读取；不顺带引入 `workspace.package` 版本继承。统一锁必须恰好包含两个无 source 的本地包、版本与四份应用配置一致。第三方版本、checksum、source 不应漂移；必要差异必须逐项解释，不运行无范围的 `cargo update`。
+
+生产构建仍默认不含 acceptance；`tokenscope-app/acceptance` 继续透传根库 feature。验证全 workspace acceptance 覆盖两个 package，正常发布构建显式不带验收 feature，不能用验收包作为发布包。
+
+### W01：基线、失败契约与路径清单
+
+1. 读取当前 Git 状态、锁文件、Cargo/Tauri 配置、环境 `CARGO_TARGET_DIR`、用户/项目 Cargo target-dir 配置；仅检查相关键，不输出无关凭证。记录当前 metadata 的 workspace_members/default_members/target_directory 与依赖版本集合。
+2. 全仓搜索 `src-tauri/target`、反斜杠形式、`path.join(..., "src-tauri", "target", ...)`、双 Cargo.lock、独立 workspace、旧 CLI 同名等引用；区分运行入口与历史证据，历史报告不伪改成新路径。
+3. 更新 `scripts/test_bump_version.py` 的合成仓库 fixture：一个根锁包含两个本地包，删掉子锁 fixture。先运行并记录旧工具因要求第二锁而失败。
+4. 补充有意义的失败用例：统一锁缺壳包、任一本地包版本错误/重复、第三方同名带 source 的包不误改；保留原子回滚、重复 bump 幂等、历史 main 基线读取测试。
+5. 检查现有工作流/发布契约覆盖位置。为真实路径接线补测试，不用单纯断言某段字符串代替实际 metadata、构建与产物验证。
+
+### W02：合并 workspace、依赖和锁文件
+
+1. 修改 `Cargo.toml`、`src-tauri/Cargo.toml`，按 10.2 配置共享依赖，删除全部旧 CLI 同名规避注释。
+2. 保存两份旧锁的比较基线，将完整壳锁内容作为根锁候选，删除受版本管理的 `src-tauri/Cargo.lock`；不删除 target。
+3. 先运行 `cargo metadata --offline --locked --format-version 1` 和 `cargo check --offline --locked --workspace`。若 Cargo 要求刷新锁，单独解析并审阅差异后重跑 locked 检查；网络确有需要时遵守项目代理约定。
+4. 核对 metadata 恰有两个成员、默认选择包含两者、target_directory 为预期根目录；使用 `cargo tree --workspace -d` 分析剩余重复版本，不强制消灭合法的多版本依赖。
+5. 对比最终锁与迁移前完整壳锁的第三方包版本/source/checksum，解释任何差异。运行根库和壳定向测试，确认无循环依赖。
+
+### W03：版本工具迁移为单锁契约
+
+1. 修改 `scripts/bump_version.py`：LOCKS 仅根锁；`validate_locks` 不再按锁索引决定包集合，必须验证两个本地包。
+2. 同步 `scripts/test_bump_version.py`：四配置＋一锁＋声明原子更新；测试命名不再声称六个版本文件。保留历史双工程提交作为 base-ref 的读取兼容，因为读取的是四配置而非历史锁数量。
+3. 在临时 Git fixture 运行 bump/check/失败回滚，证明只改本地包版本、无子锁生成、第三方依赖不漂移。
+4. 运行 `python -B -m unittest discover -s scripts -p "test_bump_version.py" -v` 与 `test_release_metadata.py`，要求全部通过。草稿阶段不执行产品版本递增。
+
+### W04：产物路径与构建命令统一
+
+逐项修改并验证：
+
+| 文件 | 处理 |
+| --- | --- |
+| `frontend/scripts/native-acceptance.mjs` | EXE_DEFAULT 改根 `target/release/tokenscope.exe`；保留 c16e023 的输出路径及日志复制修复 |
+| `.github/workflows/ui-e2e.yml` | 明确 GUI package、release、acceptance/custom-protocol；构建位置与脚本默认路径一致 |
+| `.github/workflows/release.yml` | NSIS 与 exe 收集改根 `target/x86_64-pc-windows-msvc/release/...`，保留显式目标三元组 |
+| `.github/workflows/install-test.yml` | 与 Release 使用同一产物路径规则，仍校验将发布的同一安装包 |
+| `scripts/release_assets.py` 及测试 | 核对是否已有路径无关接口；无需改的实现不改，只同步确有旧路径的调用和 fixture |
+| `.gitignore` | 保留所有层级 target 忽略，可规范为 `target/`；不缩成仅根 `/target` |
+
+不要假设所有构建都带三元组：不带 `--target` 的原生验收路径与显式 target 的发布路径分别取证。若用户显式设置 CARGO_TARGET_DIR，支持现有 exe 参数覆盖，不静默忽略用户配置；标准 CI 验证无覆盖时根 target 行为。
+
+### W05：去掉重复门禁和缓存映射
+
+1. `.githooks/pre-commit` 合并为一次 workspace fmt/clippy/test，保留前端门禁；Cargo 检查使用 `--locked`，不漏掉壳测试。
+2. `.github/actions/checks/action.yml` 保留普通、acceptance 两套 workspace clippy/test，删除重复壳轮次；fmt 只执行一次 `--all`。保留全部 Python、PowerShell、前端与 E2E 门禁。
+3. `.github/actions/setup/action.yml` Rust cache 只配置 `. -> target`；迁移时增加缓存键版本以免恢复旧布局。保留各 job 区分，不能把不同构建场景视作同一完整缓存。
+4. 检查 `ci.yml`、`install-test.yml`、`ui-e2e.yml` 的 paths 过滤是否覆盖改动入口，避免“改了构建配置却跳过验收”。
+5. 本地验证命令：`cargo fmt --all -- --check`、`cargo clippy --locked --workspace --all-targets -- -D warnings`、`cargo test --locked --workspace`；再分别以 `--features acceptance` 跑 clippy/test。
+6. 验证根目录普通 `cargo test --locked` 确实选择两个默认成员；不再反复跑第二套独立 manifest 门禁。
+
+### W06：构建与缓存隔离验收，最后处理旧 target
+
+1. 在没有旧编译产物的隔离 checkout 或一次性 Actions Runner 上运行 metadata、普通/acceptance 门禁，证明结果不依赖旧 `src-tauri/target`。
+2. 生产 `tauri build` 不带 acceptance，生成 NSIS；执行 release_assets 收集/哈希契约，确认实际 exe 与安装包路径均正确。
+3. 另行构建 acceptance 包并跑 Native UI E2E，证明隔离根仍生效且不会读取/污染用户真实数据；生产与验收产物按不同 job/工件分开记录。
+4. Actions 跑五项安装验收和两项固定旧版升级；本机禁止运行真实安装/卸载脚本。检查上传工件非空、当前 HEAD 与版本匹配，而不只看 job 成功。
+5. 记录从根和 src-tauri 发起 Cargo/Tauri 命令后都未新建子 target/子锁。更换构建入口不能回到旧布局。
+6. 新构建验证通过后再清理旧 target：先核实绝对路径处于仓库内、是否为链接、是否被运行中的 TokenScope 或其他构建/worktree 引用。当前运行实例可能来自旧 debug exe，不能直接删除其目录。
+7. 不把两套 target 文件复制拼接；不为迁移先清空根 target。对可安全清理的旧目录执行单一 PowerShell 文件操作；仍被使用则登记待清理路径与原因，不强杀用户实例。清理后记录实际回收空间。
+
+### W07：规约、版本与同分支交付
+
+- 更新 `CLAUDE.md` 的 workspace、命令、提交钩子、单锁版本规约；检查 README、开发/发布说明中的当前构建步骤。历史审核证据中的旧产物路径保留并注明历史上下文，不重写旧成功记录。
+- 本计划 S04/S07 和扫描反馈计划中的“双工程分别门禁”表述，执行时改为 workspace 门禁；`--manifest-path` 本身仍合法，不把正常包选择命令误当补丁清除。
+- 目录发现、扫描反馈和构建整理分别记录完成状态与提交，均留在用户指定分支。未实施的计划不因构建整理完成而勾选。
+- 本批准备合入 main 时 fetch 最新 main，按实际范围递增一次版本：若包含来源发现功能选 minor，若仅构建维护选 patch。使用迁移后的版本工具，不手改版本、不为同一个 PR 多次递增。
+- 全部普通/acceptance 门禁、前端构建、版本/发布契约、本次 HEAD 的 CI/安装升级/Native UI E2E 通过后才报告合并就绪；不自行合并。
+
+### 10.3 进度与完成标准
+
+| 任务 | 状态 | 证据 |
+| --- | --- | --- |
+| W01 基线与失败契约 | 未开始（已做只读初步配置核查） | 尚无迁移测试 |
+| W02 单 workspace 与锁 | 未开始 | — |
+| W03 版本工具 | 未开始 | — |
+| W04 路径接线 | 未开始 | — |
+| W05 门禁与缓存 | 未开始 | — |
+| W06 构建验收与旧目录清理 | 未开始 | — |
+| W07 文档与交付 | 未开始 | — |
+
+- [ ] metadata 两个成员、正确默认成员与统一 target_directory。
+- [ ] 仅一个受版本管理的 Cargo.lock，两个本地包版本正确，第三方依赖无未解释漂移。
+- [ ] 旧 CLI 同名规避配置和当前文档说明全部清除，共享依赖 features 保持正确。
+- [ ] 钩子、CI、缓存、NSIS 收集与原生验收统一新布局；普通/acceptance 覆盖无损。
+- [ ] 生产包、验收包、固定旧版升级均取得当前提交的实跑证据。
+- [ ] 旧 target 已安全清理，或明确记录被占用/共享而暂缓；不把待清理写成已释放空间。
