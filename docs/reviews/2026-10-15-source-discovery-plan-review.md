@@ -304,3 +304,12 @@ PR1 合入后 workspace 根目录是虚拟 manifest，命令统一改为：
 
 - PR1 实施要改目录、构建和门禁，不再是纯文档改动。建议从当前分支头新建 `feat/workspace-layout`（或 `build/workspace-layout`），c16e023 和三份计划随之带入，之前的提交不用改写。这样避免再次出现“实现落在 docs 分支”的情况（控件材质那次已经发生过）。README 和 PR1 页首的分支名同步修改。
 - PR3 §4.3 已选择实现“sessions → archived_sessions 移动后复用解析进度”。这是第 5.3 节中的可选项，可以保留；如果实施时发现它会改动历史库按路径记录进度的结构，可以拆出本轮，但计划里要写明“不做”。
+
+## 12. 第 11 节修订回填（仅计划，待复审）
+
+- [x] 11.1：[PR1](../plans/active/2026-10-15-workspace-layout.md) W05a/W05c 的消费方改为包＋构建模式，普通与 acceptance 分别保留、选命令；核心与壳 Rust 改动固定跑两模式。W05b 增加分项耗时，契约明确 acceptance_csp.js 单独改动不能只跑普通壳测试。
+- [x] 11.2：清单限定 Git 跟踪文件及含跟踪文件的目录，未跟踪/生成路径及排除原因进入 QA 证据。明确两种 cargo test 模式均不带 custom-protocol；字面折叠路径后再判断仓库边界，补 Windows/UNC/越界、release 风格生成资源及 Git 跟踪边界契约。update/check 使用同一规则。
+- [x] 11.3：[PR3](../plans/active/2026-10-14-source-discovery-and-additional-paths.md) §2/§3/S07 写明旧自定义 dir 由替代变追加、默认根新增用量可能提高总量；安排同步 stats-semantics 与升级提示。S01 增加升级并集、重复请求和停用用例，完整采集断言在 S03 接通后验证。
+- [x] 11.4：采纳实施分支建议，PR1 与 README 改为开工时从当前文档分支最新提交创建 feat/workspace-layout。本轮不切分支，不改写提交。归档移动复用继续保留在 PR3 本轮范围与验收中，未静默延期。
+
+以上只表示设计已修改；未实施脚本、业务代码或测试，也未把各任务标为完成。

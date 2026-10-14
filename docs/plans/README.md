@@ -6,8 +6,8 @@
 
 ## 现在执行什么
 
-- **2026-10-15 按 1eaede7 审阅意见拆分，三份设计均待复审、未实施**：
-  - **PR1 / patch**：[Workspace 目录迁移与提交检查](active/2026-10-15-workspace-layout.md)，W01–W07，使用 docs/source-discovery-plan，含 c16e023；迁移期间协调冻结其他 Rust 开发，合入后先 rebase。
+- **2026-10-15 已按审阅第 11 节补齐设计，三份计划均未实施，修订待复审**：
+  - **PR1 / patch**：[Workspace 目录迁移与提交检查](active/2026-10-15-workspace-layout.md)，W01–W07；开工时从 docs/source-discovery-plan 最新提交创建 feat/workspace-layout，带入 c16e023 和三份计划，不改写历史；迁移期间协调冻结其他 Rust 开发，合入后先 rebase。
   - **PR2 / minor**：[真实扫描反馈](active/2026-10-15-collection-status.md)，F01–F05；PR1 合入后从最新 main 建 feat/collection-status，读取图标至少 1 秒，查询不等待动画。
   - **PR3 / minor**：[当前用户来源目录与追加路径](active/2026-10-14-source-discovery-and-additional-paths.md)，S01–S07；PR2 合入后从最新 main 建 feat/source-paths，只发现当前用户默认和 CODEX_HOME / CLAUDE_CONFIG_DIR，取消重新发现按钮。
 

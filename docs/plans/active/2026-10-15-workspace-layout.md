@@ -1,7 +1,7 @@
 # PR1：虚拟 Cargo Workspace、目录迁移与提交检查
 
-> 状态：按 [1eaede7 审阅意见](../../reviews/2026-10-15-source-discovery-plan-review.md)修订，待复审；W01–W07 未实施。设计基线 main e34495b / 0.3.1。
-> 分支使用 `docs/source-discovery-plan`，包含既有 mjs 维护提交 c16e023。仅本 PR 改目录/构建/门禁，独立 patch；合入后才从最新 main 分别启动 [PR2](2026-10-15-collection-status.md)、[PR3](2026-10-14-source-discovery-and-additional-paths.md)，不在本 PR 实施功能。
+> 状态：已按[审阅意见第 11 节](../../reviews/2026-10-15-source-discovery-plan-review.md)补齐设计，待复审；W01–W07 未实施。设计基线 main e34495b / 0.3.1。
+> 本轮计划修订留在 `docs/source-discovery-plan`；PR1 开工时从该分支最新提交创建 `feat/workspace-layout`，带入既有 mjs 维护提交 c16e023 和三份计划，不改写历史。仅本 PR 改目录/构建/门禁，独立 patch；合入后才从最新 main 分别启动 [PR2](2026-10-15-collection-status.md)、[PR3](2026-10-14-source-discovery-and-additional-paths.md)，不在本 PR 实施功能。
 
 **Goal：** 核心库迁入 crates/tokenscope-core，统一 workspace/锁/target，并根据实际构建输入选择本地检查。
 
@@ -114,9 +114,10 @@ resolver = "3"
 | 暂存区文件类别 | 最小检查集合 |
 | --- | --- |
 | 未命中构建输入清单的 `.md` 文档 | staged whitespace、UTF-8、文档格式与新增/变更本地链接；不跑 Rust/前端测试 |
-| 命中输入清单的文件（含 `.md`、`.js`、fixture） | 按全部消费方并集选择检查；壳用壳检查，核心用 workspace 检查；文档仍做文档检查 |
-| `crates/tokenscope-core/src/**`、`crates/tokenscope-core/tests/**` 的 Rust 代码/fixture | Rust 格式、workspace clippy 和 workspace 测试，覆盖壳依赖核心库的影响；迁移提交中旧根路径的删除/重命名也按核心库分类 |
-| 仅 `src-tauri/src/**` 下的全部文件 | Rust 格式、`tokenscope-app` clippy/test；含 acceptance_csp.js；涉及验收模块时加 acceptance |
+| 命中输入清单的文件（含 `.md`、`.js`、fixture） | 按全部“包＋构建模式”消费方并集选择 clippy/test；壳用壳检查，核心用 workspace 检查；default 不加 feature，acceptance 加 `--features acceptance`；文档仍做文档检查 |
+| `crates/tokenscope-core/**` 的 Rust 代码 | Rust 格式、普通和 acceptance 两种模式的 workspace clippy/test，覆盖壳依赖核心库的影响；迁移提交中旧根路径的删除/重命名也按核心库分类 |
+| `src-tauri/src/**` 的 Rust 代码 | Rust 格式、普通和 acceptance 两种模式的 `tokenscope-app` clippy/test |
+| 上述目录中的非 Rust 文件/fixture | 已登记输入按清单的包和模式选择；未登记者完整兜底。`acceptance_csp.js` 单独改动必须选中壳 acceptance 检查 |
 | `frontend/src/**`、`frontend/public/**`、前端配置及依赖清单/锁 | 前端 typecheck、format:check、test、build；包含测试读取的 public/theme-boot.js；E2E 编排并入脚本规则 |
 | `scripts/**` 的 Python/PowerShell、`frontend/scripts/**` | 明确映射的脚本语法和契约测试；共享 helper 取全部消费者契约并集，未登记脚本走完整模式，不只测试被改文件本身 |
 | Cargo manifest/锁、`build.rs`、`.cargo/**`、Rust 工具链、Tauri 配置/capabilities、`.github/**`、`.githooks/**`、检查选择器及其测试、发布声明等构建/门禁入口 | 完整模式，包含普通与 acceptance Rust 检查、前端门禁和现有相关脚本契约 |
@@ -141,33 +142,34 @@ resolver = "3"
 3. 对命令执行器使用记录参数的替身，验证选择的命令及去重、失败退出码传播、未选择的命令未运行。模拟完整检查失败时必须阻止真实临时仓库 `git commit`；纯文档提交不得启动 Cargo/pnpm。
 4. 文档校验测试包含有效/失效相对链接、删除目标、中文路径、围栏代码、历史失效链接及暂存树与工作区目标不一致，拒绝假通过和大量误报。
 5. 运行 `python -B -m unittest discover -s scripts -p "test_pre_commit_checks.py" -v` 及文档校验测试；加入 CI 完整门禁，防止选择器修改只靠自己放行。
-6. 在真实仓库分别记录文档模式和强制完整模式的命令清单与耗时；首次切换 hook 的提交必须实际跑完整模式验证，禁止以修改后的分类器自动减少自身验证。
+6. 在真实仓库分别记录文档、核心 Rust、壳 Rust 和强制完整模式的命令清单与耗时，明确两种 Rust 构建模式各自成本。核心/壳 Rust 变更均运行普通和 acceptance clippy/test；将来若缩减须先写确定的分类规则并配契约，不能按“涉及验收模块”猜测。首次切换 hook 的提交必须实际跑完整模式验证，禁止以修改后的分类器自动减少自身验证。
 7. 更新 `CLAUDE.md` 提交流程：本地按暂存区选择，未知变更/full 保守检查；PR CI 完整门禁不减。同步修改现有“任何修改提交前必须全部跑一遍”的规定，否则仅智能化 hook 仍无法减少重复工作。保留禁止 `--no-verify`、默认验证后提交推送及失败不得提交等约束。
 
 W05a/W05b 当前均未实施。完成标准：非构建输入的文档提交只运行文档检查，编译输入按消费者检查，核心库变更仍覆盖壳，混合变更不漏检，未知路径/失败/部分暂存不能静默绕过，当前 PR CI 仍执行完整门禁。
 
 #### W05c：Cargo 依赖信息生成构建输入清单
 
-新增 `scripts/build_inputs.py`、`scripts/test_build_inputs.py` 和受版本管理的 `scripts/build-inputs.json`。不做源码静态扫描；hook 不为分类先编译，仅读取清单。清单 schema 包含排序后的仓库相对路径、file/directory 类型、消费方集合；自动生成项与人工登记项分区，后者为未来前端跨目录输入保留，不能悄悄覆盖生成结果。
+新增 `scripts/build_inputs.py`、`scripts/test_build_inputs.py` 和受版本管理的 `scripts/build-inputs.json`。不做源码静态扫描；hook 不为分类先编译，仅读取清单。清单 schema 包含排序后的仓库相对路径、file/directory 类型、消费方集合；Rust 消费方明确记录包和构建模式（default / acceptance），如 `tokenscope-app@acceptance`。同一文件被两模式消费时保留两项，hook 分别选择普通和带 `--features acceptance` 的命令，不能合并成只有包名。自动生成项与人工登记项分区，后者为未来前端跨目录输入保留，不能悄悄覆盖生成结果。
 
 **生成模式 `--update`：**
 
 1. 明确提示会重新编译两个本地 package；先 `cargo clean -p tokenscope -p tokenscope-app`（非整仓 clean），检查无并发构建或运行实例占用；若不安全则使用明确的隔离 target，不能强杀实例或清理用户目标。
-2. 在首次构建前记录此次生成 run_id、start、HEAD/输入状态及实际 target/build-dir；执行 `cargo test --locked --workspace --no-run --message-format=json`，再执行加 `--features acceptance` 的同一命令。每种模式结束立即收集产物清单和输入，取并集，不能被后续模式覆盖掉普通模式证据。
+2. 在首次构建前记录此次生成 run_id、start、HEAD/输入状态及实际 target/build-dir；执行 `cargo test --locked --workspace --no-run --message-format=json`，再执行加 `--features acceptance` 的同一命令，两种模式均不带 custom-protocol。每种模式结束立即按“包＋模式”收集产物清单和输入，取并集，不能被后续模式覆盖掉普通模式证据。
 3. 根据 Cargo metadata 和本次 JSON compiler-artifact/package_id 归属，只收集两个本地包的 `.d`，包含测试目标；消费方按编译包而非路径所属目录判断。解析 Makefile 转义、续行、Windows 盘符、空格/中文，不能按空格/冒号简单 split；不能混入第三方或旧构建残留。
 4. 补读本地包 build-script-executed 所关联的构建脚本 output，支持 `cargo:rerun-if-changed=` 和 `cargo::rerun-if-changed=`，相对路径按该 package 根解析；目录输入保留目录类型，用于匹配未来新增子文件。构建脚本未声明输入时不能假定零输入，应保守登记包目录或明确拒绝缺失证据。
-5. 排除 `.rs`、Cargo.toml（固定规则已覆盖）、env-dep、仓库外和实际 target/build-dir 生成物；目录输入不得因扩展名规则误过滤。规范为仓库相对 POSIX 路径，消费方和记录稳定排序，清单不含本机路径/mtime/run_id。只做路径过滤，不过滤被编译的 Markdown/JS/SQL/JSONL。
-6. 本次生成证据放 ignored QA 目录，清单原子写入仓库文件。映射位置改变、include_str!/include_bytes!/构建脚本输入新增删除后须运行 update 并提交清单。
+5. 解码依赖路径后，按其路径基准拼接，先按字面折叠 `.` / `..`，再判断仓库边界并转为仓库相对 POSIX 路径；例如 `src-tauri\src\../../docs/privacy.md` 归为 `docs/privacy.md`。正确处理 Windows 分隔符、盘符和 UNC，越出仓库的路径不收录。排除 `.rs`、Cargo.toml（固定规则已覆盖）、env-dep 和实际 target/build-dir 生成物；目录输入不得因扩展名规则误过滤。
+6. 以 `git ls-files -z` 为依据，只保留 Git 跟踪文件或含跟踪文件的目录；未跟踪文件（含被忽略产物）、不含跟踪文件的目录均排除。已跟踪文件不能仅因命中 ignore 模式被漏掉。目录规则匹配暂存区受版本管理的后代，包含新加、删除和重命名文件。`OUT_DIR/tauri-codegen-assets`、`frontend/dist/assets` 等生成物不进入清单，前端源码到 dist 的变化由前端检查规则覆盖，不登记带哈希的输出。
+7. 消费方和记录稳定排序，清单不含本机路径/mtime/run_id，不按扩展名豁免被编译的 Markdown/JS/SQL/JSONL。本次生成证据及排除路径、排除原因放 ignored QA 目录，清单原子写入仓库文件。映射位置改变、include_str!/include_bytes!/构建脚本输入新增删除后须运行 update 并提交清单。
 
 **CI 模式 `--check`：**
 
 - 在 workspace 构建前由 `--begin` 建立本次证据边界，清理两个本地包或确保明确的干净构建区；两种模式均记录 Cargo JSON，构建后 `--check` 基于该边界重新生成并比较。这是对审阅文字的必要细化：不能用编译后才启动的 check 进程时间过滤 `.d`，否则本次输出也会被全部滤掉。
 - 不依赖 rust-cache 永远不缓存本地包的假设。只接受本次产物与其 run 边界之后更新的依赖证据；时间精度冲突由记录的产物身份/内容及清理边界验证。缺少普通/acceptance 任一模式或本地包、只有旧文件、Cargo 命令失败均失败，不能拿空集合通过。旧 mtime、不同 checkout、无本次记录的 `.d` 不参与。
-- 不一致列出新增/缺失路径与消费方差异；已不存在的登记文件失败。人工项单独保留并校验路径/消费方，不能用人工项掩盖生成项过期。
+- 不一致列出新增/缺失路径与消费包、构建模式差异；已不存在或不再受版本管理的登记文件失败。生成与检查使用同一 Git 跟踪过滤及路径规范化规则，人工项也须满足跟踪范围。人工项单独保留并校验路径/消费方，不能用人工项掩盖生成项过期。
 - 同时校验 `.github/workflows` 中相关 CI/安装/Native UI paths 覆盖清单全部路径（包含目录后代、否定模式和顺序），替代零散维护 docs/privacy.md 的做法。实现可采用不设路径过滤的保守覆盖；校验步骤必须处于不会被这些文件改动跳过的 PR 工作流，不能形成“过滤遗漏，所以校验也不运行”的闭环。
-- 清单覆盖当前 Windows 普通＋acceptance 测试构建，不声称涵盖未构建的平台/feature。build-dir 内部布局变化时应明确失败并升级解析器，不静默漏输入。
+- 清单只覆盖当前 Windows `cargo test` 普通＋acceptance 两种构建，均不带 custom-protocol；不声称涵盖生产 custom-protocol 或其他未构建的平台/feature，发布和 Native UI 构建仍由完整 CI 验证。build-dir 内部布局变化时应明确失败并升级解析器，不静默漏输入。
 
-**必要契约：** docs/privacy.md 单独变更选壳；src-tauri/src/acceptance_csp.js 选壳；核心 fixture 变更选 workspace，包括壳测试跨 crate 引用；frontend/public/theme-boot.js 选前端；缺失/损坏清单 full；新增 include 输入未登记/登记目标已删/消费方改动/缺模式/旧依赖信息全部失败；路径转义、目录新子文件、两模式并集、构建脚本两种前缀、跨 crate 消费归属均测试。
+**必要契约：** docs/privacy.md 单独变更按登记模式选壳；src-tauri/src/acceptance_csp.js 单独变更必须选中壳 acceptance clippy/test，不能只运行普通模式；核心/壳 Rust 改动分别命中 workspace/壳的两模式 clippy/test；核心 fixture 变更选 workspace，包括壳测试跨 crate 引用；frontend/public/theme-boot.js 选前端；缺失/损坏清单 full；新增 include 输入未登记/登记目标已删/消费方或模式改动/缺模式/旧依赖信息全部失败。路径转义、Windows 分隔符/盘符/UNC、字面 `..` 折叠、越出仓库、目录新子文件、两模式消费集合不丢失、构建脚本两种前缀、跨 crate 消费归属均测试。增加 release 风格 `.d` fixture，包含 OUT_DIR 和 frontend/dist 的带哈希资源、合法跟踪输入，断言仅保留合法输入并记录排除原因；另测未跟踪输入、空目录排除和已跟踪但命中 ignore 模式的文件不漏登记。
 
 运行 `python -B -m unittest discover -s scripts -p "test_build_inputs.py" -v`，CI 两种构建后运行 `python -B scripts/build_inputs.py --check`；hook 分类测试纳入 W05b 和 CI。同步 CLAUDE.md 开发流程，不新增静态扫描引用的一层。
 
