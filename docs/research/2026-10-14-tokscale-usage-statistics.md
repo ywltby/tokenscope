@@ -352,6 +352,14 @@ cache_read_input_tokens)`（`:183-187`），再以 `min(cached, input)` 从 inpu
 `cache_read`（`:252`）；`reasoning_output_tokens` 从 output 中切出归一为
 `reasoning`——因为它是 `output_tokens` 的子集，直接并计会双计（`253-265` 注释）。
 
+**headless 路径是独立变体（第 6 轮专项复核确认）**：`codex exec` 捕获（headless）读
+`cached_input_tokens` / `cache_read_input_tokens` / `cached_tokens`（`codex.rs:1711-1714`）
+后**在提取阶段直接做 `input - cached`**（`:1734`），并写死 `cache_write: 0, reasoning: 0`
+（`:1681-1688`）；主路径所做三步（`cached.min(input)` 夹取、按夹取后值扣减、reasoning 从
+output 拆出，`:249-275`）它都**没有**。后果：若 `cached > input`，headless 行的 input 归 0
+而 cache_read 保留原值，**单条 input+cache_read 可超过上游 `total_tokens`**；
+且该路径不读 `reasoning_output_tokens`，reasoning 桶恒 0。
+
 **model 来源**：`turn_context.payload.model` 为主（`810-825`，同时重置 turn 锚点），辅以
 `info.model/model_info.slug`（`1554-1570`）；token_count 行若尚无模型则暂存，等模型出现再补
 （`1080-1087`、`1376-1412`）。
@@ -378,6 +386,15 @@ cache_read_input_tokens)`（`:183-187`），再以 `min(cached, input)` 从 inpu
   cached」与「净 input」两种语义（`479-483`、`504-552`）。
 - **JSONL 去重是「同 id 整条替换」**（`391-397`，后写覆盖先写），不是取最大值。
 - 坏行只把 `cacheable` 置 false，避免把截断文件写进缓存（`356-359`、`419-422`）。
+
+**去重缺口（第 6 轮专项复核确认）**：`gemini.rs` 全文不设置 `dedup_key`
+（构造走 `UnifiedMessage::new` → `None`，`sessions/mod.rs:301-345`、`:400`）；两条车道都是裸
+`extend`（`lib.rs:2448-2449` 流式/缓存车道、`lib.rs:5757-5759` 报告车道），且不经过
+`should_keep_deduped_message`（`lib.rs:6790-6795`——该函数对 `None` key 返回 `true` 放行，
+但 Gemini 连它都不走）。会话内也没有去重（`gemini.rs:227-257`）。因此**同一份会话内容若出现在
+两个扫描目录（如 `tmp/` 下的重复拷贝），会被双计**。代码里其实存在可用稳定键
+`(client, session_id, model, timestamp)`（session_id 取文件内字段、缺失回退文件 stem，
+`gemini.rs:112-147`），但没有消费者使用——这是 tokscale 当前的一个明确缺口。
 
 ### 4.4 文件型适配器的共性模式
 
@@ -589,16 +606,22 @@ sample_hashes + content_hash + related_files`，**没有 inode**。
   `min(size, 4096)` 字节做 FNV-1a；`max_offset = size - sample_len` 随 append 整体移动，
   **任何 append 都会改变最后一个采样点**。
 - 热判定 `primary_fingerprint_matches`（`:809-815`）只比 size + mtime + 采样，
-  文档写明「热扫描每文件最多读 20 KiB」（`:251-260`）。
+  代码注释写明「热扫描每文件最多读 20 KiB」（`:253-255`）——第 6 轮复核确认该数字是
+  **设计上限**（`4096 B × 5` 个采样点的推导值，`:74-75`、`:3432`、`:3451`），不是实测统计。
 - `ContentHashMode`（`:3477-3504`）：通用客户端用 `SamplesOnly` 并存 `[0u8;32]` 哨兵，
   只有 Codex 与 Prime 用全文 SHA-256。
 - 失效：指纹变 → `FingerprintStatus::Changed` → 整文件重解析；
   解析器升级 → 信封 `Stale` → 重写该片；损坏 → `Invalid` → 重写（`:2674-2685`、
-  `:3115-3121`、`:3123-3133`）。**源消息缓存没有 TTL**（全仓搜索未见过期字段，
-  但此项非穷尽验证；全仓其他 TTL 均不属本层：TUI 聚合缓存
-  `CACHE_STALE_THRESHOLD_MS = 5min`（`tui/cache.rs:23`）、订阅用量缓存 300s
-  （`commands/usage/mod.rs:344-347`）、TUI remote 缓存 3600s（`tui/remote.rs:23`）、
-  定价快照 3600s（`pricing/cache.rs:6`））。
+  `:3115-3121`、`:3123-3133`）。**源消息缓存没有 TTL，也没有全局容量上限或 LRU 淘汰**
+  （第 6 轮专项复核：全文件标识符扫描仅见 `CACHE_SHARD_COUNT` / `MAX_CACHE_SHARD_BYTES` /
+  采样常量 `:72-76`，分片索引 = `digest[0] % 256` `:1639`；唯一的时间戳 `SystemTime::now()`
+  在 `:3357` 只用于临时文件名。CLI/TUI 侧的 `clear` / `purge` 全部作用于其它缓存——订阅用量
+  `commands/usage/mod.rs:325-333`、Antigravity `main.rs:545-546`、cursor/warp `:469`/`:592`；
+  TUI 启动路径只读 `tui/data/mod.rs:662`、`:711-720`）。默认行为下缓存**只增不减**，
+  例外只有：源文件消失 → 条目删除（`:2697-2703`）、内容/版本变化 → 重写分片、
+  v1 单体文件一次性清理（`:116-133`，调用点 `:2624`）。本层之外的 TTL 共有四处：
+  TUI 聚合缓存 5 min（`tui/cache.rs:23`）、订阅用量 300s（`commands/usage/mod.rs:344-347`）、
+  TUI remote 3600s（`tui/remote.rs:23`）、定价快照 3600s（`pricing/cache.rs:6`）。
 
 ### 7.3 增量续读：文件 append 只有 Codex
 
@@ -683,7 +706,17 @@ daily 按日期升序（`aggregator.rs:78`）；session 按 last_seen 降序（`
 
 **关键设计**：**去重与重放保护全部前移到解析期**，聚合层只按 date 过滤、不再去重
 （`lib.rs:5159-5187` 只有日期谓词）。因此重复计费与否完全取决于解析期的 `dedup_key` 纪律
-（§4.1/§4.2 的各家规则）。这是明写的信任边界，本文未验证是否存在实际双计实例。
+（§4.1/§4.2 的各家规则）。**第 6 轮专项复核已把这条信任边界验证清楚**
+（`lib.rs:6790-6795`、`:1214-1238`、`:1533-1561`）：
+
+- **同 client 内**：同 `dedup_key` 首见即留（first-wins，冷热一致）；
+- **跨 client**：只有显式写好的 4 组协调防护——Codex rollout ↔ OpenClaw 镜像
+  （`lib.rs:2744-2781`）、Copilot OTEL ↔ chatSessions（`:2349-2400`）、WorkBuddy 会话级合并
+  （`:3705-3735`）、Trae 只取最新（`:3665-3697`）；其余组合**会双计**；
+- **无 `dedup_key` 的适配器：`droid`、`gemini`、`warp`**（`UnifiedMessage::new` 传 `None`；
+  `should_keep_deduped_message` 对 `None` 直接放行）——跨文件重复**必然双计**，不存在兜底；
+- 缓存恢复路径 `retain_observed_messages`（`:1214-1238`）对无 key / 不稳定 key 的消息一律
+  不保留，即该类消息每次冷扫都重新产生。
 
 ### 8.2 报告结构
 
@@ -718,10 +751,16 @@ pub enum BucketTimezone { Local, Pinned(chrono_tz::Tz) }
 - DST 兜底：`local_day_start` 对 DST 空缺的本地午夜返回 `None`，跳出该 interval 的剩余分配
   （`sessionize.rs:419-432`、`469-479`），歧义时段取 earliest（`:476`）。
 
-**口径差异（代码可见；是否有意为之未验证）**：core 的小时桶用 pinned 时区
-（`lib.rs:4427-4430`），而 TUI 的 hourly/minutely 桶从 timestamp 经**本机 `Local`** 重算
-（`crates/tokscale-cli/src/tui/data/mod.rs:1185`、`1273`，底层 `1709-1769`）；pin 了非本机时区时
-两者的小时归属会不同。日/月桶用已 re-key 的 `msg.date`（`tui/data/mod.rs:953`），不受影响。
+**口径差异（第 6 轮专项复核：差异确证；「有意 / 遗留」不可判定）**：core 与 CLI 的今天与
+小时桶按 pinned 时区解析（`bucket_tz.rs:99-105`、`main.rs:1884`、`:1902-1907`，且
+`main.rs:1886-1901` 注释明写「today 必须按 pinned 区解析，否则从对的桶里挑错一天」——
+**CLI 侧是有意设计**）；而 TUI 的 hourly / minutely / 贡献图用本机 `Local::now()`
+（`crates/tokscale-cli/src/tui/data/mod.rs:1772`、`:1833`、`app.rs:1996`、`ui/daily.rs:208`、
+`hourly.rs:164`、`minutely.rs:152`），整个 `tui/` 目录**无任何 `BucketTimezone` 引用**
+（只有 `settings.rs:496-524` 的 pin 写入）。pin 了非本机时区时，两者的小时归属与「今天」判定
+会不同；日/月桶用已 re-key 的 `msg.date`（`tui/data/mod.rs:953`），不受影响。
+代码证据支持「CLI 有意设计、TUI 未接入 = 遗留未闭合」，但浅克隆历史
+（`bucket_tz.rs` 在本 checkout 仅 1 个提交）不足以回溯确认意图。
 
 ### 8.4 会话化与活跃时长
 
@@ -776,7 +815,7 @@ pub fn normalize_model_for_grouping(model_id: &str) -> String {
 | LiteLLM（主） | `model_prices_and_context_window.json` | 运行时抓 `raw.githubusercontent.com/BerriAI/litellm/main/...` | `pricing/litellm.rs:6-7` |
 | models.dev | `https://models.dev/api.json` | 运行时抓，结构 `provider → models → cost{input,output,cache_read,cache_write}` | `pricing/models_dev.rs:7`、`:10-28`、`:79-114` |
 | OpenRouter | REST `/models` + `/models/{id}/endpoints` | 先拿列表与兜底价，再对可识别作者前缀并发（10）取端点价 | `pricing/openrouter.rs:22`、`:23`、`:113-156`、`:216-282` |
-| 内置 Cursor / Sakana / Tokscale Archive | 编译期常量表 | 无网络 | `pricing/mod.rs:123-226`、`:227-245`、`:285-415` |
+| 内置 Cursor / Sakana / Tokscale Archive | 编译期常量表 | 无网络 | `pricing/mod.rs:123-202`、`:227-245`、`:285-414`；条目数（第 6 轮复核，口径=HashMap 键数）：**Cursor 14 / Sakana 1 / Archive 17** |
 | 用户自定义 | `custom-pricing.json` | 本地文件 | `pricing/custom.rs:11`、`:37-73` |
 
 - 三张动态表**并行抓取、各自独立降级**（`mod.rs:416-432`、`:435-457`、`:472-497`）；
@@ -797,8 +836,12 @@ pub fn normalize_model_for_grouping(model_id: &str) -> String {
 `cache_creation_input_token_cost`(±above_200k / above_1hr / above_1hr_above_200k)、
 `cache_read_input_token_cost`(±above_200k / above_272k)、以及 input/output 的
 128k/200k/256k/272k 长上下文分档）。`custom.rs` 允许 `*_per_million_tokens` 写法并在装载时 `/1e6`
-（`custom.rs:351-378`，上限校验 `:367-373`）。**金额单位只有美元，全仓没有汇率换算代码**
-（三源快照以美元计这一条属惯例推断，标**未验证**）。
+（`custom.rs:351-378`，上限校验 `:367-373`）。**金额单位只有美元，全仓没有汇率换算代码**；
+第 6 轮复核补充三条源码内旁证——`pricing/mod.rs:393` 注释 "USD numbers archived here,
+matching the datasets' currency"、CLI 输出 `${} / 1M tokens`（`main.rs:3938-3945`）、
+字段名 `cost_usd`（`sessions/hermes.rs:47`）；解析层本身不含币种字段（`models_dev.rs:22-28`
+只有四个 `f64`、`openrouter.rs:106-111` 直接 `f64::parse`），
+**上游数据是否严格以美元计价仍需对照官方文档或真实响应确认**（标**部分验证**）。
 
 ### 9.2 匹配链：模型标识 → 价格条目
 
@@ -831,6 +874,17 @@ pub fn normalize_model_for_grouping(model_id: &str) -> String {
    default`，`:72-83`、`:2946-2951`）；先家族过滤（`extract_model_family` `:2464`）再词边界包含
    （`:2539`），最后 `select_best_match` 排序（`:3292-3630`）。
 7. **失败即 `None`**（不猜价、也不假装免费）；结果进程内缓存 512 条（`lookup.rs:85`、`:540-585`）。
+
+**fuzzy 打分尾段与端点价择优（第 6 轮复核补全）**：`select_best_match`（`lookup.rs:3292-3480`）
+的排序为——剔除无可用价行（`:3304-3315`）→ provider 提示命中集优先、全无价则回退全体
+（`:3321-3352`）→ hint 自身是转售商时优先转售商行（`:3358-3364`）→ 否则按「根匹配（排除跨供应商
+别名与零价订阅命名空间）> 第一方行 > 拼写精确匹配（内层优先非转售商）> 任意非转售商 > 首个候选」
+（`:3419-3423`）→ 尾段构造证据集并给出 `candidate_count` / `price_consensus`（`:3435-3475`）。
+OpenRouter 端点价择优 `select_endpoint_pricing`（`openrouter.rs:216-252`）：只取
+`provider_name == author` 的端点（`:221-224`）；有作者端点时，在「与 listed 基准价一致」的
+端点里取缓存字段最多者（`:228-240`），否则退回第一个作者端点（`:242`）；平手规则
+`fewest_unpriceable_buckets`（`:254-275`）先比已公布缓存率数量、再保留带 `cache_read` 者。
+测试佐证：`lookup.rs:9217`、`openrouter.rs:455`、`:474`。
 
 ### 9.3 计费公式（`compute_cost`，`pricing/lookup.rs:2300-2462`）
 
@@ -1144,9 +1198,10 @@ TokenScope 与 tokscale 是同代问题（多 agent 本地用量统计）的两�
   codex 取数矩阵 7 臂、zstd 的 1489/1503/1515、fs_atomic 重试 5 次 × 10ms、
   阈值 128k/200k/256k/272k、lookup 缓存 512、TTL 3600、import 容差 1%/2/$0.01。
 
-**最终收敛声明**：五轮复核（1 轮深读 7 代理 → 2 轮对抗复核 2 代理 → 3 轮分章复核 4 代理
-→ 4 轮修正验证与通读 3 代理 → 5 轮终局抽查 2 代理）后，未再发现实质错误；
-剩余条目仅为风格建议（目录/术语微调），不影响任何结论。文档定稿。
+**收敛过程**：五轮复核（1 轮深读 7 代理 → 2 轮对抗复核 2 代理 → 3 轮分章复核 4 代理
+→ 4 轮修正验证与通读 3 代理 → 5 轮终局抽查 2 代理）后未再发现实质错误，仅剩风格建议；
+随后追加两轮：**跨解释器复核**（pwsh 7.6.6，见 §12.2.1）与**存疑专项复核**
+（3 代理，把 17 条存疑收敛为 16 条已验证 / 3 条部分验证，见 §12.3）。文档定稿。
 
 ### 12.2.1 跨解释器复核（pwsh 7.6.6，定稿追加）
 
@@ -1166,43 +1221,89 @@ PowerShell 7.6.6；中文文本在 5.1 默认编码下会被吞掉行尾换行�
 
 结论：跨解释器复核未发现任何新错误；行号级结论与解释器无关。
 
-### 12.3 各切片的未验证清单（不得外推）
+### 12.3 存疑清单与第 6 轮专项复核
+
+原列 17 条存疑已由 3 个专项复核代理逐条验证：**16 条转「已验证」、3 条「部分验证」**。
+复核过程中另发现 3 个此前未记录的实现缺口（均已并入正文）：Gemini 无任何跨文件去重（§4.3）、
+`droid`/`gemini`/`warp` 完全没有 `dedup_key`（§8.1）、Codex headless 路径缺 `cached ≤ input`
+夹取（§4.2）。逐条结论如下（★ = 不可从源码判定，需外部信息）。
 
 **读取与架构**
 
-- `recovery.rs` 的完整语义（用量账本恢复覆盖层）只按模块注释与两处调用点采信，
-  未逐行跟踪 submit 调用链。
-- `/orca/mimocode-hooks` 第二来源在所有平台无条件附加，未验证 Windows/Linux 上是否真实存在，
-  也未找到对应测试。
-- `~/.claude/transcripts/` 由哪个 Claude Code 版本写入、与 `projects/` 是否内容重叠，未深挖。
-- Claude 的 cc-mirror 变体扫描在多账号场景下是否与主根重复计费，未验证。
-- Gemini 是否给消息设置 `dedup_key`：模块内未见赋值，跨文件重放是否依赖上层缓存合并**未验证**。
-- Codex 的 UUID v7 前缀 replay 判定（`codex.rs:1195-1280`）只读片段，未逐分支验证。
-- Codex headless 路径的 `cached_input_tokens` 处理（`codex.rs:1711-1730`）只读片段。
-- openclaw `transcript_events` 的完整列语义、kiro 的 credit 分摊细节（`kiro.rs:455-471`）、
-  trae 会话行完整字段集，均只读片段。
-- TUI 实时区时区（`Local`）与 core pinned 时区的差异是否为有意设计，注释未说明。
+- `recovery.rs`（已验证）：`recovered-usage-v1.json` 是**可选的账本恢复覆盖层**
+  （`get_config_dir()` 下、`TOKSCALE_RECOVERY_DISABLE` 可关，`recovery.rs:19-24`），
+  把已删除会话的旧导出重新对账——请求行仅在 `(client, session_id)` 未出现于原生数据且
+  key/signature 不重复时追加（`:369-394`，原生 transcript 永远赢）；`daily_floors` 按
+  `(client, date, model)` 补差额（`:407-501`）。`apply` 全仓**只有一处**调用（`lib.rs:993`），
+  门控为 `GraphPricingRequirement::Lenient && recovery::applicable(&home_dir)`（`:4575-4582`）——
+  提交链路（`Submission`，`:5021-5025`）永不经过它，与模块注释「Never used by submission」一致。
+- `/orca/mimocode-hooks/...`（已验证）：**无条件构造**——唯一条件是 MiMo 客户端启用，
+  无 `#[cfg]`、无平台判断（Windows 上同样拼该 macOS 风格路径，`scanner.rs:2263-2276`）；
+  目录不存在时 `read_dir` 失败即返回空（`:1297-1300`）。本机实测该目录不存在。
+  ★「真实环境是否存在」属外部工具产物，不可从源码判定。
+- `~/.claude/transcripts/`（部分验证）：是 `projects/` **并列的独立扫描根**
+  （`scanner.rs:786-793`），文件级去重按 canonical 路径（`:2946-2949`）。同一请求同时出现在
+  两处时的合并**分级**：assistant 行的 key（`messageId:requestId`）全局稳定 → 会合并
+  （`lib.rs:2246-2265`、`claudecode.rs:1152-1160`）；tool_result 行的 key 含文件名 stem →
+  **不合并**。★「由哪个版本写入」需 Claude Code release notes 或实测对照。
+- cc-mirror（已验证）：指向 `~/.claude/projects` 的变体被显式排除（`cc_mirror.rs:94-96`）；
+  两个变体指向同一目录也不会重复扫描（注册端按 canonical 路径去重，`scanner.rs:1610-1613`，
+  测试 `:5904-5931`）。副作用：同 configDir 的变体只有字典序第一个能署名。
+- Codex UUID v7 replay（已验证）：比较 `turn_key[..12]`——UUID v7 的 48 位毫秒前缀
+  （`:1219`、`:1284-1311`）；重放行**跳过不发射**（`:683`、`:1102-1107`），门控由
+  `turn_context` 关闭（`:622-625`），同 1ms 的残余风险在 `:1234-1242` 显式接受；
+  12 个 fork/replay 测试覆盖（`:3441`、`:3570`、`:3603` 等），但 `codex_uuid_v7_order_key`
+  本身无直接单测。
+- Codex headless（已验证）：独立变体，差异见 §4.2。
+- openclaw `transcript_events`（已验证）：SQL 列为 `session_id / event_json / created_at /
+  model_provider, model / event_zstd, event_utf8_bytes`（`openclaw.rs:761-775`）；
+  压缩 blob 仅在 `event_json` 为 NULL 时解压，用 `event_utf8_bytes` 做上限与长度校验
+  （1..=4 MiB，`:533-549`）；token 取自行内 JSON `message.usage`（camelCase 键，
+  `utils.rs:762-815`）；schema 兼容四层（缺表 / 缺列 / 三级 join 候选 / 文本预过滤）。
+- kiro credit（已验证）：credit 归**最近已发射轮次**（`kiro.rs:455-473`，等距留在更早轮次，
+  测试 `:5470-5508`）；换算 `CREDIT_TO_USD = 0.04`（`:41`），但两条路径粒度不同——
+  CLI 逐轮分摊（`:471`）、DB 把会话级 `credit_sum` 整体给首个发射轮（`:1683-1688`），
+  两者都标 `provider_reported`（`:472`、`:1687`）。
+- trae 会话行字段集（已验证）：9 个 JSON 键全量——`session_id` / `usage_time`（缺失即丢整条）、
+  `model_name` / `mode`（模型名兜底 `trae-<mode>` → `trae-unknown`）、`dollar_float`
+  （缺失 → 0，不经 pricing 直接当 cost）、`extra_info.{input_token, output_token,
+  cache_read_token, cache_write_token}`（缺失 → 0）；四桶合计 0 即丢整条（`trae.rs:51-91`）。
+- TUI 时区（部分验证）：差异确证、意图不可判，见 §8.3。
 
 **缓存与性能**
 
-- 全仓未发现缓存全局容量上限、LRU、TTL 或内建清理命令；未穷尽 TUI 启动期清理逻辑。
-- 注释中的性能数字（热扫描 ≤20 KiB/文件、1.16 GB 峰值）无法在本环境复现（无基准测试）。
-- `.jsonl.zst` 每次变化整文件解压重解析，其追加频率与代价未实测。
-- `SourceCachePolicy::InMemory` 的实际调用方未穷尽（只见定义 `lib.rs:772-790`）。
+- 缓存容量 / 淘汰 / 清理（已验证）：无全局上限、无 LRU/时间淘汰、无运行时清理命令，
+  默认只增不减，见 §7.2。
+- 性能数字与基准（已验证）：20 KiB/文件是**设计上限**（`4096 × 5` 采样点推导），
+  1.16 GB 峰值是**实测记录**（`message_cache.rs:2561-2569`，issue #1100）；全仓无 `benches/`、
+  无 criterion；量化断言测试存在（`FULL_HASH_CALLS` 计数，`:4019`、`:4042`、`:4091`、
+  `:4133`、`:7747`）。
+- `.jsonl.zst`（部分验证）：不做增量（`codex.rs:1462-1472` + `lib.rs:2016`/`:2013`）、
+  超 256 MiB 整档丢弃（`codex.rs:1515-1521`）已验证；★「压缩文件是否被追加写入」属上游行为，
+  需对真实 `~/.codex/archived_sessions/*.jsonl.zst` 多次采样 size/mtime。
+- `SourceCachePolicy::InMemory`（已验证）：唯一生产入口是 `#[doc(hidden)]` 的
+  `parse_local_unified_messages_with_pricing_uncached`（`lib.rs:6737-6749`），
+  调用者全为集成测试（`tests/{muse,micode_accounting,junie,jcode,gjc}.rs`）；CLI/TUI 零使用。
 
 **计价与聚合**
 
-- models.dev 与 OpenRouter 数据以美元计价这一点，仓库内没有明文断言（惯例推断）。
-- `select_best_match` 的排序尾段（`lookup.rs:3412-3630`）与 `select_endpoint_pricing`
-  （`openrouter.rs:216-282`）未逐行核对。
-- 内置三张价格表条目未穷举统计（只抽查若干条与注释）。
-- 聚合层不做跨车道全局去重是否会导致实际双计，未验证（设计上的信任边界）。
+- 币种（部分验证）：解析层无币种字段（`models_dev.rs:22-28`、`openrouter.rs:106-111`），
+  但有三条源码内旁证支持美元，见 §9.1；★ 最终确认需抓真实响应对照官方文档。
+- `select_best_match` / `select_endpoint_pricing`（已验证）：排序与端点择优规则已补全，见 §9.2。
+- 内置表条目数（已验证）：Cursor 14 / Sakana 1 / Archive 17，见 §9.1。
+- 跨车道双计（已验证）：同 client 内 first-wins；跨 client 仅 4 组显式协调防护；
+  `droid`/`gemini`/`warp` 无 key，跨文件重复必双计，见 §8.1。
+
+**仍需外部信息才能闭合的 5 项（★）**：① `transcripts/` 的写入版本；② orca 目录的真实存在性；
+③ `.jsonl.zst` 的追加写入行为；④ 上游价格数据的币种确认；⑤ TUI 用 `Local` 的意图归属。
+五项均属「源码之外的事实」，不影响本文任何源码级结论。
 
 ### 12.4 对 TokenScope 的迁移风险提示
 
 - tokscale 的**「缓存即事实源」**模式对「重扫代价」很不友好：删缓存即重解析全部历史。
   TokenScope 的 `history.db` 模式在这一点上更安全，但也带来相反的代价——**旧的错误解析会
-  长期留在库里**。tokscale 的 `recovery.rs` 覆盖层正是为「账本级修复」而设，提示
+  长期留在库里**。tokscale 的 `recovery.rs` 覆盖层正是为「账本级修复」而设（第 6 轮复核已
+  完整验证其语义：可选覆盖、原生数据永远赢、提交链路不经过它，见 §12.3），提示
   TokenScope 需要等价的「历史重算/修复通道」而不是「删库重扫」。
 - tokscale 的 56 客户端覆盖含 6 个「自建缓存型」来源（cursor/trae/warp/hindsight/antigravity/mcode），
   它们依赖 CLI 主动 `sync`。若 TokenScope 未来扩展这类来源，需要明确「缓存新鲜度」
