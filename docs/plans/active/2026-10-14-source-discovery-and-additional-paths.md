@@ -281,14 +281,52 @@ resolver = "3"
 
 不要假设所有构建都带三元组：不带 `--target` 的原生验收路径与显式 target 的发布路径分别取证。若用户显式设置 CARGO_TARGET_DIR，支持现有 exe 参数覆盖，不静默忽略用户配置；标准 CI 验证无覆盖时根 target 行为。
 
-### W05：去掉重复门禁和缓存映射
+### W05：按变更选择本地检查，去掉重复门禁和缓存映射
 
-1. `.githooks/pre-commit` 合并为一次 workspace fmt/clippy/test，保留前端门禁；Cargo 检查使用 `--locked`，不漏掉壳测试。
+1. `.githooks/pre-commit` 按下述暂存区规则选择检查；完整模式合并为一次 workspace fmt/clippy/test，保留前端门禁；Cargo 检查使用 `--locked`，不漏掉壳测试。
 2. `.github/actions/checks/action.yml` 保留普通、acceptance 两套 workspace clippy/test，删除重复壳轮次；fmt 只执行一次 `--all`。保留全部 Python、PowerShell、前端与 E2E 门禁。
 3. `.github/actions/setup/action.yml` Rust cache 只配置 `. -> target`；迁移时增加缓存键版本以免恢复旧布局。保留各 job 区分，不能把不同构建场景视作同一完整缓存。
 4. 检查 `ci.yml`、`install-test.yml`、`ui-e2e.yml` 的 paths 过滤是否覆盖改动入口，避免“改了构建配置却跳过验收”。
 5. 本地验证命令：`cargo fmt --all -- --check`、`cargo clippy --locked --workspace --all-targets -- -D warnings`、`cargo test --locked --workspace`；再分别以 `--features acceptance` 跑 clippy/test。
 6. 验证根目录普通 `cargo test --locked` 确实选择两个默认成员；不再反复跑第二套独立 manifest 门禁。
+
+#### W05a：暂存区驱动的检查选择（2026-10-15 用户确认加入）
+
+目标：纯文档提交不跑 Rust/前端测试；代码提交按影响范围运行已有检查，未知类别保守兜底。PR 的 CI 保留完整普通/acceptance、前端及验收门禁，不以本地跳过结果作为免检依据。不做函数级或单文件测试依赖推断，不引入“上次通过即永久跳过”的结果缓存。
+
+实现文件：`.githooks/pre-commit` 保留轻量入口；新增 `scripts/pre_commit_checks.py` 集中分类和命令编排，新增 `scripts/test_pre_commit_checks.py` 覆盖临时 Git 仓库契约；文档校验可置于独立 `scripts/check_staged_docs.py` 并有对应测试。使用现有 Python 标准库，先核对开发环境可用；缺解释器或分类执行异常必须明确失败，不能静默放行。
+
+| 暂存区文件类别 | 最小检查集合 |
+| --- | --- |
+| 仅 `.md` 文档，包括规约/计划 | staged whitespace、UTF-8、基础文档格式和新增/变更的本地链接检查；不跑 Rust/前端代码测试 |
+| 根 `src/**`、`tests/**` 的 Rust 代码/fixture | Rust 格式、workspace clippy 和 workspace 测试，覆盖壳依赖核心库的影响 |
+| 仅 `src-tauri/src/**` Rust 代码 | Rust 格式、`tokenscope-app` clippy/test；涉及验收隔离模块时追加 acceptance 检查 |
+| `frontend/src/**`、前端普通类型/格式/构建配置及前端依赖清单/锁 | 前端 typecheck、format:check、test、build；涉及 E2E 编排时并入脚本规则 |
+| `scripts/**` 的 Python/PowerShell、`frontend/scripts/**` | 明确映射的脚本语法和契约测试；共享 helper 取全部消费者契约并集，未登记脚本走完整模式，不只测试被改文件本身 |
+| Cargo manifest/锁、`build.rs`、`.cargo/**`、Rust 工具链、Tauri 配置/capabilities、`.github/**`、`.githooks/**`、检查选择器及其测试、发布声明等构建/门禁入口 | 完整模式，包含普通与 acceptance Rust 检查、前端门禁和现有相关脚本契约 |
+| 其他未明确分类的文件 | 完整模式兜底，输出未识别路径及原因 |
+
+分类用有顺序的显式规则，构建/门禁入口优先于宽泛目录规则；多类改动取并集、同一检查只执行一次。普通代码最小检查不代表可免除最终完整门禁；完整模式命令与 W05 的 CI 门禁维护同一语义，不复制旧双 workspace 冗余命令。本地完整模式禁止运行真实安装/卸载/休眠，只运行安全契约与隔离验收；安装升级仍由一次性 Actions Runner 承担。
+
+读取 `git diff --cached --name-status -z --find-renames` 的 NUL 分隔结果，支持新增、修改、删除、重命名及中文/空格路径。重命名旧路径和新路径都参与分类，防止 Rust 文件改名成 Markdown 后逃过检查。首次提交使用空树基线；Git 查询失败不能当作空提交。空暂存区只报告无文件检查，不擅自操作 Git index。
+
+默认 `auto`；提供 `TOKENSCOPE_PRECOMMIT_MODE=full` 强制完整检查，非法值报错，不提供关闭全部检查的模式。提供只打印选中检查的 `--explain` 入口用于审阅，hook 正常路径必须实际执行。输出选中项、触发文件/规则、跳过原因和执行结果；任一检查非零立即阻止提交。
+
+分类依据暂存区，但多数工具读取工作区：必须处理部分暂存，不能把“测了未提交修复”声称为“已验证暂存代码”。实施初版选择简单可靠规则：运行代码检查时，如被选检查会读取的受版本管理输入存在未暂存差异，明确阻止并列出需处理文件；不得自动 stash、reset、补暂存或覆盖用户修改。纯文档检查直接读取 index 内容，不因无关未暂存代码阻止文档提交。检测范围应覆盖共享配置和跨 crate 依赖，使用临时仓库测试其边界；若未来改成隔离 index 快照执行，另行设计缓存/环境成本。
+
+文档检查必须检查暂存版本与暂存树中的链接目标：识别代码围栏，支持相对路径、目录、图片、URL 编码及可解析的标题锚点；网络链接不在 hook 联网验证。历史文档已有失效链接不突然全仓阻断，只校验此次新增/变更链接及本次删除/重命名明确影响到的本地引用。不能用正则盲扫所有括号；对不支持的语法明确说明检查边界，不假报通过。只检查，不自动格式化未暂存内容。
+
+#### W05b：选择器和实际 hook 的验收
+
+1. 先写临时 Git 仓库失败测试，覆盖纯文档、核心库、壳、前端、脚本共享依赖、混合改动、构建配置、未知文件、删除、跨类别重命名、中文/空格路径、首次提交、空 index 与 Git 查询错误。
+2. 覆盖暂存文档与工作区不同、暂存代码与工作区不同、无关未暂存文件、强制 full、非法模式；证明不会 stash/reset、更改 index 或写用户目录。
+3. 对命令执行器使用记录参数的替身，验证选择的命令及去重、失败退出码传播、未选择的命令未运行。模拟完整检查失败时必须阻止真实临时仓库 `git commit`；纯文档提交不得启动 Cargo/pnpm。
+4. 文档校验测试包含有效/失效相对链接、删除目标、中文路径、围栏代码、历史失效链接及暂存树与工作区目标不一致，拒绝假通过和大量误报。
+5. 运行 `python -B -m unittest discover -s scripts -p "test_pre_commit_checks.py" -v` 及文档校验测试；加入 CI 完整门禁，防止选择器修改只靠自己放行。
+6. 在真实仓库分别记录文档模式和强制完整模式的命令清单与耗时；首次切换 hook 的提交必须实际跑完整模式验证，禁止以修改后的分类器自动减少自身验证。
+7. 更新 `CLAUDE.md` 提交流程：本地按暂存区选择，未知变更/full 保守检查；PR CI 完整门禁不减。同步修改现有“任何修改提交前必须全部跑一遍”的规定，否则仅智能化 hook 仍无法减少重复工作。保留禁止 `--no-verify`、默认验证后提交推送及失败不得提交等约束。
+
+W05a/W05b 当前均未实施。完成标准：文档提交只运行文档检查，核心库变更仍覆盖壳，混合变更不漏检，未知路径/失败/部分暂存不能静默绕过，当前 PR CI 仍执行完整门禁。
 
 ### W06：构建与缓存隔离验收，最后处理旧 target
 
