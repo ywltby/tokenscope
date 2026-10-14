@@ -265,7 +265,7 @@ export function naiveThemeOverrides(mode: ThemeMode): GlobalThemeOverrides {
       boxShadowFocus: inputFocusShadow,
     },
     Switch: {
-      railColor: c.controlStroke, // 关闭态轨道本身就是 ≥ 3:1 的灰
+      railColor: mode === "dark" ? c.controlStrokeHover : c.controlStroke, // 暗色关闭态留出对比度余量
       railColorActive: c.accentFill,
       boxShadowFocus: inputFocusShadow,
     },

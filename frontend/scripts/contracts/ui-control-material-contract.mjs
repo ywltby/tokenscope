@@ -517,11 +517,11 @@ export async function uiControlMaterial(ctx) {
       }
 
       // 10. checkbox_and_switch_boundary_ge_3
-      const cbAndSwOk = bCheckbox.pass && bSwitch.pass;
+      const cbAndSwOk = bCheckbox.pass && bSwitch.minRatio >= 3.2;
       record(
         "checkbox_and_switch_boundary_ge_3",
         cbAndSwOk,
-        `checkbox: min=${bCheckbox.minRatio.toFixed(2)} (${formatSides(bCheckbox.details)}) | switch: min=${bSwitch.minRatio.toFixed(2)} (${formatSides(bSwitch.details)})`,
+        `checkbox: min=${bCheckbox.minRatio.toFixed(2)} (${formatSides(bCheckbox.details)}) | switch (margin >= 3.2): min=${bSwitch.minRatio.toFixed(2)} (${formatSides(bSwitch.details)})`,
       );
 
       // 触发 close-requested 事件打开关闭确认对话框

@@ -1,6 +1,6 @@
 # 控件材质与浮层可读性计划：按钮边界、焦点与操作浮层
 
-> 状态：**已实施，待用户视觉验收。** 本文是逐项对照实现的规格：token 数值、Naive 主题字段、CSS 代码、组件改动、测试名称与断言、`DESIGN.md` 替换文本都已写定。实施中如需偏离，先在本文“偏离记录”（第 10 节）写明原因，再改代码。
+> 状态：**已实施，视觉验收通过；发布准备中，待 PR 门禁。** 本文是逐项对照实现的规格：token 数值、Naive 主题字段、CSS 代码、组件改动、测试名称与断言、`DESIGN.md` 替换文本都已写定。实施中如需偏离，先在本文“偏离记录”（第 10 节）写明原因，再改代码。
 >
 > 用户反馈（两张截图）：
 > - 暗色模式下按钮边界不清，分不出是文字还是按钮。
@@ -85,7 +85,7 @@
 | `--ts-control-bg` | `rgba(255, 255, 255, 0.92)` | `rgba(255, 255, 255, 0.07)` | 次按钮、日期按钮、输入框、选择框的底色 |
 | `--ts-control-bg-hover` | `#ffffff` | `rgba(255, 255, 255, 0.12)` | 悬停（比静止更强） |
 | `--ts-control-bg-pressed` | `rgba(118, 118, 128, 0.16)` | `rgba(255, 255, 255, 0.04)` | 按下 |
-| `--ts-control-stroke` | `rgba(0, 0, 0, 0.44)` | `rgba(255, 255, 255, 0.34)` | 静止边界（≥ 3:1） |
+| `--ts-control-stroke` | `rgba(0, 0, 0, 0.52)` | `rgba(255, 255, 255, 0.34)` | 静止边界（≥ 3:1） |
 | `--ts-control-stroke-hover` | `rgba(0, 0, 0, 0.56)` | `rgba(255, 255, 255, 0.46)` | 悬停和按下时的边界 |
 | `--ts-control-rim` | `inset 0 1px 0 rgba(255, 255, 255, 0.9)` | `inset 0 1px 0 rgba(255, 255, 255, 0.12)` | 上沿受光 |
 | `--ts-control-shadow` | `0 1px 2px rgba(0, 0, 0, 0.1)` | `0 1px 2px rgba(0, 0, 0, 0.45)` | 抬起感 |
@@ -123,7 +123,7 @@
 | 组合 | 最低值 | 要求 |
 | --- | --- | --- |
 | 暗色：控件描边 34% / 四种衬底 | 3.41:1 | ≥ 3:1 |
-| 亮色：控件描边 44% / 四种衬底 | 3.20:1 | ≥ 3:1 |
+| 亮色：控件描边 52% / 含画布的实际控件背景 | 实测最低 3.19:1 | ≥ 3:1 |
 | 暗色悬停描边 46% | > 4.7:1 | ≥ 3:1 |
 | 选中描边（`--ts-accent`）/ 分段底槽 | 暗色 5.09:1，亮色 4.60:1 | ≥ 3:1 |
 | 焦点 outline（`--ts-accent`）/ 卡片 | 暗色 6.73:1，亮色 5.29:1 | ≥ 3:1 |
@@ -400,7 +400,7 @@ Checkbox: {
   boxShadowFocus: inputFocusShadow,
 },
 Switch: {
-  railColor: c.controlStroke,     // 关闭态轨道本身就是 ≥ 3:1 的灰
+  railColor: mode === "dark" ? c.controlStrokeHover : c.controlStroke, // 暗色轨道留出余量
   railColorActive: c.accentFill,
   boxShadowFocus: inputFocusShadow,
 },
@@ -677,9 +677,15 @@ DatePicker: {
 - [x] C06 `ui_control_material` 明暗两主题全部通过
 - [x] C07 `DESIGN.md` 已替换；前后对比截图齐全
 - [x] 前端 typecheck、format:check、test、build、test:e2e 全绿；提交钩子全绿
-- [x] 分支保留在 docs/control-material-plan（严格不合并到 main，不切到 main）
+- [x] 视觉验收通过（浏览器渲染、两种视口、deviceScaleFactor 1.5；不替代真实跨显示器验收）
+- [x] UI 整理到 feat/control-material；研究历史完整保留于 docs/control-material-plan，调研提交不进入 UI PR
+- [x] 补丁版本递增为 0.3.1，版本检查通过（main 基线 5974e6b / 0.3.0）
+- [ ] 远程 PR 门禁通过后再评估合并（PR 状态以 GitHub 的 feat/control-material → main 为准）
 
 ## 10. 偏离记录
+
+- **发布准备补修**：按用户最新授权将 `feat/control-material` 快进到 `dc4cf4c`，不重写研究分支；暗色关闭态开关轨道采用既有悬停描边 token（46% 白色），契约提高到 ≥ 3.2:1。历史 C07 英文标题保留，不为格式重写已推送历史。
+- **开关余量回归证据（2026-10-14）**：先将开关契约提高到 3.2:1，旧暗色轨道以最低 3.00:1 失败（唯一失败项）；再改用 46% 白色，暗色最低 4.13:1，亮色保持 4.24:1，五组 E2E 契约全部通过。日志为 `control-material-margin-red.log` 与 `control-material-final-e2e.log`（本地忽略产物）。
 
 - **位置**：`frontend/scripts/contracts/ui-control-material-contract.mjs`（`measureBoundary`）
 - **原规格**：每条边向内取第 0 与第 1 整像素作为边框候选，向外取第 3 整像素作为外侧像素；两内侧候选分别与外侧像素求对比度取较大者。
