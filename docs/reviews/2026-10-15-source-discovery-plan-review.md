@@ -270,3 +270,37 @@ PR1 合入后 workspace 根目录是虚拟 manifest，命令统一改为：
 - 技术细化 1：编译后的 `--check` 不能用自己的启动时间筛 `.d`；增加构建前 `--begin` run 边界和每模式产物记录。明确包清理/隔离构建与完整性检查，不依赖缓存动作的内部实现假设；旧依赖信息不能混入，缺证据不得空集合通过。
 - 技术细化 2：实际心跳周期是配置间隔＋真实采集耗时，最短 1 秒只影响显示，不改调度；缺少可见动画本身不足以证明后端停止。失败/状态不可用立即显示，正常短采集满足 1 秒。
 - CLAUDE_CONFIG_DIR 映射位置仍为实施前核实项；未把猜测写成事实。真实性能数字仍是预算/历史参考，尚无本次实现基准。
+
+## 11. 复审意见（针对 4ef146e）
+
+> 复审日期：2026-10-15。对象：[PR1](../plans/active/2026-10-15-workspace-layout.md)、[PR2](../plans/active/2026-10-15-collection-status.md)、[PR3](../plans/active/2026-10-14-source-discovery-and-additional-paths.md)、`docs/plans/README.md`、UI 调整计划顶部说明。
+
+**结论：** 第 9 节各项均已落实到三份计划，多账户相关内容已删净（全文检索 ProfileList、提权、账户映射、`source_paths_discover` 均无残留），旧锚点 `#collection-feedback` 已无引用。执行方新增的两条技术细化（构建前 `--begin` 划定证据边界；心跳周期 = 间隔 + 真实耗时，1 秒只影响显示）判断正确，予以采纳。改完下面 11.1、11.2 两处即可开工 PR1；11.3 在 PR3 开工前改好即可。
+
+### 11.1 清单的消费方要区分普通与 acceptance 构建（PR1 W05a/W05c，必改）
+
+- 事实：`src-tauri/src/acceptance_csp.js` 由 `src-tauri/src/acceptance.rs:104` 的 `include_str!` 引入，整个模块受 `#[cfg(feature = "acceptance")]` 控制。本机现有依赖信息文件中，壳的普通构建只列出 `docs/privacy.md`，带 acceptance 的构建才出现 `acceptance_csp.js`。
+- 问题：W05c 的清单只记“消费方集合”（包名）。若 `acceptance_csp.js` 只登记为 `tokenscope-app`，钩子会跑壳的普通 clippy/test，而普通构建根本不编译这个文件，改动等于没验证。
+- 要求：
+  1. 清单的消费方改为“包 + 构建模式”（例如 `tokenscope-app@acceptance`），钩子按模式选择对应命令。
+  2. W05a 表中“涉及验收模块时加 acceptance”判断条件不明确，改成确定的规则。建议最简单的写法：`crates/tokenscope-core/**` 和 `src-tauri/src/**` 的 Rust 改动，普通和 acceptance 两种模式都跑 clippy/test。W05b 第 6 步实测耗时；如果太慢，再写出明确的缩减规则并配测试。
+  3. 必要契约中加入用例：`acceptance_csp.js` 单独改动必须选中壳的 acceptance 检查。
+
+### 11.2 清单只收受版本管理的文件（PR1 W05c，必改）
+
+- 事实：本机 release（custom-protocol）构建的壳依赖信息文件，列出了 6 个 `OUT_DIR/tauri-codegen-assets/<哈希>.js|css|html`，以及 `frontend/dist/assets/*-<哈希>.js|css`。`frontend/dist` 在仓库内、不在 target 下，现有排除规则（仓库外、target/build-dir 内）挡不住；它的文件名带哈希，每次前端构建都会变。
+- 问题：`--update`/`--check` 目前只用 `cargo test`（不带 custom-protocol），暂时不会读到这些文件。但只要以后某个模式或 CI 步骤带上 custom-protocol，清单就会每次变动，`--check` 结果也会不稳定。
+- 要求：
+  1. 清单条目只保留 Git 跟踪的文件，或含有被跟踪文件的目录（用 `git ls-files` 判断）。未跟踪和被忽略的路径排除，写入证据目录并列出。
+  2. 计划写明清单覆盖范围：`cargo test` 的普通和 acceptance 两种模式、不带 custom-protocol。`frontend/dist` 由前端规则覆盖。
+  3. 依赖信息里的路径形如 `src-tauri\src\../../docs/privacy.md`。规范化时要先按字面折叠 `..`，再转成仓库相对路径。用例覆盖这种写法，以及一份 release 风格的 `.d` fixture，断言生成产物被排除。
+
+### 11.3 旧 `dir` 迁移后开启自动发现也是行为变更（PR3 §2、§3、S07，PR3 开工前改）
+
+- 事实：现在 `make_source`（`src/report.rs:241`）的逻辑是：设置了自定义 `dir`，就只读这个目录，默认根不读。按 PR3 §3，旧的非空 `dir` 迁移为追加项后，自动发现会开启，默认根也开始读取，统计总量可能增加。这与 `CODEX_HOME` 从“替代”改为“追加”属于同一类变化。
+- 要求：把这条和 `CODEX_HOME` 一起写进 §2 的“行为变更”、`docs/stats-semantics.md` 来源章节和 S07 的版本摘要；S01 增加“旧配置有自定义 dir 时，升级后默认根的用量被并入”的升级用例。本机 `settings.toml` 没有设置 `dir`，不受影响，但计划要覆盖其他升级用户。
+
+### 11.4 建议（不阻塞）
+
+- PR1 实施要改目录、构建和门禁，不再是纯文档改动。建议从当前分支头新建 `feat/workspace-layout`（或 `build/workspace-layout`），c16e023 和三份计划随之带入，之前的提交不用改写。这样避免再次出现“实现落在 docs 分支”的情况（控件材质那次已经发生过）。README 和 PR1 页首的分支名同步修改。
+- PR3 §4.3 已选择实现“sessions → archived_sessions 移动后复用解析进度”。这是第 5.3 节中的可选项，可以保留；如果实施时发现它会改动历史库按路径记录进度的结构，可以拆出本轮，但计划里要写明“不做”。
