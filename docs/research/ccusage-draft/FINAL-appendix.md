@@ -21,7 +21,7 @@
 | `CACHE_ETAG_MAX_BYTES` | 4096 | `rust/crates/ccusage/src/http.rs:13` | ETag 侧车文件上限 |
 | 缓存价推导 | `cache_create = input × 1.25`、`cache_read = input × 0.1` | `rust/crates/ccusage-core/src/pricing.rs:1085-1088` | LiteLLM 未给缓存价时的默认值 |
 | 缺价披露门槛 | `total_tokens == 0` 不报 | `rust/crates/ccusage-core/src/cost.rs:66-68` | 避免无用量行刷警告 |
-| 日志级别 | `LOG_LEVEL` 0–5（默认 3） | `docs/guide/environment-variables.md` + `rust/crates/ccusage-core/src/logger.rs` | 0 静默、1 警告、2 日志、3 info、4 debug、5 trace |
+| 日志级别 | `LOG_LEVEL` 0–5（默认 3） | `docs/guide/environment-variables.md`（0 静默、1 警告、2 日志、3 info、4 debug、5 trace）；`rust/crates/ccusage-core/src/logger.rs` 只是轻量封装（15 行） | 只影响日志输出，不影响统计口径 |
 
 ## 附录 B：模块与入口索引
 

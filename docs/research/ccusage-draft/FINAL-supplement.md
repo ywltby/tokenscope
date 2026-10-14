@@ -54,7 +54,7 @@
 证据：`project_names.rs:116-123`。判据的性质与边界：
 
 - 只认两类形态：`X:\Users\...`（盘符 + 反斜杠 + `Users\`）与 `\Users\...`（无主机前缀的形态）。
-- `bytes.len() >= 10` 是索引安全下限（保证 `bytes[1..3]` 可读）。
+- `bytes.len() >= 10` 是一个**保守下界**：要匹配 `Users\` 只需长度 ≥9（前缀 3 字节 + 6 字节字面量），代码取 10 是留余量，并非某处索引的最小安全值。
 - **不走本分支**的反例：`C:/Users/...`（正斜杠）、`/Users/...`（落步 3）、`c:\users\...`（小写 `users`）。测试只覆盖 `C:\Users\phaedrus\Development\ccusage`、`\Users\phaedrus\Development\ccusage`（`rust/crates/ccusage/src/main.rs:149-161`）与 `/Users/alice/*`、`-Users-alice-ccusage`（`project_names.rs:147-163`），大小写与正斜杠形态**无测试**。
 
 #### 14.1.4 调用点

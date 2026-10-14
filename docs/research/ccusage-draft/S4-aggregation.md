@@ -3,6 +3,7 @@
 - 仓库：`ccusage`（只读样本）HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31
 - 证据约定：所有 `path:line` 均相对仓库根；行号取实际文件行号（用 `read` 逐文件核对，不用 `Measure-Object -Line`，该命令会漏掉末行）
 - 方法：静态阅读（`read` / `grep` / `glob`）为主；第 8 轮已构建并运行 ccusage（`--offline`，见 §13.5），未修改任何样本
+- **本章裸文件名约定**：未写全路径的 `summary.rs`/`date_utils.rs`/`last_window.rs`/`output.rs`/`agent_report.rs`/`types.rs` 指 `rust/crates/ccusage-core/src/` 下同名文件；`blocks.rs`/`main.rs`/`commands/mod.rs`/`cli/timezone.rs`/`cli/last_window.rs` 指 `rust/crates/ccusage/src/`；`loader.rs`/`report.rs`/`types.rs`（统一报表语境）指 `rust/crates/ccusage-adapter-all/src/`；`parser.rs` 指 `rust/crates/ccusage-cli-parser/src/parser.rs`。
 - 覆盖：`ccusage-core`（summary / date_utils / last_window / output / agent_report / types）、`ccusage`（blocks / commands / cli）、`ccusage-adapter-all`（loader / report / types）、`ccusage-cli-parser`（parser）、`ccusage-cli`（types）、`ccusage-config`（config），并以 `docs/guide/*.md` 交叉验证
 
 ### 0. 结论速览
@@ -639,7 +640,7 @@ aggregate_rows（:888-908）: period 归一（Daily 原样 / Monthly [..7] / Wee
 
 ### 未验证 / 存疑
 
-> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
+> **本节状态（第 8–9 轮实测后）**：§13.5 已实测 `blocks --json` 的字段全集（对应本节第 6 条）与 `claude statusline --help` 的默认值（第 8 条）；第 9 轮全文复核又实测闭环了第 1 条（`blocks --json` 数组**升序、最旧在前**，与代码默认 `SortOrder::Asc` 一致，官方文档的 "newest first" 不成立）。其余条目仍未闭环。
 
 1. **blocks 默认排序与文档冲突**：代码默认 `SortOrder::Asc`（`ccusage-cli/src/types.rs:63-70`），`sort_blocks` 升序后再按需反转（`blocks.rs:177-182`），即默认最旧块在前；但 `docs/guide/blocks-reports.md:147-155` 写"Show newest blocks first (default)"。我没有运行二进制确认实际输出顺序，也未找到任何把 blocks 默认改为 Desc 的赋值点（`run_session` 才显式改 Desc，`commands/mod.rs:153`）。**结论以代码为准，文档疑为过时**。
 2. **`TZ` 环境变量语义**：ccusage 自身不读 `TZ`；仅当最终落到 jiff `TimeZone::system()` 时由 jiff 读取（证据为 registry 中 jiff-0.2.38 源码 `src/tz/system/mod.rs:185` 与其文档 `src/tz/timezone.rs:291-311`）。我未运行 ccusage 验证 `TZ=Asia/Tokyo ccusage daily` 的实际日期归属，也未核对 Windows 平台 jiff 的 `system()` 分支实现细节（`src/tz/system/windows/mod.rs` 仅见片段）。

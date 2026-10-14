@@ -8,7 +8,7 @@
 - 价格来自**四处**：编译期内嵌 LiteLLM 快照（白名单裁剪）、编译期内嵌 models.dev 扁平快照、运行期在线 LiteLLM `main` 原始 JSON、运行期在线 `https://models.dev/api.json`；用户侧没有独立价格文件，只有 config 的 `pricingOverrides`（字段级补丁）与 `CCUSAGE_MODEL_ALIASES`（名字改写）。
 - 合并**没有深合并**：LiteLLM 按 key 整条替换，models.dev 只补缺失 id，内置兜底表只 `or_insert`，用户 override 是唯一的字段级合并且永远最后执行。
 - 匹配链：精确 → 静态别名 → `.`/`@`→`-` 归一化 → 模糊子串（最长键 + 版本边界保护）→ 在线 models.dev → 内嵌 models.dev，外加 `exact_only` 门禁。
-- 计价有两种档位语义：**整单切换**（有 per-model `long_context_threshold`）与**边际分段**（LiteLLM `*_above_200k_tokens`，默认 200K）。1 小时缓存写入按 `input × 2`。
+- 计价有两种档位语义：**整单切换**（有 per-model `long_context_threshold`）与**边际分段**（LiteLLM `*_above_200k_tokens`，默认 200K）。1 小时缓存写入按 `input × 2`。注意 Codex 侧的阈值判定只看 `input_tokens` 总量（见 §6.2），与 Claude 链的「上下文总量」口径不同。
 - 缺价一律回退 `0.0`，同时用 `missingPricing` / `unpricedModels` / stderr 警告三处披露；显式 0 价不算缺价。
 
 ---
@@ -276,7 +276,7 @@ fn suffix_allows_pricing_key_match(key, suffix) -> bool {
 
 #### 4.5 四个给定名字的命中推演
 
-**(a) `claude-sonnet-4-20250514`**：**实测修正（第 8 轮）——不是精确命中，而是模糊命中**。内嵌表（534 键，见 §13.5）里**没有**该裸键（`claude-*` 裸键只覆盖 4.5 代及以后）；真实路径是双向子串落到区域前缀的 Bedrock 键——实测命中最长键 `global.anthropic.claude-sonnet-4-20250514-v1:0`（长度 46），候选另含 `anthropic.` / `us.` / `eu.` 三个前缀的变体（**`apac.` 不在内嵌表**——裁剪白名单不含该前缀，它只存在于未裁剪的完整 LiteLLM）。仓库测试 `embedded_pricing_resolves_overlapping_model_keys_exactly`（`pricing.rs:4931-4955`）正是这项行为的断言：它比较 `find("claude-sonnet-4-20250514")` 与 `find("anthropic.claude-sonnet-4-20250514-v1:0")` 的 **input 相等**，而非断言裸键存在。8 位日期后缀放行规则（`suffix_starts_with_numeric_model_version`，`:2703-2722`）与「取最长键」（`:5853-5898`）仍如原述；`claude-3-5-haiku-20241022` 同理实测命中 `us.anthropic.claude-3-5-haiku-20241022-v1:0`（input `0.8e-6`，与测试一致）。
+**(a) `claude-sonnet-4-20250514`**：**实测修正（第 8 轮）——不是精确命中，而是模糊命中**。内嵌表（534 键，见 §13.5）里**没有**该裸键（`claude-*` 裸键只覆盖 4.5 代及以后）；真实路径是双向子串落到区域前缀的 Bedrock 键——实测命中最长键 `global.anthropic.claude-sonnet-4-20250514-v1:0`（长度 46），候选另含 `anthropic.` / `us.` / `eu.` 三个前缀的变体（**`apac.` 不在内嵌表**——裁剪白名单不含该前缀，它只存在于未裁剪的完整 LiteLLM）。仓库测试 `embedded_pricing_resolves_overlapping_model_keys_exactly`（`pricing.rs:4931-4955`）正是这项行为的断言：它比较 `find("claude-sonnet-4-20250514")` 与 `find("anthropic.claude-sonnet-4-20250514-v1:0")` 的 **input 相等**，而非断言裸键存在。8 位日期后缀放行规则（`suffix_starts_with_numeric_model_version`，`:2703-2722`）与「取最长键」（`:5853-5898`）仍如原述；`claude-3-5-haiku-20241022` 则**不需要模糊匹配**：它是**内嵌兜底表的精确命中**——`pricing.rs:2191-2192` 用 `put_builtin_entry` 把 `claude-3-5-haiku` 与 `claude-3-5-haiku-20241022` 直接写入 `entries`，精确阶段的 `entries.get(model)`（`:1565-1567`）就作答了，三个同价的 Bedrock 变体（`anthropic.` / `eu.` / `us.`，input 均为 `8e-7`）不会被选中。这也解释了为什么 `pricing.rs:4951-4954` 的断言（input `0.8e-6`）**无法区分命中路径**——三条候选价同。（若它真的走模糊扫描，会按「同长度取字典序较小者」在并列候选里选中 `eu.`：实测该组长度为 `eu.` 43、`us.` 43、`anthropic.` 40。）
 
 **(b) `claude-opus-4-6-fast`**：models.dev 快照中**没有**该键（只有 `claude-opus-4-8-fast`:7504、`claude-opus-5-5-fast`:7598、`claude-opus-5-fast`:7634，三者均带 `"exactOnly": true`，见 `models-dev-pricing.json:7504-7515`、`:7598-7609`、`:7634-7645`）。精确 miss 后 fuzzy：`contains_pricing_key("claude-opus-4-6-fast", "claude-opus-4-6")` 成立（前边界为空、后缀 `-fast` 首字节是边界、key 末位非数字）→ 命中基础条目 `claude-opus-4-6`（`:2667-2722`）。前提是该拼写不是 exact-only，否则 `allows_fuzzy_lookup_with_fallbacks` 拒绝 fuzzy 并转内嵌 models.dev（`:1664-1683`、`:1450-1453`）。fast 倍率由 `fast-multiplier-overrides.json` 的 `normalized_prefix["claude-opus-4-6"]=6.0` 提供（`SpeedMultiplierOverrides::multiplier_for` `:944-978`、`matches_model_suffix` `:2802-2808`），测试 `:5782-5842`（`claude-opus-4.7-20260416` → 6.0，无 tier 关系的 `claude-opus-4-70` → 1.0）。现实入口是 Claude adapter 在 `speed: fast` 时把**展示名**写成 `{model}-fast`（`claude/src/lib.rs:535-543`），金额仍按原始模型名 + `Speed::Fast`（`:525` → `cost.rs:110-115`）。
 
@@ -579,7 +579,7 @@ pub fn json_float(value: f64) -> Value {
 
 ### 未验证 / 存疑
 
-> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
+> **本节状态（第 8 轮实测后）**：§13.5 的对照表已逐条标出本节哪些条目被闭环（内嵌键集、models.dev 生成器、在线目录对比、格式化舍入等）与被部分闭环的边界；第 5 条（并发压力）与第 11、12 条（兜底表写入意图、Codex 未分类 token）仍开放。
 
 1. **内嵌 LiteLLM 快照的键集未直接检视**：`$OUT_DIR/litellm-pricing.json.deflate` 是编译产物，当时（第 1–7 轮）遵守「只读、不构建、不运行」约束未生成它；`claude-sonnet-4-20250514`、`claude-opus-4-6-fast` 等在该快照中的存在性结论来自仓库内测试断言（如 `pricing.rs:4931-4955`）与算法推演。**（第 8 轮已闭环：见 §13.5——构建产物被解压后与重放键集逐键逐值 0 差异，534 键。）**
 2. **`format_currency` 舍入模式未实验**：`{:.2}` 对 `x.xx5` 的边界行为未在测试中断言，本文只描述为「Rust 标准库浮点格式化」。

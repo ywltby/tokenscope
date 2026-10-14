@@ -51,8 +51,8 @@ rustc -O fmt-probe.rs -o fmt-probe.exe; .\fmt-probe.exe
 - LiteLLM 4084 条目 → 白名单筛掉 3550 → **内嵌 534 键**；其中 `claude-*` 裸键 23 个（仅 4.5 代及以后）。
   复核员进一步**解压真实构建产物** `out/litellm-pricing.json.deflate`，与本目录的 `embedded-keys.json`
   **逐键、逐字段、逐值 0 差异**——重放等价由此确证。
-- `claude-sonnet-4-20250514` / `claude-3-5-haiku-20241022` **无裸键**，靠模糊匹配落到
-  `global.anthropic.…-v1:0` / `us.anthropic.…-v1:0`（区域 Bedrock 形态；`apac.` 不在内嵌表）。
+- `claude-sonnet-4-20250514` **无裸键**，靠模糊匹配落到 `global.anthropic.…-v1:0`（区域 Bedrock 形态；`apac.` 不在内嵌表）；
+  `claude-3-5-haiku-20241022` 则是**内置兜底表的精确命中**（`pricing.rs:2191-2192`），不走模糊匹配。
 - 版本边界保护的实证样例是 `gpt-5.4-9` 与 `claude-opus-5-9`（均无模糊命中）；
   `gpt-500` 是被边界检查挡住、`opus550` 是无子串关系——不能用它们证明版本保护。
 - models.dev：内嵌 3049 键中 3021 键名仍在在线目录，28 个已消失（**仅比键名**，未比价格/档位）。
@@ -65,9 +65,13 @@ rustc -O fmt-probe.rs -o fmt-probe.exe; .\fmt-probe.exe
 
 ## 使用边界（重要）
 
-1. `replay-match.js` **只实现了 `pricing_key_matches` 与最长键裁决，没有实现 `exact_only` 门禁**。
-   因此它会把 `claude-opus-5-fast` 判成命中 `claude-opus-5`；真实运行时该名字由 models.dev
-   的档位条目作答。用它下结论时必须叠加这一层。
+1. `replay-match.js` **只实现了 `pricing_key_matches` 与最长键裁决（含等长时取字典序较小者）**，
+   有两处刻意未实现：
+   - **未实现 `exact_only` 门禁**：它会把 `claude-opus-5-fast` 判成命中 `claude-opus-5`，
+     真实运行时该名字由 models.dev 的档位条目作答；
+   - **未加载内置兜底表**（`put_builtin_pricing`）：它会把 `claude-3-5-haiku-20241022`
+     判成模糊命中区域键，真实运行时是兜底表的**精确命中**（`pricing.rs:2191-2192`）。
+   用它下结论时必须叠加这两层。
 2. 「3021 键名重叠」只是**集合比较**：价格数值、档位（tiers）、上下文上限、`exactOnly` 标记
    均未逐项比对。
 3. 运行记录只包含**结构与字段名**；所有命令均带 `--offline`，未写 HTTP 缓存、未改任何数据目录。

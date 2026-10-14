@@ -2,6 +2,7 @@
 
 > 只读仓库（第 1–7 轮为静态阅读；第 8 轮已构建并运行，见 §13.5）：`C:\Users\admin\AppData\Local\Temp\ccusage-research\ccusage`
 > HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`，v20.0.31（Rust workspace：`rust/crates/*` + `rust/adapters/*`）。
+> **本章裸文件名约定**：未写全路径的 `lib.rs`/`daily.rs`/`paths.rs` 指 `rust/adapters/claude/src/` 下同名文件；`loader.rs`/`report.rs`（统一报表语境）指 `rust/crates/ccusage-adapter-all/src/`；`output.rs`/`cost.rs`/`summary.rs`/`types.rs`/`date_utils.rs`/`utils.rs`/`project_names.rs` 指 `rust/crates/ccusage-core/src/`；`parser.rs` 指 `rust/crates/ccusage-cli-parser/src/parser.rs`；`main.rs`/`commands/mod.rs`/`blocks.rs`/`http.rs` 指 `rust/crates/ccusage/src/`。
 > 路径相对仓库根；行号一律为 `read` 实测（任务书给的若干行数来自 `Measure-Object -Line` 口径，偏小：`cost.rs` 实测 664 / `adapter-all/loader.rs` 1637 / `pricing.rs` 6181）。
 > 关键文件实测行数：`claude/src/lib.rs` 1582、`claude/src/daily.rs` 1182、`claude/src/paths.rs` 555、`ccusage/src/main.rs` 1063、`ccusage/src/commands/mod.rs` 1411、`adapter-all/src/loader.rs` 1637、`adapter-all/src/types.rs` 208、`core/src/cost.rs` 664、`core/src/types.rs` 219、`core/src/summary.rs` 759。
 
@@ -54,7 +55,7 @@ for path in [xdg.join("claude"), home.join(".claude")] { … }
 
 - 递归无深度限制；`read_dir` 失败静默返回（`common/lib.rs:19-21`）；**无任何忽略规则**（不读 `.gitignore`、不跳隐藏目录）；只收扩展名恰为 `jsonl` 的文件（`common/lib.rs:28`）。
 - 排序：`files.sort_by_cached_key(|path| path.to_string_lossy().into_owned());`（`paths.rs:77`）——**去重的输入之一**（谁先谁后决定幸存者）。测试 `main.rs:211-223`：父会话文件排在 `subagents/agent-a.jsonl` 之前。
-- 项目过滤只接受单段目录名：`is_project_path_segment` 拒绝空串、`.`、`..` 与含 `/` `\` 的值（`paths.rs:248-254`）；非单段过滤值退化为全量扫描（`lib.rs:972-982`）。
+- 项目过滤只接受单段目录名：`is_project_path_segment` 拒绝空串、`.`、`..` 与含 `/` `\` 的值（`paths.rs:248-254`）；非单段过滤值退化为全量扫描——判定与分支在 `rust/adapters/claude/src/paths.rs:69-75`（`lib.rs:972-982` 是覆盖同一行为的测试）。
 
 **1.3 路径 → 会话/项目身份**
 
@@ -548,7 +549,9 @@ let mut buckets = summarize_summaries_by_bucket(&daily, kind, WeekDay::Sunday);
 
 ## 未验证/存疑
 
-> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
+> **本节状态（第 8 轮）**：§13.5 的实测覆盖的是模型名匹配与运行时契约，与本节多数条目无关；
+> 本节各条仍是「静态阅读下的未决项」，其中「progress 包装行两路径是否分叉」「`--single-thread`
+> 对统一报表并行无效」等仍需构造样本或运行验证。
 
 - **progress 包装行的双路径分叉**：`read_usage_file` 用严格 `UsageEntry`（`lib.rs:514`，`message` 必填 `core/src/types.rs:13/23`），daily 用无标签联合接受 `data.message.message`（`daily.rs:182-204`）。「progress 行有 subagents 副本」时两者收敛（`main.rs:570-595` 断言相等），但**没有**测试覆盖「progress 行无任何副本」的情形——按代码推断两条路径 token 总量会不同，未实测。
 - **`Speed` 枚举严格性**：`speed` 只接受小写 `standard`/`fast`（`core/src/types.rs:36/60-65`），其它取值会让整行被静默丢弃；仓库内无该取值 fixture，属推断。

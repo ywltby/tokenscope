@@ -4,6 +4,7 @@
 - 证据约定：所有 `path:line` 相对 ccusage 仓库根（`C:\Users\admin\AppData\Local\Temp\ccusage-research\ccusage`），行号取实际文件行号（`read` 工具核对；`Measure-Object -Line` 会少算末行，不采用）
 - 方法：静态阅读（`read` / `grep` / `glob`）为主；第 8 轮已构建并运行 ccusage（`--offline`，见 §13.5），未修改任何样本
 - 覆盖：`rust/adapters/codex/src/{loader,parser,aggregate,types,replay,report,speed,paths,lib,compaction_tests}.rs`、`rust/adapters/codex/{README.md,src/README.md}`、`rust/adapters/common/src/lib.rs`、`rust/crates/ccusage-core/src/{pricing,model_aliases}.rs`、`rust/crates/ccusage-adapter-all/src/{loader,report}.rs`、`rust/crates/ccusage-cli*/src/*`、`docs/guide/codex/index.md`
+- **本章裸文件名约定**：未写全路径的 `parser.rs`/`loader.rs`/`aggregate.rs`/`types.rs`/`replay.rs`/`report.rs`/`speed.rs`/`paths.rs`/`lib.rs` 指 `rust/adapters/codex/src/` 下同名文件；`cost.rs`/`utils.rs` 指 `rust/crates/ccusage-core/src/`；`lib.rs`（统一报表语境）指 `rust/crates/ccusage-adapter-all/src/`。
 
 ### 0. 结论速览
 
@@ -313,10 +314,10 @@ match line_kind {
 
 ### 未验证/存疑
 
-> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
+> **本节状态（第 8 轮实测后）**：§13.5 已实测 `codex daily --json` 的字段与 `--speed` 三态（`auto` 与 `standard` 数值不同、`fast` 更高），并确认 `.jsonl.zst` 不被支持；本节其余条目（compaction 归因、1000 ms 阈值的经验依据、未分类 token 的档位归属）仍需真实数据或构造样本，仍未闭环。
 
 1. **`src/README.md:47-53` 描述的 MultiAgent V2 边界在代码里不存在**：文档说用 `event_msg.task_started` 作为「重放前缀结束」、用 `inter_agent_communication_metadata`（旧名 `inter_agent_communication`）的 `trigger_turn === true` 作为「子回合开始」来切分。全仓 grep（`task_started` / `trigger_turn` / `inter_agent_communication`）**只命中该 README**，解析器没有任何相关字符串或状态。实际实现是 §5.1 的「父前缀逐条相等 + 重写突发」。两者结论方向一致但机制不同，属于文档与代码不一致；因浅克隆（`git log` 仅 1 个提交）无法判定谁先谁后。
-2. **`docs/guide/codex/index.md:50` 与 `:116` 说「缺模型元数据的会话被跳过」，与代码冲突**：`parser.rs:813-818` 在无模型时回退 `gpt-5` 并标记 fallback（`src/README.md:63` 与同文档 `:54` 也是这么说的）。`aggregate.rs:328` 的 `model == None → skip` 分支在解析链上几乎不可达，目前只有手工构造事件的快照用例会命中（`lib.rs:1055-1068`）。
+2. **`docs/guide/codex/index.md:50` 与 `:116` 说「缺模型元数据的会话被跳过」，与代码冲突**：`parser.rs:813-818` 在无模型时回退 `gpt-5` 并标记 fallback（`rust/adapters/codex/src/README.md:63` 与 `docs/guide/codex/index.md:54` 也是这么说的）。`aggregate.rs:328` 的 `model == None → skip` 分支在解析链上几乎不可达，目前只有手工构造事件的快照用例会命中（`lib.rs:1055-1068`）。
 3. **replay 前缀匹配的精确性未在真实日志上验证**：`parser.rs:236` 要求 6 个字段完全相等；父日志被压缩/改写后完全走启发式。阈值常量本身与两处使用点已核实（定义 `parser.rs:122`，使用点 `parser.rs:171-173` 与 `parser.rs:256-261`），但注释给出的实测区间（10–40 ms vs 5.8–15.3 s）只来自源码注释（`parser.rs:114-118`），我未独立复现。
 4. **`detect_rewritten_burst` 会二次打开并重扫文件头**（`parser.rs:129-177`），与主扫描重复 IO；触发条件与频率、对超大 rollout 的影响未测。
 5. **session 身份是路径派生**（`parser.rs:892-904`），不是 Codex 的会话 UUID；同一会话被重命名/移动后，跨文件去重键（`aggregate.rs:29-42`，非 Session 分组时不含 session）与 `sessionId` 稳定性未验证。

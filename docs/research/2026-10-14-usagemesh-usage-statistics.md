@@ -11,8 +11,9 @@
 >
 > 研究方法：浅克隆两个仓库到临时目录后逐文件精读（符号定位 → 分段读原文 → 交叉核对调用点与常量），
 > 抽取出 `文件:行号` 级证据；关键断言由独立复核代理做对抗性验证（见附录 C 复核记录）。
-> **未运行任何二进制**（未 `cargo build`、未执行 `usagemesh` 子命令）、**未读取任何真实用户会话数据**
-> （未扫描本机 `~/.claude`、`~/.codex`、`~/.config/tokscale` 等目录内容），全部结论来自源码与仓库内文档。
+> 第 6 轮追加**实证复核**（见附录 D）：在**工作副本**内执行构建与测试（rust-cli `cargo test` 89 passed / tokscale 上游套件 1917 passed / web-ui `npm test` 191 passed，均 0 failed），
+> 并做联网核验（models.dev 目录全文统计、OpenAI 三个模型页原文、GitHub REST 文档与响应头、上游公开分支的**信封元数据**）。
+> **仍未做**：读取本机真实用户配置或会话内容（未扫描 `~/.claude`、`~/.codex`、`~/.config/tokscale`、`~/.config/usagemesh`）、未登录任何账号、未解密任何账本密文、未真机验证 macOS/Linux 调度分支与真实 `codex app-server` 字段契约。
 >
 > 证据分档：**【已核实】**（源码直证，且经交叉复核）／**【代核实】**（由二级取证代理逐行读取源码并给出行号，一级代理抽查后收录）／
 > **【未验证】**（结构推断、未实测，正文中显式标注）。
@@ -105,7 +106,13 @@
   - [C.3 第 2 轮发现与处置（修正落地审计）](#c3-第-2-轮发现与处置修正落地审计)
   - [C.4 第 3 轮（冻结稿抽检）与第 4 轮（覆盖度回填）](#c4-第-3-轮冻结稿抽检与第-4-轮覆盖度回填)
   - [C.5 残留不确定性与已知边界](#c5-残留不确定性与已知边界)
-  - [C.6 复核产物清单（可在本机临时目录复核）](#c6-复核产物清单可在本机临时目录复核)
+  - [C.6 第 6 轮（存疑项专项复核与实证）](#c6-第-6-轮存疑项专项复核与实证)
+  - [C.7 复核产物清单（可在本机临时目录复核）](#c7-复核产物清单可在本机临时目录复核)
+- [附录 D：实证复核记录（联网 / 运行）](#附录-d实证复核记录联网-运行)
+  - [D.1 联网实证结果](#d1-联网实证结果)
+  - [D.2 运行时验证（工作副本内）](#d2-运行时验证工作副本内)
+  - [D.3 由实证改写的存疑项（清单）](#d3-由实证改写的存疑项清单)
+  - [D.4 仍不可核实的项与条件](#d4-仍不可核实的项与条件)
 
 ## 1. 范围与方法
 
@@ -114,15 +121,15 @@
 | 研究对象版本 | UsageMesh `8cfb77f`（v2.7.0）+ 内嵌 tokscale-core `v4.14.0`（`1ec865d`） |
 | 仓库形态 | Rust CLI（`rust-cli/`，单 bin `usagemesh`）+ React 静态仪表盘（`web-ui/`）+ 本机 Web 工作台（`rust-cli/local-web/`）+ GitHub Actions（`.github/workflows/`） |
 | 读取范围 | `rust-cli/src/**`（21 个 Rust 文件）、`rust-cli/local-web/**`、`web-ui/src/**`、`web-ui/tests/**`、`docs/**`、`README*.md`、`.github/workflows/**`、以及 tokscale v4.14.0 的 `crates/tokscale-core/src/**` |
-| 不读范围 | 任何真实设备数据、任何线上账户、`~/.config/usagemesh` 运行态、GitHub 远端分支内容 |
-| 方法 | 符号级 grep 定位 → 逐函数精读 → 调用链闭合 → 常量/阈值交叉核对 → 独立代理对抗性复核 |
+| 不读范围 | 本机真实用户配置与会话内容（`~/.claude`、`~/.codex`、`~/.config/tokscale`、`~/.config/usagemesh`）、任何账号登录态、账本密文内容 |
+| 方法 | 符号级 grep 定位 → 逐函数精读 → 调用链闭合 → 常量/阈值交叉核对 → 独立代理对抗性复核（5 轮）→ 实证复核（副本内构建/测试 + 联网核对，见附录 D） |
 | 证据密度 | 每条结论附 `文件:行号`；文件路径缩写规则见下 |
 
 引用口径：
 - UsageMesh 侧一律用**仓库根相对路径**，如 `rust-cli/src/collector.rs:211`、`web-ui/src/lib/data.ts:15`、`docs/PRICING.md:13`；
 - tokscale 侧一律用 **crate 根相对路径**，如 `tokscale-core/src/lib.rs:4334`，指 `crates/tokscale-core/src/lib.rs`
   （固定于 tag `v4.14.0`，提交 `1ec865d`）；出现歧义处会显式写出完整路径。
-- 附录 A 给出「关键常量与阈值」速查，附录 B 给出「关键符号 → 文件:行号」索引，附录 C 记录多轮复核流程与发现台账。
+- 附录 A 给出「关键常量与阈值」速查，附录 B 给出「关键符号 → 文件:行号」索引，附录 C 记录多轮复核流程与发现台账，附录 D 记录第 6 轮的实证结果（联网与运行）。
 
 ## 2. 总架构与端到端数据流
 
@@ -336,7 +343,7 @@ v4.14.0 里存在**两套互不相同的本地读取实现**，UsageMesh 只吃�
 | `provider_id` | 客户端级 provider 解析（如 Claude 走 `claude_provider_choice` `claudecode.rs:675-682`，Codex 用 `session_provider` 或按模型推断，缺省 `"openai"` `codex.rs:628-632`）。 |
 | `session_id` | 客户端级会话身份。Claude：文件 stem，sidechain 时被父 session id 覆盖（`claudecode.rs:444-448`、`:524-537`）。Codex：文件 stem（`sessions/utils.rs:496-501`），fork 场景另有 `dedup_scope_id` 只进 dedup key。 |
 | `workspace_key` / `workspace_label` | 归一化后的项目路径 / 展示名，由各解析器 `set_workspace()` 填（`sessions/mod.rs:390-397`）。Claude 从路径里取 `.claude/projects/<slug>`（`claudecode.rs:771-802`）。 |
-| `timestamp` | **Unix 毫秒**。证据链：`sessions/mod.rs:1017` 注释 “Convert Unix milliseconds to a local YYYY-MM-DD date string.”；`sessions/mod.rs:1018-1020` `timestamp_to_date(timestamp_ms)`；`claudecode.rs:875-879` `dt.timestamp_millis()`；`codex.rs:909-913` 同样是 `timestamp_millis()`。⚠️ 个别冷门解析器可能写秒，见「未验证项」。UsageMesh 防御性地处理了两种单位（`collector.rs:38-44`）。 |
+| `timestamp` | **Unix 毫秒**。证据链：`sessions/mod.rs:1017` 注释 “Convert Unix milliseconds to a local YYYY-MM-DD date string.”；`sessions/mod.rs:1018-1020` `timestamp_to_date(timestamp_ms)`；`claudecode.rs:875-879` `dt.timestamp_millis()`；`codex.rs:909-913` 同样是 `timestamp_millis()`。⚠️ 单位需逐 lane 核对：少数解析器是**从秒换算**（`kimi.rs:302-309`、`trae.rs:74-78`、`kiro.rs:300-311`），`mux` 的 `lastRequest.timestamp` 在源码内**无单位说明**；逐条清点见「未验证项」§3.10-1。UsageMesh 防御性地处理了两种单位（`collector.rs:38-44`）。 |
 | `date` | `timestamp` 在**当时本机时区**下的 `%Y-%m-%d`，构造期由 `new_full` 得出（`sessions/mod.rs:367` `let date = timestamp_to_date(timestamp);`），之后可能被 `rebucket_date` / `rebucket_parsed_days` 覆写（`sessions/mod.rs:411-430`、`lib.rs:5286-5306`）。 |
 | `input`/`output`/`cache_read`/`cache_write`/`reasoning` | 五桶 i64，**语义因客户端而异**，见 §3.6。 |
 | `duration_ms` | `Option<i64>`，解析器算出的「本轮耗时」。Claude：`duration_between_ms(pending_request_start, completion)`（`claudecode.rs:689-690`、`:881-884`）。Codex 同构（`codex.rs:617-620`）。**仅 >0 才有值**（`(duration > 0).then_some(duration)`）。UsageMesh 用 `duration_ms.filter(\|v\| *v >= 0)` 再过滤一次（`collector.rs:258`）。 |
@@ -360,7 +367,7 @@ v4.14.0 里存在**两套互不相同的本地读取实现**，UsageMesh 只吃�
 - `counts: ClientCounts`（`clients.rs:1009-1034`）：`counts: [i32; ClientId::COUNT]` 定长数组，`get/set/add`（`clients.rs:1020-1031`）。
 - **`counts[c]` 与 `messages` 中 `client == c` 的元素个数不一定相等**，因为：
   - 部分客户端用 `should_keep_deduped_message` 先过滤再计数（如 Codex `lib.rs:4464-4471`）；
-  - 部分客户端用 `summed_parsed_message_count`（`lib.rs:5385-5390`，把 `message_count.max(0)` 累加）计数，与元素条数不同（如 Reasonix `lib.rs:4685-4688`、Zcode `lib.rs:4806`）；
+  - 部分客户端用 `summed_parsed_message_count`（`lib.rs:5385-5390`，把 `message_count.max(0)` 累加）计数，与元素条数不同（确证的 9 个不相等 lane 见 §3.10-6；例如 Reasonix `lib.rs:4685-4688`、Warp `lib.rs:5106-5107`。**Zcode `lib.rs:4806` 虽用 `summed`，但两条路径的 `message_count` 都是 1（JSONL 显式置 1 `zcode.rs:196`、SQLite 不置走默认 1），故 counts 与条数仍相等**）；
   - Devin Desktop 用**去重前**计数（`lib.rs:5142-5147`、`:5165` 注释：“Count before dedup so the `clients` command reflects how many Desktop sessions were actually found”）；
   - Kiro 是两个 lane 相加（`lib.rs:5017-5018` 与 `:5027` `counts.add(...)`）。
 - `processing_time_ms` 是整段 `parse_local_clients` 的墙钟（`lib.rs:4335` `Instant::now()`，`:5280` `start.elapsed().as_millis() as u32`）。
@@ -1646,7 +1653,7 @@ tool_result 的合并 `merge_claude_tool_result_duplicate`（`claudecode.rs:964-
 
 **表注**：
 - `证据档`：【已核实】= 一级逐行精读（只有 `claude`、`codex` 两行，§3.5.1–§3.5.2）；【代核实】= 二级取证代理逐行读源码并给出行号、一级抽查关键行号后收录（原始报告 `usagemesh-notes/raw/group-A.md`…`group-D.md`，标注规则见 §3.5 开头）。⇒ **本表除前两行外强度一律为【代核实】，勿按【已核实】读。**
-- `时间戳单位` 取自 §3.10 未验证项 1 的清单与各客户端小节；标「**未验证**」的格子是本文件未取得源码级证据的那一处（本表内是 `mux` 的单位），**不要按推断补齐**；表外同类项见 §3.10-1 的「仍未逐一确认」段（`zcode` SQLite 的 `started_at`、`kiro` workspace-session 直接用 mtime、`workbuddy`/`codebuddy` 扩展日志行首时间）。
+- `时间戳单位` 取自 §3.10 未验证项 1 的清单与各客户端小节；标「**未验证**」的格子是本文件未取得源码级证据的那一处（本表内是 `mux` 的单位），**不要按推断补齐**；表外同类项见 §3.10-1 的**已核实三例**（`zcode` SQLite 的 `started_at` = 毫秒且无单位探测、`kiro` workspace-session 锚定文件 mtime、`workbuddy`/`codebuddy` 扩展日志行首时间按本地时区解析）。
 - `token 是否含估算` 取自 §3.5.11：写「无」= 该客户端 token 全部来自上报字段、且未被 §3.5.11 列入估算名单。**§3.5.11 名单里的 `kiro` / `commandcode` / `zcode` 不在本表 24 行之列**——`kiro` 六条来源路径的 input/output 全走「显式 > context 占比推算 > 字符/4」三级链（`kiro.rs:234-252`、`:435`），`commandcode` 全量估算（`commandcode.rs:125-134`），`zcode` 仅在无 usage 时估算（`zcode.rs:156-173`）。
 
 **三条对 UsageMesh 最要命的横向结论**：
@@ -1680,7 +1687,7 @@ tool_result 的合并 `merge_claude_tool_result_duplicate`（`claudecode.rs:964-
 | `commandcode` | `Home/.commandcode/projects/*/*.jsonl`（`clients.rs:718-727`；**无本地 token**） | 毫秒（`parse_rfc3339_ms`，回退 mtime，`commandcode.rs:246-250`、`:78`） | **全量字符估算**（input 为每轮增量），`cache/reasoning` 恒 0（`commandcode.rs:125-134`、`:156-165`、`:197-206`） | `{session}:{assistant_index}`（`commandcode.rs:164`） | 【代核实】§3.5.10 |
 | `gjc` | `EnvVar(GJC_CODING_AGENT_DIR)/.gjc/agent` + `sessions/*.jsonl`（§3.3.2） | 毫秒（message `timestamp` 毫秒优先；记录级 ISO-8601 次之；再 mtime，`gjc.rs:161-166`） | `CamelUsage::to_breakdown`，`reasoning` 恒 0（`utils.rs:599-622`）；**`client` 可被 message `source` 覆盖**（`gjc.rs:194-198`，与 `lib.rs:198` 的 9router 特判呼应） | `{session}:{msg_id}`，否则 `gjc:{sid}:{ts}:{model}:{provider}:{五桶}:{line_hash}`（`gjc.rs:189-190`、`:82-89`） | 【代核实】§3.5.9 |
 | `junie` | `Home/.junie/sessions/*/events.jsonl`（§3.3.2） | 毫秒（`timestampMs`；回退 session id 的 `session-YYMMDD-HHMMSS`（Local）→ mtime；有显式时间戳时 `back_anchor`，`junie.rs:67-68`、`:172-193`、`:126-130`） | 五桶别名（`junie.rs:224-245`）；model 过 `resolve_alias`（`:88-90`）；`is_turn_start` 由 `UserPromptEvent` 置位（`:49-52`） | `junie:{sid}:{ts}:{model}:{五桶}:{cost}:{usage_index}`（`junie.rs:100-108`） | 【代核实】§3.5.9 |
-| `zcode` | `Home/.zcode/projects/*/*.jsonl`（`clients.rs:767-776`）+ SQLite `~/.zcode/cli/db/db.sqlite`（`scanner.rs:111-112`） | JSONL 毫秒（`parse_rfc3339_ms` + mtime，`zcode.rs:180-184`）；SQLite `started_at` → `completed_at − duration_ms` → `completed_at` → mtime（`:528-544`），**`started_at` 单位未验证**（§3.10-1） | 别名块 + 包含式归一（`zcode.rs:47-73`、`:246-277`）；SQLite legacy 无条件相减（`:428-434`）；**缺 usage 时字符估算**（`:156-173`） | `{session}:{idx}` / `zcode-sqlite:{id}`（`zcode.rs:194`、`:472`） | 【代核实】§3.5.10 |
+| `zcode` | `Home/.zcode/projects/*/*.jsonl`（`clients.rs:767-776`）+ SQLite `~/.zcode/cli/db/db.sqlite`（`scanner.rs:111-112`） | JSONL 毫秒（`parse_rfc3339_ms` + mtime，`zcode.rs:180-184`）；SQLite `started_at` → `completed_at − duration_ms` → `completed_at` → mtime（`:528-544`），**`started_at` = 毫秒 epoch、无单位探测**（§3.10-1 已核实） | 别名块 + 包含式归一（`zcode.rs:47-73`、`:246-277`）；SQLite legacy 无条件相减（`:428-434`）；**缺 usage 时字符估算**（`:156-173`） | `{session}:{idx}` / `zcode-sqlite:{id}`（`zcode.rs:194`、`:472`） | 【代核实】§3.5.10 |
 | `cherrystudio` | `AppData/CherryStudio/.claude/projects/*/*.jsonl`（§3.3.2；V1 根省略 `Data/Agents`，`cherrystudio.rs:3-9`） | 毫秒（顶层 `timestamp` 走 `parse_timestamp_str` + mtime，`cherrystudio.rs:344-347`） | Claude 式四桶，流式合并逐桶取 max（`cherrystudio.rs:350-356`、`:198-205`） | **无**（跨行别名并查集 `dedupe_usage_records:112-174`；构造器 `:359`） | 【代核实】§3.5.9 |
 | `dsh` | `EnvVar(DSH_HOME)/.dsh` + `sessions/<encoded-cwd>/<sid>/session.jsonl(.zstd)`（§3.3.2、`dsh.rs:3-8`） | 毫秒（事件 `time` **原值直用**；缺失或 `≤0` 跳过、无回退，`dsh.rs:288-293`） | `output ← outputTokens − reasoningTokens`；`cache_write ← cacheWriteTokens`；`reasoning ← reasoningTokens`（`dsh.rs:423-433`） | `dsh:{kind}{identity}:{ts}:{provider}:{model}:{五桶}`（`dsh.rs:370-377`） | 【代核实】§3.5.10 |
 | `mcode` | `Config/headless/mcode/*.jsonl`（§3.3.2；`stream-json` 输出，`mcode.rs:3-8`） | 毫秒（`normalize_timestamp`：`0 < t < 1e10` 视为秒 ×1000，`mcode.rs:170-176`） | 四桶、`reasoning` 恒 0（`mcode.rs:156-164`）；`agent = "headless"`（`:144`） | `mcode:{sid}:{turn_id}:{index}:{四桶}`（`mcode.rs:127-133`） | 【代核实】§3.5.9 |
@@ -1756,6 +1763,11 @@ crates/tokscale-core/src/sessions/senpi.rs:44:  {"type":"message",...,"usage":{.
 ```
 
 五个桶全部相加，且用 `saturating_add` 防溢出。
+
+**与计价口径的一致性（第 5 章 §5.12-4 的本章侧证据）**【已核实】：tokscale v4.14.0 自身就是按 `output + reasoning` 计价的——`pricing/lookup.rs:1879-1882` 把两者都按 output 单价累加（`:1880` `let output_clamped = output.max(0).saturating_add(reasoning.max(0)) as f64;`）。⇒ **UsageMesh 的 `output + reasoning` 公式与 tokscale 完全一致**，不存在「tokscale 对、UsageMesh 错」的差异。
+⇒ 真正的**重复计费风险来自「未把 `reasoning` 从 `output` 中减去」的解析器**（即上游语义里 `reasoning` 是 `output` 子集、而解析器把两者各自原样透传）。本轮把 56 个解析器文件全量分类，**未相减的 B 类共 12 个模块、13 处位置（`copilot` 占两处）**：`jcode.rs:110-129`；`copilot.rs:429` + `:798-817`（`normalize_input_tokens` 只扣 `cache_read`，`output` 与 `reasoning` 各自 `max(0)` 原样保留）；`copilot_vscode.rs:212-229`；`droid.rs:474-480`；`antigravity.rs:74-101`；`qwen.rs:108-141`；`tencent_buddy.rs:91-122`（含 `codebuddy`）；`opencode_schema.rs:663-698`（`opencode`/`kilo`/`micode` 共用）；`hermes.rs:137-151`；`fx.rs:304-310`；`junie.rs:224-245`；`zcode.rs:435-442`（现代 schema 且 `computed_total_tokens` 为 NULL 的分支）。按客户端名口径即 §5.12-4 所称「**B 类未减的 13 个客户端**」的清单（`jcode`、`copilot` OTEL、`copilot_vscode`、`droid`、`antigravity`、`qwen`、`tencent_buddy`/`codebuddy`、`opencode_schema` 三宿主、`hermes`、`fx`、`junie`、`zcode` 的 NULL-total 分支）。
+对照面：已相减、或 `reasoning` 恒 0 的解析器**不受影响**——例如 Codex（`codex.rs:191-215`，注释 `:195-208` 明说 `reasoning_output_tokens` 是 `output_tokens` 的子集，不减会「billed it twice」）、Grok（`grok.rs:243`、`:752`）、DSH（`dsh.rs:416-428`）、Pi 系（`pi.rs:250-267`）、Kimi（`kimi.rs:74`，reasoning 恒 0）。
+⚠️ 该风险的**外部不确定项**（仓库内无法判定）：`opencode_schema` 路径的 `tokens.output` 与 `tokens.reasoning` 关系零注释零测试；Copilot OTEL 的 `gen_ai.usage.reasoning.output_tokens` 属性语义；`copilot_vscode` 的 `toolCallRounds[].thinking.tokens` 与 `completion_tokens` 的关系。这三项需与 provider 账单或上游 schema 比对才能定案。
 
 #### 3.6.3 饱和累加
 
@@ -1946,6 +1958,7 @@ Claude 的**文件内**去重与跨文件去重是两套：
 - **「cache_write_1h 是 cache_write 的子集，且不加进 `total()`」这个约定是 v4.18.0 的**。v4.14.0 的 `total()`（`lib.rs:271-279`）五桶相加，没有第六桶。
 - `ParsedMessage` 在 v4.18.0 也加了同名字段（`v4.18.0:lib.rs:363`，位于 `cache_write` 之后、`reasoning` 之前，doc 注释指向 `TokenBreakdown::cache_write_1h`）。
 - 行号已回源补齐（`git show v4.18.0:crates/tokscale-core/src/lib.rs`）：`TokenBreakdown.cache_write_1h` 在 `v4.18.0:lib.rs:261`，`ParsedMessage.cache_write_1h` 在 `v4.18.0:lib.rs:363`。
+- **填充点与计价分档已核实**（本轮回源，逐行证据见 §3.10-8）：真正写该桶的有 `claudecode`（`v4.18.0:sessions/claudecode.rs:730`，另 `:797-801` 对整批消息钳到 `cache_write` 以内）与 `cherrystudio`（`v4.18.0:sessions/cherrystudio.rs:213`、`:216`、`:318`、`:370`）两条显式路径，取值源为 `v4.18.0:sessions/utils.rs:203-211` 的 `extract_cache_write_1h`（读 `usage.cache_creation.ephemeral_1h_input_tokens`）；此外还有一条**共享 helper 路径**：`v4.18.0:sessions/utils.rs:649-659` 的 `AnthropicUsage::to_breakdown`（`:656` 写 `cache_write_1h: self.cache_write_1h_raw().min(cache_write)`），其使用者 `augment`（`v4.18.0:sessions/augment.rs:88` 字段类型、`:203` 调用）因此在源字段非零时也会带出非零 1h 桶 ⇒ **可产出非零值的解析器实为 3 个**；其余（`gjc`/`kimi`/`pi`/`tencent_buddy`/`zcode` 等）经各自类型仍为零，`CamelUsage::to_breakdown` 显式写 0（`utils.rs:703` 注释可证）。定价侧按 5m / 1h 分档（`v4.18.0:pricing/lookup.rs:2341-2342`、`:2440-2461`）。该字段由提交 `2cd6c64`（#1374）引入，`git tag --contains 2cd6c64` 仅 `v4.18.0`。
 
 #### 3.8.3 `ParsedMessage` 加了 cost / cost_source / service_tier（16 → 20 字段）
 
@@ -2031,7 +2044,7 @@ Claude 的**文件内**去重与跨文件去重是两套：
 | **部分客户端无 `dedup_key`**（比例无法用「约 1/3」概括，无键名单见 §3.5.13） | `lib.rs:5378-5383`：`dedup_key == None` 的消息一律保留且不参与去重 ⇒ 同树双份转录会双计 | §3.5.13 |
 | **`since` 增量扫描不省 IO** | 通道 A 不走 `message_cache`（§3.7.1）；`since` 只在解析后过滤（`lib.rs:5275`） | `lib.rs:4334-5282` 无 `message_cache` 引用 |
 | **UsageMesh 的 `since` 取自本机 `Local`，而 tokscale 的 `date` 可能被 settings 钉住** | `main.rs:394-396` 用 `Local::now()`；`parse_local_clients` 会读 `scanner_settings.bucket_timezone` 并 rebucket（`lib.rs:5273`）+ 按其过滤（`lib.rs:5404`）。若本机 `~/.config/tokscale/settings.json` 钉了非本机时区，**UsageMesh 的「最近 2 天」窗口与它拿到的 `date` 处于两个不同时区**，`merge_incremental`（`collector.rs:375-401`）的 `row.date < since` 裁剪就会出现边界日误差 | `main.rs:364-401`、`lib.rs:5273`、`lib.rs:5404`、`collector.rs:375-401` |
-| **`counts` 不能当行数** | Devin Desktop / Reasonix / Zcode / Kiro 等（§3.4.4） | `lib.rs:5142-5167`、`:4685-4688`、`:4806`、`:5017-5027` |
+| **`counts` 不能当行数** | 9 个不相等 lane（Devin Desktop / Reasonix / Kiro / Crush / Hermes / Warp / Zed / Grok / Synthetic，逐一证据见 §3.10-6；**Zcode `lib.rs:4806` 经核实不属此列**） | `lib.rs:5142-5167`、`:4685-4688`、`:4806`、`:5017-5027`、`:5047-5048`、`:4980-4981`、`:5106-5107`、`:5002-5003`、`:5218-5219`、`:5237-5245` |
 | **两次调用 `parse_local_clients` 的成本不会共享任何结果** | `collector::collect`（`collector.rs:211`）与 `local::activity::scan`（`activity.rs:12`）各自独立全量扫描 | 两处调用点 |
 | **token 数在 5 类客户端上是「猜」的** | Kiro（无显式上报时走 context 占比推算 / 字符估算）、CommandCode 全量字符估算；zcode 无 usage 时估算；freebuff 全量估算；goose 的 `reasoning` 是差值推导（源码自标 INFERRED）。**`ParsedMessage` 无来源可信度字段，UsageMesh 无法标注** | §3.5.11 |
 | **Kiro 的「请求数」也可能不可比** | `message_count` 共**七处赋值、覆盖六条来源路径**（IDE 一条路径两处）：`total_request_count.unwrap_or(1).max(1)` / 1 / `flat_assistant_turns.max(1)` / 1 / 1 / `prompt_log_count.max(1)` / 1 | `kiro.rs:280`、`:619`、`:669`、`:915`、`:1060`、`:1149`、`:1311` |
@@ -2057,24 +2070,56 @@ v4.14.0 的注册表里有、但 UsageMesh 收不到任何消息的客户端（*
 
 ### 3.10 未验证项
 
-1. **`ParsedMessage.timestamp` 是否真的对通道 A 分派的 47 个 ClientId 全部都是毫秒——大部分已核实，少数仍未确认**。
+1. **`ParsedMessage.timestamp` 是否真的对通道 A 分派的 47 个 ClientId 全部都是毫秒——已核实**（原「少数仍未确认」的三项已于本轮核到源码级证据，见下；唯一仍无单位说明的是 `mux` 的 `lastRequest.timestamp`，见 §3.5.13）。
    已核实为毫秒：Claude（`claudecode.rs:875-879`）、Codex（`codex.rs:909-913`）、Grok（`grok.rs:380`、`:696-699`、`:1319`、`:1443-1456`）、Kimi legacy（**秒 ×1000**，`kimi.rs:302-309`）与 kimi-code（毫秒，`kimi.rs:236-239`）、gjc（`gjc.rs:161-166`）、junie（`junie.rs:67-68`）、mcode（`mcode.rs:170-176`）、trae（**秒 ×1000**，`trae.rs:74-78`）、warp（`warp.rs:41-45`）、hermes（**秒 → ms**，`hermes.rs:99`/`:114`/`:144`、`utils.rs:518-529`）、dsh（事件 `time` i64 **直用不换算**，`dsh.rs:288-293`）、devin CLI（SQL 内 `created_at * 1000`，`devin.rs:163`/`:169`）、copilot_desktop（`parse_iso8601_timestamp_ms` `:592-624`）、copilot_vscode（**`timestamp` 直用、缺失即 0、无解析函数**，`copilot_vscode.rs:179`）、antigravity（`antigravity.rs:50`/`:111-121`）、antigravity_cli（秒+纳秒 → ms，`antigravity_cli.rs:646`）、kiro CLI（**秒 ×1000**，`kiro.rs:300-311`）、qwen / zed / claude 系均走 `parse_timestamp_str`（`utils.rs:223-257`）、goose（`parse_created_at` + `timestamp_secs_to_ms`，`goose.rs:31-46`/`:111`）。
-   **仍未逐一确认**：`zcode` SQLite 的 `started_at`（`zcode.rs:528-544` 注释标「按毫秒使用」但无换算）、`kiro` workspace-session（直接用 mtime）、`workbuddy`/`codebuddy` 的 extension log 行首时间（`tencent_buddy.rs:426-462`，本地 naive 优先）。
+   该三项**已于本轮逐条核实（不再是「仍未逐一确认」）**，三例具体路径如下：
+   - `zcode` SQLite 的 `started_at`（`zcode.rs:528-544`）是**毫秒 epoch**、**无单位探测**：`resolve_zcode_timestamp` 对 `started_at.filter(|v| *v > 0)` 直接原样返回（`zcode.rs:534-536`），不做 `<1e12` 的秒/毫秒二判；**三级兜底**为 `started_at` → `completed_at − duration_ms`（`:538-539`，`back_anchor_timestamp`）→ `completed_at`（`:540`）→ 文件 mtime（`:542`）。单位为毫秒另有 SQL 直接取列（`zcode.rs:291`、`:319`）、schema 声明 `started_at INTEGER`（`:619-620`）与测试断言 `1_782_718_000_000_i64`（`:896-898`）三重佐证。
+   - `kiro` 的 workspace-session（`kiro.rs:1067-1153`）**没有事件时间**：`parse_kiro_global_storage_file` 取 `file_modified_timestamp_ms(path)`（`kiro.rs:838-859`，赋值 `:839`、传入 `:858`）作为 `fallback_timestamp`；`try_parse_kiro_workspace_session` 全程不读日志内任何时间字段，直接把该值当消息时间戳（`kiro.rs:1133-1148`，字段位置 `:1138`）。即该路径锚定**文件 mtime**，不是日志时间。
+   - `workbuddy`/`codebuddy` 的 extension log 行首时间（`tencent_buddy.rs:426-462`；核心解析 `:426-448`）：`parse_log_timestamp_ms` 剥 `[...]` 前缀 → 按空格切日期/时间 → 用 `/` 或 `-` 拆三段日期并归一为 `%Y-%m-%d %H:%M:%S[.f]` → **`chrono::Local` 按本地时区解释** → `timestamp_millis()`（`:450-457`）；日期拆不出三段时回退 `utils::parse_timestamp_str`（`:441-443`）。调用点 `parse_log_timestamp_ms(line).unwrap_or(fallback_timestamp)`（`:344`，`fallback_timestamp` = 文件 mtime，`:302`）⇒ 解析失败回退 mtime。
    结论：**UsageMesh 保留 `abs() < 1e11 ⇒ *1000` 的归一仍是必要的**，因为上游既有「秒 ×1000 后产出毫秒」也有「原值直用」两种写法，且 `parse_timestamp_value`（`utils.rs:203-221`）本身还会按 1e12 阈值二判。
 2. **客户端覆盖与 v4.14.0 注册表的口径差异**：`kilo`/`goose`/`crush`/`trae`/`zed`/`kimi`/`grok`/`zcode`/`dsh`/`droid`/`pi`/`jcode`/`openclaw`/`workbuddy`/`codebuddy` 全部存在；`copilot` 是**一个注册项**（`clients.rs:586`）但**三个解析器**（`copilot.rs` / `copilot_desktop.rs` / `copilot_vscode.rs`，由 `lib.rs:4474-4519` 合成）；`micode` 的注册名是 `MiMoCode` → `as_str() == "micode"`（`clients.rs:728-737`）；`antigravity` 与 `antigravity-cli` 是**两个不同客户端**（`clients.rs:619` 与 `:744`）；**`fx` 有 `ClientId::Fx`（`clients.rs:979`）而 `synthetic` 没有 `ClientId`**（纯字符串，§3.3.4）。
 3. **`ClientId::MiMoCode` 的变体名 vs 文档所写的 `Micode`**：grep `Micode`（不加 `o`）在整个 `crates/tokscale-core/src` 下**无命中**；`lib.rs:1707` 用 `ClientId::MiMoCode` 合法，`clients.rs:728` 的变体是 `MiMoCode`。⇒ 正确写法是 `MiMoCode`，`as_str()` 才是 `"micode"`。
 4. **`ScannerSettings` 的实际取值未验证**。UsageMesh 的 `load_scanner_settings`（`collector.rs:78-93`）会读本机 `dirs::config_dir()/tokscale/settings.json`。本会话**未读取、也未打印任何真实用户配置文件内容**（遵守约束）。⇒ **本机 `bucket_timezone` 究竟是 `None` 还是已钉、`extra_scan_paths` 里有什么，全部未验证。** 这一项直接决定 §10.1 的风险 R2/R9 在当前机器上是否已实际发生。
 5. **一级取证的阅读覆盖率**（二级代理的覆盖标注见各条末尾）。`lib.rs` 14921 行、`claudecode.rs` 3473 行、`codex.rs` 2967 行、`message_cache.rs` 5473 行。完整/近完整读过的区段：`lib.rs:1-560`、`:715-1240`、`:4140-5440`、`:5468-5599`；`claudecode.rs:400-610`、`:610-850`、`:865-1050`、`:1078-1137`；`codex.rs:20-240`、`:308-780`、`:900-1060`、`:1120-1200`；`clients.rs:1-120`、`:200-1020`；`scanner.rs:1-190`、`:320-500`、`:1380-1460`；`bucket_tz.rs:1-160`；`paths.rs:40-169`；`sessions/mod.rs:1-330`、`:330-500`、`:1000-1040`；`synthetic.rs:30-140`；`utils.rs:200-260`、`:488-547`；`aliases.rs:1-110`、`:126-175`、`:183-227`；`kiro.rs` 只 grep 了 `estimate_tokens` 相关行。其余（尤其 `message_cache.rs` 5.4k 行、`pricing/*`、`aggregator.rs`、`wiki.rs`、`content_extractor.rs`、`sessionize.rs`、`mcp.rs`）**只做了定向 grep**。
-6. **`counts` 与 `messages` 的差异集合**未穷举。已确证至少 Devin Desktop（`lib.rs:5142-5165`）、Reasonix（`:4685-4687`）、Zcode（`:4806`）、Kiro（`:5017-5027`）、Copilot Desktop（`message_count` 仅首条 1）、Hermes（`hermes.rs:208-223` 只在第一行带计数）、以及所有用 `summed_parsed_message_count`（`:5385-5390`）的 lane 存在差异；**是否还有别的 lane 也存在差异，未逐一验证。**
-7. **`parse_local_clients` 里 `lib.rs:4454` 计算的 `is_headless` 是否真的生效**。`apply_headless_agent`（`lib.rs:4184-4188`）只在 `message.agent.is_none()` 时写 `"headless"`。Codex 解析器自身在 headless 会话里已写 `Some("headless")`（`codex.rs:622-626`），所以这里的调用可能是冗余的。**未验证在哪些实际路径下它才是唯一的写入者。**（通道 B 的同等逻辑在 `lib.rs:857-874`。）
-8. **`cache_write_1h` 在 v4.18.0 的具体填充点**未验证（只确认了字段与注释存在，未追谁写它、哪几个客户端填、`apply_pricing_if_available` 是否按 1h 档计价）。
-9. **v4.15.0 / v4.16.0 / v4.17.0 的中间差异**未逐版本追溯。本克隆只有 `v4.14.0`、`v4.17.0`、`v4.18.0` 三个标签，`v4.15.0` 不存在（`git rev-parse v4.15.0` 实报 `fatal: ambiguous argument 'v4.15.0': unknown revision or path not in the working tree.`，退出码 128；`Needed a single revision` 是 `rev-parse --verify` 系的报错文本，与本命令不符）。⇒ **「v4.14.0 vs v4.18.0」的差异清单里，无法区分哪些是 v4.17.0 引入的。**
+6. **`counts` 与 `messages` 的差异集合**——已在本轮逐 lane 穷举：**不相等者共 9 个 lane**（其余 lane 含「用 `summed_parsed_message_count`（`lib.rs:5385-5390`）但解析器把 `message_count` 恒写 1 或从不写」的那一批，已逐一核对为相等）。
+
+| lane | counts 行号 | 差异机制（解析器赋值点） | 方向 |
+|---|---|---|---|
+| Reasonix | `lib.rs:4685-4687`（`set` 在 `:4688`） | `reasonix.rs:132` `record.requests.clamp(1, i32::MAX)`——计的是 Σ `message_count` 而非条数 | counts ≥ 条数 |
+| Kiro（JSON + SQLite 两批） | `lib.rs:5017-5027`（JSON `:5017-5018`；SQLite `:5026-5027` 用 `counts.add`） | `kiro.rs:280` `total_request_count.unwrap_or(1).max(1)`、`:669` `flat_assistant_turns.max(1)`、`:1149` `prompt_log_count.max(1)` | counts ≥ 条数 |
+| Crush | `lib.rs:5047-5048` | `crush.rs:104` `bucket.message_count.max(0)`；`crush.rs:130` 置 **0** | 双向（按天桶偏大，无助理桶的会话记 0） |
+| Hermes | `lib.rs:4980-4981` | `hermes.rs:155` `row.message_count.max(0)`；`hermes.rs:222` 置 **0**（计数只挂每个 session 的第一行，`hermes.rs:208-223`） | counts ≤ 条数 |
+| Warp | `lib.rs:5106-5107` | `warp.rs:83`、`:109` = `requests_used`（账户/工作区**聚合**请求数） | counts ≫ 条数 |
+| Zed | `lib.rs:5002-5003` | `zed.rs:152`、`:165` = `thread_usage` 的 `request_count`（`:208-211`、`:244`） | counts ≥ 条数 |
+| Grok（unified 路径） | `lib.rs:5218-5219` | `grok.rs:762` `i32::from(message.is_turn_start)`（大多数消息记 0） | counts ≤ 条数 |
+| Devin Desktop | `lib.rs:5142-5165`（去重前计数，注释 `:5142-5143`；`set` 在 `:5167`，注释 `:5162-5164`） | `messages` 只放**去重后**（`lib.rs:5148-5151`），counts 用去重前的 `devin_desktop_raw_count`（`:5144`、`:5165`） | counts ≥ 条数 |
+| Synthetic | **无 `counts.set`**（`lib.rs:5237-5245` 只 `messages.extend`） | synthetic 消息进入 `messages` 但不进 `counts` | counts 缺项 |
+
+另有两处**计数定稿之后**的隐性差异：`messages` 会被 `lib.rs:5249-5254`（按请求的 clients retain）与 `lib.rs:5275`（`filter_parsed_messages` 日期过滤）各裁剪一次而 `counts` 不变 ⇒ 带 `clients`/`since`/`until` 参数时「counts 之和 ≠ 最终 messages 条数」是设计如此。**Copilot Desktop**（`message_count` 仅首条 1）不在上表：它所在 lane 用 `.len()` 计数，counts 与条数仍相等，差异只体现在「请求数」语义上；Zcode 同理（`lib.rs:4806` 用 `summed`，但解析器 `message_count` 恒 1）。
+7. **`parse_local_clients` 里 `lib.rs:4454` 计算的 `is_headless` 是否真的生效——已核实：`apply_headless_agent` 不是永远冗余**。`apply_headless_agent`（`lib.rs:4184-4188`，判定函数 `is_headless_path` `:4180-4183`）只在 `message.agent.is_none()` 时写 `"headless"`；headless 根由 `scanner.rs:333-353` 给出（`$TOKSCALE_HEADLESS_DIR` 或 `<home>/.config/tokscale/headless`、`<home>/Library/Application Support/tokscale/headless`），并确实进入 Codex lane——`scanner.rs:1777-1785` 为每个根注册 `<root>/codex` 为 `ClientId::Codex` 扫描任务，`lib.rs:4450-4462` 即该 lane 的解析循环（`:4458` 逐文件调用）。两条路径的实际分工：
+   - **对 `codex exec` 会话确实冗余**：`codex.rs` 自己在两条产消息路径上都写 `Some("headless")`（`codex.rs:622-626` 的 `token_count` 路径、`codex.rs:1157-1161` 的 headless-line 回落路径，均由 `state.session_is_headless` 决定，而该状态只在 `session_meta` 的 `source == "exec"` 时置真：`codex.rs:431-434` + `codex_source_is_exec` `:777-778`），此时 `lib.rs` 的调用是双写。
+   - **对 headless 目录里「无 `session_meta` 或 `source ≠ exec`、且无 `agent_nickname`」的会话，它是唯一写入者**：此时 `codex.rs` 产出 `agent = None`，`"headless"` 只能由 `apply_headless_agent` 写入。佐证测试 `codex.rs:2724-2733` `test_headless_fallback_defaults_to_openai_without_session_meta` 在无 `session_meta` 的输入上断言 `assert!(messages[0].agent.is_none())`（`:2733`）——即解析器侧确实留空。
+   ⇒ 生效位置两处：`lib.rs:871`（`finalize_codex_messages`，带定价/缓存通道，`857-874`）与 `lib.rs:4458`（`parse_local_clients` 通道）。
+8. **`cache_write_1h` 在 v4.18.0 的具体填充点——已核实**（字段与 doc 注释见 §3.8.2）：
+   - 定义 `v4.18.0:lib.rs:261`（doc `:257-260`）；`TokenBreakdown::total()`（`v4.18.0:lib.rs:279-287`）**不含该桶**（仍只有 `input + output + cache_read + cache_write + reasoning`），故不会与 `cache_write` 重复计入；`add_assign_saturating`（`v4.18.0:lib.rs:270-277`）逐桶包含它。
+   - **真正填充该桶的解析器实为 3 个**（非零赋值）：`claudecode`——`v4.18.0:sessions/claudecode.rs:730` `cache_write_1h: usage.cache_write_1h_raw()`，并在 `:797-801` 对整批消息钳到 `cache_write` 以内（`min(cache_write)`），另有 `:965`、`:1017-1020`（合并取 `max`）、`:1582`、`:1776`、`:1813`；`cherrystudio`——`v4.18.0:sessions/cherrystudio.rs:213`、`:216`（`max` 合并后 `min(cache_write)`）、`:318`（`extract_cache_write_1h(usage).min(cache_creation)`）、`:370`；**共享 helper 路径**——`v4.18.0:sessions/utils.rs:649-659` 的 `AnthropicUsage::to_breakdown`（`:656` 写 `cache_write_1h: self.cache_write_1h_raw().min(cache_write)`），使用者为 `augment`（`v4.18.0:sessions/augment.rs:88` 字段类型、`:203` 调用），源字段非零时同样带出非零 1h 桶。取值来源：`v4.18.0:sessions/utils.rs:203-211` `extract_cache_write_1h`（读 `usage.cache_creation.ephemeral_1h_input_tokens`，钳零）与 `:664-672` `cache_write_1h_raw()`。其余 `sessions/*.rs` 中的 `cache_write_1h: 0` 是**零填充**（`CamelUsage::to_breakdown` 显式写 0，`utils.rs:703` 注释可证），不构成填充点。
+   - **定价侧按 5m / 1h 分档**：`apply_pricing_if_available`（`v4.18.0:lib.rs:5258-5280`）把整份 `message.tokens` 交给计价层；`v4.18.0:pricing/lookup.rs:2306` 起接收 `cache_write_1h` 参数，`:2341-2342` 拆出 `cache_write_1h_clamped` 与 `cache_write_5m_clamped = cache_write − 1h`，`:2440-2461` 在 `hourly_base` 存在时把 5m 与 1h **分别计价后相加**（门控见 `v4.18.0:pricing/litellm.rs:158`、`:165`、`:178`、`:274`）。
+   - **版本归属**：引入提交 `2cd6c64`（2026-09-29，`fix(claudecode): price Claude Code 1-hour cache writes at the 1-hour rate (#1374)`），`git tag --contains 2cd6c64` 结果**只有 `v4.18.0`**；`git grep cache_write_1h v4.17.0 -- crates/tokscale-core/src/lib.rs` **无输出**，v4.14.0 快照全 crate 零命中 ⇒ **该字段仅 v4.18.0 起存在**（v4.17.0 及以前没有）。
+9. **v4.15.0 / v4.16.0 / v4.17.0 的中间差异**未逐版本追溯。本文只**抽样对照** `v4.14.0`（UsageMesh 钉死，`1ec865d4`）与 `v4.17.0` / `v4.18.0`；`v4.15.0`、`v4.15.1`、`v4.16.0` **亦已发布**——本轮 `git ls-remote --tags https://github.com/junhoyeo/tokscale.git` 实测：`v4.15.0` = `7ad8827a`、`v4.15.1` = `a3209ff0`、`v4.16.0` = `cbe3330d`、`v4.17.0` = `dcf8d365`、`v4.18.0` = `d4d1c751`、`v4.14.0` = `1ec865d4`（**上一版此处「v4.15.0 不存在/从未发布」的表述是错的，已按实测更正**）。本地研究克隆只 fetch 了 `v4.14.0`/`v4.17.0`/`v4.18.0` 三个标签，故 `v4.15.0`/`v4.15.1`/`v4.16.0` 三个中间版本**不在本地、未逐版本追溯**。⇒ **「v4.14.0 vs v4.18.0」的差异清单里，无法区分哪些是 v4.17.0 引入的，也无法区分哪些是 v4.15.0 / v4.15.1 / v4.16.0 引入的。**
 10. **UsageMesh 的 `since` 实参格式已追到，但语义链未端到端验证**。已核实：`main.rs:394-396` 生成 `(Local::now().date_naive() - Duration::days(2)).format("%Y-%m-%d")`，`main.rs:389` 全量分支传 `None`；`merge_incremental`（`collector.rs:375-401`）按 `row.date.as_str() < since` 裁剪旧行、并按 `partial.requests` 的最小 `timestamp_ms` 裁剪旧请求明细。格式确认是 `YYYY-MM-DD`。**未验证**：`overlap_start`/`stale_cache` 判定（`main.rs:364-367`）与 `activity.rs:9-11` 的 89 天窗口在跨时区/跨月边界上的行为。
-11. **`error` 语义**：`parse_local_clients` 返回 `Result<ParsedMessages, String>`。已核实唯一的 `Err` 来源是 `get_home_dir_string` 失败（`lib.rs:4337` + `:723-725`）。**其余客户端解析失败是否全部静默**（读文件失败返回空 `Vec`，如 `claudecode.rs:476-479`、`codex.rs:1012-1015`；SQLite 打不开返回空，如 `opencode_schema.rs:853`、`synthetic.rs:113-115`）未穷举，但抽样到的都是静默。⇒ UsageMesh 的 `.context("Tokscale failed to scan local AI coding-tool sessions")`（`collector.rs:220-221`）几乎只在「找不到 home」时触发。
+11. **`error` 语义**：`parse_local_clients` 返回 `Result<ParsedMessages, String>`。已核实唯一的 `Err` 来源是 `get_home_dir_string` 失败（`lib.rs:4337` + `:723-725`）；该区段内另一处 `?`（`lib.rs:4403` `sessions::opencode::parse_opencode_file(path)?`）位于 `filter_map` 闭包内、只把该文件变成 `None`，不中断整轮扫描 ⇒ **能中断整轮扫描的只有 `lib.rs:4337`**。⇒ UsageMesh 的 `.context("Tokscale failed to scan local AI coding-tool sessions")`（`collector.rs:220-221`）几乎只在「找不到 home」时触发。
+   **「其余客户端解析失败全部静默」的表述需更正——已核实的非静默点在 SQLite 层，且受参数门控**：`sessions/utils.rs:424-445` `sqlite_for_each_row` 打开库失败时 `warn!(db_path, what, error, "Failed to open session database")`（`:434-439`）并返回 `SqliteScan::NotOpened`（`:441`；四态枚举 `:307-317`，谓词 `ran()` `:321-323`、`prepared()` `:330-332`）；**但该 warn 只在调用方传了 `what: Some(..)` 时输出**——探测可选表的解析器传 `None` 时完全静默（`:338-340` 注释：“a missing table there is the expected case, not a fault worth logging on every run”）。行级行为：`sink` 拒绝的行被跳过、扫描继续，`step` 出错则终止该库迭代（`:342-345`）；`sessions/kiro.rs:1237` 传 `Some("Kiro conversation")` 故库级失败会 warn，其行级 JSON 解码错误则被吞成 `Ok(())`（`:1241-1244`）。
+   其余失败面确为静默——读文件失败返回空 `Vec`（如 `claudecode.rs:476-479`、`codex.rs:1012-1015`），SQLite 打不开返回空（如 `opencode_schema.rs:853`、`synthetic.rs:113-115`），公共 I/O 层同样只有静默出口（`utils.rs:103-121`、`:296-298`、`:453-457`、`:461-463`）。上位证据：**69 处 `parse_*` 入口无一返回 `Result`**——67 处 `-> Vec<UnifiedMessage>`，另 `opencode.rs:30` `-> Option<UnifiedMessage>` 与 `gemini.rs:149` `-> GeminiParseResult` ⇒ 解析层不存在把错误上报给调用者的通道。
+   残留（本条唯一的「仍无法核实」）：各解析器内部的 `unwrap`/`expect`/`panic!` 未逐一穷举（本轮只核对了公共 I/O / SQLite / JSON 层与 `parse_local_clients` 的错误出口）。
 12. **`sessions/mod.rs` 与 `lib.rs` 里那些 `#[cfg(test)]` 区段**（`sessions/mod.rs:1030-2067`、`lib.rs:5442-14921`）**未逐行阅读**。本报告的所有行号断言都落在生产代码区；引用的测试只用作「行为佐证」（如 `lib.rs:5497-5519` 的饱和断言），且已注明是测试。
-13. **`kiro.rs` 的 token 估算结论经二次核验**（grep 到 `estimate_tokens` 调用点与 `DEFAULT_CONTEXT_WINDOW = 200_000`），但**该文件 2235 行的其余部分（尤其 704-837、1373-2235）未逐行读**；Kiro 的六条来源路径的取舍与 `suppress_snapshots_covered_by_executions` 的边界行为以二级取证报告为准，一级抽查仅覆盖 `kiro.rs:230-251`、`:385-386`、`:435` 三处注释与常量。
-14. **`provider_identity.rs` 的 `canonical_provider`（`:62-64`）与 `inferred_provider_from_model`（`:260`）实现体未逐行读**（只读了 grep 定位到的签名行）。所有「过/不过 canonical_provider」的结论都建立在「某解析器文件里有没有该符号调用」的 grep 证据上，而非对归一化规则本身的核验。
-15. **跨客户端汇总口径未经运行验证**。本报告全部结论来自**只读源码阅读与 grep**，**没有编译、没有运行任何测试、没有构造 fixture 复现**（任务约束禁止 `cargo build`/`cargo test`）。任何「某客户端在真实数据上产出什么」的问题，都需要另行用真实或合成数据实测。
+13. **`kiro.rs` 的 token 估算结论经二次核验**（grep 到 `estimate_tokens` 调用点与 `DEFAULT_CONTEXT_WINDOW = 200_000`）。本轮把该文件的「未读区段」缩小到一处：**`kiro.rs:1373-2235` 整段是 `#[cfg(test)] mod tests`**（模块起点 `:1342-1343`，文件总行 2235；段内含 31 个 `fn` 测试），**不参与运行时、不含生产语义**，因此不必逐行读；生产代码里真正仍需说明的只有 **704-837**——`collect_kiro_snapshot_text`（`:705-787`：按 role/type 归类 prompt/assistant 文本，识别 `user|prompt|human` 与 `assistant|response|bot`，`tool` 有意不匹配）与 `find_kiro_snapshot_model_id`（`:789-836`：按键序找 `model_id|modelId|model`，跳过内部模型 `agent|auto|qdev`，找不到再递归 17 个键），**该区段不含 token 语义**，只产出 `prompt_chars`/`assistant_chars` 与模型名（调用方 `:878-879` 直接 `estimate_tokens(...)`）。Kiro 的六条来源路径的取舍与 `suppress_snapshots_covered_by_executions`（`:1172-1231`）的边界行为以二级取证报告为准，一级抽查另覆盖 `kiro.rs:230-251`、`:385-386`、`:435` 三处注释与常量。
+14. **`provider_identity.rs` 的 `canonical_provider` 实现体——已逐行读，规则与「改写」效果如下**：
+   - `canonical_provider`（`:62-64`）= `provider_tags(raw).into_iter().next()` ⇒ **只取第一个规范化标签**，返回 `None` 表示「不是可识别的 provider」（不是「原样返回」）。
+   - `provider_tags`（`:73-93`）：按 `/` 切段，段内含 `.` 再按 `.` 拆开，逐段规范化并**保序去重**。
+   - `canonicalize_provider_segment`（`:1-60`）的规则：`trim` → 去尾部 `/` → `to_lowercase` → `-` 替换为 `_`；`<...>` 占位与 `""`/`"unknown"` → `None`；别名表把 `x_ai|xai→xai`、`z_ai|zai→zai`、`moonshot|moonshotai|kimi_for_coding→moonshotai`、`meta|meta_llama→meta_llama`、`azure|azure_ai→azure_ai`、`anthropic|vertex|vertex_ai→anthropic`、`together|together_ai→together_ai`、`fireworks|fireworks_ai→fireworks_ai`、`google|gemini→google`、`openai|openai_codex→openai`、`minimax|minimaxai|minimax_ai→minimax`、`mistral|mistralai→mistralai`、`deepseek|deepseek_ai→deepseek`（`:27-41` 注释给出 `-ai` 折叠的理由）、`novita|novita_ai→novita`、`stepfun|stepfun_ai→stepfun` 折叠；**`-cn` 区域后缀明确不折叠**（`:44-51` 注释：`alibaba` 与 `alibaba-cn` 共享 45 个模型、其中 41 个价格不同）；未知段若**含 ASCII 数字**判为模型片段 → `None`（`:52-55`）。
+   - **它会改写 `provider_id`**：调用点普遍写成 `canonical_provider(x).unwrap_or(原值)` 形式 ⇒ 返回 `Some` 时 `provider_id` 被替换为规范标签，返回 `None` 时保留原值。已核实调用点：`sessions/opencode.rs:57`、`sessions/antigravity.rs:72`、`sessions/jcode.rs:89`、`sessions/mux.rs:113`、`sessions/opencode_schema.rs:540`、`sessions/claudecode.rs:844`（另 `:1646`、`:1655`）、`sessions/droid.rs:99`、`sessions/reasonix.rs:64`（`unwrap_or_else(|| provider.to_string())`）、`sessions/utils.rs:541`，以及定价侧的只读使用（`pricing/lookup.rs`）。**上一版「实现体未逐行读、结论只靠 grep」的限定对 `canonical_provider` 已不再成立。**
+   - `inferred_provider_from_model`（`:260`）仍是本轮**未逐行复读**的部分（按小写子串/边界匹配返回 `&'static str`；W1 报告给出外层 `:260-262`、内层实现 `:268-366`、两档强度 `contains_family`/`contains_versioned_family` `:234-250`，本轮未逐行复核）。它多数只作兜底：`sessions/codex.rs:1155`（`session_provider.or_else(...)`）、`sessions/tencent_buddy.rs:349-351`（推断失败才 `DEFAULT_PROVIDER`）、`sessions/junie.rs:220`、`sessions/utils.rs:543`、`sessions/reasonix.rs:60`/`:71`。
+15. **跨客户端汇总口径的运行验证**：本报告在 tokscale 侧的结论仍以**源码级阅读与 grep** 为主，但本轮已把上游门禁套件**在隔离副本内实际跑过**——`cargo test -p tokscale-core --all-targets` 于 `tokscale-v4.14.0` 的工作副本（`C:\Users\admin\AppData\Local\Temp\usagemesh-empirical\tokscale-v4.14.0`，原件只读、副本内构建）执行得 **1917 passed / 0 failed / 4 ignored**（8 个测试二进制），**退出码 0**；即 UsageMesh 锁定的 `1ec865d4` 解析层自身的全部单元测试无失败用例（详见附录 D.2）。⇒ 上一版此处「没有编译、没有运行任何测试」的表述已不成立，应读作「**源码级 + 上游套件已在副本内运行验证**」。**仍未做**：为逐客户端结论构造自有 fixture 复现，以及用本机真实日志（1.2 GB 级）跑一遍 `parse_local_clients`；任何「某客户端在真实数据上产出什么」的问题仍需另行实测。
 
 ## 4. 设备侧采集、账本结构与聚合口径
 
@@ -2179,7 +2224,7 @@ UsageMesh 的金额是**设备端一次性算出**的「兼容价卡估算」，
 
 **【已核实】** 价格目录**不是**编译期内置表，唯一通用来源是远程 `https://models.dev/api.json`（`pricing.rs:22`），GPT-5.6 家族由硬编码守卫卡片覆盖（`pricing.rs:361-397`）。
 
-缓存文件路径 = `dirs::config_dir()/usagemesh/models-dev-pricing.json`（`pricing.rs:93-95`）；写入前 `create_dir_all` 父目录，写失败被 `let _ =` 静默吞掉（`pricing.rs:215-225`）。Windows 上 `dirs::config_dir()` 预期为 `%APPDATA%\usagemesh\models-dev-pricing.json`（【未验证】，依赖 `dirs` crate 的平台语义）。
+缓存文件路径 = `dirs::config_dir()/usagemesh/models-dev-pricing.json`（`pricing.rs:93-95`）；写入前 `create_dir_all` 父目录，写失败被 `let _ =` 静默吞掉（`pricing.rs:215-225`）。**平台落点【已核实（回源 + 官方平台表）】**：`dirs 6.0.0`（`Cargo.lock:404-405`）按官方表把 `config_dir()` 解析为 Windows `%APPDATA%`（`{FOLDERID_RoamingAppData}`）、macOS `~/Library/Application Support`、Linux `${XDG_CONFIG_HOME:-~/.config}`，故缓存落在 `%APPDATA%\usagemesh\models-dev-pricing.json` / `~/Library/Application Support/usagemesh/models-dev-pricing.json` / `${XDG_CONFIG_HOME:-~/.config}/usagemesh/models-dev-pricing.json`（`pricing.rs:94`；同根用法 `config.rs:40-44`、`collector.rs:79-82`、`local/store.rs:123`）。
 
 过期规则：文件 mtime 距今 ≤ 24h 视为新鲜（`pricing.rs:26`、`97-103`）。回退链四级，逐级记入 `catalog_state`（`pricing.rs:242-279`）：
 
@@ -2305,7 +2350,7 @@ URL 解析失败时会补 `https://` 前缀重试（`provider.rs:115-117`）；�
 2. Codex 会话：`~/.codex/sessions`、`~/.codex/archived_sessions` 的 `*.jsonl`，只解析含 `session_meta` 的行（`evidence.rs:174-216`、`782-791`）。注意此处根目录**硬编码** `home/.codex/...`（`evidence.rs:782-791`），同一模块的 config/auth 读取才走 `$CODEX_HOME`（`evidence.rs:85-97`）；而 `codex_tier.rs` 用 `$CODEX_HOME`（回退 `~/.codex`，`codex_tier.rs:312-318`）——设置 `CODEX_HOME` 后两模块可能扫到不同目录，日级对账门的输入也随之不同。
 3. Claude 会话：`$CLAUDE_CONFIG_DIR` 或 `~/.claude` 下的 `projects/**/*.jsonl`（`evidence.rs:218-267`、`793-801`）。
 4. CodeBuddy 全局设置：`~/.codebuddy/settings.json` 然后 `~/.codebuddy/settings.local.json`（后者优先），再被环境变量 `CODEBUDDY_BASE_URL` 覆盖（`evidence.rs:619-648`，注释 `620`、`638-639`）。
-5. 通用兜底：遍历 `ClientId::iter()` 的 `data().resolve_path()`（`evidence.rs:734-772`），扩展名限定 `json/jsonl/ndjson/log/toml`（`evidence.rs:723-732`），单文件上限 32 MiB（`evidence.rs:43`、`665-667`），单 client 上限 2500 文件（`evidence.rs:44`、`757-759`），目录深度 10（`evidence.rs:752`），增量模式只取近 3 天修改的文件（`evidence.rs:53-64`）。JSON 整读、TOML 转 JSON、其它按行：行内出现 `reasoning`/`thinking` 或 `base_url`/`baseurl`/`api_url`/`apiurl`/`endpoint` **任一**关键字即尝试解析，并按命中项分别注册 effort 与 route 证据（`evidence.rs:698-720`，判定逻辑 `evidence.rs:702-711`）；超过 2 MiB 的行在解析前被整行跳过，该行的路由/effort 证据随之丢失（`MAX_EVIDENCE_LINE_BYTES`，`evidence.rs:45`、`evidence.rs:699-701`）。
+5. 通用兜底：遍历 `ClientId::iter()` 的 `data().resolve_path()`（`evidence.rs:734-772`），扩展名限定 `json/jsonl/ndjson/log/toml`（`evidence.rs:723-732`），单文件上限 32 MiB（`evidence.rs:43`、`665-667`），单 client 上限 2500 文件（`evidence.rs:44`、`757-759`），目录深度 10（`evidence.rs:752`），增量模式只取近 3 天修改的文件（`evidence.rs:53-64`）。JSON 整读、TOML 转 JSON、其它按行：行内出现 `reasoning`/`thinking` 或 `base_url`/`baseurl`/`api_url`/`apiurl`/`endpoint` **任一**关键字即尝试解析，并按命中项分别注册 effort 与 route 证据（`evidence.rs:698-720`，判定逻辑 `evidence.rs:702-711`）；超过 2 MiB 的行在解析前被**整行 `continue` 跳过、不截断**，该行的路由/effort 证据随之丢失（`MAX_EVIDENCE_LINE_BYTES`，`evidence.rs:45`、`evidence.rs:699-701`）；另有两处更重的静默漏读——迭代器 `lines().map_while(Result::ok)`（`evidence.rs:698`）遇**无效 UTF-8** 会终止该文件**剩余全部行**的扫描，而 >32 MiB 的文件整文件被放弃（`evidence.rs:43`、`665-667`）。二者都只影响路由/effort 标签，不影响用量与金额（详见 §5.12-9）。
 
 `EvidenceBundle` 结构（`evidence.rs:30-41`）：
 
@@ -2360,6 +2405,8 @@ tier 归属【已核实】：从每行 `payload` 的 10 个候选 pointer 提取
 
 结论：**核心声明与代码一致，无直接矛盾项；但有 4 处实现细节文档未覆盖（缓存回退、文件限额/扫描窗口、Codex 日级对账、请求明细上限），且 1 处「1h cache 写」表述在代码中无对应实体。** 详见后文《文档-代码一致性对照》表。
 
+**官方文档页已联网核对【已核实（实证），关闭 §5.12-3 的「文档页内容未核对」项】**：`gpt-5.6-sol` 页原文逐条命中两条结构规则——「>272K input tokens are priced at 2x input and 1.5x output for the full request」「Cache writes are billed at 1.25x the uncached input token rate」；官方**当前促销价** `$4 / $0.40 / $20`（注明至少延续到 2026-11-21）与钉住卡 `$5 / $0.50 / $30` 的价差被量化为**输入/缓存 +25%、输出 +50%**；Terra/Luna 官方现价 `$2 / $0.2 / $12`、`$0.2 / $0.02 / $1.2` 与 `pricing.rs:378-381` 的 ≥2026-07-30 分支**逐项相等**。
+
 ### 5.8 「一条用量消息 → 最终展示金额」完整链与重复/漏价风险
 
 计算链【已核实】：
@@ -2380,7 +2427,7 @@ tier 归属【已核实】：从每行 `payload` 的 10 个候选 pointer 提取
 2. **请求明细被截断**：`MAX_REQUEST_DETAILS = 1000`（`collector.rs:36`），`trim_request_details` 先按 (时间, client, model, tier, metrics) 去重，再只保留**最后** 1000 条（`collector.rs:50-67`、`361`、`399`）。后果是「请求明细金额合计」会小于设备总计金额——展示层若按明细求和会低估；行级 `rows` 与 `totals` 不受影响。去重键里的 `metrics` 含 `cost_usd`（`collector.rs:57-63`），因此同分钟、同 client/model/tier 且四个 token 桶与金额完全相同的记录会被合并，而仅金额不同者不会——去重粒度随金额变化。
 3. **增量合并按日期字符串切分**：增量扫描固定回看 2 天（`main.rs:394-401`），合并时按 `row.date < since` 保留旧行、`requests` 按最小时间戳切（`collector.rs:375-401`）。若 core 的 `since` 过滤语义返回了早于 `since` 的行，同一自然日会出现新旧两批行 → 重复计费。**【已核实（见 §3.6.10）：字符串日期比较、解析后过滤、不省 IO】**——core 侧 `filter_parsed_messages` 用 `m.date.as_str() >= since.as_str()` 做字典序裁剪（`lib.rs:5403-5405`；`until` 为 `<=`，`lib.rs:5407-5409`），过滤发生在 `rebucket_parsed_days`（`lib.rs:5273`）与**全部文件解析完毕之后**（`lib.rs:5275`）；通道 A 的整段实现 `lib.rs:4334-5282` 不引用 `message_cache`（§3.7.1），因此 `since` 只裁剪结果、**不减少磁盘 IO**。由此本条的触发面收窄为**时区口径不一致**：本机 `since` 由 `Local::now()` 生成（`main.rs:394-396`），而 core 的 `date` 可被扫描器钉定时区后重分桶并按同一钉定时区过滤（`lib.rs:5273`、`lib.rs:5404`）——扫描器钉了非本机时区时，`merge_incremental`（`collector.rs:375-401`）的 `row.date < since` 裁剪才会出现边界日误差（§3.9.2、§10.1）。
 4. **离线/无缓存的首次运行**：所有非 GPT-5.6 模型金额为 0，仅靠 `lower_bound` 标记（`pricing.rs:275-278`、`315-320`）。前端虽有「下界」提示，但总额会显示为 `$0.00 ≥` 这类形态。
-5. **`output` 与 `reasoning` 是否重叠【未验证】**：canonical 路径的成本公式把 `output + reasoning` 一起按 output 单价计（`pricing.rs:341-348`）。若 tokscale-core 的 `ParsedMessage.output` 本身已包含 reasoning token，则会重复计费；Codex 增强路径已显式剥离（`codex_tier.rs:39-45`）。此项需 core 侧语义确认。
+5. **`output` 与 `reasoning` 的重叠【已核实（上游全量分类），详见 §5.12-4】**：canonical 路径把 `output + reasoning` 一起按 output 单价计（`pricing.rs:341-348`），这与 tokscale-core v4.14.0 **自身**的口径一致（`tokscale-core/src/pricing/lookup.rs:1880` 即 `output.max(0) + reasoning.max(0)`，`TokenBreakdown::total()` 同样相加），因此**不是 UsageMesh 的公式问题**。重复计费**仅在这些客户端上可能发生**：其解析器把上游同时给出的 `output` 与 `reasoning` 原样透传、未做相减（B 类 13 处位置／12 个模块，清单见 §5.12-4）；A 类（显式相减/独立派生）与 C 类（reasoning 恒 0）不会重复；Codex 增强路径已显式剥离（`codex_tier.rs:39-45`）。
 6. **Codex 日级对账拒绝时的静默降级**：整天退回 canonical 行 → Fast/Priority 标签丢失（`collector.rs:182-194`、`233-236`）；金额不受影响，但 tier 维度的筛选/分组会显示 `Standard`（`data.ts:701-709`）。
 7. **models.dev 缺失字段被归零**：`cache_read`/`cache_write` 缺失与显式 0 无法区分（`pricing.rs:72-73`），会在有 token 时触发下界标记，不产生静默错价，但会让大量模型常驻「下界」状态。
 
@@ -2395,7 +2442,7 @@ total_input = max(input,0) ⊕ max(cache_read,0) ⊕ max(cache_write,0)  // ⊕ 
 long        = threshold.is_some() && total_input > threshold      // 仅 GPT-5.6 家族，阈值 272_000
 in_mult     = long ? long_input_multiplier : 1.0                  // 2.0
 out_mult    = long ? long_output_multiplier : 1.0                 // 1.5
-output_tok  = max(output,0) ⊕ max(reasoning,0)                    // 饱和加法
+output_tok  = max(output,0) ⊕ max(reasoning,0)                    // 饱和加法；与上游同口径（tokscale-core/src/pricing/lookup.rs:1880）
 
 cost = max(input,0)       × P_input     × in_mult                 // 每个桶先 max(0)
      + max(cache_read,0)  × P_cache_read× in_mult
@@ -2412,6 +2459,8 @@ lower_bound = 未命中模型
 ```
 
 来源：`pricing.rs:291-302`（匹配链）、`pricing.rs:322-357`（公式与下界；`322-326` 输入侧饱和加法、`341-348` 逐桶 `max(0)` 与 `output+reasoning` 合并、`350-353` 下界条件）、`pricing.rs:361-397`（守卫卡片）、`codex_tier.rs:35-49`（Codex 桶归一）、`collector.rs:301-305`（Codex 额外下界条件）。
+
+**`output + reasoning` 合并计价与上游一致【已核实（回源）】**：tokscale-core v4.14.0 自身在 `tokscale-core/src/pricing/lookup.rs:1880` 就按 `output.max(0) + reasoning.max(0)` 计价，`TokenBreakdown::total()` 亦把五桶相加，故 UsageMesh 在此不引入超出上游口径的重复；潜在重复只来自未把 reasoning 从 output 减去的解析器（B 类，见 §5.8、§5.12-4）。
 
 ---
 
@@ -2450,9 +2499,9 @@ lower_bound = 未命中模型
 | 2 | 浏览器不重价（`PRICING.md:13`） | `applyDynamicPricing` 仅 `cost = storedCost`（`data.ts:18-29`），无单价/乘数 | 一致 |
 | 3 | Sol 卡 $5/$0.50/$6.25/$30，长上下文 $10/$1/$12.50/$45（`PRICING.md:17-23`） | `pricing.rs:377` + `387` + `393-395`（1.25× 与 2×/1.5× 组合即得该表） | 一致 |
 | 4 | 「Cache write (1h)」单列一行同价（`PRICING.md:22`） | 代码只有**一个** `cache_write` 单价（`pricing.rs:56`、`387`），无 1h/5m 桶区分 | 表述冗余（不矛盾） |
-| 5 | Sol 卡不随 OpenAI 促销价漂移、与请求日期无关（`PRICING.md:15`、`25`） | Sol 无日期分支（`pricing.rs:377`）；测试 `429-442` | 一致 |
-| 6 | Terra/Luna 保留日期感知官方价（`PRICING.md:25`） | `pricing.rs:378-381`，分界 2026-07-30 | 一致 |
-| 7 | >272K 输入按 2× 输入侧 + 1.5× 输出侧作用于**整笔请求**（`PRICING.md:25`、`33`） | 阈值判断用三桶之和，乘数作用于 input 侧三桶与 output（含 reasoning），不分段（`pricing.rs:322-348`，测试 `460-472`） | 一致 |
+| 5 | Sol 卡不随 OpenAI 促销价漂移、与请求日期无关（`PRICING.md:15`、`25`） | Sol 无日期分支（`pricing.rs:377`）；测试 `429-442`；**官方页促销价 `$4 / $0.40 / $20`（至少延续到 2026-11-21）vs 钉住 `$5 / $0.50 / $30` ⇒ 输入/缓存 +25%、输出 +50%【已核实（实证）】** | 一致 |
+| 6 | Terra/Luna 保留日期感知官方价（`PRICING.md:25`） | `pricing.rs:378-381`，分界 2026-07-30；官方现价 Terra `$2 / $0.2 / $12`、Luna `$0.2 / $0.02 / $1.2` 与新价分支**逐项相等**【已核实（实证）】 | 一致 |
+| 7 | >272K 输入按 2× 输入侧 + 1.5× 输出侧作用于**整笔请求**（`PRICING.md:25`、`33`） | 阈值判断用三桶之和，乘数作用于 input 侧三桶与 output（含 reasoning），不分段（`pricing.rs:322-348`，测试 `460-472`）；官方 Sol 页原文逐条命中【已核实（实证）】 | 一致 |
 | 8 | Tier（Standard/Fast/Priority）不改变金额（`PRICING.md:31`） | canonical 行硬编码 `"standard"`，`tier` 参数未参与定价（`collector.rs:119`、`pricing.rs:369`、测试 `445-457`） | 一致 |
 | 9 | 路由优先级：request/session endpoint > provider base_url > ChatGPT 认证传输 > raw provider label（`PRICING.md:37-43`） | `or_else` 链三层（`collector.rs:152-159`）；ChatGPT 认证是 `provider_hints` 的补全项而非独立第四层（`evidence.rs:154-169`） | 基本一致（层级表述比代码更细） |
 | 10 | ChatGPT 认证 + 无自定义 URL 即 `official-subscription`，即使 raw id 是 `custom`/`openai-http`（`PRICING.md:44`） | `evidence.rs:154-169` + 测试 `936-960`；有 base_url 的条目在 `evidence.rs:115-124` 提前返回，故「无自定义 URL」条件成立 | 一致 |
@@ -2471,15 +2520,17 @@ lower_bound = 未命中模型
 
 ### 5.12 未验证项
 
-1. `dirs::config_dir()` 的跨平台落点（`pricing.rs:93-95`）；Windows 预期 `%APPDATA%\usagemesh\models-dev-pricing.json`，本轮未执行代码验证。
-2. `models.dev/api.json` 的实际结构与字段名（如 `cost.cache_read`、`cost.cache_write` 是否普遍存在，`provider_id` 命名是否与 `provider_preference` 的期望一致），未联网抓取；`pricing.rs:31-49` 只是代码侧假设。
-3. `https://developers.openai.com/api/docs/models/gpt-5.6-sol` 的真实内容未核对；文档与代码都把它当作「结构性规则」的依据。
-4. tokscale-core v4.14.0（`Cargo.lock:1879-1881`）的 `ParsedMessage` 语义：`output` 是否已含 `reasoning`；`date` 桶日使用的时区是否与本模块 `ScannerSettings`（`collector.rs:78-93`、`codex_tier.rs:338`）一致；`since` 过滤是否包含边界（影响增量合并的重复计费风险）。**这三项已在 §3.6.9、§3.6.10 与 §3.9 核实**：`date` 由构造期 `chrono::Local` 推出、`bucket_timezone` 未钉时不重分桶、`since/until` 为字符串日期比较且在解析后过滤。
+> 状态：第 1、2、3、4、6、7、9 条已由本轮回源/联网/运行实证关闭，第 8 条为部分关闭（末端保留「未用真实账本数据复现」的限定）；第 5 条此前已在 §3 回源核实。正文均保留原始行号引用。
+
+1. 【已核实（回源，关闭）】`dirs::config_dir()` 的跨平台落点（`pricing.rs:93-95`）：`dirs 6.0.0`（`Cargo.lock:404-405`）按官方平台表解析为 Windows `%APPDATA%`（`{FOLDERID_RoamingAppData}` ⇒ `%APPDATA%\usagemesh\`）、macOS `~/Library/Application Support/usagemesh/`、Linux `${XDG_CONFIG_HOME:-~/.config}/usagemesh/`（`pricing.rs:94`、`config.rs:40-44`、`local/store.rs:123`）；同根下的 `local\` 子目录承载本地工作台数据（额度历史、活动扫描、设置，`local/store.rs:123`）。
+2. 【已核实（联网实证，关闭）】`models.dev/api.json` 的实际结构与字段名（`pricing.rs:31-49` 的代码侧假设）：全文 5,632,574 字节、**229 个 provider**，`pricing.rs:138-169` 期望的九个规范 provider（`openai`/`anthropic`/`google`/`xai`/`deepseek`/`alibaba`/`moonshotai`/`xiaomi`/`zai`）**全部存在**，结构 `{provider:{models:{id:{cost:{input,output,cache_read?,cache_write?}}}}}` 与假设一致。实测细节：8,830 条模型中 8,376 条带 `cost`；**`cache_read` 缺 3,107、`cache_write` 缺 6,943**（分母口径：全部 8,830 条；在带 `cost` 的 8,376 条子集内为 2,653 / 6,489）——缺失归零后只要该桶有 token 即触发下界（`pricing.rs:72-73`、`350-353`），故下界标记会大面积出现；**5,055 条模型 id 含 `/`**（如 `openai/gpt-5.6-sol`、`deepinfra/anthropic/claude-…`），⇒ `pricing.rs:105-114` 「取最后一个 `/` 之后」的归一是**必要**而非可选；按 `normalize_model_id` 归并后 **2,189 个键**（仅带 `cost` 条目），其中 **855 个键存在多个候选条目、843 个键横跨 ≥2 个 provider**（例：`gemma-4-31b-it` 命中 deepinfra `$0.2` 与 nano-gpt `$0.1`；`grok-4.20-0309-reasoning` 命中 xai `$1.25` 与 cloudflare-ai-gateway `$2`）⇒ `provider_preference` + `provider_id` 字典序决胜（`pricing.rs:191-200`）是**真实生效路径**而非理论分支。目录另带 **`cost.tiers`（643 条）与 `cost.context_over_200k`（529 条）**，但 `ModelsDevCost`（`pricing.rs:31-37`）只解析四个单价字段 ⇒ **目录级长上下文/分档规则被丢弃**，长上下文乘数只可能来自 GPT-5.6 守卫卡（与 `pricing.rs:74-76` 互为佐证）。
+3. 【已核实（联网实证，关闭）】`https://developers.openai.com/api/docs/models/gpt-5.6-sol` 页面原文：结构规则**逐条命中**——「>272K input tokens are priced at 2x input and 1.5x output for the full request」「Cache writes are billed at 1.25x the uncached input token rate」；官方**当前促销价** `$4 / $0.40 / $20`（每 1M，注明促销至少延续到 2026-11-21），而 UsageMesh 钉住 `$5 / $0.50 / $30`（`pricing.rs:377`、`:387`）⇒ **输入/缓存高 25%、输出高 50%**，与 `docs/PRICING.md:25`「刻意不跟随促销价」一致，该差异现有官方原文佐证。Terra/Luna 官方页现价 `$2 / $0.2 / $12` 与 `$0.2 / $0.02 / $1.2`，与 `guarded_pricing` 的 ≥2026-07-30 分支（`pricing.rs:378-381`）**逐项相等**；两页同样声明 272K 与 1.25× 规则。
+4. 【已核实（回源 + 上游全量分类，关闭）】tokscale-core v4.14.0（`Cargo.lock:1879-1881`）的 `ParsedMessage` 语义三项：① **`output` 是否已含 `reasoning`**——tokscale **自身**就按 `output.max(0) + reasoning.max(0)` 计价（`tokscale-core/src/pricing/lookup.rs:1880`），且 `TokenBreakdown::total()` 把五桶相加，故 UsageMesh 的 `output + reasoning` 公式与上游**同口径，不是 UsageMesh 的问题**；真正的重复计费风险只存在于**未把 reasoning 从 output 减去的解析器**（B 类 13 处位置／12 个模块：`jcode.rs:110-129`、`copilot.rs:429` 与 `798-817`、`copilot_vscode.rs:212-229`、`droid.rs:474-480`、`antigravity.rs:74-101`、`qwen.rs:108-141`、`tencent_buddy.rs:91-122`、`opencode_schema.rs:663-698`、`hermes.rs:137-151`、`fx.rs:304-310`、`junie.rs:224-245`、`zcode.rs:435-442`；A 类显式相减、C 类 reasoning 恒 0 均不会重复——清单与分类见 W1 报告 §5.12-4）。**残留不确定（三项，与 §3.6.2 的 ⚠️ 段对齐）**：`opencode_schema`（opencode/kilo/micode 共用）与 Copilot OTEL、`copilot_vscode` 三处的上游字段语义未由官方 schema 佐证，故"是否确为重复"仍属推断。② `date` 桶日使用的时区是否与本模块 `ScannerSettings`（`collector.rs:78-93`、`codex_tier.rs:338`）一致、③ `since` 过滤是否包含边界（影响增量合并的重复计费风险）——**这两项已在 §3.6.9、§3.6.10 与 §3.9 核实**：`date` 由构造期 `chrono::Local` 推出、`bucket_timezone` 未钉时不重分桶、`since/until` 为字符串日期比较且在解析后过滤。
 5. `canonical_model_id`（`collector.rs:238`、`:286`）的归一规则**已在 §3.2.7 与 §3.9.1 回源核实**：它是 `normalize_syntactic` 的直通（`lib.rs:87-89`），只做**语法归一**——小写 → 剥 `(reasoning-tier)` 后缀（tier 白名单 `lib.rs:57-73`）→ 剥尾部 `-YYYYMMDD` → `claude` 名内「数字`.`数字」改写为 `-` → `anthropic/claude-<major>-<minor>-<family>` 折叠为 `claude-<family>-<major>-<minor>`（`lib.rs:129-184`）；**不做别名折叠**（`modelAliases` 折叠只出现在本地展示用的 `normalize_model_for_grouping`（`lib.rs:100-102`），通道 A 不调用它）。UsageMesh 侧因此只有 `collector.rs:238`/`:286` 两处调用与下游 `pricing.rs:105-114` 这一层，无其他归一。
-6. `CURRENT_LEDGER_SCHEMA_VERSION = 8`（`model.rs:3`）与浏览器端解析的字段兼容性未做运行时验证。
-7. 前端展示结论（`≥` 前缀、下界文案）来自源码文本检索，未启动 `web-ui` 实际渲染确认。
-8. 「请求明细合计小于总额」是由代码路径推导（`collector.rs:36`、`64-66`）得出，未用真实账本数据复现。
-9. `MAX_EVIDENCE_LINE_BYTES` 与 `parse_json_candidate` 的截取行为（`evidence.rs:650-659`、`698-720`）在超长行场景下的实际影响未验证。
+6. 【已核实（回源，关闭）】`CURRENT_LEDGER_SCHEMA_VERSION = 8`（`model.rs:3`）与浏览器端解析的字段兼容性：**命名全部对齐**（后端 camelCase 序列化名与前端读取名一一对应，后端字段是前端使用集合的超集——`model.rs:48-76`、`data.ts:79-98`、`data.ts:755-851`）；前端**只校验加密信封版本 2**（`data.ts:629`）**与心跳版本 1**（`data.ts:673`），**没有 `ledger.schemaVersion` 的任何判断**（该字段仅在 `data.ts:124` 声明）；`Ledger.totals`/`scanMs`/`pricing`（`model.rs:141-144`）与 `DeviceInfo.hostname`（`model.rs:85`）前端完全未用。后果：schema 升级不会让页面报错，字段不兼容时表现为**静默显示 `0`/`Unknown`**（`timestampMs` 缺失时 `data.ts:773` 取 0 → 桶落 1970；`tier` 缺失 → 显示 Standard，`data.ts:701-709`），没有 fail-fast 提示。
+7. 【已核实（副本内运行，关闭）】前端行为已由测试套件与构建验证（副本内，见附录 D.2）：Web 前端 `npm test` **191 passed / 18 文件 / 0 failed**、`typecheck` 干净、`npm run build` 成功（12.66 s）；rust-cli `cargo test` **89 passed / 0 failed / 1 ignored**。`≥` 前缀与下界文案的展示逻辑仍为源码级结论 + 前端测试断言，未在真实浏览器中人工目视。
+8. 【部分关闭】「请求明细合计小于总额」由代码路径推导（`collector.rs:36`、`64-66`）得出，前端行为已由测试套件与构建验证（副本内，见附录 D.2）；**仍未用真实账本数据复现「明细合计 < 总额」本身**——该结论仍属代码推导。
+9. 【已核实（回源，关闭）】`MAX_EVIDENCE_LINE_BYTES` 与超长行行为：超长行（>2 MiB，`evidence.rs:45`）在解析前被**整行 `continue` 跳过、不截断**（`evidence.rs:698-701`，行循环整体见 `evidence.rs:698-720`；`parse_json_candidate` 只在通过长度检查后调用，`evidence.rs:650-659`），文件后续行继续扫描。另有两处更重的静默漏读：① 迭代器 `lines().map_while(Result::ok)`（`evidence.rs:698`）遇**无效 UTF-8** 会终止该文件**剩余全部行**的扫描且无日志；② 文件 >32 MiB（含空文件）时整文件被放弃（`evidence.rs:43`、`665-667`）。影响范围仅限路由/effort 证据（`routeType`/`routeProvider`/`billingChannel`/`reasoningEffort` 等标签缺证据、可能退回 `unknown`/`Standard`）；用量行、请求数与费用由独立管线产出，不受影响。
 
 ## 6. 云端仪表盘：解密、多设备合并与展示
 
@@ -2518,7 +2569,7 @@ lower_bound = 未命中模型
 
 账本信封校验还包含**分支名与设备哈希一致性**：`branch !== "um-ledger-" + envelope.deviceHash` 即抛 `设备账本格式不受支持`（`data.ts:627-633`；测试 `web-ui/tests/data.test.ts:102-109`）。
 
-**v1 兼容路径【已核实】**：`access.json` 是**迭代驱动**的——注释明写旧 310k 清单继续有效，新/改密码用设备端更强的默认值（`data.ts:508-509`）；前端不硬编码次数，只做区间约束。测试对 `[310_000, 600_000]` 参数化验证成功路径与错误密码拒绝（`data.test.ts:44-58`），并断言 `99_999` 被拒且错误类型是 KDF 而非密码（`data.test.ts:59-67`）。
+**v1 兼容路径【已核实】**：`access.json` 是**迭代驱动**的——注释明写旧 310k 清单继续有效，新/改密码用设备端更强的默认值（`data.ts:508-509`）；前端不硬编码次数，只做区间约束。测试对 `[310_000, 600_000]` 参数化验证成功路径与错误密码拒绝（`data.test.ts:44-58`），并断言 `99_999` 被拒且错误类型是 KDF 而非密码（`data.test.ts:59-67`）。**设备端默认值已回源**：迭代 **600,000**、盐 **16 B**、nonce **12 B**、`updatedAt` = 清单写入时刻（`rust-cli/src/crypto.rs:14,108-111,134`），新清单要求密码 ≥ 12 字节（`crypto.rs:104-106`）；**线上实测**上游 `um-dashboard/access.json` 的 `iterations = 310000`、盐/nonce 同为 16 B/12 B（真实工作区仍是 v1 兼容档），印证"旧清单保留、新建才 600k"（附录 D N15）。
 
 **密钥只驻内存 —— 逐介质核实【已核实】**
 
@@ -2556,19 +2607,19 @@ lower_bound = 未命中模型
 **API 端点与回退顺序【已核实】**（常量见 `data.ts:41-46`）
 
 1. 设备索引 `loadDeviceIndex()`（`data.ts:558-605`）按序尝试：① `https://raw.githubusercontent.com/<repo>/um-index/index.json`；② `<repo>/um-dashboard/device-index.json`；③ **仅当 URL 不带 `?repo=`** 时读站点相对 `device-index.json`（`new URL("device-index.json", document.baseURI)`）。每级都过滤 `/^um-ledger-[a-f0-9]+$/i` 并 `[...new Set(...)]` 去重（`data.ts:589-592`）。全失败时按是否有 transient 错分别抛"工作区索引读取失败…请检查网络后重试"或"暂无设备索引，请先在任意设备执行 usagemesh sync"（`data.ts:599-604`）。
-2. 静态回退文件 `web-ui/public/device-index.json` 内容为 `{schemaVersion:1, kind:"usagemesh-device-index", branches:[], updatedAt:null}`；CI 部署时若 `um-index` 可达，会用实时内容覆盖 `dist/device-index.json`（`.github/workflows/pages.yml:90-99`）。
+2. 静态回退文件 `web-ui/public/device-index.json` 内容为 `{schemaVersion:1, kind:"usagemesh-device-index", branches:[], updatedAt:null}`；CI 部署时若 `um-index` 可达，会用实时内容覆盖 `dist/device-index.json`（`.github/workflows/pages.yml:90-99`）；该静态回退**仅在不带 `?repo=` 时参与**读取（`data.ts:577-584`）。**线上实测**：站点内 `device-index.json` 已被覆盖为 6 个真实 `um-ledger-*` 分支名（仓库内 `public/device-index.json` 仍为空骨架），说明覆盖逻辑在真实部署中生效（附录 D N16）。
 3. 账本/心跳：`decryptLedger()` 对每台设备同时发起 `um-ledger-<hash>/ledger.json` 与 `um-presence-<hash>/presence.json`（`data.ts:616-625`）。
 
 **传输、超时与降级【已核实】**
 
-- `json()` 统一使用 `cache:"no-store"`、`credentials:"omit"`、`AbortSignal.timeout(timeoutMs)`，默认超时 20 秒（`data.ts:432-443`）。**未使用 ETag / `If-None-Match` / 条件请求**（全库检索仅命中 `cache: "no-store"` 一处）。
+- `json()` 统一使用 `cache:"no-store"`、`credentials:"omit"`、`AbortSignal.timeout(timeoutMs)`，默认超时 20 秒（`data.ts:432-443`）。**未使用 ETag / `If-None-Match` / 条件请求**（全库检索仅命中 `cache: "no-store"` 一处）。**线上响应头实测**：`raw.githubusercontent.com` 返回 `cache-control: max-age=300` 与 `etag: "<64 位十六进制>"（实测为强 ETag）`（另有 `access-control-allow-origin: *`、`vary: Authorization`）——`no-store` 加无条件请求等于**每次实拉、绕过 5 分钟 CDN 缓存**（附录 D N12）。
 - `githubJson()`：RAW 直读超时 **8 秒**；仅当失败被判定为 transient 才改走 GitHub Contents API（`Accept: application/vnd.github.raw+json`）超时 **12 秒**，注释说明"正常轮询不消耗 API 速率限制；RAW 媒体还支持 >1 MB 的加密账本"（`data.ts:467-490`）。
 - transient 归类（`data.ts:444-462`）：HTTP **408 / 429 / 5xx**；`TypeError`（"网络读取失败"）、`AbortError` / `TimeoutError`（"数据读取超时"）。**JSON 解析失败与信封/校验失败不计入 transient**，因而不享受"沿用上次快照"的回退（注释 `data.ts:452-454`；测试 `data.test.ts:552-558`）。
 - 端到端超时行为有测试固化：RAW 无响应时 8 秒切换、合计 20 秒结束、不无限重试（`data.test.ts:325`）。
 
 **并发与限流【已核实】**：`loadDashboardWithKey()` 用 `Promise.allSettled` 对**索引中的全部设备一次性并发**（`data.ts:975-977`）；每台设备内部账本与心跳并行（`data.ts:616-625`）。**代码中没有并发上限、退避重试或速率限制器**——限流只体现在"正常轮询不走 API、失败才走 API"这一条降级策略上。
 
-**心跳阈值与在线判定【已核实】**：`deviceSyncStatus()`（`data.ts:893-903`）以年龄分档：`≤ 3 分钟 → online`，`≤ 10 分钟 → syncing`，超过 → `offline`，时间戳不可解析直接 `offline`。设备行优先用 `presenceAt`，缺失时回退账本 `generatedAt`（`data.ts:944,951`）；老设备无 presence 分支时显式回退账本时间（`data.ts:677`）。presence 校验要求 `kind==="usagemesh-device-presence"`、`schemaVersion===1`、`deviceHash` 与账本信封一致（`data.ts:671-675`），且心跳刷新不改动已缓存的账本对象（`const ledger = { ...source }`，`data.ts:669`）。设备页文案与阈值一致（`web-ui/src/views/Devices.tsx:202`）。
+**心跳阈值与在线判定【已核实】**：`deviceSyncStatus()`（`data.ts:893-903`）以年龄分档：`≤ 3 分钟 → online`，`≤ 10 分钟 → syncing`，超过 → `offline`，时间戳不可解析直接 `offline`。设备行优先用 `presenceAt`，缺失时回退账本 `generatedAt`（`data.ts:944,951`）；老设备无 presence 分支时显式回退账本时间（`data.ts:677`）。设备端心跳目标频率 **60 秒**（`rust-cli/src/main.rs:205`），30 秒轮询相位下实际间隔 60–90 秒，发布成功才写戳、失败下一轮（30 秒后）立即重试（`main.rs:264-280`）。presence 校验要求 `kind==="usagemesh-device-presence"`、`schemaVersion===1`、`deviceHash` 与账本信封一致（`data.ts:671-675`），且心跳刷新不改动已缓存的账本对象（`const ledger = { ...source }`，`data.ts:669`）。设备页文案与阈值一致（`web-ui/src/views/Devices.tsx:202`）。
 
 **`/build-info.json` 的作用【已核实】**：由 Pages 流水线在构建产物中生成，字段 `workspaceRepository` / `dashboardSource` / `dashboardSourceSha` / `builtAt`（`.github/workflows/pages.yml:78-88`）；前端仅在**设置页**读取并展示"网页构建版本（源码 SHA 链接）"和"构建时间"（`web-ui/src/views/Settings.tsx:30-43,223-242`）。它**不参与任何统计或校验**，只用于部署溯源。
 
@@ -2703,7 +2754,7 @@ remaining = max(0, total − recorded)
 - 历史过滤 `isElapsedSubscriptionPeriod()`：`resetsAt ≤ now` **且**（`lastUsedPercent > 0` 或存在正百分比样本），即"从未使用的漂移 0% 窗口不归档"（`subscriptionPeriods.ts:240-248`；`docs/QUOTA-FORECAST.md:29`）。
 - 当前窗口视图由**最新快照**驱动（`currentSubscriptions()`，`subscriptions.ts:27-128`），包含全新的 0% 窗口（`:26`），并把最新快照的百分比并入样本序列（`:90-93`）。
 
-**耗尽快照预测【已核实（调用点）/ 未验证（算法细节）】**：`views/QuotaCycles.tsx:39` 从 **Rust 侧共享的 JS 模块** `rust-cli/local-web/quota-forecast.js` 引入 `forecastQuotaCycle`，用于"预计 X 耗尽"提示（`QuotaCycles.tsx:185-197,248-250`）；其类型声明为 `method: "stable-linear-regression-v1"`，状态机 `ready|partial|insufficient|expired|invalid`，原因枚举含 `stale-snapshot|rapid-jump|low-confidence` 等（`rust-cli/local-web/quota-forecast.d.ts:1-76`）。**该 JS 文件未逐行阅读**（见未验证项）。
+**耗尽快照预测【已核实】**：`views/QuotaCycles.tsx:39` 从 **Rust 侧共享的 JS 模块** `rust-cli/local-web/quota-forecast.js` 引入 `forecastQuotaCycle`，用于"预计 X 耗尽"提示（`QuotaCycles.tsx:185-197,248-250`）；其类型声明为 `method: "stable-linear-regression-v1"`，状态机 `ready|partial|insufficient|expired|invalid`，原因枚举含 `stale-snapshot|rapid-jump|low-confidence` 等（`rust-cli/local-web/quota-forecast.d.ts:1-76`）。算法本轮已逐段核实（文件 296 行）：回归窗口 `max(15 分钟, min(24 小时, 窗口长度 × 10%))`（`quota-forecast.js:202-205`），窗口内不足 2 个稳定点回退最近 5 个（`:210`），`confidence = min(n/5, 1) × r² × 跨度因子 ×（0.6 若快速跃迁）`（`:229-237`），`ready` 需 `confidence ≥ 0.35`（`:288`）并先通过 15 分钟新鲜度与「稳定样本 ≥3 / 跨度 ≥10 分钟 / 变化 ≥1pp / 时间进度 ≥8%」四道门限（`:267-294`）；完整参数见 §6.11-7。
 
 ### 6.6 金额：web-ui 是否重算成本？
 
@@ -2771,16 +2822,18 @@ for (const record of records) {
 
 ### 6.11 未验证项
 
-1. **未执行任何测试或构建**：任务约束禁止 `npm install` / `npm run build`，所有测试结论来自静态阅读；`npm test` 的实际绿/红状态未验证。
-2. **设备端 `access.json` 生成细节**：实际默认迭代数（注释只说"设备端更强默认值"，测试用 310k/600k）、盐长度、`updatedAt` 语义均未读 Rust 侧代码。
-3. **账本版本号语义**：`schemaVersion` 真实序列（测试里出现过 2 与 8）与"v7 分钟桶迁移"的历史边界未验证——web-ui 不读该字段，无法从本侧证实；本文对"分钟 vs 日粒度"的结论只覆盖浏览器行为。
-4. **线上响应特征**：`um-index/index.json`、`ledger.json`、`presence.json` 的真实 HTTP 头（是否带 ETag / cache-control / CDN 缓存）未实测；前端确实不使用条件请求（已核实），但 GitHub 端行为未验证。
-5. **设备端心跳写入频率**与 3/10 分钟阈值的匹配关系未与 Rust 侧核对。
-6. **GitHub API 备用路径的真实速率限制阈值**未验证；代码只保证正常轮询不消耗 API 配额。
-7. **`rust-cli/local-web/quota-forecast.js` 算法细节**未逐行阅读（只读了 `.d.ts` 与相关测试标题）；"预计耗尽时间"的回归窗口与置信阈值属【未验证】。
-8. **`expectedDevices` 与实际设备数的差异来源**（例如索引残留已注销设备）在 web-ui 侧无测试覆盖。
-9. **`?repo=` 缺省时的静态回退**在 fork 场景下的实际可用性未实测（代码路径已核实，`pages.yml:90-99` 的覆盖逻辑未运行验证）。
-10. **CSP 与 `no-referrer`**（`web-ui/index.html:6-7`：CSP 在 `:6`、referrer 在 `:7`，`:5` 是 viewport；CI 断言 `pages.yml:55-64` 内第 `:62-63` 行分别 grep 两者）在部署环境中的实际生效情况未实测；本轮只核实了文件内容。
+> 本轮已用联网实证与运行实证逐条回填（证据：附录 D「联网实证结果」N12–N17、W2 存疑项核实报告、W3 运行时实证报告）：下列 10 条中 9 条闭合、1 条部分闭合；仍未闭合的部分在条目内显式标注，不再保留"整节未验证"的表述。
+
+1. **测试与构建已实跑【已核实（实证，本轮关闭）】**：原先"未执行任何测试或构建"的约束已由隔离副本解除——`npm ci --no-audit --no-fund`（216 包）→ `npm test`（vitest 3.2.4）**18 个文件 / 191 passed / 0 failed**（17.81 s）→ `npm run typecheck`（`tsc --noEmit` 无输出，退出码 0）→ `npm run build`（vite，**12.66 s**）成功。全部命令在**工作副本**内执行，只读原件（`usagemesh-research`）零写入；`npm run format:check` 报 56 个文件不合规，已归因为 **CRLF 环境假阳性**（全局 `core.autocrlf=true` 且仓库无 `.gitattributes`；副本 LF 化后用项目自带 prettier 3.6.2 复检全通过，CI 在 `ubuntu-latest` 检出为 LF，故该门禁为绿）。详见附录 D.2「运行时验证（工作副本内）」。
+2. **设备端 `access.json` 生成细节【已核实（实证，本轮关闭）】**：迭代 **600_000**（`rust-cli/src/crypto.rs:14`）、盐 **16 B**、nonce **12 B**（`crypto.rs:108-111`）、`schemaVersion = 1`、`kind = "usagemesh-dashboard-access"`、`kdf = "PBKDF2-HMAC-SHA256"`、`algorithm = "AES-256-GCM"`、AAD 绑定仓库名小写（`crypto.rs:114`）、`updatedAt` = 清单写入时刻（`crypto.rs:125-135`，含 `crypto.rs:134`）；新清单要求密码 ≥ 12 字节（`crypto.rs:104-106`），历史 310k 清单仍可解（`crypto.rs:143-159`）。前端更宽松：只校验 `kind`/`schemaVersion`/`kdf`/`algorithm` 与 `iterations ∈ [100_000, 5_000_000]`（`data.ts:501-516`），**不校验盐/nonce 长度与 `updatedAt`**（长度错误由 WebCrypto 解密失败兜底为"密码不正确"）。**线上实测**：上游 `um-dashboard/access.json` 的 `iterations = 310000`、盐/nonce 同为 16 B/12 B（真实工作区仍是 v1 兼容档），印证"旧清单保留、新建才 600k"（附录 D N15）。
+3. **账本版本号语义【部分关闭】**：按上游 tag 逐个拉取 `model.rs` 实测的序列为 `v2.0.0 = 4`、`v2.1.0–v2.3.0 = 5`、`v2.4.0–v2.6.1 = 7`、`v2.7.0 = 8`（当前 HEAD `8cfb77f` 亦为 8，`rust-cli/src/model.rs:3`）；三个迁移点——**4 → 5** 账本加入逐请求明细 `requests`、**5 → 7** 加入行级分钟桶 `timestampMs` 与 `billingChannel`（跨过 6）、**7 → 8** 加入 `officialQuota`，与 `.release/v2.4.0:11`（"schema v7 stores minute buckets"）及 `.release/v2.7.0:5`（额度窗口并入加密账本）一致。**v1–v3 与 v6 仍无公开证据**（事实源为浅克隆，`git rev-list --all --count = 1`；`v2.2.2` 的 tag 无法按名拉取、但该版本的 `.release` 记录存在），本文件不宣称完整线性序列。web-ui 侧不消费该字段（浏览器只按 `row.timestampMs > 0` 区分粒度），故"分钟 vs 日粒度"的结论仍只覆盖浏览器行为。
+4. **线上响应特征【已核实（实证，本轮关闭）】**：`raw.githubusercontent.com` 实测返回 `cache-control: max-age=300`、`etag: "<64 位十六进制>"（实测为强 ETag）`、`access-control-allow-origin: *`、`vary: Authorization`；前端 `cache:"no-store"` 加无条件请求（`data.ts:432-443`）等于**每次实拉、绕过 5 分钟 CDN 缓存**，行为自洽（附录 D N12）。
+5. **设备端心跳频率与阈值匹配【已核实（实证，本轮关闭）】**：`PRESENCE_INTERVAL = 60 s`（`rust-cli/src/main.rs:205`），30 秒轮询相位下实际间隔 **60–90 秒**；发布成功才写戳，失败只打一行 stderr（`quiet` 时静默）、不写戳并在下一轮（30 秒后）立即重试（`main.rs:264-280`）。前端阈值 `≤ 3 min → online`、`≤ 10 min → syncing`、超过 → `offline`（`data.ts:893-903`）。**"离线"只代表心跳过期**（设备休眠、断网或同步持续失败），历史账本仍可读；无 presence 分支的旧设备以账本 `generatedAt` 兜底（`data.ts:944,951`），长时间无用量变化时可能被判离线（`.release/v2.5.0:9` 已披露该向后兼容回退）。
+6. **GitHub API 速率限制【已核实（实证，本轮关闭）】**：`api.github.com` 未认证实测 `X-RateLimit-Limit: 60`（共享出口代理当时 `Remaining: 0`），印证"正常轮询只读 RAW、不消耗 API 配额，只有 transient 失败降级 Contents API 才会碰 60 次/小时硬限"（`data.ts:467-490`）。**另附实证**：上游 `um-index/index.json` 只列 `um-ledger-*` 分支名（印证 `github.rs:113-126`）；首页 `build-info.json` 的 `dashboardSourceSha` = `8cfb77f1…`（正是本文分析的提交）（附录 D N13、N14、N15）。
+7. **`rust-cli/local-web/quota-forecast.js` 算法细节【已核实（实证，本轮关闭）】**：文件共 296 行，方法标识 `stable-linear-regression-v1`（`:20`）。回归窗口 `max(15 分钟, min(24 小时, 窗口长度 × 10%))`（`:202-205`），窗口内不足 2 个稳定样本时回退最近 5 个（`:210`）；`confidence = min(n/5, 1) × r² × 跨度因子 ×（0.6 若快速跃迁）`（`:229-237`），`ready` 门槛 `confidence ≥ 0.35`（`:288`）；此前依次为 15 分钟新鲜度（`:270-272`）与四道顺序门限——稳定样本 ≥ 3（`:273-275`）、跨度 ≥ 10 分钟（`:276-278`）、观测变化 ≥ 1 个百分点（`:279-281`）、时间进度 ≥ 8%（`:282-284`），另有快速跃迁否决（`:285-287`）。
+8. **`expectedDevices` 语义与差异来源【已核实（实证，本轮关闭）】**：`expectedDevices` = **索引内通过 `/^um-ledger-[a-f0-9]+$/i` 过滤的 `um-ledger-*` 分支数**（`data.ts:1080`、正则 `:589-591`），**不等于"应有设备数"**。差异来源：① 索引滞后于账本（CLI 先写账本分支、后刷索引，`main.rs:449-452`）；② 分支读取失败且无上次可用快照（有快照则沿用并登记 `retainedDeviceIds`）；③ 索引残留已删除/重命名的分支；④ 命名不合规分支被正则永久过滤；⑤ 静态快照与 Pages 缓存滞后。界面表述应写"索引尚未刷新 / 部分账本读取失败"，不写"设备数据丢失"。
+9. **fork 场景静态回退【已核实（实证，本轮关闭）】**：静态回退**仅在 URL 不带 `?repo=` 时启用**（`data.ts:577-584`），内容取自**部署仓库自身**的 `um-index`（`pages.yml:90-99` 用 `${GITHUB_REPOSITORY}` 覆盖 `dist/device-index.json`）。fork 未同步时该文件仍是空骨架 `branches: []` → 页面显示 **0 台设备且不报错**；`?repo=` 场景**没有静态回退**；`um-dashboard/device-index.json` 这条遗留回退全仓无写入者。**实证**：线上站点该文件已被覆盖为 **6 个真实 `um-ledger-*` 分支名**，而仓库内 `web-ui/public/device-index.json` 仍为空骨架（附录 D N16）。
+10. **CSP 与 `no-referrer`【已核实（实证，本轮关闭）】**：文件侧为 `web-ui/index.html:6-7`（CSP 在 `:6`、referrer 在 `:7`，`:5` 是 viewport；CI 断言 `pages.yml:55-64` 内第 `:62-63` 行分别 grep 两者）；**线上 Pages 首页实测确实包含 `<meta http-equiv="Content-Security-Policy" …>` 与 `<meta name="referrer" content="no-referrer">`**，部署环境生效（附录 D N14）。
 
 ## 7. 本地工作台与官方配额
 
@@ -2969,13 +3022,13 @@ for (const record of records) {
 ### 7.12 未验证项
 
 1. 【提交级证据缺失】克隆为浅克隆（`rev-list --count HEAD = 1`，`.git/shallow` 存在），无法用 diff 证明 HEAD 提交 `fix(quota): retain official observations during refresh failures` 的具体改动；文中"刷新失败保留官方观测"的实现位置（`rust-cli/src/local/quota_history.rs:70-86`、`rust-cli/src/local/mod.rs:302-312`、`:355-370`）是**当前工作树**证据。
-2. 【未运行】未执行 `cargo test`/`cargo build`，也未实机运行 `usagemesh serve`；所有行为结论来自静态阅读，未经运行时验证（例如自动扫描节流的实际表现、`codex app-server` 真实响应字段）。
+2. 【部分已运行】本轮已在**隔离工作副本**内执行 `cargo test`（89 passed / 0 failed / 1 ignored，退出码 0；CI 等价命令 `cargo test --workspace --all-targets` 同结果）与 `cargo build`、`cargo clippy --all-targets`、`cargo fmt --check`，前端 `npm test`（18 文件 / 191 用例全部通过）、`npm run typecheck`、`npm run build`（详见附录 D.2「运行时验证（工作副本内）」，原始报告 `verify/W3-empirical.md`）；**未实机运行 `usagemesh serve`**，自动扫描节流的实际表现仍未做运行时验证；也未运行 `--ignored` 的 `local::quota_official::tests::installed_app_server_smoke_test`（`rust-cli/src/local/quota_official.rs:1034-1035`）——它是全库唯一 `#[ignore]`，需要已安装且已登录的 `codex app-server`、会对真实 `~/.codex` 执行真实子进程，故主动跳过。
 3. 【跨模块边界】`tokscale_core::parse_local_clients` 的字段语义与去重规则详见 §3，本节只记录调用方式与参数（`rust-cli/src/local/activity.rs:12-21`）。
-4. 【外部依赖行为】`codex app-server` 的 `account/read`、`rateLimitsByLimitId`、`account/usage/read` 真实字段形态未实机验证；`limits_account_id` 与 `account/read` 的交叉校验依赖服务端返回，未确认真机是否总能通过。
+4. 【外部依赖行为·静态部分已核实】RPC 序列与依赖字段已逐项列出（`rust-cli/src/local/quota_official.rs:274-362`；窗口字段别名 `usedPercent`/`used_percent`、`resetsAt`/`resets_at`、`windowDurationMins`/`windowMinutes`/`window_minutes` 见 `:595-657`，`resetsAt` 的 ≥1e11 按毫秒处理见 `:653`）；本机已装 `codex-cli 0.162.1`（`Get-Command codex` → `%APPDATA%\npm\codex.ps1`，同目录 `codex.cmd` 会被 `:205-209` 的可执行名候选命中，`%APPDATA%\npm` 也在候选目录内）。**仍未核实的是"真机字段契约"**：`account/read`、`rateLimitsByLimitId`、`account/usage/read` 的真实返回形状与 `limits_account_id` 交叉校验的真机通过率——唯一真机入口 `installed_app_server_smoke_test` 属 `#[ignore]`（`quota_official.rs:1034-1035`），本轮未运行。
 5. 【远端实现细节】云端 `data.ts` 的账本解析、`QuotaCapacityScenario`（Tokens 容量情景）、`Guide.tsx` 中"周期用量"文案未逐一读取；本章的云端结论限定于 `quotaCycles.ts` / `subscriptionPeriods.ts` / `subscriptions.ts` / `views/QuotaCycles.tsx`（详见 §6）。
-6. 【统计意义】前端渠道质量 P50/P95 取位法（`Math.ceil(n*p)-1`）在小样本（n<20）下的稳定性未验证：`rust-cli/local-web/app.js:696-697`。
-7. 【未核对】`docs/LOCAL-WORKSPACE.md:83` 所述"保留最近 90 天"用的是滑动窗口删除（`rust-cli/src/local/quota_history.rs:274-278`），但 `MAX_CYCLES=400` 与 90 天谁先触发取决于采样频率，未做数值推演。
-8. 【未验证的引用】`docs/QUOTA-FORECAST.md` 引用的外部项目（CodexBar、onWatch、ccusage）只作交互参考，其内容未核验。
+6. 【已核实·统计意义】前端渠道质量 P50/P95 为 **nearest-rank** 取位法（`Math.ceil(n*p)-1` 转 0-based，`rust-cli/local-web/app.js:696-697`，函数体 `:675-703`）：取位法**正确、不做插值**，分位数只能落在观测点上；`n<20` 时 `⌈0.95n⌉ = n` ⇒ P95 退化为最大值（一次网络抖动即抬高），偶数 `n` 的 P50 取下中位（升序第 `n/2` 个）而非两中位平均。表内无样本量下限告警，判读应与"事件数"列同看。
+7. 【已核实·数值推演】`docs/LOCAL-WORKSPACE.md:83` 的"保留最近 90 天"实现为两段串行——先按 `last_observed_at >= now − 90 天` 过滤（`:275`）、再按该字段降序截断 `MAX_CYCLES=400`（`:277-278`），即 **90 天与 400 条先到先裁**（`rust-cli/src/local/quota_history.rs:274-278`，常量 `:9`）。按默认 5 分钟节流满载推演：90 天 = 129,600 分钟 ⇒ 5 小时窗口上限 432 个 + 7 天窗口 12–13 个 ≈ 445 > 400 ⇒ **400 条上限先行，保留跨度 ≈83.3 天**（400 × 5 h = 2,000 h）；若混入 13 个 7 天周期（5 小时周期只剩 387 个）⇒ ≈80.6 天。只有非零周期生成率低于 400/90 ≈ 4.44 条/天时 90 天窗口才先触发（单个 5 小时 limit 每天上限 4.8 条，约 92.6% 的窗口有非零观测即轮到 400 先行）。7 天周期样本数（≈2016）超过 `MAX_SAMPLES=256`（`:10`）会被均匀抽稀（`:230-240`），等效采样间隔约从 5 分钟退化到 10 分钟。
+8. 【已核实·存在性】`docs/QUOTA-FORECAST.md:13-15` 引用的三个外部项目**均存在**：CodexBar（`github.com/steipete/CodexBar`，官网 codexbar.app 可访问）、onWatch（`github.com/onllm-dev/onWatch`，官网 onwatch.onllm.dev，自述 Beta）、ccusage 官方文档页 `ccusage.com/guide/blocks-reports`（HTTP 200，页面确有 `blocks` / `blocks --active` / `blocks --recent` 与"5 小时计费窗口"）。三者**只作交互参考**，不为金额换算或预测正确性背书（本轮只核存在性与页面口径，未逐行核验其源码）。**引用注意**：ccusage 页面页脚/编辑入口指向 `ryoppippi/ccusage`，与文献中按 `ccusage/ccusage` 写法引用的组织名不一致 ⇒ 建议只引用官方文档页并注明该不一致，不在文档中固化任一仓库路径。
 9. 【范围外，规则已在 §6.5 取证】`web-ui/src/lib/data.ts` 的 `sanitizeOfficialQuota` 完整校验规则见 §6.5（已取证，本章不重复）；云端每页 12 条的展示分页未取证。
 
 ## 8. 同步、加密、调度与自动更新
@@ -3075,7 +3128,7 @@ TokenScope 与本项目同属「读本地日志 → 统一事件 → 聚合 → 
 | R7 | 部分客户端**无 `dedup_key`**（无键名单逐 lane 枚举见 §3.5.13，**不能用「约 1/3」概括**） | 同一会话被双份转录时会计两次；有键客户端则首见保留 | §3.6.5、§3.5.13、§3.9.2 |
 | R8 | 客户端覆盖与产品声称不一致：`micode` 在通道 A **不解析**；`supported_clients()` 列出 50 个（含 `parse_local: false` 的 `cursor`），且实际 `client` 可能是 `cc-mirror/<variant>` 而不在清单内 | `usagemesh clients` 的输出 ≠ 实际统计范围 | §3.3.4、§3.9.3、`collector.rs:196-202` |
 | R9 | 账本时间桶依赖「机器本地时区 + 扫描器 `bucket_timezone` 未钉即不重分桶」 | 同一份历史在不同时区/不同机器上重扫会重新分桶，跨设备对比存在偏移空间 | §3.6.9、§3.2.8 之 `BucketTimezone` |
-| R10 | 快照是**覆盖式**提交（`parents: []` + 强制 PATCH），无 git 历史 | 误上传无法按分支历史回滚，只能靠下一次正确快照覆盖 | `github.rs:278`、`299-311` |
+| R10 | 快照是**覆盖式**提交（`parents: []` + 强制 PATCH），无 git 历史；本条原含一个**已证伪的服务端假设**——"同内容 ⇒ 同 sha，故重复发布可跳过" | 误上传无法按分支历史回滚，只能靠下一次正确快照覆盖；**假设已证伪**：GitHub 官方文档（Create a commit，N10）明确 `POST /git/commits` 默认 author = 认证用户 + **当前日期**，本机 git 实验（N11）证明 sha 只在 tree/parents/author/committer/date/message 全同才相同 ⇒ `github.rs:278` 只传 `{message, tree, parents:[]}` 时**每次发布都会得到新 sha**，ref 被强制 PATCH 一次（幂等、内容不变），并非"跳过" | `github.rs:278`、`299-311`；证伪依据见附录 D.1 的 N10/N11 |
 | R11 | `um-presence-*` 为明文、设备指纹仅 64 bit（SHA-256 前 16 hex）且进分支名与 AAD；pair code 是含工作区密钥的**明文 base64url** | 分支名可被匿名枚举；pair code 贴在公开渠道等于泄露工作区密钥 | 结构定义 `github.rs:70-78`、写入点 `github.rs:382-399`、`crypto.rs:34-38`、`config.rs:154-162` |
 | R12 | 本地缓存只在 `schema_version < CURRENT` 时判空；**更高版本**缓存会被接受并参与增量合并 | 降级运行（回退二进制）时会用未来版本账本做增量，字段语义不保证兼容 | `config.rs:209-211` |
 | R13 | `same_accounting` 把 `official_quota` 计入相等性；`quota_update_for_sync` 会剥离 `updatedAt`/`lastObservedAt`/`samples`，以及 `usedPercent == 0` 窗口的 `resetsAt`（`collector.rs:418-423`）与 `officialUsage.updatedAt`（`:437-439`）再比语义，仅在上一份 `latest` 全部条目 `updatedAt` 落在过去 0–600 s 内且语义相等时才复用旧值 | 配额观测变化会触发账本重新上传（金额不变），使「上传次数」不完全等于「用量变化次数」 | `collector.rs:405-459`、`461-469` |
@@ -3084,9 +3137,11 @@ TokenScope 与本项目同属「读本地日志 → 统一事件 → 聚合 → 
 | R16 | 浏览器**不读账本内部 `schemaVersion`**，分钟/日粒度完全靠 `row.timestampMs > 0` 判断 | README 中「schema-v7 设备改造成分钟桶」的表述与实现不符（`README.md:189`）：其 `v7` 与代码 `CURRENT_LEDGER_SCHEMA_VERSION = 8`（`model.rs:3`）亦不一致；旧账本只表现为「无时间戳行」 | §6.3 |
 | R17 | 本地工作台存在**第二条独立计价链**，且传**原始 `model_id`**（未过 `canonical_model_id`） | 同一模型在本机工作台与云端账本上的金额理论上可能不一致 | §5.8、`local/activity.rs:27,63` |
 | R18 | Codex tier 增强的日级对账门被拒时**静默降级**为 canonical 行 | `Fast/Priority` 标签丢失（金额不变），tier 维度的筛选与分组出现 `Standard` 假象 | `collector.rs:177-194`、`233-236` |
-| R19 | `evidence::scan` 增量按文件 mtime **3 天**过滤，而采集窗口是 **2 天** | 两个窗口不同步；陈旧文件里的路由证据可能缺席 | `evidence.rs:53-64`、`main.rs:394` |
+| R19 | `evidence::scan` 增量按文件 mtime **3 天**过滤（`evidence.rs:53-64`），而采集用量行窗口是 **2 天**（`main.rs:364,394`，实际跨度 2–3 个自然日）；**证据窗口比用量行窗口更宽**，方向与原表述相反 | 正常时钟下不会因窗口差异导致"有用量、缺路由/强度证据"（记录时间戳 ≤ 文件 mtime，写入即刷新）；真实缺证据来源是 32 MiB 文件上限、2 MiB 行上限、无效 UTF-8 提前终止、扩展名白名单、每客户端 2500 文件上限、会话 id 两侧不匹配；当 mtime 与内容脱钩（回拨/复制/恢复/挂载）时仍会缺证据 | `evidence.rs:53-64`、`main.rs:394`；对照 `evidence.rs:43-45`、`:665-667`、`:698`、`:699-701`、`:723-732`、`:757-759`、`:807-815` |
 | R20 | 本地工作台 `configure.rs` 会**写入 agent 配置**（`<codex>/config.toml`、`<claude>/settings.json`，Claude 分支写入 `ANTHROPIC_AUTH_TOKEN`） | 与「只读」原则相反；属 UsageMesh 显式设计，但对以只读为约束的工具是风险面 | `local/store.rs:136-142`、`local/configure.rs:77-99` |
 | R21 | 英文 `README.md:177` 的**安全模型写反**：宣称解锁密钥只驻内存、不在 `sessionStorage`/IndexedDB、刷新必须重输密码；实现是密文信封入 `sessionStorage`（`web-ui/src/lib/session.ts:3,99,136,145,190`）+ 不可导出 `CryptoKey` 入 IndexedDB（`session.ts:30,164-168`）+ 刷新自动恢复（`session.ts:197-232`，30 min 闲置 / 12 h 绝对） | 以英文 README 为准的读者会误判浏览器的密钥持久化与恢复行为；注意中文版 `README.zh-CN.md:167` 与实现一致，即中英文档自相矛盾 | 详见 §6.1 的「文档与实现矛盾」判定 |
+| R22 | 部分解析器**未把 `reasoning` 从 `output` 相减**（原样透传），而 UsageMesh 按 `output + reasoning` 计价——该口径与 tokscale 自身一致（`TokenBreakdown::total()` 五项相加，计价点 `tokscale-core/src/pricing/lookup.rs:1880` 亦为 `output.max(0).saturating_add(reasoning.max(0))`） | 在 W1 报告认定的 **13 个客户端**上可能**重复计费**（若上游 output 本就含 reasoning，该部分被计两次）；是否重复取决于各客户端上游语义，仓库内无法证伪（`total()` 口径下 tokscale 自身同等程度重复） | 清单与逐行号见 W1 报告 §5.12-4 与 `_sub-B-output-reasoning.md` §5（B 类"明确有风险"13 项：`antigravity.rs:74-101`、`copilot.rs:429`+`798-817`、`copilot_desktop.rs:373-379`+`407-413`、`copilot_vscode.rs:212-229`、`droid.rs:474-480`、`fx.rs:304-310`、`hermes.rs:137-151`、`jcode.rs:110-129`、`junie.rs:224-245`、`opencode_schema.rs:663-698`（`opencode`/`kilo`/`micode` 共用）、`qwen.rs:108-141`、`tencent_buddy.rs:91-122`（含 `codebuddy`）、`zcode.rs:435-442`）；对应 §3.5.13 / §3.5.14 的桶级条目与 §5.12-4 |
+| R23 | crate 质量门禁现状（Windows 目标）：`cargo build` 有 **8 个 rustc 警告**、`cargo clippy --all-targets` 有 **15 个 clippy 警告**（CI 只跑 `cargo clippy --workspace --all-targets`、**不带 `-D warnings`**，故不阻塞）；`cargo fmt --check` 有 **11 处真实未格式化**（`main.rs` ×7、`scheduler.rs` ×4，LF 对照实验已排除行尾干扰）；前端 `npm run format:check` 报 56 文件失败属 **CRLF 环境假阳性**（`core.autocrlf=true` + 仓库无 `.gitattributes`/`.editorconfig`/`.prettierrc`；`--end-of-line auto` 与 LF 副本复检均全通过） | 警告持续积累（含 Windows 分支 dead code 与 `#[cfg]` 裁剪副产物）；在当前检出环境下本地 `fmt` 门禁真实不通过（CI 在 ubuntu-latest 上检出 LF，实为绿）；CRLF 假阳性会误导"代码风格有问题"的判断 | 附录 D.2（运行时验证（工作副本内））/ `verify/W3-empirical.md` §3.2、§3.4、§3.5、§3.7、§5.1-11 |
 
 ### 10.2 设备侧与传输链风险（原始清单）
 
@@ -3106,23 +3161,25 @@ TokenScope 与本项目同属「读本地日志 → 统一事件 → 聚合 → 
 #### 10.2.2 未验证项（设备侧）
 
 1. `tokscale-core 4.14.0` 内部实现（`since` 的日粒度/时区语义、`ParsedMessage.date` 是否定长 ISO、`timestamp` 单位与去重规则）**未在本仓核实**；本仓只证明传参与消费（`collector.rs:5-8,211-221`、`Cargo.toml:33`、`Cargo.lock:1879-1881`）。§4.5 的潜在缺陷 1、2 需 tokscale 侧源码确认（该确认见 §3.6.9、§3.6.10）。
-2. `evidence::scan` 的增量文件过滤是"mtime 3 天内"（`evidence.rs:53-64`）而采集窗口是"2 天"，两者不同步；是否会造成"数据仍在写入但证据缺失"未验证。
+2. **已核实（原前提方向相反）**：`evidence::scan` 的增量文件过滤是"mtime 3 天内"（`evidence.rs:53-64`），采集用量行窗口是"2 天"（`main.rs:364,394`，实际跨度 2–3 个自然日）——**证据窗口比用量行窗口更宽**，正常时钟下不会因此"有用量、缺证据"（记录时间戳 ≤ 文件 mtime，写入即刷新）。真实缺证据来源是：证据文件 > 32 MiB 整文件跳过（`evidence.rs:43`、`:665-667`）、单行 ≥ 2 MiB 跳行（`:45`、`:699-701`）、无效 UTF-8 使该文件后续行全部终止（`:698`）、扩展名白名单仅 `json/jsonl/ndjson/log/toml`（`:723-732`）、每客户端 2500 文件上限（`:44`、`:757-759`）、会话 id 两侧不匹配（`:807-815`）。**可复现条件**：把某会话 JSONL 的 mtime 回拨到 4 天前（或保留时间戳复制/恢复/挂载），再执行一次增量 `sync` ⇒ 用量行仍按记录日期进入窗口，而证据扫描因 mtime 过期整文件跳过，该会话的 `routeType`/`billingChannel`/`reasoningEffort` 缺失。影响面：只影响路由/强度标签，不改变 token、请求数与费用。
 3. `PriceBook::load()` 的目录/缓存策略与 `pricing.rs` 全文未逐行核对；本次只核实 `PRICING_POLICY`（`pricing.rs:24`）与 `metadata()`（`pricing.rs:281-289`）、`quote_on_date` 未收录模型的 `lower_bound=true`（`pricing.rs:315-320`）。
 4. 云端仪表盘的多设备聚合、缓存（`DashboardLoadCache`）与轮询节奏未逐行核对，仅核实解锁与单设备解密路径（`data.ts:492-649`）。
-5. Linux cron 回退路径、macOS launchd 路径**未在真实系统上运行验证**，仅静态阅读（`scheduler.rs:534-575,388-419`）。
-6. Windows 自更新"等父进程退出后覆盖"在父进程被杀/无权限时的残留行为未验证（`update.rs:291-336`）。
-7. `Metrics.messages: i32`（`model.rs:24`）在极端量级下的溢出行为未做压力验证；`scan_ms` 有 `min(u64::MAX)` 保护（`collector.rs:370`）。
-8. 本地工作区的 `quota_official` / `quota_history` 抓取与存储细节未逐行核对（仅核实调用链 `local/mod.rs:302-325,334-371`）。
+5. Linux cron 回退路径、macOS launchd 路径**未在真实系统上运行验证**，仅静态阅读（`scheduler.rs:534-575,388-419`）。本轮已进一步确认：这些分支在当前（Windows）目标下由 `#[cfg(target_os = …)]` **编译期排除**——`cargo build` 对 `scheduler.rs` 报出的 `unused import: Path`、`unused attribute 'allow'`、`unreachable expression` 即该裁剪的副产物；且 `crontab` 内容改写逻辑**零测试覆盖**（`scheduler.rs` 测试模块仅常量断言）。"未真机验证"的结论不变。
+6. Windows 自更新"等父进程退出后覆盖"在父进程被杀/无权限时的残留行为**未真机验证**（`update.rs:291-336`）。本轮已确认该文件在 Windows 目标下存在编译期裁剪的痕迹——`sync_args`（`update.rs:274`）被判为 dead code（`cargo build` 8 个警告之一），且相关残留/重试路径无测试覆盖。
+7. **已核实（关闭）**：`Metrics.messages: i32`（`model.rs:24`）由全字段 `saturating_add` 累加（`model.rs:37-45`，`messages` 在 `:43`），在 2,147,483,647（`i32::MAX`）处**饱和截断、不 panic、不回绕**；同结构 token 五桶与 `total_tokens` 亦为饱和链（`:29-35`、`:38-42`），其为 `i64`，实际不可达。口径提示：这是"上限处截断"而非"溢出报错"。`scan_ms` 另有 `min(u64::MAX)` 保护（`collector.rs:370`）。
+8. **已核实（关闭）**：本地工作区 `quota_official` / `quota_history` 抓取与存储细节已逐行核对（调用链 `local/mod.rs:302-325,334-371`）：存储为 `<data>/quota-history.json`（默认 `%APPDATA%\usagemesh\local\`，`store.rs:120-124`）、写入是同目录临时文件 + `persist` 原子替换（`store.rs:15-28`）、跨进程排他锁 `quota-history.lock`（`quota_history.rs:286-303`）、保留 90 天 / 400 条（`:274-278`）；stale 保留共 **5 处**：抓取前先标 stale 落盘（`local/mod.rs:302-312`）、失败路径保留（`local/mod.rs:77-89`）、同账号合并才保留旧快照（`quota_history.rs:70-86`）、5 分钟节流命中导出 stale（`local/mod.rs:334-371`）、同步侧 600 秒语义相同才复用（`collector.rs:405-459`）；`stale` 保留点三处——刷新前置 stale 并落盘（`local/mod.rs:302-312`）、`merge_usage` 同账号保留旧快照（`quota_history.rs:70-86`）、常驻同步失败时从历史导出 stale（`local/mod.rs:334-371`）。
 
 ### 10.3 各章未验证项索引
 
-| 主题 | 位置 | 条目数 |
-| --- | --- | --- |
-| tokscale-core v4.14.0 内部语义（客户端解析细节、估算面、v4.18 差异） | §3.10 | 15 |
-| 计价与路由身份（价格目录实测、PDF/文档页、跨平台目录落点） | §5.12 | 9 |
-| 云端仪表盘（未跑测试、线上响应头、限流阈值、fork 回退） | §6.11 | 10 |
-| 本地工作台（浅克隆限制、未实跑、app-server 实机字段） | §7.12 | 9 |
-| 设备侧与传输链 | §10.2.2 | 8 |
+> 第 6 轮（存疑项专项 + 实证，见附录 D）之后，各章已把条目重新分为「已核实（实证）」与「确证不可核实（附条件）」两分。下表给出**收口后仍开放**的条目数与主题。
+
+| 主题 | 位置 | 仍开放条目 | 备注 |
+| --- | --- | --- | --- |
+| tokscale-core v4.14.0 内部语义 | §3.10 | 9 | 已核实 6 条（时间戳、counts 差异、headless、`cache_write_1h`、静默失败、`canonical_provider`）；仍开放者为 `inferred_provider_from_model` 逐行、`unwrap/panic` 穷举、`mux`/`antigravity` 的路径与单位、B 类三项外部 schema、v4.15–4.16 中间差异等 |
+| 计价与路由身份 | §5.12 | 2 | 价格目录、OpenAI 文档、重复计价口径、账本字段兼容、超长行行为均已闭合；仅剩"真实账本数据复现明细合计 < 总额"与少量文档页口径 |
+| 云端仪表盘 | §6.11 | 1 | 仅剩账本 schema v1–v3 与 v6 段别（需完整 git 历史）；测试/构建、响应头、限流、心跳、预测、索引、fork 回退、CSP 均已闭合 |
+| 本地工作台 | §7.12 | 4 | 提交级 diff（浅克隆）、真机 `codex app-server` 字段契约、`usagemesh serve` 实跑与节流时间线、云端侧逐行核对 |
+| 设备侧与传输链 | §10.2.2 | 3 | 平台调度分支（`#[cfg]` 排除 + 零测试覆盖）、Windows 自更新残留路径、本地配额逐行核对已完成；其余已关闭 |
 
 ## 附录 A：关键常量与阈值速查
 
@@ -3263,7 +3320,7 @@ TokenScope 与本项目同属「读本地日志 → 统一事件 → 聚合 → 
 
 一致性结论（V8 独立重算，**该轮时点**）：目录 **81 条 = 实际 81 条**（文本/顺序/锚点零差异，含本轮补齐的附录 B/C）；124 个编号标题序号连续无断号；74 个代码围栏全部成对；49 个表格块列数一致；`§` 引用共 37 个唯一编号，**35 个有效**（另 2 个 `§11`/`§6.15` 只出现在 §C.2 的历史台账里，用于描述"曾引用不存在章节"的修复记录）；附录 A 36/36 行回源成立；元信息 8 项逐项确证。
 
-**定稿组装后的最终状态**（第 4/5 轮回填完成、重新拼装后由一级代理实测）：顶层 `##` 14 个（含「目录」自身，故实际章节标题 13 个）+ `###` 70 个，对应**目录 83 条 = 14 + 70 − 1**（第 4 轮新增 §3.5.14 与 §4.6）；代码围栏 74 行 = 37 对；**52 个表格块列数一致**（口径：允许行首缩进，行内 `\|` 视为转义）；`文件:行号` 引用（`:\d+` 形态）**4207 条**；占位符扫描 0（`待补`/`TODO`/`<!--F`）；失效引用扫描 0——`§11`/`§6.15` 只出现在本附录的历史台账里（第 5 轮复核代理核对），`待核对` 只出现在 §6.5「文档待核对项已可关闭」这一小节标题中。
+**定稿组装后的最终状态**（第 6 轮收口、重新拼装时点由一级代理实测；数值随编辑微动，口径固定如下）：顶层 `##` 15 个（含「目录」自身，故实际章节标题 14 个：第 1–10 章 + 附录 A–D）+ `###` 75 个，对应**目录 89 条 = 15 + 75 − 1**；代码围栏 74 行 = 37 对；**58 个表格块列数一致**（口径：允许行首缩进、行内 `\|` 视为转义）；`文件:行号` 引用（`:\d+` 形态）**约 4,580 条**；占位符扫描 0（不含本附录用于描述扫描词的字面量）；失效引用扫描 0——`§11`/`§6.15` 只出现在本附录的历史台账里，`待核对` 只出现在 §6.5「文档待核对项已可关闭」这一小节标题中。
 
 ### C.4 第 3 轮（冻结稿抽检）与第 4 轮（覆盖度回填）
 
@@ -3310,13 +3367,26 @@ V11 结论：**无阻断级错误**；1 条重要 + 1 条中等 + 6 条轻微，
 
 ### C.5 残留不确定性与已知边界
 
-1. **未运行任何代码**：两个仓库只做静态阅读，未 `cargo build`/`cargo test`/`npm test`，因此「测试是否通过」「运行时是否报错」类问题不在本文结论范围内（多处测试仅作为**语义锚点**引用其断言，而非作为已执行结果）。
+1. **「未运行任何代码」这一条已被第 6 轮超越**：第 1–5 轮的结论确为纯静态，但第 6 轮已在隔离副本内执行构建与测试（`cargo test` 89 passed、tokscale 上游套件 1917 passed、`npm test` 191 passed，均 0 failed；见 §D.2）。因此"测试是否通过""能否构建""有无编译警告"这类问题现已有运行级答案；仍未运行的是真实日志性能验收、已登录 `codex app-server` 契约、macOS/Linux 调度分支与六平台矩阵。
 2. **未触碰真实数据**：未读取本机 `~/.claude`、`~/.codex`、`~/.config/tokscale` 等目录内容，因此涉及「本机 scanner 设置实际取值」「真实日志字段形态」的判断一律落在未验证项。
 3. **远端行为未实测**：GitHub REST/Pages/限流/ETag 等线上行为、`codex app-server` 真机字段、`models.dev` 实际 JSON 结构均未联网验证。
 4. **平台路径未验证**：Linux cron / systemd、macOS launchd 路径仅静态阅读，未在真机运行。
 5. **版本漂移**：本文锚定 UsageMesh `8cfb77f`（2026-09-11）与 tokscale-core `v4.14.0`；上游后续提交可能改变行号与行为（v4.18.0 的差异清单见 §3.8，其中「只认标签对象、勿用主分支工作树」的引用体例见 §3.1 的说明）。
 
-### C.6 复核产物清单（可在本机临时目录复核）
+### C.6 第 6 轮（存疑项专项复核与实证）
+
+第 5 轮之后，针对全文**遗留的「未验证项」**做了一轮专项：目标是"逐条推进为已核实，或确证核不了并说明条件"。
+
+| 分路 | 执行者 | 覆盖 | 结果 |
+| --- | --- | --- | --- |
+| tokscale 侧 | 深挖代理 W1 | §3.10 的 10 条 + §5.12-4 | 10 条全部收口；**3 条改写了文档**：①`v4.15.0`/`v4.15.1`/`v4.16.0` 其实**已发布**（原判断错误）；②tokscale **自身**即按 `output + reasoning` 计价（`pricing/lookup.rs:1880`），重复计费风险收窄到 13 个未相减的解析器；③`apply_headless_agent` **并非冗余**（headless 目录部分场景由它独写） |
+| UsageMesh 侧 | 深挖代理 W2 | §5.12 / §6.11 / §7.12 / §10.2.2 共 16 条 | 14 条完全核实、1 条部分核实（schema 序列需 git 历史）、1 条静态核实待真机；**1 条原前提方向写反**：证据窗口（3 天）其实**比**采集窗口（2 天）**更宽**，缺证据另有来源 |
+| 运行实证 | 实证代理 W3 | rust-cli / web-ui / tokscale 上游 | 副本内 `cargo test` 89 passed、上游套件 1917 passed、前端 191 passed（均 0 failed）；另有 8 个 rustc 警告、15 个 clippy 警告、`cargo fmt --check` 11 处真实 diff、前端 `format:check` 的 56 文件失败证为 CRLF 环境假阳性；**零污染**（未创建任何真实数据目录、未安装计划任务、原件零写入） |
+| 联网实证 | 一级代理 | models.dev 目录全文、OpenAI 三个模型页、GitHub REST 文档与响应头、上游公开分支信封元数据 | 17 项（N1–N17），其中「同内容 ⇒ 同 commit sha」被 **证伪**（GitHub 默认 author = 认证用户 + **当前日期**） |
+
+处置：以上结论经四个回填代理（F11–F14）写回各章，实证过程与结论汇总进**附录 D**；各章「未验证项」小节改为「已核实（实证）/确证不可核实（附条件）」两分。仍不可核实的 8 类条目见 §D.4。
+
+### C.7 复核产物清单（可在本机临时目录复核）
 
 | 产物 | 路径 |
 | --- | --- |
@@ -3324,10 +3394,121 @@ V11 结论：**无阻断级错误**；1 条重要 + 1 条中等 + 6 条轻微，
 | 引用落点审计原文 | `%TEMP%\usagemesh-notes\verify\_lineref-audit.txt`（235 条引用的源码原文） |
 | 第 2 轮复核报告 | `%TEMP%\usagemesh-notes\verify\V6-findings.md`（落地审计）、`V7-findings.md`（落地审计）、`V8-findings.md`（一致性/附录） |
 | 第 3 轮复核报告 | `%TEMP%\usagemesh-notes\verify\V9-findings.md`（冻结稿终检）、`V10-review.md`（覆盖度与可读性）、`V10-officialdoc-diff.md`（官方文档差异全集 51 条） |
+| 第 6 轮（存疑项专项）报告 | `%TEMP%\usagemesh-notes\verify\W1-doubtfindings.md`（tokscale 侧 10 条 + `_sub-A-silent-errors.md`、`_sub-B-output-reasoning.md`）、`W2-doubtfindings.md`（UsageMesh 侧 16 条）、`W3-empirical.md`（运行实证：命令、退出码、零污染审计） |
+| 第 6 轮联网实证原始产物 | `%TEMP%\usagemesh-notes\modelsdev-api.json`（models.dev 全量目录 5,632,574 字节）、`modelsdev_check.ps1` / `modelsdev_check2.ps1`（统计脚本）、`net_checks.ps1`、`openai_docs.ps1`、`github_docs.ps1`（响应头与官方文档取数脚本） |
+| 第 6 轮运行时副本 | `%TEMP%\usagemesh-empirical\`（`rust-cli`、`web-ui`、`tokscale-v4.14.0` 三个工作副本与构建产物，供复核；只读原件未被写入） |
 | 冻结稿审计过程数据 | `%TEMP%\usagemesh-notes\verify\V9-appB-raw.txt`、`V9-refs-index.csv`（2176 条引用索引）、`V9-sampling.txt` |
-| 修正日志（共 11 份） | `F1-fixlog.md`（ch04/ch08）、`F2-fixlog.md`（ch05）、`F3-ch06-fixlog.md`、`F3-ch07-fixlog.md`、`F4-fixlog.md`（ch03）、`F5-fixlog.md`（收口章/附录）、`F6-fixlog.md`（ch03/ch05 精度）、`F7-fixlog.md`（ch06/ch07 精度）、`F8-fixlog.md`（ch02/ch03 覆盖度）、`F9-fixlog.md`（ch04 覆盖度）、`F10-fixlog.md`（ch05/ch06 同步与文档矛盾） |
+| 修正日志（共 15 份） | `F1-fixlog.md`（ch04/ch08）、`F2-fixlog.md`（ch05）、`F3-ch06-fixlog.md`、`F3-ch07-fixlog.md`、`F4-fixlog.md`（ch03）、`F5-fixlog.md`（收口章/附录）、`F6-fixlog.md`（ch03/ch05 精度）、`F7-fixlog.md`（ch06/ch07 精度）、`F8-fixlog.md`（ch02/ch03 覆盖度）、`F9-fixlog.md`（ch04 覆盖度）、`F10-fixlog.md`（ch05/ch06 同步与文档矛盾）、`F11-fixlog.md`（ch03 存疑项回填）、`F12-fixlog.md`（ch05 存疑项回填）、`F13-fixlog.md`（ch06 存疑项回填）、`F14-fixlog.md`（ch07/ch10 存疑项回填） |
 | 二级取证原始报告（【代核实】条目的底层证据） | `%TEMP%\usagemesh-notes\raw\group-A.md` … `group-D.md`（逐模块原始输出） |
 | 章节源文件（拼装输入） | `%TEMP%\usagemesh-notes\final\*.md`、`%TEMP%\usagemesh-notes\S0-front.md`、`S9-tail.md` |
 | 源码克隆（只读） | UsageMesh：`%TEMP%\usagemesh-research`（HEAD `8cfb77f`）；tokscale v4.14.0：`%TEMP%\tokscale-v4.14.0`（`1ec865d`）；对照 v4.18.0 用标签 `v4.18.0` 解析出的 commit `d4d1c751`（轻量标签，无独立 tag 对象） |
 
-> 复核的独立性边界：所有复核代理都只读源码与文档，**未运行任何二进制或测试**（`cargo`/`npm` 全程禁用），因此所有结论都是**源码级**而非运行时级；凡涉及"实际运行时会怎样"的判断，本文一律落在 §3.10、§5.12、§6.11、§7.12、§10.2.2 的未验证项里，不写成事实。
+> 复核的独立性边界：第 1–5 轮的所有复核代理都只读源码与文档，**未运行任何二进制或测试**（`cargo`/`npm` 全程禁用），因此那一批结论都是**源码级**；凡是"实际运行时会怎样"的判断，当时一律落在各章的未验证项里。
+> **第 6 轮打破了这个边界**（用户要求复核存疑部分）：在**隔离工作副本**内执行了构建与测试（副本路径 `%TEMP%\usagemesh-empirical\`，只读原件零写入、本机真实数据目录零创建，见 §D.2 的审计与零污染核对），并做了联网核验（§D.1）。因此：
+> ①「测试是否绿」「能否构建」「有无编译警告」这类问题已有运行级答案；
+> ② 仍未运行的是：真实日志的性能验收（`--ignored`）、已登录 `codex app-server` 的字段契约、macOS/Linux 调度分支与六平台矩阵；
+> ③ 结论的**效力分档**相应变为：**源码级（第 1–5 轮）→ 运行级（第 6 轮副本内）→ 未核实（§D.4 列出条件）**。
+
+## 附录 D：实证复核记录（联网 / 运行）
+
+> 前几轮复核都是**源码级**的。本附录记录一次**实证复核**：把各章「未验证项」逐条推进为「已核实（附证据）」或「确证不可核实（附条件）」。
+> 手段三类：① 静态源码深挖；② 联网实证（官方文档、上游公开元数据、HTTP 响应头）；③ 在**工作副本**上执行测试（不碰只读克隆，不碰本机真实用户数据）。
+> 追加边界：本附录新增的所有检查都**未登录任何账号、未写入任何远端仓库、未解密任何账本密文、未读取本机 `~/.codex`/`~/.claude`/`~/.config/usagemesh` 内容**；联网走本机代理。
+
+### D.1 联网实证结果
+
+| # | 检查项 | 方法 | 结果 | 影响的存疑项 |
+| --- | --- | --- | --- | --- |
+| N1 | `models.dev/api.json` 的真实结构 | 下载全文（5,632,574 字节）后用脚本统计 | **229 个 provider**；`pricing.rs:138-169` 期望的九个规范 provider（`openai`/`anthropic`/`google`/`xai`/`deepseek`/`alibaba`/`moonshotai`/`xiaomi`/`zai`）**全部存在**；结构为 `{provider: {models: {id: {cost: {input, output, cache_read?, cache_write?}}}}}`,与 `pricing.rs:31-49` 的假设一致 | §5.12-2 |
+| N2 | 目录里 cache 价的缺失面 | 同上 | 8,830 条模型中 8,376 条带 `cost`；**`cache_read` 存在 5,723 / 缺失 3,107**，**`cache_write` 存在 1,887 / 缺失 6,943**；缺失时 `EffectivePricing::from_models_dev`（`pricing.rs:63-78`）归零，有 token 即触发下界（`pricing.rs:350-353`） | §5.12-2、§5.3 |
+| N3 | 模型标识的形态 | 同上 | **5,055 条模型 id 含 `/`**（如 `openai/gpt-5.6-sol`、`deepinfra/anthropic/claude-…`）⇒ `normalize_model_id` 的"取最后一个 `/` 之后"（`pricing.rs:105-114`）是**必要**而非可选 | §5.2 |
+| N4 | 目录里的重复键规模 | 同上，按 `normalize_model_id` 规则归并 | 归一化后 **2,189 个键：855 个存在多个候选条目，其中 843 个横跨 ≥2 个 provider**（例：归一键 `gemma-4-31b-it` 有两个候选——`llmgateway-providers` 的 `deepinfra/gemma-4-31b-it` 报 `$0.2`、`nano-gpt` 报 `$0.1`；`grok-4.20-0309-reasoning` 在 xai `$1.25`、cloudflare-ai-gateway `$2`）⇒ `provider_preference` + `provider_id` 字典序决胜（`pricing.rs:190-200`）**是真实生效路径**，不是理论分支 | §5.1、§5.2 |
+| N5 | 目录里被忽略的字段 | 同上 | 目录还带 **`cost.tiers`（643 条）与 `cost.context_over_200k`（529 条）**，但 UsageMesh 的 `ModelsDevCost`（`pricing.rs:31-37`）只解析四个单价字段 ⇒ **目录级长上下文/分档规则被丢弃**，长上下文乘数只可能来自 GPT-5.6 守卫卡；这与 `pricing.rs:74-76`（目录条目阈值恒 `None`）互为佐证 | §5.2、§5.7 |
+| N6 | GPT-5.6 家族在目录里的价格 | 同上 | 目录同时存在 `gpt-5.6-sol` 的 `input=5/output=30`（abacus、ai-router、aihubmix…）与 `5.2/26`（aimlapi）等**互不一致**的条目；`gpt-5.6-terra` 有 `2/12` 与 `2.5/15` 两档；`gpt-5.6-luna` 有 `0.2/1.2` 与 `1/6` 两档 ⇒ 若无 `guarded_pricing` 守卫，同一模型的价格会随"哪个 provider 胜出"漂移 | §5.1、§5.7 |
+| N7 | OpenAI 官方 Sol 模型页 | `web_fetch` 取 `gpt-5.6-sol` 页与 `.md` 版 | **结构规则逐条命中**：">272K input tokens are priced at **2x input and 1.5x output for the full request**"、"Cache writes are billed at **1.25x** the uncached input token rate" | §5.12-3、§5.7 |
+| N8 | Sol 的官方当前价 vs 钉住卡 | 同上 | 官方**促销价** `$4 / $0.40 / $20`（每 1M；"promotional pricing is available at least through November 21, 2026"）；UsageMesh 钉住 `$5 / $0.50 / $30` ⇒ **输入/缓存高 25%、输出高 50%**（`pricing.rs:377`、`:387`），与 `docs/PRICING.md:25`"刻意不跟随促销价"一致，且该差异现在是**有官方原文佐证的量化结论** | §5.12-3、§5.7 |
+| N9 | Terra / Luna 的日期价卡 | 同上（两个模型页） | 官方当前 `Terra $2 / $0.2 / $12`、`Luna $0.2 / $0.02 / $1.2` —— 与 `guarded_pricing` 的"≥2026-07-30"分支**逐项相等**（`pricing.rs:378-381`）；两页同样声明 272K 与 1.25× 规则 | §5.2、§5.7 |
+| N10 | GitHub 提交 API 的默认行为 | GitHub REST 官方文档（Create a commit） | 文档原文："By default, the author will be the authenticated user and **the current date**" ⇒ UsageMesh 只传 `{message, tree, parents:[]}`（`github.rs:278`）时，**同一内容在不同时刻会得到不同的 commit sha** | §8.2、§10.1 |
+| N11 | "同内容 ⇒ 同 sha" 的机制确认 | 本机 git 实验（固定 `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE`，相同 tree+message+空 parents 两次） | 两次产出**同 sha**（`b32a074…`）⇒ 该假设只在"作者/时间完全一致"时成立，而 N10 表明 GitHub 侧时间由服务端取当前时刻 ⇒ **假设在 GitHub 上不成立**：每次重新发布都会新建无父 commit 并强制 PATCH ref（幂等，但并非"跳过"） | §8.2、§10.1 的 R10 |
+| N12 | `raw.githubusercontent.com` 的响应头 | `Invoke-WebRequest` 取公开文件 | `200`；`cache-control: max-age=300`；`etag: "<64 位十六进制>"`（复测多次均为**强 ETag**；首次探测曾见 `W/"db54…"` 弱标记，属同一 CDN 的两种返回形态，结论不受影响）；`access-control-allow-origin: *`；`vary: Authorization` ⇒ 前端 `data.ts:432-443` 的 `cache:"no-store"` + 无条件请求，等于**每次实拉、绕过 5 分钟 CDN 缓存**，行为自洽 | §6.11-4 |
+| N13 | `api.github.com` 未认证配额 | 同上（`/rate_limit`） | `X-RateLimit-Limit: 60`，且本机出口（代理）当时 `Remaining: 0` ⇒ 印证"正常轮询（只读 raw）不消耗 API 配额"的必要性——**回退到 Contents API 的路径会受 60 次/小时的硬限** | §6.11-6 |
+| N14 | 上游 Pages 站点 | 同上（站点首页 / `build-info.json`） | 首页 `200` 且含 `<meta http-equiv="Content-Security-Policy" …>` 与 `<meta name="referrer" content="no-referrer">`；`build-info.json` 的 `dashboardSourceSha` = **`8cfb77f1…`（即本文分析的提交）**、`builtAt 2026-10-13` ⇒ 线上仪表盘与本文同一版本，CSP/referrer 在部署环境**确实生效** | §6.11-10 |
+| N15 | 上游公开分支的布局与元数据 | 同上（`um-index`/`um-dashboard`/`um-presence`/`um-ledger`） | `um-index/index.json` 只列 `um-ledger-*` 名（印证 `github.rs:113-126`）；`um-dashboard/access.json` 的 **`iterations: 310000`**（真实工作区仍是 v1 兼容档，印证"旧清单保留 310k、新建才 600k"）；`um-ledger-*/ledger.json` 信封 `schemaVersion: 2`、3.86 MB 密文（未解密）；`um-presence-*/presence.json` 恰为**五个字段**（`schemaVersion`/`kind`/`deviceHash`/`updatedAt`/`appVersion: "2.7.0"`） | §6.1、§8.1、§8.2 |
+| N16 | fork 场景的静态回退 | 同上（站点内 `device-index.json`） | 线上该文件已被 `um-index` 覆盖为 **6 个真实 `um-ledger-*` 分支**（而仓库内 `web-ui/public/device-index.json` 是空骨架）⇒ `pages.yml:90-99` 的覆盖逻辑在真实部署中生效 | §6.11-9 |
+| N17 | 账本 schema v7 的引入点 | 仓库内变更记录 | `.release/v2.4.0:11`："schema **v7** stores minute buckets so totals, trends and request details share the same precise boundaries"；`.release/v2.5.0:8`："Presence heartbeats are published about once per minute, while encrypted `um-ledger-*` snapshots are rewritten only when accounting changes" ⇒ v7=分钟桶已由**发布记录**证实；当前 v8 的引入内容仓库文档未记载 | §6.11-3 |
+
+### D.2 运行时验证（工作副本内）
+
+为回答"测试是否绿、解析会不会 panic、能否编译"这类只能跑出来的问题，本轮在**临时副本**上执行了构建与测试。
+执行前先做了副作用审计：全仓 `#[ignore]` 测试**只有 1 个**——`local::quota_official::tests::installed_app_server_smoke_test`（它会用真实 `~/.codex` 并启动已登录的 `codex app-server`），**默认跳过且未加 `--ignored`**；其余测试均为纯函数、tempdir 注入、自进程 fake stdio 或 `127.0.0.1` 回环 socket。事后核对：`~/.claude`、`~/.cc-switch`、`~/.tokenscope` 窗口内写入 0，`~/.config/usagemesh` 与 `~/.usagemesh-local` **未被创建**，计划任务 0，两个只读克隆被写入文件 0。
+
+| 命令 | 对象 | 结果 | 退出码 |
+| --- | --- | --- | --- |
+| `cargo test` | UsageMesh `rust-cli`（副本） | **89 passed / 0 failed / 1 ignored**（30.9 s） | 0 |
+| `cargo test --workspace --all-targets` | 同上（CI 的精确命令） | 89 / 0 / 1 | 0 |
+| `cargo build` | 同上 | 成功；**8 个 rustc 警告**（Windows 目标：2×`unused import`（`Path`、`PricingInfo`）、1×`unused attribute`、1×`unreachable expression`、4 处 dead_code） | 0 |
+| `cargo clippy --all-targets` | 同上 | 成功；**15 个 clippy 警告**；CI 的 `rust-quality` 不带 `-D warnings`，故不阻塞 | 0 |
+| `cargo fmt --check` | 同上 | **11 处 diff**（`main.rs`×7、`scheduler.rs`×4）；用行尾对照实验排除 CRLF 干扰后仍成立，属**真实未格式化** | 1 |
+| `cargo test -p tokscale-core --all-targets` | tokscale v4.14.0（副本） | **1917 passed / 0 failed / 4 ignored**（8 个二进制） | 0 |
+| `npm ci` / `npm test` | `web-ui`（副本） | 216 包；**18 文件 / 191 passed / 0 failed** | 0 |
+| `npm run typecheck` / `npm run build` | 同上 | 干净；构建成功（12.66 s） | 0 |
+| `npm run format:check` | 同上 | 56 文件报错 → **已证为 CRLF 环境假阳性**：`--end-of-line auto` 全通过，副本转 LF 后用项目自带 prettier 复检 57 文件全通过 | 1 |
+| `install.ps1` 语法（PS7 / PS5.1） | 仓库脚本 | 0 错误 | — |
+| dashboard 安全策略断言（5 项） | `pages.yml:55-64` | 5/5 通过 | — |
+
+**由运行确定的三项新事实**（纯静态阅读得不到）：
+
+1. **编译警告不是零**：Windows 目标 8 个 rustc 警告 + 15 个 clippy 警告，含 4 处 dead code（`unwrap_dashboard_key`、`decrypt_ledger`、`PriceBook::quote`、`sync_args`）——后者说明这些函数在当前版本里没有生产调用者。
+2. **`cargo fmt --check` 不干净且与行尾无关**（11 处，如 `main.rs:317` 的超宽 `eprintln!`）。
+3. **前端 `format:check` 的失败是环境归因**：全局 `core.autocrlf=true` 且仓库无 `.gitattributes`/`.prettierrc` 兜底；CI 在 Linux 上因此是绿的。
+
+**仍无法用运行回答的项**（需要别的环境）：macOS launchd 分支与 Linux systemd/cron 分支（`#[cfg]` 编译期排除、crontab 改写零测试覆盖）、真实 `codex app-server` 的字段契约（需已登录实例）、release 静态 musl 与六平台矩阵（需 CI）、真实 GB 级日志解析（`--ignored` 性能测试，本轮未跑）、`install.sh` 的 `sh -n`（本机无 `sh`）。
+
+### D.3 由实证改写的存疑项（清单）
+
+| 章 | 存疑项 | 原状态 | 实证后的状态 |
+| --- | --- | --- | --- |
+| §3.10 | 时间戳单位（zcode / kiro / workbuddy·codebuddy） | 未确认 | 已核实（毫秒 / 文件 mtime / 本地时区解析） |
+| §3.10 | `counts` vs `messages` 差异集合 | 未穷举 | 已穷举（9 个 lane） |
+| §3.10 | `apply_headless_agent` 是否冗余 | 未验证 | 已核实（`codex exec` 双写；headless 目录部分场景由它独写） |
+| §3.10 | v4.18.0 `cache_write_1h` 填充点 | 未验证 | 已核实（仅 `claudecode`/`cherrystudio` 填充；`total()` 不计入；按 5m/1h 分档计价） |
+| §3.10 | 「v4.15.0 不存在」 | **判断错误** | 已更正：`v4.15.0`/`v4.15.1`/`v4.16.0` **均已发布**（`git ls-remote` 实测） |
+| §3.10 | 解析失败是否全静默 | 未穷举 | 已核实（SQLite 打开失败会 warn；唯一中断点是 `lib.rs:4337`） |
+| §3.10 | `kiro.rs` 1373-2235 未读 | 未读 | 已核实：该段**整段是测试模块** |
+| §3.10 | `canonical_provider` 实现体 | 未读 | 已核实（会改写 `provider_id`，`unwrap_or(原值)`） |
+| §5.12 | `dirs::config_dir()` 落点 | 未验证 | 已核实（三平台具体路径，`dirs 6.0.0`） |
+| §5.12 | models.dev 实际结构 | 未联网 | 已核实（229 provider / 8,830 模型 / 缺失面 / 重复键 / 被忽略的 `tiers` 与 `context_over_200k`） |
+| §5.12 | OpenAI 文档页内容 | 未核对 | 已核对（结构规则逐条命中；Sol 促销价与钉住卡的量化差异） |
+| §5.12 | `output` 是否含 `reasoning`（重复计价） | 未验证 | 已核实（上游自身即 `output+reasoning` 计价；风险收窄到 13 个未相减的解析器） |
+| §5.12 | ledger v8 与前端字段兼容 | 未运行验证 | 已核实（命名全对齐；前端不校验账本 schema 版本；不兼容表现为静默 0/Unknown） |
+| §5.12 | `evidence.rs` 超长行行为 | 未验证 | 已核实（整行跳过；另有 >32 MiB 整文件跳过与无效 UTF-8 提前终止） |
+| §6.11 | 未执行测试/构建 | 未运行 | 已运行（前端 191 passed、typecheck 干净、构建成功） |
+| §6.11 | 设备端 access.json 细节 | 未读 Rust 侧 | 已核实（600k/16B/12B/版本常量），并有线上 `iterations: 310000` 实证 |
+| §6.11 | 账本 schema 序列 | 未验证 | 部分核实（tag 实测 4/5/7/8 与三段迁移点；v1–v3 与 v6 无公开证据） |
+| §6.11 | 线上响应头 / 限流 | 未实测 | 已实测（raw 带 ETag 与 300 s 缓存；API 60 次/小时） |
+| §6.11 | 心跳频率与阈值匹配 | 未核对 | 已核实（60 s 目标、实际 60–90 s；3/10 分钟阈值语义） |
+| §6.11 | 预测算法细节 | 未逐行读 | 已核实（窗口公式、置信阈值 0.35、四道前置门限） |
+| §6.11 | `expectedDevices` 差异来源 | 无测试覆盖 | 已核实（= 索引内分支数；四类差异来源） |
+| §6.11 | fork 静态回退可用性 | 未实测 | 已核实（仅无 `?repo=` 时生效；线上已被覆盖为 6 个真实分支） |
+| §6.11 | CSP / `no-referrer` 部署生效 | 未实测 | 已实测（线上首页两条 meta 均在） |
+| §7.12 | 前端 P50/P95 取位法 | 未验证 | 已核实（nearest-rank；小样本边界已说明） |
+| §7.12 | 400 周期 vs 90 天 | 未推演 | 已推演（满载时 400 先行，跨度 ≈80–83 天） |
+| §7.12 | 外部项目引用 | 未核验 | 已核实（三者均存在；ccusage 组织名不一致已注明） |
+| §10.2.2 | 证据窗口 vs 采集窗口 | **方向写反** | 已更正（证据窗口更宽；缺口来自文件/行/编码/白名单上限） |
+| §10.2.2 | `messages: i32` 溢出 | 未压测 | 已分析（饱和于 2,147,483,647，不 panic 不回绕） |
+| §10.1 | 「同内容 ⇒ 同 commit sha」 | 未验证的服务端假设 | **已证伪**（GitHub 默认 author = 认证用户 + 当前日期 ⇒ 每次发布新 sha） |
+
+### D.4 仍不可核实的项与条件
+
+以下条目在本轮之后**依然无法核实**，并给出"需要什么才能核实"：
+
+| 条目 | 为什么现在核不了 | 需要什么 |
+| --- | --- | --- |
+| macOS launchd 分支、Linux systemd/cron 分支 | 相关代码在 Windows 目标下被 `#[cfg]` 编译期排除，且 crontab 改写逻辑零测试覆盖 | macOS / Linux 真机（或对应 CI runner）上安装并观察 |
+| 真实 `codex app-server` 的字段契约 | 需要已登录的 ChatGPT 订阅实例；仓库自带的 smoke test 标 `#[ignore]`，本轮按隔离纪律跳过 | 在有登录态的机器上显式运行该 ignored 测试 |
+| 六平台发布矩阵、静态 musl 断言 | 需要 GitHub Actions 的对应 runner 与发布流程 | 在 CI 中执行 release 工作流 |
+| 真实 GB 级会话日志的解析表现 | 仓库的性能验收测试要求显式环境变量且会读真实日志，与本轮隔离纪律冲突 | 用户在自己机器上显式运行性能验收 |
+| `install.sh` 的 `sh -n` 语法检查 | 本机无 `sh` | Linux/macOS 环境 |
+| 本机 `tokscale/settings.json` 的实际内容（是否钉了 `bucket_timezone`、`extra_scan_paths` 有哪些） | 属用户私有配置，本轮按纪律不读 | 用户自行查看该文件（或授权读取） |
+| 生产环境 GitHub 的限流/CDN 细节（代理出口 IP 的配额抖动） | 出口 IP 共享、配额随时间变化 | 以自身 token 实测 |
+| 各客户端在**真实**数据上的产出与估算比例（例如 Kiro 估算量的实际占比） | 需真实会话数据 | 用户在自己机器上用合成或授权数据复现 |

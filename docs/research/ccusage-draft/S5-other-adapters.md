@@ -5,6 +5,7 @@
 - 方法：静态阅读（`read` / `grep` / `glob`）为主；第 8 轮已构建并运行 ccusage（`--offline`，见 §13.5），未修改任何样本
 - 覆盖：`rust/adapters/{opencode,copilot,antigravity,pi,grok,kimi,openclaw,codebuff,hermes,zcode,qwen,droid,kilo,goose,gemini,amp}`、`rust/adapters/common/src/{jsonl.rs,lib.rs,report.rs}`、`rust/crates/ccusage-adapter-all/src/{loader.rs,report.rs,types.rs}`，并以 `ccusage-core` 的 `types/cost/utils/home/date_utils/progress` 作为公共零件参照
 - 边界：Claude（`rust/adapters/claude/`）与 Codex（`rust/adapters/codex/`）另见 §4 与 §5，本章只在跨适配器对比处引用其行号，不重复展开
+- **本章裸文件名约定**：各小节标题里的 agent 名即该节裸文件名的宿主——如 `grok/src/parser.rs:170` 是简写，完整路径为 `rust/adapters/grok/src/parser.rs`；`common/...` 指 `rust/adapters/common/src/`；统一报表语境的 `loader.rs`/`report.rs`/`types.rs` 指 `rust/crates/ccusage-adapter-all/src/`；`pricing.rs`/`cost.rs`/`types.rs`（core 语境）指 `rust/crates/ccusage-core/src/`。
 
 ### 0. 结论速览
 
@@ -15,7 +16,7 @@
 | 并行读文件 | 15 家用 `common::read_files_parallel`（按文件大小分块、结果按原文件序重组）；**antigravity 是唯一顺序 for 循环的** | `common/src/lib.rs:84`, `common/src/lib.rs:49`；`antigravity/src/loader.rs:23` |
 | SQLite 适配器 | 7 家：`opencode`、`openclaw`、`zcode`、`kilo`、`goose`、`hermes`、`antigravity`；**全部用 `sqlite` crate（无 rusqlite）**，全部 `with_read_only()` | `rust/Cargo.toml:65`；`zcode/src/loader.rs:91`, `goose/src/loader.rs:75`, `hermes/src/loader.rs:43`, `kilo/src/loader.rs:52`, `openclaw/src/sqlite.rs:87`, `opencode/src/loader.rs:288`, `antigravity/src/parser.rs:146` |
 | token 四桶归一到哪里 | `LoadedEntry.data.message.usage: TokenUsageRaw`（input/output/cache_creation_input/cache_read_input），汇总时经 `TokenCounts::add_usage` 落到 `input/output/cache_creation/cache_read` 四桶 | `ccusage-core/src/types.rs:29`, `ccusage-core/src/types.rs:69`, `ccusage-core/src/types.rs:78` |
-| 把 cached 从 input 里减掉 | 明确做的有四家：`grok`（`split_input_tokens`）、`copilot`（input − cache_read − cache_creation）、`zcode`（input − cache_read − cache_creation）、`gemini`（条件性 `subtract_cached_overlap_tokens`） | `grok/src/parser.rs:170`, `copilot/src/parser.rs:445`, `zcode/src/parser.rs:47`, `gemini/src/parser.rs:400` |
+| 把 cached 从 input 里减掉 | **本章 16 家范围内**明确做的有四家：`grok`（`split_input_tokens`）、`copilot`（input − cache_read − cache_creation）、`zcode`（input − cache_read − cache_creation）、`gemini`（条件性 `subtract_cached_overlap_tokens`）；Claude 侧不在此列（它本来就分桶写，见 §4） | `grok/src/parser.rs:170`, `copilot/src/parser.rs:445`, `zcode/src/parser.rs:47`, `gemini/src/parser.rs:400` |
 | 缺字段兜底 | **12 家调用（共 14 处）** `apply_total_token_fallback(usage, extra, total)`，把「总 token 与分项之差」塞进 output 或 `extra_total_tokens`；其中 amp（`:158`/`:261`）与 kimi（`:208`/`:255`）各 2 处 | `ccusage-core/src/utils.rs:22`；`kimi/src/parser.rs:255`, `opencode/src/parser.rs:193` |
 | CostMode 三态落点 | `Display`（只用厂商自有 cost）/ `Auto`（有则用、无则算）/ `Calculate`（强制按 pricing 算）；分派在 `ccusage-core/src/cost.rs:31`，各家另有自有的优先级覆盖 | `ccusage-core/src/cost.rs:39-45`；`zcode/src/parser.rs:94`, `hermes/src/parser.rs:180`, `kimi/src/parser.rs:378` |
 | 目录不存在 | 绝大多数静默返回空：`collect_files_with_extension` 读不到目录直接 `return`；只有「home 目录解析不出」或「显式配置非法」才报错或降级 | `common/src/lib.rs:19`；`amp/src/paths.rs:25`, `opencode/src/paths.rs:36`, `zcode/src/paths.rs:20` |
@@ -40,7 +41,7 @@
 | 14 | `goose` | `~/.local/share/goose/sessions/sessions.db`（`GOOSE_PATH_ROOT`；另有 macOS / Block 两条候选） | SQLite（表 `sessions`） | `model_config_json`、`provider_name`、`created_at`、`total_tokens`/`input_tokens`/`output_tokens` 及其 `accumulated_*` 变体 | 是 | 否 |
 | 15 | `gemini` | `~/.gemini/tmp`（`GEMINI_DATA_DIR`） | 单 JSON **与** JSONL | `tokens{input/prompt,output/candidates,cached,thoughts,tool,total}`、`sessionId`、`model` | 否 | 否 |
 | 16 | `amp` | `~/.local/share/amp/threads/*.json`（`AMP_DATA_DIR`） | 单 JSON（一个 thread 一个文件） | `usageLedger.events[].tokens{input,output,total}`、`messages[].usage{cacheCreationInputTokens,cacheReadInputTokens}`、`credits` | 否 | 是 `credits` |
-| — | `claude`（对照） | `~/.claude/projects/**/*.jsonl`（`CLAUDE_CONFIG_DIR`） | JSONL | 见 `claude/src/lib.rs:510` 起字节级迭代 | 否 | 是 `costUSD`：记录内厂商成本映射到 `UsageEntry.cost_usd`（`ccusage-core/src/types.rs:14-15`），`Display` 模式直接采用（`claude/src/lib.rs:525-532`） |
+| — | `claude`（对照） | `$XDG_CONFIG_HOME/claude` 与 `~/.claude` 两处的 `projects/**/*.jsonl`（`CLAUDE_CONFIG_DIR` 可多根覆盖；见 §4.1） | JSONL | 见 `claude/src/lib.rs:510` 起字节级迭代 | 否 | 是 `costUSD`：记录内厂商成本映射到 `UsageEntry.cost_usd`（`ccusage-core/src/types.rs:14-15`），`Display` 模式直接采用（`claude/src/lib.rs:525-532`） |
 | — | `codex`（对照） | `~/.codex/sessions`（`CODEX_HOME`） | JSONL（字节级行分类） | `codex/src/parser.rs:661` 起按标记分类 | 否 | 否（会话日志内无成本字段）；成本按 pricing 计算：汇总输出 `codex/src/report.rs:158-180`，模型级 `calculate_codex_model_cost` `:183-217` |
 
 ### 2. 公共层：可复用的读取零件
@@ -401,7 +402,7 @@ crate 与版本：`rust/Cargo.toml:65` → `sqlite = { version = "0.37.4", defau
 
 ### 5. 未验证 / 存疑
 
-> 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
+> **本节状态（第 8 轮实测后）**：§13.5 的实测面向 Claude / Codex 与价格链，**未覆盖本章各适配器的内部细节**（protobuf 映射、credits 归因、SQL 细节、replay 剔除点等）；本节各条仍为静态阅读下的未决项，需样本或额外数据才能闭环。
 
 - `antigravity` 的 `event_to_loaded`（`antigravity/src/parser.rs:960-1022`）未逐行读：`project` / `project_path`（是否固定 `"Antigravity"`）、`credits` 字段取值、`extra_total_tokens` 是否使用 `reasoning_tokens` 均**未验证**。
 - `gemini` 的 `parse_json_file` / `parse_stats_events` 的完整分支（`gemini/src/parser.rs:115-320`）只读了函数名与部分字段别名，`stats`/`result` 两条路径的优先级**未逐行核对**。

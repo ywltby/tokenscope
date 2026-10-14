@@ -57,6 +57,8 @@ function pricingKeyMatches(candidate, model) {
 }
 
 // find_entry_with_fallback 的模糊段：全表扫描 + max_by(len, then right.cmp(left))
+// Rust: max_by(|l, r| l.len().cmp(&r.len()).then_with(|| r.cmp(l)))
+// → 最长键优先；长度相同时「字典序较小者」胜（因为 left 在 r.cmp(l) 为 Greater 时更大）
 function fuzzyLookup(model) {
   const normalizedModel = normalizedPricingKey(model);
   const matches = [];
@@ -64,7 +66,10 @@ function fuzzyLookup(model) {
     if (pricingKeyMatches(candidate, model, normalizedModel)) matches.push(candidate);
   }
   if (matches.length === 0) return null;
-  matches.sort((a, b) => (b.length - a.length) || (a < b ? 1 : a > b ? -1 : 0));
+  matches.sort((a, b) => {
+    if (a.length !== b.length) return b.length - a.length;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
   return matches[0];
 }
 

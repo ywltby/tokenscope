@@ -5,7 +5,8 @@
 - 主仓（Rust，v20.0.31）：`C:\Users\admin\AppData\Local\Temp\ccusage-research\ccusage`，HEAD `57afdc255fcbe031b0ecd7cac487f8fd7c5d531f`（`chore: release v20.0.31`）。
 - 对照仓（TypeScript，v19.0.3）：`%TEMP%\ccusage-research\ccusage-v19`，HEAD `4aedac0622232f4b8e93650e9b7b54535ef9cf2b`，tag `v19.0.3`。
 
-行号约定：Rust 侧证据写成 `path:line`（相对主仓根）；v19 侧证据写成 `ccusage-v19/path:line`。下文所有行号均为实际行号（read/grep 实测），未做估算。
+行号约定：Rust 侧证据写成 `path:line`（相对主仓根）；v19 侧证据写成 `ccusage-v19/path:line`。下文所有行号均为实际行号（read/grep 实测）。
+**本章裸文件名约定**：未写全路径的 `parser.rs`/`help.rs`/`help_codegen.rs`/`arg_parser.rs` 指 `rust/crates/ccusage-cli-parser/src/`；`config.rs`/`config_schema.rs` 指 `rust/crates/ccusage-config/src/`；`output.rs`/`types.rs`（core 语境）/`agent_report.rs` 指 `rust/crates/ccusage-core/src/`；`http.rs`/`cli.rs`/`commands/mod.rs` 指 `rust/crates/ccusage/src/`；`types.rs`（CLI 语境）指 `rust/crates/ccusage-cli/src/types.rs`。
 
 ---
 
@@ -486,7 +487,7 @@ v20：
 - compaction/replay 是 v20 新增的**覆盖范围**（不是新增 `last_token_usage` 支持，两版都优先它）：`rust/adapters/codex/src/compaction_tests.rs:141-143` 等用例覆盖 `last_token_usage` 与 `total_token_usage` 并存的情况；`subtracts_cache_write_usage_from_cumulative_token_totals`（`rust/adapters/codex/src/loader.rs:943`）说明 v20 会从累计值里扣掉 cache write。
 - 迁移对齐测试：`prices_codex_versioned_models_like_typescript_adapter`（`rust/crates/ccusage/src/main.rs:694`）、`prices_codex_gpt_5_4_like_typescript_adapter`（`main.rs:773`）。
 
-**语义变化**：取值**主路径两版一致**——都优先 `last_token_usage`，累计差分只是回退（v19：`ccusage-v19/apps/ccusage/src/adapter/codex/parser.ts:205-209`；v20：`rust/adapters/codex/src/parser.rs:483-496` 先判定 `total_token_usage` 是否等于上一条、再决定是否用差分）。真正的差异是 v20 增加了 replay/rewrite 状态机（跳过被重写的突发，`parser.rs:254-257`）、从累计值中扣减 cache write（`rust/adapters/codex/src/loader.rs:943`）以及 response id 层面的 compaction 去重（`loader.rs:562`）。跨会话相同事件两版都会去重（v19 的键不含 session，`ccusage-v19/apps/ccusage/src/adapter/codex/parser.ts:126-129`；v20 走 `dedupe_codex_events`，`loader.rs:240`）。
+**语义变化**：取值**顺序相同，但 v20 多一道门控**——两版都先看 `last_token_usage`；但 v20 会先用 `cumulative_advanced`（即 `total_token_usage` 是否与上一条不同；**该字段缺失时门控视为通过**）判定，**未前进时丢弃 `last_token_usage` 并转走累计差分**（`rust/adapters/codex/src/parser.rs:483-494`），而 v19 无此门控、`lastUsage` 存在即无条件采用（`ccusage-v19/apps/ccusage/src/adapter/codex/parser.ts:205-212`）。因此「累计值未前进但 `last_token_usage` 存在」这类样本两版会给出不同结果——口径详见 §5.3。其余差异是 v20 增加了 replay/rewrite 状态机（跳过被重写的突发，`parser.rs:254-257`）、从累计值中扣减 cache write（`rust/adapters/codex/src/loader.rs:943`）以及 response id 层面的 compaction 去重（`loader.rs:562`）。跨会话相同事件两版都会去重（v19 的键不含 session，`ccusage-v19/apps/ccusage/src/adapter/codex/parser.ts:126-129`；v20 走 `dedupe_codex_events`，`loader.rs:240`）。
 
 ### 7.5 5 小时 block 算法
 
@@ -543,19 +544,23 @@ v20（`rust/crates/ccusage-core/src/cost.rs`）：
 
 1. **运行时与分发**：Bun/Node 脚本 → 原生二进制；npm 包降级为 wrapper（`apps/ccusage/src/cli.js:93-109`、`:233-258`）。v19 的 `CCUSAGE_BUN_AUTO_RUN` 开关（`ccusage-v19/apps/ccusage/src/env.ts:1-2`）随 Bun 路径一起消失。
 2. **并发模型**：v19 用 worker_threads + `CCUSAGE_JSONL_WORKER_THREADS`（`ccusage-v19/apps/ccusage/src/adapter/claude/data-loader.ts:1978` 等 4 处）与 `CCUSAGE_JSONL_READ_CONCURRENCY`（`data-loader.ts:208`）→ v20 用线程池 + `--single-thread`（`rust/crates/ccusage-cli/src/types.rs:56`）与按体积分块（测试 `balances_file_chunks_by_size`，`rust/crates/ccusage/src/main.rs:176-209`）。
-3. **Claude 去重**：单键 `messageId[:requestId]` → 会话感知 + `msg_`/gateway 区分 + sidechain 重放键（§7.3）。
-4. **Codex**：取值优先级不变（两版都优先 `last_token_usage`，累计差分作回退）→ 新增 replay/rewrite 状态机、compaction 去重与 cache-write 扣减（§7.4）。
-5. **日期输入**：仅 `YYYYMMDD` → 双格式 + 日历校验（§7.2）。
+3. **Claude 去重**：单键 `messageId[:requestId]` → 会话感知 + `msg_`/gateway 区分 + sidechain 重放键（§4.4）。
+4. **Codex**：取值顺序不变（都先看 `last_token_usage`），但 v20 加了「累计值必须前进」的门控，未前进时改走累计差分 → 另新增 replay/rewrite 状态机、compaction 去重与 cache-write 扣减（§5.3）。
+5. **日期输入**：仅 `YYYYMMDD` → 双格式 + 日历校验（§9.3）。
 6. **CLI 能力**：新增 `--jq`、`--last`、`--sections`、`--by-agent`、`--no-cost`、`--all`；错误出口统一为 exit 2 + `Run 'ccusage --help' for usage.`（`rust/crates/ccusage/src/cli.rs:35-39`）。
-7. **帮助系统**：gunshi 自动生成 → 构建期从两个 JSON 生成静态表（§2.4）。
-8. **配置**：字段扩展到 18 个 agent 段 + 统一 `commands` + pricingOverrides + pi.stores；校验错误统一 `Invalid ccusage config: ...`（§1.5）。
-9. **价格**：新增 models.dev 源、磁盘 ETag 缓存、别名与精确优先匹配、缺价信号（§7.6）。
+7. **帮助系统**：gunshi 自动生成 → 构建期从两个 JSON 生成静态表（§9.2.4）。
+8. **配置**：字段扩展到 18 个 agent 段 + 统一 `commands` + pricingOverrides + pi.stores；校验错误统一 `Invalid ccusage config: ...`（§9.1.5）。
+9. **价格**：新增 models.dev 源、磁盘 ETag 缓存、别名与精确优先匹配、缺价信号（§8）。
 10. **版本**：`package.json` 直接 import → 编译期 `CCUSAGE_VERSION` + 一致性测试（`rust/crates/ccusage/build.rs:5-18`、`main.rs:125-135`）。
 11. **保留的 TS 兼容断言**（跨版本回归锚点）：`formats_windows_user_project_paths_like_typescript`（`rust/crates/ccusage/src/main.rs:150`）、`sorts_usage_files_like_typescript_path_strings`（`main.rs:212`）、`loads_daily_summaries_like_loaded_entry_aggregation`（`main.rs:483`）、`rejects_null_schema_fields_like_typescript_loader`（`rust/adapters/claude/src/lib.rs:1025`）、`allows_null_content_like_typescript_loader`（`lib.rs:1041`）。
 
 ---
 
 ## 未验证/存疑（本节同时覆盖配置/CLI/输出章与版本史章的未决项）
+
+> 第 8 轮实测（§13.5）已覆盖本节第 1 条的一部分（`--jq` 不在帮助里，实测确认）与第 9 条（运行期状态）；
+> 第 6 条（`blocks` JSON 字段全集）也已被 §13.5 的 `blocks --json` 实测补全。其余各条与 §13.5 无关，
+> 仍未闭环。
 
 > 第 8 轮实测复核（§13.5）已闭环本节中与内嵌表键集、运行时行为、格式化相关的条目；此处保留原始清单与当时的判断，逐条状态以 §13.5 为准。
 

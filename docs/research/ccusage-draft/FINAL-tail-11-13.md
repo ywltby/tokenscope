@@ -5,7 +5,7 @@
 | # | 位置 | 文档说法 | 代码事实 | 影响 |
 | --- | --- | --- | --- | --- |
 | 1 | `docs/guide/blocks-reports.md:150-151` | 「`--order desc` 显示最新块（默认）」 | `SortOrder` 的 `#[default]` 是 `Asc`（`rust/crates/ccusage-cli/src/types.rs`），`blocks` 默认最旧在前 | 直接照文档复现会得到相反顺序 |
-| 2 | `docs/guide/weekly-reports.md:138-149` | `modelBreakdowns` 是**对象映射**（模型名 → 明细） | 实际是**数组**（`UsageSummary.model_breakdowns: Vec<ModelBreakdown>`，`types.rs:175`） | 按文档写的解析器会崩 |
+| 2 | `docs/guide/weekly-reports.md:138-149` | `modelBreakdowns` 是**对象映射**（模型名 → 明细） | 实际是**数组**（`UsageSummary.model_breakdowns: Vec<ModelBreakdown>`，`rust/crates/ccusage-core/src/types.rs:175`） | 按文档写的解析器会崩 |
 | 3 | `docs/guide/codex/index.md:50` 与 `:116` | 「缺模型元数据的会话被跳过」 | 同文 `:54` 说「早期日志仍计入、按 `gpt-5` 回退」，与代码一致（`rust/adapters/codex/src/parser.rs:813` 附近的回退） | 文档**自身**前后矛盾 |
 | 4 | `rust/adapters/codex/src/README.md:47-53` | 描述 `task_started` / `inter_agent_communication_metadata` / `trigger_turn` 的边界处理 | 全仓 grep 这三个符号只命中该 README，代码未实现；真实实现是父前缀 usage 全等匹配 + 「重写突发」启发式（`codex/src/parser.rs:236`、`:122`） | 会把未实现的能力当成已实现 |
 | 5 | `docs/guide/environment-variables.md:124/129/209` | `CCUSAGE_OFFLINE` 强制离线 | 两版源码（v19/v20）**均无**该变量的读取 | 设了不生效 |
@@ -34,6 +34,7 @@
 | 第 6 轮 | 1 个补充研究代理（S7） | 按 R6 清单补齐缺口与漏项，写成 §14 横向专题 | 见 §14 |
 | 第 7 轮 | 1 个复验代理（R7） | 复验 §14（22 条抽查）、第 5–6 轮改动（10 条逐条）、§12 的 TokenScope 侧引用（8 条）与全文结构 | 未落地项 0；4 处低危细节（阅读约定章号、§14.6 步号、zcode 分支描述、grep 计数）已修；判定**可交付** |
 | 第 8 轮 | 主研究员（实测轮）+ 1 个复核员 | **构建 ccusage 并用本机日志真实运行**（`--help` / `daily` / `claude daily` / `codex daily` / `session` / `blocks` / `--mode` 三态 / `--no-cost` / `--by-agent` 两处入口），用脚本离线重放 `build.rs` 的裁剪逻辑与 `pricing.rs` 的匹配算法、用 `rustc` 复现金额格式化，并跑仓库自测（188 passed） | 闭环 7 条存疑项、修正 §8 一处实质错误；复核员独立复现（含解压真实构建产物逐键比对），推翻并改正了本轮一处关于 `--by-agent` 的错误结论；详见 §13.5 |
+| 第 9 轮 | 4 个全文复核员（C1–C4） | **逐节读完**全文并按章抽查（C1 60 条 / C2 59 条 / C3 63 条 / C4 44 条，共 226 条），另做机械检查：全部 `文件:行号` 引用的越界扫描（2125 条、0 越界）与引用完整性检查 | 一致率约 98%；本轮修正 6 处实质/引用问题（`claude-3-5-haiku-20241022` 的命中路径、v19↔v20 的取值门控、§10.8 交叉引用错位、`types.rs` 缺 crate 限定、附录 A 位置列、`bytes.len` 因果），并为各章补「裸文件名约定」；详见 §13.6 |
 
 ### 13.2 第 2 轮发现的典型问题（保留以示证据强度）
 
