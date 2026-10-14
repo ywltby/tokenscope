@@ -6,13 +6,30 @@
 > **未运行其二进制、未读取任何真实会话数据、未改动本机 `~/.config/tokscale`**。
 >
 > 证据分档：**已验证**（源码可证，且行号经交叉复核）／**一致解释**（多条代码证据指向同一结论，
-> 无单点直证）／**未验证推论**（结构推断，未实测）。
+> 无单点直证）／**未验证**（结构推断，未实测；全文统一简写为「未验证」）。
 >
 > 行号口径：一律为**文件实际行号**（编辑/读取工具口径）。PowerShell `Measure-Object -Line`
 > 会忽略空行、给出偏小的计数，本文不采用该口径；两者差异在个别文件上可达 8%（如
 > `message_cache.rs` 实际 9222 行 vs 非空 8534 行）。
 >
 > 本文只记录字段名、表名、路径规则与计算口径，不含任何真实会话内容。
+
+## 目录
+
+1. 范围与方法
+2. 总体架构（crate 划分、解析主干与两份实现、统一事件模型）
+3. 客户端注册表与覆盖矩阵（58 个数据面）
+4. 文件型适配器：逐家读取实现（Claude Code / Codex / Gemini 与共性模式）
+5. SQLite 型适配器
+6. 缓存 / 同步型数据源（上游无可解析本地存储）
+7. 增量缓存与性能
+8. 聚合口径与时间（分组、时区、会话化、身份归一）
+9. 定价与金额计算（来源、匹配链、计费公式、倍率）
+10. 输出与上报
+11. 与 TokenScope 的对照：值得抄的、需要避的
+12. 未验证项与已知风险（含四轮复核记录）
+- 附录 A：关键常量与阈值速查
+- 附录 B：模块行号索引（节选）
 
 ## 1. 范围与方法
 
@@ -67,15 +84,16 @@ opencode/openclaw/augment/junie/kimi/qwen 等自有车道），产出 `ParsedMes
   `lib.rs:2117-3662` 与 `lib.rs:5472-6690`）；
 - 两套语义需要手工对齐，tokscale 自己的测试以成对断言兜底（如
   `crates/tokscale-core/tests/micode_accounting.rs:232-236` 的 `local` vs `unified` 对照）。
-  这比「唯一主干」的叙事维护成本更高，是第六节之后多处「双实现」注释的来源。
+  这比「唯一主干」的叙事维护成本更高，是 §11.3 与 §12.4 里「双解析实现」风险的来源。
 
 主干内部顺序（**已验证**）：扫描（`lib.rs:2081` → `scanner.rs:1875` →
 `scanner.rs:1929`）→ 打开缓存（`lib.rs:2092-2095`）→ 逐客户端车道
 （`lib.rs:2117` 起 OpenCode、`2181` MiMo、`2210` Claude、`2292` Codex、`2430` Gemini、
-`2460` Cursor、`2495` Grok、`2625` OpenClaw、`3188` Kimi、`3325` Fx、`3391` Devin、
-`3420` Zed、`3507` CodeBuddy、`3595` WorkBuddy、`3639` synthetic）→ 出口过滤
+`2460` Cursor、`2495` Grok、`2625` OpenClaw、`3188` Kimi、`3325` Fx、`3388` Devin、
+`3420` Zed、`3507` CodeBuddy、`3595` WorkBuddy、`3639` synthetic；**节选**，
+另有 kilo/goose/kiro/crush/trae 等块）→ 出口过滤
 （`flush_lane` `lib.rs:930` → `flush_message` `lib.rs:944`，客户端过滤在 `949-958`、
-时区重分桶在 `960-971`）→ 缓存落盘（`lib.rs:3655-3657`）→ 历史修复
+时区重分桶在 `967-969`）→ 缓存落盘（`lib.rs:3655-3657`）→ 历史修复
 （`recovery::apply`，`lib.rs:993`；实现 `recovery.rs:331`）→ 报告侧过滤
 （`filter_messages_for_report` `lib.rs:5189`）→ 聚合。
 
@@ -86,7 +104,8 @@ opencode/openclaw/augment/junie/kimi/qwen 等自有车道），产出 `ParsedMes
 
 ### 2.3 统一事件模型
 
-**已验证**（`crates/tokscale-core/src/sessions/mod.rs:81-125`）：
+**已验证**（`crates/tokscale-core/src/sessions/mod.rs:81-125`；下列为字段定义，
+源码中每字段独立成行并带文档注释，此处压缩排版）：
 
 ```rust
 pub struct UnifiedMessage {
@@ -127,17 +146,24 @@ reasoning`。要点：
 - 根类型 `PathRoot`（`clients.rs:2-18`）：`Home / XdgData / Config / AppData / EnvVar{var,
   fallback_relative} / ReasonixHome`，解析含各平台差异（`clients.rs:98-213`）。
 - 注册表规模：**56 个 `ClientId`**（index 0–55），另有注册表外的人工别名
-  `synthetic` 与 `9router`（`scanner.rs:1946-1955`、`crates/tokscale-cli/src/main.rs:4277-4280`）。
+  `synthetic` 与 `9router`（`scanner.rs:1946-1955`、`crates/tokscale-cli/src/main.rs:4277-4280`）——
+  两者都不增加 `ClientId`、不产生独立数据面：`9router` 是 CLI 侧筛选别名（指向 Gjc 的
+  扫描面），`synthetic` 是解析后的重归属标签（§8.5）。
 - 关键点：`ClientDef` **不含解析函数指针**。客户端 → 解析函数是
-  `lib.rs:2100-3662` 手写车道里显式书写的 `sessions::<client>::parse_*` 调用。
+  `parse_all_messages_streaming`（`lib.rs:1011-3663`）内手写车道里显式书写的
+  `sessions::<client>::parse_*` 调用（车道直接调用口径实测 58 处、覆盖 51 个模块；
+  若计入 7 处辅助闭包内的解析调用则为 65 处/54 个模块）。
 - 默认本地集合 = 所有 `parse_local() == true` 的客户端 + `synthetic`
   （`lib.rs:5441-5448`）。`Cursor` 的 `parse_local: false`（`clients.rs:447`）意味着
   **默认扫描不含 Cursor**，必须显式请求。
 
 ### 3.2 覆盖矩阵（58 个数据面）
 
-**已验证**：下表由注册表逐条抽出并与各适配器入口函数核对。`sessions/` 前缀省略为
-`sessions/`，全部相对 `crates/tokscale-core/src/`。
+**已验证**：下表由注册表逐条抽出并与各适配器入口函数核对。解析入口列相对
+`crates/tokscale-core/src/`，**保留完整目录前缀**（`sessions/…` 与根目录文件并存）。
+平台路径按 Linux/macOS 口径书写：`PathRoot::Config` 的条目（Antigravity/Trae/Warp 等）
+在 Windows 下为 `%APPDATA%\tokscale\…`，`PathRoot::Home`（Cursor）为
+`%USERPROFILE%\.config\tokscale\…`。
 
 | client id | 展示名 | 数据来源（路径 / 环境变量） | 数据面 | 解析入口 |
 | --- | --- | --- | --- | --- |
@@ -158,7 +184,7 @@ reasoning`。要点：
 | kilo | Kilo CLI | `$XDG_DATA_HOME/kilo/kilo.db` | SQLite | sessions/kilo.rs:16 |
 | crush | Crush | `$XDG_DATA_HOME/crush/projects.json` → 各项目 `crush.db` | SQLite（仅成本） | sessions/crush.rs:47 |
 | hermes | Hermes Agent | `$HERMES_HOME/state.db` + `$HERMES_HOME/profiles/*/state.db` | SQLite | sessions/hermes.rs:194 |
-| copilot | Copilot CLI | `~/.copilot/session-store.db`、`~/.copilot/data.db`、`~/.copilot/otel/*.jsonl`、VS Code `chatSessions/*.jsonl` | 混合（4 源） | copilot.rs:15 / copilot_session_store.rs:15 / copilot_desktop.rs:241 / copilot_vscode.rs:9 |
+| copilot | Copilot CLI | `~/.copilot/session-store.db`、`~/.copilot/data.db`、`~/.copilot/otel/*.jsonl`、VS Code `chatSessions/*.jsonl` | 混合（4 源） | sessions/copilot.rs:15 / sessions/copilot_session_store.rs:15 / sessions/copilot_desktop.rs:241 / sessions/copilot_vscode.rs:9 |
 | goose | Goose | `$GOOSE_PATH_ROOT/data/sessions/sessions.db`；`~/.local/share/goose/...`；macOS Library | SQLite | sessions/goose.rs:48 |
 | codebuff | Codebuff | `$CODEBUFF_DATA_DIR/projects/**/chat-messages.json`（默认三通道 manicode[-dev/-staging]） | JSON 快照 | sessions/codebuff.rs:40 |
 | freebuff | Freebuff | 与 Codebuff 同树；`$FREEBUFF_DATA_DIR` → `$CODEBUFF_DATA_DIR` | JSON 快照（估算） | sessions/freebuff.rs:118 |
@@ -178,7 +204,7 @@ reasoning`。要点：
 | junie | Junie | `~/.junie/sessions/*/events.jsonl` | JSONL | sessions/junie.rs:21 |
 | zcode | ZCode | `~/.zcode/projects/**/*.jsonl`（legacy）+ `~/.zcode/cli/db/db.sqlite`（v2） | 混合 | sessions/zcode.rs:107 / :281 |
 | opencodereview | OpenCodeReview | `~/.opencodereview/sessions/**/*.jsonl` | JSONL | sessions/opencodereview.rs:15 |
-| codebuddy | CodeBuddy | `~/.codebuddy/projects/**/*.jsonl` + 扩展文本日志（`%LOCALAPPDATA%`/`%APPDATA%`） | 混合 | sessions/codebuddy.rs:12 → tencent_buddy.rs:197 / :309 |
+| codebuddy | CodeBuddy | `~/.codebuddy/projects/**/*.jsonl` + 扩展文本日志（`%LOCALAPPDATA%`/`%APPDATA%`） | 混合 | sessions/codebuddy.rs:12 → sessions/tencent_buddy.rs:197 / :309 |
 | workbuddy | WorkBuddy | `~/.workbuddy/projects/**/*.jsonl`、`~/.workbuddy-ai/...`（5.5+）+ 各自 `workbuddy.db` | 混合 | sessions/workbuddy.rs:14 / :43 |
 | devin-cli | Devin CLI | `$XDG_DATA_HOME/devin/cli/sessions.db` | SQLite | sessions/devin.rs:153 |
 | devin-desktop | Devin Desktop | `<config>/Devin/User/acp-events/*.ndjson`（各平台路径不同） | NDJSON | sessions/devin.rs:424 / :110 |
@@ -197,23 +223,23 @@ reasoning`。要点：
 | hindsight | Hindsight | `$HINDSIGHT_HOME/usage/*.jsonl`（需 `hindsight sync`） | 自建缓存 | sessions/hindsight.rs:77 |
 | muse | Muse Code | `$XDG_DATA_HOME/muse/sessions/**/session.jsonl`（含 `subagent/`） | JSONL | sessions/muse.rs:44 |
 | antigravity-extension | Antigravity IDE 扩展 | `~/.gemini/antigravity/conversations/*.db` | SQLite | sessions/antigravity_cli.rs:79 |
-| sakana（无独立 ClientId） | Sakana Fugu | 经 Codex 转录 `model_provider: sakana` 重归属 | 重归属 | provider_identity.rs:341 |
+| sakana（无独立 ClientId） | Sakana Fugu | 经 Codex 转录 `model_provider: sakana` 重归属 | 重归属 | provider_identity.rs:268（fugu 分支 :340-342） |
 | synthetic（无独立 ClientId） | Synthetic | `hf:` 模型前缀 / `synthetic`·`glhf`·`octofriend` provider 重归属；+ Octofriend `sqlite.db` | 重归属 | sessions/synthetic.rs:99 / :112 |
 
 ### 3.3 读取方式分类统计
 
 | 类别 | 数量 | 共同点 |
 | --- | --- | --- |
-| JSONL 转录 | 17 | 递归发现固定文件名（`*.jsonl`、`wire.jsonl`、`updates.jsonl`、`events.jsonl`、`session.jsonl[.zstd]`），逐行解析带 usage 的事件；Pi 格式族覆盖 pi/kimchi/senpi/omp/prime-agent（`sessions/pi.rs:1207-1215`） |
-| JSON 快照 | 10 | 一文件 = 一次会话/任务完整对象，整体反序列化后按 turn 提取；roocode/kilocode/cline 共用 `parse_roo_kilo_file`，codebuff/freebuff 共用 chat-messages 布局 |
+| JSONL 转录 | 17 | 递归发现固定文件名（`*.jsonl`、`wire.jsonl`、`updates.jsonl`、`events.jsonl`、`session.jsonl[.zstd]`），逐行解析带 usage 的事件；Pi 格式族覆盖 pi/kimchi/senpi/omp/prime-agent（模块头注释 `sessions/pi.rs:18-26`、共享入口 `:414`、共享基版本常量 `:49`；各族的 `use` 点见 kimchi.rs:7、omp.rs:22、senpi.rs:19） |
+| JSON 快照 | 9 | 一文件 = 一次会话/任务完整对象，整体反序列化后按 turn 提取；roocode/kilocode/cline 共用 `parse_roo_kilo_file`，codebuff/freebuff 共用 chat-messages 布局 |
 | SQLite | 11 | 统一只读连接（`sessions/utils.rs:301`）执行固定 SQL；kilo/micode 共用 `opencode_schema` 驱动（`opencode_schema.rs:1239`）；crush 先经 `projects.json` 注册表定位库文件 |
-| 混合（≥2 数据面） | 10 | 迁移期新旧存储叠放，靠稳定 dedup key 去重防双计 |
-| tokscale 自建缓存（需 sync/headless） | 6 | 数据先由 CLI 命令抓到 `~/.config/tokscale/`（Windows `%APPDATA%\tokscale`），再当普通文件读；上游无本地用量存储 |
+| 混合（≥2 数据面） | 11 | 迁移期新旧存储叠放，靠稳定 dedup key 去重防双计；含 jcode（`session_*.json` + `.journal.jsonl` 边车） |
+| tokscale 自建缓存（需 sync/headless） | 6 | 数据先由 CLI 命令抓到 `~/.config/tokscale/`（Windows `%APPDATA%\tokscale`），再当普通文件读；上游无本地用量存储。6 = cursor/antigravity/trae/warp/hindsight + 1 个 headless 捕获（mcode） |
 | 文本日志 | 1 | lmstudio 只抓 `usage` 块与响应 id，不留正文 |
 | NDJSON 事件流 | 1 | devin-desktop 的 ACP 事件流 |
 | 重归属 | 2 | sakana / synthetic：无独立扫描根，解析后按模型/provider 特征改归属 |
 
-### 3.4 README 与代码的差异（抽 7 个客户端核对）
+### 3.4 README 与代码的差异（抽 6 个客户端核对）
 
 1. **Claude 第三来源未记录**：README 只写 `projects/` 与 `transcripts/`，代码另有 cc-mirror
    变体根（`scanner.rs:794-798` → `cc_mirror.rs:22`，`variant.json` 的 `configDir` 可重定向，
@@ -223,15 +249,17 @@ reasoning`。要点：
 3. **Cursor 缓存格式过时**：README 只提 `usage*.csv`；代码 pattern 是
    `usage*.json|usage*.csv`（`clients.rs:445`），JSON 为当前格式、CSV 为 legacy，并存时
    JSON 胜出（`scanner.rs:3022`、`:3029`）。
-4. **`--client` 取值清单漏 10 个 id**：README 列出 46 个，注册表实有 56 个，缺 senpi、
+4. **`--client` 取值清单漏 10 个 id**：README 的取值清单列 46 个 ClientId（清单另含
+   非 ClientId 的 `synthetic`，故合计 47 项），注册表实有 56 个，缺 senpi、
    freebuff、dsh、mcode、fx、omp、workbuddy、devin-cli、devin-desktop、reasonix——它们都可被
    `ClientId::from_str`（`clients.rs:369`）解析。
 5. **MiMo 的 orca 第二来源未记录**：代码无条件追加
    `~/Library/Application Support/orca/mimocode-hooks/shared/data` 并与 XDG 目录求并集
-   （`scanner.rs:2250-2276`）。
+   （`scanner.rs:2251-2276`）。
 6. **Cursor 平台根与 Warp/Trae 不同**：Cursor 用 `PathRoot::Home`（`clients.rs:443`）→
-   Windows `%USERPROFILE%\.config\tokscale\cursor-cache`；Warp/Trae/Antigravity 用
-   `PathRoot::Config`（`clients.rs:622/652/662`）→ `%APPDATA%\tokscale\...`（`clients.rs:154-157`）。
+   Windows `%USERPROFILE%\.config\tokscale\cursor-cache`；Antigravity/Trae/Warp 用
+   `PathRoot::Config`（`clients.rs:622/652/662`，按此顺序）→ `%APPDATA%\tokscale\...`
+   （`clients.rs:154-157`）。
 
 **一致解释**：README 表格 58 行 ≈ 56 个 `ClientId` + 2 个重归属来源，数量自洽。
 
@@ -243,7 +271,8 @@ reasoning`。要点：
 额外扫 `projects` 同级的 `transcripts/` 与 cc-mirror 变体根；后缀规则 `*.jsonl*`
 会把备份/隔离副本一并收进来（`scanner.rs:513-535`），靠去重折算。
 
-**usage → 桶映射是直译**（`claudecode.rs:696-707`）：
+**usage → 桶映射是直译**（`claudecode.rs:696-709`；代码块中 `// 暂不 clamp` 为本文注，
+源码对应说明在 `:702-706`）：
 
 ```rust
 let cache_write = usage.cache_creation_input_tokens.unwrap_or(0).max(0);
@@ -274,7 +303,7 @@ max 合并，但 `input` 例外——当一方带缓存键、另一方不带时�
 因此 `subagents/workflows/<wf>/agent-X.jsonl` 也能找回父会话（`156-183`）；
 `subagents/**/journal.jsonl` 被显式拒收（`140-146`）。
 
-**advisor 用量（提交 c8fc84b）**：`usage.iterations[]` 中 `type == "advisor_message"` 的条目
+**advisor 用量（提交 `c8fc84b` "fix(claude): count advisor model usage"）**：`usage.iterations[]` 中 `type == "advisor_message"` 的条目
 单独出账，模型取 iteration 自己的 `model`，去重键是父键加 `:advisor:{index}`，`message_count`
 置 0（`claudecode.rs:829-871`）；主循环在父消息装配完成后才处理 advisor（`735-772`）。
 即：服务端 advisor 模型的额外用量从「被忽略」改为「独立入账」。
@@ -282,14 +311,15 @@ max 合并，但 `input` 例外——当一方带缓存键、另一方不带时�
 **其余细节**：时间戳 RFC3339 → 毫秒（`claudecode.rs:977-981`），缺失回退文件 mtime（`459`）；
 轮次耗时 = 上一条 user 行时间 → 本 assistant 行时间，只取正值（`563-566`、`983-986`）；
 project/cwd 由 `projects/<key>` 的 dash 编码 slug 经 `decode_claude_project_slug`
-（`sessions/mod.rs:868`）做**回溯式文件系统探测**还原，带探测预算（`883-895`、`960-1046`）。
+（`sessions/mod.rs:868`）做**回溯式文件系统探测**还原，带探测预算（`883-895`、`960-1045`）。
 
 ### 4.2 Codex CLI（`sessions/codex.rs`）
 
 扫描面（`clients.rs:427-439` + `scanner.rs:2317-2352`）：`sessions/**/*.jsonl*`、
 `archived_sessions/`、headless 根；pattern `*.jsonl*` 与后缀规则共同覆盖 `.jsonl.zst`。
 
-**取数矩阵**（`codex.rs:934-973`，已验证原文）：
+**取数矩阵**（`codex.rs:933-973`，**节选**：源码 7 条分支注释与
+`(Some(total), None, Some(previous))` 分支的 953-961 行实现从略）：
 
 ```rust
 let (tokens, next_totals) = match (total_usage, last_usage, state.previous_totals) {
@@ -317,15 +347,16 @@ let (tokens, next_totals) = match (total_usage, last_usage, state.previous_total
 （`codex.rs:893-896`）声称 total「never as a direct delta source」，与代码实际行为存在出入；
 引用时应以代码为准。
 
-**桶拆分**（`codex.rs:249-275`）：`cached_input_tokens` 从 input 中扣除（`input -= min(cached,
-input)`），`cache_read = cached`；`reasoning_output_tokens` 从 output 中切出归一为
-`reasoning`——因为它是 `output_tokens` 的子集，直接并计会双计（`253-266` 注释）。
+**桶拆分**（`codex.rs:249-275`）：先取 `cached = max(cached_input_tokens,
+cache_read_input_tokens)`（`:183-187`），再以 `min(cached, input)` 从 input 中扣除、余数作为
+`cache_read`（`:252`）；`reasoning_output_tokens` 从 output 中切出归一为
+`reasoning`——因为它是 `output_tokens` 的子集，直接并计会双计（`253-265` 注释）。
 
 **model 来源**：`turn_context.payload.model` 为主（`810-825`，同时重置 turn 锚点），辅以
 `info.model/model_info.slug`（`1554-1570`）；token_count 行若尚无模型则暂存，等模型出现再补
 （`1080-1087`、`1376-1412`）。
 
-**zstd（提交 bd62b8c）**：增量续读不支持压缩文件（`start_offset != 0` 直接返回空并置
+**zstd（提交 `bd62b8c4` "fix(codex): support reading and caching zstd-compressed transcripts"）**：增量续读不支持压缩文件（`start_offset != 0` 直接返回空并置
 `parse_succeeded=false`，`codex.rs:1462-1472`）；解压用流式 `zstd::stream::read::Decoder` +
 `window_log_max(26)` + `take(MAX_ARCHIVE_BYTES + 1)`（256 MB 上限，`1489-1522`，常量
 `sessions/utils.rs:545`），超限或失败即清空消息并标记解析失败。
@@ -355,7 +386,7 @@ input)`），`cache_read = cached`；`reasoning_output_tokens` 从 output 中切
 | 范式 | 代表 | 位置 |
 | --- | --- | --- |
 | 单次值（每行/每请求自带 usage） | Claude Code、Gemini、Cline、Junie、Command Code | `claudecode.rs:696`、`gemini.rs:248`、`cline.rs:238`、`junie.rs:132`、`commandcode.rs:421` |
-| 累计快照差分 | Codex、Copilot Desktop、Devin ACP、Grok | `codex.rs:934-985`、`copilot_desktop.rs:115-164`、`devin.rs:420-423`、`grok.rs:506-519` |
+| 累计快照差分 | Codex、Copilot Desktop、Devin ACP、Grok | `codex.rs:934-985`、`copilot_desktop.rs:115-164`、`devin.rs:418-424`（doc 注释 + 实现起点）、`grok.rs:506-519` |
 
 **坏行容错**普遍是「静默跳过、不 panic」：Claude 逐行 `Err(_) => continue`
 （`claudecode.rs:511-515`）；Codex 解析失败忽略该行，但 I/O 失败会置 `parse_succeeded=false`
@@ -396,7 +427,7 @@ pub(crate) fn open_readonly_sqlite(path: &Path) -> rusqlite::Result<Connection> 
 
 - `NO_MUTEX` 的前提是每个 parser 单线程独占连接（注释 `utils.rs:296-300`）。
 - **全仓无 `immutable=1`**；唯一例外是 CLI 读 Cursor 桌面 `state.vscdb` 时用
-  `file:…?mode=ro` URI（`crates/tokscale-cli/src/cursor.rs:421-424`）。
+  `file:…?mode=ro` URI（`crates/tokscale-cli/src/cursor.rs:421-425`）。
 - PRAGMA 只用于**探测**（`PRAGMA table_info`，`zed.rs:96`、`micode.rs:62`、
   `cherrystudio.rs:428`）；没有 `journal_mode` / `query_only` 设置。
 - 忙等只有 OpenClaw 一处：`busy_timeout = 1500ms`（`openclaw.rs:185`、`:624`）。
@@ -406,7 +437,7 @@ pub(crate) fn open_readonly_sqlite(path: &Path) -> rusqlite::Result<Connection> 
   NotOpened/NotPrepared/NotExecuted/Incomplete/Ran，增量路径用 `completed()`（`:352`）
   拒绝在「只读了前缀」时写高水位。
 - 源库被占用时**不做** WAL 特殊处理：不写 sidecar、不 checkpoint，扫描阶段忽略 `-wal`/`-shm`
-  （`scanner.rs:671-672`，测试断言 `scanner.rs:3480-3486`）。
+  （`scanner.rs:676-679`，测试断言 `scanner.rs:3480-3486`）。
 
 多版本 schema 的适配机制 = **候选 SQL 数组顺序 `prepare`，第一个 `prepared()` 的胜出，且不回落旧查询**
 （`opencode_schema.rs:1484-1505`）：
@@ -441,9 +472,11 @@ micode `normalize_time` 判 `>1e12`（`micode.rs:46-52`）；copilot Desktop 兼
 
 ### 5.3 直接采用来源金额的适配器
 
-**已验证 + 复核修正**：SQLite 类中直接采用源库金额的有三家（带换算）：
+**已验证 + 复核修正**：以下三家的金额直接取自源库，换算口径各不相同——copilot 与 kiro
+需要单位换算，cherrystudio 直接采用（且按 §3.2 分类属「混合」数据面）。
+全仓同类的自带成本远不止这三家，见下文清单：
 
-| 客户端 | 来源字段 | 换算 |
+| 客户端 | 来源字段 | 金额处理 |
 | --- | --- | --- |
 | copilot | `assistant_usage_events.total_nano_aiu` | `/ 1e11`（nano AIU → USD），`copilot_session_store.rs:13`、`:126-149` |
 | cherrystudio | `ai_usage_record.cost` | 直接采用（`cherrystudio.rs:592`、`:775`），非 USD 币种一律交回 token 计价（`cherrystudio.rs:746-777`） |
@@ -459,7 +492,7 @@ micode `normalize_time` 判 `>1e12`（`micode.rs:46-52`）；copilot Desktop 兼
 ### 5.4 粗粒度与本地推理的显式建模
 
 - **Warp 只有聚合，但带金额**（复核修正）：每条记录是账户/工作区聚合，模型名写死
-  `aggregate-requests`、token 全 0、请求数进 `message_count`，**金额 = `cents_to_dollars(spendCents)`**
+  `aggregate-requests`、token 全 0、请求数进 `message_count`，**金额 = `cents_to_dollars(spend_cents)`**
   （`sessions/warp.rs:74-84`、`:100-117`）。提交路径会按 `is_aggregate_only_warp_row` 把这些
   tokenless 聚合行整行剔除（`crates/tokscale-cli/src/main.rs:6085-6098`、`:6113`）——
   即「本地可见、不参与上报」。
@@ -475,7 +508,7 @@ micode `normalize_time` 判 `>1e12`（`micode.rs:46-52`）；copilot Desktop 兼
 
 | 客户端 | 命令入口（CLI） | 缓存落点 | core 解析 |
 | --- | --- | --- | --- |
-| cursor | `run_cursor_command`（`main.rs:6891`）→ `run_cursor_sync`（`cursor.rs:2001`） | `<home>/.config/tokscale/cursor-cache/usage.json`（旧 CSV，`cursor.rs:103-117`、`:153`） | `sessions/cursor.rs:308`；成本 `totalCents` 优先、退回 `chargedCents`，cents→USD 并标 provider-reported（`:192-201`、`:395-401`） |
+| cursor | `run_cursor_command`（`main.rs:6891`）→ `run_cursor_sync`（`cursor.rs:2001`） | `<home>/.config/tokscale/cursor-cache/usage.json`（旧 CSV，`cursor.rs:103-117`、`:153`） | `sessions/cursor.rs:308`；成本 `totalCents` 优先、退回 `chargedCents`，cents→USD 并标 provider-reported（`:192-201`、`:395-401`；`mark_provider_reported_cost` 在 `:419-421`） |
 | antigravity | `main.rs:6919` → `antigravity.rs:215` | `antigravity-cache/{manifest.json, sessions/*.jsonl}`（`antigravity.rs:98`、`:106`、`:774`） | `sessions/antigravity.rs:6` |
 | trae | `main.rs:6947` → `trae.rs:1379` | `<config>/trae-cache/manifest.json` + `sessions/usage-<batch_ts>.json`（`trae.rs:1011`、`:1307`） | `sessions/trae.rs:113` |
 | warp | `main.rs:7070` → `warp.rs` | `<config>/warp-cache/usage.json`（`warp.rs:84-85`、`:137`） | `sessions/warp.rs:32` |
@@ -508,14 +541,15 @@ micode `normalize_time` 判 `>1e12`（`micode.rs:46-52`）；copilot Desktop 兼
   （`paths.rs:120` → `message_cache.rs:94` → `shard_path` `:3069-3071`），
   同级锁文件 `source-message-cache.lock`（`:98`）；**256 个分片**（`CACHE_SHARD_COUNT`，`:72`），
   单分片上限 256 MiB（`MAX_CACHE_SHARD_BYTES`，`:73`）。
-- 每片是一个 bincode 信封（手写头 + payload，`bincode 1.3`）：
+- 每片是一个 bincode 信封（手写头 + payload，`bincode 1.3`）。下划线右侧的说明为本文所加；
+  源码此处另有 `#[derive(Debug, Serialize, Deserialize)]`：
 
 ```rust
-struct CachedShardEnvelope {          // message_cache.rs:2525-2531
-    format_version: u32,              // wire 布局版本
-    parser_namespace: String,         // 客户端命名空间
-    parser_version: u32,              // 该客户端解析器版本
-    payload: Vec<u8>,                 // CachedSourceEntry 的 bincode
+struct CachedShardEnvelope {          // message_cache.rs:2526-2531
+    format_version: u32,              // wire 布局版本（本文注）
+    parser_namespace: String,         // 客户端命名空间（本文注）
+    parser_version: u32,              // 该客户端解析器版本（本文注）
+    payload: Vec<u8>,                 // CachedSourceEntry 的 bincode（本文注）
 }
 ```
 
@@ -527,18 +561,24 @@ struct CachedShardEnvelope {          // message_cache.rs:2525-2531
   `:1241-1258`）走 `shared_family_version`（`:1265-1279`），以「族 base + offset」共用同一版本，
   驱动代码一变整族一起失效。
   效果：**一个客户端（或一个族）的解析器升级不会淘汰其他命名空间的缓存**——信封先比
-  `namespace + parser_version`（比较点 `:3123-3134`；`:2525-2531` 只是信封结构体定义），
-  不一致即 `Stale` 重写该片（`:3301`）。
+  `namespace + parser_version`（比较点 `:3130-3134`；`:2525-2531` 只是信封结构体定义），
+  不符即返回 `Stale`（`:3133`）并登记重写（`:2674-2678`；`:3301` 是 format_version
+  未知时的兜底分支）。
 - `parser_generation()`（`message_cache.rs:1074-1093`，导出 `lib.rs:28`）**不进缓存 key**，
   只服务 TUI 聚合缓存：把全部 `parser_version` + Claude 保留代次折叠成 FNV-1a u64，
   不一致即 `CacheResult::Miss`（`crates/tokscale-cli/src/tui/cache.rs:812`）。
 - 存储粒度是**解析后的 `UnifiedMessage` 列表**（不是原始字节）。
-  `CachedSourceEntry`（`:1669-1694`）含 `parser_namespace / parser_version / path /
+  `CachedSourceEntry`（`:1669-1705`）含 `parser_namespace / parser_version / path /
   fingerprint / messages / fallback_timestamp_indices`，外加 per-client 边车：
-  `codex_incremental`（`:867-873`）、`prime_accounting`、`opencode_incremental`、`micode_metadata`
-  （MiMo 用独立信封 `MICODE_CACHE_FORMAT_VERSION = 11`，`:53`、`:3136-3163`）。
+  `codex_incremental`（`:867-873`）、`prime_accounting`（`:1691-1694`）、
+  `opencode_incremental`（`:1695-1700`）、`micode_metadata`（`:1701-1704`；
+  MiMo 用独立信封 `MICODE_CACHE_FORMAT_VERSION = 11`，`:53`、`:3136-3163`）。
 - **Claude 是唯一「缓存即唯一副本」的命名空间**：压缩后的历史行只留在缓存里，
-  `parser_version` bump 对它是有损而非仅仅变冷（`:1675-1680`、`lib.rs:1384-1393`）。
+  `parser_version` bump 对它是有损而非仅仅变冷——`message_cache.rs` 的 `ClientId::Claude`
+  分支带显式 WARNING 注释（`:1384-1393`："bumping this discards data that is not recoverable
+  by re-parsing … the cold rebuild that follows sees only the compacted file"），
+  `CachedSourceEntry.messages` 的文档同旨（`:1675-1680`），
+  相关迁移逻辑见 `lib.rs:1257-1308` 的 `needs_retention_provenance_migration`。
 
 ### 7.2 文件指纹与失效判定
 
@@ -554,20 +594,24 @@ sample_hashes + content_hash + related_files`，**没有 inode**。
   只有 Codex 与 Prime 用全文 SHA-256。
 - 失效：指纹变 → `FingerprintStatus::Changed` → 整文件重解析；
   解析器升级 → 信封 `Stale` → 重写该片；损坏 → `Invalid` → 重写（`:2674-2685`、
-  `:3115-3121`、`:3123-3133`）。**源消息缓存没有 TTL**（全仓仅 TUI 聚合缓存
-  `CACHE_STALE_THRESHOLD_MS = 5min`（`tui/cache.rs:23`）与订阅用量缓存 300s
-  （`commands/usage/mod.rs:344-347`）两处 TTL，均不属本层）。
+  `:3115-3121`、`:3123-3133`）。**源消息缓存没有 TTL**（全仓搜索未见过期字段，
+  但此项非穷尽验证；全仓其他 TTL 均不属本层：TUI 聚合缓存
+  `CACHE_STALE_THRESHOLD_MS = 5min`（`tui/cache.rs:23`）、订阅用量缓存 300s
+  （`commands/usage/mod.rs:344-347`）、TUI remote 缓存 3600s（`tui/remote.rs:23`）、
+  定价快照 3600s（`pricing/cache.rs:6`））。
 
 ### 7.3 增量续读：文件 append 只有 Codex
 
 **已验证（措辞经复核限定）**：热命中要求 `consumed_offset == fingerprint.size &&
-prefix_hash == fingerprint.content_hash`（`message_cache.rs:3609-3620`）；
+prefix_hash == fingerprint.content_hash` 且 `ends_with_newline`（三个合取项，
+`message_cache.rs:3609-3620`）；
 size 变大时走 `parse_codex_file_incremental`（`lib.rs:2021-2025`），前置条件是
 `codex_prefix_matches`（`:3598-3607`，重算前缀 SHA-256）与 `file_ends_with_newline`
 （`:3581-3596`，检查偏移前一个字节是 `\n`）；不满足就 `reparse_from_start`（`lib.rs:1971-1976`）。
 
-- **限定**：这是唯一的**文件级 append 偏移续读**；OpenCode 另有一套**行级增量**
-  （`lib.rs:1825-1831`），不属于同一种机制。
+- **限定**：这是唯一的**文件级 append 偏移续读**；OpenCode 另有一套 SQLite 变更行 mark
+  （实现入口 `lib.rs:1832`，`:1825-1831` 为设计注释；状态字段
+  `message_cache.rs:1695-1700`），不属于同一种机制。
 - 其余所有客户端走 `load_or_parse_source_with_fingerprint_and_policy`（`lib.rs:1240-1377`），
   指纹变即整文件重解析——**没有通用的 tail/partial-line 续读**，半行问题靠
   `ends_with_newline` 闸口规避。
@@ -591,8 +635,10 @@ size 变大时走 `parse_codex_file_incremental`（`lib.rs:2021-2025`），前�
   同 key 合并而非覆盖（`absorb_retained_history` `:2452-2506`，调用点 `:3010-3025`）；
   删除也要比对指纹，避免删掉别的进程刚刷新的条目（`:2997-3009`）。
 - 损坏片只影响自己：`test_corrupt_shard_does_not_hide_entries_from_other_shards`
-  （`:7785-7814`）；无全局容量上限、无 LRU/淘汰；清理入口只有
-  `remove_legacy_monolith_cache_once`（`:116-133`，删 v1 单体文件）。
+  （`:7785-7814`）；无全局容量上限、无 LRU/淘汰；运行时唯一清理入口是
+  `remove_legacy_monolith_cache_once`（Once 包装 `:130-133` + 函数体 `:116-125`，
+  运行时调用点 `:2624`，删 v1 单体文件；测试专用的 `prune_missing_files`
+  `:2869-2870` 带 `#[cfg(test)]`，不属运行时入口）。
 
 ### 7.5 性能证据与取舍
 
@@ -608,7 +654,7 @@ size 变大时走 `parse_codex_file_incremental`（`lib.rs:2021-2025`），前�
 - 扫描并行度上限 `SCAN_WORKER_CEILING = 4`（`scanner.rs:1989`），理由注释明确：
   「目录遍历阻塞在文件系统而非 CPU，超过少量 worker 只会互相争抢」；扫描用局部
   `rayon::ThreadPoolBuilder` 线程池，构建失败回落全局池（`scanner.rs:2915-2926`）。
-- 解析车道普遍 `par_iter()`（`lib.rs` 中 50+ 处，如 `2153`、`2292`、`3332`），
+- 解析车道普遍 `par_iter()`（`lib.rs` 中实测 86 处调用，如 `2153`、`2292`），
   内存按车道经 `MessageSink`（`lib.rs:832`）逐段释放（设计说明 `lib.rs:825-831`）。
 
 ## 8. 聚合口径与时间
@@ -633,7 +679,7 @@ size 变大时走 `parse_codex_file_incremental`（`lib.rs:2021-2025`），前�
 `SessionAccumulator::add_message`（`aggregator.rs:451-506`，顺带把毫秒时间戳归一为秒）。
 
 排序：models 按 cost 降序、NaN 垫底（`lib.rs:4205-4213`）；monthly/hourly 升序（`4354`、`4479`）；
-daily 按日期升序（`aggregator.rs:78`）；session 按 last_seen 降序（`aggregator.rs:118-120`）。
+daily 按日期升序（`aggregator.rs:78`）；session 按 last_seen 降序（`aggregator.rs:120-125`）。
 
 **关键设计**：**去重与重放保护全部前移到解析期**，聚合层只按 date 过滤、不再去重
 （`lib.rs:5159-5187` 只有日期谓词）。因此重复计费与否完全取决于解析期的 `dedup_key` 纪律
@@ -650,7 +696,7 @@ daily 按日期升序（`aggregator.rs:78`）；session 按 last_seen 降序（`
 
 ### 8.3 时区分桶：`BucketTimezone`
 
-**已验证**（`bucket_tz.rs:36-45`）：
+**已验证**（`bucket_tz.rs:36-45`；源码含 `#[derive]` 与逐变体注释，此处压缩为一行）：
 
 ```rust
 pub enum BucketTimezone { Local, Pinned(chrono_tz::Tz) }
@@ -661,7 +707,7 @@ pub enum BucketTimezone { Local, Pinned(chrono_tz::Tz) }
 - 探测：`TZ` 环境变量（**仅 unix**，`bucket_tz.rs:224-229`；Windows 恒返回 `None`，`:250-253`）
   → `iana_time_zone::get_timezone()`（`:215-217`）；候选必须与 `chrono::Local` 在
   `[epoch, now + 10 年]` 上每 30 分钟采样一次的偏移**完全一致**才接受（`:267-287`、`:347-377`），
-  否则不 pin。非法名/空串/固定偏移名一律降级 `Local` 并 warn（`:54-70`）。
+  否则不 pin。空串/缺失静默降级 `Local`（`:55-57`），无法解析的名称才 warn（`:62-66`）。
 - 日键 `day_key` = `%Y-%m-%d`（`:108-113`），时键 `hour_key` = `%Y-%m-%d %H:00`（`:122-127`）；
   无法表示的瞬间返回空串（`:137-146`），调用方保留原日期而不是塞进假桶
   （`sessions/mod.rs:441-447`）。
@@ -672,7 +718,7 @@ pub enum BucketTimezone { Local, Pinned(chrono_tz::Tz) }
 - DST 兜底：`local_day_start` 对 DST 空缺的本地午夜返回 `None`，跳出该 interval 的剩余分配
   （`sessionize.rs:419-432`、`469-479`），歧义时段取 earliest（`:476`）。
 
-**口径差异（代码可见，**未验证**是否有意）**：core 的小时桶用 pinned 时区
+**口径差异（代码可见；是否有意为之未验证）**：core 的小时桶用 pinned 时区
 （`lib.rs:4427-4430`），而 TUI 的 hourly/minutely 桶从 timestamp 经**本机 `Local`** 重算
 （`crates/tokscale-cli/src/tui/data/mod.rs:1185`、`1273`，底层 `1709-1769`）；pin 了非本机时区时
 两者的小时归属会不同。日/月桶用已 re-key 的 `msg.date`（`tui/data/mod.rs:953`），不受影响。
@@ -681,7 +727,7 @@ pub enum BucketTimezone { Local, Pinned(chrono_tz::Tz) }
 
 - `DEFAULT_IDLE_GAP_MS = 3 * 60 * 1000`（`sessionize.rs:8`）：按 `(client, session_id)` 分组后，
   相邻消息间隔超过 3 分钟即切段；段内 wall 时长计入活跃时长。
-- 每日活跃时长按 wall-clock 占比**分配到各自然日**（`sessionize.rs:375-441`），
+- 每日活跃时长按 wall-clock 占比**分配到各自然日**（`sessionize.rs:389-453`），
   跨日会话两端各取本日份额。
 - 子会话归并：`UnifiedMessage.parent_session_id`（`sessions/mod.rs:110-116`）允许把 subagent
   会话滚进父会话（如 OMP 的嵌套目录），`is_turn_start`（`:117-120`）用于区分
@@ -714,13 +760,14 @@ pub fn normalize_model_for_grouping(model_id: &str) -> String {
   `accounts/together/`，或 provider ∈ {synthetic, glhf, synthetic.new, octofriend}，
   且**仅当 provider 为空或 unknown 时**才改写为 `synthetic`
   （`sessions/synthetic.rs:19-96`；调用点 `lib.rs:960-965`、`:6664-6666`）；
-  客户端字段不变。Sakana 的重归属同理（`provider_identity.rs:341` 由 fugu 前缀推断）。
+  客户端字段不变。Sakana 的重归属同理（`provider_identity.rs:268` 的
+  `inferred_provider_from_model_inner`，fugu 分支 `:340-342`）。
 
 ## 9. 定价与金额计算
 
-这一层是「金额怎么算出来的」的全部答案：**六个价格来源 → 匹配链 → 分档累进公式 → 倍率修正**。
+这一层是「金额怎么算出来的」的全部答案：**六类上游来源（+1 张用户表）→ 匹配链 → 分档累进公式 → 倍率修正**。
 
-### 9.1 六个价格来源
+### 9.1 价格来源（3 动态 + 3 内置 + 用户表）
 
 **已验证**：
 
@@ -750,7 +797,8 @@ pub fn normalize_model_for_grouping(model_id: &str) -> String {
 `cache_creation_input_token_cost`(±above_200k / above_1hr / above_1hr_above_200k)、
 `cache_read_input_token_cost`(±above_200k / above_272k)、以及 input/output 的
 128k/200k/256k/272k 长上下文分档）。`custom.rs` 允许 `*_per_million_tokens` 写法并在装载时 `/1e6`
-（`custom.rs:351-378`，上限校验 `:367-373`）。**只有美元，没有汇率换算代码。**
+（`custom.rs:351-378`，上限校验 `:367-373`）。**金额单位只有美元，全仓没有汇率换算代码**
+（三源快照以美元计这一条属惯例推断，标**未验证**）。
 
 ### 9.2 匹配链：模型标识 → 价格条目
 
@@ -822,7 +870,7 @@ let tiered_cost = |tokens: f64, base: Option<f64>, tiers: &[(f64, Option<f64>)]|
 **例外：整单换价**（`compute_cost_for_lookup`，`lookup.rs:2204-2298`）——与累进分段不同：
 
 - OpenAI 名单（`is_openai_full_request_272k_model` `:2021-2042`）且 provider 为 openai
-  且 LiteLLM 行完整（`:2077-2093`）时，总输入 `input + cache_read + cache_write > 272k`
+  且 LiteLLM 行完整（完整性判定 `:2060-2071`）时，总输入 `input + cache_read + cache_write > 272k`
   就把各级率**整体替换**为 above 价、并按 input 倍数缩放 cache_write（`:2241-2297`）。
 - xAI grok 200k 同构，边界为 `>=` 且清空高段字段避免二次分档（`:2104-2202`）。
 
@@ -830,7 +878,7 @@ let tiered_cost = |tokens: f64, base: Option<f64>, tiers: &[(f64, Option<f64>)]|
 
 | 机制 | 规则 | 位置 |
 | --- | --- | --- |
-| Zed hosted | 该客户端视角下 provider 为 zed 时 **×1.1**（官方文档口径：list price + 10%） | `lib.rs:5227-5235`（注释明确提醒未来 LiteLLM 若收录已含加价的 zed 行会双重计费） |
+| Zed hosted | 该客户端视角下 `provider_id == "zed.dev"` 时 **×1.1**（官方文档口径：list price + 10%） | `sessions/zed.rs:22`、`lib.rs:5227-5235`（注释明确提醒未来 LiteLLM 若收录已含加价的 zed 行会双重计费） |
 | OpenAI fast/priority | `service_tier` 为 `priority`/`fast`，或模型名带 fast 后缀且命中归一化费率时 **×2.0** | `lib.rs:5276-5298`；入口 `calculate_cost_with_service_tier` `:5303-5312` |
 | 权威成本守卫 | `has_authoritative_cost()` 为真直接跳过计价 | `lib.rs:5314-5336`（`:5318-5320`） |
 | 写回条件 | 仅当 `calculated_cost > 0.0` 才覆盖 cost 并标 `Estimated` | `lib.rs:5332-5335` |
@@ -839,11 +887,11 @@ let tiered_cost = |tokens: f64, base: Option<f64>, tiers: &[(f64, Option<f64>)]|
 全仓存在两个额外计价点，引用时必须区分：
 
 - `ParsedMessage` 链路明确**不计价**（`lib.rs:368-372` 注释 "This lane applies no pricing"），
-  由消费者在**报告期逐条重算**：`tokscale report` 的 `report.rs:167` →
-  `compute_msg_cost`（`report.rs:1572-1593`）。它复用同一个 `PricingService`，因此同一天
-  可能被重算多次（这是 wiki/任务归属报告的活跃路径）。
+  由消费者在报告期计算：`tokscale report` 的 `report.rs:167` →
+  `compute_msg_cost`（`report.rs:1572-1593`；`ProviderReported` 行直接返回原值 `:1573-1575`，
+  其余按 token 重算）。它复用同一个 `PricingService`，因此同一天可能被重算多次。
 - **提交闸** `prepare_submission_pricing`（`lib.rs:4865-4973`）会按「提交口径」重写成本：
-  无完整定价覆盖的非权威行被清零并登记 `incomplete_cost_dates`（`:4951-4952`）。
+  无完整定价覆盖的非权威行被清零（`:4951-4952`）并登记 `incomplete_cost_dates`（`:4946`）。
   即**本地估算口径 ≠ 上报口径**，同一份日志在两处的金额可能不同。
 
 ### 9.5 特例与陷阱
@@ -881,7 +929,7 @@ CLI 端到端 `crates/tokscale-cli/tests/cli_tests.rs:1703`、`:4880`、`:4972`�
 Submit / Autosubmit / Headless / Wrapped / Usage / Report / ...` 等子命令；
 `--group-by` 在 `main.rs:89-95`（全局）与 `:121-127`（models）定义，默认 `client,model`。
 
-- `tokscale report`（`commands/report.rs:44` 起）是**任务归属报告**：先解析会话
+- `tokscale report`（`commands/report.rs:38` 的 `run_report`）是**任务归属报告**：先解析会话
   （走 §2.2 的独立实现 `parse_local_clients`，并在报告期逐条重算成本，§9.4），
   再用 LLM summarizer 给会话生成标题/任务类别/复杂度，写入本地 wiki 库
   （`WikiDb`，`wiki.rs:1-3` 注释「FM-generated summaries of coding sessions」），
@@ -910,7 +958,7 @@ summary / years / contributions[] / time_metrics / mcp_servers / provenance`。
   绝大多数客户端是 `SUBMISSION_PARSER_VERSION = 1`，Copilot 为 2，MiCode 家族为 2
   （`main.rs:4877-4882`、`5036-5039`）。服务端据此决定是否接受该设备的增量。
 - survey 类字段（模型名）走 `canonical_model_id`（§8.5），保证别名不污染服务端身份。
-- 服务端在 `packages/frontend/src/app/api/submit/route.ts`（1529 行）做校验、合并与
+- 服务端在 `packages/frontend/src/app/api/submit/route.ts`（1623 行）做校验、合并与
   去重（`validateSubmission`、`mergeClientBreakdownsWithRegressionGuard`、日粒度
   `daily_breakdown` 表、`parserHighWater` 高水位等）；该文件以注释记录新旧客户端别名折叠
   （`LEGACY_CLIENT_ALIASES`：`kilocode → kilo`）。
@@ -930,26 +978,27 @@ TokenScope 与 tokscale 是同代问题（多 agent 本地用量统计）的两�
 | 客户端注册表 | `clients.rs` 宏生成 56 个 `ClientId`，只描述扫描面；解析映射是手写车道 | 每个 source 适配器自治（发现+解析），无全局注册表 |
 | 客户端数量 | 56（+2 重归属），各家格式差异大 | 双 agent（Claude Code、Codex），聚焦深度 |
 | 事实存储 | **无历史库**：解析结果在分片缓存里，宁可重建 | `~/.tokenscope/history.db` SQLite 持久事实源，来源文件删除不删用量 |
-| 缓存 | 分片 256 × bincode，双版本轴（wire 10 / per-client parser_version） | 现有缓存机制（M 系）与 `history.db` 并存 |
-| 增量续读 | 仅 Codex 有文件级 append 续读（前缀哈希 + 换行边界）；OpenCode 另有行级增量 | 逐请求解析（无 append 续读概念） |
-| 价格来源 | 6 个（3 动态 + 3 内置 + 用户表），候选择优 | 3 个（`pricing.toml` / models.dev / OpenRouter），候选独立、**无编译期内置表** |
+| 缓存 | 分片 256 × bincode，双版本轴（wire 10 / per-client parser_version） | **解析缓存已退役**：`cache.db` 仅首次升级时只读迁移一次，解析指纹由 `history.db` 的 `source_files` 承接（本仓 `src/report.rs:278-281` 的 `open_cache` 已 `#[allow(dead_code)]`，注释「生产采集路径一律走历史库」） |
+| 增量续读 | 仅 Codex 有文件级 append 续读（前缀哈希 + 换行边界）；OpenCode 另有 SQLite 变更行 mark | 文件级 (size, mtime) 指纹跳过；未命中即整文件重解析，无 append 续读 |
+| 价格来源 | 6 个上游来源（3 动态 + 3 内置）+ 1 张用户自定义表，候选择优 | 3 个（`pricing.toml` / models.dev / OpenRouter），候选独立、**无编译期内置表** |
 | 计价公式 | 分档累进 + 两处整单换价例外 + 两处倍率 | 上下文分段 + 峰谷时间规则 + 多渠道候选取最高费用 |
 | 去重位置 | 全部在解析期，聚合层不去重 | 解析期身份 + 历史库求并集 |
 | 时区 | 首跑 pin IANA zone 写 settings.json，日键稳定 | settings.toml `timezone` 为唯一权威 |
-| 金额权威性 | `ProviderReported` 一经确认不再重估 | 同源（自带成本优先）+ `model_policy` 语义 |
+| 金额权威性 | `ProviderReported` 一经确认不再重估 | **无来源自带成本优先**：事件费用一律本地估价；CCS 导入的 `source_cost_usd` 仅作来源证据保存，不进入主估算（本仓 `src/aggregate.rs:106-110`） |
 
 ### 11.2 值得借鉴的实现手法
 
 1. **「注册表只描述扫描面、解析映射独立」的解耦**：`ClientDef` 不含函数指针
-   （`clients.rs:285-293`），使 56 个客户端可以共享 uno 套扫描调度，且新增客户端只动
-   注册表条目 + 一条车道。代价是 `lib.rs` 变成 2 万行巨物——TokenScope 若客户端数量扩张，
+   （`clients.rs:285-293`），使 56 个客户端可以共享一套扫描调度，且新增客户端只动
+   注册表条目 + 一条车道（车道之间顺序执行、车道内部 `par_iter` 并行）。代价是
+   `lib.rs` 变成 2 万行巨物——TokenScope 若客户端数量扩张，
    需在「表驱动」与「文件自治」之间早做选择。
 2. **缓存双版本轴**（`message_cache.rs:15-53`）：wire 布局与 per-client 解析器版本分开，
    避免一个客户端升级淘汰全部缓存。TokenScope 现有 `history.db` 的 schema 版本演进可借鉴
    同样的「分级失效」思路。
 3. **「缓存即唯一副本」的显式风险标注**：Claude 压缩历史只存在缓存里，
-   `parser_version` bump 对它是**有损**而非仅仅变冷（`message_cache.rs:1675-1680`、
-   `lib.rs:1384-1393`）；README 也单独警告删缓存会让压缩会话总量变低。
+   `parser_version` bump 对它是**有损**而非仅仅变冷（`message_cache.rs:1675-1680` 与
+   `:1384-1393` 的 WARNING 注释）；README 也单独警告删缓存会让压缩会话总量变低。
    TokenScope 因有持久历史库，天然规避这类损失——这正是把「缓存」与「事实源」分开的价值。
 4. **去重键的作用域纪律**（`claudecode.rs:1139-1159`）：内容派生的 dedup key 全局稳定、
    含会话 id 的 key 只在本文件有效；`dedup_key_is_globally_stable` 决定该行历史可否跨重启保留。
@@ -968,8 +1017,9 @@ TokenScope 与 tokscale 是同代问题（多 agent 本地用量统计）的两�
    并对 `ERROR_ACCESS_DENIED`/`ERROR_SHARING_VIOLATION` 退避重试——被杀毒/索引/云同步干扰
    在 Windows 上非常常见，TokenScope 写 `history.db`/settings 的原子替换可复用此策略。
 9. **声明式解析器版本**（`main.rs:4877-4882`、`:5031-5044`）：上报载荷携带
-   `scan_scope.parser_versions`，服务端据此判断增量可信区间。TokenScope 若做跨设备合并，
-   同样需要「解析器代次」这一元数据。
+   `scan_scope.parser_versions`，服务端据此判断增量可信区间。TokenScope 已在本机侧
+   维护解析修订（本仓 `src/history.rs:140` 的 `parser_revision`），若做跨设备/上报合并，
+   需把它提升为「随数据一起流动」的声明式元数据。
 10. **`unpriced:<type>` 命名空间**（`unsloth.rs:59-64`）：把「不可定价」编码进 provider 字段，
     而不是塞进价格 0——这是比「标记一个 bool」更不易被下游误用的小技巧。
 
@@ -979,7 +1029,7 @@ TokenScope 与 tokscale 是同代问题（多 agent 本地用量统计）的两�
    `dedup_key` 上。tokscale 自己在多处用「首见即留」「key 必须全局稳定」来兜底，
    但只要某家适配器的 key 粒度错误，聚合层没有任何第二道闸门。TokenScope 若沿用
    「历史库求并集」的路线，应继续保持解析期与入库期两道独立防线。
-2. **「一个客户端一个手写车道」的副作用**：`lib.rs` 车道段 2100-3662 约 1500 行、
+2. **「一个客户端一个手写车道」的副作用**：`lib.rs` 车道段 2117-3662 约 1500 行、
    大量 `par_iter` + 特例注释；56 客户端的维护成本已体现在 README 与代码的多处不一致
    （§3.4 的 6 条）。客户端数量不是竞争力本身，口径一致性才是。
 3. **编译期内置价格表**（`pricing/mod.rs:123-415`）：tokscale 保留了三张内置表作为兜底。
@@ -1015,8 +1065,8 @@ TokenScope 与 tokscale 是同代问题（多 agent 本地用量统计）的两�
 ### 12.2 复核结论（对抗性验证）
 
 两个独立复核代理按「逐条验证 + 主动找反例」模式复查了 24 条关键断言
-（读取链路 12 条、聚合/计价/缓存 12 条）。结果：**完全通过 14 条**，**部分正确 7 条**，
-**不成立 2 条**，另 2 条结论成立但需限定措辞。全部偏差已在正文中修正，主要如下：
+（读取链路 12 条、聚合/计价/缓存 12 条）。结果：**完全通过 14 条**，**部分正确 8 条**，
+**不成立 2 条**（14 + 8 + 2 = 24）。全部偏差已在正文中修正，主要如下：
 
 - **不成立 1：「唯一解析主干」**——实际存在第二套独立实现 `parse_local_clients`
   （§2.2 已改，并补出车道段两处的范围）。
@@ -1041,6 +1091,62 @@ TokenScope 与 tokscale 是同代问题（多 agent 本地用量统计）的两�
     （`lib.rs:4575-4581`），可用 `TOKSCALE_RECOVERY_DISABLE` 关闭；
   - 提交闸 `prepare_submission_pricing`（`lib.rs:4865-4973`）是「本地口径 ≠ 上报口径」的
     唯一实现点（已并入 §9.4）。
+
+**第 3 轮（分章独立复核）**：4 个复核代理按章节切分（§3 覆盖矩阵 / §4–§5 适配器 /
+§6–§7–§10 缓存与上报 / §8–§9 与附录）各自独立验证，全部引用「带文件名的行号」逐条打开源码核对，
+并对矩阵 79 处解析入口引用做全量定位（58 行数据面中「一行多入口」展开后的引用数）。结果：
+
+- 表格与结论主体成立（矩阵 58 行 id 集合与注册表双向差集为空、路径列 20/20 一致、
+  附录 A 19/21 行逐值正确、§9.3 计费公式片段与源码逐 token 一致）。
+- 但**行号精度与表述**共修正 30+ 处，典型：§3.3 两处分类计数（JSON 快照 10→9、混合 10→11）、
+  `scanner.rs` WAL 处理（671-672→676-679）、`lib.rs:1384-1393`（实为泛型签名，
+  正确出处是 `message_cache.rs:1384-1393` 的 WARNING 注释）、附录 A 的 zstd 位置
+  （`codex.rs:1489`→`:1503`）、`incomplete_cost_dates` 登记行（`lib.rs:4946`）、
+  路由文件行数（1529→1623）、`devin.rs` 引用改为 doc 注释起点、`spendCents`→`spend_cents`
+  （源码标识符）、§3.4 的 `PathRoot::Config` 条目顺序（Antigravity/Trae/Warp）等。
+- **一条复核建议被证伪**：复核建议补充「清理入口还有 `prune_missing_files`（`message_cache.rs:2870`）」，
+  但该函数带 `#[cfg(test)]`（`:2869`），仅测试专用；运行时唯一入口仍是
+  `remove_legacy_monolith_cache_once`（调用点 `:2624`）。文档按证伪后的结论书写——
+  复核本身也需要被验证。
+
+**第 4 轮（收敛复核）**：3 个复核代理分别做「验证第 3 轮修正的落实」「全量简写行号抽查」
+「读者视角通读」。结果：
+
+- **修正落实**：20 条抽验中 18 条完全落实；不精确 2 条（§4.2 分支数 8→7；
+  §5.3 的「均为 SQLite 数据面」限定语与矩阵分类冲突）。
+- **简写行号**：提取全文 247 处简写引用（首行号 ≥300 的 178 处）逐一归属并核对，
+  **命中 319 处、偏差 1 处、无法定位 0 处**；唯一实质偏差是 §2.2 的时区重分桶行号
+  （`960-971` → 实为 `967-969`，`960-965` 是 synthetic 字段归一）。
+- **最严重的发现来自 §11（本仓对照章节）**：两处对 TokenScope 现状的描述与事实相反——
+  ①「现有缓存机制与 `history.db` 并存」不成立（解析缓存已退役，`cache.db` 仅只读迁移一次，
+  `open_cache` 带 `#[allow(dead_code)]`，本仓 `src/report.rs:278-281`）；
+  ②「同源（自带成本优先）」不成立（本仓无来源自带成本优先，事件费用一律本地估价，
+  CCS 的 `source_cost_usd` 仅作来源证据、不进主估算，本仓 `src/aggregate.rs:106-110`）。
+  另有一处判断失真：TokenScope 已有 `parser_revision`（本仓 `history.rs:140`），
+  不是「尚缺解析器代次」。三处均已按本仓源码改正。
+- 其余一并修正：§9.1/§11.1 的来源计数口径（上游 6 个 + 用户表）、§7.2「无 TTL」与
+  §9.1「只有美元」的证据档位措辞、附录 B 的索引补录与区间统一（`988-1045`、`3323-3393`）、
+  §3.4 标题计数（7→6）、README 清单口径（46 个 ClientId，清单另含 synthetic）等。
+
+**收敛判定**：第 4 轮后残留问题为 0 个实质错误（仅剩风格级建议，如增大目录、术语微调），
+判定收敛；后续若再发现新证据，按同一「修正 → 再复核」流程处理。
+
+**第 5 轮（终局复核）**：2 个复核代理分别做「第 4 轮修正落实验证」与「随机 35 处终局抽查」。
+
+- 修正落实：20 条中 18 条完全正确；§5.3 首句的矛盾已按复核给出的精确改法改正；
+  另 4 处措辞/排版小项（§11.1 价格来源口径、§6 cursor 的 `mark_provider_reported_cost`
+  位置补 `:419-421`、§12.2 段落空行、目录条目措辞）一并落实。
+- 终局抽查：35 处删选覆盖 §2–§12，**33 处逐字命中、未发现新的实质错误**；
+  2 处轻微偏差已修（§7.3 热命中条件补第三合取项 `ends_with_newline`；
+  §2.2 车道清单 Devin 起点 `3391`→`3388-3394`，并标注清单为节选）。
+- 数字类断言由复核代理独立重建验证：56 个 `ClientId`、README 清单 47 项
+  （46 + synthetic）、`par_iter` 86 处、Codex parser_version 14 / Claude 2、
+  codex 取数矩阵 7 臂、zstd 的 1489/1503/1515、fs_atomic 重试 5 次 × 10ms、
+  阈值 128k/200k/256k/272k、lookup 缓存 512、TTL 3600、import 容差 1%/2/$0.01。
+
+**最终收敛声明**：五轮复核（1 轮深读 7 代理 → 2 轮对抗复核 2 代理 → 3 轮分章复核 4 代理
+→ 4 轮修正验证与通读 3 代理 → 5 轮终局抽查 2 代理）后，未再发现实质错误；
+剩余条目仅为风格建议（目录/术语微调），不影响任何结论。文档定稿。
 
 ### 12.3 各切片的未验证清单（不得外推）
 
@@ -1080,7 +1186,7 @@ TokenScope 与 tokscale 是同代问题（多 agent 本地用量统计）的两�
   TokenScope 的 `history.db` 模式在这一点上更安全，但也带来相反的代价——**旧的错误解析会
   长期留在库里**。tokscale 的 `recovery.rs` 覆盖层正是为「账本级修复」而设，提示
   TokenScope 需要等价的「历史重算/修复通道」而不是「删库重扫」。
-- tokscale 的 56 客户端覆盖含大量「自建缓存型」来源（trae/warp/cursor/antigravity/hindsight），
+- tokscale 的 56 客户端覆盖含 6 个「自建缓存型」来源（cursor/trae/warp/hindsight/antigravity/mcode），
   它们依赖 CLI 主动 `sync`。若 TokenScope 未来扩展这类来源，需要明确「缓存新鲜度」
   在界面上的表达能力（tokscale 只有 manifest 与批时间戳，无 UI 提示）。
 - **双解析实现的教训**：`parse_local_clients` 与 `parse_all_messages_streaming` 是两份
@@ -1107,7 +1213,7 @@ TokenScope 与 tokscale 是同代问题（多 agent 本地用量统计）的两�
 | 分档阈值 | 128k / 200k / 256k / 272k tokens | `pricing/lookup.rs:86-89` |
 | 计价模糊匹配最小长度 | 5 | `pricing/lookup.rs:91` |
 | 扫描并行上限 `SCAN_WORKER_CEILING` | 4 | `scanner.rs:1989` |
-| zstd 解压上限 `MAX_ARCHIVE_BYTES` | 256 MiB（window_log_max 26） | `sessions/utils.rs:545`、`codex.rs:1489` |
+| zstd 解压上限 `MAX_ARCHIVE_BYTES` | 256 MiB（`window_log_max(26)`） | `sessions/utils.rs:545`、`codex.rs:1503`（Decoder 建于 1489，`take(上限)` 在 1515） |
 | 上报解析器版本 | 通用 1 / Copilot 2 / MiCode 2 | `main.rs:4877-4882` |
 | Zed hosted 倍率 | ×1.1 | `lib.rs:5227-5235` |
 | OpenAI fast/priority 倍率 | ×2.0 | `lib.rs:5276-5298` |
@@ -1115,10 +1221,10 @@ TokenScope 与 tokscale 是同代问题（多 agent 本地用量统计）的两�
 | Copilot nano AIU 换算 | ÷ 1e11 | `copilot_session_store.rs:13` |
 | TUI 聚合缓存 TTL | 5 min | `tui/cache.rs:23` |
 | 订阅额度缓存 TTL | 300 s | `commands/usage/mod.rs:344-347` |
-| 无价格表时的 token 估算 | `chars.div_ceil(4)` | `sessions/utils.rs:540` |
-| 导入对账容差 | 1% / 2 tokens / $0.01 | `commands/import.rs:1005-1007` |
+| 来源缺用量元数据时的 token 估算 | `chars.div_ceil(4)`（与价格表无关） | `sessions/utils.rs:538-541` |
+| 导入对账容差 | 1% / 2 tokens / $0.01（`RECONCILE_RELATIVE_TOLERANCE` / `..._TOKEN_ABS_TOLERANCE` / `..._COST_ABS_TOLERANCE`） | `commands/import.rs:1005-1007` |
 
-## 附录 B：模块行号索引
+## 附录 B：模块行号索引（节选：正文引用到的模块与函数）
 
 | 文件 | 关键内容 | 行号 |
 | --- | --- | --- |
@@ -1128,27 +1234,38 @@ TokenScope 与 tokscale 是同代问题（多 agent 本地用量统计）的两�
 | | 出口过滤与时区重分桶 | `930`、`944`、`3737`、`5159-5187` |
 | | 聚合与计价入口 | `4080`、`4107-4118`、`5314-5336` |
 | `sessions/mod.rs` | `CostSource` / `UnifiedMessage` / 成本标记 | `73-78`、`81-125`、`455-465` |
-| | workspace slug 解码 | `868`、`883-895`、`960-1046` |
+| | workspace slug 解码 | `868`、`883-895`、`960-1045` |
 | `clients.rs` | `PathRoot` / `ClientDef` / `define_clients!` | `2-18`、`285-318`、`320-401` |
 | `scanner.rs` | 扫描入口 / 并行 / 后缀规则 / 并行上限 | `1929`、`2915-2926`、`513-535`、`1989` |
-| `message_cache.rs` | 版本常量 / 信封 / 分片路径 / 锁 / 原子写 | `49-53`、`2525-2531`、`3069-3071`、`2642`、`2929`、`3370-3393` |
+| `message_cache.rs` | 版本常量 / 信封 / 分片路径 / 锁 / 原子写 | `49-53`、`2525-2531`、`3069-3071`、`2642`、`2929`、`3323-3393` |
 | | 指纹与采样 / Codex 续读判定 | `231-260`、`3431-3456`、`3581-3620` |
 | `pricing/lookup.rs` | 匹配主链 / 计费公式 / 整单换价 / 阈值 | `619-1156`、`2300-2462`、`2021-2298`、`86-89` |
 | `pricing/mod.rs` | 服务装配 / 降级 / custom 前置 / 内置表 | `416-497`、`545-627`、`123-415` |
 | `pricing/litellm.rs` | URL / 费率结构 / 零价与覆盖判定 | `6-7`、`10-28`、`124-166`、`289` |
-| `sessions/claudecode.rs` | 去重键 / 合并 / subagent / advisor | `632-636`、`988-1046`、`88-183`、`829-871` |
+| `pricing/aliases.rs` | 别名表 / 解析入口 | `4-266`、`268-283` |
+| `pricing/cache.rs` | 定价缓存 TTL / 原子写 | `6`、`22-103` |
+| `pricing/fetch.rs` | HTTP 超时与重试 | `7-46` |
+| `pricing/openrouter.rs` | API 根 / 端点价择优 | `22`、`113-156`、`216-282` |
+| `pricing/models_dev.rs` | URL / 单位换算 | `7`、`79-114` |
+| `pricing/custom.rs` | 用户价格表装载 | `11`、`351-378` |
+| `sessions/claudecode.rs` | 去重键 / 合并 / subagent / advisor | `632-636`、`988-1045`、`88-183`、`829-871` |
+| | dedup key 全局稳定性判定 | `1139-1159` |
 | `sessions/codex.rs` | 取数矩阵 / 桶拆分 / zstd / replay | `934-985`、`249-275`、`1462-1522`、`1324-1358` |
+| `sessions/gemini.rs` | token 别名 / 重叠相减 / 同 id 替换 | `51-81`、`504-552`、`391-397` |
 | `sessions/opencode_schema.rs` | 多版本 schema 探测 | `351-425`、`1484-1505` |
 | `sessions/utils.rs` | 只读 SQLite / 逐行读 / 时间与估算工具 | `301-310`、`103-123`、`191-292`、`540-555` |
 | `bucket_tz.rs` | Local/Pinned / 探测校验 / 日键 | `36-45`、`267-287`、`108-146` |
-| `sessionize.rs` | 空闲阈值 / 活跃时长分配 | `8`、`375-441` |
+| `sessionize.rs` | 空闲阈值 / 活跃时长分配 | `8`、`389-453` |
 | `model_alias.rs` | 别名装载与折叠 | `39-42`、`86-149` |
 | `provider_identity.rs` | provider 归一与推断 | `1-93`、`260-367` |
 | `sessions/synthetic.rs` | 重归属规则 | `19-96` |
 | `crates/tokscale-cli/src/main.rs` | 命令枚举 / 上报载荷 / 解析器版本声明 | `108`、`4904-5026`、`4877-4882`、`5031-5044` |
-| `crates/tokscale-cli/src/commands/report.rs` | 任务归属报告 | `44-115` |
+| `crates/tokscale-cli/src/commands/report.rs` | 任务归属报告 | `38-115`、`1572-1593` |
 | `crates/tokscale-cli/src/tui/data/mod.rs` | TUI 数据层（含 minutely） | `629`、`146`、`1273-1322` |
-| `packages/frontend/src/app/api/submit/route.ts` | 上报服务端校验与合并 | 全文 |
+| `crates/tokscale-cli/src/{cursor,trae,warp,antigravity,hindsight}.rs` | §6 的 sync 客户端（命令实现） | 见 §6 表 |
+| `crates/tokscale-core/src/fs_atomic.rs` | 原子替换与 Windows 重试 | `4-14`、`17-76` |
+| `crates/tokscale-core/src/aggregator.rs` | 日/会话/汇总/图聚合 | `14`、`93`、`131`、`231` |
+| `packages/frontend/src/app/api/submit/route.ts` | 上报服务端校验与合并 | 全文（1623 行） |
 
 ---
 
