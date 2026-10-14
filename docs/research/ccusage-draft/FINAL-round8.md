@@ -77,7 +77,7 @@
 | `--jq` | **不在** `--help` 文本里（但选项可解析） | §11 第 8 条一致 |
 | `claude statusline --help` | `--offline` 默认 **true**、`--cache` 默认 true、`--refresh-interval` 默认 1 | 闭环 §8「未验证 / 存疑」第 8 条的疑问 |
 | `codex daily --help` | `--speed [auto\|standard\|flex\|fast]`，默认 auto | §5 §6 一致 |
-| `codex daily --speed` 三态 | `standard` 与 `auto` 数值相同、`fast` 数值更高（本机日志未记录 service tier，故差异来自 `--speed` 强制档） | §5 §6 一致 |
+| `codex daily --speed` 三态 | `auto` 与 `standard` 数值**不同**、`fast` 高于 `standard` ——说明 `auto` 确实读取并采用了本机日志记录的 service tier（若日志无 tier 记录，auto 会退化成 standard），`--speed` 的强制覆盖也确实改变金额 | §5 §6 一致 |
 
 **`--by-agent` 的适用范围（本条曾被本轮实测误判，已按复核结论改正）**：
 该选项在**顶层 `daily` 与无子命令路径**下**生效**——`ccusage daily --json --by-agent --offline`
