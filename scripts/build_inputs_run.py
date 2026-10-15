@@ -2,7 +2,7 @@
 
 归属方式：只用 Cargo 自己的 JSON `compiler-artifact` 消息里的产物路径与
 `package_id` 把 dep-info 精确映射到本地包（`libtokenscope-<hash>.rlib` →
-`libtokenscope-<hash>.d`），不根据 `.d` 文件名猜包名。
+`tokenscope-<hash>.d`），不根据 `.d` 文件名猜包名。
 """
 
 from __future__ import annotations
@@ -101,6 +101,8 @@ def dep_files_from_messages(messages):
             if path.suffix not in ARTIFACT_SUFFIXES:
                 continue
             candidate = path.with_suffix(".d")
+            if path.suffix in (".rlib", ".rmeta") and path.name.startswith("lib"):
+                candidate = candidate.with_name(candidate.name[3:])
             if candidate.is_file():
                 found.setdefault(package, set()).add(candidate)
     return found
@@ -229,6 +231,7 @@ def update(root, manifest_path, evidence=None, *, clean=True):
         clean_local_packages(root)
     records = collect_both_modes(root, evidence)
     previous = load_manifest(manifest_path) if Path(manifest_path).is_file() else {"manual": []}
+    validate_manual(root, previous["manual"])
     manifest = {"schema_version": 1, "generated": records, "manual": previous["manual"]}
     write_manifest(manifest_path, manifest)
     return {"manifest": str(manifest_path), "generated": len(records),
@@ -253,6 +256,23 @@ def diff_records(expected, actual):
     return missing, stale, changed
 
 
+def validate_manual(root, records):
+    """人工输入独立校验，不能替代或掩盖生成项。"""
+    files, directories = git_tracked(root)
+    for record in records:
+        rel, kind = record["path"], record["kind"]
+        if normalize_repo_path(rel, base=root, repo=root) != rel:
+            raise ManifestError(f"人工输入不是规范仓库相对路径：{rel}")
+        path = root / rel
+        valid = (rel in files and path.is_file()) if kind == "file" else (
+            rel in directories and path.is_dir())
+        if not valid:
+            raise ManifestError(f"人工输入不存在、类型不符或未受版本管理：{rel}")
+        if any(c["package"] not in LOCAL_PACKAGES or c["mode"] not in MODES
+               for c in record["consumers"]):
+            raise ManifestError(f"人工输入消费方非法：{rel}")
+
+
 def check(root, manifest_path, evidence=None, *, clean=True):
     manifest_path = Path(manifest_path)
     if not manifest_path.is_file():
@@ -262,11 +282,13 @@ def check(root, manifest_path, evidence=None, *, clean=True):
         clean_local_packages(root)
     expected = collect_both_modes(root, evidence)
     manifest = load_manifest(manifest_path)
+    validate_manual(root, manifest["manual"])
     registered = manifest["generated"] + manifest["manual"]
-    missing, stale, changed = diff_records(expected, registered)
+    missing, stale, changed = diff_records(expected, manifest["generated"])
     report = {"generated": len(expected), "missing": missing, "stale": stale,
               "changed": changed, "evidence": str(evidence)}
-    uncovered = workflow_paths_check(root, [record["path"] for record in expected])
+    uncovered = workflow_paths_check(root, sorted({record["path"] for record in
+                                                 expected + manifest["manual"]}))
     report["workflow_uncovered"] = uncovered
     # 登记路径必须仍然存在于仓库；不存在即失败，不允许静默留下失效登记。
     absent = sorted(record["path"] for record in registered

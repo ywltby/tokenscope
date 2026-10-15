@@ -464,5 +464,18 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 
 ### 6.7 过程事件（已在当轮修复）
 
-测试用的临时仓库操作一度污染了真实仓库 `.git/config`（`bare = true` 与被 fixture 身份覆盖的 `[user]` 段），原因是当时为验证钩子环境而手动注入了绝对路径的 `GIT_DIR`/`GIT_INDEX_FILE`。分支、HEAD、reflog、index 与工作区内容未受影响；配置已按备份复原（身份回退全局 `~/.gitconfig`）。加固：钩子显式 `unset` 这些变量，工具与测试的所有 Git 子进程都剥离调用者的 `GIT_*`。明细见 `qa-artifacts/workspace-layout/incident-2026-10-15/README.md`（ignored）。
+测试用的临时仓库操作一度污染了真实仓库 `.git/config`（`bare = true` 与被 fixture 身份覆盖的 `[user]` 段），原因是当时为验证钩子环境而手动注入了绝对路径的 `GIT_DIR`/`GIT_INDEX_FILE`。执行方当时记录分支、HEAD、reflog、index 与工作区内容未受影响，配置已按备份复原（身份回退全局 `~/.gitconfig`）。最初清理钩子环境的方案后来被 §6.8 的 `--only` 反例推翻；当前钩子与提交检查器保留本次提交的 Git 环境，由自建临时仓库的测试隔离 `GIT_*`，不能再次统一 unset。原始事件记录见 `qa-artifacts/workspace-layout/incident-2026-10-15/README.md`（ignored），其中初版修复描述属于历史记录。
+
+### 6.9 第 15 节审阅修复
+
+- PowerShell 语法检查器显式输出无 BOM UTF-8；测试保持严格 UTF-8 解码，覆盖主动设置 GBK 的子进程成功输出及失败 stderr。仓库范围测试不再传空临时根；PowerShell 与 Node 两种检查器遇到 0 个脚本均失败，测试按真实脚本集合核对数量（本轮为 11/14）。
+- 库 `.rlib`/`.rmeta` 产物去掉 Cargo 的 `lib` 文件前缀再定位 `.d`，不会删除同名二进制自身的 `lib` 前缀；只有库产物、没有单测二进制的用例也能收集输入。
+- 人工登记独立校验规范相对路径、文件/目录类型、Git 跟踪资格及消费方；生成项仍单独比较，人工项不能掩盖漏登记。工作流覆盖检查同时包含人工项。CLI 与编排层共享异常类型，缺清单时返回清晰非零错误而非堆栈。
+- 未跟踪且未被忽略的文件也参与检查输入保护；只有命中实际选中范围才阻止，纯文档提交不受无关新源码影响，ignored target/QA 不误阻。
+- CI 实现偏差明确接受：清单 `--check` 自己 `clean -p` 两个本地包后重新构建普通和 acceptance 两轮，而非复用前面门禁的产物。代价是额外两轮本地包编译；不能宣称实现了构建证据复用。此次保留现有正确性策略，不再改调度。
+- 本轮新增回归在 `test_script_checks.py`、`test_review15_regressions.py`；后者接入完整 CI。失败反例先于实现运行，复现了 GBK 解码失败、零文件放行、库依赖遗漏、人工项误报及未跟踪输入遗漏；实际验证结果在完成后回填。
+
+验证：完整脚本契约第一轮 227 项通过，随后新增 GBK stderr 用例；Git Bash 下语法契约 10 项通过，仓库检查器实际检查 PowerShell 11 个、Node 14 个。真实 `build_inputs.py --check` 重编译两模式后返回 generated=5，missing/stale/changed/absent 均空、workflow_uncovered 为空；日志与产物记录在 `qa-artifacts/workspace-layout/review15/manifest-check.txt` 和 `manifest/`。版本检查仍为 0.3.1 → 0.3.2，本 PR 不重复加号。提交前完整 hook 将复验新增用例及全部门禁。
+
+创建 PR、远程 CI/安装升级/Native UI E2E、旧 target 清理均保持原有待办与授权边界。
 

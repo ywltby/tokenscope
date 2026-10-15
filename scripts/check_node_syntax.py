@@ -37,6 +37,9 @@ def main():
         print("[node-syntax] 找不到 node，拒绝在无验证的情况下通过", file=sys.stderr)
         return 127
     files = list(node_files(args.root))
+    if not files:
+        print(f"[node-syntax] 检查范围内有 0 个脚本，拒绝空检查：{args.root}", file=sys.stderr)
+        return 1
     failures = []
     for item in files:
         result = subprocess.run([node, "--check", str(item)], capture_output=True,

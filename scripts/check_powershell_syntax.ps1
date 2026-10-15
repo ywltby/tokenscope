@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 if (-not $Root) {
     $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
@@ -25,6 +26,10 @@ foreach ($folder in $folders) {
     }
 }
 
+if ($checked -eq 0) {
+    [Console]::Error.WriteLine("[powershell-syntax] 检查范围内有 0 个脚本，拒绝空检查：$Root")
+    exit 1
+}
 if ($failures.Count -gt 0) {
     foreach ($failure in $failures) {
         [Console]::Error.WriteLine("[powershell-syntax] $failure")

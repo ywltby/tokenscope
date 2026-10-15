@@ -31,6 +31,8 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -B -m unittest discover -s scripts -p "test_script_checks.py" -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_review15_regressions.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         pwsh -NoProfile -File scripts/check_powershell_syntax.ps1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -B scripts/check_node_syntax.py

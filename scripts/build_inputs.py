@@ -424,6 +424,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # 编排层反向导入本模块，必须共享同一个 ManifestError 类型，避免 CLI 捕获失效。
+    sys.modules["build_inputs"] = sys.modules[__name__]
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
     sys.exit(main())

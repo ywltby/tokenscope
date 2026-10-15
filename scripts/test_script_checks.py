@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -29,13 +30,37 @@ class PowerShellSyntaxCase(unittest.TestCase):
         (self.root / "scripts").mkdir()
         (self.root / "frontend" / "scripts").mkdir(parents=True)
 
-    def run_check(self):
+    def run_check(self, *, repository=False, legacy_encoding=False):
+        script = ROOT / "scripts/check_powershell_syntax.ps1"
+        args = [] if repository else ["-Root", str(self.root)]
+        if legacy_encoding:
+            command = [PWSH, "-NoProfile", "-Command",
+                       "[Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(936); "
+                       "& $env:TOKENSCOPE_SYNTAX_SCRIPT -Root $env:TOKENSCOPE_SYNTAX_ROOT"]
+        else:
+            command = [PWSH, "-NoProfile", "-File", str(script), *args]
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith("GIT_")}
+        environment.update(TOKENSCOPE_SYNTAX_SCRIPT=str(script),
+                           TOKENSCOPE_SYNTAX_ROOT=str(self.root))
         return subprocess.run(
-            [PWSH, "-NoProfile", "-File", str(ROOT / "scripts/check_powershell_syntax.ps1"),
-             "-Root", str(self.root)],
-            capture_output=True, encoding="utf-8", errors="replace",
-            env={key: value for key, value in os.environ.items()
-                 if not key.startswith("GIT_")})
+            command, capture_output=True, encoding="utf-8", env=environment)
+
+    def test_empty_scope_is_an_error(self):
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("0", result.stderr)
+
+    def test_gbk_console_still_produces_utf8(self):
+        (self.root / "scripts" / "ok.ps1").write_text("Write-Output 1\n", encoding="utf-8")
+        result = self.run_check(legacy_encoding=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("通过：1 个脚本", result.stdout)
+
+    def test_gbk_console_error_is_also_utf8(self):
+        result = self.run_check(legacy_encoding=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("拒绝空检查", result.stderr)
 
     def test_valid_scripts_pass(self):
         (self.root / "scripts" / "ok.ps1").write_text(
@@ -55,9 +80,33 @@ class PowerShellSyntaxCase(unittest.TestCase):
         self.assertIn("[powershell-syntax]", result.stderr)
 
     def test_repository_scripts_are_syntactically_valid(self):
-        result = self.run_check()  # 默认以仓库根为范围
+        result = self.run_check(repository=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertRegex(result.stdout, r"通过：\d+ 个脚本")
+        expected = sum(len(list((ROOT / folder).glob("*.ps1")))
+                       for folder in ("scripts", "frontend/scripts"))
+        self.assertGreater(expected, 0)
+        self.assertIn(f"通过：{expected} 个脚本", result.stdout)
+
+
+class NodeSyntaxCase(unittest.TestCase):
+    def check(self, root=None):
+        args = [] if root is None else ["--root", str(root)]
+        return subprocess.run([sys.executable, "-B", str(ROOT / "scripts/check_node_syntax.py"),
+                               *args], capture_output=True, encoding="utf-8")
+
+    def test_empty_scope_is_an_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            result = self.check(root)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("0", result.stderr)
+
+    def test_repository_scripts_are_checked(self):
+        result = self.check()
+        expected = sum(p.is_file() and p.suffix in (".mjs", ".js")
+                       for p in (ROOT / "frontend/scripts").rglob("*"))
+        self.assertGreater(expected, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"通过：{expected} 个脚本", result.stdout)
 
 
 class ScriptCheckSelectionCase(unittest.TestCase):

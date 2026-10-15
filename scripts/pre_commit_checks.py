@@ -451,7 +451,12 @@ def unstaged_paths(root):
                             capture_output=True, check=False)
     if result.returncode != 0:
         raise CheckError("读取未暂存差异失败（git diff）")
-    return [item.decode("utf-8") for item in result.stdout.split(b"\0") if item]
+    untracked = subprocess.run(["git", "-C", str(root), "ls-files", "--others",
+                                "--exclude-standard", "-z"], capture_output=True, check=False)
+    if untracked.returncode != 0:
+        raise CheckError("读取未跟踪文件失败（git ls-files）")
+    return sorted({item.decode("utf-8") for data in (result.stdout, untracked.stdout)
+                   for item in data.split(b"\0") if item})
 
 
 def run(commands, *, cwd, executor=None):
@@ -508,7 +513,7 @@ def main():
     for note in plan["notes"]:
         print(f"[pre-commit] 说明：{note}")
     if plan["blocked"]:
-        print("[pre-commit] 以下受版本管理输入存在未暂存差异，请先处理后再提交：", file=sys.stderr)
+        print("[pre-commit] 以下检查输入存在未暂存差异或尚未跟踪，请先处理后再提交：", file=sys.stderr)
         for path in plan["blocked"]:
             print(f"[pre-commit]   {path}", file=sys.stderr)
         if not args.explain:
