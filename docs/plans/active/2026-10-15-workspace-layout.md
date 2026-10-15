@@ -441,6 +441,13 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 
 复现与验证：修复前在本机用真实钩子复现为 `STAGED=[]`（提交却包含 `Cargo.toml`），修复后同一场景为 `STAGED=[Cargo.toml|]`；坏 `.mjs` 脚本可被 `check_node_syntax.py` 抓出（exit 1）。
 
+按同样的复核方式自查，补 5 项契约（脚本契约 197 → 202 项）：
+
+- **`--only` 端到端**：临时仓库里放仓库本体的 `pre_commit_checks.py` / `build_inputs.py` / `check_staged_docs.py`（不放替身），挂上受版本管理的 `.githooks`，对「已跟踪文件在工作区被改坏但没有 `git add`」执行 `git commit --only <path>`。坏链接文档被查出（输出含 `nope.md`）并阻止提交，正常改动放行——这条链路同时证明「选中了检查」与「检查确实执行」，比只回显暂存区的替身更强。
+- **强制完整模式的前端未暂存差异**同样阻止（完整模式会跑前端检查）。
+- **清单已登记的 fixture**（`schema-v3.sql`）与运行时 fixture 走同一套 workspace 规则，且不牵连前端检查。
+- **fixture 重命名进 `docs/`** 时新旧路径规则取并集（fixtures 规则 + 文档检查）。
+
 ### 6.7 过程事件（已在当轮修复）
 
 测试用的临时仓库操作一度污染了真实仓库 `.git/config`（`bare = true` 与被 fixture 身份覆盖的 `[user]` 段），原因是当时为验证钩子环境而手动注入了绝对路径的 `GIT_DIR`/`GIT_INDEX_FILE`。分支、HEAD、reflog、index 与工作区内容未受影响；配置已按备份复原（身份回退全局 `~/.gitconfig`）。加固：钩子显式 `unset` 这些变量，工具与测试的所有 Git 子进程都剥离调用者的 `GIT_*`。明细见 `qa-artifacts/workspace-layout/incident-2026-10-15/README.md`（ignored）。

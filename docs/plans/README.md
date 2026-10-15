@@ -1,104 +1,77 @@
-# TokenScope 计划与完成状态总账
+﻿# TokenScope 璁″垝涓庡畬鎴愮姸鎬佹€昏处
 
-> 2026-10-11 整理。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
-> 当前待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)。[UI 调整计划](active/2026-10-13-ui-adjustment.md)本轮功能及价格/窗口隐藏复核补修已完成、本地验收通过，最新补修仍需自身 HEAD 的远程门禁，PR #7 未合并；真实跨午夜、长时间休眠、跨显示器已按用户决定移至[独立系统验收待办](system-acceptance-todo.md)，本轮不执行。逐份事实核对：[审计索引](audits/README.md)。
-> 最新进展：PR #5 最终 19c634b 的 CI、五场景、两项升级及工件已验，合并为 main 8d17a47。main 同样全部通过，历史 [v0.1.0](https://github.com/ywltby/tokenscope/releases/tag/v0.1.0) 与 [v0.2.0](https://github.com/ywltby/tokenscope/releases/tag/v0.2.0) 已公开；新建草稿读取延迟曾阻断上传，确认既有草稿后分阶段恢复了同一产物。防复发的 0.2.1 补修已改为固定创建响应 Release ID，当前门禁仍按新 HEAD 和 [Release](https://github.com/ywltby/tokenscope/actions/workflows/release.yml)判定；其余系统签字及 N10/N11/N13 不关闭。
+> 2026-10-11 鏁寸悊銆?*鐢ㄦ埛鏄庣‘瑕佹眰 > 杈冩柊璁″垝 > 杈冩棫璁″垝 > 鏈‘璁ょ殑璁捐寤鸿銆?*
+> 褰撳墠寰呭姙鍏ュ彛锛歔鍓╀綑浠诲姟鏁村悎涓庨獙鏀惰鍒抅(active/2026-10-11-consolidated-remaining-work.md)銆俒UI 璋冩暣璁″垝](active/2026-10-13-ui-adjustment.md)鏈疆鍔熻兘鍙婁环鏍?绐楀彛闅愯棌澶嶆牳琛ヤ慨宸插畬鎴愩€佹湰鍦伴獙鏀堕€氳繃锛屾渶鏂拌ˉ淇粛闇€鑷韩 HEAD 鐨勮繙绋嬮棬绂侊紝PR #7 鏈悎骞讹紱鐪熷疄璺ㄥ崍澶溿€侀暱鏃堕棿浼戠湢銆佽法鏄剧ず鍣ㄥ凡鎸夌敤鎴峰喅瀹氱Щ鑷砙鐙珛绯荤粺楠屾敹寰呭姙](system-acceptance-todo.md)锛屾湰杞笉鎵ц銆傞€愪唤浜嬪疄鏍稿锛歔瀹¤绱㈠紩](audits/README.md)銆?> 鏈€鏂拌繘灞曪細PR #5 鏈€缁?19c634b 鐨?CI銆佷簲鍦烘櫙銆佷袱椤瑰崌绾у強宸ヤ欢宸查獙锛屽悎骞朵负 main 8d17a47銆俶ain 鍚屾牱鍏ㄩ儴閫氳繃锛屽巻鍙?[v0.1.0](https://github.com/ywltby/tokenscope/releases/tag/v0.1.0) 涓?[v0.2.0](https://github.com/ywltby/tokenscope/releases/tag/v0.2.0) 宸插叕寮€锛涙柊寤鸿崏绋胯鍙栧欢杩熸浘闃绘柇涓婁紶锛岀‘璁ゆ棦鏈夎崏绋垮悗鍒嗛樁娈垫仮澶嶄簡鍚屼竴浜х墿銆傞槻澶嶅彂鐨?0.2.1 琛ヤ慨宸叉敼涓哄浐瀹氬垱寤哄搷搴?Release ID锛屽綋鍓嶉棬绂佷粛鎸夋柊 HEAD 鍜?[Release](https://github.com/ywltby/tokenscope/actions/workflows/release.yml)鍒ゅ畾锛涘叾浣欑郴缁熺瀛楀強 N10/N11/N13 涓嶅叧闂€?
+## 鐜板湪鎵ц浠€涔?
+- **2026-10-15 PR1 宸插疄鏂藉苟瀹屾垚鏈湴楠屾敹锛汸R2/PR3 浠嶆湭瀹炴柦**锛?  - **PR1 / patch**锛歔Workspace 鐩綍杩佺Щ涓庢彁浜ゆ鏌(active/2026-10-15-workspace-layout.md)锛學01鈥揥07銆傚垎鏀?`feat/workspace-layout` 浠?docs/source-discovery-plan 鏈€鏂版彁浜わ紙`94e5c52`锛屽惈 c16e023 涓庝笁浠借鍒掞級鍒涘缓锛屾寜 W01鈥揥07 閫愰」瀹炴柦锛岀増鏈凡閫掑鍒?0.3.2銆傛湰鍦颁氦浠橀棬妲?14 鏉″懡浠ら€愭潯 exit 0锛堟櫘閫氫笌 acceptance 涓ゅ workspace clippy/test銆佸墠绔?typecheck/format:check/test/build 涓庢祻瑙堝櫒 E2E銆佽剼鏈绾?197 椤广€佺増鏈彂甯冨绾︼級锛涢殧绂?checkout 鍐风紪璇戜袱妯″紡閫氳繃锛屼笖浠庢牴鐩綍涓?`src-tauri` 鐩綍鍙戣捣鏋勫缓閮藉彧鍐欐牴 target銆佷笉鏂板缓瀛?target/瀛愰攣锛涚敓浜?NSIS 鏋勫缓涓?`release_assets` 鏀堕泦銆侀獙鏀跺寘鏋勫缓涓庡師鐢?E2E 鍧囧湪鏈満瀹炶窇閫氳繃鈥斺€旈€愰」璇佹嵁瑙佽璁″垝绗?6 鑺傘€?*鏈垱寤?PR銆佹湭鍚堝苟 main**锛歐06.4 鐨勪簲椤瑰畨瑁呴獙鏀朵笌涓ら」鍥哄畾鏃х増鍗囩骇銆佷互鍙?ci/release/install-test/ui-e2e 鐨勮繙绋嬮棬绂佷粛寰?Actions 鎻愪緵锛涙棫 `src-tauri/target`锛?8.85 GiB锛屾棤杩涚▼鍗犵敤锛夋寜鐢ㄦ埛鍐冲畾鐧昏涓哄緟娓呯悊锛屾湭鍒犻櫎銆傜浜岃疆澶栭儴澶嶆牳鎻愬嚭鐨?5 椤瑰弽渚嬶紙`git commit --only` 璇诲埌閿欒 index銆乫ull 妯″紡璺宠繃閮ㄥ垎鏆傚瓨淇濇姢銆佹竻鍗曡窡韪繃婊よ繃瀹姐€佸墠绔獙鏀惰剼鏈湭鍏ヨ剼鏈鍒欍€佸垹闄よ寮曠敤鏂囦欢鏃犲憡璀︼級宸查€愰」澶嶇幇骞朵慨澶嶏紝琛?8 椤瑰洖褰掓祴璇曪紝璇﹁璇ヨ鍒掔 6.8 鑺傘€?  - **PR2 / minor**锛歔鐪熷疄鎵弿鍙嶉](active/2026-10-15-collection-status.md)锛孎01鈥揊05锛汸R1 鍚堝叆鍚庝粠鏈€鏂?main 寤?feat/collection-status锛岃鍙栧浘鏍囪嚦灏?1 绉掞紝鏌ヨ涓嶇瓑寰呭姩鐢汇€?  - **PR3 / minor**锛歔褰撳墠鐢ㄦ埛鏉ユ簮鐩綍涓庤拷鍔犺矾寰刔(active/2026-10-14-source-discovery-and-additional-paths.md)锛孲01鈥揝07锛汸R2 鍚堝叆鍚庝粠鏈€鏂?main 寤?feat/source-paths锛屽彧鍙戠幇褰撳墠鐢ㄦ埛榛樿鍜?CODEX_HOME / CLAUDE_CONFIG_DIR锛屽彇娑堥噸鏂板彂鐜版寜閽€?
+涓?PR 鍚勮嚜閫掑涓€娆＄増鏈€佸悇鑷獙璇佹渶缁?HEAD锛屼笉鍐嶇粺涓€浜や粯銆侾R1 宸插疄鐜帮紝杩佺Щ鏈熼棿鍐荤粨鍏朵粬 Rust 寮€鍙戠殑瑕佹眰闅忎箣杞负銆孭R1 鍚堝叆鍚庡厛 rebase 鏈€鏂?main 鍐嶇户缁€嶏紱鐙珛绯荤粺楠屾敹 todo 涓嶅彉銆?
+鎵ц鍏ュ彛宸茶ˉ榻愶細[PR1 绗?4鈥? 鑺俔(active/2026-10-15-workspace-layout.md#4-涓変唤璁″垝鍏卞悓鐨勬墽琛屼笌浜や粯绾︽潫)瑙勫畾涓変唤璁″垝鍏卞悓鐨勬搷浣滈『搴忋€佺姝簨椤广€佽瘉鎹牸寮忓拰鍥涚骇浜や粯闂ㄦ锛屽苟缁嗗寲杩佺Щ/娓呭崟/hook锛沎PR2 绗?6 鑺俔(active/2026-10-15-collection-status.md#6-鎵ц缁嗗垯涓庨€愰」楠屾敹闂ㄦ)缁欏嚭鐘舵€佹満銆佸墠绔鏃跺拰鍙嶄緥琛紱[PR3 绗?8 鑺俔(active/2026-10-14-source-discovery-and-additional-paths.md#8-鎵ц缁嗗垯绠楁硶杈圭晫涓庨獙鏀堕棬妲?缁欏嚭鏉ユ簮瑙ｆ瀽銆佹暣杞亶鍘嗗幓閲嶃€佷簨瀹炵煩闃靛拰鎬ц兘鍙栬瘉銆傝ˉ鍏呮墽琛岃鏄庝笉浠ｈ〃浠诲姟宸茬粡瀹炴柦锛汸R1 鐨勯€愰」鎵ц缁撴灉涓庢湭闂悎椤硅鍏剁 6 鑺傘€?
+鍘?active 鐨?25 浠借鍒掑叏閮ㄥ綊妗ｏ紱M1鈥揗11 閲嶆柊鏍稿鑷韩楠屾敹鏉′欢銆傚巻鍙茶鍒掑叡 **36 浠斤細8 浠藉凡瀹炵幇銆?6 浠介儴鍒嗗畬鎴愩€? 浠藉凡琚彇浠?*銆傞儴鍒嗗畬鎴愰€氬父鏄€滃疄鐜板凡瀹屾垚銆侀獙鏀舵湁灏鹃」鈥濓紱鐢ㄩ噺鍘嗗彶璁″垝浠嶆湁鍘熺敓鍙婄湡瀹炴€ц兘楠屾敹璐ｄ换銆傞櫎涓婅堪涓変唤鏂拌鍒掑锛宍active/` 淇濈暀涓婅堪鏁村悎璁″垝銆?026-10-13 鐨?UI 璋冩暣璁″垝涓嶽鎺т欢鏉愯川涓庢诞灞傚彲璇绘€ц鍒抅(active/2026-10-13-control-material.md)锛堢敤鎴峰凡纭锛氳竟鐣?鈮?3:1銆佸厠鍒跺彈鍏変笌鐒︾偣/閫変腑鏌斿厜銆佹搷浣滃瀷娴眰瀹炶壊锛涘凡瀹炴柦涓旇瑙夐獙鏀堕€氳繃锛沀I 鐙珛鍒嗘敮鍑嗗鍙戝竷锛屽緟 PR 闂ㄧ锛夛紝涓嶅啀鍒嗗埆杩介€愭棫璁″垝鐨勫熬椤广€?
+- **PR #4 宸插悎骞?*锛?cde2b33 鐨勬渶缁堜袱濂楁鏌ユ垚鍔燂紝main b1f8b635 鐨?CI/Release 涓庝簲涓畨瑁呭満鏅垚鍔熴€侫01鈥揂06銆丮01銆丯09 淇濇寔鍏抽棴銆?- **P2锛歂12 鐗堟湰涓庣湡瀹炴棫鍖呭崌绾?*锛屽巻鍙?0.1.0 涓庡姛鑳借疆娆?0.2.0 宸插彂甯冿紱鐗堟湰宸ュ叿銆佷笉鍙彉鍙戝竷鍜屾棩蹇椾繚鐣?鍒犻櫎涓ゅ満鏅崌绾у凡瀹炶窇閫氳繃銆傚綋鍓?0.2.1 淇鏂板缓鑽夌韬唤璇诲彇锛屼粛闇€鑷繁鐨?PR/main 鍙戝竷闂ㄧ銆?- **P2锛歂10鈥揘11**锛屽綋鍓嶉殣绉佸己鍙栬瘉鍜屽師鐢熺粺涓€楠屾敹锛汵01鈥揘09 涓嶉噸澶嶅疄鏂姐€?- **P3锛歂12 鍏朵綑绯荤粺楠屾敹銆丯13**锛岄殢瀹為檯鍙戝竷鍋?D5/绯荤粺绛惧瓧锛屾纭€ч棴鍚堝悗澶嶆祴鎬ц兘銆?
+鎸夌敤鎴疯姹傝ˉ榻愮殑 [M05/M06 瀹夎楠屾敹淇璁捐涓庡疄鏂芥楠(active/2026-10-11-consolidated-remaining-work.md#n12-install-design)宸插畬鏁磋惤鍦帮細閫愯韩浠?JSON 浜嬪疄銆佺敓鎴愬櫒濂戠害銆佸疄闄呭惎鍔ㄣ€佹棩蹇楄矾鐢便€丳S7 姝ｅ弽渚嬪強鍓嶇疆闂ㄧ鍧囧凡楠岃瘉锛宍a64d340` 鐨?A01鈥揂06 鍜屽悗缁?Actions 鏆撮湶鐨勭紪鐮?璋冪敤/鐩綍/娲诲姩鏃ュ織璇诲彇缂哄彛鍧囬棴鍚堛€俧a911dd 鐨?CI銆佺湡瀹炰簲鍦烘櫙鍜屽伐浠跺凡楠岋紝涓嶅啀灏嗗繀闇€瀹夎瀹炶窇鍒椾负鏈畬鎴愩€?
+淇濈暀 13 涓矗浠荤紪鍙凤紱褰撳墠涓?**9 椤瑰畬鎴愩€? 椤归儴鍒嗗畬鎴愩€? 椤规湰杞獙鏀舵湭鎵ц**锛屽叡 4 椤瑰緟鍔炪€侼01鈥揘09 宸插畬鎴愶紝N12 蹇呴渶瀹夎銆佺増鏈強鐪熷疄鍗囩骇宸叉湁瀹炶窇璇佹嵁锛涘綋鍓嶅彂甯冭ˉ淇緟鏂伴棬绂侊紝鍏朵綑绯荤粺/鍙戝竷绛惧瓧浠嶅緟楠岋紱N10/N11/N13 淇濈暀鏈墽琛岀姸鎬併€傚巻鍙测€滃悎骞跺緟楠屸€濊褰曚笉鍐嶄唬琛?PR #4 褰撳墠鐘舵€併€?
+蹇呴』淇濇寔鐢ㄦ埛瀹氱锛氫竴涓?`~/.tokenscope/history.db`锛屽彧淇濆瓨绮剧畝 token/cwd 鍏冩暟鎹紱鍏ㄩ儴浠ｇ悊鏈夋晥鐢ㄩ噺绾冲叆锛屼笉鍋氫富瀛愬叧绯讳骇鍝侊紱婧愭棩蹇楀垹闄?鍋滅敤浠嶆煡寰楀埌宸蹭繚瀛樺巻鍙诧紱CCS 璁剧疆椤靛彧鎵嬪姩鍗曟瀵煎叆锛涘凡鏈変簨瀹炰笌瀵煎叆姹傚苟闆嗭紝閲嶅瀵煎叆涓嶅鍔犵敤閲忋€傝緝鏂板巻鍙插簱瑙勫垯浼樺厛浜庢棫鈥滄簮鏃ュ織鏄敮涓€浜嬪疄/sidechain 鎺掗櫎鈥濊鍒欍€?
+## 宸插畬鎴愯兘鍔涗笌璇佹嵁杈圭晫
 
-## 现在执行什么
-
-- **2026-10-15 PR1 已实施并完成本地验收；PR2/PR3 仍未实施**：
-  - **PR1 / patch**：[Workspace 目录迁移与提交检查](active/2026-10-15-workspace-layout.md)，W01–W07。分支 `feat/workspace-layout` 从 docs/source-discovery-plan 最新提交（`94e5c52`，含 c16e023 与三份计划）创建，按 W01–W07 逐项实施，版本已递增到 0.3.2。本地交付门槛 14 条命令逐条 exit 0（普通与 acceptance 两套 workspace clippy/test、前端 typecheck/format:check/test/build 与浏览器 E2E、脚本契约 197 项、版本发布契约）；隔离 checkout 冷编译两模式通过，且从根目录与 `src-tauri` 目录发起构建都只写根 target、不新建子 target/子锁；生产 NSIS 构建与 `release_assets` 收集、验收包构建与原生 E2E 均在本机实跑通过——逐项证据见该计划第 6 节。**未创建 PR、未合并 main**：W06.4 的五项安装验收与两项固定旧版升级、以及 ci/release/install-test/ui-e2e 的远程门禁仍待 Actions 提供；旧 `src-tauri/target`（38.85 GiB，无进程占用）按用户决定登记为待清理，未删除。第二轮外部复核提出的 5 项反例（`git commit --only` 读到错误 index、full 模式跳过部分暂存保护、清单跟踪过滤过宽、前端验收脚本未入脚本规则、删除被引用文件无告警）已逐项复现并修复，补 8 项回归测试，详见该计划第 6.8 节。
-  - **PR2 / minor**：[真实扫描反馈](active/2026-10-15-collection-status.md)，F01–F05；PR1 合入后从最新 main 建 feat/collection-status，读取图标至少 1 秒，查询不等待动画。
-  - **PR3 / minor**：[当前用户来源目录与追加路径](active/2026-10-14-source-discovery-and-additional-paths.md)，S01–S07；PR2 合入后从最新 main 建 feat/source-paths，只发现当前用户默认和 CODEX_HOME / CLAUDE_CONFIG_DIR，取消重新发现按钮。
-
-三 PR 各自递增一次版本、各自验证最终 HEAD，不再统一交付。PR1 已实现，迁移期间冻结其他 Rust 开发的要求随之转为「PR1 合入后先 rebase 最新 main 再继续」；独立系统验收 todo 不变。
-
-执行入口已补齐：[PR1 第 4–5 节](active/2026-10-15-workspace-layout.md#4-三份计划共同的执行与交付约束)规定三份计划共同的操作顺序、禁止事项、证据格式和四级交付门槛，并细化迁移/清单/hook；[PR2 第 6 节](active/2026-10-15-collection-status.md#6-执行细则与逐项验收门槛)给出状态机、前端计时和反例表；[PR3 第 8 节](active/2026-10-14-source-discovery-and-additional-paths.md#8-执行细则算法边界与验收门槛)给出来源解析、整轮遍历去重、事实矩阵和性能取证。补充执行说明不代表任务已经实施；PR1 的逐项执行结果与未闭合项见其第 6 节。
-
-原 active 的 25 份计划全部归档；M1–M11 重新核对自身验收条件。历史计划共 **36 份：8 份已实现、26 份部分完成、2 份已被取代**。部分完成通常是“实现已完成、验收有尾项”；用量历史计划仍有原生及真实性能验收责任。除上述三份新计划外，`active/` 保留上述整合计划、2026-10-13 的 UI 调整计划与[控件材质与浮层可读性计划](active/2026-10-13-control-material.md)（用户已确认：边界 ≥ 3:1、克制受光与焦点/选中柔光、操作型浮层实色；已实施且视觉验收通过；UI 独立分支准备发布，待 PR 门禁），不再分别追逐旧计划的尾项。
-
-- **PR #4 已合并**：4cde2b33 的最终两套检查成功，main b1f8b635 的 CI/Release 与五个安装场景成功。A01–A06、M01、N09 保持关闭。
-- **P2：N12 版本与真实旧包升级**，历史 0.1.0 与功能轮次 0.2.0 已发布；版本工具、不可变发布和日志保留/删除两场景升级已实跑通过。当前 0.2.1 修复新建草稿身份读取，仍需自己的 PR/main 发布门禁。
-- **P2：N10–N11**，当前隐私强取证和原生统一验收；N01–N09 不重复实施。
-- **P3：N12 其余系统验收、N13**，随实际发布做 D5/系统签字，正确性闭合后复测性能。
-
-按用户要求补齐的 [M05/M06 安装验收修复设计与实施步骤](active/2026-10-11-consolidated-remaining-work.md#n12-install-design)已完整落地：逐身份 JSON 事实、生成器契约、实际启动、日志路由、PS7 正反例及前置门禁均已验证，`a64d340` 的 A01–A06 和后续 Actions 暴露的编码/调用/目录/活动日志读取缺口均闭合。fa911dd 的 CI、真实五场景和工件已验，不再将必需安装实跑列为未完成。
-
-保留 13 个责任编号；当前为 **9 项完成、1 项部分完成、3 项本轮验收未执行**，共 4 项待办。N01–N09 已完成，N12 必需安装、版本及真实升级已有实跑证据；当前发布补修待新门禁，其余系统/发布签字仍待验；N10/N11/N13 保留未执行状态。历史“合并待验”记录不再代表 PR #4 当前状态。
-
-必须保持用户定稿：一个 `~/.tokenscope/history.db`，只保存精简 token/cwd 元数据；全部代理有效用量纳入，不做主子关系产品；源日志删除/停用仍查得到已保存历史；CCS 设置页只手动单次导入；已有事实与导入求并集，重复导入不增加用量。较新历史库规则优先于旧“源日志是唯一事实/sidechain 排除”规则。
-
-## 已完成能力与证据边界
-
-| 范围 | 当前结论 |
+| 鑼冨洿 | 褰撳墠缁撹 |
 | --- | --- |
-| Claude/Codex 解析、四桶归一化、时间/项目/模型聚合、冻结查询与分页 | 主体与多轮修复已经实现；历史并集/升级/规模边界见 N01–N07 |
-| GUI、设置 TOML/事务、关闭三态、导航/日期控件/费用浮层、窗口/托盘/自启接线 | 既有功能实现完成；自身未闭合的原生操作/系统验收合并至 N10–N12 |
-| 无内置价、三来源独立候选、完整优先/最高请求费用、分段峰谷/缓存三态 | 已实现；跨应用、有价分页、完整候选文案及普通价格隔离通过，N08 完成；当前原生验收由 N11 承接 |
-| 项目路径统一、子目录归根/越界切换、模型等价/可信名称 | 核心与多轮边界修复已经实现；跨应用和原始模型分页已验证，当前原生链见 N11 |
-| 隐私同意闸门 | P01–P05 已实现；P06 强取证与当前完整矩阵仍未闭合，不能写成全部通过 |
-| 历史库与 CCS 手动预览/确认、全部代理、Codex 归档发现 | 旧污染纠错、非法迁移、容量、百万 Rust 峰值、退出、证据登记、价格隔离及普通/acceptance 门禁已验证；原生/性能仍有责任，H01–H08 不能全部关闭 |
-| 既有浏览器/原生 QA | 历史 60 场景/17 契约/243 断言、CSP、真实 TTL、无强制当前显示器 150% 有产物；不证明最新功能/安装包全验 |
-| CI / main 预发布 | fa911dd 的 PR 两套检查和真实五个安装场景已验；已有 main 预发布/校验和/attestation 是历史证据。固定旧包、正式 v* 与当前发布签字仍待验 |
+| Claude/Codex 瑙ｆ瀽銆佸洓妗跺綊涓€鍖栥€佹椂闂?椤圭洰/妯″瀷鑱氬悎銆佸喕缁撴煡璇笌鍒嗛〉 | 涓讳綋涓庡杞慨澶嶅凡缁忓疄鐜帮紱鍘嗗彶骞堕泦/鍗囩骇/瑙勬ā杈圭晫瑙?N01鈥揘07 |
+| GUI銆佽缃?TOML/浜嬪姟銆佸叧闂笁鎬併€佸鑸?鏃ユ湡鎺т欢/璐圭敤娴眰銆佺獥鍙?鎵樼洏/鑷惎鎺ョ嚎 | 鏃㈡湁鍔熻兘瀹炵幇瀹屾垚锛涜嚜韬湭闂悎鐨勫師鐢熸搷浣?绯荤粺楠屾敹鍚堝苟鑷?N10鈥揘12 |
+| 鏃犲唴缃环銆佷笁鏉ユ簮鐙珛鍊欓€夈€佸畬鏁翠紭鍏?鏈€楂樿姹傝垂鐢ㄣ€佸垎娈靛嘲璋?缂撳瓨涓夋€?| 宸插疄鐜帮紱璺ㄥ簲鐢ㄣ€佹湁浠峰垎椤点€佸畬鏁村€欓€夋枃妗堝強鏅€氫环鏍奸殧绂婚€氳繃锛孨08 瀹屾垚锛涘綋鍓嶅師鐢熼獙鏀剁敱 N11 鎵挎帴 |
+| 椤圭洰璺緞缁熶竴銆佸瓙鐩綍褰掓牴/瓒婄晫鍒囨崲銆佹ā鍨嬬瓑浠?鍙俊鍚嶇О | 鏍稿績涓庡杞竟鐣屼慨澶嶅凡缁忓疄鐜帮紱璺ㄥ簲鐢ㄥ拰鍘熷妯″瀷鍒嗛〉宸查獙璇侊紝褰撳墠鍘熺敓閾捐 N11 |
+| 闅愮鍚屾剰闂搁棬 | P01鈥揚05 宸插疄鐜帮紱P06 寮哄彇璇佷笌褰撳墠瀹屾暣鐭╅樀浠嶆湭闂悎锛屼笉鑳藉啓鎴愬叏閮ㄩ€氳繃 |
+| 鍘嗗彶搴撲笌 CCS 鎵嬪姩棰勮/纭銆佸叏閮ㄤ唬鐞嗐€丆odex 褰掓。鍙戠幇 | 鏃ф薄鏌撶籂閿欍€侀潪娉曡縼绉汇€佸閲忋€佺櫨涓?Rust 宄板€笺€侀€€鍑恒€佽瘉鎹櫥璁般€佷环鏍奸殧绂诲強鏅€?acceptance 闂ㄧ宸查獙璇侊紱鍘熺敓/鎬ц兘浠嶆湁璐ｄ换锛孒01鈥揌08 涓嶈兘鍏ㄩ儴鍏抽棴 |
+| 鏃㈡湁娴忚鍣?鍘熺敓 QA | 鍘嗗彶 60 鍦烘櫙/17 濂戠害/243 鏂█銆丆SP銆佺湡瀹?TTL銆佹棤寮哄埗褰撳墠鏄剧ず鍣?150% 鏈変骇鐗╋紱涓嶈瘉鏄庢渶鏂板姛鑳?瀹夎鍖呭叏楠?|
+| CI / main 棰勫彂甯?| fa911dd 鐨?PR 涓ゅ妫€鏌ュ拰鐪熷疄浜斾釜瀹夎鍦烘櫙宸查獙锛涘凡鏈?main 棰勫彂甯?鏍￠獙鍜?attestation 鏄巻鍙茶瘉鎹€傚浐瀹氭棫鍖呫€佹寮?v* 涓庡綋鍓嶅彂甯冪瀛椾粛寰呴獙 |
 
-`a58684c` 普通与 acceptance 完整门禁保留为时点基线：普通根库 **456 通过/10 忽略**、壳 **42 通过**、前端 **361 通过**；acceptance 根库 **456 通过/10 忽略**、壳 **47 通过**。双 manifest fmt、普通/acceptance Clippy（`-D warnings`）、前端 typecheck/format:check/build 和发布元数据 **7 项**通过，Cargo 均带 `--locked`，详见[M01 修复复核](../reviews/2026-10-11-main-merge-readiness.md#m01-closed)。随后安装提交未改产品源码。该轮实际迁移 **8 通过**、native_acceptance **3 通过/2 忽略**、review_regressions **29 通过**、metadata **7 通过**；未重复全套。main 可快进；安装接线不能代替验收实跑。门禁终态（双审计循环收敛，`6fab12f`）：根库 **461 + acceptance**、壳库 **45**、前端 **364**、python **36**、pwsh 契约 **22** 全绿，此前数字保留为时点基线。本批索引随 A01–A06 修复入库，当时的“验证失败例外”已消失。
+`a58684c` 鏅€氫笌 acceptance 瀹屾暣闂ㄧ淇濈暀涓烘椂鐐瑰熀绾匡細鏅€氭牴搴?**456 閫氳繃/10 蹇界暐**銆佸３ **42 閫氳繃**銆佸墠绔?**361 閫氳繃**锛沘cceptance 鏍瑰簱 **456 閫氳繃/10 蹇界暐**銆佸３ **47 閫氳繃**銆傚弻 manifest fmt銆佹櫘閫?acceptance Clippy锛坄-D warnings`锛夈€佸墠绔?typecheck/format:check/build 鍜屽彂甯冨厓鏁版嵁 **7 椤?*閫氳繃锛孋argo 鍧囧甫 `--locked`锛岃瑙乕M01 淇澶嶆牳](../reviews/2026-10-11-main-merge-readiness.md#m01-closed)銆傞殢鍚庡畨瑁呮彁浜ゆ湭鏀逛骇鍝佹簮鐮併€傝杞疄闄呰縼绉?**8 閫氳繃**銆乶ative_acceptance **3 閫氳繃/2 蹇界暐**銆乺eview_regressions **29 閫氳繃**銆乵etadata **7 閫氳繃**锛涙湭閲嶅鍏ㄥ銆俶ain 鍙揩杩涳紱瀹夎鎺ョ嚎涓嶈兘浠ｆ浛楠屾敹瀹炶窇銆傞棬绂佺粓鎬侊紙鍙屽璁″惊鐜敹鏁涳紝`6fab12f`锛夛細鏍瑰簱 **461 + acceptance**銆佸３搴?**45**銆佸墠绔?**364**銆乸ython **36**銆乸wsh 濂戠害 **22** 鍏ㄧ豢锛屾鍓嶆暟瀛椾繚鐣欎负鏃剁偣鍩虹嚎銆傛湰鎵圭储寮曢殢 A01鈥揂06 淇鍏ュ簱锛屽綋鏃剁殑鈥滈獙璇佸け璐ヤ緥澶栤€濆凡娑堝け銆?
+鏈€鏂扮嫭绔嬫牳楠岋紙2026-10-12锛夛細鏅€氫笌 acceptance 鏍瑰簱鍚?**462 閫氳繃/10 蹇界暐**锛屽３ **46/51**銆佸墠绔?**364**銆丳ython **36**銆丳S7 **22** 鍜屽叏閮ㄦ牸寮?Clippy/typecheck/build 閫氳繃锛涘疄闄呭畨瑁呯紪鎺掔殑浠撳鎺㈤拡閫氳繃褰撳墠鏃ュ織/鍗曞疄渚?鍏抽棴鍓嶅悗浜嬪疄/璇佹嵁/鐜鎭㈠銆傚閮ㄥ惎鍔ㄥ拰鍏抽棴琚浛鎹紝鏈疄璺?NSIS銆侫01鈥揂06 宸茬嫭绔嬬‘璁ゅ叧闂紱231f667 鍙婂悗缁粎鏂囨。 e31d1b6 鍧囨棤 PR/Actions 缁撴灉锛宮ain 浠嶇鍏堛€備唬鐮佷笌鏈湴闂ㄧ灏辩华锛屼絾姝ｅ紡鍚堝苟椤诲綋鍓?PR 鐨?CI/gate 鍜?Install test/install-test 缁跨伅銆侼12 淇濇寔閮ㄥ垎瀹屾垚锛涗竴鏉?P3 璁剧疆椤靛唴閮ㄥ璁℃枃妗堝師褰?N11 娓呯悊锛?026-10-13 璧锋敼鐢?UI 璋冩暣璁″垝 U05 鎵挎媴锛屼笉鎴愪负鏂板悎骞堕樆鏂€傝瑙乕鏈€鏂板鏍竇(../reviews/2026-10-11-main-merge-readiness.md#current-merge-readiness)銆?
+## 鍘?active 璁″垝锛氶€愪唤褰掓。
 
-最新独立核验（2026-10-12）：普通与 acceptance 根库各 **462 通过/10 忽略**，壳 **46/51**、前端 **364**、Python **36**、PS7 **22** 和全部格式/Clippy/typecheck/build 通过；实际安装编排的仓外探针通过当前日志/单实例/关闭前后事实/证据/环境恢复。外部启动和关闭被替换，未实跑 NSIS。A01–A06 已独立确认关闭；231f667 及后续仅文档 e31d1b6 均无 PR/Actions 结果，main 仍祖先。代码与本地门禁就绪，但正式合并须当前 PR 的 CI/gate 和 Install test/install-test 绿灯。N12 保持部分完成；一条 P3 设置页内部审计文案原归 N11 清理，2026-10-13 起改由 UI 调整计划 U05 承担，不成为新合并阻断。详见[最新复核](../reviews/2026-10-11-main-merge-readiness.md#current-merge-readiness)。
-
-## 原 active 计划：逐份归档
-
-| 历史计划 | 状态 | 当前剩余责任 |
+| 鍘嗗彶璁″垝 | 鐘舵€?| 褰撳墠鍓╀綑璐ｄ换 |
 | --- | --- | --- |
-| [定价来源策略](archive/partial/2026-10-05-pricing-source-policy.md) | 部分完成 | N11；N08/N09 已完成 |
-| [产品审查与路线图](archive/partial/2026-10-05-product-review-and-roadmap.md) | 部分完成 | N12、N13 |
-| [发布阻断问题修复](archive/partial/2026-10-05-release-blockers-remediation.md) | 部分完成 | N12；N09 已完成 |
-| [Apple 视觉刷新剩余任务](archive/partial/2026-10-06-apple-refresh-remaining-tasks.md) | 部分完成 | N11、N12 |
-| [Apple 视觉刷新早期方案](archive/superseded/2026-10-06-apple-visual-refresh.md) | 已被取代 | N11、N12 |
-| [缓存读取价格语义](archive/partial/2026-10-06-cache-read-pricing-resolution.md) | 部分完成 | N11 |
-| [关闭确认与设置文件](archive/implemented/2026-10-06-close-confirm-and-settings-file.md) | 已实现 | 无独立待办 |
-| [设计系统实施](archive/partial/2026-10-06-design-system-implementation.md) | 部分完成 | N11、N12 |
-| [设计系统视觉差异基线](archive/superseded/2026-10-06-design-system-visual-gap.md) | 已被取代 | N12 |
-| [设计系统视觉 QA 历史记录](archive/partial/2026-10-06-design-system-visual-qa.md) | 部分完成 | N11、N12 |
-| [实现后审计修复](archive/partial/2026-10-06-post-implementation-audit-remediation.md) | 部分完成 | N12 |
-| [审查发现问题修复](archive/partial/2026-10-06-review-findings-remediation.md) | 部分完成 | N12；N09 已完成 |
-| [分段计价与请求费用明细](archive/partial/2026-10-06-tiered-pricing-and-request-breakdown.md) | 部分完成 | N11、N12；N08 已完成 |
-| [全计划审计修复 R01–R10](archive/implemented/2026-10-07-all-plans-audit-remediation.md) | 已实现 | 无独立待办 |
-| [修复后复核 F01–F08](archive/implemented/2026-10-07-post-remediation-recheck-fixes.md) | 已实现 | 无独立待办 |
-| [UI/UX 与统计基础修复](archive/partial/2026-10-07-ui-ux-review-remediation.md) | 部分完成 | N10、N11、N12 |
-| [原生复核 QA 记录](archive/partial/2026-10-08-native-recheck-qa.md) | 部分完成 | N10、N11、N12 |
-| [RC01–RC11 复核修复](archive/partial/2026-10-08-recheck-remediation.md) | 部分完成 | N10、N11、N12 |
-| [AP01–AP09 全计划终态复核](archive/partial/2026-10-09-all-plans-final-recheck.md) | 部分完成 | N10、N11、N12 |
-| [AP08 补齐验收记录](archive/partial/2026-10-09-ap08-completion-qa.md) | 部分完成 | N10、N11、N12 |
-| [CI 与发布自动化](archive/implemented/2026-10-09-ci-release-automation.md) | 已实现 | N12 |
-| [首次启动隐私同意](archive/partial/2026-10-09-first-launch-privacy-consent.md) | 部分完成 | N10、N12 |
-| [跨工具项目路径统一](archive/partial/2026-10-09-project-path-unification.md) | 部分完成 | N11 |
-| [模型名称等价分组与计价](archive/partial/2026-10-10-model-pricing-name-equivalence.md) | 部分完成 | N11；N08 已完成 |
-| [用量历史库与 CCS 手动导入](archive/partial/2026-10-10-usage-history-and-ccs-import.md) | 部分完成 | N11、N13；N01–N09 已完成 |
+| [瀹氫环鏉ユ簮绛栫暐](archive/partial/2026-10-05-pricing-source-policy.md) | 閮ㄥ垎瀹屾垚 | N11锛汵08/N09 宸插畬鎴?|
+| [浜у搧瀹℃煡涓庤矾绾垮浘](archive/partial/2026-10-05-product-review-and-roadmap.md) | 閮ㄥ垎瀹屾垚 | N12銆丯13 |
+| [鍙戝竷闃绘柇闂淇](archive/partial/2026-10-05-release-blockers-remediation.md) | 閮ㄥ垎瀹屾垚 | N12锛汵09 宸插畬鎴?|
+| [Apple 瑙嗚鍒锋柊鍓╀綑浠诲姟](archive/partial/2026-10-06-apple-refresh-remaining-tasks.md) | 閮ㄥ垎瀹屾垚 | N11銆丯12 |
+| [Apple 瑙嗚鍒锋柊鏃╂湡鏂规](archive/superseded/2026-10-06-apple-visual-refresh.md) | 宸茶鍙栦唬 | N11銆丯12 |
+| [缂撳瓨璇诲彇浠锋牸璇箟](archive/partial/2026-10-06-cache-read-pricing-resolution.md) | 閮ㄥ垎瀹屾垚 | N11 |
+| [鍏抽棴纭涓庤缃枃浠禲(archive/implemented/2026-10-06-close-confirm-and-settings-file.md) | 宸插疄鐜?| 鏃犵嫭绔嬪緟鍔?|
+| [璁捐绯荤粺瀹炴柦](archive/partial/2026-10-06-design-system-implementation.md) | 閮ㄥ垎瀹屾垚 | N11銆丯12 |
+| [璁捐绯荤粺瑙嗚宸紓鍩虹嚎](archive/superseded/2026-10-06-design-system-visual-gap.md) | 宸茶鍙栦唬 | N12 |
+| [璁捐绯荤粺瑙嗚 QA 鍘嗗彶璁板綍](archive/partial/2026-10-06-design-system-visual-qa.md) | 閮ㄥ垎瀹屾垚 | N11銆丯12 |
+| [瀹炵幇鍚庡璁′慨澶峕(archive/partial/2026-10-06-post-implementation-audit-remediation.md) | 閮ㄥ垎瀹屾垚 | N12 |
+| [瀹℃煡鍙戠幇闂淇](archive/partial/2026-10-06-review-findings-remediation.md) | 閮ㄥ垎瀹屾垚 | N12锛汵09 宸插畬鎴?|
+| [鍒嗘璁′环涓庤姹傝垂鐢ㄦ槑缁哴(archive/partial/2026-10-06-tiered-pricing-and-request-breakdown.md) | 閮ㄥ垎瀹屾垚 | N11銆丯12锛汵08 宸插畬鎴?|
+| [鍏ㄨ鍒掑璁′慨澶?R01鈥揜10](archive/implemented/2026-10-07-all-plans-audit-remediation.md) | 宸插疄鐜?| 鏃犵嫭绔嬪緟鍔?|
+| [淇鍚庡鏍?F01鈥揊08](archive/implemented/2026-10-07-post-remediation-recheck-fixes.md) | 宸插疄鐜?| 鏃犵嫭绔嬪緟鍔?|
+| [UI/UX 涓庣粺璁″熀纭€淇](archive/partial/2026-10-07-ui-ux-review-remediation.md) | 閮ㄥ垎瀹屾垚 | N10銆丯11銆丯12 |
+| [鍘熺敓澶嶆牳 QA 璁板綍](archive/partial/2026-10-08-native-recheck-qa.md) | 閮ㄥ垎瀹屾垚 | N10銆丯11銆丯12 |
+| [RC01鈥揜C11 澶嶆牳淇](archive/partial/2026-10-08-recheck-remediation.md) | 閮ㄥ垎瀹屾垚 | N10銆丯11銆丯12 |
+| [AP01鈥揂P09 鍏ㄨ鍒掔粓鎬佸鏍竇(archive/partial/2026-10-09-all-plans-final-recheck.md) | 閮ㄥ垎瀹屾垚 | N10銆丯11銆丯12 |
+| [AP08 琛ラ綈楠屾敹璁板綍](archive/partial/2026-10-09-ap08-completion-qa.md) | 閮ㄥ垎瀹屾垚 | N10銆丯11銆丯12 |
+| [CI 涓庡彂甯冭嚜鍔ㄥ寲](archive/implemented/2026-10-09-ci-release-automation.md) | 宸插疄鐜?| N12 |
+| [棣栨鍚姩闅愮鍚屾剰](archive/partial/2026-10-09-first-launch-privacy-consent.md) | 閮ㄥ垎瀹屾垚 | N10銆丯12 |
+| [璺ㄥ伐鍏烽」鐩矾寰勭粺涓€](archive/partial/2026-10-09-project-path-unification.md) | 閮ㄥ垎瀹屾垚 | N11 |
+| [妯″瀷鍚嶇О绛変环鍒嗙粍涓庤浠穄(archive/partial/2026-10-10-model-pricing-name-equivalence.md) | 閮ㄥ垎瀹屾垚 | N11锛汵08 宸插畬鎴?|
+| [鐢ㄩ噺鍘嗗彶搴撲笌 CCS 鎵嬪姩瀵煎叆](archive/partial/2026-10-10-usage-history-and-ccs-import.md) | 閮ㄥ垎瀹屾垚 | N11銆丯13锛汵01鈥揘09 宸插畬鎴?|
 
-## M1–M11：自身验收复核
-
-| 里程碑 | 状态 | 当前剩余责任 |
+## M1鈥揗11锛氳嚜韬獙鏀跺鏍?
+| 閲岀▼纰?| 鐘舵€?| 褰撳墠鍓╀綑璐ｄ换 |
 | --- | --- | --- |
-| [M1 Claude Code 适配器](archive/implemented/2026-10-03-m1-claude-code-adapter.md) | 已实现 | 无独立待办 |
-| [M2 Codex 适配器与计价](archive/implemented/2026-10-03-m2-codex-adapter-pricing.md) | 已实现 | 无独立待办 |
-| [M3 Tauri + Vue GUI](archive/partial/2026-10-03-m3-tauri-vue-gui.md) | 部分完成 | N12 |
-| [M4 缓存、外置价格与设置](archive/partial/2026-10-03-m4-cache-pricing-settings.md) | 部分完成 | N11 |
-| [M5 OpenRouter 价格同步](archive/partial/2026-10-04-m5-openrouter-pricing-sync.md) | 部分完成 | N11 |
-| [M6 时区解析](archive/implemented/2026-10-04-m6-timezone-resolution.md) | 已实现 | N11 |
-| [M7 请求明细下钻](archive/partial/2026-10-04-m7-event-drilldown.md) | 部分完成 | N11 |
-| [M8 桌面体验](archive/partial/2026-10-04-m8-desktop-experience.md) | 部分完成 | N12 |
-| [M9 models.dev 价格主源](archive/partial/2026-10-04-m9-modelsdev-source.md) | 部分完成 | N11 |
-| [M10 日期区间](archive/implemented/2026-10-04-m10-date-range.md) | 已实现 | N11 |
-| [M11 价格索引与自动同步](archive/partial/2026-10-04-m11-pricing-cache-autosync.md) | 部分完成 | N10、N12、N13 |
+| [M1 Claude Code 閫傞厤鍣╙(archive/implemented/2026-10-03-m1-claude-code-adapter.md) | 宸插疄鐜?| 鏃犵嫭绔嬪緟鍔?|
+| [M2 Codex 閫傞厤鍣ㄤ笌璁′环](archive/implemented/2026-10-03-m2-codex-adapter-pricing.md) | 宸插疄鐜?| 鏃犵嫭绔嬪緟鍔?|
+| [M3 Tauri + Vue GUI](archive/partial/2026-10-03-m3-tauri-vue-gui.md) | 閮ㄥ垎瀹屾垚 | N12 |
+| [M4 缂撳瓨銆佸缃环鏍间笌璁剧疆](archive/partial/2026-10-03-m4-cache-pricing-settings.md) | 閮ㄥ垎瀹屾垚 | N11 |
+| [M5 OpenRouter 浠锋牸鍚屾](archive/partial/2026-10-04-m5-openrouter-pricing-sync.md) | 閮ㄥ垎瀹屾垚 | N11 |
+| [M6 鏃跺尯瑙ｆ瀽](archive/implemented/2026-10-04-m6-timezone-resolution.md) | 宸插疄鐜?| N11 |
+| [M7 璇锋眰鏄庣粏涓嬮捇](archive/partial/2026-10-04-m7-event-drilldown.md) | 閮ㄥ垎瀹屾垚 | N11 |
+| [M8 妗岄潰浣撻獙](archive/partial/2026-10-04-m8-desktop-experience.md) | 閮ㄥ垎瀹屾垚 | N12 |
+| [M9 models.dev 浠锋牸涓绘簮](archive/partial/2026-10-04-m9-modelsdev-source.md) | 閮ㄥ垎瀹屾垚 | N11 |
+| [M10 鏃ユ湡鍖洪棿](archive/implemented/2026-10-04-m10-date-range.md) | 宸插疄鐜?| N11 |
+| [M11 浠锋牸绱㈠紩涓庤嚜鍔ㄥ悓姝(archive/partial/2026-10-04-m11-pricing-cache-autosync.md) | 閮ㄥ垎瀹屾垚 | N10銆丯12銆丯13 |
 
-M1/M2/M6/M10 不因全产品 D5 未签字反向变成未实现。M3/M4/M5/M7/M8/M9/M11 的 partial 来自原计划自己的安装/操作/运行条件，不是泛泛要求每份计划重跑 D5；已合并成安装托盘、Settings 同步、下钻点击、窗口/单实例/自启、自动同步五组。
-
-## 归档规则与维护
-
-- [archive/implemented](archive/README.md)：原工程及自身验收已闭合，公共产品验收另记。
-- [archive/partial](archive/README.md)：实现或验收有未闭合项，旧记录保留，责任转入唯一新计划。
-- [archive/superseded](archive/README.md)：被较新用户需求/方案取代，不按旧设计重新实现。
-- [D5 清单](d5-acceptance-checklist.md) 是 N12 的发布附属清单，保留旧产物结果，不是另一份 active 计划。
-- 后续只更新新计划的任务与证据，并回填对应历史头部。不得把历史“待验/active/完成”直接当当前状态。
-
-其他工具适配器、自动更新、DuckDB、多设备 CCS 等没有本期实施排期；研究文档不自动变成开发任务。旧截图补造、旧 CLI/内置价、代理关系、项目拆库和自动 CCS 同步不再执行。
+M1/M2/M6/M10 涓嶅洜鍏ㄤ骇鍝?D5 鏈瀛楀弽鍚戝彉鎴愭湭瀹炵幇銆侻3/M4/M5/M7/M8/M9/M11 鐨?partial 鏉ヨ嚜鍘熻鍒掕嚜宸辩殑瀹夎/鎿嶄綔/杩愯鏉′欢锛屼笉鏄硾娉涜姹傛瘡浠借鍒掗噸璺?D5锛涘凡鍚堝苟鎴愬畨瑁呮墭鐩樸€丼ettings 鍚屾銆佷笅閽荤偣鍑汇€佺獥鍙?鍗曞疄渚?鑷惎銆佽嚜鍔ㄥ悓姝ヤ簲缁勩€?
+## 褰掓。瑙勫垯涓庣淮鎶?
+- [archive/implemented](archive/README.md)锛氬師宸ョ▼鍙婅嚜韬獙鏀跺凡闂悎锛屽叕鍏变骇鍝侀獙鏀跺彟璁般€?- [archive/partial](archive/README.md)锛氬疄鐜版垨楠屾敹鏈夋湭闂悎椤癸紝鏃ц褰曚繚鐣欙紝璐ｄ换杞叆鍞竴鏂拌鍒掋€?- [archive/superseded](archive/README.md)锛氳杈冩柊鐢ㄦ埛闇€姹?鏂规鍙栦唬锛屼笉鎸夋棫璁捐閲嶆柊瀹炵幇銆?- [D5 娓呭崟](d5-acceptance-checklist.md) 鏄?N12 鐨勫彂甯冮檮灞炴竻鍗曪紝淇濈暀鏃т骇鐗╃粨鏋滐紝涓嶆槸鍙︿竴浠?active 璁″垝銆?- 鍚庣画鍙洿鏂版柊璁″垝鐨勪换鍔′笌璇佹嵁锛屽苟鍥炲～瀵瑰簲鍘嗗彶澶撮儴銆備笉寰楁妸鍘嗗彶鈥滃緟楠?active/瀹屾垚鈥濈洿鎺ュ綋褰撳墠鐘舵€併€?
+鍏朵粬宸ュ叿閫傞厤鍣ㄣ€佽嚜鍔ㄦ洿鏂般€丏uckDB銆佸璁惧 CCS 绛夋病鏈夋湰鏈熷疄鏂芥帓鏈燂紱鐮旂┒鏂囨。涓嶈嚜鍔ㄥ彉鎴愬紑鍙戜换鍔°€傛棫鎴浘琛ラ€犮€佹棫 CLI/鍐呯疆浠枫€佷唬鐞嗗叧绯汇€侀」鐩媶搴撳拰鑷姩 CCS 鍚屾涓嶅啀鎵ц銆?

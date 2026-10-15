@@ -98,6 +98,17 @@ class ClassifyCase(unittest.TestCase):
         checks = self.checks([change("M", "crates/tokenscope-core/tests/fixtures/codex/rate-limit-only.jsonl")])
         self.assertEqual(checks, ["rust-core-acceptance", "rust-core-default"])
 
+    def test_registered_fixture_selects_workspace_modes_without_frontend(self):
+        # 清单已登记的 fixture 与未登记的运行时 fixture 走同一套规则。
+        checks = self.checks([change("M", "crates/tokenscope-core/tests/fixtures/cache/schema-v3.sql")])
+        self.assertEqual(checks, ["rust-core-acceptance", "rust-core-default"])
+
+    def test_fixture_renamed_into_docs_keeps_both_rules(self):
+        plan = self.plan([change("R", "docs/moved.md",
+                                 old_path="crates/tokenscope-core/tests/fixtures/x.jsonl")])
+        self.assertIn("rust-core-default", plan["checks"])
+        self.assertIn("docs", plan["checks"])
+
     def test_frontend_sources_and_public_assets_select_all_frontend_checks(self):
         for path in ("frontend/src/main.ts", "frontend/public/theme-boot.js",
                      "frontend/package.json", "frontend/pnpm-lock.yaml"):
@@ -227,6 +238,12 @@ class UnstagedGuardCase(unittest.TestCase):
                         unstaged=["Cargo.toml"], force_full=True)
         self.assertEqual(plan["mode"], "full")
         self.assertEqual(plan["blocked"], ["Cargo.toml"])
+
+    def test_forced_full_mode_also_blocks_unstaged_frontend_changes(self):
+        # 完整模式会跑前端检查，因此前端未暂存差异同样必须阻止。
+        plan = classify([change("M", "docs/notes.md")], manifest=MANIFEST,
+                        unstaged=["frontend/src/main.ts"], force_full=True)
+        self.assertEqual(plan["blocked"], ["frontend/src/main.ts"])
 
     def test_unrelated_unstaged_file_does_not_block_document_submission(self):
         plan = classify([change("M", "docs/notes.md")], manifest=MANIFEST,
@@ -450,6 +467,68 @@ class UserDataIsolationCase(unittest.TestCase):
                        "--root", str(self.root)]], cwd=self.root)
         self.assertEqual(status, 0)
         self.assertEqual(before, self.snapshot())
+
+
+class EndToEndOnlyCommitCase(unittest.TestCase):
+    """真实选择器 + 真实文档检查 + `git commit --only`：坏链接必须真的阻止提交。
+
+    与 HookWiringCase 的区别：这里不放替身，临时仓库里是仓库中受版本管理的
+    `pre_commit_checks.py` / `build_inputs.py` / `check_staged_docs.py` 本体，
+    因此验证的是「选中了检查」进而「检查确实执行并失败」。
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="tokenscope-e2e-only-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / "端到端 仓库"
+        (self.root / "scripts").mkdir(parents=True)
+        (self.root / "docs").mkdir()
+        for name in ("pre_commit_checks.py", "build_inputs.py", "check_staged_docs.py"):
+            shutil.copyfile(ROOT / "scripts" / name, self.root / "scripts" / name)
+        (self.root / "scripts" / "build-inputs.json").write_text(
+            json.dumps({"schema_version": 1, "generated": [], "manual": []}),
+            encoding="utf-8")
+        (self.root / "docs" / "ok.md").write_text("# 正常\n", encoding="utf-8")
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.name", "TokenScope fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        # 基线提交在挂上钩子之前完成，避免基线本身触发完整门禁。
+        self.assertEqual(self.git("add", "-A").returncode, 0)
+        self.assertEqual(self.git("commit", "-qm", "baseline").returncode, 0)
+        self.git("config", "core.hooksPath", str(ROOT / ".githooks"))
+
+    def git(self, *args):
+        environment = git_env()
+        return subprocess.run(["git", "-C", str(self.root), *args],
+                              capture_output=True, encoding="utf-8", errors="replace",
+                              env=environment)
+
+    def test_broken_link_in_only_commit_runs_the_checker_and_blocks(self):
+        target = self.root / "docs" / "tracked.md"
+        target.write_text("# 初始\n", encoding="utf-8")
+        self.assertEqual(self.git("add", "docs/tracked.md").returncode, 0)
+        self.assertEqual(self.git("commit", "-qm", "跟踪一个文档").returncode, 0)
+
+        # 工作区改坏但不 add：`--only` 会把工作区版本放进临时 index，
+        # 检查器必须读到它，否则会看到"没有暂存文件"而放行。
+        target.write_text("# 坏链接\n\n[缺失](nope.md)\n", encoding="utf-8")
+        result = self.git("commit", "--only", "docs/tracked.md", "-m", "应被阻止")
+        combined = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, combined)
+        self.assertIn("nope.md", combined, f"文档检查没有真正执行：{combined!r}")
+        self.assertEqual(len(self.git("log", "--oneline").stdout.strip().splitlines()), 2,
+                         "检查失败时不得产生提交")
+
+    def test_clean_change_in_only_commit_is_allowed(self):
+        target = self.root / "docs" / "tracked-ok.md"
+        target.write_text("# 初始\n", encoding="utf-8")
+        self.assertEqual(self.git("add", "docs/tracked-ok.md").returncode, 0)
+        self.assertEqual(self.git("commit", "-qm", "跟踪另一个文档").returncode, 0)
+
+        target.write_text("# 正常改动\n\n[正常](ok.md)\n", encoding="utf-8")
+        result = self.git("commit", "--only", "docs/tracked-ok.md", "-m", "应成功")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.git("log", "--oneline").stdout.strip().splitlines()), 3)
 
 
 if __name__ == "__main__":
