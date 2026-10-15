@@ -60,6 +60,10 @@ LEGACY_CORE_PREFIXES = ("src/", "tests/")
 SHELL_PREFIX = "src-tauri/src/"
 FIXTURE_PREFIXES = ("crates/tokenscope-core/tests/fixtures/", "tests/fixtures/")
 FRONTEND_PREFIXES = ("frontend/src/", "frontend/public/", "frontend/scripts/")
+# 浏览器验收脚本有本地等价契约（浏览器 E2E）；原生验收驱动需要真实原生环境与窗口
+# 动作，本地没有等价契约，按计划完整兜底；其余未登记的前端脚本同样兜底。
+BROWSER_ACCEPTANCE_SCRIPTS = ("frontend/scripts/check-",
+                              "frontend/scripts/run-ui-refresh-e2e.mjs")
 FRONTEND_FILES = ("frontend/package.json", "frontend/pnpm-lock.yaml",
                   "frontend/tsconfig.json", "frontend/vite.config.ts",
                   "frontend/env.d.ts", "frontend/index.html",
@@ -90,6 +94,7 @@ CHECK_COMMANDS = {
     "frontend-test": [["pnpm", "--dir", "frontend", "test"]],
     "frontend-build": [["pnpm", "--dir", "frontend", "build"]],
     "node-syntax": [["python", "-B", "scripts/check_node_syntax.py"]],
+    "browser-e2e": [["pnpm", "--dir", "frontend", "test:e2e"]],
     SCRIPTS_CHECK: [
         ["python", "-B", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_*.py"],
         ["pwsh", "-NoProfile", "-File", "scripts/check_powershell_syntax.ps1"],
@@ -105,13 +110,14 @@ CHECK_COMMANDS = {
 # 时执行，见 CHECK_COMMANDS）。
 FULL_CHECKS = ("rust-fmt", "rust-core-default", "rust-core-acceptance",
                "frontend-typecheck", "frontend-format", "frontend-test", "frontend-build",
-               "node-syntax", SCRIPTS_CHECK, DOC_CHECK)
+               "node-syntax", "browser-e2e", SCRIPTS_CHECK, DOC_CHECK)
 
-# 每个检查读取的作用域：未暂存差异落在这些前缀下会阻止提交。
-# Rust 检查还会读取共享配置与整个 src-tauri（壳的构建脚本、Tauri 配置、
-# capabilities 都参与编译），只写 src-tauri/src 会漏掉这些输入。
-RUST_INPUT_SCOPES = ("crates/", "src-tauri/", "Cargo.toml", "Cargo.lock")
+# Rust 检查（workspace 与壳）除源码外还会读取的共享配置与工具链文件。
+RUST_SHARED_INPUTS = ("crates/", "src-tauri/", "Cargo.toml", "Cargo.lock",
+                      "rustfmt.toml", "rust-toolchain.toml", ".cargo/")
+LOCAL_PACKAGES = ("tokenscope", "tokenscope-app")
 
+# 每个检查读取的固定范围：目录前缀以 "/" 结尾，其余为精确文件路径。
 CHECK_SCOPES = {
     "rust-fmt": ("crates/", "src-tauri/src/"),
     "rust-core-default": ("crates/", "src-tauri/src/"),
@@ -123,6 +129,7 @@ CHECK_SCOPES = {
     "frontend-test": ("frontend/",),
     "frontend-build": ("frontend/",),
     "node-syntax": ("frontend/scripts/",),
+    "browser-e2e": ("frontend/",),
     SCRIPTS_CHECK: ("scripts/",),
     DOC_CHECK: (),
 }
@@ -209,12 +216,29 @@ def classify(changes, *, manifest=None, unstaged=(), explain=False, force_full=F
         for path in filter(None, (change.get("path"), change.get("old_path"))):
             reasons = _classify_path(path, manifest, result)
             result["triggers"].setdefault(path, []).extend(reasons)
+        if str(change.get("status", ""))[:1] in ("D", "R"):
+            # 删除/改名会让引用它们的文档失效（引用方本身可能没有被修改），
+            # 因此即使目标和引用方都不是文档，也要跑文档检查。
+            result["checks"].add(DOC_CHECK)
+            result["triggers"].setdefault(change["path"], []).append("deleted-or-renamed")
     if result["mode"] == MODE_FULL:
         result["checks"] = set(FULL_CHECKS)
     checks = sorted(result["checks"])
     result["checks"] = checks
     result["blocked"] = _blocked_inputs(checks, unstaged, manifest)
     return result
+
+
+def _classify_frontend_script(path, result):
+    """前端脚本按消费者选择契约；没有本地等价契约的按计划完整兜底。"""
+    if path.startswith(BROWSER_ACCEPTANCE_SCRIPTS):
+        result["checks"].update({"frontend-typecheck", "frontend-format", "frontend-test",
+                                 "frontend-build", "node-syntax", "browser-e2e"})
+        return ["frontend-script-browser"]
+    result["mode"] = MODE_FULL
+    result["notes"].append(
+        f"{path}：原生验收驱动/未登记脚本没有本地等价契约，完整模式兜底")
+    return ["frontend-script-no-contract"]
 
 
 def _classify_path(path, manifest, result):
@@ -256,10 +280,7 @@ def _classify_path(path, manifest, result):
         result["notes"].append(f"{path}：核心库内未登记非 Rust 输入，完整模式兜底")
         return ["unregistered-core-input"]
     if path.startswith("frontend/scripts/"):
-        # E2E 编排脚本属于脚本规则：前端四项并不校验它们能否运行。
-        result["checks"].update({"frontend-typecheck", "frontend-format",
-                                 "frontend-test", "frontend-build", "node-syntax"})
-        return ["frontend-scripts"]
+        return _classify_frontend_script(path, result)
     if _matches(path, FRONTEND_PREFIXES) or path in FRONTEND_FILES:
         result["checks"].update({"frontend-typecheck", "frontend-format",
                                  "frontend-test", "frontend-build"})
@@ -283,34 +304,53 @@ def _classify_path(path, manifest, result):
     return ["unrecognised"]
 
 
-def _in_scope(path, scopes):
-    for scope in scopes:
-        if scope.endswith("/"):
-            if path.startswith(scope):
-                return True
-        elif path == scope:
-            return True
-    return False
+def _manifest_inputs(manifest, packages):
+    """清单中由这些 package 消费的输入，保留 file/directory 类型。"""
+    if not manifest:
+        return []
+    inputs = []
+    for layer in ("generated", "manual"):
+        for record in manifest.get(layer, []):
+            if any(consumer["package"] in packages for consumer in record["consumers"]):
+                inputs.append((record["path"], record["kind"]))
+    return inputs
+
+
+def _check_scopes(checks, manifest):
+    """被选检查会读取的输入范围：目录前缀、精确文件或 (路径, 类型)。"""
+    scopes = []
+    for check in checks:
+        scopes.extend(CHECK_SCOPES.get(check, ()))
+        if check.startswith("rust-"):
+            # Rust 检查会编译两个本地 package，因此共享配置、工具链文件与清单登记的
+            # 编译输入都算它的输入；文档检查只读 index，不受这些改动影响。
+            scopes.extend(RUST_SHARED_INPUTS)
+            scopes.extend(_manifest_inputs(manifest, LOCAL_PACKAGES))
+    return scopes
+
+
+def _in_scope(path, scope):
+    if isinstance(scope, tuple):
+        target, kind = scope
+        if kind == "directory":
+            return path == target or path.startswith(target + "/")
+        return path == target
+    if scope.endswith("/"):
+        return path.startswith(scope)
+    return path == scope
 
 
 def _blocked_inputs(checks, unstaged, manifest=None):
     """被选检查会读取、却存在未暂存差异的受版本管理输入。
 
-    范围包含共享配置与清单登记的编译输入：它们同样参与实际构建，若工作区版本
-    与暂存版本不同，检查结果就不能代表将要提交的内容。
+    范围按实际选中的检查及其消费方计算：Rust 检查包含共享配置、工具链文件与清单
+    登记的编译输入（目录按子树匹配）；文档检查只读 index，因此纯文档提交不会被
+    无关的编译输入改动阻止。
     """
-    scopes = set()
-    for check in checks:
-        scopes.update(CHECK_SCOPES.get(check, ()))
-        if check.startswith("rust-"):
-            scopes.update(RUST_INPUT_SCOPES)
-    if manifest:
-        for layer in ("generated", "manual"):
-            for record in manifest.get(layer, []):
-                scopes.add(record["path"])
+    scopes = _check_scopes(checks, manifest)
     if not scopes:
         return []
-    blocked = {path for path in unstaged or () if _in_scope(path, scopes)}
+    blocked = {path for path in unstaged or () if any(_in_scope(path, s) for s in scopes)}
     return sorted(blocked)
 
 

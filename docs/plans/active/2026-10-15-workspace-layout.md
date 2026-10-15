@@ -448,6 +448,16 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 - **清单已登记的 fixture**（`schema-v3.sql`）与运行时 fixture 走同一套 workspace 规则，且不牵连前端检查。
 - **fixture 重命名进 `docs/`** 时新旧路径规则取并集（fixtures 规则 + 文档检查）。
 
+第三轮复核另提三项（同样逐项复现后修复，脚本契约 204 → 211 项）：
+
+| 反例 | 根因 | 修复 |
+| --- | --- | --- |
+| 未暂存保护的范围不对：工具链配置文件漏配、清单登记的目录按精确路径匹配、纯文档提交反被编译输入误阻 | 输入范围硬编码且不区分 file/directory；清单输入不按消费方筛选 | 新增 `RUST_SHARED_INPUTS`（`crates/`、`src-tauri/`、`Cargo.toml`、`Cargo.lock`、`rustfmt.toml`、`rust-toolchain.toml`、`.cargo/`）；`_manifest_inputs` 按消费方筛选并保留 kind，目录项按子树匹配；文档检查只读 index，不再被编译输入的未暂存改动阻止 |
+| 删除/改名没有触发文档检查，引用检查形同闲置 | 分类器只按路径分类，D/R 状态不会选中 docs | `classify` 对 D/R 状态额外加入文档检查并记录 `deleted-or-renamed` 触发原因 |
+| 前端脚本只做语法检查，未满足「E2E 编排并入脚本规则」 | `frontend/scripts/` 统一映射为前端四项 + node-syntax | 按消费者映射：浏览器验收脚本（`check-*`、`run-ui-refresh-e2e.mjs`）→ 前端四项 + node-syntax + `browser-e2e`（`pnpm test:e2e`）；`native-acceptance.mjs`、`contracts/`、`lib/`、`fixtures/` 与未登记脚本无本地等价契约 → 完整模式兜底；`browser-e2e` 同时纳入完整模式 |
+
+链路测试按要求覆盖「分类器 → 实际检查器」：端到端用例用仓库本体的选择器与检查器，在临时仓库里删除一个被引用的文件，提交被真实文档检查阻止（输出含引用方文件名），无人引用时放行。
+
 ### 6.7 过程事件（已在当轮修复）
 
 测试用的临时仓库操作一度污染了真实仓库 `.git/config`（`bare = true` 与被 fixture 身份覆盖的 `[user]` 段），原因是当时为验证钩子环境而手动注入了绝对路径的 `GIT_DIR`/`GIT_INDEX_FILE`。分支、HEAD、reflog、index 与工作区内容未受影响；配置已按备份复原（身份回退全局 `~/.gitconfig`）。加固：钩子显式 `unset` 这些变量，工具与测试的所有 Git 子进程都剥离调用者的 `GIT_*`。明细见 `qa-artifacts/workspace-layout/incident-2026-10-15/README.md`（ignored）。

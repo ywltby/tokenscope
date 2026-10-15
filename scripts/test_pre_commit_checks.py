@@ -32,6 +32,11 @@ MANIFEST = {
          "consumers": [{"package": "tokenscope-app", "mode": "default"}]},
         {"path": "src-tauri/src/acceptance_csp.js", "kind": "file",
          "consumers": [{"package": "tokenscope-app", "mode": "acceptance"}]},
+        {"path": "src-tauri/capabilities", "kind": "directory",
+         "consumers": [{"package": "tokenscope-app", "mode": "default"},
+                       {"package": "tokenscope-app", "mode": "acceptance"}]},
+        {"path": "assets", "kind": "directory",
+         "consumers": [{"package": "tokenscope-app", "mode": "default"}]},
         {"path": "crates/tokenscope-core/tests/fixtures/cache/schema-v3.sql", "kind": "file",
          "consumers": [{"package": "tokenscope", "mode": "default"},
                        {"package": "tokenscope", "mode": "acceptance"}]},
@@ -109,6 +114,15 @@ class ClassifyCase(unittest.TestCase):
         self.assertIn("rust-core-default", plan["checks"])
         self.assertIn("docs", plan["checks"])
 
+    def test_deleting_or_renaming_selects_document_checks(self):
+        """删除/改名会让引用失效，引用方可能没被修改 → 必须同时跑文档检查。"""
+        deleted = self.plan([change("D", "crates/tokenscope-core/src/unused.rs")])
+        self.assertIn("docs", deleted["checks"])
+        self.assertIn("rust-core-default", deleted["checks"])
+        renamed = self.plan([change("R", "crates/tokenscope-core/src/renamed.rs",
+                                    old_path="crates/tokenscope-core/src/unused.rs")])
+        self.assertIn("docs", renamed["checks"])
+
     def test_frontend_sources_and_public_assets_select_all_frontend_checks(self):
         for path in ("frontend/src/main.ts", "frontend/public/theme-boot.js",
                      "frontend/package.json", "frontend/pnpm-lock.yaml"):
@@ -117,12 +131,21 @@ class ClassifyCase(unittest.TestCase):
                 self.assertEqual(checks, ["frontend-build", "frontend-format",
                                           "frontend-test", "frontend-typecheck"])
 
-    def test_frontend_acceptance_script_selects_script_syntax_check(self):
-        """E2E 编排脚本属于脚本规则：不能只跑前端四项而放行不可运行的脚本。"""
-        checks = self.checks([change("M", "frontend/scripts/native-acceptance.mjs")])
+    def test_browser_acceptance_script_selects_its_browser_e2e_contract(self):
+        """浏览器验收脚本的契约是浏览器 E2E，而不是只做语法检查。"""
+        checks = self.checks([change("M", "frontend/scripts/check-ui-contracts.mjs")])
+        self.assertIn("browser-e2e", checks)
         self.assertIn("node-syntax", checks)
         self.assertIn("frontend-test", checks)
-        self.assertIn("frontend-build", checks)
+
+    def test_native_acceptance_script_without_local_contract_falls_back_to_full(self):
+        """原生验收驱动需要真实原生环境，本地无等价契约 → 按计划完整兜底。"""
+        for path in ("frontend/scripts/native-acceptance.mjs",
+                     "frontend/scripts/contracts/native-ui-refresh.mjs",
+                     "frontend/scripts/lib/png.mjs",
+                     "frontend/scripts/unknown-tool.mjs"):
+            with self.subTest(path=path):
+                self.assertEqual(self.plan([change("M", path)])["mode"], "full")
 
     def test_scripts_and_hooks_and_build_configs_require_full_mode(self):
         for path in ("Cargo.toml", "Cargo.lock", "crates/tokenscope-core/Cargo.toml",
@@ -164,8 +187,9 @@ class ClassifyCase(unittest.TestCase):
         self.assertIn("docs", plan["checks"])
 
     def test_deleted_fixture_still_uses_fixture_rule(self):
+        # 删除 fixture 走 fixtures 规则；同时因为删除会让引用失效，还要跑文档检查。
         checks = self.checks([change("D", "crates/tokenscope-core/tests/fixtures/claude/x.jsonl")])
-        self.assertEqual(checks, ["rust-core-acceptance", "rust-core-default"])
+        self.assertEqual(checks, ["docs", "rust-core-acceptance", "rust-core-default"])
 
     def test_chinese_and_space_paths_are_classified(self):
         checks = self.checks([change("M", "crates/tokenscope-core/tests/fixtures/中文 目录/x.jsonl")])
@@ -244,6 +268,30 @@ class UnstagedGuardCase(unittest.TestCase):
         plan = classify([change("M", "docs/notes.md")], manifest=MANIFEST,
                         unstaged=["frontend/src/main.ts"], force_full=True)
         self.assertEqual(plan["blocked"], ["frontend/src/main.ts"])
+
+    def test_unstaged_toolchain_configuration_blocks_rust_checks(self):
+        """`.cargo/config.toml` 与 `rustfmt.toml` 都会影响 Rust 检查的读取结果。"""
+        plan = classify([change("M", "crates/tokenscope-core/src/report.rs")],
+                        manifest=MANIFEST,
+                        unstaged=[".cargo/config.toml", "rustfmt.toml",
+                                  "rust-toolchain.toml"])
+        self.assertEqual(plan["blocked"], [".cargo/config.toml", "rust-toolchain.toml",
+                                           "rustfmt.toml"])
+
+    def test_unstaged_file_inside_a_manifest_directory_blocks_rust_checks(self):
+        """清单登记的目录输入要按子树匹配，而不是当成精确文件路径。"""
+        plan = classify([change("M", "crates/tokenscope-core/src/report.rs")],
+                        manifest=MANIFEST,
+                        unstaged=["assets/data.json", "assets/nested/deep.json",
+                                  "src-tauri/capabilities/default.json"])
+        self.assertEqual(plan["blocked"], ["assets/data.json", "assets/nested/deep.json",
+                                           "src-tauri/capabilities/default.json"])
+
+    def test_document_only_submission_is_not_blocked_by_compiled_inputs(self):
+        """文档检查只读 index，不读被编译的输入，因此不该被它的未暂存改动阻止。"""
+        plan = classify([change("M", "docs/notes.md")], manifest=MANIFEST,
+                        unstaged=["docs/privacy.md", "src-tauri/tauri.conf.json"])
+        self.assertEqual(plan["blocked"], [])
 
     def test_unrelated_unstaged_file_does_not_block_document_submission(self):
         plan = classify([change("M", "docs/notes.md")], manifest=MANIFEST,
@@ -529,6 +577,33 @@ class EndToEndOnlyCommitCase(unittest.TestCase):
         result = self.git("commit", "--only", "docs/tracked-ok.md", "-m", "应成功")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(len(self.git("log", "--oneline").stdout.strip().splitlines()), 3)
+
+
+    def test_deleting_a_referenced_file_is_blocked_by_the_real_checker(self):
+        """分类器选中文档检查 + 检查器真的发现失效引用 → 提交被阻止。"""
+        (self.root / "docs" / "dep.md").write_text("# 依赖\n", encoding="utf-8")
+        (self.root / "docs" / "referrer.md").write_text(
+            "# 引用者\n\n[依赖](dep.md)\n", encoding="utf-8")
+        self.assertEqual(self.git("add", "-A").returncode, 0)
+        self.assertEqual(self.git("commit", "-qm", "加入引用").returncode, 0)
+
+        self.assertEqual(self.git("rm", "-q", "docs/dep.md").returncode, 0)
+        result = self.git("commit", "-m", "删除被引用的文件")
+        combined = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, combined)
+        self.assertIn("referrer.md", combined, f"未检查未修改文档的引用：{combined!r}")
+        # baseline + "加入引用" 两个提交；被阻止的这次不得产生提交。
+        self.assertEqual(len(self.git("log", "--oneline").stdout.strip().splitlines()), 2,
+                         "检查失败时不得产生提交")
+
+    def test_deleting_an_unreferenced_file_is_allowed(self):
+        (self.root / "docs" / "lonely.md").write_text("# 无人引用\n", encoding="utf-8")
+        self.assertEqual(self.git("add", "-A").returncode, 0)
+        self.assertEqual(self.git("commit", "-qm", "加入孤立文档").returncode, 0)
+
+        self.assertEqual(self.git("rm", "-q", "docs/lonely.md").returncode, 0)
+        result = self.git("commit", "-m", "删除无人引用的文件")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
