@@ -337,5 +337,64 @@ class HookWiringCase(unittest.TestCase):
         self.assertIn("应成功", self.git("log", "--oneline").stdout)
 
 
+class FirstCommitCase(unittest.TestCase):
+    """还没有 HEAD 的仓库：暂存区与空树比较，不能当作 Git 查询失败。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="tokenscope-firstcommit-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / "首次 仓库"
+        (self.root / "docs").mkdir(parents=True)
+        self.git("init", "-q", "-b", "main")
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.root), *args],
+                              capture_output=True, encoding="utf-8", errors="replace",
+                              env=git_env())
+
+    def test_first_commit_is_read_from_the_empty_tree(self):
+        (self.root / "docs" / "notes.md").write_text("# 说明\n", encoding="utf-8")
+        self.assertEqual(self.git("add", "docs/notes.md").returncode, 0)
+        changes = build_changes(self.root)
+        self.assertEqual(changes, [{"status": "A", "path": "docs/notes.md",
+                                    "old_path": None}])
+        plan = classify(changes, manifest=MANIFEST)
+        self.assertEqual(plan["checks"], ["docs"])
+        self.assertEqual(plan["mode"], "selected")
+
+
+class UserDataIsolationCase(unittest.TestCase):
+    """被选中的检查不得写用户数据目录（本机 `~/.tokenscope`）。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="tokenscope-userdata-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / "仓库"
+        (self.root / "docs").mkdir(parents=True)
+        subprocess.run(["git", "-C", str(self.root), "init", "-q", "-b", "main"],
+                       capture_output=True, env=git_env())
+        (self.root / "docs" / "notes.md").write_text("# 说明\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.root), "add", "docs/notes.md"],
+                       capture_output=True, env=git_env())
+
+    @property
+    def data_dir(self):
+        home = os.environ.get("USERPROFILE") or os.environ.get("HOME") or ""
+        return Path(home) / ".tokenscope"
+
+    def snapshot(self):
+        if not self.data_dir.exists():
+            return None
+        return sorted(str(path.relative_to(self.data_dir))
+                      for path in self.data_dir.rglob("*"))
+
+    def test_selected_checks_do_not_touch_user_data_directory(self):
+        before = self.snapshot()
+        status = run([["python", "-B", str(ROOT / "scripts/check_staged_docs.py"),
+                       "--root", str(self.root)]], cwd=self.root)
+        self.assertEqual(status, 0)
+        self.assertEqual(before, self.snapshot())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,9 @@
 """
 
 from pathlib import Path
+import json
 import re
+import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -17,6 +19,14 @@ TRIPLE = "x86_64-pc-windows-msvc"
 
 def read(relative):
     return (ROOT / relative).read_text(encoding="utf-8")
+
+
+def read_toml(relative):
+    return tomllib.loads(read(relative))
+
+
+def core_version():
+    return read_toml("crates/tokenscope-core/Cargo.toml")["package"]["version"]
 
 
 def step_run_block(text, step_name):
@@ -59,6 +69,77 @@ def workflow_paths(relative):
             if stripped.startswith("- "):
                 patterns.append(stripped[2:].strip().strip("'\""))
     return patterns
+
+
+class WorkspaceInvariantCase(unittest.TestCase):
+    """计划 §2 的目标配置：根为虚拟 workspace、共享依赖继承、依赖方向单向。"""
+
+    def test_root_manifest_is_a_virtual_workspace_without_exclude(self):
+        manifest = read_toml("Cargo.toml")
+        self.assertNotIn("package", manifest)
+        self.assertNotIn("dependencies", manifest)
+        workspace = manifest["workspace"]
+        self.assertEqual(workspace["members"], ["crates/tokenscope-core", "src-tauri"])
+        self.assertEqual(workspace["default-members"],
+                         ["crates/tokenscope-core", "src-tauri"])
+        self.assertEqual(workspace["resolver"], "3")
+        self.assertNotIn("exclude", workspace)
+        self.assertNotIn("version", workspace)
+
+    def test_shell_manifest_has_no_own_workspace_and_points_at_the_core_crate(self):
+        shell = read_toml("src-tauri/Cargo.toml")
+        self.assertNotIn("workspace", shell)
+        self.assertEqual(shell["package"]["name"], "tokenscope-app")
+        self.assertEqual(shell["dependencies"]["tokenscope"]["path"],
+                         "../crates/tokenscope-core")
+        self.assertEqual(shell["features"]["acceptance"], ["tokenscope/acceptance"])
+
+    def test_shared_dependencies_are_inherited_with_explicit_features(self):
+        root = read_toml("Cargo.toml")["workspace"]["dependencies"]
+        core = read_toml("crates/tokenscope-core/Cargo.toml")
+        shell = read_toml("src-tauri/Cargo.toml")
+        for name in ("anyhow", "jiff", "log", "serde", "serde_json"):
+            self.assertIn(name, root, f"共享依赖 {name} 未在根声明")
+        self.assertEqual(core["dependencies"]["serde"],
+                         {"workspace": True, "features": ["derive"]})
+        self.assertEqual(shell["dependencies"]["serde"],
+                         {"workspace": True, "features": ["derive"]})
+        self.assertEqual(core["dependencies"]["anyhow"], {"workspace": True})
+        self.assertEqual(shell["dependencies"]["jiff"], {"workspace": True})
+
+    def test_core_library_never_depends_on_tauri(self):
+        core = read_toml("crates/tokenscope-core/Cargo.toml")
+        for section in ("dependencies", "dev-dependencies", "build-dependencies"):
+            names = set(core.get(section, {}))
+            offenders = sorted(name for name in names
+                               if name == "tauri" or name.startswith("tauri-"))
+            self.assertEqual(offenders, [], f"{section} 引入了 Tauri 依赖")
+
+    def test_root_lock_holds_exactly_the_two_local_packages_at_the_app_version(self):
+        lock = read_toml("Cargo.lock")
+        version = core_version()
+        local = [(package["name"], package["version"])
+                 for package in lock["package"] if "source" not in package]
+        self.assertEqual(sorted(local), [("tokenscope", version),
+                                         ("tokenscope-app", version)])
+        for name in ("crates/tokenscope-core/Cargo.toml", "src-tauri/Cargo.toml"):
+            self.assertEqual(read_toml(name)["package"]["version"], version, name)
+        self.assertEqual(json.loads(read("src-tauri/tauri.conf.json"))["version"], version)
+        self.assertEqual(json.loads(read("frontend/package.json"))["version"], version)
+
+    def test_manifest_records_are_repository_relative_without_run_metadata(self):
+        text = read("scripts/build-inputs.json")
+        value = json.loads(text)
+        self.assertEqual(set(value), {"schema_version", "generated", "manual"})
+        for record in value["generated"] + value["manual"]:
+            path = record["path"]
+            self.assertFalse(path.startswith("/"), path)
+            self.assertNotIn("\\", path, path)
+            self.assertNotIn(":", path, path)
+            self.assertNotIn("..", path.split("/"), path)
+        lowered = text.lower()
+        for banned in ("run_id", "mtime", "c:\\\\"):
+            self.assertNotIn(banned, lowered)
 
 
 class ReleasePathCase(unittest.TestCase):
