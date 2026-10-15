@@ -228,6 +228,61 @@ class ManifestCase(unittest.TestCase):
             self.assertEqual([r["path"] for r in loaded["generated"]], ["a", "b"])
 
 
+RELEASE_STYLE_DEP_INFO = (
+    "/repo/target/release/deps/tokenscope-9f2a.rlib: "
+    "/repo/crates/tokenscope-core/src/lib.rs "
+    "/repo/docs/privacy.md "
+    "/repo/target/release/build/tokenscope-app-1234/out/tauri-codegen-assets/abc123.png "
+    "/repo/frontend/dist/assets/index-4f2a.js "
+    "/repo/src-tauri/capabilities/default.json "
+    "/repo/notes/untracked.md\n"
+)
+
+
+class ReleaseStyleDepInfoCase(unittest.TestCase):
+    """release 风格 .d 的组合：只保留合法跟踪输入，并为排除项记录可读原因。"""
+
+    def classify(self, text, tracked_files):
+        kept, excluded = [], []
+        for raw in parse_dep_info(text):
+            rel = normalize_repo_path(raw, base=Path("/repo"), repo=posix_repo())
+            if rel is None:
+                excluded.append((raw, "仓库外或无法安全解释"))
+                continue
+            if is_excluded_input(rel, "file"):
+                excluded.append((rel, "固定规则覆盖或构建生成物"))
+                continue
+            kept.append(rel)
+        survivors, dropped = filter_tracked(sorted(set(kept)), tracked_files, set())
+        return survivors, excluded, dropped
+
+    def test_only_legitimate_tracked_inputs_survive(self):
+        survivors, excluded, untracked = self.classify(
+            RELEASE_STYLE_DEP_INFO,
+            tracked_files={"docs/privacy.md", "src-tauri/capabilities/default.json"})
+        self.assertEqual(survivors,
+                         ["docs/privacy.md", "src-tauri/capabilities/default.json"])
+        self.assertEqual([rel for rel, _ in excluded], [
+            "crates/tokenscope-core/src/lib.rs",
+            "target/release/build/tokenscope-app-1234/out/tauri-codegen-assets/abc123.png",
+            "frontend/dist/assets/index-4f2a.js",
+        ])
+        self.assertEqual([reason for _, reason in excluded],
+                         ["固定规则覆盖或构建生成物"] * 3)
+        self.assertEqual(untracked, ["notes/untracked.md"])
+
+    def test_paths_outside_the_repository_are_dropped_with_a_reason(self):
+        text = "/repo/target/x.rlib: /repo/docs/privacy.md C:\\other\\escape.rs\n"
+        survivors, excluded, _ = self.classify(text, tracked_files={"docs/privacy.md"})
+        self.assertEqual(survivors, ["docs/privacy.md"])
+        self.assertEqual(excluded[0][1], "仓库外或无法安全解释")
+
+    def test_empty_directory_input_is_not_registered(self):
+        survivors, _, _ = self.classify(
+            "/repo/target/x.rlib: /repo/frontend/public/assets\n", tracked_files=set())
+        self.assertEqual(survivors, [])
+
+
 class WorkflowCoverageCase(unittest.TestCase):
     """CI/安装/Native UI 的 paths 过滤必须覆盖清单里的全部路径。"""
 

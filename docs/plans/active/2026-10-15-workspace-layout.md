@@ -349,7 +349,7 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 
 两目录相加约 76.5 GB，与计划开头的估算一致，但**清理只涉及 `src-tauri/target`**：根 `target/` 是统一后的默认输出，不能清理。另需注意仓库存在第二个 worktree（`~/.config/superpowers/worktrees/tokenscope/source-discovery-plan`，detached HEAD `3ffea3e`），它有自己的构建目录，不在本次清理范围。
 
-**用户 2026-10-15 决策：暂缓清理。** 本轮不删除 `src-tauri/target`，登记为待清理项，也不声称空间已释放；后续若要清理，仍按 W06.7 的核对流程执行（确认路径在预期仓库内、无进程占用、单一 PowerShell 文件操作、记录实际释放空间、仍占用则登记不强杀实例）。
+**用户 2026-10-15 决策：暂缓清理。** 本轮不删除 `src-tauri/target`，登记为待清理项，也不声称空间已释放；后续若要清理，仍按 W06.7 的核对流程执行（确认路径在预期仓库内、无进程占用、单一 PowerShell 文件操作、记录实际释放空间、仍占用则登记不强杀实例）。清理脚本已就绪并演练过 dry-run（`qa-artifacts/workspace-layout/tools/cleanup_legacy_target.ps1`，默认 dry-run、只有 `-Execute` 才删除）：2026-10-15 演练输出 `exists=true / isInside=true / linkType=Directory / files=32326 / gib=38.85 / occupancy=[] / action=dry-run：未删除`，未触碰任何文件；授权后一条命令即可执行并记录实际释放空间。
 
 **用户 2026-10-15 决策：暂不创建 PR。** 分支已推送到 `origin/feat/workspace-layout`（HEAD `4488b56`），本轮不产生远程 CI、安装升级与 Native UI E2E 证据，因此不报告“合并就绪”；这些门槛的实跑证据待用户确认后由 Actions 提供。
 
@@ -388,6 +388,11 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 | `python -B scripts/bump_version.py --check --base-ref origin/main` | exit 0（0.3.1 → 0.3.2） | 0.3s |
 
 两种 Rust 构建模式的成本（本机热缓存）：普通与 acceptance 的 clippy 各约 1s、test 各约 71–75s；冷缓存下的隔离 checkout 见 6.5。
+
+本轮另补两组契约测试（不属于 §4.2 命令表，但对应 §5.1.5 与 §5.2 的必要契约）：
+
+- `scripts/test_build_paths.py`（10 项）：发布与安装的 `release_assets collect` 参数必须一致且指向 `target/x86_64-pc-windows-msvc/release/...`；`release_assets.py` 自身不含仓库布局假设；`native-acceptance.mjs` 的 `EXE_DEFAULT` 为根 `target/release/tokenscope.exe` 且 `--exe` 覆盖仍可用；`ui-e2e.yml` 用 `-p tokenscope-app` 构建且不带 `--target`；rust-cache 只映射 `. -> target`；checks action 的 fmt 与 workspace 轮次各只出现一次、含清单校验与新增契约；install-test paths 覆盖核心 crate、不含旧根路径；`.gitignore` 为 `target/`；有效入口零 `src-tauri/target` 残留；受版本管理的锁只有根一个。该测试先跑出红灯（CI 未接线），接入 Selector and build-input contracts 步骤后转绿。
+- `test_build_inputs.py` 新增 3 项 release 风格 dep-info 组合契约：只保留合法跟踪输入，被排除项按「固定规则覆盖或构建生成物」记录原因；仓库外路径与空目录输入同样被丢弃。脚本契约总数 159 → 172 项，全部通过。
 
 ### 6.5 隔离验收与旧入口核对（W06.1/W06.5）
 
