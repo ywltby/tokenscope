@@ -6,14 +6,14 @@
 
 ## 现在执行什么
 
-- **2026-10-15 审阅第 13 节复审通过，PR1 可开工；fixture 分类已明确，三份计划均未实施**：
-  - **PR1 / patch**：[Workspace 目录迁移与提交检查](active/2026-10-15-workspace-layout.md)，W01–W07；开工时从 docs/source-discovery-plan 最新提交创建 feat/workspace-layout，带入 c16e023 和三份计划，不改写历史；迁移期间协调冻结其他 Rust 开发，合入后先 rebase。
+- **2026-10-15 PR1 已实施并完成本地验收；PR2/PR3 仍未实施**：
+  - **PR1 / patch**：[Workspace 目录迁移与提交检查](active/2026-10-15-workspace-layout.md)，W01–W07。分支 `feat/workspace-layout` 从 docs/source-discovery-plan 最新提交（`94e5c52`，含 c16e023 与三份计划）创建，按 W01–W07 逐项实施，版本已递增到 0.3.2。本地交付门槛 14 条命令逐条 exit 0（普通与 acceptance 两套 workspace clippy/test、前端 typecheck/format:check/test/build 与浏览器 E2E、脚本契约 173 项、版本发布契约）；隔离 checkout 冷编译两模式通过，且从根目录与 `src-tauri` 目录发起构建都只写根 target、不新建子 target/子锁；生产 NSIS 构建与 `release_assets` 收集、验收包构建与原生 E2E 均在本机实跑通过——逐项证据见该计划第 6 节。**未创建 PR、未合并 main**：W06.4 的五项安装验收与两项固定旧版升级、以及 ci/release/install-test/ui-e2e 的远程门禁仍待 Actions 提供；旧 `src-tauri/target`（38.85 GiB，无进程占用）按用户决定登记为待清理，未删除。
   - **PR2 / minor**：[真实扫描反馈](active/2026-10-15-collection-status.md)，F01–F05；PR1 合入后从最新 main 建 feat/collection-status，读取图标至少 1 秒，查询不等待动画。
   - **PR3 / minor**：[当前用户来源目录与追加路径](active/2026-10-14-source-discovery-and-additional-paths.md)，S01–S07；PR2 合入后从最新 main 建 feat/source-paths，只发现当前用户默认和 CODEX_HOME / CLAUDE_CONFIG_DIR，取消重新发现按钮。
 
-三 PR 各自递增一次版本、各自验证最终 HEAD，不再统一交付。此次只在现有计划分支修改文档；独立系统验收 todo 不变。
+三 PR 各自递增一次版本、各自验证最终 HEAD，不再统一交付。PR1 已实现，迁移期间冻结其他 Rust 开发的要求随之转为「PR1 合入后先 rebase 最新 main 再继续」；独立系统验收 todo 不变。
 
-执行入口已补齐：[PR1 第 4–5 节](active/2026-10-15-workspace-layout.md#4-三份计划共同的执行与交付约束)规定三份计划共同的操作顺序、禁止事项、证据格式和四级交付门槛，并细化迁移/清单/hook；[PR2 第 6 节](active/2026-10-15-collection-status.md#6-执行细则与逐项验收门槛)给出状态机、前端计时和反例表；[PR3 第 8 节](active/2026-10-14-source-discovery-and-additional-paths.md#8-执行细则算法边界与验收门槛)给出来源解析、整轮遍历去重、事实矩阵和性能取证。补充执行说明不代表任务已经实施。
+执行入口已补齐：[PR1 第 4–5 节](active/2026-10-15-workspace-layout.md#4-三份计划共同的执行与交付约束)规定三份计划共同的操作顺序、禁止事项、证据格式和四级交付门槛，并细化迁移/清单/hook；[PR2 第 6 节](active/2026-10-15-collection-status.md#6-执行细则与逐项验收门槛)给出状态机、前端计时和反例表；[PR3 第 8 节](active/2026-10-14-source-discovery-and-additional-paths.md#8-执行细则算法边界与验收门槛)给出来源解析、整轮遍历去重、事实矩阵和性能取证。补充执行说明不代表任务已经实施；PR1 的逐项执行结果与未闭合项见其第 6 节。
 
 原 active 的 25 份计划全部归档；M1–M11 重新核对自身验收条件。历史计划共 **36 份：8 份已实现、26 份部分完成、2 份已被取代**。部分完成通常是“实现已完成、验收有尾项”；用量历史计划仍有原生及真实性能验收责任。除上述三份新计划外，`active/` 保留上述整合计划、2026-10-13 的 UI 调整计划与[控件材质与浮层可读性计划](active/2026-10-13-control-material.md)（用户已确认：边界 ≥ 3:1、克制受光与焦点/选中柔光、操作型浮层实色；已实施且视觉验收通过；UI 独立分支准备发布，待 PR 门禁），不再分别追逐旧计划的尾项。
 
