@@ -823,6 +823,23 @@ for (const fixtureName of args.fixtures) {
           await page.waitForTimeout(150);
         }
 
+        // 冷启动/繁忙 Runner 上固定延时不能保证 ResizeObserver 与 CSS 过渡已提交。
+        // 只在几何量满足原契约后取样；永久零宽、错位或缺控件仍在超时后失败。
+        // baseline 保留原始取样，不能为等待“正确”布局而丢失回退证据。
+        if (args.phase === "verify") {
+          await page.waitForFunction(() => {
+            const groups = [...document.querySelectorAll(".ts-segmented")];
+            return groups.length > 0 && groups.every((group) => {
+              const thumb = group.querySelector(".ts-segmented-thumb");
+              const active = group.querySelector('[aria-checked="true"]');
+              if (!thumb || !active) return false;
+              const a = active.getBoundingClientRect();
+              const t = thumb.getBoundingClientRect();
+              return a.width > 0 && Math.abs(t.width - a.width) <= 1 &&
+                Math.abs(t.left - a.left) <= 1;
+            });
+          }, null, { timeout: 5000, polling: "raf" });
+        }
         const m = await page.evaluate(MEASURE);
 
         // UX05：切维度 + 切主题后，图表仍渲染且摘要列出全部真实类别（无合计）
