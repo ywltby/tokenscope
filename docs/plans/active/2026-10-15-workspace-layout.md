@@ -475,7 +475,7 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 - CI 实现偏差明确接受：清单 `--check` 自己 `clean -p` 两个本地包后重新构建普通和 acceptance 两轮，而非复用前面门禁的产物。代价是额外两轮本地包编译；不能宣称实现了构建证据复用。此次保留现有正确性策略，不再改调度。
 - 本轮新增回归在 `test_script_checks.py`、`test_review15_regressions.py`；后者接入完整 CI。失败反例先于实现运行，复现了 GBK 解码失败、零文件放行、库依赖遗漏、人工项误报及未跟踪输入遗漏；实际验证结果在完成后回填。
 
-验证：完整脚本契约第一轮 227 项通过，随后新增 GBK stderr 用例；Git Bash 下语法契约 10 项通过，仓库检查器实际检查 PowerShell 11 个、Node 14 个。真实 `build_inputs.py --check` 重编译两模式后返回 generated=5，missing/stale/changed/absent 均空、workflow_uncovered 为空；日志与产物记录在 `qa-artifacts/workspace-layout/review15/manifest-check.txt` 和 `manifest/`。版本检查仍为 0.3.1 → 0.3.2，本 PR 不重复加号。提交前完整 hook 将复验新增用例及全部门禁。
+验证：修复提交 `0cbbc8b` 的完整 hook exit 0；脚本契约最终 228 项通过，普通/acceptance workspace fmt、clippy、test 全绿，前端 480 项、typecheck/format/build 全绿，浏览器 E2E 4 场景零违例、5 契约共 178 断言通过，安装/升级/窗口 helper 契约通过。Git Bash 下语法契约 10 项通过，仓库检查器实际检查 PowerShell 11 个、Node 14 个。真实 `build_inputs.py --check` 重编译两模式后返回 generated=5，missing/stale/changed/absent 均空、workflow_uncovered 为空；日志与产物记录在 `qa-artifacts/workspace-layout/review15/manifest-check.txt` 和 `manifest/`。版本检查仍为 0.3.1 → 0.3.2，本 PR 不重复加号。
 
 创建 PR、远程 CI/安装升级/Native UI E2E、旧 target 清理均保持原有待办与授权边界。
 
