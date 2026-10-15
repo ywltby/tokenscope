@@ -102,6 +102,10 @@ fn test_inject_migration_fail(path: &Path) -> Result<()> {
 
 impl Cache {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_busy_timeout(path, std::time::Duration::from_secs(2))
+    }
+
+    fn open_with_busy_timeout(path: &Path, busy_timeout: std::time::Duration) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("创建缓存目录失败: {}", dir.display()))?;
@@ -109,7 +113,7 @@ impl Cache {
         let mut conn =
             Connection::open(path).with_context(|| format!("打开缓存失败: {}", path.display()))?;
         // busy_timeout 先于 pragma 设置：并发打开时等锁而不是立即报忙。
-        conn.busy_timeout(std::time::Duration::from_millis(2000))?;
+        conn.busy_timeout(busy_timeout)?;
         // WAL 切换需要短暂独占，且 SQLite 不为该切换调用 busy handler——
         // 并发打开时对方连接可能正持锁/切换，这里小步重试（对齐 busy_timeout
         // 的等待语义），而非把并发打开错判为损坏。
@@ -1221,6 +1225,31 @@ mod tests {
     }
 
     #[test]
+    fn test_cache_open_waits_for_slow_writer_with_test_budget() {
+        let dir = tmp_dir("slow-writer");
+        let path = dir.join("cache.db");
+        let cache = Cache::open(&path).unwrap();
+        drop(cache);
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let production_error = Cache::open(&path).err().expect("生产等待仍须有界失败");
+        assert!(production_error.chain().any(|cause| matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(f, _))
+                if f.code == rusqlite::ErrorCode::DatabaseBusy
+        )));
+        let opener = std::thread::spawn(move || {
+            Cache::open_with_busy_timeout(&path, std::time::Duration::from_secs(30))
+        });
+        // 明确超过生产的 2 秒等待上限，复现繁忙 Runner 上的慢持锁者。
+        std::thread::sleep(std::time::Duration::from_millis(2200));
+        writer.execute_batch("COMMIT").unwrap();
+        opener.join().unwrap().expect("测试预算内释放锁后必须成功");
+        drop(writer);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn test_cache_concurrent_v3_open() {
         // 两个连接并发打开 v3 库：写事务内重判版本 + 串行迁移，不得交错出
         // 半迁移结构；两个打开都必须成功，结果为健康可用的当前版结构。
@@ -1229,8 +1258,14 @@ mod tests {
         seed_v3(&path);
 
         let path2 = path.clone();
-        let h1 = std::thread::spawn(move || Cache::open(&path));
-        let h2 = std::thread::spawn(move || Cache::open(&path2));
+        // 本测试验证并发迁移的结构正确性，不要求共享 Runner 在 2 秒内调度完毕。
+        // 只给测试连接更大的有界等锁预算；生产打开仍使用 2 秒降级策略。
+        let h1 = std::thread::spawn(move || {
+            Cache::open_with_busy_timeout(&path, std::time::Duration::from_secs(30))
+        });
+        let h2 = std::thread::spawn(move || {
+            Cache::open_with_busy_timeout(&path2, std::time::Duration::from_secs(30))
+        });
         let c1 = h1.join().unwrap().expect("并发打开 1 必须成功");
         let c2 = h2.join().unwrap().expect("并发打开 2 必须成功");
 
