@@ -3,8 +3,10 @@
 > 研究对象：开源项目 [`puppnn/codex-token-pulse`](https://github.com/puppnn/codex-token-pulse)，
 > main 分支 HEAD `4e6e3150e0c5a074f6c8700265a0bb34744f97fd`（2026-09-08，
 > "显示一位小数缓存命中率并隔离预览测试数据写入"）。克隆到临时目录后逐段精读源码，
-> 并在隔离的合成日志沙箱里实际运行导出器复算数值，**未读取本机任何真实会话日志、
-> 未改动本机 `~/.codex`、`~/.claude`、`~/.grok`、`~/.opencodex`、`~/.antigravity_cockpit`**。
+> 并在隔离的合成日志沙箱里实际运行导出器复算数值。
+> **数据边界**：全程未读取本机任何真实会话内容；唯一的本机接触是第 6 轮为核对 schema 假设
+> 而执行的**只读** `PRAGMA table_info`（`~/.codex/state_5.sqlite`、`~/.codex/logs_2.sqlite`、
+> `~/.cc-switch/cc-switch.db`，仅取列名，不读任何行）；未写入或改动上述任何路径。
 >
 > 证据分档：**已验证**（源码逐行可证，或已在隔离沙箱复现数值）／**一致解释**（多条代码
 > 证据指向同一结论，无单点直证）／**未验证推论**（结构推断或未能从仓内取证，列入 §附录 C）。
@@ -146,7 +148,8 @@ Sub2API 请求参数；分析服务同样固定 UTC+8（`analytics_server.py:51`
   （全仓 grep 零命中），也不读 `%APPDATA%\.codex`。
 - **反向索引优先**：`codex_state_rollout_paths`（`2726`）直接打开
   `~/.codex/state_5.sqlite` 或 `~/.codex/sqlite/state_5.sqlite`（`2737-2740`），
-  以 `PRAGMA table_info(threads)` 做结构门禁（要求 `id` 与 `rollout_path` 两列，`2752-2762`），
+  以 `PRAGMA table_info(threads)` 做结构门禁（要求 `id` 与 `rollout_path` 两列，`2752-2762`；
+  本机 `~/.codex/state_5.sqlite` 实测确有这两列，见 §C.3 第 1 条），
   SQL 原文 `SELECT id, rollout_path FROM threads WHERE rollout_path IS NOT NULL AND rollout_path != ''`（`2762-2767`）——
   **不带时间条件**，范围完全由 Python 侧三段过滤决定：
   1. 路径必须落在 sessions 根内（`resolved.relative_to(sessions_root)`，失败 `continue`，`2785-2789`）；
@@ -177,7 +180,8 @@ WHERE ts >= ? AND ts < ?
 ORDER BY ts ASC, ts_nanos ASC
 ```
 
-（`3458-3470`；窗口 = 秒级 `start-300s` 到 `end+300s`）。正文用
+（`3458-3470`；窗口 = 秒级 `start-300s` 到 `end+300s`。本机 `~/.codex/logs_2.sqlite` 的
+`logs` 表实测列名一致 —— `ts:INTEGER`/`ts_nanos:INTEGER`/`feedback_log_body:TEXT`）。正文用
 `message = parse_json_after_marker(text, marker)`（`3485`，marker = `"Received message "` @3449）
 解出 message，再从 `message["response"]` 取 `response.usage` 的
 `input_tokens`/`output_tokens`/`input_tokens_details.cached_tokens`
@@ -297,7 +301,8 @@ ORDER BY ts ASC, ts_nanos ASC
 两张表：
 
 - `proxy_request_logs`（LEFT JOIN `providers`，按 `date(created_at,'unixepoch','+8 hours')`
-  分组，`250-271`）；
+  分组，`250-271`；本机 `cc-switch.db` 实测三张表的列名与 join 条件全部吻合，
+  且 `total_cost_usd` 为 **TEXT** ⇒ 代码的 `CAST(... AS REAL)` 是必要而非冗余）；
 - `usage_daily_rollups`（只补前者缺失的 `(date, app, provider, model)` 组合，`303-306`）。
 
 回填规则两级：表级"rollups 只在 proxy 无同组合时采用"（`305-306`）；
@@ -1020,7 +1025,8 @@ priority = 2.325、flex = 0.58125、batch = 0.7625、长上下文 = 1.35。
   `deepseek-v4-pro (0.66, 0.022, 1.98)`、`deepseek-v4-flash (0.22, 0.007, 0.66)`；
   峰价 `OPENCODE_GO_PEAK_PRICES`（`906-917`）是 `pro (1.32, 0.044, 3.96)`、
   `flash (0.44, 0.014, 1.32)`（均为谷价 ×2），`kimi-k3` 无峰谷变体。
-- **峰谷判定**（`1221-1226`）：`UTC 01:00–03:59` 或 `UTC 06:00–09:59`（共 6 小时/天），
+- **峰谷判定**（`1221-1226`）：`UTC 01:00–03:59` 或 `UTC 06:00–09:59`（UTC 小时 1/2/3 与 6/7/8/9，
+  **共 7 小时/天**——第 6 轮复核修正：原文误写 6 小时），
   `when is None` → 谷价；无 tzinfo 按 UTC+8 解释再转 UTC。边界测试
   `tests/test_unpriced_model_accounting.py:574-594`。
 - **已缓存在线价套峰**（`1229-1245`）：峰时段且模型在峰价表时，按 `peak/standard` 比例
@@ -1154,6 +1160,11 @@ providers/detail_tokens/updated_at`（+ 可选 `source_gap`、`offline_reconcile
 `history_row_signature`（`11831-11844`）把 `round(cost,6)` 纳入签名 ⇒ 价格变化触发重写。
 `monitor.py` 侧同日高水位阈值是 **5%**（`2206`），跨日不写（`2142-2143`）。
 
+⚠️ **同日高水位的副作用（第 6 轮实验确证）**：本函数按 **provider 名逐行**取高水位，
+并在旧行消失时整行恢复，最后用 provider 求和覆盖 `today`。当同一批事件在两次运行中
+归属到**不同**的 provider 行时（待归因 → 证据到达的升级、30 分钟窗口滑动等），
+两行都会被保留 ⇒ 总量被推高。机制、受控实验与影响范围见 §8.2 第 10 条。
+
 ### 7.5 离线回填 worker
 
 - 默认回看由 env `CLIENT_USAGE_OFFLINE_BACKFILL_MAX_DAYS` 控制（Python 常量
@@ -1279,6 +1290,43 @@ providers/detail_tokens/updated_at`（+ 可选 `source_gap`、`offline_reconcile
    依赖版本（`PRAGMA table_info` 探列后回退）。
 8. **`client_usage_account_timeline.json` 的切换边界**依赖 `auth.json` mtime；
    快速来回切号可能压缩成同一个边界（`record_account_timeline_snapshot` 的夹取规则）。
+9. **`opencode-go` 在线条目若是峰价会被重复放峰**（第 6 轮实验确证，**导出器与 GUI 双侧同源**）：
+   `apply_opencode_go_time_pricing`（`1229-1245`）无条件按 `peak/standard` 比例乘，唯一的守卫是
+   `standard_price > 0 and current_price > 0`（`1243`）——**全仓没有任何"当前价是否已是峰价"的判定**。
+   对"已是峰价"的条目会**再乘一次比例**（单次倍数 = `peak/standard` = 2，相对标准价共 ×4）：
+   实测峰价 `1.32/0.044/3.96` 在峰时段返回 `2.64/0.088/7.92`；把结果再喂一次得 `5.28/0.176/15.84`
+   （乘性、无幂等）。`monitor.py:1461-1480` 的 `adjust_live_opencode_go_time_price` 是**同构实现**
+   （门禁 `1469`、缩放 `1479`，`live_opencode_go_peak_at` `1450-1458` 同判据），GUI 实时链路同样重复放峰。
+   当前 `models.dev` 存的是标准价（`deepseek-v4-pro` = `0.66/1.98/0.022`）且 LiteLLM 里没有任何
+   `opencode-go/*` 键，故**未触发**；上游改峰价或手工写入峰价缓存即会重复计费（§C.3 第 3 条）。
+   另注：`deepseek-v4-flash` 的在线值（`0.15/0.6/0.003`）与内置标准价（`0.22/0.007/0.66`）不同源，
+   放大后（`0.30/1.2/0.006`）也不等于内置峰价（`0.44/1.32`）——在线路径的峰价并不等于内置峰价。
+10. **同日高水位在"归属漂移"时会把同一批量计两次**（第 6 轮实验确证 + 独立复核，影响最大的一条）：
+    `same_day_output_high_water` 的 provider 合并是**按名字逐行取高水位**（`merge_cumulative` `12538-12565`、
+    对齐入口 `12643-12696`，旧文件里新结果没有的行会**整行恢复** `12683-12693`），随后 `today`
+    又被 **provider 求和覆盖**（`12700-12719`）。于是当同一批事件在两次运行中落到**不同的 provider 行**时，
+    两行的量都被保留 ⇒ `today.requests/tokens/cost/unpriced_*` 全部被推高。
+    - **触发门槛比"账号切换"低得多**：`ledger_label_for_event`（`3754-3772`，`3762-3763`/`3768-3769`）
+      把 `Unassigned local` 与 `Codex local` **当空标签丢弃**，这两类归属**每轮重算**，只由
+      `CLIENT_USAGE_CURRENT_ACCOUNT_RECENT_SECONDS`（`434`，默认 1800 s）窗口决定 ⇒
+      **仅时间流逝**（某事件在 30 分钟内被导出过一次、之后超过 30 分钟再导出）就会双计。
+    - 独立复核的最小实验（真实值恒为 `2 请求 / 3250 tokens`）：对照连跑稳定 2/3250；
+      人为换行 → `3/4350`；把会话时间前移进窗（走整行恢复）→ `3/4350`；
+      **零干预只等 3 分钟**让一个会话越过 1800 s → `3/5400`；再跑不变（**不自愈**）；
+      整批事件一次性换行 → `4/6500`，即**最坏 2×**。
+    - 本报告沙箱的对应观察：正确快照 `9 请求 / 17810 tokens`，旧快照被换行后重跑得
+      `10 请求 / 20110 tokens`（`Codex local` 3/9720 + `Unassigned local` 3/5700，同一份 2300 tokens 两行各留一份）。
+    - **不会在 gap 行上暴露**：派生缺口行按 `today − Σ 其他行` 计算（`12869-12915`），双计后差值为负、
+      该行反被移除（`12891-12893`）。
+    - **限定**：只有 `current_api_account_routing`（`12483-12484`）为真时才在 `12677-12682` 跳过行级合并；
+      纯本地官方账号路径没有任何防护。反之，**具体账号行**（`Codex local - <identity>`）不在 ledger 的
+      忽略名单里、一旦固化就稳定，因此"具体账号 ↔ 具体账号"的漂移需走 mirror 升级（`8542-8562`）或
+      cockpit verdict 路径（该分支只做过代码阅读，未实验）。
+    - 另一条**独立**的推高路径是 `restore_today_from_usage_history`（`12722` 起）：它把差额持久化为
+      `days[<今天>].source_gap` 写回历史库（`12801-12805`）——复核类似问题时需单独隔离。
+    - 最小修复方向（供参考）：把 `Unassigned local` 一并纳入 `is_derived_gap_provider`（`12494-12501`）
+      或对齐循环的跳过集合；注意该标签可由 `CLIENT_USAGE_UNASSIGNED_CODEX_LABEL`（`449`）改名，
+      修复不能写死字面量。
 
 ### 8.3 死代码与遗留路径（当前 HEAD 无调用点）
 
@@ -1288,6 +1336,7 @@ providers/detail_tokens/updated_at`（+ 可选 `source_gap`、`offline_reconcile
 | `codex_fork_replay_cutoff`（文本行版） | `2025` | 活路径用 `codex_fork_replay_cutoff_from_rows`（`2664`） |
 | `_collapse_cockpit_request_usage_events_legacy` | `9390` | 折叠口径已被废弃（`reconcile_cockpit_request_usage_events` 现在是恒等函数） |
 | `load_opencodex_account_timeline` / `OPENCODEX_ACCOUNT_TIMELINE_RETENTION_DAYS` | `4253` / `398` | 生产路径无调用者（一致解释） |
+| `merge_codex_account_fallback_events` | `8323-8342` | 按 cutoff 过滤后重新入桶的"补漏"函数，全仓无调用点（第 6 轮复核新增确认） |
 | `_models_dev_route_names` 的 `elif provider in MODEL_ROUTE_PREFIXES: return ()` | `994-995` | 前两分支已枚举 `MODEL_ROUTE_PREFIXES` 全部成员 → 不可达 |
 
 ---
@@ -1330,7 +1379,16 @@ python .\client_usage_export.py --output "$lab\out.json"
 
 合成 fixture（`%TEMP%\ctp-lab\make_fixtures.py`）覆盖：Codex 累计型 / last 型 / **fork 重放型** /
 超限与坏行型四类会话、Claude 同一 `message.id` 重复两行（第二行含 cache 细分，另有一条独立
-`msg_solo_2`）、Grok `turn_completed` 且 `modelCalls=2`。**未读取任何真实用户日志。**
+`msg_solo_2`）、Grok `turn_completed` 且 `modelCalls=2`。
+
+**隔离边界与一处修正（第 6 轮发现）**：上面三个变量隔离了"日志根 / 数据目录 / 价格源"，
+但 **Codex Desktop 日志根当时未隔离**——`default_codex_desktop_log_roots()` 走的是
+`%LOCALAPPDATA%`/`%APPDATA%`/`%PROGRAMFILES%`，**指向真实目录**（本机 `%LOCALAPPDATA%\Codex\Logs`
+存在，内含 2026-09-30 的 `codex-desktop-*.log`）。因此早期几轮实验确实读取了这些**应用日志**
+（只读、且只匹配 `sa_server_request_failed` 失败行，不产出 token、不影响统计结论），
+但没有读取任何**会话日志**。第 6 轮起改为把 `CLIENT_USAGE_CODEX_DESKTOP_LOG_ROOT`
+指向 lab 内空目录；补测显示这**不改变**请求数/成本（往返对照：不隔离 9 请求 / 隔离 9 请求），
+也**不是**耗时主因（§A.4）。
 
 ### A.2 离线（内置回退链）结果与手算复算
 
@@ -1369,10 +1427,10 @@ unpriced_models={"grok-4.5-build": 1000}`。
 
 ### A.4 增量缓存与追加
 
-| 运行 | 动作 | 耗时 | 结果 |
+| 运行 | 动作 | 耗时（墙钟 / 导出器自报） | 结果 |
 | --- | --- | --- | --- |
-| 第 1 次 | 冷启动（**该轮用离线价格态 `state/`**） | — | 见 A.2（0.160445） |
-| 第 2 次 | 复用缓存 | **0.56 s** | 输出与第 1 次一致（0.160445） |
+| 第 1 次 | 冷启动（**该轮用在线价格态 `state2/`**） | — / — | 见 A.5（0.115367） |
+| 第 2 次 | 复用缓存（行缓存命中） | **0.56 s** | 输出与第 1 次一致 |
 | 第 3 次 | 向会话 A 追加一条累计行（12000/3000/2000） | **0.57 s** | `requests=10 tokens=28410 cost=0.197568`（增量被正确并入） |
 
 > ⚠️ **两次实验的价格态不同**：A.4 的耗时与第 3 次数字取自**在线价格态**目录（`state2/`，
@@ -1380,6 +1438,11 @@ unpriced_models={"grok-4.5-build": 1000}`。
 > 追加事件的增量 = delta `6600/2400/1600` × gpt-5.5 在线价 `5/0.5/30` = **0.0822**，
 > 合计 **0.197568**，与 tokens `17810 + 10600 = 28410` 自洽。**离线态**（`state/`）的对应
 > 总量则是 A.2 的 **0.160445**——两者都同时被复算验证过。
+
+> **耗时归因（第 6 轮补测与复现）**：冷启动 = **2.54 s 墙钟 / 2.2 s 自报**；热缓存 =
+> **0.65 s 墙钟 / 0.2 s 自报**（与原文 0.56/0.57 s 同量级）。差异来源是
+> `client_usage_codex_event_cache.json` 是否命中，**与价格源是否可达无关**——
+> 离线（价格源不可达）2.5 s ≈ 在线首次 2.6 s，而在线第二次即降到 0.65 s。
 
 ### A.5 在线价格链（真实网络，仅取价格表）
 
@@ -1561,31 +1624,92 @@ unpriced_models={"grok-4.5-build": 1000}`。
 §1-§9 与附录范围内的事实可靠性已收敛；剩余不确定项仅为附录 C.3 列出的
 "上游/环境事实"（仓外可证）与附录 A.4 的两项不可复现量（耗时、聚合统计）。
 
+**第 6 轮（存疑项专项复核）**
+
+针对原 §C.3 的 9 条待确认项与附录 A.4 的两项不可复现量（现合并为 §C.3 的 10 条）逐项攻击
+（结果见 §C.3 重写版）。
+方法：**本机只读 `PRAGMA` 取真实 schema**、下载并统计 LiteLLM / models.dev 真实 payload、
+直接 import 源码函数做纯函数实验、`git log -S` + diff 判定实现意图、以及受控沙箱实验。
+实质产出：
+
+| # | 对象 | 结论 |
+| --- | --- | --- |
+| 1 | `apply_opencode_go_time_pricing` | **会重复放峰**：峰价条目在峰时段被再乘一次比例（`1.32 → 2.64`，再喂一次 `5.28`）；**GUI 侧 `monitor.py:1461-1480` 同构实现同样如此**；当前 models.dev 存标准价故未触发 |
+| 11 | §6.8 峰时段 | 原文"共 6 小时/天"算错，实测 UTC 小时 1/2/3 + 6/7/8/9 = **7 小时/天**（已改） |
+| 2 | 同日高水位 | **归属漂移时重复计入**：受控实验把旧快照的同一份量换到另一行后，`today` 从 9 请求/17810 tokens 跳到 10 请求/20110 tokens。**独立复核复现并加严**：触发门槛实际是"仅时间流逝"（ledger 丢弃 `Unassigned local`/`Codex local`），最坏 2×、污染不自愈、gap 行不会暴露 |
+| 3 | 三套 sqlite schema | 本机真实样本证实与代码反推一致（含 `total_cost_usd` 为 TEXT，故 `CAST` 必要） |
+| 4 | LiteLLM / models.dev 字段 | 22 项读取名单中的 `above_272k`/`flex`/`batches` 上游**确实提供**（125/244/392 条） |
+| 5 | `codex_auth_identity` 两侧差异 | git 历史判定为**同步遗漏**（守卫在 `5178394` 只加在导出器侧，该提交同时改过 `monitor.py`） |
+| 6 | 事件缓存 env 一名两用 | `0fb4590` 同一提交内的有意设计 |
+| 7 | 检查点转换器 | 无字段白名单，是 datetime→ISO + dict/list 全量递归 |
+| 8 | `monitor.py` 降级分支 | 静态确证不可达（模式集合已被前一段消费） |
+| 9 | 死代码外部调用 | 仓内（含打包脚本/CI/文档）无引用；另发现第 4 个死代码 `merge_codex_account_fallback_events` |
+| 10 | 附录 A.4 耗时 | 冷启动 2.2 s 与热缓存 0.2 s 的差异来自**行缓存是否命中**，与价格源可达性无关 |
+
+**本轮两大发现均经独立复核（2 路 subagent，各自重写脚本、自建目录、不复用报告脚本）**：
+重复放峰**未被证伪**（数值逐项吻合，且复核员进一步证实在 `monitor.py:1461-1480` 有同构实现、
+补充了 `kimi-k3`/未知模型不缩放等边界）；高水位重复**成立且触发条件比原报告更宽松**
+（零干预等 3 分钟即触发、最坏 2×、不自愈），复核员另指出 `restore_today_from_usage_history`
+是第二条独立推高路径。复核同时纠正了本文一处算错（§6.8 峰时段为 **7 小时/天**）。
+
 **复算复核**：第 3 轮独立用源码内置价表复算了附录 A.2 的全部数字
 （A 0.0243 / B 0.008375 / C 0.0567 / D 0.0021 / Codex 小计 0.091475 / Claude 0.06897 /
 合计 0.160445 / 9 请求 / 17810 token），**逐项一致，未发现复算偏差**。
 
-### C.3 待确认清单（未能从仓内取证，均为"上游/环境"事实）
+### C.3 存疑项复核结果（第 6 轮：逐项攻击原"待确认清单"）
 
-1. **上游写入方不在仓内**：Sub2API 管理端字段语义、Cockpit `request_logs` 建表语句、
-   OpenCodex `usage.jsonl` 写入方、ccSwitch 三张表的 DDL、Codex `state_5.sqlite` 的
-   `threads` 表 DDL —— 均只能由读取侧反推。
-2. **LiteLLM / models.dev 的字段完备性**：代码读取名单含 `*_above_272k*`、`*_flex`、
-   `*_batches`，但上游是否真的提供这些键未取证（沙箱只核对了裸键与常见字段）。
-3. **`apply_opencode_go_time_pricing` 对"本身已是峰价的在线条目"是否重复放峰**：
-   实现无条件按 `peak/standard` 比例放大，全仓没有"是否已是峰价"的判定；
-   测试只覆盖"在线值恰为标准价"（`tests/test_unpriced_model_accounting.py:616-637`）。
-4. **`monitor.py` 与导出器的 `codex_auth_identity` 差异是否有意**：无一致性测试
-   （对比 `live_usage_event_id` 有测试锁定），实际影响未评估。
-5. **`CLIENT_USAGE_CODEX_EVENT_CACHE` 一名两用**（路径 + 布尔开关）是否为有意设计：
-   行为已确认，意图未取证。
-6. **检查点 overlay 的完整字段白名单**：只确认顶层 5 键与常见 overlay 键，
-   `_checkpoint_json_value` 未逐行核对。
-7. **`client_usage_live_checkpoint.json` 的"按比例补齐"在极端场景（跨越重启的额度窗口）**
-   下是否会与权威快照短暂背离：未构造该场景实测。
-8. **`monitor.py:5950` 的降级分支是否可达**：静态推断与 `5928` 互斥，未运行时验证。
-9. **`add_codex_usage`、`_collapse_..._legacy`、文本版 cutoff 是否被外部脚本按名调用**：
-   仓内无调用点，仓外不可证。
+> 本轮专门针对原先列出的 9 条"上游/环境事实"与附录 A.4 的两项不可复现量逐条复核。
+> ✅ 已解决 / ◐ 部分解决 / ⭕ 仍不可证。
+
+1. **上游写入方不在仓内** ◐
+   - ✅ **三套读取侧 schema 已用本机真实样本核实**（只读 PRAGMA，未读任何行内容）：
+     `~/.codex/state_5.sqlite` 的 `threads` 表确有 `id:TEXT` / `rollout_path:TEXT`（共 42 列，
+     还有 `tokens_used`、`cwd`、`model` 等代码未用的列）；`~/.codex/logs_2.sqlite` 的 `logs` 表
+     确有 `ts:INTEGER` / `ts_nanos:INTEGER` / `feedback_log_body:TEXT`（12 列）；`~/.cc-switch/cc-switch.db`
+     的 `proxy_request_logs`（27 列）/`usage_daily_rollups`（15 列）/`providers`（18 列）列名与
+     `LEFT JOIN providers p ON p.id = l.provider_id AND p.app_type = l.app_type` 全部吻合。
+     其中 `total_cost_usd` 是 **TEXT** ⇒ 代码必须 `CAST(... AS REAL)`；`request_logs` 另有
+     `input_token_semantics` 列（与本文 §8.2 的跨来源口径问题呼应）。
+   - ⭕ Sub2API 管理端、Cockpit `request_logs`、OpenCodex `usage.jsonl` 本机无样本
+     （`~/.antigravity_cockpit`、`~/.opencodex` 不存在），仍只能由读取侧反推。
+2. **LiteLLM / models.dev 字段完备性** ✅ 实测解决：
+   - LiteLLM 真实 payload（4123 键）确实提供 `input/output_cost_per_token_above_272k_tokens`（各 125 条）、
+     `*_flex`（244/240）、`*_batches`（372/392）、`cache_*_priority` 等 —— 22 项读取名单不是凭空假设；
+     另有名单外的 `*_ultrafast`、`*_decisions`、`above_200k`/`above_100k` 变体（被代码忽略）。
+   - models.dev（230 provider）的 `cost` 子字段为 `input/output/cache_read/cache_write/tiers/
+     context_over_200k/reasoning/input_audio/output_audio` —— 代码只映射前四项。
+3. **`apply_opencode_go_time_pricing` 是否重复放峰** ✅ 实验确证（**会重复**）：
+   - 传入峰价 `1.32/0.044/3.96` + UTC 01:30 → 返回 **`2.64/0.088/7.92`**（应为 1.32）；传入标准价
+     `0.66/…` 才正确放大到 1.32。即实现无条件按 `peak/standard` 比例乘。
+   - **当前生产不触发**：`models.dev` 的 `opencode-go/deepseek-v4-pro` 存的是标准价
+     `0.66/1.98/0.022`（`deepseek-v4-flash` 为 `0.15/0.6/0.003`），且 LiteLLM 里**没有任何
+     `opencode-go/*` 键**（0 个）。只有上游把该渠道条目改成峰价、或用户手工写入峰价缓存才会重复计费。
+   - **双侧同源**：`monitor.py:1461-1480` 的 `adjust_live_opencode_go_time_price` 门禁与缩放逐行同构
+     （同样没有"已是峰价"判定），GUI 实时链路在用 per-token 峰价时会放大成 `2.64e-06/8.8e-08/7.92e-06`。
+   - 对照路径：内置兜底 `opencode_go_official_price_details` 不放大，峰价正确（1.32）。
+4. **两侧 `codex_auth_identity` 差异是否有意** ✅ git 历史解决：`usable_cockpit_identity` 守卫由
+   `5178394`（"Fix Cockpit attribution and live usage consistency"）引入，只加在
+   `client_usage_export.py`；该提交**同时修改了 `monitor.py`（34 行）**却没同步这个函数 ⇒
+   判定为**同步遗漏**（两份实现自 `ace7620` 起同源分叉），非有意分叉。
+5. **`CLIENT_USAGE_CODEX_EVENT_CACHE` 一名两用** ✅ 已解决：`0fb4590` 的 diff 显示"路径覆盖"
+   与"`_is_default_codex_path` 布尔判断"在**同一提交**引入 —— 有意的"自定义路径即强制持久化"设计。
+6. **检查点 overlay 字段白名单** ✅ 已解决：`_checkpoint_json_value`（`11071-11081`）**没有白名单**，
+   它是"`datetime` → ISO（`CN_TZ`，微秒）+ dict/list 递归"的全量转换器；字段集由 overlay 构造侧决定。
+7. **"按比例补齐"的边界** ◐ 检查点比例补齐本身未发现异常；但本轮顺带确证了一个**同族但更严重的
+   问题**（见 §8.2 第 10 条：同日高水位在归属漂移时重复计入总量）。
+8. **`monitor.py` 降级分支可达性** ✅ 静态确证不可达：`{"fallback","auto-sub2api"}` 已被前面的
+   `if self.mode in {"", "auto", "fallback", "auto-sub2api"}` 分支消费并提前返回，故 `5949` 的
+   `if` 恒为 False —— 到达 `5946` 的 mode 只剩 `sub2api`/`server` 等，`fetch_sub2api_state`
+   抛异常时只会 `raise`。
+9. **死代码是否被外部脚本按名调用** ◐ 全仓（含 `build-windows.ps1`、`packaging/*.iss`、
+   `.github/**`、`docs/**`、`tests/**`）对 `add_codex_usage`、`_collapse_cockpit_request_usage_events_legacy`、
+   文本版 `codex_fork_replay_cutoff` 的引用**只有定义行**；仓外调用不可证。本轮另发现
+   第 4 个死代码：`merge_codex_account_fallback_events`（`8323-8342`，无调用点）。
+10. **附录 A.4 的两项不可复现量** ✅ 已复现/归因：
+    - 耗时：热缓存 0.65 s（墙钟）/ 0.2 s（导出器自报）与原文 0.56/0.57 s 同量级；
+      **冷启动**补测 2.5 s（墙钟）/ 2.2 s（自报，含首次建立行缓存）。差异来源是**行缓存是否命中**，
+      与价格源可达性无关（离线 2.5 s ≈ 在线首次 2.6 s）。
+    - 聚合统计（118 符号 / 108 命中 / 912 行号）属本文自评，可由文档内脚本复现，非仓内事实。
 
 ### C.4 与 README 声明的逐条对照
 
