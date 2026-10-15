@@ -1,8 +1,6 @@
-[workspace]
-
 [package]
 name = "tokenscope-app"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "TokenScope 桌面应用壳（Tauri 2 + Vue 3）"
 license = "MIT"
@@ -11,7 +9,7 @@ license = "MIT"
 name = "tokenscope_tauri_lib"
 crate-type = ["rlib"]
 
-# GUI 进程名 tokenscope.exe（与 CLI 同名，分属不同 target 目录互不覆盖）
+# GUI 进程名 tokenscope.exe：唯一应用二进制，核心库在 crates/tokenscope-core。
 [[bin]]
 name = "tokenscope"
 path = "src/main.rs"
@@ -20,24 +18,21 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [features]
-# 默认构建不含验收入口（与根库一致：普通构建行为完全不变）。
+# 默认构建不含验收入口（与核心库一致：普通构建行为完全不变）。
 default = []
-# RC10：显式透传根库同名 feature——`tauri build --features acceptance` 只
-# 会传到这里，根库的 acceptance 分支必须随之启用，否则隔离根解析不到、
+# RC10：显式透传核心库同名 feature——`tauri build --features acceptance` 只
+# 会传到这里，核心库的 acceptance 分支必须随之启用，否则隔离根解析不到、
 # 验收实例会带着真实 HOME 启动。
 acceptance = ["tokenscope/acceptance"]
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokenscope = { path = ".." }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokenscope = { path = "../crates/tokenscope-core" }
 tauri-plugin-opener = "2.7.0"
-anyhow = "1.0.104"
+anyhow = { workspace = true }
 tauri-plugin-single-instance = "2.5.2"
 tauri-plugin-autostart = "2.7.0"
-log = "0.4.34"
-jiff = "0.2.37"
-
-# 独立于根 workspace（根已 exclude 本目录）：GUI 进程名为 tokenscope.exe，
-# 与根 target 下的 CLI tokenscope.exe 分属不同目录，互不覆盖。
+log = { workspace = true }
+jiff = { workspace = true }

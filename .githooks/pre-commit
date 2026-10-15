@@ -1,26 +1,25 @@
 #!/bin/sh
 # TokenScope 提交门禁（启用：git config core.hooksPath .githooks）
-# 计划 A5（F09）：根库与 Tauri 壳是两个独立 workspace（根 Cargo.toml
-# exclude src-tauri），根命令不覆盖壳——两个 manifest 必须显式分别门禁。
+#
+# 检查选择集中在 scripts/pre_commit_checks.py：按暂存区分类，纯文档只跑文档检查，
+# 编译输入按清单消费方选择包与构建模式，未知类别 / 清单缺失或损坏 / 构建与门禁
+# 入口变更回退完整检查。PR CI 仍执行完整门禁，本地选择不减少远程验证。
+#
+# 强制完整检查：TOKENSCOPE_PRECOMMIT_MODE=full git commit ...
+# 只打印选中检查：python -B scripts/pre_commit_checks.py --explain
+#
+# Git 会为本次提交设置 GIT_DIR / GIT_INDEX_FILE：`git commit --only <path>` 使用
+# 临时 index，钩子必须把它交给检查器，否则检查器会读默认 index、看到"没有暂存
+# 文件"而放行内容未受检的提交。自建临时仓库的是测试，它们各自隔离环境。
 set -e
+
 # rustup 默认安装位置兜底：Git Bash / 某些钩子环境可能不继承用户 PATH
 PATH="$HOME/.cargo/bin:$PATH"
 export PATH
-echo "[pre-commit] 根库 cargo fmt --check"
-cargo fmt --all -- --check
-echo "[pre-commit] 根库 cargo clippy"
-cargo clippy --workspace --all-targets -- -D warnings
-echo "[pre-commit] 根库 cargo test"
-cargo test --workspace --quiet
-echo "[pre-commit] 壳 cargo fmt --check"
-cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-echo "[pre-commit] 壳 cargo clippy"
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-echo "[pre-commit] 壳 cargo test"
-cargo test --manifest-path src-tauri/Cargo.toml --quiet
-echo "[pre-commit] frontend typecheck"
-pnpm --dir frontend typecheck
-echo "[pre-commit] frontend format:check"
-pnpm --dir frontend format:check
-echo "[pre-commit] frontend test"
-pnpm --dir frontend test
+
+if ! command -v python >/dev/null 2>&1; then
+  echo "[pre-commit] 找不到 python：无法选择检查，拒绝在无验证的情况下提交" >&2
+  exit 2
+fi
+
+exec python -B scripts/pre_commit_checks.py "$@"

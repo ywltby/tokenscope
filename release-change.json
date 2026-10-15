@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "控件材质与浮层可读性"
+  "summary": "统一为根虚拟 workspace，核心库迁入 crates/tokenscope-core，门禁按暂存区选择并新增构建输入清单"
 }

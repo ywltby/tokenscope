@@ -34,19 +34,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **rustup 默认 stable 工具链，Rust 1.99.0**（cargo/rustc 1.99.0，`stable-x86_64-pc-windows-msvc`，含 clippy 与 rustfmt；2026-10-03 安装确认）。升级工具链后回写此处。
 - Cargo 工程用 **edition 2024**；不引入 nightly-only 特性。
+- **workspace 布局（2026-10-15）**：仓库根是**虚拟 workspace**（没有 `[package]`、不写应用版本），成员为 `crates/tokenscope-core`（核心库，package 名仍是 `tokenscope`，原根 `src/`、`tests/` 与全部 fixture 已迁入）与 `src-tauri`（桌面壳 `tokenscope-app`，唯一应用二进制 `tokenscope.exe`）。应用版本写在**核心 manifest**。根目录普通 `cargo build/test/clippy` 覆盖两个默认成员；只查核心库用 `cargo test -p tokenscope`，只构建 GUI 用 `cargo build -p tokenscope-app --bin tokenscope`。
+- **单一锁与 target**：受版本管理的锁只有根 `Cargo.lock`（恰好含 `tokenscope`、`tokenscope-app` 两个无 source 的本地包，版本与四份版本配置一致），不再有 `src-tauri/Cargo.lock`；默认输出统一到根 `target/`。
 - 本仓是可执行应用，**Cargo.lock 入库**（勿 gitignore）。
 - 格式化以仓库根 `rustfmt.toml` 为准（钉 `newline_style = "Unix"`，与 .gitattributes / .editorconfig 一致）。
+- **构建输入清单**：`scripts/build-inputs.json` 由 `python -B scripts/build_inputs.py --update` 从 Cargo 依赖信息生成，记录被编译进程序的非 Rust 输入及其消费包与构建模式；改 `include_str!`/`include_bytes!`/构建脚本输入后必须更新并提交清单，CI 两种构建后跑 `--check` 校验。
 
 ## 常用命令
 
 仓库根 `C:\Users\admin\Desktop\项目\tokenscope` 下：
 
 ```powershell
-cargo build                        # 构建（workspace：根 crate + src-tauri）
-cargo fmt                          # 格式化（提交前必须跑过，--check 必须干净）
-cargo clippy --all-targets         # 静态检查（提交前必须干净）
-cargo test                         # 全部测试
-cargo test usage_event             # 按名过滤单个测试
+cargo build                        # 构建两个默认成员（核心库 + 桌面壳）
+cargo fmt --all                    # 格式化（提交前必须跑过，--check 必须干净）
+cargo clippy --locked --workspace --all-targets   # 静态检查（提交前必须干净）
+cargo test --locked --workspace    # 全部测试（两个成员）
+cargo test -p tokenscope usage_event   # 只查核心库；按名过滤单个测试
+cargo test -p tokenscope-app       # 只查壳
 ```
 
 GUI（前端在 `frontend/`，Tauri 壳在 `src-tauri/`；Tauri CLI 装于 frontend devDependencies）：
@@ -66,7 +70,7 @@ GUI（Tauri CLI 在仓库根调用——CLI 只向下搜索 src-tauri，在 fron
 ```
 
 - 前端 TypeScript 钉 TypeScript 5.x（vue-tsc 与 TS 7 不兼容，勿升级）；Naive UI 组件库、ECharts 图表（直接用 echarts，未包 vue-echarts）。
-- **格式化分工**：Rust 用 `cargo fmt`（`rustfmt.toml` 钉 LF）；前端用 Prettier（`frontend/.prettierrc.json`，双引号/分号/2 空格/printWidth 100）。**提交钩子**（`.githooks/pre-commit`，克隆后执行一次 `git config core.hooksPath .githooks` 启用，计划 A5 后）会自动跑：根库 fmt/clippy/test + **壳（src-tauri）fmt/clippy/test**（两个独立 manifest，根命令不覆盖壳）+ 前端 typecheck + format:check + **test（vitest）**。CI（`.github/workflows/ci.yml`）在 push/PR 上跑同一门禁（clippy 加 `-D warnings`，另含前端 build）；`tauri build` 属发布验收不进 CI。
+- **格式化分工**：Rust 用 `cargo fmt`（`rustfmt.toml` 钉 LF）；前端用 Prettier（`frontend/.prettierrc.json`，双引号/分号/2 空格/printWidth 100）。**提交钩子**（`.githooks/pre-commit`，克隆后执行一次 `git config core.hooksPath .githooks` 启用）**按暂存区选择检查**（`scripts/pre_commit_checks.py`）：纯文档提交只跑文档检查；Rust 代码按包与构建模式选择 workspace 或壳的 clippy+test；前端改动跑 typecheck/format:check/test/build；构建与门禁入口（Cargo 清单与锁、`build.rs`、`.cargo/**`、`.github/**`、`.githooks/**`、清单与选择器自身）强制完整检查，未识别路径同样完整兜底。用 `TOKENSCOPE_PRECOMMIT_MODE=full` 强制完整模式，`python -B scripts/pre_commit_checks.py --explain` 只打印选中检查。CI（`.github/workflows/ci.yml`）在 push/PR 上跑**不减的完整门禁**（普通与 acceptance 两套 workspace clippy/test、构建输入清单校验、前端 build 与 E2E）；`tauri build` 属发布验收不进 CI。
 - **测试密闭性（2026-10-05 事故修复，必须遵守）**：任何测试（单元/e2e）构造 `SummaryOptions` 时，`cache_dir` 与 `pricing_index` **必须注入临时目录**，禁止落回默认 `~/.tokenscope`——否则测试会把用户真实缓存 purge 成 fixture，GUI 每次启动都全量冷扫描（用户 1.2 GB 日志，分钟级加载）。新测试评审时先看这两项。
 - **真实数据性能验收/缓存预热**（`#[ignore]`，需显式环境变量，会全量解析本机 `~/.claude`、`~/.codex` 并写入 `~/.tokenscope/history.db`）：
 
@@ -103,10 +107,10 @@ $env:TOKENSCOPE_REAL_PERF = "1"; cargo test --release --test perf_real_data -- -
 
 ## 提交流程
 
-- **main 版本递增（用户 2026-10-12 定稿）**：每个准备合入 main 的批次必须递增一次 `0.x.y`，暂不发 `1.x`；修复/文档/维护选 patch，新功能或不兼容变化选 minor，混合取更高等级。同一个 PR 的补修不重复加号。先 fetch 最新 main，再执行 `python -B scripts/bump_version.py --bump minor --summary "本轮变更说明"`（修复改用 patch），工具同步四配置/两份 Cargo.lock/声明；用 `--check --base-ref origin/main` 自查。不要单改版本字符串或顺手更新第三方依赖。尚待确认的方案文档不分配发行版本；准备合入 main 的文档 PR 也须 patch。
+- **main 版本递增（用户 2026-10-12 定稿）**：每个准备合入 main 的批次必须递增一次 `0.x.y`，暂不发 `1.x`；修复/文档/维护选 patch，新功能或不兼容变化选 minor，混合取更高等级。同一个 PR 的补修不重复加号。先 fetch 最新 main，再执行 `python -B scripts/bump_version.py --bump minor --summary "本轮变更说明"`（修复改用 patch），工具同步四份版本配置（核心 manifest、壳 manifest、`frontend/package.json`、`src-tauri/tauri.conf.json`）、唯一根 `Cargo.lock` 与声明；用 `--check --base-ref origin/main` 自查。历史基线的版本按该 ref 自身布局读取（迁移前的提交读根 `[package]`，迁移后读核心 manifest）。不要单改版本字符串或顺手更新第三方依赖。尚待确认的方案文档不分配发行版本；准备合入 main 的文档 PR 也须 patch。
 - **发布与升级**：main 的 gate/build/五场景安装/两项真实旧版升级通过后由同一流水线创建 `v0.x.y` 和预发布，标签与资产不可覆盖；历史 0.1.0 固定 8d1d90de 的原资产，不重新构建历史包。新 main 提交不取消另一个提交的发布。真实安装、卸载和升级脚本只在 GitHub-hosted 一次性 Runner 执行，本机仅测试契约，不能删除真实 `~/.tokenscope`；不恢复可选旧包变量跳过分支。实际来源以标签解引用的提交和固定资产哈希判断，已有标签时 Release 的 target_commitish 只是创建提示。
 - **默认自动提交推送**：完成任何文件修改后，除非用户明确说"不 commit / 暂不提交 / 先别提交 / 不要 push"等同义要求，或存在验证失败/未解决阻断，自动执行验证 → commit → push，不再等待用户额外提醒。文档修改也算一批文件修改。
-- 完成修改后：先自查（`cargo fmt --check` + `cargo clippy` + `cargo test` + 前端 `typecheck`/`format:check` 全绿；pre-commit 钩子会再自动跑一遍）→ `git add`（优先具体文件名，避免目录级 add）→ `git commit` → `git push`，**严格串行执行，禁止并行**。
+- 完成修改后：先自查（本地按暂存区选择——提交钩子只跑选中检查；要一次跑全可用 `TOKENSCOPE_PRECOMMIT_MODE=full`，未知变更、清单缺失或损坏一律完整兜底；PR CI 的完整门禁不减）→ `git add`（优先具体文件名，避免目录级 add）→ `git commit` → `git push`，**严格串行执行，禁止并行**。验证失败不得提交；禁止 `--no-verify`，不得关闭 CI 或降低验收阈值。
 - commit message 遵循 **Conventional Commits 且必须有中文正文**，说明改了什么、为什么、影响范围（例：`feat(解析): 接入 Claude Code 会话日志适配器`）。
 - 一个 commit 只解决一类问题。
 - **严禁 `--no-verify`**；严禁未授权 push 到非当前分支。

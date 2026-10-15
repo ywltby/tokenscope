@@ -1,4 +1,14 @@
-"""同步应用版本；PR/主分支按实际 Git 基线只读校验一次递增。"""
+"""同步应用版本；PR/主分支按实际 Git 基线只读校验一次递增。
+
+布局契约（PR1）：仓库根是虚拟 workspace，应用版本写在核心 manifest
+`crates/tokenscope-core/Cargo.toml`；根 `Cargo.toml` 只有 workspace 表，
+禁止向其写入 version。受版本管理的锁只有根 `Cargo.lock`，其中两个本地包
+（`tokenscope`、`tokenscope-app`）必须各有一条无 source 记录且版本一致。
+
+历史 ref 的版本按该 ref 自身的布局读取：该提交存在核心 manifest 就从核心
+manifest 取，不存在才按旧布局读根 manifest 的 `[package]`；核心 manifest
+损坏或缺失 `package.version` 一律失败，不静默回退旧布局。
+"""
 
 from __future__ import annotations
 
@@ -16,9 +26,12 @@ from release_metadata import read_versions
 
 ROOT = Path(__file__).resolve().parent.parent
 ZERO_VERSION = re.compile(r"0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
-CONFIGS = ("Cargo.toml", "src-tauri/Cargo.toml", "frontend/package.json",
-           "src-tauri/tauri.conf.json")
-LOCKS = ("Cargo.lock", "src-tauri/Cargo.lock")
+CORE_MANIFEST = "crates/tokenscope-core/Cargo.toml"
+SHELL_MANIFEST = "src-tauri/Cargo.toml"
+LEGACY_MANIFEST = "Cargo.toml"
+JSON_CONFIGS = ("frontend/package.json", "src-tauri/tauri.conf.json")
+CONFIGS = (CORE_MANIFEST, SHELL_MANIFEST, *JSON_CONFIGS)
+LOCK = "Cargo.lock"
 
 
 def git(root, *args):
@@ -26,10 +39,20 @@ def git(root, *args):
                                    encoding="utf-8", stderr=subprocess.PIPE).strip()
 
 
+def git_error_text(exc):
+    detail = exc.stderr if exc.stderr is not None else exc.output
+    if isinstance(detail, bytes):
+        detail = detail.decode("utf-8", "replace")
+    return (detail or "").strip()
+
+
 def resolve(root, ref):
     if not isinstance(ref, str) or not ref or ref.startswith("-"):
         raise ValueError("版本基线引用非法")
-    sha = git(root, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}")
+    try:
+        sha = git(root, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}")
+    except (subprocess.CalledProcessError, OSError) as exc:
+        raise ValueError(f"版本基线引用无法解析：{ref}") from exc
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise ValueError("版本基线不是完整提交 SHA")
     return sha
@@ -51,30 +74,77 @@ def uniform(versions):
     return version
 
 
+def ref_has(root, sha, name):
+    """该提交的树里是否存在该路径。
+
+    不存在返回 False；Git 查询本身失败（非仓库、对象损坏、命令错误）抛
+    ValueError——这与“该 ref 采用旧布局”是两件事，不能混淆后回退。
+    """
+    try:
+        output = git(root, "ls-tree", "--name-only", sha, "--", name)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        detail = git_error_text(exc) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        raise ValueError(f"读取历史版本布局失败：{detail or exc}") from exc
+    return bool(output.strip())
+
+
+def file_at(root, sha, name):
+    try:
+        return git(root, "show", f"{sha}:{name}")
+    except (subprocess.CalledProcessError, OSError) as exc:
+        detail = git_error_text(exc) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        raise ValueError(f"读取 {name}（{sha[:12]}）失败：{detail or exc}") from exc
+
+
+def manifest_version(root, sha, name):
+    try:
+        data = tomllib.loads(file_at(root, sha, name))
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"{name}（{sha[:12]}）的 TOML 无法解析") from exc
+    package = data.get("package")
+    if not isinstance(package, dict) or not isinstance(package.get("version"), str):
+        raise ValueError(f"{name}（{sha[:12]}）缺少 package.version")
+    return package["version"]
+
+
+def json_version(root, sha, name):
+    try:
+        value = json.loads(file_at(root, sha, name))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name}（{sha[:12]}）的 JSON 无法解析") from exc
+    if not isinstance(value, dict) or not isinstance(value.get("version"), str):
+        raise ValueError(f"{name}（{sha[:12]}）缺少 version")
+    return value["version"]
+
+
 def historical_versions(root, ref):
     sha = resolve(root, ref)
-    versions = {}
-    for name in CONFIGS:
-        text = git(root, "show", f"{sha}:{name}")
-        versions[name] = (tomllib.loads(text)["package"]["version"] if name.endswith(".toml")
-                          else json.loads(text)["version"])
+    manifest = CORE_MANIFEST if ref_has(root, sha, CORE_MANIFEST) else LEGACY_MANIFEST
+    versions = {manifest: manifest_version(root, sha, manifest),
+                SHELL_MANIFEST: manifest_version(root, sha, SHELL_MANIFEST)}
+    for name in JSON_CONFIGS:
+        versions[name] = json_version(root, sha, name)
     return sha, uniform(versions)
 
 
 def local_names(root):
     return [tomllib.loads((root / name).read_text(encoding="utf-8"))["package"]["name"]
-            for name in CONFIGS[:2]]
+            for name in (CORE_MANIFEST, SHELL_MANIFEST)]
 
 
 def validate_locks(root, version):
-    names = local_names(root)
-    for index, name in enumerate(LOCKS):
-        packages = tomllib.loads((root / name).read_text(encoding="utf-8"))["package"]
-        expected_names = names[:1] if index == 0 else names
-        for package_name in expected_names:
-            rows = [p for p in packages if p["name"] == package_name and "source" not in p]
-            if len(rows) != 1 or rows[0]["version"] != version:
-                raise ValueError(f"{name} 的本项目包 {package_name} 版本不一致")
+    """唯一根锁必须恰好含两个无 source 的本地包，版本与应用版本一致。
+
+    第三方同名但带 source 的记录不是本项目包，既不参与校验也不被改写。
+    """
+    packages = tomllib.loads((root / LOCK).read_text(encoding="utf-8")).get("package")
+    if not isinstance(packages, list):
+        raise ValueError(f"{LOCK} 缺少 package 记录")
+    for package_name in local_names(root):
+        rows = [p for p in packages
+                if p.get("name") == package_name and "source" not in p]
+        if len(rows) != 1 or rows[0].get("version") != version:
+            raise ValueError(f"{LOCK} 的本项目包 {package_name} 版本不一致")
 
 
 def declaration(root):
@@ -129,7 +199,7 @@ def check_event(root, event, event_name):
 
 def replace_version(text, version):
     updated, count = re.subn(r'^version\s*=\s*"[^"]+"', f'version = "{version}"',
-                            text, count=1, flags=re.M)
+                             text, count=1, flags=re.M)
     if count != 1:
         raise ValueError("缺少可更新的 version 字段")
     return updated
@@ -201,17 +271,16 @@ def bump(root, kind, base_ref="origin/main", summary="版本更新"):
                 raise ValueError(f"{name} 缺少唯一 package 表")
         changes[path] = updated
     names = set(local_names(root))
-    for name in LOCKS:
-        path = root / name
-        text = path.read_text(encoding="utf-8")
+    path = root / LOCK
+    text = path.read_text(encoding="utf-8")
 
-        def update_package(match):
-            package = tomllib.loads(match[0])["package"][0]
-            return (replace_version(match[0], version)
-                    if package["name"] in names and "source" not in package else match[0])
+    def update_package(match):
+        package = tomllib.loads(match[0])["package"][0]
+        return (replace_version(match[0], version)
+                if package["name"] in names and "source" not in package else match[0])
 
-        changes[path] = re.sub(r"(?ms)^\[\[package\]\]\n.*?(?=^\[\[package\]\]|\Z)",
-                               update_package, text)
+    changes[path] = re.sub(r"(?ms)^\[\[package\]\]\n.*?(?=^\[\[package\]\]|\Z)",
+                           update_package, text)
     changes[root / "release-change.json"] = json.dumps(
         {"schema_version": 1, "kind": kind, "summary": summary},
         ensure_ascii=False, indent=2) + "\n"

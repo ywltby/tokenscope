@@ -53,6 +53,16 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertEqual(len(versions), 4)
         self.assertEqual(len(set(versions.values())), 1)
 
+    def test_repository_versions_come_from_the_four_configs_not_the_virtual_root(self):
+        versions = read_versions(Path(__file__).resolve().parent.parent)
+        self.assertEqual(set(versions), {
+            "crates/tokenscope-core/Cargo.toml",
+            "src-tauri/Cargo.toml",
+            "frontend/package.json",
+            "src-tauri/tauri.conf.json",
+        })
+        self.assertNotIn("Cargo.toml", versions)
+
 
 if __name__ == "__main__":
     unittest.main()

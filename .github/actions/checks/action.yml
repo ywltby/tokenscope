@@ -16,29 +16,40 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         pwsh -NoProfile -File scripts/test_upgrade_helpers.ps1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    - name: 根库 cargo fmt --check
+    # 检查选择器与构建输入清单也属于门禁入口：它们自身的契约测试必须在完整
+    # 门禁里跑，避免"改选择器只靠自己放行"。
+    - name: Selector and build-input contracts
+      shell: pwsh
+      run: |
+        python -B -m unittest discover -s scripts -p "test_build_inputs.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_pre_commit_checks.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_check_staged_docs.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_build_paths.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_script_checks.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_review15_regressions.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        pwsh -NoProfile -File scripts/check_powershell_syntax.ps1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B scripts/check_node_syntax.py
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # 统一 workspace：一次 fmt --all 加一次 workspace clippy/test 即覆盖两个
+    # package，不再保留分根库/壳的重复轮次。
+    - name: cargo fmt --all --check
       shell: pwsh
       run: cargo fmt --all -- --check
 
-    - name: 根库 cargo clippy
+    - name: workspace cargo clippy
       shell: pwsh
       run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-    - name: 根库 cargo test
+    - name: workspace cargo test
       shell: pwsh
       run: cargo test --locked --workspace
-
-    - name: 壳 cargo fmt --check
-      shell: pwsh
-      run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-
-    - name: 壳 cargo clippy
-      shell: pwsh
-      run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-
-    - name: 壳 cargo test
-      shell: pwsh
-      run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
     - name: frontend typecheck
       shell: pwsh
@@ -80,18 +91,19 @@ runs:
       run: |
         pwsh -NoProfile -File scripts/test_install_helpers.ps1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    - name: 根库 acceptance clippy
+    - name: workspace acceptance clippy
       shell: pwsh
       run: cargo clippy --locked --workspace --all-targets --features acceptance -- -D warnings
-    - name: 根库 acceptance test
+    - name: workspace acceptance test
       shell: pwsh
       run: cargo test --locked --workspace --features acceptance
-    - name: 壳 acceptance clippy
+    # W05c：重建两种模式的编译输入并与受版本管理的清单比较。check 自身先清理
+    # 两个本地 package（不是整仓 clean），因此证据只可能来自本次构建。
+    - name: Build input manifest matches this build (W05c)
       shell: pwsh
-      run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --features acceptance -- -D warnings
-    - name: 壳 acceptance test
-      shell: pwsh
-      run: cargo test --locked --manifest-path src-tauri/Cargo.toml --features acceptance
+      run: |
+        python -B scripts/build_inputs.py --check --evidence qa-artifacts/build-inputs/ci
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: Release metadata tests
       shell: pwsh
       run: python -m unittest discover -s scripts -p "test_release_metadata.py" -v

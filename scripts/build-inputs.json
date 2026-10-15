@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "generated": [
+    {
+      "path": "crates/tokenscope-core/tests/fixtures/cache/schema-v3.sql",
+      "kind": "file",
+      "consumers": [
+        {
+          "package": "tokenscope",
+          "mode": "acceptance"
+        },
+        {
+          "package": "tokenscope",
+          "mode": "default"
+        }
+      ]
+    },
+    {
+      "path": "docs/privacy.md",
+      "kind": "file",
+      "consumers": [
+        {
+          "package": "tokenscope-app",
+          "mode": "acceptance"
+        },
+        {
+          "package": "tokenscope-app",
+          "mode": "default"
+        }
+      ]
+    },
+    {
+      "path": "src-tauri/capabilities",
+      "kind": "directory",
+      "consumers": [
+        {
+          "package": "tokenscope-app",
+          "mode": "acceptance"
+        },
+        {
+          "package": "tokenscope-app",
+          "mode": "default"
+        }
+      ]
+    },
+    {
+      "path": "src-tauri/src/acceptance_csp.js",
+      "kind": "file",
+      "consumers": [
+        {
+          "package": "tokenscope-app",
+          "mode": "acceptance"
+        }
+      ]
+    },
+    {
+      "path": "src-tauri/tauri.conf.json",
+      "kind": "file",
+      "consumers": [
+        {
+          "package": "tokenscope-app",
+          "mode": "acceptance"
+        },
+        {
+          "package": "tokenscope-app",
+          "mode": "default"
+        }
+      ]
+    }
+  ],
+  "manual": []
+}
