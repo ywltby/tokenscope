@@ -94,8 +94,10 @@ CHECK_COMMANDS = {
     DOC_CHECK: [["python", "-B", "scripts/check_staged_docs.py"]],
 }
 
+# 完整模式合并为「一次 fmt + 一次 workspace 两模式 clippy/test + 前端门禁 + 脚本与
+# 文档」：workspace 轮次已覆盖两个 package，不再叠加壳轮次（壳轮次只在壳改动被选中
+# 时执行，见 CHECK_COMMANDS）。
 FULL_CHECKS = ("rust-fmt", "rust-core-default", "rust-core-acceptance",
-               "rust-shell-default", "rust-shell-acceptance",
                "frontend-typecheck", "frontend-format", "frontend-test", "frontend-build",
                SCRIPTS_CHECK, DOC_CHECK)
 

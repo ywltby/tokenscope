@@ -206,16 +206,16 @@ W05a/W05b 当前均未实施。完成标准：非构建输入的文档提交只�
 | W04 路径接线 | 已完成 | `6f6f4dc`；残留检索 `W01/grep-old-target.txt`、`W01/grep-shell-manifest.txt` |
 | W05 门禁与缓存 | 已完成（本地） | `6f6f4dc`；`W05/test-pre-commit.txt`（30 OK）、`W05/test-check-staged-docs.txt`（15 OK）；真实提交 `a26961f`/`c0497ca` 触发完整门禁并通过 |
 | W05c 构建输入清单 | 已完成（本地） | `abc4ef5`；`W05/build-inputs-update.txt`、`W05/build-inputs-check-final.txt`（零差异）、`W05/build-inputs-check-negative2.txt`（漏登记+paths 未覆盖双重检出） |
-| W06 构建验收与旧目录清理 | 部分完成 | 旧 target 只读测量见第 6 节；隔离 Runner 验收与删除待用户确认 |
-| W07 文档与交付 | 部分完成 | `CLAUDE.md`/`README.md`/`stats-semantics.md` 已更新、版本 0.3.2；远程门禁与推送待执行 |
+| W06 构建验收与旧目录清理 | 本机部分完成 | `W06/isolated-checkout.txt`（隔离 checkout 冷编译两模式、旧入口不新建子 target/子锁）、`W06/build-and-acceptance.txt`（生产 NSIS + 资产收集 + 验收包 + 原生 E2E）；旧 target 按用户决策登记待清理（见 6.1） |
+| W07 文档与交付 | 部分完成 | `fda4a6c` 起 HEAD：`CLAUDE.md`/`README.md`/`stats-semantics.md` 已更新、版本 0.3.2、`--check` 通过、分支已推送；远程门禁待创建 PR |
 
 - [x] metadata 两个成员、正确默认成员与统一 target_directory。
 - [x] 根是虚拟 workspace，核心源码/测试/fixture 完整迁移，无旧路径副本；跨 cwd 测试、旧/新 Git 基线版本读取均通过。
 - [x] 仅一个受版本管理的 Cargo.lock，两个本地包版本正确，第三方依赖无未解释漂移。
 - [x] 旧 CLI 同名规避配置和当前文档说明全部清除，共享依赖 features 保持正确。
-- [x] 钩子、CI、缓存、NSIS 收集与原生验收统一新布局；普通/acceptance 覆盖无损（本地门禁全绿）。
-- [ ] 生产包、验收包、固定旧版升级均取得当前提交的实跑证据（需推送后由 CI/Actions 提供）。
-- [ ] 旧 target 已安全清理，或明确记录被占用/共享而暂缓（已测量，等待用户确认）。
+- [x] 钩子、CI、缓存、NSIS 收集与原生验收统一新布局；普通/acceptance 覆盖无损（本地门禁逐条 exit 0，生产与验收包本机实跑）。
+- [ ] 生产包与验收包已取得当前提交的实跑证据（6.6）；**固定旧版升级仍未执行**——属一次性 Actions Runner，待用户创建 PR 后由 Actions 提供。
+- [ ] 旧 target 已安全清理，或明确记录被占用/共享而暂缓（已测量，用户 2026-10-15 决定暂缓并登记为待清理）。
 
 ## 4. 三份计划共同的执行与交付约束
 
@@ -353,7 +353,71 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 
 **用户 2026-10-15 决策：暂不创建 PR。** 分支已推送到 `origin/feat/workspace-layout`（HEAD `4488b56`），本轮不产生远程 CI、安装升级与 Native UI E2E 证据，因此不报告“合并就绪”；这些门槛的实跑证据待用户确认后由 Actions 提供。
 
-### 6.2 过程事件（已在当轮修复）
+### 6.3 W04 逐项结论（§5.1.5 要求每项记录「已改＋测试」或「无需改＋依据」）
+
+| W04 表格项 | 结论 | 依据 / 验证 |
+| --- | --- | --- |
+| `frontend/scripts/native-acceptance.mjs` | 已改 | `EXE_DEFAULT` 改为根 `target/release/tokenscope.exe`；c16e023 的输出路径与日志复制修复保留。验收包构建后 exe 落在根 target，原生 E2E 的 `evidence.json` 记录的正是该路径（见 6.6） |
+| `.github/workflows/ui-e2e.yml` | 已改 | 构建命令改为 `cargo build --locked -p tokenscope-app --release --features acceptance,tauri/custom-protocol --bin tokenscope`，显式 GUI package、release 与两 feature，产物位置与脚本默认路径一致 |
+| `.github/workflows/release.yml` | 已改 | NSIS 与 exe 收集改为 `target/x86_64-pc-windows-msvc/release/...`，保留显式目标三元组；本机 production 构建 + `release_assets.py collect` 以同一路径实测通过（见 6.6） |
+| `.github/workflows/install-test.yml` | 已改 | 与 release.yml 使用同一产物路径规则，仍收集并校验同一个待发布安装包；paths 过滤从 `src/**` 改为 `crates/tokenscope-core/**` |
+| `scripts/release_assets.py` 及测试 | 无需改 | 收集接口以 `--bundle`/`--executable` 参数接收路径，本身不含仓库布局假设；唯一直接读取的 `src-tauri/tauri.conf.json` 未迁移，仍是正确路径。`test_release_assets.py` 全绿 |
+| `.gitignore` | 已改 | `target` 规范为 `target/`，保持所有层级目录忽略（含历史子目录遗留），未缩成仅根 `/target` |
+| 工作流 paths、脚本引用、当前开发文档 | 已改 | `install-test.yml` paths 已更新；`CLAUDE.md`、`README.md`、`docs/stats-semantics.md` 的源码/测试路径改指 `crates/tokenscope-core`；历史 audit/review 记录不改写事实 |
+| `src-tauri/target` 残留检索（§5.1.5） | 已核对 | 非 docs 命中为 0；仅历史报告保留旧路径作为当时证据 |
+
+### 6.4 本地交付门槛（计划 §4.2 命令表，逐条执行，非零即停）
+
+`qa-artifacts/workspace-layout/pr1-local-gate.txt`（脚本 `qa-artifacts/workspace-layout/tools/local_gate.ps1`）。全部 14 条 exit 0，未见“后续成功覆盖失败”的情形：
+
+| 命令 | 结果 | 耗时 |
+| --- | --- | --- |
+| `cargo fmt --all -- --check` | exit 0 | 1.1s |
+| `cargo clippy --locked --workspace --all-targets -- -D warnings` | exit 0 | 1.3s |
+| `cargo test --locked --workspace` | exit 0，548 通过 / 10 忽略 | 74.6s |
+| `cargo clippy --locked --workspace --all-targets --features acceptance -- -D warnings` | exit 0 | 1.0s |
+| `cargo test --locked --workspace --features acceptance` | exit 0，553 通过 / 10 忽略 | 71.4s |
+| `python -B -m unittest discover -s scripts -p "test_*.py"` | exit 0，159 通过 | 63.7s |
+| `pwsh -NoProfile -File scripts/test_install_helpers.ps1` | exit 0 | 17.2s |
+| `pwsh -NoProfile -File scripts/test_native_window_action.ps1` | exit 0 | 2.5s |
+| `pnpm --dir frontend typecheck` | exit 0 | 12.2s |
+| `pnpm --dir frontend format:check` | exit 0 | 5.7s |
+| `pnpm --dir frontend test` | exit 0，480 通过（40 文件） | 40.9s |
+| `pnpm --dir frontend build` | exit 0 | 16.1s |
+| `pnpm --dir frontend test:e2e` | exit 0 | 172.6s |
+| `python -B scripts/bump_version.py --check --base-ref origin/main` | exit 0（0.3.1 → 0.3.2） | 0.3s |
+
+两种 Rust 构建模式的成本（本机热缓存）：普通与 acceptance 的 clippy 各约 1s、test 各约 71–75s；冷缓存下的隔离 checkout 见 6.5。
+
+### 6.5 隔离验收与旧入口核对（W06.1/W06.5）
+
+`qa-artifacts/workspace-layout/W06/isolated-checkout.txt`（脚本 `tools/w06_isolated_checkout.ps1`）。隔离目录为 `%TEMP%\tokenscope-pr1-isolated`，从本分支 `git clone --local` 得到，克隆后仓库内 target 目录数为 0：
+
+| 步骤 | 结果 | 耗时（冷缓存） |
+| --- | --- | --- |
+| `cargo metadata --offline --locked --no-deps` | exit 0 | 0.1s |
+| `cargo clippy --locked --offline --workspace --all-targets -- -D warnings` | exit 0 | 113.5s |
+| `cargo test --locked --offline --workspace --features acceptance --no-run` | exit 0 | 199.9s |
+| 从 `src-tauri` 目录发起 `cargo check -p tokenscope-app`（旧入口） | exit 0 | 8.1s |
+
+布局核对：`childTargetCreated = false`、`childLockCreated = false`、`rootTargetCreated = true`、受版本管理的锁恰为 `Cargo.lock`。即在没有任何旧编译产物的 checkout 里，从根目录与 `src-tauri` 目录发起构建都只写根 `target/`，不新建子 target 或子锁。
+
+### 6.6 生产构建、资产收集与原生 E2E（W06.2/W06.3）
+
+`qa-artifacts/workspace-layout/W06/build-and-acceptance.txt`（脚本 `tools/w06_build_acceptance.ps1`），四步全部 exit 0：
+
+| 步骤 | 结果 | 耗时 |
+| --- | --- | --- |
+| 生产 `tauri build`（不带 acceptance，NSIS，显式 `x86_64-pc-windows-msvc`） | exit 0；产物 `target/x86_64-pc-windows-msvc/release/bundle/nsis/TokenScope_0.3.2_x64-setup.exe`（5.31 MiB） | 334.6s |
+| `release_assets.py collect` 与哈希契约 | exit 0；产出 `TokenScope_v0.3.2_windows-x64-setup.exe`（5565434 字节）、`SHA256SUMS.txt`、`build-metadata.json`（含 exe 与解包后 exe 的 sha256） | 0.9s |
+| 验收包构建（`cargo build -p tokenscope-app --release --features acceptance,tauri/custom-protocol --bin tokenscope`，不带 `--target`） | exit 0 | 229.3s |
+| 原生 E2E `ui-refresh`（真实 WebView2 + 隔离根） | exit 0，10 项断言通过；`evidence.json` 记录的 exe 是根 `target/release/tokenscope.exe` | 143.3s |
+
+写入位置核对：本次构建后根 `target/release/tokenscope.exe` 大小为 20030464、写入时间 2026-10-15 14:26；旧 `src-tauri/target/release/tokenscope.exe` 仍是 10-13 的 20029440，未被本次构建触碰——更换构建入口后没有回到旧布局。
+
+本机不运行真实安装/卸载脚本：W06.4 的五项安装验收与两项固定旧版升级属于一次性 Actions Runner，且本轮按用户决策未创建 PR，因此该部分不构成本轮证据。
+
+### 6.7 过程事件（已在当轮修复）
 
 测试用的临时仓库操作一度污染了真实仓库 `.git/config`（`bare = true` 与被 fixture 身份覆盖的 `[user]` 段），原因是当时为验证钩子环境而手动注入了绝对路径的 `GIT_DIR`/`GIT_INDEX_FILE`。分支、HEAD、reflog、index 与工作区内容未受影响；配置已按备份复原（身份回退全局 `~/.gitconfig`）。加固：钩子显式 `unset` 这些变量，工具与测试的所有 Git 子进程都剥离调用者的 `GIT_*`。明细见 `qa-artifacts/workspace-layout/incident-2026-10-15/README.md`（ignored）。
 

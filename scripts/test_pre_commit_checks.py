@@ -104,6 +104,14 @@ class ClassifyCase(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.plan([change("M", path)])["mode"], "full")
 
+    def test_full_mode_does_not_repeat_shell_rounds_covered_by_workspace(self):
+        plan = self.plan([change("M", "Cargo.toml")])
+        self.assertEqual(plan["mode"], "full")
+        self.assertIn("rust-core-default", plan["checks"])
+        self.assertIn("rust-core-acceptance", plan["checks"])
+        self.assertNotIn("rust-shell-default", plan["checks"])
+        self.assertNotIn("rust-shell-acceptance", plan["checks"])
+
     def test_unknown_path_falls_back_to_full_mode_and_is_reported(self):
         plan = self.plan([change("A", "Makefile")])
         self.assertEqual(plan["mode"], "full")
