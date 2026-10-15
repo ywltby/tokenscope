@@ -337,8 +337,8 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 | W04 | 6f6f4dc | 6f6f4dc | `git grep -n "src-tauri[/\\\\]target" -- ':!docs'` | 有效入口零残留 | 非 docs 命中为 0；`src-tauri/Cargo.lock` 引用只余历史文档 | `W01/grep-old-target.txt` | 无 |
 | W05a/W05b | 6f6f4dc | 6f6f4dc | `test_pre_commit_checks.py`、`test_check_staged_docs.py`；真实提交触发 hook | 分类正确、缺工具明确失败、临时仓库与调用者仓库隔离 | 选择器 30 项、文档检查 15 项通过；首次切换 hook 的提交（a26961f）实际跑完整门禁并通过 | `W05/test-pre-commit.txt`、`W05/test-check-staged-docs.txt` | 无 |
 | W05c | abc4ef5 | abc4ef5 | `build_inputs.py --update` / `--check`；`test_build_inputs.py` | 生成后与本次构建零差异；漏登记必须失败 | 清单 5 项；纯函数 31 项通过；正向 check 零差异；新增真实 include 输入后 check 非零退出并同时报出「清单漏登记」与「install-test.yml paths 未覆盖」 | `W05/build-inputs-update.txt`、`W05/build-inputs-check-final.txt`、`W05/build-inputs-check-negative2.txt` | 无 |
-| W06 | — | — | 只读测量（见 6.1） | 删除前必须取得用户确认 | 未执行删除 | `W06/`（本机测量另见 6.1） | 隔离 Runner 验收、生产包与旧版升级实跑待 CI |
-| W07 | 本次提交 | 本次提交 | `python -B scripts/bump_version.py --bump patch --summary …`；`--check --base-ref origin/main` | 四配置＋一锁＋声明原子更新，版本 0.3.2 | bump exit 0；check 通过（previous 0.3.1 / base e34495b） | 本提交 | 推送与远程门禁 |
+| W06 | — | — | 只读测量（见 6.1） | 删除前必须取得用户确认 | 未执行删除；本轮按用户决策登记为待清理 | `W06/`（本机测量另见 6.1） | 隔离 Runner 验收、生产包与旧版升级实跑待 CI；旧 target 待后续授权清理 |
+| W07 | 4488b56 | 4488b56 | `python -B scripts/bump_version.py --bump patch --summary …`；`--check --base-ref origin/main` | 四配置＋一锁＋声明原子更新，版本 0.3.2 | bump exit 0；check 通过（previous 0.3.1 / base e34495b）；分支已推送 | 本提交 | 远程门禁与 PR 未创建（用户决策） |
 
 ### 6.1 旧 target 现状（只读测量，等待确认后清理）
 
@@ -348,6 +348,10 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 | `<仓库>/target` | 37.71 GB（49524 文件） | 真实目录 | 迁移后持续写入 | 默认共享输出，保留 | 当前构建使用中 |
 
 两目录相加约 76.5 GB，与计划开头的估算一致，但**清理只涉及 `src-tauri/target`**：根 `target/` 是统一后的默认输出，不能清理。另需注意仓库存在第二个 worktree（`~/.config/superpowers/worktrees/tokenscope/source-discovery-plan`，detached HEAD `3ffea3e`），它有自己的构建目录，不在本次清理范围。
+
+**用户 2026-10-15 决策：暂缓清理。** 本轮不删除 `src-tauri/target`，登记为待清理项，也不声称空间已释放；后续若要清理，仍按 W06.7 的核对流程执行（确认路径在预期仓库内、无进程占用、单一 PowerShell 文件操作、记录实际释放空间、仍占用则登记不强杀实例）。
+
+**用户 2026-10-15 决策：暂不创建 PR。** 分支已推送到 `origin/feat/workspace-layout`（HEAD `4488b56`），本轮不产生远程 CI、安装升级与 Native UI E2E 证据，因此不报告“合并就绪”；这些门槛的实跑证据待用户确认后由 Actions 提供。
 
 ### 6.2 过程事件（已在当轮修复）
 
