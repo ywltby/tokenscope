@@ -461,6 +461,7 @@ def unstaged_paths(root):
 
 def run(commands, *, cwd, executor=None):
     """顺序执行；任一非零立即返回该退出码，后续命令不再运行。"""
+    _configure_output()
     runner = executor or _execute
     for command in commands:
         status = runner(command, cwd)
@@ -488,7 +489,15 @@ def _execute(argv, cwd):
     return subprocess.run([executable, *argv[1:]], cwd=cwd, check=False).returncode
 
 
+def _configure_output():
+    """CLI 与导入调用共用 UTF-8 输出；保留无 reconfigure 的内存捕获流。"""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
+
 def main():
+    _configure_output()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--explain", action="store_true", help="只打印选中检查，不执行")
     parser.add_argument("--root", type=Path, default=ROOT)
@@ -533,6 +542,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
     sys.exit(main())

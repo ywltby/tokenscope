@@ -16,6 +16,27 @@ from pre_commit_checks import classify, unstaged_paths
 ROOT = Path(__file__).resolve().parent.parent
 
 
+class ImportedRunnerEncodingCase(unittest.TestCase):
+    def test_imported_runner_logs_unicode_under_english_windows_encoding(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                code = (
+                    "import sys; from pre_commit_checks import run; "
+                    "sys.exit(run([['missing-中文-tool']] if " + repr(missing) +
+                    " else [[sys.executable, '-c', 'pass', '中文路径']], cwd='.'))"
+                )
+                env = {**os.environ, "PYTHONIOENCODING": "cp1252:strict"}
+                result = subprocess.run(
+                    [sys.executable, "-B", "-c", code], cwd=ROOT / "scripts",
+                    env=env, capture_output=True,
+                )
+                self.assertEqual(result.returncode, 127 if missing else 0,
+                                 result.stderr.decode("utf-8", errors="replace"))
+                self.assertIn("中文", result.stdout.decode("utf-8"))
+                if missing:
+                    self.assertIn("找不到可执行文件", result.stderr.decode("utf-8"))
+
+
 def record(path, package="tokenscope", kind="file"):
     return {"path": path, "kind": kind,
             "consumers": [{"package": package, "mode": "default"}]}
