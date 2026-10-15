@@ -398,3 +398,35 @@ W02 与 W05c 同步区分编译期嵌入和运行时读取：schema-v3.sql 按�
 修复提交 `0cbbc8b`：完整提交门禁通过，脚本契约 228 项、前端 480 项、浏览器 E2E 178 断言通过；真实清单两模式重编译后无差异。Git Bash 下语法契约 10 项通过，真实检查 PowerShell 11 个、Node 14 个。详细结果见计划 §6.9。
 
 本轮不创建 PR、不删除旧 target；修复代码不等于远程安装升级已验收，仍待独立复审。
+
+## 17. 第 16 节修复复核（HEAD 518fef7，修复提交 0cbbc8b）
+
+结论：第 15 节 2 项必改、5 项建议全部闭合，本地实现层面可以创建 PR。远程 CI、安装升级与 Native UI E2E 仍无证据，合并就绪要等 PR 门禁结果。
+
+### 17.1 逐项核实
+
+| 项 | 复核方式 | 结果 |
+|---|---|---|
+| 15.2 编码 | 在原失败环境（Git Bash 调用 pwsh）复跑 `python -B -m unittest discover -s scripts -p "test_*.py"` | 228 项全部通过，原 2 项失败消失 |
+| 15.2 空检查 | 对空临时目录分别运行两个检查器 | PowerShell 与 Node 检查器均输出「拒绝空检查」并 exit 1；仓库范围实测 11 个 / 14 个，exit 0 |
+| 15.3.1 库 `.d` 映射 | 用 `review15/manifest/cargo-default.json` 的真实 Cargo 消息调用 `dep_files_from_messages` | 已收集库目标 `tokenscope-990f6a2dc04b6829.d` 与壳库 `tokenscope_tauri_lib-*.d`；磁盘上不存在带 `lib` 前缀的 `.d`，映射方向正确 |
+| 15.3.2 人工登记 | 读 `check`/`update`/`validate_manual` 与回归用例 | 生成项单独比较，人工项单独校验，不能掩盖漏登记；工作流覆盖检查包含人工项 |
+| 15.3.3 未跟踪文件 | 读 `unstaged_paths`/`_blocked_inputs` | 只有命中所选检查范围才拦截，忽略目录不参与；当前工作区无未跟踪文件，不会误阻 |
+| 15.3.4 堆栈与 §6.7 | 用不存在的清单路径运行 `build_inputs.py --check` | 只输出一行「构建输入清单失败：…」，exit 1，无 Traceback；§6.7 已改为历史描述 |
+| 15.3.5 CI 重编译 | 读计划 §6.9 | 已明确记录额外两轮编译的代价，接受 |
+
+补充：仓库范围用例的期望数量与检查器使用同一套 glob 推导，不是独立事实源；但有 `assertGreater(expected, 0)`，目录改名或路径解析出错导致的空检查都会失败，满足 15.2 的目的，不要求改成硬编码数字。
+
+### 17.2 新发现：分支混入与 PR1 无关的研究文档（需用户决定，不由执行方处理）
+
+`f7ce9d3` 之后有 6 个 `docs(研究)` 提交（`0646468`…`518fef7`），新增 `docs/research/2026-10-15-codex-token-pulse-usage-statistics.md`（1728 行）与 `docs/research/2026-10-15-tokenarena-usage-statistics.md`（1134 行）。它们不属于 W01–W07，也不在 PR1 计划范围内。只改文档，不影响门禁与运行时，但会把约 2900 行无关内容带进「只改目录」的 PR1，评审和回滚粒度都变差。
+
+两种处理方式：
+
+- 移出（推荐）：以当前 HEAD 建 `docs/research` 分支保留这 6 个提交，把 `feat/workspace-layout` 重置到 `f7ce9d3` 并强制推送。这一步会改写已推送的历史，需要用户明确授权。研究文档以后单独走文档 PR，合入 main 前需递增 patch 版本。
+- 保留：PR 描述中单列这两份研究文档，说明与目录迁移无关；版本不重复递增。
+
+### 17.3 仍未闭合
+
+- 远程 CI、安装升级、Native UI E2E：创建 PR 后才有证据。
+- 旧 `src-tauri/target`（38.85 GB）：按用户决定暂缓清理。
