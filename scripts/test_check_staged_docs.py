@@ -9,13 +9,16 @@ import tempfile
 import unittest
 
 from check_staged_docs import (
+    added_line_numbers,
     check_document,
     extract_targets,
+    git_show,
     heading_slugs,
     resolve_target,
     staged_documents,
     strip_code_fences,
     tree_has,
+    whitespace_problems,
 )
 
 
@@ -128,6 +131,30 @@ class DocumentCase(unittest.TestCase):
         # 简写引用式（[text][ref]）不在解析范围：明确记录边界而不是假报通过。
         text = "[文本][ref]\n"
         self.assertEqual(extract_targets(text), [])
+
+    def test_new_trailing_whitespace_is_reported(self):
+        (self.root / "docs" / "source.md").write_text("# 源\n带空白 \n干净\n", encoding="utf-8")
+        self.stage("docs/source.md")
+        problems = whitespace_problems(
+            "docs/source.md", git_show(self.root, ":docs/source.md"),
+            added_line_numbers(self.root, "docs/source.md"))
+        self.assertEqual([problem["reason"] for problem in problems], ["行尾空白"])
+
+    def test_historical_trailing_whitespace_is_not_reported(self):
+        legacy = self.root / "docs" / "legacy.md"
+        legacy.write_text("# 旧\n带空白 \n", encoding="utf-8")
+        self.stage("docs/legacy.md")
+        self.git("commit", "-qm", "含历史空白的基线")
+        legacy.write_text("# 旧\n带空白 \n新增行\n", encoding="utf-8")
+        self.stage("docs/legacy.md")
+        self.assertEqual(whitespace_problems(
+            "docs/legacy.md", git_show(self.root, ":docs/legacy.md"),
+            added_line_numbers(self.root, "docs/legacy.md")), [])
+
+    def test_carriage_return_in_added_line_is_reported(self):
+        problems = whitespace_problems("docs/x.md", "# 标题\r\n正文\n", {1})
+        self.assertEqual([problem["reason"] for problem in problems],
+                         ["行尾为 CR（仓库钉 LF）"])
 
 
 if __name__ == "__main__":

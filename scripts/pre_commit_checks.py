@@ -89,8 +89,13 @@ CHECK_COMMANDS = {
     "frontend-format": [["pnpm", "--dir", "frontend", "format:check"]],
     "frontend-test": [["pnpm", "--dir", "frontend", "test"]],
     "frontend-build": [["pnpm", "--dir", "frontend", "build"]],
-    SCRIPTS_CHECK: [["python", "-B", "-m", "unittest", "discover", "-s", "scripts",
-                     "-p", "test_*.py"]],
+    SCRIPTS_CHECK: [
+        ["python", "-B", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_*.py"],
+        ["pwsh", "-NoProfile", "-File", "scripts/check_powershell_syntax.ps1"],
+        ["pwsh", "-NoProfile", "-File", "scripts/test_install_helpers.ps1"],
+        ["pwsh", "-NoProfile", "-File", "scripts/test_upgrade_helpers.ps1"],
+        ["pwsh", "-NoProfile", "-File", "scripts/test_native_window_action.ps1"],
+    ],
     DOC_CHECK: [["python", "-B", "scripts/check_staged_docs.py"]],
 }
 

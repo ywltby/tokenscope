@@ -179,9 +179,11 @@ class CommandExpansionCase(unittest.TestCase):
     def test_frontend_and_script_commands_are_stable(self):
         self.assertEqual(expand_commands(["frontend-typecheck"]),
                          [["pnpm", "--dir", "frontend", "typecheck"]])
-        self.assertEqual(expand_commands(["scripts-contracts"]),
-                         [["python", "-B", "-m", "unittest", "discover", "-s", "scripts",
-                           "-p", "test_*.py"]])
+        scripts = expand_commands(["scripts-contracts"])
+        self.assertIn(["python", "-B", "-m", "unittest", "discover", "-s", "scripts",
+                       "-p", "test_*.py"], scripts)
+        self.assertIn(["pwsh", "-NoProfile", "-File",
+                       "scripts/check_powershell_syntax.ps1"], scripts)
         self.assertEqual(expand_commands(["docs"]),
                          [["python", "-B", "scripts/check_staged_docs.py"]])
 

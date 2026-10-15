@@ -147,6 +147,39 @@ def tree_has(root, path):
                listing.stdout.decode("utf-8", "replace").split("\0"))
 
 
+def added_line_numbers(root, path):
+    """暂存版本中新增/修改的行号集合（1 基），用于只检查本次引入的空白问题。"""
+    result = subprocess.run(["git", "-C", str(root), "diff", "--cached", "-U0", "--", path],
+                            capture_output=True, check=False, env=git_env())
+    if result.returncode != 0:
+        raise DocumentError(f"读取 {path} 的暂存差异失败")
+    numbers = set()
+    for match in re.finditer(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@",
+                             result.stdout.decode("utf-8", "replace"), re.M):
+        start = int(match.group(1))
+        count = 1 if match.group(2) is None else int(match.group(2))
+        numbers.update(range(start, start + count))
+    return numbers
+
+
+def whitespace_problems(source, text, added_lines):
+    """只对本次新增/修改的行报告行尾空白与 CR，历史行不追溯。"""
+    problems = []
+    lines = text.split("\n")
+    for number in sorted(added_lines):
+        if number - 1 >= len(lines):
+            continue
+        line = lines[number - 1]
+        if line.endswith("\r"):
+            problems.append({"document": source, "target": f"第 {number} 行",
+                             "reason": "行尾为 CR（仓库钉 LF）"})
+            line = line[:-1]
+        if line != line.rstrip():
+            problems.append({"document": source, "target": f"第 {number} 行",
+                             "reason": "行尾空白"})
+    return problems
+
+
 def check_document(root, source, text, changed_targets=frozenset(), baseline_text=""):
     """只校验本次新增/变更的链接，以及本次删除/重命名影响到的历史链接。
 
@@ -208,6 +241,7 @@ def main():
                 problems.append({"document": new, "target": "", "reason": "不是合法 UTF-8"})
             baseline = git_show(root, f"HEAD:{new}") if old is None else git_show(root, f"HEAD:{old}")
             problems.extend(check_document(root, new, text, changed, baseline or ""))
+            problems.extend(whitespace_problems(new, text, added_line_numbers(root, new)))
         for problem in problems:
             print(f"[docs] {problem['document']} → {problem['target']}：{problem['reason']}",
                   file=sys.stderr)
