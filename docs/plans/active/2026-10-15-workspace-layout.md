@@ -395,6 +395,7 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 - `test_build_inputs.py` 新增 3 项 release 风格 dep-info 组合契约：只保留合法跟踪输入，被排除项按「固定规则覆盖或构建生成物」记录原因；仓库外路径与空目录输入同样被丢弃。
 - `test_pre_commit_checks.py` 新增 1 项钩子接线契约：临时仓库把 `core.hooksPath` 指向受版本管理的 `.githooks`，用替身 `scripts/pre_commit_checks.py` 控制退出码——替身返回 7 时真实 `git commit` 被阻止且不产生提交，返回 0 时提交成功。钩子脚本本身不替换。
 - 脚本契约总数 159 → 173 项，全部通过。
+- CI/Release 的版本门禁事件路径按真实事件结构在本机模拟（`qa-artifacts/workspace-layout/W07/version-gates.txt`）：PR 事件（`ci.yml` gate）与 main push 事件（`release.yml` gate）各跑 `bump_version.py --check --event-file`，均 exit 0（version 0.3.2、previous 0.3.1、kind patch、base e34495b）；`release_metadata.py` 以 `GITHUB_REF=refs/heads/main` 实跑输出 `tag=v0.3.2 / prerelease=true / latest=false`。事件文件需为无 BOM 的 UTF-8（GitHub 提供的事件文件如此）；本机用 `Out-File -Encoding utf8` 生成的带 BOM 副本会被明确拒绝并报 `Unexpected UTF-8 BOM`，属预期失败而非静默通过。
 
 ### 6.5 隔离验收与旧入口核对（W06.1/W06.5）
 
