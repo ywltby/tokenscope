@@ -340,3 +340,47 @@ PR1 合入后 workspace 根目录是虚拟 manifest，命令统一改为：
 选择 fixtures 专用目录规则：`crates/tokenscope-core/tests/fixtures/**` 固定运行 workspace 普通与 acceptance 两种模式 clippy/test，覆盖核心及壳。W05a 分类表、优先级和 §5.3 契约同步；目录内 Markdown 不享受纯文档豁免，新旧路径均参与重命名分类。清单损坏/门禁入口仍完整兜底，多类影响取并集。
 
 W02 与 W05c 同步区分编译期嵌入和运行时读取：schema-v3.sql 按实际依赖进入清单，运行时 JSONL 不伪造登记，靠目录规则覆盖。三份计划及 README 状态同步为复审通过、实现未开始。本轮未创建实施分支、未执行 W01。
+
+## 15. PR1 实现复核（feat/workspace-layout，HEAD 8a9652b）
+
+> 复核日期：2026-10-15。对象：`e190686..8a9652b` 共 21 个提交。复核方在本机按计划第 4.2 节命令表逐条重跑，并独立核对迁移、锁文件、钩子选择和清单证据。
+
+**结论：** 结构迁移、单锁、版本工具、产物路径、CI 精简和按暂存区选择检查都已按设计落地，质量好。但本机门禁有 1 条失败（15.2 第 1 项），且同一个检查脚本在仓库上实际没有检查任何文件（15.2 第 2 项）。修好这两项后可以创建 PR。远程 CI、安装升级和 Native UI E2E 仍要等 PR 创建后才有证据，目前不能称“合并就绪”。
+
+### 15.1 已核实通过
+
+| 项目 | 复核方法 | 结果 |
+| --- | --- | --- |
+| 源码与测试迁移 | `git diff -M e190686 HEAD -- src tests crates` | 全部文件 100% 原样重命名，唯一新增是核心 `Cargo.toml`，没有夹带业务改动 |
+| 锁文件 | 用 tomllib 比较旧壳锁、旧根锁和新根锁的 (name, version, source, checksum, deps) | 第三方包零差异；旧根锁的包都包含在内；只有两个本地包从 0.3.1 变为 0.3.2 |
+| workspace | `cargo metadata --offline --locked` | 两个成员，两个默认成员，target 为根目录 `target/`；只有一个受版本管理的 Cargo.lock |
+| 清单内容 | 对照本机两种模式的依赖信息文件 | 5 项与实际编译输入一致：`docs/privacy.md`、`acceptance_csp.js`（仅 acceptance）、`schema-v3.sql`、`tauri.conf.json`、`capabilities/` |
+| 钩子选择 | 用临时 `GIT_INDEX_FILE` 暂存 5 类改动，运行 `--explain` | 纯文档只跑文档检查；`privacy.md` 跑壳两种模式加文档检查；`acceptance_csp.js` 只跑壳 acceptance；fixture 跑 workspace 两种模式；`theme-boot.js` 跑前端四项。未暂存差异拦截行为正确 |
+| 清单反例 | 读取 `W05/build-inputs-check-negative2.txt` | 漏登记和 `install-test.yml` paths 未覆盖都被检出，退出码非零 |
+| 测试环境隔离 | 检查会建临时 Git 仓库的 3 个测试模块和本仓 `.git/config` | 3 个模块都在加载时清除 `GIT_*`；`.git/config` 已无 `bare`，也无被覆盖的身份 |
+| 本地门禁 | 按第 4.2 节命令表逐条执行 | fmt、两种模式的 clippy/test、`test_install_helpers.ps1`、前端 typecheck/format:check/test/build/test:e2e、`bump_version.py --check` 全部 exit 0；**脚本契约 216 项中 2 项失败**，见 15.2 |
+
+### 15.2 必改（创建 PR 前）
+
+1. **PowerShell 语法检查的测试依赖控制台编码。**
+   - 复现：`test_script_checks.PowerShellSyntaxCase` 的两个用例用 UTF-8 解码 pwsh 的输出，而 `check_powershell_syntax.ps1` 按控制台编码输出中文。复核方的 PowerShell 会话编码是 utf-8，用例通过；从 Git Bash 发起时 pwsh 的 `[Console]::OutputEncoding` 是 gb2312，两个用例失败。
+   - 影响：提交钩子经 `sh → python → pwsh` 调用这组测试。从 Git Bash、IDE 或其他控制台编码不同的环境提交时会误红。GitHub Windows Runner 的默认编码也未验证。
+   - 要求：脚本开头固定 `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)`，测试保持 UTF-8 解码。补一个用例：在 gb2312 环境（例如先执行 `chcp 936`，或在子进程中显式设置控制台编码）下运行仍然通过。
+
+2. **零个脚本也算通过，仓库范围的用例实际检查的是空目录。**
+   - `test_repository_scripts_are_syntactically_valid` 的注释写“默认以仓库根为范围”，但它调用的 `run_check()` 总是传 `-Root self.root`（空临时目录），输出是“通过：0 个脚本”。
+   - `check_powershell_syntax.ps1` 和 `check_node_syntax.py` 都允许 0 个文件时 exit 0。目录改名或路径解析失败时，检查会静默变成空检查。
+   - 要求：两个检查器都在检查数为 0 时失败。仓库范围的用例不传 `-Root`，并断言检查数等于仓库实际脚本数（当前 PowerShell 11 个，`frontend/scripts` 下 node 脚本 14 个）。
+
+### 15.3 建议（不阻塞，可在本 PR 一并处理）
+
+1. **库目标本身的依赖信息文件没有被读到。** `dep_files_from_messages` 用 `with_suffix(".d")`，把 `libtokenscope-<hash>.rlib` 映射成了 `libtokenscope-<hash>.d`，但 Cargo 实际写的是 `deps/tokenscope-<hash>.d`。复核方读取 `pr1-negative2` 证据确认：两个本地库的 rlib/rmeta 都映射到不存在的文件。当前清单没有出错，因为库的单元测试二进制编译同一份源码，它的 `.d` 兜住了。但出现 `#[cfg(not(test))]` 下的 `include_str!` 或 `test = false` 时就会漏登记。建议映射时去掉 `lib` 前缀，补一条只有 rlib 产物的用例，同时修正模块文档字符串中的错误示例。
+2. **人工登记项会被 `--check` 判为过期。** `check()` 拿 `generated + manual` 和本次生成结果比较，任何人工项都会进入 `stale`，人工分区实际不能用。目前人工项为空，不影响结果；建议人工项单独校验（路径存在、受跟踪、消费方合法），不参与生成项比较。
+3. **未跟踪文件不在部分暂存保护范围内。** `unstaged_paths` 只读 `git diff`。例如暂存的 `lib.rs` 新增了 `mod foo;`，而 `foo.rs` 还没有 `git add`，本地编译能通过，提交里却缺文件，要到 CI 才失败。建议把 `git ls-files --others --exclude-standard` 中落在所选检查范围内的路径也纳入拦截。
+4. 计划 §6.7 仍写“钩子显式 unset `GIT_*`”，§6.8 已改为由测试侧隔离，需同步。`--check` 失败时直接抛出 Python 堆栈，建议改为输出清晰的差异信息并以非零退出。
+5. CI 的清单校验没有采用 `--begin` 边界后复用两次构建的方案，而是自己 `clean -p` 后重新编译两次。正确性没问题，代价是 CI 多两轮本地包编译。可以接受，请在计划中写明这一偏差。
+
+### 15.4 未闭合项（如实保留）
+
+- 远程 CI、安装升级和 Native UI E2E 尚无证据（按计划 §6.1 记载的用户决定，暂不创建 PR）。
+- 旧 `src-tauri/target`（38.85 GB）按用户决定暂缓清理，空间尚未释放。
