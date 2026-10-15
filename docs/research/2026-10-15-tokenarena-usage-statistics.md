@@ -101,8 +101,8 @@ parser 模块，每个模块文件末行执行 `registerParser(new XxxParser())`
 但 20 个 parser 中有 18 个自实现该方法（只有 codex 与 gemini-cli 未实现、
 走回退），所以 `dataDir` 常只是"声明值"：
 cline 声明 `~/.cline` 而真实扫描 7 个宿主目录（`cline.ts:27-29` vs `:49-60`）、
-roo-code 声明 `getHostRoots()[0]`（宿主根而非扩展目录）、qwenpaw 的 `dataDir`
-甚至是一个**文件**路径（`qwenpaw.ts:16-18`）。`detectInstalledTools()` 只被
+roo-code 声明 `getHostRoots()[0]`（宿主根而非扩展目录）、qwenpaw 的 `dataDir` 甚至是一个**文件**路径（`qwenpaw.ts:16-18` 声明、
+`:83` 赋值）。`detectInstalledTools()` 只被
 命令层用于展示，**扫描不做安装过滤**——每个 parser 都会被调用。
 
 解析调度在 `cli/src/services/parser-service.ts:29-48`：**串行**逐个 parser
@@ -536,7 +536,7 @@ update 时用 `...(sessionUsageWrite ?? {})`（`:263`）——归一化为 null 
 ### 4.3 服务端再聚合：三层，全部与排行榜有关
 
 1. **桶/会话 → 日汇总**：`recomputeLeaderboardUserDays`
-   （`leaderboard/aggregates.ts:113-234`）在 ingest 事务内执行——`findMany`
+   （`leaderboard/aggregates.ts:113-233`）在 ingest 事务内执行——`findMany`
    拉原始行后用 **JS 累加**（:170-231）写 `leaderboard_user_day`，
    不是 SQL 聚合。
 2. **日汇总 → 榜单快照**：`leaderboard/queries.ts:488-520` 用
@@ -546,7 +546,7 @@ update 时用 `...(sessionUsageWrite ?? {})`（`:263`）——归一化为 null 
    **该 TTL 只作用于全局 token 榜**：cost 榜（`:646-761`）与 following
    token 榜（`:908-950`，直接查 `leaderboard_user_day`）都不读快照。
 3. **周期结算**：`finalizePendingLeaderboardPeriods`（`finalize.ts:89-304`，
-   其中 `:89-156` 是 `groupBy`/`take: 100` 查询段）→ 写
+   其中 `:121-156` 是 `groupBy`/`take: 100` 查询段）→ 写
    `leaderboard_period_result/entry`（**100 条**）并给 `rank <= 50` 发徽章
    （`finalize.ts:67`、`:186-301`）；
    **懒触发**（`achievements/queries.ts:637,649,674,702` + 页面侧
@@ -831,8 +831,9 @@ totalUsd     = inputUsd + outputUsd + reasoningUsd + cacheUsd
 （`leaderboard/queries.ts:534`、:636、:964），再由 `hydrateEntries`（:401-471）
 发现"全为 0"时调 `getEstimatedCostMapForUsers` 实时 `groupBy` 补算
 （:411-413、:424-426、:451-454）。副作用：真实成本恰为 0 的用户会被反复
-判定为"未定价"而多走一次实时路径。**token 榜也一样**（`:855`、`:973` 的
-汇总行成本恒 0）——即打开任何榜单页都会触发一次实时成本 `groupBy`；
+判定为"未定价"而多走一次实时路径。**token 榜也一样**（`:534`、`:636`、
+`:964`、`:815` 处把成本赋值 0；`:855`、`:973` 是水合调用行）——即打开任何
+榜单页都会触发一次实时成本 `groupBy`；
 `all_time` 窗口下该 `groupBy` 无时间条件（`buildBucketWindowWhere` 返回 `{}`，
 `:97-108`），会扫描该用户全部历史 bucket 行（`:304-338`）。
 另外 `achievements/queries.ts:88-90` 在目录不可用时是**显式早退返回 0**，
