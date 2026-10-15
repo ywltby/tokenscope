@@ -158,6 +158,10 @@ def added_line_numbers(root, path):
 def whitespace_problems(source, text, added_lines):
     """只对本次新增/修改的行报告行尾空白与 CR，历史行不追溯。"""
     problems = []
+    if text.startswith("\ufeff") and 1 in added_lines:
+        # 仓库统一无 BOM 的 UTF-8；只对本次新增的文件报，历史 BOM 不追溯。
+        problems.append({"document": source, "target": "文件开头",
+                         "reason": "带 UTF-8 BOM（仓库其余文件无 BOM）"})
     lines = text.split("\n")
     for number in sorted(added_lines):
         if number - 1 >= len(lines):

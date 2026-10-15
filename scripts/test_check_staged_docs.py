@@ -192,6 +192,15 @@ class DocumentCase(unittest.TestCase):
         self.assertEqual([problem["reason"] for problem in problems],
                          ["行尾为 CR（仓库钉 LF）"])
 
+    def test_bom_in_a_new_document_is_reported(self):
+        problems = whitespace_problems("docs/new.md", "\ufeff# 标题\n", {1})
+        self.assertEqual([problem["reason"] for problem in problems],
+                         ["带 UTF-8 BOM（仓库其余文件无 BOM）"])
+
+    def test_historical_bom_is_not_reported(self):
+        # 第 1 行不是本次新增行 → 历史 BOM 不追溯。
+        self.assertEqual(whitespace_problems("docs/old.md", "\ufeff# 标题\n", {5}), [])
+
 
 if __name__ == "__main__":
     unittest.main()

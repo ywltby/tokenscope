@@ -1,4 +1,4 @@
-﻿# TokenScope 璁″垝涓庡畬鎴愮姸鎬佹€昏处
+# TokenScope 璁″垝涓庡畬鎴愮姸鎬佹€昏处
 
 > 2026-10-11 鏁寸悊銆?*鐢ㄦ埛鏄庣‘瑕佹眰 > 杈冩柊璁″垝 > 杈冩棫璁″垝 > 鏈‘璁ょ殑璁捐寤鸿銆?*
 > 褰撳墠寰呭姙鍏ュ彛锛歔鍓╀綑浠诲姟鏁村悎涓庨獙鏀惰鍒抅(active/2026-10-11-consolidated-remaining-work.md)銆俒UI 璋冩暣璁″垝](active/2026-10-13-ui-adjustment.md)鏈疆鍔熻兘鍙婁环鏍?绐楀彛闅愯棌澶嶆牳琛ヤ慨宸插畬鎴愩€佹湰鍦伴獙鏀堕€氳繃锛屾渶鏂拌ˉ淇粛闇€鑷韩 HEAD 鐨勮繙绋嬮棬绂侊紝PR #7 鏈悎骞讹紱鐪熷疄璺ㄥ崍澶溿€侀暱鏃堕棿浼戠湢銆佽法鏄剧ず鍣ㄥ凡鎸夌敤鎴峰喅瀹氱Щ鑷砙鐙珛绯荤粺楠屾敹寰呭姙](system-acceptance-todo.md)锛屾湰杞笉鎵ц銆傞€愪唤浜嬪疄鏍稿锛歔瀹¤绱㈠紩](audits/README.md)銆?> 鏈€鏂拌繘灞曪細PR #5 鏈€缁?19c634b 鐨?CI銆佷簲鍦烘櫙銆佷袱椤瑰崌绾у強宸ヤ欢宸查獙锛屽悎骞朵负 main 8d17a47銆俶ain 鍚屾牱鍏ㄩ儴閫氳繃锛屽巻鍙?[v0.1.0](https://github.com/ywltby/tokenscope/releases/tag/v0.1.0) 涓?[v0.2.0](https://github.com/ywltby/tokenscope/releases/tag/v0.2.0) 宸插叕寮€锛涙柊寤鸿崏绋胯鍙栧欢杩熸浘闃绘柇涓婁紶锛岀‘璁ゆ棦鏈夎崏绋垮悗鍒嗛樁娈垫仮澶嶄簡鍚屼竴浜х墿銆傞槻澶嶅彂鐨?0.2.1 琛ヤ慨宸叉敼涓哄浐瀹氬垱寤哄搷搴?Release ID锛屽綋鍓嶉棬绂佷粛鎸夋柊 HEAD 鍜?[Release](https://github.com/ywltby/tokenscope/actions/workflows/release.yml)鍒ゅ畾锛涘叾浣欑郴缁熺瀛楀強 N10/N11/N13 涓嶅叧闂€?
