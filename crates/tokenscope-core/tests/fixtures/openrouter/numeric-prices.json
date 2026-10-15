@@ -1,0 +1,54 @@
+{
+  "data": [
+    {
+      "id": "prov/numeric-mixed",
+      "name": "Numeric Mixed",
+      "pricing": {
+        "prompt": 0.000003,
+        "completion": "0.000015",
+        "input_cache_read": 0.0000003,
+        "input_cache_write": "0.00000375",
+        "overrides": [
+          {
+            "min_prompt_tokens": 200000,
+            "prompt": 0.000006,
+            "completion": "0.00003",
+            "input_cache_read": 0.0000006,
+            "input_cache_write": "0.0000075"
+          }
+        ]
+      }
+    },
+    {
+      "id": "prov/numeric-zero",
+      "name": "Numeric Zero",
+      "pricing": {
+        "prompt": 0,
+        "completion": 0,
+        "input_cache_read": 0,
+        "input_cache_write": 0
+      }
+    },
+    {
+      "id": "prov/zero-override",
+      "name": "Zero Override",
+      "pricing": {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [
+          { "min_prompt_tokens": 100000, "prompt": 0, "completion": 0 }
+        ]
+      }
+    },
+    {
+      "id": "prov/bad-type",
+      "name": "Bad Type",
+      "pricing": {
+        "prompt": true,
+        "completion": [1, 2],
+        "input_cache_read": { "x": 1 },
+        "input_cache_write": "0.000001"
+      }
+    }
+  ]
+}

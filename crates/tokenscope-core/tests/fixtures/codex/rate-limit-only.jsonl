@@ -1,0 +1,5 @@
+{"timestamp":"2026-07-17T15:00:00Z","type":"session_meta","payload":{"id":"synthetic-rate-limit","cwd":"C:/synthetic"}}
+{"timestamp":"2026-07-17T15:01:00Z","type":"turn_context","payload":{"model":"synthetic-model","cwd":"C:/synthetic"}}
+{"timestamp":"2026-07-17T15:02:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}}
+{"timestamp":"2026-07-17T15:03:00Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":12.0,"window_minutes":300,"resets_at":1784304000},"secondary":null}}}
+{"timestamp":"2026-07-17T15:04:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20,"output_tokens":7,"total_tokens":27}},"rate_limits":{"primary":null}}}
