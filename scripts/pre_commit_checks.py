@@ -112,6 +112,40 @@ FULL_CHECKS = ("rust-fmt", "rust-core-default", "rust-core-acceptance",
                "frontend-typecheck", "frontend-format", "frontend-test", "frontend-build",
                "node-syntax", "browser-e2e", SCRIPTS_CHECK, DOC_CHECK)
 
+# 检查的执行顺序（被选中时按此展开）；未列出的检查按名称追加在后。
+CHECK_ORDER = FULL_CHECKS
+
+# 检查之间的依赖：E2E 入口直接用 Vite preview 读取已有 dist，自己不构建，因此必须
+# 等前端构建成功之后才运行；构建失败时 run() 立即停止，E2E 不会再执行。
+CHECK_DEPENDENCIES = {"browser-e2e": ("frontend-build",)}
+
+
+def _ordered_checks(checks):
+    """按依赖关系与固定顺序排列检查，并补齐被选中检查缺失的依赖。"""
+    selected = set(checks)
+    for check in sorted(selected):
+        if check not in CHECK_COMMANDS:
+            raise CheckError(f"未知检查项：{check}")
+        selected.update(CHECK_DEPENDENCIES.get(check, ()))
+    ordered, visiting = [], set()
+
+    def visit(check):
+        if check in ordered:
+            return
+        if check in visiting:
+            raise CheckError(f"检查依赖成环：{check}")
+        visiting.add(check)
+        for dependency in CHECK_DEPENDENCIES.get(check, ()):
+            if dependency in selected:
+                visit(dependency)
+        visiting.discard(check)
+        ordered.append(check)
+
+    for check in [item for item in CHECK_ORDER if item in selected] + sorted(
+            selected - set(CHECK_ORDER)):
+        visit(check)
+    return ordered
+
 # Rust 检查（workspace 与壳）除源码外还会读取的共享配置与工具链文件。
 RUST_SHARED_INPUTS = ("crates/", "src-tauri/", "Cargo.toml", "Cargo.lock",
                       "rustfmt.toml", "rust-toolchain.toml", ".cargo/")
@@ -356,9 +390,7 @@ def _blocked_inputs(checks, unstaged, manifest=None):
 
 def expand_commands(checks):
     commands = []
-    for check in checks:
-        if check not in CHECK_COMMANDS:
-            raise CheckError(f"未知检查项：{check}")
+    for check in _ordered_checks(checks):
         commands.extend([list(command) for command in CHECK_COMMANDS[check]])
     return commands
 

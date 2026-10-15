@@ -458,6 +458,10 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 
 链路测试按要求覆盖「分类器 → 实际检查器」：端到端用例用仓库本体的选择器与检查器，在临时仓库里删除一个被引用的文件，提交被真实文档检查阻止（输出含引用方文件名），无人引用时放行。
 
+第四轮复核提出执行顺序问题：`expand_commands` 按检查名称展开，`browser-e2e` 排在 `frontend-build` 之前，而 E2E 入口用 Vite preview 直接读取已有 dist、自己不构建——可能验证旧产物后放行新改动，干净环境还会因缺 dist 失败；选中模式与完整模式都有该问题。
+
+修复：新增 `CHECK_ORDER` 与 `CHECK_DEPENDENCIES`（`browser-e2e` 依赖 `frontend-build`），`_ordered_checks` 按依赖拓扑展开、补齐被选中检查缺失的依赖并检测依赖成环；`run()` 仍在首个非零退出时停止，因此构建失败时 E2E 不会执行。补 5 项顺序契约（脚本契约 211 → 216 项）：selected 与 full 两模式都要求 build 先于 E2E、单独选 `browser-e2e` 时自动带上构建、构建失败后 E2E 不执行、共享依赖对多个消费者只展开一次。
+
 ### 6.7 过程事件（已在当轮修复）
 
 测试用的临时仓库操作一度污染了真实仓库 `.git/config`（`bare = true` 与被 fixture 身份覆盖的 `[user]` 段），原因是当时为验证钩子环境而手动注入了绝对路径的 `GIT_DIR`/`GIT_INDEX_FILE`。分支、HEAD、reflog、index 与工作区内容未受影响；配置已按备份复原（身份回退全局 `~/.gitconfig`）。加固：钩子显式 `unset` 这些变量，工具与测试的所有 Git 子进程都剥离调用者的 `GIT_*`。明细见 `qa-artifacts/workspace-layout/incident-2026-10-15/README.md`（ignored）。

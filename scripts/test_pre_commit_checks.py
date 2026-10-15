@@ -16,6 +16,7 @@ import unittest
 
 from pre_commit_checks import (
     CheckError,
+    FULL_CHECKS,
     build_changes,
     classify,
     expand_commands,
@@ -237,6 +238,47 @@ class CommandExpansionCase(unittest.TestCase):
                        "scripts/check_powershell_syntax.ps1"], scripts)
         self.assertEqual(expand_commands(["docs"]),
                          [["python", "-B", "scripts/check_staged_docs.py"]])
+
+
+class CommandOrderCase(unittest.TestCase):
+    """E2E 入口直接读取已有 dist，必须在构建成功之后才运行。"""
+
+    BUILD = "pnpm --dir frontend build"
+    E2E = "pnpm --dir frontend test:e2e"
+
+    def names(self, checks):
+        return [" ".join(command) for command in expand_commands(checks)]
+
+    def test_selected_mode_runs_build_before_e2e(self):
+        names = self.names(["browser-e2e", "frontend-build"])
+        self.assertLess(names.index(self.BUILD), names.index(self.E2E))
+
+    def test_full_mode_runs_build_before_e2e(self):
+        names = self.names(list(FULL_CHECKS))
+        self.assertLess(names.index(self.BUILD), names.index(self.E2E))
+
+    def test_e2e_pulls_in_its_build_dependency_when_selected_alone(self):
+        names = self.names(["browser-e2e"])
+        self.assertIn(self.BUILD, names)
+        self.assertLess(names.index(self.BUILD), names.index(self.E2E))
+
+    def test_build_failure_stops_before_e2e(self):
+        calls = []
+
+        def executor(argv, cwd):
+            calls.append(" ".join(argv))
+            return 7 if argv[:2] == ["pnpm", "--dir"] and argv[-1] == "build" else 0
+
+        status = run(expand_commands(["browser-e2e", "frontend-build"]),
+                     cwd=ROOT, executor=executor)
+        self.assertEqual(status, 7)
+        self.assertIn(self.BUILD, calls)
+        self.assertNotIn(self.E2E, calls, "构建失败后不得运行 E2E")
+
+    def test_shared_dependency_appears_once_for_multiple_consumers(self):
+        names = self.names(["browser-e2e", "frontend-typecheck"])
+        self.assertEqual(names.count(self.BUILD), 1)
+        self.assertEqual(names.count(self.E2E), 1)
 
 
 class UnstagedGuardCase(unittest.TestCase):
