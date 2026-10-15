@@ -1,6 +1,6 @@
 # PR1：虚拟 Cargo Workspace、目录迁移与提交检查
 
-> 状态：已按[审阅意见第 11 节](../../reviews/2026-10-15-source-discovery-plan-review.md)补齐设计，待复审；W01–W07 未实施。设计基线 main e34495b / 0.3.1。
+> 状态：[审阅第 13 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过，PR1 可开工；运行时 fixture 分类已按意见明确。W01–W07 未实施。设计基线 main e34495b / 0.3.1。
 > 本轮计划修订留在 `docs/source-discovery-plan`；PR1 开工时从该分支最新提交创建 `feat/workspace-layout`，带入既有 mjs 维护提交 c16e023 和三份计划，不改写历史。仅本 PR 改目录/构建/门禁，独立 patch；合入后才从最新 main 分别启动 [PR2](2026-10-15-collection-status.md)、[PR3](2026-10-14-source-discovery-and-additional-paths.md)，不在本 PR 实施功能。
 
 **Goal：** 核心库迁入 crates/tokenscope-core，统一 workspace/锁/target，并根据实际构建输入选择本地检查。
@@ -70,7 +70,7 @@ resolver = "3"
 3. 先运行 `cargo metadata --offline --locked --format-version 1` 和 `cargo check --offline --locked --workspace`。若 Cargo 要求刷新锁，单独解析并审阅差异后重跑 locked 检查；网络确有需要时遵守项目代理约定。
 4. 核对 metadata 恰有两个成员、默认选择包含两者、target_directory 为预期根目录；使用 `cargo tree --workspace -d` 分析剩余重复版本，不强制消灭合法的多版本依赖。
 5. 对比最终锁与迁移前完整壳锁的第三方包版本/source/checksum，解释任何差异。运行根库和壳定向测试，确认无循环依赖。
-6. 核心源码和 tests 同级关系保持，逐项验证 fixture 实际加载内容；不要把所有 `CARGO_MANIFEST_DIR` 盲目改成仓库根。壳测试通过 `../../tests/fixtures/codex/rate-limit-only.jsonl` 跨 crate 引用的路径必须随迁移更新并被 W05c 清单捕获，不能仅检查核心自己的 fixture。确需仓库根的工具入口显式解析 workspace root，核心测试仍以 crate 根为基准。从根目录和核心 crate 目录分别运行代表性测试，确认不依赖启动 cwd。
+6. 核心源码和 tests 同级关系保持，逐项验证 fixture 实际加载内容；不要把所有 `CARGO_MANIFEST_DIR` 盲目改成仓库根。壳测试跨 crate 读取的 `tests/fixtures/codex/rate-limit-only.jsonl` 路径必须随迁移更新，并由 W05a 的 fixtures 目录规则选择 workspace 两种模式检查；运行时读取不会被 W05c 编译输入清单捕获，不能仅检查核心自己的 fixture。确需仓库根的工具入口显式解析 workspace root，核心测试仍以 crate 根为基准。从根目录和核心 crate 目录分别运行代表性测试，确认不依赖启动 cwd。
 7. 检查依赖方向：核心库不引入 Tauri，壳依赖核心库，前端仍通过 IPC；本轮目录迁移不混入业务逻辑重构，也不把 source/history/pricing 拆成更多 crate。
 
 ### W03：版本工具迁移为单锁契约
@@ -117,13 +117,16 @@ resolver = "3"
 | 命中输入清单的文件（含 `.md`、`.js`、fixture） | 按全部“包＋构建模式”消费方并集选择 clippy/test；壳用壳检查，核心用 workspace 检查；default 不加 feature，acceptance 加 `--features acceptance`；文档仍做文档检查 |
 | `crates/tokenscope-core/**` 的 Rust 代码 | Rust 格式、普通和 acceptance 两种模式的 workspace clippy/test，覆盖壳依赖核心库的影响；迁移提交中旧根路径的删除/重命名也按核心库分类 |
 | `src-tauri/src/**` 的 Rust 代码 | Rust 格式、普通和 acceptance 两种模式的 `tokenscope-app` clippy/test |
-| 上述目录中的非 Rust 文件/fixture | 已登记输入按清单的包和模式选择；未登记者完整兜底。`acceptance_csp.js` 单独改动必须选中壳 acceptance 检查 |
+| `crates/tokenscope-core/tests/fixtures/**` | 固定选择 workspace 普通与 acceptance 两种模式 clippy/test，包含壳测试；无论编译期嵌入或运行时读取均适用，不要求先命中输入清单 |
+| 上述目录中未命中 fixtures 专用规则的非 Rust 文件 | 已登记输入按清单的包和模式选择；未登记者完整兜底。`acceptance_csp.js` 单独改动必须选中壳 acceptance 检查 |
 | `frontend/src/**`、`frontend/public/**`、前端配置及依赖清单/锁 | 前端 typecheck、format:check、test、build；包含测试读取的 public/theme-boot.js；E2E 编排并入脚本规则 |
 | `scripts/**` 的 Python/PowerShell、`frontend/scripts/**` | 明确映射的脚本语法和契约测试；共享 helper 取全部消费者契约并集，未登记脚本走完整模式，不只测试被改文件本身 |
 | Cargo manifest/锁、`build.rs`、`.cargo/**`、Rust 工具链、Tauri 配置/capabilities、`.github/**`、`.githooks/**`、检查选择器及其测试、发布声明等构建/门禁入口 | 完整模式，包含普通与 acceptance Rust 检查、前端门禁和现有相关脚本契约 |
 | 其他未明确分类的文件 | 完整模式兜底，输出未识别路径及原因 |
 
 分类用有顺序的显式规则，构建/门禁入口优先于宽泛目录规则；多类改动取并集、同一检查只执行一次。普通代码最小检查不代表可免除最终完整门禁；完整模式命令与 W05 的 CI 门禁维护同一语义，不复制旧双 workspace 冗余命令。本地完整模式禁止运行真实安装/卸载/休眠，只运行安全契约与隔离验收；安装升级仍由一次性 Actions Runner 承担。
+
+fixtures 专用规则先于文档豁免和非 Rust 未登记兜底，目录内 Markdown 也不能按纯文档免检。该规则与清单消费方取并集，不短路其他影响；清单损坏或同时修改门禁配置时仍走完整模式。迁移提交中的旧 `tests/fixtures/**` 删除/重命名按同一规则处理。运行时 fixture 不伪造为编译输入，也不为了清单而改成 include_str!。
 
 构建输入匹配先于文档豁免，清单缺失/损坏/无法匹配格式时完整兜底。清单及生成器/测试变更属于门禁入口，走完整检查。对部分暂存读取 index 的清单；同时用 HEAD 清单与暂存清单的并集防止本次删登记导致输入漏检。
 
@@ -173,7 +176,7 @@ W05a/W05b 当前均未实施。完成标准：非构建输入的文档提交只�
 
 运行 `python -B -m unittest discover -s scripts -p "test_build_inputs.py" -v`，CI 两种构建后运行 `python -B scripts/build_inputs.py --check`；hook 分类测试纳入 W05b 和 CI。同步 CLAUDE.md 开发流程，不新增静态扫描引用的一层。
 
-依据：[Cargo dep-info](https://doc.rust-lang.org/cargo/reference/build-cache.html#dep-info-files) 与 [构建脚本输出](https://doc.rust-lang.org/cargo/reference/build-scripts.html#outputs-of-the-build-script)。生成清单时必须覆盖 source/fixture 迁移后的路径，旧路径不能遗留为隐式豁免。
+依据：[Cargo dep-info](https://doc.rust-lang.org/cargo/reference/build-cache.html#dep-info-files) 与 [构建脚本输出](https://doc.rust-lang.org/cargo/reference/build-scripts.html#outputs-of-the-build-script)。清单记录迁移后的实际编译输入，包括嵌入的 schema-v3.sql；运行时 fixture 由 W05a 专用目录规则覆盖，不要求出现在清单。旧路径不能遗留为隐式豁免。
 
 ### W06：构建与缓存隔离验收，最后处理旧 target
 
@@ -307,6 +310,8 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 | 普通计划 Markdown | 暂存文档检查 | 不启动 Cargo/pnpm |
 | 仅 acceptance_csp.js | 壳 acceptance clippy/test | 只跑 default 算失败 |
 | 核心 Rust | workspace 两模式 clippy/test＋fmt | 只测核心而漏壳算失败 |
+| 核心 fixtures 的运行时 JSONL 或嵌入 SQL 单独改动 | workspace 两模式 clippy/test；测试清单有/无该路径两种情况 | 正常清单下不因运行时文件未登记而多跑前端；不得只测核心漏壳 |
+| fixtures 下 Markdown、新增/删除/跨目录重命名 | fixtures 规则先于文档豁免；新旧路径影响取并集 | 不得以扩展名或旧路径逃过检查 |
 | 壳 Rust | 壳两模式 clippy/test＋fmt | 不凭文件名猜 acceptance |
 | public/theme-boot.js | 前端检查 | 不落入纯静态资源豁免 |
 | 清单/选择器/hook/Cargo 配置 | 完整模式 | 禁止由自身变更降低验证 |

@@ -334,3 +334,9 @@ PR1 合入后 workspace 根目录是虚拟 manifest，命令统一改为：
 **唯一的小矛盾（不阻塞，执行 W05a 时一并改）：** 核心 fixture 中只有 `tests/fixtures/cache/schema-v3.sql` 是编译期输入（`src/cache.rs:742`、`tests/history_migration.rs:544` 中的 `include_str!`），会进入清单。其余 fixture（包括壳测试跨 crate 读取的 `codex/rate-limit-only.jsonl`）都是运行时读取，不在清单里。
 
 按新分类表“非 Rust 文件未登记者完整兜底”，这些 fixture 改动会走完整模式，与“必要契约”中“核心 fixture 变更选 workspace”的说法不一致。请在分类表加一条明确规则：`crates/tokenscope-core/tests/fixtures/**` → workspace 两种模式的 clippy/test（workspace 已包含壳，跨 crate 引用随之覆盖），并让契约与之一致。保持现在的完整兜底也安全，只是更慢，二选一写明即可。
+
+## 14. 第 13 节执行方回填（仅计划）
+
+选择 fixtures 专用目录规则：`crates/tokenscope-core/tests/fixtures/**` 固定运行 workspace 普通与 acceptance 两种模式 clippy/test，覆盖核心及壳。W05a 分类表、优先级和 §5.3 契约同步；目录内 Markdown 不享受纯文档豁免，新旧路径均参与重命名分类。清单损坏/门禁入口仍完整兜底，多类影响取并集。
+
+W02 与 W05c 同步区分编译期嵌入和运行时读取：schema-v3.sql 按实际依赖进入清单，运行时 JSONL 不伪造登记，靠目录规则覆盖。三份计划及 README 状态同步为复审通过、实现未开始。本轮未创建实施分支、未执行 W01。

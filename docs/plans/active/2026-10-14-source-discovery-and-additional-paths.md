@@ -1,6 +1,6 @@
 # PR3：当前用户日志目录发现与追加路径管理
 
-> 状态：按 [1eaede7 审阅意见](../../reviews/2026-10-15-source-discovery-plan-review.md)修订，待复审；S01–S07 均未实施。
+> 状态：[审阅第 13 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过；S01–S07 均未实施，仍须等待 PR2 合入。
 > 前置条件：[PR1 目录迁移](2026-10-15-workspace-layout.md)和 [PR2 扫描反馈](2026-10-15-collection-status.md)依次合入 main。届时从最新 main 创建 `feat/source-paths`，独立 minor 版本、独立 PR 和验收。当前设计修订仍提交到 `docs/source-discovery-plan`。
 
 **Goal：** 默认发现当前用户的标准日志目录与环境变量指定的目录，以追加列表管理来源；来源重叠不重复解析或计量，遍历链接不会死循环。
