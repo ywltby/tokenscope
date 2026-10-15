@@ -213,3 +213,106 @@ W05a/W05b 当前均未实施。完成标准：非构建输入的文档提交只�
 - [ ] 生产包、验收包、固定旧版升级均取得当前提交的实跑证据。
 - [ ] 旧 target 已安全清理，或明确记录被占用/共享而暂缓；不把待清理写成已释放空间。
 
+## 4. 三份计划共同的执行与交付约束
+
+本节同时适用于 PR2、PR3。任务表中的“未开始”不能因为计划写好了而改为完成。以下是执行步骤，不是本轮已经取得的证据。
+
+### 4.1 开工与逐项执行
+
+1. 读取 AGENTS.md、CLAUDE.md、当前计划；涉及界面再读 DESIGN.md。执行 `git status --short`、`git branch --show-current`、`git log -1 --oneline`，记录基线。存在他人改动时不暂存、不覆盖、不重置。
+2. PR1 在用户确认实施后按页首创建实施分支；PR2 必须确认 PR1 已合入 main，PR3 必须确认 PR2 已合入 main，再按各自页首建分支。不得并行实施三个 PR，也不得把后一个 PR 的功能提前塞入前一个。
+3. 按任务编号执行，每项拆成“补测试 → 单独运行确认红灯 → 实现 → 定向验证 → 检查差异 → 提交”。前置任务未通过时只允许修复该前置任务，不继续堆积后续功能。
+4. 测试红灯须命中目标断言或预期缺失接口；语法错误、缺工具、网络失败不算有效红灯。先保存失败输出，再改实现；不允许修改期望值、放宽阈值或跳过用例来获得绿灯。
+5. 原有统计不变量继续成立：事实求并集、四 token 桶、模型/项目身份、价格冻结、查询分页、CCS 手动导入均不得顺带改动。新增状态或路径元数据不能成为请求去重键。
+6. 自动测试使用合成来源和临时 history/settings/pricing 目录；注入全部真实来源入口，失败时也不能回落用户目录。真实数据性能测试单列 opt-in；本机不运行真实安装/卸载，不触发真实系统休眠。
+7. 新测试计数器、延迟、故障注入只在测试或 acceptance 构建中存在。发布构建不含 acceptance；不要通过生产环境变量开启测试后门。
+8. 任务提交只暂存本项文件。禁止跳过 hook、擅自关闭 CI、降低验收阈值、删除旧失败证据、强推改写历史。未知现状先核实；无法验证的项目写“待验＋原因”，不推断通过。
+
+### 4.2 证据格式与四级门槛
+
+每项在本计划的执行记录中增加：`任务编号 | 实现 commit | 验证 HEAD | 命令 | 预期断言 | 实际结果/退出码 | 证据位置 | 未闭合项`。原始输出存 `qa-artifacts/<pr-name>/<head>/<task>/`（ignored）；文档仅登记摘要，不提交真实日志。执行模型必须回填实际命令和路径，不能留下占位符冒充证据。
+
+| 阶段 | 必须满足 | 不能替代的证据 |
+| --- | --- | --- |
+| 单项实现通过 | 目标反例先失败、修复后通过；相关回归通过；无越界改动 | 全量测试绿不能代替目标用例 |
+| 本地交付通过 | 下列完整门禁逐条 exit 0；所有本 PR 必需项闭合；版本声明通过 | 单测不能代替生产构建或原生 E2E |
+| 合并就绪 | 同一最终来源 HEAD 的 CI、安装升级、Native UI E2E 全绿；工件可下载且属于本次构建，关键断言确实执行 | queued、skipped、旧 HEAD 绿、上传空目录均不算通过 |
+| 发布完成 | 合并后的 main SHA 自身 gate/build/install/publish 成功；版本标签、资产及校验和对应本次产物 | PR 绿或已合并不等于发布成功 |
+
+即使合并就绪也不自行合并，须遵守用户当时授权。真实跨午夜/长时间休眠/跨显示器只引用独立 todo；旧 target 清理若未获授权可单独待办，不因此声称空间已释放。
+
+PR1 完成迁移后，三个 PR 收尾都逐条执行以下命令（PowerShell 每条执行后检查 `$LASTEXITCODE`；非零立即停，不让后续成功覆盖失败）：
+
+```powershell
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets --features acceptance -- -D warnings
+cargo test --locked --workspace --features acceptance
+python -B -m unittest discover -s scripts -p "test_*.py"
+pwsh -NoProfile -File scripts/test_install_helpers.ps1
+pnpm --dir frontend typecheck
+pnpm --dir frontend format:check
+pnpm --dir frontend test
+pnpm --dir frontend build
+pnpm --dir frontend test:e2e
+python -B scripts/bump_version.py --check --base-ref origin/main
+```
+
+构建输入清单另按 W05c 从 `--begin` 到两种构建再 `--check` 完整执行，不能对旧 target 直接运行 check 当作本轮验证。CI 当前已有的其他脚本契约不得因本命令表未逐个列出而删除。命令因迁移需要改变时，同步脚本、CI 和本计划，记录原因。
+
+## 5. PR1 具体落地顺序与阻断断言
+
+### 5.1 W01–W04：先迁移结构，再改调用方
+
+1. W01 保存两份 `cargo metadata --no-deps --format-version 1`、两份锁的包身份及版本工具测试基线；为版本工具加入旧布局/新布局临时 Git 仓库。旧实现对新布局必须失败，旧布局历史查询必须保持通过。
+2. W02 先 `git mv` 源码及 fixtures，再改三个 manifest 和根锁。立即核对根 manifest 没有 package、成员恰为 tokenscope 与 tokenscope-app，且核心不依赖壳/Tauri。失败先修依赖图，不继续批量改脚本。
+3. 修改源码相对路径时逐个定位引用方：核心测试原有同级 fixtures 通常不变；跨 crate 引用和仓库根资源需要重算。禁止全仓替换 `../`。以真实加载 fixture 的内容断言验证，不只检查路径字符串存在。
+4. W03 统一当前版本读取入口与历史 ref 布局探测；分别测试缺文件、损坏 TOML、Git 查询失败。只有“该 ref 确实没有新布局文件”才允许旧布局读取，其他错误不得回退。
+5. W04 逐个更新 workflow/mjs/release 调用点；表中每项记录“已改＋测试”或“无需改＋依据”。检索残留 `src-tauri/target`、子 Cargo.lock 与旧源码路径，分类为有效入口/历史材料；有效入口必须零残留，历史材料不改写。
+6. W06 在干净 runner 验证不带 target 的验收 exe 与带三元组的生产 NSIS 两条路径。实际文件存在、hash 清单匹配、安装/升级执行通过，才允许关闭产物路径任务。
+
+### 5.2 W05c：先实现生成器，再让 hook 使用清单
+
+实现顺序固定为 `test_build_inputs.py → build_inputs.py → build-inputs.json → test_pre_commit_checks.py → pre_commit_checks.py → hook/CI`。不要先跳过文档测试，再补输入识别。
+
+建议最小 schema 如下；模式字段是必需契约，字段名称可随实现统一调整并有 schema 校验：
+
+```json
+{
+  "schema_version": 1,
+  "generated": [
+    {
+      "path": "src-tauri/src/acceptance_csp.js",
+      "kind": "file",
+      "consumers": [{ "package": "tokenscope-app", "mode": "acceptance" }]
+    }
+  ],
+  "manual": []
+}
+```
+
+1. 把 `.d` 解析、build-script output 解析、路径规范化、Git 跟踪过滤、记录合并做成纯函数；用合成 fixture 验证，不在这些单测中编译真实工程。Makefile 多目标/转义/续行不能按空格简单拆。
+2. 编排层解析 workspace metadata，再记录本次普通/acceptance compiler-artifact 与 build-script-executed。两次编译各自立即采集证据；只归属本地 package_id，不根据 `.d` 文件名猜包名。不把两模式产物最后留下的一个文件当作两份证据。
+3. 同一输入的 consumer 按 `(package, mode)` 去重排序；路径/类型相同才合并。未知模式、损坏 schema、重复冲突记录明确拒绝；生成器失败不得写一份空清单覆盖旧清单。
+4. `--update` 只在成功收齐两模式、过滤和校验后原子替换清单。`--check` 只比较，不修改受跟踪文件；输出差异路径及包/模式，退出码非零。缺证据、构建失败、只有旧缓存与确实零输入必须可区分。
+5. 防止 CI 绿而清单没验证：在临时 fixture 新加一个 include 输入但不更新清单，`--check` 必须失败；更新后通过；删除输入、改变消费模式再次失败。保存三次实际输出。
+
+### 5.3 W05a/W05b：分类器不能成为免检漏洞
+
+推荐流水线：`读取 staged diff/HEAD 与 index 清单 → 规则并集 → 展开检查命令 → 按检查身份去重 → 部分暂存检查 → 执行`。分类层只返回选择结果和原因，不执行 Cargo；执行层接收 argv 数组，禁止字符串拼接命令。
+
+| 临时仓库变更 | 必须选中 | 必须排除/失败行为 |
+| --- | --- | --- |
+| 普通计划 Markdown | 暂存文档检查 | 不启动 Cargo/pnpm |
+| 仅 acceptance_csp.js | 壳 acceptance clippy/test | 只跑 default 算失败 |
+| 核心 Rust | workspace 两模式 clippy/test＋fmt | 只测核心而漏壳算失败 |
+| 壳 Rust | 壳两模式 clippy/test＋fmt | 不凭文件名猜 acceptance |
+| public/theme-boot.js | 前端检查 | 不落入纯静态资源豁免 |
+| 清单/选择器/hook/Cargo 配置 | 完整模式 | 禁止由自身变更降低验证 |
+| 清单丢失、坏 JSON、未知 schema/类别 | 完整模式并解释 | 不能当作文档提交通过 |
+| 旧路径重命名为文档，或删除登记 | 新旧路径、HEAD/index 清单并集 | 不能只检查新路径 |
+| 被选检查输入有未暂存修改 | 明确阻止并列文件 | 禁止自动 stash/reset/add |
+
+临时 Git 仓库必须真实调用 hook；失败替身必须阻止 commit，成功替身记录 argv 与调用次数。只测试分类函数、不测试 hook 接线，不满足 W05。首次替换真实 hook 的提交强制 full 并保留日志。
+
