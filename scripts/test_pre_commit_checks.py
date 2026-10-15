@@ -23,6 +23,8 @@ from pre_commit_checks import (
     run,
 )
 
+ROOT = Path(__file__).resolve().parent.parent
+
 MANIFEST = {
     "schema_version": 1,
     "generated": [
@@ -281,6 +283,56 @@ class GitIntegrationCase(unittest.TestCase):
         run([["a"]], cwd=self.root, executor=lambda argv, cwd: 0)
         self.assertEqual(before, self.git("status", "--porcelain=v1", "-z"))
         self.assertFalse((self.root / ".git" / "refs" / "stash").exists())
+
+
+class HookWiringCase(unittest.TestCase):
+    """真实钩子脚本 + 替身检查器：非零退出必须阻止真实的 git commit。
+
+    只替换被钩子调用的检查器（临时仓库里放 `scripts/pre_commit_checks.py` 替身），
+    钩子本身用仓库里受版本管理的 `.githooks/pre-commit`，因此验证的是真实接线。
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="tokenscope-hookwire-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / "hook 仓库"
+        (self.root / "scripts").mkdir(parents=True)
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.name", "TokenScope fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        self.git("config", "core.hooksPath", str(ROOT / ".githooks"))
+        (self.root / "note.txt").write_text("内容\n", encoding="utf-8")
+
+    @property
+    def hooks_path(self):
+        return ROOT / ".githooks"
+
+    def git(self, *args, extra_env=None):
+        environment = git_env()
+        if extra_env:
+            environment.update(extra_env)
+        return subprocess.run(["git", "-C", str(self.root), *args],
+                              capture_output=True, encoding="utf-8", errors="replace",
+                              env=environment)
+
+    def write_stub(self, code):
+        (self.root / "scripts" / "pre_commit_checks.py").write_text(
+            f"import sys\nprint('stub checks')\nsys.exit({code})\n", encoding="utf-8")
+
+    def test_failing_check_blocks_commit_and_success_allows_it(self):
+        self.assertTrue(self.hooks_path.is_dir(), "缺少受版本管理的 .githooks 目录")
+        self.assertEqual(self.git("add", "note.txt").returncode, 0)
+
+        self.write_stub(7)
+        blocked = self.git("commit", "-m", "应被阻止")
+        self.assertNotEqual(blocked.returncode, 0, blocked.stdout)
+        self.assertEqual(self.git("log", "--oneline").stdout.strip(), "",
+                         "检查失败时不得产生提交")
+
+        self.write_stub(0)
+        allowed = self.git("commit", "-m", "应成功")
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertIn("应成功", self.git("log", "--oneline").stdout)
 
 
 if __name__ == "__main__":

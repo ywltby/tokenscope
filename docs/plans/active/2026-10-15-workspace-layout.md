@@ -392,7 +392,9 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 本轮另补两组契约测试（不属于 §4.2 命令表，但对应 §5.1.5 与 §5.2 的必要契约）：
 
 - `scripts/test_build_paths.py`（10 项）：发布与安装的 `release_assets collect` 参数必须一致且指向 `target/x86_64-pc-windows-msvc/release/...`；`release_assets.py` 自身不含仓库布局假设；`native-acceptance.mjs` 的 `EXE_DEFAULT` 为根 `target/release/tokenscope.exe` 且 `--exe` 覆盖仍可用；`ui-e2e.yml` 用 `-p tokenscope-app` 构建且不带 `--target`；rust-cache 只映射 `. -> target`；checks action 的 fmt 与 workspace 轮次各只出现一次、含清单校验与新增契约；install-test paths 覆盖核心 crate、不含旧根路径；`.gitignore` 为 `target/`；有效入口零 `src-tauri/target` 残留；受版本管理的锁只有根一个。该测试先跑出红灯（CI 未接线），接入 Selector and build-input contracts 步骤后转绿。
-- `test_build_inputs.py` 新增 3 项 release 风格 dep-info 组合契约：只保留合法跟踪输入，被排除项按「固定规则覆盖或构建生成物」记录原因；仓库外路径与空目录输入同样被丢弃。脚本契约总数 159 → 172 项，全部通过。
+- `test_build_inputs.py` 新增 3 项 release 风格 dep-info 组合契约：只保留合法跟踪输入，被排除项按「固定规则覆盖或构建生成物」记录原因；仓库外路径与空目录输入同样被丢弃。
+- `test_pre_commit_checks.py` 新增 1 项钩子接线契约：临时仓库把 `core.hooksPath` 指向受版本管理的 `.githooks`，用替身 `scripts/pre_commit_checks.py` 控制退出码——替身返回 7 时真实 `git commit` 被阻止且不产生提交，返回 0 时提交成功。钩子脚本本身不替换。
+- 脚本契约总数 159 → 173 项，全部通过。
 
 ### 6.5 隔离验收与旧入口核对（W06.1/W06.5）
 
