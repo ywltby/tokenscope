@@ -91,7 +91,7 @@ analytics_server.py（历史分析网页，只读 usage_history.json + cc-switch
 | 7 | Claude / Grok 独立扫描与分桶；三者合并小时序列；失败小时标记 | 13923-13945 |
 | 8 | 窗口统计（5h/7d/30d/cycle，仅当天）；镜像行归拢；写 ledger | 13955-13976 |
 | 9 | 构建 `output` 字典（today / providers / latest_request / active_sessions / dashboard） | 13978-14126 |
-| 10 | 收口四步：镜像聚合 → 同日高水位 → 历史回填 → 未归因缺口 → 原子落盘 | **14158-14162** |
+| 10 | 落盘收口：镜像聚合 → 同日高水位 → 历史回填 → 未归因缺口 → 原子写（**5 个动作**） | **14158-14162** |
 | 11 | 离线回填 worker 入队（可能在 14163-14183 二次落盘） | 14127-14183 |
 
 ### 2.3 `providers` 行的构成与账号口径
@@ -289,10 +289,9 @@ ORDER BY ts ASC, ts_nanos ASC
 
 ### 3.10 ccSwitch（只在分析网页里回填）
 
-**已验证**：全仓 `cc-switch|ccSwitch|cc_switch` 命中 `analytics_server.py`（8 处代码路径）
-与测试，另有文档/前端提及（`README.md:253`、`analytics/index.html` 的 4 处）——
-即**读取实现只在分析服务**，导出器与窗口都不碰 cc-switch。
-路径 `CCSWITCH_DB`（`analytics_server.py:45-49`）：`TOKEN_PULSE_CCSWITCH_DB` /
+**已验证**：全仓 `cc-switch|ccSwitch|cc_switch` 在 `analytics_server.py` 与其前端页面
+（`analytics/index.html`）中多处出现，但**读取实现只在分析服务**——导出器与窗口进程
+零命中。路径 `CCSWITCH_DB`（`analytics_server.py:45-49`）：`TOKEN_PULSE_CCSWITCH_DB` /
 `CCSWITCH_DB` / `~/.cc-switch/cc-switch.db`；`mode=ro`、`timeout=2`（`248`）。
 两张表：
 
@@ -745,7 +744,7 @@ turn 起点与 `marker.request_at` ≤5 s）仍标 unresolved；③ 同 turn 内
 | `cockpit_confirmed_auth_result_event_markers` | 10253-10339 | 0.35 s | 仅结构化 `auth_result` + confirmed + 账号可用；歧义阈值 **0.01 s**（最严） |
 | `cockpit_consistent_temporal_affinity_turn_anchors` | 10342-10678 | 0.25–0.35 s | 唯一配对的事件级 anchor |
 
-窗口常量集中在 `409-442`（`CLIENT_USAGE_COCKPIT_*` 系列，含
+窗口常量集中在 `409-433`（`CLIENT_USAGE_COCKPIT_*` 系列，含
 `AFFINITY_TURN_MATCH_SECONDS=2.0`、`AFFINITY_TURN_AMBIGUITY_SECONDS=0.2`、
 `AFFINITY_EVENT_MATCH_SECONDS=0.25`、`FINAL_TURN_START_MATCH_SECONDS=0.5`、
 `AFFINITY_MIN_STABLE_EVENTS=2`、`FALLBACK_GRACE_SECONDS=45.0`）。
@@ -775,7 +774,8 @@ turn 起点与 `marker.request_at` ≤5 s）仍标 unresolved；③ 同 turn 内
 `CODEX_ACCOUNT_MATCH_WINDOW_SECONDS = 600` 才采用，否则 `Unassigned local`
 （`UNASSIGNED_CODEX_LABEL`）。时间基准 = `account_at or request_at or when`（`3775-3780`）。
 最外层兜底：最近 30 分钟内（`CODEX_CURRENT_ACCOUNT_RECENT_SECONDS = 1800`）且无任何证据时，
-用"当前账号"（`8511-8513`、`8564-8571`）。
+用"当前账号"——无 markers 分支在 `8503-8511`（判定 `8504-8509`、写 ledger `8510-8511`），
+markers 分支在 `8563-8571`（判定 `8565-8571`）。
 
 **`resolve_api_service_event_accounts`（`10693-11058`）优先级链**（命中即停）：
 
@@ -798,8 +798,9 @@ turn 起点与 `marker.request_at` ≤5 s）仍标 unresolved；③ 同 turn 内
 ```
 
 `preserve_direct_label`（`11009-11015` 的局部布尔变量，`11016` 使用）是第 8 步的例外：`preserve_direct_official_usage`
-开启、标签不是 mirror 而是具体账号、模型属官方配额模型（`is_official_codex_quota_model`
-要求**不含 `/`**，`1641-1652`）、且 300 s 内无 Cockpit 证据 → 保留直连账号。
+**开启、标签不是 mirror 而是具体账号、模型属官方配额模型（`is_official_codex_quota_model`
+要求**不含 `/`** 且前缀属 `gpt-/o1/o3/o4/o5/codex-/chatgpt-`，`1641-1652`）、且 300 s 内无
+Cockpit 证据 → 保留直连账号。
 
 **归档（verdict）分级**（`495-511`、`10679-10690`）：
 `API_SERVICE_VERDICT_TIER_RANKS = {temporal:1, affinity_confirmed:2, cockpit_usage_row:3, opencodex_usage_row:4}`，
@@ -1000,11 +1001,12 @@ priority = 2.325、flex = 0.58125、batch = 0.7625、长上下文 = 1.35。
 - `codex_service_tier_to_speed`（`1568-1578`）：`priority|fast`→`fast`，
   `flex|batch|batches`→对应档，`standard`→`standard`，未知/空→`""`（**不猜**）。
 - `normalize_codex_speed`（`5652-5662`）/`codex_speed_meta`（`5663-5670`）。
-- 覆盖来源优先级：`CLIENT_USAGE_CODEX_FORCE_SPEED` > 配置 `current_speed`
-  （`config_current_speed` @5730-5736）> `config.toml` 的 `service_tier`
-  （`codex_config_service_tier_speed` @5739-5760）> `.codex-global-state.json` 的
-  `default-service-tier`（`5776-5790`）> 账号级 `speed_overrides`（`5704-5728`）>
-  账号 JSON 的 `app_speed` > `"standard"`（`5913-5944`）。
+- 覆盖来源优先级（按 `cockpit_codex_speed_by_label` 的**逐级覆盖**顺序，`5913-5944`）：
+  账号级 `speed_overrides`（按 label/email/id/name 匹配，最后写入、**优先级最高**，
+  `5940-5942`）> `current_speed`（`CLIENT_USAGE_CODEX_FORCE_SPEED` @`5730-5736` 优先，
+  否则 `config.toml` 的 `service_tier` @`5739-5760`，再否则 `.codex-global-state.json` 的
+  `default-service-tier` @`5776-5790`）> 账号 JSON 的 `app_speed` > `"standard"`
+  （`5937-5939`）。
 - `codex_speed_history`（`5844-5866`）用 config.toml 的 mtime 作为切换时刻生成
   `SpeedMarker`；`codex_speed_at`（`5869-5878`）取"最后一个 ≤ 事件时间的 marker"；
   `apply_codex_speed_fallback`（`5881-5890`）的跳过条件是"**乘数非空且 tier 非空**"，
@@ -1038,8 +1040,8 @@ priority = 2.325、flex = 0.58125、batch = 0.7625、长上下文 = 1.35。
   同时把标签写进 ledger 的**稳定 id 与 legacy id 双键**。
 - `pricing_model` 注入点：Cockpit 行（`4580-4586`，`pricing_model or resolved_model or model`）、
   marker 事件（`4718`、`4742`）、Grok 的 `grok_local_pricing_model`（`8862-8873`）。
-- `is_official_codex_quota_model`（`1641-1652`）要求模型名**不含 `/`** ⇒ 第三方路由
-  不消耗官方 5h/7d 配额统计。
+- `is_official_codex_quota_model`（`1641-1652`）要求模型名**不含 `/`** 且前缀属
+  `gpt-/o1/o3/o4/o5/codex-/chatgpt-` ⇒ 第三方路由不消耗官方 5h/7d 配额统计。
 
 ### 6.10 成本聚合口径
 
@@ -1051,7 +1053,7 @@ priority = 2.325、flex = 0.58125、batch = 0.7625、长上下文 = 1.35。
 - `cached_input_tokens` 输出时**把两个来源合并**：`bucket.cached_input_tokens +
   bucket.cache_read_input_tokens`（`12924`、`12953`）。
 - `models` / `unpriced_models` 只保留前 8（`12928-12932`），不影响成本合计。
-- 实时增量（`build_live_catchup_payload` @13497-13740）里事件级成本保留 **12 位小数**，
+- 实时增量（`build_live_catchup_payload` @`13497-13748`）里事件级成本保留 **12 位小数**，
   `price_resolved = (unpriced_tokens == 0)`（`13697-13699`）。
 - 历史行成本（`build_historical_usage_rows` @11667-11830）为
   `round(cost, 6)`，并纳入 `history_row_signature`（`11831-11844`）⇒ 价格变化触发历史重写。
@@ -1094,7 +1096,7 @@ priority = 2.325、flex = 0.58125、batch = 0.7625、长上下文 = 1.35。
 | `source` | str | 固定 `"client-jsonl"`（`14100`） |
 | `updated_at` / `date` | ISO str | 本地时间（`14101-14102`） |
 | `scan_status` | obj | `state/from/through/source`（`14103-14108`） |
-| `today` | obj | `bucket_to_dict("Client local", total)`：`requests/tokens/input_tokens/cached_input_tokens/cache_creation_input_tokens/output_tokens/cost/models/unpriced_tokens/unpriced_models/latest_at/latest_model/show_zero`（`14109`、`12918-12945`） |
+| `today` | obj | `bucket_to_dict("Client local", total)`：`requests/tokens/input_tokens/cached_input_tokens/cache_creation_input_tokens/output_tokens/cost/models/unpriced_tokens/unpriced_models/latest_at/latest_model/show_zero`（`14109`、`12918-12945`）；另有**条件字段** `app_speed`/`cost_multiplier`/`speed_badge`，仅当 `latest_app_speed` 非空时注入（`12937-12944`） |
 | `providers` | array | 按归属标签的明细；`name` 含 `@` 时附带 `window_5h/window_7d/window_cycle`（+ 可选 `window_30d`）（`13993-14010`、`14002-14005`） |
 | `latest_request` | obj | `provider/model/created_at/kind`（`14111-14116`） |
 | `active_sessions` / `unresolved_active_sessions` | array | 会话态（`14117-14118`） |
@@ -1139,7 +1141,10 @@ providers/detail_tokens/updated_at`（+ 可选 `source_gap`、`offline_reconcile
 `accounting_migration_high_water_guard`）。**沙箱复现**：导出器在当天运行时会顺手把
 昨天（10-14）以 0 值补进 `days` 并写 `offline_sync`（附录 A.3）。
 
-**高水位合并** `merge_rebuilt_history_day`（`11886-12051`）四分支：
+**高水位合并** `merge_rebuilt_history_day`（`11886-12051`）四分支。注意"schema 升级"有**两条
+独立轴**：`usage_accounting_schema`（`11916-11919`）与 `cockpit_usage_schema`（`11920-11927`），
+`schema_upgrade` 取二者之或（`11928`），但下面②③的替换/残余守卫**只由 accounting 轴触发**，
+仅 cockpit 轴升级走④的合并分支：
 ① 无既有行 → 直取重建值；② schema 升级且重建 ≥ 既有 → 全量替换；
 ③ schema 升级但重建更低 → 保留既有 token 与 `cost` 差值，并追加**字面标签**
 `"Historical high-water"` 的残余 provider（`11859`、`11957-12006`；注意它与今日输出中的
@@ -1208,7 +1213,8 @@ providers/detail_tokens/updated_at`（+ 可选 `source_gap`、`offline_reconcile
   cost_rate >2.2×且 cost>1、detail_gap coverage <70（一致解释，测试可证）。
 - ccSwitch 回填：表级 + 日级两级缺口（§3.10），`origin` 三态
   `primary`（`normalize_day` 默认参数 @`163`、落键 @`170`）/ `ccswitch_backfill`（`331`，
-  对应行内 `source` 字面量 @`320`）/ `missing`（`786`）。
+  对应行内 `source` 字面量 @`320`）/ `missing`（该值由 `blank_day()` → `normalize_day(..., "missing")`
+  产生，`analytics_server.py:414-415`；`786` 只是 `anomalies` 里同名的消费点，另有 `117`/`784`）。
 
 ### 7.8 界面展示口径
 
@@ -1255,8 +1261,10 @@ providers/detail_tokens/updated_at`（+ 可选 `source_gap`、`offline_reconcile
 2. **`models` 字典只保留前 8**（`12928`）：按模型下钻到第 9 名以后会从 provider 行缺失，
    但总量不受影响。
 3. **两处不共享代码的"同一件事"**：`live_usage_event_id`（导出器 vs GUI，有测试锁定）
-   与 `codex_auth_identity`（**无**测试锁定，`monitor.py:666-693` 缺 `usable_cockpit_identity`
-   守卫，会把自由文本当作账号身份）。
+   与 `codex_auth_identity`——测试只锁定"具体账号/JWT 路径下两者返回相同值"
+   （`tests/test_usage_state_boundaries.py:156-169`）以及**导出器侧**的自由文本守卫
+   （`171-176`）；**monitor 侧的自由文本分支没有断言**，而 `monitor.py:666-693` 确实缺
+   `usable_cockpit_identity`，会把路由诊断文本当作账号身份。
 4. **mirror 标签两侧不对称**：`API_SERVICE_MIRROR_LABELS` 有 3 项，
    而 `monitor.is_local_api_service_provider_name` 只认 2 项
    （`codex_local_access_runtime` 在展示层不被该分支扣除）。
@@ -1362,9 +1370,15 @@ unpriced_models={"grok-4.5-build": 1000}`。
 
 | 运行 | 动作 | 耗时 | 结果 |
 | --- | --- | --- | --- |
-| 第 1 次 | 冷启动 | — | 见 A.2 |
-| 第 2 次 | 复用缓存 | **0.56 s** | 输出一致 |
+| 第 1 次 | 冷启动（**该轮用离线价格态 `state/`**） | — | 见 A.2（0.160445） |
+| 第 2 次 | 复用缓存 | **0.56 s** | 输出与第 1 次一致（0.160445） |
 | 第 3 次 | 向会话 A 追加一条累计行（12000/3000/2000） | **0.57 s** | `requests=10 tokens=28410 cost=0.197568`（增量被正确并入） |
+
+> ⚠️ **两次实验的价格态不同**：A.4 的耗时与第 3 次数字取自**在线价格态**目录（`state2/`，
+> 价格缓存在 24 h 内复用，§6.3 决策第 4 级）。在该目录：第 1 次即 A.5 的 **0.115367**；
+> 追加事件的增量 = delta `6600/2400/1600` × gpt-5.5 在线价 `5/0.5/30` = **0.0822**，
+> 合计 **0.197568**，与 tokens `17810 + 10600 = 28410` 自洽。**离线态**（`state/`）的对应
+> 总量则是 A.2 的 **0.160445**——两者都同时被复算验证过。
 
 ### A.5 在线价格链（真实网络，仅取价格表）
 
@@ -1405,7 +1419,7 @@ unpriced_models={"grok-4.5-build": 1000}`。
 | `OPENCODEX_*` 窗口 | 180 / 21600 / 60 / 0.05 / 30 / 5（秒） | `374-401` |
 | `CODEX_ACCOUNT_MATCH_WINDOW_SECONDS` / `CODEX_CURRENT_ACCOUNT_RECENT_SECONDS` | 600 / 1800 | `373`、`434` |
 | `API_SERVICE_VERDICT_ARCHIVE_MIN_TIER` | 2（`max(2, env)`） | `501-504` |
-| Cockpit affinity 窗口 | 2.0 / 0.2 / 0.25 / 0.5 / 45.0 | `410-442` |
+| Cockpit affinity 窗口 | 2.0 / 0.2 / 0.25 / 0.5 / 45.0 | `409-433` |
 | OpenCode Go 峰时段 | UTC 01–04、06–10 | `1221-1226` |
 | `OFFLINE_HISTORY_BACKFILL_MAX_DAYS`（env `CLIENT_USAGE_OFFLINE_BACKFILL_MAX_DAYS`） | 31（≥0） | `445-448` |
 | GUI 轮询三档 | 100 / 250 / 500 ms | `monitor.py:141-154` |
@@ -1503,6 +1517,26 @@ unpriced_models={"grok-4.5-build": 1000}`。
 | 10 | §6.10 | "三处账实不符…镜像聚合"标签与行号不对应 | 改为两类补差 + 折叠只求和 |
 | 11 | 附录 B | 简写常量名不精确（`…ROW_SCHEMA`、`…RECENT_…`）；两个文件常量混排 | 用全名；表头声明"未标文件名者 = client_usage_export.py"；GUI 行补 `monitor.py:` |
 | 12 | §8.2 | Grok 上限只在导出器侧缺失（GUI 实时链路同源受限） | 补 `monitor.py:179-182`/`13471` 与汇聚点 `12707` |
+
+**第 4 轮（第 2 轮复审：修正落地验证 + 全新抽样）**
+
+两路独立 subagent 复核修正后的文档：一路覆盖 §1-§5（27 项修正逐条验证 → 26 项正确应用；
+20 条全新抽样全部一致），一路覆盖 §6-附录（12 项修正 → 11 项正确应用；24 组全新抽样 +
+附录 B 全表全部一致）。本轮新发现并修复：
+
+| # | 位置 | 复核发现 | 修正 |
+| --- | --- | --- | --- |
+| 1 | §5.5 | 兜底行号 `8511-8513` 指向写入/落桶段，判定实为 `8504-8509`（markers 分支 `8565-8571`） | 改为 `8503-8511` / `8563-8571` 并分段标注 |
+| 2 | §3.10 | cc-switch 命中计数与实测不符（不是"8 处/4 处"） | 去掉具体数字，改为"多处出现但读取实现只在分析服务" |
+| 3 | §5.5 / §6.9 | `is_official_codex_quota_model` 只写了"不含 `/`"，漏前缀白名单 | 补 `gpt-/o1/o3/o4/o5/codex-/chatgpt-` |
+| 4 | §2.2 | "收口四步"却列了 5 个动作 | 改"落盘收口…（5 个动作）" |
+| 5 | §8.2 / §C.4 | "`codex_auth_identity` 无测试锁定"被仓内测试证伪（`tests:156-169` 同时断言两侧） | 改为"monitor 侧自由文本分支无断言" |
+| 6 | §6.7 | 覆盖优先级链方向与代码相反（账号级 override 最后写入 = 最高优先） | 按 `5913-5944` 的逐级覆盖顺序重写 |
+| 7 | 附录 A.4 | 第 3 次成本 `0.197568` 属**在线价态**，与表中"第 1 次 = 离线"序列不自洽 | 标注两次实验的价格态并给出两种态的对照数字 |
+| 8 | 附录 B | "Cockpit affinity 窗口 `410-442`"上限外扩 | 收紧为 `409-433` |
+| 9 | §6.10 | `build_live_catchup_payload` 上限偏窄 | 改 `13497-13748` |
+| 10 | §7.7 | `missing` 态引 `786`（那是 anomalies 消费点） | 改引产生点 `analytics_server.py:414-415`，另注消费点 |
+| 11 | §7.2 / §7.4 | `today` 未提条件字段；高水位"schema 升级"未区分两条独立轴 | 补 `12937-12944`；标注 accounting 轴才是②③的触发条件 |
 
 **复算复核**：第 3 轮独立用源码内置价表复算了附录 A.2 的全部数字
 （A 0.0243 / B 0.008375 / C 0.0567 / D 0.0021 / Codex 小计 0.091475 / Claude 0.06897 /
