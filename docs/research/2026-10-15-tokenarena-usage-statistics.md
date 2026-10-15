@@ -272,8 +272,9 @@ reasoning/cached 恒 0、project 恒 `"unknown"`、**无 sessionId**（`:276-301
 `state.vscdb` 取 `cursorAuth/accessToken`（锁冲突时复制 `db+shm+wal` 快照，
 `:62-116`），再 GET `cursor.com/api/dashboard/export-usage-events-csv?strategy=tokens`
 （认证尝试数 = 1 + 2×Cookie 值个数，JWT `sub` 解析成功时最多 5 种、否则 3 种；
-网络失败静默返回空结果——失败判定 `:162-170`、捕获 `:300-304`，
-`:135-152` 为 URL 与认证尝试的构造）；
+网络异常/超时静默返回空结果——`:162-170` 打 skip 标记、`:300-304` 捕获，
+`:135-152` 为 URL 与认证尝试的构造；**HTTP 非 2xx 会抛错**
+（`:175`）并经 parser-service 记为 warn，不是静默）；
 CSV 列映射：`input = 'Input (w/ Cache Write)' + 'Input (w/o Cache Write)'`、
 `cached = 'Cache Read'`、`output = 'Output Tokens'`、reasoning 恒 0、
 project 恒 `"unknown"`、**无 sessionId**、时间粒度是**当天 00:00:00Z**、
@@ -489,8 +490,8 @@ token 为 0；其中 qwenpaw 走自建会话聚合、cline 也产出会话行）
   `UsageBucket` 只有 `reasoningTokens` 有 `@default(0)`（`:209`），
   其余四列无默认；`UsageSession` 五列全部 `@default(0)`（`:238-242`）。
 - `UsageBucket` 有 5 个 `estimated*Usd Float?`（:212-216）、`UsageSession` 有
-  1 个 `estimatedCostUsd Float?`（:244）。bucket 侧这 5 列**写入端不写、
-  读取端不消费**（成本在查询期现算，见 §6.4；注意 `queries.ts:67` 的
+  1 个 `estimatedCostUsd Float?`（:244）。bucket 侧这 5 列**既无写入方也无
+  读取方（恒为 NULL）**（成本在查询期现算，见 §6.4；注意 `queries.ts:67` 的
   `findMany` 无 `select`，Prisma 会把这些列随行取回——只是没人用）；
   session 侧 `estimatedCostUsd` 是 ingest 时算好落库、查询直接读的真列。
 - 桶表带 `apiKeyId`（:200）但**唯一键不含它**：同一桶换 key 重传会覆盖行并
@@ -818,9 +819,9 @@ totalUsd     = inputUsd + outputUsd + reasoningUsd + cacheUsd
 
 因此同一"金额"存在**两套取数路径**：
 
-- **bucket 侧**：`UsageBucket` 表里那 5 个 `estimated*Usd` 列是**死列**
-  （ingest 不写、queries 不读），所有桶成本都在查询时现算
-  （`queries.ts:113-136`）。改价目表/改公式会**同时**改变历史区间的展示成本。
+- **bucket 侧**：`UsageBucket` 表里那 5 个 `estimated*Usd` 列**既无写入方也无
+  读取方（恒为 NULL）**（ingest 不写、queries 不消费），所有桶成本都在查询时
+  现算（`queries.ts:113-136`）。改价目表/改公式会**同时**改变历史区间的展示成本。
 - **session 侧**：`UsageSession.estimatedCostUsd` 在
   `ingest.ts:97-111`/`:146-148` 按 `modelUsages` 逐模型计算后落库，
   查询直接读列（`queries.ts:764`、`:795`）；无已定价模型时为 `null`。
@@ -922,7 +923,8 @@ totalUsd     = inputUsd + outputUsd + reasoningUsd + cacheUsd
   对照：成就评估侧 `achievements/queries.ts:573-586` 的同名调用**有**
   `skipDuplicates: true`。冲突窗口只剩"并发未提交期"，风险低但存在；
   同类写法还有 `leaderboardPeriodEntry.createMany`（`finalize.ts:215-228`，
-  由前置 `deleteMany` 兜住）。
+  由前置 `deleteMany` 兜住；但交错并发下仍可能撞
+  `@@unique([resultId, userId])`，`schema.prisma:380-381`——窗口比上面更宽）。
 - 周期结果写入 `leaderboard_period_result/entry`，并给 top50 发徽章
   （`finalize.ts:186-301`）。
 
@@ -1019,36 +1021,114 @@ totalUsd     = inputUsd + outputUsd + reasoningUsd + cacheUsd
 
 ## 11. 未决与存疑
 
-以下事项在源码中**找不到佐证**或存在实现风险，如实列出：
+以下事项均已在源码中定位到对应实现，按「**已证实的行为**」与「**未证实的
+推断**」两类列出（本节经逐条回源复核；标注"源码无法判定"的项依赖上游日志
+语义或 Next 运行时行为，静态核对到此为止）。
 
-- **无流式解析**：所有 parser 整文件读内存（`fs/utils.ts:48-54`），大日志
-  场景的内存占用未做保护；也没有增量游标（每次 sync 全量重扫）。
-- **codex 首见累计值直接采信**（`codex.ts:200`）：同一模型第一次出现的
-  `total_token_usage` 会被整额计入，存在高估可能。
-- **gemini-cli 裸减法**（`gemini-cli.ts:219-237`）：`cached > input` 时产生
-  负值，靠聚合层整条丢弃兜底——该条数据永久丢失（不是修正为 0）。
-- **copilot-cli 丢弃 cacheWrite**（字段声明在 `copilot-cli.ts:37`，
-  映射 `:155-173` 从未消费它）、**kimi-code 丢弃 `input_cache_creation`**
-  （`kimi-code.ts:238` 读出、`:264-274` 未映射）：缓存写入 token
-  未计入任何桶。
-- **Cursor 依赖联网**（`cursor.ts:135-152`）：失败静默返回空结果，
-  不报错、不降级到本地。
-- **qodercli 的 credits ≠ token**（`qodercli.ts:44-48`）：把 credit 差值写进
-  `inputTokens`，与其它 agent 的 token 数值**不可比**。
-- **`UsageBucket` 的 5 个金额列是死列**（`schema.prisma:212-216`）。
-- **会话与桶两套成本口径不合并、不对账**（§6.4），改价或目录不可用会导致
-  KPI 与会话明细的金额不一致。
-- **`cache_write` 全仓无消费**（`catalog.ts:13` 仅类型声明）；同类还有
-  `resolve.ts:102-104` 的 `_unique` 死函数（定义后无人引用）。
-- **看板无 SQL 聚合、无分页/limit**（`queries.ts:62-109`），成本随行数线性
-  增长；服务端对摄入数组也无长度上限（`contracts.ts:109-110` 无 `.max()`）。
-- **model 过滤下的会话指标错配**（§5.4）。
-- **排行榜并发结算可能撞唯一约束**（`finalize.ts:250` 无 `skipDuplicates`）。
-- **无跨 DST 转换时刻的测试**（`date-range.test.ts:25-35` 只覆盖了 DST
-  生效期的日期边界；`date-range.ts:92-122` 的迭代换算是唯一兜底）。
-- **`kiro.ts` 无测试**；`opencode.ts` 的 SQLite 分支无测试（覆盖率排除）。
-- 采集端 `settings.timezone` 拉下来**不使用**（`client.ts:208`）。
-- `codex.ts:110` 的 `sessionModel = "unknown"` 是死变量，使模型回退链末段
-  恒为 `"unknown"`（`:206-207`）。
-- 锁被占用导致的 `markSyncFailed` 仍会更新 `lastCompletedAt`（`state.ts:96`），
-  与"本轮未完成"的语义冲突，状态展示会误读。
+### 11.1 已证实的行为与风险
+
+- **无流式解析**：文本类 parser 都是整文件读内存（`fs/utils.ts:48-54` 的
+  `readFileSafe`；另有 9 处自实现同款读取——`gemini-cli.ts:97`、
+  `copilot-cli.ts:107`、`openclaw.ts:125`、`kiro.ts:119/:185`、`cline.ts:64`、
+  `roo-code.ts:61`、`opencode.ts:325`、`qodercli.ts:332/:399`），大日志场景的
+  内存占用未做保护。**解析层**没有增量游标（每轮 sync 全量重扫，
+  `sync-service.ts:266`；不过上传层有内容哈希差异，`upload-manifest.ts:236-243`）。
+- **codex 的差分基准只在 total 分支回写**（`codex.ts:202`），且 `prevTotal`
+  每文件新建、不跨 sync 持久化（`:131`）：当同一文件内该 model key 已由
+  `last_token_usage` 分支计入过用量时，随后首见的累计值会被**整额再计一次**
+  （`:198-201`）。纯累计（无 last）的文件不会高估，只是把首见前的累计量整额
+  归到首见时间点。
+- **gemini-cli 裸减法**（`gemini-cli.ts:219-220`、`:233-237`）：`cached > input`
+  或 `thoughts > output` 时该条 entry 的**四个桶整体不入账**（判据
+  `token-usage.ts:13-16`，执行点 `aggregator.ts:21-24`、
+  `session-extractor.ts:28-30`）——不是把负桶钳到 0，连本次有效的
+  cached/reasoning 也一并丢失；丢弃粒度是单条消息，会话对象（时间/轮次/
+  消息数）仍会产出，只是 token 记 0。
+- **copilot-cli 与 kimi-code 的缓存写入 token 未进入任何桶**：copilot-cli 的
+  `cacheWriteTokens` 只在 `copilot-cli.ts:37` 声明、`:155-173` 的 entry 映射
+  从不读取，且 `:159-161` 的零值判定**不含**它——只含缓存写入的 shutdown 会
+  **整条消失**；kimi-code 的 `input_cache_creation` 在 `kimi-code.ts:238`
+  读出后仅参与 `:240-247` 的全零判定、`:264-274` 未映射进 entry——只含它的
+  entry 不消失，而是产出一条**全零 entry**。
+- **Cursor 的用量只能来自联网 CSV**（`cursor.ts:135-152`）：网络异常/超时
+  （`:162-170` 打 skip 标记）与取不到 token（`:295`）都会**静默**返回空结果、
+  无日志；但 HTTP 非 2xx 会在 `:175` 抛出 `Cursor usage export auth failed`，
+  经 `parser-service.ts:45-47` 记为 warn——"静默"只覆盖网络层与无 token
+  两类分支。全程无本地降级路径（`sessions: []`，`:352`）。
+- **qodercli 的 credits ≠ token**：credit 差值写进 `inputTokens`
+  （`qodercli.ts:286`，单位声明 `:44-48`），会直接进入桶与总 token
+  （`aggregator.ts:50-54`、`queries.ts:159-165`），与其它 agent 不可加。
+  费用影响分两种：模型串命中官方前缀（`resolve.ts:16-79`）则按 token 单价
+  乘 credit 数（数值无意义）；落到 `"credits"` 兜底（`:61`）则计未定价
+  （金额 0、计入覆盖率分母）。
+- **`UsageBucket` 的 5 个 `estimated*Usd` 列恒为 NULL**
+  （`schema.prisma:212-216`）：`ingest.ts:68-77` 不写（upsert 是唯一写点）、
+  `queries.ts:67` 的 `findMany` 无 `select` 会把它们随行取回但下游只读 token
+  字段、桶成本一律查询期现算（`:113-136`）。**既无写入方也无读取方**，
+  只有随行取回的传输开销。
+- **会话与桶两套成本口径不合并**：桶侧金额每次查询按当前价目现算
+  （`queries.ts:113-136`，KPI 取 `:669-703` 的 `currentUsd`；分解 `:532-540`），
+  会话侧读 ingest 期落库的 `UsageSession.estimatedCostUsd`
+  （`ingest.ts:97-111`、`queries.ts:795`）。**改价后** KPI / 定价表 / 分解 /
+  榜单金额会变，**历史会话明细不变**——只有会话被重传时才按新价重写
+  （`ingest.ts:263`；而清单内容哈希不因改价变化，`upload-manifest.ts:236-243`）。
+  **目录不可用**时桶侧归 0、会话明细仍显示旧值。两处本来也不等：会话 token
+  只统计带 sessionId 的 entry（`session-extractor.ts:23-30`），
+  cline/cursor/kiro/qwenpaw 的会话 token 恒 0、金额 null。
+- **`cache_write` 全仓无计算消费**：`catalog.ts:13` 仅是类型字段——取值确实
+  随价目快照传入（`:102`），但 `estimateCostUsd` 只读 input/output/reasoning/
+  cache_read。同类还有 `resolve.ts:102-104` 的 `_unique`（非 export、零引用）。
+- **看板无 SQL 聚合、无分页/limit**（`queries.ts:62-109`）：一次仪表盘渲染会
+  执行 `loadBuckets` 7 次、session 全量读 7 次（行号见 §5.3），其中 5 遍逐行
+  调用 `estimateBucketCostUsd`（`queries.ts:297`、`:408`、`:532`、`:720-721`），
+  单行工作量为固定上限（`resolve.ts:16-79` 的 11 条规则 × ≤3 候选）。
+  **摄入数组无长度上限**：`contracts.ts:109-110` 无 `.max()`，唯一校验点是
+  `api/usage/ingest/route.ts:34`，`ingest.ts` 与 `next.config.ts` 均无二次限制。
+- **model 过滤下会话指标不随过滤**（§5.4 的错配）：按 `model` 筛选时，
+  **随过滤**＝token 四桶、分解卡 token/成本、价格表、趋势图 token/成本、
+  KPI 的 `estimatedCostUsd`（`kpi-grid.tsx:145-151` 取自 bucket 侧
+  `pricingSummary`）；**不随过滤**＝sessions / messages / userMessages /
+  activeSeconds / totalSeconds（KPI、分解卡、趋势图 totalSeconds、热力图、
+  会话明细列表）。成本合计因此不受错配影响，但会话明细行的
+  `estimatedCostUsd` 是 ingest 落库的**全模型**值，与按模型过滤的 KPI 成本
+  不可对账。
+- **排行榜结算在并发未提交期仍有撞唯一约束的窗口**：`finalize.ts:232-247`
+  先按 `dedupeKey` `findMany` 过滤（`schema.prisma:336` 为 `@unique`），
+  `:250` 的 `createMany` 未加 `skipDuplicates`（对照
+  `achievements/queries.ts:585` 有）；`:103-119` 的幂等早退无锁——风险低但存在。
+- **无跨 DST 转换时刻的测试**：`date-range.test.ts:25-35` 是全仓唯一的负偏移
+  用例（`America/Los_Angeles`，2026-03-26→27，处于 PDT 生效期、不跨转换点），
+  其余时区用例均为 `Asia/Shanghai`（无 DST）；墙钟→UTC 换算统一走
+  `date-range.ts:92-122` 的 ≤3 轮偏移迭代，格子递推在 `listRangeBuckets`
+  （`:322-326`）——转换点行为缺乏定向用例。
+- **测试覆盖缺口**：`kiro.ts` 无测试（parsers 目录唯一没有同名 `.test.ts` 的
+  实现；`parser-service.test.ts:3-4` 用 mock 替换 registry）；`opencode.ts`
+  **有**测试但只覆盖 JSON 存储分支，SQLite 分支（`opencode.ts:212-217`、
+  `:228-239`）无用例。二者同被列入 coverage exclude（`cli/vitest.config.ts:16`、
+  `:19`）——"排除"与"无测试"是两件事。
+- **采集端拉取的 `settings.timezone` 除完整性校验外不参与任何计算或上传**：
+  `client.ts:204-212` 校验缺失即判 settings 无效，使本轮同步失败
+  （`sync-service.ts:303-308`）；CLI 全仓无其它使用点。
+- **`codex.ts:110` 的 `const sessionModel = "unknown"` 是死变量**：回退链
+  （`:206-207`）在它之前已由 `turnContextModel`（初值同为 `"unknown"`，
+  `:124`）截断，末段实际兜底就是字面量。
+- **锁被占用时的 `lastCompletedAt`**：`sync-service.ts:239-253` 走
+  `markSyncFailed(..., "skipped_locked")`，该函数（`state.ts:87-102`）会把
+  `lastCompletedAt` 设为当前时间，与"本轮未完成"的字段语义矛盾；但该字段
+  **只写不读**（全仓仅 `state.ts:16`、`:76`、`:96`；`status.ts:112-138`
+  展示的是 `lastAttemptAt`/`lastSuccessAt`），不会造成展示误读——风险在
+  后续新增消费者时兑现。
+
+### 11.2 未证实的推断（源码无法判定）
+
+- codex 若把 `total_token_usage` 作为会话级累计、而差分键按 `info.model`
+  分裂，则换模型时新 key 的首见值可能含旧模型累计——依赖上游日志语义。
+- qodercli 的 quota 是账户级三池之和（`qodercli.ts:162-168`）且无 entrypoint
+  维度过滤，差值是否包含 Qoder IDE 的消耗同样属上游语义。
+- 价目目录抓取失败返回 `null` 后，该 `null` 是否被 `unstable_cache` 按 12
+  小时缓存，取决于 Next 运行时行为；源码未处理"负缓存"。
+- DST 转换时刻的实际换算输出正确性（静态核对只能证明"无定向用例"）。
+- 排行榜条目表 `leaderboard_period_entry` 的 `@@unique([resultId, userId])`
+  （`schema.prisma:380-381`）与 `finalize.ts:208-228` 的
+  `deleteMany`+`createMany` 组合，在交错并发下的窗口比上一条更宽——
+  结构化推断，未做并发验证。
