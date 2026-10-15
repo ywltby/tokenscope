@@ -313,3 +313,24 @@ PR1 合入后 workspace 根目录是虚拟 manifest，命令统一改为：
 - [x] 11.4：采纳实施分支建议，PR1 与 README 改为开工时从当前文档分支最新提交创建 feat/workspace-layout。本轮不切分支，不改写提交。归档移动复用继续保留在 PR3 本轮范围与验收中，未静默延期。
 
 以上只表示设计已修改；未实施脚本、业务代码或测试，也未把各任务标为完成。
+
+## 13. 第二次复审（针对 9a8b0c9、9d8942a）
+
+**结论：通过，可以开工 PR1。** 第 11 节四项均已落实：
+
+- 消费方改为“包 + 模式”，`acceptance_csp.js` 单独改动必须选中壳 acceptance 检查。
+- 清单只收 Git 跟踪文件，先折叠 `..` 再判断是否越出仓库，并增加 release 风格 fixture。
+- 旧 `dir` 迁移的行为变更已写入 §2、§3、S01、S07。
+- 实施分支改为 `feat/workspace-layout`。
+
+新增的 PR1 第 4–5 节、PR2 第 6 节、PR3 第 8 节逐项核对，结论如下：
+
+- 引用的 `AGENTS.md`、`scripts/test_install_helpers.ps1` 存在，`qa-artifacts/` 已在 `.gitignore` 中。
+- 本地门禁命令 `python -B -m unittest discover -s scripts -p "test_*.py"` 覆盖了 CI 分别执行的全部 7 个脚本测试文件，本机实跑 74 项通过（35.6 秒），都是临时目录契约测试，没有真实安装。
+- README 中的四个跨文件锚点与目标标题一致。
+- PR2 的状态机和计时规则与现有 `collect_flighted_with`、`COLLECT_SERIAL`、`Trigger` 的结构相符：start 在取锁后发出，终态在释锁前写入，同一 runId 不延长显示期。
+- PR3 的事实矩阵覆盖了第 5 节全部要求。
+
+**唯一的小矛盾（不阻塞，执行 W05a 时一并改）：** 核心 fixture 中只有 `tests/fixtures/cache/schema-v3.sql` 是编译期输入（`src/cache.rs:742`、`tests/history_migration.rs:544` 中的 `include_str!`），会进入清单。其余 fixture（包括壳测试跨 crate 读取的 `codex/rate-limit-only.jsonl`）都是运行时读取，不在清单里。
+
+按新分类表“非 Rust 文件未登记者完整兜底”，这些 fixture 改动会走完整模式，与“必要契约”中“核心 fixture 变更选 workspace”的说法不一致。请在分类表加一条明确规则：`crates/tokenscope-core/tests/fixtures/**` → workspace 两种模式的 clippy/test（workspace 已包含壳，跨 crate 引用随之覆盖），并让契约与之一致。保持现在的完整兜底也安全，只是更慢，二选一写明即可。
