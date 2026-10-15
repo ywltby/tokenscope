@@ -22,7 +22,7 @@ CLI 的 `history.jsonl` 当作 rollout）。
 ## 2. Token 桶（互斥四桶）
 
 内部存储、IPC 与计费保留四个互斥桶：**非缓存输入 / 输出 / 缓存写 / 缓存读**。
-契约测试：`tests/token_bucket_contract.rs`。
+契约测试：`crates/tokenscope-core/tests/token_bucket_contract.rs`。
 
 界面中所有应用的「输入」统一显示总输入，即非缓存输入 + 缓存写 + 缓存读。
 缓存写、缓存命中作为输入的子项独立展示；总 token = 展示输入 + 输出，不能重复加缓存。
@@ -121,7 +121,7 @@ Anthropic Messages API 的 usage 四字段本身就是互斥桶，逐一映射�
 
 ## 3. 去重（dedupe）
 
-全局去重（M4 起上移，`src/dedupe.rs`），在缓存合并之后、聚合之前执行，
+全局去重（M4 起上移，`crates/tokenscope-core/src/dedupe.rs`），在缓存合并之后、聚合之前执行，
 保证无缓存/缓存命中/重建三路径数字一致。
 
 ### 3.1 Claude Code
@@ -154,9 +154,9 @@ model 纳入键：**跨模型**的同用量请求不再误合并；重播必然�
 
 ### 3.3 契约测试
 
-`src/dedupe.rs`：重播保首条、跨批次/跨日仍去重、agent 间隔离。
-`tests/e2e_events_range.rs` 等端到端测试保证去重与汇总/明细同源。
-`tests/all_usage_sources.rs`（H02）：子代理用量并入、同请求跨文件取终值、
+`crates/tokenscope-core/src/dedupe.rs`：重播保首条、跨批次/跨日仍去重、agent 间隔离。
+`crates/tokenscope-core/tests/e2e_events_range.rs` 等端到端测试保证去重与汇总/明细同源。
+`crates/tokenscope-core/tests/all_usage_sources.rs`（H02）：子代理用量并入、同请求跨文件取终值、
 多根发现与归档目录、非 rollout 文件不纳入、可证实的跨来源身份。
 
 ### 3.3.1 跨来源请求身份（H02/H05）
@@ -203,7 +203,7 @@ model 纳入键：**跨模型**的同用量请求不再误合并；重播必然�
 - **展示名（`Group.label`）= 路径末段**，完整身份保留下钻匹配。
 - **跨工具合并**：同一路径的 Claude 与 Codex 会话归入同一项目、一次聚合；
   仅展示名相同（Claude 只有 slug、或路径不同）**不合并**
-  （`tests/project_alias_cross_agent.rs`、`tests/project_path_drilldown.rs`）。
+  （`crates/tokenscope-core/tests/project_alias_cross_agent.rs`、`crates/tokenscope-core/tests/project_path_drilldown.rs`）。
 - **失效**：Claude 项目映射的内容与状态构成解析上下文修订（缓存
   `files.context_rev` 与采集复用键都据此区分）——配置变化后新查询重新解析，
   已建立的查询会话继续使用旧冻结快照；解析版本 9（项目根归并）、界面快照
@@ -540,7 +540,7 @@ model 纳入键：**跨模型**的同用量请求不再误合并；重播必然�
 
 ## 6.5 审阅修订（2026-10-10，H01–H08 复审）
 
-复审发现的缺陷与最终口径（每项都有定向回归测试，见 `tests/review_regressions.rs`）：
+复审发现的缺陷与最终口径（每项都有定向回归测试，见 `crates/tokenscope-core/tests/review_regressions.rs`）：
 
 - **IPC 字段命名**：`ImportPreview` / `ImportReport` / `CcsSchema` / `RollupCoverage` 一律**蛇形**命名，
   与 `SummaryReport` / `EventRow` 同一套约定。早期误加的 camelCase 改名会让前端读到 `undefined`

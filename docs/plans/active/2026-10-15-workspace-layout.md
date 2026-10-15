@@ -200,21 +200,22 @@ W05a/W05b 当前均未实施。完成标准：非构建输入的文档提交只�
 
 | 任务 | 状态 | 证据 |
 | --- | --- | --- |
-| W01 基线与失败契约 | 未开始（已做只读初步配置核查） | 尚无迁移测试 |
-| W02 单 workspace 与锁 | 未开始 | — |
-| W03 版本工具 | 未开始 | — |
-| W04 路径接线 | 未开始 | — |
-| W05 门禁与缓存 | 未开始 | — |
-| W06 构建验收与旧目录清理 | 未开始 | — |
-| W07 文档与交付 | 未开始 | — |
+| W01 基线与失败契约 | 已完成 | `qa-artifacts/workspace-layout/94e5c52/W01/`（两份 metadata、两份旧锁、`red-bump-version.txt` 18 项 KeyError 红灯） |
+| W02 单 workspace 与锁 | 已完成 | `a26961f`、`c0497ca`；`W01/metadata-unified.json`（两成员/默认两成员/根 target）、`W02/cargo-check-exit.txt`、`W02/cargo-test-summary.txt`（552 通过）、`W01/lock-diff-shell-vs-unified.json`（467 包零差异） |
+| W03 版本工具 | 已完成 | `abc4ef5`；`W03/green-bump-version.txt`（16 OK）、`W03/python-all.txt`（82 OK） |
+| W04 路径接线 | 已完成 | `6f6f4dc`；残留检索 `W01/grep-old-target.txt`、`W01/grep-shell-manifest.txt` |
+| W05 门禁与缓存 | 已完成（本地） | `6f6f4dc`；`W05/test-pre-commit.txt`（30 OK）、`W05/test-check-staged-docs.txt`（15 OK）；真实提交 `a26961f`/`c0497ca` 触发完整门禁并通过 |
+| W05c 构建输入清单 | 已完成（本地） | `abc4ef5`；`W05/build-inputs-update.txt`、`W05/build-inputs-check-final.txt`（零差异）、`W05/build-inputs-check-negative2.txt`（漏登记+paths 未覆盖双重检出） |
+| W06 构建验收与旧目录清理 | 部分完成 | 旧 target 只读测量见第 6 节；隔离 Runner 验收与删除待用户确认 |
+| W07 文档与交付 | 部分完成 | `CLAUDE.md`/`README.md`/`stats-semantics.md` 已更新、版本 0.3.2；远程门禁与推送待执行 |
 
-- [ ] metadata 两个成员、正确默认成员与统一 target_directory。
-- [ ] 根是虚拟 workspace，核心源码/测试/fixture 完整迁移，无旧路径副本；跨 cwd 测试、旧/新 Git 基线版本读取均通过。
-- [ ] 仅一个受版本管理的 Cargo.lock，两个本地包版本正确，第三方依赖无未解释漂移。
-- [ ] 旧 CLI 同名规避配置和当前文档说明全部清除，共享依赖 features 保持正确。
-- [ ] 钩子、CI、缓存、NSIS 收集与原生验收统一新布局；普通/acceptance 覆盖无损。
-- [ ] 生产包、验收包、固定旧版升级均取得当前提交的实跑证据。
-- [ ] 旧 target 已安全清理，或明确记录被占用/共享而暂缓；不把待清理写成已释放空间。
+- [x] metadata 两个成员、正确默认成员与统一 target_directory。
+- [x] 根是虚拟 workspace，核心源码/测试/fixture 完整迁移，无旧路径副本；跨 cwd 测试、旧/新 Git 基线版本读取均通过。
+- [x] 仅一个受版本管理的 Cargo.lock，两个本地包版本正确，第三方依赖无未解释漂移。
+- [x] 旧 CLI 同名规避配置和当前文档说明全部清除，共享依赖 features 保持正确。
+- [x] 钩子、CI、缓存、NSIS 收集与原生验收统一新布局；普通/acceptance 覆盖无损（本地门禁全绿）。
+- [ ] 生产包、验收包、固定旧版升级均取得当前提交的实跑证据（需推送后由 CI/Actions 提供）。
+- [ ] 旧 target 已安全清理，或明确记录被占用/共享而暂缓（已测量，等待用户确认）。
 
 ## 4. 三份计划共同的执行与交付约束
 
@@ -320,4 +321,35 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 | 被选检查输入有未暂存修改 | 明确阻止并列文件 | 禁止自动 stash/reset/add |
 
 临时 Git 仓库必须真实调用 hook；失败替身必须阻止 commit，成功替身记录 argv 与调用次数。只测试分类函数、不测试 hook 接线，不满足 W05。首次替换真实 hook 的提交强制 full 并保留日志。
+
+## 6. PR1 执行记录（2026-10-15）
+
+实现分支 `feat/workspace-layout`，起点 `94e5c52`（`docs/source-discovery-plan` 最新提交，含 c16e023）。本机环境：cargo/rustc 1.99.0、Python 3.14.3、pnpm 11；Rust 门禁全部以 `--offline --locked` 执行。原始输出保存在 ignored 的 `qa-artifacts/workspace-layout/94e5c52/`，本节只登记摘要。
+
+| 任务 | 实现 commit | 验证 HEAD | 命令 | 预期断言 | 实际结果 | 证据位置 | 未闭合项 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| W01 | abc4ef5 | 94e5c52 | `python -B -m unittest discover -s scripts -p "test_bump_version.py"` | 新布局下版本工具必须按核心 manifest 与唯一锁工作 | 18 项 `KeyError: 'package'`（旧实现读不到根虚拟 manifest 的版本），命中预期缺失接口 | `W01/red-bump-version.txt` | 无 |
+| W02 | a26961f、c0497ca | 94e5c52 | `cargo metadata --offline --locked --format-version 1`；`cargo check --offline --locked --workspace`；`cargo test --locked --workspace` | 恰好两个成员、默认成员含两者、target 为根 target；check 与 test 通过 | 成员与默认成员均为 `tokenscope@0.3.1` + `tokenscope-app@0.3.1`，`target_directory` 为仓库根；check exit 0（3m29s）；test 552 项通过 | `W01/metadata-unified.json`、`W02/cargo-check-exit.txt`、`W02/cargo-test-summary.txt` | 无 |
+| W02 锁与依赖 | a26961f | 94e5c52 | 自写比较脚本比较三份锁的 name/source/version/checksum | 第三方不得漂移 | 统一锁与原壳锁 467 个包身份零差异；原根锁 156 个包全部包含其中 | `W01/lock-diff-shell-vs-unified.json` | 无 |
+| W02 依赖方向 | a26961f | a26961f | `cargo tree --workspace -d` | 只保留合法的多版本依赖 | 50 行重复均为第三方内部多版本（如 base64 0.22/0.23），无环、无核心→壳依赖 | `W02/cargo-tree-duplicates.txt` | 无 |
+| W02 跨 cwd | a26961f | a26961f | 根目录与 `crates/tokenscope-core` 各跑 `--test project_path_attribution` | 不依赖启动工作目录 | 两处均 16 项通过 | `W02/cwd-root.txt`、`W02/cwd-crate.txt` | 无 |
+| W03 | abc4ef5 | abc4ef5 | `test_bump_version.py`、`test_release_metadata.py`、`python -B -m unittest discover -s scripts -p "test_*.py"` | 单锁契约与历史布局探测 | 16 项通过；全部脚本契约 82 项通过 | `W03/green-bump-version.txt`、`W03/python-all.txt` | 无 |
+| W04 | 6f6f4dc | 6f6f4dc | `git grep -n "src-tauri[/\\\\]target" -- ':!docs'` | 有效入口零残留 | 非 docs 命中为 0；`src-tauri/Cargo.lock` 引用只余历史文档 | `W01/grep-old-target.txt` | 无 |
+| W05a/W05b | 6f6f4dc | 6f6f4dc | `test_pre_commit_checks.py`、`test_check_staged_docs.py`；真实提交触发 hook | 分类正确、缺工具明确失败、临时仓库与调用者仓库隔离 | 选择器 30 项、文档检查 15 项通过；首次切换 hook 的提交（a26961f）实际跑完整门禁并通过 | `W05/test-pre-commit.txt`、`W05/test-check-staged-docs.txt` | 无 |
+| W05c | abc4ef5 | abc4ef5 | `build_inputs.py --update` / `--check`；`test_build_inputs.py` | 生成后与本次构建零差异；漏登记必须失败 | 清单 5 项；纯函数 31 项通过；正向 check 零差异；新增真实 include 输入后 check 非零退出并同时报出「清单漏登记」与「install-test.yml paths 未覆盖」 | `W05/build-inputs-update.txt`、`W05/build-inputs-check-final.txt`、`W05/build-inputs-check-negative2.txt` | 无 |
+| W06 | — | — | 只读测量（见 6.1） | 删除前必须取得用户确认 | 未执行删除 | `W06/`（本机测量另见 6.1） | 隔离 Runner 验收、生产包与旧版升级实跑待 CI |
+| W07 | 本次提交 | 本次提交 | `python -B scripts/bump_version.py --bump patch --summary …`；`--check --base-ref origin/main` | 四配置＋一锁＋声明原子更新，版本 0.3.2 | bump exit 0；check 通过（previous 0.3.1 / base e34495b） | 本提交 | 推送与远程门禁 |
+
+### 6.1 旧 target 现状（只读测量，等待确认后清理）
+
+| 目录 | 大小 | 实际类型 | 最近写入 | 仓库配置引用 | 进程占用 |
+| --- | --- | --- | --- | --- | --- |
+| `<仓库>/src-tauri/target` | 38.85 GB（32326 文件） | 真实目录（非 junction/符号链接） | 2026-10-08 | 零（`src-tauri/Cargo.toml` 已无独立 workspace，代码与 workflow 已指向根 target） | 无（测量时仅本次迁移产生的 cargo/rustc 在根 target 工作） |
+| `<仓库>/target` | 37.71 GB（49524 文件） | 真实目录 | 迁移后持续写入 | 默认共享输出，保留 | 当前构建使用中 |
+
+两目录相加约 76.5 GB，与计划开头的估算一致，但**清理只涉及 `src-tauri/target`**：根 `target/` 是统一后的默认输出，不能清理。另需注意仓库存在第二个 worktree（`~/.config/superpowers/worktrees/tokenscope/source-discovery-plan`，detached HEAD `3ffea3e`），它有自己的构建目录，不在本次清理范围。
+
+### 6.2 过程事件（已在当轮修复）
+
+测试用的临时仓库操作一度污染了真实仓库 `.git/config`（`bare = true` 与被 fixture 身份覆盖的 `[user]` 段），原因是当时为验证钩子环境而手动注入了绝对路径的 `GIT_DIR`/`GIT_INDEX_FILE`。分支、HEAD、reflog、index 与工作区内容未受影响；配置已按备份复原（身份回退全局 `~/.gitconfig`）。加固：钩子显式 `unset` 这些变量，工具与测试的所有 Git 子进程都剥离调用者的 `GIT_*`。明细见 `qa-artifacts/workspace-layout/incident-2026-10-15/README.md`（ignored）。
 
