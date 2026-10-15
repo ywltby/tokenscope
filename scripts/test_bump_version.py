@@ -97,6 +97,12 @@ def git_env():
             if not key.startswith("GIT_")}
 
 
+def setUpModule():
+    """实现本身保留 GIT_*（它们决定本次提交的内容），隔离只能发生在测试侧。"""
+    for key in [name for name in os.environ if name.startswith("GIT_")]:
+        del os.environ[key]
+
+
 def git(root, *args):
     return subprocess.check_output(["git", "-C", str(root), *args],
                                    encoding="utf-8", stderr=subprocess.PIPE,

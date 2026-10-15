@@ -37,12 +37,6 @@ class ManifestError(ValueError):
     """清单、记录或证据非法（区别于"文件不存在"）。"""
 
 
-def git_env():
-    """剥离 Git 钩子注入的仓库变量，避免子进程操作被改写到调用者仓库。"""
-    return {key: value for key, value in os.environ.items()
-            if not key.startswith("GIT_")}
-
-
 # ── Makefile dep-info 解析 ──────────────────────────────────────────
 
 
@@ -191,16 +185,18 @@ def is_excluded_input(rel, kind):
 
 
 def filter_tracked(paths, tracked_files, tracked_dirs):
-    """只保留 Git 跟踪的文件或含跟踪后代的目录，返回 (保留, 排除)。"""
+    """只保留 Git 跟踪的文件，或确有跟踪后代的目录，返回 (保留, 排除)。
+
+    "位于含跟踪文件的目录下面"不构成成员资格：只跟踪了 `docs/privacy.md` 时，
+    `docs/untracked.md` 与空的 `docs/empty/` 都不是受版本管理的输入。
+    """
     kept, dropped = [], []
     for rel in paths:
-        if rel in tracked_files or rel in tracked_dirs:
+        candidate = rel.rstrip("/")
+        if candidate in tracked_files or candidate in tracked_dirs:
             kept.append(rel)
-            continue
-        if any(rel.startswith(directory + "/") for directory in tracked_dirs):
-            kept.append(rel)
-            continue
-        dropped.append(rel)
+        else:
+            dropped.append(rel)
     return kept, dropped
 
 
@@ -310,7 +306,7 @@ def write_manifest(path, value, *, atomic=True):
 def git_tracked(root):
     """返回 (tracked_files, tracked_dirs)，均为仓库相对 POSIX 路径。"""
     result = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
-                            capture_output=True, check=False, env=git_env())
+                            capture_output=True, check=False)
     if result.returncode != 0:
         raise ManifestError("git ls-files 失败，无法判定跟踪范围")
     files = [item.decode("utf-8") for item in result.stdout.split(b"\0") if item]

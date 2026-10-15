@@ -7,16 +7,15 @@
 #
 # 强制完整检查：TOKENSCOPE_PRECOMMIT_MODE=full git commit ...
 # 只打印选中检查：python -B scripts/pre_commit_checks.py --explain
+#
+# Git 会为本次提交设置 GIT_DIR / GIT_INDEX_FILE：`git commit --only <path>` 使用
+# 临时 index，钩子必须把它交给检查器，否则检查器会读默认 index、看到"没有暂存
+# 文件"而放行内容未受检的提交。自建临时仓库的是测试，它们各自隔离环境。
 set -e
 
 # rustup 默认安装位置兜底：Git Bash / 某些钩子环境可能不继承用户 PATH
 PATH="$HOME/.cargo/bin:$PATH"
 export PATH
-
-# Git 会把 GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE 等传给钩子进程；它们会把子进程里
-# 的"临时仓库"或 `git -C <path>` 操作重新指向调用者的仓库。工具与测试都用显式仓库
-# 路径，因此这里清理这些变量，避免子进程被改写到别的仓库。
-unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
 
 if ! command -v python >/dev/null 2>&1; then
   echo "[pre-commit] 找不到 python：无法选择检查，拒绝在无验证的情况下提交" >&2

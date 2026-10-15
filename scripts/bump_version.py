@@ -34,16 +34,9 @@ CONFIGS = (CORE_MANIFEST, SHELL_MANIFEST, *JSON_CONFIGS)
 LOCK = "Cargo.lock"
 
 
-def git_env():
-    """剥离 Git 钩子注入的仓库变量，避免子进程操作被改写到调用者仓库。"""
-    return {key: value for key, value in os.environ.items()
-            if not key.startswith("GIT_")}
-
-
 def git(root, *args):
     return subprocess.check_output(["git", "-C", str(root), *args],
-                                   encoding="utf-8", stderr=subprocess.PIPE,
-                                   env=git_env()).strip()
+                                   encoding="utf-8", stderr=subprocess.PIPE).strip()
 
 
 def git_error_text(exc):
@@ -186,8 +179,7 @@ def check_event(root, event, event_name):
         git(root, "fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
         base = resolve(root, "origin/main")
         ancestor = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor",
-                                   base, "HEAD"], capture_output=True, check=False,
-                                  env=git_env())
+                                   base, "HEAD"], capture_output=True, check=False)
         if ancestor.returncode != 0:
             raise ValueError("main 已推进，当前被测提交未包含最新基线；请更新 PR 并重新检查")
     elif event_name == "push" and event.get("ref") == "refs/heads/main":

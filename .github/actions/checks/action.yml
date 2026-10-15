@@ -33,6 +33,8 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         pwsh -NoProfile -File scripts/check_powershell_syntax.ps1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B scripts/check_node_syntax.py
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # 统一 workspace：一次 fmt --all 加一次 workspace clippy/test 即覆盖两个
     # package，不再保留分根库/壳的重复轮次。
     - name: cargo fmt --all --check

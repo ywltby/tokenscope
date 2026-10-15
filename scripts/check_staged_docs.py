@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import posixpath
 import re
 import subprocess
@@ -33,15 +32,9 @@ class DocumentError(ValueError):
     """暂存文档读取或判定失败（区别于"发现坏链接"）。"""
 
 
-def git_env():
-    """剥离 Git 钩子注入的仓库变量，保证子进程只操作显式指定的仓库。"""
-    return {key: value for key, value in os.environ.items()
-            if not key.startswith("GIT_")}
-
-
 def git_show(root, spec):
     result = subprocess.run(["git", "-C", str(root), "show", spec],
-                            capture_output=True, check=False, env=git_env())
+                            capture_output=True, check=False)
     if result.returncode != 0:
         return None
     return result.stdout.decode("utf-8", "replace")
@@ -49,7 +42,7 @@ def git_show(root, spec):
 
 def git_lines(root, *args):
     result = subprocess.run(["git", "-C", str(root), *args],
-                            capture_output=True, check=False, env=git_env())
+                            capture_output=True, check=False)
     if result.returncode != 0:
         raise DocumentError(f"git {' '.join(args)} 失败")
     return [line for line in result.stdout.decode("utf-8", "replace").split("\n") if line]
@@ -59,7 +52,7 @@ def staged_documents(root):
     """暂存区里新增/修改/重命名后的 Markdown 路径。"""
     result = subprocess.run(["git", "-C", str(root), "diff", "--cached", "--name-status",
                              "-z", "--find-renames", "--diff-filter=ACMR"],
-                            capture_output=True, check=False, env=git_env())
+                            capture_output=True, check=False)
     if result.returncode != 0:
         raise DocumentError("读取暂存区失败")
     fields = [item.decode("utf-8") for item in result.stdout.split(b"\0") if item]
@@ -135,11 +128,11 @@ def resolve_target(source, target):
 def tree_has(root, path):
     """暂存树（index）里是否存在该路径（文件或目录）。"""
     result = subprocess.run(["git", "-C", str(root), "cat-file", "-e", f":{path}"],
-                            capture_output=True, check=False, env=git_env())
+                            capture_output=True, check=False)
     if result.returncode == 0:
         return True
     listing = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
-                             capture_output=True, check=False, env=git_env())
+                             capture_output=True, check=False)
     if listing.returncode != 0:
         raise DocumentError("读取暂存树失败")
     prefix = path.rstrip("/") + "/"
@@ -150,7 +143,7 @@ def tree_has(root, path):
 def added_line_numbers(root, path):
     """暂存版本中新增/修改的行号集合（1 基），用于只检查本次引入的空白问题。"""
     result = subprocess.run(["git", "-C", str(root), "diff", "--cached", "-U0", "--", path],
-                            capture_output=True, check=False, env=git_env())
+                            capture_output=True, check=False)
     if result.returncode != 0:
         raise DocumentError(f"读取 {path} 的暂存差异失败")
     numbers = set()
@@ -214,6 +207,68 @@ def _affected_by_change(path, changed_targets):
     return any(name.startswith(path.rstrip("/") + "/") for name in changed_targets)
 
 
+def removed_paths(root):
+    """本次删除或改名中被移除的路径：D 的路径与 R 的旧路径。"""
+    result = subprocess.run(["git", "-C", str(root), "diff", "--cached", "--name-status",
+                             "-z", "--find-renames", "--diff-filter=DR"],
+                            capture_output=True, check=False)
+    if result.returncode != 0:
+        raise DocumentError("读取删除/改名列表失败")
+    fields = [item.decode("utf-8", "replace") for item in result.stdout.split(b"\0") if item]
+    paths, index = [], 0
+    while index < len(fields):
+        status = fields[index]
+        if status[:1] == "R":
+            if index + 2 >= len(fields):
+                raise DocumentError("重命名记录不完整")
+            paths.append(fields[index + 1])
+            index += 3
+            continue
+        if index + 1 >= len(fields):
+            raise DocumentError("删除记录不完整")
+        paths.append(fields[index + 1])
+        index += 2
+    return paths
+
+
+def markdown_files(root):
+    """暂存树中全部 Markdown 路径。"""
+    result = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", "*.md"],
+                            capture_output=True, check=False)
+    if result.returncode != 0:
+        raise DocumentError("读取 Markdown 文件列表失败")
+    return [name for name in result.stdout.decode("utf-8", "replace").split("\0") if name]
+
+
+def documents_referencing(root, removed, *, limit=3000):
+    """引用被删除/改名目标的文档——包括本次没有被修改的文档。
+
+    先按被删目标的基本名粗筛文本，再逐个解析链接，避免对每个文档都完整解析。
+    """
+    targets = {path.rstrip("/") for path in removed if path}
+    if not targets:
+        return []
+    basenames = {path.rsplit("/", 1)[-1] for path in targets}
+    problems, scanned = [], 0
+    for name in markdown_files(root):
+        if scanned >= limit:
+            break
+        text = git_show(root, f":{name}")
+        if text is None:
+            continue
+        if not any(basename in text for basename in basenames):
+            continue
+        scanned += 1
+        for target, _ in extract_targets(text):
+            if not target or is_external(target) or target.startswith("#"):
+                continue
+            resolved = resolve_target(name, target)
+            if resolved is not None and resolved.rstrip("/") in targets:
+                problems.append({"document": name, "target": target,
+                                 "reason": "引用的目标已在本提交删除或改名"})
+    return problems
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
@@ -221,16 +276,12 @@ def main():
     root = args.root
     try:
         documents = staged_documents(root)
-        if not documents:
+        # 本次被移除的路径（删除与改名的旧路径）：即使引用它们的文档没被修改，
+        # 也要追查这些引用，否则删掉被引用的文件不会有任何告警。
+        removed = set(removed_paths(root))
+        if not documents and not removed:
             print("[docs] 暂存区没有 Markdown 变更")
             return 0
-        # 本次删除/重命名的目标：只有这些目标的旧链接才追究。
-        changed = set()
-        deleted = subprocess.run(["git", "-C", str(root), "diff", "--cached", "--name-only",
-                                  "-z", "--diff-filter=DR"], capture_output=True, check=False,
-                                 env=git_env())
-        if deleted.returncode == 0:
-            changed.update(item.decode("utf-8") for item in deleted.stdout.split(b"\0") if item)
         problems = []
         for old, new in documents:
             text = git_show(root, f":{new}")
@@ -240,12 +291,20 @@ def main():
             if "\ufffd" in text:
                 problems.append({"document": new, "target": "", "reason": "不是合法 UTF-8"})
             baseline = git_show(root, f"HEAD:{new}") if old is None else git_show(root, f"HEAD:{old}")
-            problems.extend(check_document(root, new, text, changed, baseline or ""))
+            problems.extend(check_document(root, new, text, removed, baseline or ""))
             problems.extend(whitespace_problems(new, text, added_line_numbers(root, new)))
+        problems.extend(documents_referencing(root, removed))
+        unique, seen = [], set()
         for problem in problems:
+            key = (problem["document"], problem.get("target"), problem["reason"])
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(problem)
+        for problem in unique:
             print(f"[docs] {problem['document']} → {problem['target']}：{problem['reason']}",
                   file=sys.stderr)
-        return 1 if problems else 0
+        return 1 if unique else 0
     except DocumentError as exc:
         print(f"[docs] 文档检查失败：{exc}", file=sys.stderr)
         return 2

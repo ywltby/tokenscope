@@ -427,6 +427,20 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 
 本机不运行真实安装/卸载脚本：W06.4 的五项安装验收与两项固定旧版升级属于一次性 Actions Runner，且本轮按用户决策未创建 PR，因此该部分不构成本轮证据。
 
+### 6.8 复核反例修复（2026-10-15 第二轮复核）
+
+外部复核在 `4a54074` 上提出 5 项反例（2×P1、3×P2）。逐项复现确认后修复，并补 8 项回归测试，脚本契约 189 → 197 项：
+
+| 反例 | 根因 | 修复 | 回归测试 |
+| --- | --- | --- | --- |
+| P1 `git commit --only <path>` 时检查器看不到本次提交的内容 | 钩子 `unset GIT_INDEX_FILE`，检查器又剥离 `GIT_*`，于是读默认 index 而不是 Git 为 `--only` 准备的临时 index，输出「暂存区没有文件」后放行 | 钩子保留 Git 传入的环境（`--only` 依赖它）；实现层不再剥离；隔离改到测试侧（`setUpModule` 删除 `GIT_*`），使自建临时仓库与调用者互不影响 | `test_only_commit_exposes_the_paths_git_prepared_for_that_commit`（真实钩子 + 回显替身，断言 `STAGED=[Cargo.toml|]`） |
+| P1 部分暂存保护不全，full 模式直接跳过 | 保护范围只按检查前缀（`src-tauri/src/`），漏掉共享配置与清单登记的编译输入；`main` 的 full 分支把 `blocked` 置空 | 新增 `RUST_INPUT_SCOPES`（`crates/`、`src-tauri/`、`Cargo.toml`、`Cargo.lock`）并并入清单登记路径；`classify` 增加 `force_full`，full 与其他模式共用同一套保护 | `test_unstaged_shared_configuration_and_compiled_inputs_block_rust_checks`、`test_forced_full_mode_uses_the_same_unstaged_guard` |
+| P2 清单过滤把目录前缀当成成员资格 | `filter_tracked` 对「位于含跟踪文件的目录下」的文件也放行，只跟踪 `docs/privacy.md` 时 `docs/untracked.md`、`docs/empty/` 都被保留 | 改为精确成员资格：文件须在 `tracked_files`，目录须在 `tracked_dirs` | `test_directory_prefix_is_not_membership_for_file_inputs` |
+| P2 前端验收脚本改动没有选到脚本检查 | `frontend/scripts/` 走的是前端四项，未按 §W05a「E2E 编排并入脚本规则」处理 | 新增 `scripts/check_node_syntax.py`（`node --check` 校验 `frontend/scripts/**`，当前 14 个脚本）与 `node-syntax` 检查项；`frontend/scripts/` 改动选前端四项 + `node-syntax`，CI 同步接入 | `test_frontend_acceptance_script_selects_script_syntax_check` |
+| P2 删除被引用文件时未检查未修改文档 | `main` 只看暂存的 Markdown 变更；目标被删而引用方未改时直接返回「没有 Markdown 变更」 | 新增 `removed_paths`（D 路径与 R 旧路径）与 `documents_referencing`（先按基本名粗筛再解析链接，覆盖未修改文档）；`main` 在没有 Markdown 变更但存在移除路径时同样执行 | `test_removing_a_linked_target_is_reported_from_unchanged_documents`、`test_renaming_a_target_is_reported_from_unchanged_documents`、`test_removed_target_without_references_reports_nothing` |
+
+复现与验证：修复前在本机用真实钩子复现为 `STAGED=[]`（提交却包含 `Cargo.toml`），修复后同一场景为 `STAGED=[Cargo.toml|]`；坏 `.mjs` 脚本可被 `check_node_syntax.py` 抓出（exit 1）。
+
 ### 6.7 过程事件（已在当轮修复）
 
 测试用的临时仓库操作一度污染了真实仓库 `.git/config`（`bare = true` 与被 fixture 身份覆盖的 `[user]` 段），原因是当时为验证钩子环境而手动注入了绝对路径的 `GIT_DIR`/`GIT_INDEX_FILE`。分支、HEAD、reflog、index 与工作区内容未受影响；配置已按备份复原（身份回退全局 `~/.gitconfig`）。加固：钩子显式 `unset` 这些变量，工具与测试的所有 Git 子进程都剥离调用者的 `GIT_*`。明细见 `qa-artifacts/workspace-layout/incident-2026-10-15/README.md`（ignored）。

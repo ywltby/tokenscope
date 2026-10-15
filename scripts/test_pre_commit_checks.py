@@ -44,6 +44,15 @@ def change(status, path, old_path=None):
     return {"status": status, "path": path, "old_path": old_path}
 
 
+def setUpModule():
+    """钩子会注入 GIT_DIR/GIT_INDEX_FILE；测试自建临时仓库，必须与调用者仓库隔离。
+
+    实现本身保留这些变量（`git commit --only` 依赖它们），所以隔离只能发生在测试侧。
+    """
+    for key in [name for name in os.environ if name.startswith("GIT_")]:
+        del os.environ[key]
+
+
 def git_env():
     """Git 钩子会注入 GIT_DIR 等变量；测试仓库必须与调用者环境隔离。"""
     return {key: value for key, value in os.environ.items()
@@ -96,6 +105,13 @@ class ClassifyCase(unittest.TestCase):
                 checks = self.checks([change("M", path)])
                 self.assertEqual(checks, ["frontend-build", "frontend-format",
                                           "frontend-test", "frontend-typecheck"])
+
+    def test_frontend_acceptance_script_selects_script_syntax_check(self):
+        """E2E 编排脚本属于脚本规则：不能只跑前端四项而放行不可运行的脚本。"""
+        checks = self.checks([change("M", "frontend/scripts/native-acceptance.mjs")])
+        self.assertIn("node-syntax", checks)
+        self.assertIn("frontend-test", checks)
+        self.assertIn("frontend-build", checks)
 
     def test_scripts_and_hooks_and_build_configs_require_full_mode(self):
         for path in ("Cargo.toml", "Cargo.lock", "crates/tokenscope-core/Cargo.toml",
@@ -196,6 +212,21 @@ class UnstagedGuardCase(unittest.TestCase):
                         manifest=MANIFEST,
                         unstaged=["crates/tokenscope-core/src/report.rs"])
         self.assertEqual(plan["blocked"], ["crates/tokenscope-core/src/report.rs"])
+
+    def test_unstaged_shared_configuration_and_compiled_inputs_block_rust_checks(self):
+        """共享配置与清单登记的编译输入也参与构建，未暂存差异同样必须阻止。"""
+        plan = classify([change("M", "crates/tokenscope-core/src/report.rs")],
+                        manifest=MANIFEST,
+                        unstaged=["Cargo.toml", "Cargo.lock", "src-tauri/tauri.conf.json",
+                                  "docs/privacy.md"])
+        self.assertEqual(plan["blocked"], ["Cargo.lock", "Cargo.toml", "docs/privacy.md",
+                                           "src-tauri/tauri.conf.json"])
+
+    def test_forced_full_mode_uses_the_same_unstaged_guard(self):
+        plan = classify([change("M", "docs/notes.md")], manifest=MANIFEST,
+                        unstaged=["Cargo.toml"], force_full=True)
+        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["blocked"], ["Cargo.toml"])
 
     def test_unrelated_unstaged_file_does_not_block_document_submission(self):
         plan = classify([change("M", "docs/notes.md")], manifest=MANIFEST,
@@ -320,6 +351,31 @@ class HookWiringCase(unittest.TestCase):
     def write_stub(self, code):
         (self.root / "scripts" / "pre_commit_checks.py").write_text(
             f"import sys\nprint('stub checks')\nsys.exit({code})\n", encoding="utf-8")
+
+    def write_echo_stub(self):
+        """替身只回显它看到的暂存区，用来验证钩子把 Git 准备的 index 传下去了。"""
+        (self.root / "scripts" / "pre_commit_checks.py").write_text(
+            "import subprocess, sys\n"
+            "result = subprocess.run(['git', 'diff', '--cached', '--name-only', '-z',\n"
+            "                         '--find-renames'], capture_output=True)\n"
+            "staged = result.stdout.decode('utf-8', 'replace').replace(chr(0), '|')\n"
+            "print('STAGED=[' + staged + ']')\n"
+            "sys.exit(0)\n", encoding="utf-8")
+
+    def test_only_commit_exposes_the_paths_git_prepared_for_that_commit(self):
+        """`git commit --only <path>` 用临时 index；钩子必须读到它，不能读默认 index。"""
+        self.write_stub(0)  # 初始提交也需要一个放行的替身
+        (self.root / "Cargo.toml").write_text("内容 = 1\n", encoding="utf-8")
+        self.assertEqual(self.git("add", "Cargo.toml").returncode, 0)
+        self.assertEqual(self.git("commit", "-qm", "初始").returncode, 0)
+        self.write_echo_stub()
+        (self.root / "Cargo.toml").write_text("内容 = 2\n", encoding="utf-8")
+
+        result = self.git("commit", "--only", "Cargo.toml", "-m", "only 提交")
+        combined = result.stdout + result.stderr
+        self.assertIn("STAGED=[Cargo.toml|]", combined,
+                      f"钩子没读到 --only 提交的路径：{combined!r}")
+        self.assertEqual(result.returncode, 0, combined)
 
     def test_failing_check_blocks_commit_and_success_allows_it(self):
         self.assertTrue(self.hooks_path.is_dir(), "缺少受版本管理的 .githooks 目录")

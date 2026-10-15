@@ -89,6 +89,7 @@ CHECK_COMMANDS = {
     "frontend-format": [["pnpm", "--dir", "frontend", "format:check"]],
     "frontend-test": [["pnpm", "--dir", "frontend", "test"]],
     "frontend-build": [["pnpm", "--dir", "frontend", "build"]],
+    "node-syntax": [["python", "-B", "scripts/check_node_syntax.py"]],
     SCRIPTS_CHECK: [
         ["python", "-B", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_*.py"],
         ["pwsh", "-NoProfile", "-File", "scripts/check_powershell_syntax.ps1"],
@@ -104,9 +105,13 @@ CHECK_COMMANDS = {
 # 时执行，见 CHECK_COMMANDS）。
 FULL_CHECKS = ("rust-fmt", "rust-core-default", "rust-core-acceptance",
                "frontend-typecheck", "frontend-format", "frontend-test", "frontend-build",
-               SCRIPTS_CHECK, DOC_CHECK)
+               "node-syntax", SCRIPTS_CHECK, DOC_CHECK)
 
 # 每个检查读取的作用域：未暂存差异落在这些前缀下会阻止提交。
+# Rust 检查还会读取共享配置与整个 src-tauri（壳的构建脚本、Tauri 配置、
+# capabilities 都参与编译），只写 src-tauri/src 会漏掉这些输入。
+RUST_INPUT_SCOPES = ("crates/", "src-tauri/", "Cargo.toml", "Cargo.lock")
+
 CHECK_SCOPES = {
     "rust-fmt": ("crates/", "src-tauri/src/"),
     "rust-core-default": ("crates/", "src-tauri/src/"),
@@ -117,6 +122,7 @@ CHECK_SCOPES = {
     "frontend-format": ("frontend/",),
     "frontend-test": ("frontend/",),
     "frontend-build": ("frontend/",),
+    "node-syntax": ("frontend/scripts/",),
     SCRIPTS_CHECK: ("scripts/",),
     DOC_CHECK: (),
 }
@@ -179,14 +185,18 @@ def _checks_for_consumers(consumers):
     return checks
 
 
-def classify(changes, *, manifest=None, unstaged=(), explain=False):
+def classify(changes, *, manifest=None, unstaged=(), explain=False, force_full=False):
     """把暂存区变更映射为检查集合。
 
     `changes` 为 `{"status", "path", "old_path"}` 列表；`manifest` 为清单记录
-    （None 表示缺失或损坏，直接完整兜底）；`unstaged` 为未暂存路径列表。
+    （None 表示缺失或损坏，直接完整兜底）；`unstaged` 为未暂存路径列表；
+    `force_full` 强制完整模式，且与其他模式共用同一套未暂存保护。
     """
     result = {"mode": MODE_SELECTED, "checks": set(), "triggers": {}, "fallback": [],
               "blocked": [], "notes": []}
+    if force_full:
+        result["mode"] = MODE_FULL
+        result["notes"].append("强制完整模式（TOKENSCOPE_PRECOMMIT_MODE=full）")
     if manifest is not None:
         try:
             manifest = validate_manifest(manifest)
@@ -203,7 +213,7 @@ def classify(changes, *, manifest=None, unstaged=(), explain=False):
         result["checks"] = set(FULL_CHECKS)
     checks = sorted(result["checks"])
     result["checks"] = checks
-    result["blocked"] = _blocked_inputs(checks, unstaged)
+    result["blocked"] = _blocked_inputs(checks, unstaged, manifest)
     return result
 
 
@@ -245,6 +255,11 @@ def _classify_path(path, manifest, result):
         result["mode"] = MODE_FULL
         result["notes"].append(f"{path}：核心库内未登记非 Rust 输入，完整模式兜底")
         return ["unregistered-core-input"]
+    if path.startswith("frontend/scripts/"):
+        # E2E 编排脚本属于脚本规则：前端四项并不校验它们能否运行。
+        result["checks"].update({"frontend-typecheck", "frontend-format",
+                                 "frontend-test", "frontend-build", "node-syntax"})
+        return ["frontend-scripts"]
     if _matches(path, FRONTEND_PREFIXES) or path in FRONTEND_FILES:
         result["checks"].update({"frontend-typecheck", "frontend-format",
                                  "frontend-test", "frontend-build"})
@@ -268,18 +283,35 @@ def _classify_path(path, manifest, result):
     return ["unrecognised"]
 
 
-def _blocked_inputs(checks, unstaged):
-    """被选检查会读取、却存在未暂存差异的受版本管理输入。"""
+def _in_scope(path, scopes):
+    for scope in scopes:
+        if scope.endswith("/"):
+            if path.startswith(scope):
+                return True
+        elif path == scope:
+            return True
+    return False
+
+
+def _blocked_inputs(checks, unstaged, manifest=None):
+    """被选检查会读取、却存在未暂存差异的受版本管理输入。
+
+    范围包含共享配置与清单登记的编译输入：它们同样参与实际构建，若工作区版本
+    与暂存版本不同，检查结果就不能代表将要提交的内容。
+    """
     scopes = set()
     for check in checks:
         scopes.update(CHECK_SCOPES.get(check, ()))
+        if check.startswith("rust-"):
+            scopes.update(RUST_INPUT_SCOPES)
+    if manifest:
+        for layer in ("generated", "manual"):
+            for record in manifest.get(layer, []):
+                scopes.add(record["path"])
     if not scopes:
         return []
-    blocked = []
-    for path in unstaged or ():
-        if any(path.startswith(scope) for scope in scopes):
-            blocked.append(path)
-    return sorted(set(blocked))
+    blocked = {path for path in unstaged or () if _in_scope(path, scopes)}
+    return sorted(blocked)
 
 
 def expand_commands(checks):
@@ -291,23 +323,12 @@ def expand_commands(checks):
     return commands
 
 
-def git_env():
-    """清理 Git 钩子注入的仓库变量。
-
-    钩子会传 GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE 等；它们会让子进程里的
-    "临时仓库"或 `git -C <path>` 操作被改写到调用者的仓库。工具与测试一律用
-    显式仓库路径，因此这些变量必须剥掉。
-    """
-    return {key: value for key, value in os.environ.items()
-            if not key.startswith("GIT_")}
-
-
 def manifest_index(root):
     """HEAD 与暂存区清单的并集；都不可用时返回 None（调用方完整兜底）。"""
     layers = []
     for spec in (f"HEAD:{MANIFEST_PATH}", f":{MANIFEST_PATH}"):
         result = subprocess.run(["git", "-C", str(root), "show", spec],
-                                capture_output=True, check=False, env=git_env())
+                                capture_output=True, check=False)
         if result.returncode != 0:
             continue
         try:
@@ -332,8 +353,7 @@ def manifest_index(root):
 def build_changes(root):
     """读取暂存区变更；Git 查询失败不能当作空提交。"""
     result = subprocess.run(["git", "-C", str(root), "diff", "--cached", "--name-status",
-                             "-z", "--find-renames"], capture_output=True, check=False,
-                            env=git_env())
+                             "-z", "--find-renames"], capture_output=True, check=False)
     if result.returncode != 0:
         raise CheckError("读取暂存区失败（git diff --cached），不能当作空提交")
     fields = [item.decode("utf-8") for item in result.stdout.split(b"\0") if item]
@@ -356,7 +376,7 @@ def build_changes(root):
 
 def unstaged_paths(root):
     result = subprocess.run(["git", "-C", str(root), "diff", "--name-only", "-z"],
-                            capture_output=True, check=False, env=git_env())
+                            capture_output=True, check=False)
     if result.returncode != 0:
         raise CheckError("读取未暂存差异失败（git diff）")
     return [item.decode("utf-8") for item in result.stdout.split(b"\0") if item]
@@ -402,13 +422,8 @@ def main():
         return 2
     try:
         changes = build_changes(args.root)
-        if mode == "full":
-            plan = {"mode": MODE_FULL, "checks": sorted(FULL_CHECKS),
-                    "triggers": {c["path"]: ["forced-full"] for c in changes},
-                    "fallback": [], "blocked": [], "notes": ["TOKENSCOPE_PRECOMMIT_MODE=full"]}
-        else:
-            plan = classify(changes, manifest=manifest_index(args.root),
-                            unstaged=unstaged_paths(args.root))
+        plan = classify(changes, manifest=manifest_index(args.root),
+                        unstaged=unstaged_paths(args.root), force_full=(mode == "full"))
     except CheckError as exc:
         print(f"[pre-commit] 选择检查失败：{exc}", file=sys.stderr)
         return 2

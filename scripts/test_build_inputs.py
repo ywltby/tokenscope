@@ -152,6 +152,16 @@ class TrackedCase(unittest.TestCase):
         self.assertEqual(kept, ["frontend/public"])
         self.assertEqual(dropped, [])
 
+    def test_directory_prefix_is_not_membership_for_file_inputs(self):
+        """只有目录下确有跟踪文件不代表该目录下的任意文件都被跟踪。"""
+        kept, dropped = filter_tracked(
+            ["docs/privacy.md", "docs/untracked.md", "docs/empty/"],
+            tracked_files={"docs/privacy.md"},
+            tracked_dirs={"docs"},
+        )
+        self.assertEqual(kept, ["docs/privacy.md"])
+        self.assertEqual(sorted(dropped), ["docs/empty/", "docs/untracked.md"])
+
 
 class BuildScriptCase(unittest.TestCase):
     def test_both_prefixes_are_recognised_and_other_lines_ignored(self):

@@ -11,6 +11,7 @@ import unittest
 from check_staged_docs import (
     added_line_numbers,
     check_document,
+    documents_referencing,
     extract_targets,
     git_show,
     heading_slugs,
@@ -26,6 +27,12 @@ def git_env():
     """Git 钩子会注入 GIT_DIR 等变量；测试仓库必须与调用者环境隔离。"""
     return {key: value for key, value in os.environ.items()
             if not key.startswith("GIT_")}
+
+
+def setUpModule():
+    """实现本身保留 GIT_*（它们决定本次提交的内容），隔离只能发生在测试侧。"""
+    for key in [name for name in os.environ if name.startswith("GIT_")]:
+        del os.environ[key]
 
 
 class DocumentCase(unittest.TestCase):
@@ -131,6 +138,35 @@ class DocumentCase(unittest.TestCase):
         # 简写引用式（[text][ref]）不在解析范围：明确记录边界而不是假报通过。
         text = "[文本][ref]\n"
         self.assertEqual(extract_targets(text), [])
+
+    def test_removing_a_linked_target_is_reported_from_unchanged_documents(self):
+        """删掉被引用的文件时，引用它的文档本身没改也必须被检查出来。"""
+        referrer = self.root / "docs" / "referrer.md"
+        referrer.write_text("# 引用者\n\n[目标](target.md)\n", encoding="utf-8")
+        self.stage("docs/referrer.md")
+        self.git("commit", "-qm", "加入引用文档")
+        self.git("rm", "-q", "docs/target.md")
+        problems = documents_referencing(self.root, ["docs/target.md"])
+        self.assertEqual([problem["document"] for problem in problems],
+                         ["docs/referrer.md"])
+        self.assertEqual(problems[0]["reason"], "引用的目标已在本提交删除或改名")
+
+    def test_renaming_a_target_is_reported_from_unchanged_documents(self):
+        referrer = self.root / "docs" / "referrer.md"
+        referrer.write_text("# 引用者\n\n[目标](target.md)\n", encoding="utf-8")
+        self.stage("docs/referrer.md")
+        self.git("commit", "-qm", "加入引用文档")
+        self.git("mv", "docs/target.md", "docs/moved.md")
+        problems = documents_referencing(self.root, ["docs/target.md"])
+        self.assertEqual([problem["document"] for problem in problems],
+                         ["docs/referrer.md"])
+
+    def test_removed_target_without_references_reports_nothing(self):
+        (self.root / "docs" / "lonely.md").write_text("# 无人引用\n", encoding="utf-8")
+        self.stage("docs/lonely.md")
+        self.git("commit", "-qm", "加入孤立文档")
+        self.git("rm", "-q", "docs/lonely.md")
+        self.assertEqual(documents_referencing(self.root, ["docs/lonely.md"]), [])
 
     def test_new_trailing_whitespace_is_reported(self):
         (self.root / "docs" / "source.md").write_text("# 源\n带空白 \n干净\n", encoding="utf-8")

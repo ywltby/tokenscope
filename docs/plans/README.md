@@ -7,7 +7,7 @@
 ## 现在执行什么
 
 - **2026-10-15 PR1 已实施并完成本地验收；PR2/PR3 仍未实施**：
-  - **PR1 / patch**：[Workspace 目录迁移与提交检查](active/2026-10-15-workspace-layout.md)，W01–W07。分支 `feat/workspace-layout` 从 docs/source-discovery-plan 最新提交（`94e5c52`，含 c16e023 与三份计划）创建，按 W01–W07 逐项实施，版本已递增到 0.3.2。本地交付门槛 14 条命令逐条 exit 0（普通与 acceptance 两套 workspace clippy/test、前端 typecheck/format:check/test/build 与浏览器 E2E、脚本契约 189 项、版本发布契约）；隔离 checkout 冷编译两模式通过，且从根目录与 `src-tauri` 目录发起构建都只写根 target、不新建子 target/子锁；生产 NSIS 构建与 `release_assets` 收集、验收包构建与原生 E2E 均在本机实跑通过——逐项证据见该计划第 6 节。**未创建 PR、未合并 main**：W06.4 的五项安装验收与两项固定旧版升级、以及 ci/release/install-test/ui-e2e 的远程门禁仍待 Actions 提供；旧 `src-tauri/target`（38.85 GiB，无进程占用）按用户决定登记为待清理，未删除。
+  - **PR1 / patch**：[Workspace 目录迁移与提交检查](active/2026-10-15-workspace-layout.md)，W01–W07。分支 `feat/workspace-layout` 从 docs/source-discovery-plan 最新提交（`94e5c52`，含 c16e023 与三份计划）创建，按 W01–W07 逐项实施，版本已递增到 0.3.2。本地交付门槛 14 条命令逐条 exit 0（普通与 acceptance 两套 workspace clippy/test、前端 typecheck/format:check/test/build 与浏览器 E2E、脚本契约 197 项、版本发布契约）；隔离 checkout 冷编译两模式通过，且从根目录与 `src-tauri` 目录发起构建都只写根 target、不新建子 target/子锁；生产 NSIS 构建与 `release_assets` 收集、验收包构建与原生 E2E 均在本机实跑通过——逐项证据见该计划第 6 节。**未创建 PR、未合并 main**：W06.4 的五项安装验收与两项固定旧版升级、以及 ci/release/install-test/ui-e2e 的远程门禁仍待 Actions 提供；旧 `src-tauri/target`（38.85 GiB，无进程占用）按用户决定登记为待清理，未删除。第二轮外部复核提出的 5 项反例（`git commit --only` 读到错误 index、full 模式跳过部分暂存保护、清单跟踪过滤过宽、前端验收脚本未入脚本规则、删除被引用文件无告警）已逐项复现并修复，补 8 项回归测试，详见该计划第 6.8 节。
   - **PR2 / minor**：[真实扫描反馈](active/2026-10-15-collection-status.md)，F01–F05；PR1 合入后从最新 main 建 feat/collection-status，读取图标至少 1 秒，查询不等待动画。
   - **PR3 / minor**：[当前用户来源目录与追加路径](active/2026-10-14-source-discovery-and-additional-paths.md)，S01–S07；PR2 合入后从最新 main 建 feat/source-paths，只发现当前用户默认和 CODEX_HOME / CLAUDE_CONFIG_DIR，取消重新发现按钮。
 
