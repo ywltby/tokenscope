@@ -89,7 +89,7 @@ analytics_server.py（历史分析网页，只读 usage_history.json + cc-switch
 | 5 | 桌面日志失败事件、速度标记回填、账号切换/请求 marker、Cockpit affinity 扫描 | 13850-13877 |
 | 6 | 归属：`attribute_codex_events_by_account` → mirror 补漏 → `resolve_api_service_event_accounts` → 分桶 | 13879-13921 |
 | 7 | Claude / Grok 独立扫描与分桶；三者合并小时序列；失败小时标记 | 13923-13945 |
-| 8 | 窗口统计（5h/7d/30d/cycle，仅当天）；镜像行归拢；写 ledger | 13955-13976 |
+| 8 | 窗口统计（5h/7d/30d/cycle，仅当天）；window_only 标签补零；写 ledger | 13955-13976 |
 | 9 | 构建 `output` 字典（today / providers / latest_request / active_sessions / dashboard） | 13978-14126 |
 | 10 | 落盘收口：镜像聚合 → 同日高水位 → 历史回填 → 未归因缺口 → 原子写（**5 个动作**） | **14158-14162** |
 | 11 | 离线回填 worker 入队（可能在 14163-14183 二次落盘） | 14127-14183 |
@@ -99,7 +99,7 @@ analytics_server.py（历史分析网页，只读 usage_history.json + cc-switch
 **已验证**：`output.providers` 是**按归属标签分桶**的列表，包含以下类型：
 
 - Codex 账号行（`Codex local - <email>`、`Codex local - OpenCodex-pXXXXXX` 等）：
-  名字含 `@` 时额外注入 `window_5h/window_7d/window_cycle/window_30d`（`14002-14005`）。
+  名字含 `@` 时额外注入 `window_5h/window_7d/window_rolling_7d/window_cycle`（`14002-14005`）。
 - 外部子代理行 `Grok subagent` / `OpenCode subagent`（`client_usage_export.py:366-372`、
   `1655-1691`；中文展示名见 `monitor.py:1024-1025`）。
 - `Claude local` 与 `Grok local` 两条固定行（`14007-14010`，`GROK_LOCAL_LABEL="Grok local"` @366）。
@@ -133,7 +133,7 @@ Sub2API 请求参数；分析服务同样固定 UTC+8（`analytics_server.py:51`
 | Claude Code | `~/.claude/projects` | 递归 `*.jsonl` | mtime ≥ start−2h | 无（每次重扫窗口内文件） |
 | Grok CLI | `~/.grok/sessions` | `**/updates.jsonl` | mtime ≥ start（**无 −2h 缓冲**） | 无 |
 | Antigravity Cockpit | `~/.antigravity_cockpit` | `codex_local_access_logs.sqlite` 表 `request_logs`；`logs/codex-api.log*`；`logs/app.log*`；清单/侧车 JSON | 毫秒时间戳区间；日志按文件名日期 + mtime | 进程内标签缓存、switch-log 缓存；**SQL 全窗口 fetchall，无事件级增量** |
-| OpenCodex 代理 | `~/.opencodex`（可 `CLIENT_USAGE_OPENCODEX_DIR` 覆盖） | `usage.jsonl`、`config.json*` | 扫描窗口 `[start−6h, end+6h]` | `client_usage_opencodex_usage_cache.json` |
+| OpenCodex 代理 | `~/.opencodex`（可 `CLIENT_USAGE_OPENCODEX_DIR` 覆盖） | `usage.jsonl`、`config.json*` | 外层扫描窗口 `[start−6h, end+6h]`；marker 内层准入 ±180 s（`4497-4498`、`4514`） | `client_usage_opencodex_usage_cache.json` |
 | Sub2API 服务端 | `SUB2API_BASE_URL`（默认 `http://127.0.0.1:8080`） | 管理端 REST | 服务端按 `days`/`time_range` 参数 | 进程内三档 TTL 缓存 |
 | ccSwitch | `~/.cc-switch/cc-switch.db` | 表 `proxy_request_logs`、`usage_daily_rollups` | 全量读，按日聚合 | 文件签名缓存（mtime_ns+size） |
 
@@ -147,7 +147,7 @@ Sub2API 请求参数；分析服务同样固定 UTC+8（`analytics_server.py:51`
 - **反向索引优先**：`codex_state_rollout_paths`（`2726`）直接打开
   `~/.codex/state_5.sqlite` 或 `~/.codex/sqlite/state_5.sqlite`（`2737-2740`），
   以 `PRAGMA table_info(threads)` 做结构门禁（要求 `id` 与 `rollout_path` 两列，`2752-2762`），
-  SQL 原文 `SELECT id, rollout_path FROM threads WHERE rollout_path IS NOT NULL AND rollout_path != ''`（`2763-2769`）——
+  SQL 原文 `SELECT id, rollout_path FROM threads WHERE rollout_path IS NOT NULL AND rollout_path != ''`（`2762-2767`）——
   **不带时间条件**，范围完全由 Python 侧三段过滤决定：
   1. 路径必须落在 sessions 根内（`resolved.relative_to(sessions_root)`，失败 `continue`，`2785-2789`）；
   2. 剥 Windows 扩展前缀（`\\?\UNC\`、`\\?\`，`2776-2779`）；
@@ -289,8 +289,9 @@ ORDER BY ts ASC, ts_nanos ASC
 
 ### 3.10 ccSwitch（只在分析网页里回填）
 
-**已验证**：全仓 `cc-switch|ccSwitch|cc_switch` 在 `analytics_server.py` 与其前端页面
-（`analytics/index.html`）中多处出现，但**读取实现只在分析服务**——导出器与窗口进程
+**已验证**：全仓 `cc-switch|ccSwitch|cc_switch` 命中分布在 `analytics_server.py`（读取实现）、
+其前端页面 `analytics/index.html`、`README.md:253` 与 `tests/test_analytics_server.py`
+——**读取实现只在分析服务**，导出器（`client_usage_export.py`）与窗口进程（`monitor.py`）
 零命中。路径 `CCSWITCH_DB`（`analytics_server.py:45-49`）：`TOKEN_PULSE_CCSWITCH_DB` /
 `CCSWITCH_DB` / `~/.cc-switch/cc-switch.db`；`mode=ro`、`timeout=2`（`248`）。
 两张表：
@@ -316,7 +317,7 @@ ORDER BY ts ASC, ts_nanos ASC
   "never cache conversation text"），序列化为 `base64(zlib(json))`；
   加载与合并两处都做同一道门禁 `payload["schema"] != CODEX_EVENT_CACHE_SCHEMA` → 整体弃用
   （`2323-2324` 的 `_load`、`2561-2562` 的 `_merge_entries_from_disk`；schema 常量 `288-290`，
-  flush 写盘在 `2589-2598`）。
+  flush 的 payload 组装在 `2589-2600`、`os.replace` 写盘在 `2601`）。
 - 失效四态 `rows_for_path`（`2444-2505`）+ 锚点校验（`2395-2404`）：
   schema 过期 → 全量；`size+mtime_ns` 一致 → 命中；`size` 增长且 head/boundary 哈希一致 →
   从 `processed_length` 偏移续读；其余（含截断）→ 从 0 全量。
@@ -744,7 +745,7 @@ turn 起点与 `marker.request_at` ≤5 s）仍标 unresolved；③ 同 turn 内
 | `cockpit_confirmed_auth_result_event_markers` | 10253-10339 | 0.35 s | 仅结构化 `auth_result` + confirmed + 账号可用；歧义阈值 **0.01 s**（最严） |
 | `cockpit_consistent_temporal_affinity_turn_anchors` | 10342-10678 | 0.25–0.35 s | 唯一配对的事件级 anchor |
 
-窗口常量集中在 `409-433`（`CLIENT_USAGE_COCKPIT_*` 系列，含
+窗口常量集中在 `410-433`（`CLIENT_USAGE_COCKPIT_*` 系列，含
 `AFFINITY_TURN_MATCH_SECONDS=2.0`、`AFFINITY_TURN_AMBIGUITY_SECONDS=0.2`、
 `AFFINITY_EVENT_MATCH_SECONDS=0.25`、`FINAL_TURN_START_MATCH_SECONDS=0.5`、
 `AFFINITY_MIN_STABLE_EVENTS=2`、`FALLBACK_GRACE_SECONDS=45.0`）。
@@ -1097,7 +1098,7 @@ priority = 2.325、flex = 0.58125、batch = 0.7625、长上下文 = 1.35。
 | `updated_at` / `date` | ISO str | 本地时间（`14101-14102`） |
 | `scan_status` | obj | `state/from/through/source`（`14103-14108`） |
 | `today` | obj | `bucket_to_dict("Client local", total)`：`requests/tokens/input_tokens/cached_input_tokens/cache_creation_input_tokens/output_tokens/cost/models/unpriced_tokens/unpriced_models/latest_at/latest_model/show_zero`（`14109`、`12918-12945`）；另有**条件字段** `app_speed`/`cost_multiplier`/`speed_badge`，仅当 `latest_app_speed` 非空时注入（`12937-12944`） |
-| `providers` | array | 按归属标签的明细；`name` 含 `@` 时附带 `window_5h/window_7d/window_cycle`（+ 可选 `window_30d`）（`13993-14010`、`14002-14005`） |
+| `providers` | array | 按归属标签的明细；`name` 含 `@` 时附带 `window_5h/window_7d/window_rolling_7d/window_cycle`（+ 可选 `window_30d`）（`13993-14010`、`14002-14005`；`window_rolling_7d` 由 `13478` 生成、仅被 `monitor.py:5564`/`6207` 透传） |
 | `latest_request` | obj | `provider/model/created_at/kind`（`14111-14116`） |
 | `active_sessions` / `unresolved_active_sessions` | array | 会话态（`14117-14118`） |
 | `api_service_routed` | bool | 当前 route 是否指向 Cockpit 服务（`13889`、`14119`） |
@@ -1328,8 +1329,8 @@ python .\client_usage_export.py --output "$lab\out.json"
 ```
 
 合成 fixture（`%TEMP%\ctp-lab\make_fixtures.py`）覆盖：Codex 累计型 / last 型 / **fork 重放型** /
-超限与坏行型四类会话、Claude `message.id` 重复三行（含 cache 细分）、Grok `turn_completed`
-且 `modelCalls=2`。**未读取任何真实用户日志。**
+超限与坏行型四类会话、Claude 同一 `message.id` 重复两行（第二行含 cache 细分，另有一条独立
+`msg_solo_2`）、Grok `turn_completed` 且 `modelCalls=2`。**未读取任何真实用户日志。**
 
 ### A.2 离线（内置回退链）结果与手算复算
 
@@ -1345,7 +1346,7 @@ unpriced_models={"grok-4.5-build": 1000}`。
 | Codex B（last 型） | last 2000/500/300 | 1500 / 500 / 300 | gpt-5.4：(1500×2.5 + 500×0.25 + 300×15)/1e6 = **0.008375** |
 | Codex C（fork A） | 重放 2 行被剔除；9000/2000/1500 → delta 6000/1400/1100 | 4600 / 1400 / 1100 | (4600×5 + 1400×0.5 + 1100×30)/1e6 = **0.0567** |
 | Codex D（超限 + 坏行） | 2.5M 被上限剔除，保留 300/0/20 | 300 / 0 / 20 | (300×5 + 20×30)/1e6 = **0.0021** |
-| Claude | `msg_shared_1` 三行合并取最全快照 + `msg_solo_2` | 2120 / 1000(read) / 540，cache_creation 30 | shared 0.00132 + opus 0.06765 = **0.06897** |
+| Claude | `msg_shared_1` 两行合并取最全快照 + `msg_solo_2` | 2120 / 1000(read) / 540，cache_creation 30 | shared 0.00132 + opus 0.06765 = **0.06897** |
 | Grok | 1 turn，`modelCalls=2` 拆 2 事件 | 600 / 300 / 100 | **0.0（unpriced）** |
 
 合计成本 = 0.091475（Codex）+ 0.06897（Claude）= **0.160445** ✓
@@ -1416,10 +1417,10 @@ unpriced_models={"grok-4.5-build": 1000}`。
 | `CODEX_EVENT_CACHE_HASH_BYTES` / `CODEX_EVENT_CACHE_MAX_ENTRIES` | 4096（≥1024）/ 4096（≥128） | `291-298` |
 | Codex/Claude mtime 缓冲；Grok | −2 h；−2 h；0 | `2741`、`8588`、`8988` |
 | 日期目录回看 | 62 天 | `2859` |
-| `OPENCODEX_*` 窗口 | 180 / 21600 / 60 / 0.05 / 30 / 5（秒） | `374-401` |
+| `OPENCODEX_*` 窗口 | 180 / 21600 / 60 / 0.05 / 30 / 5（秒） | `374-397` |
 | `CODEX_ACCOUNT_MATCH_WINDOW_SECONDS` / `CODEX_CURRENT_ACCOUNT_RECENT_SECONDS` | 600 / 1800 | `373`、`434` |
 | `API_SERVICE_VERDICT_ARCHIVE_MIN_TIER` | 2（`max(2, env)`） | `501-504` |
-| Cockpit affinity 窗口 | 2.0 / 0.2 / 0.25 / 0.5 / 45.0 | `409-433` |
+| Cockpit affinity 窗口 | 2.0 / 0.2 / 0.25 / 0.5 / 45.0 | `410-433` |
 | OpenCode Go 峰时段 | UTC 01–04、06–10 | `1221-1226` |
 | `OFFLINE_HISTORY_BACKFILL_MAX_DAYS`（env `CLIENT_USAGE_OFFLINE_BACKFILL_MAX_DAYS`） | 31（≥0） | `445-448` |
 | GUI 轮询三档 | 100 / 250 / 500 ms | `monitor.py:141-154` |
@@ -1533,10 +1534,32 @@ unpriced_models={"grok-4.5-build": 1000}`。
 | 5 | §8.2 / §C.4 | "`codex_auth_identity` 无测试锁定"被仓内测试证伪（`tests:156-169` 同时断言两侧） | 改为"monitor 侧自由文本分支无断言" |
 | 6 | §6.7 | 覆盖优先级链方向与代码相反（账号级 override 最后写入 = 最高优先） | 按 `5913-5944` 的逐级覆盖顺序重写 |
 | 7 | 附录 A.4 | 第 3 次成本 `0.197568` 属**在线价态**，与表中"第 1 次 = 离线"序列不自洽 | 标注两次实验的价格态并给出两种态的对照数字 |
-| 8 | 附录 B | "Cockpit affinity 窗口 `410-442`"上限外扩 | 收紧为 `409-433` |
+| 8 | 附录 B | "Cockpit affinity 窗口 `410-442`"上限外扩 | 收紧为 `410-433` |
 | 9 | §6.10 | `build_live_catchup_payload` 上限偏窄 | 改 `13497-13748` |
 | 10 | §7.7 | `missing` 态引 `786`（那是 anomalies 消费点） | 改引产生点 `analytics_server.py:414-415`，另注消费点 |
 | 11 | §7.2 / §7.4 | `today` 未提条件字段；高水位"schema 升级"未区分两条独立轴 | 补 `12937-12944`；标注 accounting 轴才是②③的触发条件 |
+
+**第 5 轮（第 3 轮收敛复核：验证 + 对抗搜索）**
+
+两路 subagent 分别复核 §1-§5 与 §6-附录：第 4 轮的 11 项修正 **11 项全部正确落地**；
+对抗抽样共 62 条（30 + 32），**未发现任何 P1**，两路均判定"事实可靠性已收敛"。
+本轮修完的残余 P2/P3：
+
+| # | 位置 | 复核发现 | 修正 |
+| --- | --- | --- | --- |
+| 1 | §3.1 | OpenCodex 行只给了外层 ±6h 扫描窗，漏内层 ±180 s 准入 | 补 `4497-4498`/`4514` |
+| 2 | §3.10 | cc-switch 命中范围还含 `README.md:253` 与测试 | 补述 |
+| 3 | §3.2 | SQL 行号 `2763-2769` | 改 `2762-2767` |
+| 4 | §3.11 | flush 组装与写盘未分 | 补 `2589-2600` / `2601` |
+| 5 | §2.2 | 步 8 描述含"镜像行归拢"（实际在收口步） | 改为"window_only 标签补零" |
+| 6 | §C.4 | 仍引旧的 `8511-8513` 兜底行号 | 同步为 `8504-8509` / `8565-8571` |
+| 7 | 附录 A.1/A.2 | "`message.id` 重复三行"与 fixture 不符（实际 2 行） | 改为"重复两行" |
+| 8 | §2.3/§7.2 | `providers` 窗口字段漏 `window_rolling_7d` | 补 `13478`/`14002-14003` 与透传点 |
+| 9 | 附录 B | `OPENCODEX_*` 区间与 Cockpit affinity 区间各宽 4 行 / 1 行 | 收紧为 `374-397` 与 `410-433` |
+
+**收敛结论**：第 3 轮两路均给出"**无 P1**"，抽样 62 条全部与源码一致，判定文档在
+§1-§9 与附录范围内的事实可靠性已收敛；剩余不确定项仅为附录 C.3 列出的
+"上游/环境事实"（仓外可证）与附录 A.4 的两项不可复现量（耗时、聚合统计）。
 
 **复算复核**：第 3 轮独立用源码内置价表复算了附录 A.2 的全部数字
 （A 0.0243 / B 0.008375 / C 0.0567 / D 0.0021 / Codex 小计 0.091475 / Claude 0.06897 /
@@ -1574,7 +1597,7 @@ unpriced_models={"grok-4.5-build": 1000}`。
 | "`CLIENT_USAGE_MAX_SINGLE_EVENT_TOKENS` 用来过滤异常大的单次 token 事件"（第 164 行） | ✅ 成立，但**只覆盖 Codex/Claude**（§4.7） |
 | "超过 272K 输入上下文时仍沿用当前 tier 的普通价格，不应用长上下文加价字段"（第 194 行） | ✅ 成立（`*_above_272k*` 从不被读取） |
 | "Models.dev 只对 openai/anthropic/xai/deepseek 建立无前缀别名；opencode-go 始终使用独立计价键"（第 185-186 行） | ✅ 成立（`981-1003`、`1079-1082`） |
-| "待归因期间 Token 仍计入总量，但不会借用上一个账号"（第 174 行） | ✅ 成立（`11047`、`8511-8513` 的 30 分钟例外窗口需注意） |
+| "待归因期间 Token 仍计入总量，但不会借用上一个账号"（第 174 行） | ✅ 成立（`11047`；注意 `8504-8509` / `8565-8571` 有一处"最近 30 分钟内用当前账号"的例外窗口） |
 | "只有活动 provider 明确为 Cockpit API 服务时，才读取 `.cockpit_codex_auth.json`"（第 75 行） | ✅ 成立（`4081-4116`） |
 
 > 结论：README 的统计口径声明与代码一致；唯一的补充是
