@@ -1,26 +1,26 @@
 #!/bin/sh
 # TokenScope 提交门禁（启用：git config core.hooksPath .githooks）
-# 计划 A5（F09）：根库与 Tauri 壳是两个独立 workspace（根 Cargo.toml
-# exclude src-tauri），根命令不覆盖壳——两个 manifest 必须显式分别门禁。
+#
+# 检查选择集中在 scripts/pre_commit_checks.py：按暂存区分类，纯文档只跑文档检查，
+# 编译输入按清单消费方选择包与构建模式，未知类别 / 清单缺失或损坏 / 构建与门禁
+# 入口变更回退完整检查。PR CI 仍执行完整门禁，本地选择不减少远程验证。
+#
+# 强制完整检查：TOKENSCOPE_PRECOMMIT_MODE=full git commit ...
+# 只打印选中检查：python -B scripts/pre_commit_checks.py --explain
 set -e
+
 # rustup 默认安装位置兜底：Git Bash / 某些钩子环境可能不继承用户 PATH
 PATH="$HOME/.cargo/bin:$PATH"
 export PATH
-echo "[pre-commit] 根库 cargo fmt --check"
-cargo fmt --all -- --check
-echo "[pre-commit] 根库 cargo clippy"
-cargo clippy --workspace --all-targets -- -D warnings
-echo "[pre-commit] 根库 cargo test"
-cargo test --workspace --quiet
-echo "[pre-commit] 壳 cargo fmt --check"
-cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-echo "[pre-commit] 壳 cargo clippy"
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-echo "[pre-commit] 壳 cargo test"
-cargo test --manifest-path src-tauri/Cargo.toml --quiet
-echo "[pre-commit] frontend typecheck"
-pnpm --dir frontend typecheck
-echo "[pre-commit] frontend format:check"
-pnpm --dir frontend format:check
-echo "[pre-commit] frontend test"
-pnpm --dir frontend test
+
+# Git 会把 GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE 等传给钩子进程；它们会把子进程里
+# 的"临时仓库"或 `git -C <path>` 操作重新指向调用者的仓库。工具与测试都用显式仓库
+# 路径，因此这里清理这些变量，避免子进程被改写到别的仓库。
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
+
+if ! command -v python >/dev/null 2>&1; then
+  echo "[pre-commit] 找不到 python：无法选择检查，拒绝在无验证的情况下提交" >&2
+  exit 2
+fi
+
+exec python -B scripts/pre_commit_checks.py "$@"

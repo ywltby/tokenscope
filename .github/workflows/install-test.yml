@@ -6,7 +6,7 @@ on:
     branches: [main]
     paths:
       - 'src-tauri/**'
-      - 'src/**'
+      - 'crates/tokenscope-core/**'
       - 'frontend/**'
       - 'scripts/**'
       - 'Cargo.toml'
@@ -63,7 +63,7 @@ jobs:
         run: node ./frontend/node_modules/@tauri-apps/cli/tauri.js build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
       - name: Collect current installer and build identity
         run: |
-          python -B scripts/release_assets.py collect --bundle src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis --executable src-tauri/target/x86_64-pc-windows-msvc/release/tokenscope.exe --directory current-installer --commit '${{ steps.app_version.outputs.sha }}' --version '${{ steps.app_version.outputs.version }}'
+          python -B scripts/release_assets.py collect --bundle target/x86_64-pc-windows-msvc/release/bundle/nsis --executable target/x86_64-pc-windows-msvc/release/tokenscope.exe --directory current-installer --commit '${{ steps.app_version.outputs.sha }}' --version '${{ steps.app_version.outputs.version }}'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload current installer for isolated upgrade jobs
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

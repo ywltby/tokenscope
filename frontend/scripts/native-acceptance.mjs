@@ -21,7 +21,8 @@ import { nativeUiSystem } from "./contracts/native-ui-system.mjs";
 import { decodePng } from "./lib/png.mjs";
 
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
-const EXE_DEFAULT = path.join(REPO, "src-tauri", "target", "release", "tokenscope.exe");
+// 统一 workspace 后，不带 --target 的 release 构建产物落在根 target/。
+const EXE_DEFAULT = path.join(REPO, "target", "release", "tokenscope.exe");
 const PREP = path.join(REPO, "scripts", "prepare-native-acceptance.ps1");
 const RECORDER = path.join(REPO, "scripts", "capture-window-frames.ps1");
 const WINDOW_ACTION = path.join(REPO, "scripts", "native-window-action.ps1");

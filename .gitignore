@@ -1,6 +1,7 @@
 # ── Rust / Cargo 构建产物 ───────────────────────────────
 debug
-target
+# 根虚拟 workspace 后的唯一 target；保留所有层级忽略（含历史子目录遗留）
+target/
 # rustfmt 生成的备份文件
 **/*.rs.bk
 # MSVC Windows 构建产生的调试信息

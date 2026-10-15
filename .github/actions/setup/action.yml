@@ -21,10 +21,11 @@ runs:
         python-version: '3.12'
     - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       with:
+        # 统一 workspace 后只有一个根 target；key 追加布局版本，避免恢复
+        # 旧的双 target 缓存（缓存条目内容不是构建输入，恢复旧的会误判命中）。
         workspaces: |
           . -> target
-          src-tauri -> target
-        key: ${{ github.job }}
+        key: ${{ github.job }}-workspace-layout
         save-if: ${{ github.ref == 'refs/heads/main' }}
     - name: Install frontend dependencies
       shell: pwsh

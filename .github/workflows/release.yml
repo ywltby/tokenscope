@@ -58,7 +58,7 @@ jobs:
         run: node ./frontend/node_modules/@tauri-apps/cli/tauri.js build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
       - name: Collect installer and checksums
         run: |
-          python -B scripts/release_assets.py collect --bundle src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis --executable src-tauri/target/x86_64-pc-windows-msvc/release/tokenscope.exe --directory release-assets --commit '${{ needs.gate.outputs.sha }}' --version '${{ needs.gate.outputs.version }}'
+          python -B scripts/release_assets.py collect --bundle target/x86_64-pc-windows-msvc/release/bundle/nsis --executable target/x86_64-pc-windows-msvc/release/tokenscope.exe --directory release-assets --commit '${{ needs.gate.outputs.sha }}' --version '${{ needs.gate.outputs.version }}'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Attest installer checksums and build identity
         id: attest
