@@ -16,6 +16,7 @@ import {
   awaitWithHostExit,
   buildLaunchesEvidence,
   clampTimeoutToBudget,
+  connectWithBudget,
   createHostExitSignal,
   createLaunchRecord,
   createProbeFn,
@@ -230,6 +231,7 @@ describe("剩余预算约束等待（§6.2 行 5：总时限不延长）", () =>
 
   it("取消后迟到的连接被关闭，且不作为新的尝试结果返回（要求 3）", async () => {
     let closed = 0;
+    let cancelled = 0;
     const lateBrowser = {
       close: async () => {
         closed++;
@@ -243,13 +245,17 @@ describe("剩余预算约束等待（§6.2 行 5：总时限不延长）", () =>
       },
       timeoutMs: 120,
       timeoutDetail: "connectOverCDP 超过剩余预算 120 ms（WebSocket 未建立）",
-      onAbandon: (browser) => browser.close(),
+      onCancel: () => {
+        cancelled++;
+      },
+      onLateResult: (browser) => browser.close(),
     }).then(
       () => null,
       (e) => e,
     );
     expect(error).toBeInstanceOf(BudgetExhaustedError);
     expect(connectCalls).toBe(1);
+    expect(cancelled).toBe(1); // 取消当下就执行，而不是等迟到结果
     expect(closed).toBe(0); // 尚未迟到
     await sleep(500);
     expect(closed).toBe(1); // 迟到的连接已关闭，没有悬空
@@ -318,7 +324,9 @@ describe("探测受剩余预算与宿主退出约束（§4.8 第 4 条题目：�
     const result = await probe({ deadlineMs: startedAt + 400 });
     const elapsed = Date.now() - startedAt;
     expect(result.ok).toBe(false);
-    expect(result.timeout_ms).toBe(400); // min(30000, 400)
+    // 截断后的超时贴着剩余预算：不写死 400，避免真实时钟在两次调用之间推进 1 ms 就误报
+    expect(result.timeout_ms).toBeGreaterThan(350);
+    expect(result.timeout_ms).toBeLessThanOrEqual(400); // min(30000, 400)
     expect(elapsed).toBeLessThan(1200);
     expect(elapsed).toBeGreaterThanOrEqual(350);
     expect(result.error).toContain("已按本次启动剩余预算截断");
@@ -383,6 +391,178 @@ describe("探测受剩余预算与宿主退出约束（§4.8 第 4 条题目：�
     expect(result.ok).toBe(true);
     expect(result.processes).toEqual([{ pid: 10, ppid: 4, name: "tokenscope.exe" }]);
     expect(result.listeners).toEqual([{ port: 9452, pid: 10, state: "2" }]);
-    expect(result.timeout_ms).toBe(5000); // 自身 30 秒被剩余预算截断
+    // 自身 30 秒被剩余预算截断（同样不写死毫秒数，真实时钟会推进）
+    expect(result.timeout_ms).toBeGreaterThan(4900);
+    expect(result.timeout_ms).toBeLessThanOrEqual(5000);
+  });
+});
+
+describe("取消动作在取消当下执行（复核 P2：onCancel 与 onLateResult 分离）", () => {
+  it("超时分支：底层任务还没结束，取消动作已经发生", async () => {
+    let cancelled = 0;
+    let late = 0;
+    let taskFinished = false;
+    const startedAt = Date.now();
+    const error = await awaitWithHostExit({
+      task: () =>
+        new Promise(() => {}).then(() => {
+          taskFinished = true;
+        }),
+      timeoutMs: 40,
+      timeoutDetail: "超过剩余预算 40 ms",
+      onCancel: () => {
+        cancelled++;
+      },
+      onLateResult: () => {
+        late++;
+      },
+    }).then(
+      () => null,
+      (e) => e,
+    );
+    expect(error).toBeInstanceOf(BudgetExhaustedError);
+    expect(cancelled).toBe(1);
+    expect(taskFinished).toBe(false);
+    expect(late).toBe(0);
+    expect(Date.now() - startedAt).toBeLessThan(500);
+  });
+
+  it("宿主退出分支：底层任务还没结束，取消动作已经发生", async () => {
+    let cancelled = 0;
+    let fireExit = null;
+    const hostExit = {
+      signal: new Promise((resolve) => {
+        fireExit = resolve;
+      }),
+    };
+    const pending = awaitWithHostExit({
+      task: () => new Promise(() => {}),
+      hostExit,
+      timeoutMs: 45000,
+      onCancel: () => {
+        cancelled++;
+      },
+    }).then(
+      () => null,
+      (e) => e,
+    );
+    await sleep(30);
+    expect(cancelled).toBe(0); // 还没取消
+    fireExit({ code: 0 });
+    const error = await pending;
+    expect(error).toBeInstanceOf(HostExitError);
+    expect(cancelled).toBe(1); // 取消当下就执行，不等底层自己结束
+  });
+
+  it("取消后迟到成功：只交给收尾回调一次，且不再重复取消", async () => {
+    let cancelled = 0;
+    const closed = [];
+    const lateBrowser = {
+      close: async () => {
+        closed.push("closed");
+      },
+    };
+    const error = await awaitWithHostExit({
+      task: () => sleep(120).then(() => lateBrowser),
+      timeoutMs: 40,
+      timeoutDetail: "超过剩余预算 40 ms",
+      onCancel: () => {
+        cancelled++;
+      },
+      onLateResult: (browser) => browser.close(),
+    }).then(
+      () => null,
+      (e) => e,
+    );
+    expect(error).toBeInstanceOf(BudgetExhaustedError);
+    expect(cancelled).toBe(1);
+    expect(closed).toHaveLength(0);
+    await sleep(250);
+    expect(cancelled).toBe(1); // 迟到结果不会再次触发取消
+    expect(closed).toEqual(["closed"]);
+  });
+
+  it("预算耗尽：底层任务根本不启动，取消动作仍然执行", async () => {
+    let cancelled = 0;
+    let started = 0;
+    const error = await awaitWithHostExit({
+      task: () => {
+        started++;
+      },
+      timeoutMs: 0,
+      onCancel: () => {
+        cancelled++;
+      },
+    }).then(
+      () => null,
+      (e) => e,
+    );
+    expect(error).toBeInstanceOf(BudgetExhaustedError);
+    expect(started).toBe(0);
+    expect(cancelled).toBe(1);
+  });
+
+  it("宿主退出后真实 fetch 立刻被 abort（请求不再挂着）", async () => {
+    const { createServer } = await import("node:http");
+    let observed = 0;
+    const server = createServer((req, res) => {
+      req.on("aborted", () => {
+        observed++;
+      });
+      res.on("close", () => {
+        if (!res.writableEnded) observed++;
+      });
+      // 故意不响应：请求会一直挂着，除非被取消
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    const controller = new AbortController();
+    let fireExit = null;
+    const hostExit = {
+      signal: new Promise((resolve) => {
+        fireExit = resolve;
+      }),
+    };
+    const pending = awaitWithHostExit({
+      task: () => fetch(`http://127.0.0.1:${port}/json/version`, { signal: controller.signal }),
+      hostExit,
+      timeoutMs: 45000,
+      onCancel: () => controller.abort(),
+    }).then(
+      () => null,
+      (e) => e,
+    );
+    await sleep(150); // 让请求真正到达服务端
+    fireExit({ code: 0 });
+    const error = await pending;
+    expect(error).toBeInstanceOf(HostExitError);
+    await sleep(250);
+    expect(observed).toBeGreaterThan(0); // 服务端看到连接被关闭，而不是一直挂着
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  it("connectWithBudget：底层拿到同一份超时，取消后迟到连接被关闭", async () => {
+    const seen = [];
+    let closed = 0;
+    const error = await connectWithBudget({
+      connect: (url, options) => {
+        seen.push({ url, timeout: options?.timeout });
+        return sleep(150).then(() => ({
+          close: async () => {
+            closed++;
+          },
+        }));
+      },
+      url: "http://127.0.0.1:9601",
+      timeoutMs: 50,
+      timeoutDetail: "connectOverCDP 超过剩余预算 50 ms（WebSocket 未建立）",
+    }).then(
+      () => null,
+      (e) => e,
+    );
+    expect(error).toBeInstanceOf(BudgetExhaustedError);
+    expect(seen).toEqual([{ url: "http://127.0.0.1:9601", timeout: 50 }]);
+    await sleep(250);
+    expect(closed).toBe(1);
   });
 });

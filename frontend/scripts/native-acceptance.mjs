@@ -33,6 +33,7 @@ import {
   BudgetExhaustedError,
   awaitWithHostExit,
   buildLaunchesEvidence,
+  connectWithBudget,
   clampTimeoutToBudget,
   classifyPortOwner,
   collectDescendants,
@@ -223,7 +224,8 @@ async function fetchJsonVersion(record, { deadlineMs, hostExit }) {
       hostExit,
       timeoutMs,
       timeoutDetail: `/json/version 超过剩余预算 ${timeoutMs} ms（端口 ${record.port}）`,
-      onAbandon: () => controller.abort(),
+      // 取消当下就 abort：宿主退出或预算耗尽后请求不再继续挂着（不是等它自己结束）。
+      onCancel: () => controller.abort(),
     });
   } finally {
     clearTimeout(timer);
@@ -247,8 +249,8 @@ function errorChain(error) {
 }
 
 /**
- * 在剩余预算内建立 CDP 连接（§4.8 第 4 条）：超时按可重试瞬断处理，但**取消底层连接**——
- * 竞速失败后迟到的连接交给 `close()`，既不悬空，也不会被当成新的尝试结果。
+ * 在剩余预算内建立 CDP 连接（§4.8 第 4 条）：底层 `connectOverCDP` 拿到同一份超时，
+ * 竞速失败后迟到的连接交给 `close()`——既不悬空，也不会被当成新的尝试结果。
  */
 function budgetedConnect(record, { deadlineMs, hostExit }) {
   const timeoutMs = clampTimeoutToBudget({
@@ -263,18 +265,12 @@ function budgetedConnect(record, { deadlineMs, hostExit }) {
       }),
     );
   }
-  return awaitWithHostExit({
-    task: () => chromium.connectOverCDP(`http://127.0.0.1:${record.port}`),
-    hostExit,
+  return connectWithBudget({
+    connect: (url, options) => chromium.connectOverCDP(url, options),
+    url: `http://127.0.0.1:${record.port}`,
     timeoutMs,
+    hostExit,
     timeoutDetail: `connectOverCDP 超过剩余预算 ${timeoutMs} ms（WebSocket 未建立）`,
-    onAbandon: (browser) => {
-      try {
-        Promise.resolve(browser?.close?.()).catch(() => {});
-      } catch {
-        /* 取消后的清理失败不改变本次失败结论 */
-      }
-    },
   });
 }
 

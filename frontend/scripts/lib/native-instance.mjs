@@ -307,46 +307,49 @@ export function createHostExitSignal({
  * 让一个可能不可取消的等待（`connectOverCDP`、`fetch`、重试间隔）在
  * 「目标完成」「宿主退出」「预算耗尽」之间取先到者。
  *
- * 取消分支抛出 `HostExitError` / `BudgetExhaustedError`；**迟到的成功结果不返回给调用方**，
- * 而是交给 `onAbandon` 清理（例如 `browser.close()`）——这样被取消的旧连接不会被当成
- * 新的尝试结果，底层连接也不会悬空。
+ * 取消分支抛出 `HostExitError` / `BudgetExhaustedError`，并在**取消当下**执行
+ * `onCancel`（例如 `AbortController.abort()`）——不能等到任务自己迟到结束才清理，
+ * 否则被取消的请求会继续挂着。迟到的成功结果不返回给调用方，而是交给
+ * `onLateResult` 收尾（例如 `browser.close()`），这样旧连接既不会被当成新的尝试结果，
+ * 也不会悬空。
  */
 export function awaitWithHostExit({
   task,
   hostExit = null,
   timeoutMs = 0,
   timeoutDetail = "",
+  onCancel = null,
+  onLateResult = null,
   onAbandon = null,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
 } = {}) {
   const waitMs = Math.max(0, Math.round(Number(timeoutMs) || 0));
   if (waitMs <= 0) {
-    // 预算已耗尽：不启动新的等待/连接（§6.2 行 5）
+    // 预算已耗尽：不启动新的等待/连接（§6.2 行 5）。此时底层还没开始，直接给出取消结论。
+    runCallback(onCancel, { kind: "budget-exhausted", timeoutMs: 0, detail: timeoutDetail });
     return Promise.reject(new BudgetExhaustedError({ timeoutMs: 0, detail: timeoutDetail }));
   }
-  const abandon = (value) => {
-    if (typeof onAbandon !== "function") return;
-    try {
-      onAbandon(value);
-    } catch {
-      /* 清理失败不影响主流程 */
-    }
-  };
+  const lateResult = typeof onLateResult === "function" ? onLateResult : onAbandon;
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer = null;
-    const finish = (action) => {
+    const finish = (action, cancelReason = null) => {
       if (settled) return;
       settled = true;
       if (timer !== null) {
         clearTimer(timer);
         timer = null;
       }
+      if (cancelReason !== null) runCallback(onCancel, cancelReason);
       action();
     };
     timer = setTimer(
-      () => finish(() => reject(new BudgetExhaustedError({ timeoutMs: waitMs, detail: timeoutDetail }))),
+      () =>
+        finish(
+          () => reject(new BudgetExhaustedError({ timeoutMs: waitMs, detail: timeoutDetail })),
+          { kind: "timeout", timeoutMs: waitMs, detail: timeoutDetail },
+        ),
       waitMs,
     );
     const observed = Promise.resolve()
@@ -357,18 +360,56 @@ export function awaitWithHostExit({
       );
     if (hostExit?.signal) {
       hostExit.signal.then(
-        (info) => finish(() => reject(new HostExitError(info))),
+        (info) =>
+          finish(() => reject(new HostExitError(info)), { kind: "host-exit", info }),
         () => {},
       );
     }
     observed.then((result) => {
       if (settled) {
-        // 已经被取消：迟到的成功结果交给清理逻辑，不回传
-        if (result.ok) abandon(result.value);
+        // 已经被取消：迟到的成功结果交给收尾逻辑，不回传
+        if (result.ok) runCallback(lateResult, result.value);
         return;
       }
       finish(() => (result.ok ? resolve(result.value) : reject(result.error)));
     });
+  });
+}
+
+/** 回调失败不影响主流程：取消结论已经确定，清理异常不能改变它。 */
+function runCallback(callback, value) {
+  if (typeof callback !== "function") return;
+  try {
+    callback(value);
+  } catch {
+    /* 忽略回调异常 */
+  }
+}
+
+/**
+ * 在剩余预算内建立 CDP 连接（§4.8 第 4 条）：
+ *   - 底层 `connectOverCDP` 显式拿到同一份超时（`{ timeout }`），不会在外层结束后继续等；
+ *   - 竞速失败后迟到的连接交给 `close()`，既不悬空，也不会被当成新的尝试结果。
+ */
+export function connectWithBudget({
+  connect,
+  url,
+  timeoutMs,
+  hostExit = null,
+  timeoutDetail = "",
+} = {}) {
+  return awaitWithHostExit({
+    task: () => connect(url, { timeout: timeoutMs }),
+    hostExit,
+    timeoutMs,
+    timeoutDetail,
+    onLateResult: (browser) => {
+      try {
+        Promise.resolve(browser?.close?.()).catch(() => {});
+      } catch {
+        /* 取消后的清理失败不改变本次失败结论 */
+      }
+    },
   });
 }
 
