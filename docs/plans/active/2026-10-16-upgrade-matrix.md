@@ -305,6 +305,7 @@
 
 - PR：[#10](https://github.com/ywltby/tokenscope/pull/10)（base `main`，head `docs/upgrade-matrix-plan`，最终提交 `34518ef`）。
 - 同一 HEAD 的远程结果（2026-10-16）：CI `gate` 18m56s 通过（含新增的登记表远端 `check` 步骤）；Install test `install-test` 11m39s 通过，`plan-upgrades` 12s 从登记表选出两个起点，四个单跳作业全部通过——`upgrade-test (0.1.0, present)` 54s、`(0.1.0, deleted)` 1m4s、`(0.3.2, present)` 58s、`(0.3.2, deleted)` 1m4s；`upgrade-chain` 按设计在 PR 上跳过（仅手动触发）；Native UI E2E `native-ui` 11m30s 通过——main `19aae8b` 上失败的同一检查在新的实例生命周期下通过。
+- 取消逻辑修复后（HEAD `10364fc`）同一组门禁重跑仍全部通过：`gate` 20m59s、`install-test` 11m34s（`plan-upgrades` 9s，四个单跳作业 57s–1m17s）、`native-ui` 13m4s。
 - 仍未取得：合入 main 后 Release 的两条连续升级链、`v0.3.3` 发布与五场景安装的真实签名；这些按 §7 第 3 步在发布批次里取证。
 
 ### 10.8 复核修复（2026-10-16 第二轮）
