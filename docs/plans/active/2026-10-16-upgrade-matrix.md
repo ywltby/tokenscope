@@ -1,6 +1,6 @@
 # 升级测试补测：起点矩阵、连续升级链与原生验收重启修复
 
-> 状态：**用户已确认（2026-10-16）**，第 9 节 D1–D5 均已决定；同日用户决定把原生验收重启连接修复（UP09，§4.8）并入本计划，不推迟到 PR2。均未实施。执行方补充（`fb35e91`）经[审阅第 18 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复核后已并入正文；按用户要求删去过度防御的设计与过高的验收门槛（第 19 节）。
+> 状态：**用户已确认（2026-10-16）**，第 9 节 D1–D5 均已决定；同日用户决定把原生验收重启连接修复（UP09，§4.8）并入本计划，不推迟到 PR2。执行方补充（`fb35e91`）经[审阅第 18 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复核后已并入正文；按用户要求删去过度防御的设计与过高的验收门槛（第 19 节）。**本地实施已完成（2026-10-16）**，逐项证据见第 10 节；尚未创建 PR，五场景安装、升级矩阵远程运行、Release 双链与原生 20 轮重启取证仍待该 PR 的门禁。
 > 交付：独立 PR，patch（测试与发布门禁维护，不改变统计口径和界面）。实施时从最新 main 建 `feat/upgrade-matrix`。
 > 顺序：**下一个 PR**，在 [PR2 扫描反馈](2026-10-15-collection-status.md)之前合入。PR2 的 F04 要扩展同一个原生验收脚本，先修好重启连接，PR2 才能在稳定的测试架上取证；也因此早于 [PR3 来源目录](2026-10-14-source-discovery-and-additional-paths.md)，PR3 的设置迁移能直接得到真实 0.3.x 安装包的升级覆盖（见 §8）。
 > 承接：[整合计划 N12](2026-10-11-consolidated-remaining-work.md) 的“真实旧包升级”责任；本计划只扩展起点与升级次数，不改变 N12 已验收的 0.1.0 单跳场景。
@@ -249,3 +249,60 @@
 | D3 | 连续升级链 | (a) 只在 Release，经过格式代表；(b) Release 中经过全部已发布版本；(c) PR 中也跑 | (a)：多跳风险集中在格式变化处；(b) 每多一个版本多 1 分钟左右 |
 | D4 | 撤回版本还要不要测 | (a) 撤回即删除发布，此后不再测试；(b) 撤回只改说明、保留安装包，并继续作为额外起点测试 | (a)：符合“在发布页撤回”的用法，规则简单；如果某次撤回的版本已有不少人安装，可以对那一个版本临时选 (b) |
 | D5 | 20 次重启压力验证在哪里跑 | (a) 只在本地跑一次作为本 PR 取证；(b) 常驻 CI，每次都跑 | (a)：用户决定。常驻会让必需检查每次多数分钟，属于过度防御；CI 中由各场景原有的重启覆盖这条链路 |
+
+## 10. 实施记录（2026-10-16）
+
+本节的结论只覆盖本地实现与脚本契约；§7 第 2、3 步的远程证据仍未取得。
+
+### 10.1 起点登记表与选择器（UP01/UP02/UP07）
+
+- `scripts/fixtures/upgrade_baselines.json`（schema 2）取代 `upgrade_baseline.json`：0.1.0 原样迁入，补登 0.2.0、0.2.1、0.3.0、0.3.1、0.3.2。每条 `commit` 与标签解引用一致；`persistent_format` 按各标签源码常量登记（0.2.0 起 cache 11 / history 4 / parser 1 / identity 1 / pricing 9 / settings 1；0.1.0 为 cache 6 / pricing 8，history 系列与修订为 null）。
+- 23 个登记资产的 SHA256 与 GitHub Release 资产 digest 逐条一致。
+- `scripts/upgrade_baselines.py`：`select` 是离线纯函数（0.1.0 固定入选 + 上一版 + 每种持久格式的最新代表，去重按版本升序，超过 6 个报错），输出 `origins`、`chain`、`include`；`add` 逐个下载资产核对哈希后才写入（缺 `persistent_format` 的旧元数据要求手工登记，`--unpublished` 需附提交与原因）；`withdraw` 标记撤回；`check` 校验基础版本已登记、标签解引用、远端资产集合与哈希、schema 2 元数据的持久格式一致，GitHub 出错即失败，撤回条目发布仍在只提示“待删除”。
+- `release_assets.py`：登记表统一校验（`load_registry`）、`download-baseline --origin <版本>`、`print-persistent-format`、`collect` 必带 `--persistent-format`、`verify` 要求元数据 schema 2、`publish` 先读最新 main 的登记表并拒绝登记为 `withdrawn` 的版本（`assert_publishable`）。
+
+### 10.2 持久格式指纹（UP03）
+
+- 核心库新增 `persistent_format` 模块与 `SETTINGS_FORMAT_REVISION = 1`；六项全部读真实常量（`cache::SCHEMA_VERSION` 改为 `pub`），不复制数字。
+- 新增构建用示例 `crates/tokenscope-core/examples/print_persistent_formats.rs`（不进安装包），输出一行紧凑 JSON，键序固定。
+- 两个构建作业在 `collect` 前跑 `release_assets.py print-persistent-format`，结果写进 `build-metadata.json` 的 `persistent_format`（schema 2）。发布后登记的新版本由 `--check` 校验登记值与元数据一致。
+
+### 10.3 夹具、编排与备份规则（UP04）
+
+- `upgrade_fixture.py prepare --profile legacy-cache|history`：`history` 起点预置隐私同意，`legacy-cache` 保持不写；新增幂等 `ensure-consent`（0.1.0 升级后与链路每一跳使用）。
+- 设置核对改为声明式：`scripts/fixtures/settings_migrations.json`（本 PR 只有 `1->1` 恒等），支持恒等、rename、default 三种操作；未声明的格式组合、迁移表之外的字段改动、迁移后取值不一致都失败。
+- 编排按 `profile` 分支：旧事实（`cache.db` 用 `upgrade_fixture.py verify`，`history.db` 用 `inspect_history.py --verify-manifest`）、记录（0.1.0 额外比对 `cache.db` 字节与只读性；0.2.0 起复制旧库作证据、不作字节比对）、升级后核对。
+- I4 备份规则：`inspect_history.py --schema-version`（读 `PRAGMA user_version`）给出本跳安装前的结构版本，`Assert-HistoryBackup` 据此判定——结构升级必须有 `history.db.backup-v<旧结构>` 且只读可打开并含旧事实，结构未变不得出现同名备份；0.1.0 起点首次建库不适用。
+- 起点、期望清单、设置格式都不再写死：`New-UpgradeCase`/`Set-UpgradeJump` 读登记表条目；`upgrade-result.json`（schema 2）写明起点版本与提交、夹具类型、四桶哈希、旧结构版本、备份名与逐跳结果。
+
+### 10.4 工作流与链路（UP05/UP06）
+
+- 两个工作流各加 `plan-upgrades`（离线 `select`，空集合直接抛错），`upgrade-test` 改为 `matrix.include: ${{ fromJSON(needs.plan-upgrades.outputs.include) }}`，作业名形如 `upgrade-test (0.1.0, present)`；起点与场景只来自矩阵，工作流不写死版本、无跳过分支。
+- `release.yml` 新增 `upgrade-chain`（`present`/`deleted` 两条链），`publish` 依赖单跳矩阵与双链全部成功。
+- 链路只播种一次；`deleted` 链在第一跳采集后删除来源日志，后续跳只能依赖已存事实。逐跳：下载校验并安装 → 核对注册版本与主程序哈希 → 启动等待就绪 → 核对事实、I4 备份与设置 → 正常关闭；最后一跳再做一次重启幂等核对；任一跳失败即中止并写出逐跳结果。
+
+### 10.5 本地验证（UP01–UP08）
+
+| 项 | 结果 |
+| --- | --- |
+| `python -B scripts/upgrade_baselines.py select --current-version 0.3.3` | `origins = ["0.1.0", "0.3.2"]`，`include` 四项 |
+| `python -B scripts/upgrade_baselines.py check --base-ref origin/main` | 6 个条目、23 个远端资产的标签解引用与哈希全部通过，无警告 |
+| `python -B -m unittest discover -s scripts -p "test_*.py"` | 262 项通过 |
+| `pwsh -NoProfile -File scripts/test_upgrade_helpers.ps1` | 49 项通过（含 I4 两种反例、链路只播种一次、失败即中止） |
+| `pwsh -NoProfile -File scripts/check_powershell_syntax.ps1` | 12 个脚本通过 |
+| `python -B scripts/release_assets.py print-persistent-format` | 六项指纹与本计划 §1.2 及登记表一致 |
+
+### 10.6 原生验收实例生命周期（UP09）
+
+- 新增 `frontend/scripts/lib/native-instance.mjs`：端口计算、端口归属判定、连接重试决策、退出确认与证据拼装的纯逻辑；进程与网络查询以参数注入，沿用脚本原有一次 PowerShell 调用（`Get-CimInstance Win32_Process` + `Get-NetTCPConnection`），未另建适配器脚本。新增 `frontend/scripts/lib/native-instance.test.mjs`（27 项，覆盖 §6.2 全部反例，node 环境），`frontend/vitest.config.ts` 纳入 `scripts/lib/**/*.test.mjs`。
+- `native-acceptance.mjs` 重写实例生命周期：启动前查端口占用（有监听者即失败并记录占用进程，不自动换端口）；连接前核实端点归属（属于外来进程即失败且不结束它）；连接类瞬断每 300 ms 重试，重试前确认宿主存活与端口归属，宿主退出立即失败并报退出码；单次启动 65 秒预算不收紧不放宽；每次关闭等宿主及其全部后代进程退出且端口不再监听（上限 20 秒，超时列出残留 PID，强制结束只用于失败清理且只针对已记录 PID）。启动与场景执行包进 try/finally，失败也写 `evidence.json`（新增 `launches[]`：序号、端口、宿主 PID 与退出码、后代 PID、端口所属 PID、连接尝试与错误、页面 target、阶段耗时，另附宿主与应用日志尾部）。
+- `ui-e2e.yml` 各步起始端口互不重叠（ui-refresh 9451、四个 ui-system 9460/9470/9480/9490），进程内第 n 次启动用 `--port + n`；新增只在本地运行的 `ui-relaunch` 场景（`--relaunch-cycles`，默认 20）。
+- **本地取证**：`node frontend/scripts/native-acceptance.mjs --scenario ui-relaunch --events 4 --relaunch-cycles 20 --port 9640 --out qa-artifacts/up09-relaunch-local` 退出码 0——21 次启动端口 9641…9661 无重复，20 轮“直接退出 → 确认退出 → 重启 → 等待数据 → 核对设置”每轮退出码 0 且设置仍在，8/8 检查通过（含新增 `instance_stop_confirmed`），真实用户数据未被触碰；既有 `ui-system` 场景回归 15/15 通过（原 14 项名称与数量不减），attach 模式实测不认领、不结束外部实例。证据与日志留在本机 `qa-artifacts/up09-relaunch-local/`（不入库）。
+- 实测纠正了两处与计划假设不符的事实：`Get-NetTCPConnection` 的 `State` 在 JSON 里是数字枚举（只认字符串会把真实监听者判成“无监听者”），undici 的 `fetch failed` 把真实原因放在 `cause`（错误链展开后 `ECONNREFUSED` 等才按可重试处理）。两处都补了单元测试。
+- CLAUDE.md 已写明“Native UI E2E 失败先按证据说明原因，重跑不能替代原因”，并记录 20 轮压测只在本地取证。
+
+### 10.7 未完成项（远程门禁）
+
+- PR 侧：CI、Native UI E2E、Install test 与升级矩阵（0.1.0/0.3.2 × present/deleted）在同一 HEAD 全部通过，并核对每个作业的 `upgrade-result.json` 写明起点版本与提交。
+- Release 侧：main 的两条连续升级链通过、`v0.x.y` 发布后回填运行链接。
+- 五场景安装与真实 `tauri build` 仍只在 GitHub-hosted Runner 执行，本机只跑契约。
