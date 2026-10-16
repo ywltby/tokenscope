@@ -85,13 +85,13 @@ class SelectionCase(RegistryCase):
                          ["0.1.0", "0.3.1"])
 
     def test_withdrawn_and_unpublished_versions_are_never_origins(self):
-        registry = self.with_entry("0.3.2", status="withdrawn",
+        registry = self.with_entry("0.3.3", status="withdrawn",
                                    withdrawn={"date": "2026-10-20", "reason": "崩溃"})
-        registry["entries"].append({"version": "0.3.3", "tag": "v0.3.3", "commit": SHA,
-                                    "origin_release": "v0.3.3", "profile": "history",
+        registry["entries"].append({"version": "0.3.4", "tag": "v0.3.4", "commit": SHA,
+                                    "origin_release": "v0.3.4", "profile": "history",
                                     "status": "unpublished", "assets": []})
-        self.assertEqual([e["version"] for e in baselines.select_origins(registry, "0.3.4")],
-                         ["0.1.0", "0.3.1"])
+        self.assertEqual([e["version"] for e in baselines.select_origins(registry, "0.3.5")],
+                         ["0.1.0", "0.3.2"])
 
     def test_each_persistent_format_keeps_its_own_latest_representative(self):
         registry = self.with_entry("0.2.0", persistent_format={**FINGERPRINT, "history_schema": "3"})
@@ -113,7 +113,7 @@ class SelectionCase(RegistryCase):
                     baselines.select_origins(registry, "0.3.3")
 
     def test_too_many_origins_stop_instead_of_expanding_silently(self):
-        registry = self.without("0.3.2")
+        registry = self.without("0.3.2", "0.3.3")
         for index, version in enumerate(("0.3.2", "0.3.3", "0.3.4", "0.3.5", "0.3.6")):
             registry["entries"].append({
                 "version": version, "tag": "v" + version, "commit": SHA,
@@ -173,8 +173,8 @@ class RegistryValidationCase(RegistryCase):
 
     def test_unpublished_entry_carries_commit_and_reason_without_assets(self):
         payload = self.payload()
-        payload["entries"].append({"version": "0.3.3", "tag": "v0.3.3", "commit": SHA,
-                                   "origin_release": "v0.3.3", "profile": "history",
+        payload["entries"].append({"version": "0.3.4", "tag": "v0.3.4", "commit": SHA,
+                                   "origin_release": "v0.3.4", "profile": "history",
                                    "status": "unpublished", "assets": []})
         path = self.write(payload)
         registry = baselines.load_registry(path)
@@ -251,13 +251,13 @@ class CheckCase(RegistryCase):
 
     def test_unpublished_entry_keeps_expectations_without_installer(self):
         registry = copy.deepcopy(self.registry)
-        registry["entries"].append({"version": "0.3.3", "tag": "v0.3.3", "commit": SHA,
-                                    "origin_release": "v0.3.3", "profile": "history",
+        registry["entries"].append({"version": "0.3.4", "tag": "v0.3.4", "commit": SHA,
+                                    "origin_release": "v0.3.4", "profile": "history",
                                     "status": "unpublished", "persistent_format": None,
                                     "assets": []})
         payload = baselines.entries_payload(baselines.load_registry(self.write(registry)))
         entry = payload["entries"][-1]
-        self.assertEqual(entry["version"], "0.3.3")
+        self.assertEqual(entry["version"], "0.3.4")
         self.assertEqual(entry["status"], "unpublished")
         self.assertIsNone(entry["installer_name"])
         self.assertIsNone(entry["installer_sha256"])
@@ -279,7 +279,7 @@ class CheckCase(RegistryCase):
         registry = self.with_entry("0.3.1", status="withdrawn",
                                    withdrawn={"date": "2026-10-20", "reason": "崩溃"})
         result = self.run_check(registry)
-        self.assertEqual(result["checked"], ["0.1.0", "0.2.0", "0.2.1", "0.3.0", "0.3.2"])
+        self.assertEqual(result["checked"], ["0.1.0", "0.2.0", "0.2.1", "0.3.0", "0.3.2", "0.3.3"])
         self.assertTrue(any("0.3.1" in warning for warning in result["warnings"]))
 
     def test_metadata_fingerprint_must_match_the_registry(self):
@@ -315,32 +315,32 @@ class CheckCase(RegistryCase):
 
 class AddCase(RegistryCase):
     def test_unpublished_release_waits_and_unpublished_status_needs_reason(self):
-        registry = self.without("0.3.2")
+        registry = self.without("0.3.3")
         path = self.write(registry)
         with self.assertRaises(ValueError) as caught:
-            baselines.add_entry("v0.3.2", api=FakeApi(), path=path)
-        self.assertIn("等待 v0.3.2", str(caught.exception))
+            baselines.add_entry("v0.3.3", api=FakeApi(), path=path)
+        self.assertIn("等待 v0.3.3", str(caught.exception))
         with self.assertRaises(ValueError):
-            baselines.add_entry("v0.3.2", api=FakeApi(), path=path, status="unpublished")
-        entry = baselines.add_entry("v0.3.2", api=FakeApi(), path=path, status="unpublished",
+            baselines.add_entry("v0.3.3", api=FakeApi(), path=path, status="unpublished")
+        entry = baselines.add_entry("v0.3.3", api=FakeApi(), path=path, status="unpublished",
                                     commit=SHA, reason="发布流水线失败")
         self.assertEqual(entry["status"], "unpublished")
-        self.assertEqual(baselines.load_registry(path)["entries"][-1]["version"], "0.3.2")
+        self.assertEqual(baselines.load_registry(path)["entries"][-1]["version"], "0.3.3")
 
     def test_schema_one_metadata_requires_manual_registration(self):
-        registry = self.without("0.3.2")
+        registry = self.without("0.3.3")
         path = self.write(registry)
-        assets = [asset("TokenScope_v0.3.2_windows-x64-setup.exe", "1" * 64),
-                  asset("SHA256SUMS.txt", "2" * 64),
-                  asset("provenance.sigstore.json", "3" * 64),
-                  asset("build-metadata.json", "4" * 64)]
-        api = FakeApi({"v0.3.2": release("v0.3.2", assets, commit=SHA)}, {"v0.3.2": SHA})
+        assets = [asset("TokenScope_v0.3.3_windows-x64-setup.exe", "1" * 64, tag="v0.3.3"),
+                  asset("SHA256SUMS.txt", "2" * 64, tag="v0.3.3"),
+                  asset("provenance.sigstore.json", "3" * 64, tag="v0.3.3"),
+                  asset("build-metadata.json", "4" * 64, tag="v0.3.3")]
+        api = FakeApi({"v0.3.3": release("v0.3.3", assets, commit=SHA)}, {"v0.3.3": SHA})
         metadata = self.work_dir() / "build-metadata.json"
 
         def fake_download(url, sha256, directory, name):
             path_ = Path(directory) / name
             if name == "build-metadata.json":
-                path_.write_text(json.dumps({"schema_version": 1, "version": "0.3.2"}),
+                path_.write_text(json.dumps({"schema_version": 1, "version": "0.3.3"}),
                                  encoding="utf-8")
             else:
                 path_.write_bytes(name.encode("utf-8"))
@@ -348,20 +348,20 @@ class AddCase(RegistryCase):
 
         with patch.object(baselines, "download", side_effect=fake_download):
             with self.assertRaises(ValueError) as caught:
-                baselines.add_entry("v0.3.2", api=api, path=path)
+                baselines.add_entry("v0.3.3", api=api, path=path)
         self.assertIn("persistent_format", str(caught.exception))
-        self.assertEqual(len(baselines.load_registry(path)["entries"]), 5)
+        self.assertEqual(len(baselines.load_registry(path)["entries"]), 6)
 
     def work_dir(self):
         return Path(self.temp.name)
 
     def test_add_registers_downloaded_assets_and_metadata(self):
-        registry = self.without("0.3.2")
+        registry = self.without("0.3.3")
         path = self.write(registry)
-        names = ["TokenScope_v0.3.2_windows-x64-setup.exe", "SHA256SUMS.txt",
+        names = ["TokenScope_v0.3.3_windows-x64-setup.exe", "SHA256SUMS.txt",
                  "provenance.sigstore.json", "build-metadata.json"]
-        api = FakeApi({"v0.3.2": release("v0.3.2", [asset(n, "5" * 64) for n in names],
-                                        commit=SHA)}, {"v0.3.2": SHA})
+        api = FakeApi({"v0.3.3": release("v0.3.3", [asset(n, "5" * 64, tag="v0.3.3") for n in names],
+                                        commit=SHA)}, {"v0.3.3": SHA})
 
         def fake_download(url, sha256, directory, name):
             path_ = Path(directory) / name
@@ -374,15 +374,15 @@ class AddCase(RegistryCase):
 
         with patch.object(baselines, "download", side_effect=fake_download):
             with patch.object(baselines, "digest", return_value="5" * 64):
-                entry = baselines.add_entry("v0.3.2", api=api, path=path,
+                entry = baselines.add_entry("v0.3.3", api=api, path=path,
                                             directory=self.temp.name)
         self.assertEqual([a["sha256"] for a in entry["assets"]], ["5" * 64] * 4)
-        self.assertEqual(entry["origin_release"], "v0.3.2")
+        self.assertEqual(entry["origin_release"], "v0.3.3")
         self.assertEqual(entry["profile"], "history")
         self.assertEqual(entry["persistent_format"], FINGERPRINT)
         stored = baselines.load_registry(path)
         self.assertEqual([e["version"] for e in stored["entries"]],
-                         ["0.1.0", "0.2.0", "0.2.1", "0.3.0", "0.3.1", "0.3.2"])
+                         ["0.1.0", "0.2.0", "0.2.1", "0.3.0", "0.3.1", "0.3.2", "0.3.3"])
 
 
 class WithdrawCase(RegistryCase):

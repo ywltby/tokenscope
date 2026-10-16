@@ -52,6 +52,14 @@ def collect_arguments(block):
     return bundle.group(1), executable.group(1)
 
 
+def job_block(text, name):
+    """截取工作流中顶层作业块（写法同 test_upgrade_workflow.py）。"""
+    match = re.search(rf"^  {re.escape(name)}:\n((?:    .*\n|\n)+)", text, re.M)
+    if match is None:
+        raise AssertionError(f"workflow 里没有作业 {name}")
+    return match[1]
+
+
 def workflow_paths(relative):
     """提取 `on.<event>.paths` 列表（保持顺序，含否定模式）。"""
     patterns, inside, indent = [], False, None
@@ -202,6 +210,18 @@ class CiLayoutCase(unittest.TestCase):
         self.assertNotIn("--manifest-path src-tauri", checks)
         self.assertIn("python -B scripts/build_inputs.py --check", checks)
         self.assertIn('test_build_paths.py', checks)
+
+    def test_release_gate_keeps_identity_checks_without_full_quality_gate(self):
+        # 完整质量门禁由 PR 必需检查（ci.yml 的 gate）保证；Release 的 gate 只保留
+        # 发布身份校验。防止日后删测试时连身份校验一起删掉，或把 CI 的完整门禁误删。
+        release_gate = job_block(read(".github/workflows/release.yml"), "gate")
+        ci_gate = job_block(read(".github/workflows/ci.yml"), "gate")
+        self.assertIn("bump_version.py --check", release_gate)
+        self.assertIn("release_metadata.py", release_gate)
+        self.assertIn("id: metadata", release_gate)
+        for duplicated in ("./.github/actions/setup", "./.github/actions/checks"):
+            self.assertNotIn(duplicated, release_gate, duplicated)
+        self.assertIn("./.github/actions/checks", ci_gate)
 
     def test_install_test_paths_cover_core_crate_and_not_legacy_root(self):
         patterns = workflow_paths(".github/workflows/install-test.yml")
