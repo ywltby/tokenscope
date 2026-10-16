@@ -8,9 +8,10 @@
 
 按顺序：
 
-1. **PR2 / minor**：[真实扫描反馈](active/2026-10-15-collection-status.md)，F00–F05；前置均已合入，分支 `feat/collection-status` 已从 main `0ee50f4` 建立，先做 F00（升级登记表测试脱钩，用户 2026-10-17 决定）。
-2. **PR3 / minor**：[当前用户来源目录与追加路径](active/2026-10-14-source-discovery-and-additional-paths.md)，S01–S07；PR2 合入后从最新 main 建 `feat/source-paths`。
-3. **整合计划尾项**：N10、N11、N13 与系统签字，见[整合计划](active/2026-10-11-consolidated-remaining-work.md)。
+1. **CI 并行化 / patch（待用户确认）**：[CI 拆成并行作业与原生 E2E 精简](active/2026-10-17-ci-parallel-checks.md)，C00–C04；用户 2026-10-17 决定单独先合。PR2 的 F00（登记表测试脱钩）移入为 C00。预计 PR 等待从约 12 分钟降到约 8 分钟。分支 `ci/parallel-checks`。
+2. **PR2 / minor**：[真实扫描反馈](active/2026-10-15-collection-status.md)，F01–F05；分支 `feat/collection-status` 已建立，CI 并行化合入后快进到 main 再开工。
+3. **PR3 / minor**：[当前用户来源目录与追加路径](active/2026-10-14-source-discovery-and-additional-paths.md)，S01–S07；PR2 合入后从最新 main 建 `feat/source-paths`。
+4. **整合计划尾项**：N10、N11、N13 与系统签字，见[整合计划](active/2026-10-11-consolidated-remaining-work.md)。
 
 每个 PR 各自递增一次版本、各自验证最终 HEAD；合入 main 前先用 `python -B scripts/upgrade_baselines.py add --tag v<上一版>` 登记上一版。
 
