@@ -1,7 +1,16 @@
 # PR1：虚拟 Cargo Workspace、目录迁移与提交检查
 
-> 状态：[审阅第 13 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过，PR1 可开工；运行时 fixture 分类已按意见明确。W01–W07 未实施。设计基线 main e34495b / 0.3.1。
-> 本轮计划修订留在 `docs/source-discovery-plan`；PR1 开工时从该分支最新提交创建 `feat/workspace-layout`，带入既有 mjs 维护提交 c16e023 和三份计划，不改写历史。仅本 PR 改目录/构建/门禁，独立 patch；合入后才从最新 main 分别启动 [PR2](2026-10-15-collection-status.md)、[PR3](2026-10-14-source-discovery-and-additional-paths.md)，不在本 PR 实施功能。
+> **2026-10-17 归档复核：已实现。** PR [#9](https://github.com/ywltby/tokenscope/pull/9) 于 2026-10-15 合入 main（`19aae8b`），[Release](https://github.com/ywltby/tokenscope/actions/runs/38768858069) 的 gate、构建、五场景安装与固定 0.1.0 升级通过并发布 `v0.3.2`。归档不等于其他计划的待验项目通过；当前待办只在 [整合计划](../../active/2026-10-11-consolidated-remaining-work.md) 登记，状态总账见 [计划索引](../../README.md)。下方原文保留当时的状态与证据，其中“待合入 / 待门禁 / 未实施”等字样以本头部为准。
+>
+> | 第 3 节未勾项 | 当前状态 |
+> | --- | --- |
+> | 固定旧版升级实跑 | 已由 `v0.3.2` 的 Release 在一次性 Runner 上完成 |
+> | 旧 `src-tauri/target` 清理 | 2026-10-17 用户要求清理时核实该目录已不存在（回收站中也没有），根 `target/` 完好；本仓会话记录中未找到删除命令，删除时间与操作者未知 |
+>
+> 合入后 main 上的 Native UI E2E 曾因重启后连接调试端口的时序缺口失败（[run 38768858040](https://github.com/ywltby/tokenscope/actions/runs/38768858040)），属测试架问题，已由[升级测试补测计划](2026-10-16-upgrade-matrix.md) UP09 修复。
+
+> 状态：[审阅第 13 节](../../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过，PR1 可开工；运行时 fixture 分类已按意见明确。W01–W07 未实施。设计基线 main e34495b / 0.3.1。
+> 本轮计划修订留在 `docs/source-discovery-plan`；PR1 开工时从该分支最新提交创建 `feat/workspace-layout`，带入既有 mjs 维护提交 c16e023 和三份计划，不改写历史。仅本 PR 改目录/构建/门禁，独立 patch；合入后才从最新 main 分别启动 [PR2](../../active/2026-10-15-collection-status.md)、[PR3](../../active/2026-10-14-source-discovery-and-additional-paths.md)，不在本 PR 实施功能。
 
 **Goal：** 核心库迁入 crates/tokenscope-core，统一 workspace/锁/target，并根据实际构建输入选择本地检查。
 

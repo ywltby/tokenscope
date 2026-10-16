@@ -1,25 +1,23 @@
 # TokenScope 计划与完成状态总账
 
 > 2026-10-11 整理。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
-> 当前待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)。[UI 调整计划](active/2026-10-13-ui-adjustment.md)本轮功能及价格/窗口隐藏复核补修已完成、本地验收通过，最新补修仍需自身 HEAD 的远程门禁，PR #7 未合并；真实跨午夜、长时间休眠、跨显示器已按用户决定移至[独立系统验收待办](system-acceptance-todo.md)，本轮不执行。逐份事实核对：[审计索引](audits/README.md)。
-> 最新进展：PR #5 最终 19c634b 的 CI、五场景、两项升级及工件已验，合并为 main 8d17a47。main 同样全部通过，历史 [v0.1.0](https://github.com/ywltby/tokenscope/releases/tag/v0.1.0) 与 [v0.2.0](https://github.com/ywltby/tokenscope/releases/tag/v0.2.0) 已公开；新建草稿读取延迟曾阻断上传，确认既有草稿后分阶段恢复了同一产物。防复发的 0.2.1 补修已改为固定创建响应 Release ID，当前门禁仍按新 HEAD 和 [Release](https://github.com/ywltby/tokenscope/actions/workflows/release.yml)判定；其余系统签字及 N10/N11/N13 不关闭。
+> 当前待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)。真实跨午夜、长时间休眠、跨显示器在[独立系统验收待办](system-acceptance-todo.md)维护。逐份事实核对：[审计索引](audits/README.md)。
+> 最新进展（2026-10-17）：0.3.0–0.3.3 四个批次（PR #7–#10）均已合入 main，并由各自的 Release 发布预发布；对应计划已归档到 archive/implemented，见下方[第二批归档](#2026-10-17-第二批归档)。
 
 ## 现在执行什么
 
-- **2026-10-15 PR1 已实施并完成本地验收；PR2/PR3 仍未实施**：
-  - **PR1 / patch**：[Workspace 目录迁移与提交检查](active/2026-10-15-workspace-layout.md)，W01–W07。分支 `feat/workspace-layout` 从 docs/source-discovery-plan 最新提交（`94e5c52`，含 c16e023 与三份计划）创建，按 W01–W07 逐项实施，版本已递增到 0.3.2。本地交付门槛 14 条命令逐条 exit 0（普通与 acceptance 两套 workspace clippy/test、前端 typecheck/format:check/test/build 与浏览器 E2E、脚本契约 216 项、版本发布契约）；隔离 checkout 冷编译两模式通过，且从根目录与 `src-tauri` 目录发起构建都只写根 target、不新建子 target/子锁；生产 NSIS 构建与 `release_assets` 收集、验收包构建与原生 E2E 均在本机实跑通过——逐项证据见该计划第 6 节。第二轮与第三轮外部复核共提出 8 项反例（含 `git commit --only` 读到错误 index、未暂存保护范围不区分文件与目录、删除未触发文档检查、前端脚本只做语法检查等），已逐项复现并修复，补 22 项回归测试，详见该计划第 6.8 节。**未创建 PR、未合并 main**：W06.4 的五项安装验收与两项固定旧版升级、以及 ci/release/install-test/ui-e2e 的远程门禁仍待 Actions 提供；旧 `src-tauri/target`（38.85 GiB，无进程占用）按用户决定登记为待清理，未删除。
-  - **发布去重 / patch（待用户确认）**：[发布流程去掉重复的完整测试](active/2026-10-17-release-gate-dedup.md)，R01–R03；Release 的 gate 只保留版本与身份校验，完整测试由 PR 必需检查保证，发布预计从约 31 分钟降到约 14 分钟；先于 PR2。
-  - **PR2 / minor**：[真实扫描反馈](active/2026-10-15-collection-status.md)，F01–F05；升级测试补测合入后从最新 main 建 feat/collection-status，读取图标至少 1 秒，查询不等待动画。
-  - **PR3 / minor**：[当前用户来源目录与追加路径](active/2026-10-14-source-discovery-and-additional-paths.md)，S01–S07；PR2 合入后从最新 main 建 feat/source-paths，只发现当前用户默认和 CODEX_HOME / CLAUDE_CONFIG_DIR，取消重新发现按钮。
-  - **升级测试补测 / patch（用户已确认）**：[起点矩阵、连续升级链与原生验收重启修复](active/2026-10-16-upgrade-matrix.md)，UP01–UP09，**下一个 PR，先于 PR2**；在 0.1.0 单跳之外加测上一版与每种持久格式的代表起点，Release 增加连续升级链，处理撤回版本；UP09 修复原生验收重启后连接调试端口的时序缺口（main `19aae8b` 失败）。第 9 节 D1–D5 已确认（D5：20 次重启压力验证只在本地跑）。**本地实施已完成**：登记表 schema 2（0.1.0 与 0.2.0–0.3.2），`upgrade_baselines.py` 的 `select`/`add`/`withdraw`/`check`，按 profile 分支的夹具与编排、I4 备份核对、声明式设置迁移，两个工作流的动态起点矩阵与 Release 连续升级链，`publish` 拒绝撤回版本，以及从真实常量生成持久格式指纹的构建元数据 schema 2；第二轮独立复核提出的 5 项问题（旧期望清单缺失、撤回保护未读最新 main、链路跳过历史库备份验收、未发布条目解析、原生连接预算与退出即时检测）已修复并补齐能红的契约，见该计划第 10.8/10.9 节。**未创建 PR**：五场景安装、升级矩阵远程运行与原生 20 轮重启取证仍待该 PR 的门禁。
+按顺序：
 
-三 PR 各自递增一次版本、各自验证最终 HEAD，不再统一交付。PR1 已实现，迁移期间冻结其他 Rust 开发的要求随之转为「PR1 合入后先 rebase 最新 main 再继续」；独立系统验收 todo 不变。
+1. **发布去重 / patch（待用户确认）**：[发布流程去掉重复的完整测试](active/2026-10-17-release-gate-dedup.md)，R01–R03；Release 的 gate 只保留版本与身份校验，完整测试由 PR 必需检查保证，发布预计从约 31 分钟降到约 14 分钟。
+2. **PR2 / minor**：[真实扫描反馈](active/2026-10-15-collection-status.md)，F01–F05；前置的目录迁移与升级测试补测均已合入，从最新 main 建 `feat/collection-status`。
+3. **PR3 / minor**：[当前用户来源目录与追加路径](active/2026-10-14-source-discovery-and-additional-paths.md)，S01–S07；PR2 合入后从最新 main 建 `feat/source-paths`。
+4. **整合计划尾项**：N10、N11、N13 与系统签字，见[整合计划](active/2026-10-11-consolidated-remaining-work.md)。
 
-PR1 最新补修：第 15 节审阅的编码、空检查及构建输入边界问题已在 `0cbbc8b` 修复；脚本契约从上述 216 项增至 **228 项**，完整提交门禁通过，真实清单重编译校验无差异。Git Bash 编码回归及仓库脚本数量验证通过。详见计划 §6.9、审阅 §16，等待独立复审；未创建 PR、未清理旧 target。
+每个 PR 各自递增一次版本、各自验证最终 HEAD；合入 main 前先用 `python -B scripts/upgrade_baselines.py add --tag v<上一版>` 登记上一版。
 
-执行入口已补齐：[PR1 第 4–5 节](active/2026-10-15-workspace-layout.md#4-三份计划共同的执行与交付约束)规定三份计划共同的操作顺序、禁止事项、证据格式和四级交付门槛，并细化迁移/清单/hook；[PR2 第 6 节](active/2026-10-15-collection-status.md#6-执行细则与逐项验收门槛)给出状态机、前端计时和反例表；[PR3 第 8 节](active/2026-10-14-source-discovery-and-additional-paths.md#8-执行细则算法边界与验收门槛)给出来源解析、整轮遍历去重、事实矩阵和性能取证。补充执行说明不代表任务已经实施；PR1 的逐项执行结果与未闭合项见其第 6 节。
+执行入口已补齐：[PR1 第 4–5 节](archive/implemented/2026-10-15-workspace-layout.md#4-三份计划共同的执行与交付约束)规定三份计划共同的操作顺序、禁止事项、证据格式和四级交付门槛，并细化迁移/清单/hook；[PR2 第 6 节](active/2026-10-15-collection-status.md#6-执行细则与逐项验收门槛)给出状态机、前端计时和反例表；[PR3 第 8 节](active/2026-10-14-source-discovery-and-additional-paths.md#8-执行细则算法边界与验收门槛)给出来源解析、整轮遍历去重、事实矩阵和性能取证。补充执行说明不代表任务已经实施；PR1 的逐项执行结果与未闭合项见其第 6 节。
 
-原 active 的 25 份计划全部归档；M1–M11 重新核对自身验收条件。历史计划共 **36 份：8 份已实现、26 份部分完成、2 份已被取代**。部分完成通常是“实现已完成、验收有尾项”；用量历史计划仍有原生及真实性能验收责任。除上述三份新计划外，`active/` 保留上述整合计划、2026-10-13 的 UI 调整计划与[控件材质与浮层可读性计划](active/2026-10-13-control-material.md)（用户已确认：边界 ≥ 3:1、克制受光与焦点/选中柔光、操作型浮层实色；已实施且视觉验收通过；UI 独立分支准备发布，待 PR 门禁），不再分别追逐旧计划的尾项。
+原 active 的 25 份计划全部归档；M1–M11 重新核对自身验收条件。历史计划共 **40 份：12 份已实现、26 份部分完成、2 份已被取代**（含 2026-10-17 第二批归档的 4 份）。部分完成通常是“实现已完成、验收有尾项”；用量历史计划仍有原生及真实性能验收责任。除上述三份新计划外，`active/` 保留上述整合计划、2026-10-13 的 UI 调整计划与[控件材质与浮层可读性计划](archive/implemented/2026-10-13-control-material.md)（用户已确认：边界 ≥ 3:1、克制受光与焦点/选中柔光、操作型浮层实色；已实施且视觉验收通过；UI 独立分支准备发布，待 PR 门禁），不再分别追逐旧计划的尾项。
 
 - **PR #4 已合并**：4cde2b33 的最终两套检查成功，main b1f8b635 的 CI/Release 与五个安装场景成功。A01–A06、M01、N09 保持关闭。
 - **P2：N12 版本与真实旧包升级**，历史 0.1.0 与功能轮次 0.2.0 已发布；版本工具、不可变发布和日志保留/删除两场景升级已实跑通过。当前 0.2.1 修复新建草稿身份读取，仍需自己的 PR/main 发布门禁。
@@ -78,6 +76,17 @@ PR1 最新补修：第 15 节审阅的编码、空检查及构建输入边界问
 | [跨工具项目路径统一](archive/partial/2026-10-09-project-path-unification.md) | 部分完成 | N11 |
 | [模型名称等价分组与计价](archive/partial/2026-10-10-model-pricing-name-equivalence.md) | 部分完成 | N11；N08 已完成 |
 | [用量历史库与 CCS 手动导入](archive/partial/2026-10-10-usage-history-and-ccs-import.md) | 部分完成 | N11、N13；N01–N09 已完成 |
+
+## 2026-10-17 第二批归档
+
+以下 4 份计划均已合入 main 并发布，归档到 archive/implemented；各文件头部的“2026-10-17 归档复核”说明原文中过时状态的实际结果。
+
+| 历史计划 | PR / 版本 | 状态 | 当前剩余责任 |
+| --- | --- | --- | --- |
+| [UI 调整：时间筛选、自动读取、汇总页状态与设置页](archive/implemented/2026-10-13-ui-adjustment.md) | #7 / v0.3.0 | 已实现 | U06 常驻更新时间由 PR2 取代；系统验收见独立待办 |
+| [控件材质与浮层可读性](archive/implemented/2026-10-13-control-material.md) | #8 / v0.3.1 | 已实现 | 真实跨显示器见独立待办 |
+| [PR1：虚拟 Cargo Workspace、目录迁移与提交检查](archive/implemented/2026-10-15-workspace-layout.md) | #9 / v0.3.2 | 已实现 | 无；旧 `src-tauri/target` 核实已不存在 |
+| [升级测试补测：起点矩阵、连续升级链与原生验收重启修复](archive/implemented/2026-10-16-upgrade-matrix.md) | #10 / v0.3.3 | 已实现 | 无 |
 
 ## M1–M11：自身验收复核
 

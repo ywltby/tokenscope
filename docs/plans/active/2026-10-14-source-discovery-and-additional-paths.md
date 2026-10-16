@@ -1,7 +1,7 @@
 # PR3：当前用户日志目录发现与追加路径管理
 
 > 状态：[审阅第 13 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过；S01–S07 均未实施，仍须等待 PR2 合入。
-> 前置条件：[PR1 目录迁移](2026-10-15-workspace-layout.md)和 [PR2 扫描反馈](2026-10-15-collection-status.md)依次合入 main。届时从最新 main 创建 `feat/source-paths`，独立 minor 版本、独立 PR 和验收。当前设计修订仍提交到 `docs/source-discovery-plan`。
+> 前置条件：[PR1 目录迁移](../archive/implemented/2026-10-15-workspace-layout.md)和 [PR2 扫描反馈](2026-10-15-collection-status.md)依次合入 main。届时从最新 main 创建 `feat/source-paths`，独立 minor 版本、独立 PR 和验收。当前设计修订仍提交到 `docs/source-discovery-plan`。
 
 **Goal：** 默认发现当前用户的标准日志目录与环境变量指定的目录，以追加列表管理来源；来源重叠不重复解析或计量，遍历链接不会死循环。
 
@@ -172,7 +172,7 @@ S01–S07 全部未开始，版本未分配。实施后逐项记 commit、命令
 
 ## 8. 执行细则、算法边界与验收门槛
 
-共同执行、证据和合并门槛见 [PR1 第 4 节](2026-10-15-workspace-layout.md#41-开工与逐项执行)。PR2 合入前不开始 S01。先保持所有旧查询/计价/导入回归通过；路径管理不能改变事件业务身份或重写已有历史事实。
+共同执行、证据和合并门槛见 [PR1 第 4 节](../archive/implemented/2026-10-15-workspace-layout.md#41-开工与逐项执行)。PR2 合入前不开始 S01。先保持所有旧查询/计价/导入回归通过；路径管理不能改变事件业务身份或重写已有历史事实。
 
 ### 8.1 S01/S02：先解析配置，再接实际读取
 
