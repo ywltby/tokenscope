@@ -64,11 +64,12 @@ function New-UpgradeCase {
         InstallerPath=$InstallerPath; AppVersion=$AppVersion; ExpectedCommit=$ExpectedCommit
         SourceState=$SourceState; Origin=$Origin; Baseline=$baseline; Profile=$baseline.profile
         Entries=$entries; Metadata=$Metadata
-        ExpectedManifest=$manifest; ExpectedRequests=0; JumpSettingsFormat=$baseline.persistent_format.settings_format
+        ExpectedManifest=$manifest; ExpectedOldManifest=$baseline.expected_old
+        ExpectedRequests=0; JumpSettingsFormat=$baseline.persistent_format.settings_format
         Chain=@($Origin); JumpIndex=0; Jumps=@(); JumpOrigin=$Origin
         SourcesRoot=$null; OldInstallerPath=$null; OldExeHash=$null; InstalledExeHash=$null
         CacheHash=$null; SettingsHash=$null; PricingHash=$null
-        OldHistorySchema=$null; BackupName=$null
+        OldHistorySchema=$null; BackupName=$null; BackupsBefore=@()
         OldSettingsPath=$null; OldInstallerOrigin=$null
     }
     $case.SourcesRoot = Join-Path $TempRoot ("tokenscope-upgrade-sources-"+$SourceState)
@@ -85,12 +86,36 @@ function Get-HistorySchemaVersion {
     return [int]$value
 }
 
+function Get-HistoryBackups {
+    # 升级前备份清单（名字 + 内容哈希）：I4 要求结构未变的一跳不得新增或覆盖
+    # 备份，此前跳留下的备份允许保留但不得被改写。
+    param([Parameter(Mandatory=$true)][string]$DataDir)
+    return @(Get-ChildItem -LiteralPath $DataDir -Filter "history.db.backup-v*" -ErrorAction SilentlyContinue |
+        Sort-Object -Property Name | ForEach-Object {
+            "{0}:{1}" -f $_.Name, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        })
+}
+
+function Save-HistoryBackupState {
+    # 每次安装目标包之前采样：这一跳是"新增备份"还是"不得动备份"由它决定。
+    param($Case)
+    $Case.BackupsBefore = @(Get-HistoryBackups -DataDir $Case.DataDir)
+}
+
 function Assert-HistoryBackup {
-    # I4：发生结构升级的一跳必须留下 history.db.backup-v<旧结构>，且备份
-    # 只读可打开并含旧事实；结构未变的一跳不得新增或覆盖同名备份。
+    # I4：发生结构升级的一跳必须新增 history.db.backup-v<旧结构>，且备份只读
+    # 可打开并含旧事实；结构未变的一跳不得新增或覆盖备份。判定按**本跳安装前
+    # 的实际旧库状态**（OldHistorySchema），与最初起点的夹具类型无关。
     param([Parameter(Mandatory=$true)]$Case,
         [ValidateSet("auto","created","absent")][string]$Expect="auto")
-    if ($null -eq $Case.OldHistorySchema) { return [pscustomobject]@{ applicable=$false } }
+    $before = @($Case.BackupsBefore)
+    $after = @(Get-HistoryBackups -DataDir $Case.DataDir)
+    if ($null -eq $Case.OldHistorySchema) {
+        if (($before -join "|") -ne ($after -join "|")) {
+            throw "本跳之前没有历史库，却出现了升级备份：$($after -join '，')"
+        }
+        return [pscustomobject]@{ applicable=$false; before=$before; after=$after }
+    }
     $name = "history.db.backup-v$($Case.OldHistorySchema)"
     $path = Join-Path $Case.DataDir $name
     $exists = Test-Path -LiteralPath $path -PathType Leaf
@@ -101,17 +126,25 @@ function Assert-HistoryBackup {
     }
     if ($expectation -eq "created") {
         if (-not $exists) { throw "历史库结构已升级却没有留下升级前备份：$name" }
+        if (@($before | Where-Object { $_ -like ($name + ":*") }).Count -ne 0) {
+            throw "结构升级这一跳不得覆盖已有备份：$name"
+        }
         $facts = Invoke-UpgradePython -Arguments @((Join-Path $Case.RepoRoot "scripts/inspect_history.py"),
             $path,"--verify-manifest",$Case.ExpectedOldManifest) `
             -EvidencePath (Join-Path $Case.EvidenceRoot "backup-facts.json")
         if (-not $facts.ok) { throw "升级前备份不含旧事实：$name" }
         $Case | Add-Member -NotePropertyName BackupName -NotePropertyValue $name -Force
     }
-    elseif ($exists) {
-        throw "历史库结构未升级却出现了备份：$name"
+    else {
+        if ($exists -and @($before | Where-Object { $_ -like ($name + ":*") }).Count -eq 0) {
+            throw "历史库结构未升级却出现了备份：$name"
+        }
+        if (($before -join "|") -ne ($after -join "|")) {
+            throw "历史库结构未升级却改动了升级备份：$($after -join '，')"
+        }
     }
     return [pscustomobject]@{ applicable=$true; expect=$expectation; name=$name; exists=$exists
-        old_schema=$Case.OldHistorySchema; current_schema=$current }
+        old_schema=$Case.OldHistorySchema; current_schema=$current; before=$before; after=$after }
 }
 
 function Test-InstalledExecutable {
@@ -301,9 +334,11 @@ function Check-CurrentUsage {
         "--from-format",$Case.JumpSettingsFormat,
         "--to-format",$Case.Metadata.persistent_format.settings_format) `
         -EvidencePath (Join-Path $evidence ("settings-"+$stage+".json")) | Out-Null
-    if ($Case.Profile -eq "history") {
-        $backup = Assert-HistoryBackup -Case $Case
-        $backup | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Case.EvidenceRoot "history-backup.json") -Encoding utf8NoBOM
+    # 备份规则按本跳实际的旧库状态判定，与最初起点的夹具类型无关。
+    $backup = Assert-HistoryBackup -Case $Case
+    if ($backup.applicable) {
+        $backup | ConvertTo-Json -Depth 6 |
+            Set-Content -LiteralPath (Join-Path $Case.EvidenceRoot "history-backup.json") -Encoding utf8NoBOM
     }
 }
 
@@ -347,6 +382,7 @@ function Invoke-UpgradeScenario {
         Invoke-UpgradeLifecycle -Case $Case -Phase "old" -Verify { param($Value,$Context) Check-OldUsage -Case $Value -Context $Context }
         Save-OldUpgradeState -Case $Case
         if ($Case.SourceState -eq "deleted") { Remove-UpgradeSources -Case $Case }
+        Save-HistoryBackupState -Case $Case
         Install-UpgradeCurrent -Case $Case
         Assert-PreservedBeforeLaunch -Case $Case
         Grant-UpgradeConsent -Case $Case
@@ -414,9 +450,11 @@ function Invoke-UpgradeChain {
             Set-UpgradeJump -Case $Case -Version $version | Out-Null
             Copy-Item -LiteralPath (Join-Path $Case.DataDir "settings.toml") -Destination $Case.OldSettingsPath -Force
             $Case.SettingsHash = (Get-FileHash -LiteralPath $Case.OldSettingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            # 这一跳安装前留下的历史库结构版本（可能还不存在）：备份规则按它判定。
+            # 这一跳安装前留下的历史库结构版本（可能还不存在）与备份清单：
+            # 备份规则按它们判定，不按起点夹具类型。
             $Case.OldHistorySchema = Get-HistorySchemaVersion -RepoRoot $Case.RepoRoot `
                 -Database (Join-Path $Case.DataDir "history.db")
+            Save-HistoryBackupState -Case $Case
             $installer = $Case.InstallerPath
             if ($version -ne $Case.AppVersion) {
                 $download = Invoke-UpgradePython -Arguments @((Join-Path $Case.RepoRoot "scripts/release_assets.py"),

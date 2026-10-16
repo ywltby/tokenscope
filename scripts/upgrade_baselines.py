@@ -56,11 +56,11 @@ def version_tuple(version):
     return tuple(int(part) for part in match.groups())
 
 
-def load_registry(path=REGISTRY):
-    """读取并逐项校验登记表；任何结构问题都抛 ValueError。"""
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+def parse_registry(text, source="scripts/fixtures/upgrade_baselines.json"):
+    """校验登记表结构；文本入口与文件入口共用同一份规则。"""
+    payload = json.loads(text)
     if not isinstance(payload, dict) or payload.get("schema_version") != 2:
-        raise ValueError("登记表 schema_version 必须为 2")
+        raise ValueError(f"登记表 schema_version 必须为 2：{source}")
     repository = payload.get("repository")
     if not isinstance(repository, str) or REPOSITORY.fullmatch(repository) is None:
         raise ValueError("登记表仓库名非法")
@@ -74,6 +74,10 @@ def load_registry(path=REGISTRY):
             raise ValueError(f"登记表版本重复：{entry['version']}")
         seen.add(entry["version"])
     return payload
+
+
+def load_registry(path=REGISTRY):
+    return parse_registry(Path(path).read_text(encoding="utf-8"), source=str(path))
 
 
 def entry_of(registry, version):
@@ -171,20 +175,23 @@ def validate_assets(entry, repository, status):
 
 
 def installer_asset(entry):
-    return next(a for a in entry["assets"] if a["name"].endswith("-setup.exe"))
+    """已登记版本必须恰有一个安装包；未发布版本没有资产。"""
+    return next((a for a in entry.get("assets") or [] if a["name"].endswith("-setup.exe")), None)
 
 
 def resolved_entry(entry, root=ROOT):
     """给编排用的条目视图：期望清单路径与安装包名都按缺省规则解析成绝对路径。"""
     state_paths = {state: str(root / ((entry.get("expected_after") or {}).get(state)
                                      or DEFAULT_EXPECTED)) for state in SOURCE_STATES}
+    installer = installer_asset(entry)
     return {"version": entry["version"], "tag": entry["tag"], "commit": entry["commit"],
             "origin_release": entry["origin_release"], "profile": entry["profile"],
-            "status": entry["status"], "persistent_format": entry["persistent_format"],
+            "status": entry["status"],
+            "persistent_format": entry.get("persistent_format"),
             "expected_old": str(root / (entry.get("expected_old") or DEFAULT_EXPECTED)),
             "expected_after": state_paths,
-            "installer_name": installer_asset(entry)["name"],
-            "installer_sha256": installer_asset(entry)["sha256"]}
+            "installer_name": None if installer is None else installer["name"],
+            "installer_sha256": None if installer is None else installer["sha256"]}
 
 
 def select_origins(registry, current_version):
@@ -339,11 +346,13 @@ def check_registry(base_ref, path=REGISTRY, api=None):
     if base_entry is None:
         raise ValueError(f"基础版本 {resolved}（{base_ref}）没有登记：先运行 "
                          f"python -B scripts/upgrade_baselines.py add --tag v{resolved}")
-    if base_entry["status"] != "published":
-        raise ValueError(f"基础版本 {resolved} 登记为 {base_entry['status']}："
-                         "需要重新评审起点集合")
     api = api or Api(registry["repository"])
     warnings, checked = [], []
+    if base_entry["status"] != "published":
+        # unpublished（发布流水线失败）与 withdrawn 都允许作为基础版本继续合入，
+        # 但必须在结果里显式提示，避免"上一版没公开"被当成已验收。
+        warnings.append(f"基础版本 {resolved} 登记为 {base_entry['status']}："
+                        "该版本不作为升级起点，其发布或撤回状态请按计划第 4.4 节处理")
     with tempfile.TemporaryDirectory(prefix="tokenscope-baselines-") as temporary:
         for entry in registry["entries"]:
             if entry["status"] == "withdrawn":

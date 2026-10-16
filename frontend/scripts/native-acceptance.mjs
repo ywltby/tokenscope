@@ -25,25 +25,30 @@ import { decodePng } from "./lib/png.mjs";
 import {
   CDP_READY_BUDGET_MS,
   CONNECT_RETRY_INTERVAL_MS,
+  HOST_EXIT_POLL_MS,
   LAUNCH_BUDGET_MS,
   PAGE_TARGET_BUDGET_MS,
   PROBE_SHELL,
   STOP_TIMEOUT_MS,
+  BudgetExhaustedError,
+  awaitWithHostExit,
   buildLaunchesEvidence,
+  clampTimeoutToBudget,
   classifyPortOwner,
   collectDescendants,
   connectDecision,
+  createHostExitSignal,
   createLaunchRecord,
+  createProbeFn,
   hostLogTail,
   launchPort,
   listenersOnPort,
   mergePids,
   pageTargetDecision,
-  parseProbeOutput,
-  probeSpawnArgs,
   recordConnectAttempt,
   recordOwnerCheck,
   recordProbe,
+  remainingBudgetMs,
   stopDecision,
 } from "./lib/native-instance.mjs";
 
@@ -54,6 +59,8 @@ const PREP = path.join(REPO, "scripts", "prepare-native-acceptance.ps1");
 const RECORDER = path.join(REPO, "scripts", "capture-window-frames.ps1");
 const WINDOW_ACTION = path.join(REPO, "scripts", "native-window-action.ps1");
 const REAL_DATA = path.join(process.env.USERPROFILE || "", ".tokenscope");
+/** 页面 target 轮询间隔；每次等待都受剩余预算与宿主退出约束（§4.8 第 4 条）。 */
+const PAGE_TARGET_POLL_MS = 200;
 
 const argv = process.argv.slice(2);
 function arg(name, def = undefined) {
@@ -151,43 +158,12 @@ function psCommand(script) {
 
 /**
  * 一次 PowerShell 调用取回进程表与监听表（§4.8 第 6 条：沿用脚本现有方式，
- * 不另建适配器脚本）。返回 `{ ok, processes, listeners, ms, error }`；
+ * 不另建适配器脚本）。等待受**本次启动剩余预算**约束：自身超时 30 秒取
+ * `min(自身超时, 剩余预算)`，预算耗尽时根本不 spawn；宿主退出信号先到时立刻终止本次探测。
+ * 返回 `{ ok, processes, listeners, ms, timeout_ms, error }`；
  * 探测失败不抛错，由调用方按“归属未知”处理，耗时进 `launches[]` 证据。
  */
-function probeProcessAndListeners() {
-  return new Promise((resolve) => {
-    const startedAt = Date.now();
-    let child;
-    try {
-      child = spawn(PROBE_SHELL, probeSpawnArgs(), { windowsHide: true });
-    } catch (e) {
-      resolve({ ok: false, error: String(e?.message ?? e), ms: Date.now() - startedAt, processes: [], listeners: [] });
-      return;
-    }
-    let out = "";
-    let err = "";
-    const timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {}
-    }, 30000);
-    child.stdout.on("data", (d) => (out += d));
-    child.stderr.on("data", (d) => (err += d));
-    child.on("error", (e) => {
-      clearTimeout(timer);
-      resolve({ ok: false, error: String(e?.message ?? e), ms: Date.now() - startedAt, processes: [], listeners: [] });
-    });
-    child.on("close", () => {
-      clearTimeout(timer);
-      const parsed = parseProbeOutput(out);
-      resolve({
-        ...parsed,
-        error: parsed.error ? `${parsed.error}${err.trim() ? `；stderr: ${err.trim().slice(0, 200)}` : ""}` : null,
-        ms: Date.now() - startedAt,
-      });
-    });
-  });
-}
+const probeProcessAndListeners = createProbeFn({ spawnFn: spawn });
 
 /**
  * 端口是否有监听者：连得上或超时都算“有”（保守），只有明确的 ECONNREFUSED 才算没有。
@@ -222,12 +198,36 @@ function isProcessAlive(pid) {
   }
 }
 
-async function fetchJsonVersion(port, timeoutMs) {
-  const res = await fetch(`http://127.0.0.1:${port}/json/version`, {
-    signal: AbortSignal.timeout(Math.max(300, Math.round(timeoutMs))),
-  });
-  if (!res.ok) throw new Error(`/json/version 返回 HTTP ${res.status}`);
-  return await res.json();
+/**
+ * `/json/version`：超时取 `min(3000, 剩余预算)`（不再被抬到 300 ms 之外），
+ * 宿主退出立即中止；被取消时主动 `abort()`，不让底层请求悬空（§4.8 第 4 条）。
+ */
+async function fetchJsonVersion(record, { deadlineMs, hostExit }) {
+  const timeoutMs = clampTimeoutToBudget({ timeoutMs: 3000, deadlineMs, minMs: 300 });
+  if (timeoutMs <= 0) {
+    throw new BudgetExhaustedError({
+      detail: `本次启动剩余预算已耗尽，不再请求 /json/version（端口 ${record.port}）`,
+    });
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await awaitWithHostExit({
+      task: async () => {
+        const res = await fetch(`http://127.0.0.1:${record.port}/json/version`, {
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error(`/json/version 返回 HTTP ${res.status}`);
+        return await res.json();
+      },
+      hostExit,
+      timeoutMs,
+      timeoutDetail: `/json/version 超过剩余预算 ${timeoutMs} ms（端口 ${record.port}）`,
+      onAbandon: () => controller.abort(),
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -246,22 +246,36 @@ function errorChain(error) {
   return parts.join(" ← ") || "未知错误";
 }
 
-/** 在剩余预算内建立 CDP 连接；超时按可重试瞬断处理（不允许超出启动预算）。 */
-async function budgetedConnect(port, timeoutMs) {
-  let timer;
-  try {
-    return await Promise.race([
-      chromium.connectOverCDP(`http://127.0.0.1:${port}`),
-      new Promise((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`connectOverCDP 超过剩余预算 ${Math.round(timeoutMs)} ms（WebSocket 未建立）`)),
-          Math.max(300, Math.round(timeoutMs)),
-        );
+/**
+ * 在剩余预算内建立 CDP 连接（§4.8 第 4 条）：超时按可重试瞬断处理，但**取消底层连接**——
+ * 竞速失败后迟到的连接交给 `close()`，既不悬空，也不会被当成新的尝试结果。
+ */
+function budgetedConnect(record, { deadlineMs, hostExit }) {
+  const timeoutMs = clampTimeoutToBudget({
+    timeoutMs: remainingBudgetMs(deadlineMs),
+    deadlineMs,
+    minMs: 300,
+  });
+  if (timeoutMs <= 0) {
+    return Promise.reject(
+      new BudgetExhaustedError({
+        detail: `本次启动剩余预算已耗尽，不再发起 CDP 连接（端口 ${record.port}）`,
       }),
-    ]);
-  } finally {
-    clearTimeout(timer);
+    );
   }
+  return awaitWithHostExit({
+    task: () => chromium.connectOverCDP(`http://127.0.0.1:${record.port}`),
+    hostExit,
+    timeoutMs,
+    timeoutDetail: `connectOverCDP 超过剩余预算 ${timeoutMs} ms（WebSocket 未建立）`,
+    onAbandon: (browser) => {
+      try {
+        Promise.resolve(browser?.close?.()).catch(() => {});
+      } catch {
+        /* 取消后的清理失败不改变本次失败结论 */
+      }
+    },
+  });
 }
 
 /** 心跳：挂起点会打印出来，避免"静默卡住"被当成通过。 */
@@ -370,6 +384,9 @@ class Instance {
     this.attached = false;
     this.snapshot = { at: 0, ms: 0, ok: false, processes: [], listeners: [], error: null };
     this.lastConnectError = null;
+    // 宿主退出信号（§4.8 第 4 条）：仅启动阶段武装；attach / 收尾阶段为 null
+    this.hostExit = null;
+    this.budgetArmed = false;
   }
   async prepareRoot() {
     fs.mkdirSync(OUT, { recursive: true });
@@ -392,11 +409,96 @@ class Instance {
     if (this.opts.extraBrowserArgs) parts.push(...this.opts.extraBrowserArgs);
     return parts.join(" ");
   }
-  /** 进程表 + 监听表快照：`maxAgeMs` 内复用，避免每次重试都重启 PowerShell。 */
-  async probe({ maxAgeMs = 1000, force = false } = {}) {
+  /**
+   * 本次启动的等待截止时刻（§4.8 第 4 条）：阶段上限与 65 秒总上限取更严者。
+   * 未武装（预检查阶段、场景收尾、attach 模式）返回 null，表示不受启动预算约束。
+   */
+  budgetDeadline(record = this.current) {
+    if (!this.budgetArmed || !record) return null;
+    const phase = Number(record.phaseDeadlineMs);
+    const total = Number(record.launchDeadlineMs);
+    if (!Number.isFinite(phase)) return Number.isFinite(total) ? total : null;
+    if (!Number.isFinite(total)) return phase;
+    return Math.min(phase, total);
+  }
+  /** 启动阶段才把宿主退出接入等待；场景收尾解除，避免正常关闭被当成启动失败。 */
+  armedHostExit() {
+    return this.budgetArmed ? this.hostExit : null;
+  }
+  /**
+   * 宿主退出码（§6.2 行 4）：优先取子进程退出码；退出信号已经判定退出但退出码不可读时
+   * 记为 `unknown`——0 与非 0 都必须立即失败，不能被当成"还没退出"继续等。
+   */
+  hostExitCodeOf(record) {
+    this.markHostExit(record);
+    if (record.hostExitCode !== null && record.hostExitCode !== undefined) return record.hostExitCode;
+    if (record.hostExitDetected) return record.hostExitDetected.code ?? "unknown";
+    return null;
+  }
+  /** 解除宿主退出监听（预检查阶段、场景收尾与 attach 模式）。 */
+  disarmHostWatch() {
+    this.budgetArmed = false;
+    try {
+      this.hostExit?.stop();
+    } catch {}
+    this.hostExit = null;
+  }
+  /**
+   * 可中断的短等待（重试间隔、页面 target 轮询）：等待时长先按本次启动剩余预算截断，
+   * 宿主退出时立刻抛出带退出码的错误，而不是等满这一轮（§4.8 第 4 条）。
+   * 竞速计时与等待目标同刻：同刻触发只说明"睡够了"，由调用方决策点判定失败。
+   */
+  async waitOrExit(record, ms) {
+    const remaining = remainingBudgetMs(this.budgetDeadline(record));
+    const wanted = Math.max(0, Math.round(Number(ms) || 0));
+    const waitMs = Number.isFinite(remaining) ? Math.max(0, Math.min(wanted, remaining)) : wanted;
+    if (waitMs <= 0) return; // 预算耗尽：不再等待，由调用方决策点判定失败
+    try {
+      await awaitWithHostExit({
+        task: () => sleep(waitMs),
+        hostExit: this.armedHostExit(),
+        timeoutMs: waitMs,
+        timeoutDetail: `等待 ${waitMs} ms 超过本次启动剩余预算`,
+      });
+    } catch (error) {
+      if (error?.abortedBy === "host-exit") throw error;
+      // 竞速超时说明预算已到底：视作等待结束，由调用方决策点判定失败
+    }
+  }
+  /** 等待被中止（宿主退出 / 预算耗尽）时的最终失败：宿主退出带退出码，预算耗尽按原失败处理。 */
+  abortFailure(record, error, { budgetMs } = {}) {
+    const decision = connectDecision({
+      error: null,
+      hostExitCode: this.hostExitCodeOf(record),
+      ownerKind: "none",
+      elapsedMs: Date.now() - record.startedAtMs,
+      budgetMs,
+    });
+    const detail = decision.action === "fail" ? decision.detail : String(error?.message ?? error);
+    record.failure = detail;
+    return new Error(detail);
+  }
+  /** 启动失败的统一收尾：写明原因、清理本次记录到的 PID，再把原错误抛给上层。 */
+  async failLaunch(record, error) {
+    record.stageMs.total = Date.now() - record.startedAtMs;
+    this.markHostExit(record);
+    const detail = String(error?.message ?? error);
+    if (!record.failure) record.failure = detail;
+    hb(`启动失败：${detail}`);
+    await this.cleanupFailedLaunch(record);
+    return error instanceof Error ? error : new Error(detail);
+  }
+  /**
+   * 进程表 + 监听表快照：`maxAgeMs` 内复用，避免每次重试都重启 PowerShell。
+   * `deadlineMs` 显式给出时用它（例如启动前的端口预检查也要压在 65 秒总上限内）。
+   */
+  async probe({ maxAgeMs = 1000, force = false, deadlineMs = null } = {}) {
     const now = Date.now();
     if (!force && this.snapshot.at && now - this.snapshot.at <= maxAgeMs) return this.snapshot;
-    const fresh = await probeProcessAndListeners();
+    const fresh = await probeProcessAndListeners({
+      deadlineMs: deadlineMs ?? this.budgetDeadline(),
+      hostExit: this.armedHostExit(),
+    });
     this.snapshot = { ...fresh, at: Date.now() };
     return this.snapshot;
   }
@@ -454,13 +556,17 @@ class Instance {
    * 宿主退出立即失败并报告退出码；预算用尽按原失败处理。
    */
   async connectCdp(record, { deadlineMs, phase = "cdp" }) {
+    // 本阶段的截止时刻写进记录：探测、等待与连接共用同一上限（§4.8 第 4 条）
+    record.phaseDeadlineMs = Number.isFinite(Number(record.launchDeadlineMs))
+      ? Math.min(deadlineMs, Number(record.launchDeadlineMs))
+      : deadlineMs;
     // 等待期间定期重新核实端口归属（§4.8 第 4 条：重试前确认宿主存活、端口归属不变）
     const ownershipRefreshMs = 8000;
     let lastOwnerCheckAt = 0;
     while (true) {
       const elapsedMs = Date.now() - record.startedAtMs;
       const budgetMs = deadlineMs - record.startedAtMs;
-      this.markHostExit(record);
+      const hostExitCode = this.hostExitCodeOf(record);
       if (record.spawnError) {
         record.failure = `进程启动失败：${record.spawnError}`;
         throw new Error(record.failure);
@@ -468,7 +574,7 @@ class Instance {
       // 决策点 1：宿主退出立即失败、预算用尽按原失败、上次错误不可重试即失败
       let decision = connectDecision({
         error: this.lastConnectError,
-        hostExitCode: record.hostExitCode,
+        hostExitCode,
         ownerKind: "none",
         elapsedMs,
         budgetMs,
@@ -494,12 +600,23 @@ class Instance {
       // 端点是否已经响应：拒绝连接说明还没有监听者，继续等（不额外重启 PowerShell）
       let version = null;
       try {
-        version = await fetchJsonVersion(record.port, Math.min(3000, deadlineMs - Date.now()));
+        version = await fetchJsonVersion(record, {
+          deadlineMs: this.budgetDeadline(record),
+          hostExit: this.armedHostExit(),
+        });
       } catch (error) {
         const message = errorChain(error);
         this.lastConnectError = message;
-        recordConnectAttempt(record, { atMs: elapsedMs, phase: "endpoint", ok: false, error: message });
-        await sleep(CONNECT_RETRY_INTERVAL_MS);
+        recordConnectAttempt(record, {
+          atMs: elapsedMs,
+          phase: "endpoint",
+          ok: false,
+          error: message,
+          aborted: error?.abortedBy ?? null,
+        });
+        // 宿主退出 / 预算耗尽：不重试，直接给出带退出码或预算的失败
+        if (error?.abortedBy) throw this.abortFailure(record, error, { budgetMs });
+        await this.waitOrExit(record, CONNECT_RETRY_INTERVAL_MS);
         continue;
       }
       // 决策点 2：连接前核实监听者必须是宿主或本次已记录的后代
@@ -508,7 +625,7 @@ class Instance {
       lastOwnerCheckAt = Date.now();
       decision = connectDecision({
         error: this.lastConnectError,
-        hostExitCode: record.hostExitCode,
+        hostExitCode: this.hostExitCodeOf(record),
         ownerKind: owner.kind,
         ownerDetail: owner.detail,
         elapsedMs: Date.now() - record.startedAtMs,
@@ -520,27 +637,43 @@ class Instance {
       }
       if (owner.kind === "none") {
         // 端点已响应但监听者还没核实成自己人：继续等，不连未核实的端点
-        await sleep(CONNECT_RETRY_INTERVAL_MS);
+        await this.waitOrExit(record, CONNECT_RETRY_INTERVAL_MS);
         continue;
       }
       const attemptStartedAt = Date.now();
       try {
-        const browser = await budgetedConnect(record.port, deadlineMs - Date.now());
+        const browser = await budgetedConnect(record, {
+          deadlineMs: this.budgetDeadline(record),
+          hostExit: this.armedHostExit(),
+        });
         this.browser = browser;
         this.ctx = browser.contexts()[0];
         this.lastConnectError = null;
         recordConnectAttempt(record, { atMs: elapsedMs, phase, ok: true, ms: Date.now() - attemptStartedAt });
         return version;
       } catch (error) {
+        const ms = Date.now() - attemptStartedAt;
+        if (error?.abortedBy) {
+          // 被取消的尝试单独留证据：底层连接已由 onAbandon 关闭，不作为新的尝试结果
+          recordConnectAttempt(record, {
+            atMs: elapsedMs,
+            phase,
+            ok: false,
+            error: errorChain(error),
+            ms,
+            aborted: error.abortedBy,
+          });
+          throw this.abortFailure(record, error, { budgetMs });
+        }
         this.lastConnectError = errorChain(error);
         recordConnectAttempt(record, {
           atMs: elapsedMs,
           phase,
           ok: false,
           error: this.lastConnectError,
-          ms: Date.now() - attemptStartedAt,
+          ms,
         });
-        await sleep(CONNECT_RETRY_INTERVAL_MS);
+        await this.waitOrExit(record, CONNECT_RETRY_INTERVAL_MS);
       }
     }
   }
@@ -594,12 +727,18 @@ class Instance {
       browserArgs,
       startedAtMs: Date.now(),
     });
+    // 启动预算（§4.8 第 4 条）：总上限 65 秒，阶段上限随后收窄；一切等待都不得超过二者
+    record.launchDeadlineMs = record.startedAtMs + LAUNCH_BUDGET_MS;
+    record.phaseDeadlineMs = record.startedAtMs + CDP_READY_BUDGET_MS;
     this.launches.push(record);
     this.current = record;
+    // 上一轮的宿主退出监听不跨启动复用
+    this.disarmHostWatch();
 
     // 启动前端口不得已有监听者：失败并记录占用进程，不自动换端口（§4.8 第 1 条）
     if (await portListening(port)) {
-      const snap = await this.probe({ force: true });
+      // 预检查发生在 spawn 之前，但探测同样压在 65 秒总上限内，不额外占用启动预算
+      const snap = await this.probe({ force: true, deadlineMs: record.launchDeadlineMs });
       const occupiers = listenersOnPort(snap.listeners, port);
       recordProbe(record, {
         atMs: 0,
@@ -633,9 +772,29 @@ class Instance {
     this.proc.on("error", (e) => {
       record.spawnError = String(e?.message ?? e);
     });
+    // 宿主退出接入全部等待（§4.8 第 4 条）：子进程 `exit` 事件与 250 ms 存活轮询取先到者，
+    // 探测、`/json/version`、`connectOverCDP`、重试间隔与页面 target 轮询都能在数百毫秒内中止。
+    this.hostExit = createHostExitSignal({
+      isAlive: () => isProcessAlive(record.hostPid),
+      readExitCode: () => {
+        this.markHostExit(record);
+        return record.hostExitCode;
+      },
+      intervalMs: HOST_EXIT_POLL_MS,
+      onExit: (info) => {
+        record.hostExitDetected = {
+          code: info.code,
+          at_ms: Math.round(info.atMs - record.startedAtMs),
+          source: info.source,
+        };
+      },
+    });
+    this.budgetArmed = true;
     this.proc.on("exit", (code) => {
       record.hostExitCode = code;
+      this.hostExit?.notify(code);
     });
+    this.hostExit.start();
     hb(
       `launch #${index} PID=${record.hostPid} port=${port}；预算 ${LAUNCH_BUDGET_MS / 1000} s（CDP ${CDP_READY_BUDGET_MS / 1000} s + 页面 ${PAGE_TARGET_BUDGET_MS / 1000} s）`,
     );
@@ -646,22 +805,19 @@ class Instance {
     try {
       version = await this.connectCdp(record, { deadlineMs: cdpDeadline, phase: "cdp" });
     } catch (error) {
-      record.stageMs.total = Date.now() - record.startedAtMs;
-      this.markHostExit(record);
-      if (!record.failure) record.failure = String(error?.message ?? error);
-      await this.cleanupFailedLaunch(record);
-      throw error;
+      throw await this.failLaunch(record, error);
     }
     record.stageMs.cdp_ready = Date.now() - record.startedAtMs;
     hb("CDP 就绪，等待应用页面 target");
 
     // WebView2 先给出 about:blank，再挂上 tauri://localhost；直接取 pages[0]
-    // 会连到空 target（实测：重启后拿到已销毁的旧 target）。
+    // 会连到已销毁的旧 target（实测：重启后拿到已销毁的旧 target）。
     const pagePhaseStartedAt = Date.now();
     const pageDeadline = Math.min(pagePhaseStartedAt + PAGE_TARGET_BUDGET_MS, totalDeadline);
+    // 页面阶段的等待同样受该阶段上限与 65 秒总上限约束（§4.8 第 4 条）
+    record.phaseDeadlineMs = pageDeadline;
     this.page = null;
     while (true) {
-      this.markHostExit(record);
       let urls = [];
       try {
         urls = this.ctx ? this.ctx.pages().map((p) => p.url()) : [];
@@ -675,18 +831,16 @@ class Instance {
         });
         try {
           await this.connectCdp(record, { deadlineMs: totalDeadline, phase: "reconnect" });
+          // 重连会改写阶段截止；页面阶段仍按自己的上限计时
+          record.phaseDeadlineMs = pageDeadline;
           continue;
         } catch (reconnectError) {
-          record.stageMs.total = Date.now() - record.startedAtMs;
-          this.markHostExit(record);
-          record.failure = String(reconnectError?.message ?? reconnectError);
-          await this.cleanupFailedLaunch(record);
-          throw reconnectError;
+          throw await this.failLaunch(record, reconnectError);
         }
       }
       record.pageTargets = urls;
       const decision = pageTargetDecision({
-        hostExitCode: record.hostExitCode,
+        hostExitCode: this.hostExitCodeOf(record),
         urls,
         elapsedMs: Date.now() - pagePhaseStartedAt,
         budgetMs: pageDeadline - pagePhaseStartedAt,
@@ -696,13 +850,14 @@ class Instance {
         if (this.page) break;
       }
       if (decision.action === "fail") {
-        record.failure = decision.detail;
-        record.stageMs.total = Date.now() - record.startedAtMs;
-        hb(`启动失败：${decision.detail}`);
-        await this.cleanupFailedLaunch(record);
-        throw new Error(decision.detail);
+        throw await this.failLaunch(record, new Error(decision.detail));
       }
-      await sleep(200);
+      try {
+        // 宿主退出时立刻抛出带退出码的错误，不等满这一轮（§4.8 第 4 条）
+        await this.waitOrExit(record, PAGE_TARGET_POLL_MS);
+      } catch (error) {
+        throw await this.failLaunch(record, error);
+      }
     }
     record.pageTargetUrl = this.page.url();
     record.stageMs.page_target = Date.now() - pagePhaseStartedAt;
@@ -805,6 +960,8 @@ class Instance {
    */
   async attachToExisting(state) {
     this.attached = true;
+    // attach 模式不认领、不结束外部实例，也不把启动预算与宿主退出监听强加到它身上
+    this.disarmHostWatch();
     const record = createLaunchRecord({
       index: 0,
       port: state.port,
@@ -843,6 +1000,8 @@ class Instance {
     const record = this.current;
     if (!record) return { action: "skipped", detail: "本次没有启动实例" };
     if (record.stop) return record.stop;
+    // 收尾阶段解除启动预算与宿主退出监听：正常关闭（宿主已退出）不能被当成启动失败
+    this.disarmHostWatch();
     try {
       await this.browser?.close();
     } catch {}

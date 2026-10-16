@@ -15,6 +15,16 @@ export const LAUNCH_BUDGET_MS = CDP_READY_BUDGET_MS + PAGE_TARGET_BUDGET_MS;
 export const CONNECT_RETRY_INTERVAL_MS = 300;
 /** 退出确认上限（计划 §4.8 第 2 条）。 */
 export const STOP_TIMEOUT_MS = 20000;
+/**
+ * 宿主退出轮询间隔（计划 §4.8 第 4 条：宿主一旦退出立即失败）。
+ * 与驱动进程里的子进程 `exit` 事件取先到者，保证数百毫秒内发现退出。
+ */
+export const HOST_EXIT_POLL_MS = 250;
+/**
+ * 进程/监听表探测自身的超时上限。实际等待取
+ * `min(PROBE_TIMEOUT_MS, 本次启动剩余预算)`——预算耗尽时不再等待（计划 §4.8 第 4 条）。
+ */
+export const PROBE_TIMEOUT_MS = 30000;
 
 /** 进程表 + 监听表探测所用 shell。沿用现有 `stop()` 用的 Windows PowerShell。 */
 export const PROBE_SHELL = "powershell.exe";
@@ -33,6 +43,80 @@ export const PROCESS_PROBE_COMMAND = [
 /** 探测进程的启动参数（测试固定住 shell 与单次调用形态）。 */
 export function probeSpawnArgs() {
   return ["-NoProfile", "-NonInteractive", "-Command", PROCESS_PROBE_COMMAND];
+}
+
+/**
+ * 本次启动的剩余预算（计划 §4.8 第 4 条：单次启动从启动进程到拿到应用页面共 65 秒，
+ * 任何等待都不得超过 `启动开始 + 65 秒`，也不得超过所选阶段的原有上限）。
+ * 调用方把「阶段上限与总上限取更严者」算好后传进来；`null`/`Infinity` 表示不受启动预算约束
+ * （例如场景收尾的退出确认），此时返回 `Infinity`。
+ */
+export function remainingBudgetMs(deadlineMs, nowMs = Date.now()) {
+  // `null` / `undefined` / 空串表示"没有启动预算约束"，不能被 Number() 折成 0（那就成了"预算已耗尽"）
+  if (deadlineMs === null || deadlineMs === undefined || deadlineMs === "") {
+    return Number.POSITIVE_INFINITY;
+  }
+  const deadline = Number(deadlineMs);
+  if (!Number.isFinite(deadline)) return Number.POSITIVE_INFINITY;
+  const now = Number(nowMs);
+  return Math.max(0, Math.round(deadline - (Number.isFinite(now) ? now : Date.now())));
+}
+
+/**
+ * 把某个等待自身的超时压到剩余预算之内：`min(max(自身超时, 下限), 剩余预算)`。
+ * 返回 0 表示预算已耗尽——调用方**不得**再开启新的等待/连接/探测，
+ * 而不是把等待抬到自己的最低值（那正是"探测仍可等 30 秒"的缺陷）。
+ */
+export function clampTimeoutToBudget({
+  timeoutMs = 0,
+  deadlineMs = null,
+  nowMs = Date.now(),
+  minMs = 0,
+} = {}) {
+  const remaining = remainingBudgetMs(deadlineMs, nowMs);
+  const own = Number(timeoutMs);
+  const floor = Math.max(0, Number(minMs) || 0);
+  const wanted = Math.max(Number.isFinite(own) && own > 0 ? own : 0, floor);
+  if (!Number.isFinite(remaining)) return Math.round(wanted);
+  if (remaining <= 0) return 0;
+  return Math.round(Math.min(wanted || remaining, remaining));
+}
+
+/**
+ * 宿主退出失败的统一文案（计划 §4.8 第 4 条 / §6.2 行 4）：0 与非 0 都立即失败并报告退出码。
+ * `connectDecision` 与 `HostExitError` 共用同一文本，避免两处措辞漂移。
+ */
+export function hostExitDetail({ code = null, atMs = null, source = null } = {}) {
+  const codeText = code === null || code === undefined ? "unknown" : code;
+  const detected =
+    atMs === null || atMs === undefined
+      ? ""
+      : `（于启动后 ${Math.round(atMs)} ms 经${source === "exit-event" ? "子进程 exit 事件" : "存活轮询"}发现）`;
+  return `宿主在启动阶段退出（退出码=${codeText}），立即失败且不再重试${detected}`;
+}
+
+/** 等待期间宿主退出：等待立即中止，错误里带退出码（§6.2 行 4）。 */
+export class HostExitError extends Error {
+  constructor(info = {}) {
+    const code = info?.code ?? null;
+    super(hostExitDetail({ code, atMs: info?.atMs ?? null, source: info?.source ?? null }));
+    this.name = "HostExitError";
+    this.kind = "host-exited";
+    this.abortedBy = "host-exit";
+    this.hostExitCode = code;
+    this.detectedAtMs = info?.atMs ?? null;
+  }
+}
+
+/** 本次启动剩余预算耗尽：不再开启新的等待/连接/探测（§6.2 行 5：总时限不延长）。 */
+export class BudgetExhaustedError extends Error {
+  constructor({ detail = "", timeoutMs = 0 } = {}) {
+    super(detail || `本次启动剩余预算耗尽（已等 ${Math.round(timeoutMs)} ms），不再开启新的等待`);
+    this.name = "BudgetExhaustedError";
+    this.kind = "budget-exhausted";
+    this.abortedBy = "budget";
+    this.timeoutMs = Math.round(timeoutMs);
+  }
 }
 
 /**
@@ -136,6 +220,266 @@ export function parseProbeOutput(text) {
 }
 
 /**
+ * 宿主退出信号（计划 §4.8 第 4 条）：驱动进程里的子进程 `exit` 事件（`notify`）
+ * 与短间隔存活轮询取先到者。resolve 出 `{ code, atMs, source }`；宿主不退出则永不 resolve。
+ *
+ * 单独用 exit 事件不够：`spawn` 的宿主若被别处结束、或事件在等待中途丢失，
+ * 等待会一直挂到自己的超时；单独用轮询也不够：至少要等一个轮询周期才发现。
+ * 两者一起才满足"数百毫秒内中止"。
+ */
+export function createHostExitSignal({
+  isAlive = () => true,
+  readExitCode = () => null,
+  intervalMs = HOST_EXIT_POLL_MS,
+  now = () => Date.now(),
+  onExit = null,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+} = {}) {
+  let resolveSignal;
+  const signal = new Promise((resolve) => {
+    resolveSignal = resolve;
+  });
+  let settled = false;
+  let timer = null;
+  let polls = 0;
+  let explicitCode;
+  const clear = () => {
+    if (timer !== null) {
+      clearTimer(timer);
+      timer = null;
+    }
+  };
+  const settle = (source, code) => {
+    if (settled) return;
+    settled = true;
+    clear();
+    const value = code === undefined || code === null ? readExitCode() : code;
+    const info = { code: value ?? null, atMs: now(), source };
+    try {
+      onExit?.(info);
+    } catch {
+      /* 记录回调失败不影响退出信号本身 */
+    }
+    resolveSignal(info);
+  };
+  const poll = () => {
+    timer = null;
+    if (settled) return;
+    polls++;
+    let alive = true;
+    try {
+      alive = isAlive() !== false;
+    } catch {
+      alive = false;
+    }
+    if (!alive) {
+      settle("poll");
+      return;
+    }
+    timer = setTimer(poll, Math.max(1, Math.round(intervalMs)));
+  };
+  return {
+    signal,
+    start() {
+      if (!settled && timer === null) timer = setTimer(poll, 0);
+      return this;
+    },
+    /** 由驱动侧的 `child.on("exit")` 调用；即使退出码为 null（信号终止）也要触发。 */
+    notify(code) {
+      if (code !== undefined && code !== null) explicitCode = code;
+      settle("exit-event", explicitCode);
+      return this;
+    },
+    stop() {
+      clear();
+      return this;
+    },
+    isSettled: () => settled,
+    exitInfo: () => (settled ? { code: explicitCode ?? null } : null),
+    get polls() {
+      return polls;
+    },
+  };
+}
+
+/**
+ * 让一个可能不可取消的等待（`connectOverCDP`、`fetch`、重试间隔）在
+ * 「目标完成」「宿主退出」「预算耗尽」之间取先到者。
+ *
+ * 取消分支抛出 `HostExitError` / `BudgetExhaustedError`；**迟到的成功结果不返回给调用方**，
+ * 而是交给 `onAbandon` 清理（例如 `browser.close()`）——这样被取消的旧连接不会被当成
+ * 新的尝试结果，底层连接也不会悬空。
+ */
+export function awaitWithHostExit({
+  task,
+  hostExit = null,
+  timeoutMs = 0,
+  timeoutDetail = "",
+  onAbandon = null,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+} = {}) {
+  const waitMs = Math.max(0, Math.round(Number(timeoutMs) || 0));
+  if (waitMs <= 0) {
+    // 预算已耗尽：不启动新的等待/连接（§6.2 行 5）
+    return Promise.reject(new BudgetExhaustedError({ timeoutMs: 0, detail: timeoutDetail }));
+  }
+  const abandon = (value) => {
+    if (typeof onAbandon !== "function") return;
+    try {
+      onAbandon(value);
+    } catch {
+      /* 清理失败不影响主流程 */
+    }
+  };
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    const finish = (action) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) {
+        clearTimer(timer);
+        timer = null;
+      }
+      action();
+    };
+    timer = setTimer(
+      () => finish(() => reject(new BudgetExhaustedError({ timeoutMs: waitMs, detail: timeoutDetail }))),
+      waitMs,
+    );
+    const observed = Promise.resolve()
+      .then(task)
+      .then(
+        (value) => ({ ok: true, value }),
+        (error) => ({ ok: false, error }),
+      );
+    if (hostExit?.signal) {
+      hostExit.signal.then(
+        (info) => finish(() => reject(new HostExitError(info))),
+        () => {},
+      );
+    }
+    observed.then((result) => {
+      if (settled) {
+        // 已经被取消：迟到的成功结果交给清理逻辑，不回传
+        if (result.ok) abandon(result.value);
+        return;
+      }
+      finish(() => (result.ok ? resolve(result.value) : reject(result.error)));
+    });
+  });
+}
+
+/**
+ * 一次进程/监听表探测（沿用一次 PowerShell 调用，§4.8 第 6 条）：
+ *   - 自身超时取 `min(PROBE_TIMEOUT_MS, 本次启动剩余预算)`；预算耗尽时**不 spawn**；
+ *   - 宿主退出信号先到时立刻结束本次探测并终止 PowerShell（由调用方的决策点抛出带退出码的错误）。
+ * 返回 `{ ok, processes, listeners, ms, timeout_ms, error, hostExited? }`；探测失败不抛错。
+ */
+export function createProbeFn({
+  spawnFn,
+  shell = PROBE_SHELL,
+  spawnArgs = probeSpawnArgs,
+  ownTimeoutMs = PROBE_TIMEOUT_MS,
+  now = () => Date.now(),
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+} = {}) {
+  if (typeof spawnFn !== "function") throw new Error("createProbeFn 需要注入 spawn 实现");
+  return function probe({ deadlineMs = null, hostExit = null } = {}) {
+    return new Promise((resolve) => {
+      const startedAt = now();
+      const timeoutMs = clampTimeoutToBudget({ timeoutMs: ownTimeoutMs, deadlineMs, nowMs: startedAt });
+      if (timeoutMs <= 0) {
+        resolve({
+          ok: false,
+          error: `本次启动剩余预算已耗尽，不开启新的探测（自身超时 ${ownTimeoutMs} ms 被截断）`,
+          processes: [],
+          listeners: [],
+          timeout_ms: 0,
+          ms: 0,
+        });
+        return;
+      }
+      let child;
+      try {
+        child = spawnFn(shell, spawnArgs(), { windowsHide: true });
+      } catch (e) {
+        resolve({
+          ok: false,
+          error: `探测进程启动失败：${String(e?.message ?? e)}`,
+          processes: [],
+          listeners: [],
+          timeout_ms: timeoutMs,
+          ms: now() - startedAt,
+        });
+        return;
+      }
+      let out = "";
+      let err = "";
+      let done = false;
+      let timer = null;
+      const finish = (result) => {
+        if (done) return;
+        done = true;
+        if (timer !== null) clearTimer(timer);
+        resolve({ ...result, timeout_ms: timeoutMs, ms: now() - startedAt });
+      };
+      timer = setTimer(() => {
+        try {
+          child.kill();
+        } catch {}
+        finish({
+          ok: false,
+          error: `探测自身超过 ${timeoutMs} ms（已按本次启动剩余预算截断），已终止本次探测`,
+          processes: [],
+          listeners: [],
+        });
+      }, timeoutMs);
+      if (child.stdout && child.stderr) {
+        child.stdout.on("data", (d) => (out += d));
+        child.stderr.on("data", (d) => (err += d));
+      }
+      child.on("error", (e) =>
+        finish({
+          ok: false,
+          error: `探测进程错误：${String(e?.message ?? e)}`,
+          processes: [],
+          listeners: [],
+        }),
+      );
+      child.on("close", () => {
+        const parsed = parseProbeOutput(out);
+        finish({
+          ...parsed,
+          error: parsed.error ? `${parsed.error}${err.trim() ? `；stderr: ${err.trim().slice(0, 200)}` : ""}` : null,
+        });
+      });
+      if (hostExit?.signal) {
+        hostExit.signal.then(
+          (info) => {
+            try {
+              child.kill();
+            } catch {}
+            finish({
+              ok: false,
+              hostExited: true,
+              hostExitCode: info?.code ?? null,
+              error: `宿主已退出（退出码=${info?.code ?? "unknown"}），探测中止`,
+              processes: [],
+              listeners: [],
+            });
+          },
+          () => {},
+        );
+      }
+    });
+  };
+}
+
+/**
  * 递归记录宿主后代（按父 PID），用于端口归属判定与关闭确认（计划 §4.8 第 2、3 条）。
  * 返回不含宿主自身的 PID 列表。
  */
@@ -234,7 +578,7 @@ export function connectDecision({
     return {
       action: "fail",
       kind: "host-exited",
-      detail: `宿主在启动阶段退出（退出码=${hostExitCode}），立即失败且不再重试`,
+      detail: hostExitDetail({ code: hostExitCode }),
       retryAfterMs: 0,
     };
   }
@@ -377,6 +721,10 @@ export function createLaunchRecord({
     browserArgs,
     startedAtMs,
     startedAt: new Date(startedAtMs).toISOString(),
+    // 启动预算（§4.8 第 4 条）：总上限与当前阶段上限取更严者作为一切等待的截止时刻
+    launchDeadlineMs: null,
+    phaseDeadlineMs: null,
+    hostExitDetected: null,
     attached: false,
     hostPid: null,
     hostExitCode: null,
@@ -412,7 +760,7 @@ export function recordProbe(
 /** 记录一次连接尝试（时间与错误），重试成功时两次都要留在证据里。 */
 export function recordConnectAttempt(
   record,
-  { atMs = 0, phase = "cdp", ok = true, error = null, ms = 0 } = {},
+  { atMs = 0, phase = "cdp", ok = true, error = null, ms = 0, aborted = null } = {},
 ) {
   if (!record) return record;
   record.attempts.push({
@@ -421,6 +769,8 @@ export function recordConnectAttempt(
     ok: !!ok,
     error: error ?? null,
     ms: Math.round(ms),
+    // 被宿主退出/预算取消的尝试单独标注，便于从证据里区分"自己超时"与"被中止"
+    aborted: aborted ?? null,
   });
   return record;
 }
@@ -455,6 +805,11 @@ export function buildLaunchesEvidence(records) {
     attached: record.attached === true,
     host_pid: record.hostPid,
     host_exit_code: record.hostExitCode,
+    host_exit_detected: record.hostExitDetected ? { ...record.hostExitDetected } : null,
+    budget_ms:
+      Number.isFinite(Number(record.launchDeadlineMs)) && Number.isFinite(Number(record.startedAtMs))
+        ? Math.round(Number(record.launchDeadlineMs) - Number(record.startedAtMs))
+        : null,
     descendant_pids: [...record.descendantPids],
     port_owner_pids: [...record.portOwnerPids],
     browser_args: record.browserArgs,

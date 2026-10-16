@@ -20,6 +20,32 @@ function Expect-Failure([scriptblock]$Action, [string]$Message) {
     Check $failed $Message
 }
 
+function New-HistoryDb {
+    # 按期望清单造最小历史库：只用于契约测试，结构版本与事实都与真库同口径。
+    param([string]$Path,[string]$Manifest)
+    $script = Join-Path $contractRoot "make-history.py"
+    [IO.File]::WriteAllText($script, @'
+import json, sqlite3, sys
+manifest, target = sys.argv[1], sys.argv[2]
+events = json.load(open(manifest, encoding="utf-8"))["events"]
+con = sqlite3.connect(target)
+con.execute("PRAGMA user_version=4")
+con.execute("CREATE TABLE usage_events(app TEXT, session_id TEXT, record_id TEXT, model_raw TEXT, "
+            "project_key TEXT, session_initial_cwd TEXT, event_cwd TEXT, input_tokens TEXT, "
+            "output_tokens TEXT, cache_write_tokens TEXT, cache_read_tokens TEXT)")
+for e in events:
+    con.execute("INSERT INTO usage_events VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (e["app"], e["session_id"], e["record_id"], e["model_raw"], e["project_key"],
+                 e["session_initial_cwd"], e["event_cwd"], str(e["input_tokens"]),
+                 str(e["output_tokens"]), str(e["cache_write_tokens"]), str(e["cache_read_tokens"])))
+con.commit()
+con.close()
+print("ok")
+'@, [Text.UTF8Encoding]::new($false))
+    & python -B $script $Manifest $Path | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "造历史库失败" }
+}
+
 $contractRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("tokenscope-upgrade-contracts-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $contractRoot | Out-Null
 # 真实实现先留底：后面替换外部动作时要能回到它们（避免递归替换自己）。
@@ -108,28 +134,84 @@ sys.exit(37 if "--fail" in sys.argv else 0)
         -ExpectedCommit ("a"*40) -SourceState "present" -Origin "9.9.9" `
         -EvidenceRoot $contractRoot -Metadata $null } "未登记的起点被拒绝"
 
-    # I4 备份规则：真实函数 + 注入的结构版本读数。
+    # 真实 Case 构造 + 真实旧事实核对：history 起点必须能从登记表拿到旧期望清单。
+    Check ($historyCase.ExpectedOldManifest -eq $legacyCase.ExpectedOldManifest) "history 起点的旧期望清单来自登记表"
+    Check ($historyCase.BackupsBefore.Count -eq 0) "作业上下文自带升级前备份清单"
+    $historyData = Join-Path $contractRoot "history-case/.tokenscope"
+    New-Item -ItemType Directory -Path $historyData -Force | Out-Null
+    New-HistoryDb -Path (Join-Path $historyData "history.db") -Manifest $historyCase.ExpectedOldManifest
+    $historyCase.DataDir = $historyData
+    Check ((Get-HistorySchemaVersion -RepoRoot $repoRoot -Database (Join-Path $historyData "history.db")) -eq 4) "旧历史库结构版本读数"
+    Check-OldUsage -Case $historyCase
+    Check ((Get-Content -LiteralPath (Join-Path $historyCase.EvidenceRoot "old-facts.json") -Raw -Encoding utf8 |
+        ConvertFrom-Json).ok) "真实 Case 与真实旧事实核对通过"
+
+    # 备份规则按本跳实际的旧库状态判定，与起点夹具类型无关：0.1.0 起点的链路里
+    # 也会出现历史库，Profile=legacy-cache 时同样必须核对（按 profile 判断会跳过）。
+    $backupData = Join-Path $contractRoot "backup-case/.tokenscope"
+    New-Item -ItemType Directory -Path $backupData -Force | Out-Null
+    New-HistoryDb -Path (Join-Path $backupData "history.db") -Manifest $historyCase.ExpectedOldManifest
+    "privacy_policy_accepted = true`nprice_auto_sync = false`nclose_action = ""quit""`n" |
+        Set-Content -LiteralPath (Join-Path $backupData "settings.toml") -Encoding utf8NoBOM
+    "[[model]]`nprefix = ""x""`n" | Set-Content -LiteralPath (Join-Path $backupData "pricing.toml") -Encoding utf8NoBOM
+    "旧缓存字节" | Set-Content -LiteralPath (Join-Path $backupData "cache.db") -Encoding utf8NoBOM
+    $guardCase = New-UpgradeCase -RepoRoot $repoRoot -InstallerPath (Join-Path $contractRoot "current-setup.exe") `
+        -AppVersion "0.3.3" -ExpectedCommit ("a"*40) -SourceState "present" -Origin "0.1.0" `
+        -EvidenceRoot (Join-Path $contractRoot "backup-guard") `
+        -Metadata ([pscustomobject]@{ executable_sha256=("b"*64); persistent_format=([pscustomobject]@{ settings_format="1" }) }) `
+        -DataDir $backupData -TempRoot $tempRoot
+    New-Item -ItemType Directory -Path $guardCase.EvidenceRoot -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $backupData "settings.toml") -Destination (Join-Path $guardCase.EvidenceRoot "old-settings.toml")
+    $guardCase.OldSettingsPath = Join-Path $guardCase.EvidenceRoot "old-settings.toml"
+    $guardCase.CacheHash = (Get-FileHash -LiteralPath (Join-Path $backupData "cache.db") -Algorithm SHA256).Hash.ToLowerInvariant()
+    $guardCase.PricingHash = (Get-FileHash -LiteralPath (Join-Path $backupData "pricing.toml") -Algorithm SHA256).Hash.ToLowerInvariant()
+    $guardCase.OldHistorySchema = 4
+    $guardCase.BackupsBefore = @()
+    "非法备份" | Set-Content -LiteralPath (Join-Path $backupData "history.db.backup-v4") -Encoding utf8NoBOM
+    Expect-Failure { Check-CurrentUsage -Case $guardCase } "legacy 起点的链路里也会核对历史备份"
+    Remove-Item -LiteralPath (Join-Path $backupData "history.db.backup-v4")
+    Check-CurrentUsage -Case $guardCase
+    Check (Test-Path -LiteralPath (Join-Path $guardCase.EvidenceRoot "history-backup.json")) "备份判定写出证据"
+
+    # I4 备份清单：结构升级不得覆盖已有备份，结构未变不得改动备份。
     $script:CurrentSchema = 4
     function Get-HistorySchemaVersion { param($RepoRoot,$Database) return $script:CurrentSchema }
     function Invoke-UpgradePython { param([string[]]$Arguments,[string]$EvidencePath="")
         $script:Trace.Add("python:"+$Arguments[0])
         return [pscustomobject]@{ ok=$true } }
     $backupCase = [pscustomobject]@{ RepoRoot=$repoRoot; DataDir=$dataRoot; EvidenceRoot=$contractRoot
-        OldHistorySchema=4; ExpectedOldManifest=(Join-Path $repoRoot "scripts/fixtures/upgrade-0.1.0/expected.json") }
+        OldHistorySchema=4; ExpectedOldManifest=(Join-Path $repoRoot "scripts/fixtures/upgrade-0.1.0/expected.json")
+        BackupsBefore=@() }
     $result = Assert-HistoryBackup -Case $backupCase -Expect "absent"
     Check ($result.applicable -and $result.expect -eq "absent") "结构未变时备份规则适用且要求不存在"
-    "old" | Set-Content -LiteralPath (Join-Path $dataRoot "history.db.backup-v4") -Encoding utf8NoBOM
-    Expect-Failure { Assert-HistoryBackup -Case $backupCase -Expect "absent" } "结构未升级却出现备份被拒绝"
+    "keep" | Set-Content -LiteralPath (Join-Path $dataRoot "history.db.backup-v3") -Encoding utf8NoBOM
+    $backupCase.BackupsBefore = @(Get-HistoryBackups -DataDir $dataRoot)
+    Check ((Assert-HistoryBackup -Case $backupCase -Expect "absent").expect -eq "absent") "结构未变时此前跳留下的备份允许保留"
+    "new" | Set-Content -LiteralPath (Join-Path $dataRoot "history.db.backup-v4") -Encoding utf8NoBOM
+    Expect-Failure { Assert-HistoryBackup -Case $backupCase -Expect "absent" } "结构未升级却新增备份被拒绝"
+    $backupCase.BackupsBefore = @(Get-HistoryBackups -DataDir $dataRoot)
     $script:CurrentSchema = 5
+    Expect-Failure { Assert-HistoryBackup -Case $backupCase } "结构升级不得覆盖这一跳之前已有的备份"
+    Remove-Item -LiteralPath (Join-Path $dataRoot "history.db.backup-v4")
+    $backupCase.BackupsBefore = @(Get-HistoryBackups -DataDir $dataRoot)
+    "备份由这一跳留下" | Set-Content -LiteralPath (Join-Path $dataRoot "history.db.backup-v4") -Encoding utf8NoBOM
     $result = Assert-HistoryBackup -Case $backupCase
     Check ($result.expect -eq "created") "结构升级时自动要求备份"
     Check ($result.exists -and $backupCase.BackupName -eq "history.db.backup-v4") "结构升级的备份被登记为证据"
     Remove-Item -LiteralPath (Join-Path $dataRoot "history.db.backup-v4")
     Expect-Failure { Assert-HistoryBackup -Case $backupCase } "结构升级却没有备份被拒绝"
     $script:CurrentSchema = 4
+    $backupCase.BackupsBefore = @(Get-HistoryBackups -DataDir $dataRoot)
+    "tampered" | Set-Content -LiteralPath (Join-Path $dataRoot "history.db.backup-v3") -Encoding utf8NoBOM
+    Expect-Failure { Assert-HistoryBackup -Case $backupCase } "结构未变不得改写此前跳留下的备份"
+    Remove-Item -LiteralPath (Join-Path $dataRoot "history.db.backup-v3")
+    $backupCase.BackupsBefore = @()
     $noHistory = [pscustomobject]@{ RepoRoot=$repoRoot; DataDir=$dataRoot; EvidenceRoot=$contractRoot
-        OldHistorySchema=$null; ExpectedOldManifest="unused" }
+        OldHistorySchema=$null; ExpectedOldManifest="unused"; BackupsBefore=@() }
     Check (-not (Assert-HistoryBackup -Case $noHistory).applicable) "没有旧历史库时备份规则不适用"
+    "非法备份" | Set-Content -LiteralPath (Join-Path $dataRoot "history.db.backup-v4") -Encoding utf8NoBOM
+    Expect-Failure { Assert-HistoryBackup -Case $noHistory } "本跳之前没有历史库却出现备份被拒绝"
+    Remove-Item -LiteralPath (Join-Path $dataRoot "history.db.backup-v4")
 
     # 编排顺序：真实 Invoke-UpgradeScenario/Invoke-UpgradeChain，只替换外部动作。
     function Invoke-UpgradePython { param([string[]]$Arguments,[string]$EvidencePath="")
@@ -146,7 +228,13 @@ sys.exit(37 if "--fail" in sys.argv else 0)
     function Prepare-OldUsage { param($Case) $script:Trace.Add("prepare-old") }
     function Invoke-UpgradeLifecycle { param($Case,$Phase,$Verify)
         $script:Trace.Add("lifecycle:"+$Phase)
-        if ($script:FailAt -eq ("lifecycle:"+$Phase)) { throw "injected lifecycle $Phase" } }
+        if ($script:FailAt -eq ("lifecycle:"+$Phase)) { throw "injected lifecycle $Phase" }
+        # 与真实实现一致：核对回调会被调用（这样"链路里到底有没有进核对路径"
+        # 能在契约里看出来，而不是靠实现自证）。
+        if ($null -ne $Verify) { & $Verify $Case $null | Out-Null } }
+    function Check-OldUsage { param($Case,$Context=$null) $script:Trace.Add("old-facts:"+$Case.JumpOrigin) }
+    function Check-CurrentUsage { param($Case,$Context=$null)
+        $script:Trace.Add("check-current:"+$Case.JumpOrigin+":"+$Case.OldHistorySchema) }
     function Save-OldUpgradeState { param($Case) $script:Trace.Add("save-old") }
     function Install-UpgradeCurrent { param($Case) $script:Trace.Add("install-current") }
     function Assert-PreservedBeforeLaunch { param($Case) $script:Trace.Add("preserved") }
@@ -173,9 +261,10 @@ sys.exit(37 if "--fail" in sys.argv else 0)
             -DataDir $dataRoot -TempRoot $tempRoot
         $script:Trace.Clear(); $script:FailAt = ""
         Invoke-UpgradeScenario -Case $case
-        $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:old,save-old,"
+        $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:old,old-facts:0.1.0,save-old,"
         if ($state -eq "deleted") { $expected += "delete-source," }
-        $expected += "install-current,preserved,consent,jump:0.3.3,lifecycle:current,lifecycle:restart,jump:current:True,case:True"
+        $expected += "install-current,preserved,consent,jump:0.3.3,lifecycle:current,"
+        $expected += "check-current:0.3.3:,lifecycle:restart,check-current:0.3.3:,jump:current:True,case:True"
         Check (($script:Trace -join ",") -eq $expected) "$state：旧版先产数据，再直接覆盖升级并重启复核"
     }
     foreach ($failure in @("install-baseline","lifecycle:old","lifecycle:current","lifecycle:restart")) {
@@ -198,12 +287,12 @@ sys.exit(37 if "--fail" in sys.argv else 0)
             -DataDir $dataRoot -TempRoot $tempRoot
         $script:Trace.Clear(); $script:FailAt = ""
         Invoke-UpgradeChain -Case $case
-        $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:chain-00-old,save-old,jump:chain-00-old:True,"
+        $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:chain-00-old,old-facts:0.1.0,save-old,jump:chain-00-old:True,"
         if ($state -eq "deleted") { $expected += "delete-source," }
         $expected += "jump:0.3.2,download:0.3.2,install:0.3.2,consent,"
-        $expected += "lifecycle:chain-01,jump:chain-01:True,"
-        $expected += "jump:0.3.3,install:0.3.3,installed,consent,lifecycle:chain-02,jump:chain-02:True,"
-        $expected += "lifecycle:restart,jump:restart:True,case:True"
+        $expected += "lifecycle:chain-01,check-current:0.3.2:4,jump:chain-01:True,"
+        $expected += "jump:0.3.3,install:0.3.3,installed,consent,lifecycle:chain-02,check-current:0.3.3:4,"
+        $expected += "jump:chain-02:True,lifecycle:restart,check-current:0.3.3:4,jump:restart:True,case:True"
         Check (($script:Trace -join ",") -eq $expected) "$state：链路逐跳覆盖安装并只播种一次"
         Check ((@($case.Chain) -join "->") -eq "0.1.0->0.3.2->0.3.3") "链路记录起点集合与当前版本"
         Check ((@($script:Trace | Where-Object { $_ -like "prepare-old*" }).Count) -eq 1) "$state：链路只播种一次来源日志"

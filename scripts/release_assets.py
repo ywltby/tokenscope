@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -369,6 +370,30 @@ class Github:
                  "-F", "draft=false", "-F", "prerelease=true", "-f", "make_latest=false")
 
 
+def latest_main_registry(github, path="scripts/fixtures/upgrade_baselines.json"):
+    """发布前读**最新 main 固定 SHA** 下的登记表：撤回发生在工作流检出之后也要拦住。
+
+    工作流检出的是发布提交，工作区里的登记表可能已经落后于 main；只有按 main
+    的当前提交读取并校验，撤回保护才成立。读取失败一律阻断发布。
+    """
+    ref = json.loads(github.run("api", f"{github.api}/git/ref/heads/main"))
+    sha = ((ref or {}).get("object") or {}).get("sha")
+    if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+        raise ValueError("最新 main 的提交身份非法，拒绝发布")
+    payload = json.loads(github.run("api", f"{github.api}/contents/{path}?ref={sha}"))
+    if (not isinstance(payload, dict) or payload.get("encoding") != "base64"
+            or not isinstance(payload.get("content"), str) or not payload["content"].strip()):
+        raise ValueError("最新 main 的登记表读取失败：内容缺失，拒绝发布")
+    try:
+        # GitHub 的 contents 响应按行折行，解码前先去掉所有空白。
+        content = "".join(payload["content"].split())
+        text = base64.b64decode(content, validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError(f"最新 main 的登记表不是合法 UTF-8/Base64：{exc}") from exc
+    from upgrade_baselines import parse_registry
+    return parse_registry(text, source=f"main@{sha}:{path}")
+
+
 def assert_publishable(registry, version):
     """撤回的版本不再进入发布：本次将创建的任一版本都会被拒绝。"""
     refused = [entry["version"] for entry in registry["entries"]
@@ -383,7 +408,8 @@ def publish(directory, commit, version):
     provenance = directory / "provenance.sigstore.json"
     if not provenance.is_file() or not provenance.stat().st_size:
         raise ValueError("当前资产缺少 Sigstore 来源证明")
-    registry = load_registry()
+    github = Github(os.environ["GITHUB_REPOSITORY"])
+    registry = latest_main_registry(github)
     assert_publishable(registry, version)
     legacy = published_entry(registry, LEGACY_VERSION)
     _, historical = historical_versions(ROOT, legacy["commit"])

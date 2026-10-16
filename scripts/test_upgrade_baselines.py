@@ -226,14 +226,43 @@ class CheckCase(RegistryCase):
                 baselines.check_registry("origin/main", path=path, api=self.api_for_registry(registry))
         self.assertIn("add --tag v0.3.2", str(caught.exception))
 
-    def test_withdrawn_base_version_blocks_the_batch(self):
-        registry = self.with_entry("0.3.2", status="withdrawn",
-                                   withdrawn={"date": "2026-10-20", "reason": "崩溃"})
-        path = self.write(registry)
-        with patch.object(baselines, "base_version", return_value="0.3.2"):
-            with self.assertRaises(ValueError):
-                baselines.check_registry("origin/main", path=path,
-                                         api=self.api_for_registry(registry))
+    def test_non_published_base_version_is_reported_but_still_mergeable(self):
+        for status in ("unpublished", "withdrawn"):
+            with self.subTest(status=status):
+                registry = copy.deepcopy(self.registry)
+                entry = next(e for e in registry["entries"] if e["version"] == "0.3.2")
+                entry["status"] = status
+                if status == "withdrawn":
+                    entry["withdrawn"] = {"date": "2026-10-20", "reason": "崩溃"}
+                else:
+                    entry["assets"] = []
+                    entry["persistent_format"] = None
+                path = self.write(registry)
+                with patch.object(baselines, "base_version", return_value="0.3.2"), \
+                        patch.object(baselines, "download",
+                                     return_value=(self.metadata_file, "0" * 64)):
+                    self.metadata_file.write_text(json.dumps({"schema_version": 1}),
+                                                  encoding="utf-8")
+                    result = baselines.check_registry("origin/main", path=path,
+                                                      api=self.api_for_registry(registry))
+                self.assertEqual(result["base_version"], "0.3.2")
+                self.assertTrue(any("0.3.2" in warning for warning in result["warnings"]))
+                self.assertNotIn("0.3.2", result["checked"])
+
+    def test_unpublished_entry_keeps_expectations_without_installer(self):
+        registry = copy.deepcopy(self.registry)
+        registry["entries"].append({"version": "0.3.3", "tag": "v0.3.3", "commit": SHA,
+                                    "origin_release": "v0.3.3", "profile": "history",
+                                    "status": "unpublished", "persistent_format": None,
+                                    "assets": []})
+        payload = baselines.entries_payload(baselines.load_registry(self.write(registry)))
+        entry = payload["entries"][-1]
+        self.assertEqual(entry["version"], "0.3.3")
+        self.assertEqual(entry["status"], "unpublished")
+        self.assertIsNone(entry["installer_name"])
+        self.assertIsNone(entry["installer_sha256"])
+        self.assertIsNone(entry["persistent_format"])
+        self.assertTrue(entry["expected_old"].endswith("expected.json"))
 
     def test_deleted_release_or_moved_tag_fails_with_withdrawn_hint(self):
         for kwargs in ({"drop": ("0.3.1",)}, {"commit_ok": False}):

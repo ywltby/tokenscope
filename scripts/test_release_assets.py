@@ -1,5 +1,6 @@
 """对真实临时资产和受控 GitHub API 验证不可变发布，永不写远端。"""
 
+import base64
 import hashlib
 import json
 import os
@@ -15,12 +16,81 @@ FINGERPRINT = {"cache_schema": "11", "history_schema": "4", "parser_revision": "
                "identity_revision": "1", "pricing_index": "9", "settings_format": "1"}
 
 
-def legacy_registry(status="published"):
+def legacy_entry(status="published"):
+    name = f"TokenScope_pre-{SHA}_windows-x64-setup.exe"
+    prefix = f"https://github.com/ywltby/tokenscope/releases/download/pre-{SHA}/"
     entry = {"version": "0.1.0", "tag": "v0.1.0", "commit": SHA, "origin_release": "pre-" + SHA,
-             "profile": "legacy-cache", "status": status}
+             "profile": "legacy-cache", "status": status,
+             "persistent_format": {**FINGERPRINT, "cache_schema": "6"},
+             "assets": [{"name": name, "url": prefix + name, "sha256": "0" * 64},
+                        {"name": "SHA256SUMS.txt", "url": prefix + "SHA256SUMS.txt",
+                         "sha256": "0" * 64},
+                        {"name": "provenance.sigstore.json",
+                         "url": prefix + "provenance.sigstore.json", "sha256": "0" * 64}]}
     if status == "withdrawn":
         entry["withdrawn"] = {"date": "2026-10-20", "reason": "崩溃"}
-    return {"schema_version": 2, "repository": "ywltby/tokenscope", "entries": [entry]}
+    return entry
+
+
+def history_entry(version="0.2.0", status="published"):
+    prefix = f"https://github.com/ywltby/tokenscope/releases/download/v{version}/"
+    names = [f"TokenScope_v{version}_windows-x64-setup.exe", "SHA256SUMS.txt",
+             "provenance.sigstore.json"]
+    entry = {"version": version, "tag": "v" + version, "commit": SHA,
+             "origin_release": "v" + version, "profile": "history", "status": status,
+             "persistent_format": dict(FINGERPRINT),
+             "assets": [{"name": name, "url": prefix + name, "sha256": "1" * 64}
+                        for name in names]}
+    if status == "withdrawn":
+        entry["withdrawn"] = {"date": "2026-10-20", "reason": "崩溃"}
+    return entry
+
+
+def registry_payload(entries):
+    return {"schema_version": 2, "repository": "ywltby/tokenscope", "entries": entries}
+
+
+class FakeMainGithub:
+    """只回答“读最新 main 登记表”需要的两个请求，其余调用一律记录为写操作。"""
+
+    def __init__(self, registry, failure=None):
+        self.api = "repos/ywltby/tokenscope"
+        self.registry = registry
+        self.failure = failure
+        self.operations = []
+
+    def run(self, *args, optional=False):
+        joined = " ".join(str(arg) for arg in args)
+        if self.failure is not None:
+            raise RuntimeError(self.failure)
+        if "/git/ref/heads/main" in joined:
+            return json.dumps({"object": {"sha": SHA}})
+        if "/contents/scripts/fixtures/upgrade_baselines.json" in joined:
+            text = json.dumps(self.registry, ensure_ascii=False)
+            return json.dumps({"encoding": "base64",
+                               "content": base64.b64encode(text.encode("utf-8")).decode("ascii")})
+        self.operations.append(joined)
+        return json.dumps({})
+
+    def get_tag(self, tag):
+        self.operations.append("get_tag")
+        return SHA
+
+    def get_release(self, tag):
+        self.operations.append("get_release")
+        return None
+
+    def create_tag(self, tag, sha):
+        self.operations.append("create_tag")
+
+    def create_draft(self, tag, sha, notes):
+        self.operations.append("create_draft")
+
+    def upload(self, tag, paths):
+        self.operations.append("upload")
+
+    def publish(self, tag):
+        self.operations.append("publish")
 
 
 class FakeGithub:
@@ -257,26 +327,70 @@ class ReleaseAssetCase(unittest.TestCase):
         self.assertEqual(assets.installer_of(baseline)["sha256"],
                          "798e7722120b414d2014cc80e987c831914f11d211abd8b5595f95184b62ece6")
 
-    def test_publish_refuses_withdrawn_version_before_any_github_call(self):
+    def test_publish_refuses_version_withdrawn_on_latest_main(self):
         (self.directory / "provenance.sigstore.json").write_bytes(b"attestation bundle")
-        registry = {"schema_version": 2, "repository": "ywltby/tokenscope", "entries": [
-            {"version": "0.1.0", "tag": "v0.1.0", "commit": SHA, "origin_release": "v0.1.0",
-             "profile": "legacy-cache", "status": "withdrawn",
-             "withdrawn": {"date": "2026-10-20", "reason": "崩溃"},
-             "assets": [{"name": "TokenScope_v0.1.0_windows-x64-setup.exe",
-                         "url": "https://github.com/ywltby/tokenscope/releases/download/v0.1.0/"
-                                "TokenScope_v0.1.0_windows-x64-setup.exe", "sha256": "0" * 64}]},
-            {"version": "0.2.0", "tag": "v0.2.0", "commit": SHA, "origin_release": "v0.2.0",
-             "profile": "history", "status": "withdrawn",
-             "withdrawn": {"date": "2026-10-20", "reason": "崩溃"},
-             "assets": []}]}
+        local = registry_payload([legacy_entry(), history_entry()])
+        main = registry_payload([legacy_entry(), history_entry(status="withdrawn")])
+        fake = FakeMainGithub(main)
         with patch.object(assets, "verify_current", return_value={"executable_sha256": "b" * 64}), \
-                patch.object(assets, "load_registry", return_value=registry), \
-                patch.object(assets, "Github") as github, \
+                patch.object(assets, "load_registry", return_value=local), \
+                patch.object(assets, "Github", return_value=fake), \
+                patch.dict(os.environ, {"GITHUB_REPOSITORY": "ywltby/tokenscope"}):
+            with self.assertRaises(ValueError) as caught:
+                assets.publish(self.directory, SHA, "0.2.0")
+        self.assertIn("withdrawn", str(caught.exception))
+        self.assertEqual(fake.operations, [])
+
+    def test_publish_refuses_when_baseline_is_withdrawn_on_latest_main(self):
+        (self.directory / "provenance.sigstore.json").write_bytes(b"attestation bundle")
+        local = registry_payload([legacy_entry(), history_entry()])
+        main = registry_payload([legacy_entry(status="withdrawn"), history_entry()])
+        fake = FakeMainGithub(main)
+        with patch.object(assets, "verify_current", return_value={"executable_sha256": "b" * 64}), \
+                patch.object(assets, "load_registry", return_value=local), \
+                patch.object(assets, "Github", return_value=fake), \
                 patch.dict(os.environ, {"GITHUB_REPOSITORY": "ywltby/tokenscope"}):
             with self.assertRaises(ValueError):
                 assets.publish(self.directory, SHA, "0.2.0")
-        github.assert_not_called()
+        self.assertEqual(fake.operations, [])
+
+    def test_publish_stops_when_latest_main_registry_cannot_be_read(self):
+        (self.directory / "provenance.sigstore.json").write_bytes(b"attestation bundle")
+        for failure in ("GitHub 操作失败：HTTP 500", "最新 main 的登记表读取失败：内容缺失"):
+            with self.subTest(failure=failure):
+                fake = FakeMainGithub(None, failure=failure)
+                with patch.object(assets, "verify_current",
+                                  return_value={"executable_sha256": "b" * 64}), \
+                        patch.object(assets, "Github", return_value=fake), \
+                        patch.dict(os.environ, {"GITHUB_REPOSITORY": "ywltby/tokenscope"}):
+                    with self.assertRaises((ValueError, RuntimeError)):
+                        assets.publish(self.directory, SHA, "0.2.0")
+                self.assertEqual(fake.operations, [])
+
+    def test_latest_main_registry_accepts_folded_base64_and_rejects_broken_content(self):
+        class Fake(FakeMainGithub):
+            def __init__(self, payload):
+                super().__init__(None)
+                self.payload = payload
+
+            def run(self, *args, optional=False):
+                joined = " ".join(str(arg) for arg in args)
+                if "/git/ref/heads/main" in joined:
+                    return json.dumps({"object": {"sha": SHA}})
+                return json.dumps(self.payload)
+
+        registry = registry_payload([legacy_entry(), history_entry()])
+        encoded = base64.b64encode(json.dumps(registry, ensure_ascii=False).encode("utf-8")).decode("ascii")
+        folded = "\n".join(encoded[i:i + 60] for i in range(0, len(encoded), 60)) + "\n"
+        parsed = assets.latest_main_registry(Fake({"encoding": "base64", "content": folded}))
+        self.assertEqual(parsed["schema_version"], 2)
+        self.assertEqual([e["version"] for e in parsed["entries"]], ["0.1.0", "0.2.0"])
+        for payload in ({"encoding": "utf-8", "content": "x"}, {"encoding": "base64"},
+                        {"encoding": "base64", "content": ""},
+                        {"encoding": "base64", "content": "  \n "},
+                        {"encoding": "base64", "content": "不是 base64"}):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                assets.latest_main_registry(Fake(payload))
 
     def test_build_metadata_requires_complete_fingerprint(self):
         for value in (None, {}, {key: None for key in FINGERPRINT},
