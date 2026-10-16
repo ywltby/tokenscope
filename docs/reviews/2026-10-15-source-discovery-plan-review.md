@@ -552,3 +552,44 @@ W02 与 W05c 同步区分编译期嵌入和运行时读取：schema-v3.sql 按�
 - 连续链的 SQLite backup API 备选方案。旧程序正常退出后复制即可。
 
 第 18.1 节接受的其余补充保留：固定 base SHA、撤回的真实边界、逐跳备份、逐跳期望、首次启动失败也写证据。
+
+## 20. 升级测试补测实现复核（PR #10，HEAD c64685d）
+
+### 20.1 核对结果
+
+| 项 | 结论 | 依据 |
+| --- | --- | --- |
+| 起点选择 | 符合 §4.3 | `select --current-version 0.3.3` 输出起点 {0.1.0, 0.3.2}、链 0.1.0 → 0.3.2、`include` 四项；0.2.0–0.3.2 的持久格式相同，归为一组，代表正好是上一版 |
+| 登记表 | 符合 §4.1 | 6 个条目、`commit` 均为标签解引用提交；本地 `check` 与 PR gate 均通过 |
+| 工作流接线 | 符合 §4.7 | 两边的 `plan-upgrades` 都由 `select` 生成矩阵，空集合抛错；release 的 `publish` 依赖 `upgrade-test` 与 `upgrade-chain`；gate 用 `pull_request.base.sha`，push 时用 `event.before` |
+| 撤回保护 | 符合 §4.4 | `publish` 先取 main 的固定 SHA，再读该 SHA 的登记表，读取失败即阻断；覆盖当前版本与回补的 0.1.0 |
+| 启动预算 | 符合 §4.8 第 4 条 | CDP 45 s + 页面 20 s，合计 65 s，与原上限一致 |
+| 端口 | 符合 §4.8 第 1 条 | `ui-e2e.yml` 各步改用 9451/9460/9470/9480/9490 |
+| CLAUDE.md | 符合 UP08 与 §4.8 第 8 条 | 写明登记上一版、撤回顺序、“重跑不能代替原因”、压测只在本地 |
+| 远程证据 | 通过 | PR 的 gate、install-test（四个单跳）、native-ui 均通过。链路在 PR 上默认跳过，我在 PR 分支手动触发 run [38912723002](https://github.com/ywltby/tokenscope/actions/runs/38912723002)：`upgrade-chain (present)` 1m07s、`(deleted)` 1m51s 通过，日志为“连续升级链 0.1.0 -> 0.3.2 -> 0.3.3：逐跳事实、备份、设置与重启幂等全部通过”；同一次运行的四个单跳作业也通过 |
+
+### 20.2 UP09 的实现超出了第 19 节精简后的范围（不阻断合入）
+
+UP09 一共约 2900 行：`native-instance.mjs` 867 行，两份测试共约 1000 行（48 项），`native-acceptance.mjs` 净增约 980 行。
+
+其中有几项正是第 19 节明确删除的“单次调用取消 / 预算截断”一类设计，由执行方之后的第二轮复核（P2）重新加了回来：
+
+- `awaitWithHostExit` 的 `onCancel` / `onLateResult` 双回调与 AbortController。
+- `createHostExitSignal`：退出事件与 250 ms 轮询竞速。
+- `clampTimeoutToBudget`，以及按剩余预算截断探测和连接。
+- `native-instance.async.test.mjs` 的 21 项异步组合测试。
+
+判断：
+
+- 这些代码已经实现、测试全绿、远程通过，现在拆掉要再走一轮完整门禁，还有引入回归的风险，收益不大。所以**不返工**。
+- 约束一：PR2 的 F04 只复用现有的 `launch` / `stop` 与 `launches[]`，不再扩展生命周期逻辑。
+- 约束二：之后的复核不得推翻用户已确认的精简决定。要改，先回到计划，由用户决定。
+
+### 20.3 小问题（不需要单独修）
+
+- 计划文件头仍写“从最新 main 建 `feat/upgrade-matrix`”，实际 PR 的 head 是 `docs/upgrade-matrix-plan`。§10 开头“远程证据仍未取得”也已过时。合入后归档时一并修正。
+- 0.2.0 起 `cache_schema` 登记的是运行时不再写入的 `cache.db` 常量。以后只改这个常量，会多出一个起点作业。影响很小，暂不处理。
+
+### 20.4 结论
+
+可以合入。合入后需要在 main 的 Release 里确认两条链再次通过、`v0.3.3` 已发布，然后用 `upgrade_baselines.py add --tag v0.3.3` 在下一个 PR 登记。
