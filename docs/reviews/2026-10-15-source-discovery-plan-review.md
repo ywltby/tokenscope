@@ -264,7 +264,7 @@ PR1 合入后 workspace 根目录是虚拟 manifest，命令统一改为：
 
 ## 10. 执行方修订说明（待复审）
 
-- [PR1](../plans/active/2026-10-15-workspace-layout.md)：独立 patch，W01–W07 和 c16e023；保留目录迁移、新旧版本基线、全部门禁，新增 W05c 依赖信息清单。旧 target 必须报告路径、大小、链接、占用并取得用户确认后删除。
+- [PR1](../plans/archive/implemented/2026-10-15-workspace-layout.md)：独立 patch，W01–W07 和 c16e023；保留目录迁移、新旧版本基线、全部门禁，新增 W05c 依赖信息清单。旧 target 必须报告路径、大小、链接、占用并取得用户确认后删除。
 - [PR2](../plans/active/2026-10-15-collection-status.md)：PR1 合入后独立 minor，F01–F05；至少 1 秒显示、CSS 图标、查询不等动画、连续轮次及减少动态效果均有用例，安排 DESIGN.md 豁免。
 - [PR3](../plans/active/2026-10-14-source-discovery-and-additional-paths.md)：PR2 合入后独立 minor，S01–S07；只剩当前用户标准/环境/追加根，取消重新发现，保留 settings 事务、防环、三层去重、性能预算及环境变更说明。
 - 技术细化 1：编译后的 `--check` 不能用自己的启动时间筛 `.d`；增加构建前 `--begin` run 边界和每模式产物记录。明确包清理/隔离构建与完整性检查，不依赖缓存动作的内部实现假设；旧依赖信息不能混入，缺证据不得空集合通过。
@@ -273,7 +273,7 @@ PR1 合入后 workspace 根目录是虚拟 manifest，命令统一改为：
 
 ## 11. 复审意见（针对 4ef146e）
 
-> 复审日期：2026-10-15。对象：[PR1](../plans/active/2026-10-15-workspace-layout.md)、[PR2](../plans/active/2026-10-15-collection-status.md)、[PR3](../plans/active/2026-10-14-source-discovery-and-additional-paths.md)、`docs/plans/README.md`、UI 调整计划顶部说明。
+> 复审日期：2026-10-15。对象：[PR1](../plans/archive/implemented/2026-10-15-workspace-layout.md)、[PR2](../plans/active/2026-10-15-collection-status.md)、[PR3](../plans/active/2026-10-14-source-discovery-and-additional-paths.md)、`docs/plans/README.md`、UI 调整计划顶部说明。
 
 **结论：** 第 9 节各项均已落实到三份计划，多账户相关内容已删净（全文检索 ProfileList、提权、账户映射、`source_paths_discover` 均无残留），旧锚点 `#collection-feedback` 已无引用。执行方新增的两条技术细化（构建前 `--begin` 划定证据边界；心跳周期 = 间隔 + 真实耗时，1 秒只影响显示）判断正确，予以采纳。改完下面 11.1、11.2 两处即可开工 PR1；11.3 在 PR3 开工前改好即可。
 
@@ -307,7 +307,7 @@ PR1 合入后 workspace 根目录是虚拟 manifest，命令统一改为：
 
 ## 12. 第 11 节修订回填（仅计划，待复审）
 
-- [x] 11.1：[PR1](../plans/active/2026-10-15-workspace-layout.md) W05a/W05c 的消费方改为包＋构建模式，普通与 acceptance 分别保留、选命令；核心与壳 Rust 改动固定跑两模式。W05b 增加分项耗时，契约明确 acceptance_csp.js 单独改动不能只跑普通壳测试。
+- [x] 11.1：[PR1](../plans/archive/implemented/2026-10-15-workspace-layout.md) W05a/W05c 的消费方改为包＋构建模式，普通与 acceptance 分别保留、选命令；核心与壳 Rust 改动固定跑两模式。W05b 增加分项耗时，契约明确 acceptance_csp.js 单独改动不能只跑普通壳测试。
 - [x] 11.2：清单限定 Git 跟踪文件及含跟踪文件的目录，未跟踪/生成路径及排除原因进入 QA 证据。明确两种 cargo test 模式均不带 custom-protocol；字面折叠路径后再判断仓库边界，补 Windows/UNC/越界、release 风格生成资源及 Git 跟踪边界契约。update/check 使用同一规则。
 - [x] 11.3：[PR3](../plans/active/2026-10-14-source-discovery-and-additional-paths.md) §2/§3/S07 写明旧自定义 dir 由替代变追加、默认根新增用量可能提高总量；安排同步 stats-semantics 与升级提示。S01 增加升级并集、重复请求和停用用例，完整采集断言在 S03 接通后验证。
 - [x] 11.4：采纳实施分支建议，PR1 与 README 改为开工时从当前文档分支最新提交创建 feat/workspace-layout。本轮不切分支，不改写提交。归档移动复用继续保留在 PR3 本轮范围与验收中，未静默延期。
@@ -593,3 +593,59 @@ UP09 一共约 2900 行：`native-instance.mjs` 867 行，两份测试共约 100
 ### 20.4 结论
 
 可以合入。合入后需要在 main 的 Release 里确认两条链再次通过、`v0.3.3` 已发布，然后用 `upgrade_baselines.py add --tag v0.3.3` 在下一个 PR 登记。
+
+## 21. 发布去重计划复核（执行方补充 3c10bd9）
+
+对象：[发布流程去掉重复的完整测试](../plans/active/2026-10-17-release-gate-dedup.md)，执行方新增 §6（85 行）。按用户“避免过度防御的计划”的要求精简，§6 重写为 7 步，计划从 145 行减到 87 行。
+
+### 21.1 接受
+
+| 补充 | 处理 |
+| --- | --- |
+| §4：相同代码树不保证结果相同，失败不能直接归为环境问题 | 接受，压成一句；撤回顺序补上“取消在途发布” |
+| §4：分支保护放宽时需重新评审 | 接受 |
+| R01：PR 上也有安装与单跳升级，但 Release 重新构建的包须独立验收 | 接受，保留原文 |
+| §6.1：上一版按 main 实际版本登记，不机械照抄 0.3.3；已登记则跳过 | 接受 |
+| §6.3：setup-python 的固定写法与步骤顺序 | 接受 |
+| install-test 会被触发 | 改为明确写出：本 PR 改了 `scripts/**` 与 `.github/workflows/**`，install-test 必然触发，须通过 |
+
+### 21.2 纠正
+
+- **§6.1 第 3 步“从最新 main 建 `ci/release-gate-dedup`”会丢提交**：当前分支 `docs/release-gate-dedup-plan` 已带第二批计划归档 `fcc3578`，另建分支只“带入本计划文件”，归档提交就不会进 main。改为在当前分支 rebase 到最新 main 后实施。
+
+### 21.3 删除的过度设计
+
+- 开工时重新读取规则集并逐项比对。前提已在 2026-10-17 核实，写进了 §1；放宽时重新评审已由 §4 约束。
+- 契约测试断言 runner、timeout、checkout 的三项参数、六项 outputs 全集、build 仍用 setup。只保留真正要防的三条：身份校验在、完整动作不在 Release gate、CI gate 仍跑完整检查。
+- 用内存副本做 5 种变异反例，并要求正常文件与反例走同一函数。
+- 保存红灯日志到 `qa-artifacts/` 并核对失败类型。
+- 提交前手工逐条跑 5 个单测命令和 `git diff --check`。改 `.github/**` 时钩子本来就选完整模式。
+- 记录 PR 合并 ref 的 checkout SHA 并核对父提交。规则集要求与 main 同步，GitHub 已保证。
+- 合入后下载安装与升级证据逐跳核对。本 PR 不改这些作业，作业通过即可。
+- 核对 tag 解引用、metadata SHA、安装包哈希。`publish` 本来就做这些校验。
+- gate 5 分钟硬门槛，以及排队时间与执行时间分开统计。改为如实记录耗时，不设硬门槛。
+- 回填 6 行证据表。改为回填 PR 链接、Release run 链接和各作业耗时。
+
+## 22. 发布去重实现复核（PR #11，HEAD 6f495f4）
+
+结论：**可以合入。** 改动范围与精简后的计划一致，PR 首次运行全部通过。
+
+### 22.1 逐项核对
+
+| 项 | 核对结果 |
+| --- | --- |
+| R01 `release.yml` | 只改 `gate`：删除 setup 与 checks，加 setup-python 3.12（固定 SHA 与其他作业相同），timeout 45 → 10，加一行注释；checkout、两个校验步骤、`id: metadata`、六项 outputs 与其余六个作业的 diff 为空 |
+| R02 契约测试 | 三条断言与计划一致。复核时把 `release.yml` 换回 main 版本运行，测试失败（gate 含 `./.github/actions/setup`）；恢复后通过 |
+| R03 文档 | `CLAUDE.md`「发布与升级」写明 Release gate 只做身份校验、完整测试由 PR 必需检查保证、main 的 CI 与 Native UI E2E 并行不阻断 |
+| 登记 v0.3.3 | 提交 `e3eb680`、持久格式指纹与 `build-metadata.json` 一致；四个资产的 sha256 与 GitHub digest 逐一相同 |
+| 版本 | 0.3.3 → 0.3.4，patch，`release-change.json` 摘要已更新 |
+| PR 检查 | 同一 HEAD：CI `gate`、`native-ui`、`install-test`、`plan-upgrades` 与四项单跳升级均为首次运行通过；`upgrade-chain` 在 PR 上按设计跳过；`mergeStateStatus` 为 CLEAN |
+
+### 22.2 计划外的改动
+
+- **`cf73995` 原生实例退出用例的偶发红灯**：Windows 上轮询可能先于父进程回收子进程发现进程已退出，此时 `child.exitCode` 仍为 null。修复只放宽轮询路径（允许 3 或 null），exit 事件路径仍严格要求 3；与同文件另两个真实子进程用例对 unknown 退出码的处理一致。提交说明写明了原因，不是重跑碰绿，属于 CLAUDE.md 允许直接修复的测试红灯。接受。
+- **`scripts/test_upgrade_baselines.py` 改了 68 行**：原因是 `RegistryCase.setUp` 直接读取真实登记表 `scripts/fixtures/upgrade_baselines.json`，登记 0.3.3 后，写死的版本号与选择结果都要跟着改。本次修改正确，但问题会在每次登记上一版时重复出现（PR2 登记 0.3.4 时还要再改一遍）。建议：测试改为读取一份冻结的测试登记表，与真实登记表脱钩；真实登记表的正确性已由 CI gate 的 `upgrade_baselines.py check` 保证。不阻断本 PR。
+
+### 22.3 文档
+
+执行方指出的计划页头“待用户确认”已改为“已实施，待合入后的 Release 取证”，§5 回填本地与 PR 证据；计划总账同步。合入后的 Release 取证（gate 日志、双链、发布与耗时）完成前不归档。

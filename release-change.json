@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "升级测试补测：起点矩阵、连续升级链与原生验收实例生命周期"
+  "summary": "发布流程只做身份校验，完整测试由 PR 门禁保证"
 }

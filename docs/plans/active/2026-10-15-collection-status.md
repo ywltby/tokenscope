@@ -1,7 +1,7 @@
 # PR2：真实扫描状态与读取动画
 
-> 状态：[审阅第 13 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过；F01–F05 未实施。PR1 已合入 main（`19aae8b`）；按用户 2026-10-16 决定，须等[升级测试补测计划](2026-10-16-upgrade-matrix.md)（含原生验收重启修复 UP09）合入后再开工，F04 基于其新的实例生命周期扩展原生验收。
-> 前置条件：[PR1 目录迁移](2026-10-15-workspace-layout.md)已合入 main。实施时从最新 main 创建 `feat/collection-status`，独立 minor 和独立门禁，不依赖 [PR3 来源管理](2026-10-14-source-discovery-and-additional-paths.md)；PR3 在本 PR 合入后再启动。
+> 状态：[审阅第 13 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过；F01–F05 未实施。PR1 已合入 main（`19aae8b`）；按用户 2026-10-16 决定，须等[升级测试补测计划](../archive/implemented/2026-10-16-upgrade-matrix.md)（含原生验收重启修复 UP09）合入后再开工，F04 基于其新的实例生命周期扩展原生验收。
+> 前置条件：[PR1 目录迁移](../archive/implemented/2026-10-15-workspace-layout.md)已合入 main。实施时从最新 main 创建 `feat/collection-status`，独立 minor 和独立门禁，不依赖 [PR3 来源管理](2026-10-14-source-discovery-and-additional-paths.md)；PR3 在本 PR 合入后再启动。
 
 **Goal：** 扫描由真实工作驱动、至少显示 1 秒，作为可见读取心跳；只有新事实或既有时间窗口规则触发统计刷新，取消常驻具体更新时间。
 
@@ -136,7 +136,7 @@ type CollectionStatus = {
 
 ## 6. 执行细则与逐项验收门槛
 
-先遵守 [PR1 第 4 节共同执行约束](2026-10-15-workspace-layout.md#41-开工与逐项执行)及其证据/门槛。本节只细化 F01–F05，不授权在 PR1 合入前实施。新接口先补测试，任务执行记录中填实际 commit、命令、退出码和工件。
+先遵守 [PR1 第 4 节共同执行约束](../archive/implemented/2026-10-15-workspace-layout.md#41-开工与逐项执行)及其证据/门槛。本节只细化 F01–F05，不授权在 PR1 合入前实施。新接口先补测试，任务执行记录中填实际 commit、命令、退出码和工件。
 
 ### 6.1 F01/F02：真实状态机，先内核后 IPC
 

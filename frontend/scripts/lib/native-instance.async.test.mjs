@@ -83,7 +83,13 @@ describe("宿主退出信号（§4.8 第 4 条 / §6.2 行 4）", () => {
     const info = await watcher.signal;
     const elapsed = Date.now() - startedAt;
     expect(["exit-event", "poll"]).toContain(info.source);
-    expect(info.code).toBe(3);
+    if (info.source === "exit-event") {
+      expect(info.code).toBe(3);
+    } else {
+      // 轮询先到时，Windows 内核层可能已判死而父进程还没回收子进程，
+      // child.exitCode 仍为 null（产品按“退出码=unknown”处理）；已回收则必须是 3。
+      expect([3, null]).toContain(info.code);
+    }
     expect(elapsed).toBeLessThan(1500);
     expect(elapsed).toBeGreaterThanOrEqual(100);
   });

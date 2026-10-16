@@ -14,9 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 完整质量门禁由 PR 必需检查（ci.yml 的 gate、native-ui）保证；这里只校验发布身份。
   gate:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     outputs:
       tag: ${{ steps.metadata.outputs.tag }}
       sha: ${{ steps.metadata.outputs.sha }}
@@ -30,7 +31,9 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: ./.github/actions/setup
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
       - name: Validate one version increment for this main merge
         run: |
           python -B scripts/bump_version.py --check --event-file "$env:GITHUB_EVENT_PATH"
@@ -38,7 +41,6 @@ jobs:
       - name: Validate release identity and versions
         id: metadata
         run: python scripts/release_metadata.py
-      - uses: ./.github/actions/checks
 
   build:
     needs: gate

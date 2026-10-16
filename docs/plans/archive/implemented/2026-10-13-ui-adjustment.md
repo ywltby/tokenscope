@@ -1,8 +1,16 @@
 # UI 调整计划：时间筛选、自动读取、汇总页状态与设置页
 
-> 2026-10-15 后续需求：U06 常驻更新时间将由 [PR2 扫描反馈计划](2026-10-15-collection-status.md)取代：真实扫描触发、至少 1 秒读取动画，有新用量立即刷新统计。新计划待复审、未实施；本文件保留历史设计与验收记录。
+> **2026-10-17 归档复核：已实现。** PR [#7](https://github.com/ywltby/tokenscope/pull/7) 于 2026-10-13 合入 main（`5974e6b`），[Release](https://github.com/ywltby/tokenscope/actions/runs/38371229510) 通过并发布 `v0.3.0`。归档不等于其他计划的待验项目通过；当前待办只在 [整合计划](../../active/2026-10-11-consolidated-remaining-work.md) 登记，状态总账见 [计划索引](../../README.md)。下方原文保留当时的状态与证据，其中“待合入 / 待门禁 / 未实施”等字样以本头部为准。
+>
+> | 原任务 / 范围 | 当前状态 | 剩余任务承接 |
+> | --- | --- | --- |
+> | U01–U05、U07 | 已实现，本地与远程门禁通过 | — |
+> | U06 自动读取间隔与刷新 | 已实现；其中常驻“更新于 HH:MM:SS”被较新需求取代 | [PR2 扫描反馈](../../active/2026-10-15-collection-status.md) |
+> | 真实跨午夜、长时间休眠、跨显示器 / DPI | 用户 2026-10-13 移出本计划，未实跑，不计作本计划未闭合项 | [独立系统验收待办](../../system-acceptance-todo.md) |
 
-> 状态：**本轮功能与最新复核补修已完成，本地验收通过；最新补修需按其自身 HEAD 核对远程门禁。** `b302a9a` 的三套远程检查通过属于补修前证据。用户于 2026-10-13 将真实跨午夜、长时间休眠、跨显示器验收移至[独立系统验收待办](../system-acceptance-todo.md)，本计划不再执行或等待这三项；移出不代表通过。PR #7 保持不自行合并 main。
+> 2026-10-15 后续需求：U06 常驻更新时间将由 [PR2 扫描反馈计划](../../active/2026-10-15-collection-status.md)取代：真实扫描触发、至少 1 秒读取动画，有新用量立即刷新统计。新计划待复审、未实施；本文件保留历史设计与验收记录。
+
+> 状态：**本轮功能与最新复核补修已完成，本地验收通过；最新补修需按其自身 HEAD 核对远程门禁。** `b302a9a` 的三套远程检查通过属于补修前证据。用户于 2026-10-13 将真实跨午夜、长时间休眠、跨显示器验收移至[独立系统验收待办](../../system-acceptance-todo.md)，本计划不再执行或等待这三项；移出不代表通过。PR #7 保持不自行合并 main。
 >
 > 修订记录（均为 2026-10-13）：
 > - 第一版：初稿。
@@ -400,7 +408,7 @@ type RangePreset =
 
 ## 5. 不在本计划内
 
-- 真实跨午夜、长时间休眠、跨显示器及真实系统 DPI 切换验收（2026-10-13 用户明确移出，后续只在[独立待办](../system-acceptance-todo.md)维护）。
+- 真实跨午夜、长时间休眠、跨显示器及真实系统 DPI 切换验收（2026-10-13 用户明确移出，后续只在[独立待办](../../system-acceptance-todo.md)维护）。
 - 玻璃材质、配色 tokens、字体与柔光背景的调整。
 - 来源按钮加文字、筛选栏合并成一行、时间副标题。
 - 后端内部 `cache_*` 命名重构；与时间边界、`collect` 参数无关的查询协议改动。
@@ -496,7 +504,7 @@ type RangePreset =
 
 ### 验收边界（系统尾项已转独立待办）
 
-- 真实跨午夜、长时间休眠、不同 DPI/显示器验收仍未实跑，按用户决定移至[独立待办](../system-acceptance-todo.md)，不再计作本计划未闭合项。本机单次 S4 休眠/定时唤醒/应用恢复已通过（见下文）；浏览器模拟时钟与组件测试不能替代移出的系统验收。
+- 真实跨午夜、长时间休眠、不同 DPI/显示器验收仍未实跑，按用户决定移至[独立待办](../../system-acceptance-todo.md)，不再计作本计划未闭合项。本机单次 S4 休眠/定时唤醒/应用恢复已通过（见下文）；浏览器模拟时钟与组件测试不能替代移出的系统验收。
 - 原生时区迁移/冲突旧值已覆盖；设置页手动更换时区后重启的完整点击路径已由下述 `ui-system` 原生 E2E 补齐。
 - 本地通过不代表远程 Actions 已通过；远程结果需在推送后按同一提交核对。N10/N11/N12 其余项/N13 不因本轮 UI E2E 自动闭合。
 - 证据保存在忽略目录 `qa-artifacts/ui-adjustment/`，不提交用户日志或运行工件；早期截图位于 `final/`，本轮浏览器位于 `ci-e2e/`，原生位于 `final-native/`。
@@ -531,4 +539,4 @@ type RangePreset =
 - **发现并修复真实缺陷**：980×620 下自定义日期浮层底边约 707px，确认/取消超出视口；新增边界断言先稳定复现浅/深色共 8 个失败，再按触发按钮上下可用空间限制面板高度，日期区内部滚动，操作区保持可见；打开期间随窗口与滚动更新高度，关闭后移除监听。
 - **本地结果**：根库/壳 fmt、clippy、test，前端 typecheck、format、466 项测试与 build 通过。浏览器四组布局零违例，四项 E2E 共 **149 条断言通过**（新增矩阵 **121 条**）。复现证据 `qa-artifacts/ui-adjustment/date-overflow-red/`；最终截图/测量 `qa-artifacts/ui-adjustment/ci-e2e/`，日志 `final-date-e2e.log`、`date-gates.log`。已抽查宽窄窗口的真实截图，非只检查文件存在。
 - **远程与交付**：上一提交 `09762b3` 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/38339892044)、[安装及两项固定旧包升级](https://github.com/ywltby/tokenscope/actions/runs/38339892055)、[原生 UI E2E](https://github.com/ywltby/tokenscope/actions/runs/38339892049) 均已通过。本次浮层补修需以推送后对应 HEAD 的 CI 为准，不沿用上一提交的通过状态；同一 PR 保持版本 0.3.0，PR #7 不自行合并。
-- **后续范围调整与远程终态**：用户明确将真实跨午夜、长时间休眠、跨显示器（含真实系统 DPI 切换）移至[独立待办](../system-acceptance-todo.md)，本计划先不执行。`b302a9a` 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/38342335100)、[安装及升级](https://github.com/ywltby/tokenscope/actions/runs/38342335069)、[原生 UI E2E](https://github.com/ywltby/tokenscope/actions/runs/38342335008) 均为 success，U07 在调整后的本轮范围内完成。历史段落中的“系统待验”描述保留为时点记录，以本条范围调整为准；单次 S4 已验证、S0 未额外验证，其他整合计划 N10/N11/N12/N13 不因此全部完成。
+- **后续范围调整与远程终态**：用户明确将真实跨午夜、长时间休眠、跨显示器（含真实系统 DPI 切换）移至[独立待办](../../system-acceptance-todo.md)，本计划先不执行。`b302a9a` 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/38342335100)、[安装及升级](https://github.com/ywltby/tokenscope/actions/runs/38342335069)、[原生 UI E2E](https://github.com/ywltby/tokenscope/actions/runs/38342335008) 均为 success，U07 在调整后的本轮范围内完成。历史段落中的“系统待验”描述保留为时点记录，以本条范围调整为准；单次 S4 已验证、S0 未额外验证，其他整合计划 N10/N11/N12/N13 不因此全部完成。
