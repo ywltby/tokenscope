@@ -8,8 +8,9 @@
 
 - **2026-10-15 PR1 已实施并完成本地验收；PR2/PR3 仍未实施**：
   - **PR1 / patch**：[Workspace 目录迁移与提交检查](active/2026-10-15-workspace-layout.md)，W01–W07。分支 `feat/workspace-layout` 从 docs/source-discovery-plan 最新提交（`94e5c52`，含 c16e023 与三份计划）创建，按 W01–W07 逐项实施，版本已递增到 0.3.2。本地交付门槛 14 条命令逐条 exit 0（普通与 acceptance 两套 workspace clippy/test、前端 typecheck/format:check/test/build 与浏览器 E2E、脚本契约 216 项、版本发布契约）；隔离 checkout 冷编译两模式通过，且从根目录与 `src-tauri` 目录发起构建都只写根 target、不新建子 target/子锁；生产 NSIS 构建与 `release_assets` 收集、验收包构建与原生 E2E 均在本机实跑通过——逐项证据见该计划第 6 节。第二轮与第三轮外部复核共提出 8 项反例（含 `git commit --only` 读到错误 index、未暂存保护范围不区分文件与目录、删除未触发文档检查、前端脚本只做语法检查等），已逐项复现并修复，补 22 项回归测试，详见该计划第 6.8 节。**未创建 PR、未合并 main**：W06.4 的五项安装验收与两项固定旧版升级、以及 ci/release/install-test/ui-e2e 的远程门禁仍待 Actions 提供；旧 `src-tauri/target`（38.85 GiB，无进程占用）按用户决定登记为待清理，未删除。
-  - **PR2 / minor**：[真实扫描反馈](active/2026-10-15-collection-status.md)，F01–F05；PR1 合入后从最新 main 建 feat/collection-status，读取图标至少 1 秒，查询不等待动画。
+  - **PR2 / minor**：[真实扫描反馈](active/2026-10-15-collection-status.md)，F01–F05；升级测试补测合入后从最新 main 建 feat/collection-status，读取图标至少 1 秒，查询不等待动画。
   - **PR3 / minor**：[当前用户来源目录与追加路径](active/2026-10-14-source-discovery-and-additional-paths.md)，S01–S07；PR2 合入后从最新 main 建 feat/source-paths，只发现当前用户默认和 CODEX_HOME / CLAUDE_CONFIG_DIR，取消重新发现按钮。
+  - **升级测试补测 / patch（用户已确认）**：[起点矩阵、连续升级链与原生验收重启修复](active/2026-10-16-upgrade-matrix.md)，UP01–UP09，**下一个 PR，先于 PR2**；在 0.1.0 单跳之外加测上一版与每种持久格式的代表起点，Release 增加连续升级链，处理撤回版本；UP09 修复原生验收重启后连接调试端口的时序缺口（main `19aae8b` 失败）。第 9 节 D1–D5 已确认（D5：20 次重启压力验证只在本地跑）。**本地实施已完成**：登记表 schema 2（0.1.0 与 0.2.0–0.3.2），`upgrade_baselines.py` 的 `select`/`add`/`withdraw`/`check`，按 profile 分支的夹具与编排、I4 备份核对、声明式设置迁移，两个工作流的动态起点矩阵与 Release 连续升级链，`publish` 拒绝撤回版本，以及从真实常量生成持久格式指纹的构建元数据 schema 2；第二轮独立复核提出的 5 项问题（旧期望清单缺失、撤回保护未读最新 main、链路跳过历史库备份验收、未发布条目解析、原生连接预算与退出即时检测）已修复并补齐能红的契约，见该计划第 10.8/10.9 节。**未创建 PR**：五场景安装、升级矩阵远程运行与原生 20 轮重启取证仍待该 PR 的门禁。
 
 三 PR 各自递增一次版本、各自验证最终 HEAD，不再统一交付。PR1 已实现，迁移期间冻结其他 Rust 开发的要求随之转为「PR1 合入后先 rebase 最新 main 再继续」；独立系统验收 todo 不变。
 

@@ -58,7 +58,9 @@ jobs:
         run: node ./frontend/node_modules/@tauri-apps/cli/tauri.js build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
       - name: Collect installer and checksums
         run: |
-          python -B scripts/release_assets.py collect --bundle target/x86_64-pc-windows-msvc/release/bundle/nsis --executable target/x86_64-pc-windows-msvc/release/tokenscope.exe --directory release-assets --commit '${{ needs.gate.outputs.sha }}' --version '${{ needs.gate.outputs.version }}'
+          python -B scripts/release_assets.py print-persistent-format --output persistent-format.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B scripts/release_assets.py collect --bundle target/x86_64-pc-windows-msvc/release/bundle/nsis --executable target/x86_64-pc-windows-msvc/release/tokenscope.exe --directory release-assets --commit '${{ needs.gate.outputs.sha }}' --version '${{ needs.gate.outputs.version }}' --persistent-format persistent-format.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Attest installer checksums and build identity
         id: attest
@@ -117,10 +119,76 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  plan-upgrades:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      include: ${{ steps.plan.outputs.include }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Select upgrade origins from the checked-in registry
+        id: plan
+        shell: pwsh
+        run: |
+          $selection = python -B scripts/upgrade_baselines.py select --current-version '${{ needs.gate.outputs.version }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $include = @(($selection | ConvertFrom-Json).include)
+          if ($include.Count -eq 0) { throw "起点集合为空：不能用空矩阵当通过" }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("include=" + ($include | ConvertTo-Json -Compress -Depth 5 -AsArray))
+
   upgrade-test:
-    needs: [gate, build]
+    needs: [gate, build, plan-upgrades]
     runs-on: windows-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan-upgrades.outputs.include) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release-${{ needs.gate.outputs.sha }}
+          path: installer
+      - name: Run real upgrade from ${{ matrix.origin }}
+        run: |
+          $files = @(Get-ChildItem installer/*-setup.exe)
+          if ($files.Count -ne 1) { throw "必须有唯一当前安装包" }
+          $upgradeParameters = @{
+            InstallerPath = $files[0].FullName
+            AppVersion = '${{ needs.gate.outputs.version }}'
+            ExpectedCommit = '${{ needs.gate.outputs.sha }}'
+            SourceState = '${{ matrix.source_state }}'
+            Origin = '${{ matrix.origin }}'
+          }
+          & ./scripts/test_upgrade.ps1 @upgradeParameters
+          exit $LASTEXITCODE
+      - name: Upload real upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: upgrade-evidence-release-${{ needs.gate.outputs.sha }}-${{ matrix.origin }}-${{ matrix.source_state }}
+          path: ${{ runner.temp }}/tokenscope-install-evidence
+          if-no-files-found: ignore
+          retention-days: 14
+
+  upgrade-chain:
+    needs: [gate, build]
+    runs-on: windows-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -137,29 +205,29 @@ jobs:
         with:
           name: release-${{ needs.gate.outputs.sha }}
           path: installer
-      - name: Run real 0.1.0 upgrade
+      - name: Run chained upgrades
         run: |
           $files = @(Get-ChildItem installer/*-setup.exe)
           if ($files.Count -ne 1) { throw "必须有唯一当前安装包" }
-          $upgradeParameters = @{
+          $chainParameters = @{
             InstallerPath = $files[0].FullName
             AppVersion = '${{ needs.gate.outputs.version }}'
             ExpectedCommit = '${{ needs.gate.outputs.sha }}'
             SourceState = '${{ matrix.source_state }}'
           }
-          & ./scripts/test_upgrade.ps1 @upgradeParameters
+          & ./scripts/test_upgrade_chain.ps1 @chainParameters
           exit $LASTEXITCODE
-      - name: Upload real upgrade evidence
+      - name: Upload chained upgrade evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: upgrade-evidence-release-${{ needs.gate.outputs.sha }}-${{ matrix.source_state }}
+          name: upgrade-chain-evidence-${{ needs.gate.outputs.sha }}-${{ matrix.source_state }}
           path: ${{ runner.temp }}/tokenscope-install-evidence
           if-no-files-found: ignore
           retention-days: 14
 
   publish:
-    needs: [gate, build, install-test, upgrade-test]
+    needs: [gate, build, install-test, upgrade-test, upgrade-chain]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

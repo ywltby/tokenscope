@@ -61,6 +61,28 @@ class UpgradeFixtureCase(unittest.TestCase):
         self.assertEqual(sum(r[2]["cache_creation_input_tokens"] for r in rows), 12)
         self.assertEqual(sum(r[2]["cache_read_input_tokens"] for r in rows), 20)
 
+    def test_history_profile_seeds_consent_and_legacy_profile_refuses_unknown(self):
+        fixture.prepare(self.data, self.sources, "history")
+        settings = tomllib.loads((self.data / "settings.toml").read_text(encoding="utf-8"))
+        self.assertTrue(settings["privacy_policy_accepted"])
+        self.assertEqual(settings["close_action"], "quit")
+        with self.assertRaises(ValueError):
+            fixture.prepare(self.data, self.sources, "猜的")
+        other = self.root / "other/.tokenscope"
+        with self.assertRaises(ValueError):
+            fixture.prepare(other, self.sources, "history.profile")
+
+    def test_ensure_consent_is_idempotent_after_the_first_write(self):
+        fixture.prepare(self.data, self.sources)
+        first = fixture.ensure_test_consent(self.data)
+        self.assertTrue(first["test_consent_added"])
+        text = (self.data / "settings.toml").read_text(encoding="utf-8")
+        second = fixture.ensure_test_consent(self.data)
+        self.assertFalse(second["test_consent_added"])
+        self.assertEqual((self.data / "settings.toml").read_text(encoding="utf-8"), text)
+        with self.assertRaises(ValueError):
+            fixture.grant_test_consent(self.data)
+
     def test_preparation_refuses_existing_database_and_consent_preserves_old_settings(self):
         path = self.make_legacy()
         before = path.read_bytes()
@@ -89,14 +111,72 @@ class UpgradeFixtureCase(unittest.TestCase):
         original = self.root / "original.toml"
         original.write_bytes((self.data / "settings.toml").read_bytes())
         with self.assertRaises(ValueError):
-            fixture.verify_settings(self.data, original)
+            fixture.verify_settings(self.data, original, 1, 1)
         fixture.grant_test_consent(self.data)
-        self.assertTrue(fixture.verify_settings(self.data, original)["ok"])
+        self.assertTrue(fixture.verify_settings(self.data, original, 1, 1)["ok"])
         path = self.data / "settings.toml"
+        with self.assertRaises(ValueError):
+            fixture.verify_settings(self.data, original, 1, 2)
+        with self.assertRaises(ValueError):
+            fixture.verify_settings(self.data, original, 2, 1)
         path.write_text(path.read_text(encoding="utf-8").replace('"quit"', '"minimize"'),
                         encoding="utf-8")
         with self.assertRaises(ValueError):
-            fixture.verify_settings(self.data, original)
+            fixture.verify_settings(self.data, original, 1, 1)
+
+    def test_nested_field_changes_outside_the_migration_table_fail(self):
+        fixture.prepare(self.data, self.sources)
+        original = self.root / "original.toml"
+        original.write_bytes((self.data / "settings.toml").read_bytes())
+        fixture.grant_test_consent(self.data)
+        path = self.data / "settings.toml"
+        for old, new in (("enabled = true", "enabled = false"),
+                         ('dir = "', 'dir = "moved-'),
+                         ("price_auto_sync = false", "price_auto_sync = true")):
+            with self.subTest(old=old):
+                text = path.read_text(encoding="utf-8")
+                path.write_text(text.replace(old, new, 1), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    fixture.verify_settings(self.data, original, 1, 1)
+                path.write_text(text, encoding="utf-8")
+
+    def test_declared_migration_rules_rename_and_default_fields(self):
+        fixture.prepare(self.data, self.sources)
+        original = self.root / "original.toml"
+        original.write_text('[sources.claude]\nenabled = true\ndir = "/old"\n', encoding="utf-8")
+        migrations = self.root / "migrations.json"
+        migrations.write_text(json.dumps({"schema_version": 1, "migrations": {
+            "1->2": {"operations": [{"kind": "rename", "from": "sources.claude.dir",
+                                     "to": "sources.claude.additional_paths"},
+                                    {"kind": "default", "path": "sources.claude.enabled",
+                                     "value": True}]}}}), encoding="utf-8")
+        path = self.data / "settings.toml"
+        with_missing_default = ('privacy_policy_accepted = true\n'
+                                '[sources.claude]\nadditional_paths = "/old"\n')
+        path.write_text(with_missing_default, encoding="utf-8")
+        with self.assertRaises(ValueError):
+            fixture.verify_settings(self.data, original, 1, 2, migrations)
+        migrated = with_missing_default + "enabled = true\n"
+        path.write_text(migrated, encoding="utf-8")
+        self.assertTrue(fixture.verify_settings(self.data, original, 1, 2, migrations)["ok"])
+        path.write_text(migrated.replace('"/old"', '"/elsewhere"'), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            fixture.verify_settings(self.data, original, 1, 2, migrations)
+
+    def test_broken_migration_tables_are_rejected(self):
+        for migrations in ({"1->2": {"operations": [{"kind": "move", "from": "a"}]}},
+                           {"1->2": {"operations": [{"kind": "rename", "from": "a"}]}},
+                           {"1->2": {"operations": [{"kind": "default", "path": "a"}]}},
+                           {"1->2": {"operations": []}, "x": {"operations": []}},
+                           {"1->2": []}):
+            with self.subTest(migrations=migrations), self.assertRaises(ValueError):
+                fixture.load_migrations(self.write_migrations(migrations))
+
+    def write_migrations(self, migrations):
+        path = self.root / "broken-migrations.json"
+        path.write_text(json.dumps({"schema_version": 1, "migrations": migrations}),
+                        encoding="utf-8")
+        return path
 
     def test_wrong_schema_unknown_identity_extra_record_and_bucket_changes_fail(self):
         mutations = ("UPDATE meta SET value='10'", "UPDATE events SET input=input+1 WHERE record_id='m1'",

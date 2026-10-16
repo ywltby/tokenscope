@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -19,8 +20,10 @@ from bump_version import declaration, historical_versions, resolve, uniform
 from release_metadata import read_versions
 
 ROOT = Path(__file__).resolve().parent.parent
-BASELINE = ROOT / "scripts/fixtures/upgrade_baseline.json"
 HASH = re.compile(r"[0-9a-f]{64}")
+LEGACY_VERSION = "0.1.0"
+PERSISTENT_KEYS = ("cache_schema", "history_schema", "parser_revision",
+                   "identity_revision", "pricing_index", "settings_format")
 
 
 def digest(path):
@@ -35,44 +38,37 @@ def safe_name(name):
     return name
 
 
-def load_baseline(path=BASELINE):
-    value = json.loads(Path(path).read_text(encoding="utf-8"))
-    if (not isinstance(value, dict) or value.get("schema_version") != 1
-            or not re.fullmatch(r"[0-9a-f]{40}", value.get("commit", ""))
-            or value.get("version") != "0.1.0" or value.get("tag") != "v0.1.0"
-            or value.get("cache_schema") != "6"
-            or value.get("origin_release") != "pre-" + value["commit"]
-            or not re.fullmatch(r"[\w.-]+/[\w.-]+", value.get("repository", ""))):
-        raise ValueError("历史基线身份非法")
-    prefix = (f"https://github.com/{value['repository']}/releases/download/"
-              f"{value['origin_release']}/")
-    assets = value.get("assets")
-    if not isinstance(assets, list) or len(assets) != 3:
-        raise ValueError("历史基线必须固定三份原始资产")
-    names = []
-    for asset in assets:
-        name = safe_name(asset.get("name"))
-        if not HASH.fullmatch(asset.get("sha256", "")) or asset.get("url") != prefix + name:
-            raise ValueError("历史资产地址或 SHA256 非法")
-        names.append(name)
-    if (len(set(names)) != 3 or "SHA256SUMS.txt" not in names
-            or "provenance.sigstore.json" not in names
-            or sum(n.endswith("-setup.exe") for n in names) != 1):
-        raise ValueError("历史资产集合非法")
-    return value
+def load_registry(path=None):
+    """登记表读取与校验只有一份实现（scripts/upgrade_baselines.py）。"""
+    from upgrade_baselines import REGISTRY, load_registry as load
+    return load(path or REGISTRY)
 
 
-def download_baseline(directory, baseline=None):
-    baseline = load_baseline() if baseline is None else baseline
+def entry_of(registry, version):
+    from upgrade_baselines import entry_of as lookup
+    return lookup(registry, version)
+
+
+def published_entry(registry, version):
+    from upgrade_baselines import published_entry as lookup
+    return lookup(registry, version)
+
+
+def installer_of(entry):
+    return next(a for a in entry["assets"] if a["name"].endswith("-setup.exe"))
+
+
+def download_entry(entry, directory):
+    """按登记表原样复用历史发布字节：文件名、地址与 SHA256 都取自登记值。"""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     paths = []
-    for asset in baseline["assets"]:
+    for asset in entry["assets"]:
         path = directory / safe_name(asset["name"])
         if not path.is_file() or digest(path) != asset["sha256"]:
             temporary = path.with_name(path.name + ".download")
             try:
-                with urlopen(asset["url"], timeout=60) as response, temporary.open("wb") as fh:
+                with urlopen(asset["url"], timeout=180) as response, temporary.open("wb") as fh:
                     while chunk := response.read(1024 * 1024):
                         fh.write(chunk)
                 if digest(temporary) != asset["sha256"]:
@@ -91,6 +87,42 @@ def write_checksums(directory, paths):
     text = "".join(f"{digest(path)}  {path.name}\n" for path in paths)
     with (Path(directory) / "SHA256SUMS.txt").open("w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
+
+
+def validate_persistent_format(value):
+    if not isinstance(value, dict) or set(value) != set(PERSISTENT_KEYS):
+        raise ValueError("构建元数据必须带六项持久格式指纹")
+    for key, item in value.items():
+        if not isinstance(item, str) or not item.strip() or item != item.strip():
+            raise ValueError(f"持久格式指纹取值非法：{key}")
+
+
+def read_persistent_format(path):
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    validate_persistent_format(value)
+    return {key: value[key] for key in PERSISTENT_KEYS}
+
+
+def print_persistent_format(output, command=None, root=ROOT):
+    """运行核心库示例程序，把真实常量输出的六项指纹写成构建输入。"""
+    command = command or ["cargo", "run", "--locked", "--release",
+                          "-p", "tokenscope", "--example", "print_persistent_formats"]
+    try:
+        result = subprocess.run(command, cwd=str(root), capture_output=True,
+                                encoding="utf-8", check=False)
+    except FileNotFoundError as exc:
+        raise RuntimeError("找不到 cargo：先把 Rust 工具链加入 PATH 再重试") from exc
+    if result.returncode:
+        raise RuntimeError(f"持久格式指纹示例程序失败：{result.stderr.strip()}")
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("持久格式指纹示例程序没有输出")
+    value = json.loads(lines[-1])
+    validate_persistent_format(value)
+    payload = {key: value[key] for key in PERSISTENT_KEYS}
+    Path(output).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                            encoding="utf-8")
+    return payload
 
 
 def verify_current(directory, commit, version):
@@ -114,21 +146,24 @@ def verify_current(directory, commit, version):
         if digest(directory / name) != expected_hash:
             raise ValueError(f"资产 SHA256 不一致：{name}")
     metadata = json.loads((directory / "build-metadata.json").read_text(encoding="utf-8"))
-    if (metadata.get("schema_version") != 1 or metadata.get("commit") != commit
+    if (metadata.get("schema_version") != 2 or metadata.get("commit") != commit
             or not re.fullmatch(r"[0-9a-f]{40}", commit)
             or metadata.get("version") != version
             or not HASH.fullmatch(metadata.get("executable_sha256", ""))):
         raise ValueError("构建元数据与被测来源、版本或 exe 哈希不一致")
+    validate_persistent_format(metadata.get("persistent_format"))
     uniform({"build": version})
     return metadata
 
 
-def build_metadata(executable, commit, output, root=ROOT):
+def build_metadata(executable, commit, output, persistent_format, root=ROOT):
     if resolve(root, "HEAD") != commit:
         raise ValueError("构建来源 SHA 与实际 checkout 不一致")
-    payload = {"schema_version": 1, "commit": commit,
+    validate_persistent_format(persistent_format)
+    payload = {"schema_version": 2, "commit": commit,
                "version": uniform(read_versions(Path(root))),
-               "executable_sha256": digest(executable)}
+               "executable_sha256": digest(executable),
+               "persistent_format": {key: persistent_format[key] for key in PERSISTENT_KEYS}}
     Path(output).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
                             encoding="utf-8")
     return payload
@@ -167,8 +202,10 @@ def extract_payload(installer, directory, name="tokenscope.exe", command=None):
     return payload
 
 
-def collect(bundle, executable, directory, commit, version):
+def collect(bundle, executable, directory, commit, version, persistent_format=None, root=ROOT):
     uniform({"version": version})
+    if persistent_format is None:
+        raise ValueError("收集构建产物前必须先生成持久格式指纹")
     product = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))["productName"]
     installer = Path(bundle) / safe_name(f"{product}_{version}_x64-setup.exe")
     if not installer.is_file():
@@ -183,7 +220,8 @@ def collect(bundle, executable, directory, commit, version):
     # Tauri 打包前写入包类型，打包后还原编译目录的 exe；哈希取安装包的实际字节。
     with tempfile.TemporaryDirectory(prefix="tokenscope-nsis-payload-") as temporary:
         payload = extract_payload(target, temporary, name=Path(executable).name)
-        data = build_metadata(payload, commit, metadata)
+        data = build_metadata(payload, commit, metadata, read_persistent_format(persistent_format),
+                              root=root)
     data["unbundled_executable_sha256"] = digest(executable)
     metadata.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     write_checksums(directory, [target, metadata])
@@ -332,27 +370,62 @@ class Github:
                  "-F", "draft=false", "-F", "prerelease=true", "-f", "make_latest=false")
 
 
+def latest_main_registry(github, path="scripts/fixtures/upgrade_baselines.json"):
+    """发布前读**最新 main 固定 SHA** 下的登记表：撤回发生在工作流检出之后也要拦住。
+
+    工作流检出的是发布提交，工作区里的登记表可能已经落后于 main；只有按 main
+    的当前提交读取并校验，撤回保护才成立。读取失败一律阻断发布。
+    """
+    ref = json.loads(github.run("api", f"{github.api}/git/ref/heads/main"))
+    sha = ((ref or {}).get("object") or {}).get("sha")
+    if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+        raise ValueError("最新 main 的提交身份非法，拒绝发布")
+    payload = json.loads(github.run("api", f"{github.api}/contents/{path}?ref={sha}"))
+    if (not isinstance(payload, dict) or payload.get("encoding") != "base64"
+            or not isinstance(payload.get("content"), str) or not payload["content"].strip()):
+        raise ValueError("最新 main 的登记表读取失败：内容缺失，拒绝发布")
+    try:
+        # GitHub 的 contents 响应按行折行，解码前先去掉所有空白。
+        content = "".join(payload["content"].split())
+        text = base64.b64decode(content, validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError(f"最新 main 的登记表不是合法 UTF-8/Base64：{exc}") from exc
+    from upgrade_baselines import parse_registry
+    return parse_registry(text, source=f"main@{sha}:{path}")
+
+
+def assert_publishable(registry, version):
+    """撤回的版本不再进入发布：本次将创建的任一版本都会被拒绝。"""
+    refused = [entry["version"] for entry in registry["entries"]
+               if entry["status"] == "withdrawn" and entry["version"] in (LEGACY_VERSION, version)]
+    if refused:
+        raise ValueError(f"最新 main 的登记表把 {refused} 标为 withdrawn：拒绝发布")
+
+
 def publish(directory, commit, version):
     metadata = verify_current(directory, commit, version)
     directory = Path(directory)
     provenance = directory / "provenance.sigstore.json"
     if not provenance.is_file() or not provenance.stat().st_size:
         raise ValueError("当前资产缺少 Sigstore 来源证明")
-    baseline = load_baseline()
-    _, historical = historical_versions(ROOT, baseline["commit"])
-    if historical != baseline["version"]:
+    github = Github(os.environ["GITHUB_REPOSITORY"])
+    registry = latest_main_registry(github)
+    assert_publishable(registry, version)
+    legacy = published_entry(registry, LEGACY_VERSION)
+    _, historical = historical_versions(ROOT, legacy["commit"])
+    if historical != legacy["version"]:
         raise ValueError("历史提交的四份版本配置不一致")
     subprocess.run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor",
-                    baseline["commit"], commit], check=True)
+                    legacy["commit"], commit], check=True)
     github = Github(os.environ["GITHUB_REPOSITORY"])
     with tempfile.TemporaryDirectory(prefix="tokenscope-history-release-") as temporary:
-        old_paths = download_baseline(temporary, baseline)
-        old_notes = (f"历史版本身份回补：{baseline['version']}。\n\n"
-                     f"Source commit: {baseline['commit']}\n"
-                     f"Original release: {baseline['origin_release']}\n\n"
+        old_paths = download_entry(legacy, temporary)
+        old_notes = (f"历史版本身份回补：{legacy['version']}。\n\n"
+                     f"Source commit: {legacy['commit']}\n"
+                     f"Original release: {legacy['origin_release']}\n\n"
                      "复用原安装包、校验和与来源证明的相同字节和原文件名，未重新构建。\n"
                      "沿用原发布时的验收边界；当前版本的升级证据在后续 Release 中记录。\n")
-        publish_immutable(github, baseline["tag"], baseline["commit"], old_paths, old_notes)
+        publish_immutable(github, legacy["tag"], legacy["commit"], old_paths, old_notes)
     paths = [*directory.glob("*-setup.exe"), directory / "SHA256SUMS.txt",
              directory / "build-metadata.json", provenance]
     notes = (f"TokenScope {version}\n\n{declaration(ROOT)['summary']}\n\nSource commit: {commit}\n"
@@ -376,31 +449,45 @@ def main():
     command.add_argument("--executable", type=Path, required=True)
     command.add_argument("--commit", required=True)
     command.add_argument("--output", type=Path, required=True)
+    command.add_argument("--persistent-format", type=Path, required=True)
     command = sub.add_parser("checksums")
     command.add_argument("--directory", type=Path, required=True)
     command.add_argument("files", nargs="+")
     command = sub.add_parser("download-baseline")
     command.add_argument("--directory", type=Path, required=True)
+    command.add_argument("--origin", required=True)
+    command = sub.add_parser("print-persistent-format")
+    command.add_argument("--output", type=Path, required=True)
     command = sub.add_parser("collect")
     command.add_argument("--bundle", type=Path, required=True)
     command.add_argument("--executable", type=Path, required=True)
     command.add_argument("--directory", type=Path, required=True)
     command.add_argument("--commit", required=True)
     command.add_argument("--version", required=True)
+    command.add_argument("--persistent-format", type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.mode == "build-metadata":
-            result = build_metadata(args.executable, args.commit, args.output)
+            result = build_metadata(args.executable, args.commit, args.output,
+                                    read_persistent_format(args.persistent_format))
         elif args.mode == "checksums":
             write_checksums(args.directory, [args.directory / safe_name(n) for n in args.files])
             result = {"ok": True}
         elif args.mode == "download-baseline":
-            paths = download_baseline(args.directory)
-            result = {"installer": str(next(p for p in paths if p.name.endswith("-setup.exe")))}
+            entry = published_entry(load_registry(), args.origin)
+            paths = download_entry(entry, args.directory)
+            installer = next(p for p in paths if p.name.endswith("-setup.exe"))
+            asset = next(a for a in entry["assets"] if a["name"] == installer.name)
+            result = {"origin": entry["version"], "profile": entry["profile"],
+                      "directory": str(args.directory), "installer": str(installer),
+                      "installer_sha256": asset["sha256"]}
+        elif args.mode == "print-persistent-format":
+            result = print_persistent_format(args.output)
         elif args.mode == "verify":
             result = verify_current(args.directory, args.commit, args.version)
         elif args.mode == "collect":
-            result = collect(args.bundle,args.executable,args.directory,args.commit,args.version)
+            result = collect(args.bundle, args.executable, args.directory, args.commit,
+                             args.version, args.persistent_format)
         else:
             publish(args.directory, args.commit, args.version)
             result = {"published": "v" + args.version, "commit": args.commit}

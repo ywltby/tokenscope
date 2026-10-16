@@ -167,10 +167,11 @@ export async function nativeUiSystem({ inst, ck, ev }) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   if (inst.proc.exitCode !== 0)
     throw new Error(`expected clean shutdown, got ${inst.proc.exitCode}`);
-  try {
-    await inst.browser.close();
-  } catch {}
-  await inst.launch();
+  // 重启前确认旧实例真的退出、端口已释放（升级矩阵 §4.8 第 2 条）：走同一个 stop/launch
+  const restartStop = await inst.stop({ terminate: false, reason: "ui-system-restart" });
+  const restarted = await inst.launch();
+  ev.restartStop = restartStop;
+  ev.restartLaunch = { index: restarted.launchIndex, port: restarted.port, pid: restarted.pid };
   await inst.waitForData();
   await navigate("设置");
   ck.add(
@@ -221,4 +222,129 @@ export async function nativeUiSystem({ inst, ck, ev }) {
   );
   ev.scope =
     "real minimize/restore and focus; not OS sleep; explicit --scale is layout emulation only";
+}
+
+/**
+ * UP09（升级矩阵 §4.8 第 7 条）：多路重启压力验证，只在本地跑，不进 CI（D5）。
+ *
+ * 首次启动后每轮：直接退出 → 确认退出（宿主与全部已记录后代退出、端口释放）→
+ * 重启（新端口，端口不复用）→ 等待数据 → 核对设置仍在。
+ * 轮数由 `--relaunch-cycles N` 指定（默认 20）；单次启动预算与退出确认都走同一套
+ * `Instance.launch()` / `Instance.stop()`，不另写启动逻辑。
+ */
+export async function nativeUiRelaunch({ inst, ck, ev }) {
+  const page = () => inst.page;
+  const cycles = Number(inst.opts.relaunchCycles ?? 20);
+  const action = fileURLToPath(
+    new URL("../../../scripts/native-window-action.ps1", import.meta.url),
+  );
+  const settingsPath = path.join(inst.root, "tokenscope", "settings.toml");
+  const savedUtc = () => /^timezone\s*=\s*"UTC"\s*$/m.test(fs.readFileSync(settingsPath, "utf8"));
+  const navigate = (label) =>
+    page()
+      .locator('[aria-label="页面切换"]')
+      .getByRole("radio", { name: label, exact: true })
+      .click();
+  const windowAction = (state) => {
+    const result = spawnSync(
+      "pwsh",
+      ["-NoProfile", "-File", action, "-ProcessId", String(inst.proc.pid), "-Action", state],
+      { encoding: "utf8", windowsHide: true },
+    );
+    if (result.status !== 0 || !/(CLOSED|STATE_CHANGED) true/i.test(result.stdout))
+      throw new Error(`Native ${state} failed: ${result.stdout} ${result.stderr}`);
+    return (result.stdout || "").trim();
+  };
+  /** 走应用自己的「直接退出」，等宿主真实退出（退出码由父进程句柄给出）。 */
+  const exitThroughDialog = async () => {
+    const close = windowAction("close");
+    await page()
+      .locator(".close-dialog")
+      .getByRole("button", { name: "直接退出", exact: true })
+      .click();
+    const deadline = Date.now() + 20000;
+    while (inst.proc.exitCode === null && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    return { close, exitCode: inst.proc.exitCode };
+  };
+
+  await inst.waitForData();
+  // 播种一个可核对的持久化设置：真实下拉把隔离 TOML 写成 UTC
+  await navigate("设置");
+  await page().locator('[aria-label="聚合/展示时区"]').click();
+  await page().locator(".n-base-select-option").filter({ hasText: /^UTC$/ }).click();
+  await page().waitForFunction(() => !document.querySelector('[data-section="general"] .tz-state'));
+  ck.add("relaunch_seeds_persisted_setting", savedUtc(), "真实下拉把隔离 TOML 写成 UTC");
+  await navigate("汇总");
+  await inst.waitForData();
+
+  const first = inst.launches[0];
+  ev.firstLaunch = { index: first?.index ?? null, port: first?.port ?? null, pid: first?.hostPid ?? null };
+  ev.cycles = [];
+  for (let cycle = 1; cycle <= cycles; cycle++) {
+    const started = Date.now();
+    const row = {
+      cycle,
+      close: null,
+      exitCode: null,
+      stop: null,
+      port: inst.current?.port ?? null,
+      relaunchPort: null,
+      relaunchPid: null,
+      dataReadyMs: null,
+      settingStillUtc: null,
+      error: null,
+    };
+    try {
+      const exit = await exitThroughDialog();
+      row.close = exit.close;
+      row.exitCode = exit.exitCode;
+      // 确认退出：宿主与全部已记录后代退出、端口不再监听（§4.8 第 2 条）
+      row.stop = await inst.stop({ terminate: false, reason: `ui-relaunch-cycle-${cycle}` });
+      const info = await inst.launch();
+      row.relaunchPort = info.port;
+      row.relaunchPid = info.pid;
+      await inst.waitForData();
+      row.dataReadyMs = Date.now() - started;
+      await navigate("设置");
+      const dropdown = await page().locator('[aria-label="聚合/展示时区"]').innerText();
+      row.settingStillUtc = savedUtc() && dropdown.includes("UTC");
+      await navigate("汇总");
+      await inst.waitForData();
+    } catch (error) {
+      row.error = String(error?.message ?? error);
+      ev.cycles.push(row);
+      throw error;
+    }
+    ev.cycles.push(row);
+    if (cycle % 5 === 0 || cycle === cycles)
+      process.stderr.write(
+        `[ui-relaunch] ${cycle}/${cycles} 轮完成：port=${row.relaunchPort} exit=${row.exitCode} data=${row.dataReadyMs} ms\n`,
+      );
+  }
+
+  const ports = inst.launches.map((l) => l.port);
+  ev.portSequence = ports;
+  ev.lastLaunchPort = inst.current?.port ?? null;
+  ck.add(
+    "relaunch_cycles_completed",
+    ev.cycles.length === cycles && ev.cycles.every((c) => !c.error),
+    `${ev.cycles.length}/${cycles} 轮完成`,
+  );
+  ck.add(
+    "relaunch_ports_never_reused",
+    ports.length === cycles + 1 && new Set(ports).size === ports.length,
+    `${ports.length} 次启动的端口：${ports.join(",")}`,
+  );
+  ck.add(
+    "relaunch_exits_are_clean",
+    ev.cycles.every((c) => c.exitCode === 0),
+    ev.cycles.map((c) => `${c.cycle}:${c.exitCode}`).join(" "),
+  );
+  ck.add(
+    "relaunch_settings_survive_every_cycle",
+    ev.cycles.every((c) => c.settingStillUtc === true),
+    `${ev.cycles.filter((c) => c.settingStillUtc).length}/${ev.cycles.length} 轮重启后仍是 UTC`,
+  );
+  await page().screenshot({ path: path.join(inst.opts.shots, "ui-relaunch-final.png") });
 }

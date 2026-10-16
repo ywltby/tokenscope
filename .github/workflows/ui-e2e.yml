@@ -39,10 +39,12 @@ jobs:
       - name: Native window restore and settings persistence
         shell: pwsh
         run: |
-          node frontend/scripts/native-acceptance.mjs --scenario ui-system --events 4 --port 9452 --out qa-artifacts/ui-adjustment/native-e2e/system
+          # UP09（升级矩阵 §4.8 第 1 条）：各步起始端口互不重叠，进程内第 n 次启动用 --port + n。
+          node frontend/scripts/native-acceptance.mjs --scenario ui-system --events 4 --port 9460 --out qa-artifacts/ui-adjustment/native-e2e/system
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $ports = @{ '1' = 9470; '1.5' = 9480; '2' = 9490 }
           foreach ($scale in @('1', '1.5', '2')) {
-            node frontend/scripts/native-acceptance.mjs --scenario ui-system --events 4 --scale $scale --port 9452 --out "qa-artifacts/ui-adjustment/native-e2e/layout-$scale"
+            node frontend/scripts/native-acceptance.mjs --scenario ui-system --events 4 --scale $scale --port $ports[$scale] --out "qa-artifacts/ui-adjustment/native-e2e/layout-$scale"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
       - name: Upload native UI evidence

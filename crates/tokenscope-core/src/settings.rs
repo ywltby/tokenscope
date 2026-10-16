@@ -11,6 +11,15 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// 设置文件格式修订号（UP03，当前 1）。
+///
+/// **只在"需要声明迁移"或"改变旧设置的解释语义"时递增**，且必须同步
+/// `scripts/settings_migrations.json` 的迁移规则；**新增普通设置字段不算**
+/// ——未知字段本就忽略、缺失字段回默认值，向前兼容不靠这个数字。
+/// 该值经 [`crate::persistent_format::persistent_format`] 进入
+/// `build-metadata.json`，升级矩阵按格式分组挑起点时读的就是它。
+pub const SETTINGS_FORMAT_REVISION: u8 = 1;
+
 /// 关闭窗口按钮的默认动作（None = 每次询问；托盘「退出」不受此影响）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

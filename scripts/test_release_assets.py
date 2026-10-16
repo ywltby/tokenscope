@@ -1,7 +1,9 @@
 """对真实临时资产和受控 GitHub API 验证不可变发布，永不写远端。"""
 
+import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,6 +12,85 @@ from unittest.mock import patch
 import release_assets as assets
 
 SHA = "a" * 40
+FINGERPRINT = {"cache_schema": "11", "history_schema": "4", "parser_revision": "1",
+               "identity_revision": "1", "pricing_index": "9", "settings_format": "1"}
+
+
+def legacy_entry(status="published"):
+    name = f"TokenScope_pre-{SHA}_windows-x64-setup.exe"
+    prefix = f"https://github.com/ywltby/tokenscope/releases/download/pre-{SHA}/"
+    entry = {"version": "0.1.0", "tag": "v0.1.0", "commit": SHA, "origin_release": "pre-" + SHA,
+             "profile": "legacy-cache", "status": status,
+             "persistent_format": {**FINGERPRINT, "cache_schema": "6"},
+             "assets": [{"name": name, "url": prefix + name, "sha256": "0" * 64},
+                        {"name": "SHA256SUMS.txt", "url": prefix + "SHA256SUMS.txt",
+                         "sha256": "0" * 64},
+                        {"name": "provenance.sigstore.json",
+                         "url": prefix + "provenance.sigstore.json", "sha256": "0" * 64}]}
+    if status == "withdrawn":
+        entry["withdrawn"] = {"date": "2026-10-20", "reason": "崩溃"}
+    return entry
+
+
+def history_entry(version="0.2.0", status="published"):
+    prefix = f"https://github.com/ywltby/tokenscope/releases/download/v{version}/"
+    names = [f"TokenScope_v{version}_windows-x64-setup.exe", "SHA256SUMS.txt",
+             "provenance.sigstore.json"]
+    entry = {"version": version, "tag": "v" + version, "commit": SHA,
+             "origin_release": "v" + version, "profile": "history", "status": status,
+             "persistent_format": dict(FINGERPRINT),
+             "assets": [{"name": name, "url": prefix + name, "sha256": "1" * 64}
+                        for name in names]}
+    if status == "withdrawn":
+        entry["withdrawn"] = {"date": "2026-10-20", "reason": "崩溃"}
+    return entry
+
+
+def registry_payload(entries):
+    return {"schema_version": 2, "repository": "ywltby/tokenscope", "entries": entries}
+
+
+class FakeMainGithub:
+    """只回答“读最新 main 登记表”需要的两个请求，其余调用一律记录为写操作。"""
+
+    def __init__(self, registry, failure=None):
+        self.api = "repos/ywltby/tokenscope"
+        self.registry = registry
+        self.failure = failure
+        self.operations = []
+
+    def run(self, *args, optional=False):
+        joined = " ".join(str(arg) for arg in args)
+        if self.failure is not None:
+            raise RuntimeError(self.failure)
+        if "/git/ref/heads/main" in joined:
+            return json.dumps({"object": {"sha": SHA}})
+        if "/contents/scripts/fixtures/upgrade_baselines.json" in joined:
+            text = json.dumps(self.registry, ensure_ascii=False)
+            return json.dumps({"encoding": "base64",
+                               "content": base64.b64encode(text.encode("utf-8")).decode("ascii")})
+        self.operations.append(joined)
+        return json.dumps({})
+
+    def get_tag(self, tag):
+        self.operations.append("get_tag")
+        return SHA
+
+    def get_release(self, tag):
+        self.operations.append("get_release")
+        return None
+
+    def create_tag(self, tag, sha):
+        self.operations.append("create_tag")
+
+    def create_draft(self, tag, sha, notes):
+        self.operations.append("create_draft")
+
+    def upload(self, tag, paths):
+        self.operations.append("upload")
+
+    def publish(self, tag):
+        self.operations.append("publish")
 
 
 class FakeGithub:
@@ -50,12 +131,18 @@ class ReleaseAssetCase(unittest.TestCase):
         self.exe = self.directory / "TokenScope_v0.2.0_windows-x64-setup.exe"
         self.exe.write_bytes(b"inert installer, never executed")
         self.metadata = self.directory / "build-metadata.json"
-        self.metadata.write_text(json.dumps({"schema_version": 1, "version": "0.2.0",
-                                             "commit": SHA, "executable_sha256": "b" * 64}),
+        self.metadata.write_text(json.dumps({"schema_version": 2, "version": "0.2.0",
+                                             "commit": SHA, "executable_sha256": "b" * 64,
+                                             "persistent_format": FINGERPRINT}),
                                  encoding="utf-8")
 
     def checksum(self):
         assets.write_checksums(self.directory, [self.exe, self.metadata])
+
+    def fingerprint_file(self):
+        path = self.directory / "persistent-format.json"
+        path.write_text(json.dumps(FINGERPRINT), encoding="utf-8")
+        return path
 
     def test_checksums_bind_exact_files_and_build_identity(self):
         self.checksum()
@@ -227,16 +314,104 @@ class ReleaseAssetCase(unittest.TestCase):
             github.remember_release("v0.2.1",{"id":456,"tag_name":"v0.2.1"})
 
     def test_baseline_pins_source_original_three_assets_and_expected_fixture(self):
-        baseline = assets.load_baseline(Path(__file__).parent / "fixtures/upgrade_baseline.json")
-        self.assertEqual(baseline["version"], "0.1.0")
-        self.assertEqual(baseline["cache_schema"], "6")
+        registry = assets.load_registry()
+        baseline = assets.published_entry(registry, "0.1.0")
+        self.assertEqual(baseline["profile"], "legacy-cache")
+        self.assertEqual(baseline["persistent_format"]["cache_schema"], "6")
         self.assertEqual(baseline["commit"], "8d1d90de29aa00d10b9a7e4b8f906d909726446b")
+        self.assertEqual(baseline["origin_release"], "pre-" + baseline["commit"])
         self.assertEqual(len(baseline["assets"]), 3)
         self.assertTrue(all(a["url"].startswith(
             "https://github.com/ywltby/tokenscope/releases/download/pre-" + baseline["commit"] + "/")
-                            for a in baseline["assets"]))
-        self.assertEqual(baseline["assets"][0]["sha256"],
+            for a in baseline["assets"]))
+        self.assertEqual(assets.installer_of(baseline)["sha256"],
                          "798e7722120b414d2014cc80e987c831914f11d211abd8b5595f95184b62ece6")
+
+    def test_publish_refuses_version_withdrawn_on_latest_main(self):
+        (self.directory / "provenance.sigstore.json").write_bytes(b"attestation bundle")
+        local = registry_payload([legacy_entry(), history_entry()])
+        main = registry_payload([legacy_entry(), history_entry(status="withdrawn")])
+        fake = FakeMainGithub(main)
+        with patch.object(assets, "verify_current", return_value={"executable_sha256": "b" * 64}), \
+                patch.object(assets, "load_registry", return_value=local), \
+                patch.object(assets, "Github", return_value=fake), \
+                patch.dict(os.environ, {"GITHUB_REPOSITORY": "ywltby/tokenscope"}):
+            with self.assertRaises(ValueError) as caught:
+                assets.publish(self.directory, SHA, "0.2.0")
+        self.assertIn("withdrawn", str(caught.exception))
+        self.assertEqual(fake.operations, [])
+
+    def test_publish_refuses_when_baseline_is_withdrawn_on_latest_main(self):
+        (self.directory / "provenance.sigstore.json").write_bytes(b"attestation bundle")
+        local = registry_payload([legacy_entry(), history_entry()])
+        main = registry_payload([legacy_entry(status="withdrawn"), history_entry()])
+        fake = FakeMainGithub(main)
+        with patch.object(assets, "verify_current", return_value={"executable_sha256": "b" * 64}), \
+                patch.object(assets, "load_registry", return_value=local), \
+                patch.object(assets, "Github", return_value=fake), \
+                patch.dict(os.environ, {"GITHUB_REPOSITORY": "ywltby/tokenscope"}):
+            with self.assertRaises(ValueError):
+                assets.publish(self.directory, SHA, "0.2.0")
+        self.assertEqual(fake.operations, [])
+
+    def test_publish_stops_when_latest_main_registry_cannot_be_read(self):
+        (self.directory / "provenance.sigstore.json").write_bytes(b"attestation bundle")
+        for failure in ("GitHub 操作失败：HTTP 500", "最新 main 的登记表读取失败：内容缺失"):
+            with self.subTest(failure=failure):
+                fake = FakeMainGithub(None, failure=failure)
+                with patch.object(assets, "verify_current",
+                                  return_value={"executable_sha256": "b" * 64}), \
+                        patch.object(assets, "Github", return_value=fake), \
+                        patch.dict(os.environ, {"GITHUB_REPOSITORY": "ywltby/tokenscope"}):
+                    with self.assertRaises((ValueError, RuntimeError)):
+                        assets.publish(self.directory, SHA, "0.2.0")
+                self.assertEqual(fake.operations, [])
+
+    def test_latest_main_registry_accepts_folded_base64_and_rejects_broken_content(self):
+        class Fake(FakeMainGithub):
+            def __init__(self, payload):
+                super().__init__(None)
+                self.payload = payload
+
+            def run(self, *args, optional=False):
+                joined = " ".join(str(arg) for arg in args)
+                if "/git/ref/heads/main" in joined:
+                    return json.dumps({"object": {"sha": SHA}})
+                return json.dumps(self.payload)
+
+        registry = registry_payload([legacy_entry(), history_entry()])
+        encoded = base64.b64encode(json.dumps(registry, ensure_ascii=False).encode("utf-8")).decode("ascii")
+        folded = "\n".join(encoded[i:i + 60] for i in range(0, len(encoded), 60)) + "\n"
+        parsed = assets.latest_main_registry(Fake({"encoding": "base64", "content": folded}))
+        self.assertEqual(parsed["schema_version"], 2)
+        self.assertEqual([e["version"] for e in parsed["entries"]], ["0.1.0", "0.2.0"])
+        for payload in ({"encoding": "utf-8", "content": "x"}, {"encoding": "base64"},
+                        {"encoding": "base64", "content": ""},
+                        {"encoding": "base64", "content": "  \n "},
+                        {"encoding": "base64", "content": "不是 base64"}):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                assets.latest_main_registry(Fake(payload))
+
+    def test_build_metadata_requires_complete_fingerprint(self):
+        for value in (None, {}, {key: None for key in FINGERPRINT},
+                      {key: FINGERPRINT[key] for key in list(FINGERPRINT)[:5]}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                assets.validate_persistent_format(value)
+        for value in ({**FINGERPRINT, "cache_schema": 11}, {**FINGERPRINT, "extra": "1"}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                assets.validate_persistent_format(value)
+        self.assertEqual(assets.read_persistent_format(self.fingerprint_file()), FINGERPRINT)
+
+    def test_verify_current_rejects_metadata_without_fingerprint(self):
+        for payload in ({"schema_version": 1, "version": "0.2.0", "commit": SHA,
+                         "executable_sha256": "b" * 64},
+                        {"schema_version": 2, "version": "0.2.0", "commit": SHA,
+                         "executable_sha256": "b" * 64}):
+            with self.subTest(payload=payload):
+                self.metadata.write_text(json.dumps(payload), encoding="utf-8")
+                self.checksum()
+                with self.assertRaises(ValueError):
+                    assets.verify_current(self.directory, SHA, "0.2.0")
 
     def test_collection_selects_current_version_even_with_stale_cached_installer(self):
         bundle = self.directory / "bundle"
@@ -249,11 +424,12 @@ class ReleaseAssetCase(unittest.TestCase):
         bundled = self.directory / "bundled.exe"
         bundled.write_bytes(b"application patched for NSIS")
         with patch.object(assets, "resolve", return_value=SHA), patch.object(assets, "read_versions", return_value={"app":"0.2.0"}), patch.object(assets,"extract_payload",return_value=bundled,create=True) as extract:
-            assets.collect(bundle,binary,target,SHA,"0.2.0")
+            assets.collect(bundle,binary,target,SHA,"0.2.0",self.fingerprint_file())
         installer = next(target.glob("*-setup.exe"))
         self.assertEqual(installer.read_bytes(),b"current")
-        self.assertEqual(assets.verify_current(target,SHA,"0.2.0")["executable_sha256"],
-                         hashlib.sha256(bundled.read_bytes()).hexdigest())
+        metadata=assets.verify_current(target,SHA,"0.2.0")
+        self.assertEqual(metadata["executable_sha256"],hashlib.sha256(bundled.read_bytes()).hexdigest())
+        self.assertEqual(metadata["persistent_format"],FINGERPRINT)
         extract.assert_called_once()
 
     def test_payload_extraction_selects_one_root_binary_without_running_installer(self):
@@ -287,12 +463,12 @@ class ReleaseAssetCase(unittest.TestCase):
 
     def test_bad_download_hash_never_becomes_a_usable_old_package(self):
         import io
-        baseline = {"assets":[{"name":"old-setup.exe","url":"https://example.invalid/old",
-                                "sha256":"0"*64}]}
+        entry = {"assets":[{"name":"old-setup.exe","url":"https://example.invalid/old",
+                            "sha256":"0"*64}]}
         target = self.directory / "old"
         with patch.object(assets,"urlopen",return_value=io.BytesIO(b"wrong bytes")):
             with self.assertRaises(ValueError):
-                assets.download_baseline(target,baseline)
+                assets.download_entry(entry,target)
         self.assertFalse((target / "old-setup.exe").exists())
         self.assertFalse(list(target.glob("*.download")))
 

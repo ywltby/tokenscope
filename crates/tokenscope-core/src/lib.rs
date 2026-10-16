@@ -10,6 +10,7 @@ pub mod model;
 pub mod model_identity;
 pub mod modelsdev;
 pub mod openrouter;
+pub mod persistent_format;
 pub mod pricing;
 pub mod query;
 pub mod report;

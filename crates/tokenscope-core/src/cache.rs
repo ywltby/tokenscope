@@ -62,7 +62,10 @@ pub struct CacheStats {
 /// 携带源文件内 0-based 行序（历史库来源定位用）——旧行的"子代理被跳过"是
 /// 另一种口径，必须整体失效重解析（旧缓存里的 sidechain 用量无从恢复，
 /// 由源日志重解析补上）。
-const SCHEMA_VERSION: &str = "11";
+///
+/// `pub`：供 [`crate::persistent_format`] 汇总持久格式指纹（UP03）；字符串值
+/// 与写入缓存的字节完全一致，可见性变化不影响缓存内容或失效语义。
+pub const SCHEMA_VERSION: &str = "11";
 
 fn fingerprint(size: u64, mtime_ms: i64) -> (i64, i64) {
     // u64 → i64 存库；实际文件大小远小于 i64 上限。
