@@ -1,6 +1,6 @@
 # PR2：真实扫描状态与读取动画
 
-> 状态：[审阅第 13 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过；F01–F05 未实施。PR1 已合入 main（`19aae8b`）；按用户 2026-10-16 决定，须等[升级测试补测计划](../archive/implemented/2026-10-16-upgrade-matrix.md)（含原生验收重启修复 UP09）合入后再开工，F04 基于其新的实例生命周期扩展原生验收。
+> 状态：[审阅第 13 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过；F01–F05 未实施。PR1 已合入 main（`19aae8b`）；按用户 2026-10-16 决定，须等[升级测试补测计划](../archive/implemented/2026-10-16-upgrade-matrix.md)（含原生验收重启修复 UP09）合入后再开工，F04 基于其新的实例生命周期扩展原生验收。**2026-10-17：升级测试补测（v0.3.3）与发布去重（v0.3.4）均已合入，可以开工**；分支 `feat/collection-status` 已从 main `0ee50f4` 建立。用户同日决定先做 F00。
 > 前置条件：[PR1 目录迁移](../archive/implemented/2026-10-15-workspace-layout.md)已合入 main。实施时从最新 main 创建 `feat/collection-status`，独立 minor 和独立门禁，不依赖 [PR3 来源管理](2026-10-14-source-discovery-and-additional-paths.md)；PR3 在本 PR 合入后再启动。
 
 **Goal：** 扫描由真实工作驱动、至少显示 1 秒，作为可见读取心跳；只有新事实或既有时间窗口规则触发统计刷新，取消常驻具体更新时间。
@@ -85,6 +85,13 @@ type CollectionStatus = {
 
 每项先添加能失败的定向用例，保存失败断言，再最小实现、运行相关测试并单独提交。执行时使用 executing-plans 技能；本设计未批准前不实施。
 
+### F00：升级登记表测试与真实登记表脱钩（用户 2026-10-17 决定，本 PR 第一个提交）
+
+- 问题：`scripts/test_upgrade_baselines.py` 的 `RegistryCase.setUp` 直接读取真实登记表 `scripts/fixtures/upgrade_baselines.json`，测试里写死了“最新版本是哪个”。每登记一个上一版就得改测试，PR #11 登记 0.3.3 时改了 68 行（[审阅 §22.2](../../reviews/2026-10-15-source-discovery-plan-review.md#222-计划外的改动)）。
+- 做法：把 main `0ee50f4` 上的真实登记表（0.1.0、0.2.0–0.3.3）原样复制为固定测试登记表 `scripts/fixtures/upgrade_baselines_test.json`，`RegistryCase.setUp` 改为 `baselines.load_registry(<该文件>)`。测试数据保持 PR #11 改后的写法，不再改动。
+- 不改：`RepositoryCase` 与 `test_release_assets.py` 只核对仓库名和 0.1.0 这类固定事实，继续读真实登记表；`upgrade_baselines.py` 本身不改。真实登记表的正确性由 CI gate 的 `upgrade_baselines.py check` 保证。
+- 验收：`python -B -m unittest discover -s scripts -p "test_upgrade_baselines.py" -v` 通过；本 PR 交付时执行 `upgrade_baselines.py add --tag v0.3.4`，测试文件不需要任何改动。
+
 ### F01：根库真实采集生命周期
 
 - 修改 `crates/tokenscope-core/src/report.rs`；必要时将状态类型单独放入 `crates/tokenscope-core/src/collection_status.rs` 并在 `crates/tokenscope-core/src/lib.rs` 导出。
@@ -126,6 +133,7 @@ type CollectionStatus = {
 
 | 任务 | 状态 | 完成证据 |
 | --- | --- | --- |
+| F00 登记表测试脱钩 | 未开始 | — |
 | F01 生命周期 | 未开始 | — |
 | F02 宿主事件与查询 | 未开始 | — |
 | F03 状态与动画 | 未开始 | — |
