@@ -1,6 +1,6 @@
 # 发布流程去掉重复的完整测试
 
-> 状态：**待用户确认**（2026-10-17）。执行方补充（`3c10bd9`）经[审阅第 21 节](../../reviews/2026-10-15-source-discovery-plan-review.md#21-发布去重计划复核执行方补充-3c10bd9)复核：接受风险表述与版本登记的修正，删去过度防御的步骤，§6 重写。
+> 状态：**已实施，待合入后的 Release 取证**（2026-10-17）。实现见 PR [#11](https://github.com/ywltby/tokenscope/pull/11)，复核见[审阅第 22 节](../../reviews/2026-10-15-source-discovery-plan-review.md#22-发布去重实现复核pr-11head-6f495f4)。执行方补充（`3c10bd9`）经[审阅第 21 节](../../reviews/2026-10-15-source-discovery-plan-review.md#21-发布去重计划复核执行方补充-3c10bd9)复核：接受风险表述与版本登记的修正，删去过度防御的步骤，§6 重写。
 > 交付：独立小 PR，patch（只改发布工作流、一条契约测试与文档，不改程序）。**在当前分支 `docs/release-gate-dedup-plan` 上实施**：它已带本计划与第二批计划归档（`fcc3578`），从 main 另建分支会丢掉归档提交。排在 [PR2 扫描反馈](2026-10-15-collection-status.md)之前。
 
 ## 1. 现状（2026-10-17 核实）
@@ -60,6 +60,12 @@
 2. PR：最终 HEAD 的 CI `gate`、`native-ui` 通过；本 PR 改了 `scripts/**` 与 `.github/workflows/**`，会触发 install-test，它也须通过。
 3. 合入后：Release 的 gate 日志里只有 checkout、Python 与两个身份校验；build、install-test、升级矩阵、两条升级链与 publish 全部成功，新版本发布。gate 与整个工作流的耗时如实记录，不设硬门槛。
 4. 回填：PR 链接、Release run 链接与各作业耗时写到本节，然后归档本计划。
+
+已取得（HEAD `6f495f4`，2026-10-16 UTC）：
+
+- 第 1 条：新契约在旧工作流上失败（Release gate 仍含 `./.github/actions/setup`），改后通过；提交钩子完整模式通过。
+- 第 2 条：PR #11 首次运行全部通过：CI `gate` 17m12s、`native-ui` 7m7s、`install-test` 11m26s，四项单跳升级（0.1.0 / 0.3.3 × present / deleted）均约 1 分钟。
+- 第 3、4 条待合入后的 Release。
 
 ## 6. 执行步骤
 

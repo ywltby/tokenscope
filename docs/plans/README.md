@@ -8,7 +8,7 @@
 
 按顺序：
 
-1. **发布去重 / patch（实施中）**：[发布流程去掉重复的完整测试](active/2026-10-17-release-gate-dedup.md)，R01–R03；Release 的 gate 只保留版本与身份校验，完整测试由 PR 必需检查保证，发布预计从约 31 分钟降到约 14 分钟。
+1. **发布去重 / patch（PR #11 已通过检查，待合入）**：[发布流程去掉重复的完整测试](active/2026-10-17-release-gate-dedup.md)，R01–R03；Release 的 gate 只保留版本与身份校验，完整测试由 PR 必需检查保证，发布预计从约 31 分钟降到约 14 分钟。
 2. **PR2 / minor**：[真实扫描反馈](active/2026-10-15-collection-status.md)，F01–F05；前置的目录迁移与升级测试补测均已合入，从最新 main 建 `feat/collection-status`。
 3. **PR3 / minor**：[当前用户来源目录与追加路径](active/2026-10-14-source-discovery-and-additional-paths.md)，S01–S07；PR2 合入后从最新 main 建 `feat/source-paths`。
 4. **整合计划尾项**：N10、N11、N13 与系统签字，见[整合计划](active/2026-10-11-consolidated-remaining-work.md)。

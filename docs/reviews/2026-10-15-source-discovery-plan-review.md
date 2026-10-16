@@ -625,3 +625,27 @@ UP09 一共约 2900 行：`native-instance.mjs` 867 行，两份测试共约 100
 - 核对 tag 解引用、metadata SHA、安装包哈希。`publish` 本来就做这些校验。
 - gate 5 分钟硬门槛，以及排队时间与执行时间分开统计。改为如实记录耗时，不设硬门槛。
 - 回填 6 行证据表。改为回填 PR 链接、Release run 链接和各作业耗时。
+
+## 22. 发布去重实现复核（PR #11，HEAD 6f495f4）
+
+结论：**可以合入。** 改动范围与精简后的计划一致，PR 首次运行全部通过。
+
+### 22.1 逐项核对
+
+| 项 | 核对结果 |
+| --- | --- |
+| R01 `release.yml` | 只改 `gate`：删除 setup 与 checks，加 setup-python 3.12（固定 SHA 与其他作业相同），timeout 45 → 10，加一行注释；checkout、两个校验步骤、`id: metadata`、六项 outputs 与其余六个作业的 diff 为空 |
+| R02 契约测试 | 三条断言与计划一致。复核时把 `release.yml` 换回 main 版本运行，测试失败（gate 含 `./.github/actions/setup`）；恢复后通过 |
+| R03 文档 | `CLAUDE.md`「发布与升级」写明 Release gate 只做身份校验、完整测试由 PR 必需检查保证、main 的 CI 与 Native UI E2E 并行不阻断 |
+| 登记 v0.3.3 | 提交 `e3eb680`、持久格式指纹与 `build-metadata.json` 一致；四个资产的 sha256 与 GitHub digest 逐一相同 |
+| 版本 | 0.3.3 → 0.3.4，patch，`release-change.json` 摘要已更新 |
+| PR 检查 | 同一 HEAD：CI `gate`、`native-ui`、`install-test`、`plan-upgrades` 与四项单跳升级均为首次运行通过；`upgrade-chain` 在 PR 上按设计跳过；`mergeStateStatus` 为 CLEAN |
+
+### 22.2 计划外的改动
+
+- **`cf73995` 原生实例退出用例的偶发红灯**：Windows 上轮询可能先于父进程回收子进程发现进程已退出，此时 `child.exitCode` 仍为 null。修复只放宽轮询路径（允许 3 或 null），exit 事件路径仍严格要求 3；与同文件另两个真实子进程用例对 unknown 退出码的处理一致。提交说明写明了原因，不是重跑碰绿，属于 CLAUDE.md 允许直接修复的测试红灯。接受。
+- **`scripts/test_upgrade_baselines.py` 改了 68 行**：原因是 `RegistryCase.setUp` 直接读取真实登记表 `scripts/fixtures/upgrade_baselines.json`，登记 0.3.3 后，写死的版本号与选择结果都要跟着改。本次修改正确，但问题会在每次登记上一版时重复出现（PR2 登记 0.3.4 时还要再改一遍）。建议：测试改为读取一份冻结的测试登记表，与真实登记表脱钩；真实登记表的正确性已由 CI gate 的 `upgrade_baselines.py check` 保证。不阻断本 PR。
+
+### 22.3 文档
+
+执行方指出的计划页头“待用户确认”已改为“已实施，待合入后的 Release 取证”，§5 回填本地与 PR 证据；计划总账同步。合入后的 Release 取证（gate 日志、双链、发布与耗时）完成前不归档。
