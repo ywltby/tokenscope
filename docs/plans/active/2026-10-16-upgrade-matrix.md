@@ -1,6 +1,6 @@
 # 升级测试补测：起点矩阵、连续升级链与原生验收重启修复
 
-> 状态：**用户已确认（2026-10-16）**，第 9 节 D1–D5 均已决定；同日用户决定把原生验收重启连接修复（UP09，§4.8）并入本计划，不推迟到 PR2。执行方补充（`fb35e91`）经[审阅第 18 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复核后已并入正文；按用户要求删去过度防御的设计与过高的验收门槛（第 19 节）。**本地实施已完成（2026-10-16）**，逐项证据见第 10 节；尚未创建 PR，五场景安装、升级矩阵远程运行、Release 双链与原生 20 轮重启取证仍待该 PR 的门禁。
+> 状态：**用户已确认（2026-10-16）**，第 9 节 D1–D5 均已决定；同日用户决定把原生验收重启连接修复（UP09，§4.8）并入本计划，不推迟到 PR2。执行方补充（`fb35e91`）经[审阅第 18 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复核后已并入正文；按用户要求删去过度防御的设计与过高的验收门槛（第 19 节）。**本地实施已完成（2026-10-16）**，第二轮独立复核的 5 项问题已修复，逐项证据见第 10 节；PR [#10](https://github.com/ywltby/tokenscope/pull/10) 的 CI、Install test（含 0.1.0 与 0.3.2 两个起点的四个作业）与 Native UI E2E 均已通过，Release 的双链与 `v0.3.3` 发布待合入 main。
 > 交付：独立 PR，patch（测试与发布门禁维护，不改变统计口径和界面）。实施时从最新 main 建 `feat/upgrade-matrix`。
 > 顺序：**下一个 PR**，在 [PR2 扫描反馈](2026-10-15-collection-status.md)之前合入。PR2 的 F04 要扩展同一个原生验收脚本，先修好重启连接，PR2 才能在稳定的测试架上取证；也因此早于 [PR3 来源目录](2026-10-14-source-discovery-and-additional-paths.md)，PR3 的设置迁移能直接得到真实 0.3.x 安装包的升级覆盖（见 §8）。
 > 承接：[整合计划 N12](2026-10-11-consolidated-remaining-work.md) 的“真实旧包升级”责任；本计划只扩展起点与升级次数，不改变 N12 已验收的 0.1.0 单跳场景。
@@ -301,11 +301,11 @@
 - 实测纠正了两处与计划假设不符的事实：`Get-NetTCPConnection` 的 `State` 在 JSON 里是数字枚举（只认字符串会把真实监听者判成“无监听者”），undici 的 `fetch failed` 把真实原因放在 `cause`（错误链展开后 `ECONNREFUSED` 等才按可重试处理）。两处都补了单元测试。
 - CLAUDE.md 已写明“Native UI E2E 失败先按证据说明原因，重跑不能替代原因”，并记录 20 轮压测只在本地取证。
 
-### 10.7 未完成项（远程门禁）
+### 10.7 远程门禁（PR #10）
 
-- PR 侧：CI、Native UI E2E、Install test 与升级矩阵（0.1.0/0.3.2 × present/deleted）在同一 HEAD 全部通过，并核对每个作业的 `upgrade-result.json` 写明起点版本与提交。
-- Release 侧：main 的两条连续升级链通过、`v0.x.y` 发布后回填运行链接。
-- 五场景安装与真实 `tauri build` 仍只在 GitHub-hosted Runner 执行，本机只跑契约。
+- PR：[#10](https://github.com/ywltby/tokenscope/pull/10)（base `main`，head `docs/upgrade-matrix-plan`，最终提交 `34518ef`）。
+- 同一 HEAD 的远程结果（2026-10-16）：CI `gate` 18m56s 通过（含新增的登记表远端 `check` 步骤）；Install test `install-test` 11m39s 通过，`plan-upgrades` 12s 从登记表选出两个起点，四个单跳作业全部通过——`upgrade-test (0.1.0, present)` 54s、`(0.1.0, deleted)` 1m4s、`(0.3.2, present)` 58s、`(0.3.2, deleted)` 1m4s；`upgrade-chain` 按设计在 PR 上跳过（仅手动触发）；Native UI E2E `native-ui` 11m30s 通过——main `19aae8b` 上失败的同一检查在新的实例生命周期下通过。
+- 仍未取得：合入 main 后 Release 的两条连续升级链、`v0.3.3` 发布与五场景安装的真实签名；这些按 §7 第 3 步在发布批次里取证。
 
 ### 10.8 复核修复（2026-10-16 第二轮）
 
