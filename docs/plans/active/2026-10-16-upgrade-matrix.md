@@ -306,3 +306,23 @@
 - PR 侧：CI、Native UI E2E、Install test 与升级矩阵（0.1.0/0.3.2 × present/deleted）在同一 HEAD 全部通过，并核对每个作业的 `upgrade-result.json` 写明起点版本与提交。
 - Release 侧：main 的两条连续升级链通过、`v0.x.y` 发布后回填运行链接。
 - 五场景安装与真实 `tauri build` 仍只在 GitHub-hosted Runner 执行，本机只跑契约。
+
+### 10.8 复核修复（2026-10-16 第二轮）
+
+独立复核对第 10.1–10.6 节提出 5 项问题，逐项修复并补了能红的契约：
+
+| 复核项 | 修复 | 新增契约 |
+| --- | --- | --- |
+| P1：0.3.2 起点的旧期望清单位缺失（`ExpectedOldManifest` 未初始化，真实升级会失败） | `New-UpgradeCase` 从登记表 `expected_old` 初始化该字段 | 真实 Case + 真实 `history.db` 跑真实 `Check-OldUsage`（经 `inspect_history.py --verify-manifest`）通过；`ExpectedOldManifest` 与登记值一致 |
+| P1：撤回保护读的是工作区登记表（工作流检出的是发布提交），最新 main 上的撤回看不到 | `publish` 改为 `latest_main_registry()`：先取 main 的固定提交 SHA，再按该 SHA 读登记表并校验结构，任何读取失败都阻断发布 | “本地表允许、最新 main 已撤回”仍拒绝且不发生任何远端写操作；main 读取失败即阻断；`unpublished` 的当前版本同样拒绝 |
+| P1：连续升级链实际跳过 history.db 备份验收（判定按起点夹具类型，链路起点永远是 `legacy-cache`） | 备份判定改按**本跳安装前的旧库状态**（`OldHistorySchema`）与升级前备份清单（`BackupsBefore`）：结构升级必须新增且不得覆盖同名备份，结构未变不得新增或改写任何备份；`Check-CurrentUsage` 无条件执行备份核对 | `Profile=legacy-cache` 且已有历史库时非法备份必须失败；结构升级覆盖已有备份失败；结构未变新增/改写备份失败；链路每一跳都带旧库状态并进入核对路径 |
+| P2：登记 `unpublished` 版本会让 `entries` 崩溃；`--check` 又强制基础版本必须 `published`，与“发布流水线失败也要登记”的流程冲突 | `resolved_entry` 对无资产条目输出空的安装包字段；`--check` 只要求基础版本**已登记**，非 `published` 改为结果里的显式警告 | `unpublished` 条目仍可解析出版本、状态与期望清单路径；基础版本 `unpublished`/`withdrawn` 通过并带警告，且不作为起点 |
+| P2：原生连接预算与退出即时检测没有落到实际异步调用 | 见 10.9 | 见 10.9 |
+
+### 10.9 原生连接预算与退出即时检测（复核 P2）
+
+- 纯逻辑（`frontend/scripts/lib/native-instance.mjs`）：新增 `remainingBudgetMs` / `clampTimeoutToBudget`（自身超时取 `min(max(自身超时, 下限), 剩余预算)`，预算耗尽返回 0）、`HostExitError` / `BudgetExhaustedError`、`createHostExitSignal`（子进程 `exit` 事件与 250 ms 存活轮询取先到者）、`awaitWithHostExit`（目标完成 / 宿主退出 / 预算耗尽三者竞速，被取消时把迟到的成功结果交给清理回调而不回传）、`createProbeFn`（探测自身 30 秒超时被剩余预算截断，预算耗尽不 spawn，宿主退出立刻结束探测）。
+- 驱动（`frontend/scripts/native-acceptance.mjs`）：进程探测改为受预算约束的 `createProbeFn`；`/json/version`、`connectOverCDP` 与两次重试间隔、页面 target 轮询全部走 `budgetedConnect` / `waitOrExit`，取消时 `AbortController.abort()` 与 `browser.close()` 关闭底层连接，被取消的尝试在 `launches[]` 里标 `aborted`，成功结果不写入 `this.browser`；`launch` 启动前解除旧监听、启动后装配宿主退出信号并在页面阶段使用本阶段截止时刻；`stop` / `attachToExisting` 结束时解除监听（attach 仍不认领、不结束外部实例）。证据新增 `launch_deadline_ms` / `phase_deadline_ms` / `host_exit_detected` / `budget_ms`。
+- 新增 `frontend/scripts/lib/native-instance.async.test.mjs`（16 项真实异步组合：真实子进程退出被事件与轮询检出、退出码 0 与非 0 都立即失败、预算耗尽不再发起第二次连接、探测被预算截断、竞速超时后迟到连接被关闭且不算新尝试、`socket hang up` 后第二次成功且两次尝试入证据）。
+- 复核点名之外另有 3 处同类缺陷一并修：`fetchJsonVersion` 的超时被下限抬出预算、连接重试的间隔等待与页面轮询在等待期完全不感知宿主退出。
+- 本地实跑：`pnpm --dir frontend test` 42 文件 / 523 项通过（既有 507 项不减），`typecheck` / `format:check` / `build` / `node --check` 通过；`--scenario ui-system --port 9700` 15/15 通过（`real_untouched=true`）；故障注入 `--exe cmd.exe` 在启动后 17 ms 报「宿主在启动阶段退出（退出码=0）」且证据里 `connect_attempts[0].aborted="host-exit"`，`--exe notepad.exe`（不监听端口）在 45006 ms 报「启动预算 45000 ms 用尽」——总时限未被放宽。
