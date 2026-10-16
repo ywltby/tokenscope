@@ -17,6 +17,10 @@
       （缺值输出 NULL）——供**按请求身份逐条核对** cwd 字段与 NULL
       语义的断言使用（M06：DISTINCT 集合相等验不出单行改 NULL 或
       两条互换）。
+  python scripts/inspect_history.py <history.db> --schema-version
+      输出历史库结构版本（`PRAGMA user_version`）或 `absent`（库不存在）。
+      升级编排用它判断这一跳是否发生了结构升级，从而决定是否必须有
+      `history.db.backup-v<旧结构版本>`。
   python scripts/inspect_history.py <history.db> --verify-manifest <期望.json>
       N12/M06 严格校验：按业务身份 (app, session_id, record_id) 与期望
       文件逐条比较 model_raw、project_key、session_initial_cwd、
@@ -221,6 +225,23 @@ def run_verify_manifest(db_path, expected_path) -> int:
 
 def main() -> int:
     argv = sys.argv[1:]
+    if "--schema-version" in argv:
+        rest = [a for a in argv if a != "--schema-version"]
+        if len(rest) != 1:
+            print(__doc__)
+            return 2
+        con = open_readonly(rest[0])
+        if con is None:
+            print("absent")
+            return 0
+        try:
+            print(con.execute("PRAGMA user_version").fetchone()[0])
+        except sqlite3.DatabaseError as exc:
+            print(f"无法按 SQLite 打开 {rest[0]}: {exc}", file=sys.stderr)
+            return 2
+        finally:
+            con.close()
+        return 0
     if "--verify-manifest" in argv:
         idx = argv.index("--verify-manifest")
         rest = argv[:idx] + argv[idx + 1:]

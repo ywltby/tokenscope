@@ -12,6 +12,8 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -B -m unittest discover -s scripts -p "test_upgrade_fixture.py" -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_upgrade_baselines.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -B -m unittest discover -s scripts -p "test_upgrade_workflow.py" -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         pwsh -NoProfile -File scripts/test_upgrade_helpers.ps1

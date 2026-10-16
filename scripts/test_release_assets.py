@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,6 +11,16 @@ from unittest.mock import patch
 import release_assets as assets
 
 SHA = "a" * 40
+FINGERPRINT = {"cache_schema": "11", "history_schema": "4", "parser_revision": "1",
+               "identity_revision": "1", "pricing_index": "9", "settings_format": "1"}
+
+
+def legacy_registry(status="published"):
+    entry = {"version": "0.1.0", "tag": "v0.1.0", "commit": SHA, "origin_release": "pre-" + SHA,
+             "profile": "legacy-cache", "status": status}
+    if status == "withdrawn":
+        entry["withdrawn"] = {"date": "2026-10-20", "reason": "崩溃"}
+    return {"schema_version": 2, "repository": "ywltby/tokenscope", "entries": [entry]}
 
 
 class FakeGithub:
@@ -50,12 +61,18 @@ class ReleaseAssetCase(unittest.TestCase):
         self.exe = self.directory / "TokenScope_v0.2.0_windows-x64-setup.exe"
         self.exe.write_bytes(b"inert installer, never executed")
         self.metadata = self.directory / "build-metadata.json"
-        self.metadata.write_text(json.dumps({"schema_version": 1, "version": "0.2.0",
-                                             "commit": SHA, "executable_sha256": "b" * 64}),
+        self.metadata.write_text(json.dumps({"schema_version": 2, "version": "0.2.0",
+                                             "commit": SHA, "executable_sha256": "b" * 64,
+                                             "persistent_format": FINGERPRINT}),
                                  encoding="utf-8")
 
     def checksum(self):
         assets.write_checksums(self.directory, [self.exe, self.metadata])
+
+    def fingerprint_file(self):
+        path = self.directory / "persistent-format.json"
+        path.write_text(json.dumps(FINGERPRINT), encoding="utf-8")
+        return path
 
     def test_checksums_bind_exact_files_and_build_identity(self):
         self.checksum()
@@ -227,16 +244,60 @@ class ReleaseAssetCase(unittest.TestCase):
             github.remember_release("v0.2.1",{"id":456,"tag_name":"v0.2.1"})
 
     def test_baseline_pins_source_original_three_assets_and_expected_fixture(self):
-        baseline = assets.load_baseline(Path(__file__).parent / "fixtures/upgrade_baseline.json")
-        self.assertEqual(baseline["version"], "0.1.0")
-        self.assertEqual(baseline["cache_schema"], "6")
+        registry = assets.load_registry()
+        baseline = assets.published_entry(registry, "0.1.0")
+        self.assertEqual(baseline["profile"], "legacy-cache")
+        self.assertEqual(baseline["persistent_format"]["cache_schema"], "6")
         self.assertEqual(baseline["commit"], "8d1d90de29aa00d10b9a7e4b8f906d909726446b")
+        self.assertEqual(baseline["origin_release"], "pre-" + baseline["commit"])
         self.assertEqual(len(baseline["assets"]), 3)
         self.assertTrue(all(a["url"].startswith(
             "https://github.com/ywltby/tokenscope/releases/download/pre-" + baseline["commit"] + "/")
-                            for a in baseline["assets"]))
-        self.assertEqual(baseline["assets"][0]["sha256"],
+            for a in baseline["assets"]))
+        self.assertEqual(assets.installer_of(baseline)["sha256"],
                          "798e7722120b414d2014cc80e987c831914f11d211abd8b5595f95184b62ece6")
+
+    def test_publish_refuses_withdrawn_version_before_any_github_call(self):
+        (self.directory / "provenance.sigstore.json").write_bytes(b"attestation bundle")
+        registry = {"schema_version": 2, "repository": "ywltby/tokenscope", "entries": [
+            {"version": "0.1.0", "tag": "v0.1.0", "commit": SHA, "origin_release": "v0.1.0",
+             "profile": "legacy-cache", "status": "withdrawn",
+             "withdrawn": {"date": "2026-10-20", "reason": "崩溃"},
+             "assets": [{"name": "TokenScope_v0.1.0_windows-x64-setup.exe",
+                         "url": "https://github.com/ywltby/tokenscope/releases/download/v0.1.0/"
+                                "TokenScope_v0.1.0_windows-x64-setup.exe", "sha256": "0" * 64}]},
+            {"version": "0.2.0", "tag": "v0.2.0", "commit": SHA, "origin_release": "v0.2.0",
+             "profile": "history", "status": "withdrawn",
+             "withdrawn": {"date": "2026-10-20", "reason": "崩溃"},
+             "assets": []}]}
+        with patch.object(assets, "verify_current", return_value={"executable_sha256": "b" * 64}), \
+                patch.object(assets, "load_registry", return_value=registry), \
+                patch.object(assets, "Github") as github, \
+                patch.dict(os.environ, {"GITHUB_REPOSITORY": "ywltby/tokenscope"}):
+            with self.assertRaises(ValueError):
+                assets.publish(self.directory, SHA, "0.2.0")
+        github.assert_not_called()
+
+    def test_build_metadata_requires_complete_fingerprint(self):
+        for value in (None, {}, {key: None for key in FINGERPRINT},
+                      {key: FINGERPRINT[key] for key in list(FINGERPRINT)[:5]}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                assets.validate_persistent_format(value)
+        for value in ({**FINGERPRINT, "cache_schema": 11}, {**FINGERPRINT, "extra": "1"}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                assets.validate_persistent_format(value)
+        self.assertEqual(assets.read_persistent_format(self.fingerprint_file()), FINGERPRINT)
+
+    def test_verify_current_rejects_metadata_without_fingerprint(self):
+        for payload in ({"schema_version": 1, "version": "0.2.0", "commit": SHA,
+                         "executable_sha256": "b" * 64},
+                        {"schema_version": 2, "version": "0.2.0", "commit": SHA,
+                         "executable_sha256": "b" * 64}):
+            with self.subTest(payload=payload):
+                self.metadata.write_text(json.dumps(payload), encoding="utf-8")
+                self.checksum()
+                with self.assertRaises(ValueError):
+                    assets.verify_current(self.directory, SHA, "0.2.0")
 
     def test_collection_selects_current_version_even_with_stale_cached_installer(self):
         bundle = self.directory / "bundle"
@@ -249,11 +310,12 @@ class ReleaseAssetCase(unittest.TestCase):
         bundled = self.directory / "bundled.exe"
         bundled.write_bytes(b"application patched for NSIS")
         with patch.object(assets, "resolve", return_value=SHA), patch.object(assets, "read_versions", return_value={"app":"0.2.0"}), patch.object(assets,"extract_payload",return_value=bundled,create=True) as extract:
-            assets.collect(bundle,binary,target,SHA,"0.2.0")
+            assets.collect(bundle,binary,target,SHA,"0.2.0",self.fingerprint_file())
         installer = next(target.glob("*-setup.exe"))
         self.assertEqual(installer.read_bytes(),b"current")
-        self.assertEqual(assets.verify_current(target,SHA,"0.2.0")["executable_sha256"],
-                         hashlib.sha256(bundled.read_bytes()).hexdigest())
+        metadata=assets.verify_current(target,SHA,"0.2.0")
+        self.assertEqual(metadata["executable_sha256"],hashlib.sha256(bundled.read_bytes()).hexdigest())
+        self.assertEqual(metadata["persistent_format"],FINGERPRINT)
         extract.assert_called_once()
 
     def test_payload_extraction_selects_one_root_binary_without_running_installer(self):
@@ -287,12 +349,12 @@ class ReleaseAssetCase(unittest.TestCase):
 
     def test_bad_download_hash_never_becomes_a_usable_old_package(self):
         import io
-        baseline = {"assets":[{"name":"old-setup.exe","url":"https://example.invalid/old",
-                                "sha256":"0"*64}]}
+        entry = {"assets":[{"name":"old-setup.exe","url":"https://example.invalid/old",
+                            "sha256":"0"*64}]}
         target = self.directory / "old"
         with patch.object(assets,"urlopen",return_value=io.BytesIO(b"wrong bytes")):
             with self.assertRaises(ValueError):
-                assets.download_baseline(target,baseline)
+                assets.download_entry(entry,target)
         self.assertFalse((target / "old-setup.exe").exists())
         self.assertFalse(list(target.glob("*.download")))
 

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "description": "设置格式迁移规则：键为『起点设置格式->当前设置格式』，值为字段变换规则。只支持恒等（空 operations）、rename（字段重命名/移动）与 default（缺失字段的期望默认值）三种操作；未声明的组合一律失败。SETTINGS_FORMAT_REVISION 递增时必须同步这里。",
+  "migrations": {
+    "1->1": {
+      "operations": []
+    }
+  }
+}

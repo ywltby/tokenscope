@@ -1,5 +1,6 @@
 #Requires -Version 7
 # 升级编排契约：外部安装/应用动作均替换；文件边界只用命名临时目录。
+# 编排本身（登记表条目、按场景切换期望清单、备份规则、链路顺序）用真实实现。
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "install_test_helpers.ps1")
 . (Join-Path $PSScriptRoot "installer_helpers.ps1")
@@ -7,6 +8,7 @@ $ErrorActionPreference = "Stop"
 
 $script:Trace = [System.Collections.Generic.List[string]]::new()
 $script:Assertions = 0
+$script:FailAt = ""
 function Check([bool]$Value, [string]$Message) {
     if (-not $Value) { throw "FAIL $Message" }
     $script:Assertions++
@@ -20,6 +22,11 @@ function Expect-Failure([scriptblock]$Action, [string]$Message) {
 
 $contractRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("tokenscope-upgrade-contracts-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $contractRoot | Out-Null
+# 真实实现先留底：后面替换外部动作时要能回到它们（避免递归替换自己）。
+$script:RealPython = ${function:Invoke-UpgradePython}
+$script:RealSetJump = ${function:Set-UpgradeJump}
+$script:RealCaseResult = ${function:Save-UpgradeCaseResult}
+$script:RealJumpResult = ${function:Save-JumpResult}
 try {
     Expect-Failure { Assert-HostedInstallRunner -Actions "false" -Environment "github-hosted" -TempRoot $contractRoot } "本机执行被拒绝"
     Expect-Failure { Assert-HostedInstallRunner -Actions "true" -Environment "self-hosted" -TempRoot $contractRoot } "持久自托管目录被拒绝"
@@ -75,91 +82,146 @@ sys.exit(37 if "--fail" in sys.argv else 0)
     Expect-Failure { Remove-UpgradeFixtureSources -SourcesRoot $contractRoot -TempRoot $contractRoot -SourceState "deleted" } "越出固定来源目录被拒绝"
     Expect-Failure { Reset-InstallData -DataDir $contractRoot -UserRoot $contractRoot } "越出 .tokenscope 数据目录被拒绝"
 
-    # 实际生命周期函数的调用链；M05 的进程健康条件由既有 26 项契约覆盖。
-    function Prepare-LaunchEvidence { param($DataDir,$EvidenceRoot,$Scenario,$RunId)
-        $script:Trace.Add("prepare"); return (Join-Path $contractRoot "logs") }
-    function Get-UninstallEntry { return [pscustomobject]@{ InstallLocation=$contractRoot; DisplayVersion="0.2.0" } }
-    function Launch-AppOnce { param($ExePath,$Scenario,$RunId,$EvidenceDir,$LiveLogsDir)
-        $script:Trace.Add("launch")
-        return [pscustomobject]@{ Process=[pscustomobject]@{Id=42}; Pid=42; Stage="launched";
-            QueryId=$null; Requests=$null; EvidenceDir=$EvidenceDir; LiveLogsDir=$LiveLogsDir } }
-    function Wait-CurrentSummary { param($Context,$ExpectedRequests,$TimeoutSeconds)
-        $script:Trace.Add("wait"); $Context.QueryId="q-fixture"; $Context.Requests=$ExpectedRequests }
-    function Observe-ProcessAlive { param($Context,$DurationSeconds,$PollMilliseconds) $script:Trace.Add("observe") }
-    function Close-AppGracefully { param($Context,$TimeoutSeconds) $script:Trace.Add("close"); $Context.Stage="closed" }
-    function Save-ScenarioResult { param($Context,$Pass,$Stage,$Detail) $script:Trace.Add("save:$Pass") }
-    function Copy-LiveLogsToEvidence { param($Context) $script:Trace.Add("copy") }
-    function Stop-ScenarioProcess { param($Context) $script:Trace.Add("stop") }
-    $case = [pscustomobject]@{ DataDir=(Join-Path $contractRoot "profile/.tokenscope");
-        EvidenceRoot=$contractRoot; SourceState="present"; ExpectedRequests=3 }
-    $script:Trace.Clear()
-    Invoke-UpgradeLifecycle -Case $case -Phase "current" -Verify {
-        param($Value) $script:Trace.Add("verify")
-    }
-    Check (($script:Trace -join ",") -eq "prepare,launch,wait,verify,observe,close,verify,save:True") "同一次启动贯穿验证、观察、关闭和关闭后复核"
-    $script:Trace.Clear()
-    Expect-Failure { Invoke-UpgradeLifecycle -Case $case -Phase "current" -Verify { throw "facts differ" } } "事实差异终止生命周期"
-    Check (-not $script:Trace.Contains("save:True")) "失败不能记成功"
-    Check ($script:Trace.Contains("stop")) "失败清理同一实例"
+    # 登记表驱动的作业上下文：起点身份、夹具类型、期望清单与请求数都来自登记表。
+    $repoRoot = Split-Path -Parent $PSScriptRoot
+    $script:InstalledVersion = "0.1.0"
+    function Get-UninstallEntry { return [pscustomobject]@{ InstallLocation=$contractRoot; DisplayVersion=$script:InstalledVersion } }
+    $dataRoot = Join-Path $contractRoot "profile/.tokenscope"
+    $tempRoot = Join-Path $contractRoot "runner-temp"
+    New-Item -ItemType Directory -Path $dataRoot,$tempRoot -Force | Out-Null
+    "price_auto_sync = false`n" | Set-Content -LiteralPath (Join-Path $dataRoot "settings.toml") -Encoding utf8NoBOM
+    "[[model]]`nprefix = ""x""`n" | Set-Content -LiteralPath (Join-Path $dataRoot "pricing.toml") -Encoding utf8NoBOM
+    $legacyCase = New-UpgradeCase -RepoRoot $repoRoot -InstallerPath (Join-Path $contractRoot "current-setup.exe") `
+        -AppVersion "0.3.3" -ExpectedCommit ("a"*40) -SourceState "present" -Origin "0.1.0" `
+        -EvidenceRoot (Join-Path $contractRoot "legacy-evidence") -Metadata ([pscustomobject]@{ executable_sha256=("b"*64) }) `
+        -DataDir $dataRoot -TempRoot $tempRoot
+    Check ($legacyCase.Profile -eq "legacy-cache") "0.1.0 起点使用旧缓存夹具类型"
+    Check ($legacyCase.ExpectedRequests -eq 3) "期望请求数取自登记表缺省清单"
+    Check ($legacyCase.ExpectedManifest -like "*upgrade-0.1.0*expected.json") "期望清单缺省指向 0.1.0 清单"
+    $historyCase = New-UpgradeCase -RepoRoot $repoRoot -InstallerPath (Join-Path $contractRoot "current-setup.exe") `
+        -AppVersion "0.3.3" -ExpectedCommit ("a"*40) -SourceState "deleted" -Origin "0.3.2" `
+        -EvidenceRoot (Join-Path $contractRoot "history-evidence") -Metadata ([pscustomobject]@{ executable_sha256=("b"*64) }) `
+        -DataDir $dataRoot -TempRoot $tempRoot
+    Check ($historyCase.Profile -eq "history") "0.3.2 起点使用历史库夹具类型"
+    Check ($historyCase.Baseline.commit -eq "19aae8b91eb61c0de2d0aaeea3016a4fef64e477") "登记提交与标签解引用一致"
+    Expect-Failure { New-UpgradeCase -RepoRoot $repoRoot -InstallerPath "x" -AppVersion "0.3.3" `
+        -ExpectedCommit ("a"*40) -SourceState "present" -Origin "9.9.9" `
+        -EvidenceRoot $contractRoot -Metadata $null } "未登记的起点被拒绝"
 
-    # 直接调用事实函数，确认非零输出落在本阶段，不依赖后续成功快照。
-    $shadowScripts = Join-Path $contractRoot "shadow/scripts"
-    New-Item -ItemType Directory -Path $shadowScripts,$case.DataDir -Force | Out-Null
-    $case | Add-Member RepoRoot (Split-Path -Parent $shadowScripts)
-    $case | Add-Member ExpectedManifest "inert-expected.json"
-    foreach ($name in @("upgrade_fixture.py","inspect_history.py")) {
-        [IO.File]::WriteAllText((Join-Path $shadowScripts $name),@'
-import json, sys
-sys.stdout.reconfigure(encoding="utf-8")
-print(json.dumps({"ok":False,"problems":["input_tokens expected=100 actual=99"]}))
-sys.exit(1)
-'@,[Text.UTF8Encoding]::new($false))
-    }
-    $factsContext = [pscustomobject]@{ EvidenceDir=$contractRoot; Stage="summary-complete" }
-    Expect-Failure { Check-OldUsage -Case $case -Context $factsContext } "旧版字段差异不能回退成功"
-    Check ((Get-Content -LiteralPath (Join-Path $contractRoot "old-facts-summary-complete.json") -Raw -Encoding utf8 |
-        ConvertFrom-Json).problems[0] -eq "input_tokens expected=100 actual=99") "旧版失败保留逐字段差异"
-    Expect-Failure { Check-CurrentUsage -Case $case -Context $factsContext } "新版字段差异不能回退成功"
-    Check ((Get-Content -LiteralPath (Join-Path $contractRoot "current-facts-summary-complete.json") -Raw -Encoding utf8 |
-        ConvertFrom-Json).problems[0] -eq "input_tokens expected=100 actual=99") "新版失败保留逐字段差异"
-    $failedCache = Join-Path $case.DataDir "cache.db"
-    [IO.File]::WriteAllBytes($failedCache,[byte[]](1,2,3))
-    Save-UpgradeFailureData -Case $case
-    Check ((Get-FileHash -LiteralPath $failedCache).Hash -eq
-        (Get-FileHash -LiteralPath (Join-Path $contractRoot "failed-data/cache.db")).Hash) "成功旧库快照前失败也保留原库"
+    # I4 备份规则：真实函数 + 注入的结构版本读数。
+    $script:CurrentSchema = 4
+    function Get-HistorySchemaVersion { param($RepoRoot,$Database) return $script:CurrentSchema }
+    function Invoke-UpgradePython { param([string[]]$Arguments,[string]$EvidencePath="")
+        $script:Trace.Add("python:"+$Arguments[0])
+        return [pscustomobject]@{ ok=$true } }
+    $backupCase = [pscustomobject]@{ RepoRoot=$repoRoot; DataDir=$dataRoot; EvidenceRoot=$contractRoot
+        OldHistorySchema=4; ExpectedOldManifest=(Join-Path $repoRoot "scripts/fixtures/upgrade-0.1.0/expected.json") }
+    $result = Assert-HistoryBackup -Case $backupCase -Expect "absent"
+    Check ($result.applicable -and $result.expect -eq "absent") "结构未变时备份规则适用且要求不存在"
+    "old" | Set-Content -LiteralPath (Join-Path $dataRoot "history.db.backup-v4") -Encoding utf8NoBOM
+    Expect-Failure { Assert-HistoryBackup -Case $backupCase -Expect "absent" } "结构未升级却出现备份被拒绝"
+    $script:CurrentSchema = 5
+    $result = Assert-HistoryBackup -Case $backupCase
+    Check ($result.expect -eq "created") "结构升级时自动要求备份"
+    Check ($result.exists -and $backupCase.BackupName -eq "history.db.backup-v4") "结构升级的备份被登记为证据"
+    Remove-Item -LiteralPath (Join-Path $dataRoot "history.db.backup-v4")
+    Expect-Failure { Assert-HistoryBackup -Case $backupCase } "结构升级却没有备份被拒绝"
+    $script:CurrentSchema = 4
+    $noHistory = [pscustomobject]@{ RepoRoot=$repoRoot; DataDir=$dataRoot; EvidenceRoot=$contractRoot
+        OldHistorySchema=$null; ExpectedOldManifest="unused" }
+    Check (-not (Assert-HistoryBackup -Case $noHistory).applicable) "没有旧历史库时备份规则不适用"
 
-    # 实际总编排函数：任何阶段失败均不能进入新版后续启动或发布成功记录。
-    $phases = @("Install-UpgradeBaseline","Prepare-OldUsage","Save-OldUpgradeState",
-        "Install-UpgradeCurrent","Assert-InstalledUpgrade","Assert-PreservedBeforeLaunch","Grant-UpgradeConsent")
-    $failureControl = [pscustomobject]@{ Name="" }
-    foreach ($phase in $phases) {
-        $name = $phase
-        Set-Item -Path ("Function:" + $name) -Value {
-            param($Case) $script:Trace.Add($name)
-            if ($failureControl.Name -eq $name) { throw "injected $name" }
-        }.GetNewClosure()
-    }
-    function Check-OldUsage { param($Case) }
-    function Check-CurrentUsage { param($Case) }
-    function Remove-UpgradeSources { param($Case) $script:Trace.Add("delete-source") }
+    # 编排顺序：真实 Invoke-UpgradeScenario/Invoke-UpgradeChain，只替换外部动作。
+    function Invoke-UpgradePython { param([string[]]$Arguments,[string]$EvidencePath="")
+        if ($Arguments -contains "download-baseline") {
+            $script:Trace.Add("download:"+$Arguments[$Arguments.IndexOf("--origin")+1])
+            return [pscustomobject]@{ installer=(Join-Path $contractRoot "old-setup.exe"); installer_sha256=("c"*64) }
+        }
+        return (& $script:RealPython -Arguments $Arguments -EvidencePath $EvidencePath) }
+    function Set-UpgradeJump { param($Case,[string]$Version)
+        $script:Trace.Add("jump:"+$Version)
+        return (& $script:RealSetJump -Case $Case -Version $Version) }
+    function Install-UpgradeBaseline { param($Case) $script:Trace.Add("install-baseline")
+        if ($script:FailAt -eq "install-baseline") { throw "injected install-baseline" } }
+    function Prepare-OldUsage { param($Case) $script:Trace.Add("prepare-old") }
     function Invoke-UpgradeLifecycle { param($Case,$Phase,$Verify)
-        $script:Trace.Add("lifecycle:$Phase")
-        if ($script:FailAt -eq "lifecycle:$Phase") { throw "injected lifecycle $Phase" } }
-    function Save-UpgradeCaseResult { param($Case,$Pass,$Detail) $script:Trace.Add("case:$Pass") }
+        $script:Trace.Add("lifecycle:"+$Phase)
+        if ($script:FailAt -eq ("lifecycle:"+$Phase)) { throw "injected lifecycle $Phase" } }
+    function Save-OldUpgradeState { param($Case) $script:Trace.Add("save-old") }
+    function Install-UpgradeCurrent { param($Case) $script:Trace.Add("install-current") }
+    function Assert-PreservedBeforeLaunch { param($Case) $script:Trace.Add("preserved") }
+    function Assert-InstalledUpgrade { param($Case) $script:Trace.Add("installed") }
+    function Grant-UpgradeConsent { param($Case) $script:Trace.Add("consent") }
+    function Install-UpgradePackage { param($Case,$Origin,$InstallerPath) $script:Trace.Add("install:"+$Origin)
+        if ($script:FailAt -eq ("install:"+$Origin)) { throw "injected install $Origin" } }
+    function Save-UpgradeCaseResult { param($Case,$Pass,$Detail)
+        $script:Trace.Add("case:$Pass")
+        & $script:RealCaseResult -Case $Case -Pass $Pass -Detail $Detail }
+    function Save-UpgradeFailureData { param($Case) $script:Trace.Add("failure-data") }
+    function Save-JumpResult { param($Case,$Phase,$Pass,$Detail="")
+        $script:Trace.Add("jump:${Phase}:${Pass}")
+        & $script:RealJumpResult -Case $Case -Phase $Phase -Pass $Pass -Detail $Detail }
+    function Remove-UpgradeSources { param($Case) $script:Trace.Add("delete-source") }
+    function Assert-NoAliveTokenScope { }
+    function Test-InstalledExecutable { param($Case) return ("d"*64) }
+
     foreach ($state in @("present","deleted")) {
-        $case.SourceState = $state
-        $script:Trace.Clear(); $script:FailAt = ""; $failureControl.Name = ""
+        $case = New-UpgradeCase -RepoRoot $repoRoot -InstallerPath (Join-Path $contractRoot "current-setup.exe") `
+            -AppVersion "0.3.3" -ExpectedCommit ("a"*40) -SourceState $state -Origin "0.1.0" `
+            -EvidenceRoot (Join-Path $contractRoot ("scenario-"+$state)) `
+            -Metadata ([pscustomobject]@{ executable_sha256=("b"*64); persistent_format=([pscustomobject]@{ settings_format="1" }) }) `
+            -DataDir $dataRoot -TempRoot $tempRoot
+        $script:Trace.Clear(); $script:FailAt = ""
         Invoke-UpgradeScenario -Case $case
-        $expected = "Install-UpgradeBaseline,Prepare-OldUsage,lifecycle:old,Save-OldUpgradeState,"
+        $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:old,save-old,"
         if ($state -eq "deleted") { $expected += "delete-source," }
-        $expected += "Install-UpgradeCurrent,Assert-InstalledUpgrade,Assert-PreservedBeforeLaunch,Grant-UpgradeConsent,lifecycle:current,lifecycle:restart,case:True"
+        $expected += "install-current,preserved,consent,jump:0.3.3,lifecycle:current,lifecycle:restart,jump:current:True,case:True"
         Check (($script:Trace -join ",") -eq $expected) "$state：旧版先产数据，再直接覆盖升级并重启复核"
     }
-    foreach ($failure in @($phases) + @("lifecycle:old","lifecycle:current","lifecycle:restart")) {
-        $script:Trace.Clear(); $script:FailAt = $failure; $failureControl.Name = $failure
+    foreach ($failure in @("install-baseline","lifecycle:old","lifecycle:current","lifecycle:restart")) {
+        $script:Trace.Clear(); $script:FailAt = $failure
+        $case = New-UpgradeCase -RepoRoot $repoRoot -InstallerPath (Join-Path $contractRoot "current-setup.exe") `
+            -AppVersion "0.3.3" -ExpectedCommit ("a"*40) -SourceState "present" -Origin "0.3.2" `
+            -EvidenceRoot (Join-Path $contractRoot "failure") `
+            -Metadata ([pscustomobject]@{ executable_sha256=("b"*64); persistent_format=([pscustomobject]@{ settings_format="1" }) }) `
+            -DataDir $dataRoot -TempRoot $tempRoot
         Expect-Failure { Invoke-UpgradeScenario -Case $case } "$failure 失败不回退成功"
         Check (-not $script:Trace.Contains("case:True")) "$failure 不保存成功结果"
     }
+
+    # 连续升级链：起点集合按版本升序逐跳，只播种一次，失败即中止后续跳。
+    foreach ($state in @("present","deleted")) {
+        $case = New-UpgradeCase -RepoRoot $repoRoot -InstallerPath (Join-Path $contractRoot "current-setup.exe") `
+            -AppVersion "0.3.3" -ExpectedCommit ("a"*40) -SourceState $state -Origin "0.1.0" `
+            -EvidenceRoot (Join-Path $contractRoot ("chain-"+$state)) `
+            -Metadata ([pscustomobject]@{ executable_sha256=("b"*64); persistent_format=([pscustomobject]@{ settings_format="1" }) }) `
+            -DataDir $dataRoot -TempRoot $tempRoot
+        $script:Trace.Clear(); $script:FailAt = ""
+        Invoke-UpgradeChain -Case $case
+        $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:chain-00-old,save-old,jump:chain-00-old:True,"
+        if ($state -eq "deleted") { $expected += "delete-source," }
+        $expected += "jump:0.3.2,download:0.3.2,install:0.3.2,consent,"
+        $expected += "lifecycle:chain-01,jump:chain-01:True,"
+        $expected += "jump:0.3.3,install:0.3.3,installed,consent,lifecycle:chain-02,jump:chain-02:True,"
+        $expected += "lifecycle:restart,jump:restart:True,case:True"
+        Check (($script:Trace -join ",") -eq $expected) "$state：链路逐跳覆盖安装并只播种一次"
+        Check ((@($case.Chain) -join "->") -eq "0.1.0->0.3.2->0.3.3") "链路记录起点集合与当前版本"
+        Check ((@($script:Trace | Where-Object { $_ -like "prepare-old*" }).Count) -eq 1) "$state：链路只播种一次来源日志"
+    }
+    $case = New-UpgradeCase -RepoRoot $repoRoot -InstallerPath (Join-Path $contractRoot "current-setup.exe") `
+        -AppVersion "0.3.3" -ExpectedCommit ("a"*40) -SourceState "present" -Origin "0.1.0" `
+        -EvidenceRoot (Join-Path $contractRoot "chain-failure") `
+        -Metadata ([pscustomobject]@{ executable_sha256=("b"*64); persistent_format=([pscustomobject]@{ settings_format="1" }) }) `
+        -DataDir $dataRoot -TempRoot $tempRoot
+    $script:Trace.Clear(); $script:FailAt = "install:0.3.2"
+    Expect-Failure { Invoke-UpgradeChain -Case $case } "链中某一跳失败即中止"
+    Check (-not ($script:Trace -join ",").Contains("chain-01")) "失败跳之后的核对不再执行"
+    Check (-not $script:Trace.Contains("case:True")) "链路失败不保存成功结果"
+    $script:FailAt = ""
+    $result = Get-Content -LiteralPath (Join-Path $case.EvidenceRoot "upgrade-result.json") -Raw -Encoding utf8 | ConvertFrom-Json
+    Check (($result.pass -eq $false) -and (@($result.chain) -join "->" -eq "0.1.0->0.3.2->0.3.3")) "链路失败写出逐跳结果"
+    Check (($result.jumps | Where-Object { -not $_.pass } | Select-Object -First 1).phase -eq "failed") "链路失败记录失败阶段"
+
     Write-Host "升级契约 $script:Assertions 项通过"
 }
 finally {

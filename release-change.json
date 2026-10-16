@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "统一为根虚拟 workspace，核心库迁入 crates/tokenscope-core，门禁按暂存区选择并新增构建输入清单"
+  "summary": "升级测试补测：起点矩阵、连续升级链与原生验收实例生命周期"
 }
