@@ -1,6 +1,6 @@
 # PR2：真实扫描状态与读取动画
 
-> 状态：[审阅第 13 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过；F01–F05 未实施。PR1 已合入 main（`19aae8b`）；按用户 2026-10-16 决定，须等[升级测试补测计划](../archive/implemented/2026-10-16-upgrade-matrix.md)（含原生验收重启修复 UP09）合入后再开工，F04 基于其新的实例生命周期扩展原生验收。**2026-10-17：升级测试补测（v0.3.3）与发布去重（v0.3.4）均已合入，可以开工**；分支 `feat/collection-status` 已从 main `0ee50f4` 建立。用户同日决定先合入 [CI 并行化 patch](2026-10-17-ci-parallel-checks.md)（F00 移入其中）；它已于 2026-10-17 合入并发布 `v0.3.5`，本分支已快进到 main `1223ef0`，**可以开工**。本 PR 第一次 CI 的用时须回填到 CI 并行化计划 §5。
+> 状态：**F01–F05 已实施（2026-10-17），草稿 PR 等待复核、尚未合并**。F01–F03 逐项先红后绿提交；F04 本地隔离实跑取证（`ui-collection-status` 20/20、`ui-refresh` 11/11）；F05 文档与交付随最后一个提交。实施记录见 [§7](#7-实施记录2026-10-17)。复审与开工前置见下。PR1 已合入 main（`19aae8b`）；按用户 2026-10-16 决定，等[升级测试补测计划](../archive/implemented/2026-10-16-upgrade-matrix.md)（含原生验收重启修复 UP09）合入后再开工，F04 基于其新的实例生命周期。**2026-10-17：升级测试补测（v0.3.3）与发布去重（v0.3.4）均已合入**；CI 并行化 patch（F00=C00）已合入并发布 `v0.3.5`，本分支已快进到 main `1223ef0`。本 PR 第一次 CI 的用时回填到 CI 并行化计划 §5。
 > 前置条件：[PR1 目录迁移](../archive/implemented/2026-10-15-workspace-layout.md)已合入 main。实施时从最新 main 创建 `feat/collection-status`，独立 minor 和独立门禁，不依赖 [PR3 来源管理](2026-10-14-source-discovery-and-additional-paths.md)；PR3 在本 PR 合入后再启动。
 
 **Goal：** 扫描由真实工作驱动、至少显示 1 秒，作为可见读取心跳；只有新事实或既有时间窗口规则触发统计刷新，取消常驻具体更新时间。
@@ -130,12 +130,12 @@ type CollectionStatus = {
 
 | 任务 | 状态 | 完成证据 |
 | --- | --- | --- |
-| F00 登记表测试脱钩 | 移至 CI 并行化 patch（C00） | — |
-| F01 生命周期 | 未开始 | — |
-| F02 宿主事件与查询 | 未开始 | — |
-| F03 状态与动画 | 未开始 | — |
-| F04 E2E | 未开始 | — |
-| F05 文档与交付 | 未开始 | — |
+| F00 登记表测试脱钩 | 移至 CI 并行化 patch（C00） | 该 patch 已合入 main（PR #12） |
+| F01 生命周期 | 完成 | `f6288ca`；集成 15/15（新增 5 用例）+ 单测全绿（新增 3 用例 + collection_status 模块 6 用例）；红态为 4 条新用例因"采集路径无状态事件"失败 |
+| F02 宿主事件与查询 | 完成 | `07a8b5c`；`cargo test -p tokenscope-app` 53/53（含一次性注册用例），命令闸门由既有审计测试守住 |
+| F03 状态与动画 | 完成 | `0b71437`；前端 540/540（新增 collectionStatus 11 项，可控时钟验证 999/1000ms 边界），typecheck/format/build 通过 |
+| F04 E2E | 完成 | `76c3902`；本地隔离实跑 `ui-collection-status` 20/20、`ui-refresh` 11/11（证据 `qa-artifacts/collection-status-local/`），慢轮次/失败注入走验收构建环境变量 |
+| F05 文档与交付 | 完成 | DESIGN.md §1/§5/§6、stats-semantics §3.7、设置页文案随 F03；版本登记 v0.3.5 并递增 minor，门禁与 PR 见 §7 |
 
 本 PR 独立验收和交付，完成后才启动 PR3。真实跨午夜、长时间休眠和跨显示器继续留在独立系统验收 todo，不因本计划关闭或重新引入本轮。
 
@@ -194,3 +194,18 @@ type CollectionStatus = {
 前端 fake-clock 测试严格检查 999/1000ms 边界；原生 E2E 记录观察误差，不用截图间隔推断精确 50ms 后端时长。原生快速完成可按实际时间记录，1000ms 精确阈值由可控时钟证明；不得给生产扫描硬加 50ms/1s 延迟来凑结果。
 
 F04 必须同时有浏览器契约与真实 Tauri 隔离实跑。证据至少含进程/构建身份、runId/revision、开始/结束、显示开始/结束、generation、查询批次和事实前后差异。合成一条新事实的身份及四桶期望预先写死；不能只断言“总数大于原来”。慢轮次与故障仅由测试构建注入。工件缺关键场景、状态事件由测试直接伪造而未走采集入口，均不能标原生验收通过。
+
+## 7. 实施记录（2026-10-17）
+
+分支 `feat/collection-status`（基于 main `1223ef0`）。子代理两次尝试均被运行环境拦截（"request blocked due to unusual activity"，含前台模式），F01–F05 全部由主会话实施。
+
+- **F01（`f6288ca`）**：新增 `crates/tokenscope-core/src/collection_status.rs`（状态机 + 观察者接口 + RAII 守卫 + 进程级单例）；`collect_flighted_with` 拆出状态可注入的 `collect_flighted_with_on`，领队在取得采集串行锁后 begin_run、结果确定后（仍在锁内）终态。先红：4 条集成用例因"采集路径不产生状态事件"失败；后绿。隔离实例测试的领队闭包用有限睡眠（不用跨线程握手），避免与并行测试在串行锁上互相饿死。连带发现并确认既有 `submission_counter_covers_leader_work` 依赖短临界区——新用例不再长时间持锁。
+- **F02（`07a8b5c`）**：壳层事件桥（一次性注册 + 进程生命周期 + 注册即投递快照）与只读 `collection_status` 命令；`PROTECTED_COMMANDS` 增补，闸门由既有命令覆盖审计守住。
+- **F03（`0b71437`）**：`collectionStatus.ts`（revision 门卫、单调时钟最短期、可见性/恢复/清理、代次经 `notifyUsageUpdated` 转发）+ 胶囊合并（查询侧优先、正常态静态「已更新」）+ 采集错误独立通知 + `data-collection-*` 取证属性 + tokens.css 旋转/降级 + 设置页文案；浏览器契约 fixture 补 `collection_status`（latestGeneration=null 保持查询次数语义）。
+- **F04（`76c3902`）**：场景 `ui-collection-status`（3 启动：正常两轮+快轮 / 注入慢轮+失败+减少动态效果 / 翻页保护）入 ui-e2e.yml（端口 9470，段内 3 启动）；`native-instance.test.mjs` 端口集合同步。本地实跑两轮迭代修复：两次 pollUntil 的时间基准统一为场景纪元；减少动态效果改用 Playwright 媒体仿真（WebView2 不吃 `--force-prefers-reduced-motion`）。最终 20/20 与 ui-refresh 11/11。
+- **F05（本提交）**：DESIGN.md（§1 豁免、§5 状态胶囊、§6 动效注记）、stats-semantics §3.7（扫描时间 ≠ 查询 as_of）、计划状态与索引更新；登记 v0.3.5 后按项目规约递增 minor（功能变更）。
+
+已知偏离与说明：
+- F04 的"查询先于动画结束"按快轮次取证（查询在显示期内落地）；慢轮次下查询必然晚于显示期（轮次长于 1 秒），与 §6.3 反例表的语义一致。
+- 计划 §6.2 的"组件销毁先标失效"以 `disposed` 门卫 + `onUnmounted(dispose)` 实现；晚到 IPC 由 `applyStatus` 的 disposed 门卫丢弃（有测试）。
+- 真实跨午夜、长时间休眠、跨显示器仍留在独立系统验收 todo，未纳入本 PR。

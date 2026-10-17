@@ -9,7 +9,7 @@
 按顺序：
 
 1. **CI 并行化 / patch（已合入，待取证）**：[CI 拆成并行作业与原生 E2E 精简](active/2026-10-17-ci-parallel-checks.md)，PR #12 合入 main `1223ef0` 并发布 `v0.3.5`，main 门禁全绿、四组缓存已建立；只差用 PR2 第一次 CI 记录热缓存用时，记录后归档。PR2 的 F00（登记表测试脱钩）已作为 C00 随本 patch 合入。
-2. **PR2 / minor**：[真实扫描反馈](active/2026-10-15-collection-status.md)，F01–F05；分支 `feat/collection-status` 已快进到 main `1223ef0`，可以开工；交付时登记 `v0.3.5`。
+2. **PR2 / minor**：[真实扫描反馈](active/2026-10-15-collection-status.md)，F01–F05 已实施并本地验证，草稿 PR 等待复核（尚未合并）；交付登记 `v0.3.5`，递增到 `0.4.0`。
 3. **PR3 / minor**：[当前用户来源目录与追加路径](active/2026-10-14-source-discovery-and-additional-paths.md)，S01–S07；PR2 合入后从最新 main 建 `feat/source-paths`。
 4. **整合计划尾项**：N10、N11、N13 与系统签字，见[整合计划](active/2026-10-11-consolidated-remaining-work.md)。
 

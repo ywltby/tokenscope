@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
-  "kind": "patch",
-  "summary": "CI 拆成并行作业，精简原生 E2E 等待"
+  "kind": "minor",
+  "summary": "真实扫描状态与读取动画：内核采集生命周期、状态事件与只读查询、前端最短显示期与静态已更新胶囊、原生验收场景"
 }
