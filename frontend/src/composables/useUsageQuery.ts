@@ -15,7 +15,7 @@
 //   相等时用于首帧展示，从不反向改写偏好或时区；
 // - 可见性由页面用 `onActivated` / `onDeactivated` 调 `setVisible(bool)` 传入
 //   （见文件末尾的说明）。
-import { computed, nextTick, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onUnmounted, ref, watch, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -44,6 +44,7 @@ import {
   type RollupsMode,
   type ViewFilters,
 } from "../lib/viewFilters";
+import type { CollectionPillView } from "./collectionStatus";
 import { useTimezone } from "./timezone";
 import { collectIntervalText, useCollectInterval } from "./collectInterval";
 import { todayInTz, tzDate } from "../lib/dates";
@@ -129,6 +130,10 @@ export interface UsageQueryOptions {
   refreshKey: () => number;
   /** 来源异常条目的「去设置 ›」动作（由页面接到应用壳）。 */
   goSettings?: () => void;
+  /** PR2：读取侧状态胶囊（null = 用查询侧胶囊兜底），由页面桥接。 */
+  collectionPill?: Ref<CollectionPillView | null>;
+  /** PR2：采集错误通知（独立通道，由页面桥接进合并通知）。 */
+  collectionNotice?: Ref<NoticeItem | null>;
 }
 
 const SEVERITY_ORDER: Record<NoticeSeverity, number> = { error: 0, warning: 1, info: 2 };
@@ -176,22 +181,6 @@ function dayInTz(iso: string | null | undefined, tz: string): string | null {
   const ms = queryTimeMs(iso);
   if (!Number.isFinite(ms)) return null;
   return tzDate(ms, tz);
-}
-
-/** 时刻串在统计时区下的钟点（"HH:MM:SS"）；缺失/非法返回 null。 */
-function clockInTz(iso: string | null | undefined, tz: string): string | null {
-  if (!iso) return null;
-  const ms = queryTimeMs(iso);
-  if (!Number.isFinite(ms)) return null;
-  // sv-SE 是 24 小时制，`local` 特判避免把 "local" 传给 Intl（RangeError）。
-  if (tz === "local") return new Date(ms).toLocaleTimeString("sv-SE");
-  return new Intl.DateTimeFormat("sv-SE", {
-    timeZone: tz,
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date(ms));
 }
 
 export function useUsageQuery(opts: UsageQueryOptions) {
@@ -741,33 +730,69 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   }
 
   // ── 状态胶囊与通知 ──────────────────────────────────────
-  // 任务 3：标题行状态胶囊——stale / 刷新中 / 刷新失败 / 更新于四态可见。
-  // U06：正常态显示本次查询的 `as_of`（按统计时区），悬停提示写自动读取间隔。
-  const statusPill = computed<{ cls: string; text: string; title: string }>(() => {
-    const title = `每 ${collectIntervalText(intervalSecs.value)}自动读取`;
+  // 任务 3：标题行状态胶囊——stale / 刷新中 / 刷新失败四态可见。
+  // PR2：取消常驻"更新于 HH:MM:SS"——正常态显示静态绿点"已更新"；读取侧
+  // 状态（正在读取 / 读取失败 / 状态不可用 / 部分异常）由 collectionStatus
+  // 提供并在查询侧无在途、无失败、非 stale、已有有效统计时优先展示（查询
+  // 在途时"刷新中…"优先；查询先结束而读取最短期未满时回落到读取反馈）。
+  const statusPill = computed<{
+    cls: string;
+    text: string;
+    title: string;
+    spin: boolean;
+    dot: boolean;
+  }>(() => {
+    const baseTitle = `每 ${collectIntervalText(intervalSecs.value)}自动读取；无新用量时保持统计不变`;
     const failed = summaryError.value || eventsError.value;
+    const queryBusy = loading.value || eventsLoading.value;
+    const collection = opts.collectionPill?.value ?? null;
+    if (!queryBusy && !failed && !stale.value && report.value && collection) {
+      return {
+        cls: collection.cls,
+        text: collection.text,
+        title: `${baseTitle}${collection.recent ?? ""}`,
+        spin: collection.spin,
+        dot: collection.dot,
+      };
+    }
     // R04 状态机：stale + 失败 = 旧数据/刷新失败（不能谎称"后台刷新中"）；
     // stale + 刷新中才显示后台刷新。
     if (stale.value && failed)
-      return { cls: "ts-pill-warning", text: "缓存数据 · 刷新失败", title };
-    if (stale.value && (loading.value || eventsLoading.value))
-      return { cls: "ts-pill-warning", text: "缓存数据 · 后台刷新中", title };
+      return {
+        cls: "ts-pill-warning",
+        text: "缓存数据 · 刷新失败",
+        title: baseTitle,
+        spin: false,
+        dot: false,
+      };
+    if (stale.value && queryBusy)
+      return {
+        cls: "ts-pill-warning",
+        text: "缓存数据 · 后台刷新中",
+        title: baseTitle,
+        spin: false,
+        dot: false,
+      };
     // 首载失败且无任何数据可恢复：必须显示失败而非"刷新中"（G-P2-1）。
     if (!report.value && failed)
-      return { cls: "ts-pill-warning", text: "刷新失败 · 暂无数据", title };
-    if (loading.value || eventsLoading.value || !report.value)
-      return { cls: "ts-pill-info", text: "刷新中…", title };
-    if (failed) return { cls: "ts-pill-warning", text: "刷新失败 · 显示上次数据", title };
-    // 更新时间取本次查询冻结的 `as_of`（与汇总数字同源），按统计时区显示。
-    const updatedAt = clockInTz(
-      displayedQuery.value?.asOf ?? report.value?.generated_at,
-      report.value?.timezone ?? tz.value,
-    );
-    return {
-      cls: "ts-pill-success",
-      text: updatedAt ? `更新于 ${updatedAt}` : "已更新",
-      title,
-    };
+      return {
+        cls: "ts-pill-warning",
+        text: "刷新失败 · 暂无数据",
+        title: baseTitle,
+        spin: false,
+        dot: false,
+      };
+    if (queryBusy || !report.value)
+      return { cls: "ts-pill-info", text: "刷新中…", title: baseTitle, spin: false, dot: false };
+    if (failed)
+      return {
+        cls: "ts-pill-warning",
+        text: "刷新失败 · 显示上次数据",
+        title: baseTitle,
+        spin: false,
+        dot: false,
+      };
+    return { cls: "ts-pill-success", text: "已更新", title: baseTitle, spin: false, dot: true };
   });
 
   // R08（Task 8）：采集诊断——空结果/部分结果都必须可见，不依赖表格挂载。
@@ -914,6 +939,10 @@ export function useUsageQuery(opts: UsageQueryOptions) {
         actions: [{ label: "恢复自动参与", run: () => setRollupsMode("auto") }],
       });
     }
+    // PR2：采集错误通知（读取失败 / 状态不可用）——独立通道，由页面桥接；
+    // 只有下一次成功采集能清除它，不被另一路成功（查询成功）覆盖。
+    const collectionNotice = opts.collectionNotice?.value ?? null;
+    if (collectionNotice) list.push(collectionNotice);
     // 稳定排序：严重级别优先，同级别保持声明顺序。
     return list.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
   });

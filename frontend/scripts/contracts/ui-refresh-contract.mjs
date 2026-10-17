@@ -139,8 +139,9 @@ export async function uiRefreshClock(ctx) {
   const selectRange = async (label) => {
     await click(page.locator(".range-trigger"));
     await click(page.getByRole("button", { name: label, exact: true }));
+    // PR2：刷新完成的信号是静态「已更新」（取消常驻"更新于 HH:MM:SS"）。
     await page.waitForFunction(() =>
-      document.querySelector(".ts-status-pill")?.textContent.includes("更新于"),
+      document.querySelector(".ts-status-pill")?.textContent.includes("已更新"),
     );
   };
   try {

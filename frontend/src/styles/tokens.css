@@ -480,6 +480,28 @@ body {
   flex-shrink: 0;
 }
 
+/* PR2（2026-10-15 计划）：真实读取进行中的旋转图标——DESIGN.md §1 豁免的
+   功能反馈（≤16px、中性/强调色、无发光、真实读取触发、至少 1 秒），不属于
+   被禁止的装饰性闪烁。旋转期间隐藏静态圆点，保持同一加载图标连续。 */
+.ts-status-pill.is-reading::before {
+  display: none;
+}
+.ts-pill-spinner {
+  flex-shrink: 0;
+  animation: ts-pill-spin 1s linear infinite;
+}
+@keyframes ts-pill-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* 减少动态效果：静态图标 + 文字仍满足最短 1 秒的显示期（由状态机保证）。 */
+@media (prefers-reduced-motion: reduce) {
+  .ts-pill-spinner {
+    animation: none;
+  }
+}
+
 /* 内联通知条 */
 .ts-notice {
   display: flex;

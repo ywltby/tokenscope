@@ -15,13 +15,20 @@ import TrendChart from "../components/TrendChart.vue";
 import EventTable from "../components/EventTable.vue";
 import SegmentedControl from "../components/SegmentedControl.vue";
 import DateRangeSelect from "../components/DateRangeSelect.vue";
-import { useUsageQuery, type NoticeAction } from "../composables/useUsageQuery";
+import { useUsageQuery, type NoticeAction, type NoticeItem } from "../composables/useUsageQuery";
+import { useCollectionStatus, type CollectionPillView } from "../composables/collectionStatus";
 import { useTimezone } from "../composables/timezone";
 import { realGroups } from "../lib/chartData";
 
 const props = defineProps<{ refreshKey: number }>();
 /// 任务 3：来源异常通知的「去设置 ›」动作——由应用壳切换到设置页。
 const emit = defineEmits<{ (e: "go-settings"): void }>();
+
+/// PR2：读取侧状态桥——collectionStatus 写入这两个 ref，useUsageQuery 在
+/// 状态胶囊与合并通知里消费（先建查询组合式，再把它的可见性与刷新入口
+/// 交给读取侧组合式，避免循环依赖）。
+const collectionPill = ref<CollectionPillView | null>(null);
+const collectionNotice = ref<NoticeItem | null>(null);
 
 const {
   // 筛选偏好（来源 / 维度 / 时间预设 / 日粒度参与方式 / 下钻）
@@ -82,6 +89,38 @@ const {
 } = useUsageQuery({
   refreshKey: () => props.refreshKey,
   goSettings: () => emit("go-settings"),
+  collectionPill,
+  collectionNotice,
+});
+
+/// PR2：真实采集状态 + 最短 1 秒显示期。更高的 latestGeneration 经
+/// notifyUsageUpdated（既有的"有新数据"自动刷新合并入口）转发；综合可见性
+/// 直接复用查询侧的 visible（页面 KeepAlive + 宿主窗口两个维度都已合并）。
+const collectionApi = useCollectionStatus({
+  visible,
+  onGeneration: notifyUsageUpdated,
+  onManualRefresh: manualRefresh,
+  pillOut: collectionPill,
+  noticeOut: collectionNotice,
+});
+
+/// PR2：读取侧展示态（原生 E2E 以低频轮询取证，不用截图间隔推断毫秒）。
+const collectionState = computed(() => {
+  if (collectionApi.statusUnavailable.value) return "unavailable";
+  if (!collectionApi.latestStatus.value) return "confirming";
+  if (collectionApi.reading.value) return "reading";
+  if (collectionApi.latestStatus.value.phase === "failed") return "failed";
+  return "confirmed";
+});
+const collectionRevision = computed(() =>
+  collectionApi.latestStatus.value ? String(collectionApi.latestStatus.value.revision) : "",
+);
+const collectionRunId = computed(() =>
+  collectionApi.latestStatus.value ? String(collectionApi.latestStatus.value.runId) : "",
+);
+const collectionGeneration = computed(() => {
+  const gen = collectionApi.latestStatus.value?.latestGeneration;
+  return typeof gen === "number" ? String(gen) : "";
 });
 
 /// U01：日期按钮的悬停提示与可访问名称按统计时区渲染（时区本身在设置页改）。
@@ -201,13 +240,34 @@ defineExpose({
         <div v-if="drill" class="page-sub">已筛选 {{ drillLabel(drill) }}</div>
       </div>
       <div class="head-right">
-        <!-- U06：正常态显示本次查询的更新时间，悬停提示写自动读取间隔 -->
+        <!-- U06/PR2：正常态显示静态"已更新"（自带状态圆点，无常驻更新时间，
+             悬停提示写自动读取间隔与"无新用量时保持统计不变"）；读取侧状态由
+             collectionStatus 驱动——正在读取（旋转图标，最短 1 秒）、读取失败、
+             状态不可用。data-collection-* 供原生 E2E 低频轮询取证。 -->
         <span
           class="ts-pill ts-status-pill"
-          :class="statusPill.cls"
+          :class="[statusPill.cls, { 'is-reading': statusPill.spin }]"
           :title="statusPill.title"
           role="status"
-          >{{ statusPill.text }}</span
+          :data-collection-state="collectionState"
+          :data-collection-revision="collectionRevision"
+          :data-collection-run-id="collectionRunId"
+          :data-collection-generation="collectionGeneration"
+          ><svg
+            v-if="statusPill.spin"
+            class="ts-pill-spinner"
+            viewBox="0 0 16 16"
+            width="14"
+            height="14"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path d="M8 2.2a5.8 5.8 0 1 1-5.8 5.8" />
+          </svg>
+          <span class="ts-pill-text">{{ statusPill.text }}</span></span
         >
         <!-- U06 翻页保护：已加载更多时自动刷新不执行，改为提示；点击等同手动刷新 -->
         <button

@@ -45,7 +45,7 @@ export const REQUIRED_CONTRACTS = [
   "privacy_no_business_effects_before_acceptance",
   "privacy_denied_ipc_has_no_filesystem_or_network_effect",
   // U01/U02/U06（UI 调整计划）：日期预设按钮与内联时刻面板、状态胶囊
-  // 「更新于」与自动读取提示、合并通知唯一性、设置页读取间隔六档。
+  // 静态「已更新」与自动读取提示（PR2）、合并通知唯一性、设置页读取间隔六档。
   "ui_adjustment_shapes",
   "ui_date_keyboard_matrix",
   // C06（控件材质与浮层可读性计划）：像素级边界对比度与焦点契约。
@@ -2141,7 +2141,7 @@ const IMPL = {
 
   /**
    * U01/U02/U06（UI 调整计划 2026-10-13）：日期预设按钮与内联时刻面板、
-   * 状态胶囊"更新于"与自动读取提示、合并通知的唯一性、设置页「数据源」分区
+   * 状态胶囊静态「已更新」与自动读取提示（PR2）、合并通知唯一性、设置页「数据源」分区
    * 的自动读取间隔——都在真实浏览器里量测，并留下截图证据。
    */
   async ui_adjustment_shapes(ctx) {
@@ -2222,14 +2222,18 @@ const IMPL = {
       await page.keyboard.press("Escape");
       await page.waitForTimeout(300);
 
-      // 状态胶囊：更新于 HH:MM:SS + 自动读取间隔提示。
+      // 状态胶囊（PR2）：静态「已更新」（取消常驻"更新于 HH:MM:SS"）+
+      // 自动读取间隔与"无新用量时保持统计不变"提示；最近读取诊断可附。
       const pill = page.locator(".ts-status-pill").first();
       const pillText = (await pill.innerText()).trim();
       const pillTitle = (await pill.getAttribute("title")) ?? "";
       ctx.record(
         "ui_adjustment_shapes",
-        "状态胶囊显示「更新于 HH:MM:SS」且提示自动读取间隔",
-        /^更新于 \d{2}:\d{2}:\d{2}$/.test(pillText) && /自动读取/.test(pillTitle),
+        "状态胶囊显示静态「已更新」且提示自动读取与无新用量不刷新",
+        pillText === "已更新" &&
+          /自动读取/.test(pillTitle) &&
+          /无新用量时保持统计不变/.test(pillTitle) &&
+          !/更新于 \d{2}:\d{2}:\d{2}/.test(pillTitle),
         `胶囊="${pillText}" title="${pillTitle}"`,
       );
       await ctx.shot("ui_adjustment_shapes", session, "status-pill");

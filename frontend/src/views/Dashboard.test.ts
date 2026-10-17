@@ -78,8 +78,25 @@ function mockOk(): void {
     if (cmd === "query_summary") return Promise.resolve(summaryA);
     if (cmd === "query_events") return Promise.resolve(events);
     if (cmd === "source_status") return Promise.resolve([]);
+    // PR2：干净成功态的胶囊断言需要真实采集状态（无警告的已成功轮次）。
+    if (cmd === "collection_status") return Promise.resolve(collectionStatusOk());
     return Promise.resolve(null);
   });
+}
+
+/// PR2：单测共用的"最近一轮成功、无警告"采集状态。
+function collectionStatusOk(): Record<string, unknown> {
+  return {
+    revision: 2,
+    runId: 1,
+    phase: "succeeded",
+    trigger: "manual",
+    latestGeneration: null,
+    changed: true,
+    hasWarnings: false,
+    lastCompletedAt: null,
+    error: null,
+  };
 }
 
 function mountDashboard(): VueWrapper {
@@ -155,6 +172,7 @@ describe("Dashboard 查询编排", () => {
       if (cmd === "query_summary") return new Promise((r) => (resolveSummary = r));
       if (cmd === "query_events") return new Promise((r) => (resolveEvents = r));
       if (cmd === "source_status") return Promise.resolve([]);
+      if (cmd === "collection_status") return Promise.resolve(collectionStatusOk());
       return Promise.resolve(null);
     });
     const w = mountDashboard();
@@ -959,6 +977,7 @@ describe("视图快照查询身份（R04）", () => {
         return fail ? Promise.reject(new Error("net down")) : Promise.resolve(summaryA);
       if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
+      if (cmd === "collection_status") return Promise.resolve(collectionStatusOk());
       return Promise.resolve(null);
     });
     const w = mountDashboard();
@@ -973,7 +992,7 @@ describe("视图快照查询身份（R04）", () => {
     const retry = w.findAll("button").find((b) => b.text() === "重试");
     await retry!.trigger("click");
     await flushPromises();
-    expect(w.find(".page-head .ts-status-pill").text()).toContain("更新于");
+    expect(w.find(".page-head .ts-status-pill").text()).toBe("已更新");
   });
 
   it("first_load_failure_without_data_shows_failure_not_refreshing：首载失败且无数据 = 失败态（G-P2-1）", async () => {
@@ -1217,7 +1236,7 @@ describe("Dashboard 页头与通知（设计系统 Task 3）", () => {
     expect(head.find(".page-sub").exists()).toBe(false);
     const pill = head.find(".ts-status-pill");
     expect(pill.exists()).toBe(true);
-    expect(pill.text()).toContain("更新于");
+    expect(pill.text()).toBe("已更新");
     expect(head.findAll("button").some((b) => b.text() === "刷新")).toBe(true);
   });
 
@@ -1231,6 +1250,7 @@ describe("Dashboard 页头与通知（设计系统 Task 3）", () => {
       if (cmd === "query_summary") return new Promise((r) => (resolveSummary = r));
       if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
+      if (cmd === "collection_status") return Promise.resolve(collectionStatusOk());
       return Promise.resolve(null);
     });
     const w = mountDashboard();
@@ -2039,6 +2059,7 @@ describe("Dashboard 自动读取状态（U06）", () => {
       if (cmd === "query_summary") return Promise.resolve(summaryA);
       if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
+      if (cmd === "collection_status") return Promise.resolve(collectionStatusOk());
       return Promise.resolve(null);
     });
   }
@@ -2048,9 +2069,11 @@ describe("Dashboard 自动读取状态（U06）", () => {
     const w = mountDashboard();
     await flushPromises();
     const pill = w.find(".page-head .ts-status-pill");
-    expect(pill.text()).toBe("更新于 22:34:56");
+    expect(pill.text()).toBe("已更新");
     expect(pill.classes()).toContain("ts-pill-success");
-    expect(pill.attributes("title"), "悬停提示随读取间隔设置").toBe("每 5 分钟自动读取");
+    expect(pill.attributes("title"), "悬停提示随读取间隔设置").toBe(
+      "每 5 分钟自动读取；无新用量时保持统计不变",
+    );
     w.unmount();
   });
 
@@ -2062,6 +2085,7 @@ describe("Dashboard 自动读取状态（U06）", () => {
       if (cmd === "query_summary") return Promise.resolve({ ...summaryA, timezone: "UTC" });
       if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
+      if (cmd === "collection_status") return Promise.resolve(collectionStatusOk());
       return Promise.resolve(null);
     });
     const { initTimezone } = await import("../composables/timezone");
@@ -2069,7 +2093,7 @@ describe("Dashboard 自动读取状态（U06）", () => {
     const w = mountDashboard();
     await flushPromises();
     expect(useTimezone().tz.value).toBe("UTC");
-    expect(w.find(".page-head .ts-status-pill").text()).toBe("更新于 16:00:00");
+    expect(w.find(".page-head .ts-status-pill").text()).toBe("已更新");
     w.unmount();
   });
 
@@ -2079,8 +2103,8 @@ describe("Dashboard 自动读取状态（U06）", () => {
     const w = mountDashboard();
     await flushPromises();
     const pill = w.find(".page-head .ts-status-pill");
-    expect(pill.text()).toBe("更新于 09:05:00");
-    expect(pill.attributes("title")).toBe("每 5 秒自动读取");
+    expect(pill.text()).toBe("已更新");
+    expect(pill.attributes("title")).toBe("每 5 秒自动读取；无新用量时保持统计不变");
     w.unmount();
   });
 

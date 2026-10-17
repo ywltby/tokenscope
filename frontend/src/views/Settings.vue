@@ -1129,13 +1129,14 @@ defineExpose({ priceColumns });
               可能来自显式覆盖）；停用后该来源完全不参与统计。两个来源不能指向同一目录。
             </div>
           </div>
-          <!-- U06：自动读取间隔——后台按此间隔读取 JSONL 日志；界面在新数据
-               写入后自动刷新（间隔越短，新会话出现在界面上的延迟越短）。 -->
+          <!-- U06/PR2：自动读取间隔——后台按此间隔读取 JSONL 日志；写入自动
+               保存，修改立即生效；只有确有新用量才刷新统计（读取心跳不代表
+               有新数据），汇总页读取状态由真实采集生命周期驱动。 -->
           <div class="setting-row interval-row">
             <div class="setting-main">
               <div class="setting-label">自动读取间隔</div>
               <div class="setting-help">
-                后台按此间隔读取日志并在有新数据时刷新界面；修改后立即生效。
+                后台按此间隔自动读取日志并保存（自动保存，修改后立即生效）；只有出现新用量才刷新统计，没有新用量时数字保持不变。
                 <span v-if="intervalSaving" class="tz-state">保存中…</span>
                 <span v-else-if="intervalError" class="tz-state is-error">
                   保存失败：{{ intervalError }}（已回到上次保存的值）
