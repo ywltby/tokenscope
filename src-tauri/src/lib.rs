@@ -20,6 +20,7 @@ use tauri::{
 use tauri_plugin_autostart::MacosLauncher;
 
 use privacy::{RuntimeFlags, RuntimeStep};
+use tokenscope::collection_status::CollectionObserver;
 
 /// SF06 + P03：日志运行时状态（managed state）。
 ///
@@ -124,6 +125,7 @@ pub fn run() {
             commands::settings_set_close_action,
             commands::settings_set_timezone,
             commands::settings_set_collect_interval,
+            commands::collection_status,
             commands::close_resolve,
             commands::open_settings_file,
         ])
@@ -351,12 +353,64 @@ pub(crate) fn initialize_business_runtime(
         flags.mark(RuntimeStep::Collection);
     }
 
+    // 7) PR2：采集状态事件桥（业务 Ready 后注册一次；之后任何入口的真实
+    //    采集轮次都会向前端投递 collection-status 事件）。
+    install_collection_status_bridge(app);
+
     log::info!(
         "业务初始化完成（日志/窗口/托盘/自同步线程，剩余步骤 {}），{} ms",
         flags.pending().len(),
         t0.elapsed().as_millis()
     );
     Ok(diagnostics)
+}
+
+// ── PR2：采集状态事件桥 ───────────────────────────────────
+// 内核（collection_status::global_tracker）推进真实采集生命周期；本桥只做
+// 轻量事件投递：回调期间不查询、不扫描、不打开任何库。注册恰好一次，观察
+// 者与进程同生命周期（句柄故意遗忘——Drop 会注销观察者）。发事件失败只
+// 记 warn，绝不影响采集结果与用量提交。
+
+struct CollectionStatusSink {
+    app: tauri::AppHandle,
+}
+
+impl tokenscope::collection_status::CollectionObserver for CollectionStatusSink {
+    fn on_collection_status(&self, status: &tokenscope::collection_status::CollectionStatus) {
+        if let Err(e) = self.app.emit("collection-status", status) {
+            log::warn!("发送采集状态事件失败: {e}");
+        }
+    }
+}
+
+/// 可测的一次性注册：返回是否本次完成注册（重复调用不重复注册）。
+fn install_status_bridge_once(
+    installed: &AtomicBool,
+    tracker: &tokenscope::collection_status::CollectionStatusTracker,
+    sink: std::sync::Arc<dyn tokenscope::collection_status::CollectionObserver>,
+) -> bool {
+    if installed.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    let handle = tracker.register_observer(sink);
+    std::mem::forget(handle);
+    true
+}
+
+static STATUS_BRIDGE_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+fn install_collection_status_bridge(app: &tauri::AppHandle) {
+    let tracker = tokenscope::collection_status::global_tracker();
+    let installed = install_status_bridge_once(
+        &STATUS_BRIDGE_INSTALLED,
+        tracker,
+        std::sync::Arc::new(CollectionStatusSink { app: app.clone() }),
+    );
+    if !installed {
+        return;
+    }
+    // 注册后立即投递一次当前快照：覆盖"前端订阅之前已发生的状态转换"。
+    CollectionStatusSink { app: app.clone() }.on_collection_status(&tracker.snapshot());
 }
 
 struct SharedStateHolder {
@@ -1391,5 +1445,42 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "停止必须立即中断等待（实测 {elapsed:?}）"
         );
+    }
+
+    /// PR2：采集状态事件桥只注册一次——重复安装不产生第二个观察者
+    ///（内核侧已证明观察者收到全部状态转换；这里守住"恰好一次"语义）。
+    #[test]
+    fn status_bridge_installs_exactly_once() {
+        use std::sync::atomic::AtomicBool;
+        let tracker = tokenscope::collection_status::CollectionStatusTracker::new();
+        let installed = AtomicBool::new(false);
+        let sink: std::sync::Arc<dyn tokenscope::collection_status::CollectionObserver> =
+            std::sync::Arc::new(CountingSink {
+                calls: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            });
+        assert!(
+            install_status_bridge_once(&installed, &tracker, sink),
+            "首次安装必须完成注册"
+        );
+        assert!(
+            !install_status_bridge_once(
+                &installed,
+                &tracker,
+                std::sync::Arc::new(CountingSink {
+                    calls: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                }),
+            ),
+            "重复安装不得重复注册"
+        );
+    }
+
+    struct CountingSink {
+        calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl tokenscope::collection_status::CollectionObserver for CountingSink {
+        fn on_collection_status(&self, _status: &tokenscope::collection_status::CollectionStatus) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }

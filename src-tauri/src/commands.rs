@@ -785,6 +785,16 @@ fn default_source_tz() -> String {
         .unwrap_or_else(|| "local".to_string())
 }
 
+/// PR2：只读采集状态快照——仅返回内核内存状态，不扫描目录、不打开历史库、
+/// 不导入 CCS、不触发任何采集。
+#[tauri::command]
+pub async fn collection_status(
+    app: tauri::AppHandle,
+) -> Result<tokenscope::collection_status::CollectionStatus, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    Ok(tokenscope::collection_status::global_tracker().snapshot())
+}
+
 /// AP03：重建缓存——采集范围与普通查询**同一份**已成功读取的配置。
 ///
 /// 修复前此处走 `rebuild_cache(None)` → `SummaryOptions::default()`，既跳过
