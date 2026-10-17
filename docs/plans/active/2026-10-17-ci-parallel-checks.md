@@ -109,6 +109,21 @@ PR 的等待时间取决于两项必需检查 `gate`（ci.yml）与 `native-ui`�
 - contracts 组不加前端构建：把 `frontend/dist` 移走后 `python -B scripts/build_inputs.py --check` 通过（`missing`、`stale`、`changed`、`workflow_uncovered` 全空），§6 第 5 步的备选方案不启用。
 - 版本：v0.3.4 已登记进升级起点矩阵，patch 递增到 0.3.5。
 
+**PR [#12](https://github.com/ywltby/tokenscope/pull/12) 门禁（四个新作业的冷缓存首跑，2026-10-17）**
+
+| 检查 | 运行 | 用时 |
+| --- | --- | --- |
+| CI `gate`（汇总，结果为四组中最慢者） | [39006263490](https://github.com/ywltby/tokenscope/actions/runs/39006263490) | 8m52s |
+| — `rust` | 同上 | 7m58s |
+| — `rust-acceptance` | 同上 | 8m44s |
+| — `contracts` | 同上 | 6m48s |
+| — `frontend` | 同上 | 4m45s |
+| — `gate` 汇总作业本身 | 同上 | 3s |
+| `native-ui` | [39006263499](https://github.com/ywltby/tokenscope/actions/runs/39006263499) | 7m04s |
+| Install test（含 4 个升级场景） | [39006263447](https://github.com/ywltby/tokenscope/actions/runs/39006263447) | 12m37s |
+
+PR 等待 = max(`gate`, `native-ui`) ≈ 8m52s。对照拆分前：main `0ee50f4` 的 CI 11m43s、PR #11 的 `gate` 16–17 分钟；本次是四个新作业没有自己缓存的首跑，已达成预期。`upgrade-chain` 在 PR 上按设计跳过（`if: github.event_name == 'workflow_dispatch'`）。
+
 ## 6. 执行步骤
 
 1. **准备分支**：在 `ci/parallel-checks` 上 `git fetch origin` 并 rebase 到最新 `origin/main`。
