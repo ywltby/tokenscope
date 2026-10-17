@@ -204,6 +204,7 @@ fn default_enabled_source_participates_in_overlap_validation() {
             claude: Some(SourceConfig {
                 enabled: false,
                 dir: None,
+                ..Default::default()
             }),
             codex: None,
         },
@@ -224,6 +225,7 @@ fn default_enabled_source_participates_in_overlap_validation() {
             claude: Some(SourceConfig {
                 enabled: true,
                 dir: Some(codex_default.to_string_lossy().into_owned()),
+                ..Default::default()
             }),
             codex: None,
         },
@@ -241,6 +243,7 @@ fn default_enabled_source_participates_in_overlap_validation() {
             claude: Some(SourceConfig {
                 enabled: true,
                 dir: Some(parent.display().to_string()),
+                ..Default::default()
             }),
             codex: None,
         },

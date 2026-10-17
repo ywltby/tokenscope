@@ -634,6 +634,7 @@ pub(crate) fn source_config_set_impl(
     let cfg = tokenscope::settings::SourceConfig {
         enabled,
         dir: dir.clone(),
+        ..Default::default()
     };
     let cfg_for_save = cfg.clone();
     tokenscope::settings::update(path, move |s| {

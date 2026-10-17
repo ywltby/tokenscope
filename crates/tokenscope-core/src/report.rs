@@ -3945,10 +3945,12 @@ cache_read = 0.0
         s.sources.claude = Some(crate::settings::SourceConfig {
             enabled: true,
             dir: Some(fixture("claude", "basic").display().to_string()),
+            ..Default::default()
         });
         s.sources.codex = Some(crate::settings::SourceConfig {
             enabled: false,
             dir: Some(fixture("codex", "no-such-dir").display().to_string()),
+            ..Default::default()
         });
         let st = source_status(&s).unwrap();
         assert_eq!(st.len(), 2);
@@ -3962,6 +3964,7 @@ cache_read = 0.0
         s2.sources.claude = Some(crate::settings::SourceConfig {
             enabled: true,
             dir: Some(empty_dir.display().to_string()),
+            ..Default::default()
         });
         let st2 = source_status(&s2).unwrap();
         assert_eq!(st2[0].state, "empty", "目录存在但无 jsonl → empty");
