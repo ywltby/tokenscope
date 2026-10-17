@@ -49,6 +49,13 @@ jobs:
             node frontend/scripts/native-acceptance.mjs --scenario ui-system --events 4 --scale $scale --port $ports[$scale] --out "qa-artifacts/ui-adjustment/native-e2e/layout-$scale"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+      # PR2：真实采集生命周期 + 读取显示期 + 失败恢复 + 翻页保护（3 次启动，
+      # 起始端口 9470，进程内递增；与其余步骤的端口段互不重叠）。
+      - name: Native collection status lifecycle
+        shell: pwsh
+        run: |
+          node frontend/scripts/native-acceptance.mjs --scenario ui-collection-status --events 250 --port 9470 --out qa-artifacts/ui-adjustment/native-e2e/collection-status
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload native UI evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7

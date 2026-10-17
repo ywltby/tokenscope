@@ -76,12 +76,12 @@ export async function nativeUiSystem({ inst, ck, ev }) {
   await inst.setWindowSize(980, 620);
   ev.hostGeometry = await inst.assertHostFilled();
   ck.add("webview_fills_native_client", true, JSON.stringify(ev.hostGeometry));
+  // PR2：状态胶囊为静态「已更新」（取消常驻"更新于 HH:MM:SS"）——真实
+  // Rust 查询落到界面的证明改为胶囊文案 + 汇总数据容器。
   ck.add(
-    "real_query_timestamp_displayed",
-    await page()
-      .getByText(/^更新于 \d{2}:\d{2}:\d{2}$/)
-      .isVisible(),
-    "actual Rust timestamp rendered",
+    "real_query_status_pill_rendered",
+    (await page().locator(".ts-status-pill").first().innerText()).trim() === "已更新",
+    "actual Rust query result rendered (PR2 static pill)",
   );
   await page().screenshot({ path: path.join(inst.opts.shots, "native-resized.png") });
   await navigate("设置");
