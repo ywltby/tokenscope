@@ -10,7 +10,7 @@
 
 1. ~~CI 并行化 / patch~~：已完成并归档——[CI 拆成并行作业与原生 E2E 精简](archive/implemented/2026-10-17-ci-parallel-checks.md)，PR #12 合入并发布 `v0.3.5`；热缓存效果已用 PR2 第一次 CI 取证（`gate` ≈5m53s，四组 full match 命中），无未闭合项。
 2. ~~PR2 / minor~~：已完成并归档——[真实扫描反馈](archive/implemented/2026-10-15-collection-status.md)，PR #13 合入 main `6393bfc` 并发布 `v0.4.0`；main 上 Native UI E2E 一次卡死至超时，排查转入 PR3 S00。
-3. **PR3 / minor（精简修订待确认）**：[当前用户来源目录与追加路径](active/2026-10-14-source-discovery-and-additional-paths.md)，S00–S07（S00 为原生验收卡死定位）；2026-10-18 按“避免过度防御”精简（计划 §0），分支 `feat/source-paths` 已从 main `6393bfc` 建立；交付时登记 `v0.4.0`。
+3. **PR3 / minor（可开工）**：[当前用户来源目录与追加路径](active/2026-10-14-source-discovery-and-additional-paths.md)，S00–S07（S00 为原生验收卡死定位）；2026-10-18 按“避免过度防御”精简并新增 S00（计划 §0，用户已确认），分支 `feat/source-paths` 已从 main `6393bfc` 建立；交付时登记 `v0.4.0`。
 4. **整合计划尾项**：N10、N11、N13 与系统签字，见[整合计划](active/2026-10-11-consolidated-remaining-work.md)。
 
 每个 PR 各自递增一次版本、各自验证最终 HEAD；合入 main 前先用 `python -B scripts/upgrade_baselines.py add --tag v<上一版>` 登记上一版。
