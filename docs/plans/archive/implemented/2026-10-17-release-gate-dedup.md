@@ -1,7 +1,7 @@
 # 发布流程去掉重复的完整测试
 
-> 状态：**已实施，待合入后的 Release 取证**（2026-10-17）。实现见 PR [#11](https://github.com/ywltby/tokenscope/pull/11)，复核见[审阅第 22 节](../../reviews/2026-10-15-source-discovery-plan-review.md#22-发布去重实现复核pr-11head-6f495f4)。执行方补充（`3c10bd9`）经[审阅第 21 节](../../reviews/2026-10-15-source-discovery-plan-review.md#21-发布去重计划复核执行方补充-3c10bd9)复核：接受风险表述与版本登记的修正，删去过度防御的步骤，§6 重写。
-> 交付：独立小 PR，patch（只改发布工作流、一条契约测试与文档，不改程序）。**在当前分支 `docs/release-gate-dedup-plan` 上实施**：它已带本计划与第二批计划归档（`fcc3578`），从 main 另建分支会丢掉归档提交。排在 [PR2 扫描反馈](2026-10-15-collection-status.md)之前。
+> 状态：**已实现并验收（2026-10-17 归档）。** PR [#11](https://github.com/ywltby/tokenscope/pull/11) 于 2026-10-16 19:04Z 合入 main（`0ee50f4`），[Release](https://github.com/ywltby/tokenscope/actions/runs/38952158912) 全部通过并发布 `v0.3.4`，发布总耗时 6 分 44 秒（v0.3.3 约 31 分钟）。复核见[审阅第 22 节](../../../reviews/2026-10-15-source-discovery-plan-review.md#22-发布去重实现复核pr-11head-6f495f4)。
+> 交付：独立小 PR，patch（只改发布工作流、一条契约测试与文档，不改程序）。**在当前分支 `docs/release-gate-dedup-plan` 上实施**：它已带本计划与第二批计划归档（`fcc3578`），从 main 另建分支会丢掉归档提交。排在 [PR2 扫描反馈](../../active/2026-10-15-collection-status.md)之前。
 
 ## 1. 现状（2026-10-17 核实）
 
@@ -65,7 +65,23 @@
 
 - 第 1 条：新契约在旧工作流上失败（Release gate 仍含 `./.github/actions/setup`），改后通过；提交钩子完整模式通过。
 - 第 2 条：PR #11 首次运行全部通过：CI `gate` 17m12s、`native-ui` 7m7s、`install-test` 11m26s，四项单跳升级（0.1.0 / 0.3.3 × present / deleted）均约 1 分钟。
-- 第 3、4 条待合入后的 Release。
+- 第 2 条补充：PR 最终 HEAD `c3a8331`（仅文档）重跑同样首次通过：CI `gate` 16m30s、`native-ui` 8m39s、`install-test` 9m40s，四项单跳升级各约 1 分钟。
+- 第 3 条：[Release run 38952158912](https://github.com/ywltby/tokenscope/actions/runs/38952158912)（main `0ee50f4`）。gate 日志只有 checkout、setup-python、版本递增校验与发布身份校验，没有 Rust、pnpm 与完整检查。
+
+  | 作业 | 用时 | 结果 |
+  | --- | --- | --- |
+  | gate | 18 s | 通过 |
+  | build | 4m30s | 通过 |
+  | plan-upgrades | 11 s | 通过 |
+  | install-test | 1m25s | 通过 |
+  | upgrade-test × 4（0.1.0 / 0.3.3 × present / deleted） | 58 s–1m02s | 通过 |
+  | upgrade-chain × 2（present / deleted） | 1m06s–1m07s | 通过 |
+  | publish | 22 s | 通过，`v0.3.4` 预发布于 19:10:55Z，四个资产齐全 |
+  | 工作流合计 | 6m44s | 通过 |
+
+  build 从 v0.3.3 的约 11 分钟降到 4.5 分钟，与本计划无关（构建作业未改动），原因未查，不计入本计划的效果。
+- main 上并行运行的 [CI](https://github.com/ywltby/tokenscope/actions/runs/38952158892)（11m43s）与 [Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/38952158936)（10m21s）均通过，发布未等待它们。
+- 第 4 条：已回填，计划归档。
 
 ## 6. 执行步骤
 

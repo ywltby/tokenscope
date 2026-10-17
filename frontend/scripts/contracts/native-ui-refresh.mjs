@@ -120,7 +120,8 @@ export async function nativeUiRefresh({ inst, ck, ev }) {
     await root().getAttribute("data-summary-query"),
   );
 
-  // 空闲采集验证保留真实 120 秒；期间不发查询、不模拟时间、不绕过原生日志器。
+  // 空闲采集验证保留真实 30 秒（自动读取最短间隔 5 秒，约 6 轮）；期间不发查询、
+  // 不模拟时间、不绕过原生日志器。
   const logs = () => {
     const dir = path.join(inst.root, "tokenscope", "logs");
     return fs
@@ -135,15 +136,15 @@ export async function nativeUiRefresh({ inst, ck, ev }) {
   };
   const baseline = logs();
   const started = Date.now();
-  while (Date.now() - started < 120000) {
+  while (Date.now() - started < 30000) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
     if (inst.proc.exitCode !== null) throw new Error("application exited during idle check");
-    if (Math.floor((Date.now() - started) / 1000) % 30 === 0)
+    if (Math.floor((Date.now() - started) / 1000) % 10 === 0)
       process.stderr.write("[ui-refresh] idle log observation\n");
   }
   const after = logs();
   ck.add(
-    "idle_120s_no_info_lines",
+    "idle_30s_no_info_lines",
     JSON.stringify(after) === JSON.stringify(baseline),
     `${baseline.length} -> ${after.length}`,
   );

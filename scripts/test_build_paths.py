@@ -15,6 +15,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 TRIPLE = "x86_64-pc-windows-msvc"
+# CI 拆分后的四个检查组：每个检查步骤都必须归属其中之一，且各组都有作业在跑。
+CHECK_GROUPS = ("rust", "rust-acceptance", "contracts", "frontend")
+GROUP_CONDITION = re.compile(r"(?:always\(\) && )?inputs\.group == ['\"]([a-z-]+)['\"]")
 
 
 def read(relative):
@@ -58,6 +61,51 @@ def job_block(text, name):
     if match is None:
         raise AssertionError(f"workflow 里没有作业 {name}")
     return match[1]
+
+
+def job_names(text):
+    """`jobs:` 下的顶层作业名（缩进恰好 2 空格、行尾无值）。"""
+    tail = text.split("\njobs:\n", 1)[1]
+    return re.findall(r"^  ([A-Za-z0-9_-]+): *$", tail, re.M)
+
+
+def needs_of(block):
+    """作业的 `needs` 列表，支持内联与块序列两种写法。"""
+    match = re.search(r"^    needs: *(\S.*)?$", block, re.M)
+    if match is None:
+        raise AssertionError("作业没有 needs")
+    inline = match.group(1)
+    if inline:
+        return [item.strip().strip("'\"")
+                for item in inline.strip().strip("[]").split(",") if item.strip()]
+    items = []
+    for line in block[match.end():].lstrip("\r\n").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            break
+        if stripped.startswith("#"):
+            continue
+        if not stripped.startswith("- "):
+            break
+        items.append(stripped[2:].strip().strip("'\""))
+    return items
+
+
+def action_steps(relative):
+    """按出现顺序提取复合动作的步骤：名字、`if` 条件与整块原始文本。"""
+    steps = []
+    for line in read(relative).split("\n"):
+        if line.startswith("    - "):
+            name = line[len("    - name: "):].strip() if line.startswith("    - name: ") else ""
+            steps.append({"name": name, "condition": "", "text": [line]})
+            continue
+        if not steps:
+            continue
+        steps[-1]["text"].append(line)
+        stripped = line.strip()
+        if stripped.startswith("if: "):
+            steps[-1]["condition"] = stripped[len("if: "):]
+    return steps
 
 
 def workflow_paths(relative):
@@ -211,17 +259,54 @@ class CiLayoutCase(unittest.TestCase):
         self.assertIn("python -B scripts/build_inputs.py --check", checks)
         self.assertIn('test_build_paths.py', checks)
 
+    def test_every_checks_step_belongs_to_exactly_one_group(self):
+        """拆分后不得有检查掉出所有组：每步恰属一组，且四个组都有步骤在跑。"""
+        steps = action_steps(".github/actions/checks/action.yml")
+        self.assertGreater(len(steps), 1, "checks 动作没有步骤")
+        self.assertEqual(steps[0]["name"], "Validate the check group")
+        self.assertEqual(steps[0]["condition"], "", "组校验自身不挂在任何组上")
+        body = "\n".join(steps[0]["text"])
+        for group in CHECK_GROUPS:
+            self.assertIn(group, body, f"组校验没有列出 {group}")
+        groups = []
+        for step in steps[1:]:
+            match = GROUP_CONDITION.fullmatch(step["condition"])
+            self.assertIsNotNone(match, f"步骤没有归属组：{step['name']}")
+            self.assertIn(match.group(1), CHECK_GROUPS, step["name"])
+            groups.append(match.group(1))
+        self.assertEqual(sorted(set(groups)), sorted(CHECK_GROUPS), "有组没有步骤在跑")
+
+    def test_ci_runs_each_check_group_once_and_gate_covers_them(self):
+        """四个组各被一个作业调用一次；gate 汇总这四者且自身不跑检查。"""
+        ci = read(".github/workflows/ci.yml")
+        called = {}
+        for name in job_names(ci):
+            block = job_block(ci, name)
+            if "./.github/actions/checks" not in block:
+                continue
+            match = re.search(r"^ *group: *([a-z-]+) *$", block, re.M)
+            self.assertIsNotNone(match, f"作业 {name} 没有传给 checks 的 group")
+            called[name] = match.group(1)
+        self.assertEqual(sorted(called.values()), sorted(CHECK_GROUPS),
+                         "四个组必须各被调用恰好一次")
+        for name, group in called.items():
+            self.assertEqual(name, group, "作业名与组名一致（gate 的 needs 依赖它）")
+        gate = job_block(ci, "gate")
+        self.assertNotIn("./.github/actions/checks", gate, "gate 不再直接跑检查")
+        self.assertEqual(sorted(needs_of(gate)), sorted(CHECK_GROUPS))
+
     def test_release_gate_keeps_identity_checks_without_full_quality_gate(self):
         # 完整质量门禁由 PR 必需检查（ci.yml 的 gate）保证；Release 的 gate 只保留
         # 发布身份校验。防止日后删测试时连身份校验一起删掉，或把 CI 的完整门禁误删。
         release_gate = job_block(read(".github/workflows/release.yml"), "gate")
-        ci_gate = job_block(read(".github/workflows/ci.yml"), "gate")
         self.assertIn("bump_version.py --check", release_gate)
         self.assertIn("release_metadata.py", release_gate)
         self.assertIn("id: metadata", release_gate)
         for duplicated in ("./.github/actions/setup", "./.github/actions/checks"):
             self.assertNotIn(duplicated, release_gate, duplicated)
-        self.assertIn("./.github/actions/checks", ci_gate)
+        # CI 侧只要求工作流仍在调用该动作；每个步骤的归属与作业调用由
+        # CheckGroupCase 覆盖（gate 本身是汇总作业，不再直接跑检查）。
+        self.assertIn("./.github/actions/checks", read(".github/workflows/ci.yml"))
 
     def test_install_test_paths_cover_core_crate_and_not_legacy_root(self):
         patterns = workflow_paths(".github/workflows/install-test.yml")
