@@ -193,6 +193,7 @@ docs/privacy.md 只补充当前用户默认、环境和多个手动路径，不�
 S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失败→通过及远程 run/artifact，计划审阅不代表实现。
 
 - [x] S00：原生验收卡死有超时、看门狗证据与阶段日志。（2026-10-18 实施完毕，记录见下）
+- [x] S01：配置集合与迁移（设置格式 v2）。（2026-10-18 实施完毕，记录见下）
 - [ ] 固定候选、两种环境变量、映射核实和隔离全部验证。
 - [ ] 手动嵌套拒绝；迁移/环境重叠不阻断且只解析一次。
 - [ ] 联接环闭合；两层去重不丢独立事件。
@@ -209,6 +210,14 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 - **关键测试**：`scripts/lib/native-scenario.test.mjs` 24 例——同步命令超时（error=ETIMEDOUT/signal=SIGTERM/status=null 全部进错误信息）、CDP close 永不返回、场景永不返回、onTimeout 恰一次、迟到分支不重复触发且不重启（源级契约钉住 Instance 接线）、失败取证永不返回、正常完成解除计时器、attach 不终止外部进程、Node 子进程端到端（父测 10 秒上限、断言磁盘证据与非零退出 7）。
 - **执行结果**：`pnpm --dir frontend test` 44 文件/566 用例全绿；`python -B scripts/check_node_syntax.py` 20 个脚本通过；本机冒烟（`--exe` 指向不存在路径跑 `ui-system`）退出码 2，evidence.json 落盘含 `failure_stage=setup`、`last_stage`（stop 已完成 done_at 置位）、`stages`（launch 失败未完成）、`stop.browser_close`、真实数据指纹不变。
 - **边界如实记录**：防卡死机制已验证；run 39050690161 的原卡死根因仍未知（S00 只保证此类卡死能定位，不宣称已修复）；场景预算非精确墙钟强杀点（同步阻塞最多推迟一个 30 秒有界调用）；远程 Native UI E2E 待本 PR CI，属交付条件。未完成项：无（本项范围内）。
+
+### S01 执行记录（2026-10-18）
+
+- **提交**：S01 代码与测试为 commit `4d541f1`（pre-commit 完整模式全绿）；本记录为紧随其后的文档提交。
+- **落点**：`settings.rs`——`SourceConfig` 增 `auto_discover`/`excluded_auto_paths`/`additional_paths`（`AdditionalSourcePath{path,enabled}`）并自定义反序列化保留"新字段是否出现"信息；`migrate_source_paths(_with)` 事务锁内 v1 dir→追加项（空 dir 仅归一、相对 dir 按 cwd 转绝对、失败可操作且字节不动、幂等、重叠给一次性提示、其余字段逐字段保留）；`check_additional_path` 与 `validate_additional_path_shape` 供 S04 接线；`SETTINGS_FORMAT_REVISION` 1→2，模板同步。升级契约：`settings_migrations.json` 补 `source_dir_to_additional_path` 操作与 `1->2`/`2->2`（保留 `1->1`），`upgrade_fixture.py` 校验实现与 `test_upgrade_fixture.py` 契约测试同步。
+- **关键测试**：`source_paths_settings.rs` 17 例（旧空/非空/停用 dir、新旧并存忽略 dir、显式空列表、幂等、共享锁原子失败、迁移×update 并发合并、相对 dir 存在/缺失、父根重叠说明、遗留 JSON、字段保留、追加路径形态与同/嵌套拒绝、升级配置固化、修订号=2）；`test_upgrade_fixture.py` 新增 8 例（dir→追加项各坏形态拒绝、空 dir 无空条目、停用继承、无 dir 免迁移、2->2 恒等、规则表完备性）。
+- **执行结果**：`cargo test --locked -p tokenscope --test source_paths_settings` 17/17；`cargo test --locked --workspace` 49 个测试目标全绿；`cargo clippy --locked --workspace --all-targets` 与 `cargo fmt --all -- --check` 干净；`python -B -m unittest test_upgrade_fixture` 17/17。
+- **边界如实记录**：升级用量并集断言（旧自定义 dir 与默认根各有独立用量、重复请求不增量）按 §9.2 第 7 条**待 S03** 在 `source_paths_collection.rs` 以相同场景执行，本项只固化配置与预期；`source_config_set` 等壳入口仍按旧接口编译兼容（S04 替换）。未完成项：无（本项范围内）。
 
 ## 8. 执行细则、算法边界与验收门槛
 
