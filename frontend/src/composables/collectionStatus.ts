@@ -99,6 +99,9 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
   let lastSeenRunId = -1;
   /// 已转发给自动刷新入口的最高代次（同一已覆盖代次不重复建查询）。
   let forwardedGeneration = -1;
+  /// 最近一次采集失败的错误（PR2 复核修订）：**只在成功终态清除**——
+  /// running/隐藏/通道波动都不清，失败通知独立于活动阶段存续。
+  let lastCollectionError: string | null = null;
   let unlisten: (() => void) | null = null;
   let subscribing = false;
   let displayUntil = 0;
@@ -150,7 +153,11 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
     return `；最近读取 ${secs} 秒前`;
   }
 
-  /** 从当前内存状态重建胶囊视图与错误通知（所有状态变化点的唯一出口）。 */
+  /** 从当前内存状态重建胶囊视图与错误通知（所有状态变化点的唯一出口）。
+   *
+   * 采集错误通知挂在 `lastCollectionError` 上（PR2 复核修订）：**只有成功
+   * 终态清除它**——下一轮 running 不清除（计划："后台下一次成功只能清除
+   * 采集错误"），running 期间通知与「正在读取」胶囊并存。 */
   function updateOutputs(): void {
     if (disposed) return;
     const s = latestStatus.value;
@@ -169,9 +176,9 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
       };
       return;
     }
-    opts.noticeOut.value = null;
     if (!s) {
       // 初始状态尚未获取：静态"正在确认状态"，不假称扫描中。
+      opts.noticeOut.value = null;
       opts.pillOut.value = {
         cls: "ts-pill-info",
         text: "正在确认状态",
@@ -180,13 +187,17 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
       };
       return;
     }
-    if (s.phase === "failed") {
+    if (lastCollectionError !== null) {
       opts.noticeOut.value = {
         id: "collection-failed",
         severity: "error",
-        text: `读取失败：${s.error ?? "未知错误"}（统计显示的是上次成功读取的数据）`,
+        text: `读取失败：${lastCollectionError}（统计显示的是上次成功读取的数据）`,
         actions: [{ label: "手动刷新", run: () => opts.onManualRefresh() }],
       };
+    } else {
+      opts.noticeOut.value = null;
+    }
+    if (s.phase === "failed") {
       opts.pillOut.value = {
         cls: "ts-pill-warning",
         text: "读取失败",
@@ -231,7 +242,15 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
     if (s.revision <= lastRevision) return;
     lastRevision = s.revision;
     latestStatus.value = s;
+    // 通道健康由成功路径独立恢复（见 resync/ensureSubscribed）——这里只处理
+    // "确实收到新版本"的情形。
     statusUnavailable.value = false;
+    // 采集错误只在成功终态清除；failed 记录本轮错误，running 保持不变。
+    if (s.phase === "failed") {
+      lastCollectionError = s.error ?? "未知错误";
+    } else if (s.phase === "succeeded") {
+      lastCollectionError = null;
+    }
     // 代次转发：更高的 latestGeneration 走既有自动刷新合并入口。隐藏期间
     // 也转发（合并入口自己负责"只记待刷新"）。
     if (
@@ -278,6 +297,12 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
         return;
       }
       unlisten = un;
+      // 通道恢复即解除异常提示（PR2 复核修订）：通道健康与状态版本更新是
+      // 两件事——不重播动画、不重复转发代次（那些只走 applyStatus 的新版本）。
+      if (statusUnavailable.value) {
+        statusUnavailable.value = false;
+        updateOutputs();
+      }
     } catch {
       if (disposed) return;
       if (hasTauriHost()) {
@@ -296,11 +321,19 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
 
   /// 重查内存状态：纠正漏失的结束事件；失败时提示状态不可用（不把超时
   /// 假判为采集失败）。30 秒校验计时器与恢复可见时共用。
+  ///
+  /// 成功返回**即使被 revision 门卫丢弃**也解除通道异常（PR2 复核修订）：
+  /// 一次 IPC 失败后，后台状态没变（revision 相同）的成功重试必须恢复提示，
+  /// 而丢弃路径不触碰动画与代次。
   async function resync(): Promise<void> {
     if (disposed) return;
     await ensureSubscribed();
     try {
       const s = await queryStatus();
+      if (statusUnavailable.value) {
+        statusUnavailable.value = false;
+        updateOutputs();
+      }
       applyStatus(s);
     } catch {
       if (disposed) return;
@@ -363,6 +396,11 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
 
   // 初始输出：状态尚未获取时静态"正在确认状态"，不假称扫描中。
   updateOutputs();
+
+  // 初始已可见即启动 30 秒校验（PR2 复核修订）：可见性 watcher 只响应
+  // 变化、不处理初始值——一直停在汇总页时校验必须照常运行，否则漏掉的
+  // 结束事件会让读取反馈永远不停。
+  if (opts.visible.value) startVerifyTimer();
 
   // 启动顺序：先订阅，再查询快照（订阅先就位才能收到间隙里的转换）。
   void (async () => {

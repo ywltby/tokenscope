@@ -253,10 +253,18 @@ describe("collectionStatus 失败、隐藏与清理", () => {
     expect(h.notice.value?.actions[0]?.label).toBe("手动刷新");
     h.notice.value?.actions[0]?.run();
     expect(h.manualRefreshes.length).toBe(1);
-    // 随后一次成功：清除采集错误（notice 由真实状态派生）。
-    h.emit(status({ revision: 3, phase: "succeeded", runId: 2, changed: false }));
+    // 下一轮 running：活动阶段显示当前工作（胶囊"正在读取"），但上一轮的
+    // 采集错误通知必须保留——只有成功终态才能清除（PR2 复核修订）。
+    h.emit(status({ revision: 3, phase: "running", runId: 2 }));
+    await flushPromises();
+    expect(h.pill.value?.text).toBe("正在读取");
+    expect(h.notice.value?.severity).toBe("error");
+    // 成功终态：错误清除；显示期未满前读取反馈继续，到期后回到「已更新」。
+    h.emit(status({ revision: 4, phase: "succeeded", runId: 2, changed: false }));
     await flushPromises();
     expect(h.notice.value).toBeNull();
+    expect(h.pill.value?.text).toBe("正在读取");
+    await tick(1000);
     expect(h.pill.value?.text).toBe("已更新");
     h.wrapper.unmount();
   });
@@ -330,6 +338,61 @@ describe("collectionStatus 失败、隐藏与清理", () => {
     await flushPromises();
     expect(h.pill.value?.text).not.toBe("读取状态不可用");
     expect(h.notice.value).toBeNull();
+    h.wrapper.unmount();
+  });
+
+  // ── PR2 复核修订（评审三项 P2 的回归）──────────────────────
+
+  it("initial_visible_starts_periodic_verification：不切页面也运行 30 秒校验", async () => {
+    // 可见性 watcher 只响应变化、不处理初始值——初始 visible=true 必须由
+    // setup 直接启动校验计时器，漏掉结束事件才能被纠正（修复前 30 秒后
+    // 状态查询次数仍为 1）。
+    const query = vi.fn(async () => status({ revision: 2, phase: "succeeded", runId: 1 }));
+    const h = makeHarness();
+    h.setQuery(query);
+    await flushPromises();
+    const baseline = query.mock.calls.length;
+    expect(baseline).toBe(1);
+    await tick(30_001);
+    expect(query.mock.calls.length).toBeGreaterThan(baseline);
+    h.wrapper.unmount();
+  });
+
+  it("same_revision_retry_recovers_channel：相同 revision 的成功重试解除通道异常", async () => {
+    // 通道健康与状态版本更新分离：一次 IPC 失败后，后台状态没变（revision
+    // 相同）的成功重试必须清除"读取状态不可用"，且不重播动画、不重复转发
+    // 代次（丢弃路径不触碰显示期与 onGeneration）。
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const payload = status({
+      revision: 2,
+      phase: "succeeded",
+      runId: 1,
+      changed: true,
+      latestGeneration: 7,
+    });
+    const h = makeHarness();
+    let failing = false;
+    h.setQuery(async () => {
+      if (failing) throw new Error("临时 IPC 失败");
+      return payload;
+    });
+    await flushPromises();
+    expect(h.generations).toEqual([7]);
+    // 隐藏期间把查询切到失败，恢复可见时校验失败 → 通道异常。
+    h.visible.value = false;
+    await flushPromises();
+    failing = true;
+    h.visible.value = true;
+    await flushPromises();
+    expect(h.pill.value?.text).toBe("读取状态不可用");
+    // 相同 revision 的成功重试：恢复提示。
+    failing = false;
+    h.notice.value?.actions[0]?.run();
+    await flushPromises();
+    expect(h.pill.value?.text).toBe("已更新");
+    expect(h.notice.value).toBeNull();
+    expect(h.generations).toEqual([7]);
+    expect(h.pill.value?.spin).toBe(false);
     h.wrapper.unmount();
   });
 });
