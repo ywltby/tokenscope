@@ -1,7 +1,7 @@
 # CI 拆成并行作业与原生 E2E 精简
 
-> 状态：**实施中**（2026-10-17 用户确认执行）。C00–C04 已落地在 `ci/parallel-checks` 上并 patch 递增到 0.3.5；剩余：本 PR 门禁、合入后 main 建立热缓存、用 PR2 首跑记录效果。
-> 交付：独立小 PR，patch（只改工作流、复合动作、测试脚本与文档，不改程序）。**在分支 `ci/parallel-checks` 上实施**：它从 `feat/collection-status` 的 `ec8603b` 建立，已带发布去重计划的回填与归档（`4170869`）和 PR2 计划的修改（`ec8603b`）；从 main 另建分支会丢掉这两个提交。排在 [PR2 扫描反馈](2026-10-15-collection-status.md)之前；合入后 `feat/collection-status` 用 `git merge --ff-only origin/main` 跟上即可。
+> 状态：**已完成并归档（2026-10-17）**。PR [#12](https://github.com/ywltby/tokenscope/pull/12) 于 2026-10-17 05:50Z 合入 main（`1223ef0`），main 的 CI、Native UI E2E 与 Release 全部通过，`v0.3.5` 已发布，四组 Rust 缓存已在 main 上保存。§5 第 3 条后半的热缓存效果取证已用 PR2 第一次 CI（PR [#13](https://github.com/ywltby/tokenscope/pull/13)，HEAD `5805801`）完成，见下方「热缓存取证」。
+> 交付：独立小 PR，patch（只改工作流、复合动作、测试脚本与文档，不改程序）。**在分支 `ci/parallel-checks` 上实施**：它从 `feat/collection-status` 的 `ec8603b` 建立，已带发布去重计划的回填与归档（`4170869`）和 PR2 计划的修改（`ec8603b`）；从 main 另建分支会丢掉这两个提交。排在 [PR2 扫描反馈](../../active/2026-10-15-collection-status.md)之前；合入后 `feat/collection-status` 用 `git merge --ff-only origin/main` 跟上即可。
 
 ## 1. 现状（2026-10-17 核实）
 
@@ -123,6 +123,35 @@ PR 的等待时间取决于两项必需检查 `gate`（ci.yml）与 `native-ui`�
 | Install test（含 4 个升级场景） | [39006263447](https://github.com/ywltby/tokenscope/actions/runs/39006263447) | 12m37s |
 
 PR 等待 = max(`gate`, `native-ui`) ≈ 8m52s。对照拆分前：main `0ee50f4` 的 CI 11m43s、PR #11 的 `gate` 16–17 分钟；本次是四个新作业没有自己缓存的首跑，已达成预期。`upgrade-chain` 在 PR 上按设计跳过（`if: github.event_name == 'workflow_dispatch'`）。
+
+**合入后 main `1223ef0`（2026-10-17，§5 第 3 条前半）**
+
+| 运行 | 作业 | 用时 | 结果 |
+| --- | --- | --- | --- |
+| [CI 39007741994](https://github.com/ywltby/tokenscope/actions/runs/39007741994) | `rust` / `rust-acceptance` / `contracts` / `frontend` | 8m55s / 8m31s / 8m29s / 4m20s | 通过（四组仍是冷缓存首跑） |
+| 同上 | `gate` 汇总 | 2s；工作流合计 9m03s | 通过 |
+| [Native UI E2E 39007741999](https://github.com/ywltby/tokenscope/actions/runs/39007741999) | `native-ui` | 6m42s（拆分前 10m17s） | 通过；工件 56 项检查全过，含 `idle_30s_no_info_lines` 与 DPR 1 / 1.5 / 2 |
+| [Release 39007741954](https://github.com/ywltby/tokenscope/actions/runs/39007741954) | gate 27s、build 4m45s、install-test、升级矩阵（0.1.0 / 0.3.4 × present / deleted）、两条升级链、publish | 合计 6m51s | 通过；`v0.3.5` 预发布于 05:57:31Z，四个资产齐全 |
+
+GitHub 缓存列表已有 main 上的 `rust-workspace-layout`（632 MB）、`rust-acceptance-workspace-layout`（632 MB）、`contracts-workspace-layout`（496 MB）、`frontend-workspace-layout`（113 MB）四份，PR 之后可以命中。旧 `gate-workspace-layout` 缓存不再使用，按 §4 等 GitHub 自动清理。
+
+**热缓存取证（§5 第 3 条后半，2026-10-17）**：PR2 第一次 CI——[PR #13](https://github.com/ywltby/tokenscope/pull/13)（真实扫描状态与读取动画），来源 HEAD `5805801`（CI 实际 checkout 同一 SHA，无重跑）。
+
+| 检查 | 运行 | 作业用时 | 结果 |
+| --- | --- | --- | --- |
+| CI `gate`（汇总） | [39031769454](https://github.com/ywltby/tokenscope/actions/runs/39031769454) | 工作流合计 ≈5m53s（12:14:55→12:20:48Z）；`gate` 汇总作业本身 3s | 通过 |
+| — `rust` | 同上 | 4m39s（12:14:57→12:19:36Z） | 通过 |
+| — `rust-acceptance` | 同上 | 4m35s（→12:19:32Z） | 通过 |
+| — `contracts` | 同上 | 5m46s（→12:20:43Z） | 通过 |
+| — `frontend` | 同上 | 5m03s（→12:20:00Z） | 通过 |
+| `native-ui` | [39031769499](https://github.com/ywltby/tokenscope/actions/runs/39031769499) | 7m37s（12:14:57→12:22:34Z；工作流合计 ≈7m39s） | 通过 |
+| Install test（0.1.0 / 0.3.5 × present / deleted） | [39031769568](https://github.com/ywltby/tokenscope/actions/runs/39031769568) | install-test 11m38s + 升级矩阵约 1m05s | 通过 |
+
+**缓存命中（来自各作业日志，非"缓存存在"推断）**：四组均 `full match: true` 命中 main 保存的各自 key——`rust` 命中 `v0-rust-rust-workspace-layout-rust-…`（12:16:24Z restored）、`rust-acceptance` 命中 `v0-rust-rust-acceptance-workspace-layout-…`（12:16:18Z）、`contracts` 命中 `v0-rust-contracts-workspace-layout-…`（12:16:15Z）、`frontend` 命中 `v0-rust-frontend-workspace-layout-…`（12:15:58Z）；四组的 pnpm `node-cache` 也全部命中并在 Post 阶段按主键命中跳过保存。
+
+**对照**：冷缓存首跑（PR #12）`gate` 8m52s（rust 7m58s / rust-acceptance 8m44s / contracts 6m48s / frontend 4m45s）；热缓存下同组 4m35s–5m46s，`gate` 合计缩短约 3 分钟，达到 §1 的预期方向（预期 CI 约 5 分钟、原生约 8 分钟——实测 gate 5m53s、native-ui 7m37s，均无硬门槛）。PR 等待 = max(gate, native-ui) ≈ 7m39s；native-ui 略高于拆分前的 6m42s，原因是本 PR 为新场景 `ui-collection-status` 增加了第三次启动（CI 上 20/20 通过），属新增覆盖而非退化。无排队等待（run 创建与作业启动差 2s）、无缓存未命中、无失败重跑。`upgrade-chain` 在 PR 上按设计跳过。
+
+§5 第 3 条满足，计划归档。
 
 ## 6. 执行步骤
 

@@ -20,6 +20,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import { nativeUiRefresh } from "./contracts/native-ui-refresh.mjs";
+import { nativeCollectionStatus } from "./contracts/native-collection-status.mjs";
 import { nativeUiRelaunch, nativeUiSystem } from "./contracts/native-ui-system.mjs";
 import { decodePng } from "./lib/png.mjs";
 import {
@@ -1273,6 +1274,8 @@ async function measureA11y(page) {
 const scenarios = {
   "ui-refresh": nativeUiRefresh,
   "ui-system": nativeUiSystem,
+  // PR2：真实采集生命周期 + 读取显示期 + 失败恢复 + 翻页保护（验收注入驱动慢轮次与失败）。
+  "ui-collection-status": nativeCollectionStatus,
   // §4.8 第 7 条：多路重启压力验证，只在本地跑（CI 由各场景原有的重启覆盖）。
   "ui-relaunch": nativeUiRelaunch,
   // 在同一个驱动进程内完成等待；部分终端会在父进程结束时回收其原生子进程。
@@ -2366,7 +2369,13 @@ async function main() {
   if (!setupError) {
     ev.dpr = await inst.page.evaluate(() => devicePixelRatio).catch(() => null);
     const scenarioTimeoutMs =
-      SCENARIO === "expire-cycle" ? 750000 : SCENARIO === "ui-relaunch" ? 1800000 : 240000;
+      SCENARIO === "expire-cycle"
+        ? 750000
+        : SCENARIO === "ui-relaunch"
+          ? 1800000
+          : SCENARIO === "ui-collection-status"
+            ? 480000
+            : 240000;
     let scenarioTimer;
     try {
       hb(`场景 ${SCENARIO} 开始`);

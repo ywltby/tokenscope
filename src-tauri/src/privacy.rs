@@ -77,6 +77,8 @@ pub const PROTECTED_COMMANDS: &[&str] = &[
     "settings_set_timezone",
     // U06：JSONL 自动读取间隔（settings.toml 单一来源）同样受闸门保护。
     "settings_set_collect_interval",
+    // PR2：只读采集状态快照同样受闸门保护（未 Ready 时不暴露进程内部状态）。
+    "collection_status",
     "close_resolve",
     "open_settings_file",
 ];

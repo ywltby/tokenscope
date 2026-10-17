@@ -60,6 +60,16 @@ pub fn bootstrapped() -> bool {
     imp::bootstrapped()
 }
 
+/// PR2 F04：领队工作前的受控注入——只存在于验收构建，生产构建没有任何
+/// 环境变量通道。用于原生 E2E 观察「慢轮次持续到真实完成」与「失败恢复」：
+/// - `TOKENSCOPE_ACCEPTANCE_COLLECT_DELAY_MS=<毫秒>`：每轮领队工作前睡眠
+///   该时长（模拟慢扫描；不改变真实工作量与结果）；
+/// - `TOKENSCOPE_ACCEPTANCE_COLLECT_FAIL_ON_ROUND=<N>`：第 N 轮领队工作
+///   返回错误（一次性；第 N 轮之前的轮次与之后的轮次都正常）。
+pub fn before_leader_work() -> Result<(), String> {
+    imp::before_leader_work()
+}
+
 #[cfg(not(feature = "acceptance"))]
 mod imp {
     use std::path::PathBuf;
@@ -76,6 +86,9 @@ mod imp {
     }
     pub fn bootstrapped() -> bool {
         false
+    }
+    pub fn before_leader_work() -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -96,6 +109,36 @@ mod imp {
 
     pub fn bootstrapped() -> bool {
         ROOT.get().is_some()
+    }
+
+    /// 领队工作前的受控注入（仅验收构建）：每轮延迟 + 第 N 轮一次性失败。
+    /// 环境变量在首次调用时读取（采集进程的启动环境固定，无中途换值需求）。
+    pub fn before_leader_work() -> Result<(), String> {
+        static ROUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        use std::sync::atomic::Ordering;
+        static DELAY_MS: OnceLock<u64> = OnceLock::new();
+        let delay_ms = *DELAY_MS.get_or_init(|| {
+            std::env::var("TOKENSCOPE_ACCEPTANCE_COLLECT_DELAY_MS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(0)
+        });
+        if delay_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+        static FAIL_ROUND: OnceLock<Option<u64>> = OnceLock::new();
+        let fail_round = *FAIL_ROUND.get_or_init(|| {
+            std::env::var("TOKENSCOPE_ACCEPTANCE_COLLECT_FAIL_ON_ROUND")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+        });
+        let round = ROUND.fetch_add(1, Ordering::SeqCst) + 1;
+        if fail_round == Some(round) {
+            return Err(format!(
+                "验收注入：第 {round} 轮采集失败（TOKENSCOPE_ACCEPTANCE_COLLECT_FAIL_ON_ROUND）"
+            ));
+        }
+        Ok(())
     }
 
     pub fn bootstrap_from_env() -> Result<(), String> {

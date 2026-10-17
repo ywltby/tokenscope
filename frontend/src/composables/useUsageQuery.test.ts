@@ -999,7 +999,7 @@ describe("query coherence and reactivation regressions", () => {
     });
     const w = mountHost();
     await flushPromises();
-    expect(api.statusPill.value.text).toBe("更新于 23:59:00");
+    expect(api.statusPill.value.text).toBe("已更新");
     const before = beginCalls();
     api.setVisible(false);
     vi.setSystemTime(new Date("2026-10-05T16:01:00Z"));

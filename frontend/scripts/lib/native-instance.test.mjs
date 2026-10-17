@@ -80,10 +80,11 @@ describe("端口计算（§4.8 第 1 条）", () => {
   it("工作流各步起始端口互不重叠（§4.8 第 1 条）", () => {
     const bases = [...workflowText().matchAll(/\b9\d{3}\b/g)].map((m) => Number(m[0]));
     const unique = [...new Set(bases)].sort((a, b) => a - b);
-    // 强制缩放 1 那一轮已删：Runner 的系统 DPI 轮本身就是 dpr=1、视口 980×620，
-    // 两轮证据重复，端口 9470 随之退场。
-    expect(unique).toEqual([9451, 9460, 9480, 9490]);
-    // 单步最多 3 次启动：ui-refresh 首次 + 2 次重启，ui-system 首次 + 1 次重启。
+    // 9470 复活为 ui-collection-status 的起始端口（旧用途是强制缩放 1 轮，
+    // 已因证据重复删除）；该场景 3 次启动用 9471–9473。
+    expect(unique).toEqual([9451, 9460, 9470, 9480, 9490]);
+    // 单步最多 3 次启动：ui-refresh 首次 + 2 次重启，ui-system 首次 + 1 次重启，
+    // ui-collection-status 首次 + 2 次重启。
     const stepSize = 3;
     const segments = unique.map((base) => [base + 1, base + stepSize]);
     for (const [from, to] of segments) {

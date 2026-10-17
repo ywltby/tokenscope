@@ -871,6 +871,21 @@ export function buildFixture(name) {
         return 1;
       case "plugin:event|unlisten":
         return null;
+      case "collection_status":
+        // PR2：只读采集状态快照——浏览器契约里等价"最近一轮成功、无警告"。
+        // latestGeneration 为 null：不触发"有新数据"自动刷新，保持既有
+        // 契约的查询次数语义不变。
+        return {
+          revision: 2,
+          runId: 1,
+          phase: "succeeded",
+          trigger: "startup",
+          latestGeneration: null,
+          changed: true,
+          hasWarnings: false,
+          lastCompletedAt: "2026-10-15T02:16:05.041Z",
+          error: null,
+        };
       case "pricing_status": {
         state.statusReads += 1;
         // RC09：状态读取失败形态——pricing_status 本身拒绝（不是价格列表）。
