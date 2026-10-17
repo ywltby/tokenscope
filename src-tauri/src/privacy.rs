@@ -60,6 +60,7 @@ pub const PROTECTED_COMMANDS: &[&str] = &[
     "source_path_add",
     "source_path_remove",
     "source_path_set_enabled",
+    "source_auto_set",
     "cache_stats",
     "refresh_cache",
     // H05：CCS 导入只由用户在设置页手动触发，且同样受隐私闸门保护

@@ -381,6 +381,22 @@ export function sourceIdOf(agent: string): string {
   return agent === "claude-code" ? "claude" : agent;
 }
 
+/** PR3 §5：来源目录管理行（source_paths_list；id = 规范化身份键）。
+ *  后端已解析路径身份/重叠/标签——前端只展示，不重算。 */
+export interface SourcePathRow {
+  id: string;
+  agent: "claude" | "codex";
+  path: string;
+  canonical_identity: string;
+  identity_confirmed: boolean;
+  origins: string[];
+  mapping_path: string | null;
+  row_enabled: boolean;
+  enabled: boolean;
+  state: "ready" | "missing" | "no_permission" | "not_directory";
+  diagnostics: string[];
+}
+
 export const AGENT_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",

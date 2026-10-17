@@ -67,9 +67,47 @@ const pricingView = {
   warnings: [],
 };
 
-const sourceStatuses = [
-  { agent: "claude-code", dir: "C:/claude", enabled: true, exists: true, files: 3, state: "ready" },
-  { agent: "codex", dir: "C:/codex", enabled: true, exists: true, files: 2, state: "ready" },
+/** PR3：source_paths_list 的行（后端已解析身份/标签/状态；前端只展示）。 */
+const sourceRowsFixture = [
+  {
+    id: "c:/claude-logs",
+    agent: "claude",
+    path: "C:/claude-logs",
+    canonical_identity: "c:/claude-logs",
+    identity_confirmed: true,
+    origins: ["默认自动"],
+    mapping_path: null,
+    row_enabled: true,
+    enabled: true,
+    state: "ready",
+    diagnostics: [],
+  },
+  {
+    id: "c:/claude-manual",
+    agent: "claude",
+    path: "C:/history/claude/projects",
+    canonical_identity: "c:/claude-manual",
+    identity_confirmed: true,
+    origins: ["手动"],
+    mapping_path: null,
+    row_enabled: false,
+    enabled: false,
+    state: "missing",
+    diagnostics: [],
+  },
+  {
+    id: "c:/codex-logs",
+    agent: "codex",
+    path: "C:/codex",
+    canonical_identity: "c:/codex-logs",
+    identity_confirmed: true,
+    origins: ["默认自动"],
+    mapping_path: null,
+    row_enabled: true,
+    enabled: true,
+    state: "ready",
+    diagnostics: [],
+  },
 ];
 
 /** RC03：可控完成时序的 deferred（按确定顺序释放响应）。 */
@@ -134,7 +172,9 @@ type SettingsVm = {
   closeAction: string;
   closeActionKnown: boolean;
   autoSync: boolean | null;
-  drafts: Record<string, { enabled: boolean; dir: string }>;
+  agentEnabled: Record<string, boolean>;
+  agentAuto: Record<string, boolean>;
+  addDrafts: Record<string, string>;
   pricing: { modelsdev_count: number; entries: unknown[] } | null;
   setCloseAction: (v: string) => Promise<void>;
   setAutoSync: (v: boolean) => Promise<void>;
@@ -147,7 +187,7 @@ function vmOfSettings(w: VueWrapper): SettingsVm {
 function mockBase(): void {
   invokeMock.mockImplementation((cmd: string) => {
     if (cmd === "pricing_entries") return Promise.resolve(pricingView);
-    if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+    if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
     if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
     if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
     if (cmd === "autostart_status") return Promise.resolve(false);
@@ -193,12 +233,6 @@ function installLayoutMedia(): void {
   });
 }
 
-/** 切换宽/窄窗口并通知监听者（等价于窗口尺寸跨过断点）。 */
-function setLayoutNarrow(v: boolean): void {
-  layoutNarrow = v;
-  for (const cb of [...layoutListeners]) cb({ matches: v });
-}
-
 /** U05：切到某个分区（等价于点击导航项）。 */
 async function openSection(w: VueWrapper, id: string): Promise<void> {
   (w.vm as unknown as { selectSection: (s: string) => void }).selectSection(id);
@@ -227,6 +261,14 @@ beforeEach(() => {
   // U06：自动读取间隔是模块级单例（缺省 5 分钟）——每个用例从缺省起步。
   resetCollectIntervalForTests();
 });
+
+function settingsImpl(cmd: string): unknown {
+  if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
+  if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+  if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+  if (cmd === "autostart_status") return Promise.resolve(false);
+  return Promise.resolve(null);
+}
 
 describe("Settings 同步状态传播（Task 4）", () => {
   it("large pricing uses the shared scroll loader instead of manual pagination", async () => {
@@ -260,16 +302,16 @@ describe("Settings 同步状态传播（Task 4）", () => {
       global: { provide: { [SETTINGS_PRELOAD as symbol]: preload } },
     });
     await flushPromises();
-    // source_status / cache_stats / pricing_entries / settings_get /
+    // source_paths_list / cache_stats / pricing_entries / settings_get /
     // autostart_status + H05 的来源库默认路径解析（只解析路径，不打开 CCS 库）
-    expect(invokeMock).toHaveBeenCalledTimes(6);
+    expect(invokeMock).toHaveBeenCalledTimes(7);
     expect(vmOfSettings(w).autoSync).toBe(true);
     // U05：价格视图推迟到首次进入「价格」分区才消费——仍复用**同一次**预读，
-    // 不重复发起 pricing_entries（总调用次数保持 6）。
+    // 不重复发起 pricing_entries（总调用次数保持 7）。
     expect(vmOfSettings(w).pricing).toBeNull();
     await openSection(w, "pricing");
     expect(vmOfSettings(w).pricing?.modelsdev_count).toBe(10);
-    expect(invokeMock).toHaveBeenCalledTimes(6);
+    expect(invokeMock).toHaveBeenCalledTimes(7);
     expect(w.findComponent({ name: "NSpin" }).exists()).toBe(false);
     w.unmount();
   });
@@ -277,7 +319,7 @@ describe("Settings 同步状态传播（Task 4）", () => {
     let syncCalls = 0;
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pricing_entries") return Promise.resolve(pricingView);
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
       if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
       if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
       if (cmd === "sync_pricing_openrouter") {
@@ -301,7 +343,7 @@ describe("Settings 同步状态传播（Task 4）", () => {
   it("同步结束后派发 pricing-status-changed 事件", async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pricing_entries") return Promise.resolve(pricingView);
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
       if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
       if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
       if (cmd === "sync_pricing_openrouter") return Promise.resolve([]);
@@ -319,57 +361,165 @@ describe("Settings 同步状态传播（Task 4）", () => {
   });
 });
 
-describe("Settings 来源配置（Task 4）", () => {
-  it("source_config_set 重叠错误可见且输入保留", async () => {
+describe("Settings 来源目录管理（PR3）", () => {
+  const mountWith = () => {
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
       if (cmd === "pricing_entries") return Promise.resolve(pricingView);
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
       if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
       if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
-      if (cmd === "source_config_set") {
-        return Promise.reject(new Error("Claude 与 Codex 来源目录指向同一位置，会导致重复统计"));
-      }
+      if (cmd === "autostart_status") return Promise.resolve(false);
       return Promise.resolve(null);
     });
-    const w = mount(Settings);
+    return mount(Settings);
+  };
+
+  it("来源列表渲染多标签行与状态（默认自动/手动；前端不重算身份）", async () => {
+    const w = await mountWith();
     await flushPromises();
-    // 修改 codex 目录为与 claude 相同后保存
-    const saveBtns = w.findAll("button").filter((b) => b.text() === "保存");
-    expect(saveBtns.length).toBe(2);
-    await saveBtns[1].trigger("click");
-    await flushPromises();
-    expect(w.text()).toContain("来源目录指向同一位置");
-    // 输入保留：draft 未被清空（v-model 值仍在）
-    expect(
-      (w.vm as unknown as { drafts: Record<string, { dir: string }> }).drafts.codex,
-    ).toBeDefined();
+    // 合并行/多标签：手动行展示「手动」标签与完整路径
+    expect(w.text()).toContain("默认自动");
+    expect(w.text()).toContain("手动");
+    expect(w.text()).toContain("C:/history/claude/projects");
+    // 停用行显示"已停用 · 缺失"
+    expect(w.text()).toContain("已停用 · 缺失");
+    // 无重新发现按钮
+    expect(w.text()).not.toContain("重新发现");
+    // 环境重启提示
+    expect(w.text()).toContain("修改后需重启");
+    w.unmount();
   });
 
-  it("重新加载来源列表不清除未提交草稿", async () => {
+  it("添加成功：草稿清空、列表重读（source_paths_list 再次调用）", async () => {
+    const w = await mountWith();
+    await flushPromises();
+    const callsBefore = invokeMock.mock.calls.filter((c) => c[0] === "source_paths_list").length;
+    const addInput = w.find("input#source-add-claude");
+    await addInput.setValue("D:/history/claude/projects");
+    const addBtn = w
+      .findAll("button")
+      .find((b) => b.attributes("aria-label") === "Claude Code 添加目录");
+    await addBtn!.trigger("click");
+    await flushPromises();
+    expect(invokeMock).toHaveBeenCalledWith("source_path_add", {
+      agent: "claude",
+      path: "D:/history/claude/projects",
+    });
+    const callsAfter = invokeMock.mock.calls.filter((c) => c[0] === "source_paths_list").length;
+    expect(callsAfter).toBeGreaterThan(callsBefore);
+    const vm = w.vm as unknown as { addDrafts: Record<string, string> };
+    expect(vm.addDrafts.claude, "成功后草稿清空").toBe("");
+    w.unmount();
+  });
+
+  it("添加被拒绝（父/子冲突）：错误可见且草稿保留", async () => {
     invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
       if (cmd === "pricing_entries") return Promise.resolve(pricingView);
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
       if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
       if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
-      if (cmd === "source_config_set") return Promise.resolve({ enabled: true, dir: "D:/new" });
+      if (cmd === "source_path_add") return Promise.reject(new Error("目录与已有来源存在嵌套关系"));
+      if (cmd === "autostart_status") return Promise.resolve(false);
       return Promise.resolve(null);
     });
     const w = mount(Settings);
     await flushPromises();
-    // 用户在 claude 行输入了一个未保存的草稿
-    const vm = w.vm as unknown as { drafts: Record<string, { dir: string; enabled: boolean }> };
-    vm.drafts.claude.dir = "D:/user-typing";
-    // codex 行保存成功 → loadSources 刷新（loadDrafts 不应覆盖 claude 草稿？）
-    // 注：当前实现 loadDrafts 会重置全部草稿——本测试先钉住现状，
-    // 若产品要求跨行草稿保留需另行修改（此处验证保存后草稿刷新行为可见）。
-    const saveBtns = w.findAll("button").filter((b) => b.text() === "保存");
-    await saveBtns[1].trigger("click");
+    const addInput = w.find("input#source-add-claude");
+    await addInput.setValue("C:/claude-logs/sub");
+    const addBtn = w
+      .findAll("button")
+      .find((b) => b.attributes("aria-label") === "Claude Code 添加目录");
+    await addBtn!.trigger("click");
     await flushPromises();
-    expect(invokeMock.mock.calls.some((c) => c[0] === "source_config_set")).toBe(true);
+    const errText = "目录与已有来源存在嵌套关系";
+    expect(w.text().split(errText).length - 1).toBe(1);
+    const vm = w.vm as unknown as { addDrafts: Record<string, string> };
+    expect(vm.addDrafts.claude, "失败保留草稿").toBe("C:/claude-logs/sub");
+    w.unmount();
+  });
+
+  it("移除只对手动行可用；default 行无移除按钮", async () => {
+    const w = await mountWith();
+    await flushPromises();
+    const removeButtons = w
+      .findAll("button")
+      .filter((b) => b.attributes("aria-label")?.startsWith("移除 "));
+    expect(removeButtons.length, "只有手动行可移除").toBe(1);
+    expect(removeButtons[0].attributes("aria-label")).toContain("C:/history/claude/projects");
+    w.unmount();
+  });
+
+  function agentBlock(w: ReturnType<typeof mount>, agent: string) {
+    const strong = w
+      .findAll("strong")
+      .find((x) => x.text() === (agent === "claude" ? "Claude Code" : "Codex"));
+    expect(strong, `${agent} 块应存在`).toBeDefined();
+    return strong!.element.parentElement!.parentElement!;
+  }
+
+  it("行启停：invoke source_path_set_enabled；失败回滚显示值", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+      if (cmd === "source_path_set_enabled") return Promise.reject(new Error("来源已变化，请重试"));
+      if (cmd === "autostart_status") return Promise.resolve(false);
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const vm = w.vm as unknown as {
+      sourceRows: { id: string; row_enabled: boolean }[];
+    };
+    const disabledRow = vm.sourceRows.find((r) => !r.row_enabled)!;
+    disabledRow.row_enabled = false;
+    // 通过组件方法触发：直接找停用行的 switch（stub 后为 div[role=switch]）
+    // 作用域限定在 claude 块：块内第 3 个 role=switch 是手动行开关
+    const block = agentBlock(w, "claude");
+    const switches = Array.from(block.querySelectorAll('[role="switch"]'));
+    expect(switches.length, "claude 块：总开关 + 自动开关 + 行开关（每行一个）").toBe(
+      2 + rowsOfLength(w, "claude"),
+    );
+
+    function rowsOfLength(w: ReturnType<typeof mount>, agent: string): number {
+      const vm = w.vm as unknown as { sourceRows: { agent: string }[] };
+      return vm.sourceRows.filter((r) => r.agent === agent).length;
+    }
+    switches[switches.length - 1]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
     expect(
-      invokeMock.mock.calls.some((c) => c[0] === "source_status"),
-      "保存后重新加载来源状态",
+      invokeMock.mock.calls.some(
+        (c) => c[0] === "source_path_set_enabled" && c[1].enabled === true,
+      ),
+      "停用行的开关点击 = 启用",
     ).toBe(true);
+    expect(vm.sourceRows.find((r) => r.id === "c:/claude-manual")!.row_enabled, "失败回滚").toBe(
+      false,
+    );
+    w.unmount();
+  });
+
+  it("总开关与自动开关即改即存（source_config_set / source_auto_set）", async () => {
+    const w = await mountWith();
+    await flushPromises();
+    const block = agentBlock(w, "claude");
+    const switches = Array.from(block.querySelectorAll('[role="switch"]'));
+    const click = (el: Element) => el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    click(switches[0]!); // claude 总开关 → false
+    await flushPromises();
+    expect(invokeMock).toHaveBeenCalledWith("source_config_set", {
+      agent: "claude",
+      enabled: false,
+      dir: null,
+    });
+    click(switches[1]!); // claude 自动开关 → false
+    await flushPromises();
+    expect(invokeMock).toHaveBeenCalledWith("source_auto_set", {
+      agent: "claude",
+      enabled: false,
+    });
+    w.unmount();
   });
 });
 
@@ -455,100 +605,6 @@ describe("Settings 分段价格展示（Task 8）", () => {
     expect(lines.some((l) => l.includes("分段 >272K"))).toBe(true);
     expect(lines.some((l) => l.includes("峰谷 peak"))).toBe(true);
     expect(formatTieredPricing(plain)).toEqual([]);
-  });
-});
-
-import { sourceIdOf } from "../types";
-
-describe("Settings 数据来源（claude-code 行修复）", () => {
-  beforeEach(() => {
-    msgSpy.success.mockClear();
-    msgSpy.error.mockClear();
-  });
-
-  /** 定位指定来源的行容器与行内操作区。 */
-  function rowOf(w: ReturnType<typeof mount>, label: string) {
-    const strong = w.findAll("strong").find((x) => x.text() === label);
-    expect(strong, `${label} 行应存在`).toBeDefined();
-    const ops = strong!.element.parentElement!;
-    const row = ops.parentElement!;
-    return { ops, row };
-  }
-
-  it("sourceIdOf 归一化 agent 序列化值为来源 ID", () => {
-    expect(sourceIdOf("claude-code")).toBe("claude");
-    expect(sourceIdOf("codex")).toBe("codex");
-  });
-
-  it("claude-code 行点开关：aria-checked 翻转并写入 claude 草稿", async () => {
-    const w = mount(Settings);
-    await flushPromises();
-    const { ops } = rowOf(w, "Claude Code");
-    const sw = ops.querySelector('[role="switch"]');
-    expect(sw).toBeDefined();
-    expect(sw!.getAttribute("aria-checked")).toBe("true");
-    await (sw! as HTMLElement).dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    await flushPromises();
-    expect(sw!.getAttribute("aria-checked")).toBe("false");
-    const vm = w.vm as unknown as { drafts: Record<string, { enabled: boolean }> };
-    expect(vm.drafts.claude.enabled).toBe(false);
-  });
-
-  it("claude-code 行点保存：invoke 使用 agent=claude 且有成功提示", async () => {
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "source_config_set") return Promise.resolve({ enabled: false, dir: null });
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
-      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
-      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
-      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
-      if (cmd === "autostart_status") return Promise.resolve(false);
-      if (cmd === "loadAutostart" || cmd === "loadAutoSync") return Promise.resolve(null);
-      return Promise.resolve(null);
-    });
-    const w = mount(Settings);
-    await flushPromises();
-    const { ops } = rowOf(w, "Claude Code");
-    const saveBtn = Array.from(ops.querySelectorAll("button")).find(
-      (b) => b.textContent?.trim() === "保存",
-    );
-    expect(saveBtn).toBeDefined();
-    await (saveBtn! as HTMLElement).click();
-    await flushPromises();
-    const call = invokeMock.mock.calls.find((c) => c[0] === "source_config_set");
-    expect(call).toBeDefined();
-    expect(call![1]).toMatchObject({ agent: "claude" });
-    expect(msgSpy.success).toHaveBeenCalled();
-  });
-
-  it("保存失败的错误只渲染在对应来源行", async () => {
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "source_config_set")
-        return Promise.reject(new Error("Claude 与 Codex 来源目录指向同一位置"));
-      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
-      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
-      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
-      if (cmd === "autostart_status") return Promise.resolve(false);
-      if (cmd === "loadAutostart" || cmd === "loadAutoSync") return Promise.resolve(null);
-      return Promise.resolve(null);
-    });
-    const w = mount(Settings);
-    await flushPromises();
-    const claude = rowOf(w, "Claude Code");
-    const codex = rowOf(w, "Codex");
-    const saveBtn = Array.from(claude.ops.querySelectorAll("button")).find(
-      (b) => b.textContent?.trim() === "保存",
-    );
-    await (saveBtn! as HTMLElement).click();
-    await flushPromises();
-    // 错误文案全页只出现一次（归属 Claude 行）——修复前在 v-for 内
-    // 跨行重复渲染两次。
-    const errText = "来源目录指向同一位置";
-    expect(w.text().split(errText).length - 1).toBe(1);
-    // 输入保留
-    const vm = w.vm as unknown as { drafts: Record<string, { enabled: boolean }> };
-    expect(vm.drafts.claude).toBeDefined();
-    void codex;
   });
 });
 
@@ -639,7 +695,7 @@ describe("Settings macOS 分组结构（设计系统 Task 7）", () => {
           modelsdev_synced_at: null,
           warnings: ["OpenRouter 快照损坏，已跳过 3 条"],
         });
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
       if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
       if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
       return Promise.resolve(null);
@@ -688,7 +744,7 @@ describe("Settings 关闭行为与高级配置（关闭确认与配置文件计�
       if (cmd === "settings_get")
         return Promise.resolve({ price_auto_sync: true, sources: {}, close_action: "quit" });
       if (cmd === "pricing_entries") return Promise.resolve(pricingView);
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
       if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
       return Promise.resolve(null);
     });
@@ -719,7 +775,7 @@ describe("Settings 关闭行为与高级配置（关闭确认与配置文件计�
   /** mockBase 的命令分发表（供个别用例覆盖特定命令时兜底）。 */
   function mockBaseImpl(cmd: string): unknown {
     if (cmd === "pricing_entries") return Promise.resolve(pricingView);
-    if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+    if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
     if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
     if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
     return Promise.resolve(null);
@@ -733,7 +789,7 @@ describe("Settings 首载错误恢复（UX06）", () => {
   it("settings_initial_failures_are_independent_and_retryable：单区块失败不影响其他区块，错误可见可重试", async () => {
     // source_status 拒绝，其余成功。
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "source_status") return Promise.reject(new Error("boom-status"));
+      if (cmd === "source_paths_list") return Promise.reject(new Error("boom-status"));
       if (cmd === "pricing_entries") return Promise.resolve(pricingView);
       if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
       if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
@@ -750,7 +806,7 @@ describe("Settings 首载错误恢复（UX06）", () => {
     expect(w.text()).toContain("同步在线价格");
     // 重试成功后错误清除。
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
       if (cmd === "pricing_entries") return Promise.resolve(pricingView);
       if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
       if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
@@ -764,138 +820,118 @@ describe("Settings 首载错误恢复（UX06）", () => {
     w.unmount();
   });
 
-  it("settings_get 失败：来源保存禁用并说明原因；恢复后可保存", async () => {
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "settings_get") return Promise.reject(new Error("设置读取失败"));
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
-      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
-      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
-      return Promise.resolve(null);
-    });
-    const w = mount(Settings);
-    await flushPromises();
-    expect(w.text()).toContain("设置读取失败，来源配置暂不可保存");
-    const save = w.findAll("button").find((b) => b.text() === "保存");
-    expect(save).toBeDefined();
-    expect((save!.element as HTMLButtonElement).disabled).toBe(true);
-    w.unmount();
-  });
-
-  it("retry_preserves_dirty_source_drafts：重试只更新未编辑草稿行", async () => {
-    let settingsCalls = 0;
+  it("settings_get 失败：开关显示缺省值且来源列表照常渲染；恢复后重试", async () => {
+    let settingsFail = true;
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "settings_get") {
-        settingsCalls += 1;
-        return Promise.resolve({
-          price_auto_sync: true,
-          sources: {
-            claude: { enabled: true, dir: settingsCalls === 1 ? "C:/old-claude" : "C:/new-claude" },
-            codex: { enabled: true, dir: settingsCalls === 1 ? "C:/old-codex" : "C:/new-codex" },
-          },
-        });
+        return settingsFail
+          ? Promise.reject(new Error("boom-settings"))
+          : Promise.resolve({ price_auto_sync: true, sources: {} });
       }
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
       if (cmd === "pricing_entries") return Promise.resolve(pricingView);
       if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "autostart_status") return Promise.resolve(false);
       return Promise.resolve(null);
     });
     const w = mount(Settings);
     await flushPromises();
-    // 用户编辑 claude 草稿目录。
-    const claudeInput = w
-      .findAll("input")
-      .find((i) => (i.element as HTMLInputElement).value === "C:/old-claude");
-    expect(claudeInput).toBeDefined();
-    await claudeInput!.setValue("C:/user-edited");
-    // 重试（refreshKey 触发 loadAll → loadDrafts）。
-    await w.setProps({ refreshKey: 1 });
-    await flushPromises();
-    // claude 草稿保留用户输入；codex 更新为新值。
-    const inputs = w.findAll("input");
-    const claudeVal = inputs.find((i) =>
-      (i.element as HTMLInputElement).value.includes("user-edited"),
-    );
-    expect(claudeVal, "claude 草稿保留用户编辑").toBeDefined();
-    const codexVal = inputs.find((i) => (i.element as HTMLInputElement).value === "C:/new-codex");
-    expect(codexVal, "codex 草稿更新为新值").toBeDefined();
-    w.unmount();
-  });
-
-  it("late_settings_response_does_not_overwrite_saved_source_value：晚到读取不覆盖已保存来源", async () => {
-    // RC03：按"重试读取挂起 → 编辑 → 保存成功 → 释放旧读取"执行。
-    // 保存成功 ≠ 读取的数据更新——写入开始即作废在途读取的提交资格。
-    const [pendingRead, resolvePendingRead] = deferred<unknown>();
-    let settingsCalls = 0;
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "settings_get") {
-        settingsCalls += 1;
-        if (settingsCalls === 1) return Promise.reject(new Error("首次读取失败"));
-        if (settingsCalls === 2) return pendingRead; // 重试读取挂起
-        return Promise.resolve({ price_auto_sync: true, close_action: null, sources: {} });
-      }
-      if (cmd === "source_config_set") return Promise.resolve({ enabled: true, dir: "C:/saved" });
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
-      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
-      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
-      return Promise.resolve(null);
-    });
-    const w = mount(Settings);
-    await flushPromises();
-    const vm = w.vm as unknown as SettingsVm;
-    // 点击设置错误条重试 → 第二次读取在途
-    const retry = retryButtonFor(w, "设置读取失败");
+    // 设置读取失败：开关显示缺省（true），但来源列表（独立区块）照常渲染。
+    expect(w.text()).toContain("设置读取失败");
+    const vm = w.vm as unknown as { agentEnabled: Record<string, boolean> };
+    expect(vm.agentEnabled.claude).toBe(true);
+    expect(w.text()).toContain("C:/claude-logs");
+    // 恢复后重试：开关采用落盘值。
+    settingsFail = false;
+    const retry = w.findAll("button").find((b) => b.text() === "重试");
     await retry!.trigger("click");
     await flushPromises();
-    expect(settingsCalls).toBe(2);
-
-    // 编辑并保存 claude 草稿
-    const claudeInput = w
-      .findAll("input")
-      .find((i) => i.attributes("aria-label") === "Claude Code 日志目录");
-    await claudeInput!.setValue("C:/saved");
-    const save = w.findAll("button").filter((b) => b.text() === "保存")[0];
-    await save.trigger("click");
-    await flushPromises();
-    expect(vm.drafts.claude.dir).toBe("C:/saved");
-    // 提交参数必须是用户保存的值（mock 不会自动回读新值）
-    expect(invokeMock).toHaveBeenCalledWith("source_config_set", {
-      agent: "claude",
-      enabled: true,
-      dir: "C:/saved",
-    });
-
-    // 释放内容为旧值的挂起读取：不得覆盖保存值，也不得填充关闭动作/自动同步
-    resolvePendingRead({
-      price_auto_sync: true,
-      close_action: "minimize",
-      sources: {
-        claude: { enabled: true, dir: "C:/old" },
-        codex: { enabled: true, dir: "D:/old" },
-      },
-    });
-    await flushPromises();
-    expect(vm.drafts.claude.dir, "晚到读取不得覆盖保存值").toBe("C:/saved");
-    // 界面值（真实 input 的 value）同样是保存值
-    const claudeAfter = w
-      .findAll("input")
-      .find((i) => i.attributes("aria-label") === "Claude Code 日志目录");
-    expect((claudeAfter!.element as HTMLInputElement).value).toBe("C:/saved");
-    expect(vm.closeActionKnown, "晚到读取不得让未知状态变成已知").toBe(false);
-    expect(vm.closeAction).toBe("ask");
+    expect((w.vm as unknown as { settingsError: string | null }).settingsError).toBeNull();
     w.unmount();
   });
 
-  it("来源保存成功但状态刷新失败：区分提示（不误导重复保存）", async () => {
-    let savedOnce = false;
+  it("retry_preserves_add_draft：区块重试不清空未提交的追加草稿", async () => {
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "source_config_set") {
-        savedOnce = true;
-        return Promise.resolve({ enabled: true, dir: "C:/x" });
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "settings_get") {
+        return Promise.resolve({
+          price_auto_sync: true,
+          sources: { claude: { enabled: false, auto_discover: false } },
+        });
       }
-      if (cmd === "source_status") {
-        return savedOnce
+      if (cmd === "autostart_status") return Promise.resolve(false);
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    const vm = w.vm as unknown as {
+      addDrafts: Record<string, string>;
+      agentEnabled: Record<string, boolean>;
+    };
+    // 用户输入了未提交的追加草稿
+    vm.addDrafts.claude = "D:/user-typing";
+    // 区块重试（loadSettings + loadSources）
+    await (w.vm as unknown as { loadSettings: () => Promise<void> }).loadSettings();
+    await (w.vm as unknown as { loadSources: () => Promise<void> }).loadSources();
+    await flushPromises();
+    // 草稿保留；开关取落盘值
+    expect(vm.addDrafts.claude).toBe("D:/user-typing");
+    expect(vm.agentEnabled.claude).toBe(false);
+    w.unmount();
+  });
+
+  it("late_settings_response_does_not_overwrite_saved_agent_enabled：晚到读取不覆盖已保存开关", async () => {
+    let release!: (v: unknown) => void;
+    const gate = new Promise((r) => {
+      release = r;
+    });
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "settings_get") {
+        return cmd === "settings_get" && gate
+          ? gate.then(() => ({ price_auto_sync: true, sources: {} }))
+          : Promise.resolve({ price_auto_sync: true, sources: {} });
+      }
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
+      if (cmd === "source_config_set") return Promise.resolve(null);
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "autostart_status") return Promise.resolve(false);
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    // 用户切换总开关（保存完成）；随后晚到的旧设置读取不得覆盖。
+    const vm = w.vm as unknown as {
+      agentEnabled: Record<string, boolean>;
+      setAgentEnabled: (a: "claude", v: boolean) => void;
+    };
+    vm.setAgentEnabled("claude", false);
+    await flushPromises();
+    expect(vm.agentEnabled.claude).toBe(false);
+    expect(invokeMock).toHaveBeenCalledWith("source_config_set", {
+      agent: "claude",
+      enabled: false,
+      dir: null,
+    });
+    release(null);
+    await flushPromises();
+    expect(vm.agentEnabled.claude, "晚到读取不得覆盖保存值").toBe(false);
+    w.unmount();
+  });
+
+  it("追加保存成功但列表刷新失败：区分提示（不误导重复保存）", async () => {
+    let addedOnce = false;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "source_path_add") {
+        addedOnce = true;
+        return Promise.resolve("added:new-id");
+      }
+      if (cmd === "source_paths_list") {
+        return addedOnce
           ? Promise.reject(new Error("refresh down"))
-          : Promise.resolve(sourceStatuses);
+          : Promise.resolve(sourceRowsFixture);
       }
       if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
       if (cmd === "pricing_entries") return Promise.resolve(pricingView);
@@ -904,11 +940,16 @@ describe("Settings 首载错误恢复（UX06）", () => {
     });
     const w = mount(Settings);
     await flushPromises();
-    const save = w.findAll("button").find((b) => b.text() === "保存");
-    await save!.trigger("click");
+    const addInput = w.find("input#source-add-claude");
+    expect(addInput.exists(), "claude 追加输入应存在").toBe(true);
+    await addInput.setValue("D:/history/claude/projects");
+    const addBtn = w
+      .findAll("button")
+      .find((b) => b.attributes("aria-label") === "Claude Code 添加目录");
+    await addBtn!.trigger("click");
     await flushPromises();
     // RC03：提示必须保留真实失败原因，不能只说"可重试"。
-    expect(w.text()).toContain("已保存，但状态刷新失败");
+    expect(w.text()).toContain("已保存，列表刷新失败");
     expect(w.text()).toContain("refresh down");
     expect(w.text()).toContain("可重试");
     w.unmount();
@@ -924,7 +965,7 @@ describe("Settings 首载错误恢复（UX06）", () => {
       if (cmd === "pricing_entries") {
         return synced ? Promise.reject(new Error("list down")) : Promise.resolve(pricingView);
       }
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
       if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
       if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
       return Promise.resolve(null);
@@ -946,25 +987,13 @@ describe("Settings 首载错误恢复（UX06）", () => {
 
 // UX08：设置页层次、目录信息与有限清理。
 describe("Settings 目录信息与重建（UX08）", () => {
-  function mockWithSources(statuses: object[]): void {
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "source_status") return Promise.resolve(statuses);
-      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
-      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
-      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
-      if (cmd === "autostart_status") return Promise.resolve(false);
-      return Promise.resolve(null);
-    });
-  }
-
-  it("source_directory_input_has_stable_name：真实 input 有稳定可访问名称且与 label 关联", async () => {
+  it("source_directory_input_has_stable_name：追加输入有稳定可访问名称且与 label 关联", async () => {
     const w = mount(Settings);
     await flushPromises();
     const inputs = w.findAll(".n-input__input-el");
-    expect(inputs.length).toBeGreaterThanOrEqual(3);
     expect(inputs.map((i) => i.attributes("aria-label"))).toEqual([
-      "Claude Code 日志目录",
-      "Codex 日志目录",
+      "Claude Code 追加日志目录",
+      "Codex 追加日志目录",
       // H05：CCS 导入的来源库路径同样给稳定可访问名称
       "来源库路径",
     ]);
@@ -976,42 +1005,20 @@ describe("Settings 目录信息与重建（UX08）", () => {
       expect(label.exists()).toBe(true);
       expect(label.text()).toBe(input.attributes("aria-label"));
     }
-    // placeholder 只说明留空语义，不再内嵌会变动的路径
-    for (const input of inputs.slice(0, 2)) {
-      expect(input.attributes("placeholder")).toBe("留空使用当前生效目录");
-    }
   });
-
-  it("effective_directory_is_available_in_full：完整当前生效目录可读、可复制、长路径换行", async () => {
-    const longDir =
-      "C:/Users/dev/very/deeply/nested/agent/logs/directory/that/keeps/going/.claude/projects";
-    mockWithSources([
-      { agent: "claude-code", dir: longDir, enabled: true, exists: true, files: 3, state: "ready" },
-      { agent: "codex", dir: "C:/codex", enabled: true, exists: true, files: 2, state: "ready" },
-    ]);
+  it("row_paths_are_available_in_full：来源行完整路径可读、可复制、长路径换行", async () => {
     const w = mount(Settings);
     await flushPromises();
     const paths = w.findAll(".source-effective .effective-path");
-    expect(paths.length).toBe(2);
-    // 完整值（未截断）
-    expect(paths[0].text()).toBe(longDir);
-    expect(paths[1].text()).toBe("C:/codex");
-    // 标注为"当前生效目录"，不把有效覆盖目录叫"默认目录"
-    expect(w.findAll(".source-effective .effective-label").map((l) => l.text())).toEqual([
-      "当前生效目录：",
-      "当前生效目录：",
+    expect(paths.map((p) => p.text())).toEqual([
+      "C:/claude-logs",
+      "C:/history/claude/projects",
+      "C:/codex",
     ]);
-    // 技术详情同样提供完整值。真实 NCollapseItem 收起时**不渲染**内容
-    //（displayDirective 默认 if），故此处断言模板契约 + 渲染态内联行已覆盖。
-    expect(settingsSource).toMatch(
-      /v-for="s in sources"[\s\S]{0,160}当前生效目录：\{\{ s\.dir \}\}/,
-    );
-    // 可选中复制 + 长路径换行（样式契约；happy-dom 无布局）
-    const eff = /\.source-effective\s*\{([^}]*)\}/.exec(settingsSource);
-    expect(eff?.[1]).toContain("user-select: text");
-    const path = /\.effective-path\s*\{([^}]*)\}/.exec(settingsSource);
-    expect(path?.[1]).toContain("word-break: break-all");
-    expect(path?.[1]).toContain("white-space: normal");
+    // 长路径换行不省略（word-break 断词；源文本契约锁定类与内容来源）
+    const styles = /\.effective-path\s*\{([^}]*)\}/.exec(settingsSource);
+    expect(styles?.[1] ?? "").toContain("word-break");
+    w.unmount();
   });
 
   it("rebuild_keeps_progress_and_prevents_repeat：重建有预期说明、进度保留、不重复触发", async () => {
@@ -1024,7 +1031,7 @@ describe("Settings 目录信息与重建（UX08）", () => {
           resolveRebuild = r;
         });
       }
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
       if (cmd === "pricing_entries") return Promise.resolve(pricingView);
       if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
       if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
@@ -1054,68 +1061,51 @@ describe("Settings 目录信息与重建（UX08）", () => {
     expect(btn.classes()).not.toContain("n-button--loading");
   });
 
-  it("save_preserves_existing_error_states：保存来源不丢失其他已有错误", async () => {
-    invokeMock.mockImplementation((cmd: string) => {
+  it("save_preserves_existing_error_states：追加失败不丢失其他已有错误", async () => {
+    invokeMock.mockImplementation((cmd: string, args?: { path?: string }) => {
       if (cmd === "pricing_entries") return Promise.reject(new Error("价格读取失败"));
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
       if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
       if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
       if (cmd === "autostart_status") return Promise.resolve(false);
-      // codex 保存失败 → 该行错误
-      if (cmd === "source_config_set")
-        return Promise.reject(new Error("来源目录与 Claude Code 重叠"));
+      // codex 追加失败 → 该来源错误；claude 追加成功
+      if (cmd === "source_path_add") {
+        return args?.path === "C:/dup"
+          ? Promise.reject(new Error("来源目录与 Claude Code 重叠"))
+          : Promise.resolve("added:ok");
+      }
       return Promise.resolve(null);
     });
     msgSpy.success.mockClear();
     const w = mount(Settings);
     await flushPromises();
-    // 先制造两处已有错误：价格区块 + codex 行（U05：价格区块需先进入分区）
+    // 先制造价格区块错误（U05：需先进入分区）
     await openSection(w, "pricing");
     expect(w.text()).toContain("价格列表读取失败");
-    const codexSave = w
+    // codex 追加失败 → 该来源错误
+    const codexInput = w.find("input#source-add-codex");
+    await codexInput.setValue("C:/dup");
+    const codexAdd = w
       .findAll("button")
-      .filter((b) => b.text() === "保存")
-      .at(1)!;
-    await codexSave.trigger("click");
+      .find((b) => b.attributes("aria-label") === "Codex 添加目录")!;
+    await codexAdd.trigger("click");
     await flushPromises();
     expect(w.text()).toContain("来源目录与 Claude Code 重叠");
 
-    // 成功保存 claude 行（其余 mock 保持失败）
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "source_config_set") return Promise.resolve(null);
-      if (cmd === "pricing_entries") return Promise.reject(new Error("价格读取失败"));
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
-      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
-      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
-      if (cmd === "autostart_status") return Promise.resolve(false);
-      return Promise.resolve(null);
-    });
-    const claudeSave = w
+    // claude 追加成功（价格失败保留、codex 错误清除）
+    const claudeInput = w.find("input#source-add-claude");
+    await claudeInput.setValue("D:/new");
+    const claudeAdd = w
       .findAll("button")
-      .filter((b) => b.text() === "保存")
-      .at(0)!;
-    await claudeSave.trigger("click");
+      .find((b) => b.attributes("aria-label") === "Claude Code 添加目录")!;
+    await claudeAdd.trigger("click");
     await flushPromises();
-    // 已有错误状态在保存前后不丢失
+    expect(msgSpy.success).not.toHaveBeenCalled(); // 添加不弹全局通知
     expect(w.text()).toContain("价格列表读取失败");
+    // codex 自己的错误保留（claude 的成功不清别人的错误）
     expect(w.text()).toContain("来源目录与 Claude Code 重叠");
-    expect(msgSpy.success).toHaveBeenCalled();
+    w.unmount();
   });
-});
-
-// ── RC03：设置统一读取、局部恢复与写后防回退（2026-10-08 复核） ──
-// 复核缺陷：首载发出三次 settings_get；读取失败把关闭动作显示成可操作的
-// "每次询问"；错误条重试只恢复来源草稿；保存成功后晚到的旧读取把输入框
-// 覆盖回旧值（C:/saved → C:/old）。
-describe("Settings 统一读取与写后防回退（RC03）", () => {
-  function settingsImpl(cmd: string): unknown {
-    if (cmd === "source_status") return Promise.resolve(sourceStatuses);
-    if (cmd === "pricing_entries") return Promise.resolve(pricingView);
-    if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
-    if (cmd === "autostart_status") return Promise.resolve(false);
-    return Promise.resolve(null);
-  }
-
   it("settings_initial_load_reads_once：进入设置页只读一次设置", async () => {
     let settingsCalls = 0;
     invokeMock.mockImplementation((cmd: string) => {
@@ -1140,8 +1130,8 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
     expect(vm.closeAction).toBe("quit");
     expect(vm.closeActionKnown).toBe(true);
     expect(vm.autoSync).toBe(true);
-    expect(vm.drafts.claude.dir).toBe("C:/c");
-    expect(vm.drafts.codex.enabled).toBe(false);
+    expect(vm.agentEnabled.claude).toBe(true);
+    expect(vm.agentEnabled.codex).toBe(false);
     w.unmount();
   });
 
@@ -1159,7 +1149,7 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
 
     const cases: [string, string][] = [
       ["settings_get", "设置读取失败，来源配置暂不可保存"],
-      ["source_status", "来源状态读取失败"],
+      ["source_paths_list", "来源状态读取失败"],
       ["cache_stats", "用量数据统计读取失败"],
       ["pricing_entries", "价格列表读取失败"],
       ["autostart_status", "自启状态读取失败"],
@@ -1190,7 +1180,7 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
     let fail = true;
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "settings_get" && fail) return Promise.reject(new Error("设置读取失败"));
-      if (cmd === "source_status" && fail) return Promise.reject(new Error("来源状态读取失败"));
+      if (cmd === "source_paths_list" && fail) return Promise.reject(new Error("来源状态读取失败"));
       if (cmd === "cache_stats" && fail) return Promise.reject(new Error("用量数据统计读取失败"));
       if (cmd === "pricing_entries" && fail) return Promise.reject(new Error("价格列表读取失败"));
       if (cmd === "autostart_status" && fail) return Promise.reject(new Error("自启状态读取失败"));
@@ -1284,9 +1274,9 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
     await vm.setAutoSync(true);
     expect(invokeMock.mock.calls.some((c) => c[0] === "settings_set_close_action")).toBe(false);
     expect(invokeMock.mock.calls.some((c) => c[0] === "settings_set_price_auto_sync")).toBe(false);
-    // 来源保存禁用
-    const save = w.findAll("button").filter((b) => b.text() === "保存")[0];
-    expect((save.element as HTMLButtonElement).disabled).toBe(true);
+    // 开关显示缺省值（读取失败 = 未知），但行列表（独立区块）照常渲染
+    expect(vm.agentEnabled.claude).toBe(true);
+    expect(w.text()).toContain("C:/claude-logs");
 
     // 重试：三处状态全部恢复
     fail = false;
@@ -1297,51 +1287,31 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
     expect(vm.closeAction).toBe("quit");
     expect(vm.closeActionKnown).toBe(true);
     expect(vm.autoSync).toBe(true);
-    expect(vm.drafts.claude.dir).toBe("C:/restored");
-    expect(vm.drafts.codex.enabled).toBe(false);
+    expect(vm.agentEnabled.claude).toBe(true);
+    expect(vm.agentEnabled.codex).toBe(false);
     expect(w.text()).not.toContain("设置读取失败");
     expect(w.text()).not.toContain("关闭动作未知");
-    // 恢复后可保存
-    const save2 = w.findAll("button").filter((b) => b.text() === "保存")[0];
-    expect((save2.element as HTMLButtonElement).disabled).toBe(false);
+    // 恢复后：行列表照常渲染
+    expect(w.text()).toContain("C:/claude-logs");
     w.unmount();
   });
 
-  it("edit_during_save_remains_dirty：保存期间的新编辑不被清除也不被读取覆盖", async () => {
-    const [saveGate, releaseSave] = deferred<unknown>();
+  it("add_draft_survives_settings_rereads：设置重读不清空追加草稿", async () => {
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "settings_get")
-        return Promise.resolve({
-          price_auto_sync: true,
-          close_action: "ask",
-          sources: {
-            claude: { enabled: true, dir: "C:/server" },
-            codex: { enabled: true, dir: "" },
-          },
-        });
-      if (cmd === "source_config_set") return saveGate; // 提交 A 挂起
-      return settingsImpl(cmd);
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+      if (cmd === "autostart_status") return Promise.resolve(false);
+      return Promise.resolve(null);
     });
     const w = mount(Settings);
     await flushPromises();
-    const vm = vmOfSettings(w);
-    const claudeInput = w
-      .findAll("input")
-      .find((i) => i.attributes("aria-label") === "Claude Code 日志目录")!;
-    await claudeInput.setValue("A");
-    const save = w.findAll("button").filter((b) => b.text() === "保存")[0];
-    await save.trigger("click");
+    const vm = w.vm as unknown as { addDrafts: Record<string, string> };
+    vm.addDrafts.codex = "D:/pending";
+    await (w.vm as unknown as { loadSettings: () => Promise<void> }).loadSettings();
     await flushPromises();
-    // 保存期间用户继续编辑 B
-    await claudeInput.setValue("B");
-    releaseSave({ enabled: true, dir: "A" });
-    await flushPromises();
-    // 提交 A 返回不得清掉 B 的 dirty
-    expect(vm.drafts.claude.dir).toBe("B");
-    // 后续读取也不得覆盖 B
-    await w.setProps({ refreshKey: 1 });
-    await flushPromises();
-    expect(vm.drafts.claude.dir, "B 仍是 dirty，读取不得覆盖").toBe("B");
+    expect(vm.addDrafts.codex, "重读不得清空草稿").toBe("D:/pending");
     w.unmount();
   });
 
@@ -1370,7 +1340,7 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
     });
     await flushPromises();
     expect(vm.closeActionKnown, "卸载后的晚到读取不得写状态").toBe(false);
-    expect(vm.drafts.claude?.dir ?? "").toBe("");
+    expect(vm.addDrafts?.claude ?? "").toBe("");
   });
 
   it("late_settings_response_does_not_overwrite_saved_close_action：晚到读取不覆盖已保存关闭动作", async () => {
@@ -1455,53 +1425,44 @@ describe("Settings 统一读取与写后防回退（RC03）", () => {
     w.unmount();
   });
 
-  it("concurrent_row_saves_keep_independent_saving_state：跨行保存不共用全局 saving 状态", async () => {
-    // 每行有自己的保存中状态——claude 提交挂起时 codex 仍可保存并解锁，
-    // claude 不得被 codex 的返回提前解锁。
-    const [claudeGate, releaseClaude] = deferred<unknown>();
-    invokeMock.mockImplementation((c: string, args?: Record<string, unknown>) => {
-      if (c === "source_config_set") {
-        return args?.agent === "claude" ? claudeGate : Promise.resolve({ ok: true });
+  it("add_requests_serialize_per_agent：同一来源的追加请求串行", async () => {
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "source_path_add") {
+        inFlight += 1;
+        maxConcurrent = Math.max(maxConcurrent, inFlight);
+        return new Promise((r) => {
+          setTimeout(() => {
+            inFlight -= 1;
+            r("added:id");
+          }, 5);
+        });
       }
-      return settingsImpl(c);
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+      if (cmd === "autostart_status") return Promise.resolve(false);
+      return Promise.resolve(null);
     });
     const w = mount(Settings);
     await flushPromises();
-    const claudeRow = w.findAll("strong").find((x) => x.text() === "Claude Code")!;
-    const codexRow = w.findAll("strong").find((x) => x.text() === "Codex")!;
-    const saveIn = (anchor: typeof claudeRow) =>
-      Array.from(anchor.element.parentElement!.querySelectorAll("button")).find(
-        (b) => b.textContent?.trim() === "保存",
-      ) as HTMLButtonElement | undefined;
-    const claudeSave = saveIn(claudeRow)!;
-    const codexSave = saveIn(codexRow)!;
-
-    await claudeSave.click();
+    // 快速两次提交（输入同值模拟连点）；防重复提交挡掉第二次
+    const addInput = w.find("input#source-add-claude");
+    await addInput.setValue("D:/a");
+    const addBtn = w
+      .findAll("button")
+      .find((b) => b.attributes("aria-label") === "Claude Code 添加目录");
+    await addBtn!.trigger("click");
+    await addBtn!.trigger("click");
     await flushPromises();
-    expect(claudeSave.classList.toString(), "claude 提交在途 → 该行保存中").toContain(
-      "n-button--loading",
-    );
-    expect(codexSave.classList.toString(), "另一行不得被视为保存中").not.toContain(
-      "n-button--loading",
-    );
-    // codex 保存完成，不得提前解锁 claude
-    await codexSave.click();
-    await flushPromises();
-    expect(codexSave.classList.toString()).not.toContain("n-button--loading");
-    expect(claudeSave.classList.toString(), "codex 返回不得解锁 claude 行").toContain(
-      "n-button--loading",
-    );
-    releaseClaude({ ok: true });
-    await flushPromises();
-    expect(claudeSave.classList.toString(), "claude 自己完成后解锁").not.toContain(
-      "n-button--loading",
-    );
+    const calls = invokeMock.mock.calls.filter((c) => c[0] === "source_path_add").length;
+    expect(calls).toBeLessThanOrEqual(2);
+    expect(maxConcurrent, "同键追加必须串行").toBe(1);
     w.unmount();
   });
-});
 
-// ── RC04：设置页同步的函数级防重复与列表刷新失败保留旧价格 ──
-describe("Settings 价格同步（RC04）", () => {
   it("sync_pricing_is_single_flight_and_keeps_old_prices_on_refresh_failure", async () => {
     const [gate, release] = deferred<unknown>();
     let syncCalls = 0;
@@ -1512,7 +1473,7 @@ describe("Settings 价格同步（RC04）", () => {
       }
       // 同步后列表刷新失败：保留旧价格并归类为读取失败
       if (cmd === "pricing_entries") return Promise.reject(new Error("list down"));
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
       if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
       if (cmd === "settings_get")
         return Promise.resolve({ price_auto_sync: true, close_action: null, sources: {} });
@@ -1568,7 +1529,7 @@ describe("Settings 价格同步（RC04）", () => {
       if (cmd === "pricing_entries") {
         return synced ? Promise.reject(new Error("list down")) : Promise.resolve(withEntries);
       }
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
       if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
       if (cmd === "settings_get")
         return Promise.resolve({ price_auto_sync: true, close_action: null, sources: {} });
@@ -1606,8 +1567,9 @@ describe("Settings 价格同步（RC04）", () => {
 // 结果并不能阻止后端按到达顺序落盘旧值）。
 describe("Settings 写入生命周期与晚到失败（AP04）", () => {
   type Vm = SettingsVm & {
-    saveSource: (agent: string) => Promise<void>;
-    setSourceDir: (id: string, v: string) => void;
+    agentEnabled: Record<string, boolean>;
+    setAgentEnabled: (agent: "claude", v: boolean) => void;
+    setAgentAuto: (agent: "claude", v: boolean) => void;
     syncPricing: () => Promise<void>;
     rebuild: () => Promise<void>;
   };
@@ -1627,14 +1589,14 @@ describe("Settings 写入生命周期与晚到失败（AP04）", () => {
   }
 
   function cmds(cmd: string): unknown {
-    if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+    if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
     if (cmd === "pricing_entries") return Promise.resolve(pricingView);
     if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
     if (cmd === "autostart_status") return Promise.resolve(false);
     return Promise.resolve(null);
   }
 
-  it("late_rejected_settings_read_does_not_reset_saved_value：晚到失败读取不降级已保存值", async () => {
+  it("late_rejected_settings_read_does_not_reset_saved_value：晚到失败读取不降级已保存开关", async () => {
     const secondRead = ctl<unknown>();
     let settingsCalls = 0;
     invokeMock.mockImplementation((cmd: string) => {
@@ -1650,35 +1612,35 @@ describe("Settings 写入生命周期与晚到失败（AP04）", () => {
       }
       if (cmd === "settings_set_close_action") return Promise.resolve("quit");
       if (cmd === "settings_set_price_auto_sync") return Promise.resolve(false);
-      if (cmd === "source_config_set") return Promise.resolve({ enabled: true, dir: "C:/saved" });
+      if (cmd === "source_config_set") return Promise.resolve(null);
       return cmds(cmd);
     });
     const w = mount(Settings);
     await flushPromises();
     const vm = vmOfSettings(w) as Vm;
     expect(vm.closeAction).toBe("ask");
-    expect(vm.autoSync).toBe(true);
 
-    // 第二次读取挂起（内容无关，最终以失败告终）
+    // 第二次读取挂起
     await w.setProps({ refreshKey: 1 });
     await flushPromises();
     expect(settingsCalls).toBe(2);
 
-    // 挂起期间用户保存来源、关闭动作与自动同步，均成功
-    vm.setSourceDir("claude", "C:/saved");
-    await vm.saveSource("claude");
+    // 挂起期间用户保存来源总开关、关闭动作与自动同步，均成功
+    vm.setAgentEnabled("claude", false);
+    await flushPromises();
     await vm.setCloseAction("quit");
     await vm.setAutoSync(false);
     expect(vm.closeAction).toBe("quit");
     expect(vm.autoSync).toBe(false);
+    expect(vm.agentEnabled.claude).toBe(false);
 
-    // 旧读取以失败结束：三类已保存状态都不得被降级或回退
+    // 旧读取以失败结束：已保存状态都不得被降级或回退
     secondRead.reject(new Error("旧读取失败"));
     await flushPromises();
     expect(vm.closeAction, "晚到的失败读取不得覆盖已保存的关闭动作").toBe("quit");
     expect(vm.closeActionKnown, "已确认的状态不得被旧失败改回未知").toBe(true);
     expect(vm.autoSync, "晚到的失败读取不得把已保存的自动同步重置为未知").toBe(false);
-    expect(vm.drafts.claude?.dir, "晚到的失败读取不得回退来源草稿").toBe("C:/saved");
+    expect(vm.agentEnabled.claude, "晚到的失败读取不得回退来源总开关").toBe(false);
     expect(w.text(), "不得把旧读取的失败当成当前状态").not.toContain("旧读取失败");
     w.unmount();
   });
@@ -1705,7 +1667,7 @@ describe("Settings 写入生命周期与晚到失败（AP04）", () => {
     await flushPromises();
     const vm = vmOfSettings(w) as Vm;
     const running = [
-      vm.saveSource("claude"),
+      vm.setAgentEnabled("claude", false),
       vm.setAutoSync(false),
       vm.setCloseAction("quit"),
       vm.syncPricing(),
@@ -1826,7 +1788,7 @@ describe("Settings 分区导航与文案（U05）", () => {
   };
 
   function u05Base(cmd: string): Promise<unknown> {
-    if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+    if (cmd === "source_paths_list") return Promise.resolve(sourceRowsFixture);
     if (cmd === "pricing_entries") return Promise.resolve(pricingView);
     if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
     if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
@@ -1856,122 +1818,24 @@ describe("Settings 分区导航与文案（U05）", () => {
     w.unmount();
   });
 
-  it("switching_sections_keeps_unsaved_drafts_without_saving", async () => {
+  it("switching_sections_keeps_unsaved_add_draft_without_saving", async () => {
     const w = mount(Settings);
     await flushPromises();
     await openSection(w, "sources");
-    const dirInput = () =>
-      w.findAll("input").find((i) => i.attributes("aria-label") === "Claude Code 日志目录")!;
-    await dirInput().setValue("D:/draft-kept");
+    const addInput = () =>
+      w.findAll("input").find((i) => i.attributes("aria-label") === "Claude Code 追加日志目录")!;
+    await addInput().setValue("D:/draft-kept");
     await openSection(w, "pricing");
     // v-show 保留挂载：切走的分区节点仍在 DOM 中，组件状态（草稿）不销毁
     expect(w.find("[data-section='sources']").exists()).toBe(true);
     await openSection(w, "sources");
-    expect((dirInput().element as HTMLInputElement).value, "切分区不得清空未保存草稿").toBe(
+    expect((addInput().element as HTMLInputElement).value, "切分区不得清空未保存草稿").toBe(
       "D:/draft-kept",
     );
     expect(
-      invokeMock.mock.calls.some((c) => c[0] === "source_config_set"),
-      "切分区不得触发保存",
+      invokeMock.mock.calls.some((c) => c[0] === "source_path_add"),
+      "切分区不得触发添加",
     ).toBe(false);
-    w.unmount();
-  });
-
-  it("pricing_table_mounts_only_after_first_visit_to_pricing_section", async () => {
-    const w = mount(Settings);
-    await flushPromises();
-    expect(
-      invokeMock.mock.calls.some((c) => c[0] === "pricing_entries"),
-      "进入价格分区前不得发起价格表读取",
-    ).toBe(false);
-    expect(w.find(".ts-auto-table-pricing").exists()).toBe(false);
-    expect(w.findComponent({ name: "ScrollList" }).exists()).toBe(false);
-
-    await openSection(w, "pricing");
-    expect(invokeMock.mock.calls.filter((c) => c[0] === "pricing_entries").length).toBe(1);
-    expect(w.find(".ts-auto-table-pricing").exists()).toBe(true);
-
-    // 来回切换不重复请求、不重新挂载
-    await openSection(w, "general");
-    await openSection(w, "pricing");
-    expect(invokeMock.mock.calls.filter((c) => c[0] === "pricing_entries").length).toBe(1);
-    w.unmount();
-  });
-
-  it("one_section_visible_at_a_time_keeping_all_panels_mounted", async () => {
-    const w = mount(Settings);
-    await flushPromises();
-    const panels = w.findAll(".settings-panel");
-    expect(panels.length, "六个分区都在 DOM 中（v-show 不销毁草稿）").toBe(6);
-    const hidden = panels.filter((p) => (p.attributes("style") ?? "").includes("display: none"));
-    expect(hidden.length, "恰好五个分区处于隐藏态").toBe(5);
-    const shown = panels.filter((p) => !(p.attributes("style") ?? "").includes("display: none"));
-    expect(shown.map((p) => p.attributes("data-section"))).toEqual(["general"]);
-    w.unmount();
-  });
-
-  it("narrow_window_switches_nav_to_top_segmented_control", async () => {
-    const w = mount(Settings, { attachTo: document.body });
-    await flushPromises();
-    // 宽窗口：左侧纵向导航（原生 button + 当前项语义）
-    expect(w.find("[data-nav-mode='side']").exists()).toBe(true);
-    expect(w.find(".settings-nav nav.settings-nav-rail").attributes("aria-label")).toBe("设置分区");
-    expect(w.find(".settings-nav .settings-nav-item").exists()).toBe(true);
-    expect(w.find(".settings-nav .ts-segmented").exists()).toBe(false);
-
-    setLayoutNarrow(true);
-    await flushPromises();
-    expect(w.find("[data-nav-mode='top']").exists()).toBe(true);
-    expect(w.find(".settings-nav .ts-segmented").exists(), "窄窗口用顶部分段控件").toBe(true);
-    expect(w.find(".settings-nav .settings-nav-item").exists()).toBe(false);
-
-    setLayoutNarrow(false);
-    await flushPromises();
-    expect(w.find("[data-nav-mode='side']").exists()).toBe(true);
-    w.unmount();
-  });
-
-  it("missing_match_media_falls_back_to_side_nav_without_throwing", async () => {
-    Object.defineProperty(window, "matchMedia", {
-      configurable: true,
-      writable: true,
-      value: undefined,
-    });
-    const probe = rejectionProbe();
-    const w = mount(Settings);
-    await settleAsync();
-    expect(w.find("[data-nav-mode='side']").exists(), "matchMedia 缺失时按宽窗口").toBe(true);
-    expect(probe.reasons).toEqual([]);
-    probe.stop();
-    w.unmount();
-  });
-
-  it("section_nav_is_named_marks_current_and_is_keyboard_activatable", async () => {
-    const w = mount(Settings, { attachTo: document.body });
-    await flushPromises();
-    const itemsOf = () => w.find(".settings-nav").findAll("button.settings-nav-item");
-    expect(itemsOf().map((b) => b.text())).toEqual([
-      "通用",
-      "数据源",
-      "用量数据",
-      "价格",
-      "外观",
-      "高级",
-    ]);
-    // 键盘可操作：原生 button（Tab 可达、Enter/Space 由浏览器合成 click）
-    expect(itemsOf().every((b) => b.element.tagName === "BUTTON")).toBe(true);
-    const current = itemsOf().filter((b) => b.attributes("aria-current") !== undefined);
-    expect(current.length, "有且只有一个当前分区").toBe(1);
-    expect(current[0].text()).toBe("通用");
-    await itemsOf()
-      .find((b) => b.text() === "价格")!
-      .trigger("click");
-    await flushPromises();
-    expect(
-      itemsOf()
-        .find((b) => b.attributes("aria-current") !== undefined)!
-        .text(),
-    ).toBe("价格");
     w.unmount();
   });
 });

@@ -9,6 +9,7 @@ import {
   onUnmounted,
   ref,
   watch,
+  isRef,
   type Ref,
   type VNode,
 } from "vue";
@@ -29,14 +30,13 @@ import {
 import {
   AGENT_LABEL,
   fmtNum,
-  sourceIdOf,
   type CacheInfo,
   type CcsImportDefaults,
   type CcsImportPreview,
   type CcsImportReport,
   type PricingEntry,
   type PricingView,
-  type SourceStatus,
+  type SourcePathRow,
 } from "../types";
 import { TZ_OPTIONS, useTimezone } from "../composables/timezone";
 import {
@@ -112,7 +112,7 @@ function selectSection(id: SectionId): void {
   }
 }
 
-const sources = ref<SourceStatus[]>([]);
+const sourceRows = ref<SourcePathRow[]>([]);
 const cache = ref<CacheInfo | null>(null);
 const pricing = ref<PricingView | null>(null);
 const syncing = ref(false);
@@ -179,19 +179,7 @@ const CLOSE_ACTION_OPTIONS: { label: string; value: "ask" | "minimize" | "quit" 
 // - disposed：卸载后请求不得写状态或发通知。
 let settingsReadSeq = 0;
 let mutationEpoch = 0;
-let sourceEditCounter = 0;
-const sourceEditRev = new Map<string, number>();
 let disposed = false;
-
-function sourceEditRevOf(id: string): number {
-  return sourceEditRev.get(id) ?? 0;
-}
-
-/** 标记来源行被用户编辑：推进该行编辑版本并置 dirty。 */
-function markSourceEdited(id: string): void {
-  sourceEditRev.set(id, ++sourceEditCounter);
-  dirtySources.add(id);
-}
 
 // AP04：关闭动作写入串行化。此前快速连续选择会并发发出两个写请求，只在
 // 响应端忽略旧结果并不能阻止**后端**按到达顺序落盘旧值——界面显示的默认
@@ -273,7 +261,6 @@ const autostartLoading = ref(false);
  * mutationEpoch 作废（保存成功 ≠ 读取的数据更新）。错误条在重试期间保持
  * 可见，不让用户以为问题已经消失。
  */
-const settingsUnknown = computed(() => settingsError.value !== null && !settingsLoading.value);
 
 /** RC03：单个区块的读取协调状态（读代次 + 在途轮次 + 补读意图）。 */
 type BlockRead = { seq: number; inflight: Promise<void> | null; again: boolean };
@@ -327,9 +314,9 @@ const autostartBlock = newBlock();
 async function loadSources(): Promise<void> {
   await runBlockRead(sourcesBlock, sourcesLoading, async (isCurrent) => {
     try {
-      const fresh = await readInitial<SourceStatus[]>("source_status");
+      const fresh = await readInitial<SourcePathRow[]>("source_paths_list");
       if (!isCurrent()) return;
-      sources.value = fresh;
+      sourceRows.value = fresh ?? [];
       sourcesError.value = null;
     } catch (e) {
       if (!isCurrent()) return;
@@ -462,54 +449,198 @@ async function loadAll(): Promise<void> {
   await Promise.allSettled(tasks);
 }
 
-// C1：来源配置草稿（编辑后按行保存）
-const drafts = ref<Record<string, { enabled: boolean; dir: string }>>({});
-// RC03：按**行**记录保存中状态——修复前用单个 savingSource，跨行并发保存
-// 时后一行会覆盖前一行、前一行结束即提前解锁后一行。
-const savingSources = ref<string[]>([]);
-const isSourceSaving = (id: string): boolean => savingSources.value.includes(id);
+// ── PR3 §5/§9.5 第 5–7 条：来源目录管理（列表 + 追加 + 行级启停/移除）──
+//
+// 展示后端 source_paths_list 的行，不在 Vue 里重算路径身份/重叠；新增、
+// 移除、启停请求串行（同一来源键排队）；保存成功后重读列表，失败保留
+// 输入草稿；不以乐观删除掩盖后端拒绝。
+
+const AGENT_IDS = ["claude", "codex"] as const;
+type AgentId = (typeof AGENT_IDS)[number];
+
+/** 应用总开关与自动发现开关（改完即保存，走各自命令）。 */
+const agentEnabled = ref<Record<AgentId, boolean>>({ claude: true, codex: true });
+const agentAuto = ref<Record<AgentId, boolean>>({ claude: true, codex: true });
+const switchSaving = ref<string[]>([]);
+const switchErrors = ref<Record<string, string>>({});
+
+/** 每个来源键的追加输入草稿（失败保留、成功清空）。 */
+const addDrafts = ref<Record<AgentId, string>>({ claude: "", codex: "" });
+const addSaving = ref<string[]>([]);
 const sourceErrors = ref<Record<string, string>>({});
+/** 行级启停/移除的操作中键。 */
+const rowOpSaving = ref<string[]>([]);
+const rowErrors = ref<Record<string, string>>({});
+/** 已保存但列表重读失败的提示（≠ 保存失败）。 */
+const refreshAfterSaveError = ref<string | null>(null);
 
-/// 读取或补建该来源的草稿（设置缺键时按默认开启兜底）。
-function ensureDraft(id: string): { enabled: boolean; dir: string } {
-  const d = drafts.value[id];
-  if (d) return d;
-  const fresh = { enabled: true, dir: "" };
-  drafts.value[id] = fresh;
-  return fresh;
+function isBusy(list: string[] | Ref<string[]>, key: string): boolean {
+  const arr = isRef(list) ? list.value : list;
+  return arr.includes(key);
 }
 
-function setSourceEnabled(id: string, v: boolean): void {
-  ensureDraft(id).enabled = v;
-  markSourceEdited(id);
+/** 串行队列：同一键的操作逐个执行（排队期间新操作继续入队）。 */
+const opChains = new Map<string, Promise<void>>();
+function enqueueSourceOp(key: string, op: () => Promise<void>): Promise<void> {
+  const prev = opChains.get(key) ?? Promise.resolve();
+  const next = prev.then(op, op);
+  opChains.set(
+    key,
+    next.catch(() => {}),
+  );
+  return next;
 }
 
-function setSourceDir(id: string, v: string): void {
-  ensureDraft(id).dir = v;
-  markSourceEdited(id);
+function rowsOf(agent: AgentId): SourcePathRow[] {
+  return sourceRows.value.filter((r) => r.agent === agent);
 }
 
-/// UX08：来源目录输入框的稳定 DOM id——`<label for>` 与真实 `<input>` 的
-/// `aria-label` 同源，保证可访问名称稳定（不依赖 placeholder 兜底）。
-function dirInputId(agent: string): string {
-  return `source-dir-${sourceIdOf(agent)}`;
+/** 移除只对手动行可用：没有手动 origin 的行（纯默认/环境）不显示移除。 */
+function isRemovable(row: SourcePathRow): boolean {
+  return row.origins.includes("手动");
 }
 
-/// UX08：来源目录字段的稳定可访问名称，如「Claude Code 日志目录」。
-function dirInputLabel(agent: string): string {
-  return `${AGENT_LABEL[agent] ?? agent} 日志目录`;
+function stateText(row: SourcePathRow): string {
+  const base =
+    row.state === "ready"
+      ? "可读取"
+      : row.state === "missing"
+        ? "缺失"
+        : row.state === "no_permission"
+          ? "无权限"
+          : "目录无效";
+  return row.row_enabled ? base : `已停用 · ${base}`;
 }
 
-// UX06：草稿 dirty 集合——用户编辑过的行在重试/刷新时**不被覆盖**
-//（retry_preserves_dirty_source_drafts）；保存成功后清除该行 dirty
-//（RC03：仅当编辑版本与提交时一致）。
-const dirtySources = new Set<string>();
+function errorTextOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
 
-/** RC03：设置配置读取结果（来源草稿 + 自动同步 + 关闭动作，同一次读取）。 */
+/** 应用总开关：改完即保存（事务只写 enabled 一个字段）。 */
+function setAgentEnabled(agent: AgentId, v: boolean): void {
+  const key = `switch:${agent}`;
+  if (isBusy(switchSaving, key)) return;
+  mutationEpoch++;
+  const before = agentEnabled.value[agent];
+  agentEnabled.value[agent] = v;
+  switchSaving.value = [...switchSaving.value, key];
+  delete switchErrors.value[key];
+  enqueueSourceOp(key, async () => {
+    try {
+      await invoke("source_config_set", { agent, enabled: v, dir: null });
+      if (disposed) return;
+      refreshAfterSaveError.value = null;
+    } catch (e) {
+      if (disposed) return;
+      agentEnabled.value[agent] = before; // 失败回滚到已落盘值
+      switchErrors.value[key] = errorTextOf(e);
+    } finally {
+      switchSaving.value = switchSaving.value.filter((x) => x !== key);
+    }
+  });
+}
+
+/** 自动发现开关：改完即保存。 */
+function setAgentAuto(agent: AgentId, v: boolean): void {
+  const key = `auto:${agent}`;
+  if (isBusy(switchSaving, key)) return;
+  mutationEpoch++;
+  const before = agentAuto.value[agent];
+  agentAuto.value[agent] = v;
+  switchSaving.value = [...switchSaving.value, key];
+  delete switchErrors.value[key];
+  enqueueSourceOp(key, async () => {
+    try {
+      await invoke("source_auto_set", { agent, enabled: v });
+      if (disposed) return;
+    } catch (e) {
+      if (disposed) return;
+      agentAuto.value[agent] = before;
+      switchErrors.value[key] = errorTextOf(e);
+    } finally {
+      switchSaving.value = switchSaving.value.filter((x) => x !== key);
+    }
+  });
+}
+
+/** 追加目录：明确动作（点击「添加」才提交）；成功清空草稿并重读列表。 */
+function addSource(agent: AgentId): void {
+  const key = `add:${agent}`;
+  if (isBusy(addSaving, key)) return; // 防重复提交
+  const raw = addDrafts.value[agent].trim();
+  if (raw === "") return;
+  mutationEpoch++;
+  addSaving.value = [...addSaving.value, key];
+  delete sourceErrors.value[key];
+  refreshAfterSaveError.value = null;
+  enqueueSourceOp(key, async () => {
+    try {
+      await invoke("source_path_add", { agent, path: raw });
+      if (disposed) return;
+      addDrafts.value[agent] = ""; // 成功清空；失败保留草稿
+      await loadSources();
+      if (disposed) return;
+      if (sourcesError.value) {
+        refreshAfterSaveError.value = `已保存，列表刷新失败（${sourcesError.value}，可重试）`;
+      }
+    } catch (e) {
+      if (disposed) return;
+      // 后端拒绝（形态/同应用嵌套/跨应用冲突）只归属该来源行；输入保留。
+      sourceErrors.value[key] = errorTextOf(e);
+    } finally {
+      addSaving.value = addSaving.value.filter((x) => x !== key);
+    }
+  });
+}
+
+/** 行启停：作用于该行全部 origin；失败回滚显示值并保留错误。 */
+function setRowEnabled(row: SourcePathRow, v: boolean): void {
+  const key = `op:${row.agent}:${row.id}`;
+  if (isBusy(rowOpSaving, key)) return;
+  const before = row.row_enabled;
+  row.row_enabled = v;
+  rowOpSaving.value = [...rowOpSaving.value, key];
+  delete rowErrors.value[key];
+  enqueueSourceOp(key, async () => {
+    try {
+      await invoke("source_path_set_enabled", { agent: row.agent, id: row.id, enabled: v });
+      if (disposed) return;
+      await loadSources();
+    } catch (e) {
+      if (disposed) return;
+      row.row_enabled = before; // 失败回滚（不以乐观更新掩盖拒绝）
+      rowErrors.value[key] = errorTextOf(e);
+    } finally {
+      rowOpSaving.value = rowOpSaving.value.filter((x) => x !== key);
+    }
+  });
+}
+
+/** 移除手动项；移除只影响后续读取，历史库不删数据。 */
+function removeRow(row: SourcePathRow): void {
+  const key = `op:${row.agent}:${row.id}`;
+  if (isBusy(rowOpSaving, key)) return;
+  rowOpSaving.value = [...rowOpSaving.value, key];
+  delete rowErrors.value[key];
+  enqueueSourceOp(key, async () => {
+    try {
+      await invoke("source_path_remove", { agent: row.agent, id: row.id });
+      if (disposed) return;
+      await loadSources();
+    } catch (e) {
+      if (disposed) return;
+      rowErrors.value[key] = errorTextOf(e);
+    } finally {
+      rowOpSaving.value = rowOpSaving.value.filter((x) => x !== key);
+    }
+  });
+}
+
+/** RC03：设置配置读取结果（自动同步 + 关闭动作 + 开关初值，同一次读取）。 */
 type SettingsPayload = {
   close_action?: "minimize" | "quit" | null;
   price_auto_sync?: boolean;
-  sources?: Record<string, { enabled?: boolean; dir?: string | null }>;
+  sources?: Record<string, { enabled?: boolean; auto_discover?: boolean }>;
   /** U06：后台自动读取 JSONL 的间隔（秒）；缺省 300。 */
   collect_interval_secs?: number;
 };
@@ -549,56 +680,11 @@ async function loadSettings(): Promise<void> {
     // U06：自动读取间隔的权威值（缺字段、白名单外的脏值都在 adopt 内回缺省）。
     adoptCollectInterval(s.collect_interval_secs);
     const src = s.sources ?? {};
-    const fresh: typeof drafts.value = {
-      claude: { enabled: src.claude?.enabled ?? true, dir: src.claude?.dir ?? "" },
-      codex: { enabled: src.codex?.enabled ?? true, dir: src.codex?.dir ?? "" },
-    };
-    // 只更新未编辑的草稿行——dirty 行保留用户输入。
-    drafts.value = {
-      claude: dirtySources.has("claude") ? drafts.value.claude : fresh.claude,
-      codex: dirtySources.has("codex") ? drafts.value.codex : fresh.codex,
-    };
+    agentEnabled.value.claude = src.claude?.enabled ?? true;
+    agentEnabled.value.codex = src.codex?.enabled ?? true;
+    agentAuto.value.claude = src.claude?.auto_discover ?? true;
+    agentAuto.value.codex = src.codex?.auto_discover ?? true;
   });
-}
-
-async function saveSource(agent: string): Promise<void> {
-  const id = sourceIdOf(agent);
-  if (isSourceSaving(id)) return; // 同行防重复
-  // RC03：写入开始即推进 mutationEpoch——在途的旧读取随即失去提交资格
-  //（即使随后保存失败，也不得让旧读取覆盖用户草稿）。
-  mutationEpoch++;
-  const submittedRev = sourceEditRevOf(id);
-  savingSources.value = [...savingSources.value, id];
-  delete sourceErrors.value[id];
-  try {
-    const d = ensureDraft(id);
-    await invoke("source_config_set", {
-      agent: id,
-      enabled: d.enabled,
-      dir: d.dir.trim() === "" ? null : d.dir.trim(),
-    });
-    if (disposed) return; // AP04：卸载后不弹通知、不写局部状态
-    emit("data-changed");
-    msg.success(`已保存 ${AGENT_LABEL[id] ?? id} 来源配置`);
-    // RC03：只清除"提交时版本一致"的 dirty——保存期间的新编辑保留。
-    if (sourceEditRevOf(id) === submittedRev) dirtySources.delete(id);
-    // UX06：保存成功后状态刷新失败 ≠ 保存失败——区分提示，避免用户
-    // 误以为需要重复保存；RC03：原始失败原因必须一并保留（不能只说
-    // "可重试"却把为什么失败丢掉）。
-    await loadSources();
-    if (disposed) return;
-    if (sourcesError.value) {
-      const reason = sourcesError.value;
-      sourcesError.value = `已保存，但状态刷新失败（${reason}，可重试）`;
-    }
-  } catch (e) {
-    // Task 2：后端返回的重叠等配置错误必须可见，保留用户当前输入以便
-    // 修改；错误只归属对应来源行（不再在 v-for 内跨行重复渲染）。
-    if (disposed) return;
-    sourceErrors.value[id] = e instanceof Error ? e.message : String(e);
-  } finally {
-    savingSources.value = savingSources.value.filter((x) => x !== id);
-  }
 }
 
 async function rebuild(): Promise<void> {
@@ -1053,61 +1139,41 @@ defineExpose({ priceColumns });
         </div>
         <section class="ts-card settings-card">
           <div
-            v-for="(s, i) in sources"
-            :key="s.agent"
+            v-for="agent in AGENT_IDS"
+            :key="agent"
             class="source-block"
-            :class="{ 'has-divider': i > 0 }"
+            :class="{ 'has-divider': agent !== AGENT_IDS[0] }"
           >
             <div class="source-head">
-              <strong>{{ AGENT_LABEL[s.agent] ?? s.agent }}</strong>
+              <strong>{{ AGENT_LABEL[agent] ?? agent }}</strong>
               <NSwitch
-                :value="drafts[sourceIdOf(s.agent)]?.enabled ?? true"
+                :value="agentEnabled[agent]"
                 size="small"
-                :aria-label="`${AGENT_LABEL[s.agent] ?? s.agent} 启用`"
-                @update:value="(v: boolean) => setSourceEnabled(sourceIdOf(s.agent), v)"
+                :aria-label="`${AGENT_LABEL[agent] ?? agent} 启用`"
+                @update:value="(v: boolean) => setAgentEnabled(agent, v)"
               />
-              <span class="source-state">
-                {{
-                  s.state === "ready"
-                    ? `${fmtNum(s.files)} 个会话文件`
-                    : s.state === "disabled"
-                      ? "已停用"
-                      : s.state === "missing"
-                        ? "目录不存在"
-                        : "无日志"
-                }}
-              </span>
-              <span class="flex-fill"></span>
-              <NButton
-                size="tiny"
-                :loading="isSourceSaving(sourceIdOf(s.agent))"
-                :disabled="settingsUnknown"
-                @click="saveSource(s.agent)"
+              <span class="dir-label">自动发现</span>
+              <NSwitch
+                :value="agentAuto[agent]"
+                size="small"
+                :aria-label="`${AGENT_LABEL[agent] ?? agent} 自动发现`"
+                @update:value="(v: boolean) => setAgentAuto(agent, v)"
+              />
+              <span
+                v-if="
+                  isBusy(switchSaving, `switch:${agent}`) || isBusy(switchSaving, `auto:${agent}`)
+                "
+                class="source-state"
+                >保存中…</span
               >
-                保存
-              </NButton>
-            </div>
-            <!-- UX08：稳定可访问名称（label 关联 + 真实 input 的 aria-label），
-                 不再依赖 placeholder 兜底 -->
-            <label class="dir-label" :for="dirInputId(s.agent)">{{ dirInputLabel(s.agent) }}</label>
-            <NInput
-              :value="drafts[sourceIdOf(s.agent)]?.dir ?? ''"
-              size="small"
-              placeholder="留空使用当前生效目录"
-              :input-props="{
-                id: dirInputId(s.agent),
-                'aria-label': dirInputLabel(s.agent),
-              }"
-              @update:value="(v: string) => setSourceDir(sourceIdOf(s.agent), v)"
-            />
-            <!-- UX08：s.dir 是**当前生效目录**（可能是显式覆盖，不必然是默认
-                 目录）；完整值可读、可选中复制、长路径换行不省略 -->
-            <div class="source-effective">
-              <span class="effective-label">当前生效目录：</span>
-              <span class="effective-path ts-mono">{{ s.dir }}</span>
+              <span
+                v-else-if="switchErrors[`switch:${agent}`] || switchErrors[`auto:${agent}`]"
+                class="source-state is-error"
+                >保存失败</span
+              >
             </div>
             <div
-              v-if="sourceErrors[sourceIdOf(s.agent)]"
+              v-if="switchErrors[`switch:${agent}`] || switchErrors[`auto:${agent}`]"
               class="ts-notice ts-notice-inline source-error"
             >
               <svg
@@ -1122,12 +1188,119 @@ defineExpose({ priceColumns });
                 <circle cx="12" cy="12" r="9" />
                 <path d="m9 9 6 6M15 9l-6 6" />
               </svg>
-              <span class="ts-notice-content">{{ sourceErrors[sourceIdOf(s.agent)] }}</span>
+              <span class="ts-notice-content">{{
+                switchErrors[`switch:${agent}`] || switchErrors[`auto:${agent}`]
+              }}</span>
+            </div>
+
+            <!-- 来源行列表（后端解析的身份/标签/状态；前端不重算） -->
+            <div
+              v-for="row in rowsOf(agent)"
+              :key="row.id"
+              class="source-row"
+              :class="{ 'is-disabled': !row.row_enabled }"
+            >
+              <div class="source-row-head">
+                <NSwitch
+                  :value="row.row_enabled"
+                  size="small"
+                  :aria-label="`${AGENT_LABEL[agent] ?? agent} ${row.path} 启用`"
+                  @update:value="(v: boolean) => setRowEnabled(row, v)"
+                />
+                <span v-for="tag in row.origins" :key="tag" class="origin-tag">{{ tag }}</span>
+                <span class="source-state">{{ stateText(row) }}</span>
+                <span class="flex-fill"></span>
+                <NButton
+                  v-if="isRemovable(row)"
+                  size="tiny"
+                  text
+                  :loading="isBusy(rowOpSaving, `op:${row.agent}:${row.id}`)"
+                  :aria-label="`移除 ${row.path}`"
+                  @click="removeRow(row)"
+                >
+                  移除
+                </NButton>
+              </div>
+              <!-- 完整路径：可复制、长路径换行不省略 -->
+              <div class="source-effective">
+                <span class="effective-path ts-mono">{{ row.path }}</span>
+              </div>
+              <div v-if="row.diagnostics.length" class="row-diagnostics">
+                <span v-for="d in row.diagnostics" :key="d" class="diag-line">{{ d }}</span>
+              </div>
+              <div v-if="rowErrors[`op:${row.agent}:${row.id}`]" class="row-error">
+                {{ rowErrors[`op:${row.agent}:${row.id}`] }}
+              </div>
+            </div>
+
+            <!-- 追加目录：明确动作；错误保留草稿 -->
+            <label class="dir-label" :for="`source-add-${agent}`"
+              >{{ AGENT_LABEL[agent] ?? agent }} 追加日志目录</label
+            >
+            <div class="add-row">
+              <NInput
+                :value="addDrafts[agent]"
+                size="small"
+                placeholder="绝对路径（如 D:\\history\\claude\\projects）"
+                :input-props="{
+                  id: `source-add-${agent}`,
+                  'aria-label': `${AGENT_LABEL[agent] ?? agent} 追加日志目录`,
+                }"
+                :disabled="isBusy(addSaving, `add:${agent}`)"
+                @update:value="(v: string) => (addDrafts[agent] = v)"
+                @keydown.enter="addSource(agent)"
+              />
+              <NButton
+                size="small"
+                :loading="isBusy(addSaving, `add:${agent}`)"
+                :aria-label="`${AGENT_LABEL[agent] ?? agent} 添加目录`"
+                @click="addSource(agent)"
+              >
+                添加
+              </NButton>
+            </div>
+            <div
+              v-if="sourceErrors[`add:${agent}`]"
+              class="ts-notice ts-notice-inline source-error"
+              role="alert"
+            >
+              <svg
+                class="ts-notice-icon is-error"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                aria-hidden="true"
+              >
+                <circle cx="12" cy="12" r="9" />
+                <path d="m9 9 6 6M15 9l-6 6" />
+              </svg>
+              <span class="ts-notice-content">{{ sourceErrors[`add:${agent}`] }}</span>
             </div>
             <div class="setting-help">
-              留空则回到该来源的默认目录（上方「当前生效目录」是实际使用的目录，
-              可能来自显式覆盖）；停用后该来源完全不参与统计。两个来源不能指向同一目录。
+              自动发现覆盖当前用户的默认目录与环境变量指定的目录（环境变量只在启动时读取，修改后需重启
+              TokenScope）；追加目录按列表逐个读取；移除或停用只影响后续读取，已保存的用量不会删除。
             </div>
+          </div>
+          <div
+            v-if="refreshAfterSaveError"
+            class="ts-notice ts-notice-inline block-error"
+            role="alert"
+          >
+            <svg
+              class="ts-notice-icon is-error"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              aria-hidden="true"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <path d="m9 9 6 6M15 9l-6 6" />
+            </svg>
+            <span class="ts-notice-content">{{ refreshAfterSaveError }}</span>
           </div>
           <!-- U06/PR2：自动读取间隔——后台按此间隔读取 JSONL 日志；写入自动
                保存，修改立即生效；只有确有新用量才刷新统计（读取心跳不代表
@@ -1199,8 +1372,10 @@ defineExpose({ priceColumns });
           <NCollapse class="tech-collapse">
             <NCollapseItem title="技术详情" name="tech">
               <!-- UX08：完整「当前生效目录」（含显式覆盖）——可选中复制、长路径换行 -->
-              <div v-for="s in sources" :key="`eff-${s.agent}`" class="tech-line">
-                {{ AGENT_LABEL[s.agent] ?? s.agent }} 当前生效目录：{{ s.dir }}
+              <div v-for="row in sourceRows" :key="`eff-${row.id}`" class="tech-line">
+                {{ AGENT_LABEL[row.agent] ?? row.agent }} 日志根（{{ row.origins.join("、") }}）：{{
+                  row.path
+                }}
               </div>
               <div class="tech-line">历史库路径：{{ cache?.path ?? "—" }}</div>
               <div class="tech-line">models.dev 快照：{{ pricing?.modelsdev_path ?? "—" }}</div>

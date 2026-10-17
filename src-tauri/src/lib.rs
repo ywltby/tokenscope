@@ -112,6 +112,7 @@ pub fn run() {
             commands::source_path_add,
             commands::source_path_remove,
             commands::source_path_set_enabled,
+            commands::source_auto_set,
             commands::cache_stats,
             commands::refresh_cache,
             commands::ccs_import_defaults,

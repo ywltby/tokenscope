@@ -2,6 +2,7 @@ import type { InjectionKey } from "vue";
 
 export const SETTINGS_READ_COMMANDS = [
   "source_status",
+  "source_paths_list",
   "cache_stats",
   "pricing_entries",
   "settings_get",

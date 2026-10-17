@@ -700,6 +700,53 @@ pub(crate) fn source_config_set_impl(
     Ok(committed)
 }
 
+/// PR3 §5/§9.5 第 3 条：auto_discover 开关（设置单项事务；追加目录管理
+/// 取代目录覆盖后，自动开关与总开关同级的两个明确操作之一）。
+#[tauri::command]
+pub async fn source_auto_set(
+    app: tauri::AppHandle,
+    agent: String,
+    enabled: bool,
+) -> Result<bool, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    let committed = run_blocking("source_auto_set", move || {
+        let path = tokenscope::settings::settings_path()?;
+        source_auto_set_impl(&path, &agent, enabled)
+    })
+    .await
+    .map_err(|e| format!("{e:#}"))?;
+    crate::wake_collection_scheduler();
+    Ok(committed)
+}
+
+pub(crate) fn source_auto_set_impl(
+    path: &std::path::Path,
+    agent: &str,
+    enabled: bool,
+) -> anyhow::Result<bool> {
+    let claude = match agent {
+        "claude" => true,
+        "codex" => false,
+        other => return Err(anyhow::anyhow!("未知 agent: {other}")),
+    };
+    tokenscope::settings::update(path, move |s| {
+        let cfg = s.source_config(claude);
+        let mut next = cfg;
+        next.auto_discover = enabled;
+        if claude {
+            s.sources.claude = Some(next);
+        } else {
+            s.sources.codex = Some(next);
+        }
+        Ok(())
+    })?;
+    log::info!("来源自动发现已保存：{agent} enabled={enabled}");
+    let committed = tokenscope::settings::load(path)?
+        .source_config(claude)
+        .auto_discover;
+    Ok(committed)
+}
+
 // ── PR3 §5/§9.5 第 3 条：来源目录管理 IPC ─────────────────────────
 //
 // list 只探测少量根（不遍历日志、不触发查询、不写历史）；写接口对最新

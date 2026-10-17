@@ -27,11 +27,6 @@ const pricingView = {
   entries: [],
   warnings: [],
 };
-const sourceStatuses = [
-  { agent: "claude-code", dir: "C:/claude", enabled: true, exists: true, files: 3, state: "ready" },
-  { agent: "codex", dir: "C:/codex", enabled: true, exists: true, files: 2, state: "ready" },
-];
-
 const preview = {
   plan_id: "plan-1",
   logical_source: "ccs",
@@ -90,8 +85,8 @@ beforeEach(() => {
   msgSpy.error.mockReset();
   invokeMock.mockImplementation((cmd: string) => {
     switch (cmd) {
-      case "source_status":
-        return Promise.resolve(sourceStatuses);
+      case "source_paths_list":
+        return Promise.resolve([]);
       case "pricing_entries":
         return Promise.resolve(pricingView);
       case "cache_stats":
@@ -205,7 +200,7 @@ describe("Settings CCS 导入（H05/H08）", () => {
       overlap_examples: ["claude / gpt-5.6-sol / 2026-07-17T15:00:00Z / 130"],
     };
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "source_paths_list") return Promise.resolve([]);
       if (cmd === "pricing_entries") return Promise.resolve(pricingView);
       if (cmd === "cache_stats")
         return Promise.resolve({ path: "C:/data/history.db", files: 4, events: 8 });
@@ -254,7 +249,7 @@ describe("Settings CCS 导入（H05/H08）", () => {
 
   it("提交失败保留错误提示且不自动重试", async () => {
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "source_paths_list") return Promise.resolve([]);
       if (cmd === "pricing_entries") return Promise.resolve(pricingView);
       if (cmd === "cache_stats")
         return Promise.resolve({ path: "C:/data/history.db", files: 4, events: 8 });
@@ -287,7 +282,7 @@ describe("Settings CCS 导入（H05/H08）", () => {
 
   it("提交失败后已消费计划被清除，可直接重新预览（N04）", async () => {
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "source_status") return Promise.resolve(sourceStatuses);
+      if (cmd === "source_paths_list") return Promise.resolve([]);
       if (cmd === "pricing_entries") return Promise.resolve(pricingView);
       if (cmd === "cache_stats")
         return Promise.resolve({ path: "C:/data/history.db", files: 4, events: 8 });
