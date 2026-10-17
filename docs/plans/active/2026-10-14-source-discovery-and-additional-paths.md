@@ -190,9 +190,9 @@ docs/privacy.md 只补充当前用户默认、环境和多个手动路径，不�
 
 ## 7. 状态与验收
 
-S00–S07 全部未开始，版本未分配。实施后逐项记 commit、命令、失败→通过及远程 run/artifact，计划审阅不代表实现。
+S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失败→通过及远程 run/artifact，计划审阅不代表实现。
 
-- [ ] S00：原生验收卡死有超时、看门狗证据与阶段日志。
+- [x] S00：原生验收卡死有超时、看门狗证据与阶段日志。（2026-10-18 实施完毕，记录见下）
 - [ ] 固定候选、两种环境变量、映射核实和隔离全部验证。
 - [ ] 手动嵌套拒绝；迁移/环境重叠不阻断且只解析一次。
 - [ ] 联接环闭合；两层去重不丢独立事件。
@@ -200,6 +200,15 @@ S00–S07 全部未开始，版本未分配。实施后逐项记 commit、命令
 - [ ] 改前改后性能有记录；真实基准有证据或待验标记。
 - [ ] 旧自定义 dir 与 CODEX_HOME 行为变更、升级用量并集、停用保留、重启说明、隐私范围及清单齐全。
 - [ ] PR3 自身版本、完整门禁、安装升级与原生工件验证。
+
+### S00 执行记录（2026-10-18）
+
+- **提交**：S00 代码与测试为 commit `7e31a19`（pre-commit 完整模式全绿）；本记录为紧随其后的文档提交。
+- **落点**：新增 `frontend/scripts/lib/native-scenario.mjs`（30 秒有界 `spawnSyncBounded`、10 秒 `closeBrowserBounded`、`withTimeout` 有界取证、`createStageTracker` 阶段记录、`runScenarioBounded` 场景看门狗、`finalizeScenarioTimeout` 有界收尾、`ScenarioCanceledError`）；新增 `frontend/scripts/lib/native-scenario.test.mjs`；`native-acceptance.mjs` 全部 spawnSync 改有界、`Instance.stop/launch` 接取消自查与阶段标记、失败取证加 8 秒上限、场景执行改走看门狗入口；`contracts/native-{ui-system,ui-refresh,collection-status}.mjs` 的关闭/重启段加 `close-command`/`click-quit`/`wait-host-exit` 阶段标记与有界命令。
+- **§9.1 第 1 条清单（改前现状，均已消除）**：无界 spawnSync 10 处（主入口 ps/psCommand/nativeGeometry/git/cmd 四类 + ui-system 的 restore/close/托盘关闭/ui-relaunch windowAction + ui-refresh 与 collection-status 的 closeForRestart）；无界 `browser.close()` 4 处（Instance.stop、cleanupFailedLaunch、expire-start 分支、两个契约 closeForRestart）；失败截图/DOM 查询在场景竞速保护外；evidence.json 只在末尾一次性写出。现有场景名称与检查项全部保留，仅新增 `scenario_timeout` 检查。
+- **关键测试**：`scripts/lib/native-scenario.test.mjs` 24 例——同步命令超时（error=ETIMEDOUT/signal=SIGTERM/status=null 全部进错误信息）、CDP close 永不返回、场景永不返回、onTimeout 恰一次、迟到分支不重复触发且不重启（源级契约钉住 Instance 接线）、失败取证永不返回、正常完成解除计时器、attach 不终止外部进程、Node 子进程端到端（父测 10 秒上限、断言磁盘证据与非零退出 7）。
+- **执行结果**：`pnpm --dir frontend test` 44 文件/566 用例全绿；`python -B scripts/check_node_syntax.py` 20 个脚本通过；本机冒烟（`--exe` 指向不存在路径跑 `ui-system`）退出码 2，evidence.json 落盘含 `failure_stage=setup`、`last_stage`（stop 已完成 done_at 置位）、`stages`（launch 失败未完成）、`stop.browser_close`、真实数据指纹不变。
+- **边界如实记录**：防卡死机制已验证；run 39050690161 的原卡死根因仍未知（S00 只保证此类卡死能定位，不宣称已修复）；场景预算非精确墙钟强杀点（同步阻塞最多推迟一个 30 秒有界调用）；远程 Native UI E2E 待本 PR CI，属交付条件。未完成项：无（本项范围内）。
 
 ## 8. 执行细则、算法边界与验收门槛
 
