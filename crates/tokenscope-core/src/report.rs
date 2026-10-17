@@ -4173,10 +4173,13 @@ cache_read = 0.0
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// 跟随者零转换：领队先注册航班（主线程确认 INFLIGHT 已含本 key 再生成
-    /// 跟随者——调度慢的 CI 上跟随者可能先到而自成为领队，必须有这一步真实
-    /// 握手），领队闭包内有限睡眠保证重叠窗口。全程只有一对 start/end，
-    /// 共享同一结果。
+    /// 跟随者零转换：**双向握手**——领队注册航班后在闭包内阻塞等待放行；
+    /// 主线程先确认航班已注册（跟随者因此必然以跟随者身份进入，不会先到
+    /// 而自成领队），生成跟随者后再确认其已阻塞在**同一航班**的 wait_flight
+    /// （按本 key 计数的等待者 ≥1——此时领队未放行，航班不可能先于跟随者
+    /// 加入而结束），最后才放行领队。等待都有 30 秒超时；主线程失败退出时
+    /// 发送端随之关闭、领队的等待立即解除并按错误收尾——任何一步失败都不
+    /// 把测试挂在串行锁上。全程只有一对 start/end，共享同一结果。
     #[test]
     fn status_follower_creates_no_extra_transition() {
         let tracker = std::sync::Arc::new(CollectionStatusTracker::new());
@@ -4186,18 +4189,21 @@ cache_read = 0.0
         let opts = opts(Some(dir.join("cache")), None, false);
         let key = collection_key(&opts);
 
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
         let t1 = {
             let tracker = tracker.clone();
             let o = opts.clone();
             std::thread::spawn(move || {
                 let leader = move |_gen: u64| -> Result<CollectionSnapshot> {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    Ok(ok_snapshot(5))
+                    match go_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                        Ok(()) => Ok(ok_snapshot(5)),
+                        Err(_) => Err(anyhow::anyhow!("握手未完成（测试保护）")),
+                    }
                 };
                 collect_flighted_with_on(&tracker, &o, &leader).unwrap()
             })
         };
-        // 真实握手：领队的航班已注册后，随后同参调用必然以跟随者身份进入
+        // 握手第一段：领队已注册航班——此后同参调用必然以跟随者身份进入
         // wait_flight（注册者才可能是领队），不依赖线程调度顺序。
         {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -4216,6 +4222,20 @@ cache_read = 0.0
                 collect_flighted_with_on(&tracker, &o, &leader).unwrap()
             })
         };
+        // 握手第二段：跟随者已阻塞在本航班的 wait_flight——这是"航班不会
+        // 在跟随者加入前结束"的直接证据（领队此刻仍阻塞在放行等待上）。
+        // 按本 key 计数，并行用例的等待者不计数。
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while flight_waiters_for_tests(&key) < 1 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "等待跟随者进入航班超时"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        go_tx.send(()).unwrap();
         let r1 = t1.join().unwrap();
         let r2 = t2.join().unwrap();
         assert_eq!(r1.generation, r2.generation, "跟随者复用同一航班结果");
