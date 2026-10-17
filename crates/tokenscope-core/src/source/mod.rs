@@ -40,6 +40,21 @@ pub struct CollectStats {
 }
 
 impl CollectStats {
+    /// PR3：累加另一份同粒度统计——来源按根实例采集后，报告按 agent 聚合用。
+    pub fn merge_from(&mut self, other: &CollectStats) {
+        self.files_scanned += other.files_scanned;
+        self.lines_seen += other.lines_seen;
+        self.bad_lines += other.bad_lines;
+        self.duplicates_dropped += other.duplicates_dropped;
+        self.skipped_sidechain += other.skipped_sidechain;
+        self.skipped_synthetic += other.skipped_synthetic;
+        self.skipped_zero_usage += other.skipped_zero_usage;
+        self.skipped_no_model += other.skipped_no_model;
+        self.ignored_token_usage_record += other.ignored_token_usage_record;
+        self.io_errors += other.io_errors;
+        self.events += other.events;
+    }
+
     /// 累加单个文件的解析统计（files_scanned 与 events 由调用方维护）。
     pub fn add_file(&mut self, f: &FileParse) {
         self.lines_seen += f.stats.lines_seen;
@@ -96,7 +111,20 @@ pub trait Source {
     /// 发现全部 jsonl，按路径排序保证稳定顺序（B4）：子目录不可读等
     /// 发现期异常以诊断字符串返回，不再静默吞掉——"只统计到部分数据"
     /// 必须对调用方可见。
-    fn discover_with_errors(&self) -> (Vec<PathBuf>, Vec<String>);
+    ///
+    /// 默认实现独立遍历（自带台账）；整轮采集由 report 层改调
+    /// [`discover_with_ledger`](Self::discover_with_ledger) 共享台账。
+    fn discover_with_errors(&self) -> (Vec<PathBuf>, Vec<String>) {
+        let mut ledger = DirVisitLedger::default();
+        self.discover_with_ledger(&mut ledger)
+    }
+
+    /// PR3 §8.2：使用**整轮共享**的目录台账发现——环、别名根与同应用嵌套
+    /// 根在整轮范围内只进入一次，文件由更小规范化根认领。适配器实现它；
+    /// 注入来源（mock/测试）沿用 [`discover_with_errors`](Self::discover_with_errors)。
+    fn discover_with_ledger(&self, _ledger: &mut DirVisitLedger) -> (Vec<PathBuf>, Vec<String>) {
+        self.discover_with_errors()
+    }
 
     /// 兼容便捷入口：只要文件列表。
     fn discover(&self) -> Vec<PathBuf> {
@@ -155,23 +183,153 @@ pub trait Source {
     }
 }
 
-/// 递归收集 root 下全部 jsonl，按路径排序（Claude/Codex 共用）。
-/// 不可读的目录（含"同名文件占位"等异常）记入 errors，不中断其余遍历。
-pub(crate) fn walk_jsonl(root: &Path, out: &mut Vec<PathBuf>, errors: &mut Vec<String>) {
-    let entries = match std::fs::read_dir(root) {
-        Ok(e) => e,
-        Err(e) => {
-            errors.push(format!("无法读取目录 {}：{e}", root.display()));
+// ── PR3 §4.2/§8.2：防环遍历与整轮目录台账 ─────────────────────────
+
+/// 整轮共享的目录访问台账：键 = 规范化目录路径（canonical 优先，不可访问退
+/// 逻辑折叠），值 = 首个进入它的来源。环、别名根、同应用嵌套根靠它保证
+/// "每个可解析目录整轮只进入一次"；跨应用根重叠在进入时暴露给调用方隔离。
+#[derive(Debug, Default)]
+pub struct DirVisitLedger {
+    visited: std::collections::HashMap<String, AgentKind>,
+}
+
+/// 台账进入判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirEnter {
+    /// 首次进入（调用方继续遍历）。
+    Fresh,
+    /// 已被访问过（同 agent 或跨 agent）——不再进入。
+    Already(AgentKind),
+}
+
+impl DirVisitLedger {
+    /// 登记进入一个目录：首次返回 `Fresh`，重复返回 `Already(首个来源)`。
+    pub fn enter(&mut self, dir: &Path, agent: AgentKind) -> DirEnter {
+        let key = crate::report::normalize_path(dir)
+            .to_string_lossy()
+            .to_lowercase();
+        match self.visited.get(&key) {
+            Some(prev) => DirEnter::Already(*prev),
+            None => {
+                self.visited.insert(key, agent);
+                DirEnter::Fresh
+            }
+        }
+    }
+}
+
+/// Windows reparse point 检测（§9.4 第 5 条）：junction 以 reparse point 形态
+/// 存在，不能只假设 `file_type().is_symlink()` 覆盖全部联接。
+#[cfg(windows)]
+fn entry_is_reparse_point(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    match std::fs::symlink_metadata(path) {
+        Ok(md) => md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(windows))]
+fn entry_is_reparse_point(_path: &Path) -> bool {
+    false
+}
+
+/// 显式栈遍历（§4.2）：`DirEntry::file_type()` 不跟随分型；链接（符号链接与
+/// Windows 联接）显式解析目标——目标是目录时按规范化目标进台账（防环、防
+/// 别名重复），目标是 jsonl 文件时按访问路径收集（身份去重在文件层完成）；
+/// 无法解析的链接跳过并诊断。普通目录进入前也进台账。子项读取/类型错误
+/// 逐项保留，不用 `entries.flatten()` 静默吞错。
+pub fn walk_jsonl_guarded(
+    root: &Path,
+    agent: AgentKind,
+    ledger: &mut DirVisitLedger,
+    out: &mut Vec<PathBuf>,
+    errors: &mut Vec<String>,
+) {
+    // 根进入台账：跨应用根重叠在此暴露（调用方按隔离处理），同应用别名根
+    // 的文件由更小规范化根认领。
+    match ledger.enter(root, agent) {
+        DirEnter::Already(prev) => {
+            if prev != agent {
+                errors.push(format!(
+                    "根 {} 已被 {} 来源遍历：跨应用来源根重叠，本轮隔离该根",
+                    root.display(),
+                    prev.as_str()
+                ));
+            }
             return;
         }
-    };
-    let mut children: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-    children.sort();
-    for child in children {
-        if child.is_dir() {
-            walk_jsonl(&child, out, errors);
-        } else if is_jsonl(&child) {
-            out.push(child);
+        DirEnter::Fresh => {}
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) => {
+                errors.push(format!("无法读取目录 {}：{e}", dir.display()));
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    errors.push(format!("读取目录 {} 子项失败：{e}", dir.display()));
+                    continue;
+                }
+            };
+            let child = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(e) => {
+                    errors.push(format!("读取 {} 类型失败：{e}", child.display()));
+                    continue;
+                }
+            };
+            // 链接：符号链接，或 Windows 上带 reparse 属性的目录（junction）
+            let is_link =
+                file_type.is_symlink() || (file_type.is_dir() && entry_is_reparse_point(&child));
+            if is_link {
+                // 链接显式解析目标（§4.2）：目录目标按规范化路径进台账后压栈
+                // （台账挡下环与别名重复）；文件目标按访问路径收集，身份去重
+                // 在文件层完成；解析失败跳过并诊断，绝不能无界递归。
+                let target = match child.canonicalize() {
+                    Ok(t) => crate::report::strip_verbatim(t),
+                    Err(_) => {
+                        errors.push(format!(
+                            "链接 {} 目标无法解析（失效链接），已跳过",
+                            child.display()
+                        ));
+                        continue;
+                    }
+                };
+                let meta = match std::fs::metadata(&target) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        errors.push(format!("链接 {} 目标不可读：{e}", child.display()));
+                        continue;
+                    }
+                };
+                if meta.is_dir() {
+                    match ledger.enter(&target, agent) {
+                        DirEnter::Fresh => stack.push(target),
+                        DirEnter::Already(_) => {}
+                    }
+                } else if is_jsonl(&child) {
+                    out.push(child);
+                }
+                continue;
+            }
+            if file_type.is_dir() {
+                // 普通目录也在进入前加入台账（§9.4 第 3 条）——祖先环由此终止
+                match ledger.enter(&child, agent) {
+                    DirEnter::Fresh => stack.push(child),
+                    DirEnter::Already(_) => {}
+                }
+            } else if file_type.is_file() && is_jsonl(&child) {
+                out.push(child);
+            }
         }
     }
 }

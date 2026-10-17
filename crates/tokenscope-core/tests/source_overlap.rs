@@ -53,25 +53,24 @@ fn opts(
     }
 }
 
-/// SF09：两个启用的 agent 指向同一目录 → 明确拒绝采集（错误列出恢复
-/// 方法），且失败前**无成功缓存写入**；再次请求同样拒绝（可重试诊断）。
+/// PR3 §4.1/§8.3：跨应用来源根相同 → **隔离**该重叠根并诊断，其余照常
+/// 读取（不再整体报错）；硬拒绝只发生在保存事务（S04 接线）。
 #[test]
 fn test_source_overlap_same_dir_single_count() {
     let dir = tmp_dir("same");
     let shared = shared_dir(&dir);
     let o = opts(&dir, &shared, Some(shared.to_path_buf()));
-    let err = summary(&o).unwrap_err();
+    let r = summary(&o).unwrap();
+    assert_eq!(r.totals.requests, 1, "claude 照常读取，codex 根被隔离");
     assert!(
-        err.to_string().contains("来源目录冲突"),
-        "同目录配置必须明确拒绝: {err}"
+        r.warnings.iter().any(|w| w.contains("跨应用来源根重叠")),
+        "隔离必须诊断可见: {:?}",
+        r.warnings
     );
-    // 失败前无成功缓存写入。
-    let info = cache_stats(o.cache_dir.clone()).unwrap();
-    assert_eq!(info.files, 0, "拒绝采集不得写缓存");
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// SF09：别名（尾分隔符）指向同一规范化目录 → 同样拒绝。
+/// PR3：尾分隔符别名指向同一规范化目录 → 同样隔离（台账按规范化键去重）。
 #[test]
 fn test_source_overlap_alias_paths_recognized() {
     let dir = tmp_dir("alias");
@@ -82,12 +81,14 @@ fn test_source_overlap_alias_paths_recognized() {
         PathBuf::from(p)
     };
     let o = opts(&dir, &shared, Some(alias));
-    let err = summary(&o).unwrap_err();
-    assert!(err.to_string().contains("来源目录冲突"), "{err}");
+    let r = summary(&o).unwrap();
+    assert_eq!(r.totals.requests, 1, "别名根隔离，claude 只计一份");
+    assert!(r.warnings.iter().any(|w| w.contains("跨应用来源根重叠")));
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// SF09：嵌套目录（父/子）同样冲突——文件归属歧义。
+/// PR3：跨应用嵌套（父/子）→ 子根被父根的遍历覆盖，隔离 + 诊断；
+/// 父根文件完整读取一次（§4.1：不采用子根覆盖父根）。
 #[test]
 fn test_source_overlap_nested_dir_rejected() {
     let dir = tmp_dir("nested");
@@ -95,25 +96,27 @@ fn test_source_overlap_nested_dir_rejected() {
     let child = shared.join("sub");
     std::fs::create_dir_all(&child).unwrap();
     let o = opts(&dir, &shared, Some(child));
-    let err = summary(&o).unwrap_err();
-    assert!(err.to_string().contains("嵌套"), "{err}");
+    let r = summary(&o).unwrap();
+    assert_eq!(r.totals.requests, 1, "父根照常读取，子根隔离");
+    assert!(r.warnings.iter().any(|w| w.contains("跨应用来源根重叠")));
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// SF09：大小写别名（Windows 不敏感语义）同样拒绝。
+/// PR3：大小写别名（Windows 不敏感语义）→ 同样隔离，不重复解析。
 #[test]
 fn test_source_overlap_case_alias_rejected() {
     let dir = tmp_dir("case");
     let shared = shared_dir(&dir);
     let upper: PathBuf = shared.to_string_lossy().to_uppercase().into();
     let o = opts(&dir, &shared, Some(upper));
-    let err = summary(&o).unwrap_err();
-    assert!(err.to_string().contains("来源目录冲突"), "{err}");
+    let r = summary(&o).unwrap();
+    assert_eq!(r.totals.requests, 1, "大小写别名根隔离");
+    assert!(r.warnings.iter().any(|w| w.contains("跨应用来源根重叠")));
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// SF09：校验使用**有效**目录——显式覆盖与工具默认根同值也算冲突；
-/// 两个默认根（未显式配置）本身不冲突。
+/// SF09（保存校验侧，S04 接线时沿用同一函数）：显式目录撞**默认根**也在
+/// 有效目录解析后识别为冲突——这里用纯校验函数核对，不对真实默认根跑采集。
 #[test]
 fn overlap_validation_uses_effective_default_paths() {
     let dir = tmp_dir("default-paths");
@@ -122,19 +125,30 @@ fn overlap_validation_uses_effective_default_paths() {
     let o = SummaryOptions {
         by: GroupBy::Day,
         claude_dir: None, // = Claude 默认根
-        codex_dir: Some(claude_default),
+        codex_dir: Some(claude_default.clone()),
         cache_dir: Some(dir.join("cache")),
         pricing_index: Some(dir.join("idx.json")),
         pricing_path: Some(dir.join("no-pricing.toml")),
         tz: Some("Asia/Shanghai".to_string()),
         ..Default::default()
     };
-    let err = summary(&o).unwrap_err();
+    let claude_effective = tokenscope::report::effective_source_roots(
+        tokenscope::model::AgentKind::ClaudeCode,
+        o.claude_enabled != Some(false),
+        o.claude_dir.as_deref(),
+    )
+    .unwrap();
+    assert_eq!(claude_effective, vec![claude_default.clone()]);
+    let err = tokenscope::settings::validate_dir_conflict(
+        &claude_effective[0],
+        &o.codex_dir.clone().unwrap(),
+    )
+    .unwrap_err();
     assert!(
-        err.to_string().contains("来源目录冲突"),
-        "显式目录撞默认根必须拒绝: {err}"
+        err.contains("来源目录冲突"),
+        "显式目录撞默认根必须识别: {err}"
     );
-    // 未显式配置：两个默认根不同 → 不冲突（可正常采集，均为空）。
+    // 分离目录照常采集（不触真实默认根）。
     let o2 = SummaryOptions {
         by: GroupBy::Day,
         cache_dir: Some(dir.join("cache2")),
@@ -330,10 +344,10 @@ mod mock_pair {
     }
 }
 
-/// SF09：两个 adapter 认领同一规范化文件 → 发现阶段即明确归属冲突
-///（移除「先发现者得」默认），任何 adapter 都不解析该文件。
+/// PR3 §8.3：两个 adapter 认领同一规范化文件 → 该文件**隔离**（两侧都不
+/// 解析）并诊断；其余来源照常。硬拒绝移到保存事务（S04）。
 #[test]
-fn ambiguous_overlap_is_rejected_before_adapter_selection() {
+fn ambiguous_file_claim_is_isolated_before_parsing() {
     let dir = tmp_dir("both-produce");
     let shared = shared_dir(&dir);
     let file = shared.join("s.jsonl");
@@ -356,15 +370,20 @@ fn ambiguous_overlap_is_rejected_before_adapter_selection() {
             ..Default::default()
         },
     );
-    let err = collected.expect_err("跨 adapter 认领必须明确拒绝");
+    let collected = collected.expect("跨 adapter 同文件隔离后采集成功");
+    assert!(collected.events.is_empty(), "冲突文件两侧都不产出事件");
     assert!(
-        err.to_string().contains("文件归属冲突"),
-        "错误必须指出归属冲突: {err}"
+        collected
+            .warnings
+            .iter()
+            .any(|w| w.contains("文件归属冲突")),
+        "隔离必须诊断可见: {:?}",
+        collected.warnings
     );
     assert_eq!(
         claude_parses.load(Ordering::Relaxed) + codex_parses.load(Ordering::Relaxed),
         0,
-        "冲突在 adapter 选择/解析之前拒绝"
+        "隔离发生在解析之前"
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -404,16 +423,18 @@ fn same_agent_duplicate_discovery_keeps_single() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// SF09：冲突拒绝前无成功缓存写入；分离目录的冷/热缓存统计不受影响。
+/// PR3：跨应用重叠 → 隔离成功（其余根照常采集、事实落库）；
+/// 分离目录的冷/热缓存统计不受影响。
 #[test]
-fn test_source_overlap_rejection_writes_no_cache_and_split_dirs_unaffected() {
+fn test_source_overlap_isolated_writes_cache_and_split_dirs_unaffected() {
     let dir = tmp_dir("cache-order");
     let shared = shared_dir(&dir);
-    // 冲突配置：拒绝，无缓存写入。
+    // 重叠配置：隔离成功，claude 的文件照常入库。
     let o = opts(&dir, &shared, Some(shared.clone()));
-    assert!(summary(&o).is_err(), "冲突配置必须拒绝");
+    let r = summary(&o).unwrap();
+    assert_eq!(r.totals.requests, 1);
     let info = cache_stats(o.cache_dir.clone()).unwrap();
-    assert_eq!(info.files, 0, "拒绝采集不得写缓存");
+    assert_eq!(info.files, 1, "隔离采集照常写缓存（仅未隔离根）");
 
     // 分离目录（codex 指向独立目录）：冷/热两次采集缓存行稳定。
     let codex_own = dir.join("codex-own");

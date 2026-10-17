@@ -22,7 +22,7 @@ use serde::Deserialize;
 
 use super::claude_projects::ProjectMapping;
 use super::project_path::{self, ProjectRootTracker};
-use super::{CollectStats, FileParse, Source, read_text, walk_jsonl};
+use super::{CollectStats, FileParse, Source, read_text};
 use crate::model::{AgentKind, UsageEvent};
 
 pub const SYNTHETIC_MODEL: &str = "<synthetic>";
@@ -163,13 +163,22 @@ impl Source for ClaudeSource {
     }
 
     fn discover_with_errors(&self) -> (Vec<PathBuf>, Vec<String>) {
+        // 独立调用（单测/状态）：自带台账，同样防环
+        let mut ledger = super::DirVisitLedger::default();
+        self.discover_with_ledger(&mut ledger)
+    }
+
+    fn discover_with_ledger(
+        &self,
+        ledger: &mut super::DirVisitLedger,
+    ) -> (Vec<PathBuf>, Vec<String>) {
         // 根目录缺失由调用方统一告警（"目录不存在"），不在此重复记异常。
         if !self.root.is_dir() {
             return (Vec::new(), Vec::new());
         }
         let mut out = Vec::new();
         let mut errors = Vec::new();
-        walk_jsonl(&self.root, &mut out, &mut errors);
+        super::walk_jsonl_guarded(&self.root, self.agent(), ledger, &mut out, &mut errors);
         out.sort();
         (out, errors)
     }

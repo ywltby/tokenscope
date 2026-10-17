@@ -128,6 +128,23 @@ pub struct SummaryOptions {
     /// 时采集与查询路径上的进度日志降级为 `debug`（唯一例外：本轮历史库
     /// 确有写入时保留一条 info 摘要）。
     pub trigger: Trigger,
+    /// PR3 §9.4：**整轮来源计划**（每根一个条目；由壳层用 discovery 解析
+    /// 结果构造，测试直接注入）。`None` = 旧单根模型（按
+    /// `claude_dir`/`codex_dir` 解释——测试兼容入口只读注入根，不偷偷追加
+    /// 默认根）；`Some` 时完全取代 dir 字段的语义。
+    pub source_plans: Option<Vec<SourcePlan>>,
+}
+
+/// PR3 §9.4：一个启用根实例。文件身份（canonicalize）在整轮发现时另行解析；
+/// `root` 保留配置路径供相对路径提取（与访问路径成对，联接别名下也能
+/// 正确 strip_prefix）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourcePlan {
+    pub agent: AgentKind,
+    /// 访问根（配置路径）。
+    pub root: PathBuf,
+    /// Claude 项目映射绑定（None = 禁用映射，A03；测试注入）。
+    pub claude_mapping: Option<PathBuf>,
 }
 
 impl SummaryOptions {
@@ -249,25 +266,56 @@ pub fn pricing_file_path(pricing_file: Option<&PathBuf>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("pricing.toml"))
 }
 
-fn make_source(opts: &SummaryOptions, kind: AgentKind) -> Result<Box<dyn Source>> {
-    Ok(match kind {
-        AgentKind::ClaudeCode => {
-            let root = match opts.claude_dir.as_ref() {
-                Some(p) => p.clone(),
-                None => ClaudeSource::default_root()?,
-            };
-            Box::new(ClaudeSource::with_mapping(
-                root,
-                claude_project_mapping(opts),
-            ))
+/// PR3 §9.4：按整轮来源计划构造来源——**每根一个实例**（Claude 每根独立
+/// `with_mapping`，Codex 每根独立单根实例），让文件认领、上下文修订与
+/// `source_files` 的根键都以根为粒度。`source_plans = None` 时保持旧单根
+/// 模型（测试兼容入口只读注入根）。
+fn make_sources(opts: &SummaryOptions, kinds: &[AgentKind]) -> Result<Vec<Box<dyn Source>>> {
+    let mut out: Vec<Box<dyn Source>> = Vec::new();
+    if let Some(plans) = &opts.source_plans {
+        for plan in plans {
+            if !kinds.contains(&plan.agent) {
+                continue;
+            }
+            // 根规范化（canonical 优先）：访问路径与台账键一致，联接/别名下
+            // slug 提取仍能正确 strip_prefix。
+            let root = normalize_path(&plan.root);
+            match plan.agent {
+                AgentKind::ClaudeCode => {
+                    let mapping = match &plan.claude_mapping {
+                        Some(p) => crate::source::claude_projects::ProjectMapping::load_cached(p),
+                        None => std::sync::Arc::new(
+                            crate::source::claude_projects::ProjectMapping::disabled(),
+                        ),
+                    };
+                    out.push(Box::new(ClaudeSource::with_mapping(root, mapping)));
+                }
+                AgentKind::Codex => out.push(Box::new(CodexSource::new(root))),
+            }
         }
-        AgentKind::Codex => Box::new(match opts.codex_dir.as_ref() {
-            // 显式自定义根：只在选定目录内递归（单根）。
-            Some(p) => CodexSource::new(p.clone()),
-            // 默认来源：sessions + archived_sessions 两个根（H02）。
-            None => CodexSource::with_roots(CodexSource::default_roots()?),
-        }),
-    })
+        return Ok(out);
+    }
+    for &kind in kinds {
+        out.push(match kind {
+            AgentKind::ClaudeCode => {
+                let root = match opts.claude_dir.as_ref() {
+                    Some(p) => p.clone(),
+                    None => ClaudeSource::default_root()?,
+                };
+                Box::new(ClaudeSource::with_mapping(
+                    root,
+                    claude_project_mapping(opts),
+                ))
+            }
+            AgentKind::Codex => Box::new(match opts.codex_dir.as_ref() {
+                // 显式自定义根：只在选定目录内递归（单根）。
+                Some(p) => CodexSource::new(p.clone()),
+                // 默认来源：sessions + archived_sessions 两个根（H02）。
+                None => CodexSource::with_roots(CodexSource::default_roots()?),
+            }),
+        });
+    }
+    Ok(out)
 }
 
 /// A03：Claude 项目映射的加载策略——显式配置路径 > 默认来源的账户配置；
@@ -357,11 +405,9 @@ pub fn cache_stats(cache_dir: Option<PathBuf>) -> Result<CacheInfo> {
 /// 重扫与查询的采集范围必然一致（修复前重建写死 `SummaryOptions::default()`，
 /// 停用的来源会被重新采集、自定义目录被忽略）。
 ///
-/// 顺序：先校验来源配置（冲突即失败），再重置指纹——避免"重置之后才因为
-/// 配置非法失败"，留下一个指纹全丢的中间状态。
+/// 顺序：重置指纹在前（重叠来源按 §8.2 隔离语义处理，不再整体失败）。
 pub fn rebuild_cache(opts: &SummaryOptions) -> Result<CacheInfo> {
     let cache_dir = opts.cache_dir.clone();
-    validate_opts_sources_overlap(opts)?;
     let history = open_history(opts)?;
     let reset = history.reset_fingerprints()?;
     log::info!("重扫日志：重置 {reset} 条采集指纹（已保存的用量不受影响）");
@@ -593,26 +639,65 @@ pub fn take_max_concurrent_collections_for_tests() -> u64 {
 /// 不参与——汇总与明细同参并发时必须合并为一次采集）。A03：Claude 项目映射
 /// 修订属于采集输入——配置变化后必须走新采集，不能复用旧航班结果。
 pub(crate) fn collection_key(opts: &SummaryOptions) -> String {
-    // Claude 停用时映射不参与采集，键里固定为 disabled（不读账户配置）。
-    let mapping_rev = if opts.enabled(true) {
-        claude_project_mapping(opts).revision().to_string()
-    } else {
-        "disabled".to_string()
+    // PR3：计划模式（§9.4）——复用键包含**实际根集合、每根映射与启用**；
+    // 旧单根模型保持原字段。映射修订属采集输入：配置变化后必须走新采集，
+    // 不能复用旧航班结果（§9.4 第 6 条：不用随机值/时间，映射修订来自文件内容）。
+    let (plans_key, mapping_rev) = match &opts.source_plans {
+        Some(plans) => {
+            let mut mapping_revs: Vec<String> = Vec::new();
+            let mut plan_parts: Vec<String> = Vec::new();
+            for p in plans {
+                let root = normalize_path(&p.root).to_string_lossy().to_lowercase();
+                let mapping = p
+                    .claude_mapping
+                    .as_ref()
+                    .map(|m| {
+                        let rev = crate::source::claude_projects::ProjectMapping::load_cached(m)
+                            .revision()
+                            .to_string();
+                        normalize_path(m).to_string_lossy().to_lowercase() + "@" + &rev
+                    })
+                    .unwrap_or_else(|| "disabled".to_string());
+                if p.agent == AgentKind::ClaudeCode {
+                    mapping_revs.push(mapping.clone());
+                }
+                plan_parts.push(format!("{}|{}|{}", p.agent.as_str(), root, mapping));
+            }
+            if mapping_revs.is_empty() {
+                mapping_revs.push("none".to_string());
+            }
+            (
+                format!("plans={}", plan_parts.join(";")),
+                mapping_revs.join(","),
+            )
+        }
+        None => (
+            format!(
+                "cd={:?}|xd={:?}|ce={:?}|xe={:?}|cpm={:?}",
+                opts.claude_dir,
+                opts.codex_dir,
+                opts.claude_enabled,
+                opts.codex_enabled,
+                opts.claude_projects_path
+            ),
+            // Claude 停用时映射不参与采集，键里固定为 disabled（不读账户配置）。
+            if opts.enabled(true) {
+                claude_project_mapping(opts).revision().to_string()
+            } else {
+                "disabled".to_string()
+            },
+        ),
     };
     format!(
-        "agent={:?}|cd={:?}|xd={:?}|ce={:?}|xe={:?}|refresh={}|cache={:?}|pp={:?}|or={:?}|md={:?}|idx={:?}|cpm={:?}|map={}",
+        "agent={:?}|{}|refresh={}|cache={:?}|pp={:?}|or={:?}|md={:?}|idx={:?}|map={}",
         opts.agent,
-        opts.claude_dir,
-        opts.codex_dir,
-        opts.claude_enabled,
-        opts.codex_enabled,
+        plans_key,
         opts.refresh,
         opts.cache_dir,
         opts.pricing_path,
         opts.openrouter_path,
         opts.modelsdev_path,
         opts.pricing_index,
-        opts.claude_projects_path,
         mapping_rev
     )
 }
@@ -768,6 +853,8 @@ struct DedupSource {
     inner: Box<dyn Source>,
     keep: Vec<PathBuf>,
     errors: Vec<String>,
+    /// 本轮发现全集（含被隔离/被更大根认领的文件），诊断取证用。
+    _discovered: Vec<PathBuf>,
 }
 
 impl Source for DedupSource {
@@ -991,13 +1078,12 @@ fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSna
         Some(k) => vec![k],
         None => vec![AgentKind::ClaudeCode, AgentKind::Codex],
     };
-    let mut sources: Vec<Box<dyn Source>> = Vec::new();
-    for kind in kinds {
-        if !opts.enabled(kind == AgentKind::ClaudeCode) {
-            continue; // C1：停用的来源零采集、零告警，状态由 source_status 呈现
-        }
-        sources.push(make_source(opts, kind)?);
-    }
+    // C1：停用的来源零采集、零告警，状态由 source_status 呈现。
+    let active: Vec<AgentKind> = kinds
+        .into_iter()
+        .filter(|k| opts.enabled(*k == AgentKind::ClaudeCode))
+        .collect();
+    let sources = make_sources(opts, &active)?;
     let collected = collect_all_with_sources(sources, opts, generation)?;
     Ok(CollectionSnapshot {
         generation: collected.generation,
@@ -1013,44 +1099,96 @@ fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSna
 #[cfg(test)]
 static TEST_COLLECT_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 
-/// SF09：来源包装器——同一规范化文件被不同 adapter 认领 → 明确归属
-/// 冲突错误（移除「先发现者得」默认）；同 adapter 内重复路径仍按单份
-/// 保留（防同一 agent 的发现重复）。原始路径保留用于文件 IO。
+/// PR3 §8.2：整轮来源发现——排序后的来源共享目录台账遍历，文件按规范化
+/// 身份认领（最小规范化根优先，结果不随输入顺序改变）；跨应用同一文件被
+/// 两个 adapter 认领 → **隔离**该文件并在两侧诊断（不再整体报错，其余来源
+/// 继续）；同应用重复（别名/嵌套根）只认领一次。返回包装后的来源
+/// （discover 固定为认领清单）与全局诊断。
 type DedupedSources = (Vec<Box<dyn Source>>, Vec<String>);
 
-fn dedup_source_overlap(sources: Vec<Box<dyn Source>>) -> Result<DedupedSources> {
-    let mut seen: std::collections::HashMap<String, AgentKind> = std::collections::HashMap::new();
-    let warnings: Vec<String> = Vec::new();
-    let mut wrapped: Vec<Box<dyn Source>> = Vec::new();
-    for src in sources {
-        let (files, errors) = src.discover_with_errors();
-        let mut keep = Vec::new();
+fn discover_round(sources: Vec<Box<dyn Source>>) -> Result<DedupedSources> {
+    // 1) 排序：(agent, 最小规范化根键, 原顺序) —— 稳定认领者（§9.4 第 3 条）
+    let root_keys: Vec<String> = sources
+        .iter()
+        .map(|s| {
+            s.roots()
+                .iter()
+                .map(|r| normalize_path(r).to_string_lossy().to_lowercase())
+                .min()
+                .unwrap_or_default()
+        })
+        .collect();
+    let mut order: Vec<usize> = (0..sources.len()).collect();
+    order.sort_by(|&a, &b| {
+        sources[a]
+            .agent()
+            .as_str()
+            .cmp(sources[b].agent().as_str())
+            .then_with(|| root_keys[a].cmp(&root_keys[b]))
+            .then_with(|| a.cmp(&b))
+    });
+    // 2) 共享台账遍历：目录整轮只进一次；链接显式解析；子项错误保留
+    let mut ledger = crate::source::DirVisitLedger::default();
+    let mut discovered: Vec<(Vec<PathBuf>, Vec<String>)> =
+        vec![(Vec::new(), Vec::new()); sources.len()];
+    for &i in &order {
+        let (mut files, errors) = sources[i].discover_with_ledger(&mut ledger);
+        files.sort();
+        discovered[i] = (files, errors);
+    }
+    // 3) 文件身份认领：同 agent 首个（根键最小）认领；跨应用冲突整组隔离
+    struct Claim {
+        src: usize,
+        agent: AgentKind,
+        file: PathBuf,
+    }
+    let mut claims: std::collections::HashMap<String, Vec<Claim>> =
+        std::collections::HashMap::new();
+    for (idx, (files, _)) in discovered.iter().enumerate() {
+        let agent = sources[idx].agent();
         for f in files {
-            let norm = normalize_path(&f);
-            let key = norm.to_string_lossy().to_lowercase();
-            match seen.get(&key) {
-                Some(prev) if *prev != src.agent() => {
-                    anyhow::bail!(
-                        "文件归属冲突：{} 同时被 {} 与 {} 认领；来源目录不得重叠（相同或嵌套），请调整目录配置或停用其一来源",
-                        norm.display(),
-                        prev.as_str(),
-                        src.agent().as_str()
-                    );
-                }
-                Some(_) => {
-                    // 同 agent 的发现重复：保留一份（不重复计数）。
-                    keep.push(f);
-                }
-                None => {
-                    seen.insert(key, src.agent());
-                    keep.push(f);
-                }
-            }
+            let key = normalize_path(f).to_string_lossy().to_lowercase();
+            claims.entry(key).or_default().push(Claim {
+                src: idx,
+                agent,
+                file: f.clone(),
+            });
         }
+    }
+    let mut keep: Vec<Vec<PathBuf>> = vec![Vec::new(); sources.len()];
+    let mut warnings: Vec<String> = Vec::new();
+    for (_identity, group) in claims {
+        let agents: std::collections::HashSet<AgentKind> = group.iter().map(|c| c.agent).collect();
+        if agents.len() > 1 {
+            // 跨应用同文件：整组隔离 + 双侧诊断（不按扫描顺序选择）
+            let mut names: Vec<&str> = agents.iter().map(|a| a.as_str()).collect();
+            names.sort_unstable();
+            let msg = format!(
+                "文件归属冲突：{} 同时被 {} 认领；本轮隔离该文件（其余来源照常读取）",
+                group[0].file.display(),
+                names.join(" 与 ")
+            );
+            warnings.push(msg);
+            continue;
+        }
+        // 同 agent：发现顺序已按根键排序 → 首个认领者即最小规范化根
+        let winner = group
+            .iter()
+            .min_by_key(|c| (root_keys[c.src].clone(), c.src))
+            .expect("分组非空");
+        keep[winner.src].push(winner.file.clone());
+    }
+    for k in &mut keep {
+        k.sort();
+    }
+    let mut wrapped: Vec<Box<dyn Source>> = Vec::new();
+    for (idx, src) in sources.into_iter().enumerate() {
+        let (files, errors) = std::mem::take(&mut discovered[idx]);
         wrapped.push(Box::new(DedupSource {
             inner: src,
-            keep,
+            keep: std::mem::take(&mut keep[idx]),
             errors,
+            _discovered: files,
         }));
     }
     Ok((wrapped, warnings))
@@ -1135,39 +1273,6 @@ pub fn effective_source_dirs_from_settings(
     Ok(out)
 }
 
-/// SF09：解析启用来源的有效目录（显式配置或工具默认根）。
-/// 未启用的来源不参与冲突检查（用户可借停用恢复）；多根来源逐根展开。
-fn effective_source_dirs(opts: &SummaryOptions) -> Result<Vec<(AgentKind, std::path::PathBuf)>> {
-    let mut out = Vec::new();
-    for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
-        let claude = kind == AgentKind::ClaudeCode;
-        let dir = if claude {
-            opts.claude_dir.as_deref()
-        } else {
-            opts.codex_dir.as_deref()
-        };
-        for root in effective_source_roots(kind, opts.enabled(claude), dir)? {
-            out.push((kind, root));
-        }
-    }
-    Ok(out)
-}
-
-/// SF09：采集前校验启用来源的有效目录冲突（相同/嵌套）——覆盖手改/
-/// 旧配置；与 agent 筛选无关，「全部/仅某来源」一致报错。
-fn validate_opts_sources_overlap(opts: &SummaryOptions) -> Result<()> {
-    let dirs = effective_source_dirs(opts)?;
-    for i in 0..dirs.len() {
-        for j in i + 1..dirs.len() {
-            let (ka, da) = &dirs[i];
-            let (kb, db) = &dirs[j];
-            crate::settings::validate_dir_conflict(da, db)
-                .map_err(|e| anyhow::anyhow!("{e}（来源: {} / {}）", ka.as_str(), kb.as_str()))?;
-        }
-    }
-    Ok(())
-}
-
 fn collect_all_with_sources(
     sources: Vec<Box<dyn Source>>,
     opts: &SummaryOptions,
@@ -1176,11 +1281,8 @@ fn collect_all_with_sources(
     // U06：自动读取的进度日志降级（见 `path_info!`）；唯一例外是"本轮确有
     // 历史库写入"的那条摘要。
     let auto = opts.trigger.is_auto();
-    // SF09：采集前拒绝启用来源的有效目录冲突（相同/嵌套）。
-    validate_opts_sources_overlap(opts)?;
-    // SF09：跨 adapter 认领同一规范化文件 → 明确归属冲突（移除
-    // 「先发现者得」默认）；无冲突时保留发现错误透传。
-    let (sources, overlap_warnings) = dedup_source_overlap(sources)?;
+    // PR3 §8.2：整轮发现与文件认领（跨应用冲突隔离、同应用重复认领一次）。
+    let (sources, overlap_warnings) = discover_round(sources)?;
     let t_total = std::time::Instant::now();
     let pricing_path = pricing_file_path(opts.pricing_path.as_ref());
     let openrouter_path = openrouter_file_path(opts.openrouter_path.as_ref());
@@ -1243,6 +1345,8 @@ fn collect_all_with_sources(
         }
     }
 
+    // PR3：来源按根实例采集；报告按 agent 聚合（GUI 契约：每应用一行）。
+    let mut reports_by_agent: Vec<(AgentKind, CollectStats)> = Vec::new();
     let mut reports: Vec<SourceReport> = Vec::new();
     let mut all_events: Vec<UsageEvent> = Vec::new();
     let mut registrations: Vec<crate::history::SourceFileRecord> = Vec::new();
@@ -1412,6 +1516,12 @@ fn collect_all_with_sources(
                 );
             }
         }
+        match reports_by_agent.iter_mut().find(|(k, _)| *k == kind) {
+            Some((_, existing)) => existing.merge_from(&stats),
+            None => reports_by_agent.push((kind, stats)),
+        }
+    }
+    for (kind, stats) in reports_by_agent {
         reports.push(SourceReport { agent: kind, stats });
     }
 
