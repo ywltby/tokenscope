@@ -11,7 +11,7 @@
 //   - 不安装、不写注册表、不改系统显示缩放。
 // UP09（升级测试补测计划 §4.8）：实例生命周期改为“端口不复用 + 归属核实 + 退出确认”，
 // 纯逻辑在 `lib/native-instance.mjs`（可单测），证据在 `evidence.json` 的 `launches[]`。
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import net from "node:net";
 import zlib from "node:zlib";
@@ -53,6 +53,18 @@ import {
   remainingBudgetMs,
   stopDecision,
 } from "./lib/native-instance.mjs";
+// S00（PR3 计划 §9.1）：场景看门狗、有界命令与阶段记录——纯逻辑在 lib，可单测。
+import {
+  FAILURE_CAPTURE_TIMEOUT_MS,
+  closeBrowserBounded,
+  createStageTracker,
+  ensureNotCanceled,
+  finalizeScenarioTimeout,
+  runScenarioBounded,
+  scenarioBudgetMs,
+  spawnSyncBounded,
+  withTimeout,
+} from "./lib/native-scenario.mjs";
 
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
 // 统一 workspace 后，不带 --target 的 release 构建产物落在根 target/。
@@ -145,16 +157,21 @@ function copyDirSync(src, dst) {
   }
 }
 function ps(scriptPath, argsArray) {
-  return spawnSync("pwsh", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...argsArray], {
-    encoding: "utf8",
-  });
+  // S00（计划 §9.1 第 2 条）：同步命令统一 30 秒上限；动作名取 -Action 参数便于定位。
+  const action = argsArray.includes("-Action")
+    ? `window-${argsArray[argsArray.indexOf("-Action") + 1]}`
+    : path.basename(scriptPath);
+  return spawnSyncBounded(
+    "pwsh",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...argsArray],
+    { action },
+  );
 }
 
 /** 一次 PowerShell 内联调用（只用于结束已记录 PID；其余查询走 probeProcessAndListeners）。 */
 function psCommand(script) {
-  return spawnSync(PROBE_SHELL, ["-NoProfile", "-NonInteractive", "-Command", script], {
-    encoding: "utf8",
-    windowsHide: true,
+  return spawnSyncBounded(PROBE_SHELL, ["-NoProfile", "-NonInteractive", "-Command", script], {
+    action: "powershell-command",
   });
 }
 
@@ -680,9 +697,8 @@ class Instance {
       await this.refreshDescendants(record);
     } catch {}
     await this.terminateRecordedPids(record, "launch-failure-cleanup");
-    try {
-      await this.browser?.close();
-    } catch {}
+    // S00：CDP 关闭 10 秒上限，超时继续进程终止流程，不在清理里挂死
+    await closeBrowserBounded(this.browser);
     this.browser = null;
     this.ctx = null;
   }
@@ -693,9 +709,15 @@ class Instance {
     );
     record.terminated = record.terminated ?? [];
     if (!pids.length) return { reason, pids: [] };
-    psCommand(
-      `@(${pids.join(",")}) | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }`,
-    );
+    try {
+      psCommand(
+        `@(${pids.join(",")}) | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }`,
+      );
+    } catch (e) {
+      // S00：终止命令本身超时也不能阻断收尾——记录后继续退出确认（有界）
+      record.terminate_error = String(e?.message ?? e);
+      hb(`终止已记录 PID 失败：${record.terminate_error}`);
+    }
     record.terminated.push({ at: nowIso(), reason, pids });
     return { reason, pids };
   }
@@ -709,6 +731,10 @@ class Instance {
         "launch() 不接受端口参数：端口由 --port + 启动序号 计算（升级矩阵 §4.8 第 1 条）",
       );
     }
+    // S00（计划 §9.1 第 6 条）：场景超时后迟到的分支不得再次 launch。
+    ensureNotCanceled(this.opts.isCanceled, "launch");
+    const launchStage = this.launchCount >= 1 ? "relaunch" : "launch";
+    this.opts.markStage?.(launchStage);
     if (this.current && !this.current.stop) {
       // 上一个实例尚未确认退出：先按同一套关闭流程确认（同一隔离根不能有两份实例）
       await this.stop({ terminate: false, reason: "launch-requires-previous-exit" });
@@ -874,6 +900,7 @@ class Instance {
       if (/Content Security Policy|Refused to/i.test(e.entry.text)) this.violations.push(t);
     });
     await this.cdp.send("Log.enable").catch(() => {});
+    this.opts.markStageDone?.(launchStage);
     return {
       pid: this.proc.pid,
       port,
@@ -905,7 +932,7 @@ class Instance {
     }
   }
   nativeGeometry(action = "geometry", extra = []) {
-    const result = spawnSync(
+    const result = spawnSyncBounded(
       "pwsh",
       [
         "-NoProfile",
@@ -917,7 +944,7 @@ class Instance {
         action,
         ...extra,
       ],
-      { encoding: "utf8", windowsHide: true },
+      { action: `window-action:${action}` },
     );
     if (result.status !== 0) throw new Error(`Native geometry: ${result.stderr}`);
     return JSON.parse(result.stdout);
@@ -994,14 +1021,21 @@ class Instance {
    * 运行即视为失败（不替它做优雅退出）。
    */
   async stop({ terminate = true, reason = "scenario-end" } = {}) {
+    // S00（计划 §9.1 第 3、6 条）：进入停止阶段即记录；场景超时后迟到的分支不得继续关闭
+    ensureNotCanceled(this.opts.isCanceled, "stop");
+    this.opts.markStage?.("stop");
     const record = this.current;
     if (!record) return { action: "skipped", detail: "本次没有启动实例" };
     if (record.stop) return record.stop;
     // 收尾阶段解除启动预算与宿主退出监听：正常关闭（宿主已退出）不能被当成启动失败
     this.disarmHostWatch();
-    try {
-      await this.browser?.close();
-    } catch {}
+    // S00（计划 §6 S00 第 2 条）：CDP 关闭 10 秒上限，超时记入停止证据后继续既有流程
+    const browserClose = await closeBrowserBounded(this.browser);
+    if (browserClose.reason !== null && browserClose.reason !== "no-browser") {
+      hb(`停止阶段 CDP 关闭未完成（${browserClose.reason}），继续退出确认与终止流程`);
+    }
+    this.browser = null;
+    this.ctx = null;
     if (this.attached) {
       // attach 模式（expire-finish）：不认领、不结束外部实例，只断开 CDP
       record.stop = {
@@ -1015,6 +1049,7 @@ class Instance {
         host_exit_code: record.hostExitCode,
         detail: "attach 模式：不认领、不结束外部实例",
       };
+      this.opts.markStageDone?.("stop");
       return record.stop;
     }
     const startedAt = Date.now();
@@ -1031,6 +1066,7 @@ class Instance {
         host_exit_code: record.hostExitCode,
         detail: "本次启动没有宿主进程（端口预占或进程未创建），不做退出等待、不动他人进程",
       };
+      this.opts.markStageDone?.("stop");
       return record.stop;
     }
     await this.refreshDescendants(record);
@@ -1081,6 +1117,7 @@ class Instance {
       residual_pids: decision.residualPids,
       port_owner_pids: ownerPids,
       host_exit_code: record.hostExitCode,
+      browser_close: browserClose,
       detail: decision.detail,
     };
     if (decision.action === "timeout") {
@@ -1089,6 +1126,7 @@ class Instance {
       throw new Error(`${decision.detail}（reason=${reason}）`);
     }
     hb(`退出确认通过：${decision.detail}`);
+    this.opts.markStageDone?.("stop");
     return record.stop;
   }
   /** 证据用：宿主日志尾部（进程日志由本脚本按次追加）。 */
@@ -2221,10 +2259,26 @@ async function main() {
 
   const realBefore = fingerprint(REAL_DATA);
   const ck = new Checks();
+  // S00（计划 §9.1 第 2 条）：证据收集里的同步命令也有界
+  let commit = "unknown";
+  try {
+    commit = spawnSyncBounded("git", ["rev-parse", "--short", "HEAD"], {
+      action: "evidence-commit",
+      options: { cwd: REPO },
+    }).stdout.trim();
+  } catch (e) {
+    hb(`读取 commit 失败：${String(e?.message ?? e)}`);
+  }
+  let windowsVersion = "";
+  try {
+    windowsVersion = (spawnSyncBounded("cmd", ["/c", "ver"], { action: "evidence-windows-version" }).stdout || "").trim();
+  } catch (e) {
+    hb(`读取 Windows 版本失败：${String(e?.message ?? e)}`);
+  }
   const ev = {
     scenario: SCENARIO,
     at: nowIso(),
-    commit: spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: REPO, encoding: "utf8" }).stdout.trim(),
+    commit,
     feature: "acceptance",
     exe: EXE,
     exe_sha256: fs.existsSync(EXE) ? sha256File(EXE) : "missing",
@@ -2232,7 +2286,7 @@ async function main() {
     theme_channel: THEME,
     forced_device_scale: SCALE,
     port: PORT,
-    windows_version: (spawnSync("cmd", ["/c", "ver"], { encoding: "utf8" }).stdout || "").trim(),
+    windows_version: windowsVersion,
     userprofile: process.env.USERPROFILE,
   };
 
@@ -2267,6 +2321,40 @@ async function main() {
       fs.writeFileSync(p, stripped, "utf8");
     } : undefined,
   });
+
+  // S00（计划 §9.1）：场景取消标志 + 阶段记录 + 最小证据写盘点。
+  // 场景与 Instance 在每次关闭/重启前自查取消标志（Promise.race 不会取消另一分支）。
+  const cancelFlag = { requested: false };
+  inst.opts.isCanceled = () => cancelFlag.requested;
+  const stage = createStageTracker({ log: hb, launchIndexOf: () => inst.current?.index ?? null });
+  inst.opts.markStage = stage.mark;
+  inst.opts.markStageDone = stage.markDone;
+  const evidencePath = path.join(stampDir, "evidence.json");
+  /** 最小证据（计划 §9.1 第 4 条）：同步写、不依赖 CDP；后续增强失败不能阻止它落盘。 */
+  const writeEvidenceSnapshot = () => {
+    fs.writeFileSync(
+      evidencePath,
+      JSON.stringify(
+        {
+          ...ev,
+          last_stage: stage.last(),
+          stages: stage.list(),
+          host_pid: inst.current?.hostPid ?? null,
+          exit_code: inst.proc?.exitCode ?? null,
+          recorded_pids: mergePids([inst.current?.hostPid], inst.current?.descendantPids ?? []),
+          attached: inst.attached === true,
+          launches: buildLaunchesEvidence(inst.launches),
+          checks: ck.rows,
+          failed: ck.failures.map((f) => f.name),
+          minimal_evidence: true,
+          minimal_evidence_at: nowIso(),
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+  };
 
   // 启动与场景执行整段可失败：失败也要写出 evidence.json（§4.8 第 5 条），
   // 因此这里不用 try/finally 包住中间步骤，而是把收尾与证据放在一个无条件执行的阶段。
@@ -2367,46 +2455,98 @@ async function main() {
   }
 
   if (!setupError) {
-    ev.dpr = await inst.page.evaluate(() => devicePixelRatio).catch(() => null);
-    const scenarioTimeoutMs =
-      SCENARIO === "expire-cycle"
-        ? 750000
-        : SCENARIO === "ui-relaunch"
-          ? 1800000
-          : SCENARIO === "ui-collection-status"
-            ? 480000
-            : 240000;
-    let scenarioTimer;
+    // S00：进入场景前的 DOM 取证也受短上限约束，不在看门狗之外挂死
     try {
-      hb(`场景 ${SCENARIO} 开始`);
-      await Promise.race([
-        scenarios[SCENARIO]({ inst, ck, ev }),
-        new Promise((_, reject) => {
-          scenarioTimer = setTimeout(() => reject(new Error(`场景超过 ${scenarioTimeoutMs / 1000} s 未完成`)), scenarioTimeoutMs);
-        }),
-      ]);
-      hb(`场景 ${SCENARIO} 结束，检查 ${ck.rows.length - ck.failures.length}/${ck.rows.length}`);
+      ev.dpr = await withTimeout(
+        () => inst.page.evaluate(() => devicePixelRatio),
+        FAILURE_CAPTURE_TIMEOUT_MS,
+        "场景前 dpr 读取",
+      );
+    } catch (e) {
+      ev.dpr = null;
+      ev.failure_capture_error = String(e?.message ?? e);
+    }
+    // S00（计划 §6 S00 第 3 条 / §9.1 第 4 条）：场景级看门狗——普通场景 5 分钟，
+    // expire-cycle/ui-relaunch/ui-collection-status 保留显式独立预算；到点置取消标志、
+    // 同步写最小证据、有界收尾（复制应用日志、终止已记录 PID）后非零退出。
+    const scenarioTimeoutMs = scenarioBudgetMs(SCENARIO);
+    ev.scenario_timeout_budget_ms = scenarioTimeoutMs;
+    hb(`场景 ${SCENARIO} 开始（看门狗预算 ${scenarioTimeoutMs / 1000} s）`);
+    let outcome = null;
+    try {
+      outcome = await runScenarioBounded({
+        scenarioFn: (ctx) =>
+          scenarios[SCENARIO]({
+            inst,
+            ck,
+            ev,
+            isCanceled: ctx.isCanceled,
+            markStage: stage.mark,
+            markStageDone: stage.markDone,
+          }),
+        timeoutMs: scenarioTimeoutMs,
+        cancelFlag,
+        onTimeout: () => {
+          ck.add(
+            "scenario_timeout",
+            false,
+            `场景超过 ${scenarioTimeoutMs / 1000} s 未完成（最后阶段=${stage.last()?.stage ?? "无"}）`,
+          );
+          ev.scenario_timeout = true;
+          ev.failure_stage = "scenario";
+          writeEvidenceSnapshot();
+        },
+        hb,
+      });
     } catch (e) {
       scenarioError = e;
       ck.add("scenario_executed", false, String(e.message ?? e));
       ev.error = String(e.stack ?? e).slice(0, 800);
       if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-relaunch") {
+        // S00：失败截图/DOM 取证有短上限，无法完成就跳过并记原因（计划 §9.1 第 5 条）
         try {
-          ev.failureViewport = await inst.page.evaluate(() => ({
-            width: innerWidth,
-            height: innerHeight,
-            dpr: devicePixelRatio,
-            navigation: [...document.querySelectorAll('[aria-label="设置分区"] button')].map(
-              (el) => ({ text: el.textContent, role: el.getAttribute("role") }),
-            ),
-          }));
-          await inst.page.screenshot({ path: path.join(shots, "failure.png") });
-        } catch {
-          /* 已退出的进程仍保留原失败原因。 */
+          await withTimeout(
+            async () => {
+              ev.failureViewport = await inst.page.evaluate(() => ({
+                width: innerWidth,
+                height: innerHeight,
+                dpr: devicePixelRatio,
+                navigation: [...document.querySelectorAll('[aria-label="设置分区"] button')].map(
+                  (el) => ({ text: el.textContent, role: el.getAttribute("role") }),
+                ),
+              }));
+              await inst.page.screenshot({ path: path.join(shots, "failure.png") });
+            },
+            FAILURE_CAPTURE_TIMEOUT_MS,
+            "失败取证（viewport/截图）",
+          );
+        } catch (captureError) {
+          /* 已退出的进程仍保留原失败原因；取证未完成的原因单独留痕。 */
+          ev.failure_capture_error = String(captureError?.message ?? captureError);
         }
       }
-    } finally {
-      clearTimeout(scenarioTimer);
+    }
+    if (outcome?.kind === "timeout") {
+      const finalize = await finalizeScenarioTimeout({
+        attached: inst.attached,
+        record: inst.current,
+        terminateRecordedPids: (record, reason) => inst.terminateRecordedPids(record, reason),
+        closeBrowser: () => closeBrowserBounded(inst.browser),
+        copyAppLogs: () => {
+          // UI 刷新验收保留合成来源的应用日志（与正常收尾同一份复制逻辑）
+          if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system") {
+            const logs = path.join(root, "tokenscope", "logs");
+            if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
+          }
+        },
+        hb,
+      });
+      ev.finalize_after_timeout = finalize;
+      writeEvidenceSnapshot();
+      process.exit(1);
+    }
+    if (!scenarioError) {
+      hb(`场景 ${SCENARIO} 结束，检查 ${ck.rows.length - ck.failures.length}/${ck.rows.length}`);
     }
   }
 
@@ -2428,9 +2568,8 @@ async function main() {
       ),
     );
     ev.instance_left_alive = true;
-    try {
-      await inst.browser?.close();
-    } catch {}
+    // S00：断开 CDP 复用 10 秒有界关闭
+    await closeBrowserBounded(inst.browser);
   } else {
     try {
       const stop = await inst.stop();
@@ -2468,6 +2607,9 @@ async function main() {
 
   // §4.8 第 5 条：launches[] 无论成败都写出；失败时附宿主日志尾部。
   ev.failure_stage = setupError ? "setup" : scenarioError ? "scenario" : null;
+  // S00（计划 §9.1 第 3 条）：最后阶段与完整阶段序列进证据，定位卡点所在段
+  ev.last_stage = stage.last();
+  ev.stages = stage.list();
   ev.launch_count = inst.launches.length;
   ev.launches = buildLaunchesEvidence(inst.launches);
   ev.checks = ck.rows;

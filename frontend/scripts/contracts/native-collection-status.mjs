@@ -5,15 +5,16 @@
 // 驱动（TOKENSCOPE_ACCEPTANCE_COLLECT_DELAY_MS / _COLLECT_FAIL_ON_ROUND，
 // 生产构建没有这条通道）。1000ms 精确阈值由可控时钟单测证明；这里按
 // 低频轮询取证并记录观察误差，不把截图间隔当毫秒证据。
+// S00（PR3 计划 §9.1 第 3、4 条）：重启段阶段标记、有界同步命令与有界 CDP 关闭。
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { closeBrowserBounded, ensureNotCanceled, spawnSyncBounded } from "../lib/native-scenario.mjs";
 
 const POLL_MS = 100;
 const POLL_FAST_MS = 40;
 
-export async function nativeCollectionStatus({ inst, ck, ev }) {
+export async function nativeCollectionStatus({ inst, ck, ev, markStage, markStageDone, isCanceled }) {
   // 场景级统一纪元：所有时间线的 at_ms 可跨启动比较（轮询窗口不重置）。
   const EPOCH = Date.now();
   const atNow = () => Date.now() - EPOCH;
@@ -138,24 +139,31 @@ export async function nativeCollectionStatus({ inst, ck, ev }) {
     const action = fileURLToPath(
       new URL("../../../scripts/native-window-action.ps1", import.meta.url),
     );
-    const result = spawnSync(
+    ensureNotCanceled(isCanceled, "close-command");
+    markStage("close-command");
+    const result = spawnSyncBounded(
       "pwsh",
       ["-NoProfile", "-File", action, "-ProcessId", String(inst.proc.pid), "-Action", "close"],
-      { encoding: "utf8", windowsHide: true },
+      { action: "window-close", stage: "close-command" },
     );
+    markStageDone("close-command");
     if (result.status !== 0 || !/CLOSED true/i.test(result.stdout))
       throw new Error(`WM_CLOSE failed: ${result.stderr} ${result.stdout}`);
+    ensureNotCanceled(isCanceled, "click-quit");
+    markStage("click-quit");
     await click(
       page().locator(".close-dialog").getByRole("button", { name: "直接退出", exact: true }),
     );
+    markStageDone("click-quit");
+    markStage("wait-host-exit");
     const deadline = Date.now() + 15000;
     while (inst.proc.exitCode === null && Date.now() < deadline)
       await new Promise((resolve) => setTimeout(resolve, 100));
+    markStageDone("wait-host-exit");
     if (inst.proc.exitCode !== 0)
       throw new Error(`restart requires clean exit, got ${inst.proc.exitCode}`);
-    try {
-      await inst.browser.close();
-    } catch {}
+    // S00：CDP 关闭 10 秒上限，超时记为 close timeout 后继续（不悬挂）
+    await closeBrowserBounded(inst.browser);
   };
 
   ev.collection_status = { launches: [], appended_events: [] };
