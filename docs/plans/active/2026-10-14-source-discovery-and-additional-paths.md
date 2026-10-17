@@ -198,6 +198,7 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 - [x] S01：配置集合与迁移（设置格式 v2）。（2026-10-18 实施完毕，记录见下）
 - [x] S02：固定候选与环境发现、映射核实与隔离解析。（2026-10-18 实施完毕，记录见下）
 - [x] S03：防环、多根与去重。（2026-10-18 实施完毕，记录见下）
+- [x] S04：壳事务与调度。（2026-10-18 实施完毕，记录见下）
 - [ ] 固定候选、两种环境变量、映射核实和隔离全部验证。
 - [ ] 手动嵌套拒绝；迁移/环境重叠不阻断且只解析一次。
 - [ ] 联接环闭合；两层去重不丢独立事件。
@@ -238,6 +239,14 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 - **关键测试**：`source_paths_collection` 14 例对应 §8.3——`ancestor_junction_loops_terminate_with_complete_single_parse`（真实 junction 经 mklink /J，环终止文件只解析一次）、`deep_tree_broken_junction_and_stray_files_terminate_with_diagnostics`（120 层深目录 + 断链诊断）、`same_agent_nested_and_duplicate_roots_parse_once`（父/子/大小写/尾分隔符，且交换输入顺序结果相同）、`copied_files_parse_but_native_identity_dedupes_without_loss`、`hard_link_paths_each_parse_once_and_union_in_history`（按 §0 第 1 条不做物理身份去重）、`mapping_context_change_reparses_file`、`same_slug_across_roots_do_not_cross_mappings`、`cross_app_same_root_isolated_and_other_roots_continue`、`upgrade_old_dir_plus_default_root_union`（**关闭 S01 遗留**：A∪B、副本不增量、热轮 generation 不推进、停用不读取且历史保留、恢复后纳入）、`codex_home_upgrade_reads_default_and_env_roots`、`truncated_file_reparses_with_fresh_fingerprint`、`root_set_change_between_rounds_changes_reading_scope`、`empty_plan_set_collects_nothing_and_keeps_history`、`plan_mapping_binding_loads_and_resolves`；`source_overlap` 10 例按隔离语义重写（同根/别名/嵌套/大小写隔离 + 诊断、跨文件隔离在解析前、无冲突照常采集、保存校验函数级核对）；`rebuild_source_contract` 重叠隔离语义。
 - **执行结果**：`cargo test --locked --workspace` 51 个测试目标全绿；`cargo clippy --locked --workspace --all-targets -- -D warnings` 干净；`cargo fmt --all -- --check` 干净；acceptance 特性 clippy/test 48 个全绿。
 - **边界如实记录**：junction 用 `cmd /c mklink /J` 创建（临时根内，清理先解除链接再删树，本机与 runner 均支持，未以 skip 换通过）；权限拒绝路径未在采集层 fixture 注入（Windows ACL 注入易残留，`NoPermission` 分类由发现层与探测注入测试覆盖），如实记待验项并入 S06 原生验收观察；热轮"零重解析"断言受全局采集复用槽位影响不确定，改以 generation 不推进 + 统计不增量断言；性能取证（§4.4 改前/改后热轮中位数）在 S06 执行。未完成项：性能取证待 S06、权限拒绝采集 fixture 待验（如实披露，不关闭）。
+
+### S04 执行记录（2026-10-18）
+
+- **提交**：S04 代码与测试为 commit `3c7ae1d`（pre-commit 完整模式全绿）；本记录为紧随其后的文档提交。
+- **落点**：`commands.rs`——`resolve_source_set(_in)` 返回 `ResolvedSourceSet`（整轮 `SourcePlan` + 应用总开关），`query_opts`/`list_events`/`collection_opts_from`/`rebuild_opts` 逐处替换；启动环境快照（`capture_startup_environment`，lib setup 最早阶段一次）；`source_config_set` 收窄为总开关（旧 dir 参数忽略并告警、新列表逐字段保留）；新增 `source_paths_list`/`source_path_add`/`source_path_remove`/`source_path_set_enabled`（隐私闸门 + 串行采集唤醒 + impl 密闭读取传入路径）。`lib.rs`：setup 最早阶段捕获环境；`RuntimeStep::SourcePathMigration` 一次性 v1 dir 迁移（成功写"总量可能增加"说明与重叠提示进启动诊断；失败保留旧文件按 v1 语义读取并降级诊断）。`discovery.rs`：行操作改用显式 `RowConfigPaths`（消除 canonical/逻辑键两种字符串形态的匹配错位），`canonical_identity` 公共助手。
+- **关键测试**：shell——`test_source_config_set_sets_only_app_switch`（旧 dir 忽略 + 追加项/排除项/自动开关逐字段保留）、`source_path_add_rejects_cross_app_and_nested_conflicts`（撞缺省 Codex 默认根、嵌套、同应用已存在、相对路径、整个主目录、合法追加）、`source_path_remove_and_set_enabled_follow_row_semantics`（禁用默认行写排除项不动手动项、禁用手动行、移除只删手动、纯自动行不可移除、开启清空、未知 id 拒绝）、`collection_opts_follow_current_settings_per_round`（每轮计划跟随设置：新目录下一轮出现、停用后计划消失、损坏设置拒绝不扩范围）、`missing_settings_keeps_documented_defaults`（注入主目录展开默认三根）、损坏/不可读设置拒绝；core——行循环测试改 RowConfigPaths。privacy 白名单新增四命令由 `privacy_all_business_commands_reject_before_ready` 自动覆盖 Ready 前拒绝。
+- **执行结果**：`cargo test --locked -p tokenscope-app` 57 用例全绿；`cargo test --locked --workspace` 51 个测试目标全绿；`cargo clippy --locked --workspace --all-targets -- -D warnings` 与 fmt 干净。
+- **边界如实记录**：`source_status` 保持应用级兼容面未改（设置页根行走新 IPC，S05 接前端）；设置迁移结果的一次性提示经启动诊断返回（S05 不重复展示）；`_in` 注入变体仅测试使用。未完成项：无（本项范围内）。
 
 ## 8. 执行细则、算法边界与验收门槛
 
