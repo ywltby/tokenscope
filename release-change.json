@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "发布流程只做身份校验，完整测试由 PR 门禁保证"
+  "summary": "CI 拆成并行作业，精简原生 E2E 等待"
 }
