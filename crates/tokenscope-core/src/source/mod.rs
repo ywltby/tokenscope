@@ -6,6 +6,7 @@
 pub mod claude;
 pub mod claude_projects;
 pub mod codex;
+pub mod discovery;
 pub mod project_path;
 
 use std::path::{Path, PathBuf};

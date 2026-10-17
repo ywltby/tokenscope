@@ -41,10 +41,12 @@
 | 默认 Claude | `~/.claude/projects` | `~/.claude.json` |
 | 默认 Codex | `~/.codex/sessions`、`~/.codex/archived_sessions` | 无 |
 | CODEX_HOME | `<CODEX_HOME>/sessions`、`<CODEX_HOME>/archived_sessions` | 无 |
-| CLAUDE_CONFIG_DIR | `<CLAUDE_CONFIG_DIR>/projects` | 实施前核实 |
+| CLAUDE_CONFIG_DIR | `<CLAUDE_CONFIG_DIR>/projects` | 禁用映射（未核实，见下） |
 | 手动追加 | 用户明确指定的绝对日志根 | 禁用映射，沿用 A03 |
 
 CLAUDE_CONFIG_DIR 映射文件位置必须在 S02 实施前通过官方文档或隔离合成实测核实，将证据回填本节；目前不假定为 `<CLAUDE_CONFIG_DIR>/.claude.json`。无法核实则禁用该根映射，不借用默认映射。默认和环境根同名 slug 必须测试不串映射；相同物理根合并时优先已核实默认绑定，冲突不猜测、需诊断。
+
+**CLAUDE_CONFIG_DIR 映射核实结论（S02 实施前，2026-10-18）**：官方文档 [code.claude.com/docs/en/claude-directory](https://code.claude.com/docs/en/claude-directory) 原文 *"If you set CLAUDE_CONFIG_DIR, every `~/.claude` path on this page lives under that directory instead"* ——确认 `<CLAUDE_CONFIG_DIR>/projects` 是日志根；但 `.claude.json` 位于 `~/.claude.json`（不在 `~/.claude` 之内），官方 settings / env-vars / claude-directory 三页均未说明它是否随 `CLAUDE_CONFIG_DIR` 迁移（env-vars 页截断未含该条目全文）。按本节兜底规则：**该环境根禁用映射**（slug 身份 + 明确诊断），不借用默认映射；后续若取得官方证据或隔离实测证据再启用。
 
 环境变量只使用 TokenScope 启动时继承的值：空串忽略，相对路径忽略并诊断，不存在的绝对根显示缺失、不每轮报错。修改后需要重启；自启进程未必继承交互 shell 中设置的变量，设置帮助和文档必须说明。测试和 acceptance 注入主目录、环境及探测器，完全忽略真实主目录和环境变量。
 

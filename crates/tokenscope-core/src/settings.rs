@@ -615,7 +615,9 @@ pub struct SourcePathMigration {
 }
 
 /// 归一化比较键：组件折叠 + Windows 大小写折叠（与 [`validate_dir_conflict`] 同源）。
-fn normalized_key(p: &Path) -> String {
+/// 对外发布：发现层与界面层的排除项匹配必须用这**同一个**规范化函数
+/// （计划 §9.3 第 5 条），禁止第三套前缀判重。
+pub fn normalized_key(p: &Path) -> String {
     crate::report::normalize_path(p)
         .to_string_lossy()
         .to_lowercase()
