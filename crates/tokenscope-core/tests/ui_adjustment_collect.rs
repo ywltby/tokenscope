@@ -472,3 +472,193 @@ fn automatic_query_keeps_prices_loaded_by_manual_refresh() {
     );
     std::fs::remove_dir_all(dir).ok();
 }
+
+// ── PR2 F01：真实采集生命周期（全局状态单例，公开 API）──────────────
+// 本文件全部用例共享 RECENT_TEST 互斥域：进程级状态单例的观察者也只在
+// 持锁期间注册（RAII 句柄在释放锁前丢弃），不新增并行全局状态污染。
+
+use std::sync::Arc as StdArc;
+
+use tokenscope::collection_status::{CollectionObserver, CollectionStatus};
+
+/// 把收到的状态事件记录进共享 Vec 的观察者。
+struct RecordingObserver {
+    events: StdArc<std::sync::Mutex<Vec<CollectionStatus>>>,
+}
+
+impl CollectionObserver for RecordingObserver {
+    fn on_collection_status(&self, status: &CollectionStatus) {
+        self.events.lock().unwrap().push(status.clone());
+    }
+}
+
+/// 在进程级状态单例上注册记录观察者（RAII 注销；仅在持有 RECENT_TEST 期间使用）。
+fn observe_global() -> (
+    StdArc<std::sync::Mutex<Vec<CollectionStatus>>>,
+    tokenscope::collection_status::ObserverHandle<'static>,
+) {
+    let events: StdArc<std::sync::Mutex<Vec<CollectionStatus>>> =
+        StdArc::new(std::sync::Mutex::new(Vec::new()));
+    let handle = tokenscope::collection_status::global_tracker().register_observer(StdArc::new(
+        RecordingObserver {
+            events: events.clone(),
+        },
+    ));
+    (events, handle)
+}
+
+/// PR2：真实领队 start/end 一对——空来源目录（无变化）也必须有终态；
+/// revision 单调递增，run_id 一致，trigger 随 opts 传递。
+#[test]
+fn collection_status_reports_leader_lifecycle_without_change() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tmp_dir("status-lifecycle");
+    let opts = base_opts(&dir);
+    let (events, _handle) = observe_global();
+    let base = tokenscope::collection_status::global_tracker().snapshot();
+
+    let first = report::collect_only(&opts).unwrap();
+    assert!(!first.changed, "空来源目录无变化");
+
+    let events = events.lock().unwrap().clone();
+    assert_eq!(
+        events.len(),
+        2,
+        "一次真实采集恰好一对 start/end: {events:?}"
+    );
+    assert_eq!(events[0].phase, "running");
+    assert_eq!(events[1].phase, "succeeded");
+    assert_eq!(events[0].run_id, base.run_id + 1);
+    assert_eq!(events[1].run_id, events[0].run_id, "终态保留本轮 run_id");
+    assert!(events[0].revision > base.revision);
+    assert!(events[1].revision > events[0].revision);
+    assert_eq!(events[0].trigger, Some("manual"));
+    assert!(!events[1].changed);
+    assert_eq!(
+        events[1].latest_generation,
+        Some(first.generation),
+        "无变化轮次也记录最近成功代次"
+    );
+    assert!(events[1].last_completed_at.is_some());
+    assert_eq!(events[1].error, None);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// PR2：有变化轮次推进 latest_generation；重复采集不再报告变化。
+#[test]
+fn collection_status_changed_round_advances_generation() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tmp_dir("status-generation");
+    let opts = base_opts(&dir);
+    let (events, _handle) = observe_global();
+
+    write_claude_session(&dir.join("claude"), "s1", &[("m1", 10)]);
+    let changed = report::collect_only(&opts).unwrap();
+    {
+        let list = events.lock().unwrap();
+        let terminal = list.last().unwrap();
+        assert_eq!(terminal.phase, "succeeded");
+        assert!(terminal.changed, "新写入的会话必须报告变化");
+        assert_eq!(terminal.latest_generation, Some(changed.generation));
+    }
+
+    let before = changed.generation;
+    let repeat = report::collect_only(&opts).unwrap();
+    assert!(!repeat.changed, "同一内容重复采集不得报告变化");
+    assert_eq!(repeat.generation, before);
+    let list = events.lock().unwrap();
+    let terminal = list.last().unwrap();
+    assert!(!terminal.changed);
+    assert_eq!(
+        terminal.latest_generation,
+        Some(before),
+        "无变化轮次不推进代次"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// PR2：失败轮保留最近成功代次并给出可展示错误；修复后下一轮成功恢复、
+/// 错误清除（后台下一次成功只能清除采集错误）。
+#[test]
+fn collection_status_failed_run_keeps_generation_then_recovers() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tmp_dir("status-failure");
+    let opts = base_opts(&dir);
+    let (events, _handle) = observe_global();
+
+    write_claude_session(&dir.join("claude"), "s1", &[("m1", 10)]);
+    let good = report::collect_only(&opts).unwrap();
+    let good_gen = good.generation;
+
+    // 让采集失败：历史库路径的父级是一个文件，SQLite 打不开必然报错。
+    let blocker = dir.join("data").join("not-a-dir");
+    std::fs::write(&blocker, b"").unwrap();
+    let mut broken = opts.clone();
+    broken.history_path = Some(blocker.join("history.db"));
+    assert!(
+        report::collect_only(&broken).is_err(),
+        "历史库打不开必须使采集失败"
+    );
+    {
+        let list = events.lock().unwrap();
+        let terminal = list.last().unwrap();
+        assert_eq!(terminal.phase, "failed", "失败必须进入 failed 终态");
+        assert!(
+            terminal
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("历史库"),
+            "错误必须可读且指向真实原因: {terminal:?}"
+        );
+        assert!(
+            terminal.latest_generation == Some(good_gen),
+            "失败不清空最近成功代次"
+        );
+        assert!(!terminal.changed);
+    }
+
+    // 修复：换回有效路径再采集 → succeeded，错误清除。
+    let recovered = report::collect_only(&opts).unwrap();
+    assert!(recovered.generation >= good_gen);
+    let list = events.lock().unwrap();
+    let terminal = list.last().unwrap();
+    assert_eq!(terminal.phase, "succeeded");
+    assert_eq!(terminal.error, None);
+    assert_eq!(terminal.latest_generation, Some(recovered.generation));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// PR2：单飞跟随者不重复——领队跑真实且足够慢的采集（300 个独立日志），
+/// 跟随者并发同参请求必然落在领队的重叠窗口内；全程只有一对 start/end，
+/// 两个调用者拿到同一结果。
+#[test]
+fn collection_status_follower_shares_leader_round() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tmp_dir("status-follower-public");
+    let opts = base_opts(&dir);
+    let claude = dir.join("claude");
+    for i in 0..300 {
+        write_claude_session(&claude, &format!("bulk-{i}"), &[("m1", 10)]);
+    }
+    let (events, _handle) = observe_global();
+    let base = tokenscope::collection_status::global_tracker().snapshot();
+
+    let o_leader = opts.clone();
+    let o_follower = opts.clone();
+    let leader = std::thread::spawn(move || report::collect_only(&o_leader).unwrap());
+    let follower = std::thread::spawn(move || report::collect_only(&o_follower).unwrap());
+    let r1 = leader.join().unwrap();
+    let r2 = follower.join().unwrap();
+    assert_eq!(r1.generation, r2.generation, "同参并发共享同一轮结果");
+    assert_eq!(r1.changed, r2.changed);
+
+    let list = events.lock().unwrap();
+    let starts = list.iter().filter(|s| s.phase == "running").count();
+    let ends = list.iter().filter(|s| s.phase == "succeeded").count();
+    assert_eq!(starts, 1, "重叠窗口内只有领队产生 start: {list:?}");
+    assert_eq!(ends, 1, "重叠窗口内只有领队产生终态");
+    assert_eq!(list[0].run_id, base.run_id + 1, "跟随者不推进 run_id");
+    assert_eq!(list[1].latest_generation, Some(r1.generation));
+    std::fs::remove_dir_all(&dir).ok();
+}

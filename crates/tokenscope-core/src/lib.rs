@@ -1,6 +1,7 @@
 pub mod acceptance;
 pub mod aggregate;
 pub mod cache;
+pub mod collection_status;
 pub mod dedupe;
 pub mod fsutil;
 pub mod history;
