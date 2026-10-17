@@ -1,7 +1,8 @@
 # PR2：真实扫描状态与读取动画
 
-> 状态：**F01–F05 已实施（2026-10-17），草稿 PR 等待复核、尚未合并**。F01–F03 逐项先红后绿提交；F04 本地隔离实跑取证（`ui-collection-status` 20/20、`ui-refresh` 11/11）；F05 文档与交付随最后一个提交。实施记录见 [§7](#7-实施记录2026-10-17)。复审与开工前置见下。PR1 已合入 main（`19aae8b`）；按用户 2026-10-16 决定，等[升级测试补测计划](../archive/implemented/2026-10-16-upgrade-matrix.md)（含原生验收重启修复 UP09）合入后再开工，F04 基于其新的实例生命周期。**2026-10-17：升级测试补测（v0.3.3）与发布去重（v0.3.4）均已合入**；CI 并行化 patch（F00=C00）已合入并发布 `v0.3.5`，本分支已快进到 main `1223ef0`。本 PR 第一次 CI 的热缓存用时已回填 CI 并行化计划 §5（该计划据此归档）。
-> 前置条件：[PR1 目录迁移](../archive/implemented/2026-10-15-workspace-layout.md)已合入 main。实施时从最新 main 创建 `feat/collection-status`，独立 minor 和独立门禁，不依赖 [PR3 来源管理](2026-10-14-source-discovery-and-additional-paths.md)；PR3 在本 PR 合入后再启动。
+> 状态：**已实现（2026-10-18 归档）。** PR [#13](https://github.com/ywltby/tokenscope/pull/13) 于 2026-10-17 16:43Z 合入 main（`6393bfc`），最终 HEAD `d4a8b78` 的 CI 四组、Native UI E2E、安装与四项单跳升级（0.1.0 / 0.3.5 × present / deleted）全部通过。main 上 [Release 39050690155](https://github.com/ywltby/tokenscope/actions/runs/39050690155) 全部通过（gate 19s、build 4m08s、install-test、四项单跳升级、两条升级链、publish；合计 6m00s），`v0.4.0` 预发布于 16:49:57Z，四个资产齐全；main 的 [CI 39050690162](https://github.com/ywltby/tokenscope/actions/runs/39050690162)（5m30s）通过，但 main 的 [Native UI E2E 39050690161](https://github.com/ywltby/tokenscope/actions/runs/39050690161) 在 `ui-system` 缩放 2 的第 1 次启动中卡住，45 分钟作业超时后被取消（卡点在恢复截图与重启之间，现有日志无法区分测试架与程序退出；同一 HEAD 在 PR 上五次通过）。按约定不以重跑代替原因，排查转入 [PR3 S00](../../active/2026-10-14-source-discovery-and-additional-paths.md#s00-原生验收卡死可定位第一个提交)。实施与复核修订见 §7。真实跨午夜、长时间休眠、跨显示器仍在[独立系统验收待办](../../system-acceptance-todo.md)。
+> 归档前原文状态：**F01–F05 已实施（2026-10-17），草稿 PR 等待复核、尚未合并**。F01–F03 逐项先红后绿提交；F04 本地隔离实跑取证（`ui-collection-status` 20/20、`ui-refresh` 11/11）；F05 文档与交付随最后一个提交。实施记录见 [§7](#7-实施记录2026-10-17)。复审与开工前置见下。PR1 已合入 main（`19aae8b`）；按用户 2026-10-16 决定，等[升级测试补测计划](2026-10-16-upgrade-matrix.md)（含原生验收重启修复 UP09）合入后再开工，F04 基于其新的实例生命周期。**2026-10-17：升级测试补测（v0.3.3）与发布去重（v0.3.4）均已合入**；CI 并行化 patch（F00=C00）已合入并发布 `v0.3.5`，本分支已快进到 main `1223ef0`。本 PR 第一次 CI 的热缓存用时已回填 CI 并行化计划 §5（该计划据此归档）。
+> 前置条件：[PR1 目录迁移](2026-10-15-workspace-layout.md)已合入 main。实施时从最新 main 创建 `feat/collection-status`，独立 minor 和独立门禁，不依赖 [PR3 来源管理](../../active/2026-10-14-source-discovery-and-additional-paths.md)；PR3 在本 PR 合入后再启动。
 
 **Goal：** 扫描由真实工作驱动、至少显示 1 秒，作为可见读取心跳；只有新事实或既有时间窗口规则触发统计刷新，取消常驻具体更新时间。
 
@@ -87,7 +88,7 @@ type CollectionStatus = {
 
 ### F00：升级登记表测试与真实登记表脱钩（已移出）
 
-2026-10-17 用户决定先单独合入 [CI 并行化 patch](../archive/implemented/2026-10-17-ci-parallel-checks.md)。该 patch 要登记 v0.3.4，本任务原样移入其中作为 C00；本 PR 不再包含 F00，交付时登记 v0.3.5，测试文件不需要改动。
+2026-10-17 用户决定先单独合入 [CI 并行化 patch](2026-10-17-ci-parallel-checks.md)。该 patch 要登记 v0.3.4，本任务原样移入其中作为 C00；本 PR 不再包含 F00，交付时登记 v0.3.5，测试文件不需要改动。
 
 ### F01：根库真实采集生命周期
 
@@ -141,7 +142,7 @@ type CollectionStatus = {
 
 ## 6. 执行细则与逐项验收门槛
 
-先遵守 [PR1 第 4 节共同执行约束](../archive/implemented/2026-10-15-workspace-layout.md#41-开工与逐项执行)及其证据/门槛。本节只细化 F01–F05，不授权在 PR1 合入前实施。新接口先补测试，任务执行记录中填实际 commit、命令、退出码和工件。
+先遵守 [PR1 第 4 节共同执行约束](2026-10-15-workspace-layout.md#41-开工与逐项执行)及其证据/门槛。本节只细化 F01–F05，不授权在 PR1 合入前实施。新接口先补测试，任务执行记录中填实际 commit、命令、退出码和工件。
 
 ### 6.1 F01/F02：真实状态机，先内核后 IPC
 

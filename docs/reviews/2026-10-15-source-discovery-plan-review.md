@@ -265,7 +265,7 @@ PR1 合入后 workspace 根目录是虚拟 manifest，命令统一改为：
 ## 10. 执行方修订说明（待复审）
 
 - [PR1](../plans/archive/implemented/2026-10-15-workspace-layout.md)：独立 patch，W01–W07 和 c16e023；保留目录迁移、新旧版本基线、全部门禁，新增 W05c 依赖信息清单。旧 target 必须报告路径、大小、链接、占用并取得用户确认后删除。
-- [PR2](../plans/active/2026-10-15-collection-status.md)：PR1 合入后独立 minor，F01–F05；至少 1 秒显示、CSS 图标、查询不等动画、连续轮次及减少动态效果均有用例，安排 DESIGN.md 豁免。
+- [PR2](../plans/archive/implemented/2026-10-15-collection-status.md)：PR1 合入后独立 minor，F01–F05；至少 1 秒显示、CSS 图标、查询不等动画、连续轮次及减少动态效果均有用例，安排 DESIGN.md 豁免。
 - [PR3](../plans/active/2026-10-14-source-discovery-and-additional-paths.md)：PR2 合入后独立 minor，S01–S07；只剩当前用户标准/环境/追加根，取消重新发现，保留 settings 事务、防环、三层去重、性能预算及环境变更说明。
 - 技术细化 1：编译后的 `--check` 不能用自己的启动时间筛 `.d`；增加构建前 `--begin` run 边界和每模式产物记录。明确包清理/隔离构建与完整性检查，不依赖缓存动作的内部实现假设；旧依赖信息不能混入，缺证据不得空集合通过。
 - 技术细化 2：实际心跳周期是配置间隔＋真实采集耗时，最短 1 秒只影响显示，不改调度；缺少可见动画本身不足以证明后端停止。失败/状态不可用立即显示，正常短采集满足 1 秒。
@@ -273,7 +273,7 @@ PR1 合入后 workspace 根目录是虚拟 manifest，命令统一改为：
 
 ## 11. 复审意见（针对 4ef146e）
 
-> 复审日期：2026-10-15。对象：[PR1](../plans/archive/implemented/2026-10-15-workspace-layout.md)、[PR2](../plans/active/2026-10-15-collection-status.md)、[PR3](../plans/active/2026-10-14-source-discovery-and-additional-paths.md)、`docs/plans/README.md`、UI 调整计划顶部说明。
+> 复审日期：2026-10-15。对象：[PR1](../plans/archive/implemented/2026-10-15-workspace-layout.md)、[PR2](../plans/archive/implemented/2026-10-15-collection-status.md)、[PR3](../plans/active/2026-10-14-source-discovery-and-additional-paths.md)、`docs/plans/README.md`、UI 调整计划顶部说明。
 
 **结论：** 第 9 节各项均已落实到三份计划，多账户相关内容已删净（全文检索 ProfileList、提权、账户映射、`source_paths_discover` 均无残留），旧锚点 `#collection-feedback` 已无引用。执行方新增的两条技术细化（构建前 `--begin` 划定证据边界；心跳周期 = 间隔 + 真实耗时，1 秒只影响显示）判断正确，予以采纳。改完下面 11.1、11.2 两处即可开工 PR1；11.3 在 PR3 开工前改好即可。
 

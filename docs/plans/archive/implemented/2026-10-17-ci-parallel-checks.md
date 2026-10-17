@@ -1,7 +1,7 @@
 # CI 拆成并行作业与原生 E2E 精简
 
 > 状态：**已完成并归档（2026-10-17）**。PR [#12](https://github.com/ywltby/tokenscope/pull/12) 于 2026-10-17 05:50Z 合入 main（`1223ef0`），main 的 CI、Native UI E2E 与 Release 全部通过，`v0.3.5` 已发布，四组 Rust 缓存已在 main 上保存。§5 第 3 条后半的热缓存效果取证已用 PR2 第一次 CI（PR [#13](https://github.com/ywltby/tokenscope/pull/13)，HEAD `5805801`）完成，见下方「热缓存取证」。
-> 交付：独立小 PR，patch（只改工作流、复合动作、测试脚本与文档，不改程序）。**在分支 `ci/parallel-checks` 上实施**：它从 `feat/collection-status` 的 `ec8603b` 建立，已带发布去重计划的回填与归档（`4170869`）和 PR2 计划的修改（`ec8603b`）；从 main 另建分支会丢掉这两个提交。排在 [PR2 扫描反馈](../../active/2026-10-15-collection-status.md)之前；合入后 `feat/collection-status` 用 `git merge --ff-only origin/main` 跟上即可。
+> 交付：独立小 PR，patch（只改工作流、复合动作、测试脚本与文档，不改程序）。**在分支 `ci/parallel-checks` 上实施**：它从 `feat/collection-status` 的 `ec8603b` 建立，已带发布去重计划的回填与归档（`4170869`）和 PR2 计划的修改（`ec8603b`）；从 main 另建分支会丢掉这两个提交。排在 [PR2 扫描反馈](2026-10-15-collection-status.md)之前；合入后 `feat/collection-status` 用 `git merge --ff-only origin/main` 跟上即可。
 
 ## 1. 现状（2026-10-17 核实）
 
