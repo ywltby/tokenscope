@@ -1,9 +1,41 @@
 name: Quality gate
 description: Default and acceptance Rust coverage plus frontend checks
+inputs:
+  group:
+    description: 本作业要跑的检查组（rust、rust-acceptance、contracts、frontend）
+    required: true
 runs:
   using: composite
   steps:
+    # 拆分后组名由 ci.yml 传入，先做白名单校验：拼错时不会报错，只会让所有步骤
+    # 都不匹配而"成功但什么都没跑"。这里必须直接失败。
+    - name: Validate the check group
+      shell: pwsh
+      env:
+        CHECK_GROUP: ${{ inputs.group }}
+      run: |
+        $groups = @('rust', 'rust-acceptance', 'contracts', 'frontend')
+        if ($groups -notcontains $env:CHECK_GROUP) {
+          throw "未知的检查组：$env:CHECK_GROUP"
+        }
+    # 版本递增与升级登记表原本在 ci.yml 的 gate 里执行，随本动作移入 contracts 组；
+    # 两者都要读完整 git 历史，由 contracts 作业的 fetch-depth: 0 保证。
+    - name: Validate one version increment for this main merge
+      if: inputs.group == 'contracts'
+      shell: pwsh
+      run: |
+        python -B scripts/bump_version.py --check --event-file "$env:GITHUB_EVENT_PATH"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - name: Validate the upgrade baseline registry against GitHub
+      if: inputs.group == 'contracts'
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        python -B scripts/upgrade_baselines.py check --base-ref '${{ github.event.pull_request.base.sha || github.event.before }}'
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: Version and immutable release contracts
+      if: inputs.group == 'contracts'
       shell: pwsh
       run: |
         python -B -m unittest discover -s scripts -p "test_bump_version.py" -v
@@ -21,6 +53,7 @@ runs:
     # 检查选择器与构建输入清单也属于门禁入口：它们自身的契约测试必须在完整
     # 门禁里跑，避免"改选择器只靠自己放行"。
     - name: Selector and build-input contracts
+      if: inputs.group == 'contracts'
       shell: pwsh
       run: |
         python -B -m unittest discover -s scripts -p "test_build_inputs.py" -v
@@ -42,70 +75,85 @@ runs:
     # 统一 workspace：一次 fmt --all 加一次 workspace clippy/test 即覆盖两个
     # package，不再保留分根库/壳的重复轮次。
     - name: cargo fmt --all --check
+      if: inputs.group == 'rust'
       shell: pwsh
       run: cargo fmt --all -- --check
 
     - name: workspace cargo clippy
+      if: inputs.group == 'rust'
       shell: pwsh
       run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
     - name: workspace cargo test
+      if: inputs.group == 'rust'
       shell: pwsh
       run: cargo test --locked --workspace
 
     - name: frontend typecheck
+      if: inputs.group == 'frontend'
       shell: pwsh
       run: pnpm --dir frontend typecheck
 
     - name: frontend format:check
+      if: inputs.group == 'frontend'
       shell: pwsh
       run: pnpm --dir frontend format:check
 
     - name: frontend test
+      if: inputs.group == 'frontend'
       shell: pwsh
       run: pnpm --dir frontend test
 
     - name: frontend build
+      if: inputs.group == 'frontend'
       shell: pwsh
       run: pnpm --dir frontend build
     - name: Browser UI refresh E2E
+      if: inputs.group == 'frontend'
       shell: pwsh
       run: pnpm --dir frontend test:e2e
     - name: Upload browser UI evidence
-      if: always()
+      if: always() && inputs.group == 'frontend'
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
       with:
         name: browser-ui-${{ github.job }}
         path: qa-artifacts/ui-adjustment/ci-e2e
         if-no-files-found: warn
     - name: 安装验收 workflow 调用契约（N12）
+      if: inputs.group == 'contracts'
       shell: pwsh
       run: |
         python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: 安装验收事实校验契约（N12/M06）
+      if: inputs.group == 'contracts'
       shell: pwsh
       run: |
         python -B -m unittest discover -s scripts -p "test_inspect_history.py" -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: 安装验收生命周期契约（N12/M05）
+      if: inputs.group == 'contracts'
       shell: pwsh
       run: |
         pwsh -NoProfile -File scripts/test_install_helpers.ps1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: workspace acceptance clippy
+      if: inputs.group == 'rust-acceptance'
       shell: pwsh
       run: cargo clippy --locked --workspace --all-targets --features acceptance -- -D warnings
     - name: workspace acceptance test
+      if: inputs.group == 'rust-acceptance'
       shell: pwsh
       run: cargo test --locked --workspace --features acceptance
     # W05c：重建两种模式的编译输入并与受版本管理的清单比较。check 自身先清理
     # 两个本地 package（不是整仓 clean），因此证据只可能来自本次构建。
     - name: Build input manifest matches this build (W05c)
+      if: inputs.group == 'contracts'
       shell: pwsh
       run: |
         python -B scripts/build_inputs.py --check --evidence qa-artifacts/build-inputs/ci
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: Release metadata tests
+      if: inputs.group == 'contracts'
       shell: pwsh
       run: python -m unittest discover -s scripts -p "test_release_metadata.py" -v

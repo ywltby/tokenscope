@@ -1,6 +1,6 @@
 # CI 拆成并行作业与原生 E2E 精简
 
-> 状态：**待用户确认**（2026-10-17 用户要求写小计划，单独做一个 patch 先合）。
+> 状态：**实施中**（2026-10-17 用户确认执行）。C00–C04 已落地在 `ci/parallel-checks` 上并 patch 递增到 0.3.5；剩余：本 PR 门禁、合入后 main 建立热缓存、用 PR2 首跑记录效果。
 > 交付：独立小 PR，patch（只改工作流、复合动作、测试脚本与文档，不改程序）。**在分支 `ci/parallel-checks` 上实施**：它从 `feat/collection-status` 的 `ec8603b` 建立，已带发布去重计划的回填与归档（`4170869`）和 PR2 计划的修改（`ec8603b`）；从 main 另建分支会丢掉这两个提交。排在 [PR2 扫描反馈](2026-10-15-collection-status.md)之前；合入后 `feat/collection-status` 用 `git merge --ff-only origin/main` 跟上即可。
 
 ## 1. 现状（2026-10-17 核实）
@@ -73,6 +73,7 @@ PR 的等待时间取决于两项必需检查 `gate`（ci.yml）与 `native-ui`�
 
 1. `frontend/scripts/contracts/native-ui-refresh.mjs`：空闲观察从 120 秒改为 30 秒，检查名 `idle_120s_no_info_lines` 改为 `idle_30s_no_info_lines`，注释同步。自动读取最短间隔 5 秒，30 秒约覆盖 6 轮，足以判断空闲时是否写 info 日志（U06 约束）。120 秒来自已归档的 UI 调整计划，属可收紧的取证时长；本地 20 轮重启压测等其他场景不受影响。
 2. `.github/workflows/ui-e2e.yml`：缩放循环从 `'1', '1.5', '2'` 改为 `'1.5', '2'`，删掉端口表里 `'1'` 一项。理由见 §1：Runner 上系统 DPI 轮已是 `dpr=1`。本地手动取证仍可传 `--scale 1`，脚本不改。
+3. 连带改动（实施时发现，不在原允许清单内）：`frontend/scripts/lib/native-instance.test.mjs` 从 `ui-e2e.yml` 提取全部 9xxx 端口并断言集合等于 `<9451, 9460, 9470, 9480, 9490>`，删掉 9470 后必须同步该期望值，否则前端测试必红。
 
 ### C04 文档
 
@@ -100,6 +101,14 @@ PR 的等待时间取决于两项必需检查 `gate`（ci.yml）与 `native-ui`�
 3. 合入后：main 的 CI 与 Native UI E2E 通过；Release 发布 v0.3.5。用 PR2 的第一次 CI 记录热缓存下的 `gate`、`native-ui` 用时作为效果，不设硬门槛（预期 CI 约 5 分钟、原生 E2E 约 8 分钟）。
 4. 回填：PR 链接、各运行链接与用时写到本节，然后归档本计划。
 
+### 实施记录（2026-10-17，分支 `ci/parallel-checks`）
+
+- C00：`test_upgrade_baselines.py` 23 项通过；随后登记 v0.3.4 未改动任何测试文件，仍 23 项通过（此前登记 0.3.3 改了 68 行）。
+- C02：两条新测试在未拆分的工作流上必红，拆分后 `test_build_paths.py` 19 项全绿。
+- C03：改动后 `pnpm --dir frontend test` 529 项通过（含同步后的端口集合契约）。
+- contracts 组不加前端构建：把 `frontend/dist` 移走后 `python -B scripts/build_inputs.py --check` 通过（`missing`、`stale`、`changed`、`workflow_uncovered` 全空），§6 第 5 步的备选方案不启用。
+- 版本：v0.3.4 已登记进升级起点矩阵，patch 递增到 0.3.5。
+
 ## 6. 执行步骤
 
 1. **准备分支**：在 `ci/parallel-checks` 上 `git fetch origin` 并 rebase 到最新 `origin/main`。
@@ -112,4 +121,4 @@ PR 的等待时间取决于两项必需检查 `gate`（ci.yml）与 `native-ui`�
 8. **提交与 PR**：按文件名暂存，正常提交，让钩子跑完整检查；推送后创建 PR，说明中写明 §4 的冷缓存代价。检查全绿后按用户授权合并。
 9. **合入后**：按 §5 第 3、4 条核对并回填。
 
-允许改动的文件：`.github/actions/checks/action.yml`、`.github/workflows/ci.yml`、`.github/workflows/ui-e2e.yml`、`frontend/scripts/contracts/native-ui-refresh.mjs`、`scripts/test_build_paths.py`、`scripts/test_upgrade_baselines.py`、`scripts/fixtures/upgrade_baselines_test.json`（新增）、`CLAUDE.md`、本计划、`docs/plans/README.md`、`docs/plans/active/2026-10-15-collection-status.md`，以及登记与版本工具自动更新的文件。
+允许改动的文件：`.github/actions/checks/action.yml`、`.github/workflows/ci.yml`、`.github/workflows/ui-e2e.yml`、`frontend/scripts/contracts/native-ui-refresh.mjs`、`frontend/scripts/lib/native-instance.test.mjs`（C03 连带）、`scripts/test_build_paths.py`、`scripts/test_upgrade_baselines.py`、`scripts/fixtures/upgrade_baselines_test.json`（新增）、`CLAUDE.md`、本计划、`docs/plans/README.md`、`docs/plans/active/2026-10-15-collection-status.md`，以及登记与版本工具自动更新的文件。
