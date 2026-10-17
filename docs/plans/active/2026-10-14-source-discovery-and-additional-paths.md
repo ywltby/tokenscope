@@ -196,6 +196,7 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 
 - [x] S00：原生验收卡死有超时、看门狗证据与阶段日志。（2026-10-18 实施完毕，记录见下）
 - [x] S01：配置集合与迁移（设置格式 v2）。（2026-10-18 实施完毕，记录见下）
+- [x] S02：固定候选与环境发现、映射核实与隔离解析。（2026-10-18 实施完毕，记录见下）
 - [ ] 固定候选、两种环境变量、映射核实和隔离全部验证。
 - [ ] 手动嵌套拒绝；迁移/环境重叠不阻断且只解析一次。
 - [ ] 联接环闭合；两层去重不丢独立事件。
@@ -220,6 +221,14 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 - **关键测试**：`source_paths_settings.rs` 17 例（旧空/非空/停用 dir、新旧并存忽略 dir、显式空列表、幂等、共享锁原子失败、迁移×update 并发合并、相对 dir 存在/缺失、父根重叠说明、遗留 JSON、字段保留、追加路径形态与同/嵌套拒绝、升级配置固化、修订号=2）；`test_upgrade_fixture.py` 新增 8 例（dir→追加项各坏形态拒绝、空 dir 无空条目、停用继承、无 dir 免迁移、2->2 恒等、规则表完备性）。
 - **执行结果**：`cargo test --locked -p tokenscope --test source_paths_settings` 17/17；`cargo test --locked --workspace` 49 个测试目标全绿；`cargo clippy --locked --workspace --all-targets` 与 `cargo fmt --all -- --check` 干净；`python -B -m unittest test_upgrade_fixture` 17/17。
 - **边界如实记录**：升级用量并集断言（旧自定义 dir 与默认根各有独立用量、重复请求不增量）按 §9.2 第 7 条**待 S03** 在 `source_paths_collection.rs` 以相同场景执行，本项只固化配置与预期；`source_config_set` 等壳入口仍按旧接口编译兼容（S04 替换）。未完成项：无（本项范围内）。
+
+### S02 执行记录（2026-10-18）
+
+- **提交**：S02 代码与测试为 commit `7d3955c`（pre-commit 完整模式全绿）；本记录为紧随其后的文档提交。
+- **落点**：新增 `source/discovery.rs`（`DiscoveryContext` 注入锚点/启动环境/探测器、`StartupEnv` 快照、`filesystem_probe` 四态分类、`resolve_sources` 候选构造与同根合并、行操作 `set_row_enabled`/`remove_manual_from_row`/`row_exists`、FNV-1a 上下文签名）；`source/mod.rs` 挂模块；`settings.rs` 的 `normalized_key` 发布为公有（排除项匹配用同一规范化函数）；新增 `tests/source_discovery.rs`。§2 已回填 CLAUDE_CONFIG_DIR 映射核实证据（官方 claude-directory 页确认 `<CLAUDE_CONFIG_DIR>/projects`；`.claude.json` 位置无官方文字 → 该根禁用映射降级）。
+- **关键测试**：`source_discovery.rs` 14 例——默认三根的 origin/映射/启用、Missing/NoPermission/NotADirectory 区分、环境空串/相对/缺失、CODEX_HOME 追加语义、大小写+尾分隔符+别名同根合并三标签、legacy 语义不扩大读取（dir 取代默认、Codex 环境根替代默认）、映射四类绑定（默认/环境禁用/手动禁用/合并保默认）、总开关×行开关×排除项组合、行禁用→重解析→移除→开启循环、未知 id 拒绝、行 id 跨轮稳定、新目录下一轮出现、签名随有效变化而变。
+- **执行结果**：`cargo test --locked -p tokenscope --test source_discovery` 14/14；`cargo test --locked --workspace` 50 个测试目标全绿；`cargo clippy --locked --workspace --all-targets -- -D warnings` 与 `cargo fmt --all -- --check` 干净。
+- **边界如实记录**：解析耗时未设硬门槛（§0 第 4 条），毫秒级取证随 S03/S06 采集计时输出；`acceptance.rs` 本项未改——`DiscoveryContext::production()` 已复用 `source_dir_override` 落隔离根，§9.3 第 2 条要求的"acceptance 空环境覆盖 + 场景显式注入"在 S04 壳启动路径接线时落实并在此回填；联接别名/断链的真实文件系统 fixture 属 S03（`source_paths_collection`）。未完成项：无（本项范围内）。
 
 ## 8. 执行细则、算法边界与验收门槛
 
