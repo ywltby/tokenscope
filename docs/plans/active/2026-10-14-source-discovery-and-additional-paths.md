@@ -197,6 +197,7 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 - [x] S00：原生验收卡死有超时、看门狗证据与阶段日志。（2026-10-18 实施完毕，记录见下）
 - [x] S01：配置集合与迁移（设置格式 v2）。（2026-10-18 实施完毕，记录见下）
 - [x] S02：固定候选与环境发现、映射核实与隔离解析。（2026-10-18 实施完毕，记录见下）
+- [x] S03：防环、多根与去重。（2026-10-18 实施完毕，记录见下）
 - [ ] 固定候选、两种环境变量、映射核实和隔离全部验证。
 - [ ] 手动嵌套拒绝；迁移/环境重叠不阻断且只解析一次。
 - [ ] 联接环闭合；两层去重不丢独立事件。
@@ -229,6 +230,14 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 - **关键测试**：`source_discovery.rs` 14 例——默认三根的 origin/映射/启用、Missing/NoPermission/NotADirectory 区分、环境空串/相对/缺失、CODEX_HOME 追加语义、大小写+尾分隔符+别名同根合并三标签、legacy 语义不扩大读取（dir 取代默认、Codex 环境根替代默认）、映射四类绑定（默认/环境禁用/手动禁用/合并保默认）、总开关×行开关×排除项组合、行禁用→重解析→移除→开启循环、未知 id 拒绝、行 id 跨轮稳定、新目录下一轮出现、签名随有效变化而变。
 - **执行结果**：`cargo test --locked -p tokenscope --test source_discovery` 14/14；`cargo test --locked --workspace` 50 个测试目标全绿；`cargo clippy --locked --workspace --all-targets -- -D warnings` 与 `cargo fmt --all -- --check` 干净。
 - **边界如实记录**：解析耗时未设硬门槛（§0 第 4 条），毫秒级取证随 S03/S06 采集计时输出；`acceptance.rs` 本项未改——`DiscoveryContext::production()` 已复用 `source_dir_override` 落隔离根，§9.3 第 2 条要求的"acceptance 空环境覆盖 + 场景显式注入"在 S04 壳启动路径接线时落实并在此回填；联接别名/断链的真实文件系统 fixture 属 S03（`source_paths_collection`）。未完成项：无（本项范围内）。
+
+### S03 执行记录（2026-10-18）
+
+- **提交**：S03 代码与测试为 commit `cdb6fd6`（pre-commit 完整模式全绿）；本记录为紧随其后的文档提交。
+- **落点**：`source/mod.rs` 新增 `walk_jsonl_guarded`（显式栈 + `file_type()` 分型 + 链接显式解析 + reparse point 检测）与 `DirVisitLedger`（canonical 目录台账，跨应用进入暴露）；Claude/Codex 实现 `discover_with_ledger` 共享台账、独立调用自带台账；`report.rs` 新增 `SourcePlan`（进入 `SummaryOptions.source_plans`，None 保持旧单根兼容语义）、`make_sources` 每根一实例、`discover_round` 排序共享遍历 + 文件身份认领（最小规范化根优先、跨应用同文件整组隔离并双侧诊断、同应用重复认领一次）、`SourceReport` 按 agent 聚合、`collection_key` 计划模式含实际根集合与映射修订；移除采集期硬校验（重叠为合法状态，硬拒绝移到保存事务）。
+- **关键测试**：`source_paths_collection` 14 例对应 §8.3——`ancestor_junction_loops_terminate_with_complete_single_parse`（真实 junction 经 mklink /J，环终止文件只解析一次）、`deep_tree_broken_junction_and_stray_files_terminate_with_diagnostics`（120 层深目录 + 断链诊断）、`same_agent_nested_and_duplicate_roots_parse_once`（父/子/大小写/尾分隔符，且交换输入顺序结果相同）、`copied_files_parse_but_native_identity_dedupes_without_loss`、`hard_link_paths_each_parse_once_and_union_in_history`（按 §0 第 1 条不做物理身份去重）、`mapping_context_change_reparses_file`、`same_slug_across_roots_do_not_cross_mappings`、`cross_app_same_root_isolated_and_other_roots_continue`、`upgrade_old_dir_plus_default_root_union`（**关闭 S01 遗留**：A∪B、副本不增量、热轮 generation 不推进、停用不读取且历史保留、恢复后纳入）、`codex_home_upgrade_reads_default_and_env_roots`、`truncated_file_reparses_with_fresh_fingerprint`、`root_set_change_between_rounds_changes_reading_scope`、`empty_plan_set_collects_nothing_and_keeps_history`、`plan_mapping_binding_loads_and_resolves`；`source_overlap` 10 例按隔离语义重写（同根/别名/嵌套/大小写隔离 + 诊断、跨文件隔离在解析前、无冲突照常采集、保存校验函数级核对）；`rebuild_source_contract` 重叠隔离语义。
+- **执行结果**：`cargo test --locked --workspace` 51 个测试目标全绿；`cargo clippy --locked --workspace --all-targets -- -D warnings` 干净；`cargo fmt --all -- --check` 干净；acceptance 特性 clippy/test 48 个全绿。
+- **边界如实记录**：junction 用 `cmd /c mklink /J` 创建（临时根内，清理先解除链接再删树，本机与 runner 均支持，未以 skip 换通过）；权限拒绝路径未在采集层 fixture 注入（Windows ACL 注入易残留，`NoPermission` 分类由发现层与探测注入测试覆盖），如实记待验项并入 S06 原生验收观察；热轮"零重解析"断言受全局采集复用槽位影响不确定，改以 generation 不推进 + 统计不增量断言；性能取证（§4.4 改前/改后热轮中位数）在 S06 执行。未完成项：性能取证待 S06、权限拒绝采集 fixture 待验（如实披露，不关闭）。
 
 ## 8. 执行细则、算法边界与验收门槛
 
