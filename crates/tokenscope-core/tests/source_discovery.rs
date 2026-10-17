@@ -591,14 +591,26 @@ fn row_disable_resolve_remove_enable_cycle_keeps_user_choices() {
         .unwrap()
         .config_path
         .clone();
+    let manual_path = merged
+        .origins
+        .iter()
+        .find(|o| o.kind == OriginKind::Manual)
+        .unwrap()
+        .config_path
+        .clone();
+    let row_paths = |manual: Vec<String>| tokenscope::source::discovery::RowConfigPaths {
+        auto: vec![auto_path.clone()],
+        manual,
+    };
 
     // 禁用：自动 origin 进排除项 + 手动项 false
-    set_row_enabled(&mut claude, &[PathBuf::from(&auto_path)], &id, false).unwrap();
+    set_row_enabled(&mut claude, &row_paths(vec![manual_path.clone()]), false).unwrap();
     assert!(
         claude
             .excluded_auto_paths
             .iter()
-            .any(|p| tokenscope::settings::normalized_key(Path::new(p)) == id),
+            .any(|p| tokenscope::settings::normalized_key(Path::new(p))
+                == tokenscope::settings::normalized_key(Path::new(&auto_path))),
         "排除项必须写入: {:?}",
         claude.excluded_auto_paths
     );
@@ -614,7 +626,7 @@ fn row_disable_resolve_remove_enable_cycle_keeps_user_choices() {
     assert_eq!(row.origins.len(), 2, "停用不删除 origin");
 
     // 移除：只删手动项；自动排除项保持（行保持停用）
-    remove_manual_from_row(&mut claude, &id).unwrap();
+    remove_manual_from_row(&mut claude, &row_paths(vec![manual_path.clone()])).unwrap();
     assert!(claude.additional_paths.is_empty());
     assert!(
         !claude.excluded_auto_paths.is_empty(),
@@ -630,12 +642,7 @@ fn row_disable_resolve_remove_enable_cycle_keeps_user_choices() {
     assert!(!row.effective_enabled);
 
     // 开启：排除项清空；被移除的手动项不得悄悄复活
-    let auto_paths: Vec<PathBuf> = row
-        .origins
-        .iter()
-        .map(|o| PathBuf::from(&o.config_path))
-        .collect();
-    set_row_enabled(&mut claude, &auto_paths, &id, true).unwrap();
+    set_row_enabled(&mut claude, &row_paths(vec![]), true).unwrap();
     assert!(claude.excluded_auto_paths.is_empty());
     assert!(claude.additional_paths.is_empty(), "移除过的手动项不得复活");
     let out = resolve_sources(&ctx, &claude, &default_codex());
@@ -652,18 +659,16 @@ fn row_disable_resolve_remove_enable_cycle_keeps_user_choices() {
 #[test]
 fn row_operations_reject_unknown_ids_and_pure_auto_rows() {
     let home = temp_dir("row-reject");
+    let _ = home;
     let mut claude = default_claude();
-    let auto = home.join(".claude/projects");
-    let err = set_row_enabled(
-        &mut claude,
-        std::slice::from_ref(&auto),
-        "z:/no-such-row",
-        false,
-    )
-    .unwrap_err();
-    assert!(err.contains("来源已变化"), "{err}");
-    let err =
-        remove_manual_from_row(&mut claude, &fake_canon(&auto).display().to_string()).unwrap_err();
+    // 空集合（无自动、无手动可操作项）→ 明确拒绝；纯自动行不可移除。
+    let empty = tokenscope::source::discovery::RowConfigPaths::default();
+    let err = set_row_enabled(&mut claude, &empty, false).unwrap_err();
+    assert!(
+        err.contains("没有可操作的配置项"),
+        "空集合必须明确拒绝: {err}"
+    );
+    let err = remove_manual_from_row(&mut claude, &empty).unwrap_err();
     assert!(err.contains("没有可移除的手动目录"), "{err}");
 }
 

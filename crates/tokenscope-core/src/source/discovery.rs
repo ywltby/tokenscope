@@ -261,6 +261,12 @@ impl DiscoveryContext {
     }
 }
 
+/// 统一的 canonical 身份（canonicalize + 剥离 Windows `\?\` 前缀）；
+/// 生产探测器与测试注入共用，保证行 id 形态一致。
+pub fn canonical_identity(path: &Path) -> Option<PathBuf> {
+    path.canonicalize().ok().map(crate::report::strip_verbatim)
+}
+
 /// 逻辑规范化键：组件折叠 + Windows 大小写折叠（与设置侧排除项匹配同一函数）。
 fn logical_key(p: &Path) -> String {
     crate::settings::normalized_key(p)
@@ -604,36 +610,41 @@ fn context_signature(roots: &[ResolvedRoot]) -> String {
 
 // ── 行操作（§9.3 第 4、5 条）：启停作用于该行全部 origin ─────────────
 
-/// 行启停：禁用 = 自动 origin 的配置路径加入排除项 + 手动项 enabled=false；
-/// 开启 = 逆操作。总开关（`SourceConfig::enabled`）不在此改写。
-/// id 不匹配任何当前行 → `Err("来源已变化，请重试")`。
+/// 目标行的配置路径集合（调用方从解析行提取；配置字符串与落盘逐字对应，
+/// 避免 canonical 身份与逻辑键两种形态之间的字符串匹配错位）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RowConfigPaths {
+    /// 该行自动 origin（默认/环境）的配置路径。
+    pub auto: Vec<String>,
+    /// 该行手动 origin 的配置路径。
+    pub manual: Vec<String>,
+}
+
+/// 行启停：禁用 = 自动 origin 的配置路径加入排除项 + 该行手动项
+/// enabled=false；开启 = 逆操作。总开关（`SourceConfig::enabled`）不在此
+/// 改写。两个集合都为空 → 明确错误（调用方应先用 `row_exists` 定位行）。
 pub fn set_row_enabled(
     cfg: &mut SourceConfig,
-    auto_paths: &[PathBuf],
-    id: &str,
+    paths: &RowConfigPaths,
     enabled: bool,
 ) -> Result<(), String> {
-    let row_auto_paths: Vec<String> = auto_paths
-        .iter()
-        .filter(|p| logical_key(p) == id)
-        .map(|p| p.display().to_string())
-        .collect();
     let mut manual_touched = false;
     for entry in &mut cfg.additional_paths {
-        if logical_key(Path::new(&entry.path)) == id {
+        if paths.manual.contains(&entry.path) {
             entry.enabled = enabled;
             manual_touched = true;
         }
     }
     if enabled {
-        let row_keys: Vec<String> = row_auto_paths
+        let row_keys: Vec<String> = paths
+            .auto
             .iter()
             .map(|p| logical_key(Path::new(p)))
             .collect();
         cfg.excluded_auto_paths
             .retain(|p| !row_keys.contains(&logical_key(Path::new(p))));
     } else {
-        for path in &row_auto_paths {
+        for path in &paths.auto {
             if !cfg
                 .excluded_auto_paths
                 .iter()
@@ -643,22 +654,25 @@ pub fn set_row_enabled(
             }
         }
     }
-    if row_auto_paths.is_empty() && !manual_touched {
-        return Err("来源已变化，请重试".to_string());
+    if paths.auto.is_empty() && !manual_touched {
+        return Err("该行没有可操作的配置项（来源可能已变化，请重试）".to_string());
     }
     Ok(())
 }
 
-/// 移除仅删除手动项；自动标签保持原启停（§9.3 第 4 条）。
-/// 行内没有手动 origin → 明确错误；id 不存在 → `来源已变化`。
-pub fn remove_manual_from_row(cfg: &mut SourceConfig, id: &str) -> Result<(), String> {
+/// 移除仅删除该行手动项；自动标签保持原启停（§9.3 第 4 条）。
+/// 行内没有手动 origin → 明确错误。
+pub fn remove_manual_from_row(
+    cfg: &mut SourceConfig,
+    paths: &RowConfigPaths,
+) -> Result<(), String> {
     let before = cfg.additional_paths.len();
     cfg.additional_paths
-        .retain(|e| logical_key(Path::new(&e.path)) != id);
+        .retain(|e| !paths.manual.contains(&e.path));
     if cfg.additional_paths.len() < before {
         return Ok(());
     }
-    // 该 id 存在但没有手动 origin（纯自动行）→ 不可移除
+    // 该行没有手动 origin（纯自动行）→ 不可移除
     Err("该行没有可移除的手动目录".to_string())
 }
 

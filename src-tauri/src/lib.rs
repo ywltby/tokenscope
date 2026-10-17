@@ -108,6 +108,10 @@ pub fn run() {
             commands::view_cache_save,
             commands::source_status,
             commands::source_config_set,
+            commands::source_paths_list,
+            commands::source_path_add,
+            commands::source_path_remove,
+            commands::source_path_set_enabled,
             commands::cache_stats,
             commands::refresh_cache,
             commands::ccs_import_defaults,
@@ -289,6 +293,10 @@ pub(crate) fn initialize_business_runtime(
     let t0 = std::time::Instant::now();
     let mut diagnostics = Vec::new();
 
+    // 0) PR3：启动环境快照（CODEX_HOME / CLAUDE_CONFIG_DIR 只在启动时捕获，
+    //    采集轮次不重读——修改环境变量后需要重启）。
+    commands::capture_startup_environment();
+
     // 1) 文件日志：失败按 SF06 的非阻断降级路径（stderr / 关闭输出）。
     if !flags.done(RuntimeStep::Logging) {
         let status = app.state::<LogState>().initialize();
@@ -356,6 +364,45 @@ pub(crate) fn initialize_business_runtime(
     // 7) PR2：采集状态事件桥（业务 Ready 后注册一次；之后任何入口的真实
     //    采集轮次都会向前端投递 collection-status 事件）。
     install_collection_status_bridge(app);
+
+    // 8) PR3：v1 来源目录迁移（设置写锁内一次性；保存成功才向采集发布新
+    //    设置——本轮失败保留旧文件并按 v1 语义读取，不扩大读取范围）。
+    if !flags.done(RuntimeStep::SourcePathMigration) {
+        match tokenscope::settings::settings_path() {
+            Ok(path) => match tokenscope::settings::migrate_source_paths(&path) {
+                Ok(migration) => {
+                    flags.mark(RuntimeStep::SourcePathMigration);
+                    if migration.changed {
+                        let converted = migration
+                            .converted
+                            .iter()
+                            .map(|c| format!("{}: {} → {}", c.agent, c.old_dir, c.path))
+                            .collect::<Vec<_>>()
+                            .join("；");
+                        log::info!("来源目录迁移完成：{converted}");
+                        diagnostics.push(format!(
+                            "旧版自定义目录已保留为追加目录；自动发现已开启，来源启用时默认目录的历史用量也会纳入，统计总量可能增加。迁移明细：{converted}"
+                        ));
+                        for note in &migration.overlap_notes {
+                            diagnostics.push(note.clone());
+                        }
+                    }
+                }
+                Err(e) => {
+                    // 迁移失败：保留旧文件字节，按 v1 语义读取（不扩大范围）；
+                    // 诊断可见，不静默。
+                    flags.mark(RuntimeStep::SourcePathMigration);
+                    let msg = format!("来源目录迁移失败（仍按旧配置读取，未扩大读取范围）：{e:#}");
+                    log::error!("{msg}");
+                    diagnostics.push(msg);
+                }
+            },
+            Err(e) => {
+                flags.mark(RuntimeStep::SourcePathMigration);
+                diagnostics.push(format!("无法定位设置文件，跳过来源目录迁移：{e:#}"));
+            }
+        }
+    }
 
     log::info!(
         "业务初始化完成（日志/窗口/托盘/自同步线程，剩余步骤 {}），{} ms",
