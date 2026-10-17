@@ -1,6 +1,6 @@
 # CI 拆成并行作业与原生 E2E 精简
 
-> 状态：**实施中**（2026-10-17 用户确认执行）。C00–C04 已落地在 `ci/parallel-checks` 上并 patch 递增到 0.3.5；剩余：本 PR 门禁、合入后 main 建立热缓存、用 PR2 首跑记录效果。
+> 状态：**已合入，待最后一项取证**。PR [#12](https://github.com/ywltby/tokenscope/pull/12) 于 2026-10-17 05:50Z 合入 main（`1223ef0`），main 的 CI、Native UI E2E 与 Release 全部通过，`v0.3.5` 已发布，四组 Rust 缓存已在 main 上保存（§5 第 3 条）。剩余：用 PR2 的第一次 CI 记录热缓存效果（§5 第 3 条后半），之后归档。
 > 交付：独立小 PR，patch（只改工作流、复合动作、测试脚本与文档，不改程序）。**在分支 `ci/parallel-checks` 上实施**：它从 `feat/collection-status` 的 `ec8603b` 建立，已带发布去重计划的回填与归档（`4170869`）和 PR2 计划的修改（`ec8603b`）；从 main 另建分支会丢掉这两个提交。排在 [PR2 扫描反馈](2026-10-15-collection-status.md)之前；合入后 `feat/collection-status` 用 `git merge --ff-only origin/main` 跟上即可。
 
 ## 1. 现状（2026-10-17 核实）
@@ -123,6 +123,19 @@ PR 的等待时间取决于两项必需检查 `gate`（ci.yml）与 `native-ui`�
 | Install test（含 4 个升级场景） | [39006263447](https://github.com/ywltby/tokenscope/actions/runs/39006263447) | 12m37s |
 
 PR 等待 = max(`gate`, `native-ui`) ≈ 8m52s。对照拆分前：main `0ee50f4` 的 CI 11m43s、PR #11 的 `gate` 16–17 分钟；本次是四个新作业没有自己缓存的首跑，已达成预期。`upgrade-chain` 在 PR 上按设计跳过（`if: github.event_name == 'workflow_dispatch'`）。
+
+**合入后 main `1223ef0`（2026-10-17，§5 第 3 条前半）**
+
+| 运行 | 作业 | 用时 | 结果 |
+| --- | --- | --- | --- |
+| [CI 39007741994](https://github.com/ywltby/tokenscope/actions/runs/39007741994) | `rust` / `rust-acceptance` / `contracts` / `frontend` | 8m55s / 8m31s / 8m29s / 4m20s | 通过（四组仍是冷缓存首跑） |
+| 同上 | `gate` 汇总 | 2s；工作流合计 9m03s | 通过 |
+| [Native UI E2E 39007741999](https://github.com/ywltby/tokenscope/actions/runs/39007741999) | `native-ui` | 6m42s（拆分前 10m17s） | 通过；工件 56 项检查全过，含 `idle_30s_no_info_lines` 与 DPR 1 / 1.5 / 2 |
+| [Release 39007741954](https://github.com/ywltby/tokenscope/actions/runs/39007741954) | gate 27s、build 4m45s、install-test、升级矩阵（0.1.0 / 0.3.4 × present / deleted）、两条升级链、publish | 合计 6m51s | 通过；`v0.3.5` 预发布于 05:57:31Z，四个资产齐全 |
+
+GitHub 缓存列表已有 main 上的 `rust-workspace-layout`（632 MB）、`rust-acceptance-workspace-layout`（632 MB）、`contracts-workspace-layout`（496 MB）、`frontend-workspace-layout`（113 MB）四份，PR 之后可以命中。旧 `gate-workspace-layout` 缓存不再使用，按 §4 等 GitHub 自动清理。
+
+**待取证（§5 第 3 条后半）**：PR2 第一次 CI 的 `gate`（及四组）与 `native-ui` 用时，填在这里后归档本计划。
 
 ## 6. 执行步骤
 

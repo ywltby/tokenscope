@@ -1,6 +1,6 @@
 # PR2：真实扫描状态与读取动画
 
-> 状态：[审阅第 13 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过；F01–F05 未实施。PR1 已合入 main（`19aae8b`）；按用户 2026-10-16 决定，须等[升级测试补测计划](../archive/implemented/2026-10-16-upgrade-matrix.md)（含原生验收重启修复 UP09）合入后再开工，F04 基于其新的实例生命周期扩展原生验收。**2026-10-17：升级测试补测（v0.3.3）与发布去重（v0.3.4）均已合入，可以开工**；分支 `feat/collection-status` 已从 main `0ee50f4` 建立。用户同日决定先合入 [CI 并行化 patch](2026-10-17-ci-parallel-checks.md)（v0.3.5，F00 移入其中），本 PR 在它合入后 `git merge --ff-only origin/main` 再开工。
+> 状态：[审阅第 13 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过；F01–F05 未实施。PR1 已合入 main（`19aae8b`）；按用户 2026-10-16 决定，须等[升级测试补测计划](../archive/implemented/2026-10-16-upgrade-matrix.md)（含原生验收重启修复 UP09）合入后再开工，F04 基于其新的实例生命周期扩展原生验收。**2026-10-17：升级测试补测（v0.3.3）与发布去重（v0.3.4）均已合入，可以开工**；分支 `feat/collection-status` 已从 main `0ee50f4` 建立。用户同日决定先合入 [CI 并行化 patch](2026-10-17-ci-parallel-checks.md)（F00 移入其中）；它已于 2026-10-17 合入并发布 `v0.3.5`，本分支已快进到 main `1223ef0`，**可以开工**。本 PR 第一次 CI 的用时须回填到 CI 并行化计划 §5。
 > 前置条件：[PR1 目录迁移](../archive/implemented/2026-10-15-workspace-layout.md)已合入 main。实施时从最新 main 创建 `feat/collection-status`，独立 minor 和独立门禁，不依赖 [PR3 来源管理](2026-10-14-source-discovery-and-additional-paths.md)；PR3 在本 PR 合入后再启动。
 
 **Goal：** 扫描由真实工作驱动、至少显示 1 秒，作为可见读取心跳；只有新事实或既有时间窗口规则触发统计刷新，取消常驻具体更新时间。
