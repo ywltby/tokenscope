@@ -199,6 +199,7 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 - [x] S02：固定候选与环境发现、映射核实与隔离解析。（2026-10-18 实施完毕，记录见下）
 - [x] S03：防环、多根与去重。（2026-10-18 实施完毕，记录见下）
 - [x] S04：壳事务与调度。（2026-10-18 实施完毕，记录见下）
+- [x] S05：来源列表前端。（2026-10-18 实施完毕，记录见下）
 - [ ] 固定候选、两种环境变量、映射核实和隔离全部验证。
 - [ ] 手动嵌套拒绝；迁移/环境重叠不阻断且只解析一次。
 - [ ] 联接环闭合；两层去重不丢独立事件。
@@ -247,6 +248,14 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 - **关键测试**：shell——`test_source_config_set_sets_only_app_switch`（旧 dir 忽略 + 追加项/排除项/自动开关逐字段保留）、`source_path_add_rejects_cross_app_and_nested_conflicts`（撞缺省 Codex 默认根、嵌套、同应用已存在、相对路径、整个主目录、合法追加）、`source_path_remove_and_set_enabled_follow_row_semantics`（禁用默认行写排除项不动手动项、禁用手动行、移除只删手动、纯自动行不可移除、开启清空、未知 id 拒绝）、`collection_opts_follow_current_settings_per_round`（每轮计划跟随设置：新目录下一轮出现、停用后计划消失、损坏设置拒绝不扩范围）、`missing_settings_keeps_documented_defaults`（注入主目录展开默认三根）、损坏/不可读设置拒绝；core——行循环测试改 RowConfigPaths。privacy 白名单新增四命令由 `privacy_all_business_commands_reject_before_ready` 自动覆盖 Ready 前拒绝。
 - **执行结果**：`cargo test --locked -p tokenscope-app` 57 用例全绿；`cargo test --locked --workspace` 51 个测试目标全绿；`cargo clippy --locked --workspace --all-targets -- -D warnings` 与 fmt 干净。
 - **边界如实记录**：`source_status` 保持应用级兼容面未改（设置页根行走新 IPC，S05 接前端）；设置迁移结果的一次性提示经启动诊断返回（S05 不重复展示）；`_in` 注入变体仅测试使用。未完成项：无（本项范围内）。
+
+### S05 执行记录（2026-10-18）
+
+- **提交**：S05 代码与测试为 commit `08e93b4`（pre-commit 完整模式全绿）；本记录为紧随其后的文档提交。
+- **落点**：`Settings.vue`「数据源」分区重写——source_paths_list 行列表（多标签、完整路径可复制换行、状态文案含"已停用 · X"）、追加目录为明确动作（草稿失败保留/成功清空/防重复提交）、总开关与自动发现开关即改即存（失败回滚 + mutationEpoch 防晚到覆盖）、行级启停/移除（移除只对手动行）、同键串行队列、"已保存，列表刷新失败"区分提示、环境重启提示、无重新发现按钮；新增壳命令 `source_auto_set`（S04 遗漏的自动开关入口，随本项补齐，含 handler/白名单）；`types.ts` 增 `SourcePathRow`；settingsPreload 预读清单加 source_paths_list；`useUsageQuery.ts` 不变（汇总页 source_status 兼容面保留）。
+- **关键测试**：Settings.test.ts 新 describe「来源目录管理（PR3）」6 例 + 改写 RC03/AP04/UX06/UX08 中依赖旧草稿模型的用例（retry 保留追加草稿、晚到读取不覆盖开关、追加失败不丢其他错误、追加串行、切分区草稿保留、UX08 稳定命名与换行契约）；ccsImport/preload/tooltip mock 同步（预读 6→7 命令）。
+- **执行结果**：`pnpm --dir frontend test` 44 文件 561 用例全绿；`pnpm --dir frontend typecheck`、`format:check`、`build` 干净。
+- **边界如实记录**：原生 E2E 的界面接线验证在 S06（`ui-source-paths` 场景）；浏览器 E2E 契约扩展也在 S06。未完成项：无（本项范围内，E2E 项归 S06）。
 
 ## 8. 执行细则、算法边界与验收门槛
 
