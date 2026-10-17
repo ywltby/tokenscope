@@ -1,4 +1,9 @@
-"""升级起点登记表与选择规则的契约测试：全部离线，远端读取用替身。"""
+"""升级起点登记表与选择规则的契约测试：全部离线，远端读取用替身。
+
+断言里的版本集合来自 `scripts/fixtures/upgrade_baselines_test.json`——一份固定的历史
+快照，而不是仓库里的真实登记表。真实登记表每发布一版都要登记新条目，若契约直接读它，
+每次登记都得连测试一起改；这里只验证规则本身，登记动作另有 `test_upgrade_workflow.py`
+和 `upgrade_baselines.py check` 覆盖。"""
 
 import copy
 import json
@@ -40,10 +45,12 @@ class FakeApi:
 
 
 class RegistryCase(unittest.TestCase):
+    TEST_REGISTRY = baselines.ROOT / "scripts/fixtures/upgrade_baselines_test.json"
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="tokenscope-baselines-")
         self.addCleanup(self.temp.cleanup)
-        self.registry = baselines.load_registry()
+        self.registry = baselines.load_registry(self.TEST_REGISTRY)
 
     def write(self, payload):
         path = Path(self.temp.name) / "upgrade_baselines.json"
