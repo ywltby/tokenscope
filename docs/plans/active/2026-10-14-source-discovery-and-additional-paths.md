@@ -296,6 +296,8 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 - **补修 4（界面）**：`SourcePathRow.state` 增 `conflicted`；设置页冲突行显示「冲突」，诊断写明对方路径；同应用重叠行显示"与 X 重叠，文件由 X 读取"。前端 563 用例全绿（含冲突行渲染用例）。
 - **补修 5（文档）**：stats-semantics §2.2 改写为"跨应用根冲突 → 发现层整组隔离"（含先到者获胜的机理说明与台账兜底定位）、同应用嵌套补读取去向诊断；CLAUDE.md SF09 与 DESIGN.md 状态清单同步。
 - **测试架加固（`2205827`，补修后 CI 取证）**：ui-system 的 `all_time_restore_does_not_query` / `page_switch_preserves_scroll_and_query` 一次失败，排查结论：预设切换存在**迟到的重复批次**（失败运行在切换后 1.6 s 出现第二个采集轮；通过的运行同样有查询 begin 无汇总完成的批次）——既有竞态，非补修引入（补修不触及查询路径，夹具数据写入与计划逐项一致）；失败运行的证据另记录 runner 窗口最小化被 OS 接受但页面 1.2 s 后仍报告可见（`minimizedVisibility=visible`），窗口时序放大了竞态。修复：恢复检查前先等查询身份稳定（2 秒无变化）再取基线，检查只对"恢复本身不触发查询"负责；切页检查保持对照切页前稳定基线的完整强度。补修二进制本地 ui-system 15/15。
+- **稳定基线判定收紧（复核 P2，`1b9a5d0`）**：`2205827` 的 `stableQueryId()` 在身份持续变化到期后仍返回最后一个 ID、两次读到空身份也视为稳定，前置条件可被默认放行。改为 `native-scenario.mjs` 的纯函数 `waitStableQuery`：汇总与明细 query_id 均非空且一致才算有效读数，同一身份连续保持 2 秒才返回，10 秒内未稳定即抛错并附观察到的身份序列；`native-scenario.test.mjs` 补正常稳定、持续变化、空身份、汇总明细不一致 4 例。预设切换重复批次在 PR3 归档时转入整合计划登记为缺陷。
+- **定时采集唤醒丢失（`9c41c57`，补修期间提交钩子取证）**：壳测 `collect_loop_follows_updated_interval_after_wake` 一次失败（唤醒后 510ms，旧间隔 500ms）。根因是 `run_collect_loop` 先读间隔、`CollectSignal::wait` 进入时才取版本基线，二者之间的设置唤醒被并入基线而丢失，按旧间隔多等一轮。改为读间隔前取版本、`wait` 以其为基线；新增确定性回归 `collect_signal_wake_before_wait_is_not_lost`。只影响调度时序。
 - **验证**：`source_discovery` 18/18、`source_paths_collection` 16/16、壳 57 用例、前端 563 用例；fmt/双 feature clippy/两套 workspace 测试全绿。版本不递增；`upgrade-chain`、真实性能基准等待验项维持 §23.3 的既有披露（同应用父根为手动时子根映射丢失，按审阅意见本 PR 不处理）。预设切换的重复批次竞态如实披露，留作后续观察，不在本 PR 扩大范围。
 
 ## 8. 执行细则、算法边界与验收门槛
