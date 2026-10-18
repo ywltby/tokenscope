@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import { nativeUiRefresh } from "./contracts/native-ui-refresh.mjs";
 import { nativeCollectionStatus } from "./contracts/native-collection-status.mjs";
+import { nativeSourcePaths } from "./contracts/native-source-paths.mjs";
 import { nativeUiRelaunch, nativeUiSystem } from "./contracts/native-ui-system.mjs";
 import { decodePng } from "./lib/png.mjs";
 import {
@@ -1314,6 +1315,8 @@ const scenarios = {
   "ui-system": nativeUiSystem,
   // PR2：真实采集生命周期 + 读取显示期 + 失败恢复 + 翻页保护（验收注入驱动慢轮次与失败）。
   "ui-collection-status": nativeCollectionStatus,
+  // PR3（§9.6 第 2 条）：来源目录主线——UI 追加手动目录、真实下一轮统计、重启后保留。
+  "ui-source-paths": nativeSourcePaths,
   // §4.8 第 7 条：多路重启压力验证，只在本地跑（CI 由各场景原有的重启覆盖）。
   "ui-relaunch": nativeUiRelaunch,
   // 在同一个驱动进程内完成等待；部分终端会在父进程结束时回收其原生子进程。
@@ -2502,7 +2505,7 @@ async function main() {
       scenarioError = e;
       ck.add("scenario_executed", false, String(e.message ?? e));
       ev.error = String(e.stack ?? e).slice(0, 800);
-      if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-relaunch") {
+      if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-relaunch" || SCENARIO === "ui-source-paths") {
         // S00：失败截图/DOM 取证有短上限，无法完成就跳过并记原因（计划 §9.1 第 5 条）
         try {
           await withTimeout(
@@ -2534,7 +2537,11 @@ async function main() {
         closeBrowser: () => closeBrowserBounded(inst.browser),
         copyAppLogs: () => {
           // UI 刷新验收保留合成来源的应用日志（与正常收尾同一份复制逻辑）
-          if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system") {
+          if (
+            SCENARIO === "ui-refresh" ||
+            SCENARIO === "ui-system" ||
+            SCENARIO === "ui-source-paths"
+          ) {
             const logs = path.join(root, "tokenscope", "logs");
             if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
           }
@@ -2580,9 +2587,9 @@ async function main() {
     }
   }
 
-  // UI 刷新验收保留合成来源的应用日志，失败也能核对采集/查询实际发生过。
+  // UI 刷新/来源目录验收保留合成来源的应用日志，失败也能核对采集/查询实际发生过。
   // 使用 copyDirSync 代替 fs.cpSync 避免 Windows GBK 环境下 C++ 绑定因中文路径编码产生乱码目录。
-  if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system") {
+  if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-source-paths") {
     const logs = path.join(root, "tokenscope", "logs");
     if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
   }

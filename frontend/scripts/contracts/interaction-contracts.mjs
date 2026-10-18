@@ -37,6 +37,8 @@ export const REQUIRED_CONTRACTS = [
   "prepaint_theme_has_correct_canvas",
   // AP08 扩充失败反例（写出失败的写、晚到的失败读、来源检测失败、定价 DTO 分态）
   "source_save_rejected_error_is_row_scoped",
+  // PR3 §5：来源目录管理——键盘添加/取消/嵌套拒绝/合并标签/行停用持久/长路径。
+  "source_paths_management_contract",
   "close_action_write_failure_rolls_back_to_confirmed",
   "late_failed_settings_read_does_not_downgrade_saved",
   "source_status_failure_recovers_without_losing_summary",
@@ -438,15 +440,24 @@ const IMPL = {
         text.includes("设置读取失败") && text.includes("设置文件损坏（合成）"),
         text.match(/设置读取失败[^\n]{0,60}/)?.[0] ?? "未找到错误条",
       );
-      const saveButtons = page.locator("button", { hasText: "保存" });
-      const firstDisabled = await saveButtons
-        .first()
-        .evaluate((el) => el.disabled === true || el.className.includes("disabled"));
+      // PR3：settings_get 失败只影响开关初值；来源列表（独立区块）照常渲染。
+      const agentSwitch = page
+        .locator('[aria-label="Claude Code 启用"]')
+        .first();
       ctx.record(
         "settings_failure_retry_restores_all_controls",
-        "失败态：来源保存被禁用并说明原因",
-        firstDisabled === true,
-        `首个保存按钮 disabled=${firstDisabled}`,
+        "失败态：来源开关仍渲染（读取失败不拆掉控件）",
+        (await agentSwitch.count()) === 1,
+        `开关=${await agentSwitch.count()}`,
+      );
+      const rowVisible = await page
+        .locator(".effective-path", { hasText: "C:/Users/dev/.claude/projects" })
+        .count();
+      ctx.record(
+        "settings_failure_retry_restores_all_controls",
+        "失败态：来源行列表照常渲染",
+        rowVisible >= 1,
+        `来源行=${rowVisible}`,
       );
 
       // 真实点击错误条"重试"
@@ -515,19 +526,19 @@ const IMPL = {
     const cases = [
       {
         key: "source",
-        // U05：来源目录在「数据源」分区。
+        // U05：来源开关在「数据源」分区（PR3：改完即存）。
         section: "数据源",
         action: async (session) => {
-          const input = session.page.locator('[aria-label="Claude Code 日志目录"]').first();
-          await input.fill("C:/saved-by-user");
-          await realClick(session.page, session.page.locator("button", { hasText: "保存" }));
+          const sw = session.page.locator('[aria-label="Claude Code 启用"]').first();
+          await sw.click();
+          await session.page.waitForTimeout(700);
         },
         verify: async (session) => {
           const v = await session.page
-            .locator('[aria-label="Claude Code 日志目录"]')
+            .locator('[aria-label="Claude Code 启用"]')
             .first()
-            .inputValue();
-          return { pass: v === "C:/saved-by-user", detail: `输入框值=${v}` };
+            .getAttribute("aria-checked");
+          return { pass: v === "false", detail: `开关 aria-checked=${v}` };
         },
       },
       {
@@ -1577,7 +1588,7 @@ const IMPL = {
       await gotoSettingsSection(page, "数据源");
       const claude = sourceBlockOf(page, "Claude Code");
       const codex = sourceBlockOf(page, "Codex");
-      const input = page.locator('[aria-label="Claude Code 日志目录"]').first();
+      const input = page.locator("input#source-add-claude").first();
       ctx.record(
         "source_save_rejected_error_is_row_scoped",
         "两行来源都已渲染（错误归属可区分的前提）",
@@ -1585,18 +1596,19 @@ const IMPL = {
         `Claude 行=${await claude.count()} Codex 行=${await codex.count()}`,
       );
 
-      await input.fill("D:/conflict");
+      // PR3：追加被后端拒绝（合成口径：嵌套目录）→ 错误只归属该来源的追加区。
+      await input.fill("C:/Users/dev/nested");
       await page.waitForTimeout(150);
       const messagesBefore = await page.locator(".n-message").allInnerTexts();
-      await realClick(page, claude.locator("button", { hasText: "保存" }));
+      await realClick(page, page.locator('[aria-label="Claude Code 添加目录"]').first());
       await page.waitForTimeout(700);
 
-      const writes = session.ipcCalls.filter((x) => x.cmd === "source_config_set");
+      const adds = session.ipcCalls.filter((x) => x.cmd === "source_path_add");
       ctx.record(
         "source_save_rejected_error_is_row_scoped",
-        "保存真的按行写入（携带用户当前输入）",
-        writes.length === 1 && writes[0].args?.dir === "D:/conflict",
-        writes.map((w) => `${w.args?.agent}:${w.args?.dir}`).join(" | ") || "无写入",
+        "追加真的发出（携带用户当前输入）",
+        adds.length === 1 && adds[0].args?.path === "C:/Users/dev/nested",
+        adds.map((w) => w.args?.path).join(" | ") || "无调用",
       );
 
       const claudeErrCount = await claude.locator(".source-error").count();
@@ -1606,19 +1618,19 @@ const IMPL = {
       const codexErrCount = await codex.locator(".source-error").count();
       ctx.record(
         "source_save_rejected_error_is_row_scoped",
-        "拒绝原因只显示在被拒的来源行（不跨行重复渲染）",
+        "拒绝原因只显示在被拒的来源块（不跨块重复渲染）",
         claudeErrCount === 1 &&
-          claudeErrText.includes("来源目录冲突") &&
+          claudeErrText.includes("嵌套") &&
           codexErrCount === 0 &&
-          !(await codex.innerText()).includes("来源目录冲突"),
-        `Claude 行错误=${claudeErrCount} 文本="${claudeErrText.replace(/\n/g, " ").slice(0, 60)}"；Codex 行错误=${codexErrCount}`,
+          !(await codex.innerText()).includes("嵌套"),
+        `Claude 块错误=${claudeErrCount} 文本="${claudeErrText.replace(/\n/g, " ").slice(0, 60)}"；Codex 块错误=${codexErrCount}`,
       );
 
       const keptValue = await input.inputValue();
       ctx.record(
         "source_save_rejected_error_is_row_scoped",
-        "被拒后保留用户输入（可直接修改后重试）",
-        keptValue === "D:/conflict",
+        "被拒后保留用户草稿（可直接修改后重试）",
+        keptValue === "C:/Users/dev/nested",
         `输入框值=${keptValue}`,
       );
 
@@ -1631,30 +1643,159 @@ const IMPL = {
         `消息=${messagesAfterFail.join(" | ") || "无"}`,
       );
 
-      await realClick(page, claude.locator("button", { hasText: "保存" }));
+      // 修改为合法路径重试：成功后错误消失、草稿清空、列表出现新行。
+      await input.fill("D:/history/claude/projects");
+      await realClick(page, page.locator('[aria-label="Claude Code 添加目录"]').first());
       await page.waitForTimeout(900);
       const afterRetry = await claude.locator(".source-error").count();
-      const messagesAfterOk = await page.locator(".n-message").allInnerTexts();
+      const newRow = page.locator(".effective-path", { hasText: "D:/history/claude/projects" });
       ctx.record(
         "source_save_rejected_error_is_row_scoped",
-        "重试保存成功后错误消失并给出成功提示",
-        afterRetry === 0 &&
-          messagesAfterOk.some((t) => t.includes("已保存 Claude Code 来源配置")) &&
-          (await input.inputValue()) === "D:/conflict",
-        `重试后错误=${afterRetry}；提示=${messagesAfterOk.join(" | ") || "无"}；输入=${await input.inputValue()}`,
+        "重试追加成功后错误消失且列表出现新行",
+        afterRetry === 0 && (await newRow.count()) >= 1,
+        `错误=${afterRetry} 新行=${await newRow.count()}`,
       );
-
-      await ctx.shot("source_save_rejected_error_is_row_scoped", session, "row-scoped");
-      ctx.finishSession(session);
     } finally {
       await session.close();
     }
   },
 
-  /**
-   * AP04：关闭动作写入被后端拒绝——界面不得停留在一个并未写入的选择上
-   *（回退到已确认值），错误可见，再次选择可重试成功。
-   */
+  async source_paths_management_contract(ctx) {
+    const session = await ctx.open({
+      fixture: "source-paths-management",
+      viewport: VIEWPORTS.desktop,
+      theme: "light",
+    });
+    try {
+      await openSettings(session);
+      const page = session.page;
+      await gotoSettingsSection(page, "数据源");
+      const claude = sourceBlockOf(page, "Claude Code");
+
+      // 1) 合并行多标签 + 长路径行渲染（后端解析，前端只展示）。
+      const mergedTags = await claude.locator(".source-row").first().locator(".origin-tag").allInnerTexts();
+      ctx.record(
+        "source_paths_management_contract",
+        "合并行展示多标签（默认自动 + 手动）",
+        mergedTags.join(",") === "默认自动,手动",
+        `标签=${mergedTags.join(",")}`,
+      );
+      const longPath = page.locator(".effective-path", { hasText: "tokenscope-monorepo" }).first();
+      const longVisible = (await longPath.count()) === 1;
+      ctx.record(
+        "source_paths_management_contract",
+        "超长路径行完整可读（不省略）",
+        longVisible,
+        `长路径行=${await page.locator(".source-row").count()} 行中可见=${longVisible}`,
+      );
+
+      // 2) 键盘添加：输入 → Enter 提交（追加是明确动作）。
+      const addInput = page.locator("input#source-add-claude");
+      await addInput.fill("D:/history/claude/projects");
+      await addInput.press("Enter");
+      await page.waitForTimeout(500);
+      const addCalls = session.ipcCalls.filter((x) => x.cmd === "source_path_add");
+      ctx.record(
+        "source_paths_management_contract",
+        "键盘 Enter 触发追加（明确动作）",
+        addCalls.length === 1 && addCalls[0].args?.path === "D:/history/claude/projects",
+        addCalls.map((c) => c.args?.path).join(" | ") || "无调用",
+      );
+      // 合成 fixture：history 路径放行 → 列表重读出现新行，草稿清空
+      const newRow = page.locator(".effective-path", { hasText: "D:/history/claude/projects" });
+      ctx.record(
+        "source_paths_management_contract",
+        "追加成功后列表出现新行",
+        (await newRow.count()) >= 1,
+        `新行可见=${await newRow.count()}`,
+      );
+
+      // 3) 取消：清空输入不触发调用（追加是明确动作，无输入不提交）。
+      await addInput.fill("D:/draft-only");
+      await addInput.fill("");
+      await page.waitForTimeout(300);
+      const addCallsAfterCancel = session.ipcCalls.filter((x) => x.cmd === "source_path_add");
+      ctx.record(
+        "source_paths_management_contract",
+        "清空输入不触发追加（无静默提交）",
+        addCallsAfterCancel.length === 1,
+        `追加调用=${addCallsAfterCancel.length}`,
+      );
+
+      // 4) 嵌套拒绝：C:/Users/dev 下的非 history 路径被后端拒绝，草稿保留。
+      await addInput.fill("C:/Users/dev/nested");
+      await page.locator('[aria-label="Claude Code 添加目录"]').first().click();
+      await page.waitForTimeout(500);
+      const errText = await page
+        .locator(".source-error", { hasText: "嵌套" })
+        .first()
+        .innerText()
+        .catch(() => "");
+      const kept = await addInput.inputValue();
+      ctx.record(
+        "source_paths_management_contract",
+        "嵌套拒绝可见且草稿保留",
+        errText.includes("嵌套") && kept === "C:/Users/dev/nested",
+        `错误="${errText.replace(/\n/g, " ").slice(0, 60)}" 草稿="${kept}"`,
+      );
+
+      // 5) 行停用持久：停用手动行 → set_enabled 调用 + 列表重读后仍停用。
+      const manualRow = page
+        .locator(".source-row")
+        .filter({ hasText: "D:/history/claude/projects" })
+        .first();
+      const rowSwitch = manualRow.locator('[role="switch"]').first();
+      await rowSwitch.click();
+      await page.waitForTimeout(600);
+      const setCalls = session.ipcCalls.filter((x) => x.cmd === "source_path_set_enabled");
+      ctx.record(
+        "source_paths_management_contract",
+        "行停用写入 source_path_set_enabled",
+        setCalls.length === 1 && setCalls[0].args?.enabled === false,
+        setCalls.map((c) => `${c.args?.id}:${c.args?.enabled}`).join(" | ") || "无",
+      );
+
+      // 6) 重启（页面重载 = 隔离 profile 内的持久化）后停用状态仍在。
+      await session.page.reload();
+      await page.waitForTimeout(1500);
+      await openSettings(session);
+      await gotoSettingsSection(page, "数据源");
+      const manualRowAfter = page
+        .locator(".source-row")
+        .filter({ hasText: "D:/history/claude/projects" })
+        .first();
+      const switchOn = await manualRowAfter.locator('[role="switch"]').getAttribute("aria-checked");
+      ctx.record(
+        "source_paths_management_contract",
+        "停用状态跨重载持久（fixture 状态保持）",
+        switchOn === "false",
+        `aria-checked=${switchOn}`,
+      );
+
+      // 7) 移除按钮：含手动 origin 的行可移除（合并行移除只删手动标签）；
+      //    纯默认行（Codex）无移除按钮。
+      const mergedRemove = await claude
+        .locator(".source-row")
+        .first()
+        .locator("button", { hasText: "移除" })
+        .count();
+      const manualRemove = await manualRowAfter.locator("button", { hasText: "移除" }).count();
+      const codexRemove = await page
+        .locator(".source-block")
+        .filter({ hasText: "Codex" })
+        .locator("button", { hasText: "移除" })
+        .count();
+      ctx.record(
+        "source_paths_management_contract",
+        "移除按钮只出现在含手动 origin 的行",
+        mergedRemove === 1 && manualRemove === 1 && codexRemove === 0,
+        `合并行移除=${mergedRemove} 手动行移除=${manualRemove} 默认行移除=${codexRemove}`,
+      );
+    } finally {
+      await session.close();
+    }
+  },
+
   async close_action_write_failure_rolls_back_to_confirmed(ctx) {
     const session = await ctx.open({
       fixture: "close-action-write-failure",
@@ -1773,21 +1914,20 @@ const IMPL = {
         `挂起键=${pending.join(",") || "无"}`,
       );
 
-      // 挂起期间用户保存来源配置并成功
-      const input = page.locator('[aria-label="Claude Code 日志目录"]').first();
-      await input.fill("C:/saved-by-user");
-      await realClick(page, sourceBlockOf(page, "Claude Code").locator("button", { hasText: "保存" }));
+      // 挂起期间用户切来源总开关并成功（mutation 已发生）
+      const sw = page.locator('[aria-label="Claude Code 启用"]').first();
+      await sw.click();
       await page.waitForTimeout(700);
       const savedWrites = session.ipcCalls.filter((x) => x.cmd === "source_config_set");
       ctx.record(
         "late_failed_settings_read_does_not_downgrade_saved",
-        "挂起期间用户保存来源配置成功（mutation 已发生）",
-        savedWrites.length === 1 && savedWrites[0].args?.dir === "C:/saved-by-user",
-        `写入=${savedWrites.map((w) => `${w.args?.agent}:${w.args?.dir}`).join(" | ") || "无"}`,
+        "挂起期间用户保存来源总开关成功（mutation 已发生）",
+        savedWrites.length === 1 && savedWrites[0].args?.enabled === false,
+        `写入=${savedWrites.map((w) => `${w.args?.agent}:${w.args?.enabled}`).join(" | ") || "无"}`,
       );
 
       const unknownBefore = ((await page.locator("#app").innerText()).match(/未知/g) ?? []).length;
-      const valueBefore = await input.inputValue();
+      const valueBefore = await sw.getAttribute("aria-checked");
       // 释放挂起的读取——以失败结束（旧读取的拒绝不得成为当前状态）
       session.fixture.failDeferred(pending[0], "旧读取失败（合成）");
       await page.waitForTimeout(700);

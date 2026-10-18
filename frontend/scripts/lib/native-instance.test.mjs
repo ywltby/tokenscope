@@ -82,7 +82,8 @@ describe("端口计算（§4.8 第 1 条）", () => {
     const unique = [...new Set(bases)].sort((a, b) => a - b);
     // 9470 复活为 ui-collection-status 的起始端口（旧用途是强制缩放 1 轮，
     // 已因证据重复删除）；该场景 3 次启动用 9471–9473。
-    expect(unique).toEqual([9451, 9460, 9470, 9480, 9490]);
+    // PR3：ui-source-paths 起始 9455（2 次启动用 9455–9456）。
+    expect(unique).toEqual([9451, 9455, 9460, 9470, 9480, 9490]);
     // 单步最多 3 次启动：ui-refresh 首次 + 2 次重启，ui-system 首次 + 1 次重启，
     // ui-collection-status 首次 + 2 次重启。
     const stepSize = 3;

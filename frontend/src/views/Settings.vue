@@ -495,7 +495,8 @@ function rowsOf(agent: AgentId): SourcePathRow[] {
   return sourceRows.value.filter((r) => r.agent === agent);
 }
 
-/** 移除只对手动行可用：没有手动 origin 的行（纯默认/环境）不显示移除。 */
+/** 移除用于含手动 origin 的行（合并行移除只删手动标签，默认标签保留）；
+ * 纯默认/环境行没有移除（用行停用表达）。 */
 function isRemovable(row: SourcePathRow): boolean {
   return row.origins.includes("手动");
 }
@@ -529,6 +530,7 @@ function setAgentEnabled(agent: AgentId, v: boolean): void {
     try {
       await invoke("source_config_set", { agent, enabled: v, dir: null });
       if (disposed) return;
+      emit("data-changed"); // 通知链与旧「保存」路径同源（汇总页重建查询）
       refreshAfterSaveError.value = null;
     } catch (e) {
       if (disposed) return;
