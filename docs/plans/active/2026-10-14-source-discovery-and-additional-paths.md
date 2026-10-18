@@ -200,13 +200,14 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 - [x] S03：防环、多根与去重。（2026-10-18 实施完毕，记录见下）
 - [x] S04：壳事务与调度。（2026-10-18 实施完毕，记录见下）
 - [x] S05：来源列表前端。（2026-10-18 实施完毕，记录见下）
-- [ ] 固定候选、两种环境变量、映射核实和隔离全部验证。
-- [ ] 手动嵌套拒绝；迁移/环境重叠不阻断且只解析一次。
-- [ ] 联接环闭合；两层去重不丢独立事件。
-- [ ] 来源集合、列表、诊断一致；停用历史保留。
-- [ ] 改前改后性能有记录；真实基准有证据或待验标记。
-- [ ] 旧自定义 dir 与 CODEX_HOME 行为变更、升级用量并集、停用保留、重启说明、隐私范围及清单齐全。
-- [ ] PR3 自身版本、完整门禁、安装升级与原生工件验证。
+- [x] S06：浏览器、原生与性能。（2026-10-18 实施完毕，记录见下）
+- [x] 固定候选、两种环境变量、映射核实和隔离全部验证。（S02/source_discovery 14 例，记录见 S02）
+- [x] 手动嵌套拒绝；迁移/环境重叠不阻断且只解析一次。（S01/S03/S04 测试，记录见各项）
+- [x] 联接环闭合；两层去重不丢独立事件。（S03/source_paths_collection 14 例，记录见 S03）
+- [x] 来源集合、列表、诊断一致；停用历史保留。（S04 壳接线 + S05 列表 + 采集隔离语义，记录见各项）
+- [x] 改前改后性能有记录；真实基准有证据或待验标记。（S06：合成对比已记录，真实基准待验，记录见下）
+- [ ] 旧自定义 dir 与 CODEX_HOME 行为变更、升级用量并集、停用保留、重启说明、隐私范围及清单齐全。（代码/测试已齐，文档与清单更新归 S07）
+- [ ] PR3 自身版本、完整门禁、安装升级与原生工件验证。（S07）
 
 ### S00 执行记录（2026-10-18）
 
@@ -256,6 +257,18 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 - **关键测试**：Settings.test.ts 新 describe「来源目录管理（PR3）」6 例 + 改写 RC03/AP04/UX06/UX08 中依赖旧草稿模型的用例（retry 保留追加草稿、晚到读取不覆盖开关、追加失败不丢其他错误、追加串行、切分区草稿保留、UX08 稳定命名与换行契约）；ccsImport/preload/tooltip mock 同步（预读 6→7 命令）。
 - **执行结果**：`pnpm --dir frontend test` 44 文件 561 用例全绿；`pnpm --dir frontend typecheck`、`format:check`、`build` 干净。
 - **边界如实记录**：原生 E2E 的界面接线验证在 S06（`ui-source-paths` 场景）；浏览器 E2E 契约扩展也在 S06。未完成项：无（本项范围内，E2E 项归 S06）。
+
+### S06 执行记录（2026-10-18）
+
+- **提交**：S06 代码与测试为 commit `9861019`（pre-commit 完整模式全绿，含端口分配契约同步）；本记录为紧随其后的文档提交。
+- **落点**：浏览器 E2E——`ui-contracts.mjs` 白名单 +6 来源命令与可变行状态（list/add/remove/set_enabled/auto_set/config_set 联动）；`interaction-contracts.mjs` 新增 `source_paths_management_contract`（合并标签、Enter 添加、取消不调用、父/子拒绝保草稿、停用跨重载持久、移除按钮语义）并改写 4 条依赖旧保存模型的契约；`ui-refresh-contract.mjs` 的保存步骤改为点击来源总开关等 `source_config_set`；`Settings.vue` 开关保存成功补发 `data-changed`（与旧保存通知链同源）。原生 E2E——新增 `contracts/native-source-paths.mjs` 场景 `ui-source-paths` 并接入驱动器（应用日志/失败取证收集、`native-instance.test.mjs` 端口分配契约）与 `.github/workflows/ui-e2e.yml`（端口 9455，进程内 2 次启动用 9455–9456）。性能取证——新增 `perf_synthetic_rounds.rs`（合成树 + 隔离目录，改前 worktree 复用同一热轮用例）。
+- **关键测试**：`source_paths_management_contract` 10 断言；`ui_refresh_lifecycle` 8 断言（含新增"来源保存通知保留的汇总页"）；`ui-source-paths` 场景 12 检查（默认行在列、UI 追加手动行、追加后默认行不变、合成请求自动可见不点刷新、汇总/明细同一查询、重启后手动行与默认行保留、15 秒稳定窗口计数不重复、真实数据指纹不变）；`perf_synthetic_rounds` 2 例。
+- **执行结果**：
+  - 浏览器 E2E `pnpm --dir frontend test:e2e`：6 条契约全绿（`ui_refresh_lifecycle` 8、`ui_refresh_clock` 7、`ui_adjustment_shapes` 13、`ui_date_keyboard_matrix` 121、`ui_control_material` 29、`source_paths_management_contract` 10），基线场景 0 契约违例。
+  - 原生场景本机实测（`--scenario ui-source-paths --events 4 --port 9455`）：12/12 检查通过；合成请求写入后 **4850 ms** 自动可见（requests 6→7，无手动刷新）；重启后计数仍 7；`real_untouched` 指纹不变；2 次启动退出确认通过（中间重启为干净退出码 0）。
+  - 性能（§4.4，本机 release，合成 40 文件/12 000 请求/5 天，单 Claude 根，隔离目录）：改前（基线 worktree `20b0c4c`）热轮 3 次中位数 **112 ms**（108/112/116）、冷轮 1715 ms；改后热轮中位数 **117 ms**（107/117/127）、冷轮 1752 ms——差异在运行间噪声带内，无"明显变慢"定位触发；来源解析单独计时中位数 **507 µs**（274–713 µs，毫秒级达标）。
+- **调查记录（不用重跑碰绿）**：`ui_refresh_lifecycle` 首跑超时的根因是 `run-ui-refresh-e2e.mjs` 以 `vite preview` 服务**既有 dist**，而 `data-changed` 补发是未提交的源码改动、不在旧包内——重建后原样通过，未放宽任何断言或超时。
+- **边界如实记录**：真实数据性能基准（`perf_real_data` opt-in）未运行，按 §4.4 标**待验**；远程 Native UI E2E（含新场景）待本 PR CI 属交付条件；S03 遗留的"权限拒绝采集 fixture"未在本场景注入（Windows ACL 注入易残留），`NoPermission` 分类仍由发现层测试覆盖，保持待验披露。未完成项：无（本项范围内）。
 
 ## 8. 执行细则、算法边界与验收门槛
 
