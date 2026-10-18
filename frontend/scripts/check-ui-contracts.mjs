@@ -733,6 +733,13 @@ async function openSession(opts) {
   page.on("pageerror", (e) => {
     if (!/ResizeObserver loop/.test(e.message)) consoleErrors.push(`pageerror: ${e.message}`);
   });
+  // 失败取证用：同源请求失败（如主应用代码块加载失败）。外联请求由路由拦截单独记录，
+  // 这里只作证据，不参与任何断言。
+  const failedRequests = [];
+  page.on("requestfailed", (request) => {
+    if (request.url().startsWith(base))
+      failedRequests.push(`${request.url()} ${request.failure()?.errorText ?? ""}`.trim());
+  });
 
   return {
     page,
@@ -745,6 +752,7 @@ async function openSession(opts) {
     ipcCalls,
     unknownCommands,
     externalRequests,
+    failedRequests,
     get pageErrors() {
       return consoleErrors;
     },
