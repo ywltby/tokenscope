@@ -234,7 +234,8 @@ sys.exit(37 if "--fail" in sys.argv else 0)
         if ($null -ne $Verify) { & $Verify $Case $null | Out-Null } }
     function Check-OldUsage { param($Case,$Context=$null) $script:Trace.Add("old-facts:"+$Case.JumpOrigin) }
     function Check-CurrentUsage { param($Case,$Context=$null)
-        $script:Trace.Add("check-current:"+$Case.JumpOrigin+":"+$Case.OldHistorySchema) }
+        $script:Trace.Add("check-current:"+$Case.JumpOrigin+":"+$Case.OldHistorySchema+":"+
+            $Case.JumpSettingsFormat+"->"+$Case.JumpTargetSettingsFormat) }
     function Save-OldUpgradeState { param($Case) $script:Trace.Add("save-old") }
     function Install-UpgradeCurrent { param($Case) $script:Trace.Add("install-current") }
     function Assert-PreservedBeforeLaunch { param($Case) $script:Trace.Add("preserved") }
@@ -264,7 +265,7 @@ sys.exit(37 if "--fail" in sys.argv else 0)
         $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:old,old-facts:0.1.0,save-old,"
         if ($state -eq "deleted") { $expected += "delete-source," }
         $expected += "install-current,preserved,consent,jump:0.3.3,lifecycle:current,"
-        $expected += "check-current:0.3.3:,lifecycle:restart,check-current:0.3.3:,jump:current:True,case:True"
+        $expected += "check-current:0.3.3::1->1,lifecycle:restart,check-current:0.3.3::1->1,jump:current:True,case:True"
         Check (($script:Trace -join ",") -eq $expected) "$state：旧版先产数据，再直接覆盖升级并重启复核"
     }
     foreach ($failure in @("install-baseline","lifecycle:old","lifecycle:current","lifecycle:restart")) {
@@ -279,24 +280,27 @@ sys.exit(37 if "--fail" in sys.argv else 0)
     }
 
     # 连续升级链：起点集合按版本升序逐跳，只播种一次，失败即中止后续跳。
+    # 当前版本设置格式取 2：中间跳装的是旧版，必须按『上一跳格式 → 本跳格式』
+    # 核对（1->1），只有装当前包的那一跳才是 1->2（v0.5.0 发布失败的回归）。
     foreach ($state in @("present","deleted")) {
         $case = New-UpgradeCase -RepoRoot $repoRoot -InstallerPath (Join-Path $contractRoot "current-setup.exe") `
             -AppVersion "0.3.3" -ExpectedCommit ("a"*40) -SourceState $state -Origin "0.1.0" `
             -EvidenceRoot (Join-Path $contractRoot ("chain-"+$state)) `
-            -Metadata ([pscustomobject]@{ executable_sha256=("b"*64); persistent_format=([pscustomobject]@{ settings_format="1" }) }) `
+            -Metadata ([pscustomobject]@{ executable_sha256=("b"*64); persistent_format=([pscustomobject]@{ settings_format="2" }) }) `
             -DataDir $dataRoot -TempRoot $tempRoot
         $script:Trace.Clear(); $script:FailAt = ""
         Invoke-UpgradeChain -Case $case
         $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:chain-00-old,old-facts:0.1.0,save-old,jump:chain-00-old:True,"
         if ($state -eq "deleted") { $expected += "delete-source," }
         $expected += "jump:0.3.2,download:0.3.2,install:0.3.2,consent,"
-        $expected += "lifecycle:chain-01,check-current:0.3.2:4,jump:chain-01:True,"
-        $expected += "jump:0.3.3,install:0.3.3,installed,consent,lifecycle:chain-02,check-current:0.3.3:4,"
-        $expected += "jump:chain-02:True,lifecycle:restart,check-current:0.3.3:4,jump:restart:True,case:True"
+        $expected += "lifecycle:chain-01,check-current:0.3.2:4:1->1,jump:chain-01:True,"
+        $expected += "jump:0.3.3,install:0.3.3,installed,consent,lifecycle:chain-02,check-current:0.3.3:4:1->2,"
+        $expected += "jump:chain-02:True,lifecycle:restart,check-current:0.3.3:4:1->2,jump:restart:True,case:True"
         Check (($script:Trace -join ",") -eq $expected) "$state：链路逐跳覆盖安装并只播种一次"
         Check ((@($case.Chain) -join "->") -eq "0.1.0->0.3.2->0.3.3") "链路记录起点集合与当前版本"
         Check ((@($script:Trace | Where-Object { $_ -like "prepare-old*" }).Count) -eq 1) "$state：链路只播种一次来源日志"
     }
+    Expect-Failure { Get-JumpSettingsFormat -Case $case -Version "9.9.9" } "未登记设置格式的版本被拒绝"
     $case = New-UpgradeCase -RepoRoot $repoRoot -InstallerPath (Join-Path $contractRoot "current-setup.exe") `
         -AppVersion "0.3.3" -ExpectedCommit ("a"*40) -SourceState "present" -Origin "0.1.0" `
         -EvidenceRoot (Join-Path $contractRoot "chain-failure") `

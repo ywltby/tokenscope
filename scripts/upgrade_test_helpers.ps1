@@ -66,6 +66,7 @@ function New-UpgradeCase {
         Entries=$entries; Metadata=$Metadata
         ExpectedManifest=$manifest; ExpectedOldManifest=$baseline.expected_old
         ExpectedRequests=0; JumpSettingsFormat=$baseline.persistent_format.settings_format
+        JumpTargetSettingsFormat=$baseline.persistent_format.settings_format
         Chain=@($Origin); JumpIndex=0; Jumps=@(); JumpOrigin=$Origin
         SourcesRoot=$null; OldInstallerPath=$null; OldExeHash=$null; InstalledExeHash=$null
         CacheHash=$null; SettingsHash=$null; PricingHash=$null
@@ -332,7 +333,7 @@ function Check-CurrentUsage {
     Invoke-UpgradePython -Arguments @((Join-Path $Case.RepoRoot "scripts/upgrade_fixture.py"),"settings",
         "--data-dir",$Case.DataDir,"--original",$Case.OldSettingsPath,
         "--from-format",$Case.JumpSettingsFormat,
-        "--to-format",$Case.Metadata.persistent_format.settings_format) `
+        "--to-format",$Case.JumpTargetSettingsFormat) `
         -EvidencePath (Join-Path $evidence ("settings-"+$stage+".json")) | Out-Null
     # 备份规则按本跳实际的旧库状态判定，与最初起点的夹具类型无关。
     $backup = Assert-HistoryBackup -Case $Case
@@ -402,14 +403,30 @@ function Invoke-UpgradeScenario {
     }
 }
 
+function Get-JumpSettingsFormat {
+    # 某个版本写出的设置格式：当前版本取构建元数据，历史版本取登记表。
+    param($Case,[Parameter(Mandatory=$true)][string]$Version)
+    if ($Version -eq $Case.AppVersion) { return $Case.Metadata.persistent_format.settings_format }
+    $matched = @($Case.Entries | Where-Object { $_.version -eq $Version })
+    if ($matched.Count -ne 1 -or $null -eq $matched[0].persistent_format) {
+        throw "版本 $Version 没有登记设置格式"
+    }
+    return $matched[0].persistent_format.settings_format
+}
+
 function Set-UpgradeJump {
     # 把编排切到某一跳：期望清单按这一跳的版本解析（当前版本尚未登记时
-    # 沿用起点期望），设置格式始终是 settings.toml 继承自起点的格式。
+    # 沿用起点期望）。设置核对按『上一跳版本写出的格式 → 本跳版本的格式』：
+    # 链路中间跳装的是旧版，不能拿当前版本的格式核对（0.1.0→0.4.0 仍是 v1）。
     param($Case,[Parameter(Mandatory=$true)][string]$Version)
     $matched = @($Case.Entries | Where-Object { $_.version -eq $Version })
     $source = if ($matched.Count -eq 1) { $matched[0] } else { $Case.Baseline }
+    $previous = $Case.JumpOrigin
     $Case.JumpOrigin = $Version
-    $Case.JumpSettingsFormat = $Case.Baseline.persistent_format.settings_format
+    $Case.JumpTargetSettingsFormat = Get-JumpSettingsFormat -Case $Case -Version $Version
+    $Case.JumpSettingsFormat = if ($previous -and $previous -ne $Version) {
+        Get-JumpSettingsFormat -Case $Case -Version $previous
+    } else { $Case.JumpTargetSettingsFormat }
     $Case.ExpectedManifest = $source.expected_after.($Case.SourceState)
     $Case.ExpectedRequests = (Get-Content -LiteralPath $Case.ExpectedManifest -Raw -Encoding utf8 | ConvertFrom-Json).events.Count
     return $source
