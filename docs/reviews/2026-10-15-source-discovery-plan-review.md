@@ -649,3 +649,37 @@ UP09 一共约 2900 行：`native-instance.mjs` 867 行，两份测试共约 100
 ### 22.3 文档
 
 执行方指出的计划页头“待用户确认”已改为“已实施，待合入后的 Release 取证”，§5 回填本地与 PR 证据；计划总账同步。合入后的 Release 取证（gate 日志、双链、发布与耗时）完成前不归档。
+
+## 23. PR3 实现复核（PR #14，HEAD cb34c73）
+
+结论：**补修一项后再合并**。S00 看门狗、遍历防环、设置迁移、隐私闸门、版本（0.5.0，登记 v0.4.0）与远程三条工作流均核实无误；跨应用冲突的隔离语义与计划、`docs/stats-semantics.md` §2.2 和 SF09 不符，测试把错误行为写成了预期。
+
+### 23.1 已核实
+
+- 远程：最终 HEAD 的 CI 四组 + `gate`、Native UI E2E、安装与四项单跳升级（0.1.0 / 0.4.0 × present / deleted）全部通过；GitHub 显示 MERGEABLE / CLEAN。
+- S00：同步子进程统一经 `frontend/scripts/lib/native-scenario.mjs` 的有界包装（30 秒），`browser.close()` 10 秒上限，场景上限 5 分钟并写证据。同步调用都有了上限，JS 定时器看门狗不会再被阻塞。
+- 遍历：`walk_jsonl_guarded` 用显式栈、`DirEntry::file_type()`、reparse point 检测，链接先解析，台账键为 `canonicalize` 结果，子项错误不吞。
+- 迁移：`migrate_source_paths_with` 先算完全部转换再写盘，失败时原文件不变；未迁移的 v1 配置写回保持 v1 两字段（`7a99978` 修的混合化问题）。
+- 新增 4 个来源 IPC 均在 `PROTECTED_COMMANDS`；`perf_synthetic_rounds` 仅 40 个文件，不拖慢 CI。
+
+### 23.2 必修：跨应用冲突实际是“先到者获胜”
+
+- **现象**：`discover_round`（`crates/tokenscope-core/src/report.rs`）先按应用名排序（claude 在 codex 前），再让所有来源共用一个 `DirVisitLedger`。
+  - 同一个根：Claude 先遍历并收下全部 jsonl；Codex 进入时台账返回 `Already(claude)`，只记一条“跨应用来源根重叠，本轮隔离该根”就返回空。认领阶段这些文件只有 Claude 一个认领者，不会触发“文件归属冲突”的整组隔离，于是 Codex 的 rollout 文件由 Claude 适配器解析。
+  - 嵌套：Claude 根 `/X`、Codex 根 `/X/sub` 时同上；反过来 Codex 根 `/X`、Claude 根 `/X/sub` 时，Codex 遍历到 `/X/sub` 被台账静默跳过，**没有任何诊断**。
+- **与约定不符**：计划 §4.1“自动出现时隔离冲突集合……不用‘先到者获胜’”、§8.5 第 4 条“跨应用根同/嵌套先隔离冲突根集合”、`docs/stats-semantics.md` §2.2“跨应用认领同一文件 → 整组隔离并在双侧诊断”、CLAUDE.md SF09“无‘先扫描者得’”。
+- **测试固化了错误行为**：`cross_app_same_root_isolated_and_other_roots_continue` 断言总请求数为 2（Claude 读了共享根 1 条 + Codex 独立根 1 条）；同文件里还留着两行 `eprintln!("DBG …")`。
+- **触发面**：手动添加已在 `source_path_add` 拒绝，只有手改设置、环境变量恰好落入另一工具的根时才会出现，实际影响小；但它让文档写明的不变量不成立，必须修。
+
+**补修方案**（同一 PR 补修，不重复递增版本）：
+
+1. 在发现层集中判定冲突：`resolve_sources` 合并候选后，对**不同应用**、有效启用的根两两比较 `identity_key`，相同或按路径分量互为父子即为冲突。双方行都加诊断“与 <应用> 的 <路径> 冲突，本轮不读取”，并标记冲突（`ResolvedRoot` 加一个字段即可）。
+2. `source_plans_from_with` 跳过被标记冲突的行；`discover_round` 不再承担跨应用隔离，台账的 `Already(其他应用)` 分支可以保留诊断作为兜底。
+3. 改写上面那条测试：只有 Codex 独立根的 1 条请求被计入，双方都有冲突诊断；新增两个方向的嵌套用例（Claude 父 / Codex 子，Codex 父 / Claude 子），断言冲突双方都不读取、其他根照常。删除 `DBG` 输出。
+4. 设置页来源列表：冲突行显示“冲突”，诊断里写明对方路径。计划 §5 的“与 X 重叠”（同应用嵌套）也一并在行诊断里给出，例如“与 <路径> 重叠，文件由 <路径> 读取”；目前 `SourcePathRow.state` 只有 ready / missing / no_permission / not_directory，列表看不出重叠和冲突。
+5. 文档：`docs/stats-semantics.md` §2.2 按实际实现改写为“跨应用相同或嵌套的根在发现层整组隔离”；计划 §7 回填补修提交。
+
+### 23.3 不阻断
+
+- 同应用嵌套由较短的父根认领，映射跟随父根。父根是手动根（映射禁用）、子根是默认根时，子根下的 Claude 文件会失去 `~/.claude.json` 映射。只有旧 `dir` 设成 `~/.claude` 这类父目录才会出现，迁移提示已让用户移除重叠的手动行，本 PR 不处理。
+- 计划 §7 列的待验项（真实数据性能基准、采集层权限拒绝 fixture、PR 上跳过的连续升级链、三个系统验收项）如实标为待验，可以接受。
