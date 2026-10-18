@@ -793,3 +793,150 @@ fn only_default_missing_rows_are_hideable() {
         .unwrap();
     assert!(!env_row.hidden_by_default_missing(), "环境根缺失保留行");
 }
+
+// ── 跨应用冲突与同应用重叠（审阅 §23.2 补修）──────────────────────
+
+/// 手动-only 配置：auto_discover 关闭，只保留给定追加根。
+fn manual_only(paths: &[&std::path::Path]) -> SourceConfig {
+    SourceConfig {
+        enabled: true,
+        dir: None,
+        auto_discover: false,
+        excluded_auto_paths: Vec::new(),
+        additional_paths: paths
+            .iter()
+            .map(|p| tokenscope::settings::AdditionalSourcePath {
+                path: p.display().to_string(),
+                enabled: true,
+            })
+            .collect(),
+        legacy_format: false,
+    }
+}
+
+/// §4.1/§8.5：跨应用相同根双方标记冲突，诊断写明对方应用与路径。
+#[test]
+fn cross_app_same_root_marks_both_sides_conflicted() {
+    let home = temp_dir("conflict-same");
+    let shared = home.join("shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    let ctx = ctx_for(&home, StartupEnv::default(), filesystem_probe());
+    let out = resolve_sources(&ctx, &manual_only(&[&shared]), &manual_only(&[&shared]));
+    let shared_rows: Vec<_> = out
+        .roots
+        .iter()
+        .filter(|r| norm(&r.display_path) == norm(&shared.to_string_lossy()))
+        .collect();
+    assert_eq!(shared_rows.len(), 2, "同根不同应用保持两行");
+    assert_eq!(
+        shared_rows.iter().map(|r| r.agent).collect::<Vec<_>>(),
+        vec![AgentKind::ClaudeCode, AgentKind::Codex]
+    );
+    for row in &shared_rows {
+        assert!(row.conflict_with.is_some(), "双方都标记冲突: {row:?}");
+        assert!(
+            row.diagnostics
+                .iter()
+                .any(|d| d.contains("冲突") && d.contains("本轮双方都不读取")),
+            "诊断写明处置: {:?}",
+            row.diagnostics
+        );
+    }
+}
+
+/// §4.1/§8.5：跨应用嵌套（Claude 父 / Codex 子）双方都标记，不只隔离一方。
+#[test]
+fn cross_app_nested_marks_both_sides_conflicted() {
+    let home = temp_dir("conflict-nest");
+    let parent = home.join("parent");
+    let child = parent.join("sub");
+    std::fs::create_dir_all(&child).unwrap();
+    let ctx = ctx_for(&home, StartupEnv::default(), filesystem_probe());
+    let out = resolve_sources(&ctx, &manual_only(&[&parent]), &manual_only(&[&child]));
+    for row in &out.roots {
+        let is_overlapped = norm(&row.display_path) == norm(&parent.to_string_lossy())
+            || norm(&row.display_path) == norm(&child.to_string_lossy());
+        assert_eq!(
+            row.conflict_with.is_some(),
+            is_overlapped && row.effective_enabled,
+            "只有有效启用的重叠根标记冲突: {row:?}"
+        );
+        if row.conflict_with.is_some() {
+            assert!(
+                row.diagnostics
+                    .iter()
+                    .any(|d| d.contains("本轮双方都不读取")),
+                "冲突行有处置诊断: {:?}",
+                row.diagnostics
+            );
+        }
+    }
+    let claude = out
+        .roots
+        .iter()
+        .find(|r| r.agent == AgentKind::ClaudeCode)
+        .unwrap();
+    assert!(
+        claude.diagnostics.iter().any(|d| d.contains("codex")),
+        "诊断写明对方是 Codex: {:?}",
+        claude.diagnostics
+    );
+}
+
+/// 停用一侧不构成读取冲突：双方都不标记（停用根本就不读取）。
+#[test]
+fn disabled_side_does_not_conflict() {
+    let home = temp_dir("conflict-disabled");
+    let shared = home.join("shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    let ctx = ctx_for(&home, StartupEnv::default(), filesystem_probe());
+    let mut codex = manual_only(&[&shared]);
+    codex.enabled = false;
+    let out = resolve_sources(&ctx, &manual_only(&[&shared]), &codex);
+    for row in &out.roots {
+        assert!(row.conflict_with.is_none(), "停用侧不参与冲突: {row:?}");
+    }
+}
+
+/// §4.1：同应用嵌套属合法重叠——子根行加"与 X 重叠，文件由 X 读取"诊断，
+/// 不标记冲突（数据由父根读取，不丢不重）。
+#[test]
+fn same_app_nested_child_gets_overlap_diagnostic() {
+    let home = temp_dir("overlap-same");
+    let parent = home.join("parent");
+    let child = parent.join("sub");
+    std::fs::create_dir_all(&child).unwrap();
+    let ctx = ctx_for(&home, StartupEnv::default(), filesystem_probe());
+    let out = resolve_sources(
+        &ctx,
+        &manual_only(&[&parent, &child]),
+        &SourceConfig::default(),
+    );
+    let child_row = out
+        .roots
+        .iter()
+        .find(|r| norm(&r.display_path) == norm(&child.to_string_lossy()))
+        .unwrap();
+    assert!(child_row.conflict_with.is_none(), "同应用不标冲突");
+    assert!(
+        child_row
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("重叠") && d.contains("文件由")),
+        "子根行有重叠诊断: {:?}",
+        child_row.diagnostics
+    );
+    let parent_row = out
+        .roots
+        .iter()
+        .find(|r| norm(&r.display_path) == norm(&parent.to_string_lossy()))
+        .unwrap();
+    assert!(
+        !parent_row
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("重叠，文件由")),
+        "父根是读取方，无重叠诊断: {:?}",
+        parent_row.diagnostics
+    );
+}

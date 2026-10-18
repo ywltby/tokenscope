@@ -390,6 +390,39 @@ describe("Settings 来源目录管理（PR3）", () => {
     w.unmount();
   });
 
+  // 审阅 §23.2 补修：跨应用冲突行显示「冲突」状态，诊断写明对方路径与处置。
+  it("冲突行显示「冲突」状态与诊断明细（前端只渲染后端行）", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "source_paths_list")
+        return Promise.resolve([
+          {
+            id: "c:/shared",
+            agent: "claude",
+            path: "C:/shared",
+            canonical_identity: "c:/shared",
+            identity_confirmed: true,
+            origins: ["手动"],
+            mapping_path: null,
+            row_enabled: true,
+            enabled: true,
+            state: "conflicted",
+            diagnostics: ["与 codex 的 C:/shared 冲突（相同或互为父子）：本轮双方都不读取"],
+          },
+          ...sourceRowsFixture,
+        ]);
+      if (cmd === "pricing_entries") return Promise.resolve(pricingView);
+      if (cmd === "cache_stats") return Promise.resolve({ path: "p", files: 1, events: 2 });
+      if (cmd === "settings_get") return Promise.resolve({ price_auto_sync: true, sources: {} });
+      if (cmd === "autostart_status") return Promise.resolve(false);
+      return Promise.resolve(null);
+    });
+    const w = mount(Settings);
+    await flushPromises();
+    expect(w.text()).toContain("冲突");
+    expect(w.text()).toContain("与 codex 的 C:/shared 冲突");
+    w.unmount();
+  });
+
   it("添加成功：草稿清空、列表重读（source_paths_list 再次调用）", async () => {
     const w = await mountWith();
     await flushPromises();

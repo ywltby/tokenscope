@@ -509,7 +509,9 @@ function stateText(row: SourcePathRow): string {
         ? "缺失"
         : row.state === "no_permission"
           ? "无权限"
-          : "目录无效";
+          : row.state === "conflicted"
+            ? "冲突"
+            : "目录无效";
   return row.row_enabled ? base : `已停用 · ${base}`;
 }
 

@@ -332,7 +332,8 @@ pub(crate) fn source_plans_from_with(
                 row.state,
                 ProbeState::Missing | ProbeState::NotADirectory(_)
             );
-            !(nothing_to_walk && !has_manual)
+            // 跨应用根冲突（发现层已双侧标记）：双方都不进本轮计划（§4.1/§8.5）。
+            !(nothing_to_walk && !has_manual) && row.conflict_with.is_none()
         })
         .map(|row| tokenscope::report::SourcePlan {
             agent: row.agent,
@@ -841,7 +842,13 @@ pub(crate) fn source_paths_list_impl(
             mapping_path: row.mapping_path.as_ref().map(|p| p.display().to_string()),
             row_enabled: row.origins.iter().any(|o| o.enabled),
             enabled: row.effective_enabled,
-            state: probe_state_name(&row.state).to_string(),
+            // 跨应用冲突行显示"冲突"（诊断里写明对方路径），其余按探测状态。
+            state: if row.conflict_with.is_some() {
+                "conflicted"
+            } else {
+                probe_state_name(&row.state)
+            }
+            .to_string(),
             diagnostics: row.diagnostics.clone(),
         })
         .collect())
@@ -2199,6 +2206,65 @@ mod tests {
                     == tokenscope::settings::normalized_key(&manual)),
             "手动缺失根保留在计划中: {plans2:?}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 审阅 §23.2 补修：跨应用根冲突在发现层标记后，双方行都不进本轮采集
+    /// 计划（手改设置才能构造——设置页 add 已拒绝跨应用冲突）。
+    #[test]
+    fn cross_app_conflicted_roots_excluded_from_plans() {
+        use tokenscope::source::discovery::{DiscoveryContext, RootProbe, StartupEnv};
+        let dir = tmp_dir("sp-cross-app-conflict");
+        let path = dir.join("settings.toml");
+        let shared = dir.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let codex_own = dir.join("codex-own");
+        std::fs::create_dir_all(&codex_own).unwrap();
+        let shared_fwd = shared.display().to_string().replace('\\', "/");
+        let own_fwd = codex_own.display().to_string().replace('\\', "/");
+        // 手写 TOML：claude 与 codex 各含 shared 追加项，codex 另含独立根
+        std::fs::write(
+            &path,
+            format!(
+                "[sources.claude]\nenabled = true\nauto_discover = false\n[[sources.claude.additional_paths]]\npath = \"{shared_fwd}\"\nenabled = true\n\n[sources.codex]\nenabled = true\nauto_discover = false\n[[sources.codex.additional_paths]]\npath = \"{shared_fwd}\"\nenabled = true\n[[sources.codex.additional_paths]]\npath = \"{own_fwd}\"\nenabled = true\n"
+            ),
+        )
+        .unwrap();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let probe = |p: &std::path::Path| RootProbe {
+            state: if p.exists() {
+                ProbeState::Ready
+            } else {
+                ProbeState::Missing
+            },
+            canonical: p.canonicalize().ok(),
+        };
+        let ctx =
+            DiscoveryContext::for_test(home, StartupEnv::default(), std::sync::Arc::new(probe));
+        let o = collection_opts_from_in(tokenscope::settings::load(&path), &ctx).unwrap();
+        let plans = o.source_plans.clone().unwrap();
+        assert_eq!(
+            plans.len(),
+            1,
+            "只有 Codex 独立根进计划，冲突双方都排除: {plans:?}"
+        );
+        assert_eq!(plans[0].agent, tokenscope::model::AgentKind::Codex);
+        assert_eq!(
+            tokenscope::settings::normalized_key(&plans[0].root),
+            tokenscope::settings::normalized_key(&codex_own)
+        );
+        // 列表行仍显示冲突双方（state=conflicted + 对方路径诊断）
+        let rows = source_paths_list_impl(&path, &ctx).unwrap();
+        let conflicted: Vec<_> = rows.iter().filter(|r| r.state == "conflicted").collect();
+        assert_eq!(conflicted.len(), 2, "冲突双方行都显示: {rows:?}");
+        for r in &conflicted {
+            assert!(
+                r.diagnostics.iter().any(|d| d.contains("冲突")),
+                "行诊断写明冲突: {:?}",
+                r.diagnostics
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

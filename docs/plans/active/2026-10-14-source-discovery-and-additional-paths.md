@@ -287,6 +287,16 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 - **PR**：草稿 [PR #14](https://github.com/ywltby/tokenscope/pull/14) 面向 main，等待复核。按约定停在草稿 PR：不自行转正式、不合并、不清理分支。
 - **边界如实记录（剩余待验，不随本 PR 关闭）**：真实数据性能基准（`perf_real_data`）待验（§4.4）；采集层权限拒绝 fixture 待验（S03 遗留）；`upgrade-chain` 连续升级链待 main 发布阶段取证；真实跨午夜、长时间休眠、跨显示器在[独立系统待办](../system-acceptance-todo.md)，不纳入本 PR。
 
+### 审阅补修记录（2026-10-18，审阅 §23 / PR #14）
+
+- **结论与范围**：复核判定"补修一项后再合并"——跨应用冲突的实际行为与 §4.1/§8.5、stats-semantics §2.2、CLAUDE.md SF09 不符：共用遍历台账 + Claude 恒排 Codex 前，跨应用同根时后到应用被台账挡下空手而归、其文件由先到应用的解析器读取（"先到者获胜"），嵌套反向时甚至无诊断；原测试把错误行为写成预期且残留 DBG 输出。同一 PR 补修，版本不递增（仍 0.5.0）。
+- **补修 1（发现层集中判定）**：`ResolvedRoot` 增 `conflict_with`（对方显示路径）；`resolve_sources` 在有效启用集合上两两比较规范化身份键（`normalized_key`，canonical 优先），不同应用相同或按路径分量互为父子 → **双方**都标记冲突并加诊断"与 <应用> 的 <路径> 冲突（相同或互为父子）：本轮双方都不读取"。同应用嵌套属合法重叠：被认领方（子根）行加"与 <父根> 重叠，文件由 <父根> 读取"诊断（父根较小先认领，数据不丢不重）。
+- **补修 2（壳侧）**：`source_plans_from_with` 排除 `conflict_with` 非空的行；`source_paths_list` 冲突行 state = `conflicted`（诊断照常下发）。`discover_round` 不再承担跨应用隔离，台账 `Already(其他应用)` 分支保留诊断作兜底；文件级认领隔离仅服务遗留注入路径（测试/基准直接构造单根来源）。
+- **补修 3（测试改写）**：删除 `cross_app_same_root_isolated_and_other_roots_continue` 的"先到者获胜"预期与两行 DBG；新增 `cross_app_same_root_both_sides_conflicted_and_excluded`、`cross_app_nested_claude_parent_codex_child_both_excluded`、`cross_app_nested_codex_parent_claude_child_both_excluded`（走 `resolve_sources` → 壳侧同规则过滤 → 真实采集，断言冲突根双方都不读取、仅独立根 1 条请求计入、无跨应用兜底诊断）；`source_discovery.rs` 增 4 例（同根双方标记、嵌套双方标记、停用侧不冲突、同应用子根重叠诊断）；壳侧增 `cross_app_conflicted_roots_excluded_from_plans`（手写 TOML 构造——设置页 add 已拒绝跨应用，断言计划只剩独立根、列表双方行 state=conflicted 且诊断可见）。
+- **补修 4（界面）**：`SourcePathRow.state` 增 `conflicted`；设置页冲突行显示「冲突」，诊断写明对方路径；同应用重叠行显示"与 X 重叠，文件由 X 读取"。前端 563 用例全绿（含冲突行渲染用例）。
+- **补修 5（文档）**：stats-semantics §2.2 改写为"跨应用根冲突 → 发现层整组隔离"（含先到者获胜的机理说明与台账兜底定位）、同应用嵌套补读取去向诊断；CLAUDE.md SF09 与 DESIGN.md 状态清单同步。
+- **验证**：`source_discovery` 18/18、`source_paths_collection` 16/16、壳 57 用例、前端 563 用例；fmt/双 feature clippy/两套 workspace 测试全绿。版本不递增；`upgrade-chain`、真实性能基准等待验项维持 §23.3 的既有披露（同应用父根为手动时子根映射丢失，按审阅意见本 PR 不处理）。
+
 ## 8. 执行细则、算法边界与验收门槛
 
 共同执行、证据和合并门槛见 [PR1 第 4 节](../archive/implemented/2026-10-15-workspace-layout.md#41-开工与逐项执行)。PR2 合入前不开始 S01。先保持所有旧查询/计价/导入回归通过；路径管理不能改变事件业务身份或重写已有历史事实。

@@ -14,7 +14,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokenscope::model::AgentKind;
 use tokenscope::report::{SourcePlan, SummaryOptions, summary};
+use tokenscope::settings::{AdditionalSourcePath, SourceConfig};
 use tokenscope::source::claude_projects::ProjectMapping;
+use tokenscope::source::discovery::{DiscoveryContext, RootProbe, StartupEnv, resolve_sources};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -423,8 +425,90 @@ fn same_slug_across_roots_do_not_cross_mappings() {
 
 /// §8.3「两个 adapter 认领同一根」：后到根隔离 + 诊断，其余根继续；
 /// 不按扫描顺序选择（claude 恒先于 codex 是排序结果，非发现顺序运气）。
+/// 跨应用根冲突（§4.1/§8.5，审阅 §23.2 补修）：冲突判定在**发现层**整组
+/// 隔离——不同应用的有效根相同或互为父子时，双方行都标记冲突并写明对方，
+/// 计划排除后双方都不读取；其余根照常。此前实现共用遍历台账且 Claude 恒在
+/// Codex 之前，跨应用重叠实际是"先到者获胜"（后到应用被台账挡下空手而归，
+/// 它的文件由先到应用的解析器读取），本用例按修复后的语义断言。
+///
+/// 走 `resolve_sources` →（按壳侧同规则过滤冲突行）→ `summary`，不做只
+/// 断言采集层兜底台账的"先到者获胜"快照。返回采集诊断与总请求数。
+fn cross_app_conflict_case(
+    tag: &str,
+    claude_paths: &[&Path],
+    codex_paths: &[&Path],
+    expect_conflicted: &[&Path],
+) -> (Vec<String>, u64) {
+    let dir = temp_dir(tag);
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let probe = |p: &Path| RootProbe {
+        state: if p.exists() {
+            tokenscope::source::discovery::ProbeState::Ready
+        } else {
+            tokenscope::source::discovery::ProbeState::Missing
+        },
+        canonical: p.canonicalize().ok(),
+    };
+    let ctx = DiscoveryContext::for_test(home, StartupEnv::default(), std::sync::Arc::new(probe));
+    let manual = |paths: &[&Path]| SourceConfig {
+        enabled: true,
+        dir: None,
+        auto_discover: false,
+        excluded_auto_paths: Vec::new(),
+        additional_paths: paths
+            .iter()
+            .map(|p| AdditionalSourcePath {
+                path: p.display().to_string(),
+                enabled: true,
+            })
+            .collect(),
+        legacy_format: false,
+    };
+    let resolved = resolve_sources(&ctx, &manual(claude_paths), &manual(codex_paths));
+    // 发现层断言：冲突标记恰好覆盖重叠集合，且冲突行诊断写明对方与处置。
+    let expected: Vec<String> = expect_conflicted.iter().map(|p| normalized(p)).collect();
+    for row in &resolved.roots {
+        let is_overlapped = expected.contains(&normalized(Path::new(&row.display_path)));
+        assert_eq!(
+            row.conflict_with.is_some(),
+            is_overlapped,
+            "冲突标记应恰好覆盖重叠根: {row:?}"
+        );
+        if is_overlapped {
+            assert!(
+                row.diagnostics
+                    .iter()
+                    .any(|d| d.contains("冲突") && d.contains("本轮双方都不读取")),
+                "冲突行必须有诊断: {:?}",
+                row.diagnostics
+            );
+        }
+    }
+    // 按壳侧同规则把冲突行排除出计划（source_plans_from_with 的语义），
+    // 再走真实采集：冲突根的文件谁都不读。
+    let plans: Vec<SourcePlan> = resolved
+        .roots
+        .iter()
+        .filter(|row| row.effective_enabled && row.conflict_with.is_none())
+        .map(|row| SourcePlan {
+            agent: row.agent,
+            root: PathBuf::from(&row.display_path),
+            claude_mapping: row.mapping_path.clone(),
+        })
+        .collect();
+    let o = base_opts(&dir, plans);
+    let r = summary(&o).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    (r.warnings, r.totals.requests)
+}
+
+fn normalized(p: &Path) -> String {
+    tokenscope::settings::normalized_key(p)
+}
+
 #[test]
-fn cross_app_same_root_isolated_and_other_roots_continue() {
+fn cross_app_same_root_both_sides_conflicted_and_excluded() {
     let dir = temp_dir("cross-app-root");
     let shared = dir.join("shared");
     write_claude_event(&shared, "", "c", "s-cl", "m-cl", 100);
@@ -432,35 +516,60 @@ fn cross_app_same_root_isolated_and_other_roots_continue() {
     let codex_own = dir.join("codex-own");
     write_codex_event(&codex_own, "", "y", "s-cy", 30);
 
-    let plans = vec![
-        claude_plan(&shared, None),
-        codex_plan(&shared),
-        codex_plan(&codex_own),
-    ];
-    let o = base_opts(&dir, plans);
-    let r = summary(&o).unwrap();
-    eprintln!("DBG r.sources={:?} warnings={:?}", r.sources, r.warnings);
-    eprintln!(
-        "DBG rollout={}",
-        std::fs::read_to_string(
-            codex_own
-                .join("2026")
-                .join("08")
-                .join("01")
-                .join("rollout-y.jsonl")
-        )
-        .unwrap()
+    let (warnings, requests) = cross_app_conflict_case(
+        "conflict-same",
+        &[&shared],
+        &[&shared, &codex_own],
+        &[&shared],
     );
-    assert_eq!(
-        r.totals.requests, 2,
-        "claude 1 + codex 独立根 1；重叠根隔离: {:?}",
-        r.totals
-    );
+    // 只有 Codex 独立根的 1 条请求计入：共享根里的 Claude/Codex 事件谁都不读。
+    assert_eq!(requests, 1, "冲突根双方都不读取: {requests}");
     assert!(
-        r.warnings.iter().any(|w| w.contains("跨应用来源根重叠")),
-        "隔离必须诊断可见: {:?}",
-        r.warnings
+        !warnings.iter().any(|w| w.contains("跨应用")),
+        "冲突在发现层解决，采集层不应再出现跨应用兜底诊断: {warnings:?}"
     );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn cross_app_nested_claude_parent_codex_child_both_excluded() {
+    let dir = temp_dir("cross-app-nest-a");
+    let parent = dir.join("parent");
+    write_claude_event(&parent, "", "c", "s-cl", "m-cl", 100);
+    let child = parent.join("sub");
+    write_codex_event(&child, "", "x", "s-cx", 60);
+    let codex_own = dir.join("codex-own");
+    write_codex_event(&codex_own, "", "y", "s-cy", 30);
+
+    let (_warnings, requests) = cross_app_conflict_case(
+        "conflict-nest-a",
+        &[&parent],
+        &[&child, &codex_own],
+        &[&parent, &child],
+    );
+    // 嵌套冲突双方（Claude 父 / Codex 子）都不读取，只有 Codex 独立根的
+    // 1 条请求计入。
+    assert_eq!(requests, 1, "嵌套冲突双方都不读取: {requests}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn cross_app_nested_codex_parent_claude_child_both_excluded() {
+    let dir = temp_dir("cross-app-nest-b");
+    let parent = dir.join("parent");
+    write_codex_event(&parent, "", "x", "s-cx", 60);
+    let child = parent.join("sub");
+    write_claude_event(&child, "", "c", "s-cl", "m-cl", 100);
+    let codex_own = dir.join("codex-own");
+    write_codex_event(&codex_own, "", "y", "s-cy", 30);
+
+    let (_warnings, requests) = cross_app_conflict_case(
+        "conflict-nest-b",
+        &[&child],
+        &[&parent, &codex_own],
+        &[&parent, &child],
+    );
+    assert_eq!(requests, 1, "反方向嵌套冲突双方都不读取: {requests}");
     std::fs::remove_dir_all(&dir).ok();
 }
 

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::model::AgentKind;
-use crate::settings::SourceConfig;
+use crate::settings::{SourceConfig, normalized_key};
 
 /// 探测分类（§9.3 第 8 条：缺失/无权限/普通文件/失效链接不合成"缺失"）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +168,11 @@ pub struct ResolvedRoot {
     pub diagnostics: Vec<String>,
     /// 有效启停 = 应用总开关且至少一个 origin 启用。
     pub effective_enabled: bool,
+    /// 跨应用根冲突（§4.1/§8.5）：与**另一应用**的有效根相同或互为父子时
+    /// 双方都标记，值为对方的显示路径。被标记的行不进入本轮采集计划，
+    /// 诊断写明对方——台账的"先遍历者获胜"会让后到应用空手而归，把对方
+    /// 的日志交给自己的解析器，违反"两边都隔离"。
+    pub conflict_with: Option<String>,
 }
 
 impl ResolvedRoot {
@@ -451,7 +456,94 @@ pub fn resolve_sources(
         };
         row.effective_enabled = row.effective_enabled && app_enabled;
     }
+    mark_cross_app_conflicts(&mut resolved.roots);
+    mark_same_app_overlap(&mut resolved.roots);
     resolved
+}
+
+/// 路径分量边界的父子关系（`a == b` 或一方在另一方之下）。输入是同一
+/// 规范化函数（`normalized_key`：canonical 优先 + 小写 + 本地分隔符）产出
+/// 的比较键；尾部分隔符在比较前去掉。
+fn roots_nest_or_equal(a: &str, b: &str) -> bool {
+    let a = a.trim_end_matches(['/', '\\']);
+    let b = b.trim_end_matches(['/', '\\']);
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let (long, short) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+    long.get(..short.len()) == Some(short) && long[short.len()..].starts_with(['/', '\\'])
+}
+
+/// §4.1/§8.5：跨应用根冲突在**发现层整组隔离**——不同应用的两个有效根
+/// 相同或互为父子时，双方都标记冲突并加诊断，不进入本轮读取。集中在这里
+/// 判定是唯一能同时看到双侧根的位置：交给采集层按遍历顺序处理会变成
+/// "先到者获胜"（后到应用被台账挡下空手而归，它的文件由先到应用的
+/// 解析器读取），违反"两边都隔离、无先扫描者得"。
+fn mark_cross_app_conflicts(roots: &mut [ResolvedRoot]) {
+    let keys: Vec<String> = roots
+        .iter()
+        .map(|r| normalized_key(Path::new(&r.identity_key)))
+        .collect();
+    for i in 0..roots.len() {
+        for j in (i + 1)..roots.len() {
+            if roots[i].agent == roots[j].agent
+                || !roots[i].effective_enabled
+                || !roots[j].effective_enabled
+            {
+                continue;
+            }
+            if !roots_nest_or_equal(&keys[i], &keys[j]) {
+                continue;
+            }
+            for (idx, peer_idx) in [(i, j), (j, i)] {
+                let peer_path = roots[peer_idx].display_path.clone();
+                let peer_agent = roots[peer_idx].agent.as_str();
+                if roots[idx].conflict_with.is_none() {
+                    roots[idx].conflict_with = Some(peer_path.clone());
+                }
+                let msg = format!(
+                    "与 {} 的 {} 冲突（相同或互为父子）：本轮双方都不读取",
+                    peer_agent, peer_path,
+                );
+                if !roots[idx].diagnostics.contains(&msg) {
+                    roots[idx].diagnostics.push(msg);
+                }
+            }
+        }
+    }
+}
+
+/// §4.1：同应用嵌套属合法重叠——较小（父）根认领文件，子根行加"与 X 重叠"
+/// 诊断说明读取去向（数据不丢、不重复计数；迁移提示已建议移除重叠手动行）。
+fn mark_same_app_overlap(roots: &mut [ResolvedRoot]) {
+    let keys: Vec<String> = roots
+        .iter()
+        .map(|r| normalized_key(Path::new(&r.identity_key)))
+        .collect();
+    for i in 0..roots.len() {
+        for j in 0..roots.len() {
+            if i == j
+                || roots[i].agent != roots[j].agent
+                || !roots[i].effective_enabled
+                || !roots[j].effective_enabled
+            {
+                continue;
+            }
+            // i 是子根（更长且在 j 之下）：i 的文件由父根 j 认领读取。
+            if keys[i].len() > keys[j].len() && roots_nest_or_equal(&keys[i], &keys[j]) {
+                let msg = format!(
+                    "与 {} 重叠，文件由 {} 读取",
+                    roots[j].display_path, roots[j].display_path
+                );
+                if !roots[i].diagnostics.contains(&msg) {
+                    roots[i].diagnostics.push(msg);
+                }
+            }
+        }
+    }
 }
 
 fn excluded(cfg: &SourceConfig, path: &Path) -> bool {
@@ -518,6 +610,7 @@ fn merge_candidates(candidates: Vec<Candidate>) -> ResolvedSources {
                 mapping_path: candidate.mapping.clone(),
                 diagnostics: candidate.diagnostics,
                 effective_enabled: false,
+                conflict_with: None,
             });
             verified.push(candidate.mapping.clone());
             disabled.push(candidate.mapping_disabled);

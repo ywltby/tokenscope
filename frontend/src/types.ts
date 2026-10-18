@@ -393,7 +393,7 @@ export interface SourcePathRow {
   mapping_path: string | null;
   row_enabled: boolean;
   enabled: boolean;
-  state: "ready" | "missing" | "no_permission" | "not_directory";
+  state: "ready" | "missing" | "no_permission" | "not_directory" | "conflicted";
   diagnostics: string[];
 }
 
