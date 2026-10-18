@@ -572,14 +572,22 @@ impl CollectSignal {
         }
     }
 
-    /// 等待 `total`：被设置变更唤醒 → `Woken`；退出请求 → `Stop`；否则 `Elapsed`。
-    fn wait(&self, total: Duration) -> WaitOutcome {
+    /// 当前间隔版本：等待方须在**读取间隔之前**取得，作为 `wait` 的基线。
+    fn version(&self) -> u64 {
+        *self.inner.version.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 等待 `total`：版本已不同于 `seen`（设置变更唤醒，含读取间隔之后、进入
+    /// 等待之前发生的唤醒）→ `Woken`；退出请求 → `Stop`；否则 `Elapsed`。
+    fn wait(&self, total: Duration, seen: u64) -> WaitOutcome {
         let mut version = self.inner.version.lock().unwrap_or_else(|e| e.into_inner());
-        let baseline = *version;
         let deadline = std::time::Instant::now() + total;
         loop {
             if self.inner.stop.load(Ordering::SeqCst) {
                 return WaitOutcome::Stop;
+            }
+            if *version != seen {
+                return WaitOutcome::Woken;
             }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
@@ -591,9 +599,6 @@ impl CollectSignal {
                 .wait_timeout(version, left)
                 .unwrap_or_else(|e| e.into_inner());
             version = guard;
-            if *version != baseline {
-                return WaitOutcome::Woken;
-            }
         }
     }
 
@@ -642,13 +647,15 @@ fn run_collect_loop<I, C, N>(
 {
     let mut first_round = true;
     loop {
+        // 先取版本再读间隔：读取间隔与进入等待之间的唤醒不会丢失。
+        let seen = signal.version();
         let interval = next_interval();
         let delay = if first_round {
             interval.min(COLLECT_FIRST_DELAY_CAP)
         } else {
             interval
         };
-        match signal.wait(delay) {
+        match signal.wait(delay, seen) {
             WaitOutcome::Stop => break,
             WaitOutcome::Woken => {
                 // 设置变更：按新间隔重新计时（不再享受首轮缩短）。
@@ -1481,7 +1488,7 @@ mod tests {
             let signal = signal.clone();
             std::thread::spawn(move || {
                 let t = Instant::now();
-                let outcome = signal.wait(Duration::from_secs(30));
+                let outcome = signal.wait(Duration::from_secs(30), signal.version());
                 (outcome, t.elapsed())
             })
         };
@@ -1492,6 +1499,26 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(2),
             "停止必须立即中断等待（实测 {elapsed:?}）"
+        );
+    }
+
+    /// 读取间隔之后、进入等待之前的唤醒不得丢失（曾偶发按旧间隔多等一整轮，
+    /// `collect_loop_follows_updated_interval_after_wake` 实测 510ms）。
+    #[test]
+    fn collect_signal_wake_before_wait_is_not_lost() {
+        let signal = CollectSignal::new();
+        let seen = signal.version();
+        signal.wake();
+        let t = Instant::now();
+        assert_eq!(
+            signal.wait(Duration::from_secs(30), seen),
+            WaitOutcome::Woken,
+            "基线之后的唤醒必须让等待立即返回"
+        );
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "实测 {:?}",
+            t.elapsed()
         );
     }
 
