@@ -1,10 +1,11 @@
 // 真实桌面窗口恢复验收；不调用系统休眠、不改系统时钟或显示缩放。
+// S00（PR3 计划 §9.1 第 3、4 条）：关闭/点击退出/等待退出各打阶段标记；同步命令有界。
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { ensureNotCanceled, spawnSyncBounded, waitStableQuery } from "../lib/native-scenario.mjs";
 
-export async function nativeUiSystem({ inst, ck, ev }) {
+export async function nativeUiSystem({ inst, ck, ev, markStage, markStageDone, isCanceled }) {
   const page = () => inst.page;
   const root = () => page().locator("[data-summary-query]");
   const query = () => root().getAttribute("data-summary-query");
@@ -32,15 +33,28 @@ export async function nativeUiSystem({ inst, ck, ev }) {
     await page().getByRole("button", { name: label, exact: true }).click();
     await waitQuery(old);
   };
+  // 等查询身份稳定（汇总与明细一致且非空、2 秒无变化，最多 10 秒，未稳定即失败）：
+  // 吸收预设切换的迟到重复批次（既有竞态，与本场景的恢复/切页检查无关）。
+  const stableQueryId = () =>
+    waitStableQuery({
+      read: () =>
+        page().evaluate(() => {
+          const node = document.querySelector("[data-summary-query]");
+          return {
+            summary: node?.dataset.summaryQuery || null,
+            events: node?.dataset.eventsQuery || null,
+          };
+        }),
+    });
   const restore = async (checkHidden = false) => {
     const action = fileURLToPath(
       new URL("../../../scripts/native-window-action.ps1", import.meta.url),
     );
     const change = (state) => {
-      const result = spawnSync(
+      const result = spawnSyncBounded(
         "pwsh",
         ["-NoProfile", "-File", action, "-ProcessId", String(inst.proc.pid), "-Action", state],
-        { encoding: "utf8", windowsHide: true },
+        { action: `window-${state}` },
       );
       if (result.status !== 0 || !/STATE_CHANGED true/i.test(result.stdout))
         throw new Error(`Native ${state} failed: ${result.stdout} ${result.stderr}`);
@@ -110,10 +124,18 @@ export async function nativeUiSystem({ inst, ck, ev }) {
   );
 
   await range("全部时间");
-  const allQuery = await query();
+  // 竞态窗口（审阅补修期间 CI 实测）：预设切换的批量刷新存在迟到的重复
+  // 触发（通过运行与失败运行均有查询 begin 无汇总完成的批次，失败运行在
+  // 切换后 1.6 s 出现第二个采集轮）。这些与"恢复/切页是否触发查询"无关，
+  // 先等查询身份稳定（2 s 无变化）再取基线，检查只对恢复本身负责。
+  const stableAllQuery = await stableQueryId();
   await restore();
   await new Promise((resolve) => setTimeout(resolve, 1500));
-  ck.add("all_time_restore_does_not_query", (await query()) === allQuery, await query());
+  ck.add(
+    "all_time_restore_does_not_query",
+    (await query()) === stableAllQuery,
+    await query(),
+  );
   await page().mouse.move(500, 400);
   await page().mouse.wheel(0, 700);
   await page().waitForFunction(() => document.querySelector(".scroll-container").scrollTop > 0);
@@ -126,10 +148,12 @@ export async function nativeUiSystem({ inst, ck, ev }) {
     (expected) => Math.abs(document.querySelector(".scroll-container").scrollTop - expected) <= 2,
     scrollBefore,
   );
+  // 切页后查询身份必须仍等于切页前的稳定基线（激活帧没有可落地的待刷新
+  // 触发；若有切页自身触发的查询，身份会变并在此暴露）。
   ck.add(
     "page_switch_preserves_scroll_and_query",
-    scrollBefore > 0 && (await query()) === allQuery,
-    `scroll=${scrollBefore}; query=${await query()}`,
+    scrollBefore > 0 && (await query()) === stableAllQuery,
+    `scroll=${scrollBefore}; query=${await query()}; baseline=${stableAllQuery}`,
   );
   ev.viewport = await page().evaluate(() => ({
     width: innerWidth,
@@ -152,22 +176,32 @@ export async function nativeUiSystem({ inst, ck, ev }) {
   const action = fileURLToPath(
     new URL("../../../scripts/native-window-action.ps1", import.meta.url),
   );
-  const close = spawnSync(
+  // S00：关闭 → 点击退出 → 等待退出各记一段；取消标志已置位时不得继续产生副作用
+  ensureNotCanceled(isCanceled, "close-command");
+  markStage("close-command");
+  const close = spawnSyncBounded(
     "pwsh",
     ["-NoProfile", "-File", action, "-ProcessId", String(inst.proc.pid), "-Action", "close"],
-    { encoding: "utf8", windowsHide: true },
+    { action: "window-close", stage: "close-command" },
   );
+  markStageDone("close-command");
   if (close.status !== 0 || !/CLOSED true/i.test(close.stdout)) throw new Error("WM_CLOSE failed");
+  ensureNotCanceled(isCanceled, "click-quit");
+  markStage("click-quit");
   await page()
     .locator(".close-dialog")
     .getByRole("button", { name: "直接退出", exact: true })
     .click();
+  markStageDone("click-quit");
+  markStage("wait-host-exit");
   const deadline = Date.now() + 15000;
   while (inst.proc.exitCode === null && Date.now() < deadline)
     await new Promise((resolve) => setTimeout(resolve, 100));
+  markStageDone("wait-host-exit");
   if (inst.proc.exitCode !== 0)
     throw new Error(`expected clean shutdown, got ${inst.proc.exitCode}`);
   // 重启前确认旧实例真的退出、端口已释放（升级矩阵 §4.8 第 2 条）：走同一个 stop/launch
+  // （stop/launch 内部各自记录「stop」「relaunch」阶段）
   const restartStop = await inst.stop({ terminate: false, reason: "ui-system-restart" });
   const restarted = await inst.launch();
   ev.restartStop = restartStop;
@@ -185,10 +219,10 @@ export async function nativeUiSystem({ inst, ck, ev }) {
   await inst.waitForData();
   await range("24h");
   ev.beforeTrayHideQuery = await query();
-  const trayClose = spawnSync(
+  const trayClose = spawnSyncBounded(
     "pwsh",
     ["-NoProfile", "-File", action, "-ProcessId", String(inst.proc.pid), "-Action", "close"],
-    { encoding: "utf8", windowsHide: true },
+    { action: "window-close-tray" },
   );
   if (trayClose.status !== 0 || !/CLOSED true/i.test(trayClose.stdout))
     throw new Error("tray WM_CLOSE failed");
@@ -232,7 +266,7 @@ export async function nativeUiSystem({ inst, ck, ev }) {
  * 轮数由 `--relaunch-cycles N` 指定（默认 20）；单次启动预算与退出确认都走同一套
  * `Instance.launch()` / `Instance.stop()`，不另写启动逻辑。
  */
-export async function nativeUiRelaunch({ inst, ck, ev }) {
+export async function nativeUiRelaunch({ inst, ck, ev, markStage, markStageDone, isCanceled }) {
   const page = () => inst.page;
   const cycles = Number(inst.opts.relaunchCycles ?? 20);
   const action = fileURLToPath(
@@ -246,10 +280,10 @@ export async function nativeUiRelaunch({ inst, ck, ev }) {
       .getByRole("radio", { name: label, exact: true })
       .click();
   const windowAction = (state) => {
-    const result = spawnSync(
+    const result = spawnSyncBounded(
       "pwsh",
       ["-NoProfile", "-File", action, "-ProcessId", String(inst.proc.pid), "-Action", state],
-      { encoding: "utf8", windowsHide: true },
+      { action: `window-${state}` },
     );
     if (result.status !== 0 || !/(CLOSED|STATE_CHANGED) true/i.test(result.stdout))
       throw new Error(`Native ${state} failed: ${result.stdout} ${result.stderr}`);
@@ -257,14 +291,22 @@ export async function nativeUiRelaunch({ inst, ck, ev }) {
   };
   /** 走应用自己的「直接退出」，等宿主真实退出（退出码由父进程句柄给出）。 */
   const exitThroughDialog = async () => {
+    ensureNotCanceled(isCanceled, "close-command");
+    markStage("close-command");
     const close = windowAction("close");
+    markStageDone("close-command");
+    ensureNotCanceled(isCanceled, "click-quit");
+    markStage("click-quit");
     await page()
       .locator(".close-dialog")
       .getByRole("button", { name: "直接退出", exact: true })
       .click();
+    markStageDone("click-quit");
+    markStage("wait-host-exit");
     const deadline = Date.now() + 20000;
     while (inst.proc.exitCode === null && Date.now() < deadline)
       await new Promise((resolve) => setTimeout(resolve, 100));
+    markStageDone("wait-host-exit");
     return { close, exitCode: inst.proc.exitCode };
   };
 

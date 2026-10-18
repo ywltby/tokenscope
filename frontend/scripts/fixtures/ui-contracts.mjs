@@ -93,6 +93,11 @@ export const PRIVACY_PROTECTED_COMMANDS = [
   "view_cache_save",
   "source_status",
   "source_config_set",
+  "source_paths_list",
+  "source_path_add",
+  "source_path_remove",
+  "source_path_set_enabled",
+  "source_auto_set",
   "cache_stats",
   "refresh_cache",
   "pricing_entries",
@@ -384,6 +389,79 @@ const sourceStatusMissing = [
 /** UX08：超长「当前生效目录」——用于真实浏览器换行/不横向溢出验收。 */
 export const LONG_SOURCE_DIR =
   "C:/Users/very.long.user.name/AppData/Roaming/deeply/nested/agent/workspaces/tokenscope-monorepo/packages/frontend/.claude/projects";
+/** PR3 §5：source_paths_list 的行（默认 + 手动；后端已解析身份/标签）。 */
+export const SOURCE_ROWS_DEFAULT = [
+  {
+    id: "c:/users/dev/.claude/projects",
+    agent: "claude",
+    path: "C:/Users/dev/.claude/projects",
+    canonical_identity: "c:/users/dev/.claude/projects",
+    identity_confirmed: true,
+    origins: ["默认自动"],
+    mapping_path: "C:/Users/dev/.claude.json",
+    row_enabled: true,
+    enabled: true,
+    state: "ready",
+    diagnostics: [],
+  },
+  {
+    id: "c:/users/dev/.codex/sessions",
+    agent: "codex",
+    path: "C:/Users/dev/.codex/sessions",
+    canonical_identity: "c:/users/dev/.codex/sessions",
+    identity_confirmed: true,
+    origins: ["默认自动"],
+    mapping_path: null,
+    row_enabled: true,
+    enabled: true,
+    state: "ready",
+    diagnostics: [],
+  },
+];
+
+/** PR3：合并行（默认自动 + 手动同根）与超长路径行——标签合并与换行验收。 */
+export const SOURCE_ROWS_MERGED_AND_LONG = [
+  {
+    id: "c:/users/dev/.claude/projects",
+    agent: "claude",
+    path: "C:/Users/dev/.claude/projects",
+    canonical_identity: "c:/users/dev/.claude/projects",
+    identity_confirmed: true,
+    origins: ["默认自动", "手动"],
+    mapping_path: "C:/Users/dev/.claude.json",
+    row_enabled: true,
+    enabled: true,
+    state: "ready",
+    diagnostics: ["同一物理根由多个候选指到：项目映射采用已核实的默认绑定"],
+  },
+  {
+    id: LONG_SOURCE_DIR.toLowerCase(),
+    agent: "claude",
+    path: LONG_SOURCE_DIR,
+    canonical_identity: LONG_SOURCE_DIR.toLowerCase(),
+    identity_confirmed: true,
+    origins: ["手动"],
+    mapping_path: null,
+    row_enabled: true,
+    enabled: true,
+    state: "ready",
+    diagnostics: [],
+  },
+  {
+    id: "c:/users/dev/.codex/sessions",
+    agent: "codex",
+    path: "C:/Users/dev/.codex/sessions",
+    canonical_identity: "c:/users/dev/.codex/sessions",
+    identity_confirmed: true,
+    origins: ["默认自动"],
+    mapping_path: null,
+    row_enabled: true,
+    enabled: true,
+    state: "ready",
+    diagnostics: [],
+  },
+];
+
 const sourceStatusLong = [
   {
     agent: "claude-code",
@@ -781,6 +859,11 @@ export function buildFixture(name) {
     p.reject(new Error(message));
   }
 
+  // PR3：来源行可变集合（cfg.sourceRows 指定初始集；缺省默认两行）。
+  let sourceRows = (cfg.sourceRows ?? "default") === "merged"
+    ? SOURCE_ROWS_MERGED_AND_LONG.map((r) => ({ ...r, origins: [...r.origins] }))
+    : SOURCE_ROWS_DEFAULT.map((r) => ({ ...r, origins: [...r.origins] }));
+
   // 可变状态（错误恢复类 fixture 需要"第一次失败、重试成功"）
   const state = {
     settingsGets: 0,
@@ -963,8 +1046,68 @@ export function buildFixture(name) {
           return reject("来源目录冲突：两个启用的来源不能指向同一目录（合成）");
         // 成功写入必须可读回；设置保存通知刷新后不能凭空退回旧目录。
         state.savedSources[args.agent] = { enabled: args.enabled, dir: args.dir };
+        // PR3：总开关只写 enabled（dir 参数已废弃，不得覆盖列表）。
+        const row = sourceRows.find((r) => r.agent === args.agent);
+        if (row) row.enabled = args.enabled;
         return null;
       }
+      // ── PR3 §5：来源目录管理（列表/追加/移除/行启停/自动开关）──
+      case "source_paths_list": {
+        state.sourceReads += 1;
+        return sourceRows.map((r) => ({ ...r, origins: [...r.origins] }));
+      }
+      case "source_path_add": {
+        const path = String(args?.path ?? "").trim();
+        if (!/^[a-zA-Z]:[\/]/.test(path))
+          return reject(`目录必须是绝对路径：${path || "（空）"}（合成）`);
+        const exists = sourceRows.find(
+          (r) => r.canonical_identity === path.toLowerCase(),
+        );
+        if (exists)
+          return reject(
+            `目录已在列表中：${exists.path}（合成）`,
+          );
+        // 合成口径：C:/Users/dev 的子目录一律按"与默认根嵌套"拒绝（父/子）。
+        if (path.toLowerCase().startsWith("c:/users/dev/") && !path.toLowerCase().includes("history"))
+          return reject(
+            "目录与已有来源存在嵌套关系（合成）：请改用互不嵌套的目录",
+          );
+        const id = path.toLowerCase();
+        sourceRows.push({
+          id,
+          agent: args.agent,
+          path,
+          canonical_identity: id,
+          identity_confirmed: true,
+          origins: ["手动"],
+          mapping_path: null,
+          row_enabled: true,
+          enabled: true,
+          state: "ready",
+          diagnostics: [],
+        });
+        return `added:${id}`;
+      }
+      case "source_path_remove": {
+        const before = sourceRows.length;
+        sourceRows = sourceRows.filter(
+          (r) => !(r.agent === args.agent && r.id === args.id && r.origins.includes("手动")),
+        );
+        if (sourceRows.length === before)
+          return reject("该行没有可移除的手动目录（合成）");
+        return null;
+      }
+      case "source_path_set_enabled": {
+        const row = sourceRows.find(
+          (r) => r.agent === args.agent && r.id === args.id,
+        );
+        if (!row) return reject("来源已变化，请重试（合成）");
+        row.row_enabled = args.enabled;
+        row.enabled = args.enabled && row.origins.includes("默认自动");
+        return null;
+      }
+      case "source_auto_set":
+        return args?.enabled ?? true;
       case "sync_pricing_openrouter": {
         state.syncRuns += 1;
         if (cfg.sync === "fail") return reject("OpenRouter: 同步失败（合成）");
@@ -1059,6 +1202,8 @@ const SCENARIOS = {
   "status-read-failure": { kind: "normal", statusFails: true },
   // AP04：来源保存被后端拒绝（目录冲突）→ 错误只归属该行、输入保留、重试成功
   "source-save-rejected": { kind: "normal", sourceWrite: "fail-then-ok" },
+  // PR3 §5：来源目录管理——合并标签/长路径初始集 + 追加/移除/行启停/开关。
+  "source-paths-management": { kind: "normal", sourceRows: "merged" },
   // AP04：关闭动作写入被拒绝 → 界面回退到已确认值（quit），错误可见可重试
   "close-action-write-failure": { kind: "normal", settings: "close-quit", closeWrite: "fail-then-ok" },
   // AP04：挂起的 settings_get 以 reject 结束 → 不得把已保存值降级成"未知"

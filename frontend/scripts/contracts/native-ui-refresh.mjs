@@ -1,10 +1,12 @@
 // 真 WebView2 + 真 Rust + 隔离根。只追加合成日志，不读写真实来源。
+// S00（PR3 计划 §9.1 第 3、4 条）：重启段的关闭/点击退出/等待退出各打阶段标记；
+// 同步命令 30 秒上限、CDP 关闭 10 秒上限。
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { closeBrowserBounded, ensureNotCanceled, spawnSyncBounded } from "../lib/native-scenario.mjs";
 
-export async function nativeUiRefresh({ inst, ck, ev }) {
+export async function nativeUiRefresh({ inst, ck, ev, markStage, markStageDone, isCanceled }) {
   const page = () => inst.page;
   const root = () => page().locator("[data-summary-query]");
   const click = async (locator) => {
@@ -52,24 +54,31 @@ export async function nativeUiRefresh({ inst, ck, ev }) {
     const action = fileURLToPath(
       new URL("../../../scripts/native-window-action.ps1", import.meta.url),
     );
-    const result = spawnSync(
+    ensureNotCanceled(isCanceled, "close-command");
+    markStage("close-command");
+    const result = spawnSyncBounded(
       "pwsh",
       ["-NoProfile", "-File", action, "-ProcessId", String(inst.proc.pid), "-Action", "close"],
-      { encoding: "utf8", windowsHide: true },
+      { action: "window-close", stage: "close-command" },
     );
+    markStageDone("close-command");
     if (result.status !== 0 || !/CLOSED true/i.test(result.stdout))
       throw new Error(`WM_CLOSE failed: ${result.stderr} ${result.stdout}`);
+    ensureNotCanceled(isCanceled, "click-quit");
+    markStage("click-quit");
     await click(
       page().locator(".close-dialog").getByRole("button", { name: "直接退出", exact: true }),
     );
+    markStageDone("click-quit");
+    markStage("wait-host-exit");
     const deadline = Date.now() + 15000;
     while (inst.proc.exitCode === null && Date.now() < deadline)
       await new Promise((resolve) => setTimeout(resolve, 100));
+    markStageDone("wait-host-exit");
     if (inst.proc.exitCode !== 0)
       throw new Error(`restart requires clean exit, got ${inst.proc.exitCode}`);
-    try {
-      await inst.browser.close();
-    } catch {}
+    // S00：CDP 关闭 10 秒上限，超时记为 close timeout 后继续（不悬挂）
+    await closeBrowserBounded(inst.browser);
   };
   await inst.waitForData();
   await inst.setWindowSize(980, 620);

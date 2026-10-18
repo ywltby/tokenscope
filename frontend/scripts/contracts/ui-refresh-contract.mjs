@@ -95,18 +95,16 @@ export async function uiRefreshLifecycle(ctx) {
     ctx.record(name, "确认刷新重建一批", calls() === before + 1, calls());
     await navigate("设置");
     await click(page.getByRole("button", { name: "数据源", exact: true }));
+    // PR3：来源开关即改即存（不再有「保存」按钮）——切换总开关触发保存并
+    // 唤醒采集，通知链与旧「保存」路径同源。
     const beforeSave = calls();
-    await click(
-      page
-        .locator('[data-section="sources"]')
-        .getByRole("button", { name: "保存", exact: true })
-        .first(),
+    await click(page.locator('[aria-label="Claude Code 启用"]'));
+    // 开关即改即存不弹通知（避免噪音）——等 source_config_set 真实发出。
+    await page.waitForFunction(
+      () => window.__TS_IPC_CALLS.some((c) => c.cmd === "source_config_set"),
+      undefined,
+      { timeout: 10000 },
     );
-    await page
-      .locator(".n-message")
-      .filter({ hasText: /已保存.*来源配置/ })
-      .first()
-      .waitFor();
     await navigate("汇总");
     await page.waitForFunction(
       (n) => window.__TS_IPC_CALLS.filter((c) => c.cmd === "query_begin").length > n,

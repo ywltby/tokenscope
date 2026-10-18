@@ -18,6 +18,7 @@ import {
   connectDecision,
   createLaunchRecord,
   describeTargets,
+  descendantsAliveByName,
   hostLogTail,
   isRetryableConnectError,
   launchPort,
@@ -82,7 +83,8 @@ describe("端口计算（§4.8 第 1 条）", () => {
     const unique = [...new Set(bases)].sort((a, b) => a - b);
     // 9470 复活为 ui-collection-status 的起始端口（旧用途是强制缩放 1 轮，
     // 已因证据重复删除）；该场景 3 次启动用 9471–9473。
-    expect(unique).toEqual([9451, 9460, 9470, 9480, 9490]);
+    // PR3：ui-source-paths 起始 9455（2 次启动用 9455–9456）。
+    expect(unique).toEqual([9451, 9455, 9460, 9470, 9480, 9490]);
     // 单步最多 3 次启动：ui-refresh 首次 + 2 次重启，ui-system 首次 + 1 次重启，
     // ui-collection-status 首次 + 2 次重启。
     const stepSize = 3;
@@ -149,6 +151,21 @@ describe("后代进程递归记录（§4.8 第 2 条）", () => {
   it("合并多次快照不会丢已记录的后代", () => {
     expect(mergePids([200], [200, 300])).toEqual([200, 300]);
     expect(mergePids(null, [])).toEqual([]);
+  });
+
+  // PR #14 CI 实测：宿主干净退出后 PID 被系统进程复用，从复用者出发的后代
+  // 遍历把整棵系统树记成"后代"，退出确认 20 秒超时。存活判定必须带进程名
+  // 身份校验——复用 PID 的新名字不属于本应用家族，不得算残留或进强杀清单。
+  it("descendantsAliveByName 只认本应用家族的名字，未知 PID 保守保留", () => {
+    const rows = normalizeProcessTable([
+      { ProcessId: 200, ParentProcessId: 752, Name: "svchost.exe" },
+      { ProcessId: 300, ParentProcessId: 752, Name: "msedgewebview2.exe" },
+      { ProcessId: 400, ParentProcessId: 1, Name: "tokenscope.exe" },
+    ]);
+    expect(descendantsAliveByName([200, 300, 400, 999], rows, () => true)).toEqual([300, 400, 999]);
+    expect(descendantsAliveByName([300], rows, () => false)).toEqual([]);
+    expect(descendantsAliveByName([300], null, () => true)).toEqual([300]);
+    expect(descendantsAliveByName(null, rows, () => true)).toEqual([]);
   });
 });
 

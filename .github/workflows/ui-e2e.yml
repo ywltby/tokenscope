@@ -56,6 +56,13 @@ jobs:
         run: |
           node frontend/scripts/native-acceptance.mjs --scenario ui-collection-status --events 250 --port 9470 --out qa-artifacts/ui-adjustment/native-e2e/collection-status
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # PR3：来源目录主线（§9.6 第 2 条）——UI 追加手动目录、真实下一轮统计、
+      # 重启后保留且不重复计数（2 次启动，起始端口 9455）。
+      - name: Native source paths lifecycle
+        shell: pwsh
+        run: |
+          node frontend/scripts/native-acceptance.mjs --scenario ui-source-paths --events 4 --port 9455 --out qa-artifacts/ui-adjustment/native-e2e/source-paths
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload native UI evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7

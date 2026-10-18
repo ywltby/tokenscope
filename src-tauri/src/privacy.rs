@@ -56,6 +56,11 @@ pub const PROTECTED_COMMANDS: &[&str] = &[
     "view_cache_save",
     "source_status",
     "source_config_set",
+    "source_paths_list",
+    "source_path_add",
+    "source_path_remove",
+    "source_path_set_enabled",
+    "source_auto_set",
     "cache_stats",
     "refresh_cache",
     // H05：CCS 导入只由用户在设置页手动触发，且同样受隐私闸门保护
@@ -138,17 +143,20 @@ pub enum RuntimeStep {
     /// H04：原生日志定时采集线程（5 分钟轮询；只在业务解锁后运行，
     /// 未同意时不打开历史库、不读日志）。
     Collection,
+    /// PR3：v1 来源目录迁移（写锁内一次性；失败保留旧文件并降级诊断）。
+    SourcePathMigration,
 }
 
 impl RuntimeStep {
     /// 全部步骤（顺序即初始化顺序）。
-    pub const ALL: [RuntimeStep; 6] = [
+    pub const ALL: [RuntimeStep; 7] = [
         RuntimeStep::Logging,
         RuntimeStep::WindowState,
         RuntimeStep::Saver,
         RuntimeStep::Tray,
         RuntimeStep::PriceSync,
         RuntimeStep::Collection,
+        RuntimeStep::SourcePathMigration,
     ];
 }
 
@@ -161,6 +169,7 @@ pub struct RuntimeFlags {
     tray: bool,
     price_sync: bool,
     collection: bool,
+    source_path_migration: bool,
 }
 
 impl RuntimeFlags {
@@ -180,6 +189,7 @@ impl RuntimeFlags {
             RuntimeStep::Tray => self.tray,
             RuntimeStep::PriceSync => self.price_sync,
             RuntimeStep::Collection => self.collection,
+            RuntimeStep::SourcePathMigration => self.source_path_migration,
         }
     }
 
@@ -191,6 +201,7 @@ impl RuntimeFlags {
             RuntimeStep::Tray => self.tray = true,
             RuntimeStep::PriceSync => self.price_sync = true,
             RuntimeStep::Collection => self.collection = true,
+            RuntimeStep::SourcePathMigration => self.source_path_migration = true,
         }
     }
 }
@@ -917,7 +928,8 @@ mod tests {
                 RuntimeStep::Saver,
                 RuntimeStep::Tray,
                 RuntimeStep::PriceSync,
-                RuntimeStep::Collection
+                RuntimeStep::Collection,
+                RuntimeStep::SourcePathMigration
             ],
             "已完成的步骤不得重复执行"
         );

@@ -25,7 +25,7 @@ try {
       "--viewport",
       "1280x820,980x620",
       "--contract",
-      "ui_refresh_lifecycle,ui_refresh_clock,ui_adjustment_shapes,ui_date_keyboard_matrix,ui_control_material",
+      "ui_refresh_lifecycle,ui_refresh_clock,ui_adjustment_shapes,ui_date_keyboard_matrix,ui_control_material,source_paths_management_contract",
       "--output",
       "qa-artifacts/ui-adjustment/ci-e2e",
     ],

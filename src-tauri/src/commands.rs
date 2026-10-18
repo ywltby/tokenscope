@@ -17,6 +17,7 @@ use tokenscope::report::{
     view_cache_path,
 };
 use tokenscope::settings::{CloseAction, Settings};
+use tokenscope::source::discovery::{OriginKind, ProbeState};
 
 use crate::privacy;
 
@@ -83,15 +84,14 @@ pub async fn list_events(
     to: Option<String>,
 ) -> Result<EventList, String> {
     privacy::require_ready(&privacy::state_of(&app))?;
-    let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings()?;
+    let set = resolve_source_set()?;
     let opts = SummaryOptions {
         by: GroupBy::Day,
         agent: parse_agent(agent.as_deref())?,
         days,
-        claude_dir,
-        codex_dir,
-        claude_enabled: Some(claude_enabled),
-        codex_enabled: Some(codex_enabled),
+        source_plans: Some(set.plans),
+        claude_enabled: Some(set.claude_enabled),
+        codex_enabled: Some(set.codex_enabled),
         tz,
         from,
         to,
@@ -129,7 +129,7 @@ fn query_opts(
     end_at: Option<String>,
     until_now: Option<bool>,
 ) -> Result<SummaryOptions, String> {
-    let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings()?;
+    let set = resolve_source_set()?;
     Ok(SummaryOptions {
         by: parse_by(by)?,
         agent: parse_agent(agent.as_deref())?,
@@ -137,10 +137,9 @@ fn query_opts(
         //（来源时区与展示时区不一致时用户可选的恢复路径之一）。
         rollups: parse_rollups_mode(rollups.as_deref())?,
         days,
-        claude_dir,
-        codex_dir,
-        claude_enabled: Some(claude_enabled),
-        codex_enabled: Some(codex_enabled),
+        source_plans: Some(set.plans),
+        claude_enabled: Some(set.claude_enabled),
+        codex_enabled: Some(set.codex_enabled),
         tz,
         from,
         to,
@@ -295,60 +294,112 @@ pub(crate) fn load_settings_strict() -> anyhow::Result<tokenscope::settings::Set
     tokenscope::settings::load(&path)
 }
 
-/// C1：由设置值解析各来源的有效配置（目录覆盖 + 启停）。
-fn source_settings_from(
-    s: &tokenscope::settings::Settings,
-) -> (
-    Option<std::path::PathBuf>,
-    Option<std::path::PathBuf>,
-    bool,
-    bool,
-) {
-    let c = s.source_config(true);
-    let x = s.source_config(false);
-    (
-        c.dir.map(std::path::PathBuf::from),
-        x.dir.map(std::path::PathBuf::from),
-        c.enabled,
-        x.enabled,
-    )
+/// PR3 §9.5 第 1 条：共用的来源**集合**解析结果——整轮计划 + 应用总开关。
+#[derive(Debug)]
+pub(crate) struct ResolvedSourceSet {
+    /// 有效启用的根实例（每根一个；发现层已合并同根 origin）。
+    pub plans: Vec<tokenscope::report::SourcePlan>,
+    /// 应用总开关（source_status 与 rollup 路径的兼容面）。
+    pub claude_enabled: bool,
+    pub codex_enabled: bool,
 }
 
-/// AP02：采集/状态入口的统一来源解析内核（可注入读取结果以便测试）。
-/// 读取失败 → 明确错误；**不**回退默认来源。
-#[allow(clippy::type_complexity)]
-fn source_settings_impl(
+/// PR3：由设置解析整轮来源计划（注入形态，测试用隔离上下文）。
+pub(crate) fn source_plans_from_with(
+    s: &tokenscope::settings::Settings,
+    ctx: &tokenscope::source::discovery::DiscoveryContext,
+) -> Vec<tokenscope::report::SourcePlan> {
+    let resolved = tokenscope::source::discovery::resolve_sources(
+        ctx,
+        &s.source_config(true),
+        &s.source_config(false),
+    );
+    resolved
+        .roots
+        .iter()
+        .filter(|row| {
+            if !row.effective_enabled {
+                return false;
+            }
+            // 缺失/非目录的**纯自动**根（默认/环境）不进采集计划（计划 §2：
+            // "不存在的绝对根显示缺失、不每轮报错"；"默认根不存在可不显示"）。
+            // 每根一实例下它们只会触发每轮"目录不存在"警告，把常态缺失变成
+            // 常驻"部分异常"胶囊。列表行照常返回（环境缺失根保留行）；目录
+            // 出现后下一轮解析状态变化，自然回到计划（复用键含实际集合与状态）。
+            // 手动配置的缺失根仍进计划，采集层保留"目录不存在"提示。
+            let has_manual = row.origins.iter().any(|o| o.kind == OriginKind::Manual);
+            let nothing_to_walk = matches!(
+                row.state,
+                ProbeState::Missing | ProbeState::NotADirectory(_)
+            );
+            // 跨应用根冲突（发现层已双侧标记）：双方都不进本轮计划（§4.1/§8.5）。
+            !(nothing_to_walk && !has_manual) && row.conflict_with.is_none()
+        })
+        .map(|row| tokenscope::report::SourcePlan {
+            agent: row.agent,
+            root: std::path::PathBuf::from(&row.display_path),
+            claude_mapping: row.mapping_path.clone(),
+        })
+        .collect()
+}
+
+/// AP02：采集/查询/状态入口的统一来源解析内核（可注入读取结果以便测试）。
+/// 读取失败 → 明确错误；**不**回退默认来源（损坏设置绝不悄悄扩大或改变
+/// 采集范围）。
+pub(crate) fn resolve_source_set_in(
     loaded: anyhow::Result<tokenscope::settings::Settings>,
-) -> Result<
-    (
-        Option<std::path::PathBuf>,
-        Option<std::path::PathBuf>,
-        bool,
-        bool,
-    ),
-    String,
-> {
-    match loaded {
-        Ok(s) => Ok(source_settings_from(&s)),
+    ctx: &tokenscope::source::discovery::DiscoveryContext,
+) -> Result<ResolvedSourceSet, String> {
+    let s = match loaded {
+        Ok(s) => s,
         Err(e) => {
             log::warn!("设置读取失败，拒绝按默认来源采集: {e:#}");
-            Err(format!("{e:#}"))
+            return Err(format!("{e:#}"));
         }
-    }
+    };
+    let plans = source_plans_from_with(&s, ctx);
+    Ok(ResolvedSourceSet {
+        plans,
+        claude_enabled: s.source_config(true).enabled,
+        codex_enabled: s.source_config(false).enabled,
+    })
 }
 
-/// C1：读设置并解析为各来源的有效配置（目录覆盖 + 启停）。
-#[allow(clippy::type_complexity)]
-fn source_settings() -> Result<
-    (
-        Option<std::path::PathBuf>,
-        Option<std::path::PathBuf>,
-        bool,
-        bool,
-    ),
-    String,
-> {
-    source_settings_impl(load_settings_strict())
+pub(crate) fn resolve_source_set_impl(
+    loaded: anyhow::Result<tokenscope::settings::Settings>,
+) -> Result<ResolvedSourceSet, String> {
+    let ctx = tokenscope::source::discovery::DiscoveryContext::production(startup_env())
+        .map_err(|e| format!("{e:#}"))?;
+    resolve_source_set_in(loaded, &ctx)
+}
+
+/// PR3：读设置并解析整轮来源计划。
+pub(crate) fn resolve_source_set() -> Result<ResolvedSourceSet, String> {
+    resolve_source_set_impl(load_settings_strict())
+}
+
+// ── PR3 §9.3 第 2 条：启动环境快照（生产 setup 捕获一次；采集轮次不重读）──
+
+static STARTUP_ENV: std::sync::RwLock<Option<tokenscope::source::discovery::StartupEnv>> =
+    std::sync::RwLock::new(None);
+
+/// 启动最早阶段调用一次（lib setup）；此后采集轮次一律使用快照。
+pub fn capture_startup_environment() {
+    let env = tokenscope::source::discovery::capture_startup_env();
+    *STARTUP_ENV.write().unwrap_or_else(|e| e.into_inner()) = Some(env.clone());
+    log::info!(
+        "启动环境捕获：CODEX_HOME={:?} CLAUDE_CONFIG_DIR={:?}",
+        env.codex_home,
+        env.claude_config_dir
+    );
+}
+
+fn startup_env() -> tokenscope::source::discovery::StartupEnv {
+    STARTUP_ENV
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(tokenscope::source::discovery::capture_startup_env)
 }
 
 /// H04：由**已成功读取**的设置构造采集选项（定时采集与查询同源）。
@@ -359,13 +410,21 @@ fn source_settings() -> Result<
 pub(crate) fn collection_opts_from(
     loaded: anyhow::Result<tokenscope::settings::Settings>,
 ) -> Result<SummaryOptions, String> {
-    let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings_impl(loaded)?;
+    let ctx = tokenscope::source::discovery::DiscoveryContext::production(startup_env())
+        .map_err(|e| format!("{e:#}"))?;
+    collection_opts_from_in(loaded, &ctx)
+}
+
+pub(crate) fn collection_opts_from_in(
+    loaded: anyhow::Result<tokenscope::settings::Settings>,
+    ctx: &tokenscope::source::discovery::DiscoveryContext,
+) -> Result<SummaryOptions, String> {
+    let set = resolve_source_set_in(loaded, ctx)?;
     Ok(SummaryOptions {
         by: tokenscope::aggregate::GroupBy::Day,
-        claude_dir,
-        codex_dir,
-        claude_enabled: Some(claude_enabled),
-        codex_enabled: Some(codex_enabled),
+        source_plans: Some(set.plans),
+        claude_enabled: Some(set.claude_enabled),
+        codex_enabled: Some(set.codex_enabled),
         ..Default::default()
     })
 }
@@ -602,7 +661,10 @@ pub async fn open_settings_file(app: tauri::AppHandle) -> Result<String, String>
     Ok(path.display().to_string())
 }
 
-/// C1：保存单一来源配置（启停 + 目录覆盖；dir=None 回默认目录）。
+/// PR3 §9.5 第 2 条：来源总开关的兼容入口——**只**允许应用总开关这一明确
+/// 操作；旧 `dir` 参数不再具有写入语义（v1 dir 已迁移为追加项并开启自动
+/// 发现，旧 dir 写入绝不能覆盖整份新列表）。追加目录的增删走
+/// `source_path_add` / `source_path_remove`。
 #[tauri::command]
 pub async fn source_config_set(
     app: tauri::AppHandle,
@@ -611,15 +673,19 @@ pub async fn source_config_set(
     dir: Option<String>,
 ) -> Result<tokenscope::settings::SourceConfig, String> {
     privacy::require_ready(&privacy::state_of(&app))?;
-    run_blocking("source_config_set", move || {
+    let committed = run_blocking("source_config_set", move || {
         let path = tokenscope::settings::settings_path()?;
         source_config_set_impl(&path, &agent, enabled, dir)
     })
-    .await
+    .await?;
+    crate::wake_collection_scheduler();
+    Ok(committed)
 }
 
 /// Task 7.1：损坏设置直接报错——绝不 unwrap_or_default 后覆盖用户文件。
-/// SF02：来源重叠校验在事务锁内基于最新其他来源值执行。
+/// PR3：事务内只改 enabled 一个字段，其余（auto_discover/excluded/追加项）
+/// 逐字段保留；跨应用冲突在 `source_path_add` 校验，总开关停用是解除冲突
+/// 的合法操作，不在采集前反向拦截。
 pub(crate) fn source_config_set_impl(
     path: &std::path::Path,
     agent: &str,
@@ -631,40 +697,432 @@ pub(crate) fn source_config_set_impl(
         "codex" => false,
         other => return Err(anyhow::anyhow!("未知 agent: {other}")),
     };
-    let cfg = tokenscope::settings::SourceConfig {
-        enabled,
-        dir: dir.clone(),
-    };
-    let cfg_for_save = cfg.clone();
+    if dir.is_some() {
+        // 旧 UI 的目录写入语义已废弃（PR3 §9.5 第 2 条）：忽略并告警，
+        // 不静默把旧语义的"目录覆盖"重新写回配置。
+        log::warn!("source_config_set 的 dir 参数已废弃（PR3 追加目录管理取代）；本次调用忽略 dir");
+    }
     tokenscope::settings::update(path, move |s| {
-        // 先落本次修改，再按"保存后的全量配置"校验（校验对象 = 生效配置）。
+        let cfg = s.source_config(claude);
+        let mut next = cfg;
+        next.enabled = enabled;
         if claude {
-            s.sources.claude = Some(cfg_for_save);
+            s.sources.claude = Some(next);
         } else {
-            s.sources.codex = Some(cfg_for_save);
-        }
-        // SF09/AP01：解析启用来源的**有效**目录后检查相同/嵌套冲突——
-        // 缺省字段（None）= 默认启用 + 工具默认根，因此同样参与校验；
-        // 解析函数与采集层共用（report::effective_source_dirs_from_settings），
-        // 不再把 None 当成"不参与校验"而放行采集层必然拒绝的配置。
-        // 校验与写入在同一临界区内完成：失败即不落盘。
-        let dirs = tokenscope::report::effective_source_dirs_from_settings(s)?;
-        for i in 0..dirs.len() {
-            for j in i + 1..dirs.len() {
-                let (ka, da) = &dirs[i];
-                let (kb, db) = &dirs[j];
-                tokenscope::settings::validate_dir_conflict(da, db).map_err(|e| {
-                    anyhow::anyhow!("{e}（来源: {} / {}）", ka.as_str(), kb.as_str())
-                })?;
-            }
+            s.sources.codex = Some(next);
         }
         Ok(())
     })?;
-    log::info!(
-        "来源配置已保存：{agent} enabled={enabled} dir={:?}",
-        cfg.dir
+    log::info!("来源总开关已保存：{agent} enabled={enabled}");
+    let committed = tokenscope::settings::load(path)?.source_config(claude);
+    Ok(committed)
+}
+
+/// PR3 §5/§9.5 第 3 条：auto_discover 开关（设置单项事务；追加目录管理
+/// 取代目录覆盖后，自动开关与总开关同级的两个明确操作之一）。
+#[tauri::command]
+pub async fn source_auto_set(
+    app: tauri::AppHandle,
+    agent: String,
+    enabled: bool,
+) -> Result<bool, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    let committed = run_blocking("source_auto_set", move || {
+        let path = tokenscope::settings::settings_path()?;
+        source_auto_set_impl(&path, &agent, enabled)
+    })
+    .await
+    .map_err(|e| format!("{e:#}"))?;
+    crate::wake_collection_scheduler();
+    Ok(committed)
+}
+
+pub(crate) fn source_auto_set_impl(
+    path: &std::path::Path,
+    agent: &str,
+    enabled: bool,
+) -> anyhow::Result<bool> {
+    let claude = match agent {
+        "claude" => true,
+        "codex" => false,
+        other => return Err(anyhow::anyhow!("未知 agent: {other}")),
+    };
+    tokenscope::settings::update(path, move |s| {
+        let cfg = s.source_config(claude);
+        let mut next = cfg;
+        next.auto_discover = enabled;
+        if claude {
+            s.sources.claude = Some(next);
+        } else {
+            s.sources.codex = Some(next);
+        }
+        Ok(())
+    })?;
+    log::info!("来源自动发现已保存：{agent} enabled={enabled}");
+    let committed = tokenscope::settings::load(path)?
+        .source_config(claude)
+        .auto_discover;
+    Ok(committed)
+}
+
+// ── PR3 §5/§9.5 第 3 条：来源目录管理 IPC ─────────────────────────
+//
+// list 只探测少量根（不遍历日志、不触发查询、不写历史）；写接口对最新
+// settings 单项修改（事务锁内），成功后唤醒既有串行采集调度器；新增与
+// 启用时后端重新校验，不信任前端传入的 canonical_identity/mapping_path。
+
+/// 设置页来源行（id = 规范化身份键，跨轮稳定，不用数组下标）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourcePathRow {
+    pub id: String,
+    /// "claude" | "codex"（前端既有命名）。
+    pub agent: String,
+    /// 显示路径（origin 稳定序里第一个的配置路径；完整可复制）。
+    pub path: String,
+    pub canonical_identity: String,
+    pub identity_confirmed: bool,
+    /// 多标签（默认自动 / 环境 CODEX_HOME / 手动 …）。
+    pub origins: Vec<String>,
+    pub mapping_path: Option<String>,
+    /// 行自身启用（至少一个 origin 启用；不含应用总开关）。
+    pub row_enabled: bool,
+    /// 有效启停 = 应用总开关且行启用。
+    pub enabled: bool,
+    /// ready | missing | no_permission | not_directory。
+    pub state: String,
+    pub diagnostics: Vec<String>,
+}
+
+fn agent_name(kind: tokenscope::model::AgentKind) -> &'static str {
+    if kind == tokenscope::model::AgentKind::ClaudeCode {
+        "claude"
+    } else {
+        "codex"
+    }
+}
+
+fn probe_state_name(state: &tokenscope::source::discovery::ProbeState) -> &'static str {
+    use tokenscope::source::discovery::ProbeState;
+    match state {
+        ProbeState::Ready => "ready",
+        ProbeState::Missing => "missing",
+        ProbeState::NoPermission(_) => "no_permission",
+        ProbeState::NotADirectory(_) => "not_directory",
+    }
+}
+
+/// 列表内核（注入形态）：严格读设置 + 发现解析；默认缺失行隐藏（仍参与
+/// 手动新增校验），其余行保留（环境/手动缺失根显示缺失，权限失败显示
+/// 无权限——不伪报缺失）。
+pub(crate) fn source_paths_list_impl(
+    settings_path: &std::path::Path,
+    ctx: &tokenscope::source::discovery::DiscoveryContext,
+) -> Result<Vec<SourcePathRow>, String> {
+    let s = tokenscope::settings::load(settings_path).map_err(|e| format!("{e:#}"))?;
+    let resolved = tokenscope::source::discovery::resolve_sources(
+        ctx,
+        &s.source_config(true),
+        &s.source_config(false),
     );
-    Ok(cfg)
+    Ok(resolved
+        .roots
+        .iter()
+        .filter(|row| !row.hidden_by_default_missing())
+        .map(|row| SourcePathRow {
+            id: row.id().to_string(),
+            agent: agent_name(row.agent).to_string(),
+            path: row.display_path.clone(),
+            canonical_identity: row.identity_key.clone(),
+            identity_confirmed: row.identity_confirmed,
+            origins: row
+                .origins
+                .iter()
+                .map(|o| o.kind.label().to_string())
+                .collect(),
+            mapping_path: row.mapping_path.as_ref().map(|p| p.display().to_string()),
+            row_enabled: row.origins.iter().any(|o| o.enabled),
+            enabled: row.effective_enabled,
+            // 跨应用冲突行显示"冲突"（诊断里写明对方路径），其余按探测状态。
+            state: if row.conflict_with.is_some() {
+                "conflicted"
+            } else {
+                probe_state_name(&row.state)
+            }
+            .to_string(),
+            diagnostics: row.diagnostics.clone(),
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn source_paths_list(app: tauri::AppHandle) -> Result<Vec<SourcePathRow>, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    run_blocking("source_paths_list", move || {
+        let settings_path = tokenscope::settings::settings_path()?;
+        let ctx = tokenscope::source::discovery::DiscoveryContext::production(startup_env())?;
+        source_paths_list_impl(&settings_path, &ctx).map_err(anyhow::Error::msg)
+    })
+    .await
+}
+
+/// add 的结果：新增（含行 id）或已存在（提示"目录已在列表中"，不新增）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SourcePathAddOutcome {
+    Added { id: String },
+    AlreadyExists { id: String },
+}
+
+/// add 内核（注入形态）：形态校验 → 同应用全部行（默认/环境/手动/停用/
+/// 缺失均包含）相同或父子拒绝 → 跨应用相同/嵌套拒绝 → 事务内追加。
+/// 后端重新计算身份，不信任前端传入值。
+pub(crate) fn source_path_add_impl(
+    settings_path: &std::path::Path,
+    ctx: &tokenscope::source::discovery::DiscoveryContext,
+    home: &std::path::Path,
+    agent: &str,
+    raw: &str,
+) -> anyhow::Result<SourcePathAddOutcome> {
+    let kind = match agent {
+        "claude" => tokenscope::model::AgentKind::ClaudeCode,
+        "codex" => tokenscope::model::AgentKind::Codex,
+        other => return Err(anyhow::anyhow!("未知 agent: {other}")),
+    };
+    let trimmed = tokenscope::settings::validate_additional_path_shape(raw, home)
+        .map_err(anyhow::Error::msg)?;
+    let s = tokenscope::settings::load(settings_path).map_err(anyhow::Error::msg)?;
+    let resolved = tokenscope::source::discovery::resolve_sources(
+        ctx,
+        &s.source_config(true),
+        &s.source_config(false),
+    );
+    // 同应用：全部已有行（含停用与缺失）参与相同/父子比较
+    let mut same_app: Vec<std::path::PathBuf> = Vec::new();
+    let mut existing_id = None;
+    for row in resolved.roots.iter().filter(|r| r.agent == kind) {
+        same_app.push(std::path::PathBuf::from(&row.display_path));
+        for o in &row.origins {
+            same_app.push(std::path::PathBuf::from(&o.config_path));
+        }
+        let new_key = tokenscope::settings::normalized_key(&trimmed);
+        if row.identity_key == new_key {
+            existing_id = Some(row.id().to_string());
+        }
+    }
+    match tokenscope::settings::check_additional_path(&same_app, &trimmed) {
+        Err(tokenscope::settings::AdditionalPathReject::AlreadyExists { .. }) => {
+            let id = existing_id.unwrap_or_else(|| tokenscope::settings::normalized_key(&trimmed));
+            return Ok(SourcePathAddOutcome::AlreadyExists { id });
+        }
+        Err(tokenscope::settings::AdditionalPathReject::Nested { existing }) => {
+            return Err(anyhow::anyhow!(
+                "目录与已有来源存在嵌套关系（{existing}），会导致文件归属歧义或重复统计；请改用互不嵌套的目录，或停用/移除已有行"
+            ));
+        }
+        Ok(()) => {}
+    }
+    // 跨应用：相同/嵌套继续拒绝手动事务（§4.1）
+    for row in resolved.roots.iter().filter(|r| r.agent != kind) {
+        let other = std::path::PathBuf::from(&row.display_path);
+        if let Err(msg) = tokenscope::settings::validate_dir_conflict(&trimmed, &other) {
+            return Err(anyhow::anyhow!(
+                "{msg}（与 {} 来源的 {} 冲突）",
+                agent_name(row.agent),
+                row.display_path
+            ));
+        }
+    }
+    // 事务内追加；行 id 按探测身份（可访问 canonical，否则逻辑键）——与
+    // 列表解析一致，前端不得自行计算
+    let probe = (ctx.probe)(&trimmed);
+    let id = probe
+        .canonical
+        .as_ref()
+        .map(|c| c.display().to_string())
+        .unwrap_or_else(|| tokenscope::settings::normalized_key(&trimmed));
+    let entry_path = trimmed.display().to_string();
+    tokenscope::settings::update(settings_path, move |s| {
+        let cfg = s.source_config(kind == tokenscope::model::AgentKind::ClaudeCode);
+        let mut next = cfg;
+        next.additional_paths
+            .push(tokenscope::settings::AdditionalSourcePath {
+                path: entry_path,
+                enabled: true,
+            });
+        if kind == tokenscope::model::AgentKind::ClaudeCode {
+            s.sources.claude = Some(next);
+        } else {
+            s.sources.codex = Some(next);
+        }
+        Ok(())
+    })?;
+    log::info!("来源追加目录已保存：{agent} {}", trimmed.display());
+    Ok(SourcePathAddOutcome::Added { id })
+}
+
+#[tauri::command]
+pub async fn source_path_add(
+    app: tauri::AppHandle,
+    agent: String,
+    path: String,
+) -> Result<String, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    let outcome = run_blocking("source_path_add", move || {
+        let settings_path = tokenscope::settings::settings_path()?;
+        let ctx = tokenscope::source::discovery::DiscoveryContext::production(startup_env())?;
+        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录"))?;
+        source_path_add_impl(&settings_path, &ctx, &home, &agent, &path)
+    })
+    .await
+    .map_err(|e| format!("{e:#}"))?;
+    crate::wake_collection_scheduler();
+    match outcome {
+        SourcePathAddOutcome::Added { id } => Ok(format!("added:{id}")),
+        SourcePathAddOutcome::AlreadyExists { id } => Ok(format!("already_exists:{id}")),
+    }
+}
+
+/// remove 内核：只移除手动项；自动标签保持原启停（§9.3 第 4 条）。
+pub(crate) fn source_path_remove_impl(
+    settings_path: &std::path::Path,
+    ctx: &tokenscope::source::discovery::DiscoveryContext,
+    agent: &str,
+    id: &str,
+) -> anyhow::Result<()> {
+    let kind = match agent {
+        "claude" => tokenscope::model::AgentKind::ClaudeCode,
+        "codex" => tokenscope::model::AgentKind::Codex,
+        other => return Err(anyhow::anyhow!("未知 agent: {other}")),
+    };
+    let s = tokenscope::settings::load(settings_path).map_err(anyhow::Error::msg)?;
+    let resolved = tokenscope::source::discovery::resolve_sources(
+        ctx,
+        &s.source_config(true),
+        &s.source_config(false),
+    );
+    if !tokenscope::source::discovery::row_exists(&resolved.roots, kind, id) {
+        return Err(anyhow::anyhow!("来源已变化，请重试"));
+    }
+    let row = resolved
+        .roots
+        .iter()
+        .find(|r| r.agent == kind && r.id() == id)
+        .ok_or_else(|| anyhow::anyhow!("来源已变化，请重试"))?;
+    let row_paths = tokenscope::source::discovery::RowConfigPaths {
+        auto: Vec::new(),
+        manual: row
+            .origins
+            .iter()
+            .filter(|o| matches!(o.kind, tokenscope::source::discovery::OriginKind::Manual))
+            .map(|o| o.config_path.clone())
+            .collect(),
+    };
+    tokenscope::settings::update(settings_path, move |s| {
+        let cfg = s.source_config(kind == tokenscope::model::AgentKind::ClaudeCode);
+        let mut next = cfg;
+        tokenscope::source::discovery::remove_manual_from_row(&mut next, &row_paths)
+            .map_err(anyhow::Error::msg)?;
+        if kind == tokenscope::model::AgentKind::ClaudeCode {
+            s.sources.claude = Some(next);
+        } else {
+            s.sources.codex = Some(next);
+        }
+        Ok(())
+    })?;
+    log::info!("来源手动目录已移除：{agent} {id}");
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn source_path_remove(
+    app: tauri::AppHandle,
+    agent: String,
+    id: String,
+) -> Result<(), String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    run_blocking("source_path_remove", move || {
+        let settings_path = tokenscope::settings::settings_path()?;
+        let ctx = tokenscope::source::discovery::DiscoveryContext::production(startup_env())?;
+        source_path_remove_impl(&settings_path, &ctx, &agent, &id)
+    })
+    .await
+    .map_err(|e| format!("{e:#}"))?;
+    crate::wake_collection_scheduler();
+    Ok(())
+}
+
+/// set_enabled 内核：作用于该行全部 origin（§9.3 第 4 条）——禁用把自动
+/// origin 的配置路径写入排除项并停用手动项，开启做逆操作；应用总开关
+/// 不在此改写。
+pub(crate) fn source_path_set_enabled_impl(
+    settings_path: &std::path::Path,
+    ctx: &tokenscope::source::discovery::DiscoveryContext,
+    agent: &str,
+    id: &str,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    let kind = match agent {
+        "claude" => tokenscope::model::AgentKind::ClaudeCode,
+        "codex" => tokenscope::model::AgentKind::Codex,
+        other => return Err(anyhow::anyhow!("未知 agent: {other}")),
+    };
+    let s = tokenscope::settings::load(settings_path).map_err(anyhow::Error::msg)?;
+    let resolved = tokenscope::source::discovery::resolve_sources(
+        ctx,
+        &s.source_config(true),
+        &s.source_config(false),
+    );
+    let row = resolved
+        .roots
+        .iter()
+        .find(|r| r.agent == kind && r.id() == id)
+        .ok_or_else(|| anyhow::anyhow!("来源已变化，请重试"))?;
+    let row_paths = tokenscope::source::discovery::RowConfigPaths {
+        auto: row
+            .origins
+            .iter()
+            .filter(|o| !matches!(o.kind, tokenscope::source::discovery::OriginKind::Manual))
+            .map(|o| o.config_path.clone())
+            .collect(),
+        manual: row
+            .origins
+            .iter()
+            .filter(|o| matches!(o.kind, tokenscope::source::discovery::OriginKind::Manual))
+            .map(|o| o.config_path.clone())
+            .collect(),
+    };
+    tokenscope::settings::update(settings_path, move |s| {
+        let cfg = s.source_config(kind == tokenscope::model::AgentKind::ClaudeCode);
+        let mut next = cfg;
+        tokenscope::source::discovery::set_row_enabled(&mut next, &row_paths, enabled)
+            .map_err(anyhow::Error::msg)?;
+        if kind == tokenscope::model::AgentKind::ClaudeCode {
+            s.sources.claude = Some(next);
+        } else {
+            s.sources.codex = Some(next);
+        }
+        Ok(())
+    })?;
+    log::info!("来源行启停已保存：{agent} {id} enabled={enabled}");
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn source_path_set_enabled(
+    app: tauri::AppHandle,
+    agent: String,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    run_blocking("source_path_set_enabled", move || {
+        let settings_path = tokenscope::settings::settings_path()?;
+        let ctx = tokenscope::source::discovery::DiscoveryContext::production(startup_env())?;
+        source_path_set_enabled_impl(&settings_path, &ctx, &agent, &id, enabled)
+    })
+    .await
+    .map_err(|e| format!("{e:#}"))?;
+    crate::wake_collection_scheduler();
+    Ok(())
 }
 
 #[tauri::command]
@@ -825,13 +1283,21 @@ pub async fn refresh_cache(app: tauri::AppHandle) -> Result<CacheInfo, String> {
 pub(crate) fn rebuild_opts(
     loaded: anyhow::Result<tokenscope::settings::Settings>,
 ) -> Result<SummaryOptions, String> {
-    let (claude_dir, codex_dir, claude_enabled, codex_enabled) = source_settings_impl(loaded)?;
+    let ctx = tokenscope::source::discovery::DiscoveryContext::production(startup_env())
+        .map_err(|e| format!("{e:#}"))?;
+    rebuild_opts_in(loaded, &ctx)
+}
+
+pub(crate) fn rebuild_opts_in(
+    loaded: anyhow::Result<tokenscope::settings::Settings>,
+    ctx: &tokenscope::source::discovery::DiscoveryContext,
+) -> Result<SummaryOptions, String> {
+    let set = resolve_source_set_in(loaded, ctx)?;
     Ok(SummaryOptions {
         by: GroupBy::Day,
-        claude_dir,
-        codex_dir,
-        claude_enabled: Some(claude_enabled),
-        codex_enabled: Some(codex_enabled),
+        source_plans: Some(set.plans),
+        claude_enabled: Some(set.claude_enabled),
+        codex_enabled: Some(set.codex_enabled),
         refresh: true,
         ..Default::default()
     })
@@ -1226,6 +1692,25 @@ mod tests {
     }
 
     /// 隔离临时目录（设置文件测试共用）。
+    /// 测试用发现上下文：home 注入临时目录、空启动环境、可访问目录按
+    /// canonical 身份（不触真实主目录与环境变量）。
+    fn test_discovery_ctx(
+        dir: &std::path::Path,
+    ) -> tokenscope::source::discovery::DiscoveryContext {
+        use tokenscope::source::discovery::{RootProbe, StartupEnv};
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let probe = |path: &std::path::Path| RootProbe {
+            state: tokenscope::source::discovery::ProbeState::Ready,
+            canonical: path.canonicalize().ok(),
+        };
+        tokenscope::source::discovery::DiscoveryContext::for_test(
+            home,
+            StartupEnv::default(),
+            std::sync::Arc::new(probe),
+        )
+    }
+
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("tokenscope-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -1241,7 +1726,7 @@ mod tests {
         std::fs::write(&path, "price_auto_sync = true\n[sources.claude\n").unwrap();
         // 采集探针：若入口放行（旧行为 = 回退默认来源），才会走到采集一步。
         let mut collected = 0u32;
-        match source_settings_impl(tokenscope::settings::load(&path)) {
+        match resolve_source_set_impl(tokenscope::settings::load(&path)) {
             Ok(_) => collected += 1,
             Err(e) => assert!(
                 e.contains("设置解析失败") || e.contains("读设置失败"),
@@ -1250,7 +1735,7 @@ mod tests {
         }
         assert_eq!(collected, 0, "配置损坏时不得回退默认来源继续采集");
         // 状态入口共用同一内核（同一错误形态）。
-        let err = source_settings_impl(tokenscope::settings::load(&path)).unwrap_err();
+        let err = resolve_source_set_impl(tokenscope::settings::load(&path)).unwrap_err();
         assert!(err.contains("设置解析失败"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1262,7 +1747,7 @@ mod tests {
         let path = dir.join("settings.toml");
         // exists() = true，read_to_string 必失败——「在位但读不出来」。
         std::fs::create_dir_all(&path).unwrap();
-        let err = source_settings_impl(tokenscope::settings::load(&path)).unwrap_err();
+        let err = resolve_source_set_impl(tokenscope::settings::load(&path)).unwrap_err();
         assert!(err.contains("读设置失败"), "必须报告读取失败: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1277,25 +1762,46 @@ mod tests {
             "[sources.claude]\nenabled = false\ndir = \"D:/logs/claude\"\n[sources.codex]\nenabled = false\n",
         )
         .unwrap();
-        let (cd, _xd, ce, xe) = source_settings_impl(tokenscope::settings::load(&path)).unwrap();
-        assert!(!ce && !xe, "基线：两来源显式停用");
-        assert_eq!(cd.as_deref(), Some(std::path::Path::new("D:/logs/claude")));
+        let set = resolve_source_set_impl(tokenscope::settings::load(&path)).unwrap();
+        assert!(
+            !set.claude_enabled && !set.codex_enabled,
+            "基线：两来源显式停用"
+        );
+        // 停用来源不产生采集计划（历史保留是查询层的事）。
+        assert!(set.plans.is_empty(), "停用来源零计划: {:?}", set.plans);
         // 同一路径被破坏后：拒绝，而不是变成"两来源默认启用 + 默认根"。
         std::fs::write(&path, "not [valid toml").unwrap();
-        assert!(source_settings_impl(tokenscope::settings::load(&path)).is_err());
+        assert!(resolve_source_set_impl(tokenscope::settings::load(&path)).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 
     /// AP02：文件缺失 = 首次启动 → 产品默认值（默认启用 + 默认根）仍成立。
+    /// PR3：默认根以**注入主目录**解析（不触真实主目录），计划逐根展开。
     #[test]
     fn missing_settings_keeps_documented_defaults() {
         let dir = tmp_dir("ap02-missing");
         let path = dir.join("nested").join("settings.toml");
-        let (cd, xd, ce, xe) = source_settings_impl(tokenscope::settings::load(&path)).unwrap();
-        assert!(ce && xe, "首次启动：两个来源默认启用");
+        let ctx = test_discovery_ctx(&dir);
+        let set = resolve_source_set_in(tokenscope::settings::load(&path), &ctx).unwrap();
         assert!(
-            cd.is_none() && xd.is_none(),
-            "首次启动：两来源走默认根（None）"
+            set.claude_enabled && set.codex_enabled,
+            "首次启动：两个来源默认启用"
+        );
+        assert_eq!(
+            set.plans.len(),
+            3,
+            "Claude 1 根 + Codex 2 根: {:?}",
+            set.plans
+        );
+        let claude_default = dir.join("home").join(".claude").join("projects");
+        assert!(
+            set.plans
+                .iter()
+                .any(|p| p.agent == tokenscope::model::AgentKind::ClaudeCode
+                    && tokenscope::settings::normalized_key(&p.root)
+                        == tokenscope::settings::normalized_key(&claude_default)),
+            "默认根随注入主目录: {:?}",
+            set.plans
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1336,16 +1842,17 @@ mod tests {
             "[sources.claude]\nenabled = false\ndir = \"D:/logs/claude\"\n[sources.codex]\nenabled = true\ndir = \"D:/logs/codex\"\n",
         )
         .unwrap();
-        let o = rebuild_opts(tokenscope::settings::load(&path)).unwrap();
-        let (cd, xd, ce, xe) = source_settings_impl(tokenscope::settings::load(&path)).unwrap();
+        let ctx = test_discovery_ctx(&dir);
+        let o = rebuild_opts_in(tokenscope::settings::load(&path), &ctx).unwrap();
+        let set = resolve_source_set_in(tokenscope::settings::load(&path), &ctx).unwrap();
         assert_eq!(
-            (o.claude_dir.clone(), o.codex_dir.clone()),
-            (cd, xd),
+            o.source_plans.as_ref().unwrap(),
+            &set.plans,
             "重建与查询必须使用同一份来源解析"
         );
         assert_eq!(
             (o.claude_enabled, o.codex_enabled),
-            (Some(ce), Some(xe)),
+            (Some(set.claude_enabled), Some(set.codex_enabled)),
             "停用状态必须传给重建"
         );
         assert_eq!(o.claude_enabled, Some(false));
@@ -1353,7 +1860,7 @@ mod tests {
 
         // 坏配置：重建入口拒绝，绝不退化成默认来源。
         std::fs::write(&path, "not [valid toml").unwrap();
-        assert!(rebuild_opts(tokenscope::settings::load(&path)).is_err());
+        assert!(rebuild_opts_in(tokenscope::settings::load(&path), &ctx).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1406,111 +1913,358 @@ mod tests {
         assert!(parse_by("week").is_err());
     }
 
+    /// PR3 §9.5 第 2 条：source_config_set 只允许总开关——旧 dir 参数不再有
+    /// 写入语义，且**绝不能覆盖整份新列表**（追加项/排除项逐字段保留）。
     #[test]
-    fn test_source_config_set_overlap_rejected() {
-        // Task 2：两个启用的 agent 指向同一目录 → 保存被拒绝。
+    fn test_source_config_set_sets_only_app_switch() {
         let dir = std::env::temp_dir().join(format!("tokenscope-t2-ovl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.toml");
         std::fs::write(&path, "price_auto_sync = true\n").unwrap();
-        // 先保存 claude 配置
-        source_config_set_impl(&path, "claude", true, Some("C:/shared/logs".into())).unwrap();
-        // codex 同目录 → 拒绝
-        let r = source_config_set_impl(&path, "codex", true, Some("C:/shared/logs".into()));
-        assert!(r.is_err(), "重叠目录必须拒绝保存");
-        // 文件内容保留（claude 配置仍在，codex 未写入）
+        // 造一份新格式配置（手动追加项 + 排除项）
+        tokenscope::settings::update(&path, |s| {
+            s.sources.claude = Some(tokenscope::settings::SourceConfig {
+                enabled: true,
+                auto_discover: true,
+                excluded_auto_paths: vec!["C:/excluded".into()],
+                additional_paths: vec![tokenscope::settings::AdditionalSourcePath {
+                    path: "C:/manual/logs".into(),
+                    enabled: true,
+                }],
+                ..Default::default()
+            });
+            Ok(())
+        })
+        .unwrap();
+        // 旧式 dir 写入被忽略：不落盘 dir，也不清掉追加项/排除项
+        let committed =
+            source_config_set_impl(&path, "claude", false, Some("C:/shared/logs".into())).unwrap();
+        assert!(!committed.enabled);
+        assert!(committed.dir.is_none(), "dir 参数不再写入");
         let s = tokenscope::settings::load(&path).unwrap();
-        assert!(s.sources.claude.as_ref().unwrap().enabled);
-        assert!(s.sources.codex.is_none(), "被拒绝的配置不得写入");
-        // 停用的来源不参与重叠校验
-        source_config_set_impl(&path, "codex", false, Some("C:/shared/logs".into())).unwrap();
+        let cfg = s.sources.claude.as_ref().unwrap();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.additional_paths.len(), 1, "追加项必须保留");
+        assert_eq!(cfg.excluded_auto_paths, vec!["C:/excluded".to_string()]);
+        assert!(cfg.auto_discover, "自动发现开关保留");
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// AP01：缺省字段（`None`）= 默认启用 + 默认根，因此**必须参与**保存校验。
-    /// 修复前 `None` 被当成"不参与校验"，用户能保存一份采集层必然拒绝的
-    /// 配置：保存返回成功，紧接着每次查询都报来源目录冲突。
+    /// PR3 §4.1/§9.5 第 3 条：跨应用冲突拒绝移到 `source_path_add`——
+    /// 缺省（默认启用 + 默认根）的**另一应用**同样参与校验（注入主目录，
+    /// 不触真实主目录与环境变量）；同应用已存在行提示不新增。
     #[test]
-    fn default_enabled_source_participates_in_overlap_validation() {
+    fn source_path_add_rejects_cross_app_and_nested_conflicts() {
         let dir =
             std::env::temp_dir().join(format!("tokenscope-ap01-overlap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.toml");
-        // 无来源配置：两个来源均缺省 = 默认启用 + 默认根。
         std::fs::write(&path, "price_auto_sync = true\n").unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
         let read = || std::fs::read_to_string(&path).unwrap();
+        let ctx = test_discovery_ctx(&dir);
+        let home = dir.join("home");
+        let codex_default = home.join(".codex").join("sessions");
 
-        let codex_default = tokenscope::source::codex::CodexSource::default_root().unwrap();
-        let claude_default = tokenscope::source::claude::ClaudeSource::default_root().unwrap();
-
-        // 正例：Claude 显式指向 Codex 的默认根（Codex 仍缺省）→ 拒绝且不落盘。
-        let r = source_config_set_impl(
+        // Claude 追加目录 = Codex 默认根（Codex 缺省启用）→ 跨应用拒绝。
+        let r = source_path_add_impl(
             &path,
+            &ctx,
+            &home,
             "claude",
-            true,
-            Some(codex_default.display().to_string()),
+            &codex_default.display().to_string(),
         );
-        assert!(
-            r.is_err(),
-            "缺省的 Codex 来源仍在生效，撞其默认根必须拒绝: {r:?}"
-        );
+        assert!(r.is_err(), "撞缺省 Codex 默认根必须拒绝: {r:?}");
         assert_eq!(read(), before, "被拒绝的配置不得落盘");
 
         // 嵌套：Codex 默认根的父目录同样拒绝。
         let parent = codex_default.parent().unwrap().display().to_string();
         assert!(
-            source_config_set_impl(&path, "claude", true, Some(parent)).is_err(),
+            source_path_add_impl(&path, &ctx, &home, "claude", &parent).is_err(),
             "与默认根嵌套的目录必须拒绝"
         );
         assert_eq!(read(), before);
 
-        // 反向：Codex 显式指向 Claude 的默认根（Claude 仍缺省）→ 拒绝。
+        // 同应用：与已存在的行相同 → already_exists（不重复新增）。
+        let claude_default = home.join(".claude").join("projects");
+        std::fs::create_dir_all(&claude_default).unwrap();
+        let r = source_path_add_impl(
+            &path,
+            &ctx,
+            &home,
+            "claude",
+            &claude_default.display().to_string(),
+        )
+        .unwrap();
         assert!(
-            source_config_set_impl(
-                &path,
-                "codex",
-                true,
-                Some(claude_default.display().to_string())
-            )
-            .is_err(),
-            "反向撞默认根同样拒绝"
+            matches!(r, SourcePathAddOutcome::AlreadyExists { .. }),
+            "与默认根相同 → 提示已存在: {r:?}"
         );
-        assert_eq!(read(), before);
+        assert_eq!(read(), before, "已存在不得新增");
 
-        // 显式停用允许保存到冲突目录（用户借停用恢复的路径）。
-        source_config_set_impl(
-            &path,
-            "claude",
-            false,
-            Some(codex_default.display().to_string()),
-        )
-        .expect("停用来源不参与校验，必须允许保存");
+        // 形态校验：相对路径拒绝；整个用户主目录拒绝。
+        assert!(
+            source_path_add_impl(&path, &ctx, &home, "claude", "relative/logs").is_err(),
+            "相对路径必须拒绝"
+        );
+        assert!(
+            source_path_add_impl(&path, &ctx, &home, "claude", &home.display().to_string())
+                .is_err(),
+            "整个用户主目录必须拒绝"
+        );
 
-        // 无配置来源的首次保存：无冲突目录 → 成功。
-        let custom = dir.join("codex-custom");
-        source_config_set_impl(&path, "codex", true, Some(custom.display().to_string()))
-            .expect("无冲突的显式目录必须可保存");
-
-        // 边界：显式目录与本来源默认目录一致（Claude 显式 = Claude 默认根）。
-        source_config_set_impl(
-            &path,
-            "claude",
-            true,
-            Some(claude_default.display().to_string()),
-        )
-        .expect("显式目录与本来源默认根一致不构成冲突（另一来源为自定义目录）");
+        // 合法追加：独立目录 → 写入事务，enabled=true。
+        let manual = dir.join("manual-claude");
+        std::fs::create_dir_all(&manual).unwrap();
+        let r = source_path_add_impl(&path, &ctx, &home, "claude", &manual.display().to_string())
+            .unwrap();
+        let SourcePathAddOutcome::Added { id } = r else {
+            panic!("合法追加必须 Added: {r:?}");
+        };
+        assert!(!id.is_empty());
         let s = tokenscope::settings::load(&path).unwrap();
-        assert_eq!(
-            s.source_config(true).dir.as_deref(),
-            Some(claude_default.to_string_lossy().as_ref())
+        let cfg = s.sources.claude.as_ref().unwrap();
+        assert_eq!(cfg.additional_paths.len(), 1);
+        assert_eq!(cfg.additional_paths[0].path, manual.display().to_string());
+        assert!(cfg.additional_paths[0].enabled);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PR3 §9.5 第 3 条：remove 只删手动项；set_enabled 作用于该行全部
+    /// origin（禁用 → 排除项 + 手动 false；开启 → 逆操作）。
+    #[test]
+    fn source_path_remove_and_set_enabled_follow_row_semantics() {
+        let dir = std::env::temp_dir().join(format!("tokenscope-sp-row-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, "price_auto_sync = true\n").unwrap();
+        let ctx = test_discovery_ctx(&dir);
+        let home = dir.join("home");
+        let claude_default = home.join(".claude").join("projects");
+        std::fs::create_dir_all(&claude_default).unwrap();
+        let manual = dir.join("manual");
+        std::fs::create_dir_all(&manual).unwrap();
+
+        // 追加一个与默认根不同的手动目录
+        source_path_add_impl(&path, &ctx, &home, "claude", &manual.display().to_string()).unwrap();
+        let s = tokenscope::settings::load(&path).unwrap();
+        let manual_path = s.source_config(true).additional_paths[0].path.clone();
+
+        // 行 id：默认根与手动根各成一行（不同身份）
+        let resolved = tokenscope::source::discovery::resolve_sources(
+            &ctx,
+            &s.source_config(true),
+            &s.source_config(false),
         );
-        assert_eq!(
-            s.source_config(false).dir.as_deref(),
-            Some(custom.to_string_lossy().as_ref())
+        let manual_row = resolved
+            .roots
+            .iter()
+            .find(|r| {
+                r.agent == tokenscope::model::AgentKind::ClaudeCode
+                    && r.origins.iter().any(|o| o.config_path == manual_path)
+            })
+            .unwrap()
+            .id()
+            .to_string();
+        let default_row = resolved
+            .roots
+            .iter()
+            .find(|r| {
+                r.agent == tokenscope::model::AgentKind::ClaudeCode
+                    && r.origins.iter().all(|o| o.config_path != manual_path)
+            })
+            .unwrap()
+            .id()
+            .to_string();
+
+        // 禁用默认根行：排除项写入，手动项不受影响
+        source_path_set_enabled_impl(&path, &ctx, "claude", &default_row, false).unwrap();
+        let s = tokenscope::settings::load(&path).unwrap();
+        let cfg = s.source_config(true);
+        assert_eq!(cfg.excluded_auto_paths.len(), 1, "排除项写入");
+        assert!(cfg.additional_paths[0].enabled, "手动项不受影响");
+
+        // 禁用手动行：手动项 enabled=false
+        source_path_set_enabled_impl(&path, &ctx, "claude", &manual_row, false).unwrap();
+        let s = tokenscope::settings::load(&path).unwrap();
+        assert!(!s.source_config(true).additional_paths[0].enabled);
+
+        // 移除手动项：additional 清空，排除项保留（默认根保持停用）
+        source_path_remove_impl(&path, &ctx, "claude", &manual_row).unwrap();
+        let s = tokenscope::settings::load(&path).unwrap();
+        assert!(s.source_config(true).additional_paths.is_empty());
+        assert_eq!(s.source_config(true).excluded_auto_paths.len(), 1);
+
+        // 纯自动行不可移除；未知 id → 来源已变化；开启 → 排除项清空
+        assert!(source_path_remove_impl(&path, &ctx, "claude", &default_row).is_err());
+        source_path_set_enabled_impl(&path, &ctx, "claude", &default_row, true).unwrap();
+        let s = tokenscope::settings::load(&path).unwrap();
+        assert!(s.source_config(true).excluded_auto_paths.is_empty());
+        assert!(source_path_set_enabled_impl(&path, &ctx, "claude", "z:/gone", true).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PR3 §9.0 第 3/5 条 + §9.5 第 4 条：每轮采集以**本轮解析的计划**为准
+    /// （冻结语义），配置变化影响下一轮；损坏设置拒绝且不扩范围。
+    #[test]
+    fn collection_opts_follow_current_settings_per_round() {
+        let dir = std::env::temp_dir().join(format!("tokenscope-sp-freeze-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, "price_auto_sync = true\n").unwrap();
+        let ctx = test_discovery_ctx(&dir);
+        let home = dir.join("home");
+        let claude_default = home.join(".claude").join("projects");
+        std::fs::create_dir_all(&claude_default).unwrap();
+        let manual = dir.join("manual");
+        std::fs::create_dir_all(&manual).unwrap();
+
+        // 第一轮：只有默认根
+        let o1 = collection_opts_from_in(tokenscope::settings::load(&path), &ctx).unwrap();
+        let plans1 = o1.source_plans.clone().unwrap();
+        assert_eq!(plans1.len(), 3, "默认 Claude 1 根 + Codex 2 根");
+
+        // 追加手动目录 → 下一轮计划并入（本轮已冻结的由运行时持有）
+        source_path_add_impl(&path, &ctx, &home, "claude", &manual.display().to_string()).unwrap();
+        let o2 = collection_opts_from_in(tokenscope::settings::load(&path), &ctx).unwrap();
+        let plans2 = o2.source_plans.clone().unwrap();
+        assert_eq!(plans2.len(), 4, "新目录下一轮出现");
+        assert!(
+            plans2
+                .iter()
+                .any(|p| tokenscope::settings::normalized_key(&p.root)
+                    == tokenscope::settings::normalized_key(&manual))
         );
+
+        // 停用 claude → 计划只剩 codex
+        source_config_set_impl(&path, "claude", false, None).unwrap();
+        let o3 = collection_opts_from_in(tokenscope::settings::load(&path), &ctx).unwrap();
+        assert!(
+            o3.source_plans
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|p| p.agent != tokenscope::model::AgentKind::ClaudeCode)
+        );
+
+        // 损坏设置：拒绝且不扩范围（Err，非默认来源）
+        std::fs::write(&path, "not [valid toml").unwrap();
+        assert!(collection_opts_from_in(tokenscope::settings::load(&path), &ctx).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 回归（PR #14 CI 实测）：缺失/非目录的纯自动根不得进采集计划——每根
+    /// 一实例下它们只会每轮产生"目录不存在"警告，把常态缺失（多数机器没有
+    /// `archived_sessions`）变成常驻"部分异常"胶囊（计划 §2：缺失"不每轮报
+    /// 错"）。列表行不受影响；手动配置的缺失根仍进计划。
+    #[test]
+    fn missing_auto_roots_excluded_from_plans_manual_missing_stays() {
+        let dir = tmp_dir("sp-missing-auto");
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, "price_auto_sync = true\n").unwrap();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // 探测器如实反映存在性（与生产 filesystem_probe 同分类）
+        use tokenscope::source::discovery::{DiscoveryContext, RootProbe, StartupEnv};
+        let probe = |p: &std::path::Path| RootProbe {
+            state: if p.exists() {
+                ProbeState::Ready
+            } else {
+                ProbeState::Missing
+            },
+            canonical: p.canonicalize().ok(),
+        };
+        let ctx = DiscoveryContext::for_test(
+            home.clone(),
+            StartupEnv::default(),
+            std::sync::Arc::new(probe),
+        );
+        // 只创建 codex sessions；claude 默认根与 codex archived_sessions 保持缺失
+        std::fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
+        let o = collection_opts_from_in(tokenscope::settings::load(&path), &ctx).unwrap();
+        let plans = o.source_plans.clone().unwrap();
+        assert_eq!(
+            plans.len(),
+            1,
+            "缺失自动根不进计划，只保留真实存在的 codex sessions: {plans:?}"
+        );
+        assert_eq!(plans[0].agent, tokenscope::model::AgentKind::Codex);
+
+        // 手动缺失根（合法保存）仍进计划——用户显式配置，采集层保留提示
+        let manual = dir.join("manual-not-created");
+        source_path_add_impl(&path, &ctx, &home, "claude", &manual.display().to_string()).unwrap();
+        let o2 = collection_opts_from_in(tokenscope::settings::load(&path), &ctx).unwrap();
+        let plans2 = o2.source_plans.clone().unwrap();
+        assert!(
+            plans2
+                .iter()
+                .any(|p| tokenscope::settings::normalized_key(&p.root)
+                    == tokenscope::settings::normalized_key(&manual)),
+            "手动缺失根保留在计划中: {plans2:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 审阅 §23.2 补修：跨应用根冲突在发现层标记后，双方行都不进本轮采集
+    /// 计划（手改设置才能构造——设置页 add 已拒绝跨应用冲突）。
+    #[test]
+    fn cross_app_conflicted_roots_excluded_from_plans() {
+        use tokenscope::source::discovery::{DiscoveryContext, RootProbe, StartupEnv};
+        let dir = tmp_dir("sp-cross-app-conflict");
+        let path = dir.join("settings.toml");
+        let shared = dir.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let codex_own = dir.join("codex-own");
+        std::fs::create_dir_all(&codex_own).unwrap();
+        let shared_fwd = shared.display().to_string().replace('\\', "/");
+        let own_fwd = codex_own.display().to_string().replace('\\', "/");
+        // 手写 TOML：claude 与 codex 各含 shared 追加项，codex 另含独立根
+        std::fs::write(
+            &path,
+            format!(
+                "[sources.claude]\nenabled = true\nauto_discover = false\n[[sources.claude.additional_paths]]\npath = \"{shared_fwd}\"\nenabled = true\n\n[sources.codex]\nenabled = true\nauto_discover = false\n[[sources.codex.additional_paths]]\npath = \"{shared_fwd}\"\nenabled = true\n[[sources.codex.additional_paths]]\npath = \"{own_fwd}\"\nenabled = true\n"
+            ),
+        )
+        .unwrap();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let probe = |p: &std::path::Path| RootProbe {
+            state: if p.exists() {
+                ProbeState::Ready
+            } else {
+                ProbeState::Missing
+            },
+            canonical: p.canonicalize().ok(),
+        };
+        let ctx =
+            DiscoveryContext::for_test(home, StartupEnv::default(), std::sync::Arc::new(probe));
+        let o = collection_opts_from_in(tokenscope::settings::load(&path), &ctx).unwrap();
+        let plans = o.source_plans.clone().unwrap();
+        assert_eq!(
+            plans.len(),
+            1,
+            "只有 Codex 独立根进计划，冲突双方都排除: {plans:?}"
+        );
+        assert_eq!(plans[0].agent, tokenscope::model::AgentKind::Codex);
+        assert_eq!(
+            tokenscope::settings::normalized_key(&plans[0].root),
+            tokenscope::settings::normalized_key(&codex_own)
+        );
+        // 列表行仍显示冲突双方（state=conflicted + 对方路径诊断）
+        let rows = source_paths_list_impl(&path, &ctx).unwrap();
+        let conflicted: Vec<_> = rows.iter().filter(|r| r.state == "conflicted").collect();
+        assert_eq!(conflicted.len(), 2, "冲突双方行都显示: {rows:?}");
+        for r in &conflicted {
+            assert!(
+                r.diagnostics.iter().any(|d| d.contains("冲突")),
+                "行诊断写明冲突: {:?}",
+                r.diagnostics
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

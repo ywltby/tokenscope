@@ -1,6 +1,6 @@
 [package]
 name = "tokenscope"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "本地 AI agent 使用量统计工具（对标 cc-switch Usage Statistics 的独立实现）"
 license = "MIT"

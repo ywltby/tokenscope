@@ -140,6 +140,10 @@ def validate_operation(operation, key):
     elif kind == "default":
         if not field_path(operation.get("path")) or "value" not in operation:
             raise ValueError(f"default 操作必须给出 path 与 value：{key!r}")
+    elif kind == "source_dir_to_additional_path":
+        # v1 sources.<agent>.dir → v2 追加项 + 自动发现（专用、有限：只认两个 agent）。
+        if operation.get("agent") not in ("claude", "codex"):
+            raise ValueError(f"source_dir_to_additional_path 操作必须给出合法 agent：{key!r}")
     else:
         raise ValueError(f"不支持的设置迁移操作：{kind!r}")
 
@@ -168,6 +172,42 @@ def lookup(table, path):
     return value
 
 
+def verify_source_dir_to_additional_path(expected, current, agent):
+    """v1 dir → v2 追加项的独立核对：变换预期独立于被测应用，逐条可搜索。
+
+    - 旧 dir 非空：必须迁为一个追加项（路径原样、enabled 继承旧来源）且
+      auto_discover 开启、旧 dir 键不再输出；
+    - 旧 dir 为空串：不得产生空路径条目（旧空值无追加项）；
+    - 旧配置无 dir：无变换可核对。
+    """
+    old_table = expected.get("sources", {}).get(agent)
+    old_dir = old_table.get("dir") if isinstance(old_table, dict) else None
+    if old_dir is None:
+        return None
+    table = current.get("sources", {}).get(agent)
+    if not isinstance(table, dict):
+        raise ValueError(f"迁移后缺少 sources.{agent} 配置")
+    if "dir" in table:
+        raise ValueError(f"迁移后 sources.{agent} 不得再输出 dir")
+    entries = table.get("additional_paths") or []
+    if not isinstance(entries, list):
+        raise ValueError(f"sources.{agent}.additional_paths 必须是列表")
+    if str(old_dir).strip() == "":
+        for entry in entries:
+            if not str(entry.get("path", "")).strip():
+                raise ValueError(f"旧空 dir 不得产生空路径条目：sources.{agent}")
+        return {"old_dir": old_dir, "entry": None}
+    old_enabled = bool(old_table.get("enabled", True))
+    for entry in entries:
+        if entry.get("path") == old_dir and bool(entry.get("enabled", True)) == old_enabled:
+            if table.get("auto_discover") is not True:
+                raise ValueError(f"迁移后 sources.{agent} 必须开启 auto_discover")
+            return {"old_dir": old_dir, "entry": entry.get("path")}
+    raise ValueError(
+        f"旧 dir 未按追加项保留：sources.{agent}.dir={old_dir!r}（期望 enabled={old_enabled} 且 auto_discover 开启）"
+    )
+
+
 def verify_settings(data, original, from_format, to_format, migrations=MIGRATIONS):
     """按『起点设置格式 → 当前设置格式』的声明式规则核对，不硬编码字段名。"""
     rules = load_migrations(migrations)
@@ -182,17 +222,26 @@ def verify_settings(data, original, from_format, to_format, migrations=MIGRATION
                if operation["kind"] == "rename"}
     defaults = [(operation["path"], operation["value"]) for operation in operations
                 if operation["kind"] == "default"]
+    source_dir_ops = [operation for operation in operations
+                      if operation["kind"] == "source_dir_to_additional_path"]
+    # dir 的变换位置由专用核对负责，不再按原路径要求保留。
+    excluded = {f"sources.{operation['agent']}.dir" for operation in source_dir_ops}
     for path, value in flatten(expected).items():
+        if path in excluded:
+            continue
         target = renames.get(path, path)
         found = lookup(current, target)
         if found is MISSING or found != value:
             raise ValueError(f"旧设置未保留：{path}"
                              + (f" -> {target}" if target != path else ""))
+    source_dir_results = [verify_source_dir_to_additional_path(expected, current, operation["agent"])
+                          for operation in source_dir_ops]
     for path, value in defaults:
         found = lookup(current, path)
         if found is MISSING or found != value:
             raise ValueError(f"迁移默认值不一致：{path}")
-    return {"ok": True, "from_format": int(from_format), "to_format": int(to_format)}
+    return {"ok": True, "from_format": int(from_format), "to_format": int(to_format),
+            "source_dir": [r for r in source_dir_results if r is not None]}
 
 
 def main():

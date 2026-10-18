@@ -132,11 +132,11 @@ fn rebuild_uses_custom_source_roots() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// AP03：配置非法（来源目录冲突）时重建必须**先**失败——不得清空已有缓存，
-/// 否则用户点击重建会得到一个空库 + 一个错误。
+/// PR3 §4.1/§8.2：跨应用来源根重叠不再是采集错误——重叠根被隔离（诊断可
+/// 见），其余照常采集；重建不清空已有缓存。硬拒绝移到保存事务（S04 接线）。
 #[test]
-fn rejected_rebuild_keeps_previous_cache() {
-    let dir = tmp_dir("conflict-keeps-cache");
+fn overlapping_sources_are_isolated_and_keep_previous_cache() {
+    let dir = tmp_dir("overlap-isolated");
     let claude = dir.join("claude");
     write_claude_log(&claude, "c1", 1);
     let codex = dir.join("codex");
@@ -148,16 +148,33 @@ fn rejected_rebuild_keeps_previous_cache() {
     let info = rebuild_cache(&ok).unwrap();
     assert_eq!(info.events, 2, "基线：claude 1 + codex 1");
 
+    // codex 根 = claude 根（跨应用重叠）：不整体报错，codex 根被隔离
+    //（诊断可见），claude 照常采集；已保存的历史事实不删除（H04）。
     let mut bad = ok.clone();
-    bad.codex_dir = Some(claude);
-    let err = rebuild_cache(&bad).unwrap_err();
+    bad.codex_dir = Some(claude.clone());
+    let info2 = rebuild_cache(&bad).unwrap();
+    assert_eq!(info2.events, 2, "历史事实保留：隔离不删除已保存用量");
+    let report = summary(&bad).unwrap();
     assert!(
-        err.to_string().contains("来源目录冲突"),
-        "冲突配置必须明确拒绝: {err}"
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("跨应用来源根重叠")),
+        "隔离必须诊断可见: {:?}",
+        report.warnings
     );
     let after = cache_stats(ok.cache_dir.clone()).unwrap();
-    assert_eq!(after.files, info.files, "校验失败不得清空缓存");
-    assert_eq!(after.events, info.events);
+    assert_eq!(after.events, info.events, "隔离/重建不得删除已保存事实");
+    assert!(after.files >= 1, "claude 根本轮照常登记");
+
+    // 重建真正失败（历史库路径是目录 → 打不开）同样不得清空缓存。
+    let mut broken = ok.clone();
+    broken.history_path = Some(dir.join("history-as-dir"));
+    std::fs::create_dir_all(dir.join("history-as-dir")).unwrap();
+    assert!(rebuild_cache(&broken).is_err());
+    let after2 = cache_stats(ok.cache_dir.clone()).unwrap();
+    assert_eq!(after2.files, after.files, "失败不得清空缓存");
+    assert_eq!(after2.events, after.events);
     std::fs::remove_dir_all(&dir).ok();
 }
 

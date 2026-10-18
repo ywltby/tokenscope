@@ -64,7 +64,7 @@ function mockOk(): void {
         entries: [entry],
         warnings: [],
       });
-    if (cmd === "source_status") return Promise.resolve([]);
+    if (cmd === "source_paths_list") return Promise.resolve([]);
     if (cmd === "cache_stats") return Promise.resolve({ path: "c", files: 0, events: 0 });
     if (cmd === "settings_get")
       return Promise.resolve({ price_auto_sync: true, close_action: null });

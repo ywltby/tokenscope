@@ -116,7 +116,8 @@ class UpgradeFixtureCase(unittest.TestCase):
         self.assertTrue(fixture.verify_settings(self.data, original, 1, 1)["ok"])
         path = self.data / "settings.toml"
         with self.assertRaises(ValueError):
-            fixture.verify_settings(self.data, original, 1, 2)
+            # 1->2 已声明（v1 dir 迁移）；真正未声明的组合仍然拒绝。
+            fixture.verify_settings(self.data, original, 1, 3)
         with self.assertRaises(ValueError):
             fixture.verify_settings(self.data, original, 2, 1)
         path.write_text(path.read_text(encoding="utf-8").replace('"quit"', '"minimize"'),
@@ -167,10 +168,137 @@ class UpgradeFixtureCase(unittest.TestCase):
         for migrations in ({"1->2": {"operations": [{"kind": "move", "from": "a"}]}},
                            {"1->2": {"operations": [{"kind": "rename", "from": "a"}]}},
                            {"1->2": {"operations": [{"kind": "default", "path": "a"}]}},
+                           {"1->2": {"operations": [{"kind": "source_dir_to_additional_path",
+                                                     "agent": "gemini"}]}},
+                           {"1->2": {"operations": [{"kind": "source_dir_to_additional_path"}]}},
                            {"1->2": {"operations": []}, "x": {"operations": []}},
                            {"1->2": []}):
             with self.subTest(migrations=migrations), self.assertRaises(ValueError):
                 fixture.load_migrations(self.write_migrations(migrations))
+
+    # ── v1 dir → v2 追加项（source_dir_to_additional_path，PR3 S01）──────
+
+    OLD_WITH_DIR = ("price_auto_sync = false\n"
+                    "[sources.claude]\nenabled = true\ndir = \"D:/history/claude/projects\"\n")
+
+    def write_current(self, text):
+        self.data.mkdir(parents=True, exist_ok=True)
+        path = self.data / "settings.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def migrated_claude(self, *, enabled=True, entry=True, entry_enabled=True,
+                        auto_discover=True, keep_dir=False):
+        lines = ["privacy_policy_accepted = true", "price_auto_sync = false",
+                 "[sources.claude]", f"enabled = {'true' if enabled else 'false'}"]
+        if keep_dir:
+            lines.append('dir = "D:/history/claude/projects"')
+        lines.append(f"auto_discover = {'true' if auto_discover else 'false'}")
+        lines.append("excluded_auto_paths = []")
+        if entry:
+            lines.append("[[sources.claude.additional_paths]]")
+            lines.append('path = "D:/history/claude/projects"')
+            lines.append(f"enabled = {'true' if entry_enabled else 'false'}")
+        return "\n".join(lines) + "\n"
+
+    def original_with_dir(self, text=OLD_WITH_DIR):
+        path = self.root / "original-v1.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_v1_nonempty_dir_migrates_to_additional_entry_with_auto_discover(self):
+        self.write_current(self.migrated_claude())
+        result = fixture.verify_settings(self.data, self.original_with_dir(), 1, 2)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["source_dir"],
+                         [{"old_dir": "D:/history/claude/projects",
+                           "entry": "D:/history/claude/projects"}])
+
+    def test_v1_dir_migration_rejects_each_broken_shape(self):
+        cases = {
+            "dir_dropped_without_entry": self.migrated_claude(entry=False),
+            "dir_still_present": self.migrated_claude(keep_dir=True),
+            "auto_discover_missing": self.migrated_claude(auto_discover=False),
+            "entry_enabled_mismatch": self.migrated_claude(entry_enabled=False),
+            "wrong_path_kept": self.migrated_claude().replace("D:/history/claude/projects",
+                                                              "D:/elsewhere", 1),
+        }
+        for name, text in cases.items():
+            with self.subTest(case=name):
+                self.write_current(text)
+                with self.assertRaises(ValueError):
+                    fixture.verify_settings(self.data, self.original_with_dir(), 1, 2)
+
+    def test_v1_empty_dir_requires_no_empty_path_entry(self):
+        original = self.original_with_dir(
+            "[sources.claude]\nenabled = true\ndir = \"\"\n")
+        self.write_current(self.migrated_claude())
+        self.assertTrue(fixture.verify_settings(self.data, original, 1, 2)["ok"])
+        self.write_current(self.migrated_claude().replace(
+            'path = "D:/history/claude/projects"', 'path = ""'))
+        with self.assertRaises(ValueError):
+            fixture.verify_settings(self.data, original, 1, 2)
+
+    def test_v1_disabled_source_keeps_disabled_and_entry_disabled(self):
+        original = self.original_with_dir(
+            "price_auto_sync = false\n"
+            "[sources.claude]\nenabled = false\ndir = \"D:/history/claude/projects\"\n")
+        self.write_current(self.migrated_claude(enabled=False, entry_enabled=False))
+        self.assertTrue(fixture.verify_settings(self.data, original, 1, 2)["ok"])
+        self.write_current(self.migrated_claude(enabled=False, entry_enabled=True))
+        with self.assertRaises(ValueError):
+            fixture.verify_settings(self.data, original, 1, 2)
+
+    def test_prepared_v1_settings_migrate_to_additional_entries(self):
+        # prepare 写的起点设置本就是 v1 形态（dir 指向夹具来源目录）——升级核对
+        # 要求它们变成追加项 + 自动发现；这里模拟新版本完成迁移后的形态，
+        # S06/S07 的安装矩阵由真实应用产生同一形态。
+        prepared = fixture.prepare(self.data, self.sources)
+        posix_dirs = {agent: Path(prepared[agent]).as_posix() for agent in ("claude", "codex")}
+        original = self.root / "original-plain.toml"
+        original.write_bytes((self.data / "settings.toml").read_bytes())
+        fixture.grant_test_consent(self.data)
+        migrated = "privacy_policy_accepted = true\nprice_auto_sync = false\nclose_action = \"quit\"\n\n"
+        for agent in ("claude", "codex"):
+            # prepare 落盘用 as_posix()；核对按文件里的原样字符串比较。
+            source_dir = posix_dirs[agent]
+            migrated += (
+                f"[sources.{agent}]\nenabled = true\nauto_discover = true\n"
+                "excluded_auto_paths = []\n"
+                f"[[sources.{agent}.additional_paths]]\npath = {json.dumps(source_dir, ensure_ascii=False)}\n"
+                "enabled = true\n\n"
+            )
+        (self.data / "settings.toml").write_text(migrated, encoding="utf-8")
+        result = fixture.verify_settings(self.data, original, 1, 2)
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["source_dir"],
+            [{"old_dir": posix_dirs["claude"], "entry": posix_dirs["claude"]},
+             {"old_dir": posix_dirs["codex"], "entry": posix_dirs["codex"]}])
+        # 未迁移的原始形态必须被拒绝（dir 不得原样保留到 v2）。
+        self.write_current("privacy_policy_accepted = true\n" + original.read_text(encoding="utf-8"))
+        with self.assertRaises(ValueError):
+            fixture.verify_settings(self.data, original, 1, 2)
+
+    def test_v2_settings_survive_identity_2_to_2(self):
+        original = self.original_with_dir(
+            "price_auto_sync = false\n"
+            "[sources.claude]\nenabled = true\nauto_discover = true\n"
+            "excluded_auto_paths = []\n"
+            "[[sources.claude.additional_paths]]\n"
+            'path = "D:/history/claude/projects"\nenabled = true\n')
+        self.write_current(original.read_text(encoding="utf-8").replace(
+            "price_auto_sync = false",
+            "privacy_policy_accepted = true\nprice_auto_sync = false"))
+        self.assertTrue(fixture.verify_settings(self.data, original, 2, 2)["ok"])
+
+    def test_real_migration_table_declares_all_required_pairs(self):
+        rules = fixture.load_migrations()
+        self.assertIn((1, 1), rules)
+        self.assertIn((1, 2), rules)
+        self.assertIn((2, 2), rules)
+        kinds = {op["kind"] for op in rules[(1, 2)]}
+        self.assertEqual(kinds, {"source_dir_to_additional_path"})
 
     def write_migrations(self, migrations):
         path = self.root / "broken-migrations.json"

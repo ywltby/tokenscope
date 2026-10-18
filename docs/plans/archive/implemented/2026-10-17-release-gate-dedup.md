@@ -1,7 +1,7 @@
 # 发布流程去掉重复的完整测试
 
 > 状态：**已实现并验收（2026-10-17 归档）。** PR [#11](https://github.com/ywltby/tokenscope/pull/11) 于 2026-10-16 19:04Z 合入 main（`0ee50f4`），[Release](https://github.com/ywltby/tokenscope/actions/runs/38952158912) 全部通过并发布 `v0.3.4`，发布总耗时 6 分 44 秒（v0.3.3 约 31 分钟）。复核见[审阅第 22 节](../../../reviews/2026-10-15-source-discovery-plan-review.md#22-发布去重实现复核pr-11head-6f495f4)。
-> 交付：独立小 PR，patch（只改发布工作流、一条契约测试与文档，不改程序）。**在当前分支 `docs/release-gate-dedup-plan` 上实施**：它已带本计划与第二批计划归档（`fcc3578`），从 main 另建分支会丢掉归档提交。排在 [PR2 扫描反馈](../../active/2026-10-15-collection-status.md)之前。
+> 交付：独立小 PR，patch（只改发布工作流、一条契约测试与文档，不改程序）。**在当前分支 `docs/release-gate-dedup-plan` 上实施**：它已带本计划与第二批计划归档（`fcc3578`），从 main 另建分支会丢掉归档提交。排在 [PR2 扫描反馈](2026-10-15-collection-status.md)之前。
 
 ## 1. 现状（2026-10-17 核实）
 

@@ -34,7 +34,7 @@ use jiff::Timestamp;
 use serde::Deserialize;
 
 use super::project_path::{self, ProjectRootTracker};
-use super::{CollectStats, FileParse, Source, read_text, walk_jsonl};
+use super::{CollectStats, FileParse, Source, read_text};
 use crate::model::{AgentKind, UsageEvent};
 
 pub struct CodexSource {
@@ -217,6 +217,15 @@ impl Source for CodexSource {
     }
 
     fn discover_with_errors(&self) -> (Vec<PathBuf>, Vec<String>) {
+        // 独立调用（单测/状态）：自带台账，同样防环
+        let mut ledger = super::DirVisitLedger::default();
+        self.discover_with_ledger(&mut ledger)
+    }
+
+    fn discover_with_ledger(
+        &self,
+        ledger: &mut super::DirVisitLedger,
+    ) -> (Vec<PathBuf>, Vec<String>) {
         let mut out = Vec::new();
         let mut errors = Vec::new();
         for root in &self.roots {
@@ -225,7 +234,7 @@ impl Source for CodexSource {
                 continue;
             }
             let mut found = Vec::new();
-            walk_jsonl(root, &mut found, &mut errors);
+            super::walk_jsonl_guarded(root, self.agent(), ledger, &mut found, &mut errors);
             for f in found {
                 if is_rollout_candidate(&f) {
                     out.push(f);

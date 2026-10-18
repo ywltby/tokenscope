@@ -11,14 +11,19 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// 设置文件格式修订号（UP03，当前 1）。
+/// 设置文件格式修订号（UP03，当前 2）。
 ///
 /// **只在"需要声明迁移"或"改变旧设置的解释语义"时递增**，且必须同步
 /// `scripts/settings_migrations.json` 的迁移规则；**新增普通设置字段不算**
 /// ——未知字段本就忽略、缺失字段回默认值，向前兼容不靠这个数字。
 /// 该值经 [`crate::persistent_format::persistent_format`] 进入
 /// `build-metadata.json`，升级矩阵按格式分组挑起点时读的就是它。
-pub const SETTINGS_FORMAT_REVISION: u8 = 1;
+///
+/// v2（PR3，2026-10-18）：来源配置新增 `auto_discover` / `excluded_auto_paths` /
+/// `additional_paths`；旧 `dir` 字段改为追加项语义并在升级时由
+/// [`migrate_source_paths`] 一次性迁移——这是**读取范围的行为变更**（已启用来源
+/// 的默认目录用量也会纳入），不是无影响的字段改名。
+pub const SETTINGS_FORMAT_REVISION: u8 = 2;
 
 /// 关闭窗口按钮的默认动作（None = 每次询问；托盘「退出」不受此影响）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -30,15 +35,47 @@ pub enum CloseAction {
     Quit,
 }
 
-/// 单一来源配置（C1）：稳定 ID = 结构字段（claude/codex），不引入字符串 ID。
+/// 手动追加的日志根（v2）：用户明确指定的绝对目录，带独立启停。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SourceConfig {
-    /// 停用后完全不采集该来源（统计与状态页均可见"已停用"）。
+pub struct AdditionalSourcePath {
+    /// 绝对日志根；落盘保存用户输入原样，身份规范化（canonicalize 等）在发现层完成。
+    pub path: String,
+    /// 停用后该追加项不参与采集（历史库不删数据）。
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// 显式目录；None = 工具默认根（~/.claude/projects、~/.codex/sessions）。
-    #[serde(default)]
+}
+
+/// 单一来源配置（C1 稳定 ID = 结构字段 claude/codex；PR3 v2 起支持自动发现与追加项）。
+///
+/// 解释规则（§9.2 第 2 条）：任一新格式字段出现即按新配置解释，旧 `dir` 一律
+/// **忽略**、不再补入追加项；只有"有 `dir` 且无任何新字段"的未迁移旧格式仍按
+/// 旧语义解释（`dir` 取代默认根）——这是迁移失败窗口期不扩大读取范围的保证。
+/// 字段缺省的默认值：`auto_discover = true`、两个列表为空。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceConfig {
+    /// 来源总开关：停用后该来源完全不采集（优先级高于自动/追加项开关）。
+    /// 反序列化缺省 true（见下方手动 impl）。
+    pub enabled: bool,
+    /// 旧格式（v1）遗留字段：显式目录。仅在未迁移旧格式上参与解释；迁移成功后
+    /// 不再写出（迁移失败的窗口期原样保留，保证原文件字节与语义不变）。
     pub dir: Option<String>,
+    /// 自动发现（默认根 + 环境变量根）；缺省 true。停用项持久化于
+    /// `excluded_auto_paths`，探测/重启不能重启用。
+    pub auto_discover: bool,
+    /// 已停用的自动候选绝对路径（用同一规范化函数匹配，不保存探测结果列表）。
+    pub excluded_auto_paths: Vec<String>,
+    /// 手动追加的日志根。
+    pub additional_paths: Vec<AdditionalSourcePath>,
+    /// 反序列化时记录：是否为未迁移旧格式（有 `dir` 且无任何新字段）。不落盘。
+    pub legacy_format: bool,
+}
+
+impl SourceConfig {
+    /// 读取侧解释：未迁移旧格式（v1 dir）仍按旧语义——`dir` 取代默认根；
+    /// 新格式忽略 `dir`。迁移失败或未运行时，采集不得借新字段扩大读取范围。
+    pub fn is_legacy_dir_semantics(&self) -> bool {
+        self.legacy_format
+    }
 }
 
 impl Default for SourceConfig {
@@ -46,7 +83,73 @@ impl Default for SourceConfig {
         Self {
             enabled: true,
             dir: None,
+            auto_discover: true,
+            excluded_auto_paths: Vec::new(),
+            additional_paths: Vec::new(),
+            legacy_format: false,
         }
+    }
+}
+
+// 自定义反序列化（§9.2 第 2 条）：保留「新字段是否出现」的信息，
+// 不先 #[serde(default)] 成空列表再猜新旧格式。
+impl<'de> Deserialize<'de> for SourceConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Raw {
+            #[serde(default = "default_true")]
+            enabled: bool,
+            #[serde(default)]
+            dir: Option<String>,
+            #[serde(default)]
+            auto_discover: Option<bool>,
+            #[serde(default)]
+            excluded_auto_paths: Option<Vec<String>>,
+            #[serde(default)]
+            additional_paths: Option<Vec<AdditionalSourcePath>>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let legacy_format = raw.dir.is_some()
+            && raw.auto_discover.is_none()
+            && raw.excluded_auto_paths.is_none()
+            && raw.additional_paths.is_none();
+        Ok(Self {
+            enabled: raw.enabled,
+            dir: raw.dir,
+            auto_discover: raw.auto_discover.unwrap_or(true),
+            excluded_auto_paths: raw.excluded_auto_paths.unwrap_or_default(),
+            additional_paths: raw.additional_paths.unwrap_or_default(),
+            legacy_format,
+        })
+    }
+}
+
+// 自定义序列化（与反序列化同一条形状保留规则）：仍是 v1 语义的在位配置
+// （旧 dir 文件原样载入、且没有任何新格式内容）**原样写回 v1 两字段**。
+// 派生序列化会带出 `auto_discover = true`，把文件变成 dir+auto_discover 的
+// 混合体——下次读取按"新字段出现"解释、`dir` 被静默忽略：迁移失败窗口内
+// 任何一次无关设置修改（改时区、关价格同步）都会悄悄改变读取范围。
+// 一旦配置含有新格式内容（列表非空或旧 dir 已清除），按新格式写出且
+// 不带 `dir`（§8.1：保留旧 dir 输入支持，新写出不带 dir）。
+impl serde::Serialize for SourceConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let v1_in_place = self.legacy_format
+            && self.dir.is_some()
+            && self.excluded_auto_paths.is_empty()
+            && self.additional_paths.is_empty();
+        if v1_in_place {
+            let mut s = serializer.serialize_struct("SourceConfig", 2)?;
+            s.serialize_field("enabled", &self.enabled)?;
+            s.serialize_field("dir", self.dir.as_deref().unwrap_or_default())?;
+            return s.end();
+        }
+        let mut s = serializer.serialize_struct("SourceConfig", 4)?;
+        s.serialize_field("enabled", &self.enabled)?;
+        s.serialize_field("auto_discover", &self.auto_discover)?;
+        s.serialize_field("excluded_auto_paths", &self.excluded_auto_paths)?;
+        s.serialize_field("additional_paths", &self.additional_paths)?;
+        s.end()
     }
 }
 
@@ -355,9 +458,20 @@ pub const SETTINGS_TEMPLATE: &str = "\
 #     手工写入的非法值在读取时回退 300 并记一条 warn（不阻断启动）。
 #
 # [sources.claude] / [sources.codex]
-#     enabled = true | false    停用后该来源完全不参与统计。
-#     dir = \"D:/logs/claude\"    显式日志目录；省略 = 使用工具默认目录。
-#     注意：两个启用的来源不能指向同一目录（保存时校验）。
+#     enabled = true | false    该来源总开关；停用后完全不采集（历史库不删数据）。
+#     auto_discover = true | false
+#         自动发现：当前用户的默认日志根与环境变量指定的根（CODEX_HOME、
+#         CLAUDE_CONFIG_DIR 只在启动时读取，修改后需重启 TokenScope）。
+#     excluded_auto_paths = [\"D:/logs/claude/projects\"]
+#         已停用的自动候选目录（界面停用自动行时写入；重新开启由界面管理）。
+#
+#     [[sources.claude.additional_paths]]
+#     path = \"D:/history/claude/projects\"    手动追加的日志根（绝对路径）。
+#     enabled = true | false                 该追加项的启停。
+#
+#     注意：同一应用的目录互不相同且不嵌套（保存时校验）；旧版 v1 的 dir 字段
+#     已在升级时迁移为一个追加项并开启 auto_discover——已启用来源的默认目录
+#     用量也会一并纳入，统计总量可能增加（不是重复计量）；原已停用来源保持停用。
 ";
 
 /// SF09：目录冲突校验——规范化后检查**相同或嵌套**（组件前缀关系），
@@ -404,6 +518,350 @@ pub fn validate_no_overlap(
         (Some(c), Some(x)) => validate_dir_conflict(&c, &x),
         _ => Ok(()),
     }
+}
+
+// ── PR3（计划 §9.2）：来源目录迁移（v1 dir → v2 追加项 + 自动发现）────────
+
+/// 迁移判定用的原始形态：保留「哪些键出现」的信息（§9.2 第 2 条），
+/// 不先 `#[serde(default)]` 成空列表再猜新旧格式。
+#[derive(Debug, Default, serde::Deserialize)]
+struct RawSourceConfig {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    dir: Option<String>,
+    #[serde(default)]
+    auto_discover: Option<bool>,
+    #[serde(default)]
+    excluded_auto_paths: Option<Vec<String>>,
+    #[serde(default)]
+    additional_paths: Option<Vec<AdditionalSourcePath>>,
+}
+
+impl RawSourceConfig {
+    fn has_new_format_fields(&self) -> bool {
+        self.auto_discover.is_some()
+            || self.excluded_auto_paths.is_some()
+            || self.additional_paths.is_some()
+    }
+    /// 是否需要迁移：旧 dir 存在且无任何新格式字段。新格式下旧 dir 必须忽略
+    /// （§9.2 第 2 条），因此不迁移、不改文件。
+    fn needs_migration(&self) -> bool {
+        self.dir.is_some() && !self.has_new_format_fields()
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct RawAgentSources {
+    #[serde(default)]
+    claude: Option<RawSourceConfig>,
+    #[serde(default)]
+    codex: Option<RawSourceConfig>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct RawSettings {
+    #[serde(default)]
+    sources: RawAgentSources,
+}
+
+fn read_raw_settings(path: &Path) -> Result<RawSettings> {
+    if path.exists() {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("读设置失败: {}", path.display()))?;
+        return toml::from_str(&text).with_context(|| format!("设置解析失败: {}", path.display()));
+    }
+    // toml 缺失但遗留 settings.json 在位：迁移同样覆盖它（转换后 save 会落 toml
+    // 并把 json 改名 .bak，与 ensure_toml 的遗留导入收敛到同一形态）。
+    if let Some(legacy) = legacy_json_path(path)
+        && legacy.exists()
+    {
+        let text = std::fs::read_to_string(&legacy)
+            .with_context(|| format!("读遗留设置失败: {}", legacy.display()))?;
+        return serde_json::from_str(&text)
+            .with_context(|| format!("遗留设置解析失败: {}", legacy.display()));
+    }
+    Ok(RawSettings::default())
+}
+
+/// 迁移上下文：用户主目录与旧相对路径的解释基准（旧入口按 cwd 解释相对目录）。
+/// 生产用真实值；测试注入隔离值，绝不触真实主目录（计划 §8）。
+#[derive(Debug, Clone)]
+pub struct SourceMigrationContext {
+    pub home: PathBuf,
+    pub cwd: PathBuf,
+}
+
+impl SourceMigrationContext {
+    /// 生产上下文：真实主目录 + 当前工作目录。
+    pub fn real() -> Result<Self> {
+        Ok(Self {
+            home: dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录"))?,
+            cwd: std::env::current_dir().context("无法定位当前工作目录")?,
+        })
+    }
+    /// 某应用自动发现的默认根（与采集侧同源；v2 起还会并入环境根，迁移提示
+    /// 按主目录默认根计算）。
+    fn auto_roots(&self, agent: &str) -> Vec<PathBuf> {
+        if agent == "claude" {
+            vec![self.home.join(".claude").join("projects")]
+        } else {
+            vec![
+                self.home.join(".codex").join("sessions"),
+                self.home.join(".codex").join("archived_sessions"),
+            ]
+        }
+    }
+}
+
+/// 一次成功迁移里单个来源的转换结果（设置页「用量数据」分区的一次性提示用）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConvertedSourcePath {
+    /// `"claude"` 或 `"codex"`。
+    pub agent: String,
+    /// 旧 `dir` 原始值。
+    pub old_dir: String,
+    /// 追加项路径（相对路径已按旧入口语义转为绝对）。
+    pub path: String,
+    /// 追加项启用值（= 旧来源 enabled：整体停用的来源迁移后仍保持停用）。
+    pub enabled: bool,
+}
+
+/// 来源目录迁移结果（§9.2 第 5 条：迁移提示由本次迁移结果返回，不逐轮重复）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SourcePathMigration {
+    /// 本次真正从旧 dir 转换出的追加项；空串旧 dir 只做格式归一，不产生条目。
+    pub converted: Vec<ConvertedSourcePath>,
+    /// 旧根与自动根相同或嵌套的一次性提示（重叠文件由采集层保证只解析一次）。
+    pub overlap_notes: Vec<String>,
+    /// 本次是否改写了文件（false = 已是新格式 / 无需迁移，幂等）。
+    pub changed: bool,
+}
+
+/// 归一化比较键：组件折叠 + Windows 大小写折叠（与 [`validate_dir_conflict`] 同源）。
+/// 对外发布：发现层与界面层的排除项匹配必须用这**同一个**规范化函数
+/// （计划 §9.3 第 5 条），禁止第三套前缀判重。
+pub fn normalized_key(p: &Path) -> String {
+    crate::report::normalize_path(p)
+        .to_string_lossy()
+        .to_lowercase()
+}
+
+/// 判断迁移后的追加目录与自动根的重叠关系，生成一次性提示。
+fn overlap_note(ctx: &SourceMigrationContext, agent: &str, resolved: &Path) -> Option<String> {
+    let key = normalized_key(resolved);
+    for root in ctx.auto_roots(agent) {
+        let root_key = normalized_key(&root);
+        let relation = if key == root_key {
+            "相同"
+        } else if root_key.starts_with(&key) || key.starts_with(&root_key) {
+            "嵌套"
+        } else {
+            continue;
+        };
+        return Some(format!(
+            "迁移后的追加目录 {} 与 {agent} 默认根 {} {}：自动发现已开启，重叠部分每轮只会解析一次；如不需要可移除该追加目录或关闭自动发现",
+            resolved.display(),
+            root.display(),
+            relation
+        ));
+    }
+    None
+}
+
+/// 把一个旧 `dir` 转换为 v2 配置（新 SourceConfig + 转换结果 + 重叠提示）。
+/// 相对路径按旧入口语义（cwd）解释；不存在则报可操作错误，保留旧文件。
+fn convert_legacy_source(
+    agent: &str,
+    raw: &RawSourceConfig,
+    ctx: &SourceMigrationContext,
+) -> Result<(SourceConfig, Option<ConvertedSourcePath>, Vec<String>)> {
+    let enabled = raw.enabled.unwrap_or(true);
+    let raw_dir = raw.dir.as_deref().unwrap_or_default();
+    let mut notes = Vec::new();
+    if raw_dir.trim().is_empty() {
+        // 旧空 dir = 未配置：无追加项，仅归一为新格式（§9.2 第 4 条：不产生空路径行）。
+        return Ok((
+            SourceConfig {
+                enabled,
+                dir: None,
+                auto_discover: true,
+                excluded_auto_paths: Vec::new(),
+                additional_paths: Vec::new(),
+                legacy_format: false,
+            },
+            None,
+            notes,
+        ));
+    }
+    let configured = Path::new(raw_dir);
+    let resolved = if configured.is_relative() {
+        let abs = ctx.cwd.join(configured);
+        if !abs.exists() {
+            return Err(anyhow::anyhow!(
+                "旧配置 sources.{agent}.dir = {raw_dir:?} 是相对路径，按当前工作目录 {} 解释为 {}，该目录不存在，无法保持原读取语义；请把该配置改为已存在的绝对路径后重试，或删除该行（本次迁移未改写设置文件）",
+                ctx.cwd.display(),
+                abs.display()
+            ));
+        }
+        // 组件折叠 + 本地分隔符（join 保留输入里的 `/`，落盘前归一）
+        crate::report::normalize_path(&abs)
+    } else {
+        configured.to_path_buf()
+    };
+    let path = resolved.to_string_lossy().into_owned();
+    if let Some(note) = overlap_note(ctx, agent, &resolved) {
+        notes.push(note);
+    }
+    Ok((
+        SourceConfig {
+            enabled,
+            dir: None,
+            auto_discover: true,
+            excluded_auto_paths: Vec::new(),
+            additional_paths: vec![AdditionalSourcePath {
+                path: path.clone(),
+                enabled,
+            }],
+            legacy_format: false,
+        },
+        Some(ConvertedSourcePath {
+            agent: agent.to_string(),
+            old_dir: raw_dir.to_string(),
+            path,
+            enabled,
+        }),
+        notes,
+    ))
+}
+
+/// PR3：来源目录迁移——事务写锁内读最新文件，把旧 `dir` 转为一个追加项并开启
+/// 自动发现，原子保存（§9.2 第 3 条）。刻意**不**调用 [`update`]（那会在同一把
+/// 锁内递归 load）；迁移保存失败返回明确错误，原文件字节不变，不回退成"全部
+/// 默认启用"。幂等：已迁移 / 显式新格式直接返回 `changed = false`。
+pub fn migrate_source_paths(path: &Path) -> Result<SourcePathMigration> {
+    migrate_source_paths_with(path, &SourceMigrationContext::real()?)
+}
+
+/// [`migrate_source_paths`] 的注入形态（测试与验收用，隔离主目录与 cwd）。
+pub fn migrate_source_paths_with(
+    path: &Path,
+    ctx: &SourceMigrationContext,
+) -> Result<SourcePathMigration> {
+    let _guard = acquire_write_lock()?;
+    let raw = read_raw_settings(path)?;
+    let needs = [
+        ("claude", raw.sources.claude.as_ref()),
+        ("codex", raw.sources.codex.as_ref()),
+    ]
+    .into_iter()
+    .filter(|(_, cfg)| cfg.is_some_and(RawSourceConfig::needs_migration))
+    .collect::<Vec<_>>();
+    if needs.is_empty() {
+        return Ok(SourcePathMigration::default());
+    }
+    // 先完成全部转换计算，再统一落盘：任一来源无法保持原语义 → 整体失败、
+    // 原文件字节不变（§9.2 第 3 条：失败不扩大读取范围）。
+    let mut converted = Vec::new();
+    let mut overlap_notes = Vec::new();
+    let mut new_claude: Option<SourceConfig> = None;
+    let mut new_codex: Option<SourceConfig> = None;
+    for (agent, raw_cfg) in needs {
+        let raw_cfg = raw_cfg.expect("needs 过滤后必为 Some");
+        let (cfg, entry, notes) = convert_legacy_source(agent, raw_cfg, ctx)?;
+        overlap_notes.extend(notes);
+        if let Some(entry) = entry {
+            converted.push(entry);
+        }
+        if agent == "claude" {
+            new_claude = Some(cfg);
+        } else {
+            new_codex = Some(cfg);
+        }
+    }
+    let mut settings = load(path)?;
+    if let Some(cfg) = new_claude {
+        settings.sources.claude = Some(cfg);
+    }
+    if let Some(cfg) = new_codex {
+        settings.sources.codex = Some(cfg);
+    }
+    save_unlocked(path, &settings)?;
+    log::info!(
+        "来源目录迁移完成：{} 个旧 dir 转为追加项并开启自动发现",
+        converted.len()
+    );
+    Ok(SourcePathMigration {
+        converted,
+        overlap_notes,
+        changed: true,
+    })
+}
+
+/// 手动追加目录校验失败的原因（§4.1 / §5）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum AdditionalPathReject {
+    /// 与已有行指向同一位置：提示「目录已在列表中」，不新增。
+    AlreadyExists { existing: String },
+    /// 与已有行存在父/子嵌套：直接拒绝，错误指出冲突行。
+    Nested { existing: String },
+}
+
+/// PR3（§4.1）：手动追加目录与同应用**全部已有行**（默认、环境、手动、停用、
+/// 缺失均包含）的逻辑比较——相同 → [`AdditionalPathReject::AlreadyExists`]；
+/// 父/子嵌套 → [`AdditionalPathReject::Nested`]。只做规范化后的路径分量比较
+/// （`C:/a` 与 `C:/ab` 不算嵌套），不触文件系统；联接别名的物理目标比较由
+/// 发现层 canonicalize 后传入已解析路径。
+pub fn check_additional_path(
+    existing: &[std::path::PathBuf],
+    new_path: &Path,
+) -> Result<(), AdditionalPathReject> {
+    let new_key = normalized_key(new_path);
+    let new_norm = crate::report::normalize_path(new_path);
+    for other in existing {
+        if normalized_key(other) == new_key {
+            return Err(AdditionalPathReject::AlreadyExists {
+                existing: other.display().to_string(),
+            });
+        }
+        let other_norm = crate::report::normalize_path(other);
+        if other_norm.starts_with(&new_norm) || new_norm.starts_with(&other_norm) {
+            return Err(AdditionalPathReject::Nested {
+                existing: other.display().to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// PR3（§5）：手动追加路径的形态校验——拒绝空值、相对路径、明显整盘与整个
+/// 用户主目录；合法缺失的绝对根可保存（缺失与否由发现层显示，不在这里挡）。
+/// 通过时返回 trim 后的路径。
+pub fn validate_additional_path_shape(path: &str, home: &Path) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "目录不能为空：请填写日志根的绝对路径（如 D:\\history\\claude\\projects）".to_string(),
+        );
+    }
+    let p = Path::new(trimmed);
+    if p.parent().is_none() {
+        return Err(format!(
+            "目录不能是整盘根：{trimmed}；请填写具体的日志目录（如 D:\\history\\claude\\projects）"
+        ));
+    }
+    if p.is_relative() {
+        return Err(format!(
+            "目录必须是绝对路径：{trimmed} 是相对路径；请填写完整路径（如 D:\\history\\claude\\projects）"
+        ));
+    }
+    if normalized_key(p) == normalized_key(home) {
+        return Err(format!(
+            "目录不能是整个用户主目录 {}：请填写其中的日志子目录（如 .claude\\projects）",
+            home.display()
+        ));
+    }
+    Ok(PathBuf::from(trimmed))
 }
 
 /// D3/R06：自动同步的允许判定——设置读取失败时返回 false（默认离线）。
@@ -483,6 +941,10 @@ mod tests {
                 claude: Some(SourceConfig {
                     enabled: false,
                     dir: Some("D:/logs/claude".into()),
+                    // dir 在位的真实文件只会以 v1 形态载入（legacy_format=true，
+                    // 与 load 的产出一致）；序列化按同一条形状保留规则写回。
+                    legacy_format: true,
+                    ..Default::default()
                 }),
                 codex: None,
             },

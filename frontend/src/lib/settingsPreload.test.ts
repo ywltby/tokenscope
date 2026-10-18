@@ -8,9 +8,9 @@ describe("设置后台预读", () => {
     preload.start();
     expect(read.mock.calls.map(([command]) => command)).toEqual([...SETTINGS_READ_COMMANDS]);
     await expect(preload.read("settings_get")).resolves.toEqual({ command: "settings_get" });
-    expect(read).toHaveBeenCalledTimes(5);
-    await preload.read("settings_get");
     expect(read).toHaveBeenCalledTimes(6);
+    await preload.read("settings_get");
+    expect(read).toHaveBeenCalledTimes(7);
   });
 
   it("进入页面复用仍在途的读取，失败可见且下次读取可恢复", async () => {
@@ -24,7 +24,8 @@ describe("设置后台预读", () => {
     reject(new Error("配置暂不可读"));
     await Promise.resolve();
     await expect(preload.read("settings_get")).rejects.toThrow("配置暂不可读");
-    expect(read).toHaveBeenCalledTimes(5);
+    // start 起了 6 个读取；失败的 read 不自动重试（由调用方显式重读）→ 仍是 6
+    expect(read).toHaveBeenCalledTimes(6);
     read.mockResolvedValueOnce(true);
     await expect(preload.read("settings_get")).resolves.toBe(true);
   });

@@ -108,6 +108,11 @@ pub fn run() {
             commands::view_cache_save,
             commands::source_status,
             commands::source_config_set,
+            commands::source_paths_list,
+            commands::source_path_add,
+            commands::source_path_remove,
+            commands::source_path_set_enabled,
+            commands::source_auto_set,
             commands::cache_stats,
             commands::refresh_cache,
             commands::ccs_import_defaults,
@@ -289,6 +294,10 @@ pub(crate) fn initialize_business_runtime(
     let t0 = std::time::Instant::now();
     let mut diagnostics = Vec::new();
 
+    // 0) PR3：启动环境快照（CODEX_HOME / CLAUDE_CONFIG_DIR 只在启动时捕获，
+    //    采集轮次不重读——修改环境变量后需要重启）。
+    commands::capture_startup_environment();
+
     // 1) 文件日志：失败按 SF06 的非阻断降级路径（stderr / 关闭输出）。
     if !flags.done(RuntimeStep::Logging) {
         let status = app.state::<LogState>().initialize();
@@ -356,6 +365,45 @@ pub(crate) fn initialize_business_runtime(
     // 7) PR2：采集状态事件桥（业务 Ready 后注册一次；之后任何入口的真实
     //    采集轮次都会向前端投递 collection-status 事件）。
     install_collection_status_bridge(app);
+
+    // 8) PR3：v1 来源目录迁移（设置写锁内一次性；保存成功才向采集发布新
+    //    设置——本轮失败保留旧文件并按 v1 语义读取，不扩大读取范围）。
+    if !flags.done(RuntimeStep::SourcePathMigration) {
+        match tokenscope::settings::settings_path() {
+            Ok(path) => match tokenscope::settings::migrate_source_paths(&path) {
+                Ok(migration) => {
+                    flags.mark(RuntimeStep::SourcePathMigration);
+                    if migration.changed {
+                        let converted = migration
+                            .converted
+                            .iter()
+                            .map(|c| format!("{}: {} → {}", c.agent, c.old_dir, c.path))
+                            .collect::<Vec<_>>()
+                            .join("；");
+                        log::info!("来源目录迁移完成：{converted}");
+                        diagnostics.push(format!(
+                            "旧版自定义目录已保留为追加目录；自动发现已开启，来源启用时默认目录的历史用量也会纳入，统计总量可能增加。迁移明细：{converted}"
+                        ));
+                        for note in &migration.overlap_notes {
+                            diagnostics.push(note.clone());
+                        }
+                    }
+                }
+                Err(e) => {
+                    // 迁移失败：保留旧文件字节，按 v1 语义读取（不扩大范围）；
+                    // 诊断可见，不静默。
+                    flags.mark(RuntimeStep::SourcePathMigration);
+                    let msg = format!("来源目录迁移失败（仍按旧配置读取，未扩大读取范围）：{e:#}");
+                    log::error!("{msg}");
+                    diagnostics.push(msg);
+                }
+            },
+            Err(e) => {
+                flags.mark(RuntimeStep::SourcePathMigration);
+                diagnostics.push(format!("无法定位设置文件，跳过来源目录迁移：{e:#}"));
+            }
+        }
+    }
 
     log::info!(
         "业务初始化完成（日志/窗口/托盘/自同步线程，剩余步骤 {}），{} ms",
@@ -524,14 +572,22 @@ impl CollectSignal {
         }
     }
 
-    /// 等待 `total`：被设置变更唤醒 → `Woken`；退出请求 → `Stop`；否则 `Elapsed`。
-    fn wait(&self, total: Duration) -> WaitOutcome {
+    /// 当前间隔版本：等待方须在**读取间隔之前**取得，作为 `wait` 的基线。
+    fn version(&self) -> u64 {
+        *self.inner.version.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 等待 `total`：版本已不同于 `seen`（设置变更唤醒，含读取间隔之后、进入
+    /// 等待之前发生的唤醒）→ `Woken`；退出请求 → `Stop`；否则 `Elapsed`。
+    fn wait(&self, total: Duration, seen: u64) -> WaitOutcome {
         let mut version = self.inner.version.lock().unwrap_or_else(|e| e.into_inner());
-        let baseline = *version;
         let deadline = std::time::Instant::now() + total;
         loop {
             if self.inner.stop.load(Ordering::SeqCst) {
                 return WaitOutcome::Stop;
+            }
+            if *version != seen {
+                return WaitOutcome::Woken;
             }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
@@ -543,9 +599,6 @@ impl CollectSignal {
                 .wait_timeout(version, left)
                 .unwrap_or_else(|e| e.into_inner());
             version = guard;
-            if *version != baseline {
-                return WaitOutcome::Woken;
-            }
         }
     }
 
@@ -594,13 +647,15 @@ fn run_collect_loop<I, C, N>(
 {
     let mut first_round = true;
     loop {
+        // 先取版本再读间隔：读取间隔与进入等待之间的唤醒不会丢失。
+        let seen = signal.version();
         let interval = next_interval();
         let delay = if first_round {
             interval.min(COLLECT_FIRST_DELAY_CAP)
         } else {
             interval
         };
-        match signal.wait(delay) {
+        match signal.wait(delay, seen) {
             WaitOutcome::Stop => break,
             WaitOutcome::Woken => {
                 // 设置变更：按新间隔重新计时（不再享受首轮缩短）。
@@ -1433,7 +1488,7 @@ mod tests {
             let signal = signal.clone();
             std::thread::spawn(move || {
                 let t = Instant::now();
-                let outcome = signal.wait(Duration::from_secs(30));
+                let outcome = signal.wait(Duration::from_secs(30), signal.version());
                 (outcome, t.elapsed())
             })
         };
@@ -1444,6 +1499,26 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(2),
             "停止必须立即中断等待（实测 {elapsed:?}）"
+        );
+    }
+
+    /// 读取间隔之后、进入等待之前的唤醒不得丢失（曾偶发按旧间隔多等一整轮，
+    /// `collect_loop_follows_updated_interval_after_wake` 实测 510ms）。
+    #[test]
+    fn collect_signal_wake_before_wait_is_not_lost() {
+        let signal = CollectSignal::new();
+        let seen = signal.version();
+        signal.wake();
+        let t = Instant::now();
+        assert_eq!(
+            signal.wait(Duration::from_secs(30), seen),
+            WaitOutcome::Woken,
+            "基线之后的唤醒必须让等待立即返回"
+        );
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "实测 {:?}",
+            t.elapsed()
         );
     }
 

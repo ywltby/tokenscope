@@ -10,7 +10,7 @@
 > 合入后 main 上的 Native UI E2E 曾因重启后连接调试端口的时序缺口失败（[run 38768858040](https://github.com/ywltby/tokenscope/actions/runs/38768858040)），属测试架问题，已由[升级测试补测计划](2026-10-16-upgrade-matrix.md) UP09 修复。
 
 > 状态：[审阅第 13 节](../../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过，PR1 可开工；运行时 fixture 分类已按意见明确。W01–W07 未实施。设计基线 main e34495b / 0.3.1。
-> 本轮计划修订留在 `docs/source-discovery-plan`；PR1 开工时从该分支最新提交创建 `feat/workspace-layout`，带入既有 mjs 维护提交 c16e023 和三份计划，不改写历史。仅本 PR 改目录/构建/门禁，独立 patch；合入后才从最新 main 分别启动 [PR2](../../active/2026-10-15-collection-status.md)、[PR3](../../active/2026-10-14-source-discovery-and-additional-paths.md)，不在本 PR 实施功能。
+> 本轮计划修订留在 `docs/source-discovery-plan`；PR1 开工时从该分支最新提交创建 `feat/workspace-layout`，带入既有 mjs 维护提交 c16e023 和三份计划，不改写历史。仅本 PR 改目录/构建/门禁，独立 patch；合入后才从最新 main 分别启动 [PR2](2026-10-15-collection-status.md)、[PR3](../../active/2026-10-14-source-discovery-and-additional-paths.md)，不在本 PR 实施功能。
 
 **Goal：** 核心库迁入 crates/tokenscope-core，统一 workspace/锁/target，并根据实际构建输入选择本地检查。
 
