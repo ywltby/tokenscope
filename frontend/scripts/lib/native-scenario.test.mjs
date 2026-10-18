@@ -22,6 +22,7 @@ import {
   runScenarioBounded,
   scenarioBudgetMs,
   spawnSyncBounded,
+  waitStableQuery,
   withTimeout,
 } from "./native-scenario.mjs";
 
@@ -372,5 +373,42 @@ describe("共用收尾入口的子进程端到端（计划 §9.1 第 7 条）", 
     expect(Date.now() - startedAt).toBeLessThan(9000);
     const evidence = JSON.parse(fs.readFileSync(evidencePath, "utf8"));
     expect(evidence).toEqual({ scenario_timeout: true, minimal: true });
+  });
+});
+
+describe("waitStableQuery（PR3 补修复核：未稳定不得放行）", () => {
+  // 按读数序列回放；超出序列后保持最后一个读数。sleep 不真等。
+  const replay = (reads) => {
+    let n = 0;
+    return {
+      read: async () => reads[Math.min(n++, reads.length - 1)],
+      sleep: async () => {},
+    };
+  };
+  const q = (summary, events = summary) => ({ summary, events });
+
+  it("迟到批次后保持稳定：返回最终身份", async () => {
+    const id = await waitStableQuery(replay([q("q1"), q("q2"), q("q2")]));
+    expect(id).toBe("q2");
+  });
+
+  it("身份持续变化：到期抛错并带变化序列", async () => {
+    const reads = Array.from({ length: 40 }, (_, i) => q(`q${i}`));
+    const error = await waitStableQuery(replay(reads)).catch((e) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.kind).toBe("query-unstable");
+    expect(error.observed.length).toBeGreaterThan(5);
+    expect(error.message).toContain("q0");
+  });
+
+  it("身份始终为空：不当作稳定基线", async () => {
+    const error = await waitStableQuery(replay([q(null)])).catch((e) => e);
+    expect(error.kind).toBe("query-unstable");
+    expect(error.observed).toEqual([{ at_ms: 0, summary: null, events: null }]);
+  });
+
+  it("汇总与明细不一致：不当作稳定基线", async () => {
+    const error = await waitStableQuery(replay([q("q2", "q1")])).catch((e) => e);
+    expect(error.kind).toBe("query-unstable");
   });
 });

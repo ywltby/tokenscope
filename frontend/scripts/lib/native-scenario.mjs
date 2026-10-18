@@ -272,3 +272,46 @@ export async function finalizeScenarioTimeout({
   hb(`有界收尾完成：${JSON.stringify(result)}`);
   return result;
 }
+
+/**
+ * 等查询身份稳定（PR3 补修复核）：吸收预设切换的迟到重复批次，给恢复/切页检查
+ * 取可信基线。`read()` 返回 `{ summary, events }`（汇总与明细的 query_id）。
+ *
+ * 判定：两者非空且相同才算有效读数；同一有效身份连续保持 `quietMs` 才返回；
+ * `budgetMs` 内未稳定即抛错，错误带观察到的身份变化序列——不得把未稳定当成功。
+ * 计时按累计等待间隔，不含读取本身耗时（读取为毫秒级 DOM 属性）。
+ */
+export async function waitStableQuery({
+  read,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  intervalMs = 500,
+  quietMs = 2000,
+  budgetMs = 10000,
+}) {
+  const observed = [];
+  let candidate = null;
+  let since = 0;
+  for (let elapsed = 0; ; elapsed += intervalMs) {
+    const { summary = null, events = null } = (await read()) ?? {};
+    const last = observed.at(-1);
+    if (!last || last.summary !== summary || last.events !== events) {
+      observed.push({ at_ms: elapsed, summary, events });
+    }
+    const valid = !!summary && summary === events;
+    if (valid && summary === candidate) {
+      if (elapsed - since >= quietMs) return summary;
+    } else {
+      candidate = valid ? summary : null;
+      since = elapsed;
+    }
+    if (elapsed >= budgetMs) {
+      const error = new Error(
+        `查询身份 ${budgetMs} ms 内未稳定（需非空、汇总与明细一致并保持 ${quietMs} ms）：${JSON.stringify(observed)}`,
+      );
+      error.kind = "query-unstable";
+      error.observed = observed;
+      throw error;
+    }
+    await sleep(intervalMs);
+  }
+}

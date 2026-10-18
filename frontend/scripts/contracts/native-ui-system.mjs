@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ensureNotCanceled, spawnSyncBounded } from "../lib/native-scenario.mjs";
+import { ensureNotCanceled, spawnSyncBounded, waitStableQuery } from "../lib/native-scenario.mjs";
 
 export async function nativeUiSystem({ inst, ck, ev, markStage, markStageDone, isCanceled }) {
   const page = () => inst.page;
@@ -33,18 +33,19 @@ export async function nativeUiSystem({ inst, ck, ev, markStage, markStageDone, i
     await page().getByRole("button", { name: label, exact: true }).click();
     await waitQuery(old);
   };
-  // 等查询身份稳定（2 秒无变化，最多 10 秒）：吸收预设切换的迟到重复批次
-  // （既有竞态，与本场景的恢复/切页检查无关），不让它污染基线。
-  const stableQueryId = async () => {
-    let id = await query();
-    for (let n = 0; n < 5; n++) {
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      const now = await query();
-      if (now === id) return id;
-      id = now;
-    }
-    return id;
-  };
+  // 等查询身份稳定（汇总与明细一致且非空、2 秒无变化，最多 10 秒，未稳定即失败）：
+  // 吸收预设切换的迟到重复批次（既有竞态，与本场景的恢复/切页检查无关）。
+  const stableQueryId = () =>
+    waitStableQuery({
+      read: () =>
+        page().evaluate(() => {
+          const node = document.querySelector("[data-summary-query]");
+          return {
+            summary: node?.dataset.summaryQuery || null,
+            events: node?.dataset.eventsQuery || null,
+          };
+        }),
+    });
   const restore = async (checkHidden = false) => {
     const action = fileURLToPath(
       new URL("../../../scripts/native-window-action.ps1", import.meta.url),
