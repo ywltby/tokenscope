@@ -333,6 +333,9 @@ fn update_on_legacy_file_keeps_v1_shape_and_migration_still_converts() {
 }
 
 /// §9.2 第 4 条「相对 dir 已存在」：按旧入口语义（cwd）转绝对追加路径。
+/// 身份比较用 canonicalize：实现经 normalize_path（canonicalize 优先）会把
+/// 8.3 短名（CI runner 的 RUNNER~1）解析为长名，按字面字符串比较在含短名
+/// 的 TEMP 下必然失配（PR #14 CI 实测），属测试断言环境脆弱，不是实现缺陷。
 #[test]
 fn legacy_relative_dir_existing_becomes_absolute_additional_path() {
     let fx = Fixture::new("relative-ok");
@@ -341,14 +344,20 @@ fn legacy_relative_dir_existing_becomes_absolute_additional_path() {
     fx.write("[sources.claude]\nenabled = true\ndir = \"logs/claude\"\n");
     let out = fx.migrate();
     assert_eq!(out.converted.len(), 1);
-    assert_eq!(
-        out.converted[0].path,
-        logs.display().to_string(),
-        "相对 dir 必须按 cwd 解释为绝对路径"
+    let same_dir =
+        |p: &str| std::fs::canonicalize(p).unwrap() == std::fs::canonicalize(&logs).unwrap();
+    assert!(
+        same_dir(&out.converted[0].path),
+        "相对 dir 必须按 cwd 解释为同一绝对目录（got {}）",
+        out.converted[0].path
     );
     let s = fx.load();
     let cfg = claude_cfg(&s);
-    assert_eq!(cfg.additional_paths[0].path, logs.display().to_string());
+    assert!(
+        same_dir(&cfg.additional_paths[0].path),
+        "落盘追加路径必须指向同一目录（got {}）",
+        cfg.additional_paths[0].path
+    );
 }
 
 /// §9.2 第 4 条「相对 dir 不存在」：可操作错误 + 原文件保留，不默默扫默认根。

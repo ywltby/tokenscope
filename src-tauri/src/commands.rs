@@ -17,6 +17,7 @@ use tokenscope::report::{
     view_cache_path,
 };
 use tokenscope::settings::{CloseAction, Settings};
+use tokenscope::source::discovery::{OriginKind, ProbeState};
 
 use crate::privacy;
 
@@ -316,7 +317,23 @@ pub(crate) fn source_plans_from_with(
     resolved
         .roots
         .iter()
-        .filter(|row| row.effective_enabled)
+        .filter(|row| {
+            if !row.effective_enabled {
+                return false;
+            }
+            // 缺失/非目录的**纯自动**根（默认/环境）不进采集计划（计划 §2：
+            // "不存在的绝对根显示缺失、不每轮报错"；"默认根不存在可不显示"）。
+            // 每根一实例下它们只会触发每轮"目录不存在"警告，把常态缺失变成
+            // 常驻"部分异常"胶囊。列表行照常返回（环境缺失根保留行）；目录
+            // 出现后下一轮解析状态变化，自然回到计划（复用键含实际集合与状态）。
+            // 手动配置的缺失根仍进计划，采集层保留"目录不存在"提示。
+            let has_manual = row.origins.iter().any(|o| o.kind == OriginKind::Manual);
+            let nothing_to_walk = matches!(
+                row.state,
+                ProbeState::Missing | ProbeState::NotADirectory(_)
+            );
+            !(nothing_to_walk && !has_manual)
+        })
         .map(|row| tokenscope::report::SourcePlan {
             agent: row.agent,
             root: std::path::PathBuf::from(&row.display_path),
@@ -2130,6 +2147,58 @@ mod tests {
         // 损坏设置：拒绝且不扩范围（Err，非默认来源）
         std::fs::write(&path, "not [valid toml").unwrap();
         assert!(collection_opts_from_in(tokenscope::settings::load(&path), &ctx).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 回归（PR #14 CI 实测）：缺失/非目录的纯自动根不得进采集计划——每根
+    /// 一实例下它们只会每轮产生"目录不存在"警告，把常态缺失（多数机器没有
+    /// `archived_sessions`）变成常驻"部分异常"胶囊（计划 §2：缺失"不每轮报
+    /// 错"）。列表行不受影响；手动配置的缺失根仍进计划。
+    #[test]
+    fn missing_auto_roots_excluded_from_plans_manual_missing_stays() {
+        let dir = tmp_dir("sp-missing-auto");
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, "price_auto_sync = true\n").unwrap();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // 探测器如实反映存在性（与生产 filesystem_probe 同分类）
+        use tokenscope::source::discovery::{DiscoveryContext, RootProbe, StartupEnv};
+        let probe = |p: &std::path::Path| RootProbe {
+            state: if p.exists() {
+                ProbeState::Ready
+            } else {
+                ProbeState::Missing
+            },
+            canonical: p.canonicalize().ok(),
+        };
+        let ctx = DiscoveryContext::for_test(
+            home.clone(),
+            StartupEnv::default(),
+            std::sync::Arc::new(probe),
+        );
+        // 只创建 codex sessions；claude 默认根与 codex archived_sessions 保持缺失
+        std::fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
+        let o = collection_opts_from_in(tokenscope::settings::load(&path), &ctx).unwrap();
+        let plans = o.source_plans.clone().unwrap();
+        assert_eq!(
+            plans.len(),
+            1,
+            "缺失自动根不进计划，只保留真实存在的 codex sessions: {plans:?}"
+        );
+        assert_eq!(plans[0].agent, tokenscope::model::AgentKind::Codex);
+
+        // 手动缺失根（合法保存）仍进计划——用户显式配置，采集层保留提示
+        let manual = dir.join("manual-not-created");
+        source_path_add_impl(&path, &ctx, &home, "claude", &manual.display().to_string()).unwrap();
+        let o2 = collection_opts_from_in(tokenscope::settings::load(&path), &ctx).unwrap();
+        let plans2 = o2.source_plans.clone().unwrap();
+        assert!(
+            plans2
+                .iter()
+                .any(|p| tokenscope::settings::normalized_key(&p.root)
+                    == tokenscope::settings::normalized_key(&manual)),
+            "手动缺失根保留在计划中: {plans2:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
