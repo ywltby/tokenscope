@@ -43,6 +43,7 @@ import {
   createHostExitSignal,
   createLaunchRecord,
   createProbeFn,
+  descendantsAliveByName,
   hostLogTail,
   launchPort,
   listenersOnPort,
@@ -517,13 +518,22 @@ class Instance {
     this.snapshot = { ...fresh, at: Date.now() };
     return this.snapshot;
   }
-  /** 刷新并累计本次已记录的后代（按父 PID 递归），同时把探测耗时写进证据。 */
+  /**
+   * 刷新并累计本次已记录的后代（按父 PID 递归），同时把探测耗时写进证据。
+   * 宿主已退出后**不再**从 hostPid 走后代树：该 PID 可能已被系统进程复用，
+   * 从复用者出发会把整棵系统进程树记成"后代"（PR #14 CI 实测：runner 上
+   * 宿主 pid 752 干净退出后被复用，退出确认把 126 个系统进程当残留）。
+   * 既有累计清单保留，由 stop() 的同名身份校验过滤。
+   */
   async refreshDescendants(record) {
     const snap = await this.probe({ force: true });
-    record.descendantPids = mergePids(
-      record.descendantPids,
-      collectDescendants(snap.processes, record.hostPid),
-    );
+    const hostGone = record.hostExitCode !== null && record.hostExitCode !== undefined;
+    if (!hostGone) {
+      record.descendantPids = mergePids(
+        record.descendantPids,
+        collectDescendants(snap.processes, record.hostPid),
+      );
+    }
     recordProbe(record, {
       atMs: Date.now() - record.startedAtMs,
       ms: snap.ms,
@@ -532,6 +542,15 @@ class Instance {
       listenerPids: listenersOnPort(snap.listeners, record.port),
     });
     return snap;
+  }
+  /**
+   * 存活后代判定带进程名身份校验：pid 只在当前名字仍是本应用家族
+   * （tokenscope / msedgewebview2）时才认——PID 复用后新名字不匹配，
+   * 不再把无关进程当成"退出未确认"的残留。探测清单里查不到的 PID
+   * 保守按存活处理（不因探测缺口漏掉真实后代）。
+   */
+  aliveDescendantPidsOf(record) {
+    return descendantsAliveByName(record.descendantPids, this.snapshot.processes, isProcessAlive);
   }
   markHostExit(record) {
     const code = this.proc?.exitCode;
@@ -703,13 +722,35 @@ class Instance {
     this.browser = null;
     this.ctx = null;
   }
-  /** 结束记录中的 PID（宿主 + 已记录后代）；绝不动外来进程。 */
+  /**
+   * 结束记录中的 PID（宿主 + 已记录后代）；绝不动外来进程。宿主已退出后
+   * 不再杀 hostPid（该 PID 可能已被复用），且后代按最近快照做进程名身份
+   * 校验——复用 PID 的"假后代"不得进入强杀清单。
+   */
   async terminateRecordedPids(record, reason) {
-    const pids = mergePids([record.hostPid], record.descendantPids).filter(
+    let snap = this.snapshot;
+    if (snap.at === 0) {
+      try {
+        snap = await this.probe({ force: true });
+      } catch {
+        /* 探测失败按"身份未知"保守处理，但宿主退出后的 hostPid 仍不杀 */
+      }
+    }
+    const hostGone = record.hostExitCode !== null && record.hostExitCode !== undefined;
+    const hostPids = hostGone ? [] : [record.hostPid];
+    const oursDescendants = descendantsAliveByName(
+      record.descendantPids ?? [],
+      snap.processes,
+      () => true,
+    );
+    const pids = mergePids(hostPids, oursDescendants).filter(
       (pid) => pid !== process.pid && pid > 4,
     );
     record.terminated = record.terminated ?? [];
-    if (!pids.length) return { reason, pids: [] };
+    if (!pids.length) {
+      record.terminated.push({ at: nowIso(), reason, pids: [] });
+      return { reason, pids: [] };
+    }
     try {
       psCommand(
         `@(${pids.join(",")}) | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }`,
@@ -1078,7 +1119,7 @@ class Instance {
       const elapsedMs = Date.now() - startedAt;
       this.markHostExit(record);
       const hostExited = !(record.hostExitCode === null || record.hostExitCode === undefined);
-      const aliveDescendantPids = record.descendantPids.filter((pid) => isProcessAlive(pid));
+      const aliveDescendantPids = this.aliveDescendantPidsOf(record);
       const listening = await portListening(record.port);
       decision = stopDecision({
         hostPid: record.hostPid,

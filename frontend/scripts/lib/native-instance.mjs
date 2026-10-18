@@ -161,6 +161,33 @@ export function mergePids(left, right) {
   return uniqueSortedPids([...(left ?? []), ...(right ?? [])]);
 }
 
+/**
+ * 进程名是否属于本应用家族（宿主或 WebView2 子进程）。PID 复用后的身份
+ * 校验用：宿主退出后其 PID 可能被系统进程复用，名字不匹配即不算残留。
+ */
+export function processNameIsOurs(name) {
+  const n = String(name ?? "").trim().toLowerCase();
+  return n === "tokenscope.exe" || n === "msedgewebview2.exe";
+}
+
+/**
+ * 存活后代判定（带身份校验）：只在进程仍存活**且**探测表里的名字属于本应用
+ * 家族时才算残留；探测表中查不到的 PID 保守按存活处理。`processes` 传最近
+ * 一次探测快照（缺省视为无表，全部保守保留）。
+ */
+export function descendantsAliveByName(pids, processes, isAlive = () => true) {
+  const rows = new Map(
+    (processes ?? []).filter((p) => Number.isInteger(p?.pid)).map((p) => [p.pid, p]),
+  );
+  return uniqueSortedPids(
+    (pids ?? []).filter((pid) => {
+      if (!Number.isInteger(pid) || pid <= 0 || !isAlive(pid)) return false;
+      const row = rows.get(pid);
+      return row ? processNameIsOurs(row.name) : true;
+    }),
+  );
+}
+
 function asArray(value) {
   if (value === null || value === undefined || value === "") return [];
   return Array.isArray(value) ? value : [value];

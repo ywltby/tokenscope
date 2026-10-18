@@ -18,6 +18,7 @@ import {
   connectDecision,
   createLaunchRecord,
   describeTargets,
+  descendantsAliveByName,
   hostLogTail,
   isRetryableConnectError,
   launchPort,
@@ -150,6 +151,21 @@ describe("后代进程递归记录（§4.8 第 2 条）", () => {
   it("合并多次快照不会丢已记录的后代", () => {
     expect(mergePids([200], [200, 300])).toEqual([200, 300]);
     expect(mergePids(null, [])).toEqual([]);
+  });
+
+  // PR #14 CI 实测：宿主干净退出后 PID 被系统进程复用，从复用者出发的后代
+  // 遍历把整棵系统树记成"后代"，退出确认 20 秒超时。存活判定必须带进程名
+  // 身份校验——复用 PID 的新名字不属于本应用家族，不得算残留或进强杀清单。
+  it("descendantsAliveByName 只认本应用家族的名字，未知 PID 保守保留", () => {
+    const rows = normalizeProcessTable([
+      { ProcessId: 200, ParentProcessId: 752, Name: "svchost.exe" },
+      { ProcessId: 300, ParentProcessId: 752, Name: "msedgewebview2.exe" },
+      { ProcessId: 400, ParentProcessId: 1, Name: "tokenscope.exe" },
+    ]);
+    expect(descendantsAliveByName([200, 300, 400, 999], rows, () => true)).toEqual([300, 400, 999]);
+    expect(descendantsAliveByName([300], rows, () => false)).toEqual([]);
+    expect(descendantsAliveByName([300], null, () => true)).toEqual([300]);
+    expect(descendantsAliveByName(null, rows, () => true)).toEqual([]);
   });
 });
 
