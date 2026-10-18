@@ -206,8 +206,9 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 - [x] 联接环闭合；两层去重不丢独立事件。（S03/source_paths_collection 14 例，记录见 S03）
 - [x] 来源集合、列表、诊断一致；停用历史保留。（S04 壳接线 + S05 列表 + 采集隔离语义，记录见各项）
 - [x] 改前改后性能有记录；真实基准有证据或待验标记。（S06：合成对比已记录，真实基准待验，记录见下）
-- [ ] 旧自定义 dir 与 CODEX_HOME 行为变更、升级用量并集、停用保留、重启说明、隐私范围及清单齐全。（代码/测试已齐，文档与清单更新归 S07）
-- [ ] PR3 自身版本、完整门禁、安装升级与原生工件验证。（S07）
+- [x] 旧自定义 dir 与 CODEX_HOME 行为变更、升级用量并集、停用保留、重启说明、隐私范围及清单齐全。（S07 文档四处 + 构建输入清单校验，记录见下）
+- [x] PR3 自身版本、完整门禁、安装升级与原生工件验证。（2026-10-18 完成，记录见 S07）
+- [x] S07：文档、版本与交付。（2026-10-18 实施完毕，草稿 PR #14 等待复核，记录见下）
 
 ### S00 执行记录（2026-10-18）
 
@@ -269,6 +270,22 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
   - 性能（§4.4，本机 release，合成 40 文件/12 000 请求/5 天，单 Claude 根，隔离目录）：改前（基线 worktree `20b0c4c`）热轮 3 次中位数 **112 ms**（108/112/116）、冷轮 1715 ms；改后热轮中位数 **117 ms**（107/117/127）、冷轮 1752 ms——差异在运行间噪声带内，无"明显变慢"定位触发；来源解析单独计时中位数 **507 µs**（274–713 µs，毫秒级达标）。
 - **调查记录（不用重跑碰绿）**：`ui_refresh_lifecycle` 首跑超时的根因是 `run-ui-refresh-e2e.mjs` 以 `vite preview` 服务**既有 dist**，而 `data-changed` 补发是未提交的源码改动、不在旧包内——重建后原样通过，未放宽任何断言或超时。
 - **边界如实记录**：真实数据性能基准（`perf_real_data` opt-in）未运行，按 §4.4 标**待验**；远程 Native UI E2E（含新场景）待本 PR CI 属交付条件；S03 遗留的"权限拒绝采集 fixture"未在本场景注入（Windows ACL 注入易残留），`NoPermission` 分类仍由发现层测试覆盖，保持待验披露。未完成项：无（本项范围内）。
+
+### S07 执行记录（2026-10-18）
+
+- **提交**：文档 `802923b`（stats-semantics §1/§2.2/§3.4、privacy、DESIGN、CLAUDE、总账；构建输入清单 `--check` 通过、无新增 include 输入）→ 版本 `d501bab`（minor 0.4.0→0.5.0，四份配置 + 根锁 + `release-change.json`，摘要按 §6 措辞；`bump_version --check --base-ref origin/main` 通过）→ 基线 `ac6eb65`（`upgrade_baselines.py add --tag v0.4.0`，资产逐个下载核对后写入）。**最终 HEAD = `138f06f`**（含 CI 取证的四个修复，见下），fetch 时 main 仍在 `6393bfc`（无分叉）。
+- **本地完整门禁**：`cargo fmt --all -- --check`；普通 + acceptance 两套 `cargo clippy --locked --workspace --all-targets -- -D warnings`；普通 + acceptance 两套 `cargo test --locked --workspace`（52 个测试目标，无失败）；前端 typecheck / format:check / 562 用例 / build / 浏览器 E2E 六契约全绿；`python -B -m unittest discover -s scripts -p "test_*.py"` 277 例、node 语法 21、pwsh 语法 12、升级契约 59 项、安装契约 26 项；`bump_version --check` 与构建输入清单 `--check` 通过。
+- **CI 取证的四个修复（先定位后修，不重跑碰绿）**：
+  1. **产品缺陷（`7a99978`）**：`settings::update` 对未迁移 v1 文件的派生序列化带出 `auto_discover=true`，把文件混合化——重载时旧 dir 被静默忽略，迁移失败窗口内任何无关设置修改都悄悄改变读取范围（并发测试 update 先取得写锁时必现）。修复：`SourceConfig` 手动 Serialize 保留 v1 形态；新增确定性回归 + 并发用例两序殊途同归；18 例 9 连跑。
+  2. **产品缺陷（`ce14a4f`）**：每根一实例后，缺失的默认 codex `archived_sessions` 根每轮产生"目录不存在"警告，状态胶囊常驻"已更新 · 部分异常"（ui-system 证据与截图定位）——违反 §2"缺失不每轮报错"。修复：缺失/非目录的纯自动根不进采集计划（列表行照常返回；目录出现下一轮自然回计划）；手动缺失根保留。新增如实探测的回归测试。
+  3. **测试架（`67c512a`）**：runner 上宿主 pid 752 干净退出后被系统进程复用，`refreshDescendants` 从复用者出发把 126 个系统进程记成后代，退出确认 20 秒超时且强杀清单险些覆盖系统进程。修复：宿主退出后不再从 hostPid 走树 + 存活/强杀清单按进程名身份校验（`descendantsAliveByName` + 单测）。
+  4. **测试架（`ce14a4f` + `138f06f`）**：runner 的 TEMP 含 8.3 短名（RUNNER~1），两处按字面比较 canonical 化路径的断言必然失配（本机 admin 无短名故 9 连跑通过）。修复：改按 `canonicalize`/`realpathSync.native` 身份比较。
+- **远程验证（同一 HEAD 的 PR 合并 SHA `46bec84`，内容 = HEAD + 未变 main）**：
+  - CI run [39120833826](https://github.com/ywltby/tokenscope/actions/runs/39120833826) ✅（rust / rust-acceptance / contracts / frontend 四组 + gate）。
+  - Native UI E2E run [39120833933](https://github.com/ywltby/tokenscope/actions/runs/39120833933) ✅：6 场景工件核对——`ui-refresh` 11、`ui-system` ×3 各 15（含 1.5/2 缩放）、`ui-collection-status` 20、**`ui-source-paths` 12（新场景非空全过）**；`failed=[]`、无场景超时、`real_untouched` 全部为真（真实 `~/.tokenscope` 指纹前后一致）。
+  - Install test run [39120833790](https://github.com/ywltby/tokenscope/actions/runs/39120833790) ✅：install-test + 升级矩阵 4 起点（0.1.0/0.4.0 × present/deleted）全绿（含本 PR 新登记的 v0.4.0）；升级证据核对 `settings_format` 指纹 = **2**（新值）、历史库 schema 4→4 不变；`upgrade-chain` 在 PR 上按设计跳过（main 发布阶段另取证，不计为通过）。
+- **PR**：草稿 [PR #14](https://github.com/ywltby/tokenscope/pull/14) 面向 main，等待复核。按约定停在草稿 PR：不自行转正式、不合并、不清理分支。
+- **边界如实记录（剩余待验，不随本 PR 关闭）**：真实数据性能基准（`perf_real_data`）待验（§4.4）；采集层权限拒绝 fixture 待验（S03 遗留）；`upgrade-chain` 连续升级链待 main 发布阶段取证；真实跨午夜、长时间休眠、跨显示器在[独立系统待办](../system-acceptance-todo.md)，不纳入本 PR。
 
 ## 8. 执行细则、算法边界与验收门槛
 
