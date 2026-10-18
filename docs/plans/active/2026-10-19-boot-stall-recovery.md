@@ -1,6 +1,6 @@
 # 启动卡死取证补强与引导期恢复
 
-> 状态：**待用户确认**（2026-10-19 起草）。承接[整合计划 N14](2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) 第 3 项。
+> 状态：**用户已确认（2026-10-19），实施中**。承接[整合计划 N14](2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) 第 3 项。
 > 前置：[PR #15](https://github.com/ywltby/tokenscope/pull/15)（0.5.1，含失败取证 `b141fcc`）合入 main 且 v0.5.1 发布完成。PR #15 尚未合入时可以先从 `origin/fix/upgrade-chain-format` 建分支开工；它合入后先合并最新 main，再开 PR。
 > 分支 `fix/boot-recovery`；修复类批次，递增 patch；一个 PR、一次版本。
 
