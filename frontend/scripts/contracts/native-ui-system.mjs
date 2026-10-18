@@ -33,6 +33,18 @@ export async function nativeUiSystem({ inst, ck, ev, markStage, markStageDone, i
     await page().getByRole("button", { name: label, exact: true }).click();
     await waitQuery(old);
   };
+  // 等查询身份稳定（2 秒无变化，最多 10 秒）：吸收预设切换的迟到重复批次
+  // （既有竞态，与本场景的恢复/切页检查无关），不让它污染基线。
+  const stableQueryId = async () => {
+    let id = await query();
+    for (let n = 0; n < 5; n++) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const now = await query();
+      if (now === id) return id;
+      id = now;
+    }
+    return id;
+  };
   const restore = async (checkHidden = false) => {
     const action = fileURLToPath(
       new URL("../../../scripts/native-window-action.ps1", import.meta.url),
@@ -111,10 +123,18 @@ export async function nativeUiSystem({ inst, ck, ev, markStage, markStageDone, i
   );
 
   await range("全部时间");
-  const allQuery = await query();
+  // 竞态窗口（审阅补修期间 CI 实测）：预设切换的批量刷新存在迟到的重复
+  // 触发（通过运行与失败运行均有查询 begin 无汇总完成的批次，失败运行在
+  // 切换后 1.6 s 出现第二个采集轮）。这些与"恢复/切页是否触发查询"无关，
+  // 先等查询身份稳定（2 s 无变化）再取基线，检查只对恢复本身负责。
+  const stableAllQuery = await stableQueryId();
   await restore();
   await new Promise((resolve) => setTimeout(resolve, 1500));
-  ck.add("all_time_restore_does_not_query", (await query()) === allQuery, await query());
+  ck.add(
+    "all_time_restore_does_not_query",
+    (await query()) === stableAllQuery,
+    await query(),
+  );
   await page().mouse.move(500, 400);
   await page().mouse.wheel(0, 700);
   await page().waitForFunction(() => document.querySelector(".scroll-container").scrollTop > 0);
@@ -127,10 +147,12 @@ export async function nativeUiSystem({ inst, ck, ev, markStage, markStageDone, i
     (expected) => Math.abs(document.querySelector(".scroll-container").scrollTop - expected) <= 2,
     scrollBefore,
   );
+  // 切页后查询身份必须仍等于切页前的稳定基线（激活帧没有可落地的待刷新
+  // 触发；若有切页自身触发的查询，身份会变并在此暴露）。
   ck.add(
     "page_switch_preserves_scroll_and_query",
-    scrollBefore > 0 && (await query()) === allQuery,
-    `scroll=${scrollBefore}; query=${await query()}`,
+    scrollBefore > 0 && (await query()) === stableAllQuery,
+    `scroll=${scrollBefore}; query=${await query()}; baseline=${stableAllQuery}`,
   );
   ev.viewport = await page().evaluate(() => ({
     width: innerWidth,
