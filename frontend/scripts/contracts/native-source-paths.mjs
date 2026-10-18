@@ -58,8 +58,18 @@ export async function nativeSourcePaths({ inst, ck, ev, markStage, markStageDone
     page()
       .locator(".source-row .effective-path")
       .allInnerTexts()
-      .then((list) => list.map((t) => t.trim().toLowerCase()));
-  const hasRow = async (p) => (await rowPaths()).includes(p.toLowerCase());
+      .then((list) => list.map((t) => t.trim()));
+  // 行路径按真实身份比较：后端展示的是 canonicalize 后的长名，而 inst.root
+  // 继承自 TEMP（CI runner 上是 8.3 短名 RUNNER~1）——字面比较必然失配
+  // （PR #14 第三轮 CI 实测）。realpath 双向归一；路径不存在时退回字面比较。
+  const sameDir = (a, b) => {
+    try {
+      return fs.realpathSync.native(a) === fs.realpathSync.native(b);
+    } catch {
+      return a.trim().toLowerCase() === String(b).trim().toLowerCase();
+    }
+  };
+  const hasRow = async (p) => (await rowPaths()).some((t) => sameDir(t, p));
   // 手动目录：隔离根下与 sources/ 平级的独立子树——不在任何默认根、迁移追加项
   // 或环境派生根之内（自动候选之外）。
   const manualDir = path.join(inst.root, "sources-extra", "claude-manual");
