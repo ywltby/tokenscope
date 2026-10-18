@@ -51,27 +51,22 @@ pub struct AdditionalSourcePath {
 /// **忽略**、不再补入追加项；只有"有 `dir` 且无任何新字段"的未迁移旧格式仍按
 /// 旧语义解释（`dir` 取代默认根）——这是迁移失败窗口期不扩大读取范围的保证。
 /// 字段缺省的默认值：`auto_discover = true`、两个列表为空。
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SourceConfig {
     /// 来源总开关：停用后该来源完全不采集（优先级高于自动/追加项开关）。
-    #[serde(default = "default_true")]
+    /// 反序列化缺省 true（见下方手动 impl）。
     pub enabled: bool,
     /// 旧格式（v1）遗留字段：显式目录。仅在未迁移旧格式上参与解释；迁移成功后
     /// 不再写出（迁移失败的窗口期原样保留，保证原文件字节与语义不变）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
     /// 自动发现（默认根 + 环境变量根）；缺省 true。停用项持久化于
     /// `excluded_auto_paths`，探测/重启不能重启用。
-    #[serde(default = "default_true")]
     pub auto_discover: bool,
     /// 已停用的自动候选绝对路径（用同一规范化函数匹配，不保存探测结果列表）。
-    #[serde(default)]
     pub excluded_auto_paths: Vec<String>,
     /// 手动追加的日志根。
-    #[serde(default)]
     pub additional_paths: Vec<AdditionalSourcePath>,
     /// 反序列化时记录：是否为未迁移旧格式（有 `dir` 且无任何新字段）。不落盘。
-    #[serde(skip)]
     pub legacy_format: bool,
 }
 
@@ -126,6 +121,35 @@ impl<'de> Deserialize<'de> for SourceConfig {
             additional_paths: raw.additional_paths.unwrap_or_default(),
             legacy_format,
         })
+    }
+}
+
+// 自定义序列化（与反序列化同一条形状保留规则）：仍是 v1 语义的在位配置
+// （旧 dir 文件原样载入、且没有任何新格式内容）**原样写回 v1 两字段**。
+// 派生序列化会带出 `auto_discover = true`，把文件变成 dir+auto_discover 的
+// 混合体——下次读取按"新字段出现"解释、`dir` 被静默忽略：迁移失败窗口内
+// 任何一次无关设置修改（改时区、关价格同步）都会悄悄改变读取范围。
+// 一旦配置含有新格式内容（列表非空或旧 dir 已清除），按新格式写出且
+// 不带 `dir`（§8.1：保留旧 dir 输入支持，新写出不带 dir）。
+impl serde::Serialize for SourceConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let v1_in_place = self.legacy_format
+            && self.dir.is_some()
+            && self.excluded_auto_paths.is_empty()
+            && self.additional_paths.is_empty();
+        if v1_in_place {
+            let mut s = serializer.serialize_struct("SourceConfig", 2)?;
+            s.serialize_field("enabled", &self.enabled)?;
+            s.serialize_field("dir", self.dir.as_deref().unwrap_or_default())?;
+            return s.end();
+        }
+        let mut s = serializer.serialize_struct("SourceConfig", 4)?;
+        s.serialize_field("enabled", &self.enabled)?;
+        s.serialize_field("auto_discover", &self.auto_discover)?;
+        s.serialize_field("excluded_auto_paths", &self.excluded_auto_paths)?;
+        s.serialize_field("additional_paths", &self.additional_paths)?;
+        s.end()
     }
 }
 
@@ -917,6 +941,9 @@ mod tests {
                 claude: Some(SourceConfig {
                     enabled: false,
                     dir: Some("D:/logs/claude".into()),
+                    // dir 在位的真实文件只会以 v1 形态载入（legacy_format=true，
+                    // 与 load 的产出一致）；序列化按同一条形状保留规则写回。
+                    legacy_format: true,
                     ..Default::default()
                 }),
                 codex: None,

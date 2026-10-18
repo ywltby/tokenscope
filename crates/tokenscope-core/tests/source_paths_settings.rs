@@ -298,6 +298,40 @@ fn migration_and_update_concurrently_keep_all_fields() {
     );
 }
 
+/// 回归（完整门禁发现的真实竞态）：update 对**未迁移** v1 文件做无关修改时，
+/// 落盘不得带出 `auto_discover`——派生序列化会把文件混合化（dir+auto_discover），
+/// 下次读取按新格式解释、旧 dir 被静默忽略，读取范围在迁移失败窗口内悄悄改变。
+/// update 后文件必须仍是 v1 形态，且后续迁移照常把 dir 转为追加项。
+#[test]
+fn update_on_legacy_file_keeps_v1_shape_and_migration_still_converts() {
+    let fx = Fixture::new("update-legacy-shape");
+    fx.write("[sources.claude]\nenabled = true\ndir = \"D:/history/claude/projects\"\n");
+    update(&fx.path, |s| {
+        s.timezone = Some("UTC".into());
+        Ok(())
+    })
+    .unwrap();
+    let text = fx.read();
+    assert!(
+        !text.contains("auto_discover"),
+        "update 不得把 v1 文件混合化: {text}"
+    );
+    assert!(text.contains("dir"), "v1 dir 必须原样保留: {text}");
+    assert!(
+        fx.load().sources.claude.unwrap().is_legacy_dir_semantics(),
+        "重载仍按 v1 语义解释"
+    );
+    let out = fx.migrate();
+    assert!(out.changed && out.converted.len() == 1, "迁移照常进行");
+    let s = fx.load();
+    assert_eq!(s.timezone.as_deref(), Some("UTC"), "无关修改必须保留");
+    let cfg = claude_cfg(&s);
+    assert!(
+        cfg.auto_discover && cfg.additional_paths.len() == 1,
+        "迁移结果不得被 update 丢失"
+    );
+}
+
 /// §9.2 第 4 条「相对 dir 已存在」：按旧入口语义（cwd）转绝对追加路径。
 #[test]
 fn legacy_relative_dir_existing_becomes_absolute_additional_path() {
