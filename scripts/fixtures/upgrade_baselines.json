@@ -376,6 +376,16 @@
           "sha256": "8843417bfef07e109cb1226b1eae4d6a1203f56bb0927cc6afa728e33461ca81"
         }
       ]
+    },
+    {
+      "version": "0.5.0",
+      "tag": "v0.5.0",
+      "commit": "599c89eecae8703cec4faa357758cf893c90bed2",
+      "origin_release": "v0.5.0",
+      "profile": "history",
+      "status": "unpublished",
+      "persistent_format": null,
+      "assets": []
     }
   ]
 }
