@@ -132,7 +132,12 @@ const INIT_SCRIPT = () => {
   window.__TS_CB = {};
   window.__TAURI_INTERNALS__ = {
     invoke: (cmd, payload) => {
-      window.__TS_IPC_CALLS.push({ cmd, args: payload ?? {} });
+      // at：页面侧相对导航的毫秒数（performance.now），与 Node 侧时间线对照用。
+      window.__TS_IPC_CALLS.push({
+        cmd,
+        args: payload ?? {},
+        at: Math.round(performance.now()),
+      });
       return window.__TS_FIXTURE_IPC(cmd, payload ?? {});
     },
     transformCallback: (cb) => {
@@ -667,21 +672,42 @@ async function openSession(opts) {
   if (opts.deviceScaleFactor) contextOptions.deviceScaleFactor = opts.deviceScaleFactor;
   const context = await browser.newContext(contextOptions);
 
+  // 会话创建时刻：IPC/请求时间线的 at 都相对它（毫秒），取证可还原时序。
+  const createdAt = Date.now();
   const externalRequests = [];
   const ipcCalls = [];
   const unknownCommands = [];
+  /** 同源请求时间线（path 相对 base；at 相对会话创建；只保留最近 50 条）。 */
+  const requests = [];
 
   // Node 侧桥接：未知 command 显式记录并由断言判定；reject 标记翻成拒绝；
   // defer 标记保持挂起，直到测试调用 fixture.settleDeferred/failDeferred。
+  // 每条记录 at（相对会话创建）与结束时的 ms/outcome（ok/unknown/reject/error）；
+  // 挂起的调用没有 ms 与 outcome。
   await context.exposeFunction("__TS_FIXTURE_IPC", async (cmd, payload) => {
-    ipcCalls.push({ cmd, args: payload ?? {} });
-    const res = await fixture.ipc(cmd, payload ?? {});
-    if (res === undefined) {
+    const started = Date.now();
+    const call = { cmd, args: payload ?? {}, at: started - createdAt };
+    ipcCalls.push(call);
+    let result;
+    try {
+      result = await fixture.ipc(cmd, payload ?? {});
+    } catch (e) {
+      call.ms = Date.now() - started;
+      call.outcome = "error";
+      throw e;
+    }
+    call.ms = Date.now() - started;
+    if (result === undefined) {
       unknownCommands.push(cmd);
+      call.outcome = "unknown";
       return { __unknown: true, cmd };
     }
-    if (isReject(res)) throw new Error(res.message);
-    return res;
+    if (isReject(result)) {
+      call.outcome = "reject";
+      throw new Error(result.message);
+    }
+    call.outcome = "ok";
+    return result;
   });
   await context.addInitScript(INIT_SCRIPT);
   if (opts.storageBlocked) {
@@ -740,6 +766,32 @@ async function openSession(opts) {
     if (request.url().startsWith(base))
       failedRequests.push(`${request.url()} ${request.failure()?.errorText ?? ""}`.trim());
   });
+  // 同源请求时间线（取证用，不作断言）：request 记录 path/at，结束时补
+  // ms 与 outcome（ok=完成，error=网络失败）；只保留最近 50 条。
+  const requestStarts = new Map();
+  page.on("request", (request) => {
+    const url = request.url();
+    if (!url.startsWith(base)) return;
+    const started = Date.now();
+    const entry = { path: url.slice(base.length) || "/", at: started - createdAt };
+    requestStarts.set(request, { started, entry });
+    requests.push(entry);
+    if (requests.length > 50) requests.splice(0, requests.length - 50);
+  });
+  page.on("requestfinished", (request) => {
+    const rec = requestStarts.get(request);
+    if (!rec) return;
+    rec.entry.ms = Date.now() - rec.started;
+    rec.entry.outcome = "ok";
+    requestStarts.delete(request);
+  });
+  page.on("requestfailed", (request) => {
+    const rec = requestStarts.get(request);
+    if (!rec) return;
+    rec.entry.ms = Date.now() - rec.started;
+    rec.entry.outcome = "error";
+    requestStarts.delete(request);
+  });
 
   return {
     page,
@@ -749,10 +801,12 @@ async function openSession(opts) {
     url: base,
     viewport: vp,
     theme,
+    createdAt,
     ipcCalls,
     unknownCommands,
     externalRequests,
     failedRequests,
+    requests,
     get pageErrors() {
       return consoleErrors;
     },
