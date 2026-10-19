@@ -12,7 +12,7 @@
 2. ~~PR2 / minor~~：已完成并归档——[真实扫描反馈](archive/implemented/2026-10-15-collection-status.md)，PR #13 合入 main `6393bfc` 并发布 `v0.4.0`；main 上 Native UI E2E 一次卡死至超时，排查转入 PR3 S00。
 3. ~~PR3 / minor~~：已合入并归档为部分完成——[当前用户来源目录与追加路径](archive/partial/2026-10-14-source-discovery-and-additional-paths.md)，PR #14 合入 main `599c89e`；main 上 Native UI E2E 通过（未复现卡死），Release 的连续升级链因测试架缺陷失败、跳过发布，v0.5.0 登记为未发布。剩余待验与遗留缺陷转入整合计划 [N14](active/2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷)，真实性能并入 N13。
 4. **0.5.1 修复批次 / patch（进行中）**：分支 `fix/upgrade-chain-format`——连续升级链按每一跳实际版本的设置格式核对、浏览器契约失败时写出取证、v0.5.0 登记为未发布；这是首个公开包含 PR3 改动的版本，发布阶段的连续升级链实测记入 N14。
-5. **启动卡死取证补强与引导期恢复 / patch（实施中）**：[计划](active/2026-10-19-boot-stall-recovery.md)，承接 N14 第 3 项（浏览器契约 dark 会话偶发超时）——失败取证补 IPC 两侧对照、时间线与自动判断；引导期检查耗时提示与代次保护、主界面加载失败可重新加载。BS01–BS05 完成并推送，复核补修（迟到响应必须落定才断言代次保护、DOM 不可读分类）已提交；计划外的并发用例重试已撤回，根因定位为产品并发首次初始化竞态并由 `ff939f8` 修复（[调查记录](active/2026-10-19-sqlite-concurrent-open-investigation.md)）；BS06 依赖 PR #15 合入与 0.5.1 发布。
+5. **启动卡死取证补强与引导期恢复 / patch（实施中）**：[计划](active/2026-10-19-boot-stall-recovery.md)，承接 N14 第 3 项（浏览器契约 dark 会话偶发超时）——失败取证补 IPC 两侧对照、时间线与自动判断；引导期检查耗时提示与代次保护、主界面加载失败可重新加载。BS01–BS05 完成并推送，复核补修（迟到响应必须落定才断言代次保护、DOM 不可读分类）已提交；计划外的并发用例重试已撤回，根因（隔离对照层面）定位为产品并发首次初始化竞态，HistoryDb 与 Cache 两条打开序列已按统一重试预算与类型化判定修复（[调查记录](active/2026-10-19-sqlite-concurrent-open-investigation.md)）；BS06 依赖 PR #15 合入与 0.5.1 发布。
 6. **整合计划尾项**：N10、N11、N13、N14 与系统签字，见[整合计划](active/2026-10-11-consolidated-remaining-work.md)。
 
 每个 PR 各自递增一次版本、各自验证最终 HEAD；合入 main 前先用 `python -B scripts/upgrade_baselines.py add --tag v<上一版>` 登记上一版。
