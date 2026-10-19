@@ -29,6 +29,7 @@
 5. **失败 / 通过会话环境记录**：失败会话为 WorkBuddy Git Bash（存在 `BASH_FUNC_rm` 包装与 `CODEBUDDY_SAFE_DELETE_*`、沙箱相关变量），cargo/rustc 1.99.0（`C:\Users\admin\.cargo\bin`），TEMP/TMP = `C:\Users\admin\AppData\Local\Temp`，提交时 node 进程 5 个（WorkBuddy 自身）。通过会话（Codex）的工具链与 TEMP 未记录。注意：cargo 构建写 `target/` 被会话沙箱拒绝访问是独立事件（构建缓存写入），不作为 SQLite readonly 的根因。
 6. **Cache 覆盖**：修复前 100 次 2 失败、修复后同口径 100 次 0 失败；`Cache::open` 与 `HistoryDb::open` 共用同一重试预算与类型判定（`crate::retry`）。
 7. **真实持锁用例**（HistoryDb 与 Cache 各一条）：另一连接持有 `BEGIN IMMEDIATE` 写事务时，`open` 的总等待受外层绝对 deadline 约束（2s 附近）并以类型化瞬态错误失败。断言留调度容差（下界预算 −0.5s、上界预算 +1s）——「锁等待预算」可精确断言，操作系统 I/O 与线程调度不可严格限制，只断言不会出现「多个完整预算叠加」的量级。
+8. **迁移路径的预算传递与确定性回归**：`migrate` 接收同一个 deadline/clock，在读版本、备份前、**备份后**、建立迁移事务前各按剩余预算设置 `busy_timeout`——备份（`VACUUM INTO`）消耗的时间会反映到事务前预算，耗尽则不建立迁移事务；WAL 的 `apply_busy_budget` 位于**每次尝试内部**。回归覆盖生产接线（`open → open_once → migrate`，步进假时钟模拟检查点之间的真实 I/O 消耗）：备份耗尽全部预算 → 备份后检查点失败、trace 无 `tx_busy_ms`、库结构保持 v3；备份消耗部分预算 → 迁移事务的 `busy_timeout` 小于完整预算且不超过备份后剩余，升级正常完成。两处变异验证（删备份后检查、事务改用完整预算）均使对应测试转红。
 
 ## 3. 结论与处置
 
@@ -38,8 +39,8 @@
 
 **修复**：
 - 新增 `crate::retry`：外层**一次创建**绝对 deadline（2s 预算）+ 20ms 间隔；`is_concurrent_init_transient` **只按 `rusqlite::Error` 类型**（ReadOnly/Busy）判定，不匹配消息文本。时钟与 sleep 可注入（`Clock`/`RealClock`）。
-- `HistoryDb::open` 与 `Cache::open` 的打开序列、WAL 重试与迁移/初始化事务等待**共用同一个绝对 deadline**（内层只用剩余预算，不得重新 `now + 2s`）——注意：「使用同一预算常量」不等于「共享同一 deadline」，旧实现正是外层与内层各自按 `now + 预算` 计时，每次进入内层都能重新获得完整预算，总时长不受单一上限约束（不是某个固定秒数的叠加）。
-- 每个可能锁等待的 SQLite 阶段（WAL 切换前、迁移/初始化事务前）按**剩余预算**重新设置 `busy_timeout`，不是只在连接建立时设一次完整预算；预算耗尽则该阶段直接失败。
+- `HistoryDb::open` 与 `Cache::open` 的打开序列、WAL 重试与迁移/初始化事务等待**共用同一个绝对 deadline**（内层只用剩余预算，不得重新 `now + 2s`）——注意：「使用同一预算常量」不等于「共享同一 deadline」，旧实现正是外层与内层各自按 `now + 预算` 计时，每次进入内层都能重新获得完整预算，总时长不受单一上限约束（不是某个固定秒数的叠加）。`migrate` 接收同一个 deadline/clock：读版本前、备份前、**备份后建立迁移事务前**各按剩余预算设 `busy_timeout`；备份耗时不得让后续阶段误用完整预算。
+- 每个可能锁等待的 SQLite 阶段（WAL 切换的**每次尝试内部**、读版本、备份前后、迁移/初始化事务前）按**剩余预算**重新设置 `busy_timeout`，不是只在连接建立时设一次完整预算；预算耗尽则该阶段直接失败。
 - 睡眠结束后重新检查 deadline，预算耗尽不再启动下一次重试，返回最后一个类型化错误。
 - 类型化错误保留：迁移失败用 `MigrateFailure` 包装——`Display` 仍带完整原因与「历史库文件保留」位置（未知版本 / SQL 失败不会被压掉），`source` 链保留 `rusqlite::Error`；`anyhow!("{:#}")` 字符串化与消息兜底判定移除。
 
@@ -58,4 +59,5 @@
 - ✅ 扩展错误码与四组对照的原始数据留档（`qa-artifacts/sqlite-probe/`）；
 - ✅ 结论写入本文档 §3（根因表述分级：已证实的对照结论 + 未证明的机理推断），回填整合计划执行账；
 - ✅ HistoryDb 与 Cache 两条打开序列均修复，带保持原并发强度的回归测试，先红后绿；
-- ✅ 确定性重试策略测试覆盖类型判定、重试/不重试、预算上限与最后错误。
+- ✅ 确定性重试策略测试覆盖类型判定、重试/不重试、预算上限与最后错误；
+- ✅ 迁移路径预算传递有覆盖生产接线的确定性回归（备份耗尽/部分消耗预算），并有变异验证。
