@@ -349,4 +349,27 @@ describe("captureContractFailure 取证补强字段", () => {
     expect(item.suspected).toContain("fixture 未返回");
     expect(result.summary).toContain("判断=fixture 未返回");
   });
+
+  it("DOM 不可读时也写 suspected（计划第一类判定「DOM 不可读」不得缺席）", async () => {
+    const registry = [];
+    const session = fakeSession("dom-unreadable", {
+      evaluate: async () => {
+        throw new Error("Execution context was destroyed");
+      },
+    });
+    trackSession(session, registry);
+
+    const writes = [];
+    await captureContractFailure({
+      contract: "c",
+      error: new Error("page.goto: net::ERR_CONNECTION_REFUSED"),
+      registry,
+      output: "out",
+      writeFile: (path, text) => writes.push({ path, payload: JSON.parse(text) }),
+    });
+
+    const item = writes[0].payload.sessions[0];
+    expect(item.dom.unavailable).toContain("Execution context was destroyed");
+    expect(item.suspected).toContain("DOM 不可读");
+  });
 });

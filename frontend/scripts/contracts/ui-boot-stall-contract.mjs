@@ -10,6 +10,8 @@
 // 阈值说明：脚本无法 import TS 常量，BOOTSTRAP_SLOW_MS 在此对齐
 // frontend/src/lib/privacyGate.ts（10_000）；改动该值时必须同步这里。
 
+import { waitForIpcSettled } from "../lib/boot-stall-wait.mjs";
+
 const BOOTSTRAP_SLOW_MS = 10_000;
 
 /** Node 侧真实等待（不受 page.clock 影响，给 CDP 往返留时间）。 */
@@ -77,19 +79,26 @@ export async function bootStallRecovery(ctx) {
       );
 
       // 迟到的第 1 次响应（needs_consent）必须被代次保护丢弃：状态不退回、
-      // 不弹政策弹窗。等 Node 侧响应落地后留出页面应用时间，再断言。
+      // 不弹政策弹窗。断言前提是旧响应真实送达 Node 侧——等待落定，超时
+      // 即契约失败（响应没送达时界面当然不会退回，继续断言是误通过）。
       const firstCall = firstBootstrap()[0];
       s.fixture.settleDeferred("privacy_bootstrap#1", s.fixture.staleBootstrap());
-      for (let n = 0; n < 100 && firstCall.outcome === undefined; n++) await sleep(50);
+      const lateOutcome = await waitForIpcSettled(firstCall, { timeoutMs: 5000 });
       await sleep(400);
       await page.clock.runFor(1500);
       const lateState = await shell.getAttribute("data-boot-state");
       const dialogs = await page.locator(".privacy-dialog").count();
       ctx.record(
         name,
+        "迟到的响应已在 Node 侧落定（outcome=ok）",
+        lateOutcome === "ok",
+        `outcome=${lateOutcome}`,
+      );
+      ctx.record(
+        name,
         "迟到的 needs_consent 不改变已就绪状态",
         lateState === "main",
-        `state=${lateState} outcome=${firstCall.outcome ?? "pending"}`,
+        `state=${lateState} outcome=${lateOutcome}`,
       );
       ctx.record(
         name,

@@ -230,7 +230,11 @@ export async function captureContractFailure({
       }
     }
     // 壳层不可见（或缺失）才给自动判断：主界面正常可见的失败与引导期无关。
-    if (item.dom && item.dom.unavailable === undefined && !(item.dom.app_shell && item.dom.app_shell_visible)) {
+    // DOM 不可读本身是计划 §4 BS03 的第一类判定（"DOM 不可读"），同样要写
+    // suspected，不能因为快照读不到就跳过分类。
+    const shellVisible =
+      item.dom?.unavailable === undefined && item.dom?.app_shell && item.dom.app_shell_visible;
+    if (!shellVisible) {
       item.suspected = classifyBootStall(item);
     }
     sessions.push(item);
