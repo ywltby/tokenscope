@@ -929,6 +929,24 @@ pub fn history_file_path() -> Result<PathBuf> {
     Ok(crate::report::data_dir()?.join("history.db"))
 }
 
+// 迁移路径的预算检查点轨迹（仅测试）：验证「备份完成后重新检查预算」
+// 与「迁移事务只获得剩余预算」，不改变生产行为。
+#[cfg(test)]
+thread_local! {
+    static MIGRATE_TRACE: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn trace(msg: String) {
+    MIGRATE_TRACE.with(|t| t.borrow_mut().push(msg));
+}
+
+#[cfg(test)]
+fn take_trace() -> Vec<String> {
+    MIGRATE_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()))
+}
+
 /// 迁移失败 + 数据位置说明。
 ///
 /// 两个约束同时成立：
@@ -973,14 +991,20 @@ impl HistoryDb {
     /// 因此在这里重试整个打开序列（每次新建连接）；绝对 deadline 只在本层
     /// 创建一次，`open_once` 内的 WAL 重试与迁移等待都只使用剩余预算。
     pub fn open(path: &Path) -> Result<Self> {
-        let clock = crate::retry::RealClock;
+        Self::open_with_clock(path, &crate::retry::RealClock)
+    }
+
+    /// 生产打开序列（时钟可注入：生产用 [`crate::retry::RealClock`]；测试用
+    /// 步进假时钟模拟「两个预算检查点之间发生真实 I/O（备份）消耗」，从而
+    /// 覆盖 `open → open_once → migrate` 的**生产接线**）。
+    fn open_with_clock(path: &Path, clock: &dyn crate::retry::Clock) -> Result<Self> {
         let deadline =
-            crate::retry::Deadline::new(&clock, crate::retry::CONCURRENT_INIT_RETRY_BUDGET);
+            crate::retry::Deadline::new(clock, crate::retry::CONCURRENT_INIT_RETRY_BUDGET);
         crate::retry::retry_until(
             &deadline,
-            &clock,
+            clock,
             crate::retry::CONCURRENT_INIT_RETRY_BACKOFF,
-            || Self::open_once(path, &deadline, &clock),
+            || Self::open_once(path, &deadline, clock),
         )
     }
 
@@ -997,17 +1021,19 @@ impl HistoryDb {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("打开历史库失败: {}", path.display()))?;
-        // WAL 切换需要短暂独占；按其剩余预算设置 busy_timeout，再在同一个
+        // WAL 切换需要短暂独占，且 SQLite 不为该切换调用 busy handler；
+        // **每次尝试内部**都按当前剩余预算重设 busy_timeout，再在同一个
         // 绝对 deadline 内小步重试（内层不重算预算）。并发**首次**初始化时
         // 另一连接可能正在切换 WAL，本连接会拿到 SQLITE_READONLY
         //（2026-10-19 探针：2/30 轮），与 DatabaseBusy 同一判定。
-        crate::retry::apply_busy_budget(&conn, deadline, clock)
-            .context("设置历史库 WAL 日志模式前预算不足")?;
         crate::retry::retry_until(
             deadline,
             clock,
             crate::retry::CONCURRENT_INIT_RETRY_BACKOFF,
-            || Ok(conn.pragma_update(None, "journal_mode", "WAL")?),
+            || {
+                crate::retry::apply_busy_budget(&conn, deadline, clock)?;
+                Ok(conn.pragma_update(None, "journal_mode", "WAL")?)
+            },
         )
         .context("设置历史库 WAL 日志模式失败")?;
         conn.pragma_update(None, "foreign_keys", "ON")
@@ -1015,17 +1041,13 @@ impl HistoryDb {
         // 持久事实存储：提交即落盘（WAL + FULL），不因崩溃丢已确认的用量。
         conn.pragma_update(None, "synchronous", "FULL")
             .context("设置历史库同步级别失败")?;
-        // 迁移（BEGIN IMMEDIATE 等写锁）前按**剩余**预算重设 busy_timeout；
-        // 预算耗尽则不得再启动该阶段的等待。
-        crate::retry::apply_busy_budget(&conn, deadline, clock)
-            .context("开始历史库迁移前预算不足")?;
         let db = Self {
             conn,
             path: path.to_path_buf(),
         };
         // 迁移失败：Display 带出完整原因与保留位置，source 保留类型化错误链
         //（打开层重试按类型判定瞬态错误，不得字符串化）。
-        db.migrate().map_err(|e| {
+        db.migrate(deadline, clock).map_err(|e| {
             anyhow::Error::new(MigrateFailure {
                 detail: format!(
                     "{:#}（历史库文件保留在 {}，可重试；不执行删表重建）",
@@ -1055,7 +1077,19 @@ impl HistoryDb {
     /// 备份只在实际发生升级（`0 < 现有版本 < 当前版本`）时生成，且已存在则
     /// 不覆盖——用户总能在 TokenScope 数据目录里找到升级前的可恢复副本
     ///（计划 §6：变更前通过 SQLite 备份 API 在 TokenScope 目录生成可恢复备份）。
-    fn migrate(&self) -> Result<()> {
+    ///
+    /// 预算传递：读版本、备份前后、建立迁移事务前都按**剩余**预算重新设置
+    /// `busy_timeout`。备份（`VACUUM INTO`）可能耗时较长——**备份完成后、
+    /// 建立迁移事务前必须重新检查**，备份消耗的时间不得被后续阶段当作
+    /// 完整预算使用；预算耗尽则不得建立迁移事务。
+    fn migrate(
+        &self,
+        deadline: &crate::retry::Deadline,
+        clock: &dyn crate::retry::Clock,
+    ) -> Result<()> {
+        // 读版本前：读取本身很快，但按同一预算管理锁等待。
+        crate::retry::apply_busy_budget(&self.conn, deadline, clock)
+            .context("读取历史库版本前预算不足")?;
         let current = self.schema_version()?;
         if current > HISTORY_SCHEMA_VERSION {
             bail!(
@@ -1065,8 +1099,25 @@ impl HistoryDb {
         }
         if current > 0 && current < HISTORY_SCHEMA_VERSION {
             // 升级前先落可恢复备份（失败即中止本次升级，结构不变）。
+            crate::retry::apply_busy_budget(&self.conn, deadline, clock)
+                .context("历史库升级前备份前预算不足")?;
             self.backup_before_upgrade(current)?;
+            #[cfg(test)]
+            trace("backup_done".to_string());
+            // 备份可能耗时较长：**建立迁移事务前重新检查剩余预算**。
+            let _after_backup = crate::retry::apply_busy_budget(&self.conn, deadline, clock)
+                .context("历史库备份完成，但重试预算已耗尽，不建立迁移事务")?;
+            #[cfg(test)]
+            trace(format!(
+                "backup_done_remaining_ms={}",
+                _after_backup.as_millis()
+            ));
         }
+        // 建立迁移事务（BEGIN IMMEDIATE 等写锁）前按剩余预算设置 busy_timeout。
+        let _tx_busy = crate::retry::apply_busy_budget(&self.conn, deadline, clock)
+            .context("建立历史库迁移事务前预算不足")?;
+        #[cfg(test)]
+        trace(format!("tx_busy_ms={}", _tx_busy.as_millis()));
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         for (version, sql) in MIGRATIONS {
             if *version > current {
@@ -2981,5 +3032,128 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// 每次 `now()` 推进固定步长的假时钟：生产代码在预算检查点读时钟，
+    /// 因此可模拟「两个检查点之间发生了真实 I/O（升级前备份）消耗」，
+    /// 让测试覆盖 `open → open_once → migrate` 的**生产接线**。
+    struct StepClock {
+        now: std::cell::Cell<std::time::Instant>,
+        step: std::time::Duration,
+    }
+
+    impl crate::retry::Clock for StepClock {
+        fn now(&self) -> std::time::Instant {
+            let t = self.now.get();
+            self.now.set(t + self.step);
+            t
+        }
+
+        fn sleep(&self, d: std::time::Duration) {
+            self.now.set(self.now.get() + d);
+        }
+    }
+
+    /// 构造真实 v3 库（完整 v1–v3 结构）：升级到 v4 会先做备份并建立迁移
+    /// 事务，覆盖 migrate 的备份与事务路径。
+    fn seed_v3_history(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        for (version, sql) in MIGRATIONS {
+            if *version <= 3 {
+                conn.execute_batch(sql).unwrap();
+            }
+        }
+        conn.pragma_update(None, "user_version", 3).unwrap();
+    }
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tokenscope-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 备份消耗完全部预算：备份后的检查点失败，**不得建立迁移事务**，
+    /// 库结构保持 v3。
+    #[test]
+    fn backup_exhausting_budget_stops_before_migration_transaction() {
+        let _ = take_trace();
+        let dir = unique_temp_dir("backup-budget");
+        let path = dir.join("history.db");
+        seed_v3_history(&path);
+        // 550ms/次检查点：WAL(550)、读版本(1100)、备份前(1650) 均未耗尽，
+        // 备份后(2200) 耗尽 2s 预算。
+        let clock = StepClock {
+            now: std::cell::Cell::new(std::time::Instant::now()),
+            step: std::time::Duration::from_millis(550),
+        };
+        let err = HistoryDb::open_with_clock(&path, &clock).unwrap_err();
+        let trace = take_trace();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("备份完成"),
+            "必须在备份后的检查点失败：{text}"
+        );
+        assert!(
+            !trace.iter().any(|t| t.starts_with("tx_busy_ms=")),
+            "预算耗尽不得建立迁移事务：{trace:?}"
+        );
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            3,
+            "结构不得变动"
+        );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 备份只消耗部分预算：迁移事务获得的 busy_timeout 只能是**剩余**
+    /// 时间（小于完整预算、不超过备份后剩余），升级正常完成。
+    #[test]
+    fn migration_transaction_gets_only_remaining_budget_after_backup() {
+        let _ = take_trace();
+        let dir = unique_temp_dir("backup-partial-budget");
+        let path = dir.join("history.db");
+        seed_v3_history(&path);
+        let clock = StepClock {
+            now: std::cell::Cell::new(std::time::Instant::now()),
+            step: std::time::Duration::from_millis(100),
+        };
+        let db = HistoryDb::open_with_clock(&path, &clock).expect("部分消耗预算内应完成升级");
+        let trace = take_trace();
+        let value = |prefix: &str| -> Option<u128> {
+            trace
+                .iter()
+                .find_map(|t| t.strip_prefix(prefix)?.trim().parse().ok())
+        };
+        let after_backup = value("backup_done_remaining_ms=").expect("必须经过备份检查点");
+        let tx_busy = value("tx_busy_ms=").expect("必须建立迁移事务");
+        let budget = crate::retry::CONCURRENT_INIT_RETRY_BUDGET.as_millis();
+        assert!(
+            after_backup > 0 && after_backup < budget,
+            "备份应消耗部分预算：{after_backup}ms"
+        );
+        assert!(tx_busy < budget, "事务不得获得完整预算：{tx_busy}ms");
+        assert!(
+            tx_busy <= after_backup,
+            "事务只能获得剩余时间：tx={tx_busy}ms / 备份后={after_backup}ms"
+        );
+        assert_eq!(
+            db.schema_version().unwrap(),
+            HISTORY_SCHEMA_VERSION,
+            "升级应完成"
+        );
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

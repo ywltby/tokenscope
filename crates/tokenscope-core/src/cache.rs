@@ -136,16 +136,18 @@ impl Cache {
         let mut conn =
             Connection::open(path).with_context(|| format!("打开缓存失败: {}", path.display()))?;
         // WAL 切换需要短暂独占，且 SQLite 不为该切换调用 busy handler——
-        // 并发打开时对方连接可能正持锁/切换，这里按剩余预算设置等待并小步
-        // 重试（同一绝对 deadline，内层不重算）；并发首次初始化时同样会
-        // 拿到 SQLITE_READONLY，与 DatabaseBusy 同一判定。
-        crate::retry::apply_busy_budget(&conn, deadline, clock)
-            .context("设置 WAL 日志模式前预算不足")?;
+        // 并发打开时对方连接可能正持锁/切换；**每次尝试内部**都按当前剩余
+        // 预算重设 busy_timeout，再在同一绝对 deadline 内小步重试（内层不
+        // 重算）。并发首次初始化时同样会拿到 SQLITE_READONLY，与
+        // DatabaseBusy 同一判定。
         crate::retry::retry_until(
             deadline,
             clock,
             crate::retry::CONCURRENT_INIT_RETRY_BACKOFF,
-            || Ok(conn.pragma_update(None, "journal_mode", "WAL")?),
+            || {
+                crate::retry::apply_busy_budget(&conn, deadline, clock)?;
+                Ok(conn.pragma_update(None, "journal_mode", "WAL")?)
+            },
         )
         .context("设置 WAL 日志模式失败")?;
         conn.pragma_update(None, "foreign_keys", "ON")

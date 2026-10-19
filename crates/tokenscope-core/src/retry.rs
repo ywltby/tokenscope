@@ -99,21 +99,23 @@ pub(crate) fn is_concurrent_init_transient(e: &anyhow::Error) -> bool {
     })
 }
 
-/// 按剩余预算为某个可能锁等待的 SQLite 阶段设置 `busy_timeout`。
+/// 按剩余预算为某个可能锁等待的 SQLite 阶段设置 `busy_timeout`，返回实际
+/// 设置的时长（供诊断与测试断言）。
 ///
-/// 每个阶段（WAL 切换前、迁移事务前）都必须重新调用一次——不能只在连接
-/// 建立时设置一次完整预算，否则前面的阶段消耗的时间不会反映到后续等待里。
+/// 每个阶段（WAL 切换的每次尝试、读版本、升级前备份前后、迁移事务前）都
+/// 必须重新调用一次——不能只在连接建立时设置一次完整预算，否则前面的
+/// 阶段（尤其是升级前备份）消耗的时间不会反映到后续等待里。
 /// 预算耗尽时返回错误：该阶段不得再启动等待。
 pub(crate) fn apply_busy_budget(
     conn: &rusqlite::Connection,
     deadline: &Deadline,
     clock: &dyn Clock,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Duration> {
     let Some(budget) = deadline.busy_budget(clock) else {
         anyhow::bail!("并发初始化重试预算已耗尽，不再等待数据库锁");
     };
     conn.busy_timeout(budget)?;
-    Ok(())
+    Ok(budget)
 }
 
 /// 在**给定**绝对 deadline 内重试瞬态失败（内层不得新建 deadline）。
