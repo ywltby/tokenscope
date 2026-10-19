@@ -873,6 +873,7 @@ export function buildFixture(name) {
     sourceWrites: 0,
     savedSources: {},
     closeWrites: 0,
+    bootstrapCalls: 0,
   };
 
   /** 设置读取响应（按 cfg.settings 模式）。
@@ -936,7 +937,14 @@ export function buildFixture(name) {
       // P06：隐私引导——普通场景等价"已有有效同意记录（ready）"，
       // 未同意场景由 cfg.privacy === "pending" 返回 needs_consent，
       // 业务命令在 ipc() 里统一被拒绝。
+      // BS04：defer-first 第 1 次检查挂起（模拟检查耗时长的现场），
+      // 之后的调用（重新检查）照常返回 ready。
       case "privacy_bootstrap":
+        if (cfg.privacy === "defer-first") {
+          state.bootstrapCalls += 1;
+          if (state.bootstrapCalls === 1) return defer("privacy_bootstrap#1");
+          return privacySnapshot("ready");
+        }
         return privacySnapshot(cfg.privacy === "pending" ? "needs_consent" : "ready");
       case "privacy_accept":
         return privacySnapshot("ready");
@@ -1177,6 +1185,8 @@ export function buildFixture(name) {
     deferredState: () => [...pending.keys()],
     /** 释放"第二次设置读取"用的旧载荷（写后回退竞态用）。 */
     staleSettings: () => staleSettingsPayload,
+    /** BS04：挂起检查被迟到释放时的 needs_consent 快照（代次保护必须丢弃它）。 */
+    staleBootstrap: () => privacySnapshot("needs_consent"),
     state,
   };
 }
@@ -1219,6 +1229,8 @@ const SCENARIOS = {
   "pricing-none-available": { kind: "normal", pricing: "none-available" },
   // P06：未同意隐私政策——只有引导命令可用，业务命令统一被拒绝，业务界面不挂载
   "privacy-consent-pending": { kind: "normal", privacy: "pending" },
+  // BS04：第 1 次 privacy_bootstrap 挂起（检查耗时长的现场），之后的调用返回 ready
+  "privacy-bootstrap-deferred": { kind: "normal", privacy: "defer-first" },
 };
 
 export const FIXTURE_NAMES = Object.keys(SCENARIOS);
