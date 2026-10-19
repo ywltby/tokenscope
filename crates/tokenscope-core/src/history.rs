@@ -970,17 +970,25 @@ impl HistoryDb {
     ///
     /// 这类错误**不能靠同一连接重试**：探针实测同一连接内重试 migrate
     /// 20 次仍失败（连接级 journal 状态与库头不一致），重新打开连接才恢复。
-    /// 因此在这里重试整个打开序列（每次新建连接），预算与判定见
-    /// [`crate::retry`]。
+    /// 因此在这里重试整个打开序列（每次新建连接）；绝对 deadline 只在本层
+    /// 创建一次，`open_once` 内的 WAL 重试与迁移等待都只使用剩余预算。
     pub fn open(path: &Path) -> Result<Self> {
-        crate::retry::retry_within_budget(
-            crate::retry::CONCURRENT_INIT_RETRY_BUDGET,
+        let clock = crate::retry::RealClock;
+        let deadline =
+            crate::retry::Deadline::new(&clock, crate::retry::CONCURRENT_INIT_RETRY_BUDGET);
+        crate::retry::retry_until(
+            &deadline,
+            &clock,
             crate::retry::CONCURRENT_INIT_RETRY_BACKOFF,
-            || Self::open_once(path),
+            || Self::open_once(path, &deadline, &clock),
         )
     }
 
-    fn open_once(path: &Path) -> Result<Self> {
+    fn open_once(
+        path: &Path,
+        deadline: &crate::retry::Deadline,
+        clock: &dyn crate::retry::Clock,
+    ) -> Result<Self> {
         if let Some(dir) = path.parent()
             && !dir.as_os_str().is_empty()
         {
@@ -989,13 +997,15 @@ impl HistoryDb {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("打开历史库失败: {}", path.display()))?;
-        // 并发打开时等锁而不是立刻报忙；WAL 切换需要短暂独占，小步重试
-        //（与缓存层同一取舍：并发打开不得被误判为损坏）。并发**首次**
-        // 初始化时另一连接可能正在切换 WAL，本连接会拿到 SQLITE_READONLY
-        // （2026-10-19 探针：2/30 轮），与 DatabaseBusy 同一预算内重试。
-        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
-        crate::retry::retry_within_budget(
-            crate::retry::CONCURRENT_INIT_RETRY_BUDGET,
+        // WAL 切换需要短暂独占；按其剩余预算设置 busy_timeout，再在同一个
+        // 绝对 deadline 内小步重试（内层不重算预算）。并发**首次**初始化时
+        // 另一连接可能正在切换 WAL，本连接会拿到 SQLITE_READONLY
+        //（2026-10-19 探针：2/30 轮），与 DatabaseBusy 同一判定。
+        crate::retry::apply_busy_budget(&conn, deadline, clock)
+            .context("设置历史库 WAL 日志模式前预算不足")?;
+        crate::retry::retry_until(
+            deadline,
+            clock,
             crate::retry::CONCURRENT_INIT_RETRY_BACKOFF,
             || Ok(conn.pragma_update(None, "journal_mode", "WAL")?),
         )
@@ -1005,6 +1015,10 @@ impl HistoryDb {
         // 持久事实存储：提交即落盘（WAL + FULL），不因崩溃丢已确认的用量。
         conn.pragma_update(None, "synchronous", "FULL")
             .context("设置历史库同步级别失败")?;
+        // 迁移（BEGIN IMMEDIATE 等写锁）前按**剩余**预算重设 busy_timeout；
+        // 预算耗尽则不得再启动该阶段的等待。
+        crate::retry::apply_busy_budget(&conn, deadline, clock)
+            .context("开始历史库迁移前预算不足")?;
         let db = Self {
             conn,
             path: path.to_path_buf(),
@@ -2889,6 +2903,47 @@ mod tests {
         assert!(
             crate::retry::is_concurrent_init_transient(&wrapped),
             "source 链必须保留类型化错误，供打开层按类型重试"
+        );
+    }
+
+    /// 真实持锁：另一个连接持有写事务时，open 的**总等待**被外层绝对
+    /// deadline 限制在预算附近（不是无限等待），并以类型化瞬态错误失败。
+    /// 「锁等待预算」可精确断言；操作系统 I/O 与线程调度不可严格限制，
+    /// 因此上下界都留调度容差，且只断言不会出现「多个完整预算叠加」的量级。
+    #[test]
+    fn open_lock_wait_is_bounded_by_retry_budget() {
+        let dir = std::env::temp_dir().join(format!(
+            "tokenscope-lockwait-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.db");
+        let holder = HistoryDb::open(&path).unwrap();
+        // 持有写锁：另一个 open 的 WAL 切换与迁移等待都会受阻。
+        holder.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        let err = HistoryDb::open(&path).unwrap_err();
+        let elapsed = started.elapsed();
+        holder.conn.execute_batch("ROLLBACK").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            crate::retry::is_concurrent_init_transient(&err),
+            "持锁失败必须是类型化的瞬态错误：{err:#}"
+        );
+        let budget = crate::retry::CONCURRENT_INIT_RETRY_BUDGET;
+        assert!(
+            elapsed >= budget.saturating_sub(std::time::Duration::from_millis(500)),
+            "锁等待应接近预算（允许调度容差）：{elapsed:?}"
+        );
+        assert!(
+            elapsed <= budget + std::time::Duration::from_secs(1),
+            "锁等待不得远超预算（OS I/O 之外的有界等待）：{elapsed:?}"
         );
     }
 
