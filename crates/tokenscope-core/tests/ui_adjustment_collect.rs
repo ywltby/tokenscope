@@ -13,29 +13,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// 并发打开同一 SQLite 库的用例专用：本机部分环境（实时文件防护钩住
-/// wal/shm 并发访问）在全量测试负载下会偶发 SQLITE_READONLY / BUSY——
-/// 环境噪声，与被测逻辑无关（CI 与单连接使用不受影响）。只对这两类
-/// 文案做有限重试；其余错误与重试耗尽照常失败，不掩盖真实回归。
-fn tolerate_environment_noise<T, E: std::fmt::Display>(mut f: impl FnMut() -> Result<T, E>) -> T {
-    for attempt in 0..10 {
-        match f() {
-            Ok(value) => return value,
-            Err(e)
-                if format!("{e:#}").contains("readonly database")
-                    || format!("{e:#}").contains("database is locked") =>
-            {
-                if attempt == 9 {
-                    panic!("并发用例在环境噪声重试后仍失败：{e}");
-                }
-                std::thread::sleep(std::time::Duration::from_millis(150));
-            }
-            Err(e) => panic!("并发用例失败：{e}"),
-        }
-    }
-    unreachable!("重试循环必然 return 或 panic")
-}
-
 use tokenscope::aggregate::GroupBy;
 use tokenscope::model::AgentKind;
 use tokenscope::query;
@@ -669,11 +646,8 @@ fn collection_status_follower_shares_leader_round() {
 
     let o_leader = opts.clone();
     let o_follower = opts.clone();
-    let leader =
-        std::thread::spawn(move || tolerate_environment_noise(|| report::collect_only(&o_leader)));
-    let follower = std::thread::spawn(move || {
-        tolerate_environment_noise(|| report::collect_only(&o_follower))
-    });
+    let leader = std::thread::spawn(move || report::collect_only(&o_leader).unwrap());
+    let follower = std::thread::spawn(move || report::collect_only(&o_follower).unwrap());
     let r1 = leader.join().unwrap();
     let r2 = follower.join().unwrap();
     assert_eq!(r1.generation, r2.generation, "同参并发共享同一轮结果");

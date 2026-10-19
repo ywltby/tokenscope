@@ -929,6 +929,27 @@ pub fn history_file_path() -> Result<PathBuf> {
     Ok(crate::report::data_dir()?.join("history.db"))
 }
 
+/// 并发首次初始化的瞬态错误：另一个连接正在同一新建库上做 WAL 切换或迁移，
+/// 本连接可能拿到 SQLITE_READONLY（2026-10-19 探针的实测形态，extended=8）
+/// 或 SQLITE_BUSY。只在打开重试里使用；磁盘只读、损坏、版本过高等错误
+/// 不在此列，照常失败（消息兜底只因 open_once 末尾把错误链字符串化了）。
+fn is_concurrent_init_transient(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        if let Some(err) = cause.downcast_ref::<rusqlite::Error>()
+            && matches!(
+                err,
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::ReadOnly
+                        || f.code == rusqlite::ErrorCode::DatabaseBusy
+            )
+        {
+            return true;
+        }
+        let msg = cause.to_string();
+        msg.contains("attempt to write a readonly database") || msg.contains("database is locked")
+    })
+}
+
 /// 打开/创建历史库（含版本迁移）。未知的更高版本一律报错且保留文件。
 #[derive(Debug)]
 pub struct HistoryDb {
@@ -937,7 +958,30 @@ pub struct HistoryDb {
 }
 
 impl HistoryDb {
+    /// 并发首次初始化：另一个连接可能正在同一新建库上做 WAL 切换/迁移，
+    /// 本连接会拿到 SQLITE_READONLY（2026-10-19 探针：30 轮里 11 轮失败，
+    /// 9 次在 v1 迁移的 execute_batch、2 次在 WAL 切换；预建库后并发打开、
+    /// 保持连接存活的并发打开、串行打开三组对照均 30/30 通过）。
+    ///
+    /// 这类错误**不能靠同一连接重试**：探针实测同一连接内重试 migrate
+    /// 20 次仍失败（连接级 journal 状态与库头不一致），重新打开连接才恢复。
+    /// 因此在这里重试整个打开序列（新建连接），只对 READONLY/BUSY 有限重试。
     pub fn open(path: &Path) -> Result<Self> {
+        let mut last = None;
+        for attempt in 0..20 {
+            match Self::open_once(path) {
+                Ok(db) => return Ok(db),
+                Err(e) if attempt < 19 && is_concurrent_init_transient(&e) => {
+                    last = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.expect("重试循环至少记录一次错误"))
+    }
+
+    fn open_once(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent()
             && !dir.as_os_str().is_empty()
         {
@@ -947,7 +991,9 @@ impl HistoryDb {
         let conn = Connection::open(path)
             .with_context(|| format!("打开历史库失败: {}", path.display()))?;
         // 并发打开时等锁而不是立刻报忙；WAL 切换需要短暂独占，小步重试
-        //（与缓存层同一取舍：并发打开不得被误判为损坏）。
+        //（与缓存层同一取舍：并发打开不得被误判为损坏）。并发**首次**
+        // 初始化时另一连接可能正在切换 WAL，本连接会拿到 SQLITE_READONLY
+        // （2026-10-19 探针：2/30 轮），同样按瞬态错误小步重试。
         conn.busy_timeout(std::time::Duration::from_millis(5000))?;
         for attempt in 0..100 {
             match conn.pragma_update(None, "journal_mode", "WAL") {
@@ -958,6 +1004,7 @@ impl HistoryDb {
                             &e,
                             rusqlite::Error::SqliteFailure(f, _)
                                 if f.code == rusqlite::ErrorCode::DatabaseBusy
+                                    || f.code == rusqlite::ErrorCode::ReadOnly
                         ) =>
                 {
                     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -2821,5 +2868,41 @@ mod tests {
             assert_eq!(WritePrecedence::from_rank(p.rank()), p);
         }
         assert_eq!(WritePrecedence::from_rank(7), WritePrecedence::NativeLog);
+    }
+
+    /// 并发首次初始化：两个连接同时对**新建**库执行 open（WAL 切换 + 迁移）。
+    /// 修复前实测（2026-10-19 探针，30 轮）：11 轮有一方在 8-ddl（9 次）或
+    /// 3-wal（2 次）阶段报 SQLITE_READONLY（extended=8）；预建库后并发打开、
+    /// 保持连接存活的并发打开、串行打开三组对照均 30/30 通过。回归保持原
+    /// 并发强度（两线程同时初始化），不得用重试或串行化掩盖。
+    #[test]
+    fn concurrent_first_initialization_both_succeed() {
+        for round in 0..50 {
+            let dir = std::env::temp_dir().join(format!(
+                "tokenscope-first-init-{}-{round}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("history.db");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let p = path.clone();
+                    let b = barrier.clone();
+                    std::thread::spawn(move || {
+                        b.wait();
+                        HistoryDb::open(&p)
+                    })
+                })
+                .collect();
+            for h in handles {
+                match h.join().unwrap() {
+                    Ok(_db) => {}
+                    Err(e) => panic!("第 {round} 轮并发首次初始化必须双方成功：{e:#}"),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

@@ -3263,38 +3263,9 @@ cache_read = 0.4
         );
     }
 
-    /// D1 并发测试专用：本机部分环境（实时文件防护钩住 SQLite 的 wal/shm
-    /// 并发访问）上，两个连接同时打开同一历史库会偶发
-    /// SQLITE_READONLY / BUSY——环境噪声，与本测试要验证的采集单飞无关
-    ///（CI windows-latest 与单连接使用都不受影响）。只对这两类文案做
-    /// 有限重试；其余错误与重试耗尽照常失败，不掩盖真实回归。
-    fn begin_query_tolerating_environment(
-        opts: &SummaryOptions,
-    ) -> Arc<crate::query::QuerySnapshot> {
-        for attempt in 0..10 {
-            match crate::query::begin_query(opts) {
-                Ok(snapshot) => return snapshot,
-                Err(e)
-                    if format!("{e:#}").contains("readonly database")
-                        || format!("{e:#}").contains("database is locked") =>
-                {
-                    if attempt == 9 {
-                        panic!("并发查询在环境噪声重试后仍失败：{e:#}");
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                }
-                Err(e) => panic!("并发查询失败：{e:#}"),
-            }
-        }
-        unreachable!("重试循环必然 return 或 panic")
-    }
-
     #[test]
     fn test_parallel_queries_single_collection() {
         // D1：同参并发查询合并为一次采集（generation 相同 = 同一份快照）。
-        // （环境噪声重试后第二次 begin_query 会复用最近一次采集结果——
-        // generation 相同的断言由此退化为「不重复采集」的复用断言；正常
-        // 环境下两个线程仍走并发单飞合并路径。）
         let dir = tmp_dir("single-flight");
         let opts = opts(Some(dir.join("cache")), None, false);
         TEST_COLLECT_DELAY_MS.store(300, Ordering::Relaxed);
@@ -3305,7 +3276,7 @@ cache_read = 0.4
                 let o = opts.clone();
                 std::thread::spawn(move || {
                     b.wait();
-                    begin_query_tolerating_environment(&o)
+                    crate::query::begin_query(&o).unwrap()
                 })
             })
             .collect();
