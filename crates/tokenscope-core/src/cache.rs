@@ -109,6 +109,19 @@ impl Cache {
     }
 
     fn open_with_busy_timeout(path: &Path, busy_timeout: std::time::Duration) -> Result<Self> {
+        // 并发首次初始化：另一连接可能正在同一库上做 WAL 切换/迁移，本连接
+        // 会在「开始缓存初始化事务」处拿到 SQLITE_READONLY（2026-10-19：
+        // v3 库并发打开 100 次 2 次失败，extended=8，立即返回）。与历史库
+        // 同一取舍：重试整个打开序列（每次新建连接重置连接状态），预算与
+        // 判定见 [`crate::retry`]。
+        crate::retry::retry_within_budget(
+            crate::retry::CONCURRENT_INIT_RETRY_BUDGET,
+            crate::retry::CONCURRENT_INIT_RETRY_BACKOFF,
+            || Self::open_once(path, busy_timeout),
+        )
+    }
+
+    fn open_once(path: &Path, busy_timeout: std::time::Duration) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("创建缓存目录失败: {}", dir.display()))?;
@@ -119,23 +132,14 @@ impl Cache {
         conn.busy_timeout(busy_timeout)?;
         // WAL 切换需要短暂独占，且 SQLite 不为该切换调用 busy handler——
         // 并发打开时对方连接可能正持锁/切换，这里小步重试（对齐 busy_timeout
-        // 的等待语义），而非把并发打开错判为损坏。
-        for attempt in 0..100 {
-            match conn.pragma_update(None, "journal_mode", "WAL") {
-                Ok(()) => break,
-                Err(e)
-                    if attempt < 99
-                        && matches!(
-                            &e,
-                            rusqlite::Error::SqliteFailure(f, _)
-                                if f.code == rusqlite::ErrorCode::DatabaseBusy
-                        ) =>
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(e) => return Err(e).context("设置 WAL 日志模式失败"),
-            }
-        }
+        // 的等待语义），而非把并发打开错判为损坏；并发首次初始化时同样会
+        // 拿到 SQLITE_READONLY，与 DatabaseBusy 同一预算内重试。
+        crate::retry::retry_within_budget(
+            crate::retry::CONCURRENT_INIT_RETRY_BUDGET,
+            crate::retry::CONCURRENT_INIT_RETRY_BACKOFF,
+            || Ok(conn.pragma_update(None, "journal_mode", "WAL")?),
+        )
+        .context("设置 WAL 日志模式失败")?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .context("启用外键约束失败")?;
         // F01：结构迁移收敛为单一写事务。真实 v3 库的 files 没有 root 列，

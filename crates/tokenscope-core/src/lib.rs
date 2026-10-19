@@ -15,5 +15,6 @@ pub mod persistent_format;
 pub mod pricing;
 pub mod query;
 pub mod report;
+mod retry;
 pub mod settings;
 pub mod source;

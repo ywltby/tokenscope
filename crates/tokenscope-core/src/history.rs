@@ -929,25 +929,30 @@ pub fn history_file_path() -> Result<PathBuf> {
     Ok(crate::report::data_dir()?.join("history.db"))
 }
 
-/// 并发首次初始化的瞬态错误：另一个连接正在同一新建库上做 WAL 切换或迁移，
-/// 本连接可能拿到 SQLITE_READONLY（2026-10-19 探针的实测形态，extended=8）
-/// 或 SQLITE_BUSY。只在打开重试里使用；磁盘只读、损坏、版本过高等错误
-/// 不在此列，照常失败（消息兜底只因 open_once 末尾把错误链字符串化了）。
-fn is_concurrent_init_transient(e: &anyhow::Error) -> bool {
-    e.chain().any(|cause| {
-        if let Some(err) = cause.downcast_ref::<rusqlite::Error>()
-            && matches!(
-                err,
-                rusqlite::Error::SqliteFailure(f, _)
-                    if f.code == rusqlite::ErrorCode::ReadOnly
-                        || f.code == rusqlite::ErrorCode::DatabaseBusy
-            )
-        {
-            return true;
-        }
-        let msg = cause.to_string();
-        msg.contains("attempt to write a readonly database") || msg.contains("database is locked")
-    })
+/// 迁移失败 + 数据位置说明。
+///
+/// 两个约束同时成立：
+/// - `Display` 自带完整原因（"执行 v1 迁移失败: ...（历史库文件保留在 X，可
+///   重试；不执行删表重建）"）——调用方只用单层 `to_string()` 也必须看到未知
+///   版本 / SQL 失败，不得被位置说明压成一句无信息量的话；
+/// - `source` 保留原始类型化错误链——打开层重试要按 `rusqlite::Error` 类型
+///   判定瞬态错误，不能用 `anyhow!("{:#}")` 把类型字符串化。
+#[derive(Debug)]
+struct MigrateFailure {
+    detail: String,
+    source: anyhow::Error,
+}
+
+impl std::fmt::Display for MigrateFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.detail)
+    }
+}
+
+impl std::error::Error for MigrateFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.source)
+    }
 }
 
 /// 打开/创建历史库（含版本迁移）。未知的更高版本一律报错且保留文件。
@@ -965,20 +970,14 @@ impl HistoryDb {
     ///
     /// 这类错误**不能靠同一连接重试**：探针实测同一连接内重试 migrate
     /// 20 次仍失败（连接级 journal 状态与库头不一致），重新打开连接才恢复。
-    /// 因此在这里重试整个打开序列（新建连接），只对 READONLY/BUSY 有限重试。
+    /// 因此在这里重试整个打开序列（每次新建连接），预算与判定见
+    /// [`crate::retry`]。
     pub fn open(path: &Path) -> Result<Self> {
-        let mut last = None;
-        for attempt in 0..20 {
-            match Self::open_once(path) {
-                Ok(db) => return Ok(db),
-                Err(e) if attempt < 19 && is_concurrent_init_transient(&e) => {
-                    last = Some(e);
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Err(last.expect("重试循环至少记录一次错误"))
+        crate::retry::retry_within_budget(
+            crate::retry::CONCURRENT_INIT_RETRY_BUDGET,
+            crate::retry::CONCURRENT_INIT_RETRY_BACKOFF,
+            || Self::open_once(path),
+        )
     }
 
     fn open_once(path: &Path) -> Result<Self> {
@@ -993,25 +992,14 @@ impl HistoryDb {
         // 并发打开时等锁而不是立刻报忙；WAL 切换需要短暂独占，小步重试
         //（与缓存层同一取舍：并发打开不得被误判为损坏）。并发**首次**
         // 初始化时另一连接可能正在切换 WAL，本连接会拿到 SQLITE_READONLY
-        // （2026-10-19 探针：2/30 轮），同样按瞬态错误小步重试。
+        // （2026-10-19 探针：2/30 轮），与 DatabaseBusy 同一预算内重试。
         conn.busy_timeout(std::time::Duration::from_millis(5000))?;
-        for attempt in 0..100 {
-            match conn.pragma_update(None, "journal_mode", "WAL") {
-                Ok(()) => break,
-                Err(e)
-                    if attempt < 99
-                        && matches!(
-                            &e,
-                            rusqlite::Error::SqliteFailure(f, _)
-                                if f.code == rusqlite::ErrorCode::DatabaseBusy
-                                    || f.code == rusqlite::ErrorCode::ReadOnly
-                        ) =>
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(e) => return Err(e).context("设置历史库 WAL 日志模式失败"),
-            }
-        }
+        crate::retry::retry_within_budget(
+            crate::retry::CONCURRENT_INIT_RETRY_BUDGET,
+            crate::retry::CONCURRENT_INIT_RETRY_BACKOFF,
+            || Ok(conn.pragma_update(None, "journal_mode", "WAL")?),
+        )
+        .context("设置历史库 WAL 日志模式失败")?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .context("启用历史库外键约束失败")?;
         // 持久事实存储：提交即落盘（WAL + FULL），不因崩溃丢已确认的用量。
@@ -1021,14 +1009,17 @@ impl HistoryDb {
             conn,
             path: path.to_path_buf(),
         };
+        // 迁移失败：Display 带出完整原因与保留位置，source 保留类型化错误链
+        //（打开层重试按类型判定瞬态错误，不得字符串化）。
         db.migrate().map_err(|e| {
-            // 错误链整体带出：迁移失败原因（未知版本 / SQL 失败）必须可见，
-            // 后续 context 不得把它压成一句无信息量的"迁移失败"。
-            anyhow!(
-                "{:#}（历史库文件保留在 {}，可重试；不执行删表重建）",
-                e,
-                path.display()
-            )
+            anyhow::Error::new(MigrateFailure {
+                detail: format!(
+                    "{:#}（历史库文件保留在 {}，可重试；不执行删表重建）",
+                    e,
+                    path.display()
+                ),
+                source: e,
+            })
         })?;
         Ok(db)
     }
@@ -2868,6 +2859,37 @@ mod tests {
             assert_eq!(WritePrecedence::from_rank(p.rank()), p);
         }
         assert_eq!(WritePrecedence::from_rank(7), WritePrecedence::NativeLog);
+    }
+
+    /// 迁移失败的包装必须同时满足两个约束：单层 Display 带出原因（不被
+    /// 位置说明压成无信息量的话），source 链保留类型化错误（打开层重试按
+    /// 类型判定瞬态错误）。
+    #[test]
+    fn migrate_failure_keeps_reason_in_display_and_type_in_source() {
+        let typed = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::ReadOnly,
+                extended_code: 8,
+            },
+            Some("attempt to write a readonly database".into()),
+        ));
+        let wrapped = anyhow::Error::new(MigrateFailure {
+            detail: format!("{:#}（历史库文件保留在 X，可重试；不执行删表重建）", typed),
+            source: typed,
+        });
+        let text = wrapped.to_string();
+        assert!(
+            text.contains("attempt to write a readonly database"),
+            "Display 必须带出原因：{text}"
+        );
+        assert!(
+            text.contains("历史库文件保留在 X"),
+            "Display 必须带出保留位置：{text}"
+        );
+        assert!(
+            crate::retry::is_concurrent_init_transient(&wrapped),
+            "source 链必须保留类型化错误，供打开层按类型重试"
+        );
     }
 
     /// 并发首次初始化：两个连接同时对**新建**库执行 open（WAL 切换 + 迁移）。
