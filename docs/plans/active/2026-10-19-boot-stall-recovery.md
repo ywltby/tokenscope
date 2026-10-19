@@ -1,6 +1,6 @@
 # 启动卡死取证补强与引导期恢复
 
-> 状态：**用户已确认（2026-10-19）。BS01–BS05 完成（已推送）+ 复核补修（迟到响应落定契约、DOM 不可读分类）已推送；计划外的并发用例重试已撤回，根因（隔离对照层面）定位为产品并发首次初始化竞态，`HistoryDb` 与 `Cache` 两条打开序列已修复并验证（`ff939f8`、`cf28d72`，调查完成，待复核）；BS06 待前置（PR #15 合入 main 且 v0.5.1 发布）。** 承接[整合计划 N14](2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) 第 3 项。
+> 状态：**用户已确认（2026-10-19）。BS01–BS05 及复核补修完成并推送；计划外并发用例重试已撤回，`HistoryDb`/`Cache` 并发首次初始化与统一绝对 deadline 预算已修复验证；BS06 已完成（PR #15 合并 `9ea0c58`、v0.5.1 发布、基线登记、0.5.2 递增），交付至草稿 PR #16 等待复核。** 承接[整合计划 N14](2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) 第 3 项。
 > 前置：[PR #15](https://github.com/ywltby/tokenscope/pull/15)（0.5.1，含失败取证 `b141fcc`）合入 main 且 v0.5.1 发布完成。PR #15 尚未合入时可以先从 `origin/fix/upgrade-chain-format` 建分支开工；它合入后先合并最新 main，再开 PR。
 > 分支 `fix/boot-recovery`；修复类批次，递增 patch；一个 PR、一次版本。
 
@@ -170,6 +170,18 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 | `cf28d72` | 复核补修：统一重试预算（`crate::retry`）、类型化错误保留（`MigrateFailure`：Display 带原因 + source 保留类型，移除字符串化与消息兜底）、确定性重试策略测试 5 例、Cache 并发打开覆盖（修复前 2/100 → 修复后 0/100） |
 | `c4ba482` | 预算机制收尾（第三轮复核）：绝对 deadline 只在外层创建一次并贯穿 open_once/WAL/迁移等待（内层不重算 `now + 预算`）；每个锁等待阶段按剩余预算设 busy_timeout；睡眠后重新检查 deadline；时钟与 sleep 可注入，假时钟单测 + 变异验证；HistoryDb 与 Cache 真实持锁集成用例（锁等待预算断言留调度容差） |
 | `72c49b0` | 迁移路径预算传递（第四轮复核）：migrate 接收同一 deadline/clock，在读版本、备份前、**备份后**、建立事务前按剩余预算设 busy_timeout；WAL 的 apply 移入每次尝试内部；覆盖生产接线的确定性回归（备份耗尽/部分消耗预算）＋变异验证 |
+| `f22648b` | BS06 同步：合并 origin/main（`9ea0c58`，v0.5.1 发布后）；执行账冲突按「保留 main 更完整的 0.5.1 行 + 本分支启动恢复批次行」解决 |
+| `6fb7978` | 复核补修：完整门禁自身以 `TOKENSCOPE_PRECOMMIT_MODE=full` 运行时，`EndToEndOnlyCommitCase` 的临时仓库钩子继承该变量强制完整检查而失败；`git_env` 剔除该变量与本机删除拦截变量（先红 4 失败 → 后绿 55 项全过） |
+| `71b5324` | BS06 版本：登记 v0.5.1 发布基线（四资产哈希与 GitHub digest、SHA256SUMS 三方核对）并递增 0.5.2；`bump_version --check` base `9ea0c58` |
+
+### BS06 交付证据（2026-10-20）
+
+- **前置**：gh 实时核对 PR #15（HEAD `bc8c622`、13 项检查全 pass、四个单跳升级矩阵 pass、`upgrade-chain` 配置 skip、无阻断评审、`mergeStateStatus=CLEAN`）→ 转正式并以普通 merge 合入 main = **`9ea0c584`**；随后 Release [39291272967](https://github.com/ywltby/tokenscope/actions/runs/39291272967) 全 11 个作业 success（含 `upgrade-chain (present)/(deleted)`、四个单跳、`install-test`、`publish`）；main CI [39291272876](https://github.com/ywltby/tokenscope/actions/runs/39291272876) 与 Native UI E2E [39291272978](https://github.com/ywltby/tokenscope/actions/runs/39291272978) 均 success。
+- **v0.5.1 发布**：tag `v0.5.1` → `9ea0c584`（轻量 tag）；四资产 `TokenScope_v0.5.1_windows-x64-setup.exe`（`2a32a9fc…74de`）、`build-metadata.json`（`12ef74…89e`）、`SHA256SUMS.txt`（`40b9df…8c6`）、`provenance.sigstore.json`（`7e6300…719`），本地下载哈希、SHA256SUMS、GitHub digest 三方一致；构建元数据 commit `9ea0c58`、version 0.5.1、persistent_format cache 11/history 4/parser 1/identity 1/pricing 9/settings 2。
+- **安装与升级证据**：安装五场景 PASS（全新安装、首次启动迁移 3 请求/180/35/2 项目、重复安装、卸载保留 `~/.tokenscope`、重新安装不重复计量）；连续升级链证据 `chain: 0.1.0 → 0.4.0 → 0.5.1`、四阶段 pass、`settings from_format 1 → to_format 2`、`current_commit 9ea0c58`、`baseline_commit 8d1d90de`；四个单跳（0.1.0/0.4.0 × present/deleted）pass。
+- **本地版本**：合并 main（`f22648b`）→ `upgrade_baselines.py add --tag v0.5.1`（commit `9ea0c58`、profile history、资产哈希核对）→ `bump_version --bump patch` 递增 **0.5.2**（`71b5324`）→ `--check --base-ref origin/main` 通过（0.5.2 ← 0.5.1，base `9ea0c58`）。
+- **完整门禁**：首次 full 模式 4 项偶发失败（`EndToEndOnlyCommitCase`，未复现）；定位为 `TOKENSCOPE_PRECOMMIT_MODE=full` 被子进程继承（`6fb7978` 修复，先红 4 失败 → 后绿 55 项）；修复后完整 full 门禁通过（含 Rust 普通/acceptance、前端 typecheck/format/test/build、浏览器 E2E、脚本契约）。
+- **草稿 PR #16**（head `71b5324`，https://github.com/ywltby/tokenscope/pull/16）：CI [39310409975](https://github.com/ywltby/tokenscope/actions/runs/39310409975)、Native UI E2E [39310409959](https://github.com/ywltby/tokenscope/actions/runs/39310409959)、Install test [39310410188](https://github.com/ywltby/tokenscope/actions/runs/39310410188) 均 success；六个单跳矩阵（0.1.0/0.4.0/0.5.1 × present/deleted）pass；`install-evidence`（fresh-migrate/reinstall pass）与 `0.5.1-present` 升级证据（baseline_commit `9ea0c58`、current_version 0.5.2、旧 exe `c056500d…` = v0.5.1 主程序）核对；`install-build` 产物身份 commit `4080463`（PR merge ref）、version 0.5.2、exe `e1e9773c…` 与升级证据一致。`upgrade-chain` 在 PR 端为设计允许的 skip（Release 专属）。
 
 ### 先红后绿
 
@@ -196,11 +208,11 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 
 ### 远端验证
 
-- PR #15（`fix/upgrade-chain-format`）：最终 HEAD `bc8c622` 三条流水线全绿——CI 39181763972、Native UI E2E 39181764030、Install test 39181763945。保持草稿，用户复核后再合并；合并后发布 v0.5.1。
-- 本分支：`32a53e5`/`4385b60` 已推送；草稿 PR 打开后 CI/Native UI E2E/Install test 的运行编号在 BS06 按最终 HEAD 回填。
+- PR #15（`fix/upgrade-chain-format`）：最终 HEAD `bc8c622` 三条流水线全绿——CI 39181763972、Native UI E2E 39181764030、Install test 39181763945；已于 2026-10-20 转正式并以普通 merge 合入 main = `9ea0c584`（Release 39291272967 全绿、v0.5.1 已发布，见「BS06 交付证据」）。
+- PR #16（`fix/boot-recovery`，草稿）：head `71b5324` 三条流水线全绿——CI 39310409975、Native UI E2E 39310409959、Install test 39310410188（六个单跳矩阵 pass、`upgrade-chain` 为 Release 专属 skip）。文档回填提交后 HEAD 更新，最终 HEAD 检查以 PR #16 最新运行结果为准（交付报告记录）。
 
 ### 未闭合
 
-- PR #15 待用户复核合并；v0.5.1 发布（用户决定）。
-- 并发首次初始化修复（`ff939f8`）待用户复核；调查计划状态更新为「调查完成」。
-- BS06：确认前置后合并最新 main、`upgrade_baselines.py add --tag v0.5.1`、`bump_version.py --bump patch`、`--check --base-ref origin/main` 自查、完整门禁、推送、开草稿 PR、等三条流水线在最终 HEAD 全绿（失败按 evidence 说明原因，不以重跑代替）。
+- **PR #16 为草稿，等待复核**：不转正式、不合并；其最终 HEAD（文档回填提交）的三条流水线与工件核对结果见交付报告。
+- 并发首次初始化修复（`ff939f8`、`cf28d72`、`c4ba482`、`72c49b0`）随 PR #16 交付，待复核。
+- 发布依赖已完成：PR #15 合并为 `9ea0c58`、v0.5.1 已发布并登记基线（`scripts/fixtures/upgrade_baselines.json`），本批次版本为 **0.5.2**。
