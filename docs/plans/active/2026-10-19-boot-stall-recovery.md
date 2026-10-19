@@ -1,6 +1,6 @@
 # 启动卡死取证补强与引导期恢复
 
-> 状态：**用户已确认（2026-10-19）。BS01–BS05 完成（已推送）+ 复核补修（迟到响应落定契约、DOM 不可读分类）已提交；计划外的并发用例重试已按复核意见撤回（撤回提交受本机环境噪声阻碍，见 §6）；BS06 待前置（PR #15 合入 main 且 v0.5.1 发布）。** 承接[整合计划 N14](2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) 第 3 项。
+> 状态：**用户已确认（2026-10-19）。BS01–BS05 完成（已推送）+ 复核补修（迟到响应落定契约、DOM 不可读分类）已推送；计划外的并发用例重试已撤回，根因定位为产品并发首次初始化竞态并由 `ff939f8` 产品修复替代（调查完成，待复核）；BS06 待前置（PR #15 合入 main 且 v0.5.1 发布）。** 承接[整合计划 N14](2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) 第 3 项。
 > 前置：[PR #15](https://github.com/ywltby/tokenscope/pull/15)（0.5.1，含失败取证 `b141fcc`）合入 main 且 v0.5.1 发布完成。PR #15 尚未合入时可以先从 `origin/fix/upgrade-chain-format` 建分支开工；它合入后先合并最新 main，再开 PR。
 > 分支 `fix/boot-recovery`；修复类批次，递增 patch；一个 PR、一次版本。
 
@@ -163,9 +163,10 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 | `61633dc` | BS02 主界面加载失败界面与阶段标记（`mainAppLoader` 单飞/失败记录、`role=alert` 面板 + 整页 reload、`data-boot-state` 八态；教训已写进 `App.vue` 注释：模板 `v-if` 不能直接用对象属性上的嵌套 ref，需顶层 ref 别名 `mainVisible`） |
 | `5c5c43c` / `bc8c622` | （插入任务，分支 `fix/upgrade-chain-format`）PR #15 Native UI E2E 判定修复与执行账补记；最终 HEAD `bc8c622` 三条流水线全绿——CI 39181763972、Native UI E2E 39181764030、Install test 39181763945；PR 保持草稿待用户复核 |
 | `6bdd55e` | BS03 失败取证补强与自动判断（首次提交消息被 shell 引号截断，以 `git commit --amend -F` 修复；IPC 两侧时间线 `at/ms/outcome`、请求时间线 50 条、`classifyBootStall` 六类判定、12 例单测；scripts/lib 97 例、前端 596 例通过） |
-| `32a53e5` | 计划外（见「计划外偏差」1）：并发用例环境噪声重试——**已按复核意见撤回**（根因尚未证实，调查另案进行） |
+| `32a53e5` | 计划外（见「计划外偏差」1）：并发用例环境噪声重试——**已按复核意见撤回**（六处回到原断言形态；根因已定位为产品并发首次初始化竞态，由 `ff939f8` 的产品修复替代） |
 | `4385b60` | BS04 浏览器契约 `boot_stall_recovery`（fixture 新场景 `privacy-bootstrap-deferred` 与 `staleBootstrap()`；检查挂起、主界面加载失败两场景共 15 断言；登记 `REQUIRED_CONTRACTS`/`IMPL` 并加入 `run-ui-refresh-e2e.mjs` 契约列表让 CI 运行） |
 | `96f580b` | 复核补修：迟到响应必须落定才断言代次保护（`waitForIpcSettled` 超时抛错 + 落定确认断言，15→16 条）；DOM 不可读也写 suspected（见「计划外偏差」3） |
+| `ff939f8` | 并发首次初始化：产品修复（`HistoryDb::open` 对 READONLY/BUSY 重试整个打开序列，新建连接重置连接状态）+ 回归测试 `concurrent_first_initialization_both_succeed`（50 轮，先红后绿）+ 撤回六处测试层容错（见「计划外偏差」1） |
 
 ### 先红后绿
 
@@ -179,10 +180,11 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 - 前端：typecheck、format:check、单测 596 例、build 全部通过（BS04 提交时）。
 - Rust：`cargo test -p tokenscope`（lib 237 例 + 集成套件）通过；`cargo fmt --check`、`cargo clippy --workspace --all-targets` 干净。
 - 提交钩子：`32a53e5`（rust 检查）与 `4385b60`（frontend/scripts 无本地等价契约 → 完整模式兜底）均以完整门禁通过。
+- 产品修复后（`ff939f8`）：lib 238 例（含新增 50 轮并发首次初始化回归）与全部集成套件通过；`cargo test --locked --workspace` 连续两次 0 失败套件；fmt/clippy 干净；完整提交钩子（rust 普通 + acceptance）通过。
 
 ### 计划外偏差（不涉产品行为的测试架最小调整）
 
-1. **并发用例环境噪声重试（`32a53e5`）——已按复核意见撤回**：BS04 起首次以完整模式钩子提交，暴露 `test_parallel_queries_single_collection`（随后 `test_cache_concurrent_v3_open`、`concurrent_queries_share_one_collection_without_duplicating_usage` 同类）在本机稳定失败——两个连接同时打开同一 SQLite 库偶发 SQLITE_READONLY/BUSY。当时给六处并发用例各引入只认 `readonly database` / `database is locked` 文案的有限重试。**复核意见（2026-10-19）指出**：重试会让并发用例在打开失败后重新执行，最终可能只验证串行打开或缓存复用，削弱原有并发断言；Python 复现同类错误不能确定原因是杀软，也不能排除产品需要处理的 SQLite 并发问题——测试层容错不能替代产品行为调查。已撤回全部重试（六处回到原断言形态），根因调查另案进行（[SQLite 并发打开失败的根因调查](2026-10-19-sqlite-concurrent-open-investigation.md)，待用户确认）；本记录及执行账中此前「判定为本机环境而非仓库缺陷」「不掩盖真实回归」的结论性表述均降级为**根因尚未证实**。
+1. **并发首次初始化竞态（`32a53e5` → 撤回 → `ff939f8` 产品修复）**：BS04 起首次以完整模式钩子提交，暴露 `test_parallel_queries_single_collection`（随后 `test_cache_concurrent_v3_open`、`concurrent_queries_share_one_collection_without_duplicating_usage` 同类）在本机失败——两个连接同时打开同一 SQLite 库偶发 SQLITE_READONLY/BUSY。当时给六处并发用例引入测试层重试。**复核意见（2026-10-19）指出**重试会让并发用例退化为串行/复用断言，测试层容错不能替代产品行为调查，要求撤回另案调查。随后按[调查计划](2026-10-19-sqlite-concurrent-open-investigation.md)定位：临时探针（12 阶段、扩展错误码、四组隔离目录对照）显示**只有「并发新建」组失败**（30 轮 11 轮，9×DDL、2×WAL，extended=8），预建库后并发、保持连接存活、串行三组 30/30 通过；同连接重试 migrate 20 次无效、重新打开连接恢复——根因是产品在并发首次初始化时连接级 journal 状态与库头不一致。`ff939f8` 在 `HistoryDb::open` 层对 READONLY/BUSY 重试整个打开序列 + 回归测试 50 轮（先红后绿）+ 撤回六处测试层重试；全量 `cargo test --workspace` 连续两次 0 失败套件，完整钩子通过。证据：`qa-artifacts/sqlite-probe/`。
 2. **提交环境事件**：WorkBuddy 的 node safe-delete shim 把 `rmSync` 重定向回收站并对批量删除要求确认，vite build 清空 `dist/assets`（可再生产物，反证期间多哈希残留累计 6 个）被 `SAFE_DELETE_BULK_CONFIRM_REQUIRED` 拦截导致钩子失败多次；恢复方式为提交命令一次性注入 `CODEBUDDY_SAFE_DELETE_ENABLED=0`（只影响该次构建清理，不改任何仓库内容）。另有数次后台提交被会话沙箱间歇拦截 cargo 写 `target/`（.d/.exe/fingerprint），重试后通过。
 3. **复核补修（`96f580b`）**：复核意见 P2-2——场景 1 的旧响应等待超时后继续断言「状态没退回」是误通过路径（响应未送达时界面当然不会退回）；新增 `waitForIpcSettled`（超时抛错让契约失败，单测 4 例含「旧响应不落定时契约必须失败」反例），契约等待落定并新增落定确认断言（15→16 条）。低优先级缺口——DOM 摘要不可读时跳过分类函数，第一类判定「DOM 不可读」没有写入 suspected；已改为壳层不可见（含 DOM 不可读）即分类，取证单测补 1 例。
 
@@ -194,6 +196,5 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 ### 未闭合
 
 - PR #15 待用户复核合并；v0.5.1 发布（用户决定）。
-- **撤回提交（六处重试 → 原断言形态）尚未落库**：撤回后本机全量 `cargo test --workspace` 实测失败（并发用例命中 readonly），完整门禁在本机大概率无法通过——这是环境噪声的如实呈现，不做测试层掩盖；改动已就绪在暂存区，待根因调查结论或用户指示后落库。
-- SQLite 并发打开根因调查：[调查计划](2026-10-19-sqlite-concurrent-open-investigation.md)待用户确认。
+- 并发首次初始化修复（`ff939f8`）待用户复核；调查计划状态更新为「调查完成」。
 - BS06：确认前置后合并最新 main、`upgrade_baselines.py add --tag v0.5.1`、`bump_version.py --bump patch`、`--check --base-ref origin/main` 自查、完整门禁、推送、开草稿 PR、等三条流水线在最终 HEAD 全绿（失败按 evidence 说明原因，不以重跑代替）。
