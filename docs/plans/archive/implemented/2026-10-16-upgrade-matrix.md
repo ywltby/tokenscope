@@ -4,7 +4,7 @@
 
 > 状态：**用户已确认（2026-10-16）**，第 9 节 D1–D5 均已决定；同日用户决定把原生验收重启连接修复（UP09，§4.8）并入本计划，不推迟到 PR2。执行方补充（`fb35e91`）经[审阅第 18 节](../../../reviews/2026-10-15-source-discovery-plan-review.md)复核后已并入正文；按用户要求删去过度防御的设计与过高的验收门槛（第 19 节）。**本地实施已完成（2026-10-16）**，第二轮独立复核的 5 项问题已修复，逐项证据见第 10 节；PR [#10](https://github.com/ywltby/tokenscope/pull/10) 的 CI、Install test（含 0.1.0 与 0.3.2 两个起点的四个作业）与 Native UI E2E 均已通过，Release 的双链与 `v0.3.3` 发布待合入 main。
 > 交付：独立 PR，patch（测试与发布门禁维护，不改变统计口径和界面）。实施时从最新 main 建 `feat/upgrade-matrix`。
-> 顺序：**下一个 PR**，在 [PR2 扫描反馈](2026-10-15-collection-status.md)之前合入。PR2 的 F04 要扩展同一个原生验收脚本，先修好重启连接，PR2 才能在稳定的测试架上取证；也因此早于 [PR3 来源目录](../../active/2026-10-14-source-discovery-and-additional-paths.md)，PR3 的设置迁移能直接得到真实 0.3.x 安装包的升级覆盖（见 §8）。
+> 顺序：**下一个 PR**，在 [PR2 扫描反馈](2026-10-15-collection-status.md)之前合入。PR2 的 F04 要扩展同一个原生验收脚本，先修好重启连接，PR2 才能在稳定的测试架上取证；也因此早于 [PR3 来源目录](../partial/2026-10-14-source-discovery-and-additional-paths.md)，PR3 的设置迁移能直接得到真实 0.3.x 安装包的升级覆盖（见 §8）。
 > 承接：[整合计划 N12](../../active/2026-10-11-consolidated-remaining-work.md) 的“真实旧包升级”责任；本计划只扩展起点与升级次数，不改变 N12 已验收的 0.1.0 单跳场景。
 
 ## 1. 现状（2026-10-16 核实）

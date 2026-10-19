@@ -266,14 +266,14 @@ PR1 合入后 workspace 根目录是虚拟 manifest，命令统一改为：
 
 - [PR1](../plans/archive/implemented/2026-10-15-workspace-layout.md)：独立 patch，W01–W07 和 c16e023；保留目录迁移、新旧版本基线、全部门禁，新增 W05c 依赖信息清单。旧 target 必须报告路径、大小、链接、占用并取得用户确认后删除。
 - [PR2](../plans/archive/implemented/2026-10-15-collection-status.md)：PR1 合入后独立 minor，F01–F05；至少 1 秒显示、CSS 图标、查询不等动画、连续轮次及减少动态效果均有用例，安排 DESIGN.md 豁免。
-- [PR3](../plans/active/2026-10-14-source-discovery-and-additional-paths.md)：PR2 合入后独立 minor，S01–S07；只剩当前用户标准/环境/追加根，取消重新发现，保留 settings 事务、防环、三层去重、性能预算及环境变更说明。
+- [PR3](../plans/archive/partial/2026-10-14-source-discovery-and-additional-paths.md)：PR2 合入后独立 minor，S01–S07；只剩当前用户标准/环境/追加根，取消重新发现，保留 settings 事务、防环、三层去重、性能预算及环境变更说明。
 - 技术细化 1：编译后的 `--check` 不能用自己的启动时间筛 `.d`；增加构建前 `--begin` run 边界和每模式产物记录。明确包清理/隔离构建与完整性检查，不依赖缓存动作的内部实现假设；旧依赖信息不能混入，缺证据不得空集合通过。
 - 技术细化 2：实际心跳周期是配置间隔＋真实采集耗时，最短 1 秒只影响显示，不改调度；缺少可见动画本身不足以证明后端停止。失败/状态不可用立即显示，正常短采集满足 1 秒。
 - CLAUDE_CONFIG_DIR 映射位置仍为实施前核实项；未把猜测写成事实。真实性能数字仍是预算/历史参考，尚无本次实现基准。
 
 ## 11. 复审意见（针对 4ef146e）
 
-> 复审日期：2026-10-15。对象：[PR1](../plans/archive/implemented/2026-10-15-workspace-layout.md)、[PR2](../plans/archive/implemented/2026-10-15-collection-status.md)、[PR3](../plans/active/2026-10-14-source-discovery-and-additional-paths.md)、`docs/plans/README.md`、UI 调整计划顶部说明。
+> 复审日期：2026-10-15。对象：[PR1](../plans/archive/implemented/2026-10-15-workspace-layout.md)、[PR2](../plans/archive/implemented/2026-10-15-collection-status.md)、[PR3](../plans/archive/partial/2026-10-14-source-discovery-and-additional-paths.md)、`docs/plans/README.md`、UI 调整计划顶部说明。
 
 **结论：** 第 9 节各项均已落实到三份计划，多账户相关内容已删净（全文检索 ProfileList、提权、账户映射、`source_paths_discover` 均无残留），旧锚点 `#collection-feedback` 已无引用。执行方新增的两条技术细化（构建前 `--begin` 划定证据边界；心跳周期 = 间隔 + 真实耗时，1 秒只影响显示）判断正确，予以采纳。改完下面 11.1、11.2 两处即可开工 PR1；11.3 在 PR3 开工前改好即可。
 
@@ -309,7 +309,7 @@ PR1 合入后 workspace 根目录是虚拟 manifest，命令统一改为：
 
 - [x] 11.1：[PR1](../plans/archive/implemented/2026-10-15-workspace-layout.md) W05a/W05c 的消费方改为包＋构建模式，普通与 acceptance 分别保留、选命令；核心与壳 Rust 改动固定跑两模式。W05b 增加分项耗时，契约明确 acceptance_csp.js 单独改动不能只跑普通壳测试。
 - [x] 11.2：清单限定 Git 跟踪文件及含跟踪文件的目录，未跟踪/生成路径及排除原因进入 QA 证据。明确两种 cargo test 模式均不带 custom-protocol；字面折叠路径后再判断仓库边界，补 Windows/UNC/越界、release 风格生成资源及 Git 跟踪边界契约。update/check 使用同一规则。
-- [x] 11.3：[PR3](../plans/active/2026-10-14-source-discovery-and-additional-paths.md) §2/§3/S07 写明旧自定义 dir 由替代变追加、默认根新增用量可能提高总量；安排同步 stats-semantics 与升级提示。S01 增加升级并集、重复请求和停用用例，完整采集断言在 S03 接通后验证。
+- [x] 11.3：[PR3](../plans/archive/partial/2026-10-14-source-discovery-and-additional-paths.md) §2/§3/S07 写明旧自定义 dir 由替代变追加、默认根新增用量可能提高总量；安排同步 stats-semantics 与升级提示。S01 增加升级并集、重复请求和停用用例，完整采集断言在 S03 接通后验证。
 - [x] 11.4：采纳实施分支建议，PR1 与 README 改为开工时从当前文档分支最新提交创建 feat/workspace-layout。本轮不切分支，不改写提交。归档移动复用继续保留在 PR3 本轮范围与验收中，未静默延期。
 
 以上只表示设计已修改；未实施脚本、业务代码或测试，也未把各任务标为完成。

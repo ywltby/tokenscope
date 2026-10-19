@@ -16,6 +16,8 @@ import { uiDateKeyboardMatrix } from "./ui-date-keyboard-contract.mjs";
 import { uiControlMaterial } from "./ui-control-material-contract.mjs";
 
 import { PRIVACY_PROTECTED_COMMANDS } from "../fixtures/ui-contracts.mjs";
+import { captureContractFailure, trackSession } from "../lib/contract-failure.mjs";
+import { withTimeout } from "../lib/native-scenario.mjs";
 
 /** 计划 §3 RC09 表格的必需契约清单——一个都不能少。 */
 export const REQUIRED_CONTRACTS = [
@@ -2500,10 +2502,13 @@ export async function runContracts({ open, output, meta, only = REQUIRED_CONTRAC
   };
 
   for (const contract of only) {
+    // 本契约打开的会话：关闭前留 DOM 摘要，抛错时据此取证（契约的 finally
+    // 先于运行器 catch 关闭页面，事后补截图拿不到现场）。
+    const opened = [];
     ctx.open = async (opts) => {
       const s = await open({ ...opts, contract });
       s.contractForFinish = contract;
-      return s;
+      return trackSession(s, opened);
     };
     const fn = IMPL[contract];
     if (!fn) {
@@ -2513,7 +2518,26 @@ export async function runContracts({ open, output, meta, only = REQUIRED_CONTRAC
     try {
       await fn(ctx);
     } catch (e) {
-      ctx.record(contract, "契约执行未抛错", false, e instanceof Error ? e.message : String(e));
+      let detail = e instanceof Error ? e.message : String(e);
+      try {
+        const evidence = await captureContractFailure({
+          contract,
+          error: e,
+          registry: opened,
+          output,
+        });
+        detail += `\n失败取证 ${evidence.file}：${evidence.summary}`;
+      } catch (captureError) {
+        detail += `\n失败取证未完成：${String(captureError?.message ?? captureError)}`;
+      }
+      ctx.record(contract, "契约执行未抛错", false, detail);
+    } finally {
+      // 抛错时契约可能来不及关闭会话：取证后统一关闭，不泄漏到下一个契约。
+      for (const entry of opened) {
+        if (!entry.closed) {
+          await withTimeout(() => entry.session.close(), 10000, "遗留会话关闭").catch(() => {});
+        }
+      }
     }
     const owned = results.filter((r) => r.contract === contract);
     ctx.record(

@@ -2,7 +2,17 @@
 
 > 执行方式：使用 executing-plans 技能，按 S00 → S07 逐项实施；本文件 §9 是逐步执行清单，不另起竞争计划。
 
-> 状态：[审阅第 13 节](../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过；**2026-10-18 精简修订与新增 S00 已经用户确认**（见 [§0](#0-2026-10-18-精简修订)），可以开工；S00–S07 均未实施。
+> **2026-10-19 归档复核：部分完成。** S00–S07 与审阅补修均已实施，PR [#14](https://github.com/ywltby/tokenscope/pull/14) 于 2026-10-18 合入 main（`599c89e`），PR 最终 HEAD `7b29082` 的 CI、Native UI E2E、安装与四项单跳升级全部通过。main 上 Native UI E2E 通过（未复现 PR2 合入后的卡死），但 CI 的 frontend 组与 Release 的两条连续升级链失败，发布被跳过：v0.5.0 从未公开、已登记为 unpublished，本计划的改动由修复批次 0.5.1 首次公开。详见 [§7 合入与发布记录](#合入与发布记录2026-10-19)。剩余待验与遗留缺陷只在[整合计划 N14](../../active/2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) 登记（真实数据性能归 N13）；归档不表示待验项通过。
+>
+> | 剩余事项 | 承接 |
+> | --- | --- |
+> | `upgrade-chain` 连续升级链实测：0.5.0 因测试架缺陷失败，已修复，待 0.5.1 发布取证 | [N14](../../active/2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) |
+> | 采集层权限拒绝 fixture（S03 遗留） | [N14](../../active/2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) |
+> | 预设切换的迟到重复查询批次（原生 ui-system 取证，产品缺陷） | [N14](../../active/2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) |
+> | 浏览器契约 `ui_control_material` dark 会话壳层 10 秒未出现（原因未明，已补失败取证） | [N14](../../active/2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) |
+> | 真实数据性能基准（`perf_real_data`，§4.4 待验） | [N13](../../active/2026-10-11-consolidated-remaining-work.md#n13真实规模历史库性能基准) |
+>
+> 归档前原文状态：[审阅第 13 节](../../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过；**2026-10-18 精简修订与新增 S00 已经用户确认**（见 [§0](#0-2026-10-18-精简修订)），可以开工；S00–S07 均未实施。
 > 前置条件：PR1、PR2 均已合入（PR2 为 PR #13，main `6393bfc`，v0.4.0）。分支 `feat/source-paths` 已从 main `6393bfc` 建立，带 PR2 计划归档提交；在该分支上实施，独立 minor、独立 PR 和验收。交付时登记 `v0.4.0`。
 
 **Goal：** 默认发现当前用户的标准日志目录与环境变量指定的目录，以追加列表管理来源；来源重叠不重复解析或计量，遍历链接不会死循环。
@@ -285,7 +295,7 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
   - Native UI E2E run [39120833933](https://github.com/ywltby/tokenscope/actions/runs/39120833933) ✅：6 场景工件核对——`ui-refresh` 11、`ui-system` ×3 各 15（含 1.5/2 缩放）、`ui-collection-status` 20、**`ui-source-paths` 12（新场景非空全过）**；`failed=[]`、无场景超时、`real_untouched` 全部为真（真实 `~/.tokenscope` 指纹前后一致）。
   - Install test run [39120833790](https://github.com/ywltby/tokenscope/actions/runs/39120833790) ✅：install-test + 升级矩阵 4 起点（0.1.0/0.4.0 × present/deleted）全绿（含本 PR 新登记的 v0.4.0）；升级证据核对 `settings_format` 指纹 = **2**（新值）、历史库 schema 4→4 不变；`upgrade-chain` 在 PR 上按设计跳过（main 发布阶段另取证，不计为通过）。
 - **PR**：草稿 [PR #14](https://github.com/ywltby/tokenscope/pull/14) 面向 main，等待复核。按约定停在草稿 PR：不自行转正式、不合并、不清理分支。
-- **边界如实记录（剩余待验，不随本 PR 关闭）**：真实数据性能基准（`perf_real_data`）待验（§4.4）；采集层权限拒绝 fixture 待验（S03 遗留）；`upgrade-chain` 连续升级链待 main 发布阶段取证；真实跨午夜、长时间休眠、跨显示器在[独立系统待办](../system-acceptance-todo.md)，不纳入本 PR。
+- **边界如实记录（剩余待验，不随本 PR 关闭）**：真实数据性能基准（`perf_real_data`）待验（§4.4）；采集层权限拒绝 fixture 待验（S03 遗留）；`upgrade-chain` 连续升级链待 main 发布阶段取证；真实跨午夜、长时间休眠、跨显示器在[独立系统待办](../../system-acceptance-todo.md)，不纳入本 PR。
 
 ### 审阅补修记录（2026-10-18，审阅 §23 / PR #14）
 
@@ -300,9 +310,18 @@ S01–S07 未开始，版本未分配。实施后逐项记 commit、命令、失
 - **定时采集唤醒丢失（`9c41c57`，补修期间提交钩子取证）**：壳测 `collect_loop_follows_updated_interval_after_wake` 一次失败（唤醒后 510ms，旧间隔 500ms）。根因是 `run_collect_loop` 先读间隔、`CollectSignal::wait` 进入时才取版本基线，二者之间的设置唤醒被并入基线而丢失，按旧间隔多等一轮。改为读间隔前取版本、`wait` 以其为基线；新增确定性回归 `collect_signal_wake_before_wait_is_not_lost`。只影响调度时序。
 - **验证**：`source_discovery` 18/18、`source_paths_collection` 16/16、壳 57 用例、前端 563 用例；fmt/双 feature clippy/两套 workspace 测试全绿。版本不递增；`upgrade-chain`、真实性能基准等待验项维持 §23.3 的既有披露（同应用父根为手动时子根映射丢失，按审阅意见本 PR 不处理）。预设切换的重复批次竞态如实披露，留作后续观察，不在本 PR 扩大范围。
 
+### 合入与发布记录（2026-10-19）
+
+- **合入**：复核通过后 PR #14 转为正式并按普通合并方式合入 main，合并提交 `599c89e`（2026-10-18 16:41Z）。合入前 PR 最终 HEAD `7b29082` 的三条流水线：CI [39144230866](https://github.com/ywltby/tokenscope/actions/runs/39144230866)、Native UI E2E [39144230980](https://github.com/ywltby/tokenscope/actions/runs/39144230980)、Install test [39144230896](https://github.com/ywltby/tokenscope/actions/runs/39144230896)（install-test 与 0.1.0/0.4.0 × present/deleted 四项单跳升级）全部通过；`upgrade-chain` 在 PR 上不运行。
+- **main 上 Native UI E2E** [39146151198](https://github.com/ywltby/tokenscope/actions/runs/39146151198)：通过，约 9 分钟；S00 加固后 main 首次运行，未复现 `6393bfc` 的 `ui-system --scale 2` 卡死。
+- **main 上 Release** [39146151291](https://github.com/ywltby/tokenscope/actions/runs/39146151291)：build、install-test 与四项单跳升级通过；`upgrade-chain (present)` / `(deleted)` 均在第一跳（0.1.0 → 0.4.0）失败，报错"迁移后 sources.claude 不得再输出 dir"，`publish` 跳过。根因（测试架缺陷）：链路校验对每一跳都以当前版本的设置格式（v2）为目标、以最老起点的格式为来源，中间跳装的旧版 0.4.0 写出 v1 的 `dir` 是正确行为。用失败工件的真实设置复核：按 1->1 校验通过，按 1->2 复现原报错。修复 `6533e22`：每跳按『上一跳版本格式 → 本跳版本格式』核对，契约用当前格式 2 的链路断言中间跳 1->1、末跳与重启 1->2，按旧目标格式逻辑变异即红。
+- **main 上 CI** [39146151362](https://github.com/ywltby/tokenscope/actions/runs/39146151362)：frontend 组的浏览器契约 `ui_control_material` 失败——light 主题 10 条断言与 150% 截图通过后，dark 主题新会话等待 `#app .app-shell` 超过 10 秒；同一代码树的 PR 检查通过。契约在自己的 `finally` 里关闭会话，现场没有截图、DOM 与页面错误，原因无法说明，不以重跑代替。修复 `b141fcc`：运行器登记会话、关闭前留有界 DOM 摘要，契约抛错时写出 `<契约>--failure.json`（含页面/控制台错误、IPC、同源失败请求、壳层状态与前三层结构，仍打开的会话截图），只增加证据、不改断言。原因转入 N14 跟踪。
+- **版本**：远端核实 v0.5.0 标签与发布均不存在，按登记表流程登记为 unpublished（合并提交 `599c89e`），不作为升级起点、不再发布；修复批次递增 patch 到 0.5.1（`66e05e0`），发布说明写明这是首个公开包含 0.5.0 改动的版本并列出其用户可见变化。0.5.1 起点集合为 0.1.0、0.4.0，连续升级链末跳跨过设置格式 1 → 2。
+- **遗留**：上表剩余事项转入整合计划 N14 / N13；本计划归档为部分完成。
+
 ## 8. 执行细则、算法边界与验收门槛
 
-共同执行、证据和合并门槛见 [PR1 第 4 节](../archive/implemented/2026-10-15-workspace-layout.md#41-开工与逐项执行)。PR2 合入前不开始 S01。先保持所有旧查询/计价/导入回归通过；路径管理不能改变事件业务身份或重写已有历史事实。
+共同执行、证据和合并门槛见 [PR1 第 4 节](../implemented/2026-10-15-workspace-layout.md#41-开工与逐项执行)。PR2 合入前不开始 S01。先保持所有旧查询/计价/导入回归通过；路径管理不能改变事件业务身份或重写已有历史事实。
 
 ### 8.1 S01/S02：先解析配置，再接实际读取
 

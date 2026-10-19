@@ -9,6 +9,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { queryPublishesDuringReading } from "../lib/collection-publish-window.mjs";
 import { closeBrowserBounded, ensureNotCanceled, spawnSyncBounded } from "../lib/native-scenario.mjs";
 
 const POLL_MS = 100;
@@ -235,11 +236,11 @@ export async function nativeCollectionStatus({ inst, ck, ev, markStage, markStag
     true,
     `requests ${beforeFast.requests} → ${beforeFast.requests + 1}；身份=${appended.id}`,
   );
-  ck.add(
-    "query_publishes_within_reading_window",
-    bump.state === "reading",
-    `统计落地时读取态=${bump.state}（t=${bump.at_ms}ms，轮询 ${POLL_FAST_MS}ms）`,
-  );
+  // 判定语义（2026-10-19 修订）：产品承诺"查询在读取期内已经开始"，不再
+  // 要求统计抢在 1000ms 最短显示期结束前落地（采集 + 查询 ≈982ms 时取样
+  // 可能已翻到 confirmed，39177008549 即此形态，非产品回归）。
+  const publishJudgment = queryPublishesDuringReading({ timeline: t2, baseline: beforeFast });
+  ck.add("query_publishes_within_reading_window", publishJudgment.ok, publishJudgment.basis);
   ck.add(
     "changed_round_advances_generation_and_run",
     bump.generation === beforeFast.generation + 1 && bump.runId > beforeFast.runId,
