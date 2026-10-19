@@ -37,6 +37,24 @@ TokenScope 是长期查看 AI 用量、请求明细和估算费用的桌面工�
 
 引导期界面只使用本文的语义 token 与浮层玻璃配方（`--ts-surface-elevated` + `--ts-glass-blur-popover` + `--ts-radius-popover`）：政策弹窗（`.privacy-dialog`，宽度上限 640px、正文区域独立滚动）与未同意的退出确认（`.exit-dialog`，420px，与关闭确认同规格）。`NGlobalStyle` 在同一文档内只注入一份（由引导壳持有，业务主应用 `MainApp.vue` 不再渲染，避免 naive 的重复实例警告）；政策全文用文本插值渲染，不使用 `v-html`、不加载远程资源，第三方链接只作纯文本展示。
 
+引导期两种卡死都有可见、可操作的出路（2026-10-19）：
+
+- **检查耗时较长（重新检查）**：`privacy_bootstrap` 超过 `BOOTSTRAP_SLOW_MS`（10 秒）未返回时，在"正在检查隐私设置…"下方显示"检查耗时较长，仍在等待结果；也可以重新检查"与「重新检查」按钮（`role="status"`，不是错误）。耗时长可能是合理的（后端同意后首次检查同步执行业务初始化），因此不写错误、不取消原请求；原请求的响应如果仍是最新一次，到达后照常应用。「重新检查」只重复同一次 `privacy_bootstrap` 读取；只采用最近一次检查的结果，迟到的响应一律丢弃（不把界面退回去、不写错误）。
+- **主界面加载失败（重新加载）**：主应用动态导入失败时，在引导壳内显示 `role="alert"` 面板："主界面加载失败：<原因>"与「重新加载」按钮，不得白屏。恢复只能整页重新加载（`window.location.reload()`）——同一文档里失败的模块请求会被模块映射缓存，再次 `import()` 不会恢复。
+
+引导壳根节点（`.privacy-shell`）带 `data-boot-state` 诊断标记。**只用于诊断与测试**（失败取证据此自动判断卡点），不作样式钩子：
+
+| 取值 | 含义 |
+| --- | --- |
+| `checking` | 隐私检查进行中（无错误、未超过慢阈值） |
+| `checking-slow` | 检查超过 `BOOTSTRAP_SLOW_MS` 仍未返回（提示可见） |
+| `blocked` | 检查出错或 `blocked_error`（错误态，可重新检查） |
+| `consent` | 需要同意 / 保存同意中 / 业务启动中（政策弹窗阶段） |
+| `exiting` | 退出流程进行中 |
+| `loading-main` | 已就绪、主界面导入中（未显示、无错误） |
+| `main-load-failed` | 主界面导入失败（失败面板与「重新加载」可见） |
+| `main` | 主界面已挂载 |
+
 ### 语义色
 
 | Token | 浅色 | 深色 | 用途 |
@@ -351,7 +369,7 @@ Token 显示颜色（「外观」分区）提供输入、输出、缓存写、�
 
 - `frontend/src/styles/tokens.css`：语义色、间距、圆角、阴影、字体、`.ts-card` / `.ts-segmented` 等公共样式。
 - `frontend/src/styles/naiveTheme.ts`、`chartTheme.ts`：与 tokens.css 同值同步。
-- `frontend/src/App.vue`：隐私同意引导壳（检查 / 政策 / 退出确认三态；业务主应用在后端 Ready 后动态挂载）。
+- `frontend/src/App.vue`：隐私同意引导壳（检查（含耗时较长提示）/ 政策 / 退出确认 / 主界面加载失败四态界面，`data-boot-state` 标记当前阶段；业务主应用在后端 Ready 后动态挂载，加载失败整页重新加载）。
 - `frontend/src/MainApp.vue`：吸顶玻璃导航与整体滚动容器（同意之后的业务主应用）。
 - `frontend/src/components/`、`frontend/src/views/`：按本文契约调整。
 
