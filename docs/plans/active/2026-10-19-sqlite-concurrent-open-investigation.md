@@ -28,6 +28,7 @@
 4. **版本与打开 flags**：产品 SQLite 3.53.2（rusqlite bundled，`rusqlite::version()`）；`HistoryDb::open` 用 `READ_WRITE | CREATE | URI | NO_MUTEX`，`read_snapshot` 用 `READ_ONLY | NO_MUTEX`。
 5. **失败 / 通过会话环境记录**：失败会话为 WorkBuddy Git Bash（存在 `BASH_FUNC_rm` 包装与 `CODEBUDDY_SAFE_DELETE_*`、沙箱相关变量），cargo/rustc 1.99.0（`C:\Users\admin\.cargo\bin`），TEMP/TMP = `C:\Users\admin\AppData\Local\Temp`，提交时 node 进程 5 个（WorkBuddy 自身）。通过会话（Codex）的工具链与 TEMP 未记录。注意：cargo 构建写 `target/` 被会话沙箱拒绝访问是独立事件（构建缓存写入），不作为 SQLite readonly 的根因。
 6. **Cache 覆盖**：修复前 100 次 2 失败、修复后同口径 100 次 0 失败；`Cache::open` 与 `HistoryDb::open` 共用同一重试预算与类型判定（`crate::retry`）。
+7. **真实持锁用例**（HistoryDb 与 Cache 各一条）：另一连接持有 `BEGIN IMMEDIATE` 写事务时，`open` 的总等待受外层绝对 deadline 约束（2s 附近）并以类型化瞬态错误失败。断言留调度容差（下界预算 −0.5s、上界预算 +1s）——「锁等待预算」可精确断言，操作系统 I/O 与线程调度不可严格限制，只断言不会出现「多个完整预算叠加」的量级。
 
 ## 3. 结论与处置
 
@@ -36,8 +37,10 @@
 **推断（未逐层证明）**：具体机理是「本连接在 WAL 切换/迁移窗口内，连接级 journal 状态与库头不一致」。探针证据（`mode=wal` 但写事务立即 readonly、stage_ms≈0、重开连接恢复）支持这一解释，但没有逐层跟踪 SQLite 内部状态，故不作为已证实结论。
 
 **修复**：
-- 新增 `crate::retry` 统一预算与判定：2s 共享 deadline、20ms 间隔；`is_concurrent_init_transient` **只按 `rusqlite::Error` 类型**（ReadOnly/Busy）判定，不匹配消息文本；预算耗尽返回最后一个错误。
-- `HistoryDb::open` 与 `Cache::open` 的 WAL 切换与整个打开序列共用该预算（原来 WAL 100×20ms 与打开 20×20ms 各自计时、可叠加）；每次重试新建连接。
+- 新增 `crate::retry`：外层**一次创建**绝对 deadline（2s 预算）+ 20ms 间隔；`is_concurrent_init_transient` **只按 `rusqlite::Error` 类型**（ReadOnly/Busy）判定，不匹配消息文本。时钟与 sleep 可注入（`Clock`/`RealClock`）。
+- `HistoryDb::open` 与 `Cache::open` 的打开序列、WAL 重试与迁移/初始化事务等待**共用同一个绝对 deadline**（内层只用剩余预算，不得重新 `now + 2s`）——注意：「使用同一预算常量」不等于「共享同一 deadline」，旧实现正是外层与内层各自按 `now + 预算` 计时，每次进入内层都能重新获得完整预算，总时长不受单一上限约束（不是某个固定秒数的叠加）。
+- 每个可能锁等待的 SQLite 阶段（WAL 切换前、迁移/初始化事务前）按**剩余预算**重新设置 `busy_timeout`，不是只在连接建立时设一次完整预算；预算耗尽则该阶段直接失败。
+- 睡眠结束后重新检查 deadline，预算耗尽不再启动下一次重试，返回最后一个类型化错误。
 - 类型化错误保留：迁移失败用 `MigrateFailure` 包装——`Display` 仍带完整原因与「历史库文件保留」位置（未知版本 / SQL 失败不会被压掉），`source` 链保留 `rusqlite::Error`；`anyhow!("{:#}")` 字符串化与消息兜底判定移除。
 
 **回归**：
