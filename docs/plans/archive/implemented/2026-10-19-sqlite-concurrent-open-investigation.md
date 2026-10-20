@@ -1,5 +1,11 @@
 # SQLite 并发打开失败的根因调查
 
+> **2026-10-20 归档复核：已完成并发布。** 本计划随 [PR #16](https://github.com/ywltby/tokenscope/pull/16) 合入 main `0ffab19`，并由 [Release 39353860618](https://github.com/ywltby/tokenscope/actions/runs/39353860618) 发布 [v0.5.2](https://github.com/ywltby/tokenscope/releases/tag/v0.5.2)。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39353860584)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39353860657) 均成功；发布的安装、六个单跳升级和两条连续升级链全部通过。原草稿交付限制及“待复核/未合并”描述仅为下文历史状态。
+>
+> 启动恢复与 SQLite 并发打开修复均已通过复核，无独立实施待办。旧 dark 会话超时的具体根因未被追溯证实；取证与恢复交付完成不等于证实该根因。真实系统验收仍见[独立待办](../../system-acceptance-todo.md)，其他剩余任务只在[整合计划](../../active/2026-10-11-consolidated-remaining-work.md)维护。
+
+## 归档前原文
+
 > 状态：**调查完成（2026-10-19）：HistoryDb 与 Cache 两条打开序列均已覆盖、修复并验证**（由启动卡死恢复计划复核意见提出：撤回测试层容错后另案调查）。
 > 分支与版本归属：随 `fix/boot-recovery` 交付至草稿 PR #16（版本 0.5.2）；前置的 v0.5.1 已发布并登记基线。
 > 根因表述分级见 §3：「失败与并发首次初始化绑定」是隔离对照**已证实**的证据；「连接级 journal 状态与库头不一致」是**推断**，未逐层证明。

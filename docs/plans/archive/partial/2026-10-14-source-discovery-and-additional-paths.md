@@ -4,12 +4,12 @@
 
 > **2026-10-19 归档复核：部分完成。** S00–S07 与审阅补修均已实施，PR [#14](https://github.com/ywltby/tokenscope/pull/14) 于 2026-10-18 合入 main（`599c89e`），PR 最终 HEAD `7b29082` 的 CI、Native UI E2E、安装与四项单跳升级全部通过。main 上 Native UI E2E 通过（未复现 PR2 合入后的卡死），但 CI 的 frontend 组与 Release 的两条连续升级链失败，发布被跳过：v0.5.0 从未公开、已登记为 unpublished，本计划的改动由修复批次 0.5.1 首次公开。详见 [§7 合入与发布记录](#合入与发布记录2026-10-19)。剩余待验与遗留缺陷只在[整合计划 N14](../../active/2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) 登记（真实数据性能归 N13）；归档不表示待验项通过。
 >
+> **2026-10-20 状态补记**：PR #15 的 v0.5.1 连续升级链已实跑通过；PR #16 的取证与引导恢复已合入并发布 v0.5.2，N14 第 1、3 项关闭（旧 dark 超时根因仍未证实）。本计划继续部分完成，剩余仅为下表事项；下文旧发布/待验描述保留为历史。
+>
 > | 剩余事项 | 承接 |
 > | --- | --- |
-> | `upgrade-chain` 连续升级链实测：0.5.0 因测试架缺陷失败，已修复，待 0.5.1 发布取证 | [N14](../../active/2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) |
 > | 采集层权限拒绝 fixture（S03 遗留） | [N14](../../active/2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) |
 > | 预设切换的迟到重复查询批次（原生 ui-system 取证，产品缺陷） | [N14](../../active/2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) |
-> | 浏览器契约 `ui_control_material` dark 会话壳层 10 秒未出现（原因未明，已补失败取证） | [N14](../../active/2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) |
 > | 真实数据性能基准（`perf_real_data`，§4.4 待验） | [N13](../../active/2026-10-11-consolidated-remaining-work.md#n13真实规模历史库性能基准) |
 >
 > 归档前原文状态：[审阅第 13 节](../../../reviews/2026-10-15-source-discovery-plan-review.md)复审通过；**2026-10-18 精简修订与新增 S00 已经用户确认**（见 [§0](#0-2026-10-18-精简修订)），可以开工；S00–S07 均未实施。
