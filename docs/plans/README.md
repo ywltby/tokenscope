@@ -1,6 +1,6 @@
 # TokenScope 计划与完成状态总账
 
-> 更新日期：2026-10-20。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
+> 更新日期：2026-10-21。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
 > 唯一当前待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)。真实跨午夜、长时间休眠、跨显示器在[独立系统验收待办](system-acceptance-todo.md)维护，均未排期、未标通过。[审计索引](audits/README.md)保留历史时点结论。
 
 ## 现在执行什么
@@ -14,9 +14,8 @@
 | N12 系统与发布签字 | 安装、版本递增、真实升级及连续链已有成功证据；其余系统验收和签字仍待验 |
 | N13 真实性能 | 历史库冷/热查询、多根真实数据性能复测未完成，按只读来源与隔离输出执行 |
 | N14 来源目录遗留 | 第 1 项连续升级链、第 3 项取证与恢复交付已关闭；第 2 项预设切换重复查询、第 4 项权限拒绝 fixture 仍待做 |
-| N15 打开锁等待回归 | 已实施并推送 `ff1bda0`，固定常驻值、备份不中断、最新库免写锁；0.5.5 按[专项计划](active/2026-10-20-sqlite-open-lock-wait.md)交付草稿 PR，待复核合入 |
 
-N01–N09 已完成；15 个责任编号中为 **9 项完成、2 项部分完成（N12/N14）、3 项专项验收未闭合（N10/N11/N13）、1 项修复已实施待草稿交付复核（N15）**，共 6 个仍开放的责任编号，不等于 6 个单独操作。
+N01–N09、N15 已完成；15 个责任编号中为 **10 项完成、2 项部分完成（N12/N14）、3 项专项验收未闭合（N10/N11/N13）**，共 5 个仍开放的责任编号，不等于 5 个单独操作。
 
 ## 已交付与证据边界
 
@@ -24,8 +23,9 @@ N01–N09 已完成；15 个责任编号中为 **9 项完成、2 项部分完成
 - PR #14 来源目录功能已合入；v0.5.0 因发布测试架失败未公开，其功能由 PR #15 的 v0.5.1 首次公开。PR #15 合并 `9ea0c584`，[Release 39291272967](https://github.com/ywltby/tokenscope/actions/runs/39291272967) 的两条连续升级链成功，N14 第 1 项关闭。
 - PR #16 启动取证与恢复、SQLite 并发打开修复合并 `0ffab19`，v0.5.2 已发布；main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39353860584)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39353860657)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39353860618) 全成功。N14 第 3 项按原验收条件关闭，旧超时根因仍未证实。
 - PR #17（`89aec76`）仅收录研究资料及版本/基线文件，不改变产品行为，也不自动增加开发任务。本次计划收尾以已核验的 v0.5.2 发布证据为基准，不借用其他版本结果补记未执行验收。
+- PR #19 打开锁等待回归修复合并 `1156385`，v0.5.5 已发布；main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39452749833)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39452749860)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39452749887) 全成功，N15 关闭。
 
-`active/` 除整合计划外，只有执行中的 [SQLite 打开锁等待修复](active/2026-10-20-sqlite-open-lock-wait.md)（N15，完成后归档）。归档共 **46 份：17 份已实现、27 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
+`active/` 只保留整合计划。归档共 **47 份：18 份已实现、27 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
 
 必须保持用户定稿：一个 `~/.tokenscope/history.db`，只保存精简 token/cwd 元数据；全部代理有效用量纳入；源日志删除或停用仍查得到历史；CCS 设置页只手动单次导入，导入与已有事实求并集。较新规则优先于旧“现存日志是唯一事实”等历史设计。
 
@@ -34,7 +34,8 @@ N01–N09 已完成；15 个责任编号中为 **9 项完成、2 项部分完成
 | 计划 | 交付 | 当前状态 |
 | --- | --- | --- |
 | [启动卡死取证补强与引导期恢复](archive/implemented/2026-10-19-boot-stall-recovery.md) | PR #16 / v0.5.2 | BS01–BS06 完成，已复核、合并、发布；N14 第 3 项关闭 |
-| [SQLite 并发打开失败调查](archive/implemented/2026-10-19-sqlite-concurrent-open-investigation.md) | 随 PR #16 / v0.5.2 | HistoryDb/Cache 修复、类型化错误、绝对 deadline 与定向回归完成；推断与实证分开保留 |
+| [SQLite 并发打开失败调查](archive/implemented/2026-10-19-sqlite-concurrent-open-investigation.md) | 随 PR #16 / v0.5.2 | HistoryDb/Cache 修复、类型化错误、绝对 deadline 与定向回归完成；推断与实证分开保留；锁等待语义由下一行修正 |
+| [SQLite 打开锁等待回归修复](archive/implemented/2026-10-20-sqlite-open-lock-wait.md)（2026-10-21 补入） | PR #19 / v0.5.5 | LW01–LW05 及复核补修完成，已合并、发布；N15 关闭 |
 
 历史执行命令、测试数量和“等待 PR/发布”等语句仅代表当时状态。当前执行以整合计划及仓库现行工具为准；每次准备合入 main 的批次仍按 CLAUDE.md 登记上一发布基线并递增一次版本。
 

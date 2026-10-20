@@ -8,11 +8,11 @@
 
 **Tech Stack:** Rust / SQLite / Tauri 2 / Vue 3，以及现有 Rust、Vitest、浏览器和原生 acceptance 测试工具。
 
-- 整理日期：2026-10-11；当前状态更新：2026-10-20。
-- 状态：**9 项完成、2 项部分完成（N12/N14）、3 项专项验收未闭合（N10/N11/N13）、1 项修复已实施待草稿交付复核（N15），共 6 个开放责任编号。** N01–N09 不重复实施；N14 第 1、3 项已关闭，第 2、4 项仍开放。
-- 已核验交付基线：PR #15 合并 `9ea0c584`、v0.5.1 公开，连续升级链成功；PR #16 合并 `0ffab19`、v0.5.2 公开，[main CI](https://github.com/ywltby/tokenscope/actions/runs/39353860584)、[原生 E2E](https://github.com/ywltby/tokenscope/actions/runs/39353860657)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39353860618) 全成功（安装、六个单跳、两条连续链）。PR #17 研究资料合入 `89aec76` 不改变这些专项验收结论。
+- 整理日期：2026-10-11；当前状态更新：2026-10-21。
+- 状态：**10 项完成（N01–N09、N15）、2 项部分完成（N12/N14）、3 项专项验收未闭合（N10/N11/N13），共 5 个开放责任编号。** N01–N09、N15 不重复实施；N14 第 1、3 项已关闭，第 2、4 项仍开放。
+- 已核验交付基线：PR #15 合并 `9ea0c584`、v0.5.1 公开，连续升级链成功；PR #16 合并 `0ffab19`、v0.5.2 公开，[main CI](https://github.com/ywltby/tokenscope/actions/runs/39353860584)、[原生 E2E](https://github.com/ywltby/tokenscope/actions/runs/39353860657)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39353860618) 全成功（安装、六个单跳、两条连续链）。PR #17 研究资料合入 `89aec76` 不改变这些专项验收结论。PR #19 合并 `1156385`、v0.5.5 公开，main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39452749833)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39452749860)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39452749887) 全成功（安装、六个单跳、两条连续链），N15 关闭。
 - 启动恢复和 SQLite 并发调查已移入 archive/implemented；下文及 §7 的旧提交、版本、失败/通过记录保留为历史证据，不能替代当前待验矩阵。
-- 待办：N15 打开锁等待回归修复（P1，优先）、N10 隐私强取证、N11 原生统一验收、N12 其余系统/签字、N13 真实性能、N14 重复查询批次及权限拒绝 fixture。真实跨午夜、长时间休眠、跨显示器仍在[独立系统待办](../system-acceptance-todo.md)，不在本轮执行。
+- 待办：N10 隐私强取证、N11 原生统一验收、N12 其余系统/签字、N13 真实性能、N14 重复查询批次及权限拒绝 fixture。真实跨午夜、长时间休眠、跨显示器仍在[独立系统待办](../system-acceptance-todo.md)，不在本轮执行。
 - 总账：[计划目录](../README.md)；历史逐份结论：[审计索引](../audits/README.md)；发布附属清单：[D5](../d5-acceptance-checklist.md)。
 
 ## 1. 优先级与状态规则
@@ -42,7 +42,7 @@
 
 ## 3. 唯一任务状态表
 
-保留 N01–N15 共 15 个稳定责任编号：N01–N09 已完成，N12/N14 部分完成，N10/N11/N13 专项验收未闭合，N15 为 2026-10-20 复核新增的修复，共 6 个开放责任编号。安装、版本递增、真实单跳与连续升级已有发布证据；剩余范围以各行及 N14 子项为准，历史执行记录移至 §7，不混入当前状态表。
+保留 N01–N15 共 15 个稳定责任编号：N01–N09 已完成，N12/N14 部分完成，N10/N11/N13 专项验收未闭合；N15 为 2026-10-20 复核新增、2026-10-21 随 v0.5.5 关闭的修复，共 5 个开放责任编号。安装、版本递增、真实单跳与连续升级已有发布证据；剩余范围以各行及 N14 子项为准，历史执行记录移至 §7，不混入当前状态表。
 
 | ID | 优先级 | 任务 | 当前状态 | 是否仍有必要 / 来源 |
 | --- | --- | --- | --- | --- |
@@ -60,7 +60,7 @@
 | N12 | P2（用户要求的版本递增与旧版升级）；其余系统尾项 P3 | 当前产物的 D5 系统、安装及发布验收 | 部分完成；v0.5.2 发布的安装、六个单跳升级、两条连续链成功；其余系统验收与签字仍待验 | 用户 2026-10-12 最新要求优先；D5、RC11/AP08 |
 | N13 | P3 | 历史库实际冷/热启动性能基准 | 新历史库真实规模复测未执行 | 有必要，排在正确性之后；H07、旧 D4/性能建议 |
 | N14 | P2 | 来源目录（PR3）遗留待验与竞态缺陷 | 部分完成；第 1、3 项关闭；第 2 项重复查询与第 4 项权限拒绝 fixture 未完成 | 必须；[PR3 归档](../archive/partial/2026-10-14-source-discovery-and-additional-paths.md)剩余事项 |
-| N15 | P1 | 历史库/缓存打开流程的锁等待回归 | 已实施 `ff1bda0`：固定 5000/2000ms，备份不中断，最新库免写事务；0.5.5 按草稿 PR 交付，待复核合入 | 必须；逐项红绿、变异与远程交付边界见[专项计划](2026-10-20-sqlite-open-lock-wait.md) §6 |
+| N15 | P1 | 历史库/缓存打开流程的锁等待回归 | 已完成；固定 5000/2000ms，备份不中断，最新库免写事务；PR #19 合并 `1156385`，v0.5.5 发布，main CI/原生 E2E/Release 全成功 | 必须；逐项红绿、变异与交付证据见[归档专项计划](../archive/implemented/2026-10-20-sqlite-open-lock-wait.md) §6 |
 
 ## 4. 各任务实施与验收
 
@@ -489,9 +489,11 @@ python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
 - 每次查询打开历史库都要拿写锁，与采集或 CCS 导入的长写事务竞争时约 2 秒即失败。
 - 慢 I/O 或升级前备份超过 2 秒时，打开直接失败。main `89aec76` 的 [CI 39361520195](https://github.com/ywltby/tokenscope/actions/runs/39361520195) 中，无竞争的首次打开即因此失败。
 
-实施与验收见[专项计划](2026-10-20-sqlite-open-lock-wait.md)（LW01–LW05）：重试 deadline 只决定是否重试，锁等待恢复固定常驻值，备份不受预算约束，最新版本打开不拿写锁；并发首次初始化回归保持原强度。
+实施与验收见[专项计划](../archive/implemented/2026-10-20-sqlite-open-lock-wait.md)（LW01–LW05，已归档）：重试 deadline 只决定是否重试，锁等待恢复固定常驻值，备份不受预算约束，最新版本打开不拿写锁；并发首次初始化回归保持原强度。
 
 2026-10-20 实施：LW01–LW04 按用户批准合为 `ff1bda0`，9 条独立红灯与元信息补齐绿色对照、两项变异验证、核心 585/10 和普通/acceptance 提交门禁均有记录。LW05 登记 v0.5.4 四资产并递增 0.5.5；最终 HEAD 远程证据随草稿 PR 与交付报告提供，未授权合入，不提前关闭 N15。
+
+2026-10-21 关闭：复核三项补修（`4e626c7` 迁移闲置参数、`4433dba` 登记表校验瞬断重试与 gh 令牌、`8e34e91` 归档链接）后 PR #19 合并 `1156385`；v0.5.5 的 main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39452749833)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39452749860)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39452749887) 全成功，发布含安装、六个单跳与两条连续升级链。
 
 ## 5. 已取代、暂缓与不再单独执行
 
@@ -636,3 +638,4 @@ python -B -m unittest discover -s scripts -p "test_release_metadata.py" -v
 | 2026-10-20 | 发布闭环与计划归档 | 两份专项归档；N14 第 1、3 项关闭 | PR #15 / v0.5.1 连续链证据、PR #16 / v0.5.2 的 main CI 39353860584、Native UI E2E 39353860657、Release 39353860618 均成功。启动恢复及 SQLite 调查归档 implemented；active 只保留本计划。N10/N11/N13 未闭合、N12 系统签字与独立三项系统待办不变；N14 仅剩第 2、4 项。 |
 | 2026-10-20 | PR #16 合入后复核 | 新增 N15（待实施） | 2 秒重试预算兼作锁等待：打开后残留 busy_timeout 约 2 秒（修改前 5 秒），查询打开需写锁，慢 I/O/备份超时即打开失败；临时 worktree 探针与 CI 39361520195 为证据；PR #18 取证判定与 #16 前端恢复复核无阻断问题 |
 | 2026-10-20 | N15 / LW01–LW05 实施 | `ff1bda0`；0.5.5 草稿交付 | LW01–LW04 因测试相互依赖按用户批准合为一个修复提交；恢复固定常驻锁等待、成功备份不中断、完整最新库免写事务，重试规则不变；9 条逐项红灯、1 条绿色对照、两项变异验证和本地门禁通过；LW05 单独登记上一版、递增版本并回填文档，最终远程证据以草稿 PR 对应 HEAD 为准，不合并 |
+| 2026-10-21 | N15 关闭与归档 | PR #19 合并 `1156385`；v0.5.5 发布 | 复核三项补修后 PR HEAD `8e34e91` 全部检查通过；main CI 39452749833、Native UI E2E 39452749860、Release 39452749887 全成功；专项计划归档 implemented |
