@@ -9,13 +9,27 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { queryPublishesDuringReading } from "../lib/collection-publish-window.mjs";
-import { closeBrowserBounded, ensureNotCanceled, spawnSyncBounded } from "../lib/native-scenario.mjs";
+import {
+  observeCollectionCallbacks,
+  queryPublishesDuringReading,
+} from "../lib/collection-publish-window.mjs";
+import {
+  closeBrowserBounded,
+  ensureNotCanceled,
+  spawnSyncBounded,
+} from "../lib/native-scenario.mjs";
 
 const POLL_MS = 100;
 const POLL_FAST_MS = 40;
 
-export async function nativeCollectionStatus({ inst, ck, ev, markStage, markStageDone, isCanceled }) {
+export async function nativeCollectionStatus({
+  inst,
+  ck,
+  ev,
+  markStage,
+  markStageDone,
+  isCanceled,
+}) {
   // 场景级统一纪元：所有时间线的 at_ms 可跨启动比较（轮询窗口不重置）。
   const EPOCH = Date.now();
   const atNow = () => Date.now() - EPOCH;
@@ -64,20 +78,24 @@ export async function nativeCollectionStatus({ inst, ck, ev, markStage, markStag
   };
   /** 一次 DOM 取样：真实采集状态（runId/revision 由事件驱动更新）与查询身份。
    *  data-collection-* 挂在状态胶囊上；data-requests / query 身份在汇总容器上。 */
-  const sample = async (atMs) => {
-    const pill = page().locator(".ts-status-pill").first();
-    return {
-      at_ms: atMs,
-      state: await pill.getAttribute("data-collection-state"),
-      text: (await pill.innerText()).trim(),
-      revision: Number((await pill.getAttribute("data-collection-revision")) || 0),
-      runId: Number((await pill.getAttribute("data-collection-run-id")) || 0),
-      generation: Number((await pill.getAttribute("data-collection-generation")) || 0),
-      requests: Number((await root().getAttribute("data-requests")) || 0),
-      summaryQuery: await root().getAttribute("data-summary-query"),
-      eventsQuery: await root().getAttribute("data-events-query"),
-    };
-  };
+  const sample = async (atMs) =>
+    page().evaluate((at_ms) => {
+      const pill = document.querySelector(".ts-status-pill");
+      const root = document.querySelector("[data-summary-query]");
+      if (!pill || !root) throw new Error("collection sample DOM missing");
+      return {
+        at_ms,
+        page_ms: performance.now(),
+        state: pill.getAttribute("data-collection-state"),
+        text: pill.textContent.trim(),
+        revision: Number(pill.getAttribute("data-collection-revision") || 0),
+        runId: Number(pill.getAttribute("data-collection-run-id") || 0),
+        generation: Number(pill.getAttribute("data-collection-generation") || 0),
+        requests: Number(root.getAttribute("data-requests") || 0),
+        summaryQuery: root.getAttribute("data-summary-query"),
+        eventsQuery: root.getAttribute("data-events-query"),
+      };
+    }, atMs);
   /** 连续取样直到 predicate 成立；全部样本进时间线（证据不打折）。 */
   const pollUntil = async (timeline, predicate, timeout, step = POLL_MS) => {
     const started = Date.now();
@@ -188,10 +206,14 @@ export async function nativeCollectionStatus({ inst, ck, ev, markStage, markStag
   // 无变化：至少两个真实轮次（后台定时采集对未变来源），统计与查询身份不动。
   const baseline = await sample(atNow());
   const t1 = [];
-  await pollUntil(t1, (s) => {
-    const rounds = roundsOf(t1).filter((r) => r.observedDisplayMs !== null);
-    return rounds.length >= 2;
-  }, 30000);
+  await pollUntil(
+    t1,
+    (s) => {
+      const rounds = roundsOf(t1).filter((r) => r.observedDisplayMs !== null);
+      return rounds.length >= 2;
+    },
+    30000,
+  );
   const rounds1 = roundsOf(t1);
   const fullRounds = rounds1.filter((r) => r.observedDisplayMs !== null);
   ck.add(
@@ -219,27 +241,37 @@ export async function nativeCollectionStatus({ inst, ck, ev, markStage, markStag
   );
 
   // 有变化：追加一条身份写死的合成用量，不点刷新——统计 +1、代次前进、
-  // 汇总与明细同 query_id，且查询在读取显示期内发布（查询不等待动画）。
+  // 汇总与明细同 query_id，且终态处理结束前已经发起查询（查询不等待动画）。
+  // 仅观察回调；不延长动画、不伪造状态、不改变真实 IPC。
+  await page().evaluate(
+    `window.__collectionProbe = (${observeCollectionCallbacks.toString()})(window.__TAURI_INTERNALS__, () => performance.now())`,
+  );
   const appended = appendClaudeEvent("cs-fast-1", 310, 17);
   ev.collection_status.appended_events.push({ phase: "fast", ...appended });
   const beforeFast = await sample(atNow());
   const t2 = [];
-  await pollUntil(
-    t2,
-    (s) => s.requests === beforeFast.requests + 1,
-    25000,
-    POLL_FAST_MS,
-  );
+  try {
+    await pollUntil(t2, (s) => s.requests === beforeFast.requests + 1, 25000, POLL_FAST_MS);
+  } finally {
+    ev.collection_status.callback_trace = await page().evaluate(() => {
+      const trace = window.__collectionProbe.read();
+      window.__collectionProbe.dispose();
+      delete window.__collectionProbe;
+      return trace;
+    });
+  }
   const bump = t2.find((s) => s.requests === beforeFast.requests + 1);
   ck.add(
     "changed_round_bumps_stats_without_manual_refresh",
     true,
     `requests ${beforeFast.requests} → ${beforeFast.requests + 1}；身份=${appended.id}`,
   );
-  // 判定语义（2026-10-19 修订）：产品承诺"查询在读取期内已经开始"，不再
-  // 要求统计抢在 1000ms 最短显示期结束前落地（采集 + 查询 ≈982ms 时取样
-  // 可能已翻到 confirmed，39177008549 即此形态，非产品回归）。
-  const publishJudgment = queryPublishesDuringReading({ timeline: t2, baseline: beforeFast });
+  // 不以 DOM 轮询推断 IPC 开始：用同一页面时钟的真实回调边界与查询身份。
+  const publishJudgment = queryPublishesDuringReading({
+    timeline: t2,
+    baseline: beforeFast,
+    trace: ev.collection_status.callback_trace,
+  });
   ck.add("query_publishes_within_reading_window", publishJudgment.ok, publishJudgment.basis);
   ck.add(
     "changed_round_advances_generation_and_run",
@@ -251,7 +283,12 @@ export async function nativeCollectionStatus({ inst, ck, ev, markStage, markStag
     bump.summaryQuery === bump.eventsQuery && bump.summaryQuery !== beforeFast.summaryQuery,
     bump.summaryQuery,
   );
-  ev.collection_status.launches.push({ launch: 1, baseline, rounds: rounds1, timeline: t1.concat(t2) });
+  ev.collection_status.launches.push({
+    launch: 1,
+    baseline,
+    rounds: rounds1,
+    timeline: t1.concat(t2),
+  });
 
   // ── 启动 2：验收注入——慢轮次持续到真实完成、失败立即停、减少动态效果 ──
   inst.opts.env = {
@@ -301,11 +338,17 @@ export async function nativeCollectionStatus({ inst, ck, ev, markStage, markStag
   const recoveredRun = rounds3.find((r) => r.runId > failedRun.runId && r.states.has("confirmed"));
   ck.add(
     "reduced_motion_display_still_minimum",
-    recoveredRun && recoveredRun.observedDisplayMs !== null && recoveredRun.observedDisplayMs >= 2300,
+    recoveredRun &&
+      recoveredRun.observedDisplayMs !== null &&
+      recoveredRun.observedDisplayMs >= 2300,
     `恢复轮显示窗口(ms)=${recoveredRun?.observedDisplayMs}（注入 2500ms）`,
   );
   await waitUntil(async () => {
-    const notice = await page().locator(".ts-notice").first().innerText().catch(() => "");
+    const notice = await page()
+      .locator(".ts-notice")
+      .first()
+      .innerText()
+      .catch(() => "");
     return !notice.includes("读取失败");
   }, 15000);
   const afterRecovery = await sample(atNow());
@@ -326,7 +369,10 @@ export async function nativeCollectionStatus({ inst, ck, ev, markStage, markStag
   await list.focus();
   const rowsBefore = await page().locator(".events-card tbody tr").count();
   await list.press("End");
-  await waitUntil(async () => (await page().locator(".events-card tbody tr").count()) > rowsBefore, 20000);
+  await waitUntil(
+    async () => (await page().locator(".events-card tbody tr").count()) > rowsBefore,
+    20000,
+  );
   const paged = await sample(atNow());
   ck.add(
     "paged_session_has_more_rows",
@@ -363,8 +409,7 @@ export async function nativeCollectionStatus({ inst, ck, ev, markStage, markStag
   const refreshed = await sample(atNow());
   ck.add(
     "paged_hint_click_refreshes_one_batch",
-    refreshed.requests === paged.requests + 1 &&
-      refreshed.summaryQuery === refreshed.eventsQuery,
+    refreshed.requests === paged.requests + 1 && refreshed.summaryQuery === refreshed.eventsQuery,
     `requests=${paged.requests}→${refreshed.requests}；query=${refreshed.summaryQuery}`,
   );
   ev.collection_status.launches.push({ launch: 3, timeline: t5, paged_before: paged, refreshed });

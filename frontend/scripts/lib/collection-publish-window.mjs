@@ -1,47 +1,98 @@
-// query_publishes_within_reading_window 的判定（2026-10-19 修订，纯函数）。
-//
-// 背景：Native UI E2E 39177008549 暴露原判定"统计落地的那次取样仍是读取
-// 态"的时序前提——它要求"采集写入 + 查询"在 1000ms 最短显示期内完成；
-// 该运行采集 ~465ms + 查询 ~517ms ≈ 982ms，落地与显示期同时到点，取样
-// 已翻到 confirmed。产品承诺的其实是"查询在读取期内已经开始"（查询不等
-// 待动画、查询早结束不推迟数据发布——后者由可控时钟单测证明）。判定：
-//   1. 落地前的读取期内观察到新代次查询开始（generation 前进到落地代次，
-//      或胶囊显示"刷新中…"）；或
-//   2. 落地取样本身仍是读取态（查询快于最短显示期的特例）。
-// 只读、有界；供 native-collection-status 契约与单测共用。
-
-/**
- * 判定新代次的查询是否在读取期内开始。
- *
- * @param timeline 按时间升序的取样（与 evidence timeline 同形：state /
- *   text / generation / requests / at_ms 等）。
- * @param baseline 追加事件前的取样（requests 为统计基线）。
- * @returns { ok, basis, publish, readingStartMs, queryStartMs }；basis 为
- *   中文依据串（读取开始、查询开始、落地时刻、落地时的状态）。
- */
-export function queryPublishesDuringReading({ timeline, baseline }) {
-  const index = timeline.findIndex((s) => s.requests === baseline.requests + 1);
-  if (index < 0) {
-    return {
-      ok: false,
-      basis: "时间线中没有统计落地取样（requests 未前进）",
-      publish: null,
-      readingStartMs: null,
-      queryStartMs: null,
+// 原生验收只观察真实 IPC 回调，不改事件、计时器或查询调度。
+// Tauri 2 的 callbacks 是其公开用于调试的 Map；接口不兼容时明确失败。
+// 此函数会序列化到 WebView 执行，必须保持无模块外部依赖。
+export function observeCollectionCallbacks(internals, now) {
+  const callbacks = internals.callbacks;
+  if (!(callbacks instanceof Map)) throw new Error("Tauri callback map unavailable");
+  const records = [];
+  const wrappers = new Map();
+  const originalSet = callbacks.set;
+  const ownSet = Object.getOwnPropertyDescriptor(callbacks, "set");
+  function wrap(id, callback, registeredAt) {
+    const wrapped = function (...args) {
+      const value = args[0];
+      const status = value?.event === "collection-status" ? value.payload : null;
+      if (status) records.push({ kind: "status-enter", at_ms: now(), ...status });
+      // query_begin 的成功响应提供身份；时间取其 resolve 回调注册时刻，
+      // 就是 invoke 同步发起时刻，不把后端响应耗时算作前端延迟。
+      if (
+        registeredAt !== null &&
+        typeof value?.queryId === "string" &&
+        typeof value?.generation === "number"
+      ) {
+        records.push({
+          kind: "query",
+          at_ms: registeredAt,
+          resolved_ms: now(),
+          queryId: value.queryId,
+          generation: value.generation,
+        });
+      }
+      const result = callback.apply(this, args);
+      if (status) records.push({ kind: "status-exit", at_ms: now(), ...status });
+      return result;
     };
+    wrappers.set(id, { callback, wrapped });
+    originalSet.call(callbacks, id, wrapped);
   }
-  const publish = timeline[index];
-  // 本轮读取期：与落地同 runId、发生在落地之前（含落地取样本身）的读取态样本。
-  const reading = timeline
-    .slice(0, index + 1)
-    .filter((s) => s.runId === publish.runId && s.state === "reading");
-  const readingStartMs = reading.length > 0 ? reading[0].at_ms : null;
-  const started = reading.find((s) => s.generation === publish.generation || s.text === "刷新中…");
-  const queryStartMs = started ? started.at_ms : null;
-  const ok = Boolean(started) || publish.state === "reading";
+  for (const [id, callback] of callbacks) wrap(id, callback, null);
+  callbacks.set = function (id, callback) {
+    wrap(id, callback, now());
+    return this;
+  };
+  return {
+    read: () => records.slice(),
+    dispose() {
+      if (ownSet) Object.defineProperty(callbacks, "set", ownSet);
+      else delete callbacks.set;
+      for (const [id, { callback, wrapped }] of wrappers) {
+        if (callbacks.get(id) === wrapped) originalSet.call(callbacks, id, callback);
+      }
+    },
+  };
+}
+
+// 检查名为兼容历史证据保留，但判定不再假设采集能在 1 秒内完成。
+// 当前可见、未翻页、无在途批次：真实终态回调处理结束之前必须已发起
+// 最终落地的 query_begin。快/慢轮次一视同仁；缺证据直接失败。
+export function queryPublishesDuringReading({ timeline, baseline, trace = [] }) {
+  const publish = timeline.find((s) => s.requests === baseline.requests + 1) ?? null;
+  const start = trace.find(
+    (s) => s.kind === "status-enter" && s.phase === "running" && s.runId === publish?.runId,
+  );
+  const end = trace.find(
+    (s) =>
+      s.kind === "status-exit" &&
+      s.phase === "succeeded" &&
+      s.runId === publish?.runId &&
+      s.latestGeneration === publish?.generation,
+  );
+  const query = trace.find(
+    (s) =>
+      s.kind === "query" &&
+      s.queryId === publish?.summaryQuery &&
+      s.generation === publish?.generation,
+  );
+  const ok = Boolean(
+    publish &&
+    start &&
+    end &&
+    query &&
+    publish.summaryQuery === publish.eventsQuery &&
+    publish.summaryQuery !== baseline.summaryQuery &&
+    publish.generation > baseline.generation &&
+    query.at_ms >= start.at_ms &&
+    query.at_ms <= end.at_ms,
+  );
   const basis =
-    `读取开始=${readingStartMs ?? "未观察到"}ms；查询开始=${queryStartMs ?? "未观察到"}ms；` +
-    `落地=${publish.at_ms}ms；落地时状态=${publish.state}/${publish.text}` +
-    (ok ? "" : "；读取期内未见新代次查询开始");
-  return { ok, basis, publish, readingStartMs, queryStartMs };
+    `页面单调时钟：读取开始=${start?.at_ms ?? "缺失"}ms；` +
+    `终态处理结束=${end?.at_ms ?? "缺失"}ms；查询发起=${query?.at_ms ?? "缺失"}ms；` +
+    `query_id=${query?.queryId ?? "缺失"}；终态处理结束前已发起对应查询=${ok}`;
+  return {
+    ok,
+    basis,
+    publish,
+    readingStartMs: start?.at_ms ?? null,
+    queryStartMs: query?.at_ms ?? null,
+  };
 }
