@@ -6,13 +6,13 @@
 //! 立即返回而非锁等待），Cache v3 并发打开 100 次 2 次失败（同一错误
 //! 形态）。
 //!
-//! 预算语义（与旧版的关键区别）：
+//! 重试与锁等待分离：
 //! - **绝对截止时间只在外层创建一次**（[`Deadline::new`]），随后传入
-//!   `open_once`、WAL 重试与迁移等待路径；内层一律用 [`Deadline::remaining`]，
-//!   **不得重新 `now + budget`**——否则嵌套重试各自获得完整预算，
-//!   实际总时长不受控。
-//! - 每个可能锁等待的 SQLite 阶段按**剩余预算**设置 `busy_timeout`
-//!   （[`Deadline::busy_budget`]），不是只在连接建立时设一次完整预算。
+//!   `open_once` 与 WAL 重试；只决定瞬态失败后能否开始下一次尝试，
+//!   **不得重新 `now + budget`**，也不得因截止时间已过而中断成功路径。
+//! - SQLite 锁等待独立使用常驻值：历史库 5000ms、缓存 2000ms。
+//!   单次尝试最多等待「等锁阶段数 × 常驻值」，另加 I/O、备份与 DDL
+//!   耗时；因而 2 秒重试预算不是整个打开流程的硬超时。
 //! - 每次睡眠结束后重新检查截止时间；预算耗尽不再启动下一次重试，
 //!   返回最后一个类型化错误。
 //!
@@ -28,8 +28,14 @@ use std::time::{Duration, Instant};
 /// 并发首次初始化的重试总预算（外层一次创建绝对 deadline）。
 pub(crate) const CONCURRENT_INIT_RETRY_BUDGET: Duration = Duration::from_millis(2000);
 
-/// 重试间隔（与 busy_timeout 的小步等待语义一致）。
+/// 瞬态失败后的重试间隔，与 SQLite 锁等待独立。
 pub(crate) const CONCURRENT_INIT_RETRY_BACKOFF: Duration = Duration::from_millis(20);
+
+/// 历史库连接的常驻锁等待（保持并发初始化修复前的值）。
+pub(crate) const HISTORY_BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
+
+/// 缓存连接的常驻锁等待。
+pub(crate) const CACHE_BUSY_TIMEOUT: Duration = Duration::from_millis(2000);
 
 /// 可注入的时钟与睡眠。
 pub(crate) trait Clock {
@@ -52,8 +58,8 @@ impl Clock for RealClock {
 
 /// 一次打开流程的绝对截止时间。
 ///
-/// **只在最外层创建一次**；`open_once`、WAL 重试、迁移等待都接收同一个
-/// `Deadline`，内层只能用 [`Deadline::remaining`] / [`Deadline::busy_budget`]，
+/// **只在最外层创建一次**；`open_once`、WAL 重试接收同一个
+/// `Deadline`，内层只能用 [`Deadline::remaining`]，
 /// 不得重新计算 `now + budget`。
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Deadline {
@@ -76,13 +82,6 @@ impl Deadline {
     pub(crate) fn expired(&self, clock: &dyn Clock) -> bool {
         self.remaining(clock).is_zero()
     }
-
-    /// 某个可能锁等待阶段可用的 `busy_timeout`：剩余预算；`None` 表示
-    /// 预算已耗尽，调用方不得再启动该阶段的等待。
-    pub(crate) fn busy_budget(&self, clock: &dyn Clock) -> Option<Duration> {
-        let remaining = self.remaining(clock);
-        (!remaining.is_zero()).then_some(remaining)
-    }
 }
 
 /// 瞬态错误：SQLITE_READONLY（extended=8，探针实测形态）或 SQLITE_BUSY。
@@ -99,23 +98,13 @@ pub(crate) fn is_concurrent_init_transient(e: &anyhow::Error) -> bool {
     })
 }
 
-/// 按剩余预算为某个可能锁等待的 SQLite 阶段设置 `busy_timeout`，返回实际
-/// 设置的时长（供诊断与测试断言）。
-///
-/// 每个阶段（WAL 切换的每次尝试、读版本、升级前备份前后、迁移事务前）都
-/// 必须重新调用一次——不能只在连接建立时设置一次完整预算，否则前面的
-/// 阶段（尤其是升级前备份）消耗的时间不会反映到后续等待里。
-/// 预算耗尽时返回错误：该阶段不得再启动等待。
-pub(crate) fn apply_busy_budget(
+/// 设置固定的常驻锁等待值，与重试截止时间无关。
+pub(crate) fn apply_busy_timeout(
     conn: &rusqlite::Connection,
-    deadline: &Deadline,
-    clock: &dyn Clock,
+    timeout: Duration,
 ) -> anyhow::Result<Duration> {
-    let Some(budget) = deadline.busy_budget(clock) else {
-        anyhow::bail!("并发初始化重试预算已耗尽，不再等待数据库锁");
-    };
-    conn.busy_timeout(budget)?;
-    Ok(budget)
+    conn.busy_timeout(timeout)?;
+    Ok(timeout)
 }
 
 /// 在**给定**绝对 deadline 内重试瞬态失败（内层不得新建 deadline）。
@@ -329,20 +318,14 @@ mod tests {
     }
 
     #[test]
-    fn busy_budget_tracks_remaining_time() {
+    fn deadline_tracks_remaining_time() {
         let clock = FakeClock::new();
         let deadline = Deadline::new(&clock, Duration::from_millis(100));
-        assert_eq!(
-            deadline.busy_budget(&clock),
-            Some(Duration::from_millis(100))
-        );
+        assert_eq!(deadline.remaining(&clock), Duration::from_millis(100));
         clock.advance(Duration::from_millis(60));
-        assert_eq!(
-            deadline.busy_budget(&clock),
-            Some(Duration::from_millis(40))
-        );
+        assert_eq!(deadline.remaining(&clock), Duration::from_millis(40));
         clock.advance(Duration::from_millis(40));
-        assert_eq!(deadline.busy_budget(&clock), None);
+        assert_eq!(deadline.remaining(&clock), Duration::ZERO);
         assert!(deadline.expired(&clock));
     }
 }
