@@ -72,6 +72,9 @@ function describe(e: unknown): string {
   return typeof e === "string" ? e : String(e);
 }
 
+/** 检查超过该时长时提示"耗时较长"——不是错误，原请求照常等待。 */
+export const BOOTSTRAP_SLOW_MS = 10_000;
+
 /** 引导门：一次会话一个实例（App.vue 里创建）。 */
 export function createPrivacyGate(invoke: InvokeFn) {
   const snapshot = ref<PrivacySnapshot | null>(null);
@@ -80,11 +83,26 @@ export function createPrivacyGate(invoke: InvokeFn) {
   const exitPromptOpen = ref(false);
   const exitBusy = ref(false);
   const exitError = ref<string | null>(null);
+  /** 最近一次检查超过 BOOTSTRAP_SLOW_MS 仍未返回（提示，不是错误）。 */
+  const slow = ref(false);
+
+  // 代次：只应用最近一次发出的 bootstrap 的结果；accept() 开始时作废在途检查。
+  let generation = 0;
+  let slowTimer: ReturnType<typeof setTimeout> | null = null;
 
   let acceptInFlight = false;
   let pendingExit = false;
 
   const phase = computed<PrivacyPhase>(() => snapshot.value?.phase ?? "checking");
+
+  /** 清除当前检查的计时器与提示（新检查开始、最新一次结束时）。 */
+  function clearSlowTimer(): void {
+    if (slowTimer !== null) {
+      clearTimeout(slowTimer);
+      slowTimer = null;
+    }
+    slow.value = false;
+  }
   const policy = computed<PolicyInfo>(() => snapshot.value?.policy ?? EMPTY_POLICY);
   const saving = computed(() => phase.value === "saving_consent" || phase.value === "starting");
   /** 后端明确报告阻断（损坏/不可读设置、保存失败）：允许「重新检查」。 */
@@ -131,10 +149,20 @@ export function createPrivacyGate(invoke: InvokeFn) {
 
   /** 检查必要设置（幂等；失败保持封闭并提供重试）。 */
   async function bootstrap(): Promise<void> {
+    const gen = ++generation;
+    clearSlowTimer();
+    slowTimer = setTimeout(() => {
+      if (gen === generation) slow.value = true;
+    }, BOOTSTRAP_SLOW_MS);
     try {
-      apply(normalize(await invoke("privacy_bootstrap")));
+      const next = normalize(await invoke("privacy_bootstrap"));
+      if (gen !== generation) return; // 已被更新的调用/accept 取代：整体丢弃
+      clearSlowTimer();
+      apply(next);
       error.value = null;
     } catch (e) {
+      if (gen !== generation) return; // 迟到的失败同样丢弃，不写入错误
+      clearSlowTimer();
       error.value = `无法检查隐私设置：${describe(e)}`;
     }
   }
@@ -144,6 +172,8 @@ export function createPrivacyGate(invoke: InvokeFn) {
     if (acceptInFlight) return;
     if (phase.value !== "needs_consent" && phase.value !== "blocked_error") return;
     acceptInFlight = true;
+    generation++; // 作废在途 bootstrap：迟到的检查不得退回保存中/就绪
+    clearSlowTimer();
     error.value = null;
     snapshot.value = { ...(snapshot.value ?? normalize(null)), phase: "saving_consent" };
     try {
@@ -202,6 +232,7 @@ export function createPrivacyGate(invoke: InvokeFn) {
     phase: phase as ComputedRef<PrivacyPhase>,
     policy,
     saving,
+    slow: slow as Ref<boolean>,
     blocked,
     blockedDetail,
     consentVisible,

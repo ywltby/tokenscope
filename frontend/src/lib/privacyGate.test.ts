@@ -1,6 +1,6 @@
 // P04/P05：隐私引导状态模块的单元测试（不含组件，直接验证门的行为）。
-import { describe, expect, it, vi } from "vitest";
-import { createPrivacyGate, type PrivacySnapshot } from "./privacyGate";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { BOOTSTRAP_SLOW_MS, createPrivacyGate, type PrivacySnapshot } from "./privacyGate";
 
 const POLICY = {
   title: "TokenScope 隐私政策",
@@ -141,5 +141,108 @@ describe("P04/P05 隐私引导门（状态模块）", () => {
     expect(gate.phase.value).toBe("ready");
     expect(gate.exitPromptOpen.value).toBe(false);
     expect(gate.consentVisible.value).toBe(false);
+  });
+});
+
+describe("BS01 检查耗时提示与代次保护", () => {
+  /** 假计时器下排空微任务：响应链上的 await 都走完。 */
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("slow_hint_is_not_error：挂起超过阈值只提示不报错", async () => {
+    vi.useFakeTimers();
+    const invoke = vi.fn((_cmd: string) => new Promise<unknown>(() => {}));
+    const gate = createPrivacyGate(invoke);
+    void gate.bootstrap();
+    await vi.advanceTimersByTimeAsync(BOOTSTRAP_SLOW_MS);
+    expect(gate.slow.value).toBe(true);
+    expect(gate.error.value).toBeNull();
+    expect(gate.phase.value).toBe("checking");
+  });
+
+  it("late_ready_after_slow_clears_hint：超时提示后原请求返回 ready，提示清除", async () => {
+    vi.useFakeTimers();
+    let resolveBoot!: (value: unknown) => void;
+    const invoke = vi.fn((_cmd: string) => new Promise((r) => (resolveBoot = r)));
+    const gate = createPrivacyGate(invoke);
+    void gate.bootstrap();
+    await vi.advanceTimersByTimeAsync(BOOTSTRAP_SLOW_MS);
+    expect(gate.slow.value).toBe(true);
+    resolveBoot(snapshot("ready"));
+    await flush();
+    expect(gate.slow.value).toBe(false);
+    expect(gate.phase.value).toBe("ready");
+  });
+
+  it("stale_success_ignored：迟到的 needs_consent 不把 ready 退回去", async () => {
+    vi.useFakeTimers();
+    const resolvers: ((value: unknown) => void)[] = [];
+    const invoke = vi.fn((_cmd: string) => new Promise((r) => resolvers.push(r)));
+    const gate = createPrivacyGate(invoke);
+    void gate.bootstrap(); // 第一次：挂起
+    void gate.retry(); // 第二次：返回 ready
+    resolvers[1](snapshot("ready"));
+    await flush();
+    expect(gate.phase.value).toBe("ready");
+    resolvers[0](snapshot("needs_consent")); // 第一次迟到
+    await flush();
+    expect(gate.phase.value).toBe("ready");
+  });
+
+  it("stale_failure_ignored：迟到的失败不写入错误", async () => {
+    vi.useFakeTimers();
+    const settles: { resolve: (value: unknown) => void; reject: (e: unknown) => void }[] = [];
+    const invoke = vi.fn(
+      (_cmd: string) =>
+        new Promise((resolve, reject) => {
+          settles.push({ resolve, reject });
+        }),
+    );
+    const gate = createPrivacyGate(invoke);
+    void gate.bootstrap(); // 第一次：挂起
+    void gate.retry(); // 第二次：ready
+    settles[1].resolve(snapshot("ready"));
+    await flush();
+    expect(gate.phase.value).toBe("ready");
+    settles[0].reject("第一次检查迟到失败（合成）");
+    await flush();
+    expect(gate.error.value).toBeNull();
+    expect(gate.phase.value).toBe("ready");
+  });
+
+  it("accept_invalidates_pending_bootstrap：同意作废在途检查，迟到响应不回退", async () => {
+    vi.useFakeTimers();
+    const settles = new Map<
+      string,
+      { resolve: (value: unknown) => void; reject: (e: unknown) => void }[]
+    >();
+    const invoke = vi.fn(
+      (cmd: string) =>
+        new Promise((resolve, reject) => {
+          const list = settles.get(cmd) ?? [];
+          list.push({ resolve, reject });
+          settles.set(cmd, list);
+        }),
+    );
+    const gate = createPrivacyGate(invoke);
+    void gate.bootstrap();
+    settles.get("privacy_bootstrap")![0].resolve(snapshot("blocked_error"));
+    await flush();
+    expect(gate.phase.value).toBe("blocked_error");
+    void gate.retry(); // 挂起
+    expect(settles.get("privacy_bootstrap")).toHaveLength(2);
+    const saving = gate.accept(); // 作废在途 bootstrap
+    settles.get("privacy_accept")![0].resolve(snapshot("ready"));
+    await saving;
+    await flush();
+    expect(gate.phase.value).toBe("ready");
+    settles.get("privacy_bootstrap")![1].resolve(snapshot("needs_consent")); // 迟到
+    await flush();
+    expect(gate.phase.value).toBe("ready");
   });
 });

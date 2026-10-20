@@ -103,6 +103,7 @@ vi.mock("./views/Settings.vue", () => ({
 
 import App from "./App.vue";
 import { renderPolicyMarkdown } from "./lib/policyMarkdown";
+import { BOOTSTRAP_SLOW_MS } from "./lib/privacyGate";
 
 /// 打包进程序的政策全文（结构与 docs/privacy.md 同构：九章 + 列表 + 链接 +
 /// 粗体）。与源文件逐字一致由 Rust 侧 include_str! 契约
@@ -416,6 +417,32 @@ describe("P04 隐私同意引导壳", () => {
     await flushPromises();
     expect(w.text()).toContain("退出 TokenScope？");
     w.unmount();
+  });
+
+  it("slow_bootstrap_shows_hint_and_recheck：超时提示可见并发出第二次检查", async () => {
+    vi.useFakeTimers();
+    try {
+      const bootResolvers: ((value: unknown) => void)[] = [];
+      mockGate({
+        privacy_bootstrap: () => new Promise((resolve) => bootResolvers.push(resolve)),
+      });
+      const w = mount(App);
+      await flushPromises();
+      expect(w.find(".privacy-shell").attributes("data-boot-state")).toBe("checking");
+      await vi.advanceTimersByTimeAsync(BOOTSTRAP_SLOW_MS);
+      await flushPromises();
+      expect(w.find(".privacy-shell").attributes("data-boot-state")).toBe("checking-slow");
+      expect(w.text()).toContain("检查耗时较长");
+      expect(w.text()).not.toContain("无法检查隐私设置");
+      await buttonByText(w, "重新检查").trigger("click");
+      await flushPromises();
+      expect(invokeMock.mock.calls.filter((call) => call[0] === "privacy_bootstrap")).toHaveLength(
+        2,
+      );
+      w.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("关闭事件到达后只出现一个退出确认（重复 X 不堆叠）", async () => {

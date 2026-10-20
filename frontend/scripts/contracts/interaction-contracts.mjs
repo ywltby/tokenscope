@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { uiRefreshLifecycle, uiRefreshClock } from "./ui-refresh-contract.mjs";
 import { uiDateKeyboardMatrix } from "./ui-date-keyboard-contract.mjs";
 import { uiControlMaterial } from "./ui-control-material-contract.mjs";
+import { bootStallRecovery } from "./ui-boot-stall-contract.mjs";
 
 import { PRIVACY_PROTECTED_COMMANDS } from "../fixtures/ui-contracts.mjs";
 import { captureContractFailure, trackSession } from "../lib/contract-failure.mjs";
@@ -54,6 +55,9 @@ export const REQUIRED_CONTRACTS = [
   "ui_date_keyboard_matrix",
   // C06（控件材质与浮层可读性计划）：像素级边界对比度与焦点契约。
   "ui_control_material",
+  // BS04（启动卡死取证与引导期恢复计划）：检查挂起可见可重查、迟到响应
+  // 被代次保护丢弃；主界面加载失败可见、可整页重载恢复。
+  "boot_stall_recovery",
 ];
 
 const VIEWPORTS = {
@@ -270,6 +274,7 @@ const IMPL = {
   ui_date_keyboard_matrix: uiDateKeyboardMatrix,
   ui_refresh_lifecycle: uiRefreshLifecycle,
   ui_refresh_clock: uiRefreshClock,
+  boot_stall_recovery: bootStallRecovery,
   async large_pricing_does_not_block_settings_navigation(ctx) {
     const name = "large_pricing_does_not_block_settings_navigation";
     const session = await ctx.open({ fixture: "large-pricing", viewport: VIEWPORTS.desktop });

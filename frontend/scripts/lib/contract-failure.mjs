@@ -41,6 +41,8 @@ export function domSnapshotInPage() {
       rect.width > 0 && rect.height > 0 && getComputedStyle(shell).visibility !== "hidden";
   }
   const root = document.documentElement;
+  const shellEl = document.querySelector("#app .privacy-shell");
+  const pageIpc = Array.isArray(window.__TS_IPC_CALLS) ? window.__TS_IPC_CALLS : [];
   return {
     url: location.href,
     ready_state: document.readyState,
@@ -51,10 +53,66 @@ export function domSnapshotInPage() {
     app_children: app ? app.childElementCount : null,
     app_shell: !!shell,
     app_shell_visible: shellVisible,
+    // 引导阶段标记（App.vue 的 data-boot-state，只用于诊断）与页面侧 IPC 尾部。
+    boot_state: shellEl ? shellEl.getAttribute("data-boot-state") : null,
+    page_ipc: pageIpc.slice(-15).map((call) => call.cmd),
+    page_ipc_count: pageIpc.length,
     app_outline: app ? outline(app, 2) : null,
     body_text_head: (document.body?.innerText ?? "").slice(0, 400),
     page_errors: Array.isArray(window.__TS_PAGE_ERRORS) ? window.__TS_PAGE_ERRORS.slice(-20) : [],
   };
+}
+
+/**
+ * 引导卡死的自动判断（只读、纯函数）：按固定顺序给出最可能的卡点。
+ *
+ * 判定顺序：
+ *   1. DOM 摘要不可读 → "DOM 不可读"；
+ *   2. boot_state=main-load-failed，或页面错误匹配动态导入/预加载 CSS →
+ *      "主界面资源加载失败"，附失败的同源请求；
+ *   3. boot_state=checking / checking-slow：按 IPC 两侧对照细分——页面侧
+ *      已发出 privacy_bootstrap 而 Node 侧无记录（"IPC 未到达 Node"）、
+ *      Node 侧挂起（"fixture 未返回"）、Node 侧已返回（"响应未回到页
+ *      面"）、页面侧也没有（"页面未发出检查"）；
+ *   4. boot_state=loading-main → "主界面导入未结束"；
+ *   5. boot_state=main 但壳层缺失或不可见 → "主界面挂载异常"；
+ *   6. 其余 → "未分类"。
+ *
+ * @param {object} item captureContractFailure 的会话取证项（dom、
+ *   page_errors、ipc_tail、ipc_pending、requests_tail）。
+ * @returns {string} 一行判断，直接进摘要与取证文件。
+ */
+export function classifyBootStall(item) {
+  const dom = item.dom ?? {};
+  if (dom.unavailable !== undefined) return "DOM 不可读";
+  const pageErrors = item.page_errors ?? [];
+  const resourceError = pageErrors.find((e) =>
+    /dynamically imported module|preload CSS/i.test(String(e)),
+  );
+  if (dom.boot_state === "main-load-failed" || resourceError) {
+    const failed = (item.requests_tail ?? [])
+      .filter((r) => r.outcome === "error")
+      .map((r) => r.path)
+      .join(", ");
+    return `主界面资源加载失败（失败请求：${failed || "未见失败请求记录"}）`;
+  }
+  const boot = dom.boot_state;
+  if (boot === "checking" || boot === "checking-slow") {
+    const pageIpc = dom.page_ipc ?? [];
+    const nodeTail = item.ipc_tail ?? [];
+    const nodePending = item.ipc_pending ?? [];
+    if (!pageIpc.includes("privacy_bootstrap")) return "页面未发出检查（页面侧未见 privacy_bootstrap）";
+    if (nodePending.includes("privacy_bootstrap")) return "fixture 未返回（privacy_bootstrap 挂起）";
+    const settled = nodeTail.filter((c) => c.cmd === "privacy_bootstrap" && c.ms !== undefined);
+    if (settled.length > 0) {
+      const last = settled.at(-1);
+      return `响应未回到页面（Node 侧 ${last.outcome ?? "已返回"}，at=${last.at ?? "?"}ms，${last.ms}ms 后落定）`;
+    }
+    return "IPC 未到达 Node（页面侧已发出 privacy_bootstrap，Node 侧无记录）";
+  }
+  if (boot === "loading-main") return "主界面导入未结束";
+  if (boot === "main" && (!dom.app_shell || !dom.app_shell_visible)) return "主界面挂载异常";
+  return "未分类";
 }
 
 const message = (error) => String(error instanceof Error ? error.message : error);
@@ -100,7 +158,8 @@ export function summarizeFailure(sessions) {
       return (
         `${item.label}[${item.closed_before_capture ? "已关闭" : "打开"}] ${shell} ` +
         `页面错误=${item.page_errors.length} 失败请求=${item.failed_requests.length} ` +
-        `IPC=${item.ipc_calls} 最后IPC=${item.last_ipc.at(-1) ?? "无"}`
+        `IPC=${item.ipc_calls} 最后IPC=${item.last_ipc.at(-1) ?? "无"}` +
+        (item.suspected ? ` 判断=${item.suspected}` : "")
       );
     })
     .join("；");
@@ -123,12 +182,33 @@ export async function captureContractFailure({
   for (const [index, entry] of registry.entries()) {
     const session = entry.session;
     const ipcCalls = session.ipcCalls ?? [];
+    const sameOriginRequests = session.requests ?? [];
     const item = {
       label: entry.label,
+      created_at:
+        session.createdAt !== undefined ? new Date(session.createdAt).toISOString() : null,
       closed_before_capture: entry.closed,
       page_errors: [...(session.pageErrors ?? [])].slice(-20),
       ipc_calls: ipcCalls.length,
       last_ipc: ipcCalls.slice(-15).map((call) => call.cmd),
+      // IPC 时间线尾与挂起：at 为相对会话创建的毫秒数，挂起的调用没有 ms。
+      ipc_tail: ipcCalls.slice(-15).map((call) => ({
+        cmd: call.cmd,
+        at: call.at,
+        ms: call.ms,
+        outcome: call.outcome,
+      })),
+      ipc_pending: ipcCalls.filter((call) => call.ms === undefined).map((call) => call.cmd),
+      // 同源请求时间线尾（保留最近 50 条，这里只取尾 15）与挂起。
+      requests_tail: sameOriginRequests.slice(-15).map((r) => ({
+        path: r.path,
+        at: r.at,
+        ms: r.ms,
+        outcome: r.outcome,
+      })),
+      requests_pending: sameOriginRequests
+        .filter((r) => r.ms === undefined)
+        .map((r) => r.path),
       unknown_commands: [...(session.unknownCommands ?? [])],
       external_requests: [...(session.externalRequests ?? [])].slice(-10),
       failed_requests: [...(session.failedRequests ?? [])].slice(-10),
@@ -148,6 +228,14 @@ export async function captureContractFailure({
       } catch (shotError) {
         item.screenshot = `截图失败：${message(shotError)}`;
       }
+    }
+    // 壳层不可见（或缺失）才给自动判断：主界面正常可见的失败与引导期无关。
+    // DOM 不可读本身是计划 §4 BS03 的第一类判定（"DOM 不可读"），同样要写
+    // suspected，不能因为快照读不到就跳过分类。
+    const shellVisible =
+      item.dom?.unavailable === undefined && item.dom?.app_shell && item.dom.app_shell_visible;
+    if (!shellVisible) {
+      item.suspected = classifyBootStall(item);
     }
     sessions.push(item);
   }

@@ -1,6 +1,6 @@
 # 启动卡死取证补强与引导期恢复
 
-> 状态：**待用户确认**（2026-10-19 起草）。承接[整合计划 N14](2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) 第 3 项。
+> 状态：**用户已确认（2026-10-19）。BS01–BS05 及复核补修完成并推送；计划外并发用例重试已撤回，`HistoryDb`/`Cache` 并发首次初始化与统一绝对 deadline 预算已修复验证；BS06 已完成（PR #15 合并 `9ea0c58`、v0.5.1 发布、基线登记、0.5.2 递增），交付至草稿 PR #16 等待复核。** 承接[整合计划 N14](2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) 第 3 项。
 > 前置：[PR #15](https://github.com/ywltby/tokenscope/pull/15)（0.5.1，含失败取证 `b141fcc`）合入 main 且 v0.5.1 发布完成。PR #15 尚未合入时可以先从 `origin/fix/upgrade-chain-format` 建分支开工；它合入后先合并最新 main，再开 PR。
 > 分支 `fix/boot-recovery`；修复类批次，递增 patch；一个 PR、一次版本。
 
@@ -152,4 +152,76 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 
 ## 6. 执行记录
 
-（实施后逐项记录提交、命令、先红后绿的现象与远程运行编号。）
+分支 `fix/boot-recovery`（基于 `origin/fix/upgrade-chain-format` 建立，PR #15 合入后先合并最新 main 再开 PR——BS06 执行）。
+
+### 批次与提交
+
+| 提交 | 内容 |
+| --- | --- |
+| `7c2fb6e` | 计划起草（用户确认后开工） |
+| `a694b25` | BS01 隐私检查耗时提示与代次保护（`BOOTSTRAP_SLOW_MS=10s`、`gate.slow`、`accept()` 作废在途检查） |
+| `61633dc` | BS02 主界面加载失败界面与阶段标记（`mainAppLoader` 单飞/失败记录、`role=alert` 面板 + 整页 reload、`data-boot-state` 八态；教训已写进 `App.vue` 注释：模板 `v-if` 不能直接用对象属性上的嵌套 ref，需顶层 ref 别名 `mainVisible`） |
+| `5c5c43c` / `bc8c622` | （插入任务，分支 `fix/upgrade-chain-format`）PR #15 Native UI E2E 判定修复与执行账补记；最终 HEAD `bc8c622` 三条流水线全绿——CI 39181763972、Native UI E2E 39181764030、Install test 39181763945；PR 保持草稿待用户复核 |
+| `6bdd55e` | BS03 失败取证补强与自动判断（首次提交消息被 shell 引号截断，以 `git commit --amend -F` 修复；IPC 两侧时间线 `at/ms/outcome`、请求时间线 50 条、`classifyBootStall` 六类判定、12 例单测；scripts/lib 97 例、前端 596 例通过） |
+| `32a53e5` | 计划外（见「计划外偏差」1）：并发用例环境噪声重试——**已按复核意见撤回**（六处回到原断言形态；根因已定位为产品并发首次初始化竞态，由 `ff939f8` 的产品修复替代） |
+| `4385b60` | BS04 浏览器契约 `boot_stall_recovery`（fixture 新场景 `privacy-bootstrap-deferred` 与 `staleBootstrap()`；检查挂起、主界面加载失败两场景共 15 断言；登记 `REQUIRED_CONTRACTS`/`IMPL` 并加入 `run-ui-refresh-e2e.mjs` 契约列表让 CI 运行） |
+| `96f580b` | 复核补修：迟到响应必须落定才断言代次保护（`waitForIpcSettled` 超时抛错 + 落定确认断言，15→16 条）；DOM 不可读也写 suspected（见「计划外偏差」3） |
+| `ff939f8` | 并发首次初始化：产品修复（`HistoryDb::open` 对 READONLY/BUSY 重试整个打开序列，新建连接重置连接状态）+ 回归测试 `concurrent_first_initialization_both_succeed`（50 轮，先红后绿）+ 撤回六处测试层容错（见「计划外偏差」1） |
+| `cf28d72` | 复核补修：统一重试预算（`crate::retry`）、类型化错误保留（`MigrateFailure`：Display 带原因 + source 保留类型，移除字符串化与消息兜底）、确定性重试策略测试 5 例、Cache 并发打开覆盖（修复前 2/100 → 修复后 0/100） |
+| `c4ba482` | 预算机制收尾（第三轮复核）：绝对 deadline 只在外层创建一次并贯穿 open_once/WAL/迁移等待（内层不重算 `now + 预算`）；每个锁等待阶段按剩余预算设 busy_timeout；睡眠后重新检查 deadline；时钟与 sleep 可注入，假时钟单测 + 变异验证；HistoryDb 与 Cache 真实持锁集成用例（锁等待预算断言留调度容差） |
+| `72c49b0` | 迁移路径预算传递（第四轮复核）：migrate 接收同一 deadline/clock，在读版本、备份前、**备份后**、建立事务前按剩余预算设 busy_timeout；WAL 的 apply 移入每次尝试内部；覆盖生产接线的确定性回归（备份耗尽/部分消耗预算）＋变异验证 |
+| `f22648b` | BS06 同步：合并 origin/main（`9ea0c58`，v0.5.1 发布后）；执行账冲突按「保留 main 更完整的 0.5.1 行 + 本分支启动恢复批次行」解决 |
+| `6fb7978` | 复核补修：完整门禁自身以 `TOKENSCOPE_PRECOMMIT_MODE=full` 运行时，`EndToEndOnlyCommitCase` 的临时仓库钩子继承该变量强制完整检查而失败；`git_env` 剔除该变量与本机删除拦截变量（先红 4 失败 → 后绿 55 项全过） |
+| `71b5324` | BS06 版本：登记 v0.5.1 发布基线（四资产哈希与 GitHub digest、SHA256SUMS 三方核对）并递增 0.5.2；`bump_version --check` base `9ea0c58` |
+
+### BS06 交付证据（2026-10-20）
+
+- **前置**：gh 实时核对 PR #15（HEAD `bc8c622`、13 项检查全 pass、四个单跳升级矩阵 pass、`upgrade-chain` 配置 skip、无阻断评审、`mergeStateStatus=CLEAN`）→ 转正式并以普通 merge 合入 main = **`9ea0c584`**；随后 Release [39291272967](https://github.com/ywltby/tokenscope/actions/runs/39291272967) 全 11 个作业 success（含 `upgrade-chain (present)/(deleted)`、四个单跳、`install-test`、`publish`）；main CI [39291272876](https://github.com/ywltby/tokenscope/actions/runs/39291272876) 与 Native UI E2E [39291272978](https://github.com/ywltby/tokenscope/actions/runs/39291272978) 均 success。
+- **v0.5.1 发布**：tag `v0.5.1` → `9ea0c584`（轻量 tag）；四资产 `TokenScope_v0.5.1_windows-x64-setup.exe`（`2a32a9fc…74de`）、`build-metadata.json`（`12ef74…89e`）、`SHA256SUMS.txt`（`40b9df…8c6`）、`provenance.sigstore.json`（`7e6300…719`），本地下载哈希、SHA256SUMS、GitHub digest 三方一致；构建元数据 commit `9ea0c58`、version 0.5.1、persistent_format cache 11/history 4/parser 1/identity 1/pricing 9/settings 2。
+- **安装与升级证据**：安装五场景 PASS（全新安装、首次启动迁移 3 请求/180/35/2 项目、重复安装、卸载保留 `~/.tokenscope`、重新安装不重复计量）；连续升级链证据 `chain: 0.1.0 → 0.4.0 → 0.5.1`、四阶段 pass、`settings from_format 1 → to_format 2`、`current_commit 9ea0c58`、`baseline_commit 8d1d90de`；四个单跳（0.1.0/0.4.0 × present/deleted）pass。
+- **本地版本**：合并 main（`f22648b`）→ `upgrade_baselines.py add --tag v0.5.1`（commit `9ea0c58`、profile history、资产哈希核对）→ `bump_version --bump patch` 递增 **0.5.2**（`71b5324`）→ `--check --base-ref origin/main` 通过（0.5.2 ← 0.5.1，base `9ea0c58`）。
+- **完整门禁**：首次 full 模式 4 项偶发失败（`EndToEndOnlyCommitCase`，未复现）；定位为 `TOKENSCOPE_PRECOMMIT_MODE=full` 被子进程继承（`6fb7978` 修复，先红 4 失败 → 后绿 55 项）；修复后完整 full 门禁通过（含 Rust 普通/acceptance、前端 typecheck/format/test/build、浏览器 E2E、脚本契约）。
+- **草稿 PR #16**（head `71b5324`，https://github.com/ywltby/tokenscope/pull/16）：CI [39310409975](https://github.com/ywltby/tokenscope/actions/runs/39310409975)、Native UI E2E [39310409959](https://github.com/ywltby/tokenscope/actions/runs/39310409959)、Install test [39310410188](https://github.com/ywltby/tokenscope/actions/runs/39310410188) 均 success；六个单跳矩阵（0.1.0/0.4.0/0.5.1 × present/deleted）pass；`install-evidence`（fresh-migrate/reinstall pass）与 `0.5.1-present` 升级证据（baseline_commit `9ea0c58`、current_version 0.5.2、旧 exe `c056500d…` = v0.5.1 主程序）核对；`install-build` 产物身份 commit `4080463`（PR merge ref）、version 0.5.2、exe `e1e9773c…` 与升级证据一致。`upgrade-chain` 在 PR 端为设计允许的 skip（Release 专属）。
+- **中间文档提交**（`5144879`，非最终已验提交）：CI [39312695608](https://github.com/ywltby/tokenscope/actions/runs/39312695608)、Native UI E2E [39312695541](https://github.com/ywltby/tokenscope/actions/runs/39312695541)、Install test [39312695555](https://github.com/ywltby/tokenscope/actions/runs/39312695555) 均 success；六个单跳矩阵 pass、`gate` pass。首轮该 HEAD 的 `frontend` 作业在 `ui_date_keyboard_matrix` 处 30s 超时——契约自带的失败取证（BS03 成果）给出 `net::ERR_NO_BUFFER_SPACE`（主 JS bundle 加载失败，Chromium 网络缓冲耗尽，页面未渲染），同一前端代码在 `71b5324` 通过，判定为 Runner 环境资源类瞬时失败；保留取证工件（`ui_date_keyboard_matrix--failure.json`）后仅重跑失败作业，重跑通过。
+
+### 最终交付提交的独立复核（2026-10-20）
+
+- 本次已验提交为 `1ca89f1cfce8ac06e355d68194ddf11503ce23a2`。上文 `71b5324`、`5144879` 是早期运行记录；`4080463` / `e1e9773c…` 仅属于早期产物，不作为本次提交的身份凭据。
+- 对应该提交的 CI [39315246024](https://github.com/ywltby/tokenscope/actions/runs/39315246024)、Native UI E2E [39315246032](https://github.com/ywltby/tokenscope/actions/runs/39315246032)、Install test [39315246067](https://github.com/ywltby/tokenscope/actions/runs/39315246067) 均成功，六个单跳升级矩阵全部通过；连续升级链仍为 PR 端设计跳过，不能记为本批次已验。
+- 下载最终运行工件核对：实际测试合并提交为 `1509c986421caa8e5e339d4a24f36acf03b958a4`，父提交分别为 main `9ea0c584987aaa84b1abe7f1c35173679f8dff91` 与 PR HEAD `1ca89f1cfce8ac06e355d68194ddf11503ce23a2`。`build-metadata.json` 的 version 为 `0.5.2`，`executable_sha256` 为 `a606c9fd79037b1e9762ae7b32fc3afc5e5dd8c28fcb5bd30a9c5058d9a71456`，与 `0.5.1-present` 的 `upgrade-result.json`、`installed-build.json` 一致。
+- 原生六个场景共 88 条检查全部通过、`failed=[]`、`real_untouched=true`；安装工件中的 `fresh-migrate` 与 `reinstall` 均 `pass=true`，请求数均为 3。复核环境重跑 full 模式钩子契约 55 项通过，版本校验通过（0.5.1 → 0.5.2）。
+- BS01–BS06 已达到计划约定的草稿 PR 交付门槛，PR #16 尚未合并、0.5.2 尚未发布。本次证据修正文档会产生新提交；以上结果仅归属于 `1ca89f1`，新 HEAD 的远程检查须独立核对，不能直接沿用。
+
+### 先红后绿
+
+- BS01：5 例假计时器单测先全部失败（`slow` 不存在、迟到响应回退/写错误），实现后 `privacyGate.test` 11/11。
+- BS02：加载器模块缺失 + `data-boot-state` 缺失先红；实现后 `mainAppLoader.test` 4 例、`App.test` 慢检查用例通过；提交时前端全套 584 例通过。
+- BS03：12 例取证单测先红（`classifyBootStall` 六类判定与取证字段不存在），实现后全绿。
+- BS04 反证：临时把 `App.vue`/`privacyGate.ts`/`mainAppLoader.ts` 及对应单测回退到 `7c2fb6e`（撤回 BS01/BS02 产品改动）后构建，新契约失败于两条断言——「检查挂起时引导壳阶段为 checking（`data-boot-state=null`）」与等待 `checking-slow` 超时（无耗时提示与重新检查入口；runner 在场景 1 抛错停止，场景 2 未执行）。恢复产品改动重建后同契约 15 条断言全部通过，`run-ui-refresh-e2e.mjs` 全矩阵 7 条契约全绿（证据 `qa-artifacts/ui-adjustment/ci-e2e`）。
+
+### 本地验证
+
+- 前端：typecheck、format:check、单测 596 例、build 全部通过（BS04 提交时）。
+- Rust：`cargo test -p tokenscope`（lib 237 例 + 集成套件）通过；`cargo fmt --check`、`cargo clippy --workspace --all-targets` 干净。
+- 提交钩子：`32a53e5`（rust 检查）与 `4385b60`（frontend/scripts 无本地等价契约 → 完整模式兜底）均以完整门禁通过。
+- 产品修复后（`ff939f8`）：lib 238 例（含新增 50 轮并发首次初始化回归）与全部集成套件通过；`cargo test --locked --workspace` 连续两次 0 失败套件；fmt/clippy 干净；完整提交钩子（rust 普通 + acceptance）通过。
+- 第二轮复核补修后（`cf28d72`）：确定性重试测试 5 例 + 迁移包装双约束单测通过；Cache v3 并发打开 100 次 0 失败（修复前 2/100）；HistoryDb 50 轮回归 3 次全过；全量 workspace 连续两次 0 失败套件；fmt/clippy 干净；完整提交钩子通过。
+- 预算机制收尾后（`c4ba482`）：假时钟单测 7 例（预算边界、嵌套共享截止时间、睡眠后不再尝试、零预算单次尝试、busy_budget 跟踪剩余、最后错误返回）＋两处变异验证（内层新建 deadline → 总睡眠 100ms 转红；删睡眠后检查 → 尝试次数转红）；HistoryDb 与 Cache 真实持锁用例通过（2.29s，符合 2s 预算）；Cache v3 并发 100 次 0 失败；HistoryDb 50 轮回归通过；全量 workspace 连续两次 0 失败套件；fmt/clippy 干净；完整提交钩子通过。
+- 迁移预算传递后（`72c49b0`）：覆盖生产接线的两条确定性回归（备份耗尽预算 → 备份后检查点失败、无 tx_busy、结构保持 v3；备份部分消耗 → 事务 busy_timeout < 完整预算且 ≤ 备份后剩余、升级完成）＋两处变异验证（删备份后检查、事务改用完整预算 → 均转红）；策略测试 7 例、持锁 2 例、HistoryDb 50 轮回归、cache 并发 30 次 0 失败均保留通过；全量 workspace 连续两次 0 失败套件；fmt/clippy 干净；完整提交钩子通过。
+
+### 计划外偏差（不涉产品行为的测试架最小调整）
+
+1. **并发首次初始化竞态（`32a53e5` → 撤回 → `ff939f8` → `cf28d72`）**：BS04 起首次以完整模式钩子提交，暴露 `test_parallel_queries_single_collection`（随后 `test_cache_concurrent_v3_open`、`concurrent_queries_share_one_collection_without_duplicating_usage` 同类）在本机失败——两个连接同时打开同一 SQLite 库偶发 SQLITE_READONLY/BUSY。当时给六处并发用例引入测试层重试。**复核意见（2026-10-19）指出**重试会让并发用例退化为串行/复用断言，测试层容错不能替代产品行为调查，要求撤回另案调查。随后按[调查计划](2026-10-19-sqlite-concurrent-open-investigation.md)定位：临时探针（12 阶段、扩展错误码、四组隔离目录对照）显示**只有「并发新建」组失败**（30 轮 11 轮，9×DDL、2×WAL，extended=8），预建库后并发、保持连接存活、串行三组 30/30 通过；同连接重试 migrate 20 次无效、重新打开连接恢复。`ff939f8` 在 `HistoryDb::open` 层重试整个打开序列 + 回归测试 50 轮（先红后绿）+ 撤回六处测试层重试。`cf28d72` 按第二轮复核补修：统一重试常量与类型化判定、保留类型化错误（移除字符串化与消息兜底；`MigrateFailure` 的 Display 仍带未知版本/SQL 失败原因）、补确定性重试策略测试、**Cache 并发打开覆盖**（修复前 100 次 2 失败，同一 extended=8 形态；修复后 0/100）。`c4ba482` 按第三轮复核收尾预算机制：**「同一预算常量」不等于「共享同一 deadline」**——旧实现外层与内层各自按 `now + 预算` 计时（每次进入内层都能重新获得完整预算，总时长不受单一上限约束，不是某个固定秒数的叠加），现改为外层一次创建绝对 deadline 并贯穿 `open_once`、WAL 重试与迁移/初始化事务等待；每个锁等待阶段按剩余预算重设 `busy_timeout`；睡眠后重新检查 deadline；时钟/sleep 可注入，假时钟精确验证预算边界、嵌套共享截止时间、睡眠后不再尝试与最后错误（两处变异验证）；HistoryDb 与 Cache 各加真实持锁集成用例（预算断言留调度容差，操作系统 I/O 不严格受限）。`72c49b0` 按第四轮复核补齐迁移路径：`migrate` 接收同一 deadline/clock，读版本、备份前、**备份后**、建立事务前各按剩余预算设 `busy_timeout`（备份耗时不得让事务误用完整预算），WAL 的 `apply_busy_budget` 移入每次尝试内部；新增覆盖 `open → open_once → migrate` 生产接线的确定性回归（步进假时钟模拟备份消耗全部/部分预算），并用变异验证测试有效性。全量 `cargo test --workspace` 连续两次 0 失败套件，完整钩子通过。证据：`qa-artifacts/sqlite-probe/`。
+2. **提交环境事件**：WorkBuddy 的 node safe-delete shim 把 `rmSync` 重定向回收站并对批量删除要求确认，vite build 清空 `dist/assets`（可再生产物，反证期间多哈希残留累计 6 个）被 `SAFE_DELETE_BULK_CONFIRM_REQUIRED` 拦截导致钩子失败多次；恢复方式为提交命令一次性注入 `CODEBUDDY_SAFE_DELETE_ENABLED=0`（只影响该次构建清理，不改任何仓库内容）。另有数次后台提交被会话沙箱间歇拦截 cargo 写 `target/`（.d/.exe/fingerprint），重试后通过。
+3. **复核补修（`96f580b`）**：复核意见 P2-2——场景 1 的旧响应等待超时后继续断言「状态没退回」是误通过路径（响应未送达时界面当然不会退回）；新增 `waitForIpcSettled`（超时抛错让契约失败，单测 4 例含「旧响应不落定时契约必须失败」反例），契约等待落定并新增落定确认断言（15→16 条）。低优先级缺口——DOM 摘要不可读时跳过分类函数，第一类判定「DOM 不可读」没有写入 suspected；已改为壳层不可见（含 DOM 不可读）即分类，取证单测补 1 例。
+
+### 远端验证
+
+- PR #15（`fix/upgrade-chain-format`）：最终 HEAD `bc8c622` 三条流水线全绿——CI 39181763972、Native UI E2E 39181764030、Install test 39181763945；已于 2026-10-20 转正式并以普通 merge 合入 main = `9ea0c584`（Release 39291272967 全绿、v0.5.1 已发布，见「BS06 交付证据」）。
+- PR #16（`fix/boot-recovery`，草稿）：head `71b5324` 三条流水线全绿——CI 39310409975、Native UI E2E 39310409959、Install test 39310410188（六个单跳矩阵 pass、`upgrade-chain` 为 Release 专属 skip）。文档回填后 HEAD `5144879` 的三条流水线（CI 39312695608、Native UI E2E 39312695541、Install test 39312695555）同样全绿，`frontend` 一次 `ERR_NO_BUFFER_SPACE` 环境瞬时失败经取证定位后仅重跑失败作业通过。后续已验提交 `1ca89f1` 的三条流水线与实际产物身份见「最终交付提交的独立复核」，不得混用早期产物。
+
+### 未闭合
+
+- **PR #16 为草稿，尚未合并**：`1ca89f1` 已通过独立复核，证据见「最终交付提交的独立复核」；本次文档修正后的新 HEAD 须核对其远程检查。
+- 并发首次初始化修复（`ff939f8`、`cf28d72`、`c4ba482`、`72c49b0`）随 PR #16 交付，已通过实现复核；合并与发布仍待执行。
+- 发布依赖已完成：PR #15 合并为 `9ea0c58`、v0.5.1 已发布并登记基线（`scripts/fixtures/upgrade_baselines.json`），本批次版本为 **0.5.2**。

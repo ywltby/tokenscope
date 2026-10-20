@@ -20,6 +20,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import PrivacyConsentDialog from "./components/PrivacyConsentDialog.vue";
 import PrivacyExitDialog from "./components/PrivacyExitDialog.vue";
+import { createMainAppLoader } from "./lib/mainAppLoader";
 import { createPrivacyGate } from "./lib/privacyGate";
 import { applyResolvedThemeAttribute } from "./lib/themePreference";
 
@@ -53,30 +54,53 @@ onBeforeUnmount(() => {
 
 // ── Ready 后挂载主应用 ──────────────────────────────────────
 // 惰性组件：模块求值只在显式导入时发生（此处即"同意后"这一个时点）。
+// 导入失败要可见、可操作：加载器记录原因并 console.error；恢复只能整页
+// 重新加载（失败的模块请求被模块映射缓存，再次 import() 不会恢复）。
+const mainLoad = createMainAppLoader({
+  load: () => import("./MainApp.vue"),
+  isReady: () => gate.phase.value === "ready",
+});
+// 顶层 ref：模板会解包顶层 ref，但不会解包对象属性上的嵌套 ref
+// （v-if="mainLoad.visible" 恒为真值，会让异步组件在引导期就开始加载）。
+const mainVisible = mainLoad.visible;
 const MainApp = defineAsyncComponent(() => import("./MainApp.vue"));
-const mainVisible = ref(false);
 
 async function enterMainApp(): Promise<void> {
-  if (mainVisible.value || gate.phase.value !== "ready") return;
+  if (mainLoad.visible.value || gate.phase.value !== "ready") return;
   // 业务持久化偏好的恢复点：先落首帧主题属性（显式函数，可证明时点），
   // 再导入主应用——主应用 import 链同样只在这里求值一次。
   applyResolvedThemeAttribute();
-  await import("./MainApp.vue");
-  // 导入期间可能已进入退出流程：晚到响应不得复活主应用。
-  if (gate.phase.value !== "ready") return;
-  mainVisible.value = true;
+  await mainLoad.enter();
 }
 
 watch(gate.phase, (phase) => {
   if (phase === "ready") void enterMainApp();
 });
+
+// 诊断与测试用的引导阶段标记（不作样式钩子），取值见 DESIGN.md。
+const bootState = computed(() => {
+  const phase = gate.phase.value;
+  if (phase === "exiting") return "exiting";
+  if (mainLoad.visible.value) return "main";
+  if (mainLoad.error.value !== null) return "main-load-failed";
+  if (phase === "ready") return "loading-main";
+  if (phase === "blocked_error" || (phase === "checking" && gate.error.value !== null)) {
+    return "blocked";
+  }
+  if (phase === "checking") return gate.slow.value ? "checking-slow" : "checking";
+  return "consent";
+});
+
+function reloadPage(): void {
+  window.location.reload();
+}
 </script>
 
 <template>
   <NConfigProvider :theme="theme" :locale="zhCN" :date-locale="dateZhCN">
     <!-- 全局样式只在这里注入一份：业务主应用 MainApp.vue 不再渲染它 -->
     <NGlobalStyle />
-    <div class="privacy-shell">
+    <div class="privacy-shell" :data-boot-state="bootState">
       <div class="ts-ambient" aria-hidden="true"></div>
       <!-- 检查中：最短的加载提示，不闪现统计页背景与旧视图 -->
       <div v-if="gate.phase.value === 'checking'" class="privacy-center">
@@ -86,7 +110,21 @@ watch(gate.phase, (phase) => {
             <NButton size="small" @click="gate.retry()">重新检查</NButton>
           </div>
         </template>
-        <span v-else class="privacy-checking" role="status">正在检查隐私设置…</span>
+        <div v-else class="privacy-checking-wrap" role="status">
+          <span class="privacy-checking">正在检查隐私设置…</span>
+          <!-- 耗时较长不是错误：不写 error、不取消原请求，响应到达照常应用 -->
+          <template v-if="gate.slow.value">
+            <p class="privacy-slow-text">检查耗时较长，仍在等待结果；也可以重新检查。</p>
+            <NButton size="small" @click="gate.retry()">重新检查</NButton>
+          </template>
+        </div>
+      </div>
+      <!-- 主界面导入失败：可见、可操作；恢复只能整页重新加载 -->
+      <div v-if="mainLoad.error.value" class="privacy-center">
+        <div class="privacy-blocked" role="alert">
+          <p class="privacy-blocked-text">主界面加载失败：{{ mainLoad.error.value }}</p>
+          <NButton size="small" @click="reloadPage()">重新加载</NButton>
+        </div>
       </div>
       <PrivacyConsentDialog
         :open="gate.consentVisible.value"
@@ -130,6 +168,20 @@ watch(gate.phase, (phase) => {
 
 .privacy-checking {
   font-size: 13px;
+  color: var(--ts-text-tertiary);
+}
+
+.privacy-checking-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ts-space-3);
+}
+
+.privacy-slow-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
   color: var(--ts-text-tertiary);
 }
 

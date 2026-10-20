@@ -60,9 +60,17 @@ def setUpModule():
 
 
 def git_env():
-    """Git 钩子会注入 GIT_DIR 等变量；测试仓库必须与调用者环境隔离。"""
+    """Git 钩子会注入 GIT_DIR 等变量；测试仓库必须与调用者环境隔离。
+
+    还要剔除影响钩子行为的变量：外层 `TOKENSCOPE_PRECOMMIT_MODE=full`
+    （完整门禁自身运行时）会让临时仓库的钩子强制完整检查——临时仓库没有
+    完整工程，提交必然失败；`CODEBUDDY_SAFE_DELETE_*` 是本机删除拦截，
+    只属于调用者环境。
+    """
     return {key: value for key, value in os.environ.items()
-            if not key.startswith("GIT_")}
+            if not key.startswith("GIT_")
+            and key != "TOKENSCOPE_PRECOMMIT_MODE"
+            and not key.startswith("CODEBUDDY_SAFE_DELETE_")}
 
 
 class ClassifyCase(unittest.TestCase):

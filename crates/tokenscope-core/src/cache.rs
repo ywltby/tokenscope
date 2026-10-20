@@ -105,39 +105,57 @@ fn test_inject_migration_fail(path: &Path) -> Result<()> {
 
 impl Cache {
     pub fn open(path: &Path) -> Result<Self> {
-        Self::open_with_busy_timeout(path, std::time::Duration::from_secs(2))
+        Self::open_with_busy_timeout(path, crate::retry::CONCURRENT_INIT_RETRY_BUDGET)
     }
 
-    fn open_with_busy_timeout(path: &Path, busy_timeout: std::time::Duration) -> Result<Self> {
+    fn open_with_busy_timeout(path: &Path, budget: std::time::Duration) -> Result<Self> {
+        // 并发首次初始化：另一连接可能正在同一库上做 WAL 切换/迁移，本连接
+        // 会在「开始缓存初始化事务」处拿到 SQLITE_READONLY（2026-10-19：
+        // v3 库并发打开 100 次 2 次失败，extended=8，立即返回）。与历史库
+        // 同一取舍：重试整个打开序列（每次新建连接重置连接状态）；绝对
+        // deadline 只在本层创建一次，open_once 内各阶段只使用剩余预算。
+        let clock = crate::retry::RealClock;
+        let deadline = crate::retry::Deadline::new(&clock, budget);
+        crate::retry::retry_until(
+            &deadline,
+            &clock,
+            crate::retry::CONCURRENT_INIT_RETRY_BACKOFF,
+            || Self::open_once(path, &deadline, &clock),
+        )
+    }
+
+    fn open_once(
+        path: &Path,
+        deadline: &crate::retry::Deadline,
+        clock: &dyn crate::retry::Clock,
+    ) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("创建缓存目录失败: {}", dir.display()))?;
         }
         let mut conn =
             Connection::open(path).with_context(|| format!("打开缓存失败: {}", path.display()))?;
-        // busy_timeout 先于 pragma 设置：并发打开时等锁而不是立即报忙。
-        conn.busy_timeout(busy_timeout)?;
         // WAL 切换需要短暂独占，且 SQLite 不为该切换调用 busy handler——
-        // 并发打开时对方连接可能正持锁/切换，这里小步重试（对齐 busy_timeout
-        // 的等待语义），而非把并发打开错判为损坏。
-        for attempt in 0..100 {
-            match conn.pragma_update(None, "journal_mode", "WAL") {
-                Ok(()) => break,
-                Err(e)
-                    if attempt < 99
-                        && matches!(
-                            &e,
-                            rusqlite::Error::SqliteFailure(f, _)
-                                if f.code == rusqlite::ErrorCode::DatabaseBusy
-                        ) =>
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(e) => return Err(e).context("设置 WAL 日志模式失败"),
-            }
-        }
+        // 并发打开时对方连接可能正持锁/切换；**每次尝试内部**都按当前剩余
+        // 预算重设 busy_timeout，再在同一绝对 deadline 内小步重试（内层不
+        // 重算）。并发首次初始化时同样会拿到 SQLITE_READONLY，与
+        // DatabaseBusy 同一判定。
+        crate::retry::retry_until(
+            deadline,
+            clock,
+            crate::retry::CONCURRENT_INIT_RETRY_BACKOFF,
+            || {
+                crate::retry::apply_busy_budget(&conn, deadline, clock)?;
+                Ok(conn.pragma_update(None, "journal_mode", "WAL")?)
+            },
+        )
+        .context("设置 WAL 日志模式失败")?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .context("启用外键约束失败")?;
+        // 初始化事务（BEGIN IMMEDIATE 等写锁）前按**剩余**预算重设
+        // busy_timeout；预算耗尽则不得再启动该阶段的等待。
+        crate::retry::apply_busy_budget(&conn, deadline, clock)
+            .context("开始缓存初始化事务前预算不足")?;
         // F01：结构迁移收敛为单一写事务。真实 v3 库的 files 没有 root 列，
         // 必须先在事务内读取版本、把旧派生表整体 drop 后再建当前结构——
         // 任一步失败整体回滚，绝不出现"新索引 + 旧表"的半迁移状态
@@ -1252,6 +1270,42 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// 真实持锁：另一个连接持有写事务时，Cache::open 的总等待被外层绝对
+    /// deadline 限制在预算附近（不是无限等待），并以类型化瞬态错误失败。
+    /// 「锁等待预算」可精确断言；操作系统 I/O 与线程调度不可严格限制，
+    /// 因此上下界都留调度容差，且只断言不会出现「多个完整预算叠加」的量级。
+    #[test]
+    fn open_lock_wait_is_bounded_by_retry_budget() {
+        let dir = tmp_dir("lockwait");
+        let path = dir.join("cache.db");
+        let holder = Cache::open(&path).unwrap();
+        // 持有写锁：另一个 open 的 WAL 切换与初始化事务等待都会受阻。
+        holder.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        // Cache 未实现 Debug（不影响 unwrap_err）：用 match 取错误。
+        let err = match Cache::open(&path) {
+            Ok(_) => panic!("持锁期间 Cache::open 必须失败"),
+            Err(e) => e,
+        };
+        let elapsed = started.elapsed();
+        holder.conn.execute_batch("ROLLBACK").unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            crate::retry::is_concurrent_init_transient(&err),
+            "持锁失败必须是类型化的瞬态错误：{err:#}"
+        );
+        let budget = crate::retry::CONCURRENT_INIT_RETRY_BUDGET;
+        assert!(
+            elapsed >= budget.saturating_sub(std::time::Duration::from_millis(500)),
+            "锁等待应接近预算（允许调度容差）：{elapsed:?}"
+        );
+        assert!(
+            elapsed <= budget + std::time::Duration::from_secs(1),
+            "锁等待不得远超预算（OS I/O 之外的有界等待）：{elapsed:?}"
+        );
+    }
+
     #[test]
     fn test_cache_concurrent_v3_open() {
         // 两个连接并发打开 v3 库：写事务内重判版本 + 串行迁移，不得交错出
@@ -1262,7 +1316,8 @@ mod tests {
 
         let path2 = path.clone();
         // 本测试验证并发迁移的结构正确性，不要求共享 Runner 在 2 秒内调度完毕。
-        // 只给测试连接更大的有界等锁预算；生产打开仍使用 2 秒降级策略。
+        // 只给测试连接更大的有界等锁预算（deadline 预算，各锁等待阶段按剩余
+        // 预算设置 busy_timeout）；生产打开仍使用 2 秒预算。
         let h1 = std::thread::spawn(move || {
             Cache::open_with_busy_timeout(&path, std::time::Duration::from_secs(30))
         });
