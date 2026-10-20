@@ -161,3 +161,11 @@
 ### 6.4 草稿交付取证
 
 LW05 完成版本与文档后，再连续运行两次 `cargo test --locked -p tokenscope`，通过正常完整提交钩子后推送并开草稿 PR。最终交付须核对该 HEAD 的 CI（gate）、Native UI E2E、Install test，运行链接和工件核对摘要写入 PR 正文与交付报告；不得借用旧 HEAD 或 main 的绿灯。本文提交时点不预报远程结果，不将 PR 端按设计跳过的连续升级链记作通过。分支上的检查可从 [GitHub Actions](https://github.com/ywltby/tokenscope/actions?query=branch%3Afix%2Fsqlite-open-lock-wait) 追溯；保持草稿，合并与发布由用户决定。
+
+### 6.5 复核补修（2026-10-20）
+
+复核 PR #19 时提出三项非阻断问题，用户要求一并修复，同一 PR 补修不再递增版本：
+
+- **迁移函数的闲置参数**：`migrate` 的截止时间与时钟参数只服务测试轨迹，现已移除，同时删掉 `backup_done_remaining_ms` 轨迹。`backup_outliving_retry_deadline_still_migrates` 改为直接断言时钟已越过重试截止时间；另一用例只断言迁移事务的固定等待值和升级完成。生产行为不变。
+- **归档链接**：调查归档顶部的补充说明原先链接本专项计划的 active 路径，本计划归档后会失效，而且文档检查不会复查历史链接。现改为链接整合计划 N15 的锚点，合入与发布状态以 N15 为准。
+- **本机登记表校验**：本机复现到两种失败。一是代理偶发 TLS EOF（单次请求正常，一轮几十个请求里偶有一个断开）；二是未设令牌时匿名 API 每小时 60 次限流，返回 403。`upgrade_baselines.py` 改为对传输层瞬断最多尝试 3 次，HTTP 状态错误（含限流）仍立即失败；未设 `GH_TOKEN` 时借用已登录 `gh` 的令牌。CI 本来就设置了 `GH_TOKEN`，所以 gate 的“GitHub 出错即失败”语义不变。新增 5 项离线单测，本机真实 `check --base-ref origin/main` 通过。
