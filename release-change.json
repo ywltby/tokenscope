@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "修复 SQLite 打开流程的锁等待回归"
+  "summary": "归档锁等待修复计划并登记 v0.5.5 基线"
 }
