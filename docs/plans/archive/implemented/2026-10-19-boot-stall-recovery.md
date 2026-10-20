@@ -1,6 +1,12 @@
 # 启动卡死取证补强与引导期恢复
 
-> 状态：**用户已确认（2026-10-19）。BS01–BS05 及复核补修完成并推送；计划外并发用例重试已撤回，`HistoryDb`/`Cache` 并发首次初始化与统一绝对 deadline 预算已修复验证；BS06 已完成（PR #15 合并 `9ea0c58`、v0.5.1 发布、基线登记、0.5.2 递增），交付至草稿 PR #16 等待复核。** 承接[整合计划 N14](2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) 第 3 项。
+> **2026-10-20 归档复核：已完成并发布。** 本计划随 [PR #16](https://github.com/ywltby/tokenscope/pull/16) 合入 main `0ffab19`，并由 [Release 39353860618](https://github.com/ywltby/tokenscope/actions/runs/39353860618) 发布 [v0.5.2](https://github.com/ywltby/tokenscope/releases/tag/v0.5.2)。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39353860584)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39353860657) 均成功；发布的安装、六个单跳升级和两条连续升级链全部通过。原草稿交付限制及“待复核/未合并”描述仅为下文历史状态。
+>
+> 启动恢复与 SQLite 并发打开修复均已通过复核，无独立实施待办。旧 dark 会话超时的具体根因未被追溯证实；取证与恢复交付完成不等于证实该根因。真实系统验收仍见[独立待办](../../system-acceptance-todo.md)，其他剩余任务只在[整合计划](../../active/2026-10-11-consolidated-remaining-work.md)维护。
+
+## 归档前原文
+
+> 状态：**用户已确认（2026-10-19）。BS01–BS05 及复核补修完成并推送；计划外并发用例重试已撤回，`HistoryDb`/`Cache` 并发首次初始化与统一绝对 deadline 预算已修复验证；BS06 已完成（PR #15 合并 `9ea0c58`、v0.5.1 发布、基线登记、0.5.2 递增），交付至草稿 PR #16 等待复核。** 承接[整合计划 N14](../../active/2026-10-11-consolidated-remaining-work.md#n14来源目录遗留待验与竞态缺陷) 第 3 项。
 > 前置：[PR #15](https://github.com/ywltby/tokenscope/pull/15)（0.5.1，含失败取证 `b141fcc`）合入 main 且 v0.5.1 发布完成。PR #15 尚未合入时可以先从 `origin/fix/upgrade-chain-format` 建分支开工；它合入后先合并最新 main，再开 PR。
 > 分支 `fix/boot-recovery`；修复类批次，递增 patch；一个 PR、一次版本。
 
@@ -13,7 +19,7 @@
 ## 1. 背景与已知事实
 
 - main `599c89e` 的 [CI 39146151362](https://github.com/ywltby/tokenscope/actions/runs/39146151362) 中，浏览器契约 `ui_control_material` 失败：light 主题全部通过后，dark 主题新会话 `goto(networkidle)` 正常返回，随后 10 秒内 `#app .app-shell` 未出现。现场没有证据，原因未明。
-- 已核实（详见 [PR3 归档的合入与发布记录](../archive/partial/2026-10-14-source-discovery-and-additional-paths.md#合入与发布记录2026-10-19)与 N14）：
+- 已核实（详见 [PR3 归档的合入与发布记录](../partial/2026-10-14-source-discovery-and-additional-paths.md#合入与发布记录2026-10-19)与 N14）：
   - 最近 60 次失败过的 CI 运行里，这是第一次出现等待 `.app-shell` 超时。
   - 那次机器不慢。工件压缩包的原始时间显示，“日期矩阵末张截图 → measurements.json”在通过的运行里是 40 秒，失败那次是 34 秒，其中还含 10 秒空等。
   - 导航按网络空闲返回，说明当时没有挂起的请求，可以排除“代码块下载慢”。

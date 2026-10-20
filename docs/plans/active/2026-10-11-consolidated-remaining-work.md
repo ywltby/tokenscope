@@ -8,15 +8,12 @@
 
 **Tech Stack:** Rust / SQLite / Tauri 2 / Vue 3，以及现有 Rust、Vitest、浏览器和原生 acceptance 测试工具。
 
-- 整理日期：2026-10-11。
-- 状态：**9 项完成、1 项部分完成、3 项本轮验收未执行、1 项新登记（N14），共 5 项待办。** 用户确认的 [0.x 版本递增及真实旧包升级](#n12-versioning-design)已实施，PR #5 合并为 main 8d17a47；历史 0.1.0 与功能轮次 0.2.0 已公开，完整 CI、五场景安装、两项真实升级及下载工件证据齐备。当前源码补修 0.2.1 的发布身份读取，仍按自身 PR 和 [main Release 门禁](https://github.com/ywltby/tokenscope/actions/workflows/release.yml)取证；系统签字及 N10/N11/N13 继续待验。
-- PR #5 首轮 `64695a1` 的升级哈希失败保留为历史记录；c6e6dba 已修复为实际 NSIS 载荷哈希，安装后严格相等断言成立。状态记账后最新 HEAD 的合并条件仍是其自己的 CI、五个安装场景和两项升级全绿，不用旧 HEAD 成功替代。
-- 最新交付：19c634b 的最终门禁及工件已验，PR #5 合并为 main 8d17a47，v0.1.0/v0.2.0 已公开。新建草稿的即时读取曾在上传处报空值，确认草稿状态后恢复了同一产物；防复发补修按下一 main 批次升至 0.2.1，创建/上传/公开固定 Release ID，并保留标签/源 SHA/资产哈希的严格校验。
-- 核对范围：原 active 的 25 份计划、对应 audits、M1–M11 归档、D5 清单、当前源码与测试内容、可用的历史 QA 产物和实际 CI/发布记录。
-- 整理核对起点：`add8319`；后续修复提交 `3e645f3` 的 7 项已完成独立复核与最终门禁，见[复核记录](../../reviews/2026-10-11-history-seven-fixes-recheck.md)。此前工作区结果保留为历史，不再作为当前交付结论。
-- 最近独立复核代码基线：`231f667099aff035ee2ef240dd6d356a843e8de7`；复核期间新增 `e31d1b67c0323cb1ed5466bff61ecb1819cd99d6`，仅改文档，未改变被测代码。本轮重跑完整普通与 acceptance 根/壳和前端门禁、Python/PS7 安装契约；A01–A06 已独立确认关闭。M01 的 a58684c 及后续审计循环结果保留为历史，不代替本轮实跑或当前 PR CI。
-- 修复设计：[N12 安装验收修复设计](#n12-install-design)已实施并取得 PR/main 的真实成功结果；新版本及旧包升级设计继续并入 [N12](#n12-versioning-design)，不新增第二份 active 计划。
-- 总账：[计划目录](../README.md)；逐份结论：[审计索引](../audits/README.md)；发布附属清单：[D5](../d5-acceptance-checklist.md)。
+- 整理日期：2026-10-11；当前状态更新：2026-10-20。
+- 状态：**9 项完成、2 项部分完成（N12/N14）、3 项专项验收未闭合（N10/N11/N13），共 5 个开放责任编号。** N01–N09 不重复实施；N14 第 1、3 项已关闭，第 2、4 项仍开放。
+- 已核验交付基线：PR #15 合并 `9ea0c584`、v0.5.1 公开，连续升级链成功；PR #16 合并 `0ffab19`、v0.5.2 公开，[main CI](https://github.com/ywltby/tokenscope/actions/runs/39353860584)、[原生 E2E](https://github.com/ywltby/tokenscope/actions/runs/39353860657)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39353860618) 全成功（安装、六个单跳、两条连续链）。PR #17 研究资料合入 `89aec76` 不改变这些专项验收结论。
+- 启动恢复和 SQLite 并发调查已移入 archive/implemented；下文及 §7 的旧提交、版本、失败/通过记录保留为历史证据，不能替代当前待验矩阵。
+- 待办：N10 隐私强取证、N11 原生统一验收、N12 其余系统/签字、N13 真实性能、N14 重复查询批次及权限拒绝 fixture。真实跨午夜、长时间休眠、跨显示器仍在[独立系统待办](../system-acceptance-todo.md)，不在本轮执行。
+- 总账：[计划目录](../README.md)；历史逐份结论：[审计索引](../audits/README.md)；发布附属清单：[D5](../d5-acceptance-checklist.md)。
 
 ## 1. 优先级与状态规则
 
@@ -45,7 +42,7 @@
 
 ## 3. 唯一任务状态表
 
-保留 13 个稳定责任编号，2026-10-19 新增 N14（来源目录遗留待验与竞态缺陷），共 14 个；其中 N01–N09 已完成，N12 部分完成，N10/N11/N13 本轮验收未执行，N14 待办，共 5 项仍有待办。原版本读取、合并前 PR 入口及 M10 过滤保持关闭；M06、M05 及五个必需安装场景已有 PR/main 的成功证据。本轮新增的版本递增与历史 0.1.0 升级要求由 N12 承接，不能用旧版本读取断言代替；其他系统/性能验收仍按原排期。
+保留 N01–N14 共 14 个稳定责任编号：N01–N09 已完成，N12/N14 部分完成，N10/N11/N13 专项验收未闭合，共 5 个开放责任编号。安装、版本递增、真实单跳与连续升级已有发布证据；剩余范围以各行及 N14 子项为准，历史执行记录移至 §7，不混入当前状态表。
 
 | ID | 优先级 | 任务 | 当前状态 | 是否仍有必要 / 来源 |
 | --- | --- | --- | --- | --- |
@@ -60,17 +57,9 @@
 | N09 | P2 | 测试确定性、路径隔离与当前门禁 | 已完成；`a58684c` 闭合 M01，history.db 路径清单、落盘产物及有效 SQLite 七表校验实测通过；两套 manifest 的普通/acceptance 和前端门禁全绿 | 必须；review-findings Task6、来源策略测试、当前合并门禁 |
 | N10 | P2 | 隐私原生取证工具与当前完整浏览器矩阵 | P01–P05 已实现；P06 的强验收未闭合 | 必须；最新隐私计划 P06 |
 | N11 | P2 | 最新项目/模型/CCS 原生统一验收 | 分别存在待验，合并一次执行 | 必须；A06/B03、MP06、H08、设计 Task8 |
-| N12 | P2（用户要求的版本递增与旧版升级）；其余系统尾项 P3 | 当前产物的 D5 系统、安装及发布验收 | 部分完成；0.1.0/0.2.0 已公开，PR/main 的 CI/五场景/两项真实升级已验；当前 0.2.1 发布身份补修待自身门禁，其余系统签字不关闭 | 用户 2026-10-12 最新要求优先；D5、RC11/AP08 |
-| 2026-10-12 | 双审计员循环第一轮（执行） | 完成 | 审计员 B（核心）：P2-1 CCS Codex 捐献按 (scheme,value) 判重修复 + 回归；P2-2 内容等值原生写升级 rank（classify_against）+ 回归；P3 query.rs 额度文案/v3 utc 同步/文档修正。审计员 A（门禁）：P2-1 失败路径复制 live-logs；P3 卸载 30s 轮询、file URI 编码、非 db 退出 2、make_legacy_cache 幂等；.gitignore 补 Python/日志模式。两个审计员均确认无 P1 |
-| 2026-10-12 | 双审计员循环第二轮（执行） | 完成 | 审计员 C（热路径+契约）：P2 热路径 7 处 DBG eprintln 删除；P2 M05 反例"错因通过"修复——四个反例接 New-StandInProcess、全部 Test-Throws 钉住 -ExpectedText、反例 1 重构为"归档旧日志→等待超时"并沿用生产证据根命名。审计员 D（集成）：确证同一 P2 并补 P3——test_install.ps1 失败模型注释、安装失败写证据说明、ExpectedRequests 从 manifest 事件数推导、非 CI 运行守卫（Reset-UserHome 保护）、证据动作不掩盖原始异常；v3 迁移 observed_at_utc 回填改 RFC3339（strftime）+ 回归（口径更正见第三轮：回填 SQL 实际在 SCHEMA_V3）；inspect_history 模式查询统一 DatabaseError 守卫与 NULL/空串区分显示（26 项 unittest）。两审计员均确认无 P1 |
-| 2026-10-12 | 双审计员循环第三轮（执行） | 完成 | 审计员 E（核心）：无 P1/P2，前两轮修复经对抗探针成立；P3——inspect_history 默认汇总改受检解析累加（SQLite SUM 在 u64 规模隐式转 REAL、坏值静默计 0）+ 3 项回归、absent 库行式模式不输出空行、aggregate 每事件两次 estimate 合并为一次（首次重构误改 unknown_pricing 累积语义，被金标对账测试抓出后修正）、四处错误文案空格串清理、utc 回填口径更正为 v3（回归测试改名 v3_backfill_*）。审计员 F（门禁）：无 P1/P2；P3——CONSENT=1 本机调试路径补 TEMP 回退、Copy-LiveLogsToEvidence 补 -Recurse、反例 1 归档前置断言改 Test-True 计账（契约 21→22 项）、install-test.yml 版本读取加 SemVer 强校验。两审计员均确认无 P1 |
-| 2026-10-12 | 双审计员循环第四轮（执行） | 完成 | 审计员 G（GUI/命令层）：无 P1；P2——Dashboard 首载失败且无数据时胶囊永久谎报"刷新中"（错误分支置于 !report 之后不可达，补失败态+测试）；P2——ImportPreview.rollups_rejected 前端契约缺失致预览计数对不上（types.ts 补字段、Settings 预览文案补已存在/被拒）；P3——聚合表行完全未计价显示 $0.00† 改"未知†"与英雄栏同口径、timezone.ts 警告漏 $ 插值、窗口状态恢复补显示器相交校验（纯函数+2 测试）、追加页失败重试不再重置回首页（失败侧别记录+锚点守卫）。审计员 H（解析/采集/计价）：无 P1/P2，第三轮修复经探针全部兑现；P3——file URI %2F 语义文档化+钉住测试（刻意解码一次的合并语义）、Claude synthetic 判定补 trim（防御深度+测试）。两审计员均确认无 P1 |
-| 2026-10-12 | 双审计员循环第五轮（执行） | 完成 | 审计员 I（回归复核）：dfcad57 九项修复逐条兑现（含追加重试守卫可达性完整推演、五套件 362+44+461+36+22 全绿）；P3——restorable_on_any_monitor 饱和值 debug 溢出 panic 改 i64 中间量+测试、CCS 预计变化补"过期跳过"与 rejected_reasons/unsupported_apps 展示出口、UsageTable 未知†与追加重试补回归测试、窗口恢复注释如实化。审计员 J（渲染/时区/settings/错误契约）：无 P1/P2，DST 拨快/回拨、跨年区间、渲染确定性、f64 三层防线、21 例错误前缀契约全部实测未破；P3——SETTINGS_HEADER 补"未知键会被 GUI 保存删除"口径、日期错误文案如实声明 YYYYMMDD 也可、溢出修复随本批入库。两审计员均确认无 P1 |
-| 2026-10-12 | 双审计员循环第六轮（执行，K 部分） | 完成 | 审计员 K（打包/安全面）：无 P1/P2；CSP/capabilities/IPC 路径面/产物链逐项实测未破（30 命令全过 require_ready、无前端可写路径、CSP 无 unsafe-eval 外域）；P3——tauri.conf.json 显式钉 NSIS 契约（installMode currentUser、languages English、allowDowngrades false 把默认值升级为显式约束）、SHA256SUMS.txt 改 WriteAllText 写 LF（消除对 runner coreutils 版本的隐式依赖）、验收断言对齐实际二进制名 tokenscope.exe（原靠大小写不敏感成立）、install-test paths 补 docs/privacy.md（include_str! 进产物）；capabilities core:default 维持现状（K 评估收紧收益趋零） |
-| 2026-10-12 | 双审计员循环第六轮（执行，L 部分） | 完成 | 审计员 L（测试质量）：无 P1，mutation 抽样证实五轮修复的关键缺陷均有能红的回归；P2——history_queries/review_regressions 触碰进程级钩子（预算注入/计数 swap(0)）无串行化被亲手复现假失败，两文件补 static SERIAL 互斥（31+6 个测试全覆盖）；P3——补单页上限 1000 契约测试（mutation 证实此前零防护）、翻页循环加收敛上界（防协议破坏时挂死）、parse_rollups_mode 补测试、262 个 pub fn 无完全未触达、临时目录/密闭性抽检合规；一次性 exit=101 信号未复现不归因（与本轮 target 产物损坏事故同期，重建后消失）；观察窗口竞态留置（OS 调度下 300 文件采集期间主线程必被调度，30s deadline 充裕） |
-| 2026-10-12 | 双审计员循环收尾（用户指示） | 收敛 | 第七轮两名审计员（核心复攻/全链路收尾）因配额中止未产出报告，循环按用户指示收敛不再续轮。总账：六轮 12 名审计员，P1 始终为 0；产品 P2 自第三轮起为 0（第六轮测试质量 P2 已修）；共修复 2+2+8+8+8+4+6 处发现，产出 15 个提交（d7ee94b、8ebbac9、659400b、8980b7c、dfcad57、b724fe3、ae919e5、6fab12f 等）。期间处置一次环境事故：僵尸测试进程锁定 target 致新旧增量产物混编、pre-commit 假失败，全量 cargo clean 重建后恢复，代码无缺陷。门禁终态：根库 461+acceptance、壳库 45、前端 364、python 36、pwsh 契约 22 全绿。N12 的 PR CI 实跑取证仍是唯一待办，不因循环收敛而视为完成 |
+| N12 | P2（用户要求的版本递增与旧版升级）；其余系统尾项 P3 | 当前产物的 D5 系统、安装及发布验收 | 部分完成；v0.5.2 发布的安装、六个单跳升级、两条连续链成功；其余系统验收与签字仍待验 | 用户 2026-10-12 最新要求优先；D5、RC11/AP08 |
 | N13 | P3 | 历史库实际冷/热启动性能基准 | 新历史库真实规模复测未执行 | 有必要，排在正确性之后；H07、旧 D4/性能建议 |
-| N14 | P2 | 来源目录（PR3）遗留待验与竞态缺陷 | 新登记（2026-10-19）；连续升级链修复待 0.5.1 发布实测，其余未执行 | 必须；[PR3 归档](../archive/partial/2026-10-14-source-discovery-and-additional-paths.md)剩余事项 |
+| N14 | P2 | 来源目录（PR3）遗留待验与竞态缺陷 | 部分完成；第 1、3 项关闭；第 2 项重复查询与第 4 项权限拒绝 fixture 未完成 | 必须；[PR3 归档](../archive/partial/2026-10-14-source-discovery-and-additional-paths.md)剩余事项 |
 
 ## 4. 各任务实施与验收
 
@@ -84,7 +73,7 @@
 - `85edad2` 复核：旧版本生成的合成污染库经 v4 升级后，Codex 热扫/重扫均为 **1 请求/120 token**，Claude 热扫/重扫均恢复输出 **21**；升级前备份含旧 schema 和事实，迁移失败全批回滚。来源消失时不能还原的终值仍不猜造。
 - 步骤：先保留这些合成旧库为版本迁移 fixture；断言升级备份可恢复、迁移原子、无歧义别名正确；再修复已有重复证据/错误终值和必要的重解析触发。不能以新建数据库测试代替升级测试。
 - 来源已消失或身份确实不够时保留事实并明确限制，不能猜造终值、直接清库或任意删掉同用量请求。
-- 验收：`cargo test --offline --test history_migration`、`cargo test --offline --test review_regressions`；升级、重启、归档移动、重复升级后唯一请求四桶保持正确，旧备份不被覆盖。
+- 验收：`cargo test --locked -p tokenscope --test history_migration`、`cargo test --locked -p tokenscope --test review_regressions`；升级、重启、归档移动、重复升级后唯一请求四桶保持正确，旧备份不被覆盖。
 
 <a id="n02"></a>
 
@@ -107,7 +96,7 @@
 - 整理时反例（现已修复）：负输入被 `.max(0)` 改为 0，迁移结果 `inserted=1/rejected=0`。
 - `85edad2` 复核：维护中迁移测试 7 项通过；独立负输入旧库得到 `inserted=0/rejected=1`，零用量写入。合法同行、受检溢出和失败回滚仍有回归保护。
 - 步骤：先加负数/溢出/矛盾桶的合成旧库断言，再以受检转换拒绝坏记录并保留诊断；合法同行继续按已确认容错规则处理，整批致命失败回滚且允许重试。
-- 验收：`cargo test --offline --test history_migration`；来源库只读，负值不伪装成合法零值，合法历史不丢。
+- 验收：`cargo test --locked -p tokenscope --test history_migration`；来源库只读，负值不伪装成合法零值，合法历史不丢。
 
 <a id="n04"></a>
 
@@ -118,7 +107,7 @@
 - 整理时缺口（现已修复）：读取先生成完整 `Vec` 后才检查行数；失败后已消费计划仍留在界面。
 - `85edad2` 复核：`read_requests/read_rollups` 逐行施加上限，超限不写历史；Settings 提交失败后清除旧预览，允许重新手动预览，无自动重试。后端容量测试与失败后恢复组件测试通过。
 - 步骤：加超过暂存上限、取消、过期/代次变化、提交失败与手动恢复断言；将限制放在读取/暂存过程中，复用现有只读事务和提交事务。
-- 验收：`cargo test --offline --test ccs_import`、`pnpm --dir frontend test`；超限明确拒绝且零用量写入，任何恢复均由新一次手动点击触发，不监听来源、不自动同步。
+- 验收：`cargo test --locked -p tokenscope --test ccs_import`、`pnpm --dir frontend test`；超限明确拒绝且零用量写入，任何恢复均由新一次手动点击触发，不监听来源、不自动同步。
 
 <a id="n05"></a>
 
@@ -130,7 +119,7 @@
 - 历史 `85edad2` release 复跑为 88,891,388 B，当时未量百万峰值。上一轮 `2252eb3` 独立复跑：1,000,000 行保留 **88,891,726 B（84.8 MiB）**，构建窗口 Rust 分配器峰值 **123,231,716 B（117.5 MiB）**，汇总窗口峰值 **84,272,474 B**；入库 **399,028 ms**、建索引 **43,796 ms**、汇总 **5,637 ms**；命令见第二轮复核。本轮未重跑百万，测量代码保留，只移除预算估算量与分配器实测量的大小断言。
 - 本项完成：§3.5 已修正日期筛选说法；第二轮同库 1,000 行保留 **93,350 B**，一天 500 行 **47,878 B**，第三轮日期探针继续通过。Rust 全局分配器测量不覆盖 SQLite C 分配和完整 RSS，不宣称峰值受保留预算限制；百万只检查前两页，4 万条测试验证汇总。400 行净存活误判断言已修且普通门禁通过，真实基准仍归 N13。
 - 步骤：保留长标识超预算断言；增加百万条合成记录的汇总、跨页、元数据保留/构建峰值测量；明确预算覆盖范围与失败动作；再按实际瓶颈判断是否需要索引/分页下推。
-- 验收：`cargo test --offline --test history_queries`、`cargo test --offline --test query_memory_budget`；无遗漏/重复/预算绕过，不为本任务换 DuckDB，不将瞬时峰值写成已受保留预算限制。
+- 验收：`cargo test --locked -p tokenscope --test history_queries`、`cargo test --locked -p tokenscope --test query_memory_budget`；无遗漏/重复/预算绕过，不为本任务换 DuckDB，不将瞬时峰值写成已受保留预算限制。
 
 <a id="n06"></a>
 
@@ -141,7 +130,7 @@
 - `85edad2` 实现已将 `SubmissionGuard` 放在共享领队边界；当时仅有模拟元数据计数验收。`2252eb3` 新增根库/壳侧真实 300 文件提交回归，本轮通过，提交后重开库可见全部 300 条事实。
 - 本项完成：第二轮仓库外壳副本仅追加测试/临时构建配置，用 SQLite 写锁验证原样的 `stop_periodic_collection`；等待、释放后落库与 60ms 上限约 62ms 返回均通过，详见第二轮复核。本轮实际提交路径未改，仓内根库/壳侧真实 300 文件回归继续通过，未重复运行外部锁探针；不冒充已入库的可控锁测试或强制终止进程验收。
 - 步骤：以可控制的提交屏障验证手动/定时/退出并发；把必要的收尾观察放到共享采集边界；保留有限等待、SQLite 回滚和未同意不打开历史库的约束。
-- 验收：`cargo test --offline --test history_collection`、`cargo test --offline --manifest-path src-tauri/Cargo.toml`；真实提交与有限等待已有证据，已提交事实保留，不声称已复现生产数据丢失。
+- 验收：`cargo test --locked -p tokenscope --test history_collection`、`cargo test --offline --manifest-path src-tauri/Cargo.toml`；真实提交与有限等待已有证据，已提交事实保留，不声称已复现生产数据丢失。
 
 <a id="n07"></a>
 
@@ -151,7 +140,7 @@
 - 文件：`src/history.rs`、`frontend/src/views/Dashboard.vue`、`frontend/src/lib/viewSnapshot.ts` 及对应测试；`docs/stats-semantics.md`。
 - 旧任务内容：日汇总按来源完整主键幂等；改变时区假设不复制用量；保存/恢复只看请求明细；旧快照失效；覆盖未知不得直接相加或制造请求。
 - 完成证据：维护中回归覆盖时区重复导入、v2 仅时区不同的重复汇总迁移和 `detail_only` 保存/恢复/v10 失效；快照版本 11、口径 §6.5.1 和全部门禁已同步通过。
-- 验收：`cargo test --offline --test review_regressions`、前端 test/typecheck/format:check/build；同源时区重选仍为 10 次，旧视图不恢复错误模式，日粒度费用/项目未知原因准确。
+- 验收：`cargo test --locked -p tokenscope --test review_regressions`、前端 test/typecheck/format:check/build；同源时区重选仍为 10 次，旧视图不恢复错误模式，日粒度费用/项目未知原因准确。
 - 日汇总整桶手动替换入口原计划有描述，当前 `PreferRollup` 未接到 GUI。它无法恢复精确请求并集，**列入第 5 节条件待办**，不以新增高级选项阻塞上述幂等与模式修复。
 
 <a id="n08"></a>
@@ -182,7 +171,7 @@
 
 ### N10：隐私强验收与完整浏览器矩阵
 
-- 文件：`frontend/scripts/native-acceptance.mjs`、`frontend/scripts/interaction-contracts.mjs`、现有 root/壳 acceptance 入口、`src-tauri/src/privacy.rs`；测试仍只使用隔离合成数据。
+- 文件：`frontend/scripts/native-acceptance.mjs`、`frontend/scripts/contracts/interaction-contracts.mjs`、现有 root/壳 acceptance 入口、`src-tauri/src/privacy.rs`；测试仍只使用隔离合成数据。
 - 原 P06 内容保留：未同意不读取业务数据或联网；同意原子保存先于第一次业务 I/O；真实受保护 IPC 拒绝；拒绝/关闭/重启/损坏设置；完整浏览器矩阵与政策产物。
 - 工具缺口：`businessFiles` 只列 `cache.db`、漏 `history.db/WAL/SHM`；未同意只等 1500ms，未观察超过 120 秒；缺已有业务文件读取与 Rust 网络计数；Ready 后读到 `true` 只证明终值，不证明落盘顺序；“denied IPC”浏览器场景未真实调用全部后端命令。
 - 步骤：补取证白名单与计数/顺序记录；复用隔离 native 两个隐私场景；真实等待跨过门槛并逐项调用当前 27 个业务 IPC；运行当前完整 required contracts/fixture 矩阵，不能以 JSON 的 required 列表代替实际结果。
@@ -202,6 +191,8 @@
 <a id="n12"></a>
 
 ### N12：D5 系统、安装与实际发布批次
+
+> 2026-10-20 当前结论：v0.5.2 的安装、六组单跳升级及两条连续升级链均已通过。以下旧版本实施/门禁记录保留为历史；不再将 0.2.1、旧 PR 实跑或固定旧包接线列为当前待办。仍开放的是本节系统验收与签字，独立三项系统待办按用户决定另行排期。
 
 - 从旧 roadmap D5、多个 remediation 真机尾项、RC11/AP08、M3/M8/M11 的自身安装或运行项、CI 方案6 合并，不分别做重复签字；M4/M5/M7/M9 的界面项在 N11。
 - 附属规范：[D5 清单](../d5-acceptance-checklist.md)。当前计划持有任务状态，清单记录步骤和签字。
@@ -472,7 +463,7 @@ python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
 
 ### N13：真实规模历史库性能基准
 
-- 文件：`tests/perf_real_data.rs` 与现有隔离验收工具；必要时新增合成规模测量，不新增数据库引擎。
+- 文件：`crates/tokenscope-core/tests/perf_real_data.rs` 与现有隔离验收工具；必要时新增合成规模测量，不新增数据库引擎。
 - 旧内容：历史库冷采集/热查询、真实约 1.2 GB 日志、查询/明细响应。旧缓存的 0.12s 数字不是新历史库验收结果。
 - 步骤：先完成 N01–N09；使用只读源数据，将输出与价格索引放到临时目录，记录环境、事件数、索引/聚合阶段、冷热耗时与峰值内存。
 - 验收：前后用量完全一致，记录可复查结果。已有热启动 1 秒目标可作参考；优化依据实际瓶颈，不为补旧 D4 的 20 次/P95 建一个额外工程。
@@ -484,9 +475,9 @@ python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
 
 来源：[PR3 归档的合入与发布记录](../archive/partial/2026-10-14-source-discovery-and-additional-paths.md#合入与发布记录2026-10-19)。原生/浏览器 E2E 失败先按证据说明原因，不以重跑通过代替。
 
-1. **连续升级链实测（待 0.5.1 发布）**：0.5.0 的 [Release 39146151291](https://github.com/ywltby/tokenscope/actions/runs/39146151291) 因链路设置格式核对的测试架缺陷失败，`6533e22` 已修复。验收：0.5.1 的 main 发布中 `upgrade-chain (present)` / `(deleted)` 通过（链路 0.1.0 → 0.4.0 → 0.5.1，末跳跨过设置格式 1 → 2），并在证据里核对每跳的设置格式。
+1. **连续升级链实测（已关闭，2026-10-20）**：0.5.0 的 [Release 39146151291](https://github.com/ywltby/tokenscope/actions/runs/39146151291) 因链路设置格式核对的测试架缺陷失败，`6533e22` 已修复。验收：0.5.1 的 main 发布中 `upgrade-chain (present)` / `(deleted)` 通过（链路 0.1.0 → 0.4.0 → 0.5.1，末跳跨过设置格式 1 → 2），并在证据里核对每跳的设置格式。结果：PR #15 合入后 [Release 39291272967](https://github.com/ywltby/tokenscope/actions/runs/39291272967) 两条链均成功，已核对四阶段及 settings 1 → 2；v0.5.2 的两条链亦通过。本项关闭。
 2. **预设切换的迟到重复批次（产品缺陷）**：原生 `ui-system` 取证显示，切换时间预设后偶尔多出一个查询批次（失败运行在切换后 1.6 s 出现第二个采集轮；通过的运行也有 begin 后无汇总完成的批次）。`2205827` / `1b9a5d0` 只让测试架等稳定基线，没有修产品。步骤：先写能复现的前端回归（切换一次预设只产生一个查询批次），定位触发源后修复。验收：回归先红后绿，原生恢复/切页检查不再需要等待稳定。
-3. **浏览器契约 `ui_control_material` dark 会话壳层超时（原因未明）**：main `599c89e` 的 [CI 39146151362](https://github.com/ywltby/tokenscope/actions/runs/39146151362) 一次失败，现场没有证据。`b141fcc` 起契约抛错会写出 `<契约>--failure.json`。取证补强（IPC 两侧对照与时间线、`classifyBootStall` 自动判断）与产品恢复（检查耗时提示与代次保护、主界面加载失败可重新加载、`data-boot-state` 阶段标记、新契约 `boot_stall_recovery`）已按[启动卡死取证补强与引导期恢复计划](2026-10-19-boot-stall-recovery.md)实施（BS01–BS04 完成并推送，§6 有先红后绿证据）；本项是否闭合以该计划交付批次在远端通过为准，之后 dark 会话再次超时即可按取证自动判断卡点。
+3. **浏览器契约 dark 超时的取证与恢复交付（已关闭，旧超时根因未证实）**：main `599c89e` 的 [CI 39146151362](https://github.com/ywltby/tokenscope/actions/runs/39146151362) 一次失败，现场没有证据。`b141fcc` 起契约抛错会写出 `<契约>--failure.json`。取证补强（IPC 两侧对照与时间线、`classifyBootStall` 自动判断）与产品恢复（检查耗时提示与代次保护、主界面加载失败可重新加载、`data-boot-state` 阶段标记、新契约 `boot_stall_recovery`）已按[启动卡死取证补强与引导期恢复计划](../archive/implemented/2026-10-19-boot-stall-recovery.md)完成（BS01–BS06 已交付、复核并随 PR #16 合入，v0.5.2 已发布）。该批次 PR/main 的 CI、原生 E2E 和安装升级均通过，满足本项原定交付条件。关闭的是取证与恢复交付责任，不是证明旧超时根因或保证不再超时；后续失败继续按实际取证分类处理。
 4. **采集层权限拒绝 fixture（PR3 S03 遗留）**：构造无读取权限的子目录，断言该项诊断可见、其余文件照常读取、整轮不中断。Windows 上不便构造 ACL 时，可只在能构造的平台运行，并在记录里说明。
 
 ## 5. 已取代、暂缓与不再单独执行
@@ -507,39 +498,34 @@ python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
 
 ## 6. 实施顺序与验证命令
 
-N01–N09 已完成，不重复实施；M06 严格校验器及 fixture 保持通过，M10 不重复实施。N12 的 A01–A06 已修复且契约全绿（两轮挑刺审计后）；随后取得当前产物的 PR 安装与普通 CI 成功结果，两种验证各自记账。后续做 N10/N11；N12 其余系统与正式签字随发布批次，N13 随性能验收排期。
+N01–N09、N14 第 1/3 项已完成，不重复实施；N14 第 2/4 项仍需实施与定向验证。M06 严格校验器及 fixture 保持通过，M10 不重复实施。N12 的 A01–A06 已修复且契约全绿（两轮挑刺审计后）；随后取得当前产物的 PR 安装与普通 CI 成功结果，两种验证各自记账。后续做 N10/N11；N12 其余系统与正式签字随发布批次，N13 随性能验收排期。
 
 新增测试名先在实际目标文件中登记，再执行；本计划提出的断言不是已经存在或已经通过的测试。N08 的现有目标为 `model_name_equivalence`、`model_identity_contract` 和 `pricing_source_policy`。
 
 ```powershell
 # 按任务运行目标测试；测试中的数据/历史/全部价格路径均为临时目录
-cargo test --offline --test history_migration -- --test-threads=1
-cargo test --offline --test history_overlap -- --test-threads=1
-cargo test --offline --test ccs_import -- --test-threads=1
-cargo test --offline --test review_regressions -- --test-threads=1
-cargo test --offline --test history_queries -- --test-threads=1
-cargo test --offline --test query_memory_budget -- --test-threads=1
-cargo test --offline --test model_name_equivalence -- --test-threads=1
-cargo test --offline --test model_identity_contract -- --test-threads=1
-cargo test --offline --test pricing_source_policy -- --test-threads=1
+cargo test --locked -p tokenscope --test history_migration -- --test-threads=1
+cargo test --locked -p tokenscope --test history_overlap -- --test-threads=1
+cargo test --locked -p tokenscope --test ccs_import -- --test-threads=1
+cargo test --locked -p tokenscope --test review_regressions -- --test-threads=1
+cargo test --locked -p tokenscope --test history_queries -- --test-threads=1
+cargo test --locked -p tokenscope --test query_memory_budget -- --test-threads=1
+cargo test --locked -p tokenscope --test model_name_equivalence -- --test-threads=1
+cargo test --locked -p tokenscope --test model_identity_contract -- --test-threads=1
+cargo test --locked -p tokenscope --test pricing_source_policy -- --test-threads=1
 
-# 最终门禁：根库与壳分别执行
+# 最终门禁：统一 workspace 覆盖核心库与壳
 cargo fmt --all -- --check
-cargo clippy --offline --workspace --all-targets -- -D warnings
-cargo test --offline --workspace
-cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-cargo clippy --offline --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-cargo test --offline --manifest-path src-tauri/Cargo.toml
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
 pnpm --dir frontend typecheck
 pnpm --dir frontend format:check
 pnpm --dir frontend test
 pnpm --dir frontend build
 
 # 合并门禁还包括 CI 实际要求的 acceptance 构建和发布元数据测试
-cargo clippy --offline --locked --workspace --all-targets --features acceptance -- -D warnings
-cargo test --offline --locked --workspace --features acceptance
-cargo clippy --offline --locked --manifest-path src-tauri/Cargo.toml --all-targets --features acceptance -- -D warnings
-cargo test --offline --locked --manifest-path src-tauri/Cargo.toml --features acceptance
+cargo clippy --locked --workspace --all-targets --features acceptance -- -D warnings
+cargo test --locked --workspace --features acceptance
 python -B -m unittest discover -s scripts -p "test_release_metadata.py" -v
 ```
 
@@ -625,4 +611,13 @@ python -B -m unittest discover -s scripts -p "test_release_metadata.py" -v
 | 2026-10-19 | 0.5.1 修复批次（`fix/upgrade-chain-format`） | 本地门禁通过；远端与发布待验 | `6533e22` 链路按每跳版本格式核对（真实失败设置 1->1 通过、1->2 复现）；`b141fcc` 浏览器契约失败取证；`66e05e0` v0.5.0 登记 unpublished 并递增 0.5.1；PR3 计划归档为部分完成，剩余转 N14 / N13。Native UI E2E [39177008549](https://github.com/ywltby/tokenscope/actions/runs/39177008549) 唯一失败项 `query_publishes_within_reading_window` 判定为测试架缺陷：原检查要求统计落地取样仍是读取态，隐含采集+查询须在 1000ms 最短显示期内完成，该运行采集约 465ms + 查询约 517ms ≈ 982ms 压在边界（t=21308 读取开始、t=21773 读取态下查询 -1-g2 已开始、t=22290 落地时取样已 confirmed），同一产品代码在 4f2c626 的 39150514196 通过；`5c5c43c` 把判定改为验证"新代次查询在读取期内已经开始"（纯函数 + 失败工件回放通过、反例失败），不调大等待、不加重试、不改产品代码 |
 | 2026-10-19 | 启动卡死恢复批次（`fix/boot-recovery`） | BS01–BS05 完成并推送；复核补修、并发首次初始化产品修复（HistoryDb + Cache）与统一重试完成；BS06 已在前置满足后执行（见下行） | 引导期恢复 `a694b25`/`61633dc`、取证补强 `6bdd55e`、新契约 `4385b60`（`boot_stall_recovery`，反证先红后绿）、复核补修 `96f580b`（迟到响应必须落定才断言代次保护，含反例；DOM 不可读也写 suspected）。计划外的并发用例重试（`32a53e5`）按复核意见撤回并另案调查：探针四组对照定位为**并发首次初始化竞态**（并发新建 30 轮 11 失败、其余三组 30/30 通过；extended=8；同连接重试无效、重开连接恢复），`ff939f8` 在 `HistoryDb::open` 层重试整个打开序列并补 50 轮回归（先红后绿）；`cf28d72` 按第二轮复核统一重试常量、保留类型化错误（移除字符串化与消息兜底）、补确定性重试策略测试、覆盖 Cache 并发打开（修复前 2/100 → 修复后 0/100）；`c4ba482` 按第三轮复核收尾预算机制——绝对 deadline 只在外层创建一次并贯穿 WAL 与迁移等待（内层不重算）、每阶段按剩余预算设 busy_timeout、睡眠后检查 deadline，假时钟与真实持锁用例双覆盖；`72c49b0` 按第四轮复核补齐迁移路径预算传递（读版本/备份前后/事务前检查点，备份耗时反映到事务前预算；WAL 的 apply 移入每次尝试），并以覆盖生产接线的确定性回归（备份耗尽/部分消耗＋变异验证）锁定。原并发用例保持原强度、全量 workspace 连续两次 0 失败。详见该计划 §6 与调查计划 |
 | 2026-10-20 | PR #15 合并与 v0.5.1 发布 → BS06 交付 | 已合并并发布；BS06 草稿 PR #16 待复核 | `9ea0c584` 普通 merge（HEAD `bc8c622`、13 检查全 pass、PR 端 `upgrade-chain` 为设计 skip）；Release [39291272967](https://github.com/ywltby/tokenscope/actions/runs/39291272967) 全 11 作业 success（连续链 present/deleted、四单跳、install-test、publish）；v0.5.1 发布（tag→`9ea0c58`，四资产哈希与 GitHub digest、SHA256SUMS 三方一致；安装五场景 PASS；连续链 0.1.0→0.4.0→0.5.1 四阶段 pass、settings 1→2）。BS06：合并 main（`f22648b`）、登记 v0.5.1 基线（commit `9ea0c58`、四资产哈希）、递增 **0.5.2**（`71b5324`）、`--check` base `9ea0c58`；首次 full 门禁 4 项偶发失败定位为 `TOKENSCOPE_PRECOMMIT_MODE=full` 被子进程继承并由 `6fb7978` 修复（先红后绿）；草稿 PR #16（head `71b5324`：CI 39310409975、Native UI E2E 39310409959、Install test 39310410188 全 success，含六个单跳矩阵 0.1.0/0.4.0/0.5.1 × present/deleted，工件身份核对 commit `4080463`、0.5.2，仅属该早期运行）。文档回填后的 HEAD `5144879` 三条流水线（CI 39312695608、Native UI E2E 39312695541、Install test 39312695555）全绿，其中 `frontend` 一次 `ERR_NO_BUFFER_SPACE` 环境瞬时失败经契约取证定位后仅重跑失败作业通过 |
-| 2026-10-20 | BS06 最终交付证据纠正与独立复核 | `1ca89f1` 已验通过；草稿 PR #16 尚未合并 | CI 39315246024、Native UI E2E 39315246032、Install test 39315246067 全成功，六个单跳矩阵通过；实际测试合并提交 `1509c986`（父提交 `9ea0c584` + `1ca89f1`）、版本 0.5.2、主程序 SHA256 `a606c9fd79037b1e9762ae7b32fc3afc5e5dd8c28fcb5bd30a9c5058d9a71456` 与升级工件一致。原生六场景 88 条检查通过、真实数据未触碰；安装迁移/重装通过。本次文档修正会产生新 HEAD，其远程检查须另行核对；详见[启动恢复计划](2026-10-19-boot-stall-recovery.md)的最终交付复核记录 |
+| 2026-10-20 | BS06 最终交付证据纠正与独立复核 | `1ca89f1` 已验通过；草稿 PR #16 尚未合并 | CI 39315246024、Native UI E2E 39315246032、Install test 39315246067 全成功，六个单跳矩阵通过；实际测试合并提交 `1509c986`（父提交 `9ea0c584` + `1ca89f1`）、版本 0.5.2、主程序 SHA256 `a606c9fd79037b1e9762ae7b32fc3afc5e5dd8c28fcb5bd30a9c5058d9a71456` 与升级工件一致。原生六场景 88 条检查通过、真实数据未触碰；安装迁移/重装通过。本次文档修正会产生新 HEAD，其远程检查须另行核对；详见[启动恢复计划](../archive/implemented/2026-10-19-boot-stall-recovery.md)的最终交付复核记录 |
+| 2026-10-12 | 双审计员循环第一轮（执行） | 完成 | 审计员 B（核心）：P2-1 CCS Codex 捐献按 (scheme,value) 判重修复 + 回归；P2-2 内容等值原生写升级 rank（classify_against）+ 回归；P3 query.rs 额度文案/v3 utc 同步/文档修正。审计员 A（门禁）：P2-1 失败路径复制 live-logs；P3 卸载 30s 轮询、file URI 编码、非 db 退出 2、make_legacy_cache 幂等；.gitignore 补 Python/日志模式。两个审计员均确认无 P1 |
+| 2026-10-12 | 双审计员循环第二轮（执行） | 完成 | 审计员 C（热路径+契约）：P2 热路径 7 处 DBG eprintln 删除；P2 M05 反例"错因通过"修复——四个反例接 New-StandInProcess、全部 Test-Throws 钉住 -ExpectedText、反例 1 重构为"归档旧日志→等待超时"并沿用生产证据根命名。审计员 D（集成）：确证同一 P2 并补 P3——test_install.ps1 失败模型注释、安装失败写证据说明、ExpectedRequests 从 manifest 事件数推导、非 CI 运行守卫（Reset-UserHome 保护）、证据动作不掩盖原始异常；v3 迁移 observed_at_utc 回填改 RFC3339（strftime）+ 回归（口径更正见第三轮：回填 SQL 实际在 SCHEMA_V3）；inspect_history 模式查询统一 DatabaseError 守卫与 NULL/空串区分显示（26 项 unittest）。两审计员均确认无 P1 |
+| 2026-10-12 | 双审计员循环第三轮（执行） | 完成 | 审计员 E（核心）：无 P1/P2，前两轮修复经对抗探针成立；P3——inspect_history 默认汇总改受检解析累加（SQLite SUM 在 u64 规模隐式转 REAL、坏值静默计 0）+ 3 项回归、absent 库行式模式不输出空行、aggregate 每事件两次 estimate 合并为一次（首次重构误改 unknown_pricing 累积语义，被金标对账测试抓出后修正）、四处错误文案空格串清理、utc 回填口径更正为 v3（回归测试改名 v3_backfill_*）。审计员 F（门禁）：无 P1/P2；P3——CONSENT=1 本机调试路径补 TEMP 回退、Copy-LiveLogsToEvidence 补 -Recurse、反例 1 归档前置断言改 Test-True 计账（契约 21→22 项）、install-test.yml 版本读取加 SemVer 强校验。两审计员均确认无 P1 |
+| 2026-10-12 | 双审计员循环第四轮（执行） | 完成 | 审计员 G（GUI/命令层）：无 P1；P2——Dashboard 首载失败且无数据时胶囊永久谎报"刷新中"（错误分支置于 !report 之后不可达，补失败态+测试）；P2——ImportPreview.rollups_rejected 前端契约缺失致预览计数对不上（types.ts 补字段、Settings 预览文案补已存在/被拒）；P3——聚合表行完全未计价显示 $0.00† 改"未知†"与英雄栏同口径、timezone.ts 警告漏 $ 插值、窗口状态恢复补显示器相交校验（纯函数+2 测试）、追加页失败重试不再重置回首页（失败侧别记录+锚点守卫）。审计员 H（解析/采集/计价）：无 P1/P2，第三轮修复经探针全部兑现；P3——file URI %2F 语义文档化+钉住测试（刻意解码一次的合并语义）、Claude synthetic 判定补 trim（防御深度+测试）。两审计员均确认无 P1 |
+| 2026-10-12 | 双审计员循环第五轮（执行） | 完成 | 审计员 I（回归复核）：dfcad57 九项修复逐条兑现（含追加重试守卫可达性完整推演、五套件 362+44+461+36+22 全绿）；P3——restorable_on_any_monitor 饱和值 debug 溢出 panic 改 i64 中间量+测试、CCS 预计变化补"过期跳过"与 rejected_reasons/unsupported_apps 展示出口、UsageTable 未知†与追加重试补回归测试、窗口恢复注释如实化。审计员 J（渲染/时区/settings/错误契约）：无 P1/P2，DST 拨快/回拨、跨年区间、渲染确定性、f64 三层防线、21 例错误前缀契约全部实测未破；P3——SETTINGS_HEADER 补"未知键会被 GUI 保存删除"口径、日期错误文案如实声明 YYYYMMDD 也可、溢出修复随本批入库。两审计员均确认无 P1 |
+| 2026-10-12 | 双审计员循环第六轮（执行，K 部分） | 完成 | 审计员 K（打包/安全面）：无 P1/P2；CSP/capabilities/IPC 路径面/产物链逐项实测未破（30 命令全过 require_ready、无前端可写路径、CSP 无 unsafe-eval 外域）；P3——tauri.conf.json 显式钉 NSIS 契约（installMode currentUser、languages English、allowDowngrades false 把默认值升级为显式约束）、SHA256SUMS.txt 改 WriteAllText 写 LF（消除对 runner coreutils 版本的隐式依赖）、验收断言对齐实际二进制名 tokenscope.exe（原靠大小写不敏感成立）、install-test paths 补 docs/privacy.md（include_str! 进产物）；capabilities core:default 维持现状（K 评估收紧收益趋零） |
+| 2026-10-12 | 双审计员循环第六轮（执行，L 部分） | 完成 | 审计员 L（测试质量）：无 P1，mutation 抽样证实五轮修复的关键缺陷均有能红的回归；P2——history_queries/review_regressions 触碰进程级钩子（预算注入/计数 swap(0)）无串行化被亲手复现假失败，两文件补 static SERIAL 互斥（31+6 个测试全覆盖）；P3——补单页上限 1000 契约测试（mutation 证实此前零防护）、翻页循环加收敛上界（防协议破坏时挂死）、parse_rollups_mode 补测试、262 个 pub fn 无完全未触达、临时目录/密闭性抽检合规；一次性 exit=101 信号未复现不归因（与本轮 target 产物损坏事故同期，重建后消失）；观察窗口竞态留置（OS 调度下 300 文件采集期间主线程必被调度，30s deadline 充裕） |
+| 2026-10-12 | 双审计员循环收尾（用户指示） | 收敛 | 第七轮两名审计员（核心复攻/全链路收尾）因配额中止未产出报告，循环按用户指示收敛不再续轮。总账：六轮 12 名审计员，P1 始终为 0；产品 P2 自第三轮起为 0（第六轮测试质量 P2 已修）；共修复 2+2+8+8+8+4+6 处发现，产出 15 个提交（d7ee94b、8ebbac9、659400b、8980b7c、dfcad57、b724fe3、ae919e5、6fab12f 等）。期间处置一次环境事故：僵尸测试进程锁定 target 致新旧增量产物混编、pre-commit 假失败，全量 cargo clean 重建后恢复，代码无缺陷。门禁终态：根库 461+acceptance、壳库 45、前端 364、python 36、pwsh 契约 22 全绿。N12 的 PR CI 实跑取证仍是唯一待办，不因循环收敛而视为完成 |
+| 2026-10-20 | 发布闭环与计划归档 | 两份专项归档；N14 第 1、3 项关闭 | PR #15 / v0.5.1 连续链证据、PR #16 / v0.5.2 的 main CI 39353860584、Native UI E2E 39353860657、Release 39353860618 均成功。启动恢复及 SQLite 调查归档 implemented；active 只保留本计划。N10/N11/N13 未闭合、N12 系统签字与独立三项系统待办不变；N14 仅剩第 2、4 项。 |

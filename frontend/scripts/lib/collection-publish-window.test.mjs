@@ -1,123 +1,72 @@
-// query_publishes_within_reading_window 判定的纯函数单测。
-// 用例 1 原样回放 Native UI E2E 39177008549 失败运行的 timeline 形态；
-// 用例 3 是反例：查询在读取态结束后才开始时必须判失败。
 import { describe, expect, it } from "vitest";
 import { queryPublishesDuringReading } from "./collection-publish-window.mjs";
 
-/** 39177008549 launches[0].timeline 的关键取样（原值）：读取开始 →
- *  读取期内新代次查询开始（generation 前进 + "刷新中…"，统计未动）→
- *  落地与 1000ms 最短显示期同时到点（取样已翻到 confirmed）。 */
-const FAILED_RUN_TIMELINE = [
+const baseline = { requests: 252, generation: 1, runId: 3, summaryQuery: "old" };
+// 39363530556 的轮询形态：最后读取样本和落地只差 63ms，不能推断调用顺序。
+const timeline = [
+  { at_ms: 20892, state: "reading", runId: 4, generation: 1, requests: 252 },
+  { at_ms: 21851, state: "reading", runId: 4, generation: 1, requests: 252 },
   {
-    at_ms: 20550,
+    at_ms: 21914,
     state: "confirmed",
-    text: "已更新",
-    revision: 6,
-    runId: 3,
-    generation: 1,
-    requests: 252,
-    summaryQuery: "q1ffbcc55d7da6f1bebbd91fcd1b407af-0-g1",
-    eventsQuery: "q1ffbcc55d7da6f1bebbd91fcd1b407af-0-g1",
-  },
-  {
-    at_ms: 21308,
-    state: "reading",
-    text: "正在读取",
-    revision: 7,
-    runId: 4,
-    generation: 1,
-    requests: 252,
-    summaryQuery: "q1ffbcc55d7da6f1bebbd91fcd1b407af-0-g1",
-    eventsQuery: "q1ffbcc55d7da6f1bebbd91fcd1b407af-0-g1",
-  },
-  {
-    at_ms: 21773,
-    state: "reading",
-    text: "刷新中…",
-    revision: 8,
-    runId: 4,
-    generation: 2,
-    requests: 252,
-    summaryQuery: "q1ffbcc55d7da6f1bebbd91fcd1b407af-1-g2",
-    eventsQuery: "q1ffbcc55d7da6f1bebbd91fcd1b407af-1-g2",
-  },
-  {
-    at_ms: 22290,
-    state: "confirmed",
-    text: "已更新",
-    revision: 8,
     runId: 4,
     generation: 2,
     requests: 253,
-    summaryQuery: "q1ffbcc55d7da6f1bebbd91fcd1b407af-1-g2",
-    eventsQuery: "q1ffbcc55d7da6f1bebbd91fcd1b407af-1-g2",
+    summaryQuery: "new",
+    eventsQuery: "new",
   },
 ];
-
-const BASELINE = {
-  at_ms: 20400,
-  state: "confirmed",
-  text: "已更新",
-  runId: 3,
-  generation: 1,
-  requests: 252,
-  summaryQuery: "q1ffbcc55d7da6f1bebbd91fcd1b407af-0-g1",
-  eventsQuery: "q1ffbcc55d7da6f1bebbd91fcd1b407af-0-g1",
-};
-
-describe("query_publishes_within_reading_window 判定", () => {
-  it("39177008549 失败运行形态：读取期内查询已开始 → 通过并写明依据", () => {
-    const j = queryPublishesDuringReading({
-      timeline: FAILED_RUN_TIMELINE,
-      baseline: BASELINE,
-    });
-    expect(j.ok).toBe(true);
-    expect(j.readingStartMs).toBe(21308);
-    expect(j.queryStartMs).toBe(21773);
-    expect(j.basis).toContain("读取开始=21308ms");
-    expect(j.basis).toContain("查询开始=21773ms");
-    expect(j.basis).toContain("落地=22290ms");
-    expect(j.basis).toContain("落地时状态=confirmed/已更新");
-  });
-
-  it("查询快于最短显示期：落地取样仍是读取态 → 通过", () => {
-    const timeline = [
-      { at_ms: 100, state: "reading", text: "正在读取", runId: 2, generation: 1, requests: 10 },
-      { at_ms: 500, state: "reading", text: "刷新中…", runId: 2, generation: 2, requests: 10 },
-      { at_ms: 900, state: "reading", text: "刷新中…", runId: 2, generation: 2, requests: 11 },
-    ];
-    const j = queryPublishesDuringReading({
+const trace = (start, end, queryAt) => [
+  { kind: "status-enter", at_ms: start, phase: "running", runId: 4, latestGeneration: 1 },
+  { kind: "status-exit", at_ms: end, phase: "succeeded", runId: 4, latestGeneration: 2 },
+  { kind: "query", at_ms: queryAt, resolved_ms: end + 20, queryId: "new", generation: 2 },
+];
+describe("查询不等待读取动画的直接证据", () => {
+  it.each([50, 1000, 2500])("采集耗时 %dms：终态处理期间已经发起查询", (duration) => {
+    const result = queryPublishesDuringReading({
       timeline,
-      baseline: { requests: 10, generation: 1, runId: 1 },
+      baseline,
+      trace: trace(100, 100 + duration, 99 + duration),
     });
-    expect(j.ok).toBe(true);
-    expect(j.publish.state).toBe("reading");
-    expect(j.basis).toContain("落地时状态=reading/刷新中…");
+    expect(result.ok).toBe(true);
+    expect(result.queryStartMs).toBe(99 + duration);
   });
-
-  it("反例：读取期内未见新代次查询、落地已是 confirmed → 失败", () => {
-    const timeline = [
-      { at_ms: 100, state: "reading", text: "正在读取", runId: 2, generation: 1, requests: 10 },
-      { at_ms: 200, state: "reading", text: "正在读取", runId: 2, generation: 1, requests: 10 },
-      { at_ms: 1500, state: "confirmed", text: "已更新", runId: 2, generation: 2, requests: 11 },
-    ];
-    const j = queryPublishesDuringReading({
-      timeline,
-      baseline: { requests: 10, generation: 1, runId: 1 },
-    });
-    expect(j.ok).toBe(false);
-    expect(j.readingStartMs).toBe(100);
-    expect(j.queryStartMs).toBeNull();
-    expect(j.basis).toContain("读取期内未见新代次查询开始");
+  it("快轮次等待动画期满再查询必须失败", () => {
+    expect(
+      queryPublishesDuringReading({ timeline, baseline, trace: trace(100, 150, 1100) }).ok,
+    ).toBe(false);
   });
-
-  it("时间线中没有统计落地取样 → 失败", () => {
-    const j = queryPublishesDuringReading({
-      timeline: FAILED_RUN_TIMELINE.filter((s) => s.requests === 252),
-      baseline: BASELINE,
-    });
-    expect(j.ok).toBe(false);
-    expect(j.publish).toBeNull();
-    expect(j.basis).toContain("没有统计落地取样");
+  it("慢轮次结束后另加动画等待也必须失败", () => {
+    expect(
+      queryPublishesDuringReading({ timeline, baseline, trace: trace(100, 2600, 3600) }).ok,
+    ).toBe(false);
+  });
+  it("仅有轮询、甚至落地仍为 reading，也不算调用证据", () => {
+    expect(
+      queryPublishesDuringReading({
+        timeline: timeline.map((s) => ({ ...s, state: "reading" })),
+        baseline,
+      }).ok,
+    ).toBe(false);
+  });
+  it.each([
+    "wrong-query",
+    "wrong-generation",
+    "missing-status",
+    "missing-start",
+    "missing-publish",
+  ])("证据不完整或串批次：%s", (kind) => {
+    let records = trace(100, 150, 149);
+    if (kind === "wrong-query") records[2].queryId = "other";
+    if (kind === "wrong-generation") records[2].generation = 3;
+    if (kind === "missing-status") records = records.filter((s) => s.kind !== "status-exit");
+    if (kind === "missing-start") records = records.filter((s) => s.kind !== "status-enter");
+    expect(
+      queryPublishesDuringReading({
+        timeline: kind === "missing-publish" ? [] : timeline,
+        baseline,
+        trace: records,
+      }).ok,
+    ).toBe(false);
   });
 });
