@@ -182,7 +182,15 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 - **本地版本**：合并 main（`f22648b`）→ `upgrade_baselines.py add --tag v0.5.1`（commit `9ea0c58`、profile history、资产哈希核对）→ `bump_version --bump patch` 递增 **0.5.2**（`71b5324`）→ `--check --base-ref origin/main` 通过（0.5.2 ← 0.5.1，base `9ea0c58`）。
 - **完整门禁**：首次 full 模式 4 项偶发失败（`EndToEndOnlyCommitCase`，未复现）；定位为 `TOKENSCOPE_PRECOMMIT_MODE=full` 被子进程继承（`6fb7978` 修复，先红 4 失败 → 后绿 55 项）；修复后完整 full 门禁通过（含 Rust 普通/acceptance、前端 typecheck/format/test/build、浏览器 E2E、脚本契约）。
 - **草稿 PR #16**（head `71b5324`，https://github.com/ywltby/tokenscope/pull/16）：CI [39310409975](https://github.com/ywltby/tokenscope/actions/runs/39310409975)、Native UI E2E [39310409959](https://github.com/ywltby/tokenscope/actions/runs/39310409959)、Install test [39310410188](https://github.com/ywltby/tokenscope/actions/runs/39310410188) 均 success；六个单跳矩阵（0.1.0/0.4.0/0.5.1 × present/deleted）pass；`install-evidence`（fresh-migrate/reinstall pass）与 `0.5.1-present` 升级证据（baseline_commit `9ea0c58`、current_version 0.5.2、旧 exe `c056500d…` = v0.5.1 主程序）核对；`install-build` 产物身份 commit `4080463`（PR merge ref）、version 0.5.2、exe `e1e9773c…` 与升级证据一致。`upgrade-chain` 在 PR 端为设计允许的 skip（Release 专属）。
-- **文档回填后的最终 HEAD**（`5144879`）：CI [39312695608](https://github.com/ywltby/tokenscope/actions/runs/39312695608)、Native UI E2E [39312695541](https://github.com/ywltby/tokenscope/actions/runs/39312695541)、Install test [39312695555](https://github.com/ywltby/tokenscope/actions/runs/39312695555) 均 success；六个单跳矩阵 pass、`gate` pass。首轮该 HEAD 的 `frontend` 作业在 `ui_date_keyboard_matrix` 处 30s 超时——契约自带的失败取证（BS03 成果）给出 `net::ERR_NO_BUFFER_SPACE`（主 JS bundle 加载失败，Chromium 网络缓冲耗尽，页面未渲染），同一前端代码在 `71b5324` 通过，判定为 Runner 环境资源类瞬时失败；保留取证工件（`ui_date_keyboard_matrix--failure.json`）后仅重跑失败作业，重跑通过。
+- **中间文档提交**（`5144879`，非最终已验提交）：CI [39312695608](https://github.com/ywltby/tokenscope/actions/runs/39312695608)、Native UI E2E [39312695541](https://github.com/ywltby/tokenscope/actions/runs/39312695541)、Install test [39312695555](https://github.com/ywltby/tokenscope/actions/runs/39312695555) 均 success；六个单跳矩阵 pass、`gate` pass。首轮该 HEAD 的 `frontend` 作业在 `ui_date_keyboard_matrix` 处 30s 超时——契约自带的失败取证（BS03 成果）给出 `net::ERR_NO_BUFFER_SPACE`（主 JS bundle 加载失败，Chromium 网络缓冲耗尽，页面未渲染），同一前端代码在 `71b5324` 通过，判定为 Runner 环境资源类瞬时失败；保留取证工件（`ui_date_keyboard_matrix--failure.json`）后仅重跑失败作业，重跑通过。
+
+### 最终交付提交的独立复核（2026-10-20）
+
+- 本次已验提交为 `1ca89f1cfce8ac06e355d68194ddf11503ce23a2`。上文 `71b5324`、`5144879` 是早期运行记录；`4080463` / `e1e9773c…` 仅属于早期产物，不作为本次提交的身份凭据。
+- 对应该提交的 CI [39315246024](https://github.com/ywltby/tokenscope/actions/runs/39315246024)、Native UI E2E [39315246032](https://github.com/ywltby/tokenscope/actions/runs/39315246032)、Install test [39315246067](https://github.com/ywltby/tokenscope/actions/runs/39315246067) 均成功，六个单跳升级矩阵全部通过；连续升级链仍为 PR 端设计跳过，不能记为本批次已验。
+- 下载最终运行工件核对：实际测试合并提交为 `1509c986421caa8e5e339d4a24f36acf03b958a4`，父提交分别为 main `9ea0c584987aaa84b1abe7f1c35173679f8dff91` 与 PR HEAD `1ca89f1cfce8ac06e355d68194ddf11503ce23a2`。`build-metadata.json` 的 version 为 `0.5.2`，`executable_sha256` 为 `a606c9fd79037b1e9762ae7b32fc3afc5e5dd8c28fcb5bd30a9c5058d9a71456`，与 `0.5.1-present` 的 `upgrade-result.json`、`installed-build.json` 一致。
+- 原生六个场景共 88 条检查全部通过、`failed=[]`、`real_untouched=true`；安装工件中的 `fresh-migrate` 与 `reinstall` 均 `pass=true`，请求数均为 3。复核环境重跑 full 模式钩子契约 55 项通过，版本校验通过（0.5.1 → 0.5.2）。
+- BS01–BS06 已达到计划约定的草稿 PR 交付门槛，PR #16 尚未合并、0.5.2 尚未发布。本次证据修正文档会产生新提交；以上结果仅归属于 `1ca89f1`，新 HEAD 的远程检查须独立核对，不能直接沿用。
 
 ### 先红后绿
 
@@ -210,10 +218,10 @@ python -B scripts/bump_version.py --check --base-ref origin/main
 ### 远端验证
 
 - PR #15（`fix/upgrade-chain-format`）：最终 HEAD `bc8c622` 三条流水线全绿——CI 39181763972、Native UI E2E 39181764030、Install test 39181763945；已于 2026-10-20 转正式并以普通 merge 合入 main = `9ea0c584`（Release 39291272967 全绿、v0.5.1 已发布，见「BS06 交付证据」）。
-- PR #16（`fix/boot-recovery`，草稿）：head `71b5324` 三条流水线全绿——CI 39310409975、Native UI E2E 39310409959、Install test 39310410188（六个单跳矩阵 pass、`upgrade-chain` 为 Release 专属 skip）。文档回填后 HEAD `5144879` 的三条流水线（CI 39312695608、Native UI E2E 39312695541、Install test 39312695555）同样全绿，`frontend` 一次 `ERR_NO_BUFFER_SPACE` 环境瞬时失败经取证定位后仅重跑失败作业通过。本段回填提交将再次更新 HEAD，其三条流水线结果见交付报告。
+- PR #16（`fix/boot-recovery`，草稿）：head `71b5324` 三条流水线全绿——CI 39310409975、Native UI E2E 39310409959、Install test 39310410188（六个单跳矩阵 pass、`upgrade-chain` 为 Release 专属 skip）。文档回填后 HEAD `5144879` 的三条流水线（CI 39312695608、Native UI E2E 39312695541、Install test 39312695555）同样全绿，`frontend` 一次 `ERR_NO_BUFFER_SPACE` 环境瞬时失败经取证定位后仅重跑失败作业通过。后续已验提交 `1ca89f1` 的三条流水线与实际产物身份见「最终交付提交的独立复核」，不得混用早期产物。
 
 ### 未闭合
 
-- **PR #16 为草稿，等待复核**：不转正式、不合并；其最终 HEAD（文档回填提交）的三条流水线与工件核对结果见交付报告。
-- 并发首次初始化修复（`ff939f8`、`cf28d72`、`c4ba482`、`72c49b0`）随 PR #16 交付，待复核。
+- **PR #16 为草稿，尚未合并**：`1ca89f1` 已通过独立复核，证据见「最终交付提交的独立复核」；本次文档修正后的新 HEAD 须核对其远程检查。
+- 并发首次初始化修复（`ff939f8`、`cf28d72`、`c4ba482`、`72c49b0`）随 PR #16 交付，已通过实现复核；合并与发布仍待执行。
 - 发布依赖已完成：PR #15 合并为 `9ea0c58`、v0.5.1 已发布并登记基线（`scripts/fixtures/upgrade_baselines.json`），本批次版本为 **0.5.2**。
