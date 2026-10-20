@@ -930,8 +930,8 @@ pub fn history_file_path() -> Result<PathBuf> {
     Ok(crate::report::data_dir()?.join("history.db"))
 }
 
-// 迁移路径的检查点轨迹（仅测试）：验证「备份完成后即使预算耗尽仍能迁移」
-// 与「迁移事务使用固定锁等待值」，不改变生产行为。
+// 迁移路径的检查点轨迹（仅测试）：验证「备份完成后仍会迁移」与「迁移
+// 事务使用固定锁等待值」，不改变生产行为。
 #[cfg(test)]
 thread_local! {
     static MIGRATE_TRACE: std::cell::RefCell<Vec<String>> =
@@ -1048,7 +1048,7 @@ impl HistoryDb {
         };
         // 迁移失败：Display 带出完整原因与保留位置，source 保留类型化错误链
         //（打开层重试按类型判定瞬态错误，不得字符串化）。
-        db.migrate(deadline, clock).map_err(|e| {
+        db.migrate().map_err(|e| {
             anyhow::Error::new(MigrateFailure {
                 detail: format!(
                     "{:#}（历史库文件保留在 {}，可重试；不执行删表重建）",
@@ -1082,11 +1082,7 @@ impl HistoryDb {
     ///
     /// 读版本、备份和迁移事务使用固定锁等待值。备份与 DDL 耗时不受
     /// 重试截止时间限制；只有瞬态失败后的重试需要检查该截止时间。
-    fn migrate(
-        &self,
-        _deadline: &crate::retry::Deadline,
-        _clock: &dyn crate::retry::Clock,
-    ) -> Result<()> {
+    fn migrate(&self) -> Result<()> {
         // 读版本前恢复常驻锁等待值。
         crate::retry::apply_busy_timeout(&self.conn, HISTORY_BUSY_TIMEOUT)?;
         let current = self.schema_version()?;
@@ -1118,12 +1114,6 @@ impl HistoryDb {
             self.backup_before_upgrade(current)?;
             #[cfg(test)]
             trace("backup_done".to_string());
-            // 仅测试记录截止时间，不因成功备份耗时而拒绝后续迁移。
-            #[cfg(test)]
-            trace(format!(
-                "backup_done_remaining_ms={}",
-                _deadline.remaining(_clock).as_millis()
-            ));
         }
         // 建立迁移事务（BEGIN IMMEDIATE 等写锁）前恢复常驻锁等待值。
         let _tx_busy = crate::retry::apply_busy_timeout(&self.conn, HISTORY_BUSY_TIMEOUT)?;
@@ -3216,8 +3206,9 @@ mod tests {
         let trace = take_trace();
         assert!(trace.iter().any(|t| t == "backup_done"), "{trace:?}");
         assert!(
-            trace.iter().any(|t| t == "backup_done_remaining_ms=0"),
-            "{trace:?}"
+            crate::retry::Clock::now(&clock)
+                >= clock.start + crate::retry::CONCURRENT_INIT_RETRY_BUDGET,
+            "备份完成后时钟必须已越过重试截止时间"
         );
         assert!(trace.iter().any(|t| t == "tx_busy_ms=5000"), "{trace:?}");
         assert!(path.with_extension("db.backup-v3").exists());
@@ -3233,7 +3224,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 备份消耗部分重试预算后，迁移事务仍使用固定 5000ms 锁等待值。
+    /// 打开流程推进时钟（步进假时钟）时，迁移事务仍使用固定 5000ms 锁等待值。
     #[test]
     fn migration_transaction_keeps_resident_timeout_after_backup() {
         let _ = take_trace();
@@ -3251,13 +3242,11 @@ mod tests {
                 .iter()
                 .find_map(|t| t.strip_prefix(prefix)?.trim().parse().ok())
         };
-        let after_backup = value("backup_done_remaining_ms=").expect("必须经过备份检查点");
-        let tx_busy = value("tx_busy_ms=").expect("必须建立迁移事务");
-        let budget = crate::retry::CONCURRENT_INIT_RETRY_BUDGET.as_millis();
         assert!(
-            after_backup > 0 && after_backup < budget,
-            "备份应消耗部分预算：{after_backup}ms"
+            trace.iter().any(|t| t == "backup_done"),
+            "必须经过备份：{trace:?}"
         );
+        let tx_busy = value("tx_busy_ms=").expect("必须建立迁移事务");
         assert_eq!(tx_busy, 5000, "事务使用固定常驻等待值");
         assert_eq!(
             db.schema_version().unwrap(),
