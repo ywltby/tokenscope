@@ -1,5 +1,7 @@
 # SQLite 并发打开失败的根因调查
 
+> **2026-10-20 锁等待复核补充：** 本文历史实现中“2 秒总预算兼作 SQLite 锁等待”的语义已由 [N15 专项修复](../../active/2026-10-20-sqlite-open-lock-wait.md)纠正（`ff1bda0`，随 0.5.5 草稿批次交付，未合入）。重试 deadline 只限制失败后的下一次尝试；历史库/缓存恢复固定 5000/2000ms，成功备份不因耗时中止，完整最新历史库免写事务打开。并发初始化修复与类型化错误继续保留；下文正文保留原时点记录，不作为新的锁等待验收标准。
+
 > **2026-10-20 归档复核：已完成并发布。** 本计划随 [PR #16](https://github.com/ywltby/tokenscope/pull/16) 合入 main `0ffab19`，并由 [Release 39353860618](https://github.com/ywltby/tokenscope/actions/runs/39353860618) 发布 [v0.5.2](https://github.com/ywltby/tokenscope/releases/tag/v0.5.2)。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39353860584)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39353860657) 均成功；发布的安装、六个单跳升级和两条连续升级链全部通过。原草稿交付限制及“待复核/未合并”描述仅为下文历史状态。
 >
 > 启动恢复与 SQLite 并发打开修复均已通过复核，无独立实施待办。旧 dark 会话超时的具体根因未被追溯证实；取证与恢复交付完成不等于证实该根因。真实系统验收仍见[独立待办](../../system-acceptance-todo.md)，其他剩余任务只在[整合计划](../../active/2026-10-11-consolidated-remaining-work.md)维护。

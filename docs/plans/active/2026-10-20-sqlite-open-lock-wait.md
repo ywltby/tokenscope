@@ -1,6 +1,6 @@
 # SQLite 打开流程的锁等待回归修复
 
-> 状态：**用户 2026-10-20 要求写成计划交执行模型实施。** 承接[整合计划 N15](2026-10-11-consolidated-remaining-work.md#n15历史库打开锁等待回归)。
+> 状态：**2026-10-20 LW01–LW04 已实施并推送（`ff1bda0`）；LW05 按草稿 PR 交付，不自动合并。** 本页记录本地提交时点证据，最终 HEAD 的远程运行链接随交付报告及 PR 正文提供。承接[整合计划 N15](2026-10-11-consolidated-remaining-work.md#n15历史库打开锁等待回归)。
 > 来源：PR #16（v0.5.2）合入后的复核。[SQLite 并发打开调查](../archive/implemented/2026-10-19-sqlite-concurrent-open-investigation.md)的并发首次初始化修复本身成立，本计划只纠正它顺带改变的锁等待语义。
 > 分支 `fix/sqlite-open-lock-wait`；修复类批次，递增 patch；一个 PR、一次版本。
 
@@ -59,7 +59,7 @@
 
 ## 4. 任务
 
-每项先写会失败的测试，在当前 main 上确认红，再实现。一个提交只解决一类问题。
+每项先写会失败的测试，在修改前的实现上确认红，再实现。**用户 2026-10-20 批准 LW01–LW04 合为一个修复提交**：固定锁等待会立即推翻旧“事务只能获得剩余预算”的断言，最新版本免写事务又会推翻旧“持锁打开必须失败”的断言，四项测试相互依赖，不能在保留这些旧断言时逐项提交。全部新测试先写好，逐项运行并单独保存红灯证据；LW05 文档、基线与版本交付单独提交，其余方案和不变量不变。
 
 ### LW01 拆开重试 deadline 与锁等待
 
@@ -121,4 +121,43 @@
 
 ## 6. 执行记录
 
-（执行模型回填：提交、红绿日志、变异验证结果、PR 与 CI 运行链接。）
+### 6.1 实施与边界
+
+- 起点 `4e38273`（计划提交），基于 main `e5539e1`。LW01–LW04 修复提交为 `ff1bda0`，正常提交钩子通过后推送至 `fix/sqlite-open-lock-wait`。
+- `retry.rs` 集中定义历史库 5000ms、缓存 2000ms；一次创建的 2 秒重试 deadline、20ms 间隔、瞬态类型判定均未改变。锁等待不再取剩余预算，成功返回前重设常驻值。
+- 备份成功后继续原子迁移；仅测试 trace 观察备份后的剩余时间，不据此中断。最新结构且四个元信息键齐全时只读返回；逐个缺失键均验证补齐且不覆盖其他键。
+- 只改三个核心 Rust 文件。未改采集、查询快照和 CCS 导入，未添加测试层重试，未操作真实用户数据。
+- LW05 已 fetch 并核实包含最新 main `e5539e1`（合并命令返回 Already up to date）；通过正式登记工具逐个下载并核验 v0.5.4 四资产后登记。版本工具递增为 **0.5.5**，`--check --base-ref origin/main` 通过。
+- 额外执行全登记表 `check` 时，Python urllib 与 curl 经本机代理分别遇到 TLS EOF/握手失败；直连 GitHub 探针正常后，用忽略目录内的临时包装仅把 `urlopen` 传输替换成直连 curl，原登记表身份、资产哈希与持久格式校验逻辑未改。完整校验通过、`warnings=[]`（`baseline-check-direct.log`）；正式 v0.5.4 `add` 本身已使用原脚本成功完成。未改仓库网络脚本，未把网络失败当作产品回归或跳过校验。
+
+### 6.2 逐项红绿证据
+
+日志目录为本地忽略目录 `qa-artifacts/sqlite-lock-wait/`，大日志不入库。下表每条都有独立 `red-<LW编号>-<测试全名，将 :: 替换为 ->.log`，命令均为 `cargo test --locked -p tokenscope --lib <测试全名> -- --exact --nocapture`。原实现为 `4e38273`，先加入测试再改实现；加强备份检查点及持锁快照断言后，再将三个生产模块临时恢复为该提交的实现、保留新测试复验，随后完整还原修复。
+
+| 编号 | 测试全名 | 原实现结果 | 修复后 |
+| --- | --- | --- | --- |
+| LW01 | `history::tests::opened_history_keeps_resident_timeout` | 失败：读回约 1991ms，期望 5000ms | 通过 |
+| LW01 | `history::tests::slow_successful_history_open_outlives_retry_deadline` | 失败：无竞争打开却报预算耗尽 | 通过 |
+| LW01 | `cache::tests::opened_cache_keeps_resident_timeout` | 失败：读回值小于 2000ms | 通过 |
+| LW01 | `cache::tests::slow_successful_cache_open_outlives_retry_deadline` | 失败：无竞争打开却报预算耗尽 | 通过 |
+| LW02 | `history::tests::backup_outliving_retry_deadline_still_migrates` | 失败：已生成真实备份，报“历史库备份完成，但重试预算已耗尽” | 通过，备份存在、结构为 v4 |
+| LW02 | `history::tests::migration_transaction_keeps_resident_timeout_after_backup` | 失败：事务等待 1500ms，期望 5000ms | 通过 |
+| LW03 | `history::tests::latest_history_opens_without_writer_lock` | 失败：持锁时打开报类型化锁错误 | 通过，持锁期间打开及读取快照小于 1 秒、generation=42 |
+| LW03 | `history::tests::latest_history_repairs_each_missing_meta_without_overwrite` | **绿色对照**：这是必须保留的原有行为，不宣称红灯 | 通过，逐个覆盖四个键 |
+| LW04 | `history::tests::migration_lock_wait_uses_resident_timeout` | 失败：约 2.23 秒，未达到固定 5 秒等待下界 | 通过，v3 迁移持锁返回类型化瞬态错误 |
+| LW04 | `cache::tests::open_lock_wait_uses_resident_timeout` | 失败：持锁方常驻值不足 2000ms | 通过，随后真实持锁计时和类型断言均执行 |
+
+备份耗尽用例最终使用只在真实备份文件生成后才推进 3 秒的假时钟，保证红灯来自备份完成检查点，不会提前在 WAL 阶段失败。其余新建慢 I/O 用例使用步进时钟。元信息补齐用例属于不变量对照，无法诚实地要求它在正确的旧行为上失败，因此单独标明。
+
+### 6.3 变异与本地门禁
+
+- `mutation-resident-history.log`、`mutation-resident-cache.log`：仅把成功返回前的常驻锁等待改回 `deadline.remaining(clock)`，对应精确值断言均转红。
+- `mutation-latest-write-lock.log`：在最新版本完整元信息分支恢复 `BEGIN IMMEDIATE`，持锁打开与快照用例转红。
+- 两项变异均只在本地进行并已还原，未入库。
+- 修复后的核心完整套件 **585 通过、10 忽略、0 失败**（`green-core-final.log`），fmt 和 workspace all-targets clippy `-D warnings` 通过；修复提交正常钩子的普通/acceptance 两套 workspace 门禁通过（`fix-commit.log`）。
+- 递增至 0.5.5 后，`cargo test --locked -p tokenscope` 连续两轮均为 **585/0/10**（通过/失败/忽略，`delivery-core-1.log`、`delivery-core-2.log`）；交付版本 fmt、clippy 和版本自查通过。
+- 原 HistoryDb 50 轮并发首次初始化、Cache v3 并发用例保持原强度，均通过；不恢复此前已撤回的测试层重试。
+
+### 6.4 草稿交付取证
+
+LW05 完成版本与文档后，再连续运行两次 `cargo test --locked -p tokenscope`，通过正常完整提交钩子后推送并开草稿 PR。最终交付须核对该 HEAD 的 CI（gate）、Native UI E2E、Install test，运行链接和工件核对摘要写入 PR 正文与交付报告；不得借用旧 HEAD 或 main 的绿灯。本文提交时点不预报远程结果，不将 PR 端按设计跳过的连续升级链记作通过。分支上的检查可从 [GitHub Actions](https://github.com/ywltby/tokenscope/actions?query=branch%3Afix%2Fsqlite-open-lock-wait) 追溯；保持草稿，合并与发布由用户决定。
