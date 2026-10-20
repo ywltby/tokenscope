@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -43,6 +44,8 @@ SOURCE_STATES = ("present", "deleted")
 LEGACY_VERSION = "0.1.0"
 MAX_ORIGINS = 6
 HASH = re.compile(r"[0-9a-f]{64}")
+# 传输层瞬断（代理 TLS EOF、连接重置、超时）的总尝试次数；HTTP 状态错误不重试。
+NETWORK_ATTEMPTS = 3
 COMMIT = re.compile(r"[0-9a-f]{40}")
 VERSION = re.compile(r"0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -236,6 +239,36 @@ def selection_payload(registry, current_version):
                         for version in origins for state in SOURCE_STATES]}
 
 
+def with_network_retry(action, sleep=time.sleep):
+    """执行一次网络读取；只对传输层瞬断有限重试，用尽后原样抛出最后一个错误。
+
+    HTTP 状态错误（404、403 限流等）是服务端的明确答复，立即抛出不重试。
+    """
+    for attempt in range(1, NETWORK_ATTEMPTS + 1):
+        try:
+            return action()
+        except HTTPError:
+            raise
+        except OSError:
+            if attempt == NETWORK_ATTEMPTS:
+                raise
+            sleep(attempt)
+
+
+def local_gh_token():
+    """本机未设令牌时借用已登录 gh 的令牌，避免匿名 API 每小时 60 次的限流。
+
+    令牌只随 api.github.com 请求发送；gh 不存在、未登录或超时都返回 None。
+    """
+    try:
+        result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True,
+                                timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    token = result.stdout.strip()
+    return token if result.returncode == 0 and token else None
+
+
 class Api:
     """只读 GitHub REST 客户端；读取失败一律抛错，不静默跳过。"""
 
@@ -243,7 +276,8 @@ class Api:
         if REPOSITORY.fullmatch(str(repository)) is None:
             raise ValueError("仓库名称非法")
         self.repository = repository
-        self.token = token or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or None
+        self.token = (token or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+                      or local_gh_token())
 
     def get(self, path):
         request = Request("https://api.github.com" + path, headers={
@@ -251,9 +285,12 @@ class Api:
             "User-Agent": "tokenscope-upgrade-baselines"})
         if self.token:
             request.add_header("Authorization", "Bearer " + self.token)
-        try:
+        def fetch():
             with urlopen(request, timeout=60) as response:
                 return json.loads(response.read().decode("utf-8"))
+
+        try:
+            return with_network_retry(fetch)
         except HTTPError as exc:
             if exc.code == 404:
                 return None
@@ -273,10 +310,13 @@ def download(url, sha256, directory, name):
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / safe_name(name)
     temporary = path.with_name(path.name + ".download")
-    try:
+    def fetch():
         with urlopen(url, timeout=180) as response, temporary.open("wb") as fh:
             while chunk := response.read(1024 * 1024):
                 fh.write(chunk)
+
+    try:
+        with_network_retry(fetch)
         actual = digest(temporary)
         if sha256 is not None and actual != sha256:
             raise ValueError(f"资产 SHA256 与登记值不一致，拒绝使用：{name}")

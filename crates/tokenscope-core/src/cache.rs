@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::model::AgentKind;
+use crate::retry::CACHE_BUSY_TIMEOUT;
 use crate::source::FileParse;
 
 /// 缓存文件身份（R05 + A03）：agent + 规范化根目录 + 规范化文件路径 +
@@ -113,7 +114,7 @@ impl Cache {
         // 会在「开始缓存初始化事务」处拿到 SQLITE_READONLY（2026-10-19：
         // v3 库并发打开 100 次 2 次失败，extended=8，立即返回）。与历史库
         // 同一取舍：重试整个打开序列（每次新建连接重置连接状态）；绝对
-        // deadline 只在本层创建一次，open_once 内各阶段只使用剩余预算。
+        // deadline 只在本层创建一次，仅约束失败后的下一次重试。
         let clock = crate::retry::RealClock;
         let deadline = crate::retry::Deadline::new(&clock, budget);
         crate::retry::retry_until(
@@ -136,8 +137,8 @@ impl Cache {
         let mut conn =
             Connection::open(path).with_context(|| format!("打开缓存失败: {}", path.display()))?;
         // WAL 切换需要短暂独占，且 SQLite 不为该切换调用 busy handler——
-        // 并发打开时对方连接可能正持锁/切换；**每次尝试内部**都按当前剩余
-        // 预算重设 busy_timeout，再在同一绝对 deadline 内小步重试（内层不
+        // 并发打开时对方连接可能正持锁/切换；**每次尝试内部**都恢复固定
+        // busy_timeout，再在同一绝对 deadline 内小步重试（内层不
         // 重算）。并发首次初始化时同样会拿到 SQLITE_READONLY，与
         // DatabaseBusy 同一判定。
         crate::retry::retry_until(
@@ -145,17 +146,15 @@ impl Cache {
             clock,
             crate::retry::CONCURRENT_INIT_RETRY_BACKOFF,
             || {
-                crate::retry::apply_busy_budget(&conn, deadline, clock)?;
+                crate::retry::apply_busy_timeout(&conn, CACHE_BUSY_TIMEOUT)?;
                 Ok(conn.pragma_update(None, "journal_mode", "WAL")?)
             },
         )
         .context("设置 WAL 日志模式失败")?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .context("启用外键约束失败")?;
-        // 初始化事务（BEGIN IMMEDIATE 等写锁）前按**剩余**预算重设
-        // busy_timeout；预算耗尽则不得再启动该阶段的等待。
-        crate::retry::apply_busy_budget(&conn, deadline, clock)
-            .context("开始缓存初始化事务前预算不足")?;
+        // 初始化事务（BEGIN IMMEDIATE 等写锁）前恢复固定 busy_timeout。
+        crate::retry::apply_busy_timeout(&conn, CACHE_BUSY_TIMEOUT)?;
         // F01：结构迁移收敛为单一写事务。真实 v3 库的 files 没有 root 列，
         // 必须先在事务内读取版本、把旧派生表整体 drop 后再建当前结构——
         // 任一步失败整体回滚，绝不出现"新索引 + 旧表"的半迁移状态
@@ -237,6 +236,7 @@ impl Cache {
             [SCHEMA_VERSION],
         )?;
         tx.commit()?;
+        crate::retry::apply_busy_timeout(&conn, CACHE_BUSY_TIMEOUT)?;
         Ok(Self { conn })
     }
 
@@ -1270,15 +1270,18 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    /// 真实持锁：另一个连接持有写事务时，Cache::open 的总等待被外层绝对
-    /// deadline 限制在预算附近（不是无限等待），并以类型化瞬态错误失败。
-    /// 「锁等待预算」可精确断言；操作系统 I/O 与线程调度不可严格限制，
-    /// 因此上下界都留调度容差，且只断言不会出现「多个完整预算叠加」的量级。
+    /// 缓存初始化仍需要写锁：固定 2000ms 等待后返回类型化瞬态错误。
+    /// 上界容许有限等待阶段及调度耗时，不把重试 deadline 当作 I/O 超时。
     #[test]
-    fn open_lock_wait_is_bounded_by_retry_budget() {
+    fn open_lock_wait_uses_resident_timeout() {
         let dir = tmp_dir("lockwait");
         let path = dir.join("cache.db");
         let holder = Cache::open(&path).unwrap();
+        let timeout: i64 = holder
+            .conn
+            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 2000, "常驻锁等待不得继承打开时的剩余预算");
         // 持有写锁：另一个 open 的 WAL 切换与初始化事务等待都会受阻。
         holder.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
         let started = std::time::Instant::now();
@@ -1295,15 +1298,55 @@ mod tests {
             crate::retry::is_concurrent_init_transient(&err),
             "持锁失败必须是类型化的瞬态错误：{err:#}"
         );
-        let budget = crate::retry::CONCURRENT_INIT_RETRY_BUDGET;
+        let budget = std::time::Duration::from_millis(2000);
         assert!(
             elapsed >= budget.saturating_sub(std::time::Duration::from_millis(500)),
             "锁等待应接近预算（允许调度容差）：{elapsed:?}"
         );
         assert!(
-            elapsed <= budget + std::time::Duration::from_secs(1),
+            elapsed <= budget * 2 + std::time::Duration::from_secs(2),
             "锁等待不得远超预算（OS I/O 之外的有界等待）：{elapsed:?}"
         );
+    }
+
+    #[test]
+    fn opened_cache_keeps_resident_timeout() {
+        let dir = tmp_dir("resident-timeout");
+        let db = Cache::open(&dir.join("cache.db")).unwrap();
+        let timeout: i64 = db
+            .conn
+            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 2000);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn slow_successful_cache_open_outlives_retry_deadline() {
+        struct StepClock(std::cell::Cell<std::time::Instant>);
+        impl crate::retry::Clock for StepClock {
+            fn now(&self) -> std::time::Instant {
+                let now = self.0.get();
+                self.0.set(now + std::time::Duration::from_secs(3));
+                now
+            }
+            fn sleep(&self, duration: std::time::Duration) {
+                self.0.set(self.0.get() + duration);
+            }
+        }
+        let dir = tmp_dir("slow-open");
+        let clock = StepClock(std::cell::Cell::new(std::time::Instant::now()));
+        let deadline =
+            crate::retry::Deadline::new(&clock, crate::retry::CONCURRENT_INIT_RETRY_BUDGET);
+        let db = Cache::open_once(&dir.join("cache.db"), &deadline, &clock).unwrap();
+        let timeout: i64 = db
+            .conn
+            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 2000);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1316,8 +1359,8 @@ mod tests {
 
         let path2 = path.clone();
         // 本测试验证并发迁移的结构正确性，不要求共享 Runner 在 2 秒内调度完毕。
-        // 只给测试连接更大的有界等锁预算（deadline 预算，各锁等待阶段按剩余
-        // 预算设置 busy_timeout）；生产打开仍使用 2 秒预算。
+        // 只给测试连接更长的重试截止时间；每阶段锁等待仍固定 2000ms，
+        // 生产打开仍使用 2 秒重试预算。
         let h1 = std::thread::spawn(move || {
             Cache::open_with_busy_timeout(&path, std::time::Duration::from_secs(30))
         });

@@ -9,9 +9,12 @@ import copy
 import json
 import os
 from pathlib import Path
+import ssl
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 import upgrade_baselines as baselines
 
@@ -412,11 +415,61 @@ class RepositoryCase(unittest.TestCase):
     def test_repository_is_read_from_the_registry_and_tokens_are_optional(self):
         registry = baselines.load_registry()
         self.assertEqual(registry["repository"], "ywltby/tokenscope")
-        with patch.dict(os.environ, {"GH_TOKEN": "", "GITHUB_TOKEN": ""}):
+        with patch.dict(os.environ, {"GH_TOKEN": "", "GITHUB_TOKEN": ""}),                 patch.object(baselines, "local_gh_token", return_value=None):
             api = baselines.Api(registry["repository"])
         self.assertIsNone(api.token)
-        with patch.dict(os.environ, {"GITHUB_TOKEN": "token"}):
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "token"}),                 patch.object(baselines, "local_gh_token", side_effect=AssertionError("不应调用")):
             self.assertEqual(baselines.Api(registry["repository"]).token, "token")
+
+    def test_missing_env_token_falls_back_to_logged_in_gh(self):
+        with patch.dict(os.environ, {"GH_TOKEN": "", "GITHUB_TOKEN": ""}),                 patch.object(baselines, "local_gh_token", return_value="gh-token"):
+            self.assertEqual(baselines.Api("ywltby/tokenscope").token, "gh-token")
+
+    def test_gh_token_lookup_failures_return_none(self):
+        failed = subprocess.CompletedProcess(["gh"], 1, stdout="", stderr="not logged in")
+        with patch.object(baselines.subprocess, "run", return_value=failed):
+            self.assertIsNone(baselines.local_gh_token())
+        with patch.object(baselines.subprocess, "run", side_effect=FileNotFoundError("gh")):
+            self.assertIsNone(baselines.local_gh_token())
+        ok = subprocess.CompletedProcess(["gh"], 0, stdout="abc\n", stderr="")
+        with patch.object(baselines.subprocess, "run", return_value=ok):
+            self.assertEqual(baselines.local_gh_token(), "abc")
+
+
+class NetworkRetryCase(unittest.TestCase):
+    def test_transport_errors_retry_then_succeed(self):
+        calls, sleeps = [], []
+
+        def action():
+            calls.append(1)
+            if len(calls) < 3:
+                raise URLError(ssl.SSLEOFError(8, "EOF occurred in violation of protocol"))
+            return "ok"
+
+        self.assertEqual(baselines.with_network_retry(action, sleep=sleeps.append), "ok")
+        self.assertEqual((len(calls), sleeps), (3, [1, 2]))
+
+    def test_transport_errors_fail_after_bounded_attempts(self):
+        calls, sleeps = [], []
+
+        def action():
+            calls.append(1)
+            raise ConnectionResetError("reset")
+
+        with self.assertRaises(ConnectionResetError):
+            baselines.with_network_retry(action, sleep=sleeps.append)
+        self.assertEqual((len(calls), sleeps), (baselines.NETWORK_ATTEMPTS, [1, 2]))
+
+    def test_http_status_errors_are_not_retried(self):
+        calls, sleeps = [], []
+
+        def action():
+            calls.append(1)
+            raise HTTPError("https://api.github.com/x", 403, "rate limit exceeded", None, None)
+
+        with self.assertRaises(HTTPError):
+            baselines.with_network_retry(action, sleep=sleeps.append)
+        self.assertEqual((len(calls), sleeps), (1, []))
 
 
 if __name__ == "__main__":
