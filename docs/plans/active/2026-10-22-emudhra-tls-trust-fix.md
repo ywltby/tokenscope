@@ -72,7 +72,19 @@
 
 ## 5. 执行记录
 
-（实施时回填。）
+2026-10-22 在分支 `fix/emudhra-tls-trust` 实施：
+
+| 任务 | 提交 | 证据 |
+| --- | --- | --- |
+| TF01 更新两个依赖 | `baa78df` | `Cargo.lock` 仅 `rustls-webpki` 0.103.15 → 0.103.16、`webpki-roots` 1.0.9 → 1.0.10 两处版本与校验和变化；两个新校验和与从 crates.io 下载的包的 SHA-256 一致。由于 `Cargo.lock` 触发完整模式，提交钩子跑了完整检查，全部通过 |
+| TF02 真实联网用例 | `ca4d1f2` | 本地带代理运行：models.dev 同步成功，8778 条。OpenRouter 的 TLS 握手与下载成功，但解析失败（`invalid type: integer 0, expected a string`），原因是上游把 override 的 `utc_start`/`utc_end` 改成了整数，与本次依赖更新无关。本机日志显示 2026-10-12 起自动同步就因此失败。按用户决定另立计划和 PR 修复（分支 `fix/openrouter-override-conditions`） |
+| TF03 版本 | `e57f994` | 先合并最新 main（`02955d1`），再 `--bump patch` 到 0.5.7；`--check --base-ref origin/main` 输出 `release: true`；`upgrade_baselines.py check` 无警告；完整提交检查全部通过 |
+
+与计划的偏离：
+- 不变量 2 要求“两个价格源的真实同步都成功”。本 PR 只能证明 OpenRouter 的 TLS 与下载成功，解析修复由 OpenRouter 修复 PR 完成，届时用同一个联网用例复验。
+- `build_inputs.py --check` 第一次运行时与联网用例的构建抢占文件锁，没有得到结论。完整模式的提交钩子不包含这项检查，所以在版本递增后单独重跑：退出码 0，`missing`、`stale`、`changed` 均为空，清单不需要更新。新版 `rustls-webpki` 用 `include_bytes!` 引入的数据文件在依赖包内部，不在本仓清单的收录范围内。
+
+合并后待验：main 的 Release 构建、安装、单跳升级、连续升级链与 v0.5.7 发布；随后登记 v0.5.7 基线并归档本计划。
 
 ## 6. 本机其他软件（用户自行处理，不属于本仓改动）
 
