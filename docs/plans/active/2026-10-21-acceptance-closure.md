@@ -1,6 +1,7 @@
 # 剩余验收收口：来源权限、原生统一验收、隐私强取证、真实性能与系统签字
 
 > 状态：**用户 2026-10-21 确认，按 B1–B5 连续执行**。承接[整合计划](2026-10-11-consolidated-remaining-work.md)全部剩余开放项：N14 第 4 项、N11、N10、N13、N12。
+> 进度（2026-10-22）：**B1 / AC01 已交付，N14 关闭**；B2–B5 继续承接 N11、N10、N13、N12，尚未标为通过。
 > 本计划只排验收与取证所需的改动。验收中暴露的产品缺陷按缺陷流程单独修复，不在本计划里预先设计修法。
 
 **Goal：** 把整合计划剩下的 5 个开放责任编号全部收口，结束后 `active/` 只剩整合计划的历史记录和独立系统待办（跨午夜、长时间休眠、跨显示器，用户 2026-10-13 决定不排期）。
@@ -283,7 +284,7 @@ AC03–AC05 的 CI 接入：
 - §1 已按源码与历史运行元数据复核：受保护命令 35 个、驱动 2716 行、默认巡检 15 个 fixture/注册 23 个、独立契约引用额外 8 个 fixture；PR #25 原生作业 09:29:25–09:37:45 UTC，实际 8 分 20 秒。确认 CCS 默认路径未隔离、价格 URL 常量与 ureq 环境代理/NO_PROXY 支持、opener 真实调用、隐私取证缺口及旧预热工具用途。未运行旧预热工具，未读取真实 CCS 库。AC08 的实际覆盖仍须后续运行产物证明。
 - 执行授权以用户本次指令为准：批次自审成立且检查全绿后用普通 merge commit 合并，批次之间不等待确认；明确停点与 AC11 人工签字仍须停下。
 
-### B1 / AC01：读取失败 fixture（共享冲突，本地定向通过，待交付）
+### B1 / AC01：读取失败 fixture（共享冲突，已交付，N14 关闭）
 
 初次 ACL 取证（历史，已停用）：
 
@@ -297,7 +298,7 @@ AC03–AC05 的 CI 接入：
 - 此前停点（已由用户修订）：AC01 的管理员绕过自检在钩子中明确失败，依“计划某一步无法按原样执行”停下。用户不采用关闭线程备份特权的建议，明确改用只依赖 `std` 的共享冲突；未改线程令牌、全局权限或钩子。
 - 清理与证据：钩子失败用例的目录与文件均恢复可读；独立探针的四个 deny ACE 已通过仅删除对应规则恢复，两个探针根已清理（`acl-probe-cleanup.json`）。失败测试二进制 SHA256 为 `df9a1a12c73a73beda92c274808db4a86748387d1df46bb45679d9de2c4f2347`，日志为 `commit-checks.log`。本批没有原生应用启动，`launches[]` 为空。
 - 命令：`cargo test --locked -p tokenscope --test source_paths_collection -- --show-output`，以及同命令增加 `--features acceptance`；均设置 `CARGO_NET_OFFLINE=true`。证据位于本 worktree 的 `qa-artifacts/acceptance-closure/b1/`。普通/acceptance 测试二进制 SHA256 分别为 `9c1ff0a2ce79c6e0e377ba2a7a8d8903fec9129870fa85318f25ba115832666a` / `462739934d067e5be400c17d260c58b30512b642799a6c4a51c46fc8a2c38d28`；新增测试源码 SHA256 为 `e5d24d07fdb6be408ed6eeabd078acbd8151c4cf8634dba80010e1b5c4754f7b`。这两份产物来自该基线加本批追加测试，完整信息见 `evidence-acl-history.json`。
-- CI 耗时：没有新增原生场景；本地新增用例约 0.08 秒。远端耗时与交付结论待本批 PR/main 实跑后记录，N14 不提前关闭。
+- 当时尚未进入远端：没有新增原生场景，本地新增 ACL 用例约 0.08 秒；最终交付改以以下共享冲突实现及其 PR/main 运行结果为准。
 
 共享冲突取证（本次交付依据）：
 
@@ -306,14 +307,28 @@ AC03–AC05 的 CI 接入：
 - 两个变异重做：目录读错分支提前 `return`，因缺少“无法读取目录”诊断失败（`sharing-red-directory.log`）；文件读错分支漏计 `io_errors`，实际 0、期望 1（`sharing-red-file.log`）。均退出 101，随后恢复产品源码，`git diff HEAD -- crates/tokenscope-core/src/source/{mod,claude}.rs` 无差异。
 - 恢复后普通与 acceptance 采集套件均 17/17（`sharing-green-default.log` / `sharing-green-acceptance.log`）。实测：目录与文件读取错误码均 32，2 请求，四桶 40/20/0/0，`io_errors = 1`，两种诊断可见。基线 `316bd70` 加本批测试；源码 SHA256 `843dac044b4d877031935ec0f5d9ac06ca3f4688b081d459b70d5a56248c8c6d`，普通/acceptance 测试二进制 SHA256 `47edfb0bbb9f0eb7aa5c61c098e42bc61af2d088f4bea2a6cde376d8c5586553` / `d8d4c5501701dd74720f521416f8c5a906a5cd309ec1cffb4af4e2924edb89a1`。完整实测值及命令在 `evidence.json`，旧 ACL 证据单列保留。
 - 钩子首次检查发现新增目录自检写成 `.err().expect()`，触发 Clippy `err_expect`；改为等价的 `.expect_err()` 后重新验证，两套定向测试仍各 17/17。该修正仅涉及新用例的语法，未放宽或删除断言，原失败日志保存为 `sharing-clippy-initial.log`。
-- 既有 16 个用例保持原样；没有产品输入、Cargo 清单或锁文件变更，没有新增原生 CI 场景。提交钩子、PR 与 main 的实际运行结论仍须随后回填，N14 尚未关闭。
+- 既有 16 个用例保持原样；没有产品输入、Cargo 清单或锁文件变更，没有新增原生 CI 场景。最终提交 `69ce2f4` 的完整钩子通过普通与 acceptance 两套 workspace Clippy/test、fmt 和文档检查，工作区干净后推送。独立复核无 Critical/Important；提出的旧证据链接与用语已修正。
+- [PR #27](https://github.com/ywltby/tokenscope/pull/27) 普通合并为 `4198051e0408126dc978c2781937974c05ba6ecc`；合并前最新 main `316bd70` 是 HEAD 祖先，八条不变量结论已写入 PR 正文及下表。合并提交与最终 PR HEAD 的文件树完全一致（`0b18802c724b52951de2ccb7c1719fdc38eea19e`）。
 
-阶段 §3 不变量自查（尚未达到合并条件）：
+| 阶段 | 运行 | 结果 |
+| --- | --- | --- |
+| PR #27 | [CI 39630887221](https://github.com/ywltby/tokenscope/actions/runs/39630887221) | success；四组及 gate 全通过 |
+| PR #27 | [Native UI E2E 39630887255](https://github.com/ywltby/tokenscope/actions/runs/39630887255) | success；8 分 26 秒 |
+| PR #27 | [Install test 39630887250](https://github.com/ywltby/tokenscope/actions/runs/39630887250) | success；安装五场景 12 分 22 秒，起点规划 11 秒，六组单跳各 58–67 秒；连续链按契约 skipped |
+| main `4198051` | [CI 39633188944](https://github.com/ywltby/tokenscope/actions/runs/39633188944) | success；四组及 gate 全通过 |
+| main `4198051` | [Native UI E2E 39633188991](https://github.com/ywltby/tokenscope/actions/runs/39633188991) | success；7 分 10 秒 |
+| main `4198051` | [Release 39633189036](https://github.com/ywltby/tokenscope/actions/runs/39633189036) | success；gate 通过，六个下游全部 skipped |
+
+- 版本未变，`--check --base-ref origin/main` 在交付前输出 `release: false`；合并后发布列表最新仍为 [v0.5.6](https://github.com/ywltby/tokenscope/releases/tag/v0.5.6)，没有新发布。新增原生 CI 时长为 0，新增 Rust 用例定向运行约 0.05 秒，未改变 45 分钟上限。
+- N14 第 4 项按用户修订的共享冲突验收通过，N14 四项全部关闭；整合计划 N 行、§7 执行账与总账同步回填。N10、N11、N12、N13 仍开放。
+- B1 回填自审：只有本计划、整合计划和总账三份文档；不变量 1、2、6、7、8 成立（无产品或数据访问变化、运行结论与链接逐项核对、无新增 CI 场景、`release: false`），3、4、5 不适用。历史执行账保留原时点结论，当前状态统一为 12 完成、1 部分完成、3 专项待验。
+
+合并前 §3 不变量自审（PR 正文与本节均已记录）：
 
 | 编号 | 结论 | 依据 |
 | --- | --- | --- |
 | 1 普通构建零变化 | 成立 | 最终只追加测试与文档，两个临时产品变异已还原 |
-| 2 真实数据零接触 | 成立；原生追踪/代理部分不适用 | 来源、历史库、价格与索引均显式注入用例临时根；没有启动原生应用或读真实业务目录 |
+| 2 真实数据零接触 | 成立；新增追踪/代理接线不适用 | 新用例的来源、历史库、价格与索引均注入临时根，探针与新用例未启动原生应用；既有隔离原生 CI 全通过 |
 | 3 CCS 只手动 | 不适用 | 本批没有 CCS 调用或代码变更 |
 | 4 历史不随来源消失 | 不适用 | 本批只验读取失败，不改变历史保留逻辑 |
 | 5 同意先于业务 | 不适用 | 没有隐私接线或原生启动变更 |
