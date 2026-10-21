@@ -9,10 +9,11 @@
 **Tech Stack:** Rust / SQLite / Tauri 2 / Vue 3，以及现有 Rust、Vitest、浏览器和原生 acceptance 测试工具。
 
 - 整理日期：2026-10-11；当前状态更新：2026-10-21。
-- 状态：**10 项完成（N01–N09、N15）、2 项部分完成（N12/N14）、3 项专项验收未闭合（N10/N11/N13）、1 项流程修订已合并待产品 PR 验证（N16），共 6 个开放责任编号。** N01–N09、N15 不重复实施；N14 第 1、3 项已关闭，第 2、4 项仍开放。
+- 状态：**11 项完成（N01–N09、N15、N16）、2 项部分完成（N12/N14）、3 项专项验收未闭合（N10/N11/N13），共 5 个开放责任编号。** 已完成项不重复实施；N14 第 1、2、3 项已关闭，仅第 4 项仍开放。
 - 已核验交付基线：PR #15 合并 `9ea0c584`、v0.5.1 公开，连续升级链成功；PR #16 合并 `0ffab19`、v0.5.2 公开，[main CI](https://github.com/ywltby/tokenscope/actions/runs/39353860584)、[原生 E2E](https://github.com/ywltby/tokenscope/actions/runs/39353860657)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39353860618) 全成功（安装、六个单跳、两条连续链）。PR #17 研究资料合入 `89aec76` 不改变这些专项验收结论。PR #19 合并 `1156385`、v0.5.5 公开，main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39452749833)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39452749860)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39452749887) 全成功（安装、六个单跳、两条连续链），N15 关闭。
-- 启动恢复和 SQLite 并发调查已移入 archive/implemented；下文及 §7 的旧提交、版本、失败/通过记录保留为历史证据，不能替代当前待验矩阵。
-- 待办：N16 合入与发布解耦（P2，优先，已合并 `49a61bd`、Release 跳过验收通过，只余下一个产品 PR 的正常发布待验）、N10 隐私强取证、N11 原生统一验收、N12 其余系统/签字、N13 真实性能、N14 重复查询批次及权限拒绝 fixture。真实跨午夜、长时间休眠、跨显示器仍在[独立系统待办](../system-acceptance-todo.md)，不在本轮执行。
+- 最新交付：PR #23 合并 `d064f98`、v0.5.6 公开，main CI/Native UI E2E/Release 全成功（安装、六个单跳、两条连续链）；N14 第 2 项与 N16 关闭，证据见各自条目。
+- 启动恢复、SQLite 并发调查和 N16 已移入 archive/implemented；下文及 §7 的旧提交、版本、失败/通过记录保留为历史证据，不能替代当前待验矩阵。
+- 待办：N10 隐私强取证、N11 原生统一验收、N12 其余系统/签字、N13 真实性能、N14 第 4 项权限拒绝 fixture。N16 随 PR #23 / v0.5.6 完成最后的产品正常发布验证，专项已归档。真实跨午夜、长时间休眠、跨显示器仍在[独立系统待办](../system-acceptance-todo.md)，不在本轮执行。
 - 总账：[计划目录](../README.md)；历史逐份结论：[审计索引](../audits/README.md)；发布附属清单：[D5](../d5-acceptance-checklist.md)。
 
 ## 1. 优先级与状态规则
@@ -42,7 +43,7 @@
 
 ## 3. 唯一任务状态表
 
-保留 N01–N16 共 16 个稳定责任编号：N01–N09 已完成，N12/N14 部分完成，N10/N11/N13 专项验收未闭合；N15 为 2026-10-20 复核新增、2026-10-21 随 v0.5.5 关闭的修复；N16 为 2026-10-21 用户确认的流程修订，已合并并完成 Release 跳过验收，只余下一个产品 PR 的正常发布待验，共 6 个开放责任编号。安装、版本递增、真实单跳与连续升级已有发布证据；剩余范围以各行及 N14 子项为准，历史执行记录移至 §7，不混入当前状态表。
+保留 N01–N16 共 16 个稳定责任编号：N01–N09、N15、N16 已完成，N12/N14 部分完成，N10/N11/N13 专项验收未闭合，共 5 个开放责任编号。N15 随 v0.5.5 关闭；N16 已完成 Release 跳过与产品正常发布两条路径的验收（PR #21 / #22 / #23），N14 第 2 项随 v0.5.6 关闭。安装、版本递增、真实单跳与连续升级已有发布证据；剩余范围以各行及 N14 子项为准，历史执行记录移至 §7，不混入当前状态表。
 
 | ID | 优先级 | 任务 | 当前状态 | 是否仍有必要 / 来源 |
 | --- | --- | --- | --- | --- |
@@ -59,9 +60,9 @@
 | N11 | P2 | 最新项目/模型/CCS 原生统一验收 | 分别存在待验，合并一次执行 | 必须；A06/B03、MP06、H08、设计 Task8 |
 | N12 | P2（用户要求的版本递增与旧版升级）；其余系统尾项 P3 | 当前产物的 D5 系统、安装及发布验收 | 部分完成；v0.5.2 发布的安装、六个单跳升级、两条连续链成功；其余系统验收与签字仍待验 | 用户 2026-10-12 最新要求优先；D5、RC11/AP08 |
 | N13 | P3 | 历史库实际冷/热启动性能基准 | 新历史库真实规模复测未执行 | 有必要，排在正确性之后；H07、旧 D4/性能建议 |
-| N14 | P2 | 来源目录（PR3）遗留待验与竞态缺陷 | 部分完成；第 1、3 项关闭；第 2 项重复查询已修复并通过本地定向验收，待 0.5.6 交付验证；第 4 项权限拒绝 fixture 未完成 | 必须；[PR3 归档](../archive/partial/2026-10-14-source-discovery-and-additional-paths.md)剩余事项 |
+| N14 | P2 | 来源目录（PR3）遗留待验与竞态缺陷 | 部分完成；第 1、2、3 项关闭；第 2 项随 PR #23 / v0.5.6 交付，main CI/原生 E2E/Release 全成功；仅第 4 项权限拒绝 fixture 未完成 | 必须；[PR3 归档](../archive/partial/2026-10-14-source-discovery-and-additional-paths.md)剩余事项 |
 | N15 | P1 | 历史库/缓存打开流程的锁等待回归 | 已完成；固定 5000/2000ms，备份不中断，最新库免写事务；PR #19 合并 `1156385`，v0.5.5 发布，main CI/原生 E2E/Release 全成功 | 必须；逐项红绿、变异与交付证据见[归档专项计划](../archive/implemented/2026-10-20-sqlite-open-lock-wait.md) §6 |
-| N16 | P2 | 合入 main 与发布解耦（版本没变就不发布） | 已合并（`49a61bd`），Release 跳过验收通过：gate 成功、六个下游 skipped、无 v0.5.6；下一个产品 PR 正常发布待验 | 必须；用户 2026-10-21 确认，修订 2026-10-12 版本规则，[专项计划](2026-10-21-release-on-version-change.md) |
+| N16 | P2 | 合入 main 与发布解耦（版本没变就不发布） | 已完成；PR #21 / #22 验证版本不变时跳过发布，PR #23 / v0.5.6 验证产品递增后正常构建发布；专项已归档 | 必须；用户 2026-10-21 确认，修订 2026-10-12 版本规则，[归档专项计划](../archive/implemented/2026-10-21-release-on-version-change.md) |
 
 ## 4. 各任务实施与验收
 
@@ -478,13 +479,13 @@ python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
 来源：[PR3 归档的合入与发布记录](../archive/partial/2026-10-14-source-discovery-and-additional-paths.md#合入与发布记录2026-10-19)。原生/浏览器 E2E 失败先按证据说明原因，不以重跑通过代替。
 
 1. **连续升级链实测（已关闭，2026-10-20）**：0.5.0 的 [Release 39146151291](https://github.com/ywltby/tokenscope/actions/runs/39146151291) 因链路设置格式核对的测试架缺陷失败，`6533e22` 已修复。验收：0.5.1 的 main 发布中 `upgrade-chain (present)` / `(deleted)` 通过（链路 0.1.0 → 0.4.0 → 0.5.1，末跳跨过设置格式 1 → 2），并在证据里核对每跳的设置格式。结果：PR #15 合入后 [Release 39291272967](https://github.com/ywltby/tokenscope/actions/runs/39291272967) 两条链均成功，已核对四阶段及 settings 1 → 2；v0.5.2 的两条链亦通过。本项关闭。
-2. **预设切换的迟到重复批次（产品缺陷）**：原生 `ui-system` 取证显示，切换时间预设后偶尔多出一个查询批次（失败运行在切换后 1.6 s 出现第二个采集轮；通过的运行也有 begin 后无汇总完成的批次）。`2205827` / `1b9a5d0` 只让测试架等稳定基线，没有修产品。步骤：先写能复现的前端回归（切换一次预设只产生一个查询批次），定位触发源后修复。验收：回归先红后绿，原生恢复/切页检查不再需要等待稳定。
+2. **预设切换的迟到重复批次（已关闭，2026-10-21）**：原生 `ui-system` 曾记录预设切换后迟到重复查询，`2205827` / `1b9a5d0` 只让测试架等稳定基线。PR #23 的 `8b9179c` 修复已覆盖通知仍刷新的入口，并补齐关闭确认框隐藏到托盘时的可见性广播；五项前端回归先红后绿，原生恢复/切页移除稳定等待，查询次数与身份同时核对。main 合并 `d064f98`、v0.5.6 发布，CI/原生 E2E/Release 全成功，满足本项验收。实现与失败取证见下方记录。
 3. **浏览器契约 dark 超时的取证与恢复交付（已关闭，旧超时根因未证实）**：main `599c89e` 的 [CI 39146151362](https://github.com/ywltby/tokenscope/actions/runs/39146151362) 一次失败，现场没有证据。`b141fcc` 起契约抛错会写出 `<契约>--failure.json`。取证补强（IPC 两侧对照与时间线、`classifyBootStall` 自动判断）与产品恢复（检查耗时提示与代次保护、主界面加载失败可重新加载、`data-boot-state` 阶段标记、新契约 `boot_stall_recovery`）已按[启动卡死取证补强与引导期恢复计划](../archive/implemented/2026-10-19-boot-stall-recovery.md)完成（BS01–BS06 已交付、复核并随 PR #16 合入，v0.5.2 已发布）。该批次 PR/main 的 CI、原生 E2E 和安装升级均通过，满足本项原定交付条件。关闭的是取证与恢复交付责任，不是证明旧超时根因或保证不再超时；后续失败继续按实际取证分类处理。
 4. **采集层权限拒绝 fixture（PR3 S03 遗留）**：构造无读取权限的子目录，断言该项诊断可见、其余文件照常读取、整轮不中断。Windows 上不便构造 ACL 时，可只在能构造的平台运行，并在记录里说明。
 
-2026-10-21 第 2 项修复（`fix/preset-query-generation`，待交付验证）：迟到的 `collection-status` / `usage-updated` 通知在其代次已被当前查询快照覆盖时，仍无条件请求刷新。`notifyUsageUpdated` 现在先拒绝无效载荷，再记录代次；已覆盖通知直接返回，真正更高代次仍沿用在途合并、补发、分页保护与隐藏待刷新。新增五项回归在旧实现上全部失败（预设切换总批次 2→4、真实 Dashboard 的迟到采集状态 2→3、隐藏待刷新与分页提示误置、无效通知发查询），修复后相关 98 项、全部前端 620 项通过，类型检查、生产构建与浏览器 E2E 通过。
+2026-10-21 第 2 项修复（`fix/preset-query-generation`，`8b9179c`，已随 PR #23 / v0.5.6 交付）：迟到的 `collection-status` / `usage-updated` 通知在其代次已被当前查询快照覆盖时，仍无条件请求刷新。`notifyUsageUpdated` 现在先拒绝无效载荷，再记录代次；已覆盖通知直接返回，真正更高代次仍沿用在途合并、补发、分页保护与隐藏待刷新。新增五项回归在旧实现上全部失败（预设切换总批次 2→4、真实 Dashboard 的迟到采集状态 2→3、隐藏待刷新与分页提示误置、无效通知发查询），修复后相关 98 项、全部前端 620 项通过，类型检查、生产构建与浏览器 E2E 通过。
 
-原生验收移除了 `waitStableQuery` 补偿，直接核对每次预设切换恰好一个 `query_begin`，并重放已覆盖通知。第一次取证暴露 Tauri 的 `invoke` 属性不可改写，包装计数器始终为 0；改为观察真实 IPC 请求，正向“必须增加一次”断言防止计数失效后假通过。隐藏与托盘通知改用真实采集代次 +1，随后真实暴露 `close_resolve` 的隐藏路径未广播窗口状态（隐藏后 begin 1→2）；补齐与已记忆关窗路径相同的可见性广播后，定向原生 `ui-system` **19/19 通过**（两次隔离启动、真实用户数据指纹不变）。本地证据位于该 worktree 的 `qa-artifacts/n14-query-generation-final/ui-system/evidence.json`；失败证据分别保留在 `n14-query-generation` 与 `n14-query-generation-verified`。本批递增 patch 至 0.5.6；N16 的正常发布仍待 main 的实际发布结果，不提前关闭。
+原生验收移除了 `waitStableQuery` 补偿，直接核对每次预设切换恰好一个 `query_begin`，并重放已覆盖通知。第一次取证暴露 Tauri 的 `invoke` 属性不可改写，包装计数器始终为 0；改为观察真实 IPC 请求，正向“必须增加一次”断言防止计数失效后假通过。隐藏与托盘通知改用真实采集代次 +1，随后真实暴露 `close_resolve` 的隐藏路径未广播窗口状态（隐藏后 begin 1→2）；补齐与已记忆关窗路径相同的可见性广播后，定向原生 `ui-system` **19/19 通过**（两次隔离启动、真实用户数据指纹不变）。本地证据位于该 worktree 的 `qa-artifacts/n14-query-generation-final/ui-system/evidence.json`；失败证据分别保留在 `n14-query-generation` 与 `n14-query-generation-verified`。本批递增 patch 至 0.5.6；main CI/原生 E2E/Release 全成功，N14 第 2 项关闭，并完成 N16 的正常发布验收。
 
 ### N15：历史库打开锁等待回归
 
@@ -502,17 +503,19 @@ python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
 
 ### N16：合入 main 与发布解耦
 
-来源：用户 2026-10-21 指出“文档更新也要发布新版本”不合理，确认不开预发布分支，改为版本号没变就不发布。现状是 `release.yml` 每次 main 推送都会构建并发布，`bump_version.py --check` 要求每个合入 main 的 PR 恰好递增一次版本，所以只收录资料的 PR #17 发了 v0.5.3，只做归档的 PR #20 也要发 0.5.6。
+来源：用户 2026-10-21 指出“文档更新也要发布新版本”不合理，确认不开预发布分支，改为版本号没变就不发布。修订前 `release.yml` 每次 main 推送都会构建并发布，`bump_version.py --check` 要求每个合入 main 的 PR 恰好递增一次版本，所以只收录资料的 PR #17 发了 v0.5.3，只做归档的 PR #20 原本也要发 0.5.6。
 
-实施与验收见[专项计划](2026-10-21-release-on-version-change.md)（RV01–RV05）：
+实施与验收见[归档专项计划](../archive/implemented/2026-10-21-release-on-version-change.md)（RV01–RV05，已完成）：
 - 按改动路径判断是否涉及产品输入，复用 `build-inputs.json`，未知路径按产品处理。
 - 涉及产品输入时仍须恰好递增一次；不涉及时允许版本不变，Release 只跑 gate。
 - 必需检查、升级基线登记、标签发布都不变。
 - PR #20 的归档内容并入本批，不再发 0.5.6。
 
-2026-10-21 实施 RV01–RV04：`02a680f` 用 `build-inputs.json` 判定发布相关路径，`2427f5a` 让 `check`/`check_event` 返回 `release` 并允许版本不变的非产品合入，`7849f0c` 让 gate 输出该判定、六个下游作业全部按它跳过；纯文档、CI、脚本、测试的合入不再递增版本、不再发布，产品输入改动仍须恰好递增一次。RV05 登记 v0.5.5 后以 `release: false` 交付 PR；红绿与偏离见[专项计划 §6](2026-10-21-release-on-version-change.md#6-执行记录)。
+2026-10-21 实施 RV01–RV04：`02a680f` 用 `build-inputs.json` 判定发布相关路径，`2427f5a` 让 `check`/`check_event` 返回 `release` 并允许版本不变的非产品合入，`7849f0c` 让 gate 输出该判定、六个下游作业全部按它跳过；纯文档、CI、脚本、测试的合入不再递增版本、不再发布，产品输入改动仍须恰好递增一次。RV05 登记 v0.5.5 后以 `release: false` 交付 PR；红绿与偏离见[归档专项计划 §6](../archive/implemented/2026-10-21-release-on-version-change.md#6-执行记录)。
 
-2026-10-21 合并与跳过验收：PR #21 合并为 `49a61bd`；该提交的 [Release 39556582716](https://github.com/ywltby/tokenscope/actions/runs/39556582716) 中 gate 成功、build/install-test/plan-upgrades/upgrade-test/upgrade-chain/publish 六个下游作业全部 skipped，未创建 `v0.5.6` 标签或发布，最新发布仍是 v0.5.5；同提交的 [CI 39556582812](https://github.com/ywltby/tokenscope/actions/runs/39556582812) 与 [Native UI E2E 39556582765](https://github.com/ywltby/tokenscope/actions/runs/39556582765) 均成功。下一个产品 PR 的正常发布仍待验，N16 暂不关闭；PR #20 已留言链接 PR #21 并关闭。
+2026-10-21 合并与跳过验收：PR #21 合并为 `49a61bd`；该提交的 [Release 39556582716](https://github.com/ywltby/tokenscope/actions/runs/39556582716) 中 gate 成功、build/install-test/plan-upgrades/upgrade-test/upgrade-chain/publish 六个下游作业全部 skipped，当时未创建 `v0.5.6` 标签或发布，最新发布仍是 v0.5.5；同提交的 [CI 39556582812](https://github.com/ywltby/tokenscope/actions/runs/39556582812) 与 [Native UI E2E 39556582765](https://github.com/ywltby/tokenscope/actions/runs/39556582765) 均成功。PR #20 已留言链接 PR #21 并关闭。
+
+2026-10-21 产品正常发布验收与关闭：N14 第 2 项修复随 [PR #23](https://github.com/ywltby/tokenscope/pull/23) 合并为 `d064f98`，按产品输入规则递增至 0.5.6。[Release 39568789984](https://github.com/ywltby/tokenscope/actions/runs/39568789984) 的 gate/build/install-test、六个单跳、两条连续链及 publish 全成功；[main CI 39568790001](https://github.com/ywltby/tokenscope/actions/runs/39568790001) 与 [Native UI E2E 39568789964](https://github.com/ywltby/tokenscope/actions/runs/39568789964) 成功。已核对 v0.5.6 标签指向完整合并 SHA，四个发布资产下载核对后登记为升级基线。N16 最后一项待验关闭，专项移入 implemented；N14 第 2 项一并关闭，其第 4 项仍开放。
 
 ## 5. 已取代、暂缓与不再单独执行
 
@@ -532,7 +535,7 @@ python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
 
 ## 6. 实施顺序与验证命令
 
-N01–N09、N14 第 1/3 项已完成，不重复实施；N14 第 2/4 项仍需实施与定向验证。M06 严格校验器及 fixture 保持通过，M10 不重复实施。N12 的 A01–A06 已修复且契约全绿（两轮挑刺审计后）；随后取得当前产物的 PR 安装与普通 CI 成功结果，两种验证各自记账。后续做 N10/N11；N12 其余系统与正式签字随发布批次，N13 随性能验收排期。
+N01–N09、N15、N16、N14 第 1/2/3 项已完成，不重复实施；N14 仅第 4 项仍需实施与定向验证。M06 严格校验器及 fixture 保持通过，M10 不重复实施。N12 的 A01–A06 已修复且契约全绿（两轮挑刺审计后）；随后取得当前产物的 PR 安装与普通 CI 成功结果，两种验证各自记账。后续做 N10/N11；N12 其余系统与正式签字随发布批次，N13 随性能验收排期。
 
 新增测试名先在实际目标文件中登记，再执行；本计划提出的断言不是已经存在或已经通过的测试。N08 的现有目标为 `model_name_equivalence`、`model_identity_contract` 和 `pricing_source_policy`。
 
@@ -660,3 +663,4 @@ python -B -m unittest discover -s scripts -p "test_release_metadata.py" -v
 | 2026-10-21 | N15 关闭与归档 | PR #19 合并 `1156385`；v0.5.5 发布 | 复核三项补修后 PR HEAD `8e34e91` 全部检查通过；main CI 39452749833、Native UI E2E 39452749860、Release 39452749887 全成功；专项计划归档 implemented |
 | 2026-10-21 | 版本与发布规则复核 | 新增 N16（待实施） | 用户确认不开预发布分支、改为版本未变不发布；核实 Release 每次 main 推送都发布、`docs/privacy.md` 是编译输入、起点选择只取严格小于当前版本的条目；PR #20 归档提交拣入专项分支 |
 | 2026-10-21 | N16 / RV01–RV05 实施与合并验收 | `02a680f`、`2427f5a`、`7849f0c`，合并 `49a61bd` | 版本检查改为按 `build-inputs.json` 判定发布：产品输入仍须恰好递增一次，纯文档/CI/脚本/测试合入返回 `release: false` 并要求声明与基线逐字节一致；Release 的 gate 输出该判定，六个下游作业全部按它跳过，身份校验只在发布时运行。main 的 Release 39556582716 中 gate 成功、六个下游 skipped、无 v0.5.6，同提交 CI 与 Native UI E2E 均成功；必需检查、升级基线登记与标签发布未改。下一个产品 PR 的正常发布待验 |
+| 2026-10-21 | N14 第 2 项交付、N16 关闭与归档 | `8b9179c`；PR #23 合并 `d064f98`，v0.5.6 发布 | 已覆盖通知不再重复查询，关闭确认框隐藏成功后广播真实窗口状态；五项回归先红后绿，完整提交门禁与原生定向 19/19 通过，原生移除稳定等待并使用有效 IPC 计数。main CI 39568790001、Native UI E2E 39568789964、Release 39568789984 全成功（生产构建、安装、六个单跳、两条连续链及发布）；v0.5.6 标签指向合并 SHA，四资产下载核对后登记基线。N14 第 2 项与 N16 关闭，N16 专项归档 implemented；当前只余 5 个开放责任编号 |

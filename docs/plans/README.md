@@ -13,10 +13,9 @@
 | N11 原生统一验收 | 项目、模型、CCS、价格同步等组合验收仍待执行，不能用一般 E2E 绿灯替代 |
 | N12 系统与发布签字 | 安装、版本递增、真实升级及连续链已有成功证据；其余系统验收和签字仍待验 |
 | N13 真实性能 | 历史库冷/热查询、多根真实数据性能复测未完成，按只读来源与隔离输出执行 |
-| N14 来源目录遗留 | 第 1、3 项已关闭；第 2 项预设切换重复查询已修复，本地回归与原生定向验收通过，待 0.5.6 交付验证；第 4 项权限拒绝 fixture 仍待做 |
-| N16 合入与发布解耦 | 用户 2026-10-21 确认：只有产品输入改动才递增并发布，纯文档/CI/脚本合入不发版；[PR #21](https://github.com/ywltby/tokenscope/pull/21) 合并 `49a61bd`，Release 只跑 gate、六个下游 skipped、无 v0.5.6；只余下一个产品 PR 的正常发布待验 |
+| N14 来源目录遗留 | 第 1、2、3 项已关闭；预设切换重复查询及托盘隐藏通知随 PR #23 / v0.5.6 交付，当前仅第 4 项权限拒绝 fixture 待做 |
 
-N01–N09、N15 已完成；16 个责任编号中为 **10 项完成、2 项部分完成（N12/N14）、3 项专项验收未闭合（N10/N11/N13）、1 项流程修订已合并待产品 PR 验证（N16）**，共 6 个仍开放的责任编号，不等于 6 个单独操作。
+N01–N09、N15、N16 已完成；16 个责任编号中为 **11 项完成、2 项部分完成（N12/N14）、3 项专项验收未闭合（N10/N11/N13）**，共 5 个仍开放的责任编号，不等于 5 个单独操作。
 
 ## 已交付与证据边界
 
@@ -25,8 +24,9 @@ N01–N09、N15 已完成；16 个责任编号中为 **10 项完成、2 项部�
 - PR #16 启动取证与恢复、SQLite 并发打开修复合并 `0ffab19`，v0.5.2 已发布；main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39353860584)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39353860657)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39353860618) 全成功。N14 第 3 项按原验收条件关闭，旧超时根因仍未证实。
 - PR #17（`89aec76`）仅收录研究资料及版本/基线文件，不改变产品行为，也不自动增加开发任务。本次计划收尾以已核验的 v0.5.2 发布证据为基准，不借用其他版本结果补记未执行验收。
 - PR #19 打开锁等待回归修复合并 `1156385`，v0.5.5 已发布；main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39452749833)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39452749860)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39452749887) 全成功，N15 关闭。
+- PR #21 / #22 已验证版本不变时 Release 只跑 gate、六个下游全部 skipped；PR #23 产品修复合并 `d064f98` 并发布 v0.5.6，main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39568790001)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39568789964)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39568789984) 全成功（安装、六个单跳、两条连续链）。N14 第 2 项及 N16 关闭，版本与发布解耦两条路径均有实跑证据。
 
-`active/` 除整合计划外，只有[合入与发布解耦](active/2026-10-21-release-on-version-change.md)（N16，已合并 `49a61bd`、Release 跳过验收通过，只余下一个产品 PR 正常发布待验，完成后归档）。归档共 **47 份：18 份已实现、27 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
+`active/` 只保留整合计划；[合入与发布解耦](archive/implemented/2026-10-21-release-on-version-change.md)（N16）已完成并归档。归档共 **48 份：19 份已实现、27 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
 
 必须保持用户定稿：一个 `~/.tokenscope/history.db`，只保存精简 token/cwd 元数据；全部代理有效用量纳入；源日志删除或停用仍查得到历史；CCS 设置页只手动单次导入，导入与已有事实求并集。较新规则优先于旧“现存日志是唯一事实”等历史设计。
 
@@ -37,6 +37,7 @@ N01–N09、N15 已完成；16 个责任编号中为 **10 项完成、2 项部�
 | [启动卡死取证补强与引导期恢复](archive/implemented/2026-10-19-boot-stall-recovery.md) | PR #16 / v0.5.2 | BS01–BS06 完成，已复核、合并、发布；N14 第 3 项关闭 |
 | [SQLite 并发打开失败调查](archive/implemented/2026-10-19-sqlite-concurrent-open-investigation.md) | 随 PR #16 / v0.5.2 | HistoryDb/Cache 修复、类型化错误、绝对 deadline 与定向回归完成；推断与实证分开保留；锁等待语义由下一行修正 |
 | [SQLite 打开锁等待回归修复](archive/implemented/2026-10-20-sqlite-open-lock-wait.md)（2026-10-21 补入） | PR #19 / v0.5.5 | LW01–LW05 及复核补修完成，已合并、发布；N15 关闭 |
+| [合入 main 与发布解耦](archive/implemented/2026-10-21-release-on-version-change.md)（2026-10-21 补入） | PR #21 / #22 / #23 | RV01–RV05 完成，不发布与产品正常发布两条路径均通过，N16 关闭 |
 
 历史执行命令、测试数量和“等待 PR/发布”等语句仅代表当时状态。当前执行以整合计划及仓库现行工具为准；准备合入 main 的批次仍按 CLAUDE.md 登记上一发布基线，只有产品输入改动才递增一次版本，纯文档、CI、脚本与测试的合入不递增、不发布。
 
