@@ -586,7 +586,10 @@ fn hide_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     let w = app
         .get_webview_window("main")
         .ok_or_else(|| "主窗口不存在，无法最小化；可改用「直接退出」".to_string())?;
-    w.hide().map_err(|e| format!("隐藏窗口失败: {e}"))
+    w.hide().map_err(|e| format!("隐藏窗口失败: {e}"))?;
+    // 与已记忆的关窗动作保持一致：WebView 不保证在托盘隐藏时发 DOM 事件。
+    crate::emit_window_visibility(&w);
+    Ok(())
 }
 
 /// F08：最小化动作的统一处理——成功才记成功日志；失败透传为可重试

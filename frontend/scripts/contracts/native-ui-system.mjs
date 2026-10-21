@@ -3,12 +3,37 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ensureNotCanceled, spawnSyncBounded, waitStableQuery } from "../lib/native-scenario.mjs";
+import { ensureNotCanceled, spawnSyncBounded } from "../lib/native-scenario.mjs";
 
 export async function nativeUiSystem({ inst, ck, ev, markStage, markStageDone, isCanceled }) {
   const page = () => inst.page;
   const root = () => page().locator("[data-summary-query]");
   const query = () => root().getAttribute("data-summary-query");
+  // Tauri 的 invoke 属性不可改写；观察真实 IPC 请求，不替换函数或响应。
+  // 每次启动独立计数，且预设切换必须增加一次，防止失效的计数器假通过。
+  const queryCounts = new WeakMap();
+  const queryBegins = () => {
+    const current = page();
+    if (!queryCounts.has(current)) {
+      const counter = { begins: 0 };
+      queryCounts.set(current, counter);
+      current.on("request", (request) => {
+        const url = new URL(request.url());
+        if ((url.hostname === "ipc.localhost" || url.protocol === "ipc:") &&
+          url.pathname === "/query_begin") counter.begins++;
+      });
+    }
+    return queryCounts.get(current).begins;
+  };
+  const notifyGeneration = (delta = 0) => page().evaluate(async (extra) => {
+    const raw = document.querySelector("[data-collection-generation]")?.dataset.collectionGeneration;
+    const generation = Number(raw);
+    if (!raw || !Number.isFinite(generation)) throw new Error("缺少真实采集代次");
+    await window.__TAURI_INTERNALS__.invoke("plugin:event|emit", {
+      event: "usage-updated",
+      payload: { generation: generation + extra },
+    });
+  }, delta);
   const navigate = (label) =>
     page()
       .locator('[aria-label="页面切换"]')
@@ -29,23 +54,17 @@ export async function nativeUiSystem({ inst, ck, ev, markStage, markStageDone, i
     );
   const range = async (label) => {
     const old = await query();
+    const begins = await queryBegins();
     await page().locator(".range-trigger").click();
     await page().getByRole("button", { name: label, exact: true }).click();
     await waitQuery(old);
+    const after = queryBegins();
+    ck.add(
+      `preset_${label}_starts_one_query`,
+      after === begins + 1,
+      `query_begin ${begins} -> ${after}`,
+    );
   };
-  // 等查询身份稳定（汇总与明细一致且非空、2 秒无变化，最多 10 秒，未稳定即失败）：
-  // 吸收预设切换的迟到重复批次（既有竞态，与本场景的恢复/切页检查无关）。
-  const stableQueryId = () =>
-    waitStableQuery({
-      read: () =>
-        page().evaluate(() => {
-          const node = document.querySelector("[data-summary-query]");
-          return {
-            summary: node?.dataset.summaryQuery || null,
-            events: node?.dataset.eventsQuery || null,
-          };
-        }),
-    });
   const restore = async (checkHidden = false) => {
     const action = fileURLToPath(
       new URL("../../../scripts/native-window-action.ps1", import.meta.url),
@@ -64,19 +83,13 @@ export async function nativeUiSystem({ inst, ck, ev, markStage, markStageDone, i
     await new Promise((resolve) => setTimeout(resolve, 1200));
     if (checkHidden) {
       const hiddenQuery = await query();
-      await page().evaluate(async () => {
-        for (let n = 0; n < 3; n++) {
-          await window.__TAURI_INTERNALS__.invoke("plugin:event|emit", {
-            event: "usage-updated",
-            payload: { generation: 0 },
-          });
-        }
-      });
+      const begins = queryBegins();
+      for (let n = 0; n < 3; n++) await notifyGeneration(1);
       await new Promise((resolve) => setTimeout(resolve, 1500));
       ck.add(
         "native_minimized_notifications_do_not_query",
-        (await query()) === hiddenQuery,
-        `${hiddenQuery} -> ${await query()}; synthetic notifications via real event bus`,
+        (await query()) === hiddenQuery && queryBegins() === begins,
+        `${hiddenQuery} -> ${await query()}; query_begin ${begins} -> ${queryBegins()}; newer notifications via real event bus`,
       );
     }
     const started = Date.now();
@@ -124,17 +137,22 @@ export async function nativeUiSystem({ inst, ck, ev, markStage, markStageDone, i
   );
 
   await range("全部时间");
-  // 竞态窗口（审阅补修期间 CI 实测）：预设切换的批量刷新存在迟到的重复
-  // 触发（通过运行与失败运行均有查询 begin 无汇总完成的批次，失败运行在
-  // 切换后 1.6 s 出现第二个采集轮）。这些与"恢复/切页是否触发查询"无关，
-  // 先等查询身份稳定（2 s 无变化）再取基线，检查只对恢复本身负责。
-  const stableAllQuery = await stableQueryId();
+  // N14：落地后直接取基线，不再等待迟到批次稳定。通过真实事件总线重放
+  // 当前事务已覆盖的代次，并在恢复/切页后同时核对显示身份和 begin 计数。
+  const allQuery = await query();
+  const allBegins = queryBegins();
+  await notifyGeneration();
   await restore();
   await new Promise((resolve) => setTimeout(resolve, 1500));
   ck.add(
     "all_time_restore_does_not_query",
-    (await query()) === stableAllQuery,
+    (await query()) === allQuery,
     await query(),
+  );
+  ck.add(
+    "covered_notification_and_restore_do_not_begin_query",
+    queryBegins() === allBegins,
+    `baseline=${allBegins}; current=${queryBegins()}`,
   );
   await page().mouse.move(500, 400);
   await page().mouse.wheel(0, 700);
@@ -148,12 +166,12 @@ export async function nativeUiSystem({ inst, ck, ev, markStage, markStageDone, i
     (expected) => Math.abs(document.querySelector(".scroll-container").scrollTop - expected) <= 2,
     scrollBefore,
   );
-  // 切页后查询身份必须仍等于切页前的稳定基线（激活帧没有可落地的待刷新
-  // 触发；若有切页自身触发的查询，身份会变并在此暴露）。
+  // 切页后不建查询，身份仍等于预设切换落地时的基线。
   ck.add(
     "page_switch_preserves_scroll_and_query",
-    scrollBefore > 0 && (await query()) === stableAllQuery,
-    `scroll=${scrollBefore}; query=${await query()}; baseline=${stableAllQuery}`,
+    scrollBefore > 0 && (await query()) === allQuery &&
+      queryBegins() === allBegins,
+    `scroll=${scrollBefore}; query=${await query()}; baseline=${allQuery}`,
   );
   ev.viewport = await page().evaluate(() => ({
     width: innerWidth,
@@ -234,25 +252,13 @@ export async function nativeUiSystem({ inst, ck, ev, markStage, markStageDone, i
   ck.add("tray_window_is_hidden", trayVisible === false, String(trayVisible));
   // 隐藏前因焦点变化发出的在途查询允许完成；从确认隐藏后开始量测新请求。
   const trayQuery = await query();
-  await page().evaluate(() => {
-    const original = window.__TAURI_INTERNALS__.invoke;
-    window.__trayQueryBegins = 0;
-    window.__TAURI_INTERNALS__.invoke = function (cmd, ...args) {
-      if (cmd === "query_begin") window.__trayQueryBegins++;
-      return original.call(this, cmd, ...args);
-    };
-  });
-  await page().evaluate(() =>
-    window.__TAURI_INTERNALS__.invoke("plugin:event|emit", {
-      event: "usage-updated",
-      payload: { generation: 0 },
-    }),
-  );
+  const trayBegins = queryBegins();
+  await notifyGeneration(1);
   await new Promise((resolve) => setTimeout(resolve, 1500));
   ck.add(
     "tray_notifications_do_not_query",
-    (await page().evaluate(() => window.__trayQueryBegins)) === 0,
-    `${trayQuery} -> ${await query()}; new queries=${await page().evaluate(() => window.__trayQueryBegins)}`,
+    queryBegins() === trayBegins && (await query()) === trayQuery,
+    `${trayQuery} -> ${await query()}; query_begin ${trayBegins} -> ${queryBegins()}`,
   );
   ev.scope =
     "real minimize/restore and focus; not OS sleep; explicit --scale is layout emulation only";
