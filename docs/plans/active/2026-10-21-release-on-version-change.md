@@ -1,6 +1,6 @@
 # 只在版本变化时发布：合入 main 与发布解耦
 
-> 状态：**用户 2026-10-21 确认方向并要求写成计划**（不开预发布分支，改为“版本号没变就不发布”）。承接[整合计划 N16](2026-10-11-consolidated-remaining-work.md#n16合入-main-与发布解耦)。
+> 状态：**用户 2026-10-21 确认方向并要求写成计划**（不开预发布分支，改为“版本号没变就不发布”）。承接[整合计划 N16](2026-10-11-consolidated-remaining-work.md#n16合入-main-与发布解耦)。RV01–RV05 已实施并提交 [PR #21](https://github.com/ywltby/tokenscope/pull/21)，执行记录见 §6；合并后 Release 跳过验收待验。
 > 修订：本计划修改用户 2026-10-12 定稿的“main 每批必递增版本”规则，以用户本次确认为准，并同步 `CLAUDE.md`。
 > 分支 `ci/release-on-version-change`；本批不含产品改动，**按新规则不递增版本**。
 
@@ -143,8 +143,8 @@
 | RV01 产品输入判定 | `02a680f` | 先追加 9 条 `ReleaseRelevanceCase`；未改实现时 12 处 `AttributeError: module 'bump_version' has no attribute 'release_relevant'`（Ran 25 tests，errors=12），实现后 25 条全过 |
 | RV02 版本检查语义 | `2427f5a` | 先追加 `ReleaseOnChangeCase`；未改实现时 4 处 `KeyError: 'release'`、2 处断言失败（报错未列产品路径、声明不一致的信息缺失），Ran 33 tests，failures=2 / errors=4；实现后 33 条全过 |
 | RV03 Release 跳过下游 | `7849f0c` | 先加 `ReleaseSkipCase` 并调整 if 计数断言；未改工作流时 9 处失败（6 个下游作业无发布条件、gate 无 `release` 输出、身份校验无 if、`upgrade-test` 的 if 计数 1≠2），Ran 8 tests，failures=9；改后 8 条全过 |
-| RV04 文档与规则同步 | 本提交 | 只改文档，`check_staged_docs.py` 通过 |
-| RV05 交付与验收 | 待回填 | 合并 main、登记 v0.5.5、`--check --base-ref origin/main` 输出 `release: false`、开 PR 取检查结论 |
+| RV04 文档与规则同步 | `a1f6c5d` | 只改文档，`check_staged_docs.py` 通过 |
+| RV05 交付与验收 | `171b4b0` + 本提交 | `origin/main` 无新提交（基线 `1156385`）；`upgrade_baselines.py add --tag v0.5.5` 登记四资产，`upgrade_baselines.py check --base-ref origin/main` 无警告；`bump_version.py --check --base-ref origin/main` 输出 `release: false`；[PR #21](https://github.com/ywltby/tokenscope/pull/21) 非草稿，待必需检查与 Install test 结论 |
 
 与计划假设不同、经用户确认的处理：
 
