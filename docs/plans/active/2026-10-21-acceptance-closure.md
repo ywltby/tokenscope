@@ -36,7 +36,7 @@
   - 浏览器契约里的 denied IPC 是 mock，不是真实后端。
 - **受保护命令现为 35 个**：以 `src-tauri/src/privacy.rs` 的 `PROTECTED_COMMANDS` 为单一事实源。整合计划写的 27 个已过时，取证时从源码读取清单，不写死数量。
 - **浏览器矩阵**：`check-ui-contracts.mjs` 默认矩阵为 18 个 fixture × 2 主题 × 2 视口 × `REQUIRED_CONTRACTS`；CI 的 `test:e2e` 只跑其中 7 个契约、`normal` 一个 fixture。
-- **性能测试会写真实目录**：`tests/perf_real_data.rs` 用 `SummaryOptions::default()`，冷轮写入真实 `~/.tokenscope`，不满足 N13 “输出与价格索引放到临时目录”的要求。
+- **性能测试会写真实目录**：`tests/perf_real_data.rs` 用 `SummaryOptions::default()`，冷轮写入真实 `~/.tokenscope`。这是它作为预热工具的设计用途，但不满足 N13 “输出与价格索引放到临时目录”的要求，所以 N13 另写隔离的新测试。
 - **真实来源目录不能做指纹**：`~/.claude`、`~/.cc-switch` 在本机正被 Claude Code 与 cc-switch 持续写入，前后指纹必然不同。隔离证明改用追踪日志：所有来源、历史库、CCS 路径都必须落在隔离根内。
 
 ## 2. 范围与不做
@@ -210,7 +210,7 @@ AC03–AC05 的 CI 接入：
 - **测试改造**（非产品）：
   - 新增 `crates/tokenscope-core/tests/perf_history_real.rs`（`#[ignore]`，需 `TOKENSCOPE_REAL_PERF=1`）；
   - `cache_dir`、`pricing_index`、历史库全部注入临时目录；来源计划只读指向真实 `~/.claude`、`~/.codex`；
-  - 旧 `perf_real_data.rs` 改成同样隔离，或删除并在文档中改指新测试，执行时二选一并记录理由。
+  - 旧 `perf_real_data.rs` **不改不删**：它是 CLAUDE.md 记载的真实缓存预热工具，写入真实 `~/.tokenscope` 是其用途 b，不是缺陷。N13 的结论只取自新测试，不引用旧测试的数字。
 - **测量**：
   - 冷采集（空历史库）、热采集（第二轮无新数据）、`query_begin` 加首页汇总、明细前两页的耗时；
   - 事件数与文件数，阶段耗时（沿用 collect_all 日志）；
