@@ -35,7 +35,12 @@
   - “同意后读到 true”只证明最终值，不证明落盘先于业务 I/O；
   - 浏览器契约里的 denied IPC 是 mock，不是真实后端。
 - **受保护命令现为 35 个**：以 `src-tauri/src/privacy.rs` 的 `PROTECTED_COMMANDS` 为单一事实源。整合计划写的 27 个已过时，取证时从源码读取清单，不写死数量。
-- **浏览器矩阵**：`check-ui-contracts.mjs` 默认矩阵为 18 个 fixture × 2 主题 × 2 视口 × `REQUIRED_CONTRACTS`；CI 的 `test:e2e` 只跑其中 7 个契约、`normal` 一个 fixture。
+- **浏览器矩阵**（2026-10-21 执行前复核修订）：`check-ui-contracts.mjs` 一次运行包含两部分。
+  - **逐 fixture 巡检**：默认 15 个 fixture × 2 主题 × 2 视口，每个会话都要等 `.app-shell` 与 `.page-head` 出现。
+  - **契约**：`REQUIRED_CONTRACTS` 每条只跑一次，由契约自己打开所需的 fixture、主题和视口，不与巡检的 fixture 相乘。
+  - `fixtures/ui-contracts.mjs` 的 `FIXTURE_NAMES` 共注册 23 个 fixture；默认巡检不含的 8 个（`large-pricing`、`settings-deferred-race`、`sync-partial-failure`、`query-expired-on-page2`、`status-read-failure`、`source-paths-management`、`privacy-consent-pending`、`privacy-bootstrap-deferred`）各自至少被一条契约使用。
+  - 两个隐私 fixture 按设计没有业务骨架，放进巡检会因等不到 `.app-shell` 而失败。这是测试架的设计限制，不是产品缺陷，所以不能简单地把 23 个全部传给 `--fixture`。
+  - CI 的 `test:e2e` 只跑其中 7 个契约，巡检只跑 `normal` 一个 fixture。
 - **性能测试会写真实目录**：`tests/perf_real_data.rs` 用 `SummaryOptions::default()`，冷轮写入真实 `~/.tokenscope`。这是它作为预热工具的设计用途，但不满足 N13 “输出与价格索引放到临时目录”的要求，所以 N13 另写隔离的新测试。
 - **真实来源目录不能做指纹**：`~/.claude`、`~/.cc-switch` 在本机正被 Claude Code 与 cc-switch 持续写入，前后指纹必然不同。隔离证明改用追踪日志：所有来源、历史库、CCS 路径都必须落在隔离根内。
 
@@ -201,8 +206,9 @@ AC03–AC05 的 CI 接入：
 
 ### AC08 N10 完整浏览器矩阵（本地一次）
 
-- 运行 `check-ui-contracts.mjs` 的默认完整矩阵（全部 fixture × light/dark × 1280x820/980x620 × 全部 `REQUIRED_CONTRACTS`），使用当次构建的 `vite preview`。
-- 记录：版本、参数、产物散列，以及每个契约 × fixture × 主题 × 视口的结果与断言数。不能用 JSON 里的 required 列表代替实际结果。
+- 用当次构建的 `vite preview` 运行一次 `check-ui-contracts.mjs`：巡检使用默认 15 个 fixture × light/dark × 1280x820/980x620，契约跑全部 `REQUIRED_CONTRACTS`。不改脚本的默认列表。
+- **fixture 覆盖核对**：从 `FIXTURE_NAMES` 读出全部注册的 fixture，对每一个记录它被哪种方式实际运行过（巡检，或者打开它的契约名）。以本次运行产物为准，不以源码引用为准。凡是两者都没有覆盖到的，列为缺口并上报，不靠临时修改列表补齐。
+- 记录：版本、参数、产物散列；巡检的每个 fixture × 主题 × 视口的结果；每条契约的结果与断言数；覆盖核对表。不能用 JSON 里的 required 列表代替实际结果。
 - 失败逐项归因：测试架问题先修测试架；产品问题按缺陷处理。
 
 ### AC09 N13 真实规模性能（本地）
