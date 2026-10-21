@@ -136,4 +136,18 @@
 
 ## 6. 执行记录
 
-（执行模型回填：提交、红绿日志、PR 与运行链接、合并后 Release 跳过证据。）
+2026-10-21 在分支 `ci/release-on-version-change` 实施，RV01–RV03 一项一个提交：
+
+| 任务 | 提交 | 红 → 绿 |
+| --- | --- | --- |
+| RV01 产品输入判定 | `02a680f` | 先追加 9 条 `ReleaseRelevanceCase`；未改实现时 12 处 `AttributeError: module 'bump_version' has no attribute 'release_relevant'`（Ran 25 tests，errors=12），实现后 25 条全过 |
+| RV02 版本检查语义 | `2427f5a` | 先追加 `ReleaseOnChangeCase`；未改实现时 4 处 `KeyError: 'release'`、2 处断言失败（报错未列产品路径、声明不一致的信息缺失），Ran 33 tests，failures=2 / errors=4；实现后 33 条全过 |
+| RV03 Release 跳过下游 | `7849f0c` | 先加 `ReleaseSkipCase` 并调整 if 计数断言；未改工作流时 9 处失败（6 个下游作业无发布条件、gate 无 `release` 输出、身份校验无 if、`upgrade-test` 的 if 计数 1≠2），Ran 8 tests，failures=9；改后 8 条全过 |
+| RV04 文档与规则同步 | 本提交 | 只改文档，`check_staged_docs.py` 通过 |
+| RV05 交付与验收 | 待回填 | 合并 main、登记 v0.5.5、`--check --base-ref origin/main` 输出 `release: false`、开 PR 取检查结论 |
+
+与计划假设不同、经用户确认的处理：
+
+1. **`release_metadata.py` 对版本未变不报错**。它只按 ref 与当前版本产出 tag（`scripts/release_metadata.py:26-38`），版本未变时会输出 `tag=v0.5.5`；而 `release_assets.py` 的 publish 在标签已指向别的提交时直接拒绝（`scripts/release_assets.py:249-252`）。因此仍按 `release == 'true'` 条件跳过它，理由记为「不报错，但产出会复用已有标签」。
+2. **`test_upgrade_workflow.py` 原有断言禁止 `upgrade-test` 带作业级 `if`**（作业内 `if:` 计数恒为 1）。按用户批准改为：`release.yml` 中该作业 `if:` 恰为 2 条（作业级发布判定 + 证据上传），`install-test.yml` 保持 1 条；`continue-on-error`、`exclude:`、`if: false` 仍然禁止。
+3. **现有用例 `test_version_rollback_skip_and_new_main_baseline_are_rejected` 的最后一段**用「基线指向 HEAD」断言必须失败。新语义下这是「没有改动的合入」，合法返回 `release: false`。按用户批准，把该段改为「自比不发布」，并追加「已递增基线上改产品文件、版本不变仍必须失败」；前 5 个回滚/跳号断言不动。
