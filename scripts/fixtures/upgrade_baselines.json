@@ -538,6 +538,44 @@
           "sha256": "bee745fdad4edea32e08778662ca5c42ed888713ad1d602a36ffe768c532d94f"
         }
       ]
+    },
+    {
+      "version": "0.5.5",
+      "tag": "v0.5.5",
+      "commit": "11563856bc281bcf953210fe047d0e07f89caaba",
+      "origin_release": "v0.5.5",
+      "profile": "history",
+      "status": "published",
+      "persistent_format": {
+        "cache_schema": "11",
+        "history_schema": "4",
+        "parser_revision": "1",
+        "identity_revision": "1",
+        "pricing_index": "9",
+        "settings_format": "2"
+      },
+      "assets": [
+        {
+          "name": "build-metadata.json",
+          "url": "https://github.com/ywltby/tokenscope/releases/download/v0.5.5/build-metadata.json",
+          "sha256": "9b6cfe7f795de09b8af56cfdd866f50954396d33758303c1e8d0603315ca42e1"
+        },
+        {
+          "name": "provenance.sigstore.json",
+          "url": "https://github.com/ywltby/tokenscope/releases/download/v0.5.5/provenance.sigstore.json",
+          "sha256": "37ead34b6a02d9c90b7bc91fbd06033f3632fc1ddb0d5da20954d2e17c9d7c8d"
+        },
+        {
+          "name": "SHA256SUMS.txt",
+          "url": "https://github.com/ywltby/tokenscope/releases/download/v0.5.5/SHA256SUMS.txt",
+          "sha256": "3083e6e5b7b2527f06bf58a7a6bcec989d96950f8c13b245073225160c6d276f"
+        },
+        {
+          "name": "TokenScope_v0.5.5_windows-x64-setup.exe",
+          "url": "https://github.com/ywltby/tokenscope/releases/download/v0.5.5/TokenScope_v0.5.5_windows-x64-setup.exe",
+          "sha256": "6f0db7428e2ff34b13e6da588d0966b0d248ffd5c2fc89f42b1593995ffb9dab"
+        }
+      ]
     }
   ]
 }
