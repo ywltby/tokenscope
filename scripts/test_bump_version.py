@@ -14,8 +14,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import build_inputs
 import bump_version as policy
 
+ROOT = Path(__file__).resolve().parent.parent
 CORE_MANIFEST = "crates/tokenscope-core/Cargo.toml"
 SHELL_MANIFEST = "src-tauri/Cargo.toml"
 LOCK = "Cargo.lock"
@@ -341,6 +343,95 @@ class HistoricalLayoutCase(RepoCase):
                                                 encoding="utf-8")
         with self.assertRaises(ValueError):
             policy.check(self.root, self.new_base)
+
+
+def build_manifest(*records):
+    """最小 build-inputs 清单：records 为 (path, kind, modes)。"""
+    return {"schema_version": 1,
+            "generated": [{"path": path, "kind": kind,
+                           "consumers": [{"package": "tokenscope", "mode": mode}
+                                         for mode in modes]}
+                          for path, kind, modes in records],
+            "manual": []}
+
+
+class ReleaseRelevanceCase(unittest.TestCase):
+    """只有会进安装包的改动才要求递增版本。
+
+    判定数据源只有 `scripts/build-inputs.json`：登记了 default 消费方的输入
+    永远按产品处理，其余路径按明确的非产品清单排除，未知路径一律按产品。
+    """
+
+    def manifest(self):
+        return build_inputs.load_manifest(ROOT / "scripts/build-inputs.json")
+
+    def test_documents_ci_scripts_and_tests_do_not_need_a_release(self):
+        paths = ["docs/plans/active/2026-10-21-release-on-version-change.md",
+                 "README.md", "CLAUDE.md", "DESIGN.md",
+                 ".github/workflows/release.yml",
+                 ".github/actions/checks/action.yml",
+                 ".githooks/pre-commit", "scripts/bump_version.py",
+                 "scripts/test_bump_version.py",
+                 "scripts/fixtures/upgrade_baselines.json",
+                 "frontend/scripts/native-acceptance.mjs",
+                 "frontend/src/usage.test.ts", "frontend/src/usage.test.mjs",
+                 "crates/tokenscope-core/tests/usage_event.rs",
+                 "crates/tokenscope-core/examples/print_persistent_formats.rs",
+                 "src-tauri/tests/shell.rs",
+                 ".gitignore", ".gitattributes", ".editorconfig",
+                 "release-change.json"]
+        self.assertEqual(policy.release_relevant(paths, self.manifest()), [])
+
+    def test_empty_change_set_needs_no_release(self):
+        self.assertEqual(policy.release_relevant([], self.manifest()), [])
+
+    def test_registered_default_inputs_stay_relevant_even_under_docs_or_tests(self):
+        manifest = self.manifest()
+        for path in ("docs/privacy.md",
+                     "crates/tokenscope-core/tests/fixtures/cache/schema-v3.sql",
+                     "src-tauri/capabilities/default.json",
+                     "src-tauri/tauri.conf.json"):
+            with self.subTest(path=path):
+                self.assertEqual(policy.release_relevant([path], manifest), [path])
+
+    def test_acceptance_only_registration_does_not_make_a_docs_path_relevant(self):
+        manifest = build_manifest(("docs/privacy.md", "file", ("acceptance",)))
+        self.assertEqual(policy.release_relevant(["docs/privacy.md"], manifest), [])
+
+    def test_acceptance_only_source_stays_relevant_by_path(self):
+        manifest = build_manifest(("src-tauri/src/acceptance_csp.js", "file",
+                                   ("acceptance",)))
+        self.assertEqual(policy.release_relevant(["src-tauri/src/acceptance_csp.js"],
+                                                 manifest),
+                         ["src-tauri/src/acceptance_csp.js"])
+
+    def test_markdown_registered_as_a_default_input_is_relevant(self):
+        manifest = build_manifest(("README.md", "file", ("default",)))
+        self.assertEqual(policy.release_relevant(["README.md"], manifest), ["README.md"])
+
+    def test_directory_inputs_cover_children_but_not_sibling_prefixes(self):
+        manifest = build_manifest(("assets/brand", "directory", ("default",)))
+        self.assertEqual(policy.release_relevant(["assets/brand/logo.svg"], manifest),
+                         ["assets/brand/logo.svg"])
+        manifest = build_manifest(("docs/privacy", "directory", ("default",)))
+        self.assertEqual(policy.release_relevant(["docs/privacy/policy.md",
+                                                  "docs/privacy-extra/policy.md"],
+                                                 manifest),
+                         ["docs/privacy/policy.md"])
+
+    def test_unknown_and_product_paths_are_relevant(self):
+        manifest = self.manifest()
+        paths = ["Cargo.toml", "Cargo.lock", "NOTES.txt", "toolchain.toml",
+                 ".cargo/config.toml", "frontend/src/App.vue",
+                 "frontend/package.json", "src-tauri/src/main.rs",
+                 "crates/tokenscope-core/src/lib.rs"]
+        self.assertEqual(policy.release_relevant(paths, manifest), paths)
+
+    def test_rename_participates_on_both_sides(self):
+        manifest = self.manifest()
+        paths = ["docs/old.md", "crates/tokenscope-core/src/new.rs"]
+        self.assertEqual(policy.release_relevant(paths, manifest),
+                         ["crates/tokenscope-core/src/new.rs"])
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ import tempfile
 import tomllib
 
 from release_metadata import read_versions
+import build_inputs
 
 ROOT = Path(__file__).resolve().parent.parent
 ZERO_VERSION = re.compile(r"0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
@@ -32,6 +33,17 @@ LEGACY_MANIFEST = "Cargo.toml"
 JSON_CONFIGS = ("frontend/package.json", "src-tauri/tauri.conf.json")
 CONFIGS = (CORE_MANIFEST, SHELL_MANIFEST, *JSON_CONFIGS)
 LOCK = "Cargo.lock"
+BUILD_INPUTS = "scripts/build-inputs.json"
+
+# 不进入安装包的路径：文档、CI、脚本、测试装配与仓库级配置。判断只看路径
+# 形态；登记在 build-inputs.json 且被 default 构建消费的输入永远算产品。
+NON_PRODUCT_PREFIXES = ("docs/", ".github/", ".githooks/", "scripts/",
+                        "frontend/scripts/", "src-tauri/tests/")
+NON_PRODUCT_FILES = (".gitignore", ".gitattributes", ".editorconfig",
+                     "release-change.json")
+NON_PRODUCT_PATTERNS = (re.compile(r"^frontend/.+\.test\.(?:ts|mjs)$"),
+                        re.compile(r"^crates/[^/]+/tests/.+"),
+                        re.compile(r"^crates/[^/]+/examples/.+"))
 
 
 def git(root, *args):
@@ -158,6 +170,59 @@ def declaration(root):
             or set(value) != {"schema_version", "kind", "summary"}):
         raise ValueError("版本声明必须包含 schema_version=1、minor/patch 和非空 summary")
     return value
+
+
+def registration(manifest):
+    """`build-inputs.json` 里被 default 构建消费的输入，按文件与目录分开。"""
+    files, directories = set(), []
+    for record in (*manifest["generated"], *manifest["manual"]):
+        if not any(consumer.get("mode") == "default"
+                   for consumer in record["consumers"]):
+            continue
+        path = str(record["path"]).strip("/")
+        if record["kind"] == "directory":
+            directories.append(path)
+        elif record["kind"] == "file":
+            files.add(path)
+    return files, tuple(directories)
+
+
+def is_registered(path, files, directories):
+    if path in files:
+        return True
+    return any(path == directory or path.startswith(directory + "/")
+               for directory in directories)
+
+
+def is_non_product(path):
+    if path in NON_PRODUCT_FILES or path.endswith(".md"):
+        return True
+    if any(path.startswith(prefix) for prefix in NON_PRODUCT_PREFIXES):
+        return True
+    return any(pattern.fullmatch(path) for pattern in NON_PRODUCT_PATTERNS)
+
+
+def release_relevant(paths, manifest):
+    """返回这次改动里会进入安装包的路径，保持输入顺序并去重。
+
+    只认 `build-inputs.json`：登记了 default 消费方的输入永远算产品（
+    `docs/privacy.md` 会被编译进程序）；其余路径按明确的非产品清单排除，
+    未知路径一律按产品处理——漏判只会多要求一次递增，不会漏发布。
+    """
+    files, directories = registration(manifest)
+    relevant, seen = [], set()
+    for raw in paths:
+        path = str(raw).replace("\\", "/").strip("/")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if is_registered(path, files, directories) or not is_non_product(path):
+            relevant.append(path)
+    return relevant
+
+
+def build_manifest(root):
+    return build_inputs.load_manifest(Path(root) / BUILD_INPUTS)
 
 
 def check(root, base_ref):
