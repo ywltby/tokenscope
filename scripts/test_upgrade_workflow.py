@@ -188,8 +188,6 @@ exit ([int]$env:TOKENSCOPE_UPGRADE_EXIT)
                                                     "origin":origin,"extra_arguments":[]})
 
 
-DOWNSTREAM = ("build", "install-test", "plan-upgrades", "upgrade-test",
-              "upgrade-chain", "publish")
 RELEASE_CONDITION = "if: needs.gate.outputs.release == 'true'"
 
 
@@ -214,10 +212,17 @@ class ReleaseSkipCase(unittest.TestCase):
         self.assertEqual(identity.count("if: steps.version.outputs.release == 'true'"), 1)
 
     def test_every_downstream_job_waits_for_the_release_decision(self):
-        for name in DOWNSTREAM:
+        jobs = self.text.split("\njobs:\n", 1)[1]
+        names = re.findall(r"(?m)^  ([^\s#][^:\n]*):[ \t]*(?:#.*)?$", jobs)
+        self.assertIn("gate", names)
+        self.assertGreater(len(names), 1, "Release 必须包含 gate 以外的作业")
+        for name in names:
+            if name == "gate":
+                continue
             with self.subTest(job=name):
                 block = job_block(self.text, name)
-                self.assertRegex(block, rf"(?m)^    {re.escape(RELEASE_CONDITION)}$")
+                self.assertRegex(block, rf"(?m)^    {re.escape(RELEASE_CONDITION)}$",
+                                 f"作业 {name} 缺少发布判定")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ manifest 取，不存在才按旧布局读根 manifest 的 `[package]`；核心 
 损坏或缺失 `package.version` 一律失败，不静默回退旧布局。
 
 发布判定（2026-10-21）：只有会进入安装包的改动才要求递增版本。纯文档、CI、
-脚本、测试装配与仓库级配置的合入允许版本不变，此时 `release-change.json`
+脚本、测试装配与明确列出的仓库级配置的合入允许版本不变，此时 `release-change.json`
 必须与基线逐字节一致，检查结果以 `release: false` 表示本次合入不发布。
 """
 
@@ -39,7 +39,7 @@ CONFIGS = (CORE_MANIFEST, SHELL_MANIFEST, *JSON_CONFIGS)
 LOCK = "Cargo.lock"
 BUILD_INPUTS = "scripts/build-inputs.json"
 
-# 不进入安装包的路径：文档、CI、脚本、测试装配与仓库级配置。判断只看路径
+# 不进入安装包的路径：文档、CI、脚本、测试装配与明确列出的仓库级配置。判断只看路径
 # 形态；登记在 build-inputs.json 且被 default 构建消费的输入永远算产品。
 NON_PRODUCT_PREFIXES = ("docs/", ".github/", ".githooks/", "scripts/",
                         "frontend/scripts/", "src-tauri/tests/")
@@ -199,6 +199,9 @@ def is_registered(path, files, directories):
 
 
 def is_non_product(path):
+    # 任意目录的 Markdown 默认非产品，已登记的 default 构建输入优先于此规则。
+    # build-inputs.json 只追踪 Rust 构建；目前前端未导入 Markdown。若以后用
+    # ?raw 等方式打包 Markdown，必须同步收窄此放行规则或扩展构建输入登记。
     if path in NON_PRODUCT_FILES or path.endswith(".md"):
         return True
     if any(path.startswith(prefix) for prefix in NON_PRODUCT_PREFIXES):
@@ -211,7 +214,7 @@ def release_relevant(paths, manifest):
 
     只认 `build-inputs.json`：登记了 default 消费方的输入永远算产品（
     `docs/privacy.md` 会被编译进程序）；其余路径按明确的非产品清单排除，
-    未知路径一律按产品处理——漏判只会多要求一次递增，不会漏发布。
+    未知路径一律按产品处理；Markdown 默认放行的前端构建限制见 is_non_product。
     """
     files, directories = registration(manifest)
     relevant, seen = [], set()
