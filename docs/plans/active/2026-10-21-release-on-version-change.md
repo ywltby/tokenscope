@@ -1,6 +1,6 @@
 # 只在版本变化时发布：合入 main 与发布解耦
 
-> 状态：**用户 2026-10-21 确认方向并要求写成计划**（不开预发布分支，改为“版本号没变就不发布”）。承接[整合计划 N16](2026-10-11-consolidated-remaining-work.md#n16合入-main-与发布解耦)。RV01–RV05 已实施并提交 [PR #21](https://github.com/ywltby/tokenscope/pull/21)，执行记录见 §6；合并后 Release 跳过验收待验。
+> 状态：**用户 2026-10-21 确认方向并要求写成计划**（不开预发布分支，改为“版本号没变就不发布”）。承接[整合计划 N16](2026-10-11-consolidated-remaining-work.md#n16合入-main-与发布解耦)。RV01–RV05 已实施，[PR #21](https://github.com/ywltby/tokenscope/pull/21) 合并为 `49a61bd`；Release 跳过验收已通过，只余下一个产品 PR 的正常发布待验，执行记录见 §6。
 > 修订：本计划修改用户 2026-10-12 定稿的“main 每批必递增版本”规则，以用户本次确认为准，并同步 `CLAUDE.md`。
 > 分支 `ci/release-on-version-change`；本批不含产品改动，**按新规则不递增版本**。
 
@@ -148,7 +148,9 @@
 
 复核结论（2026-10-21）：本地 302 项脚本测试全部通过；新增测试放回旧实现可失败；gate 的 `release` 输出 true/false 与失败退出路径均已验证。产品判定、版本检查、Release 跳过三处复核未发现阻断合并的问题。
 
-合并后待验（尚未执行，不提前标通过）：main 上该提交的 Release 只跑 gate，build、install-test、plan-upgrades、upgrade-test、upgrade-chain、publish 全部 skipped，且不出现 `v0.5.6` 标签或发布；下一个产品 PR 如实递增并正常构建发布。
+合并后验收（2026-10-21 完成）：main 合并提交 `49a61bd` 的 [Release 运行 39556582716](https://github.com/ywltby/tokenscope/actions/runs/39556582716) 结论 success——gate 成功，build、install-test、plan-upgrades、upgrade-test、upgrade-chain、publish 六个下游作业全部 skipped；远端标签与发布列表都没有 `v0.5.6`，最新发布仍是 v0.5.5。同提交的 [CI 39556582812](https://github.com/ywltby/tokenscope/actions/runs/39556582812) 与 [Native UI E2E 39556582765](https://github.com/ywltby/tokenscope/actions/runs/39556582765) 均 success。
+
+仍待验：下一个产品 PR 如实递增并正常构建发布（标签、资产与签名流程不变）。PR #20 已于同日留言链接 PR #21 并关闭，不再发 0.5.6。
 
 与计划假设不同、经用户确认的处理：
 
