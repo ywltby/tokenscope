@@ -8,6 +8,10 @@
 历史 ref 的版本按该 ref 自身的布局读取：该提交存在核心 manifest 就从核心
 manifest 取，不存在才按旧布局读根 manifest 的 `[package]`；核心 manifest
 损坏或缺失 `package.version` 一律失败，不静默回退旧布局。
+
+发布判定（2026-10-21）：只有会进入安装包的改动才要求递增版本。纯文档、CI、
+脚本、测试装配与仓库级配置的合入允许版本不变，此时 `release-change.json`
+必须与基线逐字节一致，检查结果以 `release: false` 表示本次合入不发布。
 """
 
 from __future__ import annotations
@@ -225,16 +229,61 @@ def build_manifest(root):
     return build_inputs.load_manifest(Path(root) / BUILD_INPUTS)
 
 
+def changed_paths(root, base):
+    """基线到 HEAD 的改动路径；重命名按删除 + 新增两条参与判断。
+
+    `-z` 让 Git 原样输出路径，中文与空白路径不会被转义成引号形式。
+    """
+    raw = git(root, "diff", "--name-status", "--no-renames", "-z", f"{base}..HEAD")
+    fields = raw.split("\0")
+    return [fields[index + 1] for index in range(0, len(fields) - 1, 2)
+            if fields[index]]
+
+
+def declaration_text(root):
+    with (Path(root) / "release-change.json").open(encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
+def file_text_at(root, sha, name):
+    """不裁剪空白地读取该提交里的文件原文，供逐字节比较。"""
+    try:
+        output = subprocess.check_output(["git", "-C", str(root), "show", f"{sha}:{name}"],
+                                         stderr=subprocess.PIPE)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        detail = git_error_text(exc) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        raise ValueError(f"读取 {name}（{sha[:12]}）失败：{detail or exc}") from exc
+    return output.decode("utf-8")
+
+
+def declaration_text_at(root, sha):
+    """基线提交里的声明原文；该提交没有声明时返回 None。"""
+    if not ref_has(root, sha, "release-change.json"):
+        return None
+    return file_text_at(root, sha, "release-change.json")
+
+
 def check(root, base_ref):
     root = Path(root)
     sha, previous = historical_versions(root, base_ref)
     current = uniform(read_versions(root))
     validate_locks(root, current)
     change = declaration(root)
+    relevant = release_relevant(changed_paths(root, sha), build_manifest(root))
     expected = next_version(previous, change["kind"])
+    if not relevant and current == previous:
+        if declaration_text_at(root, sha) != declaration_text(root):
+            raise ValueError("版本未变时 release-change.json 必须与基线逐字节一致")
+        return {"version": current, "previous": previous, "kind": change["kind"],
+                "base_sha": sha, "release": False}
     if current != expected:
-        raise ValueError(f"版本应从 {previous} 按 {change['kind']} 升至 {expected}，实际 {current}")
-    return {"version": current, "previous": previous, "kind": change["kind"], "base_sha": sha}
+        detail = ("；产品改动：" + "、".join(relevant[:3])
+                  + (f" 等 {len(relevant)} 个" if len(relevant) > 3 else "")
+                  if relevant else "")
+        raise ValueError(f"版本应从 {previous} 按 {change['kind']} 升至 {expected}，"
+                         f"实际 {current}{detail}")
+    return {"version": current, "previous": previous, "kind": change["kind"],
+            "base_sha": sha, "release": True}
 
 
 def check_event(root, event, event_name):
@@ -256,7 +305,7 @@ def check_event(root, event, event_name):
         validate_locks(Path(root), current)
         if event["ref"] != "refs/tags/v" + current:
             raise ValueError("版本标签与应用版本不一致")
-        return {"version": current, "kind": "existing-tag"}
+        return {"version": current, "kind": "existing-tag", "release": True}
     else:
         raise ValueError("不支持的版本校验事件")
     return check(root, base)

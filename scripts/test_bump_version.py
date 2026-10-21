@@ -58,6 +58,21 @@ def write_configs(root, version):
                                    ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+BUILD_INPUTS = "scripts/build-inputs.json"
+
+
+def write_build_inputs(root):
+    """夹具仓库与真实仓库同构：`docs/privacy.md` 编译进程序，属产品输入。"""
+    path = root / BUILD_INPUTS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "generated": [{"path": "docs/privacy.md", "kind": "file",
+                       "consumers": [{"package": "tokenscope-app", "mode": "default"}]}],
+        "manual": [],
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def seed(root, version="0.1.0"):
     """当前布局：根虚拟 workspace + 核心 manifest + 单根锁。"""
     for name, package in ((CORE_MANIFEST, "tokenscope"), (SHELL_MANIFEST, "tokenscope-app")):
@@ -66,6 +81,7 @@ def seed(root, version="0.1.0"):
         path.write_text(manifest(package, version), encoding="utf-8")
     (root / "Cargo.toml").write_text(virtual_manifest(), encoding="utf-8")
     write_configs(root, version)
+    write_build_inputs(root)
     (root / LOCK).write_text(lock_text(("tokenscope", "tokenscope-app"), version),
                              encoding="utf-8")
 
@@ -77,6 +93,7 @@ def seed_legacy(root, version="0.1.0"):
     shell.parent.mkdir(parents=True, exist_ok=True)
     shell.write_text(manifest("tokenscope-app", version), encoding="utf-8")
     write_configs(root, version)
+    write_build_inputs(root)
     (root / LOCK).write_text(lock_text(("tokenscope",), version), encoding="utf-8")
     (root / LEGACY_SHELL_LOCK).write_text(lock_text(("tokenscope", "tokenscope-app"), version),
                                           encoding="utf-8")
@@ -120,6 +137,9 @@ class RepoCase(unittest.TestCase):
         git(self.root, "init", "-q", "-b", "main")
         git(self.root, "config", "user.name", "TokenScope fixture")
         git(self.root, "config", "user.email", "fixture@example.invalid")
+        # 真实仓库用 .gitattributes 钉 eol=lf；夹具关掉自动转换，让工作区与
+        # 提交内容逐字节相同，声明一致性才可验证。
+        git(self.root, "config", "core.autocrlf", "false")
         self.origin = Path(self.temp.name) / "origin.git"
 
     def commit_all(self, message="baseline"):
@@ -238,8 +258,15 @@ class VersionPolicyCase(RepoCase):
         seed(self.root, "0.2.0")
         (self.root / "release-change.json").write_text(declaration, encoding="utf-8")
         self.commit_all("another main version")
+        # 版本没变又没有产品改动时，自比不构成一次合入：允许且不发布。
+        self.assertFalse(policy.check(self.root, "HEAD")["release"])
+        # 已含递增的基线上再改产品输入、版本不动，仍然必须被拒。
+        product = self.root / "crates/tokenscope-core/src/lib.rs"
+        product.parent.mkdir(parents=True, exist_ok=True)
+        product.write_text("产品改动\n", encoding="utf-8")
+        self.commit_all("product change without a bump")
         with self.assertRaises(ValueError):
-            policy.check(self.root, "HEAD")
+            policy.check(self.root, "HEAD~1")
 
     def test_mid_write_failure_rolls_back_all_files_and_new_declaration(self):
         before = self.snapshot()
@@ -432,6 +459,92 @@ class ReleaseRelevanceCase(unittest.TestCase):
         paths = ["docs/old.md", "crates/tokenscope-core/src/new.rs"]
         self.assertEqual(policy.release_relevant(paths, manifest),
                          ["crates/tokenscope-core/src/new.rs"])
+
+
+def seed_declaration(root, kind="patch", summary="基线版本声明"):
+    (root / "release-change.json").write_text(
+        json.dumps({"schema_version": 1, "kind": kind, "summary": summary},
+                   ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+class ReleaseOnChangeCase(RepoCase):
+    """版本没变的合入：只有产品输入改动才要求递增，其余只校验声明成对。"""
+
+    def setUp(self):
+        super().setUp()
+        seed(self.root)
+        seed_declaration(self.root)
+        self.base = self.commit_all()
+        self.publish()
+        git(self.root, "fetch", "--quiet", "origin", "main")
+        git(self.root, "switch", "-qc", "feature")
+
+    def touch(self, name, text="改动\n"):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return self.commit_all(name)
+
+    def test_documentation_only_change_skips_the_release(self):
+        self.touch("docs/plans/note.md")
+        result = policy.check(self.root, self.base)
+        self.assertEqual(result["version"], "0.1.0")
+        self.assertFalse(result["release"])
+
+    def test_main_push_and_pull_request_events_both_skip_documentation_changes(self):
+        self.touch("docs/plans/note.md")
+        push = policy.check_event(self.root, {"ref": "refs/heads/main",
+                                              "before": self.base}, "push")
+        self.assertFalse(push["release"])
+        pull = policy.check_event(
+            self.root,
+            {"pull_request": {"base": {"ref": "main", "sha": self.base}}},
+            "pull_request")
+        self.assertFalse(pull["release"])
+
+    def test_product_change_without_a_version_bump_is_rejected_naming_the_paths(self):
+        self.touch("crates/tokenscope-core/src/lib.rs")
+        with self.assertRaises(ValueError) as raised:
+            policy.check(self.root, self.base)
+        self.assertIn("crates/tokenscope-core/src/lib.rs", str(raised.exception))
+        with self.assertRaises(ValueError):
+            policy.check_event(self.root, {"ref": "refs/heads/main", "before": self.base},
+                               "push")
+        with self.assertRaises(ValueError):
+            policy.check_event(
+                self.root,
+                {"pull_request": {"base": {"ref": "main", "sha": self.base}}},
+                "pull_request")
+
+    def test_privacy_document_is_a_product_input_because_it_is_compiled_in(self):
+        self.touch("docs/privacy.md", "# 隐私说明\n")
+        with self.assertRaises(ValueError):
+            policy.check(self.root, self.base)
+
+    def test_unknown_root_file_counts_as_product(self):
+        self.touch("NOTES.txt")
+        with self.assertRaises(ValueError):
+            policy.check(self.root, self.base)
+
+    def test_documentation_change_with_a_legal_patch_bump_still_releases(self):
+        self.touch("docs/plans/note.md")
+        self.assertEqual(policy.bump(self.root, "patch", self.base, "文档整理"), "0.1.1")
+        result = policy.check(self.root, self.base)
+        self.assertTrue(result["release"])
+        self.assertEqual(result["kind"], "patch")
+
+    def test_declaration_must_match_the_baseline_when_the_version_is_unchanged(self):
+        self.touch("docs/plans/note.md")
+        seed_declaration(self.root, summary="换了个说明")
+        self.commit_all("声明")
+        with self.assertRaises(ValueError) as raised:
+            policy.check(self.root, self.base)
+        self.assertIn("release-change.json", str(raised.exception))
+
+    def test_tag_event_keeps_releasing(self):
+        result = policy.check_event(self.root, {"ref": "refs/tags/v0.1.0"}, "push")
+        self.assertTrue(result["release"])
+        self.assertEqual(result["kind"], "existing-tag")
 
 
 if __name__ == "__main__":
