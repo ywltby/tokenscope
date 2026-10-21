@@ -684,6 +684,77 @@ describe("useUsageQuery 自动刷新调度（U06）", () => {
     w.unmount();
   });
 
+  it("preset_change_ignores_late_notifications_already_in_snapshot", async () => {
+    okMock({ query_begin: () => Promise.resolve({ ...handle, generation: 5 }) });
+    const w = mountHost();
+    try {
+      await flushPromises();
+      api.preset.value = { kind: "days", days: 7 };
+      await flushPromises();
+      expect(beginCalls()).toBe(2);
+      expect(lastBegin()).toMatchObject({ days: 7, collect: true, trigger: "manual" });
+
+      // 两个通知通道可能晚于这次查询完成；事务已经覆盖其代次。
+      emitUsageUpdated(5);
+      await flushPromises();
+      api.notifyUsageUpdated(4);
+      await flushPromises();
+      expect(beginCalls(), "切换预设只产生一批，不被迟到通知再次刷新").toBe(2);
+      expect(callsOf("query_summary")).toHaveLength(2);
+      expect(callsOf("query_events")).toHaveLength(2);
+    } finally {
+      w.unmount();
+    }
+  });
+
+  it("covered_hidden_notification_does_not_queue_a_refresh", async () => {
+    okMock();
+    const w = mountHost();
+    try {
+      await flushPromises();
+      api.setVisible(false);
+      emitUsageUpdated(handle.generation);
+      await flushPromises();
+      expect(api.pendingRefresh.value).toBe(false);
+
+      api.setVisible(true);
+      await flushPromises();
+      expect(beginCalls(), "全部时间恢复可见时不补发已覆盖通知").toBe(1);
+    } finally {
+      w.unmount();
+    }
+  });
+
+  it("covered_notification_does_not_show_a_pagination_refresh_hint", async () => {
+    okMock({ query_events: () => Promise.resolve(listOf(["first"], 500)) });
+    const w = mountHost();
+    try {
+      await flushPromises();
+      await api.loadEvents(true);
+      emitUsageUpdated(handle.generation);
+      await flushPromises();
+      expect(beginCalls()).toBe(1);
+      expect(api.autoRefreshHint.value, "数据没有更新，不显示有新数据").toBeNull();
+    } finally {
+      w.unmount();
+    }
+  });
+
+  it("invalid_generation_notification_does_not_start_a_query", async () => {
+    okMock();
+    const w = mountHost();
+    try {
+      await flushPromises();
+      for (const generation of [undefined, Number.NaN, Number.POSITIVE_INFINITY]) {
+        emitUsageUpdated(generation as number);
+        await flushPromises();
+      }
+      expect(beginCalls()).toBe(1);
+    } finally {
+      w.unmount();
+    }
+  });
+
   it("rolling_preset_refreshes_on_every_clock_check：rolling 预设每次时钟检查都刷新", async () => {
     fakeClock("2026-10-05T12:00:00+08:00");
     setPreferences({ kind: "rolling", hours: 24 });

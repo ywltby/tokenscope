@@ -1029,10 +1029,12 @@ export function useUsageQuery(opts: UsageQueryOptions) {
 
   /// `usage-updated` 事件处理器：载荷是历史库代次（仅确有写入时发出）。
   function notifyUsageUpdated(generation: number): void {
-    if (typeof generation === "number" && Number.isFinite(generation)) {
-      latestGeneration.value = Math.max(latestGeneration.value, generation);
-      notifiedGeneration = Math.max(notifiedGeneration, generation);
-    }
+    if (typeof generation !== "number" || !Number.isFinite(generation)) return;
+    latestGeneration.value = Math.max(latestGeneration.value, generation);
+    notifiedGeneration = Math.max(notifiedGeneration, generation);
+    // 采集状态与用量事件可以晚于查询返回；当前冻结事务已覆盖的通知
+    // 不再建批次，也不在隐藏/分页状态下留下虚假的待刷新标记。
+    if (generation <= (currentQuery.value?.generation ?? -1)) return;
     requestAutoRefresh("data");
   }
 

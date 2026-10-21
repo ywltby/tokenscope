@@ -116,6 +116,38 @@ function mountDashboard(): VueWrapper {
   });
 }
 
+it("preset_change_keeps_one_batch_when_collection_status_arrives_late", async () => {
+  let releaseStatus!: (value: Record<string, unknown>) => void;
+  let begins = 0;
+  invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === "query_begin")
+      return Promise.resolve({ ...queryInfo, queryId: `q-${++begins}`, generation: 7 });
+    if (cmd === "query_summary") return Promise.resolve({ ...summaryA, query_id: args?.queryId });
+    if (cmd === "query_events") return Promise.resolve({ ...events, query_id: args?.queryId });
+    if (cmd === "collection_status")
+      return new Promise<Record<string, unknown>>((resolve) => (releaseStatus = resolve));
+    if (cmd === "source_status") return Promise.resolve([]);
+    return Promise.resolve(null);
+  });
+  const w = mountDashboard();
+  try {
+    await flushPromises();
+    expect(begins).toBe(1);
+    state(w)["preset"] = { kind: "days", days: 7 };
+    await flushPromises();
+    expect(begins).toBe(2);
+    expect(state(w)["report"]).toMatchObject({ query_id: "q-2" });
+
+    // 真实 collectionStatus 组合式转发迟到状态；当前查询已覆盖第 7 代。
+    releaseStatus({ ...collectionStatusOk(), latestGeneration: 7 });
+    await flushPromises();
+    expect(begins, "迟到的采集状态不得再建立第三批查询").toBe(2);
+    expect(state(w)["report"]).toMatchObject({ query_id: "q-2" });
+  } finally {
+    w.unmount();
+  }
+});
+
 /** setup 内部状态的类型友好读取（script setup 绑定在开发构建下可经 vm 代理访问）。 */
 function state(w: VueWrapper): Record<string, unknown> {
   return w.vm as unknown as Record<string, unknown>;
