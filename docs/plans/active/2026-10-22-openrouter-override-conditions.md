@@ -104,4 +104,18 @@
 
 ## 5. 执行记录
 
-（实施时回填。）
+2026-10-22 在分支 `fix/openrouter-override-conditions` 实施：
+
+| 任务 | 提交 | 红 → 绿 |
+| --- | --- | --- |
+| OR01 + OR02 | `479282f` | 新增 `time_conditioned_overrides_in_current_upstream_shape_are_skipped`，未改代码时失败，报错与生产环境相同：`invalid type: integer 0, expected a string`。改为只检测时间字段是否存在、并纳入 `utc_days` 后通过。变异验证：去掉 `utc_days` 的判断，断言“只带 utc_days 的档位不得被当作长上下文档位”失败。`non_price_fields_and_root_structure_stay_strict` 中“整数 `utc_start` 必须失败”改为“可解析且仍判为时间条件” |
+| OR03 | `1deef48` | 新增 `one_malformed_model_is_skipped_without_failing_sync`，未改代码时整体失败（`invalid type: integer 123, expected a string`）；新增守卫用例 `all_models_malformed_fails_and_keeps_previous_snapshot`（修复前后都应通过，用来防止回归）。变异验证：去掉“全部异常即失败”的判断，守卫用例失败。缺失 `id`、数字 `id` 两条断言改为“该元素判为非法”，根结构损坏的断言保留 |
+| OR04 联网用例 | `7deaa08` | 加入与 TLS 修复 PR 逐字节相同的 `pricing_live_sync.rs`。带代理实测：OpenRouter 同步成功 461 条；在 468 个模型中，7 个按原有的非法单价规则被拒绝，16 个时间条件档位被跳过（与 §1 统计一致），没有模型因结构异常被跳过。models.dev 8780 条 |
+| OR04 版本 | `9080c28` | 合并最新 main 后递增到 0.5.7，`release: true`，基线校验无警告；完整提交检查通过 |
+
+偏离与说明：
+- 守卫用例的初版 fixture 用了 `"pricing":[]`，实现后它仍然被判为合法模型：serde 允许用数组反序列化结构体，所有字段又都有默认值，于是解析成一个空价格表。这是 fixture 写错了，不是实现的问题，已改为 `"pricing":"not-an-object"`。这一既有行为保持不变。
+- `"data":[]`（空数组）维持原行为（写出空快照），不在本次范围内。“全部异常即失败”只在至少有一个模型结构异常时才生效。
+- 本分支基于 main，TLS 依赖仍是旧版本，所以联网实测只证明了解析修复；TLS 的验证在 PR #29 中进行。两个 PR 都是 0.5.7，后合并的那个更新到最新 main 后改为 0.5.8。
+
+合并后待验：main 的 Release 与对应版本的发布；安装新版本后，在设置页手动同步一次 OpenRouter，确认成功、条目数与同步时间都刷新；随后归档本计划。
