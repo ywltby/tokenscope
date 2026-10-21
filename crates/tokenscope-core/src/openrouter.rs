@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
 pub const API_URL: &str = "https://openrouter.ai/api/v1/models";
@@ -25,8 +26,9 @@ pub(crate) struct ApiModel {
 /// 类型同时接受两者。
 ///
 /// 边界（刻意收紧）：
-/// - 只放宽**价格字段**——`id`/`name`/`utc_start` 等仍是字符串，不对整份
-///   响应文本做替换，也不把任意 JSON 宽松转成数字；
+/// - 只放宽**价格字段**——`id`/`name` 仍是字符串，不对整份响应文本做替换，
+///   也不把任意 JSON 宽松转成数字；时间条件字段（`utc_start`/`utc_end`/
+///   `utc_days`）只检测是否存在、不约束类型（只用于跳过该档，见 [`ApiOverride`]）；
 /// - 布尔/数组/对象等**显式非法**（`Other`），随模型与分项报告，不因宽松
 ///   匹配变成"未知的合法值"；
 /// - 根响应结构损坏仍由 `ApiResponse` 反序列化明确失败。
@@ -51,8 +53,8 @@ struct ApiPricing {
     input_cache_read: Option<PriceInput>,
     #[serde(default)]
     input_cache_write: Option<PriceInput>,
-    /// Task 3：条件价格覆盖（长上下文等）。时间条件条目（utc_start/utc_end）
-    /// 在 Task 4A 落地前跳过并留 warning，不猜测其适用条件。
+    /// Task 3：条件价格覆盖（长上下文等）。时间条件条目（utc_start/utc_end/
+    /// utc_days 任一出现）在 Task 4A 落地前跳过并留 warning，不猜测其适用条件。
     #[serde(default)]
     overrides: Vec<ApiOverride>,
 }
@@ -70,10 +72,22 @@ struct ApiOverride {
     input_cache_read: Option<PriceInput>,
     #[serde(default)]
     input_cache_write: Option<PriceInput>,
+    /// 时间条件：只检测是否存在（非 null），不约束类型——上游曾用字符串，
+    /// 2026-10 起为整数（如 `0`、`100`），并新增星期数组 `utc_days`。
+    /// 字符串约束曾让整份响应解析失败。
     #[serde(default)]
-    utc_start: Option<String>,
+    utc_start: Option<IgnoredAny>,
     #[serde(default)]
-    utc_end: Option<String>,
+    utc_end: Option<IgnoredAny>,
+    #[serde(default)]
+    utc_days: Option<IgnoredAny>,
+}
+
+impl ApiOverride {
+    /// 任一时间条件字段出现即视为按时间生效的档位（当前不支持，整档跳过）。
+    fn has_time_condition(&self) -> bool {
+        self.utc_start.is_some() || self.utc_end.is_some() || self.utc_days.is_some()
+    }
 }
 
 /// 快照中的条件价格档（Task 3）：USD/token 原单位，导入计价层 ×1e6。
@@ -246,8 +260,8 @@ pub(crate) fn sync_with(
             let mut skip = |reason: String| {
                 warnings.push(format!("{}: override 已跳过: {reason}", m.id));
             };
-            if o.utc_start.is_some() || o.utc_end.is_some() {
-                skip("含时间条件（utc_start/utc_end），暂不支持".into());
+            if o.has_time_condition() {
+                skip("含时间条件（utc_start/utc_end/utc_days），暂不支持".into());
                 continue;
             }
             let Some(min) = o
@@ -624,14 +638,18 @@ mod tests {
                 .is_err(),
             "id 必须保持字符串语义"
         );
-        // 时间条件字段仍是字符串（数字形态不得被接受）。
+        // 时间条件字段只检测存在、不约束类型（2026-10-22 修订：上游已改为整数，
+        // 字符串约束曾让整份响应失败）；该档按时间条件跳过，见
+        // time_conditioned_overrides_in_current_upstream_shape_are_skipped。
+        let numeric_time = serde_json::from_str::<ApiResponse>(
+            r#"{"data":[{"id":"p/m","pricing":{"prompt":0,
+               "overrides":[{"min_prompt_tokens":1000,"utc_start":1630,"prompt":0}]}}]}"#,
+        )
+        .expect("整数 utc_start 必须可解析");
+        let p = numeric_time.data[0].pricing.as_ref().unwrap();
         assert!(
-            serde_json::from_str::<ApiResponse>(
-                r#"{"data":[{"id":"p/m","pricing":{"prompt":0,
-                   "overrides":[{"min_prompt_tokens":1000,"utc_start":1630,"prompt":0}]}}]}"#
-            )
-            .is_err(),
-            "utc_start 必须保持字符串语义"
+            p.overrides[0].has_time_condition(),
+            "整数 utc_start 仍是时间条件"
         );
     }
 
@@ -1012,6 +1030,73 @@ mod tests {
         let path = dir.join("pricing-openrouter.json");
         std::fs::write(&path, "not json").unwrap();
         assert!(load_snapshot(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 2026-10-22：上游把时间条件 `utc_start`/`utc_end` 改为整数并新增
+    /// `utc_days`。时间条件只决定"该档跳过"，任一字段出现即跳过、类型不限；
+    /// 只带 `utc_days` 的档位不得被当作无条件的长上下文档位应用。
+    #[test]
+    fn time_conditioned_overrides_in_current_upstream_shape_are_skipped() {
+        let dir = numeric_dir("time-conditions");
+        let path = dir.join("pricing-openrouter.json");
+        let body = r#"{"data":[
+            {"id":"prov/timed","name":"Timed","pricing":{
+                "prompt":"0.000001","completion":"0.000002",
+                "overrides":[
+                    {"utc_days":["monday","tuesday"],"utc_start":0,"utc_end":100,
+                     "prompt":"0.0000001","completion":"0.0000002"},
+                    {"utc_start":1630,"utc_end":1900,
+                     "prompt":"0.0000003","completion":"0.0000004"},
+                    {"min_prompt_tokens":200000,"prompt":"0.000004","completion":"0.000008"}
+                ]}},
+            {"id":"prov/days-only","name":"DaysOnly","pricing":{
+                "prompt":"0.000001","completion":"0.000002",
+                "overrides":[
+                    {"utc_days":["saturday","sunday"],"min_prompt_tokens":1000,
+                     "prompt":"0.0000001","completion":"0.0000001"}
+                ]}},
+            {"id":"prov/plain","name":"Plain","pricing":{"prompt":"0.000003","completion":"0.000006"}}
+        ]}"#;
+        let report = sync_with(&path, || {
+            serde_json::from_str::<ApiResponse>(body)
+                .map_err(|e| anyhow::anyhow!("解析 OpenRouter 响应失败: {e}"))
+        })
+        .expect("上游当前形态必须能同步");
+        assert_eq!(report.count, 3, "三个模型都入快照");
+
+        let snap = load_snapshot(&path).unwrap().unwrap();
+        let entry = |id: &str| snap.entries.iter().find(|e| e.id == id).unwrap();
+        let timed = entry("prov/timed");
+        assert_eq!(timed.overrides.len(), 1, "只保留长上下文档位");
+        assert_eq!(timed.overrides[0].min_prompt_tokens, 200_000);
+        assert!(
+            entry("prov/days-only").overrides.is_empty(),
+            "只带 utc_days 的档位不得被当作长上下文档位"
+        );
+        let plain = entry("prov/plain");
+        assert!(plain.overrides.is_empty());
+        assert!((plain.prompt.unwrap() * 1e6 - 3.0).abs() < 1e-9);
+
+        let time_skips = |id: &str| {
+            report
+                .warnings
+                .iter()
+                .filter(|w| {
+                    w.starts_with(&format!("{id}: override 已跳过")) && w.contains("含时间条件")
+                })
+                .count()
+        };
+        assert_eq!(time_skips("prov/timed"), 2, "{:?}", report.warnings);
+        assert_eq!(time_skips("prov/days-only"), 1, "{:?}", report.warnings);
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("prov/days-only") && w.contains("min_prompt_tokens")),
+            "跳过原因必须是时间条件: {:?}",
+            report.warnings
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
