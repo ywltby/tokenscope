@@ -1,6 +1,10 @@
 # 只在版本变化时发布：合入 main 与发布解耦
 
-> 状态：**用户 2026-10-21 确认方向并要求写成计划**（不开预发布分支，改为“版本号没变就不发布”）。承接[整合计划 N16](2026-10-11-consolidated-remaining-work.md#n16合入-main-与发布解耦)。RV01–RV05 已实施，[PR #21](https://github.com/ywltby/tokenscope/pull/21) 合并为 `49a61bd`；Release 跳过验收已通过，只余下一个产品 PR 的正常发布待验，执行记录见 §6。
+> **2026-10-21 归档复核：RV01–RV05 已完成，N16 关闭。** [PR #21](https://github.com/ywltby/tokenscope/pull/21) 合并 `49a61bd` 的 [Release 39556582716](https://github.com/ywltby/tokenscope/actions/runs/39556582716) 已验证版本不变时只跑 gate、六个下游全部 skipped；后续文档 PR #22 的 main 运行亦通过同一跳过验收。[产品修复 PR #23](https://github.com/ywltby/tokenscope/pull/23) 合并 `d064f98`，递增至 0.5.6，[Release 39568789984](https://github.com/ywltby/tokenscope/actions/runs/39568789984) 的构建、安装、六个单跳升级、两条连续升级链与 publish 全成功；[CI](https://github.com/ywltby/tokenscope/actions/runs/39568790001) 和 [Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39568789964) 亦成功。已核对 [v0.5.6](https://github.com/ywltby/tokenscope/releases/tag/v0.5.6) 标签指向该合并提交，安装包、校验和、构建元信息、Sigstore 证明四资产逐个下载核对后登记为升级基线。无独立实施或待验项，其他任务只在[整合计划](../../active/2026-10-11-consolidated-remaining-work.md)维护。
+
+## 归档前原文
+
+> 状态：**用户 2026-10-21 确认方向并要求写成计划**（不开预发布分支，改为“版本号没变就不发布”）。承接[整合计划 N16](../../active/2026-10-11-consolidated-remaining-work.md#n16合入-main-与发布解耦)。RV01–RV05 已实施，[PR #21](https://github.com/ywltby/tokenscope/pull/21) 合并为 `49a61bd`；Release 跳过验收已通过，产品 PR 的正常发布证据已补入 §6。
 > 修订：本计划修改用户 2026-10-12 定稿的“main 每批必递增版本”规则，以用户本次确认为准，并同步 `CLAUDE.md`。
 > 分支 `ci/release-on-version-change`；本批不含产品改动，**按新规则不递增版本**。
 
@@ -150,7 +154,9 @@
 
 合并后验收（2026-10-21 完成）：main 合并提交 `49a61bd` 的 [Release 运行 39556582716](https://github.com/ywltby/tokenscope/actions/runs/39556582716) 结论 success——gate 成功，build、install-test、plan-upgrades、upgrade-test、upgrade-chain、publish 六个下游作业全部 skipped；远端标签与发布列表都没有 `v0.5.6`，最新发布仍是 v0.5.5。同提交的 [CI 39556582812](https://github.com/ywltby/tokenscope/actions/runs/39556582812) 与 [Native UI E2E 39556582765](https://github.com/ywltby/tokenscope/actions/runs/39556582765) 均 success。
 
-仍待验：下一个产品 PR 如实递增并正常构建发布（标签、资产与签名流程不变）。PR #20 已于同日留言链接 PR #21 并关闭，不再发 0.5.6。
+产品发布验收（2026-10-21 完成）：[PR #23](https://github.com/ywltby/tokenscope/pull/23) 修复 N14 第 2 项的预设切换重复查询及托盘隐藏通知，包含真实产品输入改动，按规则递增 patch 至 0.5.6。main 合并 `d064f98` 的 [Release 39568789984](https://github.com/ywltby/tokenscope/actions/runs/39568789984) 中 gate 成功、build 实际运行，安装、六个单跳升级（0.1.0 / 0.4.0 / 0.5.5 各含来源保留/删除）、两条连续升级链和 publish 全通过；同提交 [CI 39568790001](https://github.com/ywltby/tokenscope/actions/runs/39568790001) 与 [Native UI E2E 39568789964](https://github.com/ywltby/tokenscope/actions/runs/39568789964) 成功。v0.5.6 标签解引用为 `d064f98b082f508820bfc96edbe617155d79ff01`，四个发布资产与登记哈希一致，N16 最后一项待验关闭。
+
+PR #20 已于同日留言链接 PR #21 并关闭，取消的是原文档批次的 0.5.6；上述实际发布的 v0.5.6 来自后续产品修复 PR #23。
 
 与计划假设不同、经用户确认的处理：
 
