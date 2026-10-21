@@ -8,13 +8,14 @@
 
 **Tech Stack:** Rust / SQLite / Tauri 2 / Vue 3，以及现有 Rust、Vitest、浏览器和原生 acceptance 测试工具。
 
-- 整理日期：2026-10-11；当前状态更新：2026-10-21。
-- 状态：**11 项完成（N01–N09、N15、N16）、2 项部分完成（N12/N14）、3 项专项验收未闭合（N10/N11/N13），共 5 个开放责任编号。** 已完成项不重复实施；N14 第 1、2、3 项已关闭，仅第 4 项仍开放。
+- 整理日期：2026-10-11；当前状态更新：2026-10-22。
+- 状态：**12 项完成（N01–N09、N14–N16）、1 项部分完成（N12）、3 项专项验收未闭合（N10/N11/N13），共 4 个开放责任编号。** 已完成项不重复实施；N14 第 4 项随 B1 / PR #27 完成，四项全部关闭。
 - 已核验交付基线：PR #15 合并 `9ea0c584`、v0.5.1 公开，连续升级链成功；PR #16 合并 `0ffab19`、v0.5.2 公开，[main CI](https://github.com/ywltby/tokenscope/actions/runs/39353860584)、[原生 E2E](https://github.com/ywltby/tokenscope/actions/runs/39353860657)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39353860618) 全成功（安装、六个单跳、两条连续链）。PR #17 研究资料合入 `89aec76` 不改变这些专项验收结论。PR #19 合并 `1156385`、v0.5.5 公开，main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39452749833)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39452749860)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39452749887) 全成功（安装、六个单跳、两条连续链），N15 关闭。
 - 最新交付：PR #23 合并 `d064f98`、v0.5.6 公开，main CI/Native UI E2E/Release 全成功（安装、六个单跳、两条连续链）；N14 第 2 项与 N16 关闭，证据见各自条目。
+- 最新验收交付：B1 / AC01 的 `69ce2f4` 随 PR #27 普通合并为 `4198051`；PR 的 CI、原生、安装与六组单跳以及 main CI/原生/Release 均成功。N14 第 4 项关闭；本批只有测试与文档，版本保持 0.5.6，Release 只跑 gate。
 - 启动恢复、SQLite 并发调查和 N16 已移入 archive/implemented；下文及 §7 的旧提交、版本、失败/通过记录保留为历史证据，不能替代当前待验矩阵。
-- 待办：N10 隐私强取证、N11 原生统一验收、N12 其余系统/签字、N13 真实性能、N14 第 4 项权限拒绝 fixture。N16 随 PR #23 / v0.5.6 完成最后的产品正常发布验证，专项已归档。真实跨午夜、长时间休眠、跨显示器仍在[独立系统待办](../system-acceptance-todo.md)，不在本轮执行。
-- 收口计划（2026-10-21 用户确认）：[剩余验收收口](2026-10-21-acceptance-closure.md) 按 AC01–AC12 承接 N14 第 4 项、N11、N10、N13、N12；各项状态随批次交付更新。
+- 待办：N10 隐私强取证、N11 原生统一验收、N12 其余系统/签字、N13 真实性能。N16 随 PR #23 / v0.5.6 完成最后的产品正常发布验证，专项已归档。真实跨午夜、长时间休眠、跨显示器仍在[独立系统待办](../system-acceptance-todo.md)，不在本轮执行。
+- 收口计划（2026-10-21 用户确认）：[剩余验收收口](2026-10-21-acceptance-closure.md) 的 AC01 / B1 已交付并关闭 N14；B2–B5 继续承接 N11、N10、N13、N12，各项状态随批次交付更新。
 - 总账：[计划目录](../README.md)；历史逐份结论：[审计索引](../audits/README.md)；发布附属清单：[D5](../d5-acceptance-checklist.md)。
 
 ## 1. 优先级与状态规则
@@ -44,7 +45,7 @@
 
 ## 3. 唯一任务状态表
 
-保留 N01–N16 共 16 个稳定责任编号：N01–N09、N15、N16 已完成，N12/N14 部分完成，N10/N11/N13 专项验收未闭合，共 5 个开放责任编号。N15 随 v0.5.5 关闭；N16 已完成 Release 跳过与产品正常发布两条路径的验收（PR #21 / #22 / #23），N14 第 2 项随 v0.5.6 关闭。安装、版本递增、真实单跳与连续升级已有发布证据；剩余范围以各行及 N14 子项为准，历史执行记录移至 §7，不混入当前状态表。
+保留 N01–N16 共 16 个稳定责任编号：N01–N09、N14–N16 已完成，N12 部分完成，N10/N11/N13 专项验收未闭合，共 4 个开放责任编号。N15 随 v0.5.5 关闭；N16 已完成 Release 跳过与产品正常发布两条路径的验收（PR #21 / #22 / #23），N14 四项已随各批次交付关闭，最后一项为 B1 / PR #27 的读取失败回归。安装、版本递增、真实单跳与连续升级已有发布证据；剩余范围以各行为准，历史执行记录移至 §7，不混入当前状态表。
 
 | ID | 优先级 | 任务 | 当前状态 | 是否仍有必要 / 来源 |
 | --- | --- | --- | --- | --- |
@@ -61,7 +62,7 @@
 | N11 | P2 | 最新项目/模型/CCS 原生统一验收 | 分别存在待验，合并一次执行 | 必须；A06/B03、MP06、H08、设计 Task8 |
 | N12 | P2（用户要求的版本递增与旧版升级）；其余系统尾项 P3 | 当前产物的 D5 系统、安装及发布验收 | 部分完成；v0.5.2 发布的安装、六个单跳升级、两条连续链成功；其余系统验收与签字仍待验 | 用户 2026-10-12 最新要求优先；D5、RC11/AP08 |
 | N13 | P3 | 历史库实际冷/热启动性能基准 | 新历史库真实规模复测未执行 | 有必要，排在正确性之后；H07、旧 D4/性能建议 |
-| N14 | P2 | 来源目录（PR3）遗留待验与竞态缺陷 | 部分完成；第 1、2、3 项关闭；第 2 项随 PR #23 / v0.5.6 交付，main CI/原生 E2E/Release 全成功；仅第 4 项权限拒绝 fixture 未完成 | 必须；[PR3 归档](../archive/partial/2026-10-14-source-discovery-and-additional-paths.md)剩余事项 |
+| N14 | P2 | 来源目录（PR3）遗留待验与竞态缺陷 | 已完成；第 4 项按用户修订用共享冲突验证目录与文件读取失败，PR #27 合并 `4198051`，PR/main 门禁通过；四项全部关闭 | 必须；[PR3 归档](../archive/partial/2026-10-14-source-discovery-and-additional-paths.md)遗留事项，最终证据见[收口计划 §6](2026-10-21-acceptance-closure.md#6-执行记录) |
 | N15 | P1 | 历史库/缓存打开流程的锁等待回归 | 已完成；固定 5000/2000ms，备份不中断，最新库免写事务；PR #19 合并 `1156385`，v0.5.5 发布，main CI/原生 E2E/Release 全成功 | 必须；逐项红绿、变异与交付证据见[归档专项计划](../archive/implemented/2026-10-20-sqlite-open-lock-wait.md) §6 |
 | N16 | P2 | 合入 main 与发布解耦（版本没变就不发布） | 已完成；PR #21 / #22 验证版本不变时跳过发布，PR #23 / v0.5.6 验证产品递增后正常构建发布；专项已归档 | 必须；用户 2026-10-21 确认，修订 2026-10-12 版本规则，[归档专项计划](../archive/implemented/2026-10-21-release-on-version-change.md) |
 
@@ -482,7 +483,7 @@ python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
 1. **连续升级链实测（已关闭，2026-10-20）**：0.5.0 的 [Release 39146151291](https://github.com/ywltby/tokenscope/actions/runs/39146151291) 因链路设置格式核对的测试架缺陷失败，`6533e22` 已修复。验收：0.5.1 的 main 发布中 `upgrade-chain (present)` / `(deleted)` 通过（链路 0.1.0 → 0.4.0 → 0.5.1，末跳跨过设置格式 1 → 2），并在证据里核对每跳的设置格式。结果：PR #15 合入后 [Release 39291272967](https://github.com/ywltby/tokenscope/actions/runs/39291272967) 两条链均成功，已核对四阶段及 settings 1 → 2；v0.5.2 的两条链亦通过。本项关闭。
 2. **预设切换的迟到重复批次（已关闭，2026-10-21）**：原生 `ui-system` 曾记录预设切换后迟到重复查询，`2205827` / `1b9a5d0` 只让测试架等稳定基线。PR #23 的 `8b9179c` 修复已覆盖通知仍刷新的入口，并补齐关闭确认框隐藏到托盘时的可见性广播；五项前端回归先红后绿，原生恢复/切页移除稳定等待，查询次数与身份同时核对。main 合并 `d064f98`、v0.5.6 发布，CI/原生 E2E/Release 全成功，满足本项验收。实现与失败取证见下方记录。
 3. **浏览器契约 dark 超时的取证与恢复交付（已关闭，旧超时根因未证实）**：main `599c89e` 的 [CI 39146151362](https://github.com/ywltby/tokenscope/actions/runs/39146151362) 一次失败，现场没有证据。`b141fcc` 起契约抛错会写出 `<契约>--failure.json`。取证补强（IPC 两侧对照与时间线、`classifyBootStall` 自动判断）与产品恢复（检查耗时提示与代次保护、主界面加载失败可重新加载、`data-boot-state` 阶段标记、新契约 `boot_stall_recovery`）已按[启动卡死取证补强与引导期恢复计划](../archive/implemented/2026-10-19-boot-stall-recovery.md)完成（BS01–BS06 已交付、复核并随 PR #16 合入，v0.5.2 已发布）。该批次 PR/main 的 CI、原生 E2E 和安装升级均通过，满足本项原定交付条件。关闭的是取证与恢复交付责任，不是证明旧超时根因或保证不再超时；后续失败继续按实际取证分类处理。
-4. **采集层权限拒绝 fixture（PR3 S03 遗留）**：构造无读取权限的子目录，断言该项诊断可见、其余文件照常读取、整轮不中断。Windows 上不便构造 ACL 时，可只在能构造的平台运行，并在记录里说明。
+4. **采集层读取失败 fixture（已关闭，2026-10-22）**：用户修订为共享冲突，避免 Git `sh` 的 MSYS 备份/恢复特权绕过 ACL。新增中性用例 `unreadable_subdir_and_file_are_diagnosed_without_stopping_the_round`，仅用 `std` 的独占共享句柄持续覆盖整轮采集；目录另设 `FILE_FLAG_BACKUP_SEMANTICS`。两环境独立探针各三轮均确认目录、文件读取失败，释放后恢复；自检不允许跳过。目录诊断、文件 `io_errors = 1`、其余 2 请求与四桶 40/20/0/0、`summary = Ok` 均通过，目录提前返回与文件漏计两个变异均红。普通与 acceptance 采集各 17/17，完整提交钩子通过；[PR #27](https://github.com/ywltby/tokenscope/pull/27) 合并 `4198051`，PR 的 CI/原生/安装/六组升级及 main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39633188944)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39633188991)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39633189036) 全成功。版本未变、Release 六个下游 skipped；N14 全部关闭，完整本地哈希与证据在[收口计划 §6](2026-10-21-acceptance-closure.md#6-执行记录)。
 
 2026-10-21 第 2 项修复（`fix/preset-query-generation`，`8b9179c`，已随 PR #23 / v0.5.6 交付）：迟到的 `collection-status` / `usage-updated` 通知在其代次已被当前查询快照覆盖时，仍无条件请求刷新。`notifyUsageUpdated` 现在先拒绝无效载荷，再记录代次；已覆盖通知直接返回，真正更高代次仍沿用在途合并、补发、分页保护与隐藏待刷新。新增五项回归在旧实现上全部失败（预设切换总批次 2→4、真实 Dashboard 的迟到采集状态 2→3、隐藏待刷新与分页提示误置、无效通知发查询），修复后相关 98 项、全部前端 620 项通过，类型检查、生产构建与浏览器 E2E 通过。
 
@@ -536,7 +537,7 @@ python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
 
 ## 6. 实施顺序与验证命令
 
-N01–N09、N15、N16、N14 第 1/2/3 项已完成，不重复实施；N14 仅第 4 项仍需实施与定向验证。M06 严格校验器及 fixture 保持通过，M10 不重复实施。N12 的 A01–A06 已修复且契约全绿（两轮挑刺审计后）；随后取得当前产物的 PR 安装与普通 CI 成功结果，两种验证各自记账。后续做 N10/N11；N12 其余系统与正式签字随发布批次，N13 随性能验收排期。
+N01–N09、N14–N16 已完成，不重复实施；N14 第 4 项已由 B1 / AC01 交付。M06 严格校验器及 fixture 保持通过，M10 不重复实施。N12 的 A01–A06 已修复且契约全绿（两轮挑刺审计后）；随后取得当前产物的 PR 安装与普通 CI 成功结果，两种验证各自记账。继续按收口计划 B2 验 N11、B3 验 N10、B4 验 N13、B5 验 N12；人工签字前不提前关闭相应编号。
 
 新增测试名先在实际目标文件中登记，再执行；本计划提出的断言不是已经存在或已经通过的测试。N08 的现有目标为 `model_name_equivalence`、`model_identity_contract` 和 `pricing_source_policy`。
 
@@ -665,3 +666,4 @@ python -B -m unittest discover -s scripts -p "test_release_metadata.py" -v
 | 2026-10-21 | 版本与发布规则复核 | 新增 N16（待实施） | 用户确认不开预发布分支、改为版本未变不发布；核实 Release 每次 main 推送都发布、`docs/privacy.md` 是编译输入、起点选择只取严格小于当前版本的条目；PR #20 归档提交拣入专项分支 |
 | 2026-10-21 | N16 / RV01–RV05 实施与合并验收 | `02a680f`、`2427f5a`、`7849f0c`，合并 `49a61bd` | 版本检查改为按 `build-inputs.json` 判定发布：产品输入仍须恰好递增一次，纯文档/CI/脚本/测试合入返回 `release: false` 并要求声明与基线逐字节一致；Release 的 gate 输出该判定，六个下游作业全部按它跳过，身份校验只在发布时运行。main 的 Release 39556582716 中 gate 成功、六个下游 skipped、无 v0.5.6，同提交 CI 与 Native UI E2E 均成功；必需检查、升级基线登记与标签发布未改。下一个产品 PR 的正常发布待验 |
 | 2026-10-21 | N14 第 2 项交付、N16 关闭与归档 | `8b9179c`；PR #23 合并 `d064f98`，v0.5.6 发布 | 已覆盖通知不再重复查询，关闭确认框隐藏成功后广播真实窗口状态；五项回归先红后绿，完整提交门禁与原生定向 19/19 通过，原生移除稳定等待并使用有效 IPC 计数。main CI 39568790001、Native UI E2E 39568789964、Release 39568789984 全成功（生产构建、安装、六个单跳、两条连续链及发布）；v0.5.6 标签指向合并 SHA，四资产下载核对后登记基线。N14 第 2 项与 N16 关闭，N16 专项归档 implemented；当前只余 5 个开放责任编号 |
+| 2026-10-22 | B1 / AC01 交付，N14 第 4 项及 N14 关闭 | `69ce2f4`；PR #27 普通合并 `4198051`，版本保持 0.5.6 | Git sh 备份特权导致 ACL 自检失败后停下，按用户修订改为 std 共享冲突；两环境探针各三轮通过，两个变异均红，恢复后普通/acceptance 采集各 17/17、完整钩子通过，既有测试与产品源码未改。PR CI 39630887221、Native UI 39630887255、Install test 39630887250 全成功，六组单跳通过；main CI 39633188944、Native UI 39633188991、Release 39633189036 全成功，Release 六个下游 skipped。N14 全部关闭，剩余 N10/N11/N12/N13 四个开放责任编号 |
