@@ -15,7 +15,7 @@
 ## 1. 背景与已核实事实（2026-10-21）
 
 - **剩余项**（整合计划 §3）：
-  - N14 第 4 项：采集层权限拒绝 fixture；
+  - N14 第 4 项：采集层读取失败 fixture（用户修订为共享冲突）；
   - N11：项目/模型/CCS/价格原生统一验收；
   - N10：隐私 P06 强取证与完整浏览器矩阵；
   - N13：真实规模性能；
@@ -47,7 +47,7 @@
 ## 2. 范围与不做
 
 做：
-- AC01 采集层权限拒绝测试（N14 第 4 项）。
+- AC01 采集层读取失败测试（共享冲突，N14 第 4 项）。
 - AC02 acceptance 构建验收接线与驱动基础设施。
 - AC03–AC05 N11 三个原生场景并进入 CI。
 - AC06–AC08 N10 隐私原生取证、长时间观察、完整浏览器矩阵。
@@ -77,14 +77,17 @@
 
 每项先写会失败的断言或测试，在未改的代码上确认红（失败摘要记入 §6），再实现变绿。一个提交只解决一类问题。
 
-### AC01 采集层权限拒绝 fixture（N14 第 4 项）
+### AC01 采集层读取失败 fixture（N14 第 4 项）
 
 - 文件：`crates/tokenscope-core/tests/source_paths_collection.rs`（追加）。
-- 用例 `permission_denied_subdir_and_file_are_diagnosed_without_stopping_the_round`：
-  - 根下三个子目录各放一条 Claude 事件；其中一个子目录用 `icacls <dir> /deny "%USERNAME%":(RX)` 拒绝读取，另一个子目录里再放一个被拒绝读取的 `.jsonl` 文件。
+- 构造方式（用户 2026-10-21 修订）：Git `sh` 的 MSYS 运行时会启用备份/恢复特权，ACL 拒绝因此不能稳定阻止目录读取。改用共享冲突，不改线程令牌、不加依赖；B1 保持只有测试与文档、`release: false`。
+- 前置探针：只用 `std` 编译独立程序，分别在 PowerShell 与 Git `sh` 下运行，目录与文件都必须稳定读取失败；任一种在任一环境下不生效就停下报告，不退回 ACL 或放宽断言。
+- 用例 `unreadable_subdir_and_file_are_diagnosed_without_stopping_the_round`：
+  - 根下三个子目录各放一条 Claude 事件，另在其中一个可读子目录放一条需要制造读取失败的 `.jsonl`。
+  - 目录用 `OpenOptions` + Windows `OpenOptionsExt`，设置 `custom_flags(FILE_FLAG_BACKUP_SEMANTICS = 0x02000000)` 与 `share_mode(0)` 打开；文件用 `share_mode(0)` 打开。两个句柄在整个采集期间持续持有，全部路径限于用例临时根。
   - 断言：其余事件全部计入；目录拒绝出现“无法读取目录”诊断；文件拒绝计入 `io_errors`（或对应诊断）；`summary` 返回 `Ok`，不中断。
-  - 清理：先 `icacls /remove:d` 恢复权限再删目录；用 guard 保证断言失败时也会恢复。
-  - `#[cfg(windows)]`。若 Runner 上以管理员身份运行导致 deny 不生效，先用 `std::fs::read_dir` 自检，确认拒绝已生效再断言；自检失败时测试明确失败并输出原因，不静默跳过。
+  - 清理：用 `File` 的 RAII 保证正常结束或 panic 时释放句柄；正常结束先确认目录和文件恢复可读，再回收本用例查询并严格删除临时目录。
+  - `#[cfg(windows)]`。持锁后先用 `std::fs::read_dir` 和真实文件读取自检，确认两者都失败再采集；自检失败时测试明确失败并输出原因，不静默跳过。实测错误码写入证据。
 - 红：因为实现已存在，“先红”的做法是把被测代码临时改成遇错 `return`，确认测试会失败，再恢复，并记录这次变异验证。
 - 交付：独立 PR，`release: false`。合入后在整合计划关闭 N14。
 
@@ -273,4 +276,47 @@ AC03–AC05 的 CI 接入：
 
 ## 6. 执行记录
 
-（实施时回填：每个任务的提交、红绿摘要、CI 运行链接、本地取证摘要、偏离与理由。）
+### 起步复核与计划合入
+
+- 计划提交：`49b7b06`、`1e56163`，以及用户修订 `4d27471`（保留旧预热工具）、`6a4dcab`（区分默认巡检与独立契约）。[PR #26](https://github.com/ywltby/tokenscope/pull/26) 普通合并为 `316bd70`；PR 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39622736925) 与 [Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39622736784) 均成功。
+- main 同提交的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39623896792)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39623896684)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39623896703) 均成功；版本保持 0.5.6，Release 六个下游全部 skipped。
+- §1 已按源码与历史运行元数据复核：受保护命令 35 个、驱动 2716 行、默认巡检 15 个 fixture/注册 23 个、独立契约引用额外 8 个 fixture；PR #25 原生作业 09:29:25–09:37:45 UTC，实际 8 分 20 秒。确认 CCS 默认路径未隔离、价格 URL 常量与 ureq 环境代理/NO_PROXY 支持、opener 真实调用、隐私取证缺口及旧预热工具用途。未运行旧预热工具，未读取真实 CCS 库。AC08 的实际覆盖仍须后续运行产物证明。
+- 执行授权以用户本次指令为准：批次自审成立且检查全绿后用普通 merge commit 合并，批次之间不等待确认；明确停点与 AC11 人工签字仍须停下。
+
+### B1 / AC01：读取失败 fixture（共享冲突，本地定向通过，待交付）
+
+初次 ACL 取证（历史，已停用）：
+
+- 基线：最新 main `316bd70`，分支 `test/acceptance-b1-permission`，原有采集套件 16/16 通过。只在 `source_paths_collection.rs` 末尾追加 ACL guard 与一个 Windows 用例；既有用例和断言未删改，产品源码无最终差异。
+- 真实 ACL：在用例自己的临时根对子目录与 JSONL 文件执行 `icacls /deny <当前用户>:(RX)`，直接从 PowerShell 启动的定向测试中，真实 `read_dir`/文件读取均确认为 `PermissionDenied`。guard 在正常结束与 panic 时撤销 deny；此前失败现场的四组临时目录/文件经只读复核均恢复可读（`panic-acl-restoration.json`）。提交钩子的环境差异另见下方阻断记录。
+- 变异红灯：目录读取错误分支临时改为直接 `return`，用例因缺少“无法读取目录”诊断失败（`red-directory.log`）；Claude 文件读取错误分支临时不累计 `io_errors`，用例明确报实际 0、期望 1（`red-file.log`）。两个变异均已逐字节恢复，未带入提交。
+- 绿色：普通与 acceptance 构建的采集套件均 17/17。实测两个可读文件完整入账：2 请求、input/output/cache_write/cache_read = 40/20/0/0，`io_errors = 1`，目录与文件拒绝均有可见诊断。测试将实测值写到 `AC01_OBSERVED` 日志，并汇入 `evidence-acl-history.json`。
+- 失败归因：新用例首次在删除临时库时遇到 Windows code 32，原因是查询注册表按设计保留只读事务；仅回收本用例会话后再严格清理，未忽略删除错误。变异恢复曾因 `Copy-Item` 保留旧 mtime，使 Cargo 复用变异产物；核对恢复文件 SHA256 与备份一致、刷新源码 mtime 并明确重新编译后通过。两项均属本地测试取证流程问题，不是产品缺陷，没有用无归因重跑替代处理。
+- **提交钩子阻断**：`git commit` 的 `cargo test --locked --workspace` 在新增用例的目录拒绝自检失败（16 通过、1 失败）：实际 `None`，期望 `Some(PermissionDenied)`，位置 `source_paths_collection.rs:826`。失败发生在 `summary` 调用之前，没有产品缺陷证据。钩子拒绝提交，未生成 B1 提交、未 push、未开 B1 PR。
+- 环境取证：同一账户、同一份独立合成 ACL 探针，在 PowerShell 下目录读取被拒绝，经 Git `sh` 启动后目录可列举；文件读取在两边都被拒绝。`powershell-privileges.log` 中 `SeBackupPrivilege`/`SeRestorePrivilege` 均 Disabled，`git-sh-privileges.log` 中均 Enabled，吻合目录枚举绕过 deny 的现象。探针结果分别保存在 `acl-environment-powershell.json`、`acl-environment-git-sh.json`；未把再次运行通过作为结论。
+- 此前停点（已由用户修订）：AC01 的管理员绕过自检在钩子中明确失败，依“计划某一步无法按原样执行”停下。用户不采用关闭线程备份特权的建议，明确改用只依赖 `std` 的共享冲突；未改线程令牌、全局权限或钩子。
+- 清理与证据：钩子失败用例的目录与文件均恢复可读；独立探针的四个 deny ACE 已通过仅删除对应规则恢复，两个探针根已清理（`acl-probe-cleanup.json`）。失败测试二进制 SHA256 为 `df9a1a12c73a73beda92c274808db4a86748387d1df46bb45679d9de2c4f2347`，日志为 `commit-checks.log`。本批没有原生应用启动，`launches[]` 为空。
+- 命令：`cargo test --locked -p tokenscope --test source_paths_collection -- --show-output`，以及同命令增加 `--features acceptance`；均设置 `CARGO_NET_OFFLINE=true`。证据位于本 worktree 的 `qa-artifacts/acceptance-closure/b1/`。普通/acceptance 测试二进制 SHA256 分别为 `9c1ff0a2ce79c6e0e377ba2a7a8d8903fec9129870fa85318f25ba115832666a` / `462739934d067e5be400c17d260c58b30512b642799a6c4a51c46fc8a2c38d28`；新增测试源码 SHA256 为 `e5d24d07fdb6be408ed6eeabd078acbd8151c4cf8634dba80010e1b5c4754f7b`。这两份产物来自该基线加本批追加测试，完整信息见 `evidence-acl-history.json`。
+- CI 耗时：没有新增原生场景；本地新增用例约 0.08 秒。远端耗时与交付结论待本批 PR/main 实跑后记录，N14 不提前关闭。
+
+共享冲突取证（本次交付依据）：
+
+- 独立探针 `shared-lock-probe.rs` 仅用 `std`，通过 `rustc --edition 2024` 编译；PowerShell 与 Git `sh` 各运行一次，每次连续三轮，目录与文件共 12 次读取均因 Windows error 32 失败，释放句柄后全部恢复，临时根均已删除。日志为 `shared-lock-probe-powershell.log` / `shared-lock-probe-git-sh.log`；探针二进制 SHA256 为 `90577eaad25e19b4e3eec5ffede6dd5b06a512b3046739766162da66165548f4`。
+- 新用例改名 `unreadable_subdir_and_file_are_diagnosed_without_stopping_the_round`，用 `OpenOptionsExt::share_mode(0)` 持有两个 `File`；目录另加 `FILE_FLAG_BACKUP_SEMANTICS`。持锁期间真实读取必须失败，两个句柄持续覆盖 `summary`，正常与 panic 都由 RAII 释放；原有采集结果断言保留。
+- 两个变异重做：目录读错分支提前 `return`，因缺少“无法读取目录”诊断失败（`sharing-red-directory.log`）；文件读错分支漏计 `io_errors`，实际 0、期望 1（`sharing-red-file.log`）。均退出 101，随后恢复产品源码，`git diff HEAD -- crates/tokenscope-core/src/source/{mod,claude}.rs` 无差异。
+- 恢复后普通与 acceptance 采集套件均 17/17（`sharing-green-default.log` / `sharing-green-acceptance.log`）。实测：目录与文件读取错误码均 32，2 请求，四桶 40/20/0/0，`io_errors = 1`，两种诊断可见。基线 `316bd70` 加本批测试；源码 SHA256 `843dac044b4d877031935ec0f5d9ac06ca3f4688b081d459b70d5a56248c8c6d`，普通/acceptance 测试二进制 SHA256 `47edfb0bbb9f0eb7aa5c61c098e42bc61af2d088f4bea2a6cde376d8c5586553` / `d8d4c5501701dd74720f521416f8c5a906a5cd309ec1cffb4af4e2924edb89a1`。完整实测值及命令在 `evidence.json`，旧 ACL 证据单列保留。
+- 钩子首次检查发现新增目录自检写成 `.err().expect()`，触发 Clippy `err_expect`；改为等价的 `.expect_err()` 后重新验证，两套定向测试仍各 17/17。该修正仅涉及新用例的语法，未放宽或删除断言，原失败日志保存为 `sharing-clippy-initial.log`。
+- 既有 16 个用例保持原样；没有产品输入、Cargo 清单或锁文件变更，没有新增原生 CI 场景。提交钩子、PR 与 main 的实际运行结论仍须随后回填，N14 尚未关闭。
+
+阶段 §3 不变量自查（尚未达到合并条件）：
+
+| 编号 | 结论 | 依据 |
+| --- | --- | --- |
+| 1 普通构建零变化 | 成立 | 最终只追加测试与文档，两个临时产品变异已还原 |
+| 2 真实数据零接触 | 成立；原生追踪/代理部分不适用 | 来源、历史库、价格与索引均显式注入用例临时根；没有启动原生应用或读真实业务目录 |
+| 3 CCS 只手动 | 不适用 | 本批没有 CCS 调用或代码变更 |
+| 4 历史不随来源消失 | 不适用 | 本批只验读取失败，不改变历史保留逻辑 |
+| 5 同意先于业务 | 不适用 | 没有隐私接线或原生启动变更 |
+| 6 证据可复查 | 成立 | 具名断言、两种环境的共享冲突探针、自检实测值、两个新变异失败日志与产物哈希均保存；旧 ACL 失败保留归因 |
+| 7 CI 预算 | 成立 | 原生场景与 45 分钟上限均未改，新增用例定向运行约 0.05 秒 |
+| 8 版本规则 | 成立 | 最终改动只有测试与文档；已实测 `--check --base-ref origin/main` 输出 `release: false` |
