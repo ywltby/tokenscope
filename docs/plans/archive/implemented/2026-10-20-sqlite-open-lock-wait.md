@@ -1,7 +1,13 @@
 # SQLite 打开流程的锁等待回归修复
 
-> 状态：**2026-10-20 LW01–LW04 已实施并推送（`ff1bda0`）；LW05 按草稿 PR 交付，不自动合并。** 本页记录本地提交时点证据，最终 HEAD 的远程运行链接随交付报告及 PR 正文提供。承接[整合计划 N15](2026-10-11-consolidated-remaining-work.md#n15历史库打开锁等待回归)。
-> 来源：PR #16（v0.5.2）合入后的复核。[SQLite 并发打开调查](../archive/implemented/2026-10-19-sqlite-concurrent-open-investigation.md)的并发首次初始化修复本身成立，本计划只纠正它顺带改变的锁等待语义。
+> **2026-10-21 归档复核：已完成并发布。** 本计划随 [PR #19](https://github.com/ywltby/tokenscope/pull/19) 合入 main `1156385`，并由 Release 发布 [v0.5.5](https://github.com/ywltby/tokenscope/releases/tag/v0.5.5)。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39452749833)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39452749860)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39452749887) 均成功；发布的安装、六个单跳升级和两条连续升级链全部通过。合并前另有三项复核补修（`4e626c7`、`4433dba`、`8e34e91`，见 §6.5），其 HEAD `8e34e91` 的 PR 检查全部通过。下文“草稿交付、不自动合并”等描述仅为当时状态。
+>
+> N15 关闭，无独立实施待办；其他剩余任务只在[整合计划](../../active/2026-10-11-consolidated-remaining-work.md)维护。
+
+## 归档前原文
+
+> 状态：**2026-10-20 LW01–LW04 已实施并推送（`ff1bda0`）；LW05 按草稿 PR 交付，不自动合并。** 本页记录本地提交时点证据，最终 HEAD 的远程运行链接随交付报告及 PR 正文提供。承接[整合计划 N15](../../active/2026-10-11-consolidated-remaining-work.md#n15历史库打开锁等待回归)。
+> 来源：PR #16（v0.5.2）合入后的复核。[SQLite 并发打开调查](2026-10-19-sqlite-concurrent-open-investigation.md)的并发首次初始化修复本身成立，本计划只纠正它顺带改变的锁等待语义。
 > 分支 `fix/sqlite-open-lock-wait`；修复类批次，递增 patch；一个 PR、一次版本。
 
 **Goal：** 打开历史库与缓存时，「重试多久」和「每次等锁多久」分开计算。慢 I/O、升级前备份不再因为总预算耗尽而打开失败；打开之后，连接的锁等待恢复为 PR #16 之前的常驻值；已是最新版本的历史库，打开时不再拿写锁。
@@ -104,7 +110,7 @@
 
 - **计划与归档文档**：
   - 本计划回填执行记录。
-  - [调查归档](../archive/implemented/2026-10-19-sqlite-concurrent-open-investigation.md)顶部加一条复核说明：2 秒总预算兼作锁等待的语义已由本计划修正，正文保留不改。
+  - [调查归档](2026-10-19-sqlite-concurrent-open-investigation.md)顶部加一条复核说明：2 秒总预算兼作锁等待的语义已由本计划修正，正文保留不改。
   - 整合计划的 N15 行与 §7 执行账回填结果，`docs/plans/README.md` 同步。
 - **交付步骤**：
   1. 从最新 `origin/main` 合并。

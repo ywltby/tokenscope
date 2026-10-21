@@ -67,8 +67,13 @@ class UpgradeMatrixCase(unittest.TestCase):
                 self.assertNotIn("0.1.0", upgrade)
                 self.assertNotIn("0.3.", upgrade)
                 # 只有证据上传允许带条件；调用本身与作业级不得跳过起点。
-                self.assertEqual(upgrade.count("if:"), 1)
-                self.assertNotIn("  upgrade-test:\n    if:", text)
+                # release.yml 例外：作业级 if 只能来自发布判定。
+                if name == "release.yml":
+                    self.assertEqual(upgrade.count("if:"), 2)
+                    self.assertIn("if: needs.gate.outputs.release == 'true'", upgrade)
+                else:
+                    self.assertEqual(upgrade.count("if:"), 1)
+                    self.assertNotIn("  upgrade-test:\n    if:", text)
 
     def test_install_test_chain_runs_only_on_manual_dispatch(self):
         text = self.workflow("install-test.yml")
@@ -181,6 +186,38 @@ exit ([int]$env:TOKENSCOPE_UPGRADE_EXIT)
                             self.assertTrue(Path(bound.pop("installer")).samefile(installer))
                             self.assertEqual(bound,{"version":"0.3.3","commit":SHA,"state":state,
                                                     "origin":origin,"extra_arguments":[]})
+
+
+DOWNSTREAM = ("build", "install-test", "plan-upgrades", "upgrade-test",
+              "upgrade-chain", "publish")
+RELEASE_CONDITION = "if: needs.gate.outputs.release == 'true'"
+
+
+class ReleaseSkipCase(unittest.TestCase):
+    """版本没变时 Release 只跑 gate：下游作业一律按发布判定跳过。"""
+
+    def setUp(self):
+        self.text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    def test_gate_publishes_the_release_decision_from_the_version_check(self):
+        gate = job_block(self.text, "gate")
+        self.assertIn("release: ${{ steps.version.outputs.release }}", gate)
+        self.assertLess(gate.index("scripts/bump_version.py --check"),
+                        gate.index("scripts/release_metadata.py"),
+                        "版本检查必须仍然是 gate 的第一个校验步骤")
+        self.assertLess(gate.index("id: version"),
+                        gate.index("scripts/release_metadata.py"))
+
+    def test_release_metadata_only_runs_when_the_version_changed(self):
+        gate = job_block(self.text, "gate")
+        identity = gate.split("id: metadata", 1)[1]
+        self.assertEqual(identity.count("if: steps.version.outputs.release == 'true'"), 1)
+
+    def test_every_downstream_job_waits_for_the_release_decision(self):
+        for name in DOWNSTREAM:
+            with self.subTest(job=name):
+                block = job_block(self.text, name)
+                self.assertRegex(block, rf"(?m)^    {re.escape(RELEASE_CONDITION)}$")
 
 
 if __name__ == "__main__":

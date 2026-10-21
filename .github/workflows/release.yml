@@ -14,11 +14,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # 完整质量门禁由 PR 必需检查（ci.yml 的 gate、native-ui）保证；这里只校验发布身份。
+  # 完整质量门禁由 PR 必需检查（ci.yml 的 gate、native-ui）保证；这里只校验
+  # 发布身份。版本没变（没有产品输入改动）时 gate 输出 release=false，下游
+  # 作业全部跳过，不构建、不建标签、不动已有发布。
   gate:
     runs-on: windows-latest
     timeout-minutes: 10
     outputs:
+      release: ${{ steps.version.outputs.release }}
       tag: ${{ steps.metadata.outputs.tag }}
       sha: ${{ steps.metadata.outputs.sha }}
       version: ${{ steps.metadata.outputs.version }}
@@ -34,16 +37,24 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
-      - name: Validate one version increment for this main merge
+      - name: Validate release relevance and version increment
+        id: version
+        shell: pwsh
         run: |
-          python -B scripts/bump_version.py --check --event-file "$env:GITHUB_EVENT_PATH"
+          $result = python -B scripts/bump_version.py --check --event-file "$env:GITHUB_EVENT_PATH"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $result
+          $release = (($result -join "`n") | ConvertFrom-Json).release
+          if ($release -isnot [bool]) { throw "版本检查未返回发布判定" }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("release=" + $release.ToString().ToLowerInvariant())
       - name: Validate release identity and versions
         id: metadata
+        if: steps.version.outputs.release == 'true'
         run: python scripts/release_metadata.py
 
   build:
     needs: gate
+    if: needs.gate.outputs.release == 'true'
     runs-on: windows-latest
     timeout-minutes: 60
     permissions:
@@ -84,6 +95,7 @@ jobs:
 
   install-test:
     needs: [gate, build]
+    if: needs.gate.outputs.release == 'true'
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -123,6 +135,7 @@ jobs:
 
   plan-upgrades:
     needs: gate
+    if: needs.gate.outputs.release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -147,6 +160,7 @@ jobs:
 
   upgrade-test:
     needs: [gate, build, plan-upgrades]
+    if: needs.gate.outputs.release == 'true'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -189,6 +203,7 @@ jobs:
 
   upgrade-chain:
     needs: [gate, build]
+    if: needs.gate.outputs.release == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     strategy:
@@ -230,6 +245,7 @@ jobs:
 
   publish:
     needs: [gate, build, install-test, upgrade-test, upgrade-chain]
+    if: needs.gate.outputs.release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

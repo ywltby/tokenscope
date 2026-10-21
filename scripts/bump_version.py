@@ -8,6 +8,10 @@
 历史 ref 的版本按该 ref 自身的布局读取：该提交存在核心 manifest 就从核心
 manifest 取，不存在才按旧布局读根 manifest 的 `[package]`；核心 manifest
 损坏或缺失 `package.version` 一律失败，不静默回退旧布局。
+
+发布判定（2026-10-21）：只有会进入安装包的改动才要求递增版本。纯文档、CI、
+脚本、测试装配与仓库级配置的合入允许版本不变，此时 `release-change.json`
+必须与基线逐字节一致，检查结果以 `release: false` 表示本次合入不发布。
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import tempfile
 import tomllib
 
 from release_metadata import read_versions
+import build_inputs
 
 ROOT = Path(__file__).resolve().parent.parent
 ZERO_VERSION = re.compile(r"0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
@@ -32,6 +37,17 @@ LEGACY_MANIFEST = "Cargo.toml"
 JSON_CONFIGS = ("frontend/package.json", "src-tauri/tauri.conf.json")
 CONFIGS = (CORE_MANIFEST, SHELL_MANIFEST, *JSON_CONFIGS)
 LOCK = "Cargo.lock"
+BUILD_INPUTS = "scripts/build-inputs.json"
+
+# 不进入安装包的路径：文档、CI、脚本、测试装配与仓库级配置。判断只看路径
+# 形态；登记在 build-inputs.json 且被 default 构建消费的输入永远算产品。
+NON_PRODUCT_PREFIXES = ("docs/", ".github/", ".githooks/", "scripts/",
+                        "frontend/scripts/", "src-tauri/tests/")
+NON_PRODUCT_FILES = (".gitignore", ".gitattributes", ".editorconfig",
+                     "release-change.json")
+NON_PRODUCT_PATTERNS = (re.compile(r"^frontend/.+\.test\.(?:ts|mjs)$"),
+                        re.compile(r"^crates/[^/]+/tests/.+"),
+                        re.compile(r"^crates/[^/]+/examples/.+"))
 
 
 def git(root, *args):
@@ -160,16 +176,114 @@ def declaration(root):
     return value
 
 
+def registration(manifest):
+    """`build-inputs.json` 里被 default 构建消费的输入，按文件与目录分开。"""
+    files, directories = set(), []
+    for record in (*manifest["generated"], *manifest["manual"]):
+        if not any(consumer.get("mode") == "default"
+                   for consumer in record["consumers"]):
+            continue
+        path = str(record["path"]).strip("/")
+        if record["kind"] == "directory":
+            directories.append(path)
+        elif record["kind"] == "file":
+            files.add(path)
+    return files, tuple(directories)
+
+
+def is_registered(path, files, directories):
+    if path in files:
+        return True
+    return any(path == directory or path.startswith(directory + "/")
+               for directory in directories)
+
+
+def is_non_product(path):
+    if path in NON_PRODUCT_FILES or path.endswith(".md"):
+        return True
+    if any(path.startswith(prefix) for prefix in NON_PRODUCT_PREFIXES):
+        return True
+    return any(pattern.fullmatch(path) for pattern in NON_PRODUCT_PATTERNS)
+
+
+def release_relevant(paths, manifest):
+    """返回这次改动里会进入安装包的路径，保持输入顺序并去重。
+
+    只认 `build-inputs.json`：登记了 default 消费方的输入永远算产品（
+    `docs/privacy.md` 会被编译进程序）；其余路径按明确的非产品清单排除，
+    未知路径一律按产品处理——漏判只会多要求一次递增，不会漏发布。
+    """
+    files, directories = registration(manifest)
+    relevant, seen = [], set()
+    for raw in paths:
+        path = str(raw).replace("\\", "/").strip("/")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if is_registered(path, files, directories) or not is_non_product(path):
+            relevant.append(path)
+    return relevant
+
+
+def build_manifest(root):
+    return build_inputs.load_manifest(Path(root) / BUILD_INPUTS)
+
+
+def changed_paths(root, base):
+    """基线到 HEAD 的改动路径；重命名按删除 + 新增两条参与判断。
+
+    `-z` 让 Git 原样输出路径，中文与空白路径不会被转义成引号形式。
+    """
+    raw = git(root, "diff", "--name-status", "--no-renames", "-z", f"{base}..HEAD")
+    fields = raw.split("\0")
+    return [fields[index + 1] for index in range(0, len(fields) - 1, 2)
+            if fields[index]]
+
+
+def declaration_text(root):
+    with (Path(root) / "release-change.json").open(encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
+def file_text_at(root, sha, name):
+    """不裁剪空白地读取该提交里的文件原文，供逐字节比较。"""
+    try:
+        output = subprocess.check_output(["git", "-C", str(root), "show", f"{sha}:{name}"],
+                                         stderr=subprocess.PIPE)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        detail = git_error_text(exc) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        raise ValueError(f"读取 {name}（{sha[:12]}）失败：{detail or exc}") from exc
+    return output.decode("utf-8")
+
+
+def declaration_text_at(root, sha):
+    """基线提交里的声明原文；该提交没有声明时返回 None。"""
+    if not ref_has(root, sha, "release-change.json"):
+        return None
+    return file_text_at(root, sha, "release-change.json")
+
+
 def check(root, base_ref):
     root = Path(root)
     sha, previous = historical_versions(root, base_ref)
     current = uniform(read_versions(root))
     validate_locks(root, current)
     change = declaration(root)
+    relevant = release_relevant(changed_paths(root, sha), build_manifest(root))
     expected = next_version(previous, change["kind"])
+    if not relevant and current == previous:
+        if declaration_text_at(root, sha) != declaration_text(root):
+            raise ValueError("版本未变时 release-change.json 必须与基线逐字节一致")
+        return {"version": current, "previous": previous, "kind": change["kind"],
+                "base_sha": sha, "release": False}
     if current != expected:
-        raise ValueError(f"版本应从 {previous} 按 {change['kind']} 升至 {expected}，实际 {current}")
-    return {"version": current, "previous": previous, "kind": change["kind"], "base_sha": sha}
+        detail = ("；产品改动：" + "、".join(relevant[:3])
+                  + (f" 等 {len(relevant)} 个" if len(relevant) > 3 else "")
+                  if relevant else "")
+        raise ValueError(f"版本应从 {previous} 按 {change['kind']} 升至 {expected}，"
+                         f"实际 {current}{detail}")
+    return {"version": current, "previous": previous, "kind": change["kind"],
+            "base_sha": sha, "release": True}
 
 
 def check_event(root, event, event_name):
@@ -191,7 +305,7 @@ def check_event(root, event, event_name):
         validate_locks(Path(root), current)
         if event["ref"] != "refs/tags/v" + current:
             raise ValueError("版本标签与应用版本不一致")
-        return {"version": current, "kind": "existing-tag"}
+        return {"version": current, "kind": "existing-tag", "release": True}
     else:
         raise ValueError("不支持的版本校验事件")
     return check(root, base)
