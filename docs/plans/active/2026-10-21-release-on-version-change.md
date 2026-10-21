@@ -144,7 +144,11 @@
 | RV02 版本检查语义 | `2427f5a` | 先追加 `ReleaseOnChangeCase`；未改实现时 4 处 `KeyError: 'release'`、2 处断言失败（报错未列产品路径、声明不一致的信息缺失），Ran 33 tests，failures=2 / errors=4；实现后 33 条全过 |
 | RV03 Release 跳过下游 | `7849f0c` | 先加 `ReleaseSkipCase` 并调整 if 计数断言；未改工作流时 9 处失败（6 个下游作业无发布条件、gate 无 `release` 输出、身份校验无 if、`upgrade-test` 的 if 计数 1≠2），Ran 8 tests，failures=9；改后 8 条全过 |
 | RV04 文档与规则同步 | `a1f6c5d` | 只改文档，`check_staged_docs.py` 通过 |
-| RV05 交付与验收 | `171b4b0` + 本提交 | `origin/main` 无新提交（基线 `1156385`）；`upgrade_baselines.py add --tag v0.5.5` 登记四资产，`upgrade_baselines.py check --base-ref origin/main` 无警告；`bump_version.py --check --base-ref origin/main` 输出 `release: false`；[PR #21](https://github.com/ywltby/tokenscope/pull/21) 非草稿，待必需检查与 Install test 结论 |
+| RV05 交付与验收 | `171b4b0` + `70bf455` | `origin/main` 无新提交（基线 `1156385`）；登记 v0.5.5 四资产，基线 check 无警告；`bump_version.py --check --base-ref origin/main` 输出 `release: false`；[PR #21](https://github.com/ywltby/tokenscope/pull/21) 的 gate、rust、rust-acceptance、contracts、frontend、native-ui、install-test 全部成功，升级矩阵六组通过、upgrade-chain 按契约跳过 |
+
+复核结论（2026-10-21）：本地 302 项脚本测试全部通过；新增测试放回旧实现可失败；gate 的 `release` 输出 true/false 与失败退出路径均已验证。产品判定、版本检查、Release 跳过三处复核未发现阻断合并的问题。
+
+合并后待验（尚未执行，不提前标通过）：main 上该提交的 Release 只跑 gate，build、install-test、plan-upgrades、upgrade-test、upgrade-chain、publish 全部 skipped，且不出现 `v0.5.6` 标签或发布；下一个产品 PR 如实递增并正常构建发布。
 
 与计划假设不同、经用户确认的处理：
 
