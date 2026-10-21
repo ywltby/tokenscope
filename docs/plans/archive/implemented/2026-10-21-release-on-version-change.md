@@ -163,3 +163,11 @@ PR #20 已于同日留言链接 PR #21 并关闭，取消的是原文档批次�
 1. **`release_metadata.py` 对版本未变不报错**。它只按 ref 与当前版本产出 tag（`scripts/release_metadata.py:26-38`），版本未变时会输出 `tag=v0.5.5`；而 `release_assets.py` 的 publish 在标签已指向别的提交时直接拒绝（`scripts/release_assets.py:249-252`）。因此仍按 `release == 'true'` 条件跳过它，理由记为「不报错，但产出会复用已有标签」。
 2. **`test_upgrade_workflow.py` 原有断言禁止 `upgrade-test` 带作业级 `if`**（作业内 `if:` 计数恒为 1）。按用户批准改为：`release.yml` 中该作业 `if:` 恰为 2 条（作业级发布判定 + 证据上传），`install-test.yml` 保持 1 条；`continue-on-error`、`exclude:`、`if: false` 仍然禁止。
 3. **现有用例 `test_version_rollback_skip_and_new_main_baseline_are_rejected` 的最后一段**用「基线指向 HEAD」断言必须失败。新语义下这是「没有改动的合入」，合法返回 `release: false`。按用户批准，把该段改为「自比不发布」，并追加「已递增基线上改产品文件、版本不变仍必须失败」；前 5 个回滚/跳号断言不动。
+
+## 7. 归档后非阻断复核补修（2026-10-21）
+
+N16 已完成的结论不变，本批仅补强测试与说明，不改变产品判定行为或递增版本：
+
+- Release 跳过契约改为从实际 `jobs` 段枚举作业，除 gate 外逐个要求作业级发布条件，不再维护六个作业的固定名单。变异验证：临时追加无条件的 `future-release-job`，旧测试错误地接受，新测试明确拒绝；补上发布条件后接受。原工作流的 8 项契约全部通过。
+- 在 `is_non_product` 旁注明 Markdown 限制：目前前端未打包 Markdown，而 `build-inputs.json` 只追踪 Rust 构建；未来若用 `?raw` 等方式打包 Markdown，必须同时收窄放行规则或扩展输入登记。
+- `CLAUDE.md` 将非产品仓库配置明确为根目录 `.gitignore`、`.gitattributes`、`.editorconfig`，其他未放行配置仍按产品处理，与代码一致。
