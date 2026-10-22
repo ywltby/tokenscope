@@ -1,6 +1,6 @@
 # Codex 压缩用量补计与线程设置模型归属
 
-> 状态：**用户 2026-10-22 确认计划文本，实施中。** 本计划是一次独立的统计口径缺陷修复，不占整合计划的责任编号；合并并验证发布后归档，并在计划总账登记。来源：对照 cc-switch v4.0.8 → v4.0.18 的 Claude/Codex 会话适配器变化（研究文档 §15.1），只关注 token 用量；首字时间、生成速度不做。
+> 状态：**用户 2026-10-22 确认计划文本；实现与本地验收完成，待用户合并及发布验收。** 本计划是一次独立的统计口径缺陷修复，不占整合计划的责任编号；合并并验证发布后归档，并在计划总账登记。来源：对照 cc-switch v4.0.8 → v4.0.18 的 Claude/Codex 会话适配器变化（研究文档 §15.1），只关注 token 用量；首字时间、生成速度不做。
 
 **Goal：** Codex 远程压缩（compaction）那次请求的用量不再被记成 0；Codex 只通过线程设置事件切换模型时，后续用量归到新模型。
 
@@ -201,3 +201,23 @@
 - 曾因升级纠正提交钩子在既有 `history_migration.rs:519` 的版本前缀断言失败而暂停，8/9 通过；该断言硬编码 `2|`，而计划要求当前解析规则为 3，失败夹具实际登记 `3|disabled-d76b56741d9489c6`。同一用例此前的迁移备份、去重与 Claude 终值恢复断言全部通过，归因为旧测试版本常量未同步。失败日志 `history-commit-hook-revision-assertion.log` 与只读夹具证据 `revision-assertion-evidence.json` 已保留，没有绕过钩子。
 - 用户 2026-10-22 批准同步该断言，并在本 PR 内常设授权：既有测试硬编码了计划已批准改变的常量时，可改为引用常量或新值，保持断言含义、不删断言、不放宽阈值，每处登记文件、行号和归因。已将 `crates/tokenscope-core/tests/history_migration.rs:520` 的断言改为使用本文件第 514 行由 `PARSE_RULES_REVISION` 生成的前缀；归因是该规则 2 → 3 的直接后果。与解析规则递增及模型纠正同一提交，正文引用原失败日志。`codex_parse_revision.rs` 第 309、550 行构造旧状态的 `2|` 保持字面量；其他既有断言未变。
 - 研究分支没有遗漏的新研究提交，研究文档相对 `77fd267` 零差异，§15.1 保持不变。本 PR 必须整体合入，**提交不可单独挑选**：`b04bd72` 单独包含新模型解析规则而不含旧事实纠正，不能视作完整交付。后续完成完整门禁、PR 自审及远端检查后才转 Ready；合并仍由用户决定。
+
+### 交付自审与 PR（2026-10-22）
+
+- 升级纠正、解析规则 2 → 3、持久 parser 标记 1 → 2 及获批迁移断言同步已一并提交为 `0da43d1` 并推送，正文引用 `history-commit-hook-revision-assertion.log`。强制 `TOKENSCOPE_PRECOMMIT_MODE=full` 的完整钩子通过：普通/acceptance workspace fmt、Clippy、674/686 项 Rust 测试，前端类型/格式/772 项单测/构建/E2E，310 项 Python 测试及 PowerShell 安装、升级、原生窗口契约。手动性能等原有忽略项未作为已执行项。日志 `history-commit-hook-authorized-final.log`，汇总 `full-gate-summary.json`；所有此前失败日志保留。
+- 再次 fetch 后 main 仍为 `c9d6c89`，是本分支祖先；`version-check-approved.log` 返回 previous=0.5.9、version=0.5.10、kind=patch、release=true。应用只取号一次；四份版本配置与根锁一致，上一版基线已经登记。研究提交截至 `424b30d` 均在祖先链，研究文档相对 `77fd267` 零差异。
+- 最终受测产品实现 `0da43d1`：冻结新旧核心库后链接一次性只读程序，命令为 `rustc --edition=2024 qa-artifacts/codex-compaction/model-correction-census.rs --extern before=qa-artifacts/codex-compaction/libbefore.rlib --extern after=qa-artifacts/codex-compaction/libafter-final.rlib --extern rusqlite=<本地依赖产物> -L dependency=target/debug/deps -o qa-artifacts/codex-compaction/model-correction-census-approved.exe`，再运行该程序，退出 0、stderr 为空。历史段仍为 44 条且合计与原预期精确一致；69 个文件、27,217 条旧去重事件逐字段不变，新增 51（另 7 条在参考界点之后）、模型纠正 0、歧义 0，事实数 27,217 → 27,268，增量四桶合计与上一快照相同。全部历史写入仅在经验证无文件的 SQLite 内存库。
+- 旧库产物 SHA256 `13250ee21bbbcfb449d28d7429ee0aeb3def6032cd4ff13222517dc1be4a0540`，最终新核心库 `b318b35c00546b7dcb88d848a7039e80a36827fc80c0dc1c75da711fd86b6ea6`，取证程序 `6994c91f4b1a3438701fa83d4122510fb6fdcdf899970625013284a55bfa6903`。输出 `model-correction-census-approved.jsonl`，完整源码及产物哈希在 `approved-probe-sha256.json`，均位于本 worktree 忽略的 `qa-artifacts/codex-compaction/`。
+- 已建立 [PR #35](https://github.com/ywltby/tokenscope/pull/35)，正文披露历史总量会小幅增加、模型纠正例外、mtime 未通过及替代证据授权，并明确“提交不可单独挑选”。仅在最终 HEAD 的 gate、native-ui、Install test 全绿后转 Ready；运行链接及最终状态以 [PR 检查页](https://github.com/ywltby/tokenscope/pull/35/checks) 和 PR 正文为准，不把待跑项记为通过。
+
+| §3 不变量 | 自审结论与依据 |
+| --- | --- |
+| 1 配对规则 | 成立。11 项计划回归先红后绿，另 3 项异常边界回归覆盖消费挂起、会话边界和无 payload 顶替；仅存在且全零 last 补计。 |
+| 2 不重复计数 | 成立。父子重放沿用现有身份；CCS 双向并集套件通过；新旧实际解析器的全部旧事件逐字段不变。 |
+| 3 事件属性 | 成立。记录位置的时间/模型/会话/项目被捕获；四桶复用 R02 及受检算术，非法记录有诊断。 |
+| 4 模型行序 | 成立。线程设置与 turn_context 按行序覆盖，空白/非字符串忽略，session 重置有回归。 |
+| 5 历史保留与授权例外 | 成立。9 项采集回归与库内事务回归覆盖唯一旧原生模型纠正、精确时间及四桶、归档路径独立、双别名、旧 CCS 再导入、当前版本排除、歧义保留总量及身份/来源冲突回滚；仅三列改变，原证据保留。 |
+| 6 诊断 | 成立。补计的零行与忽略记录计数区分；纯内存纠正/歧义进入提交后 info，歧义警告可见；generation 与整批回滚保持。 |
+| 7 其他来源与普通构建 | 成立。Claude/CCS 解析与导入内核、日汇总、价格、查询接口未改；普通/acceptance 全部必跑测试通过，无 schema、身份方案或持久计数列增加。 |
+
+尚未执行：用户合并、main 上 CI/Native UI E2E/Release 的 0.5.10 发布验收、发布验证后的计划归档。保持 active，不把这些事项记为完成。
