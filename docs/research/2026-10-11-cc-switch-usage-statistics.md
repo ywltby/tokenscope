@@ -12,7 +12,7 @@
 ## 1. 范围与方法
 
 - 代码规模（`src-tauri/src`，v4.0.18）：`services/usage_stats.rs` 5532 行、
-  `services/session_usage_codex.rs` 5909 行、`services/session_usage.rs` 2362 行、
+  `services/session_usage_codex.rs` **6328 行**、`services/session_usage.rs` 2362 行、
   `services/session_usage_pi.rs` 2086 行、`services/session_usage_grokbuild.rs` 1310 行、
   `services/session_usage_opencode.rs` 864 行、`services/session_usage_gemini.rs` 455 行、
   `services/session_usage_mcode.rs` 336 行、`services/session_usage_agy.rs` 290 行、
@@ -296,6 +296,10 @@ const DEDUP_SESSION_SOURCES_SQL: &str =
   `first_token_median_ms` 与 `est_first_token_median_ms`，谓词是
   `first_token_eligible_sql` / `est_first_token_eligible_sql`；供应商/模型表与请求日志新增「首字」列。
   精确口径只取经路由的成功流式请求的中位数，避免排队/冷启动拉高。
+- **会话侧也能估首字**：Codex 适配器从 `item_completed` 的 `started_at_ms` 取模型输出项的开始时刻
+  （`output_item_started_ms`，`session_usage_codex.rs:288`），经 `estimated_first_token_ms`
+  折算后进入 `est_first_token_median_ms`。响应一开头就是工具调用、没有思考/回复项时推不出来，
+  该列为空。
 - 两套速度口径（精确 vs 估算）**分开累计、不相加**；rollup 行的速度与首字列恒为 0/NULL。
 
 ## 11. 时区
@@ -355,9 +359,18 @@ Claude → Codex → Gemini → OpenCode → Grok Build → Pi → MCode → **A
   缓存钳制 `cached_input.min(input)`、`cache_write.min(input-cached)`。
 - 身份前缀 `codex_session:thread-v1`（`:49`），模型归一四步（`normalize_codex_model`，`:854`）；
   批写 1000 行（`CODEX_INSERT_BATCH_SIZE`，`:1953`）。
-- **v4.0.10–4.0.17 的修复（发布说明）**：中途换模型按线程设置的变更归属（旧数据不自动改写，
-  可用「重建 Codex 用量」）；桌面版分页产生的子代理会话补导；分支对话翻页的续写文件不再当新子会话；
-  Codex 0.153+ 远程压缩的用量改为从另一种记录读取。这些解释了本文件为何从 4253 行涨到 5909 行。
+- **v4.0.10–4.0.17 的修复**（发布说明 + 源码对照）：中途换模型按线程设置的变更归属
+  （`thread_settings_applied`，第 1310/1431 行）；桌面版分页产生的续写页用
+  `resolve_continuation_baseline`（第 1154 行）定位前序分段的**高水位基线**，缺前序页就
+  **报错 deferred** 而不是把整段历史累计当增量；分支对话翻页的续写文件不再当新子会话；
+  Codex 0.153+ 远程压缩的 `token_usage_record` 在随后 `token_count` 的 last 为 0 时由
+  `push_unmatched_usage`（第 957 行）补记；父 rollout 用 `load_parent_timeline`（第 1682 行）
+  + `parent_dependency_stamp`（第 1884 行）缓存时间线，避免分叉会话每分钟整份重读。
+- **本文件从 4253 行涨到 6328 行（净 +2075）的构成**：`mod tests` 旧版在第 1876 行、
+  新版在第 2423 行——即**生产代码 1875 → 2422 行（+547）**、**测试代码 2377 → 3905 行
+  （+1528，占增长约 74%）**。增长主要不是产品功能膨胀，而是上述修复带来的回归测试
+  （分页续写多页/分支/fork、retryable pending 的文件替换检测、父时间线缓存失效、
+  线程设置模型切换、远程压缩、首字计时等）。
 
 ### 12.4 Gemini CLI（`session_usage_gemini.rs`，455 行）
 
