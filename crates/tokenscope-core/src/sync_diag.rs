@@ -45,7 +45,7 @@ pub fn summarize(source: &str, warnings: &[SyncWarning]) -> Vec<String> {
                 String::new()
             };
             format!(
-                "{source} 同步丢弃数据汇总[{category}]: 模型 {total_models} 个 / 告警 {count} 条，示例: {}{note}",
+                "{source} 同步告警汇总[{category}]: 模型 {total_models} 个 / 告警 {count} 条，示例: {}{note}",
                 examples.join("、")
             )
         })
@@ -84,8 +84,11 @@ mod tests {
         ];
         let lines = summarize("models.dev", &warnings);
         assert_eq!(lines.len(), 2, "两类各一行: {lines:?}");
-        // 类别按键字典序稳定输出，行内写明来源与类别。
+        // 类别按键字典序稳定输出，行内写明来源与类别；冲突类并未丢弃数据，
+        // 措辞用中性「同步告警汇总」（明细行保留历史「丢弃数据」前缀不受影响）。
         assert!(lines[0].starts_with("models.dev "), "{:?}", lines[0]);
+        assert!(lines[0].contains("同步告警汇总"), "{:?}", lines[0]);
+        assert!(!lines[0].contains("丢弃"), "{:?}", lines[0]);
         assert!(lines[0].contains("a_cat"), "{:?}", lines[0]);
         assert!(lines[1].contains("b_cat"), "{:?}", lines[1]);
     }
