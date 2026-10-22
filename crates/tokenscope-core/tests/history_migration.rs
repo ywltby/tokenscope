@@ -313,7 +313,7 @@ fn rescan_after_migration_hits_the_same_event() {
 // ================================================================ N01/N03
 
 use tokenscope::aggregate::GroupBy;
-use tokenscope::report::{SummaryOptions, summary};
+use tokenscope::report::{PARSE_RULES_REVISION, SummaryOptions, summary};
 
 fn summary_opts(dir: &std::path::Path, claude: Option<PathBuf>) -> SummaryOptions {
     SummaryOptions {
@@ -511,12 +511,13 @@ fn polluted_v2_history_is_repaired_by_upgrade_and_rescan() {
         tokens(110, 41, 0, 0),
         "热扫即恢复真实终值（20 + 21），无需手动清库或重扫"
     );
+    let current_prefix = format!("{PARSE_RULES_REVISION}|");
     assert!(
         history
             .source_files()
             .unwrap()
             .iter()
-            .all(|f| f.context_revision.starts_with("2|")),
+            .all(|f| f.context_revision.starts_with(&current_prefix)),
         "重解析后按新规则修订重新登记"
     );
 
