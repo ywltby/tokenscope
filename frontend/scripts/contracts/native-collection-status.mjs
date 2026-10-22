@@ -4,7 +4,7 @@
 // JSONL 的真实采集（不伪造前端事件）；慢轮次与失败由验收构建的受控注入
 // 驱动（TOKENSCOPE_ACCEPTANCE_COLLECT_DELAY_MS / _COLLECT_FAIL_ON_ROUND，
 // 生产构建没有这条通道）。1000ms 精确阈值由可控时钟单测证明；这里按
-// 低频轮询取证并记录观察误差，不把截图间隔当毫秒证据。
+// 低频轮询保留旧证据，慢轮/恢复轮用页面状态切换与真实回调计时。
 // S00（PR3 计划 §9.1 第 3、4 条）：重启段阶段标记、有界同步命令与有界 CDP 关闭。
 import fs from "node:fs";
 import path from "node:path";
@@ -13,6 +13,11 @@ import {
   observeCollectionCallbacks,
   queryPublishesDuringReading,
 } from "../lib/collection-publish-window.mjs";
+import {
+  collectionDisplayWindow,
+  legacyCollectionWindow,
+} from "../lib/collection-display-window.mjs";
+import { observeCollectionTransitions } from "../lib/collection-transition-probe.mjs";
 import {
   closeBrowserBounded,
   ensureNotCanceled,
@@ -297,67 +302,104 @@ export async function nativeCollectionStatus({
   };
   await closeForRestart();
   await inst.launch();
-  await inst.waitForData(60000);
-  // 减少动态效果：Playwright 媒体仿真（与浏览器契约同一机制）。
-  await page().emulateMedia({ reducedMotion: "reduce" });
-  ev.reduced_motion = "emulated";
-  const t3 = [];
-  // 第 2 轮（启动采集是第 1 轮）：注入延迟 2.5s 后失败——显示持续到真实
-  // 结束、失败立即停止（不用最短期掩盖）、读取失败通知可见。
-  await pollUntil(t3, (s) => s.state === "failed", 40000);
-  const rounds2 = roundsOf(t3);
-  const failedRun = rounds2.find((r) => r.states.has("failed"));
-  ck.add(
-    "slow_round_displays_until_real_end",
-    failedRun && failedRun.observedDisplayMs !== null && failedRun.observedDisplayMs >= 2300,
-    `失败轮显示窗口(ms)=${failedRun?.observedDisplayMs}（注入 2500ms；轮询 100ms）`,
-  );
-  const failedSample = t3.find((s) => s.state === "failed");
-  ck.add(
-    "failure_shows_operable_notice",
-    failedSample.text === "读取失败" ||
-      (await page().locator(".ts-notice").first().innerText()).includes("读取失败"),
-    `胶囊="${failedSample.text}"`,
-  );
-  // 第 3 轮：同样注入延迟但正常成功——减少动态效果下静态图标 + 文字仍
-  // 满足最短期（轮询显示 reading ≥ 2.3s），随后恢复"已更新"并清除采集错误。
-  const t4 = [];
-  await pollUntil(t4, (s) => s.state === "reading" && s.runId > failedRun.runId, 40000);
-  // 读取期间取样旋转动画：减少动态效果时必须是静态（animation-name: none）。
-  const spinnerAnim = await page().evaluate(() => {
-    const el = document.querySelector(".ts-pill-spinner");
-    return el ? getComputedStyle(el).animationName : "<no-spinner>";
-  });
-  ck.add(
-    "reduced_motion_spinner_not_animated",
-    spinnerAnim === "none",
-    `animation-name=${spinnerAnim}`,
-  );
-  await pollUntil(t4, (s) => s.state === "confirmed" && s.runId > failedRun.runId, 40000);
-  const rounds3 = roundsOf(t4);
-  const recoveredRun = rounds3.find((r) => r.runId > failedRun.runId && r.states.has("confirmed"));
-  ck.add(
-    "reduced_motion_display_still_minimum",
-    recoveredRun &&
-      recoveredRun.observedDisplayMs !== null &&
-      recoveredRun.observedDisplayMs >= 2300,
-    `恢复轮显示窗口(ms)=${recoveredRun?.observedDisplayMs}（注入 2500ms）`,
-  );
-  await waitUntil(async () => {
-    const notice = await page()
-      .locator(".ts-notice")
-      .first()
-      .innerText()
-      .catch(() => "");
-    return !notice.includes("读取失败");
-  }, 15000);
-  const afterRecovery = await sample(atNow());
-  ck.add(
-    "failure_recovers_on_next_success",
-    afterRecovery.state === "confirmed" && afterRecovery.text === "已更新",
-    `恢复后=${afterRecovery.state}/${afterRecovery.text}`,
-  );
-  ev.collection_status.launches.push({ launch: 2, timeline: t3.concat(t4), rounds: rounds2 });
+  // 两个探针都在本轮开始前就位，共用页面 performance.now()。
+  // 观察 document 祖先而不是旧胶囊节点，兼容 Vue 重建元素。
+  await page().evaluate(`{
+    window.__collectionTimingCallbacks = (${observeCollectionCallbacks.toString()})(window.__TAURI_INTERNALS__, () => performance.now());
+    window.__collectionTransitions = (${observeCollectionTransitions.toString()})(document, () => performance.now(), MutationObserver);
+  }`);
+  const timingTrace = () =>
+    page().evaluate(() => ({
+      callbacks: window.__collectionTimingCallbacks.read(),
+      transitions: window.__collectionTransitions.read(),
+    }));
+  const launch2 = { launch: 2, timeline: [], measurements: {} };
+  ev.collection_status.launches.push(launch2);
+  try {
+    await inst.waitForData(60000);
+    // 减少动态效果：Playwright 媒体仿真（与浏览器契约同一机制）。
+    await page().emulateMedia({ reducedMotion: "reduce" });
+    ev.reduced_motion = "emulated";
+    const t3 = [];
+    launch2.timeline = t3;
+    // 第 2 轮（启动采集是第 1 轮）：注入延迟 2.5s 后失败——显示持续到真实
+    // 结束、失败立即停止（不用最短期掩盖）、读取失败通知可见。
+    await pollUntil(t3, (s) => s.state === "failed", 40000);
+    const rounds2 = roundsOf(t3);
+    const failedRun = rounds2.find((r) => r.states.has("failed"));
+    launch2.timeline = t3;
+    launch2.rounds = rounds2;
+    const slowJudgment = collectionDisplayWindow({
+      runId: failedRun?.runId,
+      ...(await timingTrace()),
+    });
+    launch2.measurements.slow = {
+      legacy: legacyCollectionWindow(t3, failedRun?.runId),
+      precise: slowJudgment,
+    };
+    ck.add("slow_round_displays_until_real_end", slowJudgment.ok, slowJudgment.basis);
+    const failedSample = t3.find((s) => s.state === "failed");
+    ck.add(
+      "failure_shows_operable_notice",
+      failedSample.text === "读取失败" ||
+        (await page().locator(".ts-notice").first().innerText()).includes("读取失败"),
+      `胶囊="${failedSample.text}"`,
+    );
+    // 第 3 轮：同样注入延迟但正常成功——减少动态效果下静态图标 + 文字仍
+    // 满足最短期（精确显示 reading ≥ 2.3s），随后恢复"已更新"并清除采集错误。
+    const t4 = [];
+    // 即使后续取证失败也保留已经取得的两段样本。
+    launch2.recovery_timeline = t4;
+    await pollUntil(t4, (s) => s.state === "reading" && s.runId > failedRun.runId, 40000);
+    // 读取期间取样旋转动画：减少动态效果时必须是静态（animation-name: none）。
+    const spinnerAnim = await page().evaluate(() => {
+      const el = document.querySelector(".ts-pill-spinner");
+      return el ? getComputedStyle(el).animationName : "<no-spinner>";
+    });
+    ck.add(
+      "reduced_motion_spinner_not_animated",
+      spinnerAnim === "none",
+      `animation-name=${spinnerAnim}`,
+    );
+    await pollUntil(t4, (s) => s.state === "confirmed" && s.runId > failedRun.runId, 40000);
+    const rounds3 = roundsOf(t4);
+    const recoveredRun = rounds3.find(
+      (r) => r.runId > failedRun.runId && r.states.has("confirmed"),
+    );
+    const recoveryJudgment = collectionDisplayWindow({
+      runId: recoveredRun?.runId,
+      phase: "succeeded",
+      ...(await timingTrace()),
+    });
+    launch2.measurements.recovery = {
+      legacy: legacyCollectionWindow(t4, recoveredRun?.runId),
+      precise: recoveryJudgment,
+    };
+    ck.add("reduced_motion_display_still_minimum", recoveryJudgment.ok, recoveryJudgment.basis);
+    await waitUntil(async () => {
+      const notice = await page()
+        .locator(".ts-notice")
+        .first()
+        .innerText()
+        .catch(() => "");
+      return !notice.includes("读取失败");
+    }, 15000);
+    const afterRecovery = await sample(atNow());
+    ck.add(
+      "failure_recovers_on_next_success",
+      afterRecovery.state === "confirmed" && afterRecovery.text === "已更新",
+      `恢复后=${afterRecovery.state}/${afterRecovery.text}`,
+    );
+    launch2.timeline = t3.concat(t4);
+  } finally {
+    launch2.precise_trace = await timingTrace();
+    await page().evaluate(() => {
+      window.__collectionTimingCallbacks.dispose();
+      window.__collectionTransitions.dispose();
+      delete window.__collectionTimingCallbacks;
+      delete window.__collectionTransitions;
+    });
+  }
 
   // ── 启动 3：正常路径——已加载更多明细时，新数据只提示不刷新 ──
   inst.opts.env = {};

@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "补齐隔离原生验收接线与项目、CCS、价格统一场景验证"
+  "summary": "修复 OpenRouter 价格同步：时间条件字段改为整数后整份响应解析失败，单个模型结构异常只跳过该模型"
 }
