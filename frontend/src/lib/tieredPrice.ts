@@ -63,6 +63,11 @@ export function formatTieredPricing(e: PricingEntry): string[] {
   }
   for (const sc of e.schedules ?? []) {
     out.push(`峰谷 ${formatSchedule(sc)} — ${formatRates(sc.prices ?? {})}`);
+    for (const period of sc.periods) {
+      out.push(
+        `时段 ${period.start_time}–${period.end_time} 覆盖价 — ${formatRates(period.prices ?? {})}`,
+      );
+    }
   }
   return out;
 }

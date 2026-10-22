@@ -85,8 +85,17 @@ fn check_staged_limit(count: usize, limit: usize, what: &str) -> Result<()> {
 
 /// 默认来源库路径（`~/.cc-switch/cc-switch.db`）。
 pub fn default_source_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录"))?;
-    Ok(home.join(".cc-switch").join("cc-switch.db"))
+    #[cfg(feature = "acceptance")]
+    {
+        let root = crate::acceptance::root()
+            .ok_or_else(|| anyhow::anyhow!("验收 CCS 默认路径要求先 bootstrap 合法隔离根"))?;
+        Ok(root.join("sources/cc-switch/cc-switch.db"))
+    }
+    #[cfg(not(feature = "acceptance"))]
+    {
+        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录"))?;
+        Ok(home.join(".cc-switch").join("cc-switch.db"))
+    }
 }
 
 /// 来源库路径是否存在（仅用于界面提示，不打开库）。
@@ -103,6 +112,8 @@ pub struct CcsSource {
 impl CcsSource {
     /// 只读打开（不写入、不复制整库，也不读取账户/密钥表）。
     pub fn open(path: &Path) -> Result<Self> {
+        #[cfg(feature = "acceptance")]
+        crate::acceptance::record_path("ccs_open", path, serde_json::json!({}))?;
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
