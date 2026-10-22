@@ -548,7 +548,7 @@ models.dev 面板、同步/重建 toast），Hero、趋势图、请求日志表�
 
 | cc-switch 改动 | 对 TokenScope 的影响 | 本机实测 | 结论 |
 | --- | --- | --- | --- |
-| Codex 远程压缩用量（PR #8479，`8cfe5644`） | **漏计**：TokenScope 把 `token_usage_record` 当作累计回显忽略，又把随后全 0 的 `last_token_usage` 当零分量占位行跳过 | 5555 条记录中 5511 条与随后的 `token_count` 四分量完全相同，44 条压缩被跳过；漏计输入 10,712,650（缓存命中 9,532,672）、输出 205,483，占 Codex 总量的输入 0.22%、输出 1.18% | 跟进，见[计划](../plans/active/2026-10-22-codex-compaction-usage.md) |
+| Codex 远程压缩用量（PR #8479，`8cfe5644`） | **漏计**：TokenScope 把 `token_usage_record` 当作累计回显忽略，又把随后全 0 的 `last_token_usage` 当零分量占位行跳过 | 5555 条记录中 5511 条与随后的 `token_count` 四分量完全相同，44 条压缩被跳过；漏计输入 10,712,650（缓存命中 9,532,672）、输出 205,483，占 Codex 总量的输入 0.22%、输出 1.18% | 跟进，见[计划](../plans/archive/implemented/2026-10-22-codex-compaction-usage.md) |
 | Codex 线程设置切换模型（PR #8176，`68122bc4`） | 潜在风险：TokenScope 只从 `turn_context` 取模型 | 564 条 `thread_settings_applied` 中 7 条改变模型，但之后都先有新的 `turn_context`，没有用量归错 | 一起跟进 |
 | Codex 分叉父线程的分页续写（PR #8213、#8290） | 不受影响：TokenScope 不定位父线程文件 | 21 个子线程文件都带父线程的 `session_meta`、会话 id 相同，现有 `(会话, 模型, 四桶)` 去重合并 3489 条重放 | 不跟进 |
 | 父 rollout 非法 UTF-8 记录（PR #8360） | 不受影响：TokenScope 按 lossy 读取，坏行计数跳过，同文件其余行照常 | — | 不跟进 |

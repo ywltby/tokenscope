@@ -1,6 +1,6 @@
 # Codex 压缩用量补计与线程设置模型归属
 
-> 状态：**用户 2026-10-22 确认计划文本；实现与本地验收完成，待用户合并及发布验收。** 本计划是一次独立的统计口径缺陷修复，不占整合计划的责任编号；合并并验证发布后归档，并在计划总账登记。来源：对照 cc-switch v4.0.8 → v4.0.18 的 Claude/Codex 会话适配器变化（研究文档 §15.1），只关注 token 用量；首字时间、生成速度不做。
+> 状态：**已实现并归档（2026-10-22）。** [PR #35](https://github.com/ywltby/tokenscope/pull/35) 由用户授权普通合并为 `a31540f`，[v0.5.10](https://github.com/ywltby/tokenscope/releases/tag/v0.5.10) 已发布；main 的 CI、Native UI E2E、Release 全成功，§5 验收全部闭合。本计划是一次独立的统计口径缺陷修复，不占整合计划的责任编号。来源：对照 cc-switch v4.0.8 → v4.0.18 的 Claude/Codex 会话适配器变化（研究文档 §15.1），只关注 token 用量；首字时间、生成速度不做。
 
 **Goal：** Codex 远程压缩（compaction）那次请求的用量不再被记成 0；Codex 只通过线程设置事件切换模型时，后续用量归到新模型。
 
@@ -220,4 +220,10 @@
 | 6 诊断 | 成立。补计的零行与忽略记录计数区分；纯内存纠正/歧义进入提交后 info，歧义警告可见；generation 与整批回滚保持。 |
 | 7 其他来源与普通构建 | 成立。Claude/CCS 解析与导入内核、日汇总、价格、查询接口未改；普通/acceptance 全部必跑测试通过，无 schema、身份方案或持久计数列增加。 |
 
-尚未执行：用户合并、main 上 CI/Native UI E2E/Release 的 0.5.10 发布验收、发布验证后的计划归档。保持 active，不把这些事项记为完成。
+### 合并与发布验收（2026-10-22）
+
+- 用户授权后以普通 merge commit 合并 PR #35（`--match-head-commit 9104bd5`），合并提交 `a31540f`；三个提交整体合入，未挑选或变基。
+- main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39786126808)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39786126780)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39786127012) 全成功。Release 的 gate、plan-upgrades、build、install-test、六组单跳升级（0.1.0 / 0.4.0 / 0.5.9 各 present、deleted）、两条连续升级链与 publish 均成功。
+- [v0.5.10](https://github.com/ywltby/tokenscope/releases/tag/v0.5.10) 预发布于 2026-10-22T13:28:07Z，标签解引用到 `a31540f`，资产为安装包、`SHA256SUMS.txt`、`build-metadata.json`、`provenance.sigstore.json` 四项。四项原资产逐个下载核对后，v0.5.10 升级基线随本次归档登记（持久格式 parser_revision 为 2；下一版起点矩阵为 0.1.0 / 0.4.0 / 0.5.9 / 0.5.10，0.5.9 作为旧 parser 格式代表保留）。
+- 升级到 v0.5.10 后首轮采集会重解析全部 Codex 文件；按 CP05 只读复核，本机 Codex 历史约增加 51 条，模型纠正预期为 0。安装后实际增幅不属于 §5 验收项，不在此记为已核对。
+
