@@ -247,6 +247,15 @@ pub fn walk_jsonl_guarded(
     out: &mut Vec<PathBuf>,
     errors: &mut Vec<String>,
 ) {
+    #[cfg(feature = "acceptance")]
+    if let Err(error) = crate::acceptance::record_path(
+        "source_root_read",
+        root,
+        serde_json::json!({"agent": agent.as_str()}),
+    ) {
+        errors.push(format!("验收来源隔离检查失败：{error:#}"));
+        return;
+    }
     // 根进入台账：跨应用根重叠在此暴露（调用方按隔离处理），同应用别名根
     // 的文件由更小规范化根认领。
     match ledger.enter(root, agent) {

@@ -657,6 +657,10 @@ pub async fn open_settings_file(app: tauri::AppHandle) -> Result<String, String>
         Ok(path)
     })
     .await?;
+    #[cfg(feature = "acceptance")]
+    if tokenscope::acceptance::record_opener(&path).map_err(|error| format!("{error:#}"))? {
+        return Ok(path.display().to_string());
+    }
     app.opener()
         .open_path(path.display().to_string(), None::<&str>)
         .map_err(|e| e.to_string())?;
@@ -1622,6 +1626,10 @@ pub async fn open_pricing_file(app: tauri::AppHandle) -> Result<String, String> 
         Ok(path)
     })
     .await?;
+    #[cfg(feature = "acceptance")]
+    if tokenscope::acceptance::record_opener(&path).map_err(|error| format!("{error:#}"))? {
+        return Ok(path.display().to_string());
+    }
     app.opener()
         .open_path(path.display().to_string(), None::<&str>)
         .map_err(|e| e.to_string())?;

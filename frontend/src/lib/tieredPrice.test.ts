@@ -5,6 +5,36 @@ import { describe, expect, it } from "vitest";
 import { fmtPriceOrUnknown, formatRates, formatTieredPricing } from "./tieredPrice";
 import type { PricingEntry, RateSpecView } from "../types";
 
+it("峰谷时段覆盖价格逐一显示，不能只列规则级未知", () => {
+  const entry = {
+    prefix: "external/period-pricing",
+    has_tiered_pricing: true,
+    segments: [],
+    schedules: [
+      {
+        label: "合成峰谷",
+        timezone: "Asia/Shanghai",
+        prices: {},
+        periods: [
+          {
+            start_time: "09:00",
+            end_time: "18:00",
+            prices: { input: 12, output: 35, cache_write: null, cache_read: null },
+          },
+          {
+            start_time: "00:00",
+            end_time: "09:00",
+            prices: { input: 2, output: 10, cache_write: null, cache_read: null },
+          },
+        ],
+      },
+    ],
+  } as unknown as PricingEntry;
+  const text = formatTieredPricing(entry).join("\n");
+  expect(text).toMatch(/09:00–18:00[^\n]*输入 \$12 · 输出 \$35 · 缓存写 未知 · 缓存命中 未知/);
+  expect(text).toMatch(/00:00–09:00[^\n]*输入 \$2 · 输出 \$10 · 缓存写 未知 · 缓存命中 未知/);
+});
+
 describe("fmtPriceOrUnknown（三态单价展示）", () => {
   it("unknown_zero_same_as_input_displayed_distinctly：三态互不混淆", () => {
     expect(fmtPriceOrUnknown(null)).toBe("未知");

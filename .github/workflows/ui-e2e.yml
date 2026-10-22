@@ -63,6 +63,22 @@ jobs:
         run: |
           node frontend/scripts/native-acceptance.mjs --scenario ui-source-paths --events 4 --port 9455 --out qa-artifacts/ui-adjustment/native-e2e/source-paths
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # AC03–AC05：三个统一验收场景分别预留十个启动端口，失败直接传递。
+      - name: Native project and model identity with history retention
+        shell: pwsh
+        run: |
+          node frontend/scripts/native-acceptance.mjs --scenario ui-identity --events 8 --port 9500 --out qa-artifacts/ui-adjustment/native-e2e/identity
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Native CCS manual import lifecycle
+        shell: pwsh
+        run: |
+          node frontend/scripts/native-acceptance.mjs --scenario ui-ccs-import --events 8 --port 9510 --out qa-artifacts/ui-adjustment/native-e2e/ccs-import
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Native pricing sync and cost disclosure
+        shell: pwsh
+        run: |
+          node frontend/scripts/native-acceptance.mjs --scenario ui-pricing --events 8 --port 9520 --out qa-artifacts/ui-adjustment/native-e2e/pricing
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload native UI evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7

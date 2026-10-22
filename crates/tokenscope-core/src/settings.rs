@@ -892,6 +892,8 @@ pub fn ensure_toml(path: &Path) -> Result<()> {
     }
     crate::fsutil::atomic_write(path, SETTINGS_TEMPLATE.as_bytes())
         .with_context(|| format!("写设置模板失败: {}", path.display()))?;
+    #[cfg(feature = "acceptance")]
+    crate::acceptance::record_path("settings_write", path, serde_json::json!({}))?;
     Ok(())
 }
 
@@ -905,6 +907,8 @@ fn save_unlocked(path: &Path, s: &Settings) -> Result<()> {
     // 先落 toml 再处理遗留文件：toml 在位后 load 即不再读 json（改名失败只是延迟迁移）。
     crate::fsutil::atomic_write(path, body.as_bytes())
         .with_context(|| format!("写设置失败: {}", path.display()))?;
+    #[cfg(feature = "acceptance")]
+    crate::acceptance::record_path("settings_write", path, serde_json::json!({}))?;
     if let Some(legacy) = legacy_json_path(path)
         && legacy.exists()
     {
