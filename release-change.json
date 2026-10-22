@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "价格同步告警按类别汇总；models.dev 兼容字段不再误报冲突"
+  "summary": "价格同步 WARN 汇总行措辞修正"
 }

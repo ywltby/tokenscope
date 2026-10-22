@@ -28,9 +28,7 @@ N01–N09、N14–N16 已完成；16 个责任编号中为 **12 项完成、1 �
 - B1 / AC01 的 `69ce2f4` 随 [PR #27](https://github.com/ywltby/tokenscope/pull/27) 普通合并 `4198051`；两环境共享冲突探针、两个变异、普通/acceptance 采集各 17/17 与完整钩子通过，PR 的 CI/原生/安装/六组升级全成功。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39633188944)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39633188991)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39633189036) 全成功，Release 六个下游 skipped，最新发布仍为 v0.5.6；N14 第 4 项及 N14 全部关闭。
 - B2 / AC02–AC05 随 [PR #31](https://github.com/ywltby/tokenscope/pull/31) 普通合并 `c9de40e`，[v0.5.9](https://github.com/ywltby/tokenscope/releases/tag/v0.5.9) 已公开并下载核对四项原资产后登记基线。三个场景本地各三连跑与 29 条具名业务断言先红后绿，最终 PR 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39756585501)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39756585449)、[Install test](https://github.com/ywltby/tokenscope/actions/runs/39756585577) 全成功。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39758431511)、[原生](https://github.com/ywltby/tokenscope/actions/runs/39758431422)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39758431613) 全成功（安装五场景、六组单跳、两条连续链）；新增 CI 为 PR 116 秒 / main 68 秒。N11 人工尾项保留，B3 待修订，B4、B5 未执行。
 
-`active/` 保留整合计划与已确认的[剩余验收收口计划](active/2026-10-21-acceptance-closure.md)（AC01–AC12，B1 已关闭 N14；B2 自动化已合并，N11 人工尾项待验；B3 待修订，B4、B5 未执行）；[合入与发布解耦](archive/implemented/2026-10-21-release-on-version-change.md)（N16）已完成并归档。归档共 **51 份：21 份已实现、28 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
-
-另有一份待复核的维护计划：[价格同步告警汇总](active/2026-10-22-sync-log-aggregation.md)（用户 2026-10-22 在 0.5.10 开发版手动同步时发现单次约 460 条 WARN，其中 415 条是 models.dev 兼容字段误报；用户 2026-10-22 确认计划文本，实施中），不占整合计划的责任编号。
+`active/` 保留整合计划与已确认的[剩余验收收口计划](active/2026-10-21-acceptance-closure.md)（AC01–AC12，B1 已关闭 N14；B2 自动化已合并，N11 人工尾项待验；B3 待修订，B4、B5 未执行）；[合入与发布解耦](archive/implemented/2026-10-21-release-on-version-change.md)（N16）已完成并归档。归档共 **52 份：22 份已实现、28 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
 
 必须保持用户定稿：一个 `~/.tokenscope/history.db`，只保存精简 token/cwd 元数据；全部代理有效用量纳入；源日志删除或停用仍查得到历史；CCS 设置页只手动单次导入，导入与已有事实求并集。较新规则优先于旧“现存日志是唯一事实”等历史设计。
 
@@ -46,6 +44,7 @@ N01–N09、N14–N16 已完成；16 个责任编号中为 **12 项完成、1 �
 | --- | --- | --- |
 | [价格同步 TLS 信任修复](archive/implemented/2026-10-22-emudhra-tls-trust-fix.md) | PR #29 / v0.5.7；组合复验在 PR #30 合并后完成 | TF01–TF03 自身验收闭合；包含 TLS 更新与解析修复的 main `cb35f83` 上两价格源完整同步通过 |
 | [OpenRouter 时间条件解析修复](archive/partial/2026-10-22-openrouter-override-conditions.md) | PR #30 / v0.5.8，合并 `cb35f83` | main CI、原生、Release 全成功，六组单跳与两条连续链通过；安装后设置页手动同步按用户决定保留待验，转 N11 |
+| [价格同步告警汇总](archive/implemented/2026-10-22-sync-log-aggregation.md) | PR #37 / v0.5.11，合并 `0fabf24` | LA01–LA04 与 §5 验收闭合；隔离程序取证 models.dev WARN 0 / 明细 415、OpenRouter WARN 2 / 明细 23；汇总行措辞随 v0.5.12 修正；不占整合计划责任编号 |
 
 原生计时误报由独立 [PR #32](https://github.com/ywltby/tokenscope/pull/32) 修复（合并 `1f00c9e`）：两条 2300ms 阈值保留，精确状态切换与真实回调取代两端 DOM 轮询判定；main 的 CI、原生成功，Release 只跑 gate、六个下游 skipped。v0.5.7、v0.5.8 均已按原资产核对并登记升级基线，v0.5.8 登记随本次归档交付；不提前关闭 N11 或其他开放编号。
 

@@ -1,5 +1,9 @@
 # 价格同步告警汇总
 
+> **2026-10-23 归档复核：LA01–LA04 与 §5 验收已完成。** [PR #37](https://github.com/ywltby/tokenscope/pull/37) 合并 `0fabf24`，v0.5.11 已发布且已登记升级基线，main 的 CI、Native UI E2E、Release 均成功。隔离程序取证计数与 §1.1 预期一致：models.dev WARN 0 / 兼容明细 415，OpenRouter WARN 2（两个类别）/ 明细 23。用户 2026-10-23 复核 PR 后确认合并，无阻断项；复核提出的三个小项随归档处理——README「待复核/实施中」措辞随移档消除、§6 补 PR 号、WARN 汇总行措辞由「同步丢弃数据汇总」改为中性「同步告警汇总」（冲突类并未丢弃数据，随 v0.5.12 发布）。开发版手动同步的人工复核按任务修订保留给用户，属既有 N11 口径，未借本专项标为通过。
+
+## 归档前原文
+
 > 状态：**实施中（2026-10-22，分支 fix/sync-log-aggregation）。** 用户 2026-10-22 确认计划文本（含兼容字段分类修订）。 本计划修复一处日志规约违背，是独立的维护项，不占整合计划的责任编号；合并并完成发布验收后归档，并在计划总账登记。来源：用户 2026-10-22 在 0.5.10 开发版手动同步价格后发现日志刷屏。
 
 **Goal：** 一次价格同步在默认日志级别下，每个来源每类告警只写一条汇总；逐条明细保留在 debug 级别，同一告警不再写两遍；models.dev 的兼容字段不再误报为冲突。
@@ -140,11 +144,11 @@ models.dev 用两种字段描述长上下文加价：
 
 ## 6. 执行记录
 
-**实施完成（2026-10-22，分支 `fix/sync-log-aggregation`，PR 待建）**。提交：`97ab5cc`（计划转实施中）、`2668085`（实现主体）、`a944a22`（统计口径文档）、`582cf47`（版本 0.5.11）。
+**实施完成（2026-10-22，分支 `fix/sync-log-aggregation`，[PR #37](https://github.com/ywltby/tokenscope/pull/37) 已合并 `0fabf24`，v0.5.11 已发布）。** 提交：`97ab5cc`（计划转实施中）、`2668085`（实现主体）、`a944a22`（统计口径文档）、`582cf47`（版本 0.5.11）、`e6b5c93`（执行记录回填）、`0fabf24`（PR #37 合并）。
 
 ### 交付形态
 
-- 新增核心库 `sync_diag` 模块：`SyncWarning { category, model, detail, for_summary }`（类别键在产生告警的位置确定）；`summarize` 纯函数按类别分组输出汇总行（`{source} 同步丢弃数据汇总[{category}]: 模型 N 个 / 告警 M 条，示例: a、b、c（等 N 个）`，类别与示例均按字典序、BTree 确定性）；`log_sync_warnings` 每类一条 `log::warn!`、每条原始告警一条 `log::debug!`（明细文本与改造前逐条 warn 一致）。
+- 新增核心库 `sync_diag` 模块：`SyncWarning { category, model, detail, for_summary }`（类别键在产生告警的位置确定）；`summarize` 纯函数按类别分组输出汇总行（`{source} 同步告警汇总[{category}]: 模型 N 个 / 告警 M 条，示例: a、b、c（等 N 个）`，类别与示例均按字典序、BTree 确定性；初版措辞「同步丢弃数据汇总」经用户复核指出冲突类并未丢弃数据，随 v0.5.12 改为中性表述）；`log_sync_warnings` 每类一条 `log::warn!`、每条原始告警一条 `log::debug!`（明细文本与改造前逐条 warn 一致）。
 - models.dev：`convert_tiers` 返回 `Vec<TierWarning>`；`context_over_200k` 按不变量 8 分类（`given_rates_match` 只比较旧字段已给出的单价项、浮点 `==`）：全等为 `over200k_compatible`（`for_summary=false`，只 debug），任一项不等或首档缺失对应项为 `over200k_conflict`（原文本保留）。`sync_with` 不再写日志，`SyncReport.warnings` 携带结构化告警。
 - OpenRouter：`sync_with` 经 `push_warning` 把告警平行写入既有 `warnings: Vec<String>`（内容与顺序不变）与新增 `diagnostics: Vec<SyncWarning>`；类别 `malformed_model` / `invalid_price_rejected` / `override_time_skipped` / `override_invalid_threshold` / `override_invalid_price` / `duplicate_override_threshold` / `base_price_rejected`（后两类为防御性产生点，真实响应未触发）。内部 warn 循环删除。
 - 手动（`commands.rs`）与自动（`lib.rs`）同步各只调用一次 `log_sync_warnings`；`commands.rs` 原 1582–1584 的逐条 warn 循环删除；自动路径此前不读 OpenRouter 告警，现与手动一致（不变量 5）。
@@ -186,3 +190,8 @@ WARN 条数只取决于类别数（models.dev 全兼容不计、OpenRouter 2 类
 - OpenRouter 新增 `#[doc(hidden)] pub fn sync_with_body_for_tests`（与 modelsdev 同名辅助对称），供 golden 集成基准生成注入固定响应体。
 - `docs/stats-semantics.md` §4 补两条口径：`context_over_200k` 兼容/真冲突判定与同步告警的收集记录方式。
 - 版本按产品改动递增 patch 至 0.5.11，`bump_version.py --check --base-ref origin/main` 输出 `release: true`。
+
+### 归档时后续动作（2026-10-23）
+
+- v0.5.11 发布验收通过后登记升级基线（`upgrade_baselines.py add --tag v0.5.11`，同批归档提交）。
+- 用户复核的汇总行措辞问题随 v0.5.12 修正：`summarize` 行前缀「同步丢弃数据汇总」→「同步告警汇总」（产品 WARN 文本，按规则递增 patch 发布），OpenRouter 逐条明细的历史前缀「OpenRouter 同步丢弃数据: 」按不变量 1 保持不变；取证程序的计数解析同步更新（qa-artifacts，不入库）。
