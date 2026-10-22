@@ -829,6 +829,8 @@ class Instance {
 
     const env = {
       ...process.env,
+      // 固定隔离通道每次启动都装配；场景可以替换 env，不能因此丢失计数代理。
+      ...this.opts.controlledIo?.env,
       TOKENSCOPE_ACCEPTANCE_ROOT: this.root,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: browserArgs,
       ...this.opts.env,

@@ -357,3 +357,9 @@ AC03–AC05 的 CI 接入：
 - 上述驱动回归最终定向 7 项全通过（`ac02-green-descendant-freeze.log`）；准备重新执行完整提交门禁。此前没有产生 AC02 提交，也没有原生运行或真实价格请求。
 - 完整提交门禁复跑时被既有安装契约拦住（`ac02-commit-hook-reviewed.log`：26 项中“观察期提前退出（退出码 23）”未抛出）。归因：退出替身 `pwsh -Command "exit N"` 冷启动可能超过 1 秒观察期，观察结束时仍存活；受控反例（子进程延迟 1.5 秒）复现该现象（`install-observation-probe.json`），没有产品或辅助函数缺陷证据。按“测试架缺陷先修测试架”单独提交 `dc9f241`：替身先写就绪文件、在等待/观察的同一调用块内放行后才退出，与 `4cde2b3` 的 GUI 替身就绪握手同类；断言、1 秒观察期与 10 秒等待期、`install_test_helpers.ps1` 均未改，不属于等待补偿。复验：PS7 契约 26/26；临时副本把子进程启动额外拖慢 1.5 秒、3 秒，均 26/26；该提交的选择性钩子（脚本契约）通过。
 - 随后 AC02 完整提交门禁的两套 Rust、前端 627 项与浏览器契约均通过，只有新增 `test_acceptance_unified_profile.py` 报错（`ac02-commit-hook-final.log`）：重定向时 pwsh 按控制台代码页（本机 936）输出中文，测试以 UTF-8 文本解码，读线程抛 `UnicodeDecodeError`，`stdout` 为 `None` 掩盖了结果。准备脚本单独运行退出码为 0、产物正确；此前通过的运行处于 65001 代码页。该测试是本批新增，改为按字节捕获、只在诊断文本中以 `errors="replace"` 解码（同 `test_upgrade_workflow.py`），断言未改，既有准备脚本未改。修前在 936 下定向复现报错，修后 936 与 65001 下均通过。
+
+### B2 续行：主线同步与场景交付（2026-10-22）
+
+- 从 `81c94f9` 合入 main `9c77cef`，普通合并提交 `cc4404a`；版本冲突采用主线 0.5.8，拿到精确采集计时修复及 v0.5.8 已发布基线，AC03–AC05 完成后再统一取号。完整合并钩子通过：普通/acceptance 两套 Rust、前端 651 项、浏览器契约、304 项脚本及 PowerShell 契约；日志 `qa-artifacts/acceptance-closure/b2/main-merge-hook.log`。
+- 原生运行前只读复核发现装配缺陷：`native-collection-status.mjs` 重启时会把 `opts.env` 替换为采集注入或空对象，原 launch 只装配继承环境与场景环境，丢掉 AC02 的价格桩、opener 与全部计数代理覆盖。新增契约直接执行真实 launch 环境表达式，修前 3 项断言全部失败（缺少固定隔离通道，`restart-environment-red.log`），不是启动失败。集中在 launch 中先补固定 `controlledIo.env`、再保留场景末级覆盖，修后 3 项通过（`restart-environment-green.log`）。未改任何旧断言、阈值或窗口；此次为用户已授权的测试装配修复，独立提交。此时仍未运行原生应用。
+- 该补修的首次完整钩子被既有异步契约拦住（`restart-environment-hook.log`：653 通过、1 失败）：宿主退出探针传入 `Date.now()+30000`，内部再取时推进 1ms，正确得到剩余 29999ms，既有断言却要求精确 30000ms。受控独立探针固定推进 1ms，实测同一断言失败（`probe-budget-race-red.log`；最初探针导入路径笔误的启动错误另存，不充当红灯）。独立修复 `317eb74` 仅对齐该测试首次取时与预算锚点，后续时钟、真实子进程、真实计时器、30000ms 断言和 `<1500ms` 上限不变；定向 22 项及完整钩子通过（`probe-budget-green.log`、`probe-budget-hook-clean.log`）。属于测试装配取时竞争，不是产品缺陷，未以重跑碰运气替代归因。两项补修均经过独立只读复核，继续执行前保留其失败原证据。
