@@ -360,6 +360,9 @@ AC03–AC05 的 CI 接入：
 
 ### B2 续行：主线同步与场景交付（2026-10-22）
 
+- AC05 发现并局部修复产品展示缺陷：设置页档位浮层列出了峰谷时间，却只显示规则级费率，没有逐时段覆盖价。最小新增回归 `峰谷时段覆盖价格逐一显示，不能只列规则级未知` 在未改代码上 1 失败、3 通过（`ac05-period-display-product-red.log`）；首次原生 `ac05-dev-01/ui-pricing/evidence.json` 同样在 `settings_segment_tags_expand_all_tiers_and_schedule` 失败，完整三模型期望来自隔离 TOML fixture，实际浮层缺少 12/35 与 2/10 的覆盖价。修复仅在既有规则行之后追加每个 period 的覆盖价行，保留原行与缺价“未知”；不改变计价、统计、隐私或设置格式，属于用户已授权的最小回归加局部修复，独立提交。修后定向连同既有费用浮层测试 19/19 通过（`ac05-period-display-product-green.log`），原生须重建后重新验证。
+- AC05 首次原生其余两个失败已完成归因：重试按钮初次 notice 可见时取样过早，但后续实际点击成功；保留初次值，并在实际点击前以既有条件预算核可见/可用。离线跨 model/agent 的汇总浮点累计为 `2.274514` / `2.2745140000000004`，逐请求费用、来源与快照哈希完全一致；新判定精确对照完整请求身份、逐请求费用/来源以及页面合计原文，不加金额容差，两个汇总原数继续留证据。新增反例修前 2 失败、45 通过，修后 47/47。两次 launches 均有退出/端口释放证据、无隔离违例，真实目录指纹一致。未用重跑替代归因；此时 AC05 尚未三连跑或接入 CI。
+
 - AC04 已实现九条具名断言：初始纯判定 9 项断言失败、18 项通过（`ac04-checks-red.log`），实现后通过；复核另加“按日时区冲突冒充 detail_only”与“DOM 未提交”反例，修前明确失败，修后 29/29 通过。最终在同一按应用维度验证 auto 14 → detail_only 11 → auto 14，参与模式取同一 query_id 的真实 query_begin；CCS 只读 fixture 前后哈希、取消不写、三次手动提交幂等、来源时区变化、失败后新预览恢复均有页面/IPC/隔离历史库证据。规格与质量复核通过，收尾哈希、探针和监听释放各自独立执行，保留原失败。
 - AC04 本地命令 `node frontend/scripts/native-acceptance.mjs --scenario ui-ccs-import --port 9510 --events 8 --out qa-artifacts/acceptance-closure/b2/ac04-stable-N`；三次间无代码修改，耗时 17.489 / 17.462 / 17.181 秒，各 15/15（九条业务与六条基础检查）通过。受测 EXE 与 AC03 相同，场景基于 `6f50af1` 续行；端口 9511，证据含 launches[]，外连计数零、路径均在隔离根、真实目录指纹一致。初次开发试跑 `ac04-dev-01` 亦通过；全部证据在 `qa-artifacts/acceptance-closure/b2/`，耗时表 `ac04-stable-times.json`，辅助树的原始红绿日志复制到 `qa-artifacts/acceptance-closure/ac04-source-evidence/`。尚待 AC05 后合算 CI 新增预算。
 
