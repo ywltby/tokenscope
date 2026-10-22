@@ -360,6 +360,27 @@ AC03–AC05 的 CI 接入：
 
 ### B2 续行：主线同步与场景交付（2026-10-22）
 
+- CI 装配最终补修独立提交 `317573e`：首次完整交付钩子在前端 766 通过、1 失败后退出，旧端口清单只登记六个端口，新增 9500/9510/9520 不在期望中；原失败保存 `final-delivery-commit-hook.log`。用户明确批准仅追加三端口及 ui-identity / ui-ccs-import / ui-pricing 的 2/1/2 次启动注释，`stepSize = 3` 和后续两两不重叠循环逐字保留，不属于放宽断言。定向端口套件 28/28（`port-registry-green.log`）。
+- 独立复核另发现新工作流契约未被远端 contracts 组枚举调用：追加接线断言先为 1 失败、5 通过（`contracts-dispatch-red.log`），按现有写法仅追加指定模块调用和退出码传播后 6/6（`contracts-dispatch-green.log`），其他调用逐字保留。`317573e` 将三场景 CI 步骤、契约和两项登记补修作为同一测试装配提交，不混入版本或产品改动；完整钩子 `ci-assembly-full-hook.log` 全通过：普通/acceptance 两套 workspace、前端 767 项、浏览器契约、脚本 310 项、PowerShell 安装 26 项与升级 60 项等。修复经过独立静态复核，无剩余重要问题，没有以重跑替代归因。
+- 版本和本节执行记录独立提交前再次 fetch，main 仍为 `9c77cef` / 0.5.8；恢复此前已统一取好的 0.5.9，没有再 bump，版本检查仍为 `release: true`。待最终提交全部必需检查成功后转为 Ready 并普通合并，远端与 main 运行结论另行回填。
+- B3 只读准备发现原计划 AC06/AC07 的前提不符，已报告并停止，未执行原生、注册表操作或补接线。acceptance 只改 identifier，autostart 默认名仍来自 productName `TokenScope`，锁定依赖先尝试 HKLM 再退 HKCU，且涉及同名 StartupApproved；仅监测 acceptance identifier 的 HKCU 值无法覆盖实际目标。价格线程先等待 120 秒，后续间隔 3600 秒，快照年龄须未知或至少 24 小时，重新开启设置不唤醒线程；`pricing_fetch` 也不能证明已发生一个关闭状态的检查周期。原 300 秒场景预算下无法按原 AC07 顺序完成。待用户修订 AC06/AC07，B2 独立继续，不自行改验收方案。
+
+- B2 CI 接入的工作流契约先在旧 YAML 上失败：缺少三场景的独立步骤，均为明确断言失败（`ac-ci-red.log`）；追加三步后 5/5 通过，真实 PowerShell 替身验证原 run 体的 0/37 退出码和参数传递。替身裸数字类型的初始装配错误另存 `ac-ci-stub-type-failure.log`，不作为先红证据。新增 Python 调用按字节捕获 pwsh，仅诊断以 `errors="replace"` 解码，936 与 65001 两种实际代码页各 5/5（`ac-ci-cp936.log`、`ac-ci-cp65001.log`）。CI 各一步、端口段 9500/9510/9520，证据子目录为既有 native-e2e 根下的 identity/ccs-import/pricing，原 45 分钟及 always 上传不变。
+- 最终取号前再次 fetch，origin/main 仍为 `9c77cef` / 0.5.8，上一版原资产基线已经在 main 登记，无须重复 add。B2 统一递增一次至 0.5.9；`python -B scripts/bump_version.py --check --base-ref origin/main` 返回 previous=0.5.8、kind=patch、release=true（`final-version-check.log`）。草稿中间提交 `4159633` 的 CI contracts 失败已读日志确认为尚未取号（要求 0.5.9，实际 0.5.8），其 Rust、acceptance、frontend 和原生均通过；最终提交仍须重新取得全部必需检查成功，不重跑旧提交掩盖结果。
+
+B2 合并前八条不变量自审（远端检查与合并后运行另行记录）：
+
+| 不变量 | 结论 | 依据 |
+| --- | --- | --- |
+| 1 普通构建零变化 | 成立（验收接线范围） | 新变量、路径、价格地址与 opener 接线受 acceptance cfg 限定，普通构建忽略变量的独立子进程测试通过。另有已授权局部 UI 缺陷修复 `4159633`，仅追加费率展示，不改统计或计价 |
+| 2 真实数据零接触 | 成立 | 九次最终稳定原生运行追踪路径全部在隔离根、代理尝试零、真实目录指纹前后一致；没有访问真实价格源或真实来源库 |
+| 3 CCS 只手动 | 成立 | AC04 预览前无 ccs_open，取消不写，重复/改时区不增用量，来源库哈希前后一致，三连跑通过 |
+| 4 历史不随来源消失 | 成立 | AC03 删除一个真实合成文件后新后端轮次成功，重扫、重建索引及停用来源后请求与四桶保持，三连跑通过 |
+| 5 同意先于业务 | 本批强取证不适用 | B2 原生 fixture 预置同意；AC02 已有核心/壳侧顺序回归和普通隐私门禁回归。未同意预置文件、真实拒绝 IPC 与双击的强取证属于 AC06/AC07，不提前声称通过 |
+| 6 证据可复查 | 成立 | 29 条具名业务断言、真实 DTO/DOM、回调、trace、价格/CCS 哈希和 launches[] 入证据；失败均先归因并补反例，没有以重跑代替原因 |
+| 7 CI 预算 | 成立（接入前实测） | 每场景固定代码三连跑，最长单次之和 75.048 秒，新增三步目标小于 8 分钟；45 分钟上限及原步骤不变，实际 CI 时长待回填 |
+| 8 版本规则 | 成立 | 基于最新 main，v0.5.8 基线已登记，本 PR 只递增一次 patch 到 0.5.9，版本检查 release=true |
+
 - AC05 十条具名断言最终完成：初始纯判定 10 项断言失败、20 项通过（`ac05-verdict-red.log`）；完整判定及缺探针/错误来源/页面零费用/四桶混价/费率前缀/金额右侧/整个规则漏项等反例逐项红绿。最终 47/47，独立规格与质量复核通过。设置规则期望独立解析隔离 TOML，不从被测 DTO 推导；同步与离线费用都先移除外置规则，核实真实快照来源；四桶公式与固定请求、逐项金额/合计原文严格对照，不引入容差。
 - AC05 三连跑（同一代码、期间无修改）：`node frontend/scripts/native-acceptance.mjs --scenario ui-pricing --port 9520 --events 8 --out qa-artifacts/acceptance-closure/b2/ac05-stable-N`，25.911 / 24.879 / 24.004 秒，各 16/16 通过。受测产品 `4159633` 的 acceptance release 构建（0.5.8），EXE SHA256 `a560d9b263b39a864a862593d09fef0f3f3c3efed073a1176c574d48250d7d34`；两次启动端口 9521/9522，证据含 launches[]、快照哈希、页面文字与 IPC。九次最终稳定运行全部路径在隔离根、外连计数零、真实目录指纹一致。三个场景最长单次之和 75.048 秒，小于新增 CI 8 分钟预算；随后各接独立 CI 步骤，作业上限仍为 45 分钟。耗时表 `ac03/ac04/ac05-stable-times.json`，实际 CI 耗时待远端结果回填。
 

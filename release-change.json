@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "修复 OpenRouter 价格同步：时间条件字段改为整数后整份响应解析失败，单个模型结构异常只跳过该模型"
+  "summary": "补齐身份、CCS 和价格原生验收，展示峰谷时段覆盖费率"
 }
