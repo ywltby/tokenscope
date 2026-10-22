@@ -18,3 +18,4 @@ pub mod report;
 mod retry;
 pub mod settings;
 pub mod source;
+pub mod sync_diag;
