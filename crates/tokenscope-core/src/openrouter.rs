@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 
 pub const API_URL: &str = "https://openrouter.ai/api/v1/models";
 
+pub fn api_url() -> Result<std::borrow::Cow<'static, str>> {
+    crate::acceptance::pricing_url(API_URL, "/openrouter/api/v1/models")
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ApiModel {
     id: String,
@@ -167,22 +171,29 @@ fn validate_price(n: f64) -> Result<Option<f64>, String> {
 /// 拉取 OpenRouter 模型清单并写快照（原子替换；同 provider 串行）。
 pub fn sync(snapshot_path: &Path) -> Result<SyncReport> {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    sync_with(snapshot_path, fetch_openrouter)
+    sync_with(snapshot_path, || fetch_openrouter(snapshot_path))
 }
 
 /// Task 7.3：同一 provider 的同步互斥锁（手动/自动两条入口共用）。
 pub static SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn fetch_openrouter() -> Result<ApiResponse> {
+fn fetch_openrouter(_snapshot_path: &Path) -> Result<ApiResponse> {
+    let url = api_url()?;
+    #[cfg(feature = "acceptance")]
+    crate::acceptance::record_path(
+        "pricing_fetch",
+        _snapshot_path,
+        serde_json::json!({"source":"openrouter", "url":url}),
+    )?;
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(30)))
         .build()
         .new_agent();
     let mut response = agent
-        .get(API_URL)
+        .get(url.as_ref())
         .header("User-Agent", "tokenscope")
         .call()
-        .with_context(|| format!("请求 OpenRouter 失败: {API_URL}"))?;
+        .with_context(|| format!("请求 OpenRouter 失败: {url}"))?;
     response
         .body_mut()
         .read_json()

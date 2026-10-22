@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 
 pub const API_URL: &str = "https://models.dev/api.json";
 
+pub fn api_url() -> Result<std::borrow::Cow<'static, str>> {
+    crate::acceptance::pricing_url(API_URL, "/modelsdev/api.json")
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ApiEntry {
     /// 供应商名称。MP03：**有意不读**——provider 名不是模型展示名，不得兜底
@@ -161,22 +165,29 @@ pub struct SyncReport {
 /// 拉取 models.dev 并写快照（原子替换；同 provider 串行）。
 pub fn sync(snapshot_path: &Path) -> Result<SyncReport> {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    sync_with(snapshot_path, fetch_modelsdev)
+    sync_with(snapshot_path, || fetch_modelsdev(snapshot_path))
 }
 
 /// Task 7.3：同一 provider 的同步互斥锁（手动/自动两条入口共用）。
 pub static SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn fetch_modelsdev() -> Result<BTreeMap<String, ApiEntry>> {
+fn fetch_modelsdev(_snapshot_path: &Path) -> Result<BTreeMap<String, ApiEntry>> {
+    let url = api_url()?;
+    #[cfg(feature = "acceptance")]
+    crate::acceptance::record_path(
+        "pricing_fetch",
+        _snapshot_path,
+        serde_json::json!({"source":"modelsdev", "url":url}),
+    )?;
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(60)))
         .build()
         .new_agent();
     let mut response = agent
-        .get(API_URL)
+        .get(url.as_ref())
         .header("User-Agent", "tokenscope")
         .call()
-        .with_context(|| format!("请求 models.dev 失败: {API_URL}"))?;
+        .with_context(|| format!("请求 models.dev 失败: {url}"))?;
     response
         .body_mut()
         .read_json()

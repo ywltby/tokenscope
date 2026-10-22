@@ -999,6 +999,8 @@ impl HistoryDb {
     /// 步进假时钟模拟「两个预算检查点之间发生真实 I/O（备份）消耗」，从而
     /// 覆盖 `open → open_once → migrate` 的**生产接线**）。
     fn open_with_clock(path: &Path, clock: &dyn crate::retry::Clock) -> Result<Self> {
+        #[cfg(feature = "acceptance")]
+        crate::acceptance::record_path("history_open", path, serde_json::json!({}))?;
         let deadline =
             crate::retry::Deadline::new(clock, crate::retry::CONCURRENT_INIT_RETRY_BUDGET);
         crate::retry::retry_until(

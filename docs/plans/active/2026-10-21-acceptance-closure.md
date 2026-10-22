@@ -335,3 +335,25 @@ AC03–AC05 的 CI 接入：
 | 6 证据可复查 | 成立 | 具名断言、两种环境的共享冲突探针、自检实测值、两个新变异失败日志与产物哈希均保存；旧 ACL 失败保留归因 |
 | 7 CI 预算 | 成立 | 原生场景与 45 分钟上限均未改，新增用例定向运行约 0.05 秒 |
 | 8 版本规则 | 成立 | 最终改动只有测试与文档；已实测 `--check --base-ref origin/main` 输出 `release: false` |
+
+### B2 / AC02：验收接线（进行中）
+
+- 基线：最新 main `87d97db`（B1 回填已合入），分支 `feat/acceptance-b2-unified`，独立 worktree `acceptance-b2`；构建产物使用该树自己的 `target/`，避免与正在其他修复分支工作的主工作区共用产物。前端 frozen/offline 安装 121 个缓存包、下载 0，构建通过；现有 `native_acceptance` 基线为 3 通过、2 个由父用例调用的子阶段 ignored。
+- 首次红灯：先新增 `acceptance_closure.rs` 的两条子进程路径断言，再运行 `cargo test --locked -p tokenscope --features acceptance --test acceptance_closure -- --show-output`（`CARGO_NET_OFFLINE=true`）。结果 2 失败、2 子阶段 ignored，退出 101：bootstrap 后 CCS 默认路径仍为真实主目录路径；未 bootstrap 时也返回 `Ok`，未拒绝。证据 `qa-artifacts/acceptance-closure/b2/ac02-red-ccs.log`。此阶段只比较路径与返回值，未调用 `source_exists`、未打开 CCS、未请求网络；产品源码尚未改动。
+- 后续先补齐同一任务的价格地址、追踪序列与普通构建忽略新变量断言，再实现 acceptance 接线；AC03–AC05 及本地三连跑尚未执行，N11 不提前关闭。
+- CCS 合成器先红：`python -B -m unittest discover -s scripts -p test_make_ccs_fixture.py` 失败 1 项，缺少 `make_ccs_fixture.py`（子进程退出 2）；断言要求重叠请求、独有请求、日汇总、只读访问与拒绝覆盖。证据 `ac02-red-ccs-maker.log`；该断言先于合成器实现，全部路径在测试临时目录。
+- 壳侧先红：`cargo test --locked -p tokenscope-app --features acceptance shell_consent_trace_precedes_business_io_in_an_isolated_process -- --show-output` 退出 101；实际追踪已有 `settings_write`、`history_open`、`opener`，但缺少 `consent_saved`，故顺序断言失败。证据 `ac02-red-shell.log`，此时尚未修改隐私门禁接线；本测试没有启动 GUI、没有发起价格请求。
+- 合成器新增测试首次实现后的失败属于测试架连接生命周期：Python SQLite 事务上下文不负责关闭连接，Windows 清理报共享冲突；改用 `contextlib.closing` 显式关闭，原断言全部保留，定向测试通过。它只处理新增合成器与新增测试的临时库，未触碰任何现有测试。
+- 驱动 I/O 基础设施先红：`node --test frontend/scripts/lib/acceptance-io.test.mjs` 两项因尚无该模块而失败（`ERR_MODULE_NOT_FOUND`，退出 1），证据 `ac02-red-driver-io.log`。待实现断言包括本地端点命中与 ok/500/down、零代理尝试、追踪顺序与不完整追加行的区分。
+- unified profile 先红：`python -B -m unittest discover -s scripts -p test_acceptance_unified_profile.py` 失败 1 项，准备脚本尚不接受 `-Profile`（退出 1）；证据 `ac02-red-profile.log`。新断言核对 8 条合成 Claude 事件、模型异写、272000/272001 边界、分段/峰谷/显式策略、不完整候选与两张 CCS 表，全部输出在临时根。
+- AC02 定向绿灯：核心库 4 通过、4 子阶段由父用例调用（ignored）；两源本地桩各命中 1 次、代理尝试 0，8 条追踪按序且所有文件路径在隔离根内；壳侧顺序与重复同意测试通过，普通构建忽略变量测试通过，驱动 I/O 两项与合成器/profile 各一项通过。普通构建再做临时变异（让 URL getter 读取新变量），新增测试退出 101 并显示 `invalid-and-must-be-ignored`；随后逐字节恢复源码，尚待最终完整门禁。证据依次为 `ac02-green-core.log`、`ac02-green-shell.log`、`ac02-green-default.log`、`ac02-green-driver-io.log`、`ac02-green-ccs-maker.log`、`ac02-green-profile.log`、`ac02-red-default-mutation.log`。
+- 落盘设置指纹明确使用 `fnv1a64`（既有依赖内实现、标准向量校验，随事件写算法名），仅证明设置字节身份；发布资产与受测二进制仍使用 SHA256。`business_ready` 记录的是同意已允许初始化的边界，附 `privacy_phase: starting` 与 `scope: runtime_initialization`，UI 的 Ready 发布时点未改。
+- 完整脚本自查：`python -B -m unittest discover -s scripts -p "test_*.py"` 304 项全通过。首次 acceptance clippy 发现新增测试 Drop 中可合并的嵌套条件，已等价修正，后续提交钩子仍按 `-D warnings` 执行。最新 fetch 的 main 仍为 `87d97db`、最新发布仍为 v0.5.6，上一版已登记；B2 按规则只递增一次到 0.5.7，锁文件只有两个本地包的版本变化，没有新增或升级依赖。
+- 提交前只读复核发现三处新增验收基础设施缺口：继承的 `ALL_PROXY/all_proxy` 可绕过计数代理；隔离违例先取消会挡住既有 `stop` 的完整收尾；缺失 path 的路径类追踪可被假通过。此时没有原生运行。先追加回归断言，`ac02-red-review-regressions.log` 实测 3 失败、2 通过（ALL_PROXY 未覆盖、history_open 缺 path 被接受、尚无可等待的隔离收尾入口）；另 `ac02-red-all-proxy.log` 保留纯配置探针的失败。修法只补新接线与新断言，不放宽旧取消规则。
+- 首次完整提交钩子已完成两套 Rust fmt/clippy/test、前端 typecheck/格式检查，但被新增测试框架接入错误拦住：`acceptance-io.test.mjs` 使用 node:test，既有 Vitest 发现该文件却没有可运行 suite；其余 49 个文件 / 620 项通过，提交未产生。已将新增文件接入项目既有的 Vitest node 环境，不修改既有测试或 Vitest 配置；该测试随 frontend 门禁执行，取消本次新增的重复 node:test CI 命令。完整失败日志保留 `ac02-commit-hook.log`，后续另存复验日志。
+- 追踪追加边界先红：新子进程测试预置“完整 JSON、没有末尾换行”的旧日志，要求启动拒绝且原字节不变；旧接线返回 `Ok`，定向运行退出 101（`ac02-red-trace-newline.log`）。同时追加双进程重启续号与单调时间断言，避免只验证单次进程内顺序。
+- 复核补修定向结果：`ac02-green-review-regressions.log` 记录 5 项 Vitest 通过；`ac02-green-core-reviewed.log` 为 6 通过、6 子阶段由父用例调用（ignored），包含末尾换行拒绝与重启续号，两源仍各 1 次本地命中、代理尝试 0。路径类事件现在必须带绝对 path，`pricing_fetch` 也附真实快照路径；进入业务的 UI 场景要求必要追踪存在，未同意场景仍允许空。隔离失败的终止与既有完整 stop 在取消前进入，随后禁止业务/重启，最终等待两项收尾；旧 stop 取消检查未改。另追加强杀失败仍等待退出确认的断言与 sync-failure 全代理注入核对，随完整门禁复验。
+- 第二轮只读复核指出首次强杀也必须先补录后代：宿主退出后，既有保护会停止从宿主 PID 继续发现后代，不能先杀再补录。新增冻结后代的回归先红（`ac02-red-descendant-freeze.log`，1 失败、6 通过），再补强杀前刷新、终止后等待完整 stop；若探测失败仍终止已知归属进程，但必须报告后代身份未确认，不得把退出确认为成功。保留旧宿主退出保护、超时预算与取消规则。
+- 上述驱动回归最终定向 7 项全通过（`ac02-green-descendant-freeze.log`）；准备重新执行完整提交门禁。此前没有产生 AC02 提交，也没有原生运行或真实价格请求。
+- 完整提交门禁复跑时被既有安装契约拦住（`ac02-commit-hook-reviewed.log`：26 项中“观察期提前退出（退出码 23）”未抛出）。归因：退出替身 `pwsh -Command "exit N"` 冷启动可能超过 1 秒观察期，观察结束时仍存活；受控反例（子进程延迟 1.5 秒）复现该现象（`install-observation-probe.json`），没有产品或辅助函数缺陷证据。按“测试架缺陷先修测试架”单独提交 `dc9f241`：替身先写就绪文件、在等待/观察的同一调用块内放行后才退出，与 `4cde2b3` 的 GUI 替身就绪握手同类；断言、1 秒观察期与 10 秒等待期、`install_test_helpers.ps1` 均未改，不属于等待补偿。复验：PS7 契约 26/26；临时副本把子进程启动额外拖慢 1.5 秒、3 秒，均 26/26；该提交的选择性钩子（脚本契约）通过。
+- 随后 AC02 完整提交门禁的两套 Rust、前端 627 项与浏览器契约均通过，只有新增 `test_acceptance_unified_profile.py` 报错（`ac02-commit-hook-final.log`）：重定向时 pwsh 按控制台代码页（本机 936）输出中文，测试以 UTF-8 文本解码，读线程抛 `UnicodeDecodeError`，`stdout` 为 `None` 掩盖了结果。准备脚本单独运行退出码为 0、产物正确；此前通过的运行处于 65001 代码页。该测试是本批新增，改为按字节捕获、只在诊断文本中以 `errors="replace"` 解码（同 `test_upgrade_workflow.py`），断言未改，既有准备脚本未改。修前在 936 下定向复现报错，修后 936 与 65001 下均通过。
