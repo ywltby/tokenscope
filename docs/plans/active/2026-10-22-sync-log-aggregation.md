@@ -140,4 +140,49 @@ models.dev 用两种字段描述长上下文加价：
 
 ## 6. 执行记录
 
-（待实施后回填。）
+**实施完成（2026-10-22，分支 `fix/sync-log-aggregation`，PR 待建）**。提交：`97ab5cc`（计划转实施中）、`2668085`（实现主体）、`a944a22`（统计口径文档）、`582cf47`（版本 0.5.11）。
+
+### 交付形态
+
+- 新增核心库 `sync_diag` 模块：`SyncWarning { category, model, detail, for_summary }`（类别键在产生告警的位置确定）；`summarize` 纯函数按类别分组输出汇总行（`{source} 同步丢弃数据汇总[{category}]: 模型 N 个 / 告警 M 条，示例: a、b、c（等 N 个）`，类别与示例均按字典序、BTree 确定性）；`log_sync_warnings` 每类一条 `log::warn!`、每条原始告警一条 `log::debug!`（明细文本与改造前逐条 warn 一致）。
+- models.dev：`convert_tiers` 返回 `Vec<TierWarning>`；`context_over_200k` 按不变量 8 分类（`given_rates_match` 只比较旧字段已给出的单价项、浮点 `==`）：全等为 `over200k_compatible`（`for_summary=false`，只 debug），任一项不等或首档缺失对应项为 `over200k_conflict`（原文本保留）。`sync_with` 不再写日志，`SyncReport.warnings` 携带结构化告警。
+- OpenRouter：`sync_with` 经 `push_warning` 把告警平行写入既有 `warnings: Vec<String>`（内容与顺序不变）与新增 `diagnostics: Vec<SyncWarning>`；类别 `malformed_model` / `invalid_price_rejected` / `override_time_skipped` / `override_invalid_threshold` / `override_invalid_price` / `duplicate_override_threshold` / `base_price_rejected`（后两类为防御性产生点，真实响应未触发）。内部 warn 循环删除。
+- 手动（`commands.rs`）与自动（`lib.rs`）同步各只调用一次 `log_sync_warnings`；`commands.rs` 原 1582–1584 的逐条 warn 循环删除；自动路径此前不读 OpenRouter 告警，现与手动一致（不变量 5）。
+
+### 红绿与测试
+
+- 先红后绿：8 条新测试在空桩（`summarize` 恒空、`SyncReport.warnings`/`diagnostics` 恒空、兼容分支未实现）下确认红灯，失败全部是断言本身——`summarize_*` 5 条（`lines.len()` 0≠期望）、`sync_report_carries_structured_warnings`（告警缺 prov-a/compat）、`sync_report_carries_parallel_diagnostics`（diagnostics 0≠4）、兼容分类 2 条中 `over200k_matching_first_tier_is_compatible_not_conflict` 与 `over200k_partial_rates_only_compare_given_items`（现状误报冲突）。
+- 护栏在改动前即为绿：真冲突分类 2 条（价格不等、首档缺项）断言原文本与原分类；两个 golden 字节测试（`golden_snapshot_bytes_unchanged`、`golden_snapshot_bytes_and_warnings_unchanged`）用同一份合成响应把**改动前实现**的快照字节固定为基准 fixture（`synced_at` 归一为 `SYNCED_AT` 占位符），实现后逐字节相同——不变量 7。OpenRouter 的 `warnings` 内容与顺序也由 golden 测试固定断言。
+- `cargo test --locked --workspace` 普通与 acceptance 两套全绿（普通 290+ 个测试文件全 ok，acceptance 291 ok），`cargo clippy --locked --workspace --all-targets`（含 `--features acceptance -- -D warnings`）与 `cargo fmt --check` 干净。pre-commit 钩子按暂存区完整跑过（含前端 vitest 772 条、E2E 四场景、310 条脚本测试）。
+- 既有测试类型适配 1 处：`convert_tiers` 返回类型变化使 `test_modelsdev_tier_conversion_rules` 的 `warnings[0].contains("time")` 改为 `warnings[0].text.contains("time")`，断言语义（条数与文本内容）未删改、未放宽。
+
+### 两条同步路径的循环 warn 排查（LA03 结论）
+
+| 位置 | 结论 |
+| --- | --- |
+| `commands.rs` 手动同步 OpenRouter 逐条循环（原 1582–1584） | 本次删除 |
+| `lib.rs` 自动同步「价格索引重建警告」循环 | 保留——属计划 §2 范围外（价格索引告警），本机日志无刷屏记录 |
+| `modelsdev.rs` `parse_snapshot_text` 的 v1 快照降级 warn | 保留——加载路径单条事件，不在同步循环 |
+| `pricing.rs` 加载告警（外置表/model_policy 等） | 保留——加载路径非同步路径，同上范围外 |
+| `lib.rs`/`commands.rs` 其余 warn | 单条降级/失败事件，符合规约，保留 |
+
+### 本地取证（隔离程序）
+
+计划 §4 原定「用开发版手动同步一次」；改用一次性隔离程序（`qa-artifacts/sync-log/probe/`，不入库）：直接调用核心库 `modelsdev::sync` / `openrouter::sync` 拉真实公开源，快照写 `qa-artifacts/sync-log/tmp/`（不触碰真实 `~/.tokenscope`），并按壳两条路径的接线方式调用统一记录函数，用计数 logger（独立进程内 `log::set_logger`）统计 WARN/debug。改为隔离程序的原因：开发版手动同步会覆盖用户真实 `~/.tokenscope` 的价格快照并写入真实日志文件，且 GUI 操作无法程序化断言级别与条数；隔离程序同一代码路径可复跑、产物可复核。开发版的人工复核由用户在 PR 转 Ready 后进行（联网走 `HTTP_PROXY/HTTPS_PROXY=127.0.0.1:7897`）。
+
+| 指标 | 修复前（2026-10-22 实测） | 修复后（取证实测） | 预期 |
+| --- | --- | --- | --- |
+| models.dev 默认级别 WARN | 415（逐模型误报冲突） | **0** | 0 ✓ |
+| models.dev debug 兼容明细 | — | **415** | 约 415 ✓ |
+| models.dev 快照条数 | 8734 | 8735（上游 +1） | 同量级 ✓ |
+| OpenRouter 默认级别 WARN | 46（23 条 × 写两遍） | **2**（`override_time_skipped` 1、`invalid_price_rejected` 1） | 个位数 ✓ |
+| OpenRouter debug 明细 | — | **23** | 约 23 ✓ |
+| OpenRouter 快照条数 | 461 | 461 | 一致 ✓ |
+
+WARN 条数只取决于类别数（models.dev 全兼容不计、OpenRouter 2 类），与模型数无关（不变量 2）。取证程序与复跑说明留 `qa-artifacts/sync-log/`（被 `.gitignore` 忽略）；注意 `scripts/test_build_paths.py` 以 `rglob` 断言仓库树内只有根 `Cargo.lock`，probe 跑完必须删除其 `Cargo.lock`（本次已踩过并记录在案）。
+
+### 其他偏离与补充
+
+- OpenRouter 新增 `#[doc(hidden)] pub fn sync_with_body_for_tests`（与 modelsdev 同名辅助对称），供 golden 集成基准生成注入固定响应体。
+- `docs/stats-semantics.md` §4 补两条口径：`context_over_200k` 兼容/真冲突判定与同步告警的收集记录方式。
+- 版本按产品改动递增 patch 至 0.5.11，`bump_version.py --check --base-ref origin/main` 输出 `release: true`。
