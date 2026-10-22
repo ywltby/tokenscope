@@ -11,12 +11,13 @@
 
 ## 1. 范围与方法
 
-- 代码规模（`src-tauri/src`，v4.0.18）：`services/usage_stats.rs` 5532 行、
-  `services/session_usage_codex.rs` **6328 行**、`services/session_usage.rs` 2362 行、
-  `services/session_usage_pi.rs` 2086 行、`services/session_usage_grokbuild.rs` 1310 行、
-  `services/session_usage_opencode.rs` 864 行、`services/session_usage_gemini.rs` 455 行、
-  `services/session_usage_mcode.rs` 336 行、`services/session_usage_agy.rs` 290 行、
-  `proxy/usage/{parser,logger,calculator}.rs` 合计 2147 行、`database/schema.rs` 3943 行。
+- 代码规模（`src-tauri/src`，v4.0.18；行数按 `Get-Content` **含空行**统计）：
+  `services/usage_stats.rs` 5986 行、`services/session_usage_codex.rs` 6328 行、
+  `services/session_usage.rs` 2592 行、`services/session_usage_pi.rs` 2229 行、
+  `services/session_usage_grokbuild.rs` 1423 行、`services/session_usage_opencode.rs` 952 行、
+  `services/session_usage_gemini.rs` 508 行、`services/session_usage_mcode.rs` 347 行、
+  `services/session_usage_agy.rs` 302 行、`proxy/usage/{parser,logger,calculator}.rs` 合计 2339 行、
+  `database/schema.rs` 4122 行。
 - 分析手段：`rg` 定位符号 → 分段读原文 → 交叉核对调用点与 DDL；关键断言附 `文件:行号`。
 - 术语：**代理链路** = 内置本地代理实时记账；**会话链路** = 回扫各工具本地会话日志/SQLite；
   **事实表** = `proxy_request_logs`。
@@ -29,6 +30,7 @@
 | `SCHEMA_VERSION` 20 → **21**，迁移只给 `mcp_servers`、`skills` 各加 `enabled_agy` | `database/mod.rs:54` |
 | 后端定时扫描从 **60 秒改为 10 分钟兜底**，用量页打开时由前端按所选间隔加扫 | `lib.rs:1394-1445` |
 | 统计新增**首字中位数**（`first_token_median_ms` / `est_first_token_median_ms`），供应商/模型表与请求日志加「首字」列 | `usage_stats.rs` 的 `ProviderStats`、`first_token_eligible_sql` |
+| **Claude Code 适配器**新增首字估算（从 `thinking` 块反推）与**事务级价格缓存** | 源码 `session_usage.rs`（`thinking_block_start_ms`、`SessionPricingCache`） |
 | 精确查价改为 **`COLLATE NOCASE`**（含大写字母的自定义定价也能命中） | `usage_stats.rs:2677` |
 | 用量页新增「设置」页签：币种换算、侧栏「今日」、请求日志列、趋势图样式；并记住上次视图 | 前端 `UsageDisplaySection.tsx`、`requestLogColumns.ts`、`rememberedChoice.ts` |
 | 新增内置价 Gemini 4 Argon（2026-11-30 前介绍价） | 发布说明 v4.0.14 |
@@ -296,10 +298,14 @@ const DEDUP_SESSION_SOURCES_SQL: &str =
   `first_token_median_ms` 与 `est_first_token_median_ms`，谓词是
   `first_token_eligible_sql` / `est_first_token_eligible_sql`；供应商/模型表与请求日志新增「首字」列。
   精确口径只取经路由的成功流式请求的中位数，避免排队/冷启动拉高。
-- **会话侧也能估首字**：Codex 适配器从 `item_completed` 的 `started_at_ms` 取模型输出项的开始时刻
-  （`output_item_started_ms`，`session_usage_codex.rs:288`），经 `estimated_first_token_ms`
-  折算后进入 `est_first_token_median_ms`。响应一开头就是工具调用、没有思考/回复项时推不出来，
-  该列为空。
+- **会话侧也能估首字**：
+  - Claude：`thinking_block_start_ms`（`session_usage.rs:364`）在首块是 `thinking` 且带
+    `thinkingDurationMs` 时反推思考块开始时刻，再由 `estimated_first_token_ms`（`:376`）折算；
+  - Codex：`output_item_started_ms`（`session_usage_codex.rs:288`）取 `item_completed` 的
+    `started_at_ms`（模型输出项的生成开始时刻）。
+
+  两者都经 `estimated_first_token_ms` 校验（结果须落在 `(0, latency_ms]`）后进入
+  `est_first_token_median_ms`；响应一开头就是工具调用、没有思考/回复项时推不出来，该列为空。
 - 两套速度口径（精确 vs 估算）**分开累计、不相加**；rollup 行的速度与首字列恒为 0/NULL。
 
 ## 11. 时区
@@ -333,7 +339,7 @@ Claude → Codex → Gemini → OpenCode → Grok Build → Pi → MCode → **A
 | MiniMax Code | `<data_dir>/v2/sqlite/runtime-state.sqlite` | SQLite | 逐请求 | `mcode:{sid}:{id}` | `INSERT OR IGNORE` + id 游标 | 2（FRESH） |
 | **Antigravity** | `~/.gemini/{antigravity-cli,antigravity}/brain` + Key 私有目录 | JSONL | 逐条完成的模型响应 | `agy:{sid}:{step_index}` | 账本 `session_usage_dedup` | 2（FRESH） |
 
-### 12.2 Claude Code（`services/session_usage.rs`，2362 行）
+### 12.2 Claude Code（`services/session_usage.rs`，2592 行）
 
 - 入口 `sync_claude_session_logs`（`:403`），目录发现 `collect_jsonl_files`（`:488`）：
   固定 4 层（`项目/*.jsonl`、`<sid>/subagents/*.jsonl`、`subagents/workflows/wf_*/*.jsonl`），
@@ -343,11 +349,23 @@ Claude → Codex → Gemini → OpenCode → Grok Build → Pi → MCode → **A
   （有 `stop_reason` 优先，否则 output 更大者）。
 - 四桶直取（`input_tokens` / `output_tokens` / `cache_read_input_tokens` /
   `cache_creation_input_tokens`），1h 分档只用于计价。
-- 耗时估算：对话链回溯（跳过 `attachment` 行），100 ms–1 h 之外写 0。
-- 游标：字节游标 + 4096 字节尾部指纹（域标签 `claude-session-tail-v1`），截断/重写即钉 EOF 不重放；
+- 游标：字节游标 + 4096 字节尾部指纹（`claude_tail_fingerprint` 写入域标签
+  `claude-session-tail-v1`，`session_usage.rs:571-573`），截断/重写即钉 EOF 不重放；
   游标推进与插入同事务（`update_sync_state_on_conn` @ `:1022`）。
 - 补全：`find_stored_session_row`（`:1068`）→ `session_costs`（`:1119`）→
   `upsert_session_log_entry_on_conn`（`:1235`）；output 增长时 UPDATE，若此时能对上代理指纹则删自身行。
+- **v4.0.10 起新增「首字估算」**（生产增量之一）：会话日志没有请求级计时，改为
+  `thinking_block_start_ms`（`:364`）从 `message.content[0]` 是 `thinking` 块且带
+  `thinkingDurationMs` 时反推思考块开始时刻（`block_end_ms - duration_ms`）；
+  `estimated_first_token_ms`（`:376`）用 `first_output_ms - start_ms` 且要求落在
+  `(0, latency_ms]` 内。结果收进 `EstimatedTiming { latency_ms, first_token_ms }`（`:1055`），
+  补全时连 `first_token_ms` 一起回填（`StoredSessionRow` 新增该字段）。
+- **v4.0.15 起新增「事务级价格缓存」**（生产增量之二）：`SessionPricingCache`（`:1092`）
+  在单个文件的导入事务内复用模型价格查询（`pricing_cache.get` @ `:1133`），
+  避免每条记录都查一次价；`session_costs`（`:1119`）新增 `pricing_cache` 参数。
+  配套测试覆盖"命中/未命中/导入中价格被更新"三种情形。
+- **增量构成**：旧 2228 行 → 新 2592 行（净 +364），其中生产 1265 → 1369（+104）、
+  测试 962 → 1223（+261）——增长同样主要来自上述两块的回归测试。
 
 ### 12.3 Codex（`services/session_usage_codex.rs`，5909 行）
 
@@ -372,28 +390,28 @@ Claude → Codex → Gemini → OpenCode → Grok Build → Pi → MCode → **A
   （分页续写多页/分支/fork、retryable pending 的文件替换检测、父时间线缓存失效、
   线程设置模型切换、远程压缩、首字计时等）。
 
-### 12.4 Gemini CLI（`session_usage_gemini.rs`，455 行）
+### 12.4 Gemini CLI（`session_usage_gemini.rs`，508 行）
 
 入口 `sync_gemini_usage`（`:42`）。`<gemini 目录>/tmp/<project_hash>/chats/session-*`；
 `.jsonl` 恒收、`.json` 仅当同名 `.jsonl` 不存在时收；JSONL 先回放成单对象（`$rewindTo`/`$set`）。
 `tokens.{input,output,cached,thoughts}`，thoughts 并入 output；`cache_creation` 恒 0；
 身份 `gemini_session:{sid}:{mid}` + UPSERT；只有 mtime 增量，变化即整文件重读。
 
-### 12.5 OpenCode（`session_usage_opencode.rs`，864 行）
+### 12.5 OpenCode（`session_usage_opencode.rs`，952 行）
 
 入口 `sync_opencode_usage`（`:82`）。SQLite `opencode.db`（V1/V2 双布局），WAL mtime 参与新鲜度；
 会话级 `time_updated` 水位 + 文件级 mtime 两级；只导已完成消息（`time.completed`），
 因为插入是 `INSERT OR IGNORE`（无法回填）；自带 `cost > 0` 时直接采信总额。
 `opencode` 不在缓存包含白名单，其 input 本就是新鲜输入。
 
-### 12.6 Grok Build（`session_usage_grokbuild.rs`，1310 行）
+### 12.6 Grok Build（`session_usage_grokbuild.rs`，1423 行）
 
 入口 `sync_grokbuild_usage`（`:104`）。`~/.grok/{sessions,archived_sessions}/<enc-cwd>/<sid>/updates.jsonl`；
 `turn_completed` 的 usage 是**该轮独立总量**，源码明令禁止差分；60 秒沉降窗；
 ±10 分钟内有 grokbuild 代理行则整轮跳过（接管守卫）；身份
 `grok_session:{sid}:{turn_key}:{model}` + UPSERT。
 
-### 12.7 Pi（`session_usage_pi.rs`，2086 行）
+### 12.7 Pi（`session_usage_pi.rs`，2229 行）
 
 入口 `sync_pi_usage`（`:168`）。`~/.pi/agent/sessions`；四类载体（assistant / toolResult /
 compaction / branch_summary）；文件 revision 四元组（mtime/size/尾 4096 字节 SHA256/完整位）
@@ -401,7 +419,7 @@ compaction / branch_summary）；文件 revision 四元组（mtime/size/尾 4096
 **v4.0.15（发布说明）**：子代理改为从各自的会话文件导入并带上真实模型/供应商，
 升级后第一次导入起统计、不补算历史。
 
-### 12.8 MiniMax Code（`session_usage_mcode.rs`，336 行）
+### 12.8 MiniMax Code（`session_usage_mcode.rs`，347 行）
 
 入口 `sync_mcode_usage`（`:12`）。SQLite `<data_dir>/v2/sqlite/runtime-state.sqlite` 的
 `local_runtime_token_usage` 表；游标是源表自增 id（存 `last_line_offset`）；
@@ -409,7 +427,7 @@ compaction / branch_summary）；文件 revision 四元组（mtime/size/尾 4096
 **v4.0.16（发布说明）**：模型为 unknown 的记录会从同会话同时间的回复里找回模型名并计价，
 已导入的保持原样。
 
-### 12.9 Antigravity（`session_usage_agy.rs`，290 行）—— v4.0.18 新增
+### 12.9 Antigravity（`session_usage_agy.rs`，302 行）—— v4.0.18 新增
 
 入口 `sync_agy_usage`（`:14`）。完整拆解见
 [`2026-10-22-cc-switch-agy-usage.md`](./2026-10-22-cc-switch-agy-usage.md)，要点：
