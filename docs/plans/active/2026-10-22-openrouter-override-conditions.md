@@ -112,6 +112,7 @@
 | OR03 | `1deef48` | 新增 `one_malformed_model_is_skipped_without_failing_sync`，未改代码时整体失败（`invalid type: integer 123, expected a string`）；新增守卫用例 `all_models_malformed_fails_and_keeps_previous_snapshot`（修复前后都应通过，用来防止回归）。变异验证：去掉“全部异常即失败”的判断，守卫用例失败。缺失 `id`、数字 `id` 两条断言改为“该元素判为非法”，根结构损坏的断言保留 |
 | OR04 联网用例 | `7deaa08` | 加入与 TLS 修复 PR 逐字节相同的 `pricing_live_sync.rs`。带代理实测：OpenRouter 同步成功 461 条；在 468 个模型中，7 个按原有的非法单价规则被拒绝，16 个时间条件档位被跳过（与 §1 统计一致），没有模型因结构异常被跳过。models.dev 8780 条 |
 | OR04 版本 | `9080c28` | 合并最新 main 后递增到 0.5.7，`release: true`，基线校验无警告；完整提交检查通过 |
+| OR04 改号 | 合并提交 | PR #29（0.5.7）先合入为 `999424d`；本分支合入该 main，`release-change.json` 冲突取 main 一侧后用 `bump_version.py --bump patch` 递增到 0.5.8（`previous: 0.5.7`、`release: true`），锁文件随之带入 #29 的 rustls-webpki 0.103.16 / webpki-roots 1.0.10，联网用例即同时覆盖 TLS 修复；登记 v0.5.7 升级基线后推送 |
 
 偏离与说明：
 - 守卫用例的初版 fixture 用了 `"pricing":[]`，实现后它仍然被判为合法模型：serde 允许用数组反序列化结构体，所有字段又都有默认值，于是解析成一个空价格表。这是 fixture 写错了，不是实现的问题，已改为 `"pricing":"not-an-object"`。这一既有行为保持不变。
