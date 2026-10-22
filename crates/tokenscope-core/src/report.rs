@@ -599,7 +599,8 @@ static COLLECT_SERIAL: Mutex<()> = Mutex::new(());
 /// 源文件在下一轮采集**重解析一次**——v2：写入身份升级为"来源键 + 持久身份
 /// 别名"且观察时间改用事件时间，旧实现登记的指纹不再代表当前解析结果；
 /// 重解析让别名补进库内、被旧实现回退的终值按"事件时间更晚者胜出"恢复。
-pub const PARSE_RULES_REVISION: u32 = 2;
+/// v3：补回 Codex 的压缩请求，并应用线程设置模型；文件未变也须重新解析。
+pub const PARSE_RULES_REVISION: u32 = 3;
 /// 观测：当前正在跑的采集管线数与历史峰值（测试断言"不同参数不并行"）。
 static COLLECT_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 static COLLECT_MAX_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
@@ -1541,7 +1542,7 @@ fn collect_all_with_sources(
 
     // H04：按事件时间升序写入历史库——同一请求的多份来源记录在同一批内
     // 按"后写者胜出"合并，与全局去重"取时间戳最晚"的口径一致；写入按来源
-    // 键 + 内容指纹去重，因此重复采集幂等，且文件被替换后旧事实不被覆盖。
+    // 键 + 内容指纹去重；旧 Codex 唯一候选的模型纠正由采集写入入口单独处理。
     events.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.line.cmp(&b.line)));
     // 逐条预检 + 跳过不可写入的事件：单条坏记录（如模型名为空的遗留行）不得
     // 让整批回滚——否则一条坏事件会让**全部采集失败**，连已有历史都无法展示。
@@ -1577,20 +1578,32 @@ fn collect_all_with_sources(
             format!("{count} 条事件字段不合法，未写入历史库（其余照常入账）"),
         ));
     }
-    let write_summary = history.write_batch(&writes)?;
+    let collected_write = history.write_collected_batch(&writes)?;
+    let write_summary = collected_write.events;
+    if collected_write.ambiguous_models > 0 {
+        warnings.push(CollectionWarning::source(
+            AgentKind::Codex,
+            format!(
+                "Codex 模型归属纠正候选不唯一：跳过 {} 条",
+                collected_write.ambiguous_models
+            ),
+        ));
+    }
     // U06：`changed` = 本轮确有新增或更新——决定定时线程是否发变化通知，
     // 也是自动触发下**唯一**保留 info 的依据（没有新数据就没有排障价值）。
     let changed = write_summary.changed_events() > 0;
     path_info!(
-        auto && !changed,
-        "历史库写入：新增 {}，更新 {}，已存在 {}，冲突 {}，陈旧 {}；别名 +{}，来源 +{}",
+        auto && !changed && collected_write.ambiguous_models == 0,
+        "历史库写入：新增 {}，更新 {}，已存在 {}，冲突 {}，陈旧 {}；别名 +{}，来源 +{}；Codex 模型纠正 {}，歧义跳过 {}",
         write_summary.inserted,
         write_summary.updated,
         write_summary.unchanged,
         write_summary.conflicts,
         write_summary.stale,
         write_summary.aliases_added,
-        write_summary.origins_added
+        write_summary.origins_added,
+        collected_write.models_corrected,
+        collected_write.ambiguous_models
     );
     // 指纹登记在用量提交**之后**：崩溃不会出现"指纹已成功但用量没落库"。
     for rec in &registrations {

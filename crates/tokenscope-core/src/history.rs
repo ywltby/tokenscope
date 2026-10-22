@@ -35,8 +35,10 @@ use crate::retry::HISTORY_BUSY_TIMEOUT;
 /// - v2 = 别名 / 来源记录 / CCS 日汇总 / 导入批次四表（H01 起）。
 pub const HISTORY_SCHEMA_VERSION: i64 = 4;
 
-/// 解析规则版本：适配器输出语义变化时递增（与事件一并存储，供重解析判定）。
-pub const PARSER_REVISION: i64 = 1;
+/// 适配器输出语义版本：标记新写入的事件/来源并进入发行指纹，不触发结构迁移。
+/// 旧文件重解析由 report::PARSE_RULES_REVISION 驱动，未纠正的事实保留原版本标记。
+/// v2：Codex 压缩请求配对与线程设置模型归属。
+pub const PARSER_REVISION: i64 = 2;
 
 /// 模型身份规则版本：等价键规则升级时递增（只重建派生键，不删 token 事实）。
 pub const IDENTITY_REVISION: i64 = 1;
@@ -476,6 +478,14 @@ impl WriteSummary {
     pub fn changed_events(&self) -> u64 {
         self.inserted + self.updated
     }
+}
+
+/// 原生采集结果：升级纠正的诊断只存在于本轮，不写入持久计数或查询 DTO。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CollectedWriteSummary {
+    pub events: WriteSummary,
+    pub models_corrected: u64,
+    pub ambiguous_models: u64,
 }
 
 /// 单条写入在库内的处置分类（预览与提交共用同一判定，见
@@ -1280,6 +1290,132 @@ impl HistoryDb {
         }
         tx.commit()?;
         Ok(summary)
+    }
+
+    /// 采集专用的升级例外：仅纠正唯一旧原生 Codex 事实的模型归属。
+    /// CCS 预演/导入仍调用原写入内核，不进入这条候选匹配路径。
+    pub fn write_collected_batch(&self, batch: &[EventWrite]) -> Result<CollectedWriteSummary> {
+        let mut result = CollectedWriteSummary::default();
+        if batch.is_empty() {
+            return Ok(result);
+        }
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let generation = self.generation_in_tx(&tx)?;
+        let mut changed = false;
+        for write in batch {
+            validate_write(write)?;
+            let mut protected_replay = None;
+            let native_codex =
+                write.app == AgentKind::Codex && write.precedence == WritePrecedence::NativeLog;
+            if native_codex {
+                let existing = lookup_event(&tx, write)?;
+                match existing.as_ref() {
+                    Some(existing)
+                        if existing.precedence == WritePrecedence::NativeLog
+                            && existing.parser_revision == PARSER_REVISION
+                            && existing.model_raw != write.model_raw
+                            && same_fact_except_model(existing, write) =>
+                    {
+                        // 旧别名仍指向纠正后的事实；模型单项重播不得撤销升级纠正。
+                        let mut replay = write.clone();
+                        replay.model_raw = existing.model_raw.clone();
+                        replay.model_identity = existing.model_identity.clone();
+                        protected_replay = Some(replay);
+                    }
+                    _ if write.session_id.as_deref().is_some_and(|id| !id.is_empty()) => {
+                        let candidates = old_codex_model_candidates(&tx, write)?;
+                        if candidates.len() > 1 {
+                            result.ambiguous_models += 1;
+                            continue;
+                        }
+                        if let Some(id) = candidates.first() {
+                            if existing.as_ref().is_some_and(|event| event.id != *id) {
+                                // 同一行可已持有双别名；只有另一行占用身份才是冲突。
+                                bail!("身份冲突：Codex 新模型身份与旧模型候选分别指向不同事实");
+                            }
+                            // lookup 可先命中主键；纠正不登记新证据，但不能吞掉来源冲突。
+                            for origin in &write.origins {
+                                if origin.origin_key.is_empty() {
+                                    bail!("来源记录键不得为空（{}）", origin.origin_kind);
+                                }
+                                let owner: Option<i64> = tx
+                                    .query_row(
+                                        "SELECT event_id FROM event_origins
+                                         WHERE origin_kind=?1 AND origin_key=?2",
+                                        params![origin.origin_kind, origin.origin_key],
+                                        |row| row.get(0),
+                                    )
+                                    .optional()?;
+                                if owner.is_some_and(|owner| owner != *id) {
+                                    bail!("来源记录冲突：Codex 模型纠正的来源已指向另一事实");
+                                }
+                            }
+                            tx.execute(
+                                "UPDATE usage_events SET model_raw=?2, model_identity=?3,
+                                    parser_revision=?4 WHERE id=?1",
+                                params![id, write.model_raw, write.model_identity, PARSER_REVISION],
+                            )?;
+                            // 原行和原证据保持；只追加新模型别名，旧别名不删除。
+                            for alias in &write.aliases {
+                                if alias.scheme.is_empty() || alias.value.is_empty() {
+                                    bail!("别名不得为空（scheme/value）");
+                                }
+                                let added = tx.execute(
+                                    "INSERT INTO event_aliases(event_id, app, identity_scheme,
+                                         identity_value, created_generation) VALUES(?1,?2,?3,?4,?5)
+                                     ON CONFLICT(app, identity_scheme, identity_value) DO NOTHING",
+                                    params![
+                                        id,
+                                        alias.app.as_str(),
+                                        alias.scheme,
+                                        alias.value,
+                                        generation as i64
+                                    ],
+                                )?;
+                                let owner: i64 = tx.query_row(
+                                    "SELECT event_id FROM event_aliases WHERE app=?1
+                                         AND identity_scheme=?2 AND identity_value=?3",
+                                    params![alias.app.as_str(), alias.scheme, alias.value],
+                                    |row| row.get(0),
+                                )?;
+                                if owner != *id {
+                                    bail!("模型纠正别名已绑定其他事件，不能改绑");
+                                }
+                                result.events.aliases_added += added as u64;
+                            }
+                            result.models_corrected += 1;
+                            result.events.updated += 1;
+                            changed = true;
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let write = protected_replay.as_ref().unwrap_or(write);
+            let (summary, wrote) =
+                write_events_in_tx(&tx, std::slice::from_ref(write), generation)?;
+            // 分项复用原内核，批次累计仍受检；溢出时包含此前纠正在内全部回滚。
+            result.events.inserted_tokens = result
+                .events
+                .inserted_tokens
+                .checked_add(&summary.inserted_tokens)
+                .ok_or_else(|| anyhow!("本批新增用量累计溢出可表示范围"))?;
+            result.events.inserted += summary.inserted;
+            result.events.updated += summary.updated;
+            result.events.unchanged += summary.unchanged;
+            result.events.conflicts += summary.conflicts;
+            result.events.stale += summary.stale;
+            result.events.overlap_candidates += summary.overlap_candidates;
+            result.events.aliases_added += summary.aliases_added;
+            result.events.origins_added += summary.origins_added;
+            changed |= wrote;
+        }
+        if changed {
+            bump_generation(&tx)?;
+        }
+        tx.commit()?;
+        Ok(result)
     }
 
     /// 单条写入在库内的处置分类（**预览与提交共用同一判定**，因此预览数字
@@ -2432,6 +2568,50 @@ fn lookup_event(conn: &Connection, w: &EventWrite) -> Result<Option<StoredEvent>
     }
 }
 
+fn same_fact_except_model(existing: &StoredEvent, write: &EventWrite) -> bool {
+    existing.app == write.app
+        && existing.ts == write.ts
+        && existing.session_id == write.session_id
+        && existing.record_id == write.record_id
+        && existing.project_key == write.project_key
+        && existing.session_initial_cwd == write.session_initial_cwd
+        && existing.event_cwd == write.event_cwd
+        && existing.tokens == write.tokens
+}
+
+/// 精确时间索引限定候选，再检查四桶与其余事实字段；路径/行号不参与。
+/// 至多取两个即可区分全库唯一与歧义，不用模糊重叠窗口或猜测首条。
+fn old_codex_model_candidates(conn: &Connection, write: &EventWrite) -> Result<Vec<i64>> {
+    let mut statement = conn.prepare(
+        "SELECT id FROM usage_events WHERE app='codex' AND origin_rank=?1
+             AND parser_revision<?2 AND session_id=?3 AND ts_seconds=?4 AND ts_nanos=?5
+             AND model_raw<>?6 AND input_tokens=?7 AND output_tokens=?8
+             AND cache_write_tokens=?9 AND cache_read_tokens=?10
+             AND record_id IS ?11 AND project_key IS ?12
+             AND session_initial_cwd IS ?13 AND event_cwd IS ?14 LIMIT 2",
+    )?;
+    let rows = statement.query_map(
+        params![
+            WritePrecedence::NativeLog.rank(),
+            PARSER_REVISION,
+            write.session_id,
+            write.ts.as_second(),
+            write.ts.subsec_nanosecond() as i64,
+            write.model_raw,
+            write.tokens.input.to_string(),
+            write.tokens.output.to_string(),
+            write.tokens.cache_write.to_string(),
+            write.tokens.cache_read.to_string(),
+            write.record_id,
+            write.project_key,
+            write.session_initial_cwd,
+            write.event_cwd
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// 批内模拟状态（[`HistoryDb::classify_batch`] 用）：身份 → 事实 → 统一终值。
 struct BatchSim {
     /// 身份键（`k|来源键`、`o|来源记录键`、`a|app|scheme|value`）→ 事实 ID。
@@ -2901,6 +3081,108 @@ fn bump_generation(tx: &Transaction<'_>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn collected_model_write(key: &str, model: &str) -> EventWrite {
+        EventWrite {
+            event_key: key.into(),
+            app: AgentKind::Codex,
+            ts: "2026-10-22T08:00:00.123456789Z".parse().unwrap(),
+            model_raw: model.into(),
+            model_identity: crate::model_identity::ModelIdentity::parse(model).identity_key(),
+            session_id: Some("synthetic-collection-model".into()),
+            record_id: None,
+            project_key: None,
+            session_initial_cwd: None,
+            event_cwd: None,
+            tokens: TokenCounts {
+                input: 80,
+                output: 10,
+                cache_write: 0,
+                cache_read: 20,
+            },
+            precedence: WritePrecedence::NativeLog,
+            observed_at: "2026-10-22T08:00:00.123456789Z".parse().unwrap(),
+            aliases: vec![EventAlias {
+                app: AgentKind::Codex,
+                scheme: "codex-usage".into(),
+                value: format!("synthetic-collection-model|{model}|80|10|0|20"),
+            }],
+            origins: vec![EventOrigin {
+                origin_kind: ORIGIN_KIND_NATIVE_FILE.into(),
+                origin_key: key.into(),
+                app: AgentKind::Codex,
+                import_run_id: None,
+                parser_revision: 1,
+                source_model_raw: None,
+                pricing_model: None,
+                source_cost_usd: None,
+                ts_precision_seconds: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn protected_model_replay_still_rejects_identity_conflicts_and_rolls_back_batch() {
+        for conflict_is_alias in [true, false] {
+            let db = HistoryDb::open(Path::new(":memory:")).unwrap();
+            let old = collected_model_write("old", "model-a");
+            let unrelated = collected_model_write("other", "model-c");
+            db.write_batch(&[old.clone(), unrelated.clone()]).unwrap();
+            db.conn
+                .execute(
+                    "UPDATE usage_events SET parser_revision=1 WHERE event_key='old'",
+                    [],
+                )
+                .unwrap();
+            let correction = db
+                .write_collected_batch(&[collected_model_write("new", "model-b")])
+                .unwrap();
+            assert_eq!(correction.models_corrected, 1);
+            let before = db.stored_events().unwrap();
+            let generation = db.generation().unwrap();
+            let mut replay = old;
+            if conflict_is_alias {
+                replay.aliases.push(unrelated.aliases[0].clone());
+            } else {
+                replay.origins.push(unrelated.origins[0].clone());
+            }
+            let inserted = collected_model_write("insert-before-conflict", "model-d");
+            let result = db.write_collected_batch(&[inserted, replay]);
+            assert!(result.is_err(), "保护旧模型回放仍必须校验身份冲突");
+            assert_eq!(db.stored_events().unwrap(), before);
+            assert_eq!(db.generation().unwrap(), generation);
+        }
+    }
+
+    #[test]
+    fn model_correction_rejects_conflicting_origin_and_rolls_back_prior_writes() {
+        let db = HistoryDb::open(Path::new(":memory:")).unwrap();
+        let old = collected_model_write("old", "model-a");
+        let unrelated = collected_model_write("other", "model-c");
+        db.write_batch(&[old, unrelated.clone()]).unwrap();
+        db.conn
+            .execute(
+                "UPDATE usage_events SET parser_revision=1 WHERE event_key='old'",
+                [],
+            )
+            .unwrap();
+        let before = db.stored_events().unwrap();
+        let generation = db.generation().unwrap();
+        let mut correction = collected_model_write("old", "model-b");
+        correction.origins.push(unrelated.origins[0].clone());
+        let mut inserted = collected_model_write("insert-before-conflict", "model-d");
+        inserted.ts = "2026-10-22T08:00:01.123456789Z".parse().unwrap();
+        inserted.observed_at = inserted.ts;
+        let result = db.write_collected_batch(&[inserted, correction]);
+        assert!(result.is_err(), "模型纠正不能绕过已绑定另一事实的来源冲突");
+        assert_eq!(db.stored_events().unwrap(), before);
+        assert_eq!(db.generation().unwrap(), generation);
+        let aliases: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM event_aliases", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(aliases, 2, "不得残留纠正或前条插入的别名");
+    }
 
     #[test]
     fn token_text_parsing_rejects_bad_values() {

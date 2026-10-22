@@ -478,7 +478,13 @@ mod tests {
         assert_eq!(events.len(), 6);
         assert_eq!(events[3].phase, "failed");
         // 终态时刻单调不回退（同一时刻可能相等，绝不倒退）。
-        assert!(failed.last_completed_at.unwrap() >= failed_at.unwrap());
+        let previous_completed_at = failed_at.unwrap();
+        let completed_at = failed.last_completed_at.unwrap();
+        assert!(
+            completed_at.parse::<jiff::Timestamp>().unwrap()
+                >= previous_completed_at.parse::<jiff::Timestamp>().unwrap(),
+            "完成时间不应倒退：previous={previous_completed_at}, current={completed_at}"
+        );
     }
 
     #[test]

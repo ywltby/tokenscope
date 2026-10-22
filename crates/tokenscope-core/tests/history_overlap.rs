@@ -581,3 +581,82 @@ fn agent_filter_keeps_imported_history_visible() {
     assert_eq!(summary(&other).unwrap().totals.requests, 0);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn codex_compaction_ccs_union_is_independent_of_import_order() {
+    use tokenscope::source::{Source, codex::CodexSource};
+    let mut results = Vec::new();
+    for ccs_first in [false, true] {
+        let dir = temp_dir("codex-compaction");
+        let root = dir.join("codex");
+        std::fs::create_dir_all(&root).unwrap();
+        let lines = [
+            serde_json::json!({"type":"session_meta","payload":{"id":"synthetic-root","cwd":"C:/synthetic"}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"synthetic-model"}}),
+            serde_json::json!({"type":"token_usage_record","timestamp":"2026-07-17T15:59:00Z","payload":{"response_id":"synthetic-response","usage":{"input_tokens":26705,"output_tokens":491,"cached_input_tokens":12000,"cache_write_input_tokens":3000,"total_tokens":27196}}}),
+            serde_json::json!({"type":"event_msg","timestamp":"2026-07-17T16:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":99999}}}}),
+        ];
+        std::fs::write(
+            root.join("rollout.jsonl"),
+            lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let db = dir.join("cc-switch.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(CCS_SCHEMA).unwrap();
+            // CCS 新版保存归一化四桶；不读取真实 CCS 库。
+            conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,session_id,created_at,data_source,input_token_semantics) VALUES('codex_thread:synthetic-root:usage:synthetic-response','p','codex','synthetic-model',11705,491,12000,3000,'synthetic-root',1784303940,'codex_session',2)", []).unwrap();
+        }
+        let mut options = opts(&dir, &dir.join("no-claude"), "UTC");
+        options.claude_enabled = Some(false);
+        options.codex_enabled = Some(true);
+        options.codex_dir = Some(root.clone());
+        if ccs_first {
+            import_all(&dir, "UTC");
+        }
+        let first = summary(&options).unwrap();
+        assert_eq!(
+            first.totals.requests, 1,
+            "原生采集必须补回压缩，ccs_first={ccs_first}"
+        );
+        if !ccs_first {
+            import_all(&dir, "UTC");
+        }
+        let combined = summary(&options).unwrap();
+        assert_eq!(combined.totals.requests, 1);
+        let tokens = &combined.totals.tokens;
+        assert_eq!(
+            (
+                tokens.input,
+                tokens.output,
+                tokens.cache_write,
+                tokens.cache_read
+            ),
+            (11705, 491, 3000, 12000)
+        );
+        let parsed = CodexSource::new(&root).collect().unwrap();
+        assert_eq!(parsed.events.len(), 1, "两种顺序都必须具有原生压缩证据");
+        let history = HistoryDb::open(&dir.join("data/history.db")).unwrap();
+        assert_eq!(history.event_count().unwrap(), 1);
+        assert_eq!(
+            history
+                .stored_events_filtered(Some(AgentKind::Codex))
+                .unwrap()
+                .len(),
+            1
+        );
+        results.push((combined.totals.requests, *tokens));
+        drop(history);
+        for id in [&first.query_id, &combined.query_id] {
+            tokenscope::query::backdate_query_for_tests(id, tokenscope::query::QUERY_IDLE_TTL);
+            tokenscope::query::query_summary(id).expect_err("仅回收本用例查询");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    assert_eq!(results[0], results[1]);
+}
