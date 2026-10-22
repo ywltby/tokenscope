@@ -148,6 +148,11 @@ pub struct SyncReport {
     /// 既有日志路径记录）。
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// 结构化诊断（类别键在产生处确定），与 `warnings` 平行且同序；
+    /// 同步函数本身不写日志，由调用方经 `sync_diag::log_sync_warnings`
+    /// 统一记录。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<crate::sync_diag::SyncWarning>,
 }
 
 /// Task 7.4 / RC08：解析单价——`None` 表示字段缺失（未知），非负有限数值
@@ -214,6 +219,25 @@ fn fetch_openrouter(_snapshot_path: &Path) -> Result<ApiResponse> {
         .context("解析 OpenRouter 响应失败")
 }
 
+/// 同步丢弃诊断的统一入口：`warnings`（字符串，内容与顺序保持不变）与
+/// `diagnostics`（结构化，类别键在此确定）平行收集；此处不写日志，调用方
+/// 经 `sync_diag::log_sync_warnings` 统一记录。
+fn push_warning(
+    warnings: &mut Vec<String>,
+    diagnostics: &mut Vec<crate::sync_diag::SyncWarning>,
+    category: &'static str,
+    model: &str,
+    text: String,
+) {
+    warnings.push(text.clone());
+    diagnostics.push(crate::sync_diag::SyncWarning {
+        category,
+        model: model.to_string(),
+        detail: format!("OpenRouter 同步丢弃数据: {text}"),
+        for_summary: true,
+    });
+}
+
 /// 可注入 fetch 的同步实现（测试 mock，不请求真实服务）。
 pub(crate) fn sync_with(
     snapshot_path: &Path,
@@ -225,6 +249,7 @@ pub(crate) fn sync_with(
     let mut parsed_models = 0u64;
     let mut malformed = 0u64;
     let mut warnings: Vec<String> = Vec::new();
+    let mut diagnostics: Vec<crate::sync_diag::SyncWarning> = Vec::new();
     let mut entries: Vec<SnapshotEntry> = Vec::new();
     for (index, item) in body.data.into_iter().enumerate() {
         // OR03：结构无法解析的模型只跳过它自己；取得到字符串 id 就用 id
@@ -235,7 +260,13 @@ pub(crate) fn sync_with(
                 rejected += 1;
                 malformed += 1;
                 let label = id.unwrap_or_else(|| format!("#{index}"));
-                warnings.push(format!("{label}: 模型结构无法解析，已跳过（{reason}）"));
+                push_warning(
+                    &mut warnings,
+                    &mut diagnostics,
+                    "malformed_model",
+                    &label,
+                    format!("{label}: 模型结构无法解析，已跳过（{reason}）"),
+                );
                 continue;
             }
         };
@@ -273,31 +304,46 @@ pub(crate) fn sync_with(
         }
         if !invalid.is_empty() {
             rejected += 1;
-            warnings.push(format!(
-                "{}: 存在非法单价，整条模型已拒绝（{}）",
-                m.id,
-                invalid.join("; ")
-            ));
+            push_warning(
+                &mut warnings,
+                &mut diagnostics,
+                "invalid_price_rejected",
+                &m.id,
+                format!(
+                    "{}: 存在非法单价，整条模型已拒绝（{}）",
+                    m.id,
+                    invalid.join("; ")
+                ),
+            );
             continue;
         }
         // Task 3：条件价格 overrides → 快照档（升序、同阈值去重、脏数据跳过）。
         let mut overrides: Vec<SnapshotOverride> = Vec::new();
         for o in &p.overrides {
-            let mut skip = |reason: String| {
-                warnings.push(format!("{}: override 已跳过: {reason}", m.id));
+            let mut skip = |category: &'static str, reason: String| {
+                push_warning(
+                    &mut warnings,
+                    &mut diagnostics,
+                    category,
+                    &m.id,
+                    format!("{}: override 已跳过: {reason}", m.id),
+                );
             };
             if o.has_time_condition() {
-                skip("含时间条件（utc_start/utc_end/utc_days），暂不支持".into());
+                skip(
+                    "override_time_skipped",
+                    "含时间条件（utc_start/utc_end/utc_days），暂不支持".into(),
+                );
                 continue;
             }
             let Some(min) = o
                 .min_prompt_tokens
                 .filter(|v| v.is_finite() && *v >= 0.0 && v.fract() == 0.0)
             else {
-                skip(format!(
-                    "min_prompt_tokens 非法或缺失: {:?}",
-                    o.min_prompt_tokens
-                ));
+                skip(
+                    "override_invalid_threshold",
+                    format!("min_prompt_tokens 非法或缺失: {:?}", o.min_prompt_tokens),
+                );
                 continue;
             };
             let rates = [
@@ -307,7 +353,7 @@ pub(crate) fn sync_with(
                 parse_price(&o.input_cache_write),
             ];
             if let Some(Err(reason)) = rates.iter().find(|r| r.is_err()) {
-                skip(reason.clone());
+                skip("override_invalid_price", reason.clone());
                 continue;
             }
             let [prompt, completion, cache_read, cache_write] = rates.map(|r| r.unwrap());
@@ -326,10 +372,16 @@ pub(crate) fn sync_with(
                 .last()
                 .is_some_and(|prev| prev.min_prompt_tokens == o.min_prompt_tokens)
             {
-                warnings.push(format!(
-                    "{}: 重复 min_prompt_tokens {}，保留首个",
-                    m.id, o.min_prompt_tokens
-                ));
+                push_warning(
+                    &mut warnings,
+                    &mut diagnostics,
+                    "duplicate_override_threshold",
+                    &m.id,
+                    format!(
+                        "{}: 重复 min_prompt_tokens {}，保留首个",
+                        m.id, o.min_prompt_tokens
+                    ),
+                );
                 continue;
             }
             deduped.push(o);
@@ -349,12 +401,15 @@ pub(crate) fn sync_with(
             Ok(e) => entries.push(e),
             Err(reason) => {
                 rejected += 1;
-                warnings.push(format!("{}: {reason}", m.id));
+                push_warning(
+                    &mut warnings,
+                    &mut diagnostics,
+                    "base_price_rejected",
+                    &m.id,
+                    format!("{}: {reason}", m.id),
+                );
             }
         }
-    }
-    for w in &warnings {
-        log::warn!("OpenRouter 同步丢弃数据: {w}");
     }
     let _ = rejected;
     // OR03：全部模型结构都无法解析 → 整次失败，不写出空快照覆盖已有价格。
@@ -382,6 +437,7 @@ pub(crate) fn sync_with(
         path: snapshot_path.display().to_string(),
         synced_at,
         warnings,
+        diagnostics,
     })
 }
 
@@ -392,6 +448,14 @@ pub(crate) fn sync_with(
 #[derive(Debug, Deserialize)]
 pub(crate) struct ApiResponse {
     pub(crate) data: Vec<ApiEntry>,
+}
+
+/// 测试专用（`#[doc(hidden)]`）：以固定 JSON 响应体跑一次同步，不联网
+///（与 modelsdev 的同名辅助对称）。
+#[doc(hidden)]
+pub fn sync_with_body_for_tests(snapshot_path: &Path, body: &str) -> Result<SyncReport> {
+    let parsed: ApiResponse = serde_json::from_str(body)?;
+    sync_with(snapshot_path, || Ok(parsed))
 }
 
 /// `data` 中的一个元素：可解析的模型，或结构无法解析的模型（不放宽字段
@@ -1229,6 +1293,123 @@ mod tests {
                 .any(|w| w.starts_with("prov/days-only") && w.contains("min_prompt_tokens")),
             "跳过原因必须是时间条件: {:?}",
             report.warnings
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── 同步告警汇总（2026-10-22 计划）──────────────────────────
+
+    /// golden 基准的合成响应（与基准生成器一致）：结构异常、非法单价、
+    /// 时间条件、重复阈值、数字单价与显式 0 混合。
+    fn golden_body() -> String {
+        r#"{"data": [
+  {"id": "prov/ok", "name": "Ok", "pricing": {"prompt": "0.000003", "completion": "0.000015",
+      "input_cache_read": "0.0000003", "input_cache_write": "0.00000375",
+      "overrides": [{"min_prompt_tokens": 200000, "prompt": "0.000006", "completion": "0.00003"},
+                    {"min_prompt_tokens": 100000, "prompt": "0.000004", "completion": "0.00002"}]}},
+  {"id": "prov/timed", "name": "Timed", "pricing": {"prompt": "0.000001", "completion": "0.000002",
+      "overrides": [{"utc_days": ["saturday", "sunday"], "min_prompt_tokens": 1000,
+                     "prompt": "0.0000001", "completion": "0.0000001"},
+                    {"min_prompt_tokens": 50000, "prompt": "0.000002", "completion": "0.000004"}]}},
+  {"id": "prov/dup", "name": "Dup", "pricing": {"prompt": "0.000001", "completion": "0.000002",
+      "overrides": [{"min_prompt_tokens": 100000, "prompt": "0.000005", "completion": "0.000009"},
+                    {"min_prompt_tokens": 100000, "prompt": "0.000099", "completion": "0.000099"}]}},
+  {"id": "prov/neg", "name": "Neg", "pricing": {"prompt": "-0.001", "completion": "0.002"}},
+  {"id": 123, "pricing": {"prompt": 0}},
+  {"id": "prov/zero", "name": "Zero", "pricing": {"prompt": 0, "completion": 0}}
+]}"#
+            .to_string()
+    }
+
+    /// 快照里随同步时刻变化的 synced_at 归一为占位符，其余字节保持原样。
+    fn normalize_synced_at(raw: &[u8]) -> Vec<u8> {
+        let text = String::from_utf8(raw.to_vec()).expect("快照必须是 UTF-8");
+        let marker = "\"synced_at\": \"";
+        let start = text.find(marker).expect("快照缺 synced_at") + marker.len();
+        let end = start + text[start..].find('"').expect("synced_at 值未闭合");
+        format!("{}SYNCED_AT{}", &text[..start], &text[end..]).into_bytes()
+    }
+
+    /// 不变量 7：同一份上游响应，改造前后快照逐字节相同（synced_at 除外）；
+    /// `SyncReport.warnings` 的字符串内容与顺序也不变。
+    #[test]
+    fn golden_snapshot_bytes_and_warnings_unchanged() {
+        let dir = std::env::temp_dir().join(format!("tokenscope-golden-or-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pricing-openrouter.json");
+        let report = sync_with_body_for_tests(&path, &golden_body()).unwrap();
+        assert_eq!(report.count, 4, "ok/timed/dup/zero 四个模型入快照");
+        let actual = normalize_synced_at(&std::fs::read(&path).unwrap());
+        let expected = std::fs::read("tests/fixtures/openrouter/snapshot-golden.json")
+            .expect("golden 基准 fixture 缺失");
+        assert_eq!(
+            String::from_utf8_lossy(&actual),
+            String::from_utf8_lossy(&expected),
+            "快照字节与改造前基准不一致"
+        );
+        // warnings 字符串内容与顺序保持不变（4 条：时间条件/重复阈值/非法单价/结构异常）。
+        let warnings: Vec<&str> = report.warnings.iter().map(String::as_str).collect();
+        assert_eq!(warnings.len(), 4, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("prov/timed:") && warnings[0].contains("含时间条件"),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings[1].starts_with("prov/dup:") && warnings[1].contains("重复 min_prompt_tokens"),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings[2].starts_with("prov/neg:") && warnings[2].contains("整条模型已拒绝"),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings[3].starts_with("#4:") && warnings[3].contains("模型结构无法解析"),
+            "{warnings:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// LA01/LA02：sync_with 另带结构化 diagnostics，与 warnings 平行同序，
+    /// 类别键在产生处确定。
+    #[test]
+    fn sync_report_carries_parallel_diagnostics() {
+        let dir = std::env::temp_dir().join(format!("tokenscope-diag-or-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pricing-openrouter.json");
+        let report = sync_with_body_for_tests(&path, &golden_body()).unwrap();
+        assert_eq!(
+            report.diagnostics.len(),
+            report.warnings.len(),
+            "diagnostics 与 warnings 平行: {:?}",
+            report.diagnostics
+        );
+        for (d, w) in report.diagnostics.iter().zip(&report.warnings) {
+            assert_eq!(d.detail, format!("OpenRouter 同步丢弃数据: {w}"), "{d:?}");
+            assert!(d.for_summary, "OpenRouter 告警全部进入 WARN 汇总: {d:?}");
+        }
+        let categories: Vec<&str> = report.diagnostics.iter().map(|d| d.category).collect();
+        assert_eq!(
+            categories,
+            [
+                "override_time_skipped",
+                "duplicate_override_threshold",
+                "invalid_price_rejected",
+                "malformed_model",
+            ],
+            "类别按产生顺序: {categories:?}"
+        );
+        // 结构异常的模型 id 用数组序号标签。
+        assert_eq!(
+            report.diagnostics[3].model, "#4",
+            "{:?}",
+            report.diagnostics[3]
+        );
+        assert_eq!(
+            report.diagnostics[2].model, "prov/neg",
+            "{:?}",
+            report.diagnostics[2]
         );
         std::fs::remove_dir_all(&dir).ok();
     }

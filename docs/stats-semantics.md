@@ -495,13 +495,24 @@ model 纳入键：**跨模型**的同用量请求不再误合并；重播必然�
   左闭右开，basis 为 `prompt_tokens = input + cache_write + cache_read`
   （output 不参与档位选择）。models.dev `tiers`（`type=context`）语义
   为 size = S 时短档覆盖 prompt <= S、高档从 S+1 开始，快照存转换后的
-  规范分段；`context_over_200k` 仅在无等价 tiers 时生效。OpenRouter
+  规范分段；`context_over_200k` 仅在无等价 tiers 时生效——上游为兼容
+  旧客户端会把档位价同时填进旧字段，此时按旧字段已给出的单价项与
+  分界点最小的 context 档逐项比较（浮点 `==`，两侧来自上游同一十进制
+  字面量）：完全相等属**兼容字段**，只写 debug 明细、不算冲突；任一项
+  不等才是真冲突。两种情况的计价都只用 tiers，分段结果相同。OpenRouter
   `overrides` 的 `min_prompt_tokens` 按**包含**下界命中（快照保留原
   语义）；两者同名数字不共用未转换的边界。外置 TOML 支持
   `[[model.segment]]`（`[min, max)`，末档省略 max_tokens 即无上限）与
   可选 `basis`/`application`（当前仅支持 `prompt_tokens`/
   `whole_request`，其他值显式拒绝）；非法条目整条忽略并给出诊断，不
   静默回退。
+- **同步告警的收集与记录（2026-10-22）**：models.dev 与 OpenRouter 的
+  同步函数只收集结构化告警（稳定类别键在产生告警的位置确定），自身不
+  写日志；手动与自动同步在调用方经核心库 `sync_diag::log_sync_warnings`
+  统一记录——默认（info）级别每个来源每类告警至多一条 WARN 汇总（写明
+  来源、类别、受影响模型数、告警条数与按字典序取的前 3 个模型示例），
+  逐条明细降为 debug（文本与逐条记录时代一致）。同一告警只写一次，无
+  告警不出 WARN。
 - **峰谷时间规则（Task 4A）**：外置 `[[model.schedule]]` + `period`
   （时区、`HH:MM`–`HH:MM` 左闭右开窗口、可选星期限制、价格覆盖）。命中
   档的价格层序为 分段显式值 > 时间规则值 > 基础价；同一候选多条规则
