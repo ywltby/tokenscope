@@ -1,5 +1,9 @@
 # 价格同步 TLS 信任修复：eMudhra 中间 CA 私钥泄露
 
+> **2026-10-22 归档复核：TF01–TF03 及本专项自身验收已完成。** [PR #29](https://github.com/ywltby/tokenscope/pull/29) 普通合并 `999424d`，v0.5.7 已发布，main 的 CI、Native UI E2E、Release 均成功。OpenRouter 解析故障由 [PR #30](https://github.com/ywltby/tokenscope/pull/30) 修复并发布 v0.5.8；在同时包含 TLS 更新和解析修复的 main `cb35f83` 上，现有显式联网用例两项均通过，OpenRouter 461 条、models.dev 8733 条，临时快照读回成功。v0.5.7 已登记为升级基线，v0.5.8 基线由同批的 `7f0618f` 单独登记。该专项无独立待验项；OpenRouter 安装后设置页人工同步属于其专项及[整合计划 N11](../../active/2026-10-11-consolidated-remaining-work.md#n11最新项目模型与-ccs-的原生统一验收)，未借本用例标为通过。
+
+## 归档前原文
+
 > 状态：**用户 2026-10-22 要求先写计划再执行**。本计划是一次独立的安全依赖更新，不占整合计划的责任编号。合并并验证发布后归档到 `archive/implemented/`，并在计划总账登记。
 > 本次依赖更新由用户明确批准，不属于 CLAUDE.md 所说的“顺手更新第三方依赖”。
 
@@ -84,7 +88,12 @@
 - 不变量 2 要求“两个价格源的真实同步都成功”。本 PR 只能证明 OpenRouter 的 TLS 与下载成功，解析修复由 OpenRouter 修复 PR 完成，届时用同一个联网用例复验。
 - `build_inputs.py --check` 第一次运行时与联网用例的构建抢占文件锁，没有得到结论。完整模式的提交钩子不包含这项检查，所以在版本递增后单独重跑：退出码 0，`missing`、`stale`、`changed` 均为空，清单不需要更新。新版 `rustls-webpki` 用 `include_bytes!` 引入的数据文件在依赖包内部，不在本仓清单的收录范围内。
 
-合并后待验：main 的 Release 构建、安装、单跳升级、连续升级链与 v0.5.7 发布；随后登记 v0.5.7 基线并归档本计划。
+合并后验收（2026-10-22 回填）：
+
+- PR #29 合并 `999424d`，main 的 [CI 39719161825](https://github.com/ywltby/tokenscope/actions/runs/39719161825)、[Native UI E2E 39719161890](https://github.com/ywltby/tokenscope/actions/runs/39719161890)、[Release 39719161921](https://github.com/ywltby/tokenscope/actions/runs/39719161921) 全成功。Release 的构建、安装、六组单跳升级、两条连续升级链、publish 均实际成功，[v0.5.7](https://github.com/ywltby/tokenscope/releases/tag/v0.5.7) 已公开；基线登记提交 `4e83895` 的同一记录已随 PR #32 合入 main。
+- 原 TF02 的 OpenRouter 解析失败已由 PR #30 修复。受测提交 `cb35f832b0113756fb3ce35ec785df2b3ecf219a`，命令为 `TOKENSCOPE_LIVE_PRICING=1 cargo test --locked -p tokenscope --test pricing_live_sync -- --ignored --nocapture`（PowerShell 以环境变量设置开关），两项通过；2026-10-22 13:53（Asia/Shanghai）OpenRouter 同步 461 条、models.dev 同步 8733 条，并各自读回快照核对条数。快照只写临时目录，不触碰真实 `~/.tokenscope`。
+- 测试二进制 SHA-256：`c5355789da3cd97047492afdecbe38a43eab68b49f346a2263809e5e71213872`。日志与源码/产物身份保留在本机 `collection-status-timing` 工作树的 `qa-artifacts/timing-fix/combined-pricing-live.log`、`combined-pricing-live-identity.json`。此证据证明 TLS 与解析修复的组合可用，不替代安装后 GUI 操作。
+- PR #30 的 main CI、原生及 Release 亦全成功，v0.5.8 已公开，详见其[归档记录](../partial/2026-10-22-openrouter-override-conditions.md)。本专项自身验收闭合，归档到 `implemented/`。
 
 ## 6. 本机其他软件（用户自行处理，不属于本仓改动）
 
