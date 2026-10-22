@@ -24,6 +24,7 @@ import { nativeCollectionStatus } from "./contracts/native-collection-status.mjs
 import { nativeSourcePaths } from "./contracts/native-source-paths.mjs";
 import { nativeIdentity } from "./contracts/native-identity.mjs";
 import { nativeCcsImport } from "./contracts/native-ccs-import.mjs";
+import { nativePricing, preparePricingScenario } from "./contracts/native-pricing.mjs";
 import { nativeUiRelaunch, nativeUiSystem } from "./contracts/native-ui-system.mjs";
 import { decodePng } from "./lib/png.mjs";
 import { startAcceptanceIo, readAcceptanceTrace, snapshotBusinessFiles, changedBusinessFiles,
@@ -1363,6 +1364,7 @@ async function measureA11y(page) {
 const scenarios = {
   "ui-identity": nativeIdentity,
   "ui-ccs-import": nativeCcsImport,
+  "ui-pricing": nativePricing,
   "ui-refresh": nativeUiRefresh,
   "ui-system": nativeUiSystem,
   // PR2：真实采集生命周期 + 读取显示期 + 失败恢复 + 翻页保护（验收注入驱动慢轮次与失败）。
@@ -2389,7 +2391,7 @@ async function main() {
         : SCENARIO === "csp" ? { TOKENSCOPE_ACCEPTANCE_CSP: "1" }
         : SCENARIO === "close-remember-failure" ? { TOKENSCOPE_ACCEPTANCE_HIDE_FAILURE_ONCE: "1" } : {}),
     },
-    mutate: SCENARIO === "fault-logs-file" ? (r) => {
+    mutate: SCENARIO === "ui-pricing" ? preparePricingScenario : SCENARIO === "fault-logs-file" ? (r) => {
       const p = path.join(r, "tokenscope", "logs");
       fs.mkdirSync(path.dirname(p), { recursive: true });
       if (fs.existsSync(p) && fs.statSync(p).isDirectory()) throw new Error("logs 已是目录，无法注入文件故障");
@@ -2594,7 +2596,7 @@ async function main() {
       scenarioError = e;
       ck.add("scenario_executed", false, String(e.message ?? e));
       ev.error = String(e.stack ?? e).slice(0, 800);
-      if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-relaunch" || SCENARIO === "ui-source-paths" || SCENARIO === "ui-identity" || SCENARIO === "ui-ccs-import") {
+      if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-relaunch" || SCENARIO === "ui-source-paths" || SCENARIO === "ui-identity" || SCENARIO === "ui-ccs-import" || SCENARIO === "ui-pricing") {
         // S00：失败截图/DOM 取证有短上限，无法完成就跳过并记原因（计划 §9.1 第 5 条）
         try {
           await withTimeout(
@@ -2631,7 +2633,7 @@ async function main() {
           if (
             SCENARIO === "ui-refresh" ||
             SCENARIO === "ui-system" ||
-            SCENARIO === "ui-source-paths" || SCENARIO === "ui-identity" || SCENARIO === "ui-ccs-import"
+            SCENARIO === "ui-source-paths" || SCENARIO === "ui-identity" || SCENARIO === "ui-ccs-import" || SCENARIO === "ui-pricing"
           ) {
             const logs = path.join(root, "tokenscope", "logs");
             if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
@@ -2684,7 +2686,7 @@ async function main() {
 
   // UI 刷新/来源目录验收保留合成来源的应用日志，失败也能核对采集/查询实际发生过。
   // 使用 copyDirSync 代替 fs.cpSync 避免 Windows GBK 环境下 C++ 绑定因中文路径编码产生乱码目录。
-  if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-source-paths" || SCENARIO === "ui-identity" || SCENARIO === "ui-ccs-import") {
+  if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-source-paths" || SCENARIO === "ui-identity" || SCENARIO === "ui-ccs-import" || SCENARIO === "ui-pricing") {
     const logs = path.join(root, "tokenscope", "logs");
     if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
   }
