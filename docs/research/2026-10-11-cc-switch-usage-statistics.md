@@ -542,6 +542,24 @@ models.dev 面板、同步/重建 toast），Hero、趋势图、请求日志表�
 - 30 天剪枝的精度损失只在代码注释里，用户手册未披露；
 - `agy_session` 未进跨源去重白名单是"因为它没有代理面"——这类例外必须有明确理由，否则会静默错账。
 
+### 15.1 跟进核对：Claude/Codex token 用量（2026-10-22）
+
+只看 token 用量；首字时间、生成速度不在 TokenScope 范围内。v4.0.8 → v4.0.18 中触及 Claude/Codex 会话适配器的提交逐个核对了 PR 说明与实现，并在本机 `~/.codex` 的 68 个 rollout 文件上只读统计（只输出计数与合计，脚本不入库）。§16 中「v4.0.10–4.0.17 只读了 release notes」一句，对下表与 Codex 用量有关的几项已不再适用。
+
+| cc-switch 改动 | 对 TokenScope 的影响 | 本机实测 | 结论 |
+| --- | --- | --- | --- |
+| Codex 远程压缩用量（PR #8479，`8cfe5644`） | **漏计**：TokenScope 把 `token_usage_record` 当作累计回显忽略，又把随后全 0 的 `last_token_usage` 当零分量占位行跳过 | 5555 条记录中 5511 条与随后的 `token_count` 四分量完全相同，44 条压缩被跳过；漏计输入 10,712,650（缓存命中 9,532,672）、输出 205,483，占 Codex 总量的输入 0.22%、输出 1.18% | 跟进，见[计划](../plans/active/2026-10-22-codex-compaction-usage.md) |
+| Codex 线程设置切换模型（PR #8176，`68122bc4`） | 潜在风险：TokenScope 只从 `turn_context` 取模型 | 564 条 `thread_settings_applied` 中 7 条改变模型，但之后都先有新的 `turn_context`，没有用量归错 | 一起跟进 |
+| Codex 分叉父线程的分页续写（PR #8213、#8290） | 不受影响：TokenScope 不定位父线程文件 | 21 个子线程文件都带父线程的 `session_meta`、会话 id 相同，现有 `(会话, 模型, 四桶)` 去重合并 3489 条重放 | 不跟进 |
+| 父 rollout 非法 UTF-8 记录（PR #8360） | 不受影响：TokenScope 按 lossy 读取，坏行计数跳过，同文件其余行照常 | — | 不跟进 |
+| Claude 适配器（`a0dd3b39`、`ad9f0f20`、`c7dceb80`） | 只有首字时间与计价缓存；token 口径不变 | — | 不跟进 |
+| 库版本 20 → 21 | 只给 MCP/技能表加 agy 开关；`proxy_request_logs`、`usage_daily_rollups` 不变；TokenScope 不以版本号判定支持性，`agy` 行在导入预览中列为不支持 | — | 不跟进 |
+
+两点修正此前的认识：
+
+- `token_usage_record.payload.usage` 是**单次**用量（与 `token_count.last_token_usage` 同口径），累计值在 `thread_token_usage` / `turn_token_usage`。`docs/stats-semantics.md` §2.2「线程级累计回显」的说法需随计划一并改正。
+- cc-switch 把分叉重放中的压缩记录列为未解决项（issue 7917 第 1 项）；TokenScope 的子线程使用根会话 id，重放与父文件命中同一保守身份，补计压缩用量后仍需用测试证明不重复。
+
 ## 16. 未验证项与已知风险
 
 - 本文行号基于 `cb90a244`；后续提交会漂移。
