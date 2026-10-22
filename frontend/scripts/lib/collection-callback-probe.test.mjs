@@ -59,3 +59,25 @@ it("回调抛错时保留原错误，不能记录成功的处理结束", () => {
 it("不支持的 Tauri 调试接口必须报错，不回退到轮询猜测", () => {
   expect(() => observeCollectionCallbacks({}, () => 1)).toThrow();
 });
+it("同一页面时钟可取得本轮 running 与 failed 的真实回调边界", () => {
+  let time = 100;
+  const callbacks = new Map([
+    [
+      1,
+      () => {
+        time += 0.25;
+      },
+    ],
+  ]);
+  const probe = observeCollectionCallbacks({ callbacks }, () => time);
+  callbacks.get(1)({ event: "collection-status", payload: { phase: "running", runId: 2 } });
+  time = 2600;
+  callbacks.get(1)({ event: "collection-status", payload: { phase: "failed", runId: 2 } });
+  expect(probe.read()).toEqual([
+    { kind: "status-enter", at_ms: 100, phase: "running", runId: 2 },
+    { kind: "status-exit", at_ms: 100.25, phase: "running", runId: 2 },
+    { kind: "status-enter", at_ms: 2600, phase: "failed", runId: 2 },
+    { kind: "status-exit", at_ms: 2600.25, phase: "failed", runId: 2 },
+  ]);
+  probe.dispose();
+});
