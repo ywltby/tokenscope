@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "补计 Codex 压缩用量并应用线程设置模型；升级后历史总量会小幅增加，已删除的来源日志无法补回"
+  "summary": "价格同步告警按类别汇总；models.dev 兼容字段不再误报冲突"
 }
