@@ -289,7 +289,9 @@ export async function nativePricing(context) {
       && row.name.toLowerCase() !== "msedgewebview2.exe");
     const openers = readAcceptanceTrace(inst.root).records.filter(row => row.event === "opener");
     check("open_pricing_file_creates_template_in_root", { existedBefore, created: fs.existsSync(file),
-      content: fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "", expectedPath: file,
+      content: fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "", rawExpectedPath: file,
+      // Runner 的 TEMP 可含 RUNNER~1；后端路径已展开，期望也须指向同一真实文件。
+      expectedPath: fs.existsSync(file) ? fs.realpathSync.native(file) : null,
       returnedPath: opened.status === "fulfilled" ? opened.value : null, openerPaths: openers.map(row => row.path),
       recorded: openers.length === 1 && inst.opts.controlledIo.env.TOKENSCOPE_ACCEPTANCE_OPENER === "record",
       processProbeOk: processSnapshot.ok, foreignProcesses });
