@@ -27,9 +27,18 @@ N01–N09、N14–N16 已完成；16 个责任编号中为 **12 项完成、1 �
 - PR #21 / #22 已验证版本不变时 Release 只跑 gate、六个下游全部 skipped；PR #23 产品修复合并 `d064f98` 并发布 v0.5.6，main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39568790001)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39568789964)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39568789984) 全成功（安装、六个单跳、两条连续链）。N14 第 2 项及 N16 关闭，版本与发布解耦两条路径均有实跑证据。
 - B1 / AC01 的 `69ce2f4` 随 [PR #27](https://github.com/ywltby/tokenscope/pull/27) 普通合并 `4198051`；两环境共享冲突探针、两个变异、普通/acceptance 采集各 17/17 与完整钩子通过，PR 的 CI/原生/安装/六组升级全成功。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39633188944)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39633188991)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39633189036) 全成功，Release 六个下游 skipped，最新发布仍为 v0.5.6；N14 第 4 项及 N14 全部关闭。
 
-`active/` 保留整合计划与已确认的[剩余验收收口计划](active/2026-10-21-acceptance-closure.md)（AC01–AC12，B1 已关闭 N14，B2–B5 承接其余 4 个开放编号）；[合入与发布解耦](archive/implemented/2026-10-21-release-on-version-change.md)（N16）已完成并归档。归档共 **48 份：19 份已实现、27 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
+`active/` 保留整合计划与已确认的[剩余验收收口计划](active/2026-10-21-acceptance-closure.md)（AC01–AC12，B1 已关闭 N14，B2–B5 承接其余 4 个开放编号）；[合入与发布解耦](archive/implemented/2026-10-21-release-on-version-change.md)（N16）已完成并归档。归档共 **50 份：20 份已实现、28 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
 
 必须保持用户定稿：一个 `~/.tokenscope/history.db`，只保存精简 token/cwd 元数据；全部代理有效用量纳入；源日志删除或停用仍查得到历史；CCS 设置页只手动单次导入，导入与已有事实求并集。较新规则优先于旧“现存日志是唯一事实”等历史设计。
+
+## 2026-10-22 价格同步修复归档
+
+| 计划 | 交付 | 当前状态 |
+| --- | --- | --- |
+| [价格同步 TLS 信任修复](archive/implemented/2026-10-22-emudhra-tls-trust-fix.md) | PR #29 / v0.5.7；组合复验在 PR #30 合并后完成 | TF01–TF03 自身验收闭合；包含 TLS 更新与解析修复的 main `cb35f83` 上两价格源完整同步通过 |
+| [OpenRouter 时间条件解析修复](archive/partial/2026-10-22-openrouter-override-conditions.md) | PR #30 / v0.5.8，合并 `cb35f83` | main CI、原生、Release 全成功，六组单跳与两条连续链通过；安装后设置页手动同步按用户决定保留待验，转 N11 |
+
+原生计时误报由独立 [PR #32](https://github.com/ywltby/tokenscope/pull/32) 修复（合并 `1f00c9e`）：两条 2300ms 阈值保留，精确状态切换与真实回调取代两端 DOM 轮询判定；main 的 CI、原生成功，Release 只跑 gate、六个下游 skipped。v0.5.7、v0.5.8 均已按原资产核对并登记升级基线，v0.5.8 登记随本次归档交付；不提前关闭 N11 或其他开放编号。
 
 ## 2026-10-20 第三批归档
 
