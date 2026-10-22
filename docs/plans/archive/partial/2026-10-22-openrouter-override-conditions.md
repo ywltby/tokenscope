@@ -1,5 +1,9 @@
 # OpenRouter 价格同步修复：时间条件字段改为整数后整份解析失败
 
+> **2026-10-22 归档复核：产品实现与发布完成，自身人工验收部分完成。** OR01–OR03 已实现；OR04 的合并与发布已验证，[PR #30](https://github.com/ywltby/tokenscope/pull/30) 普通合并 `cb35f83`，[v0.5.8](https://github.com/ywltby/tokenscope/releases/tag/v0.5.8) 已公开，main 的 CI、Native UI E2E、Release 全成功。安装后设置页手动同步的结果尚未取得；用户明确决定保留待验，因此归档到 `partial/`，该项仅由[整合计划 N11](../../active/2026-10-11-consolidated-remaining-work.md#n11最新项目模型与-ccs-的原生统一验收)继续维护。库层联网成功、自动安装检查不能替代 GUI 人工验收。
+
+## 归档前原文
+
 > 状态：**用户 2026-10-22 确认，含 OR03**。用户 2026-10-22 要求单独写计划、单独开 PR（不并入 TLS 信任修复，即分支 `fix/emudhra-tls-trust` 上的计划 `2026-10-22-emudhra-tls-trust-fix.md`）。本计划是一次独立的缺陷修复，不占整合计划的责任编号；合并并验证发布后归档到 `archive/implemented/`，并在计划总账登记。
 
 **Goal：** OpenRouter 价格同步恢复可用。上游在条件价格（override）里新增或改变时间条件的字段形态时，只跳过带时间条件的那一档价格，不再让整份响应解析失败。
@@ -112,11 +116,19 @@
 | OR03 | `1deef48` | 新增 `one_malformed_model_is_skipped_without_failing_sync`，未改代码时整体失败（`invalid type: integer 123, expected a string`）；新增守卫用例 `all_models_malformed_fails_and_keeps_previous_snapshot`（修复前后都应通过，用来防止回归）。变异验证：去掉“全部异常即失败”的判断，守卫用例失败。缺失 `id`、数字 `id` 两条断言改为“该元素判为非法”，根结构损坏的断言保留 |
 | OR04 联网用例 | `7deaa08` | 加入与 TLS 修复 PR 逐字节相同的 `pricing_live_sync.rs`。带代理实测：OpenRouter 同步成功 461 条；在 468 个模型中，7 个按原有的非法单价规则被拒绝，16 个时间条件档位被跳过（与 §1 统计一致），没有模型因结构异常被跳过。models.dev 8780 条 |
 | OR04 版本 | `9080c28` | 合并最新 main 后递增到 0.5.7，`release: true`，基线校验无警告；完整提交检查通过 |
-| OR04 改号 | 合并提交 | PR #29（0.5.7）先合入为 `999424d`；本分支合入该 main，`release-change.json` 冲突取 main 一侧后用 `bump_version.py --bump patch` 递增到 0.5.8（`previous: 0.5.7`、`release: true`），锁文件随之带入 #29 的 rustls-webpki 0.103.16 / webpki-roots 1.0.10，联网用例即同时覆盖 TLS 修复；登记 v0.5.7 升级基线后推送 |
+| OR04 改号 | `8f2bcb8`、`4e83895` | PR #29（0.5.7）先合入为 `999424d`；本分支合入该 main，`release-change.json` 冲突取 main 一侧后用 `bump_version.py --bump patch` 递增到 0.5.8（`previous: 0.5.7`、`release: true`），锁文件随之带入 #29 的 rustls-webpki 0.103.16 / webpki-roots 1.0.10；随后登记 v0.5.7 升级基线 |
+| OR04 同步验收修复 | `5c50f78` | 合入 main `1f00c9e`（PR #32），版本保持 0.5.8，不重新取号；完整提交钩子通过。新 HEAD 的 [CI 39729111257](https://github.com/ywltby/tokenscope/actions/runs/39729111257)、[Native UI E2E 39729111162](https://github.com/ywltby/tokenscope/actions/runs/39729111162)、[Install test 39729111215](https://github.com/ywltby/tokenscope/actions/runs/39729111215) 及六组单跳升级全部成功；upgrade-chain 按 PR 既有规则 skipped |
 
 偏离与说明：
 - 守卫用例的初版 fixture 用了 `"pricing":[]`，实现后它仍然被判为合法模型：serde 允许用数组反序列化结构体，所有字段又都有默认值，于是解析成一个空价格表。这是 fixture 写错了，不是实现的问题，已改为 `"pricing":"not-an-object"`。这一既有行为保持不变。
 - `"data":[]`（空数组）维持原行为（写出空快照），不在本次范围内。“全部异常即失败”只在至少有一个模型结构异常时才生效。
 - 本分支基于 main，TLS 依赖仍是旧版本，所以联网实测只证明了解析修复；TLS 的验证在 PR #29 中进行。两个 PR 都是 0.5.7，后合并的那个更新到最新 main 后改为 0.5.8。
 
-合并后待验：main 的 Release 与对应版本的发布；安装新版本后，在设置页手动同步一次 OpenRouter，确认成功、条目数与同步时间都刷新；随后归档本计划。
+合并后验收（2026-10-22 回填）：
+
+- PR #30 普通合并为 `cb35f832b0113756fb3ce35ec785df2b3ecf219a`。main 的 [CI 39730520174](https://github.com/ywltby/tokenscope/actions/runs/39730520174)、[Native UI E2E 39730520263](https://github.com/ywltby/tokenscope/actions/runs/39730520263)、[Release 39730520176](https://github.com/ywltby/tokenscope/actions/runs/39730520176) 全成功；Release 的生产构建、安装、六组单跳升级、两条连续升级链及 publish 均实际成功。
+- [v0.5.8](https://github.com/ywltby/tokenscope/releases/tag/v0.5.8) 于 2026-10-22 13:59:26（Asia/Shanghai）公开，标签解引用为上述合并提交；安装包 SHA-256 为 `08de53b47661fc8d741808795a8395b8efb407c561ac53a6716c161bcd29b27e`。安装包、构建元信息、校验和及 Sigstore 证明四项原资产下载核对后登记为 v0.5.8 基线，同批提交供后续 B2 复用；不递增版本、不修改基线规则。
+- 同一 main 上现有显式联网用例两项通过：OpenRouter 461 条、models.dev 8733 条。受测提交、命令、测试二进制哈希及本机证据位置见 [TLS 专项的组合复验](../implemented/2026-10-22-emudhra-tls-trust-fix.md#5-执行记录)。此结果不冒充安装后的设置页操作。
+- **仍待验：** 安装新版本后，在设置页手动同步一次 OpenRouter，确认成功、条目数和同步时间刷新。用户明确决定保留待验；本计划按部分完成归档，该项转入 N11，不在此继续维护，也不标为通过。
+
+本次原生失败与处理：旧 HEAD 的 [39720973124](https://github.com/ywltby/tokenscope/actions/runs/39720973124) 是 `ui-collection-status` 的 DOM 轮询计时误报，与 OpenRouter 改动无关。按用户要求先独立合并 [PR #32](https://github.com/ywltby/tokenscope/pull/32)，再合入本分支；未重跑旧失败作业。新证据保留轮询和精确值：失败轮旧值 2470ms、精确 UI 显示 2500.9ms、真实开始到 UI 结束 2501.4ms、晚于失败回调结束 0.7ms；恢复轮旧值 2576ms、精确 UI 显示 2505.4ms，两条 2300ms 阈值未降低。三次启动记录完整，真实数据目录指纹未变。
