@@ -367,7 +367,7 @@ Claude → Codex → Gemini → OpenCode → Grok Build → Pi → MCode → **A
 - **增量构成**：旧 2228 行 → 新 2592 行（净 +364），其中生产 1265 → 1369（+104）、
   测试 962 → 1223（+261）——增长同样主要来自上述两块的回归测试。
 
-### 12.3 Codex（`services/session_usage_codex.rs`，5909 行）
+### 12.3 Codex（`services/session_usage_codex.rs`，6328 行）
 
 - 入口 `sync_codex_usage`（`:1034`）；`sessions` 深度 3 + `archived_sessions` 一层；
   文件名 `rollout-*` + 尾 UUID，`.jsonl.zst` 可读。
