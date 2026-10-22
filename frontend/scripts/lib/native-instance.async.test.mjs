@@ -357,7 +357,15 @@ describe("探测受剩余预算与宿主退出约束（§4.8 第 4 条题目：�
 
   it("宿主退出：探测立刻中止并终止 PowerShell，不等自身超时", async () => {
     const childrenOfProbe = [];
+    let firstProbeTime = null;
     const probe = createProbeFn({
+      // 预算起点只取一次，避免传参到内部首次取时推进 1ms 后正确截断。
+      // 后续计时、真实子进程及真实 timer 均保留，不改变任何观察窗口。
+      now: () => {
+        const current = firstProbeTime ?? Date.now();
+        firstProbeTime = null;
+        return current;
+      },
       spawnFn: () => {
         const child = fakeProbeChild();
         childrenOfProbe.push(child);
@@ -366,7 +374,8 @@ describe("探测受剩余预算与宿主退出约束（§4.8 第 4 条题目：�
     });
     const { watcher } = spawnExitingChild(0, 150);
     const startedAt = Date.now();
-    const result = await probe({ deadlineMs: Date.now() + PROBE_TIMEOUT_MS, hostExit: watcher });
+    firstProbeTime = startedAt;
+    const result = await probe({ deadlineMs: startedAt + PROBE_TIMEOUT_MS, hostExit: watcher });
     expect(result.ok).toBe(false);
     expect(result.hostExited).toBe(true);
     expect(result.timeout_ms).toBe(PROBE_TIMEOUT_MS); // 预算充足，自身超时未被截断
