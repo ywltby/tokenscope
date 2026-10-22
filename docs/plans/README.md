@@ -36,7 +36,7 @@ N01–N09、N14–N16 已完成；16 个责任编号中为 **12 项完成、1 �
 
 | 计划 | 交付 | 当前状态 |
 | --- | --- | --- |
-| [Codex 压缩用量补计与线程设置模型归属](archive/implemented/2026-10-22-codex-compaction-usage.md) | PR #35 / v0.5.10，合并 `a31540f` | 对照 cc-switch v4.0.18 发现；CP01–CP05 与 §5 验收闭合，main CI、原生、Release 全成功；不占整合计划责任编号 |
+| [Codex 压缩用量补计与线程设置模型归属](archive/implemented/2026-10-22-codex-compaction-usage.md) | PR #35 / v0.5.10，合并 `a31540f` | 对照 cc-switch v4.0.18 发现；CP01–CP05 与 §5 验收闭合，main CI、原生、Release 全成功；v0.5.10 基线随归档登记；不占整合计划责任编号 |
 
 ## 2026-10-22 价格同步修复归档
 

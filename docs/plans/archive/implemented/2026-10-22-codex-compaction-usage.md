@@ -224,6 +224,6 @@
 
 - 用户授权后以普通 merge commit 合并 PR #35（`--match-head-commit 9104bd5`），合并提交 `a31540f`；三个提交整体合入，未挑选或变基。
 - main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39786126808)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39786126780)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39786127012) 全成功。Release 的 gate、plan-upgrades、build、install-test、六组单跳升级（0.1.0 / 0.4.0 / 0.5.9 各 present、deleted）、两条连续升级链与 publish 均成功。
-- [v0.5.10](https://github.com/ywltby/tokenscope/releases/tag/v0.5.10) 预发布于 2026-10-22T13:28:07Z，标签解引用到 `a31540f`，资产为安装包、`SHA256SUMS.txt`、`build-metadata.json`、`provenance.sigstore.json` 四项。v0.5.10 升级基线按规则在下一次版本递增合入前登记，本次不登记。
+- [v0.5.10](https://github.com/ywltby/tokenscope/releases/tag/v0.5.10) 预发布于 2026-10-22T13:28:07Z，标签解引用到 `a31540f`，资产为安装包、`SHA256SUMS.txt`、`build-metadata.json`、`provenance.sigstore.json` 四项。四项原资产逐个下载核对后，v0.5.10 升级基线随本次归档登记（持久格式 parser_revision 为 2；下一版起点矩阵为 0.1.0 / 0.4.0 / 0.5.9 / 0.5.10，0.5.9 作为旧 parser 格式代表保留）。
 - 升级到 v0.5.10 后首轮采集会重解析全部 Codex 文件；按 CP05 只读复核，本机 Codex 历史约增加 51 条，模型纠正预期为 0。安装后实际增幅不属于 §5 验收项，不在此记为已核对。
 
