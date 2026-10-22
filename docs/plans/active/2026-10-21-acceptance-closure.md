@@ -1,7 +1,7 @@
 # 剩余验收收口：来源权限、原生统一验收、隐私强取证、真实性能与系统签字
 
 > 状态：**用户 2026-10-21 确认，按 B1–B5 连续执行**。承接[整合计划](2026-10-11-consolidated-remaining-work.md)全部剩余开放项：N14 第 4 项、N11、N10、N13、N12。
-> 进度（2026-10-22）：**B1 / AC01 已交付，N14 关闭**；B2–B5 继续承接 N11、N10、N13、N12，尚未标为通过。
+> 进度（2026-10-22）：**B1 / AC01 已交付，N14 关闭；B2 / AC02–AC05 随 PR #31（`c9de40e`）交付，main 三条运行全部成功，v0.5.9 已公开并登记原资产基线**。N11 的安装后人工同步尾项按用户决定保留待验；B3 因 AC06/AC07 前提差异待用户修订，B4、B5 未执行，不提前关闭 N10–N13。
 > 本计划只排验收与取证所需的改动。验收中暴露的产品缺陷按缺陷流程单独修复，不在本计划里预先设计修法。
 
 **Goal：** 把整合计划剩下的 5 个开放责任编号全部收口，结束后 `active/` 只剩整合计划的历史记录和独立系统待办（跨午夜、长时间休眠、跨显示器，用户 2026-10-13 决定不排期）。
@@ -276,6 +276,40 @@ AC03–AC05 的 CI 接入：
 - 本地取证（AC07、AC08、AC09、AC11）的结果写进 §6，含受测提交、产物哈希、环境、命令、结论与证据位置；证据文件不入库（`qa-artifacts/` 已忽略）。
 
 ## 6. 执行记录
+
+### B2 合并与发布验收（2026-10-22）
+
+- [PR #31](https://github.com/ywltby/tokenscope/pull/31) 最终 HEAD `7664be9`，普通合并为 `c9de40ec3ded2485d2991079f209699ae6ff6107`；两父提交分别为最新 main `9c77cef` 与该 PR HEAD，合并文件树和已验证 HEAD 完全一致。AC03 / AC04 / AC05 分别提交 `6f50af1` / `16ec813` / `db43355`；局部峰谷费率展示修复 `4159633`、经批准的端口和 CI 契约登记 `317573e`、版本登记 `bfb01ed`、短路径取证补修 `7664be9` 各自独立。
+- 最终完整钩子全通过：普通与 acceptance 两套 workspace、前端 772 项、浏览器契约、Python 310 项、PowerShell 安装 26 项和升级 60 项等；`pricing-canonical-full-hook.log` 保留完整复验，原端口失败、短路径 CI 失败与本地漏嵌入特征的启动失败均单独保留。具名业务断言首次先红为 10/9/10，三个判定套件最终 36/29/47，模板取证装配另 5 项；没有删除其他旧用例、放宽阈值或增加等待。
+- 最终本地三连跑：AC03 为 31.282 / 31.648 / 29.381 秒，AC04 为 17.489 / 17.462 / 17.181 秒，短路径补修后的 AC05 为 25.534 / 24.246 / 23.979 秒，各次断言为 16/15/16。固定代码三次之间无改动，最长单次之和 74.671 秒。受测提交、0.5.8 / 0.5.9 acceptance 产物 SHA256、命令、失败与复验位置均在下方逐任务记录，汇总为 `qa-artifacts/acceptance-closure/b2/local-stable-summary.json`。
+- PR 原生产物 `12415284614` 下载 ZIP SHA256 `268df1800c226b6f00531666c9b879a7ff3b15d2c06a7878e7050375a9d5e67d` 与 GitHub 一致；全部九份场景 evidence 检查通过，路径违例与代理尝试为零、真实目录指纹一致、launches 全部退出释放。实际合并测试提交 `1cae8cc` 的 0.5.9 acceptance EXE SHA256 为 `ad8259d2ff52d60641288e51d8ed7b80ea7f805dd7abe895ee07e201060961ae`，证据在 `pr-7664be9-native/`。其中真实 CI 短路径展开后的期望、返回和 opener 路径一致。三个新增步骤实际为 60/24/32 秒，合计 116 秒，低于 8 分钟；45 分钟上限和旧步骤不变。
+
+| 阶段 | 运行 | 结论 |
+| --- | --- | --- |
+| PR #31 / `7664be9` | [CI 39756585501](https://github.com/ywltby/tokenscope/actions/runs/39756585501) | success；四组和 gate 全通过 |
+| PR #31 / `7664be9` | [Native UI E2E 39756585449](https://github.com/ywltby/tokenscope/actions/runs/39756585449) | success；三个新增步骤合计 116 秒 |
+| PR #31 / `7664be9` | [Install test 39756585577](https://github.com/ywltby/tokenscope/actions/runs/39756585577) | success；安装五场景、六组单跳通过，连续链按 PR 契约 skipped |
+| main / `c9de40e` | [CI 39758431511](https://github.com/ywltby/tokenscope/actions/runs/39758431511) | success；四组和 gate 全通过 |
+| main / `c9de40e` | [Native UI E2E 39758431422](https://github.com/ywltby/tokenscope/actions/runs/39758431422) | success；三个新增步骤为 30/17/21 秒，合计 68 秒 |
+| main / `c9de40e` | [Release 39758431613](https://github.com/ywltby/tokenscope/actions/runs/39758431613) | success；生产构建、安装五场景、六组单跳、两条连续链及 publish 全通过 |
+
+- main 原生产物 `12416837710` 的 ZIP SHA256 `9776123b47147721df8c94be864520f2af5efe2e6db07349b5f4670ee31b61ed` 已下载核对；九份 evidence 全通过，全部 launches 退出释放，路径违例/代理尝试为零、真实目录指纹一致。`c9de40e` 的 acceptance EXE SHA256 为 `095e3546df80031b4e12c7a841452465106ac408d359373ea027edcf8e7cb720`，证据在 `main-c9de40e-native/`。main 新增 CI 68 秒与 PR 116 秒均在 8 分钟内。
+- 本 PR 只递增一次 patch 到 0.5.9；v0.5.8 已在 main 登记，合并前 `--check --base-ref origin/main` 实测 release=true。[v0.5.9](https://github.com/ywltby/tokenscope/releases/tag/v0.5.9) 于 2026-10-22 09:59:15 UTC 公开（按现有发布流程标为 prerelease），标签解引用为合并提交 `c9de40ec3ded2485d2991079f209699ae6ff6107`。四项原资产经 `upgrade_baselines.py add --tag v0.5.9` 逐个下载核对后登记，未重构或覆盖旧资产；安装包 `TokenScope_v0.5.9_windows-x64-setup.exe` SHA256 为 `6d2dbf3f769e83c17dee0629301433584f67cce22bdd2dc4935f2e4f69b18de0`。
+- 原资产另三项 SHA256：`build-metadata.json` 为 `d9e5dbde5d6e47301387cb696eb21ca7a716470dda127aec65ade4c7ff01563d`，`SHA256SUMS.txt` 为 `4c0c77c66ac0b599f4933e04ef14bd13fda288d8a2c19bddaf691c5528ac15b2`，`provenance.sigstore.json` 为 `de319a3c4c1cd9a34af88b25f24046b5f57fd564e9ef7fc6c27ae0bdf7dd66b9`。基线登记日志在结果 worktree 的 `qa-artifacts/acceptance-closure/b2-results/add-v0.5.9.log`，PR/main 原生、红绿和三连跑证据仍保留在 `acceptance-b2` worktree 的 `qa-artifacts/acceptance-closure/b2/`。
+- N11 的自动化组合验收由 B2 交付，安装正式版本后手动同步 OpenRouter 的人工尾项仍按用户决定待验；N11 不关闭。B3 的两项事实差异已在下方记录，尚待用户修订；N10、N13 和 N12 系统/签字没有因本批自动化变成完成。N01–N09、N14–N16 仍已完成，四个开放责任编号不变。
+
+结果回填 PR 的 §3 不变量自审（只含上述证据回填和 v0.5.9 基线登记）：
+
+| 编号 | 结论 | 依据 |
+| --- | --- | --- |
+| 1 普通构建零变化 | 成立 | 只修改计划、验收表和升级基线登记，没有产品输入或构建接线差异 |
+| 2 真实数据零接触 | 成立 | 本批仅下载 GitHub 原资产和读取既有隔离证据，不启动新的原生运行；B2 PR/main 的路径、代理与真实目录检查均通过 |
+| 3 CCS 只手动 | 不适用 | 不修改或运行 CCS 导入；此前 AC04 结果按原证据回填 |
+| 4 历史不随来源消失 | 不适用 | 不修改历史库行为或来源文件；此前 AC03 结果按原证据回填 |
+| 5 同意先于业务 | 不适用 | 不修改同意流程，也不代签 B3 的缺口 |
+| 6 证据可复查 | 成立 | 逐项核对 PR/main 运行、九份 evidence 和 launches、产物与四项原资产 SHA256；失败日志与修复后复验分别保留 |
+| 7 CI 预算 | 成立 | 不新增 CI 步骤或等待；B2 新增步骤 PR 为 116 秒、main 为 68 秒，45 分钟上限不变 |
+| 8 版本规则 | 成立 | 保持 0.5.9，release-change.json 与基线逐字节一致，版本检查 release=false；19 个已发布基线复查通过、无警告 |
 
 ### 起步复核与计划合入
 
