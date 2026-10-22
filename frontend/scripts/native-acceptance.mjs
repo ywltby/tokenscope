@@ -165,13 +165,17 @@ function copyDirSync(src, dst) {
 }
 function ps(scriptPath, argsArray) {
   // S00（计划 §9.1 第 2 条）：同步命令统一 30 秒上限；动作名取 -Action 参数便于定位。
+  // 例外：prepare-native-acceptance.ps1 内含 cargo 构建验收可执行，CI Runner 高
+  // 负载时可远超 30 秒（main 曾连续两次在该步骤 spawnSync ETIMEDOUT，纯文档
+  // 提交同样失败）——构建准备类命令单独给 10 分钟有界上限，仍防挂死。
   const action = argsArray.includes("-Action")
     ? `window-${argsArray[argsArray.indexOf("-Action") + 1]}`
     : path.basename(scriptPath);
+  const timeoutMs = scriptPath === PREP ? 600000 : undefined;
   return spawnSyncBounded(
     "pwsh",
     ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...argsArray],
-    { action },
+    timeoutMs ? { action, timeoutMs } : { action },
   );
 }
 
