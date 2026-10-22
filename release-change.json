@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "价格同步 TLS 信任库更新：拒绝信任 eMudhra 泄露私钥的中间 CA"
+  "summary": "修复 OpenRouter 价格同步：时间条件字段改为整数后整份响应解析失败，单个模型结构异常只跳过该模型"
 }

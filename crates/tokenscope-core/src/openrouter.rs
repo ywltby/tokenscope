@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
 pub const API_URL: &str = "https://openrouter.ai/api/v1/models";
@@ -25,8 +26,9 @@ pub(crate) struct ApiModel {
 /// 类型同时接受两者。
 ///
 /// 边界（刻意收紧）：
-/// - 只放宽**价格字段**——`id`/`name`/`utc_start` 等仍是字符串，不对整份
-///   响应文本做替换，也不把任意 JSON 宽松转成数字；
+/// - 只放宽**价格字段**——`id`/`name` 仍是字符串，不对整份响应文本做替换，
+///   也不把任意 JSON 宽松转成数字；时间条件字段（`utc_start`/`utc_end`/
+///   `utc_days`）只检测是否存在、不约束类型（只用于跳过该档，见 [`ApiOverride`]）；
 /// - 布尔/数组/对象等**显式非法**（`Other`），随模型与分项报告，不因宽松
 ///   匹配变成"未知的合法值"；
 /// - 根响应结构损坏仍由 `ApiResponse` 反序列化明确失败。
@@ -51,8 +53,8 @@ struct ApiPricing {
     input_cache_read: Option<PriceInput>,
     #[serde(default)]
     input_cache_write: Option<PriceInput>,
-    /// Task 3：条件价格覆盖（长上下文等）。时间条件条目（utc_start/utc_end）
-    /// 在 Task 4A 落地前跳过并留 warning，不猜测其适用条件。
+    /// Task 3：条件价格覆盖（长上下文等）。时间条件条目（utc_start/utc_end/
+    /// utc_days 任一出现）在 Task 4A 落地前跳过并留 warning，不猜测其适用条件。
     #[serde(default)]
     overrides: Vec<ApiOverride>,
 }
@@ -70,10 +72,22 @@ struct ApiOverride {
     input_cache_read: Option<PriceInput>,
     #[serde(default)]
     input_cache_write: Option<PriceInput>,
+    /// 时间条件：只检测是否存在（非 null），不约束类型——上游曾用字符串，
+    /// 2026-10 起为整数（如 `0`、`100`），并新增星期数组 `utc_days`。
+    /// 字符串约束曾让整份响应解析失败。
     #[serde(default)]
-    utc_start: Option<String>,
+    utc_start: Option<IgnoredAny>,
     #[serde(default)]
-    utc_end: Option<String>,
+    utc_end: Option<IgnoredAny>,
+    #[serde(default)]
+    utc_days: Option<IgnoredAny>,
+}
+
+impl ApiOverride {
+    /// 任一时间条件字段出现即视为按时间生效的档位（当前不支持，整档跳过）。
+    fn has_time_condition(&self) -> bool {
+        self.utc_start.is_some() || self.utc_end.is_some() || self.utc_days.is_some()
+    }
 }
 
 /// 快照中的条件价格档（Task 3）：USD/token 原单位，导入计价层 ×1e6。
@@ -197,9 +211,24 @@ pub(crate) fn sync_with(
     let body: ApiResponse = fetch()?;
 
     let mut rejected = 0u64;
+    let mut parsed_models = 0u64;
+    let mut malformed = 0u64;
     let mut warnings: Vec<String> = Vec::new();
     let mut entries: Vec<SnapshotEntry> = Vec::new();
-    for m in body.data {
+    for (index, item) in body.data.into_iter().enumerate() {
+        // OR03：结构无法解析的模型只跳过它自己；取得到字符串 id 就用 id
+        // 标识，否则用数组序号。
+        let m = match item {
+            ApiEntry::Model(m) => m,
+            ApiEntry::Invalid { id, reason } => {
+                rejected += 1;
+                malformed += 1;
+                let label = id.unwrap_or_else(|| format!("#{index}"));
+                warnings.push(format!("{label}: 模型结构无法解析，已跳过（{reason}）"));
+                continue;
+            }
+        };
+        parsed_models += 1;
         let p = m.pricing.unwrap_or_default();
         // F04：数值预检先于任何结构性丢弃——原始候选（基础四价 + 每个
         // override 的四价）任一显式单价非法（NaN/inf/负）→ **整个模型
@@ -246,8 +275,8 @@ pub(crate) fn sync_with(
             let mut skip = |reason: String| {
                 warnings.push(format!("{}: override 已跳过: {reason}", m.id));
             };
-            if o.utc_start.is_some() || o.utc_end.is_some() {
-                skip("含时间条件（utc_start/utc_end），暂不支持".into());
+            if o.has_time_condition() {
+                skip("含时间条件（utc_start/utc_end/utc_days），暂不支持".into());
                 continue;
             }
             let Some(min) = o
@@ -317,6 +346,10 @@ pub(crate) fn sync_with(
         log::warn!("OpenRouter 同步丢弃数据: {w}");
     }
     let _ = rejected;
+    // OR03：全部模型结构都无法解析 → 整次失败，不写出空快照覆盖已有价格。
+    if parsed_models == 0 && malformed > 0 {
+        anyhow::bail!("OpenRouter 响应中没有可解析的模型（{malformed} 个全部结构异常）");
+    }
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     entries.dedup_by(|a, b| a.id == b.id);
 
@@ -342,9 +375,41 @@ pub(crate) fn sync_with(
 }
 
 /// 同步响应体（Task 7.3：sync_with 可注入，类型对同 crate 测试可见）。
+///
+/// 根结构（`data` 数组）严格；数组元素逐个解析（OR03）：单个模型结构
+/// 异常只让它自己被跳过，不再让整份响应失败。
 #[derive(Debug, Deserialize)]
 pub(crate) struct ApiResponse {
-    pub(crate) data: Vec<ApiModel>,
+    pub(crate) data: Vec<ApiEntry>,
+}
+
+/// `data` 中的一个元素：可解析的模型，或结构无法解析的模型（不放宽字段
+/// 类型——数字 `id`、非对象 `pricing` 等仍是非法，只是影响面收窄到该模型）。
+#[derive(Debug)]
+pub(crate) enum ApiEntry {
+    Model(ApiModel),
+    /// 原始 `id`（是字符串时）与解析错误，用于 warning。
+    Invalid {
+        id: Option<String>,
+        reason: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for ApiEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let id = raw
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        Ok(match serde_json::from_value::<ApiModel>(raw) {
+            Ok(model) => ApiEntry::Model(model),
+            Err(e) => ApiEntry::Invalid {
+                id,
+                reason: e.to_string(),
+            },
+        })
+    }
 }
 
 /// 读快照：文件缺失 → Ok(None)（静默）；损坏 → Err（调用方警告并忽略）。
@@ -369,6 +434,16 @@ pub(crate) fn parse_snapshot_text(text: &str) -> Result<Snapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl ApiEntry {
+        /// 测试取已解析模型；结构异常的元素直接失败并给出原因。
+        fn model(&self) -> &ApiModel {
+            match self {
+                ApiEntry::Model(m) => m,
+                ApiEntry::Invalid { id, reason } => panic!("模型结构异常 {id:?}: {reason}"),
+            }
+        }
+    }
 
     /// 数字形态（RC08）。
     fn num(v: f64) -> Option<PriceInput> {
@@ -453,7 +528,7 @@ mod tests {
         ]}"#;
         let api: ApiResponse = serde_json::from_str(body).unwrap();
         assert_eq!(api.data.len(), 3);
-        let p = &api.data[0].pricing.as_ref().unwrap();
+        let p = &api.data[0].model().pricing.as_ref().unwrap();
         // Task 7.4：数值正常解析；缺失/空串 → None（未知 ≠ 0）。
         assert!(
             parse_price(&p.prompt)
@@ -466,7 +541,7 @@ mod tests {
                 .is_some_and(|v| (v * 1e6 - 0.3).abs() < 1e-9)
         );
         assert_eq!(parse_price(&None).unwrap(), None, "缺失字段 = 未知");
-        let broken = &api.data[2].pricing.as_ref().unwrap();
+        let broken = &api.data[2].model().pricing.as_ref().unwrap();
         assert_eq!(parse_price(&broken.prompt).unwrap(), None, "空串 = 未知");
         assert_eq!(
             parse_price(&broken.completion).unwrap(),
@@ -607,31 +682,39 @@ mod tests {
     /// 根响应结构损坏必须明确失败——不得因宽松匹配把任意 JSON 转成数字。
     #[test]
     fn non_price_fields_and_root_structure_stay_strict() {
-        // 根结构损坏：data 不是数组 / 缺失必填 id。
-        for broken in [
-            r#"{"data":"not-an-array"}"#,
-            r#"{"data":[{"pricing":{"prompt":0}}]}"#,
-            r#"{"items":[]}"#,
-        ] {
+        // 根结构损坏：data 不是数组 / 缺失 data。
+        for broken in [r#"{"data":"not-an-array"}"#, r#"{"items":[]}"#] {
             assert!(
                 serde_json::from_str::<ApiResponse>(broken).is_err(),
                 "根响应结构损坏必须明确失败: {broken}"
             );
         }
-        // 非价格字段不被宽松转换：数字 id 仍非法。
+        // 非价格字段不被宽松转换：缺失 id、数字 id 仍非法。OR03（2026-10-22）
+        // 起非法只作用于该模型（元素判为 Invalid，同步时跳过并留 warning，见
+        // one_malformed_model_is_skipped_without_failing_sync），不再让整份
+        // 响应失败；类型约束本身不放宽。
+        for invalid in [
+            r#"{"data":[{"pricing":{"prompt":0}}]}"#,
+            r#"{"data":[{"id":123,"pricing":{"prompt":0}}]}"#,
+        ] {
+            let parsed = serde_json::from_str::<ApiResponse>(invalid).unwrap();
+            assert!(
+                matches!(parsed.data[0], ApiEntry::Invalid { .. }),
+                "缺失或非字符串 id 的模型必须判为非法: {invalid}"
+            );
+        }
+        // 时间条件字段只检测存在、不约束类型（2026-10-22 修订：上游已改为整数，
+        // 字符串约束曾让整份响应失败）；该档按时间条件跳过，见
+        // time_conditioned_overrides_in_current_upstream_shape_are_skipped。
+        let numeric_time = serde_json::from_str::<ApiResponse>(
+            r#"{"data":[{"id":"p/m","pricing":{"prompt":0,
+               "overrides":[{"min_prompt_tokens":1000,"utc_start":1630,"prompt":0}]}}]}"#,
+        )
+        .expect("整数 utc_start 必须可解析");
+        let p = numeric_time.data[0].model().pricing.as_ref().unwrap();
         assert!(
-            serde_json::from_str::<ApiResponse>(r#"{"data":[{"id":123,"pricing":{"prompt":0}}]}"#)
-                .is_err(),
-            "id 必须保持字符串语义"
-        );
-        // 时间条件字段仍是字符串（数字形态不得被接受）。
-        assert!(
-            serde_json::from_str::<ApiResponse>(
-                r#"{"data":[{"id":"p/m","pricing":{"prompt":0,
-                   "overrides":[{"min_prompt_tokens":1000,"utc_start":1630,"prompt":0}]}}]}"#
-            )
-            .is_err(),
-            "utc_start 必须保持字符串语义"
+            p.overrides[0].has_time_condition(),
+            "整数 utc_start 仍是时间条件"
         );
     }
 
@@ -859,7 +942,7 @@ mod tests {
         let new = serde_json::from_str::<ApiResponse>(&body).unwrap();
         assert_eq!(new.data.len(), 4);
         // 且数字与字符串各自落到同一 PriceInput 语义（数字 → Number 分支）
-        let first = new.data[0].pricing.as_ref().unwrap();
+        let first = new.data[0].model().pricing.as_ref().unwrap();
         assert!(
             matches!(first.prompt, Some(PriceInput::Number(_))),
             "数字形态走 Number 分支：{:?}",
@@ -1012,6 +1095,130 @@ mod tests {
         let path = dir.join("pricing-openrouter.json");
         std::fs::write(&path, "not json").unwrap();
         assert!(load_snapshot(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// OR03：单个模型结构无法解析时只跳过该模型并留 warning，其余模型照常
+    /// 入快照——上游任一模型的字段形态变化不再让全部价格停止更新。
+    #[test]
+    fn one_malformed_model_is_skipped_without_failing_sync() {
+        let dir = numeric_dir("malformed-model");
+        let path = dir.join("pricing-openrouter.json");
+        let body = r#"{"data":[
+            {"id":123,"pricing":{"prompt":"0.000001"}},
+            {"pricing":{"prompt":"0.000001"}},
+            {"id":"prov/bad-pricing","pricing":"not-an-object"},
+            {"id":"prov/good","name":"Good","pricing":{"prompt":"0.000002","completion":"0.000004"}}
+        ]}"#;
+        let report = sync_with(&path, || {
+            serde_json::from_str::<ApiResponse>(body)
+                .map_err(|e| anyhow::anyhow!("解析 OpenRouter 响应失败: {e}"))
+        })
+        .expect("单个模型结构异常不得让整次同步失败");
+        assert_eq!(report.count, 1, "只有合法模型入快照");
+        let snap = load_snapshot(&path).unwrap().unwrap();
+        assert_eq!(snap.entries.len(), 1);
+        assert_eq!(snap.entries[0].id, "prov/good");
+        let malformed: Vec<&String> = report
+            .warnings
+            .iter()
+            .filter(|w| w.contains("模型结构无法解析"))
+            .collect();
+        assert_eq!(malformed.len(), 3, "{:?}", report.warnings);
+        assert!(malformed[0].starts_with("#0:"), "{malformed:?}");
+        assert!(malformed[1].starts_with("#1:"), "{malformed:?}");
+        assert!(
+            malformed[2].starts_with("prov/bad-pricing:"),
+            "取得到字符串 id 时用 id 标识: {malformed:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// OR03：全部模型结构都无法解析时整次同步失败，旧快照保持不动——不得
+    /// 写出空快照把已有价格清掉。
+    #[test]
+    fn all_models_malformed_fails_and_keeps_previous_snapshot() {
+        let dir = numeric_dir("all-malformed");
+        let path = dir.join("pricing-openrouter.json");
+        let previous = r#"{"v":2,"synced_at":"2026-10-01T00:00:00+08:00","entries":[
+            {"id":"prov/keep","name":"Keep","prompt":0.000002,"completion":0.000006}
+        ]}"#;
+        std::fs::write(&path, previous).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let body = r#"{"data":[{"id":1},{"id":"prov/x","pricing":"not-an-object"}]}"#;
+        let result = sync_with(&path, || {
+            serde_json::from_str::<ApiResponse>(body)
+                .map_err(|e| anyhow::anyhow!("解析 OpenRouter 响应失败: {e}"))
+        });
+        assert!(result.is_err(), "全部模型异常必须明确失败");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "失败不得改写快照");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 2026-10-22：上游把时间条件 `utc_start`/`utc_end` 改为整数并新增
+    /// `utc_days`。时间条件只决定"该档跳过"，任一字段出现即跳过、类型不限；
+    /// 只带 `utc_days` 的档位不得被当作无条件的长上下文档位应用。
+    #[test]
+    fn time_conditioned_overrides_in_current_upstream_shape_are_skipped() {
+        let dir = numeric_dir("time-conditions");
+        let path = dir.join("pricing-openrouter.json");
+        let body = r#"{"data":[
+            {"id":"prov/timed","name":"Timed","pricing":{
+                "prompt":"0.000001","completion":"0.000002",
+                "overrides":[
+                    {"utc_days":["monday","tuesday"],"utc_start":0,"utc_end":100,
+                     "prompt":"0.0000001","completion":"0.0000002"},
+                    {"utc_start":1630,"utc_end":1900,
+                     "prompt":"0.0000003","completion":"0.0000004"},
+                    {"min_prompt_tokens":200000,"prompt":"0.000004","completion":"0.000008"}
+                ]}},
+            {"id":"prov/days-only","name":"DaysOnly","pricing":{
+                "prompt":"0.000001","completion":"0.000002",
+                "overrides":[
+                    {"utc_days":["saturday","sunday"],"min_prompt_tokens":1000,
+                     "prompt":"0.0000001","completion":"0.0000001"}
+                ]}},
+            {"id":"prov/plain","name":"Plain","pricing":{"prompt":"0.000003","completion":"0.000006"}}
+        ]}"#;
+        let report = sync_with(&path, || {
+            serde_json::from_str::<ApiResponse>(body)
+                .map_err(|e| anyhow::anyhow!("解析 OpenRouter 响应失败: {e}"))
+        })
+        .expect("上游当前形态必须能同步");
+        assert_eq!(report.count, 3, "三个模型都入快照");
+
+        let snap = load_snapshot(&path).unwrap().unwrap();
+        let entry = |id: &str| snap.entries.iter().find(|e| e.id == id).unwrap();
+        let timed = entry("prov/timed");
+        assert_eq!(timed.overrides.len(), 1, "只保留长上下文档位");
+        assert_eq!(timed.overrides[0].min_prompt_tokens, 200_000);
+        assert!(
+            entry("prov/days-only").overrides.is_empty(),
+            "只带 utc_days 的档位不得被当作长上下文档位"
+        );
+        let plain = entry("prov/plain");
+        assert!(plain.overrides.is_empty());
+        assert!((plain.prompt.unwrap() * 1e6 - 3.0).abs() < 1e-9);
+
+        let time_skips = |id: &str| {
+            report
+                .warnings
+                .iter()
+                .filter(|w| {
+                    w.starts_with(&format!("{id}: override 已跳过")) && w.contains("含时间条件")
+                })
+                .count()
+        };
+        assert_eq!(time_skips("prov/timed"), 2, "{:?}", report.warnings);
+        assert_eq!(time_skips("prov/days-only"), 1, "{:?}", report.warnings);
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("prov/days-only") && w.contains("min_prompt_tokens")),
+            "跳过原因必须是时间条件: {:?}",
+            report.warnings
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
