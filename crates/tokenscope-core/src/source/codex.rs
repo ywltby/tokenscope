@@ -1,9 +1,11 @@
 //! Codex 适配器：扫描 `~/.codex/sessions/**/*.jsonl` 与
 //! `~/.codex/archived_sessions/**/*.jsonl`（rollout 文件，append-only）。
 //!
-//! 口径（依据本机 47 文件全量实测 + 上游权威语义，见 docs/stats-semantics.md）：
-//! - 只取 `event_msg`/`token_count` 的 `info.last_token_usage`；`token_usage_record`
-//!   是累计回显，一律忽略并计数（双计防线）；
+//! 口径（见 docs/stats-semantics.md）：
+//! - 通常取 `event_msg`/`token_count` 的 `info.last_token_usage`；顶层
+//!   `token_usage_record` 是单次请求用量，挂起到下一条 token_count：只有后者
+//!   last 四分量存在且全零时单独入账；一致或非零不一致时只保留 token_count。
+//!   后一条记录顶替前一条，session 边界和文件末尾丢弃未配对记录；
 //! - 语义（R02 已查证）：OpenAI Responses 的 `input_tokens` 是总量桶，
 //!   `input_tokens_details.cached_tokens` 与 `cache_write_tokens` 均为其子集
 //!   （官方文档示例 15000 = 12000 cached + 3000 cache_write + 0 未缓存）；
@@ -14,7 +16,8 @@
 //! - `cached + cache_write > input` 属未知字段组合（如未经查证的第三方
 //!   provider 映射），按坏行计数不入账，不猜测语义；
 //! - 零分量占位行（只升 total）跳过计数；分量非零但 total 不符按坏行计数；
-//! - 模型按时间序最近的 `turn_context` 归属，遇 `session_meta` 重置；
+//! - 模型按行序最近的 `turn_context` / `thread_settings_applied` 归属，
+//!   缺失、非字符串或空白模型不覆盖，遇 `session_meta` 重置；
 //! - 项目身份（阶段 B）：按会话维护**项目根**——`turn_context` 的有效 cwd 在
 //!   当前根之下则保持根（子目录归并），越出当前根即视为新项目；`session_meta`
 //!   重置目录上下文（新会话不继承上一会话的目录）；空/无效 cwd 不清掉同会话
@@ -122,6 +125,11 @@ struct RolloutPayload {
     // 额度更新也复用 token_count，此时 info 为 null；不参与用量计量。
     #[serde(default)]
     rate_limits: Option<serde_json::Value>,
+    // 顶层 token_usage_record：在对应分支严格解码，不影响其他记录的元数据。
+    #[serde(default)]
+    usage: Option<serde_json::Value>,
+    #[serde(default)]
+    thread_settings: Option<serde_json::Value>,
 }
 
 impl RolloutPayload {
@@ -166,6 +174,15 @@ struct LastUsage {
     total_tokens: u64,
 }
 
+impl LastUsage {
+    fn is_zero(&self) -> bool {
+        self.input_tokens == 0
+            && self.output_tokens == 0
+            && self.cached_input_tokens == 0
+            && self.cache_write_input_tokens == 0
+    }
+}
+
 /// 文件内解析状态：session 边界、模型归属与项目根。
 #[derive(Default)]
 struct ScanState {
@@ -175,6 +192,8 @@ struct ScanState {
     tracker: ProjectRootTracker,
     /// 本会话首个有效 cwd（B02 的 `session_initial_cwd`）。
     initial_cwd: Option<String>,
+    /// 记录位置的归一化用量与全部上下文；下一条 token_count 才决定是否产出。
+    pending_record: Option<UsageEvent>,
 }
 
 /// 观察一个（未归一化的）cwd：只接受可归一化的值；空值、类型异常与不可解释的
@@ -279,6 +298,9 @@ fn ingest_text(
         stats.lines_seen += 1;
         ingest_line(line, line_no as u64, source_path, &mut state, stats, events);
     }
+    if state.pending_record.take().is_some() {
+        stats.ignored_token_usage_record += 1;
+    }
 }
 
 fn ingest_line(
@@ -293,10 +315,47 @@ fn ingest_line(
         Ok(r) => r,
         Err(_) => {
             stats.bad_lines += 1;
+            // 用量字段仍严格解码；即使该行坏掉，也不能跨过已识别的配对/
+            // 会话边界，拿之后的零行给旧记录补配对。
+            if let Ok(raw) = serde_json::from_str::<serde_json::Value>(line) {
+                let kind = raw.get("type").and_then(serde_json::Value::as_str);
+                if kind == Some("session_meta") {
+                    if state.pending_record.take().is_some() {
+                        stats.ignored_token_usage_record += 1;
+                    }
+                    *state = ScanState::default();
+                } else if kind == Some("token_usage_record")
+                    || (kind == Some("event_msg")
+                        && raw
+                            .pointer("/payload/type")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("token_count"))
+                {
+                    if state.pending_record.take().is_some() {
+                        stats.ignored_token_usage_record += 1;
+                    }
+                    if kind == Some("token_usage_record") {
+                        stats.ignored_token_usage_record += 1;
+                    }
+                }
+            }
             return;
         }
     };
+    if rec.kind == "session_meta" {
+        if state.pending_record.take().is_some() {
+            stats.ignored_token_usage_record += 1;
+        }
+        *state = ScanState::default();
+    }
     let Some(payload) = rec.payload.as_ref() else {
+        if rec.kind == "token_usage_record" {
+            if state.pending_record.take().is_some() {
+                stats.ignored_token_usage_record += 1;
+            }
+            stats.bad_lines += 1;
+            stats.ignored_token_usage_record += 1;
+        }
         return;
     };
     match rec.kind.as_str() {
@@ -309,19 +368,65 @@ fn ingest_line(
                 .or_else(|| payload.id())
                 .map(str::to_string)
                 .unwrap_or_default();
-            state.model = None;
-            state.tracker.reset();
-            state.initial_cwd = None;
             observe_cwd(state, payload.cwd());
         }
         "turn_context" => {
-            if let Some(m) = payload.model() {
+            if let Some(m) = payload.model().filter(|m| !m.trim().is_empty()) {
                 state.model = Some(m.to_string());
             }
             observe_cwd(state, payload.cwd());
         }
-        "token_usage_record" => stats.ignored_token_usage_record += 1,
+        "token_usage_record" => {
+            if state.pending_record.take().is_some() {
+                stats.ignored_token_usage_record += 1;
+            }
+            let usage = payload
+                .usage
+                .clone()
+                .and_then(|value| serde_json::from_value::<LastUsage>(value).ok());
+            let timestamp = rec
+                .timestamp
+                .as_deref()
+                .and_then(|value| value.parse::<Timestamp>().ok());
+            match (usage, timestamp) {
+                (Some(u), Some(ts)) if !u.is_zero() => {
+                    state.pending_record =
+                        event_from_usage(ts, line_no, source_path, &u, state, stats);
+                    if state.pending_record.is_none() {
+                        stats.ignored_token_usage_record += 1;
+                    }
+                }
+                (Some(_), Some(_)) => stats.ignored_token_usage_record += 1,
+                _ => {
+                    stats.bad_lines += 1;
+                    stats.ignored_token_usage_record += 1;
+                }
+            }
+        }
+        "event_msg" if payload.kind == "thread_settings_applied" => {
+            if let Some(model) = payload
+                .thread_settings
+                .as_ref()
+                .and_then(|settings| settings.get("model"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|model| !model.trim().is_empty())
+            {
+                state.model = Some(model.to_string());
+            }
+        }
         "event_msg" if payload.kind == "token_count" => {
+            if let Some(record) = state.pending_record.take() {
+                if payload
+                    .info
+                    .as_ref()
+                    .and_then(|info| info.last_token_usage.as_ref())
+                    .is_some_and(LastUsage::is_zero)
+                {
+                    events.push(record);
+                    return;
+                }
+                stats.ignored_token_usage_record += 1;
+            }
             ingest_token_count(
                 rec.timestamp.as_deref(),
                 line_no,
@@ -374,6 +479,19 @@ fn ingest_token_count(
         stats.bad_lines += 1;
         return;
     };
+    if let Some(event) = event_from_usage(ts, line_no, source_path, u, state, stats) {
+        events.push(event);
+    }
+}
+
+fn event_from_usage(
+    ts: Timestamp,
+    line_no: u64,
+    source_path: &str,
+    u: &LastUsage,
+    state: &ScanState,
+    stats: &mut CollectStats,
+) -> Option<UsageEvent> {
     let (input, output, cached, cache_write, total) = (
         u.input_tokens,
         u.output_tokens,
@@ -381,11 +499,11 @@ fn ingest_token_count(
         u.cache_write_input_tokens,
         u.total_tokens,
     );
-    // 零分量占位行：只升 total 不升分量（本机实测 278 条），跳过计数。
+    // 未转为压缩事件的零分量占位行：只升 total 不升分量，跳过计数。
     // SF08：逐字段比较，不做加法（异常大值加法会回绕/panic）。
     if input == 0 && output == 0 && cached == 0 && cache_write == 0 {
         stats.skipped_zero_usage += 1;
-        return;
+        return None;
     }
     // 口径校验（R02）：total = input + output；cached 与 cache_write 均是
     // input 的子集。cached + cache_write > input 属未查证的字段组合，
@@ -394,23 +512,23 @@ fn ingest_token_count(
     // 继续后续行；不回绕、不饱和、不 panic。
     let Some(total_calc) = input.checked_add(output) else {
         stats.bad_lines += 1;
-        return;
+        return None;
     };
     let Some(cached_plus_cw) = cached.checked_add(cache_write) else {
         stats.bad_lines += 1;
-        return;
+        return None;
     };
     if total != total_calc || cached_plus_cw > input {
         stats.bad_lines += 1;
-        return;
+        return None;
     }
     let Some(model) = state.model.as_deref() else {
         stats.skipped_no_model += 1;
-        return;
+        return None;
     };
     if state.session_id.is_empty() {
         stats.bad_lines += 1;
-        return;
+        return None;
     }
     // A04/B：项目身份 = 当前会话的项目根（子目录归并、越出当前根即新项目）；
     // 不同路径的同名目录不合并，同路径的跨工具会话共用同一 key；无有效 cwd 时
@@ -442,9 +560,9 @@ fn ingest_token_count(
     // SF08：source→model 公共边界（与缓存恢复同一路径）防御性兜底。
     if event.validate_buckets().is_err() {
         stats.bad_lines += 1;
-        return;
+        return None;
     }
-    events.push(event);
+    Some(event)
 }
 
 #[cfg(test)]
@@ -481,6 +599,361 @@ mod tests {
         format!(
             r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":{input},"output_tokens":{output},"cached_input_tokens":{cached},"cache_write_input_tokens":{cw},"reasoning_output_tokens":0,"total_tokens":{total}}}}}}}}}"#
         )
+    }
+
+    mod cp01 {
+        use super::*;
+
+        const TS: &str = "2026-07-17T15:59:00Z";
+
+        fn record(input: u64, output: u64, cached: u64, cw: u64) -> String {
+            serde_json::json!({"type":"token_usage_record","timestamp":TS,"payload":{
+            "response_id":"synthetic-response","usage":{
+                "input_tokens":input,"output_tokens":output,"cached_input_tokens":cached,
+                "cache_write_input_tokens":cw,"total_tokens":input.checked_add(output).unwrap_or(0)
+            }}})
+            .to_string()
+        }
+
+        fn zero() -> String {
+            tc("2026-07-17T16:00:00Z", 0, 0, 0, 0, 99999)
+        }
+
+        fn settings(model: serde_json::Value) -> String {
+            serde_json::json!({"type":"event_msg","payload":{
+                "type":"thread_settings_applied","thread_settings":{"model":model}
+            }})
+            .to_string()
+        }
+
+        #[test]
+        fn compaction_record_followed_by_zero_last_is_counted() {
+            let col = collect_lines(&[
+                meta("s", "C:/before"),
+                ctx("model-a", "C:/before/sub"),
+                record(26705, 491, 12000, 3000),
+                ctx("model-b", "D:/after"),
+                zero(),
+                zero(),
+            ]);
+            assert_eq!(col.events.len(), 1);
+            let e = &col.events[0];
+            assert_eq!(
+                (
+                    e.input_tokens,
+                    e.output_tokens,
+                    e.cache_read_tokens,
+                    e.cache_write_tokens
+                ),
+                (11705, 491, 12000, 3000)
+            );
+            assert_eq!(e.ts, TS.parse::<Timestamp>().unwrap());
+            assert_eq!(
+                (&*e.model, &*e.session_id, &*e.project),
+                ("model-a", "s", "C:/before")
+            );
+            assert_eq!(e.event_cwd.as_deref(), Some("C:/before/sub"));
+            assert_eq!(e.session_initial_cwd.as_deref(), Some("C:/before"));
+            assert_eq!(e.line, 2);
+            assert_eq!(col.stats.skipped_zero_usage, 1);
+            assert_eq!(col.stats.ignored_token_usage_record, 0);
+            assert_eq!(col.stats.bad_lines, 0);
+        }
+
+        #[test]
+        fn record_matching_following_token_count_is_not_double_counted() {
+            // 串接真实压缩，确认匹配配对已消费，下一轮不会复用旧记录。
+            let col = collect_lines(&[
+                meta("s", "C:/w"),
+                ctx("m", "C:/w"),
+                record(100, 5, 20, 10),
+                tc(TS, 100, 5, 20, 10, 105),
+                zero(),
+                record(200, 7, 30, 0),
+                zero(),
+            ]);
+            let plain = collect_lines(&[
+                meta("s", "C:/w"),
+                ctx("m", "C:/w"),
+                tc(TS, 100, 5, 20, 10, 105),
+            ]);
+            assert_eq!(col.events.len(), 2);
+            let mut expected = plain.events[0].clone();
+            expected.line = 3;
+            assert_eq!(format!("{:?}", col.events[0]), format!("{expected:?}"));
+            assert_eq!(col.events[1].input_tokens, 170);
+            assert_eq!(col.stats.ignored_token_usage_record, 1);
+            assert_eq!(col.stats.skipped_zero_usage, 1);
+        }
+
+        #[test]
+        fn record_mismatching_nonzero_token_count_is_ignored() {
+            let col = collect_lines(&[
+                meta("s", "C:/w"),
+                ctx("m", "C:/w"),
+                record(100, 5, 20, 0),
+                tc(TS, 101, 6, 21, 0, 107),
+                zero(),
+                record(200, 7, 0, 0),
+                zero(),
+            ]);
+            assert_eq!(col.events.len(), 2);
+            assert_eq!(
+                (col.events[0].input_tokens, col.events[0].output_tokens),
+                (80, 6)
+            );
+            assert_eq!(col.events[1].input_tokens, 200);
+            assert_eq!(col.stats.ignored_token_usage_record, 1);
+            assert_eq!(col.stats.skipped_zero_usage, 1);
+        }
+
+        #[test]
+        fn unpaired_record_at_eof_or_session_boundary_is_not_counted() {
+            let start = [
+                meta("s", "C:/w"),
+                ctx("m", "C:/w"),
+                record(10, 1, 0, 0),
+                zero(),
+            ];
+            let mut eof = start.to_vec();
+            eof.push(record(20, 2, 0, 0));
+            let col = collect_lines(&eof);
+            assert_eq!(col.events.len(), 1);
+            assert_eq!(col.stats.ignored_token_usage_record, 1);
+            let mut boundary = eof;
+            boundary.extend([
+                meta("new", "D:/w"),
+                ctx("n", "D:/w"),
+                zero(),
+                record(30, 3, 0, 0),
+                zero(),
+            ]);
+            let col = collect_lines(&boundary);
+            assert_eq!(col.events.len(), 2);
+            assert_eq!(col.events[1].session_id, "new");
+            assert_eq!(col.events[1].input_tokens, 30);
+            assert_eq!(col.stats.ignored_token_usage_record, 1);
+            assert_eq!(col.stats.skipped_zero_usage, 1);
+        }
+
+        #[test]
+        fn later_record_replaces_pending_record() {
+            let col = collect_lines(&[
+                meta("s", "C:/w"),
+                ctx("m", "C:/w"),
+                record(10, 1, 0, 0),
+                record(20, 2, 0, 0),
+                zero(),
+            ]);
+            assert_eq!(col.events.len(), 1);
+            assert_eq!(col.events[0].input_tokens, 20);
+            assert_eq!(col.stats.ignored_token_usage_record, 1);
+        }
+
+        #[test]
+        fn zero_or_malformed_record_is_ignored() {
+            let valid: serde_json::Value = serde_json::from_str(&record(10, 1, 0, 0)).unwrap();
+            let mut malformed = Vec::new();
+            for value in [
+                serde_json::json!(-1),
+                serde_json::json!("10"),
+                serde_json::json!(null),
+            ] {
+                let mut line = valid.clone();
+                line["payload"]["usage"]["input_tokens"] = value;
+                malformed.push(line);
+            }
+            for value in [None, Some(serde_json::json!("invalid"))] {
+                let mut line = valid.clone();
+                line.as_object_mut().unwrap().remove("timestamp");
+                if let Some(value) = value {
+                    line["timestamp"] = value;
+                }
+                malformed.push(line);
+            }
+            for line in malformed {
+                let col = collect_lines(&[
+                    meta("s", "C:/w"),
+                    ctx("m", "C:/w"),
+                    record(99, 9, 0, 0),
+                    line.to_string(),
+                    zero(),
+                ]);
+                assert!(col.events.is_empty());
+                assert_eq!(col.stats.bad_lines, 1);
+                assert_eq!(col.stats.ignored_token_usage_record, 2);
+            }
+            let col = collect_lines(&[
+                meta("s", "C:/w"),
+                ctx("m", "C:/w"),
+                record(0, 0, 0, 0),
+                zero(),
+            ]);
+            assert!(col.events.is_empty());
+            assert_eq!(col.stats.bad_lines, 0);
+            assert_eq!(col.stats.ignored_token_usage_record, 1);
+        }
+
+        #[test]
+        fn compaction_record_subset_violation_is_bad_line() {
+            for (input, output, cached, cw) in [
+                (100, 1, 90, 11),
+                (u64::MAX, 0, u64::MAX, 1),
+                (u64::MAX, 1, 0, 0),
+            ] {
+                let col = collect_lines(&[
+                    meta("s", "C:/w"),
+                    ctx("m", "C:/w"),
+                    record(input, output, cached, cw),
+                    zero(),
+                ]);
+                assert!(col.events.is_empty());
+                assert_eq!(col.stats.bad_lines, 1);
+                assert_eq!(col.stats.ignored_token_usage_record, 1);
+            }
+        }
+
+        #[test]
+        fn forked_child_replay_of_compaction_is_deduped() {
+            let lines = [
+                meta("root-session", "C:/w"),
+                ctx("m", "C:/w"),
+                record(26705, 491, 0, 0),
+                zero(),
+            ];
+            let mut events = Vec::new();
+            for path in ["parent.jsonl", "child.jsonl"] {
+                ingest_text(
+                    &lines.join("\n"),
+                    path,
+                    &mut CollectStats::default(),
+                    &mut events,
+                );
+            }
+            assert_eq!(events.len(), 2);
+            let (events, dropped) = crate::dedupe::dedupe_events(events);
+            assert_eq!(events.len(), 1);
+            assert_eq!(dropped, vec![(AgentKind::Codex, 1)]);
+        }
+
+        #[test]
+        fn thread_settings_model_applies_to_following_usage() {
+            let col = collect_lines(&[
+                meta("s", "C:/w"),
+                ctx("a", "C:/w"),
+                settings(serde_json::json!("b")),
+                tc(TS, 10, 1, 0, 0, 11),
+                ctx("c", "C:/w"),
+                tc(TS, 20, 2, 0, 0, 22),
+            ]);
+            assert_eq!(
+                col.events
+                    .iter()
+                    .map(|e| e.model.as_str())
+                    .collect::<Vec<_>>(),
+                ["b", "c"]
+            );
+        }
+
+        #[test]
+        fn thread_settings_model_without_prior_turn_context() {
+            let col = collect_lines(&[
+                meta("s", "C:/w"),
+                settings(serde_json::json!("b")),
+                tc(TS, 10, 1, 0, 0, 11),
+                meta("new", "C:/w"),
+                tc(TS, 20, 2, 0, 0, 22),
+            ]);
+            assert_eq!(col.events.len(), 1);
+            assert_eq!(col.events[0].model, "b");
+            assert_eq!(
+                col.stats.skipped_no_model, 1,
+                "只有 session_meta 重置后缺少模型的请求被跳过"
+            );
+        }
+
+        #[test]
+        fn thread_settings_invalid_model_is_ignored() {
+            let mut lines = vec![
+                meta("s", "C:/w"),
+                ctx("a", "C:/w"),
+                settings(serde_json::json!("b")),
+            ];
+            for invalid in [
+                serde_json::json!({}),
+                serde_json::json!({"thread_settings":{}}),
+                serde_json::json!({"thread_settings":{"model":123}}),
+                serde_json::json!({"thread_settings":{"model":"  \t"}}),
+                serde_json::json!({"thread_settings":false}),
+            ] {
+                let mut payload = invalid;
+                payload["type"] = serde_json::json!("thread_settings_applied");
+                lines.push(serde_json::json!({"type":"event_msg","payload":payload}).to_string());
+                lines.push(tc(TS, 10, 1, 0, 0, 11));
+            }
+            lines.push(ctx("   ", "C:/w"));
+            lines.push(tc(TS, 20, 2, 0, 0, 22));
+            let col = collect_lines(&lines);
+            assert_eq!(col.events.len(), 6);
+            assert!(col.events.iter().all(|e| e.model == "b"));
+            assert_eq!(col.stats.bad_lines, 0);
+        }
+
+        #[test]
+        fn missing_or_malformed_next_usage_consumes_pending_record() {
+            for last in [
+                serde_json::json!(null),
+                serde_json::json!({"input_tokens":"invalid"}),
+            ] {
+                let col = collect_lines(&[
+                    meta("s", "C:/w"), ctx("m", "C:/w"), record(10, 1, 0, 0),
+                    serde_json::json!({"type":"event_msg","timestamp":TS,"payload":{"type":"token_count","info":{"last_token_usage":last}}}).to_string(),
+                    zero(),
+                ]);
+                assert!(
+                    col.events.is_empty(),
+                    "不能越过缺失或非法的下一条 token_count 等待后续零行"
+                );
+                assert_eq!(col.stats.bad_lines, 1);
+                assert_eq!(col.stats.ignored_token_usage_record, 1);
+                assert_eq!(col.stats.skipped_zero_usage, 1);
+            }
+        }
+
+        #[test]
+        fn empty_session_meta_also_discards_pending_record_and_context() {
+            let col = collect_lines(&[
+                meta("s", "C:/w"),
+                ctx("m", "C:/w"),
+                record(10, 1, 0, 0),
+                serde_json::json!({"type":"session_meta","payload":null}).to_string(),
+                zero(),
+                tc(TS, 20, 2, 0, 0, 22),
+            ]);
+            assert!(col.events.is_empty());
+            assert_eq!(col.stats.ignored_token_usage_record, 1);
+            assert_eq!(col.stats.skipped_no_model, 1);
+        }
+
+        #[test]
+        fn record_without_payload_replaces_pending_and_is_diagnosed() {
+            for line in [
+                serde_json::json!({"type":"token_usage_record","timestamp":TS}),
+                serde_json::json!({"type":"token_usage_record","timestamp":TS,"payload":null}),
+            ] {
+                let col = collect_lines(&[
+                    meta("s", "C:/w"),
+                    ctx("m", "C:/w"),
+                    record(10, 1, 0, 0),
+                    line.to_string(),
+                    zero(),
+                ]);
+                assert!(col.events.is_empty());
+                assert_eq!(col.stats.bad_lines, 1);
+                assert_eq!(col.stats.ignored_token_usage_record, 2);
+                assert_eq!(col.stats.skipped_zero_usage, 1);
+            }
+        }
     }
 
     #[test]
