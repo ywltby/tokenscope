@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 >
-> 状态：**B1 已合并（2026-10-23，合并 `fde7762`）；B2 未实施，前置 PR #42 由用户单独决定**（该 PR 目前落后 main：无冲突，合并前需同步最新 main 并通过必需检查）。用户同日复核通过 B1（六条契约本地 7.65s、四种启动失败补查明确失败、CI/Native UI/安装升级全绿）并授权合并。计划分支 `docs/test-temp-cleanup-plan` 已随 PR #44 进入 main。
+> 状态：**B1 已合并（2026-10-23，合并 `fde7762`）；B2 已实施待复核（同日，分支 `fix/rust-lockwait-cleanup`：TL03 提交 `338db58`、TL04 版本 `0.5.13` `release: true`）。** 前置 PR #42 经用户批准合并（`4fc46c6`，合并前同步最新 main、修复 Runner 临时目录短名断言两处并通过全部必需检查）。计划分支 `docs/test-temp-cleanup-plan` 已随 PR #44 进入 main。
 
 **Goal:** 修复已证实的 Vitest 临时目录遗漏和 Rust 锁等待用例句柄释放顺序问题，增加能发现“测试通过但目录残留”的回归，并明确 Rust 进程级收尾的适用边界。
 
@@ -282,6 +282,6 @@
 | --- | --- | --- | --- | --- | --- |
 | TL01 | 2540290（审计登记，无业务/测试代码改动） | 不适用；复现结论为「通过但有残留」（见 §6.2） | rg 扫描；前端定向 2s；Rust 定向 6s（测试体 5.59s）；日志 `qa-artifacts/test-temp-cleanup/b1/` | 随 B1 PR 提交 | 只登记未治理；其余夹具为后续候选，不在本轮宣称已治理 |
 | TL02 / B1 | 红：d7c307f（未修）；绿：153f564 及三轮复审补修（e0d276c 终态） | 红：3 路径各因残留/假通过而红；复审各轮新回归在当轮实现上红（孤儿超界、分配晚于目标代码）；绿：契约 6 过（含超时、父先退出、受控时序反例）+ 原文件 31 过；用户复核本地 7.65s 通过并授权合并 | 契约约 8.3s；原文件 2.9s；日志 `qa-artifacts/test-temp-cleanup/b1/` | [PR #44](https://github.com/ywltby/tokenscope/pull/44) 普通合并 `fde7762`（含注释勘正 6e3ddeb）；main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39989795279)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39989795088)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39989795109) 全成功；版本不变，Release 仅 gate（23s），六下游 skipped | 自审见 §6.3；三轮复审补修见 §6.4；审计候选未动 |
-| TL03 / B2 | 未执行 | 未执行 | 未执行 | 未建 | PR #42 前置项待决定 |
-| TL04 / B2 | 未执行 | 未执行 | 未执行 | 未建 | 不预占版本 |
+| TL03 / B2 | 红：338db58 前一提交（严格断言、无 drop）；绿：338db58 | 红：经 run_rust_tests 入口，`夹具清理失败 code 32`（活连接持文件），wrapper 保留现场；绿：drop(holder) 后 1 passed（5.64s）；原错误分类/上下界/预算断言保留 | 入口命令每轮约 6s；双层验证：wrapper 层「清理已核实，临时根不存在」＋直接 Cargo 私有根 `tokenscope-lockwait-*` 残留 0；日志 `qa-artifacts/test-temp-cleanup/b2/` | 随 B2 PR | 前置 PR #42 已由用户批准合并（`4fc46c6`，含同步 main 与 Runner 短名断言修复）；只释放本用例自己的连接，未动全局查询表与生产代码 |
+| TL04 / B2 | c02ce60 | 不适用 | bump patch → 0.5.13；`--check` = `release: true`；v0.5.12 已在基线登记表（本机 check 的网络异常不构成缺失证据，CI 权威校验） | 随 B2 PR | 版本单独提交；一次既有波动已归因（`latest_history_opens_without_writer_lock` 的 <1s 断言并行负载下 1.199s，与本批无关，未放宽） |
 | TL05 | B1 部分完成：PR #44 获用户合并决定后普通合并；main 的 CI、Native UI E2E、Release 全成功（Release 仅 gate） | 不适用 | 见 TL02/B1 行的 main 运行链接 | [PR #44](https://github.com/ywltby/tokenscope/pull/44) 已合并 | B1 交付闭合；B2/收口未完成——计划保持 active；不改变 N01–N16 状态 |
