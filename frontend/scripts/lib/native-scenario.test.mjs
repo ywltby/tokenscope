@@ -94,6 +94,26 @@ describe("有界同步命令（计划 §9.1 第 2 条）", () => {
     });
     expect(quick.status).toBe(0);
   });
+
+  it("超时杀进程后保留子进程已产出的 stdout 尾部，定位阻塞阶段（2026-10-23 取证装配）", () => {
+    // 受控替身：先打印阶段标记再阻塞——模拟 prepare-native-acceptance.ps1
+    // 走到 CCS fixture 阶段后挂起。超时判定不变（仍抛错），但错误必须带上
+    // 子进程已写出的阶段输出，只剩外层 ETIMEDOUT 就无法定位阻塞阶段。
+    const script = `console.log("[stage] ccs-fixture-start"); setTimeout(() => {}, 10000);`;
+    let message = "";
+    try {
+      spawnSyncBounded(process.execPath, ["-e", script], {
+        action: "prepare-native-acceptance.ps1",
+        timeoutMs: 500,
+      });
+    } catch (e) {
+      message = e.message;
+    }
+    expect(message).toContain("同步命令超时或启动失败");
+    expect(message).toContain("[stage] ccs-fixture-start");
+    // 尾部有界：错误信息不得因巨量输出膨胀（装配约束，防日志刷爆）。
+    expect(message.length).toBeLessThan(8000);
+  });
 });
 
 describe("有界 CDP 关闭（计划 §9.1 第 5 条）", () => {

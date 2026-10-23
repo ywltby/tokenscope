@@ -60,6 +60,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# 2026-10-23 取证装配：各阶段用单调时钟（Stopwatch）输出累计毫秒。正常路径进
+# job 日志；prepare 挂起时这些输出留在子进程 stdout，由 spawnSyncBounded 超时
+# 错误的尾部保留，把「只剩外层 ETIMEDOUT」变成可定位的阻塞阶段。
+$stageStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+function Write-Stage([string]$Name) {
+    Write-Host ("[prepare] {0} at {1} ms" -f $Name, $stageStopwatch.ElapsedMilliseconds)
+}
+Write-Stage 'start'
+
 function Write-Utf8NewLineLF {
     param([string]$Path, [string]$Content)
     $dir = Split-Path -Parent $Path
@@ -196,6 +205,7 @@ $badLine = Join-Path $projectDir "broken-${session}.jsonl"
 $badBody = (($lines[0]) + "`n" + '{"this": "is not a valid line"' + "`n")
 Write-Utf8NewLineLF -Path $badLine -Content $badBody
 Record-File -Path $badLine
+Write-Stage 'claude-jsonl'
 
 $codexDay = Join-Path (Join-Path $codexDir 'sessions') '2026\10\07'
 New-Item -ItemType Directory -Force -Path $codexDay | Out-Null
@@ -211,6 +221,7 @@ if ($AcceptanceProfile -eq 'unified') {
 $codexLog = Join-Path $codexDay 'rollout-acceptance.jsonl'
 Write-Utf8NewLineLF -Path $codexLog -Content (($codexLines -join "`n") + "`n")
 Record-File -Path $codexLog
+Write-Stage 'codex-rollout'
 
 # ── 4. 有效价格（外置 pricing.toml） ───────────────────────────────
 if (-not $SkipPricing) {
@@ -233,6 +244,7 @@ output = 10.0
     $pricingPath = Join-Path $dataDir 'pricing.toml'
     Write-Utf8NewLineLF -Path $pricingPath -Content $pricing
     Record-File -Path $pricingPath
+    Write-Stage 'pricing-toml'
 }
 
 if ($AcceptanceProfile -eq 'unified') {
@@ -296,11 +308,13 @@ cache_read = "same_as_input"
         Write-Utf8NewLineLF -Path $pricingPath -Content $pricing
         Record-File -Path $pricingPath
     }
+    Write-Stage 'ccs-fixture-start'
     $ccsPath = Join-Path $rootFull 'sources\cc-switch\cc-switch.db'
     $maker = Join-Path $PSScriptRoot 'make_ccs_fixture.py'
     & python -B $maker $ccsPath
     if ($LASTEXITCODE -ne 0) { throw "CCS 合成 fixture 生成失败，退出 $LASTEXITCODE" }
     Record-File -Path $ccsPath
+    Write-Stage 'ccs-fixture-done'
 }
 
 # ── 5. 设置：显式两来源目录 + 关闭自动同步（验收期间绝不联网）+ 同意基线 ─
@@ -323,6 +337,7 @@ dir = "$($codexDir -replace '\\','/')"
 $settingsPath = Join-Path $dataDir 'settings.toml'
 Write-Utf8NewLineLF -Path $settingsPath -Content $settings
 Record-File -Path $settingsPath
+Write-Stage 'settings'
 
 # ── 6. manifest：绝对路径清单 + 初始散列 ──────────────────────────
 $manifest = [ordered]@{
@@ -349,4 +364,5 @@ Write-Host "  数据目录 = $dataDir"
 Write-Host "  来源目录 = $claudeDir | $codexDir"
 Write-Host "  WebView  = $webviewDir"
 Write-Host "  清单     = $manifestPath（$($written.Count) 个文件，含 SHA256）"
+Write-Stage 'done'
 Write-Host "下一步：设置环境变量 TOKENSCOPE_ACCEPTANCE_ROOT 后启动 acceptance 构建"
