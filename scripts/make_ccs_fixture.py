@@ -7,6 +7,19 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import sys
+
+
+def mark(stage: str) -> None:
+    """2026-10-23 取证装配：内部阶段标记走 stderr（stdout 保持纯 JSON）。
+
+    prepare 超时时这些行留在子进程 stderr，由 spawnSyncBounded 的错误尾部与
+    evidence 的 command_output_tail 字段保留——区分「python 启动挂」
+    （缺 interpreter-ready）与「SQLite 建库/写入阻塞」（后续标记缺失）。
+    flush=True：管道模式下 stdout/stderr 均为块缓冲，不即时冲刷会在超时
+    杀进程时连同缓冲一起丢失。
+    """
+    print(f"[ccs-fixture] {stage}", file=sys.stderr, flush=True)
 
 
 SCHEMA = """
@@ -33,13 +46,16 @@ CREATE TABLE usage_daily_rollups (
 
 
 def create_fixture(target: Path) -> dict:
+    mark("fixture-start")
     target = target.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     # Exclusive creation prevents overwriting any existing database, including real inputs.
     with target.open("xb"):
         pass
+    mark("db-created")
     with closing(sqlite3.connect(target)) as database, database:
         database.executescript(SCHEMA)
+        mark("schema-done")
         timestamp = int(datetime.datetime(2026, 10, 6, 1, tzinfo=datetime.timezone.utc).timestamp())
         rows = [
             ("session:msg-acceptance-1", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "claude_session", timestamp, 1200, 640, 3000, 100),
@@ -60,6 +76,8 @@ def create_fixture(target: Path) -> dict:
              cache_read_tokens,cache_creation_tokens,total_cost_usd)
             VALUES ('2026-10-05','claude','synthetic','claude-opus-5-5',3,3,900,60,20,10,'1.5')"""
         )
+        mark("rows-done")
+    mark("commit-done")
     return {"path": str(target), "requests": 2, "rollups": 1,
             "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
 
@@ -68,7 +86,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
+    mark("interpreter-ready")
     print(json.dumps(create_fixture(args.output), ensure_ascii=False))
+    mark("done")
 
 
 if __name__ == "__main__":

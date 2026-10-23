@@ -41,6 +41,29 @@ class MakeCcsFixtureTests(unittest.TestCase):
             self.assertNotEqual(repeat.returncode, 0, "已存在的数据库不得覆盖")
             self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), before)
 
+    def test_stage_markers_on_stderr_localize_hangs(self):
+        # 2026-10-23 取证装配：内部阶段标记走 stderr（stdout 保持纯 JSON，
+        # 既有 json.loads 不受影响），prepare 超时时由 spawnSyncBounded 的
+        # 错误尾部保留——可区分 python 启动、db 创建、schema、写入与提交
+        # 各步，不再只剩外层 ETIMEDOUT。
+        with tempfile.TemporaryDirectory(prefix="tokenscope-ccs-fixture-markers-") as root:
+            target = Path(root) / "cc-switch.db"
+            output = subprocess.run(
+                [sys.executable, "-B", str(Path(__file__).with_name("make_ccs_fixture.py")), str(target)],
+                capture_output=True, text=True, encoding="utf-8", check=False,
+            )
+            self.assertEqual(output.returncode, 0, output.stderr)
+            markers = [line for line in output.stderr.splitlines() if line.startswith("[ccs-fixture]")]
+            self.assertEqual(markers, [
+                "[ccs-fixture] interpreter-ready",
+                "[ccs-fixture] fixture-start",
+                "[ccs-fixture] db-created",
+                "[ccs-fixture] schema-done",
+                "[ccs-fixture] rows-done",
+                "[ccs-fixture] commit-done",
+                "[ccs-fixture] done",
+            ])
+
 
 if __name__ == "__main__":
     unittest.main()
