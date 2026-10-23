@@ -245,12 +245,24 @@
 
 **文档勘正与回填**：TL01 登记提交号为 `2540290`；TL02 交付 PR #44，contracts 作业总时长 5m18s，其中「原生场景契约临时目录清理回归」步骤实测 4981ms；审计表 history_collection 与 report 的资源持有者补记全局查询快照（`summary()` 后）。
 
+**复审第二轮（同日，提交 30b9708 仍需补修、暂不建议合并）**：用户确认失败证据保留与上传接线通过复核，但指出三项问题，复现脚本 `qa-artifacts/test-temp-cleanup/review-44/review_probes_round2.{py,json}`：
+
+1. **父进程先退出时超时仍在**：收尾依赖父 PID，taskkill 报父 PID 不存在，后代自然跑完（预算 0.3s + 宽限 0.2s 实测 2.101s 才返回），保存 stdout 为空；先前 `import time` 意外触发的孤儿边界实为必须覆盖项，不能靠让父进程存活回避。
+2. **收尾宽限串联扩大预算**：预算耗尽后可串联多次 10 秒收尾，1 秒预算最坏运行到 21 秒，违反「每次调用不超过预算、不增加等待补偿」。
+3. **fetch 失败根因未定位**：`awaitWithHostExit` 先置 settled 再调取消回调，取消回调抛 TypeError 时最终仍返回 HostExitError（用户 node 探针证实），此前「abort 落在连接建立阶段」的归因不成立；缺 `error.cause` 与服务端到达证据，隔离复跑通过不构成归因证据。**撤回「根因清楚」的结论，根因记为未定位**；原始失败日志摘录存 `qa-artifacts/test-temp-cleanup/b1/native-instance-flake-original.log`。该用例补齐证据字段属后续候选，不在本批范围。
+
+**第二轮补修**（先红后绿，新增回归 `test_early_parent_exit_orphan_is_bounded_killed_and_recorded`）：
+
+- 统一截止时间：等待阶段 `deadline = 启动 + 预算`；超时后收尾（终止树 + 排空）合计固定上限 `TEARDOWN_CAP_S = 2s`，不随预算缩放、不再串联。排空仍超时则直接采用超时异常里的部分输出，且不再触碰管道对象——`BufferedReader.close()` 会阻塞在幸存读取线程持有的锁上，正是 0.2s 宽限实测拖到 2.101s 的机制。
+- 父已退出：Windows 改用 `KILL_ON_JOB_CLOSE` 作业对象（Popen 返回后立即挂入，后代自动入作业），终止作业即连带终止孤儿，收尾不依赖父 PID；POSIX 维持进程组终止；作业不可用时回退 taskkill /T /F。正常完成时关闭作业句柄，顺带终止作业内残留后代。
+- 红绿：新回归在 30b9708 实现上红——预算 0.5s、后代 5s 实测 5.09s，超出「预算 + 收尾上限」3.5s 界（`contract-red-round2.log`）；新机制上契约五条路径全绿（6.8s，`contract-green-round3.log`），孤儿场景实测 elapsed 0.504s、stdout 保留 `parent-ready`、孤儿 PID 确认死亡。原「父存活」反例的耗时段言同步收紧为「预算 + 收尾上限 + 1s」。
+
 ### 6.5 实施后填写
 
 | 任务/批次 | 受测提交及作用 | 红灯断言与绿灯 | 命令/耗时/证据位置 | PR 与 main 运行 | 不变量自审/偏离/剩余范围 |
 | --- | --- | --- | --- | --- | --- |
 | TL01 | 2540290（审计登记，无业务/测试代码改动） | 不适用；复现结论为「通过但有残留」（见 §6.2） | rg 扫描；前端定向 2s；Rust 定向 6s（测试体 5.59s）；日志 `qa-artifacts/test-temp-cleanup/b1/` | 随 B1 PR 提交 | 只登记未治理；其余夹具为后续候选，不在本轮宣称已治理 |
-| TL02 / B1 | 红：d7c307f（未修）；绿：153f564 及复审补修 | 红：3 路径各因残留/假通过而红；绿：契约 3 过 + 原文件 31 过；复审后契约 4 过（含超时反例） | 契约约 5.8s（CI 步骤实测 4981ms）；原文件 2.9s；日志 `qa-artifacts/test-temp-cleanup/b1/` | [PR #44](https://github.com/ywltby/tokenscope/pull/44)，contracts/frontend/rust/rust-acceptance/gate/native-ui/install-test 全绿 | 自审见 §6.3；复审补修见 §6.4；审计候选未动 |
+| TL02 / B1 | 红：d7c307f（未修）；绿：153f564 及两轮复审补修 | 红：3 路径各因残留/假通过而红；复审二轮新回归在 30b9708 上红（孤儿场景 5.09s 超界）；绿：契约 5 过（含超时与父先退出反例）+ 原文件 31 过 | 契约约 6.8s；原文件 2.9s；日志 `qa-artifacts/test-temp-cleanup/b1/` | [PR #44](https://github.com/ywltby/tokenscope/pull/44)，两轮 CI 全绿 | 自审见 §6.3；两轮复审补修见 §6.4；审计候选未动 |
 | TL03 / B2 | 未执行 | 未执行 | 未执行 | 未建 | PR #42 前置项待决定 |
 | TL04 / B2 | 未执行 | 未执行 | 未执行 | 未建 | 不预占版本 |
 | TL05 | 未执行 | 不适用 | 未执行 | 未建 | 不改变 N01–N16 状态 |
