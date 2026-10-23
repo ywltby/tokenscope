@@ -276,6 +276,7 @@
 - PR #44 合并后 main 三条运行全成功：[CI](https://github.com/ywltby/tokenscope/actions/runs/39989795279)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39989795088)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39989795109)（版本不变，仅 gate，六下游 skipped，未建标签）。PR 最终轮 CI 16 项检查全过。
 - 已合并分支 `fix/frontend-test-temp-cleanup`、计划分支 `docs/test-temp-cleanup-plan` 删除（内容已全部进入 main）。
 - B2 仍未实施：等 PR #42 的用户决定与同步；本计划因此保持 active，不归档。
+- PR #42 同步准备（2026-10-23，用户授权合并前准备、不构成合并批准）：分支 `fix/rust-test-temp-cleanup` 合并 origin/main `c443ffc`（无冲突；`checks/action.yml` 两边接线并存——Rust 包装与 B1 契约步骤都在），随本记录提交以 full 模式通过完整提交钩子后推送；必需检查结果见 PR 页。
 
 | 任务/批次 | 受测提交及作用 | 红灯断言与绿灯 | 命令/耗时/证据位置 | PR 与 main 运行 | 不变量自审/偏离/剩余范围 |
 | --- | --- | --- | --- | --- | --- |
