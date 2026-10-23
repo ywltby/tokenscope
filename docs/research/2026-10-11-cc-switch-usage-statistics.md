@@ -390,6 +390,26 @@ Claude → Codex → Gemini → OpenCode → Grok Build → Pi → MCode → **A
   （分页续写多页/分支/fork、retryable pending 的文件替换检测、父时间线缓存失效、
   线程设置模型切换、远程压缩、首字计时等）。
 
+#### service_tier（Fast / priority）能不能识别？（本机真实日志实测）
+
+- **唯一的结构化来源**：`event_msg` → `payload.type == "thread_settings_applied"` →
+  `payload.thread_settings.service_tier`，取值 `"default"` / `"priority"`（`priority` 即
+  ChatGPT 的 Fast 档）。本机最近 40 个 rollout 的分布：**default 370 次、priority 53 次**，
+  共 423 条该事件；同一事件还携带 `model`、`model_provider_id`、`reasoning_effort`、`cwd`、
+  `approval_policy`、`approvals_reviewer`、`collaboration_mode`、`personality`、
+  `permission_profile`、`runtime_workspace_roots` 等键。
+- **它不是"每请求"字段**：`token_count` 与 `turn_context` 都不带 `service_tier`
+  （对同一批文件做正则匹配，命中 0）。要判断"某次响应是否 fast"，必须按事件顺序继承
+  最近一次 `thread_settings_applied` 的值——与 cc-switch 还原模型的做法完全相同。
+- **字符串 grep 会误判**：`service_tier` 子串在日志里出现 514 次，其中 **91 次只是正文文本**
+  （落在 `item_completed` 的 Reasoning/AgentMessage 与 `custom_tool_call_output` 里），
+  只有按 `"service_tier":` 的 JSON 键形态解析才得到真实的 423 次。
+- **cc-switch 不读它**：`session_usage_codex.rs` 里 `service_tier` 只出现在测试 fixture
+  （第 3812 行），生产代码只从 `thread_settings_applied` 取 `model`（第 1310/1431 行）；
+  价格表也没有 tier 维度，所以 fast 与 default 在它的统计里同价。
+  `provider.rs:554` 的「Codex OAuth FAST mode 注入 `service_tier = "priority"`」是**代理侧
+  主动注入**，与用量识别无关。
+
 ### 12.4 Gemini CLI（`session_usage_gemini.rs`，508 行）
 
 入口 `sync_gemini_usage`（`:42`）。`<gemini 目录>/tmp/<project_hash>/chats/session-*`；
@@ -532,7 +552,11 @@ models.dev 面板、同步/重建 toast），Hero、趋势图、请求日志表�
 - 日汇总与明细相加、只在完整自然日走汇总；剪枝前先补价；
 - 事件驱动的 200 ms 防抖刷新；
 - **新增来源时的"三张白名单"纪律**：缓存包含语义、跨源去重来源、前端应用筛选；
-- v4.0.14 的 `COLLATE NOCASE` 精确匹配——价格表来自用户输入，大小写不该决定命中。
+- v4.0.14 的 `COLLATE NOCASE` 精确匹配——价格表来自用户输入，大小写不该决定命中；
+- **同一事件里的多个维度别只取一个**：Codex 的 `thread_settings_applied` 同时带
+  `model`、`reasoning_effort`、`service_tier`、`cwd`，cc-switch 只用了 `model`。
+  若要按 fast/priority 计价或筛选，得把 tier 提升为事件维度，并让计价能选到对应价格——
+  models.dev / OpenRouter 的价格条目没有该维度，只能靠外置 `pricing.toml` 或倍率。
 
 **需要警惕**：
 
