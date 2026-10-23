@@ -17,9 +17,9 @@
 
 N01–N09、N14–N16 已完成；16 个责任编号中为 **12 项完成、1 项部分完成（N12）、3 项专项验收未闭合（N10/N11/N13）**，共 4 个仍开放的责任编号，不等于 4 个单独操作。
 
-## 2026-10-23 测试临时目录清理（B1 已实施待合并）
+## 2026-10-23 测试临时目录清理（B1 已合并，B2 待 PR #42 决定）
 
-[测试临时目录清理实施计划](active/2026-10-23-test-temp-cleanup.md) 的 B1 批次（Vitest 用例遗漏修复 + 隔离外层回归 + CI 接线）已实施并经用户复审补修，交付 [PR #44](https://github.com/ywltby/tokenscope/pull/44)，CI 全绿，合并与后续归档等待用户决定；其余夹具已审计登记为后续候选。B2（Rust 锁等待用例的连接释放顺序，按现有规则递增 patch）未实施，前置 [PR #42](https://github.com/ywltby/tokenscope/pull/42) 由用户单独决定——该 PR 目前落后 main：无冲突，合并前需同步最新 main 并通过必需检查。本专项不占 N 编号，不改变 N09 等已完成项的历史状态。
+[测试临时目录清理实施计划](active/2026-10-23-test-temp-cleanup.md) 的 B1 批次（Vitest 用例遗漏修复 + 隔离外层回归 + CI 接线）已实施：经用户三轮复审补修（失败证据保留、超时进程树收尾、挂起创建消除作业竞态、原预算内统一截止、日志直写文件）与最终复核，[PR #44](https://github.com/ywltby/tokenscope/pull/44) 于 2026-10-23 普通合并 `fde7762`，main 的 CI、Native UI E2E、Release 全成功（版本不变，仅 gate）；其余夹具已审计登记为后续候选。B2（Rust 锁等待用例的连接释放顺序，按现有规则递增 patch）未实施，前置 [PR #42](https://github.com/ywltby/tokenscope/pull/42) 由用户单独决定——该 PR 目前落后 main：无冲突，合并前需同步最新 main 并通过必需检查。本专项不占 N 编号，不改变 N09 等已完成项的历史状态。
 
 ## 已交付与证据边界
 

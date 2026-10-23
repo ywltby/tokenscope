@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 >
-> 状态：**B1 已实施待合并（2026-10-23）。** 用户同日确认计划并授权实施 B1；B1 交付为 PR #44（TL01–TL02 完成、复审补修完成、CI 全绿），合并由用户决定。B2 未实施，前置 PR #42 由用户单独决定（同日复审时 PR #42 已落后 main：无冲突，合并前需同步最新 main 并通过必需检查）。计划分支：`docs/test-temp-cleanup-plan`。
+> 状态：**B1 已合并（2026-10-23，合并 `fde7762`）；B2 未实施，前置 PR #42 由用户单独决定**（该 PR 目前落后 main：无冲突，合并前需同步最新 main 并通过必需检查）。用户同日复核通过 B1（六条契约本地 7.65s、四种启动失败补查明确失败、CI/Native UI/安装升级全绿）并授权合并。计划分支 `docs/test-temp-cleanup-plan` 已随 PR #44 进入 main。
 
 **Goal:** 修复已证实的 Vitest 临时目录遗漏和 Rust 锁等待用例句柄释放顺序问题，增加能发现“测试通过但目录残留”的回归，并明确 Rust 进程级收尾的适用边界。
 
@@ -271,12 +271,16 @@
 - 回归改写：受控时序回归断言「分配时 PID 文件必然未出现（挂起创建）」且逃逸后代被作业关闭收割；父先退出回归改为正常完成路径（父退出后调用应在预算内完成、孤儿被 KILL_ON_JOB_CLOSE 收割）；挂起超时回归保留（预算内父进程不退出）。三条反例的耗时段言统一为「原预算 + 1s 容差」。
 - 红绿：受控时序回归在 94d6ed4 实现上确定性红——分配等待 0.3s 内 PID 文件已出现（旧实现子进程先行运行），「分配先于目标代码」断言失败（`contract-red-round3b.log`）；新机制六条路径全绿（8.3s，`contract-green-round4.log`）。实测：孤儿场景 completed 0.106s（预算 0.5s、孤儿确认死亡）、挂起超时场景 timeout 0.755s（预算 1.0s、stdout 保留 parent-ready、后代确认死亡）——所有等待均在原预算内收敛。
 
-### 6.5 实施后填写
+### 6.5 实施后填写（收尾补记，2026-10-23 main 直接提交）
+
+- PR #44 合并后 main 三条运行全成功：[CI](https://github.com/ywltby/tokenscope/actions/runs/39989795279)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39989795088)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39989795109)（版本不变，仅 gate，六下游 skipped，未建标签）。PR 最终轮 CI 16 项检查全过。
+- 已合并分支 `fix/frontend-test-temp-cleanup`、计划分支 `docs/test-temp-cleanup-plan` 删除（内容已全部进入 main）。
+- B2 仍未实施：等 PR #42 的用户决定与同步；本计划因此保持 active，不归档。
 
 | 任务/批次 | 受测提交及作用 | 红灯断言与绿灯 | 命令/耗时/证据位置 | PR 与 main 运行 | 不变量自审/偏离/剩余范围 |
 | --- | --- | --- | --- | --- | --- |
 | TL01 | 2540290（审计登记，无业务/测试代码改动） | 不适用；复现结论为「通过但有残留」（见 §6.2） | rg 扫描；前端定向 2s；Rust 定向 6s（测试体 5.59s）；日志 `qa-artifacts/test-temp-cleanup/b1/` | 随 B1 PR 提交 | 只登记未治理；其余夹具为后续候选，不在本轮宣称已治理 |
-| TL02 / B1 | 红：d7c307f（未修）；绿：153f564 及三轮复审补修 | 红：3 路径各因残留/假通过而红；复审各轮新回归在当轮实现上红（孤儿超界、分配晚于目标代码）；绿：契约 6 过（含超时、父先退出、受控时序反例）+ 原文件 31 过 | 契约约 8.3s；原文件 2.9s；日志 `qa-artifacts/test-temp-cleanup/b1/` | [PR #44](https://github.com/ywltby/tokenscope/pull/44)，各轮 CI 全绿 | 自审见 §6.3；三轮复审补修见 §6.4；审计候选未动 |
+| TL02 / B1 | 红：d7c307f（未修）；绿：153f564 及三轮复审补修（e0d276c 终态） | 红：3 路径各因残留/假通过而红；复审各轮新回归在当轮实现上红（孤儿超界、分配晚于目标代码）；绿：契约 6 过（含超时、父先退出、受控时序反例）+ 原文件 31 过；用户复核本地 7.65s 通过并授权合并 | 契约约 8.3s；原文件 2.9s；日志 `qa-artifacts/test-temp-cleanup/b1/` | [PR #44](https://github.com/ywltby/tokenscope/pull/44) 普通合并 `fde7762`（含注释勘正 6e3ddeb）；main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39989795279)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39989795088)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39989795109) 全成功；版本不变，Release 仅 gate（23s），六下游 skipped | 自审见 §6.3；三轮复审补修见 §6.4；审计候选未动 |
 | TL03 / B2 | 未执行 | 未执行 | 未执行 | 未建 | PR #42 前置项待决定 |
 | TL04 / B2 | 未执行 | 未执行 | 未执行 | 未建 | 不预占版本 |
-| TL05 | 未执行 | 不适用 | 未执行 | 未建 | 不改变 N01–N16 状态 |
+| TL05 | B1 部分完成：PR #44 获用户合并决定后普通合并；main 的 CI、Native UI E2E、Release 全成功（Release 仅 gate） | 不适用 | 见 TL02/B1 行的 main 运行链接 | [PR #44](https://github.com/ywltby/tokenscope/pull/44) 已合并 | B1 交付闭合；B2/收口未完成——计划保持 active；不改变 N01–N16 状态 |
