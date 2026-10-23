@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust / SQLite / Tauri 2 / Vue 3，以及现有 Rust、Vitest、浏览器和原生 acceptance 测试工具。
 
-- 整理日期：2026-10-11；当前状态更新：2026-10-22。
+- 整理日期：2026-10-11；当前状态更新：2026-10-23。
 - 状态：**12 项完成（N01–N09、N14–N16）、1 项部分完成（N12）、3 项专项验收未闭合（N10/N11/N13），共 4 个开放责任编号。** 已完成项不重复实施；N14 第 4 项随 B1 / PR #27 完成，四项全部关闭。
 - 已核验交付基线：PR #15 合并 `9ea0c584`、v0.5.1 公开，连续升级链成功；PR #16 合并 `0ffab19`、v0.5.2 公开，[main CI](https://github.com/ywltby/tokenscope/actions/runs/39353860584)、[原生 E2E](https://github.com/ywltby/tokenscope/actions/runs/39353860657)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39353860618) 全成功（安装、六个单跳、两条连续链）。PR #17 研究资料合入 `89aec76` 不改变这些专项验收结论。PR #19 合并 `1156385`、v0.5.5 公开，main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39452749833)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39452749860)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39452749887) 全成功（安装、六个单跳、两条连续链），N15 关闭。
 - 最新交付：PR #23 合并 `d064f98`、v0.5.6 公开，main CI/Native UI E2E/Release 全成功（安装、六个单跳、两条连续链）；N14 第 2 项与 N16 关闭，证据见各自条目。
@@ -17,6 +17,7 @@
 - 启动恢复、SQLite 并发调查和 N16 已移入 archive/implemented；下文及 §7 的旧提交、版本、失败/通过记录保留为历史证据，不能替代当前待验矩阵。
 - 待办：N10 隐私强取证、N11 原生统一验收、N12 其余系统/签字、N13 真实性能。N16 随 PR #23 / v0.5.6 完成最后的产品正常发布验证，专项已归档。真实跨午夜、长时间休眠、跨显示器仍在[独立系统待办](../system-acceptance-todo.md)，不在本轮执行。
 - 收口计划（2026-10-21 用户确认）：[剩余验收收口](2026-10-21-acceptance-closure.md) 的 AC01 / B1 已交付并关闭 N14；B2–B5 继续承接 N11、N10、N13、N12，各项状态随批次交付更新。
+- 独立维护专项（2026-10-23，待复核）：[测试临时目录清理](2026-10-23-test-temp-cleanup.md) 计划分批处理已复现的前端遗漏和 Rust 锁等待用例残留，其余夹具先审计登记；PR #42 进程级兜底的合并单独由用户决定。该专项尚未实施，不占新 N 编号，不回写或重开 N09 的历史验收结论。
 - 总账：[计划目录](../README.md)；历史逐份结论：[审计索引](../audits/README.md)；发布附属清单：[D5](../d5-acceptance-checklist.md)。
 
 ## 1. 优先级与状态规则

@@ -143,6 +143,23 @@ runs:
       run: |
         pwsh -NoProfile -File scripts/test_install_helpers.ps1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # 测试临时目录清理计划 TL02：外层契约在私有根运行真实 Vitest，观察子进程
+    # 退出后的文件系统，防止「测试通过但目录残留」回归（前端 B1 批次）。
+    - name: 原生场景契约临时目录清理回归
+      if: inputs.group == 'contracts'
+      shell: pwsh
+      run: |
+        python -B -m unittest discover -s scripts -p "test_native_scenario_temp_cleanup.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # 外层契约真实失败时会把证据移入独立目录；这里按失败产物上传供排查。
+    # 成功运行时证据已正常清理、目录不存在，ignore 使本步为无害空操作。
+    - name: Upload temp-cleanup contract evidence
+      if: always() && inputs.group == 'contracts'
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+      with:
+        name: temp-cleanup-contract-evidence
+        path: qa-artifacts/test-temp-cleanup/contract-evidence
+        if-no-files-found: ignore
     - name: workspace acceptance clippy
       if: inputs.group == 'rust-acceptance'
       shell: pwsh
