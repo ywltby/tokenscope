@@ -10,13 +10,14 @@
 3. 清理失败：仅对该用例目录的 `fs.rmSync` 注入带固定标记的删除错误，
    Vitest 必须非零退出且输出标记；残留只允许出现在外层私有根。
 
-另有两条短反例（合成子进程，符合计划不变量 7 的注入边界）：父进程产出
-继承输出管道的长寿后代后，或驻留、或正常退出留下孤儿后代，用短预算证明
-外层超时受统一截止时间约束（等待不超过预算，收尾只追加固定上限）、已捕获
-输出落盘、后代——包括父进程已退出的孤儿——确实被终止。三条真实路径仍
-保持 30 秒预算。
+另有三条短反例（合成子进程，符合计划不变量 7 的注入边界）：父进程产出
+长寿后代后驻留、或正常退出留下孤儿后代、或受控时序强制「后代先于作业
+分配创建」，用短预算证明外层超时受原预算内统一截止约束（含收尾预留）、
+输出落盘、后代——包括孤儿与逃逸后代——确实被终止。三条真实路径仍保持
+30 秒预算。
 
-全部子进程 stdout/stderr 与 JSON 报告落盘保存；外层真实失败时证据先移入
+全部子进程 stdout/stderr 直接写入私有日志文件（不依赖管道 EOF，超时后
+读取已有内容）；外层真实失败时证据先移入
 `qa-artifacts/test-temp-cleanup/contract-evidence/` 再上抛（CI 按失败产物
 上传），成功时正常清理。核对原用例确实执行且只有该用例执行，全跳过、
 报告缺失或配置加载失败一律判失败。每次外层同步调用不超过其预算，超时
@@ -36,6 +37,9 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
+
+_CONTRACT_MODULE = sys.modules[__name__]
 
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = "frontend"
@@ -47,9 +51,9 @@ SENTINEL_BYTES = b"tokenscope temp-cleanup outer sentinel\n"
 MARK_READ = "TOKENSCOPE_TEMP_CLEANUP_INJECTED_READ_FAILURE"
 MARK_RM = "TOKENSCOPE_TEMP_CLEANUP_INJECTED_RM_FAILURE"
 CALL_TIMEOUT_S = 30
-# 超时后收尾（终止进程树 + 排空缓冲）的固定上限：不随预算缩放、不串联多次。
-# 等待阶段受预算统一截止，收尾只在预算耗尽后追加这至多 2 秒。
-TEARDOWN_CAP_S = 2.0
+# 收尾（终止进程树 + 等待退出）在原预算内部预留的时间：所有等待共用同一
+# 截止时间（启动 + 预算），不追加任何预算外的等待或收尾。
+TEARDOWN_RESERVE_S = 0.5
 EVIDENCE_DIR = ROOT / "qa-artifacts" / "test-temp-cleanup" / "contract-evidence"
 DESCENDANT_PID_ENV = "TOKENSCOPE_DESCENDANT_PID_FILE"
 
@@ -127,6 +131,14 @@ def _decode(data):
     return data.decode("utf-8", errors="replace")
 
 
+def _read_log(path):
+    """读取子进程直写的日志文件；读不到时留空，不掩盖后续断言。"""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def _kernel32():
     """配置好签名绑定的 kernel32（句柄用 c_void_p，避免 64 位截断）。"""
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -137,6 +149,14 @@ def _kernel32():
     kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     kernel32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.OpenThread.restype = ctypes.c_void_p
+    kernel32.OpenThread.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.ResumeThread.restype = ctypes.c_uint32
+    kernel32.ResumeThread.argtypes = [ctypes.c_void_p]
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+    kernel32.Thread32First.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    kernel32.Thread32Next.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     return kernel32
 
 
@@ -197,6 +217,96 @@ def _assign_to_job(job, proc):
 def _close_job(job):
     """关闭作业句柄；KILL_ON_JOB_CLOSE 会终止作业内仍存活的任何进程。"""
     _kernel32().CloseHandle(job)
+
+
+def _open_main_thread(proc):
+    """打开子进程主线程的 THREAD_SUSPEND_RESUME 句柄（Popen 不暴露该句柄）。
+
+    挂起创建的子进程此刻只有主线程一个线程，用工具帮助快照按进程枚举取得；
+    若已有其他线程 id 可用则直接打开。"""
+    tid = getattr(proc, "_tid", None)
+    if tid is not None:
+        return _kernel32().OpenThread(0x0002, False, tid) or None  # THREAD_SUSPEND_RESUME
+    return _open_only_thread(proc.pid)
+
+
+def _open_only_thread(pid):
+    """枚举目标进程的线程并打开唯一线程；挂起创建的子进程只有主线程一个，
+    出现多个线程说明进程已开始运行（违背挂起前提），宁可失败也不误恢复。"""
+    from ctypes import wintypes
+
+    class _ThreadEntry32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", ctypes.c_long),
+            ("tpDeltaPri", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD)]
+
+    kernel32 = _kernel32()
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x4, 0)  # TH32CS_SNAPTHREAD
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        return None
+    try:
+        entry = _ThreadEntry32()
+        entry.dwSize = ctypes.sizeof(_ThreadEntry32)
+        found = None
+        alive = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+        while alive:
+            if entry.th32OwnerProcessID == pid:
+                if found is not None:
+                    return None
+                found = entry.th32ThreadID
+            alive = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    if found is None:
+        return None
+    return kernel32.OpenThread(0x0002, False, found) or None  # THREAD_SUSPEND_RESUME
+
+
+def _spawn(argv, cwd, env, stdout_file, stderr_file):
+    """启动外层子进程并返回 (proc, job)；作业不可用时显式抛错，不降级。
+
+    Windows：挂起创建（CREATE_SUSPENDED）→ 挂入 KILL_ON_JOB_CLOSE 作业 →
+    恢复主线程。作业先于任何目标代码就位，后代自动入作业，父进程先退出的
+    孤儿也随作业终止（复审第三轮缺陷 1 的启动竞态由此消除；作业只收编加入
+    之后创建的后代，先启动再分配是不够的）。POSIX：新会话 + 进程组，组成员
+    资格在创建时继承，结构上无入组竞态。"""
+    if os.name == "nt":
+        proc = subprocess.Popen(argv, cwd=cwd, env=env,
+                                stdout=stdout_file, stderr=stderr_file,
+                                creationflags=getattr(subprocess, "CREATE_SUSPENDED", 0x4))
+        job = None
+        thread = None
+        try:
+            job = _create_kill_on_close_job()
+            if job is None:
+                raise OSError("创建 KILL_ON_JOB_CLOSE 作业对象失败")
+            thread = _open_main_thread(proc)
+            if thread is None:
+                raise OSError(f"OpenThread({getattr(proc, '_tid', '?')}) 失败"
+                              f"（GetLastError={ctypes.get_last_error()}）")
+            if not _assign_to_job(job, proc):
+                raise OSError("AssignProcessToJobObject 失败"
+                              f"（GetLastError={ctypes.get_last_error()}）")
+            if _kernel32().ResumeThread(thread) == 0xFFFFFFFF:
+                raise OSError(f"ResumeThread 失败（GetLastError={ctypes.get_last_error()}）")
+            return proc, job
+        except OSError:
+            if job is not None:
+                _kernel32().TerminateJobObject(job, 1)
+                _close_job(job)
+            if proc.poll() is None:
+                proc.kill()
+            raise
+        finally:
+            if thread is not None:
+                _kernel32().CloseHandle(thread)
+    return subprocess.Popen(argv, cwd=cwd, env=env, stdout=stdout_file, stderr=stderr_file,
+                            start_new_session=True), None
 
 
 def _keep_evidence_on_failure(method):
@@ -268,24 +378,16 @@ class NativeScenarioTempCleanupCase(unittest.TestCase):
         return [executable, *command[1:]]
 
     def _kill_process_tree(self, proc, job):
-        """有界进程树收尾，不依赖父 PID 存活：优先终止整个作业（覆盖父进程已
-        退出的孤儿后代）；无作业时 Windows 回退 taskkill /T /F，POSIX 终止
-        进程组。尽力而为：进程可能已自行退出（竞态），失败不外抛，返回值由
-        调用方写进证据，供反例核对后代确实终止。"""
+        """有界进程树收尾：Windows 终止整个作业——挂起创建保证后代已随作业
+        入组，父进程先退出的孤儿一并终止；POSIX 终止进程组。尽力而为：进程
+        可能已自行退出（竞态），失败不外抛，返回值由调用方写进证据，供反例
+        核对后代确实终止。"""
         try:
             if job is not None:
                 if _kernel32().TerminateJobObject(job, 1):
                     return None
                 return (f"TerminateJobObject 失败"
                         f"（GetLastError={ctypes.get_last_error()}）")
-            if os.name == "nt":
-                done = subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                    capture_output=True, timeout=TEARDOWN_CAP_S)
-                if done.returncode != 0:
-                    return (_decode(done.stderr).strip()
-                            or f"taskkill 退出码 {done.returncode}")
-                return None
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             return None
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -295,7 +397,7 @@ class NativeScenarioTempCleanupCase(unittest.TestCase):
         if os.name == "nt":
             listing = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"],
-                capture_output=True, timeout=TEARDOWN_CAP_S)
+                capture_output=True, timeout=TEARDOWN_RESERVE_S)
             rows = [line for line in _decode(listing.stdout).splitlines()
                     if line.startswith('"')]
             return bool(rows)
@@ -306,62 +408,52 @@ class NativeScenarioTempCleanupCase(unittest.TestCase):
             return False
 
     def _execute_case(self, case_name, argv, env, budget_s):
-        """在统一截止时间内运行一次外层子进程，超时按进程树收尾并保存输出。
+        """在原预算内统一截止运行一次外层子进程，超时按进程树收尾。
 
-        等待阶段受预算约束（deadline = 启动 + 预算）；超时后先终止整棵进程
-        树——Windows 用 KILL_ON_JOB_CLOSE 作业（后代自动入作业，父进程先退出
-        的孤儿也一并终止，收尾不依赖父 PID），POSIX 终止进程组——再以固定
-        TEARDOWN_CAP_S 上限排空缓冲：整树终止后写端全部关闭，EOF 即到，通常
-        立刻返回。排空仍超时则改用超时异常里的部分输出，且不再触碰管道对象：
-        BufferedReader.close() 会阻塞在幸存读取线程持有的锁上（复审第二轮
-        实测把 0.2s 宽限拖成 2.101s 的机制）。"""
+        stdout/stderr 直接写入私有日志文件——不依赖管道 EOF，超时后读取已有
+        内容即可（复审第三轮建议）。所有等待共用同一截止时间（启动 + 预算）：
+        首次等待提前预留 TEARDOWN_RESERVE_S 收尾时间；超时后终止整棵进程树
+        （Windows 作业在挂起创建阶段已先于任何目标代码挂入，孤儿一并终止；
+        POSIX 终止进程组），再在同一截止时间的剩余部分内等待退出。树终止仍
+        失败时不追加任何等待，按超时失败返回，日志保留已写入内容。"""
         started = time.monotonic()
         deadline = started + budget_s
-        try:
-            proc = subprocess.Popen(argv, cwd=ROOT, env=env,
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    start_new_session=(os.name != "nt"))
-        except OSError as exc:
-            self.fail(f"无法启动外层子进程 {argv[0]}：{exc}")
-        job = _create_kill_on_close_job()
-        if job is not None and not _assign_to_job(job, proc):
-            _close_job(job)
-            job = None
-        kind = "completed"
-        stdout_data = stderr_data = b""
-        kill_error = None
-        try:
-            stdout_data, stderr_data = proc.communicate(
-                timeout=max(0.0, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired as expired:
-            kind = "timeout"
-            kill_error = self._kill_process_tree(proc, job)
+        reserve = min(TEARDOWN_RESERVE_S, budget_s / 4)
+        stdout_path = self.evidence / f"stdout-{case_name}.log"
+        stderr_path = self.evidence / f"stderr-{case_name}.log"
+        with open(stdout_path, "wb") as stdout_file, open(stderr_path, "wb") as stderr_file:
             try:
-                stdout_data, stderr_data = proc.communicate(timeout=TEARDOWN_CAP_S)
-            except subprocess.TimeoutExpired:
-                # 树终止失败时的兜底：不 close 管道对象（会阻塞在幸存读取线程
-                # 的锁上），直接采用部分输出并放弃句柄，交由解释器退出回收。
-                stdout_data = expired.stdout or b""
-                stderr_data = expired.stderr or b""
-        finally:
-            if job is not None:
-                # KILL_ON_JOB_CLOSE：关闭句柄会终止作业内仍存活的进程，正常
-                # 完成时是对残留后代的最后兜底。
-                _close_job(job)
+                proc, job = _spawn(argv, cwd=ROOT, env=env,
+                                   stdout_file=stdout_file, stderr_file=stderr_file)
+            except OSError as exc:
+                self.fail(f"无法在作业内启动外层子进程"
+                          f"（不降级为无法处理孤儿的收尾方式）：{exc}")
+            kind = "completed"
+            kill_error = None
+            try:
+                try:
+                    proc.communicate(
+                        timeout=max(0.0, deadline - time.monotonic() - reserve))
+                except subprocess.TimeoutExpired:
+                    kind = "timeout"
+                    kill_error = self._kill_process_tree(proc, job)
+                    try:
+                        proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+                    except subprocess.TimeoutExpired:
+                        pass  # 树终止失败：不追加等待，按超时失败返回（日志保留已写入内容）
+            finally:
+                if job is not None:
+                    # KILL_ON_JOB_CLOSE：关闭句柄终止作业内仍存活的进程，正常
+                    # 完成时是对残留后代的最后兜底。
+                    _close_job(job)
         elapsed = time.monotonic() - started
-
-        stdout_text = _decode(stdout_data or b"")
-        stderr_text = _decode(stderr_data or b"")
-        (self.evidence / f"stdout-{case_name}.log").write_text(
-            stdout_text, encoding="utf-8")
-        (self.evidence / f"stderr-{case_name}.log").write_text(
-            stderr_text, encoding="utf-8")
+        stdout_text = _read_log(stdout_path)
+        stderr_text = _read_log(stderr_path)
         if kill_error is not None:
             (self.evidence / f"kill-{case_name}.log").write_text(
                 f"{kill_error}\n", encoding="utf-8")
         return SimpleNamespace(kind=kind, returncode=proc.returncode,
-                               stdout_text=stdout_text,
-                               stderr_text=stderr_text,
+                               stdout_text=stdout_text, stderr_text=stderr_text,
                                report=None, elapsed_s=elapsed)
 
     def _run_vitest(self, case_name, *, setup_template=None, mark=None,
@@ -409,9 +501,8 @@ class NativeScenarioTempCleanupCase(unittest.TestCase):
     def _require_completed(self, outcome):
         if outcome.kind != "completed":
             self.fail(
-                f"外层调用超时（预算 {CALL_TIMEOUT_S}s + 收尾上限 {TEARDOWN_CAP_S}s "
-                f"内未完成，实际 {outcome.elapsed_s:.1f}s），已按统一截止时间收尾；"
-                f"已捕获输出存于 {self.evidence}")
+                f"外层调用超时（原预算 {CALL_TIMEOUT_S}s 内统一截止，含收尾预留，"
+                f"实际 {outcome.elapsed_s:.1f}s）；已捕获输出存于 {self.evidence}")
 
     def _require_single_executed(self, outcome, expected_status):
         if outcome.report is None:
@@ -495,11 +586,8 @@ class NativeScenarioTempCleanupCase(unittest.TestCase):
 
     @_keep_evidence_on_failure
     def test_timeout_teardown_bounds_descendant_and_saves_partial_output(self):
-        # 合成子进程反例：父进程先产出一个继承输出管道的长寿后代再驻留。
-        # PR #44 复审缺陷 2：旧实现 subprocess.run(timeout=…) 只杀直接进程，
-        # 管道被后代持有时会无界排空（预算 0.5s 实测 2.102s 才返回），且超时
-        # 输出不落盘。这里用短预算证明：超时必有界、已捕获输出保留、后代
-        # 确实被进程树收尾终止。
+        # 反例（合成子进程）：父进程先产出一个长寿后代再驻留——预算内父进程
+        # 不肯退出，证明等待受原预算约束、超时收尾终止整树、已产出输出保留。
         budget_s = 1.0
         pid_path = self.root / "descendant.pid"
         outcome = self._run_vitest(
@@ -509,9 +597,9 @@ class NativeScenarioTempCleanupCase(unittest.TestCase):
         self.assertEqual(outcome.kind, "timeout",
                          "短预算必须触发超时路径，否则反例无效")
         self.assertLess(
-            outcome.elapsed_s, budget_s + TEARDOWN_CAP_S + 1.0,
-            f"统一截止时间必须约束等待与收尾（预算 {budget_s}s + 固定收尾上限 "
-            f"{TEARDOWN_CAP_S}s），实际 {outcome.elapsed_s:.2f}s")
+            outcome.elapsed_s, budget_s + 1.0,
+            f"统一截止时间必须约束在原预算内（含收尾预留，预算 {budget_s}s），"
+            f"实际 {outcome.elapsed_s:.2f}s")
         self.assertIn("parent-ready", outcome.stdout_text,
                       "超时前已捕获的输出必须保留")
         self.assertNotIn(
@@ -525,12 +613,11 @@ class NativeScenarioTempCleanupCase(unittest.TestCase):
 
     @_keep_evidence_on_failure
     def test_early_parent_exit_orphan_is_bounded_killed_and_recorded(self):
-        # 父进程先退出的反例（复审第二轮缺陷 1）：父进程产出继承输出管道的
-        # 长寿后代后正常退出——收尾不能依赖父 PID 存活。旧机制实测（用户
-        # review_probes_round2.json）：taskkill 报父 PID 不存在，后代自然跑完，
-        # 预算 0.3s + 宽限 0.2s 拖到 2.101s，保存的 stdout 为空。这里预算
-        # 0.5s、后代 5s：断言超时触发、耗时有界、父进程已产出的输出保留、
-        # 孤儿后代被终止、哨兵不变。
+        # 父进程先退出的反例（复审第二轮缺陷 1）：父进程产出长寿后代后正常
+        # 退出，调用在预算内正常完成——但作业关闭（KILL_ON_JOB_CLOSE）必须
+        # 收割父进程已退出后仍存活的孤儿后代。旧机制（收尾依赖父 PID、管道
+        # 排空依赖 EOF）实测预算 0.3s+宽限 0.2s 拖到 2.101s、后代自然跑完、
+        # stdout 为空。这里断言：正常完成、输出保留、孤儿后代确认死亡。
         budget_s = 0.5
         pid_path = self.root / "orphan.pid"
         outcome = self._run_vitest(
@@ -538,22 +625,80 @@ class NativeScenarioTempCleanupCase(unittest.TestCase):
             argv_override=[sys.executable, "-c", _pipe_holding_program(
                 EARLY_PARENT_DESCENDANT_SLEEP_S, parent_lingers=False)],
             env_extra={DESCENDANT_PID_ENV: str(pid_path)})
-        self.assertEqual(outcome.kind, "timeout",
-                         "短预算必须触发超时路径，否则反例无效")
+        self.assertEqual(outcome.kind, "completed",
+                         "父进程正常退出后调用应在预算内完成")
         self.assertLess(
-            outcome.elapsed_s, budget_s + TEARDOWN_CAP_S + 1.0,
-            f"统一截止时间必须约束等待与收尾（预算 {budget_s}s + 固定收尾上限 "
-            f"{TEARDOWN_CAP_S}s），实际 {outcome.elapsed_s:.2f}s")
+            outcome.elapsed_s, budget_s + 1.0,
+            f"统一截止时间必须约束在原预算内（含收尾预留，预算 {budget_s}s），"
+            f"实际 {outcome.elapsed_s:.2f}s")
+        self.assertEqual(outcome.returncode, 0, "父进程应按 0 退出")
         self.assertIn("parent-ready", outcome.stdout_text,
                       "父进程自然退出，其已产出的输出仍必须落盘保留")
         self.assertNotIn(
             "descendant-ended", outcome.stdout_text,
-            "孤儿后代寿命长于预算时不得等到它的输出（不得无界排空）")
+            "孤儿后代寿命长于调用时长时不得等到它的输出")
         self.assertTrue(pid_path.exists(), "反例后代未按预期产出 PID 文件")
         orphan_pid = int(pid_path.read_text(encoding="utf-8").strip())
+        time.sleep(0.2)  # 给作业关闭后的终止留出落盘与调度余量
         self.assertFalse(self._pid_alive(orphan_pid),
                          f"父进程已退出，孤儿后代 {orphan_pid} 仍存活："
-                         "收尾不能依赖父 PID")
+                         "作业关闭必须收割孤儿")
+        self._assert_sentinel_intact()
+
+    @_keep_evidence_on_failure
+    def test_job_enrollment_precedes_descendant_creation(self):
+        # 复审第三轮缺陷 1 的确定性回归：入作业必须先于任何目标代码运行。
+        # 旧实现先启动再分配，控制调度（拖到后代已创建才分配）即可让后代逃出
+        # 作业：分配成功、终止报成功、调用返回后后代仍存活（用户
+        # review_probes_round3.json 实测 2.321s、stdout 为空）。这里用同样的
+        # 受控时序——分配前等待 PID 文件出现；挂起创建下子进程尚未运行任何
+        # 目标代码、PID 文件不可能出现，等待到点后才分配并恢复。调用随后在
+        # 预算内正常完成，断言「分配时后代尚未创建」与「逃逸后代已被收割」。
+        budget_s = 2.0
+        pid_path = self.root / "escaped.pid"
+        observations = {}
+        real_assign = _assign_to_job
+
+        def assign_as_late_as_possible(job, proc):
+            deadline = time.monotonic() + 0.3
+            while not pid_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            observations["enrolled_before_descendant_creation"] = not pid_path.exists()
+            return real_assign(job, proc)
+
+        program = (
+            "import os, subprocess, sys\n"
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(5); print(\"escaped-ended\", flush=True)'])\n"
+            "with open(os.environ[" + json.dumps(DESCENDANT_PID_ENV) + "], \"w\") as handle:\n"
+            "    handle.write(str(child.pid))\n"
+            "print('parent-ready', flush=True)\n"
+        )
+        with mock.patch.object(_CONTRACT_MODULE, "_assign_to_job",
+                               side_effect=assign_as_late_as_possible):
+            outcome = self._run_vitest(
+                "enrollment", budget_s=budget_s,
+                argv_override=[sys.executable, "-c", program],
+                env_extra={DESCENDANT_PID_ENV: str(pid_path)})
+        self.assertTrue(
+            observations.get("enrolled_before_descendant_creation"),
+            "分配发生时子进程必须尚未运行任何目标代码（挂起创建先入作业）")
+        self.assertEqual(outcome.kind, "completed",
+                         "父进程随即正常退出后调用应在预算内完成")
+        self.assertLess(
+            outcome.elapsed_s, budget_s + 1.0,
+            f"统一截止时间必须约束在原预算内（含收尾预留，预算 {budget_s}s），"
+            f"实际 {outcome.elapsed_s:.2f}s")
+        self.assertIn("parent-ready", outcome.stdout_text,
+                      "超时前已产出的输出必须落盘保留")
+        self.assertNotIn(
+            "escaped-ended", outcome.stdout_text,
+            "后代寿命长于调用时长时不得等到它的输出（不得无界排空）")
+        self.assertTrue(pid_path.exists(), "反例后代未按预期产出 PID 文件")
+        escaped_pid = int(pid_path.read_text(encoding="utf-8").strip())
+        time.sleep(0.2)  # 给作业关闭后的终止留出落盘与调度余量
+        self.assertFalse(self._pid_alive(escaped_pid),
+                         f"受控时序下后代 {escaped_pid} 仍存活：入作业晚于目标代码")
         self._assert_sentinel_intact()
 
 
