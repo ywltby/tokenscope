@@ -195,3 +195,30 @@ WARN 条数只取决于类别数（models.dev 全兼容不计、OpenRouter 2 类
 
 - v0.5.11 发布验收通过后登记升级基线（`upgrade_baselines.py add --tag v0.5.11`，同批归档提交）。
 - 用户复核的汇总行措辞问题随 v0.5.12 修正：`summarize` 行前缀「同步丢弃数据汇总」→「同步告警汇总」（产品 WARN 文本，按规则递增 patch 发布），OpenRouter 逐条明细的历史前缀「OpenRouter 同步丢弃数据: 」按不变量 1 保持不变；取证程序的计数解析同步更新（qa-artifacts，不入库）。
+
+
+### 勘误与测试架调查（2026-10-23，用户复核后补记）
+
+本节更正 PR #37–#40 收尾过程中的三处事实错误，并记录 Native UI E2E 准备阶段超时的调查结论；主体产品交付（实现、发布、归档）不受影响。
+
+**事实更正：**
+
+1. **「内含 cargo 构建验收可执行」归因错误**（PR #40 正文与提交信息、`native-acceptance.mjs` 注释）：`prepare-native-acceptance.ps1` 不执行任何 Cargo 构建，其调用的 `make_ccs_fixture.py` 也不执行构建。构建发生在工作流独立步骤「Build embedded frontend and isolated acceptance executable」（约 2 分钟）；prepare 只做隔离根文件准备，成功运行中整段低于 10 秒。
+2. **「其余六场景全过」不准确**：两次失败 attempt 中，`ui-identity` 之后的 CCS 与 pricing 步骤被 **skipped**，并未运行；实际通过的是此前的 5 个场景步骤（refresh、system×2、collection-status、source-paths）。
+3. **发布矩阵计数**：v0.5.11 与 v0.5.12 的 Release 均为 **8 组单跳升级 + 2 条连续升级链**全部成功（此前汇报误写「六组单跳」）。main `6fbd964` 的 CI、Native UI E2E、Release 全绿属实，该 Release 因版本未变只执行 gate，六个下游作业 skipped。
+
+**Native UI E2E 准备阶段超时调查**（失败尝试：[a805165 attempt 1](https://github.com/ywltby/tokenscope/actions/runs/39826755242)、[b2473d6 attempt 2](https://github.com/ywltby/tokenscope/actions/runs/39834616430)；日志与 evidence 存 `qa-artifacts/sync-log/native-e2e-failures/`，不入库）：
+
+- 已由证据确认的事实：
+  - 两次失败均为 `ui-identity` 场景的 `prepare-native-acceptance.ps1` 同步调用被 30 秒上限 SIGTERM（evidence 时间戳到 FAIL 恰为 30.0 秒），`launches[]` 为空、`failure_stage=setup`，真实 `~/.tokenscope` 指纹前后一致未被触碰。
+  - prepare 的 CCS 段（`python -B make_ccs_fixture.py`，仅 `unified` 档的 ui-identity / ui-ccs-import / ui-pricing 执行）是最后到达的工作：两次 `root_files_after` 都止于 pricing.toml 与 claude/codex 日志，settings.toml 与 manifest.json 未写出；a805165 已创建空的 `cc-switch.db`（脚本第 39 行 `open("xb")`），b2473d6 连 db 文件都未出现——两次阻塞深度不同，但都在 python 调用未返回的窗口内。
+  - 脚本本身毫秒级（本机隔离计时 144 ms）；成功运行（PR #40、main 6fbd964）整段 prepare 约 3–10 秒；此前通过的 4 个场景不走 python。三个运行实例（两次失败、多次成功）共同表明这是偶发，而非确定性的脚本耗时。
+- 仍待验证的假设：python 进程启动被 Runner 层延迟（PATH 解析/防病毒扫描新进程）、SQLite 文件写入被实时扫描拦截、Runner 文件系统抖动——现有证据（只剩外层 ETIMEDOUT，子进程无内部计时）无法区分。
+- **结论：准备阶段超时原因未定位**（阻塞点定位到 unified 场景的 CCS fixture 生成调用这一层，机制未定位）。600 秒上限目前只是把「python 调用偶发超过 30 秒」从必然失败变为大概率通过，它既没有解释原因，也不能防止根因再次出现或变化。**600 秒登记为待确认的临时例外**：S00 §9.1 原文要求同步命令统一 30 秒，本例偏离统一值缺乏原始依据——「仍然有界」不证明 600 秒这个具体值合理；是否保留或收紧由用户决定（2026-10-23 复核定调），后续全绿不构成「根因已修复」的证据。
+- 取证装配（本节同批，先红后绿）：`spawnSyncBounded` 超时错误现在保留子进程已产出的 stdout/stderr 尾部（有界截断，红测用受控阻塞替身证明：能定位阻塞阶段、超时仍判失败、错误有界）；`prepare-native-acceptance.ps1` 各阶段以单调时钟输出 `[prepare] <阶段> at <毫秒>`（本机 unified 全程 545 ms 验证）。
+- **取证装配补修（2026-10-23 第二轮复核）**：
+  - 超时尾部此前拼在错误 message 里，会被外层 800 字符错误摘要截掉、落盘的 evidence 拿不到（用户以隔离替身复现）。现改为：`spawnSyncBounded` 错误对象携带 `outputTail`（stdout/stderr 各自有界 2000 字符），evidence 组装经 `errorEvidenceFields` 统一写入独立字段 `command_output_tail`（三处失败写入点全部接入，原有 800 字符摘要限制保留）。回归测试覆盖完整保存链路——真实超时错误 → 字段组装 → JSON 序列化 → 落盘 → 读回，断言尾部标记不在摘要内、在独立字段内完整（占位实现下该测试断言级红，实现后绿）。
+  - prepare 的 CCS 段此前只有 python 调用前后的 `ccs-fixture-start/done`，python 内部无标记，无法区分「python 启动慢」与「SQLite 操作阻塞」。现 `make_ccs_fixture.py` 在 stderr（`flush=True`，stdout 保持纯 JSON，既有 json.loads 解析不受影响）输出内部标记序列 `interpreter-ready → fixture-start → db-created → schema-done → rows-done → commit-done → done`（单测断言该序列，红→绿；本机验证 stderr 标记完整、stdout 纯净）。下次超时的定位粒度因此是：**CCS 准备段内**按最后到达的标记区分解释器启动、db 创建、schema、写入与提交各步；尚未到达入口标记 `interpreter-ready` 时，可能停在进程启动、模块导入或参数解析阶段。
+  - 600 秒上限的定性同步更正见上条结论（待确认的临时例外，非「符合 S00」）。
+
+**Browser E2E（run 39826755350 attempt 1，job 119991957733）复核**：首跑 evidence（artifact 12447806764，created 18:00:42Z，commit a805165）中 `normal-light-1280x820` 的 Playwright call log 显示 `locator resolved to visible <div class="app-shell" data-v-5180317e>`——**等待超时期间元素已解析且可见**，页面加载与 Vue 挂载完成；同一 dist（bundle 哈希一致）其余 3 个场景、重跑与后续 PR 全部通过。该证据不支持产品渲染缺陷或加载失败；Playwright 等待谓词为何在元素可见时不 resolve 无法进一步定位（失败场景无截图/控制台/网络记录，产物中仅最终 call log）。归类为**尚未定位**，不采信此前「Runner 环境资源类瞬时失败」的措辞；可选的后续增强是场景失败时保留截图与 trace，不在本批实施。

@@ -18,6 +18,7 @@ import {
   closeBrowserBounded,
   createStageTracker,
   ensureNotCanceled,
+  errorEvidenceFields,
   finalizeScenarioTimeout,
   runScenarioBounded,
   scenarioBudgetMs,
@@ -93,6 +94,69 @@ describe("有界同步命令（计划 §9.1 第 2 条）", () => {
       timeoutMs: 0, // 非法值必须回退到常量，而不是 0/NaN
     });
     expect(quick.status).toBe(0);
+  });
+
+  it("超时杀进程后保留子进程已产出的 stdout 尾部，定位阻塞阶段（2026-10-23 取证装配）", () => {
+    // 受控替身：先打印阶段标记再阻塞——模拟 prepare-native-acceptance.ps1
+    // 走到 CCS fixture 阶段后挂起。超时判定不变（仍抛错），但错误必须带上
+    // 子进程已写出的阶段输出，只剩外层 ETIMEDOUT 就无法定位阻塞阶段。
+    const script = `console.log("[stage] ccs-fixture-start"); setTimeout(() => {}, 10000);`;
+    let message = "";
+    try {
+      spawnSyncBounded(process.execPath, ["-e", script], {
+        action: "prepare-native-acceptance.ps1",
+        timeoutMs: 500,
+      });
+    } catch (e) {
+      message = e.message;
+    }
+    expect(message).toContain("同步命令超时或启动失败");
+    expect(message).toContain("[stage] ccs-fixture-start");
+    // 尾部有界：错误信息不得因巨量输出膨胀（装配约束，防日志刷爆）。
+    expect(message.length).toBeLessThan(8000);
+  });
+
+  it("超时证据经 evidence 字段落盘后仍完整：尾部独立成字段，不受 800 字符摘要截断（2026-10-23 补修）", () => {
+    // 复现丢失场景：替身先输出超过 800 字符的进度再打印最后阶段标记——
+    // 错误摘要（slice(0, 800)）截掉标记；修复要求标记经独立证据字段
+    // `command_output_tail` 完整落盘。用真实 spawnSyncBounded 超时错误走
+    // errorEvidenceFields 组装，序列化写盘后读回断言（完整保存链路）。
+    const filler = "x".repeat(1200);
+    const script =
+      `console.log("${filler}"); console.log("[stage] ccs-fixture-start"); ` +
+      `setTimeout(() => {}, 10000);`;
+    let failure = null;
+    try {
+      spawnSyncBounded(process.execPath, ["-e", script], {
+        action: "prepare-native-acceptance.ps1",
+        timeoutMs: 600,
+      });
+    } catch (e) {
+      failure = e;
+    }
+    const evidencePath = path.join(
+      os.tmpdir(),
+      `native-scenario-tail-${process.pid}-${Date.now()}.json`,
+    );
+    try {
+      fs.writeFileSync(evidencePath, JSON.stringify(errorEvidenceFields(failure)));
+      const persisted = JSON.parse(fs.readFileSync(evidencePath, "utf8"));
+      expect(persisted.error.length).toBeLessThanOrEqual(800);
+      expect(persisted.error).toContain("同步命令超时或启动失败");
+      // 摘要截掉了尾部标记——丢失必须由独立字段兜住：
+      expect(persisted.error).not.toContain("[stage] ccs-fixture-start");
+      expect(persisted.command_output_tail.stdout).toContain("[stage] ccs-fixture-start");
+      expect(persisted.command_output_tail.stdout).toContain(filler.slice(-64));
+    } finally {
+      fs.rmSync(evidencePath, { force: true });
+    }
+  });
+
+  it("errorEvidenceFields 对无尾部的普通错误只给 800 字符摘要，不加空字段", () => {
+    const fields = errorEvidenceFields(new Error("plain failure"));
+    expect(fields.error).toContain("plain failure");
+    expect(fields.error.length).toBeLessThanOrEqual(800);
+    expect(fields).not.toHaveProperty("command_output_tail");
   });
 });
 

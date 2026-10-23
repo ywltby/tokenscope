@@ -66,6 +66,7 @@ import {
   closeBrowserBounded,
   createStageTracker,
   ensureNotCanceled,
+  errorEvidenceFields,
   finalizeScenarioTimeout,
   runScenarioBounded,
   scenarioBudgetMs,
@@ -165,9 +166,12 @@ function copyDirSync(src, dst) {
 }
 function ps(scriptPath, argsArray) {
   // S00（计划 §9.1 第 2 条）：同步命令统一 30 秒上限；动作名取 -Action 参数便于定位。
-  // 例外：prepare-native-acceptance.ps1 内含 cargo 构建验收可执行，CI Runner 高
-  // 负载时可远超 30 秒（main 曾连续两次在该步骤 spawnSync ETIMEDOUT，纯文档
-  // 提交同样失败）——构建准备类命令单独给 10 分钟有界上限，仍防挂死。
+  // 例外（2026-10-23 更正并登记为待确认的临时例外）：prepare-native-acceptance.ps1
+  // 不执行任何构建，只做隔离根文件准备（成功运行低于 10 秒）；main 曾连续两次
+  // 在其 CCS fixture 生成（python make_ccs_fixture.py，仅 unified 档）处
+  // spawnSync ETIMEDOUT，原因未定位——600 秒上限只是让该偶发不再必然失败，
+  // 偏离统一 30 秒缺乏原始依据，是否保留/收紧由用户决定；准备阶段有分阶段
+  // 计时与超时输出尾部（见 native-scenario.mjs 与 prepare 脚本取证装配）。
   const action = argsArray.includes("-Action")
     ? `window-${argsArray[argsArray.indexOf("-Action") + 1]}`
     : path.basename(scriptPath);
@@ -2470,7 +2474,7 @@ async function main() {
       ev.idle_actual_seconds = Math.round((Date.now() - Date.parse(state.at)) / 1000);
     } catch (error) {
       setupError = error;
-      ev.error = String(error?.stack ?? error).slice(0, 800);
+      Object.assign(ev, errorEvidenceFields(error));
       hb(`attach 既有实例失败：${error?.message ?? error}`);
     }
   } else if (attachExisting) {
@@ -2547,7 +2551,7 @@ async function main() {
       // 启动失败：本次运行没有可用实例（保留原退出码 2 语义），
       // 但 launches[] 与宿主日志尾部仍要写出（§4.8 第 5 条）
       setupError = error;
-      ev.error = String(error?.stack ?? error).slice(0, 800);
+      Object.assign(ev, errorEvidenceFields(error));
       hb(`启动阶段失败：${error?.message ?? error}`);
     }
   }
@@ -2599,7 +2603,7 @@ async function main() {
     } catch (e) {
       scenarioError = e;
       ck.add("scenario_executed", false, String(e.message ?? e));
-      ev.error = String(e.stack ?? e).slice(0, 800);
+      Object.assign(ev, errorEvidenceFields(e));
       if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-relaunch" || SCENARIO === "ui-source-paths" || SCENARIO === "ui-identity" || SCENARIO === "ui-ccs-import" || SCENARIO === "ui-pricing") {
         // S00：失败截图/DOM 取证有短上限，无法完成就跳过并记原因（计划 §9.1 第 5 条）
         try {
