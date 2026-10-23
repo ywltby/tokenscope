@@ -51,6 +51,8 @@ FULL_TRIGGERS = (
     "scripts/test_build_inputs.py",
     "scripts/pre_commit_checks.py",
     "scripts/test_pre_commit_checks.py",
+    "scripts/run_rust_tests.py",
+    "scripts/test_run_rust_tests.py",
     "scripts/check_staged_docs.py",
     "scripts/test_check_staged_docs.py",
 )
@@ -148,7 +150,8 @@ def _ordered_checks(checks):
 
 # Rust 检查（workspace 与壳）除源码外还会读取的共享配置与工具链文件。
 RUST_SHARED_INPUTS = ("crates/", "src-tauri/", "Cargo.toml", "Cargo.lock",
-                      "rustfmt.toml", "rust-toolchain.toml", ".cargo/")
+                      "rustfmt.toml", "rust-toolchain.toml", ".cargo/",
+                      "scripts/run_rust_tests.py")
 LOCAL_PACKAGES = ("tokenscope", "tokenscope-app")
 
 # 每个检查读取的固定范围：目录前缀以 "/" 结尾，其余为精确文件路径。
@@ -477,6 +480,11 @@ def _execute(argv, cwd):
     这里先用 shutil.which 解析，批处理再显式经由 cmd /c。解析不到即明确失败，
     不能静默当作通过。"""
     print(f"[pre-commit] {' '.join(argv)}", flush=True)
+    if argv[:2] == ["cargo", "test"]:
+        # 检查选择与 Cargo 参数不变；进程退出后才清理其独占的临时根。
+        # 纯文档检查不加载 Rust 装配，保持独立文档夹具的最小输入范围。
+        import run_rust_tests
+        return run_rust_tests.run(argv, cwd=cwd)
     executable = shutil.which(argv[0])
     if executable is None:
         print(f"[pre-commit] 找不到可执行文件：{argv[0]}（拒绝在无验证的情况下提交）",

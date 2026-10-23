@@ -60,6 +60,8 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -B -m unittest discover -s scripts -p "test_pre_commit_checks.py" -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_run_rust_tests.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -B -m unittest discover -s scripts -p "test_check_staged_docs.py" -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -B -m unittest discover -s scripts -p "test_build_paths.py" -v
@@ -93,7 +95,7 @@ runs:
     - name: workspace cargo test
       if: inputs.group == 'rust'
       shell: pwsh
-      run: cargo test --locked --workspace
+      run: python -B scripts/run_rust_tests.py -- cargo test --locked --workspace
 
     - name: frontend typecheck
       if: inputs.group == 'frontend'
@@ -167,7 +169,7 @@ runs:
     - name: workspace acceptance test
       if: inputs.group == 'rust-acceptance'
       shell: pwsh
-      run: cargo test --locked --workspace --features acceptance
+      run: python -B scripts/run_rust_tests.py -- cargo test --locked --workspace --features acceptance
     # W05c：重建两种模式的编译输入并与受版本管理的清单比较。check 自身先清理
     # 两个本地 package（不是整仓 clean），因此证据只可能来自本次构建。
     - name: Build input manifest matches this build (W05c)

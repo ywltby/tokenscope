@@ -48,9 +48,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cargo build                        # 构建两个默认成员（核心库 + 桌面壳）
 cargo fmt --all                    # 格式化（提交前必须跑过，--check 必须干净）
 cargo clippy --locked --workspace --all-targets   # 静态检查（提交前必须干净）
-cargo test --locked --workspace    # 全部测试（两个成员）
-cargo test -p tokenscope usage_event   # 只查核心库；按名过滤单个测试
-cargo test -p tokenscope-app       # 只查壳
+python -B scripts/run_rust_tests.py -- cargo test --locked --workspace # 全部测试（两个成员）
+python -B scripts/run_rust_tests.py -- cargo test -p tokenscope usage_event # 核心库按名过滤
+python -B scripts/run_rust_tests.py -- cargo test -p tokenscope-app # 只查壳
 ```
 
 GUI（前端在 `frontend/`，Tauri 壳在 `src-tauri/`；Tauri CLI 装于 frontend devDependencies）：
@@ -72,10 +72,11 @@ GUI（Tauri CLI 在仓库根调用——CLI 只向下搜索 src-tauri，在 fron
 - 前端 TypeScript 钉 TypeScript 5.x（vue-tsc 与 TS 7 不兼容，勿升级）；Naive UI 组件库、ECharts 图表（直接用 echarts，未包 vue-echarts）。
 - **格式化分工**：Rust 用 `cargo fmt`（`rustfmt.toml` 钉 LF）；前端用 Prettier（`frontend/.prettierrc.json`，双引号/分号/2 空格/printWidth 100）。**提交钩子**（`.githooks/pre-commit`，克隆后执行一次 `git config core.hooksPath .githooks` 启用）**按暂存区选择检查**（`scripts/pre_commit_checks.py`）：纯文档提交只跑文档检查；Rust 代码按包与构建模式选择 workspace 或壳的 clippy+test；前端改动跑 typecheck/format:check/test/build；构建与门禁入口（Cargo 清单与锁、`build.rs`、`.cargo/**`、`.github/**`、`.githooks/**`、清单与选择器自身）强制完整检查，未识别路径同样完整兜底。用 `TOKENSCOPE_PRECOMMIT_MODE=full` 强制完整模式，`python -B scripts/pre_commit_checks.py --explain` 只打印选中检查。CI（`.github/workflows/ci.yml`）在 push/PR 上跑**不减的完整门禁**（普通与 acceptance 两套 workspace clippy/test、构建输入清单校验、前端 build 与 E2E），并按检查分组成 `rust`、`rust-acceptance`、`contracts`、`frontend` 四个并行作业（步骤同源于 `.github/actions/checks`，用必填输入 `group` 选择），另有一个只做汇总的 `gate` 作业作为必需检查——四条全成功它才通过；`tauri build` 属发布验收不进 CI。
 - **测试密闭性（2026-10-05 事故修复，必须遵守）**：任何测试（单元/e2e）构造 `SummaryOptions` 时，`cache_dir` 与 `pricing_index` **必须注入临时目录**，禁止落回默认 `~/.tokenscope`——否则测试会把用户真实缓存 purge 成 fixture，GUI 每次启动都全量冷扫描（用户 1.2 GB 日志，分钟级加载）。新测试评审时先看这两项。
+- **Rust 测试临时目录（2026-10-23）**：手工测试使用上述 `scripts/run_rust_tests.py -- cargo test ...` 入口；提交钩子与 CI 的普通/acceptance 两轮已接入。入口只为本次子进程设置独立的 `TMP`、`TEMP`、`TMPDIR`，保留原 Cargo 参数和失败退出码。测试进程退出、数据库连接和全局查询快照释放后，再删除并核对本次临时根；清理失败必须报错，不吞掉错误或延长等待。测试失败或中断保留现场并输出路径，历史 Temp 与真实用户目录不在清理范围。直接调用裸 `cargo test` 不经过该收尾，仍可能留下旧用例的临时文件；本入口也不替代上述 `SummaryOptions` 密闭要求。
 - **真实数据性能验收/缓存预热**（`#[ignore]`，需显式环境变量，会全量解析本机 `~/.claude`、`~/.codex` 并写入 `~/.tokenscope/history.db`）：
 
 ```powershell
-$env:TOKENSCOPE_REAL_PERF = "1"; cargo test --release --test perf_real_data -- --ignored --nocapture
+$env:TOKENSCOPE_REAL_PERF = "1"; python -B scripts/run_rust_tests.py -- cargo test --release --test perf_real_data -- --ignored --nocapture
 ```
 
   本机基准（release）：冷启动全量解析 1.2 GB 约 5.5 s，热启动（缓存命中）约 0.1–0.2 s。collect_all 各阶段耗时已落 `~/.tokenscope/logs/`（价格加载 / 逐 agent 采集 / 去重 / 聚合），启动慢先看日志。
