@@ -161,10 +161,11 @@ def _kernel32():
 
 
 def _create_kill_on_close_job():
-    """Windows：创建带 KILL_ON_JOB_CLOSE 的作业对象；失败返回 None，调用方回退。
+    """Windows：创建带 KILL_ON_JOB_CLOSE 的作业对象；失败返回 None，由调用方
+    显式失败（不降级——回退方式无法保证收割孤儿后代）。
 
-    作业在 Popen 返回后立即挂入子进程，其后代自动入作业：即使父进程先退出，
-    终止作业也能连带终止孤儿后代——收尾不依赖父 PID 存活（复审第二轮缺陷 1）。"""
+    子进程以挂起状态创建后才挂入作业再恢复：作业先于任何目标代码就位，
+    其后代自动入作业——即使父进程先退出，终止作业也能连带终止孤儿后代。"""
     if os.name != "nt":
         return None
     from ctypes import wintypes
@@ -210,7 +211,8 @@ def _create_kill_on_close_job():
 
 
 def _assign_to_job(job, proc):
-    """把子进程挂入作业；其后代自动入作业。返回是否成功（失败由调用方回退）。"""
+    """把子进程挂入作业；其后代自动入作业。返回是否成功（失败由调用方显式
+    报错并清理挂起进程，不降级）。"""
     return bool(_kernel32().AssignProcessToJobObject(job, int(proc._handle)))
 
 
