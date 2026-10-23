@@ -151,6 +151,15 @@ runs:
       run: |
         python -B -m unittest discover -s scripts -p "test_native_scenario_temp_cleanup.py" -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # 外层契约真实失败时会把证据移入独立目录；这里按失败产物上传供排查。
+    # 成功运行时证据已正常清理、目录不存在，ignore 使本步为无害空操作。
+    - name: Upload temp-cleanup contract evidence
+      if: always() && inputs.group == 'contracts'
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+      with:
+        name: temp-cleanup-contract-evidence
+        path: qa-artifacts/test-temp-cleanup/contract-evidence
+        if-no-files-found: ignore
     - name: workspace acceptance clippy
       if: inputs.group == 'rust-acceptance'
       shell: pwsh

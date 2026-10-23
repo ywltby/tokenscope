@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 >
-> 状态：**待用户复核，尚未实施。** 用户 2026-10-23 授权开分支编写计划；该授权不代表确认本计划的实施范围或合并 PR #42。计划分支：`docs/test-temp-cleanup-plan`。
+> 状态：**B1 已实施待合并（2026-10-23）。** 用户同日确认计划并授权实施 B1；B1 交付为 PR #44（TL01–TL02 完成、复审补修完成、CI 全绿），合并由用户决定。B2 未实施，前置 PR #42 由用户单独决定（同日复审时 PR #42 已落后 main：无冲突，合并前需同步最新 main 并通过必需检查）。计划分支：`docs/test-temp-cleanup-plan`。
 
 **Goal:** 修复已证实的 Vitest 临时目录遗漏和 Rust 锁等待用例句柄释放顺序问题，增加能发现“测试通过但目录残留”的回归，并明确 Rust 进程级收尾的适用边界。
 
@@ -196,12 +196,12 @@
 | src/history.rs::migration_lock_wait_uses_resident_timeout | :3249 | tokenscope-lockwait- | :3257 预清理、:3268 收尾 | `holder` Connection（ROLLBACK 后仍持文件句柄） | `let _ =` 丢弃 | 仅进程退出 | **B2 修复（TL03，前置 PR #42）** |
 | src/history.rs::concurrent_first_initialization_both_succeed | :3293 | tokenscope-first-init- | :3297 / :3317 | 局部连接 | `let _ =` | 仅进程退出 | 后续候选 |
 | src/history.rs 其余单元测试 | unique_temp_dir :3354 | tokenscope-{tag}- | :3378 / :3395 / :3418 / :3457 为 `.unwrap()`；:3508 / :3541 为 `let _ =` | 局部连接 / 全局查询表 | 严格与忽略并存 | 严格处用例层，忽略处进程退出 | 后续候选 |
-| tests/history_collection.rs | 辅助 :19 | tokenscope-history-collection- | 7 处 `.ok()` | 局部 | 忽略 | 仅进程退出 | 后续候选 |
+| tests/history_collection.rs | 辅助 :19 | tokenscope-history-collection- | 7 处 `.ok()` | 局部 / 全局查询快照（`summary()` 后） | 忽略 | 仅进程退出 | 后续候选 |
 | tests/history_overlap.rs | 辅助 :22 | tokenscope-history-overlap- | 11 处 `.ok()`；:659 `.unwrap()`（codex_compaction_ccs_union_is_independent_of_import_order，严格样例） | 局部 / 全局查询表 | 大多忽略 | 进程退出为主 | 后续候选 |
 | tests/history_queries.rs | 辅助 :62 | tokenscope-history-queries- | 7 处 `.ok()` | 局部 / 全局查询表 | 忽略 | 仅进程退出 | 后续候选 |
 | tests/history_migration.rs | 辅助 :19 | tokenscope-history-migration- | 2 处 `.ok()` | 局部 | 忽略 | 仅进程退出 | 后续候选 |
 | tests/history_storage.rs | 辅助 :23 | tokenscope-history-storage- | 无任何清理 | 局部 | 不适用 | 仅进程退出 | 后续候选 |
-| src/report.rs 单元测试 | tmp_dir :2784、:4385 | tokenscope-m4- / tokenscope-b4- | 27 处 `.ok()` | 局部 | 忽略 | 仅进程退出 | 后续候选 |
+| src/report.rs 单元测试 | tmp_dir :2784、:4385 | tokenscope-m4- / tokenscope-b4- | 27 处 `.ok()` | 局部 / 全局查询快照（`summary()` 后） | 忽略 | 仅进程退出 | 后续候选 |
 | tests/e2e_claude.rs | hermetic_dir :33 | tokenscope-e2e-claude- | 无任何清理 | 局部 | 不适用 | 仅进程退出 | 后续候选 |
 | tests/e2e_codex.rs | hermetic_dir :33 | tokenscope-e2e-codex- | 无任何清理 | 局部 | 不适用 | 仅进程退出 | 后续候选 |
 
@@ -224,12 +224,33 @@
 - 快速检查：`check_node_syntax.py` 48 个脚本通过、选择器契约 55 用例通过、`format:check` 与 `typecheck` 干净；完整提交钩子（含 `.github/**` 触发的完整门禁）通过后提交。
 - §3 不变量自审：删除只发生在契约自身私有根（哨兵字节核对通过）；原验收语义逐字保留（退出码 7、10000ms 父上限、9000ms 断言、200ms 子看门狗、最小证据内容）；`dir` 创建后全部步骤在 `try` 内；清理失败使测试非零退出且现场保留在外层私有根；不涉及 Rust、全局查询表与查询寿命；红绿均以真实目录消失/存在核实，不以通过数代替。
 
-### 6.4 实施后填写
+### 6.4 PR #44 复审补修（2026-10-23）
+
+用户复审确认前端 try/finally 修复成立、远端全绿，但指出两处外层测试架缺陷，复现脚本与结果在忽略目录 `qa-artifacts/test-temp-cleanup/review-44/review_probes.{py,json}`（head `153f564`，可直接运行）：
+
+1. **失败证据被删除**：证据与私有根同目录、清理无条件注册；注入外层断言失败后 stdout/stderr/JSON 报告全部随 teardown 消失（探针实测 `root_exists_after_teardown=false`）。
+2. **超时不覆盖后代进程**：`subprocess.run(timeout=…)` 只杀直接进程；后代持有输出管道时无界排空——预算 0.5s 实测 2.102s 才返回，且超时输出未落盘（探针实测 `evidence_files_after_timeout=[]`）。
+
+**补修内容**（对 `scripts/test_native_scenario_temp_cleanup.py` 与 `.github/actions/checks/action.yml`，三条真实路径语义与 30 秒预算不变）：
+
+- 证据保留：新增 `_keep_evidence_on_failure` 装饰器——外层真实失败时先把证据目录整体移入独立目录 `qa-artifacts/test-temp-cleanup/contract-evidence/<时间戳>-<用例>/`（附私有根残留清单，含文件名与字节），再上抛；成功时正常清理。CI contracts 组新增「Upload temp-cleanup contract evidence」失败产物上传步骤（`failure()` 条件、沿用 v7 pin）。
+- 超时收尾：外层调用改为 `Popen` + 预算内 `communicate`；超时先整树强杀（Windows `taskkill /F /T`，POSIX 杀进程组，杀失败记录入证据），再有界排空（10 秒宽限），仍超时才直关管道并改用超时异常里的部分输出——输出始终落盘。
+- 新增第四条短时反例（合成子进程，预算 1s）：父进程先产出一个继承输出管道的长寿后代（3s）并写 PID 文件再驻留；断言超时路径触发、耗时有界、已捕获输出保留（`parent-ready`）、后代长寿于预算时不得等到其输出、后代 PID 确实死亡、哨兵不变。
+
+**红绿复核**：
+
+- 红（旧机制）：用户探针即提交 `153f564` 上的红灯记录（见 review_probes.json）；本仓复核探针 `qa-artifacts/test-temp-cleanup/b1/review_fix_probes.py` 把新反例跑在旧 `_execute_case` 上——预算 1.0s 实测 3.11s，红在超时处理（「外层调用超过 1.0s 上限」），日志 `review_fix_probes.json` 的 `red_on_old_mechanism`。
+- 绿（新机制）：契约 4 条全过（7.0s，`contract-green-v3.log`）；证据保留链复核——注入外层断言失败后证据目录存活且 report/stdout/stderr 三文件齐全（同探针 `evidence_retention`）。
+- 期间自纠两处实现错误（反例父程序漏 `import time` 导致父进程秒退、vitest 命令漏 `_argv` 解析导致启动失败），均由本契约自身断言/报错暴露后修正。
+
+**文档勘正与回填**：TL01 登记提交号为 `2540290`；TL02 交付 PR #44，contracts 作业总时长 5m18s，其中「原生场景契约临时目录清理回归」步骤实测 4981ms；审计表 history_collection 与 report 的资源持有者补记全局查询快照（`summary()` 后）。
+
+### 6.5 实施后填写
 
 | 任务/批次 | 受测提交及作用 | 红灯断言与绿灯 | 命令/耗时/证据位置 | PR 与 main 运行 | 不变量自审/偏离/剩余范围 |
 | --- | --- | --- | --- | --- | --- |
-| TL01 | d7c307f（审计登记，无业务/测试代码改动） | 不适用；复现结论为「通过但有残留」（见 §6.2） | rg 扫描；前端定向 2s；Rust 定向 6s（测试体 5.59s）；日志 `qa-artifacts/test-temp-cleanup/b1/` | 随 B1 PR 提交 | 只登记未治理；其余夹具为后续候选，不在本轮宣称已治理 |
-| TL02 / B1 | 红：d7c307f（未修）；绿：本提交 | 红：3 路径各因残留/假通过而红；绿：契约 3 过 + 原文件 31 过 | 契约约 5.8s；原文件 2.9s；日志 `qa-artifacts/test-temp-cleanup/b1/` | 随 B1 PR（链接开 PR 后回填） | 自审见 §6.3；审计候选未动 |
+| TL01 | 2540290（审计登记，无业务/测试代码改动） | 不适用；复现结论为「通过但有残留」（见 §6.2） | rg 扫描；前端定向 2s；Rust 定向 6s（测试体 5.59s）；日志 `qa-artifacts/test-temp-cleanup/b1/` | 随 B1 PR 提交 | 只登记未治理；其余夹具为后续候选，不在本轮宣称已治理 |
+| TL02 / B1 | 红：d7c307f（未修）；绿：153f564 及复审补修 | 红：3 路径各因残留/假通过而红；绿：契约 3 过 + 原文件 31 过；复审后契约 4 过（含超时反例） | 契约约 5.8s（CI 步骤实测 4981ms）；原文件 2.9s；日志 `qa-artifacts/test-temp-cleanup/b1/` | [PR #44](https://github.com/ywltby/tokenscope/pull/44)，contracts/frontend/rust/rust-acceptance/gate/native-ui/install-test 全绿 | 自审见 §6.3；复审补修见 §6.4；审计候选未动 |
 | TL03 / B2 | 未执行 | 未执行 | 未执行 | 未建 | PR #42 前置项待决定 |
 | TL04 / B2 | 未执行 | 未执行 | 未执行 | 未建 | 不预占版本 |
 | TL05 | 未执行 | 不适用 | 未执行 | 未建 | 不改变 N01–N16 状态 |
