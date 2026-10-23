@@ -180,11 +180,45 @@
 - 两次均未写真实 `~/.tokenscope` 或 agent 来源；本机复现现场留在忽略的 QA 目录，不入库。自动审批拒绝删除本次两个私有根，仅返回 `blocked by policy`，未提供更具体原因；未尝试其他删除途径。
 - 以上只证明漏点，不是新增回归的红绿记录；TL01–TL05 尚未执行。
 
-### 6.2 实施后填写
+### 6.2 TL01 审计登记与隔离复现（2026-10-23，B1 实现分支）
+
+- 分支 `fix/frontend-test-temp-cleanup`（基于 d7c307f）。复核：main 仍为 `fafe1d6`，PR #42 仍 open（head `7c24193`，mergeable）；§1 两处漏点行号未变（`native-scenario.test.mjs:403`、`history.rs:3248`），无事实漂移。
+- 复现日志与私有根在忽略目录 `qa-artifacts/test-temp-cleanup/b1/`（`native-scenario-before.log`、`rust-passing-test-before.log`；私有根 `tmp-frontend/`、`tmp-rust/` 就地保留），不入库。
+
+**夹具审计登记**（rg 扫描 `std::env::temp_dir` / `mkdtempSync` / `rmSync` / `remove_dir_all`；「忽略」指删除错误被丢弃、失败不可见）：
+
+| 文件 | 创建 | 前缀 | 清理 | 资源持有者 | 错误处理 | 现有保障 | 处置 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| frontend/scripts/lib/native-scenario.test.mjs（父进程设上限用例） | :403 | native-scenario-test- | 无 | 无句柄残留；根本没有清理调用 | 不适用 | 仅进程退出 | **B1 修复（TL02）** |
+| 同文件（超时证据字段用例） | :137 | native-scenario-tail-*.json | :151 finally | 局部 | rmSync force（ENOENT 属预期） | 用例 finally | 已治理样例，不动 |
+| frontend/scripts/lib/acceptance-io.test.mjs | :35 / :109 / :124 | tokenscope-ac02- | 各用例 finally | 局部 | 抛错可见 | 用例 finally | 已治理样例，不动 |
+| frontend/scripts/lib/native-pricing-observation.test.mjs | :56 | tokenscope-pricing-path- | finally unlink+rmdir | 局部 | 抛错可见 | 用例 finally | 已治理样例，不动 |
+| src/history.rs::migration_lock_wait_uses_resident_timeout | :3249 | tokenscope-lockwait- | :3257 预清理、:3268 收尾 | `holder` Connection（ROLLBACK 后仍持文件句柄） | `let _ =` 丢弃 | 仅进程退出 | **B2 修复（TL03，前置 PR #42）** |
+| src/history.rs::concurrent_first_initialization_both_succeed | :3293 | tokenscope-first-init- | :3297 / :3317 | 局部连接 | `let _ =` | 仅进程退出 | 后续候选 |
+| src/history.rs 其余单元测试 | unique_temp_dir :3354 | tokenscope-{tag}- | :3378 / :3395 / :3418 / :3457 为 `.unwrap()`；:3508 / :3541 为 `let _ =` | 局部连接 / 全局查询表 | 严格与忽略并存 | 严格处用例层，忽略处进程退出 | 后续候选 |
+| tests/history_collection.rs | 辅助 :19 | tokenscope-history-collection- | 7 处 `.ok()` | 局部 | 忽略 | 仅进程退出 | 后续候选 |
+| tests/history_overlap.rs | 辅助 :22 | tokenscope-history-overlap- | 11 处 `.ok()`；:659 `.unwrap()`（codex_compaction_ccs_union_is_independent_of_import_order，严格样例） | 局部 / 全局查询表 | 大多忽略 | 进程退出为主 | 后续候选 |
+| tests/history_queries.rs | 辅助 :62 | tokenscope-history-queries- | 7 处 `.ok()` | 局部 / 全局查询表 | 忽略 | 仅进程退出 | 后续候选 |
+| tests/history_migration.rs | 辅助 :19 | tokenscope-history-migration- | 2 处 `.ok()` | 局部 | 忽略 | 仅进程退出 | 后续候选 |
+| tests/history_storage.rs | 辅助 :23 | tokenscope-history-storage- | 无任何清理 | 局部 | 不适用 | 仅进程退出 | 后续候选 |
+| src/report.rs 单元测试 | tmp_dir :2784、:4385 | tokenscope-m4- / tokenscope-b4- | 27 处 `.ok()` | 局部 | 忽略 | 仅进程退出 | 后续候选 |
+| tests/e2e_claude.rs | hermetic_dir :33 | tokenscope-e2e-claude- | 无任何清理 | 局部 | 不适用 | 仅进程退出 | 后续候选 |
+| tests/e2e_codex.rs | hermetic_dir :33 | tokenscope-e2e-codex- | 无任何清理 | 局部 | 不适用 | 仅进程退出 | 后续候选 |
+
+**隔离复现**（各自全新私有根，只跑指定用例，外层等进程退出后读目录清单）：
+
+| 用例 | 命令要点 | 测试自身结果 | 外层核实到的残留 |
+| --- | --- | --- | --- |
+| 前端「父进程设上限」 | `TMP`/`TEMP`/`TMPDIR` 指向 `tmp-frontend`；`pnpm --dir frontend exec vitest --run scripts/lib/native-scenario.test.mjs -t "父进程设上限"` | 退出码 0，1 通过 / 30 跳过，墙钟 2s | `native-scenario-test-iBXP53/`：evidence.json 40 B + run-scenario.mjs 559 B，共 599 B；node-compile-cache 为 Node 自身产物，归外层所有 |
+| Rust 锁等待 | 同法指向 `tmp-rust`；`cargo test --locked -p tokenscope --lib history::tests::migration_lock_wait_uses_resident_timeout -- --exact` | 退出码 0，1 通过，测试体 5.59s | `tokenscope-lockwait-12136-*/`：history.db 102400 B + history.db.backup-v3 94208 B，共 196608 B |
+
+两例都呈现同一区别：**测试自身通过、外层发现残留**——被测行为的断言全绿，泄漏只能由进程退出后的外层文件系统核实，这正是 TL02 外层契约要固化的观察方式。本轮只记录文件名、大小、退出码、耗时与目录边界，未收集真实会话内容，也未写真实 `~/.tokenscope` 或 agent 来源。
+
+### 6.3 实施后填写
 
 | 任务/批次 | 受测提交及作用 | 红灯断言与绿灯 | 命令/耗时/证据位置 | PR 与 main 运行 | 不变量自审/偏离/剩余范围 |
 | --- | --- | --- | --- | --- | --- |
-| TL01 | 未执行 | 未执行 | 未执行 | 未建 | 待用户确认计划 |
+| TL01 | d7c307f（审计登记，无业务/测试代码改动） | 不适用；复现结论为「通过但有残留」（见 §6.2） | rg 扫描；前端定向 2s；Rust 定向 6s（测试体 5.59s）；日志 `qa-artifacts/test-temp-cleanup/b1/` | 随 B1 PR 提交 | 只登记未治理；其余夹具为后续候选，不在本轮宣称已治理 |
 | TL02 / B1 | 未执行 | 未执行 | 未执行 | 未建 | 待用户确认计划 |
 | TL03 / B2 | 未执行 | 未执行 | 未执行 | 未建 | PR #42 前置项待决定 |
 | TL04 / B2 | 未执行 | 未执行 | 未执行 | 未建 | 不预占版本 |
