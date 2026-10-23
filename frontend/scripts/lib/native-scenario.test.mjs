@@ -401,42 +401,47 @@ describe("超时后的有界收尾（计划 §9.1 第 4、6 条）", () => {
 describe("共用收尾入口的子进程端到端（计划 §9.1 第 7 条）", () => {
   it("父进程设上限：子进程到点写最小证据并以非零退出，不悬挂", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "native-scenario-test-"));
-    const evidencePath = path.join(dir, "evidence.json");
-    const scriptPath = path.join(dir, "run-scenario.mjs");
-    const libPath = fileURLToPath(new URL("./native-scenario.mjs", import.meta.url));
-    fs.writeFileSync(
-      scriptPath,
-      [
-        `import fs from "node:fs";`,
-        `import { runScenarioBounded } from ${JSON.stringify(pathToFileURL(libPath).href)};`,
-        `const evidencePath = process.argv[2];`,
-        `const outcome = await runScenarioBounded({`,
-        `  scenarioFn: () => new Promise(() => {}),`,
-        `  timeoutMs: 200,`,
-        `  cancelFlag: { requested: false },`,
-        `  onTimeout: () => {`,
-        `    fs.writeFileSync(evidencePath, JSON.stringify({ scenario_timeout: true, minimal: true }), "utf8");`,
-        `  },`,
-        `  hb: () => {},`,
-        `});`,
-        `if (outcome.kind === "timeout") process.exit(7);`,
-        `process.exit(0);`,
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    const startedAt = Date.now();
-    // 父测试上限 10 秒：子进程看门狗 200 ms，超时即 kill（不等它悬挂）
-    const child = spawnSync(process.execPath, [scriptPath, evidencePath], {
-      encoding: "utf8",
-      timeout: 10000,
-      killSignal: "SIGKILL",
-    });
-    expect(child.error ?? null).toBeNull();
-    expect(child.status).toBe(7);
-    expect(Date.now() - startedAt).toBeLessThan(9000);
-    const evidence = JSON.parse(fs.readFileSync(evidencePath, "utf8"));
-    expect(evidence).toEqual({ scenario_timeout: true, minimal: true });
+    try {
+      const evidencePath = path.join(dir, "evidence.json");
+      const scriptPath = path.join(dir, "run-scenario.mjs");
+      const libPath = fileURLToPath(new URL("./native-scenario.mjs", import.meta.url));
+      fs.writeFileSync(
+        scriptPath,
+        [
+          `import fs from "node:fs";`,
+          `import { runScenarioBounded } from ${JSON.stringify(pathToFileURL(libPath).href)};`,
+          `const evidencePath = process.argv[2];`,
+          `const outcome = await runScenarioBounded({`,
+          `  scenarioFn: () => new Promise(() => {}),`,
+          `  timeoutMs: 200,`,
+          `  cancelFlag: { requested: false },`,
+          `  onTimeout: () => {`,
+          `    fs.writeFileSync(evidencePath, JSON.stringify({ scenario_timeout: true, minimal: true }), "utf8");`,
+          `  },`,
+          `  hb: () => {},`,
+          `});`,
+          `if (outcome.kind === "timeout") process.exit(7);`,
+          `process.exit(0);`,
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      const startedAt = Date.now();
+      // 父测试上限 10 秒：子进程看门狗 200 ms，超时即 kill（不等它悬挂）
+      const child = spawnSync(process.execPath, [scriptPath, evidencePath], {
+        encoding: "utf8",
+        timeout: 10000,
+        killSignal: "SIGKILL",
+      });
+      expect(child.error ?? null).toBeNull();
+      expect(child.status).toBe(7);
+      expect(Date.now() - startedAt).toBeLessThan(9000);
+      const evidence = JSON.parse(fs.readFileSync(evidencePath, "utf8"));
+      expect(evidence).toEqual({ scenario_timeout: true, minimal: true });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      expect(fs.existsSync(dir)).toBe(false);
+    }
   });
 });
 
