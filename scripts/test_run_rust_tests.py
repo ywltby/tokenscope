@@ -131,7 +131,9 @@ class RustTempCleanupCase(unittest.TestCase):
         self.assertEqual(status, 127)
         retained = list(self.parent.iterdir())
         self.assertEqual(len(retained), 1)
-        self.assertIn(str(retained[0]), output.getvalue())
+        # runner 打印的是 resolve 后的临时根（Windows 上展开 8.3 短名；
+        # GitHub Runner 的 TEMP 即短名形式），比较前同样 resolve。
+        self.assertIn(str(retained[0].resolve()), output.getvalue())
 
     def test_interruption_preserves_evidence_and_is_not_success(self):
         output = io.StringIO()
@@ -141,7 +143,7 @@ class RustTempCleanupCase(unittest.TestCase):
         self.assertEqual(status, 130)
         retained = list(self.parent.iterdir())
         self.assertEqual(len(retained), 1)
-        self.assertIn(str(retained[0]), output.getvalue())
+        self.assertIn(str(retained[0].resolve()), output.getvalue())
 
     @unittest.skipUnless(os.name == "nt", "Windows 目录联接边界")
     def test_cleanup_does_not_follow_junction_outside_owned_root(self):
