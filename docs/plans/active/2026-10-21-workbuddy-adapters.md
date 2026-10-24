@@ -389,6 +389,8 @@
 - **最终轮（`912d635`）：gate、native-ui、install-test、contracts、frontend、rust、rust-acceptance、8 组 upgrade-test 单跳全部通过；upgrade-chain 在 PR 上 skipping（连续链按既有模式在合并后 main 的 Release 验证）。**
 - 其余场景（identity / source-paths / policy-update）的脚本与 Rust 源码在上述修复中未再变化，本地三连证据继续有效。
 
+**外部评审修复（2026-10-25，`4aa90b9` / `ee55d03` / `625693b`）**：合入前评审发现五处问题，全部确认成立并修复——①`ensure_test_consent` 对已有修订号记录补写时未删旧行，会产生重复 `privacy_policy_revision` 键使 tomllib 拒绝解析（当前矩阵起点不带修订号恰好不触发，未来版本必炸）；补写前先删已有行并加 revision=1 起步用例。②WB04 对 `default` 规则的「缺失即等价」放宽误作用于全部规则，恢复严格校验并以 `allow_missing: true` 白名单标注 WorkBuddy 四条规则。③`workbuddy_failed_call_not_counted` 拿不存在的 id 比较恒真，改为 record_id 集合恰等于 fixture 三个 messageId 行的精确比对（判定测试补正反两向样例）。④`workbuddy_ai_disable_keeps_saved_usage` 拿「waitUntil 执行到了这里」当断言恒真，改为读实际总数，并按计划补「停用后切回 WorkBuddy AI 筛选、已保存 3 条仍可查询」（新增 `workbuddy_ai_saved_usage_queryable_after_disable`）。⑤`default_root` 错误信息补空格。修复后本地重建受测 exe（`749270ba…6713`），source-paths 18/18×3、identity 19/19×3；scripts/前端全量测试通过。
+
 **版本常量决策（WB02 核对结论）**：`HISTORY_SCHEMA_VERSION=4`、`PARSER_REVISION=2`、`IDENTITY_REVISION=1` 均不递增——历史库 `usage_events.app` 为 TEXT、表结构不变；新增适配器不改变 Claude/Codex 的解析语义与模型身份规则；新事件以当前 PARSER_REVISION 标记写入，读取方（升级矩阵按 persistent_format 分组挑起点）不受影响。`SETTINGS_FORMAT_REVISION` 2→3 属计划明确的变化（sources 新键 + 同意修订号），迁移规则与 `settings_migrations.json` 同步。
 
 **十条不变量自审**：
