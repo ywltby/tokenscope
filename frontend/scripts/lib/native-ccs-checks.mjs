@@ -99,9 +99,10 @@ export function ccsVerdict(name, observed) {
         o.previewVisible === true;
       break;
     case "detail_only_hides_rollups_and_discloses_granularity":
+      // WB07：统一 fixture 基线 10 → 16，CCS 导入 +4 → 20 / detail_only 17。
       ok =
-        o.autoRequests === 14 &&
-        o.detailRequests === 11 &&
+        o.autoRequests === 20 &&
+        o.detailRequests === 17 &&
         o.restoredRequests === o.autoRequests &&
         o.autoBy === "agent" &&
         o.detailBy === o.autoBy &&

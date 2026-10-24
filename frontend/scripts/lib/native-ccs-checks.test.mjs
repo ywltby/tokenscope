@@ -107,9 +107,9 @@ const cases = [
   [
     "detail_only_hides_rollups_and_discloses_granularity",
     {
-      autoRequests: 14,
-      detailRequests: 11,
-      restoredRequests: 14,
+      autoRequests: 20,
+      detailRequests: 17,
+      restoredRequests: 20,
       autoBy: "agent",
       detailBy: "agent",
       restoredBy: "agent",
@@ -121,7 +121,7 @@ const cases = [
       detailText: "当前只统计请求明细（不含只有日粒度的历史）",
     },
     (o) => {
-      o.detailRequests = 14;
+      o.detailRequests = 20;
     },
   ],
   [

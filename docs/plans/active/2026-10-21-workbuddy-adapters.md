@@ -381,6 +381,8 @@
 
 首轮尝试的失败均先取证后修：fixture 转义污染（BEL/TAB）、`matchEventDom` 应用列缺新映射（产品级发现）、`clickAgent` 过渡态等待与「全部」IPC 实参匹配、privacy-policy-update 的 mutate 分支与业务态窗口优雅关闭——每次修正后重跑，不以重跑代替原因；取号前构建（0e9a4a1）上的三次首跑证据保留但不计入三连。
 
+**CI 首轮与补录（PR #49）**：native-ui 的 `ui-ccs-import` 在「已提交的汇总与明细查询」超时失败——该场景同在 unified profile，但数字断言仍按旧基线（原生 10 / 导入后 14 / detail_only 11），WB fixture 与 CCS 导入（+4）后应为 16 / 20 / 17；`1faeac1` 同步契约与判定函数（批量、四桶增量与并集断言不变），本地三连 15/15 × 3（17 s，受测提交 `1faeac1`，exe 重建 `a6b61e26…a999`）。其余三场景的脚本与 Rust 源码在 `1faeac1` 未再变化，其三连证据（`9a32dc3` + 同源码 exe）继续有效。
+
 **版本常量决策（WB02 核对结论）**：`HISTORY_SCHEMA_VERSION=4`、`PARSER_REVISION=2`、`IDENTITY_REVISION=1` 均不递增——历史库 `usage_events.app` 为 TEXT、表结构不变；新增适配器不改变 Claude/Codex 的解析语义与模型身份规则；新事件以当前 PARSER_REVISION 标记写入，读取方（升级矩阵按 persistent_format 分组挑起点）不受影响。`SETTINGS_FORMAT_REVISION` 2→3 属计划明确的变化（sources 新键 + 同意修订号），迁移规则与 `settings_migrations.json` 同步。
 
 **十条不变量自审**：
