@@ -64,7 +64,7 @@ impl WorkBuddySource {
         Ok(match agent {
             AgentKind::WorkBuddy => home.join(".workbuddy").join("projects"),
             AgentKind::WorkBuddyAi => home.join(".workbuddy-ai").join("projects"),
-            _ => anyhow::bail!("应用 {} 没有WorkBuddy 默认根", agent.as_str()),
+            _ => anyhow::bail!("应用 {} 没有 WorkBuddy 默认根", agent.as_str()),
         })
     }
 
