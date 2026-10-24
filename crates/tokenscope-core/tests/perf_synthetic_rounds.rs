@@ -83,6 +83,9 @@ cache_read = 0.3
     )
     .unwrap();
     let opts = SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         agent: Some(AgentKind::ClaudeCode),
         claude_dir: Some(claude),
@@ -138,7 +141,13 @@ fn source_resolution_latency_recorded() {
     let mut samples = Vec::new();
     for _ in 0..5 {
         let t = Instant::now();
-        let resolved = resolve_sources(&ctx, &claude, &codex);
+        let resolved = resolve_sources(
+            &ctx,
+            &claude,
+            &codex,
+            &SourceConfig::default(),
+            &SourceConfig::default(),
+        );
         samples.push(t.elapsed().as_micros());
         assert!(!resolved.roots.is_empty(), "默认三根至少应解析出候选");
     }

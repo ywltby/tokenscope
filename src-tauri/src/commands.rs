@@ -63,10 +63,8 @@ pub(crate) fn set_source_config(
     match kind {
         AgentKind::ClaudeCode => s.sources.claude = Some(cfg),
         AgentKind::Codex => s.sources.codex = Some(cfg),
-        // WB04 扩展两版 WorkBuddy 的设置键后在此写回
-        AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => {
-            anyhow::bail!("应用 {} 的来源设置尚未接入", kind.as_str())
-        }
+        AgentKind::WorkBuddy => s.sources.workbuddy = Some(cfg),
+        AgentKind::WorkBuddyAi => s.sources.workbuddy_ai = Some(cfg),
     }
     Ok(())
 }
@@ -123,6 +121,8 @@ pub async fn list_events(
         source_plans: Some(set.plans),
         claude_enabled: Some(set.claude_enabled),
         codex_enabled: Some(set.codex_enabled),
+        workbuddy_enabled: Some(set.workbuddy_enabled),
+        workbuddy_ai_enabled: Some(set.workbuddy_ai_enabled),
         tz,
         from,
         to,
@@ -171,6 +171,8 @@ fn query_opts(
         source_plans: Some(set.plans),
         claude_enabled: Some(set.claude_enabled),
         codex_enabled: Some(set.codex_enabled),
+        workbuddy_enabled: Some(set.workbuddy_enabled),
+        workbuddy_ai_enabled: Some(set.workbuddy_ai_enabled),
         tz,
         from,
         to,
@@ -333,6 +335,9 @@ pub(crate) struct ResolvedSourceSet {
     /// 应用总开关（source_status 与 rollup 路径的兼容面）。
     pub claude_enabled: bool,
     pub codex_enabled: bool,
+    /// WB04：两个 WorkBuddy 应用的总开关。
+    pub workbuddy_enabled: bool,
+    pub workbuddy_ai_enabled: bool,
 }
 
 /// PR3：由设置解析整轮来源计划（注入形态，测试用隔离上下文）。
@@ -344,6 +349,8 @@ pub(crate) fn source_plans_from_with(
         ctx,
         &s.source_config(AgentKind::ClaudeCode),
         &s.source_config(AgentKind::Codex),
+        &s.source_config(AgentKind::WorkBuddy),
+        &s.source_config(AgentKind::WorkBuddyAi),
     );
     resolved
         .roots
@@ -393,6 +400,8 @@ pub(crate) fn resolve_source_set_in(
         plans,
         claude_enabled: s.source_config(AgentKind::ClaudeCode).enabled,
         codex_enabled: s.source_config(AgentKind::Codex).enabled,
+        workbuddy_enabled: s.source_config(AgentKind::WorkBuddy).enabled,
+        workbuddy_ai_enabled: s.source_config(AgentKind::WorkBuddyAi).enabled,
     })
 }
 
@@ -456,6 +465,8 @@ pub(crate) fn collection_opts_from_in(
         source_plans: Some(set.plans),
         claude_enabled: Some(set.claude_enabled),
         codex_enabled: Some(set.codex_enabled),
+        workbuddy_enabled: Some(set.workbuddy_enabled),
+        workbuddy_ai_enabled: Some(set.workbuddy_ai_enabled),
         ..Default::default()
     })
 }
@@ -853,6 +864,8 @@ pub(crate) fn source_paths_list_impl(
         ctx,
         &s.source_config(AgentKind::ClaudeCode),
         &s.source_config(AgentKind::Codex),
+        &s.source_config(AgentKind::WorkBuddy),
+        &s.source_config(AgentKind::WorkBuddyAi),
     );
     Ok(resolved
         .roots
@@ -920,6 +933,8 @@ pub(crate) fn source_path_add_impl(
         ctx,
         &s.source_config(tokenscope::model::AgentKind::ClaudeCode),
         &s.source_config(tokenscope::model::AgentKind::Codex),
+        &s.source_config(tokenscope::model::AgentKind::WorkBuddy),
+        &s.source_config(tokenscope::model::AgentKind::WorkBuddyAi),
     );
     // 同应用：全部已有行（含停用与缺失）参与相同/父子比较
     let mut same_app: Vec<std::path::PathBuf> = Vec::new();
@@ -1020,6 +1035,8 @@ pub(crate) fn source_path_remove_impl(
         ctx,
         &s.source_config(tokenscope::model::AgentKind::ClaudeCode),
         &s.source_config(tokenscope::model::AgentKind::Codex),
+        &s.source_config(tokenscope::model::AgentKind::WorkBuddy),
+        &s.source_config(tokenscope::model::AgentKind::WorkBuddyAi),
     );
     if !tokenscope::source::discovery::row_exists(&resolved.roots, kind, id) {
         return Err(anyhow::anyhow!("来源已变化，请重试"));
@@ -1084,6 +1101,8 @@ pub(crate) fn source_path_set_enabled_impl(
         ctx,
         &s.source_config(tokenscope::model::AgentKind::ClaudeCode),
         &s.source_config(tokenscope::model::AgentKind::Codex),
+        &s.source_config(tokenscope::model::AgentKind::WorkBuddy),
+        &s.source_config(tokenscope::model::AgentKind::WorkBuddyAi),
     );
     let row = resolved
         .roots
@@ -1308,6 +1327,8 @@ pub(crate) fn rebuild_opts_in(
         source_plans: Some(set.plans),
         claude_enabled: Some(set.claude_enabled),
         codex_enabled: Some(set.codex_enabled),
+        workbuddy_enabled: Some(set.workbuddy_enabled),
+        workbuddy_ai_enabled: Some(set.workbuddy_ai_enabled),
         refresh: true,
         ..Default::default()
     })
@@ -1773,13 +1794,16 @@ mod tests {
         let path = dir.join("settings.toml");
         std::fs::write(
             &path,
-            "[sources.claude]\nenabled = false\ndir = \"D:/logs/claude\"\n[sources.codex]\nenabled = false\n",
+            "[sources.claude]\nenabled = false\ndir = \"D:/logs/claude\"\n[sources.codex]\nenabled = false\n[sources.workbuddy]\nenabled = false\n[sources.workbuddy_ai]\nenabled = false\n",
         )
         .unwrap();
         let set = resolve_source_set_impl(tokenscope::settings::load(&path)).unwrap();
         assert!(
-            !set.claude_enabled && !set.codex_enabled,
-            "基线：两来源显式停用"
+            !set.claude_enabled
+                && !set.codex_enabled
+                && !set.workbuddy_enabled
+                && !set.workbuddy_ai_enabled,
+            "基线：四来源显式停用（WB04 口径）"
         );
         // 停用来源不产生采集计划（历史保留是查询层的事）。
         assert!(set.plans.is_empty(), "停用来源零计划: {:?}", set.plans);
@@ -1801,11 +1825,16 @@ mod tests {
             set.claude_enabled && set.codex_enabled,
             "首次启动：两个来源默认启用"
         );
+        // WB04 产品口径变化：默认候选集 3 根 → 5 根（+ WorkBuddy 2 根）
         assert_eq!(
             set.plans.len(),
-            3,
-            "Claude 1 根 + Codex 2 根: {:?}",
+            5,
+            "Claude 1 根 + Codex 2 根 + WorkBuddy 2 根: {:?}",
             set.plans
+        );
+        assert!(
+            set.workbuddy_enabled && set.workbuddy_ai_enabled,
+            "两个 WorkBuddy 默认启用"
         );
         let claude_default = dir.join("home").join(".claude").join("projects");
         assert!(
@@ -1893,6 +1922,8 @@ mod tests {
         )
         .unwrap();
         let opts = tokenscope::report::SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             by: GroupBy::Day,
             claude_dir: Some(claude),
             codex_enabled: Some(false),
@@ -2074,6 +2105,8 @@ mod tests {
             &ctx,
             &s.source_config(AgentKind::ClaudeCode),
             &s.source_config(AgentKind::Codex),
+            &s.source_config(AgentKind::WorkBuddy),
+            &s.source_config(AgentKind::WorkBuddyAi),
         );
         let manual_row = resolved
             .roots
@@ -2155,13 +2188,17 @@ mod tests {
         // 第一轮：只有默认根
         let o1 = collection_opts_from_in(tokenscope::settings::load(&path), &ctx).unwrap();
         let plans1 = o1.source_plans.clone().unwrap();
-        assert_eq!(plans1.len(), 3, "默认 Claude 1 根 + Codex 2 根");
+        assert_eq!(
+            plans1.len(),
+            5,
+            "默认 Claude 1 + Codex 2 + WorkBuddy 2（WB04 口径）"
+        );
 
         // 追加手动目录 → 下一轮计划并入（本轮已冻结的由运行时持有）
         source_path_add_impl(&path, &ctx, &home, "claude", &manual.display().to_string()).unwrap();
         let o2 = collection_opts_from_in(tokenscope::settings::load(&path), &ctx).unwrap();
         let plans2 = o2.source_plans.clone().unwrap();
-        assert_eq!(plans2.len(), 4, "新目录下一轮出现");
+        assert_eq!(plans2.len(), 6, "新目录下一轮出现");
         assert!(
             plans2
                 .iter()

@@ -183,6 +183,9 @@ fn write_log(dir: &Path, inputs: &[u64]) {
 
 fn opts(dir: &Path) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         claude_dir: Some(dir.join("no-claude")),
         codex_dir: Some(dir.join("codex")),

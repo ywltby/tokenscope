@@ -317,6 +317,9 @@ use tokenscope::report::{PARSE_RULES_REVISION, SummaryOptions, summary};
 
 fn summary_opts(dir: &std::path::Path, claude: Option<PathBuf>) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         claude_dir: claude.clone(),
         codex_dir: None,

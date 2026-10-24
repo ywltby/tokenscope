@@ -62,6 +62,9 @@ fn opts(
     codex: &std::path::Path,
 ) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Project,
         claude_dir: Some(claude.to_path_buf()),
         codex_dir: Some(codex.to_path_buf()),

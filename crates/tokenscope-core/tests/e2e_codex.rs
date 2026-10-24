@@ -83,6 +83,9 @@ fn codex_report(by: GroupBy) -> SummaryReport {
     let dir = hermetic_dir();
     let pricing = write_pricing(&dir);
     summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by,
         agent: Some(AgentKind::Codex),
         codex_dir: Some(fixture("codex", "basic")),
@@ -102,6 +105,9 @@ fn both_report(by: GroupBy) -> SummaryReport {
     let dir = hermetic_dir();
     let pricing = write_pricing(&dir);
     summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by,
         claude_dir: Some(fixture("claude", "basic")),
         codex_dir: Some(fixture("codex", "basic")),

@@ -87,6 +87,9 @@ cache_read = 0.4
     )
     .unwrap();
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         claude_dir: Some(claude_dir),
         codex_dir: Some(codex_dir),
@@ -155,6 +158,9 @@ fn test_golden_summary_events_parity() {
 
     // 模型 / 项目 / 应用维度（去重后口径）。
     let m = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Model,
         ..opts.clone()
     })
@@ -176,6 +182,9 @@ fn test_golden_summary_events_parity() {
         "展示名退回原始代表写法（合计行无 label）"
     );
     let p = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Project,
         ..opts.clone()
     })
@@ -187,6 +196,9 @@ fn test_golden_summary_events_parity() {
     assert_eq!(p.groups[1].key, "alpha");
     assert_eq!(p.groups[1].requests, 2);
     let a = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Agent,
         ..opts.clone()
     })
@@ -196,6 +208,9 @@ fn test_golden_summary_events_parity() {
 
     // 时间区间（解析时区自然日闭区间）：与按日分组严格同口径。
     let range = |from: &str, to: &str| SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         from: Some(from.into()),
         to: Some(to.into()),
         ..opts.clone()
@@ -222,12 +237,18 @@ fn test_golden_summary_events_parity() {
 
     // 单源与双源一致：claude 2 / codex 3。
     let rc = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         agent: Some(AgentKind::ClaudeCode),
         ..opts.clone()
     })
     .unwrap();
     assert_eq!(rc.totals.requests, 2);
     let rx = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         agent: Some(AgentKind::Codex),
         ..opts.clone()
     })
@@ -240,6 +261,9 @@ fn test_golden_summary_events_parity() {
     assert_eq!(cold, warm, "缓存命中必须与首次全量一致");
     let rebuilt = normalize_json(
         &summary(&SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
+
             refresh: true,
             ..opts.clone()
         })

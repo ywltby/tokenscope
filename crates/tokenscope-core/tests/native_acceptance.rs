@@ -173,6 +173,20 @@ fn acceptance_child_hermetic_paths() {
             "sources/codex",
             tokenscope::source::codex::CodexSource::default_root().unwrap(),
         ),
+        (
+            "sources/workbuddy",
+            tokenscope::source::workbuddy::WorkBuddySource::default_root(
+                tokenscope::model::AgentKind::WorkBuddy,
+            )
+            .unwrap(),
+        ),
+        (
+            "sources/workbuddy-ai",
+            tokenscope::source::workbuddy::WorkBuddySource::default_root(
+                tokenscope::model::AgentKind::WorkBuddyAi,
+            )
+            .unwrap(),
+        ),
     ];
     for (label, p) in &paths {
         checked.push(format!("{label}={}", p.display()));
@@ -254,7 +268,20 @@ fn acceptance_child_never_falls_back_to_real_sources() {
     // 默认根：必须是隔离根下路径，且该路径此刻**不存在**（准备脚本可预建）。
     let claude = tokenscope::source::claude::ClaudeSource::default_root().unwrap();
     let codex = tokenscope::source::codex::CodexSource::default_root().unwrap();
-    for (label, p) in [("claude", &claude), ("codex", &codex)] {
+    let workbuddy = tokenscope::source::workbuddy::WorkBuddySource::default_root(
+        tokenscope::model::AgentKind::WorkBuddy,
+    )
+    .unwrap();
+    let workbuddy_ai = tokenscope::source::workbuddy::WorkBuddySource::default_root(
+        tokenscope::model::AgentKind::WorkBuddyAi,
+    )
+    .unwrap();
+    for (label, p) in [
+        ("claude", &claude),
+        ("codex", &codex),
+        ("workbuddy", &workbuddy),
+        ("workbuddy-ai", &workbuddy_ai),
+    ] {
         if !p.starts_with(&root) {
             failures.push(format!("{label} 默认根回退到真实路径：{}", p.display()));
         }
@@ -263,13 +290,18 @@ fn acceptance_child_never_falls_back_to_real_sources() {
     if claude.starts_with(home.join(".claude")) || codex.starts_with(home.join(".codex")) {
         failures.push("来源默认根仍指向真实 ~/.claude 或 ~/.codex".to_string());
     }
+    if workbuddy.starts_with(home.join(".workbuddy"))
+        || workbuddy_ai.starts_with(home.join(".workbuddy-ai"))
+    {
+        failures.push("来源默认根仍指向真实 ~/.workbuddy 或 ~/.workbuddy-ai".to_string());
+    }
 
     // source_status：设置里未指定目录时，上报的生效目录也只能在隔离根内。
     let statuses = tokenscope::report::source_status(&tokenscope::settings::Settings::default())
         .expect("source_status 可读");
-    if statuses.len() < 2 {
+    if statuses.len() != 4 {
         failures.push(format!(
-            "source_status 应覆盖两个来源，实际 {}",
+            "source_status 应覆盖四个来源，实际 {}",
             statuses.len()
         ));
     }
@@ -449,6 +481,18 @@ fn acceptance_without_root_fails_before_collection() {
         ),
         ("real-data".to_string(), home.join(".tokenscope")),
         ("home".to_string(), home.clone()),
+        // WB04：两个 WorkBuddy 真实目录（含大小写规范化别名——Windows 上
+        // canonicalize 会解析真实大小写，别名必须与受保护路径判等）。
+        ("real-workbuddy".to_string(), home.join(".workbuddy")),
+        ("real-workbuddy-ai".to_string(), home.join(".workbuddy-ai")),
+        (
+            "real-workbuddy-case-alias".to_string(),
+            home.join(".WORKBUDDY"),
+        ),
+        (
+            "real-workbuddy-ai-case-alias".to_string(),
+            home.join(".WORKBUDDY-AI"),
+        ),
     ];
     for (label, value) in bad_cases {
         let out = run_child_with_env(&value);

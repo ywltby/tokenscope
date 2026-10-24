@@ -311,12 +311,15 @@ mod imp {
         let home = dirs::home_dir()
             .ok_or_else(|| "无法定位用户主目录，拒绝在未知环境下进入验收模式".to_string())?;
         let home_canon = strip_verbatim(&home.canonicalize().unwrap_or_else(|_| home.clone()));
-        // 真实数据目录：~/.tokenscope（自有数据）、~/.claude、~/.codex（来源）。
+        // 真实数据目录：~/.tokenscope（自有数据）、~/.claude、~/.codex、
+        // ~/.workbuddy、~/.workbuddy-ai（来源，WB04 起四应用）。
         for protected in [
             home_canon.clone(),
             home_canon.join(".tokenscope"),
             home_canon.join(".claude"),
             home_canon.join(".codex"),
+            home_canon.join(".workbuddy"),
+            home_canon.join(".workbuddy-ai"),
         ] {
             if canon == protected || protected.starts_with(&canon) {
                 return Err(format!(

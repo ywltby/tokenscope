@@ -118,6 +118,10 @@ cache_read = 0.2
 
     SummaryOptions {
         by: GroupBy::Day,
+        // WB04 密闭注入：本文件冻结的是 Claude/Codex 行为等价基线，
+        // 新增默认来源按计划显式禁用（不注入会读到真实 WorkBuddy 数据）。
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
         claude_dir: Some(claude_dir),
         codex_dir: Some(codex_dir),
         cache_dir: Some(dir.join("cache")),
@@ -341,6 +345,8 @@ fn test_frozen_settings_serialization_and_source_config() {
         sources: AgentSources {
             claude: Some(claude_cfg.clone()),
             codex: Some(codex_cfg.clone()),
+            workbuddy: None,
+            workbuddy_ai: None,
         },
         ..Default::default()
     };

@@ -57,6 +57,9 @@ fn write_codex_log(root: &Path, body: &str) -> PathBuf {
 
 fn opts(dir: &Path, codex_root: &Path) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         claude_dir: Some(dir.join("no-claude")),
         codex_dir: Some(codex_root.to_path_buf()),

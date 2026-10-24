@@ -80,6 +80,9 @@ pub struct SummaryOptions {
     pub days: Option<u32>,
     pub claude_dir: Option<PathBuf>,
     pub codex_dir: Option<PathBuf>,
+    /// WB04：两个 WorkBuddy 应用的显式根（None = 默认根 `~/.workbuddy{,-ai}/projects`）。
+    pub workbuddy_dir: Option<PathBuf>,
+    pub workbuddy_ai_dir: Option<PathBuf>,
     /// 缓存目录（None = `~/.tokenscope`；测试注入用）。
     pub cache_dir: Option<PathBuf>,
     /// 外置价格文件路径（None = `~/.tokenscope/pricing.toml`；测试注入用）。
@@ -116,6 +119,9 @@ pub struct SummaryOptions {
     /// 也不出现在来源统计里。
     pub claude_enabled: Option<bool>,
     pub codex_enabled: Option<bool>,
+    /// WB04：两个 WorkBuddy 应用的总开关（None = 启用）。
+    pub workbuddy_enabled: Option<bool>,
+    pub workbuddy_ai_enabled: Option<bool>,
     /// A03：Claude 项目映射配置文件（`~/.claude.json` 形态，含 `projects`）。
     /// `None` = 默认来源才使用对应账户的默认配置；显式给出时按该路径读取
     ///（测试注入）。自定义来源 + `None` = 不读取任何本机映射。
@@ -152,8 +158,8 @@ impl SummaryOptions {
         match kind {
             AgentKind::ClaudeCode => self.claude_enabled != Some(false),
             AgentKind::Codex => self.codex_enabled != Some(false),
-            // WB04 扩展新应用的启用开关；接入前默认启用（构造点受测试密闭约束）
-            AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => true,
+            AgentKind::WorkBuddy => self.workbuddy_enabled != Some(false),
+            AgentKind::WorkBuddyAi => self.workbuddy_ai_enabled != Some(false),
         }
     }
 }
@@ -271,6 +277,15 @@ pub fn pricing_file_path(pricing_file: Option<&PathBuf>) -> PathBuf {
 /// `with_mapping`，Codex 每根独立单根实例），让文件认领、上下文修订与
 /// `source_files` 的根键都以根为粒度。`source_plans = None` 时保持旧单根
 /// 模型（测试兼容入口只读注入根）。
+fn dir_of(opts: &SummaryOptions, kind: AgentKind) -> Option<PathBuf> {
+    match kind {
+        AgentKind::ClaudeCode => opts.claude_dir.clone(),
+        AgentKind::Codex => opts.codex_dir.clone(),
+        AgentKind::WorkBuddy => opts.workbuddy_dir.clone(),
+        AgentKind::WorkBuddyAi => opts.workbuddy_ai_dir.clone(),
+    }
+}
+
 fn make_sources(opts: &SummaryOptions, kinds: &[AgentKind]) -> Result<Vec<Box<dyn Source>>> {
     let mut out: Vec<Box<dyn Source>> = Vec::new();
     if let Some(plans) = &opts.source_plans {
@@ -292,9 +307,11 @@ fn make_sources(opts: &SummaryOptions, kinds: &[AgentKind]) -> Result<Vec<Box<dy
                     out.push(Box::new(ClaudeSource::with_mapping(root, mapping)));
                 }
                 AgentKind::Codex => out.push(Box::new(CodexSource::new(root))),
-                // WB03/WB04 接入 WorkBuddy 适配器与发现后在此构造来源实例；
-                // 接入前 discovery 不产生这两类计划行，此处跳过保持零来源。
-                AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => {}
+                AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => {
+                    out.push(Box::new(crate::source::workbuddy::WorkBuddySource::new(
+                        root, plan.agent,
+                    )));
+                }
             }
         }
         return Ok(out);
@@ -319,8 +336,16 @@ fn make_sources(opts: &SummaryOptions, kinds: &[AgentKind]) -> Result<Vec<Box<dy
                     None => CodexSource::with_roots(CodexSource::default_roots()?),
                 }));
             }
-            // WB03/WB04 接入 WorkBuddy 适配器与默认根后在此构造来源实例
-            AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => {}
+            AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => {
+                // WB04：默认根 `~/.workbuddy{,-ai}/projects`；显式根单根递归。
+                let root = match dir_of(opts, kind) {
+                    Some(p) => p,
+                    None => crate::source::workbuddy::WorkBuddySource::default_root(kind)?,
+                };
+                out.push(Box::new(crate::source::workbuddy::WorkBuddySource::new(
+                    root, kind,
+                )));
+            }
         }
     }
     Ok(out)
@@ -1249,9 +1274,11 @@ pub fn effective_source_roots(
         (Some(d), _) => vec![d.to_path_buf()],
         (None, AgentKind::ClaudeCode) => vec![ClaudeSource::default_root()?],
         (None, AgentKind::Codex) => CodexSource::default_roots()?,
-        // WB04 接入两个 WorkBuddy 的默认根后在此扩展
+        // WB04：两个 WorkBuddy 的默认根（固定候选集）
         (None, AgentKind::WorkBuddy | AgentKind::WorkBuddyAi) => {
-            anyhow::bail!("应用 {} 的默认来源根尚未接入", kind.as_str())
+            vec![crate::source::workbuddy::WorkBuddySource::default_root(
+                kind,
+            )?]
         }
     })
 }
@@ -1273,9 +1300,7 @@ pub fn effective_source_dirs_from_settings(
     settings: &crate::settings::Settings,
 ) -> Result<Vec<(AgentKind, std::path::PathBuf)>> {
     let mut out = Vec::new();
-    // WB04 接入两版 WorkBuddy 的默认根与设置键后扩展为 AgentKind::ALL；
-    // 当前仅遍历已接入默认根的应用，保持采集校验行为不变。
-    for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
+    for kind in AgentKind::ALL {
         let cfg = settings.source_config(kind);
         let dir = cfg.dir.as_deref().map(std::path::Path::new);
         for root in effective_source_roots(kind, cfg.enabled, dir)? {
@@ -2680,9 +2705,7 @@ pub struct SourceStatus {
 
 pub fn source_status(settings: &crate::settings::Settings) -> Result<Vec<SourceStatus>> {
     let mut out = Vec::new();
-    // WB04 接入两版 WorkBuddy 的默认根与设置键后扩展为 AgentKind::ALL；
-    // 当前仅遍历已接入默认根的应用，保持设置页行为不变。
-    for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
+    for kind in AgentKind::ALL {
         let cfg = settings.source_config(kind);
         let dir: Option<PathBuf> = cfg.dir.map(PathBuf::from);
         let root = match dir {
@@ -2692,9 +2715,8 @@ pub fn source_status(settings: &crate::settings::Settings) -> Result<Vec<SourceS
             None => match kind {
                 AgentKind::ClaudeCode => ClaudeSource::default_root()?,
                 AgentKind::Codex => CodexSource::default_root()?,
-                // WB04 接入两个 WorkBuddy 的默认根后在此扩展
                 AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => {
-                    anyhow::bail!("应用 {} 的默认来源根尚未接入", kind.as_str())
+                    crate::source::workbuddy::WorkBuddySource::default_root(kind)?
                 }
             },
         };
@@ -2779,6 +2801,8 @@ mod tests {
                 .join("no-pricing.toml")
         }));
         SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             by: GroupBy::Day,
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
@@ -2834,6 +2858,8 @@ mod tests {
     #[test]
     fn test_report_pipeline_agent_filter() {
         let opts = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             agent: Some(AgentKind::ClaudeCode),
             claude_dir: Some(fixture("claude", "basic")),
             ..opts(None, None, false)
@@ -2847,6 +2873,8 @@ mod tests {
     #[test]
     fn test_report_pipeline_missing_dir_warns() {
         let opts = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             agent: Some(AgentKind::Codex),
             codex_dir: Some(fixture("codex", "no-such-dir")),
             ..opts(None, None, false)
@@ -2891,6 +2919,8 @@ mod tests {
         )
         .unwrap();
         let mk_opts = || SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             agent: Some(AgentKind::ClaudeCode),
             claude_dir: Some(src_dir.clone()),
             cache_dir: Some(dir.join("cache")),
@@ -3004,6 +3034,8 @@ cache_read = 0.4
             mk("2026-08-13T23:00:00Z"),
         ];
         let opts = |from: Option<String>, to: Option<String>| SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             from,
             to,
             tz: Some("Asia/Shanghai".to_string()),
@@ -3052,6 +3084,8 @@ cache_read = 0.4
             .is_err()
         );
         let both = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             days: Some(7),
             from: Some("2026-08-01".into()),
             ..opts(None, None)
@@ -3066,6 +3100,8 @@ cache_read = 0.4
         // 缺省 = Asia/Shanghai；显式 UTC 改变解析标识；非法名 = 参数错误。
         let hermetic = tmp_dir("tz");
         let base = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             by: GroupBy::Day,
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
@@ -3078,6 +3114,8 @@ cache_read = 0.4
             ..Default::default()
         };
         let sh = summary(&SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             tz: Some("Asia/Shanghai".into()),
             ..base.clone()
         })
@@ -3086,6 +3124,8 @@ cache_read = 0.4
         assert_eq!(sh.groups[0].key, "2026-07-17");
 
         let utc = summary(&SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             tz: Some("UTC".into()),
             ..base.clone()
         })
@@ -3093,6 +3133,8 @@ cache_read = 0.4
         assert_eq!(utc.timezone, "UTC");
 
         let local = summary(&SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             tz: Some("local".into()),
             ..base.clone()
         })
@@ -3100,6 +3142,8 @@ cache_read = 0.4
         assert!(!local.timezone.is_empty());
 
         let bad = summary(&SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             tz: Some("Mars/Olympus".into()),
             ..base
         });
@@ -3110,6 +3154,8 @@ cache_read = 0.4
     fn test_list_events_filters() {
         let hermetic = tmp_dir("list-events");
         let base = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
             cache_dir: Some(hermetic.join("cache")),
@@ -3191,6 +3237,8 @@ cache_read = 0.4
         // 明细与汇总同源：total（过滤后）== 汇总同过滤的 requests。
         let hermetic = tmp_dir("dedupe-consistent");
         let base = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
             cache_dir: Some(hermetic.join("cache")),
@@ -3230,6 +3278,8 @@ cache_read = 0.4
         )
         .unwrap();
         let base = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
             cache_dir: Some(dir.join("cache")),
@@ -3322,6 +3372,8 @@ cache_read = 0.4
         // D1：稳定游标翻页不重不漏，且 total 恒为过滤后全量。
         let hermetic = tmp_dir("pagination");
         let base = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
             cache_dir: Some(hermetic.join("cache")),
@@ -3393,6 +3445,8 @@ cache_read = 0.4
         .unwrap();
         let cache = dir.join("cache");
         let opts = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             by: GroupBy::Day,
             claude_dir: Some(dir.clone()),
             codex_dir: Some(PathBuf::from("Z:/no-such-codex")),
@@ -3474,6 +3528,8 @@ cache_write = 10.0
         .unwrap();
         let cache = dir.join("cache");
         let opts = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             by: GroupBy::Day,
             claude_dir: Some(dir.clone()),
             codex_dir: Some(PathBuf::from("Z:/no-such-codex")),
@@ -3607,6 +3663,8 @@ cache_read = 0.0
         .unwrap();
         let cache = dir.join("cache");
         let opts = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             by: GroupBy::Day,
             claude_dir: Some(dir.clone()),
             codex_dir: Some(PathBuf::from("Z:/no-such-codex")),
@@ -3913,6 +3971,8 @@ cache_read = 0.0
         }
         std::fs::write(day.join("rollout-p.jsonl"), lines).unwrap();
         SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             agent: Some(AgentKind::Codex),
             claude_dir: Some(dir.join("no-claude")),
             codex_dir: Some(codex_dir),
@@ -4016,6 +4076,8 @@ cache_read = 0.0
         let _ = &mut lines;
         std::fs::write(day.join("rollout-e.jsonl"), lines).unwrap();
         SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             agent: Some(AgentKind::Codex),
             claude_dir: Some(dir.join("no-claude")),
             codex_dir: Some(codex_dir),
@@ -4090,10 +4152,26 @@ cache_read = 0.0
             ..Default::default()
         });
         let st = source_status(&s).unwrap();
-        assert_eq!(st.len(), 2);
-        assert_eq!(st[0].state, "ready");
-        assert_eq!(st[0].files, 2);
-        assert_eq!(st[1].state, "disabled", "停用优先于目录状态");
+        // WB04 产品口径变化：设置页状态覆盖四个应用。
+        assert_eq!(st.len(), 4);
+        let by_agent = |a: AgentKind| st.iter().find(|x| x.agent == a).unwrap();
+        assert_eq!(by_agent(AgentKind::ClaudeCode).state, "ready");
+        assert_eq!(by_agent(AgentKind::ClaudeCode).files, 2);
+        assert_eq!(
+            by_agent(AgentKind::Codex).state,
+            "disabled",
+            "停用优先于目录状态"
+        );
+        // 两个 WorkBuddy 未配置 → 默认根（真实主目录下可能存在与否），只验
+        // 行存在且状态字段可用（与下方"不依赖具体家目录"同一原则）。
+        assert!(by_agent(AgentKind::WorkBuddy).dir.contains(".workbuddy"));
+        assert!(!by_agent(AgentKind::WorkBuddy).state.is_empty());
+        assert!(
+            by_agent(AgentKind::WorkBuddyAi)
+                .dir
+                .contains(".workbuddy-ai")
+        );
+        assert!(!by_agent(AgentKind::WorkBuddyAi).state.is_empty());
         // Task 8（source_empty_error_ready_states）：存在但无日志 → empty。
         let empty_dir = tmp_dir("empty-src");
         std::fs::create_dir_all(&empty_dir).unwrap();
@@ -4104,7 +4182,14 @@ cache_read = 0.0
             ..Default::default()
         });
         let st2 = source_status(&s2).unwrap();
-        assert_eq!(st2[0].state, "empty", "目录存在但无 jsonl → empty");
+        assert_eq!(
+            st2.iter()
+                .find(|x| x.agent == AgentKind::ClaudeCode)
+                .unwrap()
+                .state,
+            "empty",
+            "目录存在但无 jsonl → empty"
+        );
         std::fs::remove_dir_all(&empty_dir).ok();
         // 未配置 → 默认目录多半不存在 → missing（不依赖具体家目录，只验状态字段存在）。
         let st = source_status(&crate::settings::Settings::default()).unwrap();
@@ -4118,6 +4203,8 @@ cache_read = 0.0
         let dir = tmp_dir("disabled");
         let mut s = crate::settings::Settings::default();
         let opts = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             agent: None,
             claude_dir: Some(fixture("claude", "basic")),
             codex_dir: Some(fixture("codex", "basic")),
@@ -4461,6 +4548,8 @@ mod collect_stability_tests {
         let file = root.join("rollout-x.jsonl");
         std::fs::write(&file, "{}\n").unwrap();
         let opts = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             agent: Some(AgentKind::Codex),
             cache_dir: Some(dir.join("cache")),
             pricing_index: Some(dir.join("idx.json")),
@@ -4548,6 +4637,8 @@ mod collect_stability_tests {
         std::fs::write(&file, "{ }").unwrap();
         let parses = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let opts = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             agent: Some(AgentKind::Codex),
             cache_dir: Some(dir.join("cache")),
             pricing_index: Some(dir.join("idx.json")),
@@ -4583,6 +4674,8 @@ mod collect_stability_tests {
     fn time_opts(tag: &str) -> SummaryOptions {
         let dir = tmp_dir(tag);
         SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             cache_dir: Some(dir.clone()),
             pricing_index: Some(dir.join("pricing-index.json")),
             pricing_path: Some(dir.join("no-pricing.toml")),
@@ -4830,6 +4923,8 @@ mod collect_stability_tests {
 
         // 自然日模式：同一天内、晚于 as_of 的记录同样被排除。
         let days = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             days: Some(1),
             ..time_opts("tb-match-days")
         };
@@ -4853,6 +4948,8 @@ mod collect_stability_tests {
 
         // 时刻模式：区间内但晚于 as_of 的记录同样被排除。
         let inst = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             start_at: Some("2026-08-02T09:00".to_string()),
             end_at: Some("2026-08-02T23:59".to_string()),
             ..time_opts("tb-match-inst")
@@ -4867,6 +4964,8 @@ mod collect_stability_tests {
 
         // 24h 窗口是闭区间：起点与 as_of 都在内。
         let rolling = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             rolling_hours: Some(24),
             ..time_opts("tb-match-rolling")
         };

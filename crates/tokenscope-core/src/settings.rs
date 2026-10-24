@@ -23,7 +23,10 @@ use serde::{Deserialize, Serialize};
 /// `additional_paths`；旧 `dir` 字段改为追加项语义并在升级时由
 /// [`migrate_source_paths`] 一次性迁移——这是**读取范围的行为变更**（已启用来源
 /// 的默认目录用量也会纳入），不是无影响的字段改名。
-pub const SETTINGS_FORMAT_REVISION: u8 = 2;
+/// v3（WB04，2026-10-24）：`sources` 新增 `workbuddy` / `workbuddy_ai` 两键
+/// （缺失 = 启用 + 自动发现）；连同隐私同意修订（WB05），升级用户在重新同意后
+/// 读取范围扩大到两个 WorkBuddy 默认根。
+pub const SETTINGS_FORMAT_REVISION: u8 = 3;
 
 /// 关闭窗口按钮的默认动作（None = 每次询问；托盘「退出」不受此影响）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -164,6 +167,12 @@ pub struct AgentSources {
     pub claude: Option<SourceConfig>,
     #[serde(default)]
     pub codex: Option<SourceConfig>,
+    /// WB04：WorkBuddy（国内版）来源配置；缺失 = 启用 + 自动发现。
+    #[serde(default)]
+    pub workbuddy: Option<SourceConfig>,
+    /// WB04：WorkBuddy AI（国际版）来源配置；缺失 = 启用 + 自动发现。
+    #[serde(default)]
+    pub workbuddy_ai: Option<SourceConfig>,
 }
 
 impl AgentSources {
@@ -172,8 +181,8 @@ impl AgentSources {
         match kind {
             crate::model::AgentKind::ClaudeCode => self.claude.as_ref(),
             crate::model::AgentKind::Codex => self.codex.as_ref(),
-            // WB04 接入两个 WorkBuddy 的设置键
-            crate::model::AgentKind::WorkBuddy | crate::model::AgentKind::WorkBuddyAi => None,
+            crate::model::AgentKind::WorkBuddy => self.workbuddy.as_ref(),
+            crate::model::AgentKind::WorkBuddyAi => self.workbuddy_ai.as_ref(),
         }
     }
 
@@ -182,7 +191,8 @@ impl AgentSources {
         match kind {
             crate::model::AgentKind::ClaudeCode => self.claude.as_mut(),
             crate::model::AgentKind::Codex => self.codex.as_mut(),
-            crate::model::AgentKind::WorkBuddy | crate::model::AgentKind::WorkBuddyAi => None,
+            crate::model::AgentKind::WorkBuddy => self.workbuddy.as_mut(),
+            crate::model::AgentKind::WorkBuddyAi => self.workbuddy_ai.as_mut(),
         }
     }
 }
@@ -571,6 +581,8 @@ impl RawSourceConfig {
     }
 }
 
+/// 迁移判定用的原始来源表：只声明有 v1 dir 语义的两个应用；
+/// WorkBuddy 两键（WB04 起）没有旧 dir 历史形态，serde 默认忽略未知键。
 #[derive(Debug, Default, serde::Deserialize)]
 struct RawAgentSources {
     #[serde(default)]
@@ -971,6 +983,8 @@ mod tests {
                     ..Default::default()
                 }),
                 codex: None,
+                workbuddy: None,
+                workbuddy_ai: None,
             },
         };
         save_unlocked(&path, &s).unwrap();

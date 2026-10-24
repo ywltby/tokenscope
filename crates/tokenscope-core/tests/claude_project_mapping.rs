@@ -48,6 +48,9 @@ fn write_session(roots: &Path, slug: &str, id: &str) {
 
 fn opts_for(dir: &Path, claude_root: &Path, mapping: Option<PathBuf>) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Project,
         claude_dir: Some(claude_root.to_path_buf()),
         codex_dir: Some(dir.join("no-codex")),

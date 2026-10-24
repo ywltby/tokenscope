@@ -238,7 +238,9 @@ def verify_settings(data, original, from_format, to_format, migrations=MIGRATION
                           for operation in source_dir_ops]
     for path, value in defaults:
         found = lookup(current, path)
-        if found is MISSING or found != value:
+        # 缺失键与默认值在读取语义上等价（缺失 = 程序按默认解释），允许；
+        # 但显式写出与默认相反的值必须失败（程序不得擅自改变默认行为）。
+        if found is not MISSING and found != value:
             raise ValueError(f"迁移默认值不一致：{path}")
     return {"ok": True, "from_format": int(from_format), "to_format": int(to_format),
             "source_dir": [r for r in source_dir_results if r is not None]}

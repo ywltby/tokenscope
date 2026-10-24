@@ -89,6 +89,9 @@ fn write_lines(path: &Path, lines: &[String]) {
 
 fn opts(dir: &Path, claude: Option<PathBuf>, codex: Option<PathBuf>) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Agent,
         claude_dir: claude.clone(),
         codex_dir: codex.clone(),
@@ -219,6 +222,9 @@ fn disabled_source_stops_new_collection_but_history_stays_visible() {
 
     // 只看 Claude 时按 agent 过滤，Codex 历史不参与。
     let filtered = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         agent: Some(AgentKind::ClaudeCode),
         ..claude_only
     })

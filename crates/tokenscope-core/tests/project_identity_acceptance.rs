@@ -83,6 +83,9 @@ fn write_sources(dir: &Path) -> (PathBuf, PathBuf) {
 
 fn opts(dir: &Path, claude: &Path, codex: &Path) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Project,
         claude_dir: Some(claude.to_path_buf()),
         codex_dir: Some(codex.to_path_buf()),
