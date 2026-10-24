@@ -462,10 +462,17 @@ function Invoke-UpgradeScenario {
         Save-HistoryBackupState -Case $Case
         Install-UpgradeCurrent -Case $Case
         Assert-PreservedBeforeLaunch -Case $Case
-        # WB05：先验证旧同意被新闸门拒绝（零业务读取），再授权当前修订。
-        Invoke-ConsentGateStage -Case $Case -Phase "current"
-        Grant-UpgradeConsent -Case $Case
+        # 先把跳指针切到新版本：Grant 与观察段都按「本跳目标格式」判断是否
+        # 涉及隐私修订号（设置格式 3 起引入）；Set-UpgradeJump 只更新期望
+        # 字段，不触发外部动作，提前不影响语义。
         Set-UpgradeJump -Case $Case -Version $Case.AppVersion | Out-Null
+        # WB05：目标版本认识修订号时，先验证旧同意被新闸门拒绝（零业务
+        # 读取），再授权当前修订；旧版本（格式 < 3）布尔同意即放行，无
+        # 重新询问路径，观察段跳过。
+        if ($Case.JumpTargetSettingsFormat -ge 3) {
+            Invoke-ConsentGateStage -Case $Case -Phase "current"
+        }
+        Grant-UpgradeConsent -Case $Case
         Invoke-UpgradeLifecycle -Case $Case -Phase "current" -Verify { param($Value,$Context) Check-CurrentUsage -Case $Value -Context $Context }
         Invoke-UpgradeLifecycle -Case $Case -Phase "restart" -Verify { param($Value,$Context) Check-CurrentUsage -Case $Value -Context $Context }
         Save-JumpResult -Case $Case -Phase "current" -Pass $true
@@ -559,9 +566,14 @@ function Invoke-UpgradeChain {
             }
             Install-UpgradePackage -Case $Case -Origin $version -InstallerPath $installer | Out-Null
             if ($version -eq $Case.AppVersion) { Assert-InstalledUpgrade -Case $Case }
-            # WB05：每跳装新版后先验证旧同意被闸门拒绝（零业务读取），再按
-            # 本跳目标格式授权（0.2.0 起没有同意就不会采集，幂等）。
-            Invoke-ConsentGateStage -Case $Case -Phase ("chain-" + $suffix)
+            # WB05：本跳目标格式 ≥ 3（版本认识隐私修订号）时，先验证旧同意
+            # 被闸门拒绝（零业务读取）再授权；中间跳装的是旧版，布尔同意即
+            # 放行、无重新询问路径，观察段跳过（Set-UpgradeJump 已在安装前
+            # 把 JumpTargetSettingsFormat 切到本跳目标）。
+            if ($Case.JumpTargetSettingsFormat -ge 3) {
+                Invoke-ConsentGateStage -Case $Case -Phase ("chain-" + $suffix)
+            }
+            # 0.2.0 起没有同意就不会采集：安装后、启动前补上（幂等）。
             Grant-UpgradeConsent -Case $Case
             Invoke-UpgradeLifecycle -Case $Case -Phase ("chain-"+$suffix) -Verify { param($Value,$Context) Check-CurrentUsage -Case $Value -Context $Context }
             Save-JumpResult -Case $Case -Phase ("chain-"+$suffix) -Pass $true

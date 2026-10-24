@@ -265,9 +265,26 @@ sys.exit(37 if "--fail" in sys.argv else 0)
         Invoke-UpgradeScenario -Case $case
         $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:old,old-facts:0.1.0,save-old,"
         if ($state -eq "deleted") { $expected += "delete-source," }
-        $expected += "install-current,preserved,consent-gate:current,consent,jump:0.3.3,lifecycle:current,"
+        # 目标格式 1 < 3：无隐私修订号闸门，观察段跳过；Set-UpgradeJump
+        # 已提前到授权前（jump:0.3.3 出现在 consent 之前）。
+        $expected += "install-current,preserved,jump:0.3.3,consent,lifecycle:current,"
         $expected += "check-current:0.3.3::1->1,lifecycle:restart,check-current:0.3.3::1->1,jump:current:True,case:True"
         Check (($script:Trace -join ",") -eq $expected) "$state：旧版先产数据，再直接覆盖升级并重启复核"
+    }
+    # WB05：目标格式 3（认识隐私修订号的版本）必须先经同意闸门观察段，
+    # 再授权——顺序为 jump 切换 → gate → consent。
+    & {
+        $case = New-UpgradeCase -RepoRoot $repoRoot -InstallerPath (Join-Path $contractRoot "current-setup.exe") `
+            -AppVersion "0.3.3" -ExpectedCommit ("a"*40) -SourceState "present" -Origin "0.1.0" `
+            -EvidenceRoot (Join-Path $contractRoot "scenario-gate") `
+            -Metadata ([pscustomobject]@{ executable_sha256=("b"*64); persistent_format=([pscustomobject]@{ settings_format="3" }) }) `
+            -DataDir $dataRoot -TempRoot $tempRoot
+        $script:Trace.Clear(); $script:FailAt = ""
+        Invoke-UpgradeScenario -Case $case
+        $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:old,old-facts:0.1.0,save-old,"
+        $expected += "install-current,preserved,jump:0.3.3,consent-gate:current,consent,lifecycle:current,"
+        $expected += "check-current:0.3.3::1->3,lifecycle:restart,check-current:0.3.3::1->3,jump:current:True,case:True"
+        Check (($script:Trace -join ",") -eq $expected) "格式3：先闸门观察再授权（gate 在 consent 前）"
     }
     foreach ($failure in @("install-baseline","lifecycle:old","lifecycle:current","lifecycle:restart")) {
         $script:Trace.Clear(); $script:FailAt = $failure
@@ -293,9 +310,9 @@ sys.exit(37 if "--fail" in sys.argv else 0)
         Invoke-UpgradeChain -Case $case
         $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:chain-00-old,old-facts:0.1.0,save-old,jump:chain-00-old:True,"
         if ($state -eq "deleted") { $expected += "delete-source," }
-        $expected += "jump:0.3.2,download:0.3.2,install:0.3.2,consent-gate:chain-01,consent,"
+        $expected += "jump:0.3.2,download:0.3.2,install:0.3.2,consent,"
         $expected += "lifecycle:chain-01,check-current:0.3.2:4:1->1,jump:chain-01:True,"
-        $expected += "jump:0.3.3,install:0.3.3,installed,consent-gate:chain-02,consent,lifecycle:chain-02,check-current:0.3.3:4:1->2,"
+        $expected += "jump:0.3.3,install:0.3.3,installed,consent,lifecycle:chain-02,check-current:0.3.3:4:1->2,"
         $expected += "jump:chain-02:True,lifecycle:restart,check-current:0.3.3:4:1->2,jump:restart:True,case:True"
         Check (($script:Trace -join ",") -eq $expected) "$state：链路逐跳覆盖安装并只播种一次"
         Check ((@($case.Chain) -join "->") -eq "0.1.0->0.3.2->0.3.3") "链路记录起点集合与当前版本"
