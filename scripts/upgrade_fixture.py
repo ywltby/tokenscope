@@ -82,7 +82,10 @@ def ensure_test_consent(data, revision=None):
     settings = tomllib.loads(text)
     if "privacy_policy_accepted" in settings and settings.get("privacy_policy_accepted") is True:
         if revision is not None and settings.get("privacy_policy_revision") != int(revision):
-            body = text.replace(
+            # 先删已有的修订号行再插入，否则文件里出现重复的
+            # privacy_policy_revision 键，tomllib 拒绝解析整个文件。
+            body = re.sub(r"(?m)^[ \t]*privacy_policy_revision[ \t]*=.*\r?\n?", "", text)
+            body = body.replace(
                 "privacy_policy_accepted = true",
                 _consent_prefix(revision).rstrip("\n"),
                 1,
@@ -164,6 +167,8 @@ def validate_operation(operation, key):
     elif kind == "default":
         if not field_path(operation.get("path")) or "value" not in operation:
             raise ValueError(f"default 操作必须给出 path 与 value：{key!r}")
+        if not isinstance(operation.get("allow_missing", False), bool):
+            raise ValueError(f"default 操作的 allow_missing 必须是布尔：{key!r}")
     elif kind == "source_dir_to_additional_path":
         # v1 sources.<agent>.dir → v2 追加项 + 自动发现（专用、有限：只认两个 agent）。
         if operation.get("agent") not in ("claude", "codex"):
@@ -244,7 +249,8 @@ def verify_settings(data, original, from_format, to_format, migrations=MIGRATION
         raise ValueError("当前验收同意状态未保留")
     renames = {operation["from"]: operation["to"] for operation in operations
                if operation["kind"] == "rename"}
-    defaults = [(operation["path"], operation["value"]) for operation in operations
+    defaults = [(operation["path"], operation["value"], operation.get("allow_missing", False))
+                for operation in operations
                 if operation["kind"] == "default"]
     source_dir_ops = [operation for operation in operations
                       if operation["kind"] == "source_dir_to_additional_path"]
@@ -260,11 +266,12 @@ def verify_settings(data, original, from_format, to_format, migrations=MIGRATION
                              + (f" -> {target}" if target != path else ""))
     source_dir_results = [verify_source_dir_to_additional_path(expected, current, operation["agent"])
                           for operation in source_dir_ops]
-    for path, value in defaults:
+    for path, value, allow_missing in defaults:
         found = lookup(current, path)
-        # 缺失键与默认值在读取语义上等价（缺失 = 程序按默认解释），允许；
-        # 但显式写出与默认相反的值必须失败（程序不得擅自改变默认行为）。
-        if found is not MISSING and found != value:
+        # 默认严格：default 声明的值必须实际写出且相等。仅显式标注
+        # allow_missing 的规则（WorkBuddy 新键：缺失 = 程序按默认启用解释）
+        # 允许缺键；显式写出与默认相反的值始终失败。
+        if (found is MISSING and not allow_missing) or (found is not MISSING and found != value):
             raise ValueError(f"迁移默认值不一致：{path}")
     return {"ok": True, "from_format": int(from_format), "to_format": int(to_format),
             "source_dir": [r for r in source_dir_results if r is not None]}

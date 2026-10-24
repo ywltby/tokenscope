@@ -112,6 +112,19 @@ class UpgradeFixtureCase(unittest.TestCase):
         result = fixture.ensure_test_consent(data, revision=2)
         self.assertFalse(result.get("test_consent_upgraded", False))
         self.assertFalse(result.get("test_consent_added"))
+        # 已有更低修订号（privacy_policy_revision = 1）+ 需要当前修订：
+        # 先删旧行再插入——写出重复键会让 tomllib 拒绝解析整个文件。
+        data = fresh_data("raise")
+        (data / "settings.toml").write_text(
+            "privacy_policy_accepted = true\nprivacy_policy_revision = 1\n",
+            encoding="utf-8")
+        result = fixture.ensure_test_consent(data, revision=2)
+        self.assertTrue(result.get("test_consent_upgraded"))
+        text = (data / "settings.toml").read_text(encoding="utf-8")
+        self.assertEqual(text.count("privacy_policy_revision"), 1, text)
+        parsed = tomllib.loads(text)
+        self.assertTrue(parsed["privacy_policy_accepted"])
+        self.assertEqual(parsed["privacy_policy_revision"], 2)
         # 不带 revision 的旧语义：只写布尔（受测历史版本不认识修订号字段）
         data = fresh_data("legacy")
         fixture.grant_test_consent(data)
