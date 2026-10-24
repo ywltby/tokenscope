@@ -312,9 +312,16 @@ function Assert-PreservedBeforeLaunch {
 
 function Grant-UpgradeConsent {
     # 幂等：起点已带同意时不动设置文件，0.1.0 起点升级后补上。
+    # WB05：本跳目标格式 ≥ 3 的版本认识隐私修订号——写入当前修订（与
+    # tokenscope-core 的 PRIVACY_POLICY_REVISION = 2 同步），让升级后的启动
+    # 直接进入业务；历史跳保持布尔形态（受测旧版本不认识该字段）。
     param($Case)
-    Invoke-UpgradePython -Arguments @((Join-Path $Case.RepoRoot "scripts/upgrade_fixture.py"),"ensure-consent",
-        "--data-dir",$Case.DataDir) | Out-Null
+    $arguments = @((Join-Path $Case.RepoRoot "scripts/upgrade_fixture.py"), "ensure-consent",
+        "--data-dir", $Case.DataDir)
+    if ($Case.JumpTargetSettingsFormat -ge 3) {
+        $arguments += @("--revision", "2")
+    }
+    Invoke-UpgradePython -Arguments $arguments | Out-Null
 }
 
 function Check-CurrentUsage {
