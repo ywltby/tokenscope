@@ -72,6 +72,40 @@ class UpgradeFixtureCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             fixture.prepare(other, self.sources, "history.profile")
 
+    def test_consent_writes_revision_when_requested(self):
+        # WB05：需要当前修订授权的跳，授予/确保同意必须与修订号同一次写入；
+        # 不带修订号的旧版跳保持布尔形态（受测版本不支持该字段）。
+        import tomllib
+
+        def fresh_data(tag: str):
+            data = self.root / f"profile-{tag}/.tokenscope"
+            data.mkdir(parents=True, exist_ok=True)
+            (data / "settings.toml").write_text("price_auto_sync = false\n",
+                                                encoding="utf-8")
+            return data
+
+        # 授予同意：true 与修订号同一次写入
+        data = fresh_data("grant")
+        fixture.grant_test_consent(data, revision=2)
+        parsed = tomllib.loads((data / "settings.toml").read_text(encoding="utf-8"))
+        self.assertTrue(parsed["privacy_policy_accepted"])
+        self.assertEqual(parsed["privacy_policy_revision"], 2)
+        # ensure 已有当前修订同意时幂等（不重写）
+        result = fixture.ensure_test_consent(data, revision=2)
+        self.assertFalse(result["test_consent_added"])
+        # ensure 无同意的目录：带修订号写入
+        data = fresh_data("ensure")
+        result = fixture.ensure_test_consent(data, revision=2)
+        self.assertTrue(result["test_consent_added"])
+        parsed = tomllib.loads((data / "settings.toml").read_text(encoding="utf-8"))
+        self.assertEqual(parsed["privacy_policy_revision"], 2)
+        # 不带 revision 的旧语义：只写布尔（受测历史版本不认识修订号字段）
+        data = fresh_data("legacy")
+        fixture.grant_test_consent(data)
+        text = (data / "settings.toml").read_text(encoding="utf-8")
+        self.assertIn("privacy_policy_accepted = true", text)
+        self.assertNotIn("privacy_policy_revision", text)
+
     def test_ensure_consent_is_idempotent_after_the_first_write(self):
         fixture.prepare(self.data, self.sources)
         first = fixture.ensure_test_consent(self.data)

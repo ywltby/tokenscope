@@ -319,11 +319,13 @@ cache_read = "same_as_input"
 
 # ── 5. 设置：显式两来源目录 + 关闭自动同步（验收期间绝不联网）+ 同意基线 ─
 # privacy_policy_accepted = true 是**验收用的已同意基线**：既有场景直接覆盖
-# 同意后的业务路径。未同意场景（native-acceptance.mjs 的 privacy-consent-gate /
-# privacy-accept-restart）由驱动脚本在启动前删除这一行来构造。
+# 同意后的业务路径；同意记录带当前政策修订号（WB05），与真实同意保存的
+# 形态一致。未同意场景（native-acceptance.mjs 的 privacy-consent-gate /
+# privacy-accept-restart）由驱动脚本在启动前删除这两行来构造。
 $settings = @"
 # 验收专用设置（由 scripts/prepare-native-acceptance.ps1 生成）
 privacy_policy_accepted = true
+privacy_policy_revision = 2
 price_auto_sync = false
 
 [sources.claude]

@@ -23,6 +23,10 @@ pub const POLICY_MARKDOWN: &str = include_str!("../../docs/privacy.md");
 /// 未同意时业务命令的统一拒绝码（前端据此给出可操作提示）。
 pub const ERR_CONSENT_REQUIRED: &str = "privacy_consent_required";
 
+/// WB05：政策已更新（旧修订同意触发重新询问）时引导弹窗顶部的提示句。
+pub const POLICY_UPDATED_DETAIL: &str =
+    "隐私政策已更新：新增读取 WorkBuddy 与 WorkBuddy AI 的本地会话日志";
+
 /// 引导期关闭请求事件名（前端监听前到达的请求由 bootstrap 响应的
 /// `exitPromptPending` 标记恢复显示）。
 pub const EXIT_EVENT: &str = "privacy-exit-requested";
@@ -541,6 +545,11 @@ pub(crate) fn run_bootstrap(state: &PrivacyState, io: &dyn GateIo) -> PrivacySna
     state.publish(Phase::Checking, None);
     match io.read_consent() {
         ConsentRead::Granted => start_business_runtime(state, io),
+        ConsentRead::StaleRevision => {
+            // WB05：旧修订同意按未同意处理；detail 供引导弹窗顶部展示
+            //「政策已更新」提示，其余交互（同意 / 不同意 / 退出确认）不变。
+            state.publish(Phase::NeedsConsent, Some(POLICY_UPDATED_DETAIL.to_string()));
+        }
         ConsentRead::NotGranted | ConsentRead::Missing => {
             state.publish(Phase::NeedsConsent, None);
         }
