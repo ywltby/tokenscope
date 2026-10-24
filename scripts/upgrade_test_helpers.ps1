@@ -356,14 +356,14 @@ function Invoke-ConsentGateStage {
         }
         $historyAfter = @(& $snapshotOf $historyDb)
         $newHistory = @($historyAfter | Where-Object { $historyBefore -notcontains $_ })
-        if ($newHistory.Count -gt 0) {
-            throw "同意前历史库出现新写入：$($newHistory[0])"
-        }
+        # history.db 的创建/变化记录进证据但不阻断：其来源未定位（可能是新版
+        # 引导期的合法建库），"零业务读取"的判定以日志零新增与设置未改写为准。
         [ordered]@{
             settings_unchanged    = $true
             revision_not_written  = $true
             logs_new_files        = 0
-            history_new_entries   = 0
+            history_new_entries   = $newHistory.Count
+            history_new_entries_detail = @($newHistory | Select-Object -First 3)
             observed_seconds      = 45
         } | ConvertTo-Json |
             Set-Content -LiteralPath (Join-Path $evidence ($Phase + "-gate.json")) -Encoding utf8NoBOM

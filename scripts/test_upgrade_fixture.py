@@ -99,6 +99,19 @@ class UpgradeFixtureCase(unittest.TestCase):
         self.assertTrue(result["test_consent_added"])
         parsed = tomllib.loads((data / "settings.toml").read_text(encoding="utf-8"))
         self.assertEqual(parsed["privacy_policy_revision"], 2)
+        # 已有旧同意（true 无修订号）+ 需要当前修订：补写修订号（闸门验证
+        # 之后的显式测试授权，与真实重新同意后的落盘等价）
+        data = fresh_data("upgrade")
+        fixture.grant_test_consent(data)
+        result = fixture.ensure_test_consent(data, revision=2)
+        self.assertTrue(result.get("test_consent_upgraded"))
+        parsed = tomllib.loads((data / "settings.toml").read_text(encoding="utf-8"))
+        self.assertTrue(parsed["privacy_policy_accepted"])
+        self.assertEqual(parsed["privacy_policy_revision"], 2)
+        # 已是当前修订：不再改写
+        result = fixture.ensure_test_consent(data, revision=2)
+        self.assertFalse(result.get("test_consent_upgraded", False))
+        self.assertFalse(result.get("test_consent_added"))
         # 不带 revision 的旧语义：只写布尔（受测历史版本不认识修订号字段）
         data = fresh_data("legacy")
         fixture.grant_test_consent(data)

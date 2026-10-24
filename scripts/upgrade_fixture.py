@@ -70,10 +70,26 @@ def grant_test_consent(data, revision=None):
 
 
 def ensure_test_consent(data, revision=None):
-    """升级链每一跳安装后、启动前使用：已有同意就不重复写入。"""
+    """升级链每一跳安装后、启动前使用（闸门拒绝路径已由观察段先行验证）。
+
+    - 无同意记录：写入（按 revision 决定是否带修订号）；
+    - 已有同意且修订号已满足（或本次调用不带 revision）：幂等跳过；
+    - 已有同意但需要当前修订授权（revision 给定且记录低于它）：补写修订号
+      ——这是闸门验证之后的显式测试授权，与真实用户重新同意后的落盘等价。
+    """
     path = Path(data) / "settings.toml"
     text = path.read_text(encoding="utf-8")
-    if "privacy_policy_accepted" in tomllib.loads(text):
+    settings = tomllib.loads(text)
+    if "privacy_policy_accepted" in settings and settings.get("privacy_policy_accepted") is True:
+        if revision is not None and settings.get("privacy_policy_revision") != int(revision):
+            body = text.replace(
+                "privacy_policy_accepted = true",
+                _consent_prefix(revision).rstrip("\n"),
+                1,
+            )
+            with path.open("w", encoding="utf-8", newline="\n") as fh:
+                fh.write(body)
+            return {"ok": True, "test_consent_added": False, "test_consent_upgraded": True}
         return {"ok": True, "test_consent_added": False}
     with path.open("w", encoding="utf-8", newline="\n") as fh:
         fh.write(_consent_prefix(revision) + text)
