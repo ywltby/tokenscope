@@ -5,7 +5,7 @@
 
 ## 现在执行什么
 
-已实施的功能专项均已交付，不重做已关闭任务；WorkBuddy 双来源另有待确认草案，见下文。当前责任状态如下，N14 已随 B1 关闭：
+已实施的功能专项均已交付，不重做已关闭任务；WorkBuddy 双来源已获独立排期，登记为 N17，见下文。当前责任状态如下，N14 已随 B1 关闭：
 
 | 责任 | 当前状态与下一步 |
 | --- | --- |
@@ -14,12 +14,13 @@
 | N12 系统与发布签字 | 最新 v0.5.9 的安装、版本递增、六组真实单跳及两条连续链成功；其余系统验收和人工签字仍待验 |
 | N13 真实性能 | 历史库冷/热查询、多根真实数据性能复测未完成，按只读来源与隔离输出执行 |
 | N14 来源目录遗留 | 已完成；第 4 项共享冲突读取失败 fixture 随 PR #27 合并 `4198051`，PR/main 门禁通过，四项全部关闭 |
+| N17 WorkBuddy 双来源 | 用户 2026-10-24 确认修订与独立推进，待实施；按 WB01–WB09 接入两版应用，合并由用户决定 |
 
-N01–N09、N14–N16 已完成；16 个责任编号中为 **12 项完成、1 项部分完成（N12）、3 项专项验收未闭合（N10/N11/N13）**，共 4 个仍开放的责任编号，不等于 4 个单独操作。
+N01–N09、N14–N16 已完成；17 个责任编号中为 **12 项完成、1 项部分完成（N12）、3 项专项验收未闭合（N10/N11/N13）、1 项已确认待实施（N17）**，共 5 个仍开放的责任编号，不等于 5 个单独操作。
 
-## 2026-10-24 WorkBuddy 双来源（实施前复核草案）
+## 2026-10-24 WorkBuddy 双来源（已确认，N17 待实施）
 
-[WorkBuddy 国内版与 WorkBuddy AI 国际版接入计划](active/2026-10-21-workbuddy-adapters.md) 在分支 `docs/workbuddy-plan` 上合入 main `a527441` 后完成代码复核与草案修订，**尚未实施、待用户确认修订文本及排期**。原“等验收收口完成后实施”的条件目前仍未满足（B3 待修订、B4 / B5 未执行），是否改为独立推进由用户决定；两版 WorkBuddy 作为独立应用、隐私政策修订后重新同意的范围保留。推荐一个产品 PR 内按“现有来源等价 → 新来源核心与同意 → 界面及验收装配 → 固定受测物交付”推进，预期下一 minor 为 0.6.0，以实际合入基线为准。这里只登记草案，不提前分配 N17、不改变 N01–N16 状态。
+[WorkBuddy 国内版与 WorkBuddy AI 国际版接入计划](active/2026-10-21-workbuddy-adapters.md) 在分支 `docs/workbuddy-plan` 上合入 main `a527441` 后完成代码复核，**用户 2026-10-24 确认修订文本并解除验收收口的串行依赖，登记 N17，尚未实施**。两版 WorkBuddy 作为独立应用、隐私政策修订后重新同意的范围保留。一个产品 PR 内按“现有来源等价 → 新来源核心与同意 → 界面及验收装配 → 固定受测物交付”推进，预期下一 minor 为 0.6.0，以实际合入基线为准。原验收收口 B3 待修订、B4 / B5 未执行的状态保留，不改变 N01–N16 的历史结论。
 
 ## 2026-10-23 测试临时目录清理（已完成归档）
 
@@ -36,7 +37,7 @@ N01–N09、N14–N16 已完成；16 个责任编号中为 **12 项完成、1 �
 - B1 / AC01 的 `69ce2f4` 随 [PR #27](https://github.com/ywltby/tokenscope/pull/27) 普通合并 `4198051`；两环境共享冲突探针、两个变异、普通/acceptance 采集各 17/17 与完整钩子通过，PR 的 CI/原生/安装/六组升级全成功。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39633188944)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39633188991)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39633189036) 全成功，Release 六个下游 skipped，最新发布仍为 v0.5.6；N14 第 4 项及 N14 全部关闭。
 - B2 / AC02–AC05 随 [PR #31](https://github.com/ywltby/tokenscope/pull/31) 普通合并 `c9de40e`，[v0.5.9](https://github.com/ywltby/tokenscope/releases/tag/v0.5.9) 已公开并下载核对四项原资产后登记基线。三个场景本地各三连跑与 29 条具名业务断言先红后绿，最终 PR 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39756585501)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39756585449)、[Install test](https://github.com/ywltby/tokenscope/actions/runs/39756585577) 全成功。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39758431511)、[原生](https://github.com/ywltby/tokenscope/actions/runs/39758431422)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39758431613) 全成功（安装五场景、六组单跳、两条连续链）；新增 CI 为 PR 116 秒 / main 68 秒。N11 人工尾项保留，B3 待修订，B4、B5 未执行。
 
-`active/` 保留整合计划与已确认的[剩余验收收口计划](active/2026-10-21-acceptance-closure.md)（AC01–AC12，B1 已关闭 N14；B2 自动化已合并，N11 人工尾项待验；B3 待修订，B4、B5 未执行），以及上述待确认的 WorkBuddy 双来源草案；[合入与发布解耦](archive/implemented/2026-10-21-release-on-version-change.md)（N16）与测试临时目录清理专项（B1/B2 均交付）已完成并归档。归档共 **53 份：23 份已实现、28 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
+`active/` 保留整合计划与已确认的[剩余验收收口计划](active/2026-10-21-acceptance-closure.md)（AC01–AC12，B1 已关闭 N14；B2 自动化已合并，N11 人工尾项待验；B3 待修订，B4、B5 未执行），以及上述已确认、独立推进的 WorkBuddy 双来源计划（N17）；[合入与发布解耦](archive/implemented/2026-10-21-release-on-version-change.md)（N16）与测试临时目录清理专项（B1/B2 均交付）已完成并归档。归档共 **53 份：23 份已实现、28 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
 
 必须保持用户定稿：一个 `~/.tokenscope/history.db`，只保存精简 token/cwd 元数据；全部代理有效用量纳入；源日志删除或停用仍查得到历史；CCS 设置页只手动单次导入，导入与已有事实求并集。较新规则优先于旧“现存日志是唯一事实”等历史设计。
 
