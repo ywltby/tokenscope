@@ -19,7 +19,7 @@ N01–N09、N14–N16 已完成；16 个责任编号中为 **12 项完成、1 �
 
 ## 2026-10-23 测试临时目录清理（已完成归档）
 
-[测试临时目录清理实施计划](archive/implemented/2026-10-23-test-temp-cleanup.md) 两个批次均已交付并经用户逐轮复核：B1（Vitest 用例遗漏修复 + 六条外层契约回归 + CI 接线）随 [PR #44](https://github.com/ywltby/tokenscope/pull/44) 合并 `fde7762`（三轮复审补修：失败证据保留、超时进程树收尾、挂起创建消除作业竞态、原预算内统一截止、日志直写文件）；前置 [PR #42](https://github.com/ywltby/tokenscope/pull/42)（Rust 独立临时根与进程级收尾）经用户批准合并 `4fc46c6`；B2（锁等待用例先 `drop(holder)` 再严格核实删除）随 [PR #46](https://github.com/ywltby/tokenscope/pull/46) 合并 `58d0d15`，发布 [v0.5.13](https://github.com/ywltby/tokenscope/releases/tag/v0.5.13)（构建、五场景安装、六组单跳、两条连续升级链全过）。两类历史失败（native-ui 页面 target 未出现、`latest_history_opens_without_writer_lock` 超限）根因未定位、仅记录；其余夹具的治理为后续候选，见归档计划 §6.2。本专项不占 N 编号，不改变 N09 等已完成项的历史状态。
+[测试临时目录清理实施计划](archive/implemented/2026-10-23-test-temp-cleanup.md) 两个批次均已交付并经用户逐轮复核：B1（Vitest 用例遗漏修复 + 六条外层契约回归 + CI 接线）随 [PR #44](https://github.com/ywltby/tokenscope/pull/44) 合并 `fde7762`（三轮复审补修：失败证据保留、超时进程树收尾、挂起创建消除作业竞态、原预算内统一截止、日志直写文件）；前置 [PR #42](https://github.com/ywltby/tokenscope/pull/42)（Rust 独立临时根与进程级收尾）经用户批准合并 `4fc46c6`；B2（锁等待用例先 `drop(holder)` 再严格核实删除）随 [PR #46](https://github.com/ywltby/tokenscope/pull/46) 合并 `58d0d15`，发布 [v0.5.13](https://github.com/ywltby/tokenscope/releases/tag/v0.5.13)（构建、五场景安装、八组单跳（0.1.0 / 0.4.0 / 0.5.9 / 0.5.12 × present/deleted）、两条连续升级链全过）。两类历史失败（native-ui 页面 target 未出现、`latest_history_opens_without_writer_lock` 超限）根因未定位、仅记录；其余夹具的治理为后续候选，见归档计划 §6.2。本专项不占 N 编号，不改变 N09 等已完成项的历史状态。
 
 ## 已交付与证据边界
 
