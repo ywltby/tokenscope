@@ -381,7 +381,13 @@
 
 首轮尝试的失败均先取证后修：fixture 转义污染（BEL/TAB）、`matchEventDom` 应用列缺新映射（产品级发现）、`clickAgent` 过渡态等待与「全部」IPC 实参匹配、privacy-policy-update 的 mutate 分支与业务态窗口优雅关闭——每次修正后重跑，不以重跑代替原因；取号前构建（0e9a4a1）上的三次首跑证据保留但不计入三连。
 
-**CI 首轮与补录（PR #49）**：native-ui 两轮各暴露一个 unified profile 场景的旧基线数字断言（首轮 `ui-ccs-import` 在「已提交的汇总与明细查询」超时：原生 10 / 导入后 14 / detail_only 11 应为 16 / 20 / 17，`1faeac1` 同步契约与判定函数，本地三连 15/15 × 3、17 s；次轮 `ui-pricing` 首屏 `events.total === 12` 应为 18（16 + 注入 2 条分段探针），`e7dfcb1` 同步后本地三连 16/16 × 3、22–26 s）。两处都是确定性的基线遗漏、先取证后修；批量、四桶增量与并集类断言不变。其余场景（identity / source-paths / policy-update）的脚本与 Rust 源码未再变化，其三连证据继续有效。
+**CI 轮次记录（PR #49，全部失败先取证后修，不以重跑代替原因）**：
+
+- 第 1–2 轮（native-ui）：`ui-ccs-import` 与 `ui-pricing` 各有一处 unified profile 的旧基线数字断言（10/14/11 → 16/20/17；首屏 12 → 18），`1faeac1` / `e7dfcb1` 同步，本地三连分别 15/15 与 16/16。
+- 第 3 轮（native-ui）：`ui-pricing` 启动期「无 tauri 页面 target（about:blank）」偶发——属计划总账已登记的历史偶发类别（v0.5.13 同记录、根因未定位），按既有处理重跑该作业后通过。
+- 第 3–6 轮（install-test / upgrade-test 8 组矩阵）：设置与升级链的同意接线缺口，三个确定性根因逐轮定位——`3be1a2d`（test_install 基线缺修订号 + Grant 按跳传修订号）、`93f48a7`（新增两段式编排：授权前以旧同意启动观察 45 s，证据化「设置未改写、业务日志零新增」；history.db 变化降级为记录，来源未定位）、`ac057e9`（ensure 对已有布尔同意按需补写修订号 = 闸门验证后的显式测试授权）、`912d635`（单跳编排的 Set-UpgradeJump 提前到授权前——Grant 判断目标格式时读到的还是起点格式导致不传修订号；观察段按「目标格式 ≥ 3」条件执行，链模式中间跳为旧版无重新询问路径）。升级契约测试同步扩展到 61 项（新增格式 3 用例钉住 jump → gate → consent 顺序）。
+- **最终轮（`912d635`）：gate、native-ui、install-test、contracts、frontend、rust、rust-acceptance、8 组 upgrade-test 单跳全部通过；upgrade-chain 在 PR 上 skipping（连续链按既有模式在合并后 main 的 Release 验证）。**
+- 其余场景（identity / source-paths / policy-update）的脚本与 Rust 源码在上述修复中未再变化，本地三连证据继续有效。
 
 **版本常量决策（WB02 核对结论）**：`HISTORY_SCHEMA_VERSION=4`、`PARSER_REVISION=2`、`IDENTITY_REVISION=1` 均不递增——历史库 `usage_events.app` 为 TEXT、表结构不变；新增适配器不改变 Claude/Codex 的解析语义与模型身份规则；新事件以当前 PARSER_REVISION 标记写入，读取方（升级矩阵按 persistent_format 分组挑起点）不受影响。`SETTINGS_FORMAT_REVISION` 2→3 属计划明确的变化（sources 新键 + 同意修订号），迁移规则与 `settings_migrations.json` 同步。
 
