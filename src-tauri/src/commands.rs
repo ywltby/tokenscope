@@ -657,6 +657,10 @@ pub async fn open_settings_file(app: tauri::AppHandle) -> Result<String, String>
         Ok(path)
     })
     .await?;
+    #[cfg(feature = "acceptance")]
+    if tokenscope::acceptance::record_opener(&path).map_err(|error| format!("{error:#}"))? {
+        return Ok(path.display().to_string());
+    }
     app.opener()
         .open_path(path.display().to_string(), None::<&str>)
         .map_err(|e| e.to_string())?;
@@ -1559,6 +1563,7 @@ pub async fn sync_pricing_openrouter(app: tauri::AppHandle) -> Result<Vec<SyncOu
         match modelsdev::sync(&modelsdev_file_path(None)) {
             Ok(r) => {
                 log::info!("models.dev 同步成功: {} 条", r.count);
+                tokenscope::sync_diag::log_sync_warnings("models.dev", &r.warnings);
                 reports.push(SyncOutcome {
                     source: "models.dev",
                     count: r.count,
@@ -1574,10 +1579,9 @@ pub async fn sync_pricing_openrouter(app: tauri::AppHandle) -> Result<Vec<SyncOu
         match openrouter::sync(&openrouter_file_path(None)) {
             Ok(r) => {
                 log::info!("OpenRouter 同步成功: {} 条", r.count);
-                // F04：同步丢弃诊断（整条拒绝的模型与分项）沿既有日志路径记录
-                for w in &r.warnings {
-                    log::warn!("OpenRouter 同步丢弃数据: {w}");
-                }
+                // F04：同步丢弃诊断沿统一记录函数输出——默认级别每类一条
+                // WARN 汇总，逐条明细降为 debug（同一告警不再写两遍）。
+                tokenscope::sync_diag::log_sync_warnings("OpenRouter", &r.diagnostics);
                 reports.push(SyncOutcome {
                     source: "OpenRouter",
                     count: r.count,
@@ -1622,6 +1626,10 @@ pub async fn open_pricing_file(app: tauri::AppHandle) -> Result<String, String> 
         Ok(path)
     })
     .await?;
+    #[cfg(feature = "acceptance")]
+    if tokenscope::acceptance::record_opener(&path).map_err(|error| format!("{error:#}"))? {
+        return Ok(path.display().to_string());
+    }
     app.opener()
         .open_path(path.display().to_string(), None::<&str>)
         .map_err(|e| e.to_string())?;

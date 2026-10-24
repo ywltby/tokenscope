@@ -16,6 +16,79 @@
 
 use std::path::PathBuf;
 
+#[cfg(feature = "acceptance")]
+#[path = "acceptance_trace.rs"]
+mod trace;
+
+/// 普通构建借用原地址，既不读验收变量，也不启用追踪。
+pub fn pricing_url(
+    default: &'static str,
+    endpoint: &'static str,
+) -> anyhow::Result<std::borrow::Cow<'static, str>> {
+    #[cfg(feature = "acceptance")]
+    {
+        let _ = default;
+        trace::pricing_url(endpoint)
+    }
+    #[cfg(not(feature = "acceptance"))]
+    {
+        let _ = endpoint;
+        Ok(std::borrow::Cow::Borrowed(default))
+    }
+}
+
+pub fn record(event: &str, fields: serde_json::Value) -> anyhow::Result<()> {
+    #[cfg(feature = "acceptance")]
+    {
+        trace::record(event, fields)
+    }
+    #[cfg(not(feature = "acceptance"))]
+    {
+        let _ = (event, fields);
+        Ok(())
+    }
+}
+
+pub fn record_path(
+    event: &str,
+    path: &std::path::Path,
+    fields: serde_json::Value,
+) -> anyhow::Result<()> {
+    #[cfg(feature = "acceptance")]
+    {
+        trace::record_path(event, path, fields)
+    }
+    #[cfg(not(feature = "acceptance"))]
+    {
+        let _ = (event, path, fields);
+        Ok(())
+    }
+}
+
+pub fn consent_saved(path: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(feature = "acceptance")]
+    {
+        trace::consent_saved(path)
+    }
+    #[cfg(not(feature = "acceptance"))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+pub fn record_opener(path: &std::path::Path) -> anyhow::Result<bool> {
+    #[cfg(feature = "acceptance")]
+    {
+        trace::record_opener(path)
+    }
+    #[cfg(not(feature = "acceptance"))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
+
 /// 验收根环境变量名（仅 acceptance 构建读取）。
 pub const ENV_ROOT: &str = "TOKENSCOPE_ACCEPTANCE_ROOT";
 
@@ -102,6 +175,7 @@ mod imp {
     /// 冻结的验收根：`None` 仍表示"已 bootstrap，但本进程不是验收实例"——
     /// 只有 bootstrap 成功才会写入，因此不会出现半解析状态。
     static ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    static BOOTSTRAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     pub fn root() -> Option<PathBuf> {
         ROOT.get().cloned().flatten()
@@ -115,6 +189,8 @@ mod imp {
     /// 环境变量在首次调用时读取（采集进程的启动环境固定，无中途换值需求）。
     pub fn before_leader_work() -> Result<(), String> {
         static ROUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        super::trace::record("collect_round_start", serde_json::json!({}))
+            .map_err(|error| format!("{error:#}"))?;
         use std::sync::atomic::Ordering;
         static DELAY_MS: OnceLock<u64> = OnceLock::new();
         let delay_ms = *DELAY_MS.get_or_init(|| {
@@ -146,6 +222,9 @@ mod imp {
     }
 
     pub fn bootstrap_with(value: Option<String>) -> Result<(), String> {
+        let _guard = BOOTSTRAP_LOCK
+            .lock()
+            .map_err(|_| "验收启动锁已损坏".to_string())?;
         let resolved = match value {
             Some(raw) => validate(&raw)?,
             // 显式允许"无验收根"的普通 acceptance 构建运行（例如只跑单测）：
@@ -155,7 +234,9 @@ mod imp {
         if let Some(prev) = ROOT.get() {
             // 已冻结：不一致的二次注入必须暴露，不能静默沿用旧值。
             return match (prev.as_ref(), resolved.as_ref()) {
-                (a, b) if a == b => Ok(()),
+                (a, b) if a == b => {
+                    super::trace::bootstrap(resolved.as_deref()).map_err(|e| format!("{e:#}"))
+                }
                 _ => Err(format!(
                     "验收根已冻结为 {:?}，拒绝改为 {:?}",
                     prev.as_ref(),
@@ -163,6 +244,7 @@ mod imp {
                 )),
             };
         }
+        super::trace::bootstrap(resolved.as_deref()).map_err(|e| format!("{e:#}"))?;
         let _ = ROOT.set(resolved.clone());
         match resolved {
             Some(p) => {

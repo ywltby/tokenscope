@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 
 pub const API_URL: &str = "https://models.dev/api.json";
 
+pub fn api_url() -> Result<std::borrow::Cow<'static, str>> {
+    crate::acceptance::pricing_url(API_URL, "/modelsdev/api.json")
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ApiEntry {
     /// 供应商名称。MP03：**有意不读**——provider 名不是模型展示名，不得兜底
@@ -156,27 +160,38 @@ pub struct SyncReport {
     pub count: u64,
     pub path: String,
     pub synced_at: String,
+    /// 同步告警（结构化，类别键在产生处确定）。同步函数本身不写日志，
+    /// 由调用方经 `sync_diag::log_sync_warnings` 统一记录。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<crate::sync_diag::SyncWarning>,
 }
 
 /// 拉取 models.dev 并写快照（原子替换；同 provider 串行）。
 pub fn sync(snapshot_path: &Path) -> Result<SyncReport> {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    sync_with(snapshot_path, fetch_modelsdev)
+    sync_with(snapshot_path, || fetch_modelsdev(snapshot_path))
 }
 
 /// Task 7.3：同一 provider 的同步互斥锁（手动/自动两条入口共用）。
 pub static SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn fetch_modelsdev() -> Result<BTreeMap<String, ApiEntry>> {
+fn fetch_modelsdev(_snapshot_path: &Path) -> Result<BTreeMap<String, ApiEntry>> {
+    let url = api_url()?;
+    #[cfg(feature = "acceptance")]
+    crate::acceptance::record_path(
+        "pricing_fetch",
+        _snapshot_path,
+        serde_json::json!({"source":"modelsdev", "url":url}),
+    )?;
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(60)))
         .build()
         .new_agent();
     let mut response = agent
-        .get(API_URL)
+        .get(url.as_ref())
         .header("User-Agent", "tokenscope")
         .call()
-        .with_context(|| format!("请求 models.dev 失败: {API_URL}"))?;
+        .with_context(|| format!("请求 models.dev 失败: {url}"))?;
     response
         .body_mut()
         .read_json()
@@ -191,14 +206,22 @@ pub(crate) fn sync_with(
     let body: BTreeMap<String, ApiEntry> = fetch()?;
 
     let mut entries: Vec<SnapshotEntry> = Vec::new();
+    let mut report_warnings: Vec<crate::sync_diag::SyncWarning> = Vec::new();
     for (provider, entry) in body {
         for (model_id, m) in entry.models {
             let Some(cost) = m.cost else {
                 continue; // 无 cost（免费/非 LLM/占位）不入快照
             };
             let (segments, warnings) = convert_tiers(&cost.tiers, cost.context_over_200k.as_ref());
-            for w in &warnings {
-                log::warn!("models.dev {provider}/{model_id}: {w}");
+            // 只收集不写日志：调用方经 sync_diag::log_sync_warnings 统一记录
+            //（明细文本与改造前的逐条 warn 一致，仅级别降为 debug）。
+            for w in warnings {
+                report_warnings.push(crate::sync_diag::SyncWarning {
+                    category: w.category,
+                    model: format!("{provider}/{model_id}"),
+                    detail: format!("models.dev {provider}/{model_id}: {}", w.text),
+                    for_summary: w.for_summary,
+                });
             }
             entries.push(SnapshotEntry {
                 id: format!("{provider}/{model_id}"),
@@ -237,6 +260,31 @@ pub(crate) fn sync_with(
         count,
         path: snapshot_path.display().to_string(),
         synced_at,
+        warnings: report_warnings,
+    })
+}
+
+/// convert_tiers 的单条档位告警：类别键在此（告警产生地）确定。
+#[derive(Debug, Clone)]
+pub(crate) struct TierWarning {
+    pub category: &'static str,
+    pub text: String,
+    pub for_summary: bool,
+}
+
+/// 不变量 8 的兼容判定：旧字段（over）已给出的每一项单价，都必须在
+/// `first`（分界点最小的 context 档）有对应项且完全相等；未给出的项不参与。
+fn given_rates_match(over: &ApiTierRates, first: &ApiTierRates) -> bool {
+    [
+        (over.input, first.input),
+        (over.output, first.output),
+        (over.cache_read, first.cache_read),
+        (over.cache_write, first.cache_write),
+    ]
+    .into_iter()
+    .all(|(o, f)| match o {
+        Some(ov) => f.is_some_and(|fv| fv == ov),
+        None => true,
     })
 }
 
@@ -254,17 +302,25 @@ pub(crate) fn sync_with(
 pub(crate) fn convert_tiers(
     tiers: &[ApiTier],
     over200k: Option<&ApiTierRates>,
-) -> (Vec<SnapshotSegment>, Vec<String>) {
-    let mut warnings = Vec::new();
+) -> (Vec<SnapshotSegment>, Vec<TierWarning>) {
+    let mut warnings: Vec<TierWarning> = Vec::new();
     let mut sized: Vec<(u64, ApiTierRates)> = Vec::new();
     for t in tiers {
         if t.tier.kind != "context" {
-            warnings.push(format!("忽略非 context 类型 tier（type={}）", t.tier.kind));
+            warnings.push(TierWarning {
+                category: "non_context_tier",
+                text: format!("忽略非 context 类型 tier（type={}）", t.tier.kind),
+                for_summary: true,
+            });
             continue;
         }
         let s = t.tier.size;
         if !s.is_finite() || s < 0.0 || s.fract() != 0.0 {
-            warnings.push(format!("tier size 非法（{s}），该档跳过"));
+            warnings.push(TierWarning {
+                category: "invalid_tier_size",
+                text: format!("tier size 非法（{s}），该档跳过"),
+                for_summary: true,
+            });
             continue;
         }
         sized.push((s as u64, t.rates()));
@@ -273,7 +329,11 @@ pub(crate) fn convert_tiers(
     let mut deduped: Vec<(u64, ApiTierRates)> = Vec::new();
     for (s, rates) in sized {
         if deduped.last().is_some_and(|(ps, _)| *ps == s) {
-            warnings.push(format!("重复 tier size {s}，保留首个"));
+            warnings.push(TierWarning {
+                category: "duplicate_tier_size",
+                text: format!("重复 tier size {s}，保留首个"),
+                for_summary: true,
+            });
             continue;
         }
         deduped.push((s, rates));
@@ -282,7 +342,27 @@ pub(crate) fn convert_tiers(
         if deduped.is_empty() {
             deduped.push((200_000, over.clone()));
         } else if !deduped.iter().any(|(s, _)| *s == 200_000) {
-            warnings.push("context_over_200k 与 tiers 冲突，优先 tiers".to_string());
+            // 不变量 8：上游为兼容旧客户端把档位价同时填进 context_over_200k。
+            // 只比较旧字段已给出的单价项：与分界点最小的 context 档（deduped
+            // 已升序）逐项完全相等 → 兼容字段，仅 debug 明细；任一项不等 →
+            // 真冲突。两种情况的计价都只用 tiers，分段结果相同。浮点用 ==
+            //：两侧来自上游同一十进制字面量，不引入容差。
+            let first = &deduped[0].1;
+            let compatible = given_rates_match(over, first);
+            if compatible {
+                warnings.push(TierWarning {
+                    category: "over200k_compatible",
+                    text: "context_over_200k 为兼容旧客户端的重复字段（单价与最小分界档一致），按 tiers 计价"
+                        .to_string(),
+                    for_summary: false,
+                });
+            } else {
+                warnings.push(TierWarning {
+                    category: "over200k_conflict",
+                    text: "context_over_200k 与 tiers 冲突，优先 tiers".to_string(),
+                    for_summary: true,
+                });
+            }
         }
         // 等价档（size=200000）已存在时静默去重，不重复计价。
     }
@@ -500,7 +580,7 @@ mod tests {
         let (segments, warnings) = convert_tiers(&tiers, None);
         assert!(segments.is_empty());
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("time"));
+        assert!(warnings[0].text.contains("time"));
 
         // 重复 size：保留第一个，其余 warning。
         let tiers = vec![
@@ -730,5 +810,196 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         assert!(load_snapshot(&path).is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── 同步告警汇总（2026-10-22 计划）──────────────────────────
+
+    /// golden 基准的合成响应（与基准生成器一致）：兼容/冲突/多档/普通模型。
+    fn golden_body() -> String {
+        r#"{
+  "prov-a": {"models": {
+    "plain": {"name": "Plain", "cost": {"input": 1.5, "output": 6.0, "cache_read": 0.15, "cache_write": 1.875}},
+    "compat": {"name": "Compat", "cost": {"input": 4, "output": 20, "cache_read": 0.4, "cache_write": 5,
+        "tiers": [{"input": 8, "output": 30, "cache_read": 0.8, "cache_write": 10, "tier": {"type": "context", "size": 272000}}],
+        "context_over_200k": {"input": 8, "output": 30, "cache_read": 0.8, "cache_write": 10}}},
+    "conflict": {"name": "Conflict", "cost": {"input": 1, "output": 2,
+        "tiers": [{"input": 8, "output": 30, "tier": {"type": "context", "size": 272000}}],
+        "context_over_200k": {"input": 9, "output": 30}}},
+    "multitier": {"name": "Multi", "cost": {"input": 1, "output": 2,
+        "tiers": [{"input": 8, "output": 30, "tier": {"type": "context", "size": 272000}},
+                  {"input": 6, "output": 25, "tier": {"type": "context", "size": 100000}},
+                  {"input": 7, "output": 26, "tier": {"type": "time", "size": 50000}}]}}
+  }}
+}"#
+        .to_string()
+    }
+
+    /// 快照里随同步时刻变化的 synced_at 归一为占位符，其余字节保持原样。
+    fn normalize_synced_at(raw: &[u8]) -> Vec<u8> {
+        let text = String::from_utf8(raw.to_vec()).expect("快照必须是 UTF-8");
+        let marker = "\"synced_at\": \"";
+        let start = text.find(marker).expect("快照缺 synced_at") + marker.len();
+        let end = start + text[start..].find('"').expect("synced_at 值未闭合");
+        format!("{}SYNCED_AT{}", &text[..start], &text[end..]).into_bytes()
+    }
+
+    /// 不变量 7：同一份上游响应，改造前后快照逐字节相同（synced_at 除外）。
+    /// 基准 fixture 由改造前实现生成后固定，本测试不得改动基准。
+    #[test]
+    fn golden_snapshot_bytes_unchanged() {
+        let dir = std::env::temp_dir().join(format!("tokenscope-golden-md-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pricing-modelsdev.json");
+        let report = sync_with_body_for_tests(&path, &golden_body()).unwrap();
+        assert_eq!(report.count, 4);
+        let actual = normalize_synced_at(&std::fs::read(&path).unwrap());
+        let expected = std::fs::read("tests/fixtures/modelsdev/snapshot-golden.json")
+            .expect("golden 基准 fixture 缺失");
+        assert_eq!(
+            String::from_utf8_lossy(&actual),
+            String::from_utf8_lossy(&expected),
+            "快照字节与改造前基准不一致"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// LA01：sync_with 用含冲突与重复档位的合成响应时，SyncReport 带回
+    /// 结构化告警（类别键 + 模型 id + 原有文本）。
+    #[test]
+    fn sync_report_carries_structured_warnings() {
+        let dir = std::env::temp_dir().join(format!("tokenscope-warn-md-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pricing-modelsdev.json");
+        let report = sync_with_body_for_tests(&path, &golden_body()).unwrap();
+        let find = |model: &str| {
+            report
+                .warnings
+                .iter()
+                .find(|w| w.model == model)
+                .unwrap_or_else(|| panic!("告警缺 {model}: {:?}", report.warnings))
+        };
+        // 兼容（prov-a/compat）：不再是冲突，是仅 debug 的兼容明细。
+        let compat = find("prov-a/compat");
+        assert_eq!(compat.category, "over200k_compatible", "{compat:?}");
+        assert!(!compat.for_summary, "兼容明细不进入 WARN 汇总: {compat:?}");
+        // 真冲突（prov-a/conflict）：类别与原文本保留。
+        let conflict = find("prov-a/conflict");
+        assert_eq!(conflict.category, "over200k_conflict", "{conflict:?}");
+        assert!(conflict.for_summary);
+        assert_eq!(
+            conflict.detail,
+            "models.dev prov-a/conflict: context_over_200k 与 tiers 冲突，优先 tiers",
+            "明细文本与改造前一致"
+        );
+        // 非 context 类型（prov-a/multitier）。
+        let non_context = find("prov-a/multitier");
+        assert_eq!(non_context.category, "non_context_tier", "{non_context:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 不变量 8：旧字段单价与最小分界档完全相等 → 兼容（仅 debug 明细），
+    /// 不再误报冲突；segments 与改造前相同。
+    #[test]
+    fn over200k_matching_first_tier_is_compatible_not_conflict() {
+        let over = ApiTierRates {
+            input: Some(8.0),
+            output: Some(30.0),
+            cache_read: Some(0.8),
+            cache_write: Some(10.0),
+        };
+        let tiers = vec![tier_of("context", 272000.0, 8.0)];
+        let (segments, warnings) = convert_tiers(&tiers, Some(&over));
+        assert!(
+            warnings.iter().all(|w| w.category != "over200k_conflict"),
+            "完全相等不得报冲突: {warnings:?}"
+        );
+        assert_eq!(warnings.len(), 1, "应有且只有一条兼容明细: {warnings:?}");
+        assert_eq!(warnings[0].category, "over200k_compatible");
+        assert!(!warnings[0].for_summary, "兼容只写 debug 明细");
+        assert_eq!(segments.len(), 1, "计价仍只用 tiers");
+        assert_eq!(segments[0].min_tokens, 272_001);
+    }
+
+    /// 不变量 8：旧字段只给出部分单价时，只比较已给出的项。
+    #[test]
+    fn over200k_partial_rates_only_compare_given_items() {
+        let over = ApiTierRates {
+            input: Some(8.0),
+            output: Some(30.0),
+            cache_read: None,
+            cache_write: None,
+        };
+        // 首档 cache 分项存在且不同——旧字段未给出的项不参与比较，仍兼容。
+        let tiers = vec![ApiTier {
+            input: Some(8.0),
+            output: Some(30.0),
+            cache_read: Some(0.9),
+            cache_write: Some(11.0),
+            tier: serde_json::from_value(serde_json::json!({
+                "type": "context", "size": 272000
+            }))
+            .unwrap(),
+        }];
+        let (segments, warnings) = convert_tiers(&tiers, Some(&over));
+        assert!(
+            warnings.iter().all(|w| w.category != "over200k_conflict"),
+            "未给出的项不参与比较: {warnings:?}"
+        );
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].category, "over200k_compatible");
+        assert_eq!(segments[0].cache_read, Some(0.9), "计价只用 tiers");
+    }
+
+    /// 不变量 8：任一项不等 → 真冲突，保留原文本。
+    #[test]
+    fn over200k_price_mismatch_is_real_conflict() {
+        let over = ApiTierRates {
+            input: Some(9.0),
+            output: Some(30.0),
+            cache_read: Some(0.8),
+            cache_write: Some(10.0),
+        };
+        let tiers = vec![tier_of("context", 272000.0, 8.0)];
+        let (segments, warnings) = convert_tiers(&tiers, Some(&over));
+        assert_eq!(warnings.len(), 1, "真冲突必须留 warning: {warnings:?}");
+        assert_eq!(warnings[0].category, "over200k_conflict");
+        assert!(warnings[0].for_summary);
+        assert_eq!(
+            warnings[0].text, "context_over_200k 与 tiers 冲突，优先 tiers",
+            "冲突文本与改造前一致"
+        );
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            segments[0].min_tokens, 272_001,
+            "计价只用 tiers，与改造前相同"
+        );
+    }
+
+    /// 不变量 8：旧字段给出的项在最小分界档缺失 → 不相等，算真冲突。
+    #[test]
+    fn over200k_rate_missing_in_first_tier_is_conflict() {
+        let over = ApiTierRates {
+            input: Some(8.0),
+            output: None,
+            cache_read: None,
+            cache_write: None,
+        };
+        // 首档 input 缺失（None）——旧字段给出了 input，无法判等 → 冲突。
+        let tiers = vec![ApiTier {
+            input: None,
+            output: Some(30.0),
+            cache_read: None,
+            cache_write: None,
+            tier: serde_json::from_value(serde_json::json!({
+                "type": "context", "size": 100000
+            }))
+            .unwrap(),
+        }];
+        let (segments, warnings) = convert_tiers(&tiers, Some(&over));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].category, "over200k_conflict");
+        assert_eq!(segments[0].min_tokens, 100_001);
     }
 }

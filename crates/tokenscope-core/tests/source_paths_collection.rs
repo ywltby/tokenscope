@@ -746,3 +746,110 @@ fn plan_mapping_binding_loads_and_resolves() {
     assert_eq!(disabled.resolve("C--proj-x"), None);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// 共享冲突限于临时根；File 在正常结束或 panic 时自动释放句柄。
+#[cfg(windows)]
+fn hold_read_conflict(root: &Path, path: &Path, directory: bool) -> std::fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let root = root.canonicalize().unwrap();
+    let path = path.canonicalize().unwrap();
+    assert!(
+        path.starts_with(&root) && path != root,
+        "共享冲突必须局限于临时根子项"
+    );
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .custom_flags(if directory {
+            FILE_FLAG_BACKUP_SEMANTICS
+        } else {
+            0
+        })
+        .open(&path)
+        .unwrap_or_else(|error| panic!("持有读取冲突句柄失败 {}: {error}", path.display()))
+}
+
+#[test]
+#[cfg(windows)]
+fn unreadable_subdir_and_file_are_diagnosed_without_stopping_the_round() {
+    let dir = temp_dir("read-conflict");
+    let root = dir.join("sources");
+    write_claude_event(&root, "readable", "ok-a", "s-ok-a", "m-ok-a", 10);
+    write_claude_event(&root, "denied-dir", "hidden", "s-hidden", "m-hidden", 20);
+    write_claude_event(&root, "mixed", "ok-b", "s-ok-b", "m-ok-b", 30);
+    write_claude_event(&root, "mixed", "denied-file", "s-denied", "m-denied", 40);
+    let denied_dir = root.join("denied-dir");
+    let denied_file = root.join("mixed/denied-file.jsonl");
+    let directory_guard = hold_read_conflict(&dir, &denied_dir, true);
+    let file_guard = hold_read_conflict(&dir, &denied_file, false);
+
+    let directory_failure = std::fs::read_dir(&denied_dir)
+        .expect_err("持有独占目录句柄时 read_dir 必须失败；自检不允许跳过");
+    let file_failure = std::fs::read_to_string(&denied_file)
+        .expect_err("持有独占文件句柄时读取必须失败；自检不允许跳过");
+
+    let mut opts = base_opts(&dir, vec![claude_plan(&root, None)]);
+    opts.openrouter_path = Some(dir.join("no-openrouter.json"));
+    opts.modelsdev_path = Some(dir.join("no-modelsdev.json"));
+    let report = summary(&opts).expect("读取失败不得中断其余文件的采集与汇总");
+    eprintln!(
+        "AC01_OBSERVED {}",
+        serde_json::json!({
+            "directory_failure": {
+                "kind": format!("{:?}", directory_failure.kind()),
+                "raw_os_error": directory_failure.raw_os_error(),
+                "message": directory_failure.to_string(),
+            },
+            "file_failure": {
+                "kind": format!("{:?}", file_failure.kind()),
+                "raw_os_error": file_failure.raw_os_error(),
+                "message": file_failure.to_string(),
+            },
+            "requests": report.totals.requests,
+            "tokens": report.totals.tokens,
+            "io_errors": report.sources.first().map(|source| source.stats.io_errors),
+            "warnings": report.warnings,
+        })
+    );
+    assert_eq!(report.totals.requests, 2, "两个可读文件完整入账");
+    assert_eq!(report.totals.tokens.input, 40);
+    assert_eq!(report.totals.tokens.output, 20);
+    assert_eq!(report.totals.tokens.cache_write, 0);
+    assert_eq!(report.totals.tokens.cache_read, 0);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("无法读取目录") && w.contains("denied-dir")),
+        "目录拒绝必须有可见诊断: {:?}",
+        report.warnings
+    );
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(
+        report.sources[0].stats.io_errors, 1,
+        "文件拒绝计入 io_errors"
+    );
+    assert!(
+        report.warnings.iter().any(|w| w.contains("读取失败")),
+        "文件拒绝必须有可见诊断: {:?}",
+        report.warnings
+    );
+
+    drop(file_guard);
+    drop(directory_guard);
+    assert!(std::fs::read_dir(&denied_dir).is_ok(), "目录句柄已释放");
+    assert!(
+        std::fs::read_to_string(&denied_file).is_ok(),
+        "文件句柄已释放"
+    );
+    // summary 的查询快照按设计仍在注册表中持有只读事务；只回收本用例的
+    // 会话后再删库，既不清空其他并发用例的会话，也不忽略 Windows 占用错误。
+    tokenscope::query::backdate_query_for_tests(
+        &report.query_id,
+        tokenscope::query::QUERY_IDLE_TTL,
+    );
+    tokenscope::query::query_summary(&report.query_id).expect_err("本用例查询已回收");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

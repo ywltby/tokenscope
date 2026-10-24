@@ -110,8 +110,41 @@ function New-StandInProcess {
 }
 
 function New-ExitProcess {
-    param([int]$Code)
-    Start-Process -FilePath "pwsh" -ArgumentList "-NoProfile", "-Command", "exit $Code" -PassThru
+    # 受控退出替身：子进程先写就绪文件，等到放行文件出现才以指定退出码退出。
+    # pwsh 冷启动可能超过观察期，不能让 Start-Process 返回充当"已运行"信号；
+    # 调用方在进入等待/观察前调用 Release-ExitProcess，退出即落在窗口内。
+    param([int]$Code, [string]$Root)
+    $ready = Join-Path $Root "exit-$Code.ready"
+    $go = Join-Path $Root "exit-$Code.go"
+    $quote = { param($path) "'" + $path.Replace("'", "''") + "'" }
+    $script = @"
+New-Item -ItemType File -Path $(& $quote $ready) | Out-Null
+`$watch = [System.Diagnostics.Stopwatch]::StartNew()
+while (-not (Test-Path -LiteralPath $(& $quote $go)) -and `$watch.Elapsed.TotalSeconds -lt 60) { Start-Sleep -Milliseconds 20 }
+exit $Code
+"@
+    $encoded = [System.Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($script))
+    $proc = Start-Process -FilePath "pwsh" -ArgumentList "-NoProfile", "-EncodedCommand", $encoded -WindowStyle Hidden -PassThru
+    try {
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($watch.Elapsed.TotalSeconds -lt 30) {
+            if (Test-Path -LiteralPath $ready) {
+                return [pscustomobject]@{ Process = $proc; GoFile = $go }
+            }
+            if ($proc.HasExited) { throw "退出替身在就绪前退出：$($proc.ExitCode)" }
+            Start-Sleep -Milliseconds 50
+        }
+        throw "退出替身未在 30 秒内就绪"
+    }
+    catch {
+        if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+        throw
+    }
+}
+
+function Release-ExitProcess {
+    param($Handle)
+    New-Item -ItemType File -Path $Handle.GoFile | Out-Null
 }
 
 function Cleanup {
@@ -183,10 +216,12 @@ Write-Host "=== 反例：等待期提前退出 0 / 23 ==="
 foreach ($code in 0, 23) {
     $s = New-Scenario "early-exit-$code"
     Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line "价格加载：重建，3 ms"
-    $proc = New-ExitProcess -Code $code
+    $exit = New-ExitProcess -Code $code -Root $s.Root
+    $proc = $exit.Process
     $s.Context.Process = $proc
     $s.Context.Pid = $proc.Id
     Test-Throws {
+        Release-ExitProcess $exit
         Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 10
     } "等待期提前退出（退出码 $code）必须失败" "进程在场景进行中退出"
     Cleanup $s
@@ -198,11 +233,13 @@ Write-Host "=== 反例：观察期提前退出 ==="
 foreach ($code in 0, 23) {
     $s = New-Scenario "observe-exit-$code"
     Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line $SummaryOk
-    $proc = New-ExitProcess -Code $code
+    $exit = New-ExitProcess -Code $code -Root $s.Root
+    $proc = $exit.Process
     $s.Context.Process = $proc
     $s.Context.Pid = $proc.Id
     $s.Context.QueryId = "q-alpha-1"
     Test-Throws {
+        Release-ExitProcess $exit
         Observe-ProcessAlive -Context $s.Context -DurationSeconds 1 -PollMilliseconds 100
     } "观察期提前退出（退出码 $code）必须失败" "进程在场景进行中退出"
     Cleanup $s

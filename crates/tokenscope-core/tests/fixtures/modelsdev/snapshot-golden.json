@@ -1,0 +1,77 @@
+{
+  "v": 4,
+  "synced_at": "SYNCED_AT",
+  "entries": [
+    {
+      "id": "prov-a/compat",
+      "name": "Compat",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "segments": [
+        {
+          "label": ">272000",
+          "min_tokens": 272001,
+          "input": 8.0,
+          "output": 30.0,
+          "cache_read": 0.8,
+          "cache_write": 10.0
+        }
+      ]
+    },
+    {
+      "id": "prov-a/conflict",
+      "name": "Conflict",
+      "input": 1.0,
+      "output": 2.0,
+      "cache_read": null,
+      "cache_write": null,
+      "segments": [
+        {
+          "label": ">272000",
+          "min_tokens": 272001,
+          "input": 8.0,
+          "output": 30.0,
+          "cache_read": null,
+          "cache_write": null
+        }
+      ]
+    },
+    {
+      "id": "prov-a/multitier",
+      "name": "Multi",
+      "input": 1.0,
+      "output": 2.0,
+      "cache_read": null,
+      "cache_write": null,
+      "segments": [
+        {
+          "label": ">100000",
+          "min_tokens": 100001,
+          "max_tokens": 272001,
+          "input": 6.0,
+          "output": 25.0,
+          "cache_read": null,
+          "cache_write": null
+        },
+        {
+          "label": ">272000",
+          "min_tokens": 272001,
+          "input": 8.0,
+          "output": 30.0,
+          "cache_read": null,
+          "cache_write": null
+        }
+      ]
+    },
+    {
+      "id": "prov-a/plain",
+      "name": "Plain",
+      "input": 1.5,
+      "output": 6.0,
+      "cache_read": 0.15,
+      "cache_write": 1.875
+    }
+  ]
+}

@@ -1025,12 +1025,20 @@ fn start_price_auto_sync(app: tauri::AppHandle) {
                 let t = std::time::Instant::now();
                 log::info!("价格自动同步开始（距上次同步 {age_note}）");
                 match tokenscope::modelsdev::sync(&tokenscope::report::modelsdev_file_path(None)) {
-                    Ok(r) => log::info!("models.dev 自动同步成功: {} 条 → {}", r.count, r.path),
+                    Ok(r) => {
+                        log::info!("models.dev 自动同步成功: {} 条 → {}", r.count, r.path);
+                        tokenscope::sync_diag::log_sync_warnings("models.dev", &r.warnings);
+                    }
                     Err(e) => tokenscope::logging::log_error("models.dev 自动同步失败", &e),
                 }
                 match tokenscope::openrouter::sync(&tokenscope::report::openrouter_file_path(None))
                 {
-                    Ok(r) => log::info!("OpenRouter 自动同步成功: {} 条 → {}", r.count, r.path),
+                    Ok(r) => {
+                        log::info!("OpenRouter 自动同步成功: {} 条 → {}", r.count, r.path);
+                        // 与手动同步一致：统一记录函数，每类一条 WARN 汇总
+                        //（此前自动同步不读 OpenRouter 告警）。
+                        tokenscope::sync_diag::log_sync_warnings("OpenRouter", &r.diagnostics);
+                    }
                     Err(e) => tokenscope::logging::log_error("OpenRouter 自动同步失败", &e),
                 }
                 // 同步后重建索引，供下次启动快速加载；失败不影响已落盘的快照。

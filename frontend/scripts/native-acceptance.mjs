@@ -22,8 +22,13 @@ import { chromium } from "playwright-core";
 import { nativeUiRefresh } from "./contracts/native-ui-refresh.mjs";
 import { nativeCollectionStatus } from "./contracts/native-collection-status.mjs";
 import { nativeSourcePaths } from "./contracts/native-source-paths.mjs";
+import { nativeIdentity } from "./contracts/native-identity.mjs";
+import { nativeCcsImport } from "./contracts/native-ccs-import.mjs";
+import { nativePricing, preparePricingScenario } from "./contracts/native-pricing.mjs";
 import { nativeUiRelaunch, nativeUiSystem } from "./contracts/native-ui-system.mjs";
 import { decodePng } from "./lib/png.mjs";
+import { startAcceptanceIo, readAcceptanceTrace, snapshotBusinessFiles, changedBusinessFiles,
+  proxyEnvironment, beginIsolationCleanup, terminateAfterSnapshot, missingBusinessEvents } from "./lib/acceptance-io.mjs";
 import {
   CDP_READY_BUDGET_MS,
   CONNECT_RETRY_INTERVAL_MS,
@@ -61,6 +66,7 @@ import {
   closeBrowserBounded,
   createStageTracker,
   ensureNotCanceled,
+  errorEvidenceFields,
   finalizeScenarioTimeout,
   runScenarioBounded,
   scenarioBudgetMs,
@@ -160,13 +166,20 @@ function copyDirSync(src, dst) {
 }
 function ps(scriptPath, argsArray) {
   // S00（计划 §9.1 第 2 条）：同步命令统一 30 秒上限；动作名取 -Action 参数便于定位。
+  // 例外（2026-10-23 更正并登记为待确认的临时例外）：prepare-native-acceptance.ps1
+  // 不执行任何构建，只做隔离根文件准备（成功运行低于 10 秒）；main 曾连续两次
+  // 在其 CCS fixture 生成（python make_ccs_fixture.py，仅 unified 档）处
+  // spawnSync ETIMEDOUT，原因未定位——600 秒上限只是让该偶发不再必然失败，
+  // 偏离统一 30 秒缺乏原始依据，是否保留/收紧由用户决定；准备阶段有分阶段
+  // 计时与超时输出尾部（见 native-scenario.mjs 与 prepare 脚本取证装配）。
   const action = argsArray.includes("-Action")
     ? `window-${argsArray[argsArray.indexOf("-Action") + 1]}`
     : path.basename(scriptPath);
+  const timeoutMs = scriptPath === PREP ? 600000 : undefined;
   return spawnSyncBounded(
     "pwsh",
     ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...argsArray],
-    { action },
+    timeoutMs ? { action, timeoutMs } : { action },
   );
 }
 
@@ -407,12 +420,15 @@ class Instance {
   async prepareRoot() {
     fs.mkdirSync(OUT, { recursive: true });
     if (this.opts.events && this.opts.events > 0) {
-      const r = ps(PREP, ["-Root", this.root, "-Events", String(this.opts.events)], { encoding: "utf8" });
+      const prepareArgs = ["-Root", this.root, "-Events", String(this.opts.events)];
+      if (this.opts.profile) prepareArgs.push("-Profile", this.opts.profile);
+      const r = ps(PREP, prepareArgs, { encoding: "utf8" });
       if (r.status !== 0) throw new Error(`prepare failed: ${r.stdout}${r.stderr}`);
     } else if (!fs.existsSync(path.join(this.root, "manifest.json"))) {
       throw new Error(`隔离根缺少 manifest：${this.root}`);
     }
     if (this.opts.mutate) this.opts.mutate(this.root);
+    this.prelaunchBusinessFiles = snapshotBusinessFiles(path.join(this.root,"tokenscope"));
     const manifest = JSON.parse(fs.readFileSync(path.join(this.root, "manifest.json"), "utf8"));
     return manifest;
   }
@@ -824,6 +840,8 @@ class Instance {
 
     const env = {
       ...process.env,
+      // 固定隔离通道每次启动都装配；场景可以替换 env，不能因此丢失计数代理。
+      ...this.opts.controlledIo?.env,
       TOKENSCOPE_ACCEPTANCE_ROOT: this.root,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: browserArgs,
       ...this.opts.env,
@@ -1352,6 +1370,9 @@ async function measureA11y(page) {
 
 // ── 场景 ──────────────────────────────────────────────────────────
 const scenarios = {
+  "ui-identity": nativeIdentity,
+  "ui-ccs-import": nativeCcsImport,
+  "ui-pricing": nativePricing,
   "ui-refresh": nativeUiRefresh,
   "ui-system": nativeUiSystem,
   // PR2：真实采集生命周期 + 读取显示期 + 失败恢复 + 翻页保护（验收注入驱动慢轮次与失败）。
@@ -2161,6 +2182,9 @@ const scenarios = {
     );
 
     ev.businessFilesBeforeAccept = businessFiles();
+    ev.allBusinessChangesBeforeAccept = changedBusinessFiles(inst.prelaunchBusinessFiles,snapshotBusinessFiles(dataDir));
+    ck.add("all_non_settings_files_unchanged_before_consent",ev.allBusinessChangesBeforeAccept.length === 0,
+      JSON.stringify(ev.allBusinessChangesBeforeAccept));
     ck.add(
       "no_business_files_before_consent",
       ev.businessFilesBeforeAccept.length === 0,
@@ -2198,6 +2222,9 @@ const scenarios = {
     ck.add("rejected_exit_closes_process", inst.proc.exitCode !== null, `exitCode=${inst.proc.exitCode}`);
 
     ev.businessFilesAfterExit = businessFiles();
+    ev.allBusinessChangesAfterExit = changedBusinessFiles(inst.prelaunchBusinessFiles,snapshotBusinessFiles(dataDir));
+    ck.add("all_non_settings_files_unchanged_after_rejection",ev.allBusinessChangesAfterExit.length === 0,
+      JSON.stringify(ev.allBusinessChangesAfterExit));
     ck.add(
       "rejection_leaves_no_business_files",
       ev.businessFilesAfterExit.length === 0,
@@ -2334,7 +2361,27 @@ async function main() {
     userprofile: process.env.USERPROFILE,
   };
 
-  const inst = new Instance({
+  const cancelFlag = { requested: false };
+  let inst;
+  let isolationCleanup = null;
+  const stopForIsolation = (detail) => {
+    if (ev.isolation_violation) return;
+    ev.isolation_violation = detail;
+    ck.add("isolation_runtime_guard", false, detail);
+    hb(`隔离检查失败，立即停止本次原生实例：${detail}`);
+    isolationCleanup = beginIsolationCleanup({
+      terminate:() => inst?.current && !inst.attached
+        ? terminateAfterSnapshot({
+          refresh:() => { inst.disarmHostWatch(); return inst.refreshDescendants(inst.current); },
+          terminate:() => inst.terminateRecordedPids(inst.current,"isolation-violation"),
+        }) : {pids:[]},
+      stop:() => inst?.current ? inst.stop({reason:"isolation-violation"}) : {action:"no-host-process"},
+      cancel:() => { cancelFlag.requested=true; },
+    });
+    isolationCleanup.catch(error => { ev.isolation_stop_error=String(error?.message ?? error); });
+  };
+  const controlledIo = await startAcceptanceIo({onViolation:stopForIsolation});
+  inst = new Instance({
     root,
     events: attachExisting ? 0 : EVENTS,
     scheme,
@@ -2342,12 +2389,17 @@ async function main() {
     shots,
     logPath,
     relaunchCycles: RELAUNCH_CYCLES,
-    env:
+    controlledIo,
+    profile: ["ui-identity","ui-ccs-import","ui-pricing"].includes(SCENARIO) ? "unified" : undefined,
+    env: {
+      ...controlledIo.env,
+      ...(
       SCENARIO === "sync-failure"
-        ? { HTTPS_PROXY: "http://127.0.0.1:9", HTTP_PROXY: "http://127.0.0.1:9", NO_PROXY: "" }
+        ? proxyEnvironment("http://127.0.0.1:9", "")
         : SCENARIO === "csp" ? { TOKENSCOPE_ACCEPTANCE_CSP: "1" }
-        : SCENARIO === "close-remember-failure" ? { TOKENSCOPE_ACCEPTANCE_HIDE_FAILURE_ONCE: "1" } : undefined,
-    mutate: SCENARIO === "fault-logs-file" ? (r) => {
+        : SCENARIO === "close-remember-failure" ? { TOKENSCOPE_ACCEPTANCE_HIDE_FAILURE_ONCE: "1" } : {}),
+    },
+    mutate: SCENARIO === "ui-pricing" ? preparePricingScenario : SCENARIO === "fault-logs-file" ? (r) => {
       const p = path.join(r, "tokenscope", "logs");
       fs.mkdirSync(path.dirname(p), { recursive: true });
       if (fs.existsSync(p) && fs.statSync(p).isDirectory()) throw new Error("logs 已是目录，无法注入文件故障");
@@ -2368,8 +2420,14 @@ async function main() {
 
   // S00（计划 §9.1）：场景取消标志 + 阶段记录 + 最小证据写盘点。
   // 场景与 Instance 在每次关闭/重启前自查取消标志（Promise.race 不会取消另一分支）。
-  const cancelFlag = { requested: false };
   inst.opts.isCanceled = () => cancelFlag.requested;
+  const isolationMonitor = setInterval(() => {
+    try {
+      const trace = readAcceptanceTrace(root,{partial:true});
+      if (trace.violations.length) stopForIsolation(trace.violations.join(" | "));
+    } catch (error) { stopForIsolation(`无法核对追踪：${String(error.message ?? error)}`); }
+  },100);
+  isolationMonitor.unref();
   const stage = createStageTracker({ log: hb, launchIndexOf: () => inst.current?.index ?? null });
   inst.opts.markStage = stage.mark;
   inst.opts.markStageDone = stage.markDone;
@@ -2416,7 +2474,7 @@ async function main() {
       ev.idle_actual_seconds = Math.round((Date.now() - Date.parse(state.at)) / 1000);
     } catch (error) {
       setupError = error;
-      ev.error = String(error?.stack ?? error).slice(0, 800);
+      Object.assign(ev, errorEvidenceFields(error));
       hb(`attach 既有实例失败：${error?.message ?? error}`);
     }
   } else if (attachExisting) {
@@ -2493,7 +2551,7 @@ async function main() {
       // 启动失败：本次运行没有可用实例（保留原退出码 2 语义），
       // 但 launches[] 与宿主日志尾部仍要写出（§4.8 第 5 条）
       setupError = error;
-      ev.error = String(error?.stack ?? error).slice(0, 800);
+      Object.assign(ev, errorEvidenceFields(error));
       hb(`启动阶段失败：${error?.message ?? error}`);
     }
   }
@@ -2545,8 +2603,8 @@ async function main() {
     } catch (e) {
       scenarioError = e;
       ck.add("scenario_executed", false, String(e.message ?? e));
-      ev.error = String(e.stack ?? e).slice(0, 800);
-      if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-relaunch" || SCENARIO === "ui-source-paths") {
+      Object.assign(ev, errorEvidenceFields(e));
+      if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-relaunch" || SCENARIO === "ui-source-paths" || SCENARIO === "ui-identity" || SCENARIO === "ui-ccs-import" || SCENARIO === "ui-pricing") {
         // S00：失败截图/DOM 取证有短上限，无法完成就跳过并记原因（计划 §9.1 第 5 条）
         try {
           await withTimeout(
@@ -2571,7 +2629,9 @@ async function main() {
       }
     }
     if (outcome?.kind === "timeout") {
-      const finalize = await finalizeScenarioTimeout({
+      const finalize = isolationCleanup
+        ? await isolationCleanup.then(stop => ({isolation:true,stop}),error => ({isolation:true,error:String(error?.message ?? error)}))
+        : await finalizeScenarioTimeout({
         attached: inst.attached,
         record: inst.current,
         terminateRecordedPids: (record, reason) => inst.terminateRecordedPids(record, reason),
@@ -2581,7 +2641,7 @@ async function main() {
           if (
             SCENARIO === "ui-refresh" ||
             SCENARIO === "ui-system" ||
-            SCENARIO === "ui-source-paths"
+            SCENARIO === "ui-source-paths" || SCENARIO === "ui-identity" || SCENARIO === "ui-ccs-import" || SCENARIO === "ui-pricing"
           ) {
             const logs = path.join(root, "tokenscope", "logs");
             if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
@@ -2590,6 +2650,10 @@ async function main() {
         hb,
       });
       ev.finalize_after_timeout = finalize;
+      clearInterval(isolationMonitor);
+      ev.controlled_io = controlledIo.snapshot();
+      ev.acceptance_trace = readAcceptanceTrace(root);
+      await controlledIo.close();
       writeEvidenceSnapshot();
       process.exit(1);
     }
@@ -2600,7 +2664,7 @@ async function main() {
 
   // 收尾（§4.8 第 2 条）：每次关闭都确认宿主与全部已记录后代退出、端口不再监听，
   // 上限 20 秒；超时失败并列出残留 PID。expire-start 故意保留实例给 expire-finish。
-  if (SCENARIO === "expire-start") {
+  if (SCENARIO === "expire-start" && !ev.isolation_violation) {
     fs.writeFileSync(
       STATE_FILE,
       JSON.stringify(
@@ -2620,7 +2684,7 @@ async function main() {
     await closeBrowserBounded(inst.browser);
   } else {
     try {
-      const stop = await inst.stop();
+      const stop = isolationCleanup ? await isolationCleanup : await inst.stop();
       ck.add("instance_stop_confirmed", true, JSON.stringify(stop));
     } catch (e) {
       ck.add("instance_stop_confirmed", false, String(e?.message ?? e));
@@ -2630,12 +2694,24 @@ async function main() {
 
   // UI 刷新/来源目录验收保留合成来源的应用日志，失败也能核对采集/查询实际发生过。
   // 使用 copyDirSync 代替 fs.cpSync 避免 Windows GBK 环境下 C++ 绑定因中文路径编码产生乱码目录。
-  if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-source-paths") {
+  if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-source-paths" || SCENARIO === "ui-identity" || SCENARIO === "ui-ccs-import" || SCENARIO === "ui-pricing") {
     const logs = path.join(root, "tokenscope", "logs");
     if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
   }
 
   const realAfter = fingerprint(REAL_DATA);
+  clearInterval(isolationMonitor);
+  ev.controlled_io = controlledIo.snapshot();
+  ev.acceptance_trace = readAcceptanceTrace(root);
+  ck.add("all_trace_paths_inside_root",ev.acceptance_trace.violations.length === 0,
+    ev.acceptance_trace.violations.join(" | ") || `${ev.acceptance_trace.records.length} 条追踪，路径均在隔离根内`);
+  ck.add("external_connection_attempts_zero",ev.controlled_io.proxy_attempts.length === 0,
+    JSON.stringify(ev.controlled_io.proxy_attempts));
+  if (SCENARIO.startsWith("ui-") || SCENARIO === "privacy-accept-restart") {
+    const missing = missingBusinessEvents(ev.acceptance_trace.records);
+    ck.add("required_business_trace_present",missing.length === 0,JSON.stringify(missing));
+  }
+  await controlledIo.close();
   ev.real_tokenscope_fingerprint_before = hashOfFingerprint(realBefore);
   ev.real_tokenscope_fingerprint_after = hashOfFingerprint(realAfter);
   ev.real_tokenscope_entry_count_before = realBefore === "<missing>" ? 0 : realBefore.split("\n").length;

@@ -1,0 +1,72 @@
+{
+  "v": 2,
+  "synced_at": "SYNCED_AT",
+  "entries": [
+    {
+      "id": "prov/dup",
+      "name": "Dup",
+      "prompt": 1e-6,
+      "completion": 2e-6,
+      "cache_read": null,
+      "cache_write": null,
+      "overrides": [
+        {
+          "min_prompt_tokens": 100000,
+          "prompt": 5e-6,
+          "completion": 9e-6,
+          "cache_read": null,
+          "cache_write": null
+        }
+      ]
+    },
+    {
+      "id": "prov/ok",
+      "name": "Ok",
+      "prompt": 3e-6,
+      "completion": 0.000015,
+      "cache_read": 3e-7,
+      "cache_write": 3.75e-6,
+      "overrides": [
+        {
+          "min_prompt_tokens": 100000,
+          "prompt": 4e-6,
+          "completion": 0.00002,
+          "cache_read": null,
+          "cache_write": null
+        },
+        {
+          "min_prompt_tokens": 200000,
+          "prompt": 6e-6,
+          "completion": 0.00003,
+          "cache_read": null,
+          "cache_write": null
+        }
+      ]
+    },
+    {
+      "id": "prov/timed",
+      "name": "Timed",
+      "prompt": 1e-6,
+      "completion": 2e-6,
+      "cache_read": null,
+      "cache_write": null,
+      "overrides": [
+        {
+          "min_prompt_tokens": 50000,
+          "prompt": 2e-6,
+          "completion": 4e-6,
+          "cache_read": null,
+          "cache_write": null
+        }
+      ]
+    },
+    {
+      "id": "prov/zero",
+      "name": "Zero",
+      "prompt": 0.0,
+      "completion": 0.0,
+      "cache_read": null,
+      "cache_write": null
+    }
+  ]
+}

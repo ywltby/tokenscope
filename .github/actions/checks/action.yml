@@ -60,6 +60,8 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -B -m unittest discover -s scripts -p "test_pre_commit_checks.py" -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_run_rust_tests.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -B -m unittest discover -s scripts -p "test_check_staged_docs.py" -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -B -m unittest discover -s scripts -p "test_build_paths.py" -v
@@ -71,6 +73,12 @@ runs:
         pwsh -NoProfile -File scripts/check_powershell_syntax.ps1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -B scripts/check_node_syntax.py
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_make_ccs_fixture.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_acceptance_unified_profile.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python -B -m unittest discover -s scripts -p "test_acceptance_native_workflow.py" -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # 统一 workspace：一次 fmt --all 加一次 workspace clippy/test 即覆盖两个
     # package，不再保留分根库/壳的重复轮次。
@@ -87,7 +95,7 @@ runs:
     - name: workspace cargo test
       if: inputs.group == 'rust'
       shell: pwsh
-      run: cargo test --locked --workspace
+      run: python -B scripts/run_rust_tests.py -- cargo test --locked --workspace
 
     - name: frontend typecheck
       if: inputs.group == 'frontend'
@@ -137,6 +145,23 @@ runs:
       run: |
         pwsh -NoProfile -File scripts/test_install_helpers.ps1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # 测试临时目录清理计划 TL02：外层契约在私有根运行真实 Vitest，观察子进程
+    # 退出后的文件系统，防止「测试通过但目录残留」回归（前端 B1 批次）。
+    - name: 原生场景契约临时目录清理回归
+      if: inputs.group == 'contracts'
+      shell: pwsh
+      run: |
+        python -B -m unittest discover -s scripts -p "test_native_scenario_temp_cleanup.py" -v
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # 外层契约真实失败时会把证据移入独立目录；这里按失败产物上传供排查。
+    # 成功运行时证据已正常清理、目录不存在，ignore 使本步为无害空操作。
+    - name: Upload temp-cleanup contract evidence
+      if: always() && inputs.group == 'contracts'
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+      with:
+        name: temp-cleanup-contract-evidence
+        path: qa-artifacts/test-temp-cleanup/contract-evidence
+        if-no-files-found: ignore
     - name: workspace acceptance clippy
       if: inputs.group == 'rust-acceptance'
       shell: pwsh
@@ -144,7 +169,7 @@ runs:
     - name: workspace acceptance test
       if: inputs.group == 'rust-acceptance'
       shell: pwsh
-      run: cargo test --locked --workspace --features acceptance
+      run: python -B scripts/run_rust_tests.py -- cargo test --locked --workspace --features acceptance
     # W05c：重建两种模式的编译输入并与受版本管理的清单比较。check 自身先清理
     # 两个本地 package（不是整仓 clean），因此证据只可能来自本次构建。
     - name: Build input manifest matches this build (W05c)

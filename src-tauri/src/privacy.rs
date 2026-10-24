@@ -585,6 +585,15 @@ pub(crate) fn run_accept(state: &PrivacyState, io: &dyn GateIo) -> Result<Privac
     }
     state.publish(Phase::SavingConsent, None);
     let outcome = io.save_accept();
+    #[cfg(feature = "acceptance")]
+    let outcome = outcome.and_then(|()| {
+        if tokenscope::acceptance::root().is_some() {
+            let path =
+                tokenscope::settings::settings_path().map_err(|error| format!("{error:#}"))?;
+            tokenscope::acceptance::consent_saved(&path).map_err(|error| format!("{error:#}"))?;
+        }
+        Ok(())
+    });
     match outcome {
         Ok(()) => {
             start_business_runtime(state, io);
@@ -603,6 +612,18 @@ pub(crate) fn run_accept(state: &PrivacyState, io: &dyn GateIo) -> Result<Privac
 /// 同意成立后的单次业务初始化：日志 → 窗口 → 托盘 → 线程。
 fn start_business_runtime(state: &PrivacyState, io: &dyn GateIo) {
     state.publish(Phase::Starting, None);
+    // 记录同意已允许业务初始化的边界；UI 仍为 Starting，完成后才发布 Ready。
+    #[cfg(feature = "acceptance")]
+    if let Err(error) = tokenscope::acceptance::record(
+        "business_ready",
+        serde_json::json!({"privacy_phase":"starting", "scope":"runtime_initialization"}),
+    ) {
+        state.publish(
+            Phase::BlockedError,
+            Some(format!("验收追踪失败：{error:#}")),
+        );
+        return;
+    }
     match io.init_runtime() {
         Ok(diagnostics) => state.publish_ready(diagnostics),
         Err(e) => state.publish(Phase::BlockedError, Some(format!("业务初始化失败：{e}"))),
@@ -617,6 +638,151 @@ fn unreadable_detail(reason: &str) -> String {
 }
 
 const EXITING_MESSAGE: &str = "应用正在退出，无法保存隐私政策同意";
+
+#[cfg(all(test, feature = "acceptance"))]
+mod acceptance_closure_tests {
+    use super::*;
+
+    #[test]
+    fn shell_consent_trace_precedes_business_io_in_an_isolated_process() {
+        let root = std::env::temp_dir().join(format!(
+            "tokenscope-ac02-shell-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "privacy::acceptance_closure_tests::shell_closure_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("TOKENSCOPE_ACCEPTANCE_ROOT", &root)
+            .env("TOKENSCOPE_ACCEPTANCE_PRICING_BASE", "http://127.0.0.1:9")
+            .env("TOKENSCOPE_ACCEPTANCE_OPENER", "record")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "壳侧追踪断言失败：{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "由父用例以独立进程执行"]
+    fn shell_closure_child() {
+        tokenscope::acceptance::bootstrap().unwrap();
+        let root = tokenscope::acceptance::root().unwrap();
+        assert_eq!(
+            tokenscope::import::ccs::default_source_path().unwrap(),
+            root.join("sources/cc-switch/cc-switch.db")
+        );
+        assert_eq!(
+            tokenscope::modelsdev::api_url().unwrap(),
+            "http://127.0.0.1:9/modelsdev/api.json"
+        );
+        assert_eq!(
+            tokenscope::openrouter::api_url().unwrap(),
+            "http://127.0.0.1:9/openrouter/api/v1/models"
+        );
+        struct DiskGate;
+        impl GateIo for DiskGate {
+            fn read_consent(&self) -> ConsentRead {
+                ConsentRead::Missing
+            }
+            fn save_accept(&self) -> Result<(), String> {
+                let path = tokenscope::settings::settings_path().unwrap();
+                tokenscope::settings::accept_privacy_policy(&path)
+                    .map_err(|error| error.to_string())
+            }
+            fn init_runtime(&self) -> Result<Vec<String>, String> {
+                assert_eq!(
+                    tokenscope::settings::read_consent(
+                        &tokenscope::settings::settings_path().unwrap()
+                    ),
+                    ConsentRead::Granted
+                );
+                drop(
+                    tokenscope::history::HistoryDb::open(
+                        &tokenscope::acceptance::root()
+                            .unwrap()
+                            .join("tokenscope/history.db"),
+                    )
+                    .unwrap(),
+                );
+                Ok(Vec::new())
+            }
+        }
+        let state = PrivacyState::new();
+        assert_eq!(
+            run_bootstrap(&state, &DiskGate).phase,
+            Phase::NeedsConsent.as_str()
+        );
+        assert!(!root.join("acceptance-trace.jsonl").exists());
+        run_accept(&state, &DiskGate).unwrap();
+        run_accept(&state, &DiskGate).unwrap();
+        assert_eq!(state.phase(), Phase::Ready);
+        let path = tokenscope::settings::settings_path().unwrap();
+        assert!(tokenscope::acceptance::record_opener(&path).unwrap());
+        let records: Vec<serde_json::Value> =
+            std::fs::read_to_string(root.join("acceptance-trace.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+        let events: Vec<&str> = records
+            .iter()
+            .map(|row| row["event"].as_str().unwrap())
+            .collect();
+        let at = |event| {
+            events
+                .iter()
+                .position(|value| *value == event)
+                .unwrap_or_else(|| panic!("缺少 {event}: {records:?}"))
+        };
+        assert!(at("settings_write") < at("consent_saved"));
+        assert!(at("consent_saved") < at("business_ready"));
+        assert!(at("business_ready") < at("history_open"));
+        assert!(at("history_open") < at("opener"));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| **event == "consent_saved")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| **event == "business_ready")
+                .count(),
+            1
+        );
+        for (index, row) in records.iter().enumerate() {
+            assert_eq!(row["seq"], index + 1);
+        }
+        assert_eq!(
+            records[at("consent_saved")]["settings_hash"]["algorithm"],
+            "fnv1a64"
+        );
+        assert_eq!(
+            records[at("consent_saved")]["settings_hash"]["value"]
+                .as_str()
+                .unwrap()
+                .len(),
+            16
+        );
+        println!("AC02_SHELL_TRACE {}", serde_json::json!(records));
+    }
+}
 
 // ── 生产 GateIo（真实设置文件 + 真实运行时初始化）──────────────
 

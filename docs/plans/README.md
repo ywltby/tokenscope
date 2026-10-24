@@ -1,21 +1,25 @@
 # TokenScope 计划与完成状态总账
 
-> 更新日期：2026-10-21。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
+> 更新日期：2026-10-23。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
 > 唯一当前待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)。真实跨午夜、长时间休眠、跨显示器在[独立系统验收待办](system-acceptance-todo.md)维护，均未排期、未标通过。[审计索引](audits/README.md)保留历史时点结论。
 
 ## 现在执行什么
 
-功能专项均已交付，不再执行旧分支或重做已关闭任务。剩余责任如下：
+功能专项均已交付，不再执行旧分支或重做已关闭任务。当前责任状态如下，N14 已随 B1 关闭：
 
 | 责任 | 当前状态与下一步 |
 | --- | --- |
-| N10 隐私强验收 | P01–P05 已实现；补齐 P06 原生取证与完整矩阵，尚未关闭 |
-| N11 原生统一验收 | 项目、模型、CCS、价格同步等组合验收仍待执行，不能用一般 E2E 绿灯替代 |
-| N12 系统与发布签字 | 安装、版本递增、真实升级及连续链已有成功证据；其余系统验收和签字仍待验 |
+| N10 隐私强验收 | P01–P05 已实现；P06 未闭合，B3 的 AC06/AC07 前提差异待用户修订，尚未执行 |
+| N11 原生统一验收 | B2 / PR #31 自动化通过，合并 `c9de40e` / v0.5.9，PR/main 门禁及发布验收全成功。安装后手动同步 OpenRouter 的人工尾项仍待验，N11 不关闭 |
+| N12 系统与发布签字 | 最新 v0.5.9 的安装、版本递增、六组真实单跳及两条连续链成功；其余系统验收和人工签字仍待验 |
 | N13 真实性能 | 历史库冷/热查询、多根真实数据性能复测未完成，按只读来源与隔离输出执行 |
-| N14 来源目录遗留 | 第 1、2、3 项已关闭；预设切换重复查询及托盘隐藏通知随 PR #23 / v0.5.6 交付，当前仅第 4 项权限拒绝 fixture 待做 |
+| N14 来源目录遗留 | 已完成；第 4 项共享冲突读取失败 fixture 随 PR #27 合并 `4198051`，PR/main 门禁通过，四项全部关闭 |
 
-N01–N09、N15、N16 已完成；16 个责任编号中为 **11 项完成、2 项部分完成（N12/N14）、3 项专项验收未闭合（N10/N11/N13）**，共 5 个仍开放的责任编号，不等于 5 个单独操作。
+N01–N09、N14–N16 已完成；16 个责任编号中为 **12 项完成、1 项部分完成（N12）、3 项专项验收未闭合（N10/N11/N13）**，共 4 个仍开放的责任编号，不等于 4 个单独操作。
+
+## 2026-10-23 测试临时目录清理（已完成归档）
+
+[测试临时目录清理实施计划](archive/implemented/2026-10-23-test-temp-cleanup.md) 两个批次均已交付并经用户逐轮复核：B1（Vitest 用例遗漏修复 + 六条外层契约回归 + CI 接线）随 [PR #44](https://github.com/ywltby/tokenscope/pull/44) 合并 `fde7762`（三轮复审补修：失败证据保留、超时进程树收尾、挂起创建消除作业竞态、原预算内统一截止、日志直写文件）；前置 [PR #42](https://github.com/ywltby/tokenscope/pull/42)（Rust 独立临时根与进程级收尾）经用户批准合并 `4fc46c6`；B2（锁等待用例先 `drop(holder)` 再严格核实删除）随 [PR #46](https://github.com/ywltby/tokenscope/pull/46) 合并 `58d0d15`，发布 [v0.5.13](https://github.com/ywltby/tokenscope/releases/tag/v0.5.13)（构建、五场景安装、八组单跳（0.1.0 / 0.4.0 / 0.5.9 / 0.5.12 × present/deleted）、两条连续升级链全过）。两类历史失败（native-ui 页面 target 未出现、`latest_history_opens_without_writer_lock` 超限）根因未定位、仅记录；其余夹具的治理为后续候选，见归档计划 §6.2。本专项不占 N 编号，不改变 N09 等已完成项的历史状态。
 
 ## 已交付与证据边界
 
@@ -25,10 +29,28 @@ N01–N09、N15、N16 已完成；16 个责任编号中为 **11 项完成、2 �
 - PR #17（`89aec76`）仅收录研究资料及版本/基线文件，不改变产品行为，也不自动增加开发任务。本次计划收尾以已核验的 v0.5.2 发布证据为基准，不借用其他版本结果补记未执行验收。
 - PR #19 打开锁等待回归修复合并 `1156385`，v0.5.5 已发布；main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39452749833)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39452749860)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39452749887) 全成功，N15 关闭。
 - PR #21 / #22 已验证版本不变时 Release 只跑 gate、六个下游全部 skipped；PR #23 产品修复合并 `d064f98` 并发布 v0.5.6，main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39568790001)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39568789964)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39568789984) 全成功（安装、六个单跳、两条连续链）。N14 第 2 项及 N16 关闭，版本与发布解耦两条路径均有实跑证据。
+- B1 / AC01 的 `69ce2f4` 随 [PR #27](https://github.com/ywltby/tokenscope/pull/27) 普通合并 `4198051`；两环境共享冲突探针、两个变异、普通/acceptance 采集各 17/17 与完整钩子通过，PR 的 CI/原生/安装/六组升级全成功。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39633188944)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39633188991)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39633189036) 全成功，Release 六个下游 skipped，最新发布仍为 v0.5.6；N14 第 4 项及 N14 全部关闭。
+- B2 / AC02–AC05 随 [PR #31](https://github.com/ywltby/tokenscope/pull/31) 普通合并 `c9de40e`，[v0.5.9](https://github.com/ywltby/tokenscope/releases/tag/v0.5.9) 已公开并下载核对四项原资产后登记基线。三个场景本地各三连跑与 29 条具名业务断言先红后绿，最终 PR 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39756585501)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39756585449)、[Install test](https://github.com/ywltby/tokenscope/actions/runs/39756585577) 全成功。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39758431511)、[原生](https://github.com/ywltby/tokenscope/actions/runs/39758431422)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39758431613) 全成功（安装五场景、六组单跳、两条连续链）；新增 CI 为 PR 116 秒 / main 68 秒。N11 人工尾项保留，B3 待修订，B4、B5 未执行。
 
-`active/` 保留整合计划与已确认的[剩余验收收口计划](active/2026-10-21-acceptance-closure.md)（AC01–AC12，承接全部 5 个开放编号）；[合入与发布解耦](archive/implemented/2026-10-21-release-on-version-change.md)（N16）已完成并归档。归档共 **48 份：19 份已实现、27 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
+`active/` 保留整合计划与已确认的[剩余验收收口计划](active/2026-10-21-acceptance-closure.md)（AC01–AC12，B1 已关闭 N14；B2 自动化已合并，N11 人工尾项待验；B3 待修订，B4、B5 未执行）；[合入与发布解耦](archive/implemented/2026-10-21-release-on-version-change.md)（N16）与上述测试临时目录清理专项（B1/B2 均交付）已完成并归档。归档共 **53 份：23 份已实现、28 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
 
 必须保持用户定稿：一个 `~/.tokenscope/history.db`，只保存精简 token/cwd 元数据；全部代理有效用量纳入；源日志删除或停用仍查得到历史；CCS 设置页只手动单次导入，导入与已有事实求并集。较新规则优先于旧“现存日志是唯一事实”等历史设计。
+
+## 2026-10-22 Codex 用量修复归档
+
+| 计划 | 交付 | 当前状态 |
+| --- | --- | --- |
+| [Codex 压缩用量补计与线程设置模型归属](archive/implemented/2026-10-22-codex-compaction-usage.md) | PR #35 / v0.5.10，合并 `a31540f` | 对照 cc-switch v4.0.18 发现；CP01–CP05 与 §5 验收闭合，main CI、原生、Release 全成功；v0.5.10 基线随归档登记；不占整合计划责任编号 |
+
+## 2026-10-22 价格同步修复归档
+
+| 计划 | 交付 | 当前状态 |
+| --- | --- | --- |
+| [价格同步 TLS 信任修复](archive/implemented/2026-10-22-emudhra-tls-trust-fix.md) | PR #29 / v0.5.7；组合复验在 PR #30 合并后完成 | TF01–TF03 自身验收闭合；包含 TLS 更新与解析修复的 main `cb35f83` 上两价格源完整同步通过 |
+| [OpenRouter 时间条件解析修复](archive/partial/2026-10-22-openrouter-override-conditions.md) | PR #30 / v0.5.8，合并 `cb35f83` | main CI、原生、Release 全成功，六组单跳与两条连续链通过；安装后设置页手动同步按用户决定保留待验，转 N11 |
+| [价格同步告警汇总](archive/implemented/2026-10-22-sync-log-aggregation.md) | PR #37 / v0.5.11，合并 `0fabf24` | LA01–LA04 与 §5 验收闭合；隔离程序取证 models.dev WARN 0 / 明细 415、OpenRouter WARN 2 / 明细 23；汇总行措辞随 v0.5.12 修正；不占整合计划责任编号 |
+
+原生计时误报由独立 [PR #32](https://github.com/ywltby/tokenscope/pull/32) 修复（合并 `1f00c9e`）：两条 2300ms 阈值保留，精确状态切换与真实回调取代两端 DOM 轮询判定；main 的 CI、原生成功，Release 只跑 gate、六个下游 skipped。v0.5.7、v0.5.8 均已按原资产核对并登记升级基线，v0.5.8 登记随本次归档交付；不提前关闭 N11 或其他开放编号。
 
 ## 2026-10-20 第三批归档
 
@@ -84,7 +106,7 @@ N01–N09、N15、N16 已完成；16 个责任编号中为 **11 项完成、2 �
 | [发布流程去掉重复的完整测试](archive/implemented/2026-10-17-release-gate-dedup.md) | #11 / v0.3.4 | 已实现 | 无；发布从约 31 分钟降到 6 分 44 秒 |
 | [CI 拆成并行作业与原生 E2E 精简](archive/implemented/2026-10-17-ci-parallel-checks.md) | #12 / v0.3.5 | 已实现 | 无；热缓存下 CI 约 5m53s、原生 E2E 约 7m39s |
 | [PR2：真实扫描状态与读取动画](archive/implemented/2026-10-15-collection-status.md) | #13 / v0.4.0 | 已实现 | main 上原生 E2E 一次卡死：PR3 S00 加固后 main 首次运行通过、未复现；系统验收见独立待办 |
-| [PR3：当前用户日志目录发现与追加路径管理](archive/partial/2026-10-14-source-discovery-and-additional-paths.md) | #14 / v0.5.0（未发布，由 0.5.1 公开） | 部分完成 | N14（预设切换重复批次、权限拒绝 fixture；连续升级链与启动取证恢复已关闭）；N13（真实性能） |
+| [PR3：当前用户日志目录发现与追加路径管理](archive/partial/2026-10-14-source-discovery-and-additional-paths.md) | #14 / v0.5.0（未发布，由 0.5.1 公开） | 部分完成 | N13（真实性能）；N14 四项均已关闭 |
 
 ## M1–M11：自身验收复核
 

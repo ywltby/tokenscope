@@ -49,12 +49,25 @@ param(
 
     [switch]$SkipPricing,
 
+    [Alias('Profile')]
+    [ValidateSet('default', 'unified')]
+    [string]$AcceptanceProfile = 'default',
+
     # 合成 Claude 事件总条数。默认 4 条（小样本，够看空/满两种状态）；
     # 需要验证明细分页 / 会话过期（RC02）时传 >200（前端单页 limit=200）。
     [int]$Events = 4
 )
 
 $ErrorActionPreference = 'Stop'
+
+# 2026-10-23 取证装配：各阶段用单调时钟（Stopwatch）输出累计毫秒。正常路径进
+# job 日志；prepare 挂起时这些输出留在子进程 stdout，由 spawnSyncBounded 超时
+# 错误的尾部保留，把「只剩外层 ETIMEDOUT」变成可定位的阻塞阶段。
+$stageStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+function Write-Stage([string]$Name) {
+    Write-Host ("[prepare] {0} at {1} ms" -f $Name, $stageStopwatch.ElapsedMilliseconds)
+}
+Write-Stage 'start'
 
 function Write-Utf8NewLineLF {
     param([string]$Path, [string]$Content)
@@ -135,6 +148,17 @@ $entries = @(
     @{ ts = '2026-10-07T03:15:00.000Z'; model = 'gpt-5-codex';       in = 500;  out = 200; cr = 0;    cw = 0;   cwd = 'C:\acceptance\workspace\bee' },
     @{ ts = '2026-10-07T04:45:00.000Z'; model = 'mystery-model';     in = 700;  out = 300; cr = 0;    cw = 0;   cwd = 'C:\acceptance\workspace\bee\123' }
 )
+if ($AcceptanceProfile -eq 'unified') {
+    $entries[0].model = 'claude-opus-5-5'
+    $entries[1].model = 'claude-opus-5-5'
+    $entries += @(
+        @{ ts = '2026-10-08T01:00:00.000Z'; model = 'gpt-5.6'; in = 272000; out = 20; cr = 0; cw = 0; cwd = 'C:\acceptance\workspace\pricing' },
+        @{ ts = '2026-10-08T01:01:00.000Z'; model = 'gpt-5.6'; in = 272001; out = 20; cr = 0; cw = 0; cwd = 'C:\acceptance\workspace\pricing\src' },
+        @{ ts = '2026-10-08T17:00:00.000Z'; model = 'claude-opus-5-5'; in = 1000; out = 100; cr = 50; cw = 10; cwd = 'D:\acceptance\workspace\tokenscope' },
+        @{ ts = '2026-10-09T01:00:00.000Z'; model = 'claude-opus-5-5'; in = 1000; out = 100; cr = 50; cw = 10; cwd = 'D:\acceptance\workspace\tokenscope\src' }
+    )
+    $Events = [Math]::Max($Events, $entries.Count)
+}
 # 分页/过期验收需要 >200 条明细：按需补齐合成事件（确定性取值，无随机）。
 $fillerModels = @('claude-sonnet-4-5', 'gpt-5-codex')
 for ($i = $entries.Count; $i -lt $Events; $i++) {
@@ -181,6 +205,7 @@ $badLine = Join-Path $projectDir "broken-${session}.jsonl"
 $badBody = (($lines[0]) + "`n" + '{"this": "is not a valid line"' + "`n")
 Write-Utf8NewLineLF -Path $badLine -Content $badBody
 Record-File -Path $badLine
+Write-Stage 'claude-jsonl'
 
 $codexDay = Join-Path (Join-Path $codexDir 'sessions') '2026\10\07'
 New-Item -ItemType Directory -Force -Path $codexDay | Out-Null
@@ -190,9 +215,13 @@ $codexLines = @(
     (@{ timestamp = '2026-10-07T05:00:10.000Z'; type = 'event_msg'; payload = @{ type = 'token_count'; info = @{ last_token_usage = @{ input_tokens = 2000; output_tokens = 800; cached_input_tokens = 1000; cache_write_input_tokens = 100; reasoning_output_tokens = 0; total_tokens = 2800 } } } } | ConvertTo-Json -Compress -Depth 10),
     (@{ timestamp = '2026-10-07T05:00:20.000Z'; type = 'event_msg'; payload = @{ type = 'token_count'; info = @{ last_token_usage = @{ input_tokens = 100; output_tokens = 20; cached_input_tokens = 0; cache_write_input_tokens = 0; reasoning_output_tokens = 0; total_tokens = 120 } } } } | ConvertTo-Json -Compress -Depth 10)
 )
+if ($AcceptanceProfile -eq 'unified') {
+    $codexLines = @($codexLines | ForEach-Object { $_ -replace 'gpt-5-codex', 'Claude_Opus_5.5' })
+}
 $codexLog = Join-Path $codexDay 'rollout-acceptance.jsonl'
 Write-Utf8NewLineLF -Path $codexLog -Content (($codexLines -join "`n") + "`n")
 Record-File -Path $codexLog
+Write-Stage 'codex-rollout'
 
 # ── 4. 有效价格（外置 pricing.toml） ───────────────────────────────
 if (-not $SkipPricing) {
@@ -215,6 +244,77 @@ output = 10.0
     $pricingPath = Join-Path $dataDir 'pricing.toml'
     Write-Utf8NewLineLF -Path $pricingPath -Content $pricing
     Record-File -Path $pricingPath
+    Write-Stage 'pricing-toml'
+}
+
+if ($AcceptanceProfile -eq 'unified') {
+    if (-not $SkipPricing) {
+        $pricing = @'
+# 合成渠道价格，所有币值仅用于验收断言。
+[[model]]
+prefix = "external/claude-opus-5-5"
+input = 8.0
+output = 30.0
+cache_write = 10.0
+
+[[model.schedule]]
+label = "合成峰谷"
+timezone = "Asia/Shanghai"
+[[model.schedule.period]]
+label = "峰时"
+start_time = "09:00"
+end_time = "18:00"
+input = 12.0
+output = 35.0
+[[model.schedule.period]]
+label = "谷时"
+start_time = "00:00"
+end_time = "09:00"
+input = 2.0
+output = 10.0
+
+[[model]]
+prefix = "incomplete/claude-opus-5-5"
+input = 999.0
+
+[[model]]
+prefix = "external/gpt-5.6"
+input = 4.0
+output = 20.0
+cache_read = 0.4
+cache_write = 5.0
+[[model.segment]]
+label = "不超过272K"
+min_tokens = 0
+max_tokens = 272001
+input = 4.0
+output = 20.0
+cache_read = 0.4
+cache_write = 5.0
+[[model.segment]]
+label = "超过272K"
+min_tokens = 272001
+input = 8.0
+output = 30.0
+cache_read = 0.8
+cache_write = 10.0
+
+[[model_policy]]
+prefix = "claude-opus-5-5"
+channel = "external"
+source = "external"
+cache_read = "same_as_input"
+'@
+        Write-Utf8NewLineLF -Path $pricingPath -Content $pricing
+        Record-File -Path $pricingPath
+    }
+    Write-Stage 'ccs-fixture-start'
+    $ccsPath = Join-Path $rootFull 'sources\cc-switch\cc-switch.db'
+    $maker = Join-Path $PSScriptRoot 'make_ccs_fixture.py'
+    & python -B $maker $ccsPath
+    if ($LASTEXITCODE -ne 0) { throw "CCS 合成 fixture 生成失败，退出 $LASTEXITCODE" }
+    Record-File -Path $ccsPath
+    Write-Stage 'ccs-fixture-done'
 }
 
 # ── 5. 设置：显式两来源目录 + 关闭自动同步（验收期间绝不联网）+ 同意基线 ─
@@ -237,6 +337,7 @@ dir = "$($codexDir -replace '\\','/')"
 $settingsPath = Join-Path $dataDir 'settings.toml'
 Write-Utf8NewLineLF -Path $settingsPath -Content $settings
 Record-File -Path $settingsPath
+Write-Stage 'settings'
 
 # ── 6. manifest：绝对路径清单 + 初始散列 ──────────────────────────
 $manifest = [ordered]@{
@@ -250,6 +351,7 @@ $manifest = [ordered]@{
     webview_data_dir    = $webviewDir
     env_var             = @{ name = 'TOKENSCOPE_ACCEPTANCE_ROOT'; value = $rootFull }
     price_auto_sync     = $false
+    profile             = $AcceptanceProfile
     claude_events       = $Events
     files               = $written.Values
     prepared_at         = (Get-Date).ToString('o')
@@ -262,4 +364,5 @@ Write-Host "  数据目录 = $dataDir"
 Write-Host "  来源目录 = $claudeDir | $codexDir"
 Write-Host "  WebView  = $webviewDir"
 Write-Host "  清单     = $manifestPath（$($written.Count) 个文件，含 SHA256）"
+Write-Stage 'done'
 Write-Host "下一步：设置环境变量 TOKENSCOPE_ACCEPTANCE_ROOT 后启动 acceptance 构建"

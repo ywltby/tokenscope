@@ -58,7 +58,45 @@ export function ensureNotCanceled(isCanceled, action) {
  * 有界 spawnSync（计划 §9.1 第 2 条）：统一 30 秒上限；检查 error / signal，
  * 非零退出码原样返回交给调用方按既有语义判定（保持各调用点现有的 status/stdout 检查）。
  * 超时（进程已被杀）与 spawn 失败抛出含动作、阶段与命令退出情况的错误；不输出凭据。
+ * 2026-10-23 取证装配：超时时子进程已写出的 stdout/stderr 尾部（有界截断）随错误
+ * 保留——prepare 类脚本按阶段输出进度，只剩外层 ETIMEDOUT 就无法定位阻塞阶段。
  */
+const TIMEOUT_OUTPUT_TAIL_CHARS = 2000;
+
+function tailText(text) {
+  const s = String(text ?? "");
+  if (!s.trim()) return "";
+  return s.length > TIMEOUT_OUTPUT_TAIL_CHARS ? `…${s.slice(-TIMEOUT_OUTPUT_TAIL_CHARS)}` : s;
+}
+
+/**
+ * 2026-10-23 取证装配：超时/启动失败的错误对象携带 `outputTail`（子进程已
+ * 产出的 stdout/stderr 尾部，各自有界截断），消息里保留带前缀的摘要。
+ * evidence 组装处经 [`errorEvidenceFields`] 把尾部写成独立证据字段——若只
+ * 拼进 message，会被外层 800 字符错误摘要截掉，证据在落盘时丢失。
+ */
+function outputTail(text) {
+  const s = String(text ?? "");
+  if (!s.trim()) return "";
+  const tail = s.length > TIMEOUT_OUTPUT_TAIL_CHARS ? `…${s.slice(-TIMEOUT_OUTPUT_TAIL_CHARS)}` : s;
+  return `（子进程已产出输出尾部）: ${tail.replace(/\r?\n$/, "")}`;
+}
+
+/**
+ * evidence 错误字段的统一组装：`error` 保持既有 800 字符摘要上限；
+ * `command_output_tail` 承载 [`spawnSyncBounded`] 错误对象上的
+ * `outputTail`（无则 null）。返回对象直接并入 evidence，序列化后字段
+ * 仍完整（尾部不在 800 字符摘要内，不受其截断影响）。
+ */
+export function errorEvidenceFields(error) {
+  const fields = { error: String(error?.stack ?? error).slice(0, 800) };
+  const tail = error?.outputTail;
+  if (tail && (tail.stdout || tail.stderr)) {
+    fields.command_output_tail = { stdout: tail.stdout ?? "", stderr: tail.stderr ?? "" };
+  }
+  return fields;
+}
+
 export function spawnSyncBounded(
   command,
   args,
@@ -72,9 +110,18 @@ export function spawnSyncBounded(
   });
   const where = `动作=${action}${stage ? ` 阶段=${stage}` : ""} 命令=${command}`;
   if (result.error) {
-    throw new Error(
-      `同步命令超时或启动失败：${where} errno=${result.error.errno ?? "unknown"} status=${result.status} signal=${result.signal ?? "none"}（${result.error.message}）`,
+    const tail = { stdout: tailText(result.stdout), stderr: tailText(result.stderr) };
+    const tailNote = [
+      outputTail(result.stdout),
+      outputTail(result.stderr).replace("（子进程已产出输出尾部）: ", "（stderr 尾部）: "),
+    ]
+      .filter(Boolean)
+      .join("");
+    const failure = new Error(
+      `同步命令超时或启动失败：${where} errno=${result.error.errno ?? "unknown"} status=${result.status} signal=${result.signal ?? "none"}（${result.error.message}）${tailNote}`,
     );
+    failure.outputTail = tail;
+    throw failure;
   }
   if (result.signal) {
     throw new Error(`同步命令被信号终止（超时上限 ${timeoutMs} ms）：${where} signal=${result.signal} status=${result.status}`);
