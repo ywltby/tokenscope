@@ -23,20 +23,35 @@ const snapshot = (overrides = {}) =>
       totals,
       ...overrides.summary,
     },
-    events: { query_id: "q", rows: [], total: 10, ...overrides.events },
+    events: { query_id: "q", rows: [], total: 16, ...overrides.events },
   });
 const good = {
   project_same_path_merges_across_agents: {
     project: snapshot({
       summary: {
-        groups: [{ key: C, label: "tokenscope", requests: 4, agents: ["claude-code", "codex"] }],
+        groups: [
+          {
+            key: C,
+            label: "tokenscope",
+            requests: 10,
+            agents: ["claude-code", "codex", "workbuddy", "workbuddy-ai"],
+          },
+        ],
         totals,
       },
     }),
     detail: snapshot({
-      events: { rows: [{ agent: "claude-code" }, { agent: "codex" }], total: 4 },
+      events: {
+        rows: [
+          { agent: "claude-code" },
+          { agent: "codex" },
+          { agent: "workbuddy" },
+          { agent: "workbuddy-ai" },
+        ],
+        total: 10,
+      },
     }),
-    detailText: "Claude Code Codex",
+    detailText: "Claude Code Codex WorkBuddy WorkBuddy AI",
   },
   project_subdir_stays_in_root: {
     all: snapshot({
@@ -99,7 +114,8 @@ const good = {
         events: { total: 2, rows: [{ [type]: "selected", ts: "2026-10-06T01:00:00Z" }] },
       }),
       filtered: true,
-      cleared: snapshot(),
+      // WB07：cleared totals 与统一 fixture 基线 16 对齐（helper 默认 total）。
+      cleared: snapshot({ summary: { totals: { ...totals, requests: 16 } } }),
       clearedFilter: true,
     })),
   },

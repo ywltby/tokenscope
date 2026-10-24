@@ -23,19 +23,33 @@ export async function nativeIdentity(context) {
         .locator('[aria-label="聚合维度"]')
         .getByRole("radio", { name: labels[by], exact: true }),
     );
-    await ui.waitUntil(
-      async () => {
-        const snapshot = await ui.querySnapshot();
-        return snapshot.sameQuery && snapshot.domMatches && snapshot.summary.by === by;
-      },
-      20000,
-      `等待${labels[by]}的真实查询`,
-    );
+    try {
+      await ui.waitUntil(
+        async () => {
+          const snapshot = await ui.querySnapshot();
+          return snapshot.sameQuery && snapshot.domMatches && snapshot.summary.by === by;
+        },
+        20000,
+        `等待${labels[by]}的真实查询`,
+      );
+    } catch (error) {
+      // WB07 取证：等待失败时把最后一次快照写入证据，区分探针对齐与 DOM 匹配。
+      ev.identity ??= {};
+      ev.identity.dimension_failure = {
+        by,
+        snapshot: await ui
+          .querySnapshot()
+          .catch((probeError) => ({ probeError: String(probeError) })),
+      };
+      throw error;
+    }
     return ui.querySnapshot();
   };
   const queryAfterUiChange = async () => {
     // 重启恢复的首屏查询可能早于探针；以真实选中项决定下一次点击，不能重复点中项。
-    const selected = await ui.page().locator('[aria-label="聚合维度"] [role="radio"][aria-checked="true"]')
+    const selected = await ui
+      .page()
+      .locator('[aria-label="聚合维度"] [role="radio"][aria-checked="true"]')
       .getAttribute("aria-label");
     await dimension(nextQueryDimension(selected));
     return ui.querySnapshot();
@@ -120,9 +134,11 @@ export async function nativeIdentity(context) {
     );
     await ui.nav("汇总");
     const project = await dimension("project");
-    if (project.summary.totals.requests !== 10 || project.events.total !== 10) {
+    if (project.summary.totals.requests !== 16 || project.events.total !== 16) {
       ev.identity_initial = project;
-      throw new Error("统一 fixture 初始请求应为 8 Claude + 2 Codex，不允许额外填充事件");
+      throw new Error(
+        "统一 fixture 初始请求应为 8 Claude + 2 Codex + 两版 WorkBuddy 各 3，不允许额外填充事件",
+      );
     }
     const all = project;
     const visibleLabels = await summaryLabels();
@@ -172,6 +188,34 @@ export async function nativeIdentity(context) {
     }
     check("drill_from_day_model_project_rows", { drills });
 
+    // WB07：四应用来源筛选独立选中 + 子 agent 计入 + 失败调用不计。
+    const clickAgent = async (name) => {
+      await ui.click(
+        ui.page().locator('[aria-label="数据来源"]').getByRole("radio", { name, exact: true }),
+      );
+      await ui.waitUntil(
+        async () => {
+          const snapshot = await ui.querySnapshot();
+          return snapshot.sameQuery && snapshot.domMatches && snapshot.beginCall?.args?.agent;
+        },
+        20000,
+        `切换来源筛选：${name}`,
+      );
+      return ui.querySnapshot();
+    };
+    const wb = await clickAgent("WorkBuddy");
+    const wbai = await clickAgent("WorkBuddy AI");
+    check("workbuddy_sources_selected_independently", { wb, wbai, all: await clickAgent("全部") });
+    check("workbuddy_subagent_usage_counted", { wb: await clickAgent("WorkBuddy") });
+    check("workbuddy_failed_call_not_counted", { wb: await clickAgent("WorkBuddy") });
+    // 回到全部，保持后续基线断言的数字口径。
+    await clickAgent("全部");
+    await ui.waitUntil(
+      async () => (await ui.querySnapshot()).summary?.totals.requests === 16,
+      20000,
+      "回到全部来源",
+    );
+
     // 先保存 Claude 历史基线，再改变来源；停用不能把历史从应用筛选中抹掉。
     await ui.click(
       ui
@@ -190,7 +234,7 @@ export async function nativeIdentity(context) {
         .locator('[aria-label="数据来源"]')
         .getByRole("radio", { name: "全部", exact: true }),
     );
-    await ui.waitUntil(async () => (await ui.querySnapshot()).summary?.totals.requests === 10);
+    await ui.waitUntil(async () => (await ui.querySnapshot()).summary?.totals.requests === 16);
     const before = await ui.querySnapshot();
 
     await ui.nav("设置");
@@ -341,9 +385,7 @@ export async function nativeIdentity(context) {
     await ui.waitUntil(async () => {
       const snapshot = await ui.querySnapshot();
       return (
-        snapshot.sameQuery &&
-        snapshot.domMatches &&
-        snapshot.beginCall?.args?.agent === "claude"
+        snapshot.sameQuery && snapshot.domMatches && snapshot.beginCall?.args?.agent === "claude"
       );
     });
     const claude = await ui.querySnapshot();

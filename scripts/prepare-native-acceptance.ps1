@@ -223,6 +223,83 @@ Write-Utf8NewLineLF -Path $codexLog -Content (($codexLines -join "`n") + "`n")
 Record-File -Path $codexLog
 Write-Stage 'codex-rollout'
 
+# ── 3b. WorkBuddy 合成转写（WB07；仅 unified profile）──────────────
+# 口径与解析器契约一致：一次调用一行带 providerData.rawUsage + messageId；
+# 缓存真值在 prompt_tokens_details.cached_tokens；失败调用不带用量不产生
+# 事件；子 agent 独立文件独立 sessionId。cwd 与 Claude 共享路径，用于
+# 验证同一路径跨四个应用合并为同一项目。每应用 3 条事件 + 1 条失败调用。
+if ($AcceptanceProfile -eq 'unified') {
+    $wbApps = @(
+        @{ dir = Join-Path $rootFull 'sources\workbuddy'; session = 'wb111111-2222-4333-8444-555555555555' },
+        @{ dir = Join-Path $rootFull 'sources\workbuddy-ai'; session = 'wa111111-2222-4333-8444-555555555555' }
+    )
+    foreach ($app in $wbApps) {
+        $wbProject = Join-Path (Join-Path $app.dir 'projects') $projectSlug
+        $wbMain = @(
+            # 旧形态行（含 hit/miss/credit；死字段存在且为 0）
+            (@{
+                type = 'function_call'; id = 'wb-row-1'; sessionId = $app.session;
+                cwd = 'C:\acceptance\workspace\tokenscope'; timestamp = 1785643200000;
+                providerData = @{
+                    messageId = 'wb-msg-1'; model = 'claude-sonnet-4-5'; requestModelId = 'claude-sonnet-4-5';
+                    rawUsage = @{
+                        prompt_tokens = 800; completion_tokens = 300; total_tokens = 1100;
+                        prompt_cache_hit_tokens = 500; prompt_cache_miss_tokens = 300;
+                        prompt_tokens_details = @{ cached_tokens = 500 };
+                        credit = 0; cached_tokens = 0; cache_read_input_tokens = 0;
+                        cache_creation_input_tokens = 0
+                    }
+                }
+            } | ConvertTo-Json -Compress -Depth 10),
+            # 新形态行（无 hit/miss/credit）
+            (@{
+                type = 'message'; id = 'wb-row-2'; sessionId = $app.session;
+                cwd = 'C:\acceptance\workspace\tokenscope\src'; timestamp = 1785646800000;
+                role = 'assistant'; status = 'completed';
+                providerData = @{
+                    messageId = 'wb-msg-2'; model = 'gpt-5-codex'; requestModelId = 'gpt-5-codex';
+                    rawUsage = @{
+                        prompt_tokens = 600; completion_tokens = 150; total_tokens = 750;
+                        prompt_tokens_details = @{ cached_tokens = 200 }
+                    }
+                }
+            } | ConvertTo-Json -Compress -Depth 10),
+            # 失败调用：status incomplete + error，无用量无 messageId（不计事件）
+            (@{
+                type = 'message'; id = 'wb-row-3'; sessionId = $app.session;
+                cwd = 'C:\acceptance\workspace\tokenscope'; timestamp = 1785647400000;
+                role = 'assistant'; status = 'incomplete';
+                providerData = @{ error = @{ code = 'ECONNRESET'; message = 'acceptance synthetic failure' } }
+            } | ConvertTo-Json -Compress -Depth 10)
+        )
+        $wbMainLog = Join-Path $wbProject ($app.session + '.jsonl')
+        Write-Utf8NewLineLF -Path $wbMainLog -Content (($wbMain -join "`n") + "`n")
+        Record-File -Path $wbMainLog
+        # 子 agent 文件：独立 sessionId、agent-<8hex>.jsonl 命名（旧形态行）
+        $subSession = 'sub' + $app.session.Substring(3)
+        $wbSub = @(
+            (@{
+                type = 'function_call'; id = 'wb-sub-1'; sessionId = $subSession;
+                cwd = 'C:\acceptance\workspace\tokenscope'; timestamp = 1785648000000;
+                providerData = @{
+                    messageId = 'wb-sub-msg-1'; model = 'claude-sonnet-4-5';
+                    requestModelId = 'claude-sonnet-4-5';
+                    rawUsage = @{
+                        prompt_tokens = 100; completion_tokens = 40; total_tokens = 140;
+                        prompt_cache_hit_tokens = 20; prompt_cache_miss_tokens = 80;
+                        prompt_tokens_details = @{ cached_tokens = 20 }
+                    }
+                }
+            } | ConvertTo-Json -Compress -Depth 10)
+        )
+        $wbSubLog = Join-Path (Join-Path $wbProject $app.session) 'subagents\agent-abc12345.jsonl'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $wbSubLog) | Out-Null
+        Write-Utf8NewLineLF -Path $wbSubLog -Content (($wbSub -join "`n") + "`n")
+        Record-File -Path $wbSubLog
+    }
+    Write-Stage 'workbuddy-jsonl'
+}
+
 # ── 4. 有效价格（外置 pricing.toml） ───────────────────────────────
 if (-not $SkipPricing) {
     $pricing = @'
@@ -335,6 +412,12 @@ dir = "$($claudeDir -replace '\\','/')"
 [sources.codex]
 enabled = true
 dir = "$($codexDir -replace '\\','/')"
+
+[sources.workbuddy]
+enabled = true
+
+[sources.workbuddy_ai]
+enabled = true
 "@
 $settingsPath = Join-Path $dataDir 'settings.toml'
 Write-Utf8NewLineLF -Path $settingsPath -Content $settings

@@ -2629,6 +2629,96 @@ const scenarios = {
     );
     await page2.screenshot({ path: path.join(inst.opts.shots, "relaunch-ready.png") });
   },
+
+  /**
+   * WB05/WB07：旧修订同意触发重新询问——fixture 预置 accepted=true 但无
+   * 修订号（v2 程序写入的形态）；新程序按未同意处理，弹窗顶部显示
+   * 「隐私政策已更新」，同意前零业务读取；同意写入当前修订号；重启不再询问。
+   */
+  async "privacy-policy-update"({ inst, ck, ev }) {
+    const page = inst.page;
+    const dataDir = path.join(inst.root, "tokenscope");
+    const settingsPath = path.join(dataDir, "settings.toml");
+    const businessFiles = () =>
+      listFiles(dataDir).filter((f) =>
+        /^(logs\/|cache\.db|window-state\.json|view-cache\.json|pricing-)/.test(f),
+      );
+
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+    ev.settingsBefore = fs.readFileSync(settingsPath, "utf8");
+    ck.add(
+      "fixture_keeps_old_consent_without_revision",
+      /privacy_policy_accepted\s*=\s*true/.test(ev.settingsBefore) &&
+        !/privacy_policy_revision/.test(ev.settingsBefore),
+      ev.settingsBefore.split("\n").slice(0, 3).join(" | "),
+    );
+    const dialogText = (await page.locator(".privacy-dialog").innerText()).replace(/\s+/g, " ");
+    ck.add(
+      "policy_updated_notice_visible",
+      dialogText.includes("隐私政策已更新") && dialogText.includes("WorkBuddy 与 WorkBuddy AI"),
+      dialogText.slice(0, 160),
+    );
+    ev.businessDomNodes = await page.locator(".app-nav, .page-head, .chart-canvas").count();
+    ck.add(
+      "business_ui_not_mounted_before_reconsent",
+      ev.businessDomNodes === 0,
+      `业务节点数=${ev.businessDomNodes}`,
+    );
+    ev.businessFilesBeforeAccept = businessFiles();
+    ck.add(
+      "no_business_files_before_reconsent",
+      ev.businessFilesBeforeAccept.length === 0,
+      ev.businessFilesBeforeAccept.join(",") || "无业务文件",
+    );
+
+    // 同意 → 同一次保存写入 true 与当前修订号，进入业务。
+    await page.locator(".privacy-actions button", { hasText: "同意并继续" }).first().click();
+    await page.waitForSelector(".app-nav", { timeout: 60000 });
+    ev.settingsAfterAccept = fs.readFileSync(settingsPath, "utf8");
+    ck.add(
+      "reconsent_writes_current_revision",
+      /privacy_policy_accepted\s*=\s*true/.test(ev.settingsAfterAccept) &&
+        /privacy_policy_revision\s*=\s*2/.test(ev.settingsAfterAccept),
+      ev.settingsAfterAccept.split("\n").slice(0, 4).join(" | "),
+    );
+
+    // 重启同一隔离根：不再询问（新修订同意有效）。
+    // 业务态窗口不会自行退出：先走真实的优雅关闭（WM_CLOSE → 「直接退出」），
+    // 确认宿主退出后再 relaunch（与 ui-source-paths 的 closeForRestart 同型）。
+    {
+      const action = fileURLToPath(
+        new URL("../../scripts/native-window-action.ps1", import.meta.url),
+      );
+      const result = spawnSyncBounded(
+        "pwsh",
+        ["-NoProfile", "-File", action, "-ProcessId", String(inst.proc.pid), "-Action", "close"],
+        { action: "window-close", stage: "policy-update-close" },
+      );
+      if (result.status !== 0 || !/CLOSED true/i.test(result.stdout))
+        throw new Error(`WM_CLOSE failed: ${result.stderr} ${result.stdout}`);
+      await page.waitForSelector(".close-dialog", { timeout: 10000 });
+      await page
+        .locator(".close-dialog")
+        .getByRole("button", { name: "直接退出", exact: true })
+        .click();
+      const deadline = Date.now() + 15000;
+      while (inst.proc.exitCode === null && Date.now() < deadline) await sleep(200);
+      if (inst.proc.exitCode !== 0)
+        throw new Error(`重新询问场景的优雅关闭要求退出码 0，实际 ${inst.proc.exitCode}`);
+    }
+    const info = await inst.launch();
+    ev.relaunchPid = info.pid;
+    const page2 = inst.page;
+    await page2.waitForSelector(".app-nav", { timeout: 60000 });
+    await page2.waitForTimeout(1500);
+    ev.relaunchConsentDialog = await page2.locator(".privacy-dialog").count();
+    ck.add(
+      "restart_does_not_ask_after_reconsent",
+      ev.relaunchConsentDialog === 0,
+      `重启后政策弹窗数=${ev.relaunchConsentDialog}`,
+    );
+    await page2.screenshot({ path: path.join(inst.opts.shots, "policy-update-reconsented.png") });
+  },
 };
 
 const labelToValue = (label) =>
@@ -2750,7 +2840,8 @@ async function main() {
     logPath,
     relaunchCycles: RELAUNCH_CYCLES,
     controlledIo,
-    profile: ["ui-identity", "ui-ccs-import", "ui-pricing"].includes(SCENARIO)
+    // WB07：ui-source-paths 也用统一 fixture（两版 WorkBuddy 合成转写）。
+    profile: ["ui-identity", "ui-ccs-import", "ui-pricing", "ui-source-paths"].includes(SCENARIO)
       ? "unified"
       : undefined,
     env: {
@@ -2783,12 +2874,27 @@ async function main() {
                   "utf8",
                 );
               }
-            : SCENARIO === "privacy-consent-gate" || SCENARIO === "privacy-accept-restart"
+            : SCENARIO === "privacy-consent-gate" ||
+                SCENARIO === "privacy-accept-restart" ||
+                SCENARIO === "privacy-policy-update"
               ? (r) => {
-                  // P06：这两个场景要"未同意"状态——删掉隔离根预置的同意记录与
-                  // 政策修订号（WB05；其余场景保留已同意基线，继续覆盖业务路径）。
+                  // P06/WB05：privacy-consent-gate 与 privacy-accept-restart 要
+                  // "未同意"状态——删掉隔离根预置的同意记录与政策修订号（其余
+                  // 场景保留已同意基线，继续覆盖业务路径）。
+                  // privacy-policy-update 要"旧修订同意"——保留 true，只剥离
+                  // 修订号，让新程序触发「政策已更新」重新询问。
                   const p = path.join(r, "tokenscope", "settings.toml");
                   const text = fs.readFileSync(p, "utf8");
+                  if (SCENARIO === "privacy-policy-update") {
+                    const downgraded = text.replace(
+                      /^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m,
+                      "",
+                    );
+                    if (downgraded === text)
+                      throw new Error("隔离根 settings.toml 未含修订号行，无法构造旧同意场景");
+                    fs.writeFileSync(p, downgraded, "utf8");
+                    return;
+                  }
                   const stripped = text
                     .replace(/^[ \t]*privacy_policy_accepted[ \t]*=[ \t]*true[ \t]*\r?\n?/m, "")
                     .replace(/^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m, "");
@@ -3120,7 +3226,11 @@ async function main() {
     ev.controlled_io.proxy_attempts.length === 0,
     JSON.stringify(ev.controlled_io.proxy_attempts),
   );
-  if (SCENARIO.startsWith("ui-") || SCENARIO === "privacy-accept-restart") {
+  if (
+    SCENARIO.startsWith("ui-") ||
+    SCENARIO === "privacy-accept-restart" ||
+    SCENARIO === "privacy-policy-update"
+  ) {
     const missing = missingBusinessEvents(ev.acceptance_trace.records);
     ck.add("required_business_trace_present", missing.length === 0, JSON.stringify(missing));
   }

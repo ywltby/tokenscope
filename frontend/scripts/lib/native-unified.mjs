@@ -84,8 +84,13 @@ export function correlateNativeQuery({ summaryQuery, eventsQuery, records = [] }
     );
   const summaryCall = latest("query_summary", summaryQuery);
   const eventCall = latest("query_events", eventsQuery);
-  const beginCall = records.findLast(record => record.command === "query_begin"
-    && record.status === "fulfilled" && record.value?.queryId === summaryQuery) ?? null;
+  const beginCall =
+    records.findLast(
+      (record) =>
+        record.command === "query_begin" &&
+        record.status === "fulfilled" &&
+        record.value?.queryId === summaryQuery,
+    ) ?? null;
   return {
     summaryQuery,
     eventsQuery,
@@ -115,7 +120,13 @@ export function matchEventDom(events, domEvents) {
     events.rows.length !== domEvents.loaded
   )
     return false;
-  const label = { "claude-code": "Claude Code", codex: "Codex" };
+  // WB07：应用列显示名与前端 AGENT_LABEL 同源（两版 WorkBuddy 由前端标签承载）。
+  const label = {
+    "claude-code": "Claude Code",
+    codex: "Codex",
+    workbuddy: "WorkBuddy",
+    "workbuddy-ai": "WorkBuddy AI",
+  };
   const fmt = (value) => Number(value).toLocaleString("en-US");
   return events.rows.every((row, index) => {
     const expected = [
