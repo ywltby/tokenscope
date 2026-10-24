@@ -239,13 +239,17 @@ export function judgeIdentity(name, evidence = {}) {
         rows(e.wb).some((row) => row.record_id === "wb-msg-2");
       break;
     case "workbuddy_failed_call_not_counted":
-      // 失败调用行（无 messageId）不产生事件；三类 fixture 行 id 均不得出现。
+      // 失败调用行（无 messageId）不产生事件：record_id 集合必须恰为
+      // fixture 里三个带 messageId 的行——精确比对，防止"拿不存在的 id
+      // 比较恒真"的弱断言。
       ok =
         same(e.wb) &&
         e.wb.events.total === 3 &&
-        rows(e.wb).every(
-          (row) => row.record_id !== "wb-row-3" && row.record_id !== "wb-msg-failed",
-        );
+        JSON.stringify(
+          rows(e.wb)
+            .map((row) => row.record_id)
+            .sort(),
+        ) === JSON.stringify(["wb-msg-1", "wb-msg-2", "wb-sub-msg-1"]);
       break;
     default:
       throw new Error(`未知 AC03 断言：${name}`);

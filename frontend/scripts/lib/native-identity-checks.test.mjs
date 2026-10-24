@@ -156,6 +156,45 @@ const good = {
     indexRecreated: true,
     cleanExit: true,
   },
+  workbuddy_sources_selected_independently: {
+    wb: snapshot({
+      summary: { totals: { requests: 3, tokens } },
+      events: { rows: [{ agent: "workbuddy" }], total: 3 },
+    }),
+    wbai: snapshot({
+      summary: { totals: { requests: 3, tokens } },
+      events: { rows: [{ agent: "workbuddy-ai" }], total: 3 },
+    }),
+    all: snapshot({
+      summary: { totals: { requests: 16, tokens } },
+      events: { total: 16 },
+    }),
+  },
+  workbuddy_subagent_usage_counted: {
+    wb: snapshot({
+      events: {
+        rows: [
+          { record_id: "wb-msg-1", agent: "workbuddy" },
+          { record_id: "wb-msg-2", agent: "workbuddy" },
+          { record_id: "wb-sub-msg-1", agent: "workbuddy" },
+        ],
+        total: 3,
+      },
+    }),
+  },
+  workbuddy_failed_call_not_counted: {
+    wb: snapshot({
+      summary: { totals: { requests: 3, tokens } },
+      events: {
+        rows: [
+          { record_id: "wb-msg-1", agent: "workbuddy" },
+          { record_id: "wb-msg-2", agent: "workbuddy" },
+          { record_id: "wb-sub-msg-1", agent: "workbuddy" },
+        ],
+        total: 3,
+      },
+    }),
+  },
   source_disable_keeps_history: {
     disabledSwitch: true,
     disableCall: {
@@ -182,6 +221,16 @@ describe("AC03 原生身份具名判定", () => {
       expect(judgeIdentity(name, {}).ok).toBe(false);
     });
   }
+  it("失败调用行混入事件时，精确 id 集合断言拒绝通过", () => {
+    const extra = structuredClone(good.workbuddy_failed_call_not_counted);
+    extra.wb.events.rows.push({ record_id: "wb-row-3", agent: "workbuddy" });
+    extra.wb.events.total = 4;
+    expect(judgeIdentity("workbuddy_failed_call_not_counted", extra).ok).toBe(false);
+    // 总数对但集合错（失败行顶掉一条真实调用）同样拒绝。
+    const swapped = structuredClone(good.workbuddy_failed_call_not_counted);
+    swapped.wb.events.rows[0].record_id = "wb-row-3";
+    expect(judgeIdentity("workbuddy_failed_call_not_counted", swapped).ok).toBe(false);
+  });
   it("同名项目不可以合为一行", () => {
     const evidence = structuredClone(good.project_label_is_last_segment);
     evidence.project.summary.groups.splice(1, 1);

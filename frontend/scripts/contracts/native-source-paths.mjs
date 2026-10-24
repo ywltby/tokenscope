@@ -247,20 +247,32 @@ export async function nativeSourcePaths({ inst, ck, ev, markStage, markStageDone
       "false",
     30000,
   );
-  const disabledCalls = [];
   await navigate("汇总");
-  await waitUntil(async () => {
-    const total = Number(await root().getAttribute("data-requests"));
-    if (total === before + 1) {
-      disabledCalls.push(total);
-      return true;
-    }
-    return false;
-  }, 30000);
+  await waitUntil(
+    async () => Number(await root().getAttribute("data-requests")) === before + 1,
+    30000,
+  );
+  // 等待通过不代表断言成立：读停用后的实际总数再断言（waitUntil 超时即抛，
+  // 拿"执行到了这里"当断言恒真）。
+  const totalAfterDisable = Number(await root().getAttribute("data-requests"));
   ck.add(
     "workbuddy_ai_disable_keeps_saved_usage",
-    disabledCalls.length > 0,
-    `停用后全部来源总数仍为 ${before + 1}（含 WorkBuddy AI 已保存的 3 条）`,
+    totalAfterDisable === before + 1,
+    `停用后全部来源总数=${totalAfterDisable} 期望=${before + 1}（含 WorkBuddy AI 已保存的 3 条）`,
+  );
+  // 计划要求的是"停用后其已保存用量仍可查询"：切回 WorkBuddy AI 筛选，
+  // 停用来源的历史 3 条必须仍然可查（筛选维度不因总开关抹掉历史）。
+  await click(
+    page()
+      .locator('[aria-label="数据来源"]')
+      .getByRole("radio", { name: "WorkBuddy AI", exact: true }),
+  );
+  await waitUntil(async () => Number(await root().getAttribute("data-requests")) === 3, 30000);
+  const wbaiAfterDisable = Number(await root().getAttribute("data-requests"));
+  ck.add(
+    "workbuddy_ai_saved_usage_queryable_after_disable",
+    wbaiAfterDisable === 3,
+    `停用后 WorkBuddy AI 筛选请求数=${wbaiAfterDisable} 期望=3`,
   );
   await page().screenshot({ path: path.join(inst.opts.shots, "ui-source-paths-restarted.png") });
 }
