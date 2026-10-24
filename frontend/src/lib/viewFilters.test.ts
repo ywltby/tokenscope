@@ -76,3 +76,16 @@ describe("筛选偏好校验与持久化（U04）", () => {
     expect(viewFiltersEqual(withDrill, { ...withDrill, drill: { ...withDrill.drill } })).toBe(true);
   });
 });
+
+// WB06：四应用的筛选归一化——新增合法值通过、未知值回退全部。
+describe("WB06 来源筛选四应用", () => {
+  it("workbuddy / workbuddy-ai 是合法筛选值并被保留", () => {
+    for (const agent of ["workbuddy", "workbuddy-ai"] as const) {
+      const f = normalizeViewFilters({ agent });
+      expect(f.agent).toBe(agent);
+    }
+  });
+  it("未知应用回退 all（视图快照旧值安全）", () => {
+    expect(normalizeViewFilters({ agent: "gpt" }).agent).toBe("all");
+  });
+});

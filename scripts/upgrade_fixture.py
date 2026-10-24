@@ -51,24 +51,32 @@ def prepare(data, sources, profile="legacy-cache"):
     return {"claude": str(claude), "codex": str(codex), "profile": profile}
 
 
-def grant_test_consent(data):
+def _consent_prefix(revision):
+    # WB05：需要当前修订授权的跳必须与修订号同一次写入（两个键一起出现）；
+    # 不带 revision 的调用保持旧布尔形态（受测历史版本不认识修订号字段）。
+    if revision is None:
+        return "privacy_policy_accepted = true\n"
+    return f"privacy_policy_accepted = true\nprivacy_policy_revision = {int(revision)}\n"
+
+
+def grant_test_consent(data, revision=None):
     path = Path(data) / "settings.toml"
     text = path.read_text(encoding="utf-8")
     settings = tomllib.loads(text)
     if "privacy_policy_accepted" in settings:
         raise ValueError("旧版夹具不应预先存在当前隐私同意状态")
     with path.open("w", encoding="utf-8", newline="\n") as fh:
-        fh.write("privacy_policy_accepted = true\n" + text)
+        fh.write(_consent_prefix(revision) + text)
 
 
-def ensure_test_consent(data):
+def ensure_test_consent(data, revision=None):
     """升级链每一跳安装后、启动前使用：已有同意就不重复写入。"""
     path = Path(data) / "settings.toml"
     text = path.read_text(encoding="utf-8")
     if "privacy_policy_accepted" in tomllib.loads(text):
         return {"ok": True, "test_consent_added": False}
     with path.open("w", encoding="utf-8", newline="\n") as fh:
-        fh.write("privacy_policy_accepted = true\n" + text)
+        fh.write(_consent_prefix(revision) + text)
     return {"ok": True, "test_consent_added": True}
 
 
@@ -238,7 +246,9 @@ def verify_settings(data, original, from_format, to_format, migrations=MIGRATION
                           for operation in source_dir_ops]
     for path, value in defaults:
         found = lookup(current, path)
-        if found is MISSING or found != value:
+        # 缺失键与默认值在读取语义上等价（缺失 = 程序按默认解释），允许；
+        # 但显式写出与默认相反的值必须失败（程序不得擅自改变默认行为）。
+        if found is not MISSING and found != value:
             raise ValueError(f"迁移默认值不一致：{path}")
     return {"ok": True, "from_format": int(from_format), "to_format": int(to_format),
             "source_dir": [r for r in source_dir_results if r is not None]}
@@ -253,8 +263,10 @@ def main():
     command.add_argument("--profile", choices=PROFILES, default="legacy-cache")
     command = sub.add_parser("consent")
     command.add_argument("--data-dir", type=Path, required=True)
+    command.add_argument("--revision", type=int, default=None)
     command = sub.add_parser("ensure-consent")
     command.add_argument("--data-dir", type=Path, required=True)
+    command.add_argument("--revision", type=int, default=None)
     command = sub.add_parser("verify")
     command.add_argument("--database", type=Path, required=True)
     command = sub.add_parser("settings")
@@ -267,10 +279,10 @@ def main():
         if args.mode == "prepare":
             result = prepare(args.data_dir, args.source_dir, args.profile)
         elif args.mode == "consent":
-            grant_test_consent(args.data_dir)
+            grant_test_consent(args.data_dir, revision=args.revision)
             result = {"ok": True, "test_consent_added": True}
         elif args.mode == "ensure-consent":
-            result = ensure_test_consent(args.data_dir)
+            result = ensure_test_consent(args.data_dir, revision=args.revision)
         elif args.mode == "settings":
             result = verify_settings(args.data_dir, args.original,
                                      args.from_format, args.to_format)

@@ -54,16 +54,19 @@ export function judgeIdentity(name, evidence = {}) {
   switch (name) {
     case "project_same_path_merges_across_agents": {
       const matches = groups(e.project).filter((group) => group.key === C);
+      // WB07：共享项目覆盖四应用（Claude 2 + Codex 2 + 两版 WorkBuddy 各 3）。
       ok =
         same(e.project) &&
         same(e.detail) &&
         matches.length === 1 &&
-        matches[0].requests === 4 &&
-        ["claude-code", "codex"].every(
+        matches[0].requests === 10 &&
+        ["claude-code", "codex", "workbuddy", "workbuddy-ai"].every(
           (agent) =>
             matches[0].agents?.includes(agent) && rows(e.detail).some((row) => row.agent === agent),
         ) &&
-        ["Claude Code", "Codex"].every((label) => e.detailText?.includes(label));
+        ["Claude Code", "Codex", "WorkBuddy", "WorkBuddy AI"].every((label) =>
+          e.detailText?.includes(label),
+        );
       break;
     }
     case "project_subdir_stays_in_root": {
@@ -142,8 +145,9 @@ export function judgeIdentity(name, evidence = {}) {
                   : row.project === drill.key,
             ) &&
             same(drill.cleared) &&
-            drill.cleared.summary.totals.requests === 10 &&
-            drill.cleared.events.total === 10 &&
+            // WB07：unified fixture 基线 10 → 16（两版 WorkBuddy 各 3 条）
+            drill.cleared.summary.totals.requests === 16 &&
+            drill.cleared.events.total === 16 &&
             drill.clearedFilter,
           );
         });
@@ -205,6 +209,43 @@ export function judgeIdentity(name, evidence = {}) {
         e.claude.events.total === 8 &&
         rows(e.claude).length > 0 &&
         rows(e.claude).every((row) => row.agent === "claude-code");
+      break;
+    case "workbuddy_sources_selected_independently": {
+      // WB07：四应用都能在来源筛选中独立选中；两个 WorkBuddy 的数值与
+      // 合成 fixture 一致（主 2 + 子 agent 1 = 3）。
+      const wbOk =
+        same(e.wb) &&
+        e.wb.summary.totals.requests === 3 &&
+        e.wb.events.total === 3 &&
+        rows(e.wb).every((row) => row.agent === "workbuddy");
+      const wbaiOk =
+        same(e.wbai) &&
+        e.wbai.summary.totals.requests === 3 &&
+        e.wbai.events.total === 3 &&
+        rows(e.wbai).every((row) => row.agent === "workbuddy-ai");
+      ok =
+        wbOk &&
+        wbaiOk &&
+        same(e.all) &&
+        e.all.summary.totals.requests === 16 &&
+        e.all.events.total === 16;
+      break;
+    }
+    case "workbuddy_subagent_usage_counted":
+      ok =
+        same(e.wb) &&
+        rows(e.wb).some((row) => row.record_id === "wb-sub-msg-1") &&
+        rows(e.wb).some((row) => row.record_id === "wb-msg-1") &&
+        rows(e.wb).some((row) => row.record_id === "wb-msg-2");
+      break;
+    case "workbuddy_failed_call_not_counted":
+      // 失败调用行（无 messageId）不产生事件；三类 fixture 行 id 均不得出现。
+      ok =
+        same(e.wb) &&
+        e.wb.events.total === 3 &&
+        rows(e.wb).every(
+          (row) => row.record_id !== "wb-row-3" && row.record_id !== "wb-msg-failed",
+        );
       break;
     default:
       throw new Error(`未知 AC03 断言：${name}`);

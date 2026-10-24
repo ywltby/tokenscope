@@ -491,15 +491,16 @@ function buildChecks(m, ctx) {
         positions[1].top >= positions[0].top + positions[0].height + 8,
       positions.map((r) => r?.top).join(","),
     ]);
+    // WB06：来源五图标（全部 + 四应用）+ 主题三选项 + 全部时间 = 9 个纯图标按钮。
     checks.push([
       "source_and_date_filters_are_named_icons_without_text",
-      m.iconFilters.length === 7 && m.iconFilters.every((c) =>
+      m.iconFilters.length === 9 && m.iconFilters.every((c) =>
         c.hasIcon && c.text === "" && !!c.name && c.name === c.title),
       JSON.stringify(m.iconFilters),
     ]);
     checks.push([
       "filter_icons_are_centered_in_buttons",
-      m.iconFilters.length === 7 && m.iconFilters.every((c) =>
+      m.iconFilters.length === 9 && m.iconFilters.every((c) =>
         c.centerOffset && Math.abs(c.centerOffset.x) <= 0.5 && Math.abs(c.centerOffset.y) <= 0.5),
       JSON.stringify(m.iconFilters.map((c) => ({ name: c.name, offset: c.centerOffset }))),
     ]);

@@ -114,6 +114,10 @@ export function createPrivacyGate(invoke: InvokeFn) {
     () => phase.value !== "checking" && phase.value !== "ready" && phase.value !== "exiting",
   );
   const blockedDetail = computed(() => snapshot.value?.detail ?? error.value);
+  /** WB05：needs_consent 且后端带 detail = 旧修订同意触发的「政策已更新」提示。 */
+  const policyUpdated = computed(() =>
+    snapshot.value?.phase === "needs_consent" ? snapshot.value.detail : null,
+  );
 
   function apply(next: PrivacySnapshot): void {
     snapshot.value = next;
@@ -235,6 +239,7 @@ export function createPrivacyGate(invoke: InvokeFn) {
     slow: slow as Ref<boolean>,
     blocked,
     blockedDetail,
+    policyUpdated,
     consentVisible,
     error: error as Ref<string | null>,
     exitPromptOpen,

@@ -322,6 +322,35 @@ class VerifyManifestCase(unittest.TestCase):
         r = self.run_verify(db, str(bad))
         self.assertEqual(r.returncode, 2)
 
+    # ---------- WB02：新 app 白名单 ----------
+
+    def test_workbuddy_app_values_accepted(self):
+        # 两版 WorkBuddy 的期望事件可写入、可校验通过（白名单扩展）。
+        events = expected_events()
+        wb = base_event("wb-1", "wb-sess-1", "C:/work/wb", "C:/work/wb", None, 10, 5)
+        wb["app"] = "workbuddy"
+        wba = base_event("wba-1", "wba-sess-1", "C:/work/wba", "C:/work/wba", None, 7, 3)
+        wba["app"] = "workbuddy-ai"
+        payload = {"schema_version": 1, "events": events + [wb, wba]}
+        self.expected_path.write_text(json.dumps(payload), encoding="utf-8")
+        db = self.make_db(payload["events"])
+        r = self.run_verify(db, str(self.expected_path))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        result = json.loads(r.stdout)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["summary"]["requests"], 5)
+
+    def test_unknown_app_still_rejected(self):
+        # 未知 app 的拒绝校验保留（不能因扩展白名单而放开）。
+        events = expected_events()
+        rogue = base_event("x-1", "x-sess", "C:/work/x", "C:/work/x", None, 1, 1)
+        rogue["app"] = "mystery-app"
+        payload = {"schema_version": 1, "events": events + [rogue]}
+        self.expected_path.write_text(json.dumps(payload), encoding="utf-8")
+        db = self.make_db(payload["events"])
+        r = self.run_verify(db, str(self.expected_path))
+        self.assertEqual(r.returncode, 2, "未知 app 必须在期望文件校验阶段拒绝")
+
     def test_wrong_expected_schema_version_is_exit_2(self):
         db = self.make_db(expected_events())
         bad = self.dir / "wrong-version.json"

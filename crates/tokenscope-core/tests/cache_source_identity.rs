@@ -43,6 +43,9 @@ fn opts(
     codex_root: Option<PathBuf>,
 ) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Project,
         claude_dir: Some(claude_root),
         codex_dir: codex_root,

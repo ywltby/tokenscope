@@ -23,7 +23,15 @@ use serde::{Deserialize, Serialize};
 /// `additional_paths`；旧 `dir` 字段改为追加项语义并在升级时由
 /// [`migrate_source_paths`] 一次性迁移——这是**读取范围的行为变更**（已启用来源
 /// 的默认目录用量也会纳入），不是无影响的字段改名。
-pub const SETTINGS_FORMAT_REVISION: u8 = 2;
+/// v3（WB04，2026-10-24）：`sources` 新增 `workbuddy` / `workbuddy_ai` 两键
+/// （缺失 = 启用 + 自动发现）；连同隐私同意修订（WB05），升级用户在重新同意后
+/// 读取范围扩大到两个 WorkBuddy 默认根。
+pub const SETTINGS_FORMAT_REVISION: u8 = 3;
+
+/// 隐私政策修订号（WB05）。同意记录低于该值的用户升级后重新看到政策；
+/// 没有修订号字段的旧同意视为 1（只同意过 v1 政策）。修订号随政策实质
+/// 变更（读取范围扩大）递增，纯文字修订不递增。
+pub const PRIVACY_POLICY_REVISION: u8 = 2;
 
 /// 关闭窗口按钮的默认动作（None = 每次询问；托盘「退出」不受此影响）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -154,12 +162,44 @@ impl serde::Serialize for SourceConfig {
 }
 
 /// 各来源的覆盖配置；None = 全默认（启用 + 默认目录）。
+///
+/// 结构字段仍是 `claude` / `codex` 两个键（序列化格式不变）；按应用取值走
+/// [`AgentSources::config`] / [`AgentSources::config_mut`]，穷举应用时不散落
+/// 布尔分支。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct AgentSources {
     #[serde(default)]
     pub claude: Option<SourceConfig>,
     #[serde(default)]
     pub codex: Option<SourceConfig>,
+    /// WB04：WorkBuddy（国内版）来源配置；缺失 = 启用 + 自动发现。
+    #[serde(default)]
+    pub workbuddy: Option<SourceConfig>,
+    /// WB04：WorkBuddy AI（国际版）来源配置；缺失 = 启用 + 自动发现。
+    #[serde(default)]
+    pub workbuddy_ai: Option<SourceConfig>,
+}
+
+impl AgentSources {
+    /// 按应用取覆盖配置（None = 全默认）。
+    pub fn config(&self, kind: crate::model::AgentKind) -> Option<&SourceConfig> {
+        match kind {
+            crate::model::AgentKind::ClaudeCode => self.claude.as_ref(),
+            crate::model::AgentKind::Codex => self.codex.as_ref(),
+            crate::model::AgentKind::WorkBuddy => self.workbuddy.as_ref(),
+            crate::model::AgentKind::WorkBuddyAi => self.workbuddy_ai.as_ref(),
+        }
+    }
+
+    /// 按应用取可变覆盖配置。
+    pub fn config_mut(&mut self, kind: crate::model::AgentKind) -> Option<&mut SourceConfig> {
+        match kind {
+            crate::model::AgentKind::ClaudeCode => self.claude.as_mut(),
+            crate::model::AgentKind::Codex => self.codex.as_mut(),
+            crate::model::AgentKind::WorkBuddy => self.workbuddy.as_mut(),
+            crate::model::AgentKind::WorkBuddyAi => self.workbuddy_ai.as_mut(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -169,6 +209,12 @@ pub struct Settings {
     /// 引导判定用 [`read_consent`]（严格读取），默认值不是授权。
     #[serde(default)]
     pub privacy_policy_accepted: bool,
+    /// WB05：同意记录对应的政策修订号；None = v2 程序写入的旧同意（视为
+    /// 修订 1）。[`accept_privacy_policy`] 在同一次原子保存中写入 true 与
+    /// 当前修订号；`read_consent` 只认修订号不低于 [`PRIVACY_POLICY_REVISION`]
+    /// 的同意。
+    #[serde(default)]
+    pub privacy_policy_revision: Option<u8>,
     /// 定时自动同步在线价格（默认开启，每 24h）。
     #[serde(default = "default_true")]
     pub price_auto_sync: bool,
@@ -273,13 +319,8 @@ fn default_true() -> bool {
 
 impl Settings {
     /// 取某来源的有效配置（未配置 → 全默认）。
-    pub fn source_config(&self, claude: bool) -> SourceConfig {
-        let c = if claude {
-            &self.sources.claude
-        } else {
-            &self.sources.codex
-        };
-        c.clone().unwrap_or_default()
+    pub fn source_config(&self, kind: crate::model::AgentKind) -> SourceConfig {
+        self.sources.config(kind).cloned().unwrap_or_default()
     }
 }
 
@@ -287,6 +328,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             privacy_policy_accepted: false,
+            privacy_policy_revision: None,
             price_auto_sync: true,
             sources: AgentSources::default(),
             close_action: None,
@@ -371,8 +413,11 @@ pub fn load(path: &Path) -> Result<Settings> {
 /// [`read_consent`] 的判定结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsentRead {
-    /// 真实 TOML 在位且同意字段为 true。
+    /// 真实 TOML 在位且同意字段为 true，修订号不低于当前修订。
     Granted,
+    /// 真实 TOML 在位且同意字段为 true，但修订号低于当前修订（含缺修订号的
+    /// 旧同意，视为 1）：按未同意处理，且需要向用户提示「政策已更新」。
+    StaleRevision,
     /// 真实 TOML 在位，但同意字段缺失或为 false。
     NotGranted,
     /// 没有 settings.toml：首次安装、删除配置、只剩遗留 settings.json 都算这里。
@@ -395,7 +440,15 @@ pub fn read_consent(path: &Path) -> ConsentRead {
         }
     };
     match toml::from_str::<Settings>(&text) {
-        Ok(s) if s.privacy_policy_accepted => ConsentRead::Granted,
+        Ok(s) if s.privacy_policy_accepted => {
+            // WB05：修订号低于当前（含缺修订号的旧同意，视为 1）按未同意处理，
+            // 并提示「政策已更新」；高于当前视为同意（不降级已给出的授权）。
+            if s.privacy_policy_revision.unwrap_or(1) < PRIVACY_POLICY_REVISION {
+                ConsentRead::StaleRevision
+            } else {
+                ConsentRead::Granted
+            }
+        }
         Ok(_) => ConsentRead::NotGranted,
         Err(e) => ConsentRead::Unreadable(format!("设置解析失败: {}（{e}）", path.display())),
     }
@@ -408,7 +461,10 @@ pub fn read_consent(path: &Path) -> ConsentRead {
 /// 遗留 json 的迁移只在这里发生（用户已明确同意之后）。
 pub fn accept_privacy_policy(path: &Path) -> Result<()> {
     update(path, |s| {
+        // WB05：同意与修订号必须同一次原子保存——只写 true 不写修订号的
+        // 中间状态会被下一次读取判为旧修订、重新询问。
         s.privacy_policy_accepted = true;
+        s.privacy_policy_revision = Some(PRIVACY_POLICY_REVISION);
         Ok(())
     })
 }
@@ -436,6 +492,12 @@ pub const SETTINGS_TEMPLATE: &str = "\
 #     该项只在应用内点击「同意并继续」且保存成功后由程序写入 true。
 #     删除本行或改为 false 会在下一次启动重新询问。本地文件不是防篡改的
 #     法律证明：手工写成 true 同样会被接受为「用户已知情」。
+#
+# privacy_policy_revision = <整数>
+#     同意记录对应的隐私政策修订号（与 accepted 同一次保存写入）。
+#     记录的修订号低于程序当前修订时，视为未同意：下一次启动显示「政策
+#     已更新」并重新询问；高于当前值视为同意（不降级已给出的授权）。
+#     没有该行的旧同意视为修订 1（升级后同样触发重新询问）。
 #
 # price_auto_sync = true | false
 #     价格自动同步（默认开启，每 24h 检查一次；关闭后完全不联网）。
@@ -551,6 +613,8 @@ impl RawSourceConfig {
     }
 }
 
+/// 迁移判定用的原始来源表：只声明有 v1 dir 语义的两个应用；
+/// WorkBuddy 两键（WB04 起）没有旧 dir 历史形态，serde 默认忽略未知键。
 #[derive(Debug, Default, serde::Deserialize)]
 struct RawAgentSources {
     #[serde(default)]
@@ -937,6 +1001,7 @@ mod tests {
         let path = tmp("roundtrip");
         let s = Settings {
             privacy_policy_accepted: false,
+            privacy_policy_revision: None,
             price_auto_sync: false,
             close_action: Some(CloseAction::Minimize),
             timezone: None,
@@ -951,6 +1016,8 @@ mod tests {
                     ..Default::default()
                 }),
                 codex: None,
+                workbuddy: None,
+                workbuddy_ai: None,
             },
         };
         save_unlocked(&path, &s).unwrap();
@@ -1094,11 +1161,120 @@ mod tests {
         assert!(!auto_sync_allowed(&Ok(off)));
     }
 
+    // ── WB05：隐私同意修订号 ────────────────────────────────
+
+    /// 写一份同意记录文件，返回（目录、路径）；调用方负责清理目录。
+    fn consent_file(content: &str, tag: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tokenscope-wb05-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, content).unwrap();
+        (dir, path)
+    }
+
+    fn cleanup_consent(dirs: &[PathBuf]) {
+        for d in dirs {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    #[test]
+    fn test_consent_revision_semantics() {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        // 缺修订号的旧同意（v2 程序写入）：按修订 1 → 重新询问
+        let (d, p) = consent_file("privacy_policy_accepted = true", "stale-missing");
+        dirs.push(d);
+        assert_eq!(read_consent(&p), ConsentRead::StaleRevision);
+        // 显式修订 1（低于当前 2）：重新询问
+        let (d, p) = consent_file(
+            "privacy_policy_accepted = true\nprivacy_policy_revision = 1\n",
+            "stale-1",
+        );
+        dirs.push(d);
+        assert_eq!(read_consent(&p), ConsentRead::StaleRevision);
+        // 修订等于当前：同意
+        let (d, p) = consent_file(
+            "privacy_policy_accepted = true\nprivacy_policy_revision = 2\n",
+            "current-2",
+        );
+        dirs.push(d);
+        assert_eq!(read_consent(&p), ConsentRead::Granted);
+        // 修订高于当前（未来版本写入）：视为同意（不降级用户已给出的授权）
+        let (d, p) = consent_file(
+            "privacy_policy_accepted = true\nprivacy_policy_revision = 3\n",
+            "future-3",
+        );
+        dirs.push(d);
+        assert_eq!(read_consent(&p), ConsentRead::Granted);
+        // 同意字段为 false（无论修订号）：未同意
+        let (d, p) = consent_file(
+            "privacy_policy_accepted = false\nprivacy_policy_revision = 2\n",
+            "not-granted",
+        );
+        dirs.push(d);
+        assert_eq!(read_consent(&p), ConsentRead::NotGranted);
+        // 修订号类型错误（字符串）：整个文件按不可读处理（封闭，不猜测）
+        let (d, p) = consent_file(
+            "privacy_policy_accepted = true\nprivacy_policy_revision = \"two\"\n",
+            "bad-type",
+        );
+        dirs.push(d);
+        assert!(matches!(read_consent(&p), ConsentRead::Unreadable(_)));
+        cleanup_consent(&dirs);
+    }
+
+    /// 同意保存的原子性：accept 后 true 与当前修订号同时可读；
+    /// 损坏文件上的同意保持封闭且原文件逐字节不变。
+    #[test]
+    fn test_accept_writes_revision_atomically_and_keeps_corrupt_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "tokenscope-wb05-accept-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, "price_auto_sync = false").unwrap();
+        accept_privacy_policy(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("privacy_policy_accepted = true"), "{text}");
+        assert!(
+            text.contains(&format!(
+                "privacy_policy_revision = {}",
+                PRIVACY_POLICY_REVISION
+            )),
+            "修订号必须与同意同一次落盘: {text}"
+        );
+        assert_eq!(read_consent(&path), ConsentRead::Granted);
+        // 损坏文件：同意保持封闭，原文件逐字节不变
+        let corrupt = dir.join("corrupt.toml");
+        std::fs::write(&corrupt, "not [valid toml").unwrap();
+        let before = std::fs::read(&corrupt).unwrap();
+        accept_privacy_policy(&corrupt).unwrap_err();
+        assert_eq!(
+            std::fs::read(&corrupt).unwrap(),
+            before,
+            "损坏文件不得被覆盖"
+        );
+        assert!(matches!(read_consent(&corrupt), ConsentRead::Unreadable(_)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn test_source_config_defaults_and_lookup() {
         // C1（test_source_config_roundtrip 的默认侧）：未配置 → 启用 + 默认目录。
         let s = Settings::default();
-        let c = s.source_config(true);
+        let c = s.source_config(crate::model::AgentKind::ClaudeCode);
         assert!(c.enabled);
         assert!(c.dir.is_none());
         // 旧版 settings.json（无 sources 字段）→ 经遗留导入向前兼容。
@@ -1106,7 +1282,7 @@ mod tests {
         let dir = dir.parent().unwrap();
         std::fs::write(dir.join("settings.json"), r#"{"price_auto_sync": true}"#).unwrap();
         let s = load(&dir.join("settings.toml")).unwrap();
-        assert!(s.source_config(false).enabled);
+        assert!(s.source_config(crate::model::AgentKind::Codex).enabled);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1160,13 +1336,30 @@ mod tests {
         assert_eq!(read_consent(&path), ConsentRead::NotGranted);
     }
 
-    /// 有效 TOML + true → 允许进入同意后的启动流程（重启不再询问）。
+    /// WB05 语义：缺修订号的旧同意（v2 程序写入的形态）→ 政策已更新，
+    /// 重新询问（原「有效 true 即同意」的口径随修订号引入而变化）。
     #[test]
-    fn privacy_valid_true_allows_bootstrap() {
-        let path = tmp("privacy-true");
+    fn privacy_valid_true_without_revision_is_stale() {
+        let path = tmp("privacy-true-stale");
         std::fs::write(
             &path,
             "privacy_policy_accepted = true\nprice_auto_sync = false\n",
+        )
+        .unwrap();
+        assert_eq!(read_consent(&path), ConsentRead::StaleRevision);
+        assert!(!load(&path).unwrap().price_auto_sync, "其余字段照常读取");
+    }
+
+    /// 有效 TOML + true + 当前修订号 → 允许进入同意后的启动流程（重启不再询问）。
+    #[test]
+    fn privacy_current_revision_allows_bootstrap() {
+        let path = tmp("privacy-true-current");
+        std::fs::write(
+            &path,
+            format!(
+                "privacy_policy_accepted = true\nprivacy_policy_revision = {}\nprice_auto_sync = false\n",
+                PRIVACY_POLICY_REVISION
+            ),
         )
         .unwrap();
         assert_eq!(read_consent(&path), ConsentRead::Granted);

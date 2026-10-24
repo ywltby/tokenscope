@@ -39,6 +39,9 @@ fn real_data_project_model_breakdown() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let opts = SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Project,
         claude_dir: Some(ClaudeSource::default_root().unwrap()),
         codex_dir: Some(CodexSource::default_root().unwrap()),
@@ -98,6 +101,9 @@ fn real_data_project_model_breakdown() {
     }
 
     let rm = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Model,
         ..opts.clone()
     })

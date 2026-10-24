@@ -87,6 +87,9 @@ fn claude_events(dir: &Path, rows: &[(&str, &str, u64)]) -> PathBuf {
 
 fn opts(dir: &Path, claude: &Path, modelsdev: Option<&Path>, by: GroupBy) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by,
         claude_dir: Some(claude.to_path_buf()),
         codex_dir: Some(no_codex(dir)),
@@ -635,6 +638,9 @@ fn model_identity_groups_equivalent_spellings_across_apps() {
     .unwrap();
 
     let o = SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Model,
         claude_dir: Some(claude),
         codex_dir: Some(codex),

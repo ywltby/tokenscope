@@ -34,7 +34,7 @@ export const DEFAULT_VIEW_FILTERS: ViewFilters = {
 };
 
 const DIMS: readonly Dim[] = ["day", "model", "project", "agent"];
-const AGENTS: readonly AgentFilter[] = ["all", "claude", "codex"];
+const AGENTS: readonly AgentFilter[] = ["all", "claude", "codex", "workbuddy", "workbuddy-ai"];
 const DRILL_TYPES: readonly EventDrill["type"][] = ["day", "model", "project"];
 
 /** `{kind:"all"}` 与 `null` 都是「全部时间」——统一存成 null（稳定身份）。 */

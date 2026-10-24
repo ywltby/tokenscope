@@ -121,6 +121,9 @@ fn write_lines(path: &Path, lines: &[String]) {
 /// 隔离的 report 选项：不触碰真实 `~/.tokenscope`（不变量 10）。
 fn opts(dir: &Path, claude: Option<PathBuf>, codex: Option<PathBuf>) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Agent,
         claude_dir: claude.clone(),
         codex_dir: codex.clone(),

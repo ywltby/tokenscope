@@ -72,6 +72,40 @@ class UpgradeFixtureCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             fixture.prepare(other, self.sources, "history.profile")
 
+    def test_consent_writes_revision_when_requested(self):
+        # WB05：需要当前修订授权的跳，授予/确保同意必须与修订号同一次写入；
+        # 不带修订号的旧版跳保持布尔形态（受测版本不支持该字段）。
+        import tomllib
+
+        def fresh_data(tag: str):
+            data = self.root / f"profile-{tag}/.tokenscope"
+            data.mkdir(parents=True, exist_ok=True)
+            (data / "settings.toml").write_text("price_auto_sync = false\n",
+                                                encoding="utf-8")
+            return data
+
+        # 授予同意：true 与修订号同一次写入
+        data = fresh_data("grant")
+        fixture.grant_test_consent(data, revision=2)
+        parsed = tomllib.loads((data / "settings.toml").read_text(encoding="utf-8"))
+        self.assertTrue(parsed["privacy_policy_accepted"])
+        self.assertEqual(parsed["privacy_policy_revision"], 2)
+        # ensure 已有当前修订同意时幂等（不重写）
+        result = fixture.ensure_test_consent(data, revision=2)
+        self.assertFalse(result["test_consent_added"])
+        # ensure 无同意的目录：带修订号写入
+        data = fresh_data("ensure")
+        result = fixture.ensure_test_consent(data, revision=2)
+        self.assertTrue(result["test_consent_added"])
+        parsed = tomllib.loads((data / "settings.toml").read_text(encoding="utf-8"))
+        self.assertEqual(parsed["privacy_policy_revision"], 2)
+        # 不带 revision 的旧语义：只写布尔（受测历史版本不认识修订号字段）
+        data = fresh_data("legacy")
+        fixture.grant_test_consent(data)
+        text = (data / "settings.toml").read_text(encoding="utf-8")
+        self.assertIn("privacy_policy_accepted = true", text)
+        self.assertNotIn("privacy_policy_revision", text)
+
     def test_ensure_consent_is_idempotent_after_the_first_write(self):
         fixture.prepare(self.data, self.sources)
         first = fixture.ensure_test_consent(self.data)
@@ -299,12 +333,50 @@ class UpgradeFixtureCase(unittest.TestCase):
         self.assertIn((2, 2), rules)
         kinds = {op["kind"] for op in rules[(1, 2)]}
         self.assertEqual(kinds, {"source_dir_to_additional_path"})
+        # WB04：格式 3（两版 WorkBuddy 来源键）的迁移规则
+        self.assertIn((1, 3), rules)
+        self.assertIn((2, 3), rules)
+        self.assertIn((3, 3), rules)
+        kinds_1_3 = {op["kind"] for op in rules[(1, 3)]}
+        self.assertEqual(
+            kinds_1_3, {"source_dir_to_additional_path", "default"},
+            "1->3 必须同时带 v1 dir 迁移与新键默认值")
+        kinds_2_3 = {op["kind"] for op in rules[(2, 3)]}
+        self.assertEqual(kinds_2_3, {"default"})
 
     def write_migrations(self, migrations):
         path = self.root / "broken-migrations.json"
         path.write_text(json.dumps({"schema_version": 1, "migrations": migrations}),
                         encoding="utf-8")
         return path
+
+    def test_format_3_default_allows_missing_keys_and_rejects_wrong_values(self):
+        # 缺失键与默认值在读取语义上等价（缺失 = 启用 + 自动发现），校验允许缺失；
+        # 但写入了与默认相反的值必须失败（程序不得擅自关掉新来源）。
+        original = self.original_with_dir(
+            "price_auto_sync = false\n"
+            "[sources.claude]\nenabled = true\nauto_discover = true\n"
+            "excluded_auto_paths = []\n"
+            "[[sources.claude.additional_paths]]\n"
+            'path = "D:/history/claude/projects"\nenabled = true\n')
+        # 新键缺失：升级后程序尚未写入 → 通过
+        self.write_current(original.read_text(encoding="utf-8").replace(
+            "price_auto_sync = false",
+            "privacy_policy_accepted = true\nprice_auto_sync = false"))
+        self.assertTrue(fixture.verify_settings(self.data, original, 2, 3)["ok"])
+        # 显式默认值（启用）：通过
+        current = original.read_text(encoding="utf-8").replace(
+            "price_auto_sync = false",
+            "privacy_policy_accepted = true\nprice_auto_sync = false")
+        current += "\n[sources.workbuddy]\nenabled = true\n"
+        current += "\n[sources.workbuddy_ai]\nenabled = true\n"
+        self.write_current(current)
+        self.assertTrue(fixture.verify_settings(self.data, original, 2, 3)["ok"])
+        # 程序擅自关闭新来源：失败
+        self.write_current(current.replace(
+            "[sources.workbuddy]\nenabled = true", "[sources.workbuddy]\nenabled = false"))
+        with self.assertRaises(ValueError):
+            fixture.verify_settings(self.data, original, 2, 3)
 
     def test_wrong_schema_unknown_identity_extra_record_and_bucket_changes_fail(self):
         mutations = ("UPDATE meta SET value='10'", "UPDATE events SET input=input+1 WHERE record_id='m1'",

@@ -367,7 +367,7 @@ export interface EventDrill {
 }
 
 export type Dim = "day" | "model" | "project" | "agent";
-export type AgentFilter = "all" | "claude" | "codex";
+export type AgentFilter = "all" | "claude" | "codex" | "workbuddy" | "workbuddy-ai";
 
 /// 关闭窗口默认动作（settings.toml close_action；缺省 null = 每次询问）。
 export type CloseAction = "minimize" | "quit";
@@ -385,7 +385,7 @@ export function sourceIdOf(agent: string): string {
  *  后端已解析路径身份/重叠/标签——前端只展示，不重算。 */
 export interface SourcePathRow {
   id: string;
-  agent: "claude" | "codex";
+  agent: "claude" | "codex" | "workbuddy" | "workbuddy-ai";
   path: string;
   canonical_identity: string;
   identity_confirmed: boolean;
@@ -400,6 +400,8 @@ export interface SourcePathRow {
 export const AGENT_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
+  workbuddy: "WorkBuddy",
+  "workbuddy-ai": "WorkBuddy AI",
   claude: "Claude Code",
   all: "全部",
 };

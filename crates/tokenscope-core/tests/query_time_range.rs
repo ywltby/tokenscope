@@ -42,6 +42,9 @@ fn hermetic(tag: &str) -> PathBuf {
 /// 采集选项：来源=合成 Claude 根，数据/索引/价格/历史库全部落临时根。
 fn opts(dir: &Path, claude_root: &Path) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         claude_dir: Some(claude_root.to_path_buf()),
         claude_enabled: Some(true),
@@ -165,6 +168,9 @@ fn days_preset_excludes_records_after_frozen_as_of() {
     assert_eq!(all.totals.requests, 2, "两条事件都已入库");
 
     let r = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         days: Some(1),
         ..base.clone()
     })
@@ -210,6 +216,9 @@ fn rolling_24h_window_bounds_and_day_groups_sum_to_total() {
     let base = opts(&dir, &root);
 
     let r = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         rolling_hours: Some(24),
         ..base.clone()
     })
@@ -252,12 +261,18 @@ fn whole_day_custom_range_matches_equivalent_natural_day_range() {
     let base = opts(&dir, &root);
 
     let aligned = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         start_at: Some("2026-07-17T00:00".to_string()),
         end_at: Some("2026-07-17T23:59".to_string()),
         ..base.clone()
     })
     .unwrap();
     let natural = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         from: Some("2026-07-17".to_string()),
         to: Some("2026-07-17".to_string()),
         ..base.clone()
@@ -277,12 +292,18 @@ fn whole_day_custom_range_matches_equivalent_natural_day_range() {
 
     // 00:00 至今 == [start, 今天]（今天之后没有 ts ≤ as_of 的记录，两者等价）
     let until = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         start_at: Some("2026-07-17T00:00".to_string()),
         until_now: true,
         ..base.clone()
     })
     .unwrap();
     let from_only = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         from: Some("2026-07-17".to_string()),
         ..base.clone()
     })
@@ -313,6 +334,9 @@ fn instant_range_excludes_rollups_and_flags_only_when_they_exist() {
 
     // 所涉自然日（07-17）确有日汇总 → 提示键为 true，且日汇总桶一个都不参与。
     let hit = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         start_at: Some("2026-07-17T09:00".to_string()),
         end_at: Some("2026-07-17T18:00".to_string()),
         ..base.clone()
@@ -331,6 +355,9 @@ fn instant_range_excludes_rollups_and_flags_only_when_they_exist() {
 
     // 所涉自然日（07-18）没有日汇总 → 不提示；区间内的明细照常统计。
     let miss = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         start_at: Some("2026-07-18T09:00".to_string()),
         end_at: Some("2026-07-18T18:00".to_string()),
         ..base.clone()
@@ -345,6 +372,9 @@ fn instant_range_excludes_rollups_and_flags_only_when_they_exist() {
 
     // 跨天时刻区间：只要覆盖到的任一天有日汇总就提示。
     let span = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         start_at: Some("2026-07-17T09:00".to_string()),
         end_at: Some("2026-07-18T18:00".to_string()),
         ..base.clone()
@@ -355,6 +385,9 @@ fn instant_range_excludes_rollups_and_flags_only_when_they_exist() {
 
     // 对照：自然日模式同一天，日汇总照常参与（既有语义不被"修正"）。
     let day = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         from: Some("2026-07-17".to_string()),
         to: Some("2026-07-17".to_string()),
         ..base.clone()
@@ -386,6 +419,9 @@ fn range_view_reports_frozen_bounds_for_every_group() {
 
     // 自然日预设：冻结的 [今天-(N-1), 今天]。
     let h = query::begin_query_handle(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         days: Some(7),
         ..base.clone()
     })
@@ -420,6 +456,9 @@ fn range_view_reports_frozen_bounds_for_every_group() {
 
     // 滚动窗口：start = as_of-24h、end = as_of；end_local = as_of 所在分钟。
     let h = query::begin_query_handle(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         rolling_hours: Some(24),
         ..base.clone()
     })
@@ -471,6 +510,9 @@ fn range_view_reports_frozen_bounds_for_every_group() {
 
     // 自定义整日 → 自然日模式，两端为用户选中的日期。
     let h = query::begin_query_handle(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         start_at: Some("2026-07-16T00:00".to_string()),
         end_at: Some("2026-07-17T23:59".to_string()),
         ..base.clone()
@@ -486,6 +528,9 @@ fn range_view_reports_frozen_bounds_for_every_group() {
 
     // 自定义时刻 → 本地字段与用户选中的分钟一致，时刻字段与本地时刻往返一致。
     let h = query::begin_query_handle(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         start_at: Some("2026-07-17T09:30".to_string()),
         end_at: Some("2026-07-17T18:45".to_string()),
         ..base.clone()
@@ -529,6 +574,9 @@ fn range_view_reports_frozen_bounds_for_every_group() {
 
     // 至今：end_local 为 as_of 所在分钟、end 为 as_of 本身。
     let h = query::begin_query_handle(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         start_at: Some("2026-07-17T09:30".to_string()),
         until_now: true,
         ..base.clone()
@@ -566,6 +614,9 @@ fn instant_snapshot_time_bounds_report_covered_local_days() {
     let base = opts(&dir, &root);
 
     let snap = query::begin_query(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         start_at: Some("2026-07-17T09:30".to_string()),
         end_at: Some("2026-07-17T18:45".to_string()),
         ..base.clone()
@@ -581,6 +632,9 @@ fn instant_snapshot_time_bounds_report_covered_local_days() {
     );
 
     let span = query::begin_query(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         start_at: Some("2026-07-17T22:00".to_string()),
         end_at: Some("2026-07-18T02:00".to_string()),
         ..base.clone()

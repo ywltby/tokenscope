@@ -56,6 +56,9 @@ fn temp_dir(tag: &str) -> PathBuf {
 
 fn opts(dir: &Path, claude: Option<PathBuf>, codex: Option<PathBuf>) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         claude_dir: claude.clone(),
         codex_dir: codex.clone(),

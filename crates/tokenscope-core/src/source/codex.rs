@@ -73,7 +73,7 @@ impl CodexSource {
     /// 默认根集合：`<CODEX_HOME>/sessions` 与 `<CODEX_HOME>/archived_sessions`。
     /// RC10：验收模式一律用隔离根下的来源目录，绝不回退真实 `~/.codex`。
     pub fn default_roots() -> Result<Vec<PathBuf>> {
-        if let Some(dir) = crate::acceptance::source_dir_override(false) {
+        if let Some(dir) = crate::acceptance::source_dir_override(crate::model::AgentKind::Codex) {
             return Ok(vec![dir.join("sessions"), dir.join("archived_sessions")]);
         }
         let home = Self::codex_home()?;

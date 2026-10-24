@@ -535,8 +535,61 @@ fn upgrade_old_dir_plus_default_root_fixture_config_expectations() {
     );
 }
 
-/// 格式修订号钉住 v2：设置解释语义变更必须同步迁移规则（upgrade 契约）。
+/// 格式修订号钉住 v3（WB04：sources 新增 workbuddy / workbuddy_ai 两键；
+/// 迁移规则见 scripts/fixtures/settings_migrations.json 的 1->3 / 2->3 / 3->3）。
 #[test]
-fn settings_format_revision_is_2() {
-    assert_eq!(SETTINGS_FORMAT_REVISION, 2);
+fn settings_format_revision_is_3() {
+    assert_eq!(SETTINGS_FORMAT_REVISION, 3);
+}
+
+/// WB04：两个 WorkBuddy 来源键的 TOML 往返（键名 workbuddy / workbuddy_ai；
+/// 配置缺省 None 序列化省略；显式配置逐字段保留）。
+#[test]
+fn workbuddy_source_keys_roundtrip() {
+    use tokenscope::settings::{AgentSources, Settings, SourceConfig};
+
+    let dir = std::env::temp_dir().join(format!(
+        "tokenscope-wb04-settings-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.toml");
+    let settings = Settings {
+        sources: AgentSources {
+            workbuddy: Some(SourceConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            workbuddy_ai: Some(SourceConfig::default()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    tokenscope::settings::update(&path, |s| {
+        *s = settings.clone();
+        Ok(())
+    })
+    .unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("[sources.workbuddy]"),
+        "workbuddy 键必须落盘: {text}"
+    );
+    assert!(
+        text.contains("[sources.workbuddy_ai]"),
+        "workbuddy_ai 键必须落盘: {text}"
+    );
+    let loaded = tokenscope::settings::load(&path).unwrap();
+    assert!(!loaded.sources.workbuddy.as_ref().unwrap().enabled);
+    assert!(loaded.sources.workbuddy_ai.as_ref().unwrap().enabled);
+    // 按应用取值：总开关分别生效
+    use tokenscope::model::AgentKind;
+    assert!(!loaded.source_config(AgentKind::WorkBuddy).enabled);
+    assert!(loaded.source_config(AgentKind::WorkBuddyAi).enabled);
+    std::fs::remove_dir_all(&dir).ok();
 }

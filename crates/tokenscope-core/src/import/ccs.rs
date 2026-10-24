@@ -607,10 +607,12 @@ pub fn preview_with_limits(
             WriteClass::OverlapCandidate => {
                 // 身份不足但库内有"同时间同用量"的候选：只作线索，不合并。
                 preview.would_overlap += 1;
-                if preview.overlap_examples.len() < 5 {
+                if preview.overlap_examples.len() < 5
+                    && let Ok(label) = raw_app_label(w.app)
+                {
                     preview.overlap_examples.push(format!(
                         "{} / {} / {} / {}",
-                        raw_app_label(w.app),
+                        label,
                         w.model_raw,
                         w.ts,
                         w.tokens.total()
@@ -771,10 +773,12 @@ fn map_app(app_type: &str) -> Option<AgentKind> {
     }
 }
 
-fn raw_app_label(app: AgentKind) -> &'static str {
+fn raw_app_label(app: AgentKind) -> anyhow::Result<&'static str> {
     match app {
-        AgentKind::ClaudeCode => "claude",
-        AgentKind::Codex => "codex",
+        AgentKind::ClaudeCode => Ok("claude"),
+        AgentKind::Codex => Ok("codex"),
+        // CCS 库没有 WorkBuddy 的数据，映射为不支持（不得伪造 app 标签）
+        other => Err(anyhow::anyhow!("CCS 导入不支持应用 {}", other.as_str())),
     }
 }
 
@@ -936,6 +940,8 @@ fn rollup_write(
     let app_type = match app {
         AgentKind::ClaudeCode => "claude",
         AgentKind::Codex => "codex",
+        // CCS 库没有 WorkBuddy 的数据，映射为不支持（不得伪造 app 标签）
+        other => bail!("CCS 导入不支持应用 {}", other.as_str()),
     };
     let input = non_negative(raw.input_tokens, "input_tokens", &raw.date)?;
     let cache_read = non_negative(raw.cache_read_tokens, "cache_read_tokens", &raw.date)?;
@@ -1049,6 +1055,8 @@ fn session_row_aliases(app: AgentKind, raw: &RawRequest) -> Vec<(String, String)
                 codex_usage_alias_value(session_id, &raw.model, &tokens),
             )]
         }
+        // CCS 库没有 WorkBuddy 的数据：无别名、无跨来源合并（WB02）
+        AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => Vec::new(),
     }
 }
 

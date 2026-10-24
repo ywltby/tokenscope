@@ -45,6 +45,9 @@ fn opts(
     days: Option<u32>,
 ) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         claude_dir: Some(fixture("claude", "basic")),
         codex_dir: Some(fixture("codex", "basic")),

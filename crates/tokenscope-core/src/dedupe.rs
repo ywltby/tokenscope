@@ -13,31 +13,35 @@ use crate::model::{AgentKind, UsageEvent};
 /// B2（R01）：键加入 model——不同模型同用量的真实请求不再误合并；
 /// 同模型同用量的两个真实请求仍无法与重播区分，保守合并（限制见
 /// docs/stats-semantics.md §3.2）。
+/// WB02：WorkBuddy 两应用同 `(session, messageId)` 强身份去重（messageId
+/// 跨文件全局唯一），同一身份行序靠后者胜，与 Claude 规则一致；键内含
+/// agent——两应用的同一身份互不合并，也不触发跨应用去重。
 ///
 /// 返回去重后事件（保持原相对顺序）与各 agent 的丢弃数（只列非零项）。
 pub fn dedupe_events(events: Vec<UsageEvent>) -> (Vec<UsageEvent>, Vec<(AgentKind, u64)>) {
     let mut keep = vec![true; events.len()];
     let mut dropped: HashMap<AgentKind, u64> = HashMap::new();
-    let mut claude_best: HashMap<(String, String), usize> = HashMap::new();
+    // 强身份组（Claude + 两版 WorkBuddy）：键含 agent，应用间互不合并
+    let mut strong_best: HashMap<(AgentKind, String, String), usize> = HashMap::new();
     let mut codex_seen: HashSet<(String, String, u64, u64, u64, u64)> = HashSet::new();
 
     for (i, e) in events.iter().enumerate() {
         match e.agent {
-            AgentKind::ClaudeCode => {
-                let key = (e.session_id.clone(), e.record_id.clone());
-                match claude_best.get(&key) {
+            AgentKind::ClaudeCode | AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => {
+                let key = (e.agent, e.session_id.clone(), e.record_id.clone());
+                match strong_best.get(&key) {
                     Some(&best) if e.ts < events[best].ts => {
                         keep[i] = false;
-                        *dropped.entry(AgentKind::ClaudeCode).or_default() += 1;
+                        *dropped.entry(e.agent).or_default() += 1;
                     }
                     Some(&best) => {
                         // 时间戳相同或更晚：行序靠后者胜
                         keep[best] = false;
-                        *dropped.entry(AgentKind::ClaudeCode).or_default() += 1;
-                        claude_best.insert(key, i);
+                        *dropped.entry(e.agent).or_default() += 1;
+                        strong_best.insert(key, i);
                     }
                     None => {
-                        claude_best.insert(key, i);
+                        strong_best.insert(key, i);
                     }
                 }
             }
@@ -68,6 +72,8 @@ pub fn dedupe_events(events: Vec<UsageEvent>) -> (Vec<UsageEvent>, Vec<(AgentKin
     dropped.sort_by_key(|(a, _)| match a {
         AgentKind::ClaudeCode => 0,
         AgentKind::Codex => 1,
+        AgentKind::WorkBuddy => 2,
+        AgentKind::WorkBuddyAi => 3,
     });
     (kept, dropped)
 }

@@ -97,7 +97,9 @@ impl ClaudeSource {
     pub fn default_root() -> Result<PathBuf> {
         // RC10：验收模式一律用隔离根下的来源目录，**绝不**回退真实
         // ~/.claude/projects（哪怕该目录不存在也只报"目录不存在"）。
-        if let Some(dir) = crate::acceptance::source_dir_override(true) {
+        if let Some(dir) =
+            crate::acceptance::source_dir_override(crate::model::AgentKind::ClaudeCode)
+        {
             return Ok(dir.join("projects"));
         }
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录"))?;
@@ -107,7 +109,9 @@ impl ClaudeSource {
     /// A03：默认账户的 Claude 配置路径（`~/.claude.json`）。验收模式走隔离根
     /// 下的 `sources/claude/claude.json`，**绝不**读取真实账户配置。
     pub fn default_mapping_path() -> Result<PathBuf> {
-        if let Some(dir) = crate::acceptance::source_dir_override(true) {
+        if let Some(dir) =
+            crate::acceptance::source_dir_override(crate::model::AgentKind::ClaudeCode)
+        {
             return Ok(dir.join("claude.json"));
         }
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录"))?;

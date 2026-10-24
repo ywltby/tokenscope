@@ -4,6 +4,9 @@
 # scripts/fixtures/upgrade_baselines.json，编排不自己拼路径或版本号。
 function Invoke-UpgradePython {
     param([Parameter(Mandatory=$true)][string[]]$Arguments,[string]$EvidencePath="")
+    # 校验脚本输出固定为 UTF-8；中文 Windows 控制台的默认代码页（GBK）会把
+    # UTF-8 字节按 ANSI 解成乱码，显式对齐后捕获结果才能逐字可比。
+    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
     $text = (& python -B @Arguments) -join "`n"
     $code = $LASTEXITCODE
     if ($EvidencePath) {
@@ -17,6 +20,7 @@ function Invoke-UpgradePython {
 function Invoke-UpgradePythonText {
     # 纯文本读数（历史库结构版本等）：不做 JSON 解析，失败即中断。
     param([Parameter(Mandatory=$true)][string[]]$Arguments)
+    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
     $text = (& python -B @Arguments) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw "升级 Python 读取失败（退出码 $LASTEXITCODE）" }
     return $text.Trim()

@@ -657,6 +657,9 @@ fn imported_claude_request_binds_to_native_event_from_session_logs() {
     )
     .unwrap();
     let opts = SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         claude_dir: Some(root.clone()),
         claude_enabled: Some(true),

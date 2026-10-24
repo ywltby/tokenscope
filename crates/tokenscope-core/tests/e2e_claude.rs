@@ -64,6 +64,9 @@ cache_read = 0.3
     )
     .unwrap();
     summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by,
         agent: Some(AgentKind::ClaudeCode),
         claude_dir: Some(fixture("claude", "basic")),

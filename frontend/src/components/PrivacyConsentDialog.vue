@@ -18,6 +18,8 @@ const props = defineProps<{
   blocked: boolean;
   /** 阻断原因（后端 detail 或 IPC 错误）。 */
   message: string | null;
+  /** WB05：政策已更新提示（旧修订同意触发重新询问时展示；null = 首次同意）。 */
+  updateNotice: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -41,6 +43,7 @@ const blocks = computed(() => renderPolicyMarkdown(props.policy.markdown));
       <div class="privacy-head">
         <div class="privacy-title">{{ policy.title }}</div>
         <div v-if="policy.date" class="privacy-date">更新日期：{{ policy.date }}</div>
+        <div v-if="updateNotice" class="privacy-updated" role="status">{{ updateNotice }}</div>
       </div>
       <p class="privacy-summary">
         同意前应用不读取任何使用数据：不扫描日志来源、不建立统计缓存、不写诊断日志、不联网同步价格。
@@ -109,6 +112,15 @@ const blocks = computed(() => renderPolicyMarkdown(props.policy.markdown));
   margin-top: 4px;
   font-size: 12px;
   color: var(--ts-text-tertiary);
+}
+
+.privacy-updated {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(128, 128, 128, 0.12);
+  font-size: 13px;
+  line-height: 18px;
 }
 
 .privacy-summary {

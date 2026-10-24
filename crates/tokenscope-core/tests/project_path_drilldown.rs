@@ -118,6 +118,9 @@ cache_read = 0.4
 
 fn opts(dir: &Path, claude: &Path, codex: &Path, agent: Option<AgentKind>) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Project,
         agent,
         claude_dir: Some(claude.to_path_buf()),
@@ -312,6 +315,9 @@ fn switch_groups_drilldown_pages_cache_and_cost_are_consistent() {
     )
     .unwrap();
     let opts = SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Project,
         claude_dir: Some(claude_root),
         codex_dir: Some(dir.join("no-codex")),
@@ -429,6 +435,9 @@ fn codex_switch_groups_and_no_cache_path_are_consistent() {
     )
     .unwrap();
     let opts = SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Project,
         agent: Some(AgentKind::Codex),
         claude_dir: Some(dir.join("no-claude")),
@@ -465,6 +474,9 @@ fn codex_switch_groups_and_no_cache_path_are_consistent() {
         "热缓存结果必须逐字段一致"
     );
     let refreshed = summary(&SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         refresh: true,
         ..opts.clone()
     })

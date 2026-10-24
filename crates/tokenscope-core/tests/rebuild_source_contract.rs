@@ -59,6 +59,9 @@ fn write_codex_log(root: &Path, session: &str) {
 /// 密闭基础选项：所有路径都指向本次临时目录。
 fn base_opts(dir: &Path) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         cache_dir: Some(dir.join("cache")),
         pricing_index: Some(dir.join("idx.json")),

@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
-  "kind": "patch",
-  "summary": "修复 Rust 锁等待测试的临时目录收尾"
+  "kind": "minor",
+  "summary": "新增 WorkBuddy（国内版）与 WorkBuddy AI（国际版）两个用量来源：共享解析器、四应用身份与去重、设置格式 v3、隐私政策修订 2 与重新同意、四应用界面与原生验收；WB08 真实对账通过"
 }
