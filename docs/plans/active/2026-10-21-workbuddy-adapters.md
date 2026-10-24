@@ -1,6 +1,6 @@
 # 新增 WorkBuddy（国内版）与 WorkBuddy AI（国际版）用量来源
 
-> 状态：**用户 2026-10-24 确认修订文本与独立排期，待实施。** 分支 `docs/workbuddy-plan` 已合入 main `a527441`（v0.5.13）。§1 保留 2026-10-21 的真实样本记录，当前代码复核见 §1.1；原“等验收收口完成后实施”的串行依赖已由本次授权解除，见 §1.2。整合计划登记为 N17。
+> 状态：**WB01–WB09 已实施（2026-10-24），PR 待用户复核合并；用户手动安装验证与 main 发布验收在合并后执行。** 分支 `docs/workbuddy-plan` 已合入 main `a527441`（v0.5.13）。§1 保留 2026-10-21 的真实样本记录，当前代码复核见 §1.1；原“等验收收口完成后实施”的串行依赖已由本次授权解除，见 §1.2。整合计划登记为 N17。
 > 用户 2026-10-21 决定：
 > - 国内版与国际版**分成两个应用**；
 > - 隐私政策**增加修订号**，老用户升级后重新询问同意；
@@ -357,6 +357,45 @@
 - 原验收收口 B3 的两项前提差异继续待修订；B4 真实规模性能和 B5 单实例 / 人工签字尚未执行。它们与 N17 分别记账，本次授权不修改 AC06 / AC07 的方案或替代人工签字。
 - 本次仍只修改计划，WB01–WB09 的产品实现尚未开始；功能 PR 的合并继续由用户决定。
 
-### 6.3 产品实施记录（尚未开始）
+### 6.3 产品实施记录（2026-10-24 实施；PR 待用户复核）
 
-每个任务回填受测提交、红灯断言 / 变异、绿灯命令与耗时、独立对账结果、证据位置、PR / main 运行链接、十条不变量自审及偏离；没有执行的项目明确写待验，不能用计划中的命令代替执行结论。
+分支 `feat/workbuddy-adapters`（自 `docs/workbuddy-plan` e35fe26 新建）。逐任务提交与证据摘要如下；除注明外全部 Rust 验证经 `scripts/run_rust_tests.py`，测试临时根清理核实。
+
+| 任务 | 受测提交 | 红灯 / 变异 | 绿灯证据 |
+| --- | --- | --- | --- |
+| WB01 泛化 | `2a6e8c2` | 新增 `tests/workbuddy_existing_equivalence.rs`（管线冻结 / 事件快照 / 设置字节三测）先在旧实现冻结；变异：`source_config` 交换两应用分支 → 设置断言红；`make_sources` Claude 分支错接 Codex 解析器 → 事件快照红（均断言级，恢复后泛化） | 普通 + acceptance 两轮 workspace 全绿；既有测试仅布尔实参适配为同义 AgentKind |
+| WB02 枚举/身份/去重 | `3135746` | 身份三断言在未实现态红（native_identity 返回 None、WorkBuddy 暂借 Codex 指纹规则）；`inspect_history.py` 白名单先红后绿 | 历史库往返与跨应用隔离测试；版本常量核对后不递增（见下） |
+| WB03 解析器 | `41f4c7d` | 零行为骨架跑出 10 个断言级红灯 | `workbuddy_source.rs` 13 用例全绿（fixture 手工合成 + json 自检） |
+| WB04 来源与设置 v3 | `04a59cf` | 迁移表缺 1->3 规则红；default 语义「缺键拒绝」红（改为缺失与默认值等价） | 迁移表 1->3/2->3/3->3；发现层四用例；验收根保护扩两真实目录 + 大小写别名；96 处 SummaryOptions 构造点注入禁用 |
+| WB05 隐私修订 | `ddd84dc` | 修订号六分支语义红（缺号/偏低/等于/高于/false/类型错误）；原子落盘与损坏文件封闭红 | `read_consent` 只认不低于当前的修订；accept 同一次写 true+修订号；前端弹窗提示行 |
+| WB06 界面 | `0e9a4a1` | —（UI 契约） | 五图标契约 9 断言 × 四视口（明暗 × 1280x820/980x620）通过、零违例；自绘徽标用 path 不用 `<text>`（保住「纯图标无文字」契约） |
+| WB07 原生验收 | `d8c3039` + `9a32dc3` | prepare fixture 转义污染（BEL/TAB）三次修正；clickAgent 过渡态等待收紧 | 见下方三连跑 |
+| WB08 对账 | `9a32dc3`（解析器实现主体在 `41f4c7d`） | 对账测试自身的 events 计数 bug（add_file 契约） | Rust 与独立 Python 逐应用逐字段一致：国内版 2,881 条 / 国际版 656 条，合计 in 146,055,367 / out 3,300,068 / cw 0 / cr 619,000,607，坏行 0；证据 `qa-artifacts/workbuddy/{rust-reconciliation.json,reconciliation.json}` |
+| WB09 取号 | `324e739` | — | `bump_version.py --bump minor`：0.5.13 → 0.6.0；`--check --base-ref origin/main` = release: true；v0.5.13 基线已登记 |
+
+**原生三连跑（最终受测提交 `9a32dc3`）**：三场景各三次（`qa-artifacts/workbuddy/{identity,sp,policy}-final{1..3}`），exe 在脚本修正提交后重建；九次全部通过、`real_untouched=true`、外部连接 0、CSP 违例 0、各两次 launch：
+
+- `ui-identity`：19/19 × 3（34 s / 32 s / 32 s）。
+- `ui-source-paths`：17/17 × 3（36 s / 37 s / 37 s）。
+- `privacy-policy-update`：12/12 × 3（11 s / 12 s / 11 s）。
+
+首轮尝试的失败均先取证后修：fixture 转义污染（BEL/TAB）、`matchEventDom` 应用列缺新映射（产品级发现）、`clickAgent` 过渡态等待与「全部」IPC 实参匹配、privacy-policy-update 的 mutate 分支与业务态窗口优雅关闭——每次修正后重跑，不以重跑代替原因；取号前构建（0e9a4a1）上的三次首跑证据保留但不计入三连。
+
+**版本常量决策（WB02 核对结论）**：`HISTORY_SCHEMA_VERSION=4`、`PARSER_REVISION=2`、`IDENTITY_REVISION=1` 均不递增——历史库 `usage_events.app` 为 TEXT、表结构不变；新增适配器不改变 Claude/Codex 的解析语义与模型身份规则；新事件以当前 PARSER_REVISION 标记写入，读取方（升级矩阵按 persistent_format 分组挑起点）不受影响。`SETTINGS_FORMAT_REVISION` 2→3 属计划明确的变化（sources 新键 + 同意修订号），迁移规则与 `settings_migrations.json` 同步。
+
+**十条不变量自审**：
+
+1. 现有统计零变化：WB01 冻结测试（管线/事件快照/设置字节）在泛化前后逐项相同；两轮 workspace 全绿。
+2. 一次调用只计一次：仅 rawUsage+messageId 行产事件（解析器门槛）；三容器只取 rawUsage。
+3. 桶互斥：input=prompt−cached；cached 只取 details.cached_tokens（回退 hit）；受检算术坏行跳过；WB08 对账坏行 0。
+4. 不补造请求：失败调用、无 messageId 用量行、摘要行均不产事件；无模型计 skipped_no_model。
+5. 两应用独立：身份键含 agent；dedupe 强身份 map 按 agent 分桶；跨应用同身份不合并（测试钉住）。
+6. 重扫幂等：同文件重扫事件一致；历史库来源键幂等由既有机制承接（WB 测试写入读回验证）。
+7. 只读最小采集面：只遍历 projects/ 下 *.jsonl；验收根保护覆盖真实 `~/.workbuddy{,-ai}` 与大小写别名；子进程密闭检查四应用默认根。
+8. 同意先于读取：修订号低于当前 → StaleRevision → NeedsConsent；privacy-policy-update 场景验证旧同意零业务文件、同意原子落盘后解锁。
+9. 项目身份一致：WB 与 Claude 事件同路径同 key（跨应用对照测试）；子目录归根、越界切换；原生场景四应用合并断言通过。
+10. 时间口径：毫秒时间戳 UTC 一次转换；跨日 Asia/Shanghai 测试钉住。
+
+**偏离与缺陷登记**：无计划外语义变更。实施中发现并修复：验收 fixture 生成脚本经工具层转义污染（BEL/TAB，三轮修正）；`matchEventDom` 应用列显示名缺新应用映射（产品级发现，测试库补齐）；`clickAgent` 过渡态等待条件过松；本机中文控制台代码页导致升级契约测试假失败（`10c90fc`，显式声明子进程 UTF-8 输出，不放宽断言）。`ui-source-paths` 纳入 unified profile（计划 WB07 授权范围：复用统一 fixture）。
+
+**待验（不因本 PR 标完成）**：用户手动安装验证（首启「政策已更新」弹窗、四应用出现在来源筛选、WorkBuddy 数值与 WB08 一致）按 §5 交用户执行；B3/B4/B5 继续由 N10–N13 原责任承接。

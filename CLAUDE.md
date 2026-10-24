@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **TokenScope** —— 本地 AI agent 使用量统计工具。Rust + Tauri 2 桌面应用（Vue 3 前端）：扫描各 AI 编程工具落在本地的会话日志，解析为统一的用量事件，统计 token 用量、请求数、缓存命中与估算花费，支持按应用 / agent / 模型 / 项目 / 时间段聚合查看。对标 [cc-switch](https://github.com/farion1231/cc-switch) 的 Usage Statistics 功能，但做成独立工具，且覆盖更多 agent（cc-switch 目前支持 Claude Code、Codex、Gemini CLI、Grok Build、OpenCode、Pi、MiniMax Code 的用量统计）。
 
-**当前状态：M1–M11 主体已落地**——Tauri 2 + Vue 3 桌面 GUI（唯一形态），双 agent 统计、三来源独立候选计价（2026-10-06 起无编译期内置表）、统一 SQLite 用量历史库、时间区间筛选、逐请求明细、单实例/窗口记忆/自启接线；自身验收与后续功能仍有未闭合项。滚动状态以 `docs/plans/README.md` 为准，唯一待办是 `docs/plans/active/2026-10-11-consolidated-remaining-work.md`，本文件不追写阶段结果。本机已装 cc-switch（`~/.cc-switch`，含 `cc-switch.db` 与 `model-pricing.json`），其日汇总可作对照；读取/导入必须由设置页手动点击触发。**本机 Claude Code 经 cc-switch 路由到非 Anthropic 模型（模型串任意，如 `grok-4.5-build`），解析与计价不得假设模型名形态。**
+**当前状态：M1–M11 主体已落地**——Tauri 2 + Vue 3 桌面 GUI（唯一形态），四应用统计（Claude Code、Codex、WorkBuddy 国内版、WorkBuddy AI 国际版；WB09 2026-10-24）、三来源独立候选计价（2026-10-06 起无编译期内置表）、统一 SQLite 用量历史库、时间区间筛选、逐请求明细、单实例/窗口记忆/自启接线；自身验收与后续功能仍有未闭合项。滚动状态以 `docs/plans/README.md` 为准，唯一待办是 `docs/plans/active/2026-10-11-consolidated-remaining-work.md`，本文件不追写阶段结果。本机已装 cc-switch（`~/.cc-switch`，含 `cc-switch.db` 与 `model-pricing.json`），其日汇总可作对照；读取/导入必须由设置页手动点击触发。**本机 Claude Code 经 cc-switch 路由到非 Anthropic 模型（模型串任意，如 `grok-4.5-build`），解析与计价不得假设模型名形态。**
 
 ## 设计方向（M1–M4 已按此落地；后续里程碑沿用）
 
@@ -28,7 +28,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **设置事务（SF02）**：全部应用内设置写者走 `settings::update` 读改写锁（原子替换保留）；外部编辑器不受锁约束，勿与 GUI 同时写。日志初始化可失败（SF06）：降级 stderr 不阻断启动，状态经 `startup_diagnostics` 暴露。
 - **输出（用户已拍板）**：**Tauri 2 + Vue 3 桌面 GUI 是唯一产品形态**（Naive UI、明暗双模式、托盘常驻、关窗三态——未配置默认动作时弹窗询问「最小化/直接退出 + 记忆勾选」，记忆值存 `~/.tokenscope/settings.toml` 的 `close_action`，设置页可改回每次询问；托盘「退出」旁路不受影响）。CLI 已于 2026-10-04 移除（用户决策）：`report.rs` 管线保留，数据经 serde 直达前端。
 - **GUI 主线程纪律**：Tauri v2 的同步 command 在主线程执行；扫描/解析/缓存/网络等重活一律 `async` + `spawn_blocking` 丢后台线程池，主线程零阻塞（启动卡顿的根因与修法）。
-- **候选 agent（用户 2026-10-04 排期决策）**：当前**专注 Claude Code 与 Codex**（本机有真实日志可实测）；Gemini CLI、OpenCode 等其他工具暂缓排期——待安装使用或拿到样例日志、经用户明确排期后再立项（详见 `docs/plans/README.md`）。
+- **候选 agent（用户 2026-10-04 排期决策；2026-10-21 WorkBuddy 双版由用户明确排期，2026-10-24 落地）**：当前支持 Claude Code、Codex、WorkBuddy（`~/.workbuddy`）与 WorkBuddy AI（`~/.workbuddy-ai`）；Gemini CLI、OpenCode 等其他工具暂缓排期——待安装使用或拿到样例日志、经用户明确排期后再立项（详见 `docs/plans/README.md`）。
 
 ## Rust 环境（本机现状）
 
@@ -93,6 +93,7 @@ $env:TOKENSCOPE_REAL_PERF = "1"; python -B scripts/run_rust_tests.py -- cargo te
 - **真实 agent 日志永不入库**：会话日志含用户代码与对话内容，属敏感数据；`.gitignore` 已兜底，测试一律使用手工合成的最小 fixture。
 - **先写失败测试，再写实现**：每个 bug 修复先有能红的最小回归测试；解析类改动必须带「样例日志 → 期望事件」的 fixture 用例。
 - 新适配器测试三件套：路径发现（含目录不存在的情形）、典型日志解析、畸形行容错（坏行跳过并计数，不 panic）。
+- **WorkBuddy 口径要点（WB03/WB09）**：只读 `projects/` 下的 `*.jsonl`（主文件与 `<sessionId>/subagents/agent-*.jsonl`），不打开 `workbuddy.db`、不读 `traces/`、`file-history/`、`models.json`；一次调用 = 一行 = 一个 `providerData.messageId`（跨文件全局唯一），三处用量容器只取 `rawUsage` 一处；缓存真值只在 `prompt_tokens_details.cached_tokens`（缺失回退 `prompt_cache_hit_tokens`），`input = prompt − cached`（OpenAI 语义）、输出不叠加 reasoning；失败调用（`status: incomplete`）与无 `messageId` 用量行不补造事件；模型取 `providerData.model`（缺失回退 `requestModelId`）；云端会话本机无用量记录，不在统计范围。权威口径见 `docs/stats-semantics.md` §2.3。
 - 全量 `cargo test` 绿只能证明已有测试通过，不能证明本次设计目标被覆盖；关键边界（跨日聚合、去重、时区）必须有定向测试。
 
 ## 协作约定

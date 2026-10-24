@@ -124,6 +124,47 @@ Anthropic Messages API 的 usage 四字段本身就是互斥桶，逐一映射�
 
 校验式：`total == input + output`（本机 47 文件全量成立，M2 实测）。
 
+### 2.3 WorkBuddy 与 WorkBuddy AI（`~/.workbuddy{,-ai}/projects/**/*.jsonl`；WB03/WB09）
+
+两个应用共用 `source/workbuddy.rs` 同一实现，以应用字段区分实例；国内版
+（`~/.workbuddy`）与国际版（`~/.workbuddy-ai`）相互独立，同样的内容出现在
+两个应用根下时按 `(app, sessionId, messageId)` 各自计入，不跨应用合并。
+
+- **采集面**：只读 `projects/` 下全部 `*.jsonl`（主文件
+  `<slug>/<sessionId>.jsonl` 与子 agent `<slug>/<sessionId>/subagents/agent-*.jsonl`）；
+  附属物（`.file-rollback.ndjson`、`.meta.json`、`tool-results/*.txt`）非
+  `.jsonl` 扩展，天然不进转写清单。不打开 `workbuddy.db`，不读 `traces/`、
+  `file-history/`、`models.json`、`settings.json`。
+- **一次调用一行**：只有同时带 `providerData.rawUsage` 与
+  `providerData.messageId` 的行才产生事件；`messageId` 跨文件全局唯一，
+  身份键 `(sessionId, messageId)`，去重身份方案 `workbuddy-message`。
+- **三处用量容器只取一处**：`providerData.rawUsage`、`providerData.usage`
+  与 `message.usage` 的共有字段逐行恒等，只读 `rawUsage`，从不相加。
+- **桶归一（OpenAI 语义）**：`prompt_tokens` 含缓存命中；
+  `cache_read = prompt_tokens_details.cached_tokens`（缺失回退
+  `prompt_cache_hit_tokens`，再缺失按 0）；`input = prompt_tokens − cache_read`；
+  `cache_write = rawUsage.cache_creation_input_tokens`（缺失 0）；
+  `output = completion_tokens`（`reasoning_tokens` 已含在内，不叠加）。
+  `rawUsage` 侧的 `cached_tokens`、`cache_read_input_tokens` 与
+  `message.usage.cache_read_input_tokens` 是死字段或可能缺键，一律不用。
+- **失败调用不补造**：`status: incomplete` 的行带 `error`、无 `messageId`
+  与用量；无 `messageId` 的用量行、压缩摘要行（只有 `logicalParentId`）、
+  `file-history-snapshot` 行都不产生事件。没有模型（`providerData.model`
+  与 `requestModelId` 都缺失或空白）计 `skipped_no_model`。
+- **模型**：取 `providerData.model`（渠道前缀出现在 `requestModelId`，
+  如 `custom-local:<model>`，不得裁剪），缺失回退 `requestModelId`。
+- **时间**：行内 `timestamp` 为 Unix 毫秒（UTC），存储层转换一次。
+- **项目身份**：按会话沿行序推进项目根（进入子目录仍归当前根，越出当前根
+  才切换），与 Claude 同款规则；cwd 为小写盘符加反斜杠，与 Claude 事件的
+  大写盘符、正斜杠归一到同一项目 key；子 agent 文件的 `sessionId` 独立，
+  按文件自身解析；会话无可信 cwd 回落 slug 文件身份。
+- **不统计**：云端会话与定时任务的用量只保存在服务端，本机没有可读记录；
+  应用内删除的本地会话转写仍留在原位，照常计入（与"来源删除不删已保存
+  用量"同向）。不使用 `credit` 作为费用（服务端点数，非美元）。
+- **对账（WB08，2026-10-24）**：Rust 解析器与独立 Python 脚本对本机真实
+  转写逐应用核对一致——国内版 2,881 条 / 国际版 656 条，四桶总和逐字段
+  相同，坏行 0（历史样本口径，非固定预期；证据见专项计划 §6）。
+
 ### 2.1 异常 token 算术（SF08）
 
 - 单事件的四桶总数与 prompt 计价基数（input + cache_write + cache_read）

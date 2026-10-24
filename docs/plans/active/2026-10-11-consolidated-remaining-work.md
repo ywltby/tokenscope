@@ -9,7 +9,7 @@
 **Tech Stack:** Rust / SQLite / Tauri 2 / Vue 3，以及现有 Rust、Vitest、浏览器和原生 acceptance 测试工具。
 
 - 整理日期：2026-10-11；当前状态更新：2026-10-24。
-- 状态：**12 项完成（N01–N09、N14–N16）、1 项部分完成（N12）、3 项专项验收未闭合（N10/N11/N13）、1 项已确认待实施（N17），共 5 个开放责任编号。** 已完成项不重复实施；N14 第 4 项随 B1 / PR #27 完成，四项全部关闭。
+- 状态：**12 项完成（N01–N09、N14–N16）、1 项部分完成（N12）、3 项专项验收未闭合（N10/N11/N13）、N17 实施完成待合并（2026-10-24，见下），共 4 个开放责任编号 + 1 项待合并。** 已完成项不重复实施；N14 第 4 项随 B1 / PR #27 完成，四项全部关闭。
 - 已核验交付基线：PR #15 合并 `9ea0c584`、v0.5.1 公开，连续升级链成功；PR #16 合并 `0ffab19`、v0.5.2 公开，[main CI](https://github.com/ywltby/tokenscope/actions/runs/39353860584)、[原生 E2E](https://github.com/ywltby/tokenscope/actions/runs/39353860657)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39353860618) 全成功（安装、六个单跳、两条连续链）。PR #17 研究资料合入 `89aec76` 不改变这些专项验收结论。PR #19 合并 `1156385`、v0.5.5 公开，main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39452749833)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39452749860)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39452749887) 全成功（安装、六个单跳、两条连续链），N15 关闭。
 - 最新交付：PR #23 合并 `d064f98`、v0.5.6 公开，main CI/Native UI E2E/Release 全成功（安装、六个单跳、两条连续链）；N14 第 2 项与 N16 关闭，证据见各自条目。
 - B1 验收交付：AC01 的 `69ce2f4` 随 PR #27 普通合并为 `4198051`；PR 的 CI、原生、安装与六组单跳以及 main CI/原生/Release 均成功。N14 第 4 项关闭；本批只有测试与文档，版本保持 0.5.6，Release 只跑 gate。
@@ -17,7 +17,7 @@
 - 启动恢复、SQLite 并发调查和 N16 已移入 archive/implemented；下文及 §7 的旧提交、版本、失败/通过记录保留为历史证据，不能替代当前待验矩阵。
 - 待办：N10 隐私强取证、N11 原生统一验收、N12 其余系统/签字、N13 真实性能。N16 随 PR #23 / v0.5.6 完成最后的产品正常发布验证，专项已归档。真实跨午夜、长时间休眠、跨显示器仍在[独立系统待办](../system-acceptance-todo.md)，不在本轮执行。
 - 收口计划（2026-10-21 用户确认）：[剩余验收收口](2026-10-21-acceptance-closure.md) 的 AC01 / B1 已交付并关闭 N14；B2–B5 继续承接 N11、N10、N13、N12，各项状态随批次交付更新。
-- 新功能排期（2026-10-24 用户确认）：[WorkBuddy 国内版与国际版接入](2026-10-21-workbuddy-adapters.md) 修订后按 N17 独立推进，原“等验收收口完成后实施”的串行依赖解除。功能实现尚未开始，不改变 N10–N13 的待验状态。
+- 新功能排期（2026-10-24 用户确认）：[WorkBuddy 国内版与国际版接入](2026-10-21-workbuddy-adapters.md) 修订后按 N17 独立推进，原“等验收收口完成后实施”的串行依赖解除。**2026-10-24 WB01–WB09 已按专项计划实施完毕（分支 `feat/workbuddy-adapters`，取号 0.6.0，真实对账一致，原生三场景本地通过），PR 待用户复核合并；合并与发布验收见专项计划 §6.3。** N10–N13 的待验状态不变。
 - 独立维护专项（2026-10-23 完成）：[测试临时目录清理](../archive/implemented/2026-10-23-test-temp-cleanup.md) 两批交付（B1 前端遗漏 + 外层契约随 PR #44 合并 `fde7762`；B2 锁等待用例连接释放随 PR #46 合并 `58d0d15`，发布 v0.5.13），已归档；其余夹具治理为后续候选。不占新 N 编号，不回写或重开 N09 的历史验收结论。
 - 总账：[计划目录](../README.md)；历史逐份结论：[审计索引](../audits/README.md)；发布附属清单：[D5](../d5-acceptance-checklist.md)。
 
@@ -553,6 +553,8 @@ python -B -m unittest discover -s scripts -p "test_install_workflow.py" -v
 N01–N09、N14–N16 已完成，不重复实施；N14 第 4 项已由 B1 / AC01 交付。M06 严格校验器及 fixture 保持通过，M10 不重复实施。N12 的 A01–A06 已修复且契约全绿（两轮挑刺审计后）；随后取得当前产物的 PR 安装与普通 CI 成功结果，两种验证各自记账。继续按收口计划 B2 验 N11、B3 验 N10、B4 验 N13、B5 验 N12；人工签字前不提前关闭相应编号。
 
 N17 按 WorkBuddy 专项计划的四个内部阶段独立推进；B3–B5 的待验不再作为其启动前置。两份计划分别回填受测提交与实际结果，不能互相代签完成。
+
+2026-10-24 实施记录：分支 `feat/workbuddy-adapters` 逐任务提交 WB01–WB09（详见专项计划 §6.3 的提交表、红绿摘要与十条不变量自审）。取号 minor 0.6.0（`bump_version.py --check` 输出 release: true）；WB08 真实对账 Rust 与独立 Python 逐应用逐字段一致（国内版 2,881 条 / 国际版 656 条、四桶总和相同、坏行 0）；`ui-identity` / `ui-source-paths` / `privacy-policy-update` 三场景在受测提交本地通过。**PR 复核与合并由用户决定；合并后的 main CI、Native UI E2E、Release 安装与升级矩阵验收、用户手动安装验证仍待执行，不提前标完成。**
 
 新增测试名先在实际目标文件中登记，再执行；本计划提出的断言不是已经存在或已经通过的测试。N08 的现有目标为 `model_name_equivalence`、`model_identity_contract` 和 `pricing_source_policy`。
 
