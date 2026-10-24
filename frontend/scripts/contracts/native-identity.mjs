@@ -189,6 +189,8 @@ export async function nativeIdentity(context) {
     check("drill_from_day_model_project_rows", { drills });
 
     // WB07：四应用来源筛选独立选中 + 子 agent 计入 + 失败调用不计。
+    // 「全部」的 IPC 实参是字符串 "all"（parse_agent 接受 None | Some("all")）。
+    const agentParamOf = { WorkBuddy: "workbuddy", "WorkBuddy AI": "workbuddy-ai", 全部: "all" };
     const clickAgent = async (name) => {
       await ui.click(
         ui.page().locator('[aria-label="数据来源"]').getByRole("radio", { name, exact: true }),
@@ -196,7 +198,13 @@ export async function nativeIdentity(context) {
       await ui.waitUntil(
         async () => {
           const snapshot = await ui.querySnapshot();
-          return snapshot.sameQuery && snapshot.domMatches && snapshot.beginCall?.args?.agent;
+          // WB07 run2 教训：只等 begin 出现会在 summary/events 落定前返回；
+          // 必须等同查询会话对齐且 begin 的 agent 参数与目标一致。
+          return (
+            snapshot.sameQuery &&
+            snapshot.domMatches &&
+            snapshot.beginCall?.args?.agent === agentParamOf[name]
+          );
         },
         20000,
         `切换来源筛选：${name}`,
