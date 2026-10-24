@@ -26,6 +26,8 @@
 | Codex | ✅ | `~/.codex/sessions/**/*.jsonl` 与 `~/.codex/archived_sessions/**/*.jsonl` |
 | Gemini CLI / OpenCode 等 | 规划中 | — |
 
+这里的 `~` 表示当前登录用户的主目录；`**/*.jsonl` 表示在该来源目录内递归查找日志。自动发现使用当前用户的默认目录与启动时环境变量指定的目录；其他位置可在设置页手动追加。
+
 ## 使用
 
 ### 桌面应用
