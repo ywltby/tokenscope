@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "价格同步 WARN 汇总行措辞修正"
+  "summary": "修复 Rust 锁等待测试的临时目录收尾"
 }

@@ -3265,7 +3265,18 @@ mod tests {
         let err = HistoryDb::open(&path).unwrap_err();
         let elapsed = started.elapsed();
         holder.execute_batch("ROLLBACK").unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
+        // ROLLBACK 只释放事务锁，连接仍持有文件句柄：先关闭连接再删，
+        // 否则 Windows 上删除失败（计划 TL03：先释放本用例自己的资源）。
+        drop(holder);
+        // 收尾必须核实：删除失败（如连接仍持有文件句柄）要让本用例红，
+        // 不能用忽略错误把「测试通过但目录残留」掩盖掉（计划 TL03）。
+        let cleanup = std::fs::remove_dir_all(&dir);
+        assert!(
+            cleanup.is_ok(),
+            "夹具清理失败 {}: {cleanup:?}",
+            dir.display()
+        );
+        assert!(!dir.exists(), "夹具目录仍存在: {}", dir.display());
 
         assert!(
             crate::retry::is_concurrent_init_transient(&err),

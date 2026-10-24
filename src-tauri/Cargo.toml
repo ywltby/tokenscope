@@ -1,6 +1,6 @@
 [package]
 name = "tokenscope-app"
-version = "0.5.12"
+version = "0.5.13"
 edition = "2024"
 description = "TokenScope 桌面应用壳（Tauri 2 + Vue 3）"
 license = "MIT"
