@@ -241,6 +241,7 @@ sys.exit(37 if "--fail" in sys.argv else 0)
     function Assert-PreservedBeforeLaunch { param($Case) $script:Trace.Add("preserved") }
     function Assert-InstalledUpgrade { param($Case) $script:Trace.Add("installed") }
     function Grant-UpgradeConsent { param($Case) $script:Trace.Add("consent") }
+    function Invoke-ConsentGateStage { param($Case,[string]$Phase) $script:Trace.Add("consent-gate:" + $Phase) }
     function Install-UpgradePackage { param($Case,$Origin,$InstallerPath) $script:Trace.Add("install:"+$Origin)
         if ($script:FailAt -eq ("install:"+$Origin)) { throw "injected install $Origin" } }
     function Save-UpgradeCaseResult { param($Case,$Pass,$Detail)
@@ -264,7 +265,7 @@ sys.exit(37 if "--fail" in sys.argv else 0)
         Invoke-UpgradeScenario -Case $case
         $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:old,old-facts:0.1.0,save-old,"
         if ($state -eq "deleted") { $expected += "delete-source," }
-        $expected += "install-current,preserved,consent,jump:0.3.3,lifecycle:current,"
+        $expected += "install-current,preserved,consent-gate:current,consent,jump:0.3.3,lifecycle:current,"
         $expected += "check-current:0.3.3::1->1,lifecycle:restart,check-current:0.3.3::1->1,jump:current:True,case:True"
         Check (($script:Trace -join ",") -eq $expected) "$state：旧版先产数据，再直接覆盖升级并重启复核"
     }
@@ -292,9 +293,9 @@ sys.exit(37 if "--fail" in sys.argv else 0)
         Invoke-UpgradeChain -Case $case
         $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:chain-00-old,old-facts:0.1.0,save-old,jump:chain-00-old:True,"
         if ($state -eq "deleted") { $expected += "delete-source," }
-        $expected += "jump:0.3.2,download:0.3.2,install:0.3.2,consent,"
+        $expected += "jump:0.3.2,download:0.3.2,install:0.3.2,consent-gate:chain-01,consent,"
         $expected += "lifecycle:chain-01,check-current:0.3.2:4:1->1,jump:chain-01:True,"
-        $expected += "jump:0.3.3,install:0.3.3,installed,consent,lifecycle:chain-02,check-current:0.3.3:4:1->2,"
+        $expected += "jump:0.3.3,install:0.3.3,installed,consent-gate:chain-02,consent,lifecycle:chain-02,check-current:0.3.3:4:1->2,"
         $expected += "jump:chain-02:True,lifecycle:restart,check-current:0.3.3:4:1->2,jump:restart:True,case:True"
         Check (($script:Trace -join ",") -eq $expected) "$state：链路逐跳覆盖安装并只播种一次"
         Check ((@($case.Chain) -join "->") -eq "0.1.0->0.3.2->0.3.3") "链路记录起点集合与当前版本"

@@ -310,6 +310,71 @@ function Assert-PreservedBeforeLaunch {
     }
 }
 
+function Invoke-ConsentGateStage {
+    # WB05 第一段：装新版后、授权前，先以旧同意（或无同意）启动一次——
+    # 新闸门必须保持封闭，保存"零业务读取"证据：
+    # - settings.toml 的同意记录原样（程序不得预先补写 privacy_policy_revision）；
+    # - DataDir/logs 无新增（业务日志初始化只发生在同意之后）；
+    # - history.db 无新增写入（采集不发生）。
+    # 观察窗口 45 秒后结束进程；第二段由 Grant-UpgradeConsent 授权。
+    param($Case, [string]$Phase)
+    $evidence = Join-Path $Case.EvidenceRoot "consent-gate"
+    New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+    $logsDir = Join-Path $Case.DataDir "logs"
+    $historyDb = Join-Path $Case.DataDir "history.db"
+    $settingsPath = Join-Path $Case.DataDir "settings.toml"
+    $snapshotOf = {
+        param($Path)
+        if (-not (Test-Path $Path)) { return @{} }
+        Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction SilentlyContinue |
+            ForEach-Object { "$($_.FullName)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" }
+    }.GetNewClosure()
+    $logsBefore = @(& $snapshotOf $logsDir)
+    $historyBefore = @(& $snapshotOf $historyDb)
+    $settingsBefore = (Get-Content -LiteralPath $settingsPath -Raw -Encoding utf8)
+
+    $exe = Join-Path (Get-UninstallEntry).InstallLocation "tokenscope.exe"
+    $context = Launch-AppOnce -ExePath $exe -Scenario $Phase -RunId ($Phase + "-gate-1") `
+        -EvidenceDir $evidence -LiveLogsDir $logsDir
+    try {
+        Start-Sleep -Seconds 45
+        if ($context.Process.HasExited) {
+            throw "旧同意下新版进程提前退出（退出码 $($context.Process.ExitCode)）"
+        }
+        $settingsAfter = (Get-Content -LiteralPath $settingsPath -Raw -Encoding utf8)
+        $revisionWritten = $settingsAfter -match '(?m)^\s*privacy_policy_revision\s*='
+        if ($revisionWritten) {
+            throw "同意闸门前程序写入了 privacy_policy_revision（绕过重新询问）"
+        }
+        if ($settingsAfter -ne $settingsBefore) {
+            throw "同意闸门前 settings.toml 被改写"
+        }
+        $logsAfter = @(& $snapshotOf $logsDir)
+        $newLogs = @($logsAfter | Where-Object { $logsBefore -notcontains $_ })
+        if ($newLogs.Count -gt 0) {
+            throw "同意前出现业务日志新增：$($newLogs[0])"
+        }
+        $historyAfter = @(& $snapshotOf $historyDb)
+        $newHistory = @($historyAfter | Where-Object { $historyBefore -notcontains $_ })
+        if ($newHistory.Count -gt 0) {
+            throw "同意前历史库出现新写入：$($newHistory[0])"
+        }
+        [ordered]@{
+            settings_unchanged    = $true
+            revision_not_written  = $true
+            logs_new_files        = 0
+            history_new_entries   = 0
+            observed_seconds      = 45
+        } | ConvertTo-Json |
+            Set-Content -LiteralPath (Join-Path $evidence ($Phase + "-gate.json")) -Encoding utf8NoBOM
+    }
+    finally {
+        Stop-ScenarioProcess -Context $context
+        Copy-LiveLogsToEvidence -Context $context
+        Save-ScenarioResult -Context $context -Pass $true -Stage ($Phase + "-gate-closed")
+    }
+}
+
 function Grant-UpgradeConsent {
     # 幂等：起点已带同意时不动设置文件，0.1.0 起点升级后补上。
     # WB05：本跳目标格式 ≥ 3 的版本认识隐私修订号——写入当前修订（与
@@ -397,6 +462,8 @@ function Invoke-UpgradeScenario {
         Save-HistoryBackupState -Case $Case
         Install-UpgradeCurrent -Case $Case
         Assert-PreservedBeforeLaunch -Case $Case
+        # WB05：先验证旧同意被新闸门拒绝（零业务读取），再授权当前修订。
+        Invoke-ConsentGateStage -Case $Case -Phase "current"
         Grant-UpgradeConsent -Case $Case
         Set-UpgradeJump -Case $Case -Version $Case.AppVersion | Out-Null
         Invoke-UpgradeLifecycle -Case $Case -Phase "current" -Verify { param($Value,$Context) Check-CurrentUsage -Case $Value -Context $Context }
@@ -492,7 +559,9 @@ function Invoke-UpgradeChain {
             }
             Install-UpgradePackage -Case $Case -Origin $version -InstallerPath $installer | Out-Null
             if ($version -eq $Case.AppVersion) { Assert-InstalledUpgrade -Case $Case }
-            # 0.2.0 起没有同意就不会采集：安装后、启动前补上（幂等）。
+            # WB05：每跳装新版后先验证旧同意被闸门拒绝（零业务读取），再按
+            # 本跳目标格式授权（0.2.0 起没有同意就不会采集，幂等）。
+            Invoke-ConsentGateStage -Case $Case -Phase ("chain-" + $suffix)
             Grant-UpgradeConsent -Case $Case
             Invoke-UpgradeLifecycle -Case $Case -Phase ("chain-"+$suffix) -Verify { param($Value,$Context) Check-CurrentUsage -Case $Value -Context $Context }
             Save-JumpResult -Case $Case -Phase ("chain-"+$suffix) -Pass $true
