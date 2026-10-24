@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 >
-> 状态：**已完成并归档（2026-10-24）。** B1（PR #44，合并 `fde7762`）与 B2（PR #46，合并 `58d0d15`）均实施、经用户逐轮复核后合并；main 的 CI、Native UI E2E、Release（v0.5.13 完整发布：构建、五场景安装、六组单跳、两条连续升级链）全部成功。PR #42（Rust 进程级兜底）经用户批准合并 `4fc46c6`。**两类历史失败（native-ui 页面 target 未出现、`latest_history_opens_without_writer_lock` 超限）根因未定位，仅记录，不表述为已修复**；审计登记的其余夹具为后续候选，未在本专项治理。
+> 状态：**已完成并归档（2026-10-24）。** B1（PR #44，合并 `fde7762`）与 B2（PR #46，合并 `58d0d15`）均实施、经用户逐轮复核后合并；main 的 CI、Native UI E2E、Release（v0.5.13 完整发布：构建、五场景安装、八组单跳（0.1.0 / 0.4.0 / 0.5.9 / 0.5.12 × present/deleted）、两条连续升级链）全部成功。PR #42（Rust 进程级兜底）经用户批准合并 `4fc46c6`。**两类历史失败（native-ui 页面 target 未出现、`latest_history_opens_without_writer_lock` 超限）根因未定位，仅记录，不表述为已修复**；审计登记的其余夹具为后续候选，未在本专项治理。
 
 **Goal:** 修复已证实的 Vitest 临时目录遗漏和 Rust 锁等待用例句柄释放顺序问题，增加能发现“测试通过但目录残留”的回归，并明确 Rust 进程级收尾的适用边界。
 

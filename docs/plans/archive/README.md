@@ -4,7 +4,7 @@
 
 | 目录 | 数量 | 含义 |
 | --- | --- | --- |
-| implemented | 22 | 原工程及自身验收已完成；公共发布验收仍由整合计划管理 |
+| implemented | 23 | 原工程及自身验收已完成；公共发布验收仍由整合计划管理 |
 | partial | 28 | 实现或自身必要验收尚有尾项；头部明确剩余任务 ID |
 | superseded | 2 | 旧方案被较新要求/设计接管；必要验收已转移 |
 
@@ -12,7 +12,9 @@
 
 2026-10-20 第三批归档启动恢复与 SQLite 并发调查两份计划，均随 PR #16 合入并发布 v0.5.2，入 implemented。2026-10-21 补入 SQLite 打开锁等待回归修复（PR #19 / v0.5.5，N15 关闭）及[合入与发布解耦](implemented/2026-10-21-release-on-version-change.md)（PR #21 / #22 跳过发布，PR #23 / v0.5.6 正常发布，N16 关闭），同入 implemented。当时共 48 份；N14 第 1、2、3 项关闭，仅第 4 项权限拒绝 fixture 由整合计划承接。
 
-2026-10-22 补入两份价格同步专项：[TLS 信任修复](implemented/2026-10-22-emudhra-tls-trust-fix.md)随 PR #29 / v0.5.7 发布，并在包含 PR #30 解析修复的 main `cb35f83` 上完成两价格源组合复验，归档 implemented；[OpenRouter 时间条件解析修复](partial/2026-10-22-openrouter-override-conditions.md)随 PR #30 / v0.5.8 发布，main CI、原生、Release 全成功，安装后设置页手动同步按用户决定保留待验，归档 partial 并由 N11 承接。随后补入 [Codex 压缩用量补计与线程设置模型归属](implemented/2026-10-22-codex-compaction-usage.md)（PR #35 / v0.5.10，合并 `a31540f`）与[价格同步告警汇总](implemented/2026-10-22-sync-log-aggregation.md)（PR #37 / v0.5.11，合并 `0fabf24`；汇总行措辞随 v0.5.12 修正），均归档 implemented。现共 52 份，归档不把人工待验项标为通过。
+2026-10-22 补入两份价格同步专项：[TLS 信任修复](implemented/2026-10-22-emudhra-tls-trust-fix.md)随 PR #29 / v0.5.7 发布，并在包含 PR #30 解析修复的 main `cb35f83` 上完成两价格源组合复验，归档 implemented；[OpenRouter 时间条件解析修复](partial/2026-10-22-openrouter-override-conditions.md)随 PR #30 / v0.5.8 发布，main CI、原生、Release 全成功，安装后设置页手动同步按用户决定保留待验，归档 partial 并由 N11 承接。随后补入 [Codex 压缩用量补计与线程设置模型归属](implemented/2026-10-22-codex-compaction-usage.md)（PR #35 / v0.5.10，合并 `a31540f`）与[价格同步告警汇总](implemented/2026-10-22-sync-log-aggregation.md)（PR #37 / v0.5.11，合并 `0fabf24`；汇总行措辞随 v0.5.12 修正），均归档 implemented。
+
+2026-10-24 补入[测试临时目录清理](implemented/2026-10-23-test-temp-cleanup.md)（B1 随 PR #44 合并 `fde7762`；前置 PR #42 经用户批准合并 `4fc46c6`；B2 随 PR #46 合并 `58d0d15`，发布 v0.5.13），归档 implemented；两类历史失败根因未定位仅记录，其余夹具治理为后续候选。现共 53 份，归档不把人工待验项标为通过。
 
 每份文件的归档复核头部优先于其“归档前原文”。原文保留当时状态/版本/命令/失败与成功记录；旧“继续 active”要求由本次用户归档要求取代。
 
