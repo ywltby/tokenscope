@@ -154,6 +154,8 @@ pub trait Source {
                     match self.agent() {
                         AgentKind::ClaudeCode => "Claude",
                         AgentKind::Codex => "Codex",
+                        AgentKind::WorkBuddy => "WorkBuddy",
+                        AgentKind::WorkBuddyAi => "WorkBuddy AI",
                     },
                     root.display()
                 ));

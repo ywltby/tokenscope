@@ -11,16 +11,29 @@ pub enum AgentKind {
     ClaudeCode,
     #[serde(rename = "codex")]
     Codex,
+    /// WorkBuddy 国内版（`~/.workbuddy`）。
+    #[serde(rename = "workbuddy")]
+    WorkBuddy,
+    /// WorkBuddy AI 国际版（`~/.workbuddy-ai`）。
+    #[serde(rename = "workbuddy-ai")]
+    WorkBuddyAi,
 }
 
 impl AgentKind {
     /// 全部已接入应用（穷举点一律取自这里，新增应用时只改枚举与本表）。
-    pub const ALL: [AgentKind; 2] = [AgentKind::ClaudeCode, AgentKind::Codex];
+    pub const ALL: [AgentKind; 4] = [
+        AgentKind::ClaudeCode,
+        AgentKind::Codex,
+        AgentKind::WorkBuddy,
+        AgentKind::WorkBuddyAi,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             AgentKind::ClaudeCode => "claude-code",
             AgentKind::Codex => "codex",
+            AgentKind::WorkBuddy => "workbuddy",
+            AgentKind::WorkBuddyAi => "workbuddy-ai",
         }
     }
 
@@ -30,6 +43,8 @@ impl AgentKind {
         match raw {
             "claude-code" => Ok(AgentKind::ClaudeCode),
             "codex" => Ok(AgentKind::Codex),
+            "workbuddy" => Ok(AgentKind::WorkBuddy),
+            "workbuddy-ai" => Ok(AgentKind::WorkBuddyAi),
             other => Err(format!("未知应用标识: {other:?}")),
         }
     }
@@ -152,6 +167,19 @@ impl UsageEvent {
                 }
             }
             AgentKind::Codex => None,
+            // WB02：WorkBuddy 转写带 providerData.messageId（跨文件全局唯一），
+            // 身份方案与 Claude 同形（sessionId|messageId）；app 字段在库层
+            // 区分国内版与国际版，两应用互不合并。
+            AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => {
+                if self.session_id.is_empty() || self.record_id.is_empty() {
+                    None
+                } else {
+                    Some((
+                        "workbuddy-message",
+                        format!("{}|{}", self.session_id, self.record_id),
+                    ))
+                }
+            }
         }
     }
 
@@ -185,6 +213,8 @@ impl UsageEvent {
                     ),
                 ))
             }
+            // WB02：与 native_identity 同方案（messageId 全局唯一，强身份）
+            AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => self.native_identity(),
         }
     }
 }

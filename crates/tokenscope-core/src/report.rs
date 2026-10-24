@@ -152,6 +152,8 @@ impl SummaryOptions {
         match kind {
             AgentKind::ClaudeCode => self.claude_enabled != Some(false),
             AgentKind::Codex => self.codex_enabled != Some(false),
+            // WB04 扩展新应用的启用开关；接入前默认启用（构造点受测试密闭约束）
+            AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => true,
         }
     }
 }
@@ -290,29 +292,36 @@ fn make_sources(opts: &SummaryOptions, kinds: &[AgentKind]) -> Result<Vec<Box<dy
                     out.push(Box::new(ClaudeSource::with_mapping(root, mapping)));
                 }
                 AgentKind::Codex => out.push(Box::new(CodexSource::new(root))),
+                // WB03/WB04 接入 WorkBuddy 适配器与发现后在此构造来源实例；
+                // 接入前 discovery 不产生这两类计划行，此处跳过保持零来源。
+                AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => {}
             }
         }
         return Ok(out);
     }
     for &kind in kinds {
-        out.push(match kind {
+        match kind {
             AgentKind::ClaudeCode => {
                 let root = match opts.claude_dir.as_ref() {
                     Some(p) => p.clone(),
                     None => ClaudeSource::default_root()?,
                 };
-                Box::new(ClaudeSource::with_mapping(
+                out.push(Box::new(ClaudeSource::with_mapping(
                     root,
                     claude_project_mapping(opts),
-                ))
+                )));
             }
-            AgentKind::Codex => Box::new(match opts.codex_dir.as_ref() {
-                // 显式自定义根：只在选定目录内递归（单根）。
-                Some(p) => CodexSource::new(p.clone()),
-                // 默认来源：sessions + archived_sessions 两个根（H02）。
-                None => CodexSource::with_roots(CodexSource::default_roots()?),
-            }),
-        });
+            AgentKind::Codex => {
+                out.push(Box::new(match opts.codex_dir.as_ref() {
+                    // 显式自定义根：只在选定目录内递归（单根）。
+                    Some(p) => CodexSource::new(p.clone()),
+                    // 默认来源：sessions + archived_sessions 两个根（H02）。
+                    None => CodexSource::with_roots(CodexSource::default_roots()?),
+                }));
+            }
+            // WB03/WB04 接入 WorkBuddy 适配器与默认根后在此构造来源实例
+            AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => {}
+        }
     }
     Ok(out)
 }
@@ -1240,6 +1249,10 @@ pub fn effective_source_roots(
         (Some(d), _) => vec![d.to_path_buf()],
         (None, AgentKind::ClaudeCode) => vec![ClaudeSource::default_root()?],
         (None, AgentKind::Codex) => CodexSource::default_roots()?,
+        // WB04 接入两个 WorkBuddy 的默认根后在此扩展
+        (None, AgentKind::WorkBuddy | AgentKind::WorkBuddyAi) => {
+            anyhow::bail!("应用 {} 的默认来源根尚未接入", kind.as_str())
+        }
     })
 }
 
@@ -1260,7 +1273,9 @@ pub fn effective_source_dirs_from_settings(
     settings: &crate::settings::Settings,
 ) -> Result<Vec<(AgentKind, std::path::PathBuf)>> {
     let mut out = Vec::new();
-    for kind in AgentKind::ALL {
+    // WB04 接入两版 WorkBuddy 的默认根与设置键后扩展为 AgentKind::ALL；
+    // 当前仅遍历已接入默认根的应用，保持采集校验行为不变。
+    for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
         let cfg = settings.source_config(kind);
         let dir = cfg.dir.as_deref().map(std::path::Path::new);
         for root in effective_source_roots(kind, cfg.enabled, dir)? {
@@ -1377,6 +1392,8 @@ fn collect_all_with_sources(
                         match kind {
                             AgentKind::ClaudeCode => "Claude",
                             AgentKind::Codex => "Codex",
+                            AgentKind::WorkBuddy => "WorkBuddy",
+                            AgentKind::WorkBuddyAi => "WorkBuddy AI",
                         },
                         root.display()
                     ),
@@ -2663,7 +2680,9 @@ pub struct SourceStatus {
 
 pub fn source_status(settings: &crate::settings::Settings) -> Result<Vec<SourceStatus>> {
     let mut out = Vec::new();
-    for kind in AgentKind::ALL {
+    // WB04 接入两版 WorkBuddy 的默认根与设置键后扩展为 AgentKind::ALL；
+    // 当前仅遍历已接入默认根的应用，保持设置页行为不变。
+    for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
         let cfg = settings.source_config(kind);
         let dir: Option<PathBuf> = cfg.dir.map(PathBuf::from);
         let root = match dir {
@@ -2673,6 +2692,10 @@ pub fn source_status(settings: &crate::settings::Settings) -> Result<Vec<SourceS
             None => match kind {
                 AgentKind::ClaudeCode => ClaudeSource::default_root()?,
                 AgentKind::Codex => CodexSource::default_root()?,
+                // WB04 接入两个 WorkBuddy 的默认根后在此扩展
+                AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => {
+                    anyhow::bail!("应用 {} 的默认来源根尚未接入", kind.as_str())
+                }
             },
         };
         let exists = root.is_dir();

@@ -111,6 +111,9 @@ pub fn source_dir_override(kind: crate::model::AgentKind) -> Option<PathBuf> {
         let name = match kind {
             crate::model::AgentKind::ClaudeCode => "claude",
             crate::model::AgentKind::Codex => "codex",
+            // WB04 接入两版 WorkBuddy 的验收来源目录
+            crate::model::AgentKind::WorkBuddy => "workbuddy",
+            crate::model::AgentKind::WorkBuddyAi => "workbuddy-ai",
         };
         r.join("sources").join(name)
     })

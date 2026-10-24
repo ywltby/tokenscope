@@ -172,6 +172,8 @@ impl AgentSources {
         match kind {
             crate::model::AgentKind::ClaudeCode => self.claude.as_ref(),
             crate::model::AgentKind::Codex => self.codex.as_ref(),
+            // WB04 接入两个 WorkBuddy 的设置键
+            crate::model::AgentKind::WorkBuddy | crate::model::AgentKind::WorkBuddyAi => None,
         }
     }
 
@@ -180,6 +182,7 @@ impl AgentSources {
         match kind {
             crate::model::AgentKind::ClaudeCode => self.claude.as_mut(),
             crate::model::AgentKind::Codex => self.codex.as_mut(),
+            crate::model::AgentKind::WorkBuddy | crate::model::AgentKind::WorkBuddyAi => None,
         }
     }
 }

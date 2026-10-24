@@ -36,6 +36,8 @@ pub fn parse_agent(agent: Option<&str>) -> Result<Option<AgentKind>, String> {
         None | Some("all") => Ok(None),
         Some("claude") => Ok(Some(AgentKind::ClaudeCode)),
         Some("codex") => Ok(Some(AgentKind::Codex)),
+        Some("workbuddy") => Ok(Some(AgentKind::WorkBuddy)),
+        Some("workbuddy-ai") => Ok(Some(AgentKind::WorkBuddyAi)),
         Some(other) => Err(format!("未知 agent: {other}")),
     }
 }
@@ -46,6 +48,8 @@ pub(crate) fn parse_agent_str(agent: &str) -> anyhow::Result<AgentKind> {
     match agent {
         "claude" => Ok(AgentKind::ClaudeCode),
         "codex" => Ok(AgentKind::Codex),
+        "workbuddy" => Ok(AgentKind::WorkBuddy),
+        "workbuddy-ai" => Ok(AgentKind::WorkBuddyAi),
         other => Err(anyhow::anyhow!("未知 agent: {other}")),
     }
 }
@@ -55,11 +59,16 @@ pub(crate) fn set_source_config(
     s: &mut tokenscope::settings::Settings,
     kind: AgentKind,
     cfg: tokenscope::settings::SourceConfig,
-) {
+) -> anyhow::Result<()> {
     match kind {
         AgentKind::ClaudeCode => s.sources.claude = Some(cfg),
         AgentKind::Codex => s.sources.codex = Some(cfg),
+        // WB04 扩展两版 WorkBuddy 的设置键后在此写回
+        AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => {
+            anyhow::bail!("应用 {} 的来源设置尚未接入", kind.as_str())
+        }
     }
+    Ok(())
 }
 
 /// **主线程纪律（用户反馈启动卡顿的根因）**：Tauri v2 的同步 command 在
@@ -734,7 +743,7 @@ pub(crate) fn source_config_set_impl(
         if let Some(slot) = s.sources.config_mut(kind) {
             *slot = next.clone();
         } else {
-            set_source_config(s, kind, next.clone());
+            set_source_config(s, kind, next.clone())?;
         }
         Ok(())
     })?;
@@ -775,7 +784,7 @@ pub(crate) fn source_auto_set_impl(
         if let Some(slot) = s.sources.config_mut(kind) {
             *slot = next.clone();
         } else {
-            set_source_config(s, kind, next.clone());
+            set_source_config(s, kind, next.clone())?;
         }
         Ok(())
     })?;
@@ -1034,7 +1043,7 @@ pub(crate) fn source_path_remove_impl(
         let mut next = cfg;
         tokenscope::source::discovery::remove_manual_from_row(&mut next, &row_paths)
             .map_err(anyhow::Error::msg)?;
-        set_source_config(s, kind, next);
+        set_source_config(s, kind, next)?;
         Ok(())
     })?;
     log::info!("来源手动目录已移除：{agent} {id}");
@@ -1100,7 +1109,7 @@ pub(crate) fn source_path_set_enabled_impl(
         let mut next = cfg;
         tokenscope::source::discovery::set_row_enabled(&mut next, &row_paths, enabled)
             .map_err(anyhow::Error::msg)?;
-        set_source_config(s, kind, next);
+        set_source_config(s, kind, next)?;
         Ok(())
     })?;
     log::info!("来源行启停已保存：{agent} {id} enabled={enabled}");
