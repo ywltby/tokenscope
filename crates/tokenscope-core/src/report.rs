@@ -148,11 +148,10 @@ pub struct SourcePlan {
 }
 
 impl SummaryOptions {
-    fn enabled(&self, claude: bool) -> bool {
-        if claude {
-            self.claude_enabled != Some(false)
-        } else {
-            self.codex_enabled != Some(false)
+    fn enabled(&self, kind: AgentKind) -> bool {
+        match kind {
+            AgentKind::ClaudeCode => self.claude_enabled != Some(false),
+            AgentKind::Codex => self.codex_enabled != Some(false),
         }
     }
 }
@@ -682,7 +681,7 @@ pub(crate) fn collection_key(opts: &SummaryOptions) -> String {
                 opts.claude_projects_path
             ),
             // Claude 停用时映射不参与采集，键里固定为 disabled（不读账户配置）。
-            if opts.enabled(true) {
+            if opts.enabled(AgentKind::ClaudeCode) {
                 claude_project_mapping(opts).revision().to_string()
             } else {
                 "disabled".to_string()
@@ -1077,13 +1076,10 @@ pub(crate) fn strip_verbatim(path: PathBuf) -> PathBuf {
 fn collect_inner(opts: &SummaryOptions, generation: u64) -> Result<CollectionSnapshot> {
     let kinds: Vec<AgentKind> = match opts.agent {
         Some(k) => vec![k],
-        None => vec![AgentKind::ClaudeCode, AgentKind::Codex],
+        None => AgentKind::ALL.to_vec(),
     };
     // C1：停用的来源零采集、零告警，状态由 source_status 呈现。
-    let active: Vec<AgentKind> = kinds
-        .into_iter()
-        .filter(|k| opts.enabled(*k == AgentKind::ClaudeCode))
-        .collect();
+    let active: Vec<AgentKind> = kinds.into_iter().filter(|k| opts.enabled(*k)).collect();
     let sources = make_sources(opts, &active)?;
     let collected = collect_all_with_sources(sources, opts, generation)?;
     Ok(CollectionSnapshot {
@@ -1264,8 +1260,8 @@ pub fn effective_source_dirs_from_settings(
     settings: &crate::settings::Settings,
 ) -> Result<Vec<(AgentKind, std::path::PathBuf)>> {
     let mut out = Vec::new();
-    for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
-        let cfg = settings.source_config(kind == AgentKind::ClaudeCode);
+    for kind in AgentKind::ALL {
+        let cfg = settings.source_config(kind);
         let dir = cfg.dir.as_deref().map(std::path::Path::new);
         for root in effective_source_roots(kind, cfg.enabled, dir)? {
             out.push((kind, root));
@@ -2667,13 +2663,8 @@ pub struct SourceStatus {
 
 pub fn source_status(settings: &crate::settings::Settings) -> Result<Vec<SourceStatus>> {
     let mut out = Vec::new();
-    for claude in [true, false] {
-        let kind = if claude {
-            AgentKind::ClaudeCode
-        } else {
-            AgentKind::Codex
-        };
-        let cfg = settings.source_config(claude);
+    for kind in AgentKind::ALL {
+        let cfg = settings.source_config(kind);
         let dir: Option<PathBuf> = cfg.dir.map(PathBuf::from);
         let root = match dir {
             Some(p) => p,

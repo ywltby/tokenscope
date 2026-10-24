@@ -104,10 +104,15 @@ pub fn data_dir_override() -> Option<PathBuf> {
 
 /// agent 来源根的覆盖值。验收模式下**不允许**回退到真实 `~/.claude`、
 /// `~/.codex`：即使隔离目录不存在也照实报告"目录不存在"，不改读真实来源。
-pub fn source_dir_override(claude: bool) -> Option<PathBuf> {
+/// 目录名沿用隔离根既有布局（`sources/claude`、`sources/codex`，与
+/// prepare-native-acceptance.ps1 的生成契约一致），不随 `as_str` 变化。
+pub fn source_dir_override(kind: crate::model::AgentKind) -> Option<PathBuf> {
     imp::root().map(|r| {
-        r.join("sources")
-            .join(if claude { "claude" } else { "codex" })
+        let name = match kind {
+            crate::model::AgentKind::ClaudeCode => "claude",
+            crate::model::AgentKind::Codex => "codex",
+        };
+        r.join("sources").join(name)
     })
 }
 

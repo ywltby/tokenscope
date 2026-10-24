@@ -214,8 +214,8 @@ impl DiscoveryContext {
     /// 生产上下文：默认锚点与采集侧同源（acceptance 构建自动落到隔离根），
     /// 环境用启动快照——本函数不在采集轮次调用。
     pub fn production(env: StartupEnv) -> Result<Self> {
-        if let Some(claude_src) = crate::acceptance::source_dir_override(true) {
-            let codex_src = crate::acceptance::source_dir_override(false)
+        if let Some(claude_src) = crate::acceptance::source_dir_override(AgentKind::ClaudeCode) {
+            let codex_src = crate::acceptance::source_dir_override(AgentKind::Codex)
                 .ok_or_else(|| anyhow::anyhow!("验收根缺少 codex 来源目录"))?;
             return Ok(Self {
                 claude_default_root: claude_src.join("projects"),

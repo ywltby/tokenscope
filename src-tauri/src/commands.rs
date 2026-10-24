@@ -40,6 +40,28 @@ pub fn parse_agent(agent: Option<&str>) -> Result<Option<AgentKind>, String> {
     }
 }
 
+/// 来源管理接口的 agent 字符串解析（必填形态）；WB01 起集中在一处，
+/// 应用列表扩展时只改这里与 `parse_agent`。
+pub(crate) fn parse_agent_str(agent: &str) -> anyhow::Result<AgentKind> {
+    match agent {
+        "claude" => Ok(AgentKind::ClaudeCode),
+        "codex" => Ok(AgentKind::Codex),
+        other => Err(anyhow::anyhow!("未知 agent: {other}")),
+    }
+}
+
+/// 按应用写回来源配置（槽位未配置时新建 Some）。
+pub(crate) fn set_source_config(
+    s: &mut tokenscope::settings::Settings,
+    kind: AgentKind,
+    cfg: tokenscope::settings::SourceConfig,
+) {
+    match kind {
+        AgentKind::ClaudeCode => s.sources.claude = Some(cfg),
+        AgentKind::Codex => s.sources.codex = Some(cfg),
+    }
+}
+
 /// **主线程纪律（用户反馈启动卡顿的根因）**：Tauri v2 的同步 command 在
 /// 主线程执行，扫描/解析/缓存/网络等重活一律 `async` + `spawn_blocking`
 /// 丢到后台线程池，GUI 主线程零阻塞。
@@ -311,8 +333,8 @@ pub(crate) fn source_plans_from_with(
 ) -> Vec<tokenscope::report::SourcePlan> {
     let resolved = tokenscope::source::discovery::resolve_sources(
         ctx,
-        &s.source_config(true),
-        &s.source_config(false),
+        &s.source_config(AgentKind::ClaudeCode),
+        &s.source_config(AgentKind::Codex),
     );
     resolved
         .roots
@@ -360,8 +382,8 @@ pub(crate) fn resolve_source_set_in(
     let plans = source_plans_from_with(&s, ctx);
     Ok(ResolvedSourceSet {
         plans,
-        claude_enabled: s.source_config(true).enabled,
-        codex_enabled: s.source_config(false).enabled,
+        claude_enabled: s.source_config(AgentKind::ClaudeCode).enabled,
+        codex_enabled: s.source_config(AgentKind::Codex).enabled,
     })
 }
 
@@ -699,29 +721,25 @@ pub(crate) fn source_config_set_impl(
     enabled: bool,
     dir: Option<String>,
 ) -> anyhow::Result<tokenscope::settings::SourceConfig> {
-    let claude = match agent {
-        "claude" => true,
-        "codex" => false,
-        other => return Err(anyhow::anyhow!("未知 agent: {other}")),
-    };
+    let kind = parse_agent_str(agent)?;
     if dir.is_some() {
         // 旧 UI 的目录写入语义已废弃（PR3 §9.5 第 2 条）：忽略并告警，
         // 不静默把旧语义的"目录覆盖"重新写回配置。
         log::warn!("source_config_set 的 dir 参数已废弃（PR3 追加目录管理取代）；本次调用忽略 dir");
     }
     tokenscope::settings::update(path, move |s| {
-        let cfg = s.source_config(claude);
+        let cfg = s.source_config(kind);
         let mut next = cfg;
         next.enabled = enabled;
-        if claude {
-            s.sources.claude = Some(next);
+        if let Some(slot) = s.sources.config_mut(kind) {
+            *slot = next.clone();
         } else {
-            s.sources.codex = Some(next);
+            set_source_config(s, kind, next.clone());
         }
         Ok(())
     })?;
     log::info!("来源总开关已保存：{agent} enabled={enabled}");
-    let committed = tokenscope::settings::load(path)?.source_config(claude);
+    let committed = tokenscope::settings::load(path)?.source_config(kind);
     Ok(committed)
 }
 
@@ -749,25 +767,21 @@ pub(crate) fn source_auto_set_impl(
     agent: &str,
     enabled: bool,
 ) -> anyhow::Result<bool> {
-    let claude = match agent {
-        "claude" => true,
-        "codex" => false,
-        other => return Err(anyhow::anyhow!("未知 agent: {other}")),
-    };
+    let kind = parse_agent_str(agent)?;
     tokenscope::settings::update(path, move |s| {
-        let cfg = s.source_config(claude);
+        let cfg = s.source_config(kind);
         let mut next = cfg;
         next.auto_discover = enabled;
-        if claude {
-            s.sources.claude = Some(next);
+        if let Some(slot) = s.sources.config_mut(kind) {
+            *slot = next.clone();
         } else {
-            s.sources.codex = Some(next);
+            set_source_config(s, kind, next.clone());
         }
         Ok(())
     })?;
     log::info!("来源自动发现已保存：{agent} enabled={enabled}");
     let committed = tokenscope::settings::load(path)?
-        .source_config(claude)
+        .source_config(kind)
         .auto_discover;
     Ok(committed)
 }
@@ -828,8 +842,8 @@ pub(crate) fn source_paths_list_impl(
     let s = tokenscope::settings::load(settings_path).map_err(|e| format!("{e:#}"))?;
     let resolved = tokenscope::source::discovery::resolve_sources(
         ctx,
-        &s.source_config(true),
-        &s.source_config(false),
+        &s.source_config(AgentKind::ClaudeCode),
+        &s.source_config(AgentKind::Codex),
     );
     Ok(resolved
         .roots
@@ -889,18 +903,14 @@ pub(crate) fn source_path_add_impl(
     agent: &str,
     raw: &str,
 ) -> anyhow::Result<SourcePathAddOutcome> {
-    let kind = match agent {
-        "claude" => tokenscope::model::AgentKind::ClaudeCode,
-        "codex" => tokenscope::model::AgentKind::Codex,
-        other => return Err(anyhow::anyhow!("未知 agent: {other}")),
-    };
+    let kind = parse_agent_str(agent)?;
     let trimmed = tokenscope::settings::validate_additional_path_shape(raw, home)
         .map_err(anyhow::Error::msg)?;
     let s = tokenscope::settings::load(settings_path).map_err(anyhow::Error::msg)?;
     let resolved = tokenscope::source::discovery::resolve_sources(
         ctx,
-        &s.source_config(true),
-        &s.source_config(false),
+        &s.source_config(tokenscope::model::AgentKind::ClaudeCode),
+        &s.source_config(tokenscope::model::AgentKind::Codex),
     );
     // 同应用：全部已有行（含停用与缺失）参与相同/父子比较
     let mut same_app: Vec<std::path::PathBuf> = Vec::new();
@@ -948,7 +958,7 @@ pub(crate) fn source_path_add_impl(
         .unwrap_or_else(|| tokenscope::settings::normalized_key(&trimmed));
     let entry_path = trimmed.display().to_string();
     tokenscope::settings::update(settings_path, move |s| {
-        let cfg = s.source_config(kind == tokenscope::model::AgentKind::ClaudeCode);
+        let cfg = s.source_config(kind);
         let mut next = cfg;
         next.additional_paths
             .push(tokenscope::settings::AdditionalSourcePath {
@@ -995,16 +1005,12 @@ pub(crate) fn source_path_remove_impl(
     agent: &str,
     id: &str,
 ) -> anyhow::Result<()> {
-    let kind = match agent {
-        "claude" => tokenscope::model::AgentKind::ClaudeCode,
-        "codex" => tokenscope::model::AgentKind::Codex,
-        other => return Err(anyhow::anyhow!("未知 agent: {other}")),
-    };
+    let kind = parse_agent_str(agent)?;
     let s = tokenscope::settings::load(settings_path).map_err(anyhow::Error::msg)?;
     let resolved = tokenscope::source::discovery::resolve_sources(
         ctx,
-        &s.source_config(true),
-        &s.source_config(false),
+        &s.source_config(tokenscope::model::AgentKind::ClaudeCode),
+        &s.source_config(tokenscope::model::AgentKind::Codex),
     );
     if !tokenscope::source::discovery::row_exists(&resolved.roots, kind, id) {
         return Err(anyhow::anyhow!("来源已变化，请重试"));
@@ -1024,15 +1030,11 @@ pub(crate) fn source_path_remove_impl(
             .collect(),
     };
     tokenscope::settings::update(settings_path, move |s| {
-        let cfg = s.source_config(kind == tokenscope::model::AgentKind::ClaudeCode);
+        let cfg = s.source_config(kind);
         let mut next = cfg;
         tokenscope::source::discovery::remove_manual_from_row(&mut next, &row_paths)
             .map_err(anyhow::Error::msg)?;
-        if kind == tokenscope::model::AgentKind::ClaudeCode {
-            s.sources.claude = Some(next);
-        } else {
-            s.sources.codex = Some(next);
-        }
+        set_source_config(s, kind, next);
         Ok(())
     })?;
     log::info!("来源手动目录已移除：{agent} {id}");
@@ -1067,16 +1069,12 @@ pub(crate) fn source_path_set_enabled_impl(
     id: &str,
     enabled: bool,
 ) -> anyhow::Result<()> {
-    let kind = match agent {
-        "claude" => tokenscope::model::AgentKind::ClaudeCode,
-        "codex" => tokenscope::model::AgentKind::Codex,
-        other => return Err(anyhow::anyhow!("未知 agent: {other}")),
-    };
+    let kind = parse_agent_str(agent)?;
     let s = tokenscope::settings::load(settings_path).map_err(anyhow::Error::msg)?;
     let resolved = tokenscope::source::discovery::resolve_sources(
         ctx,
-        &s.source_config(true),
-        &s.source_config(false),
+        &s.source_config(tokenscope::model::AgentKind::ClaudeCode),
+        &s.source_config(tokenscope::model::AgentKind::Codex),
     );
     let row = resolved
         .roots
@@ -1098,15 +1096,11 @@ pub(crate) fn source_path_set_enabled_impl(
             .collect(),
     };
     tokenscope::settings::update(settings_path, move |s| {
-        let cfg = s.source_config(kind == tokenscope::model::AgentKind::ClaudeCode);
+        let cfg = s.source_config(kind);
         let mut next = cfg;
         tokenscope::source::discovery::set_row_enabled(&mut next, &row_paths, enabled)
             .map_err(anyhow::Error::msg)?;
-        if kind == tokenscope::model::AgentKind::ClaudeCode {
-            s.sources.claude = Some(next);
-        } else {
-            s.sources.codex = Some(next);
-        }
+        set_source_config(s, kind, next);
         Ok(())
     })?;
     log::info!("来源行启停已保存：{agent} {id} enabled={enabled}");
@@ -2062,13 +2056,15 @@ mod tests {
         // 追加一个与默认根不同的手动目录
         source_path_add_impl(&path, &ctx, &home, "claude", &manual.display().to_string()).unwrap();
         let s = tokenscope::settings::load(&path).unwrap();
-        let manual_path = s.source_config(true).additional_paths[0].path.clone();
+        let manual_path = s.source_config(AgentKind::ClaudeCode).additional_paths[0]
+            .path
+            .clone();
 
         // 行 id：默认根与手动根各成一行（不同身份）
         let resolved = tokenscope::source::discovery::resolve_sources(
             &ctx,
-            &s.source_config(true),
-            &s.source_config(false),
+            &s.source_config(AgentKind::ClaudeCode),
+            &s.source_config(AgentKind::Codex),
         );
         let manual_row = resolved
             .roots
@@ -2094,26 +2090,39 @@ mod tests {
         // 禁用默认根行：排除项写入，手动项不受影响
         source_path_set_enabled_impl(&path, &ctx, "claude", &default_row, false).unwrap();
         let s = tokenscope::settings::load(&path).unwrap();
-        let cfg = s.source_config(true);
+        let cfg = s.source_config(AgentKind::ClaudeCode);
         assert_eq!(cfg.excluded_auto_paths.len(), 1, "排除项写入");
         assert!(cfg.additional_paths[0].enabled, "手动项不受影响");
 
         // 禁用手动行：手动项 enabled=false
         source_path_set_enabled_impl(&path, &ctx, "claude", &manual_row, false).unwrap();
         let s = tokenscope::settings::load(&path).unwrap();
-        assert!(!s.source_config(true).additional_paths[0].enabled);
+        assert!(!s.source_config(AgentKind::ClaudeCode).additional_paths[0].enabled);
 
         // 移除手动项：additional 清空，排除项保留（默认根保持停用）
         source_path_remove_impl(&path, &ctx, "claude", &manual_row).unwrap();
         let s = tokenscope::settings::load(&path).unwrap();
-        assert!(s.source_config(true).additional_paths.is_empty());
-        assert_eq!(s.source_config(true).excluded_auto_paths.len(), 1);
+        assert!(
+            s.source_config(AgentKind::ClaudeCode)
+                .additional_paths
+                .is_empty()
+        );
+        assert_eq!(
+            s.source_config(AgentKind::ClaudeCode)
+                .excluded_auto_paths
+                .len(),
+            1
+        );
 
         // 纯自动行不可移除；未知 id → 来源已变化；开启 → 排除项清空
         assert!(source_path_remove_impl(&path, &ctx, "claude", &default_row).is_err());
         source_path_set_enabled_impl(&path, &ctx, "claude", &default_row, true).unwrap();
         let s = tokenscope::settings::load(&path).unwrap();
-        assert!(s.source_config(true).excluded_auto_paths.is_empty());
+        assert!(
+            s.source_config(AgentKind::ClaudeCode)
+                .excluded_auto_paths
+                .is_empty()
+        );
         assert!(source_path_set_enabled_impl(&path, &ctx, "claude", "z:/gone", true).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }

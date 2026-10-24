@@ -14,6 +14,9 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
+    /// 全部已接入应用（穷举点一律取自这里，新增应用时只改枚举与本表）。
+    pub const ALL: [AgentKind; 2] = [AgentKind::ClaudeCode, AgentKind::Codex];
+
     pub fn as_str(self) -> &'static str {
         match self {
             AgentKind::ClaudeCode => "claude-code",

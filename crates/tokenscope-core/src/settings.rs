@@ -154,12 +154,34 @@ impl serde::Serialize for SourceConfig {
 }
 
 /// 各来源的覆盖配置；None = 全默认（启用 + 默认目录）。
+///
+/// 结构字段仍是 `claude` / `codex` 两个键（序列化格式不变）；按应用取值走
+/// [`AgentSources::config`] / [`AgentSources::config_mut`]，穷举应用时不散落
+/// 布尔分支。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct AgentSources {
     #[serde(default)]
     pub claude: Option<SourceConfig>,
     #[serde(default)]
     pub codex: Option<SourceConfig>,
+}
+
+impl AgentSources {
+    /// 按应用取覆盖配置（None = 全默认）。
+    pub fn config(&self, kind: crate::model::AgentKind) -> Option<&SourceConfig> {
+        match kind {
+            crate::model::AgentKind::ClaudeCode => self.claude.as_ref(),
+            crate::model::AgentKind::Codex => self.codex.as_ref(),
+        }
+    }
+
+    /// 按应用取可变覆盖配置。
+    pub fn config_mut(&mut self, kind: crate::model::AgentKind) -> Option<&mut SourceConfig> {
+        match kind {
+            crate::model::AgentKind::ClaudeCode => self.claude.as_mut(),
+            crate::model::AgentKind::Codex => self.codex.as_mut(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -273,13 +295,8 @@ fn default_true() -> bool {
 
 impl Settings {
     /// 取某来源的有效配置（未配置 → 全默认）。
-    pub fn source_config(&self, claude: bool) -> SourceConfig {
-        let c = if claude {
-            &self.sources.claude
-        } else {
-            &self.sources.codex
-        };
-        c.clone().unwrap_or_default()
+    pub fn source_config(&self, kind: crate::model::AgentKind) -> SourceConfig {
+        self.sources.config(kind).cloned().unwrap_or_default()
     }
 }
 
@@ -1098,7 +1115,7 @@ mod tests {
     fn test_source_config_defaults_and_lookup() {
         // C1（test_source_config_roundtrip 的默认侧）：未配置 → 启用 + 默认目录。
         let s = Settings::default();
-        let c = s.source_config(true);
+        let c = s.source_config(crate::model::AgentKind::ClaudeCode);
         assert!(c.enabled);
         assert!(c.dir.is_none());
         // 旧版 settings.json（无 sources 字段）→ 经遗留导入向前兼容。
@@ -1106,7 +1123,7 @@ mod tests {
         let dir = dir.parent().unwrap();
         std::fs::write(dir.join("settings.json"), r#"{"price_auto_sync": true}"#).unwrap();
         let s = load(&dir.join("settings.toml")).unwrap();
-        assert!(s.source_config(false).enabled);
+        assert!(s.source_config(crate::model::AgentKind::Codex).enabled);
         std::fs::remove_dir_all(dir).ok();
     }
 
