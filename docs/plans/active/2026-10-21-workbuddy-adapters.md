@@ -1,6 +1,6 @@
 # 新增 WorkBuddy（国内版）与 WorkBuddy AI（国际版）用量来源
 
-> 状态：**草案，待用户确认后实施**。2026-10-21 按用户要求移入 `docs/plans/active/`（此时 main 只合入了[剩余验收收口计划](2026-10-21-acceptance-closure.md)本身，代码未变，§1 行号仍有效）。收口计划的 B2 会改动来源路径与验收接线，**开始实施前必须按当时的 main 重新核对 §1 的事实与行号**；用户确认后再在整合计划登记责任编号。
+> 状态：**2026-10-24 实施前复核草案，待用户确认修订文本与排期，尚未实施。** 分支 `docs/workbuddy-plan` 已合入 main `a527441`（v0.5.13）。§1 保留 2026-10-21 的真实样本记录，当前代码复核见 §1.1；旧“等验收收口完成后实施”的前置条件尚未满足，见 §1.2。用户确认后再在整合计划登记责任编号。
 > 用户 2026-10-21 决定：
 > - 国内版与国际版**分成两个应用**；
 > - 隐私政策**增加修订号**，老用户升级后重新询问同意；
@@ -73,7 +73,7 @@
 - **删除标记不删文件**：在 WorkBuddy 内删除的本地会话，转写文件仍留在原位，照常计入。
 - **敏感文件**：`models.json` 明文保存自定义端点的 `apiKey`；`traces/` 含完整提示词与模型响应；`file-history/` 是用户代码快照。
 
-代码现状（以 2026-10-21 的 main 为准，移入计划时重新核对）：
+代码记录（2026-10-21 的历史时点；当前复核见 §1.1，不把旧行号当实施定位依据）：
 - **`AgentKind` 只有两个值**（`model.rs:8`）。以下位置用穷举 `match` 或写死的两元素列表处理它：
   - 核心库：`dedupe.rs`、`report.rs`（多处，含 `1079` 与 `1266` 两处写死的应用列表）、`import/ccs.rs`、`history.rs` 的 `parse_agent`；
   - 壳：`commands.rs` 的字符串映射。
@@ -91,6 +91,29 @@
   - `Dashboard.vue` 的来源图标选项。
   - DESIGN.md 规定汇总页来源控件只显示图标。
 - **跨应用身份**：`model.rs` 的 `same_source_identity` 中，Claude 用原生强身份，Codex 用保守重播指纹 `codex-usage`。
+
+### 1.1 2026-10-24 当前代码复核
+
+核查基线：main `a527441`，应用 0.5.13；计划分支合入该 main 的提交为 `83e057c`。只读核对仓库代码，没有运行真实来源采集，也未重跑 §1 的真实数据统计；2881 / 656 等数字仍是历史样本，不是本次实测或未来必须凑齐的预期。
+
+| 项目 | 当前事实与实施影响 |
+| --- | --- |
+| 两应用抽象 | `crates/tokenscope-core/src/model.rs` 的 `AgentKind` 仍只有 ClaudeCode / Codex；`settings.rs:276` 的 `source_config(bool)`、`acceptance.rs:107` 的 `source_dir_override(bool)` 与 `AgentSources { claude, codex }` 仍待 WB01 泛化。`report.rs` 的写死列表在 `1080`、`1267`，按符号查找全部调用方，不按旧行号替换。 |
+| WB01 旧测试 | `settings.rs:1101/1109` 的既有测试直接传入 `true/false`。改签名后需要仅适配调用参数；原“全部现有测试无需修改”不能按字面执行，修订边界见 WB01。 |
+| 原生统一验收 | PR #31 / v0.5.9 已交付 `ui-identity`、`ui-ccs-import`、`ui-pricing`，入口在 `frontend/scripts/contracts/native-*.mjs`，共用 `frontend/scripts/lib/native-unified.mjs`。WB07 在现有场景追加覆盖，不新建同名场景，不重做 B2。 |
+| 验收根保护 | `acceptance.rs` 的验收根拒绝范围目前包括真实 `~/.tokenscope`、`~/.claude`、`~/.codex`。WB04 必须把两个 WorkBuddy 真实目录也纳入拒绝范围，并证明别名路径不能绕过；普通构建仍无覆盖通道。 |
+| 隐私接线 | `settings::read_consent` 仍只判断布尔同意；`src-tauri/src/privacy.rs` 已有 `consent_saved` / `business_ready` 追踪接线。WB05 复用它核对“同意原子落盘先于业务读取”，不另建日志体系，不把现有 N10 / P06 标为完成。 |
+| 历史核验工具 | `scripts/inspect_history.py:136` 的期望事件 app 白名单只有 `claude-code` / `codex`。WB02 追加两项及反例测试；未知 app 仍失败，不能删除这条校验。 |
+| 现有规则版本 | `report::PARSE_RULES_REVISION = 3`、`history::PARSER_REVISION = 2`、`IDENTITY_REVISION = 1`、`SETTINGS_FORMAT_REVISION = 2`。Codex 压缩补计及模型纠正已经合入，WB01 等价基线必须包含这两条路径。 |
+| 测试入口 | PR #42 / #46 已交付 `scripts/run_rust_tests.py`；所有 Rust 验证经该入口隔离临时根，测试失败保留证据。不得回退为裸 Cargo 或运行写真实缓存的 `perf_real_data`。 |
+| 发布与升级 | v0.5.13 已发布并登记原资产基线；现有发布单跳矩阵为四起点 × present/deleted（八个作业）。未来合入以 `upgrade_baselines.py select` 的实际选择为准，不写死六组或八组。 |
+
+### 1.2 实施起点与待确认项
+
+- 2026-10-21 的前置要求是“等 Codex 完成收口计划后再实施”。当前验收收口只完成 B1 与 B2 自动化；N11 人工尾项待验，B3 待修订，B4 / B5 未执行。**需要用户决定仍等待，还是解除此串行依赖、让本专项独立推进；本次清理分支和修订草案不代替该决定。**
+- 推荐在用户确认后按 §5 的四个内部阶段连续实现，先保持一个产品 PR，避免用户拿到已扩充来源但尚无隐私修订或完整界面的中间版本。若 WB01 确需单独交付，先说明具体规模与额外发布成本，再由用户决定。
+- 开始 WB01 前补一次只读样本核查：只读取两版 `projects/**/*.jsonl` 与必要的版本元数据，输出计数、字段类型与四桶合计到忽略的隔离目录；不打开数据库、凭据、traces 或用户代码快照。发现与解析口径相矛盾的新形态，先记录脱敏的字段计数和原因并回到计划复核，不据旧统计强行归一。
+- WB01 的接口调用适配、WB02 核验工具白名单追加、WB04 验收根保护补齐及 WB05 旧同意验证顺序均列入本次修订，确认后才能改代码；不因此放宽其他既有断言。
 
 ## 2. 范围与不做
 
@@ -134,15 +157,28 @@
 
 ## 4. 任务
 
-每项先写会失败的测试（解析类必须带“合成样例 → 期望事件”的 fixture），在未改的代码上确认红，再实现。一个提交只解决一类问题。fixture 一律手工合成，不复制真实转写的任何内容。
+新增行为与修复先写会失败的测试（解析类必须带“合成样例 → 期望事件”的 fixture），在未改的代码上确认断言级红灯，再实现。WB01 是行为不变的重构，按下述基线与变异方式证明断言有效，不把编译错误算作行为红灯。一个提交只解决一类问题。fixture 一律手工合成，不复制真实转写的任何内容。任何构造 `SummaryOptions` 的测试同时注入临时 `cache_dir` 与 `pricing_index`；所有临时目录由创建者核实清理，失败证据放在隔离目录。
+
+实施定位清单（执行前再按符号核对，不因新增枚举顺手改无关实现）：
+
+| 任务 | 主要文件 |
+| --- | --- |
+| WB01 | `crates/tokenscope-core/src/{model,settings,acceptance,report}.rs`，以及这些接口的现有测试调用方；新增 `crates/tokenscope-core/tests/workbuddy_existing_equivalence.rs` |
+| WB02 | `crates/tokenscope-core/src/{model,dedupe,history,report}.rs`、`crates/tokenscope-core/src/import/ccs.rs`、`src-tauri/src/commands.rs`、`scripts/inspect_history.py` 与 `scripts/test_inspect_history.py` |
+| WB03 | 新增 `crates/tokenscope-core/src/source/workbuddy.rs`、`crates/tokenscope-core/tests/workbuddy_source.rs`、`crates/tokenscope-core/tests/fixtures/workbuddy/`；接入 `src/source/mod.rs` |
+| WB04 | `crates/tokenscope-core/src/{settings,acceptance,report}.rs`、`crates/tokenscope-core/src/source/discovery.rs`、`crates/tokenscope-core/tests/source_paths_collection.rs`、`crates/tokenscope-core/tests/acceptance_closure.rs`、`scripts/fixtures/settings_migrations.json` |
+| WB05 | `crates/tokenscope-core/src/settings.rs`、`src-tauri/src/privacy.rs`、`frontend/src/lib/privacyGate.ts`、`frontend/src/components/PrivacyConsentDialog.vue`、`docs/privacy.md`、升级夹具及其 Python / PowerShell 契约 |
+| WB06 | `frontend/src/types.ts`、`frontend/src/lib/viewFilters.ts`、`frontend/src/views/{Settings,Dashboard}.vue`、相关 fixture / 契约、`DESIGN.md` |
+| WB07 | `scripts/prepare-native-acceptance.ps1`、`frontend/scripts/contracts/native-identity.mjs`、`frontend/scripts/lib/native-unified.mjs`、`frontend/scripts/native-acceptance.mjs` 及相关纯函数测试 |
+| WB08–WB09 | 真实对账脚本与忽略的证据目录；`docs/stats-semantics.md`、`CLAUDE.md`、本计划与计划总账；版本与基线由既有脚本生成 |
 
 ### WB01 来源层泛化（无行为变化）
 
 - 把 `source_config(claude: bool)`、`source_dir_override(claude: bool)` 及类似的布尔分支改为按 `AgentKind` 取值；`AgentSources` 改为可按 `AgentKind` 访问，但**序列化格式保持不变**（仍是 `claude` / `codex` 两个键）。
 - `report.rs` 中写死的应用列表改为来自一处 `AgentKind::ALL`；前端的 `AGENT_IDS` 等暂不改动（放在 WB06）。
 - 验收：
-  - 全部现有测试无需修改即全绿；
-  - 新增一条等价测试：同一份合成 Claude/Codex 输入，泛化前后的汇总结果逐项相同；
+  - 既有测试保留所有行为断言；仅允许把旧布尔实参换成同义 `AgentKind`，逐处记录文件与原因，不删除用例、不改阈值、不改期望总量；
+  - 先在未泛化代码上为同一份合成 Claude/Codex 输入冻结事件集合、四桶、去重、费用、来源配置与设置序列化的期望，覆盖 Codex 压缩补计和线程设置模型归属；临时交换两应用的配置或验收根映射，确认对应断言会红，再恢复并实施泛化，前后逐项相同；
   - `settings.toml` 的读写往返结果逐字节不变。
 
 ### WB02 应用枚举、历史库身份与去重
@@ -156,6 +192,8 @@
   - `commands.rs` 的字符串映射；
   - `report.rs` 的显示名。
 - 历史库 `usage_events.app` 是 TEXT，不改表结构。核对 `persistent_format` 是否需要随新的 app 值记录一个修订；需要的话按 CLAUDE.md 同步升级基线规则。
+- `AgentKind::parse`、`scripts/inspect_history.py` 与验收汇总中的应用标签映射同时追加两项；先用合成的新 app 期望事件让现有白名单断言红，再实现。未知 app 的拒绝断言保留。
+- 版本常量先核对读取方与影响范围，再在 §6 写明是否变化及依据；不能为新增 app 顺手改 Claude/Codex 的身份或触发已有事实纠正。WB04 的设置格式 2→3 已是本计划明确的格式变化，持久指纹与起点选择都必须实测。
 - 测试：
   - 新 app 值写入、读出往返；
   - 两个应用的同一 `sessionId|messageId` 互不合并；
@@ -198,11 +236,13 @@
   - WorkBuddy AI：`~/.workbuddy-ai/projects`；
   - 两者都纳入现有的固定候选集。
 - 每个应用都有总开关、自动发现开关、按根排除、手动追加目录；跨应用的根相同或互为父子时，沿用现有冲突判定（例如有人把 `~/.workbuddy` 追加给 Claude）。
+- `~` 表示当前登录用户的主目录；自动发现使用当前用户的固定候选。界面显示实际解析路径，其他位置经用户手动追加纳入。
 - **设置格式**：
   - `sources` 增加 `workbuddy`、`workbuddy_ai` 两个键（缺失即默认：启用加自动发现）；
   - 连同 WB05 的同意修订号，`SETTINGS_FORMAT_REVISION` 升到 3；
   - `scripts/fixtures/settings_migrations.json` 增加 `1->3`、`2->3`、`3->3` 的规则（缺失字段的默认值）。
-- **验收隔离**：acceptance 构建的来源覆盖扩展到 `<root>/sources/workbuddy`、`<root>/sources/workbuddy-ai`。
+- **验收隔离**：acceptance 构建的来源覆盖扩展到 `<root>/sources/workbuddy`、`<root>/sources/workbuddy-ai`；验收根拒绝范围追加真实 `~/.workbuddy`、`~/.workbuddy-ai`，覆盖父子包含、规范化别名及 junction 等已有边界。测试使用伪造主目录与隔离根，不把真实目录当可写 fixture。
+- **全部测试的来源密闭**：启用两个新默认来源之前，审计所有 `SummaryOptions` 与 `DiscoveryContext` 构造点。旧测试仅设置 Claude / Codex 路径还不够；应为新增来源注入临时缺失根或显式禁用，确保默认发现不会读到真实 WorkBuddy 文件。因新字段而需要调整的既有 fixture 只补密闭配置，原断言保留，并在 §6 列出文件和原因。
 - 测试：发现层三件套（目录存在、不存在、冲突）；设置读写往返与旧格式迁移；`source_paths_*` 现有用例扩展到新应用；跨应用冲突用例。
 
 ### WB05 隐私政策修订与重新同意
@@ -218,8 +258,9 @@
   - 写明云端会话不统计；
   - “政策更新”一节说明修订号会触发重新询问。
 - **升级与验收工具**：
-  - `upgrade_fixture.py` 的授予同意和确保同意同时写入修订号；
-  - 升级后的核对改为两条：旧同意记录原样保留；当前修订号的测试同意可以进入业务；
+  - 历史版本夹具保持其原始同意格式；安装新版本后，**先保留旧同意状态并验证会被新闸门拒绝、没有业务读取，再执行当前修订的测试同意**，不能预先补修订号绕过重新询问路径；
+  - `upgrade_fixture.py` 的授予同意和确保同意在需要当前修订授权时同时写入修订号，升级链按每一跳的受测版本 / 格式取值，不能把最新修订硬塞给所有历史版本；
+  - 升级后的核对分开保存证据：测试同意前旧同意记录原样保留且新程序未进入业务；通过用户同意动作或显式测试授权后，当前修订号同意能进入业务。原有来源路径、设置、四桶和历史事件核对不减；
   - `prepare-native-acceptance.ps1` 与浏览器 mock（`privacySnapshot`）同步修订号。
   - 这些都会影响 Release 的升级矩阵，本地先跑 `scripts/test_*.py` 与升级脚本契约。
 - 测试：
@@ -251,6 +292,8 @@
   - 子 agent 用量已计入；
   - 失败调用没有被计入。
 - 在 `ui-source-paths` 中追加：停用 WorkBuddy AI 后，其已保存用量仍可查询。
+- 复用现有 I/O 追踪、计数代理、`evidence.json` 与 `launches[]`，四个应用的任何读取都必须落在隔离根；出现隔离外路径、外部连接或真实 `~/.tokenscope` 指纹变化时立即停止原生运行并报告。
+- 修改过的原生场景各在固定提交本地连续通过三次并记录耗时；原阈值、超时和必需检查不放宽，CI 时长增长先测量再决定是否接入。若需要加等待补偿、改 CSP 或放宽断言，先停下修订计划。
 
 ### WB08 真实数据只读对账（本地）
 
@@ -270,19 +313,44 @@
 ## 5. 交付方式与验收
 
 - **一个 PR**，按 WB01 → WB09 逐任务提交，避免发布只完成一半的版本。如果 WB01 的泛化改动过大、审阅困难，可以先单独合入 WB01（行为不变；因为改了产品输入，需要递增一次 patch），再合入其余部分。具体由执行时的改动规模决定，并向用户说明。
+- **内部实施阶段**（用户确认 §1.2 的排期后执行；阶段完成不等于已获合并批准）：
+
+  | 阶段 | 范围 | 进入下一阶段的证据 |
+  | --- | --- | --- |
+  | A 现有来源等价 | WB01；先冻结双来源结果与设置字节，再做变异与接口泛化 | 两种 Rust 构建通过，配置 / 来源未错接，原断言保留；旧接口测试仅作同义调用适配 |
+  | B 新来源核心与同意 | WB02–WB05；身份、解析、发现、设置格式及隐私修订 | 合成 fixture 断言级红绿；四应用互不双计；旧同意在新版本下零业务读取，新同意原子落盘后才解锁 |
+  | C 界面与验收装配 | WB06、WB07 的代码与纯函数测试 | 四应用界面、项目归并、原生检查函数及隐私升级场景先红后绿；现有用例不减 |
+  | D 固定受测物交付 | WB09 取号后构建固定产物，完成 WB07 原生三连跑、WB08 真实只读对账与文档回填 | 同一受测提交与资产哈希对应全部证据，PR 完整门禁通过；用户决定合并后才执行 main 发布验收与归档 |
+
+- **取号**：本次新功能按 minor；若合入时 main 仍是 0.5.13，预期为 **0.6.0**。先 fetch 并核验上一发布基线，再调用版本工具，同一产品 PR 只取号一次；本草案自身不取号。D 阶段的最终原生与真实对账都使用取号后的同一受测提交，不借用旧二进制的结果。
 - **本地门禁**：
-  - `cargo fmt`、clippy、两个成员的测试，均包含普通构建与 acceptance 构建；
-  - 前端 typecheck、format、test、build；
-  - `python -B -m unittest discover -s scripts -p "test_*.py"`。
+  - `cargo fmt --all -- --check`；`cargo clippy --locked --workspace --all-targets -- -D warnings`，另跑带 `--features acceptance` 的同一命令；
+  - 普通测试用 `python -B scripts/run_rust_tests.py -- cargo test --locked --workspace`，另跑带 `--features acceptance` 的同一入口；定向测试也经过该包装；
+  - `pnpm --dir frontend typecheck`、`format:check`、`test`、`build`、`test:e2e`；
+  - `python -B -m unittest discover -s scripts -p "test_*.py"`；
+  - 原生三连跑示例：`node frontend/scripts/native-acceptance.mjs --scenario ui-identity --events 8 --port 9500 --out qa-artifacts/workbuddy/identity-run1`，各次使用独立输出目录；`ui-source-paths` 与新增的隐私修订场景同样记录提交、产物哈希、命令与耗时，场景名以 WB05 最终登记为准。
 - **PR 检查**：`gate`、`native-ui`、Install test 全部成功。
+- **合并决定**：完成十条不变量自审及全部门禁后交用户复核，不自行合并，不改变现有 CI 分档、必需检查、CSP 或超时策略。
 - **合并后**：
-  - main 的 Release 中，安装、六个单跳升级与两条连续升级链全部成功，其中升级后重新询问同意的路径由升级脚本核对；
-  - 新版本发布后，在本机安装验证：
+  - main 的 CI、Native UI E2E 与 Release 均需实际成功；Release 中五场景安装、`upgrade_baselines.py select` 实际选出的全部单跳与两条连续升级链成功，其中升级后重新询问同意的路径由升级脚本核对；不写死单跳作业数；
+  - 自动化安装 / 卸载 / 升级只在 GitHub-hosted 一次性 Runner 执行。新版本发布后，交用户在本机手动安装验证，执行模型不在本机自动运行安装脚本或改真实数据目录：
     - 首次启动弹出“政策已更新”；
     - 同意后四个应用都出现在来源筛选中；
     - WorkBuddy 的数值与 WB08 的对账结果一致。
+  - 用户手动验证若暂不执行，按归档规则明确保留待验并由整合计划承接，不写成全验收通过。
 - **执行记录**：每个任务的提交、红绿摘要、对账结果写入本计划 §6。
 
 ## 6. 执行记录
 
-（实施时回填。）
+### 6.1 2026-10-24 分支准备与代码复核
+
+- 用户要求清理已合并分支并切到 `docs/workbuddy-plan` 研究实施顺序。已删除远端 `docs/test-temp-cleanup-b1-closeout`（PR #45）与 `test/rust-temp-cleanup`（PR #43），删除前核对其 tip 已合入 main；旧 worktrees 目录核对为空后删除。保留当前主工作树与 WorkBuddy 计划分支。
+- `83e057c` 合入 main `a527441`，无冲突，保留原计划提交 `aae449f`；当前产品版本仍为 0.5.13。此合并是分支同步，不是 WB01–WB09 的产品实现。
+- `dbfb051` 澄清 README 的当前用户默认路径、环境变量与手动追加含义，与设置页现有实现一致；只补正向说明，文档提交钩子通过。
+- 复核补齐两应用旧接口的测试调用、真实来源根拒绝范围、历史期望事件白名单、已上线统一原生场景及当前解析 / 设置版本，见 §1.1；修订后的实施安排见 §5。
+- `bump_version.py --check --base-ref origin/main` 实测版本 0.5.13→0.5.13，`release: false`；离线运行 `upgrade_baselines.py select --current-version 0.6.0` 选出 0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 四起点、八个单跳项。后者只是当前登记表的规划结果，不能代替未来 0.6.0 的构建或发布验收。
+- 本次只核对代码并修订文档，没有运行真实 WorkBuddy 采集或原生场景；旧样本数字未标为复核通过。待用户确认文本和前置排期后才开始功能开发，未分配新 N 编号，不改变 N01–N16 状态。
+
+### 6.2 产品实施记录（尚未开始）
+
+每个任务回填受测提交、红灯断言 / 变异、绿灯命令与耗时、独立对账结果、证据位置、PR / main 运行链接、十条不变量自审及偏离；没有执行的项目明确写待验，不能用计划中的命令代替执行结论。
