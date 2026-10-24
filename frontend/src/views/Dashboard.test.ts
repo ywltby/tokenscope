@@ -1246,9 +1246,22 @@ describe("Dashboard 来源筛选（纯图标分段）", () => {
     const group = w.find('[role="radiogroup"][aria-label="数据来源"]');
     expect(group.exists()).toBe(true);
     const items = group.findAll('[role="radio"]');
-    expect(items.map((t) => t.text())).toEqual(["", "", ""]);
-    expect(items.map((t) => t.attributes("aria-label"))).toEqual(["全部", "Claude Code", "Codex"]);
-    expect(items.map((t) => t.attributes("title"))).toEqual(["全部", "Claude Code", "Codex"]);
+    // WB06 产品口径变化：来源控件从三图标扩为五图标（+ WorkBuddy / WorkBuddy AI）。
+    expect(items.map((t) => t.text())).toEqual(["", "", "", "", ""]);
+    expect(items.map((t) => t.attributes("aria-label"))).toEqual([
+      "全部",
+      "Claude Code",
+      "Codex",
+      "WorkBuddy",
+      "WorkBuddy AI",
+    ]);
+    expect(items.map((t) => t.attributes("title"))).toEqual([
+      "全部",
+      "Claude Code",
+      "Codex",
+      "WorkBuddy",
+      "WorkBuddy AI",
+    ]);
     expect(items[0].attributes("aria-checked")).toBe("true");
     // AgentIcon 保留品牌身份，文字由可访问名称与悬停提示承载。
     expect(items[1].find(".seg-icon").exists()).toBe(true);
