@@ -2482,7 +2482,7 @@ const scenarios = {
     const settingsPath = path.join(dataDir, "settings.toml");
     const businessFiles = () =>
       listFiles(dataDir).filter((f) =>
-        /^(logs\/|cache\.db|window-state\.json|view-cache\.json|pricing-)/.test(f),
+        /^(logs\/|cache\.db|history\.db|window-state\.json|view-cache\.json|pricing-)/.test(f),
       );
 
     await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
@@ -2641,7 +2641,7 @@ const scenarios = {
     const settingsPath = path.join(dataDir, "settings.toml");
     const businessFiles = () =>
       listFiles(dataDir).filter((f) =>
-        /^(logs\/|cache\.db|window-state\.json|view-cache\.json|pricing-)/.test(f),
+        /^(logs\/|cache\.db|history\.db|window-state\.json|view-cache\.json|pricing-)/.test(f),
       );
 
     await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
@@ -2670,6 +2670,25 @@ const scenarios = {
       ev.businessFilesBeforeAccept.length === 0,
       ev.businessFilesBeforeAccept.join(",") || "无业务文件",
     );
+    // 同意前的验收追踪不得出现任何业务事件（评审 2026-10-25：只看文件清单
+    // 会漏掉不落文件的业务读取）。
+    const traceBeforeConsent = readAcceptanceTrace(inst.root, { partial: true });
+    if (traceBeforeConsent.violations.length)
+      throw new Error(traceBeforeConsent.violations.join(" | "));
+    const businessEventNames = [
+      "business_ready",
+      "collect_round_start",
+      "source_root_read",
+      "history_open",
+    ];
+    ev.businessTraceBeforeConsent = traceBeforeConsent.records
+      .filter((r) => businessEventNames.includes(r.event))
+      .map((r) => r.event);
+    ck.add(
+      "no_business_trace_before_reconsent",
+      ev.businessTraceBeforeConsent.length === 0,
+      ev.businessTraceBeforeConsent.join(",") || "无业务追踪事件",
+    );
 
     // 同意 → 同一次保存写入 true 与当前修订号，进入业务。
     await page.locator(".privacy-actions button", { hasText: "同意并继续" }).first().click();
@@ -2680,6 +2699,21 @@ const scenarios = {
       /privacy_policy_accepted\s*=\s*true/.test(ev.settingsAfterAccept) &&
         /privacy_policy_revision\s*=\s*2/.test(ev.settingsAfterAccept),
       ev.settingsAfterAccept.split("\n").slice(0, 4).join(" | "),
+    );
+    // 同意后的业务初始化必须发生在同意落盘之后：business_ready 的 seq
+    // 严格大于 consent_saved（顺序颠倒 = 同意前就有业务读取）。
+    const traceAfterConsent = readAcceptanceTrace(inst.root, { partial: true });
+    const seqOf = (name) =>
+      traceAfterConsent.records.filter((r) => r.event === name).map((r) => r.seq);
+    const consentSeqs = seqOf("consent_saved");
+    const readySeqs = seqOf("business_ready");
+    ev.consentTraceOrder = { consentSeqs, readySeqs };
+    ck.add(
+      "business_trace_starts_after_reconsent",
+      consentSeqs.length >= 1 &&
+        readySeqs.length >= 1 &&
+        Math.min(...readySeqs) > Math.max(...consentSeqs),
+      JSON.stringify(ev.consentTraceOrder),
     );
 
     // 重启同一隔离根：不再询问（新修订同意有效）。
