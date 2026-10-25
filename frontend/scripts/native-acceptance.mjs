@@ -2922,15 +2922,65 @@ const scenarios = {
     const page = inst.page;
     const settingsPath = path.join(inst.root, "tokenscope", "settings.toml");
     await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
-    // 双击（第二次落在保存中/已保存状态）：不得二次落盘或二次初始化。
-    await page.locator(".privacy-actions button", { hasText: "同意并继续" }).first().click();
-    await page
+    // 双击（§4b.1：CDP 连续两次 click，间隔 <100ms；第二次落在保存中/
+    // 已保存状态）：两次都用坐标级 page.mouse 下发真实输入——不依赖按钮
+    // 在第二次点击时仍存活；先挂页面级捕获计数器证明第二次输入真实到达
+    // 页面，区分「产品正确抑制」与「测试架根本没发出」；下发失败显式
+    // 失败，绝不吞掉。
+    const consentButton = page
       .locator(".privacy-actions button", { hasText: "同意并继续" })
-      .first()
-      .click({ delay: 20 })
-      .catch(() => {});
+      .first();
+    const box = await consentButton.boundingBox();
+    if (!box) throw new Error("同意按钮不可见，无法下发双击输入");
+    await page.evaluate(() => {
+      window.__ac06ConsentClicks = [];
+      for (const type of ["pointerdown", "click"]) {
+        document.addEventListener(
+          type,
+          (event) => {
+            window.__ac06ConsentClicks.push({
+              type,
+              ts: event.timeStamp,
+              x: event.clientX,
+              y: event.clientY,
+            });
+          },
+          true,
+        );
+      }
+    });
+    const inputX = box.x + box.width / 2;
+    const inputY = box.y + box.height / 2;
+    const firstClick = page.mouse.click(inputX, inputY);
+    const secondClick = page.mouse.click(inputX, inputY);
+    await firstClick;
+    await secondClick;
     await page.waitForSelector(".app-nav", { timeout: 60000 });
     await page.waitForTimeout(1500);
+
+    const clicksAtButton = (await page.evaluate(() => window.__ac06ConsentClicks ?? [])).filter(
+      (c) =>
+        c.type === "click" &&
+        c.x >= box.x &&
+        c.x <= box.x + box.width &&
+        c.y >= box.y &&
+        c.y <= box.y + box.height,
+    );
+    const inputIntervalMs =
+      clicksAtButton.length >= 2
+        ? clicksAtButton[clicksAtButton.length - 1].ts - clicksAtButton[0].ts
+        : null;
+    ev.acceptClicks = { delivered: clicksAtButton.length, intervalMs: inputIntervalMs };
+    ck.add(
+      "double_click_delivered",
+      clicksAtButton.length >= 2,
+      `同意键坐标实际点击=${clicksAtButton.length} 次`,
+    );
+    ck.add(
+      "double_click_interval_under_100ms",
+      clicksAtButton.length >= 2 && inputIntervalMs !== null && inputIntervalMs < 100,
+      `输入间隔=${inputIntervalMs === null ? "-" : inputIntervalMs.toFixed(1)}ms（要求 <100ms）`,
+    );
 
     const trace = readAcceptanceTrace(inst.root, { partial: true });
     if (trace.violations.length) throw new Error(trace.violations.join(" | "));
