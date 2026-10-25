@@ -310,12 +310,33 @@ function Assert-PreservedBeforeLaunch {
     }
 }
 
+function Get-PathSnapshot {
+    # 路径快照：不存在时返回稳定的 "absent|<路径>" 标记。早先返回空
+    # hashtable——每次调用都是新实例，-notcontains 按引用比较恒不相等，
+    # 会把"前后都不存在"误报成一次变化（0.1.0 起点没有 history.db 时
+    # 正是这样误报的）。
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return ,@("absent|$Path") }
+    Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction SilentlyContinue |
+        ForEach-Object { "$($_.FullName)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" }
+}
+
+function Compare-PathSnapshot {
+    # 快照差集：After 中不在 Before 里的条目（新增或变化的文件）。
+    # 结尾逗号防单元素展开：否则单结果时调用方拿到的是字符串，
+    # [0] 取到第一个字符而不是整条路径。
+    param([string[]]$Before, [string[]]$After)
+    , @($After | Where-Object { $Before -notcontains $_ })
+}
+
 function Invoke-ConsentGateStage {
     # WB05 第一段：装新版后、授权前，先以旧同意（或无同意）启动一次——
-    # 新闸门必须保持封闭，保存"零业务读取"证据：
+    # 新闸门必须保持封闭，保存"零业务读取"证据并阻断任何违反：
     # - settings.toml 的同意记录原样（程序不得预先补写 privacy_policy_revision）；
     # - DataDir/logs 无新增（业务日志初始化只发生在同意之后）；
-    # - history.db 无新增写入（采集不发生）。
+    # - history.db（含 -wal/-shm，按内容/大小/mtime 快照）无新增写入
+    #   （采集不发生）。任何一项违反都抛错结束本阶段，阶段证据按实际
+    #   结果保存（失败不写 pass: true）。
     # 观察窗口 45 秒后结束进程；第二段由 Grant-UpgradeConsent 授权。
     param($Case, [string]$Phase)
     $evidence = Join-Path $Case.EvidenceRoot "consent-gate"
@@ -323,19 +344,15 @@ function Invoke-ConsentGateStage {
     $logsDir = Join-Path $Case.DataDir "logs"
     $historyDb = Join-Path $Case.DataDir "history.db"
     $settingsPath = Join-Path $Case.DataDir "settings.toml"
-    $snapshotOf = {
-        param($Path)
-        if (-not (Test-Path $Path)) { return @{} }
-        Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction SilentlyContinue |
-            ForEach-Object { "$($_.FullName)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" }
-    }.GetNewClosure()
-    $logsBefore = @(& $snapshotOf $logsDir)
-    $historyBefore = @(& $snapshotOf $historyDb)
+    $logsBefore = @(Get-PathSnapshot $logsDir)
+    $historyBefore = @(Get-PathSnapshot $historyDb)
     $settingsBefore = (Get-Content -LiteralPath $settingsPath -Raw -Encoding utf8)
 
     $exe = Join-Path (Get-UninstallEntry).InstallLocation "tokenscope.exe"
     $context = Launch-AppOnce -ExePath $exe -Scenario $Phase -RunId ($Phase + "-gate-1") `
         -EvidenceDir $evidence -LiveLogsDir $logsDir
+    $gateOk = $false
+    $gateDetail = ""
     try {
         Start-Sleep -Seconds 45
         if ($context.Process.HasExited) {
@@ -349,29 +366,34 @@ function Invoke-ConsentGateStage {
         if ($settingsAfter -ne $settingsBefore) {
             throw "同意闸门前 settings.toml 被改写"
         }
-        $logsAfter = @(& $snapshotOf $logsDir)
-        $newLogs = @($logsAfter | Where-Object { $logsBefore -notcontains $_ })
+        $newLogs = Compare-PathSnapshot -Before $logsBefore -After @(Get-PathSnapshot $logsDir)
         if ($newLogs.Count -gt 0) {
             throw "同意前出现业务日志新增：$($newLogs[0])"
         }
-        $historyAfter = @(& $snapshotOf $historyDb)
-        $newHistory = @($historyAfter | Where-Object { $historyBefore -notcontains $_ })
-        # history.db 的创建/变化记录进证据但不阻断：其来源未定位（可能是新版
-        # 引导期的合法建库），"零业务读取"的判定以日志零新增与设置未改写为准。
+        $newHistory = Compare-PathSnapshot -Before $historyBefore -After @(Get-PathSnapshot $historyDb)
+        if ($newHistory.Count -gt 0) {
+            throw "同意前历史库出现新写入：$($newHistory[0])"
+        }
+        $gateOk = $true
         [ordered]@{
             settings_unchanged    = $true
             revision_not_written  = $true
             logs_new_files        = 0
-            history_new_entries   = $newHistory.Count
-            history_new_entries_detail = @($newHistory | Select-Object -First 3)
+            history_new_entries   = 0
             observed_seconds      = 45
         } | ConvertTo-Json |
             Set-Content -LiteralPath (Join-Path $evidence ($Phase + "-gate.json")) -Encoding utf8NoBOM
     }
+    catch {
+        $gateDetail = $_.Exception.Message
+        throw
+    }
     finally {
         Stop-ScenarioProcess -Context $context
         Copy-LiveLogsToEvidence -Context $context
-        Save-ScenarioResult -Context $context -Pass $true -Stage ($Phase + "-gate-closed")
+        Save-ScenarioResult -Context $context -Pass $gateOk `
+            -Stage ($Phase + "-gate-" + $(if ($gateOk) { "closed" } else { "failed" })) `
+            -Detail $gateDetail
     }
 }
 

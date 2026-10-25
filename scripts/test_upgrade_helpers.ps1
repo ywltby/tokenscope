@@ -213,6 +213,29 @@ sys.exit(37 if "--fail" in sys.argv else 0)
     Expect-Failure { Assert-HistoryBackup -Case $noHistory } "本跳之前没有历史库却出现备份被拒绝"
     Remove-Item -LiteralPath (Join-Path $dataRoot "history.db.backup-v4")
 
+    # 快照函数（评审 2026-10-25 修复）：absent 哨兵必须稳定——"前后都不存在"
+    # 不是变化；存在且变化必须检出。
+    & {
+        $snapRoot = Join-Path $contractRoot "snapshot"
+        $missing = Join-Path $snapRoot "missing-dir"
+        if (Test-Path $missing) { Remove-Item -Recurse -Force $missing }
+        $a1 = @(Get-PathSnapshot $missing)
+        $a2 = @(Get-PathSnapshot $missing)
+        Check ((Compare-PathSnapshot -Before $a1 -After $a2).Count -eq 0) "前后都不存在不报变化"
+        $present = Join-Path $snapRoot "present"
+        New-Item -ItemType Directory -Path (Join-Path $present "sub") -Force | Out-Null
+        $db = Join-Path $present "history.db"
+        [IO.File]::WriteAllText($db, "seed", [Text.UTF8Encoding]::new($false))
+        $b1 = @(Get-PathSnapshot $present)
+        Check ((Compare-PathSnapshot -Before $b1 -After @(Get-PathSnapshot $present)).Count -eq 0) "未变化不报变化"
+        Start-Sleep -Milliseconds 20
+        [IO.File]::WriteAllText($db, "mutated", [Text.UTF8Encoding]::new($false))
+        $diff = Compare-PathSnapshot -Before $b1 -After @(Get-PathSnapshot $present)
+        Check ($diff.Count -eq 1 -and $diff[0] -like "*history.db|7|*") "内容变化按大小/时间检出：$($diff -join ';')"
+        $absentDiff = Compare-PathSnapshot -Before $a1 -After $b1
+        Check ($absentDiff.Count -gt 0) "从不存在到出现检为变化"
+    }
+
     # 编排顺序：真实 Invoke-UpgradeScenario/Invoke-UpgradeChain，只替换外部动作。
     function Invoke-UpgradePython { param([string[]]$Arguments,[string]$EvidencePath="")
         if ($Arguments -contains "download-baseline") {
