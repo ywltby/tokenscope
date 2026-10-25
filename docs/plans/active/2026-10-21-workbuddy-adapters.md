@@ -413,7 +413,7 @@
 
 发布：**[v0.6.0](https://github.com/ywltby/tokenscope/releases/tag/v0.6.0)**（预发布，4 资产：安装包、SHA256SUMS、build-metadata、provenance）。连续升级链含 0.5.13→0.6.0 末跳——设置格式 2→3 与隐私修订号重新询问路径（两段式闸门观察段）在链上实际核对通过。
 
-**待验（保留，不因发布标完成）**：用户手动安装验证——首启弹「政策已更新」、同意后四应用出现在来源筛选、WorkBuddy 数值与 WB08 对账一致（国内版 2,881 / 国际版 656，四桶见 §6.3 表）；由用户在本机安装 v0.6.0 后执行。N10–N13 既有待验状态不变。
+**待验（保留，不因发布标完成）**：用户手动安装验证——首启弹「政策已更新」、同意后四应用出现在来源筛选、WorkBuddy 数值与 WB08 对账一致；由用户在本机安装 v0.6.0 后执行。**对账口径：2,881 / 656 与四桶合计是 WB08 当次（2026-10-24）只读样本基线，不是固定预期——手动验证应按相同数据范围比对（对账时点已存在的文件集合 / 截止时间戳），WorkBuddy 日志在其后继续增长时，不要求当前总量仍等于这两个数字，只要求同范围内的数值一致。**N10–N13 既有待验状态不变。
 
 **版本常量决策（WB02 核对结论）**：`HISTORY_SCHEMA_VERSION=4`、`PARSER_REVISION=2`、`IDENTITY_REVISION=1` 均不递增——历史库 `usage_events.app` 为 TEXT、表结构不变；新增适配器不改变 Claude/Codex 的解析语义与模型身份规则；新事件以当前 PARSER_REVISION 标记写入，读取方（升级矩阵按 persistent_format 分组挑起点）不受影响。`SETTINGS_FORMAT_REVISION` 2→3 属计划明确的变化（sources 新键 + 同意修订号），迁移规则与 `settings_migrations.json` 同步。
 
