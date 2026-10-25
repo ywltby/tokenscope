@@ -636,11 +636,15 @@ function buildChecks(m, ctx) {
       names.length >= 2 &&
         names.every((n) => typeof n === "string" && n.endsWith("日志目录")) &&
         inputs.every((i) => !!i.id && i.labelText === i.ariaLabel) &&
-        inputs.every((i) => i.placeholder === "留空使用当前生效目录"),
+        // PR3 起追加输入的占位符为绝对路径示例（旧值「留空使用当前生效
+        // 目录」已随追加目录管理改版失效）。
+        inputs.every((i) => i.placeholder === "绝对路径（如 D:\\\\history\\\\claude\\\\projects）"),
       names.join(" | "),
     ]);
     const eff = sd?.effective ?? [];
-    const long = eff[0];
+    // AC08 归因：四应用行加入后 eff[0] 不再是长路径行——按文本定位，
+    // 行序无关。
+    const long = eff.find((e) => e.text === ctx.expectedLongDir);
     checks.push([
       "effective_directory_is_shown_in_full_and_wraps",
       !!long &&

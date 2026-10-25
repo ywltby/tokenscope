@@ -522,15 +522,17 @@ const IMPL = {
       await retry.click();
       await page.waitForTimeout(600);
 
-      const dirClaude = page.locator('[aria-label="Claude Code 日志目录"]').first();
-      const dirCodex = page.locator('[aria-label="Codex 日志目录"]').first();
-      const claudeValue = await dirClaude.inputValue();
-      const codexValue = await dirCodex.inputValue();
+      // PR3 起目录输入改为追加目录管理，恢复值以来源开关状态断言
+      //（fixture 成功读取：claude 启用、codex 停用）。
+      const claudeSwitch = page.locator('[aria-label="Claude Code 启用"]').first();
+      const codexSwitch = page.locator('[aria-label="Codex 启用"]').first();
+      const claudeOn = await claudeSwitch.getAttribute("aria-checked");
+      const codexOn = await codexSwitch.getAttribute("aria-checked");
       ctx.record(
         "settings_failure_retry_restores_all_controls",
-        "重试后：来源目录恢复为成功读取值（断言真实输入值）",
-        claudeValue === "C:/restored/claude" && codexValue === "C:/restored/codex",
-        `claude=${claudeValue} codex=${codexValue}`,
+        "重试后：来源启用状态恢复为成功读取值",
+        claudeOn === "true" && codexOn === "false",
+        `claude=${claudeOn} codex=${codexOn}`,
       );
       // U05：自动同步开关在「价格」分区。
       await gotoSettingsSection(page, "价格");
@@ -551,16 +553,17 @@ const IMPL = {
         afterGeneral.includes("直接退出") && !afterGeneral.includes("设置读取失败"),
         `含"直接退出"=${afterGeneral.includes("直接退出")} 错误残留=${afterGeneral.includes("设置读取失败")}`,
       );
-      // U05：来源保存按钮在「数据源」分区。
+      // PR3 起来源为追加目录管理：「添加」按钮即来源写入入口，重试后重新可用。
       await gotoSettingsSection(page, "数据源");
-      const enabledAfter = await saveButtons
-        .first()
-        .evaluate((el) => el.disabled === false && !el.className.includes("disabled"));
+      const addButton = page.locator('[aria-label="Claude Code 添加目录"]').first();
+      const enabledAfter = await addButton.evaluate(
+        (el) => el.disabled === false && !el.className.includes("disabled"),
+      );
       ctx.record(
         "settings_failure_retry_restores_all_controls",
-        "重试后：来源保存重新可用",
+        "重试后：来源追加入口重新可用",
         enabledAfter === true,
-        `保存按钮 disabled=${!enabledAfter}`,
+        `添加按钮 disabled=${!enabledAfter}`,
       );
       await ctx.shot("settings_failure_retry_restores_all_controls", session, "restored");
       ctx.finishSession(session);
@@ -1235,12 +1238,12 @@ const IMPL = {
           }
           return { panel: chain[0], ancestors: chain.slice(1) };
         });
-        if (!measured) {
+        if (!measured || !measured.panel) {
           ctx.record(
             "date_outer_surface_matches_contract",
             `${theme}:日期面板可打开`,
             false,
-            "未找到 .range-panel",
+            measured ? "面板祖先链为空（未量到内层面板）" : "未找到 .range-panel",
           );
           continue;
         }
@@ -1268,9 +1271,15 @@ const IMPL = {
         );
         ctx.record(
           "date_outer_surface_matches_contract",
-          `${theme}:只有一层有效 elevated 材质（无双层玻璃）`,
-          elevatedLayers.length === 1,
-          `elevated 层数=${elevatedLayers.length}：${elevatedLayers.map((l) => `${l.cls}(${l.bg},${l.blur})`).join(" + ")}`,
+          `${theme}:操作浮层为单层实色（DESIGN.md §5 操作型材质，C06 起不用玻璃）`,
+          solidLayers.length >= 1 &&
+            elevatedLayers.length === 0 &&
+            measured.panel.bg === "rgba(0, 0, 0, 0)" &&
+            !blurred(measured.panel.blur),
+          `实色层数=${solidLayers.length} elevated 层数=${elevatedLayers.length}：` +
+            [measured.panel, ...measured.ancestors]
+              .map((l) => `${l.cls}(${l.bg},${l.blur})`)
+              .join(" + "),
         );
         ctx.record(
           "date_outer_surface_matches_contract",
@@ -2051,9 +2060,9 @@ const IMPL = {
       );
       ctx.record(
         "late_failed_settings_read_does_not_downgrade_saved",
-        "已保存值不被回退或清空",
-        valueBefore === "C:/saved-by-user" && (await input.inputValue()) === "C:/saved-by-user",
-        `释放前=${valueBefore} 释放后=${await input.inputValue()}`,
+        "已保存值不被回退或清空（来源开关保持已保存的关）",
+        valueBefore === "false" && (await sw.getAttribute("aria-checked")) === "false",
+        `释放前=${valueBefore} 释放后=${await sw.getAttribute("aria-checked")}`,
       );
       ctx.record(
         "late_failed_settings_read_does_not_downgrade_saved",
