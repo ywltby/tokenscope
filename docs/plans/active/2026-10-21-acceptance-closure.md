@@ -466,6 +466,13 @@ AC08 执行记录：
 
 门禁与版本：`cargo fmt --check`、clippy 普通与 acceptance 双模式 `-D warnings`、钩子全链（前端 789 测试 + typecheck + build + e2e、Python 336、cargo test 四套、PowerShell 安装 26 项 + 升级契约 69 项、node 语法 50 脚本）全部通过；前端 prettier 门禁只覆盖 `src/**`，scripts/ 下 17 个文件的既有格式差异与本批无关（main 版本同状）。
 
+PR #52 CI 首跑与修复（2026-10-25）：
+
+- CI 组（run 40226439454）：rust、rust-acceptance、contracts 全过；frontend 首跑在首个浏览器格（normal-light-1280x820）`#app .app-shell` 等待 10 秒超时——同一 run 其余三格与本地两轮全过、本批改动不触及启动路径、main 近五次该作业全绿，归因为 CI 冷启动抖动；失败 run 原样保留，重跑失败作业后通过、gate 随之通过。
+- Native UI E2E（run 40226439465）通过：AC06 五个隐私场景在 CI 真实 WebView2 上首次实跑成功。
+- Install test（run 40226439492）：安装五场景与 plan-upgrades 通过；八组单跳中 0.1.0/0.4.0/0.5.9/0.5.13 全过，**0.6.0 的 present/deleted 两跳失败**（等待「汇总完成」超时 180s）。证据（作业工件 upgrade-evidence-…-0.6.0-present）显示失败发生在**旧版阶段**——registered_version 仍为 0.6.0、settings.toml 只有布尔同意。归因：0.6.0 是登记表里第一个 settings_format 3 基线（认识隐私修订号），而升级夹具对 history 起点只播种旧式布尔同意，0.6.0 按 StaleRevision 拒绝、隐私门不开放；此前所有 history 基线都是格式 ≤ 2（布尔同意有效），缺口首次暴露。测试装配问题，非产品缺陷。
+- 修复 `b9b2480`：登记表新增 `privacy_revision`（0.6.0 = 2，validate 强制「格式 3 起必须登记、格式 < 3 不得登记」）；`upgrade_fixture.prepare` 支持 `--consent-revision`（旧版阶段按基线自己的修订号预置同意，不带参保持布尔形态）；`Prepare-OldUsage` 在基线格式 ≥ 3 时传入登记值（缺失即报错）；新增 `Test-ConsentGateApplies`——WB05 闸门观察只对「旧同意对新版已失效」的跳适用，同修订基线跳（0.6.0→0.6.1，revision 2 = 当前 2）旧同意仍有效、观察段跳过（否则有效同意下 45 秒观察必然看到业务而误报），单跳与链路两处同步。红先：CI 两跳失败为跳级红证；本地 3 个 Python 用例与 5 项 PS 契约（含 0.6.0→0.6.1 场景 trace 与闸门适用性四例）先红后绿，升级契约 69 → 74 项。
+
 边界保留：AC07 整项未实施（C/D 均未执行），价格线程探针未添加，产品同步周期未改；N10 保持开放，进程内恢复继续待验；真实自启出现/移除留 D5 3.4 人工签字；B4（AC09）、B5 未执行。
 
 ### B2 合并与发布验收（2026-10-22）
