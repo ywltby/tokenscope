@@ -444,6 +444,10 @@ class Instance {
     }
     if (this.opts.mutate) this.opts.mutate(this.root);
     this.prelaunchBusinessFiles = snapshotBusinessFiles(path.join(this.root, "tokenscope"));
+    const prelaunchSettingsPath = path.join(this.root, "tokenscope", "settings.toml");
+    this.prelaunchSettings = fs.existsSync(prelaunchSettingsPath)
+      ? fs.readFileSync(prelaunchSettingsPath, "utf8")
+      : null;
     const manifest = JSON.parse(fs.readFileSync(path.join(this.root, "manifest.json"), "utf8"));
     return manifest;
   }
@@ -2778,12 +2782,22 @@ const scenarios = {
 
   /**
    * AC06 场景 1：预置业务文件 + 未同意观察——已存在的业务数据必须
-   * 零读取零写入；追踪零业务事件；价格桩与外连零命中。
+   * 零读取零写入；追踪零业务事件；价格桩与外连零命中；实际观察 15 秒
+   * （单调时钟记录起止），启动前预置快照 × 观察后快照双向比对。
    */
   async "privacy-preseeded"({ inst, ck, ev }) {
     const page = inst.page;
     const dataDir = path.join(inst.root, "tokenscope");
     await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+
+    // §4b.1：未同意状态实际观察 15 秒。before 取启动前预置快照
+    // （prepareRoot 在 mutate 后、launch 前采集），启动期间的写入也会
+    // 被观察后的快照捕获，不以「场景开始时」的快照漏掉启动期变化。
+    const before = { business: inst.prelaunchBusinessFiles, settings: inst.prelaunchSettings };
+    const observedFrom = performance.now();
+    await page.waitForTimeout(15000);
+    const observedTo = performance.now();
+    const observedMs = observedTo - observedFrom;
 
     const businessEvents = businessTraceEvents(inst);
     ck.add(
@@ -2807,6 +2821,21 @@ const scenarios = {
       ev.businessDomNodes === 0,
       `业务节点=${ev.businessDomNodes}`,
     );
+
+    // 双快照不变：业务文件（字节/大小/mtime；预置、新增、删除、修改，
+    // 含 history.db/-wal/-shm）+ settings.toml 逐字节。
+    const changes = dataDirChanges(before, snapshotDataDir(dataDir));
+    ck.add(
+      "preseeded_business_files_unchanged",
+      changes.length === 0,
+      changes.join(",") || "双快照一致",
+    );
+    ck.add(
+      "preseeded_observed_full_window",
+      observedMs >= 15000 - 50,
+      `实际观察=${observedMs.toFixed(0)}ms（要求 ≥15000ms）`,
+    );
+    ev.preseeded = { observedMs: Math.round(observedMs), changes };
     await page.screenshot({ path: path.join(inst.opts.shots, "privacy-preseeded-observed.png") });
 
     // 未同意退出：不留业务残留、进程干净退出。
