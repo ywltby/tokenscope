@@ -206,6 +206,9 @@ pub struct DiscoveryContext {
     pub claude_default_mapping: PathBuf,
     /// 默认 Codex 双根（sessions + archived_sessions）。
     pub codex_default_roots: Vec<PathBuf>,
+    /// WB04：两个 WorkBuddy 的默认根（`projects/`）。
+    pub workbuddy_default_root: PathBuf,
+    pub workbuddy_ai_default_root: PathBuf,
     pub env: StartupEnv,
     pub probe: ProbeFn,
 }
@@ -214,9 +217,13 @@ impl DiscoveryContext {
     /// 生产上下文：默认锚点与采集侧同源（acceptance 构建自动落到隔离根），
     /// 环境用启动快照——本函数不在采集轮次调用。
     pub fn production(env: StartupEnv) -> Result<Self> {
-        if let Some(claude_src) = crate::acceptance::source_dir_override(true) {
-            let codex_src = crate::acceptance::source_dir_override(false)
+        if let Some(claude_src) = crate::acceptance::source_dir_override(AgentKind::ClaudeCode) {
+            let codex_src = crate::acceptance::source_dir_override(AgentKind::Codex)
                 .ok_or_else(|| anyhow::anyhow!("验收根缺少 codex 来源目录"))?;
+            let wb_src = crate::acceptance::source_dir_override(AgentKind::WorkBuddy)
+                .ok_or_else(|| anyhow::anyhow!("验收根缺少 workbuddy 来源目录"))?;
+            let wba_src = crate::acceptance::source_dir_override(AgentKind::WorkBuddyAi)
+                .ok_or_else(|| anyhow::anyhow!("验收根缺少 workbuddy-ai 来源目录"))?;
             return Ok(Self {
                 claude_default_root: claude_src.join("projects"),
                 claude_default_mapping: claude_src.join("claude.json"),
@@ -224,6 +231,8 @@ impl DiscoveryContext {
                     codex_src.join("sessions"),
                     codex_src.join("archived_sessions"),
                 ],
+                workbuddy_default_root: wb_src.join("projects"),
+                workbuddy_ai_default_root: wba_src.join("projects"),
                 env,
                 probe: filesystem_probe(),
             });
@@ -242,6 +251,8 @@ impl DiscoveryContext {
                 home.join(".codex").join("sessions"),
                 home.join(".codex").join("archived_sessions"),
             ],
+            workbuddy_default_root: home.join(".workbuddy").join("projects"),
+            workbuddy_ai_default_root: home.join(".workbuddy-ai").join("projects"),
             env,
             probe,
         }
@@ -300,6 +311,8 @@ pub fn resolve_sources(
     ctx: &DiscoveryContext,
     claude: &SourceConfig,
     codex: &SourceConfig,
+    workbuddy: &SourceConfig,
+    workbuddy_ai: &SourceConfig,
 ) -> ResolvedSources {
     let mut candidates: Vec<Candidate> = Vec::new();
     // ── Claude ──
@@ -445,14 +458,48 @@ pub fn resolve_sources(
             });
         }
     }
+    // ── WorkBuddy（WB04）：无环境变量派生根，候选 = 默认根 + 手动追加 ──
+    for (kind, cfg, default_root) in [
+        (AgentKind::WorkBuddy, workbuddy, &ctx.workbuddy_default_root),
+        (
+            AgentKind::WorkBuddyAi,
+            workbuddy_ai,
+            &ctx.workbuddy_ai_default_root,
+        ),
+    ] {
+        candidates.push(Candidate {
+            agent: kind,
+            kind: OriginKind::Default,
+            config_path: default_root.display().to_string(),
+            enabled: cfg.auto_discover && !excluded(cfg, default_root),
+            probe: (ctx.probe)(default_root),
+            mapping: None,
+            mapping_disabled: false,
+            diagnostics: vec![],
+        });
+        for entry in &cfg.additional_paths {
+            let root = PathBuf::from(&entry.path);
+            candidates.push(Candidate {
+                agent: kind,
+                kind: OriginKind::Manual,
+                config_path: entry.path.clone(),
+                enabled: entry.enabled,
+                probe: (ctx.probe)(&root),
+                mapping: None,
+                mapping_disabled: true,
+                diagnostics: vec![],
+            });
+        }
+    }
     let mut resolved = merge_candidates(candidates);
     // 行有效启用 = 应用总开关且至少一个 origin 启用（§9.3 第 3 条）；
     // 总开关只作用于有效值，不改写各行用户选择（重新开启时恢复原选择）。
     for row in &mut resolved.roots {
-        let app_enabled = if row.agent == AgentKind::ClaudeCode {
-            claude.enabled
-        } else {
-            codex.enabled
+        let app_enabled = match row.agent {
+            AgentKind::ClaudeCode => claude.enabled,
+            AgentKind::Codex => codex.enabled,
+            AgentKind::WorkBuddy => workbuddy.enabled,
+            AgentKind::WorkBuddyAi => workbuddy_ai.enabled,
         };
         row.effective_enabled = row.effective_enabled && app_enabled;
     }

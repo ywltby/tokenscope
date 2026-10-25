@@ -8,6 +8,7 @@ pub mod claude_projects;
 pub mod codex;
 pub mod discovery;
 pub mod project_path;
+pub mod workbuddy;
 
 use std::path::{Path, PathBuf};
 
@@ -154,6 +155,8 @@ pub trait Source {
                     match self.agent() {
                         AgentKind::ClaudeCode => "Claude",
                         AgentKind::Codex => "Codex",
+                        AgentKind::WorkBuddy => "WorkBuddy",
+                        AgentKind::WorkBuddyAi => "WorkBuddy AI",
                     },
                     root.display()
                 ));

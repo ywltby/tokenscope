@@ -213,6 +213,60 @@ sys.exit(37 if "--fail" in sys.argv else 0)
     Expect-Failure { Assert-HistoryBackup -Case $noHistory } "本跳之前没有历史库却出现备份被拒绝"
     Remove-Item -LiteralPath (Join-Path $dataRoot "history.db.backup-v4")
 
+    # 快照函数（评审 2026-10-25 修复）：absent 哨兵必须稳定——"前后都不存在"
+    # 不是变化；存在且变化必须检出。
+    & {
+        $snapRoot = Join-Path $contractRoot "snapshot"
+        $missing = Join-Path $snapRoot "missing-dir"
+        if (Test-Path $missing) { Remove-Item -Recurse -Force $missing }
+        $a1 = @(Get-PathSnapshot $missing)
+        $a2 = @(Get-PathSnapshot $missing)
+        Check ((Compare-PathSnapshot -Before $a1 -After $a2).Count -eq 0) "前后都不存在不报变化"
+        $present = Join-Path $snapRoot "present"
+        New-Item -ItemType Directory -Path (Join-Path $present "sub") -Force | Out-Null
+        $db = Join-Path $present "history.db"
+        [IO.File]::WriteAllText($db, "seed", [Text.UTF8Encoding]::new($false))
+        $b1 = @(Get-PathSnapshot $present)
+        Check ((Compare-PathSnapshot -Before $b1 -After @(Get-PathSnapshot $present)).Count -eq 0) "未变化不报变化"
+        Start-Sleep -Milliseconds 20
+        [IO.File]::WriteAllText($db, "mutated", [Text.UTF8Encoding]::new($false))
+        $diff = Compare-PathSnapshot -Before $b1 -After @(Get-PathSnapshot $present)
+        Check ($diff.Count -eq 1 -and $diff[0] -like "*history.db|7|*") "内容变化按大小/时间检出：$($diff -join ';')"
+        $absentDiff = Compare-PathSnapshot -Before $a1 -After $b1
+        Check ($absentDiff.Count -gt 0) "从不存在到出现检为变化"
+    }
+
+    # 历史库快照范围（评审 2026-10-25 二轮）：必须覆盖主文件 + -wal + -shm
+    # 三个文件——SQLite 的写入先进 WAL，只快照主文件会漏过同意前的写入。
+    & {
+        $histRoot = Join-Path $contractRoot "history-scope"
+        New-Item -ItemType Directory -Path $histRoot -Force | Out-Null
+        $encoding = [Text.UTF8Encoding]::new($false)
+        [IO.File]::WriteAllText((Join-Path $histRoot 'history.db'), 'seed', $encoding)
+        $before = @(Get-HistorySnapshot $histRoot)
+        Check ($before.Count -eq 3 -and @($before | Where-Object { $_ -like 'absent|*' }).Count -eq 2) `
+            "三文件快照：主文件在、wal/shm 以 absent 哨兵参与"
+        Start-Sleep -Milliseconds 20
+        # 注入 WAL 写入（评审探针的 wal-created 形态）
+        [IO.File]::WriteAllText((Join-Path $histRoot 'history.db-wal'), 'written-before-consent', $encoding)
+        $walDiff = Compare-PathSnapshot -Before $before -After @(Get-HistorySnapshot $histRoot)
+        Check ($walDiff.Count -eq 1 -and $walDiff[0] -like '*history.db-wal|22|*') `
+            "同意前新增 WAL 检为变化：$($walDiff -join ';')"
+        # 注入 SHM 写入（shm-created 形态）
+        $mid = @(Get-HistorySnapshot $histRoot)
+        Start-Sleep -Milliseconds 20
+        [IO.File]::WriteAllText((Join-Path $histRoot 'history.db-shm'), 'written-before-consent', $encoding)
+        $shmDiff = Compare-PathSnapshot -Before $mid -After @(Get-HistorySnapshot $histRoot)
+        Check ($shmDiff.Count -eq 1 -and $shmDiff[0] -like '*history.db-shm|22|*') `
+            "同意前新增 SHM 检为变化：$($shmDiff -join ';')"
+        # 三文件都不存在 → 前后快照差集为 0（absent 哨兵稳定）
+        $empty = Join-Path $contractRoot "history-scope-empty"
+        if (Test-Path $empty) { Remove-Item -Recurse -Force $empty }
+        $e1 = @(Get-HistorySnapshot $empty)
+        $e2 = @(Get-HistorySnapshot $empty)
+        Check ((Compare-PathSnapshot -Before $e1 -After $e2).Count -eq 0) "三文件都不存在不报变化"
+    }
+
     # 编排顺序：真实 Invoke-UpgradeScenario/Invoke-UpgradeChain，只替换外部动作。
     function Invoke-UpgradePython { param([string[]]$Arguments,[string]$EvidencePath="")
         if ($Arguments -contains "download-baseline") {
@@ -241,6 +295,7 @@ sys.exit(37 if "--fail" in sys.argv else 0)
     function Assert-PreservedBeforeLaunch { param($Case) $script:Trace.Add("preserved") }
     function Assert-InstalledUpgrade { param($Case) $script:Trace.Add("installed") }
     function Grant-UpgradeConsent { param($Case) $script:Trace.Add("consent") }
+    function Invoke-ConsentGateStage { param($Case,[string]$Phase) $script:Trace.Add("consent-gate:" + $Phase) }
     function Install-UpgradePackage { param($Case,$Origin,$InstallerPath) $script:Trace.Add("install:"+$Origin)
         if ($script:FailAt -eq ("install:"+$Origin)) { throw "injected install $Origin" } }
     function Save-UpgradeCaseResult { param($Case,$Pass,$Detail)
@@ -264,9 +319,26 @@ sys.exit(37 if "--fail" in sys.argv else 0)
         Invoke-UpgradeScenario -Case $case
         $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:old,old-facts:0.1.0,save-old,"
         if ($state -eq "deleted") { $expected += "delete-source," }
-        $expected += "install-current,preserved,consent,jump:0.3.3,lifecycle:current,"
+        # 目标格式 1 < 3：无隐私修订号闸门，观察段跳过；Set-UpgradeJump
+        # 已提前到授权前（jump:0.3.3 出现在 consent 之前）。
+        $expected += "install-current,preserved,jump:0.3.3,consent,lifecycle:current,"
         $expected += "check-current:0.3.3::1->1,lifecycle:restart,check-current:0.3.3::1->1,jump:current:True,case:True"
         Check (($script:Trace -join ",") -eq $expected) "$state：旧版先产数据，再直接覆盖升级并重启复核"
+    }
+    # WB05：目标格式 3（认识隐私修订号的版本）必须先经同意闸门观察段，
+    # 再授权——顺序为 jump 切换 → gate → consent。
+    & {
+        $case = New-UpgradeCase -RepoRoot $repoRoot -InstallerPath (Join-Path $contractRoot "current-setup.exe") `
+            -AppVersion "0.3.3" -ExpectedCommit ("a"*40) -SourceState "present" -Origin "0.1.0" `
+            -EvidenceRoot (Join-Path $contractRoot "scenario-gate") `
+            -Metadata ([pscustomobject]@{ executable_sha256=("b"*64); persistent_format=([pscustomobject]@{ settings_format="3" }) }) `
+            -DataDir $dataRoot -TempRoot $tempRoot
+        $script:Trace.Clear(); $script:FailAt = ""
+        Invoke-UpgradeScenario -Case $case
+        $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:old,old-facts:0.1.0,save-old,"
+        $expected += "install-current,preserved,jump:0.3.3,consent-gate:current,consent,lifecycle:current,"
+        $expected += "check-current:0.3.3::1->3,lifecycle:restart,check-current:0.3.3::1->3,jump:current:True,case:True"
+        Check (($script:Trace -join ",") -eq $expected) "格式3：先闸门观察再授权（gate 在 consent 前）"
     }
     foreach ($failure in @("install-baseline","lifecycle:old","lifecycle:current","lifecycle:restart")) {
         $script:Trace.Clear(); $script:FailAt = $failure

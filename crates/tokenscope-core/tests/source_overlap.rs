@@ -40,6 +40,9 @@ fn opts(
     codex_dir: Option<PathBuf>,
 ) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         claude_dir: Some(shared.to_path_buf()),
         codex_dir,
@@ -123,6 +126,9 @@ fn overlap_validation_uses_effective_default_paths() {
     // codex 显式目录 = Claude 的默认根 → 有效目录冲突。
     let claude_default = tokenscope::source::claude::ClaudeSource::default_root().unwrap();
     let o = SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         claude_dir: None, // = Claude 默认根
         codex_dir: Some(claude_default.clone()),
@@ -150,6 +156,9 @@ fn overlap_validation_uses_effective_default_paths() {
     );
     // 分离目录照常采集（不触真实默认根）。
     let o2 = SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         cache_dir: Some(dir.join("cache2")),
         pricing_index: Some(dir.join("idx2.json")),
@@ -163,6 +172,9 @@ fn overlap_validation_uses_effective_default_paths() {
     let _ = &o2;
     let shared2 = shared_dir(&dir);
     let o3 = SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         claude_dir: Some(shared2.clone()),
         codex_dir: Some(dir.join("other-codex")),
@@ -203,18 +215,28 @@ fn default_enabled_source_participates_in_overlap_validation() {
     let codex_default = tokenscope::source::codex::CodexSource::default_root().unwrap();
     let codex_archived = codex_default.parent().unwrap().join("archived_sessions");
 
-    // 全缺省配置：两个来源都解析出来——"字段缺失 = 默认启用 + 默认根"。
+    // 全缺省配置：全部来源都解析出来——"字段缺失 = 默认启用 + 默认根"。
     // H02：Codex 默认来源含 sessions 与 archived_sessions **两个根**，
     // 两者都必须参与冲突校验。
+    // WB04 产品口径变化：候选集从 3 根扩为 5 根（+ WorkBuddy 2 根）。
+    let wb_default =
+        tokenscope::source::workbuddy::WorkBuddySource::default_root(AgentKind::WorkBuddy).unwrap();
+    let wba_default =
+        tokenscope::source::workbuddy::WorkBuddySource::default_root(AgentKind::WorkBuddyAi)
+            .unwrap();
     let dirs = effective_source_dirs_from_settings(&Settings::default()).unwrap();
-    assert_eq!(dirs.len(), 3, "缺省字段必须解析为默认启用: {dirs:?}");
+    assert_eq!(dirs.len(), 5, "缺省字段必须解析为默认启用: {dirs:?}");
     assert_eq!(dirs[0], (AgentKind::ClaudeCode, claude_default.clone()));
     assert_eq!(dirs[1], (AgentKind::Codex, codex_default.clone()));
     assert_eq!(dirs[2], (AgentKind::Codex, codex_archived.clone()));
+    assert_eq!(dirs[3], (AgentKind::WorkBuddy, wb_default.clone()));
+    assert_eq!(dirs[4], (AgentKind::WorkBuddyAi, wba_default.clone()));
 
     // 显式停用 → 不参与（用户可借停用恢复冲突目录）。
     let disabled = Settings {
         sources: AgentSources {
+            workbuddy: None,
+            workbuddy_ai: None,
             claude: Some(SourceConfig {
                 enabled: false,
                 dir: None,
@@ -229,13 +251,18 @@ fn default_enabled_source_participates_in_overlap_validation() {
         dirs,
         vec![
             (AgentKind::Codex, codex_default.clone()),
-            (AgentKind::Codex, codex_archived.clone())
+            (AgentKind::Codex, codex_archived.clone()),
+            // WB04：两个 WorkBuddy 未配置（默认启用），与 Codex 一起在场。
+            (AgentKind::WorkBuddy, wb_default.clone()),
+            (AgentKind::WorkBuddyAi, wba_default.clone()),
         ]
     );
 
     // Claude 显式撞 Codex 默认根（Codex 缺省）→ 冲突必须被识别。
     let hit_default = Settings {
         sources: AgentSources {
+            workbuddy: None,
+            workbuddy_ai: None,
             claude: Some(SourceConfig {
                 enabled: true,
                 dir: Some(codex_default.to_string_lossy().into_owned()),
@@ -246,7 +273,8 @@ fn default_enabled_source_participates_in_overlap_validation() {
         ..Default::default()
     };
     let dirs = effective_source_dirs_from_settings(&hit_default).unwrap();
-    assert_eq!(dirs.len(), 3, "缺省的 Codex 仍在生效，必须在场参与校验");
+    // WB04 口径：五根在场（缺省的 Codex 与 WorkBuddy 仍在生效，参与校验）。
+    assert_eq!(dirs.len(), 5, "缺省的 Codex 仍在生效，必须在场参与校验");
     let err = tokenscope::settings::validate_dir_conflict(&dirs[0].1, &dirs[1].1).unwrap_err();
     assert!(err.contains("来源目录冲突"), "{err}");
 
@@ -254,6 +282,8 @@ fn default_enabled_source_participates_in_overlap_validation() {
     let parent = codex_default.parent().unwrap();
     let nested = Settings {
         sources: AgentSources {
+            workbuddy: None,
+            workbuddy_ai: None,
             claude: Some(SourceConfig {
                 enabled: true,
                 dir: Some(parent.display().to_string()),
@@ -360,6 +390,9 @@ fn ambiguous_file_claim_is_isolated_before_parsing() {
     let collected = tokenscope::report::collect_all_with_sources_for_test(
         sources,
         &SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
+
             by: GroupBy::Day,
             cache_dir: Some(dir.join("cache")),
             pricing_index: Some(dir.join("idx.json")),
@@ -404,6 +437,9 @@ fn same_agent_duplicate_discovery_keeps_single() {
     let collected = tokenscope::report::collect_all_with_sources_for_test(
         sources,
         &SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
+
             by: GroupBy::Day,
             cache_dir: Some(dir.join("cache")),
             pricing_index: Some(dir.join("idx.json")),

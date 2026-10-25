@@ -53,6 +53,9 @@ fn test_partial_cost_totals() {
     .unwrap();
 
     let opts = SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         agent: Some(AgentKind::Codex),
         claude_dir: Some(dir.join("no-claude")),

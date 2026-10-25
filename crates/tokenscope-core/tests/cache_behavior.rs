@@ -31,6 +31,9 @@ fn tmp_dir(tag: &str) -> PathBuf {
 
 fn opts(dir: &std::path::Path, agent: Option<&str>) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: tokenscope::aggregate::GroupBy::Day,
         agent: agent.map(|a| match a {
             "claude" => tokenscope::model::AgentKind::ClaudeCode,
@@ -91,6 +94,9 @@ fn test_read_failure_not_cached() {
     )
     .unwrap();
     let o = SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: tokenscope::aggregate::GroupBy::Day,
         agent: Some(tokenscope::model::AgentKind::Codex),
         claude_dir: Some(dir.join("no-claude")),

@@ -132,6 +132,7 @@ function reloadPage(): void {
         :saving="gate.saving.value"
         :blocked="gate.blocked.value"
         :message="gate.error.value ?? gate.blockedDetail.value"
+        :update-notice="gate.policyUpdated.value"
         @accept="gate.accept()"
         @reject="gate.reject()"
         @retry="gate.retry()"

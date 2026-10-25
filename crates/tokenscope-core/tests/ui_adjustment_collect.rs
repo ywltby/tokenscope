@@ -37,6 +37,9 @@ fn base_opts(dir: &Path) -> SummaryOptions {
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         agent: Some(AgentKind::ClaudeCode),
         claude_dir: Some(dir.join("claude")),

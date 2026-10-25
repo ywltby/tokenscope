@@ -1027,6 +1027,9 @@ describe("Settings 目录信息与重建（UX08）", () => {
     expect(inputs.map((i) => i.attributes("aria-label"))).toEqual([
       "Claude Code 追加日志目录",
       "Codex 追加日志目录",
+      // WB06 产品口径变化：来源分区扩为四应用（+ 两个 WorkBuddy）
+      "WorkBuddy 追加日志目录",
+      "WorkBuddy AI 追加日志目录",
       // H05：CCS 导入的来源库路径同样给稳定可访问名称
       "来源库路径",
     ]);

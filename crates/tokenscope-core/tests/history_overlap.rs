@@ -56,6 +56,9 @@ fn write_claude(path: &Path, session: &str, id: &str, ts: &str, input: u64, outp
 
 fn opts(dir: &Path, claude_root: &Path, tz: &str) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         claude_dir: Some(claude_root.to_path_buf()),
         claude_enabled: Some(true),

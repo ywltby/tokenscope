@@ -118,6 +118,9 @@ fn codex_plan(root: &Path) -> SourcePlan {
 /// 密闭基础选项：所有路径都指向本次临时目录；计划由用例注入。
 fn base_opts(dir: &Path, plans: Vec<SourcePlan>) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: tokenscope::aggregate::GroupBy::Project,
         source_plans: Some(plans),
         cache_dir: Some(dir.join("cache")),
@@ -465,7 +468,13 @@ fn cross_app_conflict_case(
             .collect(),
         legacy_format: false,
     };
-    let resolved = resolve_sources(&ctx, &manual(claude_paths), &manual(codex_paths));
+    let resolved = resolve_sources(
+        &ctx,
+        &manual(claude_paths),
+        &manual(codex_paths),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     // 发现层断言：冲突标记恰好覆盖重叠集合，且冲突行诊断写明对方与处置。
     let expected: Vec<String> = expect_conflicted.iter().map(|p| normalized(p)).collect();
     for row in &resolved.roots {

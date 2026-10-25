@@ -76,8 +76,9 @@ export async function nativeCcsImport(context) {
   };
   const dashboard = async () => {
     await u.nav("汇总");
+    // WB07：统一 fixture 基线 10 → 16（两版 WorkBuddy 各 3 条），CCS 导入 +4 → 20。
     return query(
-      (snapshot) => snapshot.summary.by === "agent" && snapshot.summary.totals.requests === 14,
+      (snapshot) => snapshot.summary.by === "agent" && snapshot.summary.totals.requests === 20,
     );
   };
   const preview = async () => {
@@ -112,8 +113,9 @@ export async function nativeCcsImport(context) {
     await inst.setWindowSize(1280, 820);
     await u.installProbe();
     await u.click(u.page().getByRole("radio", { name: "按应用", exact: true }));
+    // WB07：导入前基线 10 → 16。
     await query(
-      (snapshot) => snapshot.summary.by === "agent" && snapshot.summary.totals.requests === 10,
+      (snapshot) => snapshot.summary.by === "agent" && snapshot.summary.totals.requests === 16,
     );
     const beforeSettings = readAcceptanceTrace(inst.root).records;
     const baseline = historyCounts(inst.root);
@@ -221,13 +223,13 @@ export async function nativeCcsImport(context) {
         snapshot.summary.by === "day" && snapshot.beginCall?.args?.rollups === "detail_only",
     );
     // 按日遇到时区冲突时原本就排除日汇总，不能拿它证明 detail_only。
-    // 三份最终比较都使用按应用：auto 14 -> detail_only 11 -> auto 14。
+    // 三份最终比较都使用按应用：auto 20 -> detail_only 17 -> auto 20（WB07 基线 16+4）。
     await u.click(u.page().getByRole("radio", { name: "按应用", exact: true }));
     const detail = await query(
       (snapshot) =>
         snapshot.summary.by === "agent" &&
         snapshot.beginCall?.args?.rollups === "detail_only" &&
-        snapshot.summary.totals.requests === 11,
+        snapshot.summary.totals.requests === 17,
     );
     const detailText = await u.page().locator("body").innerText();
     await revealNoticeAction("恢复自动参与");
@@ -235,7 +237,7 @@ export async function nativeCcsImport(context) {
       (snapshot) =>
         snapshot.summary.by === "agent" &&
         snapshot.beginCall?.args?.rollups === null &&
-        snapshot.summary.totals.requests === 14,
+        snapshot.summary.totals.requests === 20,
     );
     check("detail_only_hides_rollups_and_discloses_granularity", {
       autoRequests: automatic.summary.totals.requests,
@@ -257,14 +259,23 @@ export async function nativeCcsImport(context) {
     throw error;
   } finally {
     const finishErrors = [];
-    try { check("ccs_fixture_unchanged", { before: beforeHash, after: hash() }); }
-    catch (error) { finishErrors.push(error); }
-    try { await u.saveProbe("ccs-final"); }
-    catch (error) { finishErrors.push(error); }
-    try { await u.cleanup(); }
-    catch (error) { finishErrors.push(error); }
+    try {
+      check("ccs_fixture_unchanged", { before: beforeHash, after: hash() });
+    } catch (error) {
+      finishErrors.push(error);
+    }
+    try {
+      await u.saveProbe("ccs-final");
+    } catch (error) {
+      finishErrors.push(error);
+    }
+    try {
+      await u.cleanup();
+    } catch (error) {
+      finishErrors.push(error);
+    }
     if (finishErrors.length) {
-      ev.ccs.probe_cleanup_errors = finishErrors.map(error => String(error?.message ?? error));
+      ev.ccs.probe_cleanup_errors = finishErrors.map((error) => String(error?.message ?? error));
       if (!failure) throw finishErrors[0];
     }
   }

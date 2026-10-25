@@ -6,7 +6,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { closeBrowserBounded, ensureNotCanceled, spawnSyncBounded } from "../lib/native-scenario.mjs";
+import {
+  closeBrowserBounded,
+  ensureNotCanceled,
+  spawnSyncBounded,
+} from "../lib/native-scenario.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -117,11 +121,7 @@ export async function nativeSourcePaths({ inst, ck, ev, markStage, markStageDone
 
   // 迁移基线：v1 dir 随启动迁移为追加项，默认根行必须仍在列表里。
   await waitUntil(async () => (await hasRow(claudeDefault)) && (await hasRow(codexDefault)), 30000);
-  ck.add(
-    "default_rows_still_listed",
-    true,
-    `claude=${claudeDefault}; codex=${codexDefault}`,
-  );
+  ck.add("default_rows_still_listed", true, `claude=${claudeDefault}; codex=${codexDefault}`);
 
   // 1) 从 UI 追加手动目录：目录先真实创建（与用户先建目录一致），输入 + 添加
   //    是明确动作；列表重读后新行可见。
@@ -189,10 +189,7 @@ export async function nativeSourcePaths({ inst, ck, ev, markStage, markStageDone
   // 5) 追加项仍在：重启后列表里手动行与默认行都在。
   await navigate("设置");
   await section("数据源");
-  await waitUntil(
-    async () => (await hasRow(manualDir)) && (await hasRow(claudeDefault)),
-    30000,
-  );
+  await waitUntil(async () => (await hasRow(manualDir)) && (await hasRow(claudeDefault)), 30000);
   ck.add("manual_row_survives_restart", true, manualDir);
   ck.add(
     "default_rows_unchanged_after_restart",
@@ -202,7 +199,10 @@ export async function nativeSourcePaths({ inst, ck, ev, markStage, markStageDone
 
   // 6) 同一请求不再次计数：等过至少两轮采集窗口（5 秒间隔）再断言计数不变。
   await navigate("汇总");
-  await waitUntil(async () => Number(await root().getAttribute("data-requests")) === before + 1, 30000);
+  await waitUntil(
+    async () => Number(await root().getAttribute("data-requests")) === before + 1,
+    30000,
+  );
   const stabilityStartedAt = Date.now();
   while (Date.now() - stabilityStartedAt < 15000) {
     await sleep(1000);
@@ -221,6 +221,58 @@ export async function nativeSourcePaths({ inst, ck, ev, markStage, markStageDone
     (await root().getAttribute("data-summary-query")) ===
       (await root().getAttribute("data-events-query")),
     await root().getAttribute("data-summary-query"),
+  );
+
+  // WB07：停用 WorkBuddy AI 后，其已保存用量仍可查询（历史不随来源停用删除）。
+  // 先切到 WorkBuddy AI 筛选读基线（unified fixture：主 2 + 子 agent 1 = 3 条），
+  // 再停用总开关，回到全部来源确认总数不变（停用来源零采集、零删除）。
+  await click(
+    page()
+      .locator('[aria-label="数据来源"]')
+      .getByRole("radio", { name: "WorkBuddy AI", exact: true }),
+  );
+  await waitUntil(async () => Number(await root().getAttribute("data-requests")) === 3, 30000);
+  const wbaiRequests = Number(await root().getAttribute("data-requests"));
+  ck.add("workbuddy_ai_usage_visible", wbaiRequests === 3, `requests=${wbaiRequests}`);
+  await click(
+    page().locator('[aria-label="数据来源"]').getByRole("radio", { name: "全部", exact: true }),
+  );
+  await navigate("设置");
+  await section("数据源");
+  const wbaiSwitch = page().getByRole("switch", { name: "WorkBuddy AI 启用", exact: true });
+  await click(wbaiSwitch);
+  await waitUntil(
+    async () =>
+      (await page().locator('[aria-label="WorkBuddy AI 启用"]').getAttribute("aria-checked")) ===
+      "false",
+    30000,
+  );
+  await navigate("汇总");
+  await waitUntil(
+    async () => Number(await root().getAttribute("data-requests")) === before + 1,
+    30000,
+  );
+  // 等待通过不代表断言成立：读停用后的实际总数再断言（waitUntil 超时即抛，
+  // 拿"执行到了这里"当断言恒真）。
+  const totalAfterDisable = Number(await root().getAttribute("data-requests"));
+  ck.add(
+    "workbuddy_ai_disable_keeps_saved_usage",
+    totalAfterDisable === before + 1,
+    `停用后全部来源总数=${totalAfterDisable} 期望=${before + 1}（含 WorkBuddy AI 已保存的 3 条）`,
+  );
+  // 计划要求的是"停用后其已保存用量仍可查询"：切回 WorkBuddy AI 筛选，
+  // 停用来源的历史 3 条必须仍然可查（筛选维度不因总开关抹掉历史）。
+  await click(
+    page()
+      .locator('[aria-label="数据来源"]')
+      .getByRole("radio", { name: "WorkBuddy AI", exact: true }),
+  );
+  await waitUntil(async () => Number(await root().getAttribute("data-requests")) === 3, 30000);
+  const wbaiAfterDisable = Number(await root().getAttribute("data-requests"));
+  ck.add(
+    "workbuddy_ai_saved_usage_queryable_after_disable",
+    wbaiAfterDisable === 3,
+    `停用后 WorkBuddy AI 筛选请求数=${wbaiAfterDisable} 期望=3`,
   );
   await page().screenshot({ path: path.join(inst.opts.shots, "ui-source-paths-restarted.png") });
 }

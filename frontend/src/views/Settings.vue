@@ -455,17 +455,38 @@ async function loadAll(): Promise<void> {
 // 移除、启停请求串行（同一来源键排队）；保存成功后重读列表，失败保留
 // 输入草稿；不以乐观删除掩盖后端拒绝。
 
-const AGENT_IDS = ["claude", "codex"] as const;
+const AGENT_IDS = ["claude", "codex", "workbuddy", "workbuddy-ai"] as const;
 type AgentId = (typeof AGENT_IDS)[number];
 
+/** WB06：两个 WorkBuddy 分区的固定说明（避免用户以为漏算了云端会话）。 */
+const AGENT_NOTES: Partial<Record<AgentId, string>> = {
+  workbuddy: "只统计本机会话；云端会话与定时任务的用量只保存在服务端，本机无法读取。",
+  "workbuddy-ai": "只统计本机会话；云端会话与定时任务的用量只保存在服务端，本机无法读取。",
+};
+
 /** 应用总开关与自动发现开关（改完即保存，走各自命令）。 */
-const agentEnabled = ref<Record<AgentId, boolean>>({ claude: true, codex: true });
-const agentAuto = ref<Record<AgentId, boolean>>({ claude: true, codex: true });
+const agentEnabled = ref<Record<AgentId, boolean>>({
+  claude: true,
+  codex: true,
+  workbuddy: true,
+  "workbuddy-ai": true,
+});
+const agentAuto = ref<Record<AgentId, boolean>>({
+  claude: true,
+  codex: true,
+  workbuddy: true,
+  "workbuddy-ai": true,
+});
 const switchSaving = ref<string[]>([]);
 const switchErrors = ref<Record<string, string>>({});
 
 /** 每个来源键的追加输入草稿（失败保留、成功清空）。 */
-const addDrafts = ref<Record<AgentId, string>>({ claude: "", codex: "" });
+const addDrafts = ref<Record<AgentId, string>>({
+  claude: "",
+  codex: "",
+  workbuddy: "",
+  "workbuddy-ai": "",
+});
 const addSaving = ref<string[]>([]);
 const sourceErrors = ref<Record<string, string>>({});
 /** 行级启停/移除的操作中键。 */
@@ -1176,6 +1197,7 @@ defineExpose({ priceColumns });
                 >保存失败</span
               >
             </div>
+            <p v-if="AGENT_NOTES[agent]" class="source-note">{{ AGENT_NOTES[agent] }}</p>
             <div
               v-if="switchErrors[`switch:${agent}`] || switchErrors[`auto:${agent}`]"
               class="ts-notice ts-notice-inline source-error"
@@ -1939,6 +1961,13 @@ defineExpose({ priceColumns });
 .source-head strong {
   font-size: 14px;
   color: var(--ts-text);
+}
+
+.source-note {
+  margin: 0 0 var(--ts-space-2);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ts-text-secondary);
 }
 
 /* UX08：来源目录字段名——稳定可访问名称，与真实 input 的 id/aria-label 关联 */

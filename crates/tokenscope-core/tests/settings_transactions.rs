@@ -187,8 +187,17 @@ fn privacy_accept_preserves_existing_settings() {
     assert!(s.privacy_policy_accepted, "同意位必须落盘");
     assert!(!s.price_auto_sync, "价格同步开关不得被重置");
     assert_eq!(s.close_action, Some(CloseAction::Minimize));
-    assert!(!s.source_config(true).enabled, "来源配置不得被重置");
-    assert_eq!(s.source_config(true).dir.as_deref(), Some("D:/logs/claude"));
+    assert!(
+        !s.source_config(tokenscope::model::AgentKind::ClaudeCode)
+            .enabled,
+        "来源配置不得被重置"
+    );
+    assert_eq!(
+        s.source_config(tokenscope::model::AgentKind::ClaudeCode)
+            .dir
+            .as_deref(),
+        Some("D:/logs/claude")
+    );
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(
         text.contains("privacy_policy_accepted = true"),
@@ -217,7 +226,12 @@ fn privacy_accept_migrates_legacy_after_user_action() {
     let s = settings::load(&path).unwrap();
     assert!(s.privacy_policy_accepted, "同意必须写入 toml");
     assert!(!s.price_auto_sync, "遗留值必须保留");
-    assert_eq!(s.source_config(true).dir.as_deref(), Some("D:/x"));
+    assert_eq!(
+        s.source_config(tokenscope::model::AgentKind::ClaudeCode)
+            .dir
+            .as_deref(),
+        Some("D:/x")
+    );
     assert!(!dir.join("settings.json").exists(), "迁移后遗留文件改名");
     assert!(dir.join("settings.json.bak").exists());
     assert_eq!(settings::read_consent(&path), ConsentRead::Granted);

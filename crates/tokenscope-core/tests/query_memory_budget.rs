@@ -114,6 +114,9 @@ fn write_log(root: &Path, body: &str) {
 
 fn opts(dir: &Path, root: &Path) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         claude_dir: Some(dir.join("no-claude")),
         codex_dir: Some(root.to_path_buf()),
@@ -130,6 +133,9 @@ fn opts(dir: &Path, root: &Path) -> SummaryOptions {
 /// 只保留指定日期区间（用于制造"零命中行但保留整份事件"）。
 fn opts_range(dir: &Path, root: &Path, from: &str, to: &str) -> SummaryOptions {
     SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         from: Some(from.to_string()),
         to: Some(to.to_string()),
         ..opts(dir, root)

@@ -51,24 +51,51 @@ def prepare(data, sources, profile="legacy-cache"):
     return {"claude": str(claude), "codex": str(codex), "profile": profile}
 
 
-def grant_test_consent(data):
+def _consent_prefix(revision):
+    # WB05：需要当前修订授权的跳必须与修订号同一次写入（两个键一起出现）；
+    # 不带 revision 的调用保持旧布尔形态（受测历史版本不认识修订号字段）。
+    if revision is None:
+        return "privacy_policy_accepted = true\n"
+    return f"privacy_policy_accepted = true\nprivacy_policy_revision = {int(revision)}\n"
+
+
+def grant_test_consent(data, revision=None):
     path = Path(data) / "settings.toml"
     text = path.read_text(encoding="utf-8")
     settings = tomllib.loads(text)
     if "privacy_policy_accepted" in settings:
         raise ValueError("旧版夹具不应预先存在当前隐私同意状态")
     with path.open("w", encoding="utf-8", newline="\n") as fh:
-        fh.write("privacy_policy_accepted = true\n" + text)
+        fh.write(_consent_prefix(revision) + text)
 
 
-def ensure_test_consent(data):
-    """升级链每一跳安装后、启动前使用：已有同意就不重复写入。"""
+def ensure_test_consent(data, revision=None):
+    """升级链每一跳安装后、启动前使用（闸门拒绝路径已由观察段先行验证）。
+
+    - 无同意记录：写入（按 revision 决定是否带修订号）；
+    - 已有同意且修订号已满足（或本次调用不带 revision）：幂等跳过；
+    - 已有同意但需要当前修订授权（revision 给定且记录低于它）：补写修订号
+      ——这是闸门验证之后的显式测试授权，与真实用户重新同意后的落盘等价。
+    """
     path = Path(data) / "settings.toml"
     text = path.read_text(encoding="utf-8")
-    if "privacy_policy_accepted" in tomllib.loads(text):
+    settings = tomllib.loads(text)
+    if "privacy_policy_accepted" in settings and settings.get("privacy_policy_accepted") is True:
+        if revision is not None and settings.get("privacy_policy_revision") != int(revision):
+            # 先删已有的修订号行再插入，否则文件里出现重复的
+            # privacy_policy_revision 键，tomllib 拒绝解析整个文件。
+            body = re.sub(r"(?m)^[ \t]*privacy_policy_revision[ \t]*=.*\r?\n?", "", text)
+            body = body.replace(
+                "privacy_policy_accepted = true",
+                _consent_prefix(revision).rstrip("\n"),
+                1,
+            )
+            with path.open("w", encoding="utf-8", newline="\n") as fh:
+                fh.write(body)
+            return {"ok": True, "test_consent_added": False, "test_consent_upgraded": True}
         return {"ok": True, "test_consent_added": False}
     with path.open("w", encoding="utf-8", newline="\n") as fh:
-        fh.write("privacy_policy_accepted = true\n" + text)
+        fh.write(_consent_prefix(revision) + text)
     return {"ok": True, "test_consent_added": True}
 
 
@@ -140,6 +167,8 @@ def validate_operation(operation, key):
     elif kind == "default":
         if not field_path(operation.get("path")) or "value" not in operation:
             raise ValueError(f"default 操作必须给出 path 与 value：{key!r}")
+        if not isinstance(operation.get("allow_missing", False), bool):
+            raise ValueError(f"default 操作的 allow_missing 必须是布尔：{key!r}")
     elif kind == "source_dir_to_additional_path":
         # v1 sources.<agent>.dir → v2 追加项 + 自动发现（专用、有限：只认两个 agent）。
         if operation.get("agent") not in ("claude", "codex"):
@@ -220,7 +249,8 @@ def verify_settings(data, original, from_format, to_format, migrations=MIGRATION
         raise ValueError("当前验收同意状态未保留")
     renames = {operation["from"]: operation["to"] for operation in operations
                if operation["kind"] == "rename"}
-    defaults = [(operation["path"], operation["value"]) for operation in operations
+    defaults = [(operation["path"], operation["value"], operation.get("allow_missing", False))
+                for operation in operations
                 if operation["kind"] == "default"]
     source_dir_ops = [operation for operation in operations
                       if operation["kind"] == "source_dir_to_additional_path"]
@@ -236,9 +266,12 @@ def verify_settings(data, original, from_format, to_format, migrations=MIGRATION
                              + (f" -> {target}" if target != path else ""))
     source_dir_results = [verify_source_dir_to_additional_path(expected, current, operation["agent"])
                           for operation in source_dir_ops]
-    for path, value in defaults:
+    for path, value, allow_missing in defaults:
         found = lookup(current, path)
-        if found is MISSING or found != value:
+        # 默认严格：default 声明的值必须实际写出且相等。仅显式标注
+        # allow_missing 的规则（WorkBuddy 新键：缺失 = 程序按默认启用解释）
+        # 允许缺键；显式写出与默认相反的值始终失败。
+        if (found is MISSING and not allow_missing) or (found is not MISSING and found != value):
             raise ValueError(f"迁移默认值不一致：{path}")
     return {"ok": True, "from_format": int(from_format), "to_format": int(to_format),
             "source_dir": [r for r in source_dir_results if r is not None]}
@@ -253,8 +286,10 @@ def main():
     command.add_argument("--profile", choices=PROFILES, default="legacy-cache")
     command = sub.add_parser("consent")
     command.add_argument("--data-dir", type=Path, required=True)
+    command.add_argument("--revision", type=int, default=None)
     command = sub.add_parser("ensure-consent")
     command.add_argument("--data-dir", type=Path, required=True)
+    command.add_argument("--revision", type=int, default=None)
     command = sub.add_parser("verify")
     command.add_argument("--database", type=Path, required=True)
     command = sub.add_parser("settings")
@@ -267,10 +302,10 @@ def main():
         if args.mode == "prepare":
             result = prepare(args.data_dir, args.source_dir, args.profile)
         elif args.mode == "consent":
-            grant_test_consent(args.data_dir)
+            grant_test_consent(args.data_dir, revision=args.revision)
             result = {"ok": True, "test_consent_added": True}
         elif args.mode == "ensure-consent":
-            result = ensure_test_consent(args.data_dir)
+            result = ensure_test_consent(args.data_dir, revision=args.revision)
         elif args.mode == "settings":
             result = verify_settings(args.data_dir, args.original,
                                      args.from_format, args.to_format)

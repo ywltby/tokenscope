@@ -104,10 +104,18 @@ pub fn data_dir_override() -> Option<PathBuf> {
 
 /// agent 来源根的覆盖值。验收模式下**不允许**回退到真实 `~/.claude`、
 /// `~/.codex`：即使隔离目录不存在也照实报告"目录不存在"，不改读真实来源。
-pub fn source_dir_override(claude: bool) -> Option<PathBuf> {
+/// 目录名沿用隔离根既有布局（`sources/claude`、`sources/codex`，与
+/// prepare-native-acceptance.ps1 的生成契约一致），不随 `as_str` 变化。
+pub fn source_dir_override(kind: crate::model::AgentKind) -> Option<PathBuf> {
     imp::root().map(|r| {
-        r.join("sources")
-            .join(if claude { "claude" } else { "codex" })
+        let name = match kind {
+            crate::model::AgentKind::ClaudeCode => "claude",
+            crate::model::AgentKind::Codex => "codex",
+            // WB04 接入两版 WorkBuddy 的验收来源目录
+            crate::model::AgentKind::WorkBuddy => "workbuddy",
+            crate::model::AgentKind::WorkBuddyAi => "workbuddy-ai",
+        };
+        r.join("sources").join(name)
     })
 }
 
@@ -303,12 +311,15 @@ mod imp {
         let home = dirs::home_dir()
             .ok_or_else(|| "无法定位用户主目录，拒绝在未知环境下进入验收模式".to_string())?;
         let home_canon = strip_verbatim(&home.canonicalize().unwrap_or_else(|_| home.clone()));
-        // 真实数据目录：~/.tokenscope（自有数据）、~/.claude、~/.codex（来源）。
+        // 真实数据目录：~/.tokenscope（自有数据）、~/.claude、~/.codex、
+        // ~/.workbuddy、~/.workbuddy-ai（来源，WB04 起四应用）。
         for protected in [
             home_canon.clone(),
             home_canon.join(".tokenscope"),
             home_canon.join(".claude"),
             home_canon.join(".codex"),
+            home_canon.join(".workbuddy"),
+            home_canon.join(".workbuddy-ai"),
         ] {
             if canon == protected || protected.starts_with(&canon) {
                 return Err(format!(

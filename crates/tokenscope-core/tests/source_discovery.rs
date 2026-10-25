@@ -93,11 +93,20 @@ fn default_roots_resolve_with_origins_and_mapping() {
     std::fs::create_dir_all(home.join(".claude/projects")).unwrap();
     std::fs::create_dir_all(home.join(".codex/sessions")).unwrap();
     let ctx = ctx_for(&home, StartupEnv::default(), filesystem_probe());
-    let out = resolve_sources(&ctx, &default_claude(), &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    // WB04 产品口径变化：默认候选集从 3 根扩为 5 根
+    //（Claude 1 + Codex 2 + WorkBuddy 2；两个 WorkBuddy 根在本用例主目录
+    // 不存在，按 Missing 纯默认行保留）。
     assert_eq!(
         out.roots.len(),
-        3,
-        "Claude 1 根 + Codex 2 根: {:?}",
+        5,
+        "Claude 1 根 + Codex 2 根 + WorkBuddy 2 根: {:?}",
         out.roots
     );
     let claude = out
@@ -164,7 +173,13 @@ fn missing_permission_and_not_a_directory_are_distinct() {
         ),
     ]);
     let ctx = ctx_for(&home, StartupEnv::default(), probe);
-    let out = resolve_sources(&ctx, &default_claude(), &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let claude = out
         .roots
         .iter()
@@ -203,7 +218,13 @@ fn env_variables_empty_relative_and_missing_are_handled() {
         },
         filesystem_probe(),
     );
-    let out = resolve_sources(&ctx, &default_claude(), &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     assert!(
         out.roots
             .iter()
@@ -232,7 +253,13 @@ fn env_variables_empty_relative_and_missing_are_handled() {
         },
         filesystem_probe(),
     );
-    let out = resolve_sources(&ctx, &default_claude(), &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     assert!(
         !out.roots.iter().any(|r| r
             .origins
@@ -261,7 +288,13 @@ fn env_variables_empty_relative_and_missing_are_handled() {
         },
         filesystem_probe(),
     );
-    let out = resolve_sources(&ctx, &default_claude(), &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let env_row = out
         .roots
         .iter()
@@ -292,7 +325,13 @@ fn codex_home_appends_to_default_roots() {
         },
         filesystem_probe(),
     );
-    let out = resolve_sources(&ctx, &default_claude(), &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let codex: Vec<_> = out
         .roots
         .iter()
@@ -332,7 +371,13 @@ fn same_root_aliases_merge_with_labels() {
         path: sessions.display().to_string().to_uppercase(),
         enabled: true,
     }];
-    let out = resolve_sources(&ctx, &default_claude(), &codex);
+    let out = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &codex,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let merged = out
         .roots
         .iter()
@@ -361,7 +406,13 @@ fn legacy_semantics_do_not_expand_reading() {
         legacy_format: true,
         ..Default::default()
     };
-    let out = resolve_sources(&ctx, &claude, &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &claude,
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let claude_rows: Vec<_> = out
         .roots
         .iter()
@@ -395,7 +446,13 @@ fn legacy_semantics_do_not_expand_reading() {
         legacy_format: true,
         ..Default::default()
     };
-    let out = resolve_sources(&ctx, &default_claude(), &codex_legacy);
+    let out = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &codex_legacy,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let codex_rows: Vec<_> = out
         .roots
         .iter()
@@ -422,7 +479,13 @@ fn mapping_bindings_follow_a03_and_env_degradation() {
         path: manual_dir.display().to_string(),
         enabled: true,
     }];
-    let out = resolve_sources(&ctx, &claude, &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &claude,
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let default_row = out
         .roots
         .iter()
@@ -461,7 +524,13 @@ fn mapping_bindings_follow_a03_and_env_degradation() {
             .to_uppercase(),
         enabled: true,
     }];
-    let out = resolve_sources(&ctx, &claude, &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &claude,
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let merged = out
         .roots
         .iter()
@@ -483,7 +552,13 @@ fn mapping_bindings_follow_a03_and_env_degradation() {
         },
         filesystem_probe(),
     );
-    let out = resolve_sources(&ctx, &default_claude(), &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let env_row = out
         .roots
         .iter()
@@ -514,7 +589,13 @@ fn switches_and_exclusions_compose_without_rewriting_user_choices() {
         path: manual_dir.display().to_string(),
         enabled: true,
     }];
-    let out = resolve_sources(&ctx, &claude, &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &claude,
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let default_row = out
         .roots
         .iter()
@@ -531,7 +612,13 @@ fn switches_and_exclusions_compose_without_rewriting_user_choices() {
     // 总开关：压掉全部有效值，但 origin 用户选择不变
     let mut claude = default_claude();
     claude.enabled = false;
-    let out = resolve_sources(&ctx, &claude, &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &claude,
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     assert!(
         out.roots
             .iter()
@@ -551,7 +638,13 @@ fn switches_and_exclusions_compose_without_rewriting_user_choices() {
         path: manual_dir.display().to_string(),
         enabled: true,
     }];
-    let out = resolve_sources(&ctx, &claude, &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &claude,
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let manual_row = out
         .roots
         .iter()
@@ -577,7 +670,13 @@ fn row_disable_resolve_remove_enable_cycle_keeps_user_choices() {
     // 用表驱动探测器让默认根与手动项同身份（确定性，不依赖文件系统大小写语义）
     let probe = table_probe(vec![]);
     let ctx = ctx_for(&home, StartupEnv::default(), probe);
-    let out = resolve_sources(&ctx, &claude, &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &claude,
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let merged = out
         .roots
         .iter()
@@ -616,7 +715,13 @@ fn row_disable_resolve_remove_enable_cycle_keeps_user_choices() {
     );
     assert!(!claude.additional_paths[0].enabled);
     // 重启（重新解析）：行仍存在、有效停用、自动 origin 仍在配置里
-    let out = resolve_sources(&ctx, &claude, &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &claude,
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let row = out
         .roots
         .iter()
@@ -632,7 +737,13 @@ fn row_disable_resolve_remove_enable_cycle_keeps_user_choices() {
         !claude.excluded_auto_paths.is_empty(),
         "移除手动项后自动 origin 仍保持停用"
     );
-    let out = resolve_sources(&ctx, &claude, &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &claude,
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let row = out
         .roots
         .iter()
@@ -645,7 +756,13 @@ fn row_disable_resolve_remove_enable_cycle_keeps_user_choices() {
     set_row_enabled(&mut claude, &row_paths(vec![]), true).unwrap();
     assert!(claude.excluded_auto_paths.is_empty());
     assert!(claude.additional_paths.is_empty(), "移除过的手动项不得复活");
-    let out = resolve_sources(&ctx, &claude, &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &claude,
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let row = out
         .roots
         .iter()
@@ -677,8 +794,20 @@ fn row_operations_reject_unknown_ids_and_pure_auto_rows() {
 fn row_ids_are_stable_across_re_resolution() {
     let home = temp_dir("row-id");
     let ctx = ctx_for(&home, StartupEnv::default(), filesystem_probe());
-    let out1 = resolve_sources(&ctx, &default_claude(), &default_codex());
-    let out2 = resolve_sources(&ctx, &default_claude(), &default_codex());
+    let out1 = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    let out2 = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     for (a, b) in out1.roots.iter().zip(&out2.roots) {
         assert_eq!(a.id(), b.id());
     }
@@ -699,7 +828,13 @@ fn new_directory_appears_on_next_resolution() {
     let home = temp_dir("next-round");
     let probe = filesystem_probe();
     let ctx = ctx_for(&home, StartupEnv::default(), probe);
-    let out1 = resolve_sources(&ctx, &default_claude(), &default_codex());
+    let out1 = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let claude1 = out1
         .roots
         .iter()
@@ -708,7 +843,13 @@ fn new_directory_appears_on_next_resolution() {
     assert_eq!(claude1.state, ProbeState::Missing, "前置：目录尚未创建");
     assert!(claude1.hidden_by_default_missing());
     std::fs::create_dir_all(home.join(".claude/projects")).unwrap();
-    let out2 = resolve_sources(&ctx, &default_claude(), &default_codex());
+    let out2 = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let claude2 = out2
         .roots
         .iter()
@@ -741,13 +882,31 @@ fn resolution_is_recomputed_and_signature_tracks_meaningful_changes() {
         (base)(path)
     });
     let ctx = ctx_for(&home, StartupEnv::default(), probe);
-    let out1 = resolve_sources(&ctx, &default_claude(), &default_codex());
-    let out2 = resolve_sources(&ctx, &default_claude(), &default_codex());
+    let out1 = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    let out2 = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     assert_eq!(out1.signature, out2.signature, "相同输入签名必须相同");
     assert_eq!(out1.signature.len(), 16, "签名是 16 位十六进制");
 
     *deny.lock().unwrap() = true;
-    let out3 = resolve_sources(&ctx, &default_claude(), &default_codex());
+    let out3 = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     assert_ne!(out1.signature, out3.signature, "探测状态变化必须进入签名");
 
     // 新增手动项：签名变化（根集合变化）
@@ -757,7 +916,13 @@ fn resolution_is_recomputed_and_signature_tracks_meaningful_changes() {
         path: home.join("extra").display().to_string(),
         enabled: true,
     }];
-    let out4 = resolve_sources(&ctx, &claude, &default_codex());
+    let out4 = resolve_sources(
+        &ctx,
+        &claude,
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     assert_ne!(out1.signature, out4.signature);
     assert!(
         out4.roots.iter().any(|r| r.display_path.ends_with("extra")),
@@ -779,7 +944,13 @@ fn only_default_missing_rows_are_hideable() {
         },
         probe,
     );
-    let out = resolve_sources(&ctx, &default_claude(), &default_codex());
+    let out = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let claude = out
         .roots
         .iter()
@@ -821,7 +992,13 @@ fn cross_app_same_root_marks_both_sides_conflicted() {
     let shared = home.join("shared");
     std::fs::create_dir_all(&shared).unwrap();
     let ctx = ctx_for(&home, StartupEnv::default(), filesystem_probe());
-    let out = resolve_sources(&ctx, &manual_only(&[&shared]), &manual_only(&[&shared]));
+    let out = resolve_sources(
+        &ctx,
+        &manual_only(&[&shared]),
+        &manual_only(&[&shared]),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     let shared_rows: Vec<_> = out
         .roots
         .iter()
@@ -852,7 +1029,13 @@ fn cross_app_nested_marks_both_sides_conflicted() {
     let child = parent.join("sub");
     std::fs::create_dir_all(&child).unwrap();
     let ctx = ctx_for(&home, StartupEnv::default(), filesystem_probe());
-    let out = resolve_sources(&ctx, &manual_only(&[&parent]), &manual_only(&[&child]));
+    let out = resolve_sources(
+        &ctx,
+        &manual_only(&[&parent]),
+        &manual_only(&[&child]),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     for row in &out.roots {
         let is_overlapped = norm(&row.display_path) == norm(&parent.to_string_lossy())
             || norm(&row.display_path) == norm(&child.to_string_lossy());
@@ -892,7 +1075,13 @@ fn disabled_side_does_not_conflict() {
     let ctx = ctx_for(&home, StartupEnv::default(), filesystem_probe());
     let mut codex = manual_only(&[&shared]);
     codex.enabled = false;
-    let out = resolve_sources(&ctx, &manual_only(&[&shared]), &codex);
+    let out = resolve_sources(
+        &ctx,
+        &manual_only(&[&shared]),
+        &codex,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
     for row in &out.roots {
         assert!(row.conflict_with.is_none(), "停用侧不参与冲突: {row:?}");
     }
@@ -910,6 +1099,8 @@ fn same_app_nested_child_gets_overlap_diagnostic() {
     let out = resolve_sources(
         &ctx,
         &manual_only(&[&parent, &child]),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
         &SourceConfig::default(),
     );
     let child_row = out
@@ -939,4 +1130,167 @@ fn same_app_nested_child_gets_overlap_diagnostic() {
         "父根是读取方，无重叠诊断: {:?}",
         parent_row.diagnostics
     );
+}
+
+// ── WB04：两个 WorkBuddy 的默认根、开关与跨应用冲突 ──────────────
+
+fn ctx(home: &Path) -> DiscoveryContext {
+    ctx_for(home, StartupEnv::default(), filesystem_probe())
+}
+
+#[test]
+fn workbuddy_default_roots_are_fixed_candidates() {
+    let home = temp_dir("wb-defaults");
+    std::fs::create_dir_all(home.join(".workbuddy/projects")).unwrap();
+    std::fs::create_dir_all(home.join(".workbuddy-ai/projects")).unwrap();
+    let out = resolve_sources(
+        &ctx(&home),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    let kinds: Vec<AgentKind> = out.roots.iter().map(|r| r.agent).collect();
+    for kind in [
+        AgentKind::ClaudeCode,
+        AgentKind::Codex,
+        AgentKind::WorkBuddy,
+        AgentKind::WorkBuddyAi,
+    ] {
+        assert!(
+            kinds.contains(&kind),
+            "四应用的默认根都必须出现在候选集：{kinds:?}"
+        );
+    }
+    let wb = out
+        .roots
+        .iter()
+        .find(|r| r.agent == AgentKind::WorkBuddy)
+        .unwrap();
+    assert_eq!(
+        PathBuf::from(&wb.display_path),
+        home.join(".workbuddy/projects"),
+        "默认根 = ~/.workbuddy/projects"
+    );
+    assert!(
+        wb.origins
+            .iter()
+            .all(|o| matches!(o.kind, OriginKind::Default)),
+        "WorkBuddy 没有环境变量派生根"
+    );
+    let wba = out
+        .roots
+        .iter()
+        .find(|r| r.agent == AgentKind::WorkBuddyAi)
+        .unwrap();
+    assert_eq!(
+        PathBuf::from(&wba.display_path),
+        home.join(".workbuddy-ai/projects")
+    );
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn workbuddy_total_switch_and_auto_discover_gates() {
+    let home = temp_dir("wb-switch");
+    std::fs::create_dir_all(home.join(".workbuddy/projects")).unwrap();
+    // 总开关关闭：行保留但 effective_enabled=false
+    let wb_off = SourceConfig {
+        enabled: false,
+        ..SourceConfig::default()
+    };
+    let out = resolve_sources(
+        &ctx(&home),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &wb_off,
+        &SourceConfig::default(),
+    );
+    let wb = out
+        .roots
+        .iter()
+        .find(|r| r.agent == AgentKind::WorkBuddy)
+        .unwrap();
+    assert!(!wb.effective_enabled, "总开关关闭 → 行不进采集");
+    // 自动发现关闭：默认根被关掉（仍显示行）
+    let wb_no_auto = SourceConfig {
+        auto_discover: false,
+        ..SourceConfig::default()
+    };
+    let out = resolve_sources(
+        &ctx(&home),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &wb_no_auto,
+        &SourceConfig::default(),
+    );
+    let wb = out
+        .roots
+        .iter()
+        .find(|r| r.agent == AgentKind::WorkBuddy)
+        .unwrap();
+    assert!(!wb.effective_enabled, "自动发现关闭 → 默认根不采集");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn workbuddy_root_shared_with_claude_is_conflicted() {
+    // 跨应用冲突：把 ~/.workbuddy 追加给 Claude → 与 WorkBuddy 默认根的父目录嵌套。
+    let home = temp_dir("wb-conflict");
+    std::fs::create_dir_all(home.join(".workbuddy/projects")).unwrap();
+    let claude_shared = SourceConfig {
+        additional_paths: vec![tokenscope::settings::AdditionalSourcePath {
+            path: home.join(".workbuddy").display().to_string(),
+            enabled: true,
+        }],
+        ..SourceConfig::default()
+    };
+    let out = resolve_sources(
+        &ctx(&home),
+        &claude_shared,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    let claude_row = out
+        .roots
+        .iter()
+        .find(|r| r.agent == AgentKind::ClaudeCode)
+        .unwrap();
+    let wb_row = out
+        .roots
+        .iter()
+        .find(|r| r.agent == AgentKind::WorkBuddy)
+        .unwrap();
+    assert!(
+        claude_row.conflict_with.is_some(),
+        "Claude 手动根与 WorkBuddy 默认根嵌套 → 冲突"
+    );
+    assert!(
+        wb_row.conflict_with.is_some(),
+        "WorkBuddy 默认根同样被标记（无先扫描者得）"
+    );
+    assert!(!claude_row.effective_enabled || claude_row.conflict_with.is_some());
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn workbuddy_missing_default_root_is_hidden_or_missing_row() {
+    let home = temp_dir("wb-missing");
+    // 不创建目录：缺失默认根（纯自动 + Missing）→ hidden_by_default_missing
+    let out = resolve_sources(
+        &ctx(&home),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    let wb = out
+        .roots
+        .iter()
+        .find(|r| r.agent == AgentKind::WorkBuddy)
+        .unwrap();
+    assert_eq!(wb.state, ProbeState::Missing);
+    assert!(wb.hidden_by_default_missing(), "纯默认缺失根可隐藏");
+    std::fs::remove_dir_all(&home).ok();
 }

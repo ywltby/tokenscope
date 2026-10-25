@@ -30,6 +30,9 @@ fn real_data_cold_warm_timing() {
         .try_init();
 
     let opts = || SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         ..Default::default()
     };

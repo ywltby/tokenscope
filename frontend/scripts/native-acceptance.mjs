@@ -27,8 +27,16 @@ import { nativeCcsImport } from "./contracts/native-ccs-import.mjs";
 import { nativePricing, preparePricingScenario } from "./contracts/native-pricing.mjs";
 import { nativeUiRelaunch, nativeUiSystem } from "./contracts/native-ui-system.mjs";
 import { decodePng } from "./lib/png.mjs";
-import { startAcceptanceIo, readAcceptanceTrace, snapshotBusinessFiles, changedBusinessFiles,
-  proxyEnvironment, beginIsolationCleanup, terminateAfterSnapshot, missingBusinessEvents } from "./lib/acceptance-io.mjs";
+import {
+  startAcceptanceIo,
+  readAcceptanceTrace,
+  snapshotBusinessFiles,
+  changedBusinessFiles,
+  proxyEnvironment,
+  beginIsolationCleanup,
+  terminateAfterSnapshot,
+  missingBusinessEvents,
+} from "./lib/acceptance-io.mjs";
 import {
   CDP_READY_BUDGET_MS,
   CONNECT_RETRY_INTERVAL_MS,
@@ -94,7 +102,10 @@ function flag(name) {
   return argv.includes(`--${name}`);
 }
 const SCENARIO = arg("scenario");
-const OUT = path.resolve(REPO, arg("out", path.join(REPO, "qa-artifacts", "native-recheck-2026-10-08")));
+const OUT = path.resolve(
+  REPO,
+  arg("out", path.join(REPO, "qa-artifacts", "native-recheck-2026-10-08")),
+);
 const PORT = Number(arg("port", "9411"));
 const EXE = arg("exe", EXE_DEFAULT);
 const THEME = arg("theme", "system"); // light | dark | system（--force-*-mode 通道）
@@ -121,7 +132,9 @@ function fingerprint(dir) {
   if (!fs.existsSync(dir)) return "<missing>";
   const rows = [];
   const walk = (d, rel) => {
-    for (const e of fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    for (const e of fs
+      .readdirSync(d, { withFileTypes: true })
+      .sort((a, b) => (a.name < b.name ? -1 : 1))) {
       const abs = path.join(d, e.name);
       const r = `${rel}/${e.name}`;
       if (e.isDirectory()) walk(abs, r);
@@ -140,7 +153,9 @@ function hashOfFingerprint(fp) {
 function listFiles(dir) {
   const out = [];
   const walk = (d, rel) => {
-    for (const e of fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    for (const e of fs
+      .readdirSync(d, { withFileTypes: true })
+      .sort((a, b) => (a.name < b.name ? -1 : 1))) {
       const abs = path.join(d, e.name);
       const r = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) walk(abs, r);
@@ -428,7 +443,7 @@ class Instance {
       throw new Error(`隔离根缺少 manifest：${this.root}`);
     }
     if (this.opts.mutate) this.opts.mutate(this.root);
-    this.prelaunchBusinessFiles = snapshotBusinessFiles(path.join(this.root,"tokenscope"));
+    this.prelaunchBusinessFiles = snapshotBusinessFiles(path.join(this.root, "tokenscope"));
     const manifest = JSON.parse(fs.readFileSync(path.join(this.root, "manifest.json"), "utf8"));
     return manifest;
   }
@@ -463,7 +478,8 @@ class Instance {
    */
   hostExitCodeOf(record) {
     this.markHostExit(record);
-    if (record.hostExitCode !== null && record.hostExitCode !== undefined) return record.hostExitCode;
+    if (record.hostExitCode !== null && record.hostExitCode !== undefined)
+      return record.hostExitCode;
     if (record.hostExitDetected) return record.hostExitDetected.code ?? "unknown";
     return null;
   }
@@ -596,7 +612,11 @@ class Instance {
     });
     recordOwnerCheck(record, { atMs: Date.now() - record.startedAtMs, owner, probe_ms: snap.ms });
     if (!snap.ok) {
-      return { ...owner, kind: "none", detail: `${owner.detail}（探测失败：${snap.error ?? "未知"}）` };
+      return {
+        ...owner,
+        kind: "none",
+        detail: `${owner.detail}（探测失败：${snap.error ?? "未知"}）`,
+      };
     }
     return owner;
   }
@@ -699,7 +719,12 @@ class Instance {
         this.browser = browser;
         this.ctx = browser.contexts()[0];
         this.lastConnectError = null;
-        recordConnectAttempt(record, { atMs: elapsedMs, phase, ok: true, ms: Date.now() - attemptStartedAt });
+        recordConnectAttempt(record, {
+          atMs: elapsedMs,
+          phase,
+          ok: true,
+          ms: Date.now() - attemptStartedAt,
+        });
         return version;
       } catch (error) {
         const ms = Date.now() - attemptStartedAt;
@@ -972,7 +997,9 @@ class Instance {
   async waitForData(timeoutMs = 30000) {
     await this.page.waitForSelector(".app-nav", { timeout: timeoutMs });
     await this.page.waitForFunction(
-      () => document.querySelectorAll(".ts-skeleton, .n-skeleton").length === 0 && !!document.querySelector(".chart-canvas svg"),
+      () =>
+        document.querySelectorAll(".ts-skeleton, .n-skeleton").length === 0 &&
+        !!document.querySelector(".chart-canvas svg"),
       null,
       { timeout: timeoutMs, polling: 250 },
     );
@@ -1068,7 +1095,10 @@ class Instance {
     this.cdp = await this.ctx.newCDPSession(this.page);
     this.console = [];
     this.violations = [];
-    this.opts = { ...this.opts, idleNote: `started_at=${state.at} planned=${state.idleDeadlineIso}` };
+    this.opts = {
+      ...this.opts,
+      idleNote: `started_at=${state.at} planned=${state.idleDeadlineIso}`,
+    };
     return record;
   }
   /**
@@ -1192,7 +1222,9 @@ class Instance {
   /** 证据用：宿主日志尾部（进程日志由本脚本按次追加）。 */
   logTail() {
     try {
-      return fs.existsSync(this.logPath) ? hostLogTail(fs.readFileSync(this.logPath, "utf8")) : null;
+      return fs.existsSync(this.logPath)
+        ? hostLogTail(fs.readFileSync(this.logPath, "utf8"))
+        : null;
     } catch (e) {
       return `读取宿主日志失败：${String(e?.message ?? e)}`;
     }
@@ -1242,7 +1274,9 @@ async function measureCostPopover(page, vp) {
   let reached = false;
   for (let i = 0; i < 60; i++) {
     await page.keyboard.press("Tab");
-    const isTrigger = await page.evaluate(() => document.activeElement?.classList?.contains("cost-trigger"));
+    const isTrigger = await page.evaluate(() =>
+      document.activeElement?.classList?.contains("cost-trigger"),
+    );
     if (isTrigger) {
       reached = true;
       out.tabPresses = i + 1;
@@ -1251,16 +1285,22 @@ async function measureCostPopover(page, vp) {
   }
   out.keyboardReachedTrigger = reached;
   if (!reached) return { ...out, available: false };
-  out.accessibleName = await page.evaluate(() => document.activeElement?.getAttribute("aria-label") ?? "");
+  out.accessibleName = await page.evaluate(
+    () => document.activeElement?.getAttribute("aria-label") ?? "",
+  );
   const focusRing = await page.evaluate(() => {
     const cs = getComputedStyle(document.activeElement);
-    return { outlineWidth: cs.outlineWidth, outlineStyle: cs.outlineStyle, boxShadow: cs.boxShadow.slice(0, 80) };
+    return {
+      outlineWidth: cs.outlineWidth,
+      outlineStyle: cs.outlineStyle,
+      boxShadow: cs.boxShadow.slice(0, 80),
+    };
   });
   out.focusRing = focusRing;
   await page.keyboard.press("Enter");
   await page.waitForTimeout(450);
-  out.ariaExpanded = await page.evaluate(() =>
-    document.activeElement?.getAttribute("aria-expanded") ?? null,
+  out.ariaExpanded = await page.evaluate(
+    () => document.activeElement?.getAttribute("aria-expanded") ?? null,
   );
   const tip = page.locator(".n-popover:visible, .n-tooltip:visible").first();
   out.popoverPresent = (await tip.count()) > 0;
@@ -1349,7 +1389,8 @@ async function measureNavScroll(page) {
 
 async function measureA11y(page) {
   return page.evaluate(() => {
-    const sel = "button,[role=button],input,select,textarea,a[href],[tabindex]:not([tabindex='-1'])";
+    const sel =
+      "button,[role=button],input,select,textarea,a[href],[tabindex]:not([tabindex='-1'])";
     const nodes = [...document.querySelectorAll(sel)].filter(
       (n) => n.getClientRects().length > 0 && !n.disabled,
     );
@@ -1387,11 +1428,17 @@ const scenarios = {
     const started = Date.now();
     while (Date.now() < Date.parse(context.ev.sessionIdleDeadlineIso)) {
       await sleep(1000);
-      if (context.inst.proc.exitCode !== null) throw new Error(`空闲期间进程退出：${context.inst.proc.exitCode}`);
-      if (Math.floor((Date.now() - started) / 1000) % 30 === 0) hb("原生查询会话保持空闲，等待真实 TTL");
+      if (context.inst.proc.exitCode !== null)
+        throw new Error(`空闲期间进程退出：${context.inst.proc.exitCode}`);
+      if (Math.floor((Date.now() - started) / 1000) % 30 === 0)
+        hb("原生查询会话保持空闲，等待真实 TTL");
     }
     context.ev.actualIdleMs = Date.now() - started;
-    context.ck.add("real_idle_exceeds_ttl", context.ev.actualIdleMs > 600000, `${context.ev.actualIdleMs} ms`);
+    context.ck.add(
+      "real_idle_exceeds_ttl",
+      context.ev.actualIdleMs > 600000,
+      `${context.ev.actualIdleMs} ms`,
+    );
     await scenarios["expire-finish"](context);
   },
   /**
@@ -1403,7 +1450,8 @@ const scenarios = {
    * 存储偏好在点击「同意并继续」、后端 Ready 后才恢复（见 privacy-accept-restart）。
    */
   async "first-frame"({ inst, ck, ev }) {
-    if (!inst.framesPromise) throw new Error("first-frame 必须带 --frames（首帧要用连续帧取证，加载完成截图不算证据）");
+    if (!inst.framesPromise)
+      throw new Error("first-frame 必须带 --frames（首帧要用连续帧取证，加载完成截图不算证据）");
     await inst.waitForData();
     const win = await inst.page.evaluate(() => {
       const root = document.documentElement;
@@ -1423,7 +1471,9 @@ const scenarios = {
         htmlBackground: getComputedStyle(document.documentElement).backgroundColor,
         bodyBackground: getComputedStyle(document.body).backgroundColor,
         dataTheme: root.getAttribute("data-theme") ?? shell.getAttribute("data-theme") ?? null,
-        paint: performance.getEntriesByType("paint").map((p) => `${p.name}=${Math.round(p.startTime)}ms`),
+        paint: performance
+          .getEntriesByType("paint")
+          .map((p) => `${p.name}=${Math.round(p.startTime)}ms`),
         navigation: (() => {
           const n = performance.getEntriesByType("navigation")[0];
           return n
@@ -1447,18 +1497,28 @@ const scenarios = {
         : `无可用帧（count=${frames.count} decoded=${frames.decoded}）`,
     );
     if (firstLum !== null && firstLum !== undefined && !Number.isNaN(firstLum)) {
-      if (darkExpected) ck.add("first_frame_dark_canvas", firstLum < 110, `亮度=${firstLum}（深色期望 <110）`);
-      if (lightExpected) ck.add("first_frame_light_canvas", firstLum > 150, `亮度=${firstLum}（浅色期望 >150）`);
+      if (darkExpected)
+        ck.add("first_frame_dark_canvas", firstLum < 110, `亮度=${firstLum}（深色期望 <110）`);
+      if (lightExpected)
+        ck.add("first_frame_light_canvas", firstLum > 150, `亮度=${firstLum}（浅色期望 >150）`);
       // 首帧之后不得出现"先深后浅"的闪烁：窗口帧序列里最小亮度必须就是首帧
       const lumas = frames.luma_sequence
         .map((t) => Number(t.split(":")[1]))
         .filter((v) => Number.isFinite(v) && v >= 0);
       const note = `min=${Math.min(...lumas)} max=${Math.max(...lumas)} n=${lumas.length}`;
       if (darkExpected) {
-        ck.add("no_light_before_dark_flash", Math.max(...lumas) < 110, `深色帧序列最大亮度 ${Math.max(...lumas)}；${note}`);
+        ck.add(
+          "no_light_before_dark_flash",
+          Math.max(...lumas) < 110,
+          `深色帧序列最大亮度 ${Math.max(...lumas)}；${note}`,
+        );
       }
       if (lightExpected) {
-        ck.add("no_dark_before_light_flash", Math.min(...lumas) > 150, `浅色帧序列最小亮度 ${Math.min(...lumas)}；${note}`);
+        ck.add(
+          "no_dark_before_light_flash",
+          Math.min(...lumas) > 150,
+          `浅色帧序列最小亮度 ${Math.min(...lumas)}；${note}`,
+        );
       }
     }
     ck.add(
@@ -1471,7 +1531,11 @@ const scenarios = {
       EXPECT_THEME === null || win.dataTheme === EXPECT_THEME,
       `data-theme=${win.dataTheme}，期望=${EXPECT_THEME ?? "（未指定）"}，html底色=${win.htmlBackground}，body底色=${win.bodyBackground}`,
     );
-    ck.add("paint_entries_recorded", win.paint.length > 0 || win.navigation !== "n/a", `${win.paint.join(" ")} | ${win.navigation}`);
+    ck.add(
+      "paint_entries_recorded",
+      win.paint.length > 0 || win.navigation !== "n/a",
+      `${win.paint.join(" ")} | ${win.navigation}`,
+    );
     ev.windowRect = await inst.windowInfo();
     ck.add("window_dpr_recorded", true, `dpr=${await inst.page.evaluate(() => devicePixelRatio)}`);
   },
@@ -1495,14 +1559,21 @@ const scenarios = {
       wantTheme === "system" || ev.dataTheme === wantTheme,
       `data-theme=${ev.dataTheme}，期望=${wantTheme}（--force-*-mode=${inst.opts.scheme ?? "none"}）`,
     );
-    const vp = page.viewportSize() ?? (await page.evaluate(() => ({ width: innerWidth, height: innerHeight })));
+    const vp =
+      page.viewportSize() ??
+      (await page.evaluate(() => ({ width: innerWidth, height: innerHeight })));
     ev.viewport = vp;
     ev.dpr = await page.evaluate(() => devicePixelRatio);
-    ev.nativeDpi = (ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "dpi"]).stdout || "").trim();
+    ev.nativeDpi = (
+      ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "dpi"]).stdout || ""
+    ).trim();
     if (SCALE === null) {
       const dpi = /DPI (\d+)/.exec(ev.nativeDpi);
-      ck.add("unforced_webview_matches_native_window_dpi", !!dpi && Math.abs(Number(dpi[1]) / 96 - ev.dpr) < 0.01,
-        `${ev.nativeDpi}; WebView dpr=${ev.dpr}; 未使用缩放强制参数`);
+      ck.add(
+        "unforced_webview_matches_native_window_dpi",
+        !!dpi && Math.abs(Number(dpi[1]) / 96 - ev.dpr) < 0.01,
+        `${ev.nativeDpi}; WebView dpr=${ev.dpr}; 未使用缩放强制参数`,
+      );
     }
     ev.windowRect = await inst.windowInfo();
     ev.themeMode = await page.evaluate(() => ({
@@ -1518,27 +1589,52 @@ const scenarios = {
     }));
     // 1) 键盘 + 可访问名称 + 费用浮层四边
     ev.cost = await measureCostPopover(page, vp);
-    ck.add("keyboard_reaches_cost_trigger", ev.cost.keyboardReachedTrigger, `Tab=${ev.cost.tabPresses ?? 0} 次`);
-    ck.add("cost_trigger_has_accessible_name", (ev.cost.accessibleName || "").length > 3, ev.cost.accessibleName);
     ck.add(
-    "cost_trigger_focus_ring_visible",
-    !!ev.cost.focusRing &&
-      (ev.cost.focusRing.outlineStyle !== "none" || /0px 0px 0px [1-9]/.test(ev.cost.focusRing.boxShadow || "")),
-    JSON.stringify(ev.cost.focusRing),
-  );
-    ck.add("cost_popover_opens_by_keyboard", ev.cost.ariaExpanded === "true", `aria-expanded=${ev.cost.ariaExpanded}`);
-    ck.add("cost_popover_four_edges_inside_viewport", ev.cost.fourEdgesInside === true, JSON.stringify(ev.cost.popoverBox));
+      "keyboard_reaches_cost_trigger",
+      ev.cost.keyboardReachedTrigger,
+      `Tab=${ev.cost.tabPresses ?? 0} 次`,
+    );
+    ck.add(
+      "cost_trigger_has_accessible_name",
+      (ev.cost.accessibleName || "").length > 3,
+      ev.cost.accessibleName,
+    );
+    ck.add(
+      "cost_trigger_focus_ring_visible",
+      !!ev.cost.focusRing &&
+        (ev.cost.focusRing.outlineStyle !== "none" ||
+          /0px 0px 0px [1-9]/.test(ev.cost.focusRing.boxShadow || "")),
+      JSON.stringify(ev.cost.focusRing),
+    );
+    ck.add(
+      "cost_popover_opens_by_keyboard",
+      ev.cost.ariaExpanded === "true",
+      `aria-expanded=${ev.cost.ariaExpanded}`,
+    );
+    ck.add(
+      "cost_popover_four_edges_inside_viewport",
+      ev.cost.fourEdgesInside === true,
+      JSON.stringify(ev.cost.popoverBox),
+    );
     ck.add("cost_popover_states_unit_dimension", ev.cost.hasUnitDimension === true, ev.cost.text);
     ck.add("cost_popover_closes_on_escape", ev.cost.closedByEscape === true, "");
     await page.screenshot({ path: path.join(inst.opts.shots, "01-dashboard.png") });
     // 2) 图表
     ev.chart = await measureChart(page);
-    ck.add("chart_canvas_painted", ev.chart.sizeOk && ev.chart.painted, JSON.stringify(ev.chart.box));
+    ck.add(
+      "chart_canvas_painted",
+      ev.chart.sizeOk && ev.chart.painted,
+      JSON.stringify(ev.chart.box),
+    );
     // 3) 维度切换（按模型）后仍可渲染
     await page.getByRole("radio", { name: "按模型" }).click();
     await page.waitForTimeout(900);
     ev.chartByModel = await measureChart(page);
-    ck.add("chart_renders_after_dimension_switch", ev.chartByModel.sizeOk === true, JSON.stringify(ev.chartByModel.box));
+    ck.add(
+      "chart_renders_after_dimension_switch",
+      ev.chartByModel.sizeOk === true,
+      JSON.stringify(ev.chartByModel.box),
+    );
     await page.getByRole("radio", { name: "按时间" }).click();
     await page.waitForTimeout(700);
     // 4) 日期外壳
@@ -1589,7 +1685,9 @@ const scenarios = {
         wordBreak: cs?.wordBreak ?? null,
         overflowWrap: cs?.overflowWrap ?? null,
         whiteSpace: cs?.whiteSpace ?? null,
-        textTruncated: path ? path.scrollWidth > Math.ceil(path.getBoundingClientRect().width) : null,
+        textTruncated: path
+          ? path.scrollWidth > Math.ceil(path.getBoundingClientRect().width)
+          : null,
       };
     });
     ck.add(
@@ -1600,7 +1698,11 @@ const scenarios = {
       `窗口=${JSON.stringify(ev.viewportNarrow)} scroll=${ev.settingsOverflow.scrollWidth}/${ev.settingsOverflow.clientWidth} 行数=${ev.settingsOverflow.lines} 截断=${ev.settingsOverflow.textTruncated} 断词=${ev.settingsOverflow.wordBreak}`,
     );
     ev.a11ySettings = await measureA11y(page);
-    ck.add("settings_focusables_all_named", ev.a11ySettings.unnamedCount === 0, JSON.stringify(ev.a11ySettings));
+    ck.add(
+      "settings_focusables_all_named",
+      ev.a11ySettings.unnamedCount === 0,
+      JSON.stringify(ev.a11ySettings),
+    );
     await page.screenshot({ path: path.join(inst.opts.shots, "03-settings-narrow.png") });
     await inst.setWindowSize(ev.originalBounds.width ?? 1280, ev.originalBounds.height ?? 800);
     ev.viewportRestored = page.viewportSize();
@@ -1610,7 +1712,10 @@ const scenarios = {
     ev.nav = await measureNavScroll(page);
     ck.add(
       "nav_sticky_with_blur_in_same_scroll_context",
-      ev.nav.available && ev.nav.stickyOk && /blur\(/.test(ev.nav.backdropFilter || "") && ev.nav.scrolled,
+      ev.nav.available &&
+        ev.nav.stickyOk &&
+        /blur\(/.test(ev.nav.backdropFilter || "") &&
+        ev.nav.scrolled,
       JSON.stringify(ev.nav),
     );
     ev.a11yDashboard = await measureA11y(page);
@@ -1621,11 +1726,13 @@ const scenarios = {
     );
     // 正常态通知清点（故障列由 §5 同组合故障轮实测）
     ev.noticesInNormalState = await page.locator(".ts-notice").count();
-    ev.noticeTexts = (await page.locator(".ts-notice").allInnerTexts()).map((t) => t.replace(/\s+/g, " ").slice(0, 140));
+    ev.noticeTexts = (await page.locator(".ts-notice").allInnerTexts()).map((t) =>
+      t.replace(/\s+/g, " ").slice(0, 140),
+    );
   },
 
   /** §4 生产 CSP：真实文档响应头/HTML + 全功能交互期间的违规观测。 */
-  async "csp"({ inst, ck, ev }) {
+  async csp({ inst, ck, ev }) {
     const page = inst.page;
     await inst.waitForData();
     // 重新加载并抓真实文档响应（协议级观测，不是调试器求值）
@@ -1633,7 +1740,13 @@ const scenarios = {
     await inst.cdp.send("Log.enable").catch(() => {});
     const captured = [];
     inst.cdp.on("Network.responseReceived", (e) => {
-      if (e.type === "Document") captured.push({ requestId: e.requestId, url: e.response.url, headers: e.response.headers, status: e.response.status });
+      if (e.type === "Document")
+        captured.push({
+          requestId: e.requestId,
+          url: e.response.url,
+          headers: e.response.headers,
+          status: e.response.status,
+        });
     });
     await inst.cdp.send("Page.reload");
     await inst.waitForData();
@@ -1643,16 +1756,26 @@ const scenarios = {
     if (doc) {
       try {
         const body = await inst.cdp.send("Network.getResponseBody", { requestId: doc.requestId });
-        const text = body.base64Encoded ? Buffer.from(body.body, "base64").toString("utf8") : body.body;
+        const text = body.base64Encoded
+          ? Buffer.from(body.body, "base64").toString("utf8")
+          : body.body;
         htmlSnippet = text.slice(0, 1200);
         ev.indexHtmlHasInlineScript = /<script(?![^>]*src=)[^>]*>[^<]/i.test(htmlSnippet);
-        ev.metaCsp = /Content-Security-Policy/i.test(htmlSnippet) ? "present-in-html" : "not-in-html";
+        ev.metaCsp = /Content-Security-Policy/i.test(htmlSnippet)
+          ? "present-in-html"
+          : "not-in-html";
       } catch (e) {
         ev.responseBodyError = String(e.message ?? e);
       }
     }
-    ev.cspHeader = doc ? (doc.headers["Content-Security-Policy"] ?? doc.headers["content-security-policy"] ?? null) : null;
-    ck.add("production_document_served_from_tauri_origin", !!doc && /tauri/.test(doc.url), doc?.url ?? "no-document");
+    ev.cspHeader = doc
+      ? (doc.headers["Content-Security-Policy"] ?? doc.headers["content-security-policy"] ?? null)
+      : null;
+    ck.add(
+      "production_document_served_from_tauri_origin",
+      !!doc && /tauri/.test(doc.url),
+      doc?.url ?? "no-document",
+    );
     ck.add(
       "production_csp_text_recorded",
       !!ev.cspHeader || ev.metaCsp === "present-in-html",
@@ -1670,7 +1793,8 @@ const scenarios = {
     const themeProbe = () =>
       page.evaluate(() => ({
         dataTheme: document.documentElement.getAttribute("data-theme"),
-        card: getComputedStyle(document.querySelector(".metric-card") ?? document.body).backgroundColor,
+        card: getComputedStyle(document.querySelector(".metric-card") ?? document.body)
+          .backgroundColor,
       }));
     await page.getByRole("radio", { name: "深色模式" }).click();
     await page.waitForTimeout(600);
@@ -1678,7 +1802,11 @@ const scenarios = {
     await page.getByRole("radio", { name: "浅色模式" }).click();
     await page.waitForTimeout(600);
     const lightBg = await themeProbe();
-    ck.add("ipc_summary_data_rendered", (await page.locator(".summary-card, .ts-card").count()) > 0, `cards=${await page.locator(".summary-card, .ts-card").count()}`);
+    ck.add(
+      "ipc_summary_data_rendered",
+      (await page.locator(".summary-card, .ts-card").count()) > 0,
+      `cards=${await page.locator(".summary-card, .ts-card").count()}`,
+    );
     ck.add("echarts_works_under_csp", chart.sizeOk === true, JSON.stringify(chart.box));
     ck.add("naive_popover_works_under_csp", date.opened === true, JSON.stringify(date.shell));
     ck.add(
@@ -1690,21 +1818,55 @@ const scenarios = {
     const vs = splitViolations(inst.violations);
     ev.cspViolations = inst.violations.slice(0, 20);
     ev.knownNoiseCount = vs.known.length;
-    ck.add("no_unexpected_csp_violation_while_app_runs", vs.unexpected.length === 0, vs.unexpected.slice(0, 3).join(" | ") || `仅已知噪声 ${vs.known.length} 条`);
+    ck.add(
+      "no_unexpected_csp_violation_while_app_runs",
+      vs.unexpected.length === 0,
+      vs.unexpected.slice(0, 3).join(" | ") || `仅已知噪声 ${vs.known.length} 条`,
+    );
     const beforeProbe = inst.violations.length;
     // 入口脚本由同源 HTTP 资源加载，真实点击才插入 script；evaluate 只读结果。
     await page.locator("#ts-acceptance-csp").click();
-    await page.waitForFunction(() => window.__tsCspProbe?.positiveRan && window.__tsCspProbe.violations.length >= 2);
+    await page.waitForFunction(
+      () => window.__tsCspProbe?.positiveRan && window.__tsCspProbe.violations.length >= 2,
+    );
     ev.scriptProbe = await page.evaluate(() => window.__tsCspProbe);
-    ck.add("same_origin_positive_script_executes", ev.scriptProbe.positiveRan === true, "允许的同源脚本确实执行，排除全部脚本无法加载的假阳性");
-    ck.add("unauthorized_inline_script_is_blocked", ev.scriptProbe.inlineRan === false && ev.scriptProbe.violations.some((v) => v.blockedURI === "inline"), JSON.stringify(ev.scriptProbe));
-    ck.add("external_script_is_blocked_by_policy", ev.scriptProbe.violations.some((v) => v.blockedURI === "https://tokenscope.invalid/acceptance-blocked.js"), JSON.stringify(ev.scriptProbe.violations));
-    ck.add("only_two_expected_script_policy_events", ev.scriptProbe.violations.length === 2, JSON.stringify(ev.scriptProbe.violations));
+    ck.add(
+      "same_origin_positive_script_executes",
+      ev.scriptProbe.positiveRan === true,
+      "允许的同源脚本确实执行，排除全部脚本无法加载的假阳性",
+    );
+    ck.add(
+      "unauthorized_inline_script_is_blocked",
+      ev.scriptProbe.inlineRan === false &&
+        ev.scriptProbe.violations.some((v) => v.blockedURI === "inline"),
+      JSON.stringify(ev.scriptProbe),
+    );
+    ck.add(
+      "external_script_is_blocked_by_policy",
+      ev.scriptProbe.violations.some(
+        (v) => v.blockedURI === "https://tokenscope.invalid/acceptance-blocked.js",
+      ),
+      JSON.stringify(ev.scriptProbe.violations),
+    );
+    ck.add(
+      "only_two_expected_script_policy_events",
+      ev.scriptProbe.violations.length === 2,
+      JSON.stringify(ev.scriptProbe.violations),
+    );
     // console 与 CDP Log 可能重复上报同一事件；与 DOM 事件分开记录。
-    ev.expectedScriptConsole = inst.violations.slice(beforeProbe).filter((v) =>
-      /Executing inline script violates|Loading the script 'https:\/\/tokenscope\.invalid\/acceptance-blocked\.js'/i.test(v));
+    ev.expectedScriptConsole = inst.violations
+      .slice(beforeProbe)
+      .filter((v) =>
+        /Executing inline script violates|Loading the script 'https:\/\/tokenscope\.invalid\/acceptance-blocked\.js'/i.test(
+          v,
+        ),
+      );
     inst.expectedScriptConsole = new Set(ev.expectedScriptConsole);
-    ck.add("production_policy_not_relaxed_for_probe", !!ev.cspHeader && !/script-src[^;]*'unsafe-inline'/.test(ev.cspHeader), ev.cspHeader);
+    ck.add(
+      "production_policy_not_relaxed_for_probe",
+      !!ev.cspHeader && !/script-src[^;]*'unsafe-inline'/.test(ev.cspHeader),
+      ev.cspHeader,
+    );
     await page.screenshot({ path: path.join(inst.opts.shots, "csp-state.png") });
   },
 
@@ -1712,7 +1874,9 @@ const scenarios = {
   async "seed-theme"({ inst, ck, ev }) {
     const page = inst.page;
     await inst.waitForData();
-    const label = { light: "浅色模式", dark: "深色模式", system: "跟随系统" }[inst.opts.scheme ?? "system"] ?? "跟随系统";
+    const label =
+      { light: "浅色模式", dark: "深色模式", system: "跟随系统" }[inst.opts.scheme ?? "system"] ??
+      "跟随系统";
     await page.getByRole("radio", { name: label }).click();
     await page.waitForTimeout(1500);
     ev.stored = await page.evaluate(() => {
@@ -1722,7 +1886,9 @@ const scenarios = {
         return "<blocked>";
       }
     });
-    ev.modeAfterSeed = await page.evaluate(() => getComputedStyle(document.querySelector(".app-shell") ?? document.body).backgroundColor);
+    ev.modeAfterSeed = await page.evaluate(
+      () => getComputedStyle(document.querySelector(".app-shell") ?? document.body).backgroundColor,
+    );
     ck.add(
       "theme_preference_persisted_in_isolated_profile",
       ev.stored === labelToValue(label),
@@ -1736,13 +1902,21 @@ const scenarios = {
     ev.closeRequest = (closeRes.stdout || "").trim();
     await page.waitForTimeout(1500);
     ev.dialogForExit = (await page.locator(".close-dialog").count()) > 0;
-    ck.add("exit_path_reachable_from_close_dialog", ev.dialogForExit === true, String(ev.closeRequest));
+    ck.add(
+      "exit_path_reachable_from_close_dialog",
+      ev.dialogForExit === true,
+      String(ev.closeRequest),
+    );
     if (ev.dialogForExit) {
       await page.getByRole("button", { name: "直接退出" }).click();
       const deadline = Date.now() + 20000;
       while (inst.proc.exitCode === null && Date.now() < deadline) await sleep(200);
       ev.cleanExitCode = inst.proc.exitCode;
-      ck.add("process_exited_without_force_kill", inst.proc.exitCode !== null, `exitCode=${inst.proc.exitCode}`);
+      ck.add(
+        "process_exited_without_force_kill",
+        inst.proc.exitCode !== null,
+        `exitCode=${inst.proc.exitCode}`,
+      );
     }
   },
 
@@ -1758,7 +1932,11 @@ const scenarios = {
       const p = path.join(inst.root, "tokenscope", "logs");
       return fs.existsSync(p) ? (fs.statSync(p).isFile() ? "file" : "dir") : "absent";
     })();
-    ck.add("window_appears_with_unusable_logs", (await page.locator(".app-nav").count()) > 0, "导航已渲染");
+    ck.add(
+      "window_appears_with_unusable_logs",
+      (await page.locator(".app-nav").count()) > 0,
+      "导航已渲染",
+    );
     ck.add(
       "startup_degradation_notice_visible",
       !!ev.noticeText && /文件日志不可用/.test(ev.noticeText),
@@ -1767,7 +1945,11 @@ const scenarios = {
     // 数据仍可用（降级不阻断）
     await inst.waitForData().catch(() => {});
     ev.chart = await measureChart(page);
-    ck.add("data_still_available_after_log_degradation", ev.chart.sizeOk === true, JSON.stringify(ev.chart.box));
+    ck.add(
+      "data_still_available_after_log_degradation",
+      ev.chart.sizeOk === true,
+      JSON.stringify(ev.chart.box),
+    );
     await page.screenshot({ path: path.join(inst.opts.shots, "fault-logs-file.png") });
     ev.windowRect = await inst.windowInfo();
   },
@@ -1781,10 +1963,16 @@ const scenarios = {
     ev.lockHolderPid = inst.lockHolderPid ?? null;
     ev.lockWasHeldFrom = inst.lockHeldFrom;
     ev.lockConfirmedBeforeLaunch = inst.lockConfirmed === true;
-    ck.add("pricing_file_locked_before_process_start", inst.lockConfirmed === true, `holder=${inst.lockHolderPid}`);
+    ck.add(
+      "pricing_file_locked_before_process_start",
+      inst.lockConfirmed === true,
+      `holder=${inst.lockHolderPid}`,
+    );
     // 后端把"读取失败"当作**告警**返回（不是 IPC 错误），前端在价格组内联展示，
     // 所以这里量的是 .price-notice 而不是 .ts-notice.is-error。
-    ev.priceWarnings = (await page.locator(".price-notice").allInnerTexts()).map((t) => t.replace(/\s+/g, " "));
+    ev.priceWarnings = (await page.locator(".price-notice").allInnerTexts()).map((t) =>
+      t.replace(/\s+/g, " "),
+    );
     ev.readFailureWarningVisible = ev.priceWarnings.some((t) => /外置价格文件读取失败/.test(t));
     ck.add(
       "locked_pricing_surfaces_read_failure_warning",
@@ -1792,7 +1980,11 @@ const scenarios = {
       ev.priceWarnings.map((t) => t.slice(0, 120)).join(" || ") || "无价格告警",
     );
     // 降级不阻断：汇总数据仍在（费用退化为未知也要有可见结论）
-    ck.add("app_still_usable_while_pricing_locked", (await page.locator(".settings-group").count()) >= 3, `分组数=${await page.locator(".settings-group").count()}`);
+    ck.add(
+      "app_still_usable_while_pricing_locked",
+      (await page.locator(".settings-group").count()) >= 3,
+      `分组数=${await page.locator(".settings-group").count()}`,
+    );
     await page.screenshot({ path: path.join(inst.opts.shots, "pricing-locked.png") });
     let released = false;
     const deadline = Date.now() + 70000;
@@ -1807,13 +1999,19 @@ const scenarios = {
       }
     }
     ev.lockReleased = released;
-    ck.add("lock_released_before_recovery_probe", released, `等待 ${70 - Math.round((deadline - Date.now()) / 1000)} s`);
+    ck.add(
+      "lock_released_before_recovery_probe",
+      released,
+      `等待 ${70 - Math.round((deadline - Date.now()) / 1000)} s`,
+    );
     // 恢复通道：真实重新读取（切走再切回设置页 → 价格组重新 loadPricing）
     await page.getByRole("radio", { name: "汇总" }).click();
     await page.waitForTimeout(1500);
     await page.getByRole("radio", { name: "设置" }).click();
     await page.waitForTimeout(3000);
-    ev.warningsAfterRelease = (await page.locator(".price-notice").allInnerTexts()).map((t) => t.replace(/\s+/g, " "));
+    ev.warningsAfterRelease = (await page.locator(".price-notice").allInnerTexts()).map((t) =>
+      t.replace(/\s+/g, " "),
+    );
     ck.add(
       "price_read_recovers_after_lock_release",
       ev.lockReleased && !ev.warningsAfterRelease.some((t) => /读取失败/.test(t)),
@@ -1829,18 +2027,39 @@ const scenarios = {
     await inst.waitForData();
     const settingsPath = path.join(inst.root, "tokenscope", "settings.toml");
     ev.settingsShaBefore = sha256File(settingsPath);
-    ev.closeRequest = (ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "close"]).stdout || "").trim();
+    ev.closeRequest = (
+      ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "close"]).stdout || ""
+    ).trim();
     await page.locator(".close-error").waitFor();
     ev.errorText = await page.locator(".close-error").innerText();
-    ck.add("remembered_failure_visible_with_reason", /acceptance-hide-once/.test(ev.errorText), ev.errorText);
+    ck.add(
+      "remembered_failure_visible_with_reason",
+      /acceptance-hide-once/.test(ev.errorText),
+      ev.errorText,
+    );
     await page.screenshot({ path: path.join(inst.opts.shots, "remembered-failure.png") });
     await page.getByRole("button", { name: "最小化到托盘", exact: true }).click();
     await page.waitForTimeout(1500);
-    ev.rectAfterRetry = (ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "mainrect"]).stdout || "").trim();
+    ev.rectAfterRetry = (
+      ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "mainrect"]).stdout || ""
+    ).trim();
     const rect = /MAINRECT\s+(-?\d+),(-?\d+),(\d+),(\d+)/.exec(ev.rectAfterRetry);
-    ck.add("retry_hides_real_window", /MAINRECT none/.test(ev.rectAfterRetry) || (rect && Number(rect[3]) < 100 && Number(rect[4]) < 100), ev.rectAfterRetry);
-    ck.add("retry_preserves_process", inst.proc.exitCode === null, `exitCode=${inst.proc.exitCode}`);
-    ck.add("retry_keeps_remembered_settings", sha256File(settingsPath) === ev.settingsShaBefore, ev.settingsShaBefore);
+    ck.add(
+      "retry_hides_real_window",
+      /MAINRECT none/.test(ev.rectAfterRetry) ||
+        (rect && Number(rect[3]) < 100 && Number(rect[4]) < 100),
+      ev.rectAfterRetry,
+    );
+    ck.add(
+      "retry_preserves_process",
+      inst.proc.exitCode === null,
+      `exitCode=${inst.proc.exitCode}`,
+    );
+    ck.add(
+      "retry_keeps_remembered_settings",
+      sha256File(settingsPath) === ev.settingsShaBefore,
+      ev.settingsShaBefore,
+    );
   },
 
   async "close-tray"({ inst, ck, ev }) {
@@ -1848,7 +2067,9 @@ const scenarios = {
     await page.waitForSelector(".app-nav", { timeout: 30000 });
     const settingsPath = path.join(inst.root, "tokenscope", "settings.toml");
     ev.settingsShaBefore = sha256File(settingsPath);
-    ev.closeRequest = (ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "close"]).stdout || "").trim();
+    ev.closeRequest = (
+      ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "close"]).stdout || ""
+    ).trim();
     await page.waitForTimeout(1500);
     ev.dialogVisible = (await page.locator(".close-dialog").count()) > 0;
     ck.add("close_dialog_appears", ev.dialogVisible === true, String(ev.closeRequest));
@@ -1856,14 +2077,22 @@ const scenarios = {
     await page.waitForTimeout(2000);
     // 隐藏主窗口后进程仍有可见顶层窗口（22x22 的宿主/托盘窗口，实测），
     // 因此按"最大可见顶层窗口"判定主内容窗口是否真的不在屏上。
-    ev.rectAfterMinimize = (ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "mainrect"]).stdout || "").trim();
+    ev.rectAfterMinimize = (
+      ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "mainrect"]).stdout || ""
+    ).trim();
     const m = /MAINRECT\s+(?:none|\d+,-?\d+,(\d+),(-?\d+))/.exec(ev.rectAfterMinimize);
     ev.largestWindowArea = m ? Number(m[1]) * Number(m[2]) : null;
-    ev.windowHidden = /MAINRECT none/.test(ev.rectAfterMinimize) || (m !== null && Number(m[1]) < 100 && Number(m[2]) < 100);
+    ev.windowHidden =
+      /MAINRECT none/.test(ev.rectAfterMinimize) ||
+      (m !== null && Number(m[1]) < 100 && Number(m[2]) < 100);
     ev.processAlive = inst.proc.exitCode === null;
     ev.settingsShaAfter = sha256File(settingsPath);
     ck.add("tray_minimize_hides_main_window", ev.windowHidden === true, ev.rectAfterMinimize);
-    ck.add("process_alive_after_tray_minimize", ev.processAlive === true, `exitCode=${inst.proc.exitCode}`);
+    ck.add(
+      "process_alive_after_tray_minimize",
+      ev.processAlive === true,
+      `exitCode=${inst.proc.exitCode}`,
+    );
     ck.add(
       "tray_minimize_does_not_write_close_action",
       ev.settingsShaBefore === ev.settingsShaAfter,
@@ -1879,7 +2108,9 @@ const scenarios = {
     const settingsPath = path.join(inst.root, "tokenscope", "settings.toml");
     ev.settingsBefore = fs.readFileSync(settingsPath, "utf8");
     ev.settingsShaBefore = sha256File(settingsPath);
-    ev.close1 = (ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "close"]).stdout || "").trim();
+    ev.close1 = (
+      ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "close"]).stdout || ""
+    ).trim();
     await page.waitForTimeout(1500);
     ev.dialog1 = (await page.locator(".close-dialog").count()) > 0;
     ck.add("first_close_asks", ev.dialog1 === true, ev.close1);
@@ -1889,12 +2120,20 @@ const scenarios = {
       .locator(".close-dialog .n-checkbox")
       .first()
       .evaluate((el) => el.classList.contains("n-checkbox--checked"));
-    ck.add("remember_checkbox_checkable", ev.checkboxChecked === true, `checked=${ev.checkboxChecked}`);
+    ck.add(
+      "remember_checkbox_checkable",
+      ev.checkboxChecked === true,
+      `checked=${ev.checkboxChecked}`,
+    );
     await page.getByRole("button", { name: "直接退出" }).click();
     const deadline = Date.now() + 20000;
     while (inst.proc.exitCode === null && Date.now() < deadline) await sleep(200);
     ev.exitCode = inst.proc.exitCode;
-    ck.add("remembered_exit_closes_process", inst.proc.exitCode !== null, `exitCode=${inst.proc.exitCode}`);
+    ck.add(
+      "remembered_exit_closes_process",
+      inst.proc.exitCode !== null,
+      `exitCode=${inst.proc.exitCode}`,
+    );
     ev.settingsAfter = fs.readFileSync(settingsPath, "utf8");
     ev.settingsShaAfter = sha256File(settingsPath);
     ev.closeActionWritten = /close_action/.test(ev.settingsAfter);
@@ -1920,8 +2159,14 @@ const scenarios = {
     });
     // 记住动作后重启：静息态不应挂着询问弹窗
     ev.dialogBeforeSecondClose = await page2.locator(".close-dialog").count();
-    ck.add("relaunch_shows_no_prompt_at_rest", ev.dialogBeforeSecondClose === 0, `弹窗数=${ev.dialogBeforeSecondClose}`);
-    ev.close2 = (ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "close"]).stdout || "").trim();
+    ck.add(
+      "relaunch_shows_no_prompt_at_rest",
+      ev.dialogBeforeSecondClose === 0,
+      `弹窗数=${ev.dialogBeforeSecondClose}`,
+    );
+    ev.close2 = (
+      ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "close"]).stdout || ""
+    ).trim();
     // 记住的是"直接退出"：页面会随进程结束而销毁，这里只等进程自己退出
     const deadline2 = Date.now() + 15000;
     while (inst.proc.exitCode === null && Date.now() < deadline2) await sleep(250);
@@ -1938,13 +2183,26 @@ const scenarios = {
     const page = inst.page;
     await inst.waitForData();
     const readTotals = async () =>
-      (await page.locator(".metric-card").allInnerTexts()).join(" | ").replace(/\s+/g, " ").slice(0, 400);
+      (await page.locator(".metric-card").allInnerTexts())
+        .join(" | ")
+        .replace(/\s+/g, " ")
+        .slice(0, 400);
     ev.before = await readTotals();
     await page.waitForTimeout(3000);
     ev.stillSame = await readTotals();
-    ck.add("loaded_view_stable_without_new_query", ev.before === ev.stillSame, "同一视图在采集变化期间不原地变形");
+    ck.add(
+      "loaded_view_stable_without_new_query",
+      ev.before === ev.stillSame,
+      "同一视图在采集变化期间不原地变形",
+    );
     // 真实追加一条合成事件到隔离根
-    const projectDir = path.join(inst.root, "sources", "claude", "projects", "-acceptance-workspace-tokenscope");
+    const projectDir = path.join(
+      inst.root,
+      "sources",
+      "claude",
+      "projects",
+      "-acceptance-workspace-tokenscope",
+    );
     const logFile = fs
       .readdirSync(projectDir)
       .filter((f) => f.endsWith(".jsonl") && !f.startsWith("broken-"))
@@ -1959,18 +2217,31 @@ const scenarios = {
         role: "assistant",
         model: "claude-sonnet-4-5",
         content: [{ type: "text", text: "acceptance appended reply" }],
-        usage: { input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        usage: {
+          input_tokens: 1000,
+          output_tokens: 500,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
       },
     });
     fs.appendFileSync(logFile, line + "\n");
     ev.appendedTo = path.basename(logFile);
     await page.waitForTimeout(1500);
     ev.afterAppendWithoutRefresh = await readTotals();
-    ck.add("appended_event_not_applied_to_current_query", ev.afterAppendWithoutRefresh === ev.before, "未刷新时仍显示旧会话结果");
+    ck.add(
+      "appended_event_not_applied_to_current_query",
+      ev.afterAppendWithoutRefresh === ev.before,
+      "未刷新时仍显示旧会话结果",
+    );
     await page.getByRole("button", { name: "刷新", exact: true }).click();
     await page.waitForTimeout(4000);
     ev.afterRefresh = await readTotals();
-    ck.add("new_query_reflects_appended_event", ev.afterRefresh !== ev.before, "刷新后新会话包含追加事件");
+    ck.add(
+      "new_query_reflects_appended_event",
+      ev.afterRefresh !== ev.before,
+      "刷新后新会话包含追加事件",
+    );
     ev.requestsBeforeAfter = await page
       .evaluate(() => {
         const t = document.body.innerText;
@@ -1988,7 +2259,10 @@ const scenarios = {
     await page.waitForSelector(".app-nav", { timeout: 30000 });
     await page.getByRole("radio", { name: "设置" }).click();
     await page.waitForTimeout(1500);
-    await page.getByRole("button", { name: /同步价格|立即同步|同步/ }).first().click();
+    await page
+      .getByRole("button", { name: /同步价格|立即同步|同步/ })
+      .first()
+      .click();
     await page.waitForTimeout(15000);
     const err = page.locator(".ts-notice.is-error");
     ev.errorTexts = await err.allInnerTexts();
@@ -2001,7 +2275,11 @@ const scenarios = {
     const retry = page.locator(".ts-notice.is-error button", { hasText: "重试同步" });
     const retryBtn = page.getByRole("button", { name: "重试同步" });
     ev.retryPresent = await retryBtn.count();
-    ck.add("error_notice_has_clickable_retry_sync", ev.retryPresent > 0, `按钮数=${ev.retryPresent}（旧 locator=${await retry.count()}）`);
+    ck.add(
+      "error_notice_has_clickable_retry_sync",
+      ev.retryPresent > 0,
+      `按钮数=${ev.retryPresent}（旧 locator=${await retry.count()}）`,
+    );
     await page.screenshot({ path: path.join(inst.opts.shots, "sync-failure.png") });
     if (ev.retryPresent) {
       await retryBtn.first().click();
@@ -2010,7 +2288,8 @@ const scenarios = {
       ck.add(
         "retry_sync_actually_retries_and_keeps_reason",
         ev.errorAfterRetry.some((t) => /同步/.test(t)),
-        ev.errorAfterRetry.map((t) => t.replace(/\s+/g, " ").slice(0, 140)).join(" || ") || "重试后错误消失（网络恢复？）",
+        ev.errorAfterRetry.map((t) => t.replace(/\s+/g, " ").slice(0, 140)).join(" || ") ||
+          "重试后错误消失（网络恢复？）",
       );
     }
     ev.windowRect = await inst.windowInfo();
@@ -2024,12 +2303,22 @@ const scenarios = {
     ev.rowsBefore = await page.locator(".events-table tbody tr, .n-data-table-tbody tr").count();
     const more = page.locator(".load-more-row button").first();
     ev.morePresent = (await more.count()) > 0;
-    ev.moreTextBefore = ev.morePresent ? await more.evaluate((el) => el.parentElement.innerText.replace(/\s+/g, " ")) : null;
-    ck.add("load_more_available_with_large_event_set", ev.morePresent, `首页 DOM 行数=${ev.rowsBefore}（虚拟滚动）；${ev.moreTextBefore}`);
+    ev.moreTextBefore = ev.morePresent
+      ? await more.evaluate((el) => el.parentElement.innerText.replace(/\s+/g, " "))
+      : null;
+    ck.add(
+      "load_more_available_with_large_event_set",
+      ev.morePresent,
+      `首页 DOM 行数=${ev.rowsBefore}（虚拟滚动）；${ev.moreTextBefore}`,
+    );
     // 空闲前**不点**加载更多：点完最后一页后按钮会消失，就没有可过期的游标了
     await page.waitForTimeout(1200);
     ev.sessionIdleDeadlineIso = new Date(Date.now() + 630_000).toISOString();
-    ck.add("state_recorded_for_idle_wait", true, `保持进程存活，≥630 s 后跑 --scenario expire-finish`);
+    ck.add(
+      "state_recorded_for_idle_wait",
+      true,
+      `保持进程存活，≥630 s 后跑 --scenario expire-finish`,
+    );
     await page.screenshot({ path: path.join(inst.opts.shots, "expire-page1.png") });
   },
 
@@ -2059,8 +2348,16 @@ const scenarios = {
         .locator(".ts-notice")
         .filter({ hasText: "明细加载失败" })
         .count();
-      ck.add("recovery_button_restarts_batch_and_clears_error", ev.noticeAfterRetry === 0, `剩余错误条=${ev.noticeAfterRetry}`);
-      ev.moreTextAfterRecovery = await page.locator(".load-more-row").first().innerText().catch(() => null);
+      ck.add(
+        "recovery_button_restarts_batch_and_clears_error",
+        ev.noticeAfterRetry === 0,
+        `剩余错误条=${ev.noticeAfterRetry}`,
+      );
+      ev.moreTextAfterRecovery = await page
+        .locator(".load-more-row")
+        .first()
+        .innerText()
+        .catch(() => null);
       const m = /还剩\s*([0-9,]+)\s*条/.exec(String(ev.moreTextAfterRecovery ?? ""));
       ck.add(
         "pagination_available_again_after_recovery",
@@ -2072,20 +2369,36 @@ const scenarios = {
         const loadedBefore = /已加载\s*([0-9,]+)/.exec(hintBefore);
         await page.locator(".load-more-row button").first().click();
         await page.waitForTimeout(4000);
-        ev.paginationAfterNextPage = await page.locator(".load-more-row").first().innerText().catch(() => "");
+        ev.paginationAfterNextPage = await page
+          .locator(".load-more-row")
+          .first()
+          .innerText()
+          .catch(() => "");
         ev.detailHintAfterNextPage = await page.locator(".events-card .table-hint").innerText();
         const loadedAfter = /已加载\s*([0-9,]+)/.exec(ev.detailHintAfterNextPage);
         const remaining = /还剩\s*([0-9,]+)\s*条/.exec(ev.paginationAfterNextPage);
-        ck.add("recovered_session_loads_next_page", (await err.count()) === 0 &&
-          !!loadedBefore && !!loadedAfter && Number(loadedAfter[1].replace(/,/g, "")) > Number(loadedBefore[1].replace(/,/g, "")) &&
-          (!remaining || Number(remaining[1].replace(/,/g, "")) < Number(m[1].replace(/,/g, ""))),
-          ev.detailHintAfterNextPage);
+        ck.add(
+          "recovered_session_loads_next_page",
+          (await err.count()) === 0 &&
+            !!loadedBefore &&
+            !!loadedAfter &&
+            Number(loadedAfter[1].replace(/,/g, "")) > Number(loadedBefore[1].replace(/,/g, "")) &&
+            (!remaining || Number(remaining[1].replace(/,/g, "")) < Number(m[1].replace(/,/g, ""))),
+          ev.detailHintAfterNextPage,
+        );
       }
       const logDir = path.join(inst.root, "tokenscope", "logs");
-      const logs = fs.readdirSync(logDir).sort().map((f) => fs.readFileSync(path.join(logDir, f), "utf8")).join("\n");
+      const logs = fs
+        .readdirSync(logDir)
+        .sort()
+        .map((f) => fs.readFileSync(path.join(logDir, f), "utf8"))
+        .join("\n");
       ev.detailSessions = [...logs.matchAll(/明细完成（会话 ([^）]+)）/g)].map((m) => m[1]);
-      ck.add("recovery_uses_new_backend_session", new Set(ev.detailSessions).size >= 2,
-        ev.detailSessions.join(" → "));
+      ck.add(
+        "recovery_uses_new_backend_session",
+        new Set(ev.detailSessions).size >= 2,
+        ev.detailSessions.join(" → "),
+      );
     }
     await page.screenshot({ path: path.join(inst.opts.shots, "expire-recovered.png") });
     ev.windowRect = await inst.windowInfo();
@@ -2095,7 +2408,9 @@ const scenarios = {
   async "close-final-save"({ inst, ck, ev }) {
     const page = inst.page;
     await inst.waitForData();
-    ev.closeRequest = (ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "close"]).stdout || "").trim();
+    ev.closeRequest = (
+      ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "close"]).stdout || ""
+    ).trim();
     await page.locator(".close-dialog").waitFor();
     // 等定时保存完成且 dirty 已清，再移除隔离根中的派生文件。
     // 此后没有窗口事件，只有退出前最终保存可以重新生成它。
@@ -2106,10 +2421,19 @@ const scenarios = {
     await page.getByRole("button", { name: "直接退出", exact: true }).click();
     const deadline = Date.now() + 15000;
     while (inst.proc.exitCode === null && Date.now() < deadline) await sleep(100);
-    ck.add("dialog_quit_exits_successfully", inst.proc.exitCode === 0, `exitCode=${inst.proc.exitCode}`);
-    ev.windowStateAfter = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, "utf8")) : null;
-    ck.add("dialog_quit_completes_final_save", JSON.stringify(ev.windowStateAfter) === JSON.stringify(ev.windowStateBefore),
-      JSON.stringify(ev.windowStateAfter));
+    ck.add(
+      "dialog_quit_exits_successfully",
+      inst.proc.exitCode === 0,
+      `exitCode=${inst.proc.exitCode}`,
+    );
+    ev.windowStateAfter = fs.existsSync(stateFile)
+      ? JSON.parse(fs.readFileSync(stateFile, "utf8"))
+      : null;
+    ck.add(
+      "dialog_quit_completes_final_save",
+      JSON.stringify(ev.windowStateAfter) === JSON.stringify(ev.windowStateBefore),
+      JSON.stringify(ev.windowStateAfter),
+    );
   },
 
   async "close-cancel"({ inst, ck, ev }) {
@@ -2125,7 +2449,11 @@ const scenarios = {
     const dialog = page.locator(".close-dialog");
     ev.dialogVisible = (await dialog.count()) > 0;
     ev.dialogText = ev.dialogVisible ? await dialog.first().innerText() : null;
-    ck.add("close_dialog_appears", ev.dialogVisible === true, String(ev.dialogText).replace(/\s+/g, " ").slice(0, 120));
+    ck.add(
+      "close_dialog_appears",
+      ev.dialogVisible === true,
+      String(ev.dialogText).replace(/\s+/g, " ").slice(0, 120),
+    );
     await page.screenshot({ path: path.join(inst.opts.shots, "dialog-open.png") });
     await page.keyboard.press("Escape");
     await page.waitForTimeout(1200);
@@ -2154,7 +2482,7 @@ const scenarios = {
     const settingsPath = path.join(dataDir, "settings.toml");
     const businessFiles = () =>
       listFiles(dataDir).filter((f) =>
-        /^(logs\/|cache\.db|window-state\.json|view-cache\.json|pricing-)/.test(f),
+        /^(logs\/|cache\.db|history\.db|window-state\.json|view-cache\.json|pricing-)/.test(f),
       );
 
     await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
@@ -2182,9 +2510,15 @@ const scenarios = {
     );
 
     ev.businessFilesBeforeAccept = businessFiles();
-    ev.allBusinessChangesBeforeAccept = changedBusinessFiles(inst.prelaunchBusinessFiles,snapshotBusinessFiles(dataDir));
-    ck.add("all_non_settings_files_unchanged_before_consent",ev.allBusinessChangesBeforeAccept.length === 0,
-      JSON.stringify(ev.allBusinessChangesBeforeAccept));
+    ev.allBusinessChangesBeforeAccept = changedBusinessFiles(
+      inst.prelaunchBusinessFiles,
+      snapshotBusinessFiles(dataDir),
+    );
+    ck.add(
+      "all_non_settings_files_unchanged_before_consent",
+      ev.allBusinessChangesBeforeAccept.length === 0,
+      JSON.stringify(ev.allBusinessChangesBeforeAccept),
+    );
     ck.add(
       "no_business_files_before_consent",
       ev.businessFilesBeforeAccept.length === 0,
@@ -2219,12 +2553,22 @@ const scenarios = {
     const deadline = Date.now() + 20000;
     while (inst.proc.exitCode === null && Date.now() < deadline) await sleep(200);
     ev.exitCode = inst.proc.exitCode;
-    ck.add("rejected_exit_closes_process", inst.proc.exitCode !== null, `exitCode=${inst.proc.exitCode}`);
+    ck.add(
+      "rejected_exit_closes_process",
+      inst.proc.exitCode !== null,
+      `exitCode=${inst.proc.exitCode}`,
+    );
 
     ev.businessFilesAfterExit = businessFiles();
-    ev.allBusinessChangesAfterExit = changedBusinessFiles(inst.prelaunchBusinessFiles,snapshotBusinessFiles(dataDir));
-    ck.add("all_non_settings_files_unchanged_after_rejection",ev.allBusinessChangesAfterExit.length === 0,
-      JSON.stringify(ev.allBusinessChangesAfterExit));
+    ev.allBusinessChangesAfterExit = changedBusinessFiles(
+      inst.prelaunchBusinessFiles,
+      snapshotBusinessFiles(dataDir),
+    );
+    ck.add(
+      "all_non_settings_files_unchanged_after_rejection",
+      ev.allBusinessChangesAfterExit.length === 0,
+      JSON.stringify(ev.allBusinessChangesAfterExit),
+    );
     ck.add(
       "rejection_leaves_no_business_files",
       ev.businessFilesAfterExit.length === 0,
@@ -2236,7 +2580,9 @@ const scenarios = {
       !/privacy_policy_accepted\s*=\s*true/.test(ev.settingsAfter),
       "拒绝不得留下同意记录",
     );
-    ev.rectAfterExit = (ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "mainrect"]).stdout || "").trim();
+    ev.rectAfterExit = (
+      ps(WINDOW_ACTION, ["-ProcessId", String(inst.proc.pid), "-Action", "mainrect"]).stdout || ""
+    ).trim();
     ck.add(
       "no_tray_process_after_reject",
       inst.proc.exitCode !== null && /MAINRECT none/i.test(ev.rectAfterExit),
@@ -2282,6 +2628,130 @@ const scenarios = {
       `重启后政策弹窗数=${ev.relaunchConsentDialog}`,
     );
     await page2.screenshot({ path: path.join(inst.opts.shots, "relaunch-ready.png") });
+  },
+
+  /**
+   * WB05/WB07：旧修订同意触发重新询问——fixture 预置 accepted=true 但无
+   * 修订号（v2 程序写入的形态）；新程序按未同意处理，弹窗顶部显示
+   * 「隐私政策已更新」，同意前零业务读取；同意写入当前修订号；重启不再询问。
+   */
+  async "privacy-policy-update"({ inst, ck, ev }) {
+    const page = inst.page;
+    const dataDir = path.join(inst.root, "tokenscope");
+    const settingsPath = path.join(dataDir, "settings.toml");
+    const businessFiles = () =>
+      listFiles(dataDir).filter((f) =>
+        /^(logs\/|cache\.db|history\.db|window-state\.json|view-cache\.json|pricing-)/.test(f),
+      );
+
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+    ev.settingsBefore = fs.readFileSync(settingsPath, "utf8");
+    ck.add(
+      "fixture_keeps_old_consent_without_revision",
+      /privacy_policy_accepted\s*=\s*true/.test(ev.settingsBefore) &&
+        !/privacy_policy_revision/.test(ev.settingsBefore),
+      ev.settingsBefore.split("\n").slice(0, 3).join(" | "),
+    );
+    const dialogText = (await page.locator(".privacy-dialog").innerText()).replace(/\s+/g, " ");
+    ck.add(
+      "policy_updated_notice_visible",
+      dialogText.includes("隐私政策已更新") && dialogText.includes("WorkBuddy 与 WorkBuddy AI"),
+      dialogText.slice(0, 160),
+    );
+    ev.businessDomNodes = await page.locator(".app-nav, .page-head, .chart-canvas").count();
+    ck.add(
+      "business_ui_not_mounted_before_reconsent",
+      ev.businessDomNodes === 0,
+      `业务节点数=${ev.businessDomNodes}`,
+    );
+    ev.businessFilesBeforeAccept = businessFiles();
+    ck.add(
+      "no_business_files_before_reconsent",
+      ev.businessFilesBeforeAccept.length === 0,
+      ev.businessFilesBeforeAccept.join(",") || "无业务文件",
+    );
+    // 同意前的验收追踪不得出现任何业务事件（评审 2026-10-25：只看文件清单
+    // 会漏掉不落文件的业务读取）。
+    const traceBeforeConsent = readAcceptanceTrace(inst.root, { partial: true });
+    if (traceBeforeConsent.violations.length)
+      throw new Error(traceBeforeConsent.violations.join(" | "));
+    const businessEventNames = [
+      "business_ready",
+      "collect_round_start",
+      "source_root_read",
+      "history_open",
+    ];
+    ev.businessTraceBeforeConsent = traceBeforeConsent.records
+      .filter((r) => businessEventNames.includes(r.event))
+      .map((r) => r.event);
+    ck.add(
+      "no_business_trace_before_reconsent",
+      ev.businessTraceBeforeConsent.length === 0,
+      ev.businessTraceBeforeConsent.join(",") || "无业务追踪事件",
+    );
+
+    // 同意 → 同一次保存写入 true 与当前修订号，进入业务。
+    await page.locator(".privacy-actions button", { hasText: "同意并继续" }).first().click();
+    await page.waitForSelector(".app-nav", { timeout: 60000 });
+    ev.settingsAfterAccept = fs.readFileSync(settingsPath, "utf8");
+    ck.add(
+      "reconsent_writes_current_revision",
+      /privacy_policy_accepted\s*=\s*true/.test(ev.settingsAfterAccept) &&
+        /privacy_policy_revision\s*=\s*2/.test(ev.settingsAfterAccept),
+      ev.settingsAfterAccept.split("\n").slice(0, 4).join(" | "),
+    );
+    // 同意后的业务初始化必须发生在同意落盘之后：business_ready 的 seq
+    // 严格大于 consent_saved（顺序颠倒 = 同意前就有业务读取）。
+    const traceAfterConsent = readAcceptanceTrace(inst.root, { partial: true });
+    const seqOf = (name) =>
+      traceAfterConsent.records.filter((r) => r.event === name).map((r) => r.seq);
+    const consentSeqs = seqOf("consent_saved");
+    const readySeqs = seqOf("business_ready");
+    ev.consentTraceOrder = { consentSeqs, readySeqs };
+    ck.add(
+      "business_trace_starts_after_reconsent",
+      consentSeqs.length >= 1 &&
+        readySeqs.length >= 1 &&
+        Math.min(...readySeqs) > Math.max(...consentSeqs),
+      JSON.stringify(ev.consentTraceOrder),
+    );
+
+    // 重启同一隔离根：不再询问（新修订同意有效）。
+    // 业务态窗口不会自行退出：先走真实的优雅关闭（WM_CLOSE → 「直接退出」），
+    // 确认宿主退出后再 relaunch（与 ui-source-paths 的 closeForRestart 同型）。
+    {
+      const action = fileURLToPath(
+        new URL("../../scripts/native-window-action.ps1", import.meta.url),
+      );
+      const result = spawnSyncBounded(
+        "pwsh",
+        ["-NoProfile", "-File", action, "-ProcessId", String(inst.proc.pid), "-Action", "close"],
+        { action: "window-close", stage: "policy-update-close" },
+      );
+      if (result.status !== 0 || !/CLOSED true/i.test(result.stdout))
+        throw new Error(`WM_CLOSE failed: ${result.stderr} ${result.stdout}`);
+      await page.waitForSelector(".close-dialog", { timeout: 10000 });
+      await page
+        .locator(".close-dialog")
+        .getByRole("button", { name: "直接退出", exact: true })
+        .click();
+      const deadline = Date.now() + 15000;
+      while (inst.proc.exitCode === null && Date.now() < deadline) await sleep(200);
+      if (inst.proc.exitCode !== 0)
+        throw new Error(`重新询问场景的优雅关闭要求退出码 0，实际 ${inst.proc.exitCode}`);
+    }
+    const info = await inst.launch();
+    ev.relaunchPid = info.pid;
+    const page2 = inst.page;
+    await page2.waitForSelector(".app-nav", { timeout: 60000 });
+    await page2.waitForTimeout(1500);
+    ev.relaunchConsentDialog = await page2.locator(".privacy-dialog").count();
+    ck.add(
+      "restart_does_not_ask_after_reconsent",
+      ev.relaunchConsentDialog === 0,
+      `重启后政策弹窗数=${ev.relaunchConsentDialog}`,
+    );
+    await page2.screenshot({ path: path.join(inst.opts.shots, "policy-update-reconsented.png") });
   },
 };
 
@@ -2342,7 +2812,9 @@ async function main() {
   }
   let windowsVersion = "";
   try {
-    windowsVersion = (spawnSyncBounded("cmd", ["/c", "ver"], { action: "evidence-windows-version" }).stdout || "").trim();
+    windowsVersion = (
+      spawnSyncBounded("cmd", ["/c", "ver"], { action: "evidence-windows-version" }).stdout || ""
+    ).trim();
   } catch (e) {
     hb(`读取 Windows 版本失败：${String(e?.message ?? e)}`);
   }
@@ -2370,17 +2842,29 @@ async function main() {
     ck.add("isolation_runtime_guard", false, detail);
     hb(`隔离检查失败，立即停止本次原生实例：${detail}`);
     isolationCleanup = beginIsolationCleanup({
-      terminate:() => inst?.current && !inst.attached
-        ? terminateAfterSnapshot({
-          refresh:() => { inst.disarmHostWatch(); return inst.refreshDescendants(inst.current); },
-          terminate:() => inst.terminateRecordedPids(inst.current,"isolation-violation"),
-        }) : {pids:[]},
-      stop:() => inst?.current ? inst.stop({reason:"isolation-violation"}) : {action:"no-host-process"},
-      cancel:() => { cancelFlag.requested=true; },
+      terminate: () =>
+        inst?.current && !inst.attached
+          ? terminateAfterSnapshot({
+              refresh: () => {
+                inst.disarmHostWatch();
+                return inst.refreshDescendants(inst.current);
+              },
+              terminate: () => inst.terminateRecordedPids(inst.current, "isolation-violation"),
+            })
+          : { pids: [] },
+      stop: () =>
+        inst?.current
+          ? inst.stop({ reason: "isolation-violation" })
+          : { action: "no-host-process" },
+      cancel: () => {
+        cancelFlag.requested = true;
+      },
     });
-    isolationCleanup.catch(error => { ev.isolation_stop_error=String(error?.message ?? error); });
+    isolationCleanup.catch((error) => {
+      ev.isolation_stop_error = String(error?.message ?? error);
+    });
   };
-  const controlledIo = await startAcceptanceIo({onViolation:stopForIsolation});
+  const controlledIo = await startAcceptanceIo({ onViolation: stopForIsolation });
   inst = new Instance({
     root,
     events: attachExisting ? 0 : EVENTS,
@@ -2390,32 +2874,69 @@ async function main() {
     logPath,
     relaunchCycles: RELAUNCH_CYCLES,
     controlledIo,
-    profile: ["ui-identity","ui-ccs-import","ui-pricing"].includes(SCENARIO) ? "unified" : undefined,
+    // WB07：ui-source-paths 也用统一 fixture（两版 WorkBuddy 合成转写）。
+    profile: ["ui-identity", "ui-ccs-import", "ui-pricing", "ui-source-paths"].includes(SCENARIO)
+      ? "unified"
+      : undefined,
     env: {
       ...controlledIo.env,
-      ...(
-      SCENARIO === "sync-failure"
+      ...(SCENARIO === "sync-failure"
         ? proxyEnvironment("http://127.0.0.1:9", "")
-        : SCENARIO === "csp" ? { TOKENSCOPE_ACCEPTANCE_CSP: "1" }
-        : SCENARIO === "close-remember-failure" ? { TOKENSCOPE_ACCEPTANCE_HIDE_FAILURE_ONCE: "1" } : {}),
+        : SCENARIO === "csp"
+          ? { TOKENSCOPE_ACCEPTANCE_CSP: "1" }
+          : SCENARIO === "close-remember-failure"
+            ? { TOKENSCOPE_ACCEPTANCE_HIDE_FAILURE_ONCE: "1" }
+            : {}),
     },
-    mutate: SCENARIO === "ui-pricing" ? preparePricingScenario : SCENARIO === "fault-logs-file" ? (r) => {
-      const p = path.join(r, "tokenscope", "logs");
-      fs.mkdirSync(path.dirname(p), { recursive: true });
-      if (fs.existsSync(p) && fs.statSync(p).isDirectory()) throw new Error("logs 已是目录，无法注入文件故障");
-      fs.writeFileSync(p, "not-a-directory\n");
-    } : SCENARIO === "close-remember-failure" ? (r) => {
-      const p = path.join(r, "tokenscope", "settings.toml");
-      fs.writeFileSync(p, 'close_action = "minimize"\n' + fs.readFileSync(p, "utf8"), "utf8");
-    } : SCENARIO === "privacy-consent-gate" || SCENARIO === "privacy-accept-restart" ? (r) => {
-      // P06：这两个场景要"未同意"状态——删掉隔离根预置的同意记录
-      //（其余场景保留已同意基线，继续覆盖业务路径）。
-      const p = path.join(r, "tokenscope", "settings.toml");
-      const text = fs.readFileSync(p, "utf8");
-      const stripped = text.replace(/^[ \t]*privacy_policy_accepted[ \t]*=[ \t]*true[ \t]*\r?\n?/m, "");
-      if (stripped === text) throw new Error("隔离根 settings.toml 未含同意记录，无法构造未同意场景");
-      fs.writeFileSync(p, stripped, "utf8");
-    } : undefined,
+    mutate:
+      SCENARIO === "ui-pricing"
+        ? preparePricingScenario
+        : SCENARIO === "fault-logs-file"
+          ? (r) => {
+              const p = path.join(r, "tokenscope", "logs");
+              fs.mkdirSync(path.dirname(p), { recursive: true });
+              if (fs.existsSync(p) && fs.statSync(p).isDirectory())
+                throw new Error("logs 已是目录，无法注入文件故障");
+              fs.writeFileSync(p, "not-a-directory\n");
+            }
+          : SCENARIO === "close-remember-failure"
+            ? (r) => {
+                const p = path.join(r, "tokenscope", "settings.toml");
+                fs.writeFileSync(
+                  p,
+                  'close_action = "minimize"\n' + fs.readFileSync(p, "utf8"),
+                  "utf8",
+                );
+              }
+            : SCENARIO === "privacy-consent-gate" ||
+                SCENARIO === "privacy-accept-restart" ||
+                SCENARIO === "privacy-policy-update"
+              ? (r) => {
+                  // P06/WB05：privacy-consent-gate 与 privacy-accept-restart 要
+                  // "未同意"状态——删掉隔离根预置的同意记录与政策修订号（其余
+                  // 场景保留已同意基线，继续覆盖业务路径）。
+                  // privacy-policy-update 要"旧修订同意"——保留 true，只剥离
+                  // 修订号，让新程序触发「政策已更新」重新询问。
+                  const p = path.join(r, "tokenscope", "settings.toml");
+                  const text = fs.readFileSync(p, "utf8");
+                  if (SCENARIO === "privacy-policy-update") {
+                    const downgraded = text.replace(
+                      /^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m,
+                      "",
+                    );
+                    if (downgraded === text)
+                      throw new Error("隔离根 settings.toml 未含修订号行，无法构造旧同意场景");
+                    fs.writeFileSync(p, downgraded, "utf8");
+                    return;
+                  }
+                  const stripped = text
+                    .replace(/^[ \t]*privacy_policy_accepted[ \t]*=[ \t]*true[ \t]*\r?\n?/m, "")
+                    .replace(/^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m, "");
+                  if (stripped === text)
+                    throw new Error("隔离根 settings.toml 未含同意记录，无法构造未同意场景");
+                  fs.writeFileSync(p, stripped, "utf8");
+                }
+              : undefined,
   });
 
   // S00（计划 §9.1）：场景取消标志 + 阶段记录 + 最小证据写盘点。
@@ -2423,10 +2944,12 @@ async function main() {
   inst.opts.isCanceled = () => cancelFlag.requested;
   const isolationMonitor = setInterval(() => {
     try {
-      const trace = readAcceptanceTrace(root,{partial:true});
+      const trace = readAcceptanceTrace(root, { partial: true });
       if (trace.violations.length) stopForIsolation(trace.violations.join(" | "));
-    } catch (error) { stopForIsolation(`无法核对追踪：${String(error.message ?? error)}`); }
-  },100);
+    } catch (error) {
+      stopForIsolation(`无法核对追踪：${String(error.message ?? error)}`);
+    }
+  }, 100);
   isolationMonitor.unref();
   const stage = createStageTracker({ log: hb, launchIndexOf: () => inst.current?.index ?? null });
   inst.opts.markStage = stage.mark;
@@ -2487,7 +3010,9 @@ async function main() {
     try {
       const manifest = await inst.prepareRoot();
       ev.manifest_files = Object.keys(manifest.files ?? {}).length;
-      ev.manifest_sha_first = manifest.files ? Object.values(manifest.files).map((f) => f.sha256.slice(0, 12)) : [];
+      ev.manifest_sha_first = manifest.files
+        ? Object.values(manifest.files).map((f) => f.sha256.slice(0, 12))
+        : [];
       if (SCENARIO === "first-frame") ev.expectStored = EXPECT_STORED;
       hb("启动 release/acceptance 实例并连接 CDP");
       const info = await inst.launch();
@@ -2604,7 +3129,15 @@ async function main() {
       scenarioError = e;
       ck.add("scenario_executed", false, String(e.message ?? e));
       Object.assign(ev, errorEvidenceFields(e));
-      if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-relaunch" || SCENARIO === "ui-source-paths" || SCENARIO === "ui-identity" || SCENARIO === "ui-ccs-import" || SCENARIO === "ui-pricing") {
+      if (
+        SCENARIO === "ui-refresh" ||
+        SCENARIO === "ui-system" ||
+        SCENARIO === "ui-relaunch" ||
+        SCENARIO === "ui-source-paths" ||
+        SCENARIO === "ui-identity" ||
+        SCENARIO === "ui-ccs-import" ||
+        SCENARIO === "ui-pricing"
+      ) {
         // S00：失败截图/DOM 取证有短上限，无法完成就跳过并记原因（计划 §9.1 第 5 条）
         try {
           await withTimeout(
@@ -2630,25 +3163,31 @@ async function main() {
     }
     if (outcome?.kind === "timeout") {
       const finalize = isolationCleanup
-        ? await isolationCleanup.then(stop => ({isolation:true,stop}),error => ({isolation:true,error:String(error?.message ?? error)}))
+        ? await isolationCleanup.then(
+            (stop) => ({ isolation: true, stop }),
+            (error) => ({ isolation: true, error: String(error?.message ?? error) }),
+          )
         : await finalizeScenarioTimeout({
-        attached: inst.attached,
-        record: inst.current,
-        terminateRecordedPids: (record, reason) => inst.terminateRecordedPids(record, reason),
-        closeBrowser: () => closeBrowserBounded(inst.browser),
-        copyAppLogs: () => {
-          // UI 刷新验收保留合成来源的应用日志（与正常收尾同一份复制逻辑）
-          if (
-            SCENARIO === "ui-refresh" ||
-            SCENARIO === "ui-system" ||
-            SCENARIO === "ui-source-paths" || SCENARIO === "ui-identity" || SCENARIO === "ui-ccs-import" || SCENARIO === "ui-pricing"
-          ) {
-            const logs = path.join(root, "tokenscope", "logs");
-            if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
-          }
-        },
-        hb,
-      });
+            attached: inst.attached,
+            record: inst.current,
+            terminateRecordedPids: (record, reason) => inst.terminateRecordedPids(record, reason),
+            closeBrowser: () => closeBrowserBounded(inst.browser),
+            copyAppLogs: () => {
+              // UI 刷新验收保留合成来源的应用日志（与正常收尾同一份复制逻辑）
+              if (
+                SCENARIO === "ui-refresh" ||
+                SCENARIO === "ui-system" ||
+                SCENARIO === "ui-source-paths" ||
+                SCENARIO === "ui-identity" ||
+                SCENARIO === "ui-ccs-import" ||
+                SCENARIO === "ui-pricing"
+              ) {
+                const logs = path.join(root, "tokenscope", "logs");
+                if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
+              }
+            },
+            hb,
+          });
       ev.finalize_after_timeout = finalize;
       clearInterval(isolationMonitor);
       ev.controlled_io = controlledIo.snapshot();
@@ -2694,7 +3233,14 @@ async function main() {
 
   // UI 刷新/来源目录验收保留合成来源的应用日志，失败也能核对采集/查询实际发生过。
   // 使用 copyDirSync 代替 fs.cpSync 避免 Windows GBK 环境下 C++ 绑定因中文路径编码产生乱码目录。
-  if (SCENARIO === "ui-refresh" || SCENARIO === "ui-system" || SCENARIO === "ui-source-paths" || SCENARIO === "ui-identity" || SCENARIO === "ui-ccs-import" || SCENARIO === "ui-pricing") {
+  if (
+    SCENARIO === "ui-refresh" ||
+    SCENARIO === "ui-system" ||
+    SCENARIO === "ui-source-paths" ||
+    SCENARIO === "ui-identity" ||
+    SCENARIO === "ui-ccs-import" ||
+    SCENARIO === "ui-pricing"
+  ) {
     const logs = path.join(root, "tokenscope", "logs");
     if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
   }
@@ -2703,25 +3249,46 @@ async function main() {
   clearInterval(isolationMonitor);
   ev.controlled_io = controlledIo.snapshot();
   ev.acceptance_trace = readAcceptanceTrace(root);
-  ck.add("all_trace_paths_inside_root",ev.acceptance_trace.violations.length === 0,
-    ev.acceptance_trace.violations.join(" | ") || `${ev.acceptance_trace.records.length} 条追踪，路径均在隔离根内`);
-  ck.add("external_connection_attempts_zero",ev.controlled_io.proxy_attempts.length === 0,
-    JSON.stringify(ev.controlled_io.proxy_attempts));
-  if (SCENARIO.startsWith("ui-") || SCENARIO === "privacy-accept-restart") {
+  ck.add(
+    "all_trace_paths_inside_root",
+    ev.acceptance_trace.violations.length === 0,
+    ev.acceptance_trace.violations.join(" | ") ||
+      `${ev.acceptance_trace.records.length} 条追踪，路径均在隔离根内`,
+  );
+  ck.add(
+    "external_connection_attempts_zero",
+    ev.controlled_io.proxy_attempts.length === 0,
+    JSON.stringify(ev.controlled_io.proxy_attempts),
+  );
+  if (
+    SCENARIO.startsWith("ui-") ||
+    SCENARIO === "privacy-accept-restart" ||
+    SCENARIO === "privacy-policy-update"
+  ) {
     const missing = missingBusinessEvents(ev.acceptance_trace.records);
-    ck.add("required_business_trace_present",missing.length === 0,JSON.stringify(missing));
+    ck.add("required_business_trace_present", missing.length === 0, JSON.stringify(missing));
   }
   await controlledIo.close();
   ev.real_tokenscope_fingerprint_before = hashOfFingerprint(realBefore);
   ev.real_tokenscope_fingerprint_after = hashOfFingerprint(realAfter);
-  ev.real_tokenscope_entry_count_before = realBefore === "<missing>" ? 0 : realBefore.split("\n").length;
+  ev.real_tokenscope_entry_count_before =
+    realBefore === "<missing>" ? 0 : realBefore.split("\n").length;
   ev.real_untouched = realBefore === realAfter;
   ev.root_files_after = fs.existsSync(root) ? listFiles(root).slice(0, 60) : [];
-  ck.add("real_data_untouched", ev.real_untouched === true, `${hashOfFingerprint(realBefore)} → ${hashOfFingerprint(realAfter)}`);
+  ck.add(
+    "real_data_untouched",
+    ev.real_untouched === true,
+    `${hashOfFingerprint(realBefore)} → ${hashOfFingerprint(realAfter)}`,
+  );
   if (inst.violations) {
     const expected = inst.violations.filter((v) => inst.expectedScriptConsole?.has(v));
     const vs = splitViolations(inst.violations.filter((v) => !inst.expectedScriptConsole?.has(v)));
-    ev.csp_violation_counts = { total: inst.violations.length, expected_script_probe: expected.length, known_noise: vs.known.length, unexpected: vs.unexpected.length };
+    ev.csp_violation_counts = {
+      total: inst.violations.length,
+      expected_script_probe: expected.length,
+      known_noise: vs.known.length,
+      unexpected: vs.unexpected.length,
+    };
     ck.add(
       "no_unexpected_csp_violations_during_run",
       vs.unexpected.length === 0,

@@ -67,6 +67,9 @@ fn test_unknown_model_without_sources_is_unknown() {
     )
     .unwrap();
     let opts = SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Day,
         claude_dir: Some(claude_dir),
         codex_dir: Some(dir.join("no-codex")),

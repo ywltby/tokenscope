@@ -1263,6 +1263,8 @@ mod tests {
         .unwrap();
         }
         let opts = tokenscope::report::SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
             by: tokenscope::aggregate::GroupBy::Day,
             claude_dir: Some(claude.clone()),
             codex_dir: Some(dir.join("no-codex")),

@@ -23,20 +23,35 @@ const snapshot = (overrides = {}) =>
       totals,
       ...overrides.summary,
     },
-    events: { query_id: "q", rows: [], total: 10, ...overrides.events },
+    events: { query_id: "q", rows: [], total: 16, ...overrides.events },
   });
 const good = {
   project_same_path_merges_across_agents: {
     project: snapshot({
       summary: {
-        groups: [{ key: C, label: "tokenscope", requests: 4, agents: ["claude-code", "codex"] }],
+        groups: [
+          {
+            key: C,
+            label: "tokenscope",
+            requests: 10,
+            agents: ["claude-code", "codex", "workbuddy", "workbuddy-ai"],
+          },
+        ],
         totals,
       },
     }),
     detail: snapshot({
-      events: { rows: [{ agent: "claude-code" }, { agent: "codex" }], total: 4 },
+      events: {
+        rows: [
+          { agent: "claude-code" },
+          { agent: "codex" },
+          { agent: "workbuddy" },
+          { agent: "workbuddy-ai" },
+        ],
+        total: 10,
+      },
     }),
-    detailText: "Claude Code Codex",
+    detailText: "Claude Code Codex WorkBuddy WorkBuddy AI",
   },
   project_subdir_stays_in_root: {
     all: snapshot({
@@ -99,7 +114,8 @@ const good = {
         events: { total: 2, rows: [{ [type]: "selected", ts: "2026-10-06T01:00:00Z" }] },
       }),
       filtered: true,
-      cleared: snapshot(),
+      // WB07：cleared totals 与统一 fixture 基线 16 对齐（helper 默认 total）。
+      cleared: snapshot({ summary: { totals: { ...totals, requests: 16 } } }),
       clearedFilter: true,
     })),
   },
@@ -140,6 +156,45 @@ const good = {
     indexRecreated: true,
     cleanExit: true,
   },
+  workbuddy_sources_selected_independently: {
+    wb: snapshot({
+      summary: { totals: { requests: 3, tokens } },
+      events: { rows: [{ agent: "workbuddy" }], total: 3 },
+    }),
+    wbai: snapshot({
+      summary: { totals: { requests: 3, tokens } },
+      events: { rows: [{ agent: "workbuddy-ai" }], total: 3 },
+    }),
+    all: snapshot({
+      summary: { totals: { requests: 16, tokens } },
+      events: { total: 16 },
+    }),
+  },
+  workbuddy_subagent_usage_counted: {
+    wb: snapshot({
+      events: {
+        rows: [
+          { record_id: "wb-msg-1", agent: "workbuddy" },
+          { record_id: "wb-msg-2", agent: "workbuddy" },
+          { record_id: "wb-sub-msg-1", agent: "workbuddy" },
+        ],
+        total: 3,
+      },
+    }),
+  },
+  workbuddy_failed_call_not_counted: {
+    wb: snapshot({
+      summary: { totals: { requests: 3, tokens } },
+      events: {
+        rows: [
+          { record_id: "wb-msg-1", agent: "workbuddy" },
+          { record_id: "wb-msg-2", agent: "workbuddy" },
+          { record_id: "wb-sub-msg-1", agent: "workbuddy" },
+        ],
+        total: 3,
+      },
+    }),
+  },
   source_disable_keeps_history: {
     disabledSwitch: true,
     disableCall: {
@@ -166,6 +221,16 @@ describe("AC03 原生身份具名判定", () => {
       expect(judgeIdentity(name, {}).ok).toBe(false);
     });
   }
+  it("失败调用行混入事件时，精确 id 集合断言拒绝通过", () => {
+    const extra = structuredClone(good.workbuddy_failed_call_not_counted);
+    extra.wb.events.rows.push({ record_id: "wb-row-3", agent: "workbuddy" });
+    extra.wb.events.total = 4;
+    expect(judgeIdentity("workbuddy_failed_call_not_counted", extra).ok).toBe(false);
+    // 总数对但集合错（失败行顶掉一条真实调用）同样拒绝。
+    const swapped = structuredClone(good.workbuddy_failed_call_not_counted);
+    swapped.wb.events.rows[0].record_id = "wb-row-3";
+    expect(judgeIdentity("workbuddy_failed_call_not_counted", swapped).ok).toBe(false);
+  });
   it("同名项目不可以合为一行", () => {
     const evidence = structuredClone(good.project_label_is_last_segment);
     evidence.project.summary.groups.splice(1, 1);

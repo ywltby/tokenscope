@@ -99,7 +99,10 @@ function Write-SeedData {
     $claudeDirJson = $sourceDirClaude -replace '\\', '/'
     $codexDirJson = $sourceDirCodex -replace '\\', '/'
     @"
+# 同意基线带当前政策修订号（WB05：缺修订号的旧同意会被新版闸门判为
+# StaleRevision、停在「政策已更新」弹窗；本测试覆盖的是已同意的业务路径）。
 privacy_policy_accepted = true
+privacy_policy_revision = 2
 price_auto_sync = false
 close_action = "quit"
 

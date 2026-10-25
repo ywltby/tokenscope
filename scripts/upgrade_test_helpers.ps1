@@ -4,6 +4,9 @@
 # scripts/fixtures/upgrade_baselines.json，编排不自己拼路径或版本号。
 function Invoke-UpgradePython {
     param([Parameter(Mandatory=$true)][string[]]$Arguments,[string]$EvidencePath="")
+    # 校验脚本输出固定为 UTF-8；中文 Windows 控制台的默认代码页（GBK）会把
+    # UTF-8 字节按 ANSI 解成乱码，显式对齐后捕获结果才能逐字可比。
+    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
     $text = (& python -B @Arguments) -join "`n"
     $code = $LASTEXITCODE
     if ($EvidencePath) {
@@ -17,6 +20,7 @@ function Invoke-UpgradePython {
 function Invoke-UpgradePythonText {
     # 纯文本读数（历史库结构版本等）：不做 JSON 解析，失败即中断。
     param([Parameter(Mandatory=$true)][string[]]$Arguments)
+    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
     $text = (& python -B @Arguments) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw "升级 Python 读取失败（退出码 $LASTEXITCODE）" }
     return $text.Trim()
@@ -306,11 +310,116 @@ function Assert-PreservedBeforeLaunch {
     }
 }
 
+function Get-PathSnapshot {
+    # 路径快照：不存在时返回稳定的 "absent|<路径>" 标记。早先返回空
+    # hashtable——每次调用都是新实例，-notcontains 按引用比较恒不相等，
+    # 会把"前后都不存在"误报成一次变化（0.1.0 起点没有 history.db 时
+    # 正是这样误报的）。返回裸字符串（调用方 @() 包裹；, @() 的包裹在
+    # 管道/foreach 收集场景会产生嵌套数组）。
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return "absent|$Path" }
+    Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction SilentlyContinue |
+        ForEach-Object { "$($_.FullName)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" }
+}
+
+function Compare-PathSnapshot {
+    # 快照差集：After 中不在 Before 里的条目（新增或变化的文件）。
+    # 结尾逗号防单元素展开：否则单结果时调用方拿到的是字符串，
+    # [0] 取到第一个字符而不是整条路径。
+    param([string[]]$Before, [string[]]$After)
+    , @($After | Where-Object { $Before -notcontains $_ })
+}
+
+function Get-HistorySnapshot {
+    # 历史库快照范围 = 主文件 + WAL + SHM 三个文件（评审 2026-10-25 二轮：
+    # 只快照主文件时，同意前写入 history.db-wal / -shm 会漏过——SQLite
+    # 的实际写入恰恰先进 WAL）。任一文件缺失都以 absent 哨兵参与比较。
+    # 结尾不用 , @() 包裹：那会在输出端产生嵌套数组（调用方 @() 包裹时
+    # 收成单元素）；管道本身逐字符串流出，调用方包 @() 即得平铺数组。
+    param([string]$DataDir)
+    @('history.db', 'history.db-wal', 'history.db-shm') |
+        ForEach-Object { Get-PathSnapshot (Join-Path $DataDir $_) }
+}
+
+function Invoke-ConsentGateStage {
+    # WB05 第一段：装新版后、授权前，先以旧同意（或无同意）启动一次——
+    # 新闸门必须保持封闭，保存"零业务读取"证据并阻断任何违反：
+    # - settings.toml 的同意记录原样（程序不得预先补写 privacy_policy_revision）；
+    # - DataDir/logs 无新增（业务日志初始化只发生在同意之后）；
+    # - history.db（含 -wal/-shm，按内容/大小/mtime 快照）无新增写入
+    #   （采集不发生）。任何一项违反都抛错结束本阶段，阶段证据按实际
+    #   结果保存（失败不写 pass: true）。
+    # 观察窗口 45 秒后结束进程；第二段由 Grant-UpgradeConsent 授权。
+    param($Case, [string]$Phase)
+    $evidence = Join-Path $Case.EvidenceRoot "consent-gate"
+    New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+    $logsDir = Join-Path $Case.DataDir "logs"
+    $settingsPath = Join-Path $Case.DataDir "settings.toml"
+    $logsBefore = @(Get-PathSnapshot $logsDir)
+    $historyBefore = @(Get-HistorySnapshot $Case.DataDir)
+    $settingsBefore = (Get-Content -LiteralPath $settingsPath -Raw -Encoding utf8)
+
+    $exe = Join-Path (Get-UninstallEntry).InstallLocation "tokenscope.exe"
+    $context = Launch-AppOnce -ExePath $exe -Scenario $Phase -RunId ($Phase + "-gate-1") `
+        -EvidenceDir $evidence -LiveLogsDir $logsDir
+    $gateOk = $false
+    $gateDetail = ""
+    try {
+        Start-Sleep -Seconds 45
+        if ($context.Process.HasExited) {
+            throw "旧同意下新版进程提前退出（退出码 $($context.Process.ExitCode)）"
+        }
+        $settingsAfter = (Get-Content -LiteralPath $settingsPath -Raw -Encoding utf8)
+        $revisionWritten = $settingsAfter -match '(?m)^\s*privacy_policy_revision\s*='
+        if ($revisionWritten) {
+            throw "同意闸门前程序写入了 privacy_policy_revision（绕过重新询问）"
+        }
+        if ($settingsAfter -ne $settingsBefore) {
+            throw "同意闸门前 settings.toml 被改写"
+        }
+        $newLogs = Compare-PathSnapshot -Before $logsBefore -After @(Get-PathSnapshot $logsDir)
+        if ($newLogs.Count -gt 0) {
+            throw "同意前出现业务日志新增：$($newLogs[0])"
+        }
+        $newHistory = Compare-PathSnapshot -Before $historyBefore -After @(Get-HistorySnapshot $Case.DataDir)
+        if ($newHistory.Count -gt 0) {
+            throw "同意前历史库出现新写入：$($newHistory[0])"
+        }
+        $gateOk = $true
+        [ordered]@{
+            settings_unchanged    = $true
+            revision_not_written  = $true
+            logs_new_files        = 0
+            history_new_entries   = 0
+            observed_seconds      = 45
+        } | ConvertTo-Json |
+            Set-Content -LiteralPath (Join-Path $evidence ($Phase + "-gate.json")) -Encoding utf8NoBOM
+    }
+    catch {
+        $gateDetail = $_.Exception.Message
+        throw
+    }
+    finally {
+        Stop-ScenarioProcess -Context $context
+        Copy-LiveLogsToEvidence -Context $context
+        Save-ScenarioResult -Context $context -Pass $gateOk `
+            -Stage ($Phase + "-gate-" + $(if ($gateOk) { "closed" } else { "failed" })) `
+            -Detail $gateDetail
+    }
+}
+
 function Grant-UpgradeConsent {
     # 幂等：起点已带同意时不动设置文件，0.1.0 起点升级后补上。
+    # WB05：本跳目标格式 ≥ 3 的版本认识隐私修订号——写入当前修订（与
+    # tokenscope-core 的 PRIVACY_POLICY_REVISION = 2 同步），让升级后的启动
+    # 直接进入业务；历史跳保持布尔形态（受测旧版本不认识该字段）。
     param($Case)
-    Invoke-UpgradePython -Arguments @((Join-Path $Case.RepoRoot "scripts/upgrade_fixture.py"),"ensure-consent",
-        "--data-dir",$Case.DataDir) | Out-Null
+    $arguments = @((Join-Path $Case.RepoRoot "scripts/upgrade_fixture.py"), "ensure-consent",
+        "--data-dir", $Case.DataDir)
+    if ($Case.JumpTargetSettingsFormat -ge 3) {
+        $arguments += @("--revision", "2")
+    }
+    Invoke-UpgradePython -Arguments $arguments | Out-Null
 }
 
 function Check-CurrentUsage {
@@ -386,8 +495,17 @@ function Invoke-UpgradeScenario {
         Save-HistoryBackupState -Case $Case
         Install-UpgradeCurrent -Case $Case
         Assert-PreservedBeforeLaunch -Case $Case
-        Grant-UpgradeConsent -Case $Case
+        # 先把跳指针切到新版本：Grant 与观察段都按「本跳目标格式」判断是否
+        # 涉及隐私修订号（设置格式 3 起引入）；Set-UpgradeJump 只更新期望
+        # 字段，不触发外部动作，提前不影响语义。
         Set-UpgradeJump -Case $Case -Version $Case.AppVersion | Out-Null
+        # WB05：目标版本认识修订号时，先验证旧同意被新闸门拒绝（零业务
+        # 读取），再授权当前修订；旧版本（格式 < 3）布尔同意即放行，无
+        # 重新询问路径，观察段跳过。
+        if ($Case.JumpTargetSettingsFormat -ge 3) {
+            Invoke-ConsentGateStage -Case $Case -Phase "current"
+        }
+        Grant-UpgradeConsent -Case $Case
         Invoke-UpgradeLifecycle -Case $Case -Phase "current" -Verify { param($Value,$Context) Check-CurrentUsage -Case $Value -Context $Context }
         Invoke-UpgradeLifecycle -Case $Case -Phase "restart" -Verify { param($Value,$Context) Check-CurrentUsage -Case $Value -Context $Context }
         Save-JumpResult -Case $Case -Phase "current" -Pass $true
@@ -481,6 +599,13 @@ function Invoke-UpgradeChain {
             }
             Install-UpgradePackage -Case $Case -Origin $version -InstallerPath $installer | Out-Null
             if ($version -eq $Case.AppVersion) { Assert-InstalledUpgrade -Case $Case }
+            # WB05：本跳目标格式 ≥ 3（版本认识隐私修订号）时，先验证旧同意
+            # 被闸门拒绝（零业务读取）再授权；中间跳装的是旧版，布尔同意即
+            # 放行、无重新询问路径，观察段跳过（Set-UpgradeJump 已在安装前
+            # 把 JumpTargetSettingsFormat 切到本跳目标）。
+            if ($Case.JumpTargetSettingsFormat -ge 3) {
+                Invoke-ConsentGateStage -Case $Case -Phase ("chain-" + $suffix)
+            }
             # 0.2.0 起没有同意就不会采集：安装后、启动前补上（幂等）。
             Grant-UpgradeConsent -Case $Case
             Invoke-UpgradeLifecycle -Case $Case -Phase ("chain-"+$suffix) -Verify { param($Value,$Context) Check-CurrentUsage -Case $Value -Context $Context }

@@ -155,6 +155,8 @@ const agentOptions: { label: string; value: AgentFilter; icon: string }[] = [
   { label: "全部", value: "all", icon: "all" },
   { label: "Claude Code", value: "claude", icon: "claude" },
   { label: "Codex", value: "codex", icon: "openai" },
+  { label: "WorkBuddy", value: "workbuddy", icon: "workbuddy" },
+  { label: "WorkBuddy AI", value: "workbuddy-ai", icon: "workbuddy-ai" },
 ];
 
 // UX05：真实可绘制类别（排除"合计"行）——用 computed 缓存，避免在模板里

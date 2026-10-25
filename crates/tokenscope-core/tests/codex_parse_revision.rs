@@ -350,6 +350,9 @@ fn v2_fingerprint_reparses_unchanged_codex_file_once_and_keeps_old_fact() {
     drop(history);
 
     let opts = SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Agent,
         agent: Some(AgentKind::Codex),
         claude_dir: Some(temp.0.join("disabled-claude")),
@@ -480,6 +483,9 @@ struct ModelUpgradeFixture {
 impl ModelUpgradeFixture {
     fn collect_from(&self, root: &Path, refresh: bool) -> CollectedView {
         let opts = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
+
             codex_dir: Some(root.to_path_buf()),
             refresh,
             ..self.opts.clone()
@@ -569,6 +575,9 @@ fn model_upgrade_fixture(parser_revision: i64) -> ModelUpgradeFixture {
     drop(history);
     let old_fact = fact_rows(&history_path, old_stored.id);
     let opts = SummaryOptions {
+        workbuddy_enabled: Some(false),
+        workbuddy_ai_enabled: Some(false),
+
         by: GroupBy::Agent,
         agent: Some(AgentKind::Codex),
         claude_enabled: Some(false),

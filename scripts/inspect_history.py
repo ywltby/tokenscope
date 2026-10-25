@@ -133,7 +133,8 @@ def load_expected(path):
         identity = tuple(ev.get(name) for name in VERIFY_KEY)
         if any(type(v) is not str or not v for v in identity):
             raise ValueError(f"期望事件身份非法: {identity!r}")
-        if ev.get("app") not in ("claude-code", "codex"):
+        # WB02：白名单追加两版 WorkBuddy；未知 app 仍拒绝
+        if ev.get("app") not in ("claude-code", "codex", "workbuddy", "workbuddy-ai"):
             raise ValueError(f"期望事件 app 非法: {ev.get('app')!r}")
         row = {name: ev.get(name) for name in VERIFY_KEY + VERIFY_FIELDS}
         for field in ("input_tokens", "output_tokens",
