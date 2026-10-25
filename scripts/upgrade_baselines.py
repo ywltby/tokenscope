@@ -121,8 +121,25 @@ def validate_entry(entry, repository):
                 or not str(withdrawn.get("reason", "")).strip()):
             raise ValueError(f"撤回条目必须写明日期与原因：{version!r}")
     validate_persistent_format(entry.get("persistent_format"), version, status)
+    validate_privacy_revision(entry, version)
     validate_expectations(entry, version)
     validate_assets(entry, repository, status)
+
+
+def validate_privacy_revision(entry, version):
+    """设置格式 3 起的版本认识隐私修订号：登记必须携带该基线自己认识的
+    修订号；布尔时代（格式 < 3）基线不得登记（编排旧阶段播种同意与
+    WB05 闸门观察适用性都取自这个字段）。"""
+    value = entry.get("privacy_revision")
+    fmt = (entry.get("persistent_format") or {}).get("settings_format")
+    if value is None:
+        if fmt is not None and int(fmt) >= 3:
+            raise ValueError(f"设置格式 3 起的登记版本必须登记 privacy_revision：{version!r}")
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"privacy_revision 必须是正整数：{version!r}")
+    if fmt is None or int(fmt) < 3:
+        raise ValueError(f"不认识修订号的版本不得登记 privacy_revision：{version!r}")
 
 
 def validate_persistent_format(value, version, status="published"):
@@ -191,6 +208,7 @@ def resolved_entry(entry, root=ROOT):
             "origin_release": entry["origin_release"], "profile": entry["profile"],
             "status": entry["status"],
             "persistent_format": entry.get("persistent_format"),
+            "privacy_revision": entry.get("privacy_revision"),
             "expected_old": str(root / (entry.get("expected_old") or DEFAULT_EXPECTED)),
             "expected_after": state_paths,
             "installer_name": None if installer is None else installer["name"],

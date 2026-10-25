@@ -20,7 +20,7 @@ PROFILES = ("legacy-cache", "history")
 MISSING = object()
 
 
-def prepare(data, sources, profile="legacy-cache"):
+def prepare(data, sources, profile="legacy-cache", consent_revision=None):
     data, sources = Path(data), Path(sources)
     if profile not in PROFILES:
         raise ValueError(f"未知的起点夹具类型：{profile}")
@@ -36,8 +36,10 @@ def prepare(data, sources, profile="legacy-cache"):
         with destination.open("w", encoding="utf-8", newline="\n") as fh:
             fh.write(source.read_text(encoding="utf-8"))
     # history 起点（0.2.0 起）没有同意就不采集，因此夹具要预置同意；
-    # legacy 起点（0.1.0）没有这个键，同意由升级后写入。
-    consent = "privacy_policy_accepted = true\n" if profile == "history" else ""
+    # legacy 起点（0.1.0）没有这个键，同意由升级后写入。设置格式 3 起的
+    # 基线认识修订号，必须按该基线自己认识的修订号预置，否则 StaleRevision
+    # 门不开放（0.6.0→0.6.1 首跳 CI 40226439492 旧阶段等汇总超时）。
+    consent = _consent_prefix(consent_revision) if profile == "history" else ""
     settings = (consent + 'price_auto_sync = false\nclose_action = "quit"\n\n'
                 '[sources.claude]\nenabled = true\ndir = '
                 + json.dumps(claude.as_posix(), ensure_ascii=False)
@@ -284,6 +286,8 @@ def main():
     command.add_argument("--data-dir", type=Path, required=True)
     command.add_argument("--source-dir", type=Path, required=True)
     command.add_argument("--profile", choices=PROFILES, default="legacy-cache")
+    command.add_argument("--consent-revision", type=int, default=None,
+                         help="设置格式 3 起的基线按它自己认识的修订号预置同意")
     command = sub.add_parser("consent")
     command.add_argument("--data-dir", type=Path, required=True)
     command.add_argument("--revision", type=int, default=None)
@@ -300,7 +304,8 @@ def main():
     args = parser.parse_args()
     try:
         if args.mode == "prepare":
-            result = prepare(args.data_dir, args.source_dir, args.profile)
+            result = prepare(args.data_dir, args.source_dir, args.profile,
+                             consent_revision=args.consent_revision)
         elif args.mode == "consent":
             grant_test_consent(args.data_dir, revision=args.revision)
             result = {"ok": True, "test_consent_added": True}

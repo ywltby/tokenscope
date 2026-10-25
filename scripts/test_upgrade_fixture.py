@@ -72,6 +72,18 @@ class UpgradeFixtureCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             fixture.prepare(other, self.sources, "history.profile")
 
+    def test_history_prepare_carries_baseline_revision_when_requested(self):
+        # 0.6.0 是首个设置格式 3 基线：旧版阶段必须按该基线自己认识的修订号
+        # 预置同意，否则 StaleRevision 门不开放（CI 40226439492 单跳旧阶段
+        # 等汇总超时的红先来源）。不带修订号的调用保持布尔形态。
+        fixture.prepare(self.data, self.sources, "history", consent_revision=2)
+        settings = tomllib.loads((self.data / "settings.toml").read_text(encoding="utf-8"))
+        self.assertEqual(settings["privacy_policy_revision"], 2)
+        other = self.root / "plain/.tokenscope"
+        fixture.prepare(other, self.sources, "history")
+        plain = tomllib.loads((other / "settings.toml").read_text(encoding="utf-8"))
+        self.assertNotIn("privacy_policy_revision", plain)
+
     def test_consent_writes_revision_when_requested(self):
         # WB05：需要当前修订授权的跳，授予/确保同意必须与修订号同一次写入；
         # 不带修订号的旧版跳保持布尔形态（受测版本不支持该字段）。

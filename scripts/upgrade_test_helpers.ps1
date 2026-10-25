@@ -71,6 +71,7 @@ function New-UpgradeCase {
         ExpectedManifest=$manifest; ExpectedOldManifest=$baseline.expected_old
         ExpectedRequests=0; JumpSettingsFormat=$baseline.persistent_format.settings_format
         JumpTargetSettingsFormat=$baseline.persistent_format.settings_format
+        ConsentRevision=$baseline.privacy_revision
         Chain=@($Origin); JumpIndex=0; Jumps=@(); JumpOrigin=$Origin
         SourcesRoot=$null; OldInstallerPath=$null; OldExeHash=$null; InstalledExeHash=$null
         CacheHash=$null; SettingsHash=$null; PricingHash=$null
@@ -234,9 +235,32 @@ function Install-UpgradeBaseline {
 }
 
 function Prepare-OldUsage {
+    # 旧版阶段播种：设置格式 3 起的基线认识修订号，必须按登记的
+    # privacy_revision（该基线自己认识的修订号）预置同意，否则基线按
+    # StaleRevision 拒绝布尔同意、隐私门不开放，旧阶段等汇总必然超时
+    # （0.6.0→0.6.1 首跳 CI 40226439492）。布尔时代基线保持布尔形态。
     param($Case)
-    Invoke-UpgradePython -Arguments @((Join-Path $Case.RepoRoot "scripts/upgrade_fixture.py"),"prepare",
-        "--data-dir",$Case.DataDir,"--source-dir",$Case.SourcesRoot,"--profile",$Case.Profile) | Out-Null
+    $arguments = @((Join-Path $Case.RepoRoot "scripts/upgrade_fixture.py"),"prepare",
+        "--data-dir",$Case.DataDir,"--source-dir",$Case.SourcesRoot,"--profile",$Case.Profile)
+    if ([int]$Case.Baseline.persistent_format.settings_format -ge 3) {
+        if ($null -eq $Case.Baseline.privacy_revision) {
+            throw "设置格式 3 起点 $($Case.Origin) 缺少 privacy_revision 登记"
+        }
+        $arguments += @("--consent-revision", [string]$Case.Baseline.privacy_revision)
+    }
+    Invoke-UpgradePython -Arguments $arguments | Out-Null
+}
+
+function Test-ConsentGateApplies {
+    # WB05 闸门观察只对「旧同意对新版已失效」的跳有意义：来跳同意为布尔
+    # 形态或修订号低于当前修订（2，与 tokenscope-core 的
+    # PRIVACY_POLICY_REVISION 同步）时，新闸门必须保持封闭、观察段适用；
+    # 旧同意已带当前修订号（0.6.0→0.6.1，基线 revision = 当前 2）时同意
+    # 有效、无重新询问路径，观察段不适用（有效同意下观察期必然看到业务）。
+    param($Case)
+    if ($Case.JumpTargetSettingsFormat -lt 3) { return $false }
+    if ($null -eq $Case.ConsentRevision) { return $true }
+    return ([int]$Case.ConsentRevision -lt 2)
 }
 
 function Check-OldUsage {
@@ -499,13 +523,15 @@ function Invoke-UpgradeScenario {
         # 涉及隐私修订号（设置格式 3 起引入）；Set-UpgradeJump 只更新期望
         # 字段，不触发外部动作，提前不影响语义。
         Set-UpgradeJump -Case $Case -Version $Case.AppVersion | Out-Null
-        # WB05：目标版本认识修订号时，先验证旧同意被新闸门拒绝（零业务
-        # 读取），再授权当前修订；旧版本（格式 < 3）布尔同意即放行，无
-        # 重新询问路径，观察段跳过。
-        if ($Case.JumpTargetSettingsFormat -ge 3) {
+        # WB05：目标版本认识修订号且旧同意已失效时，先验证旧同意被新闸门
+        # 拒绝（零业务读取）再授权当前修订；旧同意已带当前修订号（同修订
+        # 基线跳）或目标不认识修订号（格式 < 3）时无重新询问路径，观察段
+        # 跳过。
+        if (Test-ConsentGateApplies -Case $Case) {
             Invoke-ConsentGateStage -Case $Case -Phase "current"
         }
         Grant-UpgradeConsent -Case $Case
+        $Case.ConsentRevision = if ($Case.JumpTargetSettingsFormat -ge 3) { 2 } else { $null }
         Invoke-UpgradeLifecycle -Case $Case -Phase "current" -Verify { param($Value,$Context) Check-CurrentUsage -Case $Value -Context $Context }
         Invoke-UpgradeLifecycle -Case $Case -Phase "restart" -Verify { param($Value,$Context) Check-CurrentUsage -Case $Value -Context $Context }
         Save-JumpResult -Case $Case -Phase "current" -Pass $true
@@ -599,15 +625,16 @@ function Invoke-UpgradeChain {
             }
             Install-UpgradePackage -Case $Case -Origin $version -InstallerPath $installer | Out-Null
             if ($version -eq $Case.AppVersion) { Assert-InstalledUpgrade -Case $Case }
-            # WB05：本跳目标格式 ≥ 3（版本认识隐私修订号）时，先验证旧同意
-            # 被闸门拒绝（零业务读取）再授权；中间跳装的是旧版，布尔同意即
-            # 放行、无重新询问路径，观察段跳过（Set-UpgradeJump 已在安装前
+            # WB05：本跳目标格式 ≥ 3 且来跳同意已失效时，先验证旧同意被闸门
+            # 拒绝（零业务读取）再授权；中间跳装的是旧版，布尔同意即放行、
+            # 同修订跳旧同意仍有效，观察段跳过（Set-UpgradeJump 已在安装前
             # 把 JumpTargetSettingsFormat 切到本跳目标）。
-            if ($Case.JumpTargetSettingsFormat -ge 3) {
+            if (Test-ConsentGateApplies -Case $Case) {
                 Invoke-ConsentGateStage -Case $Case -Phase ("chain-" + $suffix)
             }
             # 0.2.0 起没有同意就不会采集：安装后、启动前补上（幂等）。
             Grant-UpgradeConsent -Case $Case
+            $Case.ConsentRevision = if ($Case.JumpTargetSettingsFormat -ge 3) { 2 } else { $null }
             Invoke-UpgradeLifecycle -Case $Case -Phase ("chain-"+$suffix) -Verify { param($Value,$Context) Check-CurrentUsage -Case $Value -Context $Context }
             Save-JumpResult -Case $Case -Phase ("chain-"+$suffix) -Pass $true
         }

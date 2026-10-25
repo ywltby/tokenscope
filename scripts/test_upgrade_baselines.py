@@ -199,6 +199,27 @@ class RegistryValidationCase(RegistryCase):
         self.assertEqual(view["installer_sha256"],
                          "2a84dad613481b28ba09b0c820eba11875ee93ee5b6afb20d34bd3b7fcccbb9c")
 
+    def test_privacy_revision_follows_settings_format(self):
+        # 0.6.0 起设置格式 3 的基线认识隐私修订号：登记必须携带该基线自己
+        # 认识的修订号（编排旧阶段播种同意与闸门观察适用性都取自它）；
+        # 格式 < 3 的布尔时代基线不得登记。
+        payload = self.payload()
+        payload["entries"][1]["persistent_format"]["settings_format"] = "3"
+        self.assert_rejected(payload)
+        payload["entries"][1]["privacy_revision"] = 0
+        self.assert_rejected(payload)
+        payload["entries"][1]["privacy_revision"] = True
+        self.assert_rejected(payload)
+        payload["entries"][1]["privacy_revision"] = 2
+        baselines.load_registry(self.write(payload))
+        payload = self.payload()
+        payload["entries"][1]["privacy_revision"] = 2
+        self.assert_rejected(payload)
+
+    def test_resolved_entry_exposes_privacy_revision(self):
+        view = baselines.resolved_entry(baselines.published_entry(self.registry, "0.2.0"))
+        self.assertIsNone(view["privacy_revision"])
+
 
 class CheckCase(RegistryCase):
     def setUp(self):
