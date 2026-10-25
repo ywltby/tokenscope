@@ -9,7 +9,7 @@
 **Tech Stack:** Rust / SQLite / Tauri 2 / Vue 3，以及现有 Rust、Vitest、浏览器和原生 acceptance 测试工具。
 
 - 整理日期：2026-10-11；当前状态更新：2026-10-24。
-- 状态：**12 项完成（N01–N09、N14–N16）、1 项部分完成（N12）、3 项专项验收未闭合（N10/N11/N13）、N17 实施完成待合并（2026-10-24，见下），共 4 个开放责任编号 + 1 项待合并。** 已完成项不重复实施；N14 第 4 项随 B1 / PR #27 完成，四项全部关闭。
+- 状态：**13 项完成（N01–N09、N14–N16、N17 自动化验收完成）、1 项部分完成（N12）、3 项专项验收未闭合（N10/N11/N13）、N17 仅剩用户手动安装验证，共 4 个开放责任编号 + 1 项待人工验证。** 已完成项不重复实施；N14 第 4 项随 B1 / PR #27 完成，四项全部关闭。
 - 已核验交付基线：PR #15 合并 `9ea0c584`、v0.5.1 公开，连续升级链成功；PR #16 合并 `0ffab19`、v0.5.2 公开，[main CI](https://github.com/ywltby/tokenscope/actions/runs/39353860584)、[原生 E2E](https://github.com/ywltby/tokenscope/actions/runs/39353860657)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39353860618) 全成功（安装、六个单跳、两条连续链）。PR #17 研究资料合入 `89aec76` 不改变这些专项验收结论。PR #19 合并 `1156385`、v0.5.5 公开，main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39452749833)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39452749860)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39452749887) 全成功（安装、六个单跳、两条连续链），N15 关闭。
 - 最新交付：PR #23 合并 `d064f98`、v0.5.6 公开，main CI/Native UI E2E/Release 全成功（安装、六个单跳、两条连续链）；N14 第 2 项与 N16 关闭，证据见各自条目。
 - B1 验收交付：AC01 的 `69ce2f4` 随 PR #27 普通合并为 `4198051`；PR 的 CI、原生、安装与六组单跳以及 main CI/原生/Release 均成功。N14 第 4 项关闭；本批只有测试与文档，版本保持 0.5.6，Release 只跑 gate。
@@ -554,7 +554,7 @@ N01–N09、N14–N16 已完成，不重复实施；N14 第 4 项已由 B1 / AC0
 
 N17 按 WorkBuddy 专项计划的四个内部阶段独立推进；B3–B5 的待验不再作为其启动前置。两份计划分别回填受测提交与实际结果，不能互相代签完成。
 
-2026-10-24 实施记录：分支 `feat/workbuddy-adapters` 逐任务提交 WB01–WB09（详见专项计划 §6.3 的提交表、红绿摘要与十条不变量自审）。取号 minor 0.6.0（`bump_version.py --check` 输出 release: true）；WB08 真实对账 Rust 与独立 Python 逐应用逐字段一致（国内版 2,881 条 / 国际版 656 条、四桶总和相同、坏行 0）；`ui-identity` / `ui-source-paths` / `privacy-policy-update` 三场景在受测提交本地通过。**PR 复核与合并由用户决定；合并后的 main CI、Native UI E2E、Release 安装与升级矩阵验收、用户手动安装验证仍待执行，不提前标完成。**
+2026-10-24 实施记录：分支 `feat/workbuddy-adapters` 逐任务提交 WB01–WB09（详见专项计划 §6.3 的提交表、红绿摘要与十条不变量自审）。取号 minor 0.6.0（`bump_version.py --check` 输出 release: true）；WB08 真实对账 Rust 与独立 Python 逐应用逐字段一致（国内版 2,881 条 / 国际版 656 条、四桶总和相同、坏行 0）；`ui-identity` / `ui-source-paths` / `privacy-policy-update` 三场景在受测提交本地通过。2026-10-25 用户经三轮外部评审（夹具校验、断言强度、观察段快照范围逐轮收紧，见专项计划 §6.3）后授权合并：**PR #49 合并 `44c026d`，main 的 CI / Native UI E2E / Release（构建、八组单跳、两条连续升级链、publish）全部实际成功，[v0.6.0](https://github.com/ywltby/tokenscope/releases/tag/v0.6.0) 已发布（预发布，4 资产）**——运行链接见专项计划 §6.4。**N17 的自动化验收全部完成；仅剩用户手动安装验证（首启「政策已更新」、四应用筛选、WorkBuddy 数值与对账一致）保留待验，由用户执行。**
 
 新增测试名先在实际目标文件中登记，再执行；本计划提出的断言不是已经存在或已经通过的测试。N08 的现有目标为 `model_name_equivalence`、`model_identity_contract` 和 `pricing_source_policy`。
 
