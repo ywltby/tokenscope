@@ -236,6 +236,37 @@ sys.exit(37 if "--fail" in sys.argv else 0)
         Check ($absentDiff.Count -gt 0) "从不存在到出现检为变化"
     }
 
+    # 历史库快照范围（评审 2026-10-25 二轮）：必须覆盖主文件 + -wal + -shm
+    # 三个文件——SQLite 的写入先进 WAL，只快照主文件会漏过同意前的写入。
+    & {
+        $histRoot = Join-Path $contractRoot "history-scope"
+        New-Item -ItemType Directory -Path $histRoot -Force | Out-Null
+        $encoding = [Text.UTF8Encoding]::new($false)
+        [IO.File]::WriteAllText((Join-Path $histRoot 'history.db'), 'seed', $encoding)
+        $before = @(Get-HistorySnapshot $histRoot)
+        Check ($before.Count -eq 3 -and @($before | Where-Object { $_ -like 'absent|*' }).Count -eq 2) `
+            "三文件快照：主文件在、wal/shm 以 absent 哨兵参与"
+        Start-Sleep -Milliseconds 20
+        # 注入 WAL 写入（评审探针的 wal-created 形态）
+        [IO.File]::WriteAllText((Join-Path $histRoot 'history.db-wal'), 'written-before-consent', $encoding)
+        $walDiff = Compare-PathSnapshot -Before $before -After @(Get-HistorySnapshot $histRoot)
+        Check ($walDiff.Count -eq 1 -and $walDiff[0] -like '*history.db-wal|22|*') `
+            "同意前新增 WAL 检为变化：$($walDiff -join ';')"
+        # 注入 SHM 写入（shm-created 形态）
+        $mid = @(Get-HistorySnapshot $histRoot)
+        Start-Sleep -Milliseconds 20
+        [IO.File]::WriteAllText((Join-Path $histRoot 'history.db-shm'), 'written-before-consent', $encoding)
+        $shmDiff = Compare-PathSnapshot -Before $mid -After @(Get-HistorySnapshot $histRoot)
+        Check ($shmDiff.Count -eq 1 -and $shmDiff[0] -like '*history.db-shm|22|*') `
+            "同意前新增 SHM 检为变化：$($shmDiff -join ';')"
+        # 三文件都不存在 → 前后快照差集为 0（absent 哨兵稳定）
+        $empty = Join-Path $contractRoot "history-scope-empty"
+        if (Test-Path $empty) { Remove-Item -Recurse -Force $empty }
+        $e1 = @(Get-HistorySnapshot $empty)
+        $e2 = @(Get-HistorySnapshot $empty)
+        Check ((Compare-PathSnapshot -Before $e1 -After $e2).Count -eq 0) "三文件都不存在不报变化"
+    }
+
     # 编排顺序：真实 Invoke-UpgradeScenario/Invoke-UpgradeChain，只替换外部动作。
     function Invoke-UpgradePython { param([string[]]$Arguments,[string]$EvidencePath="")
         if ($Arguments -contains "download-baseline") {

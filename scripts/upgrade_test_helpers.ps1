@@ -314,9 +314,10 @@ function Get-PathSnapshot {
     # 路径快照：不存在时返回稳定的 "absent|<路径>" 标记。早先返回空
     # hashtable——每次调用都是新实例，-notcontains 按引用比较恒不相等，
     # 会把"前后都不存在"误报成一次变化（0.1.0 起点没有 history.db 时
-    # 正是这样误报的）。
+    # 正是这样误报的）。返回裸字符串（调用方 @() 包裹；, @() 的包裹在
+    # 管道/foreach 收集场景会产生嵌套数组）。
     param([string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) { return ,@("absent|$Path") }
+    if (-not (Test-Path -LiteralPath $Path)) { return "absent|$Path" }
     Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction SilentlyContinue |
         ForEach-Object { "$($_.FullName)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" }
 }
@@ -327,6 +328,17 @@ function Compare-PathSnapshot {
     # [0] 取到第一个字符而不是整条路径。
     param([string[]]$Before, [string[]]$After)
     , @($After | Where-Object { $Before -notcontains $_ })
+}
+
+function Get-HistorySnapshot {
+    # 历史库快照范围 = 主文件 + WAL + SHM 三个文件（评审 2026-10-25 二轮：
+    # 只快照主文件时，同意前写入 history.db-wal / -shm 会漏过——SQLite
+    # 的实际写入恰恰先进 WAL）。任一文件缺失都以 absent 哨兵参与比较。
+    # 结尾不用 , @() 包裹：那会在输出端产生嵌套数组（调用方 @() 包裹时
+    # 收成单元素）；管道本身逐字符串流出，调用方包 @() 即得平铺数组。
+    param([string]$DataDir)
+    @('history.db', 'history.db-wal', 'history.db-shm') |
+        ForEach-Object { Get-PathSnapshot (Join-Path $DataDir $_) }
 }
 
 function Invoke-ConsentGateStage {
@@ -342,10 +354,9 @@ function Invoke-ConsentGateStage {
     $evidence = Join-Path $Case.EvidenceRoot "consent-gate"
     New-Item -ItemType Directory -Path $evidence -Force | Out-Null
     $logsDir = Join-Path $Case.DataDir "logs"
-    $historyDb = Join-Path $Case.DataDir "history.db"
     $settingsPath = Join-Path $Case.DataDir "settings.toml"
     $logsBefore = @(Get-PathSnapshot $logsDir)
-    $historyBefore = @(Get-PathSnapshot $historyDb)
+    $historyBefore = @(Get-HistorySnapshot $Case.DataDir)
     $settingsBefore = (Get-Content -LiteralPath $settingsPath -Raw -Encoding utf8)
 
     $exe = Join-Path (Get-UninstallEntry).InstallLocation "tokenscope.exe"
@@ -370,7 +381,7 @@ function Invoke-ConsentGateStage {
         if ($newLogs.Count -gt 0) {
             throw "同意前出现业务日志新增：$($newLogs[0])"
         }
-        $newHistory = Compare-PathSnapshot -Before $historyBefore -After @(Get-PathSnapshot $historyDb)
+        $newHistory = Compare-PathSnapshot -Before $historyBefore -After @(Get-HistorySnapshot $Case.DataDir)
         if ($newHistory.Count -gt 0) {
             throw "同意前历史库出现新写入：$($newHistory[0])"
         }
