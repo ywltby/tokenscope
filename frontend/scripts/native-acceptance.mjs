@@ -1409,6 +1409,152 @@ async function measureA11y(page) {
   });
 }
 
+// ── AC06 共享辅助（模块层；被下方多个隐私场景复用）─────────────
+
+/**
+ * 从仓库源码提取受保护命令清单（不写死数量），并给出每个命令的最小
+ * 合法参数——让参数反序列化成功、隐私闸门拒绝成为唯一错误来源。
+ */
+function readProtectedCommands() {
+  const text = fs.readFileSync(
+    fileURLToPath(new URL("../../src-tauri/src/privacy.rs", import.meta.url)),
+    "utf8",
+  );
+  const block = text.match(/PROTECTED_COMMANDS:\s*&\[(.*?)\];/s);
+  if (!block) throw new Error("privacy.rs 中找不到 PROTECTED_COMMANDS 清单");
+  return [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+}
+
+/** 受保护命令的最小合法参数（camelCase；仅用于让闸门成为唯一拒绝来源）。 */
+const MINIMAL_INVOKER_ARGS = {
+  summarize: { by: "day" },
+  list_events: { limit: 1 },
+  query_begin: { by: "day" },
+  query_summary: { queryId: "x" },
+  query_events: { queryId: "x" },
+  startup_diagnostics: {},
+  view_cache_load: {},
+  view_cache_save: { value: {} },
+  source_status: {},
+  source_config_set: { agent: "claude", enabled: false },
+  source_paths_list: {},
+  source_path_add: { agent: "claude", path: "C:/synthetic/denied-ipc" },
+  source_path_remove: { agent: "claude", id: "x" },
+  source_path_set_enabled: { agent: "claude", id: "x", enabled: false },
+  source_auto_set: { agent: "claude", enabled: false },
+  cache_stats: {},
+  refresh_cache: {},
+  ccs_import_defaults: {},
+  ccs_import_preview: {},
+  ccs_import_commit: { planId: "x" },
+  ccs_import_discard: { planId: "x" },
+  pricing_entries: {},
+  pricing_status: {},
+  open_pricing_file: {},
+  sync_pricing_openrouter: {},
+  autostart_status: {},
+  autostart_set: { enabled: false },
+  settings_get: {},
+  settings_set_price_auto_sync: { enabled: false },
+  settings_set_close_action: { action: "minimize" },
+  settings_set_timezone: { timezone: "UTC" },
+  settings_set_collect_interval: { secs: 300 },
+  collection_status: {},
+  close_resolve: { minimize: false, remember: false },
+  open_settings_file: {},
+};
+
+/** AC06：全蜂巢只读注册表快照（辅助证据；只读、不写、不删）。 */
+function registrySnapshot() {
+  const keys = [
+    "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+    "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+    "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run",
+    "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run",
+  ];
+  const snapshot = {};
+  for (const key of keys) {
+    const result = spawnSyncBounded("reg", ["query", key], {
+      action: "registry-snapshot",
+      stage: "registry-snapshot",
+    });
+    if (result.status !== 0) {
+      // 键不存在属于合法形态：记为空列表。
+      snapshot[key] = [];
+      continue;
+    }
+    snapshot[key] = result.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.includes("REG_"))
+      .sort();
+  }
+  return snapshot;
+}
+
+/** AC06：预置业务文件（预置 + 新增一律纳入快照比对）。 */
+function preseedBusinessFiles(dataDir) {
+  const writeFile = (name, text) => {
+    const target = path.join(dataDir, name);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, text, "utf8");
+  };
+  // 假 history.db / WAL / SHM：内容合法性无关紧要——场景证明的是
+  // 未同意状态对它们零读取零写入；一旦被触碰，字节/大小/mtime 即变。
+  writeFile("history.db", "ac06-preseeded-history\n");
+  writeFile("history.db-wal", "ac06-preseeded-wal\n");
+  writeFile("history.db-shm", "ac06-preseeded-shm\n");
+  writeFile("logs/ac06-preseeded.log", "ac06-preseeded-log\n");
+  writeFile("view-cache.json", '{"ac06":"preseeded"}\n');
+  writeFile("pricing-modelsdev.json", '{"ac06":"preseeded"}\n');
+}
+
+/** AC06：业务文件与设置的双重快照（settings 单独逐字节比对）。 */
+function snapshotDataDir(dataDir) {
+  return {
+    business: snapshotBusinessFiles(dataDir),
+    settings: fs.readFileSync(path.join(dataDir, "settings.toml"), "utf8"),
+  };
+}
+
+/** AC06：双向快照比对（预置缺失/新增/内容变化均算变化）。 */
+function dataDirChanges(before, after) {
+  return [
+    ...changedBusinessFiles(before.business, after.business),
+    ...(before.settings === after.settings ? [] : ["settings.toml"]),
+  ];
+}
+
+/** AC06：拒绝路径退出（不同意 → 退出程序 → 进程干净退出）。 */
+async function rejectAndExit(page, inst, ck, label) {
+  await page.locator(".privacy-actions button", { hasText: "不同意" }).first().click();
+  await page.waitForSelector(".exit-dialog", { timeout: 5000 });
+  await page.locator(".exit-actions button", { hasText: "退出程序" }).first().click();
+  const deadline = Date.now() + 20000;
+  while (inst.proc.exitCode === null && Date.now() < deadline) await sleep(200);
+  ck.add(`${label}_exit_clean`, inst.proc.exitCode === 0, `exitCode=${inst.proc.exitCode}`);
+}
+
+/** AC06：业务追踪事件抽取（沿用 policy-update 的判法）。 */
+function businessTraceEvents(inst) {
+  const trace = readAcceptanceTrace(inst.root, { partial: true });
+  if (trace.violations.length) throw new Error(trace.violations.join(" | "));
+  return trace.records
+    .filter((r) =>
+      [
+        "business_ready",
+        "collect_round_start",
+        "source_root_read",
+        "history_open",
+        "ccs_open",
+        "pricing_fetch",
+        "autostart_read",
+        "autostart_write",
+      ].includes(r.event),
+    )
+    .map((r) => r.event);
+}
+
 // ── 场景 ──────────────────────────────────────────────────────────
 const scenarios = {
   "ui-identity": nativeIdentity,
@@ -2631,6 +2777,218 @@ const scenarios = {
   },
 
   /**
+   * AC06 场景 1：预置业务文件 + 未同意观察——已存在的业务数据必须
+   * 零读取零写入；追踪零业务事件；价格桩与外连零命中。
+   */
+  async "privacy-preseeded"({ inst, ck, ev }) {
+    const page = inst.page;
+    const dataDir = path.join(inst.root, "tokenscope");
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+
+    const businessEvents = businessTraceEvents(inst);
+    ck.add(
+      "preseeded_no_business_trace",
+      businessEvents.length === 0,
+      businessEvents.join(",") || "无业务事件",
+    );
+
+    const hits = inst.opts.controlledIo.snapshot().hits;
+    const hitCount = Object.values(hits).reduce((n, rows) => n + rows.length, 0);
+    ck.add("preseeded_price_stub_untouched", hitCount === 0, `桩命中=${hitCount}`);
+    ck.add(
+      "preseeded_proxy_attempts_zero",
+      inst.opts.controlledIo.snapshot().proxy_attempts.length === 0,
+      "计数代理未记录外连尝试",
+    );
+
+    ev.businessDomNodes = await page.locator(".app-nav, .page-head, .chart-canvas").count();
+    ck.add(
+      "preseeded_no_business_dom",
+      ev.businessDomNodes === 0,
+      `业务节点=${ev.businessDomNodes}`,
+    );
+    await page.screenshot({ path: path.join(inst.opts.shots, "privacy-preseeded-observed.png") });
+
+    // 未同意退出：不留业务残留、进程干净退出。
+    await rejectAndExit(page, inst, ck, "preseeded");
+  },
+
+  /**
+   * AC06 场景 2：未同意状态下全量受保护命令拒绝——每条命令都以最小
+   * 合法参数经真实 IPC 调用，全部返回隐私拒绝；追踪与文件零变化；
+   * 全蜂巢注册表只读快照前后一致（辅助证据）。
+   */
+  async "privacy-denied-ipc"({ inst, ck, ev }) {
+    const page = inst.page;
+    const dataDir = path.join(inst.root, "tokenscope");
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+
+    const commands = readProtectedCommands();
+    ev.deniedIpc = { commands: commands.length, results: [] };
+    ck.add(
+      "protected_commands_extracted_from_source",
+      commands.length >= 35,
+      `命令数=${commands.length}`,
+    );
+
+    const before = snapshotDataDir(dataDir);
+    const registryBefore = registrySnapshot();
+
+    for (const command of commands) {
+      const args = MINIMAL_INVOKER_ARGS[command];
+      if (args === undefined) throw new Error(`缺少 ${command} 的最小合法参数`);
+      const outcome = await page.evaluate(
+        ([cmd, invokeArgs]) =>
+          window.__TAURI_INTERNALS__
+            .invoke(cmd, invokeArgs)
+            .then(() => ({ status: "fulfilled", error: "" }))
+            .catch((error) => ({ status: "rejected", error: String(error?.message ?? error) })),
+        [command, args],
+      );
+      ev.deniedIpc.results.push({ command, ...outcome });
+      if (outcome.status !== "rejected" || !outcome.error.includes("privacy_consent_required")) {
+        throw new Error(`${command} 未被隐私闸门拒绝：${JSON.stringify(outcome)}`);
+      }
+    }
+    ck.add(
+      "all_protected_commands_rejected_pre_consent",
+      ev.deniedIpc.results.length === commands.length &&
+        ev.deniedIpc.results.every(
+          (r) => r.status === "rejected" && r.error.includes("privacy_consent_required"),
+        ),
+      `全部 ${commands.length} 条受保护命令返回 privacy_consent_required`,
+    );
+
+    const businessEvents = businessTraceEvents(inst);
+    ck.add(
+      "denied_ipc_trace_has_no_business_events",
+      businessEvents.length === 0,
+      businessEvents.join(",") || "无业务追踪",
+    );
+
+    const after = snapshotDataDir(dataDir);
+    const changes = dataDirChanges(before, after);
+    ck.add("denied_ipc_files_unchanged", changes.length === 0, changes.join(",") || "文件零变化");
+
+    const registryAfter = registrySnapshot();
+    const registryChanged = Object.keys(registryBefore).filter(
+      (key) => JSON.stringify(registryBefore[key]) !== JSON.stringify(registryAfter[key]),
+    );
+    ck.add(
+      "registry_snapshot_unchanged",
+      registryChanged.length === 0,
+      registryChanged.join(",") || "四蜂巢快照一致",
+    );
+
+    // 未同意退出：不留业务残留、进程干净退出。
+    await rejectAndExit(page, inst, ck, "denied_ipc");
+  },
+
+  /**
+   * AC06 场景 3：同意原子落盘顺序 + 双击单次初始化——consent_saved
+   * 严格早于 business_ready 与首个业务读取；双击只落盘一次。
+   */
+  async "privacy-accept-order"({ inst, ck, ev }) {
+    const page = inst.page;
+    const settingsPath = path.join(inst.root, "tokenscope", "settings.toml");
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+    // 双击（第二次落在保存中/已保存状态）：不得二次落盘或二次初始化。
+    await page.locator(".privacy-actions button", { hasText: "同意并继续" }).first().click();
+    await page
+      .locator(".privacy-actions button", { hasText: "同意并继续" })
+      .first()
+      .click({ delay: 20 })
+      .catch(() => {});
+    await page.waitForSelector(".app-nav", { timeout: 60000 });
+    await page.waitForTimeout(1500);
+
+    const trace = readAcceptanceTrace(inst.root, { partial: true });
+    if (trace.violations.length) throw new Error(trace.violations.join(" | "));
+    const seqOf = (name) => trace.records.filter((r) => r.event === name).map((r) => r.seq);
+    const consentSeqs = seqOf("consent_saved");
+    const readySeqs = seqOf("business_ready");
+    const readSeqs = seqOf("history_open").concat(seqOf("source_root_read"));
+    ev.acceptOrder = { consentSeqs, readySeqs, readSeqs: readSeqs.slice(0, 3) };
+    ck.add(
+      "consent_saved_exactly_once",
+      consentSeqs.length === 1,
+      `consent_saved=${consentSeqs.length} 次`,
+    );
+    ck.add(
+      "business_ready_exactly_once",
+      readySeqs.length === 1,
+      `business_ready=${readySeqs.length} 次`,
+    );
+    ck.add(
+      "consent_saved_precedes_business_unlock_and_reads",
+      consentSeqs.length === 1 &&
+        readySeqs.length === 1 &&
+        readSeqs.length >= 1 &&
+        Math.min(...readSeqs) > Math.max(...consentSeqs, ...readySeqs),
+      JSON.stringify(ev.acceptOrder),
+    );
+    const settings = fs.readFileSync(settingsPath, "utf8");
+    ck.add(
+      "accept_writes_consent_with_revision",
+      /privacy_policy_accepted\s*=\s*true/.test(settings) &&
+        /privacy_policy_revision\s*=\s*2/.test(settings),
+      settings.split("\n").slice(0, 4).join(" | "),
+    );
+    await page.screenshot({ path: path.join(inst.opts.shots, "privacy-accept-order.png") });
+  },
+
+  /**
+   * AC06 场景 4a：损坏 TOML 启动进入阻断弹窗且原文件逐字节不变。
+   */
+  async "privacy-variants-corrupt"({ inst, ck, ev }) {
+    const page = inst.page;
+    const settingsPath = path.join(inst.root, "tokenscope", "settings.toml");
+    const before = fs.readFileSync(settingsPath, "utf8");
+    ev.corruptSettings = { bytes: before.length };
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+    const text = (await page.locator(".privacy-dialog").innerText()).replace(/\s+/g, " ");
+    ck.add(
+      "corrupt_toml_shows_blocked_dialog",
+      text.includes("重新检查") || text.includes("隐私设置无法确认"),
+      text.slice(0, 140),
+    );
+    const after = fs.readFileSync(settingsPath, "utf8");
+    ck.add("corrupt_toml_file_unchanged", after === before, "损坏设置文件逐字节不变");
+    // 阻断态退出：不同意 → 退出程序（进程干净退出，无业务残留）。
+    await rejectAndExit(page, inst, ck, "corrupt_toml");
+  },
+
+  /**
+   * AC06 场景 4b：close_action 记忆预设不得绕过隐私退出确认——
+   * 未同意时点关闭弹隐私退出确认，而不是按记忆最小化到托盘。
+   */
+  async "privacy-variants-close"({ inst, ck, ev }) {
+    const page = inst.page;
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+    const action = fileURLToPath(
+      new URL("../../scripts/native-window-action.ps1", import.meta.url),
+    );
+    const result = spawnSyncBounded(
+      "pwsh",
+      ["-NoProfile", "-File", action, "-ProcessId", String(inst.proc.pid), "-Action", "close"],
+      { action: "window-close", stage: "variants-close" },
+    );
+    if (result.status !== 0 || !/CLOSED true/i.test(result.stdout))
+      throw new Error(`WM_CLOSE failed: ${result.stderr} ${result.stdout}`);
+    await page.waitForSelector(".exit-dialog", { timeout: 10000 });
+    const exitText = (await page.locator(".exit-dialog").innerText()).replace(/\s+/g, " ");
+    ck.add(
+      "close_action_preset_still_asks_privacy_exit",
+      exitText.includes("退出 TokenScope") && !exitText.includes("记住"),
+      exitText.slice(0, 140),
+    );
+    await page.locator(".exit-actions button", { hasText: "退出程序" }).first().click();
+    const deadline = Date.now() + 15000;
+    while (inst.proc.exitCode === null && Date.now() < deadline) await sleep(200);
+    ck.add("variants_close_exit_clean", inst.proc.exitCode === 0, `exitCode=${inst.proc.exitCode}`);
+  },
+
+  /**
    * WB05/WB07：旧修订同意触发重新询问——fixture 预置 accepted=true 但无
    * 修订号（v2 程序写入的形态）；新程序按未同意处理，弹窗顶部显示
    * 「隐私政策已更新」，同意前零业务读取；同意写入当前修订号；重启不再询问。
@@ -2910,7 +3268,11 @@ async function main() {
               }
             : SCENARIO === "privacy-consent-gate" ||
                 SCENARIO === "privacy-accept-restart" ||
-                SCENARIO === "privacy-policy-update"
+                SCENARIO === "privacy-policy-update" ||
+                SCENARIO === "privacy-preseeded" ||
+                SCENARIO === "privacy-denied-ipc" ||
+                SCENARIO === "privacy-accept-order" ||
+                SCENARIO === "privacy-variants-close"
               ? (r) => {
                   // P06/WB05：privacy-consent-gate 与 privacy-accept-restart 要
                   // "未同意"状态——删掉隔离根预置的同意记录与政策修订号（其余
@@ -2929,14 +3291,34 @@ async function main() {
                     fs.writeFileSync(p, downgraded, "utf8");
                     return;
                   }
+                  if (SCENARIO === "privacy-variants-close") {
+                    // AC06：记忆预设变体——剥离同意后追加 close_action，
+                    // 验证未同意时点关闭仍弹隐私退出确认而非最小化。
+                    const stripped = text.replace(
+                      /^[ \t]*privacy_policy_accepted[ \t]*=[ \t]*true[ \t]*\r?\n?/m,
+                      "",
+                    );
+                    fs.writeFileSync(p, stripped + 'close_action = "minimize"\n', "utf8");
+                    return;
+                  }
                   const stripped = text
                     .replace(/^[ \t]*privacy_policy_accepted[ \t]*=[ \t]*true[ \t]*\r?\n?/m, "")
                     .replace(/^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m, "");
                   if (stripped === text)
                     throw new Error("隔离根 settings.toml 未含同意记录，无法构造未同意场景");
                   fs.writeFileSync(p, stripped, "utf8");
+                  if (SCENARIO === "privacy-preseeded") {
+                    preseedBusinessFiles(path.join(r, "tokenscope"));
+                  }
                 }
-              : undefined,
+              : SCENARIO === "privacy-variants-corrupt"
+                ? (r) => {
+                    // AC06：损坏 TOML 变体——启动必须进入阻断弹窗且原文件
+                    // 逐字节不变（prepare 产物整体替换为非法内容）。
+                    const p = path.join(r, "tokenscope", "settings.toml");
+                    fs.writeFileSync(p, "not [valid toml", "utf8");
+                  }
+                : undefined,
   });
 
   // S00（计划 §9.1）：场景取消标志 + 阶段记录 + 最小证据写盘点。
@@ -3263,7 +3645,8 @@ async function main() {
   if (
     SCENARIO.startsWith("ui-") ||
     SCENARIO === "privacy-accept-restart" ||
-    SCENARIO === "privacy-policy-update"
+    SCENARIO === "privacy-policy-update" ||
+    SCENARIO === "privacy-accept-order"
   ) {
     const missing = missingBusinessEvents(ev.acceptance_trace.records);
     ck.add("required_business_trace_present", missing.length === 0, JSON.stringify(missing));

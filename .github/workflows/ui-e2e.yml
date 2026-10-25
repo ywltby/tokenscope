@@ -79,6 +79,37 @@ jobs:
         run: |
           node frontend/scripts/native-acceptance.mjs --scenario ui-pricing --events 8 --port 9520 --out qa-artifacts/ui-adjustment/native-e2e/pricing
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # AC06：隐私原生取证五场景（确定性；本地三连跑实测合计 112 秒）。
+      # 预置业务文件未同意观察（1 次启动，起始端口 9530）。
+      - name: Native privacy preseeded files untouched
+        shell: pwsh
+        run: |
+          node frontend/scripts/native-acceptance.mjs --scenario privacy-preseeded --events 8 --port 9530 --out qa-artifacts/ui-adjustment/native-e2e/privacy-preseeded
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # 全量受保护 IPC 拒绝 + 全蜂巢注册表只读快照（1 次启动，起始端口 9533）。
+      - name: Native privacy denied IPC over protected commands
+        shell: pwsh
+        run: |
+          node frontend/scripts/native-acceptance.mjs --scenario privacy-denied-ipc --events 8 --port 9533 --out qa-artifacts/ui-adjustment/native-e2e/privacy-denied-ipc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # 同意顺序与双击单次初始化（1 次启动，起始端口 9536）。
+      - name: Native privacy accept order and single save
+        shell: pwsh
+        run: |
+          node frontend/scripts/native-acceptance.mjs --scenario privacy-accept-order --events 8 --port 9536 --out qa-artifacts/ui-adjustment/native-e2e/privacy-accept-order
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # 损坏 TOML 阻断弹窗且文件不变（1 次启动，起始端口 9539）。
+      - name: Native privacy corrupt settings blocked
+        shell: pwsh
+        run: |
+          node frontend/scripts/native-acceptance.mjs --scenario privacy-variants-corrupt --events 8 --port 9539 --out qa-artifacts/ui-adjustment/native-e2e/privacy-variants-corrupt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # close_action 记忆预设不得绕过隐私退出确认（1 次启动，起始端口 9542）。
+      - name: Native privacy close preset still asks
+        shell: pwsh
+        run: |
+          node frontend/scripts/native-acceptance.mjs --scenario privacy-variants-close --events 8 --port 9542 --out qa-artifacts/ui-adjustment/native-e2e/privacy-variants-close
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload native UI evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7

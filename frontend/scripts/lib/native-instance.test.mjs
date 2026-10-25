@@ -87,7 +87,10 @@ describe("端口计算（§4.8 第 1 条）", () => {
     // AC03：ui-identity 起始 9500（2 次启动用 9501–9502）。
     // AC04：ui-ccs-import 起始 9510（1 次启动用 9511）。
     // AC05：ui-pricing 起始 9520（2 次启动用 9521–9522）。
-    expect(unique).toEqual([9451, 9455, 9460, 9470, 9480, 9490, 9500, 9510, 9520]);
+    // AC06：五个隐私场景各 1 次启动，起始端口 9530/9533/9536/9539/9542。
+    expect(unique).toEqual([
+      9451, 9455, 9460, 9470, 9480, 9490, 9500, 9510, 9520, 9530, 9533, 9536, 9539, 9542,
+    ]);
     // 单步最多 3 次启动：ui-refresh 首次 + 2 次重启，ui-system 首次 + 1 次重启，
     // ui-collection-status 首次 + 2 次重启。
     const stepSize = 3;
@@ -276,9 +279,9 @@ describe("启动预算与重试（§4.8 第 4 条）", () => {
     expect(isRetryableConnectError("fetch failed ← connect ECONNREFUSED 127.0.0.1:9601")).toBe(
       true,
     );
-    expect(
-      isRetryableConnectError("fetch failed ← The operation was aborted due to timeout"),
-    ).toBe(true);
+    expect(isRetryableConnectError("fetch failed ← The operation was aborted due to timeout")).toBe(
+      true,
+    );
     const fatal = connectDecision({
       error: "Unexpected token < in JSON at position 0",
       elapsedMs: 1000,
