@@ -430,6 +430,9 @@ def register(entry, path=REGISTRY):
         raise ValueError(f"版本已登记：{entry['version']}")
     registry["entries"].append(entry)
     registry["entries"].sort(key=lambda item: version_tuple(item["version"]))
+    # 写盘前整表校验：新条目缺/坏元数据（如格式 3 缺 privacy_revision）在
+    # 这里失败，登记表保持原样，不能把「下一次 load 拒读」的坏表写出去。
+    parse_registry(json.dumps(registry, ensure_ascii=False), source=str(path))
     write_registry(registry, path)
     return entry
 
@@ -473,10 +476,37 @@ def add_entry(tag, api=None, path=REGISTRY, directory=None, status="published",
             _, actual = download(url, remote, work, name)
             assets.append({"name": name, "url": url, "sha256": actual})
         metadata = read_added_metadata(work, assets, version)
+    privacy_revision = None
+    if int(metadata["settings_format"]) >= 3:
+        # 设置格式 3 起的版本认识隐私修订号：登记必须取该发布标签自身源码
+        # 里的 PRIVACY_POLICY_REVISION，不能盲用登记时当前源码的修订号。
+        privacy_revision = read_tag_privacy_revision(resolved)
+        if privacy_revision is None:
+            raise ValueError(f"v{version} 的标签源码没有 PRIVACY_POLICY_REVISION，"
+                             "拒绝登记设置格式 3 版本")
     entry = {"version": version, "tag": "v" + version, "commit": resolved,
              "origin_release": "v" + version, "profile": profile_for(version),
              "status": "published", "persistent_format": metadata, "assets": assets}
+    if privacy_revision is not None:
+        entry["privacy_revision"] = privacy_revision
     return register(entry, path)
+
+
+PRIVACY_REVISION_SOURCES = ("crates/tokenscope-core/src/settings.rs", "src/settings.rs")
+
+
+def read_tag_privacy_revision(commit, root=ROOT):
+    """从发布标签解引用到的源码读隐私修订号；两处历史路径都找不到常量
+    时返回 None（由调用方决定是否拒绝登记）。"""
+    for relative in PRIVACY_REVISION_SOURCES:
+        result = subprocess.run(["git", "-C", str(root), "show", f"{commit}:{relative}"],
+                                capture_output=True, encoding="utf-8", check=False)
+        if result.returncode:
+            continue
+        match = re.search(r"PRIVACY_POLICY_REVISION\s*:\s*u8\s*=\s*(\d+)", result.stdout)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 def profile_for(version):

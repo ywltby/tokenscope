@@ -411,9 +411,85 @@ class AddCase(RegistryCase):
         self.assertEqual(entry["origin_release"], "v0.3.3")
         self.assertEqual(entry["profile"], "history")
         self.assertEqual(entry["persistent_format"], FINGERPRINT)
+        self.assertNotIn("privacy_revision", entry)
         stored = baselines.load_registry(path)
         self.assertEqual([e["version"] for e in stored["entries"]],
                          ["0.1.0", "0.2.0", "0.2.1", "0.3.0", "0.3.1", "0.3.2", "0.3.3"])
+
+    def test_format3_add_registers_tag_privacy_revision_and_reloads(self):
+        # PR52 复盘反例（probe_baseline_registration.py）：设置格式 3 的
+        # add_entry 不带 privacy_revision 就写盘，登记「成功」后 load_registry
+        # 拒读整表。修复后：修订号取自该标签自身源码（不读当前工作树），
+        # add → reload → select → check 全链可用。
+        registry = self.without("0.3.3")
+        path = self.write(registry)
+        names = ["TokenScope_v0.3.3_windows-x64-setup.exe", "SHA256SUMS.txt",
+                 "provenance.sigstore.json", "build-metadata.json"]
+        api = FakeApi({"v0.3.3": release("v0.3.3", [asset(n, "5" * 64, tag="v0.3.3") for n in names],
+                                        commit=SHA)}, {"v0.3.3": SHA})
+
+        def fake_download(url, sha256, directory, name):
+            path_ = Path(directory) / name
+            if name == "build-metadata.json":
+                path_.write_text(json.dumps({"schema_version": 2,
+                                             "persistent_format": {**FINGERPRINT, "settings_format": "3"}}),
+                                 encoding="utf-8")
+            else:
+                path_.write_bytes(name.encode("utf-8"))
+            return path_, "5" * 64
+
+        with patch.object(baselines, "download", side_effect=fake_download), \
+                patch.object(baselines, "digest", return_value="5" * 64), \
+                patch.object(baselines, "read_tag_privacy_revision", return_value=2, create=True):
+            entry = baselines.add_entry("v0.3.3", api=api, path=path, directory=self.temp.name)
+        self.assertEqual(entry["privacy_revision"], 2)
+        reloaded = baselines.load_registry(path)
+        view = baselines.resolved_entry(baselines.published_entry(reloaded, "0.3.3"))
+        self.assertEqual(view["privacy_revision"], 2)
+        self.assertEqual(baselines.selection_payload(reloaded, "0.3.4")["origins"][-1], "0.3.3")
+        releases, commits = {}, {}
+        for stored in reloaded["entries"]:
+            releases[stored["tag"]] = release(stored["tag"],
+                                              [asset(a["name"], a["sha256"]) for a in stored["assets"]])
+            commits[stored["tag"]] = stored["commit"]
+
+        def check_download(url, sha256, directory, name):
+            path_ = Path(directory) / name
+            path_.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+            return path_, sha256
+
+        with patch.object(baselines, "base_version", return_value="0.3.2"), \
+                patch.object(baselines, "download", side_effect=check_download):
+            result = baselines.check_registry("origin/main", path=path, api=FakeApi(releases, commits))
+        self.assertEqual(result["checked"][-1], "0.3.3")
+
+    def test_format3_add_fails_clean_without_tag_revision(self):
+        # 标签源码拿不到修订号 → 写盘前整表校验失败，登记表保持原样
+        # （不能把「下一次 load 拒读」的坏表留给 CI）。
+        registry = self.without("0.3.3")
+        path = self.write(registry)
+        names = ["TokenScope_v0.3.3_windows-x64-setup.exe", "SHA256SUMS.txt",
+                 "provenance.sigstore.json", "build-metadata.json"]
+        api = FakeApi({"v0.3.3": release("v0.3.3", [asset(n, "5" * 64, tag="v0.3.3") for n in names],
+                                        commit=SHA)}, {"v0.3.3": SHA})
+
+        def fake_download(url, sha256, directory, name):
+            path_ = Path(directory) / name
+            if name == "build-metadata.json":
+                path_.write_text(json.dumps({"schema_version": 2,
+                                             "persistent_format": {**FINGERPRINT, "settings_format": "3"}}),
+                                 encoding="utf-8")
+            else:
+                path_.write_bytes(name.encode("utf-8"))
+            return path_, "5" * 64
+
+        with patch.object(baselines, "download", side_effect=fake_download), \
+                patch.object(baselines, "digest", return_value="5" * 64), \
+                patch.object(baselines, "read_tag_privacy_revision", return_value=None, create=True):
+            with self.assertRaises(ValueError) as caught:
+                baselines.add_entry("v0.3.3", api=api, path=path, directory=self.temp.name)
+        self.assertIn("PRIVACY_POLICY_REVISION", str(caught.exception))
+        self.assertEqual(baselines.load_registry(path), registry)
 
 
 class WithdrawCase(RegistryCase):
