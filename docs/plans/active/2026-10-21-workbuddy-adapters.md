@@ -391,6 +391,14 @@
 
 **外部评审修复（2026-10-25，`4aa90b9` / `ee55d03` / `625693b`）**：合入前评审发现五处问题，全部确认成立并修复——①`ensure_test_consent` 对已有修订号记录补写时未删旧行，会产生重复 `privacy_policy_revision` 键使 tomllib 拒绝解析（当前矩阵起点不带修订号恰好不触发，未来版本必炸）；补写前先删已有行并加 revision=1 起步用例。②WB04 对 `default` 规则的「缺失即等价」放宽误作用于全部规则，恢复严格校验并以 `allow_missing: true` 白名单标注 WorkBuddy 四条规则。③`workbuddy_failed_call_not_counted` 拿不存在的 id 比较恒真，改为 record_id 集合恰等于 fixture 三个 messageId 行的精确比对（判定测试补正反两向样例）。④`workbuddy_ai_disable_keeps_saved_usage` 拿「waitUntil 执行到了这里」当断言恒真，改为读实际总数，并按计划补「停用后切回 WorkBuddy AI 筛选、已保存 3 条仍可查询」（新增 `workbuddy_ai_saved_usage_queryable_after_disable`）。⑤`default_root` 错误信息补空格。修复后本地重建受测 exe（`749270ba…6713`），source-paths 18/18×3、identity 19/19×3；scripts/前端全量测试通过。
 
+**第二轮外部评审修复（2026-10-25，`8b936ed` / `b8ebfb4` / `4b9f515`）**：评审以隔离替身与探针（取证 `qa-artifacts/workbuddy/review-49-codex-current`）复现四处缺陷，全部确认并修复：
+- **闸门观察段漏报**（`b8ebfb4`）：上轮把 history.db 变化降级为记录时，未发现快照函数在「路径不存在」时返回空 hashtable——每次调用都是新实例，`-notcontains` 恒不相等，「前后都不存在」被误报成一次变化（0.1.0 起点正是如此）。这正是当时降级的真实根因（已定位，非环境问题）。改为稳定 `absent|<路径>` 哨兵并恢复阻断断言；评审的 history-mutated 替身原先漏过（outer_failed=false），复跑转红。
+- **失败阶段证据失真**（`b8ebfb4`）：观察段 finally 无条件 `Pass $true`；改为成功标志位，失败时 stage 带 `-failed`、pass=false、附原因（探针 settings-mutated 模式验证：外层抛错且证据如实记失败）。
+- **非法缓存值入账**（`8b936ed`）：cached / hit / cache_write 字段存在但非法（负数、浮点、字符串、布尔）被 as_u64 的 None 静默当缺失（按 0 或借回退键混过）；改为存在但非法计坏行。新用例在旧实现先红（6 条非法全入账）。
+- **超大时间戳回绕**（`8b936ed`）：`ms as i64` 把 u64::MAX 回绕成 1969-12-31 伪事件；改 `i64::try_from` 受检转换（先红：u64::MAX 产出事件；修后 jiff 范围内大值照常）。
+- **隐私场景漏检**（`4b9f515`）：businessFiles 正则补 history.db（-wal/-shm）；同意前断言追踪无任何业务事件（business_ready / collect_round_start / source_root_read / history_open）；同意后断言 business_ready 的 seq 严格大于 consent_saved。privacy-consent-gate 的同一清单一并修正。
+验证：升级契约 65 项（+4 快照防回归）、workbuddy_source 15/15、前端 784、workspace 双轮 60/60；受测 exe 重建（`5f2c6cb7…52e5`）后 policy-update 14/14×3、identity 19/19×3、source-paths 18/18×3。
+
 **版本常量决策（WB02 核对结论）**：`HISTORY_SCHEMA_VERSION=4`、`PARSER_REVISION=2`、`IDENTITY_REVISION=1` 均不递增——历史库 `usage_events.app` 为 TEXT、表结构不变；新增适配器不改变 Claude/Codex 的解析语义与模型身份规则；新事件以当前 PARSER_REVISION 标记写入，读取方（升级矩阵按 persistent_format 分组挑起点）不受影响。`SETTINGS_FORMAT_REVISION` 2→3 属计划明确的变化（sources 新键 + 同意修订号），迁移规则与 `settings_migrations.json` 同步。
 
 **十条不变量自审**：
