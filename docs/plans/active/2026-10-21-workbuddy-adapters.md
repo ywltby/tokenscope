@@ -399,6 +399,8 @@
 - **隐私场景漏检**（`4b9f515`）：businessFiles 正则补 history.db（-wal/-shm）；同意前断言追踪无任何业务事件（business_ready / collect_round_start / source_root_read / history_open）；同意后断言 business_ready 的 seq 严格大于 consent_saved。privacy-consent-gate 的同一清单一并修正。
 验证：升级契约 65 项（+4 快照防回归）、workbuddy_source 15/15、前端 784、workspace 双轮 60/60；受测 exe 重建（`5f2c6cb7…52e5`）后 policy-update 14/14×3、identity 19/19×3、source-paths 18/18×3。
 
+**第三轮外部评审修复（2026-10-25，`2440c66`）**：二轮探针（review-49-round2）进一步发现观察段历史库快照只覆盖主文件——同意前写入 history.db-wal / -shm 漏过（三模式 pass: true）。新增 Get-HistorySnapshot（主文件 + WAL + SHM 三文件拼接快照，缺失以 absent 哨兵参与比较）接入观察段前后对比；Get-PathSnapshot 的 absent 分支改返回裸字符串（,@() 包裹在管道收集场景产生嵌套数组，本轮调试中定位）。评审探针七模式复跑全部符合预期（wal/shm 三模式从漏报转红，valid-control / history-missing 不误报）；契约测试补 4 项三文件范围防回归（65→69）。
+
 **版本常量决策（WB02 核对结论）**：`HISTORY_SCHEMA_VERSION=4`、`PARSER_REVISION=2`、`IDENTITY_REVISION=1` 均不递增——历史库 `usage_events.app` 为 TEXT、表结构不变；新增适配器不改变 Claude/Codex 的解析语义与模型身份规则；新事件以当前 PARSER_REVISION 标记写入，读取方（升级矩阵按 persistent_format 分组挑起点）不受影响。`SETTINGS_FORMAT_REVISION` 2→3 属计划明确的变化（sources 新键 + 同意修订号），迁移规则与 `settings_migrations.json` 同步。
 
 **十条不变量自审**：
