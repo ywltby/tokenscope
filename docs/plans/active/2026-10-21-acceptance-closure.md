@@ -302,14 +302,14 @@ AC03–AC05 的 CI 接入：
 
 **接线（全部 `#[cfg(feature = "acceptance")]`；按构建模式隔离，普通构建零变化）**：
 
-- 文件与位置（沿用既有体系，不另起追踪系统）：替身分支在 `src-tauri/src/commands.rs` 的 `autostart_status`/`autostart_set`（`commands.rs:1430` / `:1441`）命令体内；追踪经核心库公开接口 `tokenscope::acceptance::record("autostart_read"|"autostart_write", …)` 写入既有 `crates/tokenscope-core/src/acceptance_trace.rs` 的顺序化 JSONL（逐行 flush、seq 连续校验，`acceptance_trace.rs:146-183`）；隔离状态文件 `<root>/autostart-state.json`。壳侧 `src-tauri/src/acceptance.rs` 只负责桌面验收启动（`start/start_with` → `tokenscope::acceptance::bootstrap_with`），不是追踪或替身的实现位置。**壳内没有 `crate::acceptance::bootstrapped()`**——壳调用的是核心库 `tokenscope::acceptance::`。
+- 文件与位置（沿用既有体系，不另起追踪系统）：替身分支在 `src-tauri/src/commands.rs` 的 `autostart_status`/`autostart_set`（`commands.rs:1430` / `:1441`）命令体内；追踪经核心库公开接口 **`tokenscope::acceptance::record_path("autostart_read"|"autostart_write", <root>/autostart-state.json, …)`** 写入既有 `crates/tokenscope-core/src/acceptance_trace.rs` 的顺序化 JSONL（逐行 flush、seq 连续校验，`acceptance_trace.rs:146-183`）——**必须用 `record_path` 而非 `record`**：只有 `record_path` 会规范化路径、把绝对 `path` 写入事件并在 Rust 侧做隔离根包含校验（`acceptance_trace.rs:216-233`），`record` 不带路径、路径证据不完整。壳侧 `src-tauri/src/acceptance.rs` 只负责桌面验收启动（`start/start_with` → `tokenscope::acceptance::bootstrap_with`），不是追踪或替身的实现位置。**壳内没有 `crate::acceptance::bootstrapped()`**——壳调用的是核心库 `tokenscope::acceptance::`。
 - **按构建模式隔离（用户 2026-10-25 三轮修订）**：
   - **普通构建**：替身代码不编译（cfg 限定），真实插件行为逐字节保持；不读取任何新增验收变量、不产生替身状态文件或探针事件；
   - **acceptance 构建**：`autostart_status`/`autostart_set` **必须取得有效隔离根**——以核心库 `tokenscope::acceptance::root()` 返回 `Some(root)` 且根存在为准，只操作 `<root>/autostart-state.json`；
   - **报错路径**：未初始化、`root()` 为 `None`、根缺失/非法、替身状态文件读写失败，一律返回明确错误并**绝不进入真实插件**。
 - **`bootstrapped()` 不能替代 `root()` 校验**：核心库存在「已初始化但 root 为 `None`」的状态（`acceptance.rs` 的 `bootstrap_with(None)` 把 `ROOT` 置为 `Some(None)`，此时 `bootstrapped()` 为 true 而 `root()` 为 `None`——例如只跑单测的 acceptance 构建）。替身判定只看 `root()` 的有效值，不看 `bootstrapped()`。
 - 防线关系：命令入口的隐私闸门（`privacy::require_ready`）保持第一道防线不变；替身是**闸门回归时的第二道防线**——即使闸门回归放行命令体，也只影响隔离状态文件。
-- 新追踪事件同时覆盖三处：生产方（核心 `acceptance_trace.rs`，事件名为自由字符串、无白名单）、校验方（`frontend/scripts/lib/acceptance-io.mjs:8-9` 的 `EVENTS` 集合追加 `autostart_read`/`autostart_write`，未知事件会被校验拒绝）、判定方（场景断言读取事件）。
+- 新追踪事件同时覆盖三处：生产方（核心 `acceptance_trace.rs` 经 **`record_path`** 写入——路径规范化与隔离根包含校验在 Rust 侧完成）；校验方（`frontend/scripts/lib/acceptance-io.mjs:8-9` 的 **`EVENTS` 与 `PATH_EVENTS` 两个集合都追加** `autostart_read`/`autostart_write`——只进 `EVENTS` 不进 `PATH_EVENTS` 时，缺 `path` 的事件会被校验器放行、路径证据不完整；加入 `PATH_EVENTS` 后，缺 `path`、非绝对 `path`、越出隔离根的 `path` 均判校验失败，见 `acceptance-io.mjs:107-112`）；判定方（场景断言读取事件及其 `path`）。
 
 - **`privacy-preseeded`（预置业务文件 + 未同意观察）**
   - 隔离根预置：合成数据真实采集产出的一份 `history.db`（含 WAL/SHM 文件，用例内先同意→等待采集→重置同意记录后保留文件，或直接以 SQLite 合成）、`logs/` 内一条历史日志、`view-cache.json`、两份价格快照；settings 只含旧修订布尔同意（触发重新询问）。
@@ -365,12 +365,12 @@ AC03–AC05 的 CI 接入：
 同一隔离根、同一宿主进程（证据关联同一宿主 PID 与连续 trace 序列），全程本地价格桩（`TOKENSCOPE_ACCEPTANCE_PRICING_BASE`）与计数代理；产品 120 秒首查延迟与 3600 秒轮询周期保持原样，**不增加补偿等待、不改产品时序**；每个阶段以实际探针事件划分，各阶段写明有限截止时间（超时即场景失败并留证据，不静默延长）：
 
 1. **未同意观察（≥130 秒窗口，截止 150 秒）**：全新根、无同意记录启动。断言：`price_sync_thread_start`/`price_sync_poll`/`pricing_fetch` 均无事件（线程未随未同意启动，P03）；价格桩命中 0、外连尝试 0；业务文件（含 history.db/WAL/SHM）快照不变；无业务 DOM。
-2. **同一进程内同意**：点击「同意并继续」。断言：`consent_saved` 的 seq 早于 `business_ready` 与 `price_sync_thread_start`（同意落盘先于业务解锁与线程启动）；`price_sync_thread_start` 在场——**探针正向控制取得**。
-3. **首次双源同步**：等待首个 `pricing_fetch`（截止 = `business_ready` + 130 秒**观察窗口**；窗口只保证覆盖 120 秒首查延迟，**不是「请求必须晚于 130 秒」的断言**）。断言：双源桩各命中一次、快照 `synced_at` 更新、首个请求距 `business_ready` ≥120 秒、外连尝试 0。
-4. **经真实设置操作关闭自动同步**：设置页关闭 `price_auto_sync`（SF02 事务写）；仅在隔离根内把 models.dev 快照 `synced_at` 改写为 25 小时前。等待至少一条 `price_sync_poll`（截止 = 关闭操作 + 1 小时轮询上限 + 余量），断言该事件 `phase=ready`、`snapshot_due=true`、`auto=false`、`will_sync=false`，且全程零 `pricing_fetch`——由实际轮询证明 Ready、快照已过期、开关关闭、最终决策跳过。
-5. **同一进程内重新开启**：设置页真实重新开启（**不得用重启替代**）；等待下一轮真实轮询（截止 = 重开操作 + 1 小时轮询上限 + 余量）出现 `auto=true`、`will_sync=true` 的 `price_sync_poll` 并随后完成双源 `pricing_fetch`、快照再次更新。
+2. **同一进程内同意**：点击「同意并继续」。**起算** = CDP 实际点击时刻；**固定预算 ≤ 30 秒**（覆盖同意落盘、业务初始化、线程启动与窗口挂载）；**完整成功条件** = `consent_saved` 的 seq 早于 `business_ready` 与 `price_sync_thread_start`（同意落盘先于业务解锁与线程启动）、`price_sync_thread_start` 在场（**探针正向控制取得**）、业务 DOM 挂载。**超时不续期**：预算内未全部满足即场景失败并留证据。
+3. **首次双源同步**：**起算** = `business_ready`；**固定预算 = 130 秒观察窗口 + 60 秒同步落盘余量（截止 = `business_ready` + 190 秒）**——窗口只保证覆盖 120 秒首查延迟，**不是「请求必须晚于 130 秒」的断言**。**完整成功条件** = 双源 `pricing_fetch` 各恰一次、**两份快照文件均已写出且 `synced_at` 更新**、「价格自动同步完成」日志在场、首个请求距 `business_ready` ≥120 秒、外连尝试 0。**超时不续期**。
+4. **经真实设置操作关闭自动同步**：设置页关闭 `price_auto_sync`（SF02 事务写）；仅在隔离根内把 models.dev 快照 `synced_at` 改写为 25 小时前。**起算** = 关闭操作所在轮的**轮询工作结束**（源码语义是每轮工作结束后 sleep 3600 秒，`lib.rs:1058`，因此「1 小时」**不是严格轮询上限**——下一轮决策至多发生在「本轮工作结束 + 3600 秒」后）。**固定预算 = 3600 秒 + 60 秒余量（截止 = 起算 + 3660 秒）**；**完整成功条件** = 观察到至少一条 `phase=ready`、`snapshot_due=true`、`auto=false`、`will_sync=false` 的 `price_sync_poll`，且该轮至预算截止零 `pricing_fetch`——由实际轮询证明 Ready、快照已过期、开关关闭、最终决策跳过。**超时不续期**。
+5. **同一进程内重新开启**：设置页真实重新开启（**不得用重启替代**）。**起算** = 重开操作所在轮的**轮询工作结束**（同上，3600 秒为工作后睡眠，非严格轮询上限）。**固定预算 = 3600 秒 + 60 秒余量（截止 = 起算 + 3660 秒）**；**完整成功条件** = 观察到 `phase=ready`、`snapshot_due=true`、`auto=true`、`will_sync=true` 的 `price_sync_poll` 并随后完成双源 `pricing_fetch` 各一次、**两份快照文件均已写出且 `synced_at` 再次更新**、「价格自动同步完成」日志在场（双源成功落盘）。**超时不续期**。
 
-证据：受测提交与 acceptance 产物 SHA256、单次 launch（同一宿主 PID）、连续 trace 序列摘录（探针事件原文 + seq）、桩命中计数、各阶段截止时间实测值；`RUST_LOG=debug` 的「价格同步轮询」行仅作辅助对照。
+证据：受测提交与 acceptance 产物 SHA256、单次 launch（同一宿主 PID）、连续 trace 序列摘录（探针事件原文 + seq）、桩命中计数、各阶段起算与截止的实测值；`RUST_LOG=debug` 的「价格同步轮询」行仅作辅助对照。**任一阶段超过固定预算即场景失败并留证据，不续期、不重试、不加等待补偿。**
 
 **形态 C（备选，部分取证，约 12 分钟）**：三次重启取证——Run 1（正向控制 + 首查 ≥120 s + 首次双源同步）、Run 2（阶段 A 未同意零线程 + 阶段 B 关闭态检查周期跳过）、Run 3（重启后恢复），结构与 D 各阶段同型但跨进程。C 只证明首查、关闭配置及重启后恢复；**不证明**进程内「关闭→重开→下一轮轮询恢复」——该项**保留为 N10 待验责任**（登记进整合计划 N10 行），原 M11 目标不据此关闭。
 
