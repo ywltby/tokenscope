@@ -8,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "vitest";
-import { changedBusinessFiles, snapshotBusinessFiles } from "./acceptance-io.mjs";
+import { changedBusinessFiles, settingsFingerprint, snapshotBusinessFiles } from "./acceptance-io.mjs";
 
 const source = fs.readFileSync(new URL("../native-acceptance.mjs", import.meta.url), "utf8");
 
@@ -222,4 +222,115 @@ test("preseeded: 观察窗口内改写 settings.toml 必须失败", async () => 
   } finally {
     fs.rmSync(root, { recursive: true });
   }
+});
+
+// ── privacy-accept-order：同意顺序 + 单次落盘（PR52 复盘缺陷 3）─────────
+// 旧断言只查 read > max(consent, ready)：business_ready 先于 consent_saved、
+// 或 consent_saved 整条缺失都会放行（反例 native-ac06-review-probes.mjs）。
+
+function runAcceptOrder({ records, settingsText, settingsHashOverride }) {
+  const checks = [];
+  const clicks = [];
+  const button = {
+    first() {
+      return this;
+    },
+    async click(options) {
+      clicks.push(options ?? {});
+    },
+  };
+  const run = extractScenario(
+    "privacy-accept-order",
+    "\n  /**\n   * AC06 场景 4a",
+    {
+      path,
+      settingsFingerprint,
+      fs: {
+        readFileSync(_file, encoding) {
+          return encoding === "utf8" ? settingsText : Buffer.from(settingsText);
+        },
+      },
+      readAcceptanceTrace() {
+        return { violations: [], records };
+      },
+    },
+  );
+  return run({
+    inst: {
+      page: {
+        async waitForSelector() {},
+        async waitForTimeout() {},
+        locator() {
+          return button;
+        },
+        async screenshot() {},
+      },
+      root: "C:/synthetic-root",
+      opts: { shots: "C:/synthetic-shots" },
+    },
+    ck: { add: (name, pass, detail) => checks.push({ name, pass, detail }) },
+    ev: {},
+  }).then(() => ({ checks, clicks, settingsHashOverride }));
+}
+
+function consentRecords(settingsText, { hash } = {}) {
+  const fingerprint = settingsFingerprint(Buffer.from(settingsText));
+  return [
+    {
+      seq: 1,
+      event: "consent_saved",
+      settings_hash: { algorithm: "fnv1a64", value: hash ?? fingerprint.value },
+    },
+  ];
+}
+
+const ORDER_SETTINGS = "privacy_policy_accepted = true\nprivacy_policy_revision = 2\n";
+
+test("accept-order: 同意 → 解锁 → 首读严格成序且指纹一致才通过", async () => {
+  const records = [
+    ...consentRecords(ORDER_SETTINGS),
+    { seq: 2, event: "business_ready" },
+    { seq: 3, event: "history_open" },
+  ];
+  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  assert.deepEqual(checks.filter((check) => !check.pass), [], "正例必须全过");
+  for (const name of [
+    "consent_saved_precedes_business_ready",
+    "business_ready_precedes_first_business_read",
+    "consent_saved_single_atomic_replace",
+  ]) {
+    assert.ok(checks.some((check) => check.name === name), `缺少具名断言：${name}`);
+  }
+});
+
+test("accept-order: business_ready 早于 consent_saved 必须失败", async () => {
+  const records = [
+    { seq: 1, event: "business_ready" },
+    ...consentRecords(ORDER_SETTINGS).map((row) => ({ ...row, seq: 2 })),
+    { seq: 3, event: "history_open" },
+  ];
+  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  const failed = checks.filter((check) => !check.pass);
+  assert.ok(failed.length > 0, "颠倒顺序不得通过");
+  assert.ok(failed.some((check) => check.name === "consent_saved_precedes_business_ready"));
+});
+
+test("accept-order: consent_saved 整条缺失必须失败", async () => {
+  const records = [{ seq: 1, event: "business_ready" }, { seq: 2, event: "history_open" }];
+  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  const failed = checks.filter((check) => !check.pass);
+  assert.ok(failed.length > 0, "缺事件不得通过（旧断言 read>max(空,ready) 会放行）");
+  assert.ok(failed.some((check) => check.name === "consent_saved_precedes_business_ready"));
+});
+
+test("accept-order: 落盘指纹与最终 settings 不一致必须失败", async () => {
+  const records = [
+    ...consentRecords(ORDER_SETTINGS, { hash: "0000000000000000" }),
+    { seq: 2, event: "business_ready" },
+    { seq: 3, event: "history_open" },
+  ];
+  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  const mismatch = checks.find((check) => check.name === "consent_saved_single_atomic_replace");
+  assert.ok(mismatch, "缺少单次原子落盘指纹断言");
+  assert.equal(mismatch.pass, false);
 });

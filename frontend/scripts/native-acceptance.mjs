@@ -36,6 +36,7 @@ import {
   beginIsolationCleanup,
   terminateAfterSnapshot,
   missingBusinessEvents,
+  settingsFingerprint,
 } from "./lib/acceptance-io.mjs";
 import {
   CDP_READY_BUDGET_MS,
@@ -2948,6 +2949,19 @@ const scenarios = {
       readySeqs.length === 1,
       `business_ready=${readySeqs.length} 次`,
     );
+    // 严格成序：consent_saved < business_ready < 首个业务读取。旧的合并式
+    // 断言只查 read > max(consent, ready)，会放过 ready 先于 consent 与
+    // consent 缺失两种颠倒（PR52 复盘反例），保留为兜底并新增两条具名。
+    ck.add(
+      "consent_saved_precedes_business_ready",
+      consentSeqs.length === 1 && readySeqs.length === 1 && consentSeqs[0] < readySeqs[0],
+      `consent=${consentSeqs.join(",")} ready=${readySeqs.join(",")}`,
+    );
+    ck.add(
+      "business_ready_precedes_first_business_read",
+      readySeqs.length === 1 && readSeqs.length >= 1 && readySeqs[0] < Math.min(...readSeqs),
+      `ready=${readySeqs.join(",")} firstRead=${Math.min(...(readSeqs.length ? readSeqs : [Infinity]))}`,
+    );
     ck.add(
       "consent_saved_precedes_business_unlock_and_reads",
       consentSeqs.length === 1 &&
@@ -2955,6 +2969,21 @@ const scenarios = {
         readSeqs.length >= 1 &&
         Math.min(...readSeqs) > Math.max(...consentSeqs, ...readySeqs),
       JSON.stringify(ev.acceptOrder),
+    );
+    // 单次原子落盘：consent_saved 事件自带落盘指纹（fnv1a64，与
+    // tokenscope-core settings_hash 同算法），必须恰一条且与最终文件
+    // 逐字节一致——不能只凭最终 settings 字段宣称顺序已验证。
+    const hashRecords = trace.records
+      .filter((r) => r.event === "consent_saved")
+      .map((r) => r.settings_hash);
+    const finalFingerprint = settingsFingerprint(fs.readFileSync(settingsPath));
+    ck.add(
+      "consent_saved_single_atomic_replace",
+      consentSeqs.length === 1 &&
+        hashRecords.length === 1 &&
+        hashRecords[0]?.algorithm === "fnv1a64" &&
+        hashRecords[0]?.value === finalFingerprint.value,
+      `trace=${hashRecords.map((h) => `${h?.algorithm}:${h?.value}`).join(",")} file=${finalFingerprint.value}`,
     );
     const settings = fs.readFileSync(settingsPath, "utf8");
     ck.add(
