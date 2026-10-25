@@ -1,6 +1,6 @@
 # 新增 WorkBuddy（国内版）与 WorkBuddy AI（国际版）用量来源
 
-> 状态：**WB01–WB09 已实施（2026-10-24），PR 待用户复核合并；用户手动安装验证与 main 发布验收在合并后执行。** 分支 `docs/workbuddy-plan` 已合入 main `a527441`（v0.5.13）。§1 保留 2026-10-21 的真实样本记录，当前代码复核见 §1.1；原“等验收收口完成后实施”的串行依赖已由本次授权解除，见 §1.2。整合计划登记为 N17。
+> 状态：**已合并发布（2026-10-25）：PR #49 合并 `44c026d`，v0.6.0 预发布（构建、五场景安装、八组单跳、两条连续升级链全过）。剩余用户手动安装验证待验（见 §6.3）。** 分支 `docs/workbuddy-plan` 已合入 main `a527441`（v0.5.13）。§1 保留 2026-10-21 的真实样本记录，当前代码复核见 §1.1；原“等验收收口完成后实施”的串行依赖已由本次授权解除，见 §1.2。整合计划登记为 N17。
 > 用户 2026-10-21 决定：
 > - 国内版与国际版**分成两个应用**；
 > - 隐私政策**增加修订号**，老用户升级后重新询问同意；
@@ -400,6 +400,20 @@
 验证：升级契约 65 项（+4 快照防回归）、workbuddy_source 15/15、前端 784、workspace 双轮 60/60；受测 exe 重建（`5f2c6cb7…52e5`）后 policy-update 14/14×3、identity 19/19×3、source-paths 18/18×3。
 
 **第三轮外部评审修复（2026-10-25，`2440c66`）**：二轮探针（review-49-round2）进一步发现观察段历史库快照只覆盖主文件——同意前写入 history.db-wal / -shm 漏过（三模式 pass: true）。新增 Get-HistorySnapshot（主文件 + WAL + SHM 三文件拼接快照，缺失以 absent 哨兵参与比较）接入观察段前后对比；Get-PathSnapshot 的 absent 分支改返回裸字符串（,@() 包裹在管道收集场景产生嵌套数组，本轮调试中定位）。评审探针七模式复跑全部符合预期（wal/shm 三模式从漏报转红，valid-control / history-missing 不误报）；契约测试补 4 项三文件范围防回归（65→69）。
+
+### 6.4 合并与发布（2026-10-25）
+
+用户复核三轮评审后授权合并。**PR #49 普通合并 `44c026d`**（逐任务提交历史保留，合并分支已删除）。main 三个工作流全部实际成功：
+
+| 工作流 | 运行 | 结果 |
+| --- | --- | --- |
+| CI（gate/contracts/frontend/rust/rust-acceptance） | [40175762236](https://github.com/ywltby/tokenscope/actions/runs/40175762236) | ✓ 7m16s |
+| Native UI E2E（九场景） | [40175762241](https://github.com/ywltby/tokenscope/actions/runs/40175762241) | ✓ 10m11s |
+| Release | [40175762245](https://github.com/ywltby/tokenscope/actions/runs/40175762245) | ✓ gate→build→plan-upgrades→八组单跳（0.1.0/0.4.0/0.5.9/0.5.13 × present/deleted）→两条连续升级链（present/deleted）→install→publish，6m59s |
+
+发布：**[v0.6.0](https://github.com/ywltby/tokenscope/releases/tag/v0.6.0)**（预发布，4 资产：安装包、SHA256SUMS、build-metadata、provenance）。连续升级链含 0.5.13→0.6.0 末跳——设置格式 2→3 与隐私修订号重新询问路径（两段式闸门观察段）在链上实际核对通过。
+
+**待验（保留，不因发布标完成）**：用户手动安装验证——首启弹「政策已更新」、同意后四应用出现在来源筛选、WorkBuddy 数值与 WB08 对账一致（国内版 2,881 / 国际版 656，四桶见 §6.3 表）；由用户在本机安装 v0.6.0 后执行。N10–N13 既有待验状态不变。
 
 **版本常量决策（WB02 核对结论）**：`HISTORY_SCHEMA_VERSION=4`、`PARSER_REVISION=2`、`IDENTITY_REVISION=1` 均不递增——历史库 `usage_events.app` 为 TEXT、表结构不变；新增适配器不改变 Claude/Codex 的解析语义与模型身份规则；新事件以当前 PARSER_REVISION 标记写入，读取方（升级矩阵按 persistent_format 分组挑起点）不受影响。`SETTINGS_FORMAT_REVISION` 2→3 属计划明确的变化（sources 新键 + 同意修订号），迁移规则与 `settings_migrations.json` 同步。
 
