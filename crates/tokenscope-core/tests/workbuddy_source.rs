@@ -309,6 +309,78 @@ fn test_malformed_lines_counted_as_bad_lines() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// 评审复现（2026-10-25）：字段存在但非法 ≠ 缺失——cached / hit / cache_write
+/// 出现负数、浮点、字符串、布尔时必须计坏行跳过，不得静默按 0（或借回退键
+/// 混过）入账。每个用例独立目录，一条合法控制行验证解析器仍工作。
+#[test]
+fn test_illegal_cache_values_are_bad_lines_not_missing() {
+    let dir = tmp_dir("illegal-cache");
+    let root = dir.join("projects");
+    std::fs::create_dir_all(&root).unwrap();
+    // (名字, details.cached_tokens, prompt_cache_hit_tokens, cache_creation_input_tokens)
+    let cases: [(&str, &str, &str, &str); 6] = [
+        ("neg_cached", "-1", "0", "0"),
+        ("frac_cached", "1.5", "0", "0"),
+        ("string_cached", "\"20\"", "20", "0"),
+        ("bool_cached", "true", "0", "0"),
+        ("neg_write", "20", "20", "-7"),
+        ("bool_write", "20", "20", "true"),
+    ];
+    let mut expected_bad = 0u64;
+    for (name, cached, hit, write) in cases {
+        let proj = root.join(name);
+        std::fs::create_dir_all(&proj).unwrap();
+        let json = format!(
+            r#"{{"sessionId":"{name}","cwd":"C:/synthetic/review","timestamp":1785571200000,"providerData":{{"messageId":"m-{name}","model":"m-a","rawUsage":{{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{{"cached_tokens":{cached}}},"prompt_cache_hit_tokens":{hit},"cache_creation_input_tokens":{write}}}}}}}"#,
+        );
+        std::fs::write(proj.join("s.jsonl"), json + "\n").unwrap();
+        let _ = expected_bad;
+        expected_bad += 1;
+    }
+    let source = WorkBuddySource::new(&root, AgentKind::WorkBuddy);
+    let (events, stats, _) = collect(&source);
+    assert_eq!(events.len(), 0, "非法缓存字段不得入账: {events:?}");
+    assert_eq!(
+        stats.bad_lines, expected_bad,
+        "每个非法用例计一坏行: {stats:?}"
+    );
+    assert_eq!(stats.lines_seen, expected_bad);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 评审复现（2026-10-25）：超大毫秒时间戳（> i64::MAX）不得经 `as i64`
+/// 回绕成 1969 年的负值事件；受检转换拒绝并计坏行。jiff 范围内的合法
+/// 大值（如 2100 年）必须照常产出。
+#[test]
+fn test_oversized_timestamps_rejected_without_wraparound() {
+    let dir = tmp_dir("oversized-ts");
+    let root = dir.join("projects");
+    let proj = root.join("slug-a");
+    std::fs::create_dir_all(&proj).unwrap();
+    let line = |ts: &str, id: &str| {
+        format!(
+            r#"{{"sessionId":"s1","cwd":"c:\\work\\a","timestamp":{ts},"providerData":{{"messageId":"{id}","model":"m-a","rawUsage":{{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{{"cached_tokens":0}}}}}}}}"#,
+        )
+    };
+    let lines = [
+        // u64::MAX：as i64 会回绕成 -1（1969-12-31）——必须拒绝。
+        line("18446744073709551615", "m-umax"),
+        // i64::MAX + 1：同样越界。
+        line("9223372036854775808", "m-overflow"),
+        // 远超当代但确定在 jiff 范围内的大值（2100-01-01T00:00:00Z）——
+        // 必须照常产出，证明受检转换没有收紧合法区间。
+        line("4102444800000", "m-far-valid"),
+    ];
+    std::fs::write(proj.join("s1.jsonl"), lines.join("\n") + "\n").unwrap();
+    let source = WorkBuddySource::new(&root, AgentKind::WorkBuddy);
+    let (events, stats, _) = collect(&source);
+    assert_eq!(events.len(), 1, "只有 jiff 范围内的时间戳产出事件");
+    assert_eq!(events[0].record_id, "m-far-valid");
+    assert_eq!(events[0].ts.to_string(), "2100-01-01T00:00:00Z");
+    assert_eq!(stats.bad_lines, 2, "两个越界时间戳计坏行: {stats:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 // ── F：项目身份 ──────────────────────────────────────────────
 
 #[test]

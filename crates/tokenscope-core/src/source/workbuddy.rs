@@ -309,7 +309,13 @@ fn ingest_line(
         stats.bad_lines += 1;
         return;
     };
-    let ts = match Timestamp::from_millisecond(ms as i64) {
+    // u64 → i64 受检转换：`as i64` 会把超过 i64::MAX 的值回绕成负数，
+    // 生成 1969 年的伪事件；越界计坏行（i64 范围内但超出 jiff 表示的
+    // 值由 from_millisecond 的 Err 分支处理）。
+    let ts = match i64::try_from(ms)
+        .map_err(|_| ())
+        .and_then(|v| Timestamp::from_millisecond(v).map_err(|_| ()))
+    {
         Ok(t) => t,
         Err(_) => {
             stats.bad_lines += 1;
@@ -319,7 +325,8 @@ fn ingest_line(
 
     // 四桶（不变量 3，全程受检）：cached 取 details.cached_tokens，缺失回退
     // prompt_cache_hit_tokens，再缺失按 0；input = prompt − cached；输出不叠
-    // 加 reasoning。负数、非整数、cached > prompt、加法溢出都计坏行跳过。
+    // 加 reasoning。字段**存在但非法**（负数、浮点、字符串、布尔）与缺失
+    // 不同——计坏行跳过，不静默按 0、也不借回退键混过。
     let Some(prompt) = as_u64(raw_usage.prompt_tokens.as_ref()) else {
         stats.bad_lines += 1;
         return;
@@ -332,10 +339,35 @@ fn ingest_line(
         .prompt_tokens_details
         .as_ref()
         .and_then(|d| d.cached_tokens.as_ref());
-    let cached = as_u64(details_cached)
-        .or_else(|| as_u64(raw_usage.prompt_cache_hit_tokens.as_ref()))
-        .unwrap_or(0);
-    let cache_write = as_u64(raw_usage.cache_creation_input_tokens.as_ref()).unwrap_or(0);
+    let cached = match details_cached {
+        Some(v) => match as_u64(Some(v)) {
+            Some(n) => n,
+            None => {
+                stats.bad_lines += 1;
+                return;
+            }
+        },
+        None => match raw_usage.prompt_cache_hit_tokens.as_ref() {
+            Some(v) => match as_u64(Some(v)) {
+                Some(n) => n,
+                None => {
+                    stats.bad_lines += 1;
+                    return;
+                }
+            },
+            None => 0,
+        },
+    };
+    let cache_write = match raw_usage.cache_creation_input_tokens.as_ref() {
+        Some(v) => match as_u64(Some(v)) {
+            Some(n) => n,
+            None => {
+                stats.bad_lines += 1;
+                return;
+            }
+        },
+        None => 0,
+    };
     let Some(input) = prompt.checked_sub(cached) else {
         // cached > prompt：未知字段组合，不猜测语义
         stats.bad_lines += 1;
