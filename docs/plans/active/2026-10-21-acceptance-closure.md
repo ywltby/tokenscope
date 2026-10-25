@@ -1,7 +1,7 @@
 # 剩余验收收口：来源权限、原生统一验收、隐私强取证、真实性能与系统签字
 
 > 状态：**用户 2026-10-21 确认，按 B1–B5 连续执行**。承接[整合计划](2026-10-11-consolidated-remaining-work.md)全部剩余开放项：N14 第 4 项、N11、N10、N13、N12。
-> 进度（2026-10-22）：**B1 / AC01 已交付，N14 关闭；B2 / AC02–AC05 随 PR #31（`c9de40e`）交付，main 三条运行全部成功，v0.5.9 已公开并登记原资产基线**。N11 的安装后人工同步尾项按用户决定保留待验；B3 因 AC06/AC07 前提差异待用户修订，B4、B5 未执行，不提前关闭 N10–N13。
+> 进度（2026-10-22）：**B1 / AC01 已交付，N14 关闭；B2 / AC02–AC05 随 PR #31（`c9de40e`）交付，main 三条运行全部成功，v0.5.9 已公开并登记原资产基线**。N11 的安装后人工同步尾项按用户决定保留待验；**B3 修订稿已拟（2026-10-25，§4b，待用户确认，未实施）**，B4、B5 未执行，不提前关闭 N10–N13。
 > 本计划只排验收与取证所需的改动。验收中暴露的产品缺陷按缺陷流程单独修复，不在本计划里预先设计修法。
 > 排期补记（2026-10-24）：用户确认 WorkBuddy 专项按 N17 独立推进，本计划 B3–B5 不再作为它的启动前置；本计划原待验范围继续保留，完成本计划也不代替 N17 的实现与验收。
 
@@ -181,7 +181,7 @@ AC03–AC05 的 CI 接入：
 - 在 `ui-e2e.yml` 中各加一步，端口段互不重叠，证据目录放在 `qa-artifacts/ui-adjustment/native-e2e/` 下，由现有上传步骤一并上传。
 - 本地每个场景先连续通过 3 次，记录单次耗时，确认符合不变量 7 的预算后再接入 CI。
 
-### AC06 N10 隐私原生取证
+### AC06 N10 隐私原生取证（2026-10-25 修订：方案以 §4b.1 为准，本节保留为历史）
 
 在现有 `privacy-consent-gate`、`privacy-accept-restart` 基础上追加：
 
@@ -201,7 +201,7 @@ AC03–AC05 的 CI 接入：
   - 原生只补 Rust 层无法证明的两项：损坏 TOML 启动后仍询问且原文件逐字节不变；预置 `close_action = "minimize"` 但未同意时，点关闭仍弹出隐私退出确认而不是隐藏到托盘。
 - AC06 的四个场景都是确定性的，进入 CI。
 
-### AC07 N10 长时间观察与运行期同步（本地一次）
+### AC07 N10 长时间观察与运行期同步（本地一次）（2026-10-25 修订：方案以 §4b.2 为准，本节保留为历史）
 
 - 场景 `privacy-long-observe`，本地运行，不进 CI：
   - 未同意观察 130 秒以上，断言同 AC06 `privacy-preseeded`；
@@ -209,7 +209,7 @@ AC03–AC05 的 CI 接入：
   - 关闭“自动同步价格”后再观察一个周期，没有新的 `pricing_fetch`；重新开启后恢复。这一条承接 N12 中 “M11 运行验收：Ready 后跨过 120 秒观察价格检查/同步”。
 - 记录受测提交、产物哈希、实际等待时长与追踪日志摘录。
 
-### AC08 N10 完整浏览器矩阵（本地一次）
+### AC08 N10 完整浏览器矩阵（本地一次）（2026-10-25 修订：表述以 §4b.3 为准，本节保留为历史）
 
 - 用当次构建的 `vite preview` 运行一次 `check-ui-contracts.mjs`：巡检使用默认 15 个 fixture × light/dark × 1280x820/980x620，契约跑全部 `REQUIRED_CONTRACTS`。不改脚本的默认列表。
 - **fixture 覆盖核对**：从 `FIXTURE_NAMES` 读出全部注册的 fixture，对每一个记录它被哪种方式实际运行过（巡检，或者打开它的契约名）。以本次运行产物为准，不以源码引用为准。凡是两者都没有覆盖到的，列为缺口并上报，不靠临时修改列表补齐。
@@ -255,6 +255,119 @@ AC03–AC05 的 CI 接入：
 - 每个任务交付后，回填本计划 §6，并同步整合计划对应 N 行、§7 执行账和 `docs/plans/README.md`。
 - 全部完成后，本计划归档到 `archive/implemented/`，关闭本计划承接的责任项；另行新增的 N17 按自己的专项进度记账，独立系统待办继续保留。
 - D5 清单 4.9–4.12、5.6–5.8 的结果栏按当次证据回填。
+
+## 4b. B3 修订稿（2026-10-25，待用户确认——未确认前不实施）
+
+> 本节按用户 2026-10-25 指令对 AC06–AC08 做逐项修订，取代 §4 中 AC06–AC07 的原方案与 AC08 的原表述；原文保留作历史， headings 已加指针。修订只排验收方案；实施 PR、CI 接线与本地取证均待本稿获用户确认后另行执行。
+
+### 4b.0 复核事实（与原方案的前提差异，附源码位置）
+
+**AC06 自启动（原方案三处前提不成立）：**
+
+- 名称来源：`src-tauri/src/lib.rs:93` 以 `tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None)` 初始化，未自定义 `app_name`；插件 `tauri-plugin-autostart` 2.7.0（`Cargo.lock:3803`）的 `Builder::build`（其 `src/lib.rs:225-229`）在 `app_name` 为 `None` 时回落 `app.package_info().name`，即 `tauri.conf.json:3` 的 `productName` = **"TokenScope"**。**注册表值名与真实安装共用同一名字，当前不存在任何 acceptance 专属标识。**
+- 写入模式：插件从不调用 `set_windows_enable_mode`，`auto-launch` 0.6.0 的 `Default` 为 `WindowsEnableMode::Dynamic`（其 `src/lib.rs:355-358`）——`enable()` 先写 `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run`，仅 `E_ACCESSDENIED` 才回退 `HKCU`（其 `src/windows.rs` `enable`）。GitHub Windows Runner 以管理员运行 → **值大概率落在 HKLM，只监测 HKCU 必然漏检**。
+- 覆盖面：`enable()` 同时在 `HKLM/HKCU\...\Explorer\StartupApproved\Run` 写同名 12 字节启用值（键不存在时跳过）；`disable()` 删两个蜂巢的 Run 值但**不删 StartupApproved**；`is_enabled()` =（LM 或 CU 已注册）且（LM 与 CU 的 StartupApproved 均为启用）（`auto-launch/src/windows.rs`）。
+- 隔离风险：本机若装有真实 TokenScope，acceptance 构建调用 `autostart_set` 会以同名 "TokenScope" 覆盖/删除用户真实自启项（Run 与 StartupApproved 同名互踩）。**修订后的任何方案都不得在验收中调用真实自启接口。**
+- 结论：原 AC06「`autostart_status`/`autostart_set` 前后只读比对 HKCU Run 中 acceptance 标识的值」三处不成立——标识不存在、目标可能在 HKLM、StartupApproved 未覆盖；废弃该做法。
+
+**AC07 价格同步（原 300 秒预算不成立）：**
+
+- 线程仅在业务解锁后启动（`src-tauri/src/lib.rs:352-356`，`RuntimeStep::PriceSync` 单次保护）；首查固定延迟 **120 秒**（`lib.rs:996`）；每轮（同步或跳过后）睡眠 **3600 秒**（`lib.rs:1058`）。
+- 判据 `price_sync_due`（`src-tauri/src/privacy.rs:272-279`）= `Ready` 且 `auto_sync` 且（快照缺失或年龄 ≥ 24h）；设置读取失败按离线处理（`lib.rs:1006-1010`）。纯函数已有单测（`privacy.rs:1141-1149`）。
+- `settings_set_price_auto_sync`（`src-tauri/src/commands.rs:1349-1361`）只做 SF02 事务写设置，**不唤醒同步线程**——进程内重新开启后，最早在下一个 ≤1 小时的轮询边界生效；这是当前产品行为，不是缺陷，修订稿如实记录。
+- 证据粒度：追踪层只有 `pricing_fetch` 事件（真正发起同步才写）；轮询决策日志为 debug 级（`lib.rs:1019-1023`「价格同步轮询：… → 跳过」），默认 info 不可见。**因此「没有 pricing_fetch」不能证明「关闭状态下完成了一次检查周期」**——要么以 `RUST_LOG=debug`（产品既有诊断通道，非新接线）取得跳过日志，要么让 due 条件为真后观察确无 fetch 并另行证明轮询确已发生。
+- 预算算术：进程内完整「开启 → 关闭 → 重开」证据链 = 130 s（首查）+ ≥3,660 s（关闭态跨一个完整轮询）+ ≤3,660 s（重开后等下一轮询）≈ **最长约 2 小时 5 分**；原 300 秒只够覆盖首次同步，无法覆盖关闭态检查周期与恢复。
+
+**AC06 复用现状（WorkBuddy 专项已交付、N10 不重做的部分）：**
+
+- 受保护命令当前 **35 条**（`src-tauri/src/privacy.rs:59-97` 的 `PROTECTED_COMMANDS`，取证时从源码提取，不写死数量）。
+- 原生场景 `privacy-policy-update`（`frontend/scripts/native-acceptance.mjs`，随 PR #49 合入）已交付：业务文件清单计入 `history.db`（含 `-wal`/`-shm` 形态的文件名前缀）、同意前零业务追踪事件（`no_business_trace_before_reconsent`）、同意落盘严格早于业务初始化（`business_trace_starts_after_reconsent`，consent_saved 的 seq < business_ready）。`privacy-consent-gate` 的业务文件清单已同步补 `history.db`。
+- 升级矩阵的两段式闸门观察段（`scripts/upgrade_test_helpers.ps1`，含 WAL/SHM 三文件快照与「设置未改写、日志零新增」断言）属升级验收侧，方法论（absent 哨兵快照、按实际结果保存证据）可复用，代码不复用。
+- 浏览器侧 mock 契约 `privacy_no_business_effects_before_acceptance`、`privacy_denied_ipc_has_no_filesystem_or_network_effect` 保持现状（mock 层）；原生 denied-ipc 走真实 IPC，二者不互相替代。
+
+**AC08 机制现状：**
+
+- `frontend/scripts/check-ui-contracts.mjs:43-59`：默认巡检 15 个 fixture × 2 主题（light/dark）× 2 视口（1280x820 / 980x620）；`frontend/scripts/fixtures/ui-contracts.mjs:1236` 注册 fixture 共 **23** 个；`frontend/scripts/contracts/interaction-contracts.mjs:24-61` 的 `REQUIRED_CONTRACTS` 共 **28** 条。
+- 不在默认巡检的 8 个 fixture（large-pricing、settings-deferred-race、sync-partial-failure、query-expired-on-page2、status-read-failure、source-paths-management、privacy-consent-pending、privacy-bootstrap-deferred）中，两个隐私 fixture 按设计没有业务骨架，放入巡检会因等不到 `.app-shell` 失败——测试架设计限制，保持「不全部塞进巡检」的原判断。
+- CI `test:e2e`（`frontend/package.json:15` → `scripts/run-ui-refresh-e2e.mjs`）只跑部分契约与 `normal` 巡检；AC08 的全矩阵仍为本地一次取证。
+- 产物缺口：`measurements.json` 已记录巡检每格（fixture×主题×视口）与每条契约的结果，但**未记录每条契约实际打开了哪些 fixture**——`runContracts` 的 `ctx.open`（`interaction-contracts.mjs:2464` 起）是全部契约会话的唯一汇集点，可作为运行时记录的挂点。**不能以源码引用或 `required` 列表冒充实际运行结果。**
+
+### 4b.1 AC06 修订：隐私原生取证（推荐方案 A0 = 零产品接线）
+
+四个确定性场景全部复用既有 acceptance 基础设施（隔离根、追踪日志、价格桩、计数代理、`evidence.json`），**不改任何产品源码**；`PROTECTED_COMMANDS` 清单在场景初始化时经 Node 侧正则从 `privacy.rs` 提取，不写死 35。
+
+- **`privacy-preseeded`（预置业务文件 + 未同意观察）**
+  - 隔离根预置：合成数据真实采集产出的一份 `history.db`（含 WAL/SHM 文件，用例内先同意→等待采集→重置同意记录后保留文件，或直接以 SQLite 合成）、`logs/` 内一条历史日志、`view-cache.json`、两份价格快照；settings 只含旧修订布尔同意（触发重新询问）。
+  - 启动后观察 **15 秒**（CI）；断言（具名，全部入 evidence）：①追踪日志零业务事件（`business_ready`/`collect_round_start`/`source_root_read`/`history_open`/`pricing_fetch` 均无，沿用 policy-update 的判法）；②价格桩命中 0、代理尝试 0；③预置文件清单逐文件「字节 + 大小 + mtime」快照前后一致（快照哨兵沿用「不存在≠变化」教训，PowerShell 侧 `Get-PathSnapshot` 语义在 Node 侧等价重实现）；④无业务 DOM 节点。
+  - 与 policy-update 的分工：policy-update 验「旧修订同意 → 重新询问 → 同意解锁」的流程链；preseeded 验「已有业务数据躺在盘上时，未同意状态对它们零读取零写入」。二者互补，不合并且不删除。
+- **`privacy-denied-ipc`（全量受保护命令拒绝 + 全蜂巢注册表只读快照）**
+  - 未同意状态下，从 `privacy.rs` 提取 `PROTECTED_COMMANDS` 全表，经 CDP 调 `window.__TAURI_INTERNALS__.invoke` 以每命令的最小合法参数逐个调用；断言：①每条都 reject 且错误码为 `privacy_consent_required`；②追踪日志为空；③预置与新增文件快照不变。
+  - **自启动部分改为「全蜂巢只读快照」**：运行前后各枚举一次 `HKLM\...\Run`、`HKCU\...\Run` 与两个 `...\Explorer\StartupApproved\Run` 的**全部值**（名称+数据逐值比对，不假设标识名），断言逐字节一致。读取注册表属只读取证，不调用任何自启接口、不删除任何值——彻底规避「同名 TokenScope 覆盖真实安装」的风险。拒绝路径本就在 `require_ready` 处返回、根本到不了插件，快照证明这一点没有意外穿透。
+- **`privacy-accept-order`（同意顺序 + 双击单次落盘）**
+  - 断言：追踪按序出现 `consent_saved` → `business_ready` → 首个 `history_open`/`source_root_read`（policy-update 已覆盖前两跳，本场景补第三跳与完整三元组）；`consent_saved` 附带 的 settings 哈希对应含 `privacy_policy_accepted = true` 与当前修订号的内容。
+  - 双击同意：以 CDP 连续两次 click（间隔 <100ms），断言 `consent_saved` 恰好一次、只启动一套运行时（`business_ready` 恰好一次）、settings 只经历一次原子替换。
+- **`privacy-variants`（设置变体与关闭预设）**
+  - 先列表核对 `privacy.rs` 与 `settings.rs` 既有 Rust 测试已覆盖的同意变体（缺字段 / false / 旧 JSON / TOML 损坏 / 类型错误 / 修订号偏低偏高——WB05 已补齐单测），原生只补两项 Rust 层证明不了的：①损坏 TOML 启动后仍弹政策且**原文件逐字节不变**；②预置 `close_action = "minimize"` 但未同意时，点窗口关闭弹的是隐私退出确认而非隐藏到托盘（既有 `privacy-consent-gate` 已有同型断言，复用其选择器）。
+
+**自启动自动化的三个候选（A0 为推荐，A/B 为备选，取舍如下）：**
+
+| 方案 | 内容 | 能证明 | 不能证明 | 产品输入 | 取舍 |
+| --- | --- | --- | --- | --- | --- |
+| **A0（推荐）** | 上述 denied-ipc 的全蜂巢只读快照；验收**从不**在同意后调用 `autostart_set` | 未同意时 35 命令（含自启对）全部被闸门拒绝且注册表零变化；拒绝路径无穿透 | 同意后自启开关的真实注册表行为 | 无（纯脚本） | 真实「出现/移除」本就是 D5 3.4 人工项；自动化不冒充 |
+| A | acceptance 构建内 `#[cfg(feature = "acceptance")]` 的自启替身：`bootstrapped()` 时 `autostart_status/set` 改读写隔离根状态文件 + 新增 `autostart_read/write` 追踪事件 | 同意后开关操作的隔离状态机与序列化，注册表零写入（配全蜂巢快照证明） | 真实 auto-launch 注册表语义 | 有（src-tauri，需 patch 取号） | 为「同意后自启自动化」引入产品接线，性价比低；仅当用户明确要该项自动化时选 |
+| B | acceptance 专属名（cfg 内 `app_name("TokenScope-Acceptance")`）+ 一次性 GitHub Runner 上真实写/删该名 | auto-launch 真实写路径（HKLM 优先 + StartupApproved + disable 双蜂巢删除） | 与生产名 "TokenScope" 相关的任何行为；本地运行被禁止（需 Runner 守卫） | 有（src-tauri cfg + 守卫，需 patch 取号） | 在一次性 Runner 写真实注册表可接受，但增加守卫复杂度且仍不覆盖生产名行为 |
+
+无论选哪案，**D5 3.4「系统自启动项出现/移除；未同意时既不读也不写」的最终签字保持人工**（AC11 批次），自动化证据只作为辅助。
+
+**红绿与变异（A0 下）：**
+
+- 四场景的判定函数先以纯 Node 测试红（沿用 AC03–AC05 的判定套件模式：缺证据、顺序错、文件被改动、命令未被拒等反例必须失败）。
+- 实现已存在的部分用临时变异证明断言有效：①把 `privacy-consent-gate`/`policy-update` 的 `businessFiles` 正则临时去掉 `history\.db` → preseeded 的文件快照断言仍须红（证明快照比对独立于清单正则）；②把 `native-acceptance.mjs` 的 `no_business_trace` 白名单临时加一个业务事件名 → 判定测试红；③denied-ipc 用「故意调用一条未受保护命令（如 `privacy_bootstrap`）」作对照，证明断言能区分被拒与放行。变异逐字节恢复并记录。
+- 每场景本地三连跑（固定受测提交与产物哈希）后接入 CI `native-ui`；预算：preseeded ≈ 40 s、denied-ipc ≈ 60 s、accept-order ≈ 45 s、variants ≈ 60 s，合计 ≈ 3.5 分钟，低于原 8 分钟上限，45 分钟作业上限与既有步骤不变。
+
+### 4b.2 AC07 修订：价格同步长观察（推荐方案 C = 三段重启本地取证，约 12 分钟）
+
+新场景 `privacy-price-toggle`（本地一次取证，不进 CI），同一隔离根三次启动，全程本地价格桩（`TOKENSCOPE_ACCEPTANCE_PRICING_BASE`）与计数代理：
+
+- **Run 1（首查延迟 + 首次双源同步）**：全新根 → 同意 → `business_ready` 记时 → 等待 ≥130 s → 断言：①两源各恰一次 `pricing_fetch`（桩命中 2，外部尝试 0）；②首个 `pricing_fetch` 的追踪时间距 `business_ready` ≥120 s；③同步后快照 `synced_at` 更新。
+- **Run 2（未同意零线程 + 关闭态检查周期）**：沿用同根；预置 `price_auto_sync = false`（SF02 事务写）、把 Run 1 产出的 models.dev 快照 `synced_at` 改写为 25 小时前（隔离根内 fixture 操纵，非产品改动）、同意记录重置为「未同意」。阶段 A：启动后观察 130 s，断言零 `pricing_fetch` 且（以 `RUST_LOG=debug` 启动，产品既有日志通道，非新接线）live log 中**零**「价格同步轮询」行——证明线程未随未同意启动（P03）。阶段 B：应用内同意 → Ready → 等待 ≥130 s → 断言：①仍零 `pricing_fetch`；②live log 出现至少一条 `价格同步轮询：phase=ready auto=false … → 跳过`——**直接证明关闭状态下完成了一次检查周期**（due 条件为真：快照 25h 陈旧 + Ready，若 auto 为 true 必然 fetch，跳过只能因开关）。
+- **Run 3（重启后恢复）**：预置 `price_auto_sync = true`、快照再次改写为 25h 前 → 启动（已有有效同意）→ 等待 ≥130 s → 断言双源 `pricing_fetch` 各一次、快照刷新。
+- 证据：受测提交与 acceptance 产物 SHA256、三次 launches、每段的追踪摘录与 debug 轮询行原文、桩命中计数；`RUST_LOG=debug` 只用于取证读日志，不改变任何等待长度或断言阈值。
+
+**如实记录的边界**：本方案证明「重新开启后经**重启**恢复同步」；进程内重新开启不唤醒线程、下一轮 ≤1h 轮询生效是当前产品行为（`commands.rs` 只写设置），方案 C 不证明它、也不改它。备选：
+
+| 方案 | 内容 | 总预算 | 取舍 |
+| --- | --- | --- | --- |
+| **C（推荐）** | 三段重启 + 快照改写 + debug 轮询日志 | 单次 ≈ 12 分钟（3×（启动 ~5 s + 130 s + 余量 30 s + 收尾 ~15 s）+ 快照改写间隔） | 全部用产品自身确定性时序（120 s 首查），等待即产品行为，非补偿；不进 CI |
+| D | 严格进程内单次长测：同意→fetch#1（130 s）→关闭+快照改写→跨一个完整轮询（≥3,660 s，以 debug 行证明该轮 auto=false 跳过）→进程内重开→≤3,660 s 内 fetch#2 | ≈ 2 小时 5 分–2 小时 15 分 | 唯一能证明「进程内重开在下轮轮询生效」的形态；时长为产品真实周期使然，可作为可选附加取证（例如与 AC09 长测同场），不阻塞 B3 |
+| E | acceptance 专用可控时钟/缩短轮询间隔 | ≈ 3 分钟 | **否决为默认**：改了被测对象（不再是真实 120 s/3600 s 调度），只能重证 `price_sync_due` 纯函数已覆盖的闸门逻辑（`privacy.rs:1141-1149`）；若用户仍想要一条 CI 级冒烟，可作为附加项单独评审，不替代 C/D |
+
+原 AC07「未同意观察 130 秒」并入 Run 2 阶段 A，不再单列场景。
+
+### 4b.3 AC08 修订：完整浏览器矩阵（本地一次）
+
+- **运行方式（保持默认，不塞列表）**：`vite preview` + `check-ui-contracts.mjs` 默认参数全矩阵一次 = 巡检 15 fixture × 2 主题 × 2 视口 + 全部 28 条 `REQUIRED_CONTRACTS`（契约各自打开所需 fixture/主题/视口，不与巡检相乘）。两个隐私 fixture 不进巡检的设计限制维持原判断。
+- **fixture 覆盖表（从当次运行产物生成，补一处测试架挂点）**：
+  - 唯一改动（脚本、非产品）：`runContracts` 的 `ctx.open`（`interaction-contracts.mjs:2464` 起）已在每个契约会话汇集处带上 `contract` 与 `opts.fixture`——把每次实际打开的 `fixture` 记入该契约的结果条目；`check-ui-contracts.mjs` 汇总 `measurements.json`（约 `:1062`）时新增 `fixture_coverage` 节：对 `FIXTURE_NAMES` 全部 23 个，逐个记录 `{ patrol: 巡检是否实际运行过（以巡检结果行为准）, contracts: [实际打开过它的契约名] }`；两列皆空者列入 `uncovered` 并在汇总行打印。
+  - **报告口径**：巡检行 = 该 fixture 在真实浏览器完整启动；契约行 = 该 fixture 被该契约实际执行；`uncovered` = 当次运行两者皆无，作为缺口上报，**不**靠临时改 `--fixture` 补齐、更不引用源码 `FIXTURE_NAMES` 或契约实现文本冒充运行结果。
+  - 红绿：覆盖聚合逻辑做成纯函数（新建 `frontend/scripts/lib/fixture-coverage.mjs` + Vitest node 环境测试，沿用 AC02 `acceptance-io.test.mjs` 接入先例）——先红：喂入不含某 fixture 行的样例产物 → 期望它进 `uncovered`；变异：把巡检行缺失的 fixture 标成已覆盖 → 测试红；再实现转绿。`ctx.open` 记录点的变异：临时不记录 fixture → 一条已知名契约的 contracts 列为空 → 汇总测试红。
+- 记录：版本、命令、产物散列；巡检每格结果；每条契约结果与断言数；`fixture_coverage` 表与 `uncovered` 清单。失败逐项归因（测试架先修测试架、产品按缺陷），不以重跑代替原因。
+
+### 4b.4 边界、版本与依赖
+
+- **普通构建与 acceptance 边界**：A0 与 AC08 均零产品输入；AC07 只用产品既有 `RUST_LOG` 与既有桩环境变量。若用户改选 A 或 B（自启动接线），则属 `src-tauri` 产品输入，实施 PR 按最新 main（当前 v0.6.0）递增一次 patch（预期 0.6.1）；本轮修订稿纯文档不取号。
+- **CI 与本地划分**：AC06 四场景进 CI `native-ui`（合计 ≈3.5 分钟，预算与上限见 4b.1）；AC07（≈12 分钟）与 AC08（全矩阵，约 15–20 分钟）仅本地一次取证；既有 CI 步骤、检查分组与 45 分钟上限不变。
+- **B4/B5 依赖与剩余人工项**：B4（AC09）与 B3 互不依赖、状态不变；B5 的 AC10（单实例）不依赖本修订；AC11 人工签字清单中 D5 3.4（真实自启）、3.3/3.5–3.7、5.3 保持人工，受测物按最新发布即 **v0.6.0 安装包**（原稿写「AC02 合入后最新 main」已过时）。原停点历史（B2 §6「B3 只读准备发现…」段、2026-10-22 记录）全部保留，不将未执行项改写为通过。
+- **本稿不做的**：不改产品周期/等待/断言/CSP/必需检查/ruleset/阈值；不访问真实价格源；不运行安装卸载脚本；不操作真实用户注册表（denied-ipc 的全蜂巢枚举为只读比对）。
+
+### 4b.5 待用户确认的具体方案
+
+1. AC06 自启动自动化选 **A0（推荐，零产品接线；真实自启留 D5 3.4 人工）** 还是 A（隔离替身，需 patch）或 B（一次性 Runner 真实注册表，需 patch + Runner 守卫）？
+2. AC07 选 **C（三段重启 ≈12 分钟，推荐）**；是否另加 D（进程内 ≈2h15m，证「进程内重开下轮生效」）与/或 E（CI 冒烟级受控时钟，仅重证闸门逻辑）？
+3. AC08 的 `ctx.open` 记录点 + `fixture_coverage` 纯函数（两处均为测试架脚本）是否照 4b.3 实施？
+4. AC06 四场景接入 CI 的预算口径（≈3.5 分钟 < 8 分钟上限）是否接受？
+
+以上获确认后，B3 实施 PR 按 §5 批次表执行（A0+C+AC08 组合为纯测试/脚本 → `release: false`；含 A/B 则递增 patch）。
 
 ## 5. 交付批次与验收
 
