@@ -1,7 +1,7 @@
 # 剩余验收收口：来源权限、原生统一验收、隐私强取证、真实性能与系统签字
 
 > 状态：**用户 2026-10-21 确认，按 B1–B5 连续执行**。承接[整合计划](2026-10-11-consolidated-remaining-work.md)全部剩余开放项：N14 第 4 项、N11、N10、N13、N12。
-> 进度（2026-10-22）：**B1 / AC01 已交付，N14 关闭；B2 / AC02–AC05 随 PR #31（`c9de40e`）交付，main 三条运行全部成功，v0.5.9 已公开并登记原资产基线**。N11 的安装后人工同步尾项按用户决定保留待验；**B3 修订稿已拟并经二轮修订（2026-10-25，§4b；AC06 选 A、AC07 形态待选，未实施）**，B4、B5 未执行，不提前关闭 N10–N13。
+> 进度（2026-10-22）：**B1 / AC01 已交付，N14 关闭；B2 / AC02–AC05 随 PR #31（`c9de40e`）交付，main 三条运行全部成功，v0.5.9 已公开并登记原资产基线**。N11 的安装后人工同步尾项按用户决定保留待验；**B3 修订稿已拟并经三轮修订（2026-10-25，§4b；AC06 选 A、AC07 推荐 D 待用户确认、实施授权未给，未实施）**，B4、B5 未执行，不提前关闭 N10–N13。
 > 本计划只排验收与取证所需的改动。验收中暴露的产品缺陷按缺陷流程单独修复，不在本计划里预先设计修法。
 > 排期补记（2026-10-24）：用户确认 WorkBuddy 专项按 N17 独立推进，本计划 B3–B5 不再作为它的启动前置；本计划原待验范围继续保留，完成本计划也不代替 N17 的实现与验收。
 
@@ -260,6 +260,8 @@ AC03–AC05 的 CI 接入：
 
 > 本节按用户 2026-10-25 指令对 AC06–AC08 做逐项修订，取代 §4 中 AC06–AC07 的原方案与 AC08 的原表述；原文保留作历史， headings 已加指针。修订只排验收方案；实施 PR、CI 接线与本地取证均待本稿获用户确认后另行执行。
 >
+> **三轮修订（同日，按最新复核意见）**：①自启替身按**构建模式**隔离——普通构建保持真实插件行为，acceptance 构建必须取得有效隔离根（`root()`，不能只用 `bootstrapped()`），未初始化/根无效/替身读写失败一律报错、绝不进入真实插件；②AC07 保留 C/D 待选，**D 为推荐方案待用户确认**，补齐五阶段完整定义（未同意观察、同进程同意、首查、真实设置关闭 + 轮询证明、同进程重开恢复，证据关联同一宿主 PID）；③探针字段区分 `snapshot_due` 与 `will_sync`（不改变生产判据）；④接线位置校正（核心 `acceptance.rs`/`acceptance_trace.rs`、壳 `acceptance.rs`、`commands.rs`、`lib.rs`、`privacy.rs`、`acceptance-io.mjs`）；⑤AC08 记录点定位到契约循环内实际生效的 `ctx.open` 包装；⑥授权分三层记账，选型 ≠ 实施授权。
+>
 > **二轮修订（同日，按用户复核意见）**：①AC06 改选方案 A（acceptance 隔离替身）——A0 否决：denied-ipc 经真实 IPC 调用 `autostart_set`，闸门若回归即执行真实插件，事后只读快照只能发现损害、不能防止损害；②AC07 的「零 debug 日志证明未启动线程」不成立（未同意时日志系统尚未初始化，线程即使错误启动也可能无日志），改用 acceptance 线程启动/轮询探针 + 正向控制，同意后的 debug 跳过日志降为辅助证据；③C 明确为部分取证——进程内「关闭→重开→下轮恢复」要么选 D 完整长测、要么保留为 N10 待验责任；④原「删旧场景正则验新场景快照」的变异无因果关系，改为真实反例注入。
 
 ### 4b.0 复核事实（与原方案的前提差异，附源码位置）
@@ -298,12 +300,16 @@ AC03–AC05 的 CI 接入：
 
 四个确定性场景复用既有 acceptance 基础设施（隔离根、追踪日志、价格桩、计数代理、`evidence.json`）；`PROTECTED_COMMANDS` 清单在场景初始化时经 Node 侧正则从 `privacy.rs` 提取，不写死 35。产品侧仅新增下述 acceptance 接线。
 
-**接线（全部 `#[cfg(feature = "acceptance")]`，普通构建零变化）**：
+**接线（全部 `#[cfg(feature = "acceptance")]`；按构建模式隔离，普通构建零变化）**：
 
-- 文件：`src-tauri/src/commands.rs`（`autostart_status`/`autostart_set` 的 acceptance 分支）、`src-tauri/src/acceptance_trace.rs`（事件白名单追加 `autostart_read`/`autostart_write{enabled}`）、隔离状态文件 `<root>/autostart-state.json`。
-- 接口与语义：命令签名不变（前端零感知）；`crate::acceptance::bootstrapped()` 为真时，`autostart_status` 读状态文件、`autostart_set` 原子写状态文件并记追踪事件——**真实注册表不可达**。
-- 隔离边界：`bootstrapped()` 为假（普通构建、未 bootstrap 的 acceptance 进程）走原插件路径，行为与现在逐字节同义；**bootstrap 成功而替身初始化失败（如状态文件不可写）→ 命令返回明确错误，绝不回退真实插件**（用户 2026-10-25 要求）。
-- 普通构建证明：接线全部在 cfg 内（AC02 先例）；扩展 AC02 的普通构建忽略变量子进程测试，追加断言「设置 `TOKENSCOPE_ACCEPTANCE_ROOT` 后不产生任何自启替身状态文件与追踪事件」。
+- 文件与位置（沿用既有体系，不另起追踪系统）：替身分支在 `src-tauri/src/commands.rs` 的 `autostart_status`/`autostart_set`（`commands.rs:1430` / `:1441`）命令体内；追踪经核心库公开接口 `tokenscope::acceptance::record("autostart_read"|"autostart_write", …)` 写入既有 `crates/tokenscope-core/src/acceptance_trace.rs` 的顺序化 JSONL（逐行 flush、seq 连续校验，`acceptance_trace.rs:146-183`）；隔离状态文件 `<root>/autostart-state.json`。壳侧 `src-tauri/src/acceptance.rs` 只负责桌面验收启动（`start/start_with` → `tokenscope::acceptance::bootstrap_with`），不是追踪或替身的实现位置。**壳内没有 `crate::acceptance::bootstrapped()`**——壳调用的是核心库 `tokenscope::acceptance::`。
+- **按构建模式隔离（用户 2026-10-25 三轮修订）**：
+  - **普通构建**：替身代码不编译（cfg 限定），真实插件行为逐字节保持；不读取任何新增验收变量、不产生替身状态文件或探针事件；
+  - **acceptance 构建**：`autostart_status`/`autostart_set` **必须取得有效隔离根**——以核心库 `tokenscope::acceptance::root()` 返回 `Some(root)` 且根存在为准，只操作 `<root>/autostart-state.json`；
+  - **报错路径**：未初始化、`root()` 为 `None`、根缺失/非法、替身状态文件读写失败，一律返回明确错误并**绝不进入真实插件**。
+- **`bootstrapped()` 不能替代 `root()` 校验**：核心库存在「已初始化但 root 为 `None`」的状态（`acceptance.rs` 的 `bootstrap_with(None)` 把 `ROOT` 置为 `Some(None)`，此时 `bootstrapped()` 为 true 而 `root()` 为 `None`——例如只跑单测的 acceptance 构建）。替身判定只看 `root()` 的有效值，不看 `bootstrapped()`。
+- 防线关系：命令入口的隐私闸门（`privacy::require_ready`）保持第一道防线不变；替身是**闸门回归时的第二道防线**——即使闸门回归放行命令体，也只影响隔离状态文件。
+- 新追踪事件同时覆盖三处：生产方（核心 `acceptance_trace.rs`，事件名为自由字符串、无白名单）、校验方（`frontend/scripts/lib/acceptance-io.mjs:8-9` 的 `EVENTS` 集合追加 `autostart_read`/`autostart_write`，未知事件会被校验拒绝）、判定方（场景断言读取事件）。
 
 - **`privacy-preseeded`（预置业务文件 + 未同意观察）**
   - 隔离根预置：合成数据真实采集产出的一份 `history.db`（含 WAL/SHM 文件，用例内先同意→等待采集→重置同意记录后保留文件，或直接以 SQLite 合成）、`logs/` 内一条历史日志、`view-cache.json`、两份价格快照；settings 只含旧修订布尔同意（触发重新询问）。
@@ -311,7 +317,7 @@ AC03–AC05 的 CI 接入：
   - 与 policy-update 的分工：policy-update 验「旧修订同意 → 重新询问 → 同意解锁」的流程链；preseeded 验「已有业务数据躺在盘上时，未同意状态对它们零读取零写入」。二者互补，不合并且不删除。
 - **`privacy-denied-ipc`（全量受保护命令拒绝 + 全蜂巢注册表只读快照）**
   - 未同意状态下，从 `privacy.rs` 提取 `PROTECTED_COMMANDS` 全表，经 CDP 调 `window.__TAURI_INTERNALS__.invoke` 以每命令的最小合法参数逐个调用；断言：①每条都 reject 且错误码为 `privacy_consent_required`；②追踪日志为空；③预置与新增文件快照不变。
-  - **自启动部分（方案 A 双防线）**：第一道防线是闸门拒绝（`require_ready`）；第二道防线是替身——**即使闸门回归放行了命令体，`autostart_set` 也只写隔离状态文件，真实注册表不可达**（见 4b.1 接线；这正是 A0 被否决的原因：事后快照只能发现损害、不能防止损害）。全蜂巢只读快照保留为纵深证据：运行前后各枚举一次 `HKLM\...\Run`、`HKCU\...\Run` 与两个 `...\Explorer\StartupApproved\Run` 的**全部值**（名称+数据逐值比对，不假设标识名），断言逐字节一致；只读、不删除任何值。
+  - **自启动部分（方案 A 双防线）**：第一道防线是闸门拒绝（`require_ready`）；第二道防线是替身——**即使闸门回归放行了命令体，acceptance 构建下 `autostart_set` 也只写隔离状态文件，真实注册表不可达**（见 4b.1 接线；这正是 A0 被否决的原因：事后快照只能发现损害、不能防止损害）。全蜂巢只读快照保留为**辅助证据**（不是隔离措施）：运行前后各枚举一次 `HKLM\...\Run`、`HKCU\...\Run` 与两个 `...\Explorer\StartupApproved\Run` 的**全部值**（名称+数据逐值比对，不假设标识名），断言逐字节一致；只读、不删除任何值。真实 Windows 自启的出现/移除继续由 D5 3.4 人工验收。
 - **`privacy-accept-order`（同意顺序 + 双击单次落盘）**
   - 断言：追踪按序出现 `consent_saved` → `business_ready` → 首个 `history_open`/`source_root_read`（policy-update 已覆盖前两跳，本场景补第三跳与完整三元组）；`consent_saved` 附带 的 settings 哈希对应含 `privacy_policy_accepted = true` 与当前修订号的内容。
   - 双击同意：以 CDP 连续两次 click（间隔 <100ms），断言 `consent_saved` 恰好一次、只启动一套运行时（`business_ready` 恰好一次）、settings 只经历一次原子替换。
@@ -322,7 +328,7 @@ AC03–AC05 的 CI 接入：
 
 | 方案 | 内容 | 能证明 | 不能证明 | 产品输入 | 结论 |
 | --- | --- | --- | --- | --- | --- |
-| **A（选定）** | 4b.1 接线的自启替身：`bootstrapped()` 时 `status/set` 读写隔离状态文件 + `autostart_read/write` 追踪事件；隔离初始化失败直接报错、绝不回退真实插件 | 闸门正常**与回归**两种情况下真实注册表都不可达（配全蜂巢只读快照作纵深证据）；同意后开关操作的隔离状态机与序列化 | 真实 auto-launch 注册表语义 | 有（src-tauri cfg，实施 PR 递增 patch → 预期 0.6.1） | **选定**；真实「出现/移除」留 D5 3.4 人工签字 |
+| **A（选定）** | 4b.1 接线的自启替身：acceptance 构建下 `status/set` 必须取得有效隔离根（`root()`），只读写隔离状态文件 + `autostart_read/write` 追踪事件；未初始化/根无效/替身读写失败一律报错、绝不进入真实插件 | 闸门正常**与回归**两种情况下真实注册表都不可达（配全蜂巢只读快照作辅助证据）；同意后开关操作的隔离状态机与序列化 | 真实 auto-launch 注册表语义 | 有（src-tauri cfg，实施 PR 递增 patch → 预期 0.6.1） | **选定**；真实「出现/移除」留 D5 3.4 人工签字 |
 | A0（否决） | 零接线 + 全蜂巢只读快照；验收不在同意后调用 `autostart_set` | 事后发现损害 | denied-ipc 经真实 IPC 调用 `autostart_set`——**闸门若回归，命令体执行的就是真实插件**；快照只能发现、不能防止 | 无 | 否决（用户 2026-10-25）：防线必须在命令体一侧，不能只靠事后比对 |
 | B（备选，不采用） | acceptance 专属名（cfg 内 `app_name("TokenScope-Acceptance")`）+ 一次性 GitHub Runner 上真实写/删该名 | auto-launch 真实写路径（HKLM 优先 + StartupApproved + disable 双蜂巢删除） | 与生产名 "TokenScope" 相关的任何行为；本地运行须禁止（Runner 守卫） | 有（cfg + 守卫，patch） | 保留为记录；真实写路径的语义差异仍以 D5 3.4 人工签字收口 |
 
@@ -335,57 +341,76 @@ AC03–AC05 的 CI 接入：
   - ①文件变化：preseeded 观察窗口内实际修改一个预置文件（隔离根内追加一字节）→ 场景必须红——证明「快照采集 → 逐文件比对 → 判定」全链能检出真实变化，而不是只在构造样本上通过；
   - ②业务追踪：向证据样本注入一条业务追踪事件（构造含 `history_open` 的假追踪行喂给判定）→ 判定红；
   - ③对照：denied-ipc 以「故意调用一条未受保护命令（`privacy_bootstrap`）」作对照，证明断言能区分被拒与放行。
-- **替身接线变异**：①临时让替身在隔离初始化失败时回退真实插件 → 「绝不回退」断言红；②临时让普通构建可见替身符号 → 普通构建忽略变量测试红。变异逐字节恢复并记录。
+- **替身接线变异（哨兵后端/调用计数，不触真实后端）**：①给 `autostart_set` 的调用路径临时挂一个**会立即失败的哨兵后端**（真实插件调用点替换为直接 `panic!`/计数的桩），替身在隔离初始化失败时若试图回退即触发哨兵 → 「绝不回退」断言红；②给真实插件调用点挂调用计数器 → 场景全程计数为 0，证明未进入真实后端；③普通构建测试中临时让替身符号可见 → 忽略变量测试红。变异逐字节恢复并记录，**禁止为证明隔离而操作用户真实注册表**。
 - 每场景本地三连跑（固定受测提交与产物哈希）后接入 CI `native-ui`；预算**估计**：preseeded ≈ 40 s、denied-ipc ≈ 60 s、accept-order ≈ 45 s、variants ≈ 60 s，合计 ≈ 3.5 分钟——**以三连跑实测耗时为准，实测合计低于 8 分钟上限才接入 CI**；45 分钟作业上限与既有步骤不变。
 
-### 4b.2 AC07 修订：价格同步长观察（C = 部分取证 或 D = 完整长测，待用户选择）
+### 4b.2 AC07 修订：价格同步长观察（D = 推荐方案待用户确认；C = 部分取证备选）
 
-**接线（随方案 A 同一实施 PR，均 `#[cfg(feature = "acceptance")]`）**：追踪事件 `price_sync_thread_start`（线程入口，`src-tauri/src/lib.rs:994` 区域）与 `price_sync_poll{auto, due}`（每轮决策点，`lib.rs:1018` 区域）——追踪文件直写、**不依赖日志系统**，未同意阶段也可靠（用户 2026-10-25 指出：未同意时日志系统尚未初始化，「零 debug 日志」不能证明线程未启动）。
+**接线（随方案 A 同一实施 PR，均 `#[cfg(feature = "acceptance")]`）**：追踪事件 `price_sync_thread_start`（线程入口，`src-tauri/src/lib.rs:994` 区域）与 `price_sync_poll`（每轮决策点，`lib.rs:1018` 区域附近）——壳侧经核心库公开接口 `tokenscope::acceptance::record` 写入既有追踪 JSONL（直写、**不依赖日志系统**，未同意阶段也可靠；`crates/tokenscope-core/src/acceptance_trace.rs:146-183`）。三处同步覆盖：生产方（上述 record 调用）、校验方（`frontend/scripts/lib/acceptance-io.mjs:8-9` 的 `EVENTS` 集合追加两个事件名，未知事件会被校验拒绝）、判定方（场景断言读取事件字段）。
 
-新场景 `privacy-price-toggle`（本地一次取证，不进 CI），同一隔离根三次启动，全程本地价格桩（`TOKENSCOPE_ACCEPTANCE_PRICING_BASE`）与计数代理：
+**探针字段（区分快照过期与本轮最终决策；不得为满足断言改变生产判据）**——`price_sync_poll` 记录：
 
-- **Run 1（正向控制 + 首查延迟 + 首次双源同步）**：全新根 → 同意 → `business_ready` 记时 → 等待 ≥130 s → 断言：①`price_sync_thread_start` 与至少一条 `price_sync_poll` 在场——**正向控制**：证明探针在线程真启动时必然记录，此后「无事件」才可解读为「未启动」；②两源各恰一次 `pricing_fetch`（桩命中 2，外部尝试 0）；③首个 `pricing_fetch` 的追踪时间距 `business_ready` ≥120 s；④同步后快照 `synced_at` 更新。
-- **Run 2（未同意零线程 + 关闭态检查周期）**：沿用同根；预置 `price_auto_sync = false`（SF02 事务写）、把 Run 1 产出的 models.dev 快照 `synced_at` 改写为 25 小时前（隔离根内 fixture 操纵，非产品改动）、同意记录重置为「未同意」。阶段 A：启动后观察 130 s，断言**零 `price_sync_thread_start`、零 `price_sync_poll`、零 `pricing_fetch`**——依据 Run 1 的正向控制，「无探针事件」证明线程未随未同意启动（P03）；不以「零 debug 日志」作证明（未同意时日志系统尚未初始化，线程即使错误启动也可能无日志）。阶段 B：应用内同意 → Ready → 等待 ≥130 s → 断言：①`price_sync_thread_start` 在场；②至少一条 `price_sync_poll` 且 `auto=false`、due 为真（快照 25h 陈旧 + Ready）而**零 `pricing_fetch`**——直接证明关闭状态下完成了一次检查周期（若 auto 为 true 必然 fetch，跳过只能因开关）；③（辅助）`RUST_LOG=debug` 下 live log 的「价格同步轮询 … → 跳过」行与探针一致。
-- **Run 3（重启后恢复）**：预置 `price_auto_sync = true`、快照再次改写为 25h 前 → 启动（已有有效同意）→ 等待 ≥130 s → 断言 `price_sync_poll`（auto=true）后双源 `pricing_fetch` 各一次、快照刷新。
-- 证据：受测提交与 acceptance 产物 SHA256、三次 launches、每段追踪摘录（探针事件原文）、debug 轮询行（辅助对照）、桩命中计数；`RUST_LOG=debug` 只用于辅助取证，不改变任何等待长度或断言阈值。
+- `phase`：业务阶段（`privacy.rs` 的 `Phase`）；
+- `age_hours`：快照新鲜度依据（快照缺失/年龄未知时为 null）；
+- `snapshot_due`：快照缺失、年龄未知或达到现有 24 小时阈值（独立布尔，不含 Ready/auto）；
+- `auto`：设置开关当前值；
+- `will_sync`：现有 `price_sync_due()`（`privacy.rs:272-279` = `phase.allows_business() && auto && snapshot_due`）的最终结果。
 
-**C 的覆盖范围（部分验收，用户 2026-10-25 修订明确）**：C 证明①首查延迟 ≥120 s、②未同意零线程（探针 + 正向控制）、③关闭态检查周期发生且跳过、④**经重启后**重新开启恢复同步。C **不证明**「同一进程内关闭 → 重新开启 → 下一轮轮询恢复」——进程内重新开启不唤醒线程、下一轮 ≤1h 轮询生效是当前产品行为（`commands.rs` 只写设置）。因此二选一：
+- **关闭态有效证据** = 真实轮询事件 `phase=ready`、`snapshot_due=true`、`auto=false`、`will_sync=false`；
+- **开启态有效证据** = 真实轮询事件 `phase=ready`、`snapshot_due=true`、`auto=true`、`will_sync=true`，随后紧跟双源 `pricing_fetch`。
+- `price_sync_thread_start` 的**正向控制** = 线程真启动的场景中该事件必然在场；取得正向控制后，「无事件」才可解读为「线程未启动」。
 
-| 选项 | 内容 | 总预算 | 后果 |
-| --- | --- | --- | --- |
-| **C + 待验** | 三段重启取证（如上） | 单次 ≈ 12 分钟（3×（启动 ~5 s + 130 s + 余量 30 s + 收尾 ~15 s）+ 快照改写间隔） | 「进程内关闭→重开→下轮恢复」**保留为 N10 待验责任**（登记进整合计划 N10 行，原 M11 目标不据此关闭）；后续可并入 AC09 长测同场或单独排期；等待全部是产品自身确定性时序（120 s 首查），非补偿 |
-| **D（完整闭环）** | 单进程长测：同意 → fetch#1（≥130 s）→ 关闭 + 快照改写 → 跨一个完整轮询（≥3,660 s，探针 `price_sync_poll` 证明该轮 auto=false 跳过）→ **进程内**重新开启 → ≤3,660 s 内 fetch#2 | ≈ 2 小时 5 分–2 小时 15 分 | 本批完整闭环原 M11 目标；纯等待为产品真实周期使然，不进 CI |
-| E（否决为默认） | acceptance 专用可控时钟/缩短轮询间隔 | ≈ 3 分钟 | 改了被测对象（不再是真实 120 s/3600 s 调度），只能重证 `price_sync_due` 纯函数已覆盖的闸门逻辑（`privacy.rs:1141-1149`）；若用户仍想要一条 CI 级冒烟，可作为附加项单独评审，不替代 C/D |
+**形态 D（推荐方案，待用户确认）：本地真实周期长测，同一进程内完整闭环，预算约 2 小时 15 分钟，仅本地取证，不进 CI。**
 
-原 AC07「未同意观察 130 秒」并入 Run 2 阶段 A，不再单列场景。
+同一隔离根、同一宿主进程（证据关联同一宿主 PID 与连续 trace 序列），全程本地价格桩（`TOKENSCOPE_ACCEPTANCE_PRICING_BASE`）与计数代理；产品 120 秒首查延迟与 3600 秒轮询周期保持原样，**不增加补偿等待、不改产品时序**；每个阶段以实际探针事件划分，各阶段写明有限截止时间（超时即场景失败并留证据，不静默延长）：
+
+1. **未同意观察（≥130 秒窗口，截止 150 秒）**：全新根、无同意记录启动。断言：`price_sync_thread_start`/`price_sync_poll`/`pricing_fetch` 均无事件（线程未随未同意启动，P03）；价格桩命中 0、外连尝试 0；业务文件（含 history.db/WAL/SHM）快照不变；无业务 DOM。
+2. **同一进程内同意**：点击「同意并继续」。断言：`consent_saved` 的 seq 早于 `business_ready` 与 `price_sync_thread_start`（同意落盘先于业务解锁与线程启动）；`price_sync_thread_start` 在场——**探针正向控制取得**。
+3. **首次双源同步**：等待首个 `pricing_fetch`（截止 = `business_ready` + 130 秒**观察窗口**；窗口只保证覆盖 120 秒首查延迟，**不是「请求必须晚于 130 秒」的断言**）。断言：双源桩各命中一次、快照 `synced_at` 更新、首个请求距 `business_ready` ≥120 秒、外连尝试 0。
+4. **经真实设置操作关闭自动同步**：设置页关闭 `price_auto_sync`（SF02 事务写）；仅在隔离根内把 models.dev 快照 `synced_at` 改写为 25 小时前。等待至少一条 `price_sync_poll`（截止 = 关闭操作 + 1 小时轮询上限 + 余量），断言该事件 `phase=ready`、`snapshot_due=true`、`auto=false`、`will_sync=false`，且全程零 `pricing_fetch`——由实际轮询证明 Ready、快照已过期、开关关闭、最终决策跳过。
+5. **同一进程内重新开启**：设置页真实重新开启（**不得用重启替代**）；等待下一轮真实轮询（截止 = 重开操作 + 1 小时轮询上限 + 余量）出现 `auto=true`、`will_sync=true` 的 `price_sync_poll` 并随后完成双源 `pricing_fetch`、快照再次更新。
+
+证据：受测提交与 acceptance 产物 SHA256、单次 launch（同一宿主 PID）、连续 trace 序列摘录（探针事件原文 + seq）、桩命中计数、各阶段截止时间实测值；`RUST_LOG=debug` 的「价格同步轮询」行仅作辅助对照。
+
+**形态 C（备选，部分取证，约 12 分钟）**：三次重启取证——Run 1（正向控制 + 首查 ≥120 s + 首次双源同步）、Run 2（阶段 A 未同意零线程 + 阶段 B 关闭态检查周期跳过）、Run 3（重启后恢复），结构与 D 各阶段同型但跨进程。C 只证明首查、关闭配置及重启后恢复；**不证明**进程内「关闭→重开→下一轮轮询恢复」——该项**保留为 N10 待验责任**（登记进整合计划 N10 行），原 M11 目标不据此关闭。
+
+E（否决为默认）：acceptance 专用可控时钟/缩短轮询间隔，≈3 分钟——改了被测对象（不再是真实 120 s/3600 s 调度），只能重证 `price_sync_due` 纯函数已覆盖的闸门逻辑（`privacy.rs:1141-1149`）；若用户仍想要一条 CI 级冒烟，可单独评审，不替代 C/D。
+
+原 AC07「未同意观察 130 秒」对应 D 的阶段 ① 或 C 的 Run 2 阶段 A，不再单列场景。
 
 ### 4b.3 AC08 修订：完整浏览器矩阵（本地一次）
 
 - **运行方式（保持默认，不塞列表）**：`vite preview` + `check-ui-contracts.mjs` 默认参数全矩阵一次 = 巡检 15 fixture × 2 主题 × 2 视口 + 全部 28 条 `REQUIRED_CONTRACTS`（契约各自打开所需 fixture/主题/视口，不与巡检相乘）。两个隐私 fixture 不进巡检的设计限制维持原判断。
 - **fixture 覆盖表（从当次运行产物生成，补一处测试架挂点）**：
-  - 唯一改动（脚本、非产品）：`runContracts` 的 `ctx.open`（`interaction-contracts.mjs:2464` 起）已在每个契约会话汇集处带上 `contract` 与 `opts.fixture`——把每次实际打开的 `fixture` 记入该契约的结果条目；`check-ui-contracts.mjs` 汇总 `measurements.json`（约 `:1062`）时新增 `fixture_coverage` 节：对 `FIXTURE_NAMES` 全部 23 个，逐个记录 `{ patrol: 巡检是否实际运行过（以巡检结果行为准）, contracts: [实际打开过它的契约名] }`；两列皆空者列入 `uncovered` 并在汇总行打印。
+  - 唯一改动（脚本、非产品）：记录点必须在**契约循环内实际生效的 `ctx.open` 包装**上——`runContracts`（`interaction-contracts.mjs:2464` 起）先在 ctx 字面量里定义 `ctx.open`，再在 `for (const contract of only)` 循环体内把它覆盖为带 `contract` 的版本；只改初始定义会被随后覆盖而无效。在该生效包装内把每次实际打开的 `opts.fixture` 连同 `contract` 记入结果条目；`check-ui-contracts.mjs` 汇总 `measurements.json`（约 `:1062`）时新增 `fixture_coverage` 节：对 `FIXTURE_NAMES` 全部 23 个，逐个记录 `{ patrol: 巡检是否实际运行过（以巡检结果行为准）, contracts: [实际打开过它的契约名] }`；两列皆空者列入 `uncovered` 并在汇总行打印。
   - **报告口径**：巡检行 = 该 fixture 在真实浏览器完整启动；契约行 = 该 fixture 被该契约实际执行；`uncovered` = 当次运行两者皆无，作为缺口上报，**不**靠临时改 `--fixture` 补齐、更不引用源码 `FIXTURE_NAMES` 或契约实现文本冒充运行结果。
   - 红绿：覆盖聚合逻辑做成纯函数（新建 `frontend/scripts/lib/fixture-coverage.mjs` + Vitest node 环境测试，沿用 AC02 `acceptance-io.test.mjs` 接入先例）——先红：喂入不含某 fixture 行的样例产物 → 期望它进 `uncovered`；变异：把巡检行缺失的 fixture 标成已覆盖 → 测试红；再实现转绿。`ctx.open` 记录点的变异：临时不记录 fixture → 一条已知名契约的 contracts 列为空 → 汇总测试红。
 - 记录：版本、命令、产物散列；巡检每格结果；每条契约结果与断言数；`fixture_coverage` 表与 `uncovered` 清单。失败逐项归因（测试架先修测试架、产品按缺陷），不以重跑代替原因。
 
-### 4b.4 边界、版本与依赖
+### 4b.4 授权记录、边界、版本与依赖
 
-- **普通构建与 acceptance 边界**：AC06 方案 A 的自启替身与 AC07 的两个探针事件均为 `src-tauri` 内 `#[cfg(feature = "acceptance")]` 产品输入——实施 PR 按最新 main（当前 v0.6.0）递增一次 patch（**预期 0.6.1**，用户 2026-10-25 已确认采用 A）；AC08 两处为测试架脚本、零产品输入；本轮修订稿纯文档不取号。普通构建零变化由 cfg 边界保证（AC02 先例），并扩展既有普通构建忽略变量测试覆盖自启替身与探针事件。
-- **CI 与本地划分**：AC06 四场景进 CI `native-ui`（预算**估计**合计 ≈3.5 分钟——以本地三连跑实测耗时为准，实测低于 8 分钟上限才接入，见 4b.1）；AC07（C ≈12 分钟或 D ≈2h15m，视 4b.5 选择）与 AC08（全矩阵，约 15–20 分钟）仅本地一次取证；既有 CI 步骤、检查分组与 45 分钟上限不变。
+**授权与决定分三层记账（避免「选定形态即自动开始实施」的歧义）**：
+
+| 层 | 内容 | 状态 |
+| --- | --- | --- |
+| 已有方案决定 | AC06 选 **A**（acceptance 隔离替身；按构建模式隔离、`root()` 有效校验、失败报错绝不回退真实插件）；AC08 方向保留（循环内生效的 `ctx.open` 记录点 + `fixture_coverage` 纯函数）；AC06 四场景 CI 预算以本地三连跑实测为准 | 用户 2026-10-25 复核指令确认，**已定** |
+| 复核建议 | AC07 推荐 **D**（单进程完整闭环 ≈2h15m） | 最新复核（2026-10-25 交接 §4.2 与本轮用户提示）建议形态，**待用户明确选择** |
+| 尚待用户确认 | ①AC07 形态（D 完整闭环，或 C + 进程内恢复保留 N10 待验）；②**B3 实施范围授权**——确认 AC07 形态后仍需用户明确同意才开始实施（选型确认 ≠ 实施授权）；实施 PR 递增 patch 至 **0.6.1**（以实施时最新 main 为准，若仍为 0.6.0） | 未确认；本稿不预支 |
+
+- **普通构建与 acceptance 边界**：AC06 方案 A 的自启替身与 AC07 的两个探针事件均为 `src-tauri` 内 `#[cfg(feature = "acceptance")]` 产品输入（自启替身在 `commands.rs` 命令体、探针在 `lib.rs` 价格线程）；AC08 两处为测试架脚本、零产品输入；本轮修订稿纯文档不取号、不改 `release-change.json`。普通构建零变化由 cfg 边界保证（AC02 先例），并扩展既有普通构建忽略变量测试覆盖自启替身与探针事件。
+- **CI 与本地划分**：AC06 四场景进 CI `native-ui`（预算**估计**合计 ≈3.5 分钟——以本地三连跑实测耗时为准，实测低于 8 分钟上限才接入，见 4b.1）；AC07（C ≈12 分钟或 D ≈2h15m，视 4b.5 待确认项）与 AC08（全矩阵，约 15–20 分钟）仅本地一次取证；既有 CI 步骤、检查分组与 45 分钟上限不变。
 - **B4/B5 依赖与剩余人工项**：B4（AC09）与 B3 互不依赖、状态不变；B5 的 AC10（单实例）不依赖本修订；AC11 人工签字清单中 D5 3.4（真实自启）、3.3/3.5–3.7、5.3 保持人工，受测物按最新发布即 **v0.6.0 安装包**（原稿写「AC02 合入后最新 main」已过时）。原停点历史（B2 §6「B3 只读准备发现…」段、2026-10-22 记录）全部保留，不将未执行项改写为通过。
 - **本稿不做的**：不改产品周期/等待/断言/CSP/必需检查/ruleset/阈值；不访问真实价格源；不运行安装卸载脚本；不操作真实用户注册表（denied-ipc 的全蜂巢枚举为只读比对）。
 
-### 4b.5 待用户确认的具体方案（2026-10-25 二轮修订后）
+### 4b.5 待用户确认的具体方案（2026-10-25 三轮修订后）
 
-**已定（用户 2026-10-25 复核指令）**：
-- AC06 选 **A**（acceptance 隔离替身；隔离初始化失败直接报错、绝不回退真实插件；真实 Windows 自启行为留 D5 3.4 人工签字）；
-- AC08 方向保留（`ctx.open` 记录点 + `fixture_coverage` 纯函数，两处测试架脚本）；
-- AC06 四场景 CI 预算以本地三连跑实测为准，实测低于 8 分钟上限才接入；
-- 采用 A 后实施 PR 递增 patch 至 **0.6.1**。
+**已定（历史决定，按既有记录保留）**：AC06 选 **A**（acceptance 隔离替身；按构建模式隔离、`root()` 有效校验、失败报错绝不回退真实插件；真实 Windows 自启行为留 D5 3.4 人工签字）；AC08 方向保留（循环内生效的 `ctx.open` 记录点 + `fixture_coverage` 纯函数，两处测试架脚本）；AC06 四场景 CI 预算以本地三连跑实测为准，实测低于 8 分钟上限才接入。
 
-**待确认一项**：AC07 选 **C + 待验**（≈12 分钟；进程内「关闭→重开→下轮恢复」保留 N10 待验责任，原 M11 目标不据此关闭）还是 **D**（≈2h15m；本批完整闭环）？
+**复核建议（待用户确认）**：AC07 推荐 **D**——本地真实周期长测、同一进程内完整闭环（五阶段见 4b.2，预算约 2 小时 15 分钟，不进 CI）。备选 **C + 待验**（≈12 分钟；进程内「关闭→重开→下轮恢复」保留 N10 待验责任，原 M11 目标不据此关闭）。
 
-获确认后，B3 实施 PR 按 §5 批次表执行（A 接线 + AC07 所选形态 + AC08 测试架改动 → 递增 patch 至 0.6.1）。
+**明确两点授权边界**：
+- 选择 C 或 D 只是确认 AC07 验收形态，**不构成 B3 实施授权**；实施开始以用户对「B3 实施范围」的明确同意为准；
+- B3 实施范围 = AC06 四场景与替身接线、AC07 所选形态的场景、AC08 两处测试架改动及 CI 接入（AC06），均为 acceptance cfg 产品接线 + 测试/脚本，实施 PR 递增 patch（以实施时最新 main 为准，若仍为 0.6.0 则预期 0.6.1）。
 
 ## 5. 交付批次与验收
 
@@ -393,7 +418,7 @@ AC03–AC05 的 CI 接入：
 | --- | --- | --- | --- |
 | B1 | AC01 | 测试 | 不递增 |
 | B2 | AC02 + AC03–AC05 + CI 接入 | 产品（acceptance 接线） | patch |
-| B3 | AC06 + CI 接入；AC07、AC08 本地取证 | 脚本与测试（若 B2 的追踪事件不够用而需补产品接线，则递增 patch） | 视改动 |
+| B3 | AC06（含自启替身接线）+ CI 接入；AC07（C 或 D，待用户确认）、AC08 本地取证 | 产品（acceptance 接线：自启替身 + 价格探针事件，均在 cfg 内） | patch（预期 0.6.1，以实施时最新 main 为准） |
 | B4 | AC09 | 测试与文档 | 不递增 |
 | B5 | AC10 + CI 接入；AC11 人工签字；AC12 收口 | 脚本与文档 | 不递增 |
 
