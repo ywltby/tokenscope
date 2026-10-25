@@ -3,6 +3,7 @@
 > 状态：**用户 2026-10-21 确认，按 B1–B5 连续执行**。承接[整合计划](2026-10-11-consolidated-remaining-work.md)全部剩余开放项：N14 第 4 项、N11、N10、N13、N12。
 > 进度（2026-10-25，范围调整）：**用户授权 B3 分批实施——本批获准实施 AC06（四个隐私原生场景、自启隔离替身、回归与反例验证，以及满足预算后的 CI 接入）与 AC08（实际 fixture 覆盖记录、覆盖汇总与回归验证、本地完整浏览器矩阵取证）；AC07 整项暂缓（C/D 均不在本批执行，不新增其专用价格线程探针，不改变产品同步周期），进程内恢复目标继续保留 N10 待验。** 实施依据 a75de15 及后续最新版本的收口计划；AC06 含产品输入，实施 PR 递增 patch（若 main 仍为 0.6.0 则预期 0.6.1）。
 > 进度（2026-10-22）：**B1 / AC01 已交付，N14 关闭；B2 / AC02–AC05 随 PR #31（`c9de40e`）交付，main 三条运行全部成功，v0.5.9 已公开并登记原资产基线**。N11 的安装后人工同步尾项按用户决定保留待验；**B3 修订稿已拟并经三轮修订（2026-10-25，§4b；AC06 选 A、AC07 推荐 D 待用户确认、实施授权未给，未实施）**，B4、B5 未执行，不提前关闭 N10–N13。
+> 进度（2026-10-25，本批实施完成）：**按上方范围调整授权，AC06 与 AC08 已实施完毕（提交 `0191f78` / `17fb37e` / `af784bf`，版本递增 0.6.1，待 PR 复核合并）；AC07 未实施，价格线程探针未添加，产品同步周期未改，进程内恢复继续保留 N10 待验。** 执行记录见 §6「B3 分批实施」。
 > 本计划只排验收与取证所需的改动。验收中暴露的产品缺陷按缺陷流程单独修复，不在本计划里预先设计修法。
 > 排期补记（2026-10-24）：用户确认 WorkBuddy 专项按 N17 独立推进，本计划 B3–B5 不再作为它的启动前置；本计划原待验范围继续保留，完成本计划也不代替 N17 的实现与验收。
 
@@ -440,6 +441,32 @@ E（否决为默认）：acceptance 专用可控时钟/缩短轮询间隔，≈3
 - 本地取证（AC07、AC08、AC09、AC11）的结果写进 §6，含受测提交、产物哈希、环境、命令、结论与证据位置；证据文件不入库（`qa-artifacts/` 已忽略）。
 
 ## 6. 执行记录
+
+### B3 分批实施：AC06 + AC08（2026-10-25，AC07 暂缓）
+
+范围依据本计划顶部 2026-10-25 范围调整记录与 §5 B3 批次行：本批只实施 AC06（四个隐私原生场景、自启隔离替身、回归与反例验证、满足预算后的 CI 接入）与 AC08（实际 fixture 覆盖记录、覆盖汇总与回归验证、本地完整浏览器矩阵取证）；AC07 整项暂缓，未新增价格线程探针，未改变产品同步周期；N10 保持开放。提交：`0191f78`（AC06）、`17fb37e`（AC08 覆盖表）、`af784bf`（AC08 全矩阵归因修复）；版本递增 patch 至 **0.6.1**（`--check --base-ref origin/main` 实测 release=true，base `fd39cdc`）。证据文件不入库（`qa-artifacts/` 已忽略），关键数值记入本节，原始产物保留在 `qa-artifacts/workbuddy/b3/`。
+
+红先（在未改代码上确认失败）：
+
+- AC06 校验方：`acceptance-io.test.mjs` 新增用例「autostart shim trace events require an in-root path」先于 EVENTS/PATH_EVENTS 登记运行——两个事件未登记时校验器按未知事件放行，越根/相对/缺路径断言全部失败（红）；两集合同时登记后同一用例转绿，缺 path、相对 path、越出隔离根三种均判校验失败。
+- AC08 覆盖表：`fixture-coverage.test.mjs` 四用例先红（模块缺失）后绿，覆盖「未覆盖不虚报已覆盖」「契约 fixture 去重」「失败巡检不算覆盖」「未注册浮出」四个反例。
+
+AC06 执行记录：
+
+- 实现：自启隔离替身（acceptance cfg，`src-tauri/src/commands.rs`）——`autostart_status/set` 必须取得有效隔离根（`tokenscope::acceptance::root()` 返回 Some 且根存在；`bootstrapped()` 不能替代该校验），只读写 `<root>/autostart-state.json`，未初始化、根缺失/非法、状态文件损坏或读写失败一律显式报错，绝不回退真实插件；替身经 `record_path` 记录 `autostart_read/autostart_write`（带绝对路径）。普通构建不编译替身，真实插件行为逐字节保持（`ManagerExt` 导入按构建模式门控）。替身状态机另附 5 个 Rust 单测（缺文件读为关、roundtrip、损坏报错、根必需、写失败报错）。
+- 五个确定性场景进 CI native-ui（各 1 次启动，起始端口 9530/9533/9536/9539/9542）：privacy-preseeded（预置业务文件未同意观察：追踪零业务事件、价格桩与外连零命中、业务目录 + settings.toml 双快照不变）、privacy-denied-ipc（从 privacy.rs 提取全部 35 条受保护命令、最小合法参数经真实 IPC 逐条调用、全部返回 privacy_consent_required；四蜂巢注册表只读快照前后一致）、privacy-accept-order（双击同意 consent_saved 恰一次且早于 business_ready 与首个业务读取；同意与修订版 2 原子落盘）、privacy-variants-corrupt（损坏 TOML 阻断弹窗且文件逐字节不变）、privacy-variants-close（close_action 记忆预设不得绕过隐私退出确认）。端口登记契约期望同步为 14 段互不重叠。
+- 稳定性三连跑：受测物为 AC06 实施树（`0191f78`）构建的 release/acceptance EXE，SHA256 `b3e6f9592326094567a919655404ee6572f4cb4125658007560d5821d36a78b4`；固定代码五场景 × 3 次全部通过（15/15），最差单次之和 74 秒（preseeded 18 / denied-ipc 8 / accept-order 32 / variants-corrupt 7 / variants-close 9），低于 8 分钟新增 CI 预算。命令 `node frontend/scripts/native-acceptance.mjs --scenario privacy-<name> --output qa-artifacts/workbuddy/b3/ac06-final-<name>-<n>`；逐次日志 `ac06-final-*-1..3.log`，汇总 `ac06-stable-times.json`。真实 `~/.tokenscope` 指纹一致、外连为零；真实注册表仅只读快照；真实自启后端未进入（替身隔离），出现/移除留 D5 3.4 人工签字。
+- CI 接入：`.github/workflows/ui-e2e.yml` 新增五个 Native 步骤（输出 `qa-artifacts/ui-adjustment/native-e2e/privacy-*`），端口契约期望同步更新。
+
+AC08 执行记录：
+
+- 实现：`lib/fixture-coverage.mjs` 纯函数按注册清单聚合巡检行与契约实际打开记录，输出每 fixture 的 `{patrol, contracts}` 行、uncovered 缺口与 unregistered 异常；`runContracts` 在契约循环内实际生效的 ctx.open 包装上记录每次打开的 `opts.fixture`（初始定义会被循环内包装覆盖，改初始定义无效），返回值新增 `contract_fixtures`；`check-ui-contracts.mjs` 的 measurements 新增 `fixture_coverage` 节——全量运行（28/28 契约）时 uncovered 非空进入失败清单，部分选择（CI test:e2e 7/28）如实打印不判失败；unregistered 一律失败；汇总行打印两个计数。
+- 本地完整浏览器矩阵取证（归因修复后终跑）：命令 `node frontend/scripts/check-ui-contracts.mjs --url http://127.0.0.1:1480 --phase verify --output qa-artifacts/workbuddy/b3/ac08-matrix-final4`，exit=0；60 个巡检场景（15 fixture × 2 主题 × 2 视口）与 28 条契约全部通过、失败断言 0；`fixture_coverage.rows` 23/23（15 巡检 + 22 契约引用，去重）、`uncovered=[]`、`unregistered=[]`。矩阵驱动为前端脚本（受测提交 `af784bf`），应用本体同 0.6.1 树。
+- 首跑暴露的过时装配归因修复（`af784bf`，全部为测试装配、非产品缺陷）：long-text fixture 补 `sourceRows:"merged"`（PR3 起默认行是短路径，长路径行缺失）；占位符断言更新为 PR3 后实际值「绝对路径（如 D:\history\claude\projects）」；effective_directory 改按文本定位（四应用行加入后 eff[0] 不再是长路径行）；settings_failure_retry 与 late_failed_settings_read 改用开关 aria-checked 与真实输入值断言（旧 aria-label 输入框已不存在）；date_outer_surface 更新为操作浮层单层实色断言（DESIGN.md §5，C06 `e34495b` 起产品用 ts-popover-solid），并补面板守卫。三次中间跑失败日志（`ac08-matrix-final*.log`）与终跑证据均保留，未以重跑抹掉失败。
+
+门禁与版本：`cargo fmt --check`、clippy 普通与 acceptance 双模式 `-D warnings`、钩子全链（前端 789 测试 + typecheck + build + e2e、Python 336、cargo test 四套、PowerShell 安装 26 项 + 升级契约 69 项、node 语法 50 脚本）全部通过；前端 prettier 门禁只覆盖 `src/**`，scripts/ 下 17 个文件的既有格式差异与本批无关（main 版本同状）。
+
+边界保留：AC07 整项未实施（C/D 均未执行），价格线程探针未添加，产品同步周期未改；N10 保持开放，进程内恢复继续待验；真实自启出现/移除留 D5 3.4 人工签字；B4（AC09）、B5 未执行。
 
 ### B2 合并与发布验收（2026-10-22）
 
