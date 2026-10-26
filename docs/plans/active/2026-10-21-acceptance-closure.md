@@ -554,7 +554,16 @@ PR #52 CI 首跑与修复（2026-10-25）：
 
 修后受测树 `2e20fa5` 重跑五场景三连 15/15 全绿（preseeded 22/25/33、denied-ipc 7/8/7、accept-order 10/11/10、variants-corrupt 8/8/8、variants-close 13/13/10，最差单次之和 **75 秒**，仍远低于 8 分钟预算；EXE 未变仍为 `9f9f18ab…`，本轮仅判定脚本变更）；accept-order 实测重算哈希与事件指纹一致、顶层严格类型判定通过。
 
-五轮补修后的 CI 收口（受测 HEAD `c2ce609`）：首轮 Native UI E2E 的 privacy-preseeded 再次出现「没有 tauri 页面 target」（与此前两次同型症状，**根因仍未定位**，失败 run 40348043583 原样保留）；Install test 的 0.5.13 deleted 跳因 GitHub API 连接被远端重置（WinError 10054，网络级）失败（run 40348043558 首轮证据保留）——两者均为环境级失败，重跑失败作业后全部通过。最终全部必需检查 18 pass + 1 skipped、0 fail：CI 40348043558 之外的同轮 CI 为 40348043575（success）、Native UI E2E 40348043583（重跑 success）、Install test 40348043558（重跑 success，十格升级单跳含 0.6.0 present 58s / deleted 1m4s）。
+五轮补修后的 CI 收口（受测 HEAD `c2ce609`）：首轮 Native UI E2E 的 privacy-preseeded 再次出现「没有 tauri 页面 target」（与此前两次同型症状，**根因仍未定位**，失败 run 40348043583 原样保留，重跑通过仅说明恢复）；Install test 的 0.5.13 deleted 跳因 GitHub API 连接被远端重置（WinError 10054，日志支持，**环境级网络失败**，run 40348043558 首轮证据保留）——Native 的症状**不归为环境级**（同一轮两者失败性质不同），重跑失败作业后全部通过。最终全部必需检查 18 pass + 1 skipped、0 fail：CI 40348043575（success）、Native UI E2E 40348043583（重跑 success）、Install test 40348043558（重跑 success，十格升级单跳含 0.6.0 present 58s / deleted 1m4s）。
+
+### 六轮复核：测试装配更正与 2edeafc 收口核查（2026-10-27）
+
+复核方指出两处回归装配偏差并确认代码修复本身正确（41/41、四坏字节严格拒绝、三带引号键与合法 U+FFFD 通过、既有 15 份原生证据核对成立）：
+
+- **坏字节位置**：五轮负例把坏字节放在注释结束后（`# note\n` 已闭合），落在裸键前——旧版 TOML 解析本就拒绝，「先红」不真实。更正：坏字节放**注释行内部**（`# <坏字节>\n`，替换成 U+FFFD 后注释仍合法）——实测旧版 `toString("utf8")` 判定下确实放行、严格解码 InvalidData，红真实性成立。
+- **TOML 转义**：`"privacy_polic\u0079_accepted"` 在 JS 普通字符串里被预转义成 `y`，TOML 转义路径未被测试。更正：`String.raw` 保留字面反斜杠（标签与内容同步），测的是 TOML 层转义。
+- **归因矛盾更正**：五轮收口段同时写「根因仍未定位」与「两者均为环境级失败」矛盾——更正为 Install 的连接重置（WinError 10054）有日志支持属环境级网络失败；Native 的「无页面 target」症状保持**根因未明**，重跑通过只说明恢复，不作为归因。
+- **2edeafc 收口状态核查（复核方留证 `qa-artifacts/workbuddy/b3/review-pr52-round6/native-head-failure.json`）**：该轮 CI（40348043575）success，但 Native UI E2E **失败且与「无页面 target」不同型**——privacy-accept-order 已连接 Tauri 页面（page_target_url 非空、cdp/page_target 共 1.4s），隐私框出现后等待 `.app-nav` 60 秒超时，`acceptance_trace.records` 为空、无点击计数留存、host/app 日志尾为空，根因**未明**（PR CI 的 merge-checkout SHA `b1af5ac`、EXE `559a1484…`，与本地 `9f9f18ab…` 不同属正常）；该轮重跑后通过仅说明恢复。此处如实保留为未定位失败，不用重跑替代归因。
 
 ### B2 合并与发布验收（2026-10-22）
 

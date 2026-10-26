@@ -759,16 +759,19 @@ for (const bad of TYPE_BAD_CASES) {
 // Granted）。
 
 const BYTE_BAD_CASES = [
-  { label: "注释中的原始 FF 字节", tail: [0xff] },
-  { label: "截断的多字节编码", tail: [0x20, 0xe4, 0xb8] },
-  { label: "过长编码 C0 80", tail: [0x20, 0xc0, 0x80] },
-  { label: "代理项编码 ED A0 80", tail: [0x20, 0xed, 0xa0, 0x80] },
+  { label: "注释中的原始 FF 字节", head: [0x23, 0x20, 0xff, 0x0a] },
+  { label: "注释中的截断多字节编码", head: [0x23, 0x20, 0xe4, 0xb8, 0x0a] },
+  { label: "注释中的过长编码 C0 80", head: [0x23, 0x20, 0xc0, 0x80, 0x0a] },
+  { label: "注释中的代理项编码 ED A0 80", head: [0x23, 0x20, 0xed, 0xa0, 0x80, 0x0a] },
 ];
 
 for (const bad of BYTE_BAD_CASES) {
   test(`字节证据：${bad.label}（非法 UTF-8）必须失败`, async () => {
-    const head = Buffer.from("# note\n", "utf8");
-    const bytes = Buffer.concat([head, Buffer.from(bad.tail), Buffer.from("privacy_policy_accepted = true\nprivacy_policy_revision = 2\n", "utf8")]);
+    // 坏字节必须在注释行内部（复核六轮装配更正：放在注释结束后会落在
+    // 裸键前，旧版 TOML 解析本就拒绝——红不真实；注释内部替换成 U+FFFD
+    // 后注释仍合法，才是 toString("utf8") 误放行的原始形态）。
+    const head = Buffer.from(bad.head);
+    const bytes = Buffer.concat([head, Buffer.from("privacy_policy_accepted = true\nprivacy_policy_revision = 2\n", "utf8")]);
     const records = [
       { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
       {
@@ -794,7 +797,9 @@ for (const bad of BYTE_BAD_CASES) {
 const QUOTED_KEY_GOOD_CASES = [
   { label: "双引号键", acceptedLine: '"privacy_policy_accepted" = true\n' },
   { label: "单引号键", acceptedLine: "'privacy_policy_accepted' = true\n" },
-  { label: "转义形式键（\u0079 = y）", acceptedLine: '"privacy_polic\u0079_accepted" = true\n' },
+  // String.raw：必须测 TOML 的 \u0079 转义（复核六轮：普通字符串里 JS 会
+  // 先把它转成 y，TOML 转义路径未被测试）。
+  { label: String.raw`转义形式键（TOML \u0079 = y）`, acceptedLine: String.raw`"privacy_polic\u0079_accepted" = true` + "\n" },
 ];
 
 for (const good of QUOTED_KEY_GOOD_CASES) {
