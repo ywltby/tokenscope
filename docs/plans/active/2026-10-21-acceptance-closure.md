@@ -565,6 +565,13 @@ PR #52 CI 首跑与修复（2026-10-25）：
 - **归因矛盾更正**：五轮收口段同时写「根因仍未定位」与「两者均为环境级失败」矛盾——更正为 Install 的连接重置（WinError 10054）有日志支持属环境级网络失败；Native 的「无页面 target」症状保持**根因未明**，重跑通过只说明恢复，不作为归因。
 - **2edeafc 收口状态核查（复核方留证 `qa-artifacts/workbuddy/b3/review-pr52-round6/native-head-failure.json`）**：该轮 CI（40348043575）success，但 Native UI E2E **失败且与「无页面 target」不同型**——privacy-accept-order 已连接 Tauri 页面（page_target_url 非空、cdp/page_target 共 1.4s），隐私框出现后等待 `.app-nav` 60 秒超时，`acceptance_trace.records` 为空、无点击计数留存、host/app 日志尾为空，根因**未明**（PR CI 的 merge-checkout SHA `b1af5ac`、EXE `559a1484…`，与本地 `9f9f18ab…` 不同属正常）；该轮重跑后通过仅说明恢复。此处如实保留为未定位失败，不用重跑替代归因。
 
+六轮收口过程（2026-10-27，全部失败原样留证）：
+
+- 装配更正与归因修正随 `b73c025` 推送后，该轮（[Native 40358956806](https://github.com/ywltby/tokenscope/actions/runs/40358956806)）privacy-accept-order **再次** `.app-nav` 60 秒超时——同型第二次复现；因失败现场取证缺口（场景在 waitForSelector 抛错时点击捕获未读取），仍无法区分「输入未发出 / 输入未处理 / 保存失败」。
+- 取证能力补齐 `ef77836`：解锁超时的 catch 先抓现场再原样抛错——页面捕获的全部点击（类型/时间戳/坐标）、隐私框是否仍在、阻断错误文案、settings.toml 快照、已发生追踪事件序列、整页截图，入 evidence 的 `acceptFailureDiagnostics`；取证自身失败不掩盖原错误；正常路径与 41 项维护回归不变。
+- `ef77836` 轮（[Native 40363363800](https://github.com/ywltby/tokenscope/actions/runs/40363363800)）失败场景变为 **ui-ccs-import**（「无页面 target」同型）——**隐私五场景全部通过**（含此前两轮失败的 accept-order）。至此五轮 Native 失败分布：denied-ipc、preseeded、accept-order×2、ccs-import，两种症状（无 target ×3、解锁超时 ×2），本地 60+ 次运行零复现——强随机的 CI 启动环境问题，全部失败 run 原样保留，不增加超时掩盖。
+- 最终受测 HEAD `c831b74`（复核方追加的研究文档提交，docs-only 不动验收代码）全部必需检查通过：[CI 40366682692](https://github.com/ywltby/tokenscope/actions/runs/40366682692)、[Native UI E2E 40366682655](https://github.com/ywltby/tokenscope/actions/runs/40366682655)、[Install test 40366682837](https://github.com/ywltby/tokenscope/actions/runs/40366682837)——18 pass + 1 skipped、0 fail，覆盖确认 ef77836 的验收代码检查。
+
 ### B2 合并与发布验收（2026-10-22）
 
 - [PR #31](https://github.com/ywltby/tokenscope/pull/31) 最终 HEAD `7664be9`，普通合并为 `c9de40ec3ded2485d2991079f209699ae6ff6107`；两父提交分别为最新 main `9c77cef` 与该 PR HEAD，合并文件树和已验证 HEAD 完全一致。AC03 / AC04 / AC05 分别提交 `6f50af1` / `16ec813` / `db43355`；局部峰谷费率展示修复 `4159633`、经批准的端口和 CI 契约登记 `317573e`、版本登记 `bfb01ed`、短路径取证补修 `7664be9` 各自独立。
