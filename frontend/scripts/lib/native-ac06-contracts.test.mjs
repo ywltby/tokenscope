@@ -750,3 +750,83 @@ for (const bad of TYPE_BAD_CASES) {
     assert.equal(content.pass, false, `误放行：${bad.label}`);
   });
 }
+
+// ── 严格 UTF-8 与带引号顶层键（五轮复核缺口）────────────────────────────
+// P2：toString("utf8") 默认把坏字节替换成 U+FFFD，两个解析器检查的是替换
+// 后文本——注释中 FF、截断编码、过长编码、代理项编码全被误放行（Rust
+// 严格读取报 InvalidData）。P3：TOMLQuoted 键的文本属性是 value 而非
+// content——单引号/双引号/转义形式的合法顶层键被误判缺失（Rust 返回
+// Granted）。
+
+const BYTE_BAD_CASES = [
+  { label: "注释中的原始 FF 字节", tail: [0xff] },
+  { label: "截断的多字节编码", tail: [0x20, 0xe4, 0xb8] },
+  { label: "过长编码 C0 80", tail: [0x20, 0xc0, 0x80] },
+  { label: "代理项编码 ED A0 80", tail: [0x20, 0xed, 0xa0, 0x80] },
+];
+
+for (const bad of BYTE_BAD_CASES) {
+  test(`字节证据：${bad.label}（非法 UTF-8）必须失败`, async () => {
+    const head = Buffer.from("# note\n", "utf8");
+    const bytes = Buffer.concat([head, Buffer.from(bad.tail), Buffer.from("privacy_policy_accepted = true\nprivacy_policy_revision = 2\n", "utf8")]);
+    const records = [
+      { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+      {
+        seq: 1,
+        event: "consent_saved",
+        settings_hash: settingsFingerprint(bytes),
+        settings_bytes_hex: bytes.toString("hex"),
+      },
+      { seq: 2, event: "business_ready" },
+      { seq: 3, event: "history_open" },
+    ];
+    const { checks } = await runAcceptOrder({
+      records,
+      settingsText: bytes.toString("utf8"),
+    });
+    const content = checks.find((check) => check.name === "consent_saved_capture_content");
+    assert.ok(content, "缺少内容解析断言");
+    assert.equal(content.pass, false, `误放行：${bad.label}`);
+    assert.match(content.detail, /严格解码失败/);
+  });
+}
+
+const QUOTED_KEY_GOOD_CASES = [
+  { label: "双引号键", acceptedLine: '"privacy_policy_accepted" = true\n' },
+  { label: "单引号键", acceptedLine: "'privacy_policy_accepted' = true\n" },
+  { label: "转义形式键（\u0079 = y）", acceptedLine: '"privacy_polic\u0079_accepted" = true\n' },
+];
+
+for (const good of QUOTED_KEY_GOOD_CASES) {
+  test(`字节证据：${good.label} 必须通过（P3 误拒修复）`, async () => {
+    const text = good.acceptedLine + "privacy_policy_revision = 2\n";
+    const records = [
+      { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+      ...consentRecords(text),
+      { seq: 2, event: "business_ready" },
+      { seq: 3, event: "history_open" },
+    ];
+    const { checks } = await runAcceptOrder({ records, settingsText: text });
+    const content = checks.find((check) => check.name === "consent_saved_capture_content");
+    assert.ok(content && content.pass, JSON.stringify(checks.filter((c) => !c.pass)));
+  });
+}
+
+test("字节证据：合法编码的 U+FFFD 字符必须通过（替换仅限非法字节）", async () => {
+  const head = Buffer.from("# replacement char \xef\xbf\xbd is fine\n", "binary");
+  const bytes = Buffer.concat([head, Buffer.from("privacy_policy_accepted = true\nprivacy_policy_revision = 2\n", "utf8")]);
+  const records = [
+    { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    {
+      seq: 1,
+      event: "consent_saved",
+      settings_hash: settingsFingerprint(bytes),
+      settings_bytes_hex: bytes.toString("hex"),
+    },
+    { seq: 2, event: "business_ready" },
+    { seq: 3, event: "history_open" },
+  ];
+  const { checks } = await runAcceptOrder({ records, settingsText: bytes.toString("utf8") });
+  const content = checks.find((check) => check.name === "consent_saved_capture_content");
+  assert.ok(content && content.pass, JSON.stringify(checks.filter((c) => !c.pass)));
+});

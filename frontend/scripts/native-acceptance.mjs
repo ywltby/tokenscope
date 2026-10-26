@@ -3072,7 +3072,18 @@ const scenarios = {
         hashMatchesCapture,
       `指纹=${JSON.stringify(consentRows[0]?.settings_hash)} 重算=${recomputed ?? "无字节证据"} 同意前写入=${JSON.stringify(writesBeforeConsent)}`,
     );
-    const captureText = captureBytes === null ? "" : captureBytes.toString("utf8");
+    // 严格 UTF-8 解码（五轮复核 P2：toString("utf8") 默认把坏字节替换成
+    // U+FFFD，替换后的文本骗过两个解析器——注释中 FF、截断编码、过长编码、
+    // 代理项编码全被误放行，而产品 String::from_utf8 报 InvalidData）。
+    // fatal 模式解码失败即拒绝；合法编码的 U+FFFD 字符本身不受影响。
+    const captureText = (() => {
+      if (captureBytes === null) return "";
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(captureBytes);
+      } catch {
+        return null;
+      }
+    })();
     // 内容判定经**两个**真正的 TOML 解析器交叉（三轮/四轮复核：正则会被
     // 注释、子表与前缀骗过；smol-toml 单独使用会把 2.0/2e0/超精度浮点当成
     // 整数 2、并接受 2026-02-30 这类语义非法日期）：
@@ -3083,6 +3094,9 @@ const scenarios = {
     //   内联表、多段键路径一律不算顶层；非法日期在解析时即被拒绝。
     const captureContent = (() => {
       if (captureBytes === null) return { ok: false, detail: "无字节证据" };
+      if (captureText === null) {
+        return { ok: false, detail: "字节证据不是合法 UTF-8（严格解码失败，产品同口径 InvalidData）" };
+      }
       try {
         parseToml(captureText);
       } catch (error) {
@@ -3098,7 +3112,12 @@ const scenarios = {
       const topLevelValue = (name) => {
         for (const kv of top?.body ?? []) {
           const keys = kv.key.keys;
-          if (keys.length === 1 && (keys[0].name ?? keys[0].content) === name) {
+          // TOMLBare 键名在 name；TOMLQuoted（单引号/双引号/转义形式）在
+          // value——五轮复核 P3：只读 content 会把合法带引号键误判缺失。
+          if (
+            keys.length === 1 &&
+            (keys[0].name ?? keys[0].content ?? keys[0].value) === name
+          ) {
             return kv.value;
           }
         }
