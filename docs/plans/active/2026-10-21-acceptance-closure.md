@@ -528,6 +528,21 @@ PR #52 CI 首跑与修复（2026-10-25）：
 - 红绿：维护回归 29 项——负例四条（三种误放行形态 + 非法 TOML）先红（前三条在正则实现下全放行）后绿；负例哈希与字节自洽，失败必须来自内容解析层。
 - 修后固定受测树 `33e41e4` 干净构建 EXE SHA256 `9f9f18ab45d47f5cdf60aba5574e36d72e3854eceba5a427098ebb7427ceb6bf`；五场景三连 15/15 全绿（preseeded 22/20/21、denied-ipc 5/6/5、accept-order 8/9/8、variants-corrupt 6/5/6、variants-close 7/7/7，最差单次之和 **49 秒**）；accept-order 实测 `accepted=true revision=2`（顶层严格判定通过）、双击 2 次输入（间隔 24.7ms、合成 click 1 次）；四种对抗形态经同一解析器直接验证全部拒绝。
 
+### 四轮复核补修：字面量类型保留与非法日期语义（2026-10-26，`c6faca4`）
+
+复核方探针（`qa-artifacts/workbuddy/b3/review-pr52-round4/native-ac06-type-probes.json`，哈希正确、字节与终态一致仍 14/14 全过；产品 Rust `read_consent` 对同类输入均返回 Unreadable）暴露 smol-toml 单解析器判定的两处类型/语义缺口：
+
+- smol-toml 把整数/浮点统一解析为 JS number：`revision = 2.0` / `2e0` / `2.0000000000000001`（超出 double 精度折回 2）经 `=== 2` 全部放行——`Number.isInteger` 无法区分，值比较层无解；
+- smol-toml 日期处理宽松：`notes = 2026-02-30` 被接受，Rust toml 明确拒绝。
+
+修复：判定改为**双解析器交叉**——smol-toml 保留整篇值语义合法性（抛错即拒）；新增 toml-eslint-parser（devDependencies）用 **AST 保留字面量类型**做内容判定：顶层 `privacy_policy_accepted` 必须 `kind === "boolean"` 且值为 true、顶层 `privacy_policy_revision` 必须 `kind === "integer"` 且值为 2；子表键、内联表、多段键路径一律不算顶层；语义非法日期在严格解析时直接拒绝（`2026-02-30` REJECT、`2026-02-28` 通过）。不使用任何正则/字符串包含补丁。
+
+红绿：维护回归 33 项——新增四负例（浮点 2.0、2e0、超精度折回、非法日期）先红（smol-toml 判定下全放行）后绿；对照矩阵 12 形态全部按预期（含 `accepted = "true"` 字符串、内联表、`revision = 20` 等历史形态不回退）。壳侧 AC02 的 `toml::Value as_integer/as_bool` 断言本就类型严格，无需变更。
+
+修后受测树 `c6faca4` 重跑五场景三连 15/15 全绿（preseeded 21/20/20、denied-ipc 5/6/6、accept-order 7/8/7、variants-corrupt 5/4/4、variants-close 6/6/7，最差单次之和 **46 秒**；EXE 未变仍为 `9f9f18ab…`，本轮仅判定脚本变更）；accept-order 实测 detail 为 `accepted kind=boolean value=true；revision kind=integer value=2`。
+
+**3744891 轮运行标签勘误**（此前汇报再次写反）：正确对应为 **CI 40280864502、Native UI E2E 40280864366、Install test 40280864372**（均 success）。
+
 ### B2 合并与发布验收（2026-10-22）
 
 - [PR #31](https://github.com/ywltby/tokenscope/pull/31) 最终 HEAD `7664be9`，普通合并为 `c9de40ec3ded2485d2991079f209699ae6ff6107`；两父提交分别为最新 main `9c77cef` 与该 PR HEAD，合并文件树和已验证 HEAD 完全一致。AC03 / AC04 / AC05 分别提交 `6f50af1` / `16ec813` / `db43355`；局部峰谷费率展示修复 `4159633`、经批准的端口和 CI 契约登记 `317573e`、版本登记 `bfb01ed`、短路径取证补修 `7664be9` 各自独立。
