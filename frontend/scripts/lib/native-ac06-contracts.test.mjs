@@ -282,6 +282,9 @@ function runAcceptOrderScenario(options = {}) {
         return registryChanged && registryCalls > 1 ? { hive: ["changed"] } : registry;
       },
       fs: {
+        realpathSync(p) {
+          return String(p);
+        },
         readFileSync(file, encoding) {
           const name = String(file);
           if (name.endsWith("autostart-state.json")) {

@@ -3107,7 +3107,10 @@ const scenarios = {
         (r) => r.event === "autostart_write" || r.event === "autostart_read",
       );
     })();
-    const rootAsPosix = inst.root.replaceAll("\\", "/");
+    // 前缀比较前先把隔离根解析为规范长路径：CI Runner 的 TEMP 可能是 8.3
+    // 短名（RUNNER~1），而追踪路径经 Rust canonicalize 是长名（runneradmin），
+    // 不解析会误判越根（CI 40254310229 首跑即此差异）。
+    const rootAsPosix = fs.realpathSync(inst.root).replaceAll("\\", "/");
     ck.add(
       "autostart_trace_paths_inside_root",
       autostartTraceRows.some((r) => r.event === "autostart_write") &&
