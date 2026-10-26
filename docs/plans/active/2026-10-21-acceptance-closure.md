@@ -506,6 +506,19 @@ PR #52 CI 首跑与修复（2026-10-25）：
 - 4910660 / a98dfad / `4c9c71b`（CI 实跑揭示的第三处装配缺陷）：CI Runner 的 TEMP 为 8.3 短名（`C:\Users\RUNNER~1\...`）而追踪路径经 Rust canonicalize 是长名（`...\runneradmin\...`），自启追踪前缀比较失配（12/13）；第一轮 realpathSync 修复无效——Node 的 **JS 版 realpath 不解析 8.3 短名**（40258699869 的诊断 detail：rootNorm 仍为 runner~1），改用 `fs.realpathSync.native`（libuv `GetFinalPathNameByHandle` 展开）+ 双侧统一斜杠/小写后通过。三次失败 run（40254310229 / 40256321675 / 40258699869）原样保留作归因链。
 - 最终受测 HEAD `4c9c71b` 全部必需检查通过：[CI 40260524738](https://github.com/ywltby/tokenscope/actions/runs/40260524738)（rust / rust-acceptance / contracts / frontend / gate）、[Native UI E2E 40260524789](https://github.com/ywltby/tokenscope/actions/runs/40260524789)（五隐私场景 + 其余原生场景全过）、[Install test 40260524737](https://github.com/ywltby/tokenscope/actions/runs/40260524737)（安装、plan-upgrades、十格升级单跳全过——0.6.0 present 55s / deleted 65s 量级，链路按 PR 契约 skipped）。EXE 与 Rust 源在本轮复盘未再变更（仍为 `8f48a293…`）；本地三连取证于 `c5738a6` 树（驱动脚本在自启比较三处修复前），CI 五场景实跑为最终脚本代码的通过证据，两者口径已在本节写明。
 
+### 二轮复核补修：同意保存字节证据内容核对（2026-10-26，`bba12f9`）
+
+复核方独立复现：consent_saved 只带 settings_hash、判定方仅查格式——事件哈希填 `0000000000000000`、实际文件哈希 `0acec52d49477739` 且无后续重写时场景 13/13 全过，「保存事件哈希对应包含同意值与当前修订号的内容」未被取证（取证缺口，非产品缺陷）。
+
+- `acceptance_trace::consent_saved`：保存时字节以 `settings_bytes_hex` 随事件内嵌（JSONL 只追加即不可变证据；hex 手写编码零新依赖），业务期随后的合法重写不影响这份保存时快照。
+- 判定方：`consent_saved_single_atomic_replace` 解码证据重算 fnv1a64 与事件指纹比对（缺证据/畸形 hex/不匹配均失败）；新增 `consent_saved_capture_content` 解析证据内容必须含 `privacy_policy_accepted = true` 与 `privacy_policy_revision = 2`；不与终态文件硬比（业务期重写正例保留）。
+- 红绿：壳侧 AC02 测试加强先红（缺 `settings_bytes_hex` 即 panic）后绿（解码重算一致 + 内容断言）；维护回归 25 项——负例四条（格式合法假哈希、哈希对但缺修订号、哈希对但 accepted=false、缺字节证据字段）先红后绿。
+- 修后固定受测树 `bba12f9` 干净构建 EXE SHA256 `64250a33ce6658a1333fbfa690fb2af20c9278c1bb0a15129fe5347dec4f0204`；五场景三连 15/15 全绿（preseeded 22/21/21、denied-ipc 7/6/9、accept-order 9/8/7、variants-corrupt 5/5/5、variants-close 8/7/7，最差单次之和 **53 秒**）；accept-order 实测保存事件带字节证据、重算哈希与事件指纹一致（`36fd8552…`）、内容解析通过、双击 2 次按下（间隔 18.8ms）、preseeded 实际观察 15006ms。
+
+**双击归因更正**（按实际输入次数、合成次数与单次初始化分别陈述）：实测两次真实输入均到达同意按钮坐标（pointerdown × 2，间隔 18.8–22.4ms）；第二次 pointerdown 之后浏览器未合成第二个 click 事件——同意过渡此时已替换光标下的按钮元素，这是 DOM 被替换时浏览器不再派发 click 合成的行为，**不是产品主动抑制**；产品侧以 `consent_saved` 恰一次、`business_ready` 恰一次回应全部输入（无二次落盘、无二次初始化）。此前「产品正确抑制第二次 click 合成」的表述不准确，证据字段（delivered/synthesizedClicks/intervalMs）如实入 evidence。
+
+**运行标签勘误**：本轮此前汇报将 1438f44（文档轮）的运行标签写反——正确对应为 CI 40261768046、Install test 40261767973（均通过），Native UI E2E 为 40261768083；4c9c71b 轮为 CI 40260524738 / Native 40260524789 / Install 40260524737（均通过）。
+
 ### B2 合并与发布验收（2026-10-22）
 
 - [PR #31](https://github.com/ywltby/tokenscope/pull/31) 最终 HEAD `7664be9`，普通合并为 `c9de40ec3ded2485d2991079f209699ae6ff6107`；两父提交分别为最新 main `9c77cef` 与该 PR HEAD，合并文件树和已验证 HEAD 完全一致。AC03 / AC04 / AC05 分别提交 `6f50af1` / `16ec813` / `db43355`；局部峰谷费率展示修复 `4159633`、经批准的端口和 CI 契约登记 `317573e`、版本登记 `bfb01ed`、短路径取证补修 `7664be9` 各自独立。
