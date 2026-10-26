@@ -501,6 +501,11 @@ PR #52 CI 首跑与修复（2026-10-25）：
 - AC06 三连（`qa-artifacts/workbuddy/b3/ac06-review2-final*`）：五场景 × 3 全部通过（15/15），逐场景秒数 preseeded 20/19/19、denied-ipc 5/5/5、accept-order 7/8/7、variants-corrupt 6/4/5、variants-close 5/5/6，最差单次之和 **45 秒**（旧 74 秒为修复前口径，preseeded 观察窗口原缺失现补足 15 秒）；五步并行 CI 墙钟约等于最慢场景 20 秒，仍远低于 8 分钟预算。preseeded 实际观察 15008/15015/15008ms、双快照 changes=[]；accept-order 双击 delivered=2、间隔 22.4ms、产品正确抑制第二次 click 合成；自启路由 set/status 一致、状态文件在根、注册表四蜂巢不变；real_untouched 全过。
 - AC08 完整浏览器矩阵（`qa-artifacts/workbuddy/b3/ac08-matrix-review2`）：exit=0，measurements.json commit=`c5738a6`；60 巡检场景 + 28 契约全部通过、失败断言 0、fixture_coverage 23/23（uncovered=[]、unregistered=[]）。
 
+复盘修复后的 CI 收口（三个补充提交 + 最终全绿）：
+
+- 4910660 / a98dfad / `4c9c71b`（CI 实跑揭示的第三处装配缺陷）：CI Runner 的 TEMP 为 8.3 短名（`C:\Users\RUNNER~1\...`）而追踪路径经 Rust canonicalize 是长名（`...\runneradmin\...`），自启追踪前缀比较失配（12/13）；第一轮 realpathSync 修复无效——Node 的 **JS 版 realpath 不解析 8.3 短名**（40258699869 的诊断 detail：rootNorm 仍为 runner~1），改用 `fs.realpathSync.native`（libuv `GetFinalPathNameByHandle` 展开）+ 双侧统一斜杠/小写后通过。三次失败 run（40254310229 / 40256321675 / 40258699869）原样保留作归因链。
+- 最终受测 HEAD `4c9c71b` 全部必需检查通过：[CI 40260524738](https://github.com/ywltby/tokenscope/actions/runs/40260524738)（rust / rust-acceptance / contracts / frontend / gate）、[Native UI E2E 40260524789](https://github.com/ywltby/tokenscope/actions/runs/40260524789)（五隐私场景 + 其余原生场景全过）、[Install test 40260524737](https://github.com/ywltby/tokenscope/actions/runs/40260524737)（安装、plan-upgrades、十格升级单跳全过——0.6.0 present 55s / deleted 65s 量级，链路按 PR 契约 skipped）。EXE 与 Rust 源在本轮复盘未再变更（仍为 `8f48a293…`）；本地三连取证于 `c5738a6` 树（驱动脚本在自启比较三处修复前），CI 五场景实跑为最终脚本代码的通过证据，两者口径已在本节写明。
+
 ### B2 合并与发布验收（2026-10-22）
 
 - [PR #31](https://github.com/ywltby/tokenscope/pull/31) 最终 HEAD `7664be9`，普通合并为 `c9de40ec3ded2485d2991079f209699ae6ff6107`；两父提交分别为最新 main `9c77cef` 与该 PR HEAD，合并文件树和已验证 HEAD 完全一致。AC03 / AC04 / AC05 分别提交 `6f50af1` / `16ec813` / `db43355`；局部峰谷费率展示修复 `4159633`、经批准的端口和 CI 契约登记 `317573e`、版本登记 `bfb01ed`、短路径取证补修 `7664be9` 各自独立。
