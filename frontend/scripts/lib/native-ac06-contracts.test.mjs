@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "vitest";
 import { changedBusinessFiles, settingsFingerprint, snapshotBusinessFiles } from "./acceptance-io.mjs";
+import { parse as parseToml } from "smol-toml";
 
 const source = fs.readFileSync(new URL("../native-acceptance.mjs", import.meta.url), "utf8");
 
@@ -277,6 +278,7 @@ function runAcceptOrderScenario(options = {}) {
     {
       path,
       settingsFingerprint,
+      parseToml,
       registrySnapshot() {
         registryCalls += 1;
         return registryChanged && registryCalls > 1 ? { hive: ["changed"] } : registry;
@@ -659,3 +661,54 @@ test("字节证据：业务期合法重写（终态≠保存时字节）仍通�
     "保存时字节证据与终态无关，业务期重写不影响判定",
   );
 });
+
+// ── 同意字节证据内容解析（三轮复核缺口）─────────────────────────────────
+// capture_content 此前用正则搜索字符串——注释假字段、[notes] 表内字段、
+// revision = 20（前缀匹配成 2）三种形态全部误放行（复核方复现
+// review-pr52-round3/native-ac06-content-probes-same-bytes.json，哈希与
+// 字节均自洽仍 14/14 全过）。判定必须用真正的 TOML 解析器：解析失败拒绝，
+// 顶层 privacy_policy_accepted 严格为布尔 true、顶层修订号严格为整数 2。
+
+const CONTENT_BAD_CASES = [
+  {
+    label: "注释假字段（实际 accepted = false）",
+    text: "# privacy_policy_accepted = true\nprivacy_policy_accepted = false\nprivacy_policy_revision = 2\n",
+  },
+  {
+    label: "字段只在 [notes] 表，顶层缺失",
+    text: "\n[notes]\nprivacy_policy_accepted = true\nprivacy_policy_revision = 2\n",
+  },
+  {
+    label: "修订号 20（正则会匹配成 2）",
+    text: "privacy_policy_accepted = true\nprivacy_policy_revision = 20\n",
+  },
+  {
+    label: "非法 TOML（解析失败必须拒绝）",
+    text: "privacy_policy_accepted = true\nprivacy_policy_revision = [2\n",
+  },
+];
+
+for (const bad of CONTENT_BAD_CASES) {
+  test(`字节证据内容：${bad.label} 必须失败`, async () => {
+    const records = [
+      { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+      {
+        seq: 1,
+        event: "consent_saved",
+        settings_hash: settingsFingerprint(Buffer.from(bad.text, "utf8")),
+        settings_bytes_hex: Buffer.from(bad.text, "utf8").toString("hex"),
+      },
+      { seq: 2, event: "business_ready" },
+      { seq: 3, event: "history_open" },
+    ];
+    const { checks } = await runAcceptOrder({ records, settingsText: bad.text });
+    const content = checks.find((check) => check.name === "consent_saved_capture_content");
+    assert.ok(content, "缺少内容解析断言");
+    assert.equal(content.pass, false, `误放行：${bad.label}`);
+    assert.equal(
+      checks.find((check) => check.name === "consent_saved_single_atomic_replace").pass,
+      true,
+      "哈希自洽时重算断言应通过（失败必须来自内容解析层）",
+    );
+  });
+}

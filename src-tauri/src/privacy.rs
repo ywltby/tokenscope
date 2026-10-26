@@ -808,8 +808,25 @@ mod acceptance_closure_tests {
                 .unwrap()
         );
         let captured_text = String::from_utf8(captured).unwrap();
-        assert!(captured_text.contains("privacy_policy_accepted = true"));
-        assert!(captured_text.contains("privacy_policy_revision = 2"));
+        // 内容判定与判定方同口径：真正的 TOML 解析（三轮复核：字符串
+        // contains 会被注释假字段、[notes] 表内字段与 revision = 20 前缀
+        // 匹配骗过），严格检查顶层布尔 true 与当前整数修订号。
+        let parsed: toml::Value = toml::from_str(&captured_text)
+            .unwrap_or_else(|error| panic!("字节证据不是合法 TOML：{error}"));
+        assert_eq!(
+            parsed
+                .get("privacy_policy_accepted")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "顶层 privacy_policy_accepted 必须是布尔 true：{parsed}"
+        );
+        assert_eq!(
+            parsed
+                .get("privacy_policy_revision")
+                .and_then(|v| v.as_integer()),
+            Some(2),
+            "顶层 privacy_policy_revision 必须是整数 2：{parsed}"
+        );
         println!("AC02_SHELL_TRACE {}", serde_json::json!(records));
     }
 

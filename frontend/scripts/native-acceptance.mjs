@@ -19,6 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+import { parse as parseToml } from "smol-toml";
 import { nativeUiRefresh } from "./contracts/native-ui-refresh.mjs";
 import { nativeCollectionStatus } from "./contracts/native-collection-status.mjs";
 import { nativeSourcePaths } from "./contracts/native-source-paths.mjs";
@@ -3071,15 +3072,26 @@ const scenarios = {
       `指纹=${JSON.stringify(consentRows[0]?.settings_hash)} 重算=${recomputed ?? "无字节证据"} 同意前写入=${JSON.stringify(writesBeforeConsent)}`,
     );
     const captureText = captureBytes === null ? "" : captureBytes.toString("utf8");
-    ck.add(
-      "consent_saved_capture_content",
-      captureBytes !== null &&
-        /privacy_policy_accepted\s*=\s*true/.test(captureText) &&
-        /privacy_policy_revision\s*=\s*2/.test(captureText),
-      captureBytes === null
-        ? "无字节证据"
-        : captureText.split("\n").slice(0, 4).join(" | "),
-    );
+    // 内容判定必须经真正的 TOML 解析（三轮复核：正则搜索会被注释假字段、
+    // [notes] 表内字段与 revision = 20 前缀匹配误放行）：解析失败拒绝；
+    // 顶层 privacy_policy_accepted 严格为布尔 true、顶层修订号严格为当前
+    // 整数值 2——不搜索子表、不做字符串包含。
+    const captureContent = (() => {
+      if (captureBytes === null) return { ok: false, detail: "无字节证据" };
+      let parsed;
+      try {
+        parsed = parseToml(captureText);
+      } catch (error) {
+        return { ok: false, detail: `字节证据不是合法 TOML：${error}` };
+      }
+      const accepted = parsed.privacy_policy_accepted;
+      const revision = parsed.privacy_policy_revision;
+      return {
+        ok: accepted === true && revision === 2,
+        detail: `accepted=${JSON.stringify(accepted)} revision=${JSON.stringify(revision)}（顶层严格布尔 true / 整数 2）`,
+      };
+    })();
+    ck.add("consent_saved_capture_content", captureContent.ok, captureContent.detail);
     const settings = fs.readFileSync(settingsPath, "utf8");
     ck.add(
       "accept_writes_consent_with_revision",

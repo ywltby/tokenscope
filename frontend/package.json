@@ -27,6 +27,7 @@
     "happy-dom": "^20.14.5",
     "playwright-core": "^1.63.0",
     "prettier": "^3.9.9",
+    "smol-toml": "^1.9.1",
     "typescript": "^5.9.2",
     "vite": "^8.3.2",
     "vitest": "^5.0.3",

@@ -37,3 +37,8 @@ tauri-plugin-autostart = "2.7.0"
 log = { workspace = true }
 jiff = { workspace = true }
 dirs = "6"
+
+[dev-dependencies]
+# 壳侧验收测试核对 consent_saved 字节证据内容：与核心库同一解析器，
+# 不用字符串包含断言（PR52 三轮复核：contains 会被注释/子表/前缀骗过）。
+toml = "1.1.6"
