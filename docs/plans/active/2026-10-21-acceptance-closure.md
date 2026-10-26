@@ -4,6 +4,7 @@
 > 进度（2026-10-25，范围调整）：**用户授权 B3 分批实施——本批获准实施 AC06（四个隐私原生场景、自启隔离替身、回归与反例验证，以及满足预算后的 CI 接入）与 AC08（实际 fixture 覆盖记录、覆盖汇总与回归验证、本地完整浏览器矩阵取证）；AC07 整项暂缓（C/D 均不在本批执行，不新增其专用价格线程探针，不改变产品同步周期），进程内恢复目标继续保留 N10 待验。** 实施依据 a75de15 及后续最新版本的收口计划；AC06 含产品输入，实施 PR 递增 patch（若 main 仍为 0.6.0 则预期 0.6.1）。
 > 进度（2026-10-22）：**B1 / AC01 已交付，N14 关闭；B2 / AC02–AC05 随 PR #31（`c9de40e`）交付，main 三条运行全部成功，v0.5.9 已公开并登记原资产基线**。N11 的安装后人工同步尾项按用户决定保留待验；**B3 修订稿已拟并经三轮修订（2026-10-25，§4b；AC06 选 A、AC07 推荐 D 待用户确认、实施授权未给，未实施）**，B4、B5 未执行，不提前关闭 N10–N13。
 > 进度（2026-10-25，本批实施完成）：**按上方范围调整授权，AC06 与 AC08 已实施完毕（提交 `0191f78` / `17fb37e` / `af784bf`，版本递增 0.6.1；[PR #52](https://github.com/ywltby/tokenscope/pull/52) 首跑暴露的 0.6.0 升级跳装配缺口已随 `b9b2480` 修复，修复后全部必需检查通过，待用户复核合并）；AC07 未实施，价格线程探针未添加，产品同步周期未改，进程内恢复继续保留 N10 待验。** 执行记录见 §6「B3 分批实施」。
+> 进度（2026-10-26，PR #52 复盘修复）：**用户六项复核意见全部修复（提交 `8530b49` / `8355117` / `a17185d` / `1737a6a` / `c5738a6` 等，逐项红先转绿），并完成自启命令层路由补证与三项证据勘误（超时根因未定位如实记录、AC08 旧证据提交词勘误、覆盖口径勘误）；修后在固定受测树 `c5738a6` 重新取证——AC06 三连 15/15（45s）、AC08 全矩阵 23/23。AC07 仍整项暂缓，N10 保持开放。** 执行记录见 §6「PR #52 复盘修复」。
 > 本计划只排验收与取证所需的改动。验收中暴露的产品缺陷按缺陷流程单独修复，不在本计划里预先设计修法。
 > 排期补记（2026-10-24）：用户确认 WorkBuddy 专项按 N17 独立推进，本计划 B3–B5 不再作为它的启动前置；本计划原待验范围继续保留，完成本计划也不代替 N17 的实现与验收。
 
@@ -449,7 +450,7 @@ E（否决为默认）：acceptance 专用可控时钟/缩短轮询间隔，≈3
 红先（在未改代码上确认失败）：
 
 - AC06 校验方：`acceptance-io.test.mjs` 新增用例「autostart shim trace events require an in-root path」先于 EVENTS/PATH_EVENTS 登记运行——两个事件未登记时校验器按未知事件放行，越根/相对/缺路径断言全部失败（红）；两集合同时登记后同一用例转绿，缺 path、相对 path、越出隔离根三种均判校验失败。
-- AC08 覆盖表：`fixture-coverage.test.mjs` 四用例先红（模块缺失）后绿，覆盖「未覆盖不虚报已覆盖」「契约 fixture 去重」「失败巡检不算覆盖」「未注册浮出」四个反例。
+- AC08 覆盖表：`fixture-coverage.test.mjs` 四用例先红（模块缺失）后绿，覆盖「未覆盖不虚报已覆盖」「契约 fixture 去重」「失败巡检仍算实际执行覆盖（但巡检失败本身使总结果失败——覆盖口径勘误见下方复盘记录）」「未注册浮出」四个反例。
 
 AC06 执行记录：
 
@@ -475,6 +476,30 @@ PR #52 CI 首跑与修复（2026-10-25）：
 - 修复后终跑（受测 HEAD `978c513`，全部必需检查通过）：[CI 40230407211](https://github.com/ywltby/tokenscope/actions/runs/40230407211)（rust / rust-acceptance / contracts / frontend / gate 全过）、[Native UI E2E 40230407410](https://github.com/ywltby/tokenscope/actions/runs/40230407410)（五场景再跑通过）、[Install test 40230407568](https://github.com/ywltby/tokenscope/actions/runs/40230407568)（安装、plan-upgrades、十格升级单跳全过——**0.6.0 present 58s / deleted 55s**，链路按 PR 契约 skipped）。
 
 边界保留：AC07 整项未实施（C/D 均未执行），价格线程探针未添加，产品同步周期未改；N10 保持开放，进程内恢复继续待验；真实自启出现/移除留 D5 3.4 人工签字；B4（AC09）、B5 未执行。
+
+### PR #52 复盘修复（2026-10-26，用户六项复核意见 + 证据勘误）
+
+复核反例与原始结果保留在 `qa-artifacts/workbuddy/b3/review-pr52/`（脚本退出 0 表示「成功复现缺陷」，不是产品验证通过）。逐项修复均先有揭示缺陷的失败用例再转绿；一个提交解决一类问题：
+
+1. **格式 3 基线 add 登记产生不可读登记表（P1）**——`8530b49`。原反例 `probe_baseline_registration.py`：add_entry 构造条目不含 privacy_revision，register 直接写盘，登记「成功」后 load_registry 拒读整表。修复：add_entry 在设置格式 ≥ 3 时从**发布标签自身源码**读 `PRIVACY_POLICY_REVISION`（`git show <tag-commit>:settings.rs`，新旧两处路径；实测 `44c026d`（v0.6.0）读得 2，不读当前工作树），拿不到即拒绝登记；register 写盘前 `parse_registry` 整表校验，失败时原表逐字节不变。回归：格式 3 add → reload → resolved_entry → select → check 全链、标签缺修订号干净失败且原表不变、格式 1 add 不携带该键。修后原反例探针按预期转为干净拒绝。
+2. **privacy-preseeded 缺观察窗口与文件不变断言（P1）**——提交见修复 2 与实跑对齐提交。原反例：场景体无任何 wait、无双快照比对，真实运行存在约 1 秒结束的场景。修复：隐私框出现后实际观察 15 秒（`performance.now` 单调起止入 evidence），before 取 prepareRoot 在 mutate 后、launch 前的预置快照（新增 prelaunchSettings），after 观察后重采；复用 `snapshotDataDir`/`dataDirChanges` 双向比对（预置/新增/删除/修改，含 history.db/-wal/-shm 与 settings.toml 逐字节）。维护回归四用例先红后绿：满窗+未变才通过；观察不足失败；窗口内修改/新增/删除业务文件判定链失败；窗口内改写 settings 失败。修后三连实测观察 15008–15015ms、changes=[]。
+3. **同意顺序断言漏检（P1）**——`8355117`。原反例：旧断言只查首个读取 seq > max(consent, ready)，business_ready(seq1)→consent_saved(seq2)→history_open(seq3) 与 consent 缺失均放行。修复：新增 `consent_saved_precedes_business_ready`（consent<ready，缺任一事件即失败）与 `business_ready_precedes_first_business_read`，原合并断言保留兜底；新增 `consent_saved_single_atomic_replace` 核对同意保存事件自带指纹与相邻成对的 settings_write（不能只凭最终字段宣称原子顺序）。回归四用例先红后绿（正例成序、颠倒失败、缺事件失败、指纹畸形失败）。
+4. **双击可能只发一次输入（P2）**——`a17185d` + 实跑对齐 `c5738a6`。原反例：第二次 locator.click 失败被 catch 吞掉、delay:20 非点击间隔。修复：坐标级 `page.mouse.click` 真实输入 + 页面捕获计数器（pointerdown/click + timeStamp + clientX/Y）证明输入到达；第二次下发失败显式失败。**实跑修正两处**：并发排队会在 CDP 输入管线丢第二次完整点击（改顺序下发）；同意过渡替换光标下 DOM 使浏览器不合成第二次 click（实测 pointerdown#2 于 21.6ms 到达正确坐标、click 仅合成 1 次）——送达判定按 pointerdown（输入到达与产品抑制解耦），click 合成次数入 evidence。修后实测 delivered=2、间隔 22.4ms、synthesizedClicks=1。
+5. **日期浮层材质断言放过错误外壳（P2）**——提交见修复 5。原反例：量测含 body 页面背景且只要求 solidLayers≥1，双层实心浮层与全透明外壳靠页面背景通过（两个 falsePositive 复现）。修复：量测边界从 .range-panel 到 body/html 前（hitPageBackground 必须为真且层级≥3），边界内**恰好一层实色且必须 n-popover 外壳**，其余层（含内层与 v-binder 包装）透明无模糊、边界内零 elevated。维护回归以内存量测驱动真实 runContracts：正例链取自真实取证形态，双层实色/全透明/边界未达页面背景三反例先红后绿。
+6. **闸门观察误判已有失效修订号（P2）**——`1737a6a`。原反例 `probe_stale_consent_gate.py`：观察函数把「privacy_policy_revision 字段存在」判为程序新写入，启动前已有 revision=1 且文件未变的合法旧同意被误拒。修复：观察前后**按行内容比对**——新增（前无后有）或改写（值变化）才违规，内容未变通过；其余变化仍由整文件比对拦截。真实观察函数完整路径六用例（外部动作惰性桩化、快照/比对真实实现）先红后绿：未变通过、新增拒、改写拒、改其他设置拒、新增业务日志拒、历史库写入拒。升级契约 74→80 项。0.6.0→0.6.1 同修订跳观察段本就跳过，本反例不涉及十格升级的既有通过事实。
+
+补证与勘误：
+
+- **自启命令层路由证据**（提交见补证提交）：acceptance 构建下经真实 IPC 调用 autostart_set/status，断言替身返回一致、隔离根出现 autostart-state.json、追踪 write/read 路径在根内、四蜂巢注册表只读快照不变（真实后端不可达，全程零注册表写入）；另附 `scripts/test_autostart_command_routing.py` 源码契约（require_ready 先于 run_blocking、acceptance cfg→替身→not cfg→真实插件顺序、全部替身引用在 acceptance 区域内=普通构建编译不到、autolaunch 仅在 not 区），契约自检三类突变必须被检出。修后实跑该路由段 19/19 断言全过。
+- **两次启动超时根因：未定位**。复查复核方提供的完整证据（native denied-ipc launches：宿主 4294967295 退出、CDP 2.3s 就绪但 20s 内只有 about:blank、无 tauri target、同 run 其余场景正常；frontend 首格 `#app .app-shell` 10 秒超时、同 run 其余三格正常）：现有证据只有症状（首轮浏览器/页面未就绪），没有控制台采集与可归因的错误输出，**无法确定「环境抖动」为根因**；失败证据原样保留（CI run 40226439454 frontend 首跑、40231825406 native-ui 首跑及 review-pr52 的两份 zip），以重跑通过作为恢复事实而非归因结论。未增加任何超时掩盖。
+- **AC08 旧证据提交词勘误**：ac08-matrix-final4 的 measurements.json commit 字段为 `17fb37e`（运行时 HEAD），此前文档写 `af784bf` 不实——矩阵运行发生在 af784bf 提交之前，工作树含未提交的归因修复，**无法证明干净提交对应关系**；该旧证据保留但降级为开发期参考。修后已在固定受测树重新取证（见下）。
+- **覆盖口径勘误**：实际实现是「失败巡检仍计入实际执行覆盖（不虚报为通过），但巡检失败本身使总结果失败」；此前「失败巡检不算覆盖」的表述与实现不符，红先清单已更正。
+
+修后固定受测树重新取证（HEAD `c5738a6`，工作树干净）：
+
+- 受测 acceptance EXE SHA256 `8f48a293d7cfd359a7f330ba82e14a052b35041fe3a27428cc91df3e9a833df5`（cargo build --locked -p tokenscope-app --release --features acceptance,tauri/custom-protocol）；驱动脚本散列：native-acceptance.mjs `f2d3a8ab…01559c`、interaction-contracts.mjs `b0d62fe3…f5739`、check-ui-contracts.mjs `cf4b581c…18d71`。
+- AC06 三连（`qa-artifacts/workbuddy/b3/ac06-review2-final*`）：五场景 × 3 全部通过（15/15），逐场景秒数 preseeded 20/19/19、denied-ipc 5/5/5、accept-order 7/8/7、variants-corrupt 6/4/5、variants-close 5/5/6，最差单次之和 **45 秒**（旧 74 秒为修复前口径，preseeded 观察窗口原缺失现补足 15 秒）；五步并行 CI 墙钟约等于最慢场景 20 秒，仍远低于 8 分钟预算。preseeded 实际观察 15008/15015/15008ms、双快照 changes=[]；accept-order 双击 delivered=2、间隔 22.4ms、产品正确抑制第二次 click 合成；自启路由 set/status 一致、状态文件在根、注册表四蜂巢不变；real_untouched 全过。
+- AC08 完整浏览器矩阵（`qa-artifacts/workbuddy/b3/ac08-matrix-review2`）：exit=0，measurements.json commit=`c5738a6`；60 巡检场景 + 28 契约全部通过、失败断言 0、fixture_coverage 23/23（uncovered=[]、unregistered=[]）。
 
 ### B2 合并与发布验收（2026-10-22）
 
