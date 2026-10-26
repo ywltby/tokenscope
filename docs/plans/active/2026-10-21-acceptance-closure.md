@@ -569,8 +569,14 @@ PR #52 CI 首跑与修复（2026-10-25）：
 
 - 装配更正与归因修正随 `b73c025` 推送后，该轮（[Native 40358956806](https://github.com/ywltby/tokenscope/actions/runs/40358956806)）privacy-accept-order **再次** `.app-nav` 60 秒超时——同型第二次复现；因失败现场取证缺口（场景在 waitForSelector 抛错时点击捕获未读取），仍无法区分「输入未发出 / 输入未处理 / 保存失败」。
 - 取证能力补齐 `ef77836`：解锁超时的 catch 先抓现场再原样抛错——页面捕获的全部点击（类型/时间戳/坐标）、隐私框是否仍在、阻断错误文案、settings.toml 快照、已发生追踪事件序列、整页截图，入 evidence 的 `acceptFailureDiagnostics`；取证自身失败不掩盖原错误；正常路径与 41 项维护回归不变。
-- `ef77836` 轮（[Native 40363363800](https://github.com/ywltby/tokenscope/actions/runs/40363363800)）失败场景变为 **ui-ccs-import**（「无页面 target」同型）——**隐私五场景全部通过**（含此前两轮失败的 accept-order）。至此五轮 Native 失败分布：denied-ipc、preseeded、accept-order×2、ccs-import，两种症状（无 target ×3、解锁超时 ×2），本地 60+ 次运行零复现——强随机的 CI 启动环境问题，全部失败 run 原样保留，不增加超时掩盖。
+- `ef77836` 轮（[Native 40363363800](https://github.com/ywltby/tokenscope/actions/runs/40363363800)）失败场景变为 **ui-ccs-import**（「无页面 target」同型）；该轮 **privacy 五场景为 skipped 而非通过**（首轮作业失败后 GitHub 跳过同作业剩余场景，第二次尝试 attempt 因新推送触发并发取消而 cancelled）——此处此前误写「隐私五场景全部通过」，已在七轮复核更正（复核方经 API 核实运行矩阵）。失败的进一步归因不足：失败分布（denied-ipc、preseeded、accept-order×2、ccs-import，无 target ×3、解锁超时 ×2）与本地未复现**不足以证明环境根因**，五轮 Native 失败**继续记为根因未定位**，全部失败 run 原样保留，不增加超时掩盖。
 - 最终受测 HEAD `c831b74`（复核方追加的研究文档提交，docs-only 不动验收代码）全部必需检查通过：[CI 40366682692](https://github.com/ywltby/tokenscope/actions/runs/40366682692)、[Native UI E2E 40366682655](https://github.com/ywltby/tokenscope/actions/runs/40366682655)、[Install test 40366682837](https://github.com/ywltby/tokenscope/actions/runs/40366682837)——18 pass + 1 skipped、0 fail，覆盖确认 ef77836 的验收代码检查。
+
+七轮复核补修（2026-10-27）：取证逐项有界
+
+- **取证失败清空现场（P2）**：解锁超时的诊断段原先整体 try/catch——任何单项失败（截图异常、CDP 拒绝）都会用 `{errorText, diagError}` 覆盖已取得的现场。改为**逐项采集、失败只追加**：每项独立写入 diagnostics，失败记为 `<label>Error`，其余项照常。
+- **取证无时限（P2）**：诊断段的 `page.evaluate` 直接 await——CDP 挂起 8.1 秒仍未抛回原错误（复核方探针 `review-pr52-round7/accept-failure-probes.json`）。每项经 `withTimeout(…, 8000)` 有界（复用既有原语），超时跳过并记原因；挂计数器的 evaluate（点击前，正常路径）同样补 8 秒上限——否则 CDP 挂起时它先于取证段挂住。
+- 红绿：维护回归 44 项——三反例（截图失败不清空现场、CDP 拒绝只记该项错误、CDP 挂起在上限内跳过且不拖垮场景）先红后绿；本地实跑 20/20 断言通过。
 
 ### B2 合并与发布验收（2026-10-22）
 
