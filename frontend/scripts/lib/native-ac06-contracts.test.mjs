@@ -228,23 +228,64 @@ test("preseeded: 观察窗口内改写 settings.toml 必须失败", async () => 
 // 旧断言只查 read > max(consent, ready)：business_ready 先于 consent_saved、
 // 或 consent_saved 整条缺失都会放行（反例 native-ac06-review-probes.mjs）。
 
-function runAcceptOrder({ records, settingsText }) {
+/** privacy-accept-order 统一执行器：顺序/指纹、双击输入、自启路由三类
+ * 断言共享同一场景面（点击计数器、坐标双击、同意后自启 IPC、注册表
+ * 快照），旧 helper 只是对它的薄封装。 */
+function runAcceptOrderScenario(options = {}) {
+  const {
+    settingsText = ORDER_SETTINGS,
+    records = null,
+    deliveredClicks = 2,
+    gapMs = 30,
+    failSecondDispatch = false,
+    statusValue = true,
+    stateFileText = '{"enabled":true}',
+    autostartTrace = null,
+    registryChanged = false,
+  } = options;
   const box = { x: 100, y: 200, width: 120, height: 40 };
+  const centerX = box.x + box.width / 2;
+  const centerY = box.y + box.height / 2;
   const clicksLog = [];
   const checks = [];
+  let dispatched = 0;
+  let registryCalls = 0;
+  const registry = { hive: ["unchanged"] };
+  const autostartRows =
+    autostartTrace ?? [
+      { seq: 901, event: "autostart_write", path: "C:/synthetic-root/autostart-state.json" },
+      { seq: 902, event: "autostart_read", path: "C:/synthetic-root/autostart-state.json" },
+    ];
+  const traceRecords = records
+    ? [...records, ...autostartRows]
+    : [
+        ...consentRecords(settingsText),
+        { seq: 2, event: "business_ready" },
+        { seq: 3, event: "history_open" },
+        ...autostartRows,
+      ];
   const run = extractScenario(
     "privacy-accept-order",
     "\n  /**\n   * AC06 场景 4a",
     {
       path,
       settingsFingerprint,
+      registrySnapshot() {
+        registryCalls += 1;
+        return registryChanged && registryCalls > 1 ? { hive: ["changed"] } : registry;
+      },
       fs: {
-        readFileSync(_file, encoding) {
+        readFileSync(file, encoding) {
+          const name = String(file);
+          if (name.endsWith("autostart-state.json")) {
+            if (stateFileText === null) throw new Error("ENOENT");
+            return stateFileText;
+          }
           return encoding === "utf8" ? settingsText : Buffer.from(settingsText);
         },
       },
       readAcceptanceTrace() {
-        return { violations: [], records };
+        return { violations: [], records: traceRecords };
       },
     },
   );
@@ -261,20 +302,22 @@ function runAcceptOrder({ records, settingsText }) {
           };
         },
         async evaluate(fn) {
-          if (fn.toString().includes("addEventListener")) {
+          const text = fn.toString();
+          if (text.includes("addEventListener")) {
             clicksLog.length = 0;
             return undefined;
           }
+          if (text.includes("autostart_set")) return { ok: true, value: true };
+          if (text.includes("autostart_status")) return { ok: true, value: statusValue };
           return clicksLog;
         },
         mouse: {
           async click() {
-            clicksLog.push({
-              type: "click",
-              ts: 1030 + clicksLog.length * 30,
-              x: box.x + box.width / 2,
-              y: box.y + box.height / 2,
-            });
+            dispatched += 1;
+            if (failSecondDispatch && dispatched === 2) throw new Error("CDP 输入通道错误");
+            if (dispatched <= deliveredClicks) {
+              clicksLog.push({ type: "click", ts: 1000 + (dispatched - 1) * gapMs, x: centerX, y: centerY });
+            }
           },
         },
         async screenshot() {},
@@ -284,7 +327,11 @@ function runAcceptOrder({ records, settingsText }) {
     },
     ck: { add: (name, pass, detail) => checks.push({ name, pass, detail }) },
     ev: {},
-  }).then(() => ({ checks }));
+  }).then(() => ({ checks, dispatched }));
+}
+
+function runAcceptOrder({ records, settingsText }) {
+  return runAcceptOrderScenario({ records, settingsText });
 }
 
 function consentRecords(settingsText, { hash } = {}) {
@@ -354,71 +401,7 @@ test("accept-order: 落盘指纹与最终 settings 不一致必须失败", async
 // 仍全绿（反例 secondClickCounterexample：successfulClicks=1 通过）。
 
 function runAcceptOrderClicks({ deliveredClicks, gapMs, failSecondDispatch, records }) {
-  const checks = [];
-  const box = { x: 100, y: 200, width: 120, height: 40 };
-  const centerX = box.x + box.width / 2;
-  const centerY = box.y + box.height / 2;
-  const clicksLog = [];
-  let dispatched = 0;
-  const run = extractScenario(
-    "privacy-accept-order",
-    "\n  /**\n   * AC06 场景 4a",
-    {
-      path,
-      settingsFingerprint,
-      fs: {
-        readFileSync(_file, encoding) {
-          return encoding === "utf8" ? ORDER_SETTINGS : Buffer.from(ORDER_SETTINGS);
-        },
-      },
-      readAcceptanceTrace() {
-        return { violations: [], records };
-      },
-    },
-  );
-  const invocation = run({
-    inst: {
-      page: {
-        async waitForSelector() {},
-        async waitForTimeout() {},
-        locator() {
-          return {
-            first() {
-              return { async boundingBox() { return box; } };
-            },
-          };
-        },
-        async evaluate(fn) {
-          const text = fn.toString();
-          if (text.includes("addEventListener")) {
-            clicksLog.length = 0;
-            return undefined;
-          }
-          return clicksLog;
-        },
-        mouse: {
-          async click() {
-            dispatched += 1;
-            if (failSecondDispatch && dispatched === 2) throw new Error("CDP 输入通道错误");
-            if (dispatched <= deliveredClicks) {
-              clicksLog.push({
-                type: "click",
-                ts: 1000 + (dispatched - 1) * gapMs,
-                x: centerX,
-                y: centerY,
-              });
-            }
-          },
-        },
-        async screenshot() {},
-      },
-      root: "C:/synthetic-root",
-      opts: { shots: "C:/synthetic-shots" },
-    },
-    ck: { add: (name, pass, detail) => checks.push({ name, pass, detail }) },
-    ev: {},
-  });
-  return invocation.then(() => ({ checks, dispatched }));
+  return runAcceptOrderScenario({ deliveredClicks, gapMs, failSecondDispatch, records });
 }
 
 function orderedRecords() {
@@ -466,5 +449,57 @@ test("accept-order: 第二次输入下发失败必须显式失败（不得吞掉
   await assert.rejects(
     runAcceptOrderClicks({ deliveredClicks: 2, gapMs: 30, failSecondDispatch: true, records: orderedRecords() }),
     /CDP 输入通道错误/,
+  );
+});
+
+// ── privacy-accept-order：同意后自启命令层路由（方案 A / PR52 补证）──────
+// helper 单测不能替代 command 层证据：同意后经真实 IPC 开关自启，acceptance
+// 构建必须路由到隔离替身——返回值、状态文件、追踪路径、注册表四蜂巢快照。
+
+function runAcceptOrderRouting(options) {
+  return runAcceptOrderScenario(options);
+}
+
+test("autostart 路由：替身返回、状态文件、根内追踪、注册表不变齐备才通过", async () => {
+  const { checks } = await runAcceptOrderRouting({});
+  assert.deepEqual(checks.filter((check) => !check.pass), [], "正例必须全过");
+  for (const name of [
+    "autostart_routes_to_isolated_shim",
+    "autostart_state_file_in_root",
+    "autostart_trace_paths_inside_root",
+    "autostart_registry_untouched",
+  ]) {
+    assert.ok(checks.some((check) => check.name === name), `缺少具名断言：${name}`);
+  }
+});
+
+test("autostart 路由：状态与落盘不一致（疑似真实插件）必须失败", async () => {
+  const { checks } = await runAcceptOrderRouting({ statusValue: false });
+  assert.ok(
+    checks.some((check) => check.name === "autostart_routes_to_isolated_shim" && !check.pass),
+  );
+});
+
+test("autostart 路由：隔离根没有状态文件必须失败", async () => {
+  const { checks } = await runAcceptOrderRouting({ stateFileText: null });
+  assert.ok(checks.some((check) => check.name === "autostart_state_file_in_root" && !check.pass));
+});
+
+test("autostart 路由：追踪路径越出隔离根必须失败", async () => {
+  const { checks } = await runAcceptOrderRouting({
+    autostartTrace: [
+      { seq: 4, event: "autostart_write", path: "C:/real/registry/leak.json" },
+      { seq: 5, event: "autostart_read", path: "C:/real/registry/leak.json" },
+    ],
+  });
+  assert.ok(
+    checks.some((check) => check.name === "autostart_trace_paths_inside_root" && !check.pass),
+  );
+});
+
+test("autostart 路由：注册表快照变化必须失败", async () => {
+  const { checks } = await runAcceptOrderRouting({ registryChanged: true });
+  assert.ok(
+    checks.some((check) => check.name === "autostart_registry_untouched" && !check.pass),
   );
 });

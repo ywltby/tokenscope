@@ -3042,6 +3042,65 @@ const scenarios = {
         /privacy_policy_revision\s*=\s*2/.test(settings),
       settings.split("\n").slice(0, 4).join(" | "),
     );
+
+    // 自启命令层路由（方案 A / PR52 复盘补证）：helper 单测不能替代命令层
+    // 证据——同意后经真实 IPC 开关自启，acceptance 构建必须路由到隔离替身：
+    // 返回值与状态一致、状态文件落在隔离根、追踪路径在根内、四蜂巢注册表
+    // 只读快照不变（真实后端不可达；本场景绝不写真实注册表）。
+    const autostartRegistryBefore = registrySnapshot();
+    const autostartSet = await page.evaluate(() =>
+      window.__TAURI_INTERNALS__
+        .invoke("autostart_set", { enabled: true })
+        .then((value) => ({ ok: true, value }))
+        .catch((error) => ({ ok: false, error: String(error) })),
+    );
+    const autostartStatus = await page.evaluate(() =>
+      window.__TAURI_INTERNALS__
+        .invoke("autostart_status", {})
+        .then((value) => ({ ok: true, value }))
+        .catch((error) => ({ ok: false, error: String(error) })),
+    );
+    ck.add(
+      "autostart_routes_to_isolated_shim",
+      autostartSet.ok && autostartStatus.ok && autostartStatus.value === true,
+      `set=${JSON.stringify(autostartSet)} status=${JSON.stringify(autostartStatus)}`,
+    );
+    const autostartStatePath = path.join(inst.root, "autostart-state.json");
+    let autostartStateFile = null;
+    try {
+      autostartStateFile = JSON.parse(fs.readFileSync(autostartStatePath, "utf8"));
+    } catch {
+      autostartStateFile = null;
+    }
+    ck.add(
+      "autostart_state_file_in_root",
+      autostartStateFile?.enabled === true,
+      `状态文件=${JSON.stringify(autostartStateFile)}`,
+    );
+    const autostartTraceRows = trace.records.filter(
+      (r) => r.event === "autostart_write" || r.event === "autostart_read",
+    );
+    const rootAsPosix = inst.root.replaceAll("\\", "/");
+    ck.add(
+      "autostart_trace_paths_inside_root",
+      autostartTraceRows.length === 2 &&
+        autostartTraceRows.every(
+          (r) => typeof r.path === "string" && r.path.replaceAll("\\", "/").startsWith(rootAsPosix),
+        ),
+      autostartTraceRows.map((r) => `${r.event}:${r.path}`).join(",") || "无自启追踪",
+    );
+    const autostartRegistryAfter = registrySnapshot();
+    const autostartRegistryChanged = Object.keys(autostartRegistryBefore).filter(
+      (key) =>
+        JSON.stringify(autostartRegistryBefore[key]) !==
+        JSON.stringify(autostartRegistryAfter[key]),
+    );
+    ck.add(
+      "autostart_registry_untouched",
+      autostartRegistryChanged.length === 0,
+      autostartRegistryChanged.join(",") || "四蜂巢快照一致",
+    );
+    ev.autostartRouting = { set: autostartSet, status: autostartStatus };
     await page.screenshot({ path: path.join(inst.opts.shots, "privacy-accept-order.png") });
   },
 
