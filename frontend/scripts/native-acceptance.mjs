@@ -3109,10 +3109,11 @@ const scenarios = {
     })();
     // 前缀比较双侧规范化：CI Runner 的 TEMP 可能是 8.3 短名（RUNNER~1）而
     // 追踪路径经 Rust canonicalize 是长名（runneradmin），且 Windows 路径
-    // 大小写不敏感——realpathSync 解析短名 + 统一斜杠与大小写后再比较；
-    // 失败 detail 带上解析后的根前缀，避免盲猜（CI 40254310229/40256321675）。
+    // 大小写不敏感。**必须用 realpathSync.native**——JS 版 realpath 不解析
+    // 8.3 短名（CI 40258699869 的 rootNorm 仍为 runner~1 即此因），native
+    // 走 libuv GetFinalPathNameByHandle 才会展开；统一斜杠与大小写后再比较。
     const normPath = (value) => String(value).replaceAll("\\", "/").toLowerCase();
-    const rootNorm = normPath(fs.realpathSync(inst.root));
+    const rootNorm = normPath(fs.realpathSync.native(inst.root));
     ck.add(
       "autostart_trace_paths_inside_root",
       autostartTraceRows.some((r) => r.event === "autostart_write") &&
