@@ -53,6 +53,7 @@ $script:RealPython = ${function:Invoke-UpgradePython}
 $script:RealSetJump = ${function:Set-UpgradeJump}
 $script:RealCaseResult = ${function:Save-UpgradeCaseResult}
 $script:RealJumpResult = ${function:Save-JumpResult}
+$script:RealConsentGate = ${function:Invoke-ConsentGateStage}
 try {
     Expect-Failure { Assert-HostedInstallRunner -Actions "false" -Environment "github-hosted" -TempRoot $contractRoot } "本机执行被拒绝"
     Expect-Failure { Assert-HostedInstallRunner -Actions "true" -Environment "self-hosted" -TempRoot $contractRoot } "持久自托管目录被拒绝"
@@ -361,6 +362,69 @@ sys.exit(37 if "--fail" in sys.argv else 0)
     Check (Test-ConsentGateApplies -Case ([pscustomobject]@{ JumpTargetSettingsFormat=3; ConsentRevision=$null })) "布尔形态同意（无修订号）：闸门观察适用"
     Check (Test-ConsentGateApplies -Case ([pscustomobject]@{ JumpTargetSettingsFormat=3; ConsentRevision=1 })) "低于当前修订：闸门观察适用"
     Check (-not (Test-ConsentGateApplies -Case ([pscustomobject]@{ JumpTargetSettingsFormat=2; ConsentRevision=$null }))) "目标格式 < 3：无修订号闸门"
+
+    # PR52 复盘（probe_stale_consent_gate.py）：观察函数把「字段存在」当
+    # 「程序新写入」——启动前已有失效修订号（accepted=true、revision=1）
+    # 且文件完全未变也被误判绕过。这里测真实 Invoke-ConsentGateStage 的
+    # 完整判断路径：外部动作（注册表/进程/等待/证据落盘）全部惰性桩化，
+    # 文件快照与比对用真实实现；观察期内的「程序写入」由等待桩注入。
+    & {
+        $gateRoot = Join-Path $contractRoot "gate-path"
+        if (Test-Path $gateRoot) { Remove-Item -Recurse -Force $gateRoot }
+        New-Item -ItemType Directory -Path (Join-Path $gateRoot "logs") -Force | Out-Null
+        $settingsPath = Join-Path $gateRoot "settings.toml"
+        $staleConsent = "privacy_policy_accepted = true`nprivacy_policy_revision = 1`nprice_auto_sync = false`n"
+        [IO.File]::WriteAllText($settingsPath, $staleConsent, [Text.UTF8Encoding]::new($false))
+        $mutate = $null
+        function Get-UninstallEntry { [pscustomobject]@{ InstallLocation = $gateRoot } }
+        function Launch-AppOnce { param($ExePath,$Scenario,$RunId,$EvidenceDir,$LiveLogsDir)
+            [pscustomobject]@{ Process=[pscustomobject]@{ HasExited=$false; ExitCode=0 }
+                EvidenceDir=$EvidenceDir; LiveLogsDir=$LiveLogsDir; Pid=4242 } }
+        function Start-Sleep { if ($null -ne $mutate) { & $mutate } }
+        function Stop-ScenarioProcess { }
+        function Copy-LiveLogsToEvidence { }
+        function Save-ScenarioResult { }
+        function Invoke-UpgradeGateCase([string]$BaseText, [scriptblock]$Mutation, [string]$Label) {
+            [IO.File]::WriteAllText($settingsPath, $BaseText, [Text.UTF8Encoding]::new($false))
+            if (Test-Path (Join-Path $gateRoot "logs/new-before-consent.log")) {
+                Remove-Item -Force (Join-Path $gateRoot "logs/new-before-consent.log") }
+            if (Test-Path (Join-Path $gateRoot "history.db")) {
+                Remove-Item -Force (Join-Path $gateRoot "history.db") }
+            $mutate = $Mutation
+            $case = [pscustomobject]@{ DataDir=$gateRoot
+                EvidenceRoot=(Join-Path $gateRoot "evidence")
+                JumpTargetSettingsFormat=3; ConsentRevision=1 }
+            $errorText = $null
+            try { & $script:RealConsentGate -Case $case -Phase "review" } catch { $errorText = $_.Exception.Message }
+            return $errorText
+        }
+        # 已有失效修订号 + 文件完全未变 → 必须通过（红：现实现误判新写入）。
+        $noChange = Invoke-UpgradeGateCase $staleConsent $null "stale-unchanged"
+        Check ($null -eq $noChange) "闸门观察：已有失效修订号且文件未变 → 通过（不误判新写入）"
+        # 观察期内程序新增修订号（布尔同意 → 出现修订号）→ 必须失败。
+        $added = Invoke-UpgradeGateCase "privacy_policy_accepted = true`nprice_auto_sync = false`n" {
+            [IO.File]::WriteAllText($settingsPath,
+                "privacy_policy_accepted = true`nprivacy_policy_revision = 2`nprice_auto_sync = false`n",
+                [Text.UTF8Encoding]::new($false)) } "revision-added"
+        Check ($null -ne $added -and $added -like "*privacy_policy_revision*") "观察期新增修订号被拒：$added"
+        # 观察期内程序把修订号 1 改写为 2 → 必须失败。
+        $rewritten = Invoke-UpgradeGateCase $staleConsent { [IO.File]::WriteAllText($settingsPath,
+            "privacy_policy_accepted = true`nprivacy_policy_revision = 2`nprice_auto_sync = false`n",
+            [Text.UTF8Encoding]::new($false)) } "revision-rewritten"
+        Check ($null -ne $rewritten -and $rewritten -like "*privacy_policy_revision*") "观察期改写修订号被拒：$rewritten"
+        # 观察期内其他内容被改 → 沿用整文件比对失败。
+        $other = Invoke-UpgradeGateCase $staleConsent { [IO.File]::WriteAllText($settingsPath,
+            "privacy_policy_accepted = true`nprivacy_policy_revision = 1`nprice_auto_sync = true`n",
+            [Text.UTF8Encoding]::new($false)) } "other-rewritten"
+        Check ($null -ne $other -and $other -like "*settings.toml*") "观察期改写其他设置被拒：$other"
+        # 观察期内业务日志/历史库新增 → 完整路径的文件哨兵仍然拦截。
+        $newLog = Invoke-UpgradeGateCase $staleConsent { [IO.File]::WriteAllText((Join-Path $gateRoot "logs/new-before-consent.log"),
+            "leak", [Text.UTF8Encoding]::new($false)) } "new-log"
+        Check ($null -ne $newLog -and $newLog -like "*业务日志*") "观察期新增业务日志被拒：$newLog"
+        $newHistory = Invoke-UpgradeGateCase $staleConsent { [IO.File]::WriteAllText((Join-Path $gateRoot "history.db"),
+            "leak", [Text.UTF8Encoding]::new($false)) } "new-history"
+        Check ($null -ne $newHistory -and $newHistory -like "*历史库*") "观察期历史库新写入被拒：$newHistory"
+    }
     foreach ($failure in @("install-baseline","lifecycle:old","lifecycle:current","lifecycle:restart")) {
         $script:Trace.Clear(); $script:FailAt = $failure
         $case = New-UpgradeCase -RepoRoot $repoRoot -InstallerPath (Join-Path $contractRoot "current-setup.exe") `

@@ -368,7 +368,10 @@ function Get-HistorySnapshot {
 function Invoke-ConsentGateStage {
     # WB05 第一段：装新版后、授权前，先以旧同意（或无同意）启动一次——
     # 新闸门必须保持封闭，保存"零业务读取"证据并阻断任何违反：
-    # - settings.toml 的同意记录原样（程序不得预先补写 privacy_policy_revision）；
+    # - settings.toml 的同意记录原样。privacy_policy_revision 按**前后内容
+    #   比对**判定「程序在未同意阶段新增/改写」：启动前已有失效修订号
+    #   （如 revision=1）且内容未变不算违规（PR52 复盘：按「字段存在」
+    #   判定会误拒同表单合法的旧同意状态）；真实新增或改写仍必须失败；
     # - DataDir/logs 无新增（业务日志初始化只发生在同意之后）；
     # - history.db（含 -wal/-shm，按内容/大小/mtime 快照）无新增写入
     #   （采集不发生）。任何一项违反都抛错结束本阶段，阶段证据按实际
@@ -381,7 +384,7 @@ function Invoke-ConsentGateStage {
     $settingsPath = Join-Path $Case.DataDir "settings.toml"
     $logsBefore = @(Get-PathSnapshot $logsDir)
     $historyBefore = @(Get-HistorySnapshot $Case.DataDir)
-    $settingsBefore = (Get-Content -LiteralPath $settingsPath -Raw -Encoding utf8)
+    $settingsBefore = (Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8)
 
     $exe = Join-Path (Get-UninstallEntry).InstallLocation "tokenscope.exe"
     $context = Launch-AppOnce -ExePath $exe -Scenario $Phase -RunId ($Phase + "-gate-1") `
@@ -393,10 +396,12 @@ function Invoke-ConsentGateStage {
         if ($context.Process.HasExited) {
             throw "旧同意下新版进程提前退出（退出码 $($context.Process.ExitCode)）"
         }
-        $settingsAfter = (Get-Content -LiteralPath $settingsPath -Raw -Encoding utf8)
-        $revisionWritten = $settingsAfter -match '(?m)^\s*privacy_policy_revision\s*='
-        if ($revisionWritten) {
-            throw "同意闸门前程序写入了 privacy_policy_revision（绕过重新询问）"
+        $settingsAfter = (Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8)
+        $revisionPattern = '(?m)^[ \t]*privacy_policy_revision[ \t]*=.*$'
+        $revisionBefore = [regex]::Match($settingsBefore, $revisionPattern).Value
+        $revisionAfter = [regex]::Match($settingsAfter, $revisionPattern).Value
+        if ($revisionAfter -cne $revisionBefore) {
+            throw "同意闸门前程序新增/改写了 privacy_policy_revision（前=[$revisionBefore] 后=[$revisionAfter]）"
         }
         if ($settingsAfter -ne $settingsBefore) {
             throw "同意闸门前 settings.toml 被改写"
