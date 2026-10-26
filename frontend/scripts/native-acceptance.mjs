@@ -2957,7 +2957,37 @@ const scenarios = {
     // 同意键坐标只到达 1 次）；间隔仍以页面事件时间戳度量。
     await page.mouse.click(inputX, inputY);
     await page.mouse.click(inputX, inputY);
-    await page.waitForSelector(".app-nav", { timeout: 60000 });
+    // 业务解锁等待：超时即失败，但先抓失败现场（六轮复核缺口——此前超时
+    // 直接抛错，点击计数、隐私框状态、截图全部丢失，CI 两轮 .app-nav
+    // 超时无法归因）。取证失败不掩盖原错误。
+    try {
+      await page.waitForSelector(".app-nav", { timeout: 60000 });
+    } catch (error) {
+      try {
+        ev.acceptFailureDiagnostics = {
+          errorText: String(error).slice(0, 300),
+          capturedClicks: await page.evaluate(() => window.__ac06ConsentClicks ?? []),
+          privacyDialogCount: await page.locator(".privacy-dialog").count(),
+          privacyBlockedDetail: await page
+            .locator(".privacy-detail, .privacy-error, [class*='error']")
+            .allTextContents()
+            .catch(() => []),
+          settingsSnapshot: fs.existsSync(settingsPath)
+            ? fs.readFileSync(settingsPath, "utf8").slice(0, 800)
+            : null,
+          traceSoFar: readAcceptanceTrace(inst.root, { partial: true }).records.map((r) => ({
+            seq: r.seq,
+            event: r.event,
+          })),
+        };
+        await page.screenshot({
+          path: path.join(inst.opts.shots, "accept-order-unlock-timeout.png"),
+        });
+      } catch (diagError) {
+        ev.acceptFailureDiagnostics = { errorText: String(error).slice(0, 300), diagError: String(diagError) };
+      }
+      throw error;
+    }
     await page.waitForTimeout(1500);
 
     const capturedClicks = await page.evaluate(() => window.__ac06ConsentClicks ?? []);
