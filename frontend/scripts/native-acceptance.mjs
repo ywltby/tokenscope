@@ -2934,23 +2934,29 @@ const scenarios = {
       .first();
     const box = await consentButton.boundingBox();
     if (!box) throw new Error("同意按钮不可见，无法下发双击输入");
-    await page.evaluate(() => {
-      window.__ac06ConsentClicks = [];
-      for (const type of ["pointerdown", "click"]) {
-        document.addEventListener(
-          type,
-          (event) => {
-            window.__ac06ConsentClicks.push({
+    // 计数器挂载同样 8 秒有界：CDP 挂起时不能无限阻塞场景（七轮复核）。
+    await withTimeout(
+      () =>
+        page.evaluate(() => {
+          window.__ac06ConsentClicks = [];
+          for (const type of ["pointerdown", "click"]) {
+            document.addEventListener(
               type,
-              ts: event.timeStamp,
-              x: event.clientX,
-              y: event.clientY,
-            });
-          },
-          true,
-        );
-      }
-    });
+              (event) => {
+                window.__ac06ConsentClicks.push({
+                  type,
+                  ts: event.timeStamp,
+                  x: event.clientX,
+                  y: event.clientY,
+                });
+              },
+              true,
+            );
+          }
+        }),
+      8000,
+      "挂载同意输入计数器",
+    );
     const inputX = box.x + box.width / 2;
     const inputY = box.y + box.height / 2;
     // 顺序下发（并发排队会在 CDP 输入管线里丢掉第二次完整点击——首跑实测
@@ -2963,29 +2969,47 @@ const scenarios = {
     try {
       await page.waitForSelector(".app-nav", { timeout: 60000 });
     } catch (error) {
-      try {
-        ev.acceptFailureDiagnostics = {
-          errorText: String(error).slice(0, 300),
-          capturedClicks: await page.evaluate(() => window.__ac06ConsentClicks ?? []),
-          privacyDialogCount: await page.locator(".privacy-dialog").count(),
-          privacyBlockedDetail: await page
-            .locator(".privacy-detail, .privacy-error, [class*='error']")
-            .allTextContents()
-            .catch(() => []),
-          settingsSnapshot: fs.existsSync(settingsPath)
-            ? fs.readFileSync(settingsPath, "utf8").slice(0, 800)
-            : null,
-          traceSoFar: readAcceptanceTrace(inst.root, { partial: true }).records.map((r) => ({
-            seq: r.seq,
-            event: r.event,
-          })),
-        };
-        await page.screenshot({
-          path: path.join(inst.opts.shots, "accept-order-unlock-timeout.png"),
-        });
-      } catch (diagError) {
-        ev.acceptFailureDiagnostics = { errorText: String(error).slice(0, 300), diagError: String(diagError) };
-      }
+      // 七轮复核修正：取证**逐项**采集、每项 8 秒上限（复用 withTimeout）、
+      // 单项失败只追加该项错误——任何一步失败（截图异常、CDP 拒绝、CDP
+      // 挂起）都不得清空已取得的现场，也不得拖到场景看门狗。
+      const diagnostics = { errorText: String(error).slice(0, 300) };
+      const bounded = (label, task) =>
+        withTimeout(task, 8000, `取证 ${label}`)
+          .then((value) => {
+            diagnostics[label] = value;
+          })
+          .catch((diagError) => {
+            diagnostics[`${label}Error`] = String(diagError).slice(0, 300);
+          });
+      await bounded("capturedClicks", () =>
+        page.evaluate(() => window.__ac06ConsentClicks ?? []),
+      );
+      await bounded("privacyDialogCount", () => page.locator(".privacy-dialog").count());
+      await bounded("privacyBlockedDetail", () =>
+        page
+          .locator(".privacy-detail, .privacy-error, [class*='error']")
+          .allTextContents()
+          .catch(() => []),
+      );
+      await bounded("settingsSnapshot", async () =>
+        fs.existsSync(settingsPath)
+          ? fs.readFileSync(settingsPath, "utf8").slice(0, 800)
+          : null,
+      );
+      await bounded("traceSoFar", async () =>
+        readAcceptanceTrace(inst.root, { partial: true }).records.map((r) => ({
+          seq: r.seq,
+          event: r.event,
+        })),
+      );
+      await bounded("screenshot", () =>
+        page
+          .screenshot({
+            path: path.join(inst.opts.shots, "accept-order-unlock-timeout.png"),
+          })
+          .then(() => "accept-order-unlock-timeout.png"),
+      );
+      ev.acceptFailureDiagnostics = diagnostics;
       throw error;
     }
     await page.waitForTimeout(1500);

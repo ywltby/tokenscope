@@ -11,6 +11,7 @@ import { test } from "vitest";
 import { changedBusinessFiles, settingsFingerprint, snapshotBusinessFiles } from "./acceptance-io.mjs";
 import { parse as parseToml } from "smol-toml";
 import { parseTOML } from "toml-eslint-parser";
+import { withTimeout as realWithTimeout } from "./native-scenario.mjs";
 
 const source = fs.readFileSync(new URL("../native-acceptance.mjs", import.meta.url), "utf8");
 
@@ -281,6 +282,7 @@ function runAcceptOrderScenario(options = {}) {
       settingsFingerprint,
       parseToml,
       parseTOML,
+      withTimeout: realWithTimeout,
       registrySnapshot() {
         registryCalls += 1;
         return registryChanged && registryCalls > 1 ? { hive: ["changed"] } : registry;
@@ -834,4 +836,147 @@ test("字节证据：合法编码的 U+FFFD 字符必须通过（替换仅限非
   const { checks } = await runAcceptOrder({ records, settingsText: bytes.toString("utf8") });
   const content = checks.find((check) => check.name === "consent_saved_capture_content");
   assert.ok(content && content.pass, JSON.stringify(checks.filter((c) => !c.pass)));
+});
+
+// ── 解锁超时取证：逐项有界、失败只追加（七轮复核缺口）────────────────────
+// 旧实现整体 try/catch：任何单项取证失败（截图异常、CDP 拒绝）都会用
+// {errorText, diagError} 覆盖已取得的现场；CDP 挂起时无超时保护，可能拖
+// 到场景看门狗。逐项验证三反例 + 挂起有界。
+
+function runAcceptOrderDiagnostics({ pageBehavior }) {
+  const checks = [];
+  const ev = {};
+  const box = { x: 100, y: 200, width: 120, height: 40 };
+  const run = extractScenario(
+    "privacy-accept-order",
+    "\n  /**\n   * AC06 场景 4a",
+    {
+      path,
+      settingsFingerprint,
+      parseToml,
+      parseTOML,
+      // 真实 withTimeout 语义（race 超时跳过记原因），时间缩短便于测试。
+      withTimeout: (task, _ms, detail) => realWithTimeout(task, 50, detail),
+      registrySnapshot() {
+        return { hive: [] };
+      },
+      fs: {
+        realpathSync: Object.assign((p) => String(p), { native: (p) => String(p) }),
+        existsSync: () => true,
+        readFileSync(file, encoding) {
+          const name = String(file);
+          if (name.endsWith("autostart-state.json")) return '{"enabled":true}';
+          return encoding === "utf8" ? ORDER_SETTINGS : Buffer.from(ORDER_SETTINGS);
+        },
+      },
+      readAcceptanceTrace() {
+        return {
+          violations: [],
+          records: [
+            ...consentRecords(ORDER_SETTINGS),
+            { seq: 2, event: "business_ready" },
+            { seq: 3, event: "history_open" },
+          ],
+        };
+      },
+    },
+  );
+  const evaluateCalls = [];
+  const invocation = run({
+    inst: {
+      page: {
+        async waitForSelector(selector, options) {
+          if (String(selector) === ".app-nav") {
+            throw new Error("page.waitForSelector: Timeout 60000ms exceeded.");
+          }
+        },
+        async waitForTimeout() {},
+        locator(selector) {
+          const name = String(selector);
+          return {
+            first() {
+              return {
+                async boundingBox() {
+                  return box;
+                },
+              };
+            },
+            count() {
+              return Promise.resolve(name.includes("privacy-dialog") ? 1 : 0);
+            },
+            allTextContents() {
+              return pageBehavior.blockLocatorText
+                ? Promise.reject(new Error("CDP session closed"))
+                : Promise.resolve([]);
+            },
+          };
+        },
+        async evaluate(fn) {
+          const text = fn.toString();
+          // 区分调用点：挂计数器（addEventListener）正常走；取证读取
+          // （__ac06ConsentClicks）按 pageBehavior 注入失败/挂起。
+          if (text.includes("addEventListener")) return undefined;
+          if (text.includes("__ac06ConsentClicks")) {
+            evaluateCalls.push(text.slice(0, 40));
+            return pageBehavior.evaluate ? pageBehavior.evaluate(fn) : [];
+          }
+          return [];
+        },
+        mouse: {
+          async click() {},
+        },
+        screenshot: pageBehavior.screenshot,
+        async $() {
+          return null;
+        },
+      },
+      root: "C:/synthetic-root",
+      opts: { shots: "C:/synthetic-shots" },
+    },
+    ck: { add: (name, pass, detail) => checks.push({ name, pass, detail }) },
+    ev,
+  });
+  return invocation.then(
+    () => ({ threw: false, ev, checks }),
+    (error) => ({ threw: true, error: String(error), ev, checks }),
+  );
+}
+
+test("取证：截图失败不清空已取得的现场（逐项保存）", async () => {
+  const result = await runAcceptOrderDiagnostics({
+    pageBehavior: {
+      screenshot: () => Promise.reject(new Error("screenshot: target crashed")),
+    },
+  });
+  assert.equal(result.threw, true, "原错误必须照常抛出");
+  assert.match(result.error, /Timeout 60000ms/);
+  const diag = result.ev.acceptFailureDiagnostics;
+  assert.ok(diag.capturedClicks !== undefined, "点击捕获必须保留");
+  assert.ok(diag.privacyDialogCount !== undefined, "隐私框状态必须保留");
+  assert.match(diag.screenshotError ?? "", /target crashed/);
+});
+
+test("取证：CDP 拒绝（首个 evaluate 失败）只记该项错误，其余项继续", async () => {
+  const result = await runAcceptOrderDiagnostics({
+    pageBehavior: {
+      evaluate: () => Promise.reject(new Error("CDP session closed")),
+    },
+  });
+  assert.equal(result.threw, true);
+  const diag = result.ev.acceptFailureDiagnostics;
+  assert.match(diag.capturedClicksError ?? "", /CDP session closed/);
+  assert.ok(diag.privacyDialogCount !== undefined, "后续项必须继续采集");
+  assert.ok(diag.settingsSnapshot !== undefined, "设置快照必须继续采集");
+});
+
+test("取证：CDP 挂起在取证上限内跳过并记原因，不拖垮场景", async () => {
+  const result = await runAcceptOrderDiagnostics({
+    pageBehavior: {
+      evaluate: () => new Promise(() => {}),
+    },
+  });
+  assert.equal(result.threw, true);
+  const diag = result.ev.acceptFailureDiagnostics;
+  assert.match(diag.capturedClicksError ?? "", /上限/);
+  assert.ok(diag.privacyDialogCount !== undefined, "超时项之后其余项继续");
 });
