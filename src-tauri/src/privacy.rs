@@ -789,7 +789,35 @@ mod acceptance_closure_tests {
                 .len(),
             16
         );
+        // 二轮复核缺口：保存事件必须携带不可变字节证据，且证据可重算出
+        // 事件指纹、内容确实包含同意值与当前修订号（判定方据此核对，
+        // 不允许只查格式放行假哈希）。
+        let captured = hex_to_bytes(
+            records[at("consent_saved")]["settings_bytes_hex"]
+                .as_str()
+                .unwrap_or_else(|| panic!("consent_saved 缺少 settings_bytes_hex")),
+        );
+        let mut hashed: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in &captured {
+            hashed = (hashed ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3); // fnv1a64
+        }
+        assert_eq!(
+            format!("{hashed:016x}"),
+            records[at("consent_saved")]["settings_hash"]["value"]
+                .as_str()
+                .unwrap()
+        );
+        let captured_text = String::from_utf8(captured).unwrap();
+        assert!(captured_text.contains("privacy_policy_accepted = true"));
+        assert!(captured_text.contains("privacy_policy_revision = 2"));
         println!("AC02_SHELL_TRACE {}", serde_json::json!(records));
+    }
+
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+            .collect()
     }
 }
 

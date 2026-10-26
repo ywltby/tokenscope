@@ -351,6 +351,7 @@ function consentRecords(settingsText, { hash } = {}) {
       seq: 1,
       event: "consent_saved",
       settings_hash: { algorithm: "fnv1a64", value: hash ?? fingerprint.value },
+      settings_bytes_hex: Buffer.from(settingsText, "utf8").toString("hex"),
     },
   ];
 }
@@ -419,19 +420,21 @@ test("accept-order: 同意保存指纹畸形（算法/位数不符）必须失�
 
 test("accept-order: 业务期规范化重写（终态字节≠保存时）不算二次同意保存", async () => {
   // 实跑事实：业务初始化会在同意之后合法重写 settings（终态含说明头与
-  // 完整来源段）。判定只看「恰一次同意 + 相邻成对的 settings_write +
-  // 保存时指纹格式」，不与终态字节比对。
-  const savedOther = settingsFingerprint(Buffer.from("normalized-later\n"));
+  // 完整来源段）。判定只看保存时的不可变字节证据（重算哈希 + 内容解析），
+  // 不与终态字节比对——终态文本已变为重写后形态，仍必须通过。
   const records = [
     { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
-    { seq: 1, event: "consent_saved", settings_hash: savedOther },
+    ...consentRecords(ORDER_SETTINGS),
     { seq: 2, event: "business_ready" },
     { seq: 3, event: "history_open" },
     { seq: 4, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
   ];
-  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  const rewritten = "# TokenScope 设置文件（业务期重写后形态）\n" + ORDER_SETTINGS;
+  const { checks } = await runAcceptOrder({ records, settingsText: rewritten });
   const single = checks.find((check) => check.name === "consent_saved_single_atomic_replace");
   assert.ok(single && single.pass, JSON.stringify(checks.filter((c) => !c.pass)));
+  const content = checks.find((check) => check.name === "consent_saved_capture_content");
+  assert.ok(content && content.pass);
 });
 
 // ── privacy-accept-order：双击输入真实性（PR52 复盘缺陷 4）───────────────
@@ -552,5 +555,107 @@ test("autostart 路由：只有读没有写（set 未真正生效）必须失败
   });
   assert.ok(
     checks.some((check) => check.name === "autostart_trace_paths_inside_root" && !check.pass),
+  );
+});
+
+// ── 同意保存字节证据（PR52 二轮复核缺口）──────────────────────────────
+// 保存事件必须携带不可变字节证据（settings_bytes_hex）；判定方重算哈希并
+// 解析内容确认同意值与修订号。只查哈希格式不核对内容的旧实现放行
+// 「0000000000000000 vs 0acec52d49477739」（复核方独立复现 13/13 全过）。
+
+const BASE_ROWS = () => [
+  { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+  { seq: 2, event: "business_ready" },
+  { seq: 3, event: "history_open" },
+];
+
+test("字节证据：哈希与字节重算一致且内容含同意值与修订号才通过", async () => {
+  const records = [...BASE_ROWS().slice(0, 1), ...consentRecords(ORDER_SETTINGS), ...BASE_ROWS().slice(1)];
+  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  assert.deepEqual(checks.filter((check) => !check.pass), [], "正例必须全过");
+  for (const name of ["consent_saved_single_atomic_replace", "consent_saved_capture_content"]) {
+    assert.ok(checks.some((check) => check.name === name), `缺少具名断言：${name}`);
+  }
+});
+
+test("字节证据：格式合法但哈希与字节不符必须失败", async () => {
+  const records = [
+    ...BASE_ROWS().slice(0, 1),
+    {
+      seq: 1,
+      event: "consent_saved",
+      settings_hash: { algorithm: "fnv1a64", value: "0000000000000000" },
+      settings_bytes_hex: Buffer.from(ORDER_SETTINGS, "utf8").toString("hex"),
+    },
+    ...BASE_ROWS().slice(1),
+  ];
+  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  const mismatch = checks.find((check) => check.name === "consent_saved_single_atomic_replace");
+  assert.ok(mismatch, "缺少重算比对断言");
+  assert.equal(mismatch.pass, false, "复核方独立复现的缺陷：格式合法假哈希不得放行");
+});
+
+test("字节证据：哈希正确但内容缺修订号必须失败", async () => {
+  const wrong = "privacy_policy_accepted = true\n";
+  const records = [
+    ...BASE_ROWS().slice(0, 1),
+    {
+      seq: 1,
+      event: "consent_saved",
+      settings_hash: settingsFingerprint(Buffer.from(wrong)),
+      settings_bytes_hex: Buffer.from(wrong, "utf8").toString("hex"),
+    },
+    ...BASE_ROWS().slice(1),
+  ];
+  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  const content = checks.find((check) => check.name === "consent_saved_capture_content");
+  assert.ok(content, "缺少内容解析断言");
+  assert.equal(content.pass, false);
+});
+
+test("字节证据：哈希正确但同意值非 true 必须失败", async () => {
+  const wrong = "privacy_policy_accepted = false\nprivacy_policy_revision = 2\n";
+  const records = [
+    ...BASE_ROWS().slice(0, 1),
+    {
+      seq: 1,
+      event: "consent_saved",
+      settings_hash: settingsFingerprint(Buffer.from(wrong)),
+      settings_bytes_hex: Buffer.from(wrong, "utf8").toString("hex"),
+    },
+    ...BASE_ROWS().slice(1),
+  ];
+  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  const content = checks.find((check) => check.name === "consent_saved_capture_content");
+  assert.ok(content && !content.pass);
+});
+
+test("字节证据：事件缺字节证据字段必须失败（不得退回只查格式）", async () => {
+  const records = [
+    ...BASE_ROWS().slice(0, 1),
+    {
+      seq: 1,
+      event: "consent_saved",
+      settings_hash: settingsFingerprint(Buffer.from(ORDER_SETTINGS)),
+    },
+    ...BASE_ROWS().slice(1),
+  ];
+  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  const single = checks.find((check) => check.name === "consent_saved_single_atomic_replace");
+  assert.ok(single && !single.pass, "缺字节证据不得通过");
+});
+
+test("字节证据：业务期合法重写（终态≠保存时字节）仍通过，不用终态硬比", async () => {
+  const records = [
+    ...BASE_ROWS().slice(0, 1),
+    ...consentRecords(ORDER_SETTINGS),
+    ...BASE_ROWS().slice(1),
+    { seq: 4, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+  ];
+  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  assert.deepEqual(
+    checks.filter((check) => !check.pass),
+    [],
+    "保存时字节证据与终态无关，业务期重写不影响判定",
   );
 });

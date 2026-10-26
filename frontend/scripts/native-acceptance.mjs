@@ -3030,11 +3030,14 @@ const scenarios = {
         Math.min(...readSeqs) > Math.max(...consentSeqs, ...readySeqs),
       JSON.stringify(ev.acceptOrder),
     );
-    // 单次原子落盘：consent_saved 事件自带落盘时刻的字节指纹（fnv1a64，
-    // 与 tokenscope-core settings_hash 同算法）。实跑证明业务初始化会在
-    // 同意之后合法地再次规范化重写 settings（终态字节 ≠ 保存时字节），
-    // 因此指纹断言的是「恰一次同意保存 + 与之相邻成对的 settings_write +
-    // 指纹格式合法」，不与终态字节比对；终态仍含同意字段由下一条保证。
+    // 单次原子落盘：consent_saved 事件自带落盘时刻的**不可变字节证据**
+    // （settings_bytes_hex，Rust 侧保存时快照，JSONL 只追加不可变）与指纹
+    // （fnv1a64，与 tokenscope-core settings_hash 同算法）。判定方重算
+    // 证据哈希与事件指纹比对，并解析证据内容确认同意值与当前修订号——
+    // 只查格式不核对内容会放行假哈希（二轮复核缺口，复核方独立复现）。
+    // 实跑证明业务初始化会在同意之后合法地再次规范化重写 settings（终态
+    // 字节 ≠ 保存时字节），因此不与终态文件硬比；终态仍含同意字段由
+    // accept_writes_consent_with_revision 保证。
     const consentRows = trace.records.filter((r) => r.event === "consent_saved");
     const settingsWriteSeqs = trace.records
       .filter((r) => r.event === "settings_write")
@@ -3045,16 +3048,37 @@ const scenarios = {
       !trace.records.some(
         (r) => r.seq > writesBeforeConsent[0] && r.seq < consentSeqs[0],
       );
-    const fingerprintWellFormed =
+    const captureBytes = (() => {
+      const hex = consentRows[0]?.settings_bytes_hex;
+      if (typeof hex !== "string" || hex.length === 0 || hex.length % 2 !== 0) return null;
+      if (/[^0-9a-f]/.test(hex)) return null;
+      return Buffer.from(hex, "hex");
+    })();
+    const recomputed =
+      captureBytes === null ? null : settingsFingerprint(captureBytes).value;
+    const hashMatchesCapture =
+      recomputed !== null &&
       consentRows[0]?.settings_hash?.algorithm === "fnv1a64" &&
-      /^[0-9a-f]{16}$/.test(consentRows[0]?.settings_hash?.value ?? "");
+      /^[0-9a-f]{16}$/.test(consentRows[0]?.settings_hash?.value ?? "") &&
+      recomputed === consentRows[0].settings_hash.value;
     ck.add(
       "consent_saved_single_atomic_replace",
       consentSeqs.length === 1 &&
         writesBeforeConsent.length === 1 &&
         adjacentWrite &&
-        fingerprintWellFormed,
-      `指纹=${JSON.stringify(consentRows[0]?.settings_hash)} 同意前写入=${JSON.stringify(writesBeforeConsent)}`,
+        captureBytes !== null &&
+        hashMatchesCapture,
+      `指纹=${JSON.stringify(consentRows[0]?.settings_hash)} 重算=${recomputed ?? "无字节证据"} 同意前写入=${JSON.stringify(writesBeforeConsent)}`,
+    );
+    const captureText = captureBytes === null ? "" : captureBytes.toString("utf8");
+    ck.add(
+      "consent_saved_capture_content",
+      captureBytes !== null &&
+        /privacy_policy_accepted\s*=\s*true/.test(captureText) &&
+        /privacy_policy_revision\s*=\s*2/.test(captureText),
+      captureBytes === null
+        ? "无字节证据"
+        : captureText.split("\n").slice(0, 4).join(" | "),
     );
     const settings = fs.readFileSync(settingsPath, "utf8");
     ck.add(
