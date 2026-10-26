@@ -543,6 +543,17 @@ PR #52 CI 首跑与修复（2026-10-25）：
 
 **3744891 轮运行标签勘误**（此前汇报再次写反）：正确对应为 **CI 40280864502、Native UI E2E 40280864366、Install test 40280864372**（均 success）。
 
+### 五轮复核补修：严格 UTF-8 解码与带引号顶层键（2026-10-26，`2e20fa5`）
+
+复核方探针（`qa-artifacts/workbuddy/b3/review-pr52-round5/native-ac06-byte-probes.json`，原始字节哈希均正确、场景 14/14 全过）暴露两处：
+
+- **P2 非法 UTF-8 误放行**：`toString("utf8")` 默认把坏字节替换成 U+FFFD，两个解析器检查的是替换后文本——注释中的 FF、截断的多字节编码、过长编码（C0 80）、代理项编码（ED A0 80）全被误放行，而产品 `String::from_utf8` 对同样字节报 InvalidData。修复：`TextDecoder("utf-8", { fatal: true })` 严格解码，失败即拒绝（detail 标注与产品同口径）；合法编码的 U+FFFD 字符不受影响（EF BF BD 正例守护全程通过）。
+- **P3 合法带引号顶层键误拒**：AST 键名读取只取 `TOMLBare.name` 与不存在的 `content` 属性——`TOMLQuoted`（单引号/双引号/转义形式）的文本属性是 `value`，合法同意字段被误判缺失（Rust 对同样文件返回 Granted）。修复：键名读取改 `name ?? content ?? value`（当前产品生成的裸键行为不变）。
+
+红绿：维护回归 41 项——四条非法字节负例先红（误放行）后绿；三条带引号键正例先红（误拒）后绿；合法 U+FFFD 正例全程通过。字节级对照矩阵八形态（四非法字节、合法 U+FFFD、三种引号键）与 Rust 行为逐一对齐。
+
+修后受测树 `2e20fa5` 重跑五场景三连 15/15 全绿（preseeded 22/25/33、denied-ipc 7/8/7、accept-order 10/11/10、variants-corrupt 8/8/8、variants-close 13/13/10，最差单次之和 **75 秒**，仍远低于 8 分钟预算；EXE 未变仍为 `9f9f18ab…`，本轮仅判定脚本变更）；accept-order 实测重算哈希与事件指纹一致、顶层严格类型判定通过。
+
 ### B2 合并与发布验收（2026-10-22）
 
 - [PR #31](https://github.com/ywltby/tokenscope/pull/31) 最终 HEAD `7664be9`，普通合并为 `c9de40ec3ded2485d2991079f209699ae6ff6107`；两父提交分别为最新 main `9c77cef` 与该 PR HEAD，合并文件树和已验证 HEAD 完全一致。AC03 / AC04 / AC05 分别提交 `6f50af1` / `16ec813` / `db43355`；局部峰谷费率展示修复 `4159633`、经批准的端口和 CI 契约登记 `317573e`、版本登记 `bfb01ed`、短路径取证补修 `7664be9` 各自独立。
