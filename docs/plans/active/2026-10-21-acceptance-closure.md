@@ -519,6 +519,15 @@ PR #52 CI 首跑与修复（2026-10-25）：
 
 **运行标签勘误**：本轮此前汇报将 1438f44（文档轮）的运行标签写反——正确对应为 CI 40261768046、Install test 40261767973（均通过），Native UI E2E 为 40261768083；4c9c71b 轮为 CI 40260524738 / Native 40260524789 / Install 40260524737（均通过）。
 
+### 三轮复核补修：字节证据内容改用真正 TOML 解析（2026-10-26，`33e41e4`）
+
+复核方复现（`qa-artifacts/workbuddy/b3/review-pr52-round3/native-ac06-content-probes-same-bytes.json`，哈希正确、保存字节与终态一致仍 14/14 全过）：`consent_saved_capture_content` 用正则搜索字符串，被三种形态误放行——注释写 `accepted = true` 而实际字段为 false；同意字段只在 `[notes]` 子表、顶层缺失；`revision = 20` 被 `/revision\s*=\s*2/` 前缀匹配成当前值。
+
+- 判定方改用 **smol-toml**（TOML 1.0 解析器，devDependencies）：解析失败必须拒绝；顶层 `privacy_policy_accepted` 严格 `=== true`（布尔）、顶层 `privacy_policy_revision` 严格 `=== 2`（整数）——不搜索子表、不做字符串包含、不再叠加正则补丁。
+- 壳侧 AC02 断言同步替换：字符串 contains 改为 `toml::Value` 解析 + 顶层键严格断言（`src-tauri` dev-dependencies 加 `toml = "1.1.6"`，与核心库同一解析器；Cargo.lock 相应一行）。
+- 红绿：维护回归 29 项——负例四条（三种误放行形态 + 非法 TOML）先红（前三条在正则实现下全放行）后绿；负例哈希与字节自洽，失败必须来自内容解析层。
+- 修后固定受测树 `33e41e4` 干净构建 EXE SHA256 `9f9f18ab45d47f5cdf60aba5574e36d72e3854eceba5a427098ebb7427ceb6bf`；五场景三连 15/15 全绿（preseeded 22/20/21、denied-ipc 5/6/5、accept-order 8/9/8、variants-corrupt 6/5/6、variants-close 7/7/7，最差单次之和 **49 秒**）；accept-order 实测 `accepted=true revision=2`（顶层严格判定通过）、双击 2 次输入（间隔 24.7ms、合成 click 1 次）；四种对抗形态经同一解析器直接验证全部拒绝。
+
 ### B2 合并与发布验收（2026-10-22）
 
 - [PR #31](https://github.com/ywltby/tokenscope/pull/31) 最终 HEAD `7664be9`，普通合并为 `c9de40ec3ded2485d2991079f209699ae6ff6107`；两父提交分别为最新 main `9c77cef` 与该 PR HEAD，合并文件树和已验证 HEAD 完全一致。AC03 / AC04 / AC05 分别提交 `6f50af1` / `16ec813` / `db43355`；局部峰谷费率展示修复 `4159633`、经批准的端口和 CI 契约登记 `317573e`、版本登记 `bfb01ed`、短路径取证补修 `7664be9` 各自独立。
