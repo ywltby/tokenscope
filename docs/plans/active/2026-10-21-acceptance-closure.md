@@ -554,6 +554,8 @@ PR #52 CI 首跑与修复（2026-10-25）：
 
 修后受测树 `2e20fa5` 重跑五场景三连 15/15 全绿（preseeded 22/25/33、denied-ipc 7/8/7、accept-order 10/11/10、variants-corrupt 8/8/8、variants-close 13/13/10，最差单次之和 **75 秒**，仍远低于 8 分钟预算；EXE 未变仍为 `9f9f18ab…`，本轮仅判定脚本变更）；accept-order 实测重算哈希与事件指纹一致、顶层严格类型判定通过。
 
+五轮补修后的 CI 收口（受测 HEAD `c2ce609`）：首轮 Native UI E2E 的 privacy-preseeded 再次出现「没有 tauri 页面 target」（与此前两次同型症状，**根因仍未定位**，失败 run 40348043583 原样保留）；Install test 的 0.5.13 deleted 跳因 GitHub API 连接被远端重置（WinError 10054，网络级）失败（run 40348043558 首轮证据保留）——两者均为环境级失败，重跑失败作业后全部通过。最终全部必需检查 18 pass + 1 skipped、0 fail：CI 40348043558 之外的同轮 CI 为 40348043575（success）、Native UI E2E 40348043583（重跑 success）、Install test 40348043558（重跑 success，十格升级单跳含 0.6.0 present 58s / deleted 1m4s）。
+
 ### B2 合并与发布验收（2026-10-22）
 
 - [PR #31](https://github.com/ywltby/tokenscope/pull/31) 最终 HEAD `7664be9`，普通合并为 `c9de40ec3ded2485d2991079f209699ae6ff6107`；两父提交分别为最新 main `9c77cef` 与该 PR HEAD，合并文件树和已验证 HEAD 完全一致。AC03 / AC04 / AC05 分别提交 `6f50af1` / `16ec813` / `db43355`；局部峰谷费率展示修复 `4159633`、经批准的端口和 CI 契约登记 `317573e`、版本登记 `bfb01ed`、短路径取证补修 `7664be9` 各自独立。
