@@ -1199,8 +1199,10 @@ const IMPL = {
   },
 
   /**
-   * 日期弹层外壳：`.range-panel` 与 Naive 实际外壳祖先都必须量到，且只有
-   * **一层**有效 elevated 材质（不得双层玻璃，也不得被实色外壳盖住）。
+   * 日期弹层外壳：量测边界从 `.range-panel` 到**实际浮层本体**（Naive 弹层
+   * 经 v-binder 挂载，止于 body/html 页面背景之前）。边界内恰好**一层**
+   * 实色材质且必须是 n-popover 外壳，其余层（含内层面板）透明无模糊——
+   * 双层玻璃、双层实色、全透明外壳靠页面背景冒充外壳都会被拒。
    */
   async date_outer_surface_matches_contract(ctx) {
     for (const theme of ["light", "dark"]) {
@@ -1226,7 +1228,13 @@ const IMPL = {
           if (!panel) return null;
           const chain = [];
           let node = panel;
-          for (let i = 0; i < 6 && node; i += 1) {
+          let hitPageBackground = false;
+          for (let i = 0; i < 10 && node; i += 1) {
+            // 量测边界：body/html 是页面背景，不属于浮层本体。
+            if (node.tagName === "BODY" || node.tagName === "HTML") {
+              hitPageBackground = true;
+              break;
+            }
             const cs = getComputedStyle(node);
             chain.push({
               cls: (node.className || "").toString().slice(0, 60),
@@ -1236,7 +1244,12 @@ const IMPL = {
             });
             node = node.parentElement;
           }
-          return { panel: chain[0], ancestors: chain.slice(1) };
+          return {
+            panel: chain[0],
+            ancestors: chain.slice(1),
+            hitPageBackground,
+            chain,
+          };
         });
         if (!measured || !measured.panel) {
           ctx.record(
@@ -1257,39 +1270,36 @@ const IMPL = {
           return parts.length >= 4 ? parts[3] : 1;
         };
         const blurred = (c) => /blur\(\s*\d+(\.\d+)?px\s*\)/.test(c ?? "");
-        const elevatedLayers = [measured.panel, ...measured.ancestors].filter(
-          (l) => alpha(l.bg) < 1 && blurred(l.blur),
-        );
-        const solidLayers = [measured.panel, ...measured.ancestors].filter(
-          (l) => alpha(l.bg) === 1 && !blurred(l.blur),
-        );
-        ctx.record(
-          "date_outer_surface_matches_contract",
-          `${theme}:同时量到内层面板与 Naive 外壳祖先`,
-          measured.ancestors.length >= 2,
-          `祖先层=${measured.ancestors.map((a) => a.cls).join(" > ")}`,
+        const floating = [measured.panel, ...measured.ancestors];
+        const elevatedLayers = floating.filter((l) => alpha(l.bg) < 1 && blurred(l.blur));
+        const solidLayers = floating.filter((l) => alpha(l.bg) === 1 && !blurred(l.blur));
+        const nonSolidLayers = floating.filter(
+          (l) => !(alpha(l.bg) === 1 && !blurred(l.blur)),
         );
         ctx.record(
           "date_outer_surface_matches_contract",
-          `${theme}:操作浮层为单层实色（DESIGN.md §5 操作型材质，C06 起不用玻璃）`,
-          solidLayers.length >= 1 &&
+          `${theme}:量测边界为浮层本体（止于页面背景前）`,
+          measured.hitPageBackground === true && floating.length >= 3,
+          `边界命中页面背景=${measured.hitPageBackground}，浮层层级=${floating.length}：` +
+            floating.map((l) => l.cls).join(" > "),
+        );
+        ctx.record(
+          "date_outer_surface_matches_contract",
+          `${theme}:操作浮层单层实色且为 n-popover 外壳（DESIGN.md §5 操作型材质）`,
+          solidLayers.length === 1 &&
             elevatedLayers.length === 0 &&
-            measured.panel.bg === "rgba(0, 0, 0, 0)" &&
-            !blurred(measured.panel.blur),
+            /(^|\s)n-popover(\s|$)/.test(solidLayers[0]?.cls ?? ""),
           `实色层数=${solidLayers.length} elevated 层数=${elevatedLayers.length}：` +
-            [measured.panel, ...measured.ancestors]
-              .map((l) => `${l.cls}(${l.bg},${l.blur})`)
-              .join(" + "),
+            floating.map((l) => `${l.cls}(${l.bg},${l.blur})`).join(" + "),
         );
         ctx.record(
           "date_outer_surface_matches_contract",
-          `${theme}:内层未被实色外壳盖住`,
-          !(
-            alpha(measured.panel.bg) === 1 &&
-            !blurred(measured.panel.blur) &&
-            solidLayers.length > 1
-          ),
-          `内层 bg=${measured.panel.bg} blur=${measured.panel.blur}，实色层=${solidLayers.length}`,
+          `${theme}:浮层其余层透明且无模糊（内层不被盖住、无双层玻璃）`,
+          nonSolidLayers.every((l) => alpha(l.bg) === 0 && !blurred(l.blur)) &&
+            elevatedLayers.length === 0,
+          `非实色层=${nonSolidLayers
+            .map((l) => `${l.cls}(${l.bg},${l.blur})`)
+            .join(" + ")}，内层 bg=${measured.panel.bg} blur=${measured.panel.blur}`,
         );
         await page.keyboard.press("Escape");
         await ctx.shot("date_outer_surface_matches_contract", session, theme);
