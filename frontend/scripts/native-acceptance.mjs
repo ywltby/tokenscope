@@ -20,6 +20,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import { parse as parseToml } from "smol-toml";
+import { parseTOML } from "toml-eslint-parser";
 import { nativeUiRefresh } from "./contracts/native-ui-refresh.mjs";
 import { nativeCollectionStatus } from "./contracts/native-collection-status.mjs";
 import { nativeSourcePaths } from "./contracts/native-source-paths.mjs";
@@ -3072,23 +3073,50 @@ const scenarios = {
       `指纹=${JSON.stringify(consentRows[0]?.settings_hash)} 重算=${recomputed ?? "无字节证据"} 同意前写入=${JSON.stringify(writesBeforeConsent)}`,
     );
     const captureText = captureBytes === null ? "" : captureBytes.toString("utf8");
-    // 内容判定必须经真正的 TOML 解析（三轮复核：正则搜索会被注释假字段、
-    // [notes] 表内字段与 revision = 20 前缀匹配误放行）：解析失败拒绝；
-    // 顶层 privacy_policy_accepted 严格为布尔 true、顶层修订号严格为当前
-    // 整数值 2——不搜索子表、不做字符串包含。
+    // 内容判定经**两个**真正的 TOML 解析器交叉（三轮/四轮复核：正则会被
+    // 注释、子表与前缀骗过；smol-toml 单独使用会把 2.0/2e0/超精度浮点当成
+    // 整数 2、并接受 2026-02-30 这类语义非法日期）：
+    // - smol-toml：整篇合法性（值语义、抛错即拒）；
+    // - toml-eslint-parser：**AST 保留字面量类型**——顶层
+    //   privacy_policy_accepted 必须是 boolean 字面量且值为 true、顶层
+    //   privacy_policy_revision 必须是 integer 字面量且值为 2；子表键、
+    //   内联表、多段键路径一律不算顶层；非法日期在解析时即被拒绝。
     const captureContent = (() => {
       if (captureBytes === null) return { ok: false, detail: "无字节证据" };
-      let parsed;
       try {
-        parsed = parseToml(captureText);
+        parseToml(captureText);
       } catch (error) {
         return { ok: false, detail: `字节证据不是合法 TOML：${error}` };
       }
-      const accepted = parsed.privacy_policy_accepted;
-      const revision = parsed.privacy_policy_revision;
+      let program;
+      try {
+        program = parseTOML(captureText);
+      } catch (error) {
+        return { ok: false, detail: `字节证据未通过严格 TOML 解析：${error}` };
+      }
+      const top = program.body.find((table) => table.type === "TOMLTopLevelTable");
+      const topLevelValue = (name) => {
+        for (const kv of top?.body ?? []) {
+          const keys = kv.key.keys;
+          if (keys.length === 1 && (keys[0].name ?? keys[0].content) === name) {
+            return kv.value;
+          }
+        }
+        return null;
+      };
+      const accepted = topLevelValue("privacy_policy_accepted");
+      const revision = topLevelValue("privacy_policy_revision");
+      const ok =
+        accepted?.kind === "boolean" &&
+        accepted.value === true &&
+        revision?.kind === "integer" &&
+        revision.value === 2;
       return {
-        ok: accepted === true && revision === 2,
-        detail: `accepted=${JSON.stringify(accepted)} revision=${JSON.stringify(revision)}（顶层严格布尔 true / 整数 2）`,
+        ok,
+        detail:
+          `accepted kind=${accepted?.kind} value=${JSON.stringify(accepted?.value)}；` +
+          `revision kind=${revision?.kind} value=${JSON.stringify(revision?.value)}` +
+          "（顶层须 boolean true / integer 2）",
       };
     })();
     ck.add("consent_saved_capture_content", captureContent.ok, captureContent.detail);

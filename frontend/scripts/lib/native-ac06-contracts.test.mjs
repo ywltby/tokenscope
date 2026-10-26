@@ -10,6 +10,7 @@ import path from "node:path";
 import { test } from "vitest";
 import { changedBusinessFiles, settingsFingerprint, snapshotBusinessFiles } from "./acceptance-io.mjs";
 import { parse as parseToml } from "smol-toml";
+import { parseTOML } from "toml-eslint-parser";
 
 const source = fs.readFileSync(new URL("../native-acceptance.mjs", import.meta.url), "utf8");
 
@@ -279,6 +280,7 @@ function runAcceptOrderScenario(options = {}) {
       path,
       settingsFingerprint,
       parseToml,
+      parseTOML,
       registrySnapshot() {
         registryCalls += 1;
         return registryChanged && registryCalls > 1 ? { hive: ["changed"] } : registry;
@@ -710,5 +712,41 @@ for (const bad of CONTENT_BAD_CASES) {
       true,
       "哈希自洽时重算断言应通过（失败必须来自内容解析层）",
     );
+  });
+}
+
+// ── 字节证据类型与日期语义（四轮复核缺口）───────────────────────────────
+// smol-toml 把整数/浮点都解析成 JS number：revision = 2.0 / 2e0 /
+// 2.0000000000000001 的 === 2 全为 true（产品 Rust read_consent 对浮点
+// 返回 Unreadable）；宽松日期 2026-02-30 也被接受而 Rust 明确拒绝。
+// 判定必须保留 TOML 字面量类型（AST kind）并拒绝语义非法日期。
+
+const TYPE_BAD_CASES = [
+  { label: "浮点 2.0", extra: "privacy_policy_revision = 2.0\n", replace: true },
+  { label: "指数 2e0", extra: "privacy_policy_revision = 2e0\n", replace: true },
+  { label: "超精度浮点 2.0000000000000001", extra: "privacy_policy_revision = 2.0000000000000001\n", replace: true },
+  { label: "语义非法日期 2026-02-30", extra: "notes = 2026-02-30\n", replace: false },
+];
+
+for (const bad of TYPE_BAD_CASES) {
+  test(`字节证据类型/日期：${bad.label} 必须失败`, async () => {
+    const text = bad.replace
+      ? "privacy_policy_accepted = true\n" + bad.extra
+      : "privacy_policy_accepted = true\nprivacy_policy_revision = 2\n" + bad.extra;
+    const records = [
+      { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+      {
+        seq: 1,
+        event: "consent_saved",
+        settings_hash: settingsFingerprint(Buffer.from(text, "utf8")),
+        settings_bytes_hex: Buffer.from(text, "utf8").toString("hex"),
+      },
+      { seq: 2, event: "business_ready" },
+      { seq: 3, event: "history_open" },
+    ];
+    const { checks } = await runAcceptOrder({ records, settingsText: text });
+    const content = checks.find((check) => check.name === "consent_saved_capture_content");
+    assert.ok(content, "缺少内容解析断言");
+    assert.equal(content.pass, false, `误放行：${bad.label}`);
   });
 }
