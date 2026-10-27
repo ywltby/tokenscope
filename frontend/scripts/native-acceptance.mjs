@@ -3355,20 +3355,36 @@ const scenarios = {
       } catch (decodeError) {
         return { ok: false, detail: `终态 settings 不是合法 UTF-8：${decodeError}` };
       }
-      let parsed;
+      let program;
       try {
-        parsed = parseToml(terminalText);
+        parseToml(terminalText);
+        program = parseTOML(terminalText);
       } catch (parseError) {
-        return { ok: false, detail: `终态 settings 不是合法 TOML：${parseError}` };
+        return { ok: false, detail: `终态 settings 未通过严格 TOML 解析：${parseError}` };
       }
-      const accepted = parsed.privacy_policy_accepted;
-      const revision = parsed.privacy_policy_revision;
+      const top = program.body.find((table) => table.type === "TOMLTopLevelTable");
+      const topLevelValue = (name) => {
+        for (const kv of top?.body ?? []) {
+          const keys = kv.key.keys;
+          if (keys.length === 1 && (keys[0].name ?? keys[0].content ?? keys[0].value) === name) {
+            return kv.value;
+          }
+        }
+        return null;
+      };
+      const accepted = topLevelValue("privacy_policy_accepted");
+      const revision = topLevelValue("privacy_policy_revision");
+      const ok =
+        accepted?.kind === "boolean" &&
+        accepted.value === true &&
+        revision?.kind === "integer" &&
+        revision.value === 2;
       return {
-        ok: accepted === true && revision === 2,
+        ok,
         detail:
-          `accepted kind=${typeof accepted} value=${JSON.stringify(accepted)}；` +
-          `revision kind=${typeof revision} value=${JSON.stringify(revision)}` +
-          "（顶层须布尔 true / 整数 2）",
+          `accepted kind=${accepted?.kind} value=${JSON.stringify(accepted?.value)}；` +
+          `revision kind=${revision?.kind} value=${JSON.stringify(revision?.value)}` +
+          "（顶层须 boolean true / integer 2）",
       };
     })();
     ck.add("accept_writes_consent_with_revision", terminalCheck.ok, terminalCheck.detail);
