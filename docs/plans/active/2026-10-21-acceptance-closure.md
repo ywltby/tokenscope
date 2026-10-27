@@ -585,6 +585,16 @@ PR #52 CI 首跑与修复（2026-10-25）：
 - **P2 吞错**：`privacyBlockedDetail` 的内层 `.catch(() => [])` 移除——查询失败由外层 bounded 记 `privacyBlockedDetailError`，不再伪装成「没有文案」。
 - 红绿：维护回归 47 项——三反例（布局动画期点击用了偏移位坐标、阻断文案查询失败吞成空列表、计数事件缺目标元素）先红后绿；本地实跑 22/22 断言通过。产品侧归因待下次失败用新证据再判断；本轮不改变「根因未定位」。
 
+### 九轮复核补修：稳定性判定实效化与位置证据保留（2026-10-27，`9c4ec0f`）
+
+复核方探针（`qa-artifacts/workbuddy/b3/review-pr52-round9/review-probes.json`）暴露三处：
+
+- **P2 稳定性虚报**：稳定性循环耗尽 20 次采样后直接继续点击，`button_position_stable_before_click` 固定为 true；首次两采样间无等待，同帧相同不能证明动画结束。复现「始终移动」「首次可见随后消失」两形态均下发两次点击并记绿。修复：**跨帧采样**（先等 100ms 再取下一次）、stable 显式判定入断言；采样耗尽或按钮消失直接失败（不稳定时零点击）。
+- **P2 位置证据被覆盖**：正常路径末尾整体重写 `ev.acceptClicks`，清掉 buttonBoxAtClick/buttonBoxAfterClick（复核方核对最新 CI 产物两字段均不存在而断言为绿）。改为展开保留；失败路径补 `buttonBoxAfterFailure`（与 buttonBoxAtClick 对比即可判断布局是否在点击后变化）。
+- **P3 目标元素回归未验证实现**：测试桩跳过监听器注册与执行、自行塞 target——受测源码退回无 target 记录的 5715da8 测试仍全绿，「先红后绿」不成立。改为**真实执行受测监听器**（new Function 注入 window/document 捕获注册回调；点击时按注册类型真实派发——修正桩先前的双计形态，pointerdown 监听器不收 click）；实测移除 target 记录后两用例变红（红真实性成立）。
+
+维护回归 53 项全绿；本地实跑 22/22 断言通过。修复过程中的过程性失误如实记录：九轮场景实现一度被 `git checkout` 误恢复为 HEAD 版本（工作树未提交改动被撤销），发现后按既定设计重建并经 53 项回归与实跑复核，无残留。
+
 ### B2 合并与发布验收（2026-10-22）
 
 - [PR #31](https://github.com/ywltby/tokenscope/pull/31) 最终 HEAD `7664be9`，普通合并为 `c9de40ec3ded2485d2991079f209699ae6ff6107`；两父提交分别为最新 main `9c77cef` 与该 PR HEAD，合并文件树和已验证 HEAD 完全一致。AC03 / AC04 / AC05 分别提交 `6f50af1` / `16ec813` / `db43355`；局部峰谷费率展示修复 `4159633`、经批准的端口和 CI 契约登记 `317573e`、版本登记 `bfb01ed`、短路径取证补修 `7664be9` 各自独立。
