@@ -3000,11 +3000,6 @@ const scenarios = {
       stable === true,
       `点击前跨帧采样稳定=${stable}（x=${box.x} y=${box.y} w=${box.width} h=${box.height}）`,
     );
-    ck.add(
-      "button_position_recorded",
-      ev.acceptClicks.buttonBoxAtClick !== undefined,
-      "点击时与点击后按钮位置均已入 evidence",
-    );
     // 顺序下发（并发排队会在 CDP 输入管线里丢掉第二次完整点击——首跑实测
     // 同意键坐标只到达 1 次）；间隔仍以页面事件时间戳度量。
     await page.mouse.click(inputX, inputY);
@@ -3019,10 +3014,28 @@ const scenarios = {
       // 会让「查询失败」伪装成「按钮不存在」，证据无法归层。
       ev.acceptClicks = ev.acceptClicks ?? {};
       try {
-        ev.acceptClicks.buttonBoxAfterClick = await consentButton.boundingBox();
+        // 解锁后按钮通常已随隐私框移除——count() 立即返回不等待，0 = 合
+        // 法移除（buttonBoxAfterClick=null）；仍存在才查位置；查询异常进
+        // buttonBoxAfterClickError。三者证据可区分（十轮复核）。
+        const remaining = await consentButton.count();
+        ev.acceptClicks.buttonBoxAfterClick =
+          remaining === 0 ? null : await consentButton.boundingBox();
       } catch (boxError) {
         ev.acceptClicks.buttonBoxAfterClickError = String(boxError).slice(0, 300);
       }
+      // 十一轮复核：位置记录断言在**采集后**依据实际结果生成，区分三种
+      // 形态——查询失败（错误字段）、合法 null（按钮不存在）、成功（两
+      // 位置俱全）——不得在查询前固定为绿并声称双位置已入 evidence。
+      const recordedAfter =
+        "buttonBoxAfterClick" in ev.acceptClicks
+          ? `事后位置=${JSON.stringify(ev.acceptClicks.buttonBoxAfterClick)}`
+          : `事后位置查询失败=${ev.acceptClicks.buttonBoxAfterClickError}`;
+      ck.add(
+        "button_position_recorded",
+        ev.acceptClicks.buttonBoxAtClick !== undefined &&
+          "buttonBoxAfterClick" in ev.acceptClicks,
+        `点击时位置=${JSON.stringify(ev.acceptClicks.buttonBoxAtClick)}；${recordedAfter}`,
+      );
     } catch (error) {
       // 七轮复核修正：取证**逐项**采集、每项 8 秒上限（复用 withTimeout）、
       // 单项失败只追加该项错误——任何一步失败（截图异常、CDP 拒绝、CDP

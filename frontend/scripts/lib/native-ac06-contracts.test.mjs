@@ -338,6 +338,12 @@ function runAcceptOrderScenario(options = {}) {
           return {
             first() {
               return {
+                // 解锁后按钮已随隐私框移除（count=0 → 合法 null 形态）；
+                // 查询失败形态下按钮仍在（count=1、boundingBox 抛错）。
+                async count() {
+                  if (unlockStage) return unlockBoxQueryFails ? 1 : 0;
+                  return 1;
+                },
                 async boundingBox() {
                   if (unlockStage && unlockBoxQueryFails) {
                     throw new Error("CDP 查询失败（解锁后）");
@@ -379,6 +385,9 @@ function runAcceptOrderScenario(options = {}) {
               };
             },
             count() {
+              // 十一轮：查询失败形态下按钮仍在（count=1、boundingBox 抛错）
+              // ——与「按钮已移除（合法 null）」区分。
+              if (unlockBoxQueryFails && name.includes("privacy-actions")) return Promise.resolve(1);
               return Promise.resolve(name.includes("privacy-dialog") ? 1 : 0);
             },
             allTextContents() {
@@ -1206,7 +1215,9 @@ test("取证：正常路径的位置字段不被后续 acceptClicks 重写清掉
   const clickRecord = ev.acceptClicks;
   assert.ok("buttonBoxAtClick" in clickRecord, "buttonBoxAtClick 必须保留");
   assert.ok("buttonBoxAfterClick" in clickRecord, "buttonBoxAfterClick 必须保留");
-  assert.ok(clickRecord.buttonBoxAfterClick, "点击后位置必须有值");
+  // 解锁后按钮已移除时该值为 null（合法形态），字段存在即不被重写清掉。
+  assert.ok(clickRecord.buttonBoxAfterClick === null || typeof clickRecord.buttonBoxAfterClick === "object",
+    `事后位置应为 null 或对象：${JSON.stringify(clickRecord.buttonBoxAfterClick)}`);
 });
 
 test("目标元素：受测监听实现真实执行产生 target（移除实现即失败）", async () => {
@@ -1225,7 +1236,6 @@ test("目标元素：受测监听实现真实执行产生 target（移除实现�
 
 test("P2：解锁后位置查询失败必须记 buttonBoxAfterClickError（不得吞成 null）", async () => {
   const { ev, checks } = await runAcceptOrderScenario({ unlockBoxQueryFails: true });
-  assert.ok(checks.every((check) => check.pass), JSON.stringify(checks.filter((c) => !c.pass)));
   const clickRecord = ev.acceptClicks;
   assert.ok(
     "buttonBoxAfterClickError" in clickRecord,
@@ -1233,6 +1243,11 @@ test("P2：解锁后位置查询失败必须记 buttonBoxAfterClickError（不�
   );
   assert.match(clickRecord.buttonBoxAfterClickError, /CDP 查询失败/);
   assert.ok(!("buttonBoxAfterClick" in clickRecord), "查询失败时不得伪装成合法 null");
+  // 十一轮：位置记录断言在此形态下必须如实失败（不虚报双位置已入
+  // evidence）——它不算进通过集。
+  const recorded = checks.find((check) => check.name === "button_position_recorded");
+  assert.ok(recorded && !recorded.pass && /查询失败/.test(recorded.detail),
+    JSON.stringify(recorded));
 });
 
 test("P3：跨帧等待必须真实驱动位置（移除等待即永不稳定、场景失败）", async () => {
@@ -1244,4 +1259,23 @@ test("P3：跨帧等待必须真实驱动位置（移除等待即永不稳定、
   assert.deepEqual(checks.filter((check) => !check.pass), []);
   assert.equal(clickCoordinates.length, 2);
   assert.equal(clickCoordinates[0].x, 100 + 120 / 2, "时钟稳定后必须用原位中心");
+});
+
+// ── 十一轮复核：位置记录断言必须在采集后依据实际结果生成 ────────────────
+// 旧断言在事后位置查询前执行且固定为 true——注入查询失败后错误字段已
+// 正确保留，断言仍绿并声称「点击时与点击后按钮位置均已入 evidence」。
+
+test("P3：位置记录断言在查询失败时不得虚报双位置已入 evidence", async () => {
+  const { checks } = await runAcceptOrderScenario({ unlockBoxQueryFails: true });
+  const recorded = checks.find((check) => check.name === "button_position_recorded");
+  assert.ok(recorded, "缺少位置记录断言");
+  assert.equal(recorded.pass, false, "查询失败时不得声称双位置已入 evidence");
+  assert.match(recorded.detail, /查询失败/);
+});
+
+test("P3：位置记录断言在查询成功时如实报告两位置", async () => {
+  const { checks } = await runAcceptOrderScenario({});
+  const recorded = checks.find((check) => check.name === "button_position_recorded");
+  assert.ok(recorded && recorded.pass, JSON.stringify(checks.filter((c) => !c.pass)));
+  assert.match(recorded.detail, /事后位置=/);
 });
