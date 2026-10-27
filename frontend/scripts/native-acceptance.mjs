@@ -3020,7 +3020,12 @@ const scenarios = {
         // 为查询失败。单次读取：元素缺失 → null（合法移除），通信异常 →
         // buttonBoxAfterClickError。
         const captured = await page.evaluate(() => {
-          const button = document.querySelector(".privacy-actions button");
+          // 十四轮复核：query(第一个)取到的是「不同意」按钮（组件顺序）
+          // ——必须按点击定位同一口径（「同意并继续」文本）过滤，前后才
+          // 是同一按钮、位置可比较。
+          const button = Array.from(
+            document.querySelectorAll(".privacy-actions button"),
+          ).find((el) => (el.textContent || "").includes("同意并继续"));
           if (!button) return { exists: false };
           const rect = button.getBoundingClientRect();
           return {

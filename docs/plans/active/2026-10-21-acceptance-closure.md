@@ -612,6 +612,14 @@ PR #52 CI 首跑与修复（2026-10-25）：
 
 复核方以真实 Edge 复现（`qa-artifacts/workbuddy/b3/review-pr52-round13/review-probes.json`）：`count()` 与 `boundingBox()` 分开执行——正常退出动画恰好在两次查询之间完成时，count=1 而 boundingBox 等待超时（TimeoutError），合法移除被误判为查询失败、位置断言失败（新偶发红灯源）。修复：解锁后位置采集合并为**单次** `page.evaluate`——单次读取内同时判定存在性与位置（元素缺失 `{exists:false}` → 合法 null；读取到坐标 → 位置对象；**通信异常整次抛错** → `buttonBoxAfterClickError`），不再存在两步窗口。红先：时序回归（count=1、采集时已移除、两步查询抛超时）在旧两步实现下误判查询失败（红），合并后判合法 null（绿）。维护回归 58 项全绿；本地实跑 22/22 断言通过，真实页面采集到解锁后按钮位置对象。
 
+### 十四轮复核补修：事后采集定位同一同意按钮（2026-10-27）
+
+复核方以真实 Edge 复现（`qa-artifacts/workbuddy/b3/review-pr52-round14/review-probes.json`）：单次采集的 `querySelector(".privacy-actions button")` 取**第一个**按钮——组件顺序（`PrivacyConsentDialog.vue:68`）中第一个是「不同意」。点击前记录的是同意按钮位置、事后采集的是不同意按钮位置，两份位置不可比较且断言仍绿（无动画双按钮页面上同意按钮 x=700、事后证据记录 x=100）。
+
+修复：单次页面内采集保留，选择器改为与点击定位同一口径——`querySelectorAll(".privacy-actions button")` 按「同意并继续」文本过滤（`find`），前后是同一按钮；「正在保存…」等中间态文本不含该串时按不存在处理（合法 null），不会误取不同意按钮。
+
+红先：回归桩注入含双按钮（不同意 x=100、同意并继续 x=700）的假 DOM 并**真实执行采集回调**（new Function 注入假 document，回调内选择器行为真实运行）——旧实现取第一个按钮 x=100（红），新实现取同意按钮 x=700（绿）。维护回归 59 项全绿；本地实跑 22/22 断言通过（解锁后同意按钮已移除 → buttonBoxAfterClick=null 合法形态，不误取不同意按钮位置）。
+
 ### B2 合并与发布验收（2026-10-22）
 
 - [PR #31](https://github.com/ywltby/tokenscope/pull/31) 最终 HEAD `7664be9`，普通合并为 `c9de40ec3ded2485d2991079f209699ae6ff6107`；两父提交分别为最新 main `9c77cef` 与该 PR HEAD，合并文件树和已验证 HEAD 完全一致。AC03 / AC04 / AC05 分别提交 `6f50af1` / `16ec813` / `db43355`；局部峰谷费率展示修复 `4159633`、经批准的端口和 CI 契约登记 `317573e`、版本登记 `bfb01ed`、短路径取证补修 `7664be9` 各自独立。

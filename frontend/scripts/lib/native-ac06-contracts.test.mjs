@@ -261,6 +261,9 @@ function runAcceptOrderScenario(options = {}) {
     // 十三轮：单次页面内采集执行时元素已被移除（exists=false）——即
     // 「count 与采集之间退出动画完成」的时序形态
     unlockCollectRemoves = false,
+    // 十四轮：假 DOM 含两个按钮（不同意 x=100、同意并继续 x=700），
+    // 采集回调真实执行——覆盖选择器行为（旧实现取第一个按钮 → 红）。
+    multiButtonDom = false,
     // 八轮复核 P2：阻断文案查询（allTextContents）注入失败
     blockLocatorFails = false,
   } = options;
@@ -438,6 +441,28 @@ function runAcceptOrderScenario(options = {}) {
             // false；正常返回原位坐标。
             if (unlockBoxQueryFails) {
               throw new Error("CDP 查询失败（解锁后）");
+            }
+            if (multiButtonDom) {
+              // 十四轮：采集回调**真实执行**——注入含双按钮的假 DOM
+              // （不同意在前、同意并继续在后），回调内的选择器行为
+              // （querySelectorAll + 文本过滤）真实运行。
+              const fakeButtons = [
+                {
+                  textContent: "不同意",
+                  getBoundingClientRect: () => ({ x: 100, y: 200, width: 90, height: 28 }),
+                },
+                {
+                  textContent: "同意并继续",
+                  getBoundingClientRect: () => ({ x: 700, y: 200, width: 90, height: 28 }),
+                },
+              ];
+              const fakeDocument = {
+                querySelectorAll: (selector) =>
+                  String(selector).includes("privacy-actions") ? fakeButtons : [],
+                querySelector: (selector) =>
+                  String(selector).includes("privacy-actions") ? fakeButtons[0] : null,
+              };
+              return new Function("document", `return (${text});`)(fakeDocument)();
             }
             return unlockCollectRemoves
               ? { exists: false }
@@ -1325,5 +1350,24 @@ test("十三轮：count 与位置采集之间按钮被移除，必须判合法 n
   assert.ok(
     !("buttonBoxAfterClickError" in clickRecord),
     `不得误判为查询失败：${JSON.stringify(clickRecord.buttonBoxAfterClickError)}`,
+  );
+});
+
+// ── 十四轮复核：事后采集必须定位同一同意按钮（多按钮真实 DOM）───────────
+// querySelector(".privacy-actions button") 取第一个按钮——组件顺序中第一
+// 个是「不同意」。点击前记录的是同意按钮位置，事后采集的是不同意按钮
+// 位置，两份位置不可比较且断言仍绿。
+
+test("十四轮：事后采集定位同意按钮而非第一个按钮（多按钮真实回调）", async () => {
+  const result = await runAcceptOrderScenario({ multiButtonDom: true });
+  assert.ok(result.checks.every((check) => check.pass), JSON.stringify(result.checks.filter((c) => !c.pass)));
+  const clickRecord = result.ev.acceptClicks;
+  assert.ok(clickRecord.buttonBoxAfterClick, "事后位置必须存在");
+  // 假 DOM：不同意按钮在 x=100、同意按钮在 x=700——事后采集必须取同意
+  // 按钮（旧实现 querySelector 取第一个 → x=100 → 红）。
+  assert.equal(
+    clickRecord.buttonBoxAfterClick.x,
+    700,
+    `事后采集取到的是不同意按钮：${JSON.stringify(clickRecord.buttonBoxAfterClick)}`,
   );
 });
