@@ -595,6 +595,15 @@ PR #52 CI 首跑与修复（2026-10-25）：
 
 维护回归 53 项全绿；本地实跑 22/22 断言通过。修复过程中的过程性失误如实记录：九轮场景实现一度被 `git checkout` 误恢复为 HEAD 版本（工作树未提交改动被撤销），发现后按既定设计重建并经 53 项回归与实跑复核，无残留。
 
+### 十轮复核补修：位置查询错误区分与等待驱动回归（2026-10-27）
+
+复核方探针（`qa-artifacts/workbuddy/b3/review-pr52-round10/review-probes.json`、CI 产物核对 `ci-evidence-audit.json`）暴露两处：
+
+- **P2 位置查询吞错**：正常路径 `buttonBoxAfterClick` 的 `.catch(() => null)` 把所有查询异常变成合法 null——注入 CDP 查询失败后场景全绿，证据与「成功查询、按钮不存在」完全相同，无法归层；最新 CI 该字段也是 null，来源不可判。修复：区分合法 null（按钮不存在）与采集异常（记 `buttonBoxAfterClickError`）。负例先红（吞成 null 无错误字段）后绿。
+- **P3 跨帧等待回归无牙齿**：位置桩按采样次数变位置、waitForTimeout 空桩——移除受测 `await page.waitForTimeout(100)` 测试仍通过。改用**虚拟时钟驱动**：waitForTimeout 累计时钟、时钟未达稳定阈值前每次采样位置都不同——移除等待即时钟不走、永不稳定、场景失败。红真实性实测：移除等待后该用例即红；恢复后绿。
+
+维护回归 55 项全绿；本地实跑 22/22 断言通过。
+
 ### B2 合并与发布验收（2026-10-22）
 
 - [PR #31](https://github.com/ywltby/tokenscope/pull/31) 最终 HEAD `7664be9`，普通合并为 `c9de40ec3ded2485d2991079f209699ae6ff6107`；两父提交分别为最新 main `9c77cef` 与该 PR HEAD，合并文件树和已验证 HEAD 完全一致。AC03 / AC04 / AC05 分别提交 `6f50af1` / `16ec813` / `db43355`；局部峰谷费率展示修复 `4159633`、经批准的端口和 CI 契约登记 `317573e`、版本登记 `bfb01ed`、短路径取证补修 `7664be9` 各自独立。

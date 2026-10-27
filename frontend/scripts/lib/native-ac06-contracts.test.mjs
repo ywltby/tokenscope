@@ -251,6 +251,11 @@ function runAcceptOrderScenario(options = {}) {
     buttonVanishes = false,
     // 九轮复核：位置始终移动（每次采样都不同，永不稳定）
     alwaysMoving = false,
+    // 十轮复核：位置由**虚拟时钟**驱动（waitForTimeout 累计时钟；时钟
+    // 未达稳定阈值前每次采样位置都不同——移除等待即永不稳定）。
+    stableAfterMs = 0,
+    // 十轮复核 P2：解锁后（.app-nav 出现）的按钮位置查询注入失败
+    unlockBoxQueryFails = false,
     // 八轮复核 P2：阻断文案查询（allTextContents）注入失败
     blockLocatorFails = false,
   } = options;
@@ -266,6 +271,8 @@ function runAcceptOrderScenario(options = {}) {
   let dispatched = 0;
   let registryCalls = 0;
   let boxSamples = 0;
+  let virtualClock = 0;
+  let unlockStage = false;
   const clickCoordinates = [];
   const registry = { hive: ["unchanged"] };
   const autostartRows =
@@ -320,16 +327,36 @@ function runAcceptOrderScenario(options = {}) {
   return run({
     inst: {
       page: {
-        async waitForSelector() {},
-        async waitForTimeout() {},
+        async waitForSelector(selector) {
+          if (String(selector) === ".app-nav") unlockStage = true;
+        },
+        async waitForTimeout(ms) {
+          virtualClock += ms ?? 0;
+        },
         locator(selector) {
           const name = String(selector);
           return {
             first() {
               return {
                 async boundingBox() {
+                  if (unlockStage && unlockBoxQueryFails) {
+                    throw new Error("CDP 查询失败（解锁后）");
+                  }
                   boxSamples += 1;
                   if (buttonVanishes && boxSamples >= 2) return null;
+                  if (stableAfterMs > 0) {
+                    // 十轮：位置由虚拟时钟驱动——时钟未达阈值前每次采样
+                    // 位置都不同（移动中）；移除等待即永不稳定。
+                    if (virtualClock < stableAfterMs) {
+                      return {
+                        x: box.x + 50 + boxSamples,
+                        y: box.y + 60,
+                        width: box.width,
+                        height: box.height,
+                      };
+                    }
+                    return box;
+                  }
                   if (unstableBoxSamples > 0 && boxSamples <= unstableBoxSamples) {
                     // 动画中：每次采样位置都不同（移动中），稳定后回原位。
                     return {
@@ -1192,4 +1219,29 @@ test("目标元素：受测监听实现真实执行产生 target（移除实现�
     assert.equal(entry.target.tag, "BUTTON");
     assert.match(entry.target.text, /同意并继续/);
   }
+});
+
+// ── 十轮复核缺口 ─────────────────────────────────────────────────────────
+
+test("P2：解锁后位置查询失败必须记 buttonBoxAfterClickError（不得吞成 null）", async () => {
+  const { ev, checks } = await runAcceptOrderScenario({ unlockBoxQueryFails: true });
+  assert.ok(checks.every((check) => check.pass), JSON.stringify(checks.filter((c) => !c.pass)));
+  const clickRecord = ev.acceptClicks;
+  assert.ok(
+    "buttonBoxAfterClickError" in clickRecord,
+    `查询失败必须记错误字段，实际：${JSON.stringify(clickRecord)}`,
+  );
+  assert.match(clickRecord.buttonBoxAfterClickError, /CDP 查询失败/);
+  assert.ok(!("buttonBoxAfterClick" in clickRecord), "查询失败时不得伪装成合法 null");
+});
+
+test("P3：跨帧等待必须真实驱动位置（移除等待即永不稳定、场景失败）", async () => {
+  // 位置由虚拟时钟驱动：waitForTimeout 不推进时钟就永远在动画态。旧实现
+  // 移除 await page.waitForTimeout(100) 后时钟不走 → 20 次采样耗尽 → 场景
+  // 失败（本用例断言通过 → 移除等待即红）。按采样次数变位置的旧桩无此
+  // 牙齿（移除等待仍绿）。
+  const { checks, clickCoordinates } = await runAcceptOrderScenario({ stableAfterMs: 400 });
+  assert.deepEqual(checks.filter((check) => !check.pass), []);
+  assert.equal(clickCoordinates.length, 2);
+  assert.equal(clickCoordinates[0].x, 100 + 120 / 2, "时钟稳定后必须用原位中心");
 });

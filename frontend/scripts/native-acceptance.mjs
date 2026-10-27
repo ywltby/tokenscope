@@ -3015,10 +3015,14 @@ const scenarios = {
     try {
       await page.waitForSelector(".app-nav", { timeout: 60000 });
       // 点击后按钮位置证据（八轮复核：判断点击坐标是否因布局变化失效）。
+      // 十轮复核 P2：区分合法 null（按钮不存在）与采集异常——吞成 null
+      // 会让「查询失败」伪装成「按钮不存在」，证据无法归层。
       ev.acceptClicks = ev.acceptClicks ?? {};
-      ev.acceptClicks.buttonBoxAfterClick = await consentButton
-        .boundingBox()
-        .catch(() => null);
+      try {
+        ev.acceptClicks.buttonBoxAfterClick = await consentButton.boundingBox();
+      } catch (boxError) {
+        ev.acceptClicks.buttonBoxAfterClickError = String(boxError).slice(0, 300);
+      }
     } catch (error) {
       // 七轮复核修正：取证**逐项**采集、每项 8 秒上限（复用 withTimeout）、
       // 单项失败只追加该项错误——任何一步失败（截图异常、CDP 拒绝、CDP
