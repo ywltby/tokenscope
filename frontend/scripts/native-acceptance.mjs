@@ -2933,25 +2933,34 @@ const scenarios = {
       .locator(".privacy-actions button", { hasText: "同意并继续" })
       .first();
     // 按钮稳定性等待（八轮复核：坐标先取后点，布局动画会让坐标失效——
-    // 失败记录的点击坐标与超时截图中按钮位置不一致即此嫌疑）：连续两次
-    // boundingBox 采样一致才下发输入；点击前后各留位置证据。
-    let box = await consentButton.boundingBox();
+    // 失败记录的点击坐标与超时截图中按钮位置不一致即此嫌疑）。九轮复核
+    // 修正：**跨帧**采样（首帧内两次相同不证明动画结束）、采样次数耗尽
+    // 或按钮消失即失败，不得继续点击、不得虚报稳定。
+    const sampleBox = () => consentButton.boundingBox();
+    let previous = await sampleBox();
+    let stable = false;
+    let box = previous;
     for (let samples = 0; samples < 20; samples += 1) {
-      const next = await consentButton.boundingBox();
+      await page.waitForTimeout(100);
+      box = await sampleBox();
+      if (!box) throw new Error("同意按钮在稳定性等待期间消失，拒绝点击");
       if (
-        next &&
-        box &&
-        next.x === box.x &&
-        next.y === box.y &&
-        next.width === box.width &&
-        next.height === box.height
+        previous &&
+        box.x === previous.x &&
+        box.y === previous.y &&
+        box.width === previous.width &&
+        box.height === previous.height
       ) {
+        stable = true;
         break;
       }
-      box = next ?? box;
-      await page.waitForTimeout(100);
+      previous = box;
     }
-    if (!box) throw new Error("同意按钮不可见，无法下发双击输入");
+    if (!stable) {
+      throw new Error(
+        `同意按钮位置 20 次跨帧采样后仍不稳定（最后位置 ${JSON.stringify(box)}），拒绝点击`,
+      );
+    }
     ev.acceptClicks = ev.acceptClicks ?? {};
     ev.acceptClicks.buttonBoxAtClick = box;
     // 计数器挂载同样 8 秒有界：CDP 挂起时不能无限阻塞场景（七轮复核）。
@@ -2988,8 +2997,8 @@ const scenarios = {
     const inputY = box.y + box.height / 2;
     ck.add(
       "button_position_stable_before_click",
-      true,
-      `点击前按钮位置稳定（x=${box.x} y=${box.y} w=${box.width} h=${box.height}）`,
+      stable === true,
+      `点击前跨帧采样稳定=${stable}（x=${box.x} y=${box.y} w=${box.width} h=${box.height}）`,
     );
     ck.add(
       "button_position_recorded",
@@ -3033,6 +3042,9 @@ const scenarios = {
         page.locator(".privacy-detail, .privacy-error, [class*='error']").allTextContents(),
       );
       await bounded("buttonBoxAtClick", async () => box ?? null);
+      // 九轮复核：失败时按钮的**事后**位置——与点击时位置对比即可判断
+      // 布局是否在点击后变化（按钮消失时为 null，同样入证据）。
+      await bounded("buttonBoxAfterFailure", () => consentButton.boundingBox());
       await bounded("settingsSnapshot", async () =>
         fs.existsSync(settingsPath)
           ? fs.readFileSync(settingsPath, "utf8").slice(0, 800)
@@ -3072,12 +3084,14 @@ const scenarios = {
       pressesAtButton.length >= 2
         ? pressesAtButton[pressesAtButton.length - 1].ts - pressesAtButton[0].ts
         : null;
+    // 九轮复核：**展开**保留稳定性等待写入的 buttonBoxAtClick 等
+    // 字段——整体重写会把位置证据清掉。
     ev.acceptClicks = {
+      ...ev.acceptClicks,
       delivered: pressesAtButton.length,
       intervalMs: inputIntervalMs,
       synthesizedClicks,
       captured: capturedClicks,
-      box,
     };
     ck.add(
       "double_click_delivered",

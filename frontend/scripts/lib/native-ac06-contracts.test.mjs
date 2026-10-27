@@ -247,6 +247,10 @@ function runAcceptOrderScenario(options = {}) {
     registryChanged = false,
     // 八轮复核：按钮位置前 N 次 boundingBox 采样返回偏移位（模拟布局动画）
     unstableBoxSamples = 0,
+    // 九轮复核：稳定性等待期间按钮消失（boundingBox 返回 null）
+    buttonVanishes = false,
+    // 九轮复核：位置始终移动（每次采样都不同，永不稳定）
+    alwaysMoving = false,
     // 八轮复核 P2：阻断文案查询（allTextContents）注入失败
     blockLocatorFails = false,
   } = options;
@@ -256,6 +260,9 @@ function runAcceptOrderScenario(options = {}) {
   const clicksLog = [];
   const checks = [];
   const ev = {};
+  const listeners = [];
+  const fakeWindow = {};
+  const evaluateCalls = [];
   let dispatched = 0;
   let registryCalls = 0;
   let boxSamples = 0;
@@ -322,8 +329,17 @@ function runAcceptOrderScenario(options = {}) {
               return {
                 async boundingBox() {
                   boxSamples += 1;
-                  if (boxSamples <= unstableBoxSamples) {
+                  if (buttonVanishes && boxSamples >= 2) return null;
+                  if (unstableBoxSamples > 0 && boxSamples <= unstableBoxSamples) {
                     // 动画中：每次采样位置都不同（移动中），稳定后回原位。
+                    return {
+                      x: box.x + 50 + boxSamples,
+                      y: box.y + 60,
+                      width: box.width,
+                      height: box.height,
+                    };
+                  }
+                  if (alwaysMoving) {
                     return {
                       x: box.x + 50 + boxSamples,
                       y: box.y + 60,
@@ -349,12 +365,25 @@ function runAcceptOrderScenario(options = {}) {
         async evaluate(fn) {
           const text = fn.toString();
           if (text.includes("addEventListener")) {
-            clicksLog.length = 0;
+            // 真实执行受测监听器注册（场景体挂计数器）。
+            listeners.length = 0;
+            new Function("window", "document", `return (${text});`)(
+              fakeWindow,
+              {
+                addEventListener(type, handler) {
+                  listeners.push({ type, handler });
+                },
+              },
+            )();
             return undefined;
+          }
+          if (text.includes("__ac06ConsentClicks")) {
+            evaluateCalls.push(text.slice(0, 40));
+            return fakeWindow.__ac06ConsentClicks ?? [];
           }
           if (text.includes("autostart_set")) return { ok: true, value: true };
           if (text.includes("autostart_status")) return { ok: true, value: statusValue };
-          return clicksLog;
+          return [];
         },
         mouse: {
           async click(x, y) {
@@ -363,8 +392,24 @@ function runAcceptOrderScenario(options = {}) {
             if (failSecondDispatch && dispatched === 2) throw new Error("CDP 输入通道错误");
             if (dispatched <= deliveredClicks) {
               const ts = 1000 + (dispatched - 1) * gapMs;
-              clicksLog.push({ type: "pointerdown", ts, x, y, target: { tag: "BUTTON", cls: "privacy-actions", text: "" } });
-              clicksLog.push({ type: "click", ts, x, y, target: { tag: "BUTTON", cls: "privacy-actions", text: "" } });
+              const fakeTarget = {
+                tagName: "BUTTON",
+                className: "privacy-actions",
+                textContent: "  同意并继续 ",
+              };
+              // 真实语义：每个监听器只收自己注册的类型（pointerdown 监听器
+              // 不会收到 click），否则一次点击会计成两次按下。
+              for (const { type: listenType, handler } of listeners) {
+                handler({
+                  type: listenType,
+                  timeStamp: ts + (listenType === "click" ? 0.5 : 0),
+                  clientX: x,
+                  clientY: y,
+                  target: fakeTarget,
+                });
+              }
+              clicksLog.push({ type: "pointerdown", ts, x, y });
+              clicksLog.push({ type: "click", ts, x, y });
             }
           },
         },
@@ -375,7 +420,10 @@ function runAcceptOrderScenario(options = {}) {
     },
     ck: { add: (name, pass, detail) => checks.push({ name, pass, detail }) },
     ev,
-  }).then(() => ({ checks, dispatched, clickCoordinates, ev }));
+  }).then(
+    () => ({ threw: false, error: null, ev, checks, clickCoordinates }),
+    (error) => ({ threw: true, error: String(error), ev, checks, clickCoordinates }),
+  );
 }
 
 function runAcceptOrder({ records, settingsText }) {
@@ -526,10 +574,14 @@ test("accept-order: 两次输入间隔 ≥100ms 必须失败", async () => {
 });
 
 test("accept-order: 第二次输入下发失败必须显式失败（不得吞掉后宣称双击已测）", async () => {
-  await assert.rejects(
-    runAcceptOrderClicks({ deliveredClicks: 2, gapMs: 30, failSecondDispatch: true, records: orderedRecords() }),
-    /CDP 输入通道错误/,
-  );
+  const result = await runAcceptOrderClicks({
+    deliveredClicks: 2,
+    gapMs: 30,
+    failSecondDispatch: true,
+    records: orderedRecords(),
+  });
+  assert.equal(result.threw, true, "第二次下发失败必须显式失败");
+  assert.match(result.error, /CDP 输入通道错误/);
 });
 
 // ── privacy-accept-order：同意后自启命令层路由（方案 A / PR52 补证）──────
@@ -878,6 +930,8 @@ test("字节证据：合法编码的 U+FFFD 字符必须通过（替换仅限非
 function runAcceptOrderDiagnostics({ pageBehavior }) {
   const checks = [];
   const ev = {};
+  const listeners = [];
+  const fakeWindow = {};
   const box = { x: 100, y: 200, width: 120, height: 40 };
   const run = extractScenario(
     "privacy-accept-order",
@@ -945,12 +999,30 @@ function runAcceptOrderDiagnostics({ pageBehavior }) {
         },
         async evaluate(fn) {
           const text = fn.toString();
-          // 区分调用点：挂计数器（addEventListener）正常走；取证读取
-          // （__ac06ConsentClicks）按 pageBehavior 注入失败/挂起。
-          if (text.includes("addEventListener")) return undefined;
+          // 区分调用点：挂计数器（addEventListener）**真实执行注册**——
+          // 回调存入 listeners，点击时按受测源码的监听实现产生事件
+          // （九轮复核 P3：跳过执行再自行塞 target 的测试不验证实现）。
+          if (text.includes("addEventListener")) {
+            listeners.length = 0;
+            const factory = new Function(
+              "window",
+              "document",
+              `return (${text});`,
+            );
+            factory(
+              fakeWindow,
+              {
+                addEventListener(type, handler) {
+                  listeners.push({ type, handler });
+                },
+              },
+            )();
+            return undefined;
+          }
           if (text.includes("__ac06ConsentClicks")) {
             evaluateCalls.push(text.slice(0, 40));
-            return pageBehavior.evaluate ? pageBehavior.evaluate(fn) : [];
+            if (pageBehavior.evaluate) return pageBehavior.evaluate(fn);
+            return fakeWindow.__ac06ConsentClicks ?? [];
           }
           return [];
         },
@@ -1057,5 +1129,67 @@ test("取证：点击证据携带事件实际目标元素", async () => {
   for (const entry of ev.acceptClicks.captured) {
     assert.ok(entry.target, "计数事件必须带目标元素");
     assert.equal(entry.target.tag, "BUTTON");
+  }
+});
+
+// ── 稳定性判定与位置证据保留（九轮复核缺口）────────────────────────────
+// 旧实现：稳定性循环耗尽直接继续点击且断言固定 true；首次两采样间无等待；
+// 3075 行整体重写 ev.acceptClicks 清掉位置字段；失败路径无事后位置。
+
+test("稳定性：按钮始终移动时不得点击，直接失败", async () => {
+  const result = await runAcceptOrderScenario({ alwaysMoving: true });
+  assert.equal(result.threw, true, "永不稳定必须失败而不是继续点击");
+  assert.match(result.error, /不稳定|消失/);
+  assert.equal(result.clickCoordinates.length, 0, "不稳定时不得下发任何点击");
+  const stable = result.checks.find((check) => check.name === "button_position_stable_before_click");
+  assert.ok(!stable || stable.pass === false, "不得虚报稳定");
+});
+
+test("稳定性：按钮在等待期间消失必须失败且不点击", async () => {
+  const result = await runAcceptOrderScenario({ buttonVanishes: true });
+  assert.equal(result.threw, true, "按钮消失必须失败");
+  assert.match(result.error, /消失/);
+  assert.equal(result.clickCoordinates.length, 0, "按钮消失后不得点击");
+});
+
+test("稳定性：两采样间必须跨帧等待（首次同帧相同不算稳定）", async () => {
+  // 旧实现首次比较发生在取完初始位置后立即进行（同帧相同即误判稳定）；
+  // 新实现先等一帧再采样。用 unstableBoxSamples=1（首采样偏移、第二帧起
+  // 稳定）验证等待后用稳定位点击。
+  const { checks, clickCoordinates } = await runAcceptOrderScenario({
+    unstableBoxSamples: 1,
+  });
+  assert.deepEqual(checks.filter((check) => !check.pass), []);
+  assert.equal(clickCoordinates.length, 2);
+  assert.equal(clickCoordinates[0].x, 100 + 120 / 2, "必须用稳定位置中心");
+});
+
+test("取证：解锁超时的失败路径补按钮事后位置，且不覆盖已有字段", async () => {
+  const result = await runAcceptOrderDiagnostics({ pageBehavior: { evaluate: () => [] } });
+  assert.equal(result.threw, true);
+  const diag = result.ev.acceptFailureDiagnostics;
+  assert.ok(diag, "必须有诊断对象");
+  assert.ok("buttonBoxAtClick" in diag, "失败路径必须有按钮当时位置");
+  assert.ok("buttonBoxAfterFailure" in diag, "失败路径必须有按钮事后位置");
+});
+
+test("取证：正常路径的位置字段不被后续 acceptClicks 重写清掉", async () => {
+  const { ev, checks } = await runAcceptOrderScenario({});
+  assert.ok(checks.every((check) => check.pass), JSON.stringify(checks.filter((c) => !c.pass)));
+  const clickRecord = ev.acceptClicks;
+  assert.ok("buttonBoxAtClick" in clickRecord, "buttonBoxAtClick 必须保留");
+  assert.ok("buttonBoxAfterClick" in clickRecord, "buttonBoxAfterClick 必须保留");
+  assert.ok(clickRecord.buttonBoxAfterClick, "点击后位置必须有值");
+});
+
+test("目标元素：受测监听实现真实执行产生 target（移除实现即失败）", async () => {
+  const { ev, checks } = await runAcceptOrderScenario({});
+  assert.ok(checks.every((check) => check.pass), JSON.stringify(checks.filter((c) => !c.pass)));
+  const captured = ev.acceptClicks.captured;
+  assert.ok(captured.length >= 4, `捕获事件不足：${captured.length}`);
+  for (const entry of captured) {
+    assert.ok(entry.target, "受测监听器必须产出目标元素（没有则测试红）");
+    assert.equal(entry.target.tag, "BUTTON");
+    assert.match(entry.target.text, /同意并继续/);
   }
 });
