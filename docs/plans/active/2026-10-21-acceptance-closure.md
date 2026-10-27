@@ -563,7 +563,7 @@ PR #52 CI 首跑与修复（2026-10-25）：
 - **坏字节位置**：五轮负例把坏字节放在注释结束后（`# note\n` 已闭合），落在裸键前——旧版 TOML 解析本就拒绝，「先红」不真实。更正：坏字节放**注释行内部**（`# <坏字节>\n`，替换成 U+FFFD 后注释仍合法）——实测旧版 `toString("utf8")` 判定下确实放行、严格解码 InvalidData，红真实性成立。
 - **TOML 转义**：`"privacy_polic\u0079_accepted"` 在 JS 普通字符串里被预转义成 `y`，TOML 转义路径未被测试。更正：`String.raw` 保留字面反斜杠（标签与内容同步），测的是 TOML 层转义。
 - **归因矛盾更正**：五轮收口段同时写「根因仍未定位」与「两者均为环境级失败」矛盾——更正为 Install 的连接重置（WinError 10054）有日志支持属环境级网络失败；Native 的「无页面 target」症状保持**根因未明**，重跑通过只说明恢复，不作为归因。
-- **2edeafc 收口状态核查（复核方留证 `qa-artifacts/workbuddy/b3/review-pr52-round6/native-head-failure.json`）**：该轮 CI（40348043575）success，但 Native UI E2E **失败且与「无页面 target」不同型**——privacy-accept-order 已连接 Tauri 页面（page_target_url 非空、cdp/page_target 共 1.4s），隐私框出现后等待 `.app-nav` 60 秒超时，`acceptance_trace.records` 为空、无点击计数留存、host/app 日志尾为空，根因**未明**（PR CI 的 merge-checkout SHA `b1af5ac`、EXE `559a1484…`，与本地 `9f9f18ab…` 不同属正常）；该轮重跑后通过仅说明恢复。此处如实保留为未定位失败，不用重跑替代归因。
+- **2edeafc 收口状态核查（复核方留证 `qa-artifacts/workbuddy/b3/review-pr52-round6/native-head-failure.json`）**：该轮 CI 为 **40353024051**（success）——此前误写为前一轮（c2ce609）的 40348043575；该轮 Native UI E2E **40353023758 仅一次尝试且失败**，与「无页面 target」不同型——privacy-accept-order 已连接 Tauri 页面（page_target_url 非空、cdp/page_target 共 1.4s），隐私框出现后等待 `.app-nav` 60 秒超时，`acceptance_trace.records` 为空、无点击计数留存、host/app 日志尾为空，根因**未明**（PR CI 的 merge-checkout SHA `b1af5ac`、EXE `559a1484…`，与本地 `9f9f18ab…` 不同属正常）；**该轮 Native 未重跑通过**（此前误写「重跑后通过」——当时监控遗漏了这轮，随后 b73c025 修复轮覆盖）。此处如实保留为未定位失败，不用重跑替代归因。
 
 六轮收口过程（2026-10-27，全部失败原样留证）：
 
@@ -636,7 +636,9 @@ PR #52 CI 首跑与修复（2026-10-25）：
 
 复核方以真实 Edge 受控反例独立验证（`qa-artifacts/workbuddy/b3/review-pr52-round16/review-probes.json`）：保存中采到同一按钮位置、移除返回 null、通信失败记录错误；失败取证挂起约 8 秒后跳过并保留原始超时与其他现场；最新 Native 产物保留前后位置。维护回归 62/62；HEAD `9a12ce2` 检查 18 pass + 1 skipped，CI / Native / Install 均首轮成功。复核范围内未发现新的阻断问题。
 
-**PR #52 复盘收口状态**：版本 0.6.1，未合并（合并决定归用户）；AC07 继续暂缓，N10 保持开放；历史 Native CI 失败（无页面 target ×3、accept-order 解锁超时 ×2，取证能力补齐后未再出现）根因仍未定位，失败 run 与现场证据全部保留。
+**PR #52 复盘收口状态**：版本 0.6.1，未合并（合并决定归用户）；AC07 继续暂缓，N10 保持开放；历史 Native CI 失败（无页面 target ×3、accept-order 解锁超时 **×3**——含取证能力补齐后 `8a239ea` 轮的 40416338270 首次尝试失败，取证能力补齐后未再出现）根因仍未定位，失败 run 与现场证据全部保留。
+
+**合并与发布条件（用户要求随收口记录）**：当前版本检查已返回 release=true；合并到 main 后，Release 会运行 **present、deleted 两条连续升级链**，构建与安装、升级检查全部成功后才进入发布——PR 的 Install 检查中 upgrade-chain 当前为 skipped（按 PR 契约），合并前的链路验证由合并后 Release 承担。
 
 ### B2 合并与发布验收（2026-10-22）
 
