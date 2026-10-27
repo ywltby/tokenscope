@@ -2989,6 +2989,15 @@ const scenarios = {
               true,
             );
           }
+          // 十五轮复核：给同意按钮打**不随文案变化**的结构标记（.privacy-
+          // actions 内最后一个按钮=同意；保存中会变「正在保存…」而按钮
+          // 仍在）——正常采集与失败取证共用这个标识，按文案过滤会失去
+          // 保存中的按钮。
+          const consentButtons = Array.from(
+            document.querySelectorAll(".privacy-actions button"),
+          );
+          const consent = consentButtons[consentButtons.length - 1];
+          if (consent) consent.dataset.ac06Consent = "1";
         }),
       8000,
       "挂载同意输入计数器",
@@ -3020,12 +3029,9 @@ const scenarios = {
         // 为查询失败。单次读取：元素缺失 → null（合法移除），通信异常 →
         // buttonBoxAfterClickError。
         const captured = await page.evaluate(() => {
-          // 十四轮复核：query(第一个)取到的是「不同意」按钮（组件顺序）
-          // ——必须按点击定位同一口径（「同意并继续」文本）过滤，前后才
-          // 是同一按钮、位置可比较。
-          const button = Array.from(
-            document.querySelectorAll(".privacy-actions button"),
-          ).find((el) => (el.textContent || "").includes("同意并继续"));
+          // 十五轮复核：按**不随文案变化**的标记定位（保存中按钮会变
+          // 「正在保存…」而仍在；按文案过滤会误判为已移除）。
+          const button = document.querySelector("[data-ac06-consent]");
           if (!button) return { exists: false };
           const rect = button.getBoundingClientRect();
           return {
@@ -3079,8 +3085,19 @@ const scenarios = {
       );
       await bounded("buttonBoxAtClick", async () => box ?? null);
       // 九轮复核：失败时按钮的**事后**位置——与点击时位置对比即可判断
-      // 布局是否在点击后变化（按钮消失时为 null，同样入证据）。
-      await bounded("buttonBoxAfterFailure", () => consentButton.boundingBox());
+      // 布局是否在点击后变化（按钮消失时为 null，同样入证据）。十五轮
+      // 复核：改用与正常采集共用的**不随文案变化**的标记定位（点击前
+      // 按旧文案建立的 locator 在「保存中·未解锁」时会等待文本失配超时，
+      // 按钮仍在却被记为取证超时）；单次页面内采集 + 8 秒 bounded 超时
+      // 保留。
+      await bounded("buttonBoxAfterFailure", () =>
+        page.evaluate(() => {
+          const button = document.querySelector("[data-ac06-consent]");
+          if (!button) return null;
+          const rect = button.getBoundingClientRect();
+          return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        }),
+      );
       await bounded("settingsSnapshot", async () =>
         fs.existsSync(settingsPath)
           ? fs.readFileSync(settingsPath, "utf8").slice(0, 800)

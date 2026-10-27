@@ -264,6 +264,9 @@ function runAcceptOrderScenario(options = {}) {
     // 十四轮：假 DOM 含两个按钮（不同意 x=100、同意并继续 x=700），
     // 采集回调真实执行——覆盖选择器行为（旧实现取第一个按钮 → 红）。
     multiButtonDom = false,
+    // 十五轮：同意按钮处于「正在保存…」文案（按钮仍在 x=700）——按文案
+    // 过滤的旧实现会失去它（记 null/超时）。
+    consentSavingText = false,
     // 八轮复核 P2：阻断文案查询（allTextContents）注入失败
     blockLocatorFails = false,
   } = options;
@@ -282,6 +285,33 @@ function runAcceptOrderScenario(options = {}) {
   let virtualClock = 0;
   let unlockStage = false;
   const clickCoordinates = [];
+  // 十五轮：假 DOM（双按钮 + dataset 标记）——挂计数器回调真实执行后
+  // 最后一个按钮获得 ac06Consent 标记；采集回调按标记定位。
+  const fakeButtons = [
+    {
+      textContent: "不同意",
+      dataset: {},
+      getBoundingClientRect: () => ({ x: 100, y: 200, width: 90, height: 28 }),
+    },
+    {
+      textContent: consentSavingText ? "正在保存…" : "同意并继续",
+      dataset: {},
+      getBoundingClientRect: () => ({ x: 700, y: 200, width: 90, height: 28 }),
+    },
+  ];
+  const markedConsent = () =>
+    fakeButtons.find((button) => button.dataset.ac06Consent === "1") ?? null;
+  const fakeDocument = {
+    addEventListener: () => {},
+    querySelectorAll: (selector) =>
+      String(selector).includes("privacy-actions") ? fakeButtons : [],
+    querySelector: (selector) => {
+      const text = String(selector);
+      if (text.includes("ac06-consent")) return markedConsent();
+      if (text.includes("privacy-actions")) return fakeButtons[0];
+      return null;
+    },
+  };
   const registry = { hive: ["unchanged"] };
   const autostartRows =
     autostartTrace ?? [
@@ -419,11 +449,12 @@ function runAcceptOrderScenario(options = {}) {
         async evaluate(fn) {
           const text = fn.toString();
           if (text.includes("addEventListener")) {
-            // 真实执行受测监听器注册（场景体挂计数器）。
+            // 真实执行受测监听器注册与按钮标记（场景体挂计数器）。
             listeners.length = 0;
             new Function("window", "document", `return (${text});`)(
               fakeWindow,
               {
+                ...fakeDocument,
                 addEventListener(type, handler) {
                   listeners.push({ type, handler });
                 },
@@ -435,38 +466,15 @@ function runAcceptOrderScenario(options = {}) {
             evaluateCalls.push(text.slice(0, 40));
             return fakeWindow.__ac06ConsentClicks ?? [];
           }
-          if (text.includes("querySelector") && text.includes("privacy-actions")) {
-            // 十三轮：单次页面内采集（存在性 + 位置一次读取）。通信异常
+          if (text.includes("[data-ac06-consent]")) {
+            // 十五轮：单次页面内采集按不随文案变化的标记定位。通信异常
             // 形态（unlockBoxQueryFails）整次采集抛错；移除形态 exists=
-            // false；正常返回原位坐标。
+            // false；其余**真实执行**回调（标记按钮在假 DOM 内）。
             if (unlockBoxQueryFails) {
               throw new Error("CDP 查询失败（解锁后）");
             }
-            if (multiButtonDom) {
-              // 十四轮：采集回调**真实执行**——注入含双按钮的假 DOM
-              // （不同意在前、同意并继续在后），回调内的选择器行为
-              // （querySelectorAll + 文本过滤）真实运行。
-              const fakeButtons = [
-                {
-                  textContent: "不同意",
-                  getBoundingClientRect: () => ({ x: 100, y: 200, width: 90, height: 28 }),
-                },
-                {
-                  textContent: "同意并继续",
-                  getBoundingClientRect: () => ({ x: 700, y: 200, width: 90, height: 28 }),
-                },
-              ];
-              const fakeDocument = {
-                querySelectorAll: (selector) =>
-                  String(selector).includes("privacy-actions") ? fakeButtons : [],
-                querySelector: (selector) =>
-                  String(selector).includes("privacy-actions") ? fakeButtons[0] : null,
-              };
-              return new Function("document", `return (${text});`)(fakeDocument)();
-            }
-            return unlockCollectRemoves
-              ? { exists: false }
-              : { exists: true, x: box.x, y: box.y, width: box.width, height: box.height };
+            if (unlockCollectRemoves) return { exists: false };
+            return new Function("document", `return (${text});`)(fakeDocument)();
           }
           if (text.includes("autostart_set")) return { ok: true, value: true };
           if (text.includes("autostart_status")) return { ok: true, value: statusValue };
@@ -1020,6 +1028,31 @@ function runAcceptOrderDiagnostics({ pageBehavior }) {
   const listeners = [];
   const fakeWindow = {};
   const box = { x: 100, y: 200, width: 120, height: 40 };
+  // 十五轮：诊断路径共用同一假 DOM（双按钮 + dataset 标记）。
+  const diagButtons = [
+    {
+      textContent: "不同意",
+      dataset: {},
+      getBoundingClientRect: () => ({ x: 100, y: 200, width: 90, height: 28 }),
+    },
+    {
+      textContent: pageBehavior.consentSavingText ? "正在保存…" : "同意并继续",
+      dataset: {},
+      getBoundingClientRect: () => ({ x: 700, y: 200, width: 90, height: 28 }),
+    },
+  ];
+  const diagMarked = () =>
+    diagButtons.find((button) => button.dataset.ac06Consent === "1") ?? null;
+  const diagDocument = {
+    querySelectorAll: (selector) =>
+      String(selector).includes("privacy-actions") ? diagButtons : [],
+    querySelector: (selector) => {
+      const text = String(selector);
+      if (text.includes("ac06-consent")) return diagMarked();
+      if (text.includes("privacy-actions")) return diagButtons[0];
+      return null;
+    },
+  };
   const run = extractScenario(
     "privacy-accept-order",
     "\n  /**\n   * AC06 场景 4a",
@@ -1096,20 +1129,27 @@ function runAcceptOrderDiagnostics({ pageBehavior }) {
               "document",
               `return (${text});`,
             );
-            factory(
-              fakeWindow,
-              {
-                addEventListener(type, handler) {
-                  listeners.push({ type, handler });
-                },
+            factory(fakeWindow, {
+              ...diagDocument,
+              addEventListener(type, handler) {
+                listeners.push({ type, handler });
               },
-            )();
+            })();
             return undefined;
           }
           if (text.includes("__ac06ConsentClicks")) {
             evaluateCalls.push(text.slice(0, 40));
             if (pageBehavior.evaluate) return pageBehavior.evaluate(fn);
             return fakeWindow.__ac06ConsentClicks ?? [];
+          }
+          if (text.includes("[data-ac06-consent]")) {
+            // 十五轮：取证路径按标记采集事后位置；保存中形态按钮仍在
+            // （标记有效 → 位置对象）；旧 locator 文本失配等待超时由
+            // pageBehavior.blockBoxQuery 模拟。
+            if (pageBehavior.blockBoxQuery) {
+              throw new Error("TimeoutError: locator.boundingBox: Timeout 20000ms exceeded.");
+            }
+            return new Function("document", `return (${text});`)(diagDocument)();
           }
           return [];
         },
@@ -1370,4 +1410,35 @@ test("十四轮：事后采集定位同意按钮而非第一个按钮（多按�
     700,
     `事后采集取到的是不同意按钮：${JSON.stringify(clickRecord.buttonBoxAfterClick)}`,
   );
+});
+
+// ── 十五轮复核：按钮身份不随文案变化（保存中/已移除/取证路径）───────────
+// 同意按钮保存中会变「正在保存…」而按钮仍在——按文案过滤会失去它：正常
+// 采集记 null（与已移除无法区分）、失败取证用旧文案 locator 等待超时。
+
+test("十五轮：保存中（文案已变、按钮仍在）正常采集必须取到位置而非 null", async () => {
+  const { ev, checks } = await runAcceptOrderScenario({ consentSavingText: true });
+  assert.ok(checks.every((check) => check.pass), JSON.stringify(checks.filter((c) => !c.pass)));
+  const clickRecord = ev.acceptClicks;
+  assert.ok(clickRecord.buttonBoxAfterClick, "保存中按钮仍在，不得记 null");
+  assert.equal(clickRecord.buttonBoxAfterClick.x, 700, "必须取到同意按钮位置");
+  assert.ok(!("buttonBoxAfterClickError" in clickRecord), "不得误记查询失败");
+});
+
+test("十五轮：已移除（标记按钮不在）采集记合法 null", async () => {
+  const { ev, checks } = await runAcceptOrderScenario({ unlockCollectRemoves: true });
+  assert.ok(checks.every((check) => check.pass), JSON.stringify(checks.filter((c) => !c.pass)));
+  assert.equal(ev.acceptClicks.buttonBoxAfterClick, null);
+  assert.ok(!("buttonBoxAfterClickError" in ev.acceptClicks));
+});
+
+test("十五轮：卡在保存中未解锁时，失败取证按标记取到事后位置（不等待文本失配）", async () => {
+  const result = await runAcceptOrderDiagnostics({
+    pageBehavior: { consentSavingText: true, evaluate: () => [] },
+  });
+  assert.equal(result.threw, true);
+  const diag = result.ev.acceptFailureDiagnostics;
+  assert.ok(diag, "必须有诊断对象");
+  assert.ok(!("buttonBoxAfterFailureError" in diag), `不得记取证超时：${JSON.stringify(diag.buttonBoxAfterFailureError)}`);
+  assert.equal(diag.buttonBoxAfterFailure?.x, 700, "事后位置必须取到保存中的同意按钮");
 });
