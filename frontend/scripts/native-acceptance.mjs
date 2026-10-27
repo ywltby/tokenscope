@@ -448,9 +448,15 @@ class Instance {
     if (this.opts.mutate) this.opts.mutate(this.root);
     this.prelaunchBusinessFiles = snapshotBusinessFiles(path.join(this.root, "tokenscope"));
     const prelaunchSettingsPath = path.join(this.root, "tokenscope", "settings.toml");
-    this.prelaunchSettings = fs.existsSync(prelaunchSettingsPath)
-      ? fs.readFileSync(prelaunchSettingsPath, "utf8")
+    // 十七轮复核 P2：与 snapshotDataDir 同构（text/size/mtimeMs）。
+    const prelaunchStat = fs.existsSync(prelaunchSettingsPath)
+      ? fs.statSync(prelaunchSettingsPath)
       : null;
+    this.prelaunchSettings = {
+      text: prelaunchStat ? fs.readFileSync(prelaunchSettingsPath, "utf8") : null,
+      size: prelaunchStat ? prelaunchStat.size : null,
+      mtimeMs: prelaunchStat ? prelaunchStat.mtimeMs : null,
+    };
     const manifest = JSON.parse(fs.readFileSync(path.join(this.root, "manifest.json"), "utf8"));
     return manifest;
   }
@@ -1499,36 +1505,64 @@ function registrySnapshot() {
   return snapshot;
 }
 
-/** AC06：预置业务文件（预置 + 新增一律纳入快照比对）。 */
+/** AC06：预置业务文件（预置 + 新增一律纳入快照比对）。十七轮复核 P2：
+ * 夹具达到计划 §4b.1 组合——有效 SQLite 历史库（WAL 模式，进程退出残留
+ * WAL/SHM）、两份价格快照；旧修订同意由 mutate 写入 settings。 */
 function preseedBusinessFiles(dataDir) {
   const writeFile = (name, text) => {
     const target = path.join(dataDir, name);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, text, "utf8");
   };
-  // 假 history.db / WAL / SHM：内容合法性无关紧要——场景证明的是
-  // 未同意状态对它们零读取零写入；一旦被触碰，字节/大小/mtime 即变。
-  writeFile("history.db", "ac06-preseeded-history\n");
-  writeFile("history.db-wal", "ac06-preseeded-wal\n");
-  writeFile("history.db-shm", "ac06-preseeded-shm\n");
+  // 有效 SQLite 历史库：Runner 自带 Python 标准库 sqlite3 生成（Node 侧
+  // 无稳定 sqlite 模块）。脚本末尾不 close 连接——解释器退出时 WAL/SHM
+  // 以残留形态留在盘上（与"业务数据躺在盘上"的真实形态一致）。
+  const seedScript = [
+    "import sqlite3, sys",
+    "con = sqlite3.connect(sys.argv[1])",
+    "con.execute('PRAGMA journal_mode=WAL')",
+    "con.execute('CREATE TABLE IF NOT EXISTS usage_events(app TEXT, session_id TEXT, record_id TEXT, model_raw TEXT, project_key TEXT, session_initial_cwd TEXT, event_cwd TEXT, input_tokens TEXT, output_tokens TEXT, cache_write_tokens TEXT, cache_read_tokens TEXT)')",
+    "con.executemany('INSERT INTO usage_events VALUES(?,?,?,?,?,?,?,?,?,?,?)', [('claude-code', 'ac06-session', f'rec-{i}', 'claude-sonnet-4-5', '/ac06/project', '/ac06/project', '/ac06/project', '10', '20', '0', '5') for i in range(3)])",
+    "con.commit()",
+    "import os",
+    "os._exit(0)",
+  ].join("; ");
+  const result = spawnSyncBounded("python", ["-c", seedScript, path.join(dataDir, "history.db")], {
+    action: "preseed-sqlite",
+    stage: "preseed-sqlite",
+  });
+  if (result.status !== 0) {
+    throw new Error(`预置 SQLite 历史库失败：${result.stdout}${result.stderr}`);
+  }
   writeFile("logs/ac06-preseeded.log", "ac06-preseeded-log\n");
   writeFile("view-cache.json", '{"ac06":"preseeded"}\n');
   writeFile("pricing-modelsdev.json", '{"ac06":"preseeded"}\n');
+  writeFile("pricing-openrouter.json", '{"ac06":"preseeded"}\n');
 }
 
-/** AC06：业务文件与设置的双重快照（settings 单独逐字节比对）。 */
+/** AC06：业务文件与设置的双重快照。十七轮复核 P2：settings 附带
+ * 大小/mtime 元数据——同字节重写（内容不变、mtime 变化）也要可检出，
+ * 不能只比内容。 */
 function snapshotDataDir(dataDir) {
+  const settingsPath = path.join(dataDir, "settings.toml");
+  const stat = fs.existsSync(settingsPath) ? fs.statSync(settingsPath) : null;
   return {
     business: snapshotBusinessFiles(dataDir),
-    settings: fs.readFileSync(path.join(dataDir, "settings.toml"), "utf8"),
+    settings: {
+      text: stat ? fs.readFileSync(settingsPath, "utf8") : null,
+      size: stat ? stat.size : null,
+      mtimeMs: stat ? stat.mtimeMs : null,
+    },
   };
 }
 
-/** AC06：双向快照比对（预置缺失/新增/内容变化均算变化）。 */
+/** AC06：双向快照比对（预置缺失/新增/内容变化/设置元数据变化均算变化）。 */
 function dataDirChanges(before, after) {
   return [
     ...changedBusinessFiles(before.business, after.business),
-    ...(before.settings === after.settings ? [] : ["settings.toml"]),
+    ...(JSON.stringify(before.settings) === JSON.stringify(after.settings)
+      ? []
+      : ["settings.toml"]),
   ];
 }
 
@@ -1542,7 +1576,9 @@ async function rejectAndExit(page, inst, ck, label) {
   ck.add(`${label}_exit_clean`, inst.proc.exitCode === 0, `exitCode=${inst.proc.exitCode}`);
 }
 
-/** AC06：业务追踪事件抽取（沿用 policy-update 的判法）。 */
+/** AC06：业务追踪事件抽取（沿用 policy-update 的判法）。十七轮复核 P2：
+ * settings_write 计入——未同意阶段的任何设置写入（含同字节重写）都是
+ * 违规，不能被过滤掉。 */
 function businessTraceEvents(inst) {
   const trace = readAcceptanceTrace(inst.root, { partial: true });
   if (trace.violations.length) throw new Error(trace.violations.join(" | "));
@@ -1557,6 +1593,7 @@ function businessTraceEvents(inst) {
         "pricing_fetch",
         "autostart_read",
         "autostart_write",
+        "settings_write",
       ].includes(r.event),
     )
     .map((r) => r.event);
@@ -3195,7 +3232,9 @@ const scenarios = {
         Math.min(...readSeqs) > Math.max(...consentSeqs, ...readySeqs),
       JSON.stringify(ev.acceptOrder),
     );
-    // 单次原子落盘：consent_saved 事件自带落盘时刻的**不可变字节证据**
+    // 单次原子落盘（口径对齐十七轮复核：计划判定的是**同意保存**恰一次
+    // 原子替换；业务初始化后的规范化重写是合法的第二次 settings_write，
+    // 不计入本判定）：consent_saved 事件自带落盘时刻的**不可变字节证据**
     // （settings_bytes_hex，Rust 侧保存时快照，JSONL 只追加不可变）与指纹
     // （fnv1a64，与 tokenscope-core settings_hash 同算法）。判定方重算
     // 证据哈希与事件指纹比对，并解析证据内容确认同意值与当前修订号——
@@ -3302,13 +3341,37 @@ const scenarios = {
       };
     })();
     ck.add("consent_saved_capture_content", captureContent.ok, captureContent.detail);
-    const settings = fs.readFileSync(settingsPath, "utf8");
-    ck.add(
-      "accept_writes_consent_with_revision",
-      /privacy_policy_accepted\s*=\s*true/.test(settings) &&
-        /privacy_policy_revision\s*=\s*2/.test(settings),
-      settings.split("\n").slice(0, 4).join(" | "),
-    );
+    // 十七轮复核 P2：终态 settings 与保存字节证据**同口径**严格判定——
+    // 正则搜索会被注释假字段骗过（复核方复现：保存证据正确、终态实际
+    // accepted=false/revision=1，注释含期望字段即全过）。严格 UTF-8 +
+    // TOML 解析 + 顶层类型/值检查；业务初始化后合法重写按终态解析
+    // （不与保存字节比对，重写正例由 consent_saved_capture_content 层保证）。
+    const terminalCheck = (() => {
+      let terminalText;
+      try {
+        terminalText = new TextDecoder("utf-8", { fatal: true }).decode(
+          fs.readFileSync(settingsPath),
+        );
+      } catch (decodeError) {
+        return { ok: false, detail: `终态 settings 不是合法 UTF-8：${decodeError}` };
+      }
+      let parsed;
+      try {
+        parsed = parseToml(terminalText);
+      } catch (parseError) {
+        return { ok: false, detail: `终态 settings 不是合法 TOML：${parseError}` };
+      }
+      const accepted = parsed.privacy_policy_accepted;
+      const revision = parsed.privacy_policy_revision;
+      return {
+        ok: accepted === true && revision === 2,
+        detail:
+          `accepted kind=${typeof accepted} value=${JSON.stringify(accepted)}；` +
+          `revision kind=${typeof revision} value=${JSON.stringify(revision)}` +
+          "（顶层须布尔 true / 整数 2）",
+      };
+    })();
+    ck.add("accept_writes_consent_with_revision", terminalCheck.ok, terminalCheck.detail);
 
     // 自启命令层路由（方案 A / PR52 复盘补证）：helper 单测不能替代命令层
     // 证据——同意后经真实 IPC 开关自启，acceptance 构建必须路由到隔离替身：
@@ -3756,7 +3819,19 @@ async function main() {
                     throw new Error("隔离根 settings.toml 未含同意记录，无法构造未同意场景");
                   fs.writeFileSync(p, stripped, "utf8");
                   if (SCENARIO === "privacy-preseeded") {
+                    // 十七轮复核 P2：计划 §4b.1 要求预置「旧修订布尔同意」
+                    // （accepted=true + revision=1 → 新版 StaleRevision 重新
+                    // 询问），不是剥离同意——观察窗口证明旧修订同意状态下
+                    // 对预置业务数据零读取零写入。
+                    const downgraded = text.replace(
+                      /^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m,
+                      "privacy_policy_revision = 1\n",
+                    );
+                    if (downgraded === text)
+                      throw new Error("隔离根 settings.toml 未含修订号行，无法构造旧修订同意场景");
+                    fs.writeFileSync(p, downgraded, "utf8");
                     preseedBusinessFiles(path.join(r, "tokenscope"));
+                    return;
                   }
                 }
               : SCENARIO === "privacy-variants-corrupt"

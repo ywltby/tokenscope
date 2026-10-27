@@ -503,7 +503,7 @@ def read_tag_privacy_revision(commit, root=ROOT):
                                 capture_output=True, encoding="utf-8", check=False)
         if result.returncode:
             continue
-        match = re.search(r"PRIVACY_POLICY_REVISION\s*:\s*u8\s*=\s*(\d+)", result.stdout)
+        match = re.search(r"(?m)^(?:pub\s+)?const\s+PRIVACY_POLICY_REVISION\s*:\s*u8\s*=\s*(\d+)\s*;", result.stdout)
         if match:
             return int(match.group(1))
     return None

@@ -325,7 +325,7 @@ AC03–AC05 的 CI 接入：
   - **自启动部分（方案 A 双防线）**：第一道防线是闸门拒绝（`require_ready`）；第二道防线是替身——**即使闸门回归放行了命令体，acceptance 构建下 `autostart_set` 也只写隔离状态文件，真实注册表不可达**（见 4b.1 接线；这正是 A0 被否决的原因：事后快照只能发现损害、不能防止损害）。全蜂巢只读快照保留为**辅助证据**（不是隔离措施）：运行前后各枚举一次 `HKLM\...\Run`、`HKCU\...\Run` 与两个 `...\Explorer\StartupApproved\Run` 的**全部值**（名称+数据逐值比对，不假设标识名），断言逐字节一致；只读、不删除任何值。真实 Windows 自启的出现/移除继续由 D5 3.4 人工验收。
 - **`privacy-accept-order`（同意顺序 + 双击单次落盘）**
   - 断言：追踪按序出现 `consent_saved` → `business_ready` → 首个 `history_open`/`source_root_read`（policy-update 已覆盖前两跳，本场景补第三跳与完整三元组）；`consent_saved` 附带 的 settings 哈希对应含 `privacy_policy_accepted = true` 与当前修订号的内容。
-  - 双击同意：以 CDP 连续两次 click（间隔 <100ms），断言 `consent_saved` 恰好一次、只启动一套运行时（`business_ready` 恰好一次）、settings 只经历一次原子替换。
+  - 双击同意：以 CDP 连续两次 click（间隔 <100ms），断言 `consent_saved` 恰好一次、只启动一套运行时（`business_ready` 恰好一次）、**同意保存只经历一次原子替换**（`settings_write` 在 `consent_saved` 之前恰一次且相邻成对）——业务初始化后的规范化重写是合法的第二次 `settings_write`，单独记录并披露，不计入双击判定（十七轮复核对齐：CI 追踪中两次 `settings_write` 的第二次发生在业务解锁后）。
 - **`privacy-variants`（设置变体与关闭预设）**
   - 先列表核对 `privacy.rs` 与 `settings.rs` 既有 Rust 测试已覆盖的同意变体（缺字段 / false / 旧 JSON / TOML 损坏 / 类型错误 / 修订号偏低偏高——WB05 已补齐单测），原生只补两项 Rust 层证明不了的：①损坏 TOML 启动后仍弹政策且**原文件逐字节不变**；②预置 `close_action = "minimize"` 但未同意时，点窗口关闭弹的是隐私退出确认而非隐藏到托盘（既有 `privacy-consent-gate` 已有同型断言，复用其选择器）。
 

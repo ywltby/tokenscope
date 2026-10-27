@@ -11,9 +11,40 @@ import { test } from "vitest";
 import { changedBusinessFiles, settingsFingerprint, snapshotBusinessFiles } from "./acceptance-io.mjs";
 import { parse as parseToml } from "smol-toml";
 import { parseTOML } from "toml-eslint-parser";
-import { withTimeout as realWithTimeout } from "./native-scenario.mjs";
+import { withTimeout as realWithTimeout, spawnSyncBounded as realSpawnSyncBounded } from "./native-scenario.mjs";
 
 const source = fs.readFileSync(new URL("../native-acceptance.mjs", import.meta.url), "utf8");
+
+/** 从受测源码抽取顶层辅助函数并绑定依赖——回归测试执行的是**受测实现**
+ * 本身（九/十七轮教训：桩/复刻替代实现会让回退不可见）。 */
+const HELPER_DEP_NAMES = ["fs", "path", "readAcceptanceTrace", "snapshotBusinessFiles", "changedBusinessFiles", "spawnSyncBounded"];
+function extractHelper(name, deps) {
+  const start = source.indexOf(`function ${name}`);
+  assert.ok(start >= 0, `辅助函数未找到：${name}`);
+  // 大括号深度扫描定位函数尾（这三个辅助函数体内无字符串大括号）。
+  let depth = 0;
+  let end = -1;
+  for (let i = source.indexOf("{", start); i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+  }
+  assert.ok(end > start, `辅助函数边界未找到：${name}`);
+  return new Function(...HELPER_DEP_NAMES, `return ${source.slice(start, end)};`)(
+    deps.fs,
+    deps.path,
+    deps.readAcceptanceTrace,
+    deps.snapshotBusinessFiles,
+    deps.changedBusinessFiles,
+    deps.spawnSyncBounded,
+  );
+}
 
 function extractScenario(name, endMarker, bindings) {
   const start = source.indexOf(`  async "${name}"`);
@@ -28,16 +59,24 @@ function extractScenario(name, endMarker, bindings) {
 /** 与驱动同语义的真实采集→比较链（复用 acceptance-io 能力）。 */
 function realSnapshotDataDir(dataDir) {
   const settingsPath = path.join(dataDir, "settings.toml");
+  const stat = fs.existsSync(settingsPath) ? fs.statSync(settingsPath) : null;
   return {
     business: snapshotBusinessFiles(dataDir),
-    settings: fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath, "utf8") : null,
+    settings: {
+      text: stat ? fs.readFileSync(settingsPath, "utf8") : null,
+      size: stat ? stat.size : null,
+      mtimeMs: stat ? stat.mtimeMs : null,
+    },
   };
 }
 
 function realDataDirChanges(before, after) {
+  console.log("ZZZ-CHANGES-IN:", JSON.stringify(before.settings), "->", JSON.stringify(after.settings));
   return [
     ...changedBusinessFiles(before.business, after.business),
-    ...(before.settings === after.settings ? [] : ["settings.toml"]),
+    ...(JSON.stringify(before.settings) === JSON.stringify(after.settings)
+      ? []
+      : ["settings.toml"]),
   ];
 }
 
@@ -58,8 +97,8 @@ function extractPreseeded(extraBindings = {}) {
     "\n  /**\n   * AC06 场景 2",
     {
       path,
-      snapshotDataDir: realSnapshotDataDir,
-      dataDirChanges: realDataDirChanges,
+      snapshotDataDir: extractHelper("snapshotDataDir", { fs, path, snapshotBusinessFiles }),
+      dataDirChanges: extractHelper("dataDirChanges", { changedBusinessFiles }),
       businessTraceEvents() {
         return [];
       },
@@ -91,7 +130,11 @@ test("preseeded: 实际观察满 15 秒且文件未变才通过（单调起止 +
         },
         root,
         prelaunchBusinessFiles: snapshotBusinessFiles(dataDir),
-        prelaunchSettings: fs.readFileSync(path.join(dataDir, "settings.toml"), "utf8"),
+        prelaunchSettings: {
+          text: fs.readFileSync(path.join(dataDir, "settings.toml"), "utf8"),
+          size: fs.statSync(path.join(dataDir, "settings.toml")).size,
+          mtimeMs: fs.statSync(path.join(dataDir, "settings.toml")).mtimeMs,
+        },
         opts: {
           shots: root,
           controlledIo: { snapshot: () => ({ hits: { modelsdev: [], openrouter: [] }, proxy_attempts: [] }) },
@@ -128,7 +171,11 @@ test("preseeded: 没有实际观察窗口不得通过（约 1 秒结束的老缺
         },
         root,
         prelaunchBusinessFiles: snapshotBusinessFiles(dataDir),
-        prelaunchSettings: fs.readFileSync(path.join(dataDir, "settings.toml"), "utf8"),
+        prelaunchSettings: {
+          text: fs.readFileSync(path.join(dataDir, "settings.toml"), "utf8"),
+          size: fs.statSync(path.join(dataDir, "settings.toml")).size,
+          mtimeMs: fs.statSync(path.join(dataDir, "settings.toml")).mtimeMs,
+        },
         opts: {
           shots: root,
           controlledIo: { snapshot: () => ({ hits: { modelsdev: [], openrouter: [] }, proxy_attempts: [] }) },
@@ -170,7 +217,11 @@ test("preseeded: 观察窗口内修改/新增/删除业务文件，采集→比�
         },
         root,
         prelaunchBusinessFiles: snapshotBusinessFiles(dataDir),
-        prelaunchSettings: fs.readFileSync(path.join(dataDir, "settings.toml"), "utf8"),
+        prelaunchSettings: {
+          text: fs.readFileSync(path.join(dataDir, "settings.toml"), "utf8"),
+          size: fs.statSync(path.join(dataDir, "settings.toml")).size,
+          mtimeMs: fs.statSync(path.join(dataDir, "settings.toml")).mtimeMs,
+        },
         opts: {
           shots: root,
           controlledIo: { snapshot: () => ({ hits: { modelsdev: [], openrouter: [] }, proxy_attempts: [] }) },
@@ -211,7 +262,11 @@ test("preseeded: 观察窗口内改写 settings.toml 必须失败", async () => 
         },
         root,
         prelaunchBusinessFiles: snapshotBusinessFiles(dataDir),
-        prelaunchSettings: fs.readFileSync(path.join(dataDir, "settings.toml"), "utf8"),
+        prelaunchSettings: {
+          text: fs.readFileSync(path.join(dataDir, "settings.toml"), "utf8"),
+          size: fs.statSync(path.join(dataDir, "settings.toml")).size,
+          mtimeMs: fs.statSync(path.join(dataDir, "settings.toml")).mtimeMs,
+        },
         opts: {
           shots: root,
           controlledIo: { snapshot: () => ({ hits: { modelsdev: [], openrouter: [] }, proxy_attempts: [] }) },
@@ -1441,4 +1496,183 @@ test("十五轮：卡在保存中未解锁时，失败取证按标记取到事�
   assert.ok(diag, "必须有诊断对象");
   assert.ok(!("buttonBoxAfterFailureError" in diag), `不得记取证超时：${JSON.stringify(diag.buttonBoxAfterFailureError)}`);
   assert.equal(diag.buttonBoxAfterFailure?.x, 700, "事后位置必须取到保存中的同意按钮");
+});
+
+// ── 十七轮复核 P2：终态 settings 与保存证据同口径严格判定 ────────────────
+// accept_writes_consent_with_revision 旧实现用正则搜索终态文本——注释里
+// 出现期望字段而实际 accepted=false/revision=1 时场景全过（复核方复现
+// review-merge-independent/terminal-consent-probe.json）。终态文件与保存
+// 字节证据同口径：严格 UTF-8 + TOML 解析 + 顶层类型/值检查；业务初始化
+// 后合法重写仍按终态解析（不与保存字节比对）。
+
+const TERMINAL_BAD_CASES = [
+  {
+    label: "注释含期望字段、实际 accepted=false、revision=1",
+    text: "# privacy_policy_accepted = true\n# privacy_policy_revision = 2\nprivacy_policy_accepted = false\nprivacy_policy_revision = 1\n",
+  },
+  {
+    label: "终态非法 TOML",
+    text: "privacy_policy_accepted = true\nprivacy_policy_revision = [2\n",
+  },
+];
+
+for (const bad of TERMINAL_BAD_CASES) {
+  test(`终态判定：${bad.label} 必须失败`, async () => {
+    const records = [
+      { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+      ...consentRecords(ORDER_SETTINGS),
+      { seq: 2, event: "business_ready" },
+      { seq: 3, event: "history_open" },
+    ];
+    // 终态文本与保存字节证据无关（业务期重写后的形态由 settingsText 承载）。
+    const { checks } = await runAcceptOrder({ records, settingsText: bad.text });
+    const terminal = checks.find((check) => check.name === "accept_writes_consent_with_revision");
+    assert.ok(terminal, "缺少终态判定断言");
+    assert.equal(terminal.pass, false, `误放行：${bad.label}`);
+    // 保存证据层不受终态影响（证据自洽）。
+    const saved = checks.find((check) => check.name === "consent_saved_capture_content");
+    assert.ok(saved && saved.pass, "保存字节证据应保持通过");
+  });
+}
+
+// ── 十七轮复核 P2：denied-ipc 不得漏检设置写入 ──────────────────────────
+// 追踪筛选旧实现排除 settings_write、settings 快照只比内容——同字节重写
+// （mtime 变化）+ 合法 settings_write 追踪在场时场景仍报告无追踪、文件
+// 未变化（复核方复现 review-merge-independent/denied-ipc-trace-probe.json）。
+
+function runDeniedIpc({ records, settingsMutator }) {
+  const checks = [];
+  let mutatorDone = false;
+  // dataDir 对准场景体真实路径 <root>/tokenscope（场景体固定拼接）。
+  const dataDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tokenscope-denied-ipc-")), "tokenscope");
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(path.join(dataDir, "settings.toml"), 'price_auto_sync = false\n');
+  console.log("ZZZ-BEFORE-COLLECT:", dataDir, fs.statSync(path.join(dataDir, "settings.toml")).mtimeMs);
+  const before = realSnapshotDataDir(dataDir);
+  if (settingsMutator) settingsMutator(dataDir);
+  console.log("ZZZ-AFTER-MUTATOR:", dataDir, fs.statSync(path.join(dataDir, "settings.toml")).mtimeMs);
+  const run = extractScenario(
+    "privacy-denied-ipc",
+    "\n  /**\n   * AC06 场景 3",
+    {
+      path,
+      snapshotDataDir: extractHelper("snapshotDataDir", { fs, path, snapshotBusinessFiles }),
+      dataDirChanges: extractHelper("dataDirChanges", { changedBusinessFiles }),
+      readProtectedCommands: () => ["set_source_config"],
+      MINIMAL_INVOKER_ARGS: { set_source_config: {} },
+      businessTraceEvents: extractHelper("businessTraceEvents", {
+        readAcceptanceTrace: (root, options) =>
+          options?.partial || root === undefined
+            ? { violations: [], records: records ?? [] }
+            : { violations: [], records: records ?? [] },
+      }),
+      registrySnapshot: () => ({}),
+      async rejectAndExit(page, inst, ck, label) {
+        ck.add(`${label}_exit_clean`, true, "stub");
+      },
+    },
+  );
+  const invocation = Promise.resolve().then(() =>
+    run({
+      inst: {
+        page: {
+          async waitForSelector() {},
+          locator() {
+            return { count: async () => 0 };
+          },
+          async evaluate() {
+            if (settingsMutator && !mutatorDone) {
+              mutatorDone = true;
+              settingsMutator(dataDir);
+            }
+            return { status: "rejected", error: "privacy_consent_required" };
+          },
+          async screenshot() {},
+        },
+        root: path.dirname(dataDir),
+        __trace: records,
+        opts: {
+          shots: dataDir,
+          controlledIo: { snapshot: () => ({ hits: { modelsdev: [], openrouter: [] }, proxy_attempts: [] }) },
+        },
+      },
+      ck: { add: (name, pass, detail) => checks.push({ name, pass, detail }) },
+      ev: {},
+    }),
+  );
+  return invocation.then(
+    (value) => {
+      const settled = { threw: false, error: null, checks, before, dataDir };
+      console.log("ZZZ-SETTLED:", JSON.stringify(settled).slice(0, 300));
+      return settled;
+    },
+    (error) => {
+      const settled = { threw: true, error: String(error), checks, before, dataDir };
+      console.log("ZZZ-SETTLED:", JSON.stringify(settled).slice(0, 300));
+      return settled;
+    },
+  );
+}
+
+test("denied-ipc：settings_write 追踪在场必须判违规（不得被筛选排除）", async () => {
+  const result = await runDeniedIpc({
+    records: [
+      {
+        seq: 1,
+        event: "settings_write",
+        path: "C:/synthetic-root/tokenscope/settings.toml",
+      },
+    ],
+    settingsMutator: (dataDir) => {
+      // 同字节重写：内容不变、mtime 显式前移（避免同毫秒写入 mtime 相同）。
+      const target = path.join(dataDir, "settings.toml");
+      const text = fs.readFileSync(target, "utf8");
+      fs.writeFileSync(target, text, "utf8");
+      const future = new Date(Date.now() + 60_000);
+      fs.utimesSync(target, future, future);
+    },
+  });
+  const trace = (result.checks ?? []).find((check) => check.name === "denied_ipc_trace_has_no_business_events");
+  assert.ok(trace, `缺少追踪断言 syncError=${result.syncError}`);
+  assert.equal(trace.pass, false, "settings_write 在场不得报「无业务追踪」");
+  console.log("ZZZ-TRACE-DETAIL:", JSON.stringify(trace.detail));
+  console.log("ZZZ-BEFORE:", JSON.stringify(result.before.settings), "AFTER:", JSON.stringify(realSnapshotDataDir(result.dataDir).settings));
+  assert.match(trace.detail, /settings_write/);
+  const files = result.checks.find((check) => check.name === "denied_ipc_files_unchanged");
+  assert.equal(files.pass, false, "同字节重写（mtime 变化）不得报「文件未变化」");
+});
+
+test("denied-ipc：零追踪 + 文件未变保持通过（守护）", async () => {
+  const result = await runDeniedIpc({ records: [], settingsMutator: null });
+  assert.equal(result.threw, false, JSON.stringify(result.checks.filter((c) => !c.pass)));
+  const trace = result.checks.find((check) => check.name === "denied_ipc_trace_has_no_business_events");
+  assert.ok(trace && trace.pass);
+});
+
+// ── 十七轮复核 P2：preseeded 夹具达到计划 §4b.1 组合 ────────────────────
+// 计划要求：有效 SQLite 历史库及 WAL/SHM、两份价格快照、settings 含旧
+// 修订布尔同意。旧夹具写普通文本（非 SQLite）、单份快照、无同意字段。
+
+test("preseeded 夹具：SQLite 历史库 + WAL/SHM + 两份价格快照", async () => {
+  const preseedBusinessFiles = extractHelper("preseedBusinessFiles", {
+    fs,
+    path,
+    spawnSyncBounded: realSpawnSyncBounded,
+  });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tokenscope-preseed-fixture-"));
+  try {
+    preseedBusinessFiles(dir);
+    const db = fs.readFileSync(path.join(dir, "history.db"));
+    assert.ok(db.length > 100, `SQLite 库过小：${db.length} 字节`);
+    assert.equal(db.subarray(0, 16).toString("utf8"), "SQLite format 3\0", "history.db 必须是有效 SQLite 文件");
+    for (const name of ["history.db-wal", "history.db-shm"]) {
+      assert.ok(fs.existsSync(path.join(dir, name)), `缺少 ${name}`);
+    }
+    for (const name of ["pricing-modelsdev.json", "pricing-openrouter.json"]) {
+      const snapshot = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8"));
+      assert.ok(snapshot && typeof snapshot === "object", `${name} 必须是 JSON 快照`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true });
+  }
 });

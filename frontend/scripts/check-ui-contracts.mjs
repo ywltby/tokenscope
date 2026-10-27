@@ -1098,7 +1098,11 @@ for (const name of args.contracts) {
 // AC08：fixture 覆盖表必须来自当次运行产物；未覆盖项作为缺口上报。
 // 覆盖完整性只在全量运行（全部具名契约）时强制——部分选择（CI 的
 // test:e2e 7/28）按设计只覆盖一部分，缺口如实打印但不判失败。
-const fullMatrixRun = args.contracts.length === REQUIRED_CONTRACTS.length;
+// 十七轮复核 P3：全量判定按**名称集合相等**——仅比数量会漏掉手动传入
+// 重复名称、漏选另一条的形态。
+const fullMatrixRun =
+  new Set(args.contracts).size === REQUIRED_CONTRACTS.length &&
+  REQUIRED_CONTRACTS.every((contract) => args.contracts.includes(contract));
 const fixtureCoverage = computeFixtureCoverage({
   registered: FIXTURE_NAMES,
   patrol: results.map((r) => ({ fixture: r.fixture, ok: r.ok })),
