@@ -47,7 +47,8 @@
   以守恒式固定该语义；TokenTracker 对上游注释逐字引用「cached slice is INSIDE the input
   count」并以同一批 rollout 与 ccusage 按日数字对账实证不减法膨胀 6–7 倍
   （`2026-10-14-tokentracker-usage-statistics.md:2016-2022`，下称 TT:2016-2022）；
-  reasoning 子集关系有本机 65381 对样本零反例（TT:2051-2054）。
+  reasoning 子集关系有本机 65381 对样本零反例（规则定义与计价置 0 在 TT:2051-2054，
+  实测统计在 TT:2070 与附录 E1 的 TT:4188）。
 - **Gemini thoughts 语义**：官方 UsageMetadata 参考页两次抓取均被导航截断，未取得
   直接文本。裁决改以一手源码注释为准：TokenArena 文档引用 gemini-cli.ts:208-209
   「Gemini 的 output 已含 thoughts、input 已含 cached，减掉避免重复计数」
@@ -114,7 +115,7 @@ TA:1-12、`2026-10-11-cc-switch-usage-statistics.md:1-12`）。PULSE 不读 Gemi
 | 5.9 | TokenScope 只取 last、不做 total 差分 | ⚠️ 保守取舍：last 缺失的非压缩场景少算，量级小 | 〔本仓〕codex.rs:4-8 |
 | 5.10 | token_usage_record：CCS 补记 / TokenScope 挂起配对 / ccusage 须 compacted 认领 / CB 压制 token_count / TT 作 compaction 侧信道 | ✅ 五家方向都对准同一真实场景（Codex 0.153+ 远程压缩） | 〔实测〕CCS:705 本机 68 rollout 中 44 条压缩漏计（输入 0.22%/输出 1.18%）；〔源码〕CCS:699-715、codex 源码配对逻辑 codex.rs:379-405、ccusage:955-967、CB:428-435、TT:1991-2002 |
 | 5.11 | TK 系 / PULSE / TA 未处理 token_usage_record | ⚠️ 真实漏计约输出 1%（压缩场景） | 〔实测〕同 5.10 的 44 条量级；〔推导〕CCS 实测占比外推 |
-| 5.12 | reasoning 已含 output（ccusage/TokenScope/TT/CB/PULSE） | ✅ 符合实际 | 〔实测〕TT:2051-2054 65381 对零反例；PULSE 不单独展示但 output 直取不少算（PULSE:448） |
+| 5.12 | reasoning 已含 output（ccusage/TokenScope/TT/CB/PULSE） | ✅ 符合实际 | 〔实测〕TT:2070、TT:4188（附录 E1）65381 对零反例（`reasoning>0` 60715 对、比值上界 1.0000）；〔源码〕TT:2051-2054 规则定义与计价置 0；PULSE 不单独展示但 output 直取不少算（PULSE:448） |
 | 5.13 | TK 系 / TA 把 reasoning 拆出独立桶 | ⚠️ 重定义列而非错误：费用中性（OpenAI reasoning 与 output 同价），但跨工具 output 列不可比 | 〔推导〕5.12 + 各家计价同价；TK 警告「直接并计会双计」（tokscale:352-353） |
 | 5.14 | ccusage 不支持 `.jsonl.zst` | ❌ 确凿错误：新版 Codex 压缩转录整文件漏掉 | 〔源码〕ccusage:801；tokscale:3-5（上游专门提交支持，证明文件真实出现） |
 | 5.15 | PULSE 不读 `CODEX_HOME` | ⚠️ 覆盖缺口：自定义环境变量的用户数据漏读 | 〔源码〕PULSE:147-148 |
@@ -201,6 +202,9 @@ token_usage_record」已过时，现行口径为挂起配对（stats-semantics.m
    ccusage 的「优先明细」方向相反（PULSE:505-511 vs ccusage:529-536）。
 4. **精确化二（TA 首见采信）**：纯累计（无 last）文件不高估，只是把首见前累计
    归到首见时间点；混用 last/total 的文件才整额再计（TA:1039-1040）。
+5. **精确化三（外部复核反馈，2026-10-27）**：「65381 对零反例」的出处细化——
+   TT:2051-2054 是子集规则定义与计价置 0 的实现，实测统计与数值表在同小节
+   TT:2070 与附录 E1 的 TT:4188。已回查两处原文验证后拆分标注（§2、§5.12）。
 
 未回查、仅作背景引用的行号（§3 覆盖矩阵、§8 教训表、§9 漂移清单的部分条目）
 保持〔转述〕级，采信前可按需回查。官方核实的两条 URL 与抓取结果见 §2；
