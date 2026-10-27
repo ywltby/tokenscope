@@ -604,6 +604,14 @@ PR #52 CI 首跑与修复（2026-10-25）：
 
 维护回归 55 项全绿；本地实跑 22/22 断言通过。
 
+### 十一轮复核更正：位置记录断言移至采集后（2026-10-27，`4f7d52c` 链）
+
+`button_position_recorded` 此前在事后位置查询**前**执行且固定 true——注入查询失败后错误字段已正确保留，断言仍绿并声称「双位置均已入 evidence」（复核方探针 `review-pr52-round11/review-probes.json`）。断言移至 `buttonBoxAfterClick` 采集之后，按实际结果生成状态并区分三形态：查询失败（如实失败、detail 标注）、合法 null（解锁后按钮已随隐私框移除）、成功（两位置俱全）。实跑发现 Playwright `boundingBox` 对已移除元素自动等待至超时——解锁后先 `count()` 区分。维护回归 57 项全绿；本地实跑 22/22 断言通过。**本小节为补记**：`4f7d52c` 提交时漏写此处，已在十三轮补修提交一并补入。
+
+### 十三轮复核补修：存在性与位置读取合并为单次页面内采集（2026-10-27）
+
+复核方以真实 Edge 复现（`qa-artifacts/workbuddy/b3/review-pr52-round13/review-probes.json`）：`count()` 与 `boundingBox()` 分开执行——正常退出动画恰好在两次查询之间完成时，count=1 而 boundingBox 等待超时（TimeoutError），合法移除被误判为查询失败、位置断言失败（新偶发红灯源）。修复：解锁后位置采集合并为**单次** `page.evaluate`——单次读取内同时判定存在性与位置（元素缺失 `{exists:false}` → 合法 null；读取到坐标 → 位置对象；**通信异常整次抛错** → `buttonBoxAfterClickError`），不再存在两步窗口。红先：时序回归（count=1、采集时已移除、两步查询抛超时）在旧两步实现下误判查询失败（红），合并后判合法 null（绿）。维护回归 58 项全绿；本地实跑 22/22 断言通过，真实页面采集到解锁后按钮位置对象。
+
 ### B2 合并与发布验收（2026-10-22）
 
 - [PR #31](https://github.com/ywltby/tokenscope/pull/31) 最终 HEAD `7664be9`，普通合并为 `c9de40ec3ded2485d2991079f209699ae6ff6107`；两父提交分别为最新 main `9c77cef` 与该 PR HEAD，合并文件树和已验证 HEAD 完全一致。AC03 / AC04 / AC05 分别提交 `6f50af1` / `16ec813` / `db43355`；局部峰谷费率展示修复 `4159633`、经批准的端口和 CI 契约登记 `317573e`、版本登记 `bfb01ed`、短路径取证补修 `7664be9` 各自独立。

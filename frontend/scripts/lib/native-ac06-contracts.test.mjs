@@ -256,6 +256,11 @@ function runAcceptOrderScenario(options = {}) {
     stableAfterMs = 0,
     // 十轮复核 P2：解锁后（.app-nav 出现）的按钮位置查询注入失败
     unlockBoxQueryFails = false,
+    // 十三轮：count() 返回该值（默认解锁后 0=已移除）
+    unlockCountReturns = 0,
+    // 十三轮：单次页面内采集执行时元素已被移除（exists=false）——即
+    // 「count 与采集之间退出动画完成」的时序形态
+    unlockCollectRemoves = false,
     // 八轮复核 P2：阻断文案查询（allTextContents）注入失败
     blockLocatorFails = false,
   } = options;
@@ -341,12 +346,22 @@ function runAcceptOrderScenario(options = {}) {
                 // 解锁后按钮已随隐私框移除（count=0 → 合法 null 形态）；
                 // 查询失败形态下按钮仍在（count=1、boundingBox 抛错）。
                 async count() {
-                  if (unlockStage) return unlockBoxQueryFails ? 1 : 0;
+                  if (unlockStage) {
+                    if (unlockCountReturns !== 0) return unlockCountReturns;
+                    return unlockBoxQueryFails ? 1 : 0;
+                  }
                   return 1;
                 },
                 async boundingBox() {
                   if (unlockStage && unlockBoxQueryFails) {
                     throw new Error("CDP 查询失败（解锁后）");
+                  }
+                  if (unlockStage && unlockCollectRemoves) {
+                    // 时序形态：count 之后按钮已被移除——Playwright
+                    // boundingBox 自动等待至超时抛错（复核方真实 Edge 形态）。
+                    throw new Error(
+                      "TimeoutError: locator.boundingBox: Timeout 20000ms exceeded.",
+                    );
                   }
                   boxSamples += 1;
                   if (buttonVanishes && boxSamples >= 2) return null;
@@ -416,6 +431,17 @@ function runAcceptOrderScenario(options = {}) {
           if (text.includes("__ac06ConsentClicks")) {
             evaluateCalls.push(text.slice(0, 40));
             return fakeWindow.__ac06ConsentClicks ?? [];
+          }
+          if (text.includes("querySelector") && text.includes("privacy-actions")) {
+            // 十三轮：单次页面内采集（存在性 + 位置一次读取）。通信异常
+            // 形态（unlockBoxQueryFails）整次采集抛错；移除形态 exists=
+            // false；正常返回原位坐标。
+            if (unlockBoxQueryFails) {
+              throw new Error("CDP 查询失败（解锁后）");
+            }
+            return unlockCollectRemoves
+              ? { exists: false }
+              : { exists: true, x: box.x, y: box.y, width: box.width, height: box.height };
           }
           if (text.includes("autostart_set")) return { ok: true, value: true };
           if (text.includes("autostart_status")) return { ok: true, value: statusValue };
@@ -1278,4 +1304,26 @@ test("P3：位置记录断言在查询成功时如实报告两位置", async () 
   const recorded = checks.find((check) => check.name === "button_position_recorded");
   assert.ok(recorded && recorded.pass, JSON.stringify(checks.filter((c) => !c.pass)));
   assert.match(recorded.detail, /事后位置=/);
+});
+
+// ── 十三轮复核：存在性判断与位置读取必须单次页面内采集 ──────────────────
+// count() 与 boundingBox() 分开执行——正常退出动画恰好在两次查询之间完成
+// 时，count=1 而 boundingBox 等待超时，合法移除被误判为查询失败（复核方
+// 真实 Edge 复现）。合并为单次 evaluate：元素缺失返回 null，通信异常才
+// 记错误。
+
+test("十三轮：count 与位置采集之间按钮被移除，必须判合法 null 而非查询失败", async () => {
+  // 桩语义：count() 返回 1（查询时按钮仍在）；单次页面内采集执行时元素
+  // 已被移除（exists=false）——即「两次查询之间退出动画完成」的时序。
+  const { ev, checks } = await runAcceptOrderScenario({
+    unlockCountReturns: 1,
+    unlockCollectRemoves: true,
+  });
+  assert.ok(checks.every((check) => check.pass), JSON.stringify(checks.filter((c) => !c.pass)));
+  const clickRecord = ev.acceptClicks;
+  assert.equal(clickRecord.buttonBoxAfterClick, null, "两次查询之间移除 = 合法 null");
+  assert.ok(
+    !("buttonBoxAfterClickError" in clickRecord),
+    `不得误判为查询失败：${JSON.stringify(clickRecord.buttonBoxAfterClickError)}`,
+  );
 });

@@ -3014,12 +3014,26 @@ const scenarios = {
       // 会让「查询失败」伪装成「按钮不存在」，证据无法归层。
       ev.acceptClicks = ev.acceptClicks ?? {};
       try {
-        // 解锁后按钮通常已随隐私框移除——count() 立即返回不等待，0 = 合
-        // 法移除（buttonBoxAfterClick=null）；仍存在才查位置；查询异常进
-        // buttonBoxAfterClickError。三者证据可区分（十轮复核）。
-        const remaining = await consentButton.count();
-        ev.acceptClicks.buttonBoxAfterClick =
-          remaining === 0 ? null : await consentButton.boundingBox();
+        // 十三轮复核：存在性判断与位置读取合并为**一次**页面内采集——
+        // count() 与 boundingBox() 分开执行时，正常退出动画恰好在两次查询
+        // 之间完成会导致 count=1 而 boundingBox 等待超时，合法移除被误判
+        // 为查询失败。单次读取：元素缺失 → null（合法移除），通信异常 →
+        // buttonBoxAfterClickError。
+        const captured = await page.evaluate(() => {
+          const button = document.querySelector(".privacy-actions button");
+          if (!button) return { exists: false };
+          const rect = button.getBoundingClientRect();
+          return {
+            exists: true,
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          };
+        });
+        ev.acceptClicks.buttonBoxAfterClick = captured.exists
+          ? { x: captured.x, y: captured.y, width: captured.width, height: captured.height }
+          : null;
       } catch (boxError) {
         ev.acceptClicks.buttonBoxAfterClickError = String(boxError).slice(0, 300);
       }
