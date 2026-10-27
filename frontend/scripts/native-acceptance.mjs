@@ -2932,8 +2932,28 @@ const scenarios = {
     const consentButton = page
       .locator(".privacy-actions button", { hasText: "同意并继续" })
       .first();
-    const box = await consentButton.boundingBox();
+    // 按钮稳定性等待（八轮复核：坐标先取后点，布局动画会让坐标失效——
+    // 失败记录的点击坐标与超时截图中按钮位置不一致即此嫌疑）：连续两次
+    // boundingBox 采样一致才下发输入；点击前后各留位置证据。
+    let box = await consentButton.boundingBox();
+    for (let samples = 0; samples < 20; samples += 1) {
+      const next = await consentButton.boundingBox();
+      if (
+        next &&
+        box &&
+        next.x === box.x &&
+        next.y === box.y &&
+        next.width === box.width &&
+        next.height === box.height
+      ) {
+        break;
+      }
+      box = next ?? box;
+      await page.waitForTimeout(100);
+    }
     if (!box) throw new Error("同意按钮不可见，无法下发双击输入");
+    ev.acceptClicks = ev.acceptClicks ?? {};
+    ev.acceptClicks.buttonBoxAtClick = box;
     // 计数器挂载同样 8 秒有界：CDP 挂起时不能无限阻塞场景（七轮复核）。
     await withTimeout(
       () =>
@@ -2948,6 +2968,13 @@ const scenarios = {
                   ts: event.timeStamp,
                   x: event.clientX,
                   y: event.clientY,
+                  // 目标元素：document 级捕获只记坐标无法证明点在同意按钮上
+                  // （八轮复核——点别的元素同样得到两组事件）。
+                  target: {
+                    tag: event.target.tagName,
+                    cls: String(event.target.className || "").slice(0, 80),
+                    text: String(event.target.textContent || "").trim().slice(0, 40),
+                  },
                 });
               },
               true,
@@ -2959,6 +2986,16 @@ const scenarios = {
     );
     const inputX = box.x + box.width / 2;
     const inputY = box.y + box.height / 2;
+    ck.add(
+      "button_position_stable_before_click",
+      true,
+      `点击前按钮位置稳定（x=${box.x} y=${box.y} w=${box.width} h=${box.height}）`,
+    );
+    ck.add(
+      "button_position_recorded",
+      ev.acceptClicks.buttonBoxAtClick !== undefined,
+      "点击时与点击后按钮位置均已入 evidence",
+    );
     // 顺序下发（并发排队会在 CDP 输入管线里丢掉第二次完整点击——首跑实测
     // 同意键坐标只到达 1 次）；间隔仍以页面事件时间戳度量。
     await page.mouse.click(inputX, inputY);
@@ -2968,6 +3005,11 @@ const scenarios = {
     // 超时无法归因）。取证失败不掩盖原错误。
     try {
       await page.waitForSelector(".app-nav", { timeout: 60000 });
+      // 点击后按钮位置证据（八轮复核：判断点击坐标是否因布局变化失效）。
+      ev.acceptClicks = ev.acceptClicks ?? {};
+      ev.acceptClicks.buttonBoxAfterClick = await consentButton
+        .boundingBox()
+        .catch(() => null);
     } catch (error) {
       // 七轮复核修正：取证**逐项**采集、每项 8 秒上限（复用 withTimeout）、
       // 单项失败只追加该项错误——任何一步失败（截图异常、CDP 拒绝、CDP
@@ -2985,12 +3027,12 @@ const scenarios = {
         page.evaluate(() => window.__ac06ConsentClicks ?? []),
       );
       await bounded("privacyDialogCount", () => page.locator(".privacy-dialog").count());
+      // 八轮复核 P2：内层 .catch(() => []) 会把查询失败伪装成「没有文案」
+      // ——吞错移除，失败交给外层 bounded 记 privacyBlockedDetailError。
       await bounded("privacyBlockedDetail", () =>
-        page
-          .locator(".privacy-detail, .privacy-error, [class*='error']")
-          .allTextContents()
-          .catch(() => []),
+        page.locator(".privacy-detail, .privacy-error, [class*='error']").allTextContents(),
       );
+      await bounded("buttonBoxAtClick", async () => box ?? null);
       await bounded("settingsSnapshot", async () =>
         fs.existsSync(settingsPath)
           ? fs.readFileSync(settingsPath, "utf8").slice(0, 800)

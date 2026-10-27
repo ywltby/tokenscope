@@ -245,14 +245,21 @@ function runAcceptOrderScenario(options = {}) {
     stateFileText = '{"enabled":true}',
     autostartTrace = null,
     registryChanged = false,
+    // 八轮复核：按钮位置前 N 次 boundingBox 采样返回偏移位（模拟布局动画）
+    unstableBoxSamples = 0,
+    // 八轮复核 P2：阻断文案查询（allTextContents）注入失败
+    blockLocatorFails = false,
   } = options;
   const box = { x: 100, y: 200, width: 120, height: 40 };
   const centerX = box.x + box.width / 2;
   const centerY = box.y + box.height / 2;
   const clicksLog = [];
   const checks = [];
+  const ev = {};
   let dispatched = 0;
   let registryCalls = 0;
+  let boxSamples = 0;
+  const clickCoordinates = [];
   const registry = { hive: ["unchanged"] };
   const autostartRows =
     autostartTrace ?? [
@@ -308,10 +315,34 @@ function runAcceptOrderScenario(options = {}) {
       page: {
         async waitForSelector() {},
         async waitForTimeout() {},
-        locator() {
+        locator(selector) {
+          const name = String(selector);
           return {
             first() {
-              return { async boundingBox() { return box; } };
+              return {
+                async boundingBox() {
+                  boxSamples += 1;
+                  if (boxSamples <= unstableBoxSamples) {
+                    // 动画中：每次采样位置都不同（移动中），稳定后回原位。
+                    return {
+                      x: box.x + 50 + boxSamples,
+                      y: box.y + 60,
+                      width: box.width,
+                      height: box.height,
+                    };
+                  }
+                  return box;
+                },
+              };
+            },
+            count() {
+              return Promise.resolve(name.includes("privacy-dialog") ? 1 : 0);
+            },
+            allTextContents() {
+              if (blockLocatorFails && name.includes("error")) {
+                return Promise.reject(new Error("CDP session closed"));
+              }
+              return Promise.resolve([]);
             },
           };
         },
@@ -326,13 +357,14 @@ function runAcceptOrderScenario(options = {}) {
           return clicksLog;
         },
         mouse: {
-          async click() {
+          async click(x, y) {
             dispatched += 1;
+            clickCoordinates.push({ x, y });
             if (failSecondDispatch && dispatched === 2) throw new Error("CDP 输入通道错误");
             if (dispatched <= deliveredClicks) {
               const ts = 1000 + (dispatched - 1) * gapMs;
-              clicksLog.push({ type: "pointerdown", ts, x: centerX, y: centerY });
-              clicksLog.push({ type: "click", ts, x: centerX, y: centerY });
+              clicksLog.push({ type: "pointerdown", ts, x, y, target: { tag: "BUTTON", cls: "privacy-actions", text: "" } });
+              clicksLog.push({ type: "click", ts, x, y, target: { tag: "BUTTON", cls: "privacy-actions", text: "" } });
             }
           },
         },
@@ -342,8 +374,8 @@ function runAcceptOrderScenario(options = {}) {
       opts: { shots: "C:/synthetic-shots" },
     },
     ck: { add: (name, pass, detail) => checks.push({ name, pass, detail }) },
-    ev: {},
-  }).then(() => ({ checks, dispatched }));
+    ev,
+  }).then(() => ({ checks, dispatched, clickCoordinates, ev }));
 }
 
 function runAcceptOrder({ records, settingsText }) {
@@ -979,4 +1011,51 @@ test("取证：CDP 挂起在取证上限内跳过并记原因，不拖垮场景"
   const diag = result.ev.acceptFailureDiagnostics;
   assert.match(diag.capturedClicksError ?? "", /上限/);
   assert.ok(diag.privacyDialogCount !== undefined, "超时项之后其余项继续");
+});
+
+// ── 点击目标证据与按钮稳定性（八轮复核缺口）────────────────────────────
+// document 级计数器只记坐标不能证明目标元素是同意按钮（点击别的元素同样
+// 得到两组事件）；坐标先取后点，布局动画会让坐标失效——点击前必须等按钮
+// 位置稳定，并记录点击前后按钮位置与事件实际目标。
+
+test("按钮稳定性：布局动画期不下发输入，位置连续两次采样一致后才点击", async () => {
+  const { checks, clickCoordinates } = await runAcceptOrderScenario({
+    unstableBoxSamples: 3,
+  });
+  const failed = checks.filter((check) => !check.pass);
+  assert.deepEqual(failed, [], "稳定后点击必须全过");
+  // 实际点击坐标必须是稳定位置的中心（偏移位 x+50/y+60 的中心不是它）。
+  for (const coordinate of clickCoordinates) {
+    assert.equal(coordinate.x, 100 + 120 / 2, `点击 x 未用稳定位置：${JSON.stringify(coordinate)}`);
+    assert.equal(coordinate.y, 200 + 40 / 2, `点击 y 未用稳定位置：${JSON.stringify(coordinate)}`);
+  }
+  for (const name of ["button_position_stable_before_click", "button_position_recorded"]) {
+    assert.ok(checks.some((check) => check.name === name), `缺少具名断言：${name}`);
+  }
+});
+
+test("取证：解锁超时时阻断文案查询失败记为该项错误", async () => {
+  // 场景 waitForSelector 正常返回 .app-nav（不进取证路径）→ 用失败注入
+  // 直接验证取证段对阻断文案查询的处理。
+  const result = await runAcceptOrderDiagnostics({
+    pageBehavior: {
+      blockLocatorText: true,
+      blockLocatorReject: true,
+      evaluate: () => [],
+    },
+  });
+  assert.equal(result.threw, true);
+  const diag = result.ev.acceptFailureDiagnostics;
+  assert.match(diag.privacyBlockedDetailError ?? "", /CDP session closed/);
+  assert.ok(!("privacyBlockedDetail" in diag) || diag.privacyBlockedDetail === undefined,
+    "查询失败时不得伪装成空列表");
+});
+
+test("取证：点击证据携带事件实际目标元素", async () => {
+  const { ev, checks } = await runAcceptOrderScenario({});
+  assert.ok(checks.every((check) => check.pass), JSON.stringify(checks.filter((c) => !c.pass)));
+  for (const entry of ev.acceptClicks.captured) {
+    assert.ok(entry.target, "计数事件必须带目标元素");
+    assert.equal(entry.target.tag, "BUTTON");
+  }
 });
