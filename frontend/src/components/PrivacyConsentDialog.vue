@@ -57,6 +57,9 @@ const termsOpen = ref(false);
         同意后仅在本机读取已启用来源的会话日志用于统计与费用估算，不上传会话与统计数据；
         价格同步会访问 models.dev 与 OpenRouter 的公开目录。完整说明见下方全文。
       </p>
+      <p class="privacy-consent-scope">
+        点击「同意并继续」即表示您同意隐私政策和用户许可协议。两份文件可在下方离线查看。
+      </p>
       <div class="privacy-scroll" tabindex="0" role="region" aria-label="隐私政策全文">
         <template v-for="(block, index) in blocks" :key="index">
           <h2 v-if="block.type === 'h1'" class="privacy-h1">{{ block.text }}</h2>
@@ -98,6 +101,9 @@ const termsOpen = ref(false);
       <div v-if="message" class="privacy-error" role="alert">
         <span>{{ message }}</span>
       </div>
+      <div v-if="!termsBlocks.length || !blocks.length" class="privacy-error" role="alert">
+        隐私政策或用户许可协议未加载，无法确认同意，请重新检查。
+      </div>
       <div class="privacy-actions">
         <NButton
           v-if="termsBlocks.length"
@@ -109,7 +115,12 @@ const termsOpen = ref(false);
           {{ termsOpen ? "收起用户许可协议" : "查看最终用户许可协议" }}
         </NButton>
         <NButton size="small" :disabled="saving" @click="emit('reject')">不同意</NButton>
-        <NButton v-if="blocked" size="small" :disabled="saving" @click="emit('retry')">
+        <NButton
+          v-if="blocked || !termsBlocks.length || !blocks.length"
+          size="small"
+          :disabled="saving"
+          @click="emit('retry')"
+        >
           重新检查
         </NButton>
         <span class="privacy-actions-spacer" />
@@ -117,7 +128,7 @@ const termsOpen = ref(false);
           size="small"
           type="primary"
           :loading="saving"
-          :disabled="saving"
+          :disabled="saving || !termsBlocks.length || !blocks.length"
           @click="emit('accept')"
         >
           {{ saving ? "正在保存…" : "同意并继续" }}
@@ -173,6 +184,13 @@ const termsOpen = ref(false);
   background: var(--ts-fill-subtle);
   font-size: 12.5px;
   line-height: 1.7;
+  color: var(--ts-text-secondary);
+}
+
+.privacy-consent-scope {
+  margin: var(--ts-space-2) 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
   color: var(--ts-text-secondary);
 }
 

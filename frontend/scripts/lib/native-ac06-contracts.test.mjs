@@ -402,6 +402,7 @@ function runAcceptOrderScenario(options = {}) {
       settingsFingerprint,
       parseToml,
       parseTOML,
+      CURRENT_CONSENT_REVISION: CONSENT_REVISION,
       withTimeout: realWithTimeout,
       registrySnapshot() {
         registryCalls += 1;
@@ -598,7 +599,27 @@ function consentRecords(settingsText, { hash } = {}) {
   ];
 }
 
-const ORDER_SETTINGS = "privacy_policy_accepted = true\nprivacy_policy_revision = 2\n";
+// 当前共同同意修订号：从受测源码提取（与生产/原生验收同一事实源）。
+const CONSENT_REVISION = (() => {
+  const settingsSource = fs.readFileSync(
+    new URL("../../../crates/tokenscope-core/src/settings.rs", import.meta.url),
+    "utf8",
+  );
+  const stripped = settingsSource
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  const match = /^\s*(?:pub\s+)?const\s+PRIVACY_POLICY_REVISION\s*:\s*u8\s*=\s*(\d+)\s*;\s*$/m.exec(
+    stripped,
+  );
+  assert.ok(match, "settings.rs 缺少 PRIVACY_POLICY_REVISION");
+  return Number(match[1]);
+})();
+// 同意保存的落盘文本：隐私政策与用户许可协议四项（同一次保存写入）。
+const ORDER_SETTINGS =
+  "privacy_policy_accepted = true\n" +
+  `privacy_policy_revision = ${CONSENT_REVISION}\n` +
+  "user_agreement_accepted = true\n" +
+  `user_agreement_revision = ${CONSENT_REVISION}\n`;
 
 test("accept-order: 同意 → 解锁 → 首读严格成序且指纹一致才通过", async () => {
   const records = [
@@ -1013,7 +1034,14 @@ for (const bad of BYTE_BAD_CASES) {
     // 裸键前，旧版 TOML 解析本就拒绝——红不真实；注释内部替换成 U+FFFD
     // 后注释仍合法，才是 toString("utf8") 误放行的原始形态）。
     const head = Buffer.from(bad.head);
-    const bytes = Buffer.concat([head, Buffer.from("privacy_policy_accepted = true\nprivacy_policy_revision = 2\n", "utf8")]);
+  const body = Buffer.from(
+    `privacy_policy_accepted = true\n` +
+      `privacy_policy_revision = ${CONSENT_REVISION}\n` +
+      "user_agreement_accepted = true\n" +
+      `user_agreement_revision = ${CONSENT_REVISION}\n`,
+    "utf8",
+  );
+  const bytes = Buffer.concat([head, body]);
     const records = [
       { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
       {
@@ -1046,7 +1074,11 @@ const QUOTED_KEY_GOOD_CASES = [
 
 for (const good of QUOTED_KEY_GOOD_CASES) {
   test(`字节证据：${good.label} 必须通过（P3 误拒修复）`, async () => {
-    const text = good.acceptedLine + "privacy_policy_revision = 2\n";
+    const text =
+      good.acceptedLine +
+      `privacy_policy_revision = ${CONSENT_REVISION}\n` +
+      "user_agreement_accepted = true\n" +
+      `user_agreement_revision = ${CONSENT_REVISION}\n`;
     const records = [
       { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
       ...consentRecords(text),
@@ -1061,7 +1093,14 @@ for (const good of QUOTED_KEY_GOOD_CASES) {
 
 test("字节证据：合法编码的 U+FFFD 字符必须通过（替换仅限非法字节）", async () => {
   const head = Buffer.from("# replacement char \xef\xbf\xbd is fine\n", "binary");
-  const bytes = Buffer.concat([head, Buffer.from("privacy_policy_accepted = true\nprivacy_policy_revision = 2\n", "utf8")]);
+  const body = Buffer.from(
+    `privacy_policy_accepted = true\n` +
+      `privacy_policy_revision = ${CONSENT_REVISION}\n` +
+      "user_agreement_accepted = true\n" +
+      `user_agreement_revision = ${CONSENT_REVISION}\n`,
+    "utf8",
+  );
+  const bytes = Buffer.concat([head, body]);
   const records = [
     { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
     {
@@ -1122,6 +1161,7 @@ function runAcceptOrderDiagnostics({ pageBehavior }) {
       settingsFingerprint,
       parseToml,
       parseTOML,
+      CURRENT_CONSENT_REVISION: CONSENT_REVISION,
       // 真实 withTimeout 语义（race 超时跳过记原因），时间缩短便于测试。
       withTimeout: (task, _ms, detail) => realWithTimeout(task, 50, detail),
       registrySnapshot() {

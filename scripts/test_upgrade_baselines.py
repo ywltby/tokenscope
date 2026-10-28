@@ -622,9 +622,15 @@ class PrivacyRevisionLexerCase(RegistryCase):
                     baselines.read_tag_privacy_revision(commit, root=root), 2,
                     f"{name}：真实提取函数必须读到 2（生命周期/字符字面量不得吞掉常量）")
 
-    def test_registered_baselines_keep_reading_two(self):
-        # 当前树的真实读取仍为 2（词法器变更不得影响既有值）。
-        self.assertEqual(baselines.read_tag_privacy_revision("HEAD"), 2)
+    def test_registered_baselines_keep_reading_current_revision(self):
+        # 当前树的真实读取必须等于源码常量（词法器变更不得改变实际值）。
+        source = (baselines.ROOT / "crates/tokenscope-core/src/settings.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            baselines.read_tag_privacy_revision("HEAD"),
+            baselines.extract_privacy_revision(source),
+        )
         # 已登记基线 0.6.0（44c026d）：CI 的浅克隆可能不含该提交——
         # 仅在对象存在时断言，缺失时按可用历史优雅跳过（本地已验证为 2）。
         commit = "44c026da7acc01cb9c05bef62d52a270a6b80284"

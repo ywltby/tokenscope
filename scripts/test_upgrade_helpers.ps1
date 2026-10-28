@@ -341,26 +341,27 @@ sys.exit(37 if "--fail" in sys.argv else 0)
         $expected += "check-current:0.3.3::1->3,lifecycle:restart,check-current:0.3.3::1->3,jump:current:True,case:True"
         Check (($script:Trace -join ",") -eq $expected) "格式3：先闸门观察再授权（gate 在 consent 前）"
     }
-    # 0.6.0→0.6.1：首个格式 3 基线的同修订跳。基线登记 privacy_revision = 2
-    # （= 当前修订），旧同意对新版仍然有效——WB05 闸门观察只对「旧同意已
-    # 失效」的跳有意义；旧阶段播种的同意也必须带基线自己的修订号
-    # （CI 40226439492 单跳旧阶段等汇总超时的红先来源）。
+    # 0.6.0→0.6.1：0.6.0 的隐私修订为 2，当前共同同意修订为 3——旧同意
+    # 对新版已失效（用户决定：协议更新后所有用户必须重新明确同意），
+    # 因此闸门观察段必须适用、授权在观察之后。历史基线登记保持 2 不变
+    # （不修改已发布版本的历史修订号来掩盖重新确认需求）。
     & {
         $case = New-UpgradeCase -RepoRoot $repoRoot -InstallerPath (Join-Path $contractRoot "current-setup.exe") `
             -AppVersion "0.6.1" -ExpectedCommit ("a"*40) -SourceState "present" -Origin "0.6.0" `
-            -EvidenceRoot (Join-Path $contractRoot "scenario-same-revision") `
+            -EvidenceRoot (Join-Path $contractRoot "scenario-stale-baseline") `
             -Metadata ([pscustomobject]@{ executable_sha256=("b"*64); persistent_format=([pscustomobject]@{ settings_format="3" }) }) `
             -DataDir $dataRoot -TempRoot $tempRoot
         $script:Trace.Clear(); $script:FailAt = ""
         Invoke-UpgradeScenario -Case $case
         $expected = "jump:0.6.0,install-baseline,prepare-old,lifecycle:old,old-facts:0.6.0,save-old,"
-        $expected += "install-current,preserved,jump:0.6.1,consent,lifecycle:current,"
+        $expected += "install-current,preserved,jump:0.6.1,consent-gate:current,consent,lifecycle:current,"
         $expected += "check-current:0.6.1::3->3,lifecycle:restart,check-current:0.6.1::3->3,jump:current:True,case:True"
-        Check (($script:Trace -join ",") -eq $expected) "同修订基线跳（0.6.0→0.6.1）：旧同意仍有效，闸门观察不适用"
+        Check (($script:Trace -join ",") -eq $expected) "0.6.0（revision 2）→ 0.6.1（revision 3）：旧同意失效，先闸门观察再授权"
     }
-    Check (-not (Test-ConsentGateApplies -Case ([pscustomobject]@{ JumpTargetSettingsFormat=3; ConsentRevision=2 }))) "同修订（revision ≥ 当前 2）：闸门观察不适用"
+    $currentRevision = Get-ConsentRevision -RepoRoot $repoRoot
+    Check (-not (Test-ConsentGateApplies -Case ([pscustomobject]@{ JumpTargetSettingsFormat=3; ConsentRevision=$currentRevision }))) "同修订（revision = 当前 $currentRevision）：闸门观察不适用"
+    Check (Test-ConsentGateApplies -Case ([pscustomobject]@{ JumpTargetSettingsFormat=3; ConsentRevision=($currentRevision - 1) })) "低于当前修订：闸门观察适用"
     Check (Test-ConsentGateApplies -Case ([pscustomobject]@{ JumpTargetSettingsFormat=3; ConsentRevision=$null })) "布尔形态同意（无修订号）：闸门观察适用"
-    Check (Test-ConsentGateApplies -Case ([pscustomobject]@{ JumpTargetSettingsFormat=3; ConsentRevision=1 })) "低于当前修订：闸门观察适用"
     Check (-not (Test-ConsentGateApplies -Case ([pscustomobject]@{ JumpTargetSettingsFormat=2; ConsentRevision=$null }))) "目标格式 < 3：无修订号闸门"
 
     # PR52 复盘（probe_stale_consent_gate.py）：观察函数把「字段存在」当

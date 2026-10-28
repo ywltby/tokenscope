@@ -56,9 +56,14 @@ def prepare(data, sources, profile="legacy-cache", consent_revision=None):
 def _consent_prefix(revision):
     # WB05：需要当前修订授权的跳必须与修订号同一次写入（两个键一起出现）；
     # 不带 revision 的调用保持旧布尔形态（受测历史版本不认识修订号字段）。
+    # 2026-10-28：共同同意修订覆盖隐私政策与用户许可协议——受测的新版本
+    # 还要求协议同意字段，一次写入四项（旧版本读到未知键会忽略）。
     if revision is None:
         return "privacy_policy_accepted = true\n"
-    return f"privacy_policy_accepted = true\nprivacy_policy_revision = {int(revision)}\n"
+    return (
+        f"privacy_policy_accepted = true\nprivacy_policy_revision = {int(revision)}\n"
+        f"user_agreement_accepted = true\nuser_agreement_revision = {int(revision)}\n"
+    )
 
 
 def grant_test_consent(data, revision=None):
@@ -86,7 +91,10 @@ def ensure_test_consent(data, revision=None):
         if revision is not None and settings.get("privacy_policy_revision") != int(revision):
             # 先删已有的修订号行再插入，否则文件里出现重复的
             # privacy_policy_revision 键，tomllib 拒绝解析整个文件。
+            # 2026-10-28：协议同意两个键一并删除后按当前修订重写四项。
             body = re.sub(r"(?m)^[ \t]*privacy_policy_revision[ \t]*=.*\r?\n?", "", text)
+            body = re.sub(r"(?m)^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?", "", body)
+            body = re.sub(r"(?m)^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?", "", body)
             body = body.replace(
                 "privacy_policy_accepted = true",
                 _consent_prefix(revision).rstrip("\n"),

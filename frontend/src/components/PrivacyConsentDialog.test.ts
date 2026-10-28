@@ -46,6 +46,18 @@ function mountDialog(policy: typeof POLICY | Omit<typeof POLICY, "terms">) {
 }
 
 describe("隐私弹窗：协议离线入口（十九轮 P2）", () => {
+  it("明确告知同意按钮同时适用于隐私政策与用户许可协议", () => {
+    const wrapper = mountDialog(POLICY);
+    expect(wrapper.text()).toContain("点击「同意并继续」即表示您同意隐私政策和用户许可协议");
+  });
+
+  it("协议正文缺失时不得允许同意", () => {
+    const { terms: _omit, ...withoutTerms } = POLICY;
+    const wrapper = mountDialog(withoutTerms);
+    const accept = wrapper.findAll("button").find((button) => button.text().includes("同意并继续"));
+    expect(accept?.attributes("disabled")).toBeDefined();
+  });
+
   it("有协议全文时提供展开入口，展开后正文可见", async () => {
     const wrapper = mountDialog(POLICY);
     const toggle = wrapper.find(".privacy-terms-toggle");

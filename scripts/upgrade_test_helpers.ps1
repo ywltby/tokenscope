@@ -253,14 +253,20 @@ function Prepare-OldUsage {
 
 function Test-ConsentGateApplies {
     # WB05 闸门观察只对「旧同意对新版已失效」的跳有意义：来跳同意为布尔
-    # 形态或修订号低于当前修订（2，与 tokenscope-core 的
-    # PRIVACY_POLICY_REVISION 同步）时，新闸门必须保持封闭、观察段适用；
-    # 旧同意已带当前修订号（0.6.0→0.6.1，基线 revision = 当前 2）时同意
-    # 有效、无重新询问路径，观察段不适用（有效同意下观察期必然看到业务）。
+    # 形态或修订号低于当前共同同意修订时，新闸门必须保持封闭、观察段适用；
+    # 旧同意已带当前修订号时同意有效、无重新询问路径，观察段不适用
+    # （有效同意下观察期必然看到业务）。当前修订从受测源码读取
+    # （2026-10-28：升为 3，0.6.0 的 revision 2 因此必须重新同意）。
     param($Case)
     if ($Case.JumpTargetSettingsFormat -lt 3) { return $false }
     if ($null -eq $Case.ConsentRevision) { return $true }
-    return ([int]$Case.ConsentRevision -lt 2)
+    $repo = if ($Case.PSObject.Properties['RepoRoot'] -and $Case.RepoRoot) {
+        $Case.RepoRoot
+    } else {
+        Split-Path $PSScriptRoot -Parent
+    }
+    $current = Get-ConsentRevision -RepoRoot $repo
+    return ([int]$Case.ConsentRevision -lt $current)
 }
 
 function Check-OldUsage {
@@ -437,16 +443,29 @@ function Invoke-ConsentGateStage {
     }
 }
 
+function Get-ConsentRevision {
+    # 当前共同同意修订号：从受测源码读取（单一事实源，不硬编码）。
+    # 正则行首锚定常量声明，注释里的同名文本不会命中。
+    param([string]$RepoRoot = (Split-Path $PSScriptRoot -Parent))
+    if (-not $RepoRoot) { $RepoRoot = Split-Path $PSScriptRoot -Parent }
+    $source = Join-Path $RepoRoot "crates/tokenscope-core/src/settings.rs"
+    $text = Get-Content -LiteralPath $source -Raw -Encoding utf8
+    $m = [regex]::Match($text,
+        '(?m)^(?:pub\s+)?const\s+PRIVACY_POLICY_REVISION\s*:\s*u8\s*=\s*(\d+)\s*;')
+    if (-not $m.Success) { throw "settings.rs 缺少 PRIVACY_POLICY_REVISION 常量" }
+    return [int]$m.Groups[1].Value
+}
+
 function Grant-UpgradeConsent {
     # 幂等：起点已带同意时不动设置文件，0.1.0 起点升级后补上。
-    # WB05：本跳目标格式 ≥ 3 的版本认识隐私修订号——写入当前修订（与
-    # tokenscope-core 的 PRIVACY_POLICY_REVISION = 2 同步），让升级后的启动
-    # 直接进入业务；历史跳保持布尔形态（受测旧版本不认识该字段）。
+    # WB05：本跳目标格式 ≥ 3 的版本认识修订号——写入**受测源码里的当前
+    # 共同同意修订号**（隐私政策 + 用户许可协议同一次写入四项），让升级后的
+    # 启动直接进入业务；历史跳保持布尔形态（受测旧版本不认识这些字段）。
     param($Case)
     $arguments = @((Join-Path $Case.RepoRoot "scripts/upgrade_fixture.py"), "ensure-consent",
         "--data-dir", $Case.DataDir)
     if ($Case.JumpTargetSettingsFormat -ge 3) {
-        $arguments += @("--revision", "2")
+        $arguments += @("--revision", [string](Get-ConsentRevision -RepoRoot $Case.RepoRoot))
     }
     Invoke-UpgradePython -Arguments $arguments | Out-Null
 }

@@ -88,6 +88,21 @@ import {
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
 // 统一 workspace 后，不带 --target 的 release 构建产物落在根 target/。
 const EXE_DEFAULT = path.join(REPO, "target", "release", "tokenscope.exe");
+/** 当前共同同意修订号：从受测源码提取（单一事实源，不硬编码）。 */
+const CURRENT_CONSENT_REVISION = (() => {
+  const source = fs.readFileSync(
+    path.join(REPO, "crates", "tokenscope-core", "src", "settings.rs"),
+    "utf8",
+  );
+  const stripped = source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  const match = /^\s*(?:pub\s+)?const\s+PRIVACY_POLICY_REVISION\s*:\s*u8\s*=\s*(\d+)\s*;\s*$/m.exec(
+    stripped,
+  );
+  if (!match) throw new Error("settings.rs 缺少 PRIVACY_POLICY_REVISION 常量");
+  return Number(match[1]);
+})();
 const PREP = path.join(REPO, "scripts", "prepare-native-acceptance.ps1");
 const RECORDER = path.join(REPO, "scripts", "capture-window-frames.ps1");
 const WINDOW_ACTION = path.join(REPO, "scripts", "native-window-action.ps1");
@@ -2853,14 +2868,21 @@ const scenarios = {
       /privacy_policy_accepted\s*=\s*true/.test(ev.settingsAfterAccept),
       ev.settingsAfterAccept.split("\n")[0],
     );
+    // 弹窗关闭以「不可见」为准：NModal 关闭过渡期间 DOM 可能仍在
+    // （count 不判可见性），业务界面已挂载即证明闸门放行。
     ev.consentDialogAfterAccept = await page.locator(".privacy-dialog").count();
+    ev.consentDialogVisibleAfterAccept = ev.consentDialogAfterAccept
+      ? await page.locator(".privacy-dialog").first().isVisible()
+      : false;
     ck.add(
       "consent_dialog_closed_after_accept",
-      ev.consentDialogAfterAccept === 0,
-      `残留=${ev.consentDialogAfterAccept}`,
+      ev.consentDialogAfterAccept === 0 || ev.consentDialogVisibleAfterAccept === false,
+      `DOM 残留=${ev.consentDialogAfterAccept} 可见=${ev.consentDialogVisibleAfterAccept}`,
     );
 
-    // 重启同一隔离根：不再询问（页面句柄必须重新取）
+    // 重启同一隔离根：显式结束上一实例（业务运行中不会自行退出），
+    // 再以同一隔离根重新启动——验证重启不再询问。
+    await inst.stop({ terminate: true, reason: "restart-explicit" });
     const info = await inst.launch();
     ev.relaunchPid = info.pid;
     ev.relaunchPort = info.port;
@@ -3432,17 +3454,27 @@ const scenarios = {
       };
       const accepted = topLevelValue("privacy_policy_accepted");
       const revision = topLevelValue("privacy_policy_revision");
+      // 2026-10-28：用户许可协议同意与隐私政策同意同一次保存写入；
+      // 终态必须四项俱全且修订为当前值（旧用户不被放行的证据链终点）。
+      const agreementAccepted = topLevelValue("user_agreement_accepted");
+      const agreementRevision = topLevelValue("user_agreement_revision");
       const ok =
         accepted?.kind === "boolean" &&
         accepted.value === true &&
         revision?.kind === "integer" &&
-        revision.value === 2;
+        revision.value === CURRENT_CONSENT_REVISION &&
+        agreementAccepted?.kind === "boolean" &&
+        agreementAccepted.value === true &&
+        agreementRevision?.kind === "integer" &&
+        agreementRevision.value === CURRENT_CONSENT_REVISION;
       return {
         ok,
         detail:
           `accepted kind=${accepted?.kind} value=${JSON.stringify(accepted?.value)}；` +
-          `revision kind=${revision?.kind} value=${JSON.stringify(revision?.value)}` +
-          "（顶层须 boolean true / integer 2）",
+          `revision kind=${revision?.kind} value=${JSON.stringify(revision?.value)}；` +
+          `agreement kind=${agreementAccepted?.kind} value=${JSON.stringify(agreementAccepted?.value)}；` +
+          `agreementRevision kind=${agreementRevision?.kind} value=${JSON.stringify(agreementRevision?.value)}` +
+          `（顶层须布尔 true / 整数 ${CURRENT_CONSENT_REVISION} 各两项）`,
       };
     })();
     ck.add("consent_saved_capture_content", captureContent.ok, captureContent.detail);
@@ -3479,17 +3511,27 @@ const scenarios = {
       };
       const accepted = topLevelValue("privacy_policy_accepted");
       const revision = topLevelValue("privacy_policy_revision");
+      // 2026-10-28：终态必须同时证明接受了当前用户许可协议——
+      // 只有隐私政策同意（哪怕修订号更高）不构成新版协议同意。
+      const agreementAccepted = topLevelValue("user_agreement_accepted");
+      const agreementRevision = topLevelValue("user_agreement_revision");
       const ok =
         accepted?.kind === "boolean" &&
         accepted.value === true &&
         revision?.kind === "integer" &&
-        revision.value === 2;
+        revision.value === CURRENT_CONSENT_REVISION &&
+        agreementAccepted?.kind === "boolean" &&
+        agreementAccepted.value === true &&
+        agreementRevision?.kind === "integer" &&
+        agreementRevision.value === CURRENT_CONSENT_REVISION;
       return {
         ok,
         detail:
           `accepted kind=${accepted?.kind} value=${JSON.stringify(accepted?.value)}；` +
-          `revision kind=${revision?.kind} value=${JSON.stringify(revision?.value)}` +
-          "（顶层须 boolean true / integer 2）",
+          `revision kind=${revision?.kind} value=${JSON.stringify(revision?.value)}；` +
+          `agreement kind=${agreementAccepted?.kind} value=${JSON.stringify(agreementAccepted?.value)}；` +
+          `agreementRevision kind=${agreementRevision?.kind} value=${JSON.stringify(agreementRevision?.value)}` +
+          `（顶层须布尔 true / 整数 ${CURRENT_CONSENT_REVISION} 各两项）`,
       };
     })();
     ck.add("accept_writes_consent_with_revision", terminalCheck.ok, terminalCheck.detail);
@@ -3645,7 +3687,7 @@ const scenarios = {
     const dialogText = (await page.locator(".privacy-dialog").innerText()).replace(/\s+/g, " ");
     ck.add(
       "policy_updated_notice_visible",
-      dialogText.includes("隐私政策已更新") && dialogText.includes("WorkBuddy 与 WorkBuddy AI"),
+      dialogText.includes("隐私政策或用户许可协议已更新"),
       dialogText.slice(0, 160),
     );
     ev.businessDomNodes = await page.locator(".app-nav, .page-head, .chart-canvas").count();
@@ -3687,8 +3729,14 @@ const scenarios = {
     ck.add(
       "reconsent_writes_current_revision",
       /privacy_policy_accepted\s*=\s*true/.test(ev.settingsAfterAccept) &&
-        /privacy_policy_revision\s*=\s*2/.test(ev.settingsAfterAccept),
-      ev.settingsAfterAccept.split("\n").slice(0, 4).join(" | "),
+        new RegExp(`privacy_policy_revision\\s*=\\s*${CURRENT_CONSENT_REVISION}`).test(
+          ev.settingsAfterAccept,
+        ) &&
+        /user_agreement_accepted\s*=\s*true/.test(ev.settingsAfterAccept) &&
+        new RegExp(`user_agreement_revision\\s*=\\s*${CURRENT_CONSENT_REVISION}`).test(
+          ev.settingsAfterAccept,
+        ),
+      ev.settingsAfterAccept.split("\n").slice(0, 6).join(" | "),
     );
     // 同意后的业务初始化必须发生在同意落盘之后：business_ready 的 seq
     // 严格大于 consent_saved（顺序颠倒 = 同意前就有业务读取）。
@@ -3920,22 +3968,28 @@ async function main() {
                     );
                     if (downgraded === text)
                       throw new Error("隔离根 settings.toml 未含修订号行，无法构造旧同意场景");
-                    fs.writeFileSync(p, downgraded, "utf8");
+                    const legacyOnly = downgraded
+                      .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
+                      .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
+                    fs.writeFileSync(p, legacyOnly, "utf8");
                     return;
                   }
                   if (SCENARIO === "privacy-variants-close") {
                     // AC06：记忆预设变体——剥离同意后追加 close_action，
                     // 验证未同意时点关闭仍弹隐私退出确认而非最小化。
-                    const stripped = text.replace(
-                      /^[ \t]*privacy_policy_accepted[ \t]*=[ \t]*true[ \t]*\r?\n?/m,
-                      "",
-                    );
+                    // 2026-10-28：协议同意两项一并剥离（构造真实未同意状态）。
+                    const stripped = text
+                      .replace(/^[ \t]*privacy_policy_accepted[ \t]*=[ \t]*true[ \t]*\r?\n?/m, "")
+                      .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
+                      .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
                     fs.writeFileSync(p, stripped + 'close_action = "minimize"\n', "utf8");
                     return;
                   }
                   const stripped = text
                     .replace(/^[ \t]*privacy_policy_accepted[ \t]*=[ \t]*true[ \t]*\r?\n?/m, "")
-                    .replace(/^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m, "");
+                    .replace(/^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m, "")
+                    .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
+                    .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
                   if (stripped === text)
                     throw new Error("隔离根 settings.toml 未含同意记录，无法构造未同意场景");
                   fs.writeFileSync(p, stripped, "utf8");
@@ -3944,10 +3998,16 @@ async function main() {
                     // （accepted=true + revision=1 → 新版 StaleRevision 重新
                     // 询问），不是剥离同意——观察窗口证明旧修订同意状态下
                     // 对预置业务数据零读取零写入。
-                    const downgraded = text.replace(
-                      /^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m,
-                      "privacy_policy_revision = 1\n",
-                    );
+                    // 2026-10-28：真实旧用户只有隐私政策同意、没有协议同意
+                    // 记录——协议两项一并剥离，验证新版本不会把旧记录当作
+                    // 已同意协议而放行。
+                    const downgraded = text
+                      .replace(
+                        /^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m,
+                        "privacy_policy_revision = 1\n",
+                      )
+                      .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
+                      .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
                     if (downgraded === text)
                       throw new Error("隔离根 settings.toml 未含修订号行，无法构造旧修订同意场景");
                     fs.writeFileSync(p, downgraded, "utf8");

@@ -567,6 +567,15 @@ def strip_rust_comments_and_strings(text):
 PRIVACY_REVISION_SOURCES = ("crates/tokenscope-core/src/settings.rs", "src/settings.rs")
 
 
+def extract_privacy_revision(source):
+    """从 Rust 源码提取共同同意修订号，忽略注释和字符串中的假声明。"""
+    match = re.search(
+        r"(?m)^(?:pub\s+)?const\s+PRIVACY_POLICY_REVISION\s*:\s*u8\s*=\s*(\d+)\s*;",
+        strip_rust_comments_and_strings(source),
+    )
+    return int(match.group(1)) if match else None
+
+
 def read_tag_privacy_revision(commit, root=ROOT):
     """从发布标签解引用到的源码读隐私修订号；两处历史路径都找不到常量
     时返回 None（由调用方决定是否拒绝登记）。"""
@@ -575,12 +584,9 @@ def read_tag_privacy_revision(commit, root=ROOT):
                                 capture_output=True, encoding="utf-8", check=False)
         if result.returncode:
             continue
-        match = re.search(
-            r"(?m)^(?:pub\s+)?const\s+PRIVACY_POLICY_REVISION\s*:\s*u8\s*=\s*(\d+)\s*;",
-            strip_rust_comments_and_strings(result.stdout),
-        )
-        if match:
-            return int(match.group(1))
+        revision = extract_privacy_revision(result.stdout)
+        if revision is not None:
+            return revision
     return None
 
 

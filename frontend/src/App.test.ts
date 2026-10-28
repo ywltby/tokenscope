@@ -183,6 +183,9 @@ function snapshot(phase: string, extra: Record<string, unknown> = {}) {
       title: "TokenScope 隐私政策",
       date: "2026 年 10 月 9 日",
       markdown: FULL_POLICY_MARKDOWN,
+      // 2026-10-28：同意按钮需要两份全文均可离线查看——测试桩提供协议
+      // 文本，否则按钮按设计禁用（另有用例专门覆盖缺失形态）。
+      terms: "# TokenScope 最终用户许可与免责协议\n\n测试用协议正文。\n",
     },
     ...extra,
   };

@@ -690,6 +690,18 @@ PR #52 CI 首跑与修复（2026-10-25）：
 
 **受测树与取证**：干净树 `df4a2c3` 构建 EXE `d5faf57304db80f4413d1e48ffdb3fc0dce4c31457de1909821efb829fbcdf0e`；五场景三连 **15/15 全绿**（preseeded 26/21/21、denied-ipc 6/6/6、accept-order 8/9/8、variants-corrupt 6/6/7、variants-close 7/7/7，最差单次之和 55 秒）；前端全量 877 项（含协议换行回归）、核心 293 项 + 壳 acceptance 70 项、clippy 双模式干净。
 
+### 用户协议更新后的重新同意（2026-10-28，用户决定）
+
+用户决定：**用户许可协议更新后，所有用户必须明确同意新版协议才能进入应用。** 共同同意修订号由 2 升为 3，同意记录新增协议同意字段；实现与验证记录见 [2026-10-28-consent-updates](2026-10-28-consent-updates.md) 的执行记录。要点：
+
+- 旧记录只有隐私政策同意（即使修订号更高）不再视为已同意——`read_consent` 返回 `StaleRevision`，启动只显示同意弹窗；
+- 一次点击同时确认隐私政策与用户许可协议，四项同一次原子保存；界面明确写出两份文件，协议可离线展开；
+- 版本守卫：`docs/privacy.md` 或 `docs/terms.md` 变化而未提高共同同意修订号时，`bump_version.py --check` 拒绝（避免只改文本忘记触发重新确认）；
+- **0.6.0 历史基线保持 revision 2 不回改**；0.6.0→本版的真实单跳在 PR 的 Install test 执行，连续两条链在合并后 Release 执行；
+- 本地验证：核心 300 / 壳 70 / 前端 879 / 升级契约 80 / 升级脚本 34 / bump 35 全绿；原生五场景三连 15/15 加 consent-gate、accept-restart、policy-update 三场景通过（受测 EXE `97c5cfec…`）。
+
+AC07 继续暂缓，N10 保持开放；本批不改变产品同步周期，也不新增价格线程探针。
+
 ### B2 合并与发布验收（2026-10-22）
 
 - [PR #31](https://github.com/ywltby/tokenscope/pull/31) 最终 HEAD `7664be9`，普通合并为 `c9de40ec3ded2485d2991079f209699ae6ff6107`；两父提交分别为最新 main `9c77cef` 与该 PR HEAD，合并文件树和已验证 HEAD 完全一致。AC03 / AC04 / AC05 分别提交 `6f50af1` / `16ec813` / `db43355`；局部峰谷费率展示修复 `4159633`、经批准的端口和 CI 契约登记 `317573e`、版本登记 `bfb01ed`、短路径取证补修 `7664be9` 各自独立。
