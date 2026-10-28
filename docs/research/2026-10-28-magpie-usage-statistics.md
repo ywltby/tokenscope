@@ -723,7 +723,7 @@ func (p Price) CostSplit(input, output, cacheRead, cacheWrite, cacheWrite1h int)
   `CallerKeyLabel`、`ComputerName`。
 - **上报接口** `POST /v1/magpie/usage/requests`：外部客户端把「自己直连厂商、magpie 没看到」的调用
   报进来（`SourceReported`），可带 `cost`（`OwnCost`）。这类记录**只进 Usage 页**（§4）。
-- **CSV**（`ledger.go:568-623`）：44 列固定表头，`cost_usd` 保留 6 位小数、未知价留空；
+- **CSV**（`ledger.go:568-623`）：47 列固定表头，`cost_usd` 保留 6 位小数、未知价留空；
   另有 `cache_write_5m_tokens` / `cache_write_1h_tokens` 拆分列。
 - **OTLP**（`internal/otlp/otel.go:37-49`）：仅在插件开启时导出；队列 128、批 32，
   「整包 body 额外限 16 MB」；未开启时内核完全不导出。这就是包注释里那句「Metadata leaves the
@@ -818,7 +818,7 @@ func (p Price) CostSplit(input, output, cacheRead, cacheWrite, cacheWrite1h int)
 
 | agent | 接入（`internal/agent`） | 本地会话统计（`internal/sessions`） | 备注 |
 | --- | --- | --- | --- |
-| Claude Code (`claude`) | 是 | 是（`projects/**/*.jsonl`） | 唯一有 `cache_creation` 5m/1h 拆分与 `identity.modelId` |
+| Claude Code (`claude`) | 是 | 是（`projects/**/*.jsonl`） | 会话文件侧唯一有 `cache_creation` 5m/1h 拆分与 `identity.modelId` 的 agent |
 | Claude Desktop / Cowork (`claude-desktop`) | 是 | 是（各自 `.claude` 目录） | 通过 `entrypoint == "claude-desktop"` 与 CLI 区分 |
 | Codex (`codex`) | 是 | 是（rollout+压缩） | 有 `response_id`，配对最强 |
 | Gemini CLI | 是 | 否 | 无法从文件读用量（**未验证**是否有其他路径） |
