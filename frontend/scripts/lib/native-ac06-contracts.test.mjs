@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "vitest";
 import { changedBusinessFiles, settingsFingerprint, snapshotBusinessFiles } from "./acceptance-io.mjs";
+import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "smol-toml";
 import { parseTOML } from "toml-eslint-parser";
 import { withTimeout as realWithTimeout, spawnSyncBounded as realSpawnSyncBounded } from "./native-scenario.mjs";
@@ -17,7 +18,7 @@ const source = fs.readFileSync(new URL("../native-acceptance.mjs", import.meta.u
 
 /** 从受测源码抽取顶层辅助函数并绑定依赖——回归测试执行的是**受测实现**
  * 本身（九/十七轮教训：桩/复刻替代实现会让回退不可见）。 */
-const HELPER_DEP_NAMES = ["fs", "path", "readAcceptanceTrace", "snapshotBusinessFiles", "changedBusinessFiles", "spawnSyncBounded"];
+const HELPER_DEP_NAMES = ["fs", "path", "REPO", "readAcceptanceTrace", "snapshotBusinessFiles", "changedBusinessFiles", "spawnSyncBounded"];
 function extractHelper(name, deps) {
   const start = source.indexOf(`function ${name}`);
   assert.ok(start >= 0, `辅助函数未找到：${name}`);
@@ -39,6 +40,7 @@ function extractHelper(name, deps) {
   return new Function(...HELPER_DEP_NAMES, `return ${source.slice(start, end)};`)(
     deps.fs,
     deps.path,
+    deps.REPO,
     deps.readAcceptanceTrace,
     deps.snapshotBusinessFiles,
     deps.changedBusinessFiles,
@@ -64,6 +66,7 @@ function realSnapshotDataDir(dataDir) {
     business: snapshotBusinessFiles(dataDir),
     settings: {
       text: stat ? fs.readFileSync(settingsPath, "utf8") : null,
+      bytesHex: stat ? fs.readFileSync(settingsPath).toString("hex") : null,
       size: stat ? stat.size : null,
       mtimeMs: stat ? stat.mtimeMs : null,
     },
@@ -132,6 +135,7 @@ test("preseeded: 实际观察满 15 秒且文件未变才通过（单调起止 +
         prelaunchBusinessFiles: snapshotBusinessFiles(dataDir),
         prelaunchSettings: {
           text: fs.readFileSync(path.join(dataDir, "settings.toml"), "utf8"),
+          bytesHex: fs.readFileSync(path.join(dataDir, "settings.toml")).toString("hex"),
           size: fs.statSync(path.join(dataDir, "settings.toml")).size,
           mtimeMs: fs.statSync(path.join(dataDir, "settings.toml")).mtimeMs,
         },
@@ -173,6 +177,7 @@ test("preseeded: 没有实际观察窗口不得通过（约 1 秒结束的老缺
         prelaunchBusinessFiles: snapshotBusinessFiles(dataDir),
         prelaunchSettings: {
           text: fs.readFileSync(path.join(dataDir, "settings.toml"), "utf8"),
+          bytesHex: fs.readFileSync(path.join(dataDir, "settings.toml")).toString("hex"),
           size: fs.statSync(path.join(dataDir, "settings.toml")).size,
           mtimeMs: fs.statSync(path.join(dataDir, "settings.toml")).mtimeMs,
         },
@@ -219,6 +224,7 @@ test("preseeded: 观察窗口内修改/新增/删除业务文件，采集→比�
         prelaunchBusinessFiles: snapshotBusinessFiles(dataDir),
         prelaunchSettings: {
           text: fs.readFileSync(path.join(dataDir, "settings.toml"), "utf8"),
+          bytesHex: fs.readFileSync(path.join(dataDir, "settings.toml")).toString("hex"),
           size: fs.statSync(path.join(dataDir, "settings.toml")).size,
           mtimeMs: fs.statSync(path.join(dataDir, "settings.toml")).mtimeMs,
         },
@@ -264,6 +270,7 @@ test("preseeded: 观察窗口内改写 settings.toml 必须失败", async () => 
         prelaunchBusinessFiles: snapshotBusinessFiles(dataDir),
         prelaunchSettings: {
           text: fs.readFileSync(path.join(dataDir, "settings.toml"), "utf8"),
+          bytesHex: fs.readFileSync(path.join(dataDir, "settings.toml")).toString("hex"),
           size: fs.statSync(path.join(dataDir, "settings.toml")).size,
           mtimeMs: fs.statSync(path.join(dataDir, "settings.toml")).mtimeMs,
         },
@@ -1653,26 +1660,81 @@ test("denied-ipc：零追踪 + 文件未变保持通过（守护）", async () =
 // 计划要求：有效 SQLite 历史库及 WAL/SHM、两份价格快照、settings 含旧
 // 修订布尔同意。旧夹具写普通文本（非 SQLite）、单份快照、无同意字段。
 
-test("preseeded 夹具：SQLite 历史库 + WAL/SHM + 两份价格快照", async () => {
+test("preseeded 夹具：产品 schema SQLite 历史库 + WAL/SHM + 两份含 synced_at 的价格快照", async () => {
+  // 十八轮复核：夹具必须**产品可用**——HistoryDb::open 的 v1 迁移可执行
+  // （usage_events 含 ts_seconds 等产品列）、价格快照含 synced_at。建表
+  // SQL 由场景实现从 history.rs 的 SCHEMA_V1 提取（单一事实源）。
   const preseedBusinessFiles = extractHelper("preseedBusinessFiles", {
     fs,
     path,
+    REPO: path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.."),
     spawnSyncBounded: realSpawnSyncBounded,
   });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tokenscope-preseed-fixture-"));
   try {
     preseedBusinessFiles(dir);
     const db = fs.readFileSync(path.join(dir, "history.db"));
-    assert.ok(db.length > 100, `SQLite 库过小：${db.length} 字节`);
+    assert.ok(db.length > 1000, `SQLite 库过小：${db.length} 字节`);
     assert.equal(db.subarray(0, 16).toString("utf8"), "SQLite format 3\0", "history.db 必须是有效 SQLite 文件");
     for (const name of ["history.db-wal", "history.db-shm"]) {
       assert.ok(fs.existsSync(path.join(dir, name)), `缺少 ${name}`);
     }
+    // 产品列存在性（Python sqlite3 校验——十八轮探针同口径）。
+    const checkScript = [
+      "import sqlite3, sys, json",
+      "con = sqlite3.connect(sys.argv[1])",
+      "cols = [r[1] for r in con.execute('PRAGMA table_info(usage_events)')]",
+      "print(json.dumps({'cols': cols, 'rows': con.execute('SELECT COUNT(*) FROM usage_events').fetchone()[0], 'user_version': con.execute('PRAGMA user_version').fetchone()[0]}))",
+    ].join("; ");
+    const { execFileSync } = await import("node:child_process");
+    const check = JSON.parse(
+      execFileSync("python", ["-c", checkScript, path.join(dir, "history.db")], { encoding: "utf8" }),
+    );
+    for (const column of ["ts_seconds", "ts_nanos", "model_identity", "event_key", "observed_at_utc", "parser_revision"]) {
+      assert.ok(check.cols.includes(column), `usage_events 缺产品列 ${column}`);
+    }
+    assert.equal(check.rows, 3);
+    assert.equal(check.user_version, 1);
     for (const name of ["pricing-modelsdev.json", "pricing-openrouter.json"]) {
       const snapshot = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8"));
-      assert.ok(snapshot && typeof snapshot === "object", `${name} 必须是 JSON 快照`);
+      assert.ok(snapshot.synced_at, `${name} 缺 synced_at`);
+      assert.ok(Array.isArray(snapshot.entries) && snapshot.entries.length > 0, `${name} 缺条目`);
+      assert.ok(snapshot.entries[0].input != null || snapshot.entries[0].prompt != null, `${name} 条目缺价格`);
     }
   } finally {
     fs.rmSync(dir, { recursive: true });
   }
+});
+
+// ── 十八轮复核 P2：settings 快照必须逐字节（宽松解码会掩盖非法字节改写）──
+
+test("十八轮：settings 非法字节改写（同 size/mtime、无追踪）必须被字节快照检出", async () => {
+  // 构造：before 为合法 UTF-8；mutator 写入不同非法字节但 size/mtime 保持
+  // ——text 宽松解码后两者可能同串，只有字节快照能区分。
+  const dataDir = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), "tokenscope-byte-snap-")),
+    "tokenscope",
+  );
+  fs.mkdirSync(dataDir, { recursive: true });
+  const target = path.join(dataDir, "settings.toml");
+  fs.writeFileSync(target, Buffer.from("price_auto_sync = false\n", "utf8"));
+  const before = realSnapshotDataDir(dataDir);
+  const stat = fs.statSync(target);
+  // 写入不同非法字节（与原文同 size：把一个 ASCII 换成多字节非法序列再
+  // 补齐大小），mtime 保持原值。
+  const evil = Buffer.concat([
+    Buffer.from("price_auto_sync = fals", "utf8"),
+    Buffer.from([0xc3, 0x28]), // 非法 UTF-8 序列
+    Buffer.from("e\n", "utf8"),
+  ]);
+  fs.writeFileSync(target, evil);
+  fs.utimesSync(target, stat.mtime, stat.mtime);
+  const after = realSnapshotDataDir(dataDir);
+  const changes = realDataDirChanges(before, after);
+  assert.ok(
+    changes.includes("settings.toml"),
+    `字节快照必须检出非法字节改写：${JSON.stringify({ before: before.settings, after: after.settings })}`,
+  );
+  // 且快照值本身逐字节可辨（不是宽松解码后的同串）。
+  assert.notEqual(before.settings.bytesHex, after.settings.bytesHex);
 });

@@ -56,9 +56,17 @@ const blocks = computed(() => renderPolicyMarkdown(props.policy.markdown));
           <h3 v-else-if="block.type === 'h2'" class="privacy-h2">{{ block.text }}</h3>
           <h4 v-else-if="block.type === 'h3'" class="privacy-h3">{{ block.text }}</h4>
           <ul v-else-if="block.type === 'ul'" class="privacy-ul">
-            <li v-for="(item, i) in block.items" :key="i">{{ item }}</li>
+            <li v-for="(item, i) in block.items" :key="i">
+              <template v-for="(line, j) in item.split('\n')" :key="j">
+                <br v-if="j > 0" />{{ line }}
+              </template>
+            </li>
           </ul>
-          <p v-else class="privacy-p">{{ block.text }}</p>
+          <p v-else class="privacy-p">
+            <template v-for="(line, i) in block.text.split('\n')" :key="i">
+              <br v-if="i > 0" />{{ line }}
+            </template>
+          </p>
         </template>
       </div>
       <div v-if="message" class="privacy-error" role="alert">

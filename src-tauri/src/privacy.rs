@@ -494,6 +494,17 @@ pub fn phase_of(app: &AppHandle) -> Phase {
         .unwrap_or(Phase::Checking)
 }
 
+/// 政策日期可能以 Markdown 硬换行标记结尾；保留转义后的字面反斜杠。
+fn policy_date_text(raw: &str) -> &str {
+    let date = raw.trim();
+    let slashes = date.bytes().rev().take_while(|byte| *byte == b'\\').count();
+    if slashes % 2 == 1 {
+        date[..date.len() - 1].trim_end()
+    } else {
+        date
+    }
+}
+
 fn policy_info() -> PolicyInfo {
     static CACHE: std::sync::OnceLock<PolicyInfo> = std::sync::OnceLock::new();
     CACHE
@@ -508,7 +519,7 @@ fn policy_info() -> PolicyInfo {
                     continue;
                 }
                 if let Some(rest) = line.strip_prefix("更新日期：") {
-                    date = rest.trim().to_string();
+                    date = policy_date_text(rest).to_string();
                 }
             }
             PolicyInfo {
@@ -1256,6 +1267,19 @@ mod tests {
 
     // ── 命令覆盖（新增命令漏门的防线）────────────────────────
 
+    #[test]
+    fn privacy_policy_date_strips_only_a_hard_break_marker() {
+        assert_eq!(
+            policy_date_text(" 2026 年 10 月 28 日\\ "),
+            "2026 年 10 月 28 日"
+        );
+        assert_eq!(
+            policy_date_text("2026 年 10 月 28 日"),
+            "2026 年 10 月 28 日"
+        );
+        assert_eq!(policy_date_text(r"literal\\"), r"literal\\");
+    }
+
     /// 打包政策与源文件一致：`include_str!` 直接指向 `docs/privacy.md`，
     /// 因此"打包进程序的那一份"就是源文件；这里守住逐字一致、关键章节
     /// 与日期解析，防止有人另写一份会漂移的政策副本。
@@ -1272,6 +1296,11 @@ mod tests {
         let policy = policy_info();
         assert_eq!(policy.title, "TokenScope 隐私政策");
         assert!(!policy.date.is_empty(), "政策日期必须可解析");
+        assert!(
+            !policy.date.ends_with('\\'),
+            "政策日期不应包含 Markdown 换行标记：{:?}",
+            policy.date
+        );
         for section in [
             "## 一、适用范围",
             "## 二、读取的数据及用途",

@@ -454,6 +454,9 @@ class Instance {
       : null;
     this.prelaunchSettings = {
       text: prelaunchStat ? fs.readFileSync(prelaunchSettingsPath, "utf8") : null,
+      bytesHex: prelaunchStat
+        ? fs.readFileSync(prelaunchSettingsPath).toString("hex")
+        : null,
       size: prelaunchStat ? prelaunchStat.size : null,
       mtimeMs: prelaunchStat ? prelaunchStat.mtimeMs : null,
     };
@@ -1514,20 +1517,33 @@ function preseedBusinessFiles(dataDir) {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, text, "utf8");
   };
-  // 有效 SQLite 历史库：Runner 自带 Python 标准库 sqlite3 生成（Node 侧
-  // 无稳定 sqlite 模块）。脚本末尾不 close 连接——解释器退出时 WAL/SHM
-  // 以残留形态留在盘上（与"业务数据躺在盘上"的真实形态一致）。
+  // 有效 SQLite 历史库（十八轮复核 P2：必须是**产品 schema**——旧夹具
+  // 缺 ts_seconds 等列，HistoryDb::open 的 v1 迁移直接报错）。建表 SQL
+  // 从 crates/tokenscope-core/src/history.rs 的 SCHEMA_V1 常量提取
+  // （单一事实源，不双份维护），user_version=1 + 三行完整列事件。
+  // 脚本末尾不 close 连接——解释器退出时 WAL/SHM 以残留形态留在盘上
+  // （与"业务数据躺在盘上"的真实形态一致）。
+  const historySource = fs.readFileSync(
+    path.join(REPO, "crates", "tokenscope-core", "src", "history.rs"),
+    "utf8",
+  );
+  const schemaStart = historySource.indexOf('const SCHEMA_V1: &str = r"');
+  if (schemaStart < 0) throw new Error("history.rs 缺少 SCHEMA_V1 常量");
+  const sqlStart = schemaStart + 'const SCHEMA_V1: &str = r"'.length;
+  const sqlEnd = historySource.indexOf('"', sqlStart);
+  const schemaV1 = historySource.slice(sqlStart, sqlEnd);
   const seedScript = [
     "import sqlite3, sys",
     "con = sqlite3.connect(sys.argv[1])",
     "con.execute('PRAGMA journal_mode=WAL')",
-    "con.execute('CREATE TABLE IF NOT EXISTS usage_events(app TEXT, session_id TEXT, record_id TEXT, model_raw TEXT, project_key TEXT, session_initial_cwd TEXT, event_cwd TEXT, input_tokens TEXT, output_tokens TEXT, cache_write_tokens TEXT, cache_read_tokens TEXT)')",
-    "con.executemany('INSERT INTO usage_events VALUES(?,?,?,?,?,?,?,?,?,?,?)', [('claude-code', 'ac06-session', f'rec-{i}', 'claude-sonnet-4-5', '/ac06/project', '/ac06/project', '/ac06/project', '10', '20', '0', '5') for i in range(3)])",
+    "con.executescript(sys.argv[2])",
+    "con.execute('PRAGMA user_version=1')",
+    "con.executemany('INSERT INTO usage_events(event_key,app,ts_seconds,ts_nanos,model_raw,model_identity,identity_revision,session_id,record_id,project_key,session_initial_cwd,event_cwd,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,origin_rank,observed_at_utc,observed_at_seconds,observed_at_nanos,parser_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [('ac06-session:rec-'+str(i), 'claude-code', 1761580000+i, 0, 'claude-sonnet-4-5', 'claude-sonnet-4-5', 1, 'ac06-session', 'rec-'+str(i), '/ac06/project', '/ac06/project', '/ac06/project', '10', '20', '0', '5', 1, '2026-10-27T00:00:0'+str(i)+'Z', 1761580000+i, 0, 2) for i in range(3)])",
     "con.commit()",
     "import os",
     "os._exit(0)",
   ].join("; ");
-  const result = spawnSyncBounded("python", ["-c", seedScript, path.join(dataDir, "history.db")], {
+  const result = spawnSyncBounded("python", ["-c", seedScript, path.join(dataDir, "history.db"), schemaV1], {
     action: "preseed-sqlite",
     stage: "preseed-sqlite",
   });
@@ -1536,8 +1552,44 @@ function preseedBusinessFiles(dataDir) {
   }
   writeFile("logs/ac06-preseeded.log", "ac06-preseeded-log\n");
   writeFile("view-cache.json", '{"ac06":"preseeded"}\n');
-  writeFile("pricing-modelsdev.json", '{"ac06":"preseeded"}\n');
-  writeFile("pricing-openrouter.json", '{"ac06":"preseeded"}\n');
+  // 十八轮复核：两份价格快照按产品加载器格式生成（synced_at 必填；
+  // modelsdev 的 input/output/cache_* 与 openrouter 的 prompt/completion/
+  // cache_* 各按自身结构）。
+  const syncedAt = "2026-10-27T00:00:00+08:00";
+  writeFile(
+    "pricing-modelsdev.json",
+    JSON.stringify({
+      v: 2,
+      synced_at: syncedAt,
+      entries: [
+        {
+          id: "claude-code/claude-sonnet-4-5",
+          name: null,
+          input: 3.0,
+          output: 15.0,
+          cache_read: 0.3,
+          cache_write: 3.75,
+        },
+      ],
+    }) + "\n",
+  );
+  writeFile(
+    "pricing-openrouter.json",
+    JSON.stringify({
+      v: 2,
+      synced_at: syncedAt,
+      entries: [
+        {
+          id: "claude-sonnet-4-5",
+          name: null,
+          prompt: 3.0,
+          completion: 15.0,
+          cache_read: 0.3,
+          cache_write: 3.75,
+        },
+      ],
+    }) + "\n",
+  );
 }
 
 /** AC06：业务文件与设置的双重快照。十七轮复核 P2：settings 附带
@@ -1550,6 +1602,11 @@ function snapshotDataDir(dataDir) {
     business: snapshotBusinessFiles(dataDir),
     settings: {
       text: stat ? fs.readFileSync(settingsPath, "utf8") : null,
+      // 十八轮复核 P2：字节快照（hex）——宽松解码会把非法字节变 U+FFFD，
+      // 同 size/mtime 的非法字节改写在 text/size/mtime 上不可辨。
+      bytesHex: stat
+        ? fs.readFileSync(settingsPath).toString("hex")
+        : null,
       size: stat ? stat.size : null,
       mtimeMs: stat ? stat.mtimeMs : null,
     },
