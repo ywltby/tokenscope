@@ -60,6 +60,25 @@ describe("隐私弹窗：协议离线入口（十九轮 P2）", () => {
     expect(toggle.text()).toContain("收起用户许可协议");
   });
 
+  it("协议区硬换行不被折叠为同一段落（br 分段）", async () => {
+    // 二十轮复核 P3：协议区直接输出文本，浏览器把换行当普通空白折叠，
+    // 「更新日期 / 生效日期 / 适用范围」挤在同一段；政策区已正确分行。
+    const { terms: _t, ...rest } = POLICY;
+    const lines = [
+      "# 协议",
+      "",
+      "更新日期：2026 年 10 月 28 日\\",
+      "生效日期：2026 年 10 月 28 日\\",
+      "适用范围：示例。",
+      "",
+    ];
+    const wrapper = mountDialog({ ...rest, terms: lines.join("\n") });
+    await wrapper.find(".privacy-terms-toggle").trigger("click");
+    const paragraph = wrapper.findAll(".privacy-terms p").at(-1);
+    expect(paragraph).toBeTruthy();
+    expect(paragraph!.findAll("br").length).toBe(2);
+  });
+
   it("协议内容只作为文本渲染：不产生可点击外链", async () => {
     const wrapper = mountDialog(POLICY);
     await wrapper.find(".privacy-terms-toggle").trigger("click");

@@ -82,9 +82,17 @@ const termsOpen = ref(false);
             {{ block.text }}
           </h4>
           <ul v-else-if="block.type === 'ul'" class="privacy-ul">
-            <li v-for="(item, j) in block.items || []" :key="j">{{ item }}</li>
+            <li v-for="(item, j) in block.items || []" :key="j">
+              <template v-for="(line, k) in item.split('\n')" :key="k">
+                <br v-if="k > 0" />{{ line }}
+              </template>
+            </li>
           </ul>
-          <p v-else class="privacy-p">{{ block.text }}</p>
+          <p v-else class="privacy-p">
+            <template v-for="(line, k) in block.text.split('\n')" :key="k">
+              <br v-if="k > 0" />{{ line }}
+            </template>
+          </p>
         </template>
       </div>
       <div v-if="message" class="privacy-error" role="alert">

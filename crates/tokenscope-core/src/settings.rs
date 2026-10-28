@@ -365,10 +365,19 @@ fn acquire_write_lock() -> Result<MutexGuard<'static, ()>> {
 /// 不落盘，原文件字节不动。并发的外部编辑器不受本进程锁约束（写入冲突
 /// 由原子替换兜底为"整文件生效其一"，不做字段级合并）。
 pub fn update<T>(path: &Path, mutate: impl FnOnce(&mut Settings) -> Result<T>) -> Result<T> {
+    update_with_origin(path, "settings_update", mutate)
+}
+
+/// 带来源标记的 [`update`]：只给需要区分的写者使用（隐私同意保存等）。
+pub fn update_with_origin<T>(
+    path: &Path,
+    origin: &'static str,
+    mutate: impl FnOnce(&mut Settings) -> Result<T>,
+) -> Result<T> {
     let _guard = acquire_write_lock()?;
     let mut s = load(path)?;
     let out = mutate(&mut s)?;
-    save_unlocked(path, &s)?;
+    save_unlocked(path, &s, origin)?;
     Ok(out)
 }
 
@@ -460,7 +469,7 @@ pub fn read_consent(path: &Path) -> ConsentRead {
 /// 失败（解析/写入/锁污染）不落盘也不改内存值：调用方必须保持闸门关闭。
 /// 遗留 json 的迁移只在这里发生（用户已明确同意之后）。
 pub fn accept_privacy_policy(path: &Path) -> Result<()> {
-    update(path, |s| {
+    update_with_origin(path, "privacy_consent", |s| {
         // WB05：同意与修订号必须同一次原子保存——只写 true 不写修订号的
         // 中间状态会被下一次读取判为旧修订、重新询问。
         s.privacy_policy_accepted = true;
@@ -500,7 +509,7 @@ pub const SETTINGS_TEMPLATE: &str = "\
 #     没有该行的旧同意视为修订 1（升级后同样触发重新询问）。
 #
 # price_auto_sync = true | false
-#     价格自动同步（默认开启，每 24h 检查一次；关闭后完全不联网）。
+#     价格自动同步（默认开启，每 24h 检查一次；关闭后仅停止自动同步，仍可手动联网更新价格）。
 #
 # close_action = \"minimize\" | \"quit\"
 #     点击窗口关闭按钮的默认动作：minimize = 最小化到托盘；quit = 直接退出。
@@ -850,7 +859,7 @@ pub fn migrate_source_paths_with(
     if let Some(cfg) = new_codex {
         settings.sources.codex = Some(cfg);
     }
-    save_unlocked(path, &settings)?;
+    save_unlocked(path, &settings, "source_path_migration")?;
     log::info!(
         "来源目录迁移完成：{} 个旧 dir 转为追加项并开启自动发现",
         converted.len()
@@ -949,7 +958,7 @@ pub fn ensure_toml(path: &Path) -> Result<()> {
     let had_legacy = legacy_json_path(path).is_some_and(|p| p.exists());
     if had_legacy {
         let s = load(path)?;
-        return save_unlocked(path, &s);
+        return save_unlocked(path, &s, "settings_legacy_migration");
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
@@ -957,13 +966,20 @@ pub fn ensure_toml(path: &Path) -> Result<()> {
     crate::fsutil::atomic_write(path, SETTINGS_TEMPLATE.as_bytes())
         .with_context(|| format!("写设置模板失败: {}", path.display()))?;
     #[cfg(feature = "acceptance")]
-    crate::acceptance::record_path("settings_write", path, serde_json::json!({}))?;
+    crate::acceptance::record_path(
+        "settings_write",
+        path,
+        serde_json::json!({"origin": "settings_template"}),
+    )?;
     Ok(())
 }
 
 /// 私有底层写入：调用方必须已持有写锁（[`update`] / [`ensure_toml`]）。
 /// 不设公有 save——防止绕过事务读改写或递归加锁。
-fn save_unlocked(path: &Path, s: &Settings) -> Result<()> {
+///
+/// `origin`：写入来源（二十轮复核 P2）——验收追踪据此区分「同意保存」
+/// 与「业务初始化」等写入，而不是只按时间顺序猜测归属。
+fn save_unlocked(path: &Path, s: &Settings, origin: &'static str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
     }
@@ -972,7 +988,14 @@ fn save_unlocked(path: &Path, s: &Settings) -> Result<()> {
     crate::fsutil::atomic_write(path, body.as_bytes())
         .with_context(|| format!("写设置失败: {}", path.display()))?;
     #[cfg(feature = "acceptance")]
-    crate::acceptance::record_path("settings_write", path, serde_json::json!({}))?;
+    crate::acceptance::record_path(
+        "settings_write",
+        path,
+        serde_json::json!({"origin": origin}),
+    )?;
+    // origin 只用于验收追踪；普通构建保持参数不参与（显式消费避免警告）。
+    #[cfg(not(feature = "acceptance"))]
+    let _ = origin;
     if let Some(legacy) = legacy_json_path(path)
         && legacy.exists()
     {
@@ -1020,7 +1043,7 @@ mod tests {
                 workbuddy_ai: None,
             },
         };
-        save_unlocked(&path, &s).unwrap();
+        save_unlocked(&path, &s, "test").unwrap();
         assert_eq!(load(&path).unwrap(), s);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -1032,13 +1055,13 @@ mod tests {
             close_action: Some(CloseAction::Quit),
             ..s.clone()
         };
-        save_unlocked(&path, &s2).unwrap();
+        save_unlocked(&path, &s2, "test").unwrap();
         assert_eq!(load(&path).unwrap(), s2);
         let s3 = Settings {
             close_action: None,
             ..s2.clone()
         };
-        save_unlocked(&path, &s3).unwrap();
+        save_unlocked(&path, &s3, "test").unwrap();
         assert_eq!(load(&path).unwrap(), s3);
         assert!(
             !std::fs::read_to_string(&path)
@@ -1051,7 +1074,7 @@ mod tests {
     #[test]
     fn test_save_writes_comment_header_and_template_parses() {
         let path = tmp("header");
-        save_unlocked(&path, &Settings::default()).unwrap();
+        save_unlocked(&path, &Settings::default(), "test").unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
             text.starts_with('#'),
@@ -1100,7 +1123,7 @@ mod tests {
         std::fs::write(dir.join("settings.json"), r#"{"price_auto_sync": false}"#).unwrap();
         let toml_path = dir.join("settings.toml");
         let s = load(&toml_path).unwrap();
-        save_unlocked(&toml_path, &s).unwrap();
+        save_unlocked(&toml_path, &s, "test").unwrap();
         assert!(toml_path.exists());
         assert!(
             !dir.join("settings.json").exists(),
@@ -1559,7 +1582,7 @@ mod tests {
             collect_interval_secs: Some(30),
             ..Default::default()
         };
-        save_unlocked(&path, &s).unwrap();
+        save_unlocked(&path, &s, "test").unwrap();
         assert_eq!(load(&path).unwrap().collect_interval_secs, Some(30));
         assert!(
             std::fs::read_to_string(&path)
@@ -1567,7 +1590,7 @@ mod tests {
                 .contains("collect_interval_secs = 30"),
             "显式值必须落盘"
         );
-        save_unlocked(&path, &Settings::default()).unwrap();
+        save_unlocked(&path, &Settings::default(), "test").unwrap();
         assert!(
             !std::fs::read_to_string(&path)
                 .unwrap()

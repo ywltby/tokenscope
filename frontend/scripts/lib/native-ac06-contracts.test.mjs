@@ -383,7 +383,7 @@ function runAcceptOrderScenario(options = {}) {
     ];
   const settingsWriteRow = {
     seq: 0,
-    event: "settings_write",
+    event: "settings_write", origin: "privacy_consent",
     path: "C:/synthetic-root/tokenscope/settings.toml",
   };
   const traceRecords = records
@@ -603,7 +603,7 @@ const ORDER_SETTINGS = "privacy_policy_accepted = true\nprivacy_policy_revision 
 
 test("accept-order: 同意 → 解锁 → 首读严格成序且指纹一致才通过", async () => {
   const records = [
-    { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
     ...consentRecords(ORDER_SETTINGS),
     { seq: 2, event: "business_ready" },
     { seq: 3, event: "history_open" },
@@ -622,7 +622,7 @@ test("accept-order: 同意 → 解锁 → 首读严格成序且指纹一致才�
 test("accept-order: business_ready 早于 consent_saved 必须失败", async () => {
   const records = [
     { seq: 1, event: "business_ready" },
-    { seq: 2, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 2, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
     ...consentRecords(ORDER_SETTINGS).map((row) => ({ ...row, seq: 3 })),
     { seq: 4, event: "history_open" },
   ];
@@ -634,7 +634,7 @@ test("accept-order: business_ready 早于 consent_saved 必须失败", async () 
 
 test("accept-order: consent_saved 整条缺失必须失败", async () => {
   const records = [
-    { seq: 1, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 1, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
     { seq: 2, event: "business_ready" },
     { seq: 3, event: "history_open" },
   ];
@@ -646,7 +646,7 @@ test("accept-order: consent_saved 整条缺失必须失败", async () => {
 
 test("accept-order: 同意保存指纹畸形（算法/位数不符）必须失败", async () => {
   const records = [
-    { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
     {
       seq: 1,
       event: "consent_saved",
@@ -666,11 +666,11 @@ test("accept-order: 业务期规范化重写（终态字节≠保存时）不算
   // 完整来源段）。判定只看保存时的不可变字节证据（重算哈希 + 内容解析），
   // 不与终态字节比对——终态文本已变为重写后形态，仍必须通过。
   const records = [
-    { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
     ...consentRecords(ORDER_SETTINGS),
     { seq: 2, event: "business_ready" },
     { seq: 3, event: "history_open" },
-    { seq: 4, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 4, event: "settings_write", origin: "source_path_migration", path: "C:/synthetic-root/tokenscope/settings.toml" },
   ];
   const rewritten = "# TokenScope 设置文件（业务期重写后形态）\n" + ORDER_SETTINGS;
   const { checks } = await runAcceptOrder({ records, settingsText: rewritten });
@@ -690,7 +690,7 @@ function runAcceptOrderClicks({ deliveredClicks, gapMs, failSecondDispatch, reco
 
 function orderedRecords() {
   return [
-    { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
     ...consentRecords(ORDER_SETTINGS),
     { seq: 2, event: "business_ready" },
     { seq: 3, event: "history_open" },
@@ -811,7 +811,7 @@ test("autostart 路由：只有读没有写（set 未真正生效）必须失败
 // 「0000000000000000 vs 0acec52d49477739」（复核方独立复现 13/13 全过）。
 
 const BASE_ROWS = () => [
-  { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+  { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
   { seq: 2, event: "business_ready" },
   { seq: 3, event: "history_open" },
 ];
@@ -897,7 +897,7 @@ test("字节证据：业务期合法重写（终态≠保存时字节）仍通�
     ...BASE_ROWS().slice(0, 1),
     ...consentRecords(ORDER_SETTINGS),
     ...BASE_ROWS().slice(1),
-    { seq: 4, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 4, event: "settings_write", origin: "source_path_migration", path: "C:/synthetic-root/tokenscope/settings.toml" },
   ];
   const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
   assert.deepEqual(
@@ -936,7 +936,7 @@ const CONTENT_BAD_CASES = [
 for (const bad of CONTENT_BAD_CASES) {
   test(`字节证据内容：${bad.label} 必须失败`, async () => {
     const records = [
-      { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+      { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
       {
         seq: 1,
         event: "consent_saved",
@@ -977,7 +977,7 @@ for (const bad of TYPE_BAD_CASES) {
       ? "privacy_policy_accepted = true\n" + bad.extra
       : "privacy_policy_accepted = true\nprivacy_policy_revision = 2\n" + bad.extra;
     const records = [
-      { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+      { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
       {
         seq: 1,
         event: "consent_saved",
@@ -1016,7 +1016,7 @@ for (const bad of BYTE_BAD_CASES) {
     const head = Buffer.from(bad.head);
     const bytes = Buffer.concat([head, Buffer.from("privacy_policy_accepted = true\nprivacy_policy_revision = 2\n", "utf8")]);
     const records = [
-      { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+      { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
       {
         seq: 1,
         event: "consent_saved",
@@ -1049,7 +1049,7 @@ for (const good of QUOTED_KEY_GOOD_CASES) {
   test(`字节证据：${good.label} 必须通过（P3 误拒修复）`, async () => {
     const text = good.acceptedLine + "privacy_policy_revision = 2\n";
     const records = [
-      { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+      { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
       ...consentRecords(text),
       { seq: 2, event: "business_ready" },
       { seq: 3, event: "history_open" },
@@ -1064,7 +1064,7 @@ test("字节证据：合法编码的 U+FFFD 字符必须通过（替换仅限非
   const head = Buffer.from("# replacement char \xef\xbf\xbd is fine\n", "binary");
   const bytes = Buffer.concat([head, Buffer.from("privacy_policy_accepted = true\nprivacy_policy_revision = 2\n", "utf8")]);
   const records = [
-    { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
     {
       seq: 1,
       event: "consent_saved",
@@ -1526,7 +1526,7 @@ const TERMINAL_BAD_CASES = [
 for (const bad of TERMINAL_BAD_CASES) {
   test(`终态判定：${bad.label} 必须失败`, async () => {
     const records = [
-      { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+      { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
       ...consentRecords(ORDER_SETTINGS),
       { seq: 2, event: "business_ready" },
       { seq: 3, event: "history_open" },
@@ -1626,7 +1626,7 @@ test("denied-ipc：settings_write 追踪在场必须判违规（不得被筛选�
     records: [
       {
         seq: 1,
-        event: "settings_write",
+        event: "settings_write", origin: "privacy_consent",
         path: "C:/synthetic-root/tokenscope/settings.toml",
       },
     ],
@@ -1751,9 +1751,9 @@ test("十九轮：consent_saved → 额外 settings_write → business_ready 必
   // 受控反例 review19-independent/extra-write-probe.json：旧判定只看同意前
   // 写入，该追踪 16 项全过。
   const records = [
-    { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
     ...consentRecords(ORDER_SETTINGS),
-    { seq: 2, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 2, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
     { seq: 3, event: "business_ready" },
     { seq: 4, event: "history_open" },
   ];
@@ -1763,21 +1763,76 @@ test("十九轮：consent_saved → 额外 settings_write → business_ready 必
   );
   assert.ok(extra, "缺少写入来源分层断言");
   assert.equal(extra.pass, false, "同意后解锁前的额外写入必须被拒");
-  assert.match(extra.detail, /额外写入=\[2\]/);
+  assert.match(extra.detail, /"seq":2/);
 });
 
 test("十九轮：业务初始化后的重写单独计为解锁后写入（不判失败）", async () => {
   const records = [
-    { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
     ...consentRecords(ORDER_SETTINGS),
     { seq: 2, event: "business_ready" },
-    { seq: 3, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 3, event: "settings_write", origin: "source_path_migration", path: "C:/synthetic-root/tokenscope/settings.toml" },
     { seq: 4, event: "history_open" },
   ];
-  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  const { ev, checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
   const extra = checks.find(
     (check) => check.name === "consent_save_is_the_only_write_before_business_unlock",
   );
   assert.ok(extra && extra.pass, JSON.stringify(extra));
-  assert.match(extra.detail, /解锁后（业务初始化）写入=\[3\]/);
+  // 解锁后的写入单独记入 evidence（含来源），不计入解锁前断言。
+  assert.deepEqual(ev.consentWriteLayers.afterReady, [
+    { seq: 3, origin: "source_path_migration" },
+  ]);
+});
+
+test("二十轮 P3：终态浮点修订号必须被拒（整数类型检查的守门回归）", async () => {
+  // 十九轮重写字节快照用例时误删了该回归——移除终态整数检查后现有回归
+  // 全绿而 2.0 被误放行（terminal-mutation-suite.log）。本用例恢复守门：
+  // 移除实现中的 kind === "integer" 检查即变红。
+  const records = [
+    { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    ...consentRecords(ORDER_SETTINGS),
+    { seq: 2, event: "business_ready" },
+    { seq: 3, event: "history_open" },
+  ];
+  const { checks } = await runAcceptOrder({
+    records,
+    settingsText: "privacy_policy_accepted = true\nprivacy_policy_revision = 2.0\n",
+  });
+  const terminal = checks.find((check) => check.name === "accept_writes_consent_with_revision");
+  assert.ok(terminal, "缺少终态判定断言");
+  assert.equal(terminal.pass, false, "终态浮点修订号必须被拒");
+  assert.match(terminal.detail, /revision kind=float/);
+});
+
+test("二十轮：解锁后出现两次同一来源写入必须失败（不得都归入业务初始化）", async () => {
+  // 受控反例 review20-independent/write-layers-result.json：注入两次解锁后
+  // 写入，旧判定按时间把它们都标成「业务初始化」而全过。
+  const records = [
+    { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    ...consentRecords(ORDER_SETTINGS),
+    { seq: 2, event: "business_ready" },
+    { seq: 3, event: "settings_write", origin: "source_path_migration", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 4, event: "settings_write", origin: "source_path_migration", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 5, event: "history_open" },
+  ];
+  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  const runtime = checks.find((check) => check.name === "runtime_writes_have_known_single_origin");
+  assert.ok(runtime, "缺少解锁后来源断言");
+  assert.equal(runtime.pass, false, "同一来源两次写入必须被拒");
+  assert.match(runtime.detail, /重复来源=\["source_path_migration"\]/);
+});
+
+test("二十轮：解锁后出现未知来源写入必须失败", async () => {
+  const records = [
+    { seq: 0, event: "settings_write", origin: "privacy_consent", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    ...consentRecords(ORDER_SETTINGS),
+    { seq: 2, event: "business_ready" },
+    { seq: 3, event: "settings_write", origin: "settings_update", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 4, event: "history_open" },
+  ];
+  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  const runtime = checks.find((check) => check.name === "runtime_writes_have_known_single_origin");
+  assert.equal(runtime.pass, false, "未知来源写入必须被拒");
+  assert.match(runtime.detail, /未知来源=\["settings_update"\]/);
 });

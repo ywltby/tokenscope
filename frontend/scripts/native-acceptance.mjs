@@ -3340,15 +3340,44 @@ const scenarios = {
       (seq) => seq > consentSeqs[0] && seq < readySeqs[0],
     );
     const writesAfterReady = settingsWriteSeqs.filter((seq) => seq > readySeqs[0]);
+    // 二十轮复核 P2：写入归属必须按**来源**（追踪事件自带的 origin），
+    // 不能只按时间把解锁后的全部写入都算作「业务初始化」——否则注入两次
+    // 解锁后写入仍会被归入同一类而全过。
+    const settingsWrites = trace.records.filter((r) => r.event === "settings_write");
+    const originOf = (seq) => settingsWrites.find((r) => r.seq === seq)?.origin ?? null;
+    const afterReadyOrigins = writesAfterReady.map(originOf);
+    // 允许出现在解锁后的业务初始化来源（每个至多一次）。
+    const ALLOWED_RUNTIME_WRITE_ORIGINS = ["source_path_migration", "business_init"];
+    const unknownRuntimeOrigins = afterReadyOrigins.filter(
+      (origin) => !ALLOWED_RUNTIME_WRITE_ORIGINS.includes(origin),
+    );
+    const duplicatedRuntimeOrigins = ALLOWED_RUNTIME_WRITE_ORIGINS.filter(
+      (origin) => afterReadyOrigins.filter((value) => value === origin).length > 1,
+    );
     ev.consentWriteLayers = {
-      beforeConsent: writesBeforeConsent,
-      betweenConsentAndReady: writesBetweenConsentAndReady,
-      afterReady: writesAfterReady,
+      beforeConsent: writesBeforeConsent.map((seq) => ({ seq, origin: originOf(seq) })),
+      betweenConsentAndReady: writesBetweenConsentAndReady.map((seq) => ({
+        seq,
+        origin: originOf(seq),
+      })),
+      afterReady: writesAfterReady.map((seq) => ({ seq, origin: originOf(seq) })),
     };
     ck.add(
       "consent_save_is_the_only_write_before_business_unlock",
       writesBetweenConsentAndReady.length === 0,
-      `同意后、解锁前额外写入=${JSON.stringify(writesBetweenConsentAndReady)}；解锁后（业务初始化）写入=${JSON.stringify(writesAfterReady)}`,
+      `同意后、解锁前额外写入=${JSON.stringify(ev.consentWriteLayers.betweenConsentAndReady)}`,
+    );
+    // 同意保存必须是来源为 privacy_consent 的那一次写入。
+    ck.add(
+      "consent_save_write_origin_is_privacy_consent",
+      writesBeforeConsent.length === 1 && originOf(writesBeforeConsent[0]) === "privacy_consent",
+      `同意前写入来源=${JSON.stringify(ev.consentWriteLayers.beforeConsent)}`,
+    );
+    // 解锁后的写入必须来自已知业务初始化来源，且每个来源至多一次。
+    ck.add(
+      "runtime_writes_have_known_single_origin",
+      unknownRuntimeOrigins.length === 0 && duplicatedRuntimeOrigins.length === 0,
+      `解锁后写入=${JSON.stringify(ev.consentWriteLayers.afterReady)}；未知来源=${JSON.stringify(unknownRuntimeOrigins)}；重复来源=${JSON.stringify(duplicatedRuntimeOrigins)}`,
     );
     // 严格 UTF-8 解码（五轮复核 P2：toString("utf8") 默认把坏字节替换成
     // U+FFFD，替换后的文本骗过两个解析器——注释中 FF、截断编码、过长编码、
