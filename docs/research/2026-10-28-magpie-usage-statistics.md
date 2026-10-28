@@ -311,10 +311,10 @@ OpenCode 的 store、agy 的 summary、WSL 发行版名）。`fileMore` 单独�
 | agent | 发现逻辑 | 位置 |
 | --- | --- | --- |
 | `claude` / `claude-desktop` | `<dir>/projects/<project>/<id>.jsonl`（`main: true`）+ `<id>/subagents/*.jsonl` + `<id>/subagents/workflows/<run>/agent-*.jsonl`（后两者的 key 都归到会话 id）；`journal.jsonl` 不是 transcript，不读 | `sessions.go:564-612` |
-| `codex` | 遍历 `CodexDirs()`（多个 `CODEX_HOME`，一个 ChatGPT 账号一个目录）下的 `sessions/` 与 `archived_sessions/`，用 `rolloutName` 正则取 id；同目录存在未压缩孪生时**优先明文**（压缩可能还没写 trailer） | `sessions.go:700-826` |
+| `codex` | 遍历 `CodexDirs()`（多个 `CODEX_HOME`，一个 ChatGPT 账号一个目录）下的 `sessions/` 与 `archived_sessions/`，用 `rolloutName` 正则取 id；同目录存在未压缩孪生时**优先明文**（压缩可能还没写 trailer）；最后 `distinctCodexFiles` 按流式内容比对去掉重复副本 | `sessions.go:700-826`、`codex_discovery.go:101-130` |
 | `opencode` | 有 DB 就按 DB（`session_v2`/`session_message` 或老的 `session`/`message`），否则 `storage/` 下的 JSON；`file.path` 用 `<dbpath>#<sid>` 或 `<…>/<sid>.json` 编码 | `calls_opencode.go:41-63`、`151-202` |
 | `zcode` | 同一套表结构，`zcodeDB()` + `<dbpath>#<sid>` | `calls_zcode.go:39-107` |
-| `workbuddy` / `codebuddy` | `workbuddyFiles()` / `codebuddyFiles()` 的 `projects/<cwd>/<id>.jsonl`（子代理文件单独成源） | `calls_workbuddy.go:31-48` |
+| `workbuddy` / `codebuddy` | `walkLinked(projects/)` 下所有 `.jsonl`；父目录是 `subagents` 时 key 归到会话 id 且 `main: false`；`$CODEBUDDY_CONFIG_DIR` 指向 WorkBuddy 目录时直接返回 nil（同一批文件不读两遍，`#2932`） | `workbuddy.go:41-93`、`calls_workbuddy.go:31-48` |
 | `minimax-code` | `v2/sessions/<yyyy>/<mm>/<dd>/<ts>-session_<base64 id>/messages*.jsonl`，id 从目录名 base64 解出 | `calls_minimax.go:44-85` |
 | `kimi` | `sessions/<workdir slug>/<sid>/agents/<agent>/wire.jsonl`（每个 agent 一个文件） | `calls_kimi.go:61-69` |
 | `pi` / `omp` | `piFiles()` / `ompFiles()`，另加 `wslFiles("pi","omp")` | `calls_pi.go:42-46` |
@@ -322,7 +322,7 @@ OpenCode 的 store、agy 的 summary、WSL 发行版名）。`fileMore` 单独�
 | `agy` | `~/.gemini/antigravity-cli/brain/<conv>/.system_generated/logs/transcript_full.jsonl` | `calls_agy.go:39-46` |
 | WSL 内的 claude/codex/kimi/pi/omp | `wslFiles(...)` 经 `\\wsl.localhost` 读，停机的发行版标 `cold` | `wsl.go:135` |
 
-三个「发现层」的性能机制值得单列（**已验证**）：
+四个「发现层」的性能机制值得单列（**已验证**）：
 
 - **一次列目录代替逐文件 stat**：`statFiles()`（`sessions.go:482-525`）先用 `dirent.Stats` 把同一
   目录一次性读出（`fs.ReadDir` 语义的批量封装），拿不到的再用 8 个协程 `Stat`/`Lstat` 补齐；
@@ -333,12 +333,38 @@ OpenCode 的 store、agy 的 summary、WSL 发行版名）。`fileMore` 单独�
 - **预热期列举复用**：`codexFiles()`（`sessions.go:700-717`）在 `quiet()`（只有预热在读）时把
   rollout 列表缓存 `warmListingFor = 10s`；`OneListing()`/`heldFiles()`（`one_listing.go:29-96`）
   则在一次页面请求内共享各目录列举，并让并发读者等同一份结果而不是各自重列。
+- **Codex 副本去重**：`distinctCodexFiles()`（`codex_discovery.go:101-130`）对同名 rollout 两两做
+  **常数内存的流式比对**（32 KiB 分块，`readCodexCopies`，`:173-209`），判定 `equal` /
+  `firstPrefix` / `secondPrefix` 后只留最长或唯一的那份。缓存条件是「change time 早于本次比对
+  1 秒以上」（`codexStampSettle`，`:44`）+ size/mtime/ctime/`os.SameFile` 全一致，
+  且比对前后各 stat 一次确认文件没被改（`:151-156`）。注释特别强调：
+  「只有 proven decoded prefix 才算冗余副本，共享 thread/name 不能证明归属」。
 
 「一个会话多个文件」由 `key` 表达，读取时按 `mod` 升序排列文件（`calls.go:241-246`），
 注释说明「更早的文件拥有被复制进续接会话的消息」——这是 Claude Code 会话续接（resume）留下的
 重复消息靠 `Msg` 去重（`calls.go:266-271`）的前提。
 
 ### 6.3 各 agent 的解析口径（只记口径差异，不记内容）
+
+**先看哪些行值得解**——这是全部 reader 的共同结构，也是「本地读取」性能的真正来源（**已验证**）：
+
+- `claudeLine()`（`claude.go:68-115`）按行头 1024 字节分四种走向：Claude Code 自己的行
+  （ai-title / custom-title / summary → 整读）；`attachment` 在 `message` 之前 → 只取时间戳；
+  无 `message` → 整读；有 `message` 时看它的前两个字段——`model` 开头且 `role:assistant` → `ccReply`，
+  `role` 开头且 `role:user` → 若不是 tool_result 就整读（提示词），否则只取时间戳。
+- `ccReply()`（`claude.go:279-311`）只解 outer 身份（`gjson` 取 `requestId`，避免工具输入里
+  的同名字段冒用），用 `bytes.LastIndex(b, ccUsage)` 定位 usage，再用手写括号匹配
+  `objectEnd()`（`claude.go:250-275`）切出 usage 对象。注释给了动机：`json.Decoder` 会把整行复制
+  一遍，「冷启动头 2 分钟 11.6 GB 分配里有 1.6 GB 是这个」。
+- `codexHead()`（`codex.go:124-175`）按 `type` 与 `payload.type` 判断：`session_meta` 只在
+  `s.ID == ""` 时值得读；`turn_context`/`token_usage_record`/`compacted` 必读；
+  `event_msg` 只读 `token_count`/`task_started`/`thread_settings_applied`/`user_message`（且后者
+  只在还没有标题时）；工具调用直接记 tool 名不读全文。两处会清 `Codex.Pending = 0`
+  （`:132-140`）：`response_item + message + role:user` 与 `event_msg + user_message`——这正是
+  防止「下一次累计值被配到上一次调用」的机制。
+- `workbuddyLine()`（`workbuddy.go:154-162`）与 `piParse()`（`pi.go:158-171`）都是同一套
+  「先 `bytes.Contains` 关键字再决定要不要 `json.Unmarshal`」的预筛；`piParse` 还多一层
+  `copied` 判断（时间早于 fork 起点 → 不算）。
 
 **Claude Code / Claude Desktop**（`calls.go:632-835` + `claude_usage.go`）：
 
@@ -389,9 +415,23 @@ OpenCode 的 store、agy 的 summary、WSL 发行版名）。`fileMore` 单独�
 - 二者的「走网关」判定：`ocGatewayProvider(id)` = `magpie` 或旧名 `dial`
   （`calls_opencode.go:29-30`），直接跳过、不留待配对。
 
-**WorkBuddy / CodeBuddy**（`calls_workbuddy.go:155-241`）：一行 `providerData.usage`，
-以 `providerData.messageId` 标识；**同一 messageId 会随回复进行重复出现**，所以「最后一行覆盖前一行」，
-但仅当 id 相同且非空（`:186-196`）——无 id 的旧历史回灌行各自算一次调用。
+**WorkBuddy / CodeBuddy**（`calls_workbuddy.go:155-241` + `workbuddy.go:154-209`）：一行
+`providerData.usage`，以 `providerData.messageId` 标识；**同一 messageId 会随回复进行重复出现**，
+所以「最后一行覆盖前一行」，但仅当 id 相同且非空（`calls_workbuddy.go:186-196`）——无 id 的旧历史
+回灌行各自算一次调用。三处口径细节：
+
+- 字段有两代名字：新 `inputTokens`/`outputTokens`/`inputTokensDetails`/`cacheCreationTokens`，
+  旧 `input_tokens`/`output_tokens`/`input_tokens_details`/`cache_creation_input_tokens`，
+  用 `cmp.Or` 逐个回退（`calls_workbuddy.go:223-225`、`workbuddy.go:196-198`）；
+  `inputTokensDetails` 可能是**列表也可能单对象**，`wbDetails.UnmarshalJSON`（`workbuddy.go:99-110`）
+  两种都收，再 `sum("cached_tokens")`。
+- **input 已含缓存读与写**，所以 `Input = max(0, in - read - write)`（`calls_workbuddy.go:232`、
+  `workbuddy.go:199`）。
+- 汇总侧的「覆盖」是**撤销再重计**：`s.unuse(s.MsgDay, s.MsgModel, s.MsgUse)` 后重新
+  `s.use(date, model, t)`（`workbuddy.go:202-208`），与 calls 侧的「数组内替换」同源同口径。
+- 排他用的模型 id 是 `requestModelId`（`calls_workbuddy.go:212`），不是 `model`；
+  另外 `codebuddyInWorkBuddy()`（`workbuddy.go:53-57`）在 `$CODEBUDDY_CONFIG_DIR` 指向 WorkBuddy
+  目录时直接返回 nil，避免同一批文件被读两遍（`#2932`）。
 
 **MiniMax Code**（`calls_minimax.go:100-156`）：`messages.jsonl`（以及 `history-catalog.json`
 保留的其它世代 `messages*.jsonl`）里的 assistant 行，`message_id` 作 `Msg` 去重；
@@ -402,11 +442,16 @@ provider 为 `custom_provider:magpie` 的调用跳过。
 `model` 前缀 `magpie/` 的跳过（`:64`）。fork 会把父会话记录**逐字节复制**，因此 `Msg` 用
 `kimi:<agent>:<time>:<model>:<四桶>` 组合键（`:141-145`），跨文件去重。
 
-**Pi / omp**（`calls_pi.go:96-185`）：行式读取，`piCarry` 保存「会话 cwd / fork 起点 / 当前
-provider+model」，`model_change` 与 assistant `message` 都会推进它；`usage`、`model_usage`、
-`compaction`、`branch_summary` 四类行都算调用（压缩与分支摘要的用量记在当时的模型上）；
-provider 为 `magpie`/`dial` 跳过。fork 的判定靠 header 的 `parentSession` + `since`：
-「写在 header 之前的行是父会话的」（`:107-113`、`:127`）。
+**Pi / omp**（`calls_pi.go:96-185` + `pi.go:100-135`）：行式读取，`piCarry` 保存「会话 cwd /
+fork 起点 / 当前 provider+model」，`model_change` 与 assistant `message` 都会推进它；`usage`、
+`model_usage`、`compaction`、`branch_summary` 四类行都算调用（压缩与分支摘要的用量记在当时的
+模型上）；provider 为 `magpie`/`dial` 跳过。两个容易踩的点：
+
+- **`piUsage` 只有四桶**（`pi.go:100-105`：`input`/`output`/`cacheRead`/`cacheWrite`），
+  **没有 reasoning 字段**——注释说明 output 里已含 thinking，所以不要再单独拆一次。
+- fork 的判定靠 header 的 `parentSession` + `since`（`calls_pi.go:107-113`、`:127`），
+  汇总侧则是 `copied := at.Before(s.Since)`（`pi.go:162-168`）：「写在 header 之前的行是父会话的」。
+  `Msg` 用 `agent:id:timestamp` 组合（`calls_pi.go:182`），因此同一行不会被两个 reader 各记一次。
 
 **dsh（DeepSeek Harness）**（`calls_dsh.go:37-219`）：`assistant/message` 行带 usage；
 文件是「zstd 帧打包的追加文件」，从上次的 **帧内偏移** 续读（§6.4）。两个额外的坑：
@@ -441,6 +486,32 @@ provider 为 `magpie`/`dial` 跳过。fork 的判定靠 header 的 `parentSessio
 
 冷源（`f.cold`、`wslCold(path)`）**不打开文件**：已读过的返回旧快照，否则返回空 callFile
 （`call_cache.go:281-287`）。注释写明原因是「打开一个停机的 WSL 发行版会把它启动」。
+
+**`packed()` 一个判定、两条路**（`sessions.go:2045-2047`：后缀是 `.zst` 或 `.zstd`）：
+
+- **dsh 走帧级续读**：`resumeCallReaders["dsh"]` → `readDshCalls` → `scanFrames`
+  （`frames.go:186-270`）。它自己按 RFC 8878 读帧头（magic、帧描述符长度、逐块 3 字节块长 +
+  last 标志、可选 4 字节校验和），`frameSize`（`:154-184`）只读头就推出整帧长度，一次分配好缓冲。
+  续读位置是「帧起点 + 帧内字节偏移」（`tail.Off`/`tail.Skip`）。
+- **Codex 的 `.zst` rollout 走流式解压**：`openLines()`（`sessions.go:2050-2064`）返回一个
+  `zstdFile`，`Read` 直接转给解码器——**不可 seek**，所以只能从头读。`packed()` 的注释把结论写死了：
+  「A packed rollout is written whole, so it is read whole again whenever it changes.」
+  这也是 `prepareCalls()` 里第一个条件就是 `!packed(f.path)` 的原因：打包文件**没有**「读一半」的可能。
+
+**行级 helper 速查**（逐行确认过，全部为**已验证**）：
+
+| helper | 位置 | 行为 |
+| --- | --- | --- |
+| `maxLine = 32 << 20` | `sessions.go:1716` | 超过即判为「不是我们用的行」，跳过 |
+| `scanBuffer(f, off)` | `sessions.go:1979-1987` | 缓冲区按「剩余长度」在 16 KiB–1 MiB 之间取 |
+| `lineReader(f, size)` | `sessions.go:2008-2031` | 7 个 2 的幂尺寸档，`shelf` 优先、`sync.Pool` 兜底；交还时 `Reset(nil)`，注释警告「行只在下一次 release 前有效」 |
+| `tsAt(b, last)` | `sessions.go:2110-2126` | 从 `"timestamp":"` 后取 RFC3339Nano；`last` 决定取首个还是末个；长度 > 40 直接判无效 |
+| `numTS(b)` | `grok.go:278-296` | 数字时间戳：`> 1e11` 判为毫秒，否则按秒 |
+| `ms(n)` | `opencode.go:133-138` | 毫秒转 `time.Time`，`n <= 0` 返回零值 |
+| `dateOf(t)` | `sessions.go:290-295` | **本地时区**的 `YYYY-MM-DD`，零值返回 `""` |
+| `use/unuse` | `sessions.go:306-324` | 汇总侧记账/撤销；`unuse` 用 `find` 定位后 `sub`，找不到就跳过 |
+| `objectEnd(b)` | `claude.go:250-275` | 手写括号匹配，只认字符串外的括号；动机是 `json.Decoder` 会复制整行 |
+| `typeAfter(b, key)` | `codex.go:501` | 从 `"key` 后读到下一个 `"`，用于行头快速分型 |
 
 ### 6.5 磁盘分片：`calls-v15` 的自定义帧格式
 
@@ -1158,6 +1229,13 @@ magpie 暴露了 `GET /v1/magpie/usage`（与 GUI `/api/usage` 同构）与 `POS
   `codex_usage.go`（664 行）全文、`claude_usage.go` 全文、全部 `calls_*.go`（opencode / zcode /
   workbuddy / minimax / kimi / pi / dsh / agy），以及 `sessions.go` 的发现段（374-612、700-950、
   1740-1859）。凡未通读的段落，正文均标「未验证」。
+- 第二轮又逐行补读了各家 reader 的**依赖文件**：`pi.go`（`piUsage`/`piLine`/`piParse`）、
+  `workbuddy.go`（`wbLine`/`wbDetails`/`workbuddyLine`）、`claude.go`（`claudeLine`/`ccReply`/
+  `objectEnd`/`ccLink`/`ccRandomUUID`）、`codex.go`（`codexHead`/`cxUsage`/`spent`/`codexSource`）、
+  `codex_discovery.go`（`distinctCodexFiles`/流式比对/ctime 缓存）、`opencode.go`（`ocStore`/`ms`）、
+  `grok.go`（`numTS`），以及 `sessions.go` 的 helper 段（`scanBuffer`/`lineReader`/`openLines`/
+  `tsAt`/`title`/`dateOf`/`use`/`unuse`/`distinctPaths`/`Dirs`）。本轮新标出的未通读项见 §14.2
+  第 13、14 条（`ccCopies` 与 `readAgyCalls` 函数体）。
 
 ### 14.2 未决问题
 
@@ -1191,6 +1269,16 @@ magpie 暴露了 `GET /v1/magpie/usage`（与 GUI `/api/usage` 同构）与 `POS
 11. **WorkBuddy 无 `messageId` 的历史行**：注释说「各自算一次调用」（`calls_workbuddy.go:155-163`），
     但在「回灌历史 + 网关记录」并存的场景下是否会重复计数，`calls_workbuddy_test.go` 未见对应用例，
     **未验证**。
+12. **Codex 副本比对的缓存淘汰是随机的**：`maxCodexCopyPairs = 4096`，满时
+    `for old := range codexCopyCache.Pairs { delete(...); break }`（`codex_discovery.go:159-163`）——
+    Go 的 map 遍历顺序随机，等于不确定淘汰。多个 `CODEX_HOME` 下 rollout 很多时是否会退化成反复
+    流式比对，**未验证**（没有实测数据）。
+13. **Claude fork 复制的 calls 侧去重未闭环核实**：汇总侧有 `ccLink`/`Root`/`Leaf` + `ccCopies`
+    识别「被复制进新文件的会话」（`claude.go:119-167`），本轮只读了 `ccLink`/`link`/`ccRandomUUID`，
+    **`ccCopies` 本身在别的文件，未逐行读**。因此「同一会话的两个文件里的同一次调用在 calls 侧如何
+    避免双计」，目前只确认了 `Msg`（`message.id`）去重这一条路径，另一条未验证。
+14. **`readAgyCalls` 的函数体未逐行读**：`calls_agy.go` 只有 114 行，本轮读了 1-50 行（目录发现与
+    字段注释），`readAgyCalls` 的实现（尤其是「无 token 的步骤是否留下失败行」）**未验证**。
 
 ## 附录 A：关键常量速查
 
