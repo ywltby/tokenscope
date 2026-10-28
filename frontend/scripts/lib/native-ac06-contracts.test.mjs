@@ -74,7 +74,6 @@ function realSnapshotDataDir(dataDir) {
 }
 
 function realDataDirChanges(before, after) {
-  console.log("ZZZ-CHANGES-IN:", JSON.stringify(before.settings), "->", JSON.stringify(after.settings));
   return [
     ...changedBusinessFiles(before.business, after.business),
     ...(JSON.stringify(before.settings) === JSON.stringify(after.settings)
@@ -1554,10 +1553,8 @@ function runDeniedIpc({ records, settingsMutator }) {
   const dataDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tokenscope-denied-ipc-")), "tokenscope");
   fs.mkdirSync(dataDir, { recursive: true });
   fs.writeFileSync(path.join(dataDir, "settings.toml"), 'price_auto_sync = false\n');
-  console.log("ZZZ-BEFORE-COLLECT:", dataDir, fs.statSync(path.join(dataDir, "settings.toml")).mtimeMs);
   const before = realSnapshotDataDir(dataDir);
   if (settingsMutator) settingsMutator(dataDir);
-  console.log("ZZZ-AFTER-MUTATOR:", dataDir, fs.statSync(path.join(dataDir, "settings.toml")).mtimeMs);
   const run = extractScenario(
     "privacy-denied-ipc",
     "\n  /**\n   * AC06 场景 3",
@@ -1610,12 +1607,10 @@ function runDeniedIpc({ records, settingsMutator }) {
   return invocation.then(
     (value) => {
       const settled = { threw: false, error: null, checks, before, dataDir };
-      console.log("ZZZ-SETTLED:", JSON.stringify(settled).slice(0, 300));
       return settled;
     },
     (error) => {
       const settled = { threw: true, error: String(error), checks, before, dataDir };
-      console.log("ZZZ-SETTLED:", JSON.stringify(settled).slice(0, 300));
       return settled;
     },
   );
@@ -1642,8 +1637,6 @@ test("denied-ipc：settings_write 追踪在场必须判违规（不得被筛选�
   const trace = (result.checks ?? []).find((check) => check.name === "denied_ipc_trace_has_no_business_events");
   assert.ok(trace, `缺少追踪断言 syncError=${result.syncError}`);
   assert.equal(trace.pass, false, "settings_write 在场不得报「无业务追踪」");
-  console.log("ZZZ-TRACE-DETAIL:", JSON.stringify(trace.detail));
-  console.log("ZZZ-BEFORE:", JSON.stringify(result.before.settings), "AFTER:", JSON.stringify(realSnapshotDataDir(result.dataDir).settings));
   assert.match(trace.detail, /settings_write/);
   const files = result.checks.find((check) => check.name === "denied_ipc_files_unchanged");
   assert.equal(files.pass, false, "同字节重写（mtime 变化）不得报「文件未变化」");
