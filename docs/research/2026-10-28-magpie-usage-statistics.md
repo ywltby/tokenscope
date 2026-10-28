@@ -377,7 +377,18 @@ OpenCode 的 store、agy 的 summary、WSL 发行版名）。`fileMore` 单独�
   不能撤销后来的块」。
 - `attachment.identity.modelId` 提供 `Requested`（如 `claude-opus-5[1m]`）；`compact_boundary` 的
   `durationMs` 记到下一次成功调用上；`isApiErrorMessage` 行算错误、token 为 0。
-- 耗时用「上一次 user 行（或上次回复结束）→ 本次回复行」近似，注释承认会「多一点或少一点」。
+- **修订窗口过期后仍能续读**（`calls.go:709-723`）：当 `m.Call < 0`（该 message 已被窗口淘汰）
+  但 `st.Msgs` 里还留着它的行号时，代码用**旧调用**重建 `m.Call`/`m.Usage`/`m.Began`，
+  前提是 request id 兼容（`m.Request == ""` 或与旧调用的 `RequestID` 相等）。没有这一段，
+  一个长会话读超过窗口就必然把旧消息当成新消息再记一次。原文注释：
+  「Materialized rows already carry the last known usage beyond the recent replay window.
+  Reuse the original row lookup when that history expires.」
+- **块的两种身份**（`calls.go:725-742`）：有 `uuid` 时 `blockID = "uuid:" + uuid`；
+  老写入没有 uuid，则退回 `"content:" + sha256(message.content)`。`newBlock`（第一次见到该块）
+  用来判定「usage 没变但来了新块」时是否推进该调用的时间与 `To`，同时**不跨日移动用量**
+  （`calls.go:801-806`：要求 `dateOf(at) == dateOf(previous.Time)`）。
+- 耗时用「上一次 user 行（或上次回复结束）→ 本次回复行」近似（`calls.go:743-750`），
+  注释承认会「多一点或少一点」。
 - 磁盘上另存**修订窗口**（`claudeRevisionEntries = revisionEntries / revisionFiles = 1024`，
   `claude_usage.go:21`），并用 `MarshalJSON`/`UnmarshalJSON` 写进分片（`:102-111`），
   使「重启后继续读」不必从第一行重放（`#3493`：一个 2 GB 的活跃会话曾每次更新都要整读）。
@@ -391,8 +402,9 @@ OpenCode 的 store、agy 的 summary、WSL 发行版名）。`fileMore` 单独�
   所以 `Input -= CacheRead + CacheWrite`，负值夹 0。
 - 两条来源：`token_usage_record`（带 `response_id`，走 `record()`，`codex_usage.go:388-495`）与
   `token_count`（带累计 `total_token_usage` + 本次 `last_token_usage`，走 `count()`，`:497-646`）。
-- `record()`：去重键 `session\x00response_id`；命中则比较 usage/model，冲突计 `Conflicts++` 并丢弃；
-  重放（时间不更晚）不撤销已接受更新；无 id 时用 `Intervals` 索引按
+- `record()`：入口先把上一次的 `Pending` 取出并清零（`codex_usage.go:389-390`），再在覆盖前算好
+  `ExpectedCount`/`Epoch`（`:405`）；去重键 `session\x00response_id`；命中则比较 usage/model，
+  冲突计 `Conflicts++` 并丢弃；重放（时间不更晚）不撤销已接受更新；无 id 时用 `Intervals` 索引按
   `(session, epoch, total input/output, usage input/output)` 找唯一同区间，再退到 `Pending`
   做「一次观测只消费一次」的配对。
 - `count()`：优先用 `last`（本次请求的精确用量），缺 `last` 才用 `total - prev`；
@@ -544,6 +556,14 @@ fork 起点 / 当前 provider+model」，`model_change` 与 assistant `message` 
 读取校验（`loadCalls`，`:561-644`）逐项失败即返回 `nil`（整片按源重建）：
 帧长 0 或 > 256 MiB、CRC 不符、`State.Path`/`State.Agent` 与请求不符、`Off` 倒退、patch 下标越界、
 字符串下标越界。这是一套「宁可重读源文件，也不用可疑缓存」的策略。
+
+两个实现细节（本轮原文确认）：
+
+- `calls = slices.Grow(calls, max(len(frame.Patches), frame.Calls-len(calls)))`（`:612`）——
+  按**帧里声明的 `Calls`** 一次性预留容量，而不是 append 反复翻倍。注释记了代价：
+  「a warm start paid ~500 MB for across every cached file」。
+- `frame.State.Path != f.path || frame.State.Agent != f.agent` 直接整片作废（`:600`）——
+  分片是按路径哈希命名的，这一步是防「路径碰撞/串文件」的最后防线。
 
 **版本史即口径史**（`call_cache.go:23-46`，v3→v15）：v4 Codex 的 input 不再含缓存写、v8 Claude 的
 1 小时缓存写分离、v9 dsh 带 provider/应答模型且排除网关调用、v10 ZCode/WorkBuddy 开始读、
@@ -1236,6 +1256,11 @@ magpie 暴露了 `GET /v1/magpie/usage`（与 GUI `/api/usage` 同构）与 `POS
   `grok.go`（`numTS`），以及 `sessions.go` 的 helper 段（`scanBuffer`/`lineReader`/`openLines`/
   `tsAt`/`title`/`dateOf`/`use`/`unuse`/`distinctPaths`/`Dirs`）。本轮新标出的未通读项见 §14.2
   第 13、14 条（`ccCopies` 与 `readAgyCalls` 函数体）。
+- 第三轮把最核心的四段原文重新取出并逐行核对：`calls.go:632-766`（`ccCall`/`claudeCallLine` 全文，
+  含窗口过期重建与 `blockID` 双形态）、`codex.go:69-93`（`cxUsage`/`raw`/`spent`）、
+  `codex_usage.go:388-440` 与 `:620-646`（`record()` 入口与 `count()` 收尾）、
+  `call_cache.go:456-482` 与 `:592-639`（`callPatch`/`callFrame`/`framePatches` 与 `loadCalls` 校验）。
+  结论：前两轮的行号与语义均成立，本轮另补入三处此前遗漏的实现（见 §6.3 与 §6.5）。
 
 ### 14.2 未决问题
 
