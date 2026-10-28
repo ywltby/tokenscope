@@ -598,6 +598,15 @@ class PrivacyRevisionLexerCase(RegistryCase):
         ),
     }
 
+    def test_supports_user_agreement_ignores_comments_and_strings(self):
+        self.assertTrue(baselines.supports_user_agreement(
+            "pub user_agreement_accepted: bool,\npub user_agreement_revision: Option<u8>,\n"))
+        self.assertFalse(baselines.supports_user_agreement(
+            "pub privacy_policy_accepted: bool,\n"))
+        self.assertFalse(baselines.supports_user_agreement(
+            "/* pub user_agreement_accepted: bool, */\n"
+            "const S: &str = \"user_agreement_accepted: bool\";\n"))
+
     def make_repo(self, source_text):
         root = Path(self.temp.name) / "lexer-repo"
         settings = root / "crates/tokenscope-core/src/settings.rs"

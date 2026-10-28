@@ -238,6 +238,8 @@ function Prepare-OldUsage {
     # privacy_revision（该基线自己认识的修订号）预置同意，否则基线按
     # StaleRevision 拒绝布尔同意、隐私门不开放，旧阶段等汇总必然超时
     # （0.6.0→0.6.1 首跳 CI 40226439492）。布尔时代基线保持布尔形态。
+    # 登记了 agreement_revision 的基线（0.6.1 起）还认识用户许可协议同意，
+    # 预置必须四项同写——否则会把它当成隐私-only 的旧版。
     param($Case)
     $arguments = @((Join-Path $Case.RepoRoot "scripts/upgrade_fixture.py"),"prepare",
         "--data-dir",$Case.DataDir,"--source-dir",$Case.SourcesRoot,"--profile",$Case.Profile)
@@ -246,6 +248,10 @@ function Prepare-OldUsage {
             throw "设置格式 3 起点 $($Case.Origin) 缺少 privacy_revision 登记"
         }
         $arguments += @("--consent-revision", [string]$Case.Baseline.privacy_revision)
+        if ($Case.Baseline.PSObject.Properties['agreement_revision'] -and
+            $null -ne $Case.Baseline.agreement_revision) {
+            $arguments += "--agreement"
+        }
     }
     Invoke-UpgradePython -Arguments $arguments | Out-Null
 }
@@ -355,15 +361,17 @@ function Get-HistorySnapshot {
 function Invoke-ConsentGateStage {
     # WB05 第一段：装新版后、授权前，先以旧同意（或无同意）启动一次——
     # 新闸门必须保持封闭，保存"零业务读取"证据并阻断任何违反：
-    # - settings.toml 的同意记录原样。privacy_policy_revision 按**前后内容
-    #   比对**判定「程序在未同意阶段新增/改写」：启动前已有失效修订号
-    #   （如 revision=1）且内容未变不算违规（PR52 复盘：按「字段存在」
-    #   判定会误拒同表单合法的旧同意状态）；真实新增或改写仍必须失败；
+    # - settings.toml 的同意记录**按原始字节**比对：启动前已有失效修订号
+    #   （如 revision=1）且字节未变不算违规（PR52 复盘：按「字段存在」
+    #   判定会误拒同表单合法的旧同意状态）；任何字节变化（含仅大小写、
+    #   换行、BOM）都算改写并失败。PowerShell 文本比较大小写不敏感，不能
+    #   用来判定文件是否被改写；
+    # - privacy_policy_revision 行按字节解码后的文本逐字比对，新增或改写即失败；
     # - DataDir/logs 无新增（业务日志初始化只发生在同意之后）；
-    # - history.db（含 -wal/-shm，按内容/大小/mtime 快照）无新增写入
-    #   （采集不发生）。任何一项违反都抛错结束本阶段，阶段证据按实际
-    #   结果保存（失败不写 pass: true）。
-    # 观察窗口 45 秒后结束进程；第二段由 Grant-UpgradeConsent 授权。
+    # - history.db（含 -wal/-shm）只按路径/大小/时间戳快照比对：它证明
+    #   「没有新文件或大小/时间变化」，不等于逐字节证明未写入。
+    # 观察窗口 45 秒后结束进程；第二段由 Grant-UpgradeConsent 写入**模拟
+    # 授权**（脚本写盘，不是真实界面点击；界面点击由原生场景覆盖）。
     param($Case, [string]$Phase)
     $evidence = Join-Path $Case.EvidenceRoot "consent-gate"
     New-Item -ItemType Directory -Path $evidence -Force | Out-Null
@@ -371,7 +379,9 @@ function Invoke-ConsentGateStage {
     $settingsPath = Join-Path $Case.DataDir "settings.toml"
     $logsBefore = @(Get-PathSnapshot $logsDir)
     $historyBefore = @(Get-HistorySnapshot $Case.DataDir)
-    $settingsBefore = (Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8)
+    $settingsBytesBefore = [IO.File]::ReadAllBytes($settingsPath)
+    $settingsShaBefore = (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $settingsBefore = [Text.Encoding]::UTF8.GetString($settingsBytesBefore)
 
     $exe = Join-Path (Get-UninstallEntry).InstallLocation "tokenscope.exe"
     $context = Launch-AppOnce -ExePath $exe -Scenario $Phase -RunId ($Phase + "-gate-1") `
@@ -383,15 +393,19 @@ function Invoke-ConsentGateStage {
         if ($context.Process.HasExited) {
             throw "旧同意下新版进程提前退出（退出码 $($context.Process.ExitCode)）"
         }
-        $settingsAfter = (Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8)
+        $settingsBytesAfter = [IO.File]::ReadAllBytes($settingsPath)
+        $settingsShaAfter = (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $settingsAfter = [Text.Encoding]::UTF8.GetString($settingsBytesAfter)
         $revisionPattern = '(?m)^[ \t]*privacy_policy_revision[ \t]*=.*$'
         $revisionBefore = [regex]::Match($settingsBefore, $revisionPattern).Value
         $revisionAfter = [regex]::Match($settingsAfter, $revisionPattern).Value
         if ($revisionAfter -cne $revisionBefore) {
             throw "同意闸门前程序新增/改写了 privacy_policy_revision（前=[$revisionBefore] 后=[$revisionAfter]）"
         }
-        if ($settingsAfter -ne $settingsBefore) {
-            throw "同意闸门前 settings.toml 被改写"
+        $bytesUnchanged = $settingsBytesBefore.Length -eq $settingsBytesAfter.Length -and
+            [BitConverter]::ToString($settingsBytesBefore) -ceq [BitConverter]::ToString($settingsBytesAfter)
+        if (-not $bytesUnchanged) {
+            throw "同意闸门前 settings.toml 内容被改写（原始字节不同）"
         }
         $newLogs = Compare-PathSnapshot -Before $logsBefore -After @(Get-PathSnapshot $logsDir)
         if ($newLogs.Count -gt 0) {
@@ -403,11 +417,13 @@ function Invoke-ConsentGateStage {
         }
         $gateOk = $true
         [ordered]@{
-            settings_unchanged    = $true
-            revision_not_written  = $true
-            logs_new_files        = 0
-            history_new_entries   = 0
-            observed_seconds      = 45
+            settings_bytes_unchanged = $true
+            settings_sha256 = $settingsShaAfter
+            revision_not_written = $true
+            logs_new_files = 0
+            history_new_entries = 0
+            observed_seconds = 45
+            snapshot_scope = "settings 前后原始字节逐字节比对；logs/history 快照仅路径/大小/时间戳边界"
         } | ConvertTo-Json |
             Set-Content -LiteralPath (Join-Path $evidence ($Phase + "-gate.json")) -Encoding utf8NoBOM
     }
@@ -445,59 +461,78 @@ function Get-ConsentRecord {
         "--data-dir", $Case.DataDir)
 }
 
-function Get-TargetConsentRevision {
-    # 目标版本自己的共同同意修订号：当前版本取受测源码；历史版本取登记表
-    # 的 privacy_revision。格式 < 3 的旧版不认识修订号 → $null。
+function Get-TargetConsentExpectation {
+    # 目标版本**自身**的同意能力：当前版本取受测源码（源码要求隐私+协议
+    # 四项精确匹配）；历史版本取登记表——agreement_revision 存在即协议感知，
+    # 只有 privacy_revision 则隐私-only；登记缺失时拒绝而不是猜。
     param($Case)
-    if ($Case.JumpTargetSettingsFormat -lt 3) { return $null }
+    if ($Case.JumpTargetSettingsFormat -lt 3) {
+        return [pscustomobject]@{ Revision=$null; Agreement=$false }
+    }
     if ($Case.JumpOrigin -eq $Case.AppVersion) {
-        return [int](Get-ConsentRevision -RepoRoot $Case.RepoRoot)
+        return [pscustomobject]@{ Revision=[int](Get-ConsentRevision -RepoRoot $Case.RepoRoot); Agreement=$true }
     }
     $matched = @($Case.Entries | Where-Object { $_.version -eq $Case.JumpOrigin })
-    if ($matched.Count -ne 1 -or $null -eq $matched[0].privacy_revision) {
-        throw "历史跳 $($Case.JumpOrigin) 缺少 privacy_revision 登记，无法按目标版本语义判断"
+    if ($matched.Count -ne 1) {
+        throw "历史跳 $($Case.JumpOrigin) 没有唯一登记条目，无法按目标版本语义判断"
     }
-    return [int]$matched[0].privacy_revision
+    $entry = $matched[0]
+    $agreementRevision = if ($entry.PSObject.Properties['agreement_revision']) {
+        $entry.agreement_revision } else { $null }
+    $privacyRevision = if ($entry.PSObject.Properties['privacy_revision']) {
+        $entry.privacy_revision } else { $null }
+    if ($null -ne $agreementRevision) {
+        return [pscustomobject]@{ Revision=[int]$agreementRevision; Agreement=$true }
+    }
+    if ($null -ne $privacyRevision) {
+        return [pscustomobject]@{ Revision=[int]$privacyRevision; Agreement=$false }
+    }
+    throw "历史跳 $($Case.JumpOrigin) 缺少同意修订登记，无法按目标版本语义判断"
 }
 
 function Test-ConsentGateApplies {
     # 门禁观察只按**目标版本自身语义**与**实际落盘记录**判断：
     # - 目标格式 < 3：历史版本不认识修订号/协议字段 → 不观察；
-    # - 当前版本：隐私与协议两项须精确等于当前修订，否则新版闸门关闭；
-    # - 历史格式 3（0.6.0）：只要求隐私同意且修订不低于它自己的修订号，
-    #   它不认识协议字段——不能拿当前源码的修订/协议要求冒充它。
+    # - 目标要求协议（当前版本或登记了 agreement_revision 的历史版本）：
+    #   隐私与协议两项须精确等于目标修订；
+    # - 目标隐私-only（如 0.6.0）：只要求隐私同意且修订不低于它自己的修订。
     # 记录缺失、不可读或字段类型非法时按门禁关闭处理。
     param($Case)
     if ($Case.JumpTargetSettingsFormat -lt 3) { return $false }
-    $revision = Get-TargetConsentRevision -Case $Case
+    $expectation = Get-TargetConsentExpectation -Case $Case
     $record = Get-ConsentRecord -Case $Case
     if ($record.state -ne "present" -or $record.privacy_policy_accepted -ne $true) {
         return $true
     }
-    if ($Case.JumpOrigin -eq $Case.AppVersion) {
-        return -not (
-            $record.privacy_policy_revision -eq $revision -and
-            $record.user_agreement_accepted -eq $true -and
-            $record.user_agreement_revision -eq $revision
-        )
+    # 目标隐私-only（如 0.6.0）：它自己的实现只要求隐私修订不低于登记修订。
+    if (-not $expectation.Agreement) {
+        return -not ($record.privacy_policy_revision -ge $expectation.Revision)
     }
-    return -not ($record.privacy_policy_revision -ge $revision)
+    # 目标要求协议：隐私与协议两项都须精确等于目标修订（0.6.1 起语义）。
+    return -not (
+        $record.user_agreement_accepted -eq $true -and
+        $record.user_agreement_revision -eq $expectation.Revision
+    )
 }
 
 function Grant-UpgradeConsent {
     # 幂等：起点已带同意时不动设置文件，0.1.0 起点升级后补上。
+    # **这是脚本模拟授权**：直接写 settings.toml，等价于用户重新同意后的
+    # 落盘结果，但不是真实界面点击。真实界面点击路径由原生场景
+    # privacy-revision2-consent 覆盖，不能互相替代。
     # 按**目标版本自身**语义装配：
-    # - 当前版本：受测源码当前修订 + 协议两项（与真实重新同意同形）；
-    # - 历史格式 3（0.6.0）：登记表里它自己的修订号，不写它不认识的协议字段；
+    # - 目标要求协议（当前源码或登记的 agreement_revision）：写受测/目标
+    #   修订 + 协议两项；
+    # - 目标隐私-only（0.6.0）：只写它自己认识的隐私修订；
     # - 格式 < 3：保持旧布尔形态（受测旧版本不认识修订号字段）。
     param($Case)
     $arguments = @((Join-Path $Case.RepoRoot "scripts/upgrade_fixture.py"), "ensure-consent",
         "--data-dir", $Case.DataDir)
-    $revision = Get-TargetConsentRevision -Case $Case
-    if ($null -ne $revision) {
-        $arguments += @("--revision", [string]$revision)
+    $expectation = Get-TargetConsentExpectation -Case $Case
+    if ($null -ne $expectation.Revision) {
+        $arguments += @("--revision", [string]$expectation.Revision)
     }
-    if ($Case.JumpOrigin -eq $Case.AppVersion -and $Case.JumpTargetSettingsFormat -ge 3) {
+    if ($expectation.Agreement) {
         $arguments += "--agreement"
     }
     Invoke-UpgradePython -Arguments $arguments | Out-Null
@@ -524,10 +559,11 @@ function Check-CurrentUsage {
         "--data-dir",$Case.DataDir,"--original",$Case.OldSettingsPath,
         "--from-format",$Case.JumpSettingsFormat,
         "--to-format",$Case.JumpTargetSettingsFormat)
-    if ($Case.JumpOrigin -eq $Case.AppVersion -and $Case.JumpTargetSettingsFormat -ge 3) {
-        # 只对「刚装的受测当前版本」核对最终同意证明的是本版（隐私政策与
-        # 用户许可协议都覆盖）。升级链中间跳装的是旧版，不要求协议字段。
-        $settingsArguments += @("--consent-revision", [string](Get-ConsentRevision -RepoRoot $Case.RepoRoot))
+    $consentExpectation = Get-TargetConsentExpectation -Case $Case
+    if ($consentExpectation.Agreement -and $null -ne $consentExpectation.Revision) {
+        # 目标版本自身要求协议同意时，核对最终同意证明的是**该目标版本**的
+        # 隐私政策与用户许可协议；隐私-only 的历史目标（0.6.0）不要求协议字段。
+        $settingsArguments += @("--consent-revision", [string]$consentExpectation.Revision)
     }
     Invoke-UpgradePython -Arguments $settingsArguments `
         -EvidencePath (Join-Path $evidence ("settings-"+$stage+".json")) | Out-Null

@@ -3730,6 +3730,153 @@ const scenarios = {
     );
     await page2.screenshot({ path: path.join(inst.opts.shots, "policy-update-reconsented.png") });
   },
+
+  /**
+   * 2026-10-29 复核：真实 0.6.0 旧用户界面路径——预置隐私政策同意
+   * accepted=true、revision=2、没有协议同意字段，并预置业务文件。确认
+   * 门禁保持关闭（对旧业务数据零读取零写入），再通过真实界面点击
+   * 「同意并继续」完成重新同意，核验四项原子落盘、进入业务与重启不再询问。
+   */
+  async "privacy-revision2-consent"({ inst, ck, ev }) {
+    const page = inst.page;
+    const dataDir = path.join(inst.root, "tokenscope");
+    const settingsPath = path.join(dataDir, "settings.toml");
+    const businessFiles = () =>
+      listFiles(dataDir).filter((f) =>
+        /^(logs\/|cache\.db|history\.db|window-state\.json|view-cache\.json|pricing-)/.test(f),
+      );
+
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+    const beforeBytes = fs.readFileSync(settingsPath);
+    ev.settingsBefore = beforeBytes.toString("utf8");
+    const beforeToml = parseToml(ev.settingsBefore);
+    ck.add(
+      "fixture_is_revision2_privacy_only",
+      beforeToml.privacy_policy_accepted === true &&
+        beforeToml.privacy_policy_revision === 2 &&
+        !("user_agreement_accepted" in beforeToml) &&
+        !("user_agreement_revision" in beforeToml),
+      `accepted=${beforeToml.privacy_policy_accepted} revision=${beforeToml.privacy_policy_revision} ` +
+        `agreement=${beforeToml.user_agreement_accepted}`,
+    );
+    const legacyState = strictConsentState(beforeBytes, CURRENT_CONSENT_REVISION);
+    ck.add(
+      "legacy_record_is_not_current_consent",
+      !legacyState.ok,
+      legacyState.detail,
+    );
+    const dialogText = (await page.locator(".privacy-dialog").innerText()).replace(/\s+/g, " ");
+    ck.add(
+      "policy_updated_notice_visible",
+      dialogText.includes("隐私政策或用户许可协议已更新"),
+      dialogText.slice(0, 160),
+    );
+    ev.businessDomNodes = await page.locator(".app-nav, .page-head, .chart-canvas").count();
+    ck.add(
+      "business_ui_not_mounted_before_reconsent",
+      ev.businessDomNodes === 0,
+      `业务节点数=${ev.businessDomNodes}`,
+    );
+    ev.preseededBusinessFiles = businessFiles();
+    ck.add(
+      "preseeded_old_business_files_exist",
+      ev.preseededBusinessFiles.length > 0,
+      ev.preseededBusinessFiles.join(",") || "无预置业务文件",
+    );
+    const traceBeforeConsent = readAcceptanceTrace(inst.root, { partial: true });
+    if (traceBeforeConsent.violations.length)
+      throw new Error(traceBeforeConsent.violations.join(" | "));
+    const businessEventNames = [
+      "business_ready",
+      "collect_round_start",
+      "source_root_read",
+      "history_open",
+    ];
+    ev.businessTraceBeforeConsent = traceBeforeConsent.records
+      .filter((r) => businessEventNames.includes(r.event))
+      .map((r) => r.event);
+    ck.add(
+      "no_business_trace_before_reconsent",
+      ev.businessTraceBeforeConsent.length === 0,
+      ev.businessTraceBeforeConsent.join(",") || "无业务追踪事件",
+    );
+    // 门禁关闭期间观察 15 秒：预置业务文件集合不得变化，settings 原始字节不得变化。
+    await page.waitForTimeout(15000);
+    const afterBusiness = businessFiles();
+    ck.add(
+      "no_new_business_files_before_reconsent",
+      JSON.stringify(afterBusiness) === JSON.stringify(ev.preseededBusinessFiles),
+      `观察前=${ev.preseededBusinessFiles.join(",") || "无"}；观察后=${afterBusiness.join(",") || "无"}`,
+    );
+    ck.add(
+      "settings_bytes_unchanged_before_reconsent",
+      beforeBytes.equals(fs.readFileSync(settingsPath)),
+      "同意前 settings.toml 原始字节未变化",
+    );
+
+    // 真实界面点击同意 → 同一次原子保存四项当前修订。
+    await page.locator(".privacy-actions button", { hasText: "同意并继续" }).first().click();
+    await page.waitForSelector(".app-nav", { timeout: 60000 });
+    const afterAcceptBytes = fs.readFileSync(settingsPath);
+    ev.settingsAfterAccept = afterAcceptBytes.toString("utf8");
+    const afterAcceptState = strictConsentState(
+      afterAcceptBytes,
+      CURRENT_CONSENT_REVISION,
+    );
+    ck.add(
+      "revision2_user_click_writes_current_revision",
+      afterAcceptState.ok,
+      afterAcceptState.detail,
+    );
+    const traceAfterConsent = readAcceptanceTrace(inst.root, { partial: true });
+    const seqOf = (name) =>
+      traceAfterConsent.records.filter((r) => r.event === name).map((r) => r.seq);
+    const consentSeqs = seqOf("consent_saved");
+    const readySeqs = seqOf("business_ready");
+    ev.consentTraceOrder = { consentSeqs, readySeqs };
+    ck.add(
+      "business_trace_starts_after_reconsent",
+      consentSeqs.length >= 1 &&
+        readySeqs.length >= 1 &&
+        Math.min(...readySeqs) > Math.max(...consentSeqs),
+      JSON.stringify(ev.consentTraceOrder),
+    );
+
+    // 重启同一隔离根：不再询问（四项当前修订同意有效）。
+    {
+      const action = fileURLToPath(
+        new URL("../../scripts/native-window-action.ps1", import.meta.url),
+      );
+      const result = spawnSyncBounded(
+        "pwsh",
+        ["-NoProfile", "-File", action, "-ProcessId", String(inst.proc.pid), "-Action", "close"],
+        { action: "window-close", stage: "revision2-close" },
+      );
+      if (result.status !== 0 || !/CLOSED true/i.test(result.stdout))
+        throw new Error(`WM_CLOSE failed: ${result.stderr} ${result.stdout}`);
+      await page.waitForSelector(".close-dialog", { timeout: 10000 });
+      await page
+        .locator(".close-dialog")
+        .getByRole("button", { name: "直接退出", exact: true })
+        .click();
+      const deadline = Date.now() + 15000;
+      while (inst.proc.exitCode === null && Date.now() < deadline) await sleep(200);
+      if (inst.proc.exitCode !== 0)
+        throw new Error(`修订 2 旧用户场景的优雅关闭要求退出码 0，实际 ${inst.proc.exitCode}`);
+    }
+    const info = await inst.launch();
+    ev.relaunchPid = info.pid;
+    const page2 = inst.page;
+    await page2.waitForSelector(".app-nav", { timeout: 60000 });
+    await page2.waitForTimeout(1500);
+    ev.relaunchConsentDialog = await page2.locator(".privacy-dialog").count();
+    ck.add(
+      "restart_does_not_ask_after_revision2_consent",
+      ev.relaunchConsentDialog === 0,
+      `重启后政策弹窗数=${ev.relaunchConsentDialog}`,
+    );
+    await page2.screenshot({ path: path.join(inst.opts.shots, "revision2-reconsented.png") });
+  },
 };
 
 const labelToValue = (label) =>
@@ -3889,6 +4036,7 @@ async function main() {
                 SCENARIO === "privacy-accept-restart" ||
                 SCENARIO === "privacy-policy-update" ||
                 SCENARIO === "privacy-preseeded" ||
+                SCENARIO === "privacy-revision2-consent" ||
                 SCENARIO === "privacy-denied-ipc" ||
                 SCENARIO === "privacy-accept-order" ||
                 SCENARIO === "privacy-variants-close"
@@ -3950,6 +4098,24 @@ async function main() {
                     if (downgraded === text)
                       throw new Error("隔离根 settings.toml 未含修订号行，无法构造旧修订同意场景");
                     fs.writeFileSync(p, downgraded, "utf8");
+                    preseedBusinessFiles(path.join(r, "tokenscope"));
+                    return;
+                  }
+                  if (SCENARIO === "privacy-revision2-consent") {
+                    // 2026-10-29 复核：真实 0.6.0 旧用户形态——隐私政策同意
+                    // accepted=true + revision=2、没有协议同意字段；同时预置
+                    // 业务文件，证明门禁关闭期间对旧业务数据零读取零写入，
+                    // 之后由真实界面点击完成重新同意。
+                    const legacy = text
+                      .replace(
+                        /^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m,
+                        "privacy_policy_revision = 2\n",
+                      )
+                      .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
+                      .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
+                    if (legacy === text)
+                      throw new Error("隔离根 settings.toml 未含修订号行，无法构造修订 2 旧用户");
+                    fs.writeFileSync(p, legacy, "utf8");
                     preseedBusinessFiles(path.join(r, "tokenscope"));
                     return;
                   }

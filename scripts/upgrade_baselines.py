@@ -489,6 +489,10 @@ def add_entry(tag, api=None, path=REGISTRY, directory=None, status="published",
              "status": "published", "persistent_format": metadata, "assets": assets}
     if privacy_revision is not None:
         entry["privacy_revision"] = privacy_revision
+        # 0.6.1 起的版本在发布源码里要求用户许可协议同意：登记表必须如实
+        # 记录目标版本的协议能力，后续以它为历史目标时才能装配正确门禁。
+        if read_tag_agreement_required(resolved):
+            entry["agreement_revision"] = privacy_revision
     return register(entry, path)
 
 
@@ -576,6 +580,16 @@ def extract_privacy_revision(source):
     return int(match.group(1)) if match else None
 
 
+def supports_user_agreement(source):
+    """目标源码是否认识用户许可协议同意字段（0.6.1 起）。注释与字符串里的
+    假字段同样忽略，避免把历史版本误判为协议感知版本。"""
+    stripped = strip_rust_comments_and_strings(source)
+    return re.search(
+        r"(?m)^(?:pub\s+)?user_agreement_(?:accepted|revision)\s*:",
+        stripped,
+    ) is not None
+
+
 def read_tag_privacy_revision(commit, root=ROOT):
     """从发布标签解引用到的源码读隐私修订号；两处历史路径都找不到常量
     时返回 None（由调用方决定是否拒绝登记）。"""
@@ -588,6 +602,18 @@ def read_tag_privacy_revision(commit, root=ROOT):
         if revision is not None:
             return revision
     return None
+
+
+def read_tag_agreement_required(commit, root=ROOT):
+    """发布标签源码是否要求用户许可协议同意（与隐私政策同一次同意）。"""
+    for relative in PRIVACY_REVISION_SOURCES:
+        result = subprocess.run(["git", "-C", str(root), "show", f"{commit}:{relative}"],
+                                capture_output=True, encoding="utf-8", check=False)
+        if result.returncode:
+            continue
+        if extract_privacy_revision(result.stdout) is not None:
+            return supports_user_agreement(result.stdout)
+    return False
 
 
 def profile_for(version):

@@ -110,6 +110,12 @@ jobs:
         run: |
           node frontend/scripts/native-acceptance.mjs --scenario privacy-variants-close --events 8 --port 9542 --out qa-artifacts/ui-adjustment/native-e2e/privacy-variants-close
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # 修订 2 旧用户真实界面重新同意（2 次启动，起始端口 9545）：门禁关闭→点击同意→重启不询问。
+      - name: Native revision2 old user reconsents through UI
+        shell: pwsh
+        run: |
+          node frontend/scripts/native-acceptance.mjs --scenario privacy-revision2-consent --events 8 --port 9545 --out qa-artifacts/ui-adjustment/native-e2e/privacy-revision2-consent
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload native UI evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7

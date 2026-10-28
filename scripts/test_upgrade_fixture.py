@@ -87,6 +87,18 @@ class UpgradeFixtureCase(unittest.TestCase):
         plain = tomllib.loads((other / "settings.toml").read_text(encoding="utf-8"))
         self.assertNotIn("privacy_policy_revision", plain)
 
+    def test_history_prepare_writes_agreement_only_for_agreement_aware_baselines(self):
+        # 0.6.1 起的历史目标认识协议同意：播种必须四项同写；隐私-only 基线
+        # （0.6.0）保持真实形态，不能被提前补上协议字段。
+        fixture.prepare(self.data, self.sources, "history", consent_revision=3, agreement=True)
+        settings = tomllib.loads((self.data / "settings.toml").read_text(encoding="utf-8"))
+        self.assertEqual(settings["privacy_policy_revision"], 3)
+        self.assertTrue(settings["user_agreement_accepted"])
+        self.assertEqual(settings["user_agreement_revision"], 3)
+        with self.assertRaises(ValueError):
+            fixture.prepare(self.root / "no-revision/.tokenscope", self.sources, "history",
+                            agreement=True)
+
     def test_consent_writes_revision_when_requested(self):
         # WB05：需要当前修订授权的跳，授予/确保同意必须与修订号同一次写入；
         # 不带修订号的旧版跳保持布尔形态（受测版本不支持该字段）。

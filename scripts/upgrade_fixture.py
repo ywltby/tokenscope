@@ -30,10 +30,12 @@ CONSENT_FIELDS = (
 )
 
 
-def prepare(data, sources, profile="legacy-cache", consent_revision=None):
+def prepare(data, sources, profile="legacy-cache", consent_revision=None, agreement=False):
     data, sources = Path(data), Path(sources)
     if profile not in PROFILES:
         raise ValueError(f"未知的起点夹具类型：{profile}")
+    if agreement and consent_revision is None:
+        raise ValueError("协议同意必须与共同同意修订号同一次写入")
     if any((data / name).exists() for name in ("cache.db", "history.db", "settings.toml")):
         raise ValueError("真实旧版夹具必须从没有历史文件的独立 Runner 开始")
     data.mkdir(parents=True, exist_ok=True)
@@ -49,7 +51,7 @@ def prepare(data, sources, profile="legacy-cache", consent_revision=None):
     # legacy 起点（0.1.0）没有这个键，同意由升级后写入。设置格式 3 起的
     # 基线认识修订号，必须按该基线自己认识的修订号预置，否则 StaleRevision
     # 门不开放（0.6.0→0.6.1 首跳 CI 40226439492 旧阶段等汇总超时）。
-    consent = _consent_prefix(consent_revision) if profile == "history" else ""
+    consent = _consent_prefix(consent_revision, agreement=agreement) if profile == "history" else ""
     settings = (consent + 'price_auto_sync = false\nclose_action = "quit"\n\n'
                 '[sources.claude]\nenabled = true\ndir = '
                 + json.dumps(claude.as_posix(), ensure_ascii=False)
@@ -399,6 +401,8 @@ def main():
     command.add_argument("--profile", choices=PROFILES, default="legacy-cache")
     command.add_argument("--consent-revision", type=int, default=None,
                          help="设置格式 3 起的基线按它自己认识的修订号预置同意")
+    command.add_argument("--agreement", action="store_true",
+                         help="目标版本认识用户许可协议同意（0.6.1 起）：预置写四项")
     command = sub.add_parser("consent")
     command.add_argument("--data-dir", type=Path, required=True)
     command.add_argument("--revision", type=int, default=None)
@@ -422,7 +426,8 @@ def main():
     try:
         if args.mode == "prepare":
             result = prepare(args.data_dir, args.source_dir, args.profile,
-                             consent_revision=args.consent_revision)
+                             consent_revision=args.consent_revision,
+                             agreement=args.agreement)
         elif args.mode == "consent":
             grant_test_consent(args.data_dir, revision=args.revision)
             result = {"ok": True, "test_consent_added": True}

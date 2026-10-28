@@ -416,6 +416,41 @@ sys.exit(37 if "--fail" in sys.argv else 0)
         Check (-not (Test-ConsentGateApplies -Case ([pscustomobject]@{ JumpTargetSettingsFormat=2 }))) `
             "目标格式 < 3：无修订号闸门"
     }
+    # 2026-10-29 复核：目标版本能力来自登记表，不能按「是否当前版本」推断。
+    # 0.6.1 发布后作为历史目标时仍要求隐私与协议四项；0.6.0 仍是隐私-only。
+    & {
+        $capRoot = Join-Path $contractRoot "target-capability"
+        New-Item -ItemType Directory -Path $capRoot -Force | Out-Null
+        $settings = Join-Path $capRoot "settings.toml"
+        $encoding = [Text.UTF8Encoding]::new($false)
+        $entries = @(
+            [pscustomobject]@{ version="0.6.0"; privacy_revision=2 }
+            [pscustomobject]@{ version="0.6.1"; privacy_revision=3; agreement_revision=3 }
+        )
+        function New-CapCase([string]$Origin,[string]$Target) {
+            [pscustomobject]@{ RepoRoot=$repoRoot; DataDir=$capRoot; JumpOrigin=$Origin
+                AppVersion=$Target; JumpTargetSettingsFormat=3; Entries=$entries }
+        }
+        [IO.File]::WriteAllText($settings,
+            "privacy_policy_accepted = true`nprivacy_policy_revision = 3`n", $encoding)
+        Check (Test-ConsentGateApplies -Case (New-CapCase "0.6.1" "0.6.2")) `
+            "0.6.1 历史目标缺协议记录：门禁必须关闭"
+        Check (-not (Test-ConsentGateApplies -Case (New-CapCase "0.6.0" "0.6.2"))) `
+            "0.6.0 历史目标隐私 rev2：仍按它自己的隐私-only 语义放行"
+        & $script:RealGrantConsent -Case (New-CapCase "0.6.1" "0.6.2")
+        $after061 = Invoke-UpgradePython -Arguments @((Join-Path $repoRoot "scripts/upgrade_fixture.py"),
+            "consent-state","--data-dir",$capRoot)
+        Check ($after061.privacy_policy_revision -eq 3 -and $after061.user_agreement_accepted -eq $true -and
+            $after061.user_agreement_revision -eq 3) `
+            "0.6.1 历史目标授权写入四项修订 3"
+        Check (-not (Test-ConsentGateApplies -Case (New-CapCase "0.6.2" "0.6.2"))) `
+            "已同意 0.6.1 到协议未变的后续版本：无需重复询问"
+        & {
+            function Get-ConsentRevision { param([string]$RepoRoot) return 4 }
+            Check (Test-ConsentGateApplies -Case (New-CapCase "0.6.2" "0.6.2")) `
+                "后续协议修订变化（当前修订 4）：必须重新询问"
+        }
+    }
     # 授权装配：历史跳用目标版本登记的修订号且不写协议；当前版本用受测
     # 源码修订号并同一次写协议两项。受控替换 Python 调用，捕获真实参数。
     & {
@@ -539,6 +574,12 @@ sys.exit(37 if "--fail" in sys.argv else 0)
         $newHistory = Invoke-UpgradeGateCase $staleConsent { [IO.File]::WriteAllText((Join-Path $gateRoot "history.db"),
             "leak", [Text.UTF8Encoding]::new($false)) } "new-history"
         Check ($null -ne $newHistory -and $newHistory -like "*历史库*") "观察期历史库新写入被拒：$newHistory"
+        # 2026-10-29 复核：PowerShell 文本比较大小写不敏感，只改注释大小写
+        # 也会改变文件字节。门禁必须按原始字节比对，不能被 -ne 文本比较放过。
+        $caseOnly = Invoke-UpgradeGateCase $staleConsent {
+            $mutated = (Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8) -replace "privacy_policy_accepted","privacy_policy_Accepted"
+            [IO.File]::WriteAllText($settingsPath, $mutated, [Text.UTF8Encoding]::new($false)) } "case-only"
+        Check ($null -ne $caseOnly -and $caseOnly -like "*settings.toml*") "观察期仅大小写变化也按字节被拒：$caseOnly"
     }
     foreach ($failure in @("install-baseline","lifecycle:old","lifecycle:current","lifecycle:restart")) {
         $script:Trace.Clear(); $script:FailAt = $failure
