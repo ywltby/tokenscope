@@ -11,7 +11,7 @@
 //   - 不安装、不写注册表、不改系统显示缩放。
 // UP09（升级测试补测计划 §4.8）：实例生命周期改为“端口不复用 + 归属核实 + 退出确认”，
 // 纯逻辑在 `lib/native-instance.mjs`（可单测），证据在 `evidence.json` 的 `launches[]`。
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import net from "node:net";
 import zlib from "node:zlib";
@@ -88,20 +88,19 @@ import {
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
 // 统一 workspace 后，不带 --target 的 release 构建产物落在根 target/。
 const EXE_DEFAULT = path.join(REPO, "target", "release", "tokenscope.exe");
-/** 当前共同同意修订号：从受测源码提取（单一事实源，不硬编码）。 */
+/** 当前共同同意修订号：复用 upgrade_baselines.py 的 Rust 常量提取
+ * （剥离块注释/行注释/字符串，假声明不会命中），不在 JS 里另写正则。 */
 const CURRENT_CONSENT_REVISION = (() => {
-  const source = fs.readFileSync(
-    path.join(REPO, "crates", "tokenscope-core", "src", "settings.rs"),
-    "utf8",
+  const payload = execFileSync(
+    "python",
+    ["-B", path.join(REPO, "scripts", "upgrade_baselines.py"), "privacy-revision"],
+    { encoding: "utf8" },
   );
-  const stripped = source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/\/\/[^\n]*/g, "");
-  const match = /^\s*(?:pub\s+)?const\s+PRIVACY_POLICY_REVISION\s*:\s*u8\s*=\s*(\d+)\s*;\s*$/m.exec(
-    stripped,
-  );
-  if (!match) throw new Error("settings.rs 缺少 PRIVACY_POLICY_REVISION 常量");
-  return Number(match[1]);
+  const revision = JSON.parse(payload).privacy_revision;
+  if (!Number.isInteger(revision) || revision <= 0) {
+    throw new Error(`settings.rs 缺少合法的 PRIVACY_POLICY_REVISION：${payload}`);
+  }
+  return revision;
 })();
 const PREP = path.join(REPO, "scripts", "prepare-native-acceptance.ps1");
 const RECORDER = path.join(REPO, "scripts", "capture-window-frames.ps1");
@@ -1526,6 +1525,60 @@ function registrySnapshot() {
 /** AC06：预置业务文件（预置 + 新增一律纳入快照比对）。十七轮复核 P2：
  * 夹具达到计划 §4b.1 组合——有效 SQLite 历史库（WAL 模式，进程退出残留
  * WAL/SHM）、两份价格快照；旧修订同意由 mutate 写入 settings。 */
+/** 同意终态严格判定：UTF-8、整篇 TOML、四项顶层字面量类型与值。
+ * 保存字节证据、业务后终态与重新同意三处共用这一份实现。 */
+function strictConsentState(input, expectedRevision) {
+  let text;
+  if (typeof input === "string") {
+    text = input;
+  } else {
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(input);
+    } catch (error) {
+      return { ok: false, detail: `不是合法 UTF-8（严格解码失败）：${error}` };
+    }
+  }
+  let program;
+  try {
+    parseToml(text);
+    program = parseTOML(text);
+  } catch (error) {
+    return { ok: false, detail: `未通过严格 TOML 解析：${error}` };
+  }
+  const top = program.body.find((table) => table.type === "TOMLTopLevelTable");
+  const topLevelValue = (name) => {
+    for (const kv of top?.body ?? []) {
+      const keys = kv.key.keys;
+      if (keys.length === 1 && (keys[0].name ?? keys[0].content ?? keys[0].value) === name) {
+        return kv.value;
+      }
+    }
+    return null;
+  };
+  const accepted = topLevelValue("privacy_policy_accepted");
+  const revision = topLevelValue("privacy_policy_revision");
+  const agreementAccepted = topLevelValue("user_agreement_accepted");
+  const agreementRevision = topLevelValue("user_agreement_revision");
+  const ok =
+    accepted?.kind === "boolean" &&
+    accepted.value === true &&
+    revision?.kind === "integer" &&
+    revision.value === expectedRevision &&
+    agreementAccepted?.kind === "boolean" &&
+    agreementAccepted.value === true &&
+    agreementRevision?.kind === "integer" &&
+    agreementRevision.value === expectedRevision;
+  return {
+    ok,
+    detail:
+      `accepted kind=${accepted?.kind} value=${JSON.stringify(accepted?.value)}；` +
+      `revision kind=${revision?.kind} value=${JSON.stringify(revision?.value)}；` +
+      `agreement kind=${agreementAccepted?.kind} value=${JSON.stringify(agreementAccepted?.value)}；` +
+      `agreementRevision kind=${agreementRevision?.kind} value=${JSON.stringify(agreementRevision?.value)}` +
+      `（顶层须布尔 true / 整数 ${expectedRevision} 各两项）`,
+  };
+}
+
 function preseedBusinessFiles(dataDir) {
   const writeFile = (name, text) => {
     const target = path.join(dataDir, name);
@@ -3405,135 +3458,23 @@ const scenarios = {
     // U+FFFD，替换后的文本骗过两个解析器——注释中 FF、截断编码、过长编码、
     // 代理项编码全被误放行，而产品 String::from_utf8 报 InvalidData）。
     // fatal 模式解码失败即拒绝；合法编码的 U+FFFD 字符本身不受影响。
-    const captureText = (() => {
-      if (captureBytes === null) return "";
-      try {
-        return new TextDecoder("utf-8", { fatal: true }).decode(captureBytes);
-      } catch {
-        return null;
-      }
-    })();
-    // 内容判定经**两个**真正的 TOML 解析器交叉（三轮/四轮复核：正则会被
-    // 注释、子表与前缀骗过；smol-toml 单独使用会把 2.0/2e0/超精度浮点当成
-    // 整数 2、并接受 2026-02-30 这类语义非法日期）：
-    // - smol-toml：整篇合法性（值语义、抛错即拒）；
-    // - toml-eslint-parser：**AST 保留字面量类型**——顶层
-    //   privacy_policy_accepted 必须是 boolean 字面量且值为 true、顶层
-    //   privacy_policy_revision 必须是 integer 字面量且值为 2；子表键、
-    //   内联表、多段键路径一律不算顶层；非法日期在解析时即被拒绝。
-    const captureContent = (() => {
-      if (captureBytes === null) return { ok: false, detail: "无字节证据" };
-      if (captureText === null) {
-        return { ok: false, detail: "字节证据不是合法 UTF-8（严格解码失败，产品同口径 InvalidData）" };
-      }
-      try {
-        parseToml(captureText);
-      } catch (error) {
-        return { ok: false, detail: `字节证据不是合法 TOML：${error}` };
-      }
-      let program;
-      try {
-        program = parseTOML(captureText);
-      } catch (error) {
-        return { ok: false, detail: `字节证据未通过严格 TOML 解析：${error}` };
-      }
-      const top = program.body.find((table) => table.type === "TOMLTopLevelTable");
-      const topLevelValue = (name) => {
-        for (const kv of top?.body ?? []) {
-          const keys = kv.key.keys;
-          // TOMLBare 键名在 name；TOMLQuoted（单引号/双引号/转义形式）在
-          // value——五轮复核 P3：只读 content 会把合法带引号键误判缺失。
-          if (
-            keys.length === 1 &&
-            (keys[0].name ?? keys[0].content ?? keys[0].value) === name
-          ) {
-            return kv.value;
-          }
-        }
-        return null;
-      };
-      const accepted = topLevelValue("privacy_policy_accepted");
-      const revision = topLevelValue("privacy_policy_revision");
-      // 2026-10-28：用户许可协议同意与隐私政策同意同一次保存写入；
-      // 终态必须四项俱全且修订为当前值（旧用户不被放行的证据链终点）。
-      const agreementAccepted = topLevelValue("user_agreement_accepted");
-      const agreementRevision = topLevelValue("user_agreement_revision");
-      const ok =
-        accepted?.kind === "boolean" &&
-        accepted.value === true &&
-        revision?.kind === "integer" &&
-        revision.value === CURRENT_CONSENT_REVISION &&
-        agreementAccepted?.kind === "boolean" &&
-        agreementAccepted.value === true &&
-        agreementRevision?.kind === "integer" &&
-        agreementRevision.value === CURRENT_CONSENT_REVISION;
-      return {
-        ok,
-        detail:
-          `accepted kind=${accepted?.kind} value=${JSON.stringify(accepted?.value)}；` +
-          `revision kind=${revision?.kind} value=${JSON.stringify(revision?.value)}；` +
-          `agreement kind=${agreementAccepted?.kind} value=${JSON.stringify(agreementAccepted?.value)}；` +
-          `agreementRevision kind=${agreementRevision?.kind} value=${JSON.stringify(agreementRevision?.value)}` +
-          `（顶层须布尔 true / 整数 ${CURRENT_CONSENT_REVISION} 各两项）`,
-      };
-    })();
+    // 内容判定经 strictConsentState（严格 UTF-8 + 两个真正的 TOML 解析器
+    // 交叉 + AST 顶层字面量类型/值）：正则会被注释、子表与前缀骗过；
+    // smol-toml 单独使用会把 3.0/3e0/超精度浮点当成整数 3。保存字节证据
+    // 与业务初始化后的终态使用同一份判定。
+    const captureContent =
+      captureBytes === null
+        ? { ok: false, detail: "无字节证据" }
+        : strictConsentState(captureBytes, CURRENT_CONSENT_REVISION);
     ck.add("consent_saved_capture_content", captureContent.ok, captureContent.detail);
     // 十七轮复核 P2：终态 settings 与保存字节证据**同口径**严格判定——
     // 正则搜索会被注释假字段骗过（复核方复现：保存证据正确、终态实际
-    // accepted=false/revision=1，注释含期望字段即全过）。严格 UTF-8 +
-    // TOML 解析 + 顶层类型/值检查；业务初始化后合法重写按终态解析
-    // （不与保存字节比对，重写正例由 consent_saved_capture_content 层保证）。
-    const terminalCheck = (() => {
-      let terminalText;
-      try {
-        terminalText = new TextDecoder("utf-8", { fatal: true }).decode(
-          fs.readFileSync(settingsPath),
-        );
-      } catch (decodeError) {
-        return { ok: false, detail: `终态 settings 不是合法 UTF-8：${decodeError}` };
-      }
-      let program;
-      try {
-        parseToml(terminalText);
-        program = parseTOML(terminalText);
-      } catch (parseError) {
-        return { ok: false, detail: `终态 settings 未通过严格 TOML 解析：${parseError}` };
-      }
-      const top = program.body.find((table) => table.type === "TOMLTopLevelTable");
-      const topLevelValue = (name) => {
-        for (const kv of top?.body ?? []) {
-          const keys = kv.key.keys;
-          if (keys.length === 1 && (keys[0].name ?? keys[0].content ?? keys[0].value) === name) {
-            return kv.value;
-          }
-        }
-        return null;
-      };
-      const accepted = topLevelValue("privacy_policy_accepted");
-      const revision = topLevelValue("privacy_policy_revision");
-      // 2026-10-28：终态必须同时证明接受了当前用户许可协议——
-      // 只有隐私政策同意（哪怕修订号更高）不构成新版协议同意。
-      const agreementAccepted = topLevelValue("user_agreement_accepted");
-      const agreementRevision = topLevelValue("user_agreement_revision");
-      const ok =
-        accepted?.kind === "boolean" &&
-        accepted.value === true &&
-        revision?.kind === "integer" &&
-        revision.value === CURRENT_CONSENT_REVISION &&
-        agreementAccepted?.kind === "boolean" &&
-        agreementAccepted.value === true &&
-        agreementRevision?.kind === "integer" &&
-        agreementRevision.value === CURRENT_CONSENT_REVISION;
-      return {
-        ok,
-        detail:
-          `accepted kind=${accepted?.kind} value=${JSON.stringify(accepted?.value)}；` +
-          `revision kind=${revision?.kind} value=${JSON.stringify(revision?.value)}；` +
-          `agreement kind=${agreementAccepted?.kind} value=${JSON.stringify(agreementAccepted?.value)}；` +
-          `agreementRevision kind=${agreementRevision?.kind} value=${JSON.stringify(agreementRevision?.value)}` +
-          `（顶层须布尔 true / 整数 ${CURRENT_CONSENT_REVISION} 各两项）`,
-      };
-    })();
+    // accepted=false/revision=1，注释含期望字段即全过）。业务初始化后
+    // 合法重写按终态解析（不与保存字节比对，重写正例由上一检查保证）。
+    const terminalCheck = strictConsentState(
+      fs.readFileSync(settingsPath),
+      CURRENT_CONSENT_REVISION,
+    );
     ck.add("accept_writes_consent_with_revision", terminalCheck.ok, terminalCheck.detail);
 
     // 自启命令层路由（方案 A / PR52 复盘补证）：helper 单测不能替代命令层
@@ -3725,18 +3666,16 @@ const scenarios = {
     // 同意 → 同一次保存写入 true 与当前修订号，进入业务。
     await page.locator(".privacy-actions button", { hasText: "同意并继续" }).first().click();
     await page.waitForSelector(".app-nav", { timeout: 60000 });
-    ev.settingsAfterAccept = fs.readFileSync(settingsPath, "utf8");
+    const afterAcceptBytes = fs.readFileSync(settingsPath);
+    ev.settingsAfterAccept = afterAcceptBytes.toString("utf8");
+    const afterAcceptState = strictConsentState(
+      afterAcceptBytes,
+      CURRENT_CONSENT_REVISION,
+    );
     ck.add(
       "reconsent_writes_current_revision",
-      /privacy_policy_accepted\s*=\s*true/.test(ev.settingsAfterAccept) &&
-        new RegExp(`privacy_policy_revision\\s*=\\s*${CURRENT_CONSENT_REVISION}`).test(
-          ev.settingsAfterAccept,
-        ) &&
-        /user_agreement_accepted\s*=\s*true/.test(ev.settingsAfterAccept) &&
-        new RegExp(`user_agreement_revision\\s*=\\s*${CURRENT_CONSENT_REVISION}`).test(
-          ev.settingsAfterAccept,
-        ),
-      ev.settingsAfterAccept.split("\n").slice(0, 6).join(" | "),
+      afterAcceptState.ok,
+      afterAcceptState.detail,
     );
     // 同意后的业务初始化必须发生在同意落盘之后：business_ready 的 seq
     // 严格大于 consent_saved（顺序颠倒 = 同意前就有业务读取）。

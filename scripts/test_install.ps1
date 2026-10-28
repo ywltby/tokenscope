@@ -99,14 +99,12 @@ function Write-SeedData {
     $claudeDirJson = $sourceDirClaude -replace '\\', '/'
     $codexDirJson = $sourceDirCodex -replace '\\', '/'
     # 当前共同同意修订号从受测源码读取（隐私政策 + 用户许可协议的共同
-    # 版本）；本安装测试覆盖的是**已完成同意**后的安装/迁移/卸载路径，
-    # 首次同意弹窗由原生 consent-gate 场景与升级契约的闸门观察段覆盖。
-    $settingsSource = Join-Path $RepoRoot "crates/tokenscope-core/src/settings.rs"
-    $settingsText = Get-Content -LiteralPath $settingsSource -Raw -Encoding utf8
-    $revisionMatch = [regex]::Match($settingsText,
-        '(?m)^(?:pub\s+)?const\s+PRIVACY_POLICY_REVISION\s*:\s*u8\s*=\s*(\d+)\s*;')
-    if (-not $revisionMatch.Success) { throw "settings.rs 缺少 PRIVACY_POLICY_REVISION 常量" }
-    $consentRevision = $revisionMatch.Groups[1].Value
+    # 版本）；复用 upgrade_baselines.py 的注释/字符串剥离，避免假常量。
+    # 本安装测试覆盖的是**已完成同意**后的安装/迁移/卸载路径，首次同意
+    # 弹窗由原生 consent-gate 场景与升级契约的闸门观察段覆盖。
+    $revisionJson = python -B (Join-Path $RepoRoot "scripts/upgrade_baselines.py") privacy-revision
+    if ($LASTEXITCODE -ne 0) { throw "读取 PRIVACY_POLICY_REVISION 失败" }
+    $consentRevision = [string](($revisionJson | ConvertFrom-Json).privacy_revision)
     @"
 # 同意基线：隐私政策与用户许可协议四项同一次写入（与真实同意保存形态
 # 一致）。缺协议记录或修订低于当前的旧同意会被新版闸门判为 StaleRevision。

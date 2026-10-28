@@ -631,6 +631,9 @@ def main():
     command = sub.add_parser("select")
     command.add_argument("--current-version", required=True)
     command = sub.add_parser("entries")
+    command = sub.add_parser("privacy-revision")
+    command.add_argument("--source", type=Path,
+                         default=ROOT / "crates/tokenscope-core/src/settings.rs")
     command = sub.add_parser("add")
     command.add_argument("--tag", required=True)
     command.add_argument("--unpublished", action="store_true")
@@ -649,6 +652,11 @@ def main():
             result = selection_payload(load_registry(), args.current_version)
         elif args.mode == "entries":
             result = entries_payload(load_registry())
+        elif args.mode == "privacy-revision":
+            revision = extract_privacy_revision(args.source.read_text(encoding="utf-8"))
+            if revision is None:
+                raise ValueError(f"{args.source} 缺少 PRIVACY_POLICY_REVISION 常量")
+            result = {"privacy_revision": revision}
         elif args.mode == "add":
             entry = add_entry(args.tag,
                               status="unpublished" if args.unpublished else "published",

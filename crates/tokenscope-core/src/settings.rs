@@ -211,8 +211,8 @@ pub struct Settings {
     pub privacy_policy_accepted: bool,
     /// WB05：同意记录对应的政策修订号；None = v2 程序写入的旧同意（视为
     /// 修订 1）。[`accept_privacy_policy`] 在同一次原子保存中写入 true 与
-    /// 当前修订号；`read_consent` 只认修订号不低于 [`PRIVACY_POLICY_REVISION`]
-    /// 的同意。
+    /// 当前修订号；`read_consent` 只认修订号**精确等于**
+    /// [`PRIVACY_POLICY_REVISION`] 的同意（更高或更低都重新询问）。
     #[serde(default)]
     pub privacy_policy_revision: Option<u8>,
     /// 用户许可协议（`docs/terms.md`）的同意记录。缺失/false = 未同意；
@@ -221,8 +221,8 @@ pub struct Settings {
     #[serde(default)]
     pub user_agreement_accepted: bool,
     /// 同意记录对应的用户许可协议修订号（与隐私政策共用
-    /// [`PRIVACY_POLICY_REVISION`]）。None/低于当前 = 需要重新同意；
-    /// 高于当前视为同意（不降级已给出的授权）。
+    /// [`PRIVACY_POLICY_REVISION`]）。None/低于当前/高于当前 = 需要重新
+    /// 同意——只有精确等于当前版本的成对记录才能证明同意了本版协议。
     #[serde(default)]
     pub user_agreement_revision: Option<u8>,
     /// 定时自动同步在线价格（默认开启，每 24h）。
@@ -434,10 +434,11 @@ pub fn load(path: &Path) -> Result<Settings> {
 /// [`read_consent`] 的判定结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsentRead {
-    /// 真实 TOML 在位且同意字段为 true，修订号不低于当前修订。
+    /// 真实 TOML 在位且同意字段为 true，两份修订号都精确等于当前修订。
     Granted,
-    /// 真实 TOML 在位且同意字段为 true，但修订号低于当前修订（含缺修订号的
-    /// 旧同意，视为 1）：按未同意处理，且需要向用户提示「政策已更新」。
+    /// 真实 TOML 在位且同意字段为 true，但修订号与当前修订不一致（低于、
+    /// 高于或缺失，含两份记录彼此不一致）：按未同意处理，且需要向用户
+    /// 提示「政策已更新」。
     StaleRevision,
     /// 真实 TOML 在位，但同意字段缺失或为 false。
     NotGranted,
@@ -462,12 +463,13 @@ pub fn read_consent(path: &Path) -> ConsentRead {
     };
     match toml::from_str::<Settings>(&text) {
         Ok(s) if s.privacy_policy_accepted => {
-            // WB05：修订号低于当前（含缺修订号的旧同意，视为 1）按未同意处理，
-            // 并提示「政策已更新」；高于当前视为同意（不降级已给出的授权）。
-            if s.privacy_policy_revision.unwrap_or(1) < PRIVACY_POLICY_REVISION {
+            // 精确匹配：低于当前是旧版同意，高于当前是更新版本（或用户
+            // 降级前）写入的记录——两者都无法证明用户同意的是本版展示的
+            // 协议。两份文档的修订号还必须一致。缺失修订号同样重新询问。
+            if s.privacy_policy_revision != Some(PRIVACY_POLICY_REVISION) {
                 ConsentRead::StaleRevision
             } else if !s.user_agreement_accepted
-                || s.user_agreement_revision.unwrap_or(1) < PRIVACY_POLICY_REVISION
+                || s.user_agreement_revision != Some(PRIVACY_POLICY_REVISION)
             {
                 // 二十轮（用户决定）：同意记录必须能证明用户接受了**当前**
                 // 用户许可协议。只有隐私政策同意的旧记录（即使修订号更高）
@@ -527,8 +529,8 @@ pub const SETTINGS_TEMPLATE: &str = "\
 #
 # privacy_policy_revision = <整数>
 #     同意记录对应的隐私政策修订号（与 accepted 同一次保存写入）。
-#     记录的修订号低于程序当前修订时，视为未同意：下一次启动显示「政策
-#     已更新」并重新询问；高于当前值视为同意（不降级已给出的授权）。
+#     只有精确等于程序当前修订号才视为同意；低于、高于（例如用户降级到
+#     旧版）或缺失都会在下一次启动显示「政策已更新」并重新询问。
 #     没有该行的旧同意视为修订 1（升级后同样触发重新询问）。
 #
 # user_agreement_accepted = true | false
@@ -538,7 +540,7 @@ pub const SETTINGS_TEMPLATE: &str = "\
 #
 # user_agreement_revision = <整数>
 #     同意记录对应的用户许可协议修订号（与隐私政策共用同一修订号）。
-#     低于程序当前修订时重新询问；高于当前值视为同意。
+#     与隐私政策修订号必须一致且都精确等于程序当前修订，否则重新询问。
 #
 # price_auto_sync = true | false
 #     价格自动同步（默认开启，每 24h 检查一次；关闭后仅停止自动同步，仍可手动联网更新价格）。
@@ -1284,14 +1286,14 @@ mod tests {
         );
         dirs.push(d);
         assert_eq!(read_consent(&p), ConsentRead::Granted);
-        // 修订高于当前（未来版本写入）：不降级已给出的授权——协议同意
-        // 记录也须存在且修订不低于当前。
+        // 修订高于当前（未来版本写入，程序降级）：同样不是本版同意，
+        // 不得放行——否则记录无法证明用户同意了当前程序展示的协议。
         let (d, p) = consent_file(
             "privacy_policy_accepted = true\nprivacy_policy_revision = 4\nuser_agreement_accepted = true\nuser_agreement_revision = 4\n",
             "future-4",
         );
         dirs.push(d);
-        assert_eq!(read_consent(&p), ConsentRead::Granted);
+        assert_eq!(read_consent(&p), ConsentRead::StaleRevision);
         // 同意字段为 false（无论修订号）：未同意
         let (d, p) = consent_file(
             "privacy_policy_accepted = false\nprivacy_policy_revision = 2\n",
@@ -1743,6 +1745,61 @@ mod agreement_consent_tests {
             "agreement-current",
         );
         assert_eq!(read_consent(&path), ConsentRead::Granted);
+        cleanup(&[dir]);
+    }
+
+    #[test]
+    fn future_revision_for_both_documents_is_not_current_consent() {
+        let future = PRIVACY_POLICY_REVISION + 1;
+        let (dir, path) = consent_file(
+            &format!(
+                "privacy_policy_accepted = true\nprivacy_policy_revision = {future}\n\
+                 user_agreement_accepted = true\nuser_agreement_revision = {future}\n"
+            ),
+            "both-future",
+        );
+        assert_eq!(
+            read_consent(&path),
+            ConsentRead::StaleRevision,
+            "两份记录都高于当前（例如用户降级到旧版）时不得放行：用户没有同意过本版"
+        );
+        cleanup(&[dir]);
+    }
+
+    #[test]
+    fn mismatched_document_revisions_are_stale() {
+        let current = PRIVACY_POLICY_REVISION;
+        for (privacy, agreement, tag) in [
+            (current, current + 1, "agreement-higher"),
+            (current + 1, current, "privacy-higher"),
+        ] {
+            let (dir, path) = consent_file(
+                &format!(
+                    "privacy_policy_accepted = true\nprivacy_policy_revision = {privacy}\n\
+                     user_agreement_accepted = true\nuser_agreement_revision = {agreement}\n"
+                ),
+                tag,
+            );
+            assert_eq!(
+                read_consent(&path),
+                ConsentRead::StaleRevision,
+                "两份记录修订不一致时不能证明同意了同一版协议（{tag}）"
+            );
+            cleanup(&[dir]);
+        }
+    }
+
+    #[test]
+    fn missing_revision_rows_are_stale_even_when_both_accepted() {
+        let (dir, path) = consent_file(
+            "privacy_policy_accepted = true\nuser_agreement_accepted = true\n",
+            "both-missing-revision",
+        );
+        assert_eq!(
+            read_consent(&path),
+            ConsentRead::StaleRevision,
+            "缺修订号无法证明同意的是当前版本，必须重新询问"
+        );
         cleanup(&[dir]);
     }
 

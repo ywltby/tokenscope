@@ -80,6 +80,42 @@ def _consent_prefix(revision, agreement=False):
     return "\n".join(lines) + "\n"
 
 
+def consent_state(data):
+    """读取当前落盘的同意记录（严格类型），供升级编排判断目标版本门禁。
+
+    返回 state=missing/unreadable/present；present 时四项为严格布尔/整数或
+    null（缺失或类型不符合产品 `Option<u8>` / bool 的口径）。门禁适用性
+    由调用方结合**目标版本自身语义**判断，避免用当前源码修订号冒充历史跳。
+    """
+    path = Path(data) / "settings.toml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"state": "missing"}
+    except (OSError, UnicodeDecodeError) as exc:
+        return {"state": "unreadable", "detail": str(exc)}
+    try:
+        settings = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        return {"state": "unreadable", "detail": str(exc)}
+
+    def boolean(key):
+        value = settings.get(key)
+        return value if type(value) is bool else None
+
+    def revision(key):
+        value = settings.get(key)
+        return value if type(value) is int and 0 <= value <= 255 else None
+
+    return {
+        "state": "present",
+        "privacy_policy_accepted": boolean("privacy_policy_accepted"),
+        "privacy_policy_revision": revision("privacy_policy_revision"),
+        "user_agreement_accepted": boolean("user_agreement_accepted"),
+        "user_agreement_revision": revision("user_agreement_revision"),
+    }
+
+
 def grant_test_consent(data, revision=None):
     path = Path(data) / "settings.toml"
     text = path.read_text(encoding="utf-8")
@@ -289,28 +325,41 @@ def verify_settings(data, original, from_format, to_format, migrations=MIGRATION
         raise ValueError("当前验收同意状态未保留")
     if consent_revision is not None:
         revision = int(consent_revision)
-        if current.get("privacy_policy_revision") != revision:
+        privacy_revision = current.get("privacy_policy_revision")
+        if type(privacy_revision) is not int or privacy_revision != revision:
             raise ValueError(
-                "当前隐私政策同意修订不是本版："
-                f"{current.get('privacy_policy_revision')!r} != {revision}"
+                "当前隐私政策同意修订不是本版整数："
+                f"{privacy_revision!r} != {revision}"
             )
         if current.get("user_agreement_accepted") is not True:
             raise ValueError("当前用户许可协议同意缺失")
-        if current.get("user_agreement_revision") != revision:
+        agreement_revision = current.get("user_agreement_revision")
+        if type(agreement_revision) is not int or agreement_revision != revision:
             raise ValueError(
-                "当前用户许可协议同意修订不是本版："
-                f"{current.get('user_agreement_revision')!r} != {revision}"
+                "当前用户许可协议同意修订不是本版整数："
+                f"{agreement_revision!r} != {revision}"
             )
     # 旧版已给出的同意不得丢失或降级；旧版从未写协议字段（0.6.0 的真实
     # 形态）时由新版本闸门重新询问，不能在这里要求它凭空存在。
     for key in ("privacy_policy_accepted", "user_agreement_accepted"):
+        if key in expected and type(expected[key]) is not bool:
+            raise ValueError(f"旧同意记录类型非法：{key}")
         if expected.get(key) is True and current.get(key) is not True:
             raise ValueError(f"旧同意记录未保留：{key}")
-    old_revision = expected.get("privacy_policy_revision")
-    new_revision = current.get("privacy_policy_revision")
-    if (isinstance(old_revision, int) and isinstance(new_revision, int)
-            and new_revision < old_revision):
-        raise ValueError(f"同意修订号被下调：{old_revision} -> {new_revision}")
+    # 修订号必须仍是整数：删除记录行同样算丢失（Python 的 3.0 == 3、
+    # true == 1 不能通过产品的 Option<u8> 解析口径）。
+    for key, label in (("privacy_policy_revision", "隐私政策同意"),
+                       ("user_agreement_revision", "用户许可协议同意")):
+        if key not in expected:
+            continue
+        old_revision = expected[key]
+        if type(old_revision) is not int:
+            raise ValueError(f"旧{label}修订类型非法：{old_revision!r}")
+        new_revision = current.get(key)
+        if type(new_revision) is not int:
+            raise ValueError(f"旧{label}修订未保留：{new_revision!r}")
+        if new_revision < old_revision:
+            raise ValueError(f"{label}修订被下调：{old_revision} -> {new_revision}")
     renames = {operation["from"]: operation["to"] for operation in operations
                if operation["kind"] == "rename"}
     defaults = [(operation["path"], operation["value"], operation.get("allow_missing", False))
@@ -353,6 +402,8 @@ def main():
     command = sub.add_parser("consent")
     command.add_argument("--data-dir", type=Path, required=True)
     command.add_argument("--revision", type=int, default=None)
+    command = sub.add_parser("consent-state")
+    command.add_argument("--data-dir", type=Path, required=True)
     command = sub.add_parser("ensure-consent")
     command.add_argument("--data-dir", type=Path, required=True)
     command.add_argument("--revision", type=int, default=None)
@@ -375,6 +426,8 @@ def main():
         elif args.mode == "consent":
             grant_test_consent(args.data_dir, revision=args.revision)
             result = {"ok": True, "test_consent_added": True}
+        elif args.mode == "consent-state":
+            result = consent_state(args.data_dir)
         elif args.mode == "ensure-consent":
             result = ensure_test_consent(args.data_dir, revision=args.revision,
                                          agreement=args.agreement)

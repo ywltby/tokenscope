@@ -42,14 +42,15 @@
 
 ## 执行记录（2026-10-28）
 
-**实现（已按最终方案完成）**：
+**实现（含 2026-10-28 复核修复）**：
 
 - 共同同意修订号 `PRIVACY_POLICY_REVISION` 由 2 升为 **3**；`Settings` 新增
   `user_agreement_accepted` / `user_agreement_revision` 两个字段。
-  `read_consent` 在隐私政策检查之外要求**协议同意记录存在、为 true 且修订
-  不低于当前**——仅有隐私政策同意的旧记录（含修订号更高的形态）一律
-  `StaleRevision`；`accept_privacy_policy` 在同一次原子保存中写四项。
-- 设置模板与设置页说明补充两个协议字段的含义。
+  `read_consent` 对隐私政策与协议两份记录都要求**精确等于当前修订**：
+  低于当前（旧版）、高于当前（用户降级到旧版）、两份修订不一致、缺协议
+  记录或修订行，一律 `StaleRevision`；`accept_privacy_policy` 在同一次
+  原子保存中写四项。
+- 设置模板与设置页说明补充两个协议字段的含义，并改为精确匹配口径。
 - 前端同意弹窗：新增「点击『同意并继续』即表示您同意隐私政策和用户许可
   协议」说明；协议正文缺失或政策正文缺失时**禁用同意**并提示重新检查；
   协议可离线展开查看。`POLICY_UPDATED_DETAIL` 改为覆盖两份文件的通用提示。
@@ -58,46 +59,60 @@
   运行或更新后须在应用内明确同意两份文件」。README 同步该表述。
 - 版本守卫：`scripts/bump_version.py --check` 在 `docs/terms.md` **或**
   `docs/privacy.md` 变化时，要求当前共同同意修订号高于基线；基线无常量时
-  拒绝。`upgrade_baselines.extract_privacy_revision` 供两处共用。
-- 升级编排：`Grant-UpgradeConsent` 与 `Test-ConsentGateApplies` 改为从受测
-  源码读取当前修订；`upgrade_fixture._consent_prefix` 只为历史基线写它
-  自己认识的隐私政策同意（0.6.0 只有修订 2、没有协议字段），当前版本模拟
-  重新同意时由 `ensure-consent --agreement` 同一次写四项。升级后设置核对
-  把同意四项当作受测迁移单独验证（当前隐私修订、协议同意存在且同修订、
-  不下调），其余用户设置仍逐项保留。**0.6.0 历史基线登记保持 revision 2，
-  不改历史**。
-- 原生验收：`CURRENT_CONSENT_REVISION` 从受测源码提取；终态与同意字节证据
-  均校验四项（strict TOML + 字面量类型）；preseeded 构造「旧修订 2 + 无协议
-  记录」的真实旧用户形态；accept-restart 显式结束上一实例后重启。
+  拒绝。`upgrade_baselines.extract_privacy_revision` / `privacy-revision`
+  子命令成为 PowerShell、安装测试与原生验收共用的常量提取口径。
+- 升级编排按**目标版本自身语义**装配与判断：
+  - `Get-TargetConsentRevision`：当前版本读受测源码，历史格式 3 读登记表
+    的 `privacy_revision`（0.6.0 = 2），格式 < 3 返回空。
+  - `Grant-UpgradeConsent`：历史 0.6.0 只写它自己认识的隐私同意修订 2，
+    不写协议字段；当前版本写受测源码修订 + 协议两项（同一次写入）。
+  - `Test-ConsentGateApplies`：通过 `consent-state` 读取**实际落盘记录**，
+    当前版本要求四项精确匹配；0.6.0 只要求隐私同意且修订不低于它自己的
+    修订 2（它不认识协议字段）。删除硬编码 `ConsentRevision=2`，门禁
+    判断不再依赖编排自己记的应然状态。
+  - `upgrade_fixture.consent-state` 用 tomllib 严格类型读取记录，供门禁
+    判断；`ensure-consent --agreement` 仅当前版本使用。
+- 升级设置核对 `verify_settings`：修订号必须是 TOML 整数（浮点、布尔、
+  字符串都不行）；旧隐私/协议修订行不得删除或下调，旧 accepted 不得丢失；
+  其余用户设置继续逐项保留。
+- 原生验收：`strictConsentState` 统一严格 UTF-8 解码 + smol-toml /
+  toml-eslint-parser 双解析 + AST 顶层字面量类型/值，保存字节证据、业务后
+  终态与重新同意三处共用；新增注释假字段、子表/点号键、`30` 前缀、浮点、
+  非法 UTF-8 五类负例（真实实现抽取执行，非复制断言）。
+- 原生验收的 `CURRENT_CONSENT_REVISION`、`Get-ConsentRevision` 与安装测试
+  均复用上述 Python 常量剥离器；块注释中的假常量有回归覆盖。
 
-**验证（本地）**：
+**验证（本地，本轮复核修复后）**：
 
-- 核心库 300 项、壳 acceptance 70 项（含壳层四项落盘断言）、clippy 双模式、
-  fmt 全绿。
-- 前端 879 项、typecheck、prettier 全绿；同意弹窗 4 项（含两份文件说明、
-  协议缺失禁用、硬换行）。
-- 升级契约 80 项（含 0.6.0→0.6.1 旧同意失效→观察→授权顺序）；升级脚本
-  34 项；bump_version 35 项（含协议变更必须递增的共同同意守卫）。升级夹具
-  22 项全部通过，其中新增两项同意迁移用例：旧修订 2 无协议记录 → 当前
-  四项通过，缺协议 / 协议 false / 协议修订错 / 隐私修订下调 / 其他用户
-  设置改动逐项拒绝。
-- PR CI 40670128332 的 0.6.0 单跳红证据（`旧设置未保留：
-  privacy_policy_revision`）暴露了「把同意迁移当旧设置损坏」的校对错误；
-  修复后本地演练 0.6.0（`prepare --consent-revision 2`）→ `ensure-consent
-  --revision 3 --agreement` → `settings --consent-revision 3` 通过，
-  0.5.13 布尔同意路径同样通过。
-- 原生隔离场景（受测 EXE `97c5cfec…7dab0`，提交 `0313bc6` + 本次改动）：
-  preseeded（旧修订 2 + 无协议：15 秒观察、双快照零变化）、denied-ipc、
-  accept-order（四项落盘 + 终态严格判定）、variants-corrupt、variants-close
-  三连 15/15；另跑 consent-gate（新用户）、accept-restart（同意后重启不再
-  询问）、policy-update（再次更新触发重新同意）均通过。
-- 真实 0.6.0 → 本版单跳与连续链由 PR 的 Install test（单跳）与合并后
-  Release（两条链）执行；本机不运行真实安装/升级。PR 最新一轮（提交
-  `8f04739`，runs 40673593475 / 40673593494 / 40673593484）18 项通过、
-  0 失败、`upgrade-chain` 按设计跳过。0.6.0 present/deleted 单跳均通过：
-  旧设置只有隐私同意修订 2、无协议字段；升级后 45 秒闸门观察期间
-  settings 与业务日志/历史库零变化；授权后四项为当前修订 3，业务汇总与
-  重启复核通过（受测 EXE `938420d1…a1be`，历史起点提交 `44c026da…`）。
+- 核心库 303 项、壳 acceptance 70 项（1 ignored）、fmt/clippy 由钩子/CI
+  复核；前端 885 项（含新增严格同意断言 6 项）、typecheck 全绿。
+- Python 脚本 353 项全绿；升级契约 93 项（新增按目标版本语义、真实 0.6.0
+  中间跳、块注释假常量等回归）；升级夹具 24 项；安装 helper 26 项；
+  PowerShell 语法 12 个脚本通过。
+- 先红证据（保留在本地运行记录）：精确匹配修复前 2 项核心测试收到
+  `Granted`；门禁适用性修复前「当前版本四项精确匹配」被判适用（实际应为
+  不适用）；设置核对修复前浮点 3.0 与删除修订行均未抛错；原生正则修复前
+  注释/子表/30 前缀/浮点误放行、非法字节触发 `text.split is not a function`。
+- 此前本地原生三连的 privacy-preseeded **实际写入修订 1**（v2 布尔同意
+  形态），不是修订 2；原记录已更正。修订 2 的真实旧用户由 0.6.0 单跳与
+  连续链覆盖，不重写原三连证据。
+
+**证据轮次与勘误（按 API/artifact 核实）**：
+
+- 40673593494（起点提交 `8f04739`）：0.6.0 present 作业
+  `122771980843`、deleted 作业 `122771980642`；升级结果 EXE
+  `938420d1c5aa1b9ab645693269c112d5ec38c6aa3e863b532d865b9a2847a1be`。
+  这是**上一轮**证据，不是最终轮。
+- 40676126853（PR 头 `b8648d3`，产物记录 `current_commit`
+  `b05536c…`）：0.6.0 present 作业 `122780516355`、deleted 作业
+  `122780516352`；两份升级结果的 EXE 均为
+  `e711b0b5ec0481ad84a274e968a075b52544346b322bb6e3733bcada29f0e081`。
+  两轮 0.6.0 的旧设置都只有 `privacy_policy_accepted = true` 与
+  `privacy_policy_revision = 2`，没有协议字段；45 秒闸门观察均为
+  settings 不变、业务日志/历史库零新增。
+- 此前把 40673593475 / 40673593484 与 40673593494 混作同一“最终轮”、并
+  把 `938420d1…` 写成最终轮 EXE 不实；上述两轮分别标注。本轮修复后的
+  运行证据在推送后另行回填。
 
 **未解决/边界**：AC07 暂缓；N10 开放；真实自启出现/移除仍待 D5 3.4 人工
 签字；WorkBuddy 双版本与历史 CI 偶发失败根因不受本批影响。

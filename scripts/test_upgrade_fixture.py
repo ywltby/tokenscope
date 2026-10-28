@@ -241,6 +241,64 @@ class UpgradeFixtureCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "close_action"):
             fixture.verify_settings(self.data, original, 3, 3, consent_revision=3)
 
+    def test_verify_settings_requires_integer_consent_revisions(self):
+        # 产品按 Option<u8> 解析：TOML 浮点 3.0 会让整份设置不可读，
+        # Python 的 3.0 == 3 不能成为放行理由。
+        fixture.prepare(self.data, self.sources, "history", consent_revision=2)
+        original = self.root / "original-float.toml"
+        original.write_bytes((self.data / "settings.toml").read_bytes())
+        fixture.ensure_test_consent(self.data, revision=3, agreement=True)
+        path = self.data / "settings.toml"
+        floats = (path.read_text(encoding="utf-8")
+                  .replace("privacy_policy_revision = 3", "privacy_policy_revision = 3.0")
+                  .replace("user_agreement_revision = 3", "user_agreement_revision = 3.0"))
+        path.write_text(floats, encoding="utf-8")
+        with self.assertRaises(ValueError):
+            fixture.verify_settings(self.data, original, 3, 3, consent_revision=3)
+        # 布尔也不是整数：true == 1 不能让修订检查放行。
+        booleans = (path.read_text(encoding="utf-8")
+                    .replace("privacy_policy_revision = 3.0", "privacy_policy_revision = true")
+                    .replace("user_agreement_revision = 3.0", "user_agreement_revision = true"))
+        path.write_text(booleans, encoding="utf-8")
+        with self.assertRaises(ValueError):
+            fixture.verify_settings(self.data, original, 3, 3, consent_revision=3)
+
+    def test_verify_settings_rejects_lost_or_downgraded_old_consent(self):
+        fixture.prepare(self.data, self.sources, "history", consent_revision=2)
+        original = self.root / "original-old-consent.toml"
+        old_text = (self.data / "settings.toml").read_text(encoding="utf-8")
+        old_text = old_text.replace(
+            "price_auto_sync = false\n",
+            "user_agreement_accepted = true\nuser_agreement_revision = 2\nprice_auto_sync = false\n",
+            1,
+        )
+        original.write_text(old_text, encoding="utf-8")
+        (self.data / "settings.toml").write_text(old_text, encoding="utf-8")
+        fixture.ensure_test_consent(self.data, revision=3, agreement=True)
+        path = self.data / "settings.toml"
+        agreed = path.read_text(encoding="utf-8")
+        # 中间跳不传 consent_revision：旧隐私修订 2 被删除仍必须失败。
+        missing_privacy = re.sub(
+            r"(?m)^[ \t]*privacy_policy_revision[ \t]*=.*\r?\n?", "", agreed)
+        path.write_text(missing_privacy, encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "隐私政策"):
+            fixture.verify_settings(self.data, original, 3, 3)
+        # 旧协议修订 2 被删除或下调到 1：同样必须失败。
+        path.write_text(
+            re.sub(r"(?m)^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?", "", agreed),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "用户许可协议"):
+            fixture.verify_settings(self.data, original, 3, 3)
+        path.write_text(agreed.replace("user_agreement_revision = 3",
+                                       "user_agreement_revision = 1"),
+                        encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "用户许可协议"):
+            fixture.verify_settings(self.data, original, 3, 3)
+        # 合法迁移：旧隐私修订 2 → 当前 3（中间跳不要求协议）仍通过。
+        path.write_text(agreed, encoding="utf-8")
+        self.assertTrue(fixture.verify_settings(self.data, original, 3, 3)["ok"])
+
     def test_agreement_is_only_written_for_explicit_current_consent(self):
         # 历史钩子（prepare / grant）保持旧版本真实形态；只有为当前版本
         # 模拟重新同意（agreement=True）才写协议两项，且一次写入不重复键。

@@ -48,6 +48,33 @@ function extractHelper(name, deps) {
   );
 }
 
+/** 与 native-acceptance.mjs 共用的同意终态严格判定（受测实现本身）。 */
+function extractStrictConsentState() {
+  const start = source.indexOf("function strictConsentState");
+  assert.ok(start >= 0, "strictConsentState 未找到");
+  let depth = 0;
+  let end = -1;
+  for (let i = source.indexOf("{", start); i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+  }
+  assert.ok(end > start, "strictConsentState 边界未找到");
+  return new Function(
+    "parseToml",
+    "parseTOML",
+    `return ${source.slice(start, end)};`,
+  )(parseToml, parseTOML);
+}
+
+const strictConsentState = extractStrictConsentState();
+
 function extractScenario(name, endMarker, bindings) {
   const start = source.indexOf(`  async "${name}"`);
   const end = source.indexOf(endMarker, start);
@@ -403,6 +430,7 @@ function runAcceptOrderScenario(options = {}) {
       parseToml,
       parseTOML,
       CURRENT_CONSENT_REVISION: CONSENT_REVISION,
+      strictConsentState,
       withTimeout: realWithTimeout,
       registrySnapshot() {
         registryCalls += 1;
@@ -1162,6 +1190,7 @@ function runAcceptOrderDiagnostics({ pageBehavior }) {
       parseToml,
       parseTOML,
       CURRENT_CONSENT_REVISION: CONSENT_REVISION,
+      strictConsentState,
       // 真实 withTimeout 语义（race 超时跳过记原因），时间缩短便于测试。
       withTimeout: (task, _ms, detail) => realWithTimeout(task, 50, detail),
       registrySnapshot() {
