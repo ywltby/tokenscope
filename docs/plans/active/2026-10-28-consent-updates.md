@@ -149,6 +149,18 @@
     40698748313（单跳全过，`upgrade-chain` 按设计跳过）、Native UI E2E
     40698748680 均通过；代码与 `b3ea0a6` 相同，两条链证据仍取
     40694379602。
+  - 2026-10-29 二轮复核 HEAD `0bbdeed`：PR 必需检查 run 40716869841
+    （CI）、40716869894（Install test，0.6.0 present 作业
+    `122922582940`、deleted `122922582948`，EXE
+    `462b4e0dfc3db98cce5e3284564a4999142de7eb0103c850c768796efced311b`）、
+    40716869939（Native UI E2E，新增 `privacy-revision2-consent`
+    场景断言全 true：修订 2 旧用户、门禁观察零读写、真实点击后四项修订 3、
+    重启不询问）18 项通过、`upgrade-chain` 跳过。手动链 run 40716879803：
+    present 作业 `122924293784`、deleted `122924293455`，两条链全过，
+    EXE `a2debaa95968fc7058ef40ad507b608870c67fc97615d1ecbdb92734b5326147`；
+    chain-04/05 门禁证据改为 `settings_bytes_unchanged` + SHA256 +
+    `snapshot_scope`（字节比对，logs/history 仅路径/大小/时间戳边界）。
+    同一 run 的 0.6.0 单跳作业 `122924424407` / `122924423861` 也通过。
 
 **未解决/边界**：AC07 暂缓；N10 开放；真实自启出现/移除仍待 D5 3.4 人工
 签字；WorkBuddy 双版本与历史 CI 偶发失败根因不受本批影响。
