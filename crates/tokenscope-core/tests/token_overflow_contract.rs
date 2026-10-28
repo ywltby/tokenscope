@@ -109,6 +109,9 @@ fn overflowing_codex_line_is_skipped_and_next_line_survives() {
 fn aggregate_overflow_returns_error_without_partial_result() {
     let tz = jiff::tz::TimeZone::get("Asia/Shanghai").unwrap();
     let mk = |input: u64| UsageEvent {
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
         ts: "2026-07-17T15:00:00Z".parse().unwrap(),
         agent: AgentKind::ClaudeCode,
         model: "m".into(),
@@ -147,6 +150,9 @@ fn legacy_cached_event_cannot_bypass_validation() {
     // —— 模拟旧版本缓存中的越界组合事件。
     let i64_max = i64::MAX as u64;
     let bad = UsageEvent {
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
         ts: "2026-07-17T15:00:00Z".parse().unwrap(),
         agent: AgentKind::ClaudeCode,
         model: "bad".into(),
@@ -163,6 +169,9 @@ fn legacy_cached_event_cannot_bypass_validation() {
         cache_read_tokens: 0,
     };
     let good = UsageEvent {
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
         ts: "2026-07-17T15:01:00Z".parse().unwrap(),
         agent: AgentKind::ClaudeCode,
         model: "good".into(),
@@ -240,12 +249,18 @@ fn legacy_cached_event_cannot_bypass_validation() {
 #[test]
 fn token_counts_checked_add_overflows_to_none() {
     let a = TokenCounts {
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
         input: u64::MAX,
         output: 0,
         cache_write: 0,
         cache_read: 0,
     };
     let b = TokenCounts {
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
         input: 1,
         output: 0,
         cache_write: 0,

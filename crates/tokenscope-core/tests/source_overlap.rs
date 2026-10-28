@@ -354,6 +354,9 @@ mod mock_pair {
             FileParse {
                 stats,
                 events: vec![UsageEvent {
+                    cache_write_5m: 0,
+                    cache_write_1h: 0,
+                    cache_write_split_known: false,
                     ts: "2026-08-01T10:00:00Z".parse().unwrap(),
                     agent: self.agent,
                     model: "m".into(),

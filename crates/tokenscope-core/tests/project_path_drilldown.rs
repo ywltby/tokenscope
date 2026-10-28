@@ -273,6 +273,9 @@ fn accumulate(a: TokenCounts, b: TokenCounts) -> TokenCounts {
         output: a.output + b.output,
         cache_write: a.cache_write + b.cache_write,
         cache_read: a.cache_read + b.cache_read,
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
     }
 }
 

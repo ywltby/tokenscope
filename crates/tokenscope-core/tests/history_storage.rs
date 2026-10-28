@@ -50,6 +50,9 @@ fn tokens(input: u64, output: u64, cache_write: u64, cache_read: u64) -> TokenCo
         output,
         cache_write,
         cache_read,
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
     }
 }
 
@@ -510,5 +513,156 @@ fn open_creates_isolated_data_dir_only_under_given_path() {
     assert!(
         !Path::new(".").join("history.db").exists(),
         "不得在工作目录留下库文件"
+    );
+}
+
+// ── N18：缓存写 5m/1h 分项持久化 ────────────────────────────────────
+
+fn split_tokens(input: u64, output: u64, cw: u64, cr: u64, w5: u64, w1: u64) -> TokenCounts {
+    TokenCounts {
+        input,
+        output,
+        cache_write: cw,
+        cache_read: cr,
+        cache_write_5m: w5,
+        cache_write_1h: w1,
+        cache_write_split_known: true,
+    }
+}
+
+fn split_event(key: &str, tokens: TokenCounts) -> EventWrite {
+    EventWrite {
+        event_key: key.to_string(),
+        app: AgentKind::ClaudeCode,
+        ts: ts("2026-07-17T08:00:00Z"),
+        model_raw: "claude-sonnet-4-5".into(),
+        model_identity: "claudesonnet45".into(),
+        session_id: Some("s1".into()),
+        record_id: Some("m1".into()),
+        project_key: Some("/work/app".into()),
+        session_initial_cwd: None,
+        event_cwd: None,
+        tokens,
+        precedence: WritePrecedence::NativeLog,
+        observed_at: ts("2026-07-17T08:00:00Z"),
+        aliases: Vec::new(),
+        origins: Vec::new(),
+    }
+}
+
+#[test]
+fn n18_known_split_persists_and_roundtrips_exactly() {
+    let dir = temp_dir("n18-split-roundtrip");
+    let db = dir.join("history.db");
+    let h = HistoryDb::open(&db).unwrap();
+    let summary = h
+        .write_batch(&[split_event("n18-k1", split_tokens(10, 5, 9, 2, 4, 5))])
+        .unwrap();
+    assert_eq!(summary.inserted, 1);
+    drop(h);
+
+    let h = HistoryDb::open(&db).unwrap();
+    let stored = h.stored_events().unwrap();
+    assert_eq!(stored.len(), 1);
+    let t = &stored[0].tokens;
+    assert_eq!(
+        (t.cache_write, t.cache_write_5m, t.cache_write_1h),
+        (9, 4, 5)
+    );
+    assert!(t.cache_write_split_known);
+    assert_eq!(t.total(), 26, "总量口径不变：分项不重复计入");
+    assert!(stored[0].parser_revision >= 3, "分档写入使用新解析版本");
+}
+
+#[test]
+fn n18_unknown_split_stays_null_and_never_becomes_zero() {
+    let dir = temp_dir("n18-split-unknown");
+    let db = dir.join("history.db");
+    let h = HistoryDb::open(&db).unwrap();
+    h.write_batch(&[split_event("n18-k2", tokens(10, 5, 9, 2))])
+        .unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let (w5, w1): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT cache_write_5m, cache_write_1h FROM usage_events WHERE event_key='n18-k2'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((w5, w1), (None, None), "未知分档必须落 NULL，不得伪装 0");
+}
+
+#[test]
+fn n18_reparse_fills_split_when_source_still_readable() {
+    // 升级路径：旧版本写入的事件（分项未知），新解析器重扫同一来源键时
+    // 四桶事实不变、仅新增可信分档 → 按终值规则 Update 补齐，不重复计事件。
+    let dir = temp_dir("n18-split-reparse");
+    let db = dir.join("history.db");
+    let h = HistoryDb::open(&db).unwrap();
+    let old = tokens(10, 5, 9, 2);
+    let summary = h.write_batch(&[split_event("n18-k3", old)]).unwrap();
+    assert_eq!(summary.inserted, 1);
+    let new = split_tokens(10, 5, 9, 2, 4, 5);
+    let summary = h.write_batch(&[split_event("n18-k3", new)]).unwrap();
+    assert_eq!(summary.updated, 1, "同键重解析按更新补齐分档");
+    assert_eq!(summary.inserted, 0, "不得重复插入请求");
+    let stored = h.stored_events().unwrap();
+    let t = &stored[0].tokens;
+    assert!(t.cache_write_split_known);
+    assert_eq!((t.cache_write_5m, t.cache_write_1h), (4, 5));
+    assert_eq!(t.cache_write, 9, "四桶事实不变");
+    // 幂等：同一分档再写一次 → unchanged。
+    let summary = h.write_batch(&[split_event("n18-k3", new)]).unwrap();
+    assert_eq!(summary.unchanged, 1);
+}
+
+#[test]
+fn n18_v4_database_migrates_and_keeps_facts_with_unknown_split() {
+    // 用真实迁移路径：先建 v5 库，再手动降回 v4 形态（删两列、回拨
+    // user_version），重新打开必须由幂等 v5 迁移补回列，既有事实与
+    // 分项未知状态一字不动。
+    let dir = temp_dir("n18-v4-upgrade");
+    let db = dir.join("history.db");
+    {
+        let h = HistoryDb::open(&db).unwrap();
+        h.write_batch(&[split_event("n18-k4", split_tokens(1, 1, 6, 0, 6, 0))])
+            .unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE usage_events DROP COLUMN cache_write_5m;
+             ALTER TABLE usage_events DROP COLUMN cache_write_1h;",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
+    }
+    let h = HistoryDb::open(&db).unwrap();
+    assert_eq!(h.schema_version().unwrap(), 5);
+    let stored = h.stored_events().unwrap();
+    let t = &stored[0].tokens;
+    assert_eq!(t.cache_write, 6, "四桶事实在迁移后一字不动");
+    assert!(!t.cache_write_split_known, "降级丢列后分项按未知处理");
+}
+
+#[test]
+fn n18_split_sum_must_equal_cache_write_or_writes_fail() {
+    // 写入端不变量：分项之和 ≠ 写总量的事件在 validate_buckets 拒绝。
+    let bad = TokenCounts {
+        input: 1,
+        output: 1,
+        cache_write: 10,
+        cache_read: 0,
+        cache_write_5m: 4,
+        cache_write_1h: 4,
+        cache_write_split_known: true,
+    };
+    let dir = temp_dir("n18-split-inconsistent");
+    let h = HistoryDb::open(&dir.join("history.db")).unwrap();
+    let err = h.write_batch(&[split_event("n18-k5", bad)]).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("分项") || msg.contains("不一致"),
+        "实际：{msg}"
     );
 }

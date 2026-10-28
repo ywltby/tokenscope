@@ -261,7 +261,14 @@ export interface PricingView {
 }
 
 /** Task 5/6：请求级费用明细 DTO（与后端 EventCostBreakdown 对齐）。 */
-export type CostLineKind = "input" | "output" | "cache_write" | "cache_read";
+export type CostLineKind =
+  | "input"
+  | "output"
+  | "cache_write"
+  | "cache_read"
+  /** N18：可信分档事件把写入拆成两行（5m/1h），不再输出合并 cache_write 行 */
+  | "cache_write_5m"
+  | "cache_write_1h";
 
 /** 单价来源（缓存读取定价解析计划 Task 5）：fixed / same_as_input / unknown。 */
 export type RateKind = "fixed" | "same_as_input" | "unknown";
@@ -323,6 +330,8 @@ export interface EventCostBreakdown {
   complete: boolean;
   /** 有不完整候选被排除时的提示（非本公式 unknown） */
   excluded_candidate_warning?: string | null;
+  /** N18：事件分项未知而候选声明了分档价 → 写费按总量单价估算（≠ 完整精确费用） */
+  cache_write_split_estimated?: boolean;
 }
 
 export interface EventRow {
@@ -343,6 +352,9 @@ export interface EventRow {
   output: number;
   cache_write: number;
   cache_read: number;
+  /** N18：5m/1h 缓存写分项（分项未知时缺省/null，不得当 0） */
+  cache_write_5m?: number | null;
+  cache_write_1h?: number | null;
   cost_usd?: number | null;
   /** Task 6：请求级费用计算明细；null/缺省 = 未收录模型或旧后端 */
   cost_breakdown?: EventCostBreakdown | null;

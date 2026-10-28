@@ -32,13 +32,19 @@ use crate::retry::HISTORY_BUSY_TIMEOUT;
 /// 当前库结构版本（`PRAGMA user_version`）。
 ///
 /// - v1 = `history_meta` + `source_files` + `usage_events`；
-/// - v2 = 别名 / 来源记录 / CCS 日汇总 / 导入批次四表（H01 起）。
-pub const HISTORY_SCHEMA_VERSION: i64 = 4;
+/// - v2 = 别名 / 来源记录 / CCS 日汇总 / 导入批次四表（H01 起）；
+/// - v5 = N18 缓存写分档：`usage_events` 增加 `cache_write_5m` /
+///   `cache_write_1h` 两个可空列（NULL = 分项未知），迁移纯加列、
+///   不改任何既有 token 事实。
+pub const HISTORY_SCHEMA_VERSION: i64 = 5;
 
 /// 适配器输出语义版本：标记新写入的事件/来源并进入发行指纹，不触发结构迁移。
 /// 旧文件重解析由 report::PARSE_RULES_REVISION 驱动，未纠正的事实保留原版本标记。
 /// v2：Codex 压缩请求配对与线程设置模型归属。
-pub const PARSER_REVISION: i64 = 2;
+/// v3：N18 —— Claude `cache_creation` 的 5m/1h 分项读取与持久化；
+/// 来源文件仍在盘上时，重解析安全补齐分项列（同来源键命中同一事件，
+/// 内容差异仅来自分档 → 按终值规则 Update）。
+pub const PARSER_REVISION: i64 = 3;
 
 /// 模型身份规则版本：等价键规则升级时递增（只重建派生键，不删 token 事实）。
 pub const IDENTITY_REVISION: i64 = 1;
@@ -369,12 +375,39 @@ DROP TABLE v4_loser;
 DROP TABLE v4_keeper;
 ";
 
+/// v5 结构：N18 缓存写分档 —— `usage_events` 增加两个可空列
+/// `cache_write_5m` / `cache_write_1h`。迁移只加列：既有事件的分项为
+/// NULL（未知），token 四桶事实一字不动；已删除来源日志的旧事件保持
+/// NULL，不猜造分项。加列由 [`migrate_v5_columns`] 幂等执行（并发首次
+/// 初始化时第二个连接可能重复进入 v5，SQLite 的 ALTER TABLE 没有
+/// IF NOT EXISTS，先查列再加）。
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, SCHEMA_V1),
     (2, SCHEMA_V2),
     (3, SCHEMA_V3),
     (4, SCHEMA_V4),
+    (5, ""),
 ];
+
+/// v5 幂等迁移：`usage_events` 缺哪个分项列就补哪个。
+fn migrate_v5_columns(tx: &Transaction<'_>) -> Result<()> {
+    let mut existing = std::collections::HashSet::new();
+    let mut stmt = tx.prepare("PRAGMA table_info(usage_events)")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    for name in rows {
+        existing.insert(name?);
+    }
+    drop(stmt);
+    for column in ["cache_write_5m", "cache_write_1h"] {
+        if !existing.contains(column) {
+            tx.execute(
+                &format!("ALTER TABLE usage_events ADD COLUMN {column} TEXT"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
 
 /// 写入优先级：数值越大越可信。原生日志终值优先于 CCS 导入值；同一优先级
 /// 内部按观察时间取更晚者（计划 §5.3：与导入顺序无关）。
@@ -752,6 +785,10 @@ impl ReadSnapshot {
                     output: u64_from_row(r, 10)?,
                     cache_write: u64_from_row(r, 11)?,
                     cache_read: u64_from_row(r, 12)?,
+                    // CCS 日汇总没有 5m/1h 分项：按分项未知处理。
+                    cache_write_5m: 0,
+                    cache_write_1h: 0,
+                    cache_write_split_known: false,
                 },
                 input_semantics: r.get(13)?,
                 source_cost_usd: r
@@ -865,7 +902,7 @@ impl ReadSnapshot {
                     identity_revision, session_id, record_id, project_key,
                     session_initial_cwd, event_cwd, input_tokens, output_tokens,
                     cache_write_tokens, cache_read_tokens, origin_rank, observed_at_seconds,
-                    observed_at_nanos, parser_revision
+                    observed_at_nanos, parser_revision, cache_write_5m, cache_write_1h
              FROM usage_events WHERE id IN ({placeholders})"
         );
         let conn = self.lock();
@@ -1134,8 +1171,12 @@ impl HistoryDb {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         for (version, sql) in MIGRATIONS {
             if *version > current {
-                tx.execute_batch(sql)
-                    .with_context(|| format!("执行 v{version} 迁移失败"))?;
+                if *version == 5 {
+                    migrate_v5_columns(&tx).with_context(|| format!("执行 v{version} 迁移失败"))?;
+                } else {
+                    tx.execute_batch(sql)
+                        .with_context(|| format!("执行 v{version} 迁移失败"))?;
+                }
                 tx.pragma_update(None, "user_version", *version)?;
                 log::info!("历史库迁移：v{current} → v{version}");
             }
@@ -1558,6 +1599,9 @@ impl HistoryDb {
             output: parse_u64_text(&o, "net_output_tokens")?,
             cache_write: parse_u64_text(&cw, "net_cache_write_tokens")?,
             cache_read: parse_u64_text(&cr, "net_cache_read_tokens")?,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         })
     }
 
@@ -1691,6 +1735,10 @@ impl HistoryDb {
                     output: u64_from_row(r, 10)?,
                     cache_write: u64_from_row(r, 11)?,
                     cache_read: u64_from_row(r, 12)?,
+                    // CCS 日汇总没有 5m/1h 分项：按分项未知处理。
+                    cache_write_5m: 0,
+                    cache_write_1h: 0,
+                    cache_write_split_known: false,
                 },
                 input_semantics: r.get(13)?,
                 source_cost_usd: r
@@ -1728,7 +1776,7 @@ impl HistoryDb {
                     identity_revision, session_id, record_id, project_key,
                     session_initial_cwd, event_cwd, input_tokens, output_tokens,
                     cache_write_tokens, cache_read_tokens, origin_rank, observed_at_seconds,
-                    observed_at_nanos, parser_revision
+                    observed_at_nanos, parser_revision, cache_write_5m, cache_write_1h
              FROM usage_events
              WHERE (?1 IS NULL OR app = ?1)
              ORDER BY ts_seconds, ts_nanos, id",
@@ -1776,6 +1824,9 @@ impl HistoryDb {
                 output: parse_u64_text(&o, "output_tokens")?,
                 cache_write: parse_u64_text(&cw, "cache_write_tokens")?,
                 cache_read: parse_u64_text(&cr, "cache_read_tokens")?,
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
             };
             acc = acc
                 .checked_add(&counts)
@@ -2020,6 +2071,10 @@ fn legacy_event_write(
         output: ev.output,
         cache_write: ev.cache_write,
         cache_read: ev.cache_read,
+        // 缓存 v12 起携带分项；旧缓存（或旧行）没有 → 分项未知。
+        cache_write_5m: ev.cache_write_5m,
+        cache_write_1h: ev.cache_write_1h,
+        cache_write_split_known: ev.cache_write_split_known,
     };
     let total = tokens
         .input
@@ -2049,6 +2104,9 @@ fn legacy_event_write(
         output_tokens: ev.output,
         cache_write_tokens: ev.cache_write,
         cache_read_tokens: ev.cache_read,
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
     };
     let mut aliases = Vec::new();
     if let Some((scheme, value)) = identity_event.same_source_identity() {
@@ -2515,6 +2573,26 @@ fn validate_write(w: &EventWrite) -> Result<()> {
     if !(0..=999_999_999).contains(&w.ts.subsec_nanosecond()) {
         bail!("事件时间戳纳秒越界（来源键 {}）", w.event_key);
     }
+    // N18：分项一致性（validate_split_invariants 的单事件形态，覆盖
+    // classify/apply/legacy 迁移等全部写入内核调用方）。
+    if w.tokens.cache_write_split_known {
+        let split = w
+            .tokens
+            .cache_write_5m
+            .checked_add(w.tokens.cache_write_1h)
+            .ok_or_else(|| anyhow!("事件 {} 缓存写分项之和超出可表示范围", w.event_key))?;
+        if split != w.tokens.cache_write {
+            bail!(
+                "事件 {} 缓存写分项之和（{}+{}）与写总量 {} 不一致，拒绝写入",
+                w.event_key,
+                w.tokens.cache_write_5m,
+                w.tokens.cache_write_1h,
+                w.tokens.cache_write
+            );
+        }
+    } else if w.tokens.cache_write_5m != 0 || w.tokens.cache_write_1h != 0 {
+        bail!("事件 {} 声明分项未知却携带分项数值，拒绝写入", w.event_key);
+    }
     Ok(())
 }
 
@@ -2854,7 +2932,7 @@ fn load_event(conn: &Connection, id: i64) -> Result<Option<StoredEvent>> {
                     identity_revision, session_id, record_id, project_key,
                     session_initial_cwd, event_cwd, input_tokens, output_tokens,
                     cache_write_tokens, cache_read_tokens, origin_rank, observed_at_seconds,
-                    observed_at_nanos, parser_revision
+                    observed_at_nanos, parser_revision, cache_write_5m, cache_write_1h
              FROM usage_events WHERE id = ?1",
             params![id],
             row_to_stored_event,
@@ -2878,11 +2956,40 @@ fn row_to_stored_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredEvent> {
         project_key: r.get(10)?,
         session_initial_cwd: r.get(11)?,
         event_cwd: r.get(12)?,
-        tokens: TokenCounts {
-            input: u64_from_row(r, 13)?,
-            output: u64_from_row(r, 14)?,
-            cache_write: u64_from_row(r, 15)?,
-            cache_read: u64_from_row(r, 16)?,
+        tokens: {
+            let (five_min, one_hour) = (
+                r.get::<_, Option<String>>(21)?,
+                r.get::<_, Option<String>>(22)?,
+            );
+            // v5：两列都非 NULL 才是可信分档（写入端保证两键齐且和等于
+            // 总量）；缺任一列 = 分项未知。防御性归一：和 ≠ 总量按未知。
+            // 注意「可信」只由列存在性决定——cache_write=0 且列为 NULL 的
+            // 行同样是未知分档，不得因 0+0==0 被误判为可信零分档（否则
+            // 与写入端「未知」的 TokenCounts 不等，重导入会被误判更新）。
+            let split = match (five_min, one_hour) {
+                (Some(f), Some(o)) => {
+                    let f = parse_u64_text(&f, "cache_write_5m")
+                        .map_err(|e| conversion_error(21, e))?;
+                    let o = parse_u64_text(&o, "cache_write_1h")
+                        .map_err(|e| conversion_error(22, e))?;
+                    let cw = u64_from_row(r, 15)?;
+                    if f.checked_add(o) == Some(cw) {
+                        (f, o, true)
+                    } else {
+                        (0, 0, false)
+                    }
+                }
+                _ => (0, 0, false),
+            };
+            TokenCounts {
+                input: u64_from_row(r, 13)?,
+                output: u64_from_row(r, 14)?,
+                cache_write: u64_from_row(r, 15)?,
+                cache_read: u64_from_row(r, 16)?,
+                cache_write_5m: split.0,
+                cache_write_1h: split.1,
+                cache_write_split_known: split.2,
+            }
         },
         precedence: WritePrecedence::from_rank(r.get(17)?),
         observed_at: timestamp_from_parts(r.get(18)?, r.get(19)?),
@@ -2967,7 +3074,7 @@ fn merge_event(
             session_initial_cwd = ?11, event_cwd = ?12, input_tokens = ?13, output_tokens = ?14,
             cache_write_tokens = ?15, cache_read_tokens = ?16, origin_rank = ?17,
             observed_at_utc = ?18, observed_at_seconds = ?19, observed_at_nanos = ?20,
-            parser_revision = ?21
+            parser_revision = ?21, cache_write_5m = ?22, cache_write_1h = ?23
          WHERE id = ?1",
         params![
             existing.id,
@@ -2991,6 +3098,8 @@ fn merge_event(
             w.observed_at.as_second(),
             w.observed_at.subsec_nanosecond() as i64,
             w.parser_revision(),
+            split_params(w.tokens).0,
+            split_params(w.tokens).1,
         ],
     )?;
     summary.updated += 1;
@@ -3018,9 +3127,9 @@ fn insert_event(tx: &Transaction<'_>, w: &EventWrite) -> Result<i64> {
             model_identity, identity_revision, session_id, record_id, project_key,
             session_initial_cwd, event_cwd, input_tokens, output_tokens, cache_write_tokens,
             cache_read_tokens, origin_rank, observed_at_utc, observed_at_seconds,
-            observed_at_nanos, parser_revision)
+            observed_at_nanos, parser_revision, cache_write_5m, cache_write_1h)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20, ?21)",
+                ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         params![
             w.event_key,
             w.app.as_str(),
@@ -3043,6 +3152,8 @@ fn insert_event(tx: &Transaction<'_>, w: &EventWrite) -> Result<i64> {
             w.observed_at.as_second(),
             w.observed_at.subsec_nanosecond() as i64,
             w.parser_revision(),
+            split_params(w.tokens).0,
+            split_params(w.tokens).1,
         ],
     )?;
     Ok(tx.last_insert_rowid())
@@ -3053,6 +3164,19 @@ impl EventWrite {
     /// `parser_revision` 字段——持久化列由适配器在构造时决定）。
     fn parser_revision(&self) -> i64 {
         PARSER_REVISION
+    }
+}
+
+/// N18：分档列写入值——可信分档写两个十进制文本，未知分档写 NULL
+///（None）。绝不把「未知」伪装成 0。
+fn split_params(tokens: crate::model::TokenCounts) -> (Option<String>, Option<String>) {
+    if tokens.cache_write_split_known {
+        (
+            Some(tokens.cache_write_5m.to_string()),
+            Some(tokens.cache_write_1h.to_string()),
+        )
+    } else {
+        (None, None)
     }
 }
 
@@ -3099,6 +3223,9 @@ mod tests {
                 output: 10,
                 cache_write: 0,
                 cache_read: 20,
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
             },
             precedence: WritePrecedence::NativeLog,
             observed_at: "2026-10-22T08:00:00.123456789Z".parse().unwrap(),

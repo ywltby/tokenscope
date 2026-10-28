@@ -309,3 +309,69 @@ describe("单价精度贯通设置与公式（RC07）", () => {
     expect(t).not.toContain("$1.23/M");
   });
 });
+
+// N18：缓存写分档（5m/1h）行的展示与「估算标示」语义。
+describe("N18 cache write tiers", () => {
+  it("可信分档事件渲染两档行并替换合并行", () => {
+    const tiered = bd({
+      lines: [
+        {
+          kind: "cache_write_5m",
+          tokens: 1_000_000,
+          unit_price: 3.75,
+          subtotal: 3.75,
+          priced: true,
+        },
+        { kind: "cache_write_1h", tokens: 1_000_000, unit_price: 6, subtotal: 6, priced: true },
+        { kind: "input", tokens: 0, unit_price: 3, subtotal: 0, priced: true },
+        { kind: "output", tokens: 0, unit_price: 15, subtotal: 0, priced: true },
+        { kind: "cache_read", tokens: 0, unit_price: 0.3, subtotal: 0, priced: true },
+      ],
+      cost_usd: 9.75,
+      unknown: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+      complete: true,
+    });
+    const rows = formatCostBreakdownRows(tiered);
+    expect(rows.some((r) => r.label === "缓存写（5 分钟档）")).toBe(true);
+    expect(rows.some((r) => r.label === "缓存写（1 小时档）")).toBe(true);
+    const text = formatCostBreakdownText(tiered);
+    expect(text).toContain("$3.75");
+    expect(text).toContain("$6.00");
+    expect(text).toContain("估算合计 $9.75");
+    expect(text).not.toContain("写入分档未知");
+  });
+
+  it("分项未知 + 分档候选：估算合计后必须带『写入分档未知』标示", () => {
+    const estimated = bd({
+      lines: [
+        { kind: "input", tokens: 0, unit_price: 3, subtotal: 0, priced: true },
+        { kind: "output", tokens: 0, unit_price: 15, subtotal: 0, priced: true },
+        { kind: "cache_write", tokens: 2_000_000, unit_price: 3.75, subtotal: 7.5, priced: true },
+        { kind: "cache_read", tokens: 0, unit_price: 0.3, subtotal: 0, priced: true },
+      ],
+      cost_usd: 7.5,
+      unknown: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+      complete: false,
+      cache_write_split_estimated: true,
+    });
+    const rows = formatCostBreakdownRows(estimated);
+    expect(rows.some((r) => r.label === "写入分档未知" && r.unknown)).toBe(true);
+    const text = formatCostBreakdownText(estimated);
+    expect(text).toContain("估算合计 $7.50");
+    expect(text).toContain("写入分档未知");
+    expect(text).toContain("按写入总量单价估算");
+  });
+
+  it("分项未知 + 无分档候选：不出现估算标示（走既有未知/未计价语义）", () => {
+    const plain = bd({
+      lines: [
+        { kind: "cache_write", tokens: 1_000_000, unit_price: 3.75, subtotal: 3.75, priced: true },
+      ],
+      cost_usd: 3.75,
+      complete: true,
+      cache_write_split_estimated: false,
+    });
+    const text = formatCostBreakdownText(plain);
+    expect(text).not.toContain("写入分档未知");
+  });
+});

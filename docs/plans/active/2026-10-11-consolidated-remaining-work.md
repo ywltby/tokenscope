@@ -8,8 +8,8 @@
 
 **Tech Stack:** Rust / SQLite / Tauri 2 / Vue 3，以及现有 Rust、Vitest、浏览器和原生 acceptance 测试工具。
 
-- 整理日期：2026-10-11；当前状态更新：2026-10-24。
-- 状态：**12 项关闭（N01–N09、N14–N16）、5 项开放（N10/N11/N13 专项验收未闭合、N12 部分完成、N17 已合并发布 v0.6.0 但人工验收未结束——仅剩用户手动安装验证，不提前计关闭）。** 已完成项不重复实施；N14 第 4 项随 B1 / PR #27 完成，四项全部关闭。
+- 整理日期：2026-10-11；当前状态更新：2026-10-29。
+- 状态：**12 项关闭（N01–N09、N14–N16）、6 项开放（N10–N13、N17、N18）。** N17 已合并发布 v0.6.0 但人工验收未结束（仅剩用户手动安装验证，不提前计关闭）；N18 已实施待交付（2026-10-29 代码完成于分支 `feat/n18-cache-write-tiers`，未合并、约定验收未执行，不计关闭）。已完成项不重复实施；N14 第 4 项随 B1 / PR #27 完成，四项全部关闭。
 - 已核验交付基线：PR #15 合并 `9ea0c584`、v0.5.1 公开，连续升级链成功；PR #16 合并 `0ffab19`、v0.5.2 公开，[main CI](https://github.com/ywltby/tokenscope/actions/runs/39353860584)、[原生 E2E](https://github.com/ywltby/tokenscope/actions/runs/39353860657)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39353860618) 全成功（安装、六个单跳、两条连续链）。PR #17 研究资料合入 `89aec76` 不改变这些专项验收结论。PR #19 合并 `1156385`、v0.5.5 公开，main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39452749833)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39452749860)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39452749887) 全成功（安装、六个单跳、两条连续链），N15 关闭。
 - 最新交付：PR #23 合并 `d064f98`、v0.5.6 公开，main CI/Native UI E2E/Release 全成功（安装、六个单跳、两条连续链）；N14 第 2 项与 N16 关闭，证据见各自条目。
 - B1 验收交付：AC01 的 `69ce2f4` 随 PR #27 普通合并为 `4198051`；PR 的 CI、原生、安装与六组单跳以及 main CI/原生/Release 均成功。N14 第 4 项关闭；本批只有测试与文档，版本保持 0.5.6，Release 只跑 gate。
@@ -70,7 +70,7 @@
 | N15 | P1 | 历史库/缓存打开流程的锁等待回归 | 已完成；固定 5000/2000ms，备份不中断，最新库免写事务；PR #19 合并 `1156385`，v0.5.5 发布，main CI/原生 E2E/Release 全成功 | 必须；逐项红绿、变异与交付证据见[归档专项计划](../archive/implemented/2026-10-20-sqlite-open-lock-wait.md) §6 |
 | N16 | P2 | 合入 main 与发布解耦（版本没变就不发布） | 已完成；PR #21 / #22 验证版本不变时跳过发布，PR #23 / v0.5.6 验证产品递增后正常构建发布；专项已归档 | 必须；用户 2026-10-21 确认，修订 2026-10-12 版本规则，[归档专项计划](../archive/implemented/2026-10-21-release-on-version-change.md) |
 | N17 | P2 | WorkBuddy 国内版与国际版接入 | 已合并发布（2026-10-25）：PR #49 合并 `44c026d`、v0.6.0 发布，main CI/原生/Release 与八组单跳、两条连续链全过，WB08 真实对账一致（当次样本基线口径见专项计划 §6.3）；**仅剩用户手动安装验证，未关闭** | 必须；[专项计划](2026-10-21-workbuddy-adapters.md) WB01–WB09，证据见其 §6.3/§6.4 |
-| N18 | P3 | Claude 缓存写 5 分钟/1 小时分档计价 | **新登记（2026-10-28，PR #52 复盘发现，非本 PR 引入）**：Claude 日志的 5 分钟与 1 小时缓存写明细没有分档，计价共用一个写入单价（隔离合成测试：两种各 100 万 token 均显示 $3.75 且标记为完整；示例 1 小时价 $6 时后者少计 37.5%）。核心代码与当前 main 一致；相关研究见 docs/research/2026-10-27-usage-semantics-cross-tool-audit.md §4.5。修复需价格层引入分档匹配，按缺陷流程单独排期 | 必须；ccusage:3365 同项建议、复现输出 qa-artifacts/review-55511fa-claude-1h/run.log |
+| N18 | P3 | Claude 缓存写 5 分钟/1 小时分档计价 | **已实施待交付（2026-10-29）**：分支 `feat/n18-cache-write-tiers` 完成解析（`cache_creation.ephemeral_5m/1h` 两键齐且和=总量才可信，宁缺毋假）、持久化（cache v12 / history v5 / parser 3，旧库安全迁移与重解析补齐，源日志已删则保留未知分项）、计价（可信分档拆 5m/1h 两行；分项未知按总量单价估算并标示 `cache_write_split_estimated`，不得显示为完整精确费用；Anthropic 官方渠道派生 1h=2×input 仅当发布价自证 5m==1.25×input，其他渠道不套倍率）。定向测试：两档各 1M token 合计 $9.75、汇总总量不变、逐请求明细与汇总一致；旧库升级/重扫/重复导入/来源消失/其他应用计价无回归。**未合并、未按约定验收，仍计开放**；原缺陷记录（各 1M 均显示 $3.75 且标记完整）保留为历史证据 | 必须；ccusage:3365 同项建议、复现输出 qa-artifacts/review-55511fa-claude-1h/run.log |
 
 ## 4. 各任务实施与验收
 

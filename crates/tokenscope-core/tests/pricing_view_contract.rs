@@ -191,6 +191,9 @@ fn same_as_input_tracks_resolved_tier_input_in_breakdown() {
         .estimate(
             "seg",
             &TokenCounts {
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
                 input: 500_000,
                 output: 0,
                 cache_write: 0,
@@ -217,6 +220,9 @@ fn same_as_input_tracks_resolved_tier_input_in_breakdown() {
         .estimate(
             "seg",
             &TokenCounts {
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
                 input: 2_000_000,
                 output: 0,
                 cache_write: 0,
@@ -247,6 +253,9 @@ fn same_as_input_tracks_resolved_tier_input_in_breakdown() {
         .estimate(
             "dep2",
             &TokenCounts {
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
                 input: 100,
                 output: 0,
                 cache_write: 0,

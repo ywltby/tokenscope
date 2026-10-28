@@ -32,10 +32,13 @@ const MATCH_LABEL: Record<MatchMode, string> = {
   prefix_variant_fallback: "前缀匹配（变体回退）",
 };
 
-// UX07：分项显示名消费 tokenDisplay 单一来源（U14：缓存命中）。
-export const KIND_LABEL: Record<CostLineKind, string> = Object.fromEntries(
-  TOKEN_BUCKETS.map((b) => [b.key, b.key === "input" ? "输入（扣除缓存）" : b.label]),
-) as Record<CostLineKind, string>;
+// UX07：分项显示名消费 tokenDisplay 单一来源（U14：缓存命中）；
+// N18：5m/1h 分档行不在四桶清单里，标签在此补齐。
+export const KIND_LABEL: Record<CostLineKind, string> = Object.fromEntries([
+  ...TOKEN_BUCKETS.map((b) => [b.key, b.key === "input" ? "输入（扣除缓存）" : b.label]),
+  ["cache_write_5m", "缓存写（5 分钟档）"],
+  ["cache_write_1h", "缓存写（1 小时档）"],
+]) as Record<CostLineKind, string>;
 
 /** USD/百万 token 单价（UX07：unit 场景单一入口）。 */
 function fmtUnit(v: number): string {
@@ -116,6 +119,15 @@ function resultRows(bd: EventCostBreakdown): BreakdownRow[] {
     });
   } else {
     rows.push({ label: "估算合计", value: fmtMoney(bd.cost_usd), total: true });
+  }
+  if (bd.cache_write_split_estimated) {
+    // N18：写入分项未知（旧日志/源日志已删）——金额是按写入总量单价的
+    // 估算，不得当作完整精确费用；分档拆分见候选声明。
+    rows.push({
+      label: "写入分档未知",
+      detail: "该请求缺少 5 分钟/1 小时写入分项，写费按写入总量单价估算（可能低估 1 小时写入）",
+      unknown: true,
+    });
   }
   if (!bd.complete) {
     rows.push({

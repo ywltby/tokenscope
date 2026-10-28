@@ -2336,6 +2336,10 @@ pub(crate) fn usage_event_of(s: &crate::history::StoredEvent) -> UsageEvent {
         output_tokens: s.tokens.output,
         cache_write_tokens: s.tokens.cache_write,
         cache_read_tokens: s.tokens.cache_read,
+        // N18：库内分项随事件透传（查询与费用明细的同一事实源）。
+        cache_write_5m: s.tokens.cache_write_5m,
+        cache_write_1h: s.tokens.cache_write_1h,
+        cache_write_split_known: s.tokens.cache_write_split_known,
     }
 }
 
@@ -2446,6 +2450,10 @@ pub struct EventCostBreakdown {
     /// 完整候选胜出但有不完整候选被排除时的提示（非本公式 unknown，
     /// 而是"其他候选缺价、未参与主估算"的不确定性披露）。
     pub excluded_candidate_warning: Option<String>,
+    /// N18：事件可信分档缺失而候选声明了分档价——写费按总量单价估算，
+    /// 不得显示为完整精确费用（与 complete=false 同真）。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cache_write_split_estimated: bool,
 }
 
 /// 一条去重后的用量明细（展示行）。
@@ -2472,6 +2480,12 @@ pub struct EventRow {
     pub output: u64,
     pub cache_write: u64,
     pub cache_read: u64,
+    /// N18：5 分钟缓存写分项（分项未知时为 None，不得当 0）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_5m: Option<u64>,
+    /// N18：1 小时缓存写分项（同上）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<u64>,
     /// None = 模型无价格（unknown），不按 0。
     pub cost_usd: Option<f64>,
     /// Task 6：请求级费用计算明细（与 cost_usd 同一次 estimate 产出）；
@@ -2551,6 +2565,7 @@ pub(crate) fn query_events_from(
             unknown: est.unknown,
             complete: est.complete,
             excluded_candidate_warning: est.excluded_candidate_warning,
+            cache_write_split_estimated: est.cache_write_split_estimated,
         });
         let cursor = serde_json::to_string(&crate::query::PageCursor {
             v: crate::query::CURSOR_VERSION,
@@ -2580,6 +2595,8 @@ pub(crate) fn query_events_from(
             output: e.output_tokens,
             cache_write: e.cache_write_tokens,
             cache_read: e.cache_read_tokens,
+            cache_write_5m: e.cache_write_split_known.then_some(e.cache_write_5m),
+            cache_write_1h: e.cache_write_split_known.then_some(e.cache_write_1h),
             cost_usd,
             cost_breakdown,
         });
@@ -3027,6 +3044,9 @@ cache_read = 0.4
             output_tokens: 1,
             cache_write_tokens: 0,
             cache_read_tokens: 0,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         };
         let events = vec![
             mk("2026-08-01T10:00:00Z"),
@@ -3617,6 +3637,104 @@ cache_write = 10.0
             report.totals.cost_usd,
             row_sum
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn n18_event_rows_carry_split_and_summary_matches_per_request() {
+        // N18：真实 JSONL 的 5m/1h 分项贯通到明细行与逐请求费用；
+        // 汇总总价 == 逐请求求和，总量口径不变（分项不重复计入）。
+        let dir = tmp_dir("n18-event-split");
+        let proj = dir.join("proj-n18");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess-n18.jsonl"),
+            concat!(
+                // 5m 1M + 1h 1M：两档合计 $9.75（$3.75 + $6.0）。
+                r#"{"type":"assistant","timestamp":"2026-01-05T15:00:00.000Z","sessionId":"s-n18","isSidechain":false,"message":{"id":"msg-both","model":"n18-model","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":2000000,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":1000000,"ephemeral_1h_input_tokens":1000000}}}}"#,
+                "
+",
+                // 旧日志形态：只有写总量、无分项 → 估算（complete=false）。
+                r#"{"type":"assistant","timestamp":"2026-01-05T13:00:00.000Z","sessionId":"s-n18","isSidechain":false,"message":{"id":"msg-old","model":"n18-model","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":1000000,"cache_read_input_tokens":0}}}"#,
+                "
+",
+            ),
+        )
+        .unwrap();
+        let toml = dir.join("pricing.toml");
+        std::fs::write(
+            &toml,
+            r#"[[model]]
+prefix = "n18-model"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+"#,
+        )
+        .unwrap();
+        let cache = dir.join("cache");
+        let opts = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
+            by: GroupBy::Day,
+            claude_dir: Some(dir.clone()),
+            codex_dir: Some(PathBuf::from("Z:/no-such-codex")),
+            cache_dir: Some(cache.clone()),
+            pricing_index: Some(cache.join("pricing-index.json")),
+            pricing_path: Some(toml),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/or.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/md.json")),
+            tz: Some("UTC".to_string()),
+            refresh: true,
+            ..Default::default()
+        };
+        let filter = EventFilter::default();
+        let list = list_events(&opts, &filter).unwrap();
+        assert_eq!(list.rows.len(), 2);
+        let both = &list.rows[0];
+        let old = &list.rows[1];
+        // 分项行：两档明细行替换合并行；行级分项字段随可信分档给出。
+        assert_eq!(both.cache_write, 2_000_000);
+        assert_eq!(both.cache_write_5m, Some(1_000_000));
+        assert_eq!(both.cache_write_1h, Some(1_000_000));
+        let bd = both.cost_breakdown.as_ref().unwrap();
+        use crate::pricing::CostLineKind;
+        let w5 = bd
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheWrite5m)
+            .unwrap();
+        let w1 = bd
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheWrite1h)
+            .unwrap();
+        assert!((w5.subtotal - 3.75).abs() < 1e-9);
+        assert!((w1.subtotal - 6.0).abs() < 1e-9);
+        assert!((bd.cost_usd - 9.75).abs() < 1e-9);
+        assert!(bd.complete);
+        assert!(!bd.cache_write_split_estimated);
+        // 旧日志行：分项未知 → 估算标示，行级分项字段缺省。
+        assert_eq!(old.cache_write, 1_000_000);
+        assert_eq!(old.cache_write_5m, None);
+        assert_eq!(old.cache_write_1h, None);
+        let bdo = old.cost_breakdown.as_ref().unwrap();
+        assert!(!bdo.complete, "估算不得显示为完整精确费用");
+        assert!(bdo.cache_write_split_estimated);
+        assert!((bdo.cost_usd - 3.75).abs() < 1e-9);
+        // 不变量 7：聚合总价 == 逐请求求和（9.75 + 3.75）。
+        let report = summary(&opts).unwrap();
+        let row_sum: f64 = list.rows.iter().filter_map(|r| r.cost_usd).sum();
+        assert!(
+            (report.totals.cost_usd - row_sum).abs() < 1e-9,
+            "聚合 {} != 明细求和 {}",
+            report.totals.cost_usd,
+            row_sum
+        );
+        // 汇总总量：两事件写总量 3M（分项不重复计入）。
+        assert_eq!(report.totals.tokens.cache_write, 3_000_000);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -4535,6 +4653,9 @@ mod collect_stability_tests {
                     output_tokens: 1,
                     cache_write_tokens: 0,
                     cache_read_tokens: 0,
+                    cache_write_5m: 0,
+                    cache_write_1h: 0,
+                    cache_write_split_known: false,
                 }],
             }
         }
@@ -4622,6 +4743,9 @@ mod collect_stability_tests {
                     output_tokens: 1,
                     cache_write_tokens: 0,
                     cache_read_tokens: 0,
+                    cache_write_5m: 0,
+                    cache_write_1h: 0,
+                    cache_write_split_known: false,
                 }],
             }
         }

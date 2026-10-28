@@ -80,6 +80,15 @@ pub struct UsageEvent {
     pub output_tokens: u64,
     pub cache_write_tokens: u64,
     pub cache_read_tokens: u64,
+    /// N18：缓存写总量中 5 分钟档的分项（仅 [`Self::cache_write_split_known`]
+    /// 为 true 时有意义；未知时恒为 0，不得猜测）。
+    pub cache_write_5m: u64,
+    /// N18：缓存写总量中 1 小时档的分项（同上）。
+    pub cache_write_1h: u64,
+    /// N18：分项可信——来源日志同时给出 5m/1h 两键且 5m+1h == 写总量。
+    /// false = 分项未知（旧日志、缺一键、类型异常或与总量不一致），
+    /// 两分项字段必须为 0，计价按「分项未知」估算口径处理。
+    pub cache_write_split_known: bool,
 }
 
 impl UsageEvent {
@@ -90,6 +99,7 @@ impl UsageEvent {
     /// SF08：单事件桶边界校验（source→model 公共边界，两适配器与缓存
     /// 恢复经过同一入口）——四桶总数与 prompt 计价基数必须可表示。
     /// 异常事件由调用方计 bad_lines 并跳过，不做回绕/饱和。
+    /// N18：可信分档必须恰好等于写总量（分项是总量的内部构成，不得多计）。
     pub fn validate_buckets(&self) -> Result<(), &'static str> {
         let total = self
             .input_tokens
@@ -105,6 +115,17 @@ impl UsageEvent {
             .and_then(|v| v.checked_add(self.cache_read_tokens));
         if prompt.is_none() {
             return Err("prompt 计价基数超出可表示范围");
+        }
+        if self.cache_write_split_known {
+            let split = self
+                .cache_write_5m
+                .checked_add(self.cache_write_1h)
+                .ok_or("缓存写分项之和超出可表示范围")?;
+            if split != self.cache_write_tokens {
+                return Err("缓存写分项之和与写总量不一致");
+            }
+        } else if self.cache_write_5m != 0 || self.cache_write_1h != 0 {
+            return Err("未知分档的事件不得携带分项数值");
         }
         Ok(())
     }
@@ -220,12 +241,20 @@ impl UsageEvent {
 }
 
 /// 四类 token 的累计计数，聚合与费用计算共用。
+/// N18：附带缓存写的 5m/1h 分项与可信标志——分项是 `cache_write` 的内部
+/// 构成，任何累计口径都不得把分项再加进 `cache_write`/总量。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct TokenCounts {
     pub input: u64,
     pub output: u64,
     pub cache_write: u64,
     pub cache_read: u64,
+    /// N18：5 分钟缓存写分项（`cache_write_split_known == false` 时恒 0）。
+    pub cache_write_5m: u64,
+    /// N18：1 小时缓存写分项（同上）。
+    pub cache_write_1h: u64,
+    /// N18：分项可信（逐事件 AND 语义：聚合中混入任一未知分档事件即整体未知）。
+    pub cache_write_split_known: bool,
 }
 
 impl TokenCounts {
@@ -235,11 +264,15 @@ impl TokenCounts {
             output: e.output_tokens,
             cache_write: e.cache_write_tokens,
             cache_read: e.cache_read_tokens,
+            cache_write_5m: e.cache_write_5m,
+            cache_write_1h: e.cache_write_1h,
+            cache_write_split_known: e.cache_write_split_known,
         }
     }
 
     /// Task 1（分段计价）：prompt token 度量 = 非缓存输入 + 缓存写 + 缓存读
-    /// （输出不参与上下文档位选择——不变量 2）。
+    /// （输出不参与上下文档位选择——不变量 2）。N18：写总量已含两档分项，
+    /// prompt 基数不再另加分项（不得重复计入）。
     pub fn prompt_tokens(&self) -> u64 {
         self.input + self.cache_write + self.cache_read
     }
@@ -249,6 +282,11 @@ impl TokenCounts {
         self.output += e.output_tokens;
         self.cache_write += e.cache_write_tokens;
         self.cache_read += e.cache_read_tokens;
+        self.cache_write_5m += e.cache_write_5m;
+        self.cache_write_1h += e.cache_write_1h;
+        // 分档可信度是逐事件的属性：总量口径上只要有一个未知分档事件，
+        // 聚合就整体退回「分项未知」（不假装聚合结果仍可分档计价）。
+        self.cache_write_split_known &= e.cache_write_split_known;
     }
 
     pub fn add(&mut self, other: &TokenCounts) {
@@ -256,6 +294,9 @@ impl TokenCounts {
         self.output += other.output;
         self.cache_write += other.cache_write;
         self.cache_read += other.cache_read;
+        self.cache_write_5m += other.cache_write_5m;
+        self.cache_write_1h += other.cache_write_1h;
+        self.cache_write_split_known &= other.cache_write_split_known;
     }
 
     pub fn total(&self) -> u64 {
@@ -270,6 +311,9 @@ impl TokenCounts {
             output: self.output.checked_add(other.output)?,
             cache_write: self.cache_write.checked_add(other.cache_write)?,
             cache_read: self.cache_read.checked_add(other.cache_read)?,
+            cache_write_5m: self.cache_write_5m.checked_add(other.cache_write_5m)?,
+            cache_write_1h: self.cache_write_1h.checked_add(other.cache_write_1h)?,
+            cache_write_split_known: self.cache_write_split_known && other.cache_write_split_known,
         })
     }
 }
@@ -294,6 +338,9 @@ mod tests {
             output_tokens: output,
             cache_write_tokens: cw,
             cache_read_tokens: cr,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         }
     }
 

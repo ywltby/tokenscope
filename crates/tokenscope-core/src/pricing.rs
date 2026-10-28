@@ -227,6 +227,18 @@ impl PriceRates {
     }
 }
 
+/// N18：缓存写分档单价（5 分钟 / 1 小时）。仅当来源**有依据**地提供
+/// 分档价时才存在：外置 pricing.toml 显式 `cache_write_5m/1h` 键、
+/// models.dev 快照显式字段，以及 Anthropic 官方渠道候选的派生规则
+/// （见 models.dev 转换处注释——Claude Code 可能路由到任意提供商，
+/// 绝不按应用名套倍率）。`Unknown` 档 = 该档缺价 → 可信分档事件的
+/// 写费不完整（不得用写入总单价冒充分档价）。
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CacheWriteTiers {
+    pub five_min: RateSpec,
+    pub one_hour: RateSpec,
+}
+
 /// 计价依据（Task 1）：当前来源统一 PromptTokens；其余为将来复用保留。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PricingBasis {
@@ -274,6 +286,11 @@ pub struct PricePlan {
     /// 各自计价取最高，不从不同规则逐项拼价。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schedules: Vec<PriceSchedule>,
+    /// N18：缓存写分档价（None = 来源未提供分档，写入按单价的既有口径）。
+    /// 分档价是**平价**：不参与上下文分段与峰谷时间回退（Anthropic 两档
+    /// 写入无分段/峰谷；声明了规则的来源其分档价优先，同一次写入不可拆）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tiers: Option<CacheWriteTiers>,
 }
 
 /// 峰谷时间规则（Task 4A）：规则时区下的左闭右开时间窗 + 价格覆盖。
@@ -442,8 +459,64 @@ fn invalid_rate(r: &PriceRates) -> Option<(&'static str, f64)> {
 
 /// F05：完整计划的数值校验——索引恢复入口先把扁平字段归一成完整计划，
 /// 再用本函数统一校验，不得存在未校验的恢复通道。
+/// N18：分档单价的合法性——Fixed 须为有限非负；SameAsInput 对分档
+/// 无意义（输入价沿用不适用于"两次写入"），显式拒绝；Unknown = 该档
+/// 缺价（合法，估算按不完整处理）。
+fn tier_rate_invalid(spec: RateSpec) -> bool {
+    match spec {
+        RateSpec::Fixed(v) => !(v.is_finite() && v >= 0.0),
+        RateSpec::SameAsInput => true,
+        RateSpec::Unknown => false,
+    }
+}
+
+/// N18：models.dev 候选的缓存写分档来源。
+///
+/// - 显式字段（`cost.cache_write_5m/1h`）一旦存在即直接采用（快照层
+///   已透传），缺档 = Unknown；
+/// - 否则仅对 **Anthropic 官方渠道**（provider id 恰为 `anthropic`）
+///   派生：官方文档价 5 分钟写入 = 1.25 × 基础输入、1 小时写入 =
+///   2 × 基础输入（依据 docs/research/2026-10-27-usage-semantics-cross-tool-
+///   audit.md §4.5 引用的 Anthropic 定价）。派生以候选自身发布价自证：
+///   仅当其 `cache_write` 与 1.25 × 输入一致（相对误差 1e-9）才认定
+///   该候选确为官方 API 价并派生 1 小时档；否则不派生（宁可缺价，
+///   估算按不完整处理）。Bedrock/Vertex/OpenRouter 等其他渠道一概
+///   不派生——Claude Code 应用日志可能路由到任意提供商，绝不按
+///   应用名套倍率。
+fn modelsdev_cache_write_tiers(e: &crate::modelsdev::SnapshotEntry) -> Option<CacheWriteTiers> {
+    if e.cache_write_5m.is_some() || e.cache_write_1h.is_some() {
+        return Some(CacheWriteTiers {
+            five_min: RateSpec::fixed_or_unknown(e.cache_write_5m),
+            one_hour: RateSpec::fixed_or_unknown(e.cache_write_1h),
+        });
+    }
+    let (provider, _) = e.id.split_once('/')?;
+    if provider != "anthropic" {
+        return None;
+    }
+    let (input, write) = match (e.input, e.cache_write) {
+        (Some(i), Some(w)) if i > 0.0 => (i, w),
+        _ => return None,
+    };
+    let five_min_expected = input * 1.25;
+    if (write - five_min_expected).abs() > 1e-9 * five_min_expected.max(1.0) {
+        return None;
+    }
+    let one_hour = input * 2.0;
+    if !(one_hour.is_finite() && one_hour >= 0.0) {
+        return None;
+    }
+    Some(CacheWriteTiers {
+        five_min: RateSpec::Fixed(write),
+        one_hour: RateSpec::Fixed(one_hour),
+    })
+}
+
 fn price_plan_invalid(plan: &PricePlan) -> bool {
     invalid_rate(&plan.base).is_some()
+        || plan
+            .cache_write_tiers
+            .is_some_and(|tw| tier_rate_invalid(tw.five_min) || tier_rate_invalid(tw.one_hour))
         || plan
             .segments
             .iter()
@@ -720,89 +793,113 @@ fn estimate_entry(
     let mut complete = true;
     let mut unknown = TokenCounts::default();
     let mut lines = Vec::with_capacity(4);
-    for (kind, tokens, spec, is_cache_read, unknown_slot) in [
-        (
-            CostLineKind::Input,
-            t.input,
-            rates.input,
-            false,
-            &mut unknown.input,
-        ),
-        (
-            CostLineKind::Output,
-            t.output,
-            rates.output,
-            false,
-            &mut unknown.output,
-        ),
-        (
-            CostLineKind::CacheWrite,
-            t.cache_write,
-            rates.cache_write,
-            false,
-            &mut unknown.cache_write,
-        ),
-        (
-            CostLineKind::CacheRead,
-            t.cache_read,
-            rates.cache_read,
-            true,
-            &mut unknown.cache_read,
-        ),
-    ] {
-        let (price, rate_kind) = resolve(spec, is_cache_read);
-        match price {
-            Some(p) => {
-                // F04：先除后乘，避免有限单价的中间溢出（1M × 1e308/M
-                // 数学结果 1e308 有限）；求和同样防溢出。仍超出 f64 表示
-                // 范围时该分项不计金额、token 保留为未计价，带结构化溢出
-                // 原因（overflow）——不得夹成 0/最大值或伪装 complete=true。
-                let subtotal = tokens as f64 / 1_000_000.0 * p;
-                let summed = cost + subtotal;
-                if subtotal.is_finite() && summed.is_finite() {
-                    cost = summed;
-                    lines.push(CostLine {
-                        kind,
-                        tokens,
-                        unit_price: Some(p),
-                        subtotal,
-                        priced: true,
-                        rate_kind,
-                        overflow: false,
-                    });
-                } else {
-                    if tokens > 0 {
-                        complete = false;
-                        *unknown_slot = tokens;
-                    }
-                    lines.push(CostLine {
-                        kind,
-                        tokens,
-                        unit_price: Some(p),
-                        subtotal: 0.0,
-                        priced: false,
-                        rate_kind,
-                        overflow: true,
-                    });
-                }
+    // N18：可信分档 + 候选声明（完整）分档价 → 写入拆两行（5m/1h），不再
+    // 输出合并行；可信分档但候选没有可用分档价 → 写入整体按未知（不猜
+    // 档、不用总单价冒充）；分档未知 + 候选声明分档价 → 写入按总量单价
+    // 估算并标示（complete=false，cache_write_split_estimated=true）。
+    let tiers = plan.cache_write_tiers;
+    let tier_prices = tiers.and_then(|tw| {
+        let five = tw.five_min.resolve_direct();
+        let one = tw.one_hour.resolve_direct();
+        match (five, one) {
+            (Some(f), Some(o)) => Some((f, o)),
+            _ => None,
+        }
+    });
+    let split_known = t.cache_write_split_known && t.cache_write > 0;
+    let mut split_estimated = false;
+    let (input_price, input_kind) = resolve(rates.input, false);
+    push_cost_line(
+        &mut cost,
+        &mut complete,
+        &mut lines,
+        CostLineKind::Input,
+        t.input,
+        input_price,
+        input_kind,
+        &mut unknown.input,
+    );
+    let (output_price, output_kind) = resolve(rates.output, false);
+    push_cost_line(
+        &mut cost,
+        &mut complete,
+        &mut lines,
+        CostLineKind::Output,
+        t.output,
+        output_price,
+        output_kind,
+        &mut unknown.output,
+    );
+    if split_known {
+        match tier_prices {
+            Some((five, one)) => {
+                let (w5p, w5k) = resolve(RateSpec::Fixed(five), false);
+                push_cost_line(
+                    &mut cost,
+                    &mut complete,
+                    &mut lines,
+                    CostLineKind::CacheWrite5m,
+                    t.cache_write_5m,
+                    w5p,
+                    w5k,
+                    &mut unknown.cache_write,
+                );
+                let (w1p, w1k) = resolve(RateSpec::Fixed(one), false);
+                push_cost_line(
+                    &mut cost,
+                    &mut complete,
+                    &mut lines,
+                    CostLineKind::CacheWrite1h,
+                    t.cache_write_1h,
+                    w1p,
+                    w1k,
+                    &mut unknown.cache_write,
+                );
             }
             None => {
-                if tokens > 0 {
-                    complete = false;
-                    *unknown_slot = tokens;
-                }
-                lines.push(CostLine {
-                    kind,
-                    tokens,
-                    unit_price: None,
-                    subtotal: 0.0,
-                    priced: false,
-                    rate_kind: RateKind::Unknown,
-                    overflow: false,
-                });
+                // 候选无可用分档价：写总量按未知处理（不得猜档）。
+                let (wp, wk) = resolve(RateSpec::Unknown, false);
+                push_cost_line(
+                    &mut cost,
+                    &mut complete,
+                    &mut lines,
+                    CostLineKind::CacheWrite,
+                    t.cache_write,
+                    wp,
+                    wk,
+                    &mut unknown.cache_write,
+                );
             }
         }
+    } else {
+        let (wp, wk) = resolve(rates.cache_write, false);
+        push_cost_line(
+            &mut cost,
+            &mut complete,
+            &mut lines,
+            CostLineKind::CacheWrite,
+            t.cache_write,
+            wp,
+            wk,
+            &mut unknown.cache_write,
+        );
+        // 候选声明了分档价而事件分档未知 → 估算而非完整精确费用。
+        if tiers.is_some() && t.cache_write > 0 {
+            split_estimated = true;
+            complete = false;
+        }
     }
+    let (read_price, read_kind) = resolve(rates.cache_read, true);
+    push_cost_line(
+        &mut cost,
+        &mut complete,
+        &mut lines,
+        CostLineKind::CacheRead,
+        t.cache_read,
+        read_price,
+        read_kind,
+        &mut unknown.cache_read,
+    );
     CostEstimate {
         cost,
         unknown,
@@ -815,6 +912,73 @@ fn estimate_entry(
         lines,
         excluded_candidate_warning: None,
         excluded_incomplete_schedules: 0,
+        cache_write_split_estimated: split_estimated,
+    }
+}
+
+/// N18：单个计价分项行——已计价计入 cost；缺价/溢出按 unknown 保留并
+/// 标 incomplete（与原 estimate_entry 行为逐字段一致，仅为分档拆行复用）。
+#[allow(clippy::too_many_arguments)]
+fn push_cost_line(
+    cost: &mut f64,
+    complete: &mut bool,
+    lines: &mut Vec<CostLine>,
+    kind: CostLineKind,
+    tokens: u64,
+    price: Option<f64>,
+    rate_kind: RateKind,
+    unknown_slot: &mut u64,
+) {
+    match price {
+        Some(p) => {
+            // F04：先除后乘，避免有限单价的中间溢出（1M × 1e308/M
+            // 数学结果 1e308 有限）；求和同样防溢出。仍超出 f64 表示
+            // 范围时该分项不计金额、token 保留为未计价，带结构化溢出
+            // 原因（overflow）——不得夹成 0/最大值或伪装 complete=true。
+            let subtotal = tokens as f64 / 1_000_000.0 * p;
+            let summed = *cost + subtotal;
+            if subtotal.is_finite() && summed.is_finite() {
+                *cost = summed;
+                lines.push(CostLine {
+                    kind,
+                    tokens,
+                    unit_price: Some(p),
+                    subtotal,
+                    priced: true,
+                    rate_kind,
+                    overflow: false,
+                });
+            } else {
+                if tokens > 0 {
+                    *complete = false;
+                    *unknown_slot = tokens;
+                }
+                lines.push(CostLine {
+                    kind,
+                    tokens,
+                    unit_price: Some(p),
+                    subtotal: 0.0,
+                    priced: false,
+                    rate_kind,
+                    overflow: true,
+                });
+            }
+        }
+        None => {
+            if tokens > 0 {
+                *complete = false;
+                *unknown_slot = tokens;
+            }
+            lines.push(CostLine {
+                kind,
+                tokens,
+                unit_price: None,
+                subtotal: 0.0,
+                priced: false,
+                rate_kind: RateKind::Unknown,
+                overflow: false,
+            });
+        }
     }
 }
 
@@ -903,6 +1067,11 @@ pub enum CostLineKind {
     Output,
     CacheWrite,
     CacheRead,
+    /// N18：可信分档事件把写入拆成两行（5m/1h），不再输出合并 CacheWrite 行。
+    #[serde(rename = "cache_write_5m")]
+    CacheWrite5m,
+    #[serde(rename = "cache_write_1h")]
+    CacheWrite1h,
 }
 
 /// 分项计价结果（B3）：cost 为已计价分项小计；unknown 记录无法计价分项的
@@ -933,6 +1102,9 @@ pub struct CostEstimate {
     /// 排除的**不完整时间规则**数（已知小计可能虚高）。与渠道候选计数
     /// 单位无关，不冒充 candidate_count。
     pub excluded_incomplete_schedules: usize,
+    /// N18：事件可信分档缺失（旧日志/源日志已删）而候选声明了分档价——
+    /// 写费按写入总量单价**估算**，不得当作完整精确费用（complete=false）。
+    pub cache_write_split_estimated: bool,
 }
 
 /// GUI 悬浮对照用：该前缀在 OpenRouter 层的价格（无对应模型则 None）。
@@ -1030,6 +1202,11 @@ struct ExternalModel {
     cache_write: RateSpec,
     #[serde(default)]
     cache_read: RateSpec,
+    /// N18：缓存写分档价（可单独给出；缺档 = Unknown → 可信分档估算不完整）。
+    #[serde(default)]
+    cache_write_5m: RateSpec,
+    #[serde(default)]
+    cache_write_1h: RateSpec,
     #[serde(default)]
     segment: Vec<ExternalSegment>,
     /// Task 4A：峰谷时间规则。Task 4 阶段仅解析——含时间规则的条目整条
@@ -1249,6 +1426,10 @@ fn external_model_plan(m: &ExternalModel) -> Result<(PricePlan, Vec<String>), St
     // F04：数值预检先于任何结构性丢弃——原始候选的时间规则（规则级/
     // 时段/规则分段）任一显式单价非法 → **整条候选拒绝**，不得丢弃脏
     // 规则后按基础价完整计费。结构性错误仍沿"跳过该规则 + 诊断"契约。
+    // N18：分档价同样预检（SameAsInput 对分档无意义，显式拒绝）。
+    if tier_rate_invalid(m.cache_write_5m) || tier_rate_invalid(m.cache_write_1h) {
+        return Err("缓存写分档价非法（须为有限非负数字；分档不支持 same_as_input）".to_string());
+    }
     for s in &m.schedule {
         let rule = PriceRates {
             input: s.input,
@@ -1303,7 +1484,19 @@ fn external_model_plan(m: &ExternalModel) -> Result<(PricePlan, Vec<String>), St
             Err(err) => rule_warnings.push(err),
         }
     }
+    // N18：声明了任一分档键才挂分档（缺档 = Unknown，不冒充已知）。
+    let cache_write_tiers = if matches!(m.cache_write_5m, RateSpec::Unknown)
+        && matches!(m.cache_write_1h, RateSpec::Unknown)
+    {
+        None
+    } else {
+        Some(CacheWriteTiers {
+            five_min: m.cache_write_5m,
+            one_hour: m.cache_write_1h,
+        })
+    };
     let plan = PricePlan {
+        cache_write_tiers,
         basis,
         application,
         base,
@@ -1392,7 +1585,9 @@ fn default_index_v1() -> u8 {
 /// prefix 是旧规则（`gpt-5.6-sol`），与新查询键（`gpt56sol`）不兼容，
 /// **拒绝读取**并按来源离线重建；重建用保留的 `display` 原文重新推导键，
 /// 不从压扁后的键反推结构。
-pub const INDEX_VERSION: u8 = 9;
+/// v10：N18 缓存写分档进入 PricePlan（索引条目随计划序列化）；派生的
+/// Anthropic 官方分档也随重建生效——旧索引按 v9 拒读并整份重建。
+pub const INDEX_VERSION: u8 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -1920,7 +2115,9 @@ impl Pricing {
                             e.cache_write,
                             e.cache_read,
                         );
+                        let cache_write_tiers = modelsdev_cache_write_tiers(&e);
                         let plan = PricePlan {
+                            cache_write_tiers,
                             basis: Some(PricingBasis::PromptTokens),
                             application: Some(PricingApplication::WholeRequest),
                             base,
@@ -1950,6 +2147,7 @@ impl Pricing {
                                     e.id
                                 ));
                                 PricePlan {
+                                    cache_write_tiers: None,
                                     basis: Some(PricingBasis::PromptTokens),
                                     application: Some(PricingApplication::WholeRequest),
                                     base,
@@ -2020,6 +2218,7 @@ impl Pricing {
                             })
                             .collect::<Vec<_>>();
                         let or_plan = PricePlan {
+                            cache_write_tiers: None,
                             basis: Some(PricingBasis::PromptTokens),
                             application: Some(PricingApplication::WholeRequest),
                             // R01：快照中的数值缓存价保留（×1e6 统一
@@ -2754,6 +2953,9 @@ mod tests {
             output,
             cache_write: cw,
             cache_read: cr,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         }
     }
 
@@ -3041,6 +3243,7 @@ mod tests {
         PricePlan {
             basis: Some(PricingBasis::PromptTokens),
             application: Some(PricingApplication::WholeRequest),
+            cache_write_tiers: None,
             schedules: Vec::new(),
             base: PriceRates {
                 input: RateSpec::Fixed(3.0),
@@ -3203,6 +3406,7 @@ mod tests {
         let plan = PricePlan {
             basis: Some(PricingBasis::PromptTokens),
             application: Some(PricingApplication::WholeRequest),
+            cache_write_tiers: None,
             base: PriceRates {
                 input: RateSpec::Fixed(3.0),
                 output: RateSpec::Fixed(15.0),
@@ -3258,6 +3462,9 @@ mod tests {
             output,
             cache_write: cw,
             cache_read: cr,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         };
         // 低于阈值 → 基础价：200_000 前的 (100, 0, 0, 50)。
         let e1 = p
@@ -3296,6 +3503,7 @@ mod tests {
             plan: PricePlan {
                 basis: Some(PricingBasis::PromptTokens),
                 application: Some(PricingApplication::WholeRequest),
+                cache_write_tiers: None,
                 base: PriceRates::default(),
                 schedules: Vec::new(),
                 segments: vec![PriceSegment {
@@ -3536,6 +3744,8 @@ mod tests {
                     output: Some(20.0),
                     cache_read: Some(0.4),
                     cache_write: Some(5.0),
+                    cache_write_5m: None,
+                    cache_write_1h: None,
                     segments: vec![seg(272_001, None, 8.0)],
                 },
                 // 反向区间：非法 → 仅保留基础价 + warning
@@ -3546,6 +3756,8 @@ mod tests {
                     output: Some(2.0),
                     cache_read: None,
                     cache_write: None,
+                    cache_write_5m: None,
+                    cache_write_1h: None,
                     segments: vec![seg(100_000, Some(50_000), 9.0)],
                 },
             ],
@@ -3670,6 +3882,8 @@ mod tests {
                     output: Some(2.0),
                     cache_read: None,
                     cache_write: None,
+                    cache_write_5m: None,
+                    cache_write_1h: None,
                     segments: Vec::new(),
                 },
                 // 显式 0（如旧版 OpenAI 模型无写入计费）
@@ -3680,6 +3894,8 @@ mod tests {
                     output: Some(2.0),
                     cache_read: Some(0.0),
                     cache_write: Some(0.0),
+                    cache_write_5m: None,
+                    cache_write_1h: None,
                     segments: Vec::new(),
                 },
             ],
@@ -3777,6 +3993,8 @@ mod tests {
                 output: Some(2.0),
                 cache_read: None,
                 cache_write: None,
+                cache_write_5m: None,
+                cache_write_1h: None,
                 segments: Vec::new(),
             }],
         };
@@ -3913,6 +4131,8 @@ mod tests {
                 output: Some(3.0),
                 cache_read: Some(0.1),
                 cache_write: Some(0.2),
+                cache_write_5m: None,
+                cache_write_1h: None,
                 segments: Vec::new(),
             }],
         };
@@ -4061,6 +4281,7 @@ cache_read = 1.0
             plan: PricePlan {
                 basis: Some(PricingBasis::PromptTokens),
                 application: Some(PricingApplication::WholeRequest),
+                cache_write_tiers: None,
                 base: PriceRates {
                     input: RateSpec::Fixed(4.0),
                     output: RateSpec::Fixed(20.0),

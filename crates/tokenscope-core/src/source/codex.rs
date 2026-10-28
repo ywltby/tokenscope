@@ -556,6 +556,9 @@ fn event_from_usage(
         output_tokens: output,
         cache_write_tokens: cache_write,
         cache_read_tokens: cached,
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
     };
     // SF08：source→model 公共边界（与缓存恢复同一路径）防御性兜底。
     if event.validate_buckets().is_err() {

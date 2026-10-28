@@ -46,6 +46,12 @@ struct ApiCost {
     cache_read: Option<f64>,
     #[serde(default)]
     cache_write: Option<f64>,
+    /// N18：缓存写分档（USD/百万 token）。models.dev 当前未发布这两键；
+    /// 显式字段一旦存在即优先生效（快照层不做任何派生）。
+    #[serde(default)]
+    cache_write_5m: Option<f64>,
+    #[serde(default)]
+    cache_write_1h: Option<f64>,
     /// Task 2：上下文分段价格（只接受 tier.type = "context"）。
     #[serde(default)]
     tiers: Vec<ApiTier>,
@@ -132,6 +138,12 @@ pub struct SnapshotEntry {
     pub output: Option<f64>,
     pub cache_read: Option<f64>,
     pub cache_write: Option<f64>,
+    /// N18：缓存写分档（显式字段；缺省 None = 未发布，由计价层按来源
+    /// 渠道规则决定是否派生——快照层不猜）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_5m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<f64>,
     /// Task 2：上下文分段（v3 快照起写入；v1/v2 旧快照缺省为空 = 仅基础价）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub segments: Vec<SnapshotSegment>,
@@ -232,6 +244,8 @@ pub(crate) fn sync_with(
                 output: cost.output,
                 cache_read: cost.cache_read,
                 cache_write: cost.cache_write,
+                cache_write_5m: cost.cache_write_5m,
+                cache_write_1h: cost.cache_write_1h,
                 segments,
             });
         }
@@ -453,6 +467,8 @@ mod tests {
                     m.cost.map(|c| {
                         let (segments, _) = convert_tiers(&c.tiers, c.context_over_200k.as_ref());
                         SnapshotEntry {
+                            cache_write_5m: None,
+                            cache_write_1h: None,
                             id: format!("{provider}/{id}"),
                             name: m.name,
                             input: c.input,
@@ -528,6 +544,9 @@ mod tests {
             output: 0,
             cache_write: 0,
             cache_read: 0,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         };
         let est = p
             .estimate(
@@ -545,6 +564,9 @@ mod tests {
             output: 0,
             cache_write: 0,
             cache_read: 0,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         };
         let est = p
             .estimate(
@@ -640,6 +662,8 @@ mod tests {
             v: 2,
             synced_at: "2026-10-04T00:00:00+08:00".into(),
             entries: vec![SnapshotEntry {
+                cache_write_5m: None,
+                cache_write_1h: None,
                 id: "volcengine/doubao-seed-2-0-pro-260215".into(),
                 name: Some("Doubao Seed 2.0 Pro".into()),
                 input: Some(0.47),

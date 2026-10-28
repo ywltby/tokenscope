@@ -284,6 +284,9 @@ fn explicit_zero_is_valid_available_pricing() {
         .estimate(
             "prov/free-model",
             &tokenscope::model::TokenCounts {
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
                 input: 1_000_000,
                 output: 500_000,
                 cache_write: 0,

@@ -117,6 +117,9 @@ fn seed_events(history: &HistoryDb, prefix: &str, count: usize, same_ts: bool) {
                     session_initial_cwd: None,
                     event_cwd: None,
                     tokens: TokenCounts {
+                        cache_write_5m: 0,
+                        cache_write_1h: 0,
+                        cache_write_split_known: false,
                         input: 100,
                         output: 10,
                         cache_write: 0,
