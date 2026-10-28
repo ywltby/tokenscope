@@ -18,7 +18,7 @@
 3. 计量上游：一次请求的 token 从哪来
 4. 事件模型：`usage.Record` 一行账本
 5. 落盘与索引：`usage.jsonl` 与压缩块快照
-6. 第二来源：agent 本地会话文件（`internal/sessions`）
+6. 本地文件读取：`internal/sessions` 全链路（发现→变更判定→解析→分片缓存→网关排他）
 7. 三源合并与去重：同一调用不能算两遍
 8. 聚合：`Totals` / `Summary` / 时间桶 / 维度
 9. 计价：价格从哪来、怎么乘、怎么处理未知
@@ -235,9 +235,9 @@ out.CacheWrite ← prompt_tokens_details.cache_write_tokens
 **反面教训（值得写进任何自研实现的设计约束）**：注释明确记了「曾经按大小预算丢块」，结果是
 每次读都重新解析整文件（750k 调用 ≈ 6 秒 CPU），所以现在**块永不淘汰**（`log_index.go:31-34`）。
 
-## 6. 第二来源：agent 本地会话文件（`internal/sessions`）
+## 6. 本地文件读取：`internal/sessions` 全链路
 
-会话文件在两个地方被消费，必须分开看（**已验证**）：
+会话文件在三个地方被消费，必须分开看（**已验证**）：
 
 - `ledgerMatched()` 内部合并出全量 ledger（§7.2）——用于 Requests 页与 CSV。
 - `usage.Direct()`（`internal/usage/direct.go:11-33`）**只汇总直连调用**，用于 Usage 页与托盘
@@ -256,7 +256,7 @@ type Call struct {
     ResponseID string    // Codex 的 response_id，用于与网关记录配对
     Time       time.Time
     Agent      string    // claude / claude-desktop / codex / ...
-    Session    string    // agent 发给网关的会话头
+    Session    string    // 会话 id：Claude 取 sessionId 字段、Codex 取 rollout 文件名、Kimi 取目录名……
     ThreadID   string    // Codex 线程
     Model      string    // 文件所记模型
     Requested  string    // Claude Code 的 identity 块声明的运行模型
@@ -272,7 +272,7 @@ type Call struct {
 `CacheRead`/`CacheWrite`/`CacheWrite1h` 分列。`ccTokens()`（`sessions.go:79-87`）把 Claude Code 的
 `cache_creation.ephemeral_5m/1h` 拆出来，并取 `CacheWrite = max(总写, 5m+1h)` 防厂商字段不一致。
 
-### 6.2 读者注册表（权威清单）
+### 6.2 读者注册表与发现层
 
 `internal/sessions/call_cache.go:205-251` 是**唯一权威**的「能读哪些 agent」表。代码注释写死：
 「Every agent in `callSources` that is not in `callFiles` needs an entry here, in
@@ -298,44 +298,255 @@ type Call struct {
 `codex`、`opencode`、`zcode`、`workbuddy`、`codebuddy`、`minimax-code`、`agy`、`dsh`、`kimi`、
 `pi`、`omp`。
 
-### 6.3 各 agent 的解析要点（只记口径差异，不记内容）
+#### 发现层：先找到「什么文件」
 
-- **Claude Code**（`calls.go:632-835`）：一个 `message.id` 可能有多行（流式块各占一行），
-  以**最后一行**的 usage 为准（`m.accept`）；`isApiErrorMessage` 行算错误、无 token；
-  `attachment.identity.modelId` 提供 `Requested`（如 `claude-opus-5[1m]`）；`compact_boundary`
-  的 `durationMs` 记到下一次调用上。耗时用「上一次 user 行 → 本次回复行」近似，注释承认会「多
-  一点或少一点」。
-- **Codex**（`calls.go:852-1131`）：rollout 里 `token_count`（`info.total_token_usage` +
-  `last_token_usage`）与 `token_usage_record` 都是**累计或差分**，由 `codexUsageState` 做差分，
-  `spent()` 转换（`internal/sessions/codex.go:87`）；`turn_context` 推进 model/effort；
-  `compacted` 标记压缩轮次；`task_complete` 给出整轮 `duration_ms` 与 `time_to_first_token_ms`，
-  仅在「一轮只有一次调用」时回填到该调用。
-- **OpenCode**（`calls_opencode.go:17-63`）：一条 assistant 消息 = 一次调用；走 magpie 网关的
-  记录（provider 为 `magpie` 或旧名 `dial`）**直接跳过**，不做后续配对。
-- **WorkBuddy / CodeBuddy**（`calls_workbuddy.go:19-48`）：用量在回复行
-  `providerData.usage`，以 `providerData.messageId` 标识；一行可对应一次调用。
-- **dsh**（`calls_dsh.go:9-53`）：`assistant/message` 行带 usage，一行一次；文件只追加，
-  从上次偏移续读（帧级）；走网关的调用跳过。
-- **Kimi Code**（`calls_kimi.go:15-50`）：`usage.record` 一行一次；`usageScope: "session"`
-  表示轮次外的调用（压缩）；fork 会话会**原样复制**父会话记录，故按
-  `(agent, time, model, usage)` 生成 `kimiCallKey` 去重。
-- **agy**（`calls_agy.go:16-46`）：transcript 的 `PLANNER_RESPONSE` 步骤带 `input_tokens` /
-  `cache_read_tokens` / `output_tokens`；无模型、无账号，所以「模型未知」；走网关的步骤靠
-  token+时间匹配（§7.3）。
+统一状态是 `file`（`sessions.go:380-392`）：`agent`、`key`（`agent:session id`，一个会话可跨多个
+文件）、`path`、`size`、`mod`、`main`（是否会话自己的文件，区别于子代理文件）、`readOnly`、
+`cold`（WSL 未运行、当前不该打开）、`more *fileMore`（只有部分 agent 用到的附加信息，如
+OpenCode 的 store、agy 的 summary、WSL 发行版名）。`fileMore` 单独用指针（`:394-414`），
+注释给了理由：一次轮询要复制 ~20k 个 file 五到六次，「96 字节而不是 232 字节」。
 
-### 6.4 增量与缓存工程
+各家的发现方式（**已验证**）：
 
-- 会话文件变更判定：`prepareCalls()`（`calls.go:374-409`）要求满足「文件只增长、头部未变、
-  前缀哈希一致」才续读，否则整份重读；`prefixHash()`（`calls.go:1138-1172`）用 **16 × 4 KiB
-  采样**代替全文哈希，注释写明「重写若落在采样窗口之外会漏检」，是有意的成本取舍。
-- 并发：`Calls()` 走 `sharedCalls`（`calls.go:190-231`），同一 `(since, agent)` 的并发读者共享
-  一次飞行（flight），且全局 `callsReading` 保证「同一时刻只有一次读文件」——注释记了事故：
-  Sessions 页多个请求同时进来各持一份全量调用，「进程涨到 85 GB」。
-- 目录列举：`readDirectory()`（`discovery.go:33-56`）按目录 mtime+size 缓存，且对「2 秒内的
-  列举」不信任（`racyDirectory`），防止「同刻新增条目被漏掉」。
-- 磁盘分片：`ReadCallSource`（`calls.go:1204-1225`）读单个来源后立刻 `keepCallContinuation` +
-  释放完整行，避免「解析结果与磁盘分片双份常驻内存」。
-- 冷启动保护：肌 `f.cold || wslCold` 时不打开文件（会启动 WSL），直接返回旧快照或空。
+| agent | 发现逻辑 | 位置 |
+| --- | --- | --- |
+| `claude` / `claude-desktop` | `<dir>/projects/<project>/<id>.jsonl`（`main: true`）+ `<id>/subagents/*.jsonl` + `<id>/subagents/workflows/<run>/agent-*.jsonl`（后两者的 key 都归到会话 id）；`journal.jsonl` 不是 transcript，不读 | `sessions.go:564-612` |
+| `codex` | 遍历 `CodexDirs()`（多个 `CODEX_HOME`，一个 ChatGPT 账号一个目录）下的 `sessions/` 与 `archived_sessions/`，用 `rolloutName` 正则取 id；同目录存在未压缩孪生时**优先明文**（压缩可能还没写 trailer） | `sessions.go:700-826` |
+| `opencode` | 有 DB 就按 DB（`session_v2`/`session_message` 或老的 `session`/`message`），否则 `storage/` 下的 JSON；`file.path` 用 `<dbpath>#<sid>` 或 `<…>/<sid>.json` 编码 | `calls_opencode.go:41-63`、`151-202` |
+| `zcode` | 同一套表结构，`zcodeDB()` + `<dbpath>#<sid>` | `calls_zcode.go:39-107` |
+| `workbuddy` / `codebuddy` | `workbuddyFiles()` / `codebuddyFiles()` 的 `projects/<cwd>/<id>.jsonl`（子代理文件单独成源） | `calls_workbuddy.go:31-48` |
+| `minimax-code` | `v2/sessions/<yyyy>/<mm>/<dd>/<ts>-session_<base64 id>/messages*.jsonl`，id 从目录名 base64 解出 | `calls_minimax.go:44-85` |
+| `kimi` | `sessions/<workdir slug>/<sid>/agents/<agent>/wire.jsonl`（每个 agent 一个文件） | `calls_kimi.go:61-69` |
+| `pi` / `omp` | `piFiles()` / `ompFiles()`，另加 `wslFiles("pi","omp")` | `calls_pi.go:42-46` |
+| `dsh` | `dshFiles()`（打包帧文件） | `calls_dsh.go:27-35` |
+| `agy` | `~/.gemini/antigravity-cli/brain/<conv>/.system_generated/logs/transcript_full.jsonl` | `calls_agy.go:39-46` |
+| WSL 内的 claude/codex/kimi/pi/omp | `wslFiles(...)` 经 `\\wsl.localhost` 读，停机的发行版标 `cold` | `wsl.go:135` |
+
+三个「发现层」的性能机制值得单列（**已验证**）：
+
+- **一次列目录代替逐文件 stat**：`statFiles()`（`sessions.go:482-525`）先用 `dirent.Stats` 把同一
+  目录一次性读出（`fs.ReadDir` 语义的批量封装），拿不到的再用 8 个协程 `Stat`/`Lstat` 补齐；
+  注释记了「~21k 文件逐个 stat 是那次遍历的大头」（`#3493`）。
+- **目录列举缓存**：`readDirectory()`（`discovery.go:33-56`）按「目录 mtime + size」缓存条目，
+  并规定「列举时间距目录 mtime 不足 `racyDirectory = 2s` 的不可信，要重列」——因为 mtime 精度
+  粗，同一刻新增的条目会让 mtime 不变而漏掉。
+- **预热期列举复用**：`codexFiles()`（`sessions.go:700-717`）在 `quiet()`（只有预热在读）时把
+  rollout 列表缓存 `warmListingFor = 10s`；`OneListing()`/`heldFiles()`（`one_listing.go:29-96`）
+  则在一次页面请求内共享各目录列举，并让并发读者等同一份结果而不是各自重列。
+
+「一个会话多个文件」由 `key` 表达，读取时按 `mod` 升序排列文件（`calls.go:241-246`），
+注释说明「更早的文件拥有被复制进续接会话的消息」——这是 Claude Code 会话续接（resume）留下的
+重复消息靠 `Msg` 去重（`calls.go:266-271`）的前提。
+
+### 6.3 各 agent 的解析口径（只记口径差异，不记内容）
+
+**Claude Code / Claude Desktop**（`calls.go:632-835` + `claude_usage.go`）：
+
+- 一个 `message.id` 可能有多行（流式块各占一行、工具块重复上报同一 usage），
+  `claudeUsageState.message(id, request)`（`claude_usage.go:123-158`）按
+  `message:<id>` + `request` **分支出贡献**；只有 request id 兼容才合并，缺 id 时仅当
+  「唯一已知分支」才收养——注释写明「neither ID → no evidence that two lines are the same call」。
+- `accept()`（`claude_usage.go:202-228`）只接受「未见过且更晚」的修订：同 model + 同四桶 → 视为重复
+  （仍推进 `Updated` 作为修订序）；命中 `Previous` → 忽略；时间不更晚 → 忽略。所以「回放的旧快照
+  不能撤销后来的块」。
+- `attachment.identity.modelId` 提供 `Requested`（如 `claude-opus-5[1m]`）；`compact_boundary` 的
+  `durationMs` 记到下一次成功调用上；`isApiErrorMessage` 行算错误、token 为 0。
+- 耗时用「上一次 user 行（或上次回复结束）→ 本次回复行」近似，注释承认会「多一点或少一点」。
+- 磁盘上另存**修订窗口**（`claudeRevisionEntries = revisionEntries / revisionFiles = 1024`，
+  `claude_usage.go:21`），并用 `MarshalJSON`/`UnmarshalJSON` 写进分片（`:102-111`），
+  使「重启后继续读」不必从第一行重放（`#3493`：一个 2 GB 的活跃会话曾每次更新都要整读）。
+
+**Codex**（`calls.go:852-1131` + `codex_usage.go` + `codex.go:69-93`）——这是全仓最复杂的差分：
+
+- `cxUsage` 用 `Known uint8` 位图区分「字段缺失」与「显式 0」：`UnmarshalJSON`
+  （`codex_usage.go:230-257`）用 `*int` 逐个字段解码，缺哪个就不置位。`matches()`（`:283-295`）
+  要求 input/output 两位都必须 known、且所有共同 known 字段相等。
+- `spent()`（`codex.go:87-93`）：Codex 的 `input_tokens` 是**整个 prompt**（含缓存读写），
+  所以 `Input -= CacheRead + CacheWrite`，负值夹 0。
+- 两条来源：`token_usage_record`（带 `response_id`，走 `record()`，`codex_usage.go:388-495`）与
+  `token_count`（带累计 `total_token_usage` + 本次 `last_token_usage`，走 `count()`，`:497-646`）。
+- `record()`：去重键 `session\x00response_id`；命中则比较 usage/model，冲突计 `Conflicts++` 并丢弃；
+  重放（时间不更晚）不撤销已接受更新；无 id 时用 `Intervals` 索引按
+  `(session, epoch, total input/output, usage input/output)` 找唯一同区间，再退到 `Pending`
+  做「一次观测只消费一次」的配对。
+- `count()`：优先用 `last`（本次请求的精确用量），缺 `last` 才用 `total - prev`；
+  `Epoch` 表示「计数器域」（runtime 重启、周目切换），`CounterBases` 记录重置前的基线，
+  `High` 是单调高水位。注释点名两类坑：`#2234`（Codex Desktop 的 `thread_spawn` 会重放父线程
+  checkpoint、`last=0`，若照算差分会把父线程的量再记一遍）与「累计值回退但时间戳前跳」。
+- `compacted()`（`codex_usage.go:116-156`）：压缩调用只在 `compaction_response_id` 与
+  `latest_token_usage_record.response_id` 一致、usage 有效时计入；它同时参与
+  `projectCount()` 的偏移计算，避免压缩量与后续累计重复。
+- `task_complete` 给出整轮 `duration_ms` / `time_to_first_token_ms`，**仅当该轮只有一次调用**时
+  回填到那次调用（`calls.go:980-991`）。
+
+**OpenCode / ZCode**（`calls_opencode.go:151-250`、`calls_zcode.go:65-107`）：一条 assistant 消息
+= 一次调用。但两家 tokens 语义不同，代码显式分流（`calls_opencode.go:229-240`）：
+
+- OpenCode 自己的写法按「Codex 式」读：`Output += Reasoning`，input 原样（不含缓存）。
+- **ZCode 用的是 AI SDK 的计数**：input 含缓存、output 已含 reasoning；照搬会「缓存算两次、
+  命中率读成一半」（`#1947`，注释给了 50.8% vs 96.9% 的实测），所以单独做
+  `Input = input - cacheRead - cacheWrite`、`Output = output`。
+- 二者的「走网关」判定：`ocGatewayProvider(id)` = `magpie` 或旧名 `dial`
+  （`calls_opencode.go:29-30`），直接跳过、不留待配对。
+
+**WorkBuddy / CodeBuddy**（`calls_workbuddy.go:155-241`）：一行 `providerData.usage`，
+以 `providerData.messageId` 标识；**同一 messageId 会随回复进行重复出现**，所以「最后一行覆盖前一行」，
+但仅当 id 相同且非空（`:186-196`）——无 id 的旧历史回灌行各自算一次调用。
+
+**MiniMax Code**（`calls_minimax.go:100-156`）：`messages.jsonl`（以及 `history-catalog.json`
+保留的其它世代 `messages*.jsonl`）里的 assistant 行，`message_id` 作 `Msg` 去重；
+provider 为 `custom_provider:magpie` 的调用跳过。
+
+**Kimi Code**（`calls_kimi.go:111-145`）：`usage.record` 一行一次；`Input = inputOther`，
+缓存读/写分列（`inputCacheRead` / `inputCacheCreation`），output 含 thinking；
+`model` 前缀 `magpie/` 的跳过（`:64`）。fork 会把父会话记录**逐字节复制**，因此 `Msg` 用
+`kimi:<agent>:<time>:<model>:<四桶>` 组合键（`:141-145`），跨文件去重。
+
+**Pi / omp**（`calls_pi.go:96-185`）：行式读取，`piCarry` 保存「会话 cwd / fork 起点 / 当前
+provider+model」，`model_change` 与 assistant `message` 都会推进它；`usage`、`model_usage`、
+`compaction`、`branch_summary` 四类行都算调用（压缩与分支摘要的用量记在当时的模型上）；
+provider 为 `magpie`/`dial` 跳过。fork 的判定靠 header 的 `parentSession` + `since`：
+「写在 header 之前的行是父会话的」（`:107-113`、`:127`）。
+
+**dsh（DeepSeek Harness）**（`calls_dsh.go:37-219`）：`assistant/message` 行带 usage；
+文件是「zstd 帧打包的追加文件」，从上次的 **帧内偏移** 续读（§6.4）。两个额外的坑：
+① `session/end-seed` 事件在 `Inherited && version >= 2 && IsSeeded` 三者同时成立时，
+意味着「此前的行是从别处 seed 来的」，代码把 `st.Calls` 清空并 `kept = 0`（`:82-91`）；
+② format 2 之前没有这个标记，靠 `seq < SeedLength` 过滤 seed（`:94-96`）。
+走网关的判定是 provider 名（`magpie`/`magpie-responses`/`magpie-anthropic`/`dial`，`:209-219`），
+注释自承「只看名字：文件里没有 baseURL，用户自建的同名 provider 会被误当作网关」。
+
+**agy**（`calls_agy.go:16-46`）：transcript 的 `PLANNER_RESPONSE` 步骤带
+`input_tokens`（已扣除缓存读）/ `cache_read_tokens` / `output_tokens`（含 thoughts）；
+无模型、无账号，故「模型未知」；`created_at` 是步骤**开始**时间（不是结束）。
+走网关的步骤无法在文件层排除，只能靠 §7.3 的 token+时间配对。
+
+### 6.4 变更判定：三层证据，任一不成立就整份重读
+
+`readCalls()`（`call_cache.go:261-374`）在读之前先做**零 IO 判定**：
+
+1. 内存里有该文件、且 `Size == f.size && Mod == f.mod.UnixNano()` → 直接复用（`:273-280`，
+   还要求 `callGeneration` 未变，否则视为整体失效）。
+2. 否则 `loadKept(f)` 读磁盘分片，再走 `prepareCalls()`（`calls.go:374-409`）判断能否续读：
+   要求「不是打包文件、文件只增长（`f.size >= old.Size`）、`old.Off <= f.size`、头部 256 字节
+   哈希一致、已读前缀的采样哈希一致」。
+3. 三者任一不成立 → 丢弃旧快照，从第一行整读。
+
+采样哈希 `prefixHash()`（`calls.go:1138-1172`）是这套机制的成本核心：前缀 ≤ 64 KiB 时全读；
+更长时取 **16 个 4 KiB 窗口** 均匀采样并打上 `sample-v1:` 版本前缀。注释明说「重写若落在
+采样窗口之外会漏检」，是有意取舍（每份指纹最多 64 KiB 读，与文件长度无关）。
+
+打包文件另走 `tail`（`tail.go:16-50`）：`Off`（帧起点）+ `Skip`（帧内偏移）+ `Size`（该帧结束处）
++ `Head`/`Hash`；`holds()` 要求文件未缩短、头部一致、`prefixHash(path, Size)` 一致。
+
+冷源（`f.cold`、`wslCold(path)`）**不打开文件**：已读过的返回旧快照，否则返回空 callFile
+（`call_cache.go:281-287`）。注释写明原因是「打开一个停机的 WSL 发行版会把它启动」。
+
+### 6.5 磁盘分片：`calls-v15` 的自定义帧格式
+
+`sessions.CachePath()` = `<cache>/sessions.json`（会话汇总，`sessions.go:916`，当前
+`cacheVersion = 24`，`sessions.go:939`）；请求行则写进**另一个目录**：
+`callCacheDir() = <cache>/calls-v15`，每文件一个 `<hashHead(path)>.gob`（`call_cache.go:71-72`）。
+`call_cache.go:5` 那句「Sessions summaries never load these files」就是这套分工的声明。
+
+帧格式（`call_cache.go:456-503`、`:658-739`）：
+
+```
+[4B 长度 little-endian][4B CRC32 IEEE][gob(callFrame)]
+```
+
+- `callFrame{State, Strings, Patches, More, Calls}`：`State` 是**纯标量续读状态**
+  （`ContentHash/Size/Mod/Off/Head/HeadSize/Path/Agent/At/End/AsstEnd/Session/Requested/
+  LastUser/LastAsst` + dsh 的 carry JSON + Pi 的 carry 扁平字段）。注释特别说明：即使运行期
+  索引为 nil，gob 也会把递归类型描述写进每一帧，所以这些类型**必须留在 wire schema 之外**。
+- `Patches []callPatch`：每个 patch 是一次调用，13 个文本字段被换成
+  `Text [13]uint32` 的**帧内字符串字典下标**，`File` 由 `State.Path` 隐含（`:457-462`、`:533-535`）。
+  这样一帧里重复的 `Agent`/`Model`/`Session` 只存一次。
+- 每帧最多 `framePatches = 2048` 个 patch（`:482`）：注释记了一次实测——把 5.2 万调用的 Codex
+  会话写成**单帧** 8 MB，读取时一次分配 ~100 MB、常驻 ~70 MB（`#3493`）。
+- `More` 标记「同一写入的后续帧」，文件以 `More=true` 结尾说明**写到一半被截断**，整片作废
+  （`loadCalls` 在 `:638-640` 检查）。
+- 写入策略：只有「从已有偏移继续」时才 `O_APPEND`，否则写临时文件再 `rename` 原子替换
+  （`:719-738`）；`writeCalls` 只写 `dirty` 的旧调用 + 新调用（`:704-711`），所以一次追加的
+  代价与新增量成正比。
+
+读取校验（`loadCalls`，`:561-644`）逐项失败即返回 `nil`（整片按源重建）：
+帧长 0 或 > 256 MiB、CRC 不符、`State.Path`/`State.Agent` 与请求不符、`Off` 倒退、patch 下标越界、
+字符串下标越界。这是一套「宁可重读源文件，也不用可疑缓存」的策略。
+
+**版本史即口径史**（`call_cache.go:23-46`，v3→v15）：v4 Codex 的 input 不再含缓存写、v8 Claude 的
+1 小时缓存写分离、v9 dsh 带 provider/应答模型且排除网关调用、v10 ZCode/WorkBuddy 开始读、
+v12 ZCode 的 input 去缓存 / output 去重复 reasoning（`#1947`）、v13 压缩耗时、v14 Codex 线程、
+v15 压缩标记独立于耗时。版本号是**目录名的一部分**：`pruneCalls()` 一旦发现根目录变了，
+就 `Glob(calls-v*)` 把其它版本目录整个删掉（`:142-150`）。换句话说，**改解析口径 = 换缓存目录**，
+不做迁移也不做兼容。
+
+### 6.6 两级缓存与配额
+
+- 内存：`callCache map[string]*callFile` + `callOrder` 近似 LRU；`keepCalls()`（`call_cache.go:177-203`）
+  在插入前按 `maxKeptCalls = 131072` 条与 `maxKeptFiles = 64` 个文件做淘汰，并从最旧的开始删。
+  `callCounts` 只存「每条文件多少调用」作为分配提示，注释强调它**不存调用本身**（`:58`）。
+- `pruneCalls()`（`:96-175`）：先按当前文件集合剔除内存里已消失的路径；再清孤儿分片
+  （`.gob` / `.rev` / 超 1 小时的 `.tmp`），节流 `callSweepEvery = time.Minute`——注释记了
+  「每次都扫 ~16k 分片并哈希全部路径」曾占一次热页面的 1/10（`#3493`）。
+- 会话汇总（`sessions.json`）是**另一套**缓存，按 `cacheVersion` 整体失效；`zone()` 变了也会重读
+  （`sessions.go:947-949`）。
+
+### 6.7 修订窗口的预算：8 个文件、8192 条索引
+
+`revision_cache.go` 管的是「Claude 的 message 修订表 + Codex 的差分索引」这些**运行期索引**的
+内存预算。规则写得很清楚（`:8-30`）：最多 `revisionFiles = 8` 个文件、合计
+`revisionEntries = 8192` 条；最近 `revisionIdle = 5min` 内变过的优先，其次按源大小（重解析成本）。
+两个例外：正在写的 Codex 会话可以独占（最多 `revisionActiveFiles = 2`，每个最多
+`revisionActiveEntries = 16 × 8192`），因为它「约六条索引/调用」，超过 ~1400 条调用就会丢窗口，
+于是每次追加都从第一行重解析、占满一核（`yetone/magpie-releases#24`）。
+`revisionWorking = time.Hour` 之外的工作会话不再优先，但「空闲的 Claude 窗口只在确实需要容量时才丢」。
+
+`trimCallRevisions()`（`:181-208`）对 `callCache` 与 `callContinuations` 各跑一遍同一套预算，
+不保留时用 `withoutRevisions()` 换成「只有调用、没有索引」的副本——注意是**替换快照**而不是原地改，
+因为「解析器可能还在锁外读上一份快照」。
+
+### 6.8 并发与节流：谁在读、读多快
+
+- **同一文件**：`callLock(path)` 用 FNV-1a 把路径散到 64 个锁上（`call_cache.go:253-259`），
+  保证两个读者不会同时读同一文件（不同文件可并行）。
+- **同一次查询**：`sharedCalls()`（`calls.go:190-231`）按 `(since, agent)` 建 flight，
+  并发读者等同一个结果，且全局 `callsReading` 保证「同一时刻只有一次全量读」。
+  注释记了事故：Sessions 页多个请求同时进来各持一份全量调用，「进程涨到 85 GB」。
+- **读多快**：`quiet.go` 把「没人等的启动预热」与「页面在等」分开。预热期间 `readSlot()`
+  （`quiet.go:54-71`）用 50 ms ticker 轮询、只允许 `quietReaders() = NumCPU/4` 个读者同时读；
+  一旦有页面在等（`Ask()`），`quiet()` 立刻为假，`readSlot()` 直接放行，不再限流。
+  另一条并行的轴是 **Sessions 索引扫描**：`sessions.go:1175` 按 `scanReaders() = NumCPU/2`
+  （`quiet.go:33`）开协程，注释记了「22/32 核被读满、别的应用变慢」的实测（`#3238`）。
+  两者是不同路径，不要混为一谈。`Warm()` 结束时释放预热列举缓存。
+- **列表只列一次**：`OneListing()` / `heldFiles()`（`one_listing.go:29-96`）在一次请求内共享
+  各目录的列举结果（`~21k` 文件被一次轮询列两遍的问题），并且「正在列举时后来的读者等同一个
+  channel」，不会各自再列一遍。
+- **打包文件的一次解压两次使用**：`callsRide`（`call_cache.go:376-454`）让 Sessions 摘要扫描
+  顺手产出 calls。注释给了动机：Codex App 在 10-20 重打包了 11,591 个 rollout，
+  「预热为 Sessions 解析一遍、Requests 再读一遍，约 48 GB 解压两次」。
+- **缓冲区复用**：`shelf[T]`（`shelf.go:11-96`）在 GC 之间保留最多 4 个缓冲/解码器，
+  `shelfIdle = 10s` 后全放；理由是冷启动「约每秒一次 GC」，`sync.Pool` 在头 2 分钟里
+  611 次取空、重复分配约 1.9 GB。
+
+### 6.9 网关排他：每个 agent 的判据不一样，可靠性也不一样
+
+这是本地读取最容易出错、也最值得抄的一条经验：**同一次调用如果既被网关记账、又被会话文件读到，
+就会双计**。magpie 的解法是「读会话文件时先把走网关的调用排除」，但排除依据逐 agent 不同：
+
+| agent | 排他判据 | 可靠性 |
+| --- | --- | --- |
+| OpenCode | provider id 为 `magpie` 或 `dial`（`calls_opencode.go:29-30`） | 高：id 由 magpie 写入 |
+| ZCode | 同 OpenCode（`calls_zcode.go:92`），注释说明「magpie 写的路由就是 `magpie`，可信」 | 高 |
+| Pi / omp | provider 为 `magpie`/`dial`（`calls_pi.go:48-49`） | 高 |
+| Kimi Code | model 前缀 `magpie/`（`calls_kimi.go:63-64`） | 高 |
+| dsh | provider 名集合（`magpie`/`magpie-responses`/`magpie-anthropic`/`dial`，`calls_dsh.go:209-219`） | 中：注释自承「只看名字，用户自建同名 provider 会被误判」 |
+| WorkBuddy / CodeBuddy | **读当前 `models.json`**，把 `vendor == "magpie"` 的 id 视为网关（`calls_workbuddy.go:101-153`） | 低：注释自承「models.json 是用户的配置、不是调用记录；把 magpie 的模型删掉，那些当时走网关的调用就不再被排除，会再算一遍」 |
+| agy | 无法排除（`calls_agy.go:34-37`） | 无：只能靠 §7.3 的 token+时间配对 |
+| Claude / Codex | 不在文件层排除：这两家的文件里带着请求 id（Claude 的 `requestId`、Codex 的 `response_id`），走网关的调用由 §7.3 的 id 配对消除，而不是丢弃 | 高（有 id 即可判唯一） |
+
+`#589`、`#1947`、`#2234`、`#2512`、`#2776`、`#3493` 这一串 issue 号说明：本地读取的口径问题
+几乎全部来自「同一事实在两个文件里以不同形状出现」。
 
 ## 7. 三源合并与去重：同一调用不能算两遍
 
@@ -884,6 +1095,17 @@ magpie 之前」的用量）；②只能读到经自己网关的请求（其余 
 12. **`bareModel` 的剥离顺序**：先去上下文尾标（`[1m]`）→ 再去窗口尾标（`@256k`）→ 取最后一个
     `/` 之后 → 去 Bedrock 厂商/地域前缀 → 去版本尾巴。这个顺序比「先删分隔符」更稳，因为
     `[1m]` 里含字母 `m`、`@256k` 里含数字，先删分隔符会把它们粘进模型名。
+13. **缓存版本号当目录名，不做迁移**（`calls-v15`，§6.5）：解析口径一改就换目录、旧目录整体删除。
+    TokenScope 的 `SETTINGS_FORMAT_REVISION` 管的是设置，**解析口径变更**这一轴值得照搬
+    「显式版本 + 旧派生数据整体作废」，而不是写兼容分支。
+14. **`Known` 位图区分「缺失」与「显式 0」**（§6.3 的 Codex）：用一个 `uint8` 记哪些字段真的
+    出现在日志里，匹配时只比较双方都 known 的字段。TokenScope 现在对各字段缺省一律按 0，
+    遇到「厂商只报部分字段」的工具会误判相等/不等，值得引入同构机制。
+15. **修订窗口的预算 + 例外**（§6.7）：8 个文件 / 8192 条，但「正在写的 Codex 会话」允许
+    独占 2 个窗口、各 16× 上限。TokenScope 若做解析缓存，需要同类的「预算 + 活跃源例外」，
+    否则一个大会话会把所有小文件挤出去，退化成每次全量重解析。
+16. **读取编排的三层共享**（§6.8）：同文件加锁（64 桶）、同查询共享 flight、同请求共享目录列举。
+    TokenScope 是全量扫描、单一入口，这三层目前都不需要；但若引入增量扫描，这是最小可用的骨架。
 
 ### 13.3 要避的
 
@@ -906,6 +1128,15 @@ magpie 之前」的用量）；②只能读到经自己网关的请求（其余 
    `cost` 不可直接比对。
 8. **缺失缓存静默降级**：models.dev 缓存缺失时全部模型变「未定价」且无日志（§9.5 末）。
    TokenScope 已有「首次启动无快照 → 全局横幅提示」，属于同类问题的正确处理方式，应保持。
+9. **用「当前配置」反推「历史调用归属」**：WorkBuddy 的网关排他靠读现在的 `models.json`
+   （§6.9），作者已在注释里承认「把 magpie 的模型删掉，当时走网关的调用就会被再算一遍」。
+   TokenScope 判定任何来源归属时，只应使用日志内的证据，不用「现在装了什么」推断过去。
+10. **只靠 provider 名字判定网关**：dsh 的排他是四个固定名字（§6.9），用户自建同名 provider
+    会被误判为「两边都不算」。要做同类判定，必须找到可验证的结构证据（baseURL、端口、
+    请求 id 前缀），而不是字符串相等。
+11. **按「最新一行覆盖」处理重复用量行**：WorkBuddy/CodeBuddy 的 `messageId` 重复行靠「后行覆盖
+    前行」，但**无 id 的行各自算一次**（§6.3）。这是可接受的妥协，代价是旧历史回灌会重复计数；
+    TokenScope 遇到同类结构，应优先找稳定 id，找不到就显式标注不确定性，而不是静默累加。
 
 ### 13.4 若要把 magpie 当数据源（可选方向，未验证）
 
@@ -922,6 +1153,11 @@ magpie 暴露了 `GET /v1/magpie/usage`（与 GUI `/api/usage` 同构）与 `POS
 - 与 TokenScope 对照的结论基于 `docs/stats-semantics.md` 与 `CLAUDE.md` 的现行口径，不基于
   记忆。
 - 未运行 magpie，因此「页面实际显示什么」类结论一律未验证（前端资源未入库）。
+- 第 6 章（本地文件读取）为**逐文件通读**：`call_cache.go`（739 行）全文、`calls.go` 全文、
+  `frames.go`、`tail.go`、`revision_cache.go`、`quiet.go`、`thin.go`、`shelf.go`、`one_listing.go`、
+  `codex_usage.go`（664 行）全文、`claude_usage.go` 全文、全部 `calls_*.go`（opencode / zcode /
+  workbuddy / minimax / kimi / pi / dsh / agy），以及 `sessions.go` 的发现段（374-612、700-950、
+  1740-1859）。凡未通读的段落，正文均标「未验证」。
 
 ### 14.2 未决问题
 
@@ -946,6 +1182,15 @@ magpie 暴露了 `GET /v1/magpie/usage`（与 GUI `/api/usage` 同构）与 `POS
 8. **UA 为空的 agent 如何归属**：约 20 余个内置 agent 没有赋 `UA`（子代理逐个核对 `UA:` 字段后
    标注），它们要么靠专属 key、要么靠宿主信息，网关侧无法按 UA 区分——具体清单与影响面
    **未验证**（本文 §12.4 因此按「能读到本地历史 / 只能经网关 / 只能上报」三档归类，不按 UA 归类）。
+9. **`calls-v15` 的版本史缺 v11**：`call_cache.go:23-46` 从 v10 直接跳到 v12，v11 改了什么没有记录。
+   不影响当前行为（旧版本目录一律作废），但「哪一次口径变更对应哪个 issue」无法完整复原，
+   **未验证**是否有意省略。
+10. **`minimaxCallFiles` 未走批量 stat**：它用 `walkLinked` 逐文件 `stat()`（`calls_minimax.go:53-70`），
+    而 Claude/Codex 走 `statFiles` 的「一次列目录 + 并行 stat」。messages 目录很大时的成本
+    **未验证**（作者显然知道这套优化，可能是遗漏）。
+11. **WorkBuddy 无 `messageId` 的历史行**：注释说「各自算一次调用」（`calls_workbuddy.go:155-163`），
+    但在「回灌历史 + 网关记录」并存的场景下是否会重复计数，`calls_workbuddy_test.go` 未见对应用例，
+    **未验证**。
 
 ## 附录 A：关键常量速查
 
