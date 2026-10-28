@@ -492,6 +492,68 @@ def add_entry(tag, api=None, path=REGISTRY, directory=None, status="published",
     return register(entry, path)
 
 
+def strip_rust_comments_and_strings(text):
+    """去掉 Rust 注释与字符串字面量（保留换行），供常量声明正则使用——
+    避免块注释/原始字符串里的假常量被当成真实声明（十八轮复核 P3）。"""
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if ch == "/" and nxt == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+        elif ch == "/" and nxt == "*":
+            depth = 1
+            i += 2
+            while i < n and depth:
+                if text.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif text.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    if text[i] == "\n":
+                        out.append("\n")
+                    i += 1
+        elif ch == "r" and nxt in ('"', "#"):
+            # 原始字符串 r"..." / r#"..."# / r##"..."##
+            j = i + 1
+            hashes = 0
+            while j < n and text[j] == "#":
+                hashes += 1
+                j += 1
+            if j < n and text[j] == '"':
+                closing = '"' + "#" * hashes
+                j += 1
+                while j < n and not text.startswith(closing, j):
+                    if text[j] == "\n":
+                        out.append("\n")
+                    j += 1
+                i = j + len(closing)
+                continue
+            out.append(ch)
+            i += 1
+        elif ch == '"':
+            i += 1
+            while i < n:
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                if text[i] == '"':
+                    i += 1
+                    break
+                if text[i] == "\n":
+                    out.append("\n")
+                i += 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 PRIVACY_REVISION_SOURCES = ("crates/tokenscope-core/src/settings.rs", "src/settings.rs")
 
 
@@ -503,7 +565,10 @@ def read_tag_privacy_revision(commit, root=ROOT):
                                 capture_output=True, encoding="utf-8", check=False)
         if result.returncode:
             continue
-        match = re.search(r"(?m)^(?:pub\s+)?const\s+PRIVACY_POLICY_REVISION\s*:\s*u8\s*=\s*(\d+)\s*;", result.stdout)
+        match = re.search(
+            r"(?m)^(?:pub\s+)?const\s+PRIVACY_POLICY_REVISION\s*:\s*u8\s*=\s*(\d+)\s*;",
+            strip_rust_comments_and_strings(result.stdout),
+        )
         if match:
             return int(match.group(1))
     return None

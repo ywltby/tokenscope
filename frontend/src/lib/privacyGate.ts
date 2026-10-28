@@ -113,7 +113,16 @@ export function createPrivacyGate(invoke: InvokeFn) {
   const consentVisible = computed(
     () => phase.value !== "checking" && phase.value !== "ready" && phase.value !== "exiting",
   );
-  const blockedDetail = computed(() => snapshot.value?.detail ?? error.value);
+  // 十八轮复核 P3：needs_consent 阶段的 detail 是「政策已更新」提示
+  // （由 updateNotice 展示），不得再作为红色错误文案重复显示。
+  const blockedDetail = computed(() => {
+    const detail = snapshot.value?.detail;
+    if (snapshot.value?.phase === "needs_consent" && detail === error.value) {
+      return null;
+    }
+    if (snapshot.value?.phase === "needs_consent") return null;
+    return detail ?? error.value;
+  });
   /** WB05：needs_consent 且后端带 detail = 旧修订同意触发的「政策已更新」提示。 */
   const policyUpdated = computed(() =>
     snapshot.value?.phase === "needs_consent" ? snapshot.value.detail : null,

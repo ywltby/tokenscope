@@ -1152,7 +1152,7 @@ console.log(
 
 console.log(
   `
-${contractsOk ? "PASS" : "FAIL"} rc09_named_interaction_contracts（本次选择 ${args.contracts.length}/${REQUIRED_CONTRACTS.length} 条契约；fixture 覆盖缺口 ${fixtureCoverage.uncovered.length}，未注册 ${fixtureCoverage.unregistered.length}）`,
+${contractsOk ? "PASS" : "FAIL"} rc09_named_interaction_contracts（本次选择 ${new Set(args.contracts).size} 个唯一契约（传入 ${args.contracts.length} 条）/${REQUIRED_CONTRACTS.length}；全量=${fullMatrixRun}；fixture 覆盖缺口 ${fixtureCoverage.uncovered.length}，未注册 ${fixtureCoverage.unregistered.length}）`,
 );
 for (const name of args.contracts) {
   const rows = contractsByGroup.get(name) ?? [];

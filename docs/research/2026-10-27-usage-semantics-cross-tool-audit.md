@@ -30,7 +30,7 @@
    thoughts 加回/并入是存疑级双计（取决于上游注释是否适用于其目标版本，§6）。
    其余分歧多为合法口径取舍（§4–§7）。
 4. TokenScope 的扣减式与守恒校验经官方语义对照全部站得住；唯一实质差距是 Claude
-   1h 缓存写档未分（token 对、1h 写费最多低估 60%）；不做 total 差分与 reasoning
+   1h 缓存写档未分（token 对、1h 写费相对正确费用低估 37.5%，即正确费用比估算高 60%）；不做 total 差分与 reasoning
    不单列经裁决属保守取舍而非错误（§10）。
 
 ## 2. 证据准绳：官方语义核实记录
@@ -89,7 +89,7 @@ PULSE:339-341（§3.12 只读固定路径）。
 | 4.2 | ccusage 区分 5m/1h、1h 按 input×2 计价 | ✅ 符合实际 | 〔官方〕§2 定价表；〔源码〕ccusage:529-536（`CACHE_CREATE_1H_INPUT_MULTIPLIER=2.0`，无明细对象时扁平全按 5m 价、1h 桶为 0） |
 | 4.3 | codeburn 1h 写价 = 5m 写价 × 1.6 | ✅ 符合实际（官方比例下与 4.2 等价） | 〔官方〕1.25×1.6=2.0；〔源码〕CB:804-806 自述「写价取兜底 1.25×input 时等价 2.0×」，显式写价条目按各自 5m 价 ×1.6 |
 | 4.4 | PULSE 读到 ephemeral 但扁平优先、明细求和仅兜底、不分档 | ⚠️ token 对、1h 写费低估 | 〔源码〕PULSE:505-511（仅当扁平 ≤0 且有 dict 才对 5m+1h 求和） |
-| 4.5 | CCS / TokenTracker / TokenScope 只读扁平字段 | ⚠️ token 对、1h 写费最多低估 60%（2.0/1.25）；CCS:363「1h 分档只用于计价」不改变结论——其解析层四桶直取、无 ephemeral_1h 明细，分档没有 token 可分 | 〔源码〕CCS:362-363、TT:2812；〔本仓〕claude.rs:58-68；TS 已被 ccusage:3365 点名「最值得优先评估」 |
+| 4.5 | CCS / TokenTracker / TokenScope 只读扁平字段 | ⚠️ token 对、1h 写费低估（1.25 单价按 1h 计：示例价 $6 vs 估算 $3.75，相对正确费用低估 37.5%；反过来说正确费用比估算高 60%）；CCS:363「1h 分档只用于计价」不改变结论——其解析层四桶直取、无 ephemeral_1h 明细，分档没有 token 可分 | 〔源码〕CCS:362-363、TT:2812；〔本仓〕claude.rs:58-68；TS 已被 ccusage:3365 点名「最值得优先评估」 |
 | 4.6 | TokenArena 完全不映射 `cache_creation_input_tokens` | ❌ 确凿错误：缓存写 token 全漏，总量与费用双低估 | 〔源码〕TA:138 |
 | 4.7 | UsageMesh（v4.14.0）无 1h 桶 | ⚠️ 版本事实：1h 桶 v4.18.0 才引入 | 〔源码〕UM:1741-1748 |
 | 4.8 | sidechain 计入（ccusage/TT/CB/TokenScope） | ✅ 符合实际：子代理是真实 API 调用 | 〔源码〕CB:345-346；〔本仓〕claude.rs:5-13、242-247 |

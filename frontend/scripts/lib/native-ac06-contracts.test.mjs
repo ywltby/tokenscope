@@ -1738,3 +1738,22 @@ test("十八轮：settings 非法字节改写（同 size/mtime、无追踪）必
   // 且快照值本身逐字节可辨（不是宽松解码后的同串）。
   assert.notEqual(before.settings.bytesHex, after.settings.bytesHex);
 });
+
+test("十八轮 P3：终态浮点修订号必须被拒（整数类型检查有牙齿）", async () => {
+  // 复核突变探针：移除终态整数检查后 67 项回归仍全绿、浮点重新误通过
+  // ——本用例在移除检查后必须变红。
+  const records = [
+    { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    ...consentRecords(ORDER_SETTINGS),
+    { seq: 2, event: "business_ready" },
+    { seq: 3, event: "history_open" },
+  ];
+  const { checks } = await runAcceptOrder({
+    records,
+    settingsText: "privacy_policy_accepted = true\nprivacy_policy_revision = 2.0\n",
+  });
+  const terminal = checks.find((check) => check.name === "accept_writes_consent_with_revision");
+  assert.ok(terminal, "缺少终态判定断言");
+  assert.equal(terminal.pass, false, "终态浮点修订号必须被拒");
+  assert.match(terminal.detail, /kind=float/);
+});
