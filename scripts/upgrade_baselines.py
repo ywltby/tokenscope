@@ -536,6 +536,20 @@ def strip_rust_comments_and_strings(text):
                 continue
             out.append(ch)
             i += 1
+        elif ch == "'":
+            # 字符字面量（'x' / '\n' / '\''）：整体跳过——否则其中的
+            # 双引号/常量文本可能被后续逻辑误读（十九轮复核 P3）。
+            i += 1
+            while i < n:
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                if text[i] == "'":
+                    i += 1
+                    break
+                if text[i] == "\n":
+                    out.append("\n")
+                i += 1
         elif ch == '"':
             i += 1
             while i < n:

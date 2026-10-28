@@ -4,7 +4,7 @@
 // 不预选同意、不把关闭弹窗或继续使用当作同意：遮罩与 Esc 都不关闭弹窗
 // （保持阻断，不露出可操作主页面），只有「同意并继续」会触发保存；
 // 「不同意」进入专属退出确认。
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { NButton, NModal } from "naive-ui";
 import { renderPolicyMarkdown } from "../lib/policyMarkdown";
 import type { PolicyInfo } from "../lib/privacyGate";
@@ -29,6 +29,13 @@ const emit = defineEmits<{
 }>();
 
 const blocks = computed(() => renderPolicyMarkdown(props.policy.markdown));
+// 十九轮复核 P2：政策引用 terms.md——同意前必须能离线阅读协议全文。
+// 协议由后端编译进二进制（PolicyInfo.terms），弹窗内展开查看，不依赖
+// 安装资源路径或远程链接。
+const termsBlocks = computed(() =>
+  props.policy.terms ? renderPolicyMarkdown(props.policy.terms) : [],
+);
+const termsOpen = ref(false);
 </script>
 
 <template>
@@ -69,10 +76,30 @@ const blocks = computed(() => renderPolicyMarkdown(props.policy.markdown));
           </p>
         </template>
       </div>
+      <div v-if="termsOpen" class="privacy-terms" role="region" aria-label="最终用户许可与免责协议">
+        <template v-for="(block, i) in termsBlocks" :key="'terms-' + i">
+          <h4 v-if="block.type === 'h1' || block.type === 'h2'" class="privacy-h3">
+            {{ block.text }}
+          </h4>
+          <ul v-else-if="block.type === 'ul'" class="privacy-ul">
+            <li v-for="(item, j) in block.items || []" :key="j">{{ item }}</li>
+          </ul>
+          <p v-else class="privacy-p">{{ block.text }}</p>
+        </template>
+      </div>
       <div v-if="message" class="privacy-error" role="alert">
         <span>{{ message }}</span>
       </div>
       <div class="privacy-actions">
+        <NButton
+          v-if="termsBlocks.length"
+          size="small"
+          :disabled="saving"
+          class="privacy-terms-toggle"
+          @click="termsOpen = !termsOpen"
+        >
+          {{ termsOpen ? "收起用户许可协议" : "查看最终用户许可协议" }}
+        </NButton>
         <NButton size="small" :disabled="saving" @click="emit('reject')">不同意</NButton>
         <NButton v-if="blocked" size="small" :disabled="saving" @click="emit('retry')">
           重新检查
@@ -189,6 +216,16 @@ const blocks = computed(() => renderPolicyMarkdown(props.policy.markdown));
 
 .privacy-ul {
   padding-left: 18px;
+}
+
+.privacy-terms {
+  max-height: 240px;
+  overflow: auto;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--ts-hairline);
+  border-radius: 8px;
+  background: var(--ts-surface-sunken, rgba(0, 0, 0, 0.02));
 }
 
 .privacy-error {

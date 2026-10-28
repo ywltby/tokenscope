@@ -1708,52 +1708,76 @@ test("preseeded 夹具：产品 schema SQLite 历史库 + WAL/SHM + 两份含 sy
 
 // ── 十八轮复核 P2：settings 快照必须逐字节（宽松解码会掩盖非法字节改写）──
 
-test("十八轮：settings 非法字节改写（同 size/mtime、无追踪）必须被字节快照检出", async () => {
-  // 构造：before 为合法 UTF-8；mutator 写入不同非法字节但 size/mtime 保持
-  // ——text 宽松解码后两者可能同串，只有字节快照能区分。
+test("十九轮：settings 字节改写（同长度/同 mtime/同解码文本）必须被真实实现检出", async () => {
+  // 十九轮复核 P3：旧回归用测试内自写快照函数、前后 24/26 字节且解码文本
+  // 不同——移除受测实现的 bytesHex 该测试仍通过（byte-test-mutation.json）。
+  // 本用例调用**受测实现**（snapshotDataDir/dataDirChanges 从源码抽取），
+  // 且构造同长度、同 mtime、同解码文本（宽松解码后均为 "AAAA"）的非法
+  // 字节对：只有真实字节比较才能区分。
+  const snapshotDataDir = extractHelper("snapshotDataDir", {
+    fs,
+    path,
+    snapshotBusinessFiles,
+  });
+  const dataDirChanges = extractHelper("dataDirChanges", { changedBusinessFiles });
   const dataDir = path.join(
     fs.mkdtempSync(path.join(os.tmpdir(), "tokenscope-byte-snap-")),
     "tokenscope",
   );
   fs.mkdirSync(dataDir, { recursive: true });
   const target = path.join(dataDir, "settings.toml");
-  fs.writeFileSync(target, Buffer.from("price_auto_sync = false\n", "utf8"));
-  const before = realSnapshotDataDir(dataDir);
-  const stat = fs.statSync(target);
-  // 写入不同非法字节（与原文同 size：把一个 ASCII 换成多字节非法序列再
-  // 补齐大小），mtime 保持原值。
-  const evil = Buffer.concat([
-    Buffer.from("price_auto_sync = fals", "utf8"),
-    Buffer.from([0xc3, 0x28]), // 非法 UTF-8 序列
-    Buffer.from("e\n", "utf8"),
-  ]);
-  fs.writeFileSync(target, evil);
-  fs.utimesSync(target, stat.mtime, stat.mtime);
-  const after = realSnapshotDataDir(dataDir);
-  const changes = realDataDirChanges(before, after);
-  assert.ok(
-    changes.includes("settings.toml"),
-    `字节快照必须检出非法字节改写：${JSON.stringify({ before: before.settings, after: after.settings })}`,
+  // 两种非法编码，长度均为 4；宽松解码都得到 4 个 U+FFFD 或同形替换串。
+  fs.writeFileSync(target, Buffer.from([0xff, 0xfe, 0xfd, 0xfc]));
+  const stamp = new Date("2026-10-27T00:00:00Z");
+  fs.utimesSync(target, stamp, stamp);
+  const before = snapshotDataDir(dataDir);
+  fs.writeFileSync(target, Buffer.from([0xf8, 0xf7, 0xf6, 0xf5]));
+  fs.utimesSync(target, stamp, stamp);
+  const after = snapshotDataDir(dataDir);
+  assert.equal(after.settings.size, before.settings.size, "前提：两次字节长度相同");
+  assert.equal(after.settings.mtimeMs, before.settings.mtimeMs, "前提：两次 mtime 相同");
+  assert.equal(after.settings.text, before.settings.text, "前提：宽松解码文本相同");
+  assert.notEqual(after.settings.bytesHex, before.settings.bytesHex, "真实实现必须记录可辨字节");
+  assert.deepEqual(
+    dataDirChanges(before, after),
+    ["settings.toml"],
+    `真实比较必须检出字节改写：${JSON.stringify({ before: before.settings, after: after.settings })}`,
   );
-  // 且快照值本身逐字节可辨（不是宽松解码后的同串）。
-  assert.notEqual(before.settings.bytesHex, after.settings.bytesHex);
 });
 
-test("十八轮 P3：终态浮点修订号必须被拒（整数类型检查有牙齿）", async () => {
-  // 复核突变探针：移除终态整数检查后 67 项回归仍全绿、浮点重新误通过
-  // ——本用例在移除检查后必须变红。
+// ── 十九轮复核 P2：同意保存与业务解锁之间的额外写入必须被拒 ─────────────
+
+test("十九轮：consent_saved → 额外 settings_write → business_ready 必须失败", async () => {
+  // 受控反例 review19-independent/extra-write-probe.json：旧判定只看同意前
+  // 写入，该追踪 16 项全过。
+  const records = [
+    { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    ...consentRecords(ORDER_SETTINGS),
+    { seq: 2, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 3, event: "business_ready" },
+    { seq: 4, event: "history_open" },
+  ];
+  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  const extra = checks.find(
+    (check) => check.name === "consent_save_is_the_only_write_before_business_unlock",
+  );
+  assert.ok(extra, "缺少写入来源分层断言");
+  assert.equal(extra.pass, false, "同意后解锁前的额外写入必须被拒");
+  assert.match(extra.detail, /额外写入=\[2\]/);
+});
+
+test("十九轮：业务初始化后的重写单独计为解锁后写入（不判失败）", async () => {
   const records = [
     { seq: 0, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
     ...consentRecords(ORDER_SETTINGS),
     { seq: 2, event: "business_ready" },
-    { seq: 3, event: "history_open" },
+    { seq: 3, event: "settings_write", path: "C:/synthetic-root/tokenscope/settings.toml" },
+    { seq: 4, event: "history_open" },
   ];
-  const { checks } = await runAcceptOrder({
-    records,
-    settingsText: "privacy_policy_accepted = true\nprivacy_policy_revision = 2.0\n",
-  });
-  const terminal = checks.find((check) => check.name === "accept_writes_consent_with_revision");
-  assert.ok(terminal, "缺少终态判定断言");
-  assert.equal(terminal.pass, false, "终态浮点修订号必须被拒");
-  assert.match(terminal.detail, /kind=float/);
+  const { checks } = await runAcceptOrder({ records, settingsText: ORDER_SETTINGS });
+  const extra = checks.find(
+    (check) => check.name === "consent_save_is_the_only_write_before_business_unlock",
+  );
+  assert.ok(extra && extra.pass, JSON.stringify(extra));
+  assert.match(extra.detail, /解锁后（业务初始化）写入=\[3\]/);
 });

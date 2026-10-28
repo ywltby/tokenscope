@@ -19,6 +19,8 @@ export interface PolicyInfo {
   title: string;
   date: string;
   markdown: string;
+  /** 最终用户许可与免责协议全文（后端编译进二进制；同意前离线可读）。 */
+  terms?: string;
 }
 
 export interface PrivacySnapshot {
@@ -62,6 +64,7 @@ function normalize(raw: unknown): PrivacySnapshot {
             title: String(policy.title ?? EMPTY_POLICY.title),
             date: String(policy.date ?? ""),
             markdown: policy.markdown,
+            terms: typeof policy.terms === "string" ? policy.terms : "",
           }
         : EMPTY_POLICY,
   };

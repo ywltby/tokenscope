@@ -19,6 +19,9 @@ use tokenscope::settings::ConsentRead;
 
 /// 打包进程序的政策全文（构建期编译，运行时不访问 GitHub 或任何网络）。
 pub const POLICY_MARKDOWN: &str = include_str!("../../docs/privacy.md");
+/// 最终用户许可与免责协议全文（十九轮复核 P2：政策引用 terms.md，必须
+/// 提供同意前可用的离线入口——编译进二进制，不依赖安装资源路径）。
+pub const TERMS_MARKDOWN: &str = include_str!("../../docs/terms.md");
 
 /// 未同意时业务命令的统一拒绝码（前端据此给出可操作提示）。
 pub const ERR_CONSENT_REQUIRED: &str = "privacy_consent_required";
@@ -220,6 +223,8 @@ pub struct PolicyInfo {
     pub date: String,
     /// 政策全文（Markdown 源文本；前端做确定性渲染，不引入远程资源）。
     pub markdown: String,
+    /// 最终用户许可与免责协议全文（同意弹窗内可展开查看；离线可用）。
+    pub terms: String,
 }
 
 /// 引导状态的只读 DTO。不携带来源目录清单、缓存内容、历史查询或价格状态。
@@ -526,6 +531,7 @@ fn policy_info() -> PolicyInfo {
                 title,
                 date,
                 markdown: POLICY_MARKDOWN.to_string(),
+                terms: TERMS_MARKDOWN.to_string(),
             }
         })
         .clone()

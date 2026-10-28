@@ -177,7 +177,7 @@ proma/catpaw/qodercn 三个专属客户端——走 clap 解析前的摘出通�
 （§4.17，SF08，超过 ccusage/CCS/TT 的静默丢行）；项目/cwd 身份模型（九家工具中
 CCS 明确不采集，CCS:599）。
 
-**唯一实质差距**：Claude 1h 缓存写档未分（§4.5）——token 对、1h 写费低估最多 60%。
+**唯一实质差距**：Claude 1h 缓存写档未分（§4.5）——token 对、1h 写费相对正确费用低估 37.5%（即正确费用比估算高 60%）。
 修法明确：解析层加读 `cache_creation.ephemeral_1h_input_tokens` 明细对象，价格侧
 1h=input×2 已有官方依据（§2）。注意 ccusage:3366 所说 TokenScope「明确忽略
 token_usage_record」已过时，现行口径为挂起配对（stats-semantics.md:73-84）。

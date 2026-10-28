@@ -3331,6 +3331,25 @@ const scenarios = {
         hashMatchesCapture,
       `指纹=${JSON.stringify(consentRows[0]?.settings_hash)} 重算=${recomputed ?? "无字节证据"} 同意前写入=${JSON.stringify(writesBeforeConsent)}`,
     );
+    // 十九轮复核 P2：同意保存与业务解锁之间**不得再有设置写入**——旧判定
+    // 只看写入发生在 consent_saved 之前，把「consent_saved → 额外写入 →
+    // business_ready」的追踪也放行（受控反例 review19-independent/
+    // extra-write-probe.json 16 项全过）。按写入来源分层判定：同意前恰一次
+    // （同意落盘），同意后到业务解锁前零次；业务初始化后的重写另计。
+    const writesBetweenConsentAndReady = settingsWriteSeqs.filter(
+      (seq) => seq > consentSeqs[0] && seq < readySeqs[0],
+    );
+    const writesAfterReady = settingsWriteSeqs.filter((seq) => seq > readySeqs[0]);
+    ev.consentWriteLayers = {
+      beforeConsent: writesBeforeConsent,
+      betweenConsentAndReady: writesBetweenConsentAndReady,
+      afterReady: writesAfterReady,
+    };
+    ck.add(
+      "consent_save_is_the_only_write_before_business_unlock",
+      writesBetweenConsentAndReady.length === 0,
+      `同意后、解锁前额外写入=${JSON.stringify(writesBetweenConsentAndReady)}；解锁后（业务初始化）写入=${JSON.stringify(writesAfterReady)}`,
+    );
     // 严格 UTF-8 解码（五轮复核 P2：toString("utf8") 默认把坏字节替换成
     // U+FFFD，替换后的文本骗过两个解析器——注释中 FF、截断编码、过长编码、
     // 代理项编码全被误放行，而产品 String::from_utf8 报 InvalidData）。
