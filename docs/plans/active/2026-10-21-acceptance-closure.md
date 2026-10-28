@@ -677,6 +677,19 @@ PR #52 CI 首跑与修复（2026-10-25）：
 1. **政策修订号**：保持 2 时已同意修订 2 的用户升级后不会重新看到新政策文本；改为 3 会重新询问。本次变更性质为措辞重写与实现对齐（未改变数据收集范围），§6 建议保持 2；本 PR 未擅自提修订号。
 2. **terms.md 与 MIT 许可的关系**：协议对复制、修改、分发提出额外前提，需明确与 MIT 许可文本的兼容/从属关系——仅打包文件不能完成该决定。
 
+### 二十轮复核补修（2026-10-28，`df4a2c3`）
+
+- **P2 写入分层按时间而非来源**（`write-layers-result.json`：注入两次解锁后写入仍全过并都归入「业务初始化」）：`settings_write` 追踪事件新增 `origin` 字段——`update_with_origin`（隐私同意保存 = `privacy_consent`）、`settings_template`/`settings_legacy_migration`、`source_path_migration`、普通 `settings_update` 各自标记。验收侧按来源分层：同意前恰一次且 origin 为 `privacy_consent`；同意后解锁前零次；解锁后只允许 `source_path_migration`/`business_init` 且每来源**至多一次**（同来源两次或未知来源均失败）。四条回归（额外写入、解锁后重写单独计数、同来源两次、未知来源）。**实跑证据**：`beforeConsent=[{seq:1,origin:privacy_consent}]`、`betweenConsentAndReady=[]`、`afterReady=[{seq:4,origin:source_path_migration}]`。
+- **P3 终态浮点回归被误删**（`terminal-mutation-suite.log`）：恢复守门用例——终态 `revision = 2.0` 必须失败且 detail 标 `revision kind=float`（移除整数检查即变红）。
+- **P3 生命周期被误判为字符字面量**（`lexer-lifetime-probe.json`）：字符字面量分支只吞单字符与转义形态，`&'static str` 与 `'a` 只跳引号本体——合法源码实测读出 2（上一版返回空），三种形态与 0.6.0/HEAD 均读 2。
+- **P3 协议区换行被折叠**（`terms-expanded-980x620.png`）：协议段落与列表项改用与政策区相同的 `split` + `<br>` 分段；新增回归断言两处硬换行生成 2 个 `<br>`。
+
+**决策（按复核方建议执行）**：
+1. **terms 与 MIT 的关系**：重写第一条为「MIT 许可证完整适用源代码，其授予的复制/修改/合并/发布/分发/再许可/销售权利**不以接受本协议为前提**」，本协议仅约定官方构建的使用行为、第三方服务合规与免责；冲突时**以 MIT 许可证为准**，第九条补关系声明。
+2. **政策修订号**：**保持 2**——本次为措辞澄清与实现对齐、未改变数据收集范围，协议为独立许可文件；若后续决定提为 3，需同步 `PRIVACY_POLICY_REVISION`、政策文本修订号与升级测试基线（一行改动 + 重新取证）。
+
+**受测树与取证**：干净树 `df4a2c3` 构建 EXE `d5faf57304db80f4413d1e48ffdb3fc0dce4c31457de1909821efb829fbcdf0e`；五场景三连 **15/15 全绿**（preseeded 26/21/21、denied-ipc 6/6/6、accept-order 8/9/8、variants-corrupt 6/6/7、variants-close 7/7/7，最差单次之和 55 秒）；前端全量 877 项（含协议换行回归）、核心 293 项 + 壳 acceptance 70 项、clippy 双模式干净。
+
 ### B2 合并与发布验收（2026-10-22）
 
 - [PR #31](https://github.com/ywltby/tokenscope/pull/31) 最终 HEAD `7664be9`，普通合并为 `c9de40ec3ded2485d2991079f209699ae6ff6107`；两父提交分别为最新 main `9c77cef` 与该 PR HEAD，合并文件树和已验证 HEAD 完全一致。AC03 / AC04 / AC05 分别提交 `6f50af1` / `16ec813` / `db43355`；局部峰谷费率展示修复 `4159633`、经批准的端口和 CI 契约登记 `317573e`、版本登记 `bfb01ed`、短路径取证补修 `7664be9` 各自独立。
