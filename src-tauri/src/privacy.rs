@@ -27,8 +27,7 @@ pub const TERMS_MARKDOWN: &str = include_str!("../../docs/terms.md");
 pub const ERR_CONSENT_REQUIRED: &str = "privacy_consent_required";
 
 /// WB05：政策已更新（旧修订同意触发重新询问）时引导弹窗顶部的提示句。
-pub const POLICY_UPDATED_DETAIL: &str =
-    "隐私政策已更新：新增读取 WorkBuddy 与 WorkBuddy AI 的本地会话日志";
+pub const POLICY_UPDATED_DETAIL: &str = "隐私政策或用户许可协议已更新，请阅读并确认后继续";
 
 /// 引导期关闭请求事件名（前端监听前到达的请求由 bootstrap 响应的
 /// `exitPromptPending` 标记恢复显示）。
@@ -841,8 +840,24 @@ mod acceptance_closure_tests {
             parsed
                 .get("privacy_policy_revision")
                 .and_then(|v| v.as_integer()),
-            Some(2),
-            "顶层 privacy_policy_revision 必须是整数 2：{parsed}"
+            Some(i64::from(tokenscope::settings::PRIVACY_POLICY_REVISION)),
+            "顶层 privacy_policy_revision 必须是当前整数修订号：{parsed}"
+        );
+        // 2026-10-28：一次点击同时确认用户许可协议——壳层保存必须同时写入
+        // 协议同意与当前修订，证据才能证明接受的是当前协议版本。
+        assert_eq!(
+            parsed
+                .get("user_agreement_accepted")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "顶层 user_agreement_accepted 必须是布尔 true：{parsed}"
+        );
+        assert_eq!(
+            parsed
+                .get("user_agreement_revision")
+                .and_then(|v| v.as_integer()),
+            Some(i64::from(tokenscope::settings::PRIVACY_POLICY_REVISION)),
+            "顶层 user_agreement_revision 必须是当前整数修订号：{parsed}"
         );
         println!("AC02_SHELL_TRACE {}", serde_json::json!(records));
     }
