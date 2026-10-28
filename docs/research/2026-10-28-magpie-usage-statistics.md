@@ -301,9 +301,12 @@ type Call struct {
 里的同名 agent 也纳入——通过 `\\wsl.localhost` 读，且「停机的发行版不读，以免把它启动」
 （`call_cache.go:281-287`）。
 
-结论（**已验证**）：magpie 的「本地会话统计」覆盖 **13 个 agent**：`claude`、`claude-desktop`、
-`codex`、`opencode`、`zcode`、`workbuddy`、`codebuddy`、`minimax-code`、`agy`、`dsh`、`kimi`、
-`pi`、`omp`。
+结论（**已验证**，第五轮修正口径）：**「13 个 agent」只对 calls 侧（Usage 页可见）成立**——
+`claude`、`claude-desktop`、`codex`、`opencode`、`zcode`、`workbuddy`、`codebuddy`、`minimax-code`、
+`agy`、`dsh`、`kimi`、`pi`、`omp`。**汇总侧（Sessions 页）覆盖更多**：`qoder`、`qoder-cn`、
+`cline`、`cursor`、`hermes`、`alma`、`grok`、`droid` 也有汇总 reader（走 `parserFor`，
+见 §15.9），但没有 calls reader，**从不出现在 Requests**（`call_cache.go:205-209` 的约束注释）；
+反向的只有 `minimax-code`——只在 calls 侧，无汇总文件（不在 `allFiles`，`sessions.go:619-630`）。
 
 #### 发现层：先找到「什么文件」
 
@@ -1094,7 +1097,10 @@ func (p Price) CostSplit(input, output, cacheRead, cacheWrite, cacheWrite1h int)
 
 ### 12.2 第二层：本地会话统计层（`internal/sessions`）
 
-见 §6.2：**13 个 agent** 有真正的会话文件解析器。
+见 §6.2：**calls 侧（Usage 页）13 个 agent** 有真正的会话文件解析器；另有 8 个 agent
+（qoder、qoder-cn、cline、cursor、hermes、alma、grok、droid）只有**汇总 reader**（Sessions 页
+可见），没有 calls reader，所以从不出现在 Requests。两层各自的覆盖面由两套独立分发表决定
+（§15.9）。
 
 ### 12.3 第三层：网关观测层（不限 agent）
 
@@ -1140,11 +1146,13 @@ func (p Price) CostSplit(input, output, cacheRead, cacheWrite, cacheWrite1h int)
 | Kimi Code | 是 | 是（`usage.record`） | fork 复制记录，按 key 去重 |
 | Pi / omp | 是 | 是（`lineCallReaders`） | omp profile 视为多个 agent |
 | ZCode | 是 | 是 | 自有 JSON/DB |
-| 其余内置 agent（`droid`、`cline`、`qoder`、`qoder-cn`、`grok`、`grok-app`、`hermes`、`qwen`、`devin`、`crush`、`goose`、`zed`、`vscode` 系、`cursor` 系、`copilot` 系等，约 55 个） | 是 | 否（本仓无 reader） | 只能通过网关观测 |
+| 有汇总 reader、无 calls reader 的 8 个（`droid`、`cline`、`qoder`、`qoder-cn`、`grok`、`hermes`、`cursor` 系部分、`alma` 等） | 是 | 仅汇总（Sessions 页），**从不出现在 Requests** | §15.9 |
+| 其余内置 agent（`grok-app`、`qwen`、`devin`、`crush`、`goose`、`zed`、`vscode` 系、`copilot` 系等，约 50 个） | 是 | 否（本仓无 reader） | 只能通过网关观测 |
 | 任意未知客户端 | — | — | 网关按 UA 记账，可被 `ClientAgents` 归并 |
 
-**结论**：magpie 的「支持」在统计意义上分三档——①能读本地历史（13 个 agent，可覆盖「安装
-magpie 之前」的用量）；②只能读到经自己网关的请求（其余 ~55 个接入 agent + 任意客户端）；
+**结论**：magpie 的「支持」在统计意义上分三档——①能读本地历史并进 Usage（calls 侧 13 个
+agent，可覆盖「安装 magpie 之前」的用量；另有 8 个只有 Sessions 汇总、不进 Usage，见 §15.9）；
+②只能读到经自己网关的请求（其余约 50 个接入 agent + 任意客户端）；
 ③外部客户端主动上报（`reported`）。三档在页面上用 `through` / `direct` / `reported` 明确区分，
 不合账。
 
@@ -1272,6 +1280,12 @@ magpie 暴露了 `GET /v1/magpie/usage`（与 GUI `/api/usage` 同构）与 `POS
   `文件:行号` 的报告，由本文整合。分片表见 §15 开头；子代理标为「未验证」的条目一律原文保留在
   §15 各节末尾，不由本文代为推断。另有一条枢纽事实（`parserFor` 分发表）由本文一手读出并先写入
   §15.9，避免与子代理结论冲突时无从判断。
+- 第五轮（子代理 E 的交叉修正）：E 组指出「13 个 agent」**只对 calls 侧成立**——汇总侧另有 8 个
+  agent（qoder、qoder-cn、cline、cursor、hermes、alma、grok、droid）有 reader 但没有 calls
+  reader，从不出现在 Requests；由此修正 §6.2/§12.2/§12.4 的口径，并把「汇总 reader 与 calls
+  reader 的系统性差异」（网关剔除只发生在 calls 侧、synthetic/API 错误只在 calls 侧成行、
+  Codex 的 reasoning/effort 只在 calls 侧）写入 §15.9。E 组还确认 `cc_copies.go:48` 把
+  `ccCopies` 判重限定在 `parserFor().claude` 的文件上（函数体仍未读，见 §14.2 第 13 条）。
 
 ### 14.2 未决问题
 
@@ -1318,6 +1332,17 @@ magpie 暴露了 `GET /v1/magpie/usage`（与 GUI `/api/usage` 同构）与 `POS
     全文——无 token 步骤由 `"output_tokens"` 预筛加指针门槛双重挡掉且不留错误行；已见 step
     整体替换（后写覆盖先写）；模型与账号留空；时间用 `created_at`（步骤开始时刻、秒级）。
     详见 §15.8。
+15. **`stats_pi.go` 等五个非测试文件不存在**（子代理 E）：浅克隆里只有同名 `_test.go`
+    （`stats_pi.go`/`stats_at_work.go`/`stats_tools.go`/`stats_native.go`/`stats_subagent.go`），
+    其行为从 `stats.go` 与测试反推。若上游确有这些文件，§15.9 对 Pi 工具统计、Cursor 零用量、
+    工具分类的描述以测试为准，**未验证**。
+16. **workbuddy 零用量同行 id 行的两路不收敛**（子代理 E）：汇总 `unuse` 掉前一条且不加回、
+    calls 侧跳过该行，是从代码路径推出（`workbuddy.go:202-208` vs
+    `calls_workbuddy.go:187-195、237-239`），仓库无直接测试，**未验证**。
+17. **`dirent.Stats` 的 Windows 平台实现**只读到接口层（`dirent/stats.go:44-51`），
+    `stats_other.go` 是否退化为逐条 lstat，**未验证**。
+18. **`zone()` 在 DST 切换当天不重读**（子代理 E）：zone 只在进程启动/loadCache 时求值，
+    **未确认**。
 
 ## 附录 A：关键常量速查
 
@@ -1374,7 +1399,8 @@ magpie 暴露了 `GET /v1/magpie/usage`（与 GUI `/api/usage` 同构）与 `POS
 ## 15. 逐文件实现清单（子代理分片复核）
 
 本章由 5 个只读子代理按文件组并行复核后整合而成，全部结论带 `internal/sessions/文件:行号`。
-分片与主理的对应关系：
+五个分片均已返回并回填完毕；子代理标为「未验证」的条目在各节末尾原文保留，不由本文代为推断。
+`parserFor` 分发表（§15.9）由本文一手读出先行落盘，与子代理 E 的结论交叉一致。
 
 | 分片 | 覆盖文件 | 对应本章小节 |
 | --- | --- | --- |
@@ -1383,8 +1409,6 @@ magpie 暴露了 `GET /v1/magpie/usage`（与 GUI `/api/usage` 同构）与 `POS
 | C OpenCode/ZCode/WorkBuddy | `calls_opencode.go`、`opencode.go`、`calls_zcode.go`、`zcode.go`、`calls_workbuddy.go`、`workbuddy.go` | §15.7 |
 | D MiniMax/Kimi/Pi/omp/dsh/agy | `calls_minimax.go`、`calls_kimi.go`、`calls_pi.go`、`pi.go`、`omp.go`、`calls_dsh.go`、`dsh.go`、`calls_agy.go` | §15.8 |
 | E reader 分发与汇总 | `sessions.go` 其余部分、`stats*.go`、`alias.go`、`named.go`、`rollup.go`、`carry*.go` | §15.9 |
-
-> 以下小节内容待子代理返回后回填。占位中。
 
 ### 15.1 数据模型与调用链
 
@@ -1851,7 +1875,46 @@ provider 会被误排他，注释自承）＞ agy（无判据，结构性最弱�
 这就是 §6.8「一次解压两次使用」的实现根：不是为了省一次 open，而是为了让两条解析路径
 **看到完全相同的字节序列**，从而不出现「汇总算过、calls 没算」的漂移。
 
-（本节其余部分待子代理 E 返回后回填。）
+**`claude: true` 是四合一开关**（E 组补充）：它不只选解析函数——
+①窗口重建（`parseWith` 见 `parser.claude && old != nil && old.Claude == nil` 就丢弃旧 parse
+整读，`sessions.go:1668-1671`）；②长行裁剪（`thinClaude` 只在 `parser.claude` 时挂上，
+`sessions.go:1694-1700`）；③revision 窗口保留（`revision_cache.go:114`）；④`ccCopies` 判重
+（`cc_copies.go:48`）。
+
+**汇总 reader 与 calls reader 的系统性差异（E 组，最重要的交叉发现）**：虽然两条路径读同一批
+字节，**产出口径并不一致**，集中在三类：
+
+1. **网关调用只在 calls 侧被剔除**：pi/omp（`calls_pi.go:157`）、workbuddy
+   （`calls_workbuddy.go:212`）、opencode/zcode（`calls_opencode.go:188`）、kimi
+   （`calls_kimi.go:114`）、dsh（`calls_dsh.go:136`）都在 calls 侧丢弃走 magpie 网关的调用，
+   **汇总侧照单全收**（pi.go:200-248、workbuddy.go:192-208、kimi.go:300-301 等）。所以
+   「走 magpie 网关的用量」会出现在 Sessions 汇总里、但不在 Requests 里——这正是三源
+   （§7）要靠 `matchedBlocks` 配对再消除的重复的另一来源。
+2. **`<synthetic>` 与 API 错误只在 calls 侧成行**：汇总侧 synthetic 一律不计
+   （claude.go:296、386）；calls 侧 synthetic 仅当是 API 错误时记一条**无 token 的错误调用**
+   （calls.go:702、768-779）。API 错误只出现在 Requests，不出现在汇总。
+3. **Codex 的 `Reasoning` 分项与 `Effort` 只在 calls 侧保留**：`spent()` 落汇总时丢掉
+   reasoning（codex_usage.go:663），calls 侧另存 `c.Reasoning`（calls.go:1034）；
+   `Effort` 在汇总侧根本不是 sessions 包产的，而是 usage 侧 `CodexModelEffort`
+   （`internal/usage/codex_identity.go:533`）再由 GUI 贴回。
+
+逐 agent 的不对称（E 组清单，均为代码事实）：
+
+| agent | 不对称点 |
+| --- | --- |
+| agy | 汇总把 token 记在固定模型名 `"agy"` 下（agy.go:274、343）；calls 侧 `Model` 为空 |
+| kimi | 汇总对 `magpie/` 前缀只去前缀照算（kimi.go:300-301）；calls 侧整条丢弃 |
+| dsh | 汇总用请求模型（dsh.go:369）；calls 用「应答模型，退回请求模型」并存 `Requested/Upstream` |
+| workbuddy | **零用量同行 messageId 行不收敛**：汇总 `unuse` 掉前一条且不加回（workbuddy.go:202-208），calls 侧根本不产生 call（calls_workbuddy.go:237-239）——无测试覆盖 |
+| workbuddy / pi | 模型回退链不同：汇总多 `s.Model`/`"auto"` 两级（workbuddy.go:200），calls 缺两级 |
+| codex | compaction 的模型归属：汇总用 `s.Model`（最近见过的），calls 用按 turn 的模型 |
+| cursor | `parseCursor` **一个 token 都不产**（cursor.go:469-496 只数 Prompts/Replies/Tools），测试明确锁住「不许发明用量」 |
+| minimax-code | 只有 calls 侧，无汇总文件 |
+
+（E 组未验证项，原文保留：`stats_pi.go`/`stats_at_work.go`/`stats_tools.go`/`stats_native.go`/
+`stats_subagent.go` 五个非测试文件在浅克隆中不存在，只有同名 `_test.go`，其行为从 stats.go 与
+测试反推；`dirent.Stats` 的 Windows 平台实现只读到接口层；workbuddy 零用量行偏差是从代码路径
+推出、无直接测试；`zone()` 在 DST 切换当天不重读未确认；`parseCursor` 的 readOnly 分支未展开。）
 
 ## 附录 C：本地读取代码文件索引
 
