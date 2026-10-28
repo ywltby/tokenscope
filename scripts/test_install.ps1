@@ -98,11 +98,22 @@ function Write-SeedData {
     if ($LASTEXITCODE -ne 0) { throw "合成 cache.db 失败" }
     $claudeDirJson = $sourceDirClaude -replace '\\', '/'
     $codexDirJson = $sourceDirCodex -replace '\\', '/'
+    # 当前共同同意修订号从受测源码读取（隐私政策 + 用户许可协议的共同
+    # 版本）；本安装测试覆盖的是**已完成同意**后的安装/迁移/卸载路径，
+    # 首次同意弹窗由原生 consent-gate 场景与升级契约的闸门观察段覆盖。
+    $settingsSource = Join-Path $RepoRoot "crates/tokenscope-core/src/settings.rs"
+    $settingsText = Get-Content -LiteralPath $settingsSource -Raw -Encoding utf8
+    $revisionMatch = [regex]::Match($settingsText,
+        '(?m)^(?:pub\s+)?const\s+PRIVACY_POLICY_REVISION\s*:\s*u8\s*=\s*(\d+)\s*;')
+    if (-not $revisionMatch.Success) { throw "settings.rs 缺少 PRIVACY_POLICY_REVISION 常量" }
+    $consentRevision = $revisionMatch.Groups[1].Value
     @"
-# 同意基线带当前政策修订号（WB05：缺修订号的旧同意会被新版闸门判为
-# StaleRevision、停在「政策已更新」弹窗；本测试覆盖的是已同意的业务路径）。
+# 同意基线：隐私政策与用户许可协议四项同一次写入（与真实同意保存形态
+# 一致）。缺协议记录或修订低于当前的旧同意会被新版闸门判为 StaleRevision。
 privacy_policy_accepted = true
-privacy_policy_revision = 2
+privacy_policy_revision = $consentRevision
+user_agreement_accepted = true
+user_agreement_revision = $consentRevision
 price_auto_sync = false
 close_action = "quit"
 
