@@ -18,6 +18,16 @@ EXPECTED = FIXTURE / "expected.json"
 MIGRATIONS = Path(__file__).resolve().parent / "fixtures/settings_migrations.json"
 PROFILES = ("legacy-cache", "history")
 MISSING = object()
+# 同意记录是受测的状态迁移，不是需要原样保留的用户设置：升级后用户必须
+# 按当前共同同意修订重新明确同意，四项会整体更新。逐项比对会把这次合法
+# 更新误报成「旧设置未保留」（CI 40670128332），因此这四项改用下面的
+# 专项核对（当前修订 + 协议同意 + 不下调修订）。
+CONSENT_FIELDS = (
+    "privacy_policy_accepted",
+    "privacy_policy_revision",
+    "user_agreement_accepted",
+    "user_agreement_revision",
+)
 
 
 def prepare(data, sources, profile="legacy-cache", consent_revision=None):
@@ -53,17 +63,21 @@ def prepare(data, sources, profile="legacy-cache", consent_revision=None):
     return {"claude": str(claude), "codex": str(codex), "profile": profile}
 
 
-def _consent_prefix(revision):
+def _consent_prefix(revision, agreement=False):
     # WB05：需要当前修订授权的跳必须与修订号同一次写入（两个键一起出现）；
     # 不带 revision 的调用保持旧布尔形态（受测历史版本不认识修订号字段）。
-    # 2026-10-28：共同同意修订覆盖隐私政策与用户许可协议——受测的新版本
-    # 还要求协议同意字段，一次写入四项（旧版本读到未知键会忽略）。
-    if revision is None:
-        return "privacy_policy_accepted = true\n"
-    return (
-        f"privacy_policy_accepted = true\nprivacy_policy_revision = {int(revision)}\n"
-        f"user_agreement_accepted = true\nuser_agreement_revision = {int(revision)}\n"
-    )
+    # 历史基线只写它自己会写的隐私政策同意——0.6.0 没有协议同意字段，
+    # 升级夹具必须保持这一真实形态，否则会掩盖「旧用户缺协议记录」的
+    # 重新确认路径。只有为当前版本模拟用户重新同意时才写协议两项。
+    lines = ["privacy_policy_accepted = true"]
+    if revision is not None:
+        lines.append(f"privacy_policy_revision = {int(revision)}")
+    if agreement:
+        if revision is None:
+            raise ValueError("协议同意必须与共同同意修订号同一次写入")
+        lines.append("user_agreement_accepted = true")
+        lines.append(f"user_agreement_revision = {int(revision)}")
+    return "\n".join(lines) + "\n"
 
 
 def grant_test_consent(data, revision=None):
@@ -76,36 +90,46 @@ def grant_test_consent(data, revision=None):
         fh.write(_consent_prefix(revision) + text)
 
 
-def ensure_test_consent(data, revision=None):
+def ensure_test_consent(data, revision=None, agreement=False):
     """升级链每一跳安装后、启动前使用（闸门拒绝路径已由观察段先行验证）。
 
-    - 无同意记录：写入（按 revision 决定是否带修订号）；
-    - 已有同意且修订号已满足（或本次调用不带 revision）：幂等跳过；
+    - 无同意记录：写入（按 revision 决定是否带修订号；agreement 决定是否
+      同时写协议同意两项）；
+    - 已有同意且修订号已满足、协议状态也已满足：幂等跳过；
     - 已有同意但需要当前修订授权（revision 给定且记录低于它）：补写修订号
       ——这是闸门验证之后的显式测试授权，与真实用户重新同意后的落盘等价。
+    - agreement=True 时用户许可协议同意缺失或不匹配也要补写（新版本要求
+      隐私政策与协议同一次明确同意）。
     """
     path = Path(data) / "settings.toml"
     text = path.read_text(encoding="utf-8")
     settings = tomllib.loads(text)
-    if "privacy_policy_accepted" in settings and settings.get("privacy_policy_accepted") is True:
-        if revision is not None and settings.get("privacy_policy_revision") != int(revision):
-            # 先删已有的修订号行再插入，否则文件里出现重复的
-            # privacy_policy_revision 键，tomllib 拒绝解析整个文件。
-            # 2026-10-28：协议同意两个键一并删除后按当前修订重写四项。
-            body = re.sub(r"(?m)^[ \t]*privacy_policy_revision[ \t]*=.*\r?\n?", "", text)
-            body = re.sub(r"(?m)^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?", "", body)
-            body = re.sub(r"(?m)^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?", "", body)
-            body = body.replace(
-                "privacy_policy_accepted = true",
-                _consent_prefix(revision).rstrip("\n"),
-                1,
-            )
-            with path.open("w", encoding="utf-8", newline="\n") as fh:
-                fh.write(body)
-            return {"ok": True, "test_consent_added": False, "test_consent_upgraded": True}
+    if agreement and revision is None:
+        raise ValueError("协议同意必须与共同同意修订号同一次写入")
+    accepted = settings.get("privacy_policy_accepted") is True
+    revision_ok = revision is None or settings.get("privacy_policy_revision") == int(revision)
+    agreement_ok = (not agreement
+                    or (settings.get("user_agreement_accepted") is True
+                        and settings.get("user_agreement_revision") == settings.get("privacy_policy_revision")))
+    if accepted and revision_ok and agreement_ok:
         return {"ok": True, "test_consent_added": False}
+    if accepted:
+        # 先删已有的同意相关行再插入，否则文件里出现重复键
+        # （tomllib 拒绝解析整个文件）。协议同意两项一并删除后按当前修订
+        # 重写。
+        body = re.sub(r"(?m)^[ \t]*privacy_policy_revision[ \t]*=.*\r?\n?", "", text)
+        body = re.sub(r"(?m)^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?", "", body)
+        body = re.sub(r"(?m)^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?", "", body)
+        body = body.replace(
+            "privacy_policy_accepted = true",
+            _consent_prefix(revision, agreement=agreement).rstrip("\n"),
+            1,
+        )
+        with path.open("w", encoding="utf-8", newline="\n") as fh:
+            fh.write(body)
+        return {"ok": True, "test_consent_added": False, "test_consent_upgraded": True}
     with path.open("w", encoding="utf-8", newline="\n") as fh:
-        fh.write(_consent_prefix(revision) + text)
+        fh.write(_consent_prefix(revision, agreement=agreement) + text)
     return {"ok": True, "test_consent_added": True}
 
 
@@ -247,8 +271,14 @@ def verify_source_dir_to_additional_path(expected, current, agent):
     )
 
 
-def verify_settings(data, original, from_format, to_format, migrations=MIGRATIONS):
-    """按『起点设置格式 → 当前设置格式』的声明式规则核对，不硬编码字段名。"""
+def verify_settings(data, original, from_format, to_format, migrations=MIGRATIONS,
+                    consent_revision=None):
+    """按『起点设置格式 → 当前设置格式』的声明式规则核对，不硬编码字段名。
+
+    consent_revision 给出受测版本要求的共同同意修订号时，额外核对最终
+    同意记录证明的是本版隐私政策与用户许可协议（升级链中间跳不传，只
+    核对不丢失旧版已给出的同意）。
+    """
     rules = load_migrations(migrations)
     operations = rules.get((int(from_format), int(to_format)))
     if operations is None:
@@ -257,6 +287,30 @@ def verify_settings(data, original, from_format, to_format, migrations=MIGRATION
     current = tomllib.loads((Path(data) / "settings.toml").read_text(encoding="utf-8"))
     if current.get("privacy_policy_accepted") is not True:
         raise ValueError("当前验收同意状态未保留")
+    if consent_revision is not None:
+        revision = int(consent_revision)
+        if current.get("privacy_policy_revision") != revision:
+            raise ValueError(
+                "当前隐私政策同意修订不是本版："
+                f"{current.get('privacy_policy_revision')!r} != {revision}"
+            )
+        if current.get("user_agreement_accepted") is not True:
+            raise ValueError("当前用户许可协议同意缺失")
+        if current.get("user_agreement_revision") != revision:
+            raise ValueError(
+                "当前用户许可协议同意修订不是本版："
+                f"{current.get('user_agreement_revision')!r} != {revision}"
+            )
+    # 旧版已给出的同意不得丢失或降级；旧版从未写协议字段（0.6.0 的真实
+    # 形态）时由新版本闸门重新询问，不能在这里要求它凭空存在。
+    for key in ("privacy_policy_accepted", "user_agreement_accepted"):
+        if expected.get(key) is True and current.get(key) is not True:
+            raise ValueError(f"旧同意记录未保留：{key}")
+    old_revision = expected.get("privacy_policy_revision")
+    new_revision = current.get("privacy_policy_revision")
+    if (isinstance(old_revision, int) and isinstance(new_revision, int)
+            and new_revision < old_revision):
+        raise ValueError(f"同意修订号被下调：{old_revision} -> {new_revision}")
     renames = {operation["from"]: operation["to"] for operation in operations
                if operation["kind"] == "rename"}
     defaults = [(operation["path"], operation["value"], operation.get("allow_missing", False))
@@ -267,7 +321,7 @@ def verify_settings(data, original, from_format, to_format, migrations=MIGRATION
     # dir 的变换位置由专用核对负责，不再按原路径要求保留。
     excluded = {f"sources.{operation['agent']}.dir" for operation in source_dir_ops}
     for path, value in flatten(expected).items():
-        if path in excluded:
+        if path in excluded or path in CONSENT_FIELDS:
             continue
         target = renames.get(path, path)
         found = lookup(current, target)
@@ -302,6 +356,8 @@ def main():
     command = sub.add_parser("ensure-consent")
     command.add_argument("--data-dir", type=Path, required=True)
     command.add_argument("--revision", type=int, default=None)
+    command.add_argument("--agreement", action="store_true",
+                         help="同时写入用户许可协议同意（受测版本要求两份文件）")
     command = sub.add_parser("verify")
     command.add_argument("--database", type=Path, required=True)
     command = sub.add_parser("settings")
@@ -309,6 +365,8 @@ def main():
     command.add_argument("--original", type=Path, required=True)
     command.add_argument("--from-format", type=int, required=True)
     command.add_argument("--to-format", type=int, required=True)
+    command.add_argument("--consent-revision", type=int, default=None,
+                         help="受测版本要求的共同同意修订号：核对最终同意证明的是本版")
     args = parser.parse_args()
     try:
         if args.mode == "prepare":
@@ -318,10 +376,12 @@ def main():
             grant_test_consent(args.data_dir, revision=args.revision)
             result = {"ok": True, "test_consent_added": True}
         elif args.mode == "ensure-consent":
-            result = ensure_test_consent(args.data_dir, revision=args.revision)
+            result = ensure_test_consent(args.data_dir, revision=args.revision,
+                                         agreement=args.agreement)
         elif args.mode == "settings":
             result = verify_settings(args.data_dir, args.original,
-                                     args.from_format, args.to_format)
+                                     args.from_format, args.to_format,
+                                     consent_revision=args.consent_revision)
         else:
             result = verify_legacy(args.database)
         print(json.dumps(result, ensure_ascii=False, indent=2))

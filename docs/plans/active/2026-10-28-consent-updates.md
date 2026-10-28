@@ -60,8 +60,12 @@
   `docs/privacy.md` 变化时，要求当前共同同意修订号高于基线；基线无常量时
   拒绝。`upgrade_baselines.extract_privacy_revision` 供两处共用。
 - 升级编排：`Grant-UpgradeConsent` 与 `Test-ConsentGateApplies` 改为从受测
-  源码读取当前修订；`upgrade_fixture._consent_prefix` 写入隐私 + 协议四项
-  （旧版本忽略未知键）。**0.6.0 历史基线登记保持 revision 2，不改历史**。
+  源码读取当前修订；`upgrade_fixture._consent_prefix` 只为历史基线写它
+  自己认识的隐私政策同意（0.6.0 只有修订 2、没有协议字段），当前版本模拟
+  重新同意时由 `ensure-consent --agreement` 同一次写四项。升级后设置核对
+  把同意四项当作受测迁移单独验证（当前隐私修订、协议同意存在且同修订、
+  不下调），其余用户设置仍逐项保留。**0.6.0 历史基线登记保持 revision 2，
+  不改历史**。
 - 原生验收：`CURRENT_CONSENT_REVISION` 从受测源码提取；终态与同意字节证据
   均校验四项（strict TOML + 字面量类型）；preseeded 构造「旧修订 2 + 无协议
   记录」的真实旧用户形态；accept-restart 显式结束上一实例后重启。
@@ -73,7 +77,14 @@
 - 前端 879 项、typecheck、prettier 全绿；同意弹窗 4 项（含两份文件说明、
   协议缺失禁用、硬换行）。
 - 升级契约 80 项（含 0.6.0→0.6.1 旧同意失效→观察→授权顺序）；升级脚本
-  34 项；bump_version 35 项（含协议变更必须递增的共同同意守卫）。
+  34 项；bump_version 35 项（含协议变更必须递增的共同同意守卫）。升级夹具
+  22 项新增同意迁移用例：旧修订 2 无协议记录 → 当前四项通过，缺协议 /
+  协议 false / 协议修订错 / 隐私修订下调 / 其他用户设置改动逐项拒绝。
+- PR CI 40670128332 的 0.6.0 单跳红证据（`旧设置未保留：
+  privacy_policy_revision`）暴露了「把同意迁移当旧设置损坏」的校对错误；
+  修复后本地演练 0.6.0（`prepare --consent-revision 2`）→ `ensure-consent
+  --revision 3 --agreement` → `settings --consent-revision 3` 通过，
+  0.5.13 布尔同意路径同样通过。
 - 原生隔离场景（受测 EXE `97c5cfec…7dab0`，提交 `0313bc6` + 本次改动）：
   preseeded（旧修订 2 + 无协议：15 秒观察、双快照零变化）、denied-ipc、
   accept-order（四项落盘 + 终态严格判定）、variants-corrupt、variants-close

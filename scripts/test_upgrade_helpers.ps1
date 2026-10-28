@@ -295,7 +295,8 @@ sys.exit(37 if "--fail" in sys.argv else 0)
     function Install-UpgradeCurrent { param($Case) $script:Trace.Add("install-current") }
     function Assert-PreservedBeforeLaunch { param($Case) $script:Trace.Add("preserved") }
     function Assert-InstalledUpgrade { param($Case) $script:Trace.Add("installed") }
-    function Grant-UpgradeConsent { param($Case) $script:Trace.Add("consent") }
+    function Grant-UpgradeConsent { param($Case,[switch]$Agreement)
+        $script:Trace.Add($(if ($Agreement) { "consent-agreement" } else { "consent" })) }
     function Invoke-ConsentGateStage { param($Case,[string]$Phase) $script:Trace.Add("consent-gate:" + $Phase) }
     function Install-UpgradePackage { param($Case,$Origin,$InstallerPath) $script:Trace.Add("install:"+$Origin)
         if ($script:FailAt -eq ("install:"+$Origin)) { throw "injected install $Origin" } }
@@ -337,7 +338,7 @@ sys.exit(37 if "--fail" in sys.argv else 0)
         $script:Trace.Clear(); $script:FailAt = ""
         Invoke-UpgradeScenario -Case $case
         $expected = "jump:0.1.0,install-baseline,prepare-old,lifecycle:old,old-facts:0.1.0,save-old,"
-        $expected += "install-current,preserved,jump:0.3.3,consent-gate:current,consent,lifecycle:current,"
+        $expected += "install-current,preserved,jump:0.3.3,consent-gate:current,consent-agreement,lifecycle:current,"
         $expected += "check-current:0.3.3::1->3,lifecycle:restart,check-current:0.3.3::1->3,jump:current:True,case:True"
         Check (($script:Trace -join ",") -eq $expected) "格式3：先闸门观察再授权（gate 在 consent 前）"
     }
@@ -354,7 +355,7 @@ sys.exit(37 if "--fail" in sys.argv else 0)
         $script:Trace.Clear(); $script:FailAt = ""
         Invoke-UpgradeScenario -Case $case
         $expected = "jump:0.6.0,install-baseline,prepare-old,lifecycle:old,old-facts:0.6.0,save-old,"
-        $expected += "install-current,preserved,jump:0.6.1,consent-gate:current,consent,lifecycle:current,"
+        $expected += "install-current,preserved,jump:0.6.1,consent-gate:current,consent-agreement,lifecycle:current,"
         $expected += "check-current:0.6.1::3->3,lifecycle:restart,check-current:0.6.1::3->3,jump:current:True,case:True"
         Check (($script:Trace -join ",") -eq $expected) "0.6.0（revision 2）→ 0.6.1（revision 3）：旧同意失效，先闸门观察再授权"
     }

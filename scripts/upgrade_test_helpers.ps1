@@ -459,14 +459,17 @@ function Get-ConsentRevision {
 function Grant-UpgradeConsent {
     # 幂等：起点已带同意时不动设置文件，0.1.0 起点升级后补上。
     # WB05：本跳目标格式 ≥ 3 的版本认识修订号——写入**受测源码里的当前
-    # 共同同意修订号**（隐私政策 + 用户许可协议同一次写入四项），让升级后的
-    # 启动直接进入业务；历史跳保持布尔形态（受测旧版本不认识这些字段）。
-    param($Case)
+    # 共同同意修订号**；历史跳保持布尔形态（受测旧版本不认识这些字段）。
+    # -Agreement：为**当前版本**模拟用户重新同意，同一次写入隐私政策与
+    # 用户许可协议四项；升级链中间跳（如 0.6.0）只写它自己认识的隐私
+    # 政策同意，保持旧版本的真实落盘形态。
+    param($Case, [switch]$Agreement)
     $arguments = @((Join-Path $Case.RepoRoot "scripts/upgrade_fixture.py"), "ensure-consent",
         "--data-dir", $Case.DataDir)
     if ($Case.JumpTargetSettingsFormat -ge 3) {
         $arguments += @("--revision", [string](Get-ConsentRevision -RepoRoot $Case.RepoRoot))
     }
+    if ($Agreement) { $arguments += "--agreement" }
     Invoke-UpgradePython -Arguments $arguments | Out-Null
 }
 
@@ -487,10 +490,16 @@ function Check-CurrentUsage {
     if ((Get-FileHash -LiteralPath (Join-Path $Case.DataDir "pricing.toml") -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Case.PricingHash) {
         throw "升级后的自定义价格文件未保留"
     }
-    Invoke-UpgradePython -Arguments @((Join-Path $Case.RepoRoot "scripts/upgrade_fixture.py"),"settings",
+    $settingsArguments = @((Join-Path $Case.RepoRoot "scripts/upgrade_fixture.py"),"settings",
         "--data-dir",$Case.DataDir,"--original",$Case.OldSettingsPath,
         "--from-format",$Case.JumpSettingsFormat,
-        "--to-format",$Case.JumpTargetSettingsFormat) `
+        "--to-format",$Case.JumpTargetSettingsFormat)
+    if ($Case.JumpOrigin -eq $Case.AppVersion -and $Case.JumpTargetSettingsFormat -ge 3) {
+        # 只对「刚装的受测当前版本」核对最终同意证明的是本版（隐私政策与
+        # 用户许可协议都覆盖）。升级链中间跳装的是旧版，不要求协议字段。
+        $settingsArguments += @("--consent-revision", [string](Get-ConsentRevision -RepoRoot $Case.RepoRoot))
+    }
+    Invoke-UpgradePython -Arguments $settingsArguments `
         -EvidencePath (Join-Path $evidence ("settings-"+$stage+".json")) | Out-Null
     # 备份规则按本跳实际的旧库状态判定，与最初起点的夹具类型无关。
     $backup = Assert-HistoryBackup -Case $Case
@@ -554,7 +563,11 @@ function Invoke-UpgradeScenario {
         if (Test-ConsentGateApplies -Case $Case) {
             Invoke-ConsentGateStage -Case $Case -Phase "current"
         }
-        Grant-UpgradeConsent -Case $Case
+        if ($Case.JumpTargetSettingsFormat -ge 3) {
+            Grant-UpgradeConsent -Case $Case -Agreement
+        } else {
+            Grant-UpgradeConsent -Case $Case
+        }
         $Case.ConsentRevision = if ($Case.JumpTargetSettingsFormat -ge 3) { 2 } else { $null }
         Invoke-UpgradeLifecycle -Case $Case -Phase "current" -Verify { param($Value,$Context) Check-CurrentUsage -Case $Value -Context $Context }
         Invoke-UpgradeLifecycle -Case $Case -Phase "restart" -Verify { param($Value,$Context) Check-CurrentUsage -Case $Value -Context $Context }
@@ -657,7 +670,13 @@ function Invoke-UpgradeChain {
                 Invoke-ConsentGateStage -Case $Case -Phase ("chain-" + $suffix)
             }
             # 0.2.0 起没有同意就不会采集：安装后、启动前补上（幂等）。
-            Grant-UpgradeConsent -Case $Case
+            # 只有本跳装的是当前版本时才补协议同意——中间跳装的是旧版，
+            # 不应替它写出它自己不会写的协议记录。
+            if ($version -eq $Case.AppVersion -and $Case.JumpTargetSettingsFormat -ge 3) {
+                Grant-UpgradeConsent -Case $Case -Agreement
+            } else {
+                Grant-UpgradeConsent -Case $Case
+            }
             $Case.ConsentRevision = if ($Case.JumpTargetSettingsFormat -ge 3) { 2 } else { $null }
             Invoke-UpgradeLifecycle -Case $Case -Phase ("chain-"+$suffix) -Verify { param($Value,$Context) Check-CurrentUsage -Case $Value -Context $Context }
             Save-JumpResult -Case $Case -Phase ("chain-"+$suffix) -Pass $true

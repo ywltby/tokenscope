@@ -3,6 +3,7 @@
 import json
 from contextlib import closing
 from pathlib import Path
+import re
 import sqlite3
 import tempfile
 import tomllib
@@ -79,6 +80,8 @@ class UpgradeFixtureCase(unittest.TestCase):
         fixture.prepare(self.data, self.sources, "history", consent_revision=2)
         settings = tomllib.loads((self.data / "settings.toml").read_text(encoding="utf-8"))
         self.assertEqual(settings["privacy_policy_revision"], 2)
+        self.assertNotIn("user_agreement_accepted", settings,
+                         "0.6.0 的历史形态不能被改写进协议同意字段")
         other = self.root / "plain/.tokenscope"
         fixture.prepare(other, self.sources, "history")
         plain = tomllib.loads((other / "settings.toml").read_text(encoding="utf-8"))
@@ -196,6 +199,70 @@ class UpgradeFixtureCase(unittest.TestCase):
                         encoding="utf-8")
         with self.assertRaises(ValueError):
             fixture.verify_settings(self.data, original, 1, 1)
+
+    def test_upgrade_consent_transition_is_verified_against_current_revision(self):
+        # 0.6.0 的真实落盘形态：隐私政策同意 + 修订号 2，没有协议同意。
+        # 升级后测试授权按当前共同同意修订 3 重写四项——这是合法的同意
+        # 迁移，不能被「旧设置未保留」误拒（CI 40670128332）。
+        fixture.prepare(self.data, self.sources, "history", consent_revision=2)
+        original = self.root / "original-0.6.0.toml"
+        original.write_bytes((self.data / "settings.toml").read_bytes())
+        old = tomllib.loads(original.read_text(encoding="utf-8"))
+        self.assertEqual(old["privacy_policy_revision"], 2)
+        self.assertNotIn("user_agreement_accepted", old, "0.6.0 不写协议同意字段")
+        fixture.ensure_test_consent(self.data, revision=3, agreement=True)
+        current = tomllib.loads((self.data / "settings.toml").read_text(encoding="utf-8"))
+        self.assertEqual(current["privacy_policy_revision"], 3)
+        self.assertTrue(current["user_agreement_accepted"])
+        self.assertEqual(current["user_agreement_revision"], 3)
+        self.assertTrue(fixture.verify_settings(
+            self.data, original, 3, 3, consent_revision=3)["ok"])
+        # 缺协议同意：即使隐私修订已是当前版本也不得放行。
+        path = self.data / "settings.toml"
+        agreed = path.read_text(encoding="utf-8")
+        without_agreement = re.sub(
+            r"(?m)^[ \t]*user_agreement_(accepted|revision)[ \t]*=.*\r?\n?", "", agreed)
+        path.write_text(without_agreement, encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "用户许可协议"):
+            fixture.verify_settings(self.data, original, 3, 3, consent_revision=3)
+        # 协议同意为 false / 修订号不匹配 / 隐私修订低于本版：逐项拒绝。
+        for broken in (
+            without_agreement + "user_agreement_accepted = false\nuser_agreement_revision = 3\n",
+            without_agreement + "user_agreement_accepted = true\nuser_agreement_revision = 2\n",
+            agreed.replace("privacy_policy_revision = 3", "privacy_policy_revision = 2"),
+        ):
+            with self.subTest(broken=broken):
+                path.write_text(broken, encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    fixture.verify_settings(self.data, original, 3, 3, consent_revision=3)
+        # 非同意字段仍逐项核对：用户设置被改动必须失败。
+        path.write_text(agreed.replace('close_action = "quit"', 'close_action = "minimize"'),
+                        encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "close_action"):
+            fixture.verify_settings(self.data, original, 3, 3, consent_revision=3)
+
+    def test_agreement_is_only_written_for_explicit_current_consent(self):
+        # 历史钩子（prepare / grant）保持旧版本真实形态；只有为当前版本
+        # 模拟重新同意（agreement=True）才写协议两项，且一次写入不重复键。
+        fixture.prepare(self.data, self.sources, "history", consent_revision=2)
+        path = self.data / "settings.toml"
+        text = path.read_text(encoding="utf-8")
+        self.assertNotIn("user_agreement", text)
+        result = fixture.ensure_test_consent(self.data, revision=3, agreement=True)
+        self.assertTrue(result.get("test_consent_upgraded"))
+        upgraded = path.read_text(encoding="utf-8")
+        for key in ("privacy_policy_accepted", "privacy_policy_revision",
+                    "user_agreement_accepted", "user_agreement_revision"):
+            self.assertEqual(upgraded.count(key), 1, upgraded)
+        parsed = tomllib.loads(upgraded)
+        self.assertEqual(parsed["privacy_policy_revision"], 3)
+        self.assertEqual(parsed["user_agreement_revision"], 3)
+        again = fixture.ensure_test_consent(self.data, revision=3, agreement=True)
+        self.assertFalse(again.get("test_consent_added"))
+        self.assertFalse(again.get("test_consent_upgraded"))
+        self.assertEqual(path.read_text(encoding="utf-8"), upgraded)
+        with self.assertRaises(ValueError):
+            fixture.ensure_test_consent(self.data, revision=None, agreement=True)
 
     def test_nested_field_changes_outside_the_migration_table_fail(self):
         fixture.prepare(self.data, self.sources)
