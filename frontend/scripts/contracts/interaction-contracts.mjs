@@ -140,7 +140,10 @@ async function probeCanvasLuma(page, expect) {
       if (!p) continue;
       if (!first) first = { rgb: p.rgb, tag: `${el.tagName}(透明)` };
       if (p.a > 0.9) {
-        opaque = { rgb: p.rgb, tag: `${el.tagName}.${(el.className || "").toString().slice(0, 20)}` };
+        opaque = {
+          rgb: p.rgb,
+          tag: `${el.tagName}.${(el.className || "").toString().slice(0, 20)}`,
+        };
         break;
       }
     }
@@ -232,10 +235,7 @@ function lastQueryBegin(session) {
 
 /** 设置页某个来源行（按可见来源名过滤，例如 "Claude Code" / "Codex"）。 */
 function sourceBlockOf(page, label) {
-  return page
-    .locator(".source-block")
-    .filter({ hasText: label })
-    .first();
+  return page.locator(".source-block").filter({ hasText: label }).first();
 }
 
 /** 浮层是否真实可见（沿祖先链看 display，不能只看元素存在）。 */
@@ -285,24 +285,41 @@ const IMPL = {
       const elapsed = Date.now() - start;
       // U05：价格表只在首次进入「价格」分区时挂载，先切分区再数行。
       await gotoSettingsSection(session.page, "价格");
-      const rows = await session.page.locator('.ts-auto-table-pricing tbody tr').count();
-      ctx.record(name, "8466 条价格首批只渲染 200 行", rows === 200, `rendered=${rows}, navigation=${elapsed}ms`);
+      const rows = await session.page.locator(".ts-auto-table-pricing tbody tr").count();
+      ctx.record(
+        name,
+        "8466 条价格首批只渲染 200 行",
+        rows === 200,
+        `rendered=${rows}, navigation=${elapsed}ms`,
+      );
       ctx.record(name, "进入设置在 3 秒内完成", elapsed < 3000, `${elapsed}ms`);
       if (rows === 200) {
-        const viewport = session.page.getByRole('region', { name: '价格列表', exact: true });
+        const viewport = session.page.getByRole("region", { name: "价格列表", exact: true });
         await viewport.scrollIntoViewIfNeeded();
         await viewport.focus();
-        await session.page.keyboard.press('Control+End');
+        await session.page.keyboard.press("Control+End");
         await session.page.waitForTimeout(1000);
-        const text = await session.page.locator('.ts-auto-table-pricing').innerText();
-        const appended = await session.page.locator('.ts-auto-table-pricing tbody tr').count();
-        ctx.record(name, "滚动近底部自动追加下一批", appended === 400 && text.includes('synthetic-model-200'), `rendered=${appended}`);
+        const text = await session.page.locator(".ts-auto-table-pricing").innerText();
+        const appended = await session.page.locator(".ts-auto-table-pricing tbody tr").count();
+        ctx.record(
+          name,
+          "滚动近底部自动追加下一批",
+          appended === 400 && text.includes("synthetic-model-200"),
+          `rendered=${appended}`,
+        );
         await gotoPage(session.page, "汇总");
         await gotoPage(session.page, "设置");
-        ctx.record(name, "往返后仍可进入且无手动分页", await session.page.locator('.pricing-pagination').count() === 0, "刷新数据后从首批开始");
+        ctx.record(
+          name,
+          "往返后仍可进入且无手动分页",
+          (await session.page.locator(".pricing-pagination").count()) === 0,
+          "刷新数据后从首批开始",
+        );
         await ctx.shot(name, session, "page2");
       }
-    } finally { await session.close(); }
+    } finally {
+      await session.close();
+    }
   },
   async token_colors_customize_persist_and_reset(ctx) {
     const name = "token_colors_customize_persist_and_reset";
@@ -314,30 +331,59 @@ const IMPL = {
       // U05：Token 显示颜色在「外观」分区。
       await gotoSettingsSection(page, "外观");
       const picker = page.getByLabel("缓存命中显示颜色", { exact: true });
-      ctx.record(name, "四类颜色都有独立选择器", await page.locator('input[type="color"]').count() === 4, "输入/输出/缓存写/缓存命中");
+      ctx.record(
+        name,
+        "四类颜色都有独立选择器",
+        (await page.locator('input[type="color"]').count()) === 4,
+        "输入/输出/缓存写/缓存命中",
+      );
       await picker.fill("#b42266");
-      await page.locator('.token-color-settings').scrollIntoViewIfNeeded();
+      await page.locator(".token-color-settings").scrollIntoViewIfNeeded();
       await ctx.shot(name, session, "custom-color-settings");
       await gotoPage(page, "汇总");
-      const readColors = () => page.evaluate(() => ({
-        legend: getComputedStyle(document.querySelector('.chart-legend .legend-item:last-child .legend-dot')).backgroundColor,
-        summary: getComputedStyle(document.querySelector('.part-cache_read')).backgroundColor,
-        stored: JSON.parse(localStorage.getItem('tokenscope-token-colors') ?? '{}').cache_read,
-      }));
+      const readColors = () =>
+        page.evaluate(() => ({
+          legend: getComputedStyle(
+            document.querySelector(".chart-legend .legend-item:last-child .legend-dot"),
+          ).backgroundColor,
+          summary: getComputedStyle(document.querySelector(".part-cache_read")).backgroundColor,
+          stored: JSON.parse(localStorage.getItem("tokenscope-token-colors") ?? "{}").cache_read,
+        }));
       const changed = await readColors();
-      ctx.record(name, "图表图例与汇总色点一致且保存", changed.legend === 'rgb(180, 34, 102)' && changed.summary === changed.legend && changed.stored === '#B42266', JSON.stringify(changed));
+      ctx.record(
+        name,
+        "图表图例与汇总色点一致且保存",
+        changed.legend === "rgb(180, 34, 102)" &&
+          changed.summary === changed.legend &&
+          changed.stored === "#B42266",
+        JSON.stringify(changed),
+      );
       await page.reload({ waitUntil: "networkidle" });
-      await page.waitForSelector('.part-cache_read');
+      await page.waitForSelector(".part-cache_read");
       const restored = await readColors();
-      ctx.record(name, "重载后仍保留自定义颜色", restored.legend === changed.legend && restored.summary === changed.summary, JSON.stringify(restored));
+      ctx.record(
+        name,
+        "重载后仍保留自定义颜色",
+        restored.legend === changed.legend && restored.summary === changed.summary,
+        JSON.stringify(restored),
+      );
       await gotoPage(page, "设置");
       await gotoSettingsSection(page, "外观");
-      await page.getByRole('button', { name: '恢复默认颜色', exact: true }).click();
+      await page.getByRole("button", { name: "恢复默认颜色", exact: true }).click();
       await gotoPage(page, "汇总");
       const reset = await readColors();
-      ctx.record(name, "恢复默认缓存命中为玫红色", ['rgb(214, 91, 136)', 'rgb(240, 128, 171)'].includes(reset.legend) && reset.legend === reset.summary && !reset.stored, JSON.stringify(reset));
+      ctx.record(
+        name,
+        "恢复默认缓存命中为玫红色",
+        ["rgb(214, 91, 136)", "rgb(240, 128, 171)"].includes(reset.legend) &&
+          reset.legend === reset.summary &&
+          !reset.stored,
+        JSON.stringify(reset),
+      );
       await ctx.shot(name, session, "reset-default");
-    } finally { await session.close(); }
+    } finally {
+      await session.close();
+    }
   },
   /**
    * 空 / 未知 / 部分计价三态内容正确，且**汇总与明细同源**：
@@ -448,9 +494,7 @@ const IMPL = {
         text.match(/设置读取失败[^\n]{0,60}/)?.[0] ?? "未找到错误条",
       );
       // PR3：settings_get 失败只影响开关初值；来源列表（独立区块）照常渲染。
-      const agentSwitch = page
-        .locator('[aria-label="Claude Code 启用"]')
-        .first();
+      const agentSwitch = page.locator('[aria-label="Claude Code 启用"]').first();
       ctx.record(
         "settings_failure_retry_restores_all_controls",
         "失败态：来源开关仍渲染（读取失败不拆掉控件）",
@@ -478,15 +522,17 @@ const IMPL = {
       await retry.click();
       await page.waitForTimeout(600);
 
-      const dirClaude = page.locator('[aria-label="Claude Code 日志目录"]').first();
-      const dirCodex = page.locator('[aria-label="Codex 日志目录"]').first();
-      const claudeValue = await dirClaude.inputValue();
-      const codexValue = await dirCodex.inputValue();
+      // PR3 起目录输入改为追加目录管理，恢复值以来源开关状态断言
+      //（fixture 成功读取：claude 启用、codex 停用）。
+      const claudeSwitch = page.locator('[aria-label="Claude Code 启用"]').first();
+      const codexSwitch = page.locator('[aria-label="Codex 启用"]').first();
+      const claudeOn = await claudeSwitch.getAttribute("aria-checked");
+      const codexOn = await codexSwitch.getAttribute("aria-checked");
       ctx.record(
         "settings_failure_retry_restores_all_controls",
-        "重试后：来源目录恢复为成功读取值（断言真实输入值）",
-        claudeValue === "C:/restored/claude" && codexValue === "C:/restored/codex",
-        `claude=${claudeValue} codex=${codexValue}`,
+        "重试后：来源启用状态恢复为成功读取值",
+        claudeOn === "true" && codexOn === "false",
+        `claude=${claudeOn} codex=${codexOn}`,
       );
       // U05：自动同步开关在「价格」分区。
       await gotoSettingsSection(page, "价格");
@@ -507,16 +553,17 @@ const IMPL = {
         afterGeneral.includes("直接退出") && !afterGeneral.includes("设置读取失败"),
         `含"直接退出"=${afterGeneral.includes("直接退出")} 错误残留=${afterGeneral.includes("设置读取失败")}`,
       );
-      // U05：来源保存按钮在「数据源」分区。
+      // PR3 起来源为追加目录管理：「添加」按钮即来源写入入口，重试后重新可用。
       await gotoSettingsSection(page, "数据源");
-      const enabledAfter = await saveButtons
-        .first()
-        .evaluate((el) => el.disabled === false && !el.className.includes("disabled"));
+      const addButton = page.locator('[aria-label="Claude Code 添加目录"]').first();
+      const enabledAfter = await addButton.evaluate(
+        (el) => el.disabled === false && !el.className.includes("disabled"),
+      );
       ctx.record(
         "settings_failure_retry_restores_all_controls",
-        "重试后：来源保存重新可用",
+        "重试后：来源追加入口重新可用",
         enabledAfter === true,
-        `保存按钮 disabled=${!enabledAfter}`,
+        `添加按钮 disabled=${!enabledAfter}`,
       );
       await ctx.shot("settings_failure_retry_restores_all_controls", session, "restored");
       ctx.finishSession(session);
@@ -804,7 +851,7 @@ const IMPL = {
       const page = session.page;
       const beginsBefore = session.ipcCalls.filter((x) => x.cmd === "query_begin").length;
       const rowsBefore = await page.locator(".n-data-table .n-data-table-tr").count();
-      const more = page.getByRole('region', { name: '请求明细列表', exact: true });
+      const more = page.getByRole("region", { name: "请求明细列表", exact: true });
       ctx.record(
         "expired_query_recovers_as_one_new_batch",
         "首页使用自动滚动加载容器",
@@ -812,7 +859,7 @@ const IMPL = {
         `自动加载容器数=${await more.count()}（首页行数=${rowsBefore}）`,
       );
       await more.focus();
-      await page.keyboard.press('Control+End');
+      await page.keyboard.press("Control+End");
       await page.waitForTimeout(600);
       const text = await page.locator("#app").innerText();
       ctx.record(
@@ -1152,8 +1199,10 @@ const IMPL = {
   },
 
   /**
-   * 日期弹层外壳：`.range-panel` 与 Naive 实际外壳祖先都必须量到，且只有
-   * **一层**有效 elevated 材质（不得双层玻璃，也不得被实色外壳盖住）。
+   * 日期弹层外壳：量测边界从 `.range-panel` 到**实际浮层本体**（Naive 弹层
+   * 经 v-binder 挂载，止于 body/html 页面背景之前）。边界内恰好**一层**
+   * 实色材质且必须是 n-popover 外壳，其余层（含内层面板）透明无模糊——
+   * 双层玻璃、双层实色、全透明外壳靠页面背景冒充外壳都会被拒。
    */
   async date_outer_surface_matches_contract(ctx) {
     for (const theme of ["light", "dark"]) {
@@ -1179,7 +1228,13 @@ const IMPL = {
           if (!panel) return null;
           const chain = [];
           let node = panel;
-          for (let i = 0; i < 6 && node; i += 1) {
+          let hitPageBackground = false;
+          for (let i = 0; i < 10 && node; i += 1) {
+            // 量测边界：body/html 是页面背景，不属于浮层本体。
+            if (node.tagName === "BODY" || node.tagName === "HTML") {
+              hitPageBackground = true;
+              break;
+            }
             const cs = getComputedStyle(node);
             chain.push({
               cls: (node.className || "").toString().slice(0, 60),
@@ -1189,14 +1244,19 @@ const IMPL = {
             });
             node = node.parentElement;
           }
-          return { panel: chain[0], ancestors: chain.slice(1) };
+          return {
+            panel: chain[0],
+            ancestors: chain.slice(1),
+            hitPageBackground,
+            chain,
+          };
         });
-        if (!measured) {
+        if (!measured || !measured.panel) {
           ctx.record(
             "date_outer_surface_matches_contract",
             `${theme}:日期面板可打开`,
             false,
-            "未找到 .range-panel",
+            measured ? "面板祖先链为空（未量到内层面板）" : "未找到 .range-panel",
           );
           continue;
         }
@@ -1210,33 +1270,36 @@ const IMPL = {
           return parts.length >= 4 ? parts[3] : 1;
         };
         const blurred = (c) => /blur\(\s*\d+(\.\d+)?px\s*\)/.test(c ?? "");
-        const elevatedLayers = [measured.panel, ...measured.ancestors].filter(
-          (l) => alpha(l.bg) < 1 && blurred(l.blur),
-        );
-        const solidLayers = [measured.panel, ...measured.ancestors].filter(
-          (l) => alpha(l.bg) === 1 && !blurred(l.blur),
-        );
-        ctx.record(
-          "date_outer_surface_matches_contract",
-          `${theme}:同时量到内层面板与 Naive 外壳祖先`,
-          measured.ancestors.length >= 2,
-          `祖先层=${measured.ancestors.map((a) => a.cls).join(" > ")}`,
+        const floating = [measured.panel, ...measured.ancestors];
+        const elevatedLayers = floating.filter((l) => alpha(l.bg) < 1 && blurred(l.blur));
+        const solidLayers = floating.filter((l) => alpha(l.bg) === 1 && !blurred(l.blur));
+        const nonSolidLayers = floating.filter(
+          (l) => !(alpha(l.bg) === 1 && !blurred(l.blur)),
         );
         ctx.record(
           "date_outer_surface_matches_contract",
-          `${theme}:只有一层有效 elevated 材质（无双层玻璃）`,
-          elevatedLayers.length === 1,
-          `elevated 层数=${elevatedLayers.length}：${elevatedLayers.map((l) => `${l.cls}(${l.bg},${l.blur})`).join(" + ")}`,
+          `${theme}:量测边界为浮层本体（止于页面背景前）`,
+          measured.hitPageBackground === true && floating.length >= 3,
+          `边界命中页面背景=${measured.hitPageBackground}，浮层层级=${floating.length}：` +
+            floating.map((l) => l.cls).join(" > "),
         );
         ctx.record(
           "date_outer_surface_matches_contract",
-          `${theme}:内层未被实色外壳盖住`,
-          !(
-            alpha(measured.panel.bg) === 1 &&
-            !blurred(measured.panel.blur) &&
-            solidLayers.length > 1
-          ),
-          `内层 bg=${measured.panel.bg} blur=${measured.panel.blur}，实色层=${solidLayers.length}`,
+          `${theme}:操作浮层单层实色且为 n-popover 外壳（DESIGN.md §5 操作型材质）`,
+          solidLayers.length === 1 &&
+            elevatedLayers.length === 0 &&
+            /(^|\s)n-popover(\s|$)/.test(solidLayers[0]?.cls ?? ""),
+          `实色层数=${solidLayers.length} elevated 层数=${elevatedLayers.length}：` +
+            floating.map((l) => `${l.cls}(${l.bg},${l.blur})`).join(" + "),
+        );
+        ctx.record(
+          "date_outer_surface_matches_contract",
+          `${theme}:浮层其余层透明且无模糊（内层不被盖住、无双层玻璃）`,
+          nonSolidLayers.every((l) => alpha(l.bg) === 0 && !blurred(l.blur)) &&
+            elevatedLayers.length === 0,
+          `非实色层=${nonSolidLayers
+            .map((l) => `${l.cls}(${l.bg},${l.blur})`)
+            .join(" + ")}，内层 bg=${measured.panel.bg} blur=${measured.panel.blur}`,
         );
         await page.keyboard.press("Escape");
         await ctx.shot("date_outer_surface_matches_contract", session, theme);
@@ -1360,17 +1423,43 @@ const IMPL = {
     try {
       await openDashboard(session);
       const page = session.page;
-      const bars = () => page.locator('.chart-canvas svg').evaluate(el => [...el.querySelectorAll('path')].filter(p => getComputedStyle(p).fill === 'rgb(76, 141, 246)').length);
-      for (const [dimension, title] of [["按模型", "模型用量"], ["按项目", "项目用量"], ["按应用", "应用用量"], ["按时间", "使用趋势"]]) {
+      const bars = () =>
+        page
+          .locator(".chart-canvas svg")
+          .evaluate(
+            (el) =>
+              [...el.querySelectorAll("path")].filter(
+                (p) => getComputedStyle(p).fill === "rgb(76, 141, 246)",
+              ).length,
+          );
+      for (const [dimension, title] of [
+        ["按模型", "模型用量"],
+        ["按项目", "项目用量"],
+        ["按应用", "应用用量"],
+        ["按时间", "使用趋势"],
+      ]) {
         await clickSegment(page, dimension);
         await page.waitForTimeout(800);
         const body = page.locator(".chart-body");
-        const metrics = await body.evaluate(el => ({width: el.clientWidth, scrollWidth: el.scrollWidth, height: el.clientHeight, scrollHeight: el.scrollHeight}));
-        ctx.record(contract, `${dimension}标题与自适应尺寸`, await page.locator('.chart-title').textContent() === title && metrics.scrollWidth <= metrics.width + 1 && metrics.height <= 500 && metrics.scrollHeight <= metrics.height + 1, JSON.stringify(metrics));
+        const metrics = await body.evaluate((el) => ({
+          width: el.clientWidth,
+          scrollWidth: el.scrollWidth,
+          height: el.clientHeight,
+          scrollHeight: el.scrollHeight,
+        }));
+        ctx.record(
+          contract,
+          `${dimension}标题与自适应尺寸`,
+          (await page.locator(".chart-title").textContent()) === title &&
+            metrics.scrollWidth <= metrics.width + 1 &&
+            metrics.height <= 500 &&
+            metrics.scrollHeight <= metrics.height + 1,
+          JSON.stringify(metrics),
+        );
         if (dimension === "按模型") {
           const before = await bars();
           ctx.record(contract, "默认概览保留全部30根输入柱", before === 30, String(before));
-          await body.evaluate(el => el.scrollIntoView({block: "center"}));
+          await body.evaluate((el) => el.scrollIntoView({ block: "center" }));
           const box = await body.boundingBox();
           await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
           await page.keyboard.down("Control");
@@ -1380,17 +1469,37 @@ const IMPL = {
           await page.waitForTimeout(800);
           const zoomed = await bars();
           await ctx.shot(contract, session, "zoomed");
-          ctx.record(contract, "显式缩放聚焦部分类别", zoomed > 0 && zoomed < before, `${before} -> ${zoomed}`);
-          await realClick(page, page.locator("button", {hasText: "刷新"}));
+          ctx.record(
+            contract,
+            "显式缩放聚焦部分类别",
+            zoomed > 0 && zoomed < before,
+            `${before} -> ${zoomed}`,
+          );
+          await realClick(page, page.locator("button", { hasText: "刷新" }));
           await page.waitForTimeout(1000);
-          ctx.record(contract, "同维刷新保留缩放范围", await bars() === zoomed, String(await bars()));
-          await page.setViewportSize({width: 980, height: 620});
+          ctx.record(
+            contract,
+            "同维刷新保留缩放范围",
+            (await bars()) === zoomed,
+            String(await bars()),
+          );
+          await page.setViewportSize({ width: 980, height: 620 });
           await page.waitForTimeout(500);
-          const resized = await body.evaluate(el => ({width: el.clientWidth, scrollWidth: el.scrollWidth}));
-          ctx.record(contract, "窄窗口宽度适配且保留缩放", resized.width < metrics.width && resized.scrollWidth <= resized.width + 1 && await bars() === zoomed, JSON.stringify(resized));
-          await realClick(page, page.getByRole("button", {name: "显示全部", exact: true}));
+          const resized = await body.evaluate((el) => ({
+            width: el.clientWidth,
+            scrollWidth: el.scrollWidth,
+          }));
+          ctx.record(
+            contract,
+            "窄窗口宽度适配且保留缩放",
+            resized.width < metrics.width &&
+              resized.scrollWidth <= resized.width + 1 &&
+              (await bars()) === zoomed,
+            JSON.stringify(resized),
+          );
+          await realClick(page, page.getByRole("button", { name: "显示全部", exact: true }));
           await page.waitForTimeout(600);
-          ctx.record(contract, "恢复全部30类", await bars() === before, String(await bars()));
+          ctx.record(contract, "恢复全部30类", (await bars()) === before, String(await bars()));
         }
         await ctx.shot(contract, session, dimension);
       }
@@ -1680,7 +1789,11 @@ const IMPL = {
       const claude = sourceBlockOf(page, "Claude Code");
 
       // 1) 合并行多标签 + 长路径行渲染（后端解析，前端只展示）。
-      const mergedTags = await claude.locator(".source-row").first().locator(".origin-tag").allInnerTexts();
+      const mergedTags = await claude
+        .locator(".source-row")
+        .first()
+        .locator(".origin-tag")
+        .allInnerTexts();
       ctx.record(
         "source_paths_management_contract",
         "合并行展示多标签（默认自动 + 手动）",
@@ -1824,7 +1937,10 @@ const IMPL = {
       // 真实交互：打开下拉并选择"最小化到托盘"（第一次写入会被拒绝）
       await realClick(page, select);
       await page.waitForTimeout(200);
-      const option = page.locator(".n-base-select-option").filter({ hasText: "最小化到托盘" }).first();
+      const option = page
+        .locator(".n-base-select-option")
+        .filter({ hasText: "最小化到托盘" })
+        .first();
       ctx.record(
         "close_action_write_failure_rolls_back_to_confirmed",
         "下拉提供可选的关闭动作",
@@ -1854,8 +1970,7 @@ const IMPL = {
       ctx.record(
         "close_action_write_failure_rolls_back_to_confirmed",
         "写入失败原因对用户可见（不是静默回退）",
-        failureMsgs.some((t) => t.includes("写入设置失败")) &&
-          !helpText.includes("关闭动作未知"),
+        failureMsgs.some((t) => t.includes("写入设置失败")) && !helpText.includes("关闭动作未知"),
         `消息=${failureMsgs.join(" | ") || "无"}；关闭动作仍为已知=${!helpText.includes("关闭动作未知")}`,
       );
 
@@ -1955,9 +2070,9 @@ const IMPL = {
       );
       ctx.record(
         "late_failed_settings_read_does_not_downgrade_saved",
-        "已保存值不被回退或清空",
-        valueBefore === "C:/saved-by-user" && (await input.inputValue()) === "C:/saved-by-user",
-        `释放前=${valueBefore} 释放后=${await input.inputValue()}`,
+        "已保存值不被回退或清空（来源开关保持已保存的关）",
+        valueBefore === "false" && (await sw.getAttribute("aria-checked")) === "false",
+        `释放前=${valueBefore} 释放后=${await sw.getAttribute("aria-checked")}`,
       );
       ctx.record(
         "late_failed_settings_read_does_not_downgrade_saved",
@@ -2030,7 +2145,8 @@ const IMPL = {
         !after.includes("数据目录不存在") &&
           !after.includes("个来源异常") &&
           !after.includes("没有发现会话日志"),
-        after.match(/[^\n]*(数据目录不存在|个来源异常)[^\n]*/)?.[0]?.slice(0, 80) ?? "无来源异常通知",
+        after.match(/[^\n]*(数据目录不存在|个来源异常)[^\n]*/)?.[0]?.slice(0, 80) ??
+          "无来源异常通知",
       );
       await ctx.shot("source_status_failure_recovers_without_losing_summary", session, "retry-ok");
       ctx.finishSession(session);
@@ -2078,7 +2194,11 @@ const IMPL = {
         rows2 >= 3 && !t2.includes("汇总加载失败"),
         `聚合行=${rows2} 汇总错误=${t2.includes("汇总加载失败")}`,
       );
-      await ctx.shot("source_status_failure_recovers_without_losing_summary", s2, "missing-then-ready");
+      await ctx.shot(
+        "source_status_failure_recovers_without_losing_summary",
+        s2,
+        "missing-then-ready",
+      );
       ctx.finishSession(s2);
     } finally {
       await s2.close();
@@ -2125,8 +2245,7 @@ const IMPL = {
         ctx.record(
           "pricing_banner_distinguishes_dto_states",
           `${c.label}：DTO 是「主源缺失」而非「完全无价」`,
-          dto.needsSync === true &&
-            dto.hasAnyPricing === (c.fixture !== "pricing-none-available"),
+          dto.needsSync === true && dto.hasAnyPricing === (c.fixture !== "pricing-none-available"),
           `needsSync=${dto.needsSync} hasAnyPricing=${dto.hasAnyPricing} 有效候选=${dto.externalValidCount ?? 0}+${dto.openrouterValidCount ?? 0}`,
         );
         const missing = c.must.filter((s) => !banner.includes(s));
@@ -2134,7 +2253,9 @@ const IMPL = {
           "pricing_banner_distinguishes_dto_states",
           `${c.label}：横幅把状态讲清楚（不省略已有价格）`,
           banner.length > 0 && missing.length === 0,
-          missing.length ? `缺失=${missing.join("、")}；实际="${banner.slice(0, 140)}"` : banner.slice(0, 140),
+          missing.length
+            ? `缺失=${missing.join("、")}；实际="${banner.slice(0, 140)}"`
+            : banner.slice(0, 140),
         );
         const wrong = c.forbid.filter((s) => banner.includes(s));
         ctx.record(
@@ -2410,7 +2531,10 @@ const IMPL = {
       ctx.record(
         "ui_adjustment_shapes",
         "设置页「数据源」分区含自动读取间隔下拉（六档齐全）",
-        okSection && hasSelect && missingIntervals.length === 0 && intervals.includes(currentInterval),
+        okSection &&
+          hasSelect &&
+          missingIntervals.length === 0 &&
+          intervals.includes(currentInterval),
         `切分区=${okSection} 下拉=${hasSelect} 当前值=${currentInterval} 缺失档位=${
           missingIntervals.join("、") || "无"
         }`,
@@ -2506,6 +2630,8 @@ export async function runContracts({ open, output, meta, only = REQUIRED_CONTRAC
     },
   };
 
+  /** AC08：契约 → 实际打开的 fixture 列表（来自循环内生效的 ctx.open）。 */
+  const contractFixtures = new Map();
   for (const contract of only) {
     // 本契约打开的会话：关闭前留 DOM 摘要，抛错时据此取证（契约的 finally
     // 先于运行器 catch 关闭页面，事后补截图拿不到现场）。
@@ -2520,6 +2646,20 @@ export async function runContracts({ open, output, meta, only = REQUIRED_CONTRAC
       ctx.record(contract, "契约有实现", false, `缺少实现：${contract}`);
       continue;
     }
+    // AC08：契约循环内生效的 ctx.open 记录点（初始定义会被本包装覆盖）
+    // ——把每次实际打开的 fixture 归到本契约，供覆盖表聚合。
+    ctx.open = async (opts) => {
+      const s = await open({ ...opts, contract });
+      s.contractForFinish = contract;
+      const fixture = opts?.fixture;
+      if (typeof fixture === "string" && fixture !== "") {
+        if (!contractFixtures.has(contract)) contractFixtures.set(contract, []);
+        if (!contractFixtures.get(contract).includes(fixture)) {
+          contractFixtures.get(contract).push(fixture);
+        }
+      }
+      return trackSession(s, opened);
+    };
     try {
       await fn(ctx);
     } catch (e) {
@@ -2552,5 +2692,12 @@ export async function runContracts({ open, output, meta, only = REQUIRED_CONTRAC
       `记录断言 ${owned.length} 条，其中失败 ${owned.filter((r) => !r.pass).length} 条`,
     );
   }
-  return { results, failures };
+  return {
+    results,
+    failures,
+    contract_fixtures: [...contractFixtures.entries()].map(([contract, fixtures]) => ({
+      contract,
+      fixtures,
+    })),
+  };
 }

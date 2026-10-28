@@ -3,6 +3,7 @@
 use anyhow::Context;
 use serde::Serialize;
 use tauri::Manager;
+#[cfg(not(feature = "acceptance"))]
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_opener::OpenerExt;
 use tokenscope::aggregate::GroupBy;
@@ -1430,9 +1431,19 @@ pub(crate) fn view_cache_load_impl(
 pub async fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
     privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("autostart_status", move || {
-        app.autolaunch()
-            .is_enabled()
-            .map_err(|e| anyhow::anyhow!("读取自启状态失败: {e}"))
+        let _ = &app;
+        #[cfg(feature = "acceptance")]
+        {
+            // AC06：acceptance 构建一律走替身（含缺根报错），绝不进真实插件
+            let root = autostart_shim::valid_root(tokenscope::acceptance::root())?;
+            autostart_shim::status(&root)
+        }
+        #[cfg(not(feature = "acceptance"))]
+        {
+            app.autolaunch()
+                .is_enabled()
+                .map_err(|e| anyhow::anyhow!("读取自启状态失败: {e}"))
+        }
     })
     .await
 }
@@ -1441,20 +1452,35 @@ pub async fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
 pub async fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
     privacy::require_ready(&privacy::state_of(&app))?;
     run_blocking("autostart_set", move || {
-        let launch = app.autolaunch();
-        if enabled {
-            launch
-                .enable()
-                .map_err(|e| anyhow::anyhow!("开启自启失败: {e}"))?;
-        } else {
-            launch
-                .disable()
-                .map_err(|e| anyhow::anyhow!("关闭自启失败: {e}"))?;
+        let _ = &app;
+        #[cfg(feature = "acceptance")]
+        {
+            // AC06：acceptance 构建一律走替身（含缺根报错），绝不进真实插件
+            let root = autostart_shim::valid_root(tokenscope::acceptance::root())?;
+            let committed = autostart_shim::set(&root, enabled)?;
+            log::info!(
+                "开机自启已{}（acceptance 替身）",
+                if enabled { "开启" } else { "关闭" }
+            );
+            Ok(committed)
         }
-        log::info!("开机自启已{}", if enabled { "开启" } else { "关闭" });
-        launch
-            .is_enabled()
-            .map_err(|e| anyhow::anyhow!("读取自启状态失败: {e}"))
+        #[cfg(not(feature = "acceptance"))]
+        {
+            let launch = app.autolaunch();
+            if enabled {
+                launch
+                    .enable()
+                    .map_err(|e| anyhow::anyhow!("开启自启失败: {e}"))?;
+            } else {
+                launch
+                    .disable()
+                    .map_err(|e| anyhow::anyhow!("关闭自启失败: {e}"))?;
+            }
+            log::info!("开机自启已{}", if enabled { "开启" } else { "关闭" });
+            launch
+                .is_enabled()
+                .map_err(|e| anyhow::anyhow!("读取自启状态失败: {e}"))
+        }
     })
     .await
 }
@@ -1658,6 +1684,173 @@ pub async fn open_pricing_file(app: tauri::AppHandle) -> Result<String, String> 
         .open_path(path.display().to_string(), None::<&str>)
         .map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
+}
+
+/// AC06：acceptance 构建的自启隔离替身——只读写隔离根内的
+/// `autostart-state.json`，真实注册表不可达；隔离根缺失/无效或状态
+/// 文件读写失败一律报错，**绝不回退真实插件**。普通构建不编译本模块，
+/// `autostart_status`/`autostart_set` 保持真实插件行为。
+#[cfg(feature = "acceptance")]
+mod autostart_shim {
+    use anyhow::{Context, anyhow};
+    use serde_json::json;
+
+    /// 校验并返回替身可用的隔离根。`root()` 为 `None`（未初始化或
+    /// `bootstrap_with(None)`）与根不存在/不是目录都报错——
+    /// `bootstrapped()` 不能替代 `root()` 校验。
+    pub fn valid_root(root: Option<std::path::PathBuf>) -> anyhow::Result<std::path::PathBuf> {
+        let root =
+            root.ok_or_else(|| anyhow!("验收自启替身缺少有效隔离根；拒绝使用真实自启插件"))?;
+        anyhow::ensure!(
+            root.is_dir(),
+            "验收自启替身隔离根不存在或不是目录：{}",
+            root.display()
+        );
+        Ok(root)
+    }
+
+    fn state_path(root: &std::path::Path) -> std::path::PathBuf {
+        root.join("autostart-state.json")
+    }
+
+    /// 读替身状态；状态文件不存在 = 未开启。追踪事件带状态文件绝对路径。
+    /// 根缺失/不是目录直接报错（替身自足校验，不依赖调用方先做 valid_root）。
+    pub fn status(root: &std::path::Path) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            root.is_dir(),
+            "验收自启替身隔离根不存在或不是目录：{}",
+            root.display()
+        );
+        let path = state_path(root);
+        let enabled = match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let value: serde_json::Value = serde_json::from_str(&text)
+                    .with_context(|| format!("自启替身状态文件损坏: {}", path.display()))?;
+                value
+                    .get("enabled")
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or_else(|| {
+                        anyhow!("自启替身状态文件缺少 enabled 布尔: {}", path.display())
+                    })?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(anyhow!("读自启替身状态失败: {}（{error}）", path.display()));
+            }
+        };
+        tokenscope::acceptance::record_path(
+            "autostart_read",
+            &path,
+            json!({ "enabled": enabled }),
+        )?;
+        Ok(enabled)
+    }
+
+    /// 原子写替身状态并记录追踪事件；成功返回 enabled。
+    /// 根缺失/不是目录直接报错（替身自足校验，不依赖调用方先做 valid_root）。
+    pub fn set(root: &std::path::Path, enabled: bool) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            root.is_dir(),
+            "验收自启替身隔离根不存在或不是目录：{}",
+            root.display()
+        );
+        let path = state_path(root);
+        let body = json!({ "enabled": enabled }).to_string();
+        tokenscope::fsutil::atomic_write(&path, body.as_bytes())
+            .with_context(|| format!("写自启替身状态失败: {}", path.display()))?;
+        tokenscope::acceptance::record_path(
+            "autostart_write",
+            &path,
+            json!({ "enabled": enabled }),
+        )?;
+        Ok(enabled)
+    }
+}
+
+// AC06：自启替身契约——只读写隔离状态文件；缺根/坏文件报错，绝不触真实注册表。
+// 红灯：本测试引用的 autostart_shim 模块尚未实现（编译失败即新能力缺失的因果红）。
+#[cfg(all(test, feature = "acceptance"))]
+mod autostart_shim_tests {
+    use super::autostart_shim;
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tokenscope-ac06-shim-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn missing_state_file_reads_as_disabled() {
+        let root = temp_root("missing");
+        let enabled = autostart_shim::status(&root).unwrap();
+        assert!(!enabled, "状态文件不存在 = 未开启");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn set_then_status_roundtrip() {
+        let root = temp_root("roundtrip");
+        let enabled = autostart_shim::set(&root, true).unwrap();
+        assert!(enabled);
+        assert!(autostart_shim::status(&root).unwrap());
+        let enabled = autostart_shim::set(&root, false).unwrap();
+        assert!(!enabled);
+        assert!(!autostart_shim::status(&root).unwrap());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn corrupt_state_file_is_an_error_not_a_fallback() {
+        let root = temp_root("corrupt");
+        std::fs::write(root.join("autostart-state.json"), "not json {").unwrap();
+        let error = autostart_shim::status(&root).unwrap_err();
+        assert!(error.to_string().contains("损坏"), "{error}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn valid_root_is_required() {
+        assert!(
+            autostart_shim::valid_root(None)
+                .unwrap_err()
+                .to_string()
+                .contains("缺少有效隔离根"),
+            "root() 为 None 必须报错"
+        );
+        let missing = temp_root("ghost");
+        let missing = missing.join("no-such-dir");
+        assert!(
+            autostart_shim::valid_root(Some(missing)).is_err(),
+            "根不存在必须报错"
+        );
+        let root = temp_root("ok");
+        autostart_shim::valid_root(Some(root.clone())).unwrap();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn state_file_write_failures_are_errors() {
+        // 根指向一个文件：状态目录不可写，读写都必须报错而不是回退
+        let root = temp_root("notdir");
+        let file_root = root.join("as-file");
+        std::fs::write(&file_root, "x").unwrap();
+        assert!(
+            autostart_shim::set(&file_root, true).is_err(),
+            "写失败必须报错"
+        );
+        assert!(
+            autostart_shim::status(&file_root).is_err(),
+            "读失败必须报错"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
 }
 
 #[cfg(test)]

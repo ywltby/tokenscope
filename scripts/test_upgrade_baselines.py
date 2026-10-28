@@ -199,6 +199,27 @@ class RegistryValidationCase(RegistryCase):
         self.assertEqual(view["installer_sha256"],
                          "2a84dad613481b28ba09b0c820eba11875ee93ee5b6afb20d34bd3b7fcccbb9c")
 
+    def test_privacy_revision_follows_settings_format(self):
+        # 0.6.0 起设置格式 3 的基线认识隐私修订号：登记必须携带该基线自己
+        # 认识的修订号（编排旧阶段播种同意与闸门观察适用性都取自它）；
+        # 格式 < 3 的布尔时代基线不得登记。
+        payload = self.payload()
+        payload["entries"][1]["persistent_format"]["settings_format"] = "3"
+        self.assert_rejected(payload)
+        payload["entries"][1]["privacy_revision"] = 0
+        self.assert_rejected(payload)
+        payload["entries"][1]["privacy_revision"] = True
+        self.assert_rejected(payload)
+        payload["entries"][1]["privacy_revision"] = 2
+        baselines.load_registry(self.write(payload))
+        payload = self.payload()
+        payload["entries"][1]["privacy_revision"] = 2
+        self.assert_rejected(payload)
+
+    def test_resolved_entry_exposes_privacy_revision(self):
+        view = baselines.resolved_entry(baselines.published_entry(self.registry, "0.2.0"))
+        self.assertIsNone(view["privacy_revision"])
+
 
 class CheckCase(RegistryCase):
     def setUp(self):
@@ -390,9 +411,85 @@ class AddCase(RegistryCase):
         self.assertEqual(entry["origin_release"], "v0.3.3")
         self.assertEqual(entry["profile"], "history")
         self.assertEqual(entry["persistent_format"], FINGERPRINT)
+        self.assertNotIn("privacy_revision", entry)
         stored = baselines.load_registry(path)
         self.assertEqual([e["version"] for e in stored["entries"]],
                          ["0.1.0", "0.2.0", "0.2.1", "0.3.0", "0.3.1", "0.3.2", "0.3.3"])
+
+    def test_format3_add_registers_tag_privacy_revision_and_reloads(self):
+        # PR52 复盘反例（probe_baseline_registration.py）：设置格式 3 的
+        # add_entry 不带 privacy_revision 就写盘，登记「成功」后 load_registry
+        # 拒读整表。修复后：修订号取自该标签自身源码（不读当前工作树），
+        # add → reload → select → check 全链可用。
+        registry = self.without("0.3.3")
+        path = self.write(registry)
+        names = ["TokenScope_v0.3.3_windows-x64-setup.exe", "SHA256SUMS.txt",
+                 "provenance.sigstore.json", "build-metadata.json"]
+        api = FakeApi({"v0.3.3": release("v0.3.3", [asset(n, "5" * 64, tag="v0.3.3") for n in names],
+                                        commit=SHA)}, {"v0.3.3": SHA})
+
+        def fake_download(url, sha256, directory, name):
+            path_ = Path(directory) / name
+            if name == "build-metadata.json":
+                path_.write_text(json.dumps({"schema_version": 2,
+                                             "persistent_format": {**FINGERPRINT, "settings_format": "3"}}),
+                                 encoding="utf-8")
+            else:
+                path_.write_bytes(name.encode("utf-8"))
+            return path_, "5" * 64
+
+        with patch.object(baselines, "download", side_effect=fake_download), \
+                patch.object(baselines, "digest", return_value="5" * 64), \
+                patch.object(baselines, "read_tag_privacy_revision", return_value=2, create=True):
+            entry = baselines.add_entry("v0.3.3", api=api, path=path, directory=self.temp.name)
+        self.assertEqual(entry["privacy_revision"], 2)
+        reloaded = baselines.load_registry(path)
+        view = baselines.resolved_entry(baselines.published_entry(reloaded, "0.3.3"))
+        self.assertEqual(view["privacy_revision"], 2)
+        self.assertEqual(baselines.selection_payload(reloaded, "0.3.4")["origins"][-1], "0.3.3")
+        releases, commits = {}, {}
+        for stored in reloaded["entries"]:
+            releases[stored["tag"]] = release(stored["tag"],
+                                              [asset(a["name"], a["sha256"]) for a in stored["assets"]])
+            commits[stored["tag"]] = stored["commit"]
+
+        def check_download(url, sha256, directory, name):
+            path_ = Path(directory) / name
+            path_.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+            return path_, sha256
+
+        with patch.object(baselines, "base_version", return_value="0.3.2"), \
+                patch.object(baselines, "download", side_effect=check_download):
+            result = baselines.check_registry("origin/main", path=path, api=FakeApi(releases, commits))
+        self.assertEqual(result["checked"][-1], "0.3.3")
+
+    def test_format3_add_fails_clean_without_tag_revision(self):
+        # 标签源码拿不到修订号 → 写盘前整表校验失败，登记表保持原样
+        # （不能把「下一次 load 拒读」的坏表留给 CI）。
+        registry = self.without("0.3.3")
+        path = self.write(registry)
+        names = ["TokenScope_v0.3.3_windows-x64-setup.exe", "SHA256SUMS.txt",
+                 "provenance.sigstore.json", "build-metadata.json"]
+        api = FakeApi({"v0.3.3": release("v0.3.3", [asset(n, "5" * 64, tag="v0.3.3") for n in names],
+                                        commit=SHA)}, {"v0.3.3": SHA})
+
+        def fake_download(url, sha256, directory, name):
+            path_ = Path(directory) / name
+            if name == "build-metadata.json":
+                path_.write_text(json.dumps({"schema_version": 2,
+                                             "persistent_format": {**FINGERPRINT, "settings_format": "3"}}),
+                                 encoding="utf-8")
+            else:
+                path_.write_bytes(name.encode("utf-8"))
+            return path_, "5" * 64
+
+        with patch.object(baselines, "download", side_effect=fake_download), \
+                patch.object(baselines, "digest", return_value="5" * 64), \
+                patch.object(baselines, "read_tag_privacy_revision", return_value=None, create=True):
+            with self.assertRaises(ValueError) as caught:
+                baselines.add_entry("v0.3.3", api=api, path=path, directory=self.temp.name)
+        self.assertIn("PRIVACY_POLICY_REVISION", str(caught.exception))
+        self.assertEqual(baselines.load_registry(path), registry)
 
 
 class WithdrawCase(RegistryCase):
@@ -474,3 +571,83 @@ class NetworkRetryCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrivacyRevisionLexerCase(RegistryCase):
+    """二十轮复核 P3：修订号提取的 Rust 词法回归——调用**真实**提取函数
+    （不是直接测剥离器），覆盖生命周期、字符字面量与字符串内假常量三种
+    形态；受控退回有缺陷的词法器时，本类必须变红。"""
+
+    LEXER_CASES = {
+        "lifetime_static": (
+            "const NAME: &'static str = \"x\";\n"
+            "pub const PRIVACY_POLICY_REVISION: u8 = 2;\n"
+        ),
+        "char_literal": (
+            "const QUOTE: char = '\"';\n"
+            "const NEWLINE: char = '\n';\n"
+            "pub const PRIVACY_POLICY_REVISION: u8 = 2;\n"
+        ),
+        "fake_constant_in_string": (
+            "const S: &str = \"const PRIVACY_POLICY_REVISION: u8 = 1;\";\n"
+            "pub const PRIVACY_POLICY_REVISION: u8 = 2;\n"
+        ),
+        "fake_constant_in_block_comment": (
+            "/* const PRIVACY_POLICY_REVISION: u8 = 1; */\n"
+            "pub const PRIVACY_POLICY_REVISION: u8 = 2;\n"
+        ),
+    }
+
+    def test_supports_user_agreement_ignores_comments_and_strings(self):
+        self.assertTrue(baselines.supports_user_agreement(
+            "pub user_agreement_accepted: bool,\npub user_agreement_revision: Option<u8>,\n"))
+        self.assertFalse(baselines.supports_user_agreement(
+            "pub privacy_policy_accepted: bool,\n"))
+        self.assertFalse(baselines.supports_user_agreement(
+            "/* pub user_agreement_accepted: bool, */\n"
+            "const S: &str = \"user_agreement_accepted: bool\";\n"))
+
+    def make_repo(self, source_text):
+        root = Path(self.temp.name) / "lexer-repo"
+        settings = root / "crates/tokenscope-core/src/settings.rs"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(source_text, encoding="utf-8", newline="\n")
+        for args in (
+            ["git", "init", "-q"],
+            ["git", "add", "-A"],
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+             "commit", "-q", "-m", "lexer fixture"],
+        ):
+            subprocess.run(args, cwd=str(root), check=True, capture_output=True)
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(root),
+                                check=True, capture_output=True, encoding="utf-8").stdout.strip()
+        return root, commit
+
+    def test_read_tag_privacy_revision_reads_real_constant(self):
+        for name, text in self.LEXER_CASES.items():
+            with self.subTest(case=name):
+                root, commit = self.make_repo(text)
+                self.assertEqual(
+                    baselines.read_tag_privacy_revision(commit, root=root), 2,
+                    f"{name}：真实提取函数必须读到 2（生命周期/字符字面量不得吞掉常量）")
+
+    def test_registered_baselines_keep_reading_current_revision(self):
+        # 当前树的真实读取必须等于源码常量（词法器变更不得改变实际值）。
+        source = (baselines.ROOT / "crates/tokenscope-core/src/settings.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            baselines.read_tag_privacy_revision("HEAD"),
+            baselines.extract_privacy_revision(source),
+        )
+        # 已登记基线 0.6.0（44c026d）：CI 的浅克隆可能不含该提交——
+        # 仅在对象存在时断言，缺失时按可用历史优雅跳过（本地已验证为 2）。
+        commit = "44c026da7acc01cb9c05bef62d52a270a6b80284"
+        present = subprocess.run(
+            ["git", "-C", str(baselines.ROOT), "cat-file", "-e", commit + "^{commit}"],
+            capture_output=True, check=False,
+        ).returncode == 0
+        if present:
+            self.assertEqual(baselines.read_tag_privacy_revision(commit), 2)
+        else:
+            self.skipTest(f"当前克隆不含 {commit[:7]}（浅克隆）；本地已验证读取为 2")

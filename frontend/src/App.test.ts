@@ -112,7 +112,9 @@ import { BOOTSTRAP_SLOW_MS } from "./lib/privacyGate";
 const FULL_POLICY_MARKDOWN = [
   "# TokenScope 隐私政策",
   "",
-  "更新日期：2026 年 10 月 9 日",
+  "更新日期：2026 年 10 月 9 日\\",
+  "生效日期：2026 年 10 月 9 日\\",
+  "适用范围：桌面应用",
   "",
   "本政策说明应用会读取什么数据、保存在哪里，以及哪些功能会联网。",
   "",
@@ -181,6 +183,9 @@ function snapshot(phase: string, extra: Record<string, unknown> = {}) {
       title: "TokenScope 隐私政策",
       date: "2026 年 10 月 9 日",
       markdown: FULL_POLICY_MARKDOWN,
+      // 2026-10-28：同意按钮需要两份全文均可离线查看——测试桩提供协议
+      // 文本，否则按钮按设计禁用（另有用例专门覆盖缺失形态）。
+      terms: "# TokenScope 最终用户许可与免责协议\n\n测试用协议正文。\n",
     },
     ...extra,
   };
@@ -299,6 +304,35 @@ describe("P04 隐私同意引导壳", () => {
     const dialog = w.text();
     for (const section of POLICY_SECTIONS) expect(dialog).toContain(section);
     expect(dialog).toContain("更新日期：2026 年 10 月 9 日");
+    w.unmount();
+  });
+
+  it("政策日期按行显示，列表续行也有实际换行", async () => {
+    const markdown = `${FULL_POLICY_MARKDOWN}\n\n- 第一行\\\n  列表续行`;
+    mockGate({
+      privacy_bootstrap: () =>
+        Promise.resolve(
+          snapshot("needs_consent", {
+            policy: { title: "TokenScope 隐私政策", date: null, markdown },
+          }),
+        ),
+    });
+    const w = mount(App);
+    await flushPromises();
+
+    const firstParagraph = w.find(".privacy-scroll .privacy-p");
+    expect(firstParagraph.findAll("br")).toHaveLength(2);
+    expect(firstParagraph.text()).toContain("更新日期：2026 年 10 月 9 日");
+    expect(firstParagraph.text()).toContain("生效日期：2026 年 10 月 9 日");
+    expect(firstParagraph.text()).toContain("适用范围：");
+    expect(firstParagraph.text()).not.toContain("\\");
+
+    const continuation = w
+      .findAll(".privacy-scroll li")
+      .find((li) => li.text().includes("列表续行"));
+    expect(continuation?.findAll("br")).toHaveLength(1);
+    expect(continuation?.text()).toContain("第一行");
+    expect(continuation?.text()).not.toContain("\\");
     w.unmount();
   });
 

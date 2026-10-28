@@ -9,12 +9,13 @@
 
 | 责任 | 当前状态与下一步 |
 | --- | --- |
-| N10 隐私强验收 | P01–P05 已实现；P06 未闭合，B3 的 AC06/AC07 前提差异待用户修订，尚未执行 |
+| N10 隐私强验收 | P01–P05 已实现；P06 未闭合。2026-10-25 分批实施：AC06 + AC08 已实施（提交 `0191f78`/`17fb37e`/`af784bf`，0.6.1，PR 复核中），AC07 整项暂缓（进程内恢复保留待验），N10 不关闭 |
 | N11 原生统一验收 | B2 / PR #31 自动化通过，合并 `c9de40e` / v0.5.9，PR/main 门禁及发布验收全成功。安装后手动同步 OpenRouter 的人工尾项仍待验，N11 不关闭 |
 | N12 系统与发布签字 | 最新 v0.5.9 的安装、版本递增、六组真实单跳及两条连续链成功；其余系统验收和人工签字仍待验 |
 | N13 真实性能 | 历史库冷/热查询、多根真实数据性能复测未完成，按只读来源与隔离输出执行 |
 | N14 来源目录遗留 | 已完成；第 4 项共享冲突读取失败 fixture 随 PR #27 合并 `4198051`，PR/main 门禁通过，四项全部关闭 |
 | N17 WorkBuddy 双来源 | 开放（仅剩人工验证）：已合并发布（2026-10-25），PR #49 合并 `44c026d`，[v0.6.0](https://github.com/ywltby/tokenscope/releases/tag/v0.6.0) 预发布，main CI/原生/Release 与八组单跳+两条链全过；用户手动安装验证待执行（对账数字按当次样本基线比对） |
+| N18 Claude 缓存写分档计价 | **新登记（2026-10-28）**：Claude 日志 5 分钟/1 小时缓存写明细未分档，计价共用写入单价（1h 写费低估 37.5%，示例价 $6 vs $3.75）；非 PR #52 引入，单独排期 |
 
 N01–N09、N14–N16 已关闭；17 个责任编号中为 **12 项完成、5 项开放（N10/N11/N13 专项验收未闭合、N12 部分完成、N17 已合并发布 v0.6.0 但人工验收未结束——仅剩用户手动安装验证，不计关闭）**。
 
@@ -37,7 +38,7 @@ N01–N09、N14–N16 已关闭；17 个责任编号中为 **12 项完成、5 �
 - B1 / AC01 的 `69ce2f4` 随 [PR #27](https://github.com/ywltby/tokenscope/pull/27) 普通合并 `4198051`；两环境共享冲突探针、两个变异、普通/acceptance 采集各 17/17 与完整钩子通过，PR 的 CI/原生/安装/六组升级全成功。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39633188944)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39633188991)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39633189036) 全成功，Release 六个下游 skipped，最新发布仍为 v0.5.6；N14 第 4 项及 N14 全部关闭。
 - B2 / AC02–AC05 随 [PR #31](https://github.com/ywltby/tokenscope/pull/31) 普通合并 `c9de40e`，[v0.5.9](https://github.com/ywltby/tokenscope/releases/tag/v0.5.9) 已公开并下载核对四项原资产后登记基线。三个场景本地各三连跑与 29 条具名业务断言先红后绿，最终 PR 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39756585501)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39756585449)、[Install test](https://github.com/ywltby/tokenscope/actions/runs/39756585577) 全成功。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39758431511)、[原生](https://github.com/ywltby/tokenscope/actions/runs/39758431422)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39758431613) 全成功（安装五场景、六组单跳、两条连续链）；新增 CI 为 PR 116 秒 / main 68 秒。N11 人工尾项保留，B3 待修订，B4、B5 未执行。
 
-`active/` 保留整合计划与已确认的[剩余验收收口计划](active/2026-10-21-acceptance-closure.md)（AC01–AC12，B1 已关闭 N14；B2 自动化已合并，N11 人工尾项待验；B3 待修订，B4、B5 未执行），以及上述已确认、独立推进的 WorkBuddy 双来源计划（N17）；[合入与发布解耦](archive/implemented/2026-10-21-release-on-version-change.md)（N16）与测试临时目录清理专项（B1/B2 均交付）已完成并归档。归档共 **53 份：23 份已实现、28 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
+`active/` 保留整合计划与已确认的[剩余验收收口计划](active/2026-10-21-acceptance-closure.md)（AC01–AC12，B1 已关闭 N14；B2 自动化已合并，N11 人工尾项待验；B3 修订稿待用户确认（§4b），B4、B5 未执行），以及上述已确认、独立推进的 WorkBuddy 双来源计划（N17）；[合入与发布解耦](archive/implemented/2026-10-21-release-on-version-change.md)（N16）与测试临时目录清理专项（B1/B2 均交付）已完成并归档。归档共 **53 份：23 份已实现、28 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
 
 必须保持用户定稿：一个 `~/.tokenscope/history.db`，只保存精简 token/cwd 元数据；全部代理有效用量纳入；源日志删除或停用仍查得到历史；CCS 设置页只手动单次导入，导入与已有事实求并集。较新规则优先于旧“现存日志是唯一事实”等历史设计。
 

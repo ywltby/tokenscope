@@ -28,10 +28,10 @@ use serde::{Deserialize, Serialize};
 /// 读取范围扩大到两个 WorkBuddy 默认根。
 pub const SETTINGS_FORMAT_REVISION: u8 = 3;
 
-/// 隐私政策修订号（WB05）。同意记录低于该值的用户升级后重新看到政策；
-/// 没有修订号字段的旧同意视为 1（只同意过 v1 政策）。修订号随政策实质
-/// 变更（读取范围扩大）递增，纯文字修订不递增。
-pub const PRIVACY_POLICY_REVISION: u8 = 2;
+/// 隐私政策与用户许可协议的共同同意修订号。旧修订同意不能授权新版协议；
+/// 协议正文变更时必须递增此值，让已有用户重新作出明确选择。
+/// 没有修订号字段的旧同意视为 1。
+pub const PRIVACY_POLICY_REVISION: u8 = 3;
 
 /// 关闭窗口按钮的默认动作（None = 每次询问；托盘「退出」不受此影响）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -211,10 +211,20 @@ pub struct Settings {
     pub privacy_policy_accepted: bool,
     /// WB05：同意记录对应的政策修订号；None = v2 程序写入的旧同意（视为
     /// 修订 1）。[`accept_privacy_policy`] 在同一次原子保存中写入 true 与
-    /// 当前修订号；`read_consent` 只认修订号不低于 [`PRIVACY_POLICY_REVISION`]
-    /// 的同意。
+    /// 当前修订号；`read_consent` 只认修订号**精确等于**
+    /// [`PRIVACY_POLICY_REVISION`] 的同意（更高或更低都重新询问）。
     #[serde(default)]
     pub privacy_policy_revision: Option<u8>,
+    /// 用户许可协议（`docs/terms.md`）的同意记录。缺失/false = 未同意；
+    /// 与隐私政策同意在同一次原子保存中写入。仅有隐私政策同意的旧记录
+    /// 不得视为已同意当前协议——即使其隐私修订号更高。
+    #[serde(default)]
+    pub user_agreement_accepted: bool,
+    /// 同意记录对应的用户许可协议修订号（与隐私政策共用
+    /// [`PRIVACY_POLICY_REVISION`]）。None/低于当前/高于当前 = 需要重新
+    /// 同意——只有精确等于当前版本的成对记录才能证明同意了本版协议。
+    #[serde(default)]
+    pub user_agreement_revision: Option<u8>,
     /// 定时自动同步在线价格（默认开启，每 24h）。
     #[serde(default = "default_true")]
     pub price_auto_sync: bool,
@@ -329,6 +339,8 @@ impl Default for Settings {
         Self {
             privacy_policy_accepted: false,
             privacy_policy_revision: None,
+            user_agreement_accepted: false,
+            user_agreement_revision: None,
             price_auto_sync: true,
             sources: AgentSources::default(),
             close_action: None,
@@ -365,10 +377,19 @@ fn acquire_write_lock() -> Result<MutexGuard<'static, ()>> {
 /// 不落盘，原文件字节不动。并发的外部编辑器不受本进程锁约束（写入冲突
 /// 由原子替换兜底为"整文件生效其一"，不做字段级合并）。
 pub fn update<T>(path: &Path, mutate: impl FnOnce(&mut Settings) -> Result<T>) -> Result<T> {
+    update_with_origin(path, "settings_update", mutate)
+}
+
+/// 带来源标记的 [`update`]：只给需要区分的写者使用（隐私同意保存等）。
+pub fn update_with_origin<T>(
+    path: &Path,
+    origin: &'static str,
+    mutate: impl FnOnce(&mut Settings) -> Result<T>,
+) -> Result<T> {
     let _guard = acquire_write_lock()?;
     let mut s = load(path)?;
     let out = mutate(&mut s)?;
-    save_unlocked(path, &s)?;
+    save_unlocked(path, &s, origin)?;
     Ok(out)
 }
 
@@ -413,10 +434,11 @@ pub fn load(path: &Path) -> Result<Settings> {
 /// [`read_consent`] 的判定结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsentRead {
-    /// 真实 TOML 在位且同意字段为 true，修订号不低于当前修订。
+    /// 真实 TOML 在位且同意字段为 true，两份修订号都精确等于当前修订。
     Granted,
-    /// 真实 TOML 在位且同意字段为 true，但修订号低于当前修订（含缺修订号的
-    /// 旧同意，视为 1）：按未同意处理，且需要向用户提示「政策已更新」。
+    /// 真实 TOML 在位且同意字段为 true，但修订号与当前修订不一致（低于、
+    /// 高于或缺失，含两份记录彼此不一致）：按未同意处理，且需要向用户
+    /// 提示「政策已更新」。
     StaleRevision,
     /// 真实 TOML 在位，但同意字段缺失或为 false。
     NotGranted,
@@ -441,9 +463,17 @@ pub fn read_consent(path: &Path) -> ConsentRead {
     };
     match toml::from_str::<Settings>(&text) {
         Ok(s) if s.privacy_policy_accepted => {
-            // WB05：修订号低于当前（含缺修订号的旧同意，视为 1）按未同意处理，
-            // 并提示「政策已更新」；高于当前视为同意（不降级已给出的授权）。
-            if s.privacy_policy_revision.unwrap_or(1) < PRIVACY_POLICY_REVISION {
+            // 精确匹配：低于当前是旧版同意，高于当前是更新版本（或用户
+            // 降级前）写入的记录——两者都无法证明用户同意的是本版展示的
+            // 协议。两份文档的修订号还必须一致。缺失修订号同样重新询问。
+            if s.privacy_policy_revision != Some(PRIVACY_POLICY_REVISION) {
+                ConsentRead::StaleRevision
+            } else if !s.user_agreement_accepted
+                || s.user_agreement_revision != Some(PRIVACY_POLICY_REVISION)
+            {
+                // 二十轮（用户决定）：同意记录必须能证明用户接受了**当前**
+                // 用户许可协议。只有隐私政策同意的旧记录（即使修订号更高）
+                // 不能替代协议同意——否则协议更新后旧用户会被直接放行。
                 ConsentRead::StaleRevision
             } else {
                 ConsentRead::Granted
@@ -460,11 +490,15 @@ pub fn read_consent(path: &Path) -> ConsentRead {
 /// 失败（解析/写入/锁污染）不落盘也不改内存值：调用方必须保持闸门关闭。
 /// 遗留 json 的迁移只在这里发生（用户已明确同意之后）。
 pub fn accept_privacy_policy(path: &Path) -> Result<()> {
-    update(path, |s| {
+    update_with_origin(path, "privacy_consent", |s| {
         // WB05：同意与修订号必须同一次原子保存——只写 true 不写修订号的
         // 中间状态会被下一次读取判为旧修订、重新询问。
         s.privacy_policy_accepted = true;
         s.privacy_policy_revision = Some(PRIVACY_POLICY_REVISION);
+        // 用户决定：一次点击同时确认隐私政策与用户许可协议，四项同一次
+        // 原子保存——缺任一项都不能证明接受了当前版本。
+        s.user_agreement_accepted = true;
+        s.user_agreement_revision = Some(PRIVACY_POLICY_REVISION);
         Ok(())
     })
 }
@@ -495,12 +529,21 @@ pub const SETTINGS_TEMPLATE: &str = "\
 #
 # privacy_policy_revision = <整数>
 #     同意记录对应的隐私政策修订号（与 accepted 同一次保存写入）。
-#     记录的修订号低于程序当前修订时，视为未同意：下一次启动显示「政策
-#     已更新」并重新询问；高于当前值视为同意（不降级已给出的授权）。
+#     只有精确等于程序当前修订号才视为同意；低于、高于（例如用户降级到
+#     旧版）或缺失都会在下一次启动显示「政策已更新」并重新询问。
 #     没有该行的旧同意视为修订 1（升级后同样触发重新询问）。
 #
+# user_agreement_accepted = true | false
+#     用户许可协议（docs/terms.md）同意记录（默认 false）。与隐私政策
+#     同意在同一次保存写入；只有隐私政策同意的旧记录不算已同意协议，
+#     即使其隐私修订号更高也会在下一次启动重新询问。
+#
+# user_agreement_revision = <整数>
+#     同意记录对应的用户许可协议修订号（与隐私政策共用同一修订号）。
+#     与隐私政策修订号必须一致且都精确等于程序当前修订，否则重新询问。
+#
 # price_auto_sync = true | false
-#     价格自动同步（默认开启，每 24h 检查一次；关闭后完全不联网）。
+#     价格自动同步（默认开启，每 24h 检查一次；关闭后仅停止自动同步，仍可手动联网更新价格）。
 #
 # close_action = \"minimize\" | \"quit\"
 #     点击窗口关闭按钮的默认动作：minimize = 最小化到托盘；quit = 直接退出。
@@ -850,7 +893,7 @@ pub fn migrate_source_paths_with(
     if let Some(cfg) = new_codex {
         settings.sources.codex = Some(cfg);
     }
-    save_unlocked(path, &settings)?;
+    save_unlocked(path, &settings, "source_path_migration")?;
     log::info!(
         "来源目录迁移完成：{} 个旧 dir 转为追加项并开启自动发现",
         converted.len()
@@ -949,7 +992,7 @@ pub fn ensure_toml(path: &Path) -> Result<()> {
     let had_legacy = legacy_json_path(path).is_some_and(|p| p.exists());
     if had_legacy {
         let s = load(path)?;
-        return save_unlocked(path, &s);
+        return save_unlocked(path, &s, "settings_legacy_migration");
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
@@ -957,13 +1000,20 @@ pub fn ensure_toml(path: &Path) -> Result<()> {
     crate::fsutil::atomic_write(path, SETTINGS_TEMPLATE.as_bytes())
         .with_context(|| format!("写设置模板失败: {}", path.display()))?;
     #[cfg(feature = "acceptance")]
-    crate::acceptance::record_path("settings_write", path, serde_json::json!({}))?;
+    crate::acceptance::record_path(
+        "settings_write",
+        path,
+        serde_json::json!({"origin": "settings_template"}),
+    )?;
     Ok(())
 }
 
 /// 私有底层写入：调用方必须已持有写锁（[`update`] / [`ensure_toml`]）。
 /// 不设公有 save——防止绕过事务读改写或递归加锁。
-fn save_unlocked(path: &Path, s: &Settings) -> Result<()> {
+///
+/// `origin`：写入来源（二十轮复核 P2）——验收追踪据此区分「同意保存」
+/// 与「业务初始化」等写入，而不是只按时间顺序猜测归属。
+fn save_unlocked(path: &Path, s: &Settings, origin: &'static str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
     }
@@ -972,7 +1022,14 @@ fn save_unlocked(path: &Path, s: &Settings) -> Result<()> {
     crate::fsutil::atomic_write(path, body.as_bytes())
         .with_context(|| format!("写设置失败: {}", path.display()))?;
     #[cfg(feature = "acceptance")]
-    crate::acceptance::record_path("settings_write", path, serde_json::json!({}))?;
+    crate::acceptance::record_path(
+        "settings_write",
+        path,
+        serde_json::json!({"origin": origin}),
+    )?;
+    // origin 只用于验收追踪；普通构建保持参数不参与（显式消费避免警告）。
+    #[cfg(not(feature = "acceptance"))]
+    let _ = origin;
     if let Some(legacy) = legacy_json_path(path)
         && legacy.exists()
     {
@@ -1002,6 +1059,8 @@ mod tests {
         let s = Settings {
             privacy_policy_accepted: false,
             privacy_policy_revision: None,
+            user_agreement_accepted: false,
+            user_agreement_revision: None,
             price_auto_sync: false,
             close_action: Some(CloseAction::Minimize),
             timezone: None,
@@ -1020,7 +1079,7 @@ mod tests {
                 workbuddy_ai: None,
             },
         };
-        save_unlocked(&path, &s).unwrap();
+        save_unlocked(&path, &s, "test").unwrap();
         assert_eq!(load(&path).unwrap(), s);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -1032,13 +1091,13 @@ mod tests {
             close_action: Some(CloseAction::Quit),
             ..s.clone()
         };
-        save_unlocked(&path, &s2).unwrap();
+        save_unlocked(&path, &s2, "test").unwrap();
         assert_eq!(load(&path).unwrap(), s2);
         let s3 = Settings {
             close_action: None,
             ..s2.clone()
         };
-        save_unlocked(&path, &s3).unwrap();
+        save_unlocked(&path, &s3, "test").unwrap();
         assert_eq!(load(&path).unwrap(), s3);
         assert!(
             !std::fs::read_to_string(&path)
@@ -1051,7 +1110,7 @@ mod tests {
     #[test]
     fn test_save_writes_comment_header_and_template_parses() {
         let path = tmp("header");
-        save_unlocked(&path, &Settings::default()).unwrap();
+        save_unlocked(&path, &Settings::default(), "test").unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
             text.starts_with('#'),
@@ -1100,7 +1159,7 @@ mod tests {
         std::fs::write(dir.join("settings.json"), r#"{"price_auto_sync": false}"#).unwrap();
         let toml_path = dir.join("settings.toml");
         let s = load(&toml_path).unwrap();
-        save_unlocked(&toml_path, &s).unwrap();
+        save_unlocked(&toml_path, &s, "test").unwrap();
         assert!(toml_path.exists());
         assert!(
             !dir.join("settings.json").exists(),
@@ -1186,33 +1245,55 @@ mod tests {
     }
 
     #[test]
+    fn previously_accepted_revision_two_requires_new_agreement() {
+        let (dir, path) = consent_file(
+            "privacy_policy_accepted = true\nprivacy_policy_revision = 2\n",
+            "agreement-update",
+        );
+        assert_eq!(
+            read_consent(&path),
+            ConsentRead::StaleRevision,
+            "此前只同意修订 2 的用户必须先同意新版协议"
+        );
+        cleanup_consent(&[dir]);
+    }
+
+    #[test]
     fn test_consent_revision_semantics() {
         let mut dirs: Vec<PathBuf> = Vec::new();
         // 缺修订号的旧同意（v2 程序写入）：按修订 1 → 重新询问
         let (d, p) = consent_file("privacy_policy_accepted = true", "stale-missing");
         dirs.push(d);
         assert_eq!(read_consent(&p), ConsentRead::StaleRevision);
-        // 显式修订 1（低于当前 2）：重新询问
+        // 显式修订 1（低于当前 3）：重新询问
         let (d, p) = consent_file(
             "privacy_policy_accepted = true\nprivacy_policy_revision = 1\n",
             "stale-1",
         );
         dirs.push(d);
         assert_eq!(read_consent(&p), ConsentRead::StaleRevision);
-        // 修订等于当前：同意
+        // 修订 2 仅覆盖旧政策，必须重新确认新版用户协议。
         let (d, p) = consent_file(
             "privacy_policy_accepted = true\nprivacy_policy_revision = 2\n",
-            "current-2",
+            "stale-2",
         );
         dirs.push(d);
-        assert_eq!(read_consent(&p), ConsentRead::Granted);
-        // 修订高于当前（未来版本写入）：视为同意（不降级用户已给出的授权）
+        assert_eq!(read_consent(&p), ConsentRead::StaleRevision);
+        // 修订等于当前且协议同意同在：同意。
         let (d, p) = consent_file(
-            "privacy_policy_accepted = true\nprivacy_policy_revision = 3\n",
-            "future-3",
+            "privacy_policy_accepted = true\nprivacy_policy_revision = 3\nuser_agreement_accepted = true\nuser_agreement_revision = 3\n",
+            "current-3",
         );
         dirs.push(d);
         assert_eq!(read_consent(&p), ConsentRead::Granted);
+        // 修订高于当前（未来版本写入，程序降级）：同样不是本版同意，
+        // 不得放行——否则记录无法证明用户同意了当前程序展示的协议。
+        let (d, p) = consent_file(
+            "privacy_policy_accepted = true\nprivacy_policy_revision = 4\nuser_agreement_accepted = true\nuser_agreement_revision = 4\n",
+            "future-4",
+        );
+        dirs.push(d);
+        assert_eq!(read_consent(&p), ConsentRead::StaleRevision);
         // 同意字段为 false（无论修订号）：未同意
         let (d, p) = consent_file(
             "privacy_policy_accepted = false\nprivacy_policy_revision = 2\n",
@@ -1357,8 +1438,8 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "privacy_policy_accepted = true\nprivacy_policy_revision = {}\nprice_auto_sync = false\n",
-                PRIVACY_POLICY_REVISION
+                "privacy_policy_accepted = true\nprivacy_policy_revision = {}\nuser_agreement_accepted = true\nuser_agreement_revision = {}\nprice_auto_sync = false\n",
+                PRIVACY_POLICY_REVISION, PRIVACY_POLICY_REVISION
             ),
         )
         .unwrap();
@@ -1559,7 +1640,7 @@ mod tests {
             collect_interval_secs: Some(30),
             ..Default::default()
         };
-        save_unlocked(&path, &s).unwrap();
+        save_unlocked(&path, &s, "test").unwrap();
         assert_eq!(load(&path).unwrap().collect_interval_secs, Some(30));
         assert!(
             std::fs::read_to_string(&path)
@@ -1567,7 +1648,7 @@ mod tests {
                 .contains("collect_interval_secs = 30"),
             "显式值必须落盘"
         );
-        save_unlocked(&path, &Settings::default()).unwrap();
+        save_unlocked(&path, &Settings::default(), "test").unwrap();
         assert!(
             !std::fs::read_to_string(&path)
                 .unwrap()
@@ -1591,5 +1672,195 @@ mod tests {
             "读取不得改写用户文件"
         );
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+}
+
+// 二十轮（用户决定）：协议更新后必须重新明确同意——同意记录必须能证明
+// 用户接受了**当前**用户许可协议。仅有隐私政策同意（哪怕修订号更高）
+// 不能替代协议同意。以下测试先于实现（红）。
+#[cfg(test)]
+mod agreement_consent_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn consent_file(text: &str, tag: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tokenscope-agreement-consent-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, text).unwrap();
+        (dir, path)
+    }
+
+    fn cleanup(dirs: &[PathBuf]) {
+        for dir in dirs {
+            std::fs::remove_dir_all(dir).ok();
+        }
+    }
+
+    #[test]
+    fn privacy_only_consent_at_current_revision_is_not_agreement() {
+        let current = PRIVACY_POLICY_REVISION;
+        let (dir, path) = consent_file(
+            &format!("privacy_policy_accepted = true\nprivacy_policy_revision = {current}\n"),
+            "privacy-only-current",
+        );
+        assert_eq!(
+            read_consent(&path),
+            ConsentRead::StaleRevision,
+            "只有隐私政策同意、缺少用户许可协议同意时不得放行"
+        );
+        cleanup(&[dir]);
+    }
+
+    #[test]
+    fn privacy_only_consent_with_higher_revision_is_not_agreement() {
+        let future = PRIVACY_POLICY_REVISION + 5;
+        let (dir, path) = consent_file(
+            &format!("privacy_policy_accepted = true\nprivacy_policy_revision = {future}\n"),
+            "privacy-only-future",
+        );
+        assert_eq!(
+            read_consent(&path),
+            ConsentRead::StaleRevision,
+            "较高隐私修订号但没有协议同意记录，不得视为已同意新版协议"
+        );
+        cleanup(&[dir]);
+    }
+
+    #[test]
+    fn agreement_accepted_at_current_revision_grants() {
+        let current = PRIVACY_POLICY_REVISION;
+        let (dir, path) = consent_file(
+            &format!(
+                "privacy_policy_accepted = true\nprivacy_policy_revision = {current}\n\
+                 user_agreement_accepted = true\nuser_agreement_revision = {current}\n"
+            ),
+            "agreement-current",
+        );
+        assert_eq!(read_consent(&path), ConsentRead::Granted);
+        cleanup(&[dir]);
+    }
+
+    #[test]
+    fn future_revision_for_both_documents_is_not_current_consent() {
+        let future = PRIVACY_POLICY_REVISION + 1;
+        let (dir, path) = consent_file(
+            &format!(
+                "privacy_policy_accepted = true\nprivacy_policy_revision = {future}\n\
+                 user_agreement_accepted = true\nuser_agreement_revision = {future}\n"
+            ),
+            "both-future",
+        );
+        assert_eq!(
+            read_consent(&path),
+            ConsentRead::StaleRevision,
+            "两份记录都高于当前（例如用户降级到旧版）时不得放行：用户没有同意过本版"
+        );
+        cleanup(&[dir]);
+    }
+
+    #[test]
+    fn mismatched_document_revisions_are_stale() {
+        let current = PRIVACY_POLICY_REVISION;
+        for (privacy, agreement, tag) in [
+            (current, current + 1, "agreement-higher"),
+            (current + 1, current, "privacy-higher"),
+        ] {
+            let (dir, path) = consent_file(
+                &format!(
+                    "privacy_policy_accepted = true\nprivacy_policy_revision = {privacy}\n\
+                     user_agreement_accepted = true\nuser_agreement_revision = {agreement}\n"
+                ),
+                tag,
+            );
+            assert_eq!(
+                read_consent(&path),
+                ConsentRead::StaleRevision,
+                "两份记录修订不一致时不能证明同意了同一版协议（{tag}）"
+            );
+            cleanup(&[dir]);
+        }
+    }
+
+    #[test]
+    fn missing_revision_rows_are_stale_even_when_both_accepted() {
+        let (dir, path) = consent_file(
+            "privacy_policy_accepted = true\nuser_agreement_accepted = true\n",
+            "both-missing-revision",
+        );
+        assert_eq!(
+            read_consent(&path),
+            ConsentRead::StaleRevision,
+            "缺修订号无法证明同意的是当前版本，必须重新询问"
+        );
+        cleanup(&[dir]);
+    }
+
+    #[test]
+    fn agreement_accepted_at_stale_revision_is_stale() {
+        let current = PRIVACY_POLICY_REVISION;
+        let stale = current - 1;
+        let (dir, path) = consent_file(
+            &format!(
+                "privacy_policy_accepted = true\nprivacy_policy_revision = {current}\n\
+                 user_agreement_accepted = true\nuser_agreement_revision = {stale}\n"
+            ),
+            "agreement-stale",
+        );
+        assert_eq!(
+            read_consent(&path),
+            ConsentRead::StaleRevision,
+            "协议同意修订低于当前时必须重新询问"
+        );
+        cleanup(&[dir]);
+    }
+
+    #[test]
+    fn agreement_accepted_false_is_not_granted() {
+        let current = PRIVACY_POLICY_REVISION;
+        let (dir, path) = consent_file(
+            &format!(
+                "privacy_policy_accepted = true\nprivacy_policy_revision = {current}\n\
+                 user_agreement_accepted = false\nuser_agreement_revision = {current}\n"
+            ),
+            "agreement-false",
+        );
+        assert_eq!(read_consent(&path), ConsentRead::StaleRevision);
+        cleanup(&[dir]);
+    }
+
+    #[test]
+    fn accept_writes_both_documents_in_one_save() {
+        let (dir, path) = consent_file("privacy_policy_accepted = false\n", "accept-writes-both");
+        accept_privacy_policy(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(
+            parsed
+                .get("privacy_policy_revision")
+                .and_then(|v| v.as_integer()),
+            Some(i64::from(PRIVACY_POLICY_REVISION))
+        );
+        assert_eq!(
+            parsed
+                .get("user_agreement_accepted")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "同意保存必须与隐私政策同意同一次写入协议同意"
+        );
+        assert_eq!(
+            parsed
+                .get("user_agreement_revision")
+                .and_then(|v| v.as_integer()),
+            Some(i64::from(PRIVACY_POLICY_REVISION))
+        );
+        cleanup(&[dir]);
     }
 }

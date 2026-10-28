@@ -121,8 +121,25 @@ def validate_entry(entry, repository):
                 or not str(withdrawn.get("reason", "")).strip()):
             raise ValueError(f"撤回条目必须写明日期与原因：{version!r}")
     validate_persistent_format(entry.get("persistent_format"), version, status)
+    validate_privacy_revision(entry, version)
     validate_expectations(entry, version)
     validate_assets(entry, repository, status)
+
+
+def validate_privacy_revision(entry, version):
+    """设置格式 3 起的版本认识隐私修订号：登记必须携带该基线自己认识的
+    修订号；布尔时代（格式 < 3）基线不得登记（编排旧阶段播种同意与
+    WB05 闸门观察适用性都取自这个字段）。"""
+    value = entry.get("privacy_revision")
+    fmt = (entry.get("persistent_format") or {}).get("settings_format")
+    if value is None:
+        if fmt is not None and int(fmt) >= 3:
+            raise ValueError(f"设置格式 3 起的登记版本必须登记 privacy_revision：{version!r}")
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"privacy_revision 必须是正整数：{version!r}")
+    if fmt is None or int(fmt) < 3:
+        raise ValueError(f"不认识修订号的版本不得登记 privacy_revision：{version!r}")
 
 
 def validate_persistent_format(value, version, status="published"):
@@ -191,6 +208,7 @@ def resolved_entry(entry, root=ROOT):
             "origin_release": entry["origin_release"], "profile": entry["profile"],
             "status": entry["status"],
             "persistent_format": entry.get("persistent_format"),
+            "privacy_revision": entry.get("privacy_revision"),
             "expected_old": str(root / (entry.get("expected_old") or DEFAULT_EXPECTED)),
             "expected_after": state_paths,
             "installer_name": None if installer is None else installer["name"],
@@ -412,6 +430,9 @@ def register(entry, path=REGISTRY):
         raise ValueError(f"版本已登记：{entry['version']}")
     registry["entries"].append(entry)
     registry["entries"].sort(key=lambda item: version_tuple(item["version"]))
+    # 写盘前整表校验：新条目缺/坏元数据（如格式 3 缺 privacy_revision）在
+    # 这里失败，登记表保持原样，不能把「下一次 load 拒读」的坏表写出去。
+    parse_registry(json.dumps(registry, ensure_ascii=False), source=str(path))
     write_registry(registry, path)
     return entry
 
@@ -455,10 +476,144 @@ def add_entry(tag, api=None, path=REGISTRY, directory=None, status="published",
             _, actual = download(url, remote, work, name)
             assets.append({"name": name, "url": url, "sha256": actual})
         metadata = read_added_metadata(work, assets, version)
+    privacy_revision = None
+    if int(metadata["settings_format"]) >= 3:
+        # 设置格式 3 起的版本认识隐私修订号：登记必须取该发布标签自身源码
+        # 里的 PRIVACY_POLICY_REVISION，不能盲用登记时当前源码的修订号。
+        privacy_revision = read_tag_privacy_revision(resolved)
+        if privacy_revision is None:
+            raise ValueError(f"v{version} 的标签源码没有 PRIVACY_POLICY_REVISION，"
+                             "拒绝登记设置格式 3 版本")
     entry = {"version": version, "tag": "v" + version, "commit": resolved,
              "origin_release": "v" + version, "profile": profile_for(version),
              "status": "published", "persistent_format": metadata, "assets": assets}
+    if privacy_revision is not None:
+        entry["privacy_revision"] = privacy_revision
+        # 0.6.1 起的版本在发布源码里要求用户许可协议同意：登记表必须如实
+        # 记录目标版本的协议能力，后续以它为历史目标时才能装配正确门禁。
+        if read_tag_agreement_required(resolved):
+            entry["agreement_revision"] = privacy_revision
     return register(entry, path)
+
+
+def strip_rust_comments_and_strings(text):
+    """去掉 Rust 注释与字符串字面量（保留换行），供常量声明正则使用——
+    避免块注释/原始字符串里的假常量被当成真实声明（十八轮复核 P3）。"""
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if ch == "/" and nxt == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+        elif ch == "/" and nxt == "*":
+            depth = 1
+            i += 2
+            while i < n and depth:
+                if text.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif text.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    if text[i] == "\n":
+                        out.append("\n")
+                    i += 1
+        elif ch == "r" and nxt in ('"', "#"):
+            # 原始字符串 r"..." / r#"..."# / r##"..."##
+            j = i + 1
+            hashes = 0
+            while j < n and text[j] == "#":
+                hashes += 1
+                j += 1
+            if j < n and text[j] == '"':
+                closing = '"' + "#" * hashes
+                j += 1
+                while j < n and not text.startswith(closing, j):
+                    if text[j] == "\n":
+                        out.append("\n")
+                    j += 1
+                i = j + len(closing)
+                continue
+            out.append(ch)
+            i += 1
+        elif ch == "'":
+            # 字符字面量整体跳过；生命周期（&static str / 单引号+标识符）
+            # 不是字面量——二十轮复核 P3：按字面量处理会吞掉后续常量。
+            if nxt == "\\" and i + 3 < n and text[i + 3] == "'":
+                i += 4  # 转义字符字面量
+                continue
+            if i + 2 < n and text[i + 2] == "'" and nxt not in ("\n", "'"):
+                i += 3  # 单字符字面量
+                continue
+            i += 1  # 生命周期：只跳过引号本身，标识符按普通文本保留
+        elif ch == '"':
+            i += 1
+            while i < n:
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                if text[i] == '"':
+                    i += 1
+                    break
+                if text[i] == "\n":
+                    out.append("\n")
+                i += 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+PRIVACY_REVISION_SOURCES = ("crates/tokenscope-core/src/settings.rs", "src/settings.rs")
+
+
+def extract_privacy_revision(source):
+    """从 Rust 源码提取共同同意修订号，忽略注释和字符串中的假声明。"""
+    match = re.search(
+        r"(?m)^(?:pub\s+)?const\s+PRIVACY_POLICY_REVISION\s*:\s*u8\s*=\s*(\d+)\s*;",
+        strip_rust_comments_and_strings(source),
+    )
+    return int(match.group(1)) if match else None
+
+
+def supports_user_agreement(source):
+    """目标源码是否认识用户许可协议同意字段（0.6.1 起）。注释与字符串里的
+    假字段同样忽略，避免把历史版本误判为协议感知版本。"""
+    stripped = strip_rust_comments_and_strings(source)
+    return re.search(
+        r"(?m)^(?:pub\s+)?user_agreement_(?:accepted|revision)\s*:",
+        stripped,
+    ) is not None
+
+
+def read_tag_privacy_revision(commit, root=ROOT):
+    """从发布标签解引用到的源码读隐私修订号；两处历史路径都找不到常量
+    时返回 None（由调用方决定是否拒绝登记）。"""
+    for relative in PRIVACY_REVISION_SOURCES:
+        result = subprocess.run(["git", "-C", str(root), "show", f"{commit}:{relative}"],
+                                capture_output=True, encoding="utf-8", check=False)
+        if result.returncode:
+            continue
+        revision = extract_privacy_revision(result.stdout)
+        if revision is not None:
+            return revision
+    return None
+
+
+def read_tag_agreement_required(commit, root=ROOT):
+    """发布标签源码是否要求用户许可协议同意（与隐私政策同一次同意）。"""
+    for relative in PRIVACY_REVISION_SOURCES:
+        result = subprocess.run(["git", "-C", str(root), "show", f"{commit}:{relative}"],
+                                capture_output=True, encoding="utf-8", check=False)
+        if result.returncode:
+            continue
+        if extract_privacy_revision(result.stdout) is not None:
+            return supports_user_agreement(result.stdout)
+    return False
 
 
 def profile_for(version):
@@ -502,6 +657,9 @@ def main():
     command = sub.add_parser("select")
     command.add_argument("--current-version", required=True)
     command = sub.add_parser("entries")
+    command = sub.add_parser("privacy-revision")
+    command.add_argument("--source", type=Path,
+                         default=ROOT / "crates/tokenscope-core/src/settings.rs")
     command = sub.add_parser("add")
     command.add_argument("--tag", required=True)
     command.add_argument("--unpublished", action="store_true")
@@ -520,6 +678,11 @@ def main():
             result = selection_payload(load_registry(), args.current_version)
         elif args.mode == "entries":
             result = entries_payload(load_registry())
+        elif args.mode == "privacy-revision":
+            revision = extract_privacy_revision(args.source.read_text(encoding="utf-8"))
+            if revision is None:
+                raise ValueError(f"{args.source} 缺少 PRIVACY_POLICY_REVISION 常量")
+            result = {"privacy_revision": revision}
         elif args.mode == "add":
             entry = add_entry(args.tag,
                               status="unpublished" if args.unpublished else "published",

@@ -1,38 +1,43 @@
 # cc-switch 用量统计实现拆解（源码级）
 
 > 研究对象：开源项目 [`farion1231/cc-switch`](https://github.com/farion1231/cc-switch)，
-> 本文对应 **v4.0.18**（HEAD `cb90a244`，2026-10-21）。上一版基于 v4.0.8（`df40d53`）；
-> 两版之间的差异集中在 §1.1。
+> 本文对应 **v4.0.21**（HEAD `c4db63c`，2026-10-26）。此前两版分别基于 v4.0.18（`cb90a244`）
+> 与 v4.0.8（`df40d53`）；版本间差异集中在 §1.1。
 >
-> 证据分档：**已验证**（源码/仓库文档可证，行号基于 `cb90a244`）／**发布说明**（只有
+> 证据分档：**已验证**（源码/仓库文档可证，行号基于 `c4db63c`）／**发布说明**（只有
 > release notes 依据，未逐行核对实现）／**未验证推论**。
 >
 > 分析方式：浅克隆只读源码，未运行其二进制、未改动本机 `~/.cc-switch` 数据。
 
 ## 1. 范围与方法
 
-- 代码规模（`src-tauri/src`，v4.0.18；行数按 `Get-Content` **含空行**统计）：
-  `services/usage_stats.rs` 5986 行、`services/session_usage_codex.rs` 6328 行、
-  `services/session_usage.rs` 2592 行、`services/session_usage_pi.rs` 2229 行、
+- 代码规模（`src-tauri/src`，v4.0.21；行数按 `Get-Content` **含空行**统计）：
+  `services/usage_stats.rs` 5987 行、`services/session_usage_codex.rs` 6394 行、
+  `services/session_usage.rs` 2597 行、`services/session_usage_pi.rs` 2229 行、
   `services/session_usage_grokbuild.rs` 1423 行、`services/session_usage_opencode.rs` 952 行、
   `services/session_usage_gemini.rs` 508 行、`services/session_usage_mcode.rs` 347 行、
-  `services/session_usage_agy.rs` 302 行、`proxy/usage/{parser,logger,calculator}.rs` 合计 2339 行、
-  `database/schema.rs` 4122 行。
+  `services/session_usage_agy.rs` 538 行、`services/session_usage_kimi.rs` **712 行**（新）、
+  `kimi_session.rs` 313 行（新）、`proxy/usage/{parser,logger,calculator}.rs` 合计 2372 行、
+  `database/schema.rs` 4217 行。
 - 分析手段：`rg` 定位符号 → 分段读原文 → 交叉核对调用点与 DDL；关键断言附 `文件:行号`。
 - 术语：**代理链路** = 内置本地代理实时记账；**会话链路** = 回扫各工具本地会话日志/SQLite；
   **事实表** = `proxy_request_logs`。
 
-### 1.1 v4.0.8 → v4.0.18 的变化（本次更新依据）
+### 1.1 版本演进（v4.0.8 → v4.0.18 → v4.0.21）
 
 | 变化 | 依据 |
 | --- | --- |
 | 新增第 8 个会话适配器 **Antigravity CLI（agy）**，`app_type='agy'`、`data_source='agy_session'` | 源码 + `docs/agy-integration-zh.md` |
-| `SCHEMA_VERSION` 20 → **21**，迁移只给 `mcp_servers`、`skills` 各加 `enabled_agy` | `database/mod.rs:54` |
-| 后端定时扫描从 **60 秒改为 10 分钟兜底**，用量页打开时由前端按所选间隔加扫 | `lib.rs:1394-1445` |
+| 新增第 9 个会话适配器 **Kimi Code（kimi）**，`app_type='kimi'`、`data_source='kimi_session'`，带原生首字与耗时 | 源码 `session_usage_kimi.rs`、`kimi_session.rs` |
+| 新增第 13 个应用 **Oh My Pi（`omp`）**：有 AppType 与会话浏览，**没有用量适配器** | `app_config.rs`、发布说明 v4.0.20 |
+| `SCHEMA_VERSION` 20 → 21 → **23**（v21 加 `enabled_agy`，v22 加 `enabled_kimi`，v23 只给 `mcp_servers` 加 `enabled_omp`） | `database/schema.rs:560-620` |
+| 后端定时扫描从 **60 秒改为 10 分钟兜底**，用量页打开时由前端按所选间隔加扫 | `lib.rs` |
 | 统计新增**首字中位数**（`first_token_median_ms` / `est_first_token_median_ms`），供应商/模型表与请求日志加「首字」列 | `usage_stats.rs` 的 `ProviderStats`、`first_token_eligible_sql` |
 | **Claude Code 适配器**新增首字估算（从 `thinking` 块反推）与**事务级价格缓存** | 源码 `session_usage.rs`（`thinking_block_start_ms`、`SessionPricingCache`） |
-| 精确查价改为 **`COLLATE NOCASE`**（含大写字母的自定义定价也能命中） | `usage_stats.rs:2677` |
+| 精确查价改为 **`COLLATE NOCASE`**（含大写字母的自定义定价也能命中） | `usage_stats.rs` |
 | 用量页新增「设置」页签：币种换算、侧栏「今日」、请求日志列、趋势图样式；并记住上次视图 | 前端 `UsageDisplaySection.tsx`、`requestLogColumns.ts`、`rememberedChoice.ts` |
+| 用量页重排（指标联动趋势/热力图、明细页签带数量、请求日志每页 10/20/50 可调） | 发布说明 v4.0.19 |
+| Kimi 用量改用"请求完成时刻"定日期；agy 用 native models 回填 unknown 行 | 发布说明 v4.0.21 / 源码 |
 | 新增内置价 Gemini 4 Argon（2026-11-30 前介绍价） | 发布说明 v4.0.14 |
 | Codex 若干修复：中途换模型归属、分页子代理补导、分支翻页续写、远程压缩用量 | 发布说明 v4.0.10/11/13/17 |
 | Pi 子代理改为从各自会话文件导入；MiniMax Code 从同会话找回模型名 | 发布说明 v4.0.15/16 |
@@ -68,6 +73,7 @@
 | `_mcode_session` | MiniMax Code (Session) |
 | `_pi_session` | Pi (Session) |
 | **`_agy_session`** | **Antigravity (Session)** |
+| **`_kimi_session`** | **Kimi Code (Session)** |
 
 官方文档口径（`docs/user-manual/zh/4-proxy/4.4-usage.md`）：OpenClaw、Hermes 不支持用量统计；
 Claude Desktop 只统计经本地路由的"模型映射"请求，并折叠进 Claude Code 筛选项
@@ -82,13 +88,14 @@ Claude Desktop 只统计经本地路由的"模型映射"请求，并折叠进 Cl
 
 - 库文件 `cc-switch.db`（SQLite），会话链路、代理链路、价格表、游标全在里面。
 - 取连接统一走 `lock_conn!(db.conn)`（单连接 + 互斥锁），写操作在事务/SAVEPOINT 内提交；无连接池。
-- 迁移用 `PRAGMA user_version` 单调递增，**`SCHEMA_VERSION = 21`**（`database/mod.rs:54`）；
+- 迁移用 `PRAGMA user_version` 单调递增，**`SCHEMA_VERSION = 23`**（`database/mod.rs:54`）；
   整条迁移链包在 `SAVEPOINT schema_migration` 里，失败回滚；库比程序新时拒绝启动。
 - 升级前自动备份（`database/mod.rs` 的 `version > 0 && version < SCHEMA_VERSION` 分支）。
 - 迁移节点（用量相关）：v8 引入 `data_source` + `session_log_sync`；v9 重刷定价；
   v11 `usage_daily_rollups` 加 `request_model`；v13 加 `input_token_semantics`；
   v16 重建 Codex 用量；v17 `session_usage_dedup`；v18 字节游标列；
-  **v21 加 `enabled_agy`**。
+  **v21 加 `enabled_agy`，v22 加 `enabled_kimi`（`mcp_servers` + `skills`），
+  v23 只给 `mcp_servers` 加 `enabled_omp`**（Oh My Pi 的 Skills 启用状态按原生目录现算，同 Pi）。
 
 ### 3.2 用量明细表 `proxy_request_logs`（DDL 原文，`schema.rs:202`）
 
@@ -170,15 +177,15 @@ pub(crate) const INPUT_TOKEN_SEMANTICS_FRESH: i64 = 2;
 
 ### 5.2 模型名 → 价格条目的匹配链
 
-`find_model_pricing_row`（`usage_stats.rs:2614`）两轮：**先全候选精确匹配，再前缀回退**。
+`find_model_pricing_row`（`usage_stats.rs:2615`）两轮：**先全候选精确匹配，再前缀回退**。
 
-- 候选生成 `model_pricing_candidates`（`usage_stats.rs:2718`）：清洗（末段 `/`、截 `:`、`@`→`-`、
+- 候选生成 `model_pricing_candidates`（`usage_stats.rs:2719`）：清洗（末段 `/`、截 `:`、`@`→`-`、
   小写、去 `[1m]`）后栈式派生（命名空间、`claude-` 非 Anthropic 前缀、Bedrock `-vN`、
   日期后缀、reasoning 档位、`claude-*` 点号归一）。
-- 精确匹配 `query_model_pricing_exact`（`:2669`）——**v4.0.14 起 SQL 是
-  `WHERE model_id = ?1 COLLATE NOCASE`（`:2677`）**，因此价格表里含大写的自定义条目也能命中。
-- 前缀回退 `query_model_pricing_prefix`（`:2692`）用 `LIKE '<candidate>-%'` 取最短命中，
-  且只在 `should_try_pricing_prefix_match`（`:2905`）放行时尝试（`claude-` 需 ≥3 个连字符、
+- 精确匹配 `query_model_pricing_exact`（`:2670`）——**v4.0.14 起 SQL 是
+  `WHERE model_id = ?1 COLLATE NOCASE`（`:2678`）**，因此价格表里含大写的自定义条目也能命中。
+- 前缀回退 `query_model_pricing_prefix`（`:2693`）用 `LIKE '<candidate>-%'` 取最短命中，
+  且只在 `should_try_pricing_prefix_match`（`:2906`）放行时尝试（`claude-` 需 ≥3 个连字符、
   `o1/o3/o4/o5` ≥1、`gpt-/gemini-/deepseek-/qwen-/glm-/kimi-/minimax-` ≥2）。
 - 占位符（`unknown`/`null`/`none`/空）直接无候选 → 不计价。
 
@@ -212,35 +219,35 @@ let total_cost = (input_cost + output_cost + cache_read_cost + cache_creation_co
 - 查不到价：token 照记、五项成本写 `"0"`，并打 `[USG-002]` 警告。
 - 前端 `isUnpricedUsage` 识别（2xx + 四类 token 非零 + 倍率≠0 + 成本 0），显示**「未定价」**。
 - 补价回填：`total_cost_usd <= 0` 且有 token 的行，在价格表变动后按写入时的 `pricing_model`
-  重算（`backfill_missing_usage_costs`，`usage_stats.rs:2370`）；已非 0 的行永不改写。
+  重算（`backfill_missing_usage_costs`，`usage_stats.rs:2371`）；已非 0 的行永不改写。
 - 内置表的播种与修复遵循同一原则：`INSERT OR IGNORE` 绝不覆盖已改价，repair 只修"仍等于旧内置值"的行。
 
 ## 6. 聚合查询：明细 + 日汇总相加
 
-`get_usage_summary`（`usage_stats.rs:942`）是**两个子查询相加**（明细 + rollup），
-`get_daily_trends`（`:1273`）、`get_provider_stats`（`:1709`）、`get_model_stats`（`:1902`）
+`get_usage_summary`（`usage_stats.rs:943`）是**两个子查询相加**（明细 + rollup），
+`get_daily_trends`（`:1274`）、`get_provider_stats`（`:1710`）、`get_model_stats`（`:1903`）
 同样是"明细 UNION/相加 + rollup"。关键机制（**已验证**）：
 
-- **只把"被完整覆盖的本地自然日"交给 rollup**：`compute_rollup_date_bounds`（`:864`）
+- **只把"被完整覆盖的本地自然日"交给 rollup**：`compute_rollup_date_bounds`（`:865`）
   起点不在 `00:00:00` 就从次日算、终点不在 `23:59` 只到前一日，空区间直接 `1 = 0`。
-- 明细查询带 `effective_usage_log_filter_for_range`（`:535`，跨源去重）。
-- `LogCountCache`（键含筛选与起点、`total_changes` 校验、60 秒 TTL，`log_count_cache_key` @ `:631`）
+- 明细查询带 `effective_usage_log_filter_for_range`（`:536`，跨源去重）。
+- `LogCountCache`（键含筛选与起点、`total_changes` 校验、60 秒 TTL，`log_count_cache_key` @ `:632`）
   避免每次刷新全表 count。
-- 请求日志分页 `get_request_logs`（`:2104`）是 `LIMIT/OFFSET`，每行经
-  `maybe_backfill_log_costs`（`:2442`）兜底回填成本。
+- 请求日志分页 `get_request_logs`（`:2105`）是 `LIMIT/OFFSET`，每行经
+  `maybe_backfill_log_costs`（`:2443`）兜底回填成本。
 
 ## 7. 跨源去重：±10 分钟 + 四桶指纹
 
-窗口常量 `SESSION_PROXY_DEDUP_WINDOW_SECONDS = 10 * 60`（`usage_stats.rs:396`）。
-`effective_usage_log_filter`（`:478`）的语义：会话行若能与某条**成功代理行**在 ±10 分钟内
+窗口常量 `SESSION_PROXY_DEDUP_WINDOW_SECONDS = 10 * 60`（`usage_stats.rs:397`）。
+`effective_usage_log_filter`（`:479`）的语义：会话行若能与某条**成功代理行**在 ±10 分钟内
 对上 `input/output/cache_read` 三元组 + 模型（大小写不敏感、`unknown` 通配），
 且 `cache_creation` 兼容，就**整行排除**。
 
-`effective_usage_log_filter_for_range`（`:535`）是成本自适应版本：先数窗口内两侧行数，
+`effective_usage_log_filter_for_range`（`:536`）是成本自适应版本：先数窗口内两侧行数，
 任一侧为 0 就不加条件；代理行更少时改写成 `rowid NOT IN (一次性子查询)`；会话行更少时保留
 逐行 `EXISTS`。
 
-**去重来源白名单**（`usage_stats.rs:522`）：
+**去重来源白名单**（`usage_stats.rs:523`）：
 
 ```rust
 const DEDUP_SESSION_SOURCES_SQL: &str =
@@ -312,16 +319,17 @@ const DEDUP_SESSION_SOURCES_SQL: &str =
 
 `created_at` 一律 **UTC 秒**；本地化只发生在两处：日汇总分桶
 （`date(l.created_at,'unixepoch','localtime')`）与范围边界换算
-（`compute_rollup_date_bounds` @ `:864`、`local_day_start_rfc3339` @ `:927`，用 `chrono::Local`
+（`compute_rollup_date_bounds` @ `:865`、`local_day_start_rfc3339` @ `:928`，用 `chrono::Local`
 并处理 DST 歧义/间隙）。
 
 前端全用本机时区，**没有时区设置项**；隐含前提是"后端进程时区 = WebView 时区"。
 
-## 12. 八个会话适配器
+## 12. 九个会话适配器
 
 `sync_all_unlocked`（`services/session_usage.rs:137`）**串行**依次调用：
-Claude → Codex → Gemini → OpenCode → Grok Build → Pi → MCode → **Antigravity**，
-单步失败只进 `errors`，不影响其余。共性：无统一 trait；共用 `TokenUsage` 载体、
+Claude → Codex → Gemini → OpenCode → Grok Build → Pi → MCode → Antigravity → **Kimi Code**，
+单步失败只进 `errors`，不影响其余。另有一家**只有会话浏览、没有用量适配器**的应用：
+Oh My Pi（`omp`，见 §12.11）。共性：无统一 trait；共用 `TokenUsage` 载体、
 `CostCalculator`、`find_model_pricing`、`session_log_sync`（agy 除外）与 `SessionSyncResult`；
 **全部绕过 `database/dao/*` 直接写内联 SQL**，**没有一家采集 cwd/项目路径**
 （`proxy_request_logs` 无该列，项目维度只存在于会话浏览层的元数据）。
@@ -338,36 +346,40 @@ Claude → Codex → Gemini → OpenCode → Grok Build → Pi → MCode → **A
 | Pi | `~/.pi/agent/sessions` | JSONL | 逐记录（4 类载体） | `pi_session:{sha256(...)}` | 账本 `session_usage_dedup` | 2（FRESH） |
 | MiniMax Code | `<data_dir>/v2/sqlite/runtime-state.sqlite` | SQLite | 逐请求 | `mcode:{sid}:{id}` | `INSERT OR IGNORE` + id 游标 | 2（FRESH） |
 | **Antigravity** | `~/.gemini/{antigravity-cli,antigravity}/brain` + Key 私有目录 | JSONL | 逐条完成的模型响应 | `agy:{sid}:{step_index}` | 账本 `session_usage_dedup` | 2（FRESH） |
+| **Kimi Code** | `<data_dir>/sessions/<ws>/<sid>/agents/<agent>/wire.jsonl` | JSONL | 逐条完成响应（主 / 子 agent 两条路径） | `kimi:{provider}:{messageId}` | 账本 `session_usage_dedup` + 字节游标 | 2（FRESH） |
 
-### 12.2 Claude Code（`services/session_usage.rs`，2592 行）
+注：**Oh My Pi（`omp`）没有用量适配器**（只有会话浏览与配置管理）。它的数据面与"要接该怎么接"
+见 §12.11。
 
-- 入口 `sync_claude_session_logs`（`:403`），目录发现 `collect_jsonl_files`（`:488`）：
+### 12.2 Claude Code（`services/session_usage.rs`，2597 行）
+
+- 入口 `sync_claude_session_logs`（`:408`），目录发现 `collect_jsonl_files`（`:493`）：
   固定 4 层（`项目/*.jsonl`、`<sid>/subagents/*.jsonl`、`subagents/workflows/wf_*/*.jsonl`），
   扩展名字面 `jsonl`，mtime 是唯一门。
-- 解析 `sync_single_file`（`:622`）：逐行 `serde_json::Value`；要求 `type=="assistant"`、
+- 解析 `sync_single_file`（`:627`）：逐行 `serde_json::Value`；要求 `type=="assistant"`、
   `message.id`、`message.usage` 存在，四桶任一 >0 才导入；文件内按 `message.id` 择优
   （有 `stop_reason` 优先，否则 output 更大者）。
 - 四桶直取（`input_tokens` / `output_tokens` / `cache_read_input_tokens` /
   `cache_creation_input_tokens`），1h 分档只用于计价。
-- 游标：字节游标 + 4096 字节尾部指纹（`claude_tail_fingerprint` 写入域标签
-  `claude-session-tail-v1`，`session_usage.rs:571-573`），截断/重写即钉 EOF 不重放；
-  游标推进与插入同事务（`update_sync_state_on_conn` @ `:1022`）。
-- 补全：`find_stored_session_row`（`:1068`）→ `session_costs`（`:1119`）→
-  `upsert_session_log_entry_on_conn`（`:1235`）；output 增长时 UPDATE，若此时能对上代理指纹则删自身行。
+- 游标：字节游标 + 4096 字节尾部指纹（`TAIL_FINGERPRINT_BYTES` @ `:573`、
+  `claude_tail_fingerprint` @ `:576`，写入域标签 `claude-session-tail-v1`），
+  截断/重写即钉 EOF 不重放；游标推进与插入同事务（`update_sync_state_on_conn` @ `:1027`）。
+- 补全：`find_stored_session_row`（`:1073`）→ `session_costs`（`:1124`）→
+  `upsert_session_log_entry_on_conn`（`:1240`）；output 增长时 UPDATE，若此时能对上代理指纹则删自身行。
 - **v4.0.10 起新增「首字估算」**（生产增量之一）：会话日志没有请求级计时，改为
-  `thinking_block_start_ms`（`:364`）从 `message.content[0]` 是 `thinking` 块且带
+  `thinking_block_start_ms`（`:369`）从 `message.content[0]` 是 `thinking` 块且带
   `thinkingDurationMs` 时反推思考块开始时刻（`block_end_ms - duration_ms`）；
-  `estimated_first_token_ms`（`:376`）用 `first_output_ms - start_ms` 且要求落在
-  `(0, latency_ms]` 内。结果收进 `EstimatedTiming { latency_ms, first_token_ms }`（`:1055`），
-  补全时连 `first_token_ms` 一起回填（`StoredSessionRow` 新增该字段）。
-- **v4.0.15 起新增「事务级价格缓存」**（生产增量之二）：`SessionPricingCache`（`:1092`）
-  在单个文件的导入事务内复用模型价格查询（`pricing_cache.get` @ `:1133`），
-  避免每条记录都查一次价；`session_costs`（`:1119`）新增 `pricing_cache` 参数。
+  `estimated_first_token_ms`（`:381`）用 `first_output_ms - start_ms` 且要求落在
+  `(0, latency_ms]` 内。结果收进 `EstimatedTiming { latency_ms, first_token_ms }`（`:1060`），
+  补全时连 `first_token_ms` 一起回填（`StoredSessionRow` 新增该字段，`:1066`）。
+- **v4.0.15 起新增「事务级价格缓存」**（生产增量之二）：`SessionPricingCache`（`:1097`）
+  在单个文件的导入事务内复用模型价格查询（`pricing_cache.get` @ `:1138`），
+  避免每条记录都查一次价；`session_costs`（`:1124`）新增 `pricing_cache` 参数。
   配套测试覆盖"命中/未命中/导入中价格被更新"三种情形。
-- **增量构成**：旧 2228 行 → 新 2592 行（净 +364），其中生产 1265 → 1369（+104）、
-  测试 962 → 1223（+261）——增长同样主要来自上述两块的回归测试。
+- **增量构成**：旧 2228 行 → 现 2597 行（净 +369）。主要增长发生在 v4.0.18（+364：生产
+  1265 → 1369、测试 962 → 1223），v4.0.19–21 期间又 +5。
 
-### 12.3 Codex（`services/session_usage_codex.rs`，6328 行）
+### 12.3 Codex（`services/session_usage_codex.rs`，6394 行）
 
 - 入口 `sync_codex_usage`（`:1034`）；`sessions` 深度 3 + `archived_sessions` 一层；
   文件名 `rollout-*` + 尾 UUID，`.jsonl.zst` 可读。
@@ -384,11 +396,11 @@ Claude → Codex → Gemini → OpenCode → Grok Build → Pi → MCode → **A
   Codex 0.153+ 远程压缩的 `token_usage_record` 在随后 `token_count` 的 last 为 0 时由
   `push_unmatched_usage`（第 957 行）补记；父 rollout 用 `load_parent_timeline`（第 1682 行）
   + `parent_dependency_stamp`（第 1884 行）缓存时间线，避免分叉会话每分钟整份重读。
-- **本文件从 4253 行涨到 6328 行（净 +2075）的构成**：`mod tests` 旧版在第 1876 行、
-  新版在第 2423 行——即**生产代码 1875 → 2422 行（+547）**、**测试代码 2377 → 3905 行
-  （+1528，占增长约 74%）**。增长主要不是产品功能膨胀，而是上述修复带来的回归测试
-  （分页续写多页/分支/fork、retryable pending 的文件替换检测、父时间线缓存失效、
-  线程设置模型切换、远程压缩、首字计时等）。
+- **本文件从 4253 行涨到 6394 行（净 +2141）的构成**：`mod tests` 在 v4.0.8 是第 1876 行、
+  v4.0.18 第 2423 行、v4.0.21 第 2428 行——即**生产代码 1875 → 2427 行（+552）**、
+  **测试代码 2377 → 3966 行（+1589，约占增长的四分之三）**。增长主要不是产品功能膨胀，
+  而是上述修复带来的回归测试（分页续写多页/分支/fork、retryable pending 的文件替换检测、
+  父时间线缓存失效、线程设置模型切换、远程压缩、首字计时等）。
 
 #### service_tier（Fast / priority）能不能识别？（本机真实日志实测）
 
@@ -447,9 +459,9 @@ compaction / branch_summary）；文件 revision 四元组（mtime/size/尾 4096
 **v4.0.16（发布说明）**：模型为 unknown 的记录会从同会话同时间的回复里找回模型名并计价，
 已导入的保持原样。
 
-### 12.9 Antigravity（`session_usage_agy.rs`，302 行）—— v4.0.18 新增
+### 12.9 Antigravity（`session_usage_agy.rs`，538 行）—— v4.0.18 新增
 
-入口 `sync_agy_usage`（`:14`）。完整拆解见
+入口 `sync_agy_usage`。完整拆解见
 [`2026-10-22-cc-switch-agy-usage.md`](./2026-10-22-cc-switch-agy-usage.md)，要点：
 
 - 数据面：三个 `brain` 根（CLI `~/.gemini/antigravity-cli/brain`、
@@ -461,10 +473,128 @@ compaction / branch_summary）；文件 revision 四元组（mtime/size/尾 4096
   （input 不含缓存、output 含 thinking，实测 100/20/5/7 → 80/20/12）。
 - 模型：行内 `model` 优先，否则从 `USER_INPUT` 的 "Model Selection" 切换文本按序继承；
   缺失记 `unknown`；显示名归一为定价 ID（`Gemini 3.8 Flash (High)` → `gemini-3.8-flash-high`）。
+- **v4.0.19–21 的补强**：文件从 302 行扩到 538 行，新增 `known_model`——用 native models
+  回填 `unknown` 行（**只补模型名，不改 token、不改去重身份**）；带档位的 native id 与
+  "模型选择"事件落到同一个价格桶。对应测试
+  `native_models_backfill_unknown_rows_without_changing_tokens_or_deduplication`、
+  `native_models_do_not_replace_explicit_models_or_selection_events`、
+  `native_tiered_ids_share_the_model_selection_bucket_and_price`。
 - 保存：`request_id = agy:{sid}:{step}`，先写 `session_usage_dedup` 墓碑再插明细；
   **没有文件级游标**，每轮全量扫会话（幂等靠账本）。
 
-### 12.10 各适配器的"不做什么"
+### 12.10 Kimi Code（`session_usage_kimi.rs`，712 行）—— v4.0.19 新增
+
+Kimi Code 是**第九个**用量适配器，也是目前唯一自带**原生首字与耗时**的会话来源
+（其余会话来源只能靠时间戳估算）。
+
+**数据面与发现**（`sync_sessions`，`:27-77`）
+
+```
+<data_dir>/sessions/<workspace>/<session>/agents/<agent>/wire.jsonl
+```
+
+- `data_dir` = `KIMI_CODE_HOME`（非空）否则 `~/.kimi-code`（`kimi_config.rs`）。
+- **主 agent 与每个子 agent 各写一条 wire**（`agents/main`、`agents/agent-N`）。
+- 遍历三级：workspace → session → agents → `wire.jsonl`。
+
+**增量**（`:50-59`）
+
+- 游标仍然存在 `session_log_sync`，键是 **`kimi:<绝对路径>`**。
+- 跳过条件：`last_modified == mtime` **且** `last_line_offset == 文件字节长度`——这里
+  `last_line_offset` 被当作**文件大小**用，不是行号。
+- 行尾不完整的记录直接 `break`，留给下一轮（`:110-113`）。
+- 提交时 `update_sync_state_on_conn(tx, key, modified, bytes)`（`:219`），游标与明细同事务。
+
+**解析：主 / 子 agent 两条路径**（`:119-153`）
+
+| 来源 | 事件判定 | 用量位置 |
+| --- | --- | --- |
+| 主 agent | `type ∈ {agent.message.appended, human.agent.message.appended}` 且 `message.message.role == "assistant"` | `message.meta.usage` |
+| 子 agent | `type == context.append_loop_event` 且 `event.type == step.end` | `event.usage` |
+
+子 agent 分支会合成 `{messageId: event.messageId, model: {provider: "subagent"}}` 当元数据；
+注释明确"父会话的 `subagent.completed` 汇总不导入"，所以父子两边不会双计。
+
+**token 字段（最容易踩的地方）**（`:157-166`）
+
+| Kimi 字段 | 写入的列 |
+| --- | --- |
+| `inputOther` | `input_tokens`（**已是非缓存输入**） |
+| `output` | `output_tokens` |
+| `inputCacheRead` | `cache_read_tokens` |
+| `inputCacheCreation` | `cache_creation_tokens` |
+
+四桶全 0 跳过。语义固定写 **FRESH**（文件头注释："Tokens are already normalized to fresh
+input"），因此 `kimi` **不在** `CACHE_INCLUSIVE_APP_TYPES`，统计侧不会再减一次缓存。
+
+**身份与会话归属**（`:174-184`）
+
+- `request_id = kimi:{provider}:{messageId}`；`provider` 取 `meta.model.provider`，缺失记
+  `unknown`；`messageId` 缺失时退化成一行的 `sha256`。
+- 会话 id 直接用 `agents/` 的上一级目录名（`sync_file` 的 `session` 参数）。
+
+**模型与计时：`kimi_session::RequestIndex`**（`kimi_session.rs:29-173`）
+
+human projection 里的模型是合成名 `agent-loop`，不能用；真实模型来自同一 wire 的
+`llm.request` 事件，按 `step`/`turnStep` 与完成消息的 `messageId` 对齐：
+
+1. `agent.switched` / `agent.turn.started` → 清空当前 step；
+2. `llm.request`（只认 `kind == "loop"`，且 `turnStep` 要匹配）→ 记 `model` 与
+   `request_ms`，**重试会覆盖上一次尝试**（原生计时只属于最后一次）；
+3. `content.part` / `tool.call` → 校验 `stepUuid`；`content.part` 记 `response_ms`，
+   `tool.call` 标记"本次有工具"；
+4. `step.end` → 取 `messageId`，`first_token_ms = llmFirstTokenLatencyMs`，
+   `native_latency = estimated_latency_ms(0, first + llmStreamDurationMs)`；
+   拿不到原生值时退回 `request_ms → end_ms` 的估算（有工具时不用 `step.end` 的时间）。
+
+模型名会过滤 `agent-loop` 与 `unknown`（`model_name`，`kimi_session.rs:45-49`）。
+
+**落库与幂等**（`:189-221`）
+
+1. 先 `INSERT OR IGNORE` 墓碑：`session_usage_dedup('kimi_session', request, request, 1)`；
+2. 已存在 → 走 `refresh_existing`（`:254-319`）：只在模型变化时重算成本，并更新
+   `latency_ms` / `first_token_ms` / `created_at`；**receipt 在但明细已被 30 天剪枝时返回
+   false，不重建**（否则会和日汇总重复计）；
+3. 新记录写 `proxy_request_logs` 24 列：`provider_id='_kimi_session'`、`app_type='kimi'`、
+   `model = request_model`、`data_source='kimi_session'`、`input_token_semantics=FRESH`、
+   `latency_ms`、`first_token_ms`、`status_code=200`、`is_streaming=1`、`cost_multiplier='1'`。
+
+**时间口径（v4.0.21 修的就是这里）**（`:224-229`）
+
+Kimi 是**整轮消息一起提交**的，记录的 `time` 是提交时刻，同一轮所有请求共享；
+所以 `created_at` 取 `completed_ms(start, latency, committed) = min(start + latency, committed)`，
+即"这次模型调用结束的时刻"——与代理链路记账的时间口径对齐。
+
+**计价**（`:231-250`）：`find_model_pricing(model)` → `calculate_for_app("kimi", …)`，
+查不到价五项全 0。展示名走 `_kimi_session → "Kimi Code (Session)"`（`usage_stats.rs:390`）。
+
+**未验证**：本机未安装 Kimi Code，字段名（`inputOther` / `inputCacheRead` /
+`inputCacheCreation`）来自适配器源码与它自己的合成 fixture（`:326-351`），
+**未用真实 wire.jsonl 验证**这些字段在所有 Kimi 版本都存在。
+
+### 12.11 Oh My Pi（`omp`）：有会话浏览，没有用量
+
+- **状态**：`AppType::Omp` 已在 `app_config.rs`（`pub omp: bool`），DB v23 给 `mcp_servers`
+  加了 `enabled_omp`；会话可以浏览和恢复。但**没有 `session_usage_omp.rs`、没有
+  `_omp_session` 映射、前端 `KNOWN_APP_TYPES` 也不含 `omp`**——发布说明写得很直接：
+  「Oh My Pi 不经过本地路由，也暂不统计用量」。
+- **数据面（已验证）**：`omp_config::get_omp_data_dir()` = `~/.omp/agent`
+  （命名 profile 时为 `~/.omp/profiles/<name>/agent`），会话根是 `<agent>/sessions`
+  （`ProjectDirectories` 两级布局）；设置 `PI_CODING_AGENT_SESSION_DIR` 时改用它（`Flat` 一级）。
+- **格式沿用 Pi（已验证）**：`session_manager/providers/omp.rs` 把 Pi 的扫描器/读取器按
+  `Dialect` 参数化——`Dialect { provider_id: "omp", label: "Oh My Pi", … }`，然后
+  `pi::scan_sessions_for(&OMP)`、`pi::load_messages_for(&OMP, path)`；文件头注释：
+  「格式沿用 Pi（会话树、活动分支、转录块），差异见 `pi::Dialect`」。
+- **这意味着什么**：Oh My Pi 的会话 JSONL 与 Pi 同构，而 Pi 的用量适配器解析的正是这种
+  JSONL 里的 `usage.{input,output,cacheRead,cacheWrite}`。所以它属于**"可读但未接入"**，
+  缺的是适配器注册与几处白名单，不是数据本身。
+- **要接的话（建议路径）**：把 `session_usage_pi` 的路径/方言参数化后复用；
+  注册 `sync_omp_usage`；加 `_omp_session` 映射、前端 `KNOWN_APP_TYPES`；
+  确认 `omp` 是否也进跨源去重白名单（它没有代理面，与 agy 同理，通常不必进）。
+- **未验证**：本机未安装 Oh My Pi，**没有核实它的会话记录里是否真的写 `usage` 字段**。
+  写了则接入成本很低；不写就得另找来源——这一点必须在动手前用一个真实会话确认。
+
+### 12.12 各适配器的"不做什么"
 
 - **都不采集项目/cwd**（`proxy_request_logs` 无此列）。
 - **都不处理 sidechain/isMeta/synthetic**（Claude 只跳过 `attachment` 行做计时）。
@@ -586,8 +716,11 @@ models.dev 面板、同步/重建 toast），Hero、趋势图、请求日志表�
 
 ## 16. 未验证项与已知风险
 
-- 本文行号基于 `cb90a244`；后续提交会漂移。
+- 本文行号基于 `c4db63c`；后续提交会漂移。
 - 未运行 cc-switch 或任何上游 agent，未回放真实语料；仓库测试均为合成 fixture。
+- **本机未安装 Kimi Code 与 Oh My Pi**：Kimi 的 token 字段名（`inputOther` /
+  `inputCacheRead` / `inputCacheCreation`）来自适配器与其合成 fixture，未用真实
+  `wire.jsonl` 验证；Oh My Pi 的会话里是否写 `usage` 字段**完全未验证**。
 - 未验证：主库运行时 `journal_mode`（代码未设 WAL，Codex 适配器注释自述 `journal_mode=delete`）、
   多实例并发行为（单连接 + Mutex，无 `busy_timeout`）。
 - 未逐行核对：`rollup_and_prune(30)` 的 30 是否为设置项（两处调用均硬编码）；
@@ -606,22 +739,23 @@ models.dev 面板、同步/重建 toast），Hero、趋势图、请求日志表�
 
 ---
 
-## 附录 A：关键常量与阈值速查（v4.0.18）
+## 附录 A：关键常量与阈值速查（v4.0.21）
 
 | 名称 | 值 | 位置 |
 | --- | --- | --- |
-| `SCHEMA_VERSION` | **21** | `database/mod.rs:54` |
-| 后台会话扫描兜底 | **10 分钟** | `lib.rs:1398` |
-| 跨源去重时间窗 | ±600 秒 | `usage_stats.rs:396` |
-| 明细保留期 | 30 天 | `database/mod.rs:156` |
-| 事件防抖 | 200 ms | `usage_events.rs:23` |
+| `SCHEMA_VERSION` | **23** | `database/mod.rs:54` |
+| 后台会话扫描兜底 | **10 分钟** | `lib.rs` |
+| 跨源去重时间窗 | ±600 秒 | `usage_stats.rs` |
+| 明细保留期 | 30 天 | `database/mod.rs` |
+| 事件防抖 | 200 ms | `usage_events.rs` |
 | 前端刷新间隔默认 | 30 秒 | `UsageDashboard.tsx` |
 | models.dev 同步节流 | 6 小时 | `modelsDevAutoSync.ts` |
-| 精确速度门槛 | 输出 ≥100 token 且生成窗口 ≥100 ms | `usage_stats.rs:148` |
-| 估算速度门槛 | 输出 ≥200 token 且耗时 ≥1000 ms | `usage_stats.rs:168` |
+| 精确速度门槛 | 输出 ≥100 token 且生成窗口 ≥100 ms | `usage_stats.rs` |
+| 估算速度门槛 | 输出 ≥200 token 且耗时 ≥1000 ms | `usage_stats.rs` |
+| Kimi 原生首字/耗时 | `llmFirstTokenLatencyMs` / `llmStreamDurationMs` | `kimi_session.rs:132-145` |
 | 耗时估算合理区间 | 100 ms – 1 h | `session_usage.rs` |
 | Grok 沉降窗 | 60 秒 | `session_usage_grokbuild.rs` |
-| Codex 批量插入 | 1000 行/批 | `session_usage_codex.rs:1953` |
+| Codex 批量插入 | 1000 行/批 | `session_usage_codex.rs` |
 | 缓存写 1 小时系数 | ×1.6（= 2 / 1.25） | `calculator.rs:105` |
 | 代理默认监听 | `127.0.0.1:15721` | `proxy/types.rs` |
 | 用量脚本沙箱 | 5 s / 16 MiB / 256 KiB | `usage_script.rs` |

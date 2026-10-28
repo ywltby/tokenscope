@@ -896,6 +896,7 @@
         "pricing_index": "9",
         "settings_format": "3"
       },
+      "privacy_revision": 2,
       "assets": [
         {
           "name": "build-metadata.json",
