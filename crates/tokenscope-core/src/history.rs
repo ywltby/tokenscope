@@ -2659,7 +2659,14 @@ fn same_fact_except_model(existing: &StoredEvent, write: &EventWrite) -> bool {
 
 /// 精确时间索引限定候选，再检查四桶与其余事实字段；路径/行号不参与。
 /// 至多取两个即可区分全库唯一与歧义，不用模糊重叠窗口或猜测首条。
+///
+/// N18：只有 **v1（parser_revision < 2）** 的行是"线程设置模型未归属"的
+/// 旧缺陷产物。v2 起模型归属已经正确（CP04），v2/v3 记录即使同会话、
+/// 同时间、同四桶但模型不同，也代表**另一个合法请求**——不得按旧记录
+/// 纠正去改写模型。判断依据是事件行版本（`usage_events.parser_revision`），
+/// 不是 `EventOrigin.parser_revision`（后者是来源证据元数据）。
 fn old_codex_model_candidates(conn: &Connection, write: &EventWrite) -> Result<Vec<i64>> {
+    const CORRECTABLE_MAX_REVISION: i64 = 2;
     let mut statement = conn.prepare(
         "SELECT id FROM usage_events WHERE app='codex' AND origin_rank=?1
              AND parser_revision<?2 AND session_id=?3 AND ts_seconds=?4 AND ts_nanos=?5
@@ -2671,7 +2678,7 @@ fn old_codex_model_candidates(conn: &Connection, write: &EventWrite) -> Result<V
     let rows = statement.query_map(
         params![
             WritePrecedence::NativeLog.rank(),
-            PARSER_REVISION,
+            CORRECTABLE_MAX_REVISION,
             write.session_id,
             write.ts.as_second(),
             write.ts.subsec_nanosecond() as i64,

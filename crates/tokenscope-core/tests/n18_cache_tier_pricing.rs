@@ -416,6 +416,42 @@ cache_write_1h = 6.0
 label = ">200K"
 min_tokens = 200_000
 input = 6.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let hi = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    // 段**未改写写入价**（沿用基础 3.75）→ 回退基础层分档价是合理的。
+    assert!(
+        (hi.cost - (1.0 * 3.75 + 1.0 * 6.0)).abs() < 1e-9,
+        "段未改写写入价时应回退基础层分档价，实际 {}",
+        hi.cost
+    );
+    assert!(hi.complete);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_segment_overriding_write_without_tiers_is_unknown() {
+    // 反例（复核项 3）：段显式改写写入价（9.0）却没有段级分档依据时，
+    // 不得借用基础层 3.75/6.0 的比率并声称完整——写入分档未知。
+    let dir = tiered_dir("seg-write-no-tiers");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.segment]]
+label = ">200K"
+min_tokens = 200_000
+input = 6.0
 cache_write = 9.0
 "#,
     );
@@ -423,13 +459,9 @@ cache_write = 9.0
     let hi = p
         .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
         .unwrap();
-    // 段未声明分档 → 回退基础层分档价（写入两档价不随段变）。
-    assert!(
-        (hi.cost - (1.0 * 3.75 + 1.0 * 6.0)).abs() < 1e-9,
-        "段缺分档应回退基础层，实际 {}",
-        hi.cost
-    );
-    assert!(hi.complete);
+    assert!(!hi.complete, "段改写写入价但无分档依据 → 不得完整");
+    assert_eq!(hi.unknown.cache_write, 2_000_000);
+    assert!(!hi.cache_write_split_estimated, "这是未知不是估算");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -656,10 +688,11 @@ fn n18_anthropic_segment_without_proof_is_unknown_not_guessed() {
             at(),
         )
         .unwrap();
-    // 段自证不通过 → 该段不派生；按既有回退语义落到基础层分档价
-    // （基础 3.75/6.0 自证通过）——不猜段级倍率。
-    assert!(est.complete, "段未声明分档 → 回退基础层分档价");
-    assert!((est.cost - 9.75).abs() < 1e-9, "实际 {}", est.cost);
+    // 段显式改写写入价（9.0）且自证不通过 → 分档价未知：不得回退基础层
+    // 3.75/6.0 的比率并声称完整（复核项 3 的原反例）。
+    assert!(!est.complete, "高档无分档依据 → 不得声称完整");
+    assert_eq!(est.unknown.cache_write, 2_000_000, "写 token 记未计价");
+    assert!(!est.cache_write_split_estimated, "这是未知不是估算");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -885,5 +918,158 @@ cache_write = 3.75
         .unwrap();
     assert!((both.cost - 9.75).abs() < 1e-9, "可信分档用分档价");
 
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ── 项 4（复核）：models.dev 基础层/分段层显式分档价校验 ─────────────
+
+#[test]
+fn n18_modelsdev_invalid_explicit_tiers_are_rejected_with_diagnostics() {
+    for (tag, entry) in [
+        (
+            "base-negative",
+            r#"{"id":"anthropic/claude-x","name":"X","input":3.0,"output":15.0,
+                "cache_read":0.3,"cache_write":3.75,"cache_write_5m":-1.0,
+                "cache_write_1h":6.0}"#,
+        ),
+        (
+            "base-nonfinite",
+            r#"{"id":"anthropic/claude-x","name":"X","input":3.0,"output":15.0,
+                "cache_read":0.3,"cache_write":3.75,"cache_write_5m":1e400,
+                "cache_write_1h":6.0}"#,
+        ),
+        (
+            "segment-negative",
+            r#"{"id":"anthropic/claude-x","name":"X","input":3.0,"output":15.0,
+                "cache_read":0.3,"cache_write":3.75,
+                "segments":[{"label":">272K","min_tokens":272001,
+                  "input":6.0,"output":30.0,"cache_read":0.6,"cache_write":7.5,
+                  "cache_write_1h":-1.0}]}"#,
+        ),
+    ] {
+        let dir = md_dir(&format!("md-invalid-{tag}"));
+        let md = snapshot_json(
+            &dir,
+            &format!(r#"{{"v":4,"synced_at":"t","entries":[{entry}]}}"#),
+        );
+        let (p, warnings) = Pricing::load(None, Some(&md), None);
+        // 非法值不得进入计价：候选被拒绝（未收录 → estimate 返回 None）。
+        let est = p.estimate(
+            "anthropic/claude-x",
+            &split_counts(2_000_000, 1_000_000, 1_000_000),
+            at(),
+        );
+        assert!(est.is_none(), "{tag}：非法分档价不得进入计价");
+        assert!(
+            !warnings.is_empty(),
+            "{tag}：必须保留诊断，实际 {warnings:?}"
+        );
+        if tag != "base-nonfinite" {
+            // 负数在条目级拒绝：诊断必须指出条目。非有限 JSON 数值在快照
+            // 解析阶段即被 serde 拒绝（number out of range），诊断指出文件，
+            // 同样不会进入计价。
+            assert!(
+                warnings.iter().any(|w| w.contains("claude-x")),
+                "{tag}：诊断必须指出条目，实际 {warnings:?}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[test]
+fn n18_unknown_split_multi_candidate_discloses_event_gap_not_candidate_price_gap() {
+    // 复核项 5 原反例：事件分档未知；A 只有合并价（完整），B 分档价齐全
+    // （因事件缺分档而估算/不完整）。完整候选优先规则不变，但排除原因
+    // 必须写成「事件缺少分档」，不得误写成「候选缺少价格」。
+    let dir = md_dir("unknown-split-multi");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "chan-a/tiered"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+
+[[model]]
+prefix = "chan-b/tiered"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let est = p
+        .estimate("chan-a/tiered", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    // A 完整（合并价），按既有规则胜出。
+    let matched = est.matched.as_ref().unwrap();
+    assert_eq!(matched.raw_key, "chan-a/tiered");
+    assert_eq!(matched.reason, "highest_complete_cost");
+    assert!(est.complete);
+    assert!((est.cost - 7.5).abs() < 1e-9);
+    // B 被排除：原因必须是事件缺分档，而不是候选缺价。
+    assert!(matched.incomplete_candidates_excluded >= 1);
+    let warning = est
+        .excluded_candidate_warning
+        .as_deref()
+        .expect("必须披露被排除的候选");
+    assert!(
+        warning.contains("事件缺少 5 分钟/1 小时写入分项"),
+        "原因必须如实写成事件缺分档：{warning}"
+    );
+    assert!(
+        !warning.contains("缺少价格"),
+        "不得把事件缺分档写成候选缺价：{warning}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_tier_unknown_accumulates_overflow_and_missing_total() {
+    // 复核项 8（真实 estimate 路径）：5m 200 万 token 单价合法但金额溢出、
+    // 1h 100 万 token 缺价 → unknown.cache_write 必须累计为 300 万
+    //（不得被后一档覆盖），两档都不计金额。
+    let dir = md_dir("tier-unknown-sum");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 1e308
+"#,
+    );
+    let (p, warnings) = Pricing::load(Some(&toml), None, None);
+    assert!(warnings.is_empty(), "warnings: {warnings:?}");
+    let est = p
+        .estimate("m", &split_counts(3_000_000, 2_000_000, 1_000_000), at())
+        .unwrap();
+    assert!(!est.complete);
+    assert_eq!(
+        est.unknown.cache_write, 3_000_000,
+        "溢出档与缺价档的未计价 token 必须累计"
+    );
+    assert_eq!(est.cost, 0.0, "两档都不得计入金额");
+    use tokenscope::pricing::CostLineKind;
+    let w5 = est
+        .lines
+        .iter()
+        .find(|l| l.kind == CostLineKind::CacheWrite5m)
+        .unwrap();
+    let w1 = est
+        .lines
+        .iter()
+        .find(|l| l.kind == CostLineKind::CacheWrite1h)
+        .unwrap();
+    assert!(w5.overflow && !w5.priced, "5m 档金额溢出");
+    assert!(!w1.priced && w1.unit_price.is_none(), "1h 档缺价");
+    assert_eq!((w5.tokens, w1.tokens), (2_000_000, 1_000_000));
+    assert!(!est.cache_write_split_estimated, "这是未计价不是估算");
     std::fs::remove_dir_all(&dir).ok();
 }

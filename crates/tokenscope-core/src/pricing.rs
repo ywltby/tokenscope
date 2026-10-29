@@ -621,6 +621,12 @@ fn select_segment_in(segments: &[PriceSegment], basis_value: u64) -> Option<&Pri
 /// N18：缓存写分档价走同一层级——第一层**显式声明**分档的层胜出
 /// （段内单档 Unknown 同样算该层声明：缺档由调用方按未知处理，不得
 /// 跨层拼齐两档）；全部层未声明 → None = 分档价未知。
+///
+/// 关键约束：某层**显式改写了写入单价**（`cache_write != Unknown`）却没有
+/// 分档依据时，不得回退到下一层的分档价——写入价结构已变（如高档
+/// input=6、cache_write=9），用基础层 3.75/6.0 的比率计费会伪装成完整。
+/// 该层没有分档依据 → 分档价未知（unpriced），只有该层未改写写入价
+/// （Unknown = 沿用下一层）时才允许回退。
 pub fn effective_rates(
     plan: &PricePlan,
     schedule_prices: Option<&PriceRates>,
@@ -631,6 +637,7 @@ pub fn effective_rates(
     let layer = |seg_v: RateSpec, time_v: RateSpec, base_v: RateSpec| -> RateSpec {
         seg_v.or_explicit(time_v).or_explicit(base_v)
     };
+    let tiers = pick_cache_write_tiers(seg, time, plan.base.cache_write_tiers);
     PriceRates {
         input: layer(
             seg.map(|s| s.input).unwrap_or_default(),
@@ -652,11 +659,28 @@ pub fn effective_rates(
             time.map(|r| r.cache_read).unwrap_or_default(),
             plan.base.cache_read,
         ),
-        cache_write_tiers: seg
-            .and_then(|s| s.cache_write_tiers)
-            .or_else(|| time.and_then(|r| r.cache_write_tiers))
-            .or(plan.base.cache_write_tiers),
+        cache_write_tiers: tiers,
     }
+}
+
+/// N18：逐层取缓存写分档价——显式改写写入单价的层若没有分档依据，
+/// 直接返回 None（不跨层借比率），否则按 seg > time > base 回退。
+fn pick_cache_write_tiers(
+    seg: Option<&PriceRates>,
+    time: Option<&PriceRates>,
+    base: Option<CacheWriteTiers>,
+) -> Option<CacheWriteTiers> {
+    for layer in [seg, time] {
+        let Some(rates) = layer else { continue };
+        if rates.cache_write != RateSpec::Unknown {
+            // 写入价已在本层改写：分档价只认本层依据（None = 未知）。
+            return rates.cache_write_tiers;
+        }
+        if rates.cache_write_tiers.is_some() {
+            return rates.cache_write_tiers;
+        }
+    }
+    base
 }
 
 /// 来源标识（稳定 ID，序列化用；展示层本地化在 GUI）。
@@ -1008,7 +1032,9 @@ fn push_cost_line(
             } else {
                 if tokens > 0 {
                     *complete = false;
-                    *unknown_slot = tokens;
+                    // N18：多档未计价必须受检累计——5m 溢出后再遇 1h 缺价
+                    // 不得用后者覆盖前者；溢出上限按 u64::MAX 保守保留。
+                    *unknown_slot = unknown_slot.checked_add(tokens).unwrap_or(u64::MAX);
                 }
                 lines.push(CostLine {
                     kind,
@@ -1024,7 +1050,7 @@ fn push_cost_line(
         None => {
             if tokens > 0 {
                 *complete = false;
-                *unknown_slot = tokens;
+                *unknown_slot = unknown_slot.checked_add(tokens).unwrap_or(u64::MAX);
             }
             lines.push(CostLine {
                 kind,
@@ -2257,14 +2283,16 @@ impl Pricing {
                         // R06：显式数值非法（NaN/inf/负）→ 拒绝整条候选，
                         // 不得借"降级保留基础价"恢复非法值；分段**结构**错误
                         // 在数值合法的前提下才降级为仅基础价（既有契约）。
+                        // N18：基础层与分段层的显式缓存写分档价同规则。
                         if invalid_rate(&plan.base).is_some()
-                            || plan
-                                .segments
-                                .iter()
-                                .any(|sg| invalid_rate(&sg.prices).is_some())
+                            || rates_tiers_invalid(&plan.base)
+                            || plan.segments.iter().any(|sg| {
+                                invalid_rate(&sg.prices).is_some()
+                                    || rates_tiers_invalid(&sg.prices)
+                            })
                         {
                             diagnostics.push(format!(
-                                "models.dev 条目 {} 存在非法单价（须为有限非负），该条目已拒绝",
+                                "models.dev 条目 {} 存在非法单价（含缓存写分档价；须为有限非负），该条目已拒绝",
                                 e.id
                             ));
                             continue;
@@ -2747,15 +2775,34 @@ impl Pricing {
         //（其他候选的规则排除与本次公式无关，不冒充渠道计数）。
         // 结构化提示：完整候选胜出但有不完整候选被排除——结果不是所有
         // 渠道的严格上界（不完整候选若补价可能更高）。
+        //
+        // N18：被排除的原因必须如实区分——「事件缺少 5m/1h 分项」不是
+        // 「候选缺少价格」。前者是输入数据（事件）缺分档，后者是价格源
+        // 缺价；文案不得互换。
         let excluded_candidate_warning = if excluded > 0 {
             let names = partial_set
                 .iter()
                 .map(|(_, _, pe, _, _)| pe.display.as_str())
                 .collect::<Vec<_>>()
                 .join("、");
-            Some(format!(
-                "有 {excluded} 个候选因缺少价格未参与主估算（{names}）；若其缺失分项有价，实际最高费用可能更高"
-            ))
+            let split_excluded = partial_set
+                .iter()
+                .filter(|(pe, _, _, _, _)| pe.cache_write_split_estimated)
+                .count();
+            let price_excluded = excluded.saturating_sub(split_excluded);
+            if split_excluded > 0 && price_excluded == 0 {
+                Some(format!(
+                    "有 {split_excluded} 个候选提供写入分档价，但事件缺少 5 分钟/1 小时写入分项，未参与主估算（{names}）；实际写费可能更高"
+                ))
+            } else if split_excluded > 0 {
+                Some(format!(
+                    "有 {excluded} 个候选未参与主估算（{names}）：{split_excluded} 个因事件缺少 5 分钟/1 小时写入分项、{price_excluded} 个因缺少价格；实际最高费用可能更高"
+                ))
+            } else {
+                Some(format!(
+                    "有 {excluded} 个候选因缺少价格未参与主估算（{names}）；若其缺失分项有价，实际最高费用可能更高"
+                ))
+            }
         } else {
             None
         };

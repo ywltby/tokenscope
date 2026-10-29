@@ -9,6 +9,7 @@ use tokenscope::history::{EventOrigin, EventWrite, HistoryDb, SourceFileKey, Wri
 use tokenscope::model::{AgentKind, TokenCounts};
 use tokenscope::report::{SummaryOptions, collect_only, summary};
 use tokenscope::source::CollectStats;
+use tokenscope::source::claude_projects::ProjectMapping;
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -83,6 +84,20 @@ fn stored(path: &Path) -> Vec<tokenscope::model::TokenCounts> {
 
 /// 构造一条「旧版本认识」的源文件登记：指纹与真实文件一致、context_revision
 /// 为旧值（规则 1 时代），模拟升级前已采集过的文件。
+/// 与采集层同口径的库内路径键（规范化 + 去 Windows 前缀 + 小写）。
+fn registered_path_key(path: &Path) -> String {
+    let canonical = path.canonicalize().unwrap();
+    let text = canonical.to_string_lossy();
+    let normalized = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        text.into_owned()
+    };
+    normalized.to_lowercase()
+}
+
 fn touch_legacy_source_file(
     history: &HistoryDb,
     app: AgentKind,
@@ -104,8 +119,8 @@ fn touch_legacy_source_file(
         .touch_source_file(&tokenscope::history::SourceFileRecord {
             key: SourceFileKey {
                 app,
-                root: root.display().to_string(),
-                path: file.display().to_string(),
+                root: registered_path_key(root),
+                path: registered_path_key(file),
             },
             fingerprint,
             size_bytes: meta.len(),
@@ -144,8 +159,59 @@ fn n18_legacy_context_revision_forces_reparse_and_backfills_split() {
     let db = dir.join("data").join("history.db");
     std::fs::create_dir_all(dir.join("data")).unwrap();
     let history = HistoryDb::open(&db).unwrap();
-    // 旧版本登记的指纹：context_revision = "1|"（规则 1 时代，无分档解析）。
-    touch_legacy_source_file(&history, AgentKind::ClaudeCode, &root, &file, "1|");
+    // 旧版本（0ae242a）登记的指纹：context_revision 以规则号 3 开头
+    // （真实旧库实测形如 "3|disabled-<hash>"），事件与来源证据的
+    // parser_revision 均为 2。旧解析不读取 cache_creation 分项。
+    touch_legacy_source_file(
+        &history,
+        AgentKind::ClaudeCode,
+        &root,
+        &file,
+        &format!("3|{}", ProjectMapping::disabled().revision()),
+    );
+    // 事件本体也按旧版本写入：先以未知分档写入，再把行版本置 2。
+    history
+        .write_batch(&[EventWrite {
+            event_key: "legacy-n18-k1".into(),
+            app: AgentKind::ClaudeCode,
+            ts: "2026-07-17T08:00:00Z".parse().unwrap(),
+            model_raw: "claude-sonnet-4-5".into(),
+            model_identity: tokenscope::model_identity::ModelIdentity::parse("claude-sonnet-4-5")
+                .identity_key(),
+            session_id: Some("s1".into()),
+            record_id: Some("m1".into()),
+            project_key: Some("proj-a".into()),
+            session_initial_cwd: None,
+            event_cwd: None,
+            tokens: TokenCounts {
+                input: 1000,
+                output: 10,
+                cache_write: 2_000_000,
+                cache_read: 0,
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
+            },
+            precedence: WritePrecedence::NativeLog,
+            observed_at: "2026-07-17T08:00:00Z".parse().unwrap(),
+            aliases: vec![tokenscope::history::EventAlias {
+                app: AgentKind::ClaudeCode,
+                scheme: "claude-message".into(),
+                value: "s1|m1".into(),
+            }],
+            origins: vec![EventOrigin {
+                origin_kind: "native_file".into(),
+                origin_key: "legacy-n18-k1".into(),
+                app: AgentKind::ClaudeCode,
+                import_run_id: None,
+                parser_revision: 2,
+                source_model_raw: None,
+                pricing_model: None,
+                source_cost_usd: None,
+                ts_precision_seconds: false,
+            }],
+        }])
+        .unwrap();
     drop(history);
 
     // 普通采集（refresh = false）：旧 context_revision 失配 → 必须重解析。
@@ -481,4 +547,199 @@ cache_write = 3.75
     // 无来源 → 汇总为零，但价格层必须可用（不报错）。
     assert_eq!(report.totals.requests, 0);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+// ── 项 2（复核）：write_collected_batch 不得把合法 v2 记录当旧记录 ─────
+
+fn mark_event_revision_v2(path: &Path) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute("UPDATE usage_events SET parser_revision=2", [])
+        .unwrap();
+}
+
+#[test]
+fn n18_collected_batch_keeps_valid_v2_single_record_and_adds_new_model() {
+    let dir = temp_dir("collected-v2-single");
+    let db = dir.join("history.db");
+    let h = HistoryDb::open(&db).unwrap();
+    // 旧版（0ae242a）写入的 A：事件行与来源证据的 parser_revision 都是 2。
+    h.write_batch(&[codex_write(
+        "old-a",
+        "2026-07-17T15:00:00Z",
+        "gpt-5.6-sol",
+        "s1",
+        100,
+    )])
+    .unwrap();
+    mark_event_revision_v2(&db);
+    // 新版采集：同会话/同时间/同四桶、不同模型（线程设置归属正确）。
+    let summary = h
+        .write_collected_batch(&[codex_write(
+            "new-b",
+            "2026-07-17T15:00:00Z",
+            "gpt-5.6-luna",
+            "s1",
+            100,
+        )])
+        .unwrap();
+    assert_eq!(summary.events.inserted, 1, "不同模型是另一个合法请求");
+    assert_eq!(summary.models_corrected, 0, "不得把 v2 记录当旧缺陷纠正");
+    assert_eq!(summary.ambiguous_models, 0);
+    let events = h.stored_events().unwrap();
+    assert_eq!(events.len(), 2, "旧 A 与新 B 各自保留");
+    let a = events
+        .iter()
+        .find(|e| e.model_raw == "gpt-5.6-sol")
+        .unwrap();
+    assert_eq!(a.parser_revision, 2, "旧记录版本不得被改写");
+    assert_eq!(a.tokens.input, 100);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_collected_batch_with_existing_v2_ab_records_adds_c_without_failure() {
+    let dir = temp_dir("collected-v2-ab");
+    let db = dir.join("history.db");
+    let h = HistoryDb::open(&db).unwrap();
+    for (key, model) in [("old-a", "gpt-5.6-sol"), ("old-b", "gpt-5.6-luna")] {
+        h.write_batch(&[codex_write(key, "2026-07-17T15:00:00Z", model, "s1", 100)])
+            .unwrap();
+    }
+    mark_event_revision_v2(&db);
+    let summary = h
+        .write_collected_batch(&[codex_write(
+            "new-c",
+            "2026-07-17T15:00:00Z",
+            "gpt-5.6-terra",
+            "s1",
+            100,
+        )])
+        .unwrap();
+    assert_eq!(summary.events.inserted, 1, "第三模型同样新增，不整批失败");
+    assert_eq!(summary.models_corrected, 0);
+    let events = h.stored_events().unwrap();
+    assert_eq!(events.len(), 3);
+    let models: Vec<&str> = events.iter().map(|e| e.model_raw.as_str()).collect();
+    for expected in ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"] {
+        assert!(models.contains(&expected), "{} 必须保留", expected);
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_collected_batch_still_corrects_v1_model_misattribution() {
+    // 对照：v1 行（parser_revision=1）仍按既有规则纠正模型，证明收紧到
+    // <2 没有破坏原修复路径。
+    let dir = temp_dir("collected-v1");
+    let db = dir.join("history.db");
+    let h = HistoryDb::open(&db).unwrap();
+    h.write_batch(&[codex_write(
+        "old-v1",
+        "2026-07-17T15:00:00Z",
+        "gpt-5.6",
+        "s1",
+        100,
+    )])
+    .unwrap();
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE usage_events SET parser_revision=1", [])
+            .unwrap();
+    }
+    let summary = h
+        .write_collected_batch(&[codex_write(
+            "new-v1",
+            "2026-07-17T15:00:00Z",
+            "gpt-5.6-sol",
+            "s1",
+            100,
+        )])
+        .unwrap();
+    assert_eq!(summary.models_corrected, 1, "v1 旧缺陷仍应纠正");
+    let events = h.stored_events().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].model_raw, "gpt-5.6-sol");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ── 项 7（复核）：零缓存写的未知事件与可信事件的顺序无关 ─────────────
+
+fn unknown_event_without_write(input: u64) -> tokenscope::model::UsageEvent {
+    tokenscope::model::UsageEvent {
+        ts: "2026-07-17T08:00:00Z".parse().unwrap(),
+        agent: AgentKind::ClaudeCode,
+        model: "m".into(),
+        session_id: "s".into(),
+        project: "p".into(),
+        session_initial_cwd: None,
+        event_cwd: None,
+        record_id: "r".into(),
+        line: 0,
+        source_path: String::new(),
+        input_tokens: input,
+        output_tokens: 1,
+        cache_write_tokens: 0,
+        cache_read_tokens: 1,
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
+    }
+}
+
+fn known_event_with_write() -> tokenscope::model::UsageEvent {
+    tokenscope::model::UsageEvent {
+        cache_write_tokens: 10,
+        cache_write_5m: 4,
+        cache_write_1h: 6,
+        cache_write_split_known: true,
+        ..unknown_event_without_write(0)
+    }
+}
+
+#[test]
+fn n18_zero_write_unknown_event_contaminates_in_both_orders() {
+    // add_event：未知（零写、其他 token 非零）→ 已知 与 已知 → 未知
+    // 两种顺序都必须整体未知，且分项不重复计入总量。
+    for unknown_first in [true, false] {
+        let mut acc = TokenCounts::default();
+        if unknown_first {
+            acc.add_event(&unknown_event_without_write(7));
+            acc.add_event(&known_event_with_write());
+        } else {
+            acc.add_event(&known_event_with_write());
+            acc.add_event(&unknown_event_without_write(7));
+        }
+        assert!(
+            !acc.cache_write_split_known,
+            "顺序 unknown_first={unknown_first}：零写未知事件必须污染可信标志"
+        );
+        assert_eq!(
+            (acc.cache_write, acc.cache_write_5m, acc.cache_write_1h),
+            (10, 4, 6)
+        );
+        assert_eq!(acc.total(), 7 + 1 + 1 + 10 + 1 + 1, "分项不重复计入总量");
+
+        // add：与 add_event 同语义。
+        let mut via_add = TokenCounts::default();
+        let unknown = TokenCounts::from_event(&unknown_event_without_write(7));
+        let known = TokenCounts::from_event(&known_event_with_write());
+        if unknown_first {
+            via_add.add(&unknown);
+            via_add.add(&known);
+        } else {
+            via_add.add(&known);
+            via_add.add(&unknown);
+        }
+        assert!(!via_add.cache_write_split_known);
+        assert_eq!(via_add, acc, "add 与 add_event 结果一致");
+
+        // checked_add：同语义，且受检累计保持值。
+        let sum = if unknown_first {
+            unknown.checked_add(&known).unwrap()
+        } else {
+            known.checked_add(&unknown).unwrap()
+        };
+        assert!(!sum.cache_write_split_known);
+        assert_eq!(sum, acc, "checked_add 与 add/add_event 一致");
+    }
 }

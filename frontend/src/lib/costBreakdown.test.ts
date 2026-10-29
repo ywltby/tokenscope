@@ -489,6 +489,9 @@ describe("N18 estimated vs unpriced wording", () => {
     expect(text).toContain("写入分档未知");
     expect(text).toContain("按写入总量单价估算");
     expect(text).toContain("估算合计 $7.50");
+    // 复核项 6：纯估算没有未计价 token——不得出现未计价说明或提示。
+    expect(text).not.toContain("未计价");
+    expect(text).not.toContain("缺价 ≠ 免费");
   });
 
   it("未计价：只有「未计价」行，不出现「写入分档未知」", () => {

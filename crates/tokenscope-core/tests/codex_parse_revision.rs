@@ -18,7 +18,9 @@ use tokenscope::history::{
 use tokenscope::import::ccs::{self, CcsSource};
 use tokenscope::model::{AgentKind, TokenCounts, UsageEvent};
 use tokenscope::model_identity::ModelIdentity;
-use tokenscope::report::{CollectedView, SummaryOptions, collect_all_with_sources_for_test};
+use tokenscope::report::{
+    CollectedView, PARSE_RULES_REVISION, SummaryOptions, collect_all_with_sources_for_test,
+};
 use tokenscope::source::codex::CodexSource;
 use tokenscope::source::{CollectStats, DirVisitLedger, FileParse, Source};
 
@@ -450,7 +452,10 @@ fn v2_fingerprint_reparses_unchanged_codex_file_once_and_keeps_old_fact() {
     assert_eq!(upgraded.fingerprint, old_source.fingerprint);
     assert_eq!(upgraded.size_bytes, old_source.size_bytes);
     assert_eq!(upgraded.mtime_ms, old_source.mtime_ms);
-    assert_eq!(upgraded.context_revision, "3|");
+    assert_eq!(
+        upgraded.context_revision,
+        format!("{PARSE_RULES_REVISION}|")
+    );
     assert_eq!(upgraded.state, "present");
     assert_eq!(upgraded.stats.events, 2);
     assert_eq!(upgraded.observations, old_source.observations + 1);

@@ -313,10 +313,12 @@ fn push_event_into(
         g.tokens = new_tokens;
         g.unknown_tokens = new_unknown;
         g.cost_usd = new_cost;
-        // unknown_pricing 是组内累积标记：任一事件部分计价/无价即置位，
-        // 后续完整计价的事件不得清掉它。
+        // unknown_pricing 是组内累积标记：只有**实际存在未计价 token** 或
+        // 无价模型才置位。N18：「按合并价估算」虽然 complete=false，但
+        // unknown token 为 0、金额来自真实单价，不得触发「含未计价 token」。
+        // 后续完整计价的事件不得清掉已置位的标记。
         g.unknown_pricing = match &estimate {
-            Some(est) => g.unknown_pricing || !est.complete,
+            Some(est) => g.unknown_pricing || est.unknown.total() > 0,
             None => true,
         };
         if RECORD_AGENTS && !g.agents.contains(&e.agent.as_str()) {

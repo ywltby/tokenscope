@@ -277,7 +277,14 @@ impl TokenCounts {
         self.input + self.cache_write + self.cache_read
     }
 
+    /// 是否尚未累计任何 token（全零）。用于分档可信标志的「首条定值、
+    /// 其后 AND」：只有真正的空累计才允许被下一条的已知性覆盖。
+    fn is_empty_counts(&self) -> bool {
+        self.input == 0 && self.output == 0 && self.cache_write == 0 && self.cache_read == 0
+    }
+
     pub fn add_event(&mut self, e: &UsageEvent) {
+        let was_empty = self.is_empty_counts();
         self.input += e.input_tokens;
         self.output += e.output_tokens;
         self.cache_write += e.cache_write_tokens;
@@ -287,8 +294,9 @@ impl TokenCounts {
         // 分档可信度是逐事件的属性：总量口径上只要有一个未知分档事件，
         // 聚合就整体退回「分项未知」（不假装聚合结果仍可分档计价）。
         // 首条事件决定初值（空累计必须保持「未知」，不得因默认 false 把
-        // 全可信累加成未知）；其后逐条 AND。
-        if self.cache_write == e.cache_write_tokens {
+        // 全可信累加成未知）；其后逐条 AND。判空必须看全部四桶——零缓存写
+        // 但其他 token 非零的未知事件同样会污染可信标志，且顺序无关。
+        if was_empty {
             self.cache_write_split_known = e.cache_write_split_known;
         } else {
             self.cache_write_split_known &= e.cache_write_split_known;
@@ -296,13 +304,14 @@ impl TokenCounts {
     }
 
     pub fn add(&mut self, other: &TokenCounts) {
+        let was_empty = self.is_empty_counts();
         self.input += other.input;
         self.output += other.output;
         self.cache_write += other.cache_write;
         self.cache_read += other.cache_read;
         self.cache_write_5m += other.cache_write_5m;
         self.cache_write_1h += other.cache_write_1h;
-        if self.cache_write == other.cache_write {
+        if was_empty {
             self.cache_write_split_known = other.cache_write_split_known;
         } else {
             self.cache_write_split_known &= other.cache_write_split_known;
@@ -316,12 +325,13 @@ impl TokenCounts {
     /// SF08：受检累加——任一桶溢出返回 None（聚合层据此整体报错，
     /// 不回绕、不饱和、不做部分提交）。
     /// N18：分档可信度按「首条定值、其后 AND」与 `add` 一致——空侧
-    /// （默认未知）不把全可信结果拖成未知。
+    /// （全零）不把全可信结果拖成未知。判空看全部四桶：零缓存写但其他
+    /// token 非零的未知侧同样会污染可信标志。
     pub fn checked_add(&self, other: &TokenCounts) -> Option<TokenCounts> {
         let cache_write = self.cache_write.checked_add(other.cache_write)?;
-        let split_known = if self.cache_write == 0 {
+        let split_known = if self.is_empty_counts() {
             other.cache_write_split_known
-        } else if other.cache_write == 0 {
+        } else if other.is_empty_counts() {
             self.cache_write_split_known
         } else {
             self.cache_write_split_known && other.cache_write_split_known

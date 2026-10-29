@@ -633,7 +633,10 @@ static COLLECT_SERIAL: Mutex<()> = Mutex::new(());
 /// 别名"且观察时间改用事件时间，旧实现登记的指纹不再代表当前解析结果；
 /// 重解析让别名补进库内、被旧实现回退的终值按"事件时间更晚者胜出"恢复。
 /// v3：补回 Codex 的压缩请求，并应用线程设置模型；文件未变也须重新解析。
-pub const PARSE_RULES_REVISION: u32 = 3;
+/// v4（N18）：解析 Claude `cache_creation` 的 5 分钟 / 1 小时写入分项——
+/// v3 及更早登记的指纹（`3|…`）代表"未读取分项"的旧解析结果，必须失配
+/// 重解析一次才能给同一事件补齐分档（源日志未变也不得跳过）。
+pub const PARSE_RULES_REVISION: u32 = 4;
 /// 观测：当前正在跑的采集管线数与历史峰值（测试断言"不同参数不并行"）。
 static COLLECT_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 static COLLECT_MAX_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
@@ -4590,6 +4593,136 @@ cache_read = 0.0
         assert_eq!(phases, vec!["running", "succeeded"]);
         assert_eq!(tracker.snapshot().run_id, 1, "跟随者不得推进 run_id");
         std::fs::remove_dir_all(&dir).ok();
+    }
+    #[test]
+    fn n18_estimate_only_reports_no_unknown_tokens_and_mixed_separates_them() {
+        // 复核项 6：真实计价结果贯穿汇总与明细 DTO。
+        // (a) 纯估算（事件缺分档、候选有分档）：unknown token = 0，
+        //     汇总不得声称「含未计价 token」。
+        // (b) 真缺价（事件有分档、候选无分档）：unknown = 写总量。
+        // (c) 两者混合：金额与 unknown 各自正确。
+        let dir = tmp_dir("n18-est-unknown");
+        let proj = dir.join("proj-n18u");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess-n18u.jsonl"),
+            concat!(
+                // 估算：无 cache_creation 分项。
+                r#"{"type":"assistant","timestamp":"2026-01-05T15:00:00.000Z","sessionId":"s-u","isSidechain":false,"message":{"id":"msg-est","model":"tiered","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":2000000,"cache_read_input_tokens":0}}}"#,
+                "\n",
+                // 真缺价：分档齐全但模型无分档价。
+                r#"{"type":"assistant","timestamp":"2026-01-05T13:00:00.000Z","sessionId":"s-u","isSidechain":false,"message":{"id":"msg-unp","model":"no-tier","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":2000000,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":1000000,"ephemeral_1h_input_tokens":1000000}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let toml = dir.join("pricing.toml");
+        std::fs::write(
+            &toml,
+            r#"[[model]]
+prefix = "tiered"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model]]
+prefix = "no-tier"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+"#,
+        )
+        .unwrap();
+        let cache = dir.join("cache");
+        let opts = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
+            by: GroupBy::Day,
+            claude_dir: Some(dir.clone()),
+            codex_dir: Some(PathBuf::from("Z:/no-such-codex")),
+            cache_dir: Some(cache.clone()),
+            pricing_index: Some(cache.join("pricing-index.json")),
+            pricing_path: Some(toml),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/or.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/md.json")),
+            tz: Some("UTC".to_string()),
+            refresh: true,
+            ..Default::default()
+        };
+        let filter = EventFilter::default();
+        let list = list_events(&opts, &filter).unwrap();
+        assert_eq!(list.rows.len(), 2);
+        let est = list.rows.iter().find(|r| r.model == "tiered").unwrap();
+        let unp = list.rows.iter().find(|r| r.model == "no-tier").unwrap();
+        let bde = est.cost_breakdown.as_ref().unwrap();
+        assert!(bde.cache_write_split_estimated, "估算必须标示");
+        assert!(!bde.complete, "估算不是完整精确费用");
+        assert_eq!(bde.unknown.total(), 0, "估算不产生未计价 token");
+        assert!((bde.cost_usd - 7.5).abs() < 1e-9);
+        let bdu = unp.cost_breakdown.as_ref().unwrap();
+        assert!(!bdu.cache_write_split_estimated, "真缺价不是估算");
+        assert_eq!(bdu.unknown.cache_write, 2_000_000);
+        assert_eq!(bdu.cost_usd, 0.0);
+        let report = summary(&opts).unwrap();
+        assert!((report.totals.cost_usd - 7.5).abs() < 1e-9);
+        assert_eq!(
+            report.totals.unknown_tokens.cache_write, 2_000_000,
+            "汇总 unknown 只含真缺价的写 token"
+        );
+        assert!(report.totals.unknown_pricing, "混合场景必须提示未计价");
+        std::fs::remove_dir_all(&dir).ok();
+
+        // 纯估算单独汇总：unknown = 0 且不得置位 unknown_pricing。
+        let dir2 = tmp_dir("n18-est-only");
+        let proj2 = dir2.join("proj-n18e");
+        std::fs::create_dir_all(&proj2).unwrap();
+        std::fs::write(
+            proj2.join("sess.jsonl"),
+            concat!(
+                r#"{"type":"assistant","timestamp":"2026-01-05T15:00:00.000Z","sessionId":"s-e","isSidechain":false,"message":{"id":"msg-est2","model":"tiered","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":2000000,"cache_read_input_tokens":0}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let toml2 = dir2.join("pricing.toml");
+        std::fs::write(
+            &toml2,
+            r#"[[model]]
+prefix = "tiered"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+"#,
+        )
+        .unwrap();
+        let cache2 = dir2.join("cache");
+        let opts2 = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
+            by: GroupBy::Day,
+            claude_dir: Some(dir2.clone()),
+            codex_dir: Some(PathBuf::from("Z:/no-such-codex")),
+            cache_dir: Some(cache2.clone()),
+            pricing_index: Some(cache2.join("pricing-index.json")),
+            pricing_path: Some(toml2),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/or.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/md.json")),
+            tz: Some("UTC".to_string()),
+            refresh: true,
+            ..Default::default()
+        };
+        let report2 = summary(&opts2).unwrap();
+        assert!((report2.totals.cost_usd - 7.5).abs() < 1e-9);
+        assert_eq!(report2.totals.unknown_tokens.total(), 0);
+        assert!(
+            !report2.totals.unknown_pricing,
+            "纯估算不得显示「含未计价 token」"
+        );
+        std::fs::remove_dir_all(&dir2).ok();
     }
 }
 

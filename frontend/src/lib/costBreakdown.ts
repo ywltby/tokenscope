@@ -139,7 +139,10 @@ function resultRows(bd: EventCostBreakdown): BreakdownRow[] {
       unknown: true,
     });
   }
-  if (!bd.complete) {
+  // 只有**实际存在未计价 token** 才显示未计价说明：「按合并价估算」虽然
+  // complete=false，但 unknown token 为 0、金额来自真实单价，不得声称
+  // 含未计价 token（复核项 6）。
+  if (unpriced.length > 0) {
     rows.push({
       label: "未计价",
       detail: "缺价 ≠ 免费：未计价 token 不计入合计，数量见上方各行",
