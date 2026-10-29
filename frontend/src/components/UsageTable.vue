@@ -88,7 +88,22 @@ const columns = computed<DataTableColumn[]>(() => {
           ? "未知†"
           : formatMoney(g.cost_usd, "summary") + (g.unknown_pricing ? "†" : "");
         // 未知标记用警告色显式呈现，不用 opacity 压低（DESIGN.md §1）
-        return h("span", { style: g.unknown_pricing ? "color: var(--ts-warning)" : "" }, text);
+        // N18：分档估算组追加可访问的「分档估算」标记——与未计价†独立，
+        // 让估算组、完整组、未计价组在费用列即可区分。
+        const children: (string | ReturnType<typeof h>)[] = [text];
+        if (g.cache_write_split_estimated && !unknownOnly) {
+          children.push(
+            h(
+              "span",
+              {
+                class: "ts-pill ts-pill-warning",
+                title: "该组含缺少 5 分钟/1 小时写入分项的请求，写费按合并价估算（非完整精确费用）",
+              },
+              "分档估算",
+            ),
+          );
+        }
+        return h("span", { style: g.unknown_pricing ? "color: var(--ts-warning)" : "" }, children);
       },
     },
   ];

@@ -196,3 +196,69 @@ describe("UsageTable 合计行字重（UX01）", () => {
     expect(src).not.toMatch(/\.total-row strong\s*\{/);
   });
 });
+
+// N18 复核项 2：分组费用列必须消费每组 cache_write_split_estimated，
+// 让估算组、完整组、真正未计价组可区分（真实组件渲染 + 可访问文本）。
+describe("N18 分组费用列的分档估算标记", () => {
+  function exposed(w: ReturnType<typeof mount>) {
+    return w.vm as unknown as {
+      columns: {
+        key: string;
+        render?: (row: object) => unknown;
+      }[];
+    };
+  }
+  function costText(group: Group, totalsUnknown: boolean): string {
+    const w = mount(UsageTable, { props: { report: report([group], totalsUnknown) } });
+    const cols = exposed(w).columns;
+    const cost = cols.find((x) => x.key === "cost_usd");
+    const vnode = cost!.render!(group) as { children?: unknown };
+    // render 返回 h() 的 vnode：取文本内容（字符串或 children 数组）
+    const c = vnode as { children?: unknown; props?: { innerHTML?: string } };
+    if (typeof c.children === "string") return c.children;
+    if (Array.isArray(c.children)) {
+      return (c.children as unknown[])
+        .map((x) =>
+          typeof x === "string" ? x : String((x as { children?: string })?.children ?? ""),
+        )
+        .join("");
+    }
+    return String(c.children ?? "");
+  }
+
+  it("估算组费用旁出现可访问的「分档估算」标记，完整组不出现", () => {
+    const estimated = group("g-est");
+    estimated.cost_usd = 7.5;
+    estimated.cache_write_split_estimated = true;
+    const complete = group("g-complete");
+    complete.cost_usd = 7.5;
+    complete.cache_write_split_estimated = false;
+    const estText = costText(estimated, false);
+    const completeText = costText(complete, false);
+    expect(estText).toContain("$7.50");
+    expect(estText).toContain("分档估算");
+    expect(completeText).toContain("$7.50");
+    expect(completeText).not.toContain("分档估算");
+  });
+
+  it("真正未计价组仍显示未知†，不冒充分档估算", () => {
+    const unpriced = group("g-unpriced", { cache_write: 2_000_000 });
+    unpriced.cost_usd = 0;
+    const text = costText(unpriced, true);
+    expect(text).toContain("未知†");
+    expect(text).not.toContain("分档估算");
+  });
+
+  it("混合组（估算 + 未计价）两个标记同时出现", () => {
+    const mixed = group("g-mixed", { cache_write: 1_000_000 });
+    mixed.cost_usd = 3.75;
+    mixed.unknown_pricing = true;
+    mixed.cache_write_split_estimated = true;
+    const text = costText(mixed, true);
+    // 费用 > 0 时未知只以 † 后缀标注（未知数量在“未知†”列）；分档估算
+    // 标记独立出现——两种状态在同组可并存且可区分。
+    expect(text).toContain("†");
+    expect(text).toContain("分档估算");
+    expect(text).toContain("$3.75");
+  });
+});

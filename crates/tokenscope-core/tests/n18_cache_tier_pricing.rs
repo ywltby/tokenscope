@@ -1347,3 +1347,157 @@ cache_write_1h = 6.0
     assert_eq!(est.cost, 0.0);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ── N18 六轮（复核项 1）：阻断与未声明必须区分 ───────────────────────
+// 上层显式改写写入价、下层分档价被阻断时，事件分档未知仍应按该层合并
+// 写价估算并标不完整；整个候选从未声明分档价才保持既有兼容口径。
+
+#[test]
+fn n18_blocked_period_tiers_estimate_at_merged_price() {
+    // period 显式 cache_write=9，schedule 分档 3.75/6 被阻断。
+    // 事件分档未知：按合并价估算 $18、不完整；事件分档已知：200 万未计价。
+    let dir = tiered_dir("blocked-period");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "23:59"
+cache_write = 9.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let unknown = p
+        .estimate("m", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!(
+        (unknown.cost - 18.0).abs() < 1e-9,
+        "按 period 合并价估算应为 $18，实际 {}",
+        unknown.cost
+    );
+    assert!(!unknown.complete, "估算必须标不完整");
+    assert!(unknown.cache_write_split_estimated, "阻断情形必须标估算");
+    assert_eq!(unknown.unknown.cache_write, 0, "估算没有未计价 token");
+    let known = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    assert!(!known.complete);
+    assert_eq!(
+        known.unknown.cache_write, 2_000_000,
+        "分档已知但分档价被阻断 → 未计价"
+    );
+    assert!(!known.cache_write_split_estimated);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_blocked_schedule_tiers_estimate_at_merged_price() {
+    // schedule 显式 cache_write=9（无 period、无分档），基础分档被阻断。
+    let dir = tiered_dir("blocked-schedule");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+cache_write = 9.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let unknown = p
+        .estimate("m", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!((unknown.cost - 18.0).abs() < 1e-9, "实际 {}", unknown.cost);
+    assert!(!unknown.complete);
+    assert!(unknown.cache_write_split_estimated);
+    let known = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    assert_eq!(known.unknown.cache_write, 2_000_000);
+    assert!(!known.complete);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_blocked_segment_tiers_estimate_at_merged_price() {
+    // 计划分段显式 cache_write=9，基础分档被阻断。
+    let dir = tiered_dir("blocked-segment");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.segment]]
+label = ">200K"
+min_tokens = 200_000
+input = 6.0
+cache_write = 9.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let unknown = p
+        .estimate("m", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!((unknown.cost - 18.0).abs() < 1e-9, "实际 {}", unknown.cost);
+    assert!(!unknown.complete);
+    assert!(unknown.cache_write_split_estimated);
+    let known = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    assert_eq!(known.unknown.cache_write, 2_000_000);
+    assert!(!known.complete);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_undeclared_candidate_split_unknown_keeps_existing_compat() {
+    // 对照：整个候选从未声明分档价（也不改写写入价）→ 事件分档未知时
+    // 保持既有兼容口径：按合并价计 complete=true、无估算标志。
+    let dir = tiered_dir("undeclared-compat");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 9.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let unknown = p
+        .estimate("m", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!(unknown.complete, "未声明分档保持既有兼容口径");
+    assert!(!unknown.cache_write_split_estimated);
+    assert!((unknown.cost - 18.0).abs() < 1e-9);
+    std::fs::remove_dir_all(&dir).ok();
+}

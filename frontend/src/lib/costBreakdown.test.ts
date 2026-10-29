@@ -583,3 +583,45 @@ describe("N18 partial reason wording", () => {
     expect(text).toContain("写入分档未知");
   });
 });
+
+// N18 复核项 3：选择说明只按所选候选的已知事实描述；其他候选为何不完整
+// 由后端排除披露逐条说明，不得一律归因为事件缺分档。
+describe("N18 selection wording attributes only the selected candidate", () => {
+  const base = bd({
+    lines: [
+      { kind: "input", tokens: 0, unit_price: 3, subtotal: 0, priced: true },
+      { kind: "output", tokens: 0, unit_price: 15, subtotal: 0, priced: true },
+      { kind: "cache_write", tokens: 2_000_000, unit_price: 9, subtotal: 18, priced: true },
+      { kind: "cache_read", tokens: 0, unit_price: 0.3, subtotal: 0, priced: true },
+    ],
+    cost_usd: 18,
+    complete: false,
+    cache_write_split_estimated: true,
+    unknown: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+  });
+  base.matched.reason = "highest_partial_cost";
+
+  it("选择说明只描述所选候选（事件缺分档、按合并价估算）", () => {
+    const text = formatCostBreakdownText(base);
+    expect(text).toContain("所选候选因事件缺写入分档，写费按合并价估算");
+    expect(text).not.toContain("均不完整，因事件缺写入分档");
+  });
+
+  it("其他候选缺输入价的原因由后端披露原文呈现，不被改写", () => {
+    const withWarning = {
+      ...base,
+      excluded_candidate_warning:
+        "有 1 个候选因缺少价格未参与主估算（chan-b/cheap）；若其缺失分项有价，实际最高费用可能更高",
+    } as typeof base;
+    const text = formatCostBreakdownText(withWarning);
+    // 选择说明只描述所选候选。
+    expect(text).toContain("所选候选因事件缺写入分档");
+    // 后端披露原文原样保留（B 缺价的事实不被吞掉也不被归因为事件缺分档）。
+    expect(text).toContain("有 1 个候选因缺少价格未参与主估算（chan-b/cheap）");
+  });
+
+  it("纯估算的胜出结果仍不声称自身含未计价 token", () => {
+    const text = formatCostBreakdownText(base);
+    expect(text).not.toContain("未计价");
+  });
+});

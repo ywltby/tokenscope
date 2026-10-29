@@ -620,67 +620,116 @@ fn select_segment_in(segments: &[PriceSegment], basis_value: u64) -> Option<&Pri
 ///
 /// N18：缓存写分档价走同一层级——第一层**显式声明**分档的层胜出
 /// （段内单档 Unknown 同样算该层声明：缺档由调用方按未知处理，不得
-/// 跨层拼齐两档）；全部层未声明 → None = 分档价未知。
+/// 跨层拼齐两档）；全部层未声明 → `Undeclared`。
 ///
 /// 关键约束：某层**显式改写了写入单价**（`cache_write != Unknown`）却没有
 /// 分档依据时，不得回退到下一层的分档价——写入价结构已变（如高档
 /// input=6、cache_write=9），用基础层 3.75/6.0 的比率计费会伪装成完整。
-/// 该层没有分档依据 → 分档价未知（unpriced），只有该层未改写写入价
+/// 该层没有分档依据 → `BlockedByWriteOverride`；只有该层未改写写入价
 /// （Unknown = 沿用下一层）时才允许回退。
 pub fn effective_rates(
     plan: &PricePlan,
     schedule_prices: Option<&PriceRates>,
     selected: Option<&PriceSegment>,
-) -> PriceRates {
+) -> EffectiveRates {
     let seg = selected.map(|s| &s.prices);
     let time = schedule_prices;
     let layer = |seg_v: RateSpec, time_v: RateSpec, base_v: RateSpec| -> RateSpec {
         seg_v.or_explicit(time_v).or_explicit(base_v)
     };
     let tiers = pick_cache_write_tiers(seg, time, plan.base.cache_write_tiers);
-    PriceRates {
-        input: layer(
-            seg.map(|s| s.input).unwrap_or_default(),
-            time.map(|r| r.input).unwrap_or_default(),
-            plan.base.input,
-        ),
-        output: layer(
-            seg.map(|s| s.output).unwrap_or_default(),
-            time.map(|r| r.output).unwrap_or_default(),
-            plan.base.output,
-        ),
-        cache_write: layer(
-            seg.map(|s| s.cache_write).unwrap_or_default(),
-            time.map(|r| r.cache_write).unwrap_or_default(),
-            plan.base.cache_write,
-        ),
-        cache_read: layer(
-            seg.map(|s| s.cache_read).unwrap_or_default(),
-            time.map(|r| r.cache_read).unwrap_or_default(),
-            plan.base.cache_read,
-        ),
-        cache_write_tiers: tiers,
+    EffectiveRates {
+        rates: PriceRates {
+            input: layer(
+                seg.map(|s| s.input).unwrap_or_default(),
+                time.map(|r| r.input).unwrap_or_default(),
+                plan.base.input,
+            ),
+            output: layer(
+                seg.map(|s| s.output).unwrap_or_default(),
+                time.map(|r| r.output).unwrap_or_default(),
+                plan.base.output,
+            ),
+            cache_write: layer(
+                seg.map(|s| s.cache_write).unwrap_or_default(),
+                time.map(|r| r.cache_write).unwrap_or_default(),
+                plan.base.cache_write,
+            ),
+            cache_read: layer(
+                seg.map(|s| s.cache_read).unwrap_or_default(),
+                time.map(|r| r.cache_read).unwrap_or_default(),
+                plan.base.cache_read,
+            ),
+            cache_write_tiers: tiers.declared_tiers(),
+        },
+        tiers,
+    }
+}
+
+/// N18：`effective_rates` 的返回体——四类单价 + 分档价解析结果。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectiveRates {
+    pub rates: PriceRates,
+    pub tiers: TierResolution,
+}
+
+/// N18：缓存写分档价的解析结果——**必须区分**「上层改写写入价后阻断了
+/// 分档价」与「整个候选从未声明分档价」：前者说明该层给出了自己的写入
+/// 单价（事件分档未知时仍可按它估算并标记不完整），后者只是沿用候选
+/// 既有合并价口径（保持既有兼容：complete=true、无估算标志）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TierResolution {
+    /// 某层显式声明了分档价（`Some` 两档齐全或层内缺档 = Unknown 档）。
+    Declared(Option<CacheWriteTiers>),
+    /// 某层显式改写了写入单价但没有分档依据——分档价未知，但该层的
+    /// 合并写入价本身就是有效估算依据。
+    BlockedByWriteOverride,
+    /// 全部层都未声明分档价。
+    Undeclared,
+}
+
+impl TierResolution {
+    pub fn declared_tiers(&self) -> Option<CacheWriteTiers> {
+        match self {
+            TierResolution::Declared(t) => *t,
+            _ => None,
+        }
+    }
+
+    /// 事件分档未知时，合并写价是否构成「按合并价估算」的依据：
+    /// 只要候选曾经声明过分档价（含被上层阻断的情形）就算；从未声明
+    /// 则保持既有兼容口径（不标估算）。
+    pub fn supports_merged_price_estimate(&self) -> bool {
+        !matches!(self, TierResolution::Undeclared)
     }
 }
 
 /// N18：逐层取缓存写分档价——显式改写写入单价的层若没有分档依据，
-/// 直接返回 None（不跨层借比率），否则按 seg > time > base 回退。
+/// 返回 `BlockedByWriteOverride`（不跨层借比率），否则按 seg > time > base
+/// 取第一层显式声明；全部层未声明 → `Undeclared`。
 fn pick_cache_write_tiers(
     seg: Option<&PriceRates>,
     time: Option<&PriceRates>,
     base: Option<CacheWriteTiers>,
-) -> Option<CacheWriteTiers> {
+) -> TierResolution {
     for layer in [seg, time] {
         let Some(rates) = layer else { continue };
         if rates.cache_write != RateSpec::Unknown {
-            // 写入价已在本层改写：分档价只认本层依据（None = 未知）。
-            return rates.cache_write_tiers;
+            // 写入价已在本层改写：分档价只认本层依据；没有就是「阻断」，
+            // 不得回退下层（写入价结构已变，下层比率不再适用）。
+            return match rates.cache_write_tiers {
+                Some(t) => TierResolution::Declared(Some(t)),
+                None => TierResolution::BlockedByWriteOverride,
+            };
         }
         if rates.cache_write_tiers.is_some() {
-            return rates.cache_write_tiers;
+            return TierResolution::Declared(rates.cache_write_tiers);
         }
     }
-    base
+    match base {
+        Some(t) => TierResolution::Declared(Some(t)),
+        None => TierResolution::Undeclared,
+    }
 }
 
 /// 来源标识（稳定 ID，序列化用；展示层本地化在 GUI）。
@@ -865,7 +914,8 @@ fn estimate_entry(
         }
         None => (select_segment(plan, basis_value), None),
     };
-    let rates = effective_rates(plan, time_prices.as_ref(), selected);
+    let effective = effective_rates(plan, time_prices.as_ref(), selected);
+    let rates = effective.rates;
     // Task 5：逐分项生成明细行；cost 为各行小计之和（顺序固定，确定性的
     // 浮点求和）。未知分项仅在实际产生 token 时才标记不完整——零 token
     // 的未知分项不影响完整性（不变量 5）。
@@ -891,7 +941,12 @@ fn estimate_entry(
     // 输出合并行；可信分档但候选没有可用分档价 → 写入整体按未知（不猜
     // 档、不用总单价冒充）；分档未知 + 候选声明分档价 → 写入按总量单价
     // 估算并标示（complete=false，cache_write_split_estimated=true）。
-    let tiers = rates.cache_write_tiers;
+    // 复核六轮：分档价的「解析结果」区分声明/阻断/未声明——
+    // - 声明（含上层未改写时的继承）→ 按两档计价（缺档进 unknown）；
+    // - 阻断（上层改写写入价但无分档依据）或未声明 → 合并行；事件分档
+    //   未知且合并写价实际计入金额时，按合并价估算并标示；未声明保持
+    //   既有兼容口径（complete=true、无估算标志）。
+    let tiers = effective.tiers.declared_tiers();
     let five_price = tiers.map(|tw| tw.five_min).map(|s| resolve(s, false));
     let one_price = tiers.map(|tw| tw.one_hour).map(|s| resolve(s, false));
     let split_known = t.cache_write_split_known && t.cache_write > 0;
@@ -973,11 +1028,12 @@ fn estimate_entry(
             wk,
             &mut unknown.cache_write,
         );
-        // 候选声明了分档价而事件分档未知：**只有合并写价确实计入金额**
-        // 才是「按合并价估算」。合并写价缺失或金额溢出时写 token 是未计价，
-        // 不得声称已估算（unknown>0、split_estimated=false）。
+        // 候选声明过分档价（声明或被上层阻断）而事件分档未知：**只有合并
+        // 写价确实计入金额**才是「按合并价估算」。合并写价缺失或金额溢出
+        // 时写 token 是未计价，不得声称已估算（unknown>0、标志=false）。
         // 合并价显式 0 是合法正例：priced=true、估算成立、金额为 0。
-        if tiers.is_some() && t.cache_write > 0 && write_priced {
+        // 整个候选从未声明分档价 → 保持既有兼容口径（complete=true、无标志）。
+        if effective.tiers.supports_merged_price_estimate() && t.cache_write > 0 && write_priced {
             split_estimated = true;
             complete = false;
         }
@@ -3628,7 +3684,7 @@ mod tests {
             }],
         };
         let seg = select_segment(&plan, 300_000).unwrap();
-        let r = effective_rates(&plan, None, Some(seg));
+        let r = effective_rates(&plan, None, Some(seg)).rates;
         assert_eq!(r.input, Some(6.0));
         assert_eq!(r.output, Some(15.0), "分段缺 output → 沿用基础");
         assert_eq!(r.cache_write, Some(0.0), "显式 0 不回退");
@@ -3643,7 +3699,7 @@ mod tests {
             segments: vec![],
             ..Default::default()
         };
-        let r2 = effective_rates(&plan2, None, None);
+        let r2 = effective_rates(&plan2, None, None).rates;
         assert_eq!(r2.input, Some(3.0));
         assert_eq!(r2.output, None, "无基础价 → unknown");
     }
