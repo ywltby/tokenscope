@@ -21,10 +21,21 @@
 //!   `codex_dir` 的默认根语义，默认根（`~/.claude` 等）不会被咨询；
 //!   `claude_mapping: None` 不读真实 `~/.claude.json`；其余 dir 类字段
 //!   全部指向隔离目录内的不存在路径，即使未来回归到 dir 语义也不会
-//!   意外落在真实用户目录；
-//! - 运行前后对真实 `~/.tokenscope` 取指纹（文件数 + 总字节数）：必须
-//!   不变，本机无该目录则必须始终不存在（本测试绝不新建它）；
-//! - 请求数必须精确等于合成规模——真实来源若被意外读取，计数必然超出。
+//!   意外落在真实用户目录（测试内另断言全部来源根位于隔离目录内）。
+//!
+//! 证据边界（复核收窄，如实标注——观察范围之外的部分为**未证明**）：
+//! - 写侧：运行前后对真实 `~/.tokenscope` 取指纹且必须不变（本机无该
+//!   目录则必须始终不存在，本测试绝不新建它）。指纹只比较**文件数与
+//!   总字节数**——同长度的内容改写不可检测（敏感性用例
+//!   `ac09_fingerprint_scope_and_blind_spot` 已在合成目录钉住该边界）；
+//!   「逐字节零写入」未证明。
+//! - 读侧：请求数精确等于合成规模、四桶与期望公式吻合、按项目分组恰
+//!   为合成项目集合——只能排除**产生有效事件的额外来源**；空目录或
+//!   零有效事件来源的读取不可由结果排除，结构性保证是 `source_plans`
+//!   显式注入（见上）。本测试读取真实 `~/.tokenscope` 的**目录元数据**
+//!   （文件名与大小，递归），不读文件内容，不输出文件名清单。
+//! - 分页：前两页与合成数据的**独立期望顺序逐位核对**（不重复也不
+//!   漏行），并以「跳过中间一段」的反例证明核对对漏行有区分力。
 //!
 //! 测量（只记录，不设硬门槛）：各阶段耗时（细分阶段由 collect_all 的 INFO
 //! 日志给出，--nocapture 可见）、事件与文件数量（来源统计）、Rust 堆峰值
@@ -113,16 +124,17 @@ fn hermetic_dir(tag: &str) -> PathBuf {
     d
 }
 
-/// 真实 `~/.tokenscope` 指纹：(文件数, 总字节数)。目录不存在 = `None`
-/// （运行前后必须同为 `None`——本测试绝不新建用户数据目录）。
-fn real_tokenscope_fingerprint() -> Option<(u64, u64)> {
-    let dir = tokenscope::report::data_dir().ok()?;
+/// 目录指纹：(文件数, 总字节数)。目录不存在 = `None`。
+/// 观察范围：只能检测文件数与字节数变化；**同长度的内容改写不可检测**
+/// （敏感性用例 `ac09_fingerprint_scope_and_blind_spot` 在合成目录上
+/// 钉住该边界）。递归只读目录元数据（文件名与大小），不读文件内容。
+fn fingerprint_dir(dir: &Path) -> Option<(u64, u64)> {
     if !dir.exists() {
         return None;
     }
     let mut files = 0u64;
     let mut bytes = 0u64;
-    let mut stack = vec![dir];
+    let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&d) else {
             continue;
@@ -140,6 +152,12 @@ fn real_tokenscope_fingerprint() -> Option<(u64, u64)> {
         }
     }
     Some((files, bytes))
+}
+
+/// 真实 `~/.tokenscope` 指纹：运行前后必须不变（观察范围见
+/// [`fingerprint_dir`]；本测试绝不新建用户数据目录）。
+fn real_tokenscope_fingerprint() -> Option<(u64, u64)> {
+    fingerprint_dir(&tokenscope::report::data_dir().ok()?)
 }
 
 /// 进程峰值工作集：Windows 为进程记录的峰值（GetProcessMemoryInfo，无采样
@@ -236,14 +254,66 @@ fn expected_buckets() -> (u64, u64, u64, u64) {
     (inp, out, cw, cr)
 }
 
+/// 合成事件的展示时间（明细行口径：解析时区 "YYYY-MM-DD HH:MM:SS"，
+/// 与 report 的 `%F %T` 一致）。固定时区下展示串字典序 = 时间序。
+fn display_ts(secs: i64, tz: &jiff::tz::TimeZone) -> String {
+    jiff::Timestamp::from_second(secs)
+        .unwrap()
+        .to_zoned(tz.clone())
+        .strftime("%F %T")
+        .to_string()
+}
+
+/// 全部合成事件的**独立期望顺序**：(展示 ts, record_id) 按 UTC 时间降序。
+/// 独立于历史库、快照与游标机制——排序直接来自 fixture 公式。
+fn expected_rows(tz: &jiff::tz::TimeZone) -> Vec<(String, String)> {
+    let mut rows: Vec<(i64, String)> = Vec::with_capacity(TOTAL_EVENTS as usize);
+    for s in 0..CLAUDE_SLUGS {
+        for f in 0..CLAUDE_FILES {
+            for e in 0..CLAUDE_EVENTS {
+                let g = ((s * CLAUDE_FILES + f) * CLAUDE_EVENTS + e) as i64;
+                rows.push((CLAUDE_BASE + g * 10, format!("msg-{s}-{f}-{e}")));
+            }
+        }
+    }
+    for k in 0..CODEX_FILES {
+        for e in 0..CODEX_EVENTS {
+            let idx = (k * CODEX_EVENTS + e) as i64;
+            // Codex 行 record_id 为空（时间戳即请求身份）。
+            rows.push((CODEX_BASE + idx * 5, String::new()));
+        }
+    }
+    rows.sort_by_key(|r| std::cmp::Reverse(r.0));
+    rows.into_iter()
+        .map(|(ts, rid)| (display_ts(ts, tz), rid))
+        .collect()
+}
+
+/// 逐位核对：`rows` 必须与期望顺序从 `offset`（0 起）起完全一致——
+/// 既能发现重复，也能发现漏行（旧「两页游标不重复」检查发现不了漏行）。
+fn rows_match_expected(
+    rows: &[tokenscope::report::EventRow],
+    expected: &[(String, String)],
+    offset: usize,
+) -> bool {
+    rows.len() <= expected.len() - offset
+        && rows
+            .iter()
+            .zip(expected[offset..].iter())
+            .all(|(r, (ts, rid))| r.ts == *ts && r.record_id == *rid)
+}
+
 fn ts_at(base_secs: i64, offset_secs: i64) -> String {
     jiff::Timestamp::from_second(base_secs + offset_secs)
         .unwrap()
         .to_string()
 }
 
-const CLAUDE_BASE: i64 = 1783728000; // 2026-07-11T00:00:00Z
-const CODEX_BASE: i64 = 1784613600; // 2026-07-21T06:00:00Z（全天落在本日）
+const CLAUDE_BASE: i64 = 1783728000; // 2026-07-11T00:00:00Z（步长 10 s，≡ 0 mod 10）
+// Codex 起点 +4 s、步长 5 s → 网格 ≡ 4/9 mod 10，与 Claude 网格互斥：
+// 全部 ts 全局唯一，期望顺序无需建模 (ts, record_id) 平局规则；
+// 20 文件 × 500 事件 × 5 s ≈ 13.9 h，全部落在 2026-07-21 当日。
+const CODEX_BASE: i64 = 1784613604; // 2026-07-21T06:00:04Z
 
 fn write_claude_tree(root: &Path, slugs: usize, files: usize, events: usize) {
     for slug in 0..slugs {
@@ -284,7 +354,7 @@ fn write_codex_tree(root: &Path) {
     for file in 0..CODEX_FILES {
         let sid = format!("perf-x-{file}");
         let cwd = format!("C:/perf/x{file}");
-        let base = CODEX_BASE + (file * CODEX_EVENTS) as i64 * 4;
+        let base = CODEX_BASE + (file * CODEX_EVENTS) as i64 * 5;
         let mut body = String::new();
         let meta = serde_json::json!({
             "timestamp": ts_at(base, 0),
@@ -303,7 +373,7 @@ fn write_codex_tree(root: &Path) {
         for event in 0..CODEX_EVENTS {
             let (input, output, cached) = codex_usage(event);
             let line = serde_json::json!({
-                "timestamp": ts_at(base, event as i64 * 4),
+                "timestamp": ts_at(base, event as i64 * 5),
                 "type": "event_msg",
                 "payload": {
                     "type": "token_count",
@@ -381,7 +451,13 @@ struct PhaseMs {
 }
 
 /// 一轮「begin_query（含采集）→ 首页汇总 → 明细前两页」，全部计时并断言。
-fn run_round(label: &str, opts: &SummaryOptions) -> (tokenscope::report::SummaryReport, PhaseMs) {
+/// 分页核对 = 旧口径「两页不重复」+ 与独立期望顺序逐位一致（不重不漏）；
+/// 另取跳过中间一段的第三页作反例，证明逐位核对对漏行有区分力。
+fn run_round(
+    label: &str,
+    opts: &SummaryOptions,
+    expected: &[(String, String)],
+) -> (tokenscope::report::SummaryReport, PhaseMs) {
     let t = Instant::now();
     let snap =
         query::begin_query_with(opts, true).unwrap_or_else(|e| panic!("{label} 采集失败: {e}"));
@@ -414,12 +490,49 @@ fn run_round(label: &str, opts: &SummaryOptions) -> (tokenscope::report::Summary
     .unwrap_or_else(|e| panic!("{label} 明细第二页失败: {e}"));
     ph.page2 = t.elapsed().as_millis();
     assert_eq!(page2.rows.len(), PAGE, "{label}：第二页应为满页 {PAGE}");
-    // 翻页不重不漏：两页游标集合不相交（52 000 > 2 页，必然各有 200 行）。
+    // 旧口径：两页游标集合不相交——只能证明不重复，不能证明不漏行。
     let seen: std::collections::HashSet<&str> =
         page1.rows.iter().map(|r| r.cursor.as_str()).collect();
     assert!(
         page2.rows.iter().all(|r| !seen.contains(r.cursor.as_str())),
         "{label}：翻页不得重复"
+    );
+    // 期望顺序逐位核对：前两页必须恰为期望的第 1–400 位（不重复也不漏行）。
+    assert!(
+        rows_match_expected(&page1.rows, expected, 0)
+            && rows_match_expected(&page2.rows, expected, PAGE),
+        "{label}：前两页必须与合成数据的独立期望顺序逐位一致"
+    );
+
+    // 跳段反例：以正确第二页末行为游标取下一页（期望第 401–600 位）。
+    // 若把它误当第二页，与第一页无交集——旧「不重复」检查放行；
+    // 逐位核对必须在偏移 PAGE 处拒绝（检出漏行），并在偏移 2*PAGE 处
+    // 接受（正控制：核对函数本身对正确位置不放空）。
+    let skipped = query::query_events(
+        &snap.query_id,
+        &EventFilter {
+            before: Some(page2.rows[PAGE - 1].cursor.clone()),
+            ..EventFilter::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("{label} 跳段反例页失败: {e}"));
+    assert_eq!(skipped.rows.len(), PAGE, "{label}：反例页应为满页 {PAGE}");
+    assert!(
+        skipped
+            .rows
+            .iter()
+            .all(|r| !seen.contains(r.cursor.as_str())),
+        "{label}：反例页必须与第一页不重复（构成有效反例的前提）"
+    );
+    assert!(
+        !rows_match_expected(&skipped.rows, expected, PAGE),
+        "{label}：逐位核对必须拒绝「跳过中间一段」的第二页"
+    );
+    assert!(
+        rows_match_expected(&skipped.rows, expected, 2 * PAGE),
+        "{label}：反例页应为期望顺序的第 {}–{} 位（正控制）",
+        2 * PAGE + 1,
+        3 * PAGE
     );
 
     println!(
@@ -480,27 +593,66 @@ fn ac09_synthetic_cold_warm_pipeline() {
     // 隔离基线：真实数据目录运行前指纹（不存在 = None）。
     let fp_before = real_tokenscope_fingerprint();
 
-    let opts = build_opts(
-        &dir,
-        vec![
-            SourcePlan {
-                agent: AgentKind::ClaudeCode,
-                root: claude_root.clone(),
-                claude_mapping: None,
-            },
-            SourcePlan {
-                agent: AgentKind::Codex,
-                root: codex_root.clone(),
-                claude_mapping: None,
-            },
-        ],
+    let plans = vec![
+        SourcePlan {
+            agent: AgentKind::ClaudeCode,
+            root: claude_root.clone(),
+            claude_mapping: None,
+        },
+        SourcePlan {
+            agent: AgentKind::Codex,
+            root: codex_root.clone(),
+            claude_mapping: None,
+        },
+    ];
+    // 读侧的结构性保证（可断言的部分）：全部来源根必须位于隔离目录内。
+    assert!(
+        plans.iter().all(|p| p.root.starts_with(&dir)),
+        "来源根必须全部位于隔离目录内"
     );
+    let opts = build_opts(&dir, plans.clone());
+
+    // 独立期望顺序（来自 fixture 公式，与库/游标机制无关）。
+    let tz = jiff::tz::TimeZone::get("Asia/Shanghai").expect("仓库默认时区常量且合法");
+    let expected = expected_rows(&tz);
 
     // ── 冷采集（空历史库 → 全量解析入库）+ 首页汇总 + 明细前两页
-    let (cold, cold_ph) = run_round("冷轮", &opts);
+    let (cold, cold_ph) = run_round("冷轮", &opts, &expected);
 
     // ── 热采集（第二轮无新数据：来源指纹未变，不重解析）+ 同口径查询
-    let (warm, warm_ph) = run_round("热轮", &opts);
+    let (warm, warm_ph) = run_round("热轮", &opts, &expected);
+
+    // ── 读侧有区分度检查：按项目分组恰为合成项目集合（6 Claude + 20
+    // Codex = 26），请求数合计等于合成规模——产生有效事件的额外来源
+    // 必然新增分组或超出合计（空来源/零有效事件来源不可由此排除）。
+    let mut proj_opts = build_opts(&dir, plans);
+    proj_opts.by = GroupBy::Project;
+    let proj_snap = query::begin_query_with(&proj_opts, true).expect("项目分组采集失败");
+    let proj = query::query_summary(&proj_snap.query_id).expect("项目分组读取失败");
+    // 注：聚合器总是把「合计」行追加进 groups（aggregate.rs），先剔除再核对。
+    let (real_groups, totals_row) = match proj.groups.split_last() {
+        Some((last, rest)) if last.key == "合计" => (rest, Some(last)),
+        _ => (proj.groups.as_slice(), None),
+    };
+    assert_eq!(
+        totals_row.map(|g| g.requests),
+        Some(TOTAL_EVENTS),
+        "合计行请求数应等于合成规模"
+    );
+    assert_eq!(
+        real_groups.len(),
+        CLAUDE_SLUGS + CODEX_FILES,
+        "项目分组数应等于合成项目数（6 Claude + 20 Codex）"
+    );
+    assert!(
+        real_groups.iter().all(|g| g.requests > 0),
+        "每个合成项目都应有请求"
+    );
+    let proj_requests: u64 = real_groups.iter().map(|g| g.requests).sum();
+    assert_eq!(
+        proj_requests, TOTAL_EVENTS,
+        "项目分组请求数合计应等于合成规模"
+    );
 
     // ── 一致性（AC09）：冷、热两轮的请求数与四桶完全一致
     assert_totals_equal("冷/热", &cold.totals, &warm.totals);
@@ -554,10 +706,14 @@ fn ac09_synthetic_cold_warm_pipeline() {
     let fp_after = real_tokenscope_fingerprint();
     assert_eq!(
         fp_before, fp_after,
-        "真实 ~/.tokenscope 指纹变化（{fp_before:?} → {fp_after:?}）：本测试不得写用户数据目录。\
+        "真实 ~/.tokenscope 指纹变化（{fp_before:?} → {fp_after:?}）：\
+         文件数或总字节数被改变（观察范围 = 文件数 + 总字节数，见模块注释）。\
          若确有 TokenScope GUI 同时运行，请先关闭后重跑再归因"
     );
-    // 注：请求数已精确等于合成规模——任何真实来源被意外读取都会使计数超出。
+    // 证据边界（如实标注）：指纹只证明文件数与总字节数不变（同长度内容
+    // 改写不可检测）；请求数与项目分组只排除「产生有效事件的额外来源」。
+    // 逐字节零写入与空来源零读取未证明——结构性保证是 source_plans 显式
+    // 注入（见上方来源根断言）。
 
     // ── 峰值测量（覆盖整个冷/热流程；fixture 写入的少量分配可忽略）
     let heap_peak = peak_bytes();
@@ -592,6 +748,14 @@ fn ac09_synthetic_cold_warm_pipeline() {
             "pricing_index": dir.join("pricing-index.json"),
             "real_tokenscope_present_before": fp_before.is_some(),
             "real_tokenscope_fingerprint_unchanged": true,
+            "fingerprint_scope": "files_and_bytes_only（同长度内容改写不可检测）",
+        },
+        "verification": {
+            "page_rows_checked": 2 * PAGE,
+            "expected_order_match": true,
+            "skip_counterexample_rejected": true,
+            "project_groups": real_groups.len(),
+            "project_requests_sum": proj_requests,
         },
     });
     let evidence_path = dir.join("ac09-stage1-evidence.json");
@@ -752,4 +916,43 @@ fn ac09_default_root_plus_overlapping_alias_counts_once() {
         peak_bytes() / (1024 * 1024),
         dir.display()
     );
+}
+
+// ── 指纹检查器的观察范围与盲区（合成目录，有区分度的自证） ─────────────
+
+/// 指纹 = (文件数, 总字节数)。本用例在合成目录上钉住它能检测什么、
+/// 检测不到什么：新增/删除/字节量变化会被发现；**同长度的内容改写
+/// 不可检测**——这正是主流程指纹断言的观察范围边界，「逐字节零写入」
+/// 不在其证明范围内（如实标注为未证明，见模块注释）。
+#[test]
+#[ignore = "AC09 N13 性能测试架：需显式设置 TOKENSCOPE_REAL_PERF=1（当前为合成来源阶段）"]
+fn ac09_fingerprint_scope_and_blind_spot() {
+    let _g = serial();
+    if !gate_enabled() {
+        eprintln!("跳过：未设置 TOKENSCOPE_REAL_PERF=1");
+        return;
+    }
+    let dir = hermetic_dir("fp-scope");
+    let sub = dir.join("nested");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    // 空目录：存在但零文件。
+    assert_eq!(fingerprint_dir(&dir), Some((0, 0)));
+    // 新增文件：文件数与字节数变化可检测（含嵌套目录）。
+    std::fs::write(sub.join("a.txt"), b"hello").unwrap(); // 5 B
+    assert_eq!(fingerprint_dir(&dir), Some((1, 5)));
+    // 同长度内容改写：不可检测（盲区，按文档钉住）。
+    std::fs::write(sub.join("a.txt"), b"hellO").unwrap();
+    assert_eq!(
+        fingerprint_dir(&dir),
+        Some((1, 5)),
+        "同长度改写不改文件数/字节数——这正是指纹断言的观察范围边界"
+    );
+    // 字节量变化可检测（同文件数）。
+    std::fs::write(sub.join("a.txt"), b"hello!").unwrap(); // 6 B
+    assert_eq!(fingerprint_dir(&dir), Some((1, 6)));
+    // 删除可检测。
+    std::fs::remove_file(sub.join("a.txt")).unwrap();
+    assert_eq!(fingerprint_dir(&dir), Some((0, 0)));
+    let _ = std::fs::remove_dir_all(&dir);
 }
