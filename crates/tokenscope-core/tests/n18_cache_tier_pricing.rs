@@ -1620,3 +1620,250 @@ cache_write = 9.0
     assert!((unknown.cost - 18.0).abs() < 1e-9);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ── N18 八轮（复核项 1）：period/schedule 合并不得丢失被阻断的分档依据 ──
+
+#[test]
+fn n18_blocked_schedule_tiers_through_period_survive_merge() {
+    // 反例：基础 cache_write=2（无分档）、schedule 分档 3.75/6、命中的
+    // period 改写 cache_write=9（无分档）。schedule 的分档依据被 period
+    // 改写阻断——事件分档未知时应按合并价 $18 估算并标不完整，而不是
+    // 因 period/schedule 预合并丢失分档依据被误判为“从未声明”。
+    let dir = tiered_dir("period-merge-keeps-blocked");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 2.0
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "23:59"
+cache_write = 9.0
+"#,
+    );
+    let (p, warnings) = Pricing::load(Some(&toml), None, None);
+    assert!(warnings.is_empty(), "warnings: {warnings:?}");
+    let est = p
+        .estimate("m", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!(
+        (est.cost - 18.0).abs() < 1e-9,
+        "按 period 合并价估算应为 $18，实际 {}",
+        est.cost
+    );
+    assert!(!est.complete, "估算必须标不完整");
+    assert!(
+        est.cache_write_split_estimated,
+        "阻断的分档依据必须保留估算语义"
+    );
+    assert_eq!(est.unknown.cache_write, 0, "估算没有未计价 token");
+    // 事件分档已知：缺少 period 分档价的 2M 写 token 应未计价。
+    let known = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    assert!(!known.complete);
+    assert_eq!(
+        known.unknown.cache_write, 2_000_000,
+        "缺少 period 分档价 → 未计价"
+    );
+    assert!(!known.cache_write_split_estimated);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ── N18 八轮：回归矩阵 ──────────────────────────────────────────────
+
+#[test]
+fn n18_blocked_base_and_schedule_tiers_through_period() {
+    // 矩阵 2：base 与 schedule 都声明分档、period 改写合并价且无分档 →
+    // 同样阻断：事件分档未知按 $18 估算；分档已知 2M 未计价。
+    let dir = tiered_dir("blocked-base-sched");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "23:59"
+cache_write = 9.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let unknown = p
+        .estimate("m", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!((unknown.cost - 18.0).abs() < 1e-9, "实际 {}", unknown.cost);
+    assert!(!unknown.complete);
+    assert!(unknown.cache_write_split_estimated);
+    let known = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    assert!(!known.complete);
+    assert_eq!(known.unknown.cache_write, 2_000_000);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_no_tiers_anywhere_with_period_override_keeps_compat() {
+    // 矩阵 3：当前有效路径所有层都没有分档价、period 改写合并价 →
+    // 既有兼容口径：$18 完整、无估算标志。
+    let dir = tiered_dir("no-tiers-period-override");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 2.0
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+cache_write = 9.0
+
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "23:59"
+cache_write = 9.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let unknown = p
+        .estimate("m", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!(unknown.complete, "全层未声明 → 既有兼容口径");
+    assert!(!unknown.cache_write_split_estimated);
+    assert!((unknown.cost - 18.0).abs() < 1e-9);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_no_tiers_anywhere_period_override_multi_candidate_selects_highest_complete() {
+    // 矩阵 3 续：加入完整候选 $1——两条都完整，按最高完整费用选 $18，
+    // 不得产生虚假分档披露或选 $1。
+    let dir = tiered_dir("no-tiers-multi");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "chan-m/x"
+input = 3.0
+output = 15.0
+cache_write = 2.0
+
+[[model.segment]]
+label = ">200K"
+min_tokens = 200_000
+input = 6.0
+cache_write = 9.0
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+cache_write = 9.0
+
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "23:59"
+cache_write = 9.0
+
+[[model]]
+prefix = "chan-c/x"
+input = 3.0
+output = 15.0
+cache_write = 1.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let est = p
+        .estimate("chan-m/x", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    let matched = est.matched.as_ref().unwrap();
+    assert_eq!(matched.raw_key, "chan-m/x", "两条完整候选取最高费用 $18");
+    assert!(est.complete);
+    assert!((est.cost - 18.0).abs() < 1e-9);
+    assert!(!est.cache_write_split_estimated);
+    assert!(est.excluded_candidate_warning.is_none());
+    assert_eq!(matched.reason, "highest_complete_cost");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_non_matching_time_rule_and_segment_do_not_affect_current_path() {
+    // 矩阵 5：非命中的时间规则（时段窗口永不匹配、且声明了不同分档价）
+    // 与非选中的分段不得影响当前路径的声明/阻断判断——当前路径所有层
+    // 都没有分档价 → 保持兼容口径。
+    let dir = tiered_dir("non-hit-rules");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 2.0
+
+[[model.segment]]
+label = "<200K-irrelevant"
+min_tokens = 0
+max_tokens = 100
+input = 6.0
+cache_write_5m = 7.5
+cache_write_1h = 12.0
+
+[[model.schedule]]
+label = "never"
+timezone = "UTC"
+cache_write = 9.0
+cache_write_5m = 7.5
+cache_write_1h = 12.0
+
+[[model.schedule.period]]
+start_time = "23:00"
+end_time = "23:59"
+cache_write = 9.0
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+cache_write = 9.0
+
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "23:59"
+cache_write = 9.0
+"#,
+    );
+    let (p, warnings) = Pricing::load(Some(&toml), None, None);
+    assert!(warnings.is_empty(), "warnings: {warnings:?}");
+    let unknown = p
+        .estimate("m", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!(unknown.complete, "非命中规则/分段不得引入分档依据");
+    assert!(!unknown.cache_write_split_estimated);
+    assert!((unknown.cost - 18.0).abs() < 1e-9);
+    std::fs::remove_dir_all(&dir).ok();
+}

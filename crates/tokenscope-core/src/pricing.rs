@@ -744,6 +744,46 @@ fn pick_cache_write_tiers(
     }
 }
 
+/// N18：时间规则路径的分档解析——period 与 schedule **不预合并**，逐层
+/// 判断声明/阻断，避免“period 改写写入价 + schedule 分档被阻断”在
+/// period/schedule 合并成单个 `PriceRates` 时丢失分档依据、被误判为
+/// “从未声明”。层级顺序：seg > period > schedule > base；任一层声明
+/// 分档 → `Declared`；任一层显式改写写入价（无分档）→ `Blocked`；
+/// 全部层未声明 → `Undeclared`（既有兼容口径）。非命中的规则/分段根本
+/// 不进入本函数，不影响当前路径。
+fn rule_tier_resolution(
+    seg: Option<&PriceRates>,
+    sched: Option<&PriceSchedule>,
+    period: Option<&SchedulePeriod>,
+    base: &PriceRates,
+) -> TierResolution {
+    let layers = [
+        seg.map(|s| (s.cache_write, s.cache_write_tiers)),
+        period.map(|p| (p.prices.cache_write, p.prices.cache_write_tiers)),
+        sched.map(|s| (s.prices.cache_write, s.prices.cache_write_tiers)),
+    ];
+    // 预检：全部层都未声明分档 → Undeclared（即使上层改写了写入价）。
+    let any_declared = layers
+        .iter()
+        .any(|l| l.as_ref().is_some_and(|(_, t)| t.is_some()))
+        || base.cache_write_tiers.is_some();
+    if !any_declared {
+        return TierResolution::Undeclared;
+    }
+    for (write, tiers) in layers.into_iter().flatten() {
+        if tiers.is_some() {
+            return TierResolution::Declared(tiers);
+        }
+        if write != RateSpec::Unknown {
+            return TierResolution::BlockedByWriteOverride;
+        }
+    }
+    match base.cache_write_tiers {
+        Some(t) => TierResolution::Declared(Some(t)),
+        None => TierResolution::Undeclared,
+    }
+}
+
 /// 来源标识（稳定 ID，序列化用；展示层本地化在 GUI）。
 fn tier_name(tier: u8) -> &'static str {
     match tier {
@@ -926,7 +966,20 @@ fn estimate_entry(
         }
         None => (select_segment(plan, basis_value), None),
     };
+    // N18：四类单价仍按 seg > (period ?? schedule) > base 逐层解析；分档
+    // 依据则用**未合并**的 seg/period/schedule/base 逐层解析（保留被阻断
+    // 的分档依据，不因 period/schedule 预合并而丢失）。
     let effective = effective_rates(plan, time_prices.as_ref(), selected);
+    let tiers_resolution = match time_rule {
+        Some((sched, period)) => {
+            rule_tier_resolution(selected.map(|s| &s.prices), Some(sched), period, &plan.base)
+        }
+        None => pick_cache_write_tiers(
+            selected.map(|s| &s.prices),
+            None,
+            plan.base.cache_write_tiers,
+        ),
+    };
     let rates = effective.rates;
     // Task 5：逐分项生成明细行；cost 为各行小计之和（顺序固定，确定性的
     // 浮点求和）。未知分项仅在实际产生 token 时才标记不完整——零 token
@@ -958,7 +1011,7 @@ fn estimate_entry(
     // - 阻断（上层改写写入价但无分档依据）或未声明 → 合并行；事件分档
     //   未知且合并写价实际计入金额时，按合并价估算并标示；未声明保持
     //   既有兼容口径（complete=true、无估算标志）。
-    let tiers = effective.tiers.declared_tiers();
+    let tiers = tiers_resolution.declared_tiers();
     let five_price = tiers.map(|tw| tw.five_min).map(|s| resolve(s, false));
     let one_price = tiers.map(|tw| tw.one_hour).map(|s| resolve(s, false));
     let split_known = t.cache_write_split_known && t.cache_write > 0;
@@ -1045,7 +1098,7 @@ fn estimate_entry(
         // 时写 token 是未计价，不得声称已估算（unknown>0、标志=false）。
         // 合并价显式 0 是合法正例：priced=true、估算成立、金额为 0。
         // 整个候选从未声明分档价 → 保持既有兼容口径（complete=true、无标志）。
-        if effective.tiers.supports_merged_price_estimate() && t.cache_write > 0 && write_priced {
+        if tiers_resolution.supports_merged_price_estimate() && t.cache_write > 0 && write_priced {
             split_estimated = true;
             complete = false;
         }
