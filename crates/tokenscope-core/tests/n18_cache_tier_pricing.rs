@@ -340,3 +340,251 @@ fn n18_usage_event_construction_keeps_buckets_flat() {
     assert_eq!(e.total_tokens(), 15, "分项不得加进总量");
     assert!(e.validate_buckets().is_ok());
 }
+
+// ── N18 第二轮：分档价参与分段 / 峰谷规则 ────────────────────────────
+// 有依据的层声明分档才生效；缺层不得跨层拼齐；无依据一律未知。
+
+fn tiered_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("n18-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+#[test]
+fn n18_segment_level_tiers_override_base_tiers() {
+    let dir = tiered_dir("seg-tier");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.segment]]
+label = ">200K"
+min_tokens = 200_000
+input = 6.0
+cache_write_5m = 7.5
+cache_write_1h = 12.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    // prompt = 100K < 200K → 基础层分档价。
+    let lo = p
+        .estimate("m", &split_counts(100_000, 40_000, 60_000), at())
+        .unwrap();
+    assert!(
+        (lo.cost - (0.04 * 3.75 + 0.06 * 6.0)).abs() < 1e-9,
+        "实际 {}",
+        lo.cost
+    );
+    assert!(lo.complete);
+    assert_eq!(lo.segment_label, None);
+    // 命中 >200K 段（prompt = 2M 写 ≥ 200K）→ 段级分档价覆盖基础层。
+    let hi = p
+        .estimate("m", &split_counts(2_000_000, 800_000, 1_200_000), at())
+        .unwrap();
+    assert!(
+        (hi.cost - (0.8 * 7.5 + 1.2 * 12.0)).abs() < 1e-9,
+        "段级分档价应覆盖基础层，实际 {}",
+        hi.cost
+    );
+    assert!(hi.complete);
+    assert_eq!(hi.segment_label.as_deref(), Some(">200K"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_segment_without_tiers_falls_back_to_base_tiers() {
+    let dir = tiered_dir("seg-fallback");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.segment]]
+label = ">200K"
+min_tokens = 200_000
+input = 6.0
+cache_write = 9.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let hi = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    // 段未声明分档 → 回退基础层分档价（写入两档价不随段变）。
+    assert!(
+        (hi.cost - (1.0 * 3.75 + 1.0 * 6.0)).abs() < 1e-9,
+        "段缺分档应回退基础层，实际 {}",
+        hi.cost
+    );
+    assert!(hi.complete);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_segment_partial_tier_is_unknown_not_mixed_across_layers() {
+    let dir = tiered_dir("seg-partial");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.segment]]
+label = ">200K"
+min_tokens = 200_000
+input = 6.0
+cache_write_5m = 7.5
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let hi = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    // 段声明了分档但缺 1h 档：该层已声明 → 不跨层拼基础层 1h 价，
+    // 1h token 进 unknown（不完整），不得用总量单价冒充。
+    assert!(!hi.complete, "段级分档缺档不得拼层凑齐");
+    assert_eq!(hi.unknown.cache_write, 1_000_000, "1h token 记为未计价");
+    use tokenscope::pricing::CostLineKind;
+    let w5 = hi
+        .lines
+        .iter()
+        .find(|l| l.kind == CostLineKind::CacheWrite5m)
+        .unwrap();
+    assert!((w5.unit_price.unwrap() - 7.5).abs() < 1e-9);
+    assert!(!hi.cache_write_split_estimated, "这是未知不是估算");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_time_rule_tiers_override_base_and_segment() {
+    let dir = tiered_dir("time-tier");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+input = 6.0
+cache_write_5m = 9.0
+cache_write_1h = 15.0
+
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "23:59"
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    // at() = 08:00Z 命中规则 → 规则级分档价优先于基础层。
+    let est = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    assert!(
+        (est.cost - (1.0 * 9.0 + 1.0 * 15.0)).abs() < 1e-9,
+        "规则级分档价应覆盖基础层，实际 {}",
+        est.cost
+    );
+    assert!(est.complete);
+    assert!(est.matched.as_ref().unwrap().schedule_label.is_some());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_no_tiers_anywhere_keeps_unknown_split_and_marks_estimate() {
+    let dir = tiered_dir("no-tier");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    // 可信分档但候选无分档 → 写费未知（不猜档）。
+    let known = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    assert!(!known.complete);
+    assert_eq!(known.unknown.cache_write, 2_000_000);
+    assert_eq!(known.cost, 0.0);
+    // 分项未知 + 候选无分档 → 单价的既有完整语义（无估算标示）。
+    let unknown = p
+        .estimate("m", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!(unknown.complete, "无分档候选不应标估算");
+    assert!(!unknown.cache_write_split_estimated);
+    assert!((unknown.cost - 2.0 * 3.75).abs() < 1e-9);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_tiered_costs_sum_to_summary_across_mixed_requests() {
+    // 混合档 + 逐请求/汇总一致性：可信分档两笔 + 分项未知一笔，
+    // 聚合总价 == 逐请求求和；汇总写总量不含分项重复。
+    let dir = tiered_dir("mixed-sum");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let a = p
+        .estimate("m", &split_counts(1_000_000, 1_000_000, 0), at())
+        .unwrap();
+    let b = p
+        .estimate("m", &split_counts(1_000_000, 0, 1_000_000), at())
+        .unwrap();
+    let c = p
+        .estimate("m", &unknown_split_counts(1_000_000), at())
+        .unwrap();
+    let both = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    // 估算请求单独计价（complete=false），与完整分档请求同池求和。
+    let row_sum = a.cost + b.cost + c.cost;
+    let agg = both.cost + c.cost;
+    assert!(
+        (row_sum - agg).abs() < 1e-9,
+        "逐请求 {} vs 聚合 {}",
+        row_sum,
+        agg
+    );
+    assert!(c.cache_write_split_estimated && !c.complete);
+    assert!(both.complete);
+    std::fs::remove_dir_all(&dir).ok();
+}

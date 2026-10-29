@@ -51,10 +51,20 @@ function fmtMoney(v: number): string {
   return formatMoney(v, "request");
 }
 
+/** N18：prompt token 算式里的「缓存写」分量。
+ *  可信分档事件把写入拆成 5m/1h 两行（无合并行）——算式必须显示**两档
+ *  之和**；只有合并行时才用合并值。两行都缺（候选未声明分档、写入整体
+ *  未知）时回落合并值；分档行与合并行都不存在则为 0。绝不重复计数。 */
+function cacheWriteTokens(bd: EventCostBreakdown): number {
+  const split = bd.lines.filter((l) => l.kind === "cache_write_5m" || l.kind === "cache_write_1h");
+  if (split.length > 0) return split.reduce((sum, l) => sum + l.tokens, 0);
+  return bd.lines.find((l) => l.kind === "cache_write")?.tokens ?? 0;
+}
+
 function factRows(bd: EventCostBreakdown): BreakdownRow[] {
   const m = bd.matched;
   const input = bd.lines.find((l) => l.kind === "input")?.tokens ?? 0;
-  const cw = bd.lines.find((l) => l.kind === "cache_write")?.tokens ?? 0;
+  const cw = cacheWriteTokens(bd);
   const cr = bd.lines.find((l) => l.kind === "cache_read")?.tokens ?? 0;
   const rows: BreakdownRow[] = [
     { label: "匹配模型", value: m.raw_key },

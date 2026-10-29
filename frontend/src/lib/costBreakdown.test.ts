@@ -375,3 +375,87 @@ describe("N18 cache write tiers", () => {
     expect(text).not.toContain("写入分档未知");
   });
 });
+
+// N18 二轮：prompt tokens 算式在分档/合并/未知分档三种形态下都不重复计数。
+describe("N18 prompt tokens formula", () => {
+  const base = () =>
+    bd({
+      lines: [
+        { kind: "input", tokens: 1000, unit_price: 3, subtotal: 0.003, priced: true },
+        { kind: "output", tokens: 0, unit_price: 15, subtotal: 0, priced: true },
+      ],
+      cost_usd: 0,
+      complete: true,
+    });
+
+  it("可信分档：算式显示两档之和", () => {
+    const tiered = base();
+    tiered.lines = [
+      ...tiered.lines,
+      { kind: "cache_write_5m", tokens: 400_000, unit_price: 3.75, subtotal: 1.5, priced: true },
+      { kind: "cache_write_1h", tokens: 600_000, unit_price: 6, subtotal: 3.6, priced: true },
+      { kind: "cache_read", tokens: 2000, unit_price: 0.3, subtotal: 0.0006, priced: true },
+    ];
+    tiered.basis_value = 1_002_000;
+    const text = formatCostBreakdownText(tiered);
+    expect(text).toContain("缓存写 1,000,000");
+    expect(text).toContain("= 总输入 1,002,000");
+  });
+
+  it("合并行：算式继续使用合并值", () => {
+    const merged = base();
+    merged.lines = [
+      ...merged.lines,
+      { kind: "cache_write", tokens: 1_000_000, unit_price: 3.75, subtotal: 3.75, priced: true },
+      { kind: "cache_read", tokens: 2000, unit_price: 0.3, subtotal: 0.0006, priced: true },
+    ];
+    merged.basis_value = 1_002_000;
+    const text = formatCostBreakdownText(merged);
+    expect(text).toContain("缓存写 1,000,000");
+    expect(text).toContain("= 总输入 1,002,000");
+  });
+
+  it("未知分档（合并行估算）：算式仍只算一次写总量", () => {
+    const estimated = base();
+    estimated.lines = [
+      ...estimated.lines,
+      { kind: "cache_write", tokens: 2_000_000, unit_price: 3.75, subtotal: 7.5, priced: true },
+    ];
+    estimated.basis_value = 2_001_000;
+    estimated.complete = false;
+    estimated.cache_write_split_estimated = true;
+    const text = formatCostBreakdownText(estimated);
+    expect(text).toContain("缓存写 2,000,000");
+    expect(text).toContain("= 总输入 2,001,000");
+    expect(text).toContain("写入分档未知");
+  });
+
+  it("后端不并发两档行与合并行（契约断言：真实实现同此）", () => {
+    // 后端 estimate_entry 的可信分档分支只输出 5m/1h 两行、不输出合并行；
+    // 分项未知分支只输出合并行。两者不会并存——这里锁定该契约形状，
+    // 防止未来改动破坏「分项不重复计入」。
+    const rows = formatCostBreakdownRows(
+      (() => {
+        const tiered = base();
+        tiered.lines = [
+          ...tiered.lines,
+          {
+            kind: "cache_write_5m",
+            tokens: 400_000,
+            unit_price: 3.75,
+            subtotal: 1.5,
+            priced: true,
+          },
+          { kind: "cache_write_1h", tokens: 600_000, unit_price: 6, subtotal: 3.6, priced: true },
+        ];
+        tiered.basis_value = 1_001_000;
+        return tiered;
+      })(),
+    );
+    const formulaLabels = rows.filter(
+      (r) => r.label === "缓存写（5 分钟档）" || r.label === "缓存写（1 小时档）",
+    );
+    expect(formulaLabels).toHaveLength(2);
+    expect(rows.some((r) => r.label === "缓存写")).toBe(false);
+  });
+});

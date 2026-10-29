@@ -101,6 +101,7 @@ fn test_pricing_index_rebuilds_stale_cache_rates() {
                         output: RateSpec::Fixed(3.0),
                         cache_write: RateSpec::Unknown,
                         cache_read: RateSpec::Unknown,
+                        cache_write_tiers: None,
                     },
                     ..Default::default()
                 });
