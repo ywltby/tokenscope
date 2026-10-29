@@ -1816,10 +1816,12 @@ fn n18_non_matching_time_rule_and_segment_do_not_affect_current_path() {
     // 矩阵 5（复核项 3 更正）：待验证分档价必须放在**未命中的 period** 内。
     // 规则层默认价即使 period 未命中也会参与竞争（既有语义），放在规则层
     // 无法证明“未命中不参与”——上一版测试正是犯了这一错误（复核 91f596f）。
-    // 08:00（never 未命中）：当前路径（peak，全层无分档价）保持兼容口径
-    // $18、无估算标志、排除规则数 0；分档已知时当前路径无分档价 → 2M 未计价。
-    // 23:30（never 命中）：period 分档 7.5/12 参与并胜出（分档已知 $19.5）
-    // ——证明对照有效。非选中的分段（<200K，声明分档价）同样不得影响。
+    // 08:00（never 的 period 未命中；never 规则层默认价 cache_write=9
+    // 仍参与竞争）：当前路径全层无分档价 → 保持兼容口径 $18、无估算
+    // 标志、排除规则数 0；分档已知时当前路径无分档价 → 2M 未计价。
+    // 23:30（never 的 period 命中）：period 分档 7.5/12 参与并胜出
+    // （分档已知 $19.5）——证明对照有效。非选中的分段（<200K，声明
+    // 分档价）同样不得影响。
     let dir = tiered_dir("non-hit-rules");
     let toml = write_toml(
         &dir,
@@ -1866,7 +1868,7 @@ cache_write = 9.0
     let at8 = "2026-07-17T08:00:00Z".parse().unwrap();
     let at2330 = "2026-07-17T23:30:00Z".parse().unwrap();
 
-    // 08:00：never 未命中（peak 命中）。
+    // 08:00：never 的 period 未命中（never 规则层默认价仍参与竞争）。
     let unknown8 = p
         .estimate("m", &unknown_split_counts(2_000_000), at8)
         .unwrap();
