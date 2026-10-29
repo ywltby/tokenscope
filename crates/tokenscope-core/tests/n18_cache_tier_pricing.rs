@@ -588,3 +588,302 @@ cache_write_1h = 6.0
     assert!(both.complete);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ── N18 三轮（复核项 3/4/5/6/8）──────────────────────────────────────
+
+fn md_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("n18-md-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+#[test]
+fn n18_anthropic_high_segment_self_proved_tiers_cost_1950() {
+    // 项 3：官方渠道高档 input=6、cache_write=7.5（= 1.25 × 6）→ 该段
+    // 自证派生 1h = 12；两档各 1M token 写入费 = 7.5 + 12 = **$19.5**。
+    let dir = md_dir("seg-self-proof");
+    let md = snapshot_json(
+        &dir,
+        r#"{"v":4,"synced_at":"t","entries":[
+            {"id":"anthropic/claude-x","name":"X",
+             "input":3.0,"output":15.0,"cache_read":0.3,"cache_write":3.75,
+             "segments":[
+               {"label":">272K","min_tokens":272001,
+                "input":6.0,"output":30.0,"cache_read":0.6,"cache_write":7.5}
+             ]}
+        ]}"#,
+    );
+    let (p, warnings) = Pricing::load(None, Some(&md), None);
+    assert!(warnings.is_empty(), "warnings: {warnings:?}");
+    // prompt = 2M 写 ≥ 272001 → 命中高档段。
+    let est = p
+        .estimate(
+            "anthropic/claude-x",
+            &split_counts(2_000_000, 1_000_000, 1_000_000),
+            at(),
+        )
+        .unwrap();
+    assert!(
+        (est.cost - 19.5).abs() < 1e-9,
+        "高档自证派生应为 $19.5，实际 {}",
+        est.cost
+    );
+    assert!(est.complete);
+    assert_eq!(est.segment_label.as_deref(), Some(">272K"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_anthropic_segment_without_proof_is_unknown_not_guessed() {
+    // 项 3：高档 cache_write 与 1.25 × input 不一致 → 依据不足，标未知。
+    let dir = md_dir("seg-no-proof");
+    let md = snapshot_json(
+        &dir,
+        r#"{"v":4,"synced_at":"t","entries":[
+            {"id":"anthropic/claude-x","name":"X",
+             "input":3.0,"output":15.0,"cache_read":0.3,"cache_write":3.75,
+             "segments":[
+               {"label":">272K","min_tokens":272001,
+                "input":6.0,"output":30.0,"cache_read":0.6,"cache_write":9.0}
+             ]}
+        ]}"#,
+    );
+    let (p, _) = Pricing::load(None, Some(&md), None);
+    let est = p
+        .estimate(
+            "anthropic/claude-x",
+            &split_counts(2_000_000, 1_000_000, 1_000_000),
+            at(),
+        )
+        .unwrap();
+    // 段自证不通过 → 该段不派生；按既有回退语义落到基础层分档价
+    // （基础 3.75/6.0 自证通过）——不猜段级倍率。
+    assert!(est.complete, "段未声明分档 → 回退基础层分档价");
+    assert!((est.cost - 9.75).abs() < 1e-9, "实际 {}", est.cost);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_anthropic_segment_without_any_tier_evidence_is_unknown() {
+    // 段与基础层都无分档依据（基础 cache_write 也不自证）→ 未知。
+    let dir = md_dir("seg-no-evidence");
+    let md = snapshot_json(
+        &dir,
+        r#"{"v":4,"synced_at":"t","entries":[
+            {"id":"anthropic/claude-x","name":"X",
+             "input":3.0,"output":15.0,"cache_read":0.3,"cache_write":4.0,
+             "segments":[
+               {"label":">272K","min_tokens":272001,
+                "input":6.0,"output":30.0,"cache_read":0.6,"cache_write":9.0}
+             ]}
+        ]}"#,
+    );
+    let (p, _) = Pricing::load(None, Some(&md), None);
+    let est = p
+        .estimate(
+            "anthropic/claude-x",
+            &split_counts(2_000_000, 1_000_000, 1_000_000),
+            at(),
+        )
+        .unwrap();
+    assert!(!est.complete, "无任何自证依据 → 分档价未知");
+    assert_eq!(est.unknown.cache_write, 2_000_000);
+    assert!(!est.cache_write_split_estimated, "这是未知不是估算");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_non_anthropic_segment_never_derives_anthropic_multiplier() {
+    // 项 3：其他渠道即使数字相同也不套 Anthropic 倍率。
+    let dir = md_dir("seg-other-channel");
+    let md = snapshot_json(
+        &dir,
+        r#"{"v":4,"synced_at":"t","entries":[
+            {"id":"bedrock/claude-x","name":"X",
+             "input":3.0,"output":15.0,"cache_read":0.3,"cache_write":3.75,
+             "segments":[
+               {"label":">272K","min_tokens":272001,
+                "input":6.0,"output":30.0,"cache_read":0.6,"cache_write":7.5}
+             ]}
+        ]}"#,
+    );
+    let (p, _) = Pricing::load(None, Some(&md), None);
+    let est = p
+        .estimate(
+            "bedrock/claude-x",
+            &split_counts(2_000_000, 1_000_000, 1_000_000),
+            at(),
+        )
+        .unwrap();
+    assert!(!est.complete, "非官方渠道不得派生");
+    assert_eq!(est.unknown.cache_write, 2_000_000);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ── 项 4：各层分档价统一校验 ─────────────────────────────────────────
+
+#[test]
+fn n18_invalid_tier_prices_are_rejected_with_diagnostics() {
+    for (tag, body) in [
+        ("negative", "cache_write_5m = -1.0\ncache_write_1h = 6.0\n"),
+        ("non-finite", "cache_write_5m = nan\ncache_write_1h = 6.0\n"),
+        (
+            "same-as-input",
+            "cache_write_5m = \"same_as_input\"\ncache_write_1h = 6.0\n",
+        ),
+        (
+            "segment-negative",
+            "cache_write_5m = 3.75\ncache_write_1h = 6.0\n\n[[model.segment]]\nlabel = \">200K\"\nmin_tokens = 200000\ncache_write_5m = -1.0\n",
+        ),
+        (
+            "rule-negative",
+            "cache_write_5m = 3.75\ncache_write_1h = 6.0\n\n[[model.schedule]]\nlabel = \"peak\"\ncache_write_5m = -1.0\n",
+        ),
+        (
+            "period-negative",
+            "cache_write_5m = 3.75\ncache_write_1h = 6.0\n\n[[model.schedule]]\nlabel = \"peak\"\n\n[[model.schedule.period]]\nstart_time = \"00:00\"\nend_time = \"23:59\"\ncache_write_5m = -1.0\n",
+        ),
+        (
+            "rule-segment-negative",
+            "cache_write_5m = 3.75\ncache_write_1h = 6.0\n\n[[model.schedule]]\nlabel = \"peak\"\n\n[[model.schedule.segment]]\nmin_tokens = 200000\ncache_write_1h = -1.0\n",
+        ),
+    ] {
+        let dir = md_dir(&format!("invalid-{tag}"));
+        let toml = write_toml(
+            &dir,
+            &format!(
+                "[[model]]\nprefix = \"m\"\ninput = 3.0\noutput = 15.0\ncache_write = 3.75\n{body}"
+            ),
+        );
+        let (p, warnings) = Pricing::load(Some(&toml), None, None);
+        let est = p.estimate("m", &split_counts(1_000_000, 400_000, 600_000), at());
+        assert!(
+            est.is_none(),
+            "{tag}：非法分档价不得进入计价（候选应被拒绝）"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("分档")),
+            "{tag}：必须保留诊断，实际 {warnings:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+// ── 项 5：多候选 + 分档未知的不确定性披露 ────────────────────────────
+
+#[test]
+fn n18_multi_candidate_unknown_split_discloses_exclusion() {
+    // 两条同末段候选：A 有完整分档、B 只有合并写入价（分档未知）。
+    // 完整候选优先（既有规则），但 B 被排除的事实必须披露。
+    let dir = md_dir("multi-candidate");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "chan-a/tiered"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model]]
+prefix = "chan-b/tiered"
+input = 3.0
+output = 15.0
+cache_write = 9.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let est = p
+        .estimate(
+            "chan-a/tiered",
+            &split_counts(1_000_000, 400_000, 600_000),
+            at(),
+        )
+        .unwrap();
+    // 可信分档 + A 完整分档 → 完整且费用来自 A。
+    assert!(est.complete);
+    assert!((est.cost - (0.4 * 3.75 + 0.6 * 6.0)).abs() < 1e-9);
+    let matched = est.matched.as_ref().unwrap();
+    assert_eq!(matched.raw_key, "chan-a/tiered");
+    assert_eq!(
+        matched.reason, "highest_complete_cost",
+        "完整候选优先规则不变"
+    );
+    assert!(matched.candidate_count >= 2, "两条同末段候选");
+    // B 缺分档 → 不完整候选被排除，必须披露数量。
+    assert!(
+        matched.incomplete_candidates_excluded >= 1,
+        "被排除的不完整候选必须披露：{:?}",
+        matched
+    );
+    assert!(
+        est.excluded_candidate_warning.is_some(),
+        "排除原因必须结构化披露"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ── 项 6：估算与未计价的区分必须贯穿汇总/明细 ────────────────────────
+
+#[test]
+fn n18_estimated_and_unpriced_are_distinguishable_in_breakdown() {
+    let dir = md_dir("est-vs-unpriced");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "tiered"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model]]
+prefix = "no-tier"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+
+    // (a) 分项未知 + 有分档 → 按合并价**估算**（complete=false、标示置位、
+    //    金额 = 总量 × 合并价、unknown 不含写 token）。
+    let estimated = p
+        .estimate("tiered", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!((estimated.cost - 7.5).abs() < 1e-9, "估算金额按合并价");
+    assert!(!estimated.complete);
+    assert!(estimated.cache_write_split_estimated, "估算必须标示");
+    assert_eq!(estimated.unknown.cache_write, 0, "估算不是未计价");
+
+    // (b) 分项已知 + 无分档 → **未计价**（cost 不含写费、unknown = 写总量、
+    //    不得标估算）。
+    let unpriced = p
+        .estimate(
+            "no-tier",
+            &split_counts(2_000_000, 1_000_000, 1_000_000),
+            at(),
+        )
+        .unwrap();
+    assert_eq!(unpriced.cost, 0.0, "未计价不计金额");
+    assert!(!unpriced.complete);
+    assert!(!unpriced.cache_write_split_estimated, "未计价不是估算");
+    assert_eq!(unpriced.unknown.cache_write, 2_000_000, "写 token 记未计价");
+
+    // (c) 混合：两个请求分别估算与未计价时，估算金额与未计价数量
+    //    不互相冒充（汇总口径下两者并存）。
+    let both = p
+        .estimate(
+            "tiered",
+            &split_counts(2_000_000, 1_000_000, 1_000_000),
+            at(),
+        )
+        .unwrap();
+    assert!((both.cost - 9.75).abs() < 1e-9, "可信分档用分档价");
+
+    std::fs::remove_dir_all(&dir).ok();
+}

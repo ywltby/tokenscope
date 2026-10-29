@@ -459,3 +459,70 @@ describe("N18 prompt tokens formula", () => {
     expect(rows.some((r) => r.label === "缓存写")).toBe(false);
   });
 });
+
+// N18 三轮（复核项 6）：估算与未计价文案不得互相冒充。
+describe("N18 estimated vs unpriced wording", () => {
+  const withLines = (
+    lines: EventCostBreakdown["lines"],
+    cost: number,
+    complete: boolean,
+    estimated?: boolean,
+  ) => {
+    const base = bd({ lines, cost_usd: cost, complete });
+    if (estimated !== undefined) base.cache_write_split_estimated = estimated;
+    return base;
+  };
+
+  it("按合并价估算：有「写入分档未知」且金额来自合并价", () => {
+    const est = withLines(
+      [
+        { kind: "input", tokens: 0, unit_price: 3, subtotal: 0, priced: true },
+        { kind: "output", tokens: 0, unit_price: 15, subtotal: 0, priced: true },
+        { kind: "cache_write", tokens: 2_000_000, unit_price: 3.75, subtotal: 7.5, priced: true },
+        { kind: "cache_read", tokens: 0, unit_price: 0.3, subtotal: 0, priced: true },
+      ],
+      7.5,
+      false,
+      true,
+    );
+    const text = formatCostBreakdownText(est);
+    expect(text).toContain("写入分档未知");
+    expect(text).toContain("按写入总量单价估算");
+    expect(text).toContain("估算合计 $7.50");
+  });
+
+  it("未计价：只有「未计价」行，不出现「写入分档未知」", () => {
+    const unp = withLines(
+      [
+        { kind: "input", tokens: 0, unit_price: 3, subtotal: 0, priced: true },
+        { kind: "output", tokens: 0, unit_price: 15, subtotal: 0, priced: true },
+        { kind: "cache_write_5m", tokens: 1_000_000, unit_price: null, subtotal: 0, priced: false },
+        { kind: "cache_write_1h", tokens: 1_000_000, unit_price: 6, subtotal: 6, priced: true },
+      ],
+      6,
+      false,
+      false,
+    );
+    const text = formatCostBreakdownText(unp);
+    expect(text).toContain("未计价");
+    expect(text).toContain("缺价 ≠ 免费");
+    expect(text).not.toContain("写入分档未知");
+    expect(text).toContain("缺少单价");
+  });
+
+  it("混合：估算与未计价并存时两行都出现且金额只含已计价分项", () => {
+    const mixed = withLines(
+      [
+        { kind: "cache_write", tokens: 1_000_000, unit_price: 3.75, subtotal: 3.75, priced: true },
+        { kind: "cache_write_5m", tokens: 1_000_000, unit_price: null, subtotal: 0, priced: false },
+      ],
+      3.75,
+      false,
+      true,
+    );
+    const text = formatCostBreakdownText(mixed);
+    expect(text).toContain("写入分档未知");
+    expect(text).toContain("未计价");
+    expect(text).toContain("估算合计 $3.75");
+  });
+});

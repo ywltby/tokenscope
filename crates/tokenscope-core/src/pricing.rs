@@ -487,18 +487,25 @@ fn tier_rate_invalid(spec: RateSpec) -> bool {
 ///   估算按不完整处理）。Bedrock/Vertex/OpenRouter 等其他渠道一概
 ///   不派生——Claude Code 应用日志可能路由到任意提供商，绝不按
 ///   应用名套倍率。
-fn modelsdev_cache_write_tiers(e: &crate::modelsdev::SnapshotEntry) -> Option<CacheWriteTiers> {
-    if e.cache_write_5m.is_some() || e.cache_write_1h.is_some() {
+///
+/// 显式字段优先；两者都缺时才考虑派生。
+fn explicit_tiers(five_min: Option<f64>, one_hour: Option<f64>) -> Option<CacheWriteTiers> {
+    if five_min.is_some() || one_hour.is_some() {
         return Some(CacheWriteTiers {
-            five_min: RateSpec::fixed_or_unknown(e.cache_write_5m),
-            one_hour: RateSpec::fixed_or_unknown(e.cache_write_1h),
+            five_min: RateSpec::fixed_or_unknown(five_min),
+            one_hour: RateSpec::fixed_or_unknown(one_hour),
         });
     }
-    let (provider, _) = e.id.split_once('/')?;
-    if provider != "anthropic" {
-        return None;
-    }
-    let (input, write) = match (e.input, e.cache_write) {
+    None
+}
+
+/// N18：Anthropic 官方分档派生（自证）——5 分钟写 = 1.25 × 输入、
+/// 1 小时写 = 2 × 输入（依据 §4.5 引用的官方文档价）。仅当该层发布价
+/// 自身满足 `cache_write == 1.25 × input`（相对误差 1e-9）才认定派生
+/// 依据充分；否则不派生（宁可缺价 → 估算按不完整处理）。绝不按应用名
+/// 或渠道名套倍率。
+fn anthropic_derived_tiers(input: Option<f64>, write: Option<f64>) -> Option<CacheWriteTiers> {
+    let (input, write) = match (input, write) {
         (Some(i), Some(w)) if i > 0.0 => (i, w),
         _ => return None,
     };
@@ -514,6 +521,34 @@ fn modelsdev_cache_write_tiers(e: &crate::modelsdev::SnapshotEntry) -> Option<Ca
         five_min: RateSpec::Fixed(write),
         one_hour: RateSpec::Fixed(one_hour),
     })
+}
+
+/// N18：条目基础层分档价——显式字段优先，否则仅 Anthropic 官方渠道
+/// （provider 恰为 `anthropic`）按该条目自身发布价自证派生。
+fn modelsdev_cache_write_tiers(e: &crate::modelsdev::SnapshotEntry) -> Option<CacheWriteTiers> {
+    if let Some(tiers) = explicit_tiers(e.cache_write_5m, e.cache_write_1h) {
+        return Some(tiers);
+    }
+    if e.id.split_once('/').map(|(p, _)| p) != Some("anthropic") {
+        return None;
+    }
+    anthropic_derived_tiers(e.input, e.cache_write)
+}
+
+/// N18：**分段**分档价——显式字段优先；否则仅 Anthropic 官方渠道按该
+/// 分段自身数据自证派生（高档 input=6、cache_write=7.5 = 1.25 × 6 →
+/// 1h = 12）。其他渠道/自证不通过 → None（分档价未知）。
+fn modelsdev_segment_cache_write_tiers(
+    provider: &str,
+    s: &crate::modelsdev::SnapshotSegment,
+) -> Option<CacheWriteTiers> {
+    if let Some(tiers) = explicit_tiers(s.cache_write_5m, s.cache_write_1h) {
+        return Some(tiers);
+    }
+    if provider != "anthropic" {
+        return None;
+    }
+    anthropic_derived_tiers(s.input, s.cache_write)
 }
 
 /// N18：某层分档价合法性（非法值 → 整条候选拒绝，与其他单价同规则）。
@@ -1364,6 +1399,13 @@ fn external_segment(
             s.min_tokens, s.application, s.application
         ));
     }
+    // N18：分段级分档价合法性（负数/非有限/same_as_input → 整段拒绝）。
+    if tier_rate_invalid(s.cache_write_5m) || tier_rate_invalid(s.cache_write_1h) {
+        return Err(format!(
+            "分段 {} 缓存写分档价非法（须为有限非负数字；分档不支持 same_as_input）",
+            s.min_tokens
+        ));
+    }
     Ok(PriceSegment {
         label: s.label.clone(),
         min_tokens: s.min_tokens,
@@ -1399,6 +1441,13 @@ fn external_schedule_plan(
             return Err(format!(
                 "时间窗 [{}, {}) 非法（须 start < end，同日窗口）",
                 p.start_time, p.end_time
+            ));
+        }
+        // N18：时段级分档价合法性（非法 → 整条规则拒绝）。
+        if tier_rate_invalid(p.cache_write_5m) || tier_rate_invalid(p.cache_write_1h) {
+            return Err(format!(
+                "时间规则 {:?} 时段 {}–{} 缓存写分档价非法（须为有限非负数字；分档不支持 same_as_input）",
+                s.label, p.start_time, p.end_time
             ));
         }
         let weekdays = p
@@ -1497,6 +1546,30 @@ fn external_model_plan(m: &ExternalModel) -> Result<(PricePlan, Vec<String>), St
                 "时间规则 {:?} 分项 {comp} 价格非法（须为有限非负）: {v}",
                 s.label
             ));
+        }
+        // N18：规则级/时段/规则内分段的分档价与四类单价同规则——显式
+        // 数值非法一律**整条候选拒绝**（不得跳过脏规则后按基础价计费）。
+        if tier_rate_invalid(s.cache_write_5m) || tier_rate_invalid(s.cache_write_1h) {
+            return Err(format!(
+                "时间规则 {:?} 缓存写分档价非法（须为有限非负数字；分档不支持 same_as_input）: {s:?}",
+                s.label
+            ));
+        }
+        for p in &s.period {
+            if tier_rate_invalid(p.cache_write_5m) || tier_rate_invalid(p.cache_write_1h) {
+                return Err(format!(
+                    "时间规则 {:?} 时段 {}–{} 缓存写分档价非法（须为有限非负数字；分档不支持 same_as_input）",
+                    s.label, p.start_time, p.end_time
+                ));
+            }
+        }
+        for seg in &s.segment {
+            if tier_rate_invalid(seg.cache_write_5m) || tier_rate_invalid(seg.cache_write_1h) {
+                return Err(format!(
+                    "时间规则 {:?} 分段（min {}）缓存写分档价非法（须为有限非负数字；分档不支持 same_as_input）",
+                    s.label, seg.min_tokens
+                ));
+            }
         }
         for p in &s.period {
             let pr = PriceRates {
@@ -2140,6 +2213,7 @@ impl Pricing {
                         // Task 2：快照分段（models.dev size 语义已在同步时
                         // 转换为规范 [min, max)）→ PriceSegment。非法规则
                         // 防御性丢弃分段只留基础价，并给出诊断。
+                        let md_provider = e.id.split_once('/').map(|(p, _)| p.to_string());
                         let segments = e
                             .segments
                             .iter()
@@ -2147,12 +2221,19 @@ impl Pricing {
                                 label: s.label.clone(),
                                 min_tokens: s.min_tokens,
                                 max_tokens: s.max_tokens,
-                                prices: PriceRates::from_options(
-                                    s.input,
-                                    s.output,
-                                    s.cache_write,
-                                    s.cache_read,
-                                ),
+                                prices: PriceRates {
+                                    // N18：分段级分档（显式优先，否则官方
+                                    // 渠道按该段自身数据自证派生）。
+                                    cache_write_tiers: md_provider
+                                        .as_deref()
+                                        .and_then(|p| modelsdev_segment_cache_write_tiers(p, s)),
+                                    ..PriceRates::from_options(
+                                        s.input,
+                                        s.output,
+                                        s.cache_write,
+                                        s.cache_read,
+                                    )
+                                },
                             })
                             .collect::<Vec<_>>();
                         let base = PriceRates {
@@ -3795,6 +3876,8 @@ mod tests {
             output: Some(input * 4.0),
             cache_read: Some(input / 10.0),
             cache_write: Some(input * 1.25),
+            cache_write_5m: None,
+            cache_write_1h: None,
         };
         let snapshot = Snapshot {
             v: 3,

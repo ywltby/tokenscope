@@ -286,7 +286,13 @@ impl TokenCounts {
         self.cache_write_1h += e.cache_write_1h;
         // 分档可信度是逐事件的属性：总量口径上只要有一个未知分档事件，
         // 聚合就整体退回「分项未知」（不假装聚合结果仍可分档计价）。
-        self.cache_write_split_known &= e.cache_write_split_known;
+        // 首条事件决定初值（空累计必须保持「未知」，不得因默认 false 把
+        // 全可信累加成未知）；其后逐条 AND。
+        if self.cache_write == e.cache_write_tokens {
+            self.cache_write_split_known = e.cache_write_split_known;
+        } else {
+            self.cache_write_split_known &= e.cache_write_split_known;
+        }
     }
 
     pub fn add(&mut self, other: &TokenCounts) {
@@ -296,7 +302,11 @@ impl TokenCounts {
         self.cache_read += other.cache_read;
         self.cache_write_5m += other.cache_write_5m;
         self.cache_write_1h += other.cache_write_1h;
-        self.cache_write_split_known &= other.cache_write_split_known;
+        if self.cache_write == other.cache_write {
+            self.cache_write_split_known = other.cache_write_split_known;
+        } else {
+            self.cache_write_split_known &= other.cache_write_split_known;
+        }
     }
 
     pub fn total(&self) -> u64 {
@@ -305,15 +315,25 @@ impl TokenCounts {
 
     /// SF08：受检累加——任一桶溢出返回 None（聚合层据此整体报错，
     /// 不回绕、不饱和、不做部分提交）。
+    /// N18：分档可信度按「首条定值、其后 AND」与 `add` 一致——空侧
+    /// （默认未知）不把全可信结果拖成未知。
     pub fn checked_add(&self, other: &TokenCounts) -> Option<TokenCounts> {
+        let cache_write = self.cache_write.checked_add(other.cache_write)?;
+        let split_known = if self.cache_write == 0 {
+            other.cache_write_split_known
+        } else if other.cache_write == 0 {
+            self.cache_write_split_known
+        } else {
+            self.cache_write_split_known && other.cache_write_split_known
+        };
         Some(TokenCounts {
             input: self.input.checked_add(other.input)?,
             output: self.output.checked_add(other.output)?,
-            cache_write: self.cache_write.checked_add(other.cache_write)?,
+            cache_write,
             cache_read: self.cache_read.checked_add(other.cache_read)?,
             cache_write_5m: self.cache_write_5m.checked_add(other.cache_write_5m)?,
             cache_write_1h: self.cache_write_1h.checked_add(other.cache_write_1h)?,
-            cache_write_split_known: self.cache_write_split_known && other.cache_write_split_known,
+            cache_write_split_known: split_known,
         })
     }
 }
