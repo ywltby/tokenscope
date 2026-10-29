@@ -712,6 +712,18 @@ fn pick_cache_write_tiers(
     time: Option<&PriceRates>,
     base: Option<CacheWriteTiers>,
 ) -> TierResolution {
+    // 预检：**任何层**都没有声明 5m/1h 分档价 → `Undeclared`。此时即使
+    // 上层显式改写了写入价，也不得判为“分档被阻断”——阻断的前提是
+    // 确有下层分档价被截断（否则就是从未声明分档的候选，保持既有兼容
+    // 口径：complete=true、无估算标志）。
+    let any_declared = [seg, time]
+        .into_iter()
+        .flatten()
+        .any(|r| r.cache_write_tiers.is_some())
+        || base.is_some();
+    if !any_declared {
+        return TierResolution::Undeclared;
+    }
     for layer in [seg, time] {
         let Some(rates) = layer else { continue };
         if rates.cache_write != RateSpec::Unknown {

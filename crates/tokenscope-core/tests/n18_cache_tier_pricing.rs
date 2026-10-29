@@ -1501,3 +1501,122 @@ cache_write = 9.0
     assert!((unknown.cost - 18.0).abs() < 1e-9);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ── N18 七轮（复核项 1）：从未声明分档价不得误判为“分档被阻断” ───────
+
+#[test]
+fn n18_never_declared_tiers_with_layer_overrides_keep_compat() {
+    // 反例：基础合并价 $2、分段改写 $9，全部层都没有 5m/1h 价——
+    // 事件分档未知时必须保持既有兼容口径：按合并价 $18 完整计费、
+    // 无估算标志（不得因“上层改写”被误判为分档被阻断）。
+    let dir = tiered_dir("never-declared-overrides");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 2.0
+
+[[model.segment]]
+label = ">200K"
+min_tokens = 200_000
+input = 6.0
+cache_write = 9.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let unknown = p
+        .estimate("m", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!(unknown.complete, "从未声明分档价 → 既有兼容口径");
+    assert!((unknown.cost - 18.0).abs() < 1e-9, "实际 {}", unknown.cost);
+    assert!(!unknown.cache_write_split_estimated);
+    assert_eq!(unknown.unknown.cache_write, 0);
+    // 事件分档已知 + 无分档价：仍为未计价（不因合并价可得而改变）。
+    let known = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    assert!(!known.complete);
+    assert_eq!(known.unknown.cache_write, 2_000_000);
+    assert_eq!(known.cost, 0.0);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_multi_candidate_never_declared_selects_highest_complete_without_tier_claim() {
+    // 反例续：加入另一条完整候选 $1——两条都完整，按最高完整费用选 $18，
+    // 不得选 $1，也不得声称 $18 候选提供了分档价。
+    let dir = tiered_dir("never-declared-multi");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "chan-m/x"
+input = 3.0
+output = 15.0
+cache_write = 2.0
+
+[[model.segment]]
+label = ">200K"
+min_tokens = 200_000
+input = 6.0
+cache_write = 9.0
+
+[[model]]
+prefix = "chan-c/x"
+input = 3.0
+output = 15.0
+cache_write = 1.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let est = p
+        .estimate("chan-m/x", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    let matched = est.matched.as_ref().unwrap();
+    assert_eq!(matched.raw_key, "chan-m/x", "两条完整候选取最高费用 $18");
+    assert!(est.complete, "从未声明分档价 → 两条候选都完整");
+    assert!((est.cost - 18.0).abs() < 1e-9, "实际 {}", est.cost);
+    assert!(!est.cache_write_split_estimated);
+    assert!(
+        est.excluded_candidate_warning.is_none(),
+        "没有不完整候选被排除，不得声称提供分档价：{:?}",
+        est.excluded_candidate_warning
+    );
+    assert_eq!(matched.reason, "highest_complete_cost");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_blocked_regression_still_flags_when_lower_tiers_exist() {
+    // 回归：下层确有分档价、上层改写合并价但缺分档的原反例继续标估算。
+    let dir = tiered_dir("blocked-regression");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.segment]]
+label = ">200K"
+min_tokens = 200_000
+input = 6.0
+cache_write = 9.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let unknown = p
+        .estimate("m", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!(!unknown.complete);
+    assert!(unknown.cache_write_split_estimated);
+    assert!((unknown.cost - 18.0).abs() < 1e-9);
+    std::fs::remove_dir_all(&dir).ok();
+}

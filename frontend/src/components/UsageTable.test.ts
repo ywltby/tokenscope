@@ -262,3 +262,68 @@ describe("N18 分组费用列的分档估算标记", () => {
     expect(text).toContain("$3.75");
   });
 });
+
+// N18 复核项 2：零价估算与未计价混合组——「未知†」与「分档估算」须独立
+// 同时出现（金额 0 时原实现隐藏了分档估算标记）。
+describe("N18 分组费用列零价估算与未计价并存", () => {
+  function exposed(w: ReturnType<typeof mount>) {
+    return w.vm as unknown as {
+      columns: { key: string; render?: (row: object) => unknown }[];
+    };
+  }
+  function costText(group: Group, totalsUnknown: boolean): string {
+    const w = mount(UsageTable, { props: { report: report([group], totalsUnknown) } });
+    const cols = exposed(w).columns;
+    const cost = cols.find((x) => x.key === "cost_usd");
+    const vnode = cost!.render!(group) as { children?: unknown };
+    if (typeof vnode.children === "string") return vnode.children;
+    if (Array.isArray(vnode.children)) {
+      return (vnode.children as unknown[])
+        .map((x) =>
+          typeof x === "string" ? x : String((x as { children?: string })?.children ?? ""),
+        )
+        .join("");
+    }
+    return String(vnode.children ?? "");
+  }
+  it("cost=0 且 estimated=true、unknown_pricing=true：同时显示未知†与分档估算", () => {
+    const mixed = group("g-zero-mix", { cache_write: 2_000_000 });
+    mixed.cost_usd = 0;
+    mixed.unknown_pricing = true;
+    mixed.cache_write_split_estimated = true;
+    const text = costText(mixed, true);
+    expect(text).toContain("未知†");
+    expect(text).toContain("分档估算");
+  });
+
+  it("对照：纯未计价（无估算）只有未知†", () => {
+    const unpriced = group("g-pure-unpriced", { cache_write: 2_000_000 });
+    unpriced.cost_usd = 0;
+    unpriced.unknown_pricing = true;
+    unpriced.cache_write_split_estimated = false;
+    const text = costText(unpriced, true);
+    expect(text).toContain("未知†");
+    expect(text).not.toContain("分档估算");
+  });
+
+  it("对照：纯估算（金额 0，显式 0 合并价）只有分档估算", () => {
+    const est = group("g-pure-est");
+    est.cost_usd = 0;
+    est.unknown_pricing = false;
+    est.cache_write_split_estimated = true;
+    const text = costText(est, false);
+    expect(text).toContain("分档估算");
+    expect(text).not.toContain("未知†");
+  });
+
+  it("对照：完整组无任何标记", () => {
+    const complete = group("g-complete");
+    complete.cost_usd = 7.5;
+    complete.unknown_pricing = false;
+    complete.cache_write_split_estimated = false;
+    const text = costText(complete, false);
+    expect(text).toContain("$7.50");
+    expect(text).not.toContain("未知†");
+    expect(text).not.toContain("分档估算");
+  });
+});
