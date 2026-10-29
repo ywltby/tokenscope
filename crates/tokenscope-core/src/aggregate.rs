@@ -93,6 +93,10 @@ pub struct Group {
     pub tokens: TokenCounts,
     pub cost_usd: f64,
     pub unknown_pricing: bool,
+    /// N18：本组含「事件缺写入分档、按合并价估算」的请求——独立于
+    /// `unknown_pricing`（后者只表示真有未计价 token）。UI 必须分开披露。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cache_write_split_estimated: bool,
     pub unknown_tokens: TokenCounts,
     /// H06：本组未知费用的**原因**（如 `rollup_only` = 该组含只有日粒度的历史，
     /// 不能按当前档位/峰谷重估）。缺价（模型未收录）时为 None，两者的处置同为
@@ -321,6 +325,9 @@ fn push_event_into(
             Some(est) => g.unknown_pricing || est.unknown.total() > 0,
             None => true,
         };
+        g.cache_write_split_estimated |= estimate
+            .as_ref()
+            .is_some_and(|est| est.cache_write_split_estimated);
         if RECORD_AGENTS && !g.agents.contains(&e.agent.as_str()) {
             g.agents.push(e.agent.as_str());
         }
@@ -440,6 +447,7 @@ impl AggregateState {
                 anyhow::bail!("总计费用累计出现非有限值");
             }
             totals.unknown_pricing |= g.unknown_pricing;
+            totals.cache_write_split_estimated |= g.cache_write_split_estimated;
             if totals.unknown_reason.is_none() {
                 totals.unknown_reason = g.unknown_reason;
             }

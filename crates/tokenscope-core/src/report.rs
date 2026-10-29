@@ -4724,6 +4724,123 @@ cache_write_1h = 6.0
         );
         std::fs::remove_dir_all(&dir2).ok();
     }
+
+    /// N18 复核项 5：用真实 report 入口跑一个隔离场景，返回目录与汇总/明细。
+    fn n18_report_case(
+        tag: &str,
+        pricing: &str,
+        usage_lines: &str,
+    ) -> (PathBuf, SummaryReport, EventList) {
+        let dir = tmp_dir(tag);
+        let proj = dir.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("sess.jsonl"), usage_lines).unwrap();
+        let toml = dir.join("pricing.toml");
+        std::fs::write(&toml, pricing).unwrap();
+        let cache = dir.join("cache");
+        let opts = SummaryOptions {
+            workbuddy_enabled: Some(false),
+            workbuddy_ai_enabled: Some(false),
+            by: GroupBy::Day,
+            claude_dir: Some(dir.clone()),
+            codex_dir: Some(PathBuf::from("Z:/no-such-codex")),
+            cache_dir: Some(cache.clone()),
+            pricing_index: Some(cache.join("pricing-index.json")),
+            pricing_path: Some(toml),
+            openrouter_path: Some(PathBuf::from("Z:/no-such/or.json")),
+            modelsdev_path: Some(PathBuf::from("Z:/no-such/md.json")),
+            tz: Some("UTC".to_string()),
+            refresh: true,
+            ..Default::default()
+        };
+        let report = summary(&opts).unwrap();
+        let list = list_events(&opts, &EventFilter::default()).unwrap();
+        (dir, report, list)
+    }
+
+    #[test]
+    fn n18_summary_discloses_split_estimated_independently_of_unpriced() {
+        let estimate_line = r#"{"type":"assistant","timestamp":"2026-01-05T15:00:00.000Z","sessionId":"s","isSidechain":false,"message":{"id":"e","model":"tiered","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":2000000,"cache_read_input_tokens":0}}}"#;
+        let unpriced_line = r#"{"type":"assistant","timestamp":"2026-01-05T13:00:00.000Z","sessionId":"s","isSidechain":false,"message":{"id":"u","model":"no-tier","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":2000000,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":1000000,"ephemeral_1h_input_tokens":1000000}}}}"#;
+        let zero_line = r#"{"type":"assistant","timestamp":"2026-01-05T11:00:00.000Z","sessionId":"s","isSidechain":false,"message":{"id":"z","model":"zero","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":2000000,"cache_read_input_tokens":0}}}"#;
+        let tiered_pricing = r#"[[model]]
+prefix = "tiered"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+"#;
+        let plain_pricing = r#"[[model]]
+prefix = "no-tier"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+"#;
+        let zero_pricing = r#"[[model]]
+prefix = "zero"
+input = 3.0
+output = 15.0
+cache_write = 0.0
+cache_write_5m = 0.0
+cache_write_1h = 6.0
+"#;
+
+        // (a) 纯估算：estimated=true、unknown_pricing=false、unknown=0；
+        // reason 可能是 highest_partial_cost，但事件写 token 已计价。
+        let (d, report, list) =
+            n18_report_case("n18-sum-est", tiered_pricing, &format!("{estimate_line}\n"));
+        assert!(report.totals.cache_write_split_estimated);
+        assert!(!report.totals.unknown_pricing);
+        assert_eq!(report.totals.unknown_tokens.total(), 0);
+        assert!((report.totals.cost_usd - 7.5).abs() < 1e-9);
+        assert_eq!(report.totals.tokens.cache_write, 2_000_000);
+        let bd = list.rows[0].cost_breakdown.as_ref().unwrap();
+        assert_eq!(bd.matched.reason, "highest_partial_cost");
+        assert!(bd.cache_write_split_estimated && !bd.complete);
+        assert_eq!(bd.unknown.total(), 0);
+        let row_sum: f64 = list.rows.iter().filter_map(|r| r.cost_usd).sum();
+        assert!((report.totals.cost_usd - row_sum).abs() < 1e-9);
+        std::fs::remove_dir_all(&d).ok();
+
+        // (b) 纯缺价：estimated=false、unknown_pricing=true。
+        let (d, report, _) = n18_report_case(
+            "n18-sum-unpriced",
+            plain_pricing,
+            &format!("{unpriced_line}\n"),
+        );
+        assert!(!report.totals.cache_write_split_estimated);
+        assert!(report.totals.unknown_pricing);
+        assert_eq!(report.totals.unknown_tokens.cache_write, 2_000_000);
+        assert_eq!(report.totals.tokens.cache_write, 2_000_000);
+        std::fs::remove_dir_all(&d).ok();
+
+        // (c) 混合：两个状态同时为真，金额只含估算请求。
+        let mixed_pricing = format!("{tiered_pricing}\n{plain_pricing}");
+        let (d, report, list) = n18_report_case(
+            "n18-sum-mixed",
+            &mixed_pricing,
+            &format!("{estimate_line}\n{unpriced_line}\n"),
+        );
+        assert!(report.totals.cache_write_split_estimated);
+        assert!(report.totals.unknown_pricing);
+        assert!((report.totals.cost_usd - 7.5).abs() < 1e-9);
+        assert_eq!(report.totals.unknown_tokens.cache_write, 2_000_000);
+        assert_eq!(report.totals.tokens.cache_write, 4_000_000);
+        let row_sum: f64 = list.rows.iter().filter_map(|r| r.cost_usd).sum();
+        assert!((report.totals.cost_usd - row_sum).abs() < 1e-9);
+        std::fs::remove_dir_all(&d).ok();
+
+        // (d) 合并价显式 0、1h 有价：estimated=true 但金额 0、无未计价。
+        let (d, report, _) =
+            n18_report_case("n18-sum-zero", zero_pricing, &format!("{zero_line}\n"));
+        assert!(report.totals.cache_write_split_estimated);
+        assert!(!report.totals.unknown_pricing);
+        assert_eq!(report.totals.unknown_tokens.total(), 0);
+        assert_eq!(report.totals.cost_usd, 0.0);
+        assert_eq!(report.totals.tokens.cache_write, 2_000_000);
+        std::fs::remove_dir_all(&d).ok();
+    }
 }
 
 /// B4 测试：解析期间文件被追加 → 指纹复核失败 → 不写成功缓存。

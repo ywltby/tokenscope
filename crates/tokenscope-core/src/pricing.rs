@@ -743,11 +743,14 @@ fn normalize_weekday(s: &str) -> Result<String, String> {
 
 /// 规则价格是否含**显式声明**（Fixed 含显式 0、SameAsInput 都算）。
 /// 全 Unknown 的空规则和仅标签/时区不算声明（F02）。
+/// N18：只声明 5m/1h 分档价、四类单价全缺的规则同样是「已声明规则」——
+/// 否则命中的规则会被整体跳过，分档价永远不会参与计价。
 fn rates_declared(r: &PriceRates) -> bool {
     r.input != RateSpec::Unknown
         || r.output != RateSpec::Unknown
         || r.cache_write != RateSpec::Unknown
         || r.cache_read != RateSpec::Unknown
+        || r.cache_write_tiers.is_some()
 }
 
 /// 请求时间命中的时间规则变体（Task 4A）：每个命中规则返回
@@ -844,11 +847,17 @@ fn estimate_entry(
                     output: p.prices.output.or_explicit(sched.prices.output),
                     cache_write: p.prices.cache_write.or_explicit(sched.prices.cache_write),
                     cache_read: p.prices.cache_read.or_explicit(sched.prices.cache_read),
-                    // N18：分档价同样 period ?? schedule 回退。
-                    cache_write_tiers: p
-                        .prices
-                        .cache_write_tiers
-                        .or(sched.prices.cache_write_tiers),
+                    // N18：period 与 schedule 的分档层级身份必须保留——
+                    // period 自己改写了写入价但没给分档时，不得借用
+                    // schedule 的比率（写入价结构已在 period 层改变）；
+                    // period 未改写写入价时才按 period ?? schedule 继承。
+                    cache_write_tiers: if p.prices.cache_write != RateSpec::Unknown {
+                        p.prices.cache_write_tiers
+                    } else {
+                        p.prices
+                            .cache_write_tiers
+                            .or(sched.prices.cache_write_tiers)
+                    },
                 },
                 None => sched.prices,
             };
@@ -954,7 +963,7 @@ fn estimate_entry(
         }
     } else {
         let (wp, wk) = resolve(rates.cache_write, false);
-        push_cost_line(
+        let write_priced = push_cost_line(
             &mut cost,
             &mut complete,
             &mut lines,
@@ -964,8 +973,11 @@ fn estimate_entry(
             wk,
             &mut unknown.cache_write,
         );
-        // 候选声明了分档价而事件分档未知 → 估算而非完整精确费用。
-        if tiers.is_some() && t.cache_write > 0 {
+        // 候选声明了分档价而事件分档未知：**只有合并写价确实计入金额**
+        // 才是「按合并价估算」。合并写价缺失或金额溢出时写 token 是未计价，
+        // 不得声称已估算（unknown>0、split_estimated=false）。
+        // 合并价显式 0 是合法正例：priced=true、估算成立、金额为 0。
+        if tiers.is_some() && t.cache_write > 0 && write_priced {
             split_estimated = true;
             complete = false;
         }
@@ -999,6 +1011,7 @@ fn estimate_entry(
 
 /// N18：单个计价分项行——已计价计入 cost；缺价/溢出按 unknown 保留并
 /// 标 incomplete（与原 estimate_entry 行为逐字段一致，仅为分档拆行复用）。
+/// 返回该行是否**实际计入金额**（用于区分「按合并价估算」与「未计价」）。
 #[allow(clippy::too_many_arguments)]
 fn push_cost_line(
     cost: &mut f64,
@@ -1009,7 +1022,7 @@ fn push_cost_line(
     price: Option<f64>,
     rate_kind: RateKind,
     unknown_slot: &mut u64,
-) {
+) -> bool {
     match price {
         Some(p) => {
             // F04：先除后乘，避免有限单价的中间溢出（1M × 1e308/M
@@ -1029,6 +1042,7 @@ fn push_cost_line(
                     rate_kind,
                     overflow: false,
                 });
+                true
             } else {
                 if tokens > 0 {
                     *complete = false;
@@ -1045,6 +1059,7 @@ fn push_cost_line(
                     rate_kind,
                     overflow: true,
                 });
+                false
             }
         }
         None => {
@@ -1061,6 +1076,7 @@ fn push_cost_line(
                 rate_kind: RateKind::Unknown,
                 overflow: false,
             });
+            false
         }
     }
 }

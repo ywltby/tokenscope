@@ -1073,3 +1073,277 @@ cache_write_5m = 1e308
     assert!(!est.cache_write_split_estimated, "这是未计价不是估算");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ── N18 五轮（复核项 1/2/3）─────────────────────────────────────────
+
+#[test]
+fn n18_time_rule_declaring_only_tiers_is_recognized() {
+    // 复核项 1：规则只声明 5m/1h（没有 period、没有四类单价）也必须被
+    // 识别为已声明规则；两档各 1M → 7.5 + 12 = $19.5，而不是回退基础 9.75。
+    let dir = tiered_dir("rule-only-tiers");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+cache_write_5m = 7.5
+cache_write_1h = 12.0
+"#,
+    );
+    let (p, warnings) = Pricing::load(Some(&toml), None, None);
+    assert!(warnings.is_empty(), "warnings: {warnings:?}");
+    let est = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    assert!((est.cost - 19.5).abs() < 1e-9, "实际 {}", est.cost);
+    assert!(est.complete);
+    assert_eq!(
+        est.matched.as_ref().unwrap().schedule_label.as_deref(),
+        Some("peak"),
+        "只声明分档价的规则必须被选中"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_time_rule_segment_declaring_only_tiers_is_recognized() {
+    // 复核项 1：规则内分段只声明分档价，同样必须保留规则并参与计价。
+    let dir = tiered_dir("rule-seg-only-tiers");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+
+[[model.schedule.segment]]
+min_tokens = 0
+cache_write_5m = 7.5
+cache_write_1h = 12.0
+"#,
+    );
+    let (p, warnings) = Pricing::load(Some(&toml), None, None);
+    assert!(warnings.is_empty(), "warnings: {warnings:?}");
+    let est = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    assert!((est.cost - 19.5).abs() < 1e-9, "实际 {}", est.cost);
+    assert!(est.complete);
+    assert_eq!(
+        est.matched.as_ref().unwrap().schedule_label.as_deref(),
+        Some("peak")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_period_overriding_write_without_tiers_is_unknown_not_schedule_tiers() {
+    // 复核项 2：period 显式 cache_write=9 但无分档价 → 不得借用 schedule
+    // 的 3.75/6 并标完整；写 token 记未计价。
+    let dir = tiered_dir("period-write-no-tiers");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "23:59"
+cache_write = 9.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let est = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    assert!(!est.complete, "period 改写写入价但无分档依据 → 不得完整");
+    assert_eq!(est.unknown.cache_write, 2_000_000);
+    assert!(!est.cache_write_split_estimated, "这是未知不是估算");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_period_without_override_inherits_schedule_tiers() {
+    // 对照：period 未覆盖价格 → 正常继承 schedule 的分档价。
+    let dir = tiered_dir("period-inherit");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "23:59"
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let est = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    assert!((est.cost - 9.75).abs() < 1e-9, "实际 {}", est.cost);
+    assert!(est.complete);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_period_declaring_own_tiers_prices_correctly() {
+    // 对照：period 自己声明分档价 → 用 period 的分档（7.5/12）。
+    let dir = tiered_dir("period-own-tiers");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule]]
+label = "peak"
+timezone = "UTC"
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+
+[[model.schedule.period]]
+start_time = "00:00"
+end_time = "23:59"
+cache_write = 9.0
+cache_write_5m = 7.5
+cache_write_1h = 12.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let est = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at())
+        .unwrap();
+    assert!((est.cost - 19.5).abs() < 1e-9, "实际 {}", est.cost);
+    assert!(est.complete);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_unknown_split_without_merged_price_is_unpriced_not_estimated() {
+    // 复核项 3：候选声明分档价但没有合并写价 → 写 token 未计价，
+    // 不得声称按合并价估算。
+    let dir = tiered_dir("no-merged-write");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let est = p
+        .estimate("m", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!(!est.complete);
+    assert_eq!(est.unknown.cache_write, 2_000_000, "写 token 未计价");
+    assert!(!est.cache_write_split_estimated, "缺合并价不是估算");
+    assert_eq!(est.cost, 0.0);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_unknown_split_with_overflowing_merged_price_is_unpriced_not_estimated() {
+    // 复核项 3：合并写价金额溢出 → 同样未计价，不得声称估算。
+    let dir = tiered_dir("overflow-merged-write");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 1e308
+cache_write_5m = 3.75
+cache_write_1h = 6.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let est = p
+        .estimate("m", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!(!est.complete);
+    assert_eq!(est.unknown.cache_write, 2_000_000);
+    assert!(!est.cache_write_split_estimated, "金额溢出不是估算");
+    assert_eq!(est.cost, 0.0);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn n18_unknown_split_with_explicit_zero_merged_price_is_estimated_zero() {
+    // 复核项 3 正例：合并价为合法显式 0 → 估算成立（金额 0、无未计价），
+    // 分档价仍由候选声明（1h=6）作为依据。
+    let dir = tiered_dir("zero-merged-write");
+    let toml = write_toml(
+        &dir,
+        r#"
+[[model]]
+prefix = "m"
+input = 3.0
+output = 15.0
+cache_write = 0.0
+cache_write_5m = 0.0
+cache_write_1h = 6.0
+"#,
+    );
+    let (p, _) = Pricing::load(Some(&toml), None, None);
+    let est = p
+        .estimate("m", &unknown_split_counts(2_000_000), at())
+        .unwrap();
+    assert!(!est.complete);
+    assert!(est.cache_write_split_estimated, "显式 0 是合法估算依据");
+    assert_eq!(est.unknown.cache_write, 0, "显式 0 不是未计价");
+    assert_eq!(est.cost, 0.0);
+    std::fs::remove_dir_all(&dir).ok();
+}

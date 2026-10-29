@@ -154,9 +154,14 @@ function resultRows(bd: EventCostBreakdown): BreakdownRow[] {
 
 function sourceRows(bd: EventCostBreakdown): BreakdownRow[] {
   const m = bd.matched;
+  // 复核项 4：reason=highest_partial_cost 也可能是**纯估算**（事件缺分档、
+  // 候选分档价齐全，unknown token=0）。此时不得声称有未计价 token。
+  const unknownTokens = Object.values(bd.unknown).reduce((sum, n) => sum + n, 0);
   const selection =
     m.reason === "highest_partial_cost"
-      ? `候选 ${m.candidate_count} 条（均不完整），取已知费用最高者；未计价 token 见未知行`
+      ? unknownTokens === 0 && bd.cache_write_split_estimated
+        ? `候选 ${m.candidate_count} 条（均不完整，因事件缺写入分档），写费按合并价估算`
+        : `候选 ${m.candidate_count} 条（均不完整），取已知费用最高者；未计价 token 见未知行`
       : `候选 ${m.candidate_count} 条（完整 ${m.complete_candidate_count ?? "?"}/不完整 ${
           m.incomplete_candidate_count ?? "?"
         }），在完整候选中取最高费用（保守估算，非服务器实际路由）`;

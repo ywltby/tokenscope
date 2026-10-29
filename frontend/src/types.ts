@@ -16,6 +16,8 @@ export interface Group {
   tokens: TokenCounts;
   cost_usd: number;
   unknown_pricing: boolean;
+  /** N18：含「事件缺写入分档、按合并价估算」的请求（独立于 unknown_pricing） */
+  cache_write_split_estimated?: boolean;
   unknown_tokens: TokenCounts;
   /** H06：未知费用的原因（`rollup_only` = 该组含只有日粒度的历史）。 */
   unknown_reason?: "rollup_only" | null;

@@ -529,3 +529,57 @@ describe("N18 estimated vs unpriced wording", () => {
     expect(text).toContain("估算合计 $3.75");
   });
 });
+
+// N18 复核项 4：纯估算时 matched.reason 可能是 highest_partial_cost，
+// 明细所有文案不得声称存在未计价 token；真缺价/混合仍须提示。
+describe("N18 partial reason wording", () => {
+  const pureEstimate = () => {
+    const b = bd({
+      lines: [
+        { kind: "input", tokens: 0, unit_price: 3, subtotal: 0, priced: true },
+        { kind: "output", tokens: 0, unit_price: 15, subtotal: 0, priced: true },
+        { kind: "cache_write", tokens: 2_000_000, unit_price: 3.75, subtotal: 7.5, priced: true },
+        { kind: "cache_read", tokens: 0, unit_price: 0.3, subtotal: 0, priced: true },
+      ],
+      cost_usd: 7.5,
+      complete: false,
+      cache_write_split_estimated: true,
+      unknown: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    });
+    b.matched.reason = "highest_partial_cost";
+    return b;
+  };
+
+  it("纯估算 + highest_partial_cost：不出现未计价字样", () => {
+    const text = formatCostBreakdownText(pureEstimate());
+    expect(text).toContain("因事件缺写入分档");
+    expect(text).not.toContain("未计价");
+    expect(text).not.toContain("缺价 ≠ 免费");
+  });
+
+  it("真缺价 + highest_partial_cost：仍提示未计价", () => {
+    const unp = pureEstimate();
+    unp.cache_write_split_estimated = false;
+    unp.lines = [
+      { kind: "cache_write_5m", tokens: 1_000_000, unit_price: null, subtotal: 0, priced: false },
+      { kind: "cache_write_1h", tokens: 1_000_000, unit_price: 6, subtotal: 6, priced: true },
+    ];
+    unp.unknown = { input: 0, output: 0, cache_write: 1_000_000, cache_read: 0 };
+    unp.cost_usd = 6;
+    const text = formatCostBreakdownText(unp);
+    expect(text).toContain("未计价");
+    expect(text).toContain("缺价 ≠ 免费");
+  });
+
+  it("混合：估算与未计价并存时，选择说明同时给出两者", () => {
+    const mixed = pureEstimate();
+    mixed.unknown = { input: 0, output: 0, cache_write: 1_000_000, cache_read: 0 };
+    mixed.lines = [
+      ...mixed.lines,
+      { kind: "cache_write_5m", tokens: 1_000_000, unit_price: null, subtotal: 0, priced: false },
+    ];
+    const text = formatCostBreakdownText(mixed);
+    expect(text).toContain("未计价");
+    expect(text).toContain("写入分档未知");
+  });
+});

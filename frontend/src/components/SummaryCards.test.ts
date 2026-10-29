@@ -222,3 +222,42 @@ describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
     expect(trigger.text()).not.toContain("命中率 = 缓存命中");
   });
 });
+
+// N18 复核项 5：分档未知的「估算」与真正未计价必须分开披露。
+describe("N18 写入分档估算披露", () => {
+  it("纯估算：显示「含写入分档估算」但不显示「含未计价 token」", () => {
+    const w = mountCards(totals({ cache_write_split_estimated: true, unknown_pricing: false }));
+    expect(w.text()).toContain("含写入分档估算");
+    expect(w.text()).not.toContain("含未计价 token");
+  });
+
+  it("纯缺价：只显示未计价，不显示分档估算", () => {
+    const w = mountCards(
+      totals({
+        cache_write_split_estimated: false,
+        unknown_pricing: true,
+        unknown_tokens: { input: 0, output: 0, cache_write: 2_000_000, cache_read: 0 },
+      }),
+    );
+    expect(w.text()).toContain("含未计价 token");
+    expect(w.text()).not.toContain("含写入分档估算");
+  });
+
+  it("混合：两个胶囊同时出现", () => {
+    const w = mountCards(totals({ cache_write_split_estimated: true, unknown_pricing: true }));
+    expect(w.text()).toContain("含写入分档估算");
+    expect(w.text()).toContain("含未计价 token");
+  });
+
+  it("合并价为 0 的估算：仍披露估算，不标未计价", () => {
+    const w = mountCards(
+      totals({
+        cost_usd: 0,
+        cache_write_split_estimated: true,
+        unknown_pricing: false,
+      }),
+    );
+    expect(w.text()).toContain("含写入分档估算");
+    expect(w.text()).not.toContain("含未计价 token");
+  });
+});

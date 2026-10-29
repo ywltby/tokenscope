@@ -78,6 +78,13 @@ const parts = computed(() =>
           <span v-if="totals.unknown_pricing" class="ts-pill ts-pill-warning">
             含未计价 token
           </span>
+          <span
+            v-if="totals.cache_write_split_estimated"
+            class="ts-pill ts-pill-warning"
+            title="部分请求缺少 5 分钟/1 小时写入分项，写费按合并价估算（非完整精确费用）"
+          >
+            含写入分档估算
+          </span>
         </div>
         <div class="metric-value metric-value-main ts-num">
           <template v-if="costUnknownOnly">未知†</template>
