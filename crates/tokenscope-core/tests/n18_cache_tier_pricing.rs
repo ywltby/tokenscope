@@ -1813,9 +1813,13 @@ cache_write = 1.0
 
 #[test]
 fn n18_non_matching_time_rule_and_segment_do_not_affect_current_path() {
-    // 矩阵 5：非命中的时间规则（时段窗口永不匹配、且声明了不同分档价）
-    // 与非选中的分段不得影响当前路径的声明/阻断判断——当前路径所有层
-    // 都没有分档价 → 保持兼容口径。
+    // 矩阵 5（复核项 3 更正）：待验证分档价必须放在**未命中的 period** 内。
+    // 规则层默认价即使 period 未命中也会参与竞争（既有语义），放在规则层
+    // 无法证明“未命中不参与”——上一版测试正是犯了这一错误（复核 91f596f）。
+    // 08:00（never 未命中）：当前路径（peak，全层无分档价）保持兼容口径
+    // $18、无估算标志、排除规则数 0；分档已知时当前路径无分档价 → 2M 未计价。
+    // 23:30（never 命中）：period 分档 7.5/12 参与并胜出（分档已知 $19.5）
+    // ——证明对照有效。非选中的分段（<200K，声明分档价）同样不得影响。
     let dir = tiered_dir("non-hit-rules");
     let toml = write_toml(
         &dir,
@@ -1838,13 +1842,13 @@ cache_write_1h = 12.0
 label = "never"
 timezone = "UTC"
 cache_write = 9.0
-cache_write_5m = 7.5
-cache_write_1h = 12.0
 
 [[model.schedule.period]]
 start_time = "23:00"
 end_time = "23:59"
 cache_write = 9.0
+cache_write_5m = 7.5
+cache_write_1h = 12.0
 
 [[model.schedule]]
 label = "peak"
@@ -1859,11 +1863,60 @@ cache_write = 9.0
     );
     let (p, warnings) = Pricing::load(Some(&toml), None, None);
     assert!(warnings.is_empty(), "warnings: {warnings:?}");
-    let unknown = p
-        .estimate("m", &unknown_split_counts(2_000_000), at())
+    let at8 = "2026-07-17T08:00:00Z".parse().unwrap();
+    let at2330 = "2026-07-17T23:30:00Z".parse().unwrap();
+
+    // 08:00：never 未命中（peak 命中）。
+    let unknown8 = p
+        .estimate("m", &unknown_split_counts(2_000_000), at8)
         .unwrap();
-    assert!(unknown.complete, "非命中规则/分段不得引入分档依据");
-    assert!(!unknown.cache_write_split_estimated);
-    assert!((unknown.cost - 18.0).abs() < 1e-9);
+    assert!(unknown8.complete, "非命中规则/分段不得引入分档依据");
+    assert!(!unknown8.cache_write_split_estimated);
+    assert!((unknown8.cost - 18.0).abs() < 1e-9);
+    // 08:00 时 peak 与 never 的规则层默认价（write 9、无分档）同价竞争，
+    // 胜出标签属于实现细节（平价保持声明顺序）；关键是无分档依据参与、
+    // 排除规则数为 0。
+    assert!(unknown8.matched.as_ref().unwrap().schedule_label.is_some());
+    assert_eq!(
+        unknown8.excluded_incomplete_schedules, 0,
+        "08:00 不得有被排除的未命中规则"
+    );
+    assert!(unknown8.excluded_candidate_warning.is_none());
+    let known8 = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at8)
+        .unwrap();
+    assert!(!known8.complete, "当前路径无分档价 → 分档已知 2M 未计价");
+    assert_eq!(known8.unknown.cache_write, 2_000_000);
+    assert_eq!(known8.cost, 0.0);
+
+    // 23:30：never 的 period 命中——其分档 7.5/12 参与并胜出（对照有效）。
+    let known2330 = p
+        .estimate("m", &split_counts(2_000_000, 1_000_000, 1_000_000), at2330)
+        .unwrap();
+    assert!(
+        (known2330.cost - 19.5).abs() < 1e-9,
+        "实际 {}",
+        known2330.cost
+    );
+    assert!(known2330.complete);
+    assert_eq!(
+        known2330
+            .matched
+            .as_ref()
+            .unwrap()
+            .schedule_label
+            .as_deref(),
+        Some("never"),
+        "命中时 period 分档必须参与"
+    );
+    // 23:30 分档未知：peak（无分档，完整 $18）按完整优先胜出；never 因
+    // 事件缺分档被排除（排除数 1），费用仍为 peak 的 $18。
+    let unknown2330 = p
+        .estimate("m", &unknown_split_counts(2_000_000), at2330)
+        .unwrap();
+    assert!((unknown2330.cost - 18.0).abs() < 1e-9);
+    assert!(unknown2330.complete);
+    assert!(!unknown2330.cache_write_split_estimated);
+    assert_eq!(unknown2330.excluded_incomplete_schedules, 1);
     std::fs::remove_dir_all(&dir).ok();
 }
