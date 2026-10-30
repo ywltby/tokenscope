@@ -35,6 +35,11 @@ param(
     # 私有 toolbar 行为不同），因此这里的确定性断言是"按钮计数真实、文本查询
     # 失败 → 整个区域不可观察、计数为 null"——验证的是失败路径，不是合成记录。
     [switch]$SelfTestWindow,
+    # AC10：真实通知区域协议验证——用同一个 ReadButtons 读真实可见+溢出
+    # toolbar，验证成功路径的协议上界（全部文本长度 <= 容量、copied==len 由
+    # ReadButtons 的 text-grew 检查强制）。环境不可读时输出结构化 pending，
+    # 绝不把失败当成通过。
+    [switch]$SelfTestReal,
     [int]$TimeoutMs = 2000
 )
 
@@ -699,6 +704,70 @@ public static class TsTrayWindowHost {
     } finally {
         [void][TsTray]::DestroyWindow($tb)
     }
+    exit 0
+}
+
+if ($SelfTestReal) {
+    # 真实通知区域：同一个 ReadButtons（与无参模式相同的查找与读取路径），
+    # 输出协议验证数据——每个按钮的文本长度都经过 text-grew 检查（copied<=len）
+    # 与容量上界。观察失败时输出结构化 pending，绝不把失败当通过。
+    $shell = [TsTray]::FindWindow('Shell_TrayWnd', $null)
+    $visibleToolbar = [IntPtr]::Zero
+    $visibleError = 'Shell_TrayWnd not found'
+    if ($shell -ne [IntPtr]::Zero) {
+        $visibleToolbar = [TsTray]::Toolbar($shell, @('TrayNotifyWnd', 'SysPager', 'ToolbarWindow32'))
+        if ($visibleToolbar -eq [IntPtr]::Zero) {
+            $visibleToolbar = [TsTray]::Toolbar($shell, @('TrayNotifyWnd', 'ToolbarWindow32'))
+        }
+        if ($visibleToolbar -eq [IntPtr]::Zero) { $visibleError = 'visible tray ToolbarWindow32 not found' }
+        else { $visibleError = $null }
+    }
+    $overflowWindow = [TsTray]::FindWindow('NotifyIconOverflowWindow', $null)
+    $overflowToolbar = [IntPtr]::Zero
+    $overflowPresent = $overflowWindow -ne [IntPtr]::Zero
+    $overflowError = $null
+    if ($overflowPresent) {
+        $overflowToolbar = [TsTray]::Toolbar($overflowWindow, @('ToolbarWindow32'))
+        if ($overflowToolbar -eq [IntPtr]::Zero) { $overflowError = 'overflow ToolbarWindow32 not found' }
+    } else {
+        $overflowError = 'NotifyIconOverflowWindow not found; overflow area is unobservable'
+    }
+    $readVisible = if ($visibleToolbar -ne [IntPtr]::Zero) { [TsTray]::ReadButtons($visibleToolbar, $TimeoutMs) } else { $null }
+    $readOverflow = if ($overflowToolbar -ne [IntPtr]::Zero) { [TsTray]::ReadButtons($overflowToolbar, $TimeoutMs) } else { $null }
+    $maxLen = 0
+    $protocolRows = @()
+    foreach ($pair in @(@('visible', $readVisible), @('overflow', $readOverflow))) {
+        $area = $pair[0]
+        $read = $pair[1]
+        if ($null -eq $read) {
+            $protocolRows += [pscustomobject]@{ area = $area; present = $false; ok = $false; declared_count = $null; buttons = @() }
+            continue
+        }
+        foreach ($b in @($read.buttons)) {
+            # ReadButtons 内部已强制：copied<=textLength（text-grew 检查）、
+            # copied<=TextCapacityChars、超长在测长阶段拒绝。这里复核输出侧。
+            if ($null -ne $b.text -and $b.text.Length -gt $maxLen) { $maxLen = $b.text.Length }
+        }
+        $protocolRows += [pscustomobject]@{
+            area = $area
+            present = $true
+            ok = $read.ok
+            declared_count = $read.declared_count
+            error = $read.error
+            buttons = @($read.buttons | ForEach-Object {
+                [pscustomobject]@{ index = $_.index; command_id = $_.command_id; text_length = $_.text.Length; error = $_.error; truncated = $_.truncated }
+            })
+        }
+    }
+    $observable = ($null -ne $readVisible -and $readVisible.ok) -and ($null -ne $readOverflow -and $readOverflow.ok)
+    [pscustomobject]@{
+        mode = 'self-test-real'
+        observable = $observable
+        max_text_length = $maxLen
+        capacity_chars = 2048
+        within_capacity = ($maxLen -le 2048)
+        areas = $protocolRows
+    } | ConvertTo-Json -Depth 6 -Compress
     exit 0
 }
 

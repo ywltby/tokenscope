@@ -26,6 +26,7 @@ import {
   getAcceptanceWritePaths,
   hostProcessAlive,
   isIsolatedAcceptanceRoot,
+  parseAcceptanceBuildRecord,
   parseForeground,
   parseTrayObservation,
   parseWindowState,
@@ -47,6 +48,9 @@ const PROJECT_SLUG = "-acceptance-workspace-tokenscope";
  * 可能落在自己拥有的路径上。登记本次创建的链接，清理时先逐个 unlink 链接
  * （绝不跟随进目标侧），再对沙箱根做递归删除——递归删除的前提是根由本次
  * mkdtemp 新建、位于系统临时目录之下且不等于临时目录本身。
+ * 2026-10-31 收紧：清理前解析真实路径与链接祖先——sandbox.root 本身或任一
+ * 已登记链接若经 junction 指到沙箱之外（例如被注入的 junction 把 root 的
+ * 某段重定向到外部目录），拒绝递归删除，宁可留下现场也不删除外部数据。
  */
 function createRunSandbox(label) {
   const realTmp = fs.realpathSync(os.tmpdir());
@@ -76,17 +80,66 @@ function createRunSandbox(label) {
       const resolved = path.resolve(target);
       return resolved === root || resolved.startsWith(root + path.sep);
     },
+    /**
+     * 目标（含其全部祖先）在真实文件系统里仍解析回沙箱内才算自有。
+     * `target` 之下的某段若是 junction，realpathSync 会沿链接解析到链接另一
+     * 侧——解析结果落在沙箱外即拒绝删除（junction 越出）。
+     */
+    ownedReal: (target) => {
+      const resolved = path.resolve(target);
+      if (!sandbox.owned(resolved)) return false;
+      let current = resolved;
+      while (true) {
+        let real;
+        try {
+          real = fs.realpathSync(current);
+        } catch {
+          // 路径段不存在：无法证明它在沙箱内，保守拒绝
+          return false;
+        }
+        if (!sandbox.owned(real)) return false;
+        if (current === root) break;
+        const parent = path.dirname(current);
+        if (parent === current) return false;
+        current = parent;
+      }
+      return true;
+    },
     remove: (target) => {
       if (!sandbox.owned(target)) throw new Error(`拒绝删除非本次运行创建的路径：${target}`);
       fs.rmSync(target, { recursive: true, force: true });
     },
     cleanup: () => {
+      // 1) 沙箱根本身不得经链接祖先越出本次临时前缀
+      if (!sandbox.ownedReal(root) || root === realTmp || !root.startsWith(realTmp + path.sep)) {
+        throw new Error(`沙箱根经链接祖先越出本次沙箱，拒绝递归删除：${root}`);
+      }
+      // 2) 每个登记的链接必须登记时在沙箱内、现在也真实解析在沙箱内
       for (const link of links) {
         if (!sandbox.owned(link)) throw new Error(`登记的链接不在沙箱内：${link}`);
-        if (fs.lstatSync(link).isSymbolicLink()) fs.unlinkSync(link);
+        // 链接自身允许已不存在（此前清理失败重入时）；存在但断链或指向外部
+        // 都拒绝，宁可留下现场。
+        let stat = null;
+        try {
+          stat = fs.lstatSync(link);
+        } catch {
+          continue;
+        }
+        if (!stat.isSymbolicLink()) continue;
+        let linkTarget;
+        try {
+          linkTarget = fs.realpathSync(link);
+        } catch {
+          throw new Error(`登记的链接无法解析真实路径（断链/权限），拒绝清理：${link}`);
+        }
+        if (!sandbox.owned(linkTarget)) {
+          throw new Error(`登记的链接经 junction 越出沙箱（指向 ${linkTarget}），拒绝清理：${link}`);
+        }
+        fs.unlinkSync(link);
       }
-      if (!sandbox.owned(root) || root === realTmp || !root.startsWith(realTmp + path.sep)) {
-        throw new Error(`沙箱根不属于本次运行，拒绝递归删除：${root}`);
+      // 3) 最后一次复核根的归属（unlink 链接之后状态可能变化）
+      if (!sandbox.ownedReal(root)) {
+        throw new Error(`沙箱根在链接处理后越出沙箱，拒绝递归删除：${root}`);
       }
       fs.rmSync(root, { recursive: true, force: true });
     },
@@ -178,6 +231,49 @@ describe("沙箱清理只触碰本次创建的路径", () => {
     b.cleanup();
     expect(fs.existsSync(a.root)).toBe(false);
     expect(fs.existsSync(b.root)).toBe(false);
+  });
+
+  it("登记的链接指向沙箱外时清理拒绝，外部目录与链接都不被删除", () => {
+    // 独占外部目录：由本测试创建并自己清理（证明沙箱清理不会动它）。
+    const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ac10-outside-"));
+    const outsideFile = path.join(outside, "precious.txt");
+    fs.writeFileSync(outsideFile, "must survive", "utf8");
+    const sandbox = createRunSandbox("junction-escape");
+    // 沙箱内登记一个 junction 指向外部目录（模拟注入/测试装配错误）
+    sandbox.link(path.join(sandbox.root, "escape"), outside);
+    try {
+      expect(() => sandbox.cleanup()).toThrow(/越出沙箱/);
+      // 外部目录原样保留
+      expect(fs.readFileSync(outsideFile, "utf8")).toBe("must survive");
+      // 拒绝清理时链接本身也不删（宁可留下现场）
+      expect(fs.existsSync(path.join(sandbox.root, "escape"))).toBe(true);
+    } finally {
+      // 本测试自己负责拆除现场：先删链接再删外部与沙箱
+      fs.rmSync(path.join(sandbox.root, "escape"), { force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+      fs.rmSync(sandbox.root, { recursive: true, force: true });
+    }
+  });
+
+  it("链接目标在沙箱内时正常清理；断链链接拒绝清理并保留现场", () => {
+    // 正例：沙箱内链接（link -> 沙箱内目录）清理成功
+    const okSandbox = createRunSandbox("junction-inside");
+    const innerTarget = okSandbox.dir("inner-target");
+    okSandbox.link(path.join(okSandbox.root, "inner-link"), innerTarget);
+    okSandbox.cleanup();
+    expect(fs.existsSync(okSandbox.root)).toBe(false);
+
+    // 断链：链接指向已删除的目录 → 无法证明解析在沙箱内 → 拒绝清理
+    const broken = createRunSandbox("junction-broken");
+    const gone = broken.dir("gone");
+    broken.link(path.join(broken.root, "broken-link"), gone);
+    fs.rmSync(gone, { recursive: true, force: true });
+    try {
+      expect(() => broken.cleanup()).toThrow(/无法解析真实路径|断链/);
+      expect(fs.existsSync(broken.root)).toBe(true);
+    } finally {
+      fs.rmSync(broken.root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -469,15 +565,18 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     const root = sandbox.dir("home", "workspace");
     const target = path.join(sandbox.root, "gone");
     sandbox.dir("home", "workspace", "sources", "claude");
-    sandbox.link(path.join(root, "sources", "claude", "projects"), target);
+    const brokenLink = sandbox.link(path.join(root, "sources", "claude", "projects"), target);
     fs.mkdirSync(target, { recursive: true });
     fs.rmdirSync(target);
+    // 沙箱清理对断链链接拒绝递归删除（无法证明解析在沙箱内）——本测试自行
+    // 拆除现场：先 unlink 断链，再清沙箱。
     try {
       const result = validateAcceptancePaths({ root, homeDir: home });
       expect(result.ok).toBe(false);
       expect(result.reason).toMatch(/无法解析|不存在/);
     } finally {
-      sandbox.cleanup();
+      fs.unlinkSync(brokenLink);
+      fs.rmSync(sandbox.root, { recursive: true, force: true });
     }
   });
 
@@ -765,6 +864,7 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
         build_command: ACCEPTANCE_BUILD_COMMAND,
         source_commit: "b49f535abcdef1234567890abcdef1234567890",
         features: ["acceptance", "tauri/custom-protocol"],
+        tree_clean: true,
       },
     };
     const result = verifyAcceptanceExecutable(exePath, {
@@ -772,6 +872,53 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
       buildRecord: record,
       sourceCommit: "b49f535abcdef1234567890abcdef1234567890",
     });
+    expect(result).toMatchObject({ ok: true, launch_allowed: true, build_identity: "verified" });
+  });
+
+  it("记录缺 tree_clean（旧格式/手写）一律拒绝——来源证明字段是硬性要求", () => {
+    const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
+    const legacy = {
+      kind: ACCEPTANCE_BUILD_RECORD_KIND,
+      artifact_path: path.resolve("C:/build/target/release/tokenscope.exe"),
+      artifact_sha256: sha256(bytes),
+      build_command: ACCEPTANCE_BUILD_COMMAND,
+      source_commit: "abcdef1234567890abcdef1234567890abcdef12",
+      features: ["acceptance", "tauri/custom-protocol"],
+    };
+    const parsed = parseAcceptanceBuildRecord(JSON.stringify(legacy));
+    expect(parsed.ok).toBe(false);
+    expect(parsed.reason).toMatch(/tree_clean/);
+    const result = verifyAcceptanceExecutable(legacy.artifact_path, {
+      readFile: () => bytes,
+      buildRecord: JSON.parse(JSON.stringify(legacy)),
+      sourceCommit: legacy.source_commit,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.launch_allowed).toBe(false);
+    expect(result.build_identity).toBe("unverified");
+  });
+
+  it("脏树记录如实保留状态，可信度判断交给使用方而非静默放行", () => {
+    const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
+    const exePath = path.resolve("C:/build/target/release/tokenscope.exe");
+    const dirty = {
+      kind: ACCEPTANCE_BUILD_RECORD_KIND,
+      artifact_path: exePath,
+      artifact_sha256: sha256(bytes),
+      build_command: ACCEPTANCE_BUILD_COMMAND,
+      source_commit: "abcdef1234567890abcdef1234567890abcdef12",
+      features: ["acceptance", "tauri/custom-protocol"],
+      tree_clean: false,
+      tree_dirty_count: 3,
+    };
+    const parsed = parseAcceptanceBuildRecord(JSON.stringify(dirty));
+    expect(parsed.ok).toBe(true);
+    const result = verifyAcceptanceExecutable(exePath, {
+      readFile: () => bytes,
+      buildRecord: parsed,
+      sourceCommit: dirty.source_commit,
+    });
+    // 身份核对通过（哈希/命令/提交一致）；dirty 状态在记录里，不伪造干净。
     expect(result).toMatchObject({ ok: true, launch_allowed: true, build_identity: "verified" });
   });
 
@@ -784,6 +931,7 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
       build_command: ACCEPTANCE_BUILD_COMMAND,
       source_commit: "abcdef1234567890abcdef1234567890abcdef12",
       features: ["acceptance"],
+      tree_clean: true,
     };
     const other = verifyAcceptanceExecutable("C:/other/tokenscope.exe", {
       readFile: () => bytes,
@@ -821,6 +969,7 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
         build_command: ACCEPTANCE_BUILD_COMMAND,
         source_commit: "abcdef1234567890abcdef1234567890abcdef12",
         features: ["acceptance"],
+        tree_clean: true,
       },
     });
     expect(result.ok).toBe(false);
@@ -829,12 +978,37 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
     expect(result.reason).toMatch(/哈希/);
   });
 
+  it("产物被替换成普通 PE（哈希不匹配）时拒绝，即使记录字段全部合法", () => {
+    // 场景：登记时是 acceptance 产物，之后 target/release/tokenscope.exe 被
+    // 普通构建覆盖（无标记、含 stub 都一样）——预筛 + 哈希双层都拦。
+    const accepted = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
+    const replaced = peWith(NORMAL_ACCEPTANCE_STUB_MARKER);
+    const result = verifyAcceptanceExecutable("C:/build/tokenscope.exe", {
+      readFile: () => replaced,
+      sourceCommit: "abcdef1234567890abcdef1234567890abcdef12",
+      buildRecord: {
+        kind: ACCEPTANCE_BUILD_RECORD_KIND,
+        artifact_path: "C:/build/tokenscope.exe",
+        artifact_sha256: sha256(accepted),
+        build_command: ACCEPTANCE_BUILD_COMMAND,
+        source_commit: "abcdef1234567890abcdef1234567890abcdef12",
+        features: ["acceptance", "tauri/custom-protocol"],
+        tree_clean: true,
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.launch_allowed).toBe(false);
+    expect(result.negative_markers).toContain(NORMAL_ACCEPTANCE_STUB_MARKER);
+    expect(result.build_identity).toBe("rejected");
+  });
+
   it("不完整/损坏的构建记录一律 unverified，不授予启动许可", () => {
     const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
     for (const broken of [
-      { kind: "other", artifact_path: "C:/b.exe", artifact_sha256: sha256(bytes), build_command: ACCEPTANCE_BUILD_COMMAND, source_commit: "abcdef1234567890", features: ["acceptance"] },
-      { kind: ACCEPTANCE_BUILD_RECORD_KIND, artifact_path: "C:/b.exe", artifact_sha256: "XYZ", build_command: ACCEPTANCE_BUILD_COMMAND, source_commit: "abcdef1234567890", features: ["acceptance"] },
-      { kind: ACCEPTANCE_BUILD_RECORD_KIND, artifact_path: "C:/b.exe", artifact_sha256: sha256(bytes), build_command: ACCEPTANCE_BUILD_COMMAND, source_commit: "abcdef1234567890", features: [] },
+      { kind: "other", artifact_path: "C:/b.exe", artifact_sha256: sha256(bytes), build_command: ACCEPTANCE_BUILD_COMMAND, source_commit: "abcdef1234567890", features: ["acceptance"], tree_clean: true },
+      { kind: ACCEPTANCE_BUILD_RECORD_KIND, artifact_path: "C:/b.exe", artifact_sha256: "XYZ", build_command: ACCEPTANCE_BUILD_COMMAND, source_commit: "abcdef1234567890", features: ["acceptance"], tree_clean: true },
+      { kind: ACCEPTANCE_BUILD_RECORD_KIND, artifact_path: "C:/b.exe", artifact_sha256: sha256(bytes), build_command: ACCEPTANCE_BUILD_COMMAND, source_commit: "abcdef1234567890", features: [], tree_clean: true },
+      { kind: ACCEPTANCE_BUILD_RECORD_KIND, artifact_path: "C:/b.exe", artifact_sha256: sha256(bytes), build_command: ACCEPTANCE_BUILD_COMMAND, source_commit: "abcdef1234567890", features: ["acceptance"], tree_clean: "yes" },
       "{ not json",
       null,
     ]) {

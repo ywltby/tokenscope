@@ -153,9 +153,14 @@ describe("外部观察脚本与场景接线", () => {
     expect(source).toContain("SelfTestWindow");
     expect(source).toContain("CreateControlledToolbar");
     expect(source).toContain("TB_BUTTONSTRUCTSIZE");
+    // 真实区域协议验证：成功路径上界复核 + 不可读环境输出 pending 形态
+    expect(source).toContain("SelfTestReal");
+    expect(source).toContain("within_capacity");
     const test = read("scripts/test_read_tray_notification_area.ps1");
     expect(test).toContain("-SelfTestWindow");
     expect(test).toContain("command_id -ne 5001");
+    expect(test).toContain("-SelfTestReal");
+    expect(test).toContain("PENDING real notification area unobservable");
   });
 
   it("隔离/EXE 预检发生在目录准备和任何进程启动之前", () => {

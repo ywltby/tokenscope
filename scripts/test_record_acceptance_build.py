@@ -49,6 +49,35 @@ class RecordAcceptanceBuildCase(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, self.recorder)
 
+    def test_skipbuild_cannot_skip_the_controlled_command(self):
+        # -SkipBuild 语义收窄：受控命令永远执行（增量 no-op），否则任何普通 PE
+        # 的哈希都能被登记进记录并获得 verified。
+        body = self.recorder[self.recorder.index("[switch]$SkipBuild"):]
+        # 不再存在"if (-not $SkipBuild) { 构建 }"的跳过分支：命令调用必须无条件出现
+        self.assertNotIn("if (-not $SkipBuild) {", body)
+        self.assertIn("& $cargoProgram @cargoArguments", body)
+        # 文档说明必须保留收窄语义，防止回归
+        self.assertIn("不能跳过命令本身", self.recorder)
+
+    def test_exe_parameter_is_pinned_to_the_controlled_artifact(self):
+        # -Exe 收窄：登记路径必须是 target/release/tokenscope.exe，登记其他
+        # 路径的哈希会让任意文件获得验收身份。
+        self.assertIn("$controlledArtifact = Join-Path $repo 'target/release/tokenscope.exe'",
+                      self.recorder)
+        self.assertIn("只接受受控构建的实际产物", self.recorder)
+        self.assertIn("拒绝登记", self.recorder)
+
+    def test_record_carries_tree_state_and_lib_requires_it(self):
+        # 登记侧写入 tree_clean / tree_dirty_count；lib 侧把 tree_clean 设为
+        # 必填——旧格式/手写记录无法通过 parse。
+        self.assertIn("tree_clean", self.recorder)
+        self.assertIn("tree_dirty_count", self.recorder)
+        self.assertIn("git -C $repo status --porcelain", self.recorder)
+        lib_parse = self.lib[self.lib.index("export function parseAcceptanceBuildRecord"):]
+        lib_parse = lib_parse[:lib_parse.index("export function verifyAcceptanceBuildIdentity")]
+        self.assertIn("tree_clean", lib_parse)
+        self.assertIn("必须由 record-acceptance-build.ps1 登记源树状态", lib_parse)
+
     def test_workflow_uses_recorder_instead_of_bare_cargo_build(self):
         self.assertIn("./scripts/record-acceptance-build.ps1", self.workflow)
         # 工作流里不得再出现"构建但不登记"的裸 cargo build acceptance 命令

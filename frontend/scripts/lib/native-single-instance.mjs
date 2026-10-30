@@ -641,6 +641,12 @@ export function parseAcceptanceBuildRecord(raw, { recordPath = "" } = {}) {
   }
   const features = Array.isArray(data.features) ? data.features : [];
   if (!features.includes("acceptance")) missing.push("features 未包含 acceptance");
+  // 来源证明：记录必须由 scripts/record-acceptance-build.ps1 产出并携带源树
+  // 状态（git status --porcelain）。缺失即旧格式/手写记录——无法证明"该产物
+  // 字节确由受控命令在某个提交上产生"，一律拒绝。
+  if (typeof data.tree_clean !== "boolean") {
+    missing.push("缺少 tree_clean（必须由 record-acceptance-build.ps1 登记源树状态）");
+  }
   if (missing.length) return { ok: false, reason: `构建记录不完整：${missing.join("；")}` };
   return { ok: true, record: { ...data, recordPath } };
 }

@@ -63,6 +63,35 @@ if ($truncated.ok -or $null -ne $truncated.token_scope_count -or $truncated.erro
 }
 Write-Output 'PASS truncated button text is rejected'
 
+# AC10 真实通知区域协议验证：同一个 ReadButtons 读真实可见+溢出 toolbar。
+# 成功路径断言：每个按钮文本长度都在容量内（测长阶段上界 + text-grew 检查由
+# ReadButtons 内部强制，这里复核输出）。环境不可读时输出结构化 pending，
+# 绝不把失败当通过。
+$real = & "$PSScriptRoot/read-tray-notification-area.ps1" -SelfTestReal
+if ($LASTEXITCODE -ne 0) { throw "self-test-real exited $LASTEXITCODE" }
+$real = $real | ConvertFrom-Json
+if ($real.observable) {
+    if (-not $real.within_capacity) {
+        throw "self-test-real: text length $($real.max_text_length) exceeds capacity $($real.capacity_chars)"
+    }
+    foreach ($area in @($real.areas)) {
+        if (-not $area.ok) { throw "self-test-real: area $($area.area) not ok: $($area.error)" }
+        foreach ($b in @($area.buttons)) {
+            if ($b.text_length -gt $real.capacity_chars) {
+                throw "self-test-real: button $($b.index) text length $($b.text_length) exceeds capacity"
+            }
+            if ($b.error) { throw "self-test-real: button $($b.index) has error: $($b.error)" }
+        }
+    }
+    Write-Output "PASS real notification area: protocol holds on $($real.areas[0].declared_count)+$($real.areas[1].declared_count) buttons, max text $($real.max_text_length)/$($real.capacity_chars) within capacity"
+} else {
+    # 不可读环境（CI 变体/精简会话）：必须输出 pending 形态，不得伪造成 ok
+    if ($real.within_capacity -ne $false -and $real.max_text_length -ne 0) {
+        throw "self-test-real: unobservable environment must not report text lengths"
+    }
+    Write-Output 'PENDING real notification area unobservable in this environment (structured pending, not a pass)'
+}
+
 # AC10 自有受控窗口：本进程真实 ToolbarWindow32 + 真实 ReadButtons 全链路
 # （OpenProcess 本进程 / VirtualAllocEx / TB_BUTTONCOUNT / TB_GETBUTTON /
 # TB_GETBUTTONTEXTW）。comctl32 普通窗口对自建按钮的文本查询返回 -1（shell

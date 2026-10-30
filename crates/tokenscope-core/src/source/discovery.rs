@@ -404,15 +404,29 @@ pub fn resolve_sources(
             .as_deref()
             .filter(|d| !d.trim().is_empty())
             .map(PathBuf::from);
+        // RC10/AC10：验收隔离上下文里"环境根替代默认根"的旧语义同样被阻断——
+        // CODEX_HOME 来自启动环境、不受 acceptance 来源根重定向约束。
+        let acceptance_isolated = ctx.env.acceptance_isolated;
+        let env_replacement = match ctx.env_candidate(ctx.env.codex_home.as_ref()) {
+            // 旧语义：CODEX_HOME 替代默认 .codex
+            Some((root, _)) if !root.as_os_str().is_empty() && !acceptance_isolated => {
+                Some(vec![root.join("sessions"), root.join("archived_sessions")])
+            }
+            _ => None,
+        };
+        let has_explicit_dir = explicit.is_some();
         let roots: Vec<PathBuf> = match explicit {
             Some(d) => vec![d],
-            None => match ctx.env_candidate(ctx.env.codex_home.as_ref()) {
-                // 旧语义：CODEX_HOME 替代默认 .codex
-                Some((root, _)) if !root.as_os_str().is_empty() => {
-                    vec![root.join("sessions"), root.join("archived_sessions")]
-                }
-                _ => ctx.codex_default_roots.clone(),
-            },
+            None => env_replacement.unwrap_or_else(|| ctx.codex_default_roots.clone()),
+        };
+        let legacy_diag = if acceptance_isolated && !has_explicit_dir {
+            vec![
+                "旧格式配置尚未迁移：仍按 v1 语义解析根".to_string(),
+                "验收隔离模式：环境变量 CODEX_HOME 已忽略（不把隔离根之外的目录当作来源）"
+                    .to_string(),
+            ]
+        } else {
+            vec!["旧格式配置尚未迁移：仍按 v1 语义解析根".to_string()]
         };
         for root in roots {
             candidates.push(Candidate {
@@ -423,7 +437,7 @@ pub fn resolve_sources(
                 probe: (ctx.probe)(&root),
                 mapping: None,
                 mapping_disabled: false,
-                diagnostics: vec!["旧格式配置尚未迁移：仍按 v1 语义解析根".to_string()],
+                diagnostics: legacy_diag.clone(),
             });
         }
     } else {

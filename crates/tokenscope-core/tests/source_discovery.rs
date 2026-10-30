@@ -541,6 +541,100 @@ fn legacy_semantics_do_not_expand_reading() {
     );
 }
 
+/// RC10/AC10 + 旧格式分支：未迁移 Codex 配置（空 `dir`）在验收隔离上下文里
+/// 也不能把 `CODEX_HOME` 指向的真实目录当默认根读取——旧语义"环境根替代默认
+/// 根"只在普通模式生效。注入探测器与假环境验证，不读真实环境变量。
+/// 修复前：旧格式分支不看 acceptance_isolated，环境根直接成为候选。
+#[test]
+fn acceptance_isolated_codex_legacy_branch_ignores_codex_home() {
+    let home = temp_dir("acceptance-legacy");
+    let env_codex = home.join("real-portable-codex");
+    std::fs::create_dir_all(env_codex.join("sessions")).unwrap();
+    let ctx = DiscoveryContext {
+        env: StartupEnv {
+            codex_home: Some(env_codex.display().to_string()),
+            claude_config_dir: None,
+            acceptance_isolated: true,
+        },
+        ..ctx_for(&home, StartupEnv::default(), filesystem_probe())
+    };
+    // 旧格式 Codex：dir 缺失（等价于迁移失败窗口期的空 dir 形态）
+    let codex_legacy = SourceConfig {
+        legacy_format: true,
+        ..Default::default()
+    };
+    let out = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &codex_legacy,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    let codex: Vec<_> = out
+        .roots
+        .iter()
+        .filter(|r| r.agent == AgentKind::Codex)
+        .collect();
+    assert!(
+        codex
+            .iter()
+            .all(|r| !r.display_path.contains("real-portable-codex")),
+        "验收隔离上下文不得读取 CODEX_HOME 指向的真实目录：{:?}",
+        codex
+    );
+    assert_eq!(
+        codex.len(),
+        2,
+        "回退到隔离根默认双根（隔离根下的 sessions/archived_sessions）：{:?}",
+        codex
+    );
+    assert!(
+        codex
+            .iter()
+            .all(|r| r.origins[0].kind == OriginKind::Default),
+        "旧格式分支保留 Default 出处分类与 v1 诊断：{:?}",
+        codex
+    );
+    assert!(
+        codex
+            .iter()
+            .all(|r| r.diagnostics.iter().any(|d| d.contains("v1 语义"))),
+        "{:?}",
+        codex
+    );
+
+    // 普通模式对照：同形态配置 + 同环境，旧语义原样保留（环境根替代默认根）。
+    let plain_ctx = ctx_for(
+        &home,
+        StartupEnv {
+            codex_home: Some(env_codex.display().to_string()),
+            claude_config_dir: None,
+            acceptance_isolated: false,
+        },
+        filesystem_probe(),
+    );
+    let plain = resolve_sources(
+        &plain_ctx,
+        &default_claude(),
+        &codex_legacy,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    let plain_codex: Vec<_> = plain
+        .roots
+        .iter()
+        .filter(|r| r.agent == AgentKind::Codex)
+        .collect();
+    assert_eq!(plain_codex.len(), 2, "普通模式旧语义不变");
+    assert!(
+        plain_codex
+            .iter()
+            .all(|r| r.display_path.contains("real-portable-codex")),
+        "普通模式环境根替代默认根：{:?}",
+        plain_codex
+    );
+}
+
 /// 映射绑定：默认根=默认绑定；环境根=未核实禁用；手动根=禁用；
 /// 默认+手动同根合并时保留默认绑定并诊断（不混用）。
 #[test]
