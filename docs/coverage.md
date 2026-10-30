@@ -19,17 +19,18 @@
 
 ## 前端（Vitest + v8）
 
-- 范围：`frontend/src/**/*.{ts,vue}` 全部产品源码（50 个文件，含未被测试
-  执行的文件）；排除测试本体（`src/**/*.test.ts`）与纯类型声明
+- 范围：`frontend/src/**/*.{ts,vue}` 的**全范围**（50 个文件：49 个产品
+  源码 + 1 个仅供本地开发检查的 `src/dev/tooltipSecurityPage.ts`，含未被
+  测试执行的文件）；排除测试本体（`src/**/*.test.ts`）与纯类型声明
   （`src/**/*.d.ts`，防御性，当前 src 下没有）。`scripts/lib/**/*.test.mjs`
   属原生验收契约测试，不在统计范围（其被测对象是 node 脚本，非前端产品
-  源码）。
+  源码）。**全范围数字不能称为"全部产品源码"覆盖率**；产品范围数字见下。
 - **Vitest 5 已移除 `coverage.all`**，未执行文件由 `coverage.include` 声明、
   采集器补算。但本项目的样式/契约测试用 `import.meta.glob(..., { query:
   "?raw", eager: true })` 把全部源码以原始字符串模块导入；`@vitest/coverage-v8`
   5.0.3 会把这些空壳模块映射回源码路径并记为 0/0，使真正的未执行文件被
   当作"已加载"而跳过补算。**0/0 文件不会计入分母**，因此修复前的 94.05%
-  不是全源码覆盖率（见下）。
+  不是 `frontend/src` 全范围覆盖率（见下）。
 - `frontend/vitest.coverage-provider.ts` 在 V8 provider 汇总后把语句表为
   空的文件当作未执行文件，重跑 provider 自带的未执行文件补算
   （`getCoverageMapForUncoveredFiles`，5.0.3 的私有方法）。这是对 5.0.3
@@ -49,12 +50,18 @@
   `qa-artifacts/coverage/frontend-vitest/`（目录由 `vitest.config.ts` 的
   `coverage.reportsDirectory` 指定）。
 - **首份基线（2026-10-30，修复后；数字均为总数 / 已覆盖 / 百分比）**：
-  50 个文件、912 用例全部通过；行 **2,697 / 2,498 / 92.62%**，语句
-  **3,122 / 2,785 / 89.20%**，函数 **761 / 691 / 90.80%**，分支
-  **2,463 / 2,049 / 83.19%**。未被测试执行的 `main.ts`（0/1 行）与
-  `src/dev/tooltipSecurityPage.ts`（0/40 行）均已以 0% 计入分母。这是
-  **声明范围内（frontend/src 产品源码）的全源码覆盖率**，不是整个仓库的
-  覆盖率。
+  50 个文件（含 1 个仅供本地开发检查的 `src/dev/tooltipSecurityPage.ts`）、
+  912 用例全部通过。
+  - **`frontend/src` 全范围**（含开发检查页）：行 **2,697 / 2,498 /
+    92.62%**，语句 **3,122 / 2,785 / 89.20%**，函数 **761 / 691 /
+    90.80%**，分支 **2,463 / 2,049 / 83.19%**。未被测试执行的 `main.ts`
+    （0/1 行）与 `src/dev/tooltipSecurityPage.ts`（0/40 行）均已以 0%
+    计入分母。**92.62% 是全范围数字，不是全部产品源码覆盖率**。
+  - **产品范围**（同一报告剔除 `src/dev/tooltipSecurityPage.ts`）：行
+    **2,657 / 2,498 / 94.02%**，语句 **3,079 / 2,785 / 90.45%**，函数
+    **753 / 691 / 91.77%**，分支 **2,441 / 2,049 / 83.94%**。
+  以上均为声明范围内（`frontend/src/**/*.{ts,vue}`）的统计，不含仓库
+  其他部分，也不能当作整个仓库的覆盖率。
 
 ## Rust（cargo-llvm-cov，本地运行；不进 CI）
 
