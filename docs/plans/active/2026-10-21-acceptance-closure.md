@@ -237,8 +237,10 @@ AC03–AC05 的 CI 接入：
 ### AC10 N12 单实例原生自动化
 
 - 场景 `ui-single-instance`：同一隔离根启动第二个进程。
-  - 断言第二个进程在限定时间内退出；第一个窗口恢复为可见并获得前台；`launches[]` 正确记录两个进程的归属与退出；托盘只有一个。
+  - 断言第二个进程在限定时间内退出；第一个窗口恢复为可见并获得前台；`launches[]` 正确记录两个进程的归属与退出；托盘只有一个（按启动前基线核对：验收实例只新增一个图标，正式实例可同时运行）。
 - 确定性场景，进入 CI；只改脚本，不递增版本。
+
+> **2026-10-30 准备状态**：`ui-single-instance` 脚本与合成契约已在独立分支 `test/n12-ac10-single-instance` 准备（基于 N18 `b49f535`；不触碰 PR #52、N18、N13 与覆盖率分支）。尚未运行真实 Native、未接入 CI、未合并/发布；真实第二实例退出码、窗口前台与托盘计数待实跑，N12 保持开放。详见 §6「B5 准备」。
 
 ### AC11 N12 人工签字批次（用户执行）
 
@@ -460,6 +462,17 @@ E（否决为默认）：acceptance 专用可控时钟/缩短轮询间隔，≈3
 - **fixture 语义校准**（实现中核对产品口径，非产品改动）：Codex 行须满足 R02（`total = input + output`、`cached ≤ input`）；会话内相同 (model, 四桶) 用量按「重复额度报告」折叠去重，故 input 逐事件唯一；Codex 事件 input 桶存净输入（input − cached）；H04 起生产采集不再创建解析缓存 cache.db，历史库是唯一事实源。
 - **证据**：`qa-artifacts/n13-ac09-stage1/ac09-stage1-evidence.json`（已忽略，不入库；含 `fingerprint_scope` 与 `verification` 字段；本轮补正后 `verification.project_identity_match = true`）；运行输出只含聚合数字与路径，不含任何日志正文。
 - **未执行（后续阶段）**：真实 `~/.claude`/`~/.codex` 只读来源、真实规模冷/热测量与进程工作集外部轮询取证。**N13 保持开放。**
+
+### B5 准备：AC10 单实例脚本与合成契约（2026-10-30，未实跑）
+
+范围：只准备 AC10 / `ui-single-instance` 的脚本、外部观察与合成契约；不运行真实 Native、不接入或触发 CI、不操作真实用户数据、不合并或发布。基线为 `feat/n18-cache-write-tiers` HEAD `b49f535`，独立分支 `test/n12-ac10-single-instance`；未修改 PR #52、N18、N13 与覆盖率分支。
+
+- **隔离/EXE 预检（先于一切准备与进程）**：驱动器在创建输出目录、准备隔离根、启动 `startAcceptanceIo`/`Instance`、执行 `git`/`cmd`/`pwsh` 之前完成预检。隔离根按真实路径解析（含符号链接/junction/大小写别名），拒绝受保护目录 `~/.tokenscope` 本身、其祖先、子目录及指向这些位置的别名；无法解析真实路径时 fail closed。EXE 必须是 PE 且含 acceptance 专用标记，并不得含普通构建 stub 标记；缺失、普通 EXE 或无法读取一律拒绝启动（`attach` 模式不启动 EXE，只校验根）。预检失败打印结构化拒绝原因并退出 2，不创建输出目录、不准备隔离根、不启动任何进程。证据记录 `base_identifier`、`acceptance_identifier`、`real_data_dir` 与预检结果。
+- **场景与证据**：`ui-single-instance` 以同一隔离根启动第二个进程，`launches[]` 记录 primary/secondary 的 `role`、`owner`、`parent_pid`、`same_root`、`acceptance_identifier`、PID、退出码/信号、退出耗时与预算；第二个实例不接 CDP、不继承远程调试参数。第二个进程须在 15 s 内以退出码 0 结束，随后轮询第一个窗口可见且未最小化、`GetForegroundWindow` 属于第一个 PID。超时/取消时区分「已发送终止请求」与「已确认退出」，只终止本次拥有的 PID，记录 `terminate_error`/`terminate_unconfirmed`；第一个实例存活同时检查 `exitCode` 与 `signalCode`。
+- **托盘观察**：按 Win32 契约用 `TB_BUTTONCOUNT` → `TB_GETBUTTON(index)` 取 `idCommand` → `TB_GETBUTTONTEXTW(idCommand)`；每次查询前清零目标缓冲，处理长度/截断/超时/失败。溢出区不可观察时计数为 null（不得当作 0）；可见+溢出计数、总数与 TokenScope `matches` 明细互相矛盾时结果不可通过。脚本使用 `$tokenMatches`（避免 PowerShell `$Matches` 自动变量冲突），并提供 `-SelfTest` 合成读取循环反例。托盘数量按**启动前基线 +1** 核对（正式实例同时运行时可占基线），第二个实例退出后计数不变。
+- **pending 语义**：托盘/窗口/前台观察不可用时记 `pending`（证据 `verification_complete=false`），不混入通过或失败，退出码 3；明确不以进程数量替代托盘证据，也不以“第一个进程仍存活”替代窗口恢复/前台。CI 接线时必须把 pending 按未通过处理。
+- **合成验证**：新增 4 个测试文件 / 64 条用例（纯判定、真实短命 Node 子进程的 secondary 退出/终止确认、假实例完整场景、源码/脚本静态契约）；全量前端套件 68 文件 / 976 用例通过。另用本机已构建的 acceptance/normal 测试二进制验证 EXE 标记判别（acceptance 命中专用标记，普通二进制未命中）；托盘自测覆盖匹配、非连续 command ID、超时、计数矛盾、溢出不可观察与截断；窗口 `state`/`foreground` 对不存在 PID 返回 found/match=false。
+- **未执行（待实跑）**：真实 `ui-single-instance`（第二个实例实际退出码/耗时、第一个窗口是否真的获得前台、真实托盘计数）、CI 接线与发布。上述任一项 pending 或失败都不得把 AC10 标为完成；**N12 保持开放**。
 
 ### B3 分批实施：AC06 + AC08（2026-10-25，AC07 暂缓）
 

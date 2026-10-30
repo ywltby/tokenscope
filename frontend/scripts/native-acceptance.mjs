@@ -28,6 +28,7 @@ import { nativeIdentity } from "./contracts/native-identity.mjs";
 import { nativeCcsImport } from "./contracts/native-ccs-import.mjs";
 import { nativePricing, preparePricingScenario } from "./contracts/native-pricing.mjs";
 import { nativeUiRelaunch, nativeUiSystem } from "./contracts/native-ui-system.mjs";
+import { nativeSingleInstance, readTrayObservation } from "./contracts/native-single-instance.mjs";
 import { decodePng } from "./lib/png.mjs";
 import {
   startAcceptanceIo,
@@ -71,6 +72,15 @@ import {
   remainingBudgetMs,
   stopDecision,
 } from "./lib/native-instance.mjs";
+import {
+  SINGLE_INSTANCE_EXIT_BUDGET_MS,
+  acceptanceIdentifier,
+  classifySecondaryExit,
+  evaluateAcceptanceLaunchPreflight,
+  secondaryLaunchEnvironment,
+  startIfPreflightAllows,
+  waitForSecondaryExit,
+} from "./lib/native-single-instance.mjs";
 // S00（PR3 计划 §9.1）：场景看门狗、有界命令与阶段记录——纯逻辑在 lib，可单测。
 import {
   FAILURE_CAPTURE_TIMEOUT_MS,
@@ -90,7 +100,10 @@ const REPO = fileURLToPath(new URL("../../", import.meta.url));
 const EXE_DEFAULT = path.join(REPO, "target", "release", "tokenscope.exe");
 /** 当前共同同意修订号：复用 upgrade_baselines.py 的 Rust 常量提取
  * （剥离块注释/行注释/字符串，假声明不会命中），不在 JS 里另写正则。 */
-const CURRENT_CONSENT_REVISION = (() => {
+let currentConsentRevisionCache = null;
+/** 延迟到预检通过后首次使用时才启动 Python；不得在隔离/EXE 预检前 spawn 进程。 */
+function currentConsentRevision() {
+  if (currentConsentRevisionCache !== null) return currentConsentRevisionCache;
   const payload = execFileSync(
     "python",
     ["-B", path.join(REPO, "scripts", "upgrade_baselines.py"), "privacy-revision"],
@@ -100,12 +113,20 @@ const CURRENT_CONSENT_REVISION = (() => {
   if (!Number.isInteger(revision) || revision <= 0) {
     throw new Error(`settings.rs 缺少合法的 PRIVACY_POLICY_REVISION：${payload}`);
   }
+  currentConsentRevisionCache = revision;
   return revision;
-})();
+}
 const PREP = path.join(REPO, "scripts", "prepare-native-acceptance.ps1");
 const RECORDER = path.join(REPO, "scripts", "capture-window-frames.ps1");
 const WINDOW_ACTION = path.join(REPO, "scripts", "native-window-action.ps1");
 const REAL_DATA = path.join(process.env.USERPROFILE || "", ".tokenscope");
+// AC10：验收构建在 acceptance::configure 中把 identifier 改为 `.acceptance`；
+// 同一隔离根的两个验收实例共享该互斥名，但与用户正在运行的正式实例不同名。
+const TAURI_CONFIG = JSON.parse(
+  fs.readFileSync(path.join(REPO, "src-tauri", "tauri.conf.json"), "utf8"),
+);
+const BASE_IDENTIFIER = TAURI_CONFIG.identifier;
+const ACCEPTANCE_IDENTIFIER = acceptanceIdentifier(BASE_IDENTIFIER);
 /** 页面 target 轮询间隔；每次等待都受剩余预算与宿主退出约束（§4.8 第 4 条）。 */
 const PAGE_TARGET_POLL_MS = 200;
 
@@ -863,6 +884,9 @@ class Instance {
       browserArgs,
       startedAtMs: Date.now(),
     });
+    record.acceptanceIdentifier = this.opts.acceptanceIdentifier ?? null;
+    record.parentPid = process.pid;
+    record.sameRoot = true;
     // 启动预算（§4.8 第 4 条）：总上限 65 秒，阶段上限随后收窄；一切等待都不得超过二者
     record.launchDeadlineMs = record.startedAtMs + LAUNCH_BUDGET_MS;
     record.phaseDeadlineMs = record.startedAtMs + CDP_READY_BUDGET_MS;
@@ -1023,6 +1047,133 @@ class Instance {
       browserArgs,
       cdpVersion: version?.["Browser"] ?? version?.browser ?? "unknown",
     };
+  }
+  /**
+   * AC10：以同一隔离根启动第二个验收实例，只记录并等待其退出，不接 CDP、
+   * 不替换 current。第二个实例由单实例插件移交给第一个实例后自行退出。
+   * 第二个实例不继承远程调试参数；超时/取消时只终止本次记录的 PID。
+   */
+  async launchSecondary({ timeoutMs = SINGLE_INSTANCE_EXIT_BUDGET_MS } = {}) {
+    ensureNotCanceled(this.opts.isCanceled, "launch-secondary");
+    if (!this.current) throw new Error("第二个实例必须在第一个实例启动后启动");
+    const startedAtMs = Date.now();
+    const secondaryLog = path.join(path.dirname(this.logPath), "secondary-instance.log");
+    const record = createLaunchRecord({
+      index: this.launches.length + 1,
+      port: null,
+      root: this.root,
+      logPath: secondaryLog,
+      browserArgs: "",
+      startedAtMs,
+      role: "secondary",
+    });
+    record.owner = "acceptance-driver";
+    record.parentPid = process.pid;
+    record.sameRoot = true;
+    record.acceptanceIdentifier = this.opts.acceptanceIdentifier ?? null;
+    record.exitBudgetMs = timeoutMs;
+    record.launchDeadlineMs = startedAtMs + timeoutMs;
+    this.launches.push(record);
+    const env = secondaryLaunchEnvironment({
+      inherited: process.env,
+      controlled: this.opts.controlledIo?.env,
+      scenario: this.opts.env,
+      root: this.root,
+    });
+    let out = null;
+    let child = null;
+    try {
+      out = fs.openSync(secondaryLog, "a");
+      child = spawn(EXE, [], { env, stdio: ["ignore", out, out], detached: false });
+    } catch (error) {
+      record.spawnError = String(error?.message ?? error);
+      record.failure = `第二个实例启动失败：${record.spawnError}`;
+      if (out !== null) {
+        try {
+          fs.closeSync(out);
+        } catch {}
+      }
+      return { record, verdict: { status: "failed", reason: record.failure } };
+    }
+    record.hostPid = child.pid;
+    record.stageMs.spawn = Date.now() - startedAtMs;
+    let wait = null;
+    try {
+      wait = await waitForSecondaryExit({
+        child,
+        ownedPid: record.hostPid,
+        timeoutMs,
+        isCanceled: this.opts.isCanceled,
+      });
+    } catch (error) {
+      wait = {
+        kind: null,
+        exitCode: null,
+        signal: null,
+        spawnError: String(error?.message ?? error),
+        elapsedMs: Date.now() - startedAtMs,
+        timedOut: false,
+        canceled: false,
+        exitBeforeTerminate: false,
+        exitConfirmed: false,
+        exitAfterTerminate: false,
+        terminateRequested: false,
+        terminateError: null,
+        terminateUnconfirmed: false,
+      };
+    } finally {
+      if (out !== null) {
+        try {
+          fs.closeSync(out);
+        } catch {}
+      }
+    }
+    if (wait.spawnError) record.spawnError = wait.spawnError;
+    let verdict = classifySecondaryExit({
+      exitCode: wait.exitCode,
+      signal: wait.signal,
+      elapsedMs: wait.elapsedMs,
+      budgetMs: timeoutMs,
+      timedOut: wait.timedOut,
+      canceled: wait.canceled,
+      exitConfirmed: wait.exitConfirmed,
+      terminateRequested: wait.terminateRequested,
+      terminateError: wait.terminateError,
+      terminateUnconfirmed: wait.terminateUnconfirmed,
+    });
+    if (wait.kind === "error" || wait.spawnError) {
+      verdict = { status: "failed", reason: `第二个实例启动失败：${record.spawnError}` };
+    }
+    record.hostExitCode = wait.exitConfirmed && Number.isInteger(wait.exitCode) ? wait.exitCode : null;
+    record.hostSignal = wait.exitConfirmed ? (wait.signal ?? null) : null;
+    record.exitElapsedMs = Math.round(wait.elapsedMs);
+    record.exitConfirmed = wait.exitConfirmed === true;
+    record.exitBeforeTerminate = wait.exitBeforeTerminate === true;
+    record.exitAfterTerminate = wait.exitAfterTerminate === true;
+    record.terminateRequested = wait.terminateRequested === true;
+    record.terminateError = wait.terminateError ?? null;
+    record.terminateUnconfirmed = wait.terminateUnconfirmed === true;
+    record.exitWithinBudget =
+      !wait.timedOut &&
+      !wait.canceled &&
+      wait.exitConfirmed &&
+      wait.elapsedMs <= timeoutMs;
+    record.exitTimedOut = wait.timedOut;
+    record.exitCanceled = wait.canceled;
+    record.hostExitDetected = wait.exitConfirmed
+      ? {
+          code: record.hostExitCode,
+          signal: record.hostSignal,
+          at_ms: Math.round(wait.elapsedMs),
+          source: "exit-event",
+        }
+      : null;
+    record.stageMs.total = Math.round(wait.elapsedMs);
+    if (verdict.status !== "passed") record.failure = verdict.reason;
+    hb(
+      `第二个实例 PID=${record.hostPid} 退出=${record.hostExitCode ?? "unknown"} 确认=${record.exitConfirmed} 耗时=${record.exitElapsedMs} ms`,
+    );
+    return { record, verdict };
   }
   async waitForData(timeoutMs = 30000) {
     await this.page.waitForSelector(".app-nav", { timeout: timeoutMs });
@@ -1278,9 +1429,21 @@ function splitViolations(list) {
 class Checks {
   constructor() {
     this.rows = [];
+    // AC10：真实观察不到的外部证据（如托盘）单列 pending，不混入通过/失败，
+    // 也不能用进程数等替身结论把它变成通过。
+    this.pendingRows = [];
   }
   add(name, ok, detail = "") {
     this.rows.push({ name, ok: !!ok, detail: String(detail).slice(0, 300) });
+    return this;
+  }
+  pending(name, detail = "") {
+    this.pendingRows.push({
+      name,
+      ok: null,
+      pending: true,
+      detail: String(detail).slice(0, 300),
+    });
     return this;
   }
   get failures() {
@@ -1737,6 +1900,8 @@ const scenarios = {
   "ui-source-paths": nativeSourcePaths,
   // §4.8 第 7 条：多路重启压力验证，只在本地跑（CI 由各场景原有的重启覆盖）。
   "ui-relaunch": nativeUiRelaunch,
+  // AC10（N12）：同一隔离根启动第二个实例，核对限时退出/窗口恢复/唯一托盘。
+  "ui-single-instance": nativeSingleInstance,
   // 在同一个驱动进程内完成等待；部分终端会在父进程结束时回收其原生子进程。
   async "expire-cycle"(context) {
     await scenarios["expire-start"](context);
@@ -3465,7 +3630,7 @@ const scenarios = {
     const captureContent =
       captureBytes === null
         ? { ok: false, detail: "无字节证据" }
-        : strictConsentState(captureBytes, CURRENT_CONSENT_REVISION);
+        : strictConsentState(captureBytes, currentConsentRevision());
     ck.add("consent_saved_capture_content", captureContent.ok, captureContent.detail);
     // 十七轮复核 P2：终态 settings 与保存字节证据**同口径**严格判定——
     // 正则搜索会被注释假字段骗过（复核方复现：保存证据正确、终态实际
@@ -3473,7 +3638,7 @@ const scenarios = {
     // 合法重写按终态解析（不与保存字节比对，重写正例由上一检查保证）。
     const terminalCheck = strictConsentState(
       fs.readFileSync(settingsPath),
-      CURRENT_CONSENT_REVISION,
+      currentConsentRevision(),
     );
     ck.add("accept_writes_consent_with_revision", terminalCheck.ok, terminalCheck.detail);
 
@@ -3670,7 +3835,7 @@ const scenarios = {
     ev.settingsAfterAccept = afterAcceptBytes.toString("utf8");
     const afterAcceptState = strictConsentState(
       afterAcceptBytes,
-      CURRENT_CONSENT_REVISION,
+      currentConsentRevision(),
     );
     ck.add(
       "reconsent_writes_current_revision",
@@ -3759,7 +3924,7 @@ const scenarios = {
       `accepted=${beforeToml.privacy_policy_accepted} revision=${beforeToml.privacy_policy_revision} ` +
         `agreement=${beforeToml.user_agreement_accepted}`,
     );
-    const legacyState = strictConsentState(beforeBytes, CURRENT_CONSENT_REVISION);
+    const legacyState = strictConsentState(beforeBytes, currentConsentRevision());
     ck.add(
       "legacy_record_is_not_current_consent",
       !legacyState.ok,
@@ -3821,7 +3986,7 @@ const scenarios = {
     ev.settingsAfterAccept = afterAcceptBytes.toString("utf8");
     const afterAcceptState = strictConsentState(
       afterAcceptBytes,
-      CURRENT_CONSENT_REVISION,
+      currentConsentRevision(),
     );
     ck.add(
       "revision2_user_click_writes_current_revision",
@@ -3902,10 +4067,6 @@ async function main() {
   if (!Number.isInteger(RELAUNCH_CYCLES) || RELAUNCH_CYCLES < 1) {
     throw new Error(`--relaunch-cycles 必须是正整数：${arg("relaunch-cycles")}`);
   }
-  fs.mkdirSync(OUT, { recursive: true });
-  const stampDir = path.join(OUT, SCENARIO);
-  fs.mkdirSync(stampDir, { recursive: true });
-
   const attachExisting = SCENARIO === "expire-finish";
   // 状态文件损坏（例如带 BOM）也要走证据流程，不能直接退出而没有 evidence.json（§4.8 第 5 条）
   let state = null;
@@ -3918,6 +4079,38 @@ async function main() {
     }
   }
   const root = ROOT || state?.root || freshRoot(SCENARIO);
+
+  // AC10：全路径隔离（含子路径/别名/受保护来源目录）与实际 EXE 构建筛查
+  // 必须在创建输出目录、准备隔离根、启动任何进程之前完成。
+  const launchPreflight = evaluateAcceptanceLaunchPreflight({
+    root,
+    outDir: OUT,
+    exePath: EXE,
+    homeDir: process.env.USERPROFILE || "",
+    attachExisting,
+  });
+  if (!launchPreflight.ok) {
+    console.log(
+      JSON.stringify(
+        {
+          scenario: SCENARIO,
+          refused: true,
+          root,
+          exe: EXE,
+          preflight: launchPreflight,
+          message: "预检失败：零准备、零启动",
+        },
+        null,
+        2,
+      ),
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  fs.mkdirSync(OUT, { recursive: true });
+  const stampDir = path.join(OUT, SCENARIO);
+  fs.mkdirSync(stampDir, { recursive: true });
   const scheme = THEME === "system" ? null : THEME;
   const shots = stampDir;
   const logPath = path.join(stampDir, "process.log");
@@ -3950,12 +4143,26 @@ async function main() {
     exe: EXE,
     exe_sha256: fs.existsSync(EXE) ? sha256File(EXE) : "missing",
     acceptance_root: root,
+    acceptance_preflight: launchPreflight,
+    base_identifier: BASE_IDENTIFIER,
+    acceptance_identifier: ACCEPTANCE_IDENTIFIER,
+    real_data_dir: REAL_DATA,
     theme_channel: THEME,
     forced_device_scale: SCALE,
     port: PORT,
     windows_version: windowsVersion,
     userprofile: process.env.USERPROFILE,
   };
+  ck.add(
+    "acceptance_root_isolated",
+    launchPreflight.root.ok,
+    launchPreflight.root.reason,
+  );
+  ck.add(
+    "acceptance_executable_verified",
+    launchPreflight.exe.ok,
+    launchPreflight.exe.reason,
+  );
 
   const cancelFlag = { requested: false };
   let inst;
@@ -3998,6 +4205,10 @@ async function main() {
     logPath,
     relaunchCycles: RELAUNCH_CYCLES,
     controlledIo,
+    baseIdentifier: BASE_IDENTIFIER,
+    acceptanceIdentifier: ACCEPTANCE_IDENTIFIER,
+    realDataDir: REAL_DATA,
+    homeDir: process.env.USERPROFILE || "",
     // WB07：ui-source-paths 也用统一 fixture（两版 WorkBuddy 合成转写）。
     profile: ["ui-identity", "ui-ccs-import", "ui-pricing", "ui-source-paths"].includes(SCENARIO)
       ? "unified"
@@ -4160,8 +4371,10 @@ async function main() {
           recorded_pids: mergePids([inst.current?.hostPid], inst.current?.descendantPids ?? []),
           attached: inst.attached === true,
           launches: buildLaunchesEvidence(inst.launches),
-          checks: ck.rows,
+          checks: [...ck.rows, ...ck.pendingRows],
           failed: ck.failures.map((f) => f.name),
+          pending: ck.pendingRows.map((p) => p.name),
+          verification_complete: ck.pendingRows.length === 0,
           minimal_evidence: true,
           minimal_evidence_at: nowIso(),
         },
@@ -4199,14 +4412,31 @@ async function main() {
     hb(`attach 模式状态文件不可用：${stateError}`);
   } else {
     try {
-      const manifest = await inst.prepareRoot();
-      ev.manifest_files = Object.keys(manifest.files ?? {}).length;
-      ev.manifest_sha_first = manifest.files
-        ? Object.values(manifest.files).map((f) => f.sha256.slice(0, 12))
-        : [];
-      if (SCENARIO === "first-frame") ev.expectStored = EXPECT_STORED;
-      hb("启动 release/acceptance 实例并连接 CDP");
-      const info = await inst.launch();
+      const launchGate = await startIfPreflightAllows({
+        preflight: () => launchPreflight,
+        prepare: async () => {
+          const manifest = await inst.prepareRoot();
+          ev.manifest_files = Object.keys(manifest.files ?? {}).length;
+          ev.manifest_sha_first = manifest.files
+            ? Object.values(manifest.files).map((f) => f.sha256.slice(0, 12))
+            : [];
+          if (SCENARIO === "first-frame") ev.expectStored = EXPECT_STORED;
+          if (SCENARIO === "ui-single-instance") {
+            // 先于第一个实例读取托盘：基线可能包含用户正在运行的正式实例图标；
+            // 场景按“基线 + 1”判断验收实例只新增一个图标。
+            ev.tray_baseline_before_primary = readTrayObservation();
+          }
+          return manifest;
+        },
+        launch: async () => {
+          hb("启动 release/acceptance 实例并连接 CDP");
+          return inst.launch();
+        },
+      });
+      if (!launchGate.started) {
+        throw new Error(`预检拒绝启动：${launchGate.preflight?.reason ?? "unknown"}`);
+      }
+      const info = launchGate.launched;
       hb(`PID=${info.pid} port=${info.port}`);
       if (SCENARIO === "fault-pricing-locked") {
         // 在进程启动前独占打开 pricing.toml（FileShare=None），让真实后端读取失败
@@ -4327,7 +4557,8 @@ async function main() {
         SCENARIO === "ui-source-paths" ||
         SCENARIO === "ui-identity" ||
         SCENARIO === "ui-ccs-import" ||
-        SCENARIO === "ui-pricing"
+        SCENARIO === "ui-pricing" ||
+        SCENARIO === "ui-single-instance"
       ) {
         // S00：失败截图/DOM 取证有短上限，无法完成就跳过并记原因（计划 §9.1 第 5 条）
         try {
@@ -4371,7 +4602,8 @@ async function main() {
                 SCENARIO === "ui-source-paths" ||
                 SCENARIO === "ui-identity" ||
                 SCENARIO === "ui-ccs-import" ||
-                SCENARIO === "ui-pricing"
+                SCENARIO === "ui-pricing" ||
+                SCENARIO === "ui-single-instance"
               ) {
                 const logs = path.join(root, "tokenscope", "logs");
                 if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
@@ -4388,7 +4620,10 @@ async function main() {
       process.exit(1);
     }
     if (!scenarioError) {
-      hb(`场景 ${SCENARIO} 结束，检查 ${ck.rows.length - ck.failures.length}/${ck.rows.length}`);
+      hb(
+        `场景 ${SCENARIO} 结束，检查 ${ck.rows.length - ck.failures.length}/${ck.rows.length}` +
+          (ck.pendingRows.length ? `，待验证 ${ck.pendingRows.length} 项` : ""),
+      );
     }
   }
 
@@ -4430,7 +4665,8 @@ async function main() {
     SCENARIO === "ui-source-paths" ||
     SCENARIO === "ui-identity" ||
     SCENARIO === "ui-ccs-import" ||
-    SCENARIO === "ui-pricing"
+    SCENARIO === "ui-pricing" ||
+    SCENARIO === "ui-single-instance"
   ) {
     const logs = path.join(root, "tokenscope", "logs");
     if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
@@ -4495,8 +4731,13 @@ async function main() {
   ev.stages = stage.list();
   ev.launch_count = inst.launches.length;
   ev.launches = buildLaunchesEvidence(inst.launches);
-  ev.checks = ck.rows;
+  ev.checks = [...ck.rows, ...ck.pendingRows];
   ev.failed = ck.failures.map((f) => f.name);
+  ev.pending = ck.pendingRows.map((p) => p.name);
+  ev.verification_complete = ck.pendingRows.length === 0;
+  ev.base_identifier = BASE_IDENTIFIER;
+  ev.acceptance_identifier = ACCEPTANCE_IDENTIFIER;
+  ev.real_data_dir = REAL_DATA;
   if (ck.failures.length) ev.host_log_tail = inst.logTail();
   if (ck.failures.length) {
     // 应用自己的文件日志（隔离根 tokenscope/logs）尾部：进程 stdout 为空时这是唯一线索
@@ -4522,12 +4763,19 @@ async function main() {
     passed: ck.rows.length - ck.failures.length,
     total: ck.rows.length,
     failures: ck.failures.map((f) => `${f.name}: ${f.detail}`),
+    pending: ck.pendingRows.map((p) => `${p.name}: ${p.detail}`),
+    verification_complete: ck.pendingRows.length === 0,
     launches: ev.launches.map((l) => ({
       index: l.index,
+      role: l.role,
       port: l.port,
       attached: l.attached,
       host_pid: l.host_pid,
       host_exit_code: l.host_exit_code,
+      same_root: l.same_root,
+      acceptance_identifier: l.acceptance_identifier,
+      exit_elapsed_ms: l.exit_elapsed_ms,
+      exit_within_budget: l.exit_within_budget,
     })),
     evidence: out,
     real_untouched: ev.real_untouched,
@@ -4536,6 +4784,8 @@ async function main() {
   };
   console.log(JSON.stringify(summary, null, 2));
   if (ck.failures.length) process.exitCode = 1;
+  // AC10：pending 不是通过；用独立退出码让调用方/未来 CI 不会把未观察项当成全绿。
+  else if (ck.pendingRows.length) process.exitCode = 3;
   // 启动/attach 失败：证据已写出，保留原来的退出码 2 语义
   if (setupError) throw setupError;
   if (SCENARIO === "expire-start") {
