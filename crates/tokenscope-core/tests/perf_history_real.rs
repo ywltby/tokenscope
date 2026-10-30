@@ -29,11 +29,13 @@
 //!   总字节数**——同长度的内容改写不可检测（敏感性用例
 //!   `ac09_fingerprint_scope_and_blind_spot` 已在合成目录钉住该边界）；
 //!   「逐字节零写入」未证明。
-//! - 读侧：请求数精确等于合成规模、四桶与期望公式吻合、按项目分组恰
-//!   为合成项目集合——只能排除**产生有效事件的额外来源**；空目录或
-//!   零有效事件来源的读取不可由结果排除，结构性保证是 `source_plans`
-//!   显式注入（见上）。本测试读取真实 `~/.tokenscope` 的**目录元数据**
-//!   （文件名与大小，递归），不读文件内容，不输出文件名清单。
+//! - 读侧：请求数精确等于合成规模、四桶与期望公式吻合、按项目分组的
+//!   **身份集合**与 fixture 指定的 26 个合成项目逐项一致——只能排除
+//!   **在全局去重后仍新增事件的额外来源**；与已有事件同原生身份而被
+//!   去重的额外来源、空目录或零有效事件来源的读取不可由结果排除，
+//!   结构性保证是 `source_plans` 显式注入（见上）。本测试读取真实
+//!   `~/.tokenscope` 的**目录元数据**（文件名与大小，递归），不读文件
+//!   内容，不输出文件名清单。
 //! - 分页：前两页与合成数据的**独立期望顺序逐位核对**（不重复也不
 //!   漏行），并以「跳过中间一段」的反例证明核对对漏行有区分力。
 //!
@@ -196,6 +198,17 @@ const CLAUDE_TOTAL: u64 = (CLAUDE_SLUGS * CLAUDE_FILES * CLAUDE_EVENTS) as u64;
 const CODEX_TOTAL: u64 = (CODEX_FILES * CODEX_EVENTS) as u64;
 const TOTAL_EVENTS: u64 = CLAUDE_TOTAL + CODEX_TOTAL;
 const TOTAL_FILES: u64 = (CLAUDE_SLUGS * CLAUDE_FILES + CODEX_FILES) as u64;
+
+/// 合成项目身份集合（项目 key = 规范化 cwd）：Claude 6 个
+/// `C:/perf/work{slug}` + Codex 20 个 `C:/perf/x{file}`。只比较分组数量
+/// 不能证明「恰为指定项目」，核对时必须按集合逐项比较。
+fn expected_project_keys() -> Vec<String> {
+    let mut keys: Vec<String> = (0..CLAUDE_SLUGS)
+        .map(|slug| format!("C:/perf/work{slug}"))
+        .collect();
+    keys.extend((0..CODEX_FILES).map(|file| format!("C:/perf/x{file}")));
+    keys
+}
 
 /// Claude 事件四桶（event = 文件内序号）：随序号变化，使四桶非平凡。
 fn claude_usage(event: usize) -> (u64, u64, u64, u64) {
@@ -622,9 +635,10 @@ fn ac09_synthetic_cold_warm_pipeline() {
     // ── 热采集（第二轮无新数据：来源指纹未变，不重解析）+ 同口径查询
     let (warm, warm_ph) = run_round("热轮", &opts, &expected);
 
-    // ── 读侧有区分度检查：按项目分组恰为合成项目集合（6 Claude + 20
-    // Codex = 26），请求数合计等于合成规模——产生有效事件的额外来源
-    // 必然新增分组或超出合计（空来源/零有效事件来源不可由此排除）。
+    // ── 读侧有区分度检查：项目分组的身份集合逐项等于 fixture 指定的
+    // 26 个合成项目（6 Claude + 20 Codex），请求数合计等于合成规模——
+    // 这只能排除**在全局去重后仍新增事件的额外来源**；与已有事件同
+    // 原生身份而被去重的额外来源、空来源/零有效事件来源不可由此排除。
     let mut proj_opts = build_opts(&dir, plans);
     proj_opts.by = GroupBy::Project;
     let proj_snap = query::begin_query_with(&proj_opts, true).expect("项目分组采集失败");
@@ -639,10 +653,13 @@ fn ac09_synthetic_cold_warm_pipeline() {
         Some(TOTAL_EVENTS),
         "合计行请求数应等于合成规模"
     );
+    let mut actual_keys: Vec<String> = real_groups.iter().map(|g| g.key.clone()).collect();
+    actual_keys.sort();
+    let mut expected_keys = expected_project_keys();
+    expected_keys.sort();
     assert_eq!(
-        real_groups.len(),
-        CLAUDE_SLUGS + CODEX_FILES,
-        "项目分组数应等于合成项目数（6 Claude + 20 Codex）"
+        actual_keys, expected_keys,
+        "项目身份集合应与 fixture 指定的 26 个合成项目逐项一致（仅比较数量不足）"
     );
     assert!(
         real_groups.iter().all(|g| g.requests > 0),
@@ -711,9 +728,9 @@ fn ac09_synthetic_cold_warm_pipeline() {
          若确有 TokenScope GUI 同时运行，请先关闭后重跑再归因"
     );
     // 证据边界（如实标注）：指纹只证明文件数与总字节数不变（同长度内容
-    // 改写不可检测）；请求数与项目分组只排除「产生有效事件的额外来源」。
-    // 逐字节零写入与空来源零读取未证明——结构性保证是 source_plans 显式
-    // 注入（见上方来源根断言）。
+    // 改写不可检测）；请求数与项目身份集合只排除「在全局去重后仍新增
+    // 事件的额外来源」——与已有事件同原生身份而被去重的额外来源、空来源
+    // 零读取未证明；结构性保证是 source_plans 显式注入（见上方来源根断言）。
 
     // ── 峰值测量（覆盖整个冷/热流程；fixture 写入的少量分配可忽略）
     let heap_peak = peak_bytes();
@@ -755,6 +772,7 @@ fn ac09_synthetic_cold_warm_pipeline() {
             "expected_order_match": true,
             "skip_counterexample_rejected": true,
             "project_groups": real_groups.len(),
+            "project_identity_match": true,
             "project_requests_sum": proj_requests,
         },
     });
