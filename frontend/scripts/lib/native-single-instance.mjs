@@ -41,6 +41,9 @@ function isWithin(child, parent) {
 /**
  * 解析路径的最终真实位置，包含尚不存在的尾部与符号链接/junction 别名。
  * 失败（权限、断链、无法解析）一律 fail closed，不把别名当成独立目录。
+ * `expect`（`dir` / `file` / `any`）为声明类型：路径已存在但类型不符即拒绝，
+ * 例如 manifest.json 变成目录、`sources/claude` 变成常规文件或指向文件的
+ * 别名。不存在的路径允许（准备脚本随后创建）。
  */
 export function canonicalizeAcceptancePath(
   target,
@@ -48,6 +51,7 @@ export function canonicalizeAcceptancePath(
     lstatSync = fs.lstatSync,
     realpathSync = fs.realpathSync.native ?? fs.realpathSync,
     statSync = fs.statSync,
+    expect = "any",
   } = {},
 ) {
   const raw = String(target ?? "").trim();
@@ -80,7 +84,13 @@ export function canonicalizeAcceptancePath(
   const resolved = tail.length ? path.join(real, ...tail) : real;
   try {
     const stat = statSync(resolved);
-    if (!stat.isFile() && !stat.isDirectory()) {
+    if (expect === "dir" && !stat.isDirectory()) {
+      return { ok: false, reason: `声明为目录但实际不是目录：${resolved}` };
+    }
+    if (expect === "file" && !stat.isFile()) {
+      return { ok: false, reason: `声明为常规文件但实际不是：${resolved}` };
+    }
+    if (expect !== "dir" && expect !== "file" && !stat.isFile() && !stat.isDirectory()) {
       return { ok: false, reason: `不是常规文件或目录：${resolved}` };
     }
   } catch (error) {
@@ -88,7 +98,7 @@ export function canonicalizeAcceptancePath(
       return { ok: false, reason: `无法检查路径类型：${error?.message ?? error}` };
     }
   }
-  return { ok: true, path: path.resolve(resolved) };
+  return { ok: true, path: path.resolve(resolved), expect };
 }
 
 /**
@@ -117,36 +127,303 @@ export function getUserProtectedDirs(homeDir) {
 }
 
 /**
- * 验收实例会读写的全部路径（隔离根 + 数据/来源/WebView 子目录 + manifest + 输出目录）。
- * 深层来源子路径单独列出，使 junction/symlink 在预检时即可被解析。
+ * 只用文件系统读取当前检出的完整提交哈希（不 spawn git，保证它仍可排在
+ * 任何进程启动之前）。支持普通仓库、链接工作区（.git 文件 + commondir）与
+ * packed-refs；读不出来返回 null，由调用方决定拒绝。
+ */
+export function readGitHeadCommit(
+  repoDir,
+  {
+    readFileSync = fs.readFileSync,
+    statSync = fs.statSync,
+    existsSync = fs.existsSync,
+  } = {},
+) {
+  const hash = (value) => {
+    const text = String(value ?? "").trim();
+    return /^[0-9a-f]{40}$/i.test(text) ? text.toLowerCase() : null;
+  };
+  const fromPackedRefs = (gitDir, refName) => {
+    const packed = path.join(gitDir, "packed-refs");
+    if (!existsSync(packed)) return null;
+    let content;
+    try {
+      content = readFileSync(packed, "utf8");
+    } catch {
+      return null;
+    }
+    for (const line of content.split(/\r?\n/)) {
+      if (!line || line.startsWith("#") || line.startsWith("^")) continue;
+      const [value, ...rest] = line.trim().split(/\s+/);
+      if (rest.join("") === refName) return hash(value);
+    }
+    return null;
+  };
+  const readLoose = (base, refName) => {
+    // refName 形如 refs/heads/main：直接接在 git 目录之后，不再补 refs
+    const target = path.join(base, ...refName.split("/"));
+    if (!existsSync(target)) return null;
+    try {
+      return hash(readFileSync(target, "utf8"));
+    } catch {
+      return null;
+    }
+  };
+
+  let gitDir = path.join(repoDir, ".git");
+  try {
+    if (statSync(gitDir).isFile()) {
+      const content = readFileSync(gitDir, "utf8");
+      const match = content.match(/^\s*gitdir:\s*(.+?)\s*$/m);
+      if (!match) return null;
+      gitDir = path.resolve(repoDir, match[1]);
+    }
+  } catch {
+    return null;
+  }
+  if (!existsSync(gitDir)) return null;
+
+  let head;
+  try {
+    head = readFileSync(path.join(gitDir, "HEAD"), "utf8").trim();
+  } catch {
+    return null;
+  }
+  const detached = hash(head);
+  if (detached) return detached;
+  const refName = head.replace(/^ref:\s*/i, "").trim();
+  if (!refName || refName.startsWith("-") || path.isAbsolute(refName)) return null;
+
+  const commonDir = (() => {
+    const pointer = path.join(gitDir, "commondir");
+    if (!existsSync(pointer)) return null;
+    try {
+      return path.resolve(gitDir, readFileSync(pointer, "utf8").trim());
+    } catch {
+      return null;
+    }
+  })();
+
+  return (
+    readLoose(gitDir, refName) ??
+    (commonDir ? readLoose(commonDir, refName) : null) ??
+    fromPackedRefs(gitDir, refName) ??
+    (commonDir ? fromPackedRefs(commonDir, refName) : null)
+  );
+}
+
+/** 预检时展开验收根现有条目的上限；超过即无法完整核对，fail closed。 */
+export const ACCEPTANCE_TREE_ENTRY_BUDGET = 5000;
+
+/**
+ * 验收根内固定会被读写的路径布局。每一项都带期望类型：`dir` 必须真的是目录、
+ * `file` 必须真的是常规文件（两者都还不存在时允许，由准备脚本创建）。
+ * 覆盖 crates/tokenscope-core/src/acceptance.rs 的三类覆盖点（data_dir、
+ * source_dir、logs）与 scripts/prepare-native-acceptance.ps1 实际创建的全部
+ * 目录层级（含 `sources/<agent>/projects`、`sources/cc-switch`）。
+ */
+export function getAcceptancePathLayout(root) {
+  const join = (...parts) => path.join(root, ...parts);
+  return [
+    { path: root, kind: "dir" },
+    { path: join("tokenscope"), kind: "dir" },
+    { path: join("tokenscope", "logs"), kind: "dir" },
+    { path: join("sources"), kind: "dir" },
+    { path: join("sources", "claude"), kind: "dir" },
+    { path: join("sources", "claude", "projects"), kind: "dir" },
+    { path: join("sources", "codex"), kind: "dir" },
+    { path: join("sources", "codex", "sessions"), kind: "dir" },
+    { path: join("sources", "workbuddy"), kind: "dir" },
+    { path: join("sources", "workbuddy", "projects"), kind: "dir" },
+    { path: join("sources", "workbuddy-ai"), kind: "dir" },
+    { path: join("sources", "workbuddy-ai", "projects"), kind: "dir" },
+    { path: join("sources", "cc-switch"), kind: "dir" },
+    { path: join("webview"), kind: "dir" },
+    { path: join("manifest.json"), kind: "file" },
+  ];
+}
+
+/**
+ * 验收实例会读写的浅层路径（兼容旧接口：只返回路径字符串）。
+ * 深层子路径由 getAcceptancePathLayout / 清单派生 / 目录走查共同覆盖。
  */
 export function getAcceptanceWritePaths(root, outDir) {
-  const paths = [
-    root,
-    path.join(root, "tokenscope"),
-    path.join(root, "sources"),
-    path.join(root, "sources", "claude"),
-    path.join(root, "sources", "codex"),
-    path.join(root, "sources", "workbuddy"),
-    path.join(root, "sources", "workbuddy-ai"),
-    path.join(root, "webview"),
-    path.join(root, "manifest.json"),
-  ];
+  const paths = getAcceptancePathLayout(root).map((entry) => entry.path);
   if (outDir) paths.push(outDir);
   return paths;
 }
 
+const MANIFEST_DIR_KEY = /_dir$/;
+
 /**
- * 完整路径预检：对验收实例会读写的每个路径（root、root/tokenscope、
- * root/sources、root/webview、root/manifest.json、--out）逐个做真实路径
- * 解析（含 junction/symlink），并与全部受保护用户目录做双向包含检查。
- * 用户目录无法确定时拒绝。
+ * 从 manifest 派生预检路径：所有 `*_dir` 声明的目录与 `files` 记录的每个文件。
+ * 这是"检查其他实际读写路径"的权威来源——准备脚本把每个写入文件的绝对路径
+ * 都记进了清单，清单里的路径同样要过真实解析与受保护目录比对。
+ */
+export function collectManifestAcceptancePaths(manifest) {
+  const entries = [];
+  const invalid = [];
+  if (!manifest || typeof manifest !== "object") {
+    return { entries, invalid: ["manifest 不是对象"] };
+  }
+  for (const [key, value] of Object.entries(manifest)) {
+    if (typeof value === "string") {
+      if (MANIFEST_DIR_KEY.test(key)) entries.push({ path: value, kind: "dir", source: key });
+    } else if (value && typeof value === "object" && key === "files") {
+      for (const [name, record] of Object.entries(value)) {
+        const declared = typeof record === "string" ? record : record?.path;
+        entries.push({ path: declared ?? name, kind: "file", source: `files.${name}` });
+      }
+    }
+  }
+  for (const entry of entries) {
+    if (!String(entry.path ?? "").trim()) invalid.push(`${entry.source}: 空路径`);
+    else if (!path.isAbsolute(entry.path)) invalid.push(`${entry.source}: 非绝对路径 ${entry.path}`);
+  }
+  return { entries, invalid };
+}
+
+/**
+ * 读取隔离根里的 manifest.json。缺失=全新根（正常，由准备脚本创建）；
+ * 存在但读不出/解析不了/声明了非法路径=无法确定读写面，一律 fail closed。
+ */
+export function readAcceptanceManifest(
+  manifestPath,
+  { readFile = fs.readFileSync, collect = collectManifestAcceptancePaths } = {},
+) {
+  let raw;
+  try {
+    raw = readFile(manifestPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return { ok: true, exists: false, entries: [], invalid: [], path: manifestPath };
+    }
+    if (error?.code === "EISDIR") {
+      return {
+        ok: false,
+        exists: true,
+        entries: [],
+        invalid: [],
+        path: manifestPath,
+        reason: `manifest.json 不是常规文件（目录）：${manifestPath}`,
+      };
+    }
+    return {
+      ok: false,
+      exists: true,
+      entries: [],
+      invalid: [],
+      path: manifestPath,
+      reason: `manifest.json 读取失败：${String(error?.message ?? error)}`,
+    };
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw));
+  } catch (error) {
+    return {
+      ok: false,
+      exists: true,
+      entries: [],
+      invalid: [],
+      path: manifestPath,
+      reason: `manifest.json 不是合法 JSON：${String(error?.message ?? error)}`,
+    };
+  }
+  const collected = collect(manifest);
+  if (collected.invalid.length) {
+    return {
+      ok: false,
+      exists: true,
+      entries: collected.entries,
+      invalid: collected.invalid,
+      path: manifestPath,
+      reason: `manifest.json 声明路径非法：${collected.invalid.join("；")}`,
+    };
+  }
+  return { ok: true, exists: true, entries: collected.entries, invalid: [], path: manifestPath };
+}
+
+/**
+ * 走查隔离根现有条目：普通目录继续递归（每个目录都参与真实解析），符号链接/
+ * junction 只解析不再深入（深入会走别名另一侧），硬链接（nlink>1）按可疑别名
+ * 解析。条目超预算时 fail closed，不把"没走完"当成"没问题"。
+ */
+export function collectAcceptanceTreePaths(
+  root,
+  {
+    lstatSync = fs.lstatSync,
+    readdirSync = fs.readdirSync,
+    maxEntries = ACCEPTANCE_TREE_ENTRY_BUDGET,
+  } = {},
+) {
+  const paths = [];
+  const links = [];
+  let visited = 0;
+  const stack = [root];
+  while (stack.length) {
+    const current = stack.pop();
+    let names;
+    try {
+      names = readdirSync(current);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      return {
+        ok: false,
+        paths,
+        links,
+        reason: `验收根走查失败：${current}（${String(error?.message ?? error)}）`,
+      };
+    }
+    for (const name of names) {
+      const child = path.join(current, name);
+      visited += 1;
+      if (visited > maxEntries) {
+        return {
+          ok: false,
+          paths,
+          links,
+          reason: `验收根条目超过 ${maxEntries} 个，无法完整核对隔离，拒绝启动`,
+        };
+      }
+      let stat;
+      try {
+        stat = lstatSync(child);
+      } catch (error) {
+        return {
+          ok: false,
+          paths,
+          links,
+          reason: `无法检查验收根条目 ${child}：${String(error?.message ?? error)}`,
+        };
+      }
+      if (stat.isSymbolicLink() || Number(stat.nlink) > 1) {
+        links.push(child);
+        continue;
+      }
+      if (stat.isDirectory()) {
+        paths.push({ path: child, kind: "dir", source: "tree" });
+        stack.push(child);
+      }
+    }
+  }
+  return { ok: true, paths, links, visited };
+}
+
+/**
+ * 完整路径预检：固定布局 + manifest 声明路径 + 现有条目里的每个目录/别名，
+ * 逐个做真实路径解析（含 junction/symlink/硬链接），并与全部受保护用户目录
+ * 做双向包含检查；用户主目录本身/其祖先同样拒绝。任一路径解析失败或超预算
+ * 一律 fail closed。
  */
 export function validateAcceptancePaths({
   root,
   outDir,
   homeDir,
   canonicalize = canonicalizeAcceptancePath,
+  readFile = fs.readFileSync,
+  collectTree = collectAcceptanceTreePaths,
+  treeBudget = ACCEPTANCE_TREE_ENTRY_BUDGET,
 } = {}) {
   const protectedDirs = getUserProtectedDirs(homeDir);
   if (!protectedDirs) {
@@ -160,25 +437,45 @@ export function validateAcceptancePaths({
   if (!rawRoot) return { ok: false, reason: "隔离根为空" };
   if (!path.isAbsolute(rawRoot)) return { ok: false, reason: `隔离根不是绝对路径：${rawRoot}` };
 
-  const writePaths = getAcceptanceWritePaths(root, outDir);
+  const layout = getAcceptancePathLayout(rawRoot);
+  if (outDir) layout.push({ path: String(outDir), kind: "dir", source: "out" });
 
-  // 逐个解析验收写入路径的真实位置
-  const canonicalWritePaths = [];
-  for (const wp of writePaths) {
-    const c = canonicalize(wp);
-    if (!c.ok) return { ok: false, reason: `验收路径 ${wp} 无法解析：${c.reason}` };
-    canonicalWritePaths.push({ source: wp, path: c.path });
+  const manifest = readAcceptanceManifest(path.join(rawRoot, "manifest.json"), { readFile });
+  if (!manifest.ok) return { ok: false, reason: manifest.reason, manifest };
+  for (const entry of manifest.entries) {
+    layout.push({ path: entry.path, kind: entry.kind, source: entry.source });
   }
 
-  // 逐个解析受保护目录的真实位置
+  const tree = collectTree(rawRoot, { maxEntries: treeBudget });
+  if (!tree.ok) return { ok: false, reason: tree.reason, tree_entries: tree.visited ?? null };
+  for (const entry of tree.paths) layout.push(entry);
+  for (const link of tree.links) layout.push({ path: link, kind: "any", source: "link" });
+
+  // 去重（同一真实位置只解析一次），保留声明类型
+  const unique = new Map();
+  for (const entry of layout) {
+    const key = comparePath(entry.path);
+    if (!unique.has(key)) unique.set(key, entry);
+  }
+
+  const canonicalWritePaths = [];
+  for (const entry of unique.values()) {
+    const c = canonicalize(entry.path, { expect: entry.kind ?? "any" });
+    if (!c.ok) return { ok: false, reason: `验收路径 ${entry.path} 无法解析：${c.reason}` };
+    canonicalWritePaths.push({ source: entry.path, path: c.path, kind: entry.kind ?? "any" });
+  }
+
   const canonicalProtected = [];
   for (const pd of protectedDirs) {
     const c = canonicalize(pd);
     if (!c.ok) return { ok: false, reason: `受保护目录 ${pd} 无法解析：${c.reason}` };
     canonicalProtected.push({ source: pd, path: c.path });
   }
+  const canonicalHome = canonicalize(String(homeDir));
+  if (!canonicalHome.ok) {
+    return { ok: false, reason: `用户主目录无法解析：${canonicalHome.reason}` };
+  }
 
-  // 双向包含检查：每个验收路径 vs 每个受保护目录
   for (const wp of canonicalWritePaths) {
     for (const pd of canonicalProtected) {
       if (comparePath(wp.path) === comparePath(pd.path)) {
@@ -200,6 +497,17 @@ export function validateAcceptancePaths({
         };
       }
     }
+    // 与 acceptance.rs 同口径：验收路径不得等于用户主目录，也不得是其祖先
+    // （主目录本身在 tmpdir 之内，不能按"位于其内"拒绝）。
+    if (comparePath(wp.path) === comparePath(canonicalHome.path)) {
+      return { ok: false, reason: `验收路径 ${wp.source} 是用户主目录本身：${canonicalHome.path}` };
+    }
+    if (isWithin(canonicalHome.path, wp.path)) {
+      return {
+        ok: false,
+        reason: `验收路径 ${wp.source} 是用户主目录 ${canonicalHome.path} 的祖先`,
+      };
+    }
   }
 
   return {
@@ -209,6 +517,11 @@ export function validateAcceptancePaths({
     write_paths: canonicalWritePaths.map((p) => p.path),
     protected_dirs: canonicalProtected.map((p) => p.path),
     alias_resolved: canonicalWritePaths.some((p) => p.path !== path.resolve(p.source)),
+    manifest_present: manifest.exists,
+    manifest_declared: manifest.entries.length,
+    tree_directories: tree.paths.length,
+    tree_links: tree.links.length,
+    tree_visited: tree.visited ?? 0,
   };
 }
 
@@ -269,9 +582,6 @@ export function validateAcceptanceRoot({
   };
 }
 
-/** `child` 是否等于 `parent` 或位于其下（按规范化绝对路径的分量边界）。 */
-
-/**
 /** acceptance 构建中才会编译进 EXE 的字符串标记（shell 验收模块/分支）。 */
 export const ACCEPTANCE_EXE_MARKERS = [
   "验收构建要求进程级",
@@ -280,6 +590,11 @@ export const ACCEPTANCE_EXE_MARKERS = [
 ];
 /** 普通构建核心库 stub 中的标记；出现即判定不是验收构建。 */
 export const NORMAL_ACCEPTANCE_STUB_MARKER = "当前构建未启用 acceptance feature，不接受验收根注入";
+
+/** 受控构建记录的类型名与唯一允许的构建命令（与 .github/workflows/ui-e2e.yml 一致）。 */
+export const ACCEPTANCE_BUILD_RECORD_KIND = "tokenscope-acceptance-build";
+export const ACCEPTANCE_BUILD_COMMAND =
+  "cargo build --locked -p tokenscope-app --release --features acceptance,tauri/custom-protocol --bin tokenscope";
 
 function containsBytes(bytes, text) {
   return bytes.includes(Buffer.from(text, "utf8")) || bytes.includes(Buffer.from(text, "utf16le"));
@@ -294,65 +609,225 @@ function isPeImage(bytes) {
   );
 }
 
+function sha256Hex(bytes) {
+  return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
 /**
- * EXE 验收构建筛查：目标必须是 PE 文件，包含 acceptance 专用标记，
- * 且不含普通构建 stub 标记。字符串标记仅用于**预筛**，不构成构建身份证明——
- * 构建身份需要与受控构建来源的产物哈希比对（CI 尚未提供），当前结论为
- * `marker-screened`（非 `verified`）。
+ * 校验受控构建记录的字段形状。记录由 scripts/record-acceptance-build.ps1 在
+ * 同一次构建里写出（构建命令 + 源提交 + 产物哈希）；缺任何一项都不算身份。
  */
-export function verifyAcceptanceExecutable(exePath, { readFile = fs.readFileSync } = {}) {
+export function parseAcceptanceBuildRecord(raw, { recordPath = "" } = {}) {
+  let data = raw;
+  if (typeof raw === "string" || Buffer.isBuffer(raw)) {
+    try {
+      data = JSON.parse(Buffer.isBuffer(raw) ? raw.toString("utf8") : raw);
+    } catch (error) {
+      return { ok: false, reason: `构建记录不是合法 JSON：${String(error?.message ?? error)}` };
+    }
+  }
+  if (!data || typeof data !== "object") return { ok: false, reason: "构建记录不是对象" };
+  const missing = [];
+  if (data.kind !== ACCEPTANCE_BUILD_RECORD_KIND) {
+    missing.push(`kind 应为 ${ACCEPTANCE_BUILD_RECORD_KIND}，收到 ${String(data.kind)}`);
+  }
+  if (!String(data.artifact_path ?? "").trim()) missing.push("缺少 artifact_path");
+  if (!/^[0-9a-f]{64}$/.test(String(data.artifact_sha256 ?? ""))) {
+    missing.push("artifact_sha256 不是 64 位小写十六进制");
+  }
+  if (!String(data.build_command ?? "").trim()) missing.push("缺少 build_command");
+  if (!/^[0-9a-f]{7,40}$/i.test(String(data.source_commit ?? ""))) {
+    missing.push("source_commit 不是 git 提交哈希");
+  }
+  const features = Array.isArray(data.features) ? data.features : [];
+  if (!features.includes("acceptance")) missing.push("features 未包含 acceptance");
+  if (missing.length) return { ok: false, reason: `构建记录不完整：${missing.join("；")}` };
+  return { ok: true, record: { ...data, recordPath } };
+}
+
+/**
+ * 构建身份判定：重新计算磁盘产物的 SHA-256，并与受控构建记录逐字段核对
+ * （登记产物路径、构建命令、源提交）。只有全部一致才 `verified` 并授予启动
+ * 许可；字符串标记本身永不授予许可。
+ */
+export function verifyAcceptanceBuildIdentity({
+  exePath,
+  record = null,
+  readFile = fs.readFileSync,
+  sourceCommit = null,
+} = {}) {
+  const unverified = (reason, extra = {}) => ({
+    ok: false,
+    launch_allowed: false,
+    build_identity: "unverified",
+    reason,
+    ...extra,
+  });
   const raw = String(exePath ?? "").trim();
-  if (!raw) return { ok: false, reason: "EXE 路径为空" };
+  if (!raw) return unverified("EXE 路径为空");
+  if (!record) return unverified("缺少受控构建记录：无法证明产物来自 acceptance 构建，拒绝启动");
+  const parsed = record.ok === true ? record : parseAcceptanceBuildRecord(record);
+  if (!parsed.ok) return unverified(`${parsed.reason}，拒绝启动`);
+  const trusted = parsed.record;
+  if (comparePath(raw) !== comparePath(trusted.artifact_path)) {
+    return unverified(
+      `启动的 EXE（${raw}）不是构建记录登记的产物（${trusted.artifact_path}），拒绝启动`,
+    );
+  }
+  if (String(trusted.build_command).trim() !== ACCEPTANCE_BUILD_COMMAND) {
+    return unverified(`构建命令不是受控的 acceptance 构建：${trusted.build_command}`);
+  }
+  const commit = String(sourceCommit ?? "").trim();
+  if (!commit) {
+    return unverified("无法确定当前检出的源提交，不能证明构建记录的来源，拒绝启动");
+  }
+  if (commit.toLowerCase() !== String(trusted.source_commit).toLowerCase()) {
+    return unverified(`构建记录的源提交 ${trusted.source_commit} 与当前检出 ${commit} 不一致`);
+  }
   let bytes;
   try {
     bytes = readFile(raw);
   } catch (error) {
-    return { ok: false, reason: `无法读取 EXE：${error?.message ?? error}` };
+    return unverified(`无法读取 EXE 以核对哈希：${String(error?.message ?? error)}`);
   }
   if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
-    return { ok: false, reason: "EXE 为空或读取结果不是 Buffer，无法验证" };
+    return unverified("EXE 为空或读取结果不是 Buffer，无法核对哈希");
   }
+  const sha256 = sha256Hex(bytes);
+  const expected = String(trusted.artifact_sha256).toLowerCase();
+  if (sha256 !== expected) {
+    return {
+      ok: false,
+      launch_allowed: false,
+      build_identity: "hash-mismatch",
+      sha256,
+      expected_sha256: expected,
+      size: bytes.length,
+      reason: `产物哈希与受控构建记录不一致（实际 ${sha256.slice(0, 12)}…，登记 ${expected.slice(
+        0,
+        12,
+      )}…），拒绝启动`,
+    };
+  }
+  return {
+    ok: true,
+    launch_allowed: true,
+    build_identity: "verified",
+    sha256,
+    size: bytes.length,
+    source_commit: trusted.source_commit,
+    reason: `产物哈希与受控构建记录一致（源提交 ${trusted.source_commit}）`,
+  };
+}
+
+/**
+ * EXE 验收构建筛查：PE + acceptance 标记 + 无普通构建 stub 标记只是**预筛**。
+ * 追加了标记的普通 PE、或缺 stub 标记都不能授予启动许可；许可只能来自
+ * verifyAcceptanceBuildIdentity 的 `verified` 结论。
+ */
+export function verifyAcceptanceExecutable(
+  exePath,
+  { readFile = fs.readFileSync, buildRecord = null, sourceCommit = null } = {},
+) {
+  const raw = String(exePath ?? "").trim();
+  if (!raw) {
+    return { ok: false, reason: "EXE 路径为空", launch_allowed: false, build_identity: "unverified" };
+  }
+  let bytes;
+  try {
+    bytes = readFile(raw);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `无法读取 EXE：${error?.message ?? error}`,
+      launch_allowed: false,
+      build_identity: "unverified",
+    };
+  }
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+    return {
+      ok: false,
+      reason: "EXE 为空或读取结果不是 Buffer，无法验证",
+      launch_allowed: false,
+      build_identity: "unverified",
+    };
+  }
+  const screening = { size: bytes.length, sha256: sha256Hex(bytes) };
   if (!isPeImage(bytes)) {
-    return { ok: false, reason: "文件不是 PE 可执行文件，拒绝启动" };
+    return {
+      ...screening,
+      ok: false,
+      reason: "文件不是 PE 可执行文件，拒绝启动",
+      markers: [],
+      negative_markers: [],
+      launch_allowed: false,
+      build_identity: "rejected",
+    };
   }
   const positive = ACCEPTANCE_EXE_MARKERS.filter((marker) => containsBytes(bytes, marker));
   const negative = containsBytes(bytes, NORMAL_ACCEPTANCE_STUB_MARKER)
     ? [NORMAL_ACCEPTANCE_STUB_MARKER]
     : [];
+  const identity = verifyAcceptanceBuildIdentity({
+    exePath: raw,
+    record: buildRecord,
+    readFile,
+    sourceCommit,
+  });
   if (negative.length) {
     return {
+      ...screening,
       ok: false,
       reason: "EXE 含普通构建 acceptance stub 标记，判定不是 acceptance 构建",
-      size: bytes.length,
       markers: positive,
       negative_markers: negative,
+      launch_allowed: false,
       build_identity: "rejected",
+      identity,
     };
   }
   if (!positive.length) {
     return {
+      ...screening,
       ok: false,
       reason: "EXE 未包含 acceptance 构建标记；普通 EXE 或无法验证，拒绝启动",
-      size: bytes.length,
       markers: [],
       negative_markers: negative,
-      build_identity: "rejected",
+      launch_allowed: false,
+      build_identity: identity.build_identity,
+      identity,
+    };
+  }
+  if (!identity.ok) {
+    return {
+      ...screening,
+      ok: false,
+      reason: `字符串标记只用于预筛（命中 ${positive.length} 个），构建身份未验证：${identity.reason}`,
+      markers: positive,
+      negative_markers: [],
+      marker_screened: true,
+      launch_allowed: false,
+      build_identity: identity.build_identity,
+      identity,
     };
   }
   return {
+    ...screening,
     ok: true,
-    reason: `EXE 通过 acceptance 字符串标记预筛（命中 ${positive.length} 个；构建身份未验证，仅用于预筛）`,
-    size: bytes.length,
-    sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+    reason: `构建身份已验证：${identity.reason}（标记预筛命中 ${positive.length} 个）`,
     markers: positive,
     negative_markers: [],
-    build_identity: "marker-screened",
+    marker_screened: true,
+    launch_allowed: true,
+    build_identity: "verified",
+    identity,
   };
 }
 
 /**
- * 启动前预检：完整路径隔离（含全部子路径与受保护目录别名解析）与实际 EXE
- * 构建属性。attach 模式不启动 EXE，只校验路径；非 attach 模式两者都必须通过。
+ * 启动前预检：完整路径隔离（固定布局 + manifest 声明 + 现有条目别名）与实际
+ * EXE 构建身份。attach 模式不启动 EXE，只校验路径；非 attach 模式必须拿到
+ * `verified` 身份，`marker-screened` 一律不允许启动。
  */
 export function evaluateAcceptanceLaunchPreflight({
   root,
@@ -362,16 +837,37 @@ export function evaluateAcceptanceLaunchPreflight({
   attachExisting = false,
   canonicalize = canonicalizeAcceptancePath,
   readFile = fs.readFileSync,
+  buildRecord = null,
+  buildRecordPath = null,
+  sourceCommit = null,
 } = {}) {
   const pathCheck = validateAcceptancePaths({
     root,
     outDir,
     homeDir,
     canonicalize,
+    readFile,
   });
+  let record = buildRecord;
+  if (!record && buildRecordPath) {
+    try {
+      const raw = readFile(String(buildRecordPath));
+      record = parseAcceptanceBuildRecord(Buffer.isBuffer(raw) ? raw.toString("utf8") : raw, {
+        recordPath: String(buildRecordPath),
+      });
+    } catch {
+      record = null;
+    }
+  }
   const exeCheck = attachExisting
-    ? { ok: true, skipped: true, reason: "attach 模式不启动 EXE", build_identity: "skipped" }
-    : verifyAcceptanceExecutable(exePath, { readFile });
+    ? {
+        ok: true,
+        skipped: true,
+        reason: "attach 模式不启动 EXE",
+        build_identity: "skipped",
+        launch_allowed: false,
+      }
+    : verifyAcceptanceExecutable(exePath, { readFile, buildRecord: record, sourceCommit });
   return {
     ok: pathCheck.ok && exeCheck.ok,
     paths: pathCheck,

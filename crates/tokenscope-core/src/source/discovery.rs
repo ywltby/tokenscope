@@ -100,6 +100,10 @@ pub fn filesystem_probe() -> ProbeFn {
 pub struct StartupEnv {
     pub codex_home: Option<String>,
     pub claude_config_dir: Option<String>,
+    /// RC10/AC10：验收隔离上下文标志。环境候选根（`CODEX_HOME` /
+    /// `CLAUDE_CONFIG_DIR`）直接来自启动环境、不受 acceptance 来源根重定向
+    /// 约束，会把验收实例引向真实用户目录；该标志置位时两根一律不进入候选集。
+    pub acceptance_isolated: bool,
 }
 
 /// 生产启动路径调用一次（S04 接线）；采集轮次禁止调用。
@@ -107,6 +111,9 @@ pub fn capture_startup_env() -> StartupEnv {
     StartupEnv {
         codex_home: std::env::var("CODEX_HOME").ok(),
         claude_config_dir: std::env::var("CLAUDE_CONFIG_DIR").ok(),
+        // 生产上下文里 acceptance 构建一定先 bootstrap 了隔离根；普通构建为
+        // false。测试注入的 StartupEnv 不经这里，需要时显式置位。
+        acceptance_isolated: crate::acceptance::data_dir_override().is_some(),
     }
 }
 
@@ -339,8 +346,16 @@ pub fn resolve_sources(
         });
     } else {
         let mut claude_default_diag = Vec::new();
+        let acceptance_isolated = ctx.env.acceptance_isolated;
         if let Some((root, mut env_diag)) = ctx.env_candidate(ctx.env.claude_config_dir.as_ref()) {
-            if root.as_os_str().is_empty() {
+            if acceptance_isolated {
+                // 验收隔离上下文：环境根指向真实用户目录且不受 acceptance
+                // 重定向约束，一律不进入候选集，只留"已忽略"诊断。
+                env_diag.push(
+                    "验收隔离模式：环境变量 CLAUDE_CONFIG_DIR 已忽略（不把隔离根之外的目录当作来源）"
+                        .to_string(),
+                );
+            } else if root.as_os_str().is_empty() {
                 env_diag.push("环境变量 CLAUDE_CONFIG_DIR 为空串，已忽略".to_string());
             } else {
                 let env_root = root.join("projects");
@@ -413,8 +428,14 @@ pub fn resolve_sources(
         }
     } else {
         let mut codex_default_diag = Vec::new();
+        let acceptance_isolated = ctx.env.acceptance_isolated;
         if let Some((base, mut env_diag)) = ctx.env_candidate(ctx.env.codex_home.as_ref()) {
-            if base.as_os_str().is_empty() {
+            if acceptance_isolated {
+                env_diag.push(
+                    "验收隔离模式：环境变量 CODEX_HOME 已忽略（不把隔离根之外的目录当作来源）"
+                        .to_string(),
+                );
+            } else if base.as_os_str().is_empty() {
                 env_diag.push("环境变量 CODEX_HOME 为空串，已忽略".to_string());
             } else {
                 for root in [base.join("sessions"), base.join("archived_sessions")] {

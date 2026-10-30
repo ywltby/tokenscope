@@ -63,4 +63,26 @@ if ($truncated.ok -or $null -ne $truncated.token_scope_count -or $truncated.erro
 }
 Write-Output 'PASS truncated button text is rejected'
 
+# AC10 自有受控窗口：本进程真实 ToolbarWindow32 + 真实 ReadButtons 全链路
+# （OpenProcess 本进程 / VirtualAllocEx / TB_BUTTONCOUNT / TB_GETBUTTON /
+# TB_GETBUTTONTEXTW）。comctl32 普通窗口对自建按钮的文本查询返回 -1（shell
+# 任务栏 toolbar 是私有构建），确定性断言是失败路径：按钮计数真实读出、
+# 文本查询失败 → 整个区域不可观察。绝不把半可观察结果当成通过。
+$window = & "$PSScriptRoot/read-tray-notification-area.ps1" -SelfTestWindow
+if ($LASTEXITCODE -ne 0) { throw "self-test-window exited $LASTEXITCODE" }
+$window = $window | ConvertFrom-Json
+if ($window.declared_count -ne 1) {
+    throw "self-test-window: real toolbar button count must be 1, got $($window.declared_count)"
+}
+if ($window.read_ok) {
+    throw "self-test-window: unexpected readable text on controlled toolbar (contract changed? investigate): $($window | ConvertTo-Json -Compress)"
+}
+if ($window.row_error -notmatch 'TB_GETBUTTONTEXTW') {
+    throw "self-test-window: failure must come from the real text query, got: $($window.row_error)"
+}
+if (@($window.buttons).Count -ne 1 -or $window.buttons[0].command_id -ne 5001) {
+    throw "self-test-window: inserted button (idCommand 5001) must be read back through the real cross-process buffer: $($window | ConvertTo-Json -Compress)"
+}
+Write-Output 'PASS controlled-window: real ToolbarWindow32 read fails closed through the genuine two-phase protocol'
+
 Write-Output 'read-tray-notification-area synthetic contracts: all passed'

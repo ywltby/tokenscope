@@ -215,6 +215,7 @@ fn env_variables_empty_relative_and_missing_are_handled() {
         StartupEnv {
             codex_home: Some("  ".to_string()),
             claude_config_dir: None,
+            acceptance_isolated: false,
         },
         filesystem_probe(),
     );
@@ -250,6 +251,7 @@ fn env_variables_empty_relative_and_missing_are_handled() {
         StartupEnv {
             codex_home: Some("relative/logs".to_string()),
             claude_config_dir: Some("relative/claude".to_string()),
+            acceptance_isolated: false,
         },
         filesystem_probe(),
     );
@@ -285,6 +287,7 @@ fn env_variables_empty_relative_and_missing_are_handled() {
         StartupEnv {
             codex_home: Some(missing_env.display().to_string()),
             claude_config_dir: None,
+            acceptance_isolated: false,
         },
         filesystem_probe(),
     );
@@ -322,6 +325,7 @@ fn codex_home_appends_to_default_roots() {
         StartupEnv {
             codex_home: Some(env_base.display().to_string()),
             claude_config_dir: None,
+            acceptance_isolated: false,
         },
         filesystem_probe(),
     );
@@ -351,6 +355,75 @@ fn codex_home_appends_to_default_roots() {
     assert!(env_row.effective_enabled);
 }
 
+/// RC10/AC10：验收隔离上下文里环境派生根绝不成为候选——`CLAUDE_CONFIG_DIR`
+/// 与 `CODEX_HOME` 在启动环境里指向真实用户目录时，透传它们会让验收实例读到
+/// 真实来源日志（隔离根之外的实际读写路径）。修复前：环境根出现在候选集；
+/// 修复后：只保留隔离根默认根，且诊断明确记录"已忽略"。
+#[test]
+fn acceptance_isolated_context_drops_env_derived_roots() {
+    let home = temp_dir("acceptance-env");
+    let env_codex = home.join("real-codex-home");
+    let env_claude = home.join("real-claude-config");
+    std::fs::create_dir_all(env_codex.join("sessions")).unwrap();
+    std::fs::create_dir_all(env_claude.join("projects")).unwrap();
+    let ctx = DiscoveryContext {
+        env: StartupEnv {
+            codex_home: Some(env_codex.display().to_string()),
+            claude_config_dir: Some(env_claude.display().to_string()),
+            acceptance_isolated: true,
+        },
+        ..ctx_for(&home, StartupEnv::default(), filesystem_probe())
+    };
+    let out = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    for kind in [
+        OriginKind::Env("CODEX_HOME"),
+        OriginKind::Env("CLAUDE_CONFIG_DIR"),
+    ] {
+        assert!(
+            !out.roots
+                .iter()
+                .any(|r| r.origins.iter().any(|o| o.kind == kind)),
+            "验收隔离上下文不得出现环境候选根 {kind:?}：{:?}",
+            out.roots
+        );
+    }
+    let codex = out
+        .roots
+        .iter()
+        .filter(|r| r.agent == AgentKind::Codex)
+        .count();
+    let claude = out
+        .roots
+        .iter()
+        .filter(|r| r.agent == AgentKind::ClaudeCode)
+        .count();
+    assert_eq!(codex, 2, "只保留隔离根默认双根：{:?}", out.roots);
+    assert_eq!(claude, 1, "只保留隔离根默认单根：{:?}", out.roots);
+    let diagnostics: Vec<_> = out
+        .roots
+        .iter()
+        .flat_map(|r| r.diagnostics.iter())
+        .collect();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.contains("CODEX_HOME") && d.contains("验收隔离")),
+        "缺少 CODEX_HOME 忽略诊断：{diagnostics:?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.contains("CLAUDE_CONFIG_DIR") && d.contains("验收隔离")),
+        "缺少 CLAUDE_CONFIG_DIR 忽略诊断：{diagnostics:?}"
+    );
+}
+
 /// 大小写/尾分隔符/别名同根合并一行并保留来源标签（注入探测器模拟 canonical）。
 #[test]
 fn same_root_aliases_merge_with_labels() {
@@ -363,6 +436,7 @@ fn same_root_aliases_merge_with_labels() {
         StartupEnv {
             codex_home: Some(format!("{}/.codex", home.display())),
             claude_config_dir: None,
+            acceptance_isolated: false,
         },
         probe,
     );
@@ -438,6 +512,7 @@ fn legacy_semantics_do_not_expand_reading() {
         StartupEnv {
             codex_home: Some(home.join("env-codex").display().to_string()),
             claude_config_dir: None,
+            acceptance_isolated: false,
         },
         filesystem_probe(),
     );
@@ -549,6 +624,7 @@ fn mapping_bindings_follow_a03_and_env_degradation() {
         StartupEnv {
             codex_home: None,
             claude_config_dir: Some(home.join("cfg-dir").display().to_string()),
+            acceptance_isolated: false,
         },
         filesystem_probe(),
     );
@@ -941,6 +1017,7 @@ fn only_default_missing_rows_are_hideable() {
         StartupEnv {
             codex_home: Some(env_base.display().to_string()),
             claude_config_dir: None,
+            acceptance_isolated: false,
         },
         probe,
     );

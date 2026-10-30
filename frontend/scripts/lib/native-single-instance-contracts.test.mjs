@@ -142,6 +142,22 @@ describe("外部观察脚本与场景接线", () => {
     expect(test).toContain("overflow-unobservable");
   });
 
+  it("托盘读取是先测长后有界写入的两阶段协议，且有自有受控窗口自测", () => {
+    const source = read("scripts/read-tray-notification-area.ps1");
+    // 阶段 1：NULL 缓冲区查询文本长度；阶段 2：超长拒绝 + 按 (len+1)*2 有界写入
+    expect(source).toContain("TB_GETBUTTONTEXTW length query timeout");
+    expect(source).toContain("exceeds capacity");
+    expect(source).toContain("TextCapacityChars");
+    expect(source).toContain("text grew after length query");
+    // 自有受控窗口：真实 ToolbarWindow32 + 真实 ReadButtons（不注入替身）
+    expect(source).toContain("SelfTestWindow");
+    expect(source).toContain("CreateControlledToolbar");
+    expect(source).toContain("TB_BUTTONSTRUCTSIZE");
+    const test = read("scripts/test_read_tray_notification_area.ps1");
+    expect(test).toContain("-SelfTestWindow");
+    expect(test).toContain("command_id -ne 5001");
+  });
+
   it("隔离/EXE 预检发生在目录准备和任何进程启动之前", () => {
     const driver = read("frontend/scripts/native-acceptance.mjs");
     const mainStart = driver.indexOf("async function main()");

@@ -77,6 +77,7 @@ import {
   acceptanceIdentifier,
   classifySecondaryExit,
   evaluateAcceptanceLaunchPreflight,
+  readGitHeadCommit,
   secondaryLaunchEnvironment,
   startIfPreflightAllows,
   waitForSecondaryExit,
@@ -98,6 +99,9 @@ import {
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
 // 统一 workspace 后，不带 --target 的 release 构建产物落在根 target/。
 const EXE_DEFAULT = path.join(REPO, "target", "release", "tokenscope.exe");
+// AC10：acceptance 构建身份来自受控构建步骤写出的记录（构建命令 + 源提交 +
+// 产物 SHA-256）。没有记录就只有一次 acceptance 构建的证据，一律拒绝启动。
+const BUILD_RECORD_DEFAULT = path.join(REPO, "qa-artifacts", "acceptance-build", "build-record.json");
 /** 当前共同同意修订号：复用 upgrade_baselines.py 的 Rust 常量提取
  * （剥离块注释/行注释/字符串，假声明不会命中），不在 JS 里另写正则。 */
 let currentConsentRevisionCache = null;
@@ -146,6 +150,10 @@ const OUT = path.resolve(
 );
 const PORT = Number(arg("port", "9411"));
 const EXE = arg("exe", EXE_DEFAULT);
+const BUILD_RECORD = path.resolve(
+  REPO,
+  arg("build-record", process.env.TOKENSCOPE_ACCEPTANCE_BUILD_RECORD ?? BUILD_RECORD_DEFAULT),
+);
 const THEME = arg("theme", "system"); // light | dark | system（--force-*-mode 通道）
 // 默认使用真实系统 DPI；显式 --scale 只作布局探查，不作为系统缩放验收。
 const SCALE = arg("scale") === undefined ? null : Number(arg("scale"));
@@ -4080,14 +4088,17 @@ async function main() {
   }
   const root = ROOT || state?.root || freshRoot(SCENARIO);
 
-  // AC10：全路径隔离（含子路径/别名/受保护来源目录）与实际 EXE 构建筛查
-  // 必须在创建输出目录、准备隔离根、启动任何进程之前完成。
+  // AC10：全路径隔离（固定布局 + 清单声明 + 现有条目别名）与实际 EXE 构建身份
+  // 必须在创建输出目录、准备隔离根、启动任何进程之前完成。源提交只用文件系统
+  // 读取（不 spawn git），构建记录缺失/哈希不符/命令不合法一律零准备、零启动。
   const launchPreflight = evaluateAcceptanceLaunchPreflight({
     root,
     outDir: OUT,
     exePath: EXE,
     homeDir: process.env.USERPROFILE || "",
     attachExisting,
+    buildRecordPath: BUILD_RECORD,
+    sourceCommit: readGitHeadCommit(REPO),
   });
   if (!launchPreflight.ok) {
     console.log(
@@ -4142,6 +4153,9 @@ async function main() {
     feature: "acceptance",
     exe: EXE,
     exe_sha256: fs.existsSync(EXE) ? sha256File(EXE) : "missing",
+    build_record_path: BUILD_RECORD,
+    build_record_present: fs.existsSync(BUILD_RECORD),
+    checkout_commit: readGitHeadCommit(REPO),
     acceptance_root: root,
     acceptance_preflight: launchPreflight,
     base_identifier: BASE_IDENTIFIER,
@@ -4155,13 +4169,20 @@ async function main() {
   };
   ck.add(
     "acceptance_root_isolated",
-    launchPreflight.root.ok,
-    launchPreflight.root.reason,
+    launchPreflight.paths.ok,
+    launchPreflight.paths.reason,
   );
   ck.add(
     "acceptance_executable_verified",
     launchPreflight.exe.ok,
     launchPreflight.exe.reason,
+  );
+  ck.add(
+    "acceptance_build_identity_verified",
+    attachExisting || launchPreflight.exe.build_identity === "verified",
+    attachExisting
+      ? "attach 模式不启动 EXE，构建身份不参与"
+      : `build_identity=${launchPreflight.exe.build_identity ?? "unknown"}；记录=${BUILD_RECORD}`,
   );
 
   const cancelFlag = { requested: false };

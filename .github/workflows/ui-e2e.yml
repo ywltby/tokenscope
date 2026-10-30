@@ -31,8 +31,9 @@ jobs:
         run: |
           pnpm --dir frontend build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo build --locked -p tokenscope-app --release --features acceptance,tauri/custom-protocol --bin tokenscope
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # AC10：由脚本执行受控的 acceptance 构建并登记产物哈希 + 源提交；
+          # 没有这份记录，native-acceptance.mjs 在准备隔离根之前就拒绝启动。
+          ./scripts/record-acceptance-build.ps1
       - name: Real WebView2 and Rust refresh lifecycle
         shell: pwsh
         run: node frontend/scripts/native-acceptance.mjs --scenario ui-refresh --events 4 --port 9451 --out qa-artifacts/ui-adjustment/native-e2e
