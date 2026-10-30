@@ -7,17 +7,24 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   ACCEPTANCE_IDENTIFIER_SUFFIX,
+  ACCEPTANCE_EXE_MARKERS,
+  NORMAL_ACCEPTANCE_STUB_MARKER,
   SINGLE_INSTANCE_EXIT_BUDGET_MS,
   acceptanceIdentifier,
   classifySecondaryExit,
   classifyTrayObservation,
   classifyWindowRestore,
   countTokenScopeMatches,
+  evaluateAcceptanceLaunchPreflight,
+  hostProcessAlive,
   isIsolatedAcceptanceRoot,
   parseForeground,
   parseTrayObservation,
   parseWindowState,
   secondaryLaunchEnvironment,
+  startIfPreflightAllows,
+  validateAcceptanceRoot,
+  verifyAcceptanceExecutable,
 } from "./native-single-instance.mjs";
 import { buildLaunchesEvidence, createLaunchRecord } from "./native-instance.mjs";
 
@@ -48,6 +55,138 @@ describe("验收 identifier 与数据根预检", () => {
     expect(isIsolatedAcceptanceRoot(path.parse(REAL_DATA).root, REAL_DATA).ok).toBe(false);
     expect(isIsolatedAcceptanceRoot("relative/root", REAL_DATA).ok).toBe(false);
     expect(isIsolatedAcceptanceRoot("", REAL_DATA).ok).toBe(false);
+  });
+});
+
+describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
+  const aliases = new Map([
+    [path.resolve("C:/alias-protected"), path.resolve(REAL_DATA)],
+    [path.resolve("C:/alias-child"), path.resolve(path.join(REAL_DATA, "nested"))],
+    [path.resolve("C:/alias-home"), path.dirname(path.resolve(REAL_DATA))],
+  ]);
+  const canonicalize = (target) => {
+    const resolved = path.resolve(target);
+    return { ok: true, path: aliases.get(resolved) ?? resolved };
+  };
+
+  it("拒绝受保护目录本身、子目录、祖先及指向它们的别名", () => {
+    for (const root of [
+      REAL_DATA,
+      path.join(REAL_DATA, "nested"),
+      path.dirname(REAL_DATA),
+      "C:/alias-protected",
+      "C:/alias-child",
+      "C:/alias-home",
+    ]) {
+      expect(validateAcceptanceRoot({ root, protectedDirs: [REAL_DATA], canonicalize }).ok).toBe(
+        false,
+      );
+    }
+    expect(
+      validateAcceptanceRoot({ root: "C:/safe-root", protectedDirs: [REAL_DATA], canonicalize }).ok,
+    ).toBe(true);
+  });
+
+  it("真实路径无法解析时 fail closed", () => {
+    const result = validateAcceptanceRoot({
+      root: ISOLATED_ROOT,
+      protectedDirs: [REAL_DATA],
+      canonicalize: () => ({ ok: false, reason: "broken junction" }),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/无法解析/);
+  });
+
+  it("实际 EXE 必须是 PE 且含 acceptance 专用标记；普通/不可读一律拒绝", () => {
+    const pe = (text) => {
+      const header = Buffer.alloc(0x100, 0);
+      header[0] = 0x4d;
+      header[1] = 0x5a;
+      header.writeUInt32LE(0x80, 0x3c);
+      header.write("PE\u0000\u0000", 0x80, "latin1");
+      return Buffer.concat([header, Buffer.from(text, "utf8")]);
+    };
+    expect(
+      verifyAcceptanceExecutable("acceptance.exe", {
+        readFile: () => pe("prefix " + ACCEPTANCE_EXE_MARKERS[0] + " suffix"),
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      verifyAcceptanceExecutable("normal.exe", {
+        readFile: () => pe(NORMAL_ACCEPTANCE_STUB_MARKER),
+      }).ok,
+    ).toBe(false);
+    expect(verifyAcceptanceExecutable("plain.exe", { readFile: () => pe("no marker") }).ok).toBe(
+      false,
+    );
+    expect(
+      verifyAcceptanceExecutable("not-pe.exe", {
+        readFile: () => Buffer.from(ACCEPTANCE_EXE_MARKERS[0]),
+      }).ok,
+    ).toBe(false);
+    expect(
+      verifyAcceptanceExecutable("missing.exe", {
+        readFile: () => {
+          throw new Error("ENOENT");
+        },
+      }).ok,
+    ).toBe(false);
+  });
+
+  it("预检拒绝受保护根/普通 EXE 时 prepare 与 launch 零调用", async () => {
+    let prepared = 0;
+    let launched = 0;
+    const refused = await startIfPreflightAllows({
+      preflight: () => ({ ok: false, reason: "protected root" }),
+      prepare: async () => {
+        prepared += 1;
+      },
+      launch: async () => {
+        launched += 1;
+      },
+    });
+    expect(refused.started).toBe(false);
+    expect(prepared).toBe(0);
+    expect(launched).toBe(0);
+
+    const normalExe = evaluateAcceptanceLaunchPreflight({
+      root: ISOLATED_ROOT,
+      exePath: "normal.exe",
+      realDataDir: REAL_DATA,
+      canonicalize,
+      readFile: () => {
+        const header = Buffer.alloc(0x100, 0);
+        header[0] = 0x4d;
+        header[1] = 0x5a;
+        header.writeUInt32LE(0x80, 0x3c);
+        header.write("PE\u0000\u0000", 0x80, "latin1");
+        return Buffer.concat([header, Buffer.from(NORMAL_ACCEPTANCE_STUB_MARKER, "utf8")]);
+      },
+    });
+    expect(normalExe.ok).toBe(false);
+    expect(normalExe.root.ok).toBe(true);
+    expect(normalExe.exe.ok).toBe(false);
+  });
+
+  it("attach 模式只校验根，不要求启动 EXE", () => {
+    const result = evaluateAcceptanceLaunchPreflight({
+      root: ISOLATED_ROOT,
+      exePath: "missing.exe",
+      realDataDir: REAL_DATA,
+      attachExisting: true,
+      canonicalize,
+      readFile: () => {
+        throw new Error("must not read in attach mode");
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.exe.skipped).toBe(true);
+  });
+
+  it("main 存活同时看 exitCode 与 signalCode", () => {
+    expect(hostProcessAlive({ exitCode: null, signalCode: null })).toBe(true);
+    expect(hostProcessAlive({ exitCode: 0, signalCode: null })).toBe(false);
+    expect(hostProcessAlive({ exitCode: null, signalCode: "SIGTERM" })).toBe(false);
   });
 });
 
@@ -105,6 +244,21 @@ describe("第二次启动的退出判定", () => {
     expect(classifySecondaryExit({ exitCode: 0, elapsedMs: 15001, budgetMs: 15000 }).status).toBe(
       "failed",
     );
+  });
+
+  it("未确认退出但未超时是 pending；带终止失败/未确认的失败原因不伪报已终止", () => {
+    expect(classifySecondaryExit({ exitConfirmed: false, elapsedMs: 100 }).status).toBe("pending");
+    const failed = classifySecondaryExit({
+      exitConfirmed: false,
+      timedOut: true,
+      terminateRequested: true,
+      terminateError: "access denied",
+      terminateUnconfirmed: true,
+      elapsedMs: 15100,
+    });
+    expect(failed.status).toBe("failed");
+    expect(failed.reason).toMatch(/终止请求失败/);
+    expect(failed.reason).toMatch(/退出未确认/);
   });
 });
 
@@ -192,12 +346,48 @@ describe("托盘唯一性判定", () => {
   });
 
   it("0 个或 2 个都失败，并保留实际计数", () => {
-    expect(classifyTrayObservation({ observation: tray({ token_scope_count: 0 }) }).status).toBe(
-      "failed",
-    );
-    expect(classifyTrayObservation({ observation: tray({ token_scope_count: 2 }) }).status).toBe(
-      "failed",
-    );
+    expect(
+      classifyTrayObservation({
+        observation: tray({ token_scope_count: 0, matches: [] }),
+      }).status,
+    ).toBe("failed");
+    expect(
+      classifyTrayObservation({
+        observation: tray({
+          token_scope_count: 2,
+          matches: [
+            { area: "visible", text: "TokenScope" },
+            { area: "overflow", text: "TokenScope hidden" },
+          ],
+        }),
+      }).status,
+    ).toBe("failed");
+  });
+
+  it("计数总和、TokenScope 计数与 matches 明细矛盾时 pending，不能通过", () => {
+    expect(
+      classifyTrayObservation({
+        observation: tray({ visible_count: 2, overflow_count: 5, total_count: 8 }),
+      }).status,
+    ).toBe("pending");
+    expect(
+      classifyTrayObservation({
+        observation: tray({ token_scope_count: 2, matches: [{ text: "TokenScope" }] }),
+      }).status,
+    ).toBe("pending");
+    expect(
+      classifyTrayObservation({
+        observation: tray({
+          token_scope_count: 1,
+          matches: [{ text: "TokenScope" }, { text: "Other" }],
+        }),
+      }).status,
+    ).toBe("pending");
+    expect(
+      classifyTrayObservation({
+        observation: tray({ token_scope_count: 1, matches: [{ text: "Other" }] }),
+      }).status,
+    ).toBe("pending");
   });
 
   it("观察不可用是 pending；即使 processCount=1 也不能充当托盘证据", () => {
@@ -229,6 +419,16 @@ describe("外部观察输出解析", () => {
     expect(parseForeground("nothing").ok).toBe(false);
     expect(parseTrayObservation("nothing").ok).toBe(false);
     expect(parseTrayObservation('{"ok":true}').ok).toBe(false);
+    expect(
+      parseTrayObservation(
+        '{"ok":true,"visible_count":2,"overflow_count":1,"total_count":4,"token_scope_count":1,"matches":[{"text":"TokenScope"}]}',
+      ).ok,
+    ).toBe(false);
+    expect(
+      parseTrayObservation(
+        '{"ok":true,"visible_count":3,"overflow_count":1,"total_count":4,"token_scope_count":2,"matches":[{"text":"TokenScope"}]}',
+      ).ok,
+    ).toBe(false);
   });
 
   it("解析托盘 JSON 并用 matches 校准计数", () => {

@@ -76,7 +76,9 @@ import {
   SINGLE_INSTANCE_EXIT_BUDGET_MS,
   acceptanceIdentifier,
   classifySecondaryExit,
+  evaluateAcceptanceLaunchPreflight,
   secondaryLaunchEnvironment,
+  startIfPreflightAllows,
   waitForSecondaryExit,
 } from "./lib/native-single-instance.mjs";
 // S00（PR3 计划 §9.1）：场景看门狗、有界命令与阶段记录——纯逻辑在 lib，可单测。
@@ -98,7 +100,10 @@ const REPO = fileURLToPath(new URL("../../", import.meta.url));
 const EXE_DEFAULT = path.join(REPO, "target", "release", "tokenscope.exe");
 /** 当前共同同意修订号：复用 upgrade_baselines.py 的 Rust 常量提取
  * （剥离块注释/行注释/字符串，假声明不会命中），不在 JS 里另写正则。 */
-const CURRENT_CONSENT_REVISION = (() => {
+let currentConsentRevisionCache = null;
+/** 延迟到预检通过后首次使用时才启动 Python；不得在隔离/EXE 预检前 spawn 进程。 */
+function currentConsentRevision() {
+  if (currentConsentRevisionCache !== null) return currentConsentRevisionCache;
   const payload = execFileSync(
     "python",
     ["-B", path.join(REPO, "scripts", "upgrade_baselines.py"), "privacy-revision"],
@@ -108,8 +113,9 @@ const CURRENT_CONSENT_REVISION = (() => {
   if (!Number.isInteger(revision) || revision <= 0) {
     throw new Error(`settings.rs 缺少合法的 PRIVACY_POLICY_REVISION：${payload}`);
   }
+  currentConsentRevisionCache = revision;
   return revision;
-})();
+}
 const PREP = path.join(REPO, "scripts", "prepare-native-acceptance.ps1");
 const RECORDER = path.join(REPO, "scripts", "capture-window-frames.ps1");
 const WINDOW_ACTION = path.join(REPO, "scripts", "native-window-action.ps1");
@@ -1095,6 +1101,7 @@ class Instance {
     try {
       wait = await waitForSecondaryExit({
         child,
+        ownedPid: record.hostPid,
         timeoutMs,
         isCanceled: this.opts.isCanceled,
       });
@@ -1107,7 +1114,12 @@ class Instance {
         elapsedMs: Date.now() - startedAtMs,
         timedOut: false,
         canceled: false,
-        killed: false,
+        exitBeforeTerminate: false,
+        exitConfirmed: false,
+        exitAfterTerminate: false,
+        terminateRequested: false,
+        terminateError: null,
+        terminateUnconfirmed: false,
       };
     } finally {
       if (out !== null) {
@@ -1123,32 +1135,43 @@ class Instance {
       elapsedMs: wait.elapsedMs,
       budgetMs: timeoutMs,
       timedOut: wait.timedOut,
+      canceled: wait.canceled,
+      exitConfirmed: wait.exitConfirmed,
+      terminateRequested: wait.terminateRequested,
+      terminateError: wait.terminateError,
+      terminateUnconfirmed: wait.terminateUnconfirmed,
     });
     if (wait.kind === "error" || wait.spawnError) {
       verdict = { status: "failed", reason: `第二个实例启动失败：${record.spawnError}` };
-    } else if (wait.canceled) {
-      verdict = { status: "failed", reason: "场景取消，第二个实例已被终止" };
     }
-    record.hostExitCode = Number.isInteger(wait.exitCode) ? wait.exitCode : null;
-    record.hostSignal = wait.signal ?? null;
+    record.hostExitCode = wait.exitConfirmed && Number.isInteger(wait.exitCode) ? wait.exitCode : null;
+    record.hostSignal = wait.exitConfirmed ? (wait.signal ?? null) : null;
     record.exitElapsedMs = Math.round(wait.elapsedMs);
+    record.exitConfirmed = wait.exitConfirmed === true;
+    record.exitBeforeTerminate = wait.exitBeforeTerminate === true;
+    record.exitAfterTerminate = wait.exitAfterTerminate === true;
+    record.terminateRequested = wait.terminateRequested === true;
+    record.terminateError = wait.terminateError ?? null;
+    record.terminateUnconfirmed = wait.terminateUnconfirmed === true;
     record.exitWithinBudget =
-      !wait.timedOut && !wait.canceled && wait.kind === "exit" && wait.elapsedMs <= timeoutMs;
+      !wait.timedOut &&
+      !wait.canceled &&
+      wait.exitConfirmed &&
+      wait.elapsedMs <= timeoutMs;
     record.exitTimedOut = wait.timedOut;
     record.exitCanceled = wait.canceled;
-    record.secondaryKilled = wait.killed;
-    record.hostExitDetected = wait.kind
+    record.hostExitDetected = wait.exitConfirmed
       ? {
           code: record.hostExitCode,
-          signal: wait.signal ?? null,
+          signal: record.hostSignal,
           at_ms: Math.round(wait.elapsedMs),
-          source: wait.kind === "exit" ? "exit-event" : "spawn-error",
+          source: "exit-event",
         }
       : null;
     record.stageMs.total = Math.round(wait.elapsedMs);
     if (verdict.status !== "passed") record.failure = verdict.reason;
     hb(
-      `第二个实例 PID=${record.hostPid} 退出=${record.hostExitCode ?? "unknown"} 耗时=${record.exitElapsedMs} ms`,
+      `第二个实例 PID=${record.hostPid} 退出=${record.hostExitCode ?? "unknown"} 确认=${record.exitConfirmed} 耗时=${record.exitElapsedMs} ms`,
     );
     return { record, verdict };
   }
@@ -3607,7 +3630,7 @@ const scenarios = {
     const captureContent =
       captureBytes === null
         ? { ok: false, detail: "无字节证据" }
-        : strictConsentState(captureBytes, CURRENT_CONSENT_REVISION);
+        : strictConsentState(captureBytes, currentConsentRevision());
     ck.add("consent_saved_capture_content", captureContent.ok, captureContent.detail);
     // 十七轮复核 P2：终态 settings 与保存字节证据**同口径**严格判定——
     // 正则搜索会被注释假字段骗过（复核方复现：保存证据正确、终态实际
@@ -3615,7 +3638,7 @@ const scenarios = {
     // 合法重写按终态解析（不与保存字节比对，重写正例由上一检查保证）。
     const terminalCheck = strictConsentState(
       fs.readFileSync(settingsPath),
-      CURRENT_CONSENT_REVISION,
+      currentConsentRevision(),
     );
     ck.add("accept_writes_consent_with_revision", terminalCheck.ok, terminalCheck.detail);
 
@@ -3812,7 +3835,7 @@ const scenarios = {
     ev.settingsAfterAccept = afterAcceptBytes.toString("utf8");
     const afterAcceptState = strictConsentState(
       afterAcceptBytes,
-      CURRENT_CONSENT_REVISION,
+      currentConsentRevision(),
     );
     ck.add(
       "reconsent_writes_current_revision",
@@ -3901,7 +3924,7 @@ const scenarios = {
       `accepted=${beforeToml.privacy_policy_accepted} revision=${beforeToml.privacy_policy_revision} ` +
         `agreement=${beforeToml.user_agreement_accepted}`,
     );
-    const legacyState = strictConsentState(beforeBytes, CURRENT_CONSENT_REVISION);
+    const legacyState = strictConsentState(beforeBytes, currentConsentRevision());
     ck.add(
       "legacy_record_is_not_current_consent",
       !legacyState.ok,
@@ -3963,7 +3986,7 @@ const scenarios = {
     ev.settingsAfterAccept = afterAcceptBytes.toString("utf8");
     const afterAcceptState = strictConsentState(
       afterAcceptBytes,
-      CURRENT_CONSENT_REVISION,
+      currentConsentRevision(),
     );
     ck.add(
       "revision2_user_click_writes_current_revision",
@@ -4044,10 +4067,6 @@ async function main() {
   if (!Number.isInteger(RELAUNCH_CYCLES) || RELAUNCH_CYCLES < 1) {
     throw new Error(`--relaunch-cycles 必须是正整数：${arg("relaunch-cycles")}`);
   }
-  fs.mkdirSync(OUT, { recursive: true });
-  const stampDir = path.join(OUT, SCENARIO);
-  fs.mkdirSync(stampDir, { recursive: true });
-
   const attachExisting = SCENARIO === "expire-finish";
   // 状态文件损坏（例如带 BOM）也要走证据流程，不能直接退出而没有 evidence.json（§4.8 第 5 条）
   let state = null;
@@ -4060,6 +4079,37 @@ async function main() {
     }
   }
   const root = ROOT || state?.root || freshRoot(SCENARIO);
+
+  // AC10：隔离根（含别名）与实际 EXE 构建属性必须在创建输出目录、准备
+  // 隔离根、启动任何进程（含 git/cmd/pwsh/acceptance 实例）之前完成。
+  const launchPreflight = evaluateAcceptanceLaunchPreflight({
+    root,
+    exePath: EXE,
+    realDataDir: REAL_DATA,
+    attachExisting,
+  });
+  if (!launchPreflight.ok) {
+    console.log(
+      JSON.stringify(
+        {
+          scenario: SCENARIO,
+          refused: true,
+          root,
+          exe: EXE,
+          preflight: launchPreflight,
+          message: "预检失败：零准备、零启动",
+        },
+        null,
+        2,
+      ),
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  fs.mkdirSync(OUT, { recursive: true });
+  const stampDir = path.join(OUT, SCENARIO);
+  fs.mkdirSync(stampDir, { recursive: true });
   const scheme = THEME === "system" ? null : THEME;
   const shots = stampDir;
   const logPath = path.join(stampDir, "process.log");
@@ -4092,6 +4142,7 @@ async function main() {
     exe: EXE,
     exe_sha256: fs.existsSync(EXE) ? sha256File(EXE) : "missing",
     acceptance_root: root,
+    acceptance_preflight: launchPreflight,
     base_identifier: BASE_IDENTIFIER,
     acceptance_identifier: ACCEPTANCE_IDENTIFIER,
     real_data_dir: REAL_DATA,
@@ -4101,6 +4152,16 @@ async function main() {
     windows_version: windowsVersion,
     userprofile: process.env.USERPROFILE,
   };
+  ck.add(
+    "acceptance_root_isolated",
+    launchPreflight.root.ok,
+    launchPreflight.root.reason,
+  );
+  ck.add(
+    "acceptance_executable_verified",
+    launchPreflight.exe.ok,
+    launchPreflight.exe.reason,
+  );
 
   const cancelFlag = { requested: false };
   let inst;
@@ -4349,19 +4410,31 @@ async function main() {
     hb(`attach 模式状态文件不可用：${stateError}`);
   } else {
     try {
-      const manifest = await inst.prepareRoot();
-      ev.manifest_files = Object.keys(manifest.files ?? {}).length;
-      ev.manifest_sha_first = manifest.files
-        ? Object.values(manifest.files).map((f) => f.sha256.slice(0, 12))
-        : [];
-      if (SCENARIO === "first-frame") ev.expectStored = EXPECT_STORED;
-      if (SCENARIO === "ui-single-instance") {
-        // 先于第一个实例读取托盘：基线可能包含用户正在运行的正式实例图标；
-        // 场景按“基线 + 1”判断验收实例只新增一个图标。
-        ev.tray_baseline_before_primary = readTrayObservation();
+      const launchGate = await startIfPreflightAllows({
+        preflight: () => launchPreflight,
+        prepare: async () => {
+          const manifest = await inst.prepareRoot();
+          ev.manifest_files = Object.keys(manifest.files ?? {}).length;
+          ev.manifest_sha_first = manifest.files
+            ? Object.values(manifest.files).map((f) => f.sha256.slice(0, 12))
+            : [];
+          if (SCENARIO === "first-frame") ev.expectStored = EXPECT_STORED;
+          if (SCENARIO === "ui-single-instance") {
+            // 先于第一个实例读取托盘：基线可能包含用户正在运行的正式实例图标；
+            // 场景按“基线 + 1”判断验收实例只新增一个图标。
+            ev.tray_baseline_before_primary = readTrayObservation();
+          }
+          return manifest;
+        },
+        launch: async () => {
+          hb("启动 release/acceptance 实例并连接 CDP");
+          return inst.launch();
+        },
+      });
+      if (!launchGate.started) {
+        throw new Error(`预检拒绝启动：${launchGate.preflight?.reason ?? "unknown"}`);
       }
-      hb("启动 release/acceptance 实例并连接 CDP");
-      const info = await inst.launch();
+      const info = launchGate.launched;
       hb(`PID=${info.pid} port=${info.port}`);
       if (SCENARIO === "fault-pricing-locked") {
         // 在进程启动前独占打开 pricing.toml（FileShare=None），让真实后端读取失败

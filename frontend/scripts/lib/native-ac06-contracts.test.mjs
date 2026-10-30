@@ -430,6 +430,7 @@ function runAcceptOrderScenario(options = {}) {
       parseToml,
       parseTOML,
       CURRENT_CONSENT_REVISION: CONSENT_REVISION,
+      currentConsentRevision: () => CONSENT_REVISION,
       strictConsentState,
       withTimeout: realWithTimeout,
       registrySnapshot() {
@@ -1190,6 +1191,7 @@ function runAcceptOrderDiagnostics({ pageBehavior }) {
       parseToml,
       parseTOML,
       CURRENT_CONSENT_REVISION: CONSENT_REVISION,
+      currentConsentRevision: () => CONSENT_REVISION,
       strictConsentState,
       // 真实 withTimeout 语义（race 超时跳过记原因），时间缩短便于测试。
       withTimeout: (task, _ms, detail) => realWithTimeout(task, 50, detail),

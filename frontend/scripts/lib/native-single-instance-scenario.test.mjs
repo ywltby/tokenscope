@@ -120,6 +120,12 @@ function secondaryRecord(overrides = {}) {
     exitBudgetMs: 15000,
     exitWithinBudget: true,
     exitTimedOut: false,
+    exitConfirmed: true,
+    exitBeforeTerminate: true,
+    exitAfterTerminate: false,
+    terminateRequested: false,
+    terminateError: null,
+    terminateUnconfirmed: false,
     ...overrides,
   };
 }
@@ -129,6 +135,7 @@ async function runScenario({
   obs,
   windowOverride = null,
   restoreOnSecond = true,
+  onTrayAfter = null,
   trayBaseline = {
     ok: true,
     visible_count: 3,
@@ -141,6 +148,7 @@ async function runScenario({
   const { instance, isRestored } = fakeInstance({ secondary, restoreOnSecond });
   const { rows, pending, ck } = ledger();
   const ev = { tray_baseline_before_primary: trayBaseline };
+  let trayReads = 0;
   await nativeSingleInstance({
     inst: instance,
     ck,
@@ -153,7 +161,11 @@ async function runScenario({
         }
         return isRestored() ? obs.foregroundAfter : obs.foregroundBefore;
       }),
-    observeTray: () => obs.tray,
+    observeTray: () => {
+      trayReads += 1;
+      if (trayReads > 1) onTrayAfter?.(instance);
+      return obs.tray;
+    },
     runWindow: () => ({ status: 0, stdout: "PID 101 STATE_CHANGED true", stderr: "" }),
     trayBudgetMs: 80,
     restoreBudgetMs: 120,
@@ -180,6 +192,7 @@ describe("ui-single-instance 场景编排（假实例）", () => {
       "first_window_state_observed_minimized",
       "second_process_same_isolated_root",
       "secondary_pid_differs_from_primary",
+      "second_process_exit_confirmed",
       "second_process_exited_within_budget",
       "second_process_exit_code_zero",
       "second_process_exit_verdict",
@@ -203,7 +216,15 @@ describe("ui-single-instance 场景编排（假实例）", () => {
   it("正式实例已占一个托盘图标时，按基线+1 核对验收实例只新增一个", async () => {
     const { rows, pending, ev } = await runScenario({
       secondary: { record: secondaryRecord(), verdict: { status: "passed", reason: "ok" } },
-      obs: observations({ tray: { token_scope_count: 2 } }),
+      obs: observations({
+        tray: {
+          token_scope_count: 2,
+          matches: [
+            { area: "visible", text: "TokenScope" },
+            { area: "overflow", text: "TokenScope hidden" },
+          ],
+        },
+      }),
       trayBaseline: {
         ok: true,
         visible_count: 3,
@@ -279,7 +300,10 @@ describe("ui-single-instance 场景编排（假实例）", () => {
           hostExitCode: null,
           exitWithinBudget: false,
           exitTimedOut: true,
-          verdict: null,
+          exitConfirmed: false,
+          terminateRequested: true,
+          terminateError: null,
+          terminateUnconfirmed: true,
         }),
         verdict: { status: "failed", reason: "第二次启动未在 15000 ms 内退出" },
       },
@@ -287,10 +311,22 @@ describe("ui-single-instance 场景编排（假实例）", () => {
       restoreOnSecond: false,
     });
     expect(pending).toEqual([]);
+    expect(byName(rows, "second_process_exit_confirmed")?.ok).toBe(false);
     expect(byName(rows, "second_process_exited_within_budget")?.ok).toBe(false);
     expect(byName(rows, "second_process_exit_code_zero")?.ok).toBe(false);
     expect(byName(rows, "second_process_exit_verdict")?.ok).toBe(false);
     expect(byName(rows, "first_window_restored_visible")?.ok).toBe(false);
     expect(byName(rows, "first_window_foreground")?.ok).toBe(false);
+  });
+
+  it("第一个实例以 signalCode 退出时存活检查失败", async () => {
+    const { rows } = await runScenario({
+      secondary: { record: secondaryRecord(), verdict: { status: "passed", reason: "ok" } },
+      obs: observations(),
+      onTrayAfter: (instance) => {
+        instance.proc.signalCode = "SIGTERM";
+      },
+    });
+    expect(byName(rows, "first_instance_alive_after_second")?.ok).toBe(false);
   });
 });

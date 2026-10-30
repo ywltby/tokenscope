@@ -14,10 +14,11 @@ import {
   acceptanceIdentifier,
   classifyTrayObservation,
   classifyWindowRestore,
-  isIsolatedAcceptanceRoot,
+  hostProcessAlive,
   parseForeground,
   parseTrayObservation,
   parseWindowState,
+  validateAcceptanceRoot,
 } from "../lib/native-single-instance.mjs";
 
 const WINDOW_ACTION = fileURLToPath(
@@ -103,8 +104,10 @@ async function pollObservation({
   let last = null;
   while (Date.now() - started <= budgetMs) {
     ensureNotCanceled(isCanceled, action);
-    if (inst.proc.exitCode !== null) {
-      throw new Error(`第一个实例在「${action}」期间退出（退出码=${inst.proc.exitCode}）`);
+    if (!hostProcessAlive(inst.proc)) {
+      throw new Error(
+        `第一个实例在「${action}」期间退出（exitCode=${inst.proc.exitCode ?? "null"}，signalCode=${inst.proc.signalCode ?? "null"}）`,
+      );
     }
     last = observe();
     if (accept(last)) return { matched: true, value: last, elapsedMs: Date.now() - started };
@@ -135,7 +138,10 @@ export async function nativeSingleInstance({
   const baseIdentifier = inst.opts.baseIdentifier;
   const acceptance = inst.opts.acceptanceIdentifier;
   const realDataDir = inst.opts.realDataDir;
-  const rootCheck = isIsolatedAcceptanceRoot(inst.root, realDataDir);
+  const rootCheck = validateAcceptanceRoot({
+    root: inst.root,
+    protectedDirs: [realDataDir],
+  });
   const expectedAcceptance = acceptanceIdentifier(baseIdentifier);
   const trayBaseline = ev.tray_baseline_before_primary ?? null;
   const trayBaselineOk =
@@ -238,6 +244,12 @@ export async function nativeSingleInstance({
     exit_budget_ms: secondaryRecord.exitBudgetMs,
     exit_within_budget: secondaryRecord.exitWithinBudget,
     exit_timed_out: secondaryRecord.exitTimedOut,
+    exit_confirmed: secondaryRecord.exitConfirmed,
+    exit_before_terminate: secondaryRecord.exitBeforeTerminate,
+    exit_after_terminate: secondaryRecord.exitAfterTerminate,
+    terminate_requested: secondaryRecord.terminateRequested,
+    terminate_error: secondaryRecord.terminateError,
+    terminate_unconfirmed: secondaryRecord.terminateUnconfirmed,
     verdict: secondary.verdict,
   };
   ck.add(
@@ -250,11 +262,42 @@ export async function nativeSingleInstance({
     Number.isInteger(secondaryRecord.hostPid) && secondaryRecord.hostPid !== inst.proc.pid,
     `primary=${inst.proc.pid}; secondary=${secondaryRecord.hostPid ?? "missing"}`,
   );
-  ck.add(
-    "second_process_exited_within_budget",
-    secondaryRecord.exitWithinBudget === true && secondaryRecord.exitTimedOut !== true,
-    `${secondaryRecord.exitElapsedMs} ms / 上限 ${secondaryRecord.exitBudgetMs} ms`,
-  );
+  if (secondaryRecord.exitConfirmed === true) {
+    ck.add(
+      "second_process_exit_confirmed",
+      true,
+      secondaryRecord.exitAfterTerminate ? "终止请求后观察到退出事件" : "终止前观察到退出事件",
+    );
+  } else if (
+    secondaryRecord.exitTimedOut === true ||
+    secondaryRecord.exitCanceled === true ||
+    secondaryRecord.terminateRequested === true ||
+    secondaryRecord.terminateError ||
+    secondaryRecord.spawnError
+  ) {
+    ck.add(
+      "second_process_exit_confirmed",
+      false,
+      `未确认退出；terminate_requested=${secondaryRecord.terminateRequested === true}；terminate_error=${secondaryRecord.terminateError ?? "none"}；terminate_unconfirmed=${secondaryRecord.terminateUnconfirmed === true}；spawn_error=${secondaryRecord.spawnError ?? "none"}`,
+    );
+  } else {
+    ck.pending("second_process_exit_confirmed", "未观察到第二次启动的退出事件");
+  }
+  if (secondaryRecord.exitTimedOut === true || secondaryRecord.spawnError) {
+    ck.add(
+      "second_process_exited_within_budget",
+      false,
+      `${secondaryRecord.exitElapsedMs} ms / 上限 ${secondaryRecord.exitBudgetMs} ms${secondaryRecord.spawnError ? `；启动失败=${secondaryRecord.spawnError}` : "（超时）"}`,
+    );
+  } else if (secondaryRecord.exitConfirmed === true) {
+    ck.add(
+      "second_process_exited_within_budget",
+      secondaryRecord.exitWithinBudget === true,
+      `${secondaryRecord.exitElapsedMs} ms / 上限 ${secondaryRecord.exitBudgetMs} ms`,
+    );
+  } else {
+    ck.pending("second_process_exited_within_budget", "未确认退出，无法判断是否在限时内");
+  }
   if (
     secondaryRecord.hostExitCode === null &&
     secondaryRecord.hostSignal === null &&
@@ -364,8 +407,8 @@ export async function nativeSingleInstance({
 
   ck.add(
     "first_instance_alive_after_second",
-    inst.proc.exitCode === null,
-    `pid=${inst.proc.pid}; exit=${inst.proc.exitCode ?? "alive"}`,
+    hostProcessAlive(inst.proc),
+    `pid=${inst.proc.pid}; exit=${inst.proc.exitCode ?? "null"}; signal=${inst.proc.signalCode ?? "null"}`,
   );
   try {
     await inst.page.screenshot({

@@ -34,6 +34,17 @@ describe("acceptance 应用标识与数据根隔离", () => {
     expect(acceptance).toMatch(/root\(\)\.map\(\|r\| r\.join\("tokenscope"\)\)/);
   });
 
+  it("actual EXE 标记只存在于 acceptance 专用源码，普通构建有 stub 标记", () => {
+    const shellAcceptance = read("src-tauri/src/acceptance.rs");
+    expect(shellAcceptance).toContain("验收构建要求进程级");
+    expect(shellAcceptance).toContain("验收模式：WebView 用户数据与 identifier 已指向隔离根");
+    const shellLib = read("src-tauri/src/lib.rs");
+    expect(shellLib).toContain("验收模式启动失败");
+    expect(shellLib).toMatch(/#\[cfg\(feature = "acceptance"\)\]\s*mod acceptance;/);
+    const coreStub = read("crates/tokenscope-core/src/acceptance.rs");
+    expect(coreStub).toContain("当前构建未启用 acceptance feature，不接受验收根注入");
+  });
+
   it("产品 identifier 与验收 identifier 不同名", () => {
     const config = JSON.parse(read("src-tauri/tauri.conf.json"));
     expect(config.identifier).toBeTruthy();
@@ -105,6 +116,57 @@ describe("外部观察脚本与场景接线", () => {
     expect(source).toContain("token_scope_count");
   });
 
+  it("托盘脚本按按钮索引取 command ID 再读文本，并拒绝不可观察/矛盾结果", () => {
+    const source = read("scripts/read-tray-notification-area.ps1");
+    expect(source).toContain("TB_GETBUTTON");
+    expect(source).toContain("commandId");
+    expect(source).toContain("TB_GETBUTTONTEXTW");
+    expect(source).toContain("WriteProcessMemory");
+    expect(source).toContain("$tokenMatches");
+    expect(source).not.toMatch(/\$matches\b/i);
+    expect(source).toContain("SelfTest");
+    for (const scenario of [
+      "match",
+      "noncontiguous",
+      "timeout",
+      "count-mismatch",
+      "overflow-unobservable",
+      "truncated",
+    ]) {
+      expect(source).toContain(scenario);
+    }
+    expect(source).toContain("overflow area is unobservable");
+    const test = read("scripts/test_read_tray_notification_area.ps1");
+    expect(test).toContain("noncontiguous");
+    expect(test).toContain("count-mismatch");
+    expect(test).toContain("overflow-unobservable");
+  });
+
+  it("隔离/EXE 预检发生在目录准备和任何进程启动之前", () => {
+    const driver = read("frontend/scripts/native-acceptance.mjs");
+    const mainStart = driver.indexOf("async function main()");
+    expect(mainStart).toBeGreaterThanOrEqual(0);
+    const main = driver.slice(mainStart);
+    const preflightAt = main.indexOf("evaluateAcceptanceLaunchPreflight");
+    expect(preflightAt).toBeGreaterThanOrEqual(0);
+    for (const marker of [
+      "fs.mkdirSync(OUT",
+      "startAcceptanceIo(",
+      "inst = new Instance(",
+      "await inst.prepareRoot(",
+      "readTrayObservation()",
+      'spawnSyncBounded("git"',
+      'spawnSyncBounded("cmd"',
+    ]) {
+      const at = main.indexOf(marker);
+      expect(at, marker).toBeGreaterThan(preflightAt);
+    }
+    const refusal = main.slice(preflightAt, main.indexOf("fs.mkdirSync(OUT"));
+    expect(refusal).toContain("if (!launchPreflight.ok)");
+    expect(refusal).toContain("process.exitCode = 2");
+    expect(driver).toContain("startIfPreflightAllows(");
+  });
+
   it("驱动器注册 ui-single-instance 并使用 secondary/托盘/窗口观察", () => {
     const driver = read("frontend/scripts/native-acceptance.mjs");
     expect(driver).toContain('"ui-single-instance": nativeSingleInstance');
@@ -125,6 +187,10 @@ describe("外部观察脚本与场景接线", () => {
       "record.hostExitCode",
       "record.exitElapsedMs",
       "record.exitWithinBudget",
+      "record.exitConfirmed",
+      "record.terminateRequested",
+      "record.terminateError",
+      "record.hostSignal",
       "record.hostExitDetected",
     ]) {
       expect(launchSecondary[0]).toContain(marker);
@@ -135,10 +201,12 @@ describe("外部观察脚本与场景接线", () => {
     expect(scenario).toContain("trayBaseline.token_scope_count + 1");
     expect(scenario).toContain("readTray()");
     expect(scenario).toContain("single_tray_icon_before_second");
+    expect(scenario).toContain("second_process_exit_confirmed");
     expect(scenario).toContain("second_process_exited_within_budget");
     expect(scenario).toContain("second_process_exit_code_zero");
     expect(scenario).toContain("first_window_restored_visible");
     expect(scenario).toContain("first_window_foreground");
+    expect(scenario).toContain("hostProcessAlive");
     expect(scenario).toContain("classifyWindowRestore");
   });
 });

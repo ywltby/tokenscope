@@ -900,7 +900,12 @@ export function buildLaunchesEvidence(records) {
     exit_within_budget: record.exitWithinBudget ?? null,
     exit_timed_out: record.exitTimedOut ?? null,
     exit_canceled: record.exitCanceled ?? null,
-    secondary_killed: record.secondaryKilled ?? null,
+    exit_confirmed: record.exitConfirmed ?? null,
+    exit_before_terminate: record.exitBeforeTerminate ?? null,
+    exit_after_terminate: record.exitAfterTerminate ?? null,
+    terminate_requested: record.terminateRequested ?? null,
+    terminate_error: record.terminateError ?? null,
+    terminate_unconfirmed: record.terminateUnconfirmed ?? null,
     spawn_error: record.spawnError ?? null,
     budget_ms:
       Number.isFinite(Number(record.launchDeadlineMs)) && Number.isFinite(Number(record.startedAtMs))
