@@ -179,6 +179,7 @@ describe("ui-single-instance 场景编排（假实例）", () => {
       "first_window_minimized_before_second",
       "first_window_state_observed_minimized",
       "second_process_same_isolated_root",
+      "secondary_pid_differs_from_primary",
       "second_process_exited_within_budget",
       "second_process_exit_code_zero",
       "second_process_exit_verdict",

@@ -246,6 +246,11 @@ export async function nativeSingleInstance({
     `root=${secondaryRecord.root}; identifier=${secondaryRecord.acceptanceIdentifier}`,
   );
   ck.add(
+    "secondary_pid_differs_from_primary",
+    Number.isInteger(secondaryRecord.hostPid) && secondaryRecord.hostPid !== inst.proc.pid,
+    `primary=${inst.proc.pid}; secondary=${secondaryRecord.hostPid ?? "missing"}`,
+  );
+  ck.add(
     "second_process_exited_within_budget",
     secondaryRecord.exitWithinBudget === true && secondaryRecord.exitTimedOut !== true,
     `${secondaryRecord.exitElapsedMs} ms / 上限 ${secondaryRecord.exitBudgetMs} ms`,
