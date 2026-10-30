@@ -13,11 +13,11 @@ export default defineConfig({
     // 断言语义 token 的两套主题与降级规则（默认空模块无法校验内容）。
     css: true,
     coverage: {
-      provider: "v8",
-      // 统计 frontend/src 下全部产品源码（Vue + TS）。all: true 把未被
-      // 任何测试导入的文件也按 0% 计入报告，而不是只统计已执行文件
-      // （src/dev/ 与 src/views/ 等低频文件因此可见）。
-      all: true,
+      // Vitest 5 已移除 coverage.all；include 声明的文件由 provider 补算
+      // 未执行项。这里的 custom provider 只修正一处补算失效：契约测试以
+      // ?raw 导入全部源码，空壳模块会占住源码路径并被误判为已加载。
+      provider: "custom",
+      customProviderModule: "./vitest.coverage-provider.ts",
       include: ["src/**/*.{ts,vue}"],
       // 排除测试本体；纯类型声明（*.d.ts，当前 src 下没有）无运行时
       // 行为，防御性排除。生成物（node_modules/dist）不匹配 include。
