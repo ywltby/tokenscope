@@ -162,6 +162,31 @@ public static class TsTray {
                 }
                 int commandId = BitConverter.ToInt32(buttonBytes, 4);
                 row.command_id = commandId;
+                // 阶段 1：NULL 缓冲区查询文本长度（不写入目标进程）。
+                IntPtr lenResult;
+                if (SendMessageTimeout(toolbar, TB_GETBUTTONTEXTW, (IntPtr)commandId, IntPtr.Zero,
+                        SMTO_FLAGS, (uint)timeoutMs, out lenResult) == IntPtr.Zero) {
+                    row.error = "TB_GETBUTTONTEXTW length query timeout for command " + commandId;
+                    result.error = row.error;
+                    break;
+                }
+                int textLength = (int)(long)lenResult;
+                if (textLength < 0) {
+                    row.error = "TB_GETBUTTONTEXTW length error " + textLength + " for command " + commandId;
+                    result.error = row.error;
+                    break;
+                }
+                if (textLength == 0) {
+                    continue;
+                }
+                // 阶段 2：长度超过容量时标记截断并跳过（避免目标进程缓冲区溢出）。
+                if (textLength > TextCapacityChars) {
+                    row.truncated = true;
+                    row.error = "button text " + textLength + " chars exceeds capacity " + TextCapacityChars + " for command " + commandId;
+                    result.error = row.error;
+                    break;
+                }
+                // 阶段 3：textLength <= TextCapacityChars，写入有界：(textLength+1)*2 <= (TextCapacityChars+1)*2。
                 if (!Zero(proc, textMem, (TextCapacityChars + 1) * 2)) {
                     row.error = "WriteProcessMemory text buffer failed";
                     result.error = row.error;
@@ -170,22 +195,18 @@ public static class TsTray {
                 IntPtr textResult;
                 if (SendMessageTimeout(toolbar, TB_GETBUTTONTEXTW, (IntPtr)commandId, textMem,
                         SMTO_FLAGS, (uint)timeoutMs, out textResult) == IntPtr.Zero) {
-                    row.error = "TB_GETBUTTONTEXTW timeout or hung for command " + commandId;
+                    row.error = "TB_GETBUTTONTEXTW read timeout for command " + commandId;
                     result.error = row.error;
                     break;
                 }
-                int length = (int)(long)textResult;
-                if (length < 0) {
-                    row.error = "TB_GETBUTTONTEXTW error " + length + " for command " + commandId;
+                int copied = (int)(long)textResult;
+                if (copied < 0 || copied > TextCapacityChars) {
+                    row.error = "TB_GETBUTTONTEXTW copied " + copied + " chars for command " + commandId;
                     result.error = row.error;
                     break;
                 }
-                if (length == 0) {
-                    continue;
-                }
-                row.truncated = length >= TextCapacityChars;
-                int chars = Math.Min(length, TextCapacityChars - 1);
-                byte[] textBytes = new byte[(chars + 1) * 2];
+                int charsToRead = Math.Min(copied, TextCapacityChars);
+                byte[] textBytes = new byte[(charsToRead + 1) * 2];
                 UIntPtr readText;
                 if (!ReadProcessMemory(proc, textMem, textBytes, (UIntPtr)textBytes.Length, out readText)) {
                     row.error = "ReadProcessMemory button text failed for command " + commandId;
@@ -197,11 +218,6 @@ public static class TsTray {
                     byteLength += 2;
                 }
                 row.text = Encoding.Unicode.GetString(textBytes, 0, byteLength);
-                if (row.truncated && row.error == null) {
-                    row.error = "button text truncated for command " + commandId;
-                    result.error = row.error;
-                    break;
-                }
             }
             result.buttons = new TrayButtonRow[writtenRows];
             Array.Copy(rows, result.buttons, writtenRows);

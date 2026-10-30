@@ -26,10 +26,16 @@ function comparePath(value) {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-/** `child` 是否等于 `parent` 或位于其下（按规范化绝对路径的分量边界）。 */
+/**
+ * `child` 是否等于 `parent` 或位于其下（按规范化绝对路径的分量边界）。
+ * `path.relative` 可能返回 `..fixture`（子目录名以 .. 开头，但不是父目录
+ * 遍历），因此必须区分 `..` / `..${sep}x` 与 `..name`。
+ */
 function isWithin(child, parent) {
   const rel = path.relative(comparePath(parent), comparePath(child));
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  if (rel === "") return true;
+  if (path.isAbsolute(rel)) return false;
+  return !(rel === ".." || rel.startsWith(`..${path.sep}`) || rel.startsWith("../"));
 }
 
 /**
@@ -84,9 +90,122 @@ export function canonicalizeAcceptancePath(
 }
 
 /**
- * 受保护根预检：拒绝受保护目录本身、其祖先、其子目录，以及通过符号链接/
- * junction 指向这些位置或位于这些位置下的别名。无法解析真实路径时拒绝。
+ * 受保护根预检（单 root + 单受保护目录列表，兼容旧接口）。
  */
+export function isIsolatedAcceptanceRoot(root, realDataDir) {
+  const result = validateAcceptanceRoot({ root, protectedDirs: [realDataDir] });
+  return { ok: result.ok, reason: result.reason };
+}
+
+/**
+ * 验收构建会读写的全部受保护用户目录（基于用户主目录派生）。
+ * 用户主目录无法确定时返回 null（调用方拒绝）。
+ */
+export function getUserProtectedDirs(homeDir) {
+  const dir = String(homeDir ?? "").trim();
+  if (!dir || !path.isAbsolute(dir)) return null;
+  return [
+    path.join(dir, ".tokenscope"),
+    path.join(dir, ".claude"),
+    path.join(dir, ".codex"),
+    path.join(dir, ".cc-switch"),
+    path.join(dir, ".workbuddy"),
+    path.join(dir, ".workbuddy-ai"),
+  ];
+}
+
+/**
+ * 验收实例会读写的全部路径（隔离根 + 子目录 + manifest + 输出目录）。
+ */
+export function getAcceptanceWritePaths(root, outDir) {
+  const paths = [
+    root,
+    path.join(root, "tokenscope"),
+    path.join(root, "sources"),
+    path.join(root, "webview"),
+    path.join(root, "manifest.json"),
+  ];
+  if (outDir) paths.push(outDir);
+  return paths;
+}
+
+/**
+ * 完整路径预检：对验收实例会读写的每个路径（root、root/tokenscope、
+ * root/sources、root/webview、root/manifest.json、--out）逐个做真实路径
+ * 解析（含 junction/symlink），并与全部受保护用户目录做双向包含检查。
+ * 用户目录无法确定时拒绝。
+ */
+export function validateAcceptancePaths({
+  root,
+  outDir,
+  homeDir,
+  canonicalize = canonicalizeAcceptancePath,
+} = {}) {
+  const protectedDirs = getUserProtectedDirs(homeDir);
+  if (!protectedDirs) {
+    return { ok: false, reason: "无法确定用户主目录，无法证明来源目录隔离，拒绝启动" };
+  }
+  if (!protectedDirs.length) {
+    return { ok: false, reason: "受保护目录列表为空，无法证明隔离" };
+  }
+
+  const rawRoot = String(root ?? "").trim();
+  if (!rawRoot) return { ok: false, reason: "隔离根为空" };
+  if (!path.isAbsolute(rawRoot)) return { ok: false, reason: `隔离根不是绝对路径：${rawRoot}` };
+
+  const writePaths = getAcceptanceWritePaths(root, outDir);
+
+  // 逐个解析验收写入路径的真实位置
+  const canonicalWritePaths = [];
+  for (const wp of writePaths) {
+    const c = canonicalize(wp);
+    if (!c.ok) return { ok: false, reason: `验收路径 ${wp} 无法解析：${c.reason}` };
+    canonicalWritePaths.push({ source: wp, path: c.path });
+  }
+
+  // 逐个解析受保护目录的真实位置
+  const canonicalProtected = [];
+  for (const pd of protectedDirs) {
+    const c = canonicalize(pd);
+    if (!c.ok) return { ok: false, reason: `受保护目录 ${pd} 无法解析：${c.reason}` };
+    canonicalProtected.push({ source: pd, path: c.path });
+  }
+
+  // 双向包含检查：每个验收路径 vs 每个受保护目录
+  for (const wp of canonicalWritePaths) {
+    for (const pd of canonicalProtected) {
+      if (comparePath(wp.path) === comparePath(pd.path)) {
+        return {
+          ok: false,
+          reason: `验收路径 ${wp.source} 是受保护目录 ${pd.path} 本身`,
+        };
+      }
+      if (isWithin(wp.path, pd.path)) {
+        return {
+          ok: false,
+          reason: `验收路径 ${wp.source} 位于受保护目录 ${pd.path} 内`,
+        };
+      }
+      if (isWithin(pd.path, wp.path)) {
+        return {
+          ok: false,
+          reason: `验收路径 ${wp.source} 是受保护目录 ${pd.path} 的祖先`,
+        };
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    reason: "全部验收路径与受保护用户目录互不包含",
+    root: canonicalWritePaths[0]?.path,
+    write_paths: canonicalWritePaths.map((p) => p.path),
+    protected_dirs: canonicalProtected.map((p) => p.path),
+    alias_resolved: canonicalWritePaths.some((p) => p.path !== path.resolve(p.source)),
+  };
+}
+
+/** 旧接口：单 root + 单受保护目录列表。 */
 export function validateAcceptanceRoot({
   root,
   protectedDirs = [],
@@ -146,14 +265,6 @@ export function validateAcceptanceRoot({
 /** `child` 是否等于 `parent` 或位于其下（按规范化绝对路径的分量边界）。 */
 
 /**
- * 验收根预检：必须是非盘符根的绝对路径，且与真实 `~/.tokenscope` 互不包含。
- * 只证明路径隔离；运行时仍由 acceptance 构建强制 `TOKENSCOPE_ACCEPTANCE_ROOT`。
- */
-export function isIsolatedAcceptanceRoot(root, realDataDir) {
-  const result = validateAcceptanceRoot({ root, protectedDirs: [realDataDir] });
-  return { ok: result.ok, reason: result.reason };
-}
-
 /** acceptance 构建中才会编译进 EXE 的字符串标记（shell 验收模块/分支）。 */
 export const ACCEPTANCE_EXE_MARKERS = [
   "验收构建要求进程级",
@@ -177,9 +288,10 @@ function isPeImage(bytes) {
 }
 
 /**
- * 实际 EXE 的验收构建验证：目标必须是 PE 文件，包含 acceptance 专用标记，
- * 且不含普通构建的 acceptance stub 标记。缺文件、读失败、普通 EXE 或
- * 无法验证一律拒绝启动；不依赖从 tauri.conf/identifier 推导。
+ * EXE 验收构建筛查：目标必须是 PE 文件，包含 acceptance 专用标记，
+ * 且不含普通构建 stub 标记。字符串标记仅用于**预筛**，不构成构建身份证明——
+ * 构建身份需要与受控构建来源的产物哈希比对（CI 尚未提供），当前结论为
+ * `marker-screened`（非 `verified`）。
  */
 export function verifyAcceptanceExecutable(exePath, { readFile = fs.readFileSync } = {}) {
   const raw = String(exePath ?? "").trim();
@@ -207,6 +319,7 @@ export function verifyAcceptanceExecutable(exePath, { readFile = fs.readFileSync
       size: bytes.length,
       markers: positive,
       negative_markers: negative,
+      build_identity: "rejected",
     };
   }
   if (!positive.length) {
@@ -216,41 +329,45 @@ export function verifyAcceptanceExecutable(exePath, { readFile = fs.readFileSync
       size: bytes.length,
       markers: [],
       negative_markers: negative,
+      build_identity: "rejected",
     };
   }
   return {
     ok: true,
-    reason: `EXE 为 acceptance 构建（命中 ${positive.length} 个专用标记）`,
+    reason: `EXE 通过 acceptance 字符串标记预筛（命中 ${positive.length} 个；构建身份未验证，仅用于预筛）`,
     size: bytes.length,
     sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
     markers: positive,
     negative_markers: [],
+    build_identity: "marker-screened",
   };
 }
 
 /**
- * 启动前预检：隔离根（含别名解析）与实际 EXE 构建属性。attach 模式不启动
- * EXE，只校验根；非 attach 模式两者都必须通过。
+ * 启动前预检：完整路径隔离（含全部子路径与受保护目录别名解析）与实际 EXE
+ * 构建属性。attach 模式不启动 EXE，只校验路径；非 attach 模式两者都必须通过。
  */
 export function evaluateAcceptanceLaunchPreflight({
   root,
+  outDir,
   exePath,
-  realDataDir,
+  homeDir,
   attachExisting = false,
   canonicalize = canonicalizeAcceptancePath,
   readFile = fs.readFileSync,
 } = {}) {
-  const rootCheck = validateAcceptanceRoot({
+  const pathCheck = validateAcceptancePaths({
     root,
-    protectedDirs: [realDataDir],
+    outDir,
+    homeDir,
     canonicalize,
   });
   const exeCheck = attachExisting
-    ? { ok: true, skipped: true, reason: "attach 模式不启动 EXE" }
+    ? { ok: true, skipped: true, reason: "attach 模式不启动 EXE", build_identity: "skipped" }
     : verifyAcceptanceExecutable(exePath, { readFile });
   return {
-    ok: rootCheck.ok && exeCheck.ok,
-    root: rootCheck,
+    ok: pathCheck.ok && exeCheck.ok,
+    paths: pathCheck,
     exe: exeCheck,
     attachExisting,
   };

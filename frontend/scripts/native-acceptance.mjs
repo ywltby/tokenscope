@@ -4080,12 +4080,13 @@ async function main() {
   }
   const root = ROOT || state?.root || freshRoot(SCENARIO);
 
-  // AC10：隔离根（含别名）与实际 EXE 构建属性必须在创建输出目录、准备
-  // 隔离根、启动任何进程（含 git/cmd/pwsh/acceptance 实例）之前完成。
+  // AC10：全路径隔离（含子路径/别名/受保护来源目录）与实际 EXE 构建筛查
+  // 必须在创建输出目录、准备隔离根、启动任何进程之前完成。
   const launchPreflight = evaluateAcceptanceLaunchPreflight({
     root,
+    outDir: OUT,
     exePath: EXE,
-    realDataDir: REAL_DATA,
+    homeDir: process.env.USERPROFILE || "",
     attachExisting,
   });
   if (!launchPreflight.ok) {
@@ -4207,6 +4208,7 @@ async function main() {
     baseIdentifier: BASE_IDENTIFIER,
     acceptanceIdentifier: ACCEPTANCE_IDENTIFIER,
     realDataDir: REAL_DATA,
+    homeDir: process.env.USERPROFILE || "",
     // WB07：ui-source-paths 也用统一 fixture（两版 WorkBuddy 合成转写）。
     profile: ["ui-identity", "ui-ccs-import", "ui-pricing", "ui-source-paths"].includes(SCENARIO)
       ? "unified"

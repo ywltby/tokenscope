@@ -90,6 +90,7 @@ function fakeInstance({
         baseIdentifier: BASE,
         acceptanceIdentifier: ACCEPTANCE,
         realDataDir: REAL_DATA,
+        homeDir: os.homedir(),
         shots: os.tmpdir(),
       },
       proc: { pid: 101, exitCode: null },

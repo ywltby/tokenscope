@@ -18,7 +18,7 @@ import {
   parseForeground,
   parseTrayObservation,
   parseWindowState,
-  validateAcceptanceRoot,
+  validateAcceptancePaths,
 } from "../lib/native-single-instance.mjs";
 
 const WINDOW_ACTION = fileURLToPath(
@@ -138,9 +138,10 @@ export async function nativeSingleInstance({
   const baseIdentifier = inst.opts.baseIdentifier;
   const acceptance = inst.opts.acceptanceIdentifier;
   const realDataDir = inst.opts.realDataDir;
-  const rootCheck = validateAcceptanceRoot({
+  const rootCheck = validateAcceptancePaths({
     root: inst.root,
-    protectedDirs: [realDataDir],
+    outDir: inst.opts.shots,
+    homeDir: inst.opts.homeDir,
   });
   const expectedAcceptance = acceptanceIdentifier(baseIdentifier);
   const trayBaseline = ev.tray_baseline_before_primary ?? null;

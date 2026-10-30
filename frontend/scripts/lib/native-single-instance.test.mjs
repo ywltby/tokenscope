@@ -23,6 +23,7 @@ import {
   parseWindowState,
   secondaryLaunchEnvironment,
   startIfPreflightAllows,
+  validateAcceptancePaths,
   validateAcceptanceRoot,
   verifyAcceptanceExecutable,
 } from "./native-single-instance.mjs";
@@ -55,6 +56,88 @@ describe("验收 identifier 与数据根预检", () => {
     expect(isIsolatedAcceptanceRoot(path.parse(REAL_DATA).root, REAL_DATA).ok).toBe(false);
     expect(isIsolatedAcceptanceRoot("relative/root", REAL_DATA).ok).toBe(false);
     expect(isIsolatedAcceptanceRoot("", REAL_DATA).ok).toBe(false);
+  });
+});
+
+describe("isWithin 修复与 EXE 验证收窄", () => {
+  it("path.relative 对 .. 开头但非父目录的分量不误判（..fixture 是子目录）", () => {
+    // root = protected/..fixture 是受保护目录的子目录，必须被拒绝
+    const root = path.join(REAL_DATA, "..fixture");
+    const result = validateAcceptanceRoot({ root, protectedDirs: [REAL_DATA] });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/受保护目录内/);
+  });
+
+  it("普通 PE 追加 acceptance 字符串仍被拒绝（stub 标记仍在）", () => {
+    const pe = () => {
+      const header = Buffer.alloc(0x100, 0);
+      header[0] = 0x4d;
+      header[1] = 0x5a;
+      header.writeUInt32LE(0x80, 0x3c);
+      header.write("PE\u0000\u0000", 0x80, "latin1");
+      return Buffer.concat([
+        header,
+        Buffer.from(NORMAL_ACCEPTANCE_STUB_MARKER, "utf8"),
+        Buffer.from(ACCEPTANCE_EXE_MARKERS[0], "utf8"),
+      ]);
+    };
+    const result = verifyAcceptanceExecutable("normal-with-appended.exe", { readFile: pe });
+    expect(result.ok).toBe(false);
+    expect(result.build_identity).toBe("rejected");
+    expect(result.negative_markers.length).toBeGreaterThan(0);
+  });
+
+  it("字符串标记预筛结论为 marker-screened 而非 verified", () => {
+    const pe = () => {
+      const header = Buffer.alloc(0x100, 0);
+      header[0] = 0x4d;
+      header[1] = 0x5a;
+      header.writeUInt32LE(0x80, 0x3c);
+      header.write("PE\u0000\u0000", 0x80, "latin1");
+      return Buffer.concat([header, Buffer.from(ACCEPTANCE_EXE_MARKERS.join(" "), "utf8")]);
+    };
+    const result = verifyAcceptanceExecutable("acceptance.exe", { readFile: pe });
+    expect(result.ok).toBe(true);
+    expect(result.build_identity).toBe("marker-screened");
+  });
+
+  it("--out 指向受保护目录时拒绝", () => {
+    const result = validateAcceptancePaths({
+      root: ISOLATED_ROOT,
+      outDir: REAL_DATA,
+      homeDir: os.homedir(),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/受保护目录/);
+  });
+
+  it("root 位于受保护目录的子目录 ..fixture 时拒绝", () => {
+    const root = path.join(REAL_DATA, "..fixture");
+    const result = validateAcceptancePaths({ root, homeDir: os.homedir() });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/受保护目录/);
+  });
+
+  it("root 位于受保护来源目录（假 .claude）时拒绝", () => {
+    const fakeClaude = path.join(os.tmpdir(), "fake-home-ac10", ".claude");
+    const root = path.join(fakeClaude, "workspace");
+    const result = validateAcceptancePaths({ root, homeDir: os.tmpdir() });
+    // os.tmpdir() 不含 .claude；但 .claude 在 homeDir 下
+    // 用假 home 验证
+    const fakeHome = path.join(os.tmpdir(), "fake-home-ac10");
+    const result2 = validateAcceptancePaths({ root, homeDir: fakeHome });
+    expect(result2.ok).toBe(false);
+    expect(result2.reason).toMatch(/受保护目录/);
+  });
+
+  it("全部验收子路径均通过预检", () => {
+    const result = validateAcceptancePaths({
+      root: ISOLATED_ROOT,
+      outDir: path.join(os.tmpdir(), "ac10-out"),
+      homeDir: os.homedir(),
+    });
+    expect(result.ok).toBe(true);
+    expect(result.write_paths.length).toBeGreaterThanOrEqual(6);
   });
 });
 
@@ -152,7 +235,7 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
     const normalExe = evaluateAcceptanceLaunchPreflight({
       root: ISOLATED_ROOT,
       exePath: "normal.exe",
-      realDataDir: REAL_DATA,
+      homeDir: os.homedir(),
       canonicalize,
       readFile: () => {
         const header = Buffer.alloc(0x100, 0);
@@ -164,15 +247,15 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
       },
     });
     expect(normalExe.ok).toBe(false);
-    expect(normalExe.root.ok).toBe(true);
+    expect(normalExe.paths.ok).toBe(true);
     expect(normalExe.exe.ok).toBe(false);
   });
 
-  it("attach 模式只校验根，不要求启动 EXE", () => {
+  it("attach 模式只校验路径，不要求启动 EXE", () => {
     const result = evaluateAcceptanceLaunchPreflight({
       root: ISOLATED_ROOT,
       exePath: "missing.exe",
-      realDataDir: REAL_DATA,
+      homeDir: os.homedir(),
       attachExisting: true,
       canonicalize,
       readFile: () => {
