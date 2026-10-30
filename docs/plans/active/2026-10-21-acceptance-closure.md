@@ -239,6 +239,8 @@ AC03–AC05 的 CI 接入：
   - 断言第二个进程在限定时间内退出；第一个窗口恢复为可见并获得前台；`launches[]` 正确记录两个进程的归属与退出；托盘只有一个。
 - 确定性场景，进入 CI；只改脚本，不递增版本。
 
+> **2026-10-30 准备状态**：`ui-single-instance` 脚本与合成契约已在独立分支 `test/n12-ac10-single-instance` 准备（基于 N18 `b49f535`；不触碰 PR #52、N18、N13 与覆盖率分支）。尚未运行真实 Native、未接入 CI、未合并/发布；真实第二实例退出码、窗口前台与托盘计数待实跑，N12 保持开放。详见 §6「B5 准备」。
+
 ### AC11 N12 人工签字批次（用户执行）
 
 - **受测物**：AC02 合入后当前最新 main 发布的 NSIS 安装包（以 Release 资产哈希为准）。
@@ -442,6 +444,16 @@ E（否决为默认）：acceptance 专用可控时钟/缩短轮询间隔，≈3
 - 本地取证（AC07、AC08、AC09、AC11）的结果写进 §6，含受测提交、产物哈希、环境、命令、结论与证据位置；证据文件不入库（`qa-artifacts/` 已忽略）。
 
 ## 6. 执行记录
+
+### B5 准备：AC10 单实例脚本与合成契约（2026-10-30，未实跑）
+
+范围：只准备 AC10 / `ui-single-instance` 的脚本、外部观察与合成契约；不运行真实 Native、不接入或触发 CI、不操作真实用户数据、不合并或发布。基线为 `feat/n18-cache-write-tiers` HEAD `b49f535`，独立分支 `test/n12-ac10-single-instance`；未修改 PR #52、N18、N13 与覆盖率分支。
+
+- **隔离前置**：验收构建在 `acceptance::configure` 中把 identifier 改为 `<产品 identifier>.acceptance`，并把 app directories/WebView 指向隔离根 `webview/`；两个验收实例共享 `.acceptance` 互斥名，与正在运行的正式实例不同名。驱动器预检隔离根必须是绝对路径、非盘符根且与真实 `~/.tokenscope` 互不包含；证据记录 `base_identifier`、`acceptance_identifier`、`real_data_dir`。静态契约核对上述源码、`TOKENSCOPE_ACCEPTANCE_ROOT` 强制门禁和 `show_main` 的 show/unminimize/set_focus。
+- **场景与证据**：`ui-single-instance` 以同一隔离根启动第二个进程，`launches[]` 记录 primary/secondary 的 `role`、`owner`、`parent_pid`、`same_root`、`acceptance_identifier`、PID、退出码/信号、退出耗时与预算；第二个实例不接 CDP、不继承远程调试参数。第二个进程须在 15 s 内以退出码 0 结束，随后轮询第一个窗口可见且未最小化、`GetForegroundWindow` 属于第一个 PID；托盘用 Win32 工具栏消息读取可见+溢出区图标文本。**托盘按启动前基线核对**：基线与启动后 TokenScope 计数之差必须为 1、第二个实例退出后计数不变——正式实例同时运行（基线为 1 或更多）时总数为基线+1，验收增量仍为 1；基线观察不可用时整组 tray 检查 pending。
+- **pending 语义**：托盘/窗口/前台观察不可用时记 `pending`（证据 `verification_complete=false`），不混入通过或失败，退出码 3；明确不以进程数量替代托盘证据，也不以“第一个进程仍存活”替代窗口恢复/前台。CI 接线时必须把 pending 按未通过处理。
+- **合成验证**：新增 4 个测试文件 / 42 条用例（纯判定、真实短命 Node 子进程的 secondary 退出等待、假实例完整场景、源码/脚本静态契约）；全量前端套件 68 文件 / 954 用例通过。托盘读取脚本在本机独立运行返回 `ok=true` 与可见/溢出计数（未启动 TokenScope，`token_scope_count=0`）；窗口 `state`/`foreground` 观察脚本对不存在 PID 返回 found/match=false。
+- **未执行（待实跑）**：真实 `ui-single-instance`（第二个实例实际退出码/耗时、第一个窗口是否真的获得前台、真实托盘计数）、CI 接线与发布。上述任一项 pending 或失败都不得把 AC10 标为完成；**N12 保持开放**。
 
 ### B3 分批实施：AC06 + AC08（2026-10-25，AC07 暂缓）
 

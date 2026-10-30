@@ -15,7 +15,7 @@
 param(
     [int]$ProcessId = 0,
     [string]$Name = 'tokenscope',
-    [ValidateSet('rect', 'close', 'mainrect', 'dpi', 'minimize', 'restore', 'geometry', 'resize')]
+    [ValidateSet('rect', 'close', 'mainrect', 'dpi', 'minimize', 'restore', 'geometry', 'resize', 'state', 'foreground')]
     [string]$Action = 'rect',
     [int]$Width = 0,
     [int]$Height = 0
@@ -57,6 +57,7 @@ public static class TsActWin {
     [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int command);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     public static bool ChangeState(int pid, bool minimized) {
         IntPtr h = Find(pid);
         if (h == IntPtr.Zero) return false;
@@ -79,6 +80,41 @@ public static class TsActWin {
             return true;
         }, IntPtr.Zero);
         return _found;
+    }
+    // Find the title-bound top-level window even when it is hidden/minimized.
+    public static IntPtr FindAny(int pid) {
+        _found = IntPtr.Zero;
+        EnumWindows((h, l) => {
+            uint wp; GetWindowThreadProcessId(h, out wp);
+            if ((int)wp != pid || GetParent(h) != IntPtr.Zero) return true;
+            var title = new StringBuilder(256); GetWindowText(h, title, title.Capacity);
+            if (title.ToString() == "TokenScope") { _found = h; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return _found;
+    }
+    public static string State(int pid) {
+        IntPtr h = FindAny(pid);
+        bool found = h != IntPtr.Zero;
+        bool visible = found && IsWindowVisible(h);
+        bool minimized = found && IsIconic(h);
+        string rect = "none";
+        if (found) {
+            RECT r;
+            if (GetWindowRect(h, out r)) rect = string.Format("{0},{1},{2},{3}", r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top);
+        }
+        return string.Format("STATE found {0} hwnd {1} visible {2} minimized {3} rect {4}",
+            found ? "true" : "false", h, visible ? "true" : "false",
+            minimized ? "true" : "false", rect);
+    }
+    public static string Foreground(int pid) {
+        IntPtr h = FindAny(pid);
+        IntPtr fg = GetForegroundWindow();
+        uint fgPid = 0;
+        if (fg != IntPtr.Zero) GetWindowThreadProcessId(fg, out fgPid);
+        bool match = h != IntPtr.Zero && fg == h;
+        return string.Format("FOREGROUND match {0} pid {1} hwnd {2} fg_pid {3} fg_hwnd {4}",
+            match ? "true" : "false", pid, h, fgPid, fg);
     }
     public static string RectString(int pid) {
         IntPtr h = Find(pid);
@@ -112,8 +148,8 @@ public static class TsActWin {
 [void][TsActWin]::SetProcessDPIAware()
 
 $target = $ProcessId
-if ($Action -in @('minimize', 'restore', 'resize', 'geometry') -and $target -le 0) {
-    throw 'State changes require an explicit owned ProcessId'
+if ($Action -in @('minimize', 'restore', 'resize', 'geometry', 'state', 'foreground') -and $target -le 0) {
+    throw 'This action requires an explicit owned ProcessId'
 }
 if ($target -le 0) {
     $cand = @(Get-Process -Name $Name -ErrorAction SilentlyContinue | Sort-Object StartTime -Descending)
@@ -140,6 +176,12 @@ elseif ($Action -eq 'mainrect') {
 }
 elseif ($Action -eq 'rect') {
     Write-Output ("PID {0} RECT {1}" -f $target, [TsActWin]::RectString($target))
+}
+elseif ($Action -eq 'state') {
+    Write-Output ([TsActWin]::State($target))
+}
+elseif ($Action -eq 'foreground') {
+    Write-Output ([TsActWin]::Foreground($target))
 }
 else {
     Write-Output ("PID {0} CLOSED {1}" -f $target, [TsActWin]::Close($target))

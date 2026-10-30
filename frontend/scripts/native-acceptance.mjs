@@ -28,6 +28,7 @@ import { nativeIdentity } from "./contracts/native-identity.mjs";
 import { nativeCcsImport } from "./contracts/native-ccs-import.mjs";
 import { nativePricing, preparePricingScenario } from "./contracts/native-pricing.mjs";
 import { nativeUiRelaunch, nativeUiSystem } from "./contracts/native-ui-system.mjs";
+import { nativeSingleInstance, readTrayObservation } from "./contracts/native-single-instance.mjs";
 import { decodePng } from "./lib/png.mjs";
 import {
   startAcceptanceIo,
@@ -71,6 +72,13 @@ import {
   remainingBudgetMs,
   stopDecision,
 } from "./lib/native-instance.mjs";
+import {
+  SINGLE_INSTANCE_EXIT_BUDGET_MS,
+  acceptanceIdentifier,
+  classifySecondaryExit,
+  secondaryLaunchEnvironment,
+  waitForSecondaryExit,
+} from "./lib/native-single-instance.mjs";
 // S00（PR3 计划 §9.1）：场景看门狗、有界命令与阶段记录——纯逻辑在 lib，可单测。
 import {
   FAILURE_CAPTURE_TIMEOUT_MS,
@@ -106,6 +114,13 @@ const PREP = path.join(REPO, "scripts", "prepare-native-acceptance.ps1");
 const RECORDER = path.join(REPO, "scripts", "capture-window-frames.ps1");
 const WINDOW_ACTION = path.join(REPO, "scripts", "native-window-action.ps1");
 const REAL_DATA = path.join(process.env.USERPROFILE || "", ".tokenscope");
+// AC10：验收构建在 acceptance::configure 中把 identifier 改为 `.acceptance`；
+// 同一隔离根的两个验收实例共享该互斥名，但与用户正在运行的正式实例不同名。
+const TAURI_CONFIG = JSON.parse(
+  fs.readFileSync(path.join(REPO, "src-tauri", "tauri.conf.json"), "utf8"),
+);
+const BASE_IDENTIFIER = TAURI_CONFIG.identifier;
+const ACCEPTANCE_IDENTIFIER = acceptanceIdentifier(BASE_IDENTIFIER);
 /** 页面 target 轮询间隔；每次等待都受剩余预算与宿主退出约束（§4.8 第 4 条）。 */
 const PAGE_TARGET_POLL_MS = 200;
 
@@ -863,6 +878,9 @@ class Instance {
       browserArgs,
       startedAtMs: Date.now(),
     });
+    record.acceptanceIdentifier = this.opts.acceptanceIdentifier ?? null;
+    record.parentPid = process.pid;
+    record.sameRoot = true;
     // 启动预算（§4.8 第 4 条）：总上限 65 秒，阶段上限随后收窄；一切等待都不得超过二者
     record.launchDeadlineMs = record.startedAtMs + LAUNCH_BUDGET_MS;
     record.phaseDeadlineMs = record.startedAtMs + CDP_READY_BUDGET_MS;
@@ -1023,6 +1041,116 @@ class Instance {
       browserArgs,
       cdpVersion: version?.["Browser"] ?? version?.browser ?? "unknown",
     };
+  }
+  /**
+   * AC10：以同一隔离根启动第二个验收实例，只记录并等待其退出，不接 CDP、
+   * 不替换 current。第二个实例由单实例插件移交给第一个实例后自行退出。
+   * 第二个实例不继承远程调试参数；超时/取消时只终止本次记录的 PID。
+   */
+  async launchSecondary({ timeoutMs = SINGLE_INSTANCE_EXIT_BUDGET_MS } = {}) {
+    ensureNotCanceled(this.opts.isCanceled, "launch-secondary");
+    if (!this.current) throw new Error("第二个实例必须在第一个实例启动后启动");
+    const startedAtMs = Date.now();
+    const secondaryLog = path.join(path.dirname(this.logPath), "secondary-instance.log");
+    const record = createLaunchRecord({
+      index: this.launches.length + 1,
+      port: null,
+      root: this.root,
+      logPath: secondaryLog,
+      browserArgs: "",
+      startedAtMs,
+      role: "secondary",
+    });
+    record.owner = "acceptance-driver";
+    record.parentPid = process.pid;
+    record.sameRoot = true;
+    record.acceptanceIdentifier = this.opts.acceptanceIdentifier ?? null;
+    record.exitBudgetMs = timeoutMs;
+    record.launchDeadlineMs = startedAtMs + timeoutMs;
+    this.launches.push(record);
+    const env = secondaryLaunchEnvironment({
+      inherited: process.env,
+      controlled: this.opts.controlledIo?.env,
+      scenario: this.opts.env,
+      root: this.root,
+    });
+    let out = null;
+    let child = null;
+    try {
+      out = fs.openSync(secondaryLog, "a");
+      child = spawn(EXE, [], { env, stdio: ["ignore", out, out], detached: false });
+    } catch (error) {
+      record.spawnError = String(error?.message ?? error);
+      record.failure = `第二个实例启动失败：${record.spawnError}`;
+      if (out !== null) {
+        try {
+          fs.closeSync(out);
+        } catch {}
+      }
+      return { record, verdict: { status: "failed", reason: record.failure } };
+    }
+    record.hostPid = child.pid;
+    record.stageMs.spawn = Date.now() - startedAtMs;
+    let wait = null;
+    try {
+      wait = await waitForSecondaryExit({
+        child,
+        timeoutMs,
+        isCanceled: this.opts.isCanceled,
+      });
+    } catch (error) {
+      wait = {
+        kind: null,
+        exitCode: null,
+        signal: null,
+        spawnError: String(error?.message ?? error),
+        elapsedMs: Date.now() - startedAtMs,
+        timedOut: false,
+        canceled: false,
+        killed: false,
+      };
+    } finally {
+      if (out !== null) {
+        try {
+          fs.closeSync(out);
+        } catch {}
+      }
+    }
+    if (wait.spawnError) record.spawnError = wait.spawnError;
+    let verdict = classifySecondaryExit({
+      exitCode: wait.exitCode,
+      signal: wait.signal,
+      elapsedMs: wait.elapsedMs,
+      budgetMs: timeoutMs,
+      timedOut: wait.timedOut,
+    });
+    if (wait.kind === "error" || wait.spawnError) {
+      verdict = { status: "failed", reason: `第二个实例启动失败：${record.spawnError}` };
+    } else if (wait.canceled) {
+      verdict = { status: "failed", reason: "场景取消，第二个实例已被终止" };
+    }
+    record.hostExitCode = Number.isInteger(wait.exitCode) ? wait.exitCode : null;
+    record.hostSignal = wait.signal ?? null;
+    record.exitElapsedMs = Math.round(wait.elapsedMs);
+    record.exitWithinBudget =
+      !wait.timedOut && !wait.canceled && wait.kind === "exit" && wait.elapsedMs <= timeoutMs;
+    record.exitTimedOut = wait.timedOut;
+    record.exitCanceled = wait.canceled;
+    record.secondaryKilled = wait.killed;
+    record.hostExitDetected = wait.kind
+      ? {
+          code: record.hostExitCode,
+          signal: wait.signal ?? null,
+          at_ms: Math.round(wait.elapsedMs),
+          source: wait.kind === "exit" ? "exit-event" : "spawn-error",
+        }
+      : null;
+    record.stageMs.total = Math.round(wait.elapsedMs);
+    if (verdict.status !== "passed") record.failure = verdict.reason;
+    hb(
+      `第二个实例 PID=${record.hostPid} 退出=${record.hostExitCode ?? "unknown"} 耗时=${record.exitElapsedMs} ms`,
+    );
+    return { record, verdict };
   }
   async waitForData(timeoutMs = 30000) {
     await this.page.waitForSelector(".app-nav", { timeout: timeoutMs });
@@ -1278,9 +1406,21 @@ function splitViolations(list) {
 class Checks {
   constructor() {
     this.rows = [];
+    // AC10：真实观察不到的外部证据（如托盘）单列 pending，不混入通过/失败，
+    // 也不能用进程数等替身结论把它变成通过。
+    this.pendingRows = [];
   }
   add(name, ok, detail = "") {
     this.rows.push({ name, ok: !!ok, detail: String(detail).slice(0, 300) });
+    return this;
+  }
+  pending(name, detail = "") {
+    this.pendingRows.push({
+      name,
+      ok: null,
+      pending: true,
+      detail: String(detail).slice(0, 300),
+    });
     return this;
   }
   get failures() {
@@ -1737,6 +1877,8 @@ const scenarios = {
   "ui-source-paths": nativeSourcePaths,
   // §4.8 第 7 条：多路重启压力验证，只在本地跑（CI 由各场景原有的重启覆盖）。
   "ui-relaunch": nativeUiRelaunch,
+  // AC10（N12）：同一隔离根启动第二个实例，核对限时退出/窗口恢复/唯一托盘。
+  "ui-single-instance": nativeSingleInstance,
   // 在同一个驱动进程内完成等待；部分终端会在父进程结束时回收其原生子进程。
   async "expire-cycle"(context) {
     await scenarios["expire-start"](context);
@@ -3950,6 +4092,9 @@ async function main() {
     exe: EXE,
     exe_sha256: fs.existsSync(EXE) ? sha256File(EXE) : "missing",
     acceptance_root: root,
+    base_identifier: BASE_IDENTIFIER,
+    acceptance_identifier: ACCEPTANCE_IDENTIFIER,
+    real_data_dir: REAL_DATA,
     theme_channel: THEME,
     forced_device_scale: SCALE,
     port: PORT,
@@ -3998,6 +4143,9 @@ async function main() {
     logPath,
     relaunchCycles: RELAUNCH_CYCLES,
     controlledIo,
+    baseIdentifier: BASE_IDENTIFIER,
+    acceptanceIdentifier: ACCEPTANCE_IDENTIFIER,
+    realDataDir: REAL_DATA,
     // WB07：ui-source-paths 也用统一 fixture（两版 WorkBuddy 合成转写）。
     profile: ["ui-identity", "ui-ccs-import", "ui-pricing", "ui-source-paths"].includes(SCENARIO)
       ? "unified"
@@ -4160,8 +4308,10 @@ async function main() {
           recorded_pids: mergePids([inst.current?.hostPid], inst.current?.descendantPids ?? []),
           attached: inst.attached === true,
           launches: buildLaunchesEvidence(inst.launches),
-          checks: ck.rows,
+          checks: [...ck.rows, ...ck.pendingRows],
           failed: ck.failures.map((f) => f.name),
+          pending: ck.pendingRows.map((p) => p.name),
+          verification_complete: ck.pendingRows.length === 0,
           minimal_evidence: true,
           minimal_evidence_at: nowIso(),
         },
@@ -4205,6 +4355,11 @@ async function main() {
         ? Object.values(manifest.files).map((f) => f.sha256.slice(0, 12))
         : [];
       if (SCENARIO === "first-frame") ev.expectStored = EXPECT_STORED;
+      if (SCENARIO === "ui-single-instance") {
+        // 先于第一个实例读取托盘：基线可能包含用户正在运行的正式实例图标；
+        // 场景按“基线 + 1”判断验收实例只新增一个图标。
+        ev.tray_baseline_before_primary = readTrayObservation();
+      }
       hb("启动 release/acceptance 实例并连接 CDP");
       const info = await inst.launch();
       hb(`PID=${info.pid} port=${info.port}`);
@@ -4327,7 +4482,8 @@ async function main() {
         SCENARIO === "ui-source-paths" ||
         SCENARIO === "ui-identity" ||
         SCENARIO === "ui-ccs-import" ||
-        SCENARIO === "ui-pricing"
+        SCENARIO === "ui-pricing" ||
+        SCENARIO === "ui-single-instance"
       ) {
         // S00：失败截图/DOM 取证有短上限，无法完成就跳过并记原因（计划 §9.1 第 5 条）
         try {
@@ -4371,7 +4527,8 @@ async function main() {
                 SCENARIO === "ui-source-paths" ||
                 SCENARIO === "ui-identity" ||
                 SCENARIO === "ui-ccs-import" ||
-                SCENARIO === "ui-pricing"
+                SCENARIO === "ui-pricing" ||
+                SCENARIO === "ui-single-instance"
               ) {
                 const logs = path.join(root, "tokenscope", "logs");
                 if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
@@ -4388,7 +4545,10 @@ async function main() {
       process.exit(1);
     }
     if (!scenarioError) {
-      hb(`场景 ${SCENARIO} 结束，检查 ${ck.rows.length - ck.failures.length}/${ck.rows.length}`);
+      hb(
+        `场景 ${SCENARIO} 结束，检查 ${ck.rows.length - ck.failures.length}/${ck.rows.length}` +
+          (ck.pendingRows.length ? `，待验证 ${ck.pendingRows.length} 项` : ""),
+      );
     }
   }
 
@@ -4430,7 +4590,8 @@ async function main() {
     SCENARIO === "ui-source-paths" ||
     SCENARIO === "ui-identity" ||
     SCENARIO === "ui-ccs-import" ||
-    SCENARIO === "ui-pricing"
+    SCENARIO === "ui-pricing" ||
+    SCENARIO === "ui-single-instance"
   ) {
     const logs = path.join(root, "tokenscope", "logs");
     if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
@@ -4495,8 +4656,13 @@ async function main() {
   ev.stages = stage.list();
   ev.launch_count = inst.launches.length;
   ev.launches = buildLaunchesEvidence(inst.launches);
-  ev.checks = ck.rows;
+  ev.checks = [...ck.rows, ...ck.pendingRows];
   ev.failed = ck.failures.map((f) => f.name);
+  ev.pending = ck.pendingRows.map((p) => p.name);
+  ev.verification_complete = ck.pendingRows.length === 0;
+  ev.base_identifier = BASE_IDENTIFIER;
+  ev.acceptance_identifier = ACCEPTANCE_IDENTIFIER;
+  ev.real_data_dir = REAL_DATA;
   if (ck.failures.length) ev.host_log_tail = inst.logTail();
   if (ck.failures.length) {
     // 应用自己的文件日志（隔离根 tokenscope/logs）尾部：进程 stdout 为空时这是唯一线索
@@ -4522,12 +4688,19 @@ async function main() {
     passed: ck.rows.length - ck.failures.length,
     total: ck.rows.length,
     failures: ck.failures.map((f) => `${f.name}: ${f.detail}`),
+    pending: ck.pendingRows.map((p) => `${p.name}: ${p.detail}`),
+    verification_complete: ck.pendingRows.length === 0,
     launches: ev.launches.map((l) => ({
       index: l.index,
+      role: l.role,
       port: l.port,
       attached: l.attached,
       host_pid: l.host_pid,
       host_exit_code: l.host_exit_code,
+      same_root: l.same_root,
+      acceptance_identifier: l.acceptance_identifier,
+      exit_elapsed_ms: l.exit_elapsed_ms,
+      exit_within_budget: l.exit_within_budget,
     })),
     evidence: out,
     real_untouched: ev.real_untouched,
@@ -4536,6 +4709,8 @@ async function main() {
   };
   console.log(JSON.stringify(summary, null, 2));
   if (ck.failures.length) process.exitCode = 1;
+  // AC10：pending 不是通过；用独立退出码让调用方/未来 CI 不会把未观察项当成全绿。
+  else if (ck.pendingRows.length) process.exitCode = 3;
   // 启动/attach 失败：证据已写出，保留原来的退出码 2 语义
   if (setupError) throw setupError;
   if (SCENARIO === "expire-start") {

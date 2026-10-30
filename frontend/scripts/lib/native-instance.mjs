@@ -780,9 +780,11 @@ export function createLaunchRecord({
   logPath = "",
   browserArgs = "",
   startedAtMs = Date.now(),
+  role = "primary",
 } = {}) {
   return {
     index,
+    role,
     port,
     root,
     logPath,
@@ -796,6 +798,18 @@ export function createLaunchRecord({
     attached: false,
     hostPid: null,
     hostExitCode: null,
+    hostSignal: null,
+    spawnError: null,
+    // AC10：进程归属（两个进程都记录）与第二次启动的退出观察（exit* 字段 primary 为 null）
+    owner: "acceptance-driver",
+    parentPid: null,
+    sameRoot: null,
+    acceptanceIdentifier: null,
+    exitElapsedMs: null,
+    exitBudgetMs: null,
+    exitWithinBudget: null,
+    exitTimedOut: null,
+    exitCanceled: null,
     descendantPids: [],
     portOwnerPids: [],
     ownerChecks: [],
@@ -869,11 +883,25 @@ export function hostLogTail(text, { maxLines = 80, maxChars = 6000 } = {}) {
 export function buildLaunchesEvidence(records) {
   return (records ?? []).map((record) => ({
     index: record.index,
+    role: record.role ?? "primary",
     port: record.port,
     attached: record.attached === true,
     host_pid: record.hostPid,
     host_exit_code: record.hostExitCode,
+    host_signal: record.hostSignal ?? null,
     host_exit_detected: record.hostExitDetected ? { ...record.hostExitDetected } : null,
+    root: record.root,
+    owner: record.owner ?? "acceptance-driver",
+    parent_pid: record.parentPid ?? null,
+    same_root: record.sameRoot ?? null,
+    acceptance_identifier: record.acceptanceIdentifier ?? null,
+    exit_elapsed_ms: record.exitElapsedMs ?? null,
+    exit_budget_ms: record.exitBudgetMs ?? null,
+    exit_within_budget: record.exitWithinBudget ?? null,
+    exit_timed_out: record.exitTimedOut ?? null,
+    exit_canceled: record.exitCanceled ?? null,
+    secondary_killed: record.secondaryKilled ?? null,
+    spawn_error: record.spawnError ?? null,
     budget_ms:
       Number.isFinite(Number(record.launchDeadlineMs)) && Number.isFinite(Number(record.startedAtMs))
         ? Math.round(Number(record.launchDeadlineMs) - Number(record.startedAtMs))
