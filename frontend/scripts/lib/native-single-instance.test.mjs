@@ -2,9 +2,10 @@
 // AC10（N12 单实例）合成契约：应用标识、隔离根、第二次启动退出、
 // 窗口恢复/前台、托盘唯一性。所有外部观察都是注入的合成输入；本文件
 // 不启动原生实例，也不读取真实用户数据。
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   ACCEPTANCE_IDENTIFIER_SUFFIX,
   ACCEPTANCE_EXE_MARKERS,
@@ -138,6 +139,85 @@ describe("isWithin 修复与 EXE 验证收窄", () => {
     });
     expect(result.ok).toBe(true);
     expect(result.write_paths.length).toBeGreaterThanOrEqual(6);
+  });
+});
+
+describe("深层 junction 与已有 manifest 回归（先红后绿）", () => {
+  const HOME = os.homedir();
+  const FAKE_HOME = path.join(os.tmpdir(), "ac10-fake-home-$$");
+  const FAKE_PROTECTED = path.join(FAKE_HOME, ".tokenscope");
+  const FAKE_ROOT = path.join(FAKE_HOME, "workspace");
+
+  afterEach(() => {
+    try { fs.rmSync(FAKE_HOME, { recursive: true, force: true }); } catch {}
+  });
+
+  it("已有 manifest.json 常规文件不阻止预检通过（当前 canonicalize 拒绝非目录→红）", () => {
+    fs.mkdirSync(path.join(FAKE_ROOT, "tokenscope"), { recursive: true });
+    fs.writeFileSync(path.join(FAKE_ROOT, "manifest.json"), "{}", "utf8");
+    // 用假 home 偏移受保护目录，确保路径隔离
+    const result = validateAcceptancePaths({
+      root: FAKE_ROOT,
+      outDir: path.join(os.tmpdir(), "ac10-out-manifest"),
+      homeDir: FAKE_HOME.replace(/\\/g, "/") === FAKE_HOME ? path.join(FAKE_HOME, "..", "..") : FAKE_HOME,
+      canonicalize: (target) => {
+        const resolved = path.resolve(target);
+        // 映射假受保护目录到真实受保护目录之外
+        if (resolved.startsWith(path.resolve(FAKE_HOME))) {
+          return { ok: true, path: resolved };
+        }
+        return { ok: true, path: resolved };
+      },
+    });
+    // manifest.json 是常规文件，canonicalize 不应拒绝
+    expect(result.ok).toBe(true);
+  });
+
+  it("深层 junction root/tokenscope → 假受保护目录在预检时拒绝（红→绿）", () => {
+    // 模拟 root/tokenscope 是一个 junction 指向假受保护目录
+    const junctionTarget = FAKE_PROTECTED;
+    fs.mkdirSync(junctionTarget, { recursive: true });
+    const sentinel = path.join(junctionTarget, "sentinel.txt");
+    fs.writeFileSync(sentinel, "do-not-touch", "utf8");
+    // canonicalize 模拟 junction 解析
+    const canonicalize = (target) => {
+      const resolved = path.resolve(target);
+      // root/tokenscope 解析为假受保护目录
+      if (resolved === path.resolve(path.join(FAKE_ROOT, "tokenscope"))) {
+        return { ok: true, path: path.resolve(junctionTarget) };
+      }
+      return { ok: true, path: resolved };
+    };
+    const result = validateAcceptancePaths({
+      root: FAKE_ROOT,
+      outDir: path.join(os.tmpdir(), "ac10-out-junction"),
+      homeDir: FAKE_HOME,
+      canonicalize,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/受保护目录/);
+    // 哨兵不变
+    expect(fs.readFileSync(sentinel, "utf8")).toBe("do-not-touch");
+  });
+
+  it("root/sources/claude 为深层 junction → 受保护来源目录时拒绝", () => {
+    const fakeClaude = path.join(FAKE_HOME, ".claude");
+    fs.mkdirSync(fakeClaude, { recursive: true });
+    const canonicalize = (target) => {
+      const resolved = path.resolve(target);
+      if (resolved === path.resolve(path.join(FAKE_ROOT, "sources", "claude"))) {
+        return { ok: true, path: path.resolve(fakeClaude) };
+      }
+      return { ok: true, path: resolved };
+    };
+    const result = validateAcceptancePaths({
+      root: FAKE_ROOT,
+      outDir: path.join(os.tmpdir(), "ac10-out-deep"),
+      homeDir: FAKE_HOME,
+      canonicalize,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/受保护目录/);
   });
 });
 

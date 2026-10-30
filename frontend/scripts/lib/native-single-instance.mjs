@@ -80,10 +80,12 @@ export function canonicalizeAcceptancePath(
   const resolved = tail.length ? path.join(real, ...tail) : real;
   try {
     const stat = statSync(resolved);
-    if (!stat.isDirectory()) return { ok: false, reason: `不是目录：${resolved}` };
+    if (!stat.isFile() && !stat.isDirectory()) {
+      return { ok: false, reason: `不是常规文件或目录：${resolved}` };
+    }
   } catch (error) {
     if (error?.code !== "ENOENT") {
-      return { ok: false, reason: `无法检查目录：${error?.message ?? error}` };
+      return { ok: false, reason: `无法检查路径类型：${error?.message ?? error}` };
     }
   }
   return { ok: true, path: path.resolve(resolved) };
@@ -115,13 +117,18 @@ export function getUserProtectedDirs(homeDir) {
 }
 
 /**
- * 验收实例会读写的全部路径（隔离根 + 子目录 + manifest + 输出目录）。
+ * 验收实例会读写的全部路径（隔离根 + 数据/来源/WebView 子目录 + manifest + 输出目录）。
+ * 深层来源子路径单独列出，使 junction/symlink 在预检时即可被解析。
  */
 export function getAcceptanceWritePaths(root, outDir) {
   const paths = [
     root,
     path.join(root, "tokenscope"),
     path.join(root, "sources"),
+    path.join(root, "sources", "claude"),
+    path.join(root, "sources", "codex"),
+    path.join(root, "sources", "workbuddy"),
+    path.join(root, "sources", "workbuddy-ai"),
     path.join(root, "webview"),
     path.join(root, "manifest.json"),
   ];

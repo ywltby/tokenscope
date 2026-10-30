@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "B3 分批实施：AC06 自启隔离替身与隐私原生场景接入 CI；AC08 fixture 覆盖记录与全矩阵取证修复"
+  "summary": "N18 Claude 缓存写 5m/1h 分档计价与未知分项估算标示；B3 AC06 自启隔离替身与隐私原生场景接入 CI"
 }

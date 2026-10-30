@@ -205,6 +205,12 @@ public static class TsTray {
                     result.error = row.error;
                     break;
                 }
+                if (copied > textLength) {
+                    // 文本在长度查询后变长：写入可能超出基于查询长度的有界分配
+                    row.error = "text grew after length query: queried " + textLength + " but copied " + copied + " for command " + commandId;
+                    result.error = row.error;
+                    break;
+                }
                 int charsToRead = Math.Min(copied, TextCapacityChars);
                 byte[] textBytes = new byte[(charsToRead + 1) * 2];
                 UIntPtr readText;
