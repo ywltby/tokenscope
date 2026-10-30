@@ -63,6 +63,19 @@ if ($truncated.ok -or $null -ne $truncated.token_scope_count -or $truncated.erro
 }
 Write-Output 'PASS truncated button text is rejected'
 
+# AC10 受控文本验证：变长与超长，覆盖 ReadTextPointer 只读解析协议。
+# 载体是本进程托管 UTF-16 缓冲（与 shell 任务栏 iString 指针形态相同）：
+#   - 变长：同指针原地改写后重读，内容如实变化（不靠长度比较协议）；
+#   - 超长：4000 字符读到本地缓冲上界 2050 截断，truncated=true，不越界；
+#   - 无效指针：null（不可观察），不猜文本。
+$controlled = & "$PSScriptRoot/read-tray-notification-area.ps1" -SelfTestControlledText
+if ($LASTEXITCODE -ne 0) { throw "self-test-controlled-text exited $LASTEXITCODE" }
+$controlled = $controlled | ConvertFrom-Json
+if (-not $controlled.ok) {
+    throw "self-test-controlled-text failed: $($controlled | ConvertTo-Json -Compress -Depth 5)"
+}
+Write-Output ("PASS controlled-text: variant-length changes are observed as-is, over-long is bounded to {0} bytes with truncated=true, invalid pointer is null" -f $controlled.max_bytes)
+
 # AC10 真实通知区域协议验证：同一个 ReadButtons 读真实可见+溢出 toolbar。
 # 成功路径断言：每个按钮文本长度都在容量内（测长阶段上界 + text-grew 检查由
 # ReadButtons 内部强制，这里复核输出）。环境不可读时输出结构化 pending，
@@ -106,8 +119,8 @@ if ($window.declared_count -ne 1) {
 if ($window.read_ok) {
     throw "self-test-window: unexpected readable text on controlled toolbar (contract changed? investigate): $($window | ConvertTo-Json -Compress)"
 }
-if ($window.row_error -notmatch 'TB_GETBUTTONTEXTW') {
-    throw "self-test-window: failure must come from the real text query, got: $($window.row_error)"
+if ($window.row_error -notmatch 'button text pointer unavailable') {
+    throw "self-test-window: failure must come from the readonly text-pointer stage, got: $($window.row_error)"
 }
 if (@($window.buttons).Count -ne 1 -or $window.buttons[0].command_id -ne 5001) {
     throw "self-test-window: inserted button (idCommand 5001) must be read back through the real cross-process buffer: $($window | ConvertTo-Json -Compress)"

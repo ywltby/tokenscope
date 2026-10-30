@@ -216,6 +216,10 @@ pub struct DiscoveryContext {
     /// WB04：两个 WorkBuddy 的默认根（`projects/`）。
     pub workbuddy_default_root: PathBuf,
     pub workbuddy_ai_default_root: PathBuf,
+    /// RC10/AC10：验收隔离根（`env.acceptance_isolated` 置位时必填）。
+    /// 旧格式显式目录与手动追加目录只允许落在此根内；`None` = 普通产品
+    /// 模式，来源语义不受约束。
+    pub acceptance_root: Option<PathBuf>,
     pub env: StartupEnv,
     pub probe: ProbeFn,
 }
@@ -240,6 +244,12 @@ impl DiscoveryContext {
                 ],
                 workbuddy_default_root: wb_src.join("projects"),
                 workbuddy_ai_default_root: wba_src.join("projects"),
+                acceptance_root: Some(crate::acceptance::root().unwrap_or_else(|| {
+                    claude_src
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| claude_src.clone())
+                })),
                 env,
                 probe: filesystem_probe(),
             });
@@ -260,6 +270,7 @@ impl DiscoveryContext {
             ],
             workbuddy_default_root: home.join(".workbuddy").join("projects"),
             workbuddy_ai_default_root: home.join(".workbuddy-ai").join("projects"),
+            acceptance_root: None,
             env,
             probe,
         }
@@ -322,18 +333,50 @@ pub fn resolve_sources(
     workbuddy_ai: &SourceConfig,
 ) -> ResolvedSources {
     let mut candidates: Vec<Candidate> = Vec::new();
+    // RC10/AC10：验收隔离上下文里，用户可配置的路径（旧格式显式目录、手动
+    // 追加目录）只允许落在验收根内——隔离根之外的路径不进入候选集。普通
+    // 产品模式（acceptance_root = None）不受约束，来源语义原样保留。
+    let acceptance_constraint = |path: &Path| -> bool {
+        match (&ctx.acceptance_root, ctx.env.acceptance_isolated) {
+            (Some(root), true) => path.starts_with(root),
+            _ => true,
+        }
+    };
+    let acceptance_dropped_diag = |path: &Path| -> Vec<String> {
+        if acceptance_constraint(path) {
+            vec![]
+        } else {
+            vec![format!(
+                "验收隔离模式：路径 {} 位于隔离根之外，已忽略（不把隔离根之外的目录当作来源）",
+                path.display()
+            )]
+        }
+    };
     // ── Claude ──
     if claude.is_legacy_dir_semantics() {
-        let root = claude
+        let explicit = claude
             .dir
             .as_deref()
             .filter(|d| !d.trim().is_empty())
-            .map_or_else(|| ctx.claude_default_root.clone(), PathBuf::from);
-        let mapping = if claude.dir.is_some() {
+            .map(PathBuf::from);
+        // 显式目录在隔离根之外 → 丢弃该候选（诊断挂在已生成的行上）
+        let explicit_dropped = explicit
+            .as_ref()
+            .map(|p| !acceptance_constraint(p))
+            .unwrap_or(false);
+        let root = match (&explicit, explicit_dropped) {
+            (Some(p), false) => p.clone(),
+            _ => ctx.claude_default_root.clone(),
+        };
+        let mapping = if claude.dir.is_some() && !explicit_dropped {
             None // A03：自定义根不读取默认账户映射
         } else {
             Some(ctx.claude_default_mapping.clone())
         };
+        let mut diagnostics = vec!["旧格式配置尚未迁移：仍按 v1 语义解析根".to_string()];
+        if let Some(p) = &explicit {
+            diagnostics.extend(acceptance_dropped_diag(p));
+        }
         candidates.push(Candidate {
             agent: AgentKind::ClaudeCode,
             kind: OriginKind::Default,
@@ -341,8 +384,8 @@ pub fn resolve_sources(
             enabled: true,
             probe: (ctx.probe)(&root),
             mapping,
-            mapping_disabled: claude.dir.is_some(),
-            diagnostics: vec!["旧格式配置尚未迁移：仍按 v1 语义解析根".to_string()],
+            mapping_disabled: claude.dir.is_some() && !explicit_dropped,
+            diagnostics,
         });
     } else {
         let mut claude_default_diag = Vec::new();
@@ -385,6 +428,17 @@ pub fn resolve_sources(
         });
         for entry in &claude.additional_paths {
             let root = PathBuf::from(&entry.path);
+            if !acceptance_constraint(&root) {
+                // RC10/AC10：隔离根之外的手动追加目录不进候选集；诊断挂在
+                // 默认行上（没有可挂的独立行）。
+                for c in candidates
+                    .iter_mut()
+                    .filter(|c| c.agent == AgentKind::ClaudeCode && c.kind == OriginKind::Default)
+                {
+                    c.diagnostics.extend(acceptance_dropped_diag(&root));
+                }
+                continue;
+            }
             candidates.push(Candidate {
                 agent: AgentKind::ClaudeCode,
                 kind: OriginKind::Manual,
@@ -414,20 +468,26 @@ pub fn resolve_sources(
             }
             _ => None,
         };
-        let has_explicit_dir = explicit.is_some();
-        let roots: Vec<PathBuf> = match explicit {
-            Some(d) => vec![d],
-            None => env_replacement.unwrap_or_else(|| ctx.codex_default_roots.clone()),
+        // RC10/AC10：显式目录在隔离根之外 → 丢弃该候选（回退默认/环境语义，
+        // 诊断如实记录被丢弃的路径）。
+        let explicit_dropped = explicit
+            .as_ref()
+            .map(|p| !acceptance_constraint(p))
+            .unwrap_or(false);
+        let roots: Vec<PathBuf> = match (&explicit, explicit_dropped) {
+            (Some(d), false) => vec![d.clone()],
+            _ => env_replacement.unwrap_or_else(|| ctx.codex_default_roots.clone()),
         };
-        let legacy_diag = if acceptance_isolated && !has_explicit_dir {
-            vec![
-                "旧格式配置尚未迁移：仍按 v1 语义解析根".to_string(),
+        let mut legacy_diag = vec!["旧格式配置尚未迁移：仍按 v1 语义解析根".to_string()];
+        if let Some(p) = &explicit {
+            legacy_diag.extend(acceptance_dropped_diag(p));
+        }
+        if acceptance_isolated && explicit.as_ref().is_none_or(|p| !acceptance_constraint(p)) {
+            legacy_diag.push(
                 "验收隔离模式：环境变量 CODEX_HOME 已忽略（不把隔离根之外的目录当作来源）"
                     .to_string(),
-            ]
-        } else {
-            vec!["旧格式配置尚未迁移：仍按 v1 语义解析根".to_string()]
-        };
+            );
+        }
         for root in roots {
             candidates.push(Candidate {
                 agent: AgentKind::Codex,
@@ -481,6 +541,15 @@ pub fn resolve_sources(
         }
         for entry in &codex.additional_paths {
             let root = PathBuf::from(&entry.path);
+            if !acceptance_constraint(&root) {
+                for c in candidates
+                    .iter_mut()
+                    .filter(|c| c.agent == AgentKind::Codex && c.kind == OriginKind::Default)
+                {
+                    c.diagnostics.extend(acceptance_dropped_diag(&root));
+                }
+                continue;
+            }
             candidates.push(Candidate {
                 agent: AgentKind::Codex,
                 kind: OriginKind::Manual,
@@ -514,6 +583,15 @@ pub fn resolve_sources(
         });
         for entry in &cfg.additional_paths {
             let root = PathBuf::from(&entry.path);
+            if !acceptance_constraint(&root) {
+                for c in candidates
+                    .iter_mut()
+                    .filter(|c| c.agent == kind && c.kind == OriginKind::Default)
+                {
+                    c.diagnostics.extend(acceptance_dropped_diag(&root));
+                }
+                continue;
+            }
             candidates.push(Candidate {
                 agent: kind,
                 kind: OriginKind::Manual,

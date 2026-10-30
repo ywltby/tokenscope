@@ -36,10 +36,13 @@ param(
     # 失败 → 整个区域不可观察、计数为 null"——验证的是失败路径，不是合成记录。
     [switch]$SelfTestWindow,
     # AC10：真实通知区域协议验证——用同一个 ReadButtons 读真实可见+溢出
-    # toolbar，验证成功路径的协议上界（全部文本长度 <= 容量、copied==len 由
-    # ReadButtons 的 text-grew 检查强制）。环境不可读时输出结构化 pending，
-    # 绝不把失败当成通过。
+    # toolbar，验证成功路径的协议上界（全部文本经只读指针解析、长度受本地
+    # 缓冲上界约束）。环境不可读时输出结构化 pending，绝不把失败当成通过。
     [switch]$SelfTestReal,
+    # AC10：受控文本验证——变长与超长。本进程托管 UTF-16 缓冲 + 同一个
+    # ReadTextPointer 只读解析器（与 shell 任务栏 iString 指针指向的形态
+    # 相同），覆盖文本变化与超长截断，绝无跨进程写入。
+    [switch]$SelfTestControlledText,
     [int]$TimeoutMs = 2000
 )
 
@@ -142,6 +145,41 @@ public static class TsTray {
         return WriteProcessMemory(proc, mem, zero, (UIntPtr)size, out written);
     }
 
+    // 2026-10-31（AC10 复核 2）：跨进程文本读取改为**只读指针解析**。
+    // 旧协议（TB_GETBUTTONTEXTW NULL 测长 + 有界写入 + 读回）会向目标进程
+    // 发送消息并写入其内存，长度语义在两次消息之间可能变化；实测 comctl32
+    // 普通窗口对自建按钮返回 -1，shell 任务栏的文本机制又不走消息可见路径。
+    // Explorer 任务栏 toolbar 的 TBBUTTON 实际布局（本机取证，18 按钮逐字节
+    // 核对）：idCommand@4（4B）、dwData@16（8B 指针）、iString@24（8B 指针，
+    // 直接指向工具栏进程内的 UTF-16 文本）。因此：
+    //   - 结构读取仍用 TB_GETBUTTON（远程缓冲固定 64 字节，写入大小与文本
+    //     长度无关，属于"确实有长度限制"的写入）；
+    //   - 文本读取完全改为 ReadProcessMemory 只读 iString 指针，本地缓冲
+    //     上界 = MaxTextBytes，NUL 截断；不再向目标进程写任何文本缓冲。
+    // 指针无效（pool-index 形态 / 被清零 / 断链）→ 该按钮文本不可观察，
+    // 整个区域 fail closed（计数为 null），由调用方记 pending。
+    public const int MaxTextBytes = 4100; // 本地缓冲上界（2048 字符 + NUL + 余量）
+
+    // 只读文本解析：从 ptr 读最多 maxBytes 字节，NUL 截断。绝不写目标进程。
+    public static string ReadTextPointer(IntPtr proc, IntPtr ptr, int maxBytes, out bool truncated) {
+        truncated = false;
+        if (ptr == IntPtr.Zero || ptr.ToInt64() < 0x10000 || ptr.ToInt64() >= 0x7FFFFFFEFFFF) {
+            return null;
+        }
+        byte[] buf = new byte[maxBytes];
+        UIntPtr read;
+        if (!ReadProcessMemory(proc, ptr, buf, (UIntPtr)maxBytes, out read)) {
+            return null;
+        }
+        int byteLength = 0;
+        while (byteLength + 1 < buf.Length && (buf[byteLength] != 0 || buf[byteLength + 1] != 0)) {
+            byteLength += 2;
+        }
+        // 触底且仍有内容 → 按上界截断（超长文本读不到 NUL）
+        truncated = byteLength + 1 >= buf.Length;
+        return Encoding.Unicode.GetString(buf, 0, byteLength);
+    }
+
     public static TrayAreaResult ReadButtons(IntPtr toolbar, int timeoutMs) {
         TrayAreaResult result = new TrayAreaResult();
         result.ok = false;
@@ -156,10 +194,7 @@ public static class TsTray {
             return result;
         }
         IntPtr buttonMem = VirtualAllocEx(proc, IntPtr.Zero, (UIntPtr)64, MEM_COMMIT_RESERVE, PAGE_READWRITE);
-        IntPtr textMem = VirtualAllocEx(proc, IntPtr.Zero, (UIntPtr)((TextCapacityChars + 1) * 2), MEM_COMMIT_RESERVE, PAGE_READWRITE);
-        if (buttonMem == IntPtr.Zero || textMem == IntPtr.Zero) {
-            if (buttonMem != IntPtr.Zero) VirtualFreeEx(proc, buttonMem, UIntPtr.Zero, MEM_RELEASE);
-            if (textMem != IntPtr.Zero) VirtualFreeEx(proc, textMem, UIntPtr.Zero, MEM_RELEASE);
+        if (buttonMem == IntPtr.Zero) {
             CloseHandle(proc);
             result.error = "VirtualAllocEx failed";
             return result;
@@ -214,68 +249,17 @@ public static class TsTray {
                 }
                 int commandId = BitConverter.ToInt32(buttonBytes, 4);
                 row.command_id = commandId;
-                // 阶段 1：NULL 缓冲区查询文本长度（不写入目标进程）。
-                IntPtr lenResult;
-                if (SendMessageTimeout(toolbar, TB_GETBUTTONTEXTW, (IntPtr)commandId, IntPtr.Zero,
-                        SMTO_FLAGS, (uint)timeoutMs, out lenResult) == IntPtr.Zero) {
-                    row.error = "TB_GETBUTTONTEXTW length query timeout for command " + commandId;
+                // 只读文本解析：iString@24 指向目标进程内的 UTF-16 文本。
+                long iStringPtr = BitConverter.ToInt64(buttonBytes, 24);
+                bool truncated;
+                string text = ReadTextPointer(proc, (IntPtr)iStringPtr, MaxTextBytes, out truncated);
+                if (text == null) {
+                    row.error = "button text pointer unavailable for command " + commandId + " (ptr=0x" + iStringPtr.ToString("X") + ")";
                     result.error = row.error;
                     break;
                 }
-                int textLength = (int)(long)lenResult;
-                if (textLength < 0) {
-                    row.error = "TB_GETBUTTONTEXTW length error " + textLength + " for command " + commandId;
-                    result.error = row.error;
-                    break;
-                }
-                if (textLength == 0) {
-                    continue;
-                }
-                // 阶段 2：长度超过容量时标记截断并跳过（避免目标进程缓冲区溢出）。
-                if (textLength > TextCapacityChars) {
-                    row.truncated = true;
-                    row.error = "button text " + textLength + " chars exceeds capacity " + TextCapacityChars + " for command " + commandId;
-                    result.error = row.error;
-                    break;
-                }
-                // 阶段 3：textLength <= TextCapacityChars，写入有界：(textLength+1)*2 <= (TextCapacityChars+1)*2。
-                if (!Zero(proc, textMem, (TextCapacityChars + 1) * 2)) {
-                    row.error = "WriteProcessMemory text buffer failed";
-                    result.error = row.error;
-                    break;
-                }
-                IntPtr textResult;
-                if (SendMessageTimeout(toolbar, TB_GETBUTTONTEXTW, (IntPtr)commandId, textMem,
-                        SMTO_FLAGS, (uint)timeoutMs, out textResult) == IntPtr.Zero) {
-                    row.error = "TB_GETBUTTONTEXTW read timeout for command " + commandId;
-                    result.error = row.error;
-                    break;
-                }
-                int copied = (int)(long)textResult;
-                if (copied < 0 || copied > TextCapacityChars) {
-                    row.error = "TB_GETBUTTONTEXTW copied " + copied + " chars for command " + commandId;
-                    result.error = row.error;
-                    break;
-                }
-                if (copied > textLength) {
-                    // 文本在长度查询后变长：写入可能超出基于查询长度的有界分配
-                    row.error = "text grew after length query: queried " + textLength + " but copied " + copied + " for command " + commandId;
-                    result.error = row.error;
-                    break;
-                }
-                int charsToRead = Math.Min(copied, TextCapacityChars);
-                byte[] textBytes = new byte[(charsToRead + 1) * 2];
-                UIntPtr readText;
-                if (!ReadProcessMemory(proc, textMem, textBytes, (UIntPtr)textBytes.Length, out readText)) {
-                    row.error = "ReadProcessMemory button text failed for command " + commandId;
-                    result.error = row.error;
-                    break;
-                }
-                int byteLength = 0;
-                while (byteLength + 1 < textBytes.Length && (textBytes[byteLength] != 0 || textBytes[byteLength + 1] != 0)) {
-                    byteLength += 2;
-                }
-                row.text = Encoding.Unicode.GetString(textBytes, 0, byteLength);
+                row.text = text;
+                row.truncated = truncated;
             }
             result.buttons = new TrayButtonRow[writtenRows];
             Array.Copy(rows, result.buttons, writtenRows);
@@ -286,7 +270,6 @@ public static class TsTray {
             return result;
         } finally {
             VirtualFreeEx(proc, buttonMem, UIntPtr.Zero, MEM_RELEASE);
-            VirtualFreeEx(proc, textMem, UIntPtr.Zero, MEM_RELEASE);
             CloseHandle(proc);
         }
     }
@@ -413,245 +396,13 @@ function New-TrayResult($visible, $overflow) {
 
 if ($SelfTestWindow) {
     # AC10 自有受控窗口：真实 comctl32 工具栏 + 真实 ReadButtons 全链路。
-    # comctl32 的普通窗口对自建按钮的 TB_GETBUTTONTEXTW 返回 -1（shell 任务栏
-    # 工具栏是私有构建，文本机制不同），因此本模式验证的确定性结论是：
-    #   1. TB_BUTTONCOUNT 真实返回插入的按钮数（计数阶段真实）；
+    # 本模式验证的确定性结论是：
+    #   1. TB_BUTTONCOUNT / TB_GETBUTTON 在自建工具栏上真实工作（结构阶段）；
     #   2. ReadButtons 用真实跨进程 API（OpenProcess 本进程 / VirtualAllocEx /
-    #      TB_GETBUTTON / TB_GETBUTTONTEXTW）走完全部阶段；
-    #   3. 文本查询失败 → row.error 非空 → 整个区域不可观察、计数为 null
-    #      （失败路径真实生效，绝不把半可观察结果当成通过）。
-    if (-not ('TsTray' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.Text;
-using System.Runtime.InteropServices;
-public class TrayButtonRow {
-    public int index;
-    public int command_id;
-    public string text;
-    public string error;
-    public bool truncated;
-}
-public class TrayAreaResult {
-    public bool ok;
-    public string error;
-    public int declared_count;
-    public TrayButtonRow[] buttons;
-}
-public static class TsTray {
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-    [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
-    [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
-    [DllImport("kernel32.dll")] public static extern IntPtr VirtualAllocEx(IntPtr proc, IntPtr addr, UIntPtr size, uint type, uint protect);
-    [DllImport("kernel32.dll")] public static extern bool VirtualFreeEx(IntPtr proc, IntPtr addr, UIntPtr size, uint type);
-    [DllImport("kernel32.dll")] public static extern bool ReadProcessMemory(IntPtr proc, IntPtr addr, byte[] buf, UIntPtr size, out UIntPtr read);
-    [DllImport("kernel32.dll")] public static extern bool WriteProcessMemory(IntPtr proc, IntPtr addr, byte[] buf, UIntPtr size, out UIntPtr written);
-    [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr GetModuleHandleW(string name);
-
-    public const uint TB_BUTTONCOUNT = 0x0418;
-    public const uint TB_GETBUTTON = 0x0417;
-    public const uint TB_GETBUTTONTEXTW = 0x044B;
-    public const uint PROCESS_ACCESS = 0x0008 | 0x0010 | 0x0020 | 0x0400;
-    public const uint MEM_COMMIT_RESERVE = 0x1000 | 0x2000;
-    public const uint MEM_RELEASE = 0x8000;
-    public const uint PAGE_READWRITE = 0x04;
-    public const uint SMTO_FLAGS = 0x0003;
-    const int TextCapacityChars = 2048;
-
-    public static IntPtr Toolbar(IntPtr root, string[] chain) {
-        IntPtr cur = root;
-        foreach (var cls in chain) {
-            cur = FindWindowEx(cur, IntPtr.Zero, cls, null);
-            if (cur == IntPtr.Zero) return IntPtr.Zero;
-        }
-        return cur;
-    }
-
-    [DllImport("user32.dll", SetLastError=true, EntryPoint="CreateWindowExW", CharSet=CharSet.Unicode)] public static extern IntPtr CreateWindowEx(uint ex, string cls, string title, uint style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
-    [DllImport("user32.dll")] public static extern bool DestroyWindow(IntPtr h);
-    [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
-    [DllImport("user32.dll", SetLastError=true, EntryPoint="SendMessageW", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageString(IntPtr h, uint msg, IntPtr w, string l);
-    [StructLayout(LayoutKind.Sequential)]
-    public struct TBBUTTON { public IntPtr iBitmap; public int idCommand; public byte fsState; public byte fsStyle; public byte b0; public byte b1; public byte b2; public byte b3; public byte b4; public byte b5; public IntPtr dwData; public IntPtr iString; }
-    public const uint TB_BUTTONSTRUCTSIZE = 0x041E;
-    public const uint TB_INSERTBUTTONW = 0x0443;
-    public const uint WS_CHILD = 0x40000000;
-    public const uint WS_VISIBLE = 0x10000000;
-    public const int I_IMAGENONE = -2;
-
-    public static IntPtr CreateControlledToolbar(IntPtr parent, int commandId, string text) {
-        IntPtr tb = CreateWindowEx(0, "ToolbarWindow32", null, WS_CHILD | WS_VISIBLE, 0, 0, 300, 30, parent, IntPtr.Zero, GetModuleHandleW(null), IntPtr.Zero);
-        if (tb == IntPtr.Zero) return IntPtr.Zero;
-        SendMessage(tb, TB_BUTTONSTRUCTSIZE, (IntPtr)Marshal.SizeOf<TBBUTTON>(), IntPtr.Zero);
-        IntPtr strIdx = SendMessageString(tb, TB_ADDSTRINGW, IntPtr.Zero, text);
-        TBBUTTON btn = new TBBUTTON();
-        btn.iBitmap = (IntPtr)I_IMAGENONE;
-        btn.idCommand = commandId;
-        btn.fsState = 4;
-        btn.fsStyle = 0;
-        btn.iString = strIdx;
-        IntPtr p = Marshal.AllocHGlobal(Marshal.SizeOf<TBBUTTON>());
-        Marshal.StructureToPtr(btn, p, false);
-        SendMessage(tb, TB_INSERTBUTTONW, IntPtr.Zero, p);
-        return tb;
-    }
-
-    static bool Zero(IntPtr proc, IntPtr mem, int size) {
-        byte[] zero = new byte[size];
-        UIntPtr written;
-        return WriteProcessMemory(proc, mem, zero, (UIntPtr)size, out written);
-    }
-
-    public static TrayAreaResult ReadButtons(IntPtr toolbar, int timeoutMs) {
-        TrayAreaResult result = new TrayAreaResult();
-        result.ok = false;
-        result.error = null;
-        result.declared_count = -1;
-        result.buttons = new TrayButtonRow[0];
-        uint pid;
-        GetWindowThreadProcessId(toolbar, out pid);
-        IntPtr proc = OpenProcess(PROCESS_ACCESS, false, pid);
-        if (proc == IntPtr.Zero) {
-            result.error = "OpenProcess failed for explorer pid " + pid;
-            return result;
-        }
-        IntPtr buttonMem = VirtualAllocEx(proc, IntPtr.Zero, (UIntPtr)64, MEM_COMMIT_RESERVE, PAGE_READWRITE);
-        IntPtr textMem = VirtualAllocEx(proc, IntPtr.Zero, (UIntPtr)((TextCapacityChars + 1) * 2), MEM_COMMIT_RESERVE, PAGE_READWRITE);
-        if (buttonMem == IntPtr.Zero || textMem == IntPtr.Zero) {
-            if (buttonMem != IntPtr.Zero) VirtualFreeEx(proc, buttonMem, UIntPtr.Zero, MEM_RELEASE);
-            if (textMem != IntPtr.Zero) VirtualFreeEx(proc, textMem, UIntPtr.Zero, MEM_RELEASE);
-            CloseHandle(proc);
-            result.error = "VirtualAllocEx failed";
-            return result;
-        }
-        try {
-            IntPtr countResult;
-            if (SendMessageTimeout(toolbar, TB_BUTTONCOUNT, IntPtr.Zero, IntPtr.Zero,
-                    SMTO_FLAGS, (uint)timeoutMs, out countResult) == IntPtr.Zero) {
-                result.error = "TB_BUTTONCOUNT timeout or hung";
-                return result;
-            }
-            int count = (int)(long)countResult;
-            result.declared_count = count;
-            if (count < 0) {
-                result.error = "TB_BUTTONCOUNT returned " + count;
-                return result;
-            }
-            TrayButtonRow[] rows = new TrayButtonRow[count];
-            int writtenRows = 0;
-            for (int index = 0; index < count; index++) {
-                TrayButtonRow row = new TrayButtonRow();
-                row.index = index;
-                row.command_id = -1;
-                row.text = "";
-                row.error = null;
-                row.truncated = false;
-                rows[index] = row;
-                writtenRows = index + 1;
-                if (!Zero(proc, buttonMem, 64)) {
-                    row.error = "WriteProcessMemory button buffer failed";
-                    result.error = row.error;
-                    break;
-                }
-                IntPtr buttonResult;
-                if (SendMessageTimeout(toolbar, TB_GETBUTTON, (IntPtr)index, buttonMem,
-                        SMTO_FLAGS, (uint)timeoutMs, out buttonResult) == IntPtr.Zero) {
-                    row.error = "TB_GETBUTTON timeout or hung";
-                    result.error = row.error;
-                    break;
-                }
-                if ((long)buttonResult == 0) {
-                    row.error = "TB_GETBUTTON returned FALSE";
-                    result.error = row.error;
-                    break;
-                }
-                byte[] buttonBytes = new byte[64];
-                UIntPtr readButton;
-                if (!ReadProcessMemory(proc, buttonMem, buttonBytes, (UIntPtr)buttonBytes.Length, out readButton)) {
-                    row.error = "ReadProcessMemory TBBUTTON failed";
-                    result.error = row.error;
-                    break;
-                }
-                int commandId = BitConverter.ToInt32(buttonBytes, 4);
-                row.command_id = commandId;
-                IntPtr lenResult;
-                if (SendMessageTimeout(toolbar, TB_GETBUTTONTEXTW, (IntPtr)commandId, IntPtr.Zero,
-                        SMTO_FLAGS, (uint)timeoutMs, out lenResult) == IntPtr.Zero) {
-                    row.error = "TB_GETBUTTONTEXTW length query timeout for command " + commandId;
-                    result.error = row.error;
-                    break;
-                }
-                int textLength = (int)(long)lenResult;
-                if (textLength < 0) {
-                    row.error = "TB_GETBUTTONTEXTW length error " + textLength + " for command " + commandId;
-                    result.error = row.error;
-                    break;
-                }
-                if (textLength == 0) {
-                    continue;
-                }
-                if (textLength > TextCapacityChars) {
-                    row.truncated = true;
-                    row.error = "button text " + textLength + " chars exceeds capacity " + TextCapacityChars + " for command " + commandId;
-                    result.error = row.error;
-                    break;
-                }
-                if (!Zero(proc, textMem, (TextCapacityChars + 1) * 2)) {
-                    row.error = "WriteProcessMemory text buffer failed";
-                    result.error = row.error;
-                    break;
-                }
-                IntPtr textResult;
-                if (SendMessageTimeout(toolbar, TB_GETBUTTONTEXTW, (IntPtr)commandId, textMem,
-                        SMTO_FLAGS, (uint)timeoutMs, out textResult) == IntPtr.Zero) {
-                    row.error = "TB_GETBUTTONTEXTW read timeout for command " + commandId;
-                    result.error = row.error;
-                    break;
-                }
-                int copied = (int)(long)textResult;
-                if (copied < 0 || copied > TextCapacityChars) {
-                    row.error = "TB_GETBUTTONTEXTW copied " + copied + " chars for command " + commandId;
-                    result.error = row.error;
-                    break;
-                }
-                if (copied > textLength) {
-                    row.error = "text grew after length query: queried " + textLength + " but copied " + copied + " for command " + commandId;
-                    result.error = row.error;
-                    break;
-                }
-                int charsToRead = Math.Min(copied, TextCapacityChars);
-                byte[] textBytes = new byte[(charsToRead + 1) * 2];
-                UIntPtr readText;
-                if (!ReadProcessMemory(proc, textMem, textBytes, (UIntPtr)textBytes.Length, out readText)) {
-                    row.error = "ReadProcessMemory button text failed for command " + commandId;
-                    result.error = row.error;
-                    break;
-                }
-                int byteLength = 0;
-                while (byteLength + 1 < textBytes.Length && (textBytes[byteLength] != 0 || textBytes[byteLength + 1] != 0)) {
-                    byteLength += 2;
-                }
-                row.text = Encoding.Unicode.GetString(textBytes, 0, byteLength);
-            }
-            result.buttons = new TrayButtonRow[writtenRows];
-            Array.Copy(rows, result.buttons, writtenRows);
-            if (result.error == null && writtenRows != count) {
-                result.error = "button records " + writtenRows + " != TB_BUTTONCOUNT " + count;
-            }
-            result.ok = result.error == null;
-            return result;
-        } finally {
-            VirtualFreeEx(proc, buttonMem, UIntPtr.Zero, MEM_RELEASE);
-            VirtualFreeEx(proc, textMem, UIntPtr.Zero, MEM_RELEASE);
-            CloseHandle(proc);
-        }
-    }
-}
-'@
-    }
+    #      TB_GETBUTTON / 只读文本指针解析）走完全部阶段；
+    #   3. 受控工具栏的按钮没有可读的 iString 文本指针（comctl32 普通窗口
+    #      不回吐指针，字符串池不生效）→ 文本不可观察 → 整个区域 fail closed、
+    #      计数为 null（失败路径真实生效，绝不把半可观察结果当成通过）。
     # WinForms 只用于产生一个真实父窗口（建立消息队列/GUI 线程状态）。
     $refs = @()
     try {
@@ -686,14 +437,12 @@ public static class TsTrayWindowHost {
         exit 1
     }
     try {
-        $count = [TsTray]::SendMessage($tb, [TsTray]::TB_BUTTONCOUNT_SELF, [IntPtr]::Zero, [IntPtr]::Zero)
         $read = [TsTray]::ReadButtons($tb, $TimeoutMs)
         # ReadButtons 是返回类的公共 API；这里只断言失败路径的确定性。
         $rowError = if (@($read.buttons).Count -gt 0) { $read.buttons[0].error } else { $null }
         [pscustomobject]@{
             mode = 'self-test-window'
             declared_count = $read.declared_count
-            real_button_count = [int]$count
             read_ok = $read.ok
             read_error = $read.error
             row_error = $rowError
@@ -744,8 +493,8 @@ if ($SelfTestReal) {
             continue
         }
         foreach ($b in @($read.buttons)) {
-            # ReadButtons 内部已强制：copied<=textLength（text-grew 检查）、
-            # copied<=TextCapacityChars、超长在测长阶段拒绝。这里复核输出侧。
+            # 只读解析上界由 ReadTextPointer 的本地缓冲（MaxTextBytes）强制；
+            # 这里复核输出侧。
             if ($null -ne $b.text -and $b.text.Length -gt $maxLen) { $maxLen = $b.text.Length }
         }
         $protocolRows += [pscustomobject]@{
@@ -768,6 +517,89 @@ if ($SelfTestReal) {
         within_capacity = ($maxLen -le 2048)
         areas = $protocolRows
     } | ConvertTo-Json -Depth 6 -Compress
+    exit 0
+}
+
+if ($SelfTestControlledText) {
+    # AC10 受控文本验证：变长与超长，覆盖 ReadTextPointer 只读解析协议。
+    # 载体是本进程托管的 UTF-16 缓冲（与 shell 任务栏 toolbar 的 iString 指针
+    # 指向的形态相同：NUL 结尾 UTF-16）。受控 comctl32 窗口无法回读按钮文本
+    # （指针被清零、字符串池不生效、TB_COMMANDTOINDEX 崩溃——实测），因此
+    # "受控"落在文本内存与解析器上，而非受控 toolbar 窗口；两者共用同一
+    # ReadTextPointer 实现。绝无跨进程写入。
+    if (-not ('TsTrayControlledText' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class TsTrayControlledText {
+    public static IntPtr Alloc(string text) { return Marshal.StringToHGlobalUni(text); }
+    public static void Free(IntPtr p) { Marshal.FreeHGlobal(p); }
+    public static void Overwrite(IntPtr p, string text) { Marshal.Copy(text.ToCharArray(), 0, p, text.Length); }
+    // 模拟"文本在读取间隙变长"：先放短文本，读取期间换成长文本，
+    // 再读一次——断言两次读到的内容如实反映当次内存（不靠长度比较协议）。
+    public static IntPtr AllocLong(int chars) {
+        var buf = new char[chars + 1];
+        for (int i = 0; i < chars; i++) buf[i] = (char)(0x4e00 + (i % 2000));
+        return Marshal.StringToHGlobalUni(new string(buf));
+    }
+    public static IntPtr AllocInvalid() { return (IntPtr)12345; }
+}
+'@
+    }
+    $rows = @()
+    # 本进程句柄（与 ReadButtons 对 explorer 的 OpenProcess 同一路径）
+    $selfProc = [TsTray]::OpenProcess([TsTray]::PROCESS_ACCESS, $false, $PID)
+    if ($selfProc -eq [IntPtr]::Zero) {
+        Write-Output (@{ mode = 'self-test-controlled-text'; ok = $false; error = "OpenProcess(self) failed" } | ConvertTo-Json -Compress)
+        exit 1
+    }
+    try {
+    # 1) 变长：短文本读出 → 原地改写为更长的文本（预分配 64 字符缓冲，同
+    #    指针，改写不越界）→ 再读 → 内容变化。模拟"同一按钮的文本在两次
+    #    观察之间变长"，读取如实反映当次内存，不依赖任何长度比较协议。
+    #    缓冲用 NUL 填充：ReadTextPointer 读到第一个 NUL 截断，因此两次读取
+    #    的内容就是当次真实文本（21 字符 → 47 字符）。
+    $p = [TsTrayControlledText]::Alloc('TokenScope-AC10-short'.PadRight(64, [char]0))
+    try {
+        $t1 = [TsTray]::ReadTextPointer($selfProc, $p, [TsTray]::MaxTextBytes, [ref]$null)
+        [TsTrayControlledText]::Overwrite($p, 'TokenScope-AC10-short-now-much-longer-than-before')
+        $trunc2 = $false
+        $t2 = [TsTray]::ReadTextPointer($selfProc, $p, [TsTray]::MaxTextBytes, [ref]$trunc2)
+        $rows += [pscustomobject]@{
+            case = 'variant-length'
+            first = $t1
+            second = $t2
+            changed = ($t1 -ne $t2 -and $t1 -eq 'TokenScope-AC10-short' -and $t2 -like 'TokenScope-AC10-short-now-much-longer*')
+            truncated = $trunc2
+        }
+    } finally { [TsTrayControlledText]::Free($p) }
+    # 2) 超长：4000 字符（8000 字节）> 本地缓冲 4100 字节 → 读到上界
+    #    2050 字符截断，truncated=true，不崩溃、不越界。
+    $long = [TsTrayControlledText]::AllocLong(4000)
+    try {
+        $trunc = $false
+        $t = [TsTray]::ReadTextPointer($selfProc, $long, [TsTray]::MaxTextBytes, [ref]$trunc)
+        $rows += [pscustomobject]@{
+            case = 'over-long'
+            length = if ($null -ne $t) { $t.Length } else { 0 }
+            truncated = $trunc
+            bounded = ($null -ne $t -and $t.Length -le ([TsTray]::MaxTextBytes / 2) -and $trunc)
+        }
+    } finally { [TsTrayControlledText]::Free($long) }
+    # 3) 无效指针（pool-index 形态小整数 / 0 / 空指针）→ null（不可观察）
+    $invalid = [TsTray]::ReadTextPointer($selfProc, [TsTrayControlledText]::AllocInvalid(), [TsTray]::MaxTextBytes, [ref]$null)
+    $rows += [pscustomobject]@{ case = 'invalid-pointer'; returned_null = ($null -eq $invalid) }
+    } finally {
+        [void][TsTray]::CloseHandle($selfProc)
+    }
+    [pscustomobject]@{
+        mode = 'self-test-controlled-text'
+        max_bytes = [TsTray]::MaxTextBytes
+        rows = $rows
+        ok = (($rows | Where-Object { $_.case -eq 'variant-length' }).changed -eq $true -and
+              ($rows | Where-Object { $_.case -eq 'over-long' }).bounded -eq $true -and
+              ($rows | Where-Object { $_.case -eq 'invalid-pointer' }).returned_null -eq $true)
+    } | ConvertTo-Json -Depth 5 -Compress
     exit 0
 }
 

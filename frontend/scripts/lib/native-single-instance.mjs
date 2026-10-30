@@ -715,6 +715,16 @@ export function verifyAcceptanceBuildIdentity({
       )}…），拒绝启动`,
     };
   }
+  // 来源证明完整性：记录本身（JSON/命令/哈希/提交）都可由任何人在本地伪造，
+  // 唯一能独立佐证"该产物字节可从源提交复现"的是干净源树——脏树上的构建
+  // 混入了未提交内容，无法复现，来源无法独立证明 → unverified，拒绝启动。
+  // （CI Runner checkout 的树是干净的，其记录满足本条件；本地脏树构建一律
+  // 不授予启动许可，如实保留 unverified 而非冒充已验证。）
+  if (trusted.tree_clean === false) {
+    return unverified(
+      `构建记录为脏树产物（${trusted.tree_dirty_count ?? "?"} 个未提交变更），无法从源提交独立证明来源，拒绝启动`,
+    );
+  }
   return {
     ok: true,
     launch_allowed: true,

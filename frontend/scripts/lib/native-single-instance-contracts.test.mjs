@@ -142,23 +142,25 @@ describe("外部观察脚本与场景接线", () => {
     expect(test).toContain("overflow-unobservable");
   });
 
-  it("托盘读取是先测长后有界写入的两阶段协议，且有自有受控窗口自测", () => {
+  it("托盘读取是只读指针解析协议，且有受控文本/真实区域/受控窗口自测", () => {
     const source = read("scripts/read-tray-notification-area.ps1");
-    // 阶段 1：NULL 缓冲区查询文本长度；阶段 2：超长拒绝 + 按 (len+1)*2 有界写入
-    expect(source).toContain("TB_GETBUTTONTEXTW length query timeout");
-    expect(source).toContain("exceeds capacity");
-    expect(source).toContain("TextCapacityChars");
-    expect(source).toContain("text grew after length query");
-    // 自有受控窗口：真实 ToolbarWindow32 + 真实 ReadButtons（不注入替身）
+    // 旧的无界风险协议必须消失：不再向目标进程发送 TB_GETBUTTONTEXTW
+    expect(source).not.toContain("TB_GETBUTTONTEXTW length query timeout");
+    expect(source).not.toContain("text grew after length query");
+    expect(source).not.toContain("WriteProcessMemory text buffer failed");
+    // 只读协议：iString 指针 + 本地缓冲上界 + NUL 截断
+    expect(source).toContain("ReadTextPointer");
+    expect(source).toContain("MaxTextBytes");
+    expect(source).toContain("iStringPtr");
+    // TB_GETBUTTON 仍用固定 64 字节远程缓冲（写入与文本长度无关）
+    expect(source).toContain("TB_GETBUTTON");
+    // 受控文本（变长/超长/无效指针）+ 真实区域 + 受控窗口三个自测都在
+    expect(source).toContain("SelfTestControlledText");
+    expect(source).toContain("SelfTestReal");
     expect(source).toContain("SelfTestWindow");
     expect(source).toContain("CreateControlledToolbar");
-    expect(source).toContain("TB_BUTTONSTRUCTSIZE");
-    // 真实区域协议验证：成功路径上界复核 + 不可读环境输出 pending 形态
-    expect(source).toContain("SelfTestReal");
-    expect(source).toContain("within_capacity");
     const test = read("scripts/test_read_tray_notification_area.ps1");
-    expect(test).toContain("-SelfTestWindow");
-    expect(test).toContain("command_id -ne 5001");
+    expect(test).toContain("-SelfTestControlledText");
     expect(test).toContain("-SelfTestReal");
     expect(test).toContain("PENDING real notification area unobservable");
   });

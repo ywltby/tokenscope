@@ -635,6 +635,150 @@ fn acceptance_isolated_codex_legacy_branch_ignores_codex_home() {
     );
 }
 
+/// RC10/AC10：验收隔离上下文里，旧格式显式目录与手动追加目录只允许落在
+/// 验收根内的真实路径——指向隔离根之外的目录（真实用户数据、任意磁盘路径）
+/// 一律不进入候选集并留诊断；普通产品模式同形态配置的来源语义原样保留。
+/// 注入探测器与假路径验证，不读真实磁盘。
+#[test]
+fn acceptance_isolated_rejects_outside_legacy_and_manual_roots() {
+    let home = temp_dir("acceptance-paths");
+    let outside_dir = "C:/real-user-data/.claude/projects";
+    let outside_manual = "C:/real-user-data/.codex/sessions";
+    let probe = filesystem_probe();
+    // 验收上下文：显式 dir（旧格式）与手动追加都指向隔离根之外
+    let legacy_claude = SourceConfig {
+        dir: Some(outside_dir.to_string()),
+        legacy_format: true,
+        ..Default::default()
+    };
+    let legacy_codex = SourceConfig {
+        dir: Some(outside_manual.to_string()),
+        legacy_format: true,
+        ..Default::default()
+    };
+    let mut manual_claude = default_claude();
+    manual_claude.additional_paths = vec![tokenscope::settings::AdditionalSourcePath {
+        path: outside_manual.to_string(),
+        enabled: true,
+    }];
+    let ctx = DiscoveryContext {
+        env: StartupEnv {
+            codex_home: None,
+            claude_config_dir: None,
+            acceptance_isolated: true,
+        },
+        acceptance_root: Some(PathBuf::from("C:/acceptance-root")),
+        ..ctx_for(&home, StartupEnv::default(), probe.clone())
+    };
+    let out = resolve_sources(
+        &ctx,
+        &legacy_claude,
+        &legacy_codex,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    for agent_label in ["outside legacy dir", "outside manual path"] {
+        let needle = if agent_label.contains("legacy") {
+            outside_dir
+        } else {
+            outside_manual
+        };
+        assert!(
+            !out.roots.iter().any(|r| r.display_path.contains(needle)),
+            "验收隔离上下文不得出现隔离根之外的 {agent_label}：{:?}",
+            out.roots
+        );
+    }
+    let claude_rows: Vec<_> = out
+        .roots
+        .iter()
+        .filter(|r| r.agent == AgentKind::ClaudeCode)
+        .collect();
+    assert!(
+        claude_rows.iter().any(|r| r
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("验收隔离") && d.contains("来源"))),
+        "旧格式显式目录被丢弃时必须留验收隔离诊断：{:?}",
+        claude_rows
+    );
+
+    // 手动追加（新格式 claude/codex/workbuddy 同样约束）：隔离根外 → 丢弃
+    let mut manual_codex = default_codex();
+    manual_codex.additional_paths = vec![tokenscope::settings::AdditionalSourcePath {
+        path: outside_dir.to_string(),
+        enabled: true,
+    }];
+    let out_manual = resolve_sources(
+        &ctx,
+        &manual_claude,
+        &manual_codex,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    assert!(
+        !out_manual
+            .roots
+            .iter()
+            .any(|r| r.display_path.contains("real-user-data")),
+        "隔离根之外的手动追加目录不得进入候选集：{:?}",
+        out_manual.roots
+    );
+
+    // 隔离根内的路径：允许（真实路径落在验收根内）
+    let inside_claude = SourceConfig {
+        dir: Some("C:/acceptance-root/sources/claude".to_string()),
+        legacy_format: true,
+        ..Default::default()
+    };
+    let inside_out = resolve_sources(
+        &ctx,
+        &inside_claude,
+        &legacy_codex,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    assert!(
+        inside_out
+            .roots
+            .iter()
+            .any(|r| r.display_path == "C:/acceptance-root/sources/claude"),
+        "验收根内的显式目录允许：{:?}",
+        inside_out.roots
+    );
+
+    // 普通产品模式对照：同形态配置、无隔离标志 → 旧格式显式目录与手动追加
+    // 的来源语义原样保留（dir 取代默认根、手动追加在场）。
+    let plain_ctx = ctx_for(&home, StartupEnv::default(), probe);
+    let plain = resolve_sources(
+        &plain_ctx,
+        &legacy_claude,
+        &legacy_codex,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    assert!(
+        plain.roots.iter().any(|r| r.display_path == outside_dir),
+        "普通模式旧格式显式目录语义不变：{:?}",
+        plain.roots
+    );
+    let plain_manual = resolve_sources(
+        &plain_ctx,
+        &manual_claude,
+        &manual_codex,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    assert!(
+        plain_manual
+            .roots
+            .iter()
+            .any(|r| r.display_path.contains("real-user-data")),
+        "普通模式手动追加目录语义不变：{:?}",
+        plain_manual.roots
+    );
+}
+
 /// 映射绑定：默认根=默认绑定；环境根=未核实禁用；手动根=禁用；
 /// 默认+手动同根合并时保留默认绑定并诊断（不混用）。
 #[test]

@@ -81,20 +81,20 @@ function createRunSandbox(label) {
       return resolved === root || resolved.startsWith(root + path.sep);
     },
     /**
-     * 目标（含其全部祖先）在真实文件系统里仍解析回沙箱内才算自有。
-     * `target` 之下的某段若是 junction，realpathSync 会沿链接解析到链接另一
-     * 侧——解析结果落在沙箱外即拒绝删除（junction 越出）。
+     * 目标（含其全部祖先与**整棵子树**）在真实文件系统里仍解析回沙箱内才算
+     * 自有。子树里的 junction 会把 rmSync 的递归删除引到链接另一侧——逐条目
+     * lstat，链接/硬链接解析出界即拒绝。遍历只发生在沙箱内部路径上。
      */
     ownedReal: (target) => {
       const resolved = path.resolve(target);
       if (!sandbox.owned(resolved)) return false;
+      // 自身与全部祖先：realpath 逐级上溯（防父级被换成 junction）
       let current = resolved;
       while (true) {
         let real;
         try {
           real = fs.realpathSync(current);
         } catch {
-          // 路径段不存在：无法证明它在沙箱内，保守拒绝
           return false;
         }
         if (!sandbox.owned(real)) return false;
@@ -103,10 +103,49 @@ function createRunSandbox(label) {
         if (parent === current) return false;
         current = parent;
       }
+      // 子树走查：每个条目若是链接，解析目标必须仍在沙箱内
+      const stack = [resolved];
+      while (stack.length) {
+        const node = stack.pop();
+        let stat;
+        try {
+          stat = fs.lstatSync(node);
+        } catch {
+          return false;
+        }
+        if (stat.isSymbolicLink() || Number(stat.nlink) > 1) {
+          let linkTarget;
+          try {
+            linkTarget = fs.realpathSync(node);
+          } catch {
+            return false;
+          }
+          if (!sandbox.owned(linkTarget)) return false;
+          continue;
+        }
+        if (stat.isDirectory()) {
+          let names;
+          try {
+            names = fs.readdirSync(node);
+          } catch {
+            return false;
+          }
+          for (const name of names) {
+            const child = path.join(node, name);
+            if (!sandbox.owned(child)) return false;
+            stack.push(child);
+          }
+        }
+      }
       return true;
     },
     remove: (target) => {
       if (!sandbox.owned(target)) throw new Error(`拒绝删除非本次运行创建的路径：${target}`);
+      // 递归删除前校验目标及全部祖先的真实归属：目标之下若混入指向沙箱外
+      // 的 junction，字符串前缀检查发现不了，rmSync 会跟随进外部目录。
+      if (!sandbox.ownedReal(target)) {
+        throw new Error(`目标或其链接祖先越出沙箱，拒绝递归删除：${target}`);
+      }
       fs.rmSync(target, { recursive: true, force: true });
     },
     cleanup: () => {
@@ -233,6 +272,38 @@ describe("沙箱清理只触碰本次创建的路径", () => {
     expect(fs.existsSync(b.root)).toBe(false);
   });
 
+  it("remove 遇到沙箱内 junction 指向沙箱外时拒绝递归删除，外部目录不受影响", () => {
+    // 独占外部目录：本测试创建并自己清理（证明沙箱 remove 不会动它）。
+    const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ac10-remove-out-"));
+    const outsideFile = path.join(outside, "precious.txt");
+    fs.writeFileSync(outsideFile, "must survive", "utf8");
+    const sandbox = createRunSandbox("remove-junction");
+    // 目标目录本身在沙箱内，但里面藏了一个指向外部的 junction
+    const target = sandbox.dir("victim");
+    sandbox.link(path.join(target, "escape"), outside);
+    try {
+      expect(sandbox.owned(target)).toBe(true); // 字符串前缀检查放行
+      expect(() => sandbox.remove(target)).toThrow(/越出沙箱|拒绝递归删除/);
+      // 外部文件原样保留，junction 与目标目录也不被删除（留下现场）
+      expect(fs.readFileSync(outsideFile, "utf8")).toBe("must survive");
+      expect(fs.existsSync(path.join(target, "escape"))).toBe(true);
+    } finally {
+      fs.rmSync(path.join(target, "escape"), { force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+      fs.rmSync(sandbox.root, { recursive: true, force: true });
+    }
+  });
+
+  it("remove 对无链接的沙箱内目标正常删除（正例对照）", () => {
+    const sandbox = createRunSandbox("remove-ok");
+    const target = sandbox.dir("plain", "nested");
+    sandbox.file("plain", "nested", "data.txt", "x");
+    sandbox.remove(target);
+    expect(fs.existsSync(target)).toBe(false);
+    sandbox.cleanup();
+    expect(fs.existsSync(sandbox.root)).toBe(false);
+  });
+
   it("登记的链接指向沙箱外时清理拒绝，外部目录与链接都不被删除", () => {
     // 独占外部目录：由本测试创建并自己清理（证明沙箱清理不会动它）。
     const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ac10-outside-"));
@@ -242,7 +313,7 @@ describe("沙箱清理只触碰本次创建的路径", () => {
     // 沙箱内登记一个 junction 指向外部目录（模拟注入/测试装配错误）
     sandbox.link(path.join(sandbox.root, "escape"), outside);
     try {
-      expect(() => sandbox.cleanup()).toThrow(/越出沙箱/);
+      expect(() => sandbox.cleanup()).toThrow(/越出/);
       // 外部目录原样保留
       expect(fs.readFileSync(outsideFile, "utf8")).toBe("must survive");
       // 拒绝清理时链接本身也不删（宁可留下现场）
@@ -269,7 +340,8 @@ describe("沙箱清理只触碰本次创建的路径", () => {
     broken.link(path.join(broken.root, "broken-link"), gone);
     fs.rmSync(gone, { recursive: true, force: true });
     try {
-      expect(() => broken.cleanup()).toThrow(/无法解析真实路径|断链/);
+      // ownedReal 子树走查在根检查即拦截（断链无法证明解析在沙箱内）
+      expect(() => broken.cleanup()).toThrow(/越出|无法解析真实路径|断链/);
       expect(fs.existsSync(broken.root)).toBe(true);
     } finally {
       fs.rmSync(broken.root, { recursive: true, force: true });
@@ -898,7 +970,7 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
     expect(result.build_identity).toBe("unverified");
   });
 
-  it("脏树记录如实保留状态，可信度判断交给使用方而非静默放行", () => {
+  it("脏树记录不足以证明来源：unverified 并拒绝启动（无法从提交复现产物）", () => {
     const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
     const exePath = path.resolve("C:/build/target/release/tokenscope.exe");
     const dirty = {
@@ -918,8 +990,11 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
       buildRecord: parsed,
       sourceCommit: dirty.source_commit,
     });
-    // 身份核对通过（哈希/命令/提交一致）；dirty 状态在记录里，不伪造干净。
-    expect(result).toMatchObject({ ok: true, launch_allowed: true, build_identity: "verified" });
+    // 脏树上的产物无法仅凭提交哈希复现——来源无法独立证明 → unverified。
+    expect(result.ok).toBe(false);
+    expect(result.launch_allowed).toBe(false);
+    expect(result.build_identity).toBe("unverified");
+    expect(result.reason).toMatch(/脏树|来源/);
   });
 
   it("登记产物不是本次 EXE、构建命令不合法、源提交不一致都拒绝", () => {
