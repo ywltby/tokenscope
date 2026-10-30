@@ -48,12 +48,13 @@
 - 报告：文本汇总打到 stdout；HTML / lcov.info / json-summary 落
   `qa-artifacts/coverage/frontend-vitest/`（目录由 `vitest.config.ts` 的
   `coverage.reportsDirectory` 指定）。
-- **首份基线（2026-10-30，修复后）**：50 个文件、912 用例全部通过；
-  行 **2,697 / 2,498 / 92.62%**，语句 **3,122 / 2,785 / 89.20%**，函数
-  **761 / 691 / 90.80%**，分支 **2,463 / 2,049 / 83.19%**。未被测试执行
-  的 `main.ts`（0/1 行）与 `src/dev/tooltipSecurityPage.ts`（0/40 行）均已
-  以 0% 计入分母。这是**声明范围内（frontend/src 产品源码）的全源码
-  覆盖率**，不是整个仓库的覆盖率。
+- **首份基线（2026-10-30，修复后；数字均为总数 / 已覆盖 / 百分比）**：
+  50 个文件、912 用例全部通过；行 **2,697 / 2,498 / 92.62%**，语句
+  **3,122 / 2,785 / 89.20%**，函数 **761 / 691 / 90.80%**，分支
+  **2,463 / 2,049 / 83.19%**。未被测试执行的 `main.ts`（0/1 行）与
+  `src/dev/tooltipSecurityPage.ts`（0/40 行）均已以 0% 计入分母。这是
+  **声明范围内（frontend/src 产品源码）的全源码覆盖率**，不是整个仓库的
+  覆盖率。
 
 ## Rust（cargo-llvm-cov，本地运行；不进 CI）
 
@@ -87,7 +88,7 @@ cargo llvm-cov report --lcov --output-path qa-artifacts/coverage/rust-llvm-cov/l
   worktree 分离，不影响其他会话构建产物）；`CARGO_BUILD_JOBS=2` 规避本机
   链接器 OOM（环境变量，不属包装器）；被 `#[ignore]` 的真实数据性能测试
   （`perf_real_data`、`perf_history_real`）不会被普通 `cargo test` 执行。
-- 口径：0.9.1 输出**行（Lines）/ 区（Regions）/ 函数（Functions）**三项；
+- 口径：0.9.1 输出**区（Regions）/ 函数（Functions）/ 行（Lines）**三项；
   **Branch 指标在该工具链输出为 `-`（不提供）**，如实记录、不虚报。原始
   表头顺序是 **Regions → Functions → Lines**（Functions 组的百分比列名为
   `Executed`），读表时按列名对齐，不能把区域总数当行数。
