@@ -824,6 +824,22 @@ export function verifyAcceptanceBuildIdentity({
  * 合成 zip。安全：拒绝路径分隔符异常（`..` 段、绝对盘符）与同名重复条目
  * ——重复名无法确定哪个是登记产物，直接失败而非猜测。
  */
+// CRC-32（IEEE 802.3，ZIP 登记值）：查表实现，用于条目内容完整性校验。
+const CRC32_TABLE = (() => {
+  const table = new Int32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c;
+  }
+  return table;
+})();
+function crc32Of(buf) {
+  let crc = -1;
+  for (let i = 0; i < buf.length; i++) crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ buf[i]) & 0xff];
+  return (crc ^ -1) >>> 0;
+}
+
 export function readZipEntryBytes(archiveBytes, entryName) {
   const bytes = archiveBytes;
   const fail = (reason) => ({ ok: false, reason });
@@ -872,13 +888,14 @@ export function readZipEntryBytes(archiveBytes, entryName) {
       return fail("ZIP Central Directory 损坏（条目越界或签名不符）");
     }
     const method = safeU16(cursor + 10);
+    const crcRegistered = safeU32(cursor + 16);
     const compressedSize = safeU32(cursor + 20);
     const uncompressedSize = safeU32(cursor + 24);
     const nameLen = safeU16(cursor + 28);
     const extraLen = safeU16(cursor + 30);
     const commentLen = safeU16(cursor + 32);
     const localOffset = safeU32(cursor + 42);
-    if ([method, compressedSize, uncompressedSize, nameLen, extraLen, commentLen, localOffset].some((v) => v === null)) {
+    if ([method, crcRegistered, compressedSize, uncompressedSize, nameLen, extraLen, commentLen, localOffset].some((v) => v === null)) {
       return fail("ZIP Central Directory 字段越界，归档损坏");
     }
     if (cursor + 46 + nameLen + extraLen + commentLen > bytes.length) {
@@ -904,6 +921,18 @@ export function readZipEntryBytes(archiveBytes, entryName) {
       if (localName !== name) {
         return fail(`ZIP 中央目录名（"${name}"）与本地头名（"${localName}"）不一致，归档被拼接或损坏`);
       }
+      // 本地头登记的压缩/未压缩大小必须与中央目录一致——不一致说明目录
+      // 与数据错位或被拼接，按哪一份读都可能截断或越界。
+      const localCompressedSize = safeU32(localOffset + 18);
+      const localUncompressedSize = safeU32(localOffset + 22);
+      if (localCompressedSize === null || localUncompressedSize === null) {
+        return fail("ZIP local header 字段越界，归档损坏");
+      }
+      if (localCompressedSize !== compressedSize || localUncompressedSize !== uncompressedSize) {
+        return fail(
+          `ZIP 条目 "${entryName}" 本地头大小（压缩 ${localCompressedSize}，未压缩 ${localUncompressedSize}）与中央目录（压缩 ${compressedSize}，未压缩 ${uncompressedSize}）不一致，归档被拼接或损坏`,
+        );
+      }
       const dataStart = localOffset + 30 + localNameLen + localExtraLen;
       // 数据区间必须完整落在归档内
       if (dataStart < 0 || compressedSize < 0 || dataStart + compressedSize > bytes.length) {
@@ -922,10 +951,19 @@ export function readZipEntryBytes(archiveBytes, entryName) {
       } else {
         return fail(`ZIP 条目 "${entryName}" 使用不支持的压缩方式 ${method}，拒绝启动`);
       }
-      // 解压后长度与 Central Directory 登记的未压缩大小一致（内容完整性）
-      if (uncompressedSize > 0 && content.length !== uncompressedSize) {
+      // 内容完整性三重校验（十四轮复核）：
+      //   - 解压后长度必须等于登记的未压缩大小（登记 0 就必须为空——
+      //     "登记 0 但有内容"与"登记短于实际"同样拒绝）；
+      //   - 内容 CRC-32 必须与登记值一致（截断/替换/位翻转在此暴露）。
+      if (content.length !== uncompressedSize) {
         return fail(
           `ZIP 条目 "${entryName}" 解压后长度 ${content.length} 与登记 ${uncompressedSize} 不一致，内容损坏`,
+        );
+      }
+      const crcActual = crc32Of(content);
+      if (crcActual !== crcRegistered) {
+        return fail(
+          `ZIP 条目 "${entryName}" 内容 CRC（${crcActual.toString(16)}）与登记（${crcRegistered.toString(16)}）不一致，内容被篡改或损坏`,
         );
       }
       found = content;

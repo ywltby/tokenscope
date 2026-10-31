@@ -902,20 +902,22 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
       for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c; }
       return (b) => { let c = -1; for (const x of b) c = (c >>> 8) ^ t[(c ^ x) & 0xff]; return (c ^ -1) >>> 0; };
     })();
+    const crc32Of = crc32;
     const mkEntry = (name, content, opts = {}) => {
       const nb = Buffer.from(name);
       const nb2 = Buffer.from(opts.localName ?? name);
-      const crc = crc32(content);
+      const crc = opts.crc ?? crc32(content);
       const l = Buffer.alloc(30);
       l.writeUInt32LE(0x04034b50, 0);
       l.writeUInt16LE(20, 4);
       l.writeUInt16LE(opts.method ?? 0, 8);
-      l.writeUInt32LE(opts.compressedSize ?? content.length, 18);
-      l.writeUInt32LE(content.length, 22);
+      l.writeUInt32LE(opts.localCompressedSize ?? opts.compressedSize ?? content.length, 18);
+      l.writeUInt32LE(opts.localUncompressedSize ?? content.length, 22);
       l.writeUInt16LE(nb2.length, 26);
       const c = Buffer.alloc(46);
       c.writeUInt32LE(0x02014b50, 0);
       c.writeUInt16LE(opts.method ?? 0, 10);
+      c.writeUInt32LE(opts.crc ?? crc32(content), 16);
       c.writeUInt32LE(opts.compressedSize ?? content.length, 20);
       c.writeUInt32LE(opts.uncompressedSize ?? content.length, 24);
       c.writeUInt16LE(nb.length, 28);
@@ -966,7 +968,8 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     zipCompressed.writeUInt32LE(0xffff0000, cdOff + 20);
     const rCompressed = readZipEntryBytes(zipCompressed, "tokenscope.exe");
     expect(rCompressed.ok).toBe(false);
-    expect(rCompressed.reason).toMatch(/数据区间越界/);
+    // 十四轮复核后本地头/中央目录大小一致性检查先于数据区间越界触发（两条防线都拒绝）
+    expect(rCompressed.reason).toMatch(/数据区间越界|与中央目录.*不一致/);
     // 反例 5：条目 localOffset 越界
     const zipLocalOff = Buffer.from(zipOK);
     zipLocalOff.writeUInt32LE(0xffff0000, cdOff + 42);
@@ -976,7 +979,8 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     const zipLenMismatch = buildZip([mkEntry("a.exe", orig, { method: 8, compressedSize: deflated.length, uncompressedSize: orig.length + 7, localData: deflated })]);
     const rLenMismatch = readZipEntryBytes(zipLenMismatch, "a.exe");
     expect(rLenMismatch.ok).toBe(false);
-    expect(rLenMismatch.reason).toMatch(/解压后长度.*不一致|内容损坏/);
+    // 十四轮复核后本地头一致性检查可能先触发（两条防线都拒绝）
+    expect(rLenMismatch.reason).toMatch(/解压后长度.*不一致|内容损坏|与中央目录.*不一致/);
     // 反例 7：重复条目名
     const zipDup = makeStoredZip([["tokenscope.exe", Buffer.from("A")], ["tokenscope.exe", Buffer.from("B")]]);
     const rDup = readZipEntryBytes(zipDup, "tokenscope.exe");
@@ -985,6 +989,41 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     // 反例 8：归档内没有登记条目名
     const zipOther = makeStoredZip([["other.txt", Buffer.from("x")]]);
     expect(readZipEntryBytes(zipOther, "tokenscope.exe").ok).toBe(false);
+    // 反例 9（十四轮复核）：登记未压缩大小为 0，条目实际有非空内容
+    const zipZeroUncompressed = buildZip([
+      mkEntry("tokenscope.exe", Buffer.from("EXE-B"), {
+        uncompressedSize: 0,
+        compressedSize: 5,
+        localUncompressedSize: 0,
+      }),
+    ]);
+    const rZero = readZipEntryBytes(zipZeroUncompressed, "tokenscope.exe");
+    expect(rZero.ok).toBe(false);
+    expect(rZero.reason).toMatch(/解压后长度 5 与登记 0 不一致/);
+    // 反例 10（十四轮复核）：条目内容与登记 CRC 不一致
+    const zipCrcMismatch = buildZip([
+      mkEntry("tokenscope.exe", Buffer.from("EXE-B"), { crc: crc32Of(Buffer.from("OTHER")) }),
+    ]);
+    const rCrc = readZipEntryBytes(zipCrcMismatch, "tokenscope.exe");
+    expect(rCrc.ok).toBe(false);
+    expect(rCrc.reason).toMatch(/CRC.*不一致/);
+    // 反例 11（十四轮复核）：中央目录登记压缩大小为 0（短于条目），实际包含数据
+    const zipCdZero = buildZip([
+      mkEntry("tokenscope.exe", Buffer.from("EXE-B"), { compressedSize: 0 }),
+    ]);
+    const rCdZero = readZipEntryBytes(zipCdZero, "tokenscope.exe");
+    expect(rCdZero.ok).toBe(false);
+    expect(rCdZero.reason).toMatch(/解压后长度 0 与登记 5 不一致/);
+    // 反例 12（十四轮复核）：本地头与中央目录大小不一致（拼接归档的另一种形态）
+    const zipLocalMismatch = buildZip([
+      mkEntry("tokenscope.exe", Buffer.from("EXE-B"), {
+        compressedSize: 5,
+        localCompressedSize: 99,
+      }),
+    ]);
+    const rLocalMismatch = readZipEntryBytes(zipLocalMismatch, "tokenscope.exe");
+    expect(rLocalMismatch.ok).toBe(false);
+    expect(rLocalMismatch.reason).toMatch(/本地头大小.*与中央目录.*不一致/);
   });
 
   it("普通目录 nlink=2 也必须继续遍历：内含外部 junction 的反例不被漏掉", () => {
