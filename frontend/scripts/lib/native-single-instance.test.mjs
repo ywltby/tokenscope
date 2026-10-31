@@ -548,7 +548,8 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
       });
       expect(gate.started).toBe(false);
       expect(gate.preflight.paths.ok).toBe(false);
-      expect(gate.preflight.paths.reason).toMatch(/受保护目录/);
+      // 新防线（链接必须落在验收根内）先于受保护目录检查触发；两条理由都成立
+      expect(gate.preflight.paths.reason).toMatch(/指向隔离根之外|受保护目录/);
       // 损害模型：准备脚本若要写的合成日志文件，真实位置就是受保护目录里的哨兵
       expect(
         canonicalizeAcceptancePath(
@@ -690,6 +691,41 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
       expect(fs.readFileSync(sentinel, "utf8")).toBe("must survive");
     } finally {
       fs.rmSync(path.join(normalDir, "escape"), { force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+      sandbox.cleanup();
+    }
+  });
+
+  it("固定布局项与树走查链接同路径时链接身份不丢失：sources/claude 指向根外被拒", () => {
+    // 七轮复核缺口 1 回归（先红）：sources/claude 同时命中固定布局条目与树
+    // 走查链接——旧去重保留首个（固定布局）条目，链接身份丢失，根内校验被
+    // 绕过；修复后链接语义优先，真实目标在根外即拒绝。含可解析 manifest。
+    const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ac10-dedup-out-"));
+    const sentinel = path.join(outside, "sessions", "s.jsonl");
+    fs.mkdirSync(path.dirname(sentinel), { recursive: true });
+    fs.writeFileSync(sentinel, "REAL\n", "utf8");
+    const sandbox = createRunSandbox("dedup-link");
+    const home = sandbox.dir("home");
+    const root = sandbox.dir("home", "workspace");
+    for (const entry of getAcceptancePathLayout(root)) {
+      if (entry.kind === "dir" && !entry.path.endsWith(root)) fs.mkdirSync(entry.path, { recursive: true });
+    }
+    // 固定布局项 sources/claude 本身是 junction → 根外哨兵目录
+    fs.rmdirSync(path.join(root, "sources", "claude"), { recursive: true, force: true });
+    sandbox.link(path.join(root, "sources", "claude"), outside);
+    // 可解析 manifest（data_dir 指向根内真实目录）
+    writeManifest(sandbox, root, acceptanceManifest(root));
+    try {
+      const result = validateAcceptancePaths({ root, homeDir: home });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/指向隔离根之外/);
+      // 走查确实把 sources/claude 识别为链接（不是固定布局漏检）
+      const tree = collectAcceptanceTreePaths(root);
+      expect(tree.links.map((link) => path.basename(link))).toContain("claude");
+      // 外部哨兵原样保留
+      expect(fs.readFileSync(sentinel, "utf8")).toBe("REAL\n");
+    } finally {
+      fs.rmSync(path.join(root, "sources", "claude"), { force: true });
       fs.rmSync(outside, { recursive: true, force: true });
       sandbox.cleanup();
     }
@@ -967,38 +1003,42 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
     expect(result.negative_markers.length).toBeGreaterThan(0);
   });
 
-  it("CI 受控构建记录（builder=ci + ci 段 + CI 执行环境）才允许 verified", () => {
+  it("伪造 CI 环境 + CI 记录 + 带标记普通 PE：不能放行（自报字段互证不构成来源证明）", () => {
+    // 七轮复核回归（先红）：GITHUB_ACTIONS、run ID、repository 与记录全部
+    // 可由本地进程填写，此前"builder=ci + CI 环境即 verified"的门被这组
+    // 自报字段骗过。verified 出口已移除——无论字段如何组合，结论只能是
+    // unverified（预检拒绝启动），PE 副本不被执行。
     const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
     const exePath = path.resolve("C:/build/target/release/tokenscope.exe");
-    const record = {
-      ok: true,
-      record: {
-        kind: ACCEPTANCE_BUILD_RECORD_KIND,
-        artifact_path: exePath,
-        artifact_sha256: sha256(bytes),
-        build_command: ACCEPTANCE_BUILD_COMMAND,
-        source_commit: "b49f535abcdef1234567890abcdef1234567890",
-        features: ["acceptance", "tauri/custom-protocol"],
-        tree_clean: true,
-        builder: "ci",
-        ci: { run_id: "12345", repository: "ywltby/tokenscope", run_attempt: "1" },
-      },
+    const forgedCi = {
+      kind: ACCEPTANCE_BUILD_RECORD_KIND,
+      artifact_path: exePath,
+      artifact_sha256: sha256(bytes),
+      build_command: ACCEPTANCE_BUILD_COMMAND,
+      source_commit: "b49f535abcdef1234567890abcdef1234567890",
+      features: ["acceptance", "tauri/custom-protocol"],
+      tree_clean: true,
+      builder: "ci",
+      ci: { run_id: "12345", repository: "ywltby/tokenscope", run_attempt: "1" },
     };
-    // CI 执行环境 + CI 记录：verified（设计正确性；CI 链路实跑未验）
-    const resultCi = verifyAcceptanceExecutable(exePath, {
-      readFile: () => bytes,
-      buildRecord: record,
-      sourceCommit: "b49f535abcdef1234567890abcdef1234567890",
-      buildEnvironment: { GITHUB_ACTIONS: "true" },
-    });
-    expect(resultCi).toMatchObject({ ok: true, launch_allowed: true, build_identity: "verified" });
+    for (const env of [{ GITHUB_ACTIONS: "true" }, {}, undefined]) {
+      const result = verifyAcceptanceExecutable(exePath, {
+        readFile: () => bytes,
+        buildRecord: forgedCi,
+        sourceCommit: forgedCi.source_commit,
+        ...(env === undefined ? {} : { buildEnvironment: env }),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.launch_allowed).toBe(false);
+      expect(result.build_identity).toBe("unverified");
+      expect(result.reason).toMatch(/无法独立证明产物来源/);
+    }
   });
 
   it("本地记录（builder=local）即使字段全真也无法独立证明来源：unverified 拒绝", () => {
     const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
     const exePath = path.resolve("C:/build/target/release/tokenscope.exe");
-    // 伪造干净记录：tree_clean=true、哈希/命令/提交一致——本地无法辨伪，
-    // 因此 builder=local 一律 unverified（不虚标 verified）。
+    // 伪造干净记录：tree_clean=true、哈希/命令/提交一致——本地无法辨伪。
     const localRecord = {
       kind: ACCEPTANCE_BUILD_RECORD_KIND,
       artifact_path: exePath,
@@ -1013,40 +1053,14 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
       readFile: () => bytes,
       buildRecord: localRecord,
       sourceCommit: localRecord.source_commit,
-      buildEnvironment: {},
     });
     expect(r1.ok).toBe(false);
     expect(r1.launch_allowed).toBe(false);
     expect(r1.build_identity).toBe("unverified");
-    expect(r1.reason).toMatch(/无法独立证明|受控 CI/);
+    expect(r1.reason).toMatch(/无法独立证明产物来源/);
   });
 
-  it("伪造 CI 记录在非 CI 环境执行预检：unverified 拒绝（环境与记录必须同时成立）", () => {
-    const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
-    const exePath = path.resolve("C:/build/target/release/tokenscope.exe");
-    const forgedCi = {
-      kind: ACCEPTANCE_BUILD_RECORD_KIND,
-      artifact_path: exePath,
-      artifact_sha256: sha256(bytes),
-      build_command: ACCEPTANCE_BUILD_COMMAND,
-      source_commit: "b49f535abcdef1234567890abcdef1234567890",
-      features: ["acceptance", "tauri/custom-protocol"],
-      tree_clean: true,
-      builder: "ci",
-      ci: { run_id: "12345", repository: "ywltby/tokenscope", run_attempt: "1" },
-    };
-    const result = verifyAcceptanceExecutable(exePath, {
-      readFile: () => bytes,
-      buildRecord: forgedCi,
-      sourceCommit: forgedCi.source_commit,
-      buildEnvironment: {}, // 本地环境执行预检
-    });
-    expect(result.ok).toBe(false);
-    expect(result.launch_allowed).toBe(false);
-    expect(result.build_identity).toBe("unverified");
-  });
-
-  it("旧格式记录（无 builder/ci 段）在 CI 环境也 unverified：parse 拒绝", () => {
+  it("旧格式记录（无 builder/ci 段）parse 通过（builder/ci 为可选诊断字段）", () => {
     const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
     const legacy = {
       kind: ACCEPTANCE_BUILD_RECORD_KIND,
@@ -1058,8 +1072,33 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
       tree_clean: true,
     };
     const parsed = parseAcceptanceBuildRecord(JSON.stringify(legacy));
+    expect(parsed.ok).toBe(true);
+    // 形状通过也不授予 verified——身份门仍拒绝
+    const result = verifyAcceptanceExecutable(legacy.artifact_path, {
+      readFile: () => bytes,
+      buildRecord: parsed,
+      sourceCommit: legacy.source_commit,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.build_identity).toBe("unverified");
+  });
+
+  it("builder=ci 但 ci 段缺 run_id/repository：parse 拒绝（保留登记契约供未来 CI 核验）", () => {
+    const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
+    const broken = {
+      kind: ACCEPTANCE_BUILD_RECORD_KIND,
+      artifact_path: path.resolve("C:/build/tokenscope.exe"),
+      artifact_sha256: sha256(bytes),
+      build_command: ACCEPTANCE_BUILD_COMMAND,
+      source_commit: "abcdef1234567890abcdef1234567890abcdef12",
+      features: ["acceptance", "tauri/custom-protocol"],
+      tree_clean: true,
+      builder: "ci",
+      ci: { run_id: "", repository: "" },
+    };
+    const parsed = parseAcceptanceBuildRecord(JSON.stringify(broken));
     expect(parsed.ok).toBe(false);
-    expect(parsed.reason).toMatch(/builder|ci/);
+    expect(parsed.reason).toMatch(/ci 段/);
   });
 
   it("记录缺 tree_clean（旧格式/手写）一律拒绝——来源证明字段是硬性要求", () => {

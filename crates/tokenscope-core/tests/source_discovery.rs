@@ -971,6 +971,141 @@ fn acceptance_isolation_resolves_real_paths_and_rejects_escapes() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// RC10/AC10 七轮复核缺口 2：默认来源与显式来源被拒后的**回退路径**也必须
+/// 在探测前满足隔离约束——回退的默认根指向根外时，该行停用（Missing、
+/// enabled=false）且绝不触发探测器；隔离标志置位但根缺失/无法证明时，全部
+/// 候选停用（不回退为无限制模式）。注入计数探测器验证"不探测"。
+#[test]
+fn acceptance_isolation_gates_fallback_roots_before_probing() {
+    let home = temp_dir("acceptance-fallback-home");
+    let root = temp_dir("acceptance-fallback-root");
+    std::fs::create_dir_all(root.join("sources/claude")).unwrap();
+    // 根外的默认根（模拟 production 之外的可控注入：默认锚点不在验收根内）
+    let outside_default = temp_dir("acceptance-fallback-outside");
+    std::fs::create_dir_all(outside_default.join("projects")).unwrap();
+
+    // 可计数探测器：记录每个被探测的路径
+    let probed: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    let probed_for_probe = probed.clone();
+    let counting_probe: ProbeFn = Arc::new(move |path: &Path| {
+        probed_for_probe.lock().unwrap().push(path.to_path_buf());
+        filesystem_probe()(path)
+    });
+
+    let ctx = DiscoveryContext {
+        claude_default_root: outside_default.join("projects"),
+        env: StartupEnv {
+            codex_home: None,
+            claude_config_dir: None,
+            acceptance_isolated: true,
+        },
+        acceptance_root: Some(root.clone()),
+        ..ctx_for(&home, StartupEnv::default(), counting_probe.clone())
+    };
+    let out = resolve_sources(
+        &ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    let claude_row = out
+        .roots
+        .iter()
+        .find(|r| r.agent == AgentKind::ClaudeCode)
+        .expect("Claude 默认行保留（停用态）");
+    assert!(
+        !claude_row.effective_enabled,
+        "根外默认根必须停用：{:?}",
+        claude_row
+    );
+    assert_eq!(claude_row.state, ProbeState::Missing, "停用行不探测");
+    assert!(
+        claude_row
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("验收隔离") && d.contains("停用")),
+        "停用行必须带验收隔离诊断：{:?}",
+        claude_row
+    );
+    // 根外的默认根绝不被探测
+    assert!(
+        !probed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.starts_with(&outside_default)),
+        "隔离根之外的默认根不得被探测：{:?}",
+        probed.lock().unwrap()
+    );
+
+    // 隔离标志置位但根缺失 → fail closed：全部候选停用，不回退为无限制。
+    let missing_root_ctx = DiscoveryContext {
+        claude_default_root: root.join("sources/claude"),
+        env: StartupEnv {
+            codex_home: None,
+            claude_config_dir: None,
+            acceptance_isolated: true,
+        },
+        acceptance_root: Some(temp_dir("acceptance-fallback-missing-root")),
+        ..ctx_for(&home, StartupEnv::default(), counting_probe.clone())
+    };
+    let out_missing = resolve_sources(
+        &missing_root_ctx,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    for row in &out_missing.roots {
+        assert!(
+            !row.effective_enabled,
+            "根缺失时所有候选停用（不回退无限制）：{:?}",
+            row
+        );
+    }
+    assert!(
+        !out_missing
+            .roots
+            .iter()
+            .any(|r| r.agent == AgentKind::ClaudeCode && r.state == ProbeState::Ready),
+        "根缺失时不得有 Ready 行：{:?}",
+        out_missing.roots
+    );
+
+    // 正例对照：默认根在隔离根内 → 正常探测与启用
+    let inside_ctx = DiscoveryContext {
+        claude_default_root: root.join("sources/claude"),
+        env: StartupEnv {
+            codex_home: None,
+            claude_config_dir: None,
+            acceptance_isolated: true,
+        },
+        acceptance_root: Some(root.clone()),
+        ..ctx_for(&home, StartupEnv::default(), counting_probe)
+    };
+    let out_inside = resolve_sources(
+        &inside_ctx,
+        &default_claude(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    let inside_row = out_inside
+        .roots
+        .iter()
+        .find(|r| r.agent == AgentKind::ClaudeCode)
+        .expect("隔离根内默认行在场");
+    assert!(
+        inside_row.effective_enabled,
+        "隔离根内默认根正常启用：{:?}",
+        inside_row
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside_default);
+}
+
 /// 映射绑定：默认根=默认绑定；环境根=未核实禁用；手动根=禁用；
 /// 默认+手动同根合并时保留默认绑定并诊断（不混用）。
 #[test]

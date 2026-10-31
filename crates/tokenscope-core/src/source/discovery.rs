@@ -358,6 +358,26 @@ pub fn resolve_sources(
             None => false,
         }
     };
+    // 被拒的默认/回退路径不探测、不启用：生成 Missing 占位（诊断挂行上）。
+    // 隔离标志置位但根缺失/无法证明时，约束恒 false → 全部候选停用，绝不回退
+    // 为无限制模式。
+    let not_probed = RootProbe {
+        state: ProbeState::Missing,
+        canonical: None,
+    };
+    let acceptance_default_diag = |path: &Path| -> (bool, Vec<String>) {
+        if acceptance_constraint(path) {
+            (true, vec![])
+        } else {
+            (
+                false,
+                vec![format!(
+                    "验收隔离模式：路径 {} 的真实位置不在验收根内（含 .. 别名/链接别名/无法解析），已停用——不把隔离根之外的目录当作来源",
+                    path.display()
+                )],
+            )
+        }
+    };
     let acceptance_dropped_diag = |path: &Path| -> Vec<String> {
         if acceptance_constraint(path) {
             vec![]
@@ -375,7 +395,8 @@ pub fn resolve_sources(
             .as_deref()
             .filter(|d| !d.trim().is_empty())
             .map(PathBuf::from);
-        // 显式目录在隔离根之外 → 丢弃该候选（诊断挂在已生成的行上）
+        // 显式目录在隔离根之外 → 丢弃该候选（诊断挂在已生成的行上）；
+        // 回退的默认根同样必须满足约束（隔离根内）——探测前判定。
         let explicit_dropped = explicit
             .as_ref()
             .map(|p| !acceptance_constraint(p))
@@ -384,6 +405,7 @@ pub fn resolve_sources(
             (Some(p), false) => p.clone(),
             _ => ctx.claude_default_root.clone(),
         };
+        let (root_allowed, root_diag) = acceptance_default_diag(&root);
         let mapping = if claude.dir.is_some() && !explicit_dropped {
             None // A03：自定义根不读取默认账户映射
         } else {
@@ -393,12 +415,17 @@ pub fn resolve_sources(
         if let Some(p) = &explicit {
             diagnostics.extend(acceptance_dropped_diag(p));
         }
+        diagnostics.extend(root_diag);
         candidates.push(Candidate {
             agent: AgentKind::ClaudeCode,
             kind: OriginKind::Default,
             config_path: root.display().to_string(),
-            enabled: true,
-            probe: (ctx.probe)(&root),
+            enabled: root_allowed,
+            probe: if root_allowed {
+                (ctx.probe)(&root)
+            } else {
+                not_probed.clone()
+            },
             mapping,
             mapping_disabled: claude.dir.is_some() && !explicit_dropped,
             diagnostics,
@@ -432,15 +459,25 @@ pub fn resolve_sources(
             }
             claude_default_diag.append(&mut env_diag);
         }
+        let (claude_default_allowed, claude_default_stop) =
+            acceptance_default_diag(&ctx.claude_default_root);
+        let mut claude_default_diag_all = claude_default_diag;
+        claude_default_diag_all.extend(claude_default_stop);
         candidates.push(Candidate {
             agent: AgentKind::ClaudeCode,
             kind: OriginKind::Default,
             config_path: ctx.claude_default_root.display().to_string(),
-            enabled: claude.auto_discover && !excluded(claude, &ctx.claude_default_root),
-            probe: (ctx.probe)(&ctx.claude_default_root),
+            enabled: claude_default_allowed
+                && claude.auto_discover
+                && !excluded(claude, &ctx.claude_default_root),
+            probe: if claude_default_allowed {
+                (ctx.probe)(&ctx.claude_default_root)
+            } else {
+                not_probed.clone()
+            },
             mapping: Some(ctx.claude_default_mapping.clone()),
             mapping_disabled: false,
-            diagnostics: claude_default_diag,
+            diagnostics: claude_default_diag_all,
         });
         for entry in &claude.additional_paths {
             let root = PathBuf::from(&entry.path);
@@ -505,15 +542,23 @@ pub fn resolve_sources(
             );
         }
         for root in roots {
+            // 回退的默认/环境双根同样必须满足约束（隔离根内）——探测前判定。
+            let (allowed, stop) = acceptance_default_diag(&root);
+            let mut row_diag = legacy_diag.clone();
+            row_diag.extend(stop);
             candidates.push(Candidate {
                 agent: AgentKind::Codex,
                 kind: OriginKind::Default,
                 config_path: root.display().to_string(),
-                enabled: true,
-                probe: (ctx.probe)(&root),
+                enabled: allowed,
+                probe: if allowed {
+                    (ctx.probe)(&root)
+                } else {
+                    not_probed.clone()
+                },
                 mapping: None,
                 mapping_disabled: false,
-                diagnostics: legacy_diag.clone(),
+                diagnostics: row_diag,
             });
         }
     } else {
@@ -544,15 +589,22 @@ pub fn resolve_sources(
             codex_default_diag.append(&mut env_diag);
         }
         for root in &ctx.codex_default_roots {
+            let (allowed, stop) = acceptance_default_diag(root);
+            let mut row_diag = codex_default_diag.clone();
+            row_diag.extend(stop);
             candidates.push(Candidate {
                 agent: AgentKind::Codex,
                 kind: OriginKind::Default,
                 config_path: root.display().to_string(),
-                enabled: codex.auto_discover && !excluded(codex, root),
-                probe: (ctx.probe)(root),
+                enabled: allowed && codex.auto_discover && !excluded(codex, root),
+                probe: if allowed {
+                    (ctx.probe)(root)
+                } else {
+                    not_probed.clone()
+                },
                 mapping: None,
                 mapping_disabled: false,
-                diagnostics: codex_default_diag.clone(),
+                diagnostics: row_diag,
             });
         }
         for entry in &codex.additional_paths {
@@ -587,15 +639,20 @@ pub fn resolve_sources(
             &ctx.workbuddy_ai_default_root,
         ),
     ] {
+        let (allowed, stop) = acceptance_default_diag(default_root);
         candidates.push(Candidate {
             agent: kind,
             kind: OriginKind::Default,
             config_path: default_root.display().to_string(),
-            enabled: cfg.auto_discover && !excluded(cfg, default_root),
-            probe: (ctx.probe)(default_root),
+            enabled: allowed && cfg.auto_discover && !excluded(cfg, default_root),
+            probe: if allowed {
+                (ctx.probe)(default_root)
+            } else {
+                not_probed.clone()
+            },
             mapping: None,
             mapping_disabled: false,
-            diagnostics: vec![],
+            diagnostics: stop,
         });
         for entry in &cfg.additional_paths {
             let root = PathBuf::from(&entry.path);

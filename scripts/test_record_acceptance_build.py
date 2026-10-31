@@ -79,17 +79,23 @@ class RecordAcceptanceBuildCase(unittest.TestCase):
         self.assertIn("必须由 record-acceptance-build.ps1 登记源树状态", lib_parse)
 
     def test_record_carries_builder_grade_and_lib_gates_on_ci(self):
-        # 六轮复核：verified 只授予"受控 CI 构建"——记录 builder=ci 且预检在
-        # CI 环境。本地记录（builder=local）无法独立证明来源，一律 unverified。
+        # 七轮复核：builder/ci 段是自报字段，不再授予 verified——lib 无
+        # verified 出口（可核验绑定 = GitHub API artifact 核验，未实现）。
+        # 登记侧保留 builder/ci 段作为未来核验的证据链。
         self.assertIn("$builder = if ($isCi) { 'ci' } else { 'local' }", self.recorder)
         self.assertIn("builder         = $builder", self.recorder)
         self.assertIn("run_id      = $env:GITHUB_RUN_ID", self.recorder)
         self.assertIn("repository  = $env:GITHUB_REPOSITORY", self.recorder)
         lib_identity = self.lib[self.lib.index("export function verifyAcceptanceBuildIdentity"):]
         lib_identity = lib_identity[:lib_identity.index("/**\n * EXE 验收构建筛查")]
-        self.assertIn('trusted.builder !== "ci"', lib_identity)
-        self.assertIn('GITHUB_ACTIONS', lib_identity)
+        # 无 verified 出口：身份函数不再返回 build_identity: "verified"
+        self.assertNotIn('build_identity: "verified"', lib_identity)
+        # 结论口径：无法独立证明来源 → unverified
         self.assertIn("无法独立证明产物来源", lib_identity)
+        # 不再以自报环境变量/字段作为许可条件（注释里可提及，许可逻辑不得引用）
+        code_only = "\n".join(line for line in lib_identity.splitlines()
+                              if not line.strip().startswith("//"))
+        self.assertNotIn("GITHUB_ACTIONS", code_only)
 
     def test_workflow_uses_recorder_instead_of_bare_cargo_build(self):
         self.assertIn("./scripts/record-acceptance-build.ps1", self.workflow)

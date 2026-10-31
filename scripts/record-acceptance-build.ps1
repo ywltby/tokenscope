@@ -82,9 +82,10 @@ $treeClean = ($gitStatus.Count -eq 0)
 
 $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $exeFull).Hash.ToLowerInvariant()
 
-# 构建者分级（六轮复核）：GitHub Runner（GITHUB_ACTIONS=true）= ci，携带 ci
-# 段；本地 = local。预检侧 verified 要求 builder=ci 且预检本身运行在 CI 环境
-# ——本地记录无法独立证明来源，一律 unverified。
+# 构建者分级：GitHub Runner（GITHUB_ACTIONS=true）= ci，携带 ci 段；本地 =
+# local。这些都是自报字段，不授予 verified（七轮复核：预检当前无法独立
+# 证明产物来源，一律 unverified 拒绝启动）；登记它们是为未来的 CI artifact
+# 绑定核验（GitHub API 核验 run/EXE 同源与 digest）保留证据链。
 $isCi = $env:GITHUB_ACTIONS -eq 'true'
 $builder = if ($isCi) { 'ci' } else { 'local' }
 

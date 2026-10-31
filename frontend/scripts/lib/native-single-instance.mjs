@@ -454,11 +454,19 @@ export function validateAcceptancePaths({
   for (const entry of tree.paths) layout.push(entry);
   for (const link of tree.links) layout.push({ path: link, kind: "any", source: "link" });
 
-  // 去重（同一真实位置只解析一次），保留声明类型
+  // 去重（同一字符串位置只解析一次），但**链接身份不因去重丢失**：固定布局
+  // /manifest 条目与走查发现的链接同路径时，必须仍按链接核对真实目标——否则
+  // `sources/claude` 这类"固定布局 + 树走查链接"双重命中的路径会绕过根内
+  // 校验（七轮复核缺口 1）。链接语义一旦登记，优先级高于普通条目。
   const unique = new Map();
   for (const entry of layout) {
     const key = comparePath(entry.path);
-    if (!unique.has(key)) unique.set(key, entry);
+    const existing = unique.get(key);
+    if (!existing) {
+      unique.set(key, { ...entry });
+    } else if (existing.source !== "link" && entry.source === "link") {
+      existing.source = "link";
+    }
   }
 
   const canonicalWritePaths = [];
@@ -466,7 +474,8 @@ export function validateAcceptancePaths({
     const c = canonicalize(entry.path, { expect: entry.kind ?? "any" });
     if (!c.ok) return { ok: false, reason: `验收路径 ${entry.path} 无法解析：${c.reason}` };
     // AC10（六轮复核）：验收根内出现的链接/别名，解析目标必须仍落在验收根
-    // 内——指向根外的 junction 会让验收实例把写入落根外，破坏隔离。
+    // 内——指向根外的 junction 会让验收实例把写入落根外，破坏隔离。固定布
+    // 层、manifest、树走查发现的链接都经此核对（source 归并为 link）。
     if (entry.source === "link") {
       const canonicalRoot = canonicalize(rawRoot);
       if (canonicalRoot.ok && !isWithin(c.path, canonicalRoot.path)) {
@@ -655,21 +664,18 @@ export function parseAcceptanceBuildRecord(raw, { recordPath = "" } = {}) {
   }
   const features = Array.isArray(data.features) ? data.features : [];
   if (!features.includes("acceptance")) missing.push("features 未包含 acceptance");
-  // 来源证明：记录必须由 scripts/record-acceptance-build.ps1 产出并携带源树
-  // 状态（git status --porcelain）。缺失即旧格式/手写记录——无法证明"该产物
-  // 字节确由受控命令在某个提交上产生"，一律拒绝。
+  // 来源诊断字段（七轮复核）：tree_clean/builder/ci 段由
+  // record-acceptance-build.ps1 登记并保留在记录里作证据，但它们都是可本地
+  // 填写的自报字段——不再作为 verified 的依据（信任边界见
+  // verifyAcceptanceBuildIdentity）。tree_clean 缺失仍拒收记录（登记脚本
+  // 契约的一部分，帮助区分登记脚本产出与手写文件）；builder/ci 段可选。
   if (typeof data.tree_clean !== "boolean") {
     missing.push("缺少 tree_clean（必须由 record-acceptance-build.ps1 登记源树状态）");
-  }
-  // 构建者分级：ci（GitHub Runner 受控构建）或 local（本地构建）。CI 记录
-  // 必须携带 ci 段（run_id/repository），本地记录没有可核验的独立来源。
-  if (data.builder !== "ci" && data.builder !== "local") {
-    missing.push('builder（必须为 "ci" 或 "local"，由 record-acceptance-build.ps1 登记）');
   }
   if (data.builder === "ci") {
     const ci = data.ci && typeof data.ci === "object" ? data.ci : null;
     if (!ci || !String(ci.run_id ?? "").trim() || !String(ci.repository ?? "").trim()) {
-      missing.push("ci 段（builder=ci 必须携带 run_id 与 repository）");
+      missing.push("ci 段（builder=ci 必须携带 run_id 与 repository，供未来 CI artifact 核验使用）");
     }
   }
   if (missing.length) return { ok: false, reason: `构建记录不完整：${missing.join("；")}` };
@@ -678,15 +684,16 @@ export function parseAcceptanceBuildRecord(raw, { recordPath = "" } = {}) {
 
 /**
  * 构建身份判定：重新计算磁盘产物的 SHA-256，并与受控构建记录逐字段核对
- * （登记产物路径、构建命令、源提交）。只有全部一致才 `verified` 并授予启动
- * 许可；字符串标记本身永不授予许可。
+ * （登记产物路径、构建命令、源提交）。结论只有 unverified / hash-mismatch
+ * 两种——**没有 verified 出口**：当前不存在可独立证明产物来源的路径（记录
+ * 与环境自报字段皆可本地伪造，CI artifact 绑定核验未实现），预检一律拒绝
+ * 启动；字符串标记本身永不授予许可。
  */
 export function verifyAcceptanceBuildIdentity({
   exePath,
   record = null,
   readFile = fs.readFileSync,
   sourceCommit = null,
-  buildEnvironment = process.env,
 } = {}) {
   const unverified = (reason, extra = {}) => ({
     ok: false,
@@ -741,41 +748,29 @@ export function verifyAcceptanceBuildIdentity({
       )}…），拒绝启动`,
     };
   }
-  // 来源证明完整性：记录本身（JSON/命令/哈希/提交）都可由任何人在本地伪造，
-  // 唯一能独立佐证"该产物字节可从源提交复现"的是干净源树——脏树上的构建
-  // 混入了未提交内容，无法复现，来源无法独立证明 → unverified，拒绝启动。
-  // （CI Runner checkout 的树是干净的，其记录满足本条件；本地脏树构建一律
-  // 不授予启动许可，如实保留 unverified 而非冒充已验证。）
-  // 来源证明完整性（六轮复核）：记录本身（JSON/命令/哈希/提交/tree_clean/
-  // builder）都可由任何人在本地伪造，字段校验只保证形状。verified 的必要
-  // 条件是"受控 CI 构建"：记录 builder=ci **且**本次预检运行在 CI 环境里。
-  // 两者缺一，来源都无法独立证明（本地记录可复制粘贴、CI 记录在本地无网
-  // 可验），一律 unverified 并拒绝启动，绝不虚标 verified。CI 链路的实跑
-  // 取证仍未完成（AC10/N12 保持开放）。
+  // 来源证明信任边界（七轮复核，取代 builder/GITHUB_ACTIONS 自报字段门）：
+  // 记录的全部字段（JSON/命令/哈希/提交/tree_clean/builder/ci 段）以及
+  // GITHUB_ACTIONS 环境变量都可由本地进程填写，自报字段之间互相印证不构成
+  // 来源证明——继续加同类字段只会扩大可伪造面。可核验的绑定链是：
+  //   record → (run_id, repository) → GitHub API artifact 清单 → EXE 与
+  //   record 同 artifact 且 digest 与本地字节一致 → 来源成立。
+  // 该链路需要联网 GitHub API 与 token，且要绑定 run 的 checkout 提交；当前
+  // 未实现（后续批次），因此**当前没有任何可独立证明来源的路径**：
+  //   - verified 不再由记录字段授予（verifyAcceptanceBuildIdentity 只返回
+  //     unverified / hash-mismatch / rejected 三种结论，无 verified 出口）；
+  //   - 预检一律拒绝启动（零准备、零启动），AC10 真实 Native 链路留待 CI
+  //     绑定核验落地（AC10/N12 保持开放，不冒充完成）。
+  // 已保留并继续生效的防线：PE 预筛、stub 标记拒绝、产物哈希核对（字节被
+  // 替换即 hash-mismatch）、源提交一致性、tree_clean 形状校验——它们证明
+  // "磁盘产物与记录描述一致"，但不证明"记录描述的来源为真"。
   if (trusted.tree_clean === false) {
     return unverified(
       `构建记录为脏树产物（${trusted.tree_dirty_count ?? "?"} 个未提交变更），产物无法从源提交复现，拒绝启动`,
     );
   }
-  if (trusted.builder !== "ci") {
-    return unverified(
-      "构建记录来自本地构建（builder=local），无法独立证明产物来源（本地记录字段可伪造且无 CI 证据可核验），拒绝启动",
-    );
-  }
-  if (String(buildEnvironment?.GITHUB_ACTIONS ?? "") !== "true") {
-    return unverified(
-      "CI 构建记录只能在 CI 环境的预检中授予启动许可（当前不在 GITHUB_ACTIONS 环境，无法核验记录与产物同源），拒绝启动",
-    );
-  }
-  return {
-    ok: true,
-    launch_allowed: true,
-    build_identity: "verified",
-    sha256,
-    size: bytes.length,
-    source_commit: trusted.source_commit,
-    reason: `产物哈希与受控构建记录一致（源提交 ${trusted.source_commit}）`,
-  };
+  return unverified(
+    "无法独立证明产物来源：构建记录可本地伪造，可核验的 CI artifact 绑定（GitHub API 核验 run/EXE 同源与 digest）尚未实现——保持 unverified 并拒绝启动（AC10 真实 Native 链路留待该核验落地）",
+  );
 }
 
 /**
@@ -785,7 +780,7 @@ export function verifyAcceptanceBuildIdentity({
  */
 export function verifyAcceptanceExecutable(
   exePath,
-  { readFile = fs.readFileSync, buildRecord = null, sourceCommit = null, buildEnvironment = process.env } = {},
+  { readFile = fs.readFileSync, buildRecord = null, sourceCommit = null } = {},
 ) {
   const raw = String(exePath ?? "").trim();
   if (!raw) {
@@ -831,7 +826,6 @@ export function verifyAcceptanceExecutable(
     record: buildRecord,
     readFile,
     sourceCommit,
-    buildEnvironment,
   });
   if (negative.length) {
     return {
