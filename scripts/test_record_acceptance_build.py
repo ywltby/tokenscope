@@ -110,11 +110,11 @@ class RecordAcceptanceBuildCase(unittest.TestCase):
         self.assertIn("archiveExeSha256", binding)
         self.assertIn("归档内容与记录不符", binding)
         self.assertIn("startsWith(\"sha256:\")", binding)
-        # 合成测试覆盖可信与伪造路径（离线 GitHub 实际响应形态）
+        # 合成测试覆盖可信与伪造路径（真实合成 ZIP + 离线响应形态）
         test_text = (ROOT / "frontend/scripts/lib/native-single-instance.test.mjs").read_text(
             encoding="utf-8")
-        self.assertIn("受控绑定（按 GitHub 实际响应形态）", test_text)
-        self.assertIn("受控绑定反例（真实响应形态）", test_text)
+        self.assertIn("受控绑定（真实合成 ZIP）", test_text)
+        self.assertIn("受控绑定反例（真实合成 ZIP）", test_text)
 
     def test_workflow_uses_recorder_instead_of_bare_cargo_build(self):
         self.assertIn("./scripts/record-acceptance-build.ps1", self.workflow)

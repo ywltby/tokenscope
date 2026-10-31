@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
+import zlib from "node:zlib";
 
 /** 第二次启动必须在限定时间内退出；超时即失败并由调用方终止已记录 PID。 */
 export const SINGLE_INSTANCE_EXIT_BUDGET_MS = 15000;
@@ -457,21 +458,29 @@ export function validateAcceptancePaths({
 
   const tree = collectTree(rawRoot, { maxEntries: treeBudget });
   if (!tree.ok) return { ok: false, reason: tree.reason, tree_entries: tree.visited ?? null };
-  for (const entry of tree.paths) layout.push(entry);
-  for (const link of tree.links) layout.push({ path: link, kind: "any", source: "link" });
+  for (const entry of tree.paths) layout.push({ ...entry, discovered: true });
+  for (const link of tree.links) layout.push({ path: link, kind: "any", source: "link", discovered: true });
 
-  // 去重（同一字符串位置只解析一次），但**链接身份不因去重丢失**：固定布局
-  // /manifest 条目与走查发现的链接同路径时，必须仍按链接核对真实目标——否则
-  // `sources/claude` 这类"固定布局 + 树走查链接"双重命中的路径会绕过根内
-  // 校验（七轮复核缺口 1）。链接语义一旦登记，优先级高于普通条目。
+  // 去重（同一字符串位置只解析一次），但**链接身份与"已发现"身份不因去重
+  // 丢失**（七轮复核缺口 1 / 十轮复核）：
+  //   - source 归并为 "link"：固定布局/manifest 条目与树走查链接同路径时，
+  //     仍按链接核对真实目标；
+  //   - discovered = true：树走查**实际发现了**该路径——后续 lstat ENOENT
+  //     说明它在走查后被删除（竞态或篡改），必须拒绝；豁免仅适用于"从未
+  //     存在、准备阶段将创建"的合法布局路径（走查未发现）。
   const unique = new Map();
   for (const entry of layout) {
     const key = comparePath(entry.path);
     const existing = unique.get(key);
     if (!existing) {
       unique.set(key, { ...entry });
-    } else if (existing.source !== "link" && entry.source === "link") {
+      continue;
+    }
+    if (existing.source !== "link" && entry.source === "link") {
       existing.source = "link";
+    }
+    if (!existing.discovered && entry.discovered) {
+      existing.discovered = true;
     }
   }
 
@@ -479,26 +488,28 @@ export function validateAcceptancePaths({
   for (const entry of unique.values()) {
     const c = canonicalize(entry.path, { expect: entry.kind ?? "any" });
     if (!c.ok) return { ok: false, reason: `验收路径 ${entry.path} 无法解析：${c.reason}` };
-    // AC10（九轮复核问题 2）：验收根内 nlink>1 的**普通文件**保守拒绝——
-    // 真实硬链接（同 inode 的第二个目录项）可以在根外，验收实例可经根内
-    // 文件读写根外数据；在无法枚举同 inode 其他目录项的前提下，nlink>1
-    // 即"不能证明独立"，不当作已证明独立的普通文件放行（目录的 nlink 数值
-    // 语义不同，仍继续遍历——见 collectAcceptanceTreePaths）。
-    // lstat 失败不吞：存在性由 canonicalize 保证，此处的失败只能是权限或
-    // 竞态，无法检查即无法证明独立 → 拒绝启动。唯一豁免是 ENOENT——全新
-    // 隔离根里"尚未创建"的合法布局路径本来就被 canonicalize 允许，它们没
-    // 有 nlink 可言，不能因尚未创建被误拒。
+    // AC10（八轮复核问题 3 / 十一轮复核）：验收根内 nlink>1 的**普通文件**
+    // 保守拒绝——真实硬链接（同 inode 的第二个目录项）可以在根外，验收实例
+    // 可经根内文件读写根外数据；在无法枚举同 inode 其他目录项的前提下，
+    // nlink>1 即"不能证明独立"，不当作已证明独立的普通文件放行（目录的
+    // nlink 数值语义不同，仍继续遍历——见 collectAcceptanceTreePaths）。
+    // lstat 失败不吞（十一轮复核）：
+    //   - discovered（树走查实际发现过）的路径：后续 ENOENT = 走查后被删除
+    //     （竞态或篡改）→ 拒绝；其他错误（权限等）= 无法检查 → 拒绝；
+    //   - 从未发现（走查时不存在）的合法布局路径：豁免 ENOENT——全新隔离根
+    //     里尚未创建的布局路径本来被 canonicalize 允许，不能误拒。
     let entryStat = null;
     try {
       entryStat = lstat(entry.path);
     } catch (error) {
-      if (error?.code !== "ENOENT") {
+      if (error?.code === "ENOENT" && !entry.discovered) {
+        entryStat = null; // 从未存在，准备阶段将创建
+      } else {
         return {
           ok: false,
-          reason: `验收路径 ${entry.path} 无法检查（${String(error?.message ?? error)}），无法证明独立，拒绝启动`,
+          reason: `验收路径 ${entry.path} 无法检查（${String(error?.message ?? error)}${entry.discovered ? "；该路径在走查时已被发现" : ""}），无法证明独立，拒绝启动`,
         };
       }
-      entryStat = null;
     }
     if (entryStat && !entryStat.isDirectory() && Number(entryStat.nlink) > 1) {
       return {
@@ -807,6 +818,78 @@ export function verifyAcceptanceBuildIdentity({
 }
 
 /**
+ * 最小 ZIP 读取器（十轮复核问题 2）：解析 End of Central Directory →
+ * Central Directory → 定位条目并解出原始字节。仅支持 stored(0) 与
+ * deflate(8)，满足 GitHub artifact zip（Windows 产物多用 deflate）与测试
+ * 合成 zip。安全：拒绝路径分隔符异常（`..` 段、绝对盘符）与同名重复条目
+ * ——重复名无法确定哪个是登记产物，直接失败而非猜测。
+ */
+export function readZipEntryBytes(archiveBytes, entryName) {
+  const bytes = archiveBytes;
+  const u32 = (off) => bytes.readUInt32LE(off);
+  const u16 = (off) => bytes.readUInt16LE(off);
+  // EOCD：从尾部向前找 signature 0x06054b50（注释长度上限 65535）
+  const minEocd = 22;
+  let eocd = -1;
+  for (let i = bytes.length - minEocd; i >= 0 && i >= bytes.length - minEocd - 65536; i--) {
+    if (u32(i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) return { ok: false, reason: "不是有效的 ZIP 归档（找不到 End of Central Directory）" };
+  const entryCount = u16(eocd + 10);
+  const cdOffset = u32(eocd + 16);
+  let cursor = cdOffset;
+  const seen = new Set();
+  let found = null;
+  for (let i = 0; i < entryCount; i++) {
+    if (u32(cursor) !== 0x02014b50) {
+      return { ok: false, reason: "ZIP Central Directory 损坏（条目签名不符）" };
+    }
+    const method = u16(cursor + 10);
+    const compressedSize = u32(cursor + 20);
+    const nameLen = u16(cursor + 28);
+    const extraLen = u16(cursor + 30);
+    const commentLen = u16(cursor + 32);
+    const localOffset = u32(cursor + 42);
+    const name = bytes.toString("utf8", cursor + 46, cursor + 46 + nameLen);
+    if (name === entryName) {
+      if (seen.has(name)) {
+        return { ok: false, reason: `ZIP 归档内存在重复条目 "${entryName}"，无法确定登记产物，拒绝启动` };
+      }
+      seen.add(name);
+      // local header：跳过固定 30 字节 + 名称/extra 才是数据
+      if (u32(localOffset) !== 0x04034b50) {
+        return { ok: false, reason: "ZIP local header 签名不符，归档损坏" };
+      }
+      const localNameLen = u16(localOffset + 26);
+      const localExtraLen = u16(localOffset + 28);
+      const dataStart = localOffset + 30 + localNameLen + localExtraLen;
+      const raw = bytes.subarray(dataStart, dataStart + compressedSize);
+      let content;
+      if (method === 0) {
+        content = Buffer.from(raw);
+      } else if (method === 8) {
+        try {
+          content = zlib.inflateRawSync(raw);
+        } catch (error) {
+          return { ok: false, reason: `ZIP 条目 "${entryName}" 解压失败：${String(error?.message ?? error)}` };
+        }
+      } else {
+        return { ok: false, reason: `ZIP 条目 "${entryName}" 使用不支持的压缩方式 ${method}，拒绝启动` };
+      }
+      found = content;
+    }
+    cursor += 46 + nameLen + extraLen + commentLen;
+  }
+  if (found === null) {
+    return { ok: false, reason: `ZIP 归档内没有条目 "${entryName}"，无法核验 EXE，拒绝启动` };
+  }
+  return { ok: true, bytes: found };
+}
+
+/**
  * 受控绑定核验核心（八轮复核问题 1）：验证"EXE 产自某个成功 CI run 且未被
  * 篡改"。信任不在任何自报字段，而在 **GitHub 侧事实**——调用方把 GitHub API
  * 的 artifact 清单与 run 元数据注入（生产：真实 API 调用；合成测试：固定清
@@ -830,13 +913,21 @@ export function verifyBuildOriginBinding({
   runMetadata = null,
   jobList = [],
   artifacts = [],
+  // 受信配置（十一轮复核问题 3）：预期仓库、工作流身份与受测提交来自独立
+  // 于构建记录的受信任清单（如发布配置），全部必填——缺失即无法证明"这次
+  // run 是预期的那次"，即使记录与 GitHub 响应内部一致也拒绝。
+  trustedRepository = null,
   trustedWorkflowName = null,
+  trustedHeadSha = null,
   buildStepName = "Build embedded frontend and isolated acceptance executable",
   trustedBuildJobName = "native-ui",
   artifactNamePrefix = "acceptance-build",
-  localArtifactSha256 = null,
-  archiveSha256 = null,
-  archiveExeSha256 = null,
+  // 字节输入（十一轮复核）：核验链从下载的归档字节、归档内 EXE 字节与本地
+  // EXE 字节自行计算全部摘要——不接收任何现成哈希，杜绝"传入任意哈希冒充
+  // 已验证来源"。哈希比较仍是纯函数语义，但输入只有字节。
+  archiveBytes = null,
+  archiveExeName = "tokenscope.exe",
+  localExeBytes = null,
 } = {}) {
   const unverified = (reason) => ({ ok: false, build_identity: "unverified", reason });
   const parsed = record?.ok === true ? record : parseAcceptanceBuildRecord(record);
@@ -888,6 +979,16 @@ export function verifyBuildOriginBinding({
   if (!runRepositoryFullName) {
     return unverified("run 元数据缺 repository.full_name，无法确定可信仓库，拒绝启动");
   }
+  // 受信仓库（独立于记录）必须先与 run 响应一致——非预期仓库即使内部字段
+  // 一致也拒绝。
+  if (!trustedRepository) {
+    return unverified("缺少受信仓库配置（受信任清单注入），无法证明 run 来自预期仓库，拒绝启动");
+  }
+  if (runRepositoryFullName !== String(trustedRepository)) {
+    return unverified(
+      `run 的仓库（${runRepositoryFullName}）与受信仓库（${trustedRepository}）不一致，拒绝启动`,
+    );
+  }
   if (runRepositoryFullName !== recordRepository) {
     return unverified(
       `run 的 repository.full_name（${runRepositoryFullName}）与记录 repository（${recordRepository}）不一致，拒绝启动`,
@@ -904,6 +1005,16 @@ export function verifyBuildOriginBinding({
     );
   }
   const commit = String(trusted.source_commit).toLowerCase();
+  // 受测提交：受信配置的 head_sha 必须与 run 响应 head_sha 一致（非预期
+  // 提交即使记录与响应内部一致也拒绝）。
+  if (!trustedHeadSha) {
+    return unverified("缺少受信受测提交（受信任清单注入），无法证明 run 构建自预期提交，拒绝启动");
+  }
+  if (String(runMetadata.head_sha ?? "").toLowerCase() !== String(trustedHeadSha).toLowerCase()) {
+    return unverified(
+      `run head_sha（${runMetadata.head_sha ?? "缺失"}）与受信受测提交（${trustedHeadSha}）不一致，拒绝启动`,
+    );
+  }
   if (String(runMetadata.head_sha ?? "").toLowerCase() !== commit) {
     return unverified(
       `run head_sha（${runMetadata.head_sha ?? "缺失"}）与记录 source_commit（${commit}）不一致，拒绝启动`,
@@ -954,38 +1065,45 @@ export function verifyBuildOriginBinding({
       `artifact digest 形态非法（期望 "sha256:<64位十六进制>"）：${archiveDigestRaw}，拒绝启动`,
     );
   }
-  if (!archiveSha256) {
-    return unverified("缺少归档摘要（下载 artifact zip 后重算），拒绝启动");
+  // 核验链（十一轮复核）：全部摘要从字节自行计算——
+  //   1. 归档摘要 = sha256(archiveBytes)，与 GitHub 登记的 digest 核对；
+  //   2. 归档内 EXE 摘要 = sha256(readZipEntry(archiveBytes, EXE 名))，
+  //      与记录 artifact_sha256 核对（归档内 A 而记录 B 在此被拒）；
+  //   3. 本地 EXE 摘要 = sha256(localExeBytes)，与记录核对（受测 EXE 被
+  //      替换在此被拒）。
+  if (!archiveBytes || !Buffer.isBuffer(archiveBytes) || archiveBytes.length === 0) {
+    return unverified("缺少下载的归档字节（受控核验步骤未提供），拒绝启动");
   }
-  if (archiveDigest !== String(archiveSha256).toLowerCase()) {
+  const archiveSha256 = crypto.createHash("sha256").update(archiveBytes).digest("hex");
+  if (archiveDigest !== archiveSha256) {
     return unverified(
-      `归档摘要与 GitHub 登记不一致（登记 ${archiveDigest.slice(0, 12)}…，重算 ${String(archiveSha256).slice(0, 12)}…），拒绝启动`,
+      `归档摘要与 GitHub 登记不一致（登记 ${archiveDigest.slice(0, 12)}…，重算 ${archiveSha256.slice(0, 12)}…），拒绝启动`,
     );
-  }
-  // 归档内 EXE 摘要（真绑定核心）：核验方解压归档、对登记的 EXE 名重算哈希。
-  // 归档内是 A、记录/本地是 B 时在此被拒——这正是"归档与 EXE 分开核验"的意义。
-  if (!archiveExeSha256) {
-    return unverified("缺少归档内 EXE 摘要（解压归档后对登记 EXE 重算），拒绝启动");
   }
   const recordExeDigest = String(trusted.artifact_sha256).toLowerCase();
-  if (String(archiveExeSha256).toLowerCase() !== recordExeDigest) {
+  const extracted = readZipEntryBytes(archiveBytes, archiveExeName);
+  if (!extracted.ok) {
+    return unverified(`${extracted.reason}（登记 EXE 名 ${archiveExeName}）`);
+  }
+  const archiveExeSha256 = crypto.createHash("sha256").update(extracted.bytes).digest("hex");
+  if (archiveExeSha256 !== recordExeDigest) {
     return unverified(
-      `归档内 EXE 摘要（${String(archiveExeSha256).slice(0, 12)}…）与记录 artifact_sha256（${recordExeDigest.slice(0, 12)}…）不一致——归档内容与记录不符，拒绝启动`,
+      `归档内 EXE 摘要（${archiveExeSha256.slice(0, 12)}…）与记录 artifact_sha256（${recordExeDigest.slice(0, 12)}…）不一致——归档内容与记录不符，拒绝启动`,
     );
   }
-  // 实际受测 EXE（本地磁盘）与记录核对。
-  if (!localArtifactSha256) {
-    return unverified("缺少本地产物哈希（实际受测 EXE 重算），拒绝启动");
+  if (!localExeBytes || !Buffer.isBuffer(localExeBytes) || localExeBytes.length === 0) {
+    return unverified("缺少实际受测 EXE 的字节（本地磁盘读取），拒绝启动");
   }
-  if (String(localArtifactSha256).toLowerCase() !== recordExeDigest) {
+  const localSha256 = crypto.createHash("sha256").update(localExeBytes).digest("hex");
+  if (localSha256 !== recordExeDigest) {
     return unverified(
-      `实际受测 EXE 哈希（${String(localArtifactSha256).slice(0, 12)}…）与记录（${recordExeDigest.slice(0, 12)}…）不一致，EXE 已被替换，拒绝启动`,
+      `实际受测 EXE 哈希（${localSha256.slice(0, 12)}…）与记录（${recordExeDigest.slice(0, 12)}…）不一致，EXE 已被替换，拒绝启动`,
     );
   }
   return {
     ok: true,
     build_identity: "verified",
-    reason: `EXE 字节与 CI run ${runId}（提交 ${commit.slice(0, 12)}…，工作流 ${trustedWorkflowName}，构建 step 成功）的 artifact "${expectedArtifactName}" 绑定一致——归档摘要、归档内 EXE 摘要、记录与受测 EXE 四方核对通过，来源成立`,
+    reason: `EXE 字节与 CI run ${runId}（提交 ${commit.slice(0, 12)}…，工作流 ${trustedWorkflowName}，构建 step 成功）的 artifact "${expectedArtifactName}" 绑定一致——归档摘要、归档内 EXE 摘要（从归档字节解压重算）、记录与受测 EXE（本地字节重算）四方核对通过，来源成立`,
   };
 }
 /**
