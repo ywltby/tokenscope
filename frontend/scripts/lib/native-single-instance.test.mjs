@@ -907,22 +907,29 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
       const nb = Buffer.from(name);
       const nb2 = Buffer.from(opts.localName ?? name);
       const crc = opts.crc ?? crc32(content);
+      const flags = opts.flags ?? 0;
       const l = Buffer.alloc(30);
       l.writeUInt32LE(0x04034b50, 0);
       l.writeUInt16LE(20, 4);
+      l.writeUInt16LE(opts.localFlags ?? flags, 6);
       l.writeUInt16LE(opts.method ?? 0, 8);
       l.writeUInt32LE(opts.localCompressedSize ?? opts.compressedSize ?? content.length, 18);
       l.writeUInt32LE(opts.localUncompressedSize ?? content.length, 22);
       l.writeUInt16LE(nb2.length, 26);
       const c = Buffer.alloc(46);
       c.writeUInt32LE(0x02014b50, 0);
+      c.writeUInt16LE(20, 4);
+      c.writeUInt16LE(flags, 8);
       c.writeUInt16LE(opts.method ?? 0, 10);
       c.writeUInt32LE(opts.crc ?? crc32(content), 16);
       c.writeUInt32LE(opts.compressedSize ?? content.length, 20);
       c.writeUInt32LE(opts.uncompressedSize ?? content.length, 24);
       c.writeUInt16LE(nb.length, 28);
       c.writeUInt32LE(0, 42);
-      return { local: Buffer.concat([l, nb2, opts.localData ?? content]), central: Buffer.concat([c, nb]) };
+      const tail = Buffer.concat([
+        opts.appendAfterData ?? Buffer.alloc(0),
+      ]);
+      return { local: Buffer.concat([l, nb2, opts.localData ?? content, tail]), central: Buffer.concat([c, nb]) };
     };
     const buildZip = (entries, overrides = {}) => {
       const locals = [], centrals = [];
@@ -1024,6 +1031,121 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     const rLocalMismatch = readZipEntryBytes(zipLocalMismatch, "tokenscope.exe");
     expect(rLocalMismatch.ok).toBe(false);
     expect(rLocalMismatch.reason).toMatch(/本地头大小.*与中央目录.*不一致/);
+    // 反例 13（十五轮复核）：EOCD 登记的中央目录大小为 0，却声明目标条目——
+    // 目录解析必须受登记区间约束，不允许越过登记区间继续读条目。
+    const zipCdSizeZero = buildZip([mkEntry("tokenscope.exe", Buffer.from("EXE-B"))], { cdSize: 0 });
+    const rCdSizeZero = readZipEntryBytes(zipCdSizeZero, "tokenscope.exe");
+    expect(rCdSizeZero.ok).toBe(false);
+    expect(rCdSizeZero.reason).toMatch(/Central Directory 损坏/);
+    // 反例 14（十五轮复核）：EOCD 登记的中央目录大小短于实际目录（只够条目
+    // 头、不够名字）。
+    const zipCdSizeShort = buildZip([mkEntry("tokenscope.exe", Buffer.from("EXE-B"))], { cdSize: 40 });
+    const rCdSizeShort = readZipEntryBytes(zipCdSizeShort, "tokenscope.exe");
+    expect(rCdSizeShort.ok).toBe(false);
+    expect(rCdSizeShort.reason).toMatch(/Central Directory 损坏/);
+  });
+
+  it("data descriptor 流式 ZIP（general-purpose bit 3）：本地头占位 + 描述符核对，stored 与 deflate 均通过；描述符缺失/不一致拒绝", () => {
+    const crc32 = (() => {
+      const t = new Int32Array(256);
+      for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c; }
+      return (b) => { let c = -1; for (const x of b) c = (c >>> 8) ^ t[(c ^ x) & 0xff]; return (c ^ -1) >>> 0; };
+    })();
+    // 模拟标准库向不可 seek 流写出的真实形态：本地头 bit3 + CRC/大小占位 0，
+    // 数据后跟 PK\x07\x08 描述符（crc + 压缩大小 + 未压缩大小），中央目录
+    // 登记真实值。两种描述符形态都覆盖：带 0x08074b50 签名（zlib/Info-ZIP）
+    // 与不带签名（规范允许）。
+    const streamedZip = (name, content, method, opts = {}) => {
+      const nb = Buffer.from(name);
+      const packed = method === 8 ? zlib.deflateRawSync(content) : content;
+      const l = Buffer.alloc(30);
+      l.writeUInt32LE(0x04034b50, 0);
+      l.writeUInt16LE(20, 4);
+      l.writeUInt16LE(0x08, 6);
+      l.writeUInt16LE(method, 8);
+      l.writeUInt16LE(nb.length, 26);
+      const dd = Buffer.alloc(16);
+      if (!opts.noDescriptorSignature) dd.writeUInt32LE(0x08074b50, 0);
+      dd.writeUInt32LE(opts.descriptorCrc ?? crc32(content), opts.noDescriptorSignature ? 0 : 4);
+      dd.writeUInt32LE(opts.descriptorCompressed ?? packed.length, opts.noDescriptorSignature ? 4 : 8);
+      dd.writeUInt32LE(opts.descriptorUncompressed ?? content.length, opts.noDescriptorSignature ? 8 : 12);
+      const ddBytes = opts.dropDescriptor ? Buffer.alloc(0) : dd.subarray(0, opts.noDescriptorSignature ? 12 : 16);
+      const c = Buffer.alloc(46);
+      c.writeUInt32LE(0x02014b50, 0);
+      c.writeUInt16LE(20, 4);
+      c.writeUInt16LE(0x08, 8);
+      c.writeUInt16LE(method, 10);
+      c.writeUInt32LE(crc32(content), 16);
+      c.writeUInt32LE(packed.length, 20);
+      c.writeUInt32LE(content.length, 24);
+      c.writeUInt16LE(nb.length, 28);
+      c.writeUInt32LE(0, 42);
+      const eocd = Buffer.alloc(22);
+      eocd.writeUInt32LE(0x06054b50, 0);
+      eocd.writeUInt16LE(1, 8);
+      eocd.writeUInt16LE(1, 10);
+      eocd.writeUInt32LE(46 + nb.length, 12);
+      eocd.writeUInt32LE(30 + nb.length + packed.length + ddBytes.length, 16);
+      return Buffer.concat([l, nb, packed, ddBytes, c, nb, eocd]);
+    };
+    // 正例：stored 流式（带签名描述符）
+    const okStored = readZipEntryBytes(streamedZip("tokenscope.exe", Buffer.from("EXE-STREAM"), 0), "tokenscope.exe");
+    expect(okStored.ok).toBe(true);
+    expect(okStored.bytes.toString()).toBe("EXE-STREAM");
+    // 正例：deflate 流式（带签名描述符）
+    const okDeflate = readZipEntryBytes(streamedZip("a.exe", Buffer.from("EXE-DEFLATED-STREAM"), 8), "a.exe");
+    expect(okDeflate.ok).toBe(true);
+    expect(okDeflate.bytes.toString()).toBe("EXE-DEFLATED-STREAM");
+    // 正例：无签名描述符（规范允许）
+    const okNoSig = readZipEntryBytes(
+      streamedZip("a.exe", Buffer.from("EXE-NOSIG"), 0, { noDescriptorSignature: true }),
+      "a.exe",
+    );
+    expect(okNoSig.ok).toBe(true);
+    expect(okNoSig.bytes.toString()).toBe("EXE-NOSIG");
+    // 负例：声明 bit3 但描述符缺失（截断）——读取落到 CD 区被拒
+    const noDescriptor = readZipEntryBytes(
+      streamedZip("a.exe", Buffer.from("X-NODD"), 0, { dropDescriptor: true }),
+      "a.exe",
+    );
+    expect(noDescriptor.ok).toBe(false);
+    // 负例：描述符 CRC 与中央目录登记不一致
+    const badCrc = readZipEntryBytes(
+      streamedZip("a.exe", Buffer.from("X-CRC"), 0, { descriptorCrc: 0x12345678 }),
+      "a.exe",
+    );
+    expect(badCrc.ok).toBe(false);
+    expect(badCrc.reason).toMatch(/data descriptor.*与中央目录登记不一致/);
+    // 负例：描述符大小与中央目录登记不一致
+    const badSize = readZipEntryBytes(
+      streamedZip("a.exe", Buffer.from("X-SIZE"), 0, { descriptorUncompressed: 99 }),
+      "a.exe",
+    );
+    expect(badSize.ok).toBe(false);
+    expect(badSize.reason).toMatch(/data descriptor.*与中央目录登记不一致/);
+    // 负例：声明 bit3 但本地头 CRC/大小不是占位 0（非法形态）
+    const notPlaceholder = (() => {
+      const zip = streamedZip("a.exe", Buffer.from("X-FAKE"), 0);
+      // 本地头 CRC 字段在 offset 14
+      const cdOffset = zip.readUInt32LE(zip.length - 22 + 16);
+      const localOffset = zip.readUInt32LE(cdOffset + 42);
+      zip.writeUInt32LE(crc32(Buffer.from("X-FAKE")), localOffset + 14);
+      return zip;
+    })();
+    const rFake = readZipEntryBytes(notPlaceholder, "a.exe");
+    expect(rFake.ok).toBe(false);
+    expect(rFake.reason).toMatch(/本地头 CRC\/大小不是占位 0/);
+    // 负例：本地头与中央目录的 bit3 标志不一致（拼接形态）
+    const flagsMismatch = (() => {
+      const zip = streamedZip("a.exe", Buffer.from("X-FLAG"), 0);
+      const cdOffset = zip.readUInt32LE(zip.length - 22 + 16);
+      const localOffset = zip.readUInt32LE(cdOffset + 42);
+      zip.writeUInt16LE(0, localOffset + 6);
+      return zip;
+    })();
+    const rFlag = readZipEntryBytes(flagsMismatch, "a.exe");
+    expect(rFlag.ok).toBe(false);
+    expect(rFlag.reason).toMatch(/data descriptor 标志不一致/);
   });
 
   it("普通目录 nlink=2 也必须继续遍历：内含外部 junction 的反例不被漏掉", () => {
