@@ -407,6 +407,11 @@ export function collectAcceptanceTreePaths(
       if (stat.isDirectory()) {
         paths.push({ path: child, kind: "dir", source: "tree" });
         stack.push(child);
+      } else if (stat.isFile()) {
+        // 八轮复核问题 3：普通文件也登记（kind:"file"）——硬链接文件
+        // （nlink>1）只能在文件条目上被识别，目录走查漏掉文件 = 漏掉
+        // "经根内文件读写根外数据"的通道。
+        paths.push({ path: child, kind: "file", source: "tree" });
       }
     }
   }
@@ -427,6 +432,7 @@ export function validateAcceptancePaths({
   readFile = fs.readFileSync,
   collectTree = collectAcceptanceTreePaths,
   treeBudget = ACCEPTANCE_TREE_ENTRY_BUDGET,
+  lstat = fs.lstatSync,
 } = {}) {
   const protectedDirs = getUserProtectedDirs(homeDir);
   if (!protectedDirs) {
@@ -473,6 +479,23 @@ export function validateAcceptancePaths({
   for (const entry of unique.values()) {
     const c = canonicalize(entry.path, { expect: entry.kind ?? "any" });
     if (!c.ok) return { ok: false, reason: `验收路径 ${entry.path} 无法解析：${c.reason}` };
+    // AC10（八轮复核问题 3）：验收根内 nlink>1 的**普通文件**保守拒绝——
+    // 真实硬链接（同 inode 的第二个目录项）可以在根外，验收实例可经根内
+    // 文件读写根外数据；在无法枚举同 inode 其他目录项的前提下，nlink>1
+    // 即"不能证明独立"，不当作已证明独立的普通文件放行（目录的 nlink 数值
+    // 语义不同，仍继续遍历——见 collectAcceptanceTreePaths）。
+    let entryStat = null;
+    try {
+      entryStat = lstat(entry.path);
+    } catch {
+      /* canonicalize 已确认存在；此处失败交由下方 fail closed */
+    }
+    if (entryStat && !entryStat.isDirectory() && Number(entryStat.nlink) > 1) {
+      return {
+        ok: false,
+        reason: `验收路径 ${entry.path} 是硬链接文件（nlink=${entryStat.nlink}，可能指向验收根之外），无法证明独立，拒绝启动`,
+      };
+    }
     // AC10（六轮复核）：验收根内出现的链接/别名，解析目标必须仍落在验收根
     // 内——指向根外的 junction 会让验收实例把写入落根外，破坏隔离。固定布
     // 层、manifest、树走查发现的链接都经此核对（source 归并为 link）。
@@ -769,8 +792,97 @@ export function verifyAcceptanceBuildIdentity({
     );
   }
   return unverified(
-    "无法独立证明产物来源：构建记录可本地伪造，可核验的 CI artifact 绑定（GitHub API 核验 run/EXE 同源与 digest）尚未实现——保持 unverified 并拒绝启动（AC10 真实 Native 链路留待该核验落地）",
+    "无法独立证明产物来源：构建记录可本地伪造，可核验的 CI artifact 绑定（GitHub API 核验 run/EXE 同源与 digest）尚未接线到预检——保持 unverified 并拒绝启动（核验核心见 verifyBuildOriginBinding，AC10 真实 Native 链路留待接线）",
   );
+}
+
+/**
+ * 受控绑定核验核心（八轮复核问题 1）：验证"EXE 产自某个成功 CI run 且未被
+ * 篡改"。信任不在任何自报字段，而在 **GitHub 侧事实**——调用方把 GitHub API
+ * 的 artifact 清单与 run 元数据注入（生产：真实 API 调用；合成测试：固定清
+ * 单），本函数只做绑定判定：
+ *
+ *   record.builder === "ci"
+ *     且 ci.run_id/repository 与 run 元数据一致
+ *     且 run 元数据 conclusion === "success"、head_sha === record.source_commit
+ *     且清单里存在登记名字的 artifact、其 digest === 本地产物哈希
+ *   → "verified"（EXE 字节 = 该成功 run 在该提交上产出的字节，来源成立且未
+ *     被篡改；不证明受保护工作流未被绕过——那落在 GitHub 托管 Runner 与分支
+ *     保护的信任上）
+ *   任一环节缺失/不一致 → "unverified"（fail closed，不虚标）
+ *
+ * 联网与 token 由调用方承担：该核验是**显式的受控步骤**（CI 独立 step 或
+ * 本地 --verify-build-origin），不能塞进离线预检。当前未接到
+ * native-acceptance.mjs——预检仍无 verified 出口（AC10 保持开放）。
+ */
+export function verifyBuildOriginBinding({
+  record,
+  runMetadata = null,
+  artifacts = [],
+  artifactName = "acceptance-build",
+  localArtifactSha256 = null,
+} = {}) {
+  const unverified = (reason) => ({ ok: false, build_identity: "unverified", reason });
+  const parsed = record?.ok === true ? record : parseAcceptanceBuildRecord(record);
+  if (!parsed.ok) return unverified(`${parsed.reason}，拒绝启动`);
+  const trusted = parsed.record;
+  if (trusted.builder !== "ci") {
+    return unverified("构建记录不是 CI 构建（builder=local），无 CI 事实可核验，拒绝启动");
+  }
+  const ci = trusted.ci ?? {};
+  if (!String(ci.run_id ?? "").trim() || !String(ci.repository ?? "").trim()) {
+    return unverified("CI 记录缺 run_id/repository，无法定位 GitHub 侧事实，拒绝启动");
+  }
+  if (!runMetadata || typeof runMetadata !== "object") {
+    return unverified("缺少 GitHub run 元数据（受控核验步骤未执行），拒绝启动");
+  }
+  if (String(runMetadata.id ?? "") !== String(ci.run_id)) {
+    return unverified(
+      `run 元数据 id（${runMetadata.id ?? "缺失"}）与记录 run_id（${ci.run_id}）不一致，拒绝启动`,
+    );
+  }
+  if (String(runMetadata.repository ?? "") !== String(ci.repository)) {
+    return unverified(
+      `run 元数据 repository（${runMetadata.repository ?? "缺失"}）与记录不一致，拒绝启动`,
+    );
+  }
+  if (runMetadata.conclusion !== "success") {
+    return unverified(
+      `CI run 结论为 ${runMetadata.conclusion ?? "未知"}（期望 success），拒绝启动`,
+    );
+  }
+  const commit = String(trusted.source_commit).toLowerCase();
+  if (String(runMetadata.head_sha ?? "").toLowerCase() !== commit) {
+    return unverified(
+      `run head_sha（${runMetadata.head_sha ?? "缺失"}）与记录 source_commit（${commit}）不一致，拒绝启动`,
+    );
+  }
+  if (!Array.isArray(artifacts) || artifacts.length === 0) {
+    return unverified("该 run 没有任何 artifact，无法建立产物绑定，拒绝启动");
+  }
+  const artifact = artifacts.find((a) => a?.name === artifactName);
+  if (!artifact) {
+    return unverified(`run 的 artifact 清单中没有 "${artifactName}"，拒绝启动`);
+  }
+  if (!localArtifactSha256) {
+    return unverified("缺少本地产物哈希，无法与 artifact digest 绑定，拒绝启动");
+  }
+  // GitHub artifact digest（API 返回）必须与本地字节一致——EXE 未被替换。
+  const digest = String(artifact.digest ?? "").toLowerCase();
+  const local = String(localArtifactSha256).toLowerCase();
+  if (!digest) {
+    return unverified("artifact 没有 digest（GitHub 侧未背书），拒绝启动");
+  }
+  if (digest !== local) {
+    return unverified(
+      `artifact digest（${digest.slice(0, 12)}…）与本地产物哈希（${local.slice(0, 12)}…）不一致，EXE 已被替换或记录失效，拒绝启动`,
+    );
+  }
+  return {
+    ok: true,
+    build_identity: "verified",
+    reason: `EXE 字节与 CI run ${ci.run_id}（提交 ${commit.slice(0, 12)}…，结论 success）的 artifact "${artifactName}" 绑定一致——来源成立`,
+  };
 }
 
 /**

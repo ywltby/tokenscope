@@ -343,6 +343,10 @@ pub fn resolve_sources(
         match (&ctx.acceptance_root, ctx.env.acceptance_isolated) {
             // 隔离标志置位但根无法解析：无法证明任何路径在根内，fail closed
             (Some(root), true) => std::fs::canonicalize(root).ok(),
+            // 八轮复核问题 2：隔离标志置位但根缺失（None）同样 fail closed——
+            // 无法证明任何路径在根内，绝不回退为无限制模式。
+            (None, true) => None,
+            // 普通产品模式：不受约束
             _ => Some(PathBuf::new()),
         };
     let acceptance_constraint = |path: &Path| -> bool {

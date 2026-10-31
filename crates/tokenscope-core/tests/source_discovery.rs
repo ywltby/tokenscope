@@ -1106,6 +1106,194 @@ fn acceptance_isolation_gates_fallback_roots_before_probing() {
     let _ = std::fs::remove_dir_all(&outside_default);
 }
 
+/// RC10/AC10 八轮复核问题 2：`acceptance_isolated=true` 且 `acceptance_root=
+/// None` 必须 fail closed——隔离标志声明了验收上下文却没有根，无法证明任何
+/// 路径在根内，绝不能按普通产品模式无限制放行。分别覆盖 None、真正不存在
+/// 的根、无法解析的根（假路径形态），并用计数探测器证明被拒路径未被探测；
+/// 隔离根内正例正常；普通产品模式（isolated=false）语义原样保留。
+#[test]
+fn acceptance_isolated_without_root_fails_closed() {
+    let home = temp_dir("acc8-home");
+    let outside_default = temp_dir("acc8-outside");
+    std::fs::create_dir_all(outside_default.join("projects")).unwrap();
+
+    let probed: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    let counting_probe: ProbeFn = {
+        let probed = probed.clone();
+        Arc::new(move |path: &Path| {
+            probed.lock().unwrap().push(path.to_path_buf());
+            filesystem_probe()(path)
+        })
+    };
+
+    // 1) acceptance_root = None + isolated=true：fail closed
+    let ctx_none = DiscoveryContext {
+        claude_default_root: outside_default.join("projects"),
+        env: StartupEnv {
+            codex_home: None,
+            claude_config_dir: None,
+            acceptance_isolated: true,
+        },
+        acceptance_root: None,
+        ..ctx_for(&home, StartupEnv::default(), counting_probe.clone())
+    };
+    let out_none = resolve_sources(
+        &ctx_none,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    for row in &out_none.roots {
+        assert!(
+            !row.effective_enabled,
+            "隔离标志置位但根缺失（None）：全部候选停用，不回退无限制：{:?}",
+            row
+        );
+        assert_eq!(row.state, ProbeState::Missing, "停用行不探测：{:?}", row);
+    }
+    assert!(
+        !probed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.starts_with(&outside_default)),
+        "根缺失时根外默认根不得被探测：{:?}",
+        probed.lock().unwrap()
+    );
+
+    // 2) 真正不存在的根：fail closed
+    let ctx_missing_root = DiscoveryContext {
+        claude_default_root: outside_default.join("projects"),
+        env: StartupEnv {
+            codex_home: None,
+            claude_config_dir: None,
+            acceptance_isolated: true,
+        },
+        acceptance_root: Some(temp_dir("acc8-missing-root")),
+        ..ctx_for(&home, StartupEnv::default(), counting_probe.clone())
+    };
+    let out_missing = resolve_sources(
+        &ctx_missing_root,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    assert!(
+        out_missing
+            .roots
+            .iter()
+            .all(|r| !r.effective_enabled && r.state == ProbeState::Missing),
+        "根不存在：全部候选停用且不探测：{:?}",
+        out_missing.roots
+    );
+
+    // 3) 无法解析的根（隔离标志置位但 canonicalize 失败）：fail closed。
+    //    用断链 junction 作根。
+    let broken_root_link = home.join("broken-root-link");
+    let dangling_target = home.join("gone-root");
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&dangling_target, &broken_root_link).unwrap();
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(&dangling_target, &broken_root_link).unwrap();
+    assert!(std::fs::canonicalize(&broken_root_link).is_err());
+    let ctx_broken_root = DiscoveryContext {
+        claude_default_root: outside_default.join("projects"),
+        env: StartupEnv {
+            codex_home: None,
+            claude_config_dir: None,
+            acceptance_isolated: true,
+        },
+        acceptance_root: Some(broken_root_link),
+        ..ctx_for(&home, StartupEnv::default(), counting_probe.clone())
+    };
+    let out_broken = resolve_sources(
+        &ctx_broken_root,
+        &default_claude(),
+        &default_codex(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    assert!(
+        out_broken
+            .roots
+            .iter()
+            .all(|r| !r.effective_enabled && r.state == ProbeState::Missing),
+        "根无法解析：全部候选停用且不探测：{:?}",
+        out_broken.roots
+    );
+
+    // 4) 隔离根内正例：默认根在根内 → 正常探测与启用
+    let root = temp_dir("acc8-root");
+    std::fs::create_dir_all(root.join("sources/claude")).unwrap();
+    let ctx_inside = DiscoveryContext {
+        claude_default_root: root.join("sources/claude"),
+        env: StartupEnv {
+            codex_home: None,
+            claude_config_dir: None,
+            acceptance_isolated: true,
+        },
+        acceptance_root: Some(root.clone()),
+        ..ctx_for(&home, StartupEnv::default(), counting_probe.clone())
+    };
+    let out_inside = resolve_sources(
+        &ctx_inside,
+        &default_claude(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    let inside_row = out_inside
+        .roots
+        .iter()
+        .find(|r| r.agent == AgentKind::ClaudeCode)
+        .expect("隔离根内默认行在场");
+    assert!(
+        inside_row.effective_enabled && inside_row.state == ProbeState::Ready,
+        "隔离根内默认根正常探测与启用（目录已创建 → Ready）：{:?}",
+        inside_row
+    );
+
+    // 5) 普通产品模式对照：isolated=false、根 None → 语义原样保留（根外默认
+    //    根正常启用并探测）。
+    let probed_before = probed.lock().unwrap().len();
+    let ctx_plain = DiscoveryContext {
+        claude_default_root: outside_default.join("projects"),
+        env: StartupEnv {
+            codex_home: None,
+            claude_config_dir: None,
+            acceptance_isolated: false,
+        },
+        acceptance_root: None,
+        ..ctx_for(&home, StartupEnv::default(), counting_probe)
+    };
+    let out_plain = resolve_sources(
+        &ctx_plain,
+        &default_claude(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    let plain_row = out_plain
+        .roots
+        .iter()
+        .find(|r| r.agent == AgentKind::ClaudeCode)
+        .expect("普通模式 Claude 行在场");
+    assert!(
+        plain_row.effective_enabled,
+        "普通模式默认根语义不变：{:?}",
+        plain_row
+    );
+    assert!(
+        probed.lock().unwrap().len() > probed_before,
+        "普通模式照常探测"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside_default);
+}
+
 /// 映射绑定：默认根=默认绑定；环境根=未核实禁用；手动根=禁用；
 /// 默认+手动同根合并时保留默认绑定并诊断（不混用）。
 #[test]

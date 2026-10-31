@@ -87,7 +87,7 @@ class RecordAcceptanceBuildCase(unittest.TestCase):
         self.assertIn("run_id      = $env:GITHUB_RUN_ID", self.recorder)
         self.assertIn("repository  = $env:GITHUB_REPOSITORY", self.recorder)
         lib_identity = self.lib[self.lib.index("export function verifyAcceptanceBuildIdentity"):]
-        lib_identity = lib_identity[:lib_identity.index("/**\n * EXE 验收构建筛查")]
+        lib_identity = lib_identity[:lib_identity.index("export function verifyBuildOriginBinding")]
         # 无 verified 出口：身份函数不再返回 build_identity: "verified"
         self.assertNotIn('build_identity: "verified"', lib_identity)
         # 结论口径：无法独立证明来源 → unverified
@@ -96,6 +96,12 @@ class RecordAcceptanceBuildCase(unittest.TestCase):
         code_only = "\n".join(line for line in lib_identity.splitlines()
                               if not line.strip().startswith("//"))
         self.assertNotIn("GITHUB_ACTIONS", code_only)
+        # 受控绑定核验核心存在（GitHub run 事实 + artifact digest），但未接线
+        # 到预检——预检仍无 verified 出口；接线留待显式受控步骤（AC10 开放）。
+        self.assertIn("export function verifyBuildOriginBinding", self.lib)
+        binding = self.lib[self.lib.index("export function verifyBuildOriginBinding"):]
+        self.assertIn("conclusion", binding)
+        self.assertIn("digest", binding)
 
     def test_workflow_uses_recorder_instead_of_bare_cargo_build(self):
         self.assertIn("./scripts/record-acceptance-build.ps1", self.workflow)

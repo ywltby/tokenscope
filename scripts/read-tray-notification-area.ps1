@@ -78,6 +78,7 @@ public static class TsTray {
     [DllImport("kernel32.dll")] public static extern bool ReadProcessMemory(IntPtr proc, IntPtr addr, byte[] buf, UIntPtr size, out UIntPtr read);
     [DllImport("kernel32.dll")] public static extern bool WriteProcessMemory(IntPtr proc, IntPtr addr, byte[] buf, UIntPtr size, out UIntPtr written);
     [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();
 
     public const uint TB_BUTTONCOUNT = 0x0418;
     public const uint TB_GETBUTTON = 0x0417;
@@ -547,12 +548,9 @@ public static class TsTrayControlledText {
 '@
     }
     $rows = @()
-    # 本进程句柄（与 ReadButtons 对 explorer 的 OpenProcess 同一路径）
-    $selfProc = [TsTray]::OpenProcess([TsTray]::PROCESS_ACCESS, $false, $PID)
-    if ($selfProc -eq [IntPtr]::Zero) {
-        Write-Output (@{ mode = 'self-test-controlled-text'; ok = $false; error = "OpenProcess(self) failed" } | ConvertTo-Json -Compress)
-        exit 1
-    }
+    # 本进程句柄：GetCurrentProcess 伪句柄（-1）——钩子/作业等受限环境下
+    # OpenProcess(self) 可能失败，伪句柄由内核保证可用且语义明确（本进程）。
+    $selfProc = [TsTray]::GetCurrentProcess()
     try {
     # 1) 变长：短文本读出 → 原地改写为更长的文本（预分配 64 字符缓冲，同
     #    指针，改写不越界）→ 再读 → 内容变化。模拟"同一按钮的文本在两次

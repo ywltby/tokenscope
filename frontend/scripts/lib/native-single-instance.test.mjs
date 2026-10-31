@@ -37,6 +37,7 @@ import {
   validateAcceptanceRoot,
   verifyAcceptanceBuildIdentity,
   verifyAcceptanceExecutable,
+  verifyBuildOriginBinding,
 } from "./native-single-instance.mjs";
 import { buildLaunchesEvidence, createLaunchRecord } from "./native-instance.mjs";
 
@@ -653,6 +654,156 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
       fs.unlinkSync(brokenLink);
       fs.rmSync(sandbox.root, { recursive: true, force: true });
     }
+  });
+
+  it("根内文件与根外文件的真实硬链接（nlink>1）：预检保守拒绝，不是已证明独立的普通文件", () => {
+    // 八轮复核问题 3（先红）：NTFS 真实硬链接（linkSync，同 inode、nlink=2）
+    // 让验收实例可经根内文件读写根外数据——nlink>1 的普通文件不能当作已
+    // 证明独立的普通文件放行。外部哨兵由本测试自建自拆。
+    const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ac10-hardlink-out-"));
+    const outsideFile = path.join(outside, "sentinel.txt");
+    fs.writeFileSync(outsideFile, "REAL USER DATA", "utf8");
+    const sandbox = createRunSandbox("hardlink");
+    const home = sandbox.dir("home");
+    const root = sandbox.dir("home", "workspace");
+    sandbox.dir("home", "workspace", "tokenscope");
+    sandbox.dir("home", "workspace", "sources", "claude", "projects");
+    const linked = path.join(root, "tokenscope", "linked.db");
+    fs.linkSync(outsideFile, linked);
+    writeManifest(sandbox, root, acceptanceManifest(root));
+    try {
+      const result = validateAcceptancePaths({ root, homeDir: home });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/硬链接|nlink|链接|拒绝启动/);
+      // 外部哨兵原样保留（预检不写不删）
+      expect(fs.readFileSync(outsideFile, "utf8")).toBe("REAL USER DATA");
+    } finally {
+      fs.rmSync(linked, { force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+      sandbox.cleanup();
+    }
+  });
+
+  it("受控绑定：GitHub run 事实（success + head_sha + artifact digest）与记录一致才 verified", () => {
+    const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
+    const localSha = sha256(bytes);
+    const record = {
+      kind: ACCEPTANCE_BUILD_RECORD_KIND,
+      artifact_path: path.resolve("C:/build/target/release/tokenscope.exe"),
+      artifact_sha256: localSha,
+      build_command: ACCEPTANCE_BUILD_COMMAND,
+      source_commit: "b49f535abcdef1234567890abcdef1234567890",
+      features: ["acceptance", "tauri/custom-protocol"],
+      tree_clean: true,
+      builder: "ci",
+      ci: { run_id: "12345", repository: "ywltby/tokenscope", run_attempt: "1" },
+    };
+    // 可信路径：合成注入的 GitHub 事实（生产由真实 API 取得）与记录全部一致
+    const ok = verifyBuildOriginBinding({
+      record,
+      runMetadata: {
+        id: "12345",
+        repository: "ywltby/tokenscope",
+        conclusion: "success",
+        head_sha: "b49f535abcdef1234567890abcdef1234567890",
+      },
+      artifacts: [{ name: "acceptance-build", digest: localSha }],
+      localArtifactSha256: localSha,
+    });
+    expect(ok).toMatchObject({ ok: true, build_identity: "verified" });
+    // 预检本体仍无 verified 出口：绑定核验是显式受控步骤，未接线
+    const preflight = verifyAcceptanceExecutable(record.artifact_path, {
+      readFile: () => bytes,
+      buildRecord: parseAcceptanceBuildRecord(record),
+      sourceCommit: record.source_commit,
+    });
+    expect(preflight.build_identity).toBe("unverified");
+  });
+
+  it("受控绑定伪造路径：run 不一致/结论非 success/commit 不一致/清单缺失/digest 不匹配 → 全部 unverified", () => {
+    const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
+    const localSha = sha256(bytes);
+    const base = {
+      kind: ACCEPTANCE_BUILD_RECORD_KIND,
+      artifact_path: path.resolve("C:/build/target/release/tokenscope.exe"),
+      artifact_sha256: localSha,
+      build_command: ACCEPTANCE_BUILD_COMMAND,
+      source_commit: "b49f535abcdef1234567890abcdef1234567890",
+      features: ["acceptance", "tauri/custom-protocol"],
+      tree_clean: true,
+      builder: "ci",
+      ci: { run_id: "12345", repository: "ywltby/tokenscope", run_attempt: "1" },
+    };
+    const goodRun = {
+      id: "12345",
+      repository: "ywltby/tokenscope",
+      conclusion: "success",
+      head_sha: "b49f535abcdef1234567890abcdef1234567890",
+    };
+    const cases = [
+      {
+        name: "run id 不一致",
+        runMetadata: { ...goodRun, id: "99999" },
+        artifacts: [{ name: "acceptance-build", digest: localSha }],
+        expect: /run 元数据 id/,
+      },
+      {
+        name: "run 结论非 success",
+        runMetadata: { ...goodRun, conclusion: "failure" },
+        artifacts: [{ name: "acceptance-build", digest: localSha }],
+        expect: /结论为 failure/,
+      },
+      {
+        name: "head_sha 与记录提交不一致",
+        runMetadata: { ...goodRun, head_sha: "1111111111111111111111111111111111111111" },
+        artifacts: [{ name: "acceptance-build", digest: localSha }],
+        expect: /head_sha/,
+      },
+      {
+        name: "run 无 artifact",
+        runMetadata: goodRun,
+        artifacts: [],
+        expect: /没有任何 artifact/,
+      },
+      {
+        name: "清单没有登记的 artifact 名",
+        runMetadata: goodRun,
+        artifacts: [{ name: "other-artifact", digest: localSha }],
+        expect: /没有 "acceptance-build"/,
+      },
+      {
+        name: "digest 与本地产物不匹配（EXE 被替换）",
+        runMetadata: goodRun,
+        artifacts: [{ name: "acceptance-build", digest: "e".repeat(64) }],
+        expect: /不一致，EXE 已被替换/,
+      },
+      {
+        name: "缺少 run 元数据（核验步骤未执行）",
+        runMetadata: null,
+        artifacts: [{ name: "acceptance-build", digest: localSha }],
+        expect: /缺少 GitHub run 元数据/,
+      },
+    ];
+    for (const c of cases) {
+      const r = verifyBuildOriginBinding({
+        record: base,
+        runMetadata: c.runMetadata,
+        artifacts: c.artifacts,
+        localArtifactSha256: localSha,
+      });
+      expect(r.ok, c.name).toBe(false);
+      expect(r.build_identity, c.name).toBe("unverified");
+      expect(r.reason, c.name).toMatch(c.expect);
+    }
+    // 本地记录（builder=local）无 CI 事实可核验
+    const local = verifyBuildOriginBinding({
+      record: { ...base, builder: "local", ci: undefined },
+      runMetadata: goodRun,
+      artifacts: [{ name: "acceptance-build", digest: localSha }],
+      localArtifactSha256: localSha,
+    });
+    expect(local.ok).toBe(false);
+    expect(local.reason).toMatch(/不是 CI 构建/);
   });
 
   it("普通目录 nlink=2 也必须继续遍历：内含外部 junction 的反例不被漏掉", () => {
