@@ -828,11 +828,15 @@ export function verifyAcceptanceBuildIdentity({
 export function verifyBuildOriginBinding({
   record,
   runMetadata = null,
-  jobs = [],
+  jobList = [],
   artifacts = [],
+  trustedWorkflowName = null,
+  buildStepName = "Build embedded frontend and isolated acceptance executable",
+  trustedBuildJobName = "native-ui",
   artifactNamePrefix = "acceptance-build",
   localArtifactSha256 = null,
   archiveSha256 = null,
+  archiveExeSha256 = null,
 } = {}) {
   const unverified = (reason) => ({ ok: false, build_identity: "unverified", reason });
   const parsed = record?.ok === true ? record : parseAcceptanceBuildRecord(record);
@@ -843,30 +847,60 @@ export function verifyBuildOriginBinding({
   }
   const ci = trusted.ci ?? {};
   const runId = String(ci.run_id ?? "").trim();
-  const repository = String(ci.repository ?? "").trim();
-  if (!runId || !repository) {
+  const recordRepository = String(ci.repository ?? "").trim();
+  if (!runId || !recordRepository) {
     return unverified("CI 记录缺 run_id/repository，无法定位 GitHub 侧事实，拒绝启动");
   }
-  // repository 是 owner/name 形态（GitHub API 路径里 "/" 需编码为 %2F）。
-  if (!/^[^/\s]+\/[^/\s]+$/.test(repository)) {
-    return unverified(`repository 形态非法（期望 owner/name）：${repository}，拒绝启动`);
+  if (!/^[^/\s]+\/[^/\s]+$/.test(recordRepository)) {
+    return unverified(`repository 形态非法（期望 owner/name）：${recordRepository}，拒绝启动`);
   }
 
-  // 受信任仓库/工作流与受测提交如何确定：
-  //   - repository/run_id 必须与 run 元数据一致（GitHub 侧事实）；
-  //   - 受测提交 = run.head_sha（GitHub 侧事实），必须等于记录 source_commit；
-  //   - 构建与验证的排序：核验只看**受控构建 job**自身的结论
-  //    （jobs 里 name 匹配受控构建、conclusion=success、构建 step 成功），
-  //     不等整个 run success——Native 测试 job 与构建核验并行，避免死锁。
+  // 完整来源证明链（九轮复核重写，按 GitHub 实际响应形态）：
+  //
+  // 1. 可信仓库/工作流/受测提交——全部来自 GitHub 侧响应，独立于可自填的
+  //    构建记录：
+  //    - run 响应顶层 `repository.full_name`（owner/repo）必须等于记录的
+  //      repository（run 的 `name` 字段是**工作流名**，不是仓库，不能混用）；
+  //    - 可信工作流 = run 响应顶层 `name`，必须等于调用方注入的受信工作流名
+  //      （来自受信任清单，不由记录决定）；
+  //    - 受测提交 = run 响应 `head_sha`，必须等于记录 source_commit。
+  // 2. 构建与验证的排序：ui-e2e.yml 的构建是 `native-ui` **job 内的 step**
+  //    （"Build embedded frontend…"），不是独立 job。核验读取 run 的 jobs
+  //    响应：受信 job（native-ui）存在、其 `steps` 里构建 step
+  //    conclusion=success、job 自身不处于 failure——**不要求整个 run
+  //    success**（Native 场景 step 在构建 step 之后且可能仍在运行，等整体
+  //    success 会死锁）。先后关系 = 构建 step 成功 → 核验（本函数）→
+  //    Native 场景启动（预检）。
+  // 3. artifact 与 EXE 的真绑定：GitHub 的 artifact digest 是对 **zip 归档**
+  //    计算的（`sha256:` 前缀）；EXE 在归档内部，解压后对登记的 EXE 名重算
+  //    得到归档内 EXE 摘要。归档摘要、归档内 EXE 摘要、记录 artifact_sha256、
+  //    本地磁盘 EXE 哈希四者必须一致——归档内是 A 而记录/本地是 B 时拒绝。
   if (!runMetadata || typeof runMetadata !== "object") {
     return unverified("缺少 GitHub run 元数据（受控核验步骤未执行），拒绝启动");
   }
   if (String(runMetadata.id ?? "") !== runId) {
     return unverified(`run 元数据 id（${runMetadata.id ?? "缺失"}）与记录 run_id（${runId}）不一致，拒绝启动`);
   }
-  if (String(runMetadata.name ?? "") !== repository) {
+  // run 响应顶层 repository：{ full_name }（GitHub 实际形态）
+  const runRepositoryFullName = String(
+    runMetadata.repository?.full_name ?? runMetadata.repository ?? "",
+  ).trim();
+  if (!runRepositoryFullName) {
+    return unverified("run 元数据缺 repository.full_name，无法确定可信仓库，拒绝启动");
+  }
+  if (runRepositoryFullName !== recordRepository) {
     return unverified(
-      `run 元数据 repository（${runMetadata.name ?? "缺失"}）与记录（${repository}）不一致，拒绝启动`,
+      `run 的 repository.full_name（${runRepositoryFullName}）与记录 repository（${recordRepository}）不一致，拒绝启动`,
+    );
+  }
+  // 可信工作流：run 响应顶层 name 是工作流名（不是仓库），须与调用方注入的
+  // 受信工作流名一致——受信清单独立于构建记录。
+  if (!trustedWorkflowName) {
+    return unverified("缺少受信工作流名（受信任清单注入），无法证明 run 来自正确工作流，拒绝启动");
+  }
+  if (String(runMetadata.name ?? "") !== String(trustedWorkflowName)) {
+    return unverified(
+      `run 的工作流名（${runMetadata.name ?? "缺失"}）与受信工作流（${trustedWorkflowName}）不一致，拒绝启动`,
     );
   }
   const commit = String(trusted.source_commit).toLowerCase();
@@ -875,22 +909,27 @@ export function verifyBuildOriginBinding({
       `run head_sha（${runMetadata.head_sha ?? "缺失"}）与记录 source_commit（${commit}）不一致，拒绝启动`,
     );
   }
-  // 构建与验证的排序：核验受控构建 job 而非整个 run（run 整体 success 要等
-  // Native 测试结束，会让核验死锁）。受控构建 job = name 匹配 + conclusion
-  // =success + 构建步骤成功。
-  const buildJob = (Array.isArray(jobs) ? jobs : []).find(
-    (j) => j?.name === "Build embedded frontend and isolated acceptance executable",
-  );
-  if (!buildJob) {
-    return unverified("run 的 job 清单中没有受控构建 job，拒绝启动");
+
+  // jobs 响应形态：{ jobs: [...] } 或直接数组；受信 job（native-ui）的 steps
+  // 里构建 step conclusion=success。job 自身结论不要求 success（Native 场景
+  // step 可能在跑），但构建 step 必须成功。
+  const jobsArray = Array.isArray(jobList) ? jobList : Array.isArray(jobList?.jobs) ? jobList.jobs : [];
+  const trustedJob = jobsArray.find((j) => j?.name === trustedBuildJobName);
+  if (!trustedJob) {
+    return unverified(`run 的 job 清单中没有受信 job "${trustedBuildJobName}"，拒绝启动`);
   }
-  if (buildJob.conclusion !== "success") {
-    return unverified(`受控构建 job 结论为 ${buildJob.conclusion ?? "未知"}（期望 success），拒绝启动`);
+  const steps = Array.isArray(trustedJob.steps) ? trustedJob.steps : [];
+  const buildStep = steps.find((s) => s?.name === buildStepName);
+  if (!buildStep) {
+    return unverified(`受信 job "${trustedBuildJobName}" 的 steps 中没有构建 step "${buildStepName}"，拒绝启动`);
+  }
+  if (buildStep.conclusion !== "success") {
+    return unverified(
+      `构建 step 结论为 ${buildStep.conclusion ?? "未知"}（期望 success），拒绝启动`,
+    );
   }
 
-  // GitHub artifact 形态：清单元数据带 digest（"sha256:<hex>"，对 zip 归档
-  // 计算——"默认归档摘要"），EXE 在 zip 内部，解压后的哈希（"EXE 摘要"）是
-  // 另一个量。两者必须分别核验，且 artifact 名绑定受测提交短哈希防串用。
+  // artifact 清单（GET .../runs/{id}/artifacts 的 artifacts 数组）。
   if (!Array.isArray(artifacts) || artifacts.length === 0) {
     return unverified("该 run 没有任何 artifact，无法建立产物绑定，拒绝启动");
   }
@@ -909,8 +948,6 @@ export function verifyBuildOriginBinding({
   if (!archiveDigestRaw) {
     return unverified("artifact 没有 digest（GitHub 侧未背书归档摘要），拒绝启动");
   }
-  // 默认归档摘要：前缀必须是 sha256:，十六进制部分与传入的 archiveSha256
-  // （下载归档后重算）一致。
   const archiveDigest = archiveDigestRaw.startsWith("sha256:") ? archiveDigestRaw.slice(7) : null;
   if (!archiveDigest || !/^[0-9a-f]{64}$/.test(archiveDigest)) {
     return unverified(
@@ -925,21 +962,30 @@ export function verifyBuildOriginBinding({
       `归档摘要与 GitHub 登记不一致（登记 ${archiveDigest.slice(0, 12)}…，重算 ${String(archiveSha256).slice(0, 12)}…），拒绝启动`,
     );
   }
-  // EXE 摘要：解压归档后对 EXE 重算，必须与记录 artifact_sha256 及本地产物
-  // 哈希一致（三者相同才能证明"本地 EXE = CI run 产物"）。
-  if (!localArtifactSha256) {
-    return unverified("缺少本地产物哈希（解压归档后重算 EXE），拒绝启动");
+  // 归档内 EXE 摘要（真绑定核心）：核验方解压归档、对登记的 EXE 名重算哈希。
+  // 归档内是 A、记录/本地是 B 时在此被拒——这正是"归档与 EXE 分开核验"的意义。
+  if (!archiveExeSha256) {
+    return unverified("缺少归档内 EXE 摘要（解压归档后对登记 EXE 重算），拒绝启动");
   }
-  const exeDigest = String(trusted.artifact_sha256).toLowerCase();
-  if (exeDigest !== String(localArtifactSha256).toLowerCase()) {
+  const recordExeDigest = String(trusted.artifact_sha256).toLowerCase();
+  if (String(archiveExeSha256).toLowerCase() !== recordExeDigest) {
     return unverified(
-      `EXE 摘要与本地磁盘字节不一致（记录 ${exeDigest.slice(0, 12)}…，本地 ${String(localArtifactSha256).slice(0, 12)}…），EXE 已被替换，拒绝启动`,
+      `归档内 EXE 摘要（${String(archiveExeSha256).slice(0, 12)}…）与记录 artifact_sha256（${recordExeDigest.slice(0, 12)}…）不一致——归档内容与记录不符，拒绝启动`,
+    );
+  }
+  // 实际受测 EXE（本地磁盘）与记录核对。
+  if (!localArtifactSha256) {
+    return unverified("缺少本地产物哈希（实际受测 EXE 重算），拒绝启动");
+  }
+  if (String(localArtifactSha256).toLowerCase() !== recordExeDigest) {
+    return unverified(
+      `实际受测 EXE 哈希（${String(localArtifactSha256).slice(0, 12)}…）与记录（${recordExeDigest.slice(0, 12)}…）不一致，EXE 已被替换，拒绝启动`,
     );
   }
   return {
     ok: true,
     build_identity: "verified",
-    reason: `EXE 字节与 CI run ${runId}（提交 ${commit.slice(0, 12)}…，受控构建 job 成功）的 artifact "${expectedArtifactName}" 绑定一致——归档摘要与 EXE 摘要分别核验通过，来源成立`,
+    reason: `EXE 字节与 CI run ${runId}（提交 ${commit.slice(0, 12)}…，工作流 ${trustedWorkflowName}，构建 step 成功）的 artifact "${expectedArtifactName}" 绑定一致——归档摘要、归档内 EXE 摘要、记录与受测 EXE 四方核对通过，来源成立`,
   };
 }
 /**

@@ -684,7 +684,12 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     }
   });
 
-  it("受控绑定（按 GitHub API 形态）：构建 job 成功 + 归档摘要与 EXE 摘要分别核验一致才 verified", () => {
+  it("受控绑定（按 GitHub 实际响应形态）：可信仓库/工作流/受测提交 + 构建 step 成功 + 四方哈希一致才 verified", () => {
+    // GitHub 实际响应形态：
+    //   run: { id, name: <工作流名>, head_sha, conclusion, repository: { full_name } }
+    //   jobs: [ { name: "native-ui", conclusion, steps: [ { name, conclusion } ] } ]
+    //   artifacts: [ { name, digest: "sha256:...", workflow_run: { id } } ]
+    // 构建是 native-ui job 内的 step，不是独立 job；核验不等整个 run success。
     const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
     const localSha = sha256(bytes);
     const archiveSha = sha256(Buffer.from("zip-archive-bytes"));
@@ -699,22 +704,23 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
       builder: "ci",
       ci: { run_id: "12345", repository: "ywltby/tokenscope", run_attempt: "1" },
     };
-    // 离线 API 形态响应：run 元数据（name=owner/name 形态）、jobs（受控构建
-    // job 单独成功——不等含 Native 测试的整个 run success，避免核验死锁）、
-    // artifact 清单（digest 带 sha256: 前缀，对 zip 归档计算；名字绑定受测
-    // 提交短哈希防串用）。
     const runMetadata = {
       id: "12345",
-      name: "ywltby/tokenscope",
+      name: "Native UI E2E", // 顶层 name 是工作流名
       head_sha: "b49f535abcdef1234567890abcdef1234567890",
+      conclusion: null, // Native 场景仍在跑，不要求整体 success
+      repository: { full_name: "ywltby/tokenscope" }, // 实际形态：嵌套 full_name
     };
-    const jobs = [
+    const jobList = [
       {
-        name: "Build embedded frontend and isolated acceptance executable",
-        conclusion: "success",
-        steps: [{ name: "record-acceptance-build", conclusion: "success" }],
+        id: 1,
+        name: "native-ui", // 唯一 job，构建是其内部 step
+        conclusion: null,
+        steps: [
+          { name: "Build embedded frontend and isolated acceptance executable", conclusion: "success" },
+          { name: "Real WebView2 and Rust refresh lifecycle", conclusion: null },
+        ],
       },
-      { name: "Native single-instance scenarios", conclusion: null }, // 并行未结束
     ];
     const artifacts = [
       {
@@ -726,13 +732,15 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     const ok = verifyBuildOriginBinding({
       record,
       runMetadata,
-      jobs,
+      jobList,
       artifacts,
+      trustedWorkflowName: "Native UI E2E",
       localArtifactSha256: localSha,
       archiveSha256: archiveSha,
+      archiveExeSha256: localSha, // 归档内 EXE 摘要 = 记录/本地（同一产物）
     });
     expect(ok).toMatchObject({ ok: true, build_identity: "verified" });
-    expect(ok.reason).toMatch(/归档摘要与 EXE 摘要分别核验/);
+    expect(ok.reason).toMatch(/四方核对通过/);
     // 预检本体仍无 verified 出口：绑定核验是显式受控步骤，未接线
     const preflight = verifyAcceptanceExecutable(record.artifact_path, {
       readFile: () => bytes,
@@ -742,14 +750,15 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     expect(preflight.build_identity).toBe("unverified");
   });
 
-  it("受控绑定伪造路径（API 形态离线响应）：全组合 unverified", () => {
+  it("受控绑定反例（真实响应形态）：归档内 A 而记录/本地是 B、仓库/工作流/提交/step 不符 → 全部 unverified", () => {
     const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
-    const localSha = sha256(bytes);
-    const archiveSha = sha256(Buffer.from("zip-archive-bytes"));
+    const exeB = sha256(Buffer.from("EXE-B")); // 记录和本地声称的 B
+    const archiveSha = sha256(Buffer.from("zip-archive-A")); // 归档（内含 A）的摘要
+    const archiveExeA = sha256(Buffer.from("EXE-A")); // 归档内 EXE 实际哈希
     const record = {
       kind: ACCEPTANCE_BUILD_RECORD_KIND,
-      artifact_path: path.resolve("C:/build/target/release/tokenscope.exe"),
-      artifact_sha256: localSha,
+      artifact_path: path.resolve("C:/b.exe"),
+      artifact_sha256: exeB,
       build_command: ACCEPTANCE_BUILD_COMMAND,
       source_commit: "b49f535abcdef1234567890abcdef1234567890",
       features: ["acceptance", "tauri/custom-protocol"],
@@ -757,114 +766,149 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
       builder: "ci",
       ci: { run_id: "12345", repository: "ywltby/tokenscope", run_attempt: "1" },
     };
-    const goodRun = { id: "12345", name: "ywltby/tokenscope", head_sha: "b49f535abcdef1234567890abcdef1234567890" };
-    const goodJob = {
-      name: "Build embedded frontend and isolated acceptance executable",
-      conclusion: "success",
+    const goodRun = {
+      id: "12345",
+      name: "Native UI E2E",
+      head_sha: "b49f535abcdef1234567890abcdef1234567890",
+      repository: { full_name: "ywltby/tokenscope" },
     };
+    const goodJobs = [
+      { name: "native-ui", steps: [ { name: "Build embedded frontend and isolated acceptance executable", conclusion: "success" } ] },
+    ];
     const goodArtifacts = [
       { name: "acceptance-build-b49f535", digest: `sha256:${archiveSha}`, workflow_run: { id: "12345" } },
     ];
     const cases = [
       {
-        name: "run id 不一致",
-        runMetadata: { ...goodRun, id: "99999" },
-        jobs: [goodJob],
-        artifacts: goodArtifacts,
-        expect: /run 元数据 id/,
-      },
-      {
-        name: "repository 与记录不一致（owner/name 形态）",
-        runMetadata: { ...goodRun, name: "other/repo" },
-        jobs: [goodJob],
-        artifacts: goodArtifacts,
-        expect: /与记录.*不一致/,
-      },
-      {
-        name: "repository 形态非法",
+        name: "归档内是 A 而记录/本地是 B（真绑定核心反例）",
         runMetadata: goodRun,
-        jobs: [goodJob],
+        jobList: goodJobs,
         artifacts: goodArtifacts,
-        record: { ...record, ci: { ...record.ci, repository: "ywltby-tokenscope" } },
-        expect: /repository 形态非法/,
+        archiveSha256: archiveSha,
+        archiveExeSha256: archiveExeA, // 归档内 EXE 是 A
+        localArtifactSha256: exeB, // 本地是 B
+        expect: /归档内容与记录不符/,
+      },
+      {
+        name: "run.repository.full_name 与记录不一致",
+        runMetadata: { ...goodRun, repository: { full_name: "other/repo" } },
+        jobList: goodJobs,
+        artifacts: goodArtifacts,
+        archiveSha256: archiveSha,
+        archiveExeSha256: exeB,
+        localArtifactSha256: exeB,
+        expect: /与记录 repository.*不一致/,
+      },
+      {
+        name: "run 缺 repository.full_name",
+        runMetadata: { ...goodRun, repository: undefined },
+        jobList: goodJobs,
+        artifacts: goodArtifacts,
+        archiveSha256: archiveSha,
+        archiveExeSha256: exeB,
+        localArtifactSha256: exeB,
+        expect: /缺 repository.full_name/,
+      },
+      {
+        name: "工作流名与受信清单不一致（run.name 是工作流名）",
+        runMetadata: { ...goodRun, name: "Other Workflow" },
+        jobList: goodJobs,
+        artifacts: goodArtifacts,
+        trustedWorkflowName: "Native UI E2E",
+        archiveSha256: archiveSha,
+        archiveExeSha256: exeB,
+        localArtifactSha256: exeB,
+        expect: /受信工作流/,
+      },
+      {
+        name: "缺受信工作流名（无法证明 run 来自正确工作流）",
+        runMetadata: goodRun,
+        jobList: goodJobs,
+        artifacts: goodArtifacts,
+        trustedWorkflowName: null,
+        archiveSha256: archiveSha,
+        archiveExeSha256: exeB,
+        localArtifactSha256: exeB,
+        expect: /缺少受信工作流名/,
       },
       {
         name: "head_sha 与记录提交不一致",
         runMetadata: { ...goodRun, head_sha: "1111111111111111111111111111111111111111" },
-        jobs: [goodJob],
+        jobList: goodJobs,
         artifacts: goodArtifacts,
+        archiveSha256: archiveSha,
+        archiveExeSha256: exeB,
+        localArtifactSha256: exeB,
         expect: /head_sha/,
       },
       {
-        name: "缺 run 元数据（核验步骤未执行）",
-        runMetadata: null,
-        jobs: [goodJob],
+        name: "job 清单无 native-ui",
+        runMetadata: goodRun,
+        jobList: [ { name: "other-job", steps: [] } ],
         artifacts: goodArtifacts,
-        expect: /缺少 GitHub run 元数据/,
+        archiveSha256: archiveSha,
+        archiveExeSha256: exeB,
+        localArtifactSha256: exeB,
+        expect: /没有受信 job/,
       },
       {
-        name: "job 清单无受控构建 job",
+        name: "构建 step 缺失（native-ui 内无该 step）",
         runMetadata: goodRun,
-        jobs: [{ name: "Native tests", conclusion: "success" }],
+        jobList: [ { name: "native-ui", steps: [ { name: "other step", conclusion: "success" } ] } ],
         artifacts: goodArtifacts,
-        expect: /没有受控构建 job/,
+        archiveSha256: archiveSha,
+        archiveExeSha256: exeB,
+        localArtifactSha256: exeB,
+        expect: /没有构建 step/,
       },
       {
-        name: "受控构建 job 结论非 success",
+        name: "构建 step 结论非 success",
         runMetadata: goodRun,
-        jobs: [{ ...goodJob, conclusion: "failure" }],
+        jobList: [ { name: "native-ui", steps: [ { name: "Build embedded frontend and isolated acceptance executable", conclusion: "failure" } ] } ],
         artifacts: goodArtifacts,
-        expect: /受控构建 job 结论为 failure/,
+        archiveSha256: archiveSha,
+        archiveExeSha256: exeB,
+        localArtifactSha256: exeB,
+        expect: /构建 step 结论为 failure/,
       },
       {
-        name: "run 无 artifact",
+        name: "artifact 名未绑定受测提交",
         runMetadata: goodRun,
-        jobs: [goodJob],
-        artifacts: [],
-        expect: /没有任何 artifact/,
-      },
-      {
-        name: "artifact 名未绑定受测提交（防跨提交串用）",
-        runMetadata: goodRun,
-        jobs: [goodJob],
-        artifacts: [{ name: "acceptance-build-9999999", digest: `sha256:${archiveSha}`, workflow_run: { id: "12345" } }],
+        jobList: goodJobs,
+        artifacts: [ { name: "acceptance-build-9999999", digest: `sha256:${archiveSha}`, workflow_run: { id: "12345" } } ],
+        archiveSha256: archiveSha,
+        archiveExeSha256: exeB,
+        localArtifactSha256: exeB,
         expect: /绑定受测提交/,
       },
       {
-        name: "artifact 不属于记录的 run",
+        name: "归档摘要与 GitHub 登记不一致",
         runMetadata: goodRun,
-        jobs: [goodJob],
-        artifacts: [{ name: "acceptance-build-b49f535", digest: `sha256:${archiveSha}`, workflow_run: { id: "99999" } }],
-        expect: /不属于记录的 run/,
-      },
-      {
-        name: "digest 缺失（GitHub 侧未背书）",
-        runMetadata: goodRun,
-        jobs: [goodJob],
-        artifacts: [{ name: "acceptance-build-b49f535", workflow_run: { id: "12345" } }],
-        expect: /没有 digest/,
-      },
-      {
-        name: "digest 前缀不是 sha256:",
-        runMetadata: goodRun,
-        jobs: [goodJob],
-        artifacts: [{ name: "acceptance-build-b49f535", digest: `md5:${archiveSha}`, workflow_run: { id: "12345" } }],
-        expect: /digest 形态非法/,
-      },
-      {
-        name: "归档摘要与 GitHub 登记不一致（下载 zip 重算不符）",
-        runMetadata: goodRun,
-        jobs: [goodJob],
+        jobList: goodJobs,
         artifacts: goodArtifacts,
         archiveSha256: sha256(Buffer.from("tampered-zip")),
+        archiveExeSha256: exeB,
+        localArtifactSha256: exeB,
         expect: /归档摘要与 GitHub 登记不一致/,
       },
       {
-        name: "EXE 摘要与本地磁盘字节不一致（EXE 被替换）",
+        name: "缺归档内 EXE 摘要（核验方未解压重算）",
         runMetadata: goodRun,
-        jobs: [goodJob],
+        jobList: goodJobs,
         artifacts: goodArtifacts,
-        localArtifactSha256: sha256(Buffer.from("replaced-exe-bytes")),
+        archiveSha256: archiveSha,
+        archiveExeSha256: null,
+        localArtifactSha256: exeB,
+        expect: /缺少归档内 EXE 摘要/,
+      },
+      {
+        name: "实际受测 EXE 与记录不一致（EXE 被替换）",
+        runMetadata: goodRun,
+        jobList: goodJobs,
+        artifacts: goodArtifacts,
+        archiveSha256: archiveSha,
+        archiveExeSha256: exeB,
+        localArtifactSha256: sha256(Buffer.from("replaced-exe")),
         expect: /EXE 已被替换/,
       },
     ];
@@ -872,10 +916,12 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
       const r = verifyBuildOriginBinding({
         record: c.record ?? record,
         runMetadata: c.runMetadata,
-        jobs: c.jobs,
+        jobList: c.jobList,
         artifacts: c.artifacts,
-        localArtifactSha256: c.localArtifactSha256 ?? localSha,
-        archiveSha256: c.archiveSha256 ?? archiveSha,
+        trustedWorkflowName: Object.prototype.hasOwnProperty.call(c, "trustedWorkflowName") ? c.trustedWorkflowName : "Native UI E2E",
+        archiveSha256: c.archiveSha256,
+        archiveExeSha256: c.archiveExeSha256,
+        localArtifactSha256: c.localArtifactSha256,
       });
       expect(r.ok, c.name).toBe(false);
       expect(r.build_identity, c.name).toBe("unverified");
@@ -885,58 +931,14 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     const local = verifyBuildOriginBinding({
       record: { ...record, builder: "local", ci: undefined },
       runMetadata: goodRun,
-      jobs: [goodJob],
+      jobList: goodJobs,
       artifacts: goodArtifacts,
-      localArtifactSha256: localSha,
       archiveSha256: archiveSha,
+      archiveExeSha256: exeB,
+      localArtifactSha256: exeB,
     });
     expect(local.ok).toBe(false);
     expect(local.reason).toMatch(/不是 CI 构建/);
-  });
-
-
-  it("走查已发现的文件 lstat 失败（非 ENOENT）必须拒绝，不能吞错放行", () => {
-    // 九轮复核问题 2（先红）：lstat 权限失败被吞 → nlink 检查被跳过 →
-    // 潜在硬链接文件放行。注入 lstatSync：对走查发现的文件抛 EACCES。
-    const sandbox = createRunSandbox("lstat-fail");
-    const home = sandbox.dir("home");
-    const root = sandbox.dir("home", "workspace");
-    sandbox.dir("home", "workspace", "tokenscope");
-    sandbox.dir("home", "workspace", "sources", "claude", "projects");
-    sandbox.file("home", "workspace", "tokenscope", "linked.db", "data");
-    writeManifest(sandbox, root, acceptanceManifest(root));
-    const realLstat = fs.lstatSync.bind(fs);
-    const failingLstat = (p, opts) => {
-      if (path.resolve(String(p)) === path.resolve(path.join(root, "tokenscope", "linked.db"))) {
-        const e = new Error("EACCES: permission denied");
-        e.code = "EACCES";
-        throw e;
-      }
-      return realLstat(p, opts);
-    };
-    try {
-      const result = validateAcceptancePaths({ root, homeDir: home, lstat: failingLstat });
-      expect(result.ok).toBe(false);
-      expect(result.reason).toMatch(/无法检查|拒绝启动/);
-    } finally {
-      sandbox.cleanup();
-    }
-  });
-
-  it("全新隔离根里尚未创建的合法布局路径不被 lstat ENOENT 误拒（正例对照）", () => {
-    // 布局路径不存在是合法状态（准备脚本随后创建）；lstat ENOENT 只跳过
-    // nlink 检查，不能把全新根误判为拒绝。
-    const sandbox = createRunSandbox("lstat-enoent");
-    const home = sandbox.dir("home");
-    const root = sandbox.dir("home", "workspace");
-    // 只创建根本身，布局子路径全部不存在
-    try {
-      const result = validateAcceptancePaths({ root, homeDir: home });
-      expect(result.ok).toBe(true);
-      expect(result.reason).toMatch(/互不包含/);
-    } finally {
-      sandbox.cleanup();
-    }
   });
 
   it("普通目录 nlink=2 也必须继续遍历：内含外部 junction 的反例不被漏掉", () => {

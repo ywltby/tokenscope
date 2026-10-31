@@ -98,21 +98,23 @@ class RecordAcceptanceBuildCase(unittest.TestCase):
         self.assertNotIn("GITHUB_ACTIONS", code_only)
         # 受控绑定核验核心存在（GitHub run 事实 + artifact digest），但未接线
         # 到预检——预检仍无 verified 出口；接线留待显式受控步骤（AC10 开放）。
-        # 按 GitHub 实际 API 形态：repository owner/name、digest "sha256:" 前缀、
-        # 归档摘要与 EXE 摘要分别核验、artifact 名绑定受测提交、核验构建 job
-        # 而非整个 run（避免等 Native 测试）。
+        # 按 GitHub 实际响应形态：run.name 是工作流名、repository 是嵌套
+        # full_name、构建是 native-ui job 内的 step（不是独立 job）、核验构建
+        # step 而非整个 run、四方哈希（归档/归档内 EXE/记录/本地）。
         self.assertIn("export function verifyBuildOriginBinding", self.lib)
         binding = self.lib[self.lib.index("export function verifyBuildOriginBinding"):]
-        self.assertIn("conclusion", binding)
-        self.assertIn('startsWith("sha256:")', binding)
-        self.assertIn("archiveDigest", binding)
-        self.assertIn("expectedArtifactName", binding)
-        self.assertIn("受控构建 job", binding)
-        # 合成测试覆盖可信与伪造路径（离线 API 形态响应）
+        self.assertIn("full_name", binding)
+        self.assertIn('buildStepName = "Build embedded frontend and isolated acceptance executable"',
+                      binding)
+        self.assertIn('trustedBuildJobName = "native-ui"', binding)
+        self.assertIn("archiveExeSha256", binding)
+        self.assertIn("归档内容与记录不符", binding)
+        self.assertIn("startsWith(\"sha256:\")", binding)
+        # 合成测试覆盖可信与伪造路径（离线 GitHub 实际响应形态）
         test_text = (ROOT / "frontend/scripts/lib/native-single-instance.test.mjs").read_text(
             encoding="utf-8")
-        self.assertIn("受控绑定（按 GitHub API 形态）", test_text)
-        self.assertIn("受控绑定伪造路径（API 形态离线响应）", test_text)
+        self.assertIn("受控绑定（按 GitHub 实际响应形态）", test_text)
+        self.assertIn("受控绑定反例（真实响应形态）", test_text)
 
     def test_workflow_uses_recorder_instead_of_bare_cargo_build(self):
         self.assertIn("./scripts/record-acceptance-build.ps1", self.workflow)
