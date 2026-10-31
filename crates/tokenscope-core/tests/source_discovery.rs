@@ -1162,7 +1162,14 @@ fn acceptance_isolated_without_root_fails_closed() {
         probed.lock().unwrap()
     );
 
-    // 2) 真正不存在的根：fail closed
+    // 2) 真正不存在的根：fail closed。在本次创建的临时父目录下使用尚未
+    //    创建的子路径（temp_dir 会创建目录，因此不能用它表示"不存在"）。
+    let missing_parent = temp_dir("acc8-missing-root-parent");
+    let missing_root = missing_parent.join("not-created-acceptance-root");
+    assert!(
+        !missing_root.exists(),
+        "前置：隔离根子路径确实不存在（本次创建的临时父目录之下）"
+    );
     let ctx_missing_root = DiscoveryContext {
         claude_default_root: outside_default.join("projects"),
         env: StartupEnv {
@@ -1170,7 +1177,7 @@ fn acceptance_isolated_without_root_fails_closed() {
             claude_config_dir: None,
             acceptance_isolated: true,
         },
-        acceptance_root: Some(temp_dir("acc8-missing-root")),
+        acceptance_root: Some(missing_root),
         ..ctx_for(&home, StartupEnv::default(), counting_probe.clone())
     };
     let out_missing = resolve_sources(
@@ -1292,6 +1299,8 @@ fn acceptance_isolated_without_root_fails_closed() {
 
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&outside_default);
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&missing_parent);
 }
 
 /// 映射绑定：默认根=默认绑定；环境根=未核实禁用；手动根=禁用；
