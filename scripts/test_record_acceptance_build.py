@@ -113,8 +113,9 @@ class RecordAcceptanceBuildCase(unittest.TestCase):
         # 合成测试覆盖可信与伪造路径（真实合成 ZIP + 离线响应形态）
         test_text = (ROOT / "frontend/scripts/lib/native-single-instance.test.mjs").read_text(
             encoding="utf-8")
-        self.assertIn("受控绑定（真实合成 ZIP）", test_text)
-        self.assertIn("受控绑定反例（真实合成 ZIP）", test_text)
+        self.assertIn("受控绑定（真实合成 ZIP + 完整工作流身份）", test_text)
+        self.assertIn("受控绑定反例（完整工作流身份）", test_text)
+        self.assertIn("ZIP 边界（真实合成 ZIP 字节）", test_text)
 
     def test_workflow_uses_recorder_instead_of_bare_cargo_build(self):
         self.assertIn("./scripts/record-acceptance-build.ps1", self.workflow)

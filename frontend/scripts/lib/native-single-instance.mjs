@@ -826,46 +826,89 @@ export function verifyAcceptanceBuildIdentity({
  */
 export function readZipEntryBytes(archiveBytes, entryName) {
   const bytes = archiveBytes;
-  const u32 = (off) => bytes.readUInt32LE(off);
-  const u16 = (off) => bytes.readUInt16LE(off);
+  const fail = (reason) => ({ ok: false, reason });
+  // 全程先检查长度再读，杜绝越界读抛出未处理异常（Buffer.read* 越界会抛
+  // ERR_OUT_OF_RANGE）。
+  const safeU32 = (off) => {
+    if (!Number.isInteger(off) || off < 0 || off + 4 > bytes.length) return null;
+    return bytes.readUInt32LE(off);
+  };
+  const safeU16 = (off) => {
+    if (!Number.isInteger(off) || off < 0 || off + 2 > bytes.length) return null;
+    return bytes.readUInt16LE(off);
+  };
+  if (!Buffer.isBuffer(bytes) || bytes.length < 22) {
+    return fail("归档字节过短，不是有效的 ZIP 归档");
+  }
   // EOCD：从尾部向前找 signature 0x06054b50（注释长度上限 65535）
   const minEocd = 22;
   let eocd = -1;
-  for (let i = bytes.length - minEocd; i >= 0 && i >= bytes.length - minEocd - 65536; i--) {
-    if (u32(i) === 0x06054b50) {
+  const scanFloor = Math.max(0, bytes.length - minEocd - 65536);
+  for (let i = bytes.length - minEocd; i >= scanFloor; i--) {
+    const sig = safeU32(i);
+    if (sig === 0x06054b50) {
       eocd = i;
       break;
     }
   }
-  if (eocd < 0) return { ok: false, reason: "不是有效的 ZIP 归档（找不到 End of Central Directory）" };
-  const entryCount = u16(eocd + 10);
-  const cdOffset = u32(eocd + 16);
+  if (eocd < 0) return fail("不是有效的 ZIP 归档（找不到 End of Central Directory）");
+  const entryCount = safeU16(eocd + 10);
+  const cdSize = safeU32(eocd + 12);
+  const cdOffset = safeU32(eocd + 16);
+  if (entryCount === null || cdSize === null || cdOffset === null) {
+    return fail("ZIP EOCD 字段越界，归档损坏");
+  }
+  // 中央目录区间必须完整落在归档字节内
+  if (cdOffset < 0 || cdSize < 0 || cdOffset + cdSize > bytes.length) {
+    return fail(`ZIP 中央目录区间越界（offset ${cdOffset} + size ${cdSize} > ${bytes.length}），归档损坏或被篡改`);
+  }
+  if (entryCount < 0) {
+    return fail("ZIP EOCD 条目数为负，归档损坏");
+  }
   let cursor = cdOffset;
-  const seen = new Set();
   let found = null;
   for (let i = 0; i < entryCount; i++) {
-    if (u32(cursor) !== 0x02014b50) {
-      return { ok: false, reason: "ZIP Central Directory 损坏（条目签名不符）" };
+    if (cursor + 46 > bytes.length || safeU32(cursor) !== 0x02014b50) {
+      return fail("ZIP Central Directory 损坏（条目越界或签名不符）");
     }
-    const method = u16(cursor + 10);
-    const compressedSize = u32(cursor + 20);
-    const nameLen = u16(cursor + 28);
-    const extraLen = u16(cursor + 30);
-    const commentLen = u16(cursor + 32);
-    const localOffset = u32(cursor + 42);
+    const method = safeU16(cursor + 10);
+    const compressedSize = safeU32(cursor + 20);
+    const uncompressedSize = safeU32(cursor + 24);
+    const nameLen = safeU16(cursor + 28);
+    const extraLen = safeU16(cursor + 30);
+    const commentLen = safeU16(cursor + 32);
+    const localOffset = safeU32(cursor + 42);
+    if ([method, compressedSize, uncompressedSize, nameLen, extraLen, commentLen, localOffset].some((v) => v === null)) {
+      return fail("ZIP Central Directory 字段越界，归档损坏");
+    }
+    if (cursor + 46 + nameLen + extraLen + commentLen > bytes.length) {
+      return fail("ZIP Central Directory 条目名越界，归档损坏");
+    }
     const name = bytes.toString("utf8", cursor + 46, cursor + 46 + nameLen);
     if (name === entryName) {
-      if (seen.has(name)) {
-        return { ok: false, reason: `ZIP 归档内存在重复条目 "${entryName}"，无法确定登记产物，拒绝启动` };
+      // 同名重复条目：无法确定哪个是登记产物，直接失败而非猜测。
+      if (found !== null) {
+        return fail(`ZIP 归档内存在重复条目 "${entryName}"，无法确定登记产物，拒绝启动`);
       }
-      seen.add(name);
-      // local header：跳过固定 30 字节 + 名称/extra 才是数据
-      if (u32(localOffset) !== 0x04034b50) {
-        return { ok: false, reason: "ZIP local header 签名不符，归档损坏" };
+      // local header 必须完整落在归档内
+      if (localOffset < 0 || localOffset + 30 > bytes.length || safeU32(localOffset) !== 0x04034b50) {
+        return fail("ZIP local header 越界或签名不符，归档损坏");
       }
-      const localNameLen = u16(localOffset + 26);
-      const localExtraLen = u16(localOffset + 28);
+      const localNameLen = safeU16(localOffset + 26);
+      const localExtraLen = safeU16(localOffset + 28);
+      if (localNameLen === null || localExtraLen === null) {
+        return fail("ZIP local header 字段越界，归档损坏");
+      }
+      // 中央目录名与本地头名必须一致——不一致说明目录与数据错位或被拼接
+      const localName = bytes.toString("utf8", localOffset + 30, localOffset + 30 + localNameLen);
+      if (localName !== name) {
+        return fail(`ZIP 中央目录名（"${name}"）与本地头名（"${localName}"）不一致，归档被拼接或损坏`);
+      }
       const dataStart = localOffset + 30 + localNameLen + localExtraLen;
+      // 数据区间必须完整落在归档内
+      if (dataStart < 0 || compressedSize < 0 || dataStart + compressedSize > bytes.length) {
+        return fail(`ZIP 条目 "${entryName}" 数据区间越界（${dataStart} + ${compressedSize} > ${bytes.length}），归档损坏或被篡改`);
+      }
       const raw = bytes.subarray(dataStart, dataStart + compressedSize);
       let content;
       if (method === 0) {
@@ -874,17 +917,23 @@ export function readZipEntryBytes(archiveBytes, entryName) {
         try {
           content = zlib.inflateRawSync(raw);
         } catch (error) {
-          return { ok: false, reason: `ZIP 条目 "${entryName}" 解压失败：${String(error?.message ?? error)}` };
+          return fail(`ZIP 条目 "${entryName}" 解压失败：${String(error?.message ?? error)}`);
         }
       } else {
-        return { ok: false, reason: `ZIP 条目 "${entryName}" 使用不支持的压缩方式 ${method}，拒绝启动` };
+        return fail(`ZIP 条目 "${entryName}" 使用不支持的压缩方式 ${method}，拒绝启动`);
+      }
+      // 解压后长度与 Central Directory 登记的未压缩大小一致（内容完整性）
+      if (uncompressedSize > 0 && content.length !== uncompressedSize) {
+        return fail(
+          `ZIP 条目 "${entryName}" 解压后长度 ${content.length} 与登记 ${uncompressedSize} 不一致，内容损坏`,
+        );
       }
       found = content;
     }
     cursor += 46 + nameLen + extraLen + commentLen;
   }
   if (found === null) {
-    return { ok: false, reason: `ZIP 归档内没有条目 "${entryName}"，无法核验 EXE，拒绝启动` };
+    return fail(`ZIP 归档内没有条目 "${entryName}"，无法核验 EXE，拒绝启动`);
   }
   return { ok: true, bytes: found };
 }
@@ -913,11 +962,14 @@ export function verifyBuildOriginBinding({
   runMetadata = null,
   jobList = [],
   artifacts = [],
-  // 受信配置（十一轮复核问题 3）：预期仓库、工作流身份与受测提交来自独立
-  // 于构建记录的受信任清单（如发布配置），全部必填——缺失即无法证明"这次
-  // run 是预期的那次"，即使记录与 GitHub 响应内部一致也拒绝。
+  // 受信配置（十一轮复核问题 3 / 十二轮复核问题 1）：预期仓库、工作流身份
+  // 与受测提交来自独立于构建记录的受信任清单（如发布配置），全部必填——
+  // 缺失即无法证明"这次 run 是预期的那次"，即使记录与 GitHub 响应内部一致
+  // 也拒绝。工作流身份用 workflow_id（数字 ID）核对——显示名（run.name）在
+  // 不同工作流之间可重复，不能单独作为身份。
   trustedRepository = null,
   trustedWorkflowName = null,
+  trustedWorkflowId = null,
   trustedHeadSha = null,
   buildStepName = "Build embedded frontend and isolated acceptance executable",
   trustedBuildJobName = "native-ui",
@@ -994,14 +1046,23 @@ export function verifyBuildOriginBinding({
       `run 的 repository.full_name（${runRepositoryFullName}）与记录 repository（${recordRepository}）不一致，拒绝启动`,
     );
   }
-  // 可信工作流：run 响应顶层 name 是工作流名（不是仓库），须与调用方注入的
-  // 受信工作流名一致——受信清单独立于构建记录。
+  // 可信工作流：run 响应顶层 name 是工作流名（不是仓库），不同工作流可
+  // 显示同名——身份必须用 workflow_id（数字 ID，GitHub run 响应实际字段）
+  // 核对；显示名仅作附加一致性检查。
+  if (!trustedWorkflowId) {
+    return unverified("缺少受信工作流 ID（受信任清单注入），无法证明 run 来自正确工作流，拒绝启动");
+  }
+  if (String(runMetadata.workflow_id ?? "") !== String(trustedWorkflowId)) {
+    return unverified(
+      `run 的工作流 ID（${runMetadata.workflow_id ?? "缺失"}）与受信工作流 ID（${trustedWorkflowId}）不一致——相同显示名的工作流不是同一身份，拒绝启动`,
+    );
+  }
   if (!trustedWorkflowName) {
     return unverified("缺少受信工作流名（受信任清单注入），无法证明 run 来自正确工作流，拒绝启动");
   }
   if (String(runMetadata.name ?? "") !== String(trustedWorkflowName)) {
     return unverified(
-      `run 的工作流名（${runMetadata.name ?? "缺失"}）与受信工作流（${trustedWorkflowName}）不一致，拒绝启动`,
+      `run 的工作流名（${runMetadata.name ?? "缺失"}）与受信工作流名（${trustedWorkflowName}）不一致，拒绝启动`,
     );
   }
   const commit = String(trusted.source_commit).toLowerCase();
@@ -1028,6 +1089,13 @@ export function verifyBuildOriginBinding({
   const trustedJob = jobsArray.find((j) => j?.name === trustedBuildJobName);
   if (!trustedJob) {
     return unverified(`run 的 job 清单中没有受信 job "${trustedBuildJobName}"，拒绝启动`);
+  }
+  // job 的 run_id 必须与受检 run 一致——不同 run 的 job 不得为本核验提供
+  // 构建成功证据（GitHub jobs 响应实际字段 run_id）。
+  if (String(trustedJob.run_id ?? "") !== runId) {
+    return unverified(
+      `受信 job 的 run_id（${trustedJob.run_id ?? "缺失"}）与受检 run（${runId}）不一致——该 job 来自另一次 run，拒绝启动`,
+    );
   }
   const steps = Array.isArray(trustedJob.steps) ? trustedJob.steps : [];
   const buildStep = steps.find((s) => s?.name === buildStepName);
@@ -1103,7 +1171,7 @@ export function verifyBuildOriginBinding({
   return {
     ok: true,
     build_identity: "verified",
-    reason: `EXE 字节与 CI run ${runId}（提交 ${commit.slice(0, 12)}…，工作流 ${trustedWorkflowName}，构建 step 成功）的 artifact "${expectedArtifactName}" 绑定一致——归档摘要、归档内 EXE 摘要（从归档字节解压重算）、记录与受测 EXE（本地字节重算）四方核对通过，来源成立`,
+    reason: `EXE 字节与 CI run ${runId}（提交 ${commit.slice(0, 12)}…，工作流 ${trustedWorkflowName}#${trustedWorkflowId}，构建 step 成功）的 artifact "${expectedArtifactName}" 绑定一致——归档摘要、归档内 EXE 摘要（从归档字节解压重算）、记录与受测 EXE（本地字节重算）四方核对通过，来源成立`,
   };
 }
 /**

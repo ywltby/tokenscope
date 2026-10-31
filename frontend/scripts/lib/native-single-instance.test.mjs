@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
   ACCEPTANCE_BUILD_COMMAND,
@@ -38,6 +39,7 @@ import {
   verifyAcceptanceBuildIdentity,
   verifyAcceptanceExecutable,
   verifyBuildOriginBinding,
+  readZipEntryBytes,
 } from "./native-single-instance.mjs";
 import { buildLaunchesEvidence, createLaunchRecord } from "./native-instance.mjs";
 
@@ -567,7 +569,6 @@ describe("路径布局与固定判定", () => {
       sandbox.cleanup();
     }
   });
-});
 
 describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => {
   // 假用户目录 + 有效 manifest.json + root/sources/claude/projects junction。
@@ -760,7 +761,7 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     }
   });
 
-  it("受控绑定（真实合成 ZIP）：从归档字节计算归档摘要、读取归档内 EXE 计算摘要、独立计算本地 EXE 摘要——四方一致才 verified", () => {
+  it("受控绑定（真实合成 ZIP + 完整工作流身份）：构建 step 成功 + 四方哈希一致才 verified", () => {
     const exeBytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
     const localSha = sha256(exeBytes);
     const record = {
@@ -774,17 +775,19 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
       builder: "ci",
       ci: { run_id: "12345", repository: "ywltby/tokenscope", run_attempt: "1" },
     };
+    // GitHub 实际响应形态：run 顶层 name=工作流名、workflow_id=工作流身份、
+    // repository.full_name=仓库；job 有 run_id 字段；构建是 native-ui 内 step。
     const runMetadata = {
       id: "12345",
       name: "Native UI E2E",
+      workflow_id: 777,
       head_sha: "b49f535abcdef1234567890abcdef1234567890",
       conclusion: null,
       repository: { full_name: "ywltby/tokenscope" },
     };
     const jobList = [
-      { name: "native-ui", steps: [ { name: "Build embedded frontend and isolated acceptance executable", conclusion: "success" } ] },
+      { name: "native-ui", run_id: 12345, steps: [ { name: "Build embedded frontend and isolated acceptance executable", conclusion: "success" } ] },
     ];
-    // 真实合成 ZIP：归档内 EXE = 记录/本地同一字节
     const archiveBytes = makeStoredZip([["tokenscope.exe", exeBytes]]);
     const artifacts = [
       { name: "acceptance-build-b49f535", digest: `sha256:${sha256(archiveBytes)}`, workflow_run: { id: "12345" } },
@@ -795,8 +798,9 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
       jobList,
       artifacts,
       trustedRepository: "ywltby/tokenscope",
-    trustedHeadSha: "b49f535abcdef1234567890abcdef1234567890",
-    trustedWorkflowName: "Native UI E2E",
+      trustedWorkflowName: "Native UI E2E",
+      trustedWorkflowId: 777,
+      trustedHeadSha: "b49f535abcdef1234567890abcdef1234567890",
       archiveBytes,
       localExeBytes: exeBytes,
     });
@@ -810,14 +814,12 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     expect(preflight.build_identity).toBe("unverified");
   });
 
-  it("受控绑定反例（真实合成 ZIP）：归档内 A 而本地/记录为 B → 拒绝；重复名条目 → 拒绝；摘要不符/缺字节 → 拒绝", () => {
+  it("受控绑定反例（完整工作流身份）：相同显示名不同 workflow_id、不同 run 的 job、非预期仓库/提交 → 全部 unverified", () => {
     const exeB = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
-    const exeA = peWith(ACCEPTANCE_EXE_MARKERS.join(" ") + "-A");
-    const exeBSha = sha256(exeB);
     const record = {
       kind: ACCEPTANCE_BUILD_RECORD_KIND,
       artifact_path: path.resolve("C:/b.exe"),
-      artifact_sha256: exeBSha,
+      artifact_sha256: sha256(exeB),
       build_command: ACCEPTANCE_BUILD_COMMAND,
       source_commit: "b49f535abcdef1234567890abcdef1234567890",
       features: ["acceptance", "tauri/custom-protocol"],
@@ -828,143 +830,161 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     const runMetadata = {
       id: "12345",
       name: "Native UI E2E",
+      workflow_id: 777,
       head_sha: "b49f535abcdef1234567890abcdef1234567890",
       repository: { full_name: "ywltby/tokenscope" },
     };
-    const jobList = [
-      { name: "native-ui", steps: [ { name: "Build embedded frontend and isolated acceptance executable", conclusion: "success" } ] },
+    const zip = makeStoredZip([["tokenscope.exe", exeB]]);
+    const goodJobs = [
+      { name: "native-ui", run_id: 12345, steps: [ { name: "Build embedded frontend and isolated acceptance executable", conclusion: "success" } ] },
     ];
-    // 1) 归档内 A、记录和本地为 B：核验从归档字节读出的 EXE 是 A → 拒绝
-    const zipWithA = makeStoredZip([["tokenscope.exe", exeA]]);
-    const rA = verifyBuildOriginBinding({
-      record,
-      runMetadata,
-      jobList,
-      artifacts: [ { name: "acceptance-build-b49f535", digest: `sha256:${sha256(zipWithA)}`, workflow_run: { id: "12345" } } ],
-      trustedRepository: "ywltby/tokenscope",
-    trustedHeadSha: "b49f535abcdef1234567890abcdef1234567890",
-    trustedWorkflowName: "Native UI E2E",
-      archiveBytes: zipWithA,
-      localExeBytes: exeB,
-    });
-    expect(rA.ok).toBe(false);
-    expect(rA.reason).toMatch(/归档内容与记录不符/);
-    // 2) 同一 EXE 正例：归档内、记录、本地同为 B → verified
-    const zipWithB = makeStoredZip([["tokenscope.exe", exeB]]);
-    const rB = verifyBuildOriginBinding({
-      record,
-      runMetadata,
-      jobList,
-      artifacts: [ { name: "acceptance-build-b49f535", digest: `sha256:${sha256(zipWithB)}`, workflow_run: { id: "12345" } } ],
-      trustedRepository: "ywltby/tokenscope",
-    trustedHeadSha: "b49f535abcdef1234567890abcdef1234567890",
-    trustedWorkflowName: "Native UI E2E",
-      archiveBytes: zipWithB,
-      localExeBytes: exeB,
-    });
-    expect(rB).toMatchObject({ ok: true, build_identity: "verified" });
-    // 3) 重复文件名：无法确定登记产物 → 拒绝
-    const zipDup = makeStoredZip([["tokenscope.exe", exeA], ["tokenscope.exe", exeB]]);
-    const rDup = verifyBuildOriginBinding({
-      record,
-      runMetadata,
-      jobList,
-      artifacts: [ { name: "acceptance-build-b49f535", digest: `sha256:${sha256(zipDup)}`, workflow_run: { id: "12345" } } ],
-      trustedRepository: "ywltby/tokenscope",
-    trustedHeadSha: "b49f535abcdef1234567890abcdef1234567890",
-    trustedWorkflowName: "Native UI E2E",
-      archiveBytes: zipDup,
-      localExeBytes: exeB,
-    });
+    const goodArtifacts = [
+      { name: "acceptance-build-b49f535", digest: `sha256:${sha256(zip)}`, workflow_run: { id: "12345" } },
+    ];
+    const cases = [
+      {
+        name: "相同显示名、不同工作流身份（workflow_id 888 vs 777）",
+        runMetadata,
+        trustedWorkflowId: 888,
+        expect: /相同显示名的工作流不是同一身份/,
+      },
+      {
+        name: "缺受信工作流 ID",
+        runMetadata,
+        trustedWorkflowId: null,
+        expect: /缺少受信工作流 ID/,
+      },
+      {
+        name: "job 来自另一次 run（run_id 99999 vs 12345）",
+        jobList: [ { name: "native-ui", run_id: 99999, steps: goodJobs[0].steps } ],
+        expect: /该 job 来自另一次 run/,
+      },
+      {
+        name: "job 缺 run_id 字段",
+        jobList: [ { name: "native-ui", steps: goodJobs[0].steps } ],
+        expect: /run_id.*缺失|来自另一次 run/,
+      },
+      {
+        name: "非预期仓库（记录与响应内部一致也拒绝）",
+        runMetadata: { ...runMetadata, repository: { full_name: "other/repo" } },
+        trustedRepository: "other/trusted",
+        expect: /与受信仓库.*不一致/,
+      },
+      {
+        name: "非预期受测提交（记录与响应内部一致也拒绝）",
+        runMetadata: { ...runMetadata, head_sha: "2222222222222222222222222222222222222222" },
+        trustedHeadSha: "3333333333333333333333333333333333333333",
+        expect: /与受信受测提交.*不一致/,
+      },
+    ];
+    for (const c of cases) {
+      const r = verifyBuildOriginBinding({
+        record,
+        runMetadata: c.runMetadata ?? runMetadata,
+        jobList: c.jobList ?? goodJobs,
+        artifacts: goodArtifacts,
+        trustedRepository: c.trustedRepository ?? "ywltby/tokenscope",
+        trustedWorkflowName: "Native UI E2E",
+        trustedWorkflowId: Object.prototype.hasOwnProperty.call(c, "trustedWorkflowId") ? c.trustedWorkflowId : 777,
+        trustedHeadSha: c.trustedHeadSha ?? "b49f535abcdef1234567890abcdef1234567890",
+        archiveBytes: zip,
+        localExeBytes: exeB,
+      });
+      expect(r.ok, c.name).toBe(false);
+      expect(r.build_identity, c.name).toBe("unverified");
+      expect(r.reason, c.name).toMatch(c.expect);
+    }
+  });
+
+  it("ZIP 边界（真实合成 ZIP 字节）：CD/local 名不一致、越界、长度不一致、deflate 均安全处理", () => {
+    const crc32 = (() => {
+      const t = new Int32Array(256);
+      for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c; }
+      return (b) => { let c = -1; for (const x of b) c = (c >>> 8) ^ t[(c ^ x) & 0xff]; return (c ^ -1) >>> 0; };
+    })();
+    const mkEntry = (name, content, opts = {}) => {
+      const nb = Buffer.from(name);
+      const nb2 = Buffer.from(opts.localName ?? name);
+      const crc = crc32(content);
+      const l = Buffer.alloc(30);
+      l.writeUInt32LE(0x04034b50, 0);
+      l.writeUInt16LE(20, 4);
+      l.writeUInt16LE(opts.method ?? 0, 8);
+      l.writeUInt32LE(opts.compressedSize ?? content.length, 18);
+      l.writeUInt32LE(content.length, 22);
+      l.writeUInt16LE(nb2.length, 26);
+      const c = Buffer.alloc(46);
+      c.writeUInt32LE(0x02014b50, 0);
+      c.writeUInt16LE(opts.method ?? 0, 10);
+      c.writeUInt32LE(opts.compressedSize ?? content.length, 20);
+      c.writeUInt32LE(opts.uncompressedSize ?? content.length, 24);
+      c.writeUInt16LE(nb.length, 28);
+      c.writeUInt32LE(0, 42);
+      return { local: Buffer.concat([l, nb2, opts.localData ?? content]), central: Buffer.concat([c, nb]) };
+    };
+    const buildZip = (entries, overrides = {}) => {
+      const locals = [], centrals = [];
+      let off = 0;
+      for (const e of entries) { locals.push(e.local); centrals.push(e.central); off += e.local.length; }
+      const cdSize = centrals.reduce((a, b) => a + b.length, 0);
+      const eocd = Buffer.alloc(22);
+      eocd.writeUInt32LE(0x06054b50, 0);
+      eocd.writeUInt16LE(entries.length, 8);
+      eocd.writeUInt16LE(entries.length, 10);
+      eocd.writeUInt32LE(overrides.cdSize ?? cdSize, 12);
+      eocd.writeUInt32LE(overrides.cdOffset ?? off, 16);
+      return Buffer.concat([...locals, ...centrals, eocd]);
+    };
+    // 正例：stored 可读
+    const zipOK = buildZip([mkEntry("tokenscope.exe", Buffer.from("EXE-B"))]);
+    expect(readZipEntryBytes(zipOK, "tokenscope.exe").bytes.toString()).toBe("EXE-B");
+    // 正例：deflate 可读（uncompressedSize=原文长度）
+    const orig = Buffer.from("EXE-DEFLATED");
+    const deflated = zlib.deflateRawSync(orig);
+    const zipDef = buildZip([mkEntry("a.exe", orig, { method: 8, compressedSize: deflated.length, localData: deflated })]);
+    const rDef = readZipEntryBytes(zipDef, "a.exe");
+    expect(rDef.ok).toBe(true);
+    expect(rDef.bytes.toString()).toBe("EXE-DEFLATED");
+    // 反例 1：中央目录名与本地头名不一致
+    const zipMismatch = buildZip([mkEntry("tokenscope.exe", Buffer.from("EXE-B"), { localName: "other-name.exe" })]);
+    const rMismatch = readZipEntryBytes(zipMismatch, "tokenscope.exe");
+    expect(rMismatch.ok).toBe(false);
+    expect(rMismatch.reason).toMatch(/与本地头名.*不一致|归档被拼接/);
+    // 反例 2：中央目录偏移越界
+    const zipCdOff = buildZip([mkEntry("tokenscope.exe", Buffer.from("EXE-B"))], { cdOffset: 0xfffffff0 });
+    const rCdOff = readZipEntryBytes(zipCdOff, "tokenscope.exe");
+    expect(rCdOff.ok).toBe(false);
+    expect(rCdOff.reason).toMatch(/中央目录区间越界/);
+    // 反例 3：中央目录大小越界
+    const zipCdSize = buildZip([mkEntry("tokenscope.exe", Buffer.from("EXE-B"))], { cdSize: 0xffff0000 });
+    const rCdSize = readZipEntryBytes(zipCdSize, "tokenscope.exe");
+    expect(rCdSize.ok).toBe(false);
+    expect(rCdSize.reason).toMatch(/中央目录区间越界/);
+    // 反例 4：条目 compressedSize 越界（数据区间超出归档）
+    const cdOff = zipOK.readUInt32LE(zipOK.length - 22 + 16);
+    const zipCompressed = Buffer.from(zipOK);
+    zipCompressed.writeUInt32LE(0xffff0000, cdOff + 20);
+    const rCompressed = readZipEntryBytes(zipCompressed, "tokenscope.exe");
+    expect(rCompressed.ok).toBe(false);
+    expect(rCompressed.reason).toMatch(/数据区间越界/);
+    // 反例 5：条目 localOffset 越界
+    const zipLocalOff = Buffer.from(zipOK);
+    zipLocalOff.writeUInt32LE(0xffff0000, cdOff + 42);
+    const rLocalOff = readZipEntryBytes(zipLocalOff, "tokenscope.exe");
+    expect(rLocalOff.ok).toBe(false);
+    // 反例 6：解压后长度与登记 uncompressedSize 不一致
+    const zipLenMismatch = buildZip([mkEntry("a.exe", orig, { method: 8, compressedSize: deflated.length, uncompressedSize: orig.length + 7, localData: deflated })]);
+    const rLenMismatch = readZipEntryBytes(zipLenMismatch, "a.exe");
+    expect(rLenMismatch.ok).toBe(false);
+    expect(rLenMismatch.reason).toMatch(/解压后长度.*不一致|内容损坏/);
+    // 反例 7：重复条目名
+    const zipDup = makeStoredZip([["tokenscope.exe", Buffer.from("A")], ["tokenscope.exe", Buffer.from("B")]]);
+    const rDup = readZipEntryBytes(zipDup, "tokenscope.exe");
     expect(rDup.ok).toBe(false);
     expect(rDup.reason).toMatch(/重复条目/);
-    // 4) 归档摘要与登记不符（字节被篡改）→ 拒绝
-    const zipTampered = makeStoredZip([["tokenscope.exe", exeA]]);
-    const rTampered = verifyBuildOriginBinding({
-      record,
-      runMetadata,
-      jobList,
-      artifacts: [ { name: "acceptance-build-b49f535", digest: `sha256:${sha256(Buffer.from("not-this-zip"))}`, workflow_run: { id: "12345" } } ],
-      trustedRepository: "ywltby/tokenscope",
-    trustedHeadSha: "b49f535abcdef1234567890abcdef1234567890",
-    trustedWorkflowName: "Native UI E2E",
-      archiveBytes: zipTampered,
-      localExeBytes: exeB,
-    });
-    expect(rTampered.ok).toBe(false);
-    expect(rTampered.reason).toMatch(/归档摘要与 GitHub 登记不一致/);
-    // 5) 归档内没有登记 EXE 名 → 拒绝
+    // 反例 8：归档内没有登记条目名
     const zipOther = makeStoredZip([["other.txt", Buffer.from("x")]]);
-    const rMissing = verifyBuildOriginBinding({
-      record,
-      runMetadata,
-      jobList,
-      artifacts: [ { name: "acceptance-build-b49f535", digest: `sha256:${sha256(zipOther)}`, workflow_run: { id: "12345" } } ],
-      trustedRepository: "ywltby/tokenscope",
-    trustedHeadSha: "b49f535abcdef1234567890abcdef1234567890",
-    trustedWorkflowName: "Native UI E2E",
-      archiveBytes: zipOther,
-      localExeBytes: exeB,
-    });
-    expect(rMissing.ok).toBe(false);
-    expect(rMissing.reason).toMatch(/没有条目/);
-    // 6) 缺归档字节（受控步骤未提供）→ 拒绝
-    const zipWithB2 = makeStoredZip([["tokenscope.exe", exeB]]);
-    const rNoArchive = verifyBuildOriginBinding({
-      record,
-      runMetadata,
-      jobList,
-      artifacts: [ { name: "acceptance-build-b49f535", digest: `sha256:${sha256(zipWithB2)}`, workflow_run: { id: "12345" } } ],
-      trustedRepository: "ywltby/tokenscope",
-    trustedHeadSha: "b49f535abcdef1234567890abcdef1234567890",
-    trustedWorkflowName: "Native UI E2E",
-      archiveBytes: null,
-      localExeBytes: exeB,
-    });
-    expect(rNoArchive.ok).toBe(false);
-    expect(rNoArchive.reason).toMatch(/缺少下载的归档字节/);
-    // 7) 缺本地 EXE 字节 → 拒绝
-    const rNoLocal = verifyBuildOriginBinding({
-      record,
-      runMetadata,
-      jobList,
-      artifacts: [ { name: "acceptance-build-b49f535", digest: `sha256:${sha256(zipWithB2)}`, workflow_run: { id: "12345" } } ],
-      trustedRepository: "ywltby/tokenscope",
-    trustedHeadSha: "b49f535abcdef1234567890abcdef1234567890",
-    trustedWorkflowName: "Native UI E2E",
-      archiveBytes: zipWithB2,
-      localExeBytes: null,
-    });
-    expect(rNoLocal.ok).toBe(false);
-    expect(rNoLocal.reason).toMatch(/缺少实际受测 EXE/);
-    // 8) 非预期仓库（记录与响应内部一致也拒绝）：受信配置独立于记录
-    const rWrongRepo = verifyBuildOriginBinding({
-      record,
-      runMetadata: { ...runMetadata, repository: { full_name: "other/repo" } },
-      jobList,
-      artifacts: [ { name: "acceptance-build-b49f535", digest: `sha256:${sha256(zipWithB2)}`, workflow_run: { id: "12345" } } ],
-      trustedRepository: "ywltby/tokenscope",
-      trustedHeadSha: "b49f535abcdef1234567890abcdef1234567890",
-      archiveBytes: zipWithB2,
-      localExeBytes: exeB,
-    });
-    expect(rWrongRepo.ok).toBe(false);
-    expect(rWrongRepo.reason).toMatch(/与受信仓库.*不一致/);
-    // 9) 非预期受测提交（记录改成 2222、响应也 2222——内部一致仍拒绝）
-    const recordShifted = { ...record, source_commit: "2222222222222222222222222222222222222222" };
-    const rWrongCommit = verifyBuildOriginBinding({
-      record: recordShifted,
-      runMetadata: { ...runMetadata, head_sha: "2222222222222222222222222222222222222222" },
-      jobList,
-      artifacts: [ { name: "acceptance-build-2222222", digest: `sha256:${sha256(zipWithB2)}`, workflow_run: { id: "12345" } } ],
-      trustedRepository: "ywltby/tokenscope",
-      trustedWorkflowName: "Native UI E2E",
-      trustedHeadSha: "b49f535abcdef1234567890abcdef1234567890",
-      archiveBytes: zipWithB2,
-      localExeBytes: exeB,
-    });
-    expect(rWrongCommit.ok).toBe(false);
-    expect(rWrongCommit.reason).toMatch(/与受信受测提交.*不一致/);
+    expect(readZipEntryBytes(zipOther, "tokenscope.exe").ok).toBe(false);
   });
 
   it("普通目录 nlink=2 也必须继续遍历：内含外部 junction 的反例不被漏掉", () => {
@@ -1062,6 +1082,7 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
       sandbox.cleanup();
     }
   });
+});
 });
 
 describe("sourceCommit 只从 .git 文件读出（不 spawn git）", () => {
