@@ -78,6 +78,19 @@ class RecordAcceptanceBuildCase(unittest.TestCase):
         self.assertIn("tree_clean", lib_parse)
         self.assertIn("必须由 record-acceptance-build.ps1 登记源树状态", lib_parse)
 
+    def test_record_carries_builder_grade_and_lib_gates_on_ci(self):
+        # 六轮复核：verified 只授予"受控 CI 构建"——记录 builder=ci 且预检在
+        # CI 环境。本地记录（builder=local）无法独立证明来源，一律 unverified。
+        self.assertIn("$builder = if ($isCi) { 'ci' } else { 'local' }", self.recorder)
+        self.assertIn("builder         = $builder", self.recorder)
+        self.assertIn("run_id      = $env:GITHUB_RUN_ID", self.recorder)
+        self.assertIn("repository  = $env:GITHUB_REPOSITORY", self.recorder)
+        lib_identity = self.lib[self.lib.index("export function verifyAcceptanceBuildIdentity"):]
+        lib_identity = lib_identity[:lib_identity.index("/**\n * EXE 验收构建筛查")]
+        self.assertIn('trusted.builder !== "ci"', lib_identity)
+        self.assertIn('GITHUB_ACTIONS', lib_identity)
+        self.assertIn("无法独立证明产物来源", lib_identity)
+
     def test_workflow_uses_recorder_instead_of_bare_cargo_build(self):
         self.assertIn("./scripts/record-acceptance-build.ps1", self.workflow)
         # 工作流里不得再出现"构建但不登记"的裸 cargo build acceptance 命令

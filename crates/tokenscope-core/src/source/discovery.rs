@@ -333,13 +333,29 @@ pub fn resolve_sources(
     workbuddy_ai: &SourceConfig,
 ) -> ResolvedSources {
     let mut candidates: Vec<Candidate> = Vec::new();
-    // RC10/AC10：验收隔离上下文里，用户可配置的路径（旧格式显式目录、手动
-    // 追加目录）只允许落在验收根内——隔离根之外的路径不进入候选集。普通
-    // 产品模式（acceptance_root = None）不受约束，来源语义原样保留。
-    let acceptance_constraint = |path: &Path| -> bool {
+    // RC10/AC10（五轮复核）：验收隔离上下文里，用户可配置的路径（旧格式显式
+    // 目录、手动追加目录）必须**真实落在验收根内**——按 canonicalize 解析后
+    // 判定，覆盖 `..` 组件逃逸与 junction/symlink 别名；无法解析（断链、不
+    // 存在、权限）即无法证明在根内，一律拒绝。普通产品模式（acceptance_root
+    // = None 或未置隔离标志）不受约束，来源语义原样保留。判断先行：被拒绝
+    // 的路径不做来源探测（probe 只在判定通过后执行）。
+    let acceptance_root_canonical: Option<PathBuf> =
         match (&ctx.acceptance_root, ctx.env.acceptance_isolated) {
-            (Some(root), true) => path.starts_with(root),
-            _ => true,
+            // 隔离标志置位但根无法解析：无法证明任何路径在根内，fail closed
+            (Some(root), true) => std::fs::canonicalize(root).ok(),
+            _ => Some(PathBuf::new()),
+        };
+    let acceptance_constraint = |path: &Path| -> bool {
+        match acceptance_root_canonical.as_ref() {
+            // 普通模式（占位空根）：不受约束
+            Some(root_canon) if root_canon.as_os_str().is_empty() => true,
+            Some(root_canon) => match std::fs::canonicalize(path) {
+                Ok(canon) => canon.starts_with(root_canon),
+                // 无法解析（断链/不存在/权限）= 无法证明在根内 → 拒绝
+                Err(_) => false,
+            },
+            // 隔离标志置位且根不可解析：全部拒绝
+            None => false,
         }
     };
     let acceptance_dropped_diag = |path: &Path| -> Vec<String> {
@@ -347,7 +363,7 @@ pub fn resolve_sources(
             vec![]
         } else {
             vec![format!(
-                "验收隔离模式：路径 {} 位于隔离根之外，已忽略（不把隔离根之外的目录当作来源）",
+                "验收隔离模式：路径 {} 的真实位置不在验收根内（含 .. 别名/链接别名/无法解析），已忽略——不把隔离根之外的目录当作来源",
                 path.display()
             )]
         }

@@ -642,23 +642,31 @@ fn acceptance_isolated_codex_legacy_branch_ignores_codex_home() {
 #[test]
 fn acceptance_isolated_rejects_outside_legacy_and_manual_roots() {
     let home = temp_dir("acceptance-paths");
-    let outside_dir = "C:/real-user-data/.claude/projects";
-    let outside_manual = "C:/real-user-data/.codex/sessions";
+    // 隔离根用真实临时目录（五轮复核：约束按 canonicalize 判定，根必须可解析；
+    // 不存在的根会 fail closed——单独的反例覆盖该分支）
+    let acc_root = temp_dir("acceptance-paths-root");
+    std::fs::create_dir_all(acc_root.join("sources/claude")).unwrap();
+    // 隔离根之外的目录也用真实临时目录（存在于磁盘，但位于根外）
+    let outside_base = temp_dir("acceptance-paths-outside");
+    let outside_dir = outside_base.join(".claude/projects").display().to_string();
+    let outside_manual = outside_base.join(".codex/sessions").display().to_string();
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    std::fs::create_dir_all(&outside_manual).unwrap();
     let probe = filesystem_probe();
     // 验收上下文：显式 dir（旧格式）与手动追加都指向隔离根之外
     let legacy_claude = SourceConfig {
-        dir: Some(outside_dir.to_string()),
+        dir: Some(outside_dir.clone()),
         legacy_format: true,
         ..Default::default()
     };
     let legacy_codex = SourceConfig {
-        dir: Some(outside_manual.to_string()),
+        dir: Some(outside_manual.clone()),
         legacy_format: true,
         ..Default::default()
     };
     let mut manual_claude = default_claude();
     manual_claude.additional_paths = vec![tokenscope::settings::AdditionalSourcePath {
-        path: outside_manual.to_string(),
+        path: outside_manual.clone(),
         enabled: true,
     }];
     let ctx = DiscoveryContext {
@@ -667,7 +675,7 @@ fn acceptance_isolated_rejects_outside_legacy_and_manual_roots() {
             claude_config_dir: None,
             acceptance_isolated: true,
         },
-        acceptance_root: Some(PathBuf::from("C:/acceptance-root")),
+        acceptance_root: Some(acc_root.clone()),
         ..ctx_for(&home, StartupEnv::default(), probe.clone())
     };
     let out = resolve_sources(
@@ -679,12 +687,12 @@ fn acceptance_isolated_rejects_outside_legacy_and_manual_roots() {
     );
     for agent_label in ["outside legacy dir", "outside manual path"] {
         let needle = if agent_label.contains("legacy") {
-            outside_dir
+            outside_dir.clone()
         } else {
-            outside_manual
+            outside_manual.clone()
         };
         assert!(
-            !out.roots.iter().any(|r| r.display_path.contains(needle)),
+            !out.roots.iter().any(|r| r.display_path.contains(&needle)),
             "验收隔离上下文不得出现隔离根之外的 {agent_label}：{:?}",
             out.roots
         );
@@ -720,14 +728,14 @@ fn acceptance_isolated_rejects_outside_legacy_and_manual_roots() {
         !out_manual
             .roots
             .iter()
-            .any(|r| r.display_path.contains("real-user-data")),
+            .any(|r| r.display_path.contains("acceptance-paths-outside")),
         "隔离根之外的手动追加目录不得进入候选集：{:?}",
         out_manual.roots
     );
 
     // 隔离根内的路径：允许（真实路径落在验收根内）
     let inside_claude = SourceConfig {
-        dir: Some("C:/acceptance-root/sources/claude".to_string()),
+        dir: Some(acc_root.join("sources/claude").display().to_string()),
         legacy_format: true,
         ..Default::default()
     };
@@ -742,7 +750,7 @@ fn acceptance_isolated_rejects_outside_legacy_and_manual_roots() {
         inside_out
             .roots
             .iter()
-            .any(|r| r.display_path == "C:/acceptance-root/sources/claude"),
+            .any(|r| r.display_path == acc_root.join("sources/claude").display().to_string()),
         "验收根内的显式目录允许：{:?}",
         inside_out.roots
     );
@@ -773,10 +781,194 @@ fn acceptance_isolated_rejects_outside_legacy_and_manual_roots() {
         plain_manual
             .roots
             .iter()
-            .any(|r| r.display_path.contains("real-user-data")),
+            .any(|r| r.display_path.contains("acceptance-paths-outside")),
         "普通模式手动追加目录语义不变：{:?}",
         plain_manual.roots
     );
+}
+
+/// RC10/AC10 五轮复核：隔离判断必须按**真实路径**（canonicalize）判定——
+/// `..` 组件逃逸（字符串在根内、真实位置在根外）、junction/symlink 指向根外、
+/// 断链/无法解析（无法证明）都不得进入候选集。判断先行：被丢弃的路径不做
+/// 来源探测。真实临时目录 + 真实 junction + 真实解析器验证；外部哨兵由本
+/// 测试自建自拆，不触碰真实用户数据。
+#[test]
+fn acceptance_isolation_resolves_real_paths_and_rejects_escapes() {
+    let home = temp_dir("acceptance-real-home");
+    let root = temp_dir("acceptance-real-root");
+    std::fs::create_dir_all(root.join("sources/claude/projects")).unwrap();
+    // 外部哨兵：本次测试自建的独立目录（非真实用户数据），验证后自拆
+    let outside = temp_dir("acceptance-real-outside");
+    std::fs::create_dir_all(outside.join("sessions")).unwrap();
+    let sentinel = outside.join("sessions/sentinel.jsonl");
+    std::fs::write(&sentinel, "SENTINEL\n").unwrap();
+
+    // 1) `..` 组件逃逸：字符串在根内，真实位置在根外
+    //    projects 上四级 = TEMP（root 的父级），再进外部哨兵目录
+    let dotdot_dir = root
+        .join("sources")
+        .join("claude")
+        .join("projects")
+        .join("..")
+        .join("..")
+        .join("..")
+        .join("..")
+        .join(outside.file_name().unwrap())
+        .join("sessions");
+    assert!(
+        dotdot_dir.starts_with(&root),
+        "前置：组件 starts_with 把 .. 形态误判在根内"
+    );
+    assert!(
+        !std::fs::canonicalize(&dotdot_dir)
+            .unwrap()
+            .starts_with(std::fs::canonicalize(&root).unwrap()),
+        "前置：.. 形态的真实位置在根外"
+    );
+
+    // 2) junction 指向根外：字符串在根内，解析后在外部
+    let junction = root.join("sources/escape-link");
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&outside, &junction).unwrap();
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(&outside, &junction).unwrap();
+
+    // 3) 断链：无法证明 → 拒绝
+    let dangling = root.join("sources/dangling-link");
+    let dangling_target = root.join("sources/gone");
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&dangling_target, &dangling).unwrap();
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(&dangling_target, &dangling).unwrap();
+    assert!(
+        std::fs::canonicalize(&dangling).is_err(),
+        "前置：断链无法解析"
+    );
+
+    let ctx = DiscoveryContext {
+        env: StartupEnv {
+            codex_home: None,
+            claude_config_dir: None,
+            acceptance_isolated: true,
+        },
+        acceptance_root: Some(root.clone()),
+        ..ctx_for(&home, StartupEnv::default(), filesystem_probe())
+    };
+
+    // 旧格式显式目录：.. 逃逸形态
+    let legacy_claude = SourceConfig {
+        dir: Some(dotdot_dir.display().to_string()),
+        legacy_format: true,
+        ..Default::default()
+    };
+    // 手动追加：junction 与断链两种形态（claude + codex）
+    let mut manual_claude = default_claude();
+    manual_claude.additional_paths = vec![
+        tokenscope::settings::AdditionalSourcePath {
+            path: junction.display().to_string(),
+            enabled: true,
+        },
+        tokenscope::settings::AdditionalSourcePath {
+            path: dangling.display().to_string(),
+            enabled: true,
+        },
+    ];
+    let out = resolve_sources(
+        &ctx,
+        &legacy_claude,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    assert!(
+        !out.roots
+            .iter()
+            .any(|r| r.display_path.contains("acceptance-real-outside")
+                || r.display_path.contains("..")),
+        ".. 逃逸形态不得进入候选集：{:?}",
+        out.roots
+    );
+    let out_manual = resolve_sources(
+        &ctx,
+        &manual_claude,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    assert!(
+        !out_manual.roots.iter().any(|r| {
+            r.display_path.contains("escape-link")
+                || r.display_path.contains("dangling-link")
+                || r.display_path.contains("acceptance-real-outside")
+        }),
+        "junction/断链手动目录不得进入候选集：{:?}",
+        out_manual.roots
+    );
+    // 哨兵未被读取侧改动（约束只影响候选集，不写任何数据）
+    assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "SENTINEL\n");
+
+    // 正例：隔离根内的真实目录允许
+    let inside_claude = SourceConfig {
+        dir: Some(root.join("sources/claude").display().to_string()),
+        legacy_format: true,
+        ..Default::default()
+    };
+    let inside_out = resolve_sources(
+        &ctx,
+        &inside_claude,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    assert!(
+        inside_out
+            .roots
+            .iter()
+            .any(|r| std::fs::canonicalize(&r.display_path)
+                .map(|c| c.starts_with(std::fs::canonicalize(&root).unwrap()))
+                .unwrap_or(false)),
+        "隔离根内的显式目录允许：{:?}",
+        inside_out.roots
+    );
+
+    // 普通产品模式对照：同形态配置原样保留（.. 形态与 junction 都按用户输入
+    // 进候选集，语义不变——约束只在验收隔离上下文生效）。
+    let plain_ctx = ctx_for(&home, StartupEnv::default(), filesystem_probe());
+    let plain = resolve_sources(
+        &plain_ctx,
+        &legacy_claude,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    assert!(
+        plain
+            .roots
+            .iter()
+            .any(|r| r.display_path == dotdot_dir.display().to_string()),
+        "普通模式 .. 形态显式目录语义不变：{:?}",
+        plain.roots
+    );
+    let plain_manual = resolve_sources(
+        &plain_ctx,
+        &manual_claude,
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+        &SourceConfig::default(),
+    );
+    assert!(
+        plain_manual
+            .roots
+            .iter()
+            .any(|r| r.display_path == junction.display().to_string()),
+        "普通模式 junction 手动目录语义不变：{:?}",
+        plain_manual.roots
+    );
+
+    // 现场自拆：外部哨兵目录与隔离根由本测试创建并清理
+    let _ = std::fs::remove_dir_all(&outside);
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 /// 映射绑定：默认根=默认绑定；环境根=未核实禁用；手动根=禁用；

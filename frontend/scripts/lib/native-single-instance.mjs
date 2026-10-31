@@ -397,7 +397,10 @@ export function collectAcceptanceTreePaths(
           reason: `无法检查验收根条目 ${child}：${String(error?.message ?? error)}`,
         };
       }
-      if (stat.isSymbolicLink() || Number(stat.nlink) > 1) {
+      // 只把符号链接当别名跳过；普通目录无论 nlink 数值为何都必须继续
+      // 遍历（NTFS 目录 nlink 恒 1，但 ReFS/网络盘/未来行为可能报 >1——
+      // 按 nlink 跳过目录会把其中的外部 junction 漏掉）。
+      if (stat.isSymbolicLink()) {
         links.push(child);
         continue;
       }
@@ -462,6 +465,17 @@ export function validateAcceptancePaths({
   for (const entry of unique.values()) {
     const c = canonicalize(entry.path, { expect: entry.kind ?? "any" });
     if (!c.ok) return { ok: false, reason: `验收路径 ${entry.path} 无法解析：${c.reason}` };
+    // AC10（六轮复核）：验收根内出现的链接/别名，解析目标必须仍落在验收根
+    // 内——指向根外的 junction 会让验收实例把写入落根外，破坏隔离。
+    if (entry.source === "link") {
+      const canonicalRoot = canonicalize(rawRoot);
+      if (canonicalRoot.ok && !isWithin(c.path, canonicalRoot.path)) {
+        return {
+          ok: false,
+          reason: `验收根内的链接 ${entry.path} 指向隔离根之外（${c.path}），拒绝启动`,
+        };
+      }
+    }
     canonicalWritePaths.push({ source: entry.path, path: c.path, kind: entry.kind ?? "any" });
   }
 
@@ -647,6 +661,17 @@ export function parseAcceptanceBuildRecord(raw, { recordPath = "" } = {}) {
   if (typeof data.tree_clean !== "boolean") {
     missing.push("缺少 tree_clean（必须由 record-acceptance-build.ps1 登记源树状态）");
   }
+  // 构建者分级：ci（GitHub Runner 受控构建）或 local（本地构建）。CI 记录
+  // 必须携带 ci 段（run_id/repository），本地记录没有可核验的独立来源。
+  if (data.builder !== "ci" && data.builder !== "local") {
+    missing.push('builder（必须为 "ci" 或 "local"，由 record-acceptance-build.ps1 登记）');
+  }
+  if (data.builder === "ci") {
+    const ci = data.ci && typeof data.ci === "object" ? data.ci : null;
+    if (!ci || !String(ci.run_id ?? "").trim() || !String(ci.repository ?? "").trim()) {
+      missing.push("ci 段（builder=ci 必须携带 run_id 与 repository）");
+    }
+  }
   if (missing.length) return { ok: false, reason: `构建记录不完整：${missing.join("；")}` };
   return { ok: true, record: { ...data, recordPath } };
 }
@@ -661,6 +686,7 @@ export function verifyAcceptanceBuildIdentity({
   record = null,
   readFile = fs.readFileSync,
   sourceCommit = null,
+  buildEnvironment = process.env,
 } = {}) {
   const unverified = (reason, extra = {}) => ({
     ok: false,
@@ -720,9 +746,25 @@ export function verifyAcceptanceBuildIdentity({
   // 混入了未提交内容，无法复现，来源无法独立证明 → unverified，拒绝启动。
   // （CI Runner checkout 的树是干净的，其记录满足本条件；本地脏树构建一律
   // 不授予启动许可，如实保留 unverified 而非冒充已验证。）
+  // 来源证明完整性（六轮复核）：记录本身（JSON/命令/哈希/提交/tree_clean/
+  // builder）都可由任何人在本地伪造，字段校验只保证形状。verified 的必要
+  // 条件是"受控 CI 构建"：记录 builder=ci **且**本次预检运行在 CI 环境里。
+  // 两者缺一，来源都无法独立证明（本地记录可复制粘贴、CI 记录在本地无网
+  // 可验），一律 unverified 并拒绝启动，绝不虚标 verified。CI 链路的实跑
+  // 取证仍未完成（AC10/N12 保持开放）。
   if (trusted.tree_clean === false) {
     return unverified(
-      `构建记录为脏树产物（${trusted.tree_dirty_count ?? "?"} 个未提交变更），无法从源提交独立证明来源，拒绝启动`,
+      `构建记录为脏树产物（${trusted.tree_dirty_count ?? "?"} 个未提交变更），产物无法从源提交复现，拒绝启动`,
+    );
+  }
+  if (trusted.builder !== "ci") {
+    return unverified(
+      "构建记录来自本地构建（builder=local），无法独立证明产物来源（本地记录字段可伪造且无 CI 证据可核验），拒绝启动",
+    );
+  }
+  if (String(buildEnvironment?.GITHUB_ACTIONS ?? "") !== "true") {
+    return unverified(
+      "CI 构建记录只能在 CI 环境的预检中授予启动许可（当前不在 GITHUB_ACTIONS 环境，无法核验记录与产物同源），拒绝启动",
     );
   }
   return {
@@ -743,7 +785,7 @@ export function verifyAcceptanceBuildIdentity({
  */
 export function verifyAcceptanceExecutable(
   exePath,
-  { readFile = fs.readFileSync, buildRecord = null, sourceCommit = null } = {},
+  { readFile = fs.readFileSync, buildRecord = null, sourceCommit = null, buildEnvironment = process.env } = {},
 ) {
   const raw = String(exePath ?? "").trim();
   if (!raw) {
@@ -789,6 +831,7 @@ export function verifyAcceptanceExecutable(
     record: buildRecord,
     readFile,
     sourceCommit,
+    buildEnvironment,
   });
   if (negative.length) {
     return {

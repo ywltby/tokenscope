@@ -82,6 +82,12 @@ $treeClean = ($gitStatus.Count -eq 0)
 
 $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $exeFull).Hash.ToLowerInvariant()
 
+# 构建者分级（六轮复核）：GitHub Runner（GITHUB_ACTIONS=true）= ci，携带 ci
+# 段；本地 = local。预检侧 verified 要求 builder=ci 且预检本身运行在 CI 环境
+# ——本地记录无法独立证明来源，一律 unverified。
+$isCi = $env:GITHUB_ACTIONS -eq 'true'
+$builder = if ($isCi) { 'ci' } else { 'local' }
+
 $record = [ordered]@{
     kind            = 'tokenscope-acceptance-build'
     artifact_path   = $exeFull
@@ -91,8 +97,17 @@ $record = [ordered]@{
     source_commit   = $commit
     tree_clean      = $treeClean
     tree_dirty_count = $gitStatus.Count
+    builder         = $builder
     built_at        = (Get-Date).ToString('o')
     recorder        = 'scripts/record-acceptance-build.ps1'
+}
+if ($isCi) {
+    $record.ci = [ordered]@{
+        run_id      = $env:GITHUB_RUN_ID
+        repository  = $env:GITHUB_REPOSITORY
+        run_attempt = $env:GITHUB_RUN_ATTEMPT
+        run_number  = $env:GITHUB_RUN_NUMBER
+    }
 }
 
 $outFull = [System.IO.Path]::GetFullPath((Join-Path $repo $OutDir))
