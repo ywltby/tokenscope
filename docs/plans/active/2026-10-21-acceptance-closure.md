@@ -246,6 +246,12 @@ AC03–AC05 的 CI 接入：
 >
 > **边界（更正后的如实口径）**：堆峰值只统计 Rust 分配（不含 SQLite C 分配）；工作集为进程级、不分阶段；指纹只覆盖文件数/字节数/最新 mtime（同长度同 mtime 改写不可检测）；成本来自注入的隔离价格表，不是真实账单。**"只读"指不写入、不修改、不删除来源文件——不等于不读取内容**：采集必然把来源日志解析进内存（产品行为），临时历史库也会保存来源路径与项目目录等元数据；只读**元数据**的只有目录指纹步骤，两者都只存在于本次 hermetic 临时目录，不入库、不输出。因此"未读取会话内容"与"从未保存路径"都不成立，本记录不再这样描述。冷轮采集 11379 ms 明显高于 CLAUDE.md 记载的 5.5 s——后者是旧缓存预热工具（写真实 `~/.tokenscope`、不挂计数分配器）的口径，不可直接比较，如实记录、不设门槛、本轮不优化。**运行记录核对**：两次运行的外层临时根（`%TEMP%\tokenscope-test-qy4hqbbr`、`...-xh9yt4fz`）与其中 hermetic 证据文件均已不存在（只查这两处已记录位置，未遍历其他临时目录）；证据 JSON **未另存**，本轮只保留计划里的汇总数字（不补造、不重跑）。**变化检测顺序**：已改为冷/热与重叠两段各自**先取来源指纹观察、再做一致性断言**，断言消息携带"来源在测量期间发生变化，本结果受影响"；变化时标为测量受影响，不静默记通过。合成定向用例 `ac09_source_change_note_marks_measurement_affected` 用临时目录里的合成文件验证指纹能检出变化、标注语义成立（不读真实来源）。**结论**：只记录数字，未新增性能门槛、未做优化；真实数据测量完成一次（两次运行复核），N13 保持开放。
 
+> **2026-11-02 AC10 托盘归属（本机，干净树 `190d6fc`）**：新增 `scripts/read-tray-icon-owner.ps1`——按 PID 枚举该进程的 `tray_icon_app` 类窗口（tray-icon 0.25.1 为每个托盘图标创建的隐藏窗口），用 `Shell_NotifyIconGetRect` 对 `(hwnd, uID)` 探测注册的图标；只读、不发消息、不点击、不读 Explorer 工具栏。lib 侧 `parseTrayOwnerObservation`/`classifyTrayOwner` 把结果判为 passed（恰好 1 个）/ failed（0 个=未创建、>1=重复）/ pending（不可用或无法解析）。场景在第一个实例就绪后轮询归属、第二实例退出后再读一次，新增三项检查并写入 evidence。CI 放行检查器把归属三项列为必过，旧 evidence（无归属项）会被判"缺少关键项"阻断。
+>
+> **实跑结果（EXE SHA256 `59d4efff…258ea9`，`tree_clean=true`、预检 `assumed`）**：归属观察 `before` / `after` 均为 **1 个**图标（`tray_owner_single_icon_before_second`、`_after_second`、`_unchanged_after_second` 全部通过）；探测到的图标 `hwnd=417792268, uid=2` 归属 primary PID 14844，第二实例（PID 23928）64 ms 退出码 0 且未新增自己的图标。因此**“托盘唯一性=本实例恰好一个图标”已取得可验证结果**。Explorer 展示层三项仍 pending：基线 24 项、TokenScope 计数 0 → 工具栏未展示该图标；这一项仍未验证（不冒充通过）。证据写入独立目录 `qa-artifacts/native-e2e/ac10-tray-owner/ui-single-instance/evidence.json`，原三轮 evidence 保留。检查器复核：`allowed=true`、`verdict=partial`、`ac10_conclusion=none`。
+>
+> **CI 接线准备（未改工作流、未触发）**：步骤草案为「跑 `ui-single-instance` → 用 `check_native_single_instance_evidence.py --allow-pending tray` 裁决（场景退出码 3 仅表示有允许范围内的 pending，由检查器判定）」。GitHub-hosted Runner 的托盘可观测性未知（可能无 Explorer 通知区域），首次接线需人工确认后再加步骤；`ui-e2e.yml` 本轮不变。AC10 与 N12 保持开放。
+
 ### AC10 N12 单实例原生自动化
 
 - 场景 `ui-single-instance`：同一隔离根启动第二个进程。
