@@ -17,6 +17,8 @@ import {
   hostProcessAlive,
   parseForeground,
   parseTrayObservation,
+  classifyTrayOwner,
+  parseTrayOwnerObservation,
   parseWindowState,
   validateAcceptancePaths,
 } from "../lib/native-single-instance.mjs";
@@ -26,6 +28,9 @@ const WINDOW_ACTION = fileURLToPath(
 );
 const TRAY_READER = fileURLToPath(
   new URL("../../../scripts/read-tray-notification-area.ps1", import.meta.url),
+);
+const TRAY_OWNER_READER = fileURLToPath(
+  new URL("../../../scripts/read-tray-icon-owner.ps1", import.meta.url),
 );
 const POLL_INTERVAL_MS = 150;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -82,6 +87,35 @@ function readTray() {
     };
   }
   return parseTrayObservation(result.stdout);
+}
+
+/** 托盘归属：确认图标属于本实例（按进程 + (hwnd, uID) 探测），
+ * 而不是靠 Explorer 工具栏的 tooltip 文本猜测。 */
+function readTrayOwner(pid) {
+  let result;
+  try {
+    result = runPowerShell(TRAY_OWNER_READER, ["-ProcessId", String(pid)], "tray-owner");
+  } catch (error) {
+    return {
+      ok: false,
+      error: `托盘归属观察命令失败：${String(error?.message ?? error).slice(0, 160)}`,
+      pid: pid ?? null,
+      windows: null,
+      count: null,
+      icons: [],
+    };
+  }
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      error: `托盘归属观察失败（pwsh 退出码 ${result.status}）：${(result.stderr || "").slice(0, 160)}`,
+      pid: pid ?? null,
+      windows: null,
+      count: null,
+      icons: [],
+    };
+  }
+  return parseTrayOwnerObservation(result.stdout);
 }
 
 /** 启动第一个实例前的托盘基线：用于证明“验收实例只新增一个图标”，
@@ -154,6 +188,7 @@ export async function nativeSingleInstance({
   isCanceled = () => false,
   observeWindow = readWindow,
   observeTray = readTray,
+  observeTrayOwner = readTrayOwner,
   runWindow = (target, action) =>
     runPowerShell(
       WINDOW_ACTION,
@@ -195,6 +230,43 @@ export async function nativeSingleInstance({
   );
 
   await inst.waitForData();
+
+  // ── 托盘归属（AC10）：确认图标属于本隔离实例、且只注册一个。
+  //   这是唯一性判定的主证据——文本匹配只能说明"Explorer 展示了几个
+  //   TokenScope 标题"，无法区分正式实例与验收实例。
+  markStage("tray-owner-before-second");
+  const ownerBeforePoll = await pollObservation({
+    inst,
+    isCanceled,
+    action: "tray-owner-before-second",
+    observe: () => observeTrayOwner(inst.proc.pid),
+    accept: (value) => value.ok === true && value.count === 1,
+    budgetMs: trayBudgetMs,
+    intervalMs: pollIntervalMs,
+  });
+  markStageDone("tray-owner-before-second");
+  const ownerBefore = ownerBeforePoll.value ?? {
+    ok: false,
+    error: "无托盘归属观察结果",
+    count: null,
+    icons: [],
+  };
+  const ownerBeforeVerdict = classifyTrayOwner({ observation: ownerBefore, expected: 1 });
+  ev.single_instance.tray_owner_before_second = {
+    observation: ownerBefore,
+    matched: ownerBeforePoll.matched,
+    elapsed_ms: ownerBeforePoll.elapsedMs,
+    verdict: ownerBeforeVerdict,
+  };
+  if (ownerBeforeVerdict.status === "pending") {
+    ck.pending("tray_owner_single_icon_before_second", ownerBeforeVerdict.reason);
+  } else {
+    ck.add(
+      "tray_owner_single_icon_before_second",
+      ownerBeforeVerdict.status === "passed",
+      ownerBeforeVerdict.reason,
+    );
+  }
 
   // 第一个实例就绪后等待真实托盘图标出现；只观察 TokenScope 文本，不用进程数。
   // 基线可能包含用户正在运行的正式实例：只要求验收实例相对基线新增 1 个。
@@ -400,6 +472,44 @@ export async function nativeSingleInstance({
   ]) {
     if (result.status === "pending") ck.pending(name, result.reason);
     else ck.add(name, result.status === "passed", result.reason);
+  }
+
+  // ── 第二个实例退出后：归属观察必须仍是同一进程的 1 个图标。
+  const ownerAfter = observeTrayOwner(inst.proc.pid);
+  const ownerAfterVerdict = classifyTrayOwner({ observation: ownerAfter, expected: 1 });
+  ev.single_instance.tray_owner_after_second = {
+    observation: ownerAfter,
+    verdict: ownerAfterVerdict,
+  };
+  if (ownerAfterVerdict.status === "pending") {
+    ck.pending("tray_owner_single_icon_after_second", ownerAfterVerdict.reason);
+  } else {
+    ck.add(
+      "tray_owner_single_icon_after_second",
+      ownerAfterVerdict.status === "passed",
+      ownerAfterVerdict.reason,
+    );
+  }
+  if (
+    ownerBeforeVerdict.status === "passed" &&
+    ownerAfterVerdict.status === "passed"
+  ) {
+    ck.add(
+      "tray_owner_unchanged_after_second",
+      true,
+      `第二实例前后该进程均为 1 个托盘图标（第二次启动未新增自己的图标）`,
+    );
+  } else if (ownerBeforeVerdict.status === "pending" || ownerAfterVerdict.status === "pending") {
+    ck.pending(
+      "tray_owner_unchanged_after_second",
+      `归属观察不可用：前=${ownerBeforeVerdict.reason}；后=${ownerAfterVerdict.reason}`,
+    );
+  } else {
+    ck.add(
+      "tray_owner_unchanged_after_second",
+      false,
+      `归属观察不一致：前=${ownerBeforeVerdict.reason}；后=${ownerAfterVerdict.reason}`,
+    );
   }
 
   // 第二个实例退出后再读一次托盘：TokenScope 计数必须仍等于基线+1，且两次一致。

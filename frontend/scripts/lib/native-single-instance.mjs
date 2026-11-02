@@ -1412,6 +1412,66 @@ export function classifyWindowRestore({
  * 托盘唯一性判定：必须有实际可观察的 TokenScope 图标计数。
  * 观察不可用时是 pending；传入 processCount 也不会自动变成通过。
  */
+/**
+ * 托盘归属观察（AC10）：解析 `scripts/read-tray-icon-owner.ps1` 的输出。
+ * 该脚本按 (hwnd, uID) 用 Shell_NotifyIconGetRect 探测**指定进程**注册的托盘
+ * 图标，因此能回答"图标是否属于本实例、注册了几个"——这是文本匹配做不到的
+ * （Explorer 工具栏只有 tooltip "TokenScope"，无法区分正式实例与验收实例）。
+ */
+export function parseTrayOwnerObservation(stdout) {
+  const text = String(stdout ?? "").trim();
+  if (!text) {
+    return { ok: false, error: "托盘归属观察输出为空", pid: null, windows: null, count: null, icons: [] };
+  }
+  const lines = text.split(/\r?\n/).reverse();
+  for (const line of lines) {
+    const candidate = line.trim();
+    if (!candidate.startsWith("{")) continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (typeof parsed?.ok !== "boolean") continue;
+    return {
+      ok: parsed.ok === true,
+      pid: Number.isInteger(parsed.pid) ? parsed.pid : null,
+      windows: Number.isInteger(parsed.windows) ? parsed.windows : null,
+      count: Number.isInteger(parsed.count) ? parsed.count : null,
+      icons: Array.isArray(parsed.icons) ? parsed.icons : [],
+      error: parsed.error == null ? null : String(parsed.error),
+    };
+  }
+  return { ok: false, error: "托盘归属观察输出无法解析", pid: null, windows: null, count: null, icons: [] };
+}
+
+/** 托盘归属判定：按进程注册的图标数核对（默认期望恰好 1 个）。
+ * 观察不可用 → pending；数量不符 → failed（0 个=未创建，>1=重复图标）。 */
+export function classifyTrayOwner({ observation = null, expected = 1 } = {}) {
+  if (!observation || observation.ok !== true || !Number.isInteger(observation.count)) {
+    return {
+      status: "pending",
+      count: null,
+      reason: `托盘归属观察不可用：${observation?.error ?? "无结果"}`,
+    };
+  }
+  if (observation.count === expected) {
+    return {
+      status: "passed",
+      count: observation.count,
+      reason: `该进程注册 ${observation.count} 个托盘图标（期望 ${expected}）`,
+    };
+  }
+  return {
+    status: "failed",
+    count: observation.count,
+    reason: `该进程注册 ${observation.count} 个托盘图标（期望 ${expected}）：${
+      observation.count === 0 ? "未创建托盘图标" : "存在重复托盘图标"
+    }`,
+  };
+}
+
 export function classifyTrayObservation({
   observation = null,
   expected = 1,

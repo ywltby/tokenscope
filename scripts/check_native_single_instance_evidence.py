@@ -47,6 +47,10 @@ REQUIRED_OK = (
     "first_window_foreground",
     "first_instance_alive_after_second",
     "real_data_untouched",
+    # 托盘唯一性改由归属观察判定（按进程 + (hwnd, uID)），不再依赖文本计数
+    "tray_owner_single_icon_before_second",
+    "tray_owner_single_icon_after_second",
+    "tray_owner_unchanged_after_second",
 )
 
 # 必须留下明确记录的项：托盘三项（见 checks 或 pending）+ 全部关键项（见 checks）

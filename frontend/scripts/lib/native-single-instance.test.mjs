@@ -18,6 +18,8 @@ import {
   canonicalizeAcceptancePath,
   classifySecondaryExit,
   classifyTrayObservation,
+  classifyTrayOwner,
+  parseTrayOwnerObservation,
   classifyWindowRestore,
   collectAcceptanceTreePaths,
   collectManifestAcceptancePaths,
@@ -1632,6 +1634,38 @@ describe("托盘唯一性判定", () => {
         observation: tray({ token_scope_count: 1, matches: [{ text: "Other" }] }),
       }).status,
     ).toBe("pending");
+  });
+
+  it("托盘归属观察：解析脚本输出并按进程图标数判定（1 通过 / 0 与 2 失败 / 不可用 pending）", () => {
+    const parsed = parseTrayOwnerObservation(
+      'noise line\n{"ok":true,"pid":42,"windows":1,"count":1,"icons":[{"hwnd":"1","uid":1,"left":1,"top":2,"right":3,"bottom":4}],"error":null,"failure_line":null}\n',
+    );
+    expect(parsed).toMatchObject({ ok: true, pid: 42, windows: 1, count: 1 });
+    expect(parsed.icons).toHaveLength(1);
+    expect(classifyTrayOwner({ observation: parsed, expected: 1 }).status).toBe("passed");
+
+    expect(
+      classifyTrayOwner({
+        observation: { ok: true, count: 0, windows: 1, icons: [], error: null },
+        expected: 1,
+      }).status,
+    ).toBe("failed");
+    expect(
+      classifyTrayOwner({
+        observation: { ok: true, count: 2, windows: 1, icons: [], error: null },
+        expected: 1,
+      }).reason,
+    ).toMatch(/重复托盘图标/);
+    expect(
+      classifyTrayOwner({
+        observation: { ok: false, count: null, error: "probe failed" },
+        expected: 1,
+      }).status,
+    ).toBe("pending");
+    // 输出无法解析时也必须 pending，不得当 0 个
+    const broken = parseTrayOwnerObservation("not json");
+    expect(broken.ok).toBe(false);
+    expect(classifyTrayOwner({ observation: broken, expected: 1 }).status).toBe("pending");
   });
 
   it("观察不可用是 pending；即使 processCount=1 也不能充当托盘证据", () => {

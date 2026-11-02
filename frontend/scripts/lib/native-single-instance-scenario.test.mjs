@@ -137,6 +137,7 @@ async function runScenario({
   windowOverride = null,
   restoreOnSecond = true,
   onTrayAfter = null,
+  trayOwner = { ok: true, windows: 1, count: 1, icons: [], error: null },
   trayBaseline = {
     ok: true,
     visible_count: 3,
@@ -167,6 +168,8 @@ async function runScenario({
       if (trayReads > 1) onTrayAfter?.(instance);
       return obs.tray;
     },
+    // 归属观察：默认"本进程恰好 1 个图标"（合成正例）；用例可覆盖。
+    observeTrayOwner: (pid) => ({ ...trayOwner, pid: pid ?? 1 }),
     runWindow: () => ({ status: 0, stdout: "PID 101 STATE_CHANGED true", stderr: "" }),
     trayBudgetMs: 80,
     restoreBudgetMs: 120,
@@ -259,6 +262,55 @@ describe("ui-single-instance 场景编排（假实例）", () => {
     expect(byName(rows, "single_tray_icon_before_second")).toBeUndefined();
     expect(byName(rows, "single_tray_icon_after_second")).toBeUndefined();
     expect(byName(rows, "second_process_exit_code_zero")?.ok).toBe(true);
+  });
+
+  it("托盘归属观察：本进程恰好 1 个图标时唯一性通过（不依赖 Explorer 文本）", async () => {
+    const { rows, pending, ev } = await runScenario({
+      secondary: { record: secondaryRecord(), verdict: { status: "passed", reason: "ok" } },
+      obs: observations(),
+    });
+    expect(byName(rows, "tray_owner_single_icon_before_second")?.ok).toBe(true);
+    expect(byName(rows, "tray_owner_single_icon_after_second")?.ok).toBe(true);
+    expect(byName(rows, "tray_owner_unchanged_after_second")?.ok).toBe(true);
+    expect(pendingNames(pending)).not.toContain("tray_owner_single_icon_before_second");
+    expect(ev.single_instance.tray_owner_before_second.verdict.status).toBe("passed");
+  });
+
+  it("托盘归属观察：0 个图标记失败（未创建），2 个记失败（重复），不可用记 pending", async () => {
+    const zero = await runScenario({
+      secondary: { record: secondaryRecord(), verdict: { status: "passed", reason: "ok" } },
+      obs: observations(),
+      trayOwner: { ok: true, windows: 1, count: 0, icons: [], error: null },
+    });
+    expect(byName(zero.rows, "tray_owner_single_icon_before_second")?.ok).toBe(false);
+    expect(byName(zero.rows, "tray_owner_single_icon_before_second")?.detail).toMatch(
+      /未创建托盘图标/,
+    );
+
+    const two = await runScenario({
+      secondary: { record: secondaryRecord(), verdict: { status: "passed", reason: "ok" } },
+      obs: observations(),
+      trayOwner: { ok: true, windows: 1, count: 2, icons: [], error: null },
+    });
+    expect(byName(two.rows, "tray_owner_single_icon_before_second")?.ok).toBe(false);
+    expect(byName(two.rows, "tray_owner_single_icon_before_second")?.detail).toMatch(
+      /重复托盘图标/,
+    );
+
+    const unavailable = await runScenario({
+      secondary: { record: secondaryRecord(), verdict: { status: "passed", reason: "ok" } },
+      obs: observations(),
+      trayOwner: { ok: false, windows: null, count: null, icons: [], error: "probe failed" },
+    });
+    expect(pendingNames(unavailable.pending)).toEqual(
+      expect.arrayContaining([
+        "tray_owner_single_icon_before_second",
+        "tray_owner_single_icon_after_second",
+        "tray_owner_unchanged_after_second",
+      ]),
+    );
+    // 不可用时不得记成通过
+    expect(byName(unavailable.rows, "tray_owner_single_icon_before_second")).toBeUndefined();
   });
 
   it("托盘结构在观察窗口内没变、TokenScope 计数不符时记 pending（不冒充产品失败）", async () => {
