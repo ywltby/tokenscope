@@ -129,9 +129,15 @@ export function pricingVerdict(name, observed) {
       break;
     case "candidate_highest_without_cross_source_mix": {
       const matched = o.breakdown?.matched;
+      // N18 分档语义：快照候选（anthropic/claude-opus-5.5，无 5m/1h 分项）在
+      // 事件缺写入分项时被"宁缺毋假"排除——候选 4 条里完整 2、不完整 2、
+      // 排除 2；胜出的 external 候选未声明分档，按合并价完整估算。
       ok = matched?.source === "external" && matched.raw_key === "external/claude-opus-5-5"
-        && matched.candidate_count === 4 && matched.complete_candidate_count === 3
-        && matched.incomplete_candidate_count === 1 && matched.reason === "highest_complete_cost"
+        && matched.candidate_count === 4 && matched.complete_candidate_count === 2
+        && matched.incomplete_candidate_count === 2 && matched.incomplete_candidates_excluded === 2
+        && matched.reason === "highest_complete_cost"
+        && (o.breakdown?.excluded_candidate_warning ?? "").includes("anthropic/claude-opus-5.5")
+        && (o.breakdown?.excluded_candidate_warning ?? "").includes("5 分钟/1 小时")
         && ratesEqual(o.breakdown, [12, 35, 10, 12]) && formulaVisible(o.breakdown, o.formulaRows)
         && /候选\s*4\s*条/.test(o.tooltip ?? "")
         && /取最高费用/.test(o.tooltip ?? "");
