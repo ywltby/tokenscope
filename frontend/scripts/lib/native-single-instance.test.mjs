@@ -557,7 +557,7 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
         canonicalizeAcceptancePath(
           path.join(root, "sources", "claude", "projects", PROJECT_SLUG, "session.jsonl"),
         ).path,
-      ).toBe(path.resolve(sentinel));
+      ).toBe(fs.realpathSync.native(path.resolve(sentinel)));
       expect(prepared).toBe(0);
       expect(launched).toBe(0);
       expect(fs.readFileSync(sentinel, "utf8")).toBe("REAL USER LOG LINE\n");
@@ -864,10 +864,14 @@ describe("manifest 正例走真实路径解析实现", () => {
     manifest.files = { [fixtureFile]: { path: fixtureFile, bytes: 20, sha256: "1".repeat(64) } };
     const manifestPath = writeManifest(sandbox, root, manifest);
     try {
-      // 不注入 canonicalize：由真实 canonicalizeAcceptancePath 解析常规文件
+      // 不注入 canonicalize：由真实 canonicalizeAcceptancePath 解析常规文件。
+      // 期望路径必须与产品解析同口径：Runner 的 TEMP 可能是 8.3 短名
+      // （C:\Users\RUNNER~1\...），canonicalize 会展开为长路径，而
+      // path.resolve 只做字符串拼接——期望值同样经 fs.realpathSync.native
+      // 展开，否则在短路径环境断言恒红。
       expect(canonicalizeAcceptancePath(manifestPath, { expect: "file" })).toMatchObject({
         ok: true,
-        path: path.resolve(manifestPath),
+        path: fs.realpathSync.native(path.resolve(manifestPath)),
       });
       const result = validateAcceptancePaths({ root, homeDir: home });
       expect(result.ok).toBe(true);
@@ -875,8 +879,12 @@ describe("manifest 正例走真实路径解析实现", () => {
       expect(result.manifest_declared).toBe(
         collectManifestAcceptancePaths(manifest).entries.length,
       );
-      expect(result.write_paths).toContain(path.resolve(manifestPath));
-      expect(result.write_paths).toContain(path.resolve(fixtureFile));
+      expect(result.write_paths).toContain(
+        fs.realpathSync.native(path.resolve(manifestPath)),
+      );
+      expect(result.write_paths).toContain(
+        fs.realpathSync.native(path.resolve(fixtureFile)),
+      );
     } finally {
       sandbox.cleanup();
     }
