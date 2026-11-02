@@ -116,6 +116,35 @@ async function pollObservation({
   return { matched: false, value: last, elapsedMs: Date.now() - started };
 }
 
+/**
+ * 相对启动前基线判定托盘（实跑暴露的问题）：Explorer 的托盘工具栏在本机
+ * 存在"图标已创建但未收录进工具栏"的窗口期（验收实例退出后才读到其图标）。
+ * 当观察本身可用、但托盘**结构完全没变**（total_count 与基线相同）且
+ * TokenScope 计数不符时，无法区分"验收实例未创建图标"与"Explorer 未收录"——
+ * 记 pending 并说明原因，不伪造通过、也不把它当成产品失败。
+ * 结构发生变化（total_count 不同）而计数不符时，仍按 failed（可疑）。
+ */
+function classifyTrayAgainstBaseline({ observation, baseline, expected }) {
+  const base = classifyTrayObservation({ observation, expected });
+  if (base.status !== "failed") return base;
+  const baselineTotal = Number.isInteger(baseline?.total_count) ? baseline.total_count : null;
+  const observedTotal = Number.isInteger(observation?.total_count)
+    ? observation.total_count
+    : null;
+  if (baselineTotal === null || observedTotal === null || observedTotal !== baselineTotal) {
+    return base;
+  }
+  return {
+    status: "pending",
+    count: base.count,
+    processCount: null,
+    reason:
+      `托盘结构在观察窗口内无变化（基线 ${baselineTotal} 个 → 观察 ${observedTotal} 个；` +
+      `TokenScope 计数 ${base.count ?? "?"}，期望 ${expected}）：无法区分"验收实例未创建图标"` +
+      `与"Explorer 未收录验收实例图标"，本环境不可判定`,
+  };
+}
+
 export async function nativeSingleInstance({
   inst,
   ck,
@@ -185,7 +214,11 @@ export async function nativeSingleInstance({
   markStageDone("tray-before-second");
   const trayBefore = trayBeforePoll.value ?? { ok: false, error: "无观察结果" };
   const trayBeforeVerdict = trayBaselineOk
-    ? classifyTrayObservation({ observation: trayBefore, expected: expectedTrayCount })
+    ? classifyTrayAgainstBaseline({
+        observation: trayBefore,
+        baseline: trayBaseline,
+        expected: expectedTrayCount,
+      })
     : {
         status: "pending",
         reason: `启动前托盘基线不可用：${trayBaseline?.error ?? "无基线"}`,
@@ -372,7 +405,11 @@ export async function nativeSingleInstance({
   // 第二个实例退出后再读一次托盘：TokenScope 计数必须仍等于基线+1，且两次一致。
   const trayAfter = observeTray();
   const trayAfterVerdict = trayBaselineOk
-    ? classifyTrayObservation({ observation: trayAfter, expected: expectedTrayCount })
+    ? classifyTrayAgainstBaseline({
+        observation: trayAfter,
+        baseline: trayBaseline,
+        expected: expectedTrayCount,
+      })
     : {
         status: "pending",
         reason: `启动前托盘基线不可用：${trayBaseline?.error ?? "无基线"}`,
@@ -393,12 +430,32 @@ export async function nativeSingleInstance({
     );
   }
   if (trayBaselineOk && trayBefore.ok === true && trayAfter.ok === true) {
-    ck.add(
-      "tray_count_unchanged_after_second",
-      trayBefore.token_scope_count === expectedTrayCount &&
-        trayAfter.token_scope_count === expectedTrayCount,
-      `基线 ${trayBaseline.token_scope_count} -> 启动后 ${trayBefore.token_scope_count} -> 第二个后 ${trayAfter.token_scope_count}（期望 ${expectedTrayCount}）`,
-    );
+    const beforeMatches = trayBefore.token_scope_count === expectedTrayCount;
+    const afterMatches = trayAfter.token_scope_count === expectedTrayCount;
+    const totalsUnchanged =
+      Number.isInteger(trayBaseline.total_count) &&
+      Number.isInteger(trayBefore.total_count) &&
+      Number.isInteger(trayAfter.total_count) &&
+      trayBefore.total_count === trayBaseline.total_count &&
+      trayAfter.total_count === trayBaseline.total_count;
+    if (beforeMatches && afterMatches) {
+      ck.add(
+        "tray_count_unchanged_after_second",
+        true,
+        `基线 ${trayBaseline.token_scope_count} -> 启动后 ${trayBefore.token_scope_count} -> 第二个后 ${trayAfter.token_scope_count}（期望 ${expectedTrayCount}）`,
+      );
+    } else if (totalsUnchanged) {
+      ck.pending(
+        "tray_count_unchanged_after_second",
+        `托盘结构三次读数均为 ${trayBaseline.total_count} 个、TokenScope 计数 ${trayBefore.token_scope_count}/${trayAfter.token_scope_count}（期望 ${expectedTrayCount}）：无法区分"验收实例未创建图标"与"Explorer 未收录"，本环境不可判定`,
+      );
+    } else {
+      ck.add(
+        "tray_count_unchanged_after_second",
+        false,
+        `基线 ${trayBaseline.token_scope_count} -> 启动后 ${trayBefore.token_scope_count} -> 第二个后 ${trayAfter.token_scope_count}（期望 ${expectedTrayCount}）；托盘结构已变化（${trayBaseline.total_count} -> ${trayBefore.total_count} -> ${trayAfter.total_count}），计数不符`,
+      );
+    }
   } else {
     ck.pending(
       "tray_count_unchanged_after_second",

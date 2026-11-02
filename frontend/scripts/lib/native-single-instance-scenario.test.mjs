@@ -261,6 +261,78 @@ describe("ui-single-instance 场景编排（假实例）", () => {
     expect(byName(rows, "second_process_exit_code_zero")?.ok).toBe(true);
   });
 
+  it("托盘结构在观察窗口内没变、TokenScope 计数不符时记 pending（不冒充产品失败）", async () => {
+    // 实跑暴露的情形：验收实例启动后 Explorer 未把图标收录进工具栏，三次读数
+    // 的 total_count 与基线完全相同（24 -> 24 -> 24）且 TokenScope 计数为 0。
+    // 无法区分"未创建图标"与"未收录"，只能 pending。
+    const { rows, pending, ev } = await runScenario({
+      secondary: { record: secondaryRecord(), verdict: { status: "passed", reason: "ok" } },
+      obs: observations({
+        tray: {
+          ok: true,
+          visible_count: 3,
+          overflow_count: 21,
+          total_count: 24,
+          token_scope_count: 0,
+          matches: [],
+        },
+      }),
+      trayBaseline: {
+        ok: true,
+        visible_count: 3,
+        overflow_count: 21,
+        total_count: 24,
+        token_scope_count: 0,
+        matches: [],
+      },
+    });
+    expect(pendingNames(pending)).toEqual(
+      expect.arrayContaining([
+        "single_tray_icon_before_second",
+        "single_tray_icon_after_second",
+        "tray_count_unchanged_after_second",
+      ]),
+    );
+    // 不能记成通过，也不能记成失败
+    expect(byName(rows, "single_tray_icon_before_second")).toBeUndefined();
+    expect(byName(rows, "single_tray_icon_after_second")).toBeUndefined();
+    expect(byName(rows, "tray_count_unchanged_after_second")).toBeUndefined();
+    expect(ev.single_instance.tray_before_second.verdict.status).toBe("pending");
+    expect(ev.single_instance.tray_before_second.verdict.reason).toMatch(
+      /无法区分.*未创建图标.*未收录|Explorer 未收录/,
+    );
+    // 其余可判定项不受影响
+    expect(byName(rows, "second_process_exited_within_budget")?.ok).toBe(true);
+  });
+
+  it("托盘结构已变化但 TokenScope 计数不符时仍记失败（结构变了就要能对上身份）", async () => {
+    const { rows, pending } = await runScenario({
+      secondary: { record: secondaryRecord(), verdict: { status: "passed", reason: "ok" } },
+      obs: observations({
+        tray: {
+          ok: true,
+          visible_count: 3,
+          overflow_count: 22,
+          total_count: 25,
+          token_scope_count: 0,
+          matches: [],
+        },
+      }),
+      trayBaseline: {
+        ok: true,
+        visible_count: 3,
+        overflow_count: 21,
+        total_count: 24,
+        token_scope_count: 0,
+        matches: [],
+      },
+    });
+    expect(byName(rows, "single_tray_icon_before_second")?.ok).toBe(false);
+    expect(byName(rows, "single_tray_icon_after_second")?.ok).toBe(false);
+    expect(byName(rows, "tray_count_unchanged_after_second")?.ok).toBe(false);
+    expect(pendingNames(pending)).not.toContain("single_tray_icon_before_second");
+  });
+
   it("前台观察不可用时只把前台检查记 pending，可见性仍可独立通过", async () => {
     const obs = observations();
     const { rows, pending } = await runScenario({

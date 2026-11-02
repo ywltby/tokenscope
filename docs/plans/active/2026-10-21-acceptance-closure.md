@@ -244,6 +244,18 @@ AC03–AC05 的 CI 接入：
 
 > **2026-10-31 收敛**：AC10 从"来源防伪深挖"收敛回最小交付范围。移除了未接线的 GitHub artifact 绑定实验（`verifyBuildOriginBinding`：run/工作流/job 身份、受信仓库与提交、zip 归档摘要四方核对）与 ZIP 解析器（`readZipEntryBytes`、CRC-32、`ZIP_READ_LIMITS`）及仅服务它们的合成测试与契约断言——它们从未接入预检，保留只会扩大交付审查面。预检的许可语义改为 **`assumed`（受控构建假设）**：记录与实际 EXE 一致（哈希/命令/提交/树状态）即可启动，用于防"意外不一致"，**不构成来源独立防伪证明**；`verified` 没有出口，也不再宣称有。脏树如实分级——本机构建可启动但标注 `reproducible_from_commit=false`，`builder=ci` 的脏树记录拒绝，CI 与正式取证要求干净树。保留：隔离根与真实用户数据保护（全路径预检、junction/硬链接、受保护目录、清单核对）、进程归属检查（第二实例退出、窗口恢复/前台、托盘唯一性、`launches[]`）、EXE/记录一致性检查。既有 13 个 Native 场景的受控构建路径已恢复（预检合成正例证明门禁打开：`assumed` + prepare/launch 被调用）——**这是合成验证，不是 Native 已通过**；AC10 的真实实跑（第二实例退出码/耗时、窗口前台、真实托盘计数）与 CI 接线仍待后续，N12 继续开放。
 
+> **2026-11-02 本机实跑（不 push、不触发 CI）**：受测提交 `9447a52`（收敛后 HEAD，工作树干净）；前端先构建，再由 `scripts/record-acceptance-build.ps1` 执行受控构建并登记——EXE `target/release/tokenscope.exe`，SHA256 `f3639aeb62c3fdfd1d6396ec0bb77c4e51f72ed2dcc3033c8c929f3eb5eb0934`，记录 `tree_clean=true`、`builder=local`，预检结论 `assumed`（可复现=是）。场景生成的隔离根为 `%TEMP%\tokenscope-native-acceptance-workspace-monorepo-ui-single-instance-<8hex>`。
+>
+> **第一次实跑：22/25 通过、3 项托盘检查失败**。可判定项全部通过：两个实例 PID 不同（primary 27620 / secondary 15292）、第二实例 80 ms 以退出码 0 结束（预算 15000 ms）、`exit_before_terminate=true`；第一窗口恢复为可见且未最小化、前台窗口属于 primary（2737 ms）；同隔离根与同一 acceptance identifier；停止时宿主与后代退出、端口释放；真实 `~/.tokenscope` 指纹 `167027bada9235ac → 167027bada9235ac`（26 条目，未读内容、未改动）；CSP 仅 1 条已知噪声。失败项为三项托盘检查——读到 24 个图标（可见 3 + 溢出 21）且 TokenScope 计数 0，期望 1。
+>
+> **诊断：本机托盘观察不可靠，不是产品失败证据**。运行结束后直接调用同一读取脚本可读到 25 → 26 个图标、含 1 → 2 个 TokenScope，且此时已无验收进程——即 Explorer 对验收实例图标的收录发生在场景观察窗口之后，退出后留下幽灵图标；第三次实跑基线因此读到 26 个、含 2 个残留 TokenScope。另有一次重跑遇到溢出区只枚举到 3 个按钮（声明 22 个）而记 pending。两者都无法区分"验收实例未创建图标"与"Explorer 未收录"。
+>
+> **修复（只动该场景的判定）**：`contracts/native-single-instance.mjs` 增加相对基线的判定——观察可用但托盘**结构完全没变**（`total_count` 与基线相同）且 TokenScope 计数不符时记 **pending** 并说明"无法区分未创建与未收录"；结构发生变化而计数不符仍记 failed。合成契约补两条用例（结构未变 → pending；结构已变 → failed）。
+>
+> **第三次实跑（修复后）：0 失败、3 项托盘 pending**（基线 26 → 观察 26 → 26，TokenScope 2 vs 期望 3），`verification_complete=false`，场景退出码 3。其余 22 项通过，第二实例 84 ms、退出码 0，窗口恢复与前台判定通过。
+>
+> **CI 接线准备（未触发）**：新增 `scripts/check_native_single_instance_evidence.py`——`failed` 必须为空、`pending` 必须全部落在允许集合（默认托盘三项）、关键项必须显式通过；放行时明确输出"放行不等于 AC10 关闭，托盘唯一性仍未验证"。`ui-e2e.yml` **本轮不改**（契约测试断言工作流仍不含 `ui-single-instance`），接线动作留待确认后在 CI 实跑。**未验证**：GitHub-hosted Runner 上的 `ui-single-instance` 实跑、Runner 上托盘可观测性、CI 步骤实际运行；AC10 因此保持开放，N12 继续开放。
+
 ### AC11 N12 人工签字批次（用户执行）
 
 - **受测物**：AC02 合入后当前最新 main 发布的 NSIS 安装包（以 Release 资产哈希为准）。
