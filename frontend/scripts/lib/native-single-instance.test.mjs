@@ -40,6 +40,7 @@ import {
   verifyAcceptanceExecutable,
   verifyBuildOriginBinding,
   readZipEntryBytes,
+  ZIP_READ_LIMITS,
 } from "./native-single-instance.mjs";
 import { buildLaunchesEvidence, createLaunchRecord } from "./native-instance.mjs";
 
@@ -290,6 +291,50 @@ function crc32(buf) {
   let crc = -1;
   for (let i = 0; i < buf.length; i++) crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ buf[i]) & 0xff];
   return (crc ^ -1) >>> 0;
+}
+
+/**
+ * 构造 prefix + 4 字节后缀，使整体 CRC-32 恰为 target（十六轮复核问题 3）。
+ * CRC-32 对定长消息是仿射双射：crc(prefix||x) = base ^ A·x，A 为 32×32 的
+ * GF(2) 线性映射。用前缀与单位向量算出 A 的列，解 32×32 线性方程组即得 x。
+ * 用于造出"无签名描述符的 CRC 恰好等于 0x08074b50"这一合法形态。
+ */
+function contentWithCrc(target, prefix) {
+  const zero = Buffer.alloc(4);
+  const base = crc32(Buffer.concat([prefix, zero]));
+  const cols = [];
+  for (let bit = 0; bit < 32; bit++) {
+    const s = Buffer.alloc(4);
+    s[bit >>> 3] = 1 << (bit & 7);
+    cols.push(crc32(Buffer.concat([prefix, s])) ^ base);
+  }
+  const rhs = (target ^ base) >>> 0;
+  const rows = [];
+  for (let r = 0; r < 32; r++) {
+    let mask = 0;
+    for (let c = 0; c < 32; c++) if ((cols[c] >>> r) & 1) mask |= 1 << c;
+    rows.push({ mask, val: (rhs >>> r) & 1 });
+  }
+  const pivotOf = new Array(32).fill(-1);
+  for (let c = 0; c < 32; c++) {
+    let p = -1;
+    for (let r = 0; r < 32; r++) if (pivotOf[r] === -1 && ((rows[r].mask >>> c) & 1)) { p = r; break; }
+    if (p === -1) continue;
+    pivotOf[p] = c;
+    for (let r = 0; r < 32; r++) {
+      if (r !== p && ((rows[r].mask >>> c) & 1)) {
+        rows[r] = { mask: rows[r].mask ^ rows[p].mask, val: rows[r].val ^ rows[p].val };
+      }
+    }
+  }
+  let x = 0;
+  for (let r = 0; r < 32; r++) {
+    if (pivotOf[r] === -1 && rows[r].val === 1) return null;
+    if (pivotOf[r] !== -1 && rows[r].val === 1) x |= 1 << pivotOf[r];
+  }
+  const suffix = Buffer.alloc(4);
+  for (let bit = 0; bit < 32; bit++) if ((x >>> bit) & 1) suffix[bit >>> 3] |= 1 << (bit & 7);
+  return Buffer.concat([prefix, suffix]);
 }
 
 import cryptoModule from "node:crypto";
@@ -1103,12 +1148,14 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     );
     expect(okNoSig.ok).toBe(true);
     expect(okNoSig.bytes.toString()).toBe("EXE-NOSIG");
-    // 负例：声明 bit3 但描述符缺失（截断）——读取落到 CD 区被拒
+    // 负例：声明 bit3 但描述符完全缺失（十六轮复核问题 1）——描述符必须位于
+    // 数据之后、中央目录之前，不能从 CD 借字节；拒绝原因要明确指出缺失。
     const noDescriptor = readZipEntryBytes(
       streamedZip("a.exe", Buffer.from("X-NODD"), 0, { dropDescriptor: true }),
       "a.exe",
     );
     expect(noDescriptor.ok).toBe(false);
+    expect(noDescriptor.reason).toMatch(/描述符缺失|数据后只剩/);
     // 负例：描述符 CRC 与中央目录登记不一致
     const badCrc = readZipEntryBytes(
       streamedZip("a.exe", Buffer.from("X-CRC"), 0, { descriptorCrc: 0x12345678 }),
@@ -1146,6 +1193,117 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     const rFlag = readZipEntryBytes(flagsMismatch, "a.exe");
     expect(rFlag.ok).toBe(false);
     expect(rFlag.reason).toMatch(/data descriptor 标志不一致/);
+  });
+
+  it("无签名描述符的 CRC 恰好等于 0x08074b50：仍按无签名解析并通过（不以首 4 字节判签名）", () => {
+    const crc32Local = (b) => crc32(b);
+    // 用 GF(2) 构造内容，使其 CRC 恰为描述符签名值 0x08074b50。
+    const content = contentWithCrc(0x08074b50, Buffer.from("ZIP0"));
+    expect(content).not.toBeNull();
+    expect(crc32Local(content)).toBe(0x08074b50);
+    const nb = Buffer.from("a.exe");
+    const l = Buffer.alloc(30);
+    l.writeUInt32LE(0x04034b50, 0);
+    l.writeUInt16LE(20, 4);
+    l.writeUInt16LE(0x08, 6);
+    l.writeUInt16LE(nb.length, 26);
+    // 无签名描述符：CRC 字段恰好是 0x08074b50，后跟大小
+    const dd = Buffer.alloc(12);
+    dd.writeUInt32LE(0x08074b50, 0);
+    dd.writeUInt32LE(content.length, 4);
+    dd.writeUInt32LE(content.length, 8);
+    const c = Buffer.alloc(46);
+    c.writeUInt32LE(0x02014b50, 0);
+    c.writeUInt16LE(20, 4);
+    c.writeUInt16LE(0x08, 8);
+    c.writeUInt32LE(0x08074b50, 16);
+    c.writeUInt32LE(content.length, 20);
+    c.writeUInt32LE(content.length, 24);
+    c.writeUInt16LE(nb.length, 28);
+    c.writeUInt32LE(0, 42);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(1, 8);
+    eocd.writeUInt16LE(1, 10);
+    eocd.writeUInt32LE(46 + nb.length, 12);
+    eocd.writeUInt32LE(30 + nb.length + content.length + dd.length, 16);
+    const zip = Buffer.concat([l, nb, content, dd, c, nb, eocd]);
+    // 若实现仅凭首 4 字节判"带签名"，会跳 4 字节读错字段并拒绝；正确实现应
+    // 按无签名解读（CRC 恰等于签名值）并通过。
+    const result = readZipEntryBytes(zip, "a.exe");
+    expect(result.ok).toBe(true);
+    expect(result.bytes.equals(content)).toBe(true);
+    // 对照：同一内容改成带签名描述符，也应通过（两种形态都合法）。
+    const ddSigned = Buffer.alloc(16);
+    ddSigned.writeUInt32LE(0x08074b50, 0);
+    ddSigned.writeUInt32LE(0x08074b50, 4);
+    ddSigned.writeUInt32LE(content.length, 8);
+    ddSigned.writeUInt32LE(content.length, 12);
+    const eocdSigned = Buffer.from(eocd);
+    eocdSigned.writeUInt32LE(30 + nb.length + content.length + ddSigned.length, 16);
+    const zipSigned = Buffer.concat([l, nb, content, ddSigned, c, nb, eocdSigned]);
+    const signedResult = readZipEntryBytes(zipSigned, "a.exe");
+    expect(signedResult.ok).toBe(true);
+  });
+
+  it("归档读取与解压的资源上限：在解析与展开过程中强制，可注入小上限", () => {
+    // 上限是"可解释"的：默认值来自 ZIP_READ_LIMITS，调用方可注入更小值；
+    // 解压用 zlib maxOutputLength 在展开中途中止，不先完整展开再检查。
+    const crc32Local = (b) => crc32(b);
+    const deflatedZip = (content, claimedUncompressed) => {
+      const packed = zlib.deflateRawSync(content);
+      const nb = Buffer.from("a.exe");
+      const l = Buffer.alloc(30);
+      l.writeUInt32LE(0x04034b50, 0);
+      l.writeUInt16LE(20, 4);
+      l.writeUInt16LE(8, 8);
+      l.writeUInt32LE(crc32Local(content), 14);
+      l.writeUInt32LE(packed.length, 18);
+      l.writeUInt32LE(claimedUncompressed, 22);
+      l.writeUInt16LE(nb.length, 26);
+      const c = Buffer.alloc(46);
+      c.writeUInt32LE(0x02014b50, 0);
+      c.writeUInt16LE(20, 4);
+      c.writeUInt16LE(8, 10);
+      c.writeUInt32LE(crc32Local(content), 16);
+      c.writeUInt32LE(packed.length, 20);
+      c.writeUInt32LE(claimedUncompressed, 24);
+      c.writeUInt16LE(nb.length, 28);
+      c.writeUInt32LE(0, 42);
+      const eocd = Buffer.alloc(22);
+      eocd.writeUInt32LE(0x06054b50, 0);
+      eocd.writeUInt16LE(1, 8);
+      eocd.writeUInt16LE(1, 10);
+      eocd.writeUInt32LE(46 + nb.length, 12);
+      eocd.writeUInt32LE(30 + nb.length + packed.length, 16);
+      return Buffer.concat([l, nb, packed, c, nb, eocd]);
+    };
+    const small = deflatedZip(Buffer.alloc(40, 0x41), 40);
+    // 归档字节上限：在 EOCD 解析前拒绝
+    const archiveTooBig = readZipEntryBytes(small, "a.exe", { maxArchiveBytes: 10 });
+    expect(archiveTooBig.ok).toBe(false);
+    expect(archiveTooBig.reason).toMatch(/归档字节 \d+ 超过上限 10/);
+    // 登记未压缩大小超限：解压前拒绝（不浪费展开）
+    const entryTooBig = readZipEntryBytes(small, "a.exe", { maxEntryBytes: 8 });
+    expect(entryTooBig.ok).toBe(false);
+    expect(entryTooBig.reason).toMatch(/登记未压缩大小 40 超过上限 8/);
+    // 解压过程中超限：登记值谎报为 8 骗过登记检查，实际展开 40 字节——
+    // maxOutputLength 必须在展开中途中止，不能先完整展开再比对。
+    const lying = deflatedZip(Buffer.alloc(40, 0x41), 8);
+    const inflateTooBig = readZipEntryBytes(lying, "a.exe", { maxEntryBytes: 8 });
+    expect(inflateTooBig.ok).toBe(false);
+    expect(inflateTooBig.reason).toMatch(/解压失败.*(larger than 8|too large)/i);
+    // 默认上限是显式常量（可解释），且为正数
+    expect(ZIP_READ_LIMITS.maxArchiveBytes).toBeGreaterThan(0);
+    expect(ZIP_READ_LIMITS.maxEntryBytes).toBeGreaterThan(0);
+    expect(ZIP_READ_LIMITS.maxEntryBytes).toBeLessThanOrEqual(ZIP_READ_LIMITS.maxArchiveBytes);
+    // 对照：上限足够时同一归档通过
+    const ok = readZipEntryBytes(small, "a.exe", { maxEntryBytes: 1024 });
+    expect(ok.ok).toBe(true);
+    expect(ok.bytes.length).toBe(40);
+    // 非法上限配置拒绝
+    expect(readZipEntryBytes(small, "a.exe", { maxEntryBytes: 0 }).ok).toBe(false);
+    expect(readZipEntryBytes(small, "a.exe", { maxArchiveBytes: -1 }).ok).toBe(false);
   });
 
   it("普通目录 nlink=2 也必须继续遍历：内含外部 junction 的反例不被漏掉", () => {

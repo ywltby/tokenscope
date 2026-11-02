@@ -840,9 +840,31 @@ function crc32Of(buf) {
   return (crc ^ -1) >>> 0;
 }
 
-export function readZipEntryBytes(archiveBytes, entryName) {
+// 归档读取/解压的可解释资源上限（十六轮复核问题 2）：默认值按 EXE 产物的
+// 实际量级设定，调用方可注入更小值。上限在解析与解压**过程中**强制——
+// 解压用 zlib 的 maxOutputLength，超限在展开中途失败，不先完整展开再检查。
+export const ZIP_READ_LIMITS = {
+  // 归档 zip 字节上限（GitHub artifact 通常 10–50 MiB）
+  maxArchiveBytes: 512 * 1024 * 1024,
+  // 单条目解压后字节上限（EXE 通常 10–50 MiB）
+  maxEntryBytes: 256 * 1024 * 1024,
+};
+
+export function readZipEntryBytes(archiveBytes, entryName, limits = {}) {
   const bytes = archiveBytes;
   const fail = (reason) => ({ ok: false, reason });
+  const maxArchiveBytes = Number.isInteger(limits?.maxArchiveBytes)
+    ? limits.maxArchiveBytes
+    : ZIP_READ_LIMITS.maxArchiveBytes;
+  const maxEntryBytes = Number.isInteger(limits?.maxEntryBytes)
+    ? limits.maxEntryBytes
+    : ZIP_READ_LIMITS.maxEntryBytes;
+  if (!Number.isInteger(maxArchiveBytes) || maxArchiveBytes <= 0) {
+    return fail("归档字节上限配置非法，拒绝启动");
+  }
+  if (!Number.isInteger(maxEntryBytes) || maxEntryBytes <= 0) {
+    return fail("单条目解压上限配置非法，拒绝启动");
+  }
   // 全程先检查长度再读，杜绝越界读抛出未处理异常（Buffer.read* 越界会抛
   // ERR_OUT_OF_RANGE）。
   const safeU32 = (off) => {
@@ -855,6 +877,9 @@ export function readZipEntryBytes(archiveBytes, entryName) {
   };
   if (!Buffer.isBuffer(bytes) || bytes.length < 22) {
     return fail("归档字节过短，不是有效的 ZIP 归档");
+  }
+  if (bytes.length > maxArchiveBytes) {
+    return fail(`归档字节 ${bytes.length} 超过上限 ${maxArchiveBytes}，拒绝启动`);
   }
   // EOCD：从尾部向前找 signature 0x06054b50（注释长度上限 65535）
   const minEocd = 22;
@@ -908,6 +933,12 @@ export function readZipEntryBytes(archiveBytes, entryName) {
     // 该形态合法（Node zlib、Java ZipOutputStream 等向不可 seek 流写出时都
     // 用它），不得判损坏；描述符在读取后与 CD 登记值核对。
     const hasDataDescriptor = (cdFlags & 0x08) !== 0;
+    // 登记未压缩大小超过上限：解压前就拒绝，不先展开再检查。
+    if (uncompressedSize > maxEntryBytes) {
+      return fail(
+        `ZIP 条目 "${entryName}" 登记未压缩大小 ${uncompressedSize} 超过上限 ${maxEntryBytes}，拒绝启动`,
+      );
+    }
     if (cursor + 46 + nameLen + extraLen + commentLen > bytes.length) {
       return fail("ZIP Central Directory 条目名越界，归档损坏");
     }
@@ -971,7 +1002,9 @@ export function readZipEntryBytes(archiveBytes, entryName) {
         content = Buffer.from(raw);
       } else if (method === 8) {
         try {
-          content = zlib.inflateRawSync(raw);
+          // maxOutputLength：zlib 在展开过程中达到上限即中止（不先完整展开），
+          // 超限抛 ERR_BUFFER_TOO_LARGE。
+          content = zlib.inflateRawSync(raw, { maxOutputLength: maxEntryBytes });
         } catch (error) {
           return fail(`ZIP 条目 "${entryName}" 解压失败：${String(error?.message ?? error)}`);
         }
@@ -994,20 +1027,45 @@ export function readZipEntryBytes(archiveBytes, entryName) {
         );
       }
       if (hasDataDescriptor) {
-        // 描述符紧随数据（PK\x07\x08 可选签名 + crc + 压缩 + 未压缩）；
-        // 两种形态都接受（签名存在与否由规范允许），字段必须与 CD 一致。
-        const ddBase = dataStart + compressedSize;
-        const ddSig = safeU32(ddBase);
-        const ddOffset = ddSig === 0x08074b50 ? 4 : 0;
-        const ddCrc = safeU32(ddBase + ddOffset);
-        const ddCompressed = safeU32(ddBase + ddOffset + 4);
-        const ddUncompressed = safeU32(ddBase + ddOffset + 8);
-        if (ddCrc === null || ddCompressed === null || ddUncompressed === null || ddBase + ddOffset + 12 > bytes.length) {
-          return fail(`ZIP 条目 "${entryName}" 的 data descriptor 缺失或越界，流式归档不完整`);
-        }
-        if (ddCrc !== crcActual || ddCompressed !== compressedSize || ddUncompressed !== uncompressedSize) {
+        // data descriptor 必须**完全位于条目数据之后、中央目录之前**
+        // （十六轮复核问题 1）：描述符不能从中央目录借字节——那说明归档
+        // 根本没有描述符，借来的是 CD 条目头。
+        const dataEnd = dataStart + compressedSize;
+        if (dataEnd > cdOffset) {
           return fail(
-            `ZIP 条目 "${entryName}" 的 data descriptor（CRC ${ddCrc.toString(16)}，压缩 ${ddCompressed}，未压缩 ${ddUncompressed}）与中央目录登记不一致，归档被篡改`,
+            `ZIP 条目 "${entryName}" 数据结束位置 ${dataEnd} 越过中央目录起点 ${cdOffset}，归档损坏`,
+          );
+        }
+        const available = cdOffset - dataEnd;
+        const minDescriptorBytes = 12; // 无签名形态的最小尺寸
+        if (available < minDescriptorBytes) {
+          return fail(
+            `ZIP 条目 "${entryName}" 声明 data descriptor 但数据后只剩 ${available} 字节（需要至少 ${minDescriptorBytes}），描述符缺失，流式归档不完整`,
+          );
+        }
+        // 两种合法形态都接受（ZIP 规范允许签名存在与否），但**不能用前 4 字节
+        // 是否等于 0x08074b50 判定**——无签名描述符的 CRC 可能恰好等于该值
+        // （十六轮复核问题 3）。改为两种解读都校验，取唯一与 CD 一致者。
+        const matches = (offset) => {
+          const ddCrc = safeU32(offset);
+          const ddCompressed = safeU32(offset + 4);
+          const ddUncompressed = safeU32(offset + 8);
+          if (ddCrc === null || ddCompressed === null || ddUncompressed === null) return null;
+          if (offset + 12 > cdOffset) return null;
+          if (ddCrc !== crcActual) return null;
+          if (ddCompressed !== compressedSize || ddUncompressed !== uncompressedSize) return null;
+          return { crc: ddCrc, compressed: ddCompressed, uncompressed: ddUncompressed };
+        };
+        const signed = available >= 16 && safeU32(dataEnd) === 0x08074b50
+          ? matches(dataEnd + 4)
+          : null;
+        const unsigned = matches(dataEnd);
+        if (!signed && !unsigned) {
+          const ddCrc = safeU32(dataEnd);
+          const ddCompressed = safeU32(dataEnd + 4);
+          const ddUncompressed = safeU32(dataEnd + 8);
+          return fail(
+            `ZIP 条目 "${entryName}" 的 data descriptor 与中央目录登记不一致（读到 CRC ${ddCrc === null ? "缺失" : ddCrc.toString(16)}，压缩 ${ddCompressed ?? "缺失"}，未压缩 ${ddUncompressed ?? "缺失"}；期望 CRC ${crcActual.toString(16)}，压缩 ${compressedSize}，未压缩 ${uncompressedSize}），归档被篡改或描述符缺失`,
           );
         }
       }
