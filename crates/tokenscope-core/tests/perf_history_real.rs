@@ -1047,7 +1047,11 @@ fn ac09_perf_evidence_redaction() {
     let evidence = serde_json::json!({
         "phase": "合成脱敏验证",
         "totals": { "requests": 1, "input": 1, "output": 1, "cache_write": 1, "cache_read": 1 },
-        "isolation": { "all_writes_under_hermetic_temp_dir": true },
+        "isolation": {
+            "all_writes_under_hermetic_temp_dir": true,
+            "business_data_written_to_temp_only": true,
+            "redacted_summary_saved_to_evidence_dir": true,
+        },
         "boundaries": ["不含会话正文、文件名、项目路径或来源路径"],
     });
     let written = write_perf_evidence(&dir, "ac09-evidence-redaction.json", &evidence);
@@ -1071,6 +1075,14 @@ fn ac09_perf_evidence_redaction() {
     );
     assert_eq!(
         parsed["isolation"]["all_writes_under_hermetic_temp_dir"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        parsed["isolation"]["business_data_written_to_temp_only"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        parsed["isolation"]["redacted_summary_saved_to_evidence_dir"],
         serde_json::json!(true)
     );
 
@@ -1463,6 +1475,7 @@ fn ac09_real_sources_cold_warm_pipeline() {
     );
 
     // ── 证据 JSON（只含汇总数字与边界说明，不含文件名/路径/正文）
+    let evidence_dir_set = std::env::var_os("TOKENSCOPE_PERF_EVIDENCE_DIR").is_some();
     let evidence = serde_json::json!({
         "phase": "AC09 阶段2（真实来源，只读；N13 开放）",
         "verification": {
@@ -1488,11 +1501,14 @@ fn ac09_real_sources_cold_warm_pipeline() {
             "source_files_written": false,
             "content_read_for_parsing": true,
             "temp_history_stores_source_metadata": true,
+            "business_data_written_to_temp_only": true,
+            "redacted_summary_saved_to_evidence_dir": evidence_dir_set,
             "claude_mapping": "disabled（不读 ~/.claude.json）",
             "fingerprint_scope": "files_and_bytes_and_max_mtime",
         },
         "boundaries": [
             "来源只读 = 不写入/不修改/不删除来源文件；采集会读取内容到内存，临时历史库保存来源路径与项目目录等元数据（只在本次临时目录）",
+            "业务数据（历史库/价格索引）只写本次临时目录；脱敏汇总另存到 TOKENSCOPE_PERF_EVIDENCE_DIR（gitignored），两者分开",
             "只读元数据的只有目录指纹（文件数/字节数/最新 mtime）",
             "项目身份：claude_mapping=None，Claude 项目按 slug 计，组数不代表真实项目数",
             "成本：只加载注入的隔离价格表，真实模型可能未命中，cost 仅作参考",
