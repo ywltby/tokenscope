@@ -6,22 +6,29 @@
 //! TOKENSCOPE_REAL_PERF=1 cargo test --release --test perf_history_real -- --ignored --nocapture
 //! ```
 //!
-//! **阶段 1（当前提交）：只用合成来源验证测试架本身**——冷/热采集、首页汇总
-//! 与明细前两页可测量；冷热请求数与四桶一致；默认根与重叠追加根不重复计数；
-//! 隔离不变量成立。真实 `~/.claude`、`~/.codex` 来源的读取属 B4 后续阶段
-//! （N13 保持开放），本文件不含任何真实来源路径；旧 `perf_real_data.rs`
-//! 不改不删（它是 CLAUDE.md 记载的真实缓存预热工具），N13 的结论只取自
-//! 本文件，不引用旧测试的数字。
+//! **阶段 1（合成来源）**：验证测试架本身——冷/热采集、首页汇总与明细前两页
+//! 可测量；冷热请求数与四桶一致；默认根与重叠追加根不重复计数；隔离不变量成立。
+//!
+//! **阶段 2（真实来源，只读）**：`ac09_real_sources_cold_warm_pipeline` 只读
+//! `~/.claude/projects` 与 `~/.codex/sessions`，写入全部落在本次 hermetic
+//! 临时目录。这里的"只读"指**不写入、不修改、不删除来源文件**，不等于
+//! "不读取内容"：采集必然把日志解析进内存（这是产品行为），临时历史库也会
+//! 保存来源路径（cwd/项目目录等）与身份元数据——两者都只存在于本次临时目录，
+//! 随临时根清理删除，不入库、不输出。真正只读**元数据**的只有目录指纹步骤
+//! （文件数、字节数、最新 mtime）。
+//!
+//! 旧 `perf_real_data.rs` 不改不删（它是 CLAUDE.md 记载的真实缓存预热工具，
+//! 会写 `~/.tokenscope`），N13 的结论只取自本文件，不引用旧测试的数字。
 //!
 //! 隔离不变量（AC09 要求，全部显式注入）：
 //! - 历史库 `history_path`、缓存 `cache_dir`、价格索引 `pricing_index`、
 //!   价格文件 `pricing_path` 与证据输出全部落在 hermetic 临时目录；
 //! - OpenRouter/models.dev 快照注入不存在的路径（不读、不写真实快照）；
-//! - 来源计划 `source_plans` 显式注入合成根：`Some` 完全取代 `claude_dir`/
-//!   `codex_dir` 的默认根语义，默认根（`~/.claude` 等）不会被咨询；
-//!   `claude_mapping: None` 不读真实 `~/.claude.json`；其余 dir 类字段
-//!   全部指向隔离目录内的不存在路径，即使未来回归到 dir 语义也不会
-//!   意外落在真实用户目录（测试内另断言全部来源根位于隔离目录内）。
+//! - 来源计划 `source_plans` 显式注入：`Some` 完全取代 `claude_dir`/
+//!   `codex_dir` 的默认根语义，默认根（`~/.claude` 等）不会被咨询；阶段 1
+//!   注入合成根并断言全部位于隔离目录内；阶段 2 显式注入真实来源根（见下），
+//!   其余 dir 类字段仍指向隔离目录内的不存在路径，即使未来回归到 dir 语义
+//!   也不会意外落在真实用户目录；`claude_mapping: None` 不读 `~/.claude.json`。
 //!
 //! 证据边界（复核收窄，如实标注——观察范围之外的部分为**未证明**）：
 //! - 写侧：运行前后对真实 `~/.tokenscope` 取指纹且必须不变（本机无该
@@ -29,13 +36,16 @@
 //!   总字节数**——同长度的内容改写不可检测（敏感性用例
 //!   `ac09_fingerprint_scope_and_blind_spot` 已在合成目录钉住该边界）；
 //!   「逐字节零写入」未证明。
-//! - 读侧：请求数精确等于合成规模、四桶与期望公式吻合、按项目分组的
-//!   **身份集合**与 fixture 指定的 26 个合成项目逐项一致——只能排除
-//!   **在全局去重后仍新增事件的额外来源**；与已有事件同原生身份而被
-//!   去重的额外来源、空目录或零有效事件来源的读取不可由结果排除，
-//!   结构性保证是 `source_plans` 显式注入（见上）。本测试读取真实
-//!   `~/.tokenscope` 的**目录元数据**（文件名与大小，递归），不读文件
-//!   内容，不输出文件名清单。
+//! - 读侧（阶段 1）：请求数精确等于合成规模、四桶与期望公式吻合、按项目
+//!   分组的**身份集合**与 fixture 指定的 26 个合成项目逐项一致——只能排除
+//!   **在全局去重后仍新增事件的额外来源**；与已有事件同原生身份而被去重的
+//!   额外来源、空目录或零有效事件来源的读取不可由结果排除，结构性保证是
+//!   `source_plans` 显式注入（见上）。
+//! - 读侧（阶段 2，如实标注）：采集**会读取来源日志内容到内存**（解析所必需），
+//!   临时历史库**会保存来源路径与项目目录等元数据**；"来源未被写入/修改/删除"
+//!   由不写盘的代码路径与运行前后来源指纹保证，但"零读取"或"从未保存路径"
+//!   **不成立、也不在本测试的证明范围内**。本测试只对真实 `~/.tokenscope`
+//!   读取目录元数据（文件数 + 总字节数），不读其文件内容，不输出文件名清单。
 //! - 分页：前两页与合成数据的**独立期望顺序逐位核对**（不重复也不
 //!   漏行），并以「跳过中间一段」的反例证明核对对漏行有区分力。
 //!
@@ -44,7 +54,8 @@
 //! （N05 计数分配器；不覆盖 SQLite C 分配与完整 RSS，见
 //! docs/stats-semantics.md §3.5）、进程峰值工作集（Windows 为进程记录的
 //! 峰值经外部 PowerShell 查询，无采样间隙；不可获得时如实标注）。
-//! 证据 JSON 写入隔离目录（不入库）；本测试不输出任何日志正文内容。
+//! 证据 JSON 写入隔离目录（不入库），只含汇总数字与边界说明；不输出日志正文、
+//! 文件名或项目路径。证据随临时根清理删除（本轮实测未另存原始证据）。
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
@@ -730,7 +741,9 @@ fn ac09_synthetic_cold_warm_pipeline() {
     // 证据边界（如实标注）：指纹只证明文件数与总字节数不变（同长度内容
     // 改写不可检测）；请求数与项目身份集合只排除「在全局去重后仍新增
     // 事件的额外来源」——与已有事件同原生身份而被去重的额外来源、空来源
-    // 零读取未证明；结构性保证是 source_plans 显式注入（见上方来源根断言）。
+    // 无法由结果排除；结构性保证是 source_plans 显式注入合成根（见上方
+    // 来源根断言）。真实来源阶段的读取范围与写入口径见阶段 2 用例注释
+    // （采集会读取日志内容、临时历史库保存来源路径元数据，均为如实标注）。
 
     // ── 峰值测量（覆盖整个冷/热流程；fixture 写入的少量分配可忽略）
     let heap_peak = peak_bytes();
@@ -980,14 +993,18 @@ fn ac09_fingerprint_scope_and_blind_spot() {
 // 与阶段 1（合成来源）严格分开：本阶段的数字只来自真实来源树，**不引用
 // 合成结果**；缺失真实来源时跳过并如实标注，不伪造。
 //
-// 只读边界：
-// - 来源树只做目录遍历（文件数、字节数、最新 mtime），**不读会话内容**，
-//   不输出文件名、项目路径或正文；`claude_mapping = None` 不读 `~/.claude.json`。
+// 只读与写入边界（如实口径）：
+// - **只读 = 不写入、不修改、不删除来源文件**；**不是"不读取内容"**：采集会把
+//   来源日志解析进内存（产品行为），临时历史库会保存来源路径与项目目录等元数据
+//   ——两者都只在本次 hermetic 临时目录，随临时根清理删除，不入库、不输出。
+// - 真正只读**元数据**的只有目录指纹（文件数、字节数、最新 mtime）；不输出
+//   文件名、项目路径或正文；`claude_mapping = None` 不读 `~/.claude.json`。
 // - 历史库、缓存、价格索引、价格表与证据 JSON 全部落在本用例的 hermetic
 //   临时目录；真实 `~/.tokenscope` 只取运行前后指纹（文件数 + 总字节数），
 //   必须不变，且本用例绝不新建该目录。
 // - 来源树在测量期间若发生变化（文件数/字节数/最新 mtime 任一有变），
-//   如实标注 `source_tree_changed_during_measurement=true`，不为此反复重跑。
+//   先记录观察结果再判定一致性，并如实标注 `source_tree_changed_*`，
+//   不为此反复重跑。
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
@@ -1066,6 +1083,17 @@ struct RealRound {
     process_peak_working_set_bytes: Option<u64>,
 }
 
+/// 来源变化对测量结果的影响说明（空串 = 未观察到变化）。
+/// 断言消息必须包含它：来源在测量期间变化时，结果标为受影响，
+/// 不得静默按"未变化"口径记通过。
+fn source_change_note(changed: bool) -> &'static str {
+    if changed {
+        "；来源在测量期间发生变化，本结果受影响（不得按未变化口径解读）"
+    } else {
+        ""
+    }
+}
+
 fn measure_real_round(label: &str, opts: &SummaryOptions) -> RealRound {
     reset_peak();
     let mut r = RealRound::default();
@@ -1122,6 +1150,43 @@ fn measure_real_round(label: &str, opts: &SummaryOptions) -> RealRound {
     r
 }
 
+/// 合成定向验证：来源指纹变化检测与"测量受影响"标注（不读真实来源）。
+/// 只用本次 hermetic 目录里的合成文件，验证顺序要求的最小前提：
+/// 指纹能检出变化，且发生变化时标注必须写明"结果受影响"。
+#[test]
+#[ignore = "AC09 N13 合成定向验证：需 TOKENSCOPE_REAL_PERF=1（不读真实来源）"]
+fn ac09_source_change_note_marks_measurement_affected() {
+    let _g = serial();
+    if !gate_enabled() {
+        eprintln!("跳过：未设置 TOKENSCOPE_REAL_PERF=1");
+        return;
+    }
+    let dir = hermetic_dir("source-change");
+    let tree = dir.join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(tree.join("a.jsonl"), b"{}").unwrap();
+
+    let before = source_tree_fingerprint(&tree);
+    assert!(before.is_some(), "合成来源树必须可被指纹读取");
+    assert_eq!(source_change_note(false), "", "未变化时不得拼接影响说明");
+    // 无变化：指纹稳定，note 仍为空（正控制）。
+    assert_eq!(source_tree_fingerprint(&tree), before);
+    assert_eq!(source_change_note(false), "");
+
+    // 追加字节 → 指纹变化 → note 必须明确标注受影响。
+    std::fs::write(tree.join("a.jsonl"), b"{} \n").unwrap();
+    let after = source_tree_fingerprint(&tree);
+    assert_ne!(after, before, "追加字节必须被指纹检测到");
+    let note = source_change_note(after != before);
+    assert!(
+        note.contains("来源在测量期间发生变化"),
+        "note 必须说明来源变化"
+    );
+    assert!(note.contains("结果受影响"), "note 必须标注结果受影响");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 真实来源：冷/热采集、首页汇总、明细前两页、四桶一致性、重叠根不重复计数。
 /// 只记录数字，不设门槛；来源缺失即跳过，不伪造结果。
 #[test]
@@ -1172,22 +1237,64 @@ fn ac09_real_sources_cold_warm_pipeline() {
     let cold = measure_real_round("真实冷轮", &opts);
     let warm = measure_real_round("真实热轮", &opts);
 
+    // ── 来源观察先于一致性判定：冷/热跑完立刻取指纹，即使下面断言失败，
+    //    panic 消息也带上"来源是否变化"，不把变化静默记成"不一致=缺陷"。
+    let claude_after_cold_warm = source_tree_fingerprint(&claude_root);
+    let codex_after_cold_warm = source_tree_fingerprint(&codex_root);
+    let changed_cold_warm =
+        claude_before != claude_after_cold_warm || codex_before != codex_after_cold_warm;
+    if changed_cold_warm {
+        eprintln!(
+            "观察：冷/热测量期间来源树发生变化（文件数/字节数/最新 mtime 有变）——\
+             后续一致性判定的失败可能由此产生，结果按受影响标注，不重跑"
+        );
+    }
+
     // ── 一致性：请求数与四桶必须完全一致（真实来源下不预设规模）
-    assert_eq!(cold.requests, warm.requests, "真实冷/热请求数必须一致");
-    assert_eq!(cold.input, warm.input, "真实冷/热 input 必须一致");
-    assert_eq!(cold.output, warm.output, "真实冷/热 output 必须一致");
     assert_eq!(
-        cold.cache_write, warm.cache_write,
-        "真实冷/热 cache_write 必须一致"
+        cold.requests,
+        warm.requests,
+        "真实冷/热请求数必须一致{}",
+        source_change_note(changed_cold_warm)
     );
     assert_eq!(
-        cold.cache_read, warm.cache_read,
-        "真实冷/热 cache_read 必须一致"
+        cold.input,
+        warm.input,
+        "真实冷/热 input 必须一致{}",
+        source_change_note(changed_cold_warm)
+    );
+    assert_eq!(
+        cold.output,
+        warm.output,
+        "真实冷/热 output 必须一致{}",
+        source_change_note(changed_cold_warm)
+    );
+    assert_eq!(
+        cold.cache_write,
+        warm.cache_write,
+        "真实冷/热 cache_write 必须一致{}",
+        source_change_note(changed_cold_warm)
+    );
+    assert_eq!(
+        cold.cache_read,
+        warm.cache_read,
+        "真实冷/热 cache_read 必须一致{}",
+        source_change_note(changed_cold_warm)
     );
     // 分页：满页只在总数足够时要求（真实规模不预设）。
     if cold.requests > (2 * PAGE) as u64 {
-        assert_eq!(cold.page1_rows, PAGE, "真实明细第一页应为满页");
-        assert_eq!(cold.page2_rows, PAGE, "真实明细第二页应为满页");
+        assert_eq!(
+            cold.page1_rows,
+            PAGE,
+            "真实明细第一页应为满页{}",
+            source_change_note(changed_cold_warm)
+        );
+        assert_eq!(
+            cold.page2_rows,
+            PAGE,
+            "真实明细第二页应为满页{}",
+            source_change_note(changed_cold_warm)
+        );
     }
 
     // ── 重叠根：同一 Claude 根注入两次（同物理目录）必须与单根结果一致
@@ -1207,19 +1314,44 @@ fn ac09_real_sources_cold_warm_pipeline() {
     let double_opts = build_opts(&double_dir, double_plans);
     let double = measure_real_round("真实重叠双根", &double_opts);
 
+    // 来源观察先于重叠一致性判定（累计到此刻的变化）。
+    let claude_after_overlap = source_tree_fingerprint(&claude_root);
+    let codex_after_overlap = source_tree_fingerprint(&codex_root);
+    let changed_overlap =
+        claude_before != claude_after_overlap || codex_before != codex_after_overlap;
+    if changed_overlap && !changed_cold_warm {
+        eprintln!("观察：重叠根测量期间来源树发生变化——重叠对比结果按受影响标注，不重跑");
+    }
+
     assert_eq!(
-        single.requests, double.requests,
-        "重叠追加根不得重复计数：请求数必须与单根一致"
+        single.requests,
+        double.requests,
+        "重叠追加根不得重复计数：请求数必须与单根一致{}",
+        source_change_note(changed_overlap)
     );
-    assert_eq!(single.input, double.input, "重叠根 input 必须一致");
-    assert_eq!(single.output, double.output, "重叠根 output 必须一致");
     assert_eq!(
-        single.cache_write, double.cache_write,
-        "重叠根 cache_write 必须一致"
+        single.input,
+        double.input,
+        "重叠根 input 必须一致{}",
+        source_change_note(changed_overlap)
     );
     assert_eq!(
-        single.cache_read, double.cache_read,
-        "重叠根 cache_read 必须一致"
+        single.output,
+        double.output,
+        "重叠根 output 必须一致{}",
+        source_change_note(changed_overlap)
+    );
+    assert_eq!(
+        single.cache_write,
+        double.cache_write,
+        "重叠根 cache_write 必须一致{}",
+        source_change_note(changed_overlap)
+    );
+    assert_eq!(
+        single.cache_read,
+        double.cache_read,
+        "重叠根 cache_read 必须一致{}",
+        source_change_note(changed_overlap)
     );
 
     // ── 项目分组数（claude_mapping 禁用 → Claude 按 slug 计；只记数量）
@@ -1229,16 +1361,8 @@ fn ac09_real_sources_cold_warm_pipeline() {
     let proj = query::query_summary(&proj_snap.query_id).expect("项目分组汇总失败");
     let groups = proj.groups.iter().filter(|g| g.key != "合计").count();
 
-    // ── 来源变化检测（如实标注，不重跑求绿）
-    let claude_after = source_tree_fingerprint(&claude_root);
-    let codex_after = source_tree_fingerprint(&codex_root);
-    let source_changed = claude_before != claude_after || codex_before != codex_after;
-    if source_changed {
-        eprintln!(
-            "注意：测量期间真实来源树发生变化（文件数/字节数/最新 mtime 有变）——\
-             冷/热与重叠对比可能受并发写入影响，本结果按此标注，不重跑"
-        );
-    }
+    // ── 来源变化总览（冷/热与重叠两段观察的并集；已在各段判定前记录）
+    let source_changed = changed_cold_warm || changed_overlap;
 
     // ── 写侧隔离：真实 ~/.tokenscope 指纹必须不变
     let data_after = real_tokenscope_fingerprint();
@@ -1267,6 +1391,10 @@ fn ac09_real_sources_cold_warm_pipeline() {
             "page_rows": cold.page1_rows + cold.page2_rows,
             "project_groups": groups,
             "source_tree_changed_during_measurement": source_changed,
+            "source_tree_change_checks": {
+                "after_cold_warm": changed_cold_warm,
+                "after_overlap": changed_overlap,
+            },
             "real_tokenscope_fingerprint_unchanged": true,
         },
         "cold": cold,
@@ -1277,12 +1405,15 @@ fn ac09_real_sources_cold_warm_pipeline() {
             "history_path": dir.join("history.db"),
             "cache_dir": dir.join("cache"),
             "pricing_index": dir.join("pricing-index.json"),
-            "source_roots_read_only": true,
+            "source_files_written": false,
+            "content_read_for_parsing": true,
+            "temp_history_stores_source_metadata": true,
             "claude_mapping": "disabled（不读 ~/.claude.json）",
             "fingerprint_scope": "files_and_bytes_and_max_mtime",
         },
         "boundaries": [
-            "来源只读：从不写入来源目录；只读元数据做指纹，不读会话内容",
+            "来源只读 = 不写入/不修改/不删除来源文件；采集会读取内容到内存，临时历史库保存来源路径与项目目录等元数据（只在本次临时目录）",
+            "只读元数据的只有目录指纹（文件数/字节数/最新 mtime）",
             "项目身份：claude_mapping=None，Claude 项目按 slug 计，组数不代表真实项目数",
             "成本：只加载注入的隔离价格表，真实模型可能未命中，cost 仅作参考",
             "堆峰值只统计 Rust 分配（计数分配器），不含 SQLite C 分配",
