@@ -1446,8 +1446,20 @@ export function parseTrayOwnerObservation(stdout) {
   return { ok: false, error: "托盘归属观察输出无法解析", pid: null, windows: null, count: null, icons: [] };
 }
 
-/** 托盘归属判定：按进程注册的图标数核对（默认期望恰好 1 个）。
- * 观察不可用 → pending；数量不符 → failed（0 个=未创建，>1=重复图标）。 */
+/**
+ * 托盘归属判定（证据口径收敛版）。
+ *
+ * 探测范围本身的限制决定了结论强度：`read-tray-icon-owner.ps1` 只枚举目标进程
+ * 的 `tray_icon_app` 窗口并扫 `uID 0..MaxUid`，它能确认"在这个范围内找到了 N 个
+ * 属于该进程的图标"，但**不能**证明进程没注册过图标（可能尚未创建、可能已销毁、
+ * 可能落在范围外），也**不能**证明全局唯一（其他进程的图标不在探测内）。
+ *
+ *   - 找到恰好 1 个（探测范围内）→ passed，措辞只描述"找到 1 个"，不写"唯一"；
+ *   - 找到 >1 个 → failed（已确认至少两个，足以否定"只有一个"）；
+ *   - 0 个或观察不可用 → pending（无法区分"未创建"与"探测不到"）；
+ *   - 只有 1 个窗口但 uID 扫描区间耗尽（count>0 且命中在边界）时仍按找到的
+ *     数量判定，但调用方不应把它升级成"唯一性已证明"。
+ */
 export function classifyTrayOwner({ observation = null, expected = 1 } = {}) {
   if (!observation || observation.ok !== true || !Number.isInteger(observation.count)) {
     return {
@@ -1456,19 +1468,26 @@ export function classifyTrayOwner({ observation = null, expected = 1 } = {}) {
       reason: `托盘归属观察不可用：${observation?.error ?? "无结果"}`,
     };
   }
+  if (observation.count > expected) {
+    return {
+      status: "failed",
+      count: observation.count,
+      reason: `当前探测范围内找到 ${observation.count} 个属于该进程的托盘图标（期望 ${expected}）：至少存在重复图标`,
+    };
+  }
   if (observation.count === expected) {
     return {
       status: "passed",
       count: observation.count,
-      reason: `该进程注册 ${observation.count} 个托盘图标（期望 ${expected}）`,
+      reason: `当前探测范围内找到 ${observation.count} 个属于该进程的托盘图标`,
     };
   }
   return {
-    status: "failed",
+    status: "pending",
     count: observation.count,
-    reason: `该进程注册 ${observation.count} 个托盘图标（期望 ${expected}）：${
-      observation.count === 0 ? "未创建托盘图标" : "存在重复托盘图标"
-    }`,
+    reason:
+      `当前探测范围内未找到该进程的托盘图标（0 个）：无法区分"未创建图标"与"探测范围不足/尚未创建"，` +
+      `不据此判定未创建`,
   };
 }
 

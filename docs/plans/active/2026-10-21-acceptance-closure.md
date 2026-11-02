@@ -248,7 +248,13 @@ AC03–AC05 的 CI 接入：
 
 > **2026-11-02 AC10 托盘归属（本机，干净树 `190d6fc`）**：新增 `scripts/read-tray-icon-owner.ps1`——按 PID 枚举该进程的 `tray_icon_app` 类窗口（tray-icon 0.25.1 为每个托盘图标创建的隐藏窗口），用 `Shell_NotifyIconGetRect` 对 `(hwnd, uID)` 探测注册的图标；只读、不发消息、不点击、不读 Explorer 工具栏。lib 侧 `parseTrayOwnerObservation`/`classifyTrayOwner` 把结果判为 passed（恰好 1 个）/ failed（0 个=未创建、>1=重复）/ pending（不可用或无法解析）。场景在第一个实例就绪后轮询归属、第二实例退出后再读一次，新增三项检查并写入 evidence。CI 放行检查器把归属三项列为必过，旧 evidence（无归属项）会被判"缺少关键项"阻断。
 >
-> **实跑结果（EXE SHA256 `59d4efff…258ea9`，`tree_clean=true`、预检 `assumed`）**：归属观察 `before` / `after` 均为 **1 个**图标（`tray_owner_single_icon_before_second`、`_after_second`、`_unchanged_after_second` 全部通过）；探测到的图标 `hwnd=417792268, uid=2` 归属 primary PID 14844，第二实例（PID 23928）64 ms 退出码 0 且未新增自己的图标。因此**“托盘唯一性=本实例恰好一个图标”已取得可验证结果**。Explorer 展示层三项仍 pending：基线 24 项、TokenScope 计数 0 → 工具栏未展示该图标；这一项仍未验证（不冒充通过）。证据写入独立目录 `qa-artifacts/native-e2e/ac10-tray-owner/ui-single-instance/evidence.json`，原三轮 evidence 保留。检查器复核：`allowed=true`、`verdict=partial`、`ac10_conclusion=none`。
+> **实跑结果（EXE SHA256 `59d4efff…258ea9`，`tree_clean=true`、预检 `assumed`）**：**两次观察（第一实例就绪后、第二实例退出后）在当前探测范围内各找到 1 个属于主进程的图标**（`hwnd=417792268, uid=2`，归属 primary PID 14844），第二实例（PID 23928）64 ms 退出码 0。证据限度必须如实：探测只覆盖主进程 `tray_icon_app` 窗口的 `uID 0..64`，因此——
+> - **不能**宣称"第二进程从未创建图标"：它只存活 64 ms，探测发生在其退出之后，生命周期内是否创建过图标不在观察范围内；
+> - **不能**宣称"全局唯一"：其他进程（含用户正式实例）的图标不在本探测内，文本层也未读到归属信息；
+> - 只有"这两次在当前范围内找到同一个主进程图标"是可确认的阳性观察。
+> Explorer 展示层三项仍 pending：基线 24 项、TokenScope 计数 0 → 工具栏未展示该图标，仍未验证（不冒充通过）。证据写入独立目录 `qa-artifacts/native-e2e/ac10-tray-owner/ui-single-instance/evidence.json`，原三轮 evidence 保留未改写。检查器复核：`allowed=true`、`verdict=partial`、`tray_uniqueness_verified=true`（阳性观察存在）、`ac10_conclusion=none`。
+>
+> **判定口径（本轮修正）**：`classifyTrayOwner` 现在把"探测到 0 个"记为 **pending**（无法区分"未创建"与"探测不到/尚未创建"），只有"探测范围内找到 >1 个"才记 failed（已确认至少两个，足以否定"只有一个"）；找到 1 个记 passed 且措辞只写"当前探测范围内找到 1 个"，不写"唯一/恰好"。检查器把归属层三项从"必过项"改为"允许 pending"，另用 `tray_uniqueness_verified` 单独标记阳性观察是否存在——**pending 不等于通过**，未取得阳性观察时该标记为 false。
 >
 > **CI 接线准备（未改工作流、未触发）**：步骤草案为「跑 `ui-single-instance` → 用 `check_native_single_instance_evidence.py --allow-pending tray` 裁决（场景退出码 3 仅表示有允许范围内的 pending，由检查器判定）」。GitHub-hosted Runner 的托盘可观测性未知（可能无 Explorer 通知区域），首次接线需人工确认后再加步骤；`ui-e2e.yml` 本轮不变。AC10 与 N12 保持开放。
 

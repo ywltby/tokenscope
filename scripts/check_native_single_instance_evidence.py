@@ -27,11 +27,28 @@ import json
 import sys
 from pathlib import Path
 
+# 托盘相关检查一律允许 pending：探测范围有限，pending 表示"未验证"而不是失败，
+# 也绝不等同于通过。二者分属两层：
+#   - Explorer 展示层：工具栏文本计数（只能说明展示，不能归属）；
+#   - 归属层：按 PID 探测 (hwnd, uID)（只能说明"探测范围内找到 N 个"，
+#     不能证明唯一性，也不能证明进程没注册过图标）。
 TRAY_CHECKS = frozenset(
     {
         "single_tray_icon_before_second",
         "single_tray_icon_after_second",
         "tray_count_unchanged_after_second",
+        "tray_owner_single_icon_before_second",
+        "tray_owner_single_icon_after_second",
+        "tray_owner_unchanged_after_second",
+    }
+)
+
+# 归属层三项：用于计算"托盘唯一性是否取得阳性观察"，不设为必过项。
+TRAY_OWNER_CHECKS = frozenset(
+    {
+        "tray_owner_single_icon_before_second",
+        "tray_owner_single_icon_after_second",
+        "tray_owner_unchanged_after_second",
     }
 )
 
@@ -47,10 +64,6 @@ REQUIRED_OK = (
     "first_window_foreground",
     "first_instance_alive_after_second",
     "real_data_untouched",
-    # 托盘唯一性改由归属观察判定（按进程 + (hwnd, uID)），不再依赖文本计数
-    "tray_owner_single_icon_before_second",
-    "tray_owner_single_icon_after_second",
-    "tray_owner_unchanged_after_second",
 )
 
 # 必须留下明确记录的项：托盘三项（见 checks 或 pending）+ 全部关键项（见 checks）
@@ -145,6 +158,11 @@ def evaluate(evidence: dict, allow: frozenset[str]) -> dict:
 
     allowed = not reasons
     accepted_pending = [name for name in pending if name in allow]
+    # 托盘唯一性只有"归属层三项全部在 checks 里通过"才算取得阳性观察；
+    # 任一项 pending 即视为未验证（不是失败，更不是通过）。
+    tray_uniqueness_verified = all(
+        by_name.get(name, {}).get("ok") is True for name in TRAY_OWNER_CHECKS
+    )
     return {
         "allowed": allowed,
         # 放行只是"部分验证"；本轮不宣布 AC10 通过
@@ -158,6 +176,7 @@ def evaluate(evidence: dict, allow: frozenset[str]) -> dict:
         "missing_required": missing_required,
         "failed_required": failed_required,
         "checks_false_not_in_failed": false_not_failed,
+        "tray_uniqueness_verified": tray_uniqueness_verified,
         "verification_complete": evidence.get("verification_complete") is True,
         "real_untouched": by_name.get("real_data_untouched", {}).get("ok") is True,
         "reasons": reasons,
@@ -209,6 +228,9 @@ def main(argv: list[str] | None = None) -> int:
         state = "部分验证（放行）" if result["allowed"] else "阻断"
         print(f"[ac10-evidence] {state}：{path}")
         print(f"  failed={len(result['failed'])} pending={len(result['pending'])}")
+        print(
+            f"  托盘唯一性阳性观察：{'有（探测范围内找到 1 个主进程图标）' if result['tray_uniqueness_verified'] else '无（记为未验证）'}"
+        )
         if result["accepted_pending"]:
             print(f"  已知未验证项（不计为通过）：{', '.join(result['accepted_pending'])}")
         if result["unexpected_pending"]:

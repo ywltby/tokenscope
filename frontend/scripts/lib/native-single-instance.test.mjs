@@ -1642,20 +1642,26 @@ describe("托盘唯一性判定", () => {
     );
     expect(parsed).toMatchObject({ ok: true, pid: 42, windows: 1, count: 1 });
     expect(parsed.icons).toHaveLength(1);
-    expect(classifyTrayOwner({ observation: parsed, expected: 1 }).status).toBe("passed");
+    const one = classifyTrayOwner({ observation: parsed, expected: 1 });
+    expect(one.status).toBe("passed");
+    // 阳性措辞只描述"探测范围内找到 1 个"，不写"唯一/恰好"
+    expect(one.reason).toMatch(/当前探测范围内找到 1 个/);
+    expect(one.reason).not.toMatch(/唯一|恰好/);
 
-    expect(
-      classifyTrayOwner({
-        observation: { ok: true, count: 0, windows: 1, icons: [], error: null },
-        expected: 1,
-      }).status,
-    ).toBe("failed");
+    // 0 个：探测不到 ≠ 未创建，必须 pending
+    const zero = classifyTrayOwner({
+      observation: { ok: true, count: 0, windows: 1, icons: [], error: null },
+      expected: 1,
+    });
+    expect(zero.status).toBe("pending");
+    expect(zero.reason).toMatch(/无法区分/);
+    expect(zero.reason).toMatch(/不据此判定未创建/);
     expect(
       classifyTrayOwner({
         observation: { ok: true, count: 2, windows: 1, icons: [], error: null },
         expected: 1,
       }).reason,
-    ).toMatch(/重复托盘图标/);
+    ).toMatch(/至少存在重复图标/);
     expect(
       classifyTrayOwner({
         observation: { ok: false, count: null, error: "probe failed" },

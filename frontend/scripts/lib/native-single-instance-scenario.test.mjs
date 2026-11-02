@@ -276,16 +276,15 @@ describe("ui-single-instance 场景编排（假实例）", () => {
     expect(ev.single_instance.tray_owner_before_second.verdict.status).toBe("passed");
   });
 
-  it("托盘归属观察：0 个图标记失败（未创建），2 个记失败（重复），不可用记 pending", async () => {
+  it("托盘归属观察：0 个记 pending（探测不到≠未创建），2 个记失败（重复），不可用记 pending", async () => {
     const zero = await runScenario({
       secondary: { record: secondaryRecord(), verdict: { status: "passed", reason: "ok" } },
       obs: observations(),
       trayOwner: { ok: true, windows: 1, count: 0, icons: [], error: null },
     });
-    expect(byName(zero.rows, "tray_owner_single_icon_before_second")?.ok).toBe(false);
-    expect(byName(zero.rows, "tray_owner_single_icon_before_second")?.detail).toMatch(
-      /未创建托盘图标/,
-    );
+    // 探测不到图标无法区分"未创建"与"探测范围不足"，只能 pending
+    expect(pendingNames(zero.pending)).toContain("tray_owner_single_icon_before_second");
+    expect(byName(zero.rows, "tray_owner_single_icon_before_second")).toBeUndefined();
 
     const two = await runScenario({
       secondary: { record: secondaryRecord(), verdict: { status: "passed", reason: "ok" } },
@@ -294,7 +293,7 @@ describe("ui-single-instance 场景编排（假实例）", () => {
     });
     expect(byName(two.rows, "tray_owner_single_icon_before_second")?.ok).toBe(false);
     expect(byName(two.rows, "tray_owner_single_icon_before_second")?.detail).toMatch(
-      /重复托盘图标/,
+      /至少存在重复图标/,
     );
 
     const unavailable = await runScenario({

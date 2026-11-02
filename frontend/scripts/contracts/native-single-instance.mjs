@@ -497,7 +497,8 @@ export async function nativeSingleInstance({
     ck.add(
       "tray_owner_unchanged_after_second",
       true,
-      `第二实例前后该进程均为 1 个托盘图标（第二次启动未新增自己的图标）`,
+      `两次（第一实例就绪后、第二实例退出后）在当前探测范围内各找到 1 个属于主进程的托盘图标；` +
+        `第二实例生命周期内是否创建过图标不在探测范围内，不作结论`,
     );
   } else if (ownerBeforeVerdict.status === "pending" || ownerAfterVerdict.status === "pending") {
     ck.pending(
