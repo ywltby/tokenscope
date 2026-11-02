@@ -974,3 +974,375 @@ fn ac09_fingerprint_scope_and_blind_spot() {
     assert_eq!(fingerprint_dir(&dir), Some((0, 0)));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── 阶段 2：真实来源（只读 ~/.claude、~/.codex；全部写入隔离目录） ─────
+//
+// 与阶段 1（合成来源）严格分开：本阶段的数字只来自真实来源树，**不引用
+// 合成结果**；缺失真实来源时跳过并如实标注，不伪造。
+//
+// 只读边界：
+// - 来源树只做目录遍历（文件数、字节数、最新 mtime），**不读会话内容**，
+//   不输出文件名、项目路径或正文；`claude_mapping = None` 不读 `~/.claude.json`。
+// - 历史库、缓存、价格索引、价格表与证据 JSON 全部落在本用例的 hermetic
+//   临时目录；真实 `~/.tokenscope` 只取运行前后指纹（文件数 + 总字节数），
+//   必须不变，且本用例绝不新建该目录。
+// - 来源树在测量期间若发生变化（文件数/字节数/最新 mtime 任一有变），
+//   如实标注 `source_tree_changed_during_measurement=true`，不为此反复重跑。
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+}
+
+/// 真实来源根：Claude `~/.claude/projects`、Codex `~/.codex/sessions`。
+/// 只判断存在性，不读内容、不输出路径。
+fn real_source_roots() -> Option<(PathBuf, PathBuf)> {
+    let home = home_dir()?;
+    let claude = home.join(".claude").join("projects");
+    let codex = home.join(".codex").join("sessions");
+    if !claude.is_dir() || !codex.is_dir() {
+        return None;
+    }
+    Some((claude, codex))
+}
+
+/// 来源树指纹：(文件数, 总字节数, 最新 mtime 纳秒)。只读目录元数据，
+/// 不读文件内容、不输出文件名——用于检测测量期间来源是否变化。
+fn source_tree_fingerprint(dir: &Path) -> Option<(u64, u64, u128)> {
+    if !dir.exists() {
+        return None;
+    }
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    let mut newest: u128 = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                files += 1;
+                if let Ok(meta) = entry.metadata() {
+                    bytes += meta.len();
+                    if let Ok(Ok(dur)) = meta
+                        .modified()
+                        .map(|m| m.duration_since(std::time::UNIX_EPOCH))
+                    {
+                        newest = newest.max(dur.as_nanos());
+                    }
+                }
+            }
+        }
+    }
+    Some((files, bytes, newest))
+}
+
+/// 一轮真实来源测量。只记录数字，不设任何性能门槛。
+#[derive(Debug, Default, Clone, serde::Serialize)]
+struct RealRound {
+    begin_ms: u128,
+    summary_ms: u128,
+    page1_ms: u128,
+    page2_ms: u128,
+    requests: u64,
+    input: u64,
+    output: u64,
+    cache_write: u64,
+    cache_read: u64,
+    cost_usd: f64,
+    page1_rows: usize,
+    page2_rows: usize,
+    page1_total: u64,
+    files_scanned: u64,
+    events_in_history: u64,
+    rust_heap_peak_bytes: usize,
+    process_peak_working_set_bytes: Option<u64>,
+}
+
+fn measure_real_round(label: &str, opts: &SummaryOptions) -> RealRound {
+    reset_peak();
+    let mut r = RealRound::default();
+
+    let t = Instant::now();
+    let snap =
+        query::begin_query_with(opts, true).unwrap_or_else(|e| panic!("{label} 采集失败: {e}"));
+    r.begin_ms = t.elapsed().as_millis();
+    r.rust_heap_peak_bytes = peak_bytes();
+
+    let t = Instant::now();
+    let sum =
+        query::query_summary(&snap.query_id).unwrap_or_else(|e| panic!("{label} 汇总失败: {e}"));
+    r.summary_ms = t.elapsed().as_millis();
+    r.requests = sum.totals.requests;
+    r.input = sum.totals.tokens.input;
+    r.output = sum.totals.tokens.output;
+    r.cache_write = sum.totals.tokens.cache_write;
+    r.cache_read = sum.totals.tokens.cache_read;
+    r.cost_usd = sum.totals.cost_usd;
+    for s in &sum.sources {
+        r.files_scanned += s.stats.files_scanned;
+        r.events_in_history += s.stats.events;
+    }
+
+    let t = Instant::now();
+    let page1 = query::query_events(&snap.query_id, &EventFilter::default())
+        .unwrap_or_else(|e| panic!("{label} 明细第一页失败: {e}"));
+    r.page1_ms = t.elapsed().as_millis();
+    r.page1_rows = page1.rows.len();
+    r.page1_total = page1.total;
+    assert_eq!(page1.total, r.requests, "{label}：明细总数应等于汇总请求数");
+
+    let t = Instant::now();
+    if let Some(last) = page1.rows.last() {
+        let page2 = query::query_events(
+            &snap.query_id,
+            &EventFilter {
+                before: Some(last.cursor.clone()),
+                ..EventFilter::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{label} 明细第二页失败: {e}"));
+        r.page2_ms = t.elapsed().as_millis();
+        r.page2_rows = page2.rows.len();
+        let seen: std::collections::HashSet<&str> =
+            page1.rows.iter().map(|x| x.cursor.as_str()).collect();
+        assert!(
+            page2.rows.iter().all(|x| !seen.contains(x.cursor.as_str())),
+            "{label}：翻页不得重复"
+        );
+    }
+    r.process_peak_working_set_bytes = process_peak_working_set_bytes();
+    r
+}
+
+/// 真实来源：冷/热采集、首页汇总、明细前两页、四桶一致性、重叠根不重复计数。
+/// 只记录数字，不设门槛；来源缺失即跳过，不伪造结果。
+#[test]
+#[ignore = "AC09 N13 真实来源性能：需显式设置 TOKENSCOPE_REAL_PERF=1"]
+fn ac09_real_sources_cold_warm_pipeline() {
+    let _g = serial();
+    if !gate_enabled() {
+        eprintln!("跳过：未设置 TOKENSCOPE_REAL_PERF=1");
+        return;
+    }
+    // 验收覆盖会让默认数据目录指向验收根，真实 ~/.tokenscope 指纹不再可信。
+    if std::env::var_os("TOKENSCOPE_ACCEPTANCE_ROOT").is_some() {
+        eprintln!("跳过：检测到 TOKENSCOPE_ACCEPTANCE_ROOT，真实数据目录指纹不适用");
+        return;
+    }
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("warn")
+        .with_ansi(false)
+        .try_init();
+
+    let Some((claude_root, codex_root)) = real_source_roots() else {
+        eprintln!("跳过：真实来源根不存在（~/.claude/projects 或 ~/.codex/sessions）");
+        return;
+    };
+
+    // 只读指纹：真实数据目录 + 两个来源树。
+    let data_before = real_tokenscope_fingerprint();
+    let claude_before = source_tree_fingerprint(&claude_root);
+    let codex_before = source_tree_fingerprint(&codex_root);
+
+    let dir = hermetic_dir("real");
+    write_pricing(&dir);
+    let plans = vec![
+        SourcePlan {
+            agent: AgentKind::ClaudeCode,
+            root: claude_root.clone(),
+            claude_mapping: None,
+        },
+        SourcePlan {
+            agent: AgentKind::Codex,
+            root: codex_root.clone(),
+            claude_mapping: None,
+        },
+    ];
+    let opts = build_opts(&dir, plans.clone());
+
+    // ── 冷轮（空历史库 → 全量解析入库）与热轮（来源指纹未变，不重解析）
+    let cold = measure_real_round("真实冷轮", &opts);
+    let warm = measure_real_round("真实热轮", &opts);
+
+    // ── 一致性：请求数与四桶必须完全一致（真实来源下不预设规模）
+    assert_eq!(cold.requests, warm.requests, "真实冷/热请求数必须一致");
+    assert_eq!(cold.input, warm.input, "真实冷/热 input 必须一致");
+    assert_eq!(cold.output, warm.output, "真实冷/热 output 必须一致");
+    assert_eq!(
+        cold.cache_write, warm.cache_write,
+        "真实冷/热 cache_write 必须一致"
+    );
+    assert_eq!(
+        cold.cache_read, warm.cache_read,
+        "真实冷/热 cache_read 必须一致"
+    );
+    // 分页：满页只在总数足够时要求（真实规模不预设）。
+    if cold.requests > (2 * PAGE) as u64 {
+        assert_eq!(cold.page1_rows, PAGE, "真实明细第一页应为满页");
+        assert_eq!(cold.page2_rows, PAGE, "真实明细第二页应为满页");
+    }
+
+    // ── 重叠根：同一 Claude 根注入两次（同物理目录）必须与单根结果一致
+    let single_dir = hermetic_dir("real-overlap-single");
+    write_pricing(&single_dir);
+    let single_opts = build_opts(&single_dir, plans.clone());
+    let single = measure_real_round("真实单根", &single_opts);
+
+    let double_dir = hermetic_dir("real-overlap-double");
+    write_pricing(&double_dir);
+    let mut double_plans = plans.clone();
+    double_plans.push(SourcePlan {
+        agent: AgentKind::ClaudeCode,
+        root: claude_root.clone(),
+        claude_mapping: None,
+    });
+    let double_opts = build_opts(&double_dir, double_plans);
+    let double = measure_real_round("真实重叠双根", &double_opts);
+
+    assert_eq!(
+        single.requests, double.requests,
+        "重叠追加根不得重复计数：请求数必须与单根一致"
+    );
+    assert_eq!(single.input, double.input, "重叠根 input 必须一致");
+    assert_eq!(single.output, double.output, "重叠根 output 必须一致");
+    assert_eq!(
+        single.cache_write, double.cache_write,
+        "重叠根 cache_write 必须一致"
+    );
+    assert_eq!(
+        single.cache_read, double.cache_read,
+        "重叠根 cache_read 必须一致"
+    );
+
+    // ── 项目分组数（claude_mapping 禁用 → Claude 按 slug 计；只记数量）
+    let mut proj_opts = build_opts(&dir, plans.clone());
+    proj_opts.by = GroupBy::Project;
+    let proj_snap = query::begin_query_with(&proj_opts, false).expect("项目分组复用历史失败");
+    let proj = query::query_summary(&proj_snap.query_id).expect("项目分组汇总失败");
+    let groups = proj.groups.iter().filter(|g| g.key != "合计").count();
+
+    // ── 来源变化检测（如实标注，不重跑求绿）
+    let claude_after = source_tree_fingerprint(&claude_root);
+    let codex_after = source_tree_fingerprint(&codex_root);
+    let source_changed = claude_before != claude_after || codex_before != codex_after;
+    if source_changed {
+        eprintln!(
+            "注意：测量期间真实来源树发生变化（文件数/字节数/最新 mtime 有变）——\
+             冷/热与重叠对比可能受并发写入影响，本结果按此标注，不重跑"
+        );
+    }
+
+    // ── 写侧隔离：真实 ~/.tokenscope 指纹必须不变
+    let data_after = real_tokenscope_fingerprint();
+    assert_eq!(
+        data_before, data_after,
+        "真实 ~/.tokenscope 指纹变化（{data_before:?} → {data_after:?}）：\
+         本测试不得写入用户数据目录"
+    );
+    assert!(
+        dir.join("history.db").is_file(),
+        "历史库必须落在注入的 history_path"
+    );
+    assert!(
+        dir.join("pricing-index.json").is_file(),
+        "价格索引必须落在注入的 pricing_index"
+    );
+
+    // ── 证据 JSON（只含汇总数字与边界说明，不含文件名/路径/正文）
+    let evidence = serde_json::json!({
+        "phase": "AC09 阶段2（真实来源，只读；N13 开放）",
+        "verification": {
+            "cold_warm_requests_equal": true,
+            "cold_warm_buckets_equal": true,
+            "overlap_roots_counts_once": true,
+            "page1_total_matches_requests": true,
+            "page_rows": cold.page1_rows + cold.page2_rows,
+            "project_groups": groups,
+            "source_tree_changed_during_measurement": source_changed,
+            "real_tokenscope_fingerprint_unchanged": true,
+        },
+        "cold": cold,
+        "warm": warm,
+        "overlap_single": single,
+        "overlap_double": double,
+        "isolation": {
+            "history_path": dir.join("history.db"),
+            "cache_dir": dir.join("cache"),
+            "pricing_index": dir.join("pricing-index.json"),
+            "source_roots_read_only": true,
+            "claude_mapping": "disabled（不读 ~/.claude.json）",
+            "fingerprint_scope": "files_and_bytes_and_max_mtime",
+        },
+        "boundaries": [
+            "来源只读：从不写入来源目录；只读元数据做指纹，不读会话内容",
+            "项目身份：claude_mapping=None，Claude 项目按 slug 计，组数不代表真实项目数",
+            "成本：只加载注入的隔离价格表，真实模型可能未命中，cost 仅作参考",
+            "堆峰值只统计 Rust 分配（计数分配器），不含 SQLite C 分配",
+            "进程峰值工作集为进程级参考值，不区分阶段",
+            "来源若在测量期间变化，冷/热与重叠对比可能受并发写入影响",
+        ],
+    });
+    let evidence_path = dir.join("ac09-stage2-real-evidence.json");
+    std::fs::write(
+        &evidence_path,
+        serde_json::to_string_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+
+    println!(
+        "真实来源规模：files_scanned {} / events_in_history {} / 汇总请求 {}",
+        cold.files_scanned, cold.events_in_history, cold.requests
+    );
+    println!(
+        "冷轮：begin {} ms（采集）/ 汇总 {} ms / 两页 {} + {} ms（{} + {} 行）",
+        cold.begin_ms,
+        cold.summary_ms,
+        cold.page1_ms,
+        cold.page2_ms,
+        cold.page1_rows,
+        cold.page2_rows
+    );
+    println!(
+        "热轮：begin {} ms / 汇总 {} ms / 两页 {} + {} ms（{} + {} 行）",
+        warm.begin_ms,
+        warm.summary_ms,
+        warm.page1_ms,
+        warm.page2_ms,
+        warm.page1_rows,
+        warm.page2_rows
+    );
+    println!(
+        "四桶：input {} / output {} / cache_write {} / cache_read {}；费用 ${:.4}（隔离价格表）",
+        cold.input, cold.output, cold.cache_write, cold.cache_read, cold.cost_usd
+    );
+    println!(
+        "重叠根：单根 {} 请求 vs 双根 {} 请求（一致）；单根 begin {} ms / 双根 begin {} ms",
+        single.requests, double.requests, single.begin_ms, double.begin_ms
+    );
+    println!(
+        "Rust 堆峰值：冷 {} MiB / 热 {} MiB / 单根 {} MiB / 双根 {} MiB（不含 SQLite C 分配）",
+        cold.rust_heap_peak_bytes / (1024 * 1024),
+        warm.rust_heap_peak_bytes / (1024 * 1024),
+        single.rust_heap_peak_bytes / (1024 * 1024),
+        double.rust_heap_peak_bytes / (1024 * 1024)
+    );
+    println!(
+        "进程峰值工作集：{}",
+        match cold.process_peak_working_set_bytes {
+            Some(v) => format!("{} MiB（参考值）", v / (1024 * 1024)),
+            None => "不可获得（如实标注）".to_string(),
+        }
+    );
+    println!(
+        "项目分组数（claude_mapping 禁用，按 slug）：{groups}；来源在测量期间变化：{source_changed}"
+    );
+    println!("证据 JSON：{}", evidence_path.display());
+}
