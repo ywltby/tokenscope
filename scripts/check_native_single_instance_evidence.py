@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AC10 单实例 evidence 的 CI 放行判定（不把 pending 当通过）。
+"""AC10 单实例 evidence 的放行判定（只做部分验证判定，不宣布 AC10 通过）。
 
 用途：`ui-single-instance` 场景在 GitHub-hosted Runner 上运行时，托盘区域可能
 整体不可观测（Explorer 环境差异）。场景本身对不可观测项记 pending 且整体
-`verification_complete=false`；本脚本负责把「可接受的已知未验证项」与「真失败」
+`verification_complete=false`；本脚本把「可接受的已知未验证项」与「真失败」
 分开，供 CI 步骤决定是否放行：
 
-  - `failed` 必须为空（任何失败都阻断）；
-  - `pending` 必须全部落在允许集合内（默认托盘三项），集合外的 pending 阻断；
-  - 关键项必须显式通过（第二实例退出/耗时/归属、窗口恢复与前台、隔离根、
-    真实数据未动、构建身份 assumed）。
+  - `failed` 必须为空，且每一项都必须在 `checks` 里以 `ok=false` 出现；
+  - `pending` 必须全部落在允许集合内，且不得同时出现在 `checks` 里；
+  - `checks` 里 `ok=false` 的项必须全部出现在 `failed`（明细与汇总一致）；
+  - 托盘三项必须**明确出现在 `checks` 或 `pending` 之一**（缺项即阻断，
+    防止"三项都不存在"被当成"没有失败"）；
+  - 关键项必须出现在 `checks` 且 `ok=true`。
 
-放行不代表 AC10 关闭：evidence 的 `pending` 原样保留，报告里明确列出未验证项。
+放行只表示"未验证项在允许集合内"，**不表示 AC10 通过**：输出固定
+`ac10_conclusion=none`、`verdict=partial`，并列出未验证项。
 
-退出码：0 = 放行（failed 为空且 pending ⊆ 允许集合且关键项通过）；1 = 阻断。
+退出码：0 = 放行（部分验证）；1 = 阻断。
 """
 
 from __future__ import annotations
@@ -46,6 +49,9 @@ REQUIRED_OK = (
     "real_data_untouched",
 )
 
+# 必须留下明确记录的项：托盘三项（见 checks 或 pending）+ 全部关键项（见 checks）
+REQUIRED_PRESENT = TRAY_CHECKS | frozenset(REQUIRED_OK)
+
 
 def load_evidence(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -56,38 +62,115 @@ def evaluate(evidence: dict, allow: frozenset[str]) -> dict:
     by_name = {row.get("name"): row for row in checks}
     failed = list(evidence.get("failed") or [])
     pending = list(evidence.get("pending") or [])
-    unexpected_pending = [name for name in pending if name not in allow]
-    missing_required = [name for name in REQUIRED_OK if name not in by_name]
-    failed_required = [
-        name
-        for name in REQUIRED_OK
-        if name in by_name and by_name[name].get("ok") is not True
-    ]
+
     reasons: list[str] = []
-    if failed:
-        reasons.append(f"存在失败项：{', '.join(failed)}")
+
+    duplicate_checks = sorted(
+        name for name, count in _count(checks).items() if count > 1
+    )
+    if duplicate_checks:
+        reasons.append(f"checks 中存在重复项：{', '.join(duplicate_checks)}")
+
+    both = sorted(set(failed) & set(pending))
+    if both:
+        reasons.append(f"同一项同时出现在 failed 与 pending：{', '.join(both)}")
+
+    # 托盘三项必须明确出现（checks 或 pending），缺失即阻断
+    missing_tray = sorted(name for name in TRAY_CHECKS if name not in by_name and name not in pending)
+    if missing_tray:
+        reasons.append(f"缺少托盘检查记录（checks/pending 都没有）：{', '.join(missing_tray)}")
+
+    # failed 明细一致性：每项必须在 checks 且 ok=false
+    failed_not_in_checks = [name for name in failed if name not in by_name]
+    if failed_not_in_checks:
+        reasons.append(f"failed 中的项未出现在 checks：{', '.join(failed_not_in_checks)}")
+    failed_marked_ok = [
+        name for name in failed if name in by_name and by_name[name].get("ok") is not False
+    ]
+    if failed_marked_ok:
+        reasons.append(f"failed 中的项在 checks 里不是 ok=false：{', '.join(failed_marked_ok)}")
+
+    # checks 汇总一致性：ok=false 的项必须都在 failed
+    checks_false = [name for name, row in by_name.items() if row.get("ok") is False]
+    false_not_failed = [name for name in checks_false if name not in failed]
+    if false_not_failed:
+        reasons.append(
+            f"checks 里 ok=false 但未计入 failed（明细与汇总不一致）：{', '.join(false_not_failed)}"
+        )
+
+    # checks 汇总一致性：ok=true 的项不得出现在 failed/pending
+    checks_true = [name for name, row in by_name.items() if row.get("ok") is True]
+    true_in_failed = [name for name in checks_true if name in failed]
+    true_in_pending = [name for name in checks_true if name in pending]
+    if true_in_failed:
+        reasons.append(f"checks 里 ok=true 但同时计入 failed：{', '.join(true_in_failed)}")
+    if true_in_pending:
+        reasons.append(f"checks 里 ok=true 但同时计入 pending：{', '.join(true_in_pending)}")
+
+    # checks 里无结论（ok 为空）的项必须计入 pending——真实驱动器对 pending 项
+    # 会写 checks 条目但不带 ok；这类项不得悄悄消失，也不得计入 failed。
+    checks_null = [
+        name for name, row in by_name.items() if row.get("ok") not in (True, False)
+    ]
+    null_not_pending = [name for name in checks_null if name not in pending]
+    if null_not_pending:
+        reasons.append(
+            f"checks 里无结论（ok 为空）但未计入 pending：{', '.join(null_not_pending)}"
+        )
+
+    unexpected_pending = [name for name in pending if name not in allow]
     if unexpected_pending:
         reasons.append(f"存在集合外的未验证项：{', '.join(unexpected_pending)}")
+
+    missing_required = [name for name in REQUIRED_OK if name not in by_name]
     if missing_required:
         reasons.append(f"缺少关键项：{', '.join(missing_required)}")
+    failed_required = [
+        name for name in REQUIRED_OK if name in by_name and by_name[name].get("ok") is not True
+    ]
     if failed_required:
         reasons.append(f"关键项未通过：{', '.join(failed_required)}")
+
+    if failed:
+        reasons.append(f"存在失败项：{', '.join(failed)}")
+
+    present = set(by_name) | set(pending)
+    missing_present = sorted(name for name in REQUIRED_PRESENT if name not in present)
+    if missing_present:
+        reasons.append(f"缺少必须记录的检查项：{', '.join(missing_present)}")
+
+    allowed = not reasons
+    accepted_pending = [name for name in pending if name in allow]
     return {
-        "allowed": not reasons,
+        "allowed": allowed,
+        # 放行只是"部分验证"；本轮不宣布 AC10 通过
+        "verdict": "partial" if allowed else "blocked",
+        "ac10_conclusion": "none",
         "failed": failed,
         "pending": pending,
-        "accepted_pending": [name for name in pending if name in allow],
+        "accepted_pending": accepted_pending,
         "unexpected_pending": unexpected_pending,
+        "missing_tray": missing_tray,
         "missing_required": missing_required,
         "failed_required": failed_required,
+        "checks_false_not_in_failed": false_not_failed,
         "verification_complete": evidence.get("verification_complete") is True,
         "real_untouched": by_name.get("real_data_untouched", {}).get("ok") is True,
         "reasons": reasons,
     }
 
 
+def _count(checks: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in checks:
+        name = row.get("name")
+        if isinstance(name, str):
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="AC10 单实例 evidence 的 CI 放行判定")
+    parser = argparse.ArgumentParser(description="AC10 单实例 evidence 的放行判定（部分验证）")
     parser.add_argument("--evidence", required=True, help="evidence.json 路径")
     parser.add_argument(
         "--allow-pending",
@@ -119,18 +202,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
-        state = "放行" if result["allowed"] else "阻断"
+        state = "部分验证（放行）" if result["allowed"] else "阻断"
         print(f"[ac10-evidence] {state}：{path}")
         print(f"  failed={len(result['failed'])} pending={len(result['pending'])}")
         if result["accepted_pending"]:
-            print(f"  已知未验证（CI 放行，不记为通过）：{', '.join(result['accepted_pending'])}")
+            print(f"  已知未验证项（不计为通过）：{', '.join(result['accepted_pending'])}")
         if result["unexpected_pending"]:
             print(f"  集合外未验证：{', '.join(result['unexpected_pending'])}")
         if result["reasons"]:
             for reason in result["reasons"]:
                 print(f"  - {reason}")
         if result["allowed"]:
-            print("  备注：放行不等于 AC10 关闭——托盘唯一性仍未验证，N12 保持开放。")
+            print(
+                "  结论：部分验证（ac10_conclusion=none）——存在未验证项，"
+                "不得用作 AC10 已通过的结论；AC10 与 N12 保持开放。"
+            )
     return 0 if result["allowed"] else 1
 
 

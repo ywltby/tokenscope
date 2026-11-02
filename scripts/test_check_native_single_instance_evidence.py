@@ -19,9 +19,10 @@ spec.loader.exec_module(module)
 
 
 def base_evidence() -> dict:
-    """全部关键项通过、无失败、无 pending 的基线 evidence。"""
+    """全部关键项与托盘三项都通过、无失败、无 pending 的基线 evidence。"""
     checks = [
-        {"name": name, "ok": True, "detail": "ok"} for name in module.REQUIRED_OK
+        {"name": name, "ok": True, "detail": "ok"}
+        for name in list(module.REQUIRED_OK) + sorted(module.TRAY_CHECKS)
     ]
     return {
         "checks": checks,
@@ -37,16 +38,51 @@ class EvidenceCheckCase(unittest.TestCase):
         self.assertTrue(result["allowed"])
         self.assertEqual(result["reasons"], [])
 
-    def test_tray_pending_is_accepted_without_marking_complete(self) -> None:
+    def test_tray_pending_is_only_partial_verification(self) -> None:
+        # 真实驱动器形态：pending 项也在 checks 里，但 ok 为空（不是 true）
         evidence = base_evidence()
+        for row in evidence["checks"]:
+            if row["name"] in module.TRAY_CHECKS:
+                row["ok"] = None
         evidence["pending"] = sorted(module.TRAY_CHECKS)
         evidence["verification_complete"] = False
         result = module.evaluate(evidence, module.TRAY_CHECKS)
         self.assertTrue(result["allowed"])
         self.assertEqual(len(result["accepted_pending"]), 3)
-        # 放行不等于完成：verification_complete 原样带出
+        # 放行只是部分验证：不宣称 AC10 通过
+        self.assertEqual(result["verdict"], "partial")
+        self.assertEqual(result["ac10_conclusion"], "none")
         self.assertFalse(result["verification_complete"])
-        self.assertIn("不等于 AC10 关闭", "放行不等于 AC10 关闭")
+
+    def test_missing_tray_checks_entirely_blocks(self) -> None:
+        """托盘三项既不在 checks 也不在 pending：不能当成"没有失败"放行。"""
+        evidence = base_evidence()
+        evidence["checks"] = [
+            row for row in evidence["checks"] if row["name"] not in module.TRAY_CHECKS
+        ]
+        evidence["pending"] = []
+        result = module.evaluate(evidence, module.TRAY_CHECKS)
+        self.assertFalse(result["allowed"])
+        self.assertEqual(sorted(result["missing_tray"]), sorted(module.TRAY_CHECKS))
+        self.assertIn("缺少托盘检查记录", " ".join(result["reasons"]))
+
+    def test_check_detail_and_summary_mismatch_blocks(self) -> None:
+        """checks 里托盘项 ok=false，但 failed 未列：明细与汇总不一致 → 阻断。"""
+        evidence = base_evidence()
+        evidence["checks"].append(
+            {"name": "single_tray_icon_before_second", "ok": False, "detail": "0，期望 1"}
+        )
+        evidence["failed"] = []
+        evidence["pending"] = [
+            "single_tray_icon_after_second",
+            "tray_count_unchanged_after_second",
+        ]
+        result = module.evaluate(evidence, module.TRAY_CHECKS)
+        self.assertFalse(result["allowed"])
+        self.assertEqual(
+            result["checks_false_not_in_failed"], ["single_tray_icon_before_second"]
+        )
+        self.assertIn("明细与汇总不一致", " ".join(result["reasons"]))
 
     def test_tray_pending_blocks_when_not_allowed(self) -> None:
         evidence = base_evidence()
@@ -89,6 +125,9 @@ class EvidenceCheckCase(unittest.TestCase):
 
     def test_cli_reads_evidence_file(self) -> None:
         evidence = base_evidence()
+        for row in evidence["checks"]:
+            if row["name"] in module.TRAY_CHECKS:
+                row["ok"] = None
         evidence["pending"] = sorted(module.TRAY_CHECKS)
         evidence["verification_complete"] = False
         with tempfile.TemporaryDirectory() as tmp:
