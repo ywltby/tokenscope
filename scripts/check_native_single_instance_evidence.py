@@ -160,7 +160,7 @@ def evaluate(evidence: dict, allow: frozenset[str]) -> dict:
     accepted_pending = [name for name in pending if name in allow]
     # 托盘唯一性只有"归属层三项全部在 checks 里通过"才算取得阳性观察；
     # 任一项 pending 即视为未验证（不是失败，更不是通过）。
-    tray_uniqueness_verified = all(
+    primary_icon_positive_observation = all(
         by_name.get(name, {}).get("ok") is True for name in TRAY_OWNER_CHECKS
     )
     return {
@@ -176,7 +176,7 @@ def evaluate(evidence: dict, allow: frozenset[str]) -> dict:
         "missing_required": missing_required,
         "failed_required": failed_required,
         "checks_false_not_in_failed": false_not_failed,
-        "tray_uniqueness_verified": tray_uniqueness_verified,
+        "primary_icon_positive_observation": primary_icon_positive_observation,
         "verification_complete": evidence.get("verification_complete") is True,
         "real_untouched": by_name.get("real_data_untouched", {}).get("ok") is True,
         "reasons": reasons,
@@ -229,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ac10-evidence] {state}：{path}")
         print(f"  failed={len(result['failed'])} pending={len(result['pending'])}")
         print(
-            f"  托盘唯一性阳性观察：{'有（探测范围内找到 1 个主进程图标）' if result['tray_uniqueness_verified'] else '无（记为未验证）'}"
+            f"  主进程图标阳性观察：{'有（探测范围内两次各找到 1 个）' if result['primary_icon_positive_observation'] else '无（记为未验证）'}"
         )
         if result["accepted_pending"]:
             print(f"  已知未验证项（不计为通过）：{', '.join(result['accepted_pending'])}")

@@ -51,16 +51,16 @@ class EvidenceCheckCase(unittest.TestCase):
         # 托盘六项（展示层 3 + 归属层 3）都允许 pending
         self.assertEqual(len(result["accepted_pending"]), 6)
         # 归属层全 pending → 唯一性未验证（不是通过）
-        self.assertFalse(result["tray_uniqueness_verified"])
+        self.assertFalse(result["primary_icon_positive_observation"])
         # 放行只是部分验证：不宣称 AC10 通过
         self.assertEqual(result["verdict"], "partial")
         self.assertEqual(result["ac10_conclusion"], "none")
         self.assertFalse(result["verification_complete"])
 
-    def test_tray_uniqueness_verified_only_when_owner_checks_pass(self) -> None:
-        """归属层三项全部通过才算取得阳性观察；缺一项即未验证。"""
+    def test_primary_icon_positive_observation_only_when_owner_checks_pass(self) -> None:
+        """归属层三项全部通过才算取得主进程图标阳性观察；缺一项即未验证。"""
         full = base_evidence()
-        self.assertTrue(module.evaluate(full, module.TRAY_CHECKS)["tray_uniqueness_verified"])
+        self.assertTrue(module.evaluate(full, module.TRAY_CHECKS)["primary_icon_positive_observation"])
 
         partial = base_evidence()
         for row in partial["checks"]:
@@ -69,7 +69,7 @@ class EvidenceCheckCase(unittest.TestCase):
         partial["pending"] = ["tray_owner_single_icon_after_second"]
         result = module.evaluate(partial, module.TRAY_CHECKS)
         self.assertTrue(result["allowed"])
-        self.assertFalse(result["tray_uniqueness_verified"])
+        self.assertFalse(result["primary_icon_positive_observation"])
 
     def test_missing_tray_checks_entirely_blocks(self) -> None:
         """托盘三项既不在 checks 也不在 pending：不能当成"没有失败"放行。"""

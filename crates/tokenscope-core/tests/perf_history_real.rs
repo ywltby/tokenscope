@@ -443,6 +443,26 @@ fn build_opts(dir: &Path, plans: Vec<SourcePlan>) -> SummaryOptions {
     }
 }
 
+/// 把证据 JSON 写到 hermetic 目录；若设置了 `TOKENSCOPE_PERF_EVIDENCE_DIR`
+/// （gitignored 的 qa-artifacts 子目录），再复制一份到那里，供跨临时根复查。
+/// 只保存汇总数字与边界说明——调用方必须保证 JSON 不含会话正文、文件名、
+/// 项目路径或任何路径字符串（合成用例 `ac09_perf_evidence_redaction` 钉住）。
+fn write_perf_evidence(dir: &Path, name: &str, evidence: &serde_json::Value) -> Vec<PathBuf> {
+    let body = serde_json::to_string_pretty(evidence).unwrap();
+    let mut written = Vec::new();
+    let local = dir.join(name);
+    std::fs::write(&local, &body).unwrap();
+    written.push(local);
+    if let Some(dest) = std::env::var_os("TOKENSCOPE_PERF_EVIDENCE_DIR") {
+        let dest = PathBuf::from(dest);
+        std::fs::create_dir_all(&dest).unwrap();
+        let out = dest.join(name);
+        std::fs::write(&out, &body).unwrap();
+        written.push(out);
+    }
+    written
+}
+
 fn write_pricing(dir: &Path) {
     std::fs::write(
         dir.join("pricing.toml"),
@@ -773,9 +793,7 @@ fn ac09_synthetic_cold_warm_pipeline() {
         "rust_heap_peak_bytes": heap_peak,
         "process_peak_working_set_bytes": working_set_peak,
         "isolation": {
-            "history_path": dir.join("history.db"),
-            "cache_dir": dir.join("cache"),
-            "pricing_index": dir.join("pricing-index.json"),
+            "all_writes_under_hermetic_temp_dir": true,
             "real_tokenscope_present_before": fp_before.is_some(),
             "real_tokenscope_fingerprint_unchanged": true,
             "fingerprint_scope": "files_and_bytes_only（同长度内容改写不可检测）",
@@ -789,12 +807,7 @@ fn ac09_synthetic_cold_warm_pipeline() {
             "project_requests_sum": proj_requests,
         },
     });
-    let evidence_path = dir.join("ac09-stage1-evidence.json");
-    std::fs::write(
-        &evidence_path,
-        serde_json::to_string_pretty(&evidence).unwrap(),
-    )
-    .unwrap();
+    let written = write_perf_evidence(&dir, "ac09-stage1-evidence.json", &evidence);
 
     println!(
         "规模：{} 文件 / {} 请求；冷轮 begin {} ms，热轮 begin {} ms；热轮汇总 {} ms / 两页明细 {} + {} ms",
@@ -822,7 +835,13 @@ fn ac09_synthetic_cold_warm_pipeline() {
             None => "不可获得（如实标注）".to_string(),
         }
     );
-    println!("证据 JSON：{}", evidence_path.display());
+    println!(
+        "证据 JSON：{}（另存目录 TOKENSCOPE_PERF_EVIDENCE_DIR={}）",
+        written[0].display(),
+        std::env::var_os("TOKENSCOPE_PERF_EVIDENCE_DIR")
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<未设置，不另存>".into())
+    );
 }
 
 // ── 多根重叠：默认根 + 与之重叠的追加根不重复计数（AC09 一致性） ───────
@@ -1005,6 +1024,69 @@ fn ac09_fingerprint_scope_and_blind_spot() {
 // - 来源树在测量期间若发生变化（文件数/字节数/最新 mtime 任一有变），
 //   先记录观察结果再判定一致性，并如实标注 `source_tree_changed_*`，
 //   不为此反复重跑。
+
+/// 合成验证：证据的保存、另存与脱敏流程（不读真实来源）。
+/// 钉住"证据只含汇总数字"的要求：序列化文本不得含 hermetic 目录路径、
+/// Windows 路径分隔或来源字段；另存与清理都必须发生。
+#[test]
+#[ignore = "AC09 N13 合成定向验证：需 TOKENSCOPE_REAL_PERF=1（不读真实来源）"]
+fn ac09_perf_evidence_redaction() {
+    let _g = serial();
+    if !gate_enabled() {
+        eprintln!("跳过：未设置 TOKENSCOPE_REAL_PERF=1");
+        return;
+    }
+    let dir = hermetic_dir("evidence-redaction");
+    let out_dir = hermetic_dir("evidence-out");
+    // 保存流程：设置另存目录 → 写证据 → 两处都有。
+    // set_var/remove_var 在 edition 2024 是 unsafe：本用例持 serial() 锁、
+    // 单线程顺序执行，进程内没有并发读者，因此安全。
+    unsafe {
+        std::env::set_var("TOKENSCOPE_PERF_EVIDENCE_DIR", &out_dir);
+    }
+    let evidence = serde_json::json!({
+        "phase": "合成脱敏验证",
+        "totals": { "requests": 1, "input": 1, "output": 1, "cache_write": 1, "cache_read": 1 },
+        "isolation": { "all_writes_under_hermetic_temp_dir": true },
+        "boundaries": ["不含会话正文、文件名、项目路径或来源路径"],
+    });
+    let written = write_perf_evidence(&dir, "ac09-evidence-redaction.json", &evidence);
+    assert_eq!(written.len(), 2, "hermetic 目录与另存目录各写一份");
+
+    // 脱敏检查：文本不得包含 hermetic 目录路径或 Windows 路径分隔，
+    // 不得包含"history_path"等路径字段。
+    let body = std::fs::read_to_string(&written[1]).unwrap();
+    assert!(
+        !body.contains(dir.to_string_lossy().as_ref()),
+        "证据不得包含 hermetic 目录路径"
+    );
+    assert!(!body.contains('\\'), "证据不得包含 Windows 路径分隔");
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        parsed
+            .get("isolation")
+            .and_then(|iso| iso.get("history_path"))
+            .is_none(),
+        "证据不得包含 history_path 字段"
+    );
+    assert_eq!(
+        parsed["isolation"]["all_writes_under_hermetic_temp_dir"],
+        serde_json::json!(true)
+    );
+
+    // 清理流程：删掉两份证据与两个目录，目录必须消失（复制 run_rust_tests 的
+    // 收尾语义：删除后核对）。
+    for p in &written {
+        std::fs::remove_file(p).unwrap();
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::remove_dir_all(&out_dir).unwrap();
+    assert!(!dir.exists(), "hermetic 目录应已清理");
+    assert!(!out_dir.exists(), "另存目录应已清理");
+    unsafe {
+        std::env::remove_var("TOKENSCOPE_PERF_EVIDENCE_DIR");
+    }
+}
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
@@ -1402,9 +1484,7 @@ fn ac09_real_sources_cold_warm_pipeline() {
         "overlap_single": single,
         "overlap_double": double,
         "isolation": {
-            "history_path": dir.join("history.db"),
-            "cache_dir": dir.join("cache"),
-            "pricing_index": dir.join("pricing-index.json"),
+            "all_writes_under_hermetic_temp_dir": true,
             "source_files_written": false,
             "content_read_for_parsing": true,
             "temp_history_stores_source_metadata": true,
@@ -1421,12 +1501,7 @@ fn ac09_real_sources_cold_warm_pipeline() {
             "来源若在测量期间变化，冷/热与重叠对比可能受并发写入影响",
         ],
     });
-    let evidence_path = dir.join("ac09-stage2-real-evidence.json");
-    std::fs::write(
-        &evidence_path,
-        serde_json::to_string_pretty(&evidence).unwrap(),
-    )
-    .unwrap();
+    let written = write_perf_evidence(&dir, "ac09-stage2-real-evidence.json", &evidence);
 
     println!(
         "真实来源规模：files_scanned {} / events_in_history {} / 汇总请求 {}",
@@ -1475,5 +1550,11 @@ fn ac09_real_sources_cold_warm_pipeline() {
     println!(
         "项目分组数（claude_mapping 禁用，按 slug）：{groups}；来源在测量期间变化：{source_changed}"
     );
-    println!("证据 JSON：{}", evidence_path.display());
+    println!(
+        "证据 JSON：{}（另存目录 TOKENSCOPE_PERF_EVIDENCE_DIR={}）",
+        written[0].display(),
+        std::env::var_os("TOKENSCOPE_PERF_EVIDENCE_DIR")
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<未设置，不另存>".into())
+    );
 }
