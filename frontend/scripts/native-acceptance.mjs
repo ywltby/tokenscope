@@ -4088,9 +4088,11 @@ async function main() {
   }
   const root = ROOT || state?.root || freshRoot(SCENARIO);
 
-  // AC10：全路径隔离（固定布局 + 清单声明 + 现有条目别名）与实际 EXE 构建身份
-  // 必须在创建输出目录、准备隔离根、启动任何进程之前完成。源提交只用文件系统
-  // 读取（不 spawn git），构建记录缺失/哈希不符/命令不合法一律零准备、零启动。
+  // AC10（收敛后）：全路径隔离（固定布局 + 清单声明 + 现有条目别名）与
+  // EXE/记录一致性必须在创建输出目录、准备隔离根、启动任何进程之前完成。
+  // 源提交只用文件系统读取（不 spawn git）；记录缺失/哈希不符/命令不合法/
+  // 提交不一致一律零准备、零启动。记录一致时按**受控构建假设**（assumed）
+  // 放行——证明边界见 verifyAcceptanceBuildIdentity 注释，不冒充来源防伪。
   const launchPreflight = evaluateAcceptanceLaunchPreflight({
     root,
     outDir: OUT,
@@ -4173,16 +4175,16 @@ async function main() {
     launchPreflight.paths.reason,
   );
   ck.add(
-    "acceptance_executable_verified",
+    "acceptance_executable_consistent_with_record",
     launchPreflight.exe.ok,
     launchPreflight.exe.reason,
   );
   ck.add(
-    "acceptance_build_identity_verified",
-    attachExisting || launchPreflight.exe.build_identity === "verified",
+    "acceptance_build_identity_assumed",
+    attachExisting || launchPreflight.exe.build_identity === "assumed",
     attachExisting
       ? "attach 模式不启动 EXE，构建身份不参与"
-      : `build_identity=${launchPreflight.exe.build_identity ?? "unknown"}；记录=${BUILD_RECORD}`,
+      : `build_identity=${launchPreflight.exe.build_identity ?? "unknown"}；可复现=${launchPreflight.exe.reproducible_from_commit === true ? "是" : "否（脏树）"}；受控构建假设，非来源独立防伪证明；记录=${BUILD_RECORD}`,
   );
 
   const cancelFlag = { requested: false };

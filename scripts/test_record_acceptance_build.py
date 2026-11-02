@@ -79,43 +79,37 @@ class RecordAcceptanceBuildCase(unittest.TestCase):
         self.assertIn("必须由 record-acceptance-build.ps1 登记源树状态", lib_parse)
 
     def test_record_carries_builder_grade_and_lib_gates_on_ci(self):
-        # 七轮复核：builder/ci 段是自报字段，不再授予 verified——lib 无
-        # verified 出口（可核验绑定 = GitHub API artifact 核验，未实现）。
-        # 登记侧保留 builder/ci 段作为未来核验的证据链。
+        # AC10 收敛后：builder/ci 段是自报诊断字段，记录只在**受控构建假设**
+        # （assumed）下使用——lib 无 verified 出口，也不再有 GitHub artifact
+        # 绑定实验（未接线，已从交付代码移除）。
         self.assertIn("$builder = if ($isCi) { 'ci' } else { 'local' }", self.recorder)
         self.assertIn("builder         = $builder", self.recorder)
         self.assertIn("run_id      = $env:GITHUB_RUN_ID", self.recorder)
         self.assertIn("repository  = $env:GITHUB_REPOSITORY", self.recorder)
         lib_identity = self.lib[self.lib.index("export function verifyAcceptanceBuildIdentity"):]
-        lib_identity = lib_identity[:lib_identity.index("export function verifyBuildOriginBinding")]
-        # 无 verified 出口：身份函数不再返回 build_identity: "verified"
+        lib_identity = lib_identity[:lib_identity.index("export function verifyAcceptanceExecutable")]
+        # 无 verified 出口：身份函数的结论只有 assumed / unverified / hash-mismatch
         self.assertNotIn('build_identity: "verified"', lib_identity)
-        # 结论口径：无法独立证明来源 → unverified
-        self.assertIn("无法独立证明产物来源", lib_identity)
+        self.assertIn('const buildIdentity = "assumed"', lib_identity)
+        # 证明边界写在 reason 里：受控构建假设、不构成来源独立防伪证明
+        self.assertIn("受控构建假设", lib_identity)
+        self.assertIn("不构成来源独立防伪证明", lib_identity)
+        # 脏树分级：本机可放行但必须标注不可仅凭提交复现；CI 要求干净树
+        self.assertIn("reproducible_from_commit: false", lib_identity)
+        self.assertIn("CI 与正式取证要求干净树", lib_identity)
         # 不再以自报环境变量/字段作为许可条件（注释里可提及，许可逻辑不得引用）
         code_only = "\n".join(line for line in lib_identity.splitlines()
                               if not line.strip().startswith("//"))
         self.assertNotIn("GITHUB_ACTIONS", code_only)
-        # 受控绑定核验核心存在（GitHub run 事实 + artifact digest），但未接线
-        # 到预检——预检仍无 verified 出口；接线留待显式受控步骤（AC10 开放）。
-        # 按 GitHub 实际响应形态：run.name 是工作流名、repository 是嵌套
-        # full_name、构建是 native-ui job 内的 step（不是独立 job）、核验构建
-        # step 而非整个 run、四方哈希（归档/归档内 EXE/记录/本地）。
-        self.assertIn("export function verifyBuildOriginBinding", self.lib)
-        binding = self.lib[self.lib.index("export function verifyBuildOriginBinding"):]
-        self.assertIn("full_name", binding)
-        self.assertIn('buildStepName = "Build embedded frontend and isolated acceptance executable"',
-                      binding)
-        self.assertIn('trustedBuildJobName = "native-ui"', binding)
-        self.assertIn("archiveExeSha256", binding)
-        self.assertIn("归档内容与记录不符", binding)
-        self.assertIn("startsWith(\"sha256:\")", binding)
-        # 合成测试覆盖可信与伪造路径（真实合成 ZIP + 离线响应形态）
+        # 绑定实验（ZIP 解析 / GitHub run 核验）已移除：不留未接线死代码
+        self.assertNotIn("verifyBuildOriginBinding", self.lib)
+        self.assertNotIn("readZipEntryBytes", self.lib)
+        self.assertNotIn("ZIP_READ_LIMITS", self.lib)
+        # 合成测试覆盖受控构建路径（assumed 放行 + 拒绝分支）
         test_text = (ROOT / "frontend/scripts/lib/native-single-instance.test.mjs").read_text(
             encoding="utf-8")
-        self.assertIn("受控绑定（真实合成 ZIP + 完整工作流身份）", test_text)
-        self.assertIn("受控绑定反例（完整工作流身份）", test_text)
-        self.assertIn("ZIP 边界（真实合成 ZIP 字节）", test_text)
+        self.assertIn("受控构建路径已恢复", test_text)
+        self.assertIn('toBe("assumed")', test_text)
 
     def test_workflow_uses_recorder_instead_of_bare_cargo_build(self):
         self.assertIn("./scripts/record-acceptance-build.ps1", self.workflow)

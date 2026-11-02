@@ -4,7 +4,6 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
-import zlib from "node:zlib";
 
 /** 第二次启动必须在限定时间内退出；超时即失败并由调用方终止已记录 PID。 */
 export const SINGLE_INSTANCE_EXIT_BUDGET_MS = 15000;
@@ -792,29 +791,47 @@ export function verifyAcceptanceBuildIdentity({
       )}…），拒绝启动`,
     };
   }
-  // 来源证明信任边界（七轮复核，取代 builder/GITHUB_ACTIONS 自报字段门）：
+  // 受控构建假设（AC10 收敛后的许可语义）：
   // 记录的全部字段（JSON/命令/哈希/提交/tree_clean/builder/ci 段）以及
-  // GITHUB_ACTIONS 环境变量都可由本地进程填写，自报字段之间互相印证不构成
-  // 来源证明——继续加同类字段只会扩大可伪造面。可核验的绑定链是：
-  //   record → (run_id, repository) → GitHub API artifact 清单 → EXE 与
-  //   record 同 artifact 且 digest 与本地字节一致 → 来源成立。
-  // 该链路需要联网 GitHub API 与 token，且要绑定 run 的 checkout 提交；当前
-  // 未实现（后续批次），因此**当前没有任何可独立证明来源的路径**：
-  //   - verified 不再由记录字段授予（verifyAcceptanceBuildIdentity 只返回
-  //     unverified / hash-mismatch / rejected 三种结论，无 verified 出口）；
-  //   - 预检一律拒绝启动（零准备、零启动），AC10 真实 Native 链路留待 CI
-  //     绑定核验落地（AC10/N12 保持开放，不冒充完成）。
-  // 已保留并继续生效的防线：PE 预筛、stub 标记拒绝、产物哈希核对（字节被
-  // 替换即 hash-mismatch）、源提交一致性、tree_clean 形状校验——它们证明
-  // "磁盘产物与记录描述一致"，但不证明"记录描述的来源为真"。
+  // GITHUB_ACTIONS 环境变量都可由本地进程填写——它们是**可信本机/CI 受控
+  // 构建假设**下的自述，用来防"意外不一致"（拿错 EXE、命令不对、提交不符、
+  // 字节被替换），不构成来源独立防伪证明。可核验的 GitHub artifact 绑定
+  // （run/工作流/job/归档摘要四方核对）已从交付代码移除，留待 AC10 接入 CI
+  // 时重新评估；当前**没有任何结论可以称为 verified**。
+  // 已生效的防线（都只证明"磁盘产物与记录描述一致"）：PE 预筛、stub 标记
+  // 拒绝、产物哈希核对（字节被替换即 hash-mismatch）、源提交一致性、
+  // tree_clean 形状校验。
+  const buildIdentity = "assumed";
   if (trusted.tree_clean === false) {
-    return unverified(
-      `构建记录为脏树产物（${trusted.tree_dirty_count ?? "?"} 个未提交变更），产物无法从源提交复现，拒绝启动`,
-    );
+    // 脏树：本地开发可用，但**不可仅凭提交哈希复现**——如实标注，不冒充。
+    // CI 与正式取证要求干净树（builder=ci 的脏树记录直接拒绝）。
+    if (String(trusted.builder ?? "").trim() === "ci") {
+      return unverified(
+        `CI 构建记录为脏树产物（${trusted.tree_dirty_count ?? "?"} 个未提交变更），CI 与正式取证要求干净树，拒绝启动`,
+      );
+    }
+    return {
+      ok: true,
+      launch_allowed: true,
+      build_identity: buildIdentity,
+      reproducible_from_commit: false,
+      tree_clean: false,
+      reason:
+        "受控构建假设：本地开发脏树构建（" +
+        String(trusted.tree_dirty_count ?? "?") +
+        " 个未提交变更）——产物无法仅凭提交哈希复现，证据不得按可复现口径引用；这不构成来源独立防伪证明",
+    };
   }
-  return unverified(
-    "无法独立证明产物来源：构建记录可本地伪造，可核验的 CI artifact 绑定（GitHub API 核验 run/EXE 同源与 digest）尚未接线到预检——保持 unverified 并拒绝启动（核验核心见 verifyBuildOriginBinding，AC10 真实 Native 链路留待接线）",
-  );
+  return {
+    ok: true,
+    launch_allowed: true,
+    build_identity: buildIdentity,
+    reproducible_from_commit: true,
+    tree_clean: true,
+    reason:
+      "受控构建假设：记录与实际 EXE 一致（哈希/命令/提交/树状态），可防意外不一致；" +
+      "记录可自填，不构成来源独立防伪证明（GitHub 侧绑定未接线）",
+  };
 }
 
 /**
@@ -824,501 +841,10 @@ export function verifyAcceptanceBuildIdentity({
  * 合成 zip。安全：拒绝路径分隔符异常（`..` 段、绝对盘符）与同名重复条目
  * ——重复名无法确定哪个是登记产物，直接失败而非猜测。
  */
-// CRC-32（IEEE 802.3，ZIP 登记值）：查表实现，用于条目内容完整性校验。
-const CRC32_TABLE = (() => {
-  const table = new Int32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    table[n] = c;
-  }
-  return table;
-})();
-function crc32Of(buf) {
-  let crc = -1;
-  for (let i = 0; i < buf.length; i++) crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ buf[i]) & 0xff];
-  return (crc ^ -1) >>> 0;
-}
-
-// 归档读取/解压的可解释资源上限（十六轮复核问题 2）：默认值按 EXE 产物的
-// 实际量级设定，调用方可注入更小值。上限在解析与解压**过程中**强制——
-// 解压用 zlib 的 maxOutputLength，超限在展开中途失败，不先完整展开再检查。
-export const ZIP_READ_LIMITS = {
-  // 归档 zip 字节上限（GitHub artifact 通常 10–50 MiB）
-  maxArchiveBytes: 512 * 1024 * 1024,
-  // 单条目解压后字节上限（EXE 通常 10–50 MiB）
-  maxEntryBytes: 256 * 1024 * 1024,
-};
-
-export function readZipEntryBytes(archiveBytes, entryName, limits = {}) {
-  const bytes = archiveBytes;
-  const fail = (reason) => ({ ok: false, reason });
-  const maxArchiveBytes = Number.isInteger(limits?.maxArchiveBytes)
-    ? limits.maxArchiveBytes
-    : ZIP_READ_LIMITS.maxArchiveBytes;
-  const maxEntryBytes = Number.isInteger(limits?.maxEntryBytes)
-    ? limits.maxEntryBytes
-    : ZIP_READ_LIMITS.maxEntryBytes;
-  if (!Number.isInteger(maxArchiveBytes) || maxArchiveBytes <= 0) {
-    return fail("归档字节上限配置非法，拒绝启动");
-  }
-  if (!Number.isInteger(maxEntryBytes) || maxEntryBytes <= 0) {
-    return fail("单条目解压上限配置非法，拒绝启动");
-  }
-  // 全程先检查长度再读，杜绝越界读抛出未处理异常（Buffer.read* 越界会抛
-  // ERR_OUT_OF_RANGE）。
-  const safeU32 = (off) => {
-    if (!Number.isInteger(off) || off < 0 || off + 4 > bytes.length) return null;
-    return bytes.readUInt32LE(off);
-  };
-  const safeU16 = (off) => {
-    if (!Number.isInteger(off) || off < 0 || off + 2 > bytes.length) return null;
-    return bytes.readUInt16LE(off);
-  };
-  if (!Buffer.isBuffer(bytes) || bytes.length < 22) {
-    return fail("归档字节过短，不是有效的 ZIP 归档");
-  }
-  if (bytes.length > maxArchiveBytes) {
-    return fail(`归档字节 ${bytes.length} 超过上限 ${maxArchiveBytes}，拒绝启动`);
-  }
-  // EOCD：从尾部向前找 signature 0x06054b50（注释长度上限 65535）
-  const minEocd = 22;
-  let eocd = -1;
-  const scanFloor = Math.max(0, bytes.length - minEocd - 65536);
-  for (let i = bytes.length - minEocd; i >= scanFloor; i--) {
-    const sig = safeU32(i);
-    if (sig === 0x06054b50) {
-      eocd = i;
-      break;
-    }
-  }
-  if (eocd < 0) return fail("不是有效的 ZIP 归档（找不到 End of Central Directory）");
-  const entryCount = safeU16(eocd + 10);
-  const cdSize = safeU32(eocd + 12);
-  const cdOffset = safeU32(eocd + 16);
-  if (entryCount === null || cdSize === null || cdOffset === null) {
-    return fail("ZIP EOCD 字段越界，归档损坏");
-  }
-  // 中央目录区间必须完整落在归档字节内
-  if (cdOffset < 0 || cdSize < 0 || cdOffset + cdSize > bytes.length) {
-    return fail(`ZIP 中央目录区间越界（offset ${cdOffset} + size ${cdSize} > ${bytes.length}），归档损坏或被篡改`);
-  }
-  if (entryCount < 0) {
-    return fail("ZIP EOCD 条目数为负，归档损坏");
-  }
-  // 中央目录解析受 EOCD 登记区间约束（十五轮复核问题 1）：登记 size 为 0
-  // 却声明条目、或登记短于实际目录，都是损坏/篡改形态——不允许越过登记
-  // 区间继续读条目。
-  const cdEnd = cdOffset + cdSize;
-  let cursor = cdOffset;
-  let found = null;
-  for (let i = 0; i < entryCount; i++) {
-    if (cursor + 46 > cdEnd || safeU32(cursor) !== 0x02014b50) {
-      return fail("ZIP Central Directory 损坏（条目越界或签名不符）");
-    }
-    const method = safeU16(cursor + 10);
-    const cdFlags = safeU16(cursor + 8);
-    const crcRegistered = safeU32(cursor + 16);
-    const compressedSize = safeU32(cursor + 20);
-    const uncompressedSize = safeU32(cursor + 24);
-    const nameLen = safeU16(cursor + 28);
-    const extraLen = safeU16(cursor + 30);
-    const commentLen = safeU16(cursor + 32);
-    const localOffset = safeU32(cursor + 42);
-    if ([method, cdFlags, crcRegistered, compressedSize, uncompressedSize, nameLen, extraLen, commentLen, localOffset].some((v) => v === null)) {
-      return fail("ZIP Central Directory 字段越界，归档损坏");
-    }
-    // general-purpose bit 3（十五轮复核问题 2）：data descriptor 流式写出的
-    // 归档，本地头的 CRC/大小是占位 0，真实值在数据后的描述符与中央目录里。
-    // 该形态合法（Node zlib、Java ZipOutputStream 等向不可 seek 流写出时都
-    // 用它），不得判损坏；描述符在读取后与 CD 登记值核对。
-    const hasDataDescriptor = (cdFlags & 0x08) !== 0;
-    // 登记未压缩大小超过上限：解压前就拒绝，不先展开再检查。
-    if (uncompressedSize > maxEntryBytes) {
-      return fail(
-        `ZIP 条目 "${entryName}" 登记未压缩大小 ${uncompressedSize} 超过上限 ${maxEntryBytes}，拒绝启动`,
-      );
-    }
-    if (cursor + 46 + nameLen + extraLen + commentLen > bytes.length) {
-      return fail("ZIP Central Directory 条目名越界，归档损坏");
-    }
-    if (cursor + 46 + nameLen + extraLen + commentLen > cdEnd) {
-      return fail(
-        `ZIP Central Directory 条目越出登记区间（${cursor + 46 + nameLen + extraLen + commentLen} > ${cdEnd}），登记大小与实际目录不一致，归档损坏或被篡改`,
-      );
-    }
-    const name = bytes.toString("utf8", cursor + 46, cursor + 46 + nameLen);
-    if (name === entryName) {
-      // 同名重复条目：无法确定哪个是登记产物，直接失败而非猜测。
-      if (found !== null) {
-        return fail(`ZIP 归档内存在重复条目 "${entryName}"，无法确定登记产物，拒绝启动`);
-      }
-      // local header 必须完整落在归档内
-      if (localOffset < 0 || localOffset + 30 > bytes.length || safeU32(localOffset) !== 0x04034b50) {
-        return fail("ZIP local header 越界或签名不符，归档损坏");
-      }
-      const localFlags = safeU16(localOffset + 6);
-      const localNameLen = safeU16(localOffset + 26);
-      const localExtraLen = safeU16(localOffset + 28);
-      if (localFlags === null || localNameLen === null || localExtraLen === null) {
-        return fail("ZIP local header 字段越界，归档损坏");
-      }
-      // 本地头与中央目录的 general-purpose flags 必须一致——bit 3 有无决定
-      // 大小字段语义（真实值 vs 占位），两侧不一致即拼接形态。
-      if ((localFlags & 0x08) !== (cdFlags & 0x08)) {
-        return fail(`ZIP 条目 "${entryName}" 本地头与中央目录的 data descriptor 标志不一致，归档被拼接或损坏`);
-      }
-      // 中央目录名与本地头名必须一致——不一致说明目录与数据错位或被拼接
-      const localName = bytes.toString("utf8", localOffset + 30, localOffset + 30 + localNameLen);
-      if (localName !== name) {
-        return fail(`ZIP 中央目录名（"${name}"）与本地头名（"${localName}"）不一致，归档被拼接或损坏`);
-      }
-      // 本地头登记的压缩/未压缩大小必须与中央目录一致——不一致说明目录
-      // 与数据错位或被拼接，按哪一份读都可能截断或越界。bit 3 流式归档的
-      // 本地头大小是占位 0（真实值在描述符里），跳过此项、改由描述符核对。
-      const localCompressedSize = safeU32(localOffset + 18);
-      const localUncompressedSize = safeU32(localOffset + 22);
-      if (localCompressedSize === null || localUncompressedSize === null) {
-        return fail("ZIP local header 字段越界，归档损坏");
-      }
-      if (!hasDataDescriptor && (localCompressedSize !== compressedSize || localUncompressedSize !== uncompressedSize)) {
-        return fail(
-          `ZIP 条目 "${entryName}" 本地头大小（压缩 ${localCompressedSize}，未压缩 ${localUncompressedSize}）与中央目录（压缩 ${compressedSize}，未压缩 ${uncompressedSize}）不一致，归档被拼接或损坏`,
-        );
-      }
-      if (hasDataDescriptor && (localCompressedSize !== 0 || localUncompressedSize !== 0 || safeU32(localOffset + 14) !== 0)) {
-        return fail(
-          `ZIP 条目 "${entryName}" 声明 data descriptor 但本地头 CRC/大小不是占位 0（${localCompressedSize}/${localUncompressedSize}），归档形态非法`,
-        );
-      }
-      const dataStart = localOffset + 30 + localNameLen + localExtraLen;
-      // 数据区间必须完整落在归档内
-      if (dataStart < 0 || compressedSize < 0 || dataStart + compressedSize > bytes.length) {
-        return fail(`ZIP 条目 "${entryName}" 数据区间越界（${dataStart} + ${compressedSize} > ${bytes.length}），归档损坏或被篡改`);
-      }
-      const raw = bytes.subarray(dataStart, dataStart + compressedSize);
-      let content;
-      if (method === 0) {
-        content = Buffer.from(raw);
-      } else if (method === 8) {
-        try {
-          // maxOutputLength：zlib 在展开过程中达到上限即中止（不先完整展开），
-          // 超限抛 ERR_BUFFER_TOO_LARGE。
-          content = zlib.inflateRawSync(raw, { maxOutputLength: maxEntryBytes });
-        } catch (error) {
-          return fail(`ZIP 条目 "${entryName}" 解压失败：${String(error?.message ?? error)}`);
-        }
-      } else {
-        return fail(`ZIP 条目 "${entryName}" 使用不支持的压缩方式 ${method}，拒绝启动`);
-      }
-      // 内容完整性三重校验（十四轮复核）：
-      //   - 解压后长度必须等于登记的未压缩大小（登记 0 就必须为空——
-      //     "登记 0 但有内容"与"登记短于实际"同样拒绝）；
-      //   - 内容 CRC-32 必须与登记值一致（截断/替换/位翻转在此暴露）。
-      if (content.length !== uncompressedSize) {
-        return fail(
-          `ZIP 条目 "${entryName}" 解压后长度 ${content.length} 与登记 ${uncompressedSize} 不一致，内容损坏`,
-        );
-      }
-      const crcActual = crc32Of(content);
-      if (crcActual !== crcRegistered) {
-        return fail(
-          `ZIP 条目 "${entryName}" 内容 CRC（${crcActual.toString(16)}）与登记（${crcRegistered.toString(16)}）不一致，内容被篡改或损坏`,
-        );
-      }
-      if (hasDataDescriptor) {
-        // data descriptor 必须**完全位于条目数据之后、中央目录之前**
-        // （十六轮复核问题 1）：描述符不能从中央目录借字节——那说明归档
-        // 根本没有描述符，借来的是 CD 条目头。
-        const dataEnd = dataStart + compressedSize;
-        if (dataEnd > cdOffset) {
-          return fail(
-            `ZIP 条目 "${entryName}" 数据结束位置 ${dataEnd} 越过中央目录起点 ${cdOffset}，归档损坏`,
-          );
-        }
-        const available = cdOffset - dataEnd;
-        const minDescriptorBytes = 12; // 无签名形态的最小尺寸
-        if (available < minDescriptorBytes) {
-          return fail(
-            `ZIP 条目 "${entryName}" 声明 data descriptor 但数据后只剩 ${available} 字节（需要至少 ${minDescriptorBytes}），描述符缺失，流式归档不完整`,
-          );
-        }
-        // 两种合法形态都接受（ZIP 规范允许签名存在与否），但**不能用前 4 字节
-        // 是否等于 0x08074b50 判定**——无签名描述符的 CRC 可能恰好等于该值
-        // （十六轮复核问题 3）。改为两种解读都校验，取唯一与 CD 一致者。
-        const matches = (offset) => {
-          const ddCrc = safeU32(offset);
-          const ddCompressed = safeU32(offset + 4);
-          const ddUncompressed = safeU32(offset + 8);
-          if (ddCrc === null || ddCompressed === null || ddUncompressed === null) return null;
-          if (offset + 12 > cdOffset) return null;
-          if (ddCrc !== crcActual) return null;
-          if (ddCompressed !== compressedSize || ddUncompressed !== uncompressedSize) return null;
-          return { crc: ddCrc, compressed: ddCompressed, uncompressed: ddUncompressed };
-        };
-        const signed = available >= 16 && safeU32(dataEnd) === 0x08074b50
-          ? matches(dataEnd + 4)
-          : null;
-        const unsigned = matches(dataEnd);
-        if (!signed && !unsigned) {
-          const ddCrc = safeU32(dataEnd);
-          const ddCompressed = safeU32(dataEnd + 4);
-          const ddUncompressed = safeU32(dataEnd + 8);
-          return fail(
-            `ZIP 条目 "${entryName}" 的 data descriptor 与中央目录登记不一致（读到 CRC ${ddCrc === null ? "缺失" : ddCrc.toString(16)}，压缩 ${ddCompressed ?? "缺失"}，未压缩 ${ddUncompressed ?? "缺失"}；期望 CRC ${crcActual.toString(16)}，压缩 ${compressedSize}，未压缩 ${uncompressedSize}），归档被篡改或描述符缺失`,
-          );
-        }
-      }
-      found = content;
-    }
-    cursor += 46 + nameLen + extraLen + commentLen;
-  }
-  if (found === null) {
-    return fail(`ZIP 归档内没有条目 "${entryName}"，无法核验 EXE，拒绝启动`);
-  }
-  return { ok: true, bytes: found };
-}
-
-/**
- * 受控绑定核验核心（八轮复核问题 1）：验证"EXE 产自某个成功 CI run 且未被
- * 篡改"。信任不在任何自报字段，而在 **GitHub 侧事实**——调用方把 GitHub API
- * 的 artifact 清单与 run 元数据注入（生产：真实 API 调用；合成测试：固定清
- * 单），本函数只做绑定判定：
- *
- *   record.builder === "ci"
- *     且 ci.run_id/repository 与 run 元数据一致
- *     且 run 元数据 conclusion === "success"、head_sha === record.source_commit
- *     且清单里存在登记名字的 artifact、其 digest === 本地产物哈希
- *   → "verified"（EXE 字节 = 该成功 run 在该提交上产出的字节，来源成立且未
- *     被篡改；不证明受保护工作流未被绕过——那落在 GitHub 托管 Runner 与分支
- *     保护的信任上）
- *   任一环节缺失/不一致 → "unverified"（fail closed，不虚标）
- *
- * 联网与 token 由调用方承担：该核验是**显式的受控步骤**（CI 独立 step 或
- * 本地 --verify-build-origin），不能塞进离线预检。当前未接到
- * native-acceptance.mjs——预检仍无 verified 出口（AC10 保持开放）。
- */
-export function verifyBuildOriginBinding({
-  record,
-  runMetadata = null,
-  jobList = [],
-  artifacts = [],
-  // 受信配置（十一轮复核问题 3 / 十二轮复核问题 1）：预期仓库、工作流身份
-  // 与受测提交来自独立于构建记录的受信任清单（如发布配置），全部必填——
-  // 缺失即无法证明"这次 run 是预期的那次"，即使记录与 GitHub 响应内部一致
-  // 也拒绝。工作流身份用 workflow_id（数字 ID）核对——显示名（run.name）在
-  // 不同工作流之间可重复，不能单独作为身份。
-  trustedRepository = null,
-  trustedWorkflowName = null,
-  trustedWorkflowId = null,
-  trustedHeadSha = null,
-  buildStepName = "Build embedded frontend and isolated acceptance executable",
-  trustedBuildJobName = "native-ui",
-  artifactNamePrefix = "acceptance-build",
-  // 字节输入（十一轮复核）：核验链从下载的归档字节、归档内 EXE 字节与本地
-  // EXE 字节自行计算全部摘要——不接收任何现成哈希，杜绝"传入任意哈希冒充
-  // 已验证来源"。哈希比较仍是纯函数语义，但输入只有字节。
-  archiveBytes = null,
-  archiveExeName = "tokenscope.exe",
-  localExeBytes = null,
-} = {}) {
-  const unverified = (reason) => ({ ok: false, build_identity: "unverified", reason });
-  const parsed = record?.ok === true ? record : parseAcceptanceBuildRecord(record);
-  if (!parsed.ok) return unverified(`${parsed.reason}，拒绝启动`);
-  const trusted = parsed.record;
-  if (trusted.builder !== "ci") {
-    return unverified("构建记录不是 CI 构建（builder=local），无 CI 事实可核验，拒绝启动");
-  }
-  const ci = trusted.ci ?? {};
-  const runId = String(ci.run_id ?? "").trim();
-  const recordRepository = String(ci.repository ?? "").trim();
-  if (!runId || !recordRepository) {
-    return unverified("CI 记录缺 run_id/repository，无法定位 GitHub 侧事实，拒绝启动");
-  }
-  if (!/^[^/\s]+\/[^/\s]+$/.test(recordRepository)) {
-    return unverified(`repository 形态非法（期望 owner/name）：${recordRepository}，拒绝启动`);
-  }
-
-  // 完整来源证明链（九轮复核重写，按 GitHub 实际响应形态）：
-  //
-  // 1. 可信仓库/工作流/受测提交——全部来自 GitHub 侧响应，独立于可自填的
-  //    构建记录：
-  //    - run 响应顶层 `repository.full_name`（owner/repo）必须等于记录的
-  //      repository（run 的 `name` 字段是**工作流名**，不是仓库，不能混用）；
-  //    - 可信工作流 = run 响应顶层 `name`，必须等于调用方注入的受信工作流名
-  //      （来自受信任清单，不由记录决定）；
-  //    - 受测提交 = run 响应 `head_sha`，必须等于记录 source_commit。
-  // 2. 构建与验证的排序：ui-e2e.yml 的构建是 `native-ui` **job 内的 step**
-  //    （"Build embedded frontend…"），不是独立 job。核验读取 run 的 jobs
-  //    响应：受信 job（native-ui）存在、其 `steps` 里构建 step
-  //    conclusion=success、job 自身不处于 failure——**不要求整个 run
-  //    success**（Native 场景 step 在构建 step 之后且可能仍在运行，等整体
-  //    success 会死锁）。先后关系 = 构建 step 成功 → 核验（本函数）→
-  //    Native 场景启动（预检）。
-  // 3. artifact 与 EXE 的真绑定：GitHub 的 artifact digest 是对 **zip 归档**
-  //    计算的（`sha256:` 前缀）；EXE 在归档内部，解压后对登记的 EXE 名重算
-  //    得到归档内 EXE 摘要。归档摘要、归档内 EXE 摘要、记录 artifact_sha256、
-  //    本地磁盘 EXE 哈希四者必须一致——归档内是 A 而记录/本地是 B 时拒绝。
-  if (!runMetadata || typeof runMetadata !== "object") {
-    return unverified("缺少 GitHub run 元数据（受控核验步骤未执行），拒绝启动");
-  }
-  if (String(runMetadata.id ?? "") !== runId) {
-    return unverified(`run 元数据 id（${runMetadata.id ?? "缺失"}）与记录 run_id（${runId}）不一致，拒绝启动`);
-  }
-  // run 响应顶层 repository：{ full_name }（GitHub 实际形态）
-  const runRepositoryFullName = String(
-    runMetadata.repository?.full_name ?? runMetadata.repository ?? "",
-  ).trim();
-  if (!runRepositoryFullName) {
-    return unverified("run 元数据缺 repository.full_name，无法确定可信仓库，拒绝启动");
-  }
-  // 受信仓库（独立于记录）必须先与 run 响应一致——非预期仓库即使内部字段
-  // 一致也拒绝。
-  if (!trustedRepository) {
-    return unverified("缺少受信仓库配置（受信任清单注入），无法证明 run 来自预期仓库，拒绝启动");
-  }
-  if (runRepositoryFullName !== String(trustedRepository)) {
-    return unverified(
-      `run 的仓库（${runRepositoryFullName}）与受信仓库（${trustedRepository}）不一致，拒绝启动`,
-    );
-  }
-  if (runRepositoryFullName !== recordRepository) {
-    return unverified(
-      `run 的 repository.full_name（${runRepositoryFullName}）与记录 repository（${recordRepository}）不一致，拒绝启动`,
-    );
-  }
-  // 可信工作流：run 响应顶层 name 是工作流名（不是仓库），不同工作流可
-  // 显示同名——身份必须用 workflow_id（数字 ID，GitHub run 响应实际字段）
-  // 核对；显示名仅作附加一致性检查。
-  if (!trustedWorkflowId) {
-    return unverified("缺少受信工作流 ID（受信任清单注入），无法证明 run 来自正确工作流，拒绝启动");
-  }
-  if (String(runMetadata.workflow_id ?? "") !== String(trustedWorkflowId)) {
-    return unverified(
-      `run 的工作流 ID（${runMetadata.workflow_id ?? "缺失"}）与受信工作流 ID（${trustedWorkflowId}）不一致——相同显示名的工作流不是同一身份，拒绝启动`,
-    );
-  }
-  if (!trustedWorkflowName) {
-    return unverified("缺少受信工作流名（受信任清单注入），无法证明 run 来自正确工作流，拒绝启动");
-  }
-  if (String(runMetadata.name ?? "") !== String(trustedWorkflowName)) {
-    return unverified(
-      `run 的工作流名（${runMetadata.name ?? "缺失"}）与受信工作流名（${trustedWorkflowName}）不一致，拒绝启动`,
-    );
-  }
-  const commit = String(trusted.source_commit).toLowerCase();
-  // 受测提交：受信配置的 head_sha 必须与 run 响应 head_sha 一致（非预期
-  // 提交即使记录与响应内部一致也拒绝）。
-  if (!trustedHeadSha) {
-    return unverified("缺少受信受测提交（受信任清单注入），无法证明 run 构建自预期提交，拒绝启动");
-  }
-  if (String(runMetadata.head_sha ?? "").toLowerCase() !== String(trustedHeadSha).toLowerCase()) {
-    return unverified(
-      `run head_sha（${runMetadata.head_sha ?? "缺失"}）与受信受测提交（${trustedHeadSha}）不一致，拒绝启动`,
-    );
-  }
-  if (String(runMetadata.head_sha ?? "").toLowerCase() !== commit) {
-    return unverified(
-      `run head_sha（${runMetadata.head_sha ?? "缺失"}）与记录 source_commit（${commit}）不一致，拒绝启动`,
-    );
-  }
-
-  // jobs 响应形态：{ jobs: [...] } 或直接数组；受信 job（native-ui）的 steps
-  // 里构建 step conclusion=success。job 自身结论不要求 success（Native 场景
-  // step 可能在跑），但构建 step 必须成功。
-  const jobsArray = Array.isArray(jobList) ? jobList : Array.isArray(jobList?.jobs) ? jobList.jobs : [];
-  const trustedJob = jobsArray.find((j) => j?.name === trustedBuildJobName);
-  if (!trustedJob) {
-    return unverified(`run 的 job 清单中没有受信 job "${trustedBuildJobName}"，拒绝启动`);
-  }
-  // job 的 run_id 必须与受检 run 一致——不同 run 的 job 不得为本核验提供
-  // 构建成功证据（GitHub jobs 响应实际字段 run_id）。
-  if (String(trustedJob.run_id ?? "") !== runId) {
-    return unverified(
-      `受信 job 的 run_id（${trustedJob.run_id ?? "缺失"}）与受检 run（${runId}）不一致——该 job 来自另一次 run，拒绝启动`,
-    );
-  }
-  const steps = Array.isArray(trustedJob.steps) ? trustedJob.steps : [];
-  const buildStep = steps.find((s) => s?.name === buildStepName);
-  if (!buildStep) {
-    return unverified(`受信 job "${trustedBuildJobName}" 的 steps 中没有构建 step "${buildStepName}"，拒绝启动`);
-  }
-  if (buildStep.conclusion !== "success") {
-    return unverified(
-      `构建 step 结论为 ${buildStep.conclusion ?? "未知"}（期望 success），拒绝启动`,
-    );
-  }
-
-  // artifact 清单（GET .../runs/{id}/artifacts 的 artifacts 数组）。
-  if (!Array.isArray(artifacts) || artifacts.length === 0) {
-    return unverified("该 run 没有任何 artifact，无法建立产物绑定，拒绝启动");
-  }
-  const shortCommit = commit.slice(0, 7);
-  const expectedArtifactName = `${artifactNamePrefix}-${shortCommit}`;
-  const artifact = artifacts.find((a) => a?.name === expectedArtifactName);
-  if (!artifact) {
-    return unverified(
-      `run 的 artifact 清单中没有 "${expectedArtifactName}"（绑定受测提交，防跨提交串用），拒绝启动`,
-    );
-  }
-  if (String(artifact.workflow_run?.id ?? "") !== runId) {
-    return unverified("artifact 不属于记录的 run，拒绝启动");
-  }
-  const archiveDigestRaw = String(artifact.digest ?? "").trim();
-  if (!archiveDigestRaw) {
-    return unverified("artifact 没有 digest（GitHub 侧未背书归档摘要），拒绝启动");
-  }
-  const archiveDigest = archiveDigestRaw.startsWith("sha256:") ? archiveDigestRaw.slice(7) : null;
-  if (!archiveDigest || !/^[0-9a-f]{64}$/.test(archiveDigest)) {
-    return unverified(
-      `artifact digest 形态非法（期望 "sha256:<64位十六进制>"）：${archiveDigestRaw}，拒绝启动`,
-    );
-  }
-  // 核验链（十一轮复核）：全部摘要从字节自行计算——
-  //   1. 归档摘要 = sha256(archiveBytes)，与 GitHub 登记的 digest 核对；
-  //   2. 归档内 EXE 摘要 = sha256(readZipEntry(archiveBytes, EXE 名))，
-  //      与记录 artifact_sha256 核对（归档内 A 而记录 B 在此被拒）；
-  //   3. 本地 EXE 摘要 = sha256(localExeBytes)，与记录核对（受测 EXE 被
-  //      替换在此被拒）。
-  if (!archiveBytes || !Buffer.isBuffer(archiveBytes) || archiveBytes.length === 0) {
-    return unverified("缺少下载的归档字节（受控核验步骤未提供），拒绝启动");
-  }
-  const archiveSha256 = crypto.createHash("sha256").update(archiveBytes).digest("hex");
-  if (archiveDigest !== archiveSha256) {
-    return unverified(
-      `归档摘要与 GitHub 登记不一致（登记 ${archiveDigest.slice(0, 12)}…，重算 ${archiveSha256.slice(0, 12)}…），拒绝启动`,
-    );
-  }
-  const recordExeDigest = String(trusted.artifact_sha256).toLowerCase();
-  const extracted = readZipEntryBytes(archiveBytes, archiveExeName);
-  if (!extracted.ok) {
-    return unverified(`${extracted.reason}（登记 EXE 名 ${archiveExeName}）`);
-  }
-  const archiveExeSha256 = crypto.createHash("sha256").update(extracted.bytes).digest("hex");
-  if (archiveExeSha256 !== recordExeDigest) {
-    return unverified(
-      `归档内 EXE 摘要（${archiveExeSha256.slice(0, 12)}…）与记录 artifact_sha256（${recordExeDigest.slice(0, 12)}…）不一致——归档内容与记录不符，拒绝启动`,
-    );
-  }
-  if (!localExeBytes || !Buffer.isBuffer(localExeBytes) || localExeBytes.length === 0) {
-    return unverified("缺少实际受测 EXE 的字节（本地磁盘读取），拒绝启动");
-  }
-  const localSha256 = crypto.createHash("sha256").update(localExeBytes).digest("hex");
-  if (localSha256 !== recordExeDigest) {
-    return unverified(
-      `实际受测 EXE 哈希（${localSha256.slice(0, 12)}…）与记录（${recordExeDigest.slice(0, 12)}…）不一致，EXE 已被替换，拒绝启动`,
-    );
-  }
-  return {
-    ok: true,
-    build_identity: "verified",
-    reason: `EXE 字节与 CI run ${runId}（提交 ${commit.slice(0, 12)}…，工作流 ${trustedWorkflowName}#${trustedWorkflowId}，构建 step 成功）的 artifact "${expectedArtifactName}" 绑定一致——归档摘要、归档内 EXE 摘要（从归档字节解压重算）、记录与受测 EXE（本地字节重算）四方核对通过，来源成立`,
-  };
-}
 /**
  * EXE 验收构建筛查：PE + acceptance 标记 + 无普通构建 stub 标记只是**预筛**。
  * 追加了标记的普通 PE、或缺 stub 标记都不能授予启动许可；许可只能来自
- * verifyAcceptanceBuildIdentity 的 `verified` 结论。
+ * verifyAcceptanceBuildIdentity 的 `assumed`（受控构建假设）结论。
  */
 export function verifyAcceptanceExecutable(
   exePath,
@@ -1409,12 +935,13 @@ export function verifyAcceptanceExecutable(
   return {
     ...screening,
     ok: true,
-    reason: `构建身份已验证：${identity.reason}（标记预筛命中 ${positive.length} 个）`,
+    reason: `构建身份：${identity.build_identity}（${identity.reason}；标记预筛命中 ${positive.length} 个）`,
     markers: positive,
     negative_markers: [],
     marker_screened: true,
     launch_allowed: true,
-    build_identity: "verified",
+    build_identity: identity.build_identity,
+    reproducible_from_commit: identity.reproducible_from_commit === true,
     identity,
   };
 }
@@ -1422,7 +949,7 @@ export function verifyAcceptanceExecutable(
 /**
  * 启动前预检：完整路径隔离（固定布局 + manifest 声明 + 现有条目别名）与实际
  * EXE 构建身份。attach 模式不启动 EXE，只校验路径；非 attach 模式必须拿到
- * `verified` 身份，`marker-screened` 一律不允许启动。
+ * `assumed`（受控构建假设）身份，`marker-screened` 一律不允许启动。
  */
 export function evaluateAcceptanceLaunchPreflight({
   root,

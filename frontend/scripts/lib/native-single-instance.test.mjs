@@ -38,9 +38,6 @@ import {
   validateAcceptanceRoot,
   verifyAcceptanceBuildIdentity,
   verifyAcceptanceExecutable,
-  verifyBuildOriginBinding,
-  readZipEntryBytes,
-  ZIP_READ_LIMITS,
 } from "./native-single-instance.mjs";
 import { buildLaunchesEvidence, createLaunchRecord } from "./native-instance.mjs";
 
@@ -215,126 +212,6 @@ function peWith(text) {
 
 function sha256(bytes) {
   return cryptoModule.createHash("sha256").update(bytes).digest("hex");
-}
-
-/**
- * 合成 stored ZIP（八轮/十一轮复核问题 2）：真实 ZIP 字节布局——local
- * header(30B+name) + 数据 + central directory(46B+name) + EOCD(22B)。
- * 无压缩（method 0），符合 readZipEntryBytes 的解析契约。
- */
-function makeStoredZip(entries) {
-  const locals = [];
-  const centrals = [];
-  let offset = 0;
-  for (const [name, content] of entries) {
-    const nameBuf = Buffer.from(name, "utf8");
-    const crc = crc32(content);
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4); // version needed
-    local.writeUInt16LE(0, 6); // flags
-    local.writeUInt16LE(0, 8); // method: stored
-    local.writeUInt16LE(0, 10); // time
-    local.writeUInt16LE(0x21, 12); // date (1980-01-01)
-    local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(content.length, 18);
-    local.writeUInt32LE(content.length, 22);
-    local.writeUInt16LE(nameBuf.length, 26);
-    local.writeUInt16LE(0, 28);
-    locals.push(local, nameBuf, content);
-    const central = Buffer.alloc(46);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(20, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(0, 8);
-    central.writeUInt16LE(0, 10);
-    central.writeUInt16LE(0, 12);
-    central.writeUInt16LE(0x21, 14);
-    central.writeUInt32LE(crc, 16);
-    central.writeUInt32LE(content.length, 20);
-    central.writeUInt32LE(content.length, 24);
-    central.writeUInt16LE(nameBuf.length, 28);
-    central.writeUInt16LE(0, 30);
-    central.writeUInt16LE(0, 32);
-    central.writeUInt16LE(0, 34);
-    central.writeUInt16LE(0, 36);
-    central.writeUInt32LE(0, 38);
-    central.writeUInt32LE(offset, 42);
-    centrals.push(central, nameBuf);
-    offset += 30 + nameBuf.length + content.length;
-  }
-  const cdStart = offset;
-  const centralBuf = Buffer.concat(centrals);
-  const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50, 0);
-  eocd.writeUInt16LE(0, 4);
-  eocd.writeUInt16LE(0, 6);
-  eocd.writeUInt16LE(entries.length, 8);
-  eocd.writeUInt16LE(entries.length, 10);
-  eocd.writeUInt32LE(centralBuf.length, 12);
-  eocd.writeUInt32LE(cdStart, 16);
-  eocd.writeUInt16LE(0, 20);
-  return Buffer.concat([...locals, centralBuf, eocd]);
-}
-
-// CRC32（ZIP 需要；Node 无内置，用查表实现）
-const CRC_TABLE = (() => {
-  const table = new Int32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    table[n] = c;
-  }
-  return table;
-})();
-function crc32(buf) {
-  let crc = -1;
-  for (let i = 0; i < buf.length; i++) crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ buf[i]) & 0xff];
-  return (crc ^ -1) >>> 0;
-}
-
-/**
- * 构造 prefix + 4 字节后缀，使整体 CRC-32 恰为 target（十六轮复核问题 3）。
- * CRC-32 对定长消息是仿射双射：crc(prefix||x) = base ^ A·x，A 为 32×32 的
- * GF(2) 线性映射。用前缀与单位向量算出 A 的列，解 32×32 线性方程组即得 x。
- * 用于造出"无签名描述符的 CRC 恰好等于 0x08074b50"这一合法形态。
- */
-function contentWithCrc(target, prefix) {
-  const zero = Buffer.alloc(4);
-  const base = crc32(Buffer.concat([prefix, zero]));
-  const cols = [];
-  for (let bit = 0; bit < 32; bit++) {
-    const s = Buffer.alloc(4);
-    s[bit >>> 3] = 1 << (bit & 7);
-    cols.push(crc32(Buffer.concat([prefix, s])) ^ base);
-  }
-  const rhs = (target ^ base) >>> 0;
-  const rows = [];
-  for (let r = 0; r < 32; r++) {
-    let mask = 0;
-    for (let c = 0; c < 32; c++) if ((cols[c] >>> r) & 1) mask |= 1 << c;
-    rows.push({ mask, val: (rhs >>> r) & 1 });
-  }
-  const pivotOf = new Array(32).fill(-1);
-  for (let c = 0; c < 32; c++) {
-    let p = -1;
-    for (let r = 0; r < 32; r++) if (pivotOf[r] === -1 && ((rows[r].mask >>> c) & 1)) { p = r; break; }
-    if (p === -1) continue;
-    pivotOf[p] = c;
-    for (let r = 0; r < 32; r++) {
-      if (r !== p && ((rows[r].mask >>> c) & 1)) {
-        rows[r] = { mask: rows[r].mask ^ rows[p].mask, val: rows[r].val ^ rows[p].val };
-      }
-    }
-  }
-  let x = 0;
-  for (let r = 0; r < 32; r++) {
-    if (pivotOf[r] === -1 && rows[r].val === 1) return null;
-    if (pivotOf[r] !== -1 && rows[r].val === 1) x |= 1 << pivotOf[r];
-  }
-  const suffix = Buffer.alloc(4);
-  for (let bit = 0; bit < 32; bit++) if ((x >>> bit) & 1) suffix[bit >>> 3] |= 1 << (bit & 7);
-  return Buffer.concat([prefix, suffix]);
 }
 
 import cryptoModule from "node:crypto";
@@ -806,506 +683,6 @@ describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => 
     }
   });
 
-  it("受控绑定（真实合成 ZIP + 完整工作流身份）：构建 step 成功 + 四方哈希一致才 verified", () => {
-    const exeBytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
-    const localSha = sha256(exeBytes);
-    const record = {
-      kind: ACCEPTANCE_BUILD_RECORD_KIND,
-      artifact_path: path.resolve("C:/build/target/release/tokenscope.exe"),
-      artifact_sha256: localSha,
-      build_command: ACCEPTANCE_BUILD_COMMAND,
-      source_commit: "b49f535abcdef1234567890abcdef1234567890",
-      features: ["acceptance", "tauri/custom-protocol"],
-      tree_clean: true,
-      builder: "ci",
-      ci: { run_id: "12345", repository: "ywltby/tokenscope", run_attempt: "1" },
-    };
-    // GitHub 实际响应形态：run 顶层 name=工作流名、workflow_id=工作流身份、
-    // repository.full_name=仓库；job 有 run_id 字段；构建是 native-ui 内 step。
-    const runMetadata = {
-      id: "12345",
-      name: "Native UI E2E",
-      workflow_id: 777,
-      head_sha: "b49f535abcdef1234567890abcdef1234567890",
-      conclusion: null,
-      repository: { full_name: "ywltby/tokenscope" },
-    };
-    const jobList = [
-      { name: "native-ui", run_id: 12345, steps: [ { name: "Build embedded frontend and isolated acceptance executable", conclusion: "success" } ] },
-    ];
-    const archiveBytes = makeStoredZip([["tokenscope.exe", exeBytes]]);
-    const artifacts = [
-      { name: "acceptance-build-b49f535", digest: `sha256:${sha256(archiveBytes)}`, workflow_run: { id: "12345" } },
-    ];
-    const ok = verifyBuildOriginBinding({
-      record,
-      runMetadata,
-      jobList,
-      artifacts,
-      trustedRepository: "ywltby/tokenscope",
-      trustedWorkflowName: "Native UI E2E",
-      trustedWorkflowId: 777,
-      trustedHeadSha: "b49f535abcdef1234567890abcdef1234567890",
-      archiveBytes,
-      localExeBytes: exeBytes,
-    });
-    expect(ok).toMatchObject({ ok: true, build_identity: "verified" });
-    // 预检本体仍无 verified 出口：绑定核验是显式受控步骤，未接线
-    const preflight = verifyAcceptanceExecutable(record.artifact_path, {
-      readFile: () => exeBytes,
-      buildRecord: parseAcceptanceBuildRecord(record),
-      sourceCommit: record.source_commit,
-    });
-    expect(preflight.build_identity).toBe("unverified");
-  });
-
-  it("受控绑定反例（完整工作流身份）：相同显示名不同 workflow_id、不同 run 的 job、非预期仓库/提交 → 全部 unverified", () => {
-    const exeB = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
-    const record = {
-      kind: ACCEPTANCE_BUILD_RECORD_KIND,
-      artifact_path: path.resolve("C:/b.exe"),
-      artifact_sha256: sha256(exeB),
-      build_command: ACCEPTANCE_BUILD_COMMAND,
-      source_commit: "b49f535abcdef1234567890abcdef1234567890",
-      features: ["acceptance", "tauri/custom-protocol"],
-      tree_clean: true,
-      builder: "ci",
-      ci: { run_id: "12345", repository: "ywltby/tokenscope", run_attempt: "1" },
-    };
-    const runMetadata = {
-      id: "12345",
-      name: "Native UI E2E",
-      workflow_id: 777,
-      head_sha: "b49f535abcdef1234567890abcdef1234567890",
-      repository: { full_name: "ywltby/tokenscope" },
-    };
-    const zip = makeStoredZip([["tokenscope.exe", exeB]]);
-    const goodJobs = [
-      { name: "native-ui", run_id: 12345, steps: [ { name: "Build embedded frontend and isolated acceptance executable", conclusion: "success" } ] },
-    ];
-    const goodArtifacts = [
-      { name: "acceptance-build-b49f535", digest: `sha256:${sha256(zip)}`, workflow_run: { id: "12345" } },
-    ];
-    const cases = [
-      {
-        name: "相同显示名、不同工作流身份（workflow_id 888 vs 777）",
-        runMetadata,
-        trustedWorkflowId: 888,
-        expect: /相同显示名的工作流不是同一身份/,
-      },
-      {
-        name: "缺受信工作流 ID",
-        runMetadata,
-        trustedWorkflowId: null,
-        expect: /缺少受信工作流 ID/,
-      },
-      {
-        name: "job 来自另一次 run（run_id 99999 vs 12345）",
-        jobList: [ { name: "native-ui", run_id: 99999, steps: goodJobs[0].steps } ],
-        expect: /该 job 来自另一次 run/,
-      },
-      {
-        name: "job 缺 run_id 字段",
-        jobList: [ { name: "native-ui", steps: goodJobs[0].steps } ],
-        expect: /run_id.*缺失|来自另一次 run/,
-      },
-      {
-        name: "非预期仓库（记录与响应内部一致也拒绝）",
-        runMetadata: { ...runMetadata, repository: { full_name: "other/repo" } },
-        trustedRepository: "other/trusted",
-        expect: /与受信仓库.*不一致/,
-      },
-      {
-        name: "非预期受测提交（记录与响应内部一致也拒绝）",
-        runMetadata: { ...runMetadata, head_sha: "2222222222222222222222222222222222222222" },
-        trustedHeadSha: "3333333333333333333333333333333333333333",
-        expect: /与受信受测提交.*不一致/,
-      },
-    ];
-    for (const c of cases) {
-      const r = verifyBuildOriginBinding({
-        record,
-        runMetadata: c.runMetadata ?? runMetadata,
-        jobList: c.jobList ?? goodJobs,
-        artifacts: goodArtifacts,
-        trustedRepository: c.trustedRepository ?? "ywltby/tokenscope",
-        trustedWorkflowName: "Native UI E2E",
-        trustedWorkflowId: Object.prototype.hasOwnProperty.call(c, "trustedWorkflowId") ? c.trustedWorkflowId : 777,
-        trustedHeadSha: c.trustedHeadSha ?? "b49f535abcdef1234567890abcdef1234567890",
-        archiveBytes: zip,
-        localExeBytes: exeB,
-      });
-      expect(r.ok, c.name).toBe(false);
-      expect(r.build_identity, c.name).toBe("unverified");
-      expect(r.reason, c.name).toMatch(c.expect);
-    }
-  });
-
-  it("ZIP 边界（真实合成 ZIP 字节）：CD/local 名不一致、越界、长度不一致、deflate 均安全处理", () => {
-    const crc32 = (() => {
-      const t = new Int32Array(256);
-      for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c; }
-      return (b) => { let c = -1; for (const x of b) c = (c >>> 8) ^ t[(c ^ x) & 0xff]; return (c ^ -1) >>> 0; };
-    })();
-    const crc32Of = crc32;
-    const mkEntry = (name, content, opts = {}) => {
-      const nb = Buffer.from(name);
-      const nb2 = Buffer.from(opts.localName ?? name);
-      const crc = opts.crc ?? crc32(content);
-      const flags = opts.flags ?? 0;
-      const l = Buffer.alloc(30);
-      l.writeUInt32LE(0x04034b50, 0);
-      l.writeUInt16LE(20, 4);
-      l.writeUInt16LE(opts.localFlags ?? flags, 6);
-      l.writeUInt16LE(opts.method ?? 0, 8);
-      l.writeUInt32LE(opts.localCompressedSize ?? opts.compressedSize ?? content.length, 18);
-      l.writeUInt32LE(opts.localUncompressedSize ?? content.length, 22);
-      l.writeUInt16LE(nb2.length, 26);
-      const c = Buffer.alloc(46);
-      c.writeUInt32LE(0x02014b50, 0);
-      c.writeUInt16LE(20, 4);
-      c.writeUInt16LE(flags, 8);
-      c.writeUInt16LE(opts.method ?? 0, 10);
-      c.writeUInt32LE(opts.crc ?? crc32(content), 16);
-      c.writeUInt32LE(opts.compressedSize ?? content.length, 20);
-      c.writeUInt32LE(opts.uncompressedSize ?? content.length, 24);
-      c.writeUInt16LE(nb.length, 28);
-      c.writeUInt32LE(0, 42);
-      const tail = Buffer.concat([
-        opts.appendAfterData ?? Buffer.alloc(0),
-      ]);
-      return { local: Buffer.concat([l, nb2, opts.localData ?? content, tail]), central: Buffer.concat([c, nb]) };
-    };
-    const buildZip = (entries, overrides = {}) => {
-      const locals = [], centrals = [];
-      let off = 0;
-      for (const e of entries) { locals.push(e.local); centrals.push(e.central); off += e.local.length; }
-      const cdSize = centrals.reduce((a, b) => a + b.length, 0);
-      const eocd = Buffer.alloc(22);
-      eocd.writeUInt32LE(0x06054b50, 0);
-      eocd.writeUInt16LE(entries.length, 8);
-      eocd.writeUInt16LE(entries.length, 10);
-      eocd.writeUInt32LE(overrides.cdSize ?? cdSize, 12);
-      eocd.writeUInt32LE(overrides.cdOffset ?? off, 16);
-      return Buffer.concat([...locals, ...centrals, eocd]);
-    };
-    // 正例：stored 可读
-    const zipOK = buildZip([mkEntry("tokenscope.exe", Buffer.from("EXE-B"))]);
-    expect(readZipEntryBytes(zipOK, "tokenscope.exe").bytes.toString()).toBe("EXE-B");
-    // 正例：deflate 可读（uncompressedSize=原文长度）
-    const orig = Buffer.from("EXE-DEFLATED");
-    const deflated = zlib.deflateRawSync(orig);
-    const zipDef = buildZip([mkEntry("a.exe", orig, { method: 8, compressedSize: deflated.length, localData: deflated })]);
-    const rDef = readZipEntryBytes(zipDef, "a.exe");
-    expect(rDef.ok).toBe(true);
-    expect(rDef.bytes.toString()).toBe("EXE-DEFLATED");
-    // 反例 1：中央目录名与本地头名不一致
-    const zipMismatch = buildZip([mkEntry("tokenscope.exe", Buffer.from("EXE-B"), { localName: "other-name.exe" })]);
-    const rMismatch = readZipEntryBytes(zipMismatch, "tokenscope.exe");
-    expect(rMismatch.ok).toBe(false);
-    expect(rMismatch.reason).toMatch(/与本地头名.*不一致|归档被拼接/);
-    // 反例 2：中央目录偏移越界
-    const zipCdOff = buildZip([mkEntry("tokenscope.exe", Buffer.from("EXE-B"))], { cdOffset: 0xfffffff0 });
-    const rCdOff = readZipEntryBytes(zipCdOff, "tokenscope.exe");
-    expect(rCdOff.ok).toBe(false);
-    expect(rCdOff.reason).toMatch(/中央目录区间越界/);
-    // 反例 3：中央目录大小越界
-    const zipCdSize = buildZip([mkEntry("tokenscope.exe", Buffer.from("EXE-B"))], { cdSize: 0xffff0000 });
-    const rCdSize = readZipEntryBytes(zipCdSize, "tokenscope.exe");
-    expect(rCdSize.ok).toBe(false);
-    expect(rCdSize.reason).toMatch(/中央目录区间越界/);
-    // 反例 4：条目 compressedSize 越界（数据区间超出归档）
-    const cdOff = zipOK.readUInt32LE(zipOK.length - 22 + 16);
-    const zipCompressed = Buffer.from(zipOK);
-    zipCompressed.writeUInt32LE(0xffff0000, cdOff + 20);
-    const rCompressed = readZipEntryBytes(zipCompressed, "tokenscope.exe");
-    expect(rCompressed.ok).toBe(false);
-    // 十四轮复核后本地头/中央目录大小一致性检查先于数据区间越界触发（两条防线都拒绝）
-    expect(rCompressed.reason).toMatch(/数据区间越界|与中央目录.*不一致/);
-    // 反例 5：条目 localOffset 越界
-    const zipLocalOff = Buffer.from(zipOK);
-    zipLocalOff.writeUInt32LE(0xffff0000, cdOff + 42);
-    const rLocalOff = readZipEntryBytes(zipLocalOff, "tokenscope.exe");
-    expect(rLocalOff.ok).toBe(false);
-    // 反例 6：解压后长度与登记 uncompressedSize 不一致
-    const zipLenMismatch = buildZip([mkEntry("a.exe", orig, { method: 8, compressedSize: deflated.length, uncompressedSize: orig.length + 7, localData: deflated })]);
-    const rLenMismatch = readZipEntryBytes(zipLenMismatch, "a.exe");
-    expect(rLenMismatch.ok).toBe(false);
-    // 十四轮复核后本地头一致性检查可能先触发（两条防线都拒绝）
-    expect(rLenMismatch.reason).toMatch(/解压后长度.*不一致|内容损坏|与中央目录.*不一致/);
-    // 反例 7：重复条目名
-    const zipDup = makeStoredZip([["tokenscope.exe", Buffer.from("A")], ["tokenscope.exe", Buffer.from("B")]]);
-    const rDup = readZipEntryBytes(zipDup, "tokenscope.exe");
-    expect(rDup.ok).toBe(false);
-    expect(rDup.reason).toMatch(/重复条目/);
-    // 反例 8：归档内没有登记条目名
-    const zipOther = makeStoredZip([["other.txt", Buffer.from("x")]]);
-    expect(readZipEntryBytes(zipOther, "tokenscope.exe").ok).toBe(false);
-    // 反例 9（十四轮复核）：登记未压缩大小为 0，条目实际有非空内容
-    const zipZeroUncompressed = buildZip([
-      mkEntry("tokenscope.exe", Buffer.from("EXE-B"), {
-        uncompressedSize: 0,
-        compressedSize: 5,
-        localUncompressedSize: 0,
-      }),
-    ]);
-    const rZero = readZipEntryBytes(zipZeroUncompressed, "tokenscope.exe");
-    expect(rZero.ok).toBe(false);
-    expect(rZero.reason).toMatch(/解压后长度 5 与登记 0 不一致/);
-    // 反例 10（十四轮复核）：条目内容与登记 CRC 不一致
-    const zipCrcMismatch = buildZip([
-      mkEntry("tokenscope.exe", Buffer.from("EXE-B"), { crc: crc32Of(Buffer.from("OTHER")) }),
-    ]);
-    const rCrc = readZipEntryBytes(zipCrcMismatch, "tokenscope.exe");
-    expect(rCrc.ok).toBe(false);
-    expect(rCrc.reason).toMatch(/CRC.*不一致/);
-    // 反例 11（十四轮复核）：中央目录登记压缩大小为 0（短于条目），实际包含数据
-    const zipCdZero = buildZip([
-      mkEntry("tokenscope.exe", Buffer.from("EXE-B"), { compressedSize: 0 }),
-    ]);
-    const rCdZero = readZipEntryBytes(zipCdZero, "tokenscope.exe");
-    expect(rCdZero.ok).toBe(false);
-    expect(rCdZero.reason).toMatch(/解压后长度 0 与登记 5 不一致/);
-    // 反例 12（十四轮复核）：本地头与中央目录大小不一致（拼接归档的另一种形态）
-    const zipLocalMismatch = buildZip([
-      mkEntry("tokenscope.exe", Buffer.from("EXE-B"), {
-        compressedSize: 5,
-        localCompressedSize: 99,
-      }),
-    ]);
-    const rLocalMismatch = readZipEntryBytes(zipLocalMismatch, "tokenscope.exe");
-    expect(rLocalMismatch.ok).toBe(false);
-    expect(rLocalMismatch.reason).toMatch(/本地头大小.*与中央目录.*不一致/);
-    // 反例 13（十五轮复核）：EOCD 登记的中央目录大小为 0，却声明目标条目——
-    // 目录解析必须受登记区间约束，不允许越过登记区间继续读条目。
-    const zipCdSizeZero = buildZip([mkEntry("tokenscope.exe", Buffer.from("EXE-B"))], { cdSize: 0 });
-    const rCdSizeZero = readZipEntryBytes(zipCdSizeZero, "tokenscope.exe");
-    expect(rCdSizeZero.ok).toBe(false);
-    expect(rCdSizeZero.reason).toMatch(/Central Directory 损坏/);
-    // 反例 14（十五轮复核）：EOCD 登记的中央目录大小短于实际目录（只够条目
-    // 头、不够名字）。
-    const zipCdSizeShort = buildZip([mkEntry("tokenscope.exe", Buffer.from("EXE-B"))], { cdSize: 40 });
-    const rCdSizeShort = readZipEntryBytes(zipCdSizeShort, "tokenscope.exe");
-    expect(rCdSizeShort.ok).toBe(false);
-    expect(rCdSizeShort.reason).toMatch(/Central Directory 损坏/);
-  });
-
-  it("data descriptor 流式 ZIP（general-purpose bit 3）：本地头占位 + 描述符核对，stored 与 deflate 均通过；描述符缺失/不一致拒绝", () => {
-    const crc32 = (() => {
-      const t = new Int32Array(256);
-      for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c; }
-      return (b) => { let c = -1; for (const x of b) c = (c >>> 8) ^ t[(c ^ x) & 0xff]; return (c ^ -1) >>> 0; };
-    })();
-    // 模拟标准库向不可 seek 流写出的真实形态：本地头 bit3 + CRC/大小占位 0，
-    // 数据后跟 PK\x07\x08 描述符（crc + 压缩大小 + 未压缩大小），中央目录
-    // 登记真实值。两种描述符形态都覆盖：带 0x08074b50 签名（zlib/Info-ZIP）
-    // 与不带签名（规范允许）。
-    const streamedZip = (name, content, method, opts = {}) => {
-      const nb = Buffer.from(name);
-      const packed = method === 8 ? zlib.deflateRawSync(content) : content;
-      const l = Buffer.alloc(30);
-      l.writeUInt32LE(0x04034b50, 0);
-      l.writeUInt16LE(20, 4);
-      l.writeUInt16LE(0x08, 6);
-      l.writeUInt16LE(method, 8);
-      l.writeUInt16LE(nb.length, 26);
-      const dd = Buffer.alloc(16);
-      if (!opts.noDescriptorSignature) dd.writeUInt32LE(0x08074b50, 0);
-      dd.writeUInt32LE(opts.descriptorCrc ?? crc32(content), opts.noDescriptorSignature ? 0 : 4);
-      dd.writeUInt32LE(opts.descriptorCompressed ?? packed.length, opts.noDescriptorSignature ? 4 : 8);
-      dd.writeUInt32LE(opts.descriptorUncompressed ?? content.length, opts.noDescriptorSignature ? 8 : 12);
-      const ddBytes = opts.dropDescriptor ? Buffer.alloc(0) : dd.subarray(0, opts.noDescriptorSignature ? 12 : 16);
-      const c = Buffer.alloc(46);
-      c.writeUInt32LE(0x02014b50, 0);
-      c.writeUInt16LE(20, 4);
-      c.writeUInt16LE(0x08, 8);
-      c.writeUInt16LE(method, 10);
-      c.writeUInt32LE(crc32(content), 16);
-      c.writeUInt32LE(packed.length, 20);
-      c.writeUInt32LE(content.length, 24);
-      c.writeUInt16LE(nb.length, 28);
-      c.writeUInt32LE(0, 42);
-      const eocd = Buffer.alloc(22);
-      eocd.writeUInt32LE(0x06054b50, 0);
-      eocd.writeUInt16LE(1, 8);
-      eocd.writeUInt16LE(1, 10);
-      eocd.writeUInt32LE(46 + nb.length, 12);
-      eocd.writeUInt32LE(30 + nb.length + packed.length + ddBytes.length, 16);
-      return Buffer.concat([l, nb, packed, ddBytes, c, nb, eocd]);
-    };
-    // 正例：stored 流式（带签名描述符）
-    const okStored = readZipEntryBytes(streamedZip("tokenscope.exe", Buffer.from("EXE-STREAM"), 0), "tokenscope.exe");
-    expect(okStored.ok).toBe(true);
-    expect(okStored.bytes.toString()).toBe("EXE-STREAM");
-    // 正例：deflate 流式（带签名描述符）
-    const okDeflate = readZipEntryBytes(streamedZip("a.exe", Buffer.from("EXE-DEFLATED-STREAM"), 8), "a.exe");
-    expect(okDeflate.ok).toBe(true);
-    expect(okDeflate.bytes.toString()).toBe("EXE-DEFLATED-STREAM");
-    // 正例：无签名描述符（规范允许）
-    const okNoSig = readZipEntryBytes(
-      streamedZip("a.exe", Buffer.from("EXE-NOSIG"), 0, { noDescriptorSignature: true }),
-      "a.exe",
-    );
-    expect(okNoSig.ok).toBe(true);
-    expect(okNoSig.bytes.toString()).toBe("EXE-NOSIG");
-    // 负例：声明 bit3 但描述符完全缺失（十六轮复核问题 1）——描述符必须位于
-    // 数据之后、中央目录之前，不能从 CD 借字节；拒绝原因要明确指出缺失。
-    const noDescriptor = readZipEntryBytes(
-      streamedZip("a.exe", Buffer.from("X-NODD"), 0, { dropDescriptor: true }),
-      "a.exe",
-    );
-    expect(noDescriptor.ok).toBe(false);
-    expect(noDescriptor.reason).toMatch(/描述符缺失|数据后只剩/);
-    // 负例：描述符 CRC 与中央目录登记不一致
-    const badCrc = readZipEntryBytes(
-      streamedZip("a.exe", Buffer.from("X-CRC"), 0, { descriptorCrc: 0x12345678 }),
-      "a.exe",
-    );
-    expect(badCrc.ok).toBe(false);
-    expect(badCrc.reason).toMatch(/data descriptor.*与中央目录登记不一致/);
-    // 负例：描述符大小与中央目录登记不一致
-    const badSize = readZipEntryBytes(
-      streamedZip("a.exe", Buffer.from("X-SIZE"), 0, { descriptorUncompressed: 99 }),
-      "a.exe",
-    );
-    expect(badSize.ok).toBe(false);
-    expect(badSize.reason).toMatch(/data descriptor.*与中央目录登记不一致/);
-    // 负例：声明 bit3 但本地头 CRC/大小不是占位 0（非法形态）
-    const notPlaceholder = (() => {
-      const zip = streamedZip("a.exe", Buffer.from("X-FAKE"), 0);
-      // 本地头 CRC 字段在 offset 14
-      const cdOffset = zip.readUInt32LE(zip.length - 22 + 16);
-      const localOffset = zip.readUInt32LE(cdOffset + 42);
-      zip.writeUInt32LE(crc32(Buffer.from("X-FAKE")), localOffset + 14);
-      return zip;
-    })();
-    const rFake = readZipEntryBytes(notPlaceholder, "a.exe");
-    expect(rFake.ok).toBe(false);
-    expect(rFake.reason).toMatch(/本地头 CRC\/大小不是占位 0/);
-    // 负例：本地头与中央目录的 bit3 标志不一致（拼接形态）
-    const flagsMismatch = (() => {
-      const zip = streamedZip("a.exe", Buffer.from("X-FLAG"), 0);
-      const cdOffset = zip.readUInt32LE(zip.length - 22 + 16);
-      const localOffset = zip.readUInt32LE(cdOffset + 42);
-      zip.writeUInt16LE(0, localOffset + 6);
-      return zip;
-    })();
-    const rFlag = readZipEntryBytes(flagsMismatch, "a.exe");
-    expect(rFlag.ok).toBe(false);
-    expect(rFlag.reason).toMatch(/data descriptor 标志不一致/);
-  });
-
-  it("无签名描述符的 CRC 恰好等于 0x08074b50：仍按无签名解析并通过（不以首 4 字节判签名）", () => {
-    const crc32Local = (b) => crc32(b);
-    // 用 GF(2) 构造内容，使其 CRC 恰为描述符签名值 0x08074b50。
-    const content = contentWithCrc(0x08074b50, Buffer.from("ZIP0"));
-    expect(content).not.toBeNull();
-    expect(crc32Local(content)).toBe(0x08074b50);
-    const nb = Buffer.from("a.exe");
-    const l = Buffer.alloc(30);
-    l.writeUInt32LE(0x04034b50, 0);
-    l.writeUInt16LE(20, 4);
-    l.writeUInt16LE(0x08, 6);
-    l.writeUInt16LE(nb.length, 26);
-    // 无签名描述符：CRC 字段恰好是 0x08074b50，后跟大小
-    const dd = Buffer.alloc(12);
-    dd.writeUInt32LE(0x08074b50, 0);
-    dd.writeUInt32LE(content.length, 4);
-    dd.writeUInt32LE(content.length, 8);
-    const c = Buffer.alloc(46);
-    c.writeUInt32LE(0x02014b50, 0);
-    c.writeUInt16LE(20, 4);
-    c.writeUInt16LE(0x08, 8);
-    c.writeUInt32LE(0x08074b50, 16);
-    c.writeUInt32LE(content.length, 20);
-    c.writeUInt32LE(content.length, 24);
-    c.writeUInt16LE(nb.length, 28);
-    c.writeUInt32LE(0, 42);
-    const eocd = Buffer.alloc(22);
-    eocd.writeUInt32LE(0x06054b50, 0);
-    eocd.writeUInt16LE(1, 8);
-    eocd.writeUInt16LE(1, 10);
-    eocd.writeUInt32LE(46 + nb.length, 12);
-    eocd.writeUInt32LE(30 + nb.length + content.length + dd.length, 16);
-    const zip = Buffer.concat([l, nb, content, dd, c, nb, eocd]);
-    // 若实现仅凭首 4 字节判"带签名"，会跳 4 字节读错字段并拒绝；正确实现应
-    // 按无签名解读（CRC 恰等于签名值）并通过。
-    const result = readZipEntryBytes(zip, "a.exe");
-    expect(result.ok).toBe(true);
-    expect(result.bytes.equals(content)).toBe(true);
-    // 对照：同一内容改成带签名描述符，也应通过（两种形态都合法）。
-    const ddSigned = Buffer.alloc(16);
-    ddSigned.writeUInt32LE(0x08074b50, 0);
-    ddSigned.writeUInt32LE(0x08074b50, 4);
-    ddSigned.writeUInt32LE(content.length, 8);
-    ddSigned.writeUInt32LE(content.length, 12);
-    const eocdSigned = Buffer.from(eocd);
-    eocdSigned.writeUInt32LE(30 + nb.length + content.length + ddSigned.length, 16);
-    const zipSigned = Buffer.concat([l, nb, content, ddSigned, c, nb, eocdSigned]);
-    const signedResult = readZipEntryBytes(zipSigned, "a.exe");
-    expect(signedResult.ok).toBe(true);
-  });
-
-  it("归档读取与解压的资源上限：在解析与展开过程中强制，可注入小上限", () => {
-    // 上限是"可解释"的：默认值来自 ZIP_READ_LIMITS，调用方可注入更小值；
-    // 解压用 zlib maxOutputLength 在展开中途中止，不先完整展开再检查。
-    const crc32Local = (b) => crc32(b);
-    const deflatedZip = (content, claimedUncompressed) => {
-      const packed = zlib.deflateRawSync(content);
-      const nb = Buffer.from("a.exe");
-      const l = Buffer.alloc(30);
-      l.writeUInt32LE(0x04034b50, 0);
-      l.writeUInt16LE(20, 4);
-      l.writeUInt16LE(8, 8);
-      l.writeUInt32LE(crc32Local(content), 14);
-      l.writeUInt32LE(packed.length, 18);
-      l.writeUInt32LE(claimedUncompressed, 22);
-      l.writeUInt16LE(nb.length, 26);
-      const c = Buffer.alloc(46);
-      c.writeUInt32LE(0x02014b50, 0);
-      c.writeUInt16LE(20, 4);
-      c.writeUInt16LE(8, 10);
-      c.writeUInt32LE(crc32Local(content), 16);
-      c.writeUInt32LE(packed.length, 20);
-      c.writeUInt32LE(claimedUncompressed, 24);
-      c.writeUInt16LE(nb.length, 28);
-      c.writeUInt32LE(0, 42);
-      const eocd = Buffer.alloc(22);
-      eocd.writeUInt32LE(0x06054b50, 0);
-      eocd.writeUInt16LE(1, 8);
-      eocd.writeUInt16LE(1, 10);
-      eocd.writeUInt32LE(46 + nb.length, 12);
-      eocd.writeUInt32LE(30 + nb.length + packed.length, 16);
-      return Buffer.concat([l, nb, packed, c, nb, eocd]);
-    };
-    const small = deflatedZip(Buffer.alloc(40, 0x41), 40);
-    // 归档字节上限：在 EOCD 解析前拒绝
-    const archiveTooBig = readZipEntryBytes(small, "a.exe", { maxArchiveBytes: 10 });
-    expect(archiveTooBig.ok).toBe(false);
-    expect(archiveTooBig.reason).toMatch(/归档字节 \d+ 超过上限 10/);
-    // 登记未压缩大小超限：解压前拒绝（不浪费展开）
-    const entryTooBig = readZipEntryBytes(small, "a.exe", { maxEntryBytes: 8 });
-    expect(entryTooBig.ok).toBe(false);
-    expect(entryTooBig.reason).toMatch(/登记未压缩大小 40 超过上限 8/);
-    // 解压过程中超限：登记值谎报为 8 骗过登记检查，实际展开 40 字节——
-    // maxOutputLength 必须在展开中途中止，不能先完整展开再比对。
-    const lying = deflatedZip(Buffer.alloc(40, 0x41), 8);
-    const inflateTooBig = readZipEntryBytes(lying, "a.exe", { maxEntryBytes: 8 });
-    expect(inflateTooBig.ok).toBe(false);
-    expect(inflateTooBig.reason).toMatch(/解压失败.*(larger than 8|too large)/i);
-    // 默认上限是显式常量（可解释），且为正数
-    expect(ZIP_READ_LIMITS.maxArchiveBytes).toBeGreaterThan(0);
-    expect(ZIP_READ_LIMITS.maxEntryBytes).toBeGreaterThan(0);
-    expect(ZIP_READ_LIMITS.maxEntryBytes).toBeLessThanOrEqual(ZIP_READ_LIMITS.maxArchiveBytes);
-    // 对照：上限足够时同一归档通过
-    const ok = readZipEntryBytes(small, "a.exe", { maxEntryBytes: 1024 });
-    expect(ok.ok).toBe(true);
-    expect(ok.bytes.length).toBe(40);
-    // 非法上限配置拒绝
-    expect(readZipEntryBytes(small, "a.exe", { maxEntryBytes: 0 }).ok).toBe(false);
-    expect(readZipEntryBytes(small, "a.exe", { maxArchiveBytes: -1 }).ok).toBe(false);
-  });
-
   it("普通目录 nlink=2 也必须继续遍历：内含外部 junction 的反例不被漏掉", () => {
     // NTFS 目录 nlink 恒 1，无法在磁盘上真实造出 nlink=2 的目录——用注入的
     // lstatSync 模拟"报 nlink>1 的普通目录"（ReFS/网络盘/未来行为）。修复前
@@ -1680,10 +1057,13 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
         sourceCommit: forgedCi.source_commit,
         ...(env === undefined ? {} : { buildEnvironment: env }),
       });
-      expect(result.ok).toBe(false);
-      expect(result.launch_allowed).toBe(false);
-      expect(result.build_identity).toBe("unverified");
-      expect(result.reason).toMatch(/无法独立证明产物来源/);
+      // 受控构建假设：环境变量不参与判定，记录与实际 EXE 一致即可启动——
+      // 但结论是 assumed，不是来源证明；reason 必须写明这一边界。
+      expect(result.ok).toBe(true);
+      expect(result.launch_allowed).toBe(true);
+      expect(result.build_identity).toBe("assumed");
+      expect(result.reason).toMatch(/受控构建假设/);
+      expect(result.reason).toMatch(/不构成来源独立防伪证明/);
     }
   });
 
@@ -1706,10 +1086,11 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
       buildRecord: localRecord,
       sourceCommit: localRecord.source_commit,
     });
-    expect(r1.ok).toBe(false);
-    expect(r1.launch_allowed).toBe(false);
-    expect(r1.build_identity).toBe("unverified");
-    expect(r1.reason).toMatch(/无法独立证明产物来源/);
+    // 受控构建假设下本地记录可用（builder=local 只是诊断字段），结论 assumed。
+    expect(r1.ok).toBe(true);
+    expect(r1.launch_allowed).toBe(true);
+    expect(r1.build_identity).toBe("assumed");
+    expect(r1.reproducible_from_commit).toBe(true);
   });
 
   it("旧格式记录（无 builder/ci 段）parse 通过（builder/ci 为可选诊断字段）", () => {
@@ -1725,14 +1106,14 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
     };
     const parsed = parseAcceptanceBuildRecord(JSON.stringify(legacy));
     expect(parsed.ok).toBe(true);
-    // 形状通过也不授予 verified——身份门仍拒绝
+    // 形状通过 + 记录一致 → 受控构建假设（assumed），不是 verified。
     const result = verifyAcceptanceExecutable(legacy.artifact_path, {
       readFile: () => bytes,
       buildRecord: parsed,
       sourceCommit: legacy.source_commit,
     });
-    expect(result.ok).toBe(false);
-    expect(result.build_identity).toBe("unverified");
+    expect(result.ok).toBe(true);
+    expect(result.build_identity).toBe("assumed");
   });
 
   it("builder=ci 但 ci 段缺 run_id/repository：parse 拒绝（保留登记契约供未来 CI 核验）", () => {
@@ -1799,11 +1180,21 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
       sourceCommit: dirty.source_commit,
       buildEnvironment: { GITHUB_ACTIONS: "true" },
     });
-    // 脏树上的产物无法仅凭提交哈希复现——来源无法独立证明 → unverified。
+    // 脏树：CI 与正式取证要求干净树 → 拒绝（builder=ci）。
     expect(result.ok).toBe(false);
     expect(result.launch_allowed).toBe(false);
     expect(result.build_identity).toBe("unverified");
-    expect(result.reason).toMatch(/脏树|来源/);
+    expect(result.reason).toMatch(/脏树|干净树/);
+    // 同一份脏树记录若是本机构建：可启动，但必须如实标注不可仅凭提交复现。
+    const localDirty = verifyAcceptanceExecutable(exePath, {
+      readFile: () => bytes,
+      buildRecord: { ...parsed, record: { ...parsed.record, builder: "local" } },
+      sourceCommit: dirty.source_commit,
+    });
+    expect(localDirty.ok).toBe(true);
+    expect(localDirty.build_identity).toBe("assumed");
+    expect(localDirty.reproducible_from_commit).toBe(false);
+    expect(localDirty.reason).toMatch(/脏树|无法仅凭提交哈希复现/);
   });
 
   it("登记产物不是本次 EXE、构建命令不合法、源提交不一致都拒绝", () => {
@@ -1923,6 +1314,61 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
         },
       }).ok,
     ).toBe(false);
+  });
+
+  it("受控构建路径已恢复：合法记录 + 一致 EXE → 预检放行（assumed），prepare/launch 被调用", async () => {
+    // 收敛后既有 Native 场景的可运行路径：隔离路径 + 记录一致即放行，
+    // build_identity 是 assumed（受控构建假设），不是 verified。
+    const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
+    const exePath = path.resolve("C:/build/target/release/tokenscope.exe");
+    const record = {
+      kind: ACCEPTANCE_BUILD_RECORD_KIND,
+      artifact_path: exePath,
+      artifact_sha256: sha256(bytes),
+      build_command: ACCEPTANCE_BUILD_COMMAND,
+      source_commit: "b49f535abcdef1234567890abcdef1234567890",
+      features: ["acceptance", "tauri/custom-protocol"],
+      tree_clean: true,
+      builder: "local",
+    };
+    const sandbox = createRunSandbox("preflight-assumed");
+    try {
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      const preflight = evaluateAcceptanceLaunchPreflight({
+        root,
+        homeDir: home,
+        exePath,
+        buildRecord: {
+          ok: true,
+          record: parseAcceptanceBuildRecord(record).record,
+        },
+        sourceCommit: record.source_commit,
+        readFile: (target) =>
+          String(target).endsWith(".exe") ? bytes : fs.readFileSync(target),
+      });
+      expect(preflight.paths.ok).toBe(true);
+      expect(preflight.exe.ok).toBe(true);
+      expect(preflight.exe.build_identity).toBe("assumed");
+      expect(preflight.exe.reproducible_from_commit).toBe(true);
+      expect(preflight.ok).toBe(true);
+      let prepared = 0;
+      let launched = 0;
+      const gate = await startIfPreflightAllows({
+        preflight: () => preflight,
+        prepare: async () => {
+          prepared += 1;
+        },
+        launch: async () => {
+          launched += 1;
+        },
+      });
+      expect(gate.started).toBe(true);
+      expect(prepared).toBe(1);
+      expect(launched).toBe(1);
+    } finally {
+      sandbox.cleanup();
+    }
   });
 
   it("预检拒绝受保护根/无构建身份时 prepare 与 launch 零调用", async () => {

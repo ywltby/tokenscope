@@ -16,16 +16,22 @@
     产物哈希并与该记录逐字段核对；缺记录、路径不符、命令不合法、提交不一致或
     哈希不匹配一律拒绝启动（零准备、零启动）。
 
-    来源证明边界（2026-10-31 收窄）：
+    许可语义与证明边界（2026-10-31 收敛）：
+      结论是 **assumed（受控构建假设）**，不是来源独立防伪证明。记录的全部字段
+      都是本机/CI 受控构建的自述，用来防"意外不一致"（拿错 EXE、命令不对、
+      提交不符、字节被替换），不防蓄意伪造——不要把它当成 verified。
       - 本脚本永远执行受控构建命令（增量构建下通常为 no-op）。-SkipBuild 只
         跳过"重新登记之外的手工步骤"，不能跳过命令本身——跳过命令意味着放弃
-        "产物字节确由受控命令产生"的证明，等于允许把任意普通 PE 的哈希登记进
-        记录。
+        "产物字节确由受控命令产生"这一自述的最小前提，等于允许把任意普通 PE
+        的哈希登记进记录。
       - -Exe 只接受受控命令的实际产物 target/release/tokenscope.exe（相对或
         绝对等价路径）。其他路径一律拒绝：预检按登记路径核对哈希，登记一个
-        别处路径的哈希就能让那个文件获得 verified。
-      - 缺少来源证明的登记（无法确定 git 提交、无法执行受控命令）直接失败，
+        别处路径的哈希就能让那个文件通过一致性检查。
+      - 缺少必要自述的登记（无法确定 git 提交、无法执行受控命令）直接失败，
         不产出记录。
+      - 脏树（tree_clean=false）如实登记：本机开发可用（assumed +
+        reproducible_from_commit=false），CI 与正式取证要求干净树，脏树记录在
+        builder=ci 时被拒绝——不得把脏树产物冒充为可仅凭提交哈希复现的证据。
 
     与仓库其它脚本一样：UTF-8 无 BOM、LF。Windows PowerShell 5.1 读无 BOM UTF-8
     会把中文当 ANSI，请用 pwsh 或 `& ([scriptblock]::Create((Get-Content -Raw
@@ -47,7 +53,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 $buildCommand = 'cargo build --locked -p tokenscope-app --release --features acceptance,tauri/custom-protocol --bin tokenscope'
 $controlledArtifact = Join-Path $repo 'target/release/tokenscope.exe'
 
-# 来源证明第 1 步：登记路径必须是受控命令的实际产物。-Exe 指向别处时，登记的
+# 一致性的第 1 步：登记路径必须是受控命令的实际产物。-Exe 指向别处时，登记的
 # 哈希无法与受控命令关联（任何普通 PE 都能被登记），直接失败。
 $exeFull = [System.IO.Path]::GetFullPath((Join-Path $repo $Exe))
 $controlledFull = [System.IO.Path]::GetFullPath($controlledArtifact)
@@ -56,8 +62,9 @@ if ($exeFull -ne $controlledFull) {
         "登记其他路径的哈希会让任意文件获得验收身份，拒绝登记。"
 }
 
-# 来源证明第 2 步：永远执行受控命令。-SkipBuild 语义收窄为"不重做手工准备"，
-# 命令本身必须运行（增量构建通常 no-op，秒级）；否则无法证明产物字节来自本命令。
+# 一致性的第 2 步：永远执行受控命令。-SkipBuild 语义收窄为"不重做手工准备"，
+# 命令本身必须运行（增量构建通常 no-op，秒级）；否则"产物字节来自本命令"的
+# 自述失去最小前提。
 Write-Host "[record-acceptance-build] $buildCommand"
 $parts = $buildCommand -split ' '
 $cargoProgram = $parts[0]
@@ -74,7 +81,7 @@ if ($commit -notmatch '^[0-9a-f]{40}$') {
     throw "无法确定当前检出的源提交：'$commit'"
 }
 
-# 来源证明第 3 步：记录源树状态。CI checkout 是干净树；脏树上的产物无法仅凭
+# 一致性的第 3 步：记录源树状态。CI checkout 是干净树；脏树上的产物无法仅凭
 # 提交哈希复现。预检侧要求记录必须携带该字段（缺失即旧格式记录，拒绝），
 # 并把 dirty 数量如实带出，由验收使用方自行判断可信度。
 $gitStatus = @(& git -C $repo status --porcelain)
@@ -83,8 +90,8 @@ $treeClean = ($gitStatus.Count -eq 0)
 $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $exeFull).Hash.ToLowerInvariant()
 
 # 构建者分级：GitHub Runner（GITHUB_ACTIONS=true）= ci，携带 ci 段；本地 =
-# local。这些都是自报字段，不授予 verified（七轮复核：预检当前无法独立
-# 证明产物来源，一律 unverified 拒绝启动）；登记它们是为未来的 CI artifact
+# local。这些都是自报诊断字段：结论是 assumed（受控构建假设），不是来源
+# 独立防伪证明（GitHub 侧绑定未接线）；登记它们是为未来的 CI artifact
 # 绑定核验（GitHub API 核验 run/EXE 同源与 digest）保留证据链。
 $isCi = $env:GITHUB_ACTIONS -eq 'true'
 $builder = if ($isCi) { 'ci' } else { 'local' }
