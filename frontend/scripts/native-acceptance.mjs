@@ -1437,12 +1437,14 @@ function splitViolations(list) {
 class Checks {
   constructor() {
     this.rows = [];
+    // detail 截断 2000：pricing 契约的 basis（matched+lines+tooltip）约 1.4K，
+    // 300 字符会让 CI 上的计价失败无法取证（本机无法复现 Runner 形态）。
     // AC10：真实观察不到的外部证据（如托盘）单列 pending，不混入通过/失败，
     // 也不能用进程数等替身结论把它变成通过。
     this.pendingRows = [];
   }
   add(name, ok, detail = "") {
-    this.rows.push({ name, ok: !!ok, detail: String(detail).slice(0, 300) });
+    this.rows.push({ name, ok: !!ok, detail: String(detail).slice(0, 2000) });
     return this;
   }
   pending(name, detail = "") {
@@ -1450,7 +1452,7 @@ class Checks {
       name,
       ok: null,
       pending: true,
-      detail: String(detail).slice(0, 300),
+      detail: String(detail).slice(0, 2000),
     });
     return this;
   }
