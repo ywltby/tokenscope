@@ -27,6 +27,8 @@ import { nativeSourcePaths } from "./contracts/native-source-paths.mjs";
 import { nativeIdentity } from "./contracts/native-identity.mjs";
 import { nativeCcsImport } from "./contracts/native-ccs-import.mjs";
 import { nativePricing, preparePricingScenario } from "./contracts/native-pricing.mjs";
+// N18：分档（5m/1h）的真实界面验收——合成 Claude 日志 + 隔离分档价格表。
+import { nativeCacheTiers, prepareCacheTiersScenario } from "./contracts/native-cache-tiers.mjs";
 import { nativeUiRelaunch, nativeUiSystem } from "./contracts/native-ui-system.mjs";
 import { nativeSingleInstance, readTrayObservation } from "./contracts/native-single-instance.mjs";
 import { decodePng } from "./lib/png.mjs";
@@ -1902,6 +1904,8 @@ const scenarios = {
   "ui-identity": nativeIdentity,
   "ui-ccs-import": nativeCcsImport,
   "ui-pricing": nativePricing,
+  // N18：分档计价的两档明细与「分档未知/估算」在真实界面上的呈现。
+  "ui-cache-tiers": nativeCacheTiers,
   "ui-refresh": nativeUiRefresh,
   "ui-system": nativeUiSystem,
   // PR2：真实采集生命周期 + 读取显示期 + 失败恢复 + 翻页保护（验收注入驱动慢轮次与失败）。
@@ -4235,7 +4239,13 @@ async function main() {
     realDataDir: REAL_DATA,
     homeDir: process.env.USERPROFILE || "",
     // WB07：ui-source-paths 也用统一 fixture（两版 WorkBuddy 合成转写）。
-    profile: ["ui-identity", "ui-ccs-import", "ui-pricing", "ui-source-paths"].includes(SCENARIO)
+    profile: [
+      "ui-identity",
+      "ui-ccs-import",
+      "ui-pricing",
+      "ui-source-paths",
+      "ui-cache-tiers",
+    ].includes(SCENARIO)
       ? "unified"
       : undefined,
     env: {
@@ -4249,8 +4259,10 @@ async function main() {
             : {}),
     },
     mutate:
-      SCENARIO === "ui-pricing"
-        ? preparePricingScenario
+      SCENARIO === "ui-cache-tiers"
+        ? prepareCacheTiersScenario
+        : SCENARIO === "ui-pricing"
+          ? preparePricingScenario
         : SCENARIO === "fault-logs-file"
           ? (r) => {
               const p = path.join(r, "tokenscope", "logs");
