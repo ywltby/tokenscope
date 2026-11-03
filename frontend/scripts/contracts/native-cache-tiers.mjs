@@ -108,21 +108,44 @@ export async function nativeCacheTiers(context) {
     return { text, rows };
   };
 
+  // 必须在 Node 侧装上 IPC 旁路探针并重载页面：查询快照与 DOM 一致性
+  // 都来自探针记录的真实 query_summary/query_events（与 ui-pricing 同法）。
+  await u.installProbe();
+  await u.page().reload({ waitUntil: "domcontentloaded" });
   await inst.waitForData();
   let snapshot;
-  await u.waitUntil(
-    async () => {
-      snapshot = await u.querySnapshot();
-      return (
-        snapshot.sameQuery &&
-        snapshot.domMatches &&
-        snapshot.events.rows.some((row) => row.record_id === "m-tiers-known") &&
-        snapshot.events.rows.some((row) => row.record_id === "m-tiers-unknown")
-      );
-    },
-    30000,
-    "分档两条请求进入真实明细",
-  );
+  const diag = { polls: [] };
+  ev.cache_tiers_ui.diag = diag;
+  try {
+    await u.waitUntil(
+      async () => {
+        snapshot = await u.querySnapshot();
+        const ids = (snapshot.events?.rows ?? []).map((row) => row.record_id);
+        const ok =
+          snapshot.sameQuery &&
+          snapshot.domMatches &&
+          ids.includes("m-tiers-known") &&
+          ids.includes("m-tiers-unknown");
+        if (diag.polls.length < 6 || ok) {
+          diag.polls.push({
+            sameQuery: snapshot.sameQuery,
+            domMatches: snapshot.domMatches,
+            total: snapshot.events?.total ?? null,
+            rows: ids.length,
+            known: ids.includes("m-tiers-known"),
+            unknown: ids.includes("m-tiers-unknown"),
+            sample: ids.slice(0, 6),
+          });
+        }
+        return ok;
+      },
+      30000,
+      "分档两条请求进入真实明细",
+    );
+  } catch (error) {
+    diag.failed = String(error?.message ?? error);
+    throw error;
+  }
 
   const rowIndex = (recordId) => {
     const index = snapshot.events.rows.findIndex((row) => row.record_id === recordId);
