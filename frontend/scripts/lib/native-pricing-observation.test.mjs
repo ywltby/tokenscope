@@ -16,7 +16,7 @@ const shortPath = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\isolated\\tokensco
 const longPath = "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\isolated\\tokenscope\\pricing.toml";
 const observation = expected => ({
   existedBefore: false, created: true, content: "[[model]]", expectedPath: expected,
-  returnedPath: longPath, openerPaths: [longPath], recorded: true,
+  returnedPath: longPath, openerPaths: [longPath], recorded: true, hostPidResolved: true, hostPid: 1234,
   processProbeOk: true, foreignProcesses: [],
 });
 

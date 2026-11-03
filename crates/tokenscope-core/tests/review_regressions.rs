@@ -276,6 +276,9 @@ fn synthetic_event(i: u64) -> EventWrite {
         session_initial_cwd: None,
         event_cwd: None,
         tokens: TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
             input: 100,
             output: 10,
             cache_write: 0,
@@ -309,6 +312,9 @@ fn large_detail_plus_rollup_does_not_deadlock() {
             pricing_model: String::new(),
             request_count: 2,
             tokens: TokenCounts {
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
                 input: 10,
                 output: 1,
                 cache_write: 0,
@@ -394,6 +400,9 @@ fn codex_overlap_candidate_requires_explicit_confirmation() {
             session_initial_cwd: None,
             event_cwd: None,
             tokens: TokenCounts {
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
                 input: 100,
                 output: 30,
                 cache_write: 0,
@@ -944,6 +953,9 @@ fn net_new_tokens_counts_only_newly_inserted_events() {
         session_initial_cwd: None,
         event_cwd: None,
         tokens: TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
             input: 100,
             output: 30,
             cache_write: 0,
@@ -1176,14 +1188,14 @@ fn schema_upgrade_creates_restorable_backup() {
     let path = dir.join("history.db");
     {
         let history = HistoryDb::open(&path).unwrap();
-        assert_eq!(history.schema_version().unwrap(), 4, "新库直接是当前版本");
+        assert_eq!(history.schema_version().unwrap(), 5, "新库直接是当前版本");
     }
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.pragma_update(None, "user_version", 1).unwrap();
     }
     let history = HistoryDb::open(&path).unwrap();
-    assert_eq!(history.schema_version().unwrap(), 4, "升级到当前版本");
+    assert_eq!(history.schema_version().unwrap(), 5, "升级到当前版本");
     let backup = dir.join("history.db.backup-v1");
     assert!(backup.is_file(), "必须生成升级前备份：{}", backup.display());
     let conn = rusqlite::Connection::open(&backup).unwrap();
@@ -1236,6 +1248,9 @@ fn import_commit_rechecks_generation_inside_transaction() {
             session_initial_cwd: None,
             event_cwd: None,
             tokens: TokenCounts {
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
                 input: 1,
                 output: 1,
                 cache_write: 0,
@@ -1429,6 +1444,9 @@ fn native_confirmation_blocks_later_ccs_overwrite() {
         session_initial_cwd: None,
         event_cwd: None,
         tokens: TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
             input: 10,
             output,
             cache_write: 0,
@@ -1667,7 +1685,7 @@ fn upgraded_v2_history_backfills_identity_time_and_rollup_key() {
         }
     }
     let history = HistoryDb::open(&path).unwrap();
-    assert_eq!(history.schema_version().unwrap(), 4, "升级到当前版本");
+    assert_eq!(history.schema_version().unwrap(), 5, "升级到当前版本");
     assert_eq!(
         history.rollup_count().unwrap(),
         1,
@@ -1700,6 +1718,9 @@ fn upgraded_v2_history_backfills_identity_time_and_rollup_key() {
             session_initial_cwd: None,
             event_cwd: None,
             tokens: TokenCounts {
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
                 input: 10,
                 output: 20,
                 cache_write: 0,
@@ -1738,6 +1759,9 @@ fn upgraded_v2_history_backfills_identity_time_and_rollup_key() {
             session_initial_cwd: None,
             event_cwd: None,
             tokens: TokenCounts {
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
                 input: 100,
                 output: 30,
                 cache_write: 0,
@@ -1838,6 +1862,9 @@ fn native_precedence_beats_observed_time() {
             session_initial_cwd: None,
             event_cwd: None,
             tokens: TokenCounts {
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
                 input: 10,
                 output: 50,
                 cache_write: 0,
@@ -1863,6 +1890,9 @@ fn native_precedence_beats_observed_time() {
             session_initial_cwd: None,
             event_cwd: None,
             tokens: TokenCounts {
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
                 input: 10,
                 output: 30,
                 cache_write: 0,
@@ -1890,6 +1920,9 @@ fn native_precedence_beats_observed_time() {
             session_initial_cwd: None,
             event_cwd: None,
             tokens: TokenCounts {
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
                 input: 10,
                 output: 50,
                 cache_write: 0,
@@ -2143,6 +2176,9 @@ fn batch_preview_multi_alias_of_same_fact_does_not_conflict() {
             session_initial_cwd: None,
             event_cwd: None,
             tokens: TokenCounts {
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
                 input: 10,
                 output: 10,
                 cache_write: 0,
@@ -2167,6 +2203,9 @@ fn batch_preview_multi_alias_of_same_fact_does_not_conflict() {
         session_initial_cwd: None,
         event_cwd: None,
         tokens: TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
             input: 10,
             output,
             cache_write: 0,
@@ -2230,6 +2269,9 @@ fn batch_preview_unchanged_row_claims_new_aliases() {
         session_initial_cwd: None,
         event_cwd: None,
         tokens: TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
             input: 10,
             output: 10,
             cache_write: 0,
@@ -2289,6 +2331,9 @@ fn batch_preview_rejects_origin_bound_to_another_fact() {
         session_initial_cwd: None,
         event_cwd: None,
         tokens: TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
             input: 10,
             output,
             cache_write: 0,
@@ -2356,6 +2401,9 @@ fn batch_preview_does_not_persist_alternate_event_keys() {
         session_initial_cwd: None,
         event_cwd: None,
         tokens: TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
             input: 10,
             output,
             cache_write: 0,
@@ -2436,6 +2484,9 @@ fn batch_preview_origin_identity_includes_kind() {
             session_initial_cwd: None,
             event_cwd: None,
             tokens: TokenCounts {
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
                 input: 10,
                 output,
                 cache_write: 0,

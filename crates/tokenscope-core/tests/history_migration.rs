@@ -95,6 +95,9 @@ fn tokens(input: u64, output: u64, cw: u64, cr: u64) -> TokenCounts {
         output,
         cache_write: cw,
         cache_read: cr,
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
     }
 }
 
@@ -478,7 +481,11 @@ fn polluted_v2_history_is_repaired_by_upgrade_and_rescan() {
     }
 
     let history = HistoryDb::open(&db).unwrap();
-    assert_eq!(history.schema_version().unwrap(), 4, "升级到当前版本");
+    assert_eq!(
+        history.schema_version().unwrap(),
+        5,
+        "升级到当前版本（N18 起为 v5）"
+    );
     let backup = db.with_extension("db.backup-v2");
     assert!(backup.is_file(), "升级前必须留可恢复备份");
     {
@@ -527,7 +534,7 @@ fn polluted_v2_history_is_repaired_by_upgrade_and_rescan() {
     // 重复升级：事实稳定，不产生新备份。
     drop(history);
     let again = HistoryDb::open(&db).unwrap();
-    assert_eq!(again.schema_version().unwrap(), 4);
+    assert_eq!(again.schema_version().unwrap(), 5);
     assert_eq!(again.totals().unwrap(), tokens(110, 41, 0, 0));
     assert!(
         !db.with_extension("db.backup-v4").exists(),

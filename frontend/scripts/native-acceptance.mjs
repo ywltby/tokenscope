@@ -11,7 +11,7 @@
 //   - 不安装、不写注册表、不改系统显示缩放。
 // UP09（升级测试补测计划 §4.8）：实例生命周期改为“端口不复用 + 归属核实 + 退出确认”，
 // 纯逻辑在 `lib/native-instance.mjs`（可单测），证据在 `evidence.json` 的 `launches[]`。
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import net from "node:net";
 import zlib from "node:zlib";
@@ -19,13 +19,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+import { parse as parseToml } from "smol-toml";
+import { parseTOML } from "toml-eslint-parser";
 import { nativeUiRefresh } from "./contracts/native-ui-refresh.mjs";
 import { nativeCollectionStatus } from "./contracts/native-collection-status.mjs";
 import { nativeSourcePaths } from "./contracts/native-source-paths.mjs";
 import { nativeIdentity } from "./contracts/native-identity.mjs";
 import { nativeCcsImport } from "./contracts/native-ccs-import.mjs";
 import { nativePricing, preparePricingScenario } from "./contracts/native-pricing.mjs";
+// N18：分档（5m/1h）的真实界面验收——合成 Claude 日志 + 隔离分档价格表。
+import { nativeCacheTiers, prepareCacheTiersScenario } from "./contracts/native-cache-tiers.mjs";
 import { nativeUiRelaunch, nativeUiSystem } from "./contracts/native-ui-system.mjs";
+import { nativeSingleInstance, readTrayObservation } from "./contracts/native-single-instance.mjs";
 import { decodePng } from "./lib/png.mjs";
 import {
   startAcceptanceIo,
@@ -36,6 +41,7 @@ import {
   beginIsolationCleanup,
   terminateAfterSnapshot,
   missingBusinessEvents,
+  settingsFingerprint,
 } from "./lib/acceptance-io.mjs";
 import {
   CDP_READY_BUDGET_MS,
@@ -68,6 +74,16 @@ import {
   remainingBudgetMs,
   stopDecision,
 } from "./lib/native-instance.mjs";
+import {
+  SINGLE_INSTANCE_EXIT_BUDGET_MS,
+  acceptanceIdentifier,
+  classifySecondaryExit,
+  evaluateAcceptanceLaunchPreflight,
+  readGitHeadCommit,
+  secondaryLaunchEnvironment,
+  startIfPreflightAllows,
+  waitForSecondaryExit,
+} from "./lib/native-single-instance.mjs";
 // S00（PR3 计划 §9.1）：场景看门狗、有界命令与阶段记录——纯逻辑在 lib，可单测。
 import {
   FAILURE_CAPTURE_TIMEOUT_MS,
@@ -85,10 +101,38 @@ import {
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
 // 统一 workspace 后，不带 --target 的 release 构建产物落在根 target/。
 const EXE_DEFAULT = path.join(REPO, "target", "release", "tokenscope.exe");
+// AC10：acceptance 构建身份来自受控构建步骤写出的记录（构建命令 + 源提交 +
+// 产物 SHA-256）。没有记录就只有一次 acceptance 构建的证据，一律拒绝启动。
+const BUILD_RECORD_DEFAULT = path.join(REPO, "qa-artifacts", "acceptance-build", "build-record.json");
+/** 当前共同同意修订号：复用 upgrade_baselines.py 的 Rust 常量提取
+ * （剥离块注释/行注释/字符串，假声明不会命中），不在 JS 里另写正则。 */
+let currentConsentRevisionCache = null;
+/** 延迟到预检通过后首次使用时才启动 Python；不得在隔离/EXE 预检前 spawn 进程。 */
+function currentConsentRevision() {
+  if (currentConsentRevisionCache !== null) return currentConsentRevisionCache;
+  const payload = execFileSync(
+    "python",
+    ["-B", path.join(REPO, "scripts", "upgrade_baselines.py"), "privacy-revision"],
+    { encoding: "utf8" },
+  );
+  const revision = JSON.parse(payload).privacy_revision;
+  if (!Number.isInteger(revision) || revision <= 0) {
+    throw new Error(`settings.rs 缺少合法的 PRIVACY_POLICY_REVISION：${payload}`);
+  }
+  currentConsentRevisionCache = revision;
+  return revision;
+}
 const PREP = path.join(REPO, "scripts", "prepare-native-acceptance.ps1");
 const RECORDER = path.join(REPO, "scripts", "capture-window-frames.ps1");
 const WINDOW_ACTION = path.join(REPO, "scripts", "native-window-action.ps1");
 const REAL_DATA = path.join(process.env.USERPROFILE || "", ".tokenscope");
+// AC10：验收构建在 acceptance::configure 中把 identifier 改为 `.acceptance`；
+// 同一隔离根的两个验收实例共享该互斥名，但与用户正在运行的正式实例不同名。
+const TAURI_CONFIG = JSON.parse(
+  fs.readFileSync(path.join(REPO, "src-tauri", "tauri.conf.json"), "utf8"),
+);
+const BASE_IDENTIFIER = TAURI_CONFIG.identifier;
+const ACCEPTANCE_IDENTIFIER = acceptanceIdentifier(BASE_IDENTIFIER);
 /** 页面 target 轮询间隔；每次等待都受剩余预算与宿主退出约束（§4.8 第 4 条）。 */
 const PAGE_TARGET_POLL_MS = 200;
 
@@ -108,6 +152,10 @@ const OUT = path.resolve(
 );
 const PORT = Number(arg("port", "9411"));
 const EXE = arg("exe", EXE_DEFAULT);
+const BUILD_RECORD = path.resolve(
+  REPO,
+  arg("build-record", process.env.TOKENSCOPE_ACCEPTANCE_BUILD_RECORD ?? BUILD_RECORD_DEFAULT),
+);
 const THEME = arg("theme", "system"); // light | dark | system（--force-*-mode 通道）
 // 默认使用真实系统 DPI；显式 --scale 只作布局探查，不作为系统缩放验收。
 const SCALE = arg("scale") === undefined ? null : Number(arg("scale"));
@@ -444,6 +492,19 @@ class Instance {
     }
     if (this.opts.mutate) this.opts.mutate(this.root);
     this.prelaunchBusinessFiles = snapshotBusinessFiles(path.join(this.root, "tokenscope"));
+    const prelaunchSettingsPath = path.join(this.root, "tokenscope", "settings.toml");
+    // 十七轮复核 P2：与 snapshotDataDir 同构（text/size/mtimeMs）。
+    const prelaunchStat = fs.existsSync(prelaunchSettingsPath)
+      ? fs.statSync(prelaunchSettingsPath)
+      : null;
+    this.prelaunchSettings = {
+      text: prelaunchStat ? fs.readFileSync(prelaunchSettingsPath, "utf8") : null,
+      bytesHex: prelaunchStat
+        ? fs.readFileSync(prelaunchSettingsPath).toString("hex")
+        : null,
+      size: prelaunchStat ? prelaunchStat.size : null,
+      mtimeMs: prelaunchStat ? prelaunchStat.mtimeMs : null,
+    };
     const manifest = JSON.parse(fs.readFileSync(path.join(this.root, "manifest.json"), "utf8"));
     return manifest;
   }
@@ -833,6 +894,9 @@ class Instance {
       browserArgs,
       startedAtMs: Date.now(),
     });
+    record.acceptanceIdentifier = this.opts.acceptanceIdentifier ?? null;
+    record.parentPid = process.pid;
+    record.sameRoot = true;
     // 启动预算（§4.8 第 4 条）：总上限 65 秒，阶段上限随后收窄；一切等待都不得超过二者
     record.launchDeadlineMs = record.startedAtMs + LAUNCH_BUDGET_MS;
     record.phaseDeadlineMs = record.startedAtMs + CDP_READY_BUDGET_MS;
@@ -993,6 +1057,133 @@ class Instance {
       browserArgs,
       cdpVersion: version?.["Browser"] ?? version?.browser ?? "unknown",
     };
+  }
+  /**
+   * AC10：以同一隔离根启动第二个验收实例，只记录并等待其退出，不接 CDP、
+   * 不替换 current。第二个实例由单实例插件移交给第一个实例后自行退出。
+   * 第二个实例不继承远程调试参数；超时/取消时只终止本次记录的 PID。
+   */
+  async launchSecondary({ timeoutMs = SINGLE_INSTANCE_EXIT_BUDGET_MS } = {}) {
+    ensureNotCanceled(this.opts.isCanceled, "launch-secondary");
+    if (!this.current) throw new Error("第二个实例必须在第一个实例启动后启动");
+    const startedAtMs = Date.now();
+    const secondaryLog = path.join(path.dirname(this.logPath), "secondary-instance.log");
+    const record = createLaunchRecord({
+      index: this.launches.length + 1,
+      port: null,
+      root: this.root,
+      logPath: secondaryLog,
+      browserArgs: "",
+      startedAtMs,
+      role: "secondary",
+    });
+    record.owner = "acceptance-driver";
+    record.parentPid = process.pid;
+    record.sameRoot = true;
+    record.acceptanceIdentifier = this.opts.acceptanceIdentifier ?? null;
+    record.exitBudgetMs = timeoutMs;
+    record.launchDeadlineMs = startedAtMs + timeoutMs;
+    this.launches.push(record);
+    const env = secondaryLaunchEnvironment({
+      inherited: process.env,
+      controlled: this.opts.controlledIo?.env,
+      scenario: this.opts.env,
+      root: this.root,
+    });
+    let out = null;
+    let child = null;
+    try {
+      out = fs.openSync(secondaryLog, "a");
+      child = spawn(EXE, [], { env, stdio: ["ignore", out, out], detached: false });
+    } catch (error) {
+      record.spawnError = String(error?.message ?? error);
+      record.failure = `第二个实例启动失败：${record.spawnError}`;
+      if (out !== null) {
+        try {
+          fs.closeSync(out);
+        } catch {}
+      }
+      return { record, verdict: { status: "failed", reason: record.failure } };
+    }
+    record.hostPid = child.pid;
+    record.stageMs.spawn = Date.now() - startedAtMs;
+    let wait = null;
+    try {
+      wait = await waitForSecondaryExit({
+        child,
+        ownedPid: record.hostPid,
+        timeoutMs,
+        isCanceled: this.opts.isCanceled,
+      });
+    } catch (error) {
+      wait = {
+        kind: null,
+        exitCode: null,
+        signal: null,
+        spawnError: String(error?.message ?? error),
+        elapsedMs: Date.now() - startedAtMs,
+        timedOut: false,
+        canceled: false,
+        exitBeforeTerminate: false,
+        exitConfirmed: false,
+        exitAfterTerminate: false,
+        terminateRequested: false,
+        terminateError: null,
+        terminateUnconfirmed: false,
+      };
+    } finally {
+      if (out !== null) {
+        try {
+          fs.closeSync(out);
+        } catch {}
+      }
+    }
+    if (wait.spawnError) record.spawnError = wait.spawnError;
+    let verdict = classifySecondaryExit({
+      exitCode: wait.exitCode,
+      signal: wait.signal,
+      elapsedMs: wait.elapsedMs,
+      budgetMs: timeoutMs,
+      timedOut: wait.timedOut,
+      canceled: wait.canceled,
+      exitConfirmed: wait.exitConfirmed,
+      terminateRequested: wait.terminateRequested,
+      terminateError: wait.terminateError,
+      terminateUnconfirmed: wait.terminateUnconfirmed,
+    });
+    if (wait.kind === "error" || wait.spawnError) {
+      verdict = { status: "failed", reason: `第二个实例启动失败：${record.spawnError}` };
+    }
+    record.hostExitCode = wait.exitConfirmed && Number.isInteger(wait.exitCode) ? wait.exitCode : null;
+    record.hostSignal = wait.exitConfirmed ? (wait.signal ?? null) : null;
+    record.exitElapsedMs = Math.round(wait.elapsedMs);
+    record.exitConfirmed = wait.exitConfirmed === true;
+    record.exitBeforeTerminate = wait.exitBeforeTerminate === true;
+    record.exitAfterTerminate = wait.exitAfterTerminate === true;
+    record.terminateRequested = wait.terminateRequested === true;
+    record.terminateError = wait.terminateError ?? null;
+    record.terminateUnconfirmed = wait.terminateUnconfirmed === true;
+    record.exitWithinBudget =
+      !wait.timedOut &&
+      !wait.canceled &&
+      wait.exitConfirmed &&
+      wait.elapsedMs <= timeoutMs;
+    record.exitTimedOut = wait.timedOut;
+    record.exitCanceled = wait.canceled;
+    record.hostExitDetected = wait.exitConfirmed
+      ? {
+          code: record.hostExitCode,
+          signal: record.hostSignal,
+          at_ms: Math.round(wait.elapsedMs),
+          source: "exit-event",
+        }
+      : null;
+    record.stageMs.total = Math.round(wait.elapsedMs);
+    if (verdict.status !== "passed") record.failure = verdict.reason;
+    hb(
+      `第二个实例 PID=${record.hostPid} 退出=${record.hostExitCode ?? "unknown"} 确认=${record.exitConfirmed} 耗时=${record.exitElapsedMs} ms`,
+    );
+    return { record, verdict };
   }
   async waitForData(timeoutMs = 30000) {
     await this.page.waitForSelector(".app-nav", { timeout: timeoutMs });
@@ -1248,9 +1439,23 @@ function splitViolations(list) {
 class Checks {
   constructor() {
     this.rows = [];
+    // detail 截断 2000：pricing 契约的 basis（matched+lines+tooltip）约 1.4K，
+    // 300 字符会让 CI 上的计价失败无法取证（本机无法复现 Runner 形态）。
+    // AC10：真实观察不到的外部证据（如托盘）单列 pending，不混入通过/失败，
+    // 也不能用进程数等替身结论把它变成通过。
+    this.pendingRows = [];
   }
   add(name, ok, detail = "") {
-    this.rows.push({ name, ok: !!ok, detail: String(detail).slice(0, 300) });
+    this.rows.push({ name, ok: !!ok, detail: String(detail).slice(0, 2000) });
+    return this;
+  }
+  pending(name, detail = "") {
+    this.pendingRows.push({
+      name,
+      ok: null,
+      pending: true,
+      detail: String(detail).slice(0, 2000),
+    });
     return this;
   }
   get failures() {
@@ -1409,11 +1614,298 @@ async function measureA11y(page) {
   });
 }
 
+// ── AC06 共享辅助（模块层；被下方多个隐私场景复用）─────────────
+
+/**
+ * 从仓库源码提取受保护命令清单（不写死数量），并给出每个命令的最小
+ * 合法参数——让参数反序列化成功、隐私闸门拒绝成为唯一错误来源。
+ */
+function readProtectedCommands() {
+  const text = fs.readFileSync(
+    fileURLToPath(new URL("../../src-tauri/src/privacy.rs", import.meta.url)),
+    "utf8",
+  );
+  const block = text.match(/PROTECTED_COMMANDS:\s*&\[(.*?)\];/s);
+  if (!block) throw new Error("privacy.rs 中找不到 PROTECTED_COMMANDS 清单");
+  return [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+}
+
+/** 受保护命令的最小合法参数（camelCase；仅用于让闸门成为唯一拒绝来源）。 */
+const MINIMAL_INVOKER_ARGS = {
+  summarize: { by: "day" },
+  list_events: { limit: 1 },
+  query_begin: { by: "day" },
+  query_summary: { queryId: "x" },
+  query_events: { queryId: "x" },
+  startup_diagnostics: {},
+  view_cache_load: {},
+  view_cache_save: { value: {} },
+  source_status: {},
+  source_config_set: { agent: "claude", enabled: false },
+  source_paths_list: {},
+  source_path_add: { agent: "claude", path: "C:/synthetic/denied-ipc" },
+  source_path_remove: { agent: "claude", id: "x" },
+  source_path_set_enabled: { agent: "claude", id: "x", enabled: false },
+  source_auto_set: { agent: "claude", enabled: false },
+  cache_stats: {},
+  refresh_cache: {},
+  ccs_import_defaults: {},
+  ccs_import_preview: {},
+  ccs_import_commit: { planId: "x" },
+  ccs_import_discard: { planId: "x" },
+  pricing_entries: {},
+  pricing_status: {},
+  open_pricing_file: {},
+  sync_pricing_openrouter: {},
+  autostart_status: {},
+  autostart_set: { enabled: false },
+  settings_get: {},
+  settings_set_price_auto_sync: { enabled: false },
+  settings_set_close_action: { action: "minimize" },
+  settings_set_timezone: { timezone: "UTC" },
+  settings_set_collect_interval: { secs: 300 },
+  collection_status: {},
+  close_resolve: { minimize: false, remember: false },
+  open_settings_file: {},
+};
+
+/** AC06：全蜂巢只读注册表快照（辅助证据；只读、不写、不删）。 */
+function registrySnapshot() {
+  const keys = [
+    "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+    "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+    "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run",
+    "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run",
+  ];
+  const snapshot = {};
+  for (const key of keys) {
+    const result = spawnSyncBounded("reg", ["query", key], {
+      action: "registry-snapshot",
+      stage: "registry-snapshot",
+    });
+    if (result.status !== 0) {
+      // 键不存在属于合法形态：记为空列表。
+      snapshot[key] = [];
+      continue;
+    }
+    snapshot[key] = result.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.includes("REG_"))
+      .sort();
+  }
+  return snapshot;
+}
+
+/** AC06：预置业务文件（预置 + 新增一律纳入快照比对）。十七轮复核 P2：
+ * 夹具达到计划 §4b.1 组合——有效 SQLite 历史库（WAL 模式，进程退出残留
+ * WAL/SHM）、两份价格快照；旧修订同意由 mutate 写入 settings。 */
+/** 同意终态严格判定：UTF-8、整篇 TOML、四项顶层字面量类型与值。
+ * 保存字节证据、业务后终态与重新同意三处共用这一份实现。 */
+function strictConsentState(input, expectedRevision) {
+  let text;
+  if (typeof input === "string") {
+    text = input;
+  } else {
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(input);
+    } catch (error) {
+      return { ok: false, detail: `不是合法 UTF-8（严格解码失败）：${error}` };
+    }
+  }
+  let program;
+  try {
+    parseToml(text);
+    program = parseTOML(text);
+  } catch (error) {
+    return { ok: false, detail: `未通过严格 TOML 解析：${error}` };
+  }
+  const top = program.body.find((table) => table.type === "TOMLTopLevelTable");
+  const topLevelValue = (name) => {
+    for (const kv of top?.body ?? []) {
+      const keys = kv.key.keys;
+      if (keys.length === 1 && (keys[0].name ?? keys[0].content ?? keys[0].value) === name) {
+        return kv.value;
+      }
+    }
+    return null;
+  };
+  const accepted = topLevelValue("privacy_policy_accepted");
+  const revision = topLevelValue("privacy_policy_revision");
+  const agreementAccepted = topLevelValue("user_agreement_accepted");
+  const agreementRevision = topLevelValue("user_agreement_revision");
+  const ok =
+    accepted?.kind === "boolean" &&
+    accepted.value === true &&
+    revision?.kind === "integer" &&
+    revision.value === expectedRevision &&
+    agreementAccepted?.kind === "boolean" &&
+    agreementAccepted.value === true &&
+    agreementRevision?.kind === "integer" &&
+    agreementRevision.value === expectedRevision;
+  return {
+    ok,
+    detail:
+      `accepted kind=${accepted?.kind} value=${JSON.stringify(accepted?.value)}；` +
+      `revision kind=${revision?.kind} value=${JSON.stringify(revision?.value)}；` +
+      `agreement kind=${agreementAccepted?.kind} value=${JSON.stringify(agreementAccepted?.value)}；` +
+      `agreementRevision kind=${agreementRevision?.kind} value=${JSON.stringify(agreementRevision?.value)}` +
+      `（顶层须布尔 true / 整数 ${expectedRevision} 各两项）`,
+  };
+}
+
+function preseedBusinessFiles(dataDir) {
+  const writeFile = (name, text) => {
+    const target = path.join(dataDir, name);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, text, "utf8");
+  };
+  // 有效 SQLite 历史库（十八轮复核 P2：必须是**产品 schema**——旧夹具
+  // 缺 ts_seconds 等列，HistoryDb::open 的 v1 迁移直接报错）。建表 SQL
+  // 从 crates/tokenscope-core/src/history.rs 的 SCHEMA_V1 常量提取
+  // （单一事实源，不双份维护），user_version=1 + 三行完整列事件。
+  // 脚本末尾不 close 连接——解释器退出时 WAL/SHM 以残留形态留在盘上
+  // （与"业务数据躺在盘上"的真实形态一致）。
+  const historySource = fs.readFileSync(
+    path.join(REPO, "crates", "tokenscope-core", "src", "history.rs"),
+    "utf8",
+  );
+  const schemaStart = historySource.indexOf('const SCHEMA_V1: &str = r"');
+  if (schemaStart < 0) throw new Error("history.rs 缺少 SCHEMA_V1 常量");
+  const sqlStart = schemaStart + 'const SCHEMA_V1: &str = r"'.length;
+  const sqlEnd = historySource.indexOf('"', sqlStart);
+  const schemaV1 = historySource.slice(sqlStart, sqlEnd);
+  const seedScript = [
+    "import sqlite3, sys",
+    "con = sqlite3.connect(sys.argv[1])",
+    "con.execute('PRAGMA journal_mode=WAL')",
+    "con.executescript(sys.argv[2])",
+    "con.execute('PRAGMA user_version=1')",
+    "con.executemany('INSERT INTO usage_events(event_key,app,ts_seconds,ts_nanos,model_raw,model_identity,identity_revision,session_id,record_id,project_key,session_initial_cwd,event_cwd,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,origin_rank,observed_at_utc,observed_at_seconds,observed_at_nanos,parser_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [('ac06-session:rec-'+str(i), 'claude-code', 1761580000+i, 0, 'claude-sonnet-4-5', 'claude-sonnet-4-5', 1, 'ac06-session', 'rec-'+str(i), '/ac06/project', '/ac06/project', '/ac06/project', '10', '20', '0', '5', 1, '2026-10-27T00:00:0'+str(i)+'Z', 1761580000+i, 0, 2) for i in range(3)])",
+    "con.commit()",
+    "import os",
+    "os._exit(0)",
+  ].join("; ");
+  const result = spawnSyncBounded("python", ["-c", seedScript, path.join(dataDir, "history.db"), schemaV1], {
+    action: "preseed-sqlite",
+    stage: "preseed-sqlite",
+  });
+  if (result.status !== 0) {
+    throw new Error(`预置 SQLite 历史库失败：${result.stdout}${result.stderr}`);
+  }
+  writeFile("logs/ac06-preseeded.log", "ac06-preseeded-log\n");
+  writeFile("view-cache.json", '{"ac06":"preseeded"}\n');
+  // 十八轮复核：两份价格快照按产品加载器格式生成（synced_at 必填；
+  // modelsdev 的 input/output/cache_* 与 openrouter 的 prompt/completion/
+  // cache_* 各按自身结构）。
+  const syncedAt = "2026-10-27T00:00:00+08:00";
+  writeFile(
+    "pricing-modelsdev.json",
+    JSON.stringify({
+      v: 2,
+      synced_at: syncedAt,
+      entries: [
+        {
+          id: "claude-code/claude-sonnet-4-5",
+          name: null,
+          input: 3.0,
+          output: 15.0,
+          cache_read: 0.3,
+          cache_write: 3.75,
+        },
+      ],
+    }) + "\n",
+  );
+  writeFile(
+    "pricing-openrouter.json",
+    JSON.stringify({
+      v: 2,
+      synced_at: syncedAt,
+      entries: [
+        {
+          id: "claude-sonnet-4-5",
+          name: null,
+          prompt: 3.0,
+          completion: 15.0,
+          cache_read: 0.3,
+          cache_write: 3.75,
+        },
+      ],
+    }) + "\n",
+  );
+}
+
+/** AC06：业务文件与设置的双重快照。十七轮复核 P2：settings 附带
+ * 大小/mtime 元数据——同字节重写（内容不变、mtime 变化）也要可检出，
+ * 不能只比内容。 */
+function snapshotDataDir(dataDir) {
+  const settingsPath = path.join(dataDir, "settings.toml");
+  const stat = fs.existsSync(settingsPath) ? fs.statSync(settingsPath) : null;
+  return {
+    business: snapshotBusinessFiles(dataDir),
+    settings: {
+      text: stat ? fs.readFileSync(settingsPath, "utf8") : null,
+      // 十八轮复核 P2：字节快照（hex）——宽松解码会把非法字节变 U+FFFD，
+      // 同 size/mtime 的非法字节改写在 text/size/mtime 上不可辨。
+      bytesHex: stat
+        ? fs.readFileSync(settingsPath).toString("hex")
+        : null,
+      size: stat ? stat.size : null,
+      mtimeMs: stat ? stat.mtimeMs : null,
+    },
+  };
+}
+
+/** AC06：双向快照比对（预置缺失/新增/内容变化/设置元数据变化均算变化）。 */
+function dataDirChanges(before, after) {
+  return [
+    ...changedBusinessFiles(before.business, after.business),
+    ...(JSON.stringify(before.settings) === JSON.stringify(after.settings)
+      ? []
+      : ["settings.toml"]),
+  ];
+}
+
+/** AC06：拒绝路径退出（不同意 → 退出程序 → 进程干净退出）。 */
+async function rejectAndExit(page, inst, ck, label) {
+  await page.locator(".privacy-actions button", { hasText: "不同意" }).first().click();
+  await page.waitForSelector(".exit-dialog", { timeout: 5000 });
+  await page.locator(".exit-actions button", { hasText: "退出程序" }).first().click();
+  const deadline = Date.now() + 20000;
+  while (inst.proc.exitCode === null && Date.now() < deadline) await sleep(200);
+  ck.add(`${label}_exit_clean`, inst.proc.exitCode === 0, `exitCode=${inst.proc.exitCode}`);
+}
+
+/** AC06：业务追踪事件抽取（沿用 policy-update 的判法）。十七轮复核 P2：
+ * settings_write 计入——未同意阶段的任何设置写入（含同字节重写）都是
+ * 违规，不能被过滤掉。 */
+function businessTraceEvents(inst) {
+  const trace = readAcceptanceTrace(inst.root, { partial: true });
+  if (trace.violations.length) throw new Error(trace.violations.join(" | "));
+  return trace.records
+    .filter((r) =>
+      [
+        "business_ready",
+        "collect_round_start",
+        "source_root_read",
+        "history_open",
+        "ccs_open",
+        "pricing_fetch",
+        "autostart_read",
+        "autostart_write",
+        "settings_write",
+      ].includes(r.event),
+    )
+    .map((r) => r.event);
+}
+
 // ── 场景 ──────────────────────────────────────────────────────────
 const scenarios = {
   "ui-identity": nativeIdentity,
   "ui-ccs-import": nativeCcsImport,
   "ui-pricing": nativePricing,
+  // N18：分档计价的两档明细与「分档未知/估算」在真实界面上的呈现。
+  "ui-cache-tiers": nativeCacheTiers,
   "ui-refresh": nativeUiRefresh,
   "ui-system": nativeUiSystem,
   // PR2：真实采集生命周期 + 读取显示期 + 失败恢复 + 翻页保护（验收注入驱动慢轮次与失败）。
@@ -1422,6 +1914,8 @@ const scenarios = {
   "ui-source-paths": nativeSourcePaths,
   // §4.8 第 7 条：多路重启压力验证，只在本地跑（CI 由各场景原有的重启覆盖）。
   "ui-relaunch": nativeUiRelaunch,
+  // AC10（N12）：同一隔离根启动第二个实例，核对限时退出/窗口恢复/唯一托盘。
+  "ui-single-instance": nativeSingleInstance,
   // 在同一个驱动进程内完成等待；部分终端会在父进程结束时回收其原生子进程。
   async "expire-cycle"(context) {
     await scenarios["expire-start"](context);
@@ -2606,14 +3100,21 @@ const scenarios = {
       /privacy_policy_accepted\s*=\s*true/.test(ev.settingsAfterAccept),
       ev.settingsAfterAccept.split("\n")[0],
     );
+    // 弹窗关闭以「不可见」为准：NModal 关闭过渡期间 DOM 可能仍在
+    // （count 不判可见性），业务界面已挂载即证明闸门放行。
     ev.consentDialogAfterAccept = await page.locator(".privacy-dialog").count();
+    ev.consentDialogVisibleAfterAccept = ev.consentDialogAfterAccept
+      ? await page.locator(".privacy-dialog").first().isVisible()
+      : false;
     ck.add(
       "consent_dialog_closed_after_accept",
-      ev.consentDialogAfterAccept === 0,
-      `残留=${ev.consentDialogAfterAccept}`,
+      ev.consentDialogAfterAccept === 0 || ev.consentDialogVisibleAfterAccept === false,
+      `DOM 残留=${ev.consentDialogAfterAccept} 可见=${ev.consentDialogVisibleAfterAccept}`,
     );
 
-    // 重启同一隔离根：不再询问（页面句柄必须重新取）
+    // 重启同一隔离根：显式结束上一实例（业务运行中不会自行退出），
+    // 再以同一隔离根重新启动——验证重启不再询问。
+    await inst.stop({ terminate: true, reason: "restart-explicit" });
     const info = await inst.launch();
     ev.relaunchPid = info.pid;
     ev.relaunchPort = info.port;
@@ -2628,6 +3129,657 @@ const scenarios = {
       `重启后政策弹窗数=${ev.relaunchConsentDialog}`,
     );
     await page2.screenshot({ path: path.join(inst.opts.shots, "relaunch-ready.png") });
+  },
+
+  /**
+   * AC06 场景 1：预置业务文件 + 未同意观察——已存在的业务数据必须
+   * 零读取零写入；追踪零业务事件；价格桩与外连零命中；实际观察 15 秒
+   * （单调时钟记录起止），启动前预置快照 × 观察后快照双向比对。
+   */
+  async "privacy-preseeded"({ inst, ck, ev }) {
+    const page = inst.page;
+    const dataDir = path.join(inst.root, "tokenscope");
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+
+    // §4b.1：未同意状态实际观察 15 秒。before 取启动前预置快照
+    // （prepareRoot 在 mutate 后、launch 前采集），启动期间的写入也会
+    // 被观察后的快照捕获，不以「场景开始时」的快照漏掉启动期变化。
+    const before = { business: inst.prelaunchBusinessFiles, settings: inst.prelaunchSettings };
+    const observedFrom = performance.now();
+    await page.waitForTimeout(15000);
+    const observedTo = performance.now();
+    const observedMs = observedTo - observedFrom;
+
+    const businessEvents = businessTraceEvents(inst);
+    ck.add(
+      "preseeded_no_business_trace",
+      businessEvents.length === 0,
+      businessEvents.join(",") || "无业务事件",
+    );
+
+    const hits = inst.opts.controlledIo.snapshot().hits;
+    const hitCount = Object.values(hits).reduce((n, rows) => n + rows.length, 0);
+    ck.add("preseeded_price_stub_untouched", hitCount === 0, `桩命中=${hitCount}`);
+    ck.add(
+      "preseeded_proxy_attempts_zero",
+      inst.opts.controlledIo.snapshot().proxy_attempts.length === 0,
+      "计数代理未记录外连尝试",
+    );
+
+    ev.businessDomNodes = await page.locator(".app-nav, .page-head, .chart-canvas").count();
+    ck.add(
+      "preseeded_no_business_dom",
+      ev.businessDomNodes === 0,
+      `业务节点=${ev.businessDomNodes}`,
+    );
+
+    // 双快照不变：业务文件（字节/大小/mtime；预置、新增、删除、修改，
+    // 含 history.db/-wal/-shm）+ settings.toml 逐字节。
+    const changes = dataDirChanges(before, snapshotDataDir(dataDir));
+    ck.add(
+      "preseeded_business_files_unchanged",
+      changes.length === 0,
+      changes.join(",") || "双快照一致",
+    );
+    ck.add(
+      "preseeded_observed_full_window",
+      observedMs >= 15000 - 50,
+      `实际观察=${observedMs.toFixed(0)}ms（要求 ≥15000ms）`,
+    );
+    ev.preseeded = { observedMs: Math.round(observedMs), changes };
+    await page.screenshot({ path: path.join(inst.opts.shots, "privacy-preseeded-observed.png") });
+
+    // 未同意退出：不留业务残留、进程干净退出。
+    await rejectAndExit(page, inst, ck, "preseeded");
+  },
+
+  /**
+   * AC06 场景 2：未同意状态下全量受保护命令拒绝——每条命令都以最小
+   * 合法参数经真实 IPC 调用，全部返回隐私拒绝；追踪与文件零变化；
+   * 全蜂巢注册表只读快照前后一致（辅助证据）。
+   */
+  async "privacy-denied-ipc"({ inst, ck, ev }) {
+    const page = inst.page;
+    const dataDir = path.join(inst.root, "tokenscope");
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+
+    const commands = readProtectedCommands();
+    ev.deniedIpc = { commands: commands.length, results: [] };
+    ck.add(
+      "protected_commands_extracted_from_source",
+      commands.length >= 35,
+      `命令数=${commands.length}`,
+    );
+
+    const before = snapshotDataDir(dataDir);
+    const registryBefore = registrySnapshot();
+
+    for (const command of commands) {
+      const args = MINIMAL_INVOKER_ARGS[command];
+      if (args === undefined) throw new Error(`缺少 ${command} 的最小合法参数`);
+      const outcome = await page.evaluate(
+        ([cmd, invokeArgs]) =>
+          window.__TAURI_INTERNALS__
+            .invoke(cmd, invokeArgs)
+            .then(() => ({ status: "fulfilled", error: "" }))
+            .catch((error) => ({ status: "rejected", error: String(error?.message ?? error) })),
+        [command, args],
+      );
+      ev.deniedIpc.results.push({ command, ...outcome });
+      if (outcome.status !== "rejected" || !outcome.error.includes("privacy_consent_required")) {
+        throw new Error(`${command} 未被隐私闸门拒绝：${JSON.stringify(outcome)}`);
+      }
+    }
+    ck.add(
+      "all_protected_commands_rejected_pre_consent",
+      ev.deniedIpc.results.length === commands.length &&
+        ev.deniedIpc.results.every(
+          (r) => r.status === "rejected" && r.error.includes("privacy_consent_required"),
+        ),
+      `全部 ${commands.length} 条受保护命令返回 privacy_consent_required`,
+    );
+
+    const businessEvents = businessTraceEvents(inst);
+    ck.add(
+      "denied_ipc_trace_has_no_business_events",
+      businessEvents.length === 0,
+      businessEvents.join(",") || "无业务追踪",
+    );
+
+    const after = snapshotDataDir(dataDir);
+    const changes = dataDirChanges(before, after);
+    ck.add("denied_ipc_files_unchanged", changes.length === 0, changes.join(",") || "文件零变化");
+
+    const registryAfter = registrySnapshot();
+    const registryChanged = Object.keys(registryBefore).filter(
+      (key) => JSON.stringify(registryBefore[key]) !== JSON.stringify(registryAfter[key]),
+    );
+    ck.add(
+      "registry_snapshot_unchanged",
+      registryChanged.length === 0,
+      registryChanged.join(",") || "四蜂巢快照一致",
+    );
+
+    // 未同意退出：不留业务残留、进程干净退出。
+    await rejectAndExit(page, inst, ck, "denied_ipc");
+  },
+
+  /**
+   * AC06 场景 3：同意原子落盘顺序 + 双击单次初始化——consent_saved
+   * 严格早于 business_ready 与首个业务读取；双击只落盘一次。
+   */
+  async "privacy-accept-order"({ inst, ck, ev }) {
+    const page = inst.page;
+    const settingsPath = path.join(inst.root, "tokenscope", "settings.toml");
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+    // 双击（§4b.1：CDP 连续两次 click，间隔 <100ms；第二次落在保存中/
+    // 已保存状态）：两次都用坐标级 page.mouse 下发真实输入——不依赖按钮
+    // 在第二次点击时仍存活；先挂页面级捕获计数器证明第二次输入真实到达
+    // 页面，区分「产品正确抑制」与「测试架根本没发出」；下发失败显式
+    // 失败，绝不吞掉。
+    const consentButton = page
+      .locator(".privacy-actions button", { hasText: "同意并继续" })
+      .first();
+    // 按钮稳定性等待（八轮复核：坐标先取后点，布局动画会让坐标失效——
+    // 失败记录的点击坐标与超时截图中按钮位置不一致即此嫌疑）。九轮复核
+    // 修正：**跨帧**采样（首帧内两次相同不证明动画结束）、采样次数耗尽
+    // 或按钮消失即失败，不得继续点击、不得虚报稳定。
+    const sampleBox = () => consentButton.boundingBox();
+    let previous = await sampleBox();
+    let stable = false;
+    let box = previous;
+    for (let samples = 0; samples < 20; samples += 1) {
+      await page.waitForTimeout(100);
+      box = await sampleBox();
+      if (!box) throw new Error("同意按钮在稳定性等待期间消失，拒绝点击");
+      if (
+        previous &&
+        box.x === previous.x &&
+        box.y === previous.y &&
+        box.width === previous.width &&
+        box.height === previous.height
+      ) {
+        stable = true;
+        break;
+      }
+      previous = box;
+    }
+    if (!stable) {
+      throw new Error(
+        `同意按钮位置 20 次跨帧采样后仍不稳定（最后位置 ${JSON.stringify(box)}），拒绝点击`,
+      );
+    }
+    ev.acceptClicks = ev.acceptClicks ?? {};
+    ev.acceptClicks.buttonBoxAtClick = box;
+    // 计数器挂载同样 8 秒有界：CDP 挂起时不能无限阻塞场景（七轮复核）。
+    await withTimeout(
+      () =>
+        page.evaluate(() => {
+          window.__ac06ConsentClicks = [];
+          for (const type of ["pointerdown", "click"]) {
+            document.addEventListener(
+              type,
+              (event) => {
+                window.__ac06ConsentClicks.push({
+                  type,
+                  ts: event.timeStamp,
+                  x: event.clientX,
+                  y: event.clientY,
+                  // 目标元素：document 级捕获只记坐标无法证明点在同意按钮上
+                  // （八轮复核——点别的元素同样得到两组事件）。
+                  target: {
+                    tag: event.target.tagName,
+                    cls: String(event.target.className || "").slice(0, 80),
+                    text: String(event.target.textContent || "").trim().slice(0, 40),
+                  },
+                });
+              },
+              true,
+            );
+          }
+          // 十五轮复核：给同意按钮打**不随文案变化**的结构标记（.privacy-
+          // actions 内最后一个按钮=同意；保存中会变「正在保存…」而按钮
+          // 仍在）——正常采集与失败取证共用这个标识，按文案过滤会失去
+          // 保存中的按钮。
+          const consentButtons = Array.from(
+            document.querySelectorAll(".privacy-actions button"),
+          );
+          const consent = consentButtons[consentButtons.length - 1];
+          if (consent) consent.dataset.ac06Consent = "1";
+        }),
+      8000,
+      "挂载同意输入计数器",
+    );
+    const inputX = box.x + box.width / 2;
+    const inputY = box.y + box.height / 2;
+    ck.add(
+      "button_position_stable_before_click",
+      stable === true,
+      `点击前跨帧采样稳定=${stable}（x=${box.x} y=${box.y} w=${box.width} h=${box.height}）`,
+    );
+    // 顺序下发（并发排队会在 CDP 输入管线里丢掉第二次完整点击——首跑实测
+    // 同意键坐标只到达 1 次）；间隔仍以页面事件时间戳度量。
+    await page.mouse.click(inputX, inputY);
+    await page.mouse.click(inputX, inputY);
+    // 业务解锁等待：超时即失败，但先抓失败现场（六轮复核缺口——此前超时
+    // 直接抛错，点击计数、隐私框状态、截图全部丢失，CI 两轮 .app-nav
+    // 超时无法归因）。取证失败不掩盖原错误。
+    try {
+      await page.waitForSelector(".app-nav", { timeout: 60000 });
+      // 点击后按钮位置证据（八轮复核：判断点击坐标是否因布局变化失效）。
+      // 十轮复核 P2：区分合法 null（按钮不存在）与采集异常——吞成 null
+      // 会让「查询失败」伪装成「按钮不存在」，证据无法归层。
+      ev.acceptClicks = ev.acceptClicks ?? {};
+      try {
+        // 十三轮复核：存在性判断与位置读取合并为**一次**页面内采集——
+        // count() 与 boundingBox() 分开执行时，正常退出动画恰好在两次查询
+        // 之间完成会导致 count=1 而 boundingBox 等待超时，合法移除被误判
+        // 为查询失败。单次读取：元素缺失 → null（合法移除），通信异常 →
+        // buttonBoxAfterClickError。
+        const captured = await page.evaluate(() => {
+          // 十五轮复核：按**不随文案变化**的标记定位（保存中按钮会变
+          // 「正在保存…」而仍在；按文案过滤会误判为已移除）。
+          const button = document.querySelector("[data-ac06-consent]");
+          if (!button) return { exists: false };
+          const rect = button.getBoundingClientRect();
+          return {
+            exists: true,
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          };
+        });
+        ev.acceptClicks.buttonBoxAfterClick = captured.exists
+          ? { x: captured.x, y: captured.y, width: captured.width, height: captured.height }
+          : null;
+      } catch (boxError) {
+        ev.acceptClicks.buttonBoxAfterClickError = String(boxError).slice(0, 300);
+      }
+      // 十一轮复核：位置记录断言在**采集后**依据实际结果生成，区分三种
+      // 形态——查询失败（错误字段）、合法 null（按钮不存在）、成功（两
+      // 位置俱全）——不得在查询前固定为绿并声称双位置已入 evidence。
+      const recordedAfter =
+        "buttonBoxAfterClick" in ev.acceptClicks
+          ? `事后位置=${JSON.stringify(ev.acceptClicks.buttonBoxAfterClick)}`
+          : `事后位置查询失败=${ev.acceptClicks.buttonBoxAfterClickError}`;
+      ck.add(
+        "button_position_recorded",
+        ev.acceptClicks.buttonBoxAtClick !== undefined &&
+          "buttonBoxAfterClick" in ev.acceptClicks,
+        `点击时位置=${JSON.stringify(ev.acceptClicks.buttonBoxAtClick)}；${recordedAfter}`,
+      );
+    } catch (error) {
+      // 七轮复核修正：取证**逐项**采集、每项 8 秒上限（复用 withTimeout）、
+      // 单项失败只追加该项错误——任何一步失败（截图异常、CDP 拒绝、CDP
+      // 挂起）都不得清空已取得的现场，也不得拖到场景看门狗。
+      const diagnostics = { errorText: String(error).slice(0, 300) };
+      const bounded = (label, task) =>
+        withTimeout(task, 8000, `取证 ${label}`)
+          .then((value) => {
+            diagnostics[label] = value;
+          })
+          .catch((diagError) => {
+            diagnostics[`${label}Error`] = String(diagError).slice(0, 300);
+          });
+      await bounded("capturedClicks", () =>
+        page.evaluate(() => window.__ac06ConsentClicks ?? []),
+      );
+      await bounded("privacyDialogCount", () => page.locator(".privacy-dialog").count());
+      // 八轮复核 P2：内层 .catch(() => []) 会把查询失败伪装成「没有文案」
+      // ——吞错移除，失败交给外层 bounded 记 privacyBlockedDetailError。
+      await bounded("privacyBlockedDetail", () =>
+        page.locator(".privacy-detail, .privacy-error, [class*='error']").allTextContents(),
+      );
+      await bounded("buttonBoxAtClick", async () => box ?? null);
+      // 九轮复核：失败时按钮的**事后**位置——与点击时位置对比即可判断
+      // 布局是否在点击后变化（按钮消失时为 null，同样入证据）。十五轮
+      // 复核：改用与正常采集共用的**不随文案变化**的标记定位（点击前
+      // 按旧文案建立的 locator 在「保存中·未解锁」时会等待文本失配超时，
+      // 按钮仍在却被记为取证超时）；单次页面内采集 + 8 秒 bounded 超时
+      // 保留。
+      await bounded("buttonBoxAfterFailure", () =>
+        page.evaluate(() => {
+          const button = document.querySelector("[data-ac06-consent]");
+          if (!button) return null;
+          const rect = button.getBoundingClientRect();
+          return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        }),
+      );
+      await bounded("settingsSnapshot", async () =>
+        fs.existsSync(settingsPath)
+          ? fs.readFileSync(settingsPath, "utf8").slice(0, 800)
+          : null,
+      );
+      await bounded("traceSoFar", async () =>
+        readAcceptanceTrace(inst.root, { partial: true }).records.map((r) => ({
+          seq: r.seq,
+          event: r.event,
+        })),
+      );
+      await bounded("screenshot", () =>
+        page
+          .screenshot({
+            path: path.join(inst.opts.shots, "accept-order-unlock-timeout.png"),
+          })
+          .then(() => "accept-order-unlock-timeout.png"),
+      );
+      ev.acceptFailureDiagnostics = diagnostics;
+      throw error;
+    }
+    await page.waitForTimeout(1500);
+
+    const capturedClicks = await page.evaluate(() => window.__ac06ConsentClicks ?? []);
+    const inBox = (entry) =>
+      entry.x >= box.x &&
+      entry.x <= box.x + box.width &&
+      entry.y >= box.y &&
+      entry.y <= box.y + box.height;
+    // 送达判定按 pointerdown：同意过渡会替换光标下的 DOM，浏览器因此可能
+    // 不合成第二次 click 事件（实跑实测：pointerdown#2 在 21.6ms 后到达正确
+    // 坐标、click 未合成）——这正是「输入已发出、产品正确抑制」的形态；
+    // click 合成与否属产品行为，不作为输入送达证据。
+    const pressesAtButton = capturedClicks.filter((c) => c.type === "pointerdown" && inBox(c));
+    const synthesizedClicks = capturedClicks.filter((c) => c.type === "click" && inBox(c)).length;
+    const inputIntervalMs =
+      pressesAtButton.length >= 2
+        ? pressesAtButton[pressesAtButton.length - 1].ts - pressesAtButton[0].ts
+        : null;
+    // 九轮复核：**展开**保留稳定性等待写入的 buttonBoxAtClick 等
+    // 字段——整体重写会把位置证据清掉。
+    ev.acceptClicks = {
+      ...ev.acceptClicks,
+      delivered: pressesAtButton.length,
+      intervalMs: inputIntervalMs,
+      synthesizedClicks,
+      captured: capturedClicks,
+    };
+    ck.add(
+      "double_click_delivered",
+      pressesAtButton.length >= 2,
+      `同意键坐标实际按下=${pressesAtButton.length} 次（其中合成 click ${synthesizedClicks} 次）`,
+    );
+    ck.add(
+      "double_click_interval_under_100ms",
+      pressesAtButton.length >= 2 && inputIntervalMs !== null && inputIntervalMs < 100,
+      `输入间隔=${inputIntervalMs === null ? "-" : inputIntervalMs.toFixed(1)}ms（要求 <100ms）`,
+    );
+
+    const trace = readAcceptanceTrace(inst.root, { partial: true });
+    if (trace.violations.length) throw new Error(trace.violations.join(" | "));
+    const seqOf = (name) => trace.records.filter((r) => r.event === name).map((r) => r.seq);
+    const consentSeqs = seqOf("consent_saved");
+    const readySeqs = seqOf("business_ready");
+    const readSeqs = seqOf("history_open").concat(seqOf("source_root_read"));
+    ev.acceptOrder = { consentSeqs, readySeqs, readSeqs: readSeqs.slice(0, 3) };
+    ck.add(
+      "consent_saved_exactly_once",
+      consentSeqs.length === 1,
+      `consent_saved=${consentSeqs.length} 次`,
+    );
+    ck.add(
+      "business_ready_exactly_once",
+      readySeqs.length === 1,
+      `business_ready=${readySeqs.length} 次`,
+    );
+    // 严格成序：consent_saved < business_ready < 首个业务读取。旧的合并式
+    // 断言只查 read > max(consent, ready)，会放过 ready 先于 consent 与
+    // consent 缺失两种颠倒（PR52 复盘反例），保留为兜底并新增两条具名。
+    ck.add(
+      "consent_saved_precedes_business_ready",
+      consentSeqs.length === 1 && readySeqs.length === 1 && consentSeqs[0] < readySeqs[0],
+      `consent=${consentSeqs.join(",")} ready=${readySeqs.join(",")}`,
+    );
+    ck.add(
+      "business_ready_precedes_first_business_read",
+      readySeqs.length === 1 && readSeqs.length >= 1 && readySeqs[0] < Math.min(...readSeqs),
+      `ready=${readySeqs.join(",")} firstRead=${Math.min(...(readSeqs.length ? readSeqs : [Infinity]))}`,
+    );
+    ck.add(
+      "consent_saved_precedes_business_unlock_and_reads",
+      consentSeqs.length === 1 &&
+        readySeqs.length === 1 &&
+        readSeqs.length >= 1 &&
+        Math.min(...readSeqs) > Math.max(...consentSeqs, ...readySeqs),
+      JSON.stringify(ev.acceptOrder),
+    );
+    // 单次原子落盘（口径对齐十七轮复核：计划判定的是**同意保存**恰一次
+    // 原子替换；业务初始化后的规范化重写是合法的第二次 settings_write，
+    // 不计入本判定）：consent_saved 事件自带落盘时刻的**不可变字节证据**
+    // （settings_bytes_hex，Rust 侧保存时快照，JSONL 只追加不可变）与指纹
+    // （fnv1a64，与 tokenscope-core settings_hash 同算法）。判定方重算
+    // 证据哈希与事件指纹比对，并解析证据内容确认同意值与当前修订号——
+    // 只查格式不核对内容会放行假哈希（二轮复核缺口，复核方独立复现）。
+    // 实跑证明业务初始化会在同意之后合法地再次规范化重写 settings（终态
+    // 字节 ≠ 保存时字节），因此不与终态文件硬比；终态仍含同意字段由
+    // accept_writes_consent_with_revision 保证。
+    const consentRows = trace.records.filter((r) => r.event === "consent_saved");
+    const settingsWriteSeqs = trace.records
+      .filter((r) => r.event === "settings_write")
+      .map((r) => r.seq);
+    const writesBeforeConsent = settingsWriteSeqs.filter((s) => s < consentSeqs[0]);
+    const adjacentWrite =
+      writesBeforeConsent.length === 1 &&
+      !trace.records.some(
+        (r) => r.seq > writesBeforeConsent[0] && r.seq < consentSeqs[0],
+      );
+    const captureBytes = (() => {
+      const hex = consentRows[0]?.settings_bytes_hex;
+      if (typeof hex !== "string" || hex.length === 0 || hex.length % 2 !== 0) return null;
+      if (/[^0-9a-f]/.test(hex)) return null;
+      return Buffer.from(hex, "hex");
+    })();
+    const recomputed =
+      captureBytes === null ? null : settingsFingerprint(captureBytes).value;
+    const hashMatchesCapture =
+      recomputed !== null &&
+      consentRows[0]?.settings_hash?.algorithm === "fnv1a64" &&
+      /^[0-9a-f]{16}$/.test(consentRows[0]?.settings_hash?.value ?? "") &&
+      recomputed === consentRows[0].settings_hash.value;
+    ck.add(
+      "consent_saved_single_atomic_replace",
+      consentSeqs.length === 1 &&
+        writesBeforeConsent.length === 1 &&
+        adjacentWrite &&
+        captureBytes !== null &&
+        hashMatchesCapture,
+      `指纹=${JSON.stringify(consentRows[0]?.settings_hash)} 重算=${recomputed ?? "无字节证据"} 同意前写入=${JSON.stringify(writesBeforeConsent)}`,
+    );
+    // 十九轮复核 P2：同意保存与业务解锁之间**不得再有设置写入**——旧判定
+    // 只看写入发生在 consent_saved 之前，把「consent_saved → 额外写入 →
+    // business_ready」的追踪也放行（受控反例 review19-independent/
+    // extra-write-probe.json 16 项全过）。按写入来源分层判定：同意前恰一次
+    // （同意落盘），同意后到业务解锁前零次；业务初始化后的重写另计。
+    const writesBetweenConsentAndReady = settingsWriteSeqs.filter(
+      (seq) => seq > consentSeqs[0] && seq < readySeqs[0],
+    );
+    const writesAfterReady = settingsWriteSeqs.filter((seq) => seq > readySeqs[0]);
+    // 二十轮复核 P2：写入归属必须按**来源**（追踪事件自带的 origin），
+    // 不能只按时间把解锁后的全部写入都算作「业务初始化」——否则注入两次
+    // 解锁后写入仍会被归入同一类而全过。
+    const settingsWrites = trace.records.filter((r) => r.event === "settings_write");
+    const originOf = (seq) => settingsWrites.find((r) => r.seq === seq)?.origin ?? null;
+    const afterReadyOrigins = writesAfterReady.map(originOf);
+    // 允许出现在解锁后的业务初始化来源（每个至多一次）。
+    const ALLOWED_RUNTIME_WRITE_ORIGINS = ["source_path_migration", "business_init"];
+    const unknownRuntimeOrigins = afterReadyOrigins.filter(
+      (origin) => !ALLOWED_RUNTIME_WRITE_ORIGINS.includes(origin),
+    );
+    const duplicatedRuntimeOrigins = ALLOWED_RUNTIME_WRITE_ORIGINS.filter(
+      (origin) => afterReadyOrigins.filter((value) => value === origin).length > 1,
+    );
+    ev.consentWriteLayers = {
+      beforeConsent: writesBeforeConsent.map((seq) => ({ seq, origin: originOf(seq) })),
+      betweenConsentAndReady: writesBetweenConsentAndReady.map((seq) => ({
+        seq,
+        origin: originOf(seq),
+      })),
+      afterReady: writesAfterReady.map((seq) => ({ seq, origin: originOf(seq) })),
+    };
+    ck.add(
+      "consent_save_is_the_only_write_before_business_unlock",
+      writesBetweenConsentAndReady.length === 0,
+      `同意后、解锁前额外写入=${JSON.stringify(ev.consentWriteLayers.betweenConsentAndReady)}`,
+    );
+    // 同意保存必须是来源为 privacy_consent 的那一次写入。
+    ck.add(
+      "consent_save_write_origin_is_privacy_consent",
+      writesBeforeConsent.length === 1 && originOf(writesBeforeConsent[0]) === "privacy_consent",
+      `同意前写入来源=${JSON.stringify(ev.consentWriteLayers.beforeConsent)}`,
+    );
+    // 解锁后的写入必须来自已知业务初始化来源，且每个来源至多一次。
+    ck.add(
+      "runtime_writes_have_known_single_origin",
+      unknownRuntimeOrigins.length === 0 && duplicatedRuntimeOrigins.length === 0,
+      `解锁后写入=${JSON.stringify(ev.consentWriteLayers.afterReady)}；未知来源=${JSON.stringify(unknownRuntimeOrigins)}；重复来源=${JSON.stringify(duplicatedRuntimeOrigins)}`,
+    );
+    // 严格 UTF-8 解码（五轮复核 P2：toString("utf8") 默认把坏字节替换成
+    // U+FFFD，替换后的文本骗过两个解析器——注释中 FF、截断编码、过长编码、
+    // 代理项编码全被误放行，而产品 String::from_utf8 报 InvalidData）。
+    // fatal 模式解码失败即拒绝；合法编码的 U+FFFD 字符本身不受影响。
+    // 内容判定经 strictConsentState（严格 UTF-8 + 两个真正的 TOML 解析器
+    // 交叉 + AST 顶层字面量类型/值）：正则会被注释、子表与前缀骗过；
+    // smol-toml 单独使用会把 3.0/3e0/超精度浮点当成整数 3。保存字节证据
+    // 与业务初始化后的终态使用同一份判定。
+    const captureContent =
+      captureBytes === null
+        ? { ok: false, detail: "无字节证据" }
+        : strictConsentState(captureBytes, currentConsentRevision());
+    ck.add("consent_saved_capture_content", captureContent.ok, captureContent.detail);
+    // 十七轮复核 P2：终态 settings 与保存字节证据**同口径**严格判定——
+    // 正则搜索会被注释假字段骗过（复核方复现：保存证据正确、终态实际
+    // accepted=false/revision=1，注释含期望字段即全过）。业务初始化后
+    // 合法重写按终态解析（不与保存字节比对，重写正例由上一检查保证）。
+    const terminalCheck = strictConsentState(
+      fs.readFileSync(settingsPath),
+      currentConsentRevision(),
+    );
+    ck.add("accept_writes_consent_with_revision", terminalCheck.ok, terminalCheck.detail);
+
+    // 自启命令层路由（方案 A / PR52 复盘补证）：helper 单测不能替代命令层
+    // 证据——同意后经真实 IPC 开关自启，acceptance 构建必须路由到隔离替身：
+    // 返回值与状态一致、状态文件落在隔离根、追踪路径在根内、四蜂巢注册表
+    // 只读快照不变（真实后端不可达；本场景绝不写真实注册表）。
+    const autostartRegistryBefore = registrySnapshot();
+    const autostartSet = await page.evaluate(() =>
+      window.__TAURI_INTERNALS__
+        .invoke("autostart_set", { enabled: true })
+        .then((value) => ({ ok: true, value }))
+        .catch((error) => ({ ok: false, error: String(error) })),
+    );
+    const autostartStatus = await page.evaluate(() =>
+      window.__TAURI_INTERNALS__
+        .invoke("autostart_status", {})
+        .then((value) => ({ ok: true, value }))
+        .catch((error) => ({ ok: false, error: String(error) })),
+    );
+    ck.add(
+      "autostart_routes_to_isolated_shim",
+      autostartSet.ok && autostartStatus.ok && autostartStatus.value === true,
+      `set=${JSON.stringify(autostartSet)} status=${JSON.stringify(autostartStatus)}`,
+    );
+    const autostartStatePath = path.join(inst.root, "autostart-state.json");
+    let autostartStateFile = null;
+    try {
+      autostartStateFile = JSON.parse(fs.readFileSync(autostartStatePath, "utf8"));
+    } catch {
+      autostartStateFile = null;
+    }
+    ck.add(
+      "autostart_state_file_in_root",
+      autostartStateFile?.enabled === true,
+      `状态文件=${JSON.stringify(autostartStateFile)}`,
+    );
+    const autostartTraceRows = (() => {
+      // 自启 invoke 发生在场景早前的 trace 读取之后——必须重读，否则只能
+      // 看到启动期的 boot 读取（首跑实测恰因此少一条 write）。
+      const traceAfter = readAcceptanceTrace(inst.root, { partial: true });
+      if (traceAfter.violations.length) throw new Error(traceAfter.violations.join(" | "));
+      return traceAfter.records.filter(
+        (r) => r.event === "autostart_write" || r.event === "autostart_read",
+      );
+    })();
+    // 前缀比较双侧规范化：CI Runner 的 TEMP 可能是 8.3 短名（RUNNER~1）而
+    // 追踪路径经 Rust canonicalize 是长名（runneradmin），且 Windows 路径
+    // 大小写不敏感。**必须用 realpathSync.native**——JS 版 realpath 不解析
+    // 8.3 短名（CI 40258699869 的 rootNorm 仍为 runner~1 即此因），native
+    // 走 libuv GetFinalPathNameByHandle 才会展开；统一斜杠与大小写后再比较。
+    const normPath = (value) => String(value).replaceAll("\\", "/").toLowerCase();
+    const rootNorm = normPath(fs.realpathSync.native(inst.root));
+    ck.add(
+      "autostart_trace_paths_inside_root",
+      autostartTraceRows.some((r) => r.event === "autostart_write") &&
+        autostartTraceRows.some((r) => r.event === "autostart_read") &&
+        autostartTraceRows.every(
+          (r) => typeof r.path === "string" && normPath(r.path).startsWith(rootNorm),
+        ),
+      `root=${rootNorm}；` +
+        (autostartTraceRows.map((r) => `${r.event}:${normPath(r.path)}`).join(",") || "无自启追踪"),
+    );
+    const autostartRegistryAfter = registrySnapshot();
+    const autostartRegistryChanged = Object.keys(autostartRegistryBefore).filter(
+      (key) =>
+        JSON.stringify(autostartRegistryBefore[key]) !==
+        JSON.stringify(autostartRegistryAfter[key]),
+    );
+    ck.add(
+      "autostart_registry_untouched",
+      autostartRegistryChanged.length === 0,
+      autostartRegistryChanged.join(",") || "四蜂巢快照一致",
+    );
+    ev.autostartRouting = { set: autostartSet, status: autostartStatus };
+    await page.screenshot({ path: path.join(inst.opts.shots, "privacy-accept-order.png") });
+  },
+
+  /**
+   * AC06 场景 4a：损坏 TOML 启动进入阻断弹窗且原文件逐字节不变。
+   */
+  async "privacy-variants-corrupt"({ inst, ck, ev }) {
+    const page = inst.page;
+    const settingsPath = path.join(inst.root, "tokenscope", "settings.toml");
+    const before = fs.readFileSync(settingsPath, "utf8");
+    ev.corruptSettings = { bytes: before.length };
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+    const text = (await page.locator(".privacy-dialog").innerText()).replace(/\s+/g, " ");
+    ck.add(
+      "corrupt_toml_shows_blocked_dialog",
+      text.includes("重新检查") || text.includes("隐私设置无法确认"),
+      text.slice(0, 140),
+    );
+    const after = fs.readFileSync(settingsPath, "utf8");
+    ck.add("corrupt_toml_file_unchanged", after === before, "损坏设置文件逐字节不变");
+    // 阻断态退出：不同意 → 退出程序（进程干净退出，无业务残留）。
+    await rejectAndExit(page, inst, ck, "corrupt_toml");
+  },
+
+  /**
+   * AC06 场景 4b：close_action 记忆预设不得绕过隐私退出确认——
+   * 未同意时点关闭弹隐私退出确认，而不是按记忆最小化到托盘。
+   */
+  async "privacy-variants-close"({ inst, ck, ev }) {
+    const page = inst.page;
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+    const action = fileURLToPath(
+      new URL("../../scripts/native-window-action.ps1", import.meta.url),
+    );
+    const result = spawnSyncBounded(
+      "pwsh",
+      ["-NoProfile", "-File", action, "-ProcessId", String(inst.proc.pid), "-Action", "close"],
+      { action: "window-close", stage: "variants-close" },
+    );
+    if (result.status !== 0 || !/CLOSED true/i.test(result.stdout))
+      throw new Error(`WM_CLOSE failed: ${result.stderr} ${result.stdout}`);
+    await page.waitForSelector(".exit-dialog", { timeout: 10000 });
+    const exitText = (await page.locator(".exit-dialog").innerText()).replace(/\s+/g, " ");
+    ck.add(
+      "close_action_preset_still_asks_privacy_exit",
+      exitText.includes("退出 TokenScope") && !exitText.includes("记住"),
+      exitText.slice(0, 140),
+    );
+    await page.locator(".exit-actions button", { hasText: "退出程序" }).first().click();
+    const deadline = Date.now() + 15000;
+    while (inst.proc.exitCode === null && Date.now() < deadline) await sleep(200);
+    ck.add("variants_close_exit_clean", inst.proc.exitCode === 0, `exitCode=${inst.proc.exitCode}`);
   },
 
   /**
@@ -2655,7 +3807,7 @@ const scenarios = {
     const dialogText = (await page.locator(".privacy-dialog").innerText()).replace(/\s+/g, " ");
     ck.add(
       "policy_updated_notice_visible",
-      dialogText.includes("隐私政策已更新") && dialogText.includes("WorkBuddy 与 WorkBuddy AI"),
+      dialogText.includes("隐私政策或用户许可协议已更新"),
       dialogText.slice(0, 160),
     );
     ev.businessDomNodes = await page.locator(".app-nav, .page-head, .chart-canvas").count();
@@ -2693,12 +3845,16 @@ const scenarios = {
     // 同意 → 同一次保存写入 true 与当前修订号，进入业务。
     await page.locator(".privacy-actions button", { hasText: "同意并继续" }).first().click();
     await page.waitForSelector(".app-nav", { timeout: 60000 });
-    ev.settingsAfterAccept = fs.readFileSync(settingsPath, "utf8");
+    const afterAcceptBytes = fs.readFileSync(settingsPath);
+    ev.settingsAfterAccept = afterAcceptBytes.toString("utf8");
+    const afterAcceptState = strictConsentState(
+      afterAcceptBytes,
+      currentConsentRevision(),
+    );
     ck.add(
       "reconsent_writes_current_revision",
-      /privacy_policy_accepted\s*=\s*true/.test(ev.settingsAfterAccept) &&
-        /privacy_policy_revision\s*=\s*2/.test(ev.settingsAfterAccept),
-      ev.settingsAfterAccept.split("\n").slice(0, 4).join(" | "),
+      afterAcceptState.ok,
+      afterAcceptState.detail,
     );
     // 同意后的业务初始化必须发生在同意落盘之后：business_ready 的 seq
     // 严格大于 consent_saved（顺序颠倒 = 同意前就有业务读取）。
@@ -2753,6 +3909,153 @@ const scenarios = {
     );
     await page2.screenshot({ path: path.join(inst.opts.shots, "policy-update-reconsented.png") });
   },
+
+  /**
+   * 2026-10-29 复核：真实 0.6.0 旧用户界面路径——预置隐私政策同意
+   * accepted=true、revision=2、没有协议同意字段，并预置业务文件。确认
+   * 门禁保持关闭（对旧业务数据零读取零写入），再通过真实界面点击
+   * 「同意并继续」完成重新同意，核验四项原子落盘、进入业务与重启不再询问。
+   */
+  async "privacy-revision2-consent"({ inst, ck, ev }) {
+    const page = inst.page;
+    const dataDir = path.join(inst.root, "tokenscope");
+    const settingsPath = path.join(dataDir, "settings.toml");
+    const businessFiles = () =>
+      listFiles(dataDir).filter((f) =>
+        /^(logs\/|cache\.db|history\.db|window-state\.json|view-cache\.json|pricing-)/.test(f),
+      );
+
+    await page.waitForSelector(".privacy-dialog", { timeout: 30000 });
+    const beforeBytes = fs.readFileSync(settingsPath);
+    ev.settingsBefore = beforeBytes.toString("utf8");
+    const beforeToml = parseToml(ev.settingsBefore);
+    ck.add(
+      "fixture_is_revision2_privacy_only",
+      beforeToml.privacy_policy_accepted === true &&
+        beforeToml.privacy_policy_revision === 2 &&
+        !("user_agreement_accepted" in beforeToml) &&
+        !("user_agreement_revision" in beforeToml),
+      `accepted=${beforeToml.privacy_policy_accepted} revision=${beforeToml.privacy_policy_revision} ` +
+        `agreement=${beforeToml.user_agreement_accepted}`,
+    );
+    const legacyState = strictConsentState(beforeBytes, currentConsentRevision());
+    ck.add(
+      "legacy_record_is_not_current_consent",
+      !legacyState.ok,
+      legacyState.detail,
+    );
+    const dialogText = (await page.locator(".privacy-dialog").innerText()).replace(/\s+/g, " ");
+    ck.add(
+      "policy_updated_notice_visible",
+      dialogText.includes("隐私政策或用户许可协议已更新"),
+      dialogText.slice(0, 160),
+    );
+    ev.businessDomNodes = await page.locator(".app-nav, .page-head, .chart-canvas").count();
+    ck.add(
+      "business_ui_not_mounted_before_reconsent",
+      ev.businessDomNodes === 0,
+      `业务节点数=${ev.businessDomNodes}`,
+    );
+    ev.preseededBusinessFiles = businessFiles();
+    ck.add(
+      "preseeded_old_business_files_exist",
+      ev.preseededBusinessFiles.length > 0,
+      ev.preseededBusinessFiles.join(",") || "无预置业务文件",
+    );
+    const traceBeforeConsent = readAcceptanceTrace(inst.root, { partial: true });
+    if (traceBeforeConsent.violations.length)
+      throw new Error(traceBeforeConsent.violations.join(" | "));
+    const businessEventNames = [
+      "business_ready",
+      "collect_round_start",
+      "source_root_read",
+      "history_open",
+    ];
+    ev.businessTraceBeforeConsent = traceBeforeConsent.records
+      .filter((r) => businessEventNames.includes(r.event))
+      .map((r) => r.event);
+    ck.add(
+      "no_business_trace_before_reconsent",
+      ev.businessTraceBeforeConsent.length === 0,
+      ev.businessTraceBeforeConsent.join(",") || "无业务追踪事件",
+    );
+    // 门禁关闭期间观察 15 秒：预置业务文件集合不得变化，settings 原始字节不得变化。
+    await page.waitForTimeout(15000);
+    const afterBusiness = businessFiles();
+    ck.add(
+      "no_new_business_files_before_reconsent",
+      JSON.stringify(afterBusiness) === JSON.stringify(ev.preseededBusinessFiles),
+      `观察前=${ev.preseededBusinessFiles.join(",") || "无"}；观察后=${afterBusiness.join(",") || "无"}`,
+    );
+    ck.add(
+      "settings_bytes_unchanged_before_reconsent",
+      beforeBytes.equals(fs.readFileSync(settingsPath)),
+      "同意前 settings.toml 原始字节未变化",
+    );
+
+    // 真实界面点击同意 → 同一次原子保存四项当前修订。
+    await page.locator(".privacy-actions button", { hasText: "同意并继续" }).first().click();
+    await page.waitForSelector(".app-nav", { timeout: 60000 });
+    const afterAcceptBytes = fs.readFileSync(settingsPath);
+    ev.settingsAfterAccept = afterAcceptBytes.toString("utf8");
+    const afterAcceptState = strictConsentState(
+      afterAcceptBytes,
+      currentConsentRevision(),
+    );
+    ck.add(
+      "revision2_user_click_writes_current_revision",
+      afterAcceptState.ok,
+      afterAcceptState.detail,
+    );
+    const traceAfterConsent = readAcceptanceTrace(inst.root, { partial: true });
+    const seqOf = (name) =>
+      traceAfterConsent.records.filter((r) => r.event === name).map((r) => r.seq);
+    const consentSeqs = seqOf("consent_saved");
+    const readySeqs = seqOf("business_ready");
+    ev.consentTraceOrder = { consentSeqs, readySeqs };
+    ck.add(
+      "business_trace_starts_after_reconsent",
+      consentSeqs.length >= 1 &&
+        readySeqs.length >= 1 &&
+        Math.min(...readySeqs) > Math.max(...consentSeqs),
+      JSON.stringify(ev.consentTraceOrder),
+    );
+
+    // 重启同一隔离根：不再询问（四项当前修订同意有效）。
+    {
+      const action = fileURLToPath(
+        new URL("../../scripts/native-window-action.ps1", import.meta.url),
+      );
+      const result = spawnSyncBounded(
+        "pwsh",
+        ["-NoProfile", "-File", action, "-ProcessId", String(inst.proc.pid), "-Action", "close"],
+        { action: "window-close", stage: "revision2-close" },
+      );
+      if (result.status !== 0 || !/CLOSED true/i.test(result.stdout))
+        throw new Error(`WM_CLOSE failed: ${result.stderr} ${result.stdout}`);
+      await page.waitForSelector(".close-dialog", { timeout: 10000 });
+      await page
+        .locator(".close-dialog")
+        .getByRole("button", { name: "直接退出", exact: true })
+        .click();
+      const deadline = Date.now() + 15000;
+      while (inst.proc.exitCode === null && Date.now() < deadline) await sleep(200);
+      if (inst.proc.exitCode !== 0)
+        throw new Error(`修订 2 旧用户场景的优雅关闭要求退出码 0，实际 ${inst.proc.exitCode}`);
+    }
+    const info = await inst.launch();
+    ev.relaunchPid = info.pid;
+    const page2 = inst.page;
+    await page2.waitForSelector(".app-nav", { timeout: 60000 });
+    await page2.waitForTimeout(1500);
+    ev.relaunchConsentDialog = await page2.locator(".privacy-dialog").count();
+    ck.add(
+      "restart_does_not_ask_after_revision2_consent",
+      ev.relaunchConsentDialog === 0,
+      `重启后政策弹窗数=${ev.relaunchConsentDialog}`,
+    );
+    await page2.screenshot({ path: path.join(inst.opts.shots, "revision2-reconsented.png") });
+  },
 };
 
 const labelToValue = (label) =>
@@ -2778,10 +4081,6 @@ async function main() {
   if (!Number.isInteger(RELAUNCH_CYCLES) || RELAUNCH_CYCLES < 1) {
     throw new Error(`--relaunch-cycles 必须是正整数：${arg("relaunch-cycles")}`);
   }
-  fs.mkdirSync(OUT, { recursive: true });
-  const stampDir = path.join(OUT, SCENARIO);
-  fs.mkdirSync(stampDir, { recursive: true });
-
   const attachExisting = SCENARIO === "expire-finish";
   // 状态文件损坏（例如带 BOM）也要走证据流程，不能直接退出而没有 evidence.json（§4.8 第 5 条）
   let state = null;
@@ -2794,6 +4093,43 @@ async function main() {
     }
   }
   const root = ROOT || state?.root || freshRoot(SCENARIO);
+
+  // AC10（收敛后）：全路径隔离（固定布局 + 清单声明 + 现有条目别名）与
+  // EXE/记录一致性必须在创建输出目录、准备隔离根、启动任何进程之前完成。
+  // 源提交只用文件系统读取（不 spawn git）；记录缺失/哈希不符/命令不合法/
+  // 提交不一致一律零准备、零启动。记录一致时按**受控构建假设**（assumed）
+  // 放行——证明边界见 verifyAcceptanceBuildIdentity 注释，不冒充来源防伪。
+  const launchPreflight = evaluateAcceptanceLaunchPreflight({
+    root,
+    outDir: OUT,
+    exePath: EXE,
+    homeDir: process.env.USERPROFILE || "",
+    attachExisting,
+    buildRecordPath: BUILD_RECORD,
+    sourceCommit: readGitHeadCommit(REPO),
+  });
+  if (!launchPreflight.ok) {
+    console.log(
+      JSON.stringify(
+        {
+          scenario: SCENARIO,
+          refused: true,
+          root,
+          exe: EXE,
+          preflight: launchPreflight,
+          message: "预检失败：零准备、零启动",
+        },
+        null,
+        2,
+      ),
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  fs.mkdirSync(OUT, { recursive: true });
+  const stampDir = path.join(OUT, SCENARIO);
+  fs.mkdirSync(stampDir, { recursive: true });
   const scheme = THEME === "system" ? null : THEME;
   const shots = stampDir;
   const logPath = path.join(stampDir, "process.log");
@@ -2825,13 +4161,37 @@ async function main() {
     feature: "acceptance",
     exe: EXE,
     exe_sha256: fs.existsSync(EXE) ? sha256File(EXE) : "missing",
+    build_record_path: BUILD_RECORD,
+    build_record_present: fs.existsSync(BUILD_RECORD),
+    checkout_commit: readGitHeadCommit(REPO),
     acceptance_root: root,
+    acceptance_preflight: launchPreflight,
+    base_identifier: BASE_IDENTIFIER,
+    acceptance_identifier: ACCEPTANCE_IDENTIFIER,
+    real_data_dir: REAL_DATA,
     theme_channel: THEME,
     forced_device_scale: SCALE,
     port: PORT,
     windows_version: windowsVersion,
     userprofile: process.env.USERPROFILE,
   };
+  ck.add(
+    "acceptance_root_isolated",
+    launchPreflight.paths.ok,
+    launchPreflight.paths.reason,
+  );
+  ck.add(
+    "acceptance_executable_consistent_with_record",
+    launchPreflight.exe.ok,
+    launchPreflight.exe.reason,
+  );
+  ck.add(
+    "acceptance_build_identity_assumed",
+    attachExisting || launchPreflight.exe.build_identity === "assumed",
+    attachExisting
+      ? "attach 模式不启动 EXE，构建身份不参与"
+      : `build_identity=${launchPreflight.exe.build_identity ?? "unknown"}；可复现=${launchPreflight.exe.reproducible_from_commit === true ? "是" : "否（脏树）"}；受控构建假设，非来源独立防伪证明；记录=${BUILD_RECORD}`,
+  );
 
   const cancelFlag = { requested: false };
   let inst;
@@ -2874,8 +4234,18 @@ async function main() {
     logPath,
     relaunchCycles: RELAUNCH_CYCLES,
     controlledIo,
+    baseIdentifier: BASE_IDENTIFIER,
+    acceptanceIdentifier: ACCEPTANCE_IDENTIFIER,
+    realDataDir: REAL_DATA,
+    homeDir: process.env.USERPROFILE || "",
     // WB07：ui-source-paths 也用统一 fixture（两版 WorkBuddy 合成转写）。
-    profile: ["ui-identity", "ui-ccs-import", "ui-pricing", "ui-source-paths"].includes(SCENARIO)
+    profile: [
+      "ui-identity",
+      "ui-ccs-import",
+      "ui-pricing",
+      "ui-source-paths",
+      "ui-cache-tiers",
+    ].includes(SCENARIO)
       ? "unified"
       : undefined,
     env: {
@@ -2889,8 +4259,10 @@ async function main() {
             : {}),
     },
     mutate:
-      SCENARIO === "ui-pricing"
-        ? preparePricingScenario
+      SCENARIO === "ui-cache-tiers"
+        ? prepareCacheTiersScenario
+        : SCENARIO === "ui-pricing"
+          ? preparePricingScenario
         : SCENARIO === "fault-logs-file"
           ? (r) => {
               const p = path.join(r, "tokenscope", "logs");
@@ -2910,7 +4282,12 @@ async function main() {
               }
             : SCENARIO === "privacy-consent-gate" ||
                 SCENARIO === "privacy-accept-restart" ||
-                SCENARIO === "privacy-policy-update"
+                SCENARIO === "privacy-policy-update" ||
+                SCENARIO === "privacy-preseeded" ||
+                SCENARIO === "privacy-revision2-consent" ||
+                SCENARIO === "privacy-denied-ipc" ||
+                SCENARIO === "privacy-accept-order" ||
+                SCENARIO === "privacy-variants-close"
               ? (r) => {
                   // P06/WB05：privacy-consent-gate 与 privacy-accept-restart 要
                   // "未同意"状态——删掉隔离根预置的同意记录与政策修订号（其余
@@ -2926,17 +4303,79 @@ async function main() {
                     );
                     if (downgraded === text)
                       throw new Error("隔离根 settings.toml 未含修订号行，无法构造旧同意场景");
-                    fs.writeFileSync(p, downgraded, "utf8");
+                    const legacyOnly = downgraded
+                      .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
+                      .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
+                    fs.writeFileSync(p, legacyOnly, "utf8");
+                    return;
+                  }
+                  if (SCENARIO === "privacy-variants-close") {
+                    // AC06：记忆预设变体——剥离同意后追加 close_action，
+                    // 验证未同意时点关闭仍弹隐私退出确认而非最小化。
+                    // 2026-10-28：协议同意两项一并剥离（构造真实未同意状态）。
+                    const stripped = text
+                      .replace(/^[ \t]*privacy_policy_accepted[ \t]*=[ \t]*true[ \t]*\r?\n?/m, "")
+                      .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
+                      .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
+                    fs.writeFileSync(p, stripped + 'close_action = "minimize"\n', "utf8");
                     return;
                   }
                   const stripped = text
                     .replace(/^[ \t]*privacy_policy_accepted[ \t]*=[ \t]*true[ \t]*\r?\n?/m, "")
-                    .replace(/^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m, "");
+                    .replace(/^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m, "")
+                    .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
+                    .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
                   if (stripped === text)
                     throw new Error("隔离根 settings.toml 未含同意记录，无法构造未同意场景");
                   fs.writeFileSync(p, stripped, "utf8");
+                  if (SCENARIO === "privacy-preseeded") {
+                    // 十七轮复核 P2：计划 §4b.1 要求预置「旧修订布尔同意」
+                    // （accepted=true + revision=1 → 新版 StaleRevision 重新
+                    // 询问），不是剥离同意——观察窗口证明旧修订同意状态下
+                    // 对预置业务数据零读取零写入。
+                    // 2026-10-28：真实旧用户只有隐私政策同意、没有协议同意
+                    // 记录——协议两项一并剥离，验证新版本不会把旧记录当作
+                    // 已同意协议而放行。
+                    const downgraded = text
+                      .replace(
+                        /^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m,
+                        "privacy_policy_revision = 1\n",
+                      )
+                      .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
+                      .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
+                    if (downgraded === text)
+                      throw new Error("隔离根 settings.toml 未含修订号行，无法构造旧修订同意场景");
+                    fs.writeFileSync(p, downgraded, "utf8");
+                    preseedBusinessFiles(path.join(r, "tokenscope"));
+                    return;
+                  }
+                  if (SCENARIO === "privacy-revision2-consent") {
+                    // 2026-10-29 复核：真实 0.6.0 旧用户形态——隐私政策同意
+                    // accepted=true + revision=2、没有协议同意字段；同时预置
+                    // 业务文件，证明门禁关闭期间对旧业务数据零读取零写入，
+                    // 之后由真实界面点击完成重新同意。
+                    const legacy = text
+                      .replace(
+                        /^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m,
+                        "privacy_policy_revision = 2\n",
+                      )
+                      .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
+                      .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
+                    if (legacy === text)
+                      throw new Error("隔离根 settings.toml 未含修订号行，无法构造修订 2 旧用户");
+                    fs.writeFileSync(p, legacy, "utf8");
+                    preseedBusinessFiles(path.join(r, "tokenscope"));
+                    return;
+                  }
                 }
-              : undefined,
+              : SCENARIO === "privacy-variants-corrupt"
+                ? (r) => {
+                    // AC06：损坏 TOML 变体——启动必须进入阻断弹窗且原文件
+                    // 逐字节不变（prepare 产物整体替换为非法内容）。
+                    const p = path.join(r, "tokenscope", "settings.toml");
+                    fs.writeFileSync(p, "not [valid toml", "utf8");
+                  }
+                : undefined,
   });
 
   // S00（计划 §9.1）：场景取消标志 + 阶段记录 + 最小证据写盘点。
@@ -2969,8 +4408,10 @@ async function main() {
           recorded_pids: mergePids([inst.current?.hostPid], inst.current?.descendantPids ?? []),
           attached: inst.attached === true,
           launches: buildLaunchesEvidence(inst.launches),
-          checks: ck.rows,
+          checks: [...ck.rows, ...ck.pendingRows],
           failed: ck.failures.map((f) => f.name),
+          pending: ck.pendingRows.map((p) => p.name),
+          verification_complete: ck.pendingRows.length === 0,
           minimal_evidence: true,
           minimal_evidence_at: nowIso(),
         },
@@ -3008,14 +4449,31 @@ async function main() {
     hb(`attach 模式状态文件不可用：${stateError}`);
   } else {
     try {
-      const manifest = await inst.prepareRoot();
-      ev.manifest_files = Object.keys(manifest.files ?? {}).length;
-      ev.manifest_sha_first = manifest.files
-        ? Object.values(manifest.files).map((f) => f.sha256.slice(0, 12))
-        : [];
-      if (SCENARIO === "first-frame") ev.expectStored = EXPECT_STORED;
-      hb("启动 release/acceptance 实例并连接 CDP");
-      const info = await inst.launch();
+      const launchGate = await startIfPreflightAllows({
+        preflight: () => launchPreflight,
+        prepare: async () => {
+          const manifest = await inst.prepareRoot();
+          ev.manifest_files = Object.keys(manifest.files ?? {}).length;
+          ev.manifest_sha_first = manifest.files
+            ? Object.values(manifest.files).map((f) => f.sha256.slice(0, 12))
+            : [];
+          if (SCENARIO === "first-frame") ev.expectStored = EXPECT_STORED;
+          if (SCENARIO === "ui-single-instance") {
+            // 先于第一个实例读取托盘：基线可能包含用户正在运行的正式实例图标；
+            // 场景按“基线 + 1”判断验收实例只新增一个图标。
+            ev.tray_baseline_before_primary = readTrayObservation();
+          }
+          return manifest;
+        },
+        launch: async () => {
+          hb("启动 release/acceptance 实例并连接 CDP");
+          return inst.launch();
+        },
+      });
+      if (!launchGate.started) {
+        throw new Error(`预检拒绝启动：${launchGate.preflight?.reason ?? "unknown"}`);
+      }
+      const info = launchGate.launched;
       hb(`PID=${info.pid} port=${info.port}`);
       if (SCENARIO === "fault-pricing-locked") {
         // 在进程启动前独占打开 pricing.toml（FileShare=None），让真实后端读取失败
@@ -3136,7 +4594,8 @@ async function main() {
         SCENARIO === "ui-source-paths" ||
         SCENARIO === "ui-identity" ||
         SCENARIO === "ui-ccs-import" ||
-        SCENARIO === "ui-pricing"
+        SCENARIO === "ui-pricing" ||
+        SCENARIO === "ui-single-instance"
       ) {
         // S00：失败截图/DOM 取证有短上限，无法完成就跳过并记原因（计划 §9.1 第 5 条）
         try {
@@ -3180,7 +4639,8 @@ async function main() {
                 SCENARIO === "ui-source-paths" ||
                 SCENARIO === "ui-identity" ||
                 SCENARIO === "ui-ccs-import" ||
-                SCENARIO === "ui-pricing"
+                SCENARIO === "ui-pricing" ||
+                SCENARIO === "ui-single-instance"
               ) {
                 const logs = path.join(root, "tokenscope", "logs");
                 if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
@@ -3197,7 +4657,10 @@ async function main() {
       process.exit(1);
     }
     if (!scenarioError) {
-      hb(`场景 ${SCENARIO} 结束，检查 ${ck.rows.length - ck.failures.length}/${ck.rows.length}`);
+      hb(
+        `场景 ${SCENARIO} 结束，检查 ${ck.rows.length - ck.failures.length}/${ck.rows.length}` +
+          (ck.pendingRows.length ? `，待验证 ${ck.pendingRows.length} 项` : ""),
+      );
     }
   }
 
@@ -3239,7 +4702,8 @@ async function main() {
     SCENARIO === "ui-source-paths" ||
     SCENARIO === "ui-identity" ||
     SCENARIO === "ui-ccs-import" ||
-    SCENARIO === "ui-pricing"
+    SCENARIO === "ui-pricing" ||
+    SCENARIO === "ui-single-instance"
   ) {
     const logs = path.join(root, "tokenscope", "logs");
     if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
@@ -3263,7 +4727,8 @@ async function main() {
   if (
     SCENARIO.startsWith("ui-") ||
     SCENARIO === "privacy-accept-restart" ||
-    SCENARIO === "privacy-policy-update"
+    SCENARIO === "privacy-policy-update" ||
+    SCENARIO === "privacy-accept-order"
   ) {
     const missing = missingBusinessEvents(ev.acceptance_trace.records);
     ck.add("required_business_trace_present", missing.length === 0, JSON.stringify(missing));
@@ -3303,8 +4768,13 @@ async function main() {
   ev.stages = stage.list();
   ev.launch_count = inst.launches.length;
   ev.launches = buildLaunchesEvidence(inst.launches);
-  ev.checks = ck.rows;
+  ev.checks = [...ck.rows, ...ck.pendingRows];
   ev.failed = ck.failures.map((f) => f.name);
+  ev.pending = ck.pendingRows.map((p) => p.name);
+  ev.verification_complete = ck.pendingRows.length === 0;
+  ev.base_identifier = BASE_IDENTIFIER;
+  ev.acceptance_identifier = ACCEPTANCE_IDENTIFIER;
+  ev.real_data_dir = REAL_DATA;
   if (ck.failures.length) ev.host_log_tail = inst.logTail();
   if (ck.failures.length) {
     // 应用自己的文件日志（隔离根 tokenscope/logs）尾部：进程 stdout 为空时这是唯一线索
@@ -3330,12 +4800,19 @@ async function main() {
     passed: ck.rows.length - ck.failures.length,
     total: ck.rows.length,
     failures: ck.failures.map((f) => `${f.name}: ${f.detail}`),
+    pending: ck.pendingRows.map((p) => `${p.name}: ${p.detail}`),
+    verification_complete: ck.pendingRows.length === 0,
     launches: ev.launches.map((l) => ({
       index: l.index,
+      role: l.role,
       port: l.port,
       attached: l.attached,
       host_pid: l.host_pid,
       host_exit_code: l.host_exit_code,
+      same_root: l.same_root,
+      acceptance_identifier: l.acceptance_identifier,
+      exit_elapsed_ms: l.exit_elapsed_ms,
+      exit_within_budget: l.exit_within_budget,
     })),
     evidence: out,
     real_untouched: ev.real_untouched,
@@ -3344,6 +4821,8 @@ async function main() {
   };
   console.log(JSON.stringify(summary, null, 2));
   if (ck.failures.length) process.exitCode = 1;
+  // AC10：pending 不是通过；用独立退出码让调用方/未来 CI 不会把未观察项当成全绿。
+  else if (ck.pendingRows.length) process.exitCode = 3;
   // 启动/attach 失败：证据已写出，保留原来的退出码 2 语义
   if (setupError) throw setupError;
   if (SCENARIO === "expire-start") {

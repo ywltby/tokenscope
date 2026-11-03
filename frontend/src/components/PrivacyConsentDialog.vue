@@ -4,7 +4,7 @@
 // 不预选同意、不把关闭弹窗或继续使用当作同意：遮罩与 Esc 都不关闭弹窗
 // （保持阻断，不露出可操作主页面），只有「同意并继续」会触发保存；
 // 「不同意」进入专属退出确认。
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { NButton, NModal } from "naive-ui";
 import { renderPolicyMarkdown } from "../lib/policyMarkdown";
 import type { PolicyInfo } from "../lib/privacyGate";
@@ -29,6 +29,13 @@ const emit = defineEmits<{
 }>();
 
 const blocks = computed(() => renderPolicyMarkdown(props.policy.markdown));
+// 十九轮复核 P2：政策引用 terms.md——同意前必须能离线阅读协议全文。
+// 协议由后端编译进二进制（PolicyInfo.terms），弹窗内展开查看，不依赖
+// 安装资源路径或远程链接。
+const termsBlocks = computed(() =>
+  props.policy.terms ? renderPolicyMarkdown(props.policy.terms) : [],
+);
+const termsOpen = ref(false);
 </script>
 
 <template>
@@ -50,23 +57,70 @@ const blocks = computed(() => renderPolicyMarkdown(props.policy.markdown));
         同意后仅在本机读取已启用来源的会话日志用于统计与费用估算，不上传会话与统计数据；
         价格同步会访问 models.dev 与 OpenRouter 的公开目录。完整说明见下方全文。
       </p>
+      <p class="privacy-consent-scope">
+        点击「同意并继续」即表示您同意隐私政策和用户许可协议。两份文件可在下方离线查看。
+      </p>
       <div class="privacy-scroll" tabindex="0" role="region" aria-label="隐私政策全文">
         <template v-for="(block, index) in blocks" :key="index">
           <h2 v-if="block.type === 'h1'" class="privacy-h1">{{ block.text }}</h2>
           <h3 v-else-if="block.type === 'h2'" class="privacy-h2">{{ block.text }}</h3>
           <h4 v-else-if="block.type === 'h3'" class="privacy-h3">{{ block.text }}</h4>
           <ul v-else-if="block.type === 'ul'" class="privacy-ul">
-            <li v-for="(item, i) in block.items" :key="i">{{ item }}</li>
+            <li v-for="(item, i) in block.items" :key="i">
+              <template v-for="(line, j) in item.split('\n')" :key="j">
+                <br v-if="j > 0" />{{ line }}
+              </template>
+            </li>
           </ul>
-          <p v-else class="privacy-p">{{ block.text }}</p>
+          <p v-else class="privacy-p">
+            <template v-for="(line, i) in block.text.split('\n')" :key="i">
+              <br v-if="i > 0" />{{ line }}
+            </template>
+          </p>
+        </template>
+      </div>
+      <div v-if="termsOpen" class="privacy-terms" role="region" aria-label="最终用户许可与免责协议">
+        <template v-for="(block, i) in termsBlocks" :key="'terms-' + i">
+          <h4 v-if="block.type === 'h1' || block.type === 'h2'" class="privacy-h3">
+            {{ block.text }}
+          </h4>
+          <ul v-else-if="block.type === 'ul'" class="privacy-ul">
+            <li v-for="(item, j) in block.items || []" :key="j">
+              <template v-for="(line, k) in item.split('\n')" :key="k">
+                <br v-if="k > 0" />{{ line }}
+              </template>
+            </li>
+          </ul>
+          <p v-else class="privacy-p">
+            <template v-for="(line, k) in block.text.split('\n')" :key="k">
+              <br v-if="k > 0" />{{ line }}
+            </template>
+          </p>
         </template>
       </div>
       <div v-if="message" class="privacy-error" role="alert">
         <span>{{ message }}</span>
       </div>
+      <div v-if="!termsBlocks.length || !blocks.length" class="privacy-error" role="alert">
+        隐私政策或用户许可协议未加载，无法确认同意，请重新检查。
+      </div>
       <div class="privacy-actions">
+        <NButton
+          v-if="termsBlocks.length"
+          size="small"
+          :disabled="saving"
+          class="privacy-terms-toggle"
+          @click="termsOpen = !termsOpen"
+        >
+          {{ termsOpen ? "收起用户许可协议" : "查看最终用户许可协议" }}
+        </NButton>
         <NButton size="small" :disabled="saving" @click="emit('reject')">不同意</NButton>
-        <NButton v-if="blocked" size="small" :disabled="saving" @click="emit('retry')">
+        <NButton
+          v-if="blocked || !termsBlocks.length || !blocks.length"
+          size="small"
+          :disabled="saving"
+          @click="emit('retry')"
+        >
           重新检查
         </NButton>
         <span class="privacy-actions-spacer" />
@@ -74,7 +128,7 @@ const blocks = computed(() => renderPolicyMarkdown(props.policy.markdown));
           size="small"
           type="primary"
           :loading="saving"
-          :disabled="saving"
+          :disabled="saving || !termsBlocks.length || !blocks.length"
           @click="emit('accept')"
         >
           {{ saving ? "正在保存…" : "同意并继续" }}
@@ -133,6 +187,13 @@ const blocks = computed(() => renderPolicyMarkdown(props.policy.markdown));
   color: var(--ts-text-secondary);
 }
 
+.privacy-consent-scope {
+  margin: var(--ts-space-2) 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ts-text-secondary);
+}
+
 .privacy-scroll {
   margin-top: var(--ts-space-3);
   flex: 1;
@@ -181,6 +242,16 @@ const blocks = computed(() => renderPolicyMarkdown(props.policy.markdown));
 
 .privacy-ul {
   padding-left: 18px;
+}
+
+.privacy-terms {
+  max-height: 240px;
+  overflow: auto;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--ts-hairline);
+  border-radius: 8px;
+  background: var(--ts-surface-sunken, rgba(0, 0, 0, 0.02));
 }
 
 .privacy-error {

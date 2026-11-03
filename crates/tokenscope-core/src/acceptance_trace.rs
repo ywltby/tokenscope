@@ -249,12 +249,20 @@ pub(super) fn consent_saved(path: &Path) -> Result<()> {
         return Ok(());
     }
     let bytes = std::fs::read(path).context("读取已落盘同意记录的指纹失败")?;
+    // 二轮复核缺口：判定方必须能核对「指纹对应的内容」，只给哈希会放行
+    // 格式合法的假值（复核方独立复现 0000000000000000 全过）。保存时字节
+    // 随事件内嵌（JSONL 只追加，即不可变证据），判定方重算哈希并解析
+    // 同意值与修订号；业务期随后的合法重写不影响这份保存时证据。
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     record_path(
         "consent_saved",
         path,
-        json!({"settings_hash": {
-            "algorithm":"fnv1a64", "value":settings_hash(&bytes)
-        }}),
+        json!({
+            "settings_hash": {
+                "algorithm":"fnv1a64", "value":settings_hash(&bytes)
+            },
+            "settings_bytes_hex": hex,
+        }),
     )
 }
 

@@ -18,7 +18,9 @@ use tokenscope::history::{
 use tokenscope::import::ccs::{self, CcsSource};
 use tokenscope::model::{AgentKind, TokenCounts, UsageEvent};
 use tokenscope::model_identity::ModelIdentity;
-use tokenscope::report::{CollectedView, SummaryOptions, collect_all_with_sources_for_test};
+use tokenscope::report::{
+    CollectedView, PARSE_RULES_REVISION, SummaryOptions, collect_all_with_sources_for_test,
+};
 use tokenscope::source::codex::CodexSource;
 use tokenscope::source::{CollectStats, DirVisitLedger, FileParse, Source};
 
@@ -149,6 +151,9 @@ fn legacy_normal_write(event: &UsageEvent) -> EventWrite {
         session_initial_cwd: event.session_initial_cwd.clone(),
         event_cwd: event.event_cwd.clone(),
         tokens: TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
             input: event.input_tokens,
             output: event.output_tokens,
             cache_write: event.cache_write_tokens,
@@ -263,6 +268,9 @@ fn v2_fingerprint_reparses_unchanged_codex_file_once_and_keeps_old_fact() {
     // 精确预置 v2 会保存的正常 token_count：0-based 第 3 行；压缩尚未入库。
     // 不用新解析器的输出构造旧基线，以免新解析器的错误同步污染预期。
     let normal = UsageEvent {
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
         ts: NORMAL_TS.parse().unwrap(),
         agent: AgentKind::Codex,
         model: MODEL.to_string(),
@@ -279,6 +287,9 @@ fn v2_fingerprint_reparses_unchanged_codex_file_once_and_keeps_old_fact() {
         cache_read_tokens: 20,
     };
     let compaction = UsageEvent {
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
         ts: COMPACTION_TS.parse().unwrap(),
         line: 4,
         input_tokens: 100,
@@ -413,6 +424,9 @@ fn v2_fingerprint_reparses_unchanged_codex_file_once_and_keeps_old_fact() {
     assert_eq!(
         added.tokens,
         TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
             input: 100,
             output: 4,
             cache_write: 0,
@@ -422,6 +436,9 @@ fn v2_fingerprint_reparses_unchanged_codex_file_once_and_keeps_old_fact() {
     assert_eq!(
         history.totals().unwrap(),
         TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
             input: 180,
             output: 14,
             cache_write: 0,
@@ -435,7 +452,10 @@ fn v2_fingerprint_reparses_unchanged_codex_file_once_and_keeps_old_fact() {
     assert_eq!(upgraded.fingerprint, old_source.fingerprint);
     assert_eq!(upgraded.size_bytes, old_source.size_bytes);
     assert_eq!(upgraded.mtime_ms, old_source.mtime_ms);
-    assert_eq!(upgraded.context_revision, "3|");
+    assert_eq!(
+        upgraded.context_revision,
+        format!("{PARSE_RULES_REVISION}|")
+    );
     assert_eq!(upgraded.state, "present");
     assert_eq!(upgraded.stats.events, 2);
     assert_eq!(upgraded.observations, old_source.observations + 1);
@@ -523,6 +543,9 @@ fn model_upgrade_fixture(parser_revision: i64) -> ModelUpgradeFixture {
     let source_before = file_snapshot(&file);
     // v2 忽略 settings，已经保存为 model-a；新解析器应归 model-b，但不能双计。
     let old = UsageEvent {
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
         ts: NORMAL_TS.parse().unwrap(),
         agent: AgentKind::Codex,
         model: "model-a".to_string(),
@@ -620,6 +643,9 @@ fn assert_model_corrected_without_replacing_fact(fixture: &ModelUpgradeFixture) 
     assert_eq!(
         history.totals().unwrap(),
         TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
             input: 80,
             output: 10,
             cache_write: 0,
@@ -665,6 +691,9 @@ fn assert_model_corrected_without_replacing_fact(fixture: &ModelUpgradeFixture) 
         "旧别名完整行原样保留"
     );
     let new_model_event = UsageEvent {
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
         model: "model-b".to_string(),
         ..fixture.old.clone()
     };
@@ -798,6 +827,9 @@ fn ambiguous_old_native_model_candidates_are_skipped_without_new_usage() {
     let fixture = model_upgrade_fixture(1);
     // 第二条合法旧事实来自另一路径，故来源键不同；不放别名，避免人为别名冲突。
     let duplicate = UsageEvent {
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
         source_path: fixture
             .temp
             .0
@@ -849,6 +881,9 @@ fn ambiguous_old_native_model_candidates_are_skipped_without_new_usage() {
 fn current_parser_model_is_not_a_correction_candidate_while_old_peer_is_corrected() {
     let fixture = model_upgrade_fixture(PARSER_REVISION);
     let eligible = UsageEvent {
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
         session_id: "synthetic-eligible-old-session".to_string(),
         ts: COMPACTION_TS.parse().unwrap(),
         source_path: fixture
@@ -905,6 +940,9 @@ fn current_parser_model_is_not_a_correction_candidate_while_old_peer_is_correcte
     assert_eq!(
         corrected.tokens,
         TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
             input: 80,
             output: 10,
             cache_write: 0,
@@ -989,6 +1027,9 @@ fn occupied_new_model_alias_rejects_collection_and_rolls_back_both_facts() {
     assert_eq!(imported_b.ts, fixture.old.ts);
     assert_eq!(imported_b.tokens, fixture.old_stored.tokens);
     let new_model_event = UsageEvent {
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
         model: "model-b".to_string(),
         ..fixture.old.clone()
     };
@@ -1039,6 +1080,9 @@ fn occupied_new_model_alias_rejects_collection_and_rolls_back_both_facts() {
 fn existing_model_aliases_on_the_same_fact_allow_unique_model_correction() {
     let fixture = model_upgrade_fixture(1);
     let new_model_event = UsageEvent {
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
         model: "model-b".to_string(),
         ..fixture.old.clone()
     };
@@ -1077,6 +1121,9 @@ fn existing_model_aliases_on_the_same_fact_allow_unique_model_correction() {
     assert_eq!(
         corrected.tokens,
         TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
             input: 80,
             output: 10,
             cache_write: 0,

@@ -32,10 +32,13 @@ const MATCH_LABEL: Record<MatchMode, string> = {
   prefix_variant_fallback: "前缀匹配（变体回退）",
 };
 
-// UX07：分项显示名消费 tokenDisplay 单一来源（U14：缓存命中）。
-export const KIND_LABEL: Record<CostLineKind, string> = Object.fromEntries(
-  TOKEN_BUCKETS.map((b) => [b.key, b.key === "input" ? "输入（扣除缓存）" : b.label]),
-) as Record<CostLineKind, string>;
+// UX07：分项显示名消费 tokenDisplay 单一来源（U14：缓存命中）；
+// N18：5m/1h 分档行不在四桶清单里，标签在此补齐。
+export const KIND_LABEL: Record<CostLineKind, string> = Object.fromEntries([
+  ...TOKEN_BUCKETS.map((b) => [b.key, b.key === "input" ? "输入（扣除缓存）" : b.label]),
+  ["cache_write_5m", "缓存写（5 分钟档）"],
+  ["cache_write_1h", "缓存写（1 小时档）"],
+]) as Record<CostLineKind, string>;
 
 /** USD/百万 token 单价（UX07：unit 场景单一入口）。 */
 function fmtUnit(v: number): string {
@@ -48,10 +51,20 @@ function fmtMoney(v: number): string {
   return formatMoney(v, "request");
 }
 
+/** N18：prompt token 算式里的「缓存写」分量。
+ *  可信分档事件把写入拆成 5m/1h 两行（无合并行）——算式必须显示**两档
+ *  之和**；只有合并行时才用合并值。两行都缺（候选未声明分档、写入整体
+ *  未知）时回落合并值；分档行与合并行都不存在则为 0。绝不重复计数。 */
+function cacheWriteTokens(bd: EventCostBreakdown): number {
+  const split = bd.lines.filter((l) => l.kind === "cache_write_5m" || l.kind === "cache_write_1h");
+  if (split.length > 0) return split.reduce((sum, l) => sum + l.tokens, 0);
+  return bd.lines.find((l) => l.kind === "cache_write")?.tokens ?? 0;
+}
+
 function factRows(bd: EventCostBreakdown): BreakdownRow[] {
   const m = bd.matched;
   const input = bd.lines.find((l) => l.kind === "input")?.tokens ?? 0;
-  const cw = bd.lines.find((l) => l.kind === "cache_write")?.tokens ?? 0;
+  const cw = cacheWriteTokens(bd);
   const cr = bd.lines.find((l) => l.kind === "cache_read")?.tokens ?? 0;
   const rows: BreakdownRow[] = [
     { label: "匹配模型", value: m.raw_key },
@@ -117,7 +130,19 @@ function resultRows(bd: EventCostBreakdown): BreakdownRow[] {
   } else {
     rows.push({ label: "估算合计", value: fmtMoney(bd.cost_usd), total: true });
   }
-  if (!bd.complete) {
+  if (bd.cache_write_split_estimated) {
+    // N18：写入分项未知（旧日志/源日志已删）——金额是按写入总量单价的
+    // 估算，不得当作完整精确费用；分档拆分见候选声明。
+    rows.push({
+      label: "写入分档未知",
+      detail: "该请求缺少 5 分钟/1 小时写入分项，写费按写入总量单价估算（可能低估 1 小时写入）",
+      unknown: true,
+    });
+  }
+  // 只有**实际存在未计价 token** 才显示未计价说明：「按合并价估算」虽然
+  // complete=false，但 unknown token 为 0、金额来自真实单价，不得声称
+  // 含未计价 token（复核项 6）。
+  if (unpriced.length > 0) {
     rows.push({
       label: "未计价",
       detail: "缺价 ≠ 免费：未计价 token 不计入合计，数量见上方各行",
@@ -129,9 +154,16 @@ function resultRows(bd: EventCostBreakdown): BreakdownRow[] {
 
 function sourceRows(bd: EventCostBreakdown): BreakdownRow[] {
   const m = bd.matched;
+  // 复核项 4：reason=highest_partial_cost 也可能是**纯估算**（事件缺分档、
+  // 候选分档价齐全，unknown token=0）。此时不得声称有未计价 token。
   const selection =
     m.reason === "highest_partial_cost"
-      ? `候选 ${m.candidate_count} 条（均不完整），取已知费用最高者；未计价 token 见未知行`
+      ? bd.cache_write_split_estimated
+        ? // 复核项 3：只描述**所选候选**的已知事实——事件缺写入分档、
+          // 写费按合并价估算。其他候选为何不完整由后端的排除披露逐条
+          // 说明，这里不得一律归因为事件缺分档。
+          `候选 ${m.candidate_count} 条，未全部完整；所选候选因事件缺写入分档，写费按合并价估算（非完整精确费用）`
+        : `候选 ${m.candidate_count} 条（均不完整），取已知费用最高者；未计价 token 见未知行`
       : `候选 ${m.candidate_count} 条（完整 ${m.complete_candidate_count ?? "?"}/不完整 ${
           m.incomplete_candidate_count ?? "?"
         }），在完整候选中取最高费用（保守估算，非服务器实际路由）`;

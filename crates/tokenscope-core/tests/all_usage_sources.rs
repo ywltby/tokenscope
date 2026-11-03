@@ -347,5 +347,8 @@ fn sample_event(agent: AgentKind, session: &str, record: &str) -> UsageEvent {
         output_tokens: 1,
         cache_write_tokens: 0,
         cache_read_tokens: 0,
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
     }
 }

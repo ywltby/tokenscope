@@ -30,6 +30,7 @@ import {
   isReject,
 } from "./fixtures/ui-contracts.mjs";
 import { REQUIRED_CONTRACTS, runContracts } from "./contracts/interaction-contracts.mjs";
+import { computeFixtureCoverage } from "./lib/fixture-coverage.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -214,7 +215,11 @@ const MEASURE = () => {
         rect: rect(c),
       }))
     : [];
-  const iconFilters = [...document.querySelectorAll('[aria-label="数据来源"] button, [aria-label="主题偏好（浅色/深色/跟随系统）"] button, .range-trigger')].map((el) => ({
+  const iconFilters = [
+    ...document.querySelectorAll(
+      '[aria-label="数据来源"] button, [aria-label="主题偏好（浅色/深色/跟随系统）"] button, .range-trigger',
+    ),
+  ].map((el) => ({
     name: el.getAttribute("aria-label"),
     title: el.getAttribute("title"),
     text: el.innerText.trim(),
@@ -222,10 +227,12 @@ const MEASURE = () => {
     centerOffset: (() => {
       const button = el.getBoundingClientRect();
       const icon = el.querySelector("svg")?.getBoundingClientRect();
-      return icon ? {
-        x: icon.left + icon.width / 2 - button.left - button.width / 2,
-        y: icon.top + icon.height / 2 - button.top - button.height / 2,
-      } : null;
+      return icon
+        ? {
+            x: icon.left + icon.width / 2 - button.left - button.width / 2,
+            y: icon.top + icon.height / 2 - button.top - button.height / 2,
+          }
+        : null;
     })(),
   }));
 
@@ -243,9 +250,15 @@ const MEASURE = () => {
             color: getComputedStyle(el).color,
           }
         : null;
-    return { th: g(th), td: g(td),
-      centered: [...root.querySelectorAll('th, td')].every(el => getComputedStyle(el).textAlign === 'center'),
-      autoWidth: [...root.querySelectorAll('table')].every(el => getComputedStyle(el).tableLayout === 'auto'),
+    return {
+      th: g(th),
+      td: g(td),
+      centered: [...root.querySelectorAll("th, td")].every(
+        (el) => getComputedStyle(el).textAlign === "center",
+      ),
+      autoWidth: [...root.querySelectorAll("table")].every(
+        (el) => getComputedStyle(el).tableLayout === "auto",
+      ),
     };
   };
 
@@ -385,9 +398,15 @@ const READ_FIRST_TABLE_TYPO = () => {
     el
       ? { fontSize: getComputedStyle(el).fontSize, fontWeight: getComputedStyle(el).fontWeight }
       : null;
-  return { th: g(root.querySelector("th")), td: g(root.querySelector("tbody td")),
-    centered: [...root.querySelectorAll('th, td')].every(el => getComputedStyle(el).textAlign === 'center'),
-    autoWidth: [...root.querySelectorAll('table')].every(el => getComputedStyle(el).tableLayout === 'auto'),
+  return {
+    th: g(root.querySelector("th")),
+    td: g(root.querySelector("tbody td")),
+    centered: [...root.querySelectorAll("th, td")].every(
+      (el) => getComputedStyle(el).textAlign === "center",
+    ),
+    autoWidth: [...root.querySelectorAll("table")].every(
+      (el) => getComputedStyle(el).tableLayout === "auto",
+    ),
   };
 };
 
@@ -432,7 +451,7 @@ const READ_CHART_CANVAS = () => {
 };
 
 const CLICK_SEGMENT = (label) => {
-  const name = ({ 浅色: "浅色模式", 深色: "深色模式" })[label] ?? label;
+  const name = { 浅色: "浅色模式", 深色: "深色模式" }[label] ?? label;
   const radio = [...document.querySelectorAll(".ts-segmented-item")].find(
     (r) => r.getAttribute("aria-label") === name || r.textContent.trim() === label,
   );
@@ -486,7 +505,8 @@ function buildChecks(m, ctx) {
     const positions = m.filterControls.map((c) => c.rect);
     checks.push([
       "filter_controls_stay_on_two_rows",
-      positions.length === 3 && positions.every(Boolean) &&
+      positions.length === 3 &&
+        positions.every(Boolean) &&
         near(positions[1].top, positions[2].top, 1) &&
         positions[1].top >= positions[0].top + positions[0].height + 8,
       positions.map((r) => r?.top).join(","),
@@ -494,14 +514,19 @@ function buildChecks(m, ctx) {
     // WB06：来源五图标（全部 + 四应用）+ 主题三选项 + 全部时间 = 9 个纯图标按钮。
     checks.push([
       "source_and_date_filters_are_named_icons_without_text",
-      m.iconFilters.length === 9 && m.iconFilters.every((c) =>
-        c.hasIcon && c.text === "" && !!c.name && c.name === c.title),
+      m.iconFilters.length === 9 &&
+        m.iconFilters.every((c) => c.hasIcon && c.text === "" && !!c.name && c.name === c.title),
       JSON.stringify(m.iconFilters),
     ]);
     checks.push([
       "filter_icons_are_centered_in_buttons",
-      m.iconFilters.length === 9 && m.iconFilters.every((c) =>
-        c.centerOffset && Math.abs(c.centerOffset.x) <= 0.5 && Math.abs(c.centerOffset.y) <= 0.5),
+      m.iconFilters.length === 9 &&
+        m.iconFilters.every(
+          (c) =>
+            c.centerOffset &&
+            Math.abs(c.centerOffset.x) <= 0.5 &&
+            Math.abs(c.centerOffset.y) <= 0.5,
+        ),
       JSON.stringify(m.iconFilters.map((c) => ({ name: c.name, offset: c.centerOffset }))),
     ]);
     checks.push([
@@ -513,7 +538,7 @@ function buildChecks(m, ctx) {
     ]);
     checks.push([
       "tables_center_headers_and_cells_with_auto_width",
-      [m.aggregateTable, m.eventsTable, m.settingsTable].every(t => t?.centered && t?.autoWidth),
+      [m.aggregateTable, m.eventsTable, m.settingsTable].every((t) => t?.centered && t?.autoWidth),
       JSON.stringify([m.aggregateTable, m.eventsTable, m.settingsTable]),
     ]);
     const sc = m.dateShortcuts;
@@ -611,11 +636,15 @@ function buildChecks(m, ctx) {
       names.length >= 2 &&
         names.every((n) => typeof n === "string" && n.endsWith("日志目录")) &&
         inputs.every((i) => !!i.id && i.labelText === i.ariaLabel) &&
-        inputs.every((i) => i.placeholder === "留空使用当前生效目录"),
+        // PR3 起追加输入的占位符为绝对路径示例（旧值「留空使用当前生效
+        // 目录」已随追加目录管理改版失效）。
+        inputs.every((i) => i.placeholder === "绝对路径（如 D:\\\\history\\\\claude\\\\projects）"),
       names.join(" | "),
     ]);
     const eff = sd?.effective ?? [];
-    const long = eff[0];
+    // AC08 归因：四应用行加入后 eff[0] 不再是长路径行——按文本定位，
+    // 行序无关。
+    const long = eff.find((e) => e.text === ctx.expectedLongDir);
     checks.push([
       "effective_directory_is_shown_in_full_and_wraps",
       !!long &&
@@ -633,7 +662,11 @@ function buildChecks(m, ctx) {
 
   // UX05：切维度 / 切主题后类别与摘要一致
   if (ctx.fixture === "normal" || ctx.fixture === "multi-category") {
-    checks.push(["chart_renders_after_dimension_and_theme_switch", !!m.chart?.after && !!m.chart?.afterTheme, JSON.stringify(m.chart)]);
+    checks.push([
+      "chart_renders_after_dimension_and_theme_switch",
+      !!m.chart?.after && !!m.chart?.afterTheme,
+      JSON.stringify(m.chart),
+    ]);
   }
 
   return checks;
@@ -890,18 +923,28 @@ for (const fixtureName of args.fixtures) {
         // 只在几何量满足原契约后取样；永久零宽、错位或缺控件仍在超时后失败。
         // baseline 保留原始取样，不能为等待“正确”布局而丢失回退证据。
         if (args.phase === "verify") {
-          await page.waitForFunction(() => {
-            const groups = [...document.querySelectorAll(".ts-segmented")];
-            return groups.length > 0 && groups.every((group) => {
-              const thumb = group.querySelector(".ts-segmented-thumb");
-              const active = group.querySelector('[aria-checked="true"]');
-              if (!thumb || !active) return false;
-              const a = active.getBoundingClientRect();
-              const t = thumb.getBoundingClientRect();
-              return a.width > 0 && Math.abs(t.width - a.width) <= 1 &&
-                Math.abs(t.left - a.left) <= 1;
-            });
-          }, null, { timeout: 5000, polling: "raf" });
+          await page.waitForFunction(
+            () => {
+              const groups = [...document.querySelectorAll(".ts-segmented")];
+              return (
+                groups.length > 0 &&
+                groups.every((group) => {
+                  const thumb = group.querySelector(".ts-segmented-thumb");
+                  const active = group.querySelector('[aria-checked="true"]');
+                  if (!thumb || !active) return false;
+                  const a = active.getBoundingClientRect();
+                  const t = thumb.getBoundingClientRect();
+                  return (
+                    a.width > 0 &&
+                    Math.abs(t.width - a.width) <= 1 &&
+                    Math.abs(t.left - a.left) <= 1
+                  );
+                })
+              );
+            },
+            null,
+            { timeout: 5000, polling: "raf" },
+          );
         }
         const m = await page.evaluate(MEASURE);
 
@@ -923,12 +966,14 @@ for (const fixtureName of args.fixtures) {
         await page.waitForTimeout(250);
 
         if (fixtureName === "normal" || fixtureName === "long-text") {
-          await page.locator(".events-card").screenshot({ path: join(args.output, `${label}-events.png`) });
+          await page
+            .locator(".events-card")
+            .screenshot({ path: join(args.output, `${label}-events.png`) });
         }
 
         // 最后切到设置页量测第三张表（聚合/明细已在汇总页量测）
         if (fixtureName === "normal" || fixtureName === "long-text") {
-          const readsBefore = session.ipcCalls.filter(c => c.cmd === "settings_get").length;
+          const readsBefore = session.ipcCalls.filter((c) => c.cmd === "settings_get").length;
           const goto = await page.evaluate(GOTO_SETTINGS);
           if (goto.ok) {
             await page.waitForTimeout(600);
@@ -938,11 +983,13 @@ for (const fixtureName of args.fixtures) {
             await page.waitForTimeout(600);
             m.settingsPreload = {
               before: readsBefore,
-              after: session.ipcCalls.filter(c => c.cmd === "settings_get").length,
-              overlay: await page.locator(".settings-view .n-spin-container").count() > 0,
+              after: session.ipcCalls.filter((c) => c.cmd === "settings_get").length,
+              overlay: (await page.locator(".settings-view .n-spin-container").count()) > 0,
               pricingSection: openPricing.ok,
             };
-            await page.locator(".ts-auto-table-pricing").screenshot({ path: join(args.output, `${label}-pricing.png`) });
+            await page
+              .locator(".ts-auto-table-pricing")
+              .screenshot({ path: join(args.output, `${label}-pricing.png`) });
             if (fixtureName === "normal") {
               m.settingsTable = await page.evaluate(READ_FIRST_TABLE_TYPO);
             } else {
@@ -1021,6 +1068,7 @@ try {
 
 let contractResults = [];
 let contractFailList = [];
+let contractFixtures = [];
 try {
   const run = await runContracts({
     open: openSession,
@@ -1030,6 +1078,7 @@ try {
   });
   contractResults = run.results;
   contractFailList = run.failures;
+  contractFixtures = run.contract_fixtures ?? [];
 } catch (e) {
   contractFailList.push("契约运行器异常：" + e);
   console.error(String(e));
@@ -1045,6 +1094,27 @@ for (const name of args.contracts) {
   if (!contractsByGroup.has(name)) {
     contractFailList.push(name + "：没有任何断言记录（契约未覆盖）");
   }
+}
+// AC08：fixture 覆盖表必须来自当次运行产物；未覆盖项作为缺口上报。
+// 覆盖完整性只在全量运行（全部具名契约）时强制——部分选择（CI 的
+// test:e2e 7/28）按设计只覆盖一部分，缺口如实打印但不判失败。
+// 十七轮复核 P3：全量判定按**名称集合相等**——仅比数量会漏掉手动传入
+// 重复名称、漏选另一条的形态。
+const fullMatrixRun =
+  new Set(args.contracts).size === REQUIRED_CONTRACTS.length &&
+  REQUIRED_CONTRACTS.every((contract) => args.contracts.includes(contract));
+const fixtureCoverage = computeFixtureCoverage({
+  registered: FIXTURE_NAMES,
+  patrol: results.map((r) => ({ fixture: r.fixture, ok: r.ok })),
+  contracts: contractFixtures,
+});
+if (fixtureCoverage.uncovered.length > 0 && fullMatrixRun) {
+  contractFailList.push(
+    "fixture 覆盖缺口（巡检与契约均未运行）：" + fixtureCoverage.uncovered.join(", "),
+  );
+}
+if (fixtureCoverage.unregistered.length > 0) {
+  contractFailList.push("运行产物出现未注册 fixture：" + fixtureCoverage.unregistered.join(", "));
 }
 const contractsOk = contractFailList.length === 0;
 
@@ -1062,6 +1132,7 @@ writeFileSync(
       required_contracts: REQUIRED_CONTRACTS,
       selected_contracts: args.contracts,
       contracts: contractResults,
+      fixture_coverage: fixtureCoverage,
       results,
     },
     null,
@@ -1081,7 +1152,7 @@ console.log(
 
 console.log(
   `
-${contractsOk ? "PASS" : "FAIL"} rc09_named_interaction_contracts（本次选择 ${args.contracts.length}/${REQUIRED_CONTRACTS.length} 条契约）`,
+${contractsOk ? "PASS" : "FAIL"} rc09_named_interaction_contracts（本次选择 ${new Set(args.contracts).size} 个唯一契约（传入 ${args.contracts.length} 条）/${REQUIRED_CONTRACTS.length}；全量=${fullMatrixRun}；fixture 覆盖缺口 ${fixtureCoverage.uncovered.length}，未注册 ${fixtureCoverage.unregistered.length}）`,
 );
 for (const name of args.contracts) {
   const rows = contractsByGroup.get(name) ?? [];

@@ -14,6 +14,7 @@ import {
   STOP_TIMEOUT_MS,
   buildLaunchesEvidence,
   classifyPortOwner,
+  collectAppDescendants,
   collectDescendants,
   connectDecision,
   createLaunchRecord,
@@ -87,7 +88,13 @@ describe("端口计算（§4.8 第 1 条）", () => {
     // AC03：ui-identity 起始 9500（2 次启动用 9501–9502）。
     // AC04：ui-ccs-import 起始 9510（1 次启动用 9511）。
     // AC05：ui-pricing 起始 9520（2 次启动用 9521–9522）。
-    expect(unique).toEqual([9451, 9455, 9460, 9470, 9480, 9490, 9500, 9510, 9520]);
+    // AC06：五个隐私场景各 1 次启动，起始端口 9530/9533/9536/9539/9542。
+    // 2026-10-29：修订 2 旧用户界面重新同意场景起始端口 9545（2 次启动）。
+    // AC10：ui-single-instance 起始端口 9550（2 次启动用 9551–9552）。
+    expect(unique).toEqual([
+      9451, 9455, 9460, 9470, 9480, 9490, 9500, 9510, 9520, 9530, 9533, 9536, 9539, 9542, 9545,
+      9550,
+    ]);
     // 单步最多 3 次启动：ui-refresh 首次 + 2 次重启，ui-system 首次 + 1 次重启，
     // ui-collection-status 首次 + 2 次重启。
     const stepSize = 3;
@@ -149,6 +156,35 @@ describe("后代进程递归记录（§4.8 第 2 条）", () => {
   it("按父 PID 递归到孙进程，且不含宿主自身", () => {
     expect(collectDescendants(table, 100)).toEqual([200, 300, 400]);
     expect(collectDescendants(table, 999)).toEqual([]);
+  });
+
+  it("宿主 PID 被复用时（快照里是系统进程）拒绝把系统进程算作应用后代", () => {
+    // 复现既有事故形态：hostPid 被 smss 复用，csrss/wininit/services 成为"子进程"
+    const ghost = normalizeProcessTable([
+      { ProcessId: 720, ParentProcessId: 4, Name: "smss.exe" },
+      { ProcessId: 728, ParentProcessId: 720, Name: "csrss.exe" },
+      { ProcessId: 852, ParentProcessId: 720, Name: "wininit.exe" },
+      { ProcessId: 944, ParentProcessId: 852, Name: "services.exe" },
+      { ProcessId: 972, ParentProcessId: 852, Name: "lsass.exe" },
+    ]);
+    expect(collectAppDescendants(ghost, 720)).toEqual({ resolved: false, descendants: [] });
+  });
+
+  it("宿主行缺失时判为身份不可解析，不当作没有后代", () => {
+    expect(collectAppDescendants(table, 999)).toEqual({ resolved: false, descendants: [] });
+  });
+
+  it("解析到应用家族宿主后正常展开，并保留真实外部后代", () => {
+    const withForeign = normalizeProcessTable([
+      { ProcessId: 100, ParentProcessId: 1, Name: "tokenscope.exe" },
+      { ProcessId: 200, ParentProcessId: 100, Name: "msedgewebview2.exe" },
+      { ProcessId: 300, ParentProcessId: 200, Name: "msedgewebview2.exe" },
+      { ProcessId: 700, ParentProcessId: 100, Name: "notepad.exe" },
+    ]);
+    expect(collectAppDescendants(withForeign, 100)).toEqual({
+      resolved: true,
+      descendants: [200, 300, 700],
+    });
   });
 
   it("合并多次快照不会丢已记录的后代", () => {
@@ -276,9 +312,9 @@ describe("启动预算与重试（§4.8 第 4 条）", () => {
     expect(isRetryableConnectError("fetch failed ← connect ECONNREFUSED 127.0.0.1:9601")).toBe(
       true,
     );
-    expect(
-      isRetryableConnectError("fetch failed ← The operation was aborted due to timeout"),
-    ).toBe(true);
+    expect(isRetryableConnectError("fetch failed ← The operation was aborted due to timeout")).toBe(
+      true,
+    );
     const fatal = connectDecision({
       error: "Unexpected token < in JSON at position 0",
       elapsedMs: 1000,

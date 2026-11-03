@@ -852,6 +852,9 @@ fn request_write(app: AgentKind, raw: &RawRequest, logical_source: &str) -> Resu
         output,
         cache_write,
         cache_read,
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
     };
     let ts = Timestamp::new(raw.created_at, 0)
         .map_err(|e| anyhow::anyhow!("created_at 无法解释为时间戳（{request_id}）: {e}"))?;
@@ -971,6 +974,9 @@ fn rollup_write(
             output: non_negative(raw.output_tokens, "output_tokens", &raw.date)?,
             cache_write,
             cache_read,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         },
         // 归一化后再落库：口径与 CCS rollup 的 `INPUT_TOKEN_SEMANTICS_FRESH` 一致。
         input_semantics: INPUT_TOKEN_SEMANTICS_FRESH,
@@ -1049,6 +1055,9 @@ fn session_row_aliases(app: AgentKind, raw: &RawRequest) -> Vec<(String, String)
                 output: raw.output_tokens as u64,
                 cache_write: raw.cache_creation_tokens as u64,
                 cache_read: raw.cache_read_tokens as u64,
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
             };
             vec![(
                 "codex-usage".to_string(),

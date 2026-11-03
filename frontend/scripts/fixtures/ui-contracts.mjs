@@ -1198,7 +1198,10 @@ const SCENARIOS = {
   empty: { kind: "empty" },
   "unknown-price": { kind: "unknown" },
   "partial-price": { kind: "partial" },
-  "long-text": { kind: "long" },
+  // AC08 归因补修：长路径换行断言需要长路径行在列表里——PR3 起默认行
+  // 是短路径（SOURCE_ROWS_DEFAULT），必须声明 merged 才含 LONG_SOURCE_DIR
+  // 行；此前全矩阵未在本地跑过，该缺口未被察觉。
+  "long-text": { kind: "long", sourceRows: "merged" },
   "multi-category": { kind: "multi", pageSize: 4 },
   // RC09：设置首载失败 → 重试恢复全部依赖控件
   "settings-read-failure": { kind: "normal", settings: "fail-then-ok" },

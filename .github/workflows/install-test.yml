@@ -15,6 +15,7 @@ on:
       - '.github/workflows/**'
       - '.github/actions/**'
       - 'docs/privacy.md'
+      - 'docs/terms.md'
 
 permissions:
   contents: read

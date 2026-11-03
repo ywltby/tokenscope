@@ -125,6 +125,9 @@ mod tests {
             output_tokens: e.output,
             cache_write_tokens: e.cw,
             cache_read_tokens: e.cr,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         }
     }
 

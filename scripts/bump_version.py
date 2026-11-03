@@ -272,7 +272,27 @@ def check(root, base_ref):
     current = uniform(read_versions(root))
     validate_locks(root, current)
     change = declaration(root)
-    relevant = release_relevant(changed_paths(root, sha), build_manifest(root))
+    changed = changed_paths(root, sha)
+    relevant = release_relevant(changed, build_manifest(root))
+    if "docs/terms.md" in changed or "docs/privacy.md" in changed:
+        # 共同同意版本同时覆盖隐私政策与用户许可协议；任一文件正文更新
+        # 都必须使旧同意失效，不能只递增应用版本（2026-10-28 用户决定：
+        # 协议更新后所有用户必须重新明确同意）。
+        from upgrade_baselines import extract_privacy_revision, read_tag_privacy_revision
+
+        baseline_revision = read_tag_privacy_revision(sha, root=root)
+        if baseline_revision is None:
+            if ref_has(root, sha, "docs/terms.md") or ref_has(root, sha, "docs/privacy.md"):
+                raise ValueError("协议基线缺少可识别的同意修订号")
+            baseline_revision = 0
+        source = root / "crates/tokenscope-core/src/settings.rs"
+        current_revision = (
+            extract_privacy_revision(source.read_text(encoding="utf-8"))
+            if source.is_file()
+            else None
+        )
+        if current_revision is None or current_revision <= baseline_revision:
+            raise ValueError("用户协议更新时必须提高共同同意修订号")
     expected = next_version(previous, change["kind"])
     if not relevant and current == previous:
         if declaration_text_at(root, sha) != declaration_text(root):

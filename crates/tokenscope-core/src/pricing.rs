@@ -197,9 +197,26 @@ impl PartialEq<RateSpec> for Option<f64> {
     }
 }
 
+/// N18：缓存写分档单价（5 分钟 / 1 小时）。仅当来源**有依据**地提供
+/// 分档价时才存在：外置 pricing.toml 显式 `cache_write_5m/1h` 键、
+/// models.dev 快照显式字段，以及 Anthropic 官方渠道候选的派生规则
+/// （见 models.dev 转换处注释——Claude Code 可能路由到任意提供商，
+/// 绝不按应用名套倍率）。`Unknown` 档 = 该档缺价 → 可信分档事件的
+/// 写费不完整（不得用写入总单价冒充分档价）。
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CacheWriteTiers {
+    pub five_min: RateSpec,
+    pub one_hour: RateSpec,
+}
+
 /// Task 1：四类单价的规范载体。每项三态（RateSpec）：缺省 Unknown——
 /// 分段/基础价缺键即未知，不静默为 0；显式 0 = 免费；cache_read 可声明
 /// same_as_input（同层输入价）。
+///
+/// N18：`cache_write_tiers` 是本层的**可选**缓存写分档价，层级语义与四类
+/// 单价完全一致（分段显式值 > 时间规则显式值 > 基础层显式值）——来源
+/// **有依据**地在同一层声明分档时才参与；None = 该层未声明分档，由下一
+/// 层回退决定，全部层都缺 = 分档价未知（估算按不完整处理）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct PriceRates {
@@ -207,11 +224,14 @@ pub struct PriceRates {
     pub output: RateSpec,
     pub cache_write: RateSpec,
     pub cache_read: RateSpec,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_tiers: Option<CacheWriteTiers>,
 }
 
 impl PriceRates {
     /// 四个数值来源（models.dev / OpenRouter / 旧索引扁平字段）的保守转换：
-    /// None = Unknown，显式值 = Fixed。
+    /// None = Unknown，显式值 = Fixed。分档价不在数值来源里，恒 None
+    /// （分档只能来自显式声明或可证明的派生，见调用方）。
     pub fn from_options(
         input: Option<f64>,
         output: Option<f64>,
@@ -223,6 +243,7 @@ impl PriceRates {
             output: RateSpec::fixed_or_unknown(output),
             cache_write: RateSpec::fixed_or_unknown(cache_write),
             cache_read: RateSpec::fixed_or_unknown(cache_read),
+            cache_write_tiers: None,
         }
     }
 }
@@ -442,19 +463,119 @@ fn invalid_rate(r: &PriceRates) -> Option<(&'static str, f64)> {
 
 /// F05：完整计划的数值校验——索引恢复入口先把扁平字段归一成完整计划，
 /// 再用本函数统一校验，不得存在未校验的恢复通道。
+/// N18：分档单价的合法性——Fixed 须为有限非负；SameAsInput 对分档
+/// 无意义（输入价沿用不适用于"两次写入"），显式拒绝；Unknown = 该档
+/// 缺价（合法，估算按不完整处理）。
+fn tier_rate_invalid(spec: RateSpec) -> bool {
+    match spec {
+        RateSpec::Fixed(v) => !(v.is_finite() && v >= 0.0),
+        RateSpec::SameAsInput => true,
+        RateSpec::Unknown => false,
+    }
+}
+
+/// N18：models.dev 候选的缓存写分档来源。
+///
+/// - 显式字段（`cost.cache_write_5m/1h`）一旦存在即直接采用（快照层
+///   已透传），缺档 = Unknown；
+/// - 否则仅对 **Anthropic 官方渠道**（provider id 恰为 `anthropic`）
+///   派生：官方文档价 5 分钟写入 = 1.25 × 基础输入、1 小时写入 =
+///   2 × 基础输入（依据 docs/research/2026-10-27-usage-semantics-cross-tool-
+///   audit.md §4.5 引用的 Anthropic 定价）。派生以候选自身发布价自证：
+///   仅当其 `cache_write` 与 1.25 × 输入一致（相对误差 1e-9）才认定
+///   该候选确为官方 API 价并派生 1 小时档；否则不派生（宁可缺价，
+///   估算按不完整处理）。Bedrock/Vertex/OpenRouter 等其他渠道一概
+///   不派生——Claude Code 应用日志可能路由到任意提供商，绝不按
+///   应用名套倍率。
+///
+/// 显式字段优先；两者都缺时才考虑派生。
+fn explicit_tiers(five_min: Option<f64>, one_hour: Option<f64>) -> Option<CacheWriteTiers> {
+    if five_min.is_some() || one_hour.is_some() {
+        return Some(CacheWriteTiers {
+            five_min: RateSpec::fixed_or_unknown(five_min),
+            one_hour: RateSpec::fixed_or_unknown(one_hour),
+        });
+    }
+    None
+}
+
+/// N18：Anthropic 官方分档派生（自证）——5 分钟写 = 1.25 × 输入、
+/// 1 小时写 = 2 × 输入（依据 §4.5 引用的官方文档价）。仅当该层发布价
+/// 自身满足 `cache_write == 1.25 × input`（相对误差 1e-9）才认定派生
+/// 依据充分；否则不派生（宁可缺价 → 估算按不完整处理）。绝不按应用名
+/// 或渠道名套倍率。
+fn anthropic_derived_tiers(input: Option<f64>, write: Option<f64>) -> Option<CacheWriteTiers> {
+    let (input, write) = match (input, write) {
+        (Some(i), Some(w)) if i > 0.0 => (i, w),
+        _ => return None,
+    };
+    let five_min_expected = input * 1.25;
+    if (write - five_min_expected).abs() > 1e-9 * five_min_expected.max(1.0) {
+        return None;
+    }
+    let one_hour = input * 2.0;
+    if !(one_hour.is_finite() && one_hour >= 0.0) {
+        return None;
+    }
+    Some(CacheWriteTiers {
+        five_min: RateSpec::Fixed(write),
+        one_hour: RateSpec::Fixed(one_hour),
+    })
+}
+
+/// N18：条目基础层分档价——显式字段优先，否则仅 Anthropic 官方渠道
+/// （provider 恰为 `anthropic`）按该条目自身发布价自证派生。
+fn modelsdev_cache_write_tiers(e: &crate::modelsdev::SnapshotEntry) -> Option<CacheWriteTiers> {
+    if let Some(tiers) = explicit_tiers(e.cache_write_5m, e.cache_write_1h) {
+        return Some(tiers);
+    }
+    if e.id.split_once('/').map(|(p, _)| p) != Some("anthropic") {
+        return None;
+    }
+    anthropic_derived_tiers(e.input, e.cache_write)
+}
+
+/// N18：**分段**分档价——显式字段优先；否则仅 Anthropic 官方渠道按该
+/// 分段自身数据自证派生（高档 input=6、cache_write=7.5 = 1.25 × 6 →
+/// 1h = 12）。其他渠道/自证不通过 → None（分档价未知）。
+fn modelsdev_segment_cache_write_tiers(
+    provider: &str,
+    s: &crate::modelsdev::SnapshotSegment,
+) -> Option<CacheWriteTiers> {
+    if let Some(tiers) = explicit_tiers(s.cache_write_5m, s.cache_write_1h) {
+        return Some(tiers);
+    }
+    if provider != "anthropic" {
+        return None;
+    }
+    anthropic_derived_tiers(s.input, s.cache_write)
+}
+
+/// N18：某层分档价合法性（非法值 → 整条候选拒绝，与其他单价同规则）。
+fn rates_tiers_invalid(rates: &PriceRates) -> bool {
+    rates
+        .cache_write_tiers
+        .is_some_and(|tw| tier_rate_invalid(tw.five_min) || tier_rate_invalid(tw.one_hour))
+}
+
 fn price_plan_invalid(plan: &PricePlan) -> bool {
     invalid_rate(&plan.base).is_some()
+        || rates_tiers_invalid(&plan.base)
         || plan
             .segments
             .iter()
-            .any(|sg| invalid_rate(&sg.prices).is_some())
+            .any(|sg| invalid_rate(&sg.prices).is_some() || rates_tiers_invalid(&sg.prices))
         || plan.schedules.iter().any(|sc| {
             invalid_rate(&sc.prices).is_some()
-                || sc.periods.iter().any(|p| invalid_rate(&p.prices).is_some())
+                || rates_tiers_invalid(&sc.prices)
+                || sc
+                    .periods
+                    .iter()
+                    .any(|p| invalid_rate(&p.prices).is_some() || rates_tiers_invalid(&p.prices))
                 || sc
                     .segments
                     .iter()
-                    .any(|sg| invalid_rate(&sg.prices).is_some())
+                    .any(|sg| invalid_rate(&sg.prices).is_some() || rates_tiers_invalid(&sg.prices))
         })
 }
 
@@ -496,37 +617,170 @@ fn select_segment_in(segments: &[PriceSegment], basis_value: u64) -> Option<&Pri
 
 /// 逐字段执行"分段显式值 > 时间规则值 > 基础值"（Task 4A 加入时间层）。
 /// RateSpec 语义：Unknown 才回退下一层；Fixed(0)/SameAsInput 都是显式声明。
+///
+/// N18：缓存写分档价走同一层级——第一层**显式声明**分档的层胜出
+/// （段内单档 Unknown 同样算该层声明：缺档由调用方按未知处理，不得
+/// 跨层拼齐两档）；全部层未声明 → `Undeclared`。
+///
+/// 关键约束：某层**显式改写了写入单价**（`cache_write != Unknown`）却没有
+/// 分档依据时，不得回退到下一层的分档价——写入价结构已变（如高档
+/// input=6、cache_write=9），用基础层 3.75/6.0 的比率计费会伪装成完整。
+/// 该层没有分档依据 → `BlockedByWriteOverride`；只有该层未改写写入价
+/// （Unknown = 沿用下一层）时才允许回退。
 pub fn effective_rates(
     plan: &PricePlan,
     schedule_prices: Option<&PriceRates>,
     selected: Option<&PriceSegment>,
-) -> PriceRates {
+) -> EffectiveRates {
     let seg = selected.map(|s| &s.prices);
     let time = schedule_prices;
     let layer = |seg_v: RateSpec, time_v: RateSpec, base_v: RateSpec| -> RateSpec {
         seg_v.or_explicit(time_v).or_explicit(base_v)
     };
-    PriceRates {
-        input: layer(
-            seg.map(|s| s.input).unwrap_or_default(),
-            time.map(|r| r.input).unwrap_or_default(),
-            plan.base.input,
-        ),
-        output: layer(
-            seg.map(|s| s.output).unwrap_or_default(),
-            time.map(|r| r.output).unwrap_or_default(),
-            plan.base.output,
-        ),
-        cache_write: layer(
-            seg.map(|s| s.cache_write).unwrap_or_default(),
-            time.map(|r| r.cache_write).unwrap_or_default(),
-            plan.base.cache_write,
-        ),
-        cache_read: layer(
-            seg.map(|s| s.cache_read).unwrap_or_default(),
-            time.map(|r| r.cache_read).unwrap_or_default(),
-            plan.base.cache_read,
-        ),
+    let tiers = pick_cache_write_tiers(seg, time, plan.base.cache_write_tiers);
+    EffectiveRates {
+        rates: PriceRates {
+            input: layer(
+                seg.map(|s| s.input).unwrap_or_default(),
+                time.map(|r| r.input).unwrap_or_default(),
+                plan.base.input,
+            ),
+            output: layer(
+                seg.map(|s| s.output).unwrap_or_default(),
+                time.map(|r| r.output).unwrap_or_default(),
+                plan.base.output,
+            ),
+            cache_write: layer(
+                seg.map(|s| s.cache_write).unwrap_or_default(),
+                time.map(|r| r.cache_write).unwrap_or_default(),
+                plan.base.cache_write,
+            ),
+            cache_read: layer(
+                seg.map(|s| s.cache_read).unwrap_or_default(),
+                time.map(|r| r.cache_read).unwrap_or_default(),
+                plan.base.cache_read,
+            ),
+            cache_write_tiers: tiers.declared_tiers(),
+        },
+        tiers,
+    }
+}
+
+/// N18：`effective_rates` 的返回体——四类单价 + 分档价解析结果。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectiveRates {
+    pub rates: PriceRates,
+    pub tiers: TierResolution,
+}
+
+/// N18：缓存写分档价的解析结果——**必须区分**「上层改写写入价后阻断了
+/// 分档价」与「整个候选从未声明分档价」：前者说明该层给出了自己的写入
+/// 单价（事件分档未知时仍可按它估算并标记不完整），后者只是沿用候选
+/// 既有合并价口径（保持既有兼容：complete=true、无估算标志）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TierResolution {
+    /// 某层显式声明了分档价（`Some` 两档齐全或层内缺档 = Unknown 档）。
+    Declared(Option<CacheWriteTiers>),
+    /// 某层显式改写了写入单价但没有分档依据——分档价未知，但该层的
+    /// 合并写入价本身就是有效估算依据。
+    BlockedByWriteOverride,
+    /// 全部层都未声明分档价。
+    Undeclared,
+}
+
+impl TierResolution {
+    pub fn declared_tiers(&self) -> Option<CacheWriteTiers> {
+        match self {
+            TierResolution::Declared(t) => *t,
+            _ => None,
+        }
+    }
+
+    /// 事件分档未知时，合并写价是否构成「按合并价估算」的依据：
+    /// 只要候选曾经声明过分档价（含被上层阻断的情形）就算；从未声明
+    /// 则保持既有兼容口径（不标估算）。
+    pub fn supports_merged_price_estimate(&self) -> bool {
+        !matches!(self, TierResolution::Undeclared)
+    }
+}
+
+/// N18：逐层取缓存写分档价——显式改写写入单价的层若没有分档依据，
+/// 返回 `BlockedByWriteOverride`（不跨层借比率），否则按 seg > time > base
+/// 取第一层显式声明；全部层未声明 → `Undeclared`。
+fn pick_cache_write_tiers(
+    seg: Option<&PriceRates>,
+    time: Option<&PriceRates>,
+    base: Option<CacheWriteTiers>,
+) -> TierResolution {
+    // 预检：**任何层**都没有声明 5m/1h 分档价 → `Undeclared`。此时即使
+    // 上层显式改写了写入价，也不得判为“分档被阻断”——阻断的前提是
+    // 确有下层分档价被截断（否则就是从未声明分档的候选，保持既有兼容
+    // 口径：complete=true、无估算标志）。
+    let any_declared = [seg, time]
+        .into_iter()
+        .flatten()
+        .any(|r| r.cache_write_tiers.is_some())
+        || base.is_some();
+    if !any_declared {
+        return TierResolution::Undeclared;
+    }
+    for layer in [seg, time] {
+        let Some(rates) = layer else { continue };
+        if rates.cache_write != RateSpec::Unknown {
+            // 写入价已在本层改写：分档价只认本层依据；没有就是「阻断」，
+            // 不得回退下层（写入价结构已变，下层比率不再适用）。
+            return match rates.cache_write_tiers {
+                Some(t) => TierResolution::Declared(Some(t)),
+                None => TierResolution::BlockedByWriteOverride,
+            };
+        }
+        if rates.cache_write_tiers.is_some() {
+            return TierResolution::Declared(rates.cache_write_tiers);
+        }
+    }
+    match base {
+        Some(t) => TierResolution::Declared(Some(t)),
+        None => TierResolution::Undeclared,
+    }
+}
+
+/// N18：时间规则路径的分档解析——period 与 schedule **不预合并**，逐层
+/// 判断声明/阻断，避免“period 改写写入价 + schedule 分档被阻断”在
+/// period/schedule 合并成单个 `PriceRates` 时丢失分档依据、被误判为
+/// “从未声明”。层级顺序：seg > period > schedule > base；任一层声明
+/// 分档 → `Declared`；任一层显式改写写入价（无分档）→ `Blocked`；
+/// 全部层未声明 → `Undeclared`（既有兼容口径）。非命中的规则/分段根本
+/// 不进入本函数，不影响当前路径。
+fn rule_tier_resolution(
+    seg: Option<&PriceRates>,
+    sched: Option<&PriceSchedule>,
+    period: Option<&SchedulePeriod>,
+    base: &PriceRates,
+) -> TierResolution {
+    let layers = [
+        seg.map(|s| (s.cache_write, s.cache_write_tiers)),
+        period.map(|p| (p.prices.cache_write, p.prices.cache_write_tiers)),
+        sched.map(|s| (s.prices.cache_write, s.prices.cache_write_tiers)),
+    ];
+    // 预检：全部层都未声明分档 → Undeclared（即使上层改写了写入价）。
+    let any_declared = layers
+        .iter()
+        .any(|l| l.as_ref().is_some_and(|(_, t)| t.is_some()))
+        || base.cache_write_tiers.is_some();
+    if !any_declared {
+        return TierResolution::Undeclared;
+    }
+    for (write, tiers) in layers.into_iter().flatten() {
+        if tiers.is_some() {
+            return TierResolution::Declared(tiers);
+        }
+        if write != RateSpec::Unknown {
+            return TierResolution::BlockedByWriteOverride;
+        }
+    }
+    match base.cache_write_tiers {
+        Some(t) => TierResolution::Declared(Some(t)),
+        None => TierResolution::Undeclared,
     }
 }
 
@@ -590,11 +844,14 @@ fn normalize_weekday(s: &str) -> Result<String, String> {
 
 /// 规则价格是否含**显式声明**（Fixed 含显式 0、SameAsInput 都算）。
 /// 全 Unknown 的空规则和仅标签/时区不算声明（F02）。
+/// N18：只声明 5m/1h 分档价、四类单价全缺的规则同样是「已声明规则」——
+/// 否则命中的规则会被整体跳过，分档价永远不会参与计价。
 fn rates_declared(r: &PriceRates) -> bool {
     r.input != RateSpec::Unknown
         || r.output != RateSpec::Unknown
         || r.cache_write != RateSpec::Unknown
         || r.cache_read != RateSpec::Unknown
+        || r.cache_write_tiers.is_some()
 }
 
 /// 请求时间命中的时间规则变体（Task 4A）：每个命中规则返回
@@ -691,6 +948,17 @@ fn estimate_entry(
                     output: p.prices.output.or_explicit(sched.prices.output),
                     cache_write: p.prices.cache_write.or_explicit(sched.prices.cache_write),
                     cache_read: p.prices.cache_read.or_explicit(sched.prices.cache_read),
+                    // N18：period 与 schedule 的分档层级身份必须保留——
+                    // period 自己改写了写入价但没给分档时，不得借用
+                    // schedule 的比率（写入价结构已在 period 层改变）；
+                    // period 未改写写入价时才按 period ?? schedule 继承。
+                    cache_write_tiers: if p.prices.cache_write != RateSpec::Unknown {
+                        p.prices.cache_write_tiers
+                    } else {
+                        p.prices
+                            .cache_write_tiers
+                            .or(sched.prices.cache_write_tiers)
+                    },
                 },
                 None => sched.prices,
             };
@@ -698,7 +966,21 @@ fn estimate_entry(
         }
         None => (select_segment(plan, basis_value), None),
     };
-    let rates = effective_rates(plan, time_prices.as_ref(), selected);
+    // N18：四类单价仍按 seg > (period ?? schedule) > base 逐层解析；分档
+    // 依据则用**未合并**的 seg/period/schedule/base 逐层解析（保留被阻断
+    // 的分档依据，不因 period/schedule 预合并而丢失）。
+    let effective = effective_rates(plan, time_prices.as_ref(), selected);
+    let tiers_resolution = match time_rule {
+        Some((sched, period)) => {
+            rule_tier_resolution(selected.map(|s| &s.prices), Some(sched), period, &plan.base)
+        }
+        None => pick_cache_write_tiers(
+            selected.map(|s| &s.prices),
+            None,
+            plan.base.cache_write_tiers,
+        ),
+    };
+    let rates = effective.rates;
     // Task 5：逐分项生成明细行；cost 为各行小计之和（顺序固定，确定性的
     // 浮点求和）。未知分项仅在实际产生 token 时才标记不完整——零 token
     // 的未知分项不影响完整性（不变量 5）。
@@ -720,89 +1002,118 @@ fn estimate_entry(
     let mut complete = true;
     let mut unknown = TokenCounts::default();
     let mut lines = Vec::with_capacity(4);
-    for (kind, tokens, spec, is_cache_read, unknown_slot) in [
-        (
-            CostLineKind::Input,
-            t.input,
-            rates.input,
-            false,
-            &mut unknown.input,
-        ),
-        (
-            CostLineKind::Output,
-            t.output,
-            rates.output,
-            false,
-            &mut unknown.output,
-        ),
-        (
-            CostLineKind::CacheWrite,
-            t.cache_write,
-            rates.cache_write,
-            false,
-            &mut unknown.cache_write,
-        ),
-        (
-            CostLineKind::CacheRead,
-            t.cache_read,
-            rates.cache_read,
-            true,
-            &mut unknown.cache_read,
-        ),
-    ] {
-        let (price, rate_kind) = resolve(spec, is_cache_read);
-        match price {
-            Some(p) => {
-                // F04：先除后乘，避免有限单价的中间溢出（1M × 1e308/M
-                // 数学结果 1e308 有限）；求和同样防溢出。仍超出 f64 表示
-                // 范围时该分项不计金额、token 保留为未计价，带结构化溢出
-                // 原因（overflow）——不得夹成 0/最大值或伪装 complete=true。
-                let subtotal = tokens as f64 / 1_000_000.0 * p;
-                let summed = cost + subtotal;
-                if subtotal.is_finite() && summed.is_finite() {
-                    cost = summed;
-                    lines.push(CostLine {
-                        kind,
-                        tokens,
-                        unit_price: Some(p),
-                        subtotal,
-                        priced: true,
-                        rate_kind,
-                        overflow: false,
-                    });
-                } else {
-                    if tokens > 0 {
-                        complete = false;
-                        *unknown_slot = tokens;
-                    }
-                    lines.push(CostLine {
-                        kind,
-                        tokens,
-                        unit_price: Some(p),
-                        subtotal: 0.0,
-                        priced: false,
-                        rate_kind,
-                        overflow: true,
-                    });
-                }
+    // N18：可信分档 + 候选声明（完整）分档价 → 写入拆两行（5m/1h），不再
+    // 输出合并行；可信分档但候选没有可用分档价 → 写入整体按未知（不猜
+    // 档、不用总单价冒充）；分档未知 + 候选声明分档价 → 写入按总量单价
+    // 估算并标示（complete=false，cache_write_split_estimated=true）。
+    // 复核六轮：分档价的「解析结果」区分声明/阻断/未声明——
+    // - 声明（含上层未改写时的继承）→ 按两档计价（缺档进 unknown）；
+    // - 阻断（上层改写写入价但无分档依据）或未声明 → 合并行；事件分档
+    //   未知且合并写价实际计入金额时，按合并价估算并标示；未声明保持
+    //   既有兼容口径（complete=true、无估算标志）。
+    let tiers = tiers_resolution.declared_tiers();
+    let five_price = tiers.map(|tw| tw.five_min).map(|s| resolve(s, false));
+    let one_price = tiers.map(|tw| tw.one_hour).map(|s| resolve(s, false));
+    let split_known = t.cache_write_split_known && t.cache_write > 0;
+    let mut split_estimated = false;
+    let (input_price, input_kind) = resolve(rates.input, false);
+    push_cost_line(
+        &mut cost,
+        &mut complete,
+        &mut lines,
+        CostLineKind::Input,
+        t.input,
+        input_price,
+        input_kind,
+        &mut unknown.input,
+    );
+    let (output_price, output_kind) = resolve(rates.output, false);
+    push_cost_line(
+        &mut cost,
+        &mut complete,
+        &mut lines,
+        CostLineKind::Output,
+        t.output,
+        output_price,
+        output_kind,
+        &mut unknown.output,
+    );
+    if split_known {
+        match tiers {
+            Some(_) => {
+                // 候选声明了分档（哪怕缺一档）：两档各自计价，缺档进 unknown
+                // ——不得用总量单价冒充，也不得跨层拼齐。
+                let (w5p, w5k) = five_price.unwrap();
+                push_cost_line(
+                    &mut cost,
+                    &mut complete,
+                    &mut lines,
+                    CostLineKind::CacheWrite5m,
+                    t.cache_write_5m,
+                    w5p,
+                    w5k,
+                    &mut unknown.cache_write,
+                );
+                let (w1p, w1k) = one_price.unwrap();
+                push_cost_line(
+                    &mut cost,
+                    &mut complete,
+                    &mut lines,
+                    CostLineKind::CacheWrite1h,
+                    t.cache_write_1h,
+                    w1p,
+                    w1k,
+                    &mut unknown.cache_write,
+                );
             }
             None => {
-                if tokens > 0 {
-                    complete = false;
-                    *unknown_slot = tokens;
-                }
-                lines.push(CostLine {
-                    kind,
-                    tokens,
-                    unit_price: None,
-                    subtotal: 0.0,
-                    priced: false,
-                    rate_kind: RateKind::Unknown,
-                    overflow: false,
-                });
+                // 候选未声明分档：写总量按未知处理（不得猜档）。
+                let (wp, wk) = resolve(RateSpec::Unknown, false);
+                push_cost_line(
+                    &mut cost,
+                    &mut complete,
+                    &mut lines,
+                    CostLineKind::CacheWrite,
+                    t.cache_write,
+                    wp,
+                    wk,
+                    &mut unknown.cache_write,
+                );
             }
         }
+    } else {
+        let (wp, wk) = resolve(rates.cache_write, false);
+        let write_priced = push_cost_line(
+            &mut cost,
+            &mut complete,
+            &mut lines,
+            CostLineKind::CacheWrite,
+            t.cache_write,
+            wp,
+            wk,
+            &mut unknown.cache_write,
+        );
+        // 候选声明过分档价（声明或被上层阻断）而事件分档未知：**只有合并
+        // 写价确实计入金额**才是「按合并价估算」。合并写价缺失或金额溢出
+        // 时写 token 是未计价，不得声称已估算（unknown>0、标志=false）。
+        // 合并价显式 0 是合法正例：priced=true、估算成立、金额为 0。
+        // 整个候选从未声明分档价 → 保持既有兼容口径（complete=true、无标志）。
+        if tiers_resolution.supports_merged_price_estimate() && t.cache_write > 0 && write_priced {
+            split_estimated = true;
+            complete = false;
+        }
     }
+    let (read_price, read_kind) = resolve(rates.cache_read, true);
+    push_cost_line(
+        &mut cost,
+        &mut complete,
+        &mut lines,
+        CostLineKind::CacheRead,
+        t.cache_read,
+        read_price,
+        read_kind,
+        &mut unknown.cache_read,
+    );
     CostEstimate {
         cost,
         unknown,
@@ -815,6 +1126,79 @@ fn estimate_entry(
         lines,
         excluded_candidate_warning: None,
         excluded_incomplete_schedules: 0,
+        cache_write_split_estimated: split_estimated,
+    }
+}
+
+/// N18：单个计价分项行——已计价计入 cost；缺价/溢出按 unknown 保留并
+/// 标 incomplete（与原 estimate_entry 行为逐字段一致，仅为分档拆行复用）。
+/// 返回该行是否**实际计入金额**（用于区分「按合并价估算」与「未计价」）。
+#[allow(clippy::too_many_arguments)]
+fn push_cost_line(
+    cost: &mut f64,
+    complete: &mut bool,
+    lines: &mut Vec<CostLine>,
+    kind: CostLineKind,
+    tokens: u64,
+    price: Option<f64>,
+    rate_kind: RateKind,
+    unknown_slot: &mut u64,
+) -> bool {
+    match price {
+        Some(p) => {
+            // F04：先除后乘，避免有限单价的中间溢出（1M × 1e308/M
+            // 数学结果 1e308 有限）；求和同样防溢出。仍超出 f64 表示
+            // 范围时该分项不计金额、token 保留为未计价，带结构化溢出
+            // 原因（overflow）——不得夹成 0/最大值或伪装 complete=true。
+            let subtotal = tokens as f64 / 1_000_000.0 * p;
+            let summed = *cost + subtotal;
+            if subtotal.is_finite() && summed.is_finite() {
+                *cost = summed;
+                lines.push(CostLine {
+                    kind,
+                    tokens,
+                    unit_price: Some(p),
+                    subtotal,
+                    priced: true,
+                    rate_kind,
+                    overflow: false,
+                });
+                true
+            } else {
+                if tokens > 0 {
+                    *complete = false;
+                    // N18：多档未计价必须受检累计——5m 溢出后再遇 1h 缺价
+                    // 不得用后者覆盖前者；溢出上限按 u64::MAX 保守保留。
+                    *unknown_slot = unknown_slot.checked_add(tokens).unwrap_or(u64::MAX);
+                }
+                lines.push(CostLine {
+                    kind,
+                    tokens,
+                    unit_price: Some(p),
+                    subtotal: 0.0,
+                    priced: false,
+                    rate_kind,
+                    overflow: true,
+                });
+                false
+            }
+        }
+        None => {
+            if tokens > 0 {
+                *complete = false;
+                *unknown_slot = unknown_slot.checked_add(tokens).unwrap_or(u64::MAX);
+            }
+            lines.push(CostLine {
+                kind,
+                tokens,
+                unit_price: None,
+                subtotal: 0.0,
+                priced: false,
+                rate_kind: RateKind::Unknown,
+                overflow: false,
+            });
+            false
+        }
     }
 }
 
@@ -903,6 +1287,11 @@ pub enum CostLineKind {
     Output,
     CacheWrite,
     CacheRead,
+    /// N18：可信分档事件把写入拆成两行（5m/1h），不再输出合并 CacheWrite 行。
+    #[serde(rename = "cache_write_5m")]
+    CacheWrite5m,
+    #[serde(rename = "cache_write_1h")]
+    CacheWrite1h,
 }
 
 /// 分项计价结果（B3）：cost 为已计价分项小计；unknown 记录无法计价分项的
@@ -933,6 +1322,9 @@ pub struct CostEstimate {
     /// 排除的**不完整时间规则**数（已知小计可能虚高）。与渠道候选计数
     /// 单位无关，不冒充 candidate_count。
     pub excluded_incomplete_schedules: usize,
+    /// N18：事件可信分档缺失（旧日志/源日志已删）而候选声明了分档价——
+    /// 写费按写入总量单价**估算**，不得当作完整精确费用（complete=false）。
+    pub cache_write_split_estimated: bool,
 }
 
 /// GUI 悬浮对照用：该前缀在 OpenRouter 层的价格（无对应模型则 None）。
@@ -1030,6 +1422,11 @@ struct ExternalModel {
     cache_write: RateSpec,
     #[serde(default)]
     cache_read: RateSpec,
+    /// N18：缓存写分档价（可单独给出；缺档 = Unknown → 可信分档估算不完整）。
+    #[serde(default)]
+    cache_write_5m: RateSpec,
+    #[serde(default)]
+    cache_write_1h: RateSpec,
     #[serde(default)]
     segment: Vec<ExternalSegment>,
     /// Task 4A：峰谷时间规则。Task 4 阶段仅解析——含时间规则的条目整条
@@ -1057,6 +1454,11 @@ struct ExternalSegment {
     cache_write: RateSpec,
     #[serde(default)]
     cache_read: RateSpec,
+    /// N18：缓存写分档价（两键都 Unknown = 该层未声明分档）。
+    #[serde(default)]
+    cache_write_5m: RateSpec,
+    #[serde(default)]
+    cache_write_1h: RateSpec,
 }
 
 /// 外置峰谷时间规则（Task 4A）。
@@ -1078,6 +1480,11 @@ struct ExternalSchedule {
     cache_write: RateSpec,
     #[serde(default)]
     cache_read: RateSpec,
+    /// N18：缓存写分档价（两键都 Unknown = 该层未声明分档）。
+    #[serde(default)]
+    cache_write_5m: RateSpec,
+    #[serde(default)]
+    cache_write_1h: RateSpec,
     /// 规则内可选上下文分段（Task 4A）。
     #[serde(default)]
     segment: Vec<ExternalSegment>,
@@ -1100,6 +1507,11 @@ struct ExternalPeriod {
     cache_write: RateSpec,
     #[serde(default)]
     cache_read: RateSpec,
+    /// N18：时段级缓存写分档价。
+    #[serde(default)]
+    cache_write_5m: RateSpec,
+    #[serde(default)]
+    cache_write_1h: RateSpec,
 }
 
 /// 支持的计价依据/应用方式白名单（Task 4：未知值显式拒绝）。
@@ -1122,6 +1534,15 @@ fn parse_external_application(s: Option<&str>) -> Result<Option<PricingApplicati
 }
 
 /// 外置分段 → PriceSegment（basis/application 必须与条目一致）。
+/// N18：外置源分档价构造——两键都 Unknown = 该层未声明（None）；
+/// 任一键显式给出 = 该层声明分档（缺档 = Unknown）。
+fn external_tiers(five_min: RateSpec, one_hour: RateSpec) -> Option<CacheWriteTiers> {
+    if matches!(five_min, RateSpec::Unknown) && matches!(one_hour, RateSpec::Unknown) {
+        return None;
+    }
+    Some(CacheWriteTiers { five_min, one_hour })
+}
+
 fn external_segment(
     s: &ExternalSegment,
     basis: Option<PricingBasis>,
@@ -1141,6 +1562,13 @@ fn external_segment(
             s.min_tokens, s.application, s.application
         ));
     }
+    // N18：分段级分档价合法性（负数/非有限/same_as_input → 整段拒绝）。
+    if tier_rate_invalid(s.cache_write_5m) || tier_rate_invalid(s.cache_write_1h) {
+        return Err(format!(
+            "分段 {} 缓存写分档价非法（须为有限非负数字；分档不支持 same_as_input）",
+            s.min_tokens
+        ));
+    }
     Ok(PriceSegment {
         label: s.label.clone(),
         min_tokens: s.min_tokens,
@@ -1150,6 +1578,8 @@ fn external_segment(
             output: s.output,
             cache_write: s.cache_write,
             cache_read: s.cache_read,
+            // N18：分段级分档价（两键都 Unknown = 该层未声明）。
+            cache_write_tiers: external_tiers(s.cache_write_5m, s.cache_write_1h),
         },
     })
 }
@@ -1176,6 +1606,13 @@ fn external_schedule_plan(
                 p.start_time, p.end_time
             ));
         }
+        // N18：时段级分档价合法性（非法 → 整条规则拒绝）。
+        if tier_rate_invalid(p.cache_write_5m) || tier_rate_invalid(p.cache_write_1h) {
+            return Err(format!(
+                "时间规则 {:?} 时段 {}–{} 缓存写分档价非法（须为有限非负数字；分档不支持 same_as_input）",
+                s.label, p.start_time, p.end_time
+            ));
+        }
         let weekdays = p
             .weekdays
             .as_ref()
@@ -1195,6 +1632,8 @@ fn external_schedule_plan(
                 output: p.output,
                 cache_write: p.cache_write,
                 cache_read: p.cache_read,
+                // N18：时段级分档价。
+                cache_write_tiers: external_tiers(p.cache_write_5m, p.cache_write_1h),
             },
         });
     }
@@ -1211,6 +1650,8 @@ fn external_schedule_plan(
             output: s.output,
             cache_write: s.cache_write,
             cache_read: s.cache_read,
+            // N18：规则级分档价。
+            cache_write_tiers: external_tiers(s.cache_write_5m, s.cache_write_1h),
         },
         segments,
     };
@@ -1245,16 +1686,23 @@ fn external_model_plan(m: &ExternalModel) -> Result<(PricePlan, Vec<String>), St
         output: m.output,
         cache_write: m.cache_write,
         cache_read: m.cache_read,
+        // N18：条目基础层分档价。
+        cache_write_tiers: external_tiers(m.cache_write_5m, m.cache_write_1h),
     };
     // F04：数值预检先于任何结构性丢弃——原始候选的时间规则（规则级/
     // 时段/规则分段）任一显式单价非法 → **整条候选拒绝**，不得丢弃脏
     // 规则后按基础价完整计费。结构性错误仍沿"跳过该规则 + 诊断"契约。
+    // N18：分档价同样预检（SameAsInput 对分档无意义，显式拒绝）。
+    if tier_rate_invalid(m.cache_write_5m) || tier_rate_invalid(m.cache_write_1h) {
+        return Err("缓存写分档价非法（须为有限非负数字；分档不支持 same_as_input）".to_string());
+    }
     for s in &m.schedule {
         let rule = PriceRates {
             input: s.input,
             output: s.output,
             cache_write: s.cache_write,
             cache_read: s.cache_read,
+            cache_write_tiers: external_tiers(s.cache_write_5m, s.cache_write_1h),
         };
         if let Some((comp, v)) = invalid_rate(&rule) {
             return Err(format!(
@@ -1262,12 +1710,37 @@ fn external_model_plan(m: &ExternalModel) -> Result<(PricePlan, Vec<String>), St
                 s.label
             ));
         }
+        // N18：规则级/时段/规则内分段的分档价与四类单价同规则——显式
+        // 数值非法一律**整条候选拒绝**（不得跳过脏规则后按基础价计费）。
+        if tier_rate_invalid(s.cache_write_5m) || tier_rate_invalid(s.cache_write_1h) {
+            return Err(format!(
+                "时间规则 {:?} 缓存写分档价非法（须为有限非负数字；分档不支持 same_as_input）: {s:?}",
+                s.label
+            ));
+        }
+        for p in &s.period {
+            if tier_rate_invalid(p.cache_write_5m) || tier_rate_invalid(p.cache_write_1h) {
+                return Err(format!(
+                    "时间规则 {:?} 时段 {}–{} 缓存写分档价非法（须为有限非负数字；分档不支持 same_as_input）",
+                    s.label, p.start_time, p.end_time
+                ));
+            }
+        }
+        for seg in &s.segment {
+            if tier_rate_invalid(seg.cache_write_5m) || tier_rate_invalid(seg.cache_write_1h) {
+                return Err(format!(
+                    "时间规则 {:?} 分段（min {}）缓存写分档价非法（须为有限非负数字；分档不支持 same_as_input）",
+                    s.label, seg.min_tokens
+                ));
+            }
+        }
         for p in &s.period {
             let pr = PriceRates {
                 input: p.input,
                 output: p.output,
                 cache_write: p.cache_write,
                 cache_read: p.cache_read,
+                cache_write_tiers: external_tiers(p.cache_write_5m, p.cache_write_1h),
             };
             if let Some((comp, v)) = invalid_rate(&pr) {
                 return Err(format!(
@@ -1282,6 +1755,7 @@ fn external_model_plan(m: &ExternalModel) -> Result<(PricePlan, Vec<String>), St
                 output: seg.output,
                 cache_write: seg.cache_write,
                 cache_read: seg.cache_read,
+                cache_write_tiers: external_tiers(seg.cache_write_5m, seg.cache_write_1h),
             };
             if let Some((comp, v)) = invalid_rate(&sg) {
                 return Err(format!(
@@ -1303,6 +1777,7 @@ fn external_model_plan(m: &ExternalModel) -> Result<(PricePlan, Vec<String>), St
             Err(err) => rule_warnings.push(err),
         }
     }
+    // N18：声明了任一分档键才挂分档（缺档 = Unknown，不冒充已知）。
     let plan = PricePlan {
         basis,
         application,
@@ -1392,7 +1867,9 @@ fn default_index_v1() -> u8 {
 /// prefix 是旧规则（`gpt-5.6-sol`），与新查询键（`gpt56sol`）不兼容，
 /// **拒绝读取**并按来源离线重建；重建用保留的 `display` 原文重新推导键，
 /// 不从压扁后的键反推结构。
-pub const INDEX_VERSION: u8 = 9;
+/// v10：N18 缓存写分档进入 PricePlan（索引条目随计划序列化）；派生的
+/// Anthropic 官方分档也随重建生效——旧索引按 v9 拒读并整份重建。
+pub const INDEX_VERSION: u8 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -1899,6 +2376,7 @@ impl Pricing {
                         // Task 2：快照分段（models.dev size 语义已在同步时
                         // 转换为规范 [min, max)）→ PriceSegment。非法规则
                         // 防御性丢弃分段只留基础价，并给出诊断。
+                        let md_provider = e.id.split_once('/').map(|(p, _)| p.to_string());
                         let segments = e
                             .segments
                             .iter()
@@ -1906,20 +2384,32 @@ impl Pricing {
                                 label: s.label.clone(),
                                 min_tokens: s.min_tokens,
                                 max_tokens: s.max_tokens,
-                                prices: PriceRates::from_options(
-                                    s.input,
-                                    s.output,
-                                    s.cache_write,
-                                    s.cache_read,
-                                ),
+                                prices: PriceRates {
+                                    // N18：分段级分档（显式优先，否则官方
+                                    // 渠道按该段自身数据自证派生）。
+                                    cache_write_tiers: md_provider
+                                        .as_deref()
+                                        .and_then(|p| modelsdev_segment_cache_write_tiers(p, s)),
+                                    ..PriceRates::from_options(
+                                        s.input,
+                                        s.output,
+                                        s.cache_write,
+                                        s.cache_read,
+                                    )
+                                },
                             })
                             .collect::<Vec<_>>();
-                        let base = PriceRates::from_options(
-                            e.input,
-                            e.output,
-                            e.cache_write,
-                            e.cache_read,
-                        );
+                        let base = PriceRates {
+                            // N18：Anthropic 官方渠道按发布价自证派生 1h 档；
+                            // 其他渠道/无依据一律 None（分档价未知）。
+                            cache_write_tiers: modelsdev_cache_write_tiers(&e),
+                            ..PriceRates::from_options(
+                                e.input,
+                                e.output,
+                                e.cache_write,
+                                e.cache_read,
+                            )
+                        };
                         let plan = PricePlan {
                             basis: Some(PricingBasis::PromptTokens),
                             application: Some(PricingApplication::WholeRequest),
@@ -1930,14 +2420,16 @@ impl Pricing {
                         // R06：显式数值非法（NaN/inf/负）→ 拒绝整条候选，
                         // 不得借"降级保留基础价"恢复非法值；分段**结构**错误
                         // 在数值合法的前提下才降级为仅基础价（既有契约）。
+                        // N18：基础层与分段层的显式缓存写分档价同规则。
                         if invalid_rate(&plan.base).is_some()
-                            || plan
-                                .segments
-                                .iter()
-                                .any(|sg| invalid_rate(&sg.prices).is_some())
+                            || rates_tiers_invalid(&plan.base)
+                            || plan.segments.iter().any(|sg| {
+                                invalid_rate(&sg.prices).is_some()
+                                    || rates_tiers_invalid(&sg.prices)
+                            })
                         {
                             diagnostics.push(format!(
-                                "models.dev 条目 {} 存在非法单价（须为有限非负），该条目已拒绝",
+                                "models.dev 条目 {} 存在非法单价（含缓存写分档价；须为有限非负），该条目已拒绝",
                                 e.id
                             ));
                             continue;
@@ -2015,6 +2507,7 @@ impl Pricing {
                                         output: conv(o.completion),
                                         cache_write: conv(o.cache_write),
                                         cache_read: conv(o.cache_read),
+                                        cache_write_tiers: None,
                                     },
                                 }
                             })
@@ -2037,6 +2530,7 @@ impl Pricing {
                                 cache_read: RateSpec::fixed_or_unknown(
                                     e.cache_read.map(|v| v * 1_000_000.0),
                                 ),
+                                cache_write_tiers: None,
                             },
                             segments,
                             schedules: Vec::new(),
@@ -2418,15 +2912,34 @@ impl Pricing {
         //（其他候选的规则排除与本次公式无关，不冒充渠道计数）。
         // 结构化提示：完整候选胜出但有不完整候选被排除——结果不是所有
         // 渠道的严格上界（不完整候选若补价可能更高）。
+        //
+        // N18：被排除的原因必须如实区分——「事件缺少 5m/1h 分项」不是
+        // 「候选缺少价格」。前者是输入数据（事件）缺分档，后者是价格源
+        // 缺价；文案不得互换。
         let excluded_candidate_warning = if excluded > 0 {
             let names = partial_set
                 .iter()
                 .map(|(_, _, pe, _, _)| pe.display.as_str())
                 .collect::<Vec<_>>()
                 .join("、");
-            Some(format!(
-                "有 {excluded} 个候选因缺少价格未参与主估算（{names}）；若其缺失分项有价，实际最高费用可能更高"
-            ))
+            let split_excluded = partial_set
+                .iter()
+                .filter(|(pe, _, _, _, _)| pe.cache_write_split_estimated)
+                .count();
+            let price_excluded = excluded.saturating_sub(split_excluded);
+            if split_excluded > 0 && price_excluded == 0 {
+                Some(format!(
+                    "有 {split_excluded} 个候选提供写入分档价，但事件缺少 5 分钟/1 小时写入分项，未参与主估算（{names}）；实际写费可能更高"
+                ))
+            } else if split_excluded > 0 {
+                Some(format!(
+                    "有 {excluded} 个候选未参与主估算（{names}）：{split_excluded} 个因事件缺少 5 分钟/1 小时写入分项、{price_excluded} 个因缺少价格；实际最高费用可能更高"
+                ))
+            } else {
+                Some(format!(
+                    "有 {excluded} 个候选因缺少价格未参与主估算（{names}）；若其缺失分项有价，实际最高费用可能更高"
+                ))
+            }
         } else {
             None
         };
@@ -2754,6 +3267,9 @@ mod tests {
             output,
             cache_write: cw,
             cache_read: cr,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         }
     }
 
@@ -3023,6 +3539,7 @@ mod tests {
                 name: None,
                 plan: PricePlan {
                     base: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(i),
                         output: RateSpec::Fixed(o),
                         cache_write: RateSpec::fixed_or_unknown(cw),
@@ -3043,6 +3560,7 @@ mod tests {
             application: Some(PricingApplication::WholeRequest),
             schedules: Vec::new(),
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(3.0),
                 output: RateSpec::Fixed(15.0),
                 cache_write: RateSpec::Fixed(3.75),
@@ -3054,6 +3572,7 @@ mod tests {
                     min_tokens: 200_000,
                     max_tokens: Some(1_000_000),
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(6.0),
                         output: RateSpec::Fixed(22.5),
                         cache_write: RateSpec::Fixed(7.5),
@@ -3069,6 +3588,7 @@ mod tests {
                         output: RateSpec::Fixed(30.0),
                         cache_write: RateSpec::Fixed(11.25),
                         cache_read: RateSpec::Fixed(0.9),
+                        cache_write_tiers: None,
                     },
                 },
             ],
@@ -3094,6 +3614,7 @@ mod tests {
         // 计划 fixture：三段 [0,100000) [100000,272001) [272001,None)。
         let plan3 = PricePlan {
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(1.0),
                 ..Default::default()
             },
@@ -3103,6 +3624,7 @@ mod tests {
                     min_tokens: 0,
                     max_tokens: Some(100_000),
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(2.0),
                         ..Default::default()
                     },
@@ -3112,6 +3634,7 @@ mod tests {
                     min_tokens: 100_000,
                     max_tokens: Some(272_001),
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(4.0),
                         ..Default::default()
                     },
@@ -3121,6 +3644,7 @@ mod tests {
                     min_tokens: 272_001,
                     max_tokens: None,
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(8.0),
                         ..Default::default()
                     },
@@ -3204,6 +3728,7 @@ mod tests {
             basis: Some(PricingBasis::PromptTokens),
             application: Some(PricingApplication::WholeRequest),
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(3.0),
                 output: RateSpec::Fixed(15.0),
                 cache_write: RateSpec::Fixed(3.75),
@@ -3215,6 +3740,7 @@ mod tests {
                 min_tokens: 200_000,
                 max_tokens: None,
                 prices: PriceRates {
+                    cache_write_tiers: None,
                     input: RateSpec::Fixed(6.0),
                     output: RateSpec::Unknown,         // 沿用基础 15.0
                     cache_write: RateSpec::Fixed(0.0), // 显式免费，不回退
@@ -3223,7 +3749,7 @@ mod tests {
             }],
         };
         let seg = select_segment(&plan, 300_000).unwrap();
-        let r = effective_rates(&plan, None, Some(seg));
+        let r = effective_rates(&plan, None, Some(seg)).rates;
         assert_eq!(r.input, Some(6.0));
         assert_eq!(r.output, Some(15.0), "分段缺 output → 沿用基础");
         assert_eq!(r.cache_write, Some(0.0), "显式 0 不回退");
@@ -3231,13 +3757,14 @@ mod tests {
         // 基础价也缺失的分量 → None（估算时进 unknown）。
         let plan2 = PricePlan {
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(3.0),
                 ..Default::default()
             },
             segments: vec![],
             ..Default::default()
         };
-        let r2 = effective_rates(&plan2, None, None);
+        let r2 = effective_rates(&plan2, None, None).rates;
         assert_eq!(r2.input, Some(3.0));
         assert_eq!(r2.output, None, "无基础价 → unknown");
     }
@@ -3258,6 +3785,9 @@ mod tests {
             output,
             cache_write: cw,
             cache_read: cr,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         };
         // 低于阈值 → 基础价：200_000 前的 (100, 0, 0, 50)。
         let e1 = p
@@ -3303,6 +3833,7 @@ mod tests {
                     min_tokens: 200_000,
                     max_tokens: None,
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(6.0),
                         output: RateSpec::Fixed(22.5),
                         cache_write: RateSpec::Fixed(7.5),
@@ -3352,6 +3883,7 @@ mod tests {
                 name: None,
                 plan: PricePlan {
                     base: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(i),
                         output: RateSpec::Fixed(o),
                         cache_write: RateSpec::Fixed(cw),
@@ -3408,6 +3940,7 @@ mod tests {
             name: None,
             plan: PricePlan {
                 base: PriceRates {
+                    cache_write_tiers: None,
                     input: RateSpec::Fixed(8.0),
                     ..Default::default()
                 },
@@ -3421,6 +3954,7 @@ mod tests {
             name: None,
             plan: PricePlan {
                 base: PriceRates {
+                    cache_write_tiers: None,
                     input: RateSpec::Fixed(2.0),
                     ..Default::default()
                 },
@@ -3429,6 +3963,7 @@ mod tests {
                     min_tokens: 100_000,
                     max_tokens: None,
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(20.0),
                         ..Default::default()
                     },
@@ -3467,6 +4002,7 @@ mod tests {
                 name: None,
                 plan: PricePlan {
                     base: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(3.0),
                         ..Default::default()
                     },
@@ -3524,6 +4060,8 @@ mod tests {
             output: Some(input * 4.0),
             cache_read: Some(input / 10.0),
             cache_write: Some(input * 1.25),
+            cache_write_5m: None,
+            cache_write_1h: None,
         };
         let snapshot = Snapshot {
             v: 3,
@@ -3536,6 +4074,8 @@ mod tests {
                     output: Some(20.0),
                     cache_read: Some(0.4),
                     cache_write: Some(5.0),
+                    cache_write_5m: None,
+                    cache_write_1h: None,
                     segments: vec![seg(272_001, None, 8.0)],
                 },
                 // 反向区间：非法 → 仅保留基础价 + warning
@@ -3546,6 +4086,8 @@ mod tests {
                     output: Some(2.0),
                     cache_read: None,
                     cache_write: None,
+                    cache_write_5m: None,
+                    cache_write_1h: None,
                     segments: vec![seg(100_000, Some(50_000), 9.0)],
                 },
             ],
@@ -3670,6 +4212,8 @@ mod tests {
                     output: Some(2.0),
                     cache_read: None,
                     cache_write: None,
+                    cache_write_5m: None,
+                    cache_write_1h: None,
                     segments: Vec::new(),
                 },
                 // 显式 0（如旧版 OpenAI 模型无写入计费）
@@ -3680,6 +4224,8 @@ mod tests {
                     output: Some(2.0),
                     cache_read: Some(0.0),
                     cache_write: Some(0.0),
+                    cache_write_5m: None,
+                    cache_write_1h: None,
                     segments: Vec::new(),
                 },
             ],
@@ -3777,6 +4323,8 @@ mod tests {
                 output: Some(2.0),
                 cache_read: None,
                 cache_write: None,
+                cache_write_5m: None,
+                cache_write_1h: None,
                 segments: Vec::new(),
             }],
         };
@@ -3913,6 +4461,8 @@ mod tests {
                 output: Some(3.0),
                 cache_read: Some(0.1),
                 cache_write: Some(0.2),
+                cache_write_5m: None,
+                cache_write_1h: None,
                 segments: Vec::new(),
             }],
         };
@@ -3933,6 +4483,7 @@ mod tests {
             name: None,
             plan: PricePlan {
                 base: PriceRates {
+                    cache_write_tiers: None,
                     input: RateSpec::Fixed(2.0),
                     ..Default::default()
                 },
@@ -3941,6 +4492,7 @@ mod tests {
                     min_tokens: 100_001,
                     max_tokens: None,
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(9.0),
                         ..Default::default()
                     },
@@ -4062,6 +4614,7 @@ cache_read = 1.0
                 basis: Some(PricingBasis::PromptTokens),
                 application: Some(PricingApplication::WholeRequest),
                 base: PriceRates {
+                    cache_write_tiers: None,
                     input: RateSpec::Fixed(4.0),
                     output: RateSpec::Fixed(20.0),
                     cache_write: RateSpec::Fixed(0.0),
@@ -4072,6 +4625,7 @@ cache_read = 1.0
                     min_tokens: 272_001,
                     max_tokens: None,
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(8.0),
                         ..Default::default()
                     },
@@ -4085,6 +4639,7 @@ cache_read = 1.0
                         end_time: "14:00".into(),
                         weekdays: Some(vec!["mon".into(), "fri".into()]),
                         prices: PriceRates {
+                            cache_write_tiers: None,
                             input: RateSpec::Fixed(30.0),
                             ..Default::default()
                         },
@@ -4101,6 +4656,7 @@ cache_read = 1.0
             name: None,
             plan: PricePlan {
                 base: PriceRates {
+                    cache_write_tiers: None,
                     input: RateSpec::Fixed(1.0),
                     output: RateSpec::Fixed(2.0),
                     cache_write: RateSpec::Fixed(0.25),
@@ -4165,6 +4721,7 @@ cache_read = 1.0
         // Task 5：统一估算器输出请求级 breakdown——四行明细与总价同源；
         // 阈值边界、部分缺价、峰谷与分段条件切换、重复估算确定性。
         let rates = |i: f64, o: f64, cw: f64, cr: f64| PriceRates {
+            cache_write_tiers: None,
             input: RateSpec::Fixed(i),
             output: RateSpec::Fixed(o),
             cache_write: RateSpec::Fixed(cw),
@@ -4191,6 +4748,7 @@ cache_read = 1.0
             plan: PricePlan {
                 basis: Some(PricingBasis::PromptTokens),
                 base: PriceRates {
+                    cache_write_tiers: None,
                     input: RateSpec::Fixed(2.0),
                     output: RateSpec::Fixed(1.0),
                     cache_write: RateSpec::Fixed(0.5),
@@ -4201,6 +4759,7 @@ cache_read = 1.0
                     min_tokens: 272_001,
                     max_tokens: None,
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(10.0),
                         output: RateSpec::Fixed(5.0),
                         cache_write: RateSpec::Unknown,
@@ -4218,6 +4777,7 @@ cache_read = 1.0
             name: None,
             plan: PricePlan {
                 base: PriceRates {
+                    cache_write_tiers: None,
                     input: RateSpec::Fixed(1.0),
                     output: RateSpec::Fixed(2.0),
                     cache_write: RateSpec::Unknown,
@@ -4237,6 +4797,7 @@ cache_read = 1.0
                                 .collect(),
                         ),
                         prices: PriceRates {
+                            cache_write_tiers: None,
                             input: RateSpec::Fixed(30.0),
                             ..Default::default()
                         },
@@ -4290,6 +4851,7 @@ cache_read = 1.0
                 name: None,
                 plan: PricePlan {
                     base: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(1.0),
                         output: RateSpec::Fixed(2.0),
                         cache_write: RateSpec::Unknown,
@@ -4309,6 +4871,7 @@ cache_read = 1.0
                                     .collect(),
                             ),
                             prices: PriceRates {
+                                cache_write_tiers: None,
                                 input: RateSpec::Fixed(30.0),
                                 ..Default::default()
                             },
@@ -4434,6 +4997,7 @@ cache_read = 1.0
             name: None,
             plan: PricePlan {
                 base: PriceRates {
+                    cache_write_tiers: None,
                     input: RateSpec::Fixed(8.0),
                     ..Default::default()
                 },
@@ -4462,11 +5026,13 @@ cache_read = 1.0
                                 .collect(),
                         ),
                         prices: PriceRates {
+                            cache_write_tiers: None,
                             input: RateSpec::Fixed(20.0),
                             ..Default::default()
                         },
                     }],
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(2.0),
                         ..Default::default()
                     },
@@ -4510,11 +5076,13 @@ cache_read = 1.0
                         end_time: "20:00".into(),
                         weekdays: None,
                         prices: PriceRates {
+                            cache_write_tiers: None,
                             input: RateSpec::Fixed(30.0),
                             ..Default::default()
                         },
                     }],
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(1.0),
                         ..Default::default()
                     },
@@ -4529,6 +5097,7 @@ cache_read = 1.0
                 name: None,
                 plan: PricePlan {
                     base: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(9.0),
                         ..Default::default()
                     },
@@ -4577,6 +5146,7 @@ cache_read = 1.0
                             end_time: "20:00".into(),
                             weekdays: None,
                             prices: PriceRates {
+                                cache_write_tiers: None,
                                 input: RateSpec::Fixed(5.0),
                                 ..Default::default()
                             },
@@ -4587,6 +5157,7 @@ cache_read = 1.0
                             end_time: "18:00".into(),
                             weekdays: None,
                             prices: PriceRates {
+                                cache_write_tiers: None,
                                 input: RateSpec::Fixed(12.0),
                                 ..Default::default()
                             },
@@ -5138,6 +5709,7 @@ output = 10.0
         // Unknown → null；旧 v4 JSON（数字/null）可按 v5 语义解析。
         assert_eq!(
             serde_json::to_value(PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(0.0),
                 output: RateSpec::Unknown,
                 cache_write: RateSpec::SameAsInput,
@@ -5311,6 +5883,7 @@ cache_read = "free"
                 name: None,
                 plan: PricePlan {
                     base: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(i),
                         output: RateSpec::Fixed(o),
                         cache_write: RateSpec::Fixed(0.0),
@@ -5360,6 +5933,7 @@ cache_read = "free"
                 name: None,
                 plan: PricePlan {
                     base: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(i),
                         output: RateSpec::Fixed(o),
                         cache_write: RateSpec::Fixed(0.0),
@@ -5401,6 +5975,7 @@ cache_read = "free"
                 name: None,
                 plan: PricePlan {
                     base: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(i),
                         output: RateSpec::Fixed(o),
                         cache_write: RateSpec::Fixed(0.0),
@@ -5544,6 +6119,7 @@ cache_read = "free"
         // 21:00（规则不适用）回 A/$10。开始含入、结束排除。
         let a = PricePlan {
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(10.0),
                 ..Default::default()
             },
@@ -5556,6 +6132,7 @@ cache_read = "free"
                     end_time: "20:00".into(),
                     weekdays: None,
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(2.0),
                         ..Default::default()
                     },
@@ -5566,6 +6143,7 @@ cache_read = "free"
         };
         let b = PricePlan {
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(5.0),
                 ..Default::default()
             },
@@ -5613,6 +6191,7 @@ cache_read = "free"
         // input 1M + read 1M → 必须选完整 $3，不得按已知小计选 partial $10。
         let plan = PricePlan {
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(99.0),
                 ..Default::default()
             },
@@ -5626,6 +6205,7 @@ cache_read = "free"
                         end_time: "23:59".into(),
                         weekdays: None,
                         prices: PriceRates {
+                            cache_write_tiers: None,
                             input: RateSpec::Fixed(10.0),
                             ..Default::default()
                         },
@@ -5641,6 +6221,7 @@ cache_read = "free"
                         end_time: "23:59".into(),
                         weekdays: None,
                         prices: PriceRates {
+                            cache_write_tiers: None,
                             input: RateSpec::Fixed(2.0),
                             cache_read: RateSpec::Fixed(1.0),
                             ..Default::default()
@@ -5675,6 +6256,7 @@ cache_read = "free"
         // 没有完整规则 → 已知小计最高者胜；缺价分项零 token 不影响完整性。
         let plan = PricePlan {
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(1.0),
                 ..Default::default()
             },
@@ -5688,6 +6270,7 @@ cache_read = "free"
                         end_time: "23:59".into(),
                         weekdays: None,
                         prices: PriceRates {
+                            cache_write_tiers: None,
                             input: RateSpec::Fixed(8.0),
                             cache_read: RateSpec::Unknown,
                             ..Default::default()
@@ -5704,6 +6287,7 @@ cache_read = "free"
                         end_time: "23:59".into(),
                         weekdays: None,
                         prices: PriceRates {
+                            cache_write_tiers: None,
                             input: RateSpec::Fixed(3.0),
                             cache_read: RateSpec::Fixed(0.2),
                             ..Default::default()
@@ -5745,6 +6329,7 @@ cache_read = "free"
     fn valley_peak_pricing() -> Pricing {
         let a = PricePlan {
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(10.0),
                 ..Default::default()
             },
@@ -5758,6 +6343,7 @@ cache_read = "free"
                         end_time: "20:00".into(),
                         weekdays: None,
                         prices: PriceRates {
+                            cache_write_tiers: None,
                             input: RateSpec::Fixed(2.0),
                             ..Default::default()
                         },
@@ -5773,6 +6359,7 @@ cache_read = "free"
                         end_time: "23:00".into(),
                         weekdays: None,
                         prices: PriceRates {
+                            cache_write_tiers: None,
                             input: RateSpec::Fixed(15.0),
                             ..Default::default()
                         },
@@ -5784,6 +6371,7 @@ cache_read = "free"
         };
         let b = PricePlan {
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(5.0),
                 ..Default::default()
             },
@@ -5855,6 +6443,7 @@ cache_read = "free"
         // period 命中；不可与空规则一起被跳过。
         let plan_with_default = |default: f64| PricePlan {
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(10.0),
                 ..Default::default()
             },
@@ -5868,11 +6457,13 @@ cache_read = "free"
                     end_time: "06:00".into(),
                     weekdays: None,
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(2.0),
                         ..Default::default()
                     },
                 }],
                 prices: PriceRates {
+                    cache_write_tiers: None,
                     input: RateSpec::Fixed(default),
                     ..Default::default()
                 },
@@ -5894,6 +6485,7 @@ cache_read = "free"
             name: None,
             plan: PricePlan {
                 base: PriceRates {
+                    cache_write_tiers: None,
                     input: RateSpec::Fixed(5.0),
                     ..Default::default()
                 },
@@ -5926,6 +6518,7 @@ cache_read = "free"
         // 时规则仍适用，缓存读按该层最终输入价计。
         let a = PricePlan {
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(10.0),
                 ..Default::default()
             },
@@ -5938,11 +6531,13 @@ cache_read = "free"
                     end_time: "06:00".into(),
                     weekdays: None,
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(2.0),
                         ..Default::default()
                     },
                 }],
                 prices: PriceRates {
+                    cache_write_tiers: None,
                     cache_read: RateSpec::SameAsInput,
                     ..Default::default()
                 },
@@ -5952,6 +6547,7 @@ cache_read = "free"
         };
         let b = PricePlan {
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(5.0),
                 cache_read: RateSpec::Fixed(1.0),
                 ..Default::default()
@@ -5997,6 +6593,7 @@ cache_read = "free"
         // 不适用分段的存在不能代替实际命中。
         let a = PricePlan {
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(10.0),
                 ..Default::default()
             },
@@ -6008,6 +6605,7 @@ cache_read = "free"
                     min_tokens: 300_000,
                     max_tokens: None,
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(8.0),
                         ..Default::default()
                     },
@@ -6018,6 +6616,7 @@ cache_read = "free"
         };
         let b = PricePlan {
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(5.0),
                 ..Default::default()
             },
@@ -6065,6 +6664,7 @@ cache_read = "free"
         // 匹配日命中时规则正常生效。
         let a = PricePlan {
             base: PriceRates {
+                cache_write_tiers: None,
                 input: RateSpec::Fixed(10.0),
                 ..Default::default()
             },
@@ -6077,6 +6677,7 @@ cache_read = "free"
                     end_time: "23:59".into(),
                     weekdays: Some(vec!["sun".into()]),
                     prices: PriceRates {
+                        cache_write_tiers: None,
                         input: RateSpec::Fixed(2.0),
                         ..Default::default()
                     },
@@ -6275,6 +6876,7 @@ input = -3.0
             "solo/big",
             PricePlan {
                 base: PriceRates {
+                    cache_write_tiers: None,
                     input: RateSpec::Fixed(1e308),
                     ..Default::default()
                 },

@@ -246,3 +246,21 @@ describe("BS01 检查耗时提示与代次保护", () => {
     expect(gate.phase.value).toBe("ready");
   });
 });
+
+describe("十八轮复核 P3：政策已更新提示不重复显示为错误", () => {
+  it("needs_consent 的 detail 只作为 updateNotice，不进入 message", async () => {
+    const invoke = vi.fn((cmd: string) => {
+      if (cmd === "privacy_bootstrap")
+        return Promise.resolve(
+          snapshot("needs_consent", { detail: "政策已更新，请重新阅读并同意" }),
+        );
+      if (cmd === "privacy_load_policy") return Promise.resolve(POLICY);
+      return Promise.resolve(snapshot("needs_consent"));
+    });
+    const gate = createPrivacyGate(invoke as never);
+    await gate.bootstrap();
+    expect(gate.policyUpdated.value).toBe("政策已更新，请重新阅读并同意");
+    expect(gate.error.value).toBeNull();
+    expect(gate.blockedDetail.value).toBeNull();
+  });
+});

@@ -30,6 +30,8 @@ export const SCENARIO_TIMEOUT_OVERRIDES = {
   "expire-cycle": 750000,
   "ui-relaunch": 1800000,
   "ui-collection-status": 480000,
+  // 修订 2 旧用户场景：15 秒门禁观察 + 两次启动（同意前/重启后）。
+  "privacy-revision2-consent": 600000,
 };
 
 /** 场景预算：有显式独立预算的场景用原值，其余 5 分钟。 */

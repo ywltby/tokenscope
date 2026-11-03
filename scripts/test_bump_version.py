@@ -547,5 +547,32 @@ class ReleaseOnChangeCase(RepoCase):
         self.assertEqual(result["kind"], "existing-tag")
 
 
+class AgreementRevisionCase(RepoCase):
+    def setUp(self):
+        super().setUp()
+        seed(self.root)
+        seed_declaration(self.root)
+        self.settings = self.root / "crates/tokenscope-core/src/settings.rs"
+        self.settings.parent.mkdir(parents=True, exist_ok=True)
+        self.settings.write_text("pub const PRIVACY_POLICY_REVISION: u8 = 2;\n", encoding="utf-8")
+        self.terms = self.root / "docs/terms.md"
+        self.terms.parent.mkdir(parents=True, exist_ok=True)
+        self.terms.write_text("# 旧用户协议\n", encoding="utf-8")
+        self.base = self.commit_all()
+        policy.bump(self.root, "patch", self.base, "协议更新")
+
+    def test_changed_agreement_requires_new_consent_revision(self):
+        self.terms.write_text("# 新用户协议\n", encoding="utf-8")
+        self.commit_all("协议变化但修订不变")
+        with self.assertRaisesRegex(ValueError, "协议.*修订"):
+            policy.check(self.root, self.base)
+
+    def test_changed_agreement_with_incremented_revision_is_allowed(self):
+        self.terms.write_text("# 新用户协议\n", encoding="utf-8")
+        self.settings.write_text("pub const PRIVACY_POLICY_REVISION: u8 = 3;\n", encoding="utf-8")
+        self.commit_all("协议与修订同时更新")
+        self.assertTrue(policy.check(self.root, self.base)["release"])
+
+
 if __name__ == "__main__":
     unittest.main()

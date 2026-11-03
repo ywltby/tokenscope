@@ -5,7 +5,7 @@ import path from "node:path";
 import { createUnifiedContext } from "../lib/native-unified.mjs";
 import { pricingVerdict } from "../lib/native-pricing-checks.mjs";
 import { readAcceptanceTrace } from "../lib/acceptance-io.mjs";
-import { collectDescendants } from "../lib/native-instance.mjs";
+import { collectAppDescendants } from "../lib/native-instance.mjs";
 import { spawnSyncBounded } from "../lib/native-scenario.mjs";
 
 const stagedFile = (root) => path.join(root, "pricing-rules-staged.toml");
@@ -417,9 +417,13 @@ export async function nativePricing(context) {
     await u.click(u.page().getByRole("button", { name: "打开 / 创建外置价格文件", exact: true }));
     const opened = await settledAfter("open_pricing_file", count);
     const processSnapshot = await inst.refreshDescendants(inst.current);
-    const descendants = collectDescendants(processSnapshot.processes ?? [], inst.current.hostPid);
+    // 宿主 PID 以本次活动子进程为准：记录里的 hostPid 在宿主重启后可能已过期，
+    // 被系统复用时会把 csrss/wininit 之类当成应用后代（既有事故同类）。
+    const hostPid = inst.proc?.pid ?? inst.current.hostPid;
+    const walked = collectAppDescendants(processSnapshot.processes ?? [], hostPid);
     const foreignProcesses = (processSnapshot.processes ?? []).filter(
-      (row) => descendants.includes(row.pid) && row.name.toLowerCase() !== "msedgewebview2.exe",
+      (row) =>
+        walked.descendants.includes(row.pid) && row.name.toLowerCase() !== "msedgewebview2.exe",
     );
     const openers = readAcceptanceTrace(inst.root).records.filter((row) => row.event === "opener");
     check("open_pricing_file_creates_template_in_root", {
@@ -427,6 +431,10 @@ export async function nativePricing(context) {
       created: fs.existsSync(file),
       content: fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "",
       rawExpectedPath: file,
+      // 进程身份是否可解析：false = 快照里宿主行不是应用家族（PID 已被复用），
+      // 此时"没有外部后代"不能算通过。
+      hostPidResolved: walked.resolved,
+      hostPid,
       // Runner 的 TEMP 可含 RUNNER~1；后端路径已展开，期望也须指向同一真实文件。
       expectedPath: fs.existsSync(file) ? fs.realpathSync.native(file) : null,
       returnedPath: opened.status === "fulfilled" ? opened.value : null,

@@ -309,3 +309,319 @@ describe("单价精度贯通设置与公式（RC07）", () => {
     expect(t).not.toContain("$1.23/M");
   });
 });
+
+// N18：缓存写分档（5m/1h）行的展示与「估算标示」语义。
+describe("N18 cache write tiers", () => {
+  it("可信分档事件渲染两档行并替换合并行", () => {
+    const tiered = bd({
+      lines: [
+        {
+          kind: "cache_write_5m",
+          tokens: 1_000_000,
+          unit_price: 3.75,
+          subtotal: 3.75,
+          priced: true,
+        },
+        { kind: "cache_write_1h", tokens: 1_000_000, unit_price: 6, subtotal: 6, priced: true },
+        { kind: "input", tokens: 0, unit_price: 3, subtotal: 0, priced: true },
+        { kind: "output", tokens: 0, unit_price: 15, subtotal: 0, priced: true },
+        { kind: "cache_read", tokens: 0, unit_price: 0.3, subtotal: 0, priced: true },
+      ],
+      cost_usd: 9.75,
+      unknown: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+      complete: true,
+    });
+    const rows = formatCostBreakdownRows(tiered);
+    expect(rows.some((r) => r.label === "缓存写（5 分钟档）")).toBe(true);
+    expect(rows.some((r) => r.label === "缓存写（1 小时档）")).toBe(true);
+    const text = formatCostBreakdownText(tiered);
+    expect(text).toContain("$3.75");
+    expect(text).toContain("$6.00");
+    expect(text).toContain("估算合计 $9.75");
+    expect(text).not.toContain("写入分档未知");
+  });
+
+  it("分项未知 + 分档候选：估算合计后必须带『写入分档未知』标示", () => {
+    const estimated = bd({
+      lines: [
+        { kind: "input", tokens: 0, unit_price: 3, subtotal: 0, priced: true },
+        { kind: "output", tokens: 0, unit_price: 15, subtotal: 0, priced: true },
+        { kind: "cache_write", tokens: 2_000_000, unit_price: 3.75, subtotal: 7.5, priced: true },
+        { kind: "cache_read", tokens: 0, unit_price: 0.3, subtotal: 0, priced: true },
+      ],
+      cost_usd: 7.5,
+      unknown: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+      complete: false,
+      cache_write_split_estimated: true,
+    });
+    const rows = formatCostBreakdownRows(estimated);
+    expect(rows.some((r) => r.label === "写入分档未知" && r.unknown)).toBe(true);
+    const text = formatCostBreakdownText(estimated);
+    expect(text).toContain("估算合计 $7.50");
+    expect(text).toContain("写入分档未知");
+    expect(text).toContain("按写入总量单价估算");
+  });
+
+  it("分项未知 + 无分档候选：不出现估算标示（走既有未知/未计价语义）", () => {
+    const plain = bd({
+      lines: [
+        { kind: "cache_write", tokens: 1_000_000, unit_price: 3.75, subtotal: 3.75, priced: true },
+      ],
+      cost_usd: 3.75,
+      complete: true,
+      cache_write_split_estimated: false,
+    });
+    const text = formatCostBreakdownText(plain);
+    expect(text).not.toContain("写入分档未知");
+  });
+});
+
+// N18 二轮：prompt tokens 算式在分档/合并/未知分档三种形态下都不重复计数。
+describe("N18 prompt tokens formula", () => {
+  const base = () =>
+    bd({
+      lines: [
+        { kind: "input", tokens: 1000, unit_price: 3, subtotal: 0.003, priced: true },
+        { kind: "output", tokens: 0, unit_price: 15, subtotal: 0, priced: true },
+      ],
+      cost_usd: 0,
+      complete: true,
+    });
+
+  it("可信分档：算式显示两档之和", () => {
+    const tiered = base();
+    tiered.lines = [
+      ...tiered.lines,
+      { kind: "cache_write_5m", tokens: 400_000, unit_price: 3.75, subtotal: 1.5, priced: true },
+      { kind: "cache_write_1h", tokens: 600_000, unit_price: 6, subtotal: 3.6, priced: true },
+      { kind: "cache_read", tokens: 2000, unit_price: 0.3, subtotal: 0.0006, priced: true },
+    ];
+    tiered.basis_value = 1_002_000;
+    const text = formatCostBreakdownText(tiered);
+    expect(text).toContain("缓存写 1,000,000");
+    expect(text).toContain("= 总输入 1,002,000");
+  });
+
+  it("合并行：算式继续使用合并值", () => {
+    const merged = base();
+    merged.lines = [
+      ...merged.lines,
+      { kind: "cache_write", tokens: 1_000_000, unit_price: 3.75, subtotal: 3.75, priced: true },
+      { kind: "cache_read", tokens: 2000, unit_price: 0.3, subtotal: 0.0006, priced: true },
+    ];
+    merged.basis_value = 1_002_000;
+    const text = formatCostBreakdownText(merged);
+    expect(text).toContain("缓存写 1,000,000");
+    expect(text).toContain("= 总输入 1,002,000");
+  });
+
+  it("未知分档（合并行估算）：算式仍只算一次写总量", () => {
+    const estimated = base();
+    estimated.lines = [
+      ...estimated.lines,
+      { kind: "cache_write", tokens: 2_000_000, unit_price: 3.75, subtotal: 7.5, priced: true },
+    ];
+    estimated.basis_value = 2_001_000;
+    estimated.complete = false;
+    estimated.cache_write_split_estimated = true;
+    const text = formatCostBreakdownText(estimated);
+    expect(text).toContain("缓存写 2,000,000");
+    expect(text).toContain("= 总输入 2,001,000");
+    expect(text).toContain("写入分档未知");
+  });
+
+  it("后端不并发两档行与合并行（契约断言：真实实现同此）", () => {
+    // 后端 estimate_entry 的可信分档分支只输出 5m/1h 两行、不输出合并行；
+    // 分项未知分支只输出合并行。两者不会并存——这里锁定该契约形状，
+    // 防止未来改动破坏「分项不重复计入」。
+    const rows = formatCostBreakdownRows(
+      (() => {
+        const tiered = base();
+        tiered.lines = [
+          ...tiered.lines,
+          {
+            kind: "cache_write_5m",
+            tokens: 400_000,
+            unit_price: 3.75,
+            subtotal: 1.5,
+            priced: true,
+          },
+          { kind: "cache_write_1h", tokens: 600_000, unit_price: 6, subtotal: 3.6, priced: true },
+        ];
+        tiered.basis_value = 1_001_000;
+        return tiered;
+      })(),
+    );
+    const formulaLabels = rows.filter(
+      (r) => r.label === "缓存写（5 分钟档）" || r.label === "缓存写（1 小时档）",
+    );
+    expect(formulaLabels).toHaveLength(2);
+    expect(rows.some((r) => r.label === "缓存写")).toBe(false);
+  });
+});
+
+// N18 三轮（复核项 6）：估算与未计价文案不得互相冒充。
+describe("N18 estimated vs unpriced wording", () => {
+  const withLines = (
+    lines: EventCostBreakdown["lines"],
+    cost: number,
+    complete: boolean,
+    estimated?: boolean,
+  ) => {
+    const base = bd({ lines, cost_usd: cost, complete });
+    if (estimated !== undefined) base.cache_write_split_estimated = estimated;
+    return base;
+  };
+
+  it("按合并价估算：有「写入分档未知」且金额来自合并价", () => {
+    const est = withLines(
+      [
+        { kind: "input", tokens: 0, unit_price: 3, subtotal: 0, priced: true },
+        { kind: "output", tokens: 0, unit_price: 15, subtotal: 0, priced: true },
+        { kind: "cache_write", tokens: 2_000_000, unit_price: 3.75, subtotal: 7.5, priced: true },
+        { kind: "cache_read", tokens: 0, unit_price: 0.3, subtotal: 0, priced: true },
+      ],
+      7.5,
+      false,
+      true,
+    );
+    const text = formatCostBreakdownText(est);
+    expect(text).toContain("写入分档未知");
+    expect(text).toContain("按写入总量单价估算");
+    expect(text).toContain("估算合计 $7.50");
+    // 复核项 6：纯估算没有未计价 token——不得出现未计价说明或提示。
+    expect(text).not.toContain("未计价");
+    expect(text).not.toContain("缺价 ≠ 免费");
+  });
+
+  it("未计价：只有「未计价」行，不出现「写入分档未知」", () => {
+    const unp = withLines(
+      [
+        { kind: "input", tokens: 0, unit_price: 3, subtotal: 0, priced: true },
+        { kind: "output", tokens: 0, unit_price: 15, subtotal: 0, priced: true },
+        { kind: "cache_write_5m", tokens: 1_000_000, unit_price: null, subtotal: 0, priced: false },
+        { kind: "cache_write_1h", tokens: 1_000_000, unit_price: 6, subtotal: 6, priced: true },
+      ],
+      6,
+      false,
+      false,
+    );
+    const text = formatCostBreakdownText(unp);
+    expect(text).toContain("未计价");
+    expect(text).toContain("缺价 ≠ 免费");
+    expect(text).not.toContain("写入分档未知");
+    expect(text).toContain("缺少单价");
+  });
+
+  it("混合：估算与未计价并存时两行都出现且金额只含已计价分项", () => {
+    const mixed = withLines(
+      [
+        { kind: "cache_write", tokens: 1_000_000, unit_price: 3.75, subtotal: 3.75, priced: true },
+        { kind: "cache_write_5m", tokens: 1_000_000, unit_price: null, subtotal: 0, priced: false },
+      ],
+      3.75,
+      false,
+      true,
+    );
+    const text = formatCostBreakdownText(mixed);
+    expect(text).toContain("写入分档未知");
+    expect(text).toContain("未计价");
+    expect(text).toContain("估算合计 $3.75");
+  });
+});
+
+// N18 复核项 4：纯估算时 matched.reason 可能是 highest_partial_cost，
+// 明细所有文案不得声称存在未计价 token；真缺价/混合仍须提示。
+describe("N18 partial reason wording", () => {
+  const pureEstimate = () => {
+    const b = bd({
+      lines: [
+        { kind: "input", tokens: 0, unit_price: 3, subtotal: 0, priced: true },
+        { kind: "output", tokens: 0, unit_price: 15, subtotal: 0, priced: true },
+        { kind: "cache_write", tokens: 2_000_000, unit_price: 3.75, subtotal: 7.5, priced: true },
+        { kind: "cache_read", tokens: 0, unit_price: 0.3, subtotal: 0, priced: true },
+      ],
+      cost_usd: 7.5,
+      complete: false,
+      cache_write_split_estimated: true,
+      unknown: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    });
+    b.matched.reason = "highest_partial_cost";
+    return b;
+  };
+
+  it("纯估算 + highest_partial_cost：不出现未计价字样", () => {
+    const text = formatCostBreakdownText(pureEstimate());
+    expect(text).toContain("因事件缺写入分档");
+    expect(text).not.toContain("未计价");
+    expect(text).not.toContain("缺价 ≠ 免费");
+  });
+
+  it("真缺价 + highest_partial_cost：仍提示未计价", () => {
+    const unp = pureEstimate();
+    unp.cache_write_split_estimated = false;
+    unp.lines = [
+      { kind: "cache_write_5m", tokens: 1_000_000, unit_price: null, subtotal: 0, priced: false },
+      { kind: "cache_write_1h", tokens: 1_000_000, unit_price: 6, subtotal: 6, priced: true },
+    ];
+    unp.unknown = { input: 0, output: 0, cache_write: 1_000_000, cache_read: 0 };
+    unp.cost_usd = 6;
+    const text = formatCostBreakdownText(unp);
+    expect(text).toContain("未计价");
+    expect(text).toContain("缺价 ≠ 免费");
+  });
+
+  it("混合：估算与未计价并存时，选择说明同时给出两者", () => {
+    const mixed = pureEstimate();
+    mixed.unknown = { input: 0, output: 0, cache_write: 1_000_000, cache_read: 0 };
+    mixed.lines = [
+      ...mixed.lines,
+      { kind: "cache_write_5m", tokens: 1_000_000, unit_price: null, subtotal: 0, priced: false },
+    ];
+    const text = formatCostBreakdownText(mixed);
+    expect(text).toContain("未计价");
+    expect(text).toContain("写入分档未知");
+  });
+});
+
+// N18 复核项 3：选择说明只按所选候选的已知事实描述；其他候选为何不完整
+// 由后端排除披露逐条说明，不得一律归因为事件缺分档。
+describe("N18 selection wording attributes only the selected candidate", () => {
+  const base = bd({
+    lines: [
+      { kind: "input", tokens: 0, unit_price: 3, subtotal: 0, priced: true },
+      { kind: "output", tokens: 0, unit_price: 15, subtotal: 0, priced: true },
+      { kind: "cache_write", tokens: 2_000_000, unit_price: 9, subtotal: 18, priced: true },
+      { kind: "cache_read", tokens: 0, unit_price: 0.3, subtotal: 0, priced: true },
+    ],
+    cost_usd: 18,
+    complete: false,
+    cache_write_split_estimated: true,
+    unknown: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+  });
+  base.matched.reason = "highest_partial_cost";
+
+  it("选择说明只描述所选候选（事件缺分档、按合并价估算）", () => {
+    const text = formatCostBreakdownText(base);
+    expect(text).toContain("所选候选因事件缺写入分档，写费按合并价估算");
+    expect(text).not.toContain("均不完整，因事件缺写入分档");
+  });
+
+  it("其他候选缺输入价的原因由后端披露原文呈现，不被改写", () => {
+    const withWarning = {
+      ...base,
+      excluded_candidate_warning:
+        "有 1 个候选因缺少价格未参与主估算（chan-b/cheap）；若其缺失分项有价，实际最高费用可能更高",
+    } as typeof base;
+    const text = formatCostBreakdownText(withWarning);
+    // 选择说明只描述所选候选。
+    expect(text).toContain("所选候选因事件缺写入分档");
+    // 后端披露原文原样保留（B 缺价的事实不被吞掉也不被归因为事件缺分档）。
+    expect(text).toContain("有 1 个候选因缺少价格未参与主估算（chan-b/cheap）");
+  });
+
+  it("纯估算的胜出结果仍不声称自身含未计价 token", () => {
+    const text = formatCostBreakdownText(base);
+    expect(text).not.toContain("未计价");
+  });
+});

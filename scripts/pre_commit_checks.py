@@ -103,6 +103,7 @@ CHECK_COMMANDS = {
         ["pwsh", "-NoProfile", "-File", "scripts/test_install_helpers.ps1"],
         ["pwsh", "-NoProfile", "-File", "scripts/test_upgrade_helpers.ps1"],
         ["pwsh", "-NoProfile", "-File", "scripts/test_native_window_action.ps1"],
+        ["pwsh", "-NoProfile", "-File", "scripts/test_read_tray_notification_area.ps1"],
     ],
     DOC_CHECK: [["python", "-B", "scripts/check_staged_docs.py"]],
 }

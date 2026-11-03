@@ -46,6 +46,12 @@ struct ApiCost {
     cache_read: Option<f64>,
     #[serde(default)]
     cache_write: Option<f64>,
+    /// N18：缓存写分档（USD/百万 token）。models.dev 当前未发布这两键；
+    /// 显式字段一旦存在即优先生效（快照层不做任何派生）。
+    #[serde(default)]
+    cache_write_5m: Option<f64>,
+    #[serde(default)]
+    cache_write_1h: Option<f64>,
     /// Task 2：上下文分段价格（只接受 tier.type = "context"）。
     #[serde(default)]
     tiers: Vec<ApiTier>,
@@ -65,6 +71,11 @@ pub(crate) struct ApiTierRates {
     pub(crate) cache_read: Option<f64>,
     #[serde(default)]
     pub(crate) cache_write: Option<f64>,
+    /// N18：缓存写分档（显式给出；缺省由计价层按该层数据自证派生）。
+    #[serde(default)]
+    pub(crate) cache_write_5m: Option<f64>,
+    #[serde(default)]
+    pub(crate) cache_write_1h: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +88,11 @@ pub(crate) struct ApiTier {
     cache_read: Option<f64>,
     #[serde(default)]
     cache_write: Option<f64>,
+    /// N18：分段级缓存写分档（显式给出；缺省由计价层按该段自证派生）。
+    #[serde(default)]
+    cache_write_5m: Option<f64>,
+    #[serde(default)]
+    cache_write_1h: Option<f64>,
     tier: ApiTierDescriptor,
 }
 
@@ -94,6 +110,8 @@ impl ApiTier {
             output: self.output,
             cache_read: self.cache_read,
             cache_write: self.cache_write,
+            cache_write_5m: self.cache_write_5m,
+            cache_write_1h: self.cache_write_1h,
         }
     }
 }
@@ -117,6 +135,12 @@ pub struct SnapshotSegment {
     pub cache_read: Option<f64>,
     #[serde(default)]
     pub cache_write: Option<f64>,
+    /// N18：缓存写分档（USD/百万 token）。显式字段优先；缺省 None 时由
+    /// 计价层对该段数据自证派生（见 pricing::modelsdev_segment_cache_write_tiers）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_5m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<f64>,
 }
 
 /// 快照条目：cost 已是 USD/百万 token，直接入库。
@@ -132,6 +156,12 @@ pub struct SnapshotEntry {
     pub output: Option<f64>,
     pub cache_read: Option<f64>,
     pub cache_write: Option<f64>,
+    /// N18：缓存写分档（显式字段；缺省 None = 未发布，由计价层按来源
+    /// 渠道规则决定是否派生——快照层不猜）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_5m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<f64>,
     /// Task 2：上下文分段（v3 快照起写入；v1/v2 旧快照缺省为空 = 仅基础价）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub segments: Vec<SnapshotSegment>,
@@ -232,6 +262,8 @@ pub(crate) fn sync_with(
                 output: cost.output,
                 cache_read: cost.cache_read,
                 cache_write: cost.cache_write,
+                cache_write_5m: cost.cache_write_5m,
+                cache_write_1h: cost.cache_write_1h,
                 segments,
             });
         }
@@ -377,6 +409,8 @@ pub(crate) fn convert_tiers(
             output: r.output,
             cache_read: r.cache_read,
             cache_write: r.cache_write,
+            cache_write_5m: r.cache_write_5m,
+            cache_write_1h: r.cache_write_1h,
         })
         .collect();
     (segments, warnings)
@@ -453,6 +487,8 @@ mod tests {
                     m.cost.map(|c| {
                         let (segments, _) = convert_tiers(&c.tiers, c.context_over_200k.as_ref());
                         SnapshotEntry {
+                            cache_write_5m: None,
+                            cache_write_1h: None,
                             id: format!("{provider}/{id}"),
                             name: m.name,
                             input: c.input,
@@ -528,6 +564,9 @@ mod tests {
             output: 0,
             cache_write: 0,
             cache_read: 0,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         };
         let est = p
             .estimate(
@@ -545,6 +584,9 @@ mod tests {
             output: 0,
             cache_write: 0,
             cache_read: 0,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         };
         let est = p
             .estimate(
@@ -598,6 +640,8 @@ mod tests {
             output: Some(30.0),
             cache_read: Some(0.8),
             cache_write: Some(10.0),
+            cache_write_5m: None,
+            cache_write_1h: None,
         };
         let (segments, warnings) = convert_tiers(&[], Some(&over));
         assert!(warnings.is_empty());
@@ -646,6 +690,8 @@ mod tests {
                 output: Some(2.37),
                 cache_read: Some(0.09),
                 cache_write: Some(0.0),
+                cache_write_5m: None,
+                cache_write_1h: None,
                 segments: Vec::new(),
             }],
         };
@@ -908,6 +954,8 @@ mod tests {
             output: Some(30.0),
             cache_read: Some(0.8),
             cache_write: Some(10.0),
+            cache_write_5m: None,
+            cache_write_1h: None,
         };
         let tiers = vec![tier_of("context", 272000.0, 8.0)];
         let (segments, warnings) = convert_tiers(&tiers, Some(&over));
@@ -930,6 +978,8 @@ mod tests {
             output: Some(30.0),
             cache_read: None,
             cache_write: None,
+            cache_write_5m: None,
+            cache_write_1h: None,
         };
         // 首档 cache 分项存在且不同——旧字段未给出的项不参与比较，仍兼容。
         let tiers = vec![ApiTier {
@@ -937,6 +987,8 @@ mod tests {
             output: Some(30.0),
             cache_read: Some(0.9),
             cache_write: Some(11.0),
+            cache_write_5m: None,
+            cache_write_1h: None,
             tier: serde_json::from_value(serde_json::json!({
                 "type": "context", "size": 272000
             }))
@@ -960,6 +1012,8 @@ mod tests {
             output: Some(30.0),
             cache_read: Some(0.8),
             cache_write: Some(10.0),
+            cache_write_5m: None,
+            cache_write_1h: None,
         };
         let tiers = vec![tier_of("context", 272000.0, 8.0)];
         let (segments, warnings) = convert_tiers(&tiers, Some(&over));
@@ -985,6 +1039,8 @@ mod tests {
             output: None,
             cache_read: None,
             cache_write: None,
+            cache_write_5m: None,
+            cache_write_1h: None,
         };
         // 首档 input 缺失（None）——旧字段给出了 input，无法判等 → 冲突。
         let tiers = vec![ApiTier {
@@ -992,6 +1048,8 @@ mod tests {
             output: Some(30.0),
             cache_read: None,
             cache_write: None,
+            cache_write_5m: None,
+            cache_write_1h: None,
             tier: serde_json::from_value(serde_json::json!({
                 "type": "context", "size": 100000
             }))

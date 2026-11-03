@@ -231,14 +231,22 @@ class AcceptancePathCase(unittest.TestCase):
         self.assertIn('arg("exe", EXE_DEFAULT)', script)  # 用户仍可用 --exe 覆盖
 
     def test_ui_e2e_builds_gui_package_without_target_triple(self):
-        block = step_run_block(read(".github/workflows/ui-e2e.yml"),
-                               "Build embedded frontend and isolated acceptance executable")
-        build = next(line for line in block.splitlines() if line.startswith("cargo build"))
+        # AC10：受控构建由 record-acceptance-build.ps1 执行并登记构建记录；
+        # 工作流里不得再出现未登记的裸 cargo build acceptance 命令。
+        workflow = read(".github/workflows/ui-e2e.yml")
+        block = step_run_block(
+            workflow, "Build embedded frontend and isolated acceptance executable")
+        self.assertIn("./scripts/record-acceptance-build.ps1", block)
+        bare = [line for line in block.splitlines()
+                if line.startswith("cargo build")]
+        self.assertEqual(bare, [], f"工作流仍有未登记的 acceptance 构建：{bare}")
+        recorder = read("scripts/record-acceptance-build.ps1")
+        build = next(line for line in recorder.splitlines()
+                     if line.startswith("$buildCommand"))
         self.assertIn("-p tokenscope-app", build)
         self.assertIn("--release", build)
         self.assertIn("acceptance,tauri/custom-protocol", build)
         self.assertIn("--bin tokenscope", build)
-        # 不带 --target 才会落在脚本默认读取的根 target/release。
         self.assertNotIn("--target", build)
 
 

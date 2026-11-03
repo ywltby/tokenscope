@@ -10,6 +10,10 @@ target/
 *.profraw
 *.profdata
 coverage.*
+# coverage.py 的数据文件（本地覆盖率运行；说明文档 docs/coverage.md 例外，须入库）
+.coverage
+.coverage.*
+!docs/coverage.md
 # cargo mutants 变异测试数据
 **/mutants.out*/
 # rustc 遇到内部编译器错误时转储到当前目录的栈回溯
@@ -68,3 +72,6 @@ src-tauri/gen/
 # 体积大且每次运行都会重写，属生成物而非源码；需要留档时另行导出。
 # 目录位于仓库根，与 target/、coverage.* 等同属"生成物"。
 qa-artifacts/
+
+# 本地 Python 开发环境（覆盖率等工具；requirements-dev.txt 固定版本）
+.venv/

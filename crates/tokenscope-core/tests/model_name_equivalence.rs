@@ -31,6 +31,9 @@ fn counts(input: u64, output: u64, cw: u64, cr: u64) -> TokenCounts {
         output,
         cache_write: cw,
         cache_read: cr,
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
     }
 }
 

@@ -93,6 +93,10 @@ pub struct Group {
     pub tokens: TokenCounts,
     pub cost_usd: f64,
     pub unknown_pricing: bool,
+    /// N18：本组含「事件缺写入分档、按合并价估算」的请求——独立于
+    /// `unknown_pricing`（后者只表示真有未计价 token）。UI 必须分开披露。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cache_write_split_estimated: bool,
     pub unknown_tokens: TokenCounts,
     /// H06：本组未知费用的**原因**（如 `rollup_only` = 该组含只有日粒度的历史，
     /// 不能按当前档位/峰谷重估）。缺价（模型未收录）时为 None，两者的处置同为
@@ -313,12 +317,17 @@ fn push_event_into(
         g.tokens = new_tokens;
         g.unknown_tokens = new_unknown;
         g.cost_usd = new_cost;
-        // unknown_pricing 是组内累积标记：任一事件部分计价/无价即置位，
-        // 后续完整计价的事件不得清掉它。
+        // unknown_pricing 是组内累积标记：只有**实际存在未计价 token** 或
+        // 无价模型才置位。N18：「按合并价估算」虽然 complete=false，但
+        // unknown token 为 0、金额来自真实单价，不得触发「含未计价 token」。
+        // 后续完整计价的事件不得清掉已置位的标记。
         g.unknown_pricing = match &estimate {
-            Some(est) => g.unknown_pricing || !est.complete,
+            Some(est) => g.unknown_pricing || est.unknown.total() > 0,
             None => true,
         };
+        g.cache_write_split_estimated |= estimate
+            .as_ref()
+            .is_some_and(|est| est.cache_write_split_estimated);
         if RECORD_AGENTS && !g.agents.contains(&e.agent.as_str()) {
             g.agents.push(e.agent.as_str());
         }
@@ -438,6 +447,7 @@ impl AggregateState {
                 anyhow::bail!("总计费用累计出现非有限值");
             }
             totals.unknown_pricing |= g.unknown_pricing;
+            totals.cache_write_split_estimated |= g.cache_write_split_estimated;
             if totals.unknown_reason.is_none() {
                 totals.unknown_reason = g.unknown_reason;
             }
@@ -530,6 +540,9 @@ mod tests {
             output_tokens: output,
             cache_write_tokens: 0,
             cache_read_tokens: 0,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         }
     }
 

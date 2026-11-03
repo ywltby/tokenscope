@@ -28,6 +28,9 @@ fn event(agent: AgentKind, ts: &str, session: &str, record: &str) -> UsageEvent 
         output_tokens: 10,
         cache_write_tokens: 0,
         cache_read_tokens: 0,
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
     }
 }
 
@@ -160,6 +163,9 @@ fn wb_write(key: &str, app: AgentKind, session: &str, record: &str) -> EventWrit
             output: 20,
             cache_write: 0,
             cache_read: 50,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
         },
         precedence: WritePrecedence::NativeLog,
         observed_at: "2026-08-01T10:00:00Z".parse().unwrap(),

@@ -15,6 +15,51 @@ describe("政策渲染（policyMarkdown）", () => {
     ]);
   });
 
+  it.each(["\n", "\r\n"])("行尾反斜杠产生段落内换行（%j）", (lineEnding) => {
+    const markdown = ["更新日期：今天\\", "生效日期：明天\\", "适用范围：桌面应用"].join(
+      lineEnding,
+    );
+    expect(renderPolicyMarkdown(markdown)).toEqual([
+      { type: "p", text: "更新日期：今天\n生效日期：明天\n适用范围：桌面应用" },
+    ]);
+  });
+
+  it("列表项的行尾反斜杠保留项内换行", () => {
+    const markdown = ["- 第一行\\", "  续行 **重点**", "- 第二项"].join("\n");
+    expect(renderPolicyMarkdown(markdown)).toEqual([
+      { type: "ul", items: ["第一行\n续行 重点", "第二项"] },
+    ]);
+  });
+
+  it("普通换行与转义反斜杠不产生硬换行", () => {
+    const markdown = ["普通第一行", "普通第二行", "路径\\\\", "后续文字"].join("\n");
+    const blocks = renderPolicyMarkdown(markdown);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ type: "p" });
+    if (blocks[0].type !== "p") throw new Error("预期段落");
+    expect(blocks[0].text).not.toContain("\n");
+    expect(blocks[0].text).toContain("路径\\");
+    expect(blocks[0].text).toContain("后续文字");
+  });
+
+  it("段落结束处和反斜杠后有空格时不误判为硬换行", () => {
+    expect(renderPolicyMarkdown("段尾\\\n\n下一段")).toEqual([
+      { type: "p", text: "段尾\\" },
+      { type: "p", text: "下一段" },
+    ]);
+    expect(renderPolicyMarkdown("有空格\\ \n续行")).toEqual([{ type: "p", text: "有空格\\ 续行" }]);
+  });
+
+  it("跨行行内代码中的反斜杠保持为文本", () => {
+    const markdown = ["路径 `C:\\", "目录`"].join("\n");
+    expect(renderPolicyMarkdown(markdown)).toEqual([{ type: "p", text: "路径 C:\\ 目录" }]);
+  });
+
+  it("跨硬换行的加粗文本仍去除标记", () => {
+    const markdown = ["**请注意\\", "以下内容**"].join("\n");
+    expect(renderPolicyMarkdown(markdown)).toEqual([{ type: "p", text: "请注意\n以下内容" }]);
+  });
+
   it("inline_markup_is_flattened_without_html", () => {
     const blocks = renderPolicyMarkdown(
       "**请特别注意：**这是 `代码`，参见 [models.dev](https://models.dev/)。",

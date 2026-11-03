@@ -65,6 +65,33 @@ struct ClaudeUsage {
     cache_creation_input_tokens: u64,
     #[serde(default)]
     cache_read_input_tokens: u64,
+    /// N18：缓存写分项（Anthropic `cache_creation` 对象）。宽容读取为
+    /// `serde_json::Value` 后手工取两键——缺键 = 未知（不得当 0），
+    /// 类型异常（字符串/浮点/负数）同样只是分项未知，**不得连累事件
+    /// 本体**（usage 四桶照常解析，事件不按坏行跳过）。
+    #[serde(default)]
+    cache_creation: Option<serde_json::Value>,
+}
+
+/// N18：从 `cache_creation` 取 5 分钟 / 1 小时缓存写分项并做可信校验。
+/// 二者都是 `cache_creation_input_tokens`（写总量）的内部构成，
+/// 5m+1h 必须等于总量才算可信分档；否则（缺一键、类型异常、与总量
+/// 不一致）返回 None = 分项未知——宁缺毋假，不猜造另一档，也不把
+/// 已知部分单独当全貌。解析层只读取，不二次计入任何总量。
+fn claude_cache_write_split(value: Option<&serde_json::Value>, total: u64) -> Option<(u64, u64)> {
+    let value = value?;
+    // as_u64：仅接受非负整数——字符串、浮点、布尔一律 None（未知）。
+    let five_min = value
+        .get("ephemeral_5m_input_tokens")
+        .and_then(|v| v.as_u64())?;
+    let one_hour = value
+        .get("ephemeral_1h_input_tokens")
+        .and_then(|v| v.as_u64())?;
+    if five_min.checked_add(one_hour)? == total {
+        Some((five_min, one_hour))
+    } else {
+        None
+    }
 }
 
 pub struct ClaudeSource {
@@ -201,6 +228,18 @@ impl Source for ClaudeSource {
         stats.events = events.len() as u64;
         FileParse { stats, events }
     }
+}
+
+/// N18：集成测试入口（解析 → 事件 → 计价的端到端验证用）。
+#[doc(hidden)]
+pub fn claude_ingest_for_test(
+    text: &str,
+    source_path: &str,
+    file_project: &str,
+    stats: &mut CollectStats,
+    events: &mut Vec<UsageEvent>,
+) {
+    ingest_text(text, source_path, file_project, stats, events)
 }
 
 fn ingest_text(
@@ -361,6 +400,19 @@ fn ingest_line(
         .map(str::to_string);
     let session_initial_cwd = initials.cloned();
 
+    // N18：可信分档判定（两键齐且 5m+1h == 写总量）；不可信一律未知，
+    // 分项字段保持 0——写总量本身不受影响，也不会被分项重复计入。
+    let split = claude_cache_write_split(
+        usage.cache_creation.as_ref(),
+        usage.cache_creation_input_tokens,
+    )
+    .unwrap_or((0, 0));
+    let split_known = claude_cache_write_split(
+        usage.cache_creation.as_ref(),
+        usage.cache_creation_input_tokens,
+    )
+    .is_some();
+
     let event = UsageEvent {
         ts,
         agent: AgentKind::ClaudeCode,
@@ -376,6 +428,9 @@ fn ingest_line(
         output_tokens: usage.output_tokens,
         cache_write_tokens: usage.cache_creation_input_tokens,
         cache_read_tokens: usage.cache_read_input_tokens,
+        cache_write_5m: split.0,
+        cache_write_1h: split.1,
+        cache_write_split_known: split_known,
     };
     // SF08：source→model 公共桶边界——四字段独立来源同样校验可表示性
     //（异常组合计 bad_lines 跳过，不回绕）。
@@ -600,5 +655,111 @@ mod tests {
         assert!(col.events.is_empty());
         assert_eq!(col.warnings.len(), 1);
         assert_eq!(col.stats.files_scanned, 0);
+    }
+
+    // ── N18：cache_creation 5 分钟 / 1 小时分项 ─────────────────────
+    // 分项是**缓存写总量内部**的构成：两键齐且 5m+1h == 总量才算可信分档；
+    // 只有一键、缺分项、类型异常和不一致都不得猜测（宁缺毋假），总量原样
+    // 保留且永不因分项重复计入。测试 JSON 保持单行：解析器按行读取。
+
+    #[test]
+    fn n18_split_known_when_both_keys_match_total() {
+        let col = collect_text(&[assistant(
+            "m1",
+            "2026-07-17T08:00:01.000Z",
+            r#"{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":9,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":4,"ephemeral_1h_input_tokens":5}}"#,
+        )]
+        .join("\n"));
+        let e = &col.events[0];
+        assert_eq!(e.cache_write_tokens, 9, "总量不变");
+        assert!(e.cache_write_split_known, "两键齐且和等于总量 → 可信分档");
+        assert_eq!(e.cache_write_5m, 4);
+        assert_eq!(e.cache_write_1h, 5);
+        assert_eq!(col.stats.bad_lines, 0);
+    }
+
+    #[test]
+    fn n18_split_unknown_when_only_one_key_present() {
+        for (usage, tag) in [
+            (
+                r#"{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":7,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":7}}"#,
+                "仅 5 分钟",
+            ),
+            (
+                r#"{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":7,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_1h_input_tokens":7}}"#,
+                "仅 1 小时",
+            ),
+        ] {
+            let col = collect_text(&assistant("m1", "2026-07-17T08:00:01.000Z", usage));
+            let e = &col.events[0];
+            assert_eq!(e.cache_write_tokens, 7, "{tag}: 总量保留");
+            assert!(!e.cache_write_split_known, "{tag}: 缺一键不得猜测另一档");
+            assert_eq!(e.cache_write_5m, 0, "{tag}");
+            assert_eq!(e.cache_write_1h, 0, "{tag}");
+        }
+    }
+
+    #[test]
+    fn n18_split_unknown_when_inconsistent_with_total() {
+        // 5m+1h ≠ 总量：来源数据自相矛盾，宁可信总量，分项整体作废。
+        let col = collect_text(&[assistant(
+            "m1",
+            "2026-07-17T08:00:01.000Z",
+            r#"{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":10,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":4,"ephemeral_1h_input_tokens":4}}"#,
+        )]
+        .join("\n"));
+        let e = &col.events[0];
+        assert_eq!(e.cache_write_tokens, 10);
+        assert!(!e.cache_write_split_known);
+        assert_eq!(e.cache_write_5m, 0);
+        assert_eq!(e.cache_write_1h, 0);
+        assert_eq!(col.stats.bad_lines, 0, "不一致是数据形态，不是坏行");
+    }
+
+    #[test]
+    fn n18_split_unknown_when_no_breakdown_or_partial_types() {
+        // 无分项对象（旧日志形态）。
+        let old = collect_text(&[assistant(
+            "m1",
+            "2026-07-17T08:00:01.000Z",
+            r#"{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":6,"cache_read_input_tokens":0}"#,
+        )]
+        .join("\n"));
+        assert_eq!(old.events[0].cache_write_tokens, 6);
+        assert!(!old.events[0].cache_write_split_known);
+        // 分项对象存在但两键都缺（空对象）与类型异常（字符串）：整体未知，
+        // 事件保留（不是坏行），不得把字符串强解析成数字。
+        let empty = collect_text(&[assistant(
+            "m2",
+            "2026-07-17T08:00:01.000Z",
+            r#"{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":6,"cache_read_input_tokens":0,"cache_creation":{}}"#,
+        )]
+        .join("\n"));
+        assert_eq!(empty.events.len(), 1);
+        assert!(!empty.events[0].cache_write_split_known);
+        let bogus = collect_text(&[assistant(
+            "m3",
+            "2026-07-17T08:00:01.000Z",
+            r#"{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":6,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":"4","ephemeral_1h_input_tokens":2}}"#,
+        )]
+        .join("\n"));
+        assert_eq!(bogus.events.len(), 1);
+        assert!(!bogus.events[0].cache_write_split_known);
+        assert_eq!(bogus.events[0].cache_write_tokens, 6);
+    }
+
+    #[test]
+    fn n18_zero_total_with_zero_breakdown_is_known_zero() {
+        // 无写入 + 两键显式 0：可信的「没有分档」形态（不是未知）。
+        let col = collect_text(&[assistant(
+            "m1",
+            "2026-07-17T08:00:01.000Z",
+            r#"{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}"#,
+        )]
+        .join("\n"));
+        let e = &col.events[0];
+        assert!(e.cache_write_split_known);
+        assert_eq!(e.cache_write_5m, 0);
+        assert_eq!(e.cache_write_1h, 0);
     }
 }

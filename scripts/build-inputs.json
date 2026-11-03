@@ -30,6 +30,20 @@
       ]
     },
     {
+      "path": "docs/terms.md",
+      "kind": "file",
+      "consumers": [
+        {
+          "package": "tokenscope-app",
+          "mode": "acceptance"
+        },
+        {
+          "package": "tokenscope-app",
+          "mode": "default"
+        }
+      ]
+    },
+    {
       "path": "src-tauri/capabilities",
       "kind": "directory",
       "consumers": [

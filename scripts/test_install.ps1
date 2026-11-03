@@ -98,11 +98,20 @@ function Write-SeedData {
     if ($LASTEXITCODE -ne 0) { throw "合成 cache.db 失败" }
     $claudeDirJson = $sourceDirClaude -replace '\\', '/'
     $codexDirJson = $sourceDirCodex -replace '\\', '/'
+    # 当前共同同意修订号从受测源码读取（隐私政策 + 用户许可协议的共同
+    # 版本）；复用 upgrade_baselines.py 的注释/字符串剥离，避免假常量。
+    # 本安装测试覆盖的是**已完成同意**后的安装/迁移/卸载路径，首次同意
+    # 弹窗由原生 consent-gate 场景与升级契约的闸门观察段覆盖。
+    $revisionJson = python -B (Join-Path $RepoRoot "scripts/upgrade_baselines.py") privacy-revision
+    if ($LASTEXITCODE -ne 0) { throw "读取 PRIVACY_POLICY_REVISION 失败" }
+    $consentRevision = [string](($revisionJson | ConvertFrom-Json).privacy_revision)
     @"
-# 同意基线带当前政策修订号（WB05：缺修订号的旧同意会被新版闸门判为
-# StaleRevision、停在「政策已更新」弹窗；本测试覆盖的是已同意的业务路径）。
+# 同意基线：隐私政策与用户许可协议四项同一次写入（与真实同意保存形态
+# 一致）。缺协议记录或修订低于当前的旧同意会被新版闸门判为 StaleRevision。
 privacy_policy_accepted = true
-privacy_policy_revision = 2
+privacy_policy_revision = $consentRevision
+user_agreement_accepted = true
+user_agreement_revision = $consentRevision
 price_auto_sync = false
 close_action = "quit"
 

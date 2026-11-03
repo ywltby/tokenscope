@@ -66,7 +66,7 @@ pub struct CacheStats {
 ///
 /// `pub`：供 [`crate::persistent_format`] 汇总持久格式指纹（UP03）；字符串值
 /// 与写入缓存的字节完全一致，可见性变化不影响缓存内容或失效语义。
-pub const SCHEMA_VERSION: &str = "11";
+pub const SCHEMA_VERSION: &str = "12";
 
 fn fingerprint(size: u64, mtime_ms: i64) -> (i64, i64) {
     // u64 → i64 存库；实际文件大小远小于 i64 上限。
@@ -221,7 +221,9 @@ impl Cache {
                 input INTEGER NOT NULL,
                 output INTEGER NOT NULL,
                 cache_write INTEGER NOT NULL,
-                cache_read INTEGER NOT NULL
+                cache_read INTEGER NOT NULL,
+                cache_write_5m INTEGER,
+                cache_write_1h INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_events_file ON events(file_id);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_files_identity
@@ -298,7 +300,8 @@ impl Cache {
         {
             let mut stmt = tx.prepare(
                 "SELECT ts, record_id, model, session_id, project, session_initial_cwd, event_cwd,
-                        line, input, output, cache_write, cache_read
+                        line, input, output, cache_write, cache_read,
+                        cache_write_5m, cache_write_1h
                  FROM events WHERE file_id = ?1 ORDER BY rowid",
             )?;
             let rows = stmt.query_map([id], |r| {
@@ -315,6 +318,8 @@ impl Cache {
                     r.get::<_, i64>(9)?,
                     r.get::<_, i64>(10)?,
                     r.get::<_, i64>(11)?,
+                    r.get::<_, Option<i64>>(12)?,
+                    r.get::<_, Option<i64>>(13)?,
                 ))
             })?;
             let mut stats_bad = 0u64;
@@ -332,10 +337,19 @@ impl Cache {
                     output,
                     cw,
                     cr,
+                    w5,
+                    w1,
                 ) = row?;
                 // N03：负数是坏数据而不是合法零值——受检拒绝该行（计
                 // bad_lines），不用 `.max(0)` 把坏值伪装成 0 混进用量。
-                if line < 0 || input < 0 || output < 0 || cw < 0 || cr < 0 {
+                if line < 0
+                    || input < 0
+                    || output < 0
+                    || cw < 0
+                    || cr < 0
+                    || w5.map(|v| v < 0).unwrap_or(false)
+                    || w1.map(|v| v < 0).unwrap_or(false)
+                {
                     stats_bad += 1;
                     continue;
                 }
@@ -356,6 +370,18 @@ impl Cache {
                     output_tokens: output as u64,
                     cache_write_tokens: cw as u64,
                     cache_read_tokens: cr as u64,
+                    // N18：两列都非 NULL 才是可信分档；和 != 总量的旧行按
+                    // 未知处理（防御，validate_buckets 也会拦）。
+                    cache_write_5m: match (w5, w1) {
+                        (Some(a), Some(b)) if (a + b) as u64 == cw as u64 => a as u64,
+                        _ => 0,
+                    },
+                    cache_write_1h: match (w5, w1) {
+                        (Some(a), Some(b)) if (a + b) as u64 == cw as u64 => b as u64,
+                        _ => 0,
+                    },
+                    cache_write_split_known: matches!((w5, w1),
+                        (Some(a), Some(b)) if (a + b) as u64 == cw as u64),
                 };
                 // SF08：缓存恢复与适配器解析经过同一桶校验边界——旧缓存中
                 // 不合法事件不得绕过新检查（拒绝并计 bad_lines，不回绕）。
@@ -440,8 +466,8 @@ impl Cache {
         let mut stmt = tx.prepare(
             "INSERT INTO events(file_id, ts, record_id, model, session_id, project,
                                 session_initial_cwd, event_cwd, line, input, output,
-                                cache_write, cache_read)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                                cache_write, cache_read, cache_write_5m, cache_write_1h)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         )?;
         for e in &parse.events {
             // SF08：入库前受检转换——超出 i64 的 token 值不得经缓存往返
@@ -455,6 +481,13 @@ impl Cache {
             let output = conv(e.output_tokens)?;
             let cw = conv(e.cache_write_tokens)?;
             let cr = conv(e.cache_read_tokens)?;
+            // N18：可信分档才落列（两键齐且和 == 总量由解析层保证）；
+            // 未知分档写 NULL，绝不把「未知」伪装成 0。
+            let (w5, w1) = if e.cache_write_split_known {
+                (Some(conv(e.cache_write_5m)?), Some(conv(e.cache_write_1h)?))
+            } else {
+                (None, None)
+            };
             if e.validate_buckets().is_err() {
                 anyhow::bail!("事件桶组合不可表示，拒绝写入缓存");
             }
@@ -472,6 +505,8 @@ impl Cache {
                 output,
                 cw,
                 cr,
+                w5,
+                w1,
             ])?;
         }
         drop(stmt);
@@ -549,6 +584,11 @@ pub struct LegacyEvent {
     pub output: u64,
     pub cache_write: u64,
     pub cache_read: u64,
+    /// N18：5m/1h 缓存写分项；`cache_write_split_known == false` 时恒 0
+    /// （旧缓存行没有分项列 → 未知）。
+    pub cache_write_5m: u64,
+    pub cache_write_1h: u64,
+    pub cache_write_split_known: bool,
 }
 
 /// H03：遗留缓存的一个文件及其事件（旧版本 `files` 行 + 其 `events` 行）。
@@ -648,6 +688,17 @@ pub fn read_legacy_cache(path: &Path) -> Result<Vec<LegacyCacheFile>> {
     } else {
         "NULL"
     };
+    // N18：v12 起缓存带分项列；旧缓存缺列 = 分项未知。
+    let w5_expr = if events_cols.contains("cache_write_5m") {
+        "cache_write_5m"
+    } else {
+        "NULL"
+    };
+    let w1_expr = if events_cols.contains("cache_write_1h") {
+        "cache_write_1h"
+    } else {
+        "NULL"
+    };
     let mut out = Vec::new();
     let mut files_stmt = conn.prepare(&format!(
         "SELECT id, agent, {file_root_expr}, path, {file_crev_expr}, size, mtime_ms
@@ -671,7 +722,8 @@ pub fn read_legacy_cache(path: &Path) -> Result<Vec<LegacyCacheFile>> {
         let agent = parse_legacy_agent(&agent)?;
         let sql = format!(
             "SELECT ts, record_id, model, session_id, project, {sic_expr}, {ecwd_expr},
-                    {line_expr}, input, output, cache_write, cache_read
+                    {line_expr}, input, output, cache_write, cache_read,
+                    {w5_expr}, {w1_expr}
              FROM events WHERE file_id = ?1 ORDER BY rowid"
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -689,6 +741,8 @@ pub fn read_legacy_cache(path: &Path) -> Result<Vec<LegacyCacheFile>> {
                 r.get::<_, i64>(9)?,
                 r.get::<_, i64>(10)?,
                 r.get::<_, i64>(11)?,
+                r.get::<_, Option<i64>>(12)?,
+                r.get::<_, Option<i64>>(13)?,
             ))
         })?;
         let mut events = Vec::new();
@@ -707,6 +761,8 @@ pub fn read_legacy_cache(path: &Path) -> Result<Vec<LegacyCacheFile>> {
                 output,
                 cw,
                 cr,
+                w5,
+                w1,
             ) = r?;
             // N03：负数是坏数据而不是合法零值——受检拒绝该行并计诊断，
             // 不用 `.max(0)` 把坏值伪装成 0 混进用量。
@@ -731,6 +787,16 @@ pub fn read_legacy_cache(path: &Path) -> Result<Vec<LegacyCacheFile>> {
                 output: output as u64,
                 cache_write: cw as u64,
                 cache_read: cr as u64,
+                cache_write_5m: match (w5, w1) {
+                    (Some(a), Some(b)) if (a + b) as u64 == cw as u64 => a as u64,
+                    _ => 0,
+                },
+                cache_write_1h: match (w5, w1) {
+                    (Some(a), Some(b)) if (a + b) as u64 == cw as u64 => b as u64,
+                    _ => 0,
+                },
+                cache_write_split_known: matches!((w5, w1),
+                    (Some(a), Some(b)) if (a + b) as u64 == cw as u64),
             });
         }
         out.push(LegacyCacheFile {
@@ -836,6 +902,9 @@ mod tests {
                 output_tokens: 1,
                 cache_write_tokens: 0,
                 cache_read_tokens: 0,
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
             })
             .collect();
         let stats = crate::source::CollectStats {

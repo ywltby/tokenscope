@@ -5,7 +5,9 @@ import { pricingVerdict } from "./native-pricing-checks.mjs";
 const at = "2026-10-22T05:00:00Z";
 const view = { modelsdev_count: 2, openrouter_count: 2, modelsdev_synced_at: at, openrouter_synced_at: at };
 const rates = values => ["input", "output", "cache_write", "cache_read"].map((kind, i) => ({ kind, unit_price: values[i], rate_kind: kind === "cache_read" ? "same_as_input" : "fixed", priced: true }));
-const peak = { basis_value: 4300, matched: { raw_key: "external/claude-opus-5-5", source: "external", candidate_count: 4, complete_candidate_count: 3, incomplete_candidate_count: 1, incomplete_candidates_excluded: 1, reason: "highest_complete_cost" }, lines: rates([12, 35, 10, 12]), excluded_candidate_warning: "已排除 1 个不完整候选" };
+// N18 分档语义：快照候选 anthropic/claude-opus-5.5（事件缺 5m/1h 写入分项）与
+// incomplete 候选（缺价格）都被"宁缺毋假"排除，只有 external 候选完整参与。
+const peak = { basis_value: 4300, matched: { raw_key: "external/claude-opus-5-5", source: "external", candidate_count: 4, complete_candidate_count: 2, incomplete_candidate_count: 2, incomplete_candidates_excluded: 2, reason: "highest_complete_cost" }, lines: rates([12, 35, 10, 12]), excluded_candidate_warning: "有 2 个候选未参与主估算（anthropic/claude-opus-5.5、incomplete/claude-opus-5-5）：1 个因事件缺少 5 分钟/1 小时写入分项、1 个因缺少价格；实际最高费用可能更高" };
 const settingsEntries = [
   { prefix: "external/gpt-5.6", has_tiered_pricing: true, segments: [{ label: "不超过272K", min_tokens: 0, max_tokens: 272001, prices: { input: 4, output: 20, cache_write: 5, cache_read: 0.4 } }, { label: "超过272K", min_tokens: 272001, prices: { input: 8, output: 30, cache_write: 10, cache_read: 0.8 } }], schedules: [] },
   { prefix: "external/schedule-only-probe", has_tiered_pricing: true, segments: [], schedules: [{ label: "B2峰时", timezone: "Asia/Shanghai", periods: [{ start_time: "09:00", end_time: "18:00" }] }, { label: "B2谷时", timezone: "Asia/Shanghai", periods: [{ start_time: "00:00", end_time: "09:00" }] }] },
@@ -16,11 +18,11 @@ const cases = [
   ["single_source_failure_is_partial", { call: { status: "rejected", error: "OpenRouter: status 500" }, notice: "同步部分失败：OpenRouter status 500", retryVisible: true, retryEnabled: true, retryClicked: true, view: { ...view, openrouter_count: 0, openrouter_synced_at: null }, snapshotCount: 2, snapshotTime: at }, o => { o.retryClicked = false; }],
   ["offline_restart_uses_snapshots", { cleanExit: true, beforeCost: 0.15, afterCost: 0.15, beforeSnapshots: ["a".repeat(64), "b".repeat(64)], afterSnapshots: ["a".repeat(64), "b".repeat(64)], beforeHits: { modelsdev: 2, openrouter: 2 }, afterHits: { modelsdev: 2, openrouter: 2 }, bannerVisible: false, hostAlive: true }, o => { o.afterCost = 0; }],
   ["segment_boundary_272000_272001", { boundaries: [{ breakdown: { basis_value: 272000, segment_label: "不超过272K", lines: rates([4, 20, 5, 0.4]) }, tooltip: "命中档位 不超过272K prompt tokens 272,000" }, { breakdown: { basis_value: 272001, segment_label: "超过272K", lines: rates([8, 30, 10, 0.8]) }, tooltip: "命中档位 超过272K prompt tokens 272,001" }] }, o => { o.boundaries[1].breakdown.lines[0].unit_price = 4; }],
-  ["candidate_highest_without_cross_source_mix", { breakdown: peak, tooltip: "候选 4 条（完整 3/不完整 1），在完整候选中取最高费用" }, o => { o.breakdown.lines[1].unit_price = 25; }],
+  ["candidate_highest_without_cross_source_mix", { breakdown: peak, tooltip: "候选 4 条（完整 2/不完整 2），在完整候选中取最高费用" }, o => { o.breakdown.lines[1].unit_price = 25; }],
   ["schedule_by_event_time", { periods: [{ breakdown: { matched: { source: "external", schedule_label: "B2峰时", schedule_timezone: "Asia/Shanghai", request_at: "2026-10-08T01:00:00Z" }, lines: rates([12, 35, 1, 0.5]) }, tooltip: "B2峰时 Asia/Shanghai 2026-10-08T01:00:00Z" }, { breakdown: { matched: { source: "external", schedule_label: "B2谷时", schedule_timezone: "Asia/Shanghai", request_at: "2026-10-08T17:00:00Z" }, lines: rates([2, 10, 1, 0.5]) }, tooltip: "B2谷时 Asia/Shanghai 2026-10-08T17:00:00Z" }] }, o => { o.periods[1].breakdown.matched.schedule_label = "B2峰时"; }],
   ["settings_segment_tags_expand_all_tiers_and_schedule", { tieredCount: 2, expanded: [{ entry: settingsEntries[0], tag: true, tooltip: "计价依据\n分段 不超过272K [0, 272,001) 输入 $4 · 输出 $20 · 缓存写 $5 · 缓存命中 $0.4\n分段 超过272K [272,001, ∞) 输入 $8 · 输出 $30 · 缓存写 $10 · 缓存命中 $0.8" }, { entry: settingsEntries[1], tag: true, tooltip: "计价依据\n峰谷 B2峰时 Asia/Shanghai 09:00–18:00 输入 未知 输出 未知 缓存写 未知 缓存命中 未知\n峰谷 B2谷时 Asia/Shanghai 00:00–09:00 输入 未知 输出 未知 缓存写 未知 缓存命中 未知" }] }, o => { o.expanded.pop(); }],
-  ["same_as_input_and_excluded_incomplete_in_tooltip", { breakdown: peak, tooltip: "缓存命中 输入价 $12 已排除 1 个不完整候选" }, o => { o.breakdown.lines[3].rate_kind = "fixed"; }],
-  ["open_pricing_file_creates_template_in_root", { existedBefore: false, created: true, content: '[[model]]\nprefix = "synthetic"', expectedPath: "C:/isolated/tokenscope/pricing.toml", returnedPath: "C:/isolated/tokenscope/pricing.toml", openerPaths: ["C:/isolated/tokenscope/pricing.toml"], recorded: true, processProbeOk: true, foreignProcesses: [] }, o => { o.foreignProcesses.push("editor.exe"); }],
+  ["same_as_input_and_excluded_incomplete_in_tooltip", { breakdown: peak, tooltip: "缓存命中 输入价 $12 有 2 个候选未参与主估算（anthropic/claude-opus-5.5、incomplete/claude-opus-5-5）：1 个因事件缺少 5 分钟/1 小时写入分项、1 个因缺少价格；实际最高费用可能更高" }, o => { o.breakdown.lines[3].rate_kind = "fixed"; }],
+  ["open_pricing_file_creates_template_in_root", { existedBefore: false, created: true, content: '[[model]]\nprefix = "synthetic"', hostPidResolved: true, hostPid: 1234, expectedPath: "C:/isolated/tokenscope/pricing.toml", returnedPath: "C:/isolated/tokenscope/pricing.toml", openerPaths: ["C:/isolated/tokenscope/pricing.toml"], recorded: true, processProbeOk: true, foreignProcesses: [] }, o => { o.foreignProcesses.push("editor.exe"); }],
 ];
 for (const [name, observed] of cases) {
   if (name === "first_run_banner_without_snapshots") Object.assign(observed,
@@ -44,6 +46,32 @@ for (const [name, observed] of cases) {
   if (name === "candidate_highest_without_cross_source_mix") observed.formulaRows.push({ label: "估算合计", value: "$0.0738" });
   if (name === "settings_segment_tags_expand_all_tiers_and_schedule") observed.expectedRules = structuredClone(settingsEntries);
 }
+describe("open_pricing_file 的进程身份区分度", () => {
+  const base = () => ({
+    existedBefore: false,
+    created: true,
+    content: '[[model]]\nprefix = "synthetic"',
+    hostPidResolved: true,
+    hostPid: 1234,
+    expectedPath: "C:/isolated/tokenscope/pricing.toml",
+    returnedPath: "C:/isolated/tokenscope/pricing.toml",
+    openerPaths: ["C:/isolated/tokenscope/pricing.toml"],
+    recorded: true,
+    processProbeOk: true,
+    foreignProcesses: [],
+  });
+
+  it("宿主身份不可解析（PID 被复用）时不得通过", () => {
+    const observed = { ...base(), hostPidResolved: false, hostPid: 720 };
+    expect(pricingVerdict("open_pricing_file_creates_template_in_root", observed).ok).toBe(false);
+  });
+
+  it("解析到宿主后真实外部后代仍然判失败", () => {
+    const observed = { ...base(), foreignProcesses: [{ pid: 9, name: "notepad.exe" }] };
+    expect(pricingVerdict("open_pricing_file_creates_template_in_root", observed).ok).toBe(false);
+  });
+});
+
 describe.each(cases)("%s", (name, good, corrupt) => {
   it("完整实测证据通过", () => { expect(pricingVerdict(name, structuredClone(good)).ok).toBe(true); });
   it("违反该要求的反例失败", () => { const bad = structuredClone(good); corrupt(bad); expect(pricingVerdict(name, bad).ok).toBe(false); });

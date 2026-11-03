@@ -19,13 +19,15 @@ use tokenscope::settings::ConsentRead;
 
 /// 打包进程序的政策全文（构建期编译，运行时不访问 GitHub 或任何网络）。
 pub const POLICY_MARKDOWN: &str = include_str!("../../docs/privacy.md");
+/// 最终用户许可与免责协议全文（十九轮复核 P2：政策引用 terms.md，必须
+/// 提供同意前可用的离线入口——编译进二进制，不依赖安装资源路径）。
+pub const TERMS_MARKDOWN: &str = include_str!("../../docs/terms.md");
 
 /// 未同意时业务命令的统一拒绝码（前端据此给出可操作提示）。
 pub const ERR_CONSENT_REQUIRED: &str = "privacy_consent_required";
 
 /// WB05：政策已更新（旧修订同意触发重新询问）时引导弹窗顶部的提示句。
-pub const POLICY_UPDATED_DETAIL: &str =
-    "隐私政策已更新：新增读取 WorkBuddy 与 WorkBuddy AI 的本地会话日志";
+pub const POLICY_UPDATED_DETAIL: &str = "隐私政策或用户许可协议已更新，请阅读并确认后继续";
 
 /// 引导期关闭请求事件名（前端监听前到达的请求由 bootstrap 响应的
 /// `exitPromptPending` 标记恢复显示）。
@@ -220,6 +222,8 @@ pub struct PolicyInfo {
     pub date: String,
     /// 政策全文（Markdown 源文本；前端做确定性渲染，不引入远程资源）。
     pub markdown: String,
+    /// 最终用户许可与免责协议全文（同意弹窗内可展开查看；离线可用）。
+    pub terms: String,
 }
 
 /// 引导状态的只读 DTO。不携带来源目录清单、缓存内容、历史查询或价格状态。
@@ -494,6 +498,17 @@ pub fn phase_of(app: &AppHandle) -> Phase {
         .unwrap_or(Phase::Checking)
 }
 
+/// 政策日期可能以 Markdown 硬换行标记结尾；保留转义后的字面反斜杠。
+fn policy_date_text(raw: &str) -> &str {
+    let date = raw.trim();
+    let slashes = date.bytes().rev().take_while(|byte| *byte == b'\\').count();
+    if slashes % 2 == 1 {
+        date[..date.len() - 1].trim_end()
+    } else {
+        date
+    }
+}
+
 fn policy_info() -> PolicyInfo {
     static CACHE: std::sync::OnceLock<PolicyInfo> = std::sync::OnceLock::new();
     CACHE
@@ -508,13 +523,14 @@ fn policy_info() -> PolicyInfo {
                     continue;
                 }
                 if let Some(rest) = line.strip_prefix("更新日期：") {
-                    date = rest.trim().to_string();
+                    date = policy_date_text(rest).to_string();
                 }
             }
             PolicyInfo {
                 title,
                 date,
                 markdown: POLICY_MARKDOWN.to_string(),
+                terms: TERMS_MARKDOWN.to_string(),
             }
         })
         .clone()
@@ -789,7 +805,68 @@ mod acceptance_closure_tests {
                 .len(),
             16
         );
+        // 二轮复核缺口：保存事件必须携带不可变字节证据，且证据可重算出
+        // 事件指纹、内容确实包含同意值与当前修订号（判定方据此核对，
+        // 不允许只查格式放行假哈希）。
+        let captured = hex_to_bytes(
+            records[at("consent_saved")]["settings_bytes_hex"]
+                .as_str()
+                .unwrap_or_else(|| panic!("consent_saved 缺少 settings_bytes_hex")),
+        );
+        let mut hashed: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in &captured {
+            hashed = (hashed ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3); // fnv1a64
+        }
+        assert_eq!(
+            format!("{hashed:016x}"),
+            records[at("consent_saved")]["settings_hash"]["value"]
+                .as_str()
+                .unwrap()
+        );
+        let captured_text = String::from_utf8(captured).unwrap();
+        // 内容判定与判定方同口径：真正的 TOML 解析（三轮复核：字符串
+        // contains 会被注释假字段、[notes] 表内字段与 revision = 20 前缀
+        // 匹配骗过），严格检查顶层布尔 true 与当前整数修订号。
+        let parsed: toml::Value = toml::from_str(&captured_text)
+            .unwrap_or_else(|error| panic!("字节证据不是合法 TOML：{error}"));
+        assert_eq!(
+            parsed
+                .get("privacy_policy_accepted")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "顶层 privacy_policy_accepted 必须是布尔 true：{parsed}"
+        );
+        assert_eq!(
+            parsed
+                .get("privacy_policy_revision")
+                .and_then(|v| v.as_integer()),
+            Some(i64::from(tokenscope::settings::PRIVACY_POLICY_REVISION)),
+            "顶层 privacy_policy_revision 必须是当前整数修订号：{parsed}"
+        );
+        // 2026-10-28：一次点击同时确认用户许可协议——壳层保存必须同时写入
+        // 协议同意与当前修订，证据才能证明接受的是当前协议版本。
+        assert_eq!(
+            parsed
+                .get("user_agreement_accepted")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "顶层 user_agreement_accepted 必须是布尔 true：{parsed}"
+        );
+        assert_eq!(
+            parsed
+                .get("user_agreement_revision")
+                .and_then(|v| v.as_integer()),
+            Some(i64::from(tokenscope::settings::PRIVACY_POLICY_REVISION)),
+            "顶层 user_agreement_revision 必须是当前整数修订号：{parsed}"
+        );
         println!("AC02_SHELL_TRACE {}", serde_json::json!(records));
+    }
+
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+            .collect()
     }
 }
 
@@ -1211,6 +1288,19 @@ mod tests {
 
     // ── 命令覆盖（新增命令漏门的防线）────────────────────────
 
+    #[test]
+    fn privacy_policy_date_strips_only_a_hard_break_marker() {
+        assert_eq!(
+            policy_date_text(" 2026 年 10 月 28 日\\ "),
+            "2026 年 10 月 28 日"
+        );
+        assert_eq!(
+            policy_date_text("2026 年 10 月 28 日"),
+            "2026 年 10 月 28 日"
+        );
+        assert_eq!(policy_date_text(r"literal\\"), r"literal\\");
+    }
+
     /// 打包政策与源文件一致：`include_str!` 直接指向 `docs/privacy.md`，
     /// 因此"打包进程序的那一份"就是源文件；这里守住逐字一致、关键章节
     /// 与日期解析，防止有人另写一份会漂移的政策副本。
@@ -1227,6 +1317,11 @@ mod tests {
         let policy = policy_info();
         assert_eq!(policy.title, "TokenScope 隐私政策");
         assert!(!policy.date.is_empty(), "政策日期必须可解析");
+        assert!(
+            !policy.date.ends_with('\\'),
+            "政策日期不应包含 Markdown 换行标记：{:?}",
+            policy.date
+        );
         for section in [
             "## 一、适用范围",
             "## 二、读取的数据及用途",

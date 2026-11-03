@@ -12,5 +12,19 @@ export default defineConfig({
     // 设计系统 Task 1：css: true 让 tokens.css 在测试中真实注入 DOM，
     // 断言语义 token 的两套主题与降级规则（默认空模块无法校验内容）。
     css: true,
+    coverage: {
+      // Vitest 5 已移除 coverage.all；include 声明的文件由 provider 补算
+      // 未执行项。这里的 custom provider 只修正一处补算失效：契约测试以
+      // ?raw 导入全部源码，空壳模块会占住源码路径并被误判为已加载。
+      provider: "custom",
+      customProviderModule: "./vitest.coverage-provider.ts",
+      include: ["src/**/*.{ts,vue}"],
+      // 排除测试本体；纯类型声明（*.d.ts，当前 src 下没有）无运行时
+      // 行为，防御性排除。生成物（node_modules/dist）不匹配 include。
+      exclude: ["src/**/*.test.ts", "src/**/*.d.ts"],
+      reporter: ["text", "html", "lcovonly", "json-summary"],
+      // 报告只落本地产物目录（qa-artifacts/ 已被 gitignore，不入库）。
+      reportsDirectory: "../qa-artifacts/coverage/frontend-vitest",
+    },
   },
 });
