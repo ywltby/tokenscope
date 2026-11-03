@@ -551,6 +551,59 @@ export function createProbeFn({
  * 递归记录宿主后代（按父 PID），用于端口归属判定与关闭确认（计划 §4.8 第 2、3 条）。
  * 返回不含宿主自身的 PID 列表。
  */
+/**
+ * 应用家族进程名（小写比对）：宿主本体与 WebView2 渲染/配套进程。
+ * 与 `stop()` 的残留身份校验同一份命名口径——PID 被复用后新进程名不在此列，
+ * 就不会被当成"应用的后代"。
+ */
+export const APP_PROCESS_NAMES = Object.freeze(["tokenscope.exe", "msedgewebview2.exe"]);
+
+/** 进程名是否属于应用家族（大小写无关）。 */
+export function isAppProcessName(name) {
+  return APP_PROCESS_NAMES.includes(String(name ?? "").trim().toLowerCase());
+}
+
+/**
+ * 按进程名身份校验的后代遍历：只有当父进程本身属于应用家族时才接受其子进程。
+ *
+ * 为什么需要：进程表快照里 `hostPid` 可能在测量间隙被系统复用（既有事故记录：
+ * "宿主 pid 752 干净退出后被复用，退出确认把 126 个系统进程当残留"）。此时直接
+ * 按 ppid 全量递归会把 `csrss.exe` / `wininit.exe` / `services.exe` 这类 Session-0
+ * 系统进程当成应用后代。这里先验证宿主行本身属于应用家族，再逐层只通过应用
+ * 家族父进程展开——真实的"应用拉起外部进程"仍是宿主的直接子进程，照样会被
+ * 算进来，不会漏判。
+ *
+ * 返回 `{ resolved, descendants }`：`resolved === false` 表示快照里找不到宿主行、
+ * 或宿主行名字不是应用家族（PID 已被复用 / 探测数据不可信）——调用方必须按
+ * "身份不可用"处理，不得当成"没有后代"而静默通过。
+ */
+export function collectAppDescendants(processes, rootPid) {
+  const hostPid = Number(rootPid);
+  if (!Number.isInteger(hostPid) || hostPid <= 0) {
+    return { resolved: false, descendants: [] };
+  }
+  const rows = (processes ?? []).filter((p) => Number.isInteger(p?.pid) && p.pid > 0);
+  const hostRow = rows.find((row) => row.pid === hostPid);
+  if (!hostRow || !isAppProcessName(hostRow.name)) {
+    return { resolved: false, descendants: [] };
+  }
+  const found = new Set();
+  let frontier = [hostPid];
+  while (frontier.length) {
+    const next = [];
+    for (const parent of frontier) {
+      for (const row of rows) {
+        if (row.ppid !== parent || row.pid === hostPid || found.has(row.pid)) continue;
+        found.add(row.pid);
+        // 只有应用家族的父进程才继续向下展开（PID 复用幽灵树在第一步就被切断）
+        if (isAppProcessName(row.name)) next.push(row.pid);
+      }
+    }
+    frontier = next;
+  }
+  return { resolved: true, descendants: uniqueSortedPids([...found]) };
+}
+
 export function collectDescendants(processes, rootPid) {
   const hostPid = Number(rootPid);
   if (!Number.isInteger(hostPid) || hostPid <= 0) return [];

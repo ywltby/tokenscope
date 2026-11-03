@@ -174,12 +174,20 @@ export function pricingVerdict(name, observed) {
         && /输入价/.test(o.tooltip ?? "") && String(o.tooltip ?? "").includes(o.breakdown.excluded_candidate_warning);
       break;
     }
-    case "open_pricing_file_creates_template_in_root":
-      ok = o.existedBefore === false && o.created === true && /\[\[model\]\]/.test(o.content ?? "")
+    case "open_pricing_file_creates_template_in_root": {
+      // 进程身份不可解析（宿主 PID 被复用）时不得算通过：宁可显式失败，
+      // 也不能用"没找到外部后代"掩盖探测失效。
+      if (o.hostPidResolved !== true) {
+        ok = false;
+        break;
+      }
+      ok = o.hostPidResolved === true
+        && o.existedBefore === false && o.created === true && /\[\[model\]\]/.test(o.content ?? "")
         && Boolean(pathKey(o.expectedPath)) && pathKey(o.returnedPath) === pathKey(o.expectedPath)
         && Array.isArray(o.openerPaths) && o.openerPaths.length === 1 && pathKey(o.openerPaths[0]) === pathKey(o.expectedPath)
         && o.recorded === true && o.processProbeOk === true && Array.isArray(o.foreignProcesses) && o.foreignProcesses.length === 0;
       break;
+    }
   }
   return { ok: Boolean(ok), basis: JSON.stringify(o) };
 }

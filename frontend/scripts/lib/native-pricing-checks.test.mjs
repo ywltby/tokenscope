@@ -22,7 +22,7 @@ const cases = [
   ["schedule_by_event_time", { periods: [{ breakdown: { matched: { source: "external", schedule_label: "B2峰时", schedule_timezone: "Asia/Shanghai", request_at: "2026-10-08T01:00:00Z" }, lines: rates([12, 35, 1, 0.5]) }, tooltip: "B2峰时 Asia/Shanghai 2026-10-08T01:00:00Z" }, { breakdown: { matched: { source: "external", schedule_label: "B2谷时", schedule_timezone: "Asia/Shanghai", request_at: "2026-10-08T17:00:00Z" }, lines: rates([2, 10, 1, 0.5]) }, tooltip: "B2谷时 Asia/Shanghai 2026-10-08T17:00:00Z" }] }, o => { o.periods[1].breakdown.matched.schedule_label = "B2峰时"; }],
   ["settings_segment_tags_expand_all_tiers_and_schedule", { tieredCount: 2, expanded: [{ entry: settingsEntries[0], tag: true, tooltip: "计价依据\n分段 不超过272K [0, 272,001) 输入 $4 · 输出 $20 · 缓存写 $5 · 缓存命中 $0.4\n分段 超过272K [272,001, ∞) 输入 $8 · 输出 $30 · 缓存写 $10 · 缓存命中 $0.8" }, { entry: settingsEntries[1], tag: true, tooltip: "计价依据\n峰谷 B2峰时 Asia/Shanghai 09:00–18:00 输入 未知 输出 未知 缓存写 未知 缓存命中 未知\n峰谷 B2谷时 Asia/Shanghai 00:00–09:00 输入 未知 输出 未知 缓存写 未知 缓存命中 未知" }] }, o => { o.expanded.pop(); }],
   ["same_as_input_and_excluded_incomplete_in_tooltip", { breakdown: peak, tooltip: "缓存命中 输入价 $12 有 2 个候选未参与主估算（anthropic/claude-opus-5.5、incomplete/claude-opus-5-5）：1 个因事件缺少 5 分钟/1 小时写入分项、1 个因缺少价格；实际最高费用可能更高" }, o => { o.breakdown.lines[3].rate_kind = "fixed"; }],
-  ["open_pricing_file_creates_template_in_root", { existedBefore: false, created: true, content: '[[model]]\nprefix = "synthetic"', expectedPath: "C:/isolated/tokenscope/pricing.toml", returnedPath: "C:/isolated/tokenscope/pricing.toml", openerPaths: ["C:/isolated/tokenscope/pricing.toml"], recorded: true, processProbeOk: true, foreignProcesses: [] }, o => { o.foreignProcesses.push("editor.exe"); }],
+  ["open_pricing_file_creates_template_in_root", { existedBefore: false, created: true, content: '[[model]]\nprefix = "synthetic"', hostPidResolved: true, hostPid: 1234, expectedPath: "C:/isolated/tokenscope/pricing.toml", returnedPath: "C:/isolated/tokenscope/pricing.toml", openerPaths: ["C:/isolated/tokenscope/pricing.toml"], recorded: true, processProbeOk: true, foreignProcesses: [] }, o => { o.foreignProcesses.push("editor.exe"); }],
 ];
 for (const [name, observed] of cases) {
   if (name === "first_run_banner_without_snapshots") Object.assign(observed,
@@ -46,6 +46,32 @@ for (const [name, observed] of cases) {
   if (name === "candidate_highest_without_cross_source_mix") observed.formulaRows.push({ label: "估算合计", value: "$0.0738" });
   if (name === "settings_segment_tags_expand_all_tiers_and_schedule") observed.expectedRules = structuredClone(settingsEntries);
 }
+describe("open_pricing_file 的进程身份区分度", () => {
+  const base = () => ({
+    existedBefore: false,
+    created: true,
+    content: '[[model]]\nprefix = "synthetic"',
+    hostPidResolved: true,
+    hostPid: 1234,
+    expectedPath: "C:/isolated/tokenscope/pricing.toml",
+    returnedPath: "C:/isolated/tokenscope/pricing.toml",
+    openerPaths: ["C:/isolated/tokenscope/pricing.toml"],
+    recorded: true,
+    processProbeOk: true,
+    foreignProcesses: [],
+  });
+
+  it("宿主身份不可解析（PID 被复用）时不得通过", () => {
+    const observed = { ...base(), hostPidResolved: false, hostPid: 720 };
+    expect(pricingVerdict("open_pricing_file_creates_template_in_root", observed).ok).toBe(false);
+  });
+
+  it("解析到宿主后真实外部后代仍然判失败", () => {
+    const observed = { ...base(), foreignProcesses: [{ pid: 9, name: "notepad.exe" }] };
+    expect(pricingVerdict("open_pricing_file_creates_template_in_root", observed).ok).toBe(false);
+  });
+});
+
 describe.each(cases)("%s", (name, good, corrupt) => {
   it("完整实测证据通过", () => { expect(pricingVerdict(name, structuredClone(good)).ok).toBe(true); });
   it("违反该要求的反例失败", () => { const bad = structuredClone(good); corrupt(bad); expect(pricingVerdict(name, bad).ok).toBe(false); });

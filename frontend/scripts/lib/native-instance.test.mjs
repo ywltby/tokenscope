@@ -14,6 +14,7 @@ import {
   STOP_TIMEOUT_MS,
   buildLaunchesEvidence,
   classifyPortOwner,
+  collectAppDescendants,
   collectDescendants,
   connectDecision,
   createLaunchRecord,
@@ -153,6 +154,35 @@ describe("后代进程递归记录（§4.8 第 2 条）", () => {
   it("按父 PID 递归到孙进程，且不含宿主自身", () => {
     expect(collectDescendants(table, 100)).toEqual([200, 300, 400]);
     expect(collectDescendants(table, 999)).toEqual([]);
+  });
+
+  it("宿主 PID 被复用时（快照里是系统进程）拒绝把系统进程算作应用后代", () => {
+    // 复现既有事故形态：hostPid 被 smss 复用，csrss/wininit/services 成为"子进程"
+    const ghost = normalizeProcessTable([
+      { ProcessId: 720, ParentProcessId: 4, Name: "smss.exe" },
+      { ProcessId: 728, ParentProcessId: 720, Name: "csrss.exe" },
+      { ProcessId: 852, ParentProcessId: 720, Name: "wininit.exe" },
+      { ProcessId: 944, ParentProcessId: 852, Name: "services.exe" },
+      { ProcessId: 972, ParentProcessId: 852, Name: "lsass.exe" },
+    ]);
+    expect(collectAppDescendants(ghost, 720)).toEqual({ resolved: false, descendants: [] });
+  });
+
+  it("宿主行缺失时判为身份不可解析，不当作没有后代", () => {
+    expect(collectAppDescendants(table, 999)).toEqual({ resolved: false, descendants: [] });
+  });
+
+  it("解析到应用家族宿主后正常展开，并保留真实外部后代", () => {
+    const withForeign = normalizeProcessTable([
+      { ProcessId: 100, ParentProcessId: 1, Name: "tokenscope.exe" },
+      { ProcessId: 200, ParentProcessId: 100, Name: "msedgewebview2.exe" },
+      { ProcessId: 300, ParentProcessId: 200, Name: "msedgewebview2.exe" },
+      { ProcessId: 700, ParentProcessId: 100, Name: "notepad.exe" },
+    ]);
+    expect(collectAppDescendants(withForeign, 100)).toEqual({
+      resolved: true,
+      descendants: [200, 300, 700],
+    });
   });
 
   it("合并多次快照不会丢已记录的后代", () => {
