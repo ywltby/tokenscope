@@ -1,5 +1,7 @@
 # 用户协议更新后的重新同意实施计划
 
+> **2026-11-04 归档为已实现**：四个任务全部交付——共同同意修订 3（隐私政策 + 用户许可协议精确匹配）、协议变更版本守卫、升级编排与原生验收（含 `privacy-revision2-consent` 场景）随 [PR #52](https://github.com/ywltby/tokenscope/pull/52) 与 [PR #53](https://github.com/ywltby/tokenscope/pull/53) 合并 `3d11fa5`，并经 main Release 实跑发布 [v0.6.1](https://github.com/ywltby/tokenscope/releases/tag/v0.6.1)（预发布，2026-11-03，安装五场景、八组单跳、两条连续链、publish 全过）。剩余边界（AC07 暂缓、N10 开放、真实自启 D5 3.4 人工签字）由[整合计划](../../active/2026-10-11-consolidated-remaining-work.md)与[收口计划](../../active/2026-10-21-acceptance-closure.md)承接；归档不把人工待验项标为通过。
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** 协议更新后，新用户和已同意旧版的用户都须明确同意当前隐私政策与用户许可协议，才能进入业务界面。
