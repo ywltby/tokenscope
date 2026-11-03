@@ -117,6 +117,20 @@ jobs:
         run: |
           node frontend/scripts/native-acceptance.mjs --scenario privacy-revision2-consent --events 8 --port 9545 --out qa-artifacts/ui-adjustment/native-e2e/privacy-revision2-consent
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # AC10（N12）：同一隔离根启动第二个实例——第二实例限时退出、第一窗口恢复、
+      # 托盘归属按 PID 的 (hwnd, uID) 观察。Runner 上托盘可能无法观察：该层记
+      # pending 并由检查器按"部分验证"放行，**不把 pending 当通过**；其余判定项
+      # （第二实例退出、窗口恢复与前台、同根同 identifier、真实数据未动）仍必须通过。
+      - name: Native single instance (AC10)
+        shell: pwsh
+        run: |
+          $out = "qa-artifacts/ui-adjustment/native-e2e/single-instance"
+          node frontend/scripts/native-acceptance.mjs --scenario ui-single-instance --events 4 --port 9550 --out $out
+          $code = $LASTEXITCODE
+          # 3 = 场景完成但存在允许范围内的 pending（托盘展示层），交检查器裁决。
+          if ($code -ne 0 -and $code -ne 3) { exit $code }
+          python -B scripts/check_native_single_instance_evidence.py --evidence "$out/ui-single-instance/evidence.json" --allow-pending tray
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Upload native UI evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7

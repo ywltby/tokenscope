@@ -163,11 +163,20 @@ class EvidenceCheckCase(unittest.TestCase):
             broken.write_text("{not json", encoding="utf-8")
             self.assertEqual(module.main(["--evidence", str(broken)]), 1)
 
-    def test_repository_script_exists_and_ui_e2e_is_not_wired_yet(self) -> None:
-        # 本轮只准备接线，不改工作流触发面：ui-e2e.yml 仍不含 ui-single-instance
+    def test_ui_e2e_runs_single_instance_and_judges_with_this_checker(self) -> None:
+        """接线契约：CI 必须跑该场景，并用本检查器裁决（不是"跑过就算"）。
+
+        - 场景步骤存在，且传入唯一的起始端口；
+        - 紧随其后调用本检查器、带 --allow-pending tray（托盘层 pending 不计通过）；
+        - 仍保留其余既有场景步骤（不放宽整体触发面）。
+        """
         workflow = (ROOT / ".github" / "workflows" / "ui-e2e.yml").read_text(encoding="utf-8")
         self.assertIn("ui-refresh", workflow)
-        self.assertNotIn("ui-single-instance", workflow)
+        self.assertIn("--scenario ui-single-instance", workflow)
+        self.assertIn("check_native_single_instance_evidence.py", workflow)
+        self.assertIn("--allow-pending tray", workflow)
+        # 场景自身的 pending 退出码（3）必须被显式放行给检查器，其余非零照常失败。
+        self.assertIn("$code -ne 0 -and $code -ne 3", workflow)
 
 
 if __name__ == "__main__":
