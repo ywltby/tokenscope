@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "N18 Claude 缓存写 5m/1h 分档计价与未知分项估算标示；B3 AC06 自启隔离替身与隐私原生场景接入 CI"
+  "summary": "WorkBuddy 图标替换为官方 560x560 图标组，移除标题横幅文字"
 }
