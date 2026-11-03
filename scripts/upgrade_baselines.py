@@ -122,6 +122,7 @@ def validate_entry(entry, repository):
             raise ValueError(f"撤回条目必须写明日期与原因：{version!r}")
     validate_persistent_format(entry.get("persistent_format"), version, status)
     validate_privacy_revision(entry, version)
+    validate_agreement_revision(entry, version)
     validate_expectations(entry, version)
     validate_assets(entry, repository, status)
 
@@ -140,6 +141,24 @@ def validate_privacy_revision(entry, version):
         raise ValueError(f"privacy_revision 必须是正整数：{version!r}")
     if fmt is None or int(fmt) < 3:
         raise ValueError(f"不认识修订号的版本不得登记 privacy_revision：{version!r}")
+
+
+def validate_agreement_revision(entry, version):
+    """0.6.1 起的版本认识用户许可协议同意：登记表用 agreement_revision
+    如实记录该能力，供后续把它作为历史起点时装配正确门禁（隐私+协议
+    四项精确匹配）。协议与隐私共用「共同同意修订号」——取值必须等于
+    privacy_revision 的正整数；布尔时代（格式 < 3）或隐私-only 版本
+    （如 0.6.0）不得登记。"""
+    value = entry.get("agreement_revision")
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"agreement_revision 必须是正整数：{version!r}")
+    fmt = (entry.get("persistent_format") or {}).get("settings_format")
+    if fmt is None or int(fmt) < 3:
+        raise ValueError(f"不认识协议字段的版本不得登记 agreement_revision：{version!r}")
+    if value != entry.get("privacy_revision"):
+        raise ValueError(f"agreement_revision 必须等于共同同意修订 privacy_revision：{version!r}")
 
 
 def validate_persistent_format(value, version, status="published"):
@@ -209,6 +228,10 @@ def resolved_entry(entry, root=ROOT):
             "status": entry["status"],
             "persistent_format": entry.get("persistent_format"),
             "privacy_revision": entry.get("privacy_revision"),
+            # 协议能力必须穿过 resolved 视图到达 PowerShell 装配链
+            # （Get-UpgradeBaselines 读的就是这个视图）——丢失会让
+            # 0.6.1 历史起点被误装配成隐私-only 门禁。
+            "agreement_revision": entry.get("agreement_revision"),
             "expected_old": str(root / (entry.get("expected_old") or DEFAULT_EXPECTED)),
             "expected_after": state_paths,
             "installer_name": None if installer is None else installer["name"],
@@ -581,11 +604,14 @@ def extract_privacy_revision(source):
 
 
 def supports_user_agreement(source):
-    """目标源码是否认识用户许可协议同意字段（0.6.1 起）。注释与字符串里的
-    假字段同样忽略，避免把历史版本误判为协议感知版本。"""
+    """目标源码是否认识用户许可协议同意字段（0.6.1 起）。字段写在结构体
+    内带缩进——行首锚定必须允许空白前缀，否则真实发布源码会被误判为
+    隐私-only（2026-11-04 真实缺陷：add --tag v0.6.1 产出缺
+    agreement_revision 的条目）。注释与字符串里的假字段同样忽略，避免
+    把历史版本误判为协议感知版本。"""
     stripped = strip_rust_comments_and_strings(source)
     return re.search(
-        r"(?m)^(?:pub\s+)?user_agreement_(?:accepted|revision)\s*:",
+        r"(?m)^[ \t]*(?:pub\s+)?user_agreement_(?:accepted|revision)\s*:",
         stripped,
     ) is not None
 

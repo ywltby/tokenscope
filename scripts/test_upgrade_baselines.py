@@ -220,6 +220,55 @@ class RegistryValidationCase(RegistryCase):
         view = baselines.resolved_entry(baselines.published_entry(self.registry, "0.2.0"))
         self.assertIsNone(view["privacy_revision"])
 
+    def test_resolved_entry_preserves_agreement_revision(self):
+        # 2026-11-04 真实缺陷：协议能力必须穿过 entries/resolved_entry 到达
+        # PowerShell 装配链（Get-UpgradeBaselines 读的就是 resolved 视图）——
+        # 白名单丢字段会让 0.6.1 历史起点被误装配成隐私-only。
+        payload = self.payload()
+        entry = payload["entries"][1]
+        version = entry["version"]
+        entry["persistent_format"]["settings_format"] = "3"
+        entry["privacy_revision"] = 3
+        entry["agreement_revision"] = 3
+        registry = baselines.load_registry(self.write(payload))
+        view = baselines.resolved_entry(baselines.published_entry(registry, version))
+        self.assertEqual(view["agreement_revision"], 3)
+        self.assertEqual(view["privacy_revision"], 3)
+        outbound = baselines.entries_payload(registry)
+        target = next(e for e in outbound["entries"] if e["version"] == version)
+        self.assertEqual(target["agreement_revision"], 3)
+        # 0.6.0 形态（隐私-only）：视图中协议修订为 None，不冒充协议感知。
+        payload2 = self.payload()
+        entry2 = payload2["entries"][1]
+        version2 = entry2["version"]
+        entry2["persistent_format"]["settings_format"] = "3"
+        entry2["privacy_revision"] = 2
+        registry2 = baselines.load_registry(self.write(payload2))
+        view2 = baselines.resolved_entry(baselines.published_entry(registry2, version2))
+        self.assertIsNone(view2["agreement_revision"])
+
+    def test_agreement_revision_validation(self):
+        # agreement_revision 与 privacy_revision 共用「共同同意修订号」：
+        # 只接受格式 3 起的正整数且等于 privacy_revision，其余一律拒绝。
+        good = self.payload()
+        entry = good["entries"][1]
+        entry["persistent_format"]["settings_format"] = "3"
+        entry["privacy_revision"] = 3
+        entry["agreement_revision"] = 3
+        baselines.load_registry(self.write(good))
+        for bad in (0, True, 4, "3"):
+            with self.subTest(value=bad):
+                payload = self.payload()
+                item = payload["entries"][1]
+                item["persistent_format"]["settings_format"] = "3"
+                item["privacy_revision"] = 3
+                item["agreement_revision"] = bad
+                self.assert_rejected(payload)
+        # 布尔时代（格式 < 3）基线不得携带协议字段。
+        payload = self.payload()
+        payload["entries"][1]["agreement_revision"] = 2
+        self.assert_rejected(payload)
+
 
 class CheckCase(RegistryCase):
     def setUp(self):
@@ -491,6 +540,83 @@ class AddCase(RegistryCase):
         self.assertIn("PRIVACY_POLICY_REVISION", str(caught.exception))
         self.assertEqual(baselines.load_registry(path), registry)
 
+    def test_format3_add_registers_agreement_revision_from_indented_tag_source(self):
+        # 2026-11-04 真实缺陷回归：真实 settings.rs 的协议字段带缩进，
+        # 行首锚定识别不到 → add 产出缺 agreement_revision 的 0.6.1 条目，
+        # 之后以它为历史起点会被装配成隐私-only 门禁。真实读取链
+        # （read_tag_privacy_revision → extract、read_tag_agreement_required →
+        # supports_user_agreement）经替身 git 全程参与，不替身被测函数本身。
+        registry = self.without("0.3.3")
+        path = self.write(registry)
+        names = ["TokenScope_v0.3.3_windows-x64-setup.exe", "SHA256SUMS.txt",
+                 "provenance.sigstore.json", "build-metadata.json"]
+        api = FakeApi({"v0.3.3": release("v0.3.3", [asset(n, "5" * 64, tag="v0.3.3") for n in names],
+                                        commit=SHA)}, {"v0.3.3": SHA})
+
+        def fake_download(url, sha256, directory, name):
+            path_ = Path(directory) / name
+            if name == "build-metadata.json":
+                path_.write_text(json.dumps({"schema_version": 2,
+                                             "persistent_format": {**FINGERPRINT, "settings_format": "3"}}),
+                                 encoding="utf-8")
+            else:
+                path_.write_bytes(name.encode("utf-8"))
+            return path_, "5" * 64
+
+        def fake_git_show(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0,
+                                               stdout=PrivacyRevisionLexerCase.AGREEMENT_REAL_SHAPE,
+                                               stderr="")
+
+        with patch.object(baselines, "download", side_effect=fake_download), \
+                patch.object(baselines, "digest", return_value="5" * 64), \
+                patch.object(baselines.subprocess, "run", side_effect=fake_git_show):
+            entry = baselines.add_entry("v0.3.3", api=api, path=path, directory=self.temp.name)
+        self.assertEqual(entry["privacy_revision"], 3)
+        self.assertEqual(entry["agreement_revision"], 3)
+        reloaded = baselines.load_registry(path)
+        view = baselines.resolved_entry(baselines.published_entry(reloaded, "0.3.3"))
+        self.assertEqual(view["agreement_revision"], 3)
+
+    def test_format3_add_omits_agreement_revision_for_privacy_only_source(self):
+        # 0.6.0 形态（结构体无协议字段）：add 不得登记 agreement_revision，
+        # 也不得把注释/字符串里的假字段当成协议能力。
+        registry = self.without("0.3.3")
+        path = self.write(registry)
+        names = ["TokenScope_v0.3.3_windows-x64-setup.exe", "SHA256SUMS.txt",
+                 "provenance.sigstore.json", "build-metadata.json"]
+        api = FakeApi({"v0.3.3": release("v0.3.3", [asset(n, "5" * 64, tag="v0.3.3") for n in names],
+                                        commit=SHA)}, {"v0.3.3": SHA})
+        privacy_only = (
+            "pub const PRIVACY_POLICY_REVISION: u8 = 2;\n"
+            "pub struct Settings {\n"
+            "    pub privacy_policy_accepted: Option<bool>,\n"
+            "}\n"
+            "// pub user_agreement_accepted: bool,\n"
+            "const S: &str = \"pub user_agreement_revision: Option<u8>,\";\n"
+        )
+
+        def fake_download(url, sha256, directory, name):
+            path_ = Path(directory) / name
+            if name == "build-metadata.json":
+                path_.write_text(json.dumps({"schema_version": 2,
+                                             "persistent_format": {**FINGERPRINT, "settings_format": "3"}}),
+                                 encoding="utf-8")
+            else:
+                path_.write_bytes(name.encode("utf-8"))
+            return path_, "5" * 64
+
+        def fake_git_show(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=privacy_only, stderr="")
+
+        with patch.object(baselines, "download", side_effect=fake_download), \
+                patch.object(baselines, "digest", return_value="5" * 64), \
+                patch.object(baselines.subprocess, "run", side_effect=fake_git_show):
+            entry = baselines.add_entry("v0.3.3", api=api, path=path, directory=self.temp.name)
+        self.assertEqual(entry["privacy_revision"], 2)
+        self.assertNotIn("agreement_revision", entry)
+        baselines.load_registry(path)
+
 
 class WithdrawCase(RegistryCase):
     def test_withdraw_marks_the_entry_and_removes_it_from_selection(self):
@@ -569,10 +695,6 @@ class NetworkRetryCase(unittest.TestCase):
         self.assertEqual((len(calls), sleeps), (1, []))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PrivacyRevisionLexerCase(RegistryCase):
     """二十轮复核 P3：修订号提取的 Rust 词法回归——调用**真实**提取函数
     （不是直接测剥离器），覆盖生命周期、字符字面量与字符串内假常量三种
@@ -606,6 +728,66 @@ class PrivacyRevisionLexerCase(RegistryCase):
         self.assertFalse(baselines.supports_user_agreement(
             "/* pub user_agreement_accepted: bool, */\n"
             "const S: &str = \"user_agreement_accepted: bool\";\n"))
+
+    # 真实 v0.6.1 settings.rs 的形态：协议字段在结构体内带缩进，doc 注释
+    # 提到 [`PRIVACY_POLICY_REVISION`]；0.6.0 同结构没有协议字段。
+    AGREEMENT_REAL_SHAPE = (
+        "pub const PRIVACY_POLICY_REVISION: u8 = 3;\n\n"
+        "pub struct Settings {\n"
+        "    pub privacy_policy_accepted: Option<bool>,\n"
+        "    /// 用户许可协议同意记录（与 [`PRIVACY_POLICY_REVISION`] 共用修订）。\n"
+        "    pub user_agreement_accepted: bool,\n"
+        "    /// 精确等于当前修订；None/不一致 = 重新询问。\n"
+        "    pub user_agreement_revision: Option<u8>,\n"
+        "}\n"
+    )
+
+    def test_supports_user_agreement_recognizes_indented_fields(self):
+        # 2026-11-04 真实缺陷：行首锚定不认缩进，真实 v0.6.1 标签源码被
+        # 误判为隐私-only，add 产出缺 agreement_revision 的条目。
+        self.assertTrue(baselines.supports_user_agreement(self.AGREEMENT_REAL_SHAPE))
+        self.assertTrue(baselines.supports_user_agreement(
+            "    pub user_agreement_accepted: bool,\n"))
+        self.assertTrue(baselines.supports_user_agreement(
+            "\tpub user_agreement_revision: Option<u8>,\n"))
+        # 0.6.0 形态：privacy-only，结构体没有协议字段。
+        self.assertFalse(baselines.supports_user_agreement(
+            "pub const PRIVACY_POLICY_REVISION: u8 = 2;\n"
+            "pub struct Settings {\n"
+            "    pub privacy_policy_accepted: Option<bool>,\n"
+            "}\n"))
+
+    def test_supports_user_agreement_ignores_indented_fakes(self):
+        # 注释（含 doc 注释）与字符串里的假字段不得判为协议感知；
+        # 块注释跨行带缩进的假声明同样忽略。
+        self.assertFalse(baselines.supports_user_agreement(
+            "    // pub user_agreement_accepted: bool,\n"
+            "    /// [`user_agreement_revision`] 见文档\n"))
+        self.assertFalse(baselines.supports_user_agreement(
+            "const S: &str = \"pub user_agreement_accepted: bool,\";\n"))
+        self.assertFalse(baselines.supports_user_agreement(
+            "/* pub user_agreement_accepted: bool,\n"
+            "   pub user_agreement_revision: Option<u8>, */\n"))
+
+    def test_real_release_tags_agreement_capability(self):
+        # 真实发布标签源码（本地全量克隆；浅克隆缺对象时优雅跳过）：
+        # v0.6.1 = 隐私修订 3 + 协议感知；v0.6.0 = 隐私修订 2、隐私-only。
+        for tag, revision, agreement in (("v0.6.1", 3, True), ("v0.6.0", 2, False)):
+            with self.subTest(tag=tag):
+                probe = subprocess.run(
+                    ["git", "-C", str(baselines.ROOT), "rev-parse", tag + "^{commit}"],
+                    capture_output=True, encoding="utf-8", check=False)
+                commit = probe.stdout.strip()
+                present = False
+                if probe.returncode == 0 and commit:
+                    present = subprocess.run(
+                        ["git", "-C", str(baselines.ROOT), "cat-file", "-e", commit + "^{commit}"],
+                        capture_output=True, check=False,
+                    ).returncode == 0
+                if not present:
+                    self.skipTest(f"当前克隆不含 {tag}（浅克隆）；本地已验证")
+                self.assertEqual(baselines.read_tag_privacy_revision(commit), revision)
+                self.assertEqual(baselines.read_tag_agreement_required(commit), agreement)
 
     def make_repo(self, source_text):
         root = Path(self.temp.name) / "lexer-repo"
@@ -651,3 +833,7 @@ class PrivacyRevisionLexerCase(RegistryCase):
             self.assertEqual(baselines.read_tag_privacy_revision(commit), 2)
         else:
             self.skipTest(f"当前克隆不含 {commit[:7]}（浅克隆）；本地已验证读取为 2")
+
+
+if __name__ == "__main__":
+    unittest.main()
