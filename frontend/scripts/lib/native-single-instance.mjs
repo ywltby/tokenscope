@@ -133,11 +133,7 @@ export function getUserProtectedDirs(homeDir) {
  */
 export function readGitHeadCommit(
   repoDir,
-  {
-    readFileSync = fs.readFileSync,
-    statSync = fs.statSync,
-    existsSync = fs.existsSync,
-  } = {},
+  { readFileSync = fs.readFileSync, statSync = fs.statSync, existsSync = fs.existsSync } = {},
 ) {
   const hash = (value) => {
     const text = String(value ?? "").trim();
@@ -278,7 +274,8 @@ export function collectManifestAcceptancePaths(manifest) {
   }
   for (const entry of entries) {
     if (!String(entry.path ?? "").trim()) invalid.push(`${entry.source}: 空路径`);
-    else if (!path.isAbsolute(entry.path)) invalid.push(`${entry.source}: 非绝对路径 ${entry.path}`);
+    else if (!path.isAbsolute(entry.path))
+      invalid.push(`${entry.source}: 非绝对路径 ${entry.path}`);
   }
   return { entries, invalid };
 }
@@ -342,6 +339,19 @@ export function readAcceptanceManifest(
     };
   }
   return { ok: true, exists: true, entries: collected.entries, invalid: [], path: manifestPath };
+}
+
+/**
+ * SQLite 瞬时副产物（delete 回滚日志 / WAL 影子文件）：只在写事务期间存在、
+ * 提交或检查点后由 SQLite 自己删除。文件名固定为 `<数据库名>-journal` /
+ * `-wal` / `-shm`（见 sqlite3 文档），如 history.db-journal。已发现路径的
+ * ENOENT 若命中这份清单，按数据库正常生命周期豁免，不按"走查后被删除"拒绝。
+ */
+const TRANSIENT_DB_ARTIFACT_RE = /-(?:journal|wal|shm)$/i;
+
+export function isTransientDbArtifact(code, filePath) {
+  if (code !== "ENOENT") return false;
+  return TRANSIENT_DB_ARTIFACT_RE.test(path.basename(String(filePath ?? "")));
 }
 
 /**
@@ -458,7 +468,8 @@ export function validateAcceptancePaths({
   const tree = collectTree(rawRoot, { maxEntries: treeBudget });
   if (!tree.ok) return { ok: false, reason: tree.reason, tree_entries: tree.visited ?? null };
   for (const entry of tree.paths) layout.push({ ...entry, discovered: true });
-  for (const link of tree.links) layout.push({ path: link, kind: "any", source: "link", discovered: true });
+  for (const link of tree.links)
+    layout.push({ path: link, kind: "any", source: "link", discovered: true });
 
   // 去重（同一字符串位置只解析一次），但**链接身份与"已发现"身份不因去重
   // 丢失**（七轮复核缺口 1 / 十轮复核）：
@@ -492,21 +503,28 @@ export function validateAcceptancePaths({
     // 可经根内文件读写根外数据；在无法枚举同 inode 其他目录项的前提下，
     // nlink>1 即"不能证明独立"，不当作已证明独立的普通文件放行（目录的
     // nlink 数值语义不同，仍继续遍历——见 collectAcceptanceTreePaths）。
-    // lstat 失败不吞（十一轮复核）：
+    // lstat 失败不吞（十一轮复核；2026-11-04 Runner 实测修正）：
     //   - discovered（树走查实际发现过）的路径：后续 ENOENT = 走查后被删除
     //     （竞态或篡改）→ 拒绝；其他错误（权限等）= 无法检查 → 拒绝；
-    //   - 从未发现（走查时不存在）的合法布局路径：豁免 ENOENT——全新隔离根
-    //     里尚未创建的布局路径本来被 canonicalize 允许，不能误拒。
+    //   - 豁免一：从未发现（走查时不存在）的合法布局路径——全新隔离根里尚未
+    //     创建的布局路径本来被 canonicalize 允许，不能误拒；
+    //   - 豁免二：走查发现但属于 SQLite 瞬时副产物（journal/wal/shm）的文件
+    //     ——数据库以 delete 回滚日志模式运行时，该文件只在写事务期间存在、
+    //     提交后由 SQLite 删除，"走查时在、lstat 时没了"是数据库的正常生命
+    //     周期而非证据清理（Runner 实测：ui-single-instance 主实例在历史库
+    //     迁移/写入窗口内被本防线误拒启动）。写入本来就落在隔离根内，无独立
+    //     性问题；这类文件也不做 nlink 检查（生命期毫秒级，硬链接通道无意义）。
     let entryStat = null;
     try {
       entryStat = lstat(entry.path);
     } catch (error) {
-      if (error?.code === "ENOENT" && !entry.discovered) {
-        entryStat = null; // 从未存在，准备阶段将创建
+      const transientArtifact = isTransientDbArtifact(error?.code, entry.path);
+      if (error?.code === "ENOENT" && (!entry.discovered || transientArtifact)) {
+        entryStat = null; // 未创建的布局路径，或 SQLite 已提交删除的瞬时副产物
       } else {
         return {
           ok: false,
-          reason: `验收路径 ${entry.path} 无法检查（${String(error?.message ?? error)}${entry.discovered ? "；该路径在走查时已被发现" : ""}），无法证明独立，拒绝启动`,
+          reason: `验收路径 ${entry.path} 无法检查（${String(error?.message ?? error)}${entry.discovered && !transientArtifact ? "；该路径在走查时已被发现" : ""}），无法证明独立，拒绝启动`,
         };
       }
     }
@@ -718,7 +736,9 @@ export function parseAcceptanceBuildRecord(raw, { recordPath = "" } = {}) {
   if (data.builder === "ci") {
     const ci = data.ci && typeof data.ci === "object" ? data.ci : null;
     if (!ci || !String(ci.run_id ?? "").trim() || !String(ci.repository ?? "").trim()) {
-      missing.push("ci 段（builder=ci 必须携带 run_id 与 repository，供未来 CI artifact 核验使用）");
+      missing.push(
+        "ci 段（builder=ci 必须携带 run_id 与 repository，供未来 CI artifact 核验使用）",
+      );
     }
   }
   if (missing.length) return { ok: false, reason: `构建记录不完整：${missing.join("；")}` };
@@ -852,7 +872,12 @@ export function verifyAcceptanceExecutable(
 ) {
   const raw = String(exePath ?? "").trim();
   if (!raw) {
-    return { ok: false, reason: "EXE 路径为空", launch_allowed: false, build_identity: "unverified" };
+    return {
+      ok: false,
+      reason: "EXE 路径为空",
+      launch_allowed: false,
+      build_identity: "unverified",
+    };
   }
   let bytes;
   try {
@@ -1421,7 +1446,14 @@ export function classifyWindowRestore({
 export function parseTrayOwnerObservation(stdout) {
   const text = String(stdout ?? "").trim();
   if (!text) {
-    return { ok: false, error: "托盘归属观察输出为空", pid: null, windows: null, count: null, icons: [] };
+    return {
+      ok: false,
+      error: "托盘归属观察输出为空",
+      pid: null,
+      windows: null,
+      count: null,
+      icons: [],
+    };
   }
   const lines = text.split(/\r?\n/).reverse();
   for (const line of lines) {
@@ -1443,7 +1475,14 @@ export function parseTrayOwnerObservation(stdout) {
       error: parsed.error == null ? null : String(parsed.error),
     };
   }
-  return { ok: false, error: "托盘归属观察输出无法解析", pid: null, windows: null, count: null, icons: [] };
+  return {
+    ok: false,
+    error: "托盘归属观察输出无法解析",
+    pid: null,
+    windows: null,
+    count: null,
+    icons: [],
+  };
 }
 
 /**

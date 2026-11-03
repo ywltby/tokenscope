@@ -176,7 +176,9 @@ function createRunSandbox(label) {
           throw new Error(`登记的链接无法解析真实路径（断链/权限），拒绝清理：${link}`);
         }
         if (!sandbox.owned(linkTarget)) {
-          throw new Error(`登记的链接经 junction 越出沙箱（指向 ${linkTarget}），拒绝清理：${link}`);
+          throw new Error(
+            `登记的链接经 junction 越出沙箱（指向 ${linkTarget}），拒绝清理：${link}`,
+          );
         }
         fs.unlinkSync(link);
       }
@@ -247,7 +249,9 @@ function writeManifest(sandbox, root, manifest) {
 
 describe("沙箱清理只触碰本次创建的路径", () => {
   it("预先存在的目录不在沙箱内时拒绝删除，内容保持不变", () => {
-    const preExisting = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ac10-owned-check-"));
+    const preExisting = fs.mkdtempSync(
+      path.join(fs.realpathSync(os.tmpdir()), "ac10-owned-check-"),
+    );
     const marker = path.join(preExisting, "keep.txt");
     fs.writeFileSync(marker, "must survive", "utf8");
     const sandbox = createRunSandbox("cleanup");
@@ -400,9 +404,9 @@ describe("路径布局与固定判定", () => {
     ]) {
       expect(layoutPaths).toContain(expected);
     }
-    expect(getAcceptancePathLayout("C:/acc-root").find((e) => e.path.endsWith("manifest.json")).kind).toBe(
-      "file",
-    );
+    expect(
+      getAcceptancePathLayout("C:/acc-root").find((e) => e.path.endsWith("manifest.json")).kind,
+    ).toBe("file");
   });
 
   it("path.relative 对 .. 开头但非父目录的分量不误判（..fixture 是子目录）", () => {
@@ -452,7 +456,8 @@ describe("路径布局与固定判定", () => {
         return { ok: true, path: resolved };
       };
       expect(
-        validateAcceptancePaths({ root: fakeHome, homeDir: fakeHome, canonicalize: relocate }).reason,
+        validateAcceptancePaths({ root: fakeHome, homeDir: fakeHome, canonicalize: relocate })
+          .reason,
       ).toMatch(/用户主目录本身/);
       expect(
         validateAcceptancePaths({
@@ -494,293 +499,417 @@ describe("路径布局与固定判定", () => {
     }
   });
 
-describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => {
-  // 假用户目录 + 有效 manifest.json + root/sources/claude/projects junction。
-  // 全部使用真实 fs 与真实路径解析实现，不注入 canonicalize。
-  function buildJunctionSandbox(label) {
-    const sandbox = createRunSandbox(label);
-    const home = sandbox.dir("home");
-    const root = sandbox.dir("home", "workspace");
-    // 假"真实"来源目录：<fake home>/.claude/projects/<slug>/session.jsonl
-    const realProjects = sandbox.dir("home", ".claude", "projects");
-    const sentinel = sandbox.file(
-      "home",
-      ".claude",
-      "projects",
-      PROJECT_SLUG,
-      "session.jsonl",
-      "REAL USER LOG LINE\n",
-    );
-    sandbox.dir("home", "workspace", "sources", "claude");
-    // <root>/sources/claude/projects 是一个真实 junction，指向假受保护目录
-    sandbox.link(path.join(root, "sources", "claude", "projects"), realProjects);
-    writeManifest(sandbox, root, acceptanceManifest(root));
-    return { sandbox, home, root, realProjects, sentinel };
-  }
-
-  /** 模拟准备脚本按清单写合成日志：路径穿过 junction 就落到"真实"目录里。 */
-  function prepareFixture(root) {
-    const target = path.join(root, "sources", "claude", "projects", PROJECT_SLUG, "session.jsonl");
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, "SYNTHETIC ACCEPTANCE LINE\n", "utf8");
-    return target;
-  }
-
-  it("junction 位于 sources/claude/projects：预检拒绝，零准备零启动，哨兵不变", async () => {
-    const { sandbox, home, root, sentinel } = buildJunctionSandbox("junction-deep");
-    try {
-      let prepared = 0;
-      let launched = 0;
-      const gate = await startIfPreflightAllows({
-        preflight: () =>
-          evaluateAcceptanceLaunchPreflight({
-            root,
-            outDir: path.join(sandbox.root, "evidence"),
-            exePath: path.join(sandbox.root, "tokenscope.exe"),
-            homeDir: home,
-            attachExisting: true,
-          }),
-        prepare: async () => {
-          prepared += 1;
-          prepareFixture(root);
-        },
-        launch: async () => {
-          launched += 1;
-        },
-      });
-      expect(gate.started).toBe(false);
-      expect(gate.preflight.paths.ok).toBe(false);
-      // 新防线（链接必须落在验收根内）先于受保护目录检查触发；两条理由都成立
-      expect(gate.preflight.paths.reason).toMatch(/指向隔离根之外|受保护目录/);
-      // 损害模型：准备脚本若要写的合成日志文件，真实位置就是受保护目录里的哨兵
-      expect(
-        canonicalizeAcceptancePath(
-          path.join(root, "sources", "claude", "projects", PROJECT_SLUG, "session.jsonl"),
-        ).path,
-      ).toBe(fs.realpathSync.native(path.resolve(sentinel)));
-      expect(prepared).toBe(0);
-      expect(launched).toBe(0);
-      expect(fs.readFileSync(sentinel, "utf8")).toBe("REAL USER LOG LINE\n");
-    } finally {
-      sandbox.cleanup();
+  describe("深层 junction 真实反例：准备前拒绝且哨兵不变", () => {
+    // 假用户目录 + 有效 manifest.json + root/sources/claude/projects junction。
+    // 全部使用真实 fs 与真实路径解析实现，不注入 canonicalize。
+    function buildJunctionSandbox(label) {
+      const sandbox = createRunSandbox(label);
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      // 假"真实"来源目录：<fake home>/.claude/projects/<slug>/session.jsonl
+      const realProjects = sandbox.dir("home", ".claude", "projects");
+      const sentinel = sandbox.file(
+        "home",
+        ".claude",
+        "projects",
+        PROJECT_SLUG,
+        "session.jsonl",
+        "REAL USER LOG LINE\n",
+      );
+      sandbox.dir("home", "workspace", "sources", "claude");
+      // <root>/sources/claude/projects 是一个真实 junction，指向假受保护目录
+      sandbox.link(path.join(root, "sources", "claude", "projects"), realProjects);
+      writeManifest(sandbox, root, acceptanceManifest(root));
+      return { sandbox, home, root, realProjects, sentinel };
     }
-  });
 
-  it("junction 深一层（projects/<slug>）也要被现有条目走查抓到", async () => {
-    const sandbox = createRunSandbox("junction-deeper");
-    const home = sandbox.dir("home");
-    const root = sandbox.dir("home", "workspace");
-    const realSlug = sandbox.dir("home", ".claude", "projects", PROJECT_SLUG);
-    const sentinel = sandbox.file(
-      "home",
-      ".claude",
-      "projects",
-      PROJECT_SLUG,
-      "session.jsonl",
-      "REAL USER LOG LINE\n",
-    );
-    sandbox.dir("home", "workspace", "sources", "claude", "projects");
-    sandbox.link(path.join(root, "sources", "claude", "projects", PROJECT_SLUG), realSlug);
-    writeManifest(sandbox, root, acceptanceManifest(root));
-    try {
-      const result = validateAcceptancePaths({ root, homeDir: home });
-      expect(result.ok).toBe(false);
-      // 新防线（链接必须落在验收根内）先于受保护目录检查触发；两条理由都成立
-      expect(result.reason).toMatch(/指向隔离根之外|受保护目录/);
-      // 走查本身证明该 junction 被识别为别名（而不是靠固定布局列表命中）
-      const tree = collectAcceptanceTreePaths(root);
-      expect(tree.links.map((link) => path.basename(link))).toContain(PROJECT_SLUG);
-      expect(fs.readFileSync(sentinel, "utf8")).toBe("REAL USER LOG LINE\n");
-    } finally {
-      sandbox.cleanup();
-    }
-  });
-
-  it("无 junction 但清单将 claude_projects_dir 声明进假受保护目录时同样拒绝", () => {
-    const sandbox = createRunSandbox("manifest-pointer");
-    const home = sandbox.dir("home");
-    const root = sandbox.dir("home", "workspace");
-    const realProjects = sandbox.dir("home", ".claude", "projects");
-    const sentinel = sandbox.file("home", ".claude", "projects", "session.jsonl", "REAL\n");
-    sandbox.dir("home", "workspace", "sources", "claude", "projects");
-    writeManifest(
-      sandbox,
-      root,
-      acceptanceManifest(root, { overrides: { claude_projects_dir: realProjects } }),
-    );
-    try {
-      const result = validateAcceptancePaths({ root, homeDir: home });
-      expect(result.ok).toBe(false);
-      expect(result.reason).toMatch(/受保护目录/);
-      expect(fs.readFileSync(sentinel, "utf8")).toBe("REAL\n");
-    } finally {
-      sandbox.cleanup();
-    }
-  });
-
-  it("清单里的每个 files 条目也参与解析：指向受保护目录即拒绝", () => {
-    const sandbox = createRunSandbox("manifest-files");
-    const home = sandbox.dir("home");
-    const root = sandbox.dir("home", "workspace");
-    sandbox.dir("home", "workspace", "sources", "claude", "projects");
-    const smuggled = sandbox.file("home", ".tokenscope", "settings.toml", "[real]");
-    const manifest = acceptanceManifest(root);
-    manifest.files = { [smuggled]: { path: smuggled, bytes: 7, sha256: "0".repeat(64) } };
-    writeManifest(sandbox, root, manifest);
-    try {
-      const result = validateAcceptancePaths({ root, homeDir: home });
-      expect(result.ok).toBe(false);
-      expect(result.reason).toMatch(/受保护目录/);
-    } finally {
-      sandbox.cleanup();
-    }
-  });
-
-  it("断链 junction 无法解析真实路径时 fail closed", () => {
-    const sandbox = createRunSandbox("broken-link");
-    const home = sandbox.dir("home");
-    const root = sandbox.dir("home", "workspace");
-    const target = path.join(sandbox.root, "gone");
-    sandbox.dir("home", "workspace", "sources", "claude");
-    const brokenLink = sandbox.link(path.join(root, "sources", "claude", "projects"), target);
-    fs.mkdirSync(target, { recursive: true });
-    fs.rmdirSync(target);
-    // 沙箱清理对断链链接拒绝递归删除（无法证明解析在沙箱内）——本测试自行
-    // 拆除现场：先 unlink 断链，再清沙箱。
-    try {
-      const result = validateAcceptancePaths({ root, homeDir: home });
-      expect(result.ok).toBe(false);
-      expect(result.reason).toMatch(/无法解析|不存在/);
-    } finally {
-      fs.unlinkSync(brokenLink);
-      fs.rmSync(sandbox.root, { recursive: true, force: true });
-    }
-  });
-
-  it("根内文件与根外文件的真实硬链接（nlink>1）：预检保守拒绝，不是已证明独立的普通文件", () => {
-    // 八轮复核问题 3（先红）：NTFS 真实硬链接（linkSync，同 inode、nlink=2）
-    // 让验收实例可经根内文件读写根外数据——nlink>1 的普通文件不能当作已
-    // 证明独立的普通文件放行。外部哨兵由本测试自建自拆。
-    const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ac10-hardlink-out-"));
-    const outsideFile = path.join(outside, "sentinel.txt");
-    fs.writeFileSync(outsideFile, "REAL USER DATA", "utf8");
-    const sandbox = createRunSandbox("hardlink");
-    const home = sandbox.dir("home");
-    const root = sandbox.dir("home", "workspace");
-    sandbox.dir("home", "workspace", "tokenscope");
-    sandbox.dir("home", "workspace", "sources", "claude", "projects");
-    const linked = path.join(root, "tokenscope", "linked.db");
-    fs.linkSync(outsideFile, linked);
-    writeManifest(sandbox, root, acceptanceManifest(root));
-    try {
-      const result = validateAcceptancePaths({ root, homeDir: home });
-      expect(result.ok).toBe(false);
-      expect(result.reason).toMatch(/硬链接|nlink|链接|拒绝启动/);
-      // 外部哨兵原样保留（预检不写不删）
-      expect(fs.readFileSync(outsideFile, "utf8")).toBe("REAL USER DATA");
-    } finally {
-      fs.rmSync(linked, { force: true });
-      fs.rmSync(outside, { recursive: true, force: true });
-      sandbox.cleanup();
-    }
-  });
-
-  it("普通目录 nlink=2 也必须继续遍历：内含外部 junction 的反例不被漏掉", () => {
-    // NTFS 目录 nlink 恒 1，无法在磁盘上真实造出 nlink=2 的目录——用注入的
-    // lstatSync 模拟"报 nlink>1 的普通目录"（ReFS/网络盘/未来行为）。修复前
-    // 该目录被当"硬链接"跳过，其中的外部 junction 漏检 → 反例红。
-    const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ac10-nlink-out-"));
-    const sentinel = path.join(outside, "keep.txt");
-    fs.writeFileSync(sentinel, "must survive", "utf8");
-    const sandbox = createRunSandbox("nlink2");
-    const fakeHome = sandbox.dir("home");
-    const root = sandbox.dir("home", "workspace");
-    const normalDir = sandbox.dir("home", "workspace", "normal-nlink2");
-    sandbox.link(path.join(normalDir, "escape"), outside);
-    const realLstat = fs.lstatSync.bind(fs);
-    const fakeLstat = (p, opts) => {
-      const s = realLstat(p, opts);
-      if (path.resolve(String(p)) === path.resolve(normalDir)) {
-        // 模拟非常规文件系统：普通目录但 nlink=2（保留 Stats 原型方法）
-        const copy = Object.create(Object.getPrototypeOf(s));
-        Object.assign(copy, s);
-        copy.nlink = 2;
-        return copy;
-      }
-      return s;
-    };
-    try {
-      // 走查：nlink=2 的普通目录必须被遍历（links 里出现 escape）
-      const tree = collectAcceptanceTreePaths(root, { lstatSync: fakeLstat });
-      expect(tree.links.map((link) => path.basename(link))).toContain("escape");
-      // 完整预检：同样抓到该 junction 并拒绝启动
-      const result = validateAcceptancePaths({ root, homeDir: fakeHome, collectTree: (r) => collectAcceptanceTreePaths(r, { lstatSync: fakeLstat }) });
-      expect(result.ok).toBe(false);
-      expect(result.reason).toMatch(/指向隔离根之外|受保护目录|验收路径/);
-      // 外部哨兵原样保留
-      expect(fs.readFileSync(sentinel, "utf8")).toBe("must survive");
-    } finally {
-      fs.rmSync(path.join(normalDir, "escape"), { force: true });
-      fs.rmSync(outside, { recursive: true, force: true });
-      sandbox.cleanup();
-    }
-  });
-
-  it("固定布局项与树走查链接同路径时链接身份不丢失：sources/claude 指向根外被拒", () => {
-    // 七轮复核缺口 1 回归（先红）：sources/claude 同时命中固定布局条目与树
-    // 走查链接——旧去重保留首个（固定布局）条目，链接身份丢失，根内校验被
-    // 绕过；修复后链接语义优先，真实目标在根外即拒绝。含可解析 manifest。
-    const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ac10-dedup-out-"));
-    const sentinel = path.join(outside, "sessions", "s.jsonl");
-    fs.mkdirSync(path.dirname(sentinel), { recursive: true });
-    fs.writeFileSync(sentinel, "REAL\n", "utf8");
-    const sandbox = createRunSandbox("dedup-link");
-    const home = sandbox.dir("home");
-    const root = sandbox.dir("home", "workspace");
-    for (const entry of getAcceptancePathLayout(root)) {
-      if (entry.kind === "dir" && !entry.path.endsWith(root)) fs.mkdirSync(entry.path, { recursive: true });
-    }
-    // 固定布局项 sources/claude 本身是 junction → 根外哨兵目录
-    fs.rmdirSync(path.join(root, "sources", "claude"), { recursive: true, force: true });
-    sandbox.link(path.join(root, "sources", "claude"), outside);
-    // 可解析 manifest（data_dir 指向根内真实目录）
-    writeManifest(sandbox, root, acceptanceManifest(root));
-    try {
-      const result = validateAcceptancePaths({ root, homeDir: home });
-      expect(result.ok).toBe(false);
-      expect(result.reason).toMatch(/指向隔离根之外/);
-      // 走查确实把 sources/claude 识别为链接（不是固定布局漏检）
-      const tree = collectAcceptanceTreePaths(root);
-      expect(tree.links.map((link) => path.basename(link))).toContain("claude");
-      // 外部哨兵原样保留
-      expect(fs.readFileSync(sentinel, "utf8")).toBe("REAL\n");
-    } finally {
-      fs.rmSync(path.join(root, "sources", "claude"), { force: true });
-      fs.rmSync(outside, { recursive: true, force: true });
-      sandbox.cleanup();
-    }
-  });
-
-  it("走查超过条目预算时 fail closed，不把没走完当成没问题", () => {
-    const sandbox = createRunSandbox("budget");
-    const root = sandbox.dir("home", "workspace");
-    for (let i = 0; i < 6; i += 1) sandbox.dir("home", "workspace", `d${i}`, "leaf");
-    try {
-      const limited = collectAcceptanceTreePaths(root, { maxEntries: 3 });
-      expect(limited.ok).toBe(false);
-      expect(limited.reason).toMatch(/超过/);
-      const result = validateAcceptancePaths({
+    /** 模拟准备脚本按清单写合成日志：路径穿过 junction 就落到"真实"目录里。 */
+    function prepareFixture(root) {
+      const target = path.join(
         root,
-        homeDir: sandbox.dir("home"),
-        treeBudget: 3,
-      });
-      expect(result.ok).toBe(false);
-      expect(result.reason).toMatch(/超过/);
-    } finally {
-      sandbox.cleanup();
+        "sources",
+        "claude",
+        "projects",
+        PROJECT_SLUG,
+        "session.jsonl",
+      );
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, "SYNTHETIC ACCEPTANCE LINE\n", "utf8");
+      return target;
     }
+
+    it("junction 位于 sources/claude/projects：预检拒绝，零准备零启动，哨兵不变", async () => {
+      const { sandbox, home, root, sentinel } = buildJunctionSandbox("junction-deep");
+      try {
+        let prepared = 0;
+        let launched = 0;
+        const gate = await startIfPreflightAllows({
+          preflight: () =>
+            evaluateAcceptanceLaunchPreflight({
+              root,
+              outDir: path.join(sandbox.root, "evidence"),
+              exePath: path.join(sandbox.root, "tokenscope.exe"),
+              homeDir: home,
+              attachExisting: true,
+            }),
+          prepare: async () => {
+            prepared += 1;
+            prepareFixture(root);
+          },
+          launch: async () => {
+            launched += 1;
+          },
+        });
+        expect(gate.started).toBe(false);
+        expect(gate.preflight.paths.ok).toBe(false);
+        // 新防线（链接必须落在验收根内）先于受保护目录检查触发；两条理由都成立
+        expect(gate.preflight.paths.reason).toMatch(/指向隔离根之外|受保护目录/);
+        // 损害模型：准备脚本若要写的合成日志文件，真实位置就是受保护目录里的哨兵
+        expect(
+          canonicalizeAcceptancePath(
+            path.join(root, "sources", "claude", "projects", PROJECT_SLUG, "session.jsonl"),
+          ).path,
+        ).toBe(fs.realpathSync.native(path.resolve(sentinel)));
+        expect(prepared).toBe(0);
+        expect(launched).toBe(0);
+        expect(fs.readFileSync(sentinel, "utf8")).toBe("REAL USER LOG LINE\n");
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
+    it("junction 深一层（projects/<slug>）也要被现有条目走查抓到", async () => {
+      const sandbox = createRunSandbox("junction-deeper");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      const realSlug = sandbox.dir("home", ".claude", "projects", PROJECT_SLUG);
+      const sentinel = sandbox.file(
+        "home",
+        ".claude",
+        "projects",
+        PROJECT_SLUG,
+        "session.jsonl",
+        "REAL USER LOG LINE\n",
+      );
+      sandbox.dir("home", "workspace", "sources", "claude", "projects");
+      sandbox.link(path.join(root, "sources", "claude", "projects", PROJECT_SLUG), realSlug);
+      writeManifest(sandbox, root, acceptanceManifest(root));
+      try {
+        const result = validateAcceptancePaths({ root, homeDir: home });
+        expect(result.ok).toBe(false);
+        // 新防线（链接必须落在验收根内）先于受保护目录检查触发；两条理由都成立
+        expect(result.reason).toMatch(/指向隔离根之外|受保护目录/);
+        // 走查本身证明该 junction 被识别为别名（而不是靠固定布局列表命中）
+        const tree = collectAcceptanceTreePaths(root);
+        expect(tree.links.map((link) => path.basename(link))).toContain(PROJECT_SLUG);
+        expect(fs.readFileSync(sentinel, "utf8")).toBe("REAL USER LOG LINE\n");
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
+    it("无 junction 但清单将 claude_projects_dir 声明进假受保护目录时同样拒绝", () => {
+      const sandbox = createRunSandbox("manifest-pointer");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      const realProjects = sandbox.dir("home", ".claude", "projects");
+      const sentinel = sandbox.file("home", ".claude", "projects", "session.jsonl", "REAL\n");
+      sandbox.dir("home", "workspace", "sources", "claude", "projects");
+      writeManifest(
+        sandbox,
+        root,
+        acceptanceManifest(root, { overrides: { claude_projects_dir: realProjects } }),
+      );
+      try {
+        const result = validateAcceptancePaths({ root, homeDir: home });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/受保护目录/);
+        expect(fs.readFileSync(sentinel, "utf8")).toBe("REAL\n");
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
+    it("清单里的每个 files 条目也参与解析：指向受保护目录即拒绝", () => {
+      const sandbox = createRunSandbox("manifest-files");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      sandbox.dir("home", "workspace", "sources", "claude", "projects");
+      const smuggled = sandbox.file("home", ".tokenscope", "settings.toml", "[real]");
+      const manifest = acceptanceManifest(root);
+      manifest.files = { [smuggled]: { path: smuggled, bytes: 7, sha256: "0".repeat(64) } };
+      writeManifest(sandbox, root, manifest);
+      try {
+        const result = validateAcceptancePaths({ root, homeDir: home });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/受保护目录/);
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
+    it("断链 junction 无法解析真实路径时 fail closed", () => {
+      const sandbox = createRunSandbox("broken-link");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      const target = path.join(sandbox.root, "gone");
+      sandbox.dir("home", "workspace", "sources", "claude");
+      const brokenLink = sandbox.link(path.join(root, "sources", "claude", "projects"), target);
+      fs.mkdirSync(target, { recursive: true });
+      fs.rmdirSync(target);
+      // 沙箱清理对断链链接拒绝递归删除（无法证明解析在沙箱内）——本测试自行
+      // 拆除现场：先 unlink 断链，再清沙箱。
+      try {
+        const result = validateAcceptancePaths({ root, homeDir: home });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/无法解析|不存在/);
+      } finally {
+        fs.unlinkSync(brokenLink);
+        fs.rmSync(sandbox.root, { recursive: true, force: true });
+      }
+    });
+
+    it("根内文件与根外文件的真实硬链接（nlink>1）：预检保守拒绝，不是已证明独立的普通文件", () => {
+      // 八轮复核问题 3（先红）：NTFS 真实硬链接（linkSync，同 inode、nlink=2）
+      // 让验收实例可经根内文件读写根外数据——nlink>1 的普通文件不能当作已
+      // 证明独立的普通文件放行。外部哨兵由本测试自建自拆。
+      const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ac10-hardlink-out-"));
+      const outsideFile = path.join(outside, "sentinel.txt");
+      fs.writeFileSync(outsideFile, "REAL USER DATA", "utf8");
+      const sandbox = createRunSandbox("hardlink");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      sandbox.dir("home", "workspace", "tokenscope");
+      sandbox.dir("home", "workspace", "sources", "claude", "projects");
+      const linked = path.join(root, "tokenscope", "linked.db");
+      fs.linkSync(outsideFile, linked);
+      writeManifest(sandbox, root, acceptanceManifest(root));
+      try {
+        const result = validateAcceptancePaths({ root, homeDir: home });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/硬链接|nlink|链接|拒绝启动/);
+        // 外部哨兵原样保留（预检不写不删）
+        expect(fs.readFileSync(outsideFile, "utf8")).toBe("REAL USER DATA");
+      } finally {
+        fs.rmSync(linked, { force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+        sandbox.cleanup();
+      }
+    });
+
+    it("普通目录 nlink=2 也必须继续遍历：内含外部 junction 的反例不被漏掉", () => {
+      // NTFS 目录 nlink 恒 1，无法在磁盘上真实造出 nlink=2 的目录——用注入的
+      // lstatSync 模拟"报 nlink>1 的普通目录"（ReFS/网络盘/未来行为）。修复前
+      // 该目录被当"硬链接"跳过，其中的外部 junction 漏检 → 反例红。
+      const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ac10-nlink-out-"));
+      const sentinel = path.join(outside, "keep.txt");
+      fs.writeFileSync(sentinel, "must survive", "utf8");
+      const sandbox = createRunSandbox("nlink2");
+      const fakeHome = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      const normalDir = sandbox.dir("home", "workspace", "normal-nlink2");
+      sandbox.link(path.join(normalDir, "escape"), outside);
+      const realLstat = fs.lstatSync.bind(fs);
+      const fakeLstat = (p, opts) => {
+        const s = realLstat(p, opts);
+        if (path.resolve(String(p)) === path.resolve(normalDir)) {
+          // 模拟非常规文件系统：普通目录但 nlink=2（保留 Stats 原型方法）
+          const copy = Object.create(Object.getPrototypeOf(s));
+          Object.assign(copy, s);
+          copy.nlink = 2;
+          return copy;
+        }
+        return s;
+      };
+      try {
+        // 走查：nlink=2 的普通目录必须被遍历（links 里出现 escape）
+        const tree = collectAcceptanceTreePaths(root, { lstatSync: fakeLstat });
+        expect(tree.links.map((link) => path.basename(link))).toContain("escape");
+        // 完整预检：同样抓到该 junction 并拒绝启动
+        const result = validateAcceptancePaths({
+          root,
+          homeDir: fakeHome,
+          collectTree: (r) => collectAcceptanceTreePaths(r, { lstatSync: fakeLstat }),
+        });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/指向隔离根之外|受保护目录|验收路径/);
+        // 外部哨兵原样保留
+        expect(fs.readFileSync(sentinel, "utf8")).toBe("must survive");
+      } finally {
+        fs.rmSync(path.join(normalDir, "escape"), { force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+        sandbox.cleanup();
+      }
+    });
+
+    it("固定布局项与树走查链接同路径时链接身份不丢失：sources/claude 指向根外被拒", () => {
+      // 七轮复核缺口 1 回归（先红）：sources/claude 同时命中固定布局条目与树
+      // 走查链接——旧去重保留首个（固定布局）条目，链接身份丢失，根内校验被
+      // 绕过；修复后链接语义优先，真实目标在根外即拒绝。含可解析 manifest。
+      const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ac10-dedup-out-"));
+      const sentinel = path.join(outside, "sessions", "s.jsonl");
+      fs.mkdirSync(path.dirname(sentinel), { recursive: true });
+      fs.writeFileSync(sentinel, "REAL\n", "utf8");
+      const sandbox = createRunSandbox("dedup-link");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      for (const entry of getAcceptancePathLayout(root)) {
+        if (entry.kind === "dir" && !entry.path.endsWith(root))
+          fs.mkdirSync(entry.path, { recursive: true });
+      }
+      // 固定布局项 sources/claude 本身是 junction → 根外哨兵目录
+      fs.rmdirSync(path.join(root, "sources", "claude"), { recursive: true, force: true });
+      sandbox.link(path.join(root, "sources", "claude"), outside);
+      // 可解析 manifest（data_dir 指向根内真实目录）
+      writeManifest(sandbox, root, acceptanceManifest(root));
+      try {
+        const result = validateAcceptancePaths({ root, homeDir: home });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/指向隔离根之外/);
+        // 走查确实把 sources/claude 识别为链接（不是固定布局漏检）
+        const tree = collectAcceptanceTreePaths(root);
+        expect(tree.links.map((link) => path.basename(link))).toContain("claude");
+        // 外部哨兵原样保留
+        expect(fs.readFileSync(sentinel, "utf8")).toBe("REAL\n");
+      } finally {
+        fs.rmSync(path.join(root, "sources", "claude"), { force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+        sandbox.cleanup();
+      }
+    });
+
+    it("走查超过条目预算时 fail closed，不把没走完当成没问题", () => {
+      const sandbox = createRunSandbox("budget");
+      const root = sandbox.dir("home", "workspace");
+      for (let i = 0; i < 6; i += 1) sandbox.dir("home", "workspace", `d${i}`, "leaf");
+      try {
+        const limited = collectAcceptanceTreePaths(root, { maxEntries: 3 });
+        expect(limited.ok).toBe(false);
+        expect(limited.reason).toMatch(/超过/);
+        const result = validateAcceptancePaths({
+          root,
+          homeDir: sandbox.dir("home"),
+          treeBudget: 3,
+        });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/超过/);
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
+    it("走查已发现的文件 lstat 失败（非 ENOENT）必须拒绝，不能吞错放行", () => {
+      // 九轮复核问题 2（先红）：lstat 权限失败被吞 → nlink 检查被跳过 →
+      // 潜在硬链接文件放行。注入 lstatSync：对走查发现的文件抛 EACCES。
+      const sandbox = createRunSandbox("lstat-fail");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      sandbox.dir("home", "workspace", "tokenscope");
+      sandbox.dir("home", "workspace", "sources", "claude", "projects");
+      sandbox.file("home", "workspace", "tokenscope", "linked.db", "data");
+      writeManifest(sandbox, root, acceptanceManifest(root));
+      const realLstat = fs.lstatSync.bind(fs);
+      const failingLstat = (p, opts) => {
+        if (path.resolve(String(p)) === path.resolve(path.join(root, "tokenscope", "linked.db"))) {
+          const e = new Error("EACCES: permission denied");
+          e.code = "EACCES";
+          throw e;
+        }
+        return realLstat(p, opts);
+      };
+      try {
+        const result = validateAcceptancePaths({ root, homeDir: home, lstat: failingLstat });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/无法检查|拒绝启动/);
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
+    it("全新隔离根里尚未创建的合法布局路径不被 lstat ENOENT 误拒（正例对照）", () => {
+      // 布局路径不存在是合法状态（准备脚本随后创建）；lstat ENOENT 只跳过
+      // nlink 检查，不能把全新根误判为拒绝。
+      const sandbox = createRunSandbox("lstat-enoent");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      // 只创建根本身，布局子路径全部不存在
+      try {
+        const result = validateAcceptancePaths({ root, homeDir: home });
+        expect(result.ok).toBe(true);
+        expect(result.reason).toMatch(/互不包含/);
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
+    it("走查已发现、随后消失的 SQLite 瞬时文件（journal/wal/shm）按豁免处理，不拒绝启动", () => {
+      // 2026-11-04 CI 真实缺陷（先红）：验收实例在历史库写入窗口内，走查发现
+      // tokenscope/history.db-journal，SQLite 提交后删除该回滚日志——已发现路径
+      // 的 ENOENT 一律拒绝把"瞬时副产物消失"误判为"证据被清理"，主实例被拒绝
+      // 启动（Runner 实测 18/19 + 3 pending，exit 1）。这类文件由 SQLite 以
+      // delete 模式在事务期间创建、提交后删除，验收实例对其写入本来就只落在
+      // 隔离根内，不存在独立性问题：ENOENT 且 basename 命中瞬时副产物清单时
+      // 按未发现豁免放行；其余已发现路径的 ENOENT 仍拒绝（竞态或篡改）。
+      const sandbox = createRunSandbox("journal-transient");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      sandbox.dir("home", "workspace", "tokenscope");
+      writeManifest(sandbox, root, acceptanceManifest(root));
+      const realLstat = fs.lstatSync.bind(fs);
+      const journal = path.join(root, "tokenscope", "history.db-journal");
+      const vanishingLstat = (p, opts) => {
+        if (path.resolve(String(p)) === path.resolve(journal)) {
+          const e = new Error(`ENOENT: no such file or directory, lstat '${p}'`);
+          e.code = "ENOENT";
+          throw e;
+        }
+        return realLstat(p, opts);
+      };
+      try {
+        // 模拟"走查时存在、lstat 时已消失"：走查前写入，走查注入的 collectTree
+        // 会发现它，再在预检 lstat 阶段抛 ENOENT——由 vanishingLstat 承担。
+        sandbox.file("home", "workspace", "tokenscope", "history.db-journal", "x");
+        const withTransient = validateAcceptancePaths({
+          root,
+          homeDir: home,
+          lstat: vanishingLstat,
+          collectTree: (r) => {
+            const tree = collectAcceptanceTreePaths(r);
+            // 走查后再删除，复现"走查发现 → lstat ENOENT"的真实时序
+            fs.rmSync(journal, { force: true });
+            return tree;
+          },
+        });
+        expect(withTransient.ok).toBe(true);
+        expect(withTransient.reason).toMatch(/互不包含/);
+        // 对照：非瞬时文件走查后消失仍然拒绝（竞态或篡改语义不变）
+        const foreign = path.join(root, "tokenscope", "linked.db");
+        sandbox.file("home", "workspace", "tokenscope", "linked.db", "x");
+        const vanishingForeign = (p, opts) => {
+          if (path.resolve(String(p)) === path.resolve(foreign)) {
+            const e = new Error(`ENOENT: no such file or directory, lstat '${p}'`);
+            e.code = "ENOENT";
+            throw e;
+          }
+          return realLstat(p, opts);
+        };
+        const withForeign = validateAcceptancePaths({
+          root,
+          homeDir: home,
+          lstat: vanishingForeign,
+          collectTree: (r) => {
+            const tree = collectAcceptanceTreePaths(r);
+            fs.rmSync(foreign, { force: true });
+            return tree;
+          },
+        });
+        expect(withForeign.ok).toBe(false);
+        expect(withForeign.reason).toMatch(/走查时已被发现/);
+      } finally {
+        sandbox.cleanup();
+      }
+    });
   });
-});
 });
 
 describe("sourceCommit 只从 .git 文件读出（不 spawn git）", () => {
@@ -825,16 +954,13 @@ describe("sourceCommit 只从 .git 文件读出（不 spawn git）", () => {
       );
       // 链接工作区的 commondir 在 worktrees/<name> 里，指回公共 .git
       sandbox.file(...worktreeDir.split(path.sep), "commondir", `${path.join("..", "..", "")}\n`);
-      sandbox.file(
-        ".git",
-        "refs",
-        "heads",
-        "test",
-        "n12-ac10-single-instance",
-        `${FULL}\n`,
-      );
+      sandbox.file(".git", "refs", "heads", "test", "n12-ac10-single-instance", `${FULL}\n`);
       const repo = sandbox.dir("worktree-checkout");
-      sandbox.file("worktree-checkout", ".git", `gitdir: ${path.join(sandbox.root, ...worktreeDir.split(path.sep))}\n`);
+      sandbox.file(
+        "worktree-checkout",
+        ".git",
+        `gitdir: ${path.join(sandbox.root, ...worktreeDir.split(path.sep))}\n`,
+      );
       expect(readGitHeadCommit(repo)).toBe(FULL);
     } finally {
       sandbox.cleanup();
@@ -879,12 +1005,8 @@ describe("manifest 正例走真实路径解析实现", () => {
       expect(result.manifest_declared).toBe(
         collectManifestAcceptancePaths(manifest).entries.length,
       );
-      expect(result.write_paths).toContain(
-        fs.realpathSync.native(path.resolve(manifestPath)),
-      );
-      expect(result.write_paths).toContain(
-        fs.realpathSync.native(path.resolve(fixtureFile)),
-      );
+      expect(result.write_paths).toContain(fs.realpathSync.native(path.resolve(manifestPath)));
+      expect(result.write_paths).toContain(fs.realpathSync.native(path.resolve(fixtureFile)));
     } finally {
       sandbox.cleanup();
     }
@@ -973,7 +1095,10 @@ describe("manifest 正例走真实路径解析实现", () => {
       webview_data_dir: "C:/acc/webview",
       price_auto_sync: false,
       env_var: { name: "TOKENSCOPE_ACCEPTANCE_ROOT", value: "C:/acc" },
-      files: { "C:/acc/a.jsonl": { path: "C:/acc/a.jsonl", sha256: "x" }, "C:/acc/b.jsonl": "C:/acc/b.jsonl" },
+      files: {
+        "C:/acc/a.jsonl": { path: "C:/acc/a.jsonl", sha256: "x" },
+        "C:/acc/b.jsonl": "C:/acc/b.jsonl",
+      },
     });
     expect(collected.invalid).toEqual([]);
     expect(collected.entries.map((e) => e.kind)).toEqual(["dir", "dir", "file", "file"]);
@@ -1298,14 +1423,49 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
   it("不完整/损坏的构建记录一律 unverified，不授予启动许可", () => {
     const bytes = peWith(ACCEPTANCE_EXE_MARKERS.join(" "));
     for (const broken of [
-      { kind: "other", artifact_path: "C:/b.exe", artifact_sha256: sha256(bytes), build_command: ACCEPTANCE_BUILD_COMMAND, source_commit: "abcdef1234567890", features: ["acceptance"], tree_clean: true },
-      { kind: ACCEPTANCE_BUILD_RECORD_KIND, artifact_path: "C:/b.exe", artifact_sha256: "XYZ", build_command: ACCEPTANCE_BUILD_COMMAND, source_commit: "abcdef1234567890", features: ["acceptance"], tree_clean: true },
-      { kind: ACCEPTANCE_BUILD_RECORD_KIND, artifact_path: "C:/b.exe", artifact_sha256: sha256(bytes), build_command: ACCEPTANCE_BUILD_COMMAND, source_commit: "abcdef1234567890", features: [], tree_clean: true },
-      { kind: ACCEPTANCE_BUILD_RECORD_KIND, artifact_path: "C:/b.exe", artifact_sha256: sha256(bytes), build_command: ACCEPTANCE_BUILD_COMMAND, source_commit: "abcdef1234567890", features: ["acceptance"], tree_clean: "yes" },
+      {
+        kind: "other",
+        artifact_path: "C:/b.exe",
+        artifact_sha256: sha256(bytes),
+        build_command: ACCEPTANCE_BUILD_COMMAND,
+        source_commit: "abcdef1234567890",
+        features: ["acceptance"],
+        tree_clean: true,
+      },
+      {
+        kind: ACCEPTANCE_BUILD_RECORD_KIND,
+        artifact_path: "C:/b.exe",
+        artifact_sha256: "XYZ",
+        build_command: ACCEPTANCE_BUILD_COMMAND,
+        source_commit: "abcdef1234567890",
+        features: ["acceptance"],
+        tree_clean: true,
+      },
+      {
+        kind: ACCEPTANCE_BUILD_RECORD_KIND,
+        artifact_path: "C:/b.exe",
+        artifact_sha256: sha256(bytes),
+        build_command: ACCEPTANCE_BUILD_COMMAND,
+        source_commit: "abcdef1234567890",
+        features: [],
+        tree_clean: true,
+      },
+      {
+        kind: ACCEPTANCE_BUILD_RECORD_KIND,
+        artifact_path: "C:/b.exe",
+        artifact_sha256: sha256(bytes),
+        build_command: ACCEPTANCE_BUILD_COMMAND,
+        source_commit: "abcdef1234567890",
+        features: ["acceptance"],
+        tree_clean: "yes",
+      },
       "{ not json",
       null,
     ]) {
-      const result = verifyAcceptanceExecutable("C:/b.exe", { readFile: () => bytes, buildRecord: broken });
+      const result = verifyAcceptanceExecutable("C:/b.exe", {
+        readFile: () => bytes,
+        buildRecord: broken,
+      });
       expect(result.ok).toBe(false);
       expect(result.launch_allowed).toBe(false);
     }
@@ -1313,10 +1473,13 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
 
   it("非 PE / 空 / 不可读的 EXE 一律拒绝", () => {
     expect(
-      verifyAcceptanceExecutable("text.exe", { readFile: () => Buffer.from(ACCEPTANCE_EXE_MARKERS[0]) })
-        .ok,
+      verifyAcceptanceExecutable("text.exe", {
+        readFile: () => Buffer.from(ACCEPTANCE_EXE_MARKERS[0]),
+      }).ok,
     ).toBe(false);
-    expect(verifyAcceptanceExecutable("empty.exe", { readFile: () => Buffer.alloc(0) }).ok).toBe(false);
+    expect(verifyAcceptanceExecutable("empty.exe", { readFile: () => Buffer.alloc(0) }).ok).toBe(
+      false,
+    );
     expect(
       verifyAcceptanceExecutable("missing.exe", {
         readFile: () => {
@@ -1354,8 +1517,7 @@ describe("受保护根别名预检与实际 EXE 验收构建验证", () => {
           record: parseAcceptanceBuildRecord(record).record,
         },
         sourceCommit: record.source_commit,
-        readFile: (target) =>
-          String(target).endsWith(".exe") ? bytes : fs.readFileSync(target),
+        readFile: (target) => (String(target).endsWith(".exe") ? bytes : fs.readFileSync(target)),
       });
       expect(preflight.paths.ok).toBe(true);
       expect(preflight.exe.ok).toBe(true);
