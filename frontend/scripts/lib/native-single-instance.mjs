@@ -400,6 +400,11 @@ export function collectAcceptanceTreePaths(
       try {
         stat = lstatSync(child);
       } catch (error) {
+        // 与后续检查阶段同一时序（2026-11-04 第二轮）：journal 等受控数据库
+        // 的瞬时 sidecar 可能在 readdir 与本 lstat 之间被 SQLite 删除——
+        // ENOENT 且 basename 命中瞬时副产物时跳过该条目（已不存在，无从
+        // 核对链接/硬链接）；其余文件消失、其他读取错误仍 fail closed。
+        if (isTransientDbArtifact(error?.code, child)) continue;
         return {
           ok: false,
           paths,

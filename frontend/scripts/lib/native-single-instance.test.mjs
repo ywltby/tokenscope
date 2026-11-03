@@ -909,6 +909,106 @@ describe("路径布局与固定判定", () => {
         sandbox.cleanup();
       }
     });
+
+    it("走查阶段 sidecar 在 readdir 与 lstat 之间消失：跳过该条目，不拒绝走查", () => {
+      // 2026-11-04 CI 真实缺陷（第二轮）：collectAcceptanceTreePaths 先
+      // readdir 再逐条目 lstatSync，journal 在这两步之间被 SQLite 删除时
+      // lstatSync 抛 ENOENT，走查整体 fail closed——7f95a0b 只豁免了后续
+      // 检查阶段的同类情况，走查阶段自己的竞态仍拒绝启动。真实时序由
+      // 注入的 lstatSync 承担（首次对 journal 抛 ENOENT，其后恢复真实），
+      // 不注入 readdir，条目确实由目录枚举返回。
+      const sandbox = createRunSandbox("journal-walk-race");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      sandbox.dir("home", "workspace", "tokenscope");
+      writeManifest(sandbox, root, acceptanceManifest(root));
+      const realLstat = fs.lstatSync.bind(fs);
+      const journal = path.join(root, "tokenscope", "history.db-journal");
+      sandbox.file("home", "workspace", "tokenscope", "history.db-journal", "x");
+      let journalSeen = 0;
+      const racingLstat = (p, opts) => {
+        if (path.resolve(String(p)) === path.resolve(journal)) {
+          journalSeen += 1;
+          const e = new Error(`ENOENT: no such file or directory, lstat '${p}'`);
+          e.code = "ENOENT";
+          throw e;
+        }
+        return realLstat(p, opts);
+      };
+      try {
+        const tree = collectAcceptanceTreePaths(root, { lstatSync: racingLstat });
+        expect(tree.ok).toBe(true);
+        expect(journalSeen).toBe(1);
+        // 走查放行且不登记该条目（它已不存在，无从核对链接/硬链接）
+        expect(tree.paths.map((e) => e.path)).not.toContain(journal);
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
+    it("走查竞态端到端：journal 在枚举后消失，预检不误拒（正例对照）", () => {
+      // 真实时序：readdir 返回 journal → SQLite 删除 → 走查 lstat ENOENT →
+      // 后续对已消失条目的 lstat 同样 ENOENT。修复后两阶段都豁免，预检放行。
+      const sandbox = createRunSandbox("journal-walk-race-full");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      sandbox.dir("home", "workspace", "tokenscope");
+      writeManifest(sandbox, root, acceptanceManifest(root));
+      const realLstat = fs.lstatSync.bind(fs);
+      const journal = path.join(root, "tokenscope", "history.db-journal");
+      sandbox.file("home", "workspace", "tokenscope", "history.db-journal", "x");
+      let journalSeen = 0;
+      const racingLstat = (p, opts) => {
+        if (path.resolve(String(p)) === path.resolve(journal)) {
+          journalSeen += 1;
+          const e = new Error(`ENOENT: no such file or directory, lstat '${p}'`);
+          e.code = "ENOENT";
+          throw e;
+        }
+        return realLstat(p, opts);
+      };
+      try {
+        const result = validateAcceptancePaths({
+          root,
+          homeDir: home,
+          lstat: racingLstat,
+          collectTree: (r) => collectAcceptanceTreePaths(r, { lstatSync: racingLstat }),
+        });
+        expect(result.ok).toBe(true);
+        expect(journalSeen).toBeGreaterThanOrEqual(1);
+        expect(result.reason).toMatch(/互不包含/);
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
+    it("走查阶段非 sidecar 文件消失仍拒绝（豁免边界：不是任意 ENOENT 都放行）", () => {
+      // 边界二：豁免仅限受控数据库的预期 sidecar；普通文件在枚举与 lstat 之
+      // 间消失仍是"竞态或篡改"，走查必须 fail closed。
+      const sandbox = createRunSandbox("walk-race-foreign");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      sandbox.dir("home", "workspace", "tokenscope");
+      writeManifest(sandbox, root, acceptanceManifest(root));
+      const realLstat = fs.lstatSync.bind(fs);
+      const foreign = path.join(root, "tokenscope", "mystery.db");
+      sandbox.file("home", "workspace", "tokenscope", "mystery.db", "x");
+      const vanishingForeign = (p, opts) => {
+        if (path.resolve(String(p)) === path.resolve(foreign)) {
+          const e = new Error(`ENOENT: no such file or directory, lstat '${p}'`);
+          e.code = "ENOENT";
+          throw e;
+        }
+        return realLstat(p, opts);
+      };
+      try {
+        const tree = collectAcceptanceTreePaths(root, { lstatSync: vanishingForeign });
+        expect(tree.ok).toBe(false);
+        expect(tree.reason).toMatch(/无法检查验收根条目/);
+      } finally {
+        sandbox.cleanup();
+      }
+    });
   });
 });
 
