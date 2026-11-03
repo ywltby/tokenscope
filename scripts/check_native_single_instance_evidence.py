@@ -192,7 +192,23 @@ def _count(checks: list[dict]) -> dict[str, int]:
     return counts
 
 
+def ensure_utf8_stdio() -> None:
+    """把标准输出/错误切到 UTF-8 并允许替换无法编码的字符。
+
+    本脚本输出含中文诊断；GitHub-hosted Windows Runner 的控制台编码不是 UTF-8
+    （cp1252 等），未处理时 `print` 会抛 UnicodeEncodeError 让步骤以 1 退出——
+    判定本身没错，却把"输出编码"误报成"检查未通过"。这里只影响编码，不改判定。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            # 被替换成非 TextIOWrapper（测试替身/重定向）时保持原样。
+            continue
+
+
 def main(argv: list[str] | None = None) -> int:
+    ensure_utf8_stdio()
     parser = argparse.ArgumentParser(description="AC10 单实例 evidence 的放行判定（部分验证）")
     parser.add_argument("--evidence", required=True, help="evidence.json 路径")
     parser.add_argument(

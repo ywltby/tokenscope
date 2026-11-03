@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -162,6 +163,26 @@ class EvidenceCheckCase(unittest.TestCase):
             broken = Path(tmp) / "broken.json"
             broken.write_text("{not json", encoding="utf-8")
             self.assertEqual(module.main(["--evidence", str(broken)]), 1)
+
+    def test_utf8_stdio_guard_tolerates_streams_without_reconfigure(self) -> None:
+        """非 CJK 控制台：输出编码不得让判定崩掉（Runner 实测 cp1252 崩过一次）。
+
+        助手只改编码，不改判定；被替换成不带 reconfigure 的流时必须安全跳过。
+        """
+        class Plain:
+            pass
+
+        class Exploding:
+            def reconfigure(self, **kwargs):  # noqa: ARG002 - 模拟不支持
+                raise ValueError("not a text stream")
+
+        original = (sys.stdout, sys.stderr)
+        try:
+            sys.stdout = Plain()
+            sys.stderr = Exploding()
+            module.ensure_utf8_stdio()  # 不抛错即可
+        finally:
+            sys.stdout, sys.stderr = original
 
     def test_ui_e2e_runs_single_instance_and_judges_with_this_checker(self) -> None:
         """接线契约：CI 必须跑该场景，并用本检查器裁决（不是"跑过就算"）。
