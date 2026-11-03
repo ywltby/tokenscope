@@ -39,8 +39,9 @@ cache_write_1h = 6.0
 function event({ id, cacheCreation }) {
   return {
     type: "assistant",
+    isSidechain: false,
     sessionId: "cache-tiers-session",
-    timestamp: "2026-11-01T02:00:00.000Z",
+    timestamp: "2026-10-06T01:00:00.000Z",
     cwd: "C:\\acceptance\\workspace\\tiers",
     message: {
       id,
