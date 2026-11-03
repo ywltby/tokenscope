@@ -85,7 +85,9 @@ export async function nativeCacheTiers(context) {
   const u = createUnifiedContext(context);
   ev.cache_tiers_ui = { shots: [] };
 
-  const tooltip = async (trigger) => {
+  // 打开浮层但**不**关闭：截图必须在浮层展开、内容已渲染且过渡结束之后，
+  // 关闭动作交给调用方（先截图再 Escape），避免截到关闭动画或被当成本身缺省。
+  const openTooltip = async (trigger) => {
     await u.click(trigger);
     let id;
     await u.waitUntil(
@@ -104,8 +106,21 @@ export async function nativeCacheTiers(context) {
         value: row.querySelector(".bd-value")?.textContent?.trim() ?? null,
       })),
     );
-    await trigger.press("Escape");
-    return { text, rows };
+    return {
+      text,
+      rows,
+      body,
+      isVisible: () => body.isVisible(),
+      close: () => trigger.press("Escape"),
+    };
+  };
+
+  // 浮层是过渡动画：内容读完后仍要等一帧稳定再截图（并确认此刻确实可见）。
+  const captureOpen = async (tip, fileName) => {
+    await u.page().waitForTimeout(300);
+    const visible = await tip.isVisible();
+    await inst.page.screenshot({ path: path.join(inst.opts.shots, fileName) });
+    return { file: fileName, overlay_visible_at_capture: visible };
   };
 
   // 必须在 Node 侧装上 IPC 旁路探针并重载页面：查询快照与 DOM 一致性
@@ -156,14 +171,14 @@ export async function nativeCacheTiers(context) {
     u.page().locator(".events-card tbody tr").nth(rowIndex(recordId)).locator(".cost-trigger");
 
   // ── 场景 1：已知分档（5 分钟/1 小时各 100 万，$3.75/$6）
-  const known = await tooltip(rowTrigger("m-tiers-known"));
+  const knownTip = await openTooltip(rowTrigger("m-tiers-known"));
+  const knownShot = await captureOpen(knownTip, "n18-known-tiers.png");
+  await knownTip.close();
+  const known = { text: knownTip.text, rows: knownTip.rows };
   const knownRow = snapshot.events.rows[rowIndex("m-tiers-known")];
   const knownLabels = known.rows.map((row) => row.label);
   const knownWriteRows = known.rows.filter((row) => (row.label ?? "").includes("缓存写"));
-  await inst.page.screenshot({
-    path: path.join(inst.opts.shots, "n18-known-tiers.png"),
-  });
-  ev.cache_tiers_ui.shots.push("n18-known-tiers.png");
+  ev.cache_tiers_ui.shots.push(knownShot.file);
 
   const knownChecks = {
     two_lines:
@@ -199,6 +214,7 @@ export async function nativeCacheTiers(context) {
       cost_usd: knownRow.cost_usd,
     },
     checks: knownChecks,
+    screenshot: knownShot,
   };
   ck.add(
     "ui_known_tiers_two_lines",
@@ -222,12 +238,11 @@ export async function nativeCacheTiers(context) {
   );
 
   // ── 场景 2：分档未知（只有写入总量）
-  const unknown = await tooltip(rowTrigger("m-tiers-unknown"));
+  const unknownTip = await openTooltip(rowTrigger("m-tiers-unknown"));
+  const unknownShot = await captureOpen(unknownTip, "n18-unknown-tiers.png");
+  await unknownTip.close();
+  const unknown = { text: unknownTip.text, rows: unknownTip.rows };
   const unknownRow = snapshot.events.rows[rowIndex("m-tiers-unknown")];
-  await inst.page.screenshot({
-    path: path.join(inst.opts.shots, "n18-unknown-tiers.png"),
-  });
-  ev.cache_tiers_ui.shots.push("n18-unknown-tiers.png");
 
   const unknownChecks = {
     unknown_marker: unknown.text.includes("写入分档未知"),
@@ -255,7 +270,9 @@ export async function nativeCacheTiers(context) {
       cost_usd: unknownRow.cost_usd,
     },
     checks: unknownChecks,
+    screenshot: unknownShot,
   };
+  ev.cache_tiers_ui.shots.push(unknownShot.file);
   ck.add(
     "ui_unknown_tiers_marked_estimated",
     unknownChecks.unknown_marker && unknownChecks.estimate_note,
@@ -270,5 +287,11 @@ export async function nativeCacheTiers(context) {
     "ui_unknown_tiers_total_write_2000000",
     unknownChecks.total_write_tokens,
     JSON.stringify(ev.cache_tiers_ui.unknown.row),
+  );
+  ck.add(
+    "ui_screenshots_with_overlay_open",
+    knownShot.overlay_visible_at_capture === true &&
+      unknownShot.overlay_visible_at_capture === true,
+    JSON.stringify([knownShot, unknownShot]),
   );
 }
