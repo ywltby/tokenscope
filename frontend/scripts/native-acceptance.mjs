@@ -1664,6 +1664,7 @@ const MINIMAL_INVOKER_ARGS = {
   settings_set_close_action: { action: "minimize" },
   settings_set_timezone: { timezone: "UTC" },
   settings_set_collect_interval: { secs: 300 },
+  settings_set_language: { language: "zh-CN" },
   collection_status: {},
   close_resolve: { minimize: false, remember: false },
   open_settings_file: {},

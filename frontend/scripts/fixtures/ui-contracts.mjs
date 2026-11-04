@@ -113,6 +113,8 @@ export const PRIVACY_PROTECTED_COMMANDS = [
   "settings_set_collect_interval",
   // U03：统计时区（settings.toml 单一来源）同样受隐私闸门保护。
   "settings_set_timezone",
+  // i18n：界面语言（settings.toml 单一来源）同样受隐私闸门保护。
+  "settings_set_language",
   "close_resolve",
   "open_settings_file",
 ];
@@ -1025,6 +1027,13 @@ export function buildFixture(name) {
         if (![5, 10, 30, 60, 300, 600].includes(secs))
           return reject(`自动读取间隔只能是 5/10/30/60/300/600 秒（收到 ${secs}）`);
         return secs;
+      }
+      case "settings_set_language": {
+        // i18n：后端只接受 zh-CN / en-US（同形拒绝其余取值）。
+        const language = String(args?.language ?? "").trim();
+        if (language !== "zh-CN" && language !== "en-US")
+          return reject("界面语言只接受 zh-CN / en-US（收到 ）");
+        return language;
       }
       case "settings_set_price_auto_sync":
         return args?.enabled ?? true;
