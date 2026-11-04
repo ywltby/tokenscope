@@ -25,7 +25,7 @@ N01–N09、N14–N16、N13、N18 已关闭；18 个责任编号中为 **14 项�
 
 ## 2026-11-04 界面双语（i18n）与 AC10 豁免范围修正（PR #54）
 
-[界面双语实施计划](active/2026-11-04-i18n.md) 的 I01–I08 已交付：`vue-i18n` 集中资源 + `lib/translate.ts`（纯函数库安全复用）、`settings.toml` 新增 `language` 与受闸门保护的 `settings_set_language`、界面/无障碍名称/Naive 组件语言/`html[lang]` 全量接入、托盘菜单双语且保存后重建。默认简体中文；同意前只允许内存切换（零持久化 IO，既有 `consent_screen_*` 断言不变），同意成功后先写后读权威值；语言与统计时区严格分离。隐私政策与用户许可协议正文仍是简体中文准据版本，英文界面显式标注，不声称已完成法律文本翻译。安装器双语经评估**未实施**（理由与重启条件见计划 §5）。前端 1061 例、Rust workspace、clippy 双模式与 PR 必需检查（`gate`/`contracts`/`frontend`/`rust`/`rust-acceptance`/`native-ui`/`install-test`/`upgrade-test` 矩阵）通过；`upgrade-chain` 按设计跳过。一次 `upgrade-test (0.4.0, present)` 因历史库 `VACUUM INTO` 备份目标已存在而失败、重跑通过，根因未定位，如实记录为竞态观察。
+[界面双语实施计划](active/2026-11-04-i18n.md) 的 I01–I08 已交付：`vue-i18n` 集中资源 + `lib/translate.ts`（纯函数库安全复用）、`settings.toml` 新增 `language` 与受闸门保护的 `settings_set_language`、界面/无障碍名称/Naive 组件语言/`html[lang]` 全量接入、托盘菜单双语且保存后重建。默认简体中文；同意前只允许内存切换（零持久化 IO，既有 `consent_screen_*` 断言不变），同意成功后先写后读权威值；语言与统计时区严格分离。隐私政策与用户许可协议正文仍是简体中文准据版本，英文界面显式标注，不声称已完成法律文本翻译。安装器改为**自动跟随系统语言**（`SimpChinese` + `English`，不弹选择框；静默 `/S` 的生效语言仍未取证）。前端 1079 例、Rust workspace、clippy 双模式与 PR 必需检查（`gate`/`contracts`/`frontend`/`rust`/`rust-acceptance`/`native-ui`/`install-test`/`upgrade-test` 矩阵）通过；第二轮定向修复（重新同意保留弹窗最后选择、语言保存串行顺序、政策更新提示/费用浮层单位与无障碍名称英文化）已验证，前端全量 1079 例；`upgrade-chain` 按设计跳过。一次 `upgrade-test (0.4.0, present)` 因历史库 `VACUUM INTO` 备份目标已存在而失败、重跑通过，根因未定位，如实记录为竞态观察。
 
 AC10 验收脚本的 SQLite 瞬时文件豁免同时收窄：只在**受控历史库**（`<隔离根>/tokenscope/history.db`）的 `-journal` / `-wal` / `-shm` 且 `ENOENT` 时豁免，两个检查阶段行为一致；其他路径、其他错误、存在时的链接/硬链接仍按原规则检查，并由定向回归区分范围（见 `frontend/scripts/lib/native-single-instance.test.mjs`）。
 
