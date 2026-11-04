@@ -56,7 +56,7 @@
 研究已验证的口径（实施以此为准，复核时以新样本重跑断言）：
 
 - **一次调用一行**：带 `rawUsage` 的行与 `messageId` 一一对应，跨文件全局唯一；主文件与子 agent 文件的 `messageId` 零交集。
-- **三处用量容器取值恒等**：`rawUsage`、`usage`、`message.usage` 三处只能取一处。
+- **三处用量容器只取一处**：`rawUsage`、`usage`、`message.usage` 三处只能取一处。**共有字段并非全部恒等**（2026-11-04 复核更正）：三者键集不同，`message.usage.cache_read_input_tokens` 可能整体缺键，样本内"输入/输出相等"只是观测而非口径承诺；因此不做跨容器相加，也不把缺失键回退到另一容器取值。
 - **`prompt_tokens` 含缓存命中**（OpenAI 语义）：
   - 缓存真值只在 `prompt_tokens_details.cached_tokens`，缺失时回退 `prompt_cache_hit_tokens`；
   - `rawUsage` 侧的 `cached_tokens`、`cache_read_input_tokens` 等是死字段；

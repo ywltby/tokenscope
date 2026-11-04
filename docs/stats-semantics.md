@@ -139,7 +139,13 @@ Anthropic Messages API 的 usage 四字段本身就是互斥桶，逐一映射�
   `providerData.messageId` 的行才产生事件；`messageId` 跨文件全局唯一，
   身份键 `(sessionId, messageId)`，去重身份方案 `workbuddy-message`。
 - **三处用量容器只取一处**：`providerData.rawUsage`、`providerData.usage`
-  与 `message.usage` 的共有字段逐行恒等，只读 `rawUsage`，从不相加。
+  与 `message.usage` 描述同一次调用，但**不保证逐字段全等**——三者键集不同
+  （`usage` 是 camelCase 归一化副本，`message.usage` 缺 `total_tokens` 之外的
+  缓存键），`message.usage.cache_read_input_tokens` 还**可能整体缺键**
+  （本机国际版样本 654/656 行存在，国内版样本 1975/2881 行存在）。因此本工具
+  只读 `rawUsage` 一处，从不跨容器相加、也不把缺失键回退到另一容器取值；
+  样本内 `usage.*` 与 `rawUsage.*` 的输入/输出逐行相等（2881/2881、656/656）
+  只是该样本的观测，不作为跨容器恒等的口径承诺。
 - **桶归一（OpenAI 语义）**：`prompt_tokens` 含缓存命中；
   `cache_read = prompt_tokens_details.cached_tokens`（缺失回退
   `prompt_cache_hit_tokens`，再缺失按 0）；`input = prompt_tokens − cache_read`；
