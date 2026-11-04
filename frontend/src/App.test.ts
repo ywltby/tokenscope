@@ -470,6 +470,29 @@ describe("P04 隐私同意引导壳", () => {
     w.unmount();
   });
 
+  // i18n 漏译（修复 3）：后端 detail 是简体中文常量，只作"需要重新同意"的
+  // 信号；英文界面必须显示英文提示，且不能削弱重新同意机制。
+  it("policy_update_notice_follows_ui_language：政策更新提示按界面语言显示", async () => {
+    const backendDetail = "隐私政策或用户许可协议已更新，请阅读并确认后继续";
+    mockGate({
+      privacy_bootstrap: () =>
+        Promise.resolve(snapshot("needs_consent", { detail: backendDetail })),
+    });
+    setLocale("en-US");
+    const w = mount(App);
+    await flushPromises();
+    // 提示已英文化，弹窗仍在（重新同意机制不变）
+    expect(w.text()).toContain("has been updated");
+    expect(w.text()).not.toContain(backendDetail);
+    expect(w.text()).toContain("Agree and continue");
+
+    // 中文界面保持原有提示
+    setLocale("zh-CN");
+    await flushPromises();
+    expect(w.text()).toContain("已更新");
+    w.unmount();
+  });
+
   it("cancel_exit_returns_to_blocked_policy：取消退出回到仍然阻断的政策", async () => {
     mockGate();
     const w = mount(App);

@@ -22,6 +22,13 @@ export interface SettingQueue<T> {
   set(value: T): void;
   /** 外部权威值（启动读取/迁移基线）：记为已落盘值，不发保存。 */
   adopt(value: T): void;
+  /**
+   * 只更新"已落盘值"基线，**不改动界面显示值**（也不清空在途选择）。
+   *
+   * 用于"用户已经做过选择、随后读到权威设置"的场景：显示值必须服从用户的
+   * 最后一次选择，但回滚落点与后续"是否需要保存"的判断仍需知道磁盘真值。
+   */
+  adoptBaseline(value: T): void;
   /** 等待队列排空（含失败回滚已完成）。 */
   idle(): Promise<void>;
   /** 测试钩子：把队列重置为空闲初态（不得在请求在途时调用）。 */
@@ -72,6 +79,11 @@ export function createSettingQueue<T>(opts: {
     error.value = null;
   }
 
+  function adoptBaseline(next: T): void {
+    // 只换基线：不清错误（失败原因仍属于界面上那次未完成的保存）。
+    persisted = next;
+  }
+
   async function drain(): Promise<void> {
     if (running) return;
     running = true;
@@ -117,5 +129,5 @@ export function createSettingQueue<T>(opts: {
     error.value = null;
   }
 
-  return { value, saving, error, set, adopt, idle, resetForTests };
+  return { value, saving, error, set, adopt, adoptBaseline, idle, resetForTests };
 }

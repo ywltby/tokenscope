@@ -28,6 +28,14 @@ const t = useT();
 
 const gate = createPrivacyGate(invoke);
 
+// ── 政策更新提示（i18n）────────────────────────────────────
+// 后端 `detail` 是简体中文常量，这里只把非空 detail 当作"需要重新同意"的
+// **信号**，展示文案从界面语言资源取词——英文界面不会再弹中文提示。同意
+// 规则不变（仍需重新明确点击同意），政策与协议正文仍是简体中文准据原文。
+const consentUpdateNotice = computed(() =>
+  gate.policyUpdated.value ? t("consent.updatedNotice") : null,
+);
+
 // ── 引导主题：只跟随系统 ────────────────────────────────────
 // 不读持久化偏好，也不读写 localStorage（未同意时保持"系统默认"）。
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -147,7 +155,7 @@ function reloadPage(): void {
         :saving="gate.saving.value"
         :blocked="gate.blocked.value"
         :message="gate.error.value ?? gate.blockedDetail.value"
-        :update-notice="gate.policyUpdated.value"
+        :update-notice="consentUpdateNotice"
         @accept="gate.accept()"
         @reject="gate.reject()"
         @retry="gate.retry()"

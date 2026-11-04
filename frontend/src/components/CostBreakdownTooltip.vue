@@ -15,6 +15,7 @@ import { NTooltip } from "naive-ui";
 import { formatCostBreakdownRows } from "../lib/costBreakdown";
 import { formatMoney } from "../lib/formatMoney";
 import { UNIT_PRICE_DENOMINATOR } from "../lib/tokenDisplay";
+import { t } from "../lib/translate";
 import type { EventCostBreakdown } from "../types";
 
 const props = defineProps<{
@@ -36,7 +37,7 @@ const emit = defineEmits<{
   (e: "escape"): void;
 }>();
 
-const ariaLabel = computed(() => `估算费用 ${formatMoney(props.cost, "request")}，查看计算明细`);
+const ariaLabel = computed(() => t("cost.ariaLabel", { cost: formatMoney(props.cost, "request") }));
 const descId = `ts-cost-bd-${useId()}`;
 
 // RC06：外部点击关闭。NTooltip 的 clickoutside 在 trigger="manual" 下不可靠
@@ -95,7 +96,7 @@ function renderContent(): ReturnType<typeof h> {
       h("div", { class: si === 1 ? "bd-formula ts-card-solid" : undefined }, seg.map(renderRow)),
     ),
     // RC07：单价量纲在费用浮层内自身说明（不能只存在于列头或注释）。
-    h("div", { class: "bd-unit" }, `单价量纲：${UNIT_PRICE_DENOMINATOR}（每百万 token）`),
+    h("div", { class: "bd-unit" }, t("cost.unitNote", { unit: UNIT_PRICE_DENOMINATOR })),
   ]);
 }
 </script>

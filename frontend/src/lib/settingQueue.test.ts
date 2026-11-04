@@ -113,3 +113,39 @@ describe("settingQueue 串行保存（U03）", () => {
     expect(calls).toEqual(["local"]);
   });
 });
+
+describe("adoptBaseline（只换落盘基线，不动显示值）", () => {
+  it("keeps_display_value_and_pending_choice_but_moves_rollback_target", async () => {
+    const calls: string[] = [];
+    const gate = deferred<string>();
+    const queue = createSettingQueue<string>({
+      persisted: "zh",
+      save: (v) => {
+        calls.push(v);
+        return gate.promise;
+      },
+    });
+    // 用户已选 en（在途），随后读到权威设置 zh：显示值必须仍是 en。
+    queue.set("en");
+    queue.adoptBaseline("zh");
+    expect(queue.value.value).toBe("en");
+    // 在途保存失败且没有更新的选择 → 回滚到刚采纳的基线（zh），不是旧基线。
+    gate.reject(new Error("磁盘只读"));
+    await queue.idle();
+    expect(queue.value.value).toBe("zh");
+    expect(queue.error.value).toContain("磁盘只读");
+    expect(calls).toEqual(["en"]);
+  });
+
+  it("does_not_clear_existing_error：基线更新不是成功保存，不得清掉失败原因", async () => {
+    const queue = createSettingQueue<string>({
+      persisted: "zh",
+      save: () => Promise.reject(new Error("写入失败")),
+    });
+    queue.set("en");
+    await queue.idle();
+    expect(queue.error.value).toContain("写入失败");
+    queue.adoptBaseline("zh");
+    expect(queue.error.value).toContain("写入失败");
+  });
+});
