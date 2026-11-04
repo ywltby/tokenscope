@@ -17,6 +17,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { readItem, removeItem } from "../lib/localStorage";
 import { createSettingQueue } from "../lib/settingQueue";
 import { adoptCollectInterval } from "./collectInterval";
+import { t } from "../lib/translate";
 
 /** 旧键（历史遗留，仅用于一次性迁移）。 */
 const STORAGE_KEY = "tokenscope-tz";
@@ -96,9 +97,9 @@ async function boot(): Promise<void> {
   if (readFailed) {
     if (legacy != null && validTz(legacy)) {
       queue.adopt(legacy);
-      notice.value = `读取设置文件失败，本次会话沿用旧的本地时区偏好（${legacy}）；重新选择后会尝试保存到设置文件。`;
+      notice.value = t("tz.readFailedLegacy", { legacy });
     } else {
-      notice.value = `读取设置文件失败，本次会话使用默认时区 ${DEFAULT_TIMEZONE}；重新选择后会尝试保存到设置文件。`;
+      notice.value = t("tz.readFailedDefault", { tz: DEFAULT_TIMEZONE });
     }
     ready.value = true;
     return;
@@ -112,7 +113,7 @@ async function boot(): Promise<void> {
     // 分支 1：TOML 为准；非法值（手工编辑）回退默认并提示。
     const value = validTz(stored) ? stored : DEFAULT_TIMEZONE;
     if (value !== stored) {
-      notice.value = `设置文件里的时区 “${stored}” 无法识别，本次使用默认 ${DEFAULT_TIMEZONE}；可在设置页重新选择。`;
+      notice.value = t("tz.unknownStored", { stored, tz: DEFAULT_TIMEZONE });
     }
     queue.adopt(value);
     removeOldKey();
@@ -130,7 +131,7 @@ async function boot(): Promise<void> {
       }
     } catch (e) {
       if (!userTouched) {
-        notice.value = `时区偏好未能写入设置文件（${textOf(e)}），本次会话仍使用 ${legacy}；稍后在设置页重新选择即可保存。`;
+        notice.value = t("tz.writeFailed", { error: textOf(e), legacy });
       }
     }
     ready.value = true;
@@ -138,7 +139,7 @@ async function boot(): Promise<void> {
   }
   if (legacy != null) {
     // 旧键存在但非法：回退默认，清掉无意义的旧键（不算迁移成功）。
-    notice.value = `旧的本地时区偏好 “${legacy}” 无法识别，已回退默认 ${DEFAULT_TIMEZONE}。`;
+    notice.value = t("tz.legacyUnknown", { legacy, tz: DEFAULT_TIMEZONE });
     removeOldKey();
   }
   ready.value = true;
@@ -150,8 +151,15 @@ export function initTimezone(): Promise<void> {
   return bootPromise;
 }
 
+// i18n：只有「本机时区」这一项是界面文案；IANA 名（Asia/Shanghai、UTC）
+// 是**时区标识本身**，按规范不翻译——翻译会制造一个不存在的时区名。
 export const TZ_OPTIONS: { label: string; value: string }[] = [
-  { label: "本机时区", value: "local" },
+  {
+    get label() {
+      return t("settings.localTimezone");
+    },
+    value: "local",
+  },
   { label: "Asia/Shanghai", value: "Asia/Shanghai" },
   { label: "UTC", value: "UTC" },
 ];

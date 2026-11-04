@@ -623,6 +623,40 @@ pub(crate) fn settings_set_collect_interval_impl(
     Ok(committed)
 }
 
+/// i18n：界面语言（`zh-CN` / `en-US`）。同样受隐私闸门保护——语言偏好属于
+/// 用户设置，只在业务解锁（同意成立）后写入；非法值拒绝保存。
+#[tauri::command]
+pub async fn settings_set_language(
+    app: tauri::AppHandle,
+    language: String,
+) -> Result<String, String> {
+    privacy::require_ready(&privacy::state_of(&app))?;
+    let committed = run_blocking("settings_set_language", move || {
+        let path = tokenscope::settings::settings_path()?;
+        settings_set_language_impl(&path, language)
+    })
+    .await?;
+    // 托盘菜单是唯一由后端渲染的界面文案：语言保存成功后立即重建。
+    crate::refresh_tray_labels(&app);
+    Ok(committed)
+}
+
+/// i18n：语言写入内核（可注入路径以便单测）。校验失败在进入 `settings::update`
+/// 之前返回错误，因此不会写盘、也不会碰其它字段；事务内只改这一个字段。
+pub(crate) fn settings_set_language_impl(
+    path: &std::path::Path,
+    language: String,
+) -> anyhow::Result<String> {
+    let validated =
+        tokenscope::settings::validate_language(&language).map_err(anyhow::Error::msg)?;
+    tokenscope::settings::update(path, |s| {
+        s.language = Some(validated.clone());
+        Ok(validated.clone())
+    })?;
+    log::info!("界面语言已设置为 {validated}");
+    Ok(validated)
+}
+
 /// F08：隐藏主窗口——窗口缺失或 hide 失败都返回可操作错误（前端沿
 /// 既有 await/catch 路径展示并允许重试），不再静默吞掉。
 fn hide_main_window(app: &tauri::AppHandle) -> Result<(), String> {
@@ -2831,6 +2865,43 @@ mod tests {
                 .collect_interval_secs,
             Some(600),
             "连续保存后读到的必须等于最后一次选择"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// i18n：界面语言——非法值拒绝保存（文件字节不动），合法值落盘可读回；
+    /// 事务内只改 language：相邻字段（时区）保留。
+    #[test]
+    fn settings_set_language_validates_and_commits() {
+        let dir = tmp_dir("i18n-language");
+        let path = dir.join("settings.toml");
+        settings_set_timezone_impl(&path, Some("UTC".into())).unwrap();
+        assert_eq!(
+            settings_set_language_impl(&path, "en-US".into()).unwrap(),
+            "en-US"
+        );
+        let s = tokenscope::settings::load(&path).unwrap();
+        assert_eq!(s.language.as_deref(), Some("en-US"));
+        assert_eq!(s.timezone.as_deref(), Some("UTC"), "相邻字段必须保留");
+
+        let before = std::fs::read_to_string(&path).unwrap();
+        for bad in ["fr-FR", "", "  ", "ZH_cn"] {
+            let err = settings_set_language_impl(&path, bad.into()).unwrap_err();
+            assert!(
+                err.to_string().contains("界面语言"),
+                "错误必须中文可读: {err}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "非法值不得落盘（文件字节不动）"
+        );
+
+        assert_eq!(
+            settings_set_language_impl(&path, "  zh-CN ".into()).unwrap(),
+            "zh-CN",
+            "trim 后命中合法值"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

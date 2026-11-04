@@ -130,6 +130,7 @@ pub fn run() {
             commands::settings_set_close_action,
             commands::settings_set_timezone,
             commands::settings_set_collect_interval,
+            commands::settings_set_language,
             commands::collection_status,
             commands::close_resolve,
             commands::open_settings_file,
@@ -1077,10 +1078,58 @@ fn last_sync_age_hours(modelsdev_snapshot: &std::path::Path) -> Result<i64, Stri
 
 // ── 托盘 ─────────────────────────────────────────────────// ── 托盘 ─────────────────────────────────────────────────
 
+/// 托盘菜单文案（i18n）：跟随 `settings.toml` 的 `language`。
+///
+/// 托盘在同意后才创建（`initialize_business_runtime`），此时设置已可读；
+/// 读取失败/字段缺失时回落简体中文——不因语言读取失败阻断托盘创建。
+/// 纯函数：语言 → 托盘两项目文案（可单测，不触磁盘）。
+///
+/// 只有 `en-US` 走英文；缺失、读取失败、未知值一律回落简体中文——语言是
+/// 显示偏好，不能因为一个脏值让托盘不可用。
+pub(crate) fn tray_labels_for(language: Option<&str>) -> (&'static str, &'static str) {
+    match language {
+        Some("en-US") => ("Show main window", "Quit TokenScope"),
+        _ => ("显示主窗口", "退出 TokenScope"),
+    }
+}
+
+fn tray_labels() -> (&'static str, &'static str) {
+    let language = tokenscope::settings::settings_path()
+        .ok()
+        .and_then(|path| tokenscope::settings::load(&path).ok())
+        .and_then(|s| s.language);
+    tray_labels_for(language.as_deref())
+}
+
+/// 语言切换后重建托盘菜单（`settings_set_language` 成功后调用）。
+///
+/// 托盘尚未创建（例如测试或初始化失败）时静默跳过：语言仍然生效，
+/// 下次创建托盘时会读到新值。
+pub(crate) fn refresh_tray_labels(app: &tauri::AppHandle) {
+    let Some(tray) = app.tray_by_id("main-tray") else {
+        return;
+    };
+    let (show_label, quit_label) = tray_labels();
+    let built = (|| -> tauri::Result<Menu<tauri::Wry>> {
+        let show = MenuItem::with_id(app, "show", show_label, true, None::<&str>)?;
+        let quit = MenuItem::with_id(app, "quit", quit_label, true, None::<&str>)?;
+        Menu::with_items(app, &[&show, &quit])
+    })();
+    match built {
+        Ok(menu) => {
+            if let Err(e) = tray.set_menu(Some(menu)) {
+                log::warn!("托盘菜单语言更新失败: {e}");
+            }
+        }
+        Err(e) => log::warn!("托盘菜单重建失败: {e}"),
+    }
+}
+
 /// 启动即创建托盘图标；左键单击恢复主窗口。
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出 TokenScope", true, None::<&str>)?;
+    let (show_label, quit_label) = tray_labels();
+    let show = MenuItem::with_id(app, "show", show_label, true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", quit_label, true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
     let mut tray = TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
@@ -1135,6 +1184,76 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
+
+    /// i18n：政策更新提示的中文原文必须与前端资源一致——后端 detail 只作
+    /// "需要重新同意"的信号，展示文案取自资源；两边措辞漂移会让同一提示出现
+    /// 两种说法（英文界面固定用 en-US 资源，不显示后端常量）。
+    ///
+    /// 运行期读取（不是 `include_str!`），沿用隐私政策契约测试的口径：只读
+    /// 仓库内源文件、不进入构建输入清单。
+    #[test]
+    fn policy_updated_notice_matches_frontend_catalog() {
+        let catalog = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../frontend/src/lib/locales/zh-CN.ts"
+        ))
+        .expect("前端简体中文资源必须存在");
+        let expected = format!("updatedNotice: \"{}\"", privacy::POLICY_UPDATED_DETAIL);
+        assert!(
+            catalog.contains(&expected),
+            "policy_updated_detail_drift：后端 {:?} 与 zh-CN.ts 不一致",
+            privacy::POLICY_UPDATED_DETAIL
+        );
+    }
+
+    /// i18n：安装器语言——中文在前（系统语言不在列表时回落中文），英文在后；
+    /// 不弹出语言选择框（`displayLanguageSelector` 缺省 false，由系统语言自动
+    /// 选择），因此交互安装与静默安装都不新增页面。
+    ///
+    /// 静默安装（`/S`）的生效语言仍未在本仓实跑取证：NSIS 在静默模式不显示
+    /// 语言框，实际语言取决于安装器默认 `$LANGUAGE`。这里只锁定"配置层"契约，
+    /// 不声称静默语言已验证。
+    #[test]
+    fn installer_offers_chinese_and_english_without_selector() {
+        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("壳配置必须是合法 JSON");
+        let nsis = &config["bundle"]["windows"]["nsis"];
+        let languages: Vec<&str> = nsis["languages"]
+            .as_array()
+            .expect("nsis.languages 必须是数组")
+            .iter()
+            .map(|v| v.as_str().expect("语言项必须是字符串"))
+            .collect();
+        assert_eq!(languages, vec!["SimpChinese", "English"]);
+        assert!(
+            nsis.get("displayLanguageSelector").is_none(),
+            "不得开启语言选择框：自动跟随系统语言，交互与静默安装都不新增页面"
+        );
+        assert_eq!(
+            nsis["installMode"].as_str(),
+            Some("currentUser"),
+            "安装模式不变（无人值守安装与升级依赖它）"
+        );
+    }
+
+    #[test]
+    fn tray_labels_follow_language_with_chinese_fallback() {
+        assert_eq!(
+            tray_labels_for(Some("en-US")),
+            ("Show main window", "Quit TokenScope")
+        );
+        assert_eq!(
+            tray_labels_for(Some("zh-CN")),
+            ("显示主窗口", "退出 TokenScope")
+        );
+        for fallback in [None, Some(""), Some("fr-FR"), Some("EN-us")] {
+            assert_eq!(
+                tray_labels_for(fallback),
+                ("显示主窗口", "退出 TokenScope"),
+                "未知语言必须回落简体中文：{fallback:?}"
+            );
+        }
+    }
 
     #[test]
     fn quit_waits_for_final_window_save() {

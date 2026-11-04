@@ -72,6 +72,7 @@ vi.mock("./views/Settings.vue", () => ({
 import MainApp from "./MainApp.vue";
 import PricingStatusBanner from "./components/PricingStatusBanner.vue";
 import { useTheme } from "./composables/theme";
+import { DEFAULT_LOCALE, changeLocale } from "./lib/i18n";
 
 const statusNeedsSync = {
   modelsdevAvailable: false,
@@ -203,6 +204,40 @@ describe("App 应用壳（设计系统 Task 2，苹果风格分段控件）", ()
     await flushPromises();
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(localStorage.getItem("tokenscope-theme")).toBe("dark");
+  });
+
+  // i18n（2026-11-04）：主应用壳的页面与主题名称跟随语言；选项身份不变。
+  it("page_and_theme_labels_follow_language：切换语言后分段控件文案与无障碍名称一起变", async () => {
+    mockApp(statusOk);
+    const w = mount(MainApp);
+    await flushPromises();
+    expect(
+      w
+        .findAll('[role="radio"]')
+        .slice(0, 2)
+        .map((node) => node.text()),
+    ).toEqual(["汇总", "设置"]);
+    changeLocale("en-US");
+    await flushPromises();
+    // 页面名换成英文，但 value 仍是 summary/settings（身份不变）
+    expect(
+      w
+        .findAll('[role="radio"]')
+        .slice(0, 2)
+        .map((node) => node.text()),
+    ).toEqual(["Summary", "Settings"]);
+    const themeItems = w.findAll('[role="radiogroup"]')[1].findAll('[role="radio"]');
+    expect(themeItems.map((node) => node.attributes("aria-label"))).toEqual([
+      "Light mode",
+      "Dark mode",
+      "Follow system",
+    ]);
+    // 主题仍可用：切深色照旧写入偏好
+    await themeItems[1].trigger("click");
+    await flushPromises();
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    w.unmount();
+    changeLocale(DEFAULT_LOCALE);
   });
 
   it("横幅渲染在内容之前（不遮挡主体）", async () => {

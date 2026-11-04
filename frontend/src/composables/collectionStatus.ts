@@ -24,6 +24,7 @@ import { onUnmounted, ref, watch, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { NoticeItem } from "./useUsageQuery";
+import { t } from "../lib/translate";
 
 /** 后端 CollectionStatus DTO（camelCase，与内核 serde 约定一致）。 */
 export interface CollectionStatusPayload {
@@ -150,7 +151,7 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
     const ms = Date.parse(s.lastCompletedAt);
     if (!Number.isFinite(ms)) return undefined;
     const secs = Math.max(0, Math.round((Date.now() - ms) / 1000));
-    return `；最近读取 ${secs} 秒前`;
+    return t("status.lastReadAgo", { secs });
   }
 
   /** 从当前内存状态重建胶囊视图与错误通知（所有状态变化点的唯一出口）。
@@ -165,12 +166,12 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
       opts.noticeOut.value = {
         id: "collection-status-unavailable",
         severity: "warning",
-        text: "读取状态不可用，无法确认后台采集是否正常；统计显示的是最近一次成功读取的数据。",
-        actions: [{ label: "重试", run: () => void resync() }],
+        text: t("status.unavailableDetail"),
+        actions: [{ label: t("dashboard.retry"), run: () => void resync() }],
       };
       opts.pillOut.value = {
         cls: "ts-pill-warning",
-        text: "读取状态不可用",
+        text: t("status.unavailable"),
         spin: false,
         dot: false,
       };
@@ -181,7 +182,7 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
       opts.noticeOut.value = null;
       opts.pillOut.value = {
         cls: "ts-pill-info",
-        text: "正在确认状态",
+        text: t("status.confirming"),
         spin: false,
         dot: false,
       };
@@ -191,8 +192,8 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
       opts.noticeOut.value = {
         id: "collection-failed",
         severity: "error",
-        text: `读取失败：${lastCollectionError}（统计显示的是上次成功读取的数据）`,
-        actions: [{ label: "手动刷新", run: () => opts.onManualRefresh() }],
+        text: t("status.readFailed", { message: lastCollectionError }),
+        actions: [{ label: t("dashboard.manualRefresh"), run: () => opts.onManualRefresh() }],
       };
     } else {
       opts.noticeOut.value = null;
@@ -200,7 +201,7 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
     if (s.phase === "failed") {
       opts.pillOut.value = {
         cls: "ts-pill-warning",
-        text: "读取失败",
+        text: t("status.readFailedShort"),
         spin: false,
         dot: false,
         recent: recentLabel(),
@@ -211,7 +212,7 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
       // 隐藏期间不播放动画（真实状态照常更新，恢复后按当前运行状态展示）。
       opts.pillOut.value = {
         cls: "ts-pill-info",
-        text: "正在读取",
+        text: t("status.reading"),
         spin: true,
         dot: false,
       };
@@ -220,7 +221,7 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
     if (s.hasWarnings) {
       opts.pillOut.value = {
         cls: "ts-pill-warning",
-        text: "已更新 · 部分异常",
+        text: t("status.updatedWithIssues"),
         spin: false,
         dot: true,
         recent: recentLabel(),
@@ -229,7 +230,7 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
     }
     opts.pillOut.value = {
       cls: "ts-pill-success",
-      text: "已更新",
+      text: t("status.updated"),
       spin: false,
       dot: true,
       recent: recentLabel(),
@@ -247,7 +248,7 @@ export function useCollectionStatus(opts: CollectionStatusOptions) {
     statusUnavailable.value = false;
     // 采集错误只在成功终态清除；failed 记录本轮错误，running 保持不变。
     if (s.phase === "failed") {
-      lastCollectionError = s.error ?? "未知错误";
+      lastCollectionError = s.error ?? t("status.unknownError");
     } else if (s.phase === "succeeded") {
       lastCollectionError = null;
     }

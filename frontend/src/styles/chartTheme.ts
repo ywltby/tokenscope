@@ -3,7 +3,7 @@
 /// ECharts 默认调色板；网格、坐标轴、文字与 tooltip 颜色全部从语义
 /// token 派生。色值与 tokens.css 的 --ts-chart-* 同步维护。
 import type { ThemeMode } from "../composables/theme";
-import { TOKEN_BUCKETS, type TokenBucketKey } from "../lib/tokenDisplay";
+import { TOKEN_BUCKETS, tokenBucketLabel, type TokenBucketKey } from "../lib/tokenDisplay";
 
 export type TokenKind = TokenBucketKey;
 
@@ -29,7 +29,9 @@ export interface ChartTokens {
 }
 
 // UX07：显示名与顺序消费 tokenDisplay 单一来源（U14：缓存命中）。
-const SERIES_META: [TokenKind, string][] = TOKEN_BUCKETS.map((b) => [b.key, b.label]);
+// i18n：只固定**键与顺序**；显示名在 chartTokens() 里按当前语言读取，
+// 因此语言切换后重建图例就能得到对应语言的系列名（键身份不变）。
+const SERIES_META: TokenKind[] = TOKEN_BUCKETS.map((b) => b.key);
 
 /// 与 tokens.css --ts-chart-* 同步的系列色。
 const SERIES_COLORS: Record<ThemeMode, Record<TokenKind, string>> = {
@@ -57,9 +59,9 @@ export function chartTokens(
   // 浮层（85%），与 Naive 浮层同一配方。
   const separator = dark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.08)";
   return {
-    series: SERIES_META.map(([key, label]) => ({
+    series: SERIES_META.map((key) => ({
       key,
-      label,
+      label: tokenBucketLabel(key),
       color: colors[key],
     })),
     backgroundColor: "transparent",

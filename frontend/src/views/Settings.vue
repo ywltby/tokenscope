@@ -58,6 +58,21 @@ import ScrollList from "../components/ScrollList.vue";
 import SegmentedControl from "../components/SegmentedControl.vue";
 import { SETTINGS_PRELOAD } from "../lib/settingsPreload";
 import { useTokenColors } from "../composables/tokenColors";
+import { changeLocale, useAppLocale, useT } from "../lib/i18n";
+
+const t = useT();
+const { locale, persisting: languageSaving, persistError: languageError } = useAppLocale();
+
+// i18n：语言选项自身永远用**该语言自己的写法**（简体中文 / English），
+// 这样即使用户切到看不懂的语言也能选回来。
+const LOCALE_OPTIONS: { label: string; value: string }[] = [
+  { label: "简体中文", value: "zh-CN" },
+  { label: "English", value: "en-US" },
+];
+
+function setLanguage(value: string): void {
+  changeLocale(value as "zh-CN" | "en-US");
+}
 
 const {
   colors: tokenColors,
@@ -76,19 +91,26 @@ const msg = useMessage();
 // ── U05：分区导航 ────────────────────────────────────────────────
 // 一次只显示一个分区（v-show，未选中的分区保留挂载，未保存草稿不丢）；
 // 窗口 ≤ 1100px 时导航改为顶部分段控件（与 DESIGN.md §4 的边距断点一致）。
-const SECTIONS = [
-  { id: "general", label: "通用" },
-  { id: "sources", label: "数据源" },
-  { id: "usage", label: "用量数据" },
-  { id: "pricing", label: "价格" },
-  { id: "appearance", label: "外观" },
-  { id: "advanced", label: "高级" },
-] as const;
-type SectionId = (typeof SECTIONS)[number]["id"];
-const sectionOptions: { value: SectionId; label: string }[] = SECTIONS.map((s) => ({
-  value: s.id,
-  label: s.label,
+const SECTION_IDS = ["general", "sources", "usage", "pricing", "appearance", "advanced"] as const;
+type SectionId = (typeof SECTION_IDS)[number];
+const SECTION_LABEL_KEY: Record<SectionId, string> = {
+  general: "settings.sectionGeneral",
+  sources: "settings.sectionSources",
+  usage: "settings.sectionUsage",
+  pricing: "settings.sectionPricing",
+  appearance: "settings.sectionAppearance",
+  advanced: "settings.sectionAdvanced",
+};
+// i18n：分区名在渲染期解析（getter），语言切换后导航与标题一起更新。
+const SECTIONS = SECTION_IDS.map((id) => ({
+  id,
+  get label() {
+    return t(SECTION_LABEL_KEY[id]);
+  },
 }));
+const sectionOptions = computed<{ value: SectionId; label: string }[]>(() =>
+  SECTIONS.map((s) => ({ value: s.id, label: s.label })),
+);
 
 const activeSection = ref<SectionId>("general");
 /** 首次进入「价格」分区才挂载价格表并发起首次读取（进入前不发价格表请求）。 */
@@ -131,10 +153,10 @@ const ccsTakeSourceRollups = ref(false);
 const ccsAllowOverlap = ref(false);
 /// H05：日汇总的来源统计时区（默认本机；来源库用 localtime 生成日键）。
 const ccsSourceTz = ref<string>("local");
-const CCS_TZ_OPTIONS = [
-  { label: "本机时区（默认）", value: "local" },
-  ...TZ_OPTIONS.filter((o) => o.value !== "local"),
-];
+const CCS_TZ_OPTIONS = computed(() => [
+  { label: t("settings.ccsLocalTzDefault"), value: "local" },
+  ...TZ_OPTIONS.filter((o) => o.value !== "local").map((o) => ({ label: o.label, value: o.value })),
+]);
 /** 预览/结果里的净新增 token 合计（四桶之和，展示用）。 */
 const netNewTokens = computed(() =>
   ccsPreview.value ? totalTokens(ccsPreview.value.net_new_tokens) : 0,
@@ -164,11 +186,13 @@ const closeAction = ref<"ask" | "minimize" | "quit">("ask");
 // RC03：关闭动作是否已由一次**成功**读取确认。读取失败时为 false——
 // 显示"未知"、控件禁用，不把 ask 伪装成可操作默认值。
 const closeActionKnown = ref(false);
-const CLOSE_ACTION_OPTIONS: { label: string; value: "ask" | "minimize" | "quit" }[] = [
-  { label: "每次询问", value: "ask" },
-  { label: "最小化到托盘", value: "minimize" },
-  { label: "直接退出", value: "quit" },
-];
+const CLOSE_ACTION_OPTIONS = computed<{ label: string; value: "ask" | "minimize" | "quit" }[]>(
+  () => [
+    { label: t("settings.closeActionAsk"), value: "ask" },
+    { label: t("settings.closeActionMinimize"), value: "minimize" },
+    { label: t("settings.closeActionQuit"), value: "quit" },
+  ],
+);
 
 // RC03：设置读取/写入协调——统一读取一次，写入期间作废在途读取。
 // - settingsReadSeq：丢弃晚到的旧读取响应；
@@ -216,7 +240,7 @@ async function setCloseAction(v: "ask" | "minimize" | "quit"): Promise<void> {
       settled = target;
       closeAction.value = target;
       closeActionKnown.value = true;
-      msg.success("关闭窗口默认动作已保存");
+      msg.success(t("settings.closeActionSaved"));
       target = closeActionPending;
     }
   } finally {
@@ -233,7 +257,7 @@ async function openSettingsFile(): Promise<void> {
   try {
     const p = await invoke<string>("open_settings_file");
     if (disposed) return; // AP04：卸载后不弹通知
-    msg.info(`已打开设置配置文件（可直接编辑，保存后对下一次读取生效）：${p}`);
+    msg.info(t("settings.settingsOpened", { path: p }));
   } catch (e) {
     if (disposed) return;
     msg.error(String(e));
@@ -379,8 +403,7 @@ async function commitCcsImport(): Promise<void> {
   const plan = ccsPreview.value;
   if (!plan || ccsBusy.value) return;
   if (plan.overlap_unresolved && !ccsAllowOverlap.value) {
-    ccsError.value =
-      "存在与本地已有请求时间/用量相同但身份不足的记录：确认它们是不同请求后勾选「按新增导入」，或取消后先核对来源。";
+    ccsError.value = t("settings.ccsOverlapConfirm");
     return;
   }
   ccsBusy.value = true;
@@ -395,7 +418,7 @@ async function commitCcsImport(): Promise<void> {
     emit("data-changed");
     ccsPreview.value = null;
     ccsAllowOverlap.value = false;
-    msg.success("CCS 用量已导入（与已有历史去重求并集）");
+    msg.success(t("settings.ccsImported"));
     await loadCache();
   } catch (e) {
     // 失败不自动重试。计划是一次性消费（后端在校验前即取出）：无论失败原因
@@ -459,10 +482,10 @@ const AGENT_IDS = ["claude", "codex", "workbuddy", "workbuddy-ai"] as const;
 type AgentId = (typeof AGENT_IDS)[number];
 
 /** WB06：两个 WorkBuddy 分区的固定说明（避免用户以为漏算了云端会话）。 */
-const AGENT_NOTES: Partial<Record<AgentId, string>> = {
-  workbuddy: "只统计本机会话；云端会话与定时任务的用量只保存在服务端，本机无法读取。",
-  "workbuddy-ai": "只统计本机会话；云端会话与定时任务的用量只保存在服务端，本机无法读取。",
-};
+const AGENT_NOTES = computed<Partial<Record<AgentId, string>>>(() => ({
+  workbuddy: t("settings.workbuddyNote"),
+  "workbuddy-ai": t("settings.workbuddyNote"),
+}));
 
 /** 应用总开关与自动发现开关（改完即保存，走各自命令）。 */
 const agentEnabled = ref<Record<AgentId, boolean>>({
@@ -519,21 +542,22 @@ function rowsOf(agent: AgentId): SourcePathRow[] {
 /** 移除用于含手动 origin 的行（合并行移除只删手动标签，默认标签保留）；
  * 纯默认/环境行没有移除（用行停用表达）。 */
 function isRemovable(row: SourcePathRow): boolean {
+  // 后端来源标签是稳定契约（`OriginKind::label()`），这里按原文匹配。
   return row.origins.includes("手动");
 }
 
 function stateText(row: SourcePathRow): string {
   const base =
     row.state === "ready"
-      ? "可读取"
+      ? t("settings.stateReady")
       : row.state === "missing"
-        ? "缺失"
+        ? t("settings.stateMissing")
         : row.state === "no_permission"
-          ? "无权限"
+          ? t("settings.stateNoPermission")
           : row.state === "conflicted"
-            ? "冲突"
-            : "目录无效";
-  return row.row_enabled ? base : `已停用 · ${base}`;
+            ? t("settings.stateConflicted")
+            : t("settings.stateInvalid");
+  return row.row_enabled ? base : t("settings.stateDisabled", { base });
 }
 
 function errorTextOf(e: unknown): string {
@@ -606,7 +630,9 @@ function addSource(agent: AgentId): void {
       await loadSources();
       if (disposed) return;
       if (sourcesError.value) {
-        refreshAfterSaveError.value = `已保存，列表刷新失败（${sourcesError.value}，可重试）`;
+        refreshAfterSaveError.value = t("settings.refreshAfterSaveFailed", {
+          message: sourcesError.value ?? "",
+        });
       }
     } catch (e) {
       if (disposed) return;
@@ -725,7 +751,7 @@ async function rebuild(): Promise<void> {
     emit("data-changed");
     // H04：重扫 = 重置采集指纹并重新解析当前文件；范围 = 当前生效的来源配置，
     // 且**不删除**已保存的历史用量（历史删除不是缓存操作）。
-    msg.success("已重扫日志（按当前来源配置重新解析，已保存的历史用量不受影响）");
+    msg.success(t("settings.rebuildDone"));
   } catch (e) {
     if (disposed) return;
     msg.error(String(e));
@@ -742,11 +768,15 @@ async function syncPricing(): Promise<void> {
   try {
     const reports = await invoke<{ source: string; count: number }[]>("sync_pricing_openrouter");
     if (disposed) return; // AP04：卸载后不弹通知
-    msg.success(reports.map((r) => `${r.source} ${r.count} 条`).join("，"));
+    msg.success(
+      reports
+        .map((r) => t("settings.syncReportItem", { source: r.source, count: r.count }))
+        .join(t("settings.listJoin")),
+    );
   } catch (e) {
     // 部分失败也要刷新：主源已写盘的数据立即可见（审阅 Task 3）。
     if (disposed) return;
-    msg.error(`同步失败：${e}`);
+    msg.error(t("pricing.syncFailedShort", { message: String(e) }));
   } finally {
     // 成功与部分失败两条路径都重新读取价格视图 + 通知全局横幅刷新；
     // 列表读取失败由 loadPricing 归类为"价格列表读取失败"并保留旧数据
@@ -767,7 +797,7 @@ async function openPricing(): Promise<void> {
   try {
     const p = await invoke<string>("open_pricing_file");
     if (disposed) return; // AP04：卸载后不弹通知
-    msg.info(`已在系统默认编辑器打开（保存后下次统计生效）\n${p}`);
+    msg.info(t("settings.pricingFileOpened", { path: p }));
     // RC03：价格列表只经 loadPricing 一条路径读取（带读代次/卸载守卫）。
     await loadPricing();
   } catch (e) {
@@ -796,7 +826,7 @@ async function setAutostart(enabled: boolean): Promise<void> {
     const fresh = await invoke<boolean>("autostart_set", { enabled });
     if (disposed) return; // AP04：卸载后不写状态或弹通知
     autostart.value = fresh;
-    msg.success(enabled ? "已开启开机自启" : "已关闭开机自启");
+    msg.success(enabled ? t("settings.autostartOn") : t("settings.autostartOff"));
   } catch (e) {
     if (disposed) return;
     msg.error(String(e));
@@ -814,7 +844,7 @@ async function setAutoSync(enabled: boolean): Promise<void> {
     const committed = await invoke<boolean>("settings_set_price_auto_sync", { enabled });
     if (disposed) return; // AP04：卸载后不写状态或弹通知
     autoSync.value = committed;
-    msg.success(enabled ? "已开启自动同步（每 24h）" : "已关闭自动同步");
+    msg.success(enabled ? t("settings.autoSyncOn") : t("settings.autoSyncOff"));
   } catch (e) {
     if (disposed) return;
     msg.error(String(e));
@@ -881,15 +911,17 @@ function priceCell(r: object, key: TokenBucketKey): VNode {
   const e = asEntry(r);
   const or = e.openrouter;
   const orLine = or
-    ? `OpenRouter：${TOKEN_BUCKETS.map((b) => `${b.label} ${fmtPriceOrUnknown(or[b.key])}`).join(" · ")}`
-    : "OpenRouter：未知价格（无对应模型）";
+    ? t("settings.openrouterLine", {
+        line: TOKEN_BUCKETS.map((b) => `${b.label} ${fmtPriceOrUnknown(or[b.key])}`).join(" · "),
+      })
+    : t("settings.openrouterNoModel");
   const spec = e[key];
   const unknown = spec == null;
   // UX03：hover/focus/click/Enter/Space 可读、Escape 关闭且焦点不离开
   // 触发器；aria-describedby 指向打开时的内容节点。说明文字用语义色。
   return h(
     HelpTooltip,
-    { label: `${e.prefix} ${tokenBucketLabel(key)}单价说明` },
+    { label: t("settings.unitPriceHelp", { prefix: e.prefix, bucket: tokenBucketLabel(key) }) },
     {
       trigger: () =>
         h(
@@ -902,7 +934,11 @@ function priceCell(r: object, key: TokenBucketKey): VNode {
           h("div", priceSourceLine(e)),
           h("div", orLine),
           or?.name
-            ? h("div", { style: "color: var(--ts-text-secondary)" }, `模型：${or.name}`)
+            ? h(
+                "div",
+                { style: "color: var(--ts-text-secondary)" },
+                t("settings.modelNameLine", { name: or.name }),
+              )
             : null,
         ]),
     },
@@ -917,14 +953,17 @@ function prefixCell(r: object): VNode {
   // UX03：档位明细同样走可访问浮层（focus/click/Escape 全路径）。
   return h(
     HelpTooltip,
-    { label: `${e.prefix} 档位计价明细`, contentLabel: "档位计价明细" },
+    {
+      label: t("settings.tieredDetailAria", { prefix: e.prefix }),
+      contentLabel: t("settings.tieredDetail"),
+    },
     {
       trigger: () => [
         e.prefix,
         h(
           NTag,
           { size: "tiny", bordered: false, type: "info", style: "margin-left: 6px" },
-          { default: () => "分段" },
+          { default: () => t("settings.tiered") },
         ),
       ],
       default: () =>
@@ -939,12 +978,12 @@ function prefixCell(r: object): VNode {
 
 const priceColumns = computed<DataTableColumn[]>(() => [
   {
-    title: "显示名",
+    title: t("settings.colName"),
     key: "name",
     render: (r) => asEntry(r).name ?? "",
   },
   {
-    title: "模型前缀",
+    title: t("settings.colPrefix"),
     key: "prefix",
     render: (r) => prefixCell(r),
   },
@@ -975,7 +1014,7 @@ const priceColumns = computed<DataTableColumn[]>(() => [
     render: (r) => priceCell(r, "cache_read"),
   },
   {
-    title: "来源",
+    title: t("settings.colSource"),
     key: "source",
     render: (r) =>
       h(
@@ -1004,7 +1043,11 @@ defineExpose({ priceColumns });
     <!-- U05：分区导航——窗口 ≤ 1100px 改为顶部分段控件。导航只切换显示，
          不销毁分区（未选中的分区用 v-show 隐藏，未保存草稿留在实例里）。 -->
     <div class="settings-nav">
-      <nav v-if="navMode === 'side'" class="settings-nav-rail ts-card" aria-label="设置分区">
+      <nav
+        v-if="navMode === 'side'"
+        class="settings-nav-rail ts-card"
+        :aria-label="t('settings.navAria')"
+      >
         <button
           v-for="s in SECTIONS"
           :key="s.id"
@@ -1022,7 +1065,7 @@ defineExpose({ priceColumns });
         class="settings-nav-segmented"
         :model-value="activeSection"
         :options="sectionOptions"
-        aria-label="设置分区"
+        :aria-label="t('settings.navAria')"
         @update:model-value="selectSection"
       />
     </div>
@@ -1034,7 +1077,7 @@ defineExpose({ priceColumns });
         v-show="activeSection === 'general'"
         data-section="general"
       >
-        <h2 class="group-title">通用</h2>
+        <h2 class="group-title">{{ t("settings.sectionGeneral") }}</h2>
         <div v-if="autostartError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
             class="ts-notice-icon is-error"
@@ -1048,18 +1091,22 @@ defineExpose({ priceColumns });
             <circle cx="12" cy="12" r="9" />
             <path d="m9 9 6 6M15 9l-6 6" />
           </svg>
-          <span class="ts-notice-content">自启状态读取失败：{{ autostartError }}</span>
-          <NButton size="tiny" :loading="autostartLoading" @click="loadAutostart">重试</NButton>
+          <span class="ts-notice-content">{{
+            t("settings.autostartReadFailed", { message: autostartError })
+          }}</span>
+          <NButton size="tiny" :loading="autostartLoading" @click="loadAutostart">{{
+            t("settings.retry")
+          }}</NButton>
         </div>
         <section class="ts-card settings-card">
           <div class="setting-row">
             <div class="setting-main">
-              <div class="setting-label">聚合/展示时区</div>
+              <div class="setting-label">{{ t("settings.timezone") }}</div>
               <div class="setting-help">
-                存储/计算一律 UTC，仅展示按此时区一次转换。
-                <span v-if="tzSaving" class="tz-state">保存中…</span>
+                {{ t("settings.timezoneHelp") }}
+                <span v-if="tzSaving" class="tz-state">{{ t("settings.saving") }}</span>
                 <span v-else-if="tzError" class="tz-state is-error">
-                  保存失败：{{ tzError }}（已回到上次保存的值）
+                  {{ t("settings.tzSaveFailed", { message: tzError }) }}
                 </span>
               </div>
             </div>
@@ -1069,39 +1116,62 @@ defineExpose({ priceColumns });
                 :options="TZ_OPTIONS"
                 size="small"
                 style="width: 200px"
-                aria-label="聚合/展示时区"
+                :aria-label="t('settings.timezone')"
               />
             </div>
           </div>
           <!-- U03：旧 localStorage 时区的一次性迁移提示（非阻断，可关闭）。 -->
           <div v-if="tzNotice" class="ts-notice ts-notice-inline tz-notice" role="status">
             <span class="ts-notice-content">{{ tzNotice }}</span>
-            <NButton size="tiny" @click="clearTzNotice">知道了</NButton>
+            <NButton size="tiny" @click="clearTzNotice">{{ t("settings.gotIt") }}</NButton>
+          </div>
+          <!-- i18n：界面语言（与统计时区严格分离；只改文案，不改任何口径）。 -->
+          <div class="setting-row">
+            <div class="setting-main">
+              <div class="setting-label">{{ t("settings.language") }}</div>
+              <div class="setting-help">
+                {{ t("settings.languageHelp") }}
+                <span v-if="languageSaving" class="tz-state">{{ t("settings.saving") }}</span>
+                <span v-else-if="languageError" class="tz-state is-error">
+                  {{ t("settings.languageSaveFailed", { message: languageError }) }}
+                </span>
+              </div>
+            </div>
+            <div class="setting-control">
+              <NSelect
+                :value="locale"
+                :options="LOCALE_OPTIONS"
+                size="small"
+                style="width: 160px"
+                :aria-label="t('settings.language')"
+                @update:value="setLanguage"
+              />
+            </div>
           </div>
           <div class="setting-row">
             <div class="setting-main">
-              <div class="setting-label">开机自启</div>
-              <div class="setting-help">开机后自动启动并驻留托盘。</div>
+              <div class="setting-label">{{ t("settings.autostart") }}</div>
+              <div class="setting-help">{{ t("settings.autostartHelp") }}</div>
             </div>
             <div class="setting-control">
               <NSwitch
                 :value="autostart === true"
                 :disabled="autostart == null || autostartBusy"
                 :loading="autostartBusy"
-                aria-label="开机自启"
+                :aria-label="t('settings.autostart')"
                 @update:value="setAutostart"
               />
             </div>
           </div>
           <div class="setting-row">
             <div class="setting-main">
-              <div class="setting-label">关闭窗口时</div>
+              <div class="setting-label">{{ t("settings.closeAction") }}</div>
               <div class="setting-help">
                 <template v-if="!closeActionKnown">
-                  读取失败，关闭动作未知（点击上方错误条重试后可修改）。
+                  {{ t("settings.closeActionUnknown") }}
                 </template>
                 <template v-else>
-                  最小化后可从托盘恢复；记忆后仍可在此修改或恢复每次询问。
+                  {{ t("settings.closeActionHelp") }}
                 </template>
               </div>
             </div>
@@ -1111,7 +1181,7 @@ defineExpose({ priceColumns });
                 :options="CLOSE_ACTION_OPTIONS"
                 size="small"
                 style="width: 160px"
-                aria-label="关闭窗口时"
+                :aria-label="t('settings.closeAction')"
                 :disabled="!closeActionKnown"
                 :loading="closeActionBusy"
                 @update:value="setCloseAction"
@@ -1126,7 +1196,7 @@ defineExpose({ priceColumns });
         v-show="activeSection === 'sources'"
         data-section="sources"
       >
-        <h2 class="group-title">数据源</h2>
+        <h2 class="group-title">{{ t("settings.sectionSources") }}</h2>
         <!-- UX06：区块独立错误 + 局部重试 -->
         <div v-if="settingsError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
@@ -1141,10 +1211,12 @@ defineExpose({ priceColumns });
             <circle cx="12" cy="12" r="9" />
             <path d="m9 9 6 6M15 9l-6 6" />
           </svg>
-          <span class="ts-notice-content"
-            >设置读取失败，来源配置暂不可保存：{{ settingsError }}</span
-          >
-          <NButton size="tiny" :loading="settingsLoading" @click="loadSettings">重试</NButton>
+          <span class="ts-notice-content">{{
+            t("settings.settingsReadFailed", { message: settingsError })
+          }}</span>
+          <NButton size="tiny" :loading="settingsLoading" @click="loadSettings">{{
+            t("settings.retry")
+          }}</NButton>
         </div>
         <div v-if="sourcesError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
@@ -1159,8 +1231,12 @@ defineExpose({ priceColumns });
             <circle cx="12" cy="12" r="9" />
             <path d="m9 9 6 6M15 9l-6 6" />
           </svg>
-          <span class="ts-notice-content">来源状态读取失败：{{ sourcesError }}</span>
-          <NButton size="tiny" :loading="sourcesLoading" @click="loadSources">重试</NButton>
+          <span class="ts-notice-content">{{
+            t("settings.sourcesReadFailed", { message: sourcesError })
+          }}</span>
+          <NButton size="tiny" :loading="sourcesLoading" @click="loadSources">{{
+            t("settings.retry")
+          }}</NButton>
         </div>
         <section class="ts-card settings-card">
           <div
@@ -1174,14 +1250,16 @@ defineExpose({ priceColumns });
               <NSwitch
                 :value="agentEnabled[agent]"
                 size="small"
-                :aria-label="`${AGENT_LABEL[agent] ?? agent} 启用`"
+                :aria-label="
+                  t('settings.sourceEnabledAria', { agent: AGENT_LABEL[agent] ?? agent })
+                "
                 @update:value="(v: boolean) => setAgentEnabled(agent, v)"
               />
-              <span class="dir-label">自动发现</span>
+              <span class="dir-label">{{ t("settings.autoDiscover") }}</span>
               <NSwitch
                 :value="agentAuto[agent]"
                 size="small"
-                :aria-label="`${AGENT_LABEL[agent] ?? agent} 自动发现`"
+                :aria-label="t('settings.sourceAutoAria', { agent: AGENT_LABEL[agent] ?? agent })"
                 @update:value="(v: boolean) => setAgentAuto(agent, v)"
               />
               <span
@@ -1189,12 +1267,12 @@ defineExpose({ priceColumns });
                   isBusy(switchSaving, `switch:${agent}`) || isBusy(switchSaving, `auto:${agent}`)
                 "
                 class="source-state"
-                >保存中…</span
+                >{{ t("settings.saving") }}</span
               >
               <span
                 v-else-if="switchErrors[`switch:${agent}`] || switchErrors[`auto:${agent}`]"
                 class="source-state is-error"
-                >保存失败</span
+                >{{ t("settings.saveFailed") }}</span
               >
             </div>
             <p v-if="AGENT_NOTES[agent]" class="source-note">{{ AGENT_NOTES[agent] }}</p>
@@ -1230,7 +1308,12 @@ defineExpose({ priceColumns });
                 <NSwitch
                   :value="row.row_enabled"
                   size="small"
-                  :aria-label="`${AGENT_LABEL[agent] ?? agent} ${row.path} 启用`"
+                  :aria-label="
+                    t('settings.sourceRowEnabledAria', {
+                      agent: AGENT_LABEL[agent] ?? agent,
+                      path: row.path,
+                    })
+                  "
                   @update:value="(v: boolean) => setRowEnabled(row, v)"
                 />
                 <span v-for="tag in row.origins" :key="tag" class="origin-tag">{{ tag }}</span>
@@ -1241,10 +1324,10 @@ defineExpose({ priceColumns });
                   size="tiny"
                   text
                   :loading="isBusy(rowOpSaving, `op:${row.agent}:${row.id}`)"
-                  :aria-label="`移除 ${row.path}`"
+                  :aria-label="t('settings.removeAria', { path: row.path })"
                   @click="removeRow(row)"
                 >
-                  移除
+                  {{ t("settings.remove") }}
                 </NButton>
               </div>
               <!-- 完整路径：可复制、长路径换行不省略 -->
@@ -1260,17 +1343,17 @@ defineExpose({ priceColumns });
             </div>
 
             <!-- 追加目录：明确动作；错误保留草稿 -->
-            <label class="dir-label" :for="`source-add-${agent}`"
-              >{{ AGENT_LABEL[agent] ?? agent }} 追加日志目录</label
-            >
+            <label class="dir-label" :for="`source-add-${agent}`">{{
+              t("settings.appendLabel", { agent: AGENT_LABEL[agent] ?? agent })
+            }}</label>
             <div class="add-row">
               <NInput
                 :value="addDrafts[agent]"
                 size="small"
-                placeholder="绝对路径（如 D:\\history\\claude\\projects）"
+                :placeholder="t('settings.appendPlaceholder')"
                 :input-props="{
                   id: `source-add-${agent}`,
-                  'aria-label': `${AGENT_LABEL[agent] ?? agent} 追加日志目录`,
+                  'aria-label': t('settings.appendLabel', { agent: AGENT_LABEL[agent] ?? agent }),
                 }"
                 :disabled="isBusy(addSaving, `add:${agent}`)"
                 @update:value="(v: string) => (addDrafts[agent] = v)"
@@ -1279,10 +1362,10 @@ defineExpose({ priceColumns });
               <NButton
                 size="small"
                 :loading="isBusy(addSaving, `add:${agent}`)"
-                :aria-label="`${AGENT_LABEL[agent] ?? agent} 添加目录`"
+                :aria-label="t('settings.addAria', { agent: AGENT_LABEL[agent] ?? agent })"
                 @click="addSource(agent)"
               >
-                添加
+                {{ t("settings.add") }}
               </NButton>
             </div>
             <div
@@ -1304,10 +1387,7 @@ defineExpose({ priceColumns });
               </svg>
               <span class="ts-notice-content">{{ sourceErrors[`add:${agent}`] }}</span>
             </div>
-            <div class="setting-help">
-              自动发现覆盖当前用户的默认目录与环境变量指定的目录（环境变量只在启动时读取，修改后需重启
-              TokenScope）；追加目录按列表逐个读取；移除或停用只影响后续读取，已保存的用量不会删除。
-            </div>
+            <div class="setting-help">{{ t("settings.sourcesHelp") }}</div>
           </div>
           <div
             v-if="refreshAfterSaveError"
@@ -1333,12 +1413,12 @@ defineExpose({ priceColumns });
                有新数据），汇总页读取状态由真实采集生命周期驱动。 -->
           <div class="setting-row interval-row">
             <div class="setting-main">
-              <div class="setting-label">自动读取间隔</div>
+              <div class="setting-label">{{ t("settings.interval") }}</div>
               <div class="setting-help">
-                后台按此间隔自动读取日志并保存（自动保存，修改后立即生效）；只有出现新用量才刷新统计，没有新用量时数字保持不变。
-                <span v-if="intervalSaving" class="tz-state">保存中…</span>
+                {{ t("settings.intervalHelp") }}
+                <span v-if="intervalSaving" class="tz-state">{{ t("settings.saving") }}</span>
                 <span v-else-if="intervalError" class="tz-state is-error">
-                  保存失败：{{ intervalError }}（已回到上次保存的值）
+                  {{ t("settings.intervalSaveFailed", { message: intervalError }) }}
                 </span>
               </div>
             </div>
@@ -1348,7 +1428,7 @@ defineExpose({ priceColumns });
                 :options="COLLECT_INTERVAL_OPTIONS"
                 size="small"
                 style="width: 140px"
-                aria-label="自动读取间隔"
+                :aria-label="t('settings.interval')"
               />
             </div>
           </div>
@@ -1360,7 +1440,7 @@ defineExpose({ priceColumns });
         v-show="activeSection === 'usage'"
         data-section="usage"
       >
-        <h2 class="group-title">用量数据</h2>
+        <h2 class="group-title">{{ t("settings.sectionUsage") }}</h2>
         <div v-if="cacheError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
             class="ts-notice-icon is-error"
@@ -1374,97 +1454,110 @@ defineExpose({ priceColumns });
             <circle cx="12" cy="12" r="9" />
             <path d="m9 9 6 6M15 9l-6 6" />
           </svg>
-          <span class="ts-notice-content">用量数据统计读取失败：{{ cacheError }}</span>
-          <NButton size="tiny" :loading="cacheLoading" @click="loadCache">重试</NButton>
+          <span class="ts-notice-content">{{
+            t("settings.usageReadFailed", { message: cacheError })
+          }}</span>
+          <NButton size="tiny" :loading="cacheLoading" @click="loadCache">{{
+            t("settings.retry")
+          }}</NButton>
         </div>
         <section class="ts-card settings-card">
           <div class="setting-row">
             <div class="setting-main">
-              <div class="setting-label">已采集文件</div>
+              <div class="setting-label">{{ t("settings.filesScanned") }}</div>
             </div>
             <span class="setting-value ts-num">{{ cache ? fmtNum(cache.files) : "—" }}</span>
           </div>
           <div class="setting-row">
             <div class="setting-main">
-              <div class="setting-label">已保存请求</div>
+              <div class="setting-label">{{ t("settings.savedRequests") }}</div>
             </div>
             <span class="setting-value ts-num">{{ cache ? fmtNum(cache.events) : "—" }}</span>
           </div>
-          <div class="setting-help">
-            用量保存在
-            <span class="ts-mono">history.db</span
-            >；来源日志删除或停用后，已保存的用量仍保留；重扫只重新解析日志，不删除历史。
-          </div>
+          <div class="setting-help">{{ t("settings.usageHelp", { db: "history.db" }) }}</div>
           <NCollapse class="tech-collapse">
-            <NCollapseItem title="技术详情" name="tech">
+            <NCollapseItem :title="t('settings.techDetails')" name="tech">
               <!-- UX08：完整「当前生效目录」（含显式覆盖）——可选中复制、长路径换行 -->
               <div v-for="row in sourceRows" :key="`eff-${row.id}`" class="tech-line">
-                {{ AGENT_LABEL[row.agent] ?? row.agent }} 日志根（{{ row.origins.join("、") }}）：{{
-                  row.path
+                {{
+                  t("settings.logRootLine", {
+                    agent: AGENT_LABEL[row.agent] ?? row.agent,
+                    origins: row.origins.join(t("settings.listJoin")),
+                    path: row.path,
+                  })
                 }}
               </div>
-              <div class="tech-line">历史库路径：{{ cache?.path ?? "—" }}</div>
-              <div class="tech-line">models.dev 快照：{{ pricing?.modelsdev_path ?? "—" }}</div>
-              <div class="tech-line">OpenRouter 快照：{{ pricing?.openrouter_path ?? "—" }}</div>
-              <div class="tech-line">外置价格文件：{{ pricing?.path ?? "—" }}</div>
               <div class="tech-line">
-                models.dev 上次同步：{{ pricing?.modelsdev_synced_at ?? "—" }}
+                {{ t("settings.historyPath", { path: cache?.path ?? "—" }) }}
               </div>
               <div class="tech-line">
-                OpenRouter 上次同步：{{ pricing?.openrouter_synced_at ?? "—" }}
+                {{ t("settings.modelsdevSnapshot", { path: pricing?.modelsdev_path ?? "—" }) }}
+              </div>
+              <div class="tech-line">
+                {{ t("settings.openrouterSnapshot", { path: pricing?.openrouter_path ?? "—" }) }}
+              </div>
+              <div class="tech-line">
+                {{ t("settings.externalPricing", { path: pricing?.path ?? "—" }) }}
+              </div>
+              <div class="tech-line">
+                {{ t("settings.modelsdevSynced", { time: pricing?.modelsdev_synced_at ?? "—" }) }}
+              </div>
+              <div class="tech-line">
+                {{ t("settings.openrouterSynced", { time: pricing?.openrouter_synced_at ?? "—" }) }}
               </div>
             </NCollapseItem>
           </NCollapse>
           <div class="rebuild-row">
-            <NButton size="small" :loading="rebuilding" @click="rebuild">重扫日志</NButton>
+            <NButton size="small" :loading="rebuilding" @click="rebuild">{{
+              t("settings.rebuild")
+            }}</NButton>
             <!-- UX08：重扫预期说明；AP03：范围由当前来源配置决定；
                  H04：重扫只重置采集指纹并重新解析当前文件，**不**删除已保存的用量 -->
-            <span class="rebuild-hint"
-              >重置采集指纹并按当前来源配置重新扫描日志，可能需要一段时间（已保存的历史用量不会被删除）。</span
-            >
+            <span class="rebuild-hint">{{ t("settings.rebuildHint") }}</span>
           </div>
         </section>
 
         <!-- U05：CCS 手动导入并入「用量数据」分区（同一分区里的第二张卡） -->
         <section class="ts-card settings-card">
           <div class="setting-help">
-            手动一次性导入 cc-switch 的历史用量（请求明细 + 日汇总）：只在点击后<span
-              class="ts-strong"
-              >只读</span
-            >打开来源库，不自动同步、不重试；导入结果与 TokenScope
-            已有历史去重求并集，重复导入不会重复计费。
+            {{ t("settings.ccsHelpBefore")
+            }}<span class="ts-strong">{{ t("settings.readonly") }}</span
+            >{{ t("settings.ccsHelpAfter") }}
           </div>
           <div class="setting-row">
             <div class="setting-main">
-              <div class="setting-label">来源库</div>
+              <div class="setting-label">{{ t("settings.ccsSourceDb") }}</div>
               <div class="setting-help">
-                {{ ccsDefaults?.exists ? "默认路径已找到" : "默认路径未找到（可改选其它副本）" }}
-                <template v-if="ccsDefaults"
-                  >；日汇总按来源时区 {{ ccsDefaults.timezone }} 记录</template
-                >
+                {{ ccsDefaults?.exists ? t("settings.ccsFound") : t("settings.ccsNotFound") }}
+                <template v-if="ccsDefaults">{{
+                  t("settings.ccsSourceTzSuffix", { tz: ccsDefaults.timezone })
+                }}</template>
               </div>
             </div>
             <!-- H05：来源库路径可改选其它副本；稳定可访问名称与来源目录字段一致
                  （label 关联 + 真实 input 的 aria-label） -->
-            <label class="dir-label ccs-path-label" for="ccs-import-path">来源库路径</label>
+            <label class="dir-label ccs-path-label" for="ccs-import-path">{{
+              t("settings.ccsSourcePath")
+            }}</label>
             <NInput
               v-model:value="ccsPath"
               class="ccs-path"
               size="small"
-              placeholder="留空使用默认位置"
+              :placeholder="t('settings.ccsSourcePathPlaceholder')"
               :disabled="ccsBusy || !!ccsPreview"
               :input-props="{
                 id: 'ccs-import-path',
-                'aria-label': '来源库路径',
+                'aria-label': t('settings.ccsSourcePath'),
               }"
             />
           </div>
           <div class="setting-row">
             <div class="setting-main">
-              <div class="setting-label">来源统计时区</div>
+              <div class="setting-label">{{ t("settings.ccsSourceTz") }}</div>
               <div class="setting-help">
-                来源库按本机时区生成日键：日汇总只在<span class="ts-strong">这个时区</span
-                >下与展示时区一致时才参与按日统计（不一致时按日视图会提示切换或只看请求明细）。
+                {{ t("settings.ccsSourceTzHelpBefore")
+                }}<span class="ts-strong">{{ t("settings.thisTz") }}</span
+                >{{ t("settings.ccsSourceTzHelpAfter") }}
               </div>
             </div>
             <NSelect
@@ -1473,7 +1566,7 @@ defineExpose({ priceColumns });
               size="small"
               :options="CCS_TZ_OPTIONS"
               :disabled="ccsBusy || !!ccsPreview"
-              aria-label="来源统计时区"
+              :aria-label="t('settings.ccsSourceTz')"
             />
           </div>
           <div class="rebuild-row">
@@ -1482,53 +1575,67 @@ defineExpose({ priceColumns });
               :loading="ccsBusy"
               :disabled="ccsBusy || !!ccsPreview"
               @click="previewCcsImport"
-              >从 CCS 导入用量</NButton
+              >{{ t("settings.ccsImport") }}</NButton
             >
-            <span class="rebuild-hint"
-              >点击后才只读打开该库；换选同一库的备份仍更新同一逻辑来源，不重复计费。</span
-            >
+            <span class="rebuild-hint">{{ t("settings.ccsImportHint") }}</span>
           </div>
 
           <div v-if="ccsError" class="ts-notice ts-notice-inline block-error" role="alert">
-            <span class="ts-notice-content">CCS 导入未完成：{{ ccsError }}</span>
+            <span class="ts-notice-content">{{
+              t("settings.ccsImportIncomplete", { message: ccsError })
+            }}</span>
           </div>
 
           <div v-if="ccsPreview" class="ccs-preview">
             <div class="setting-row">
               <div class="setting-main">
-                <div class="setting-label">预览（尚未写入）</div>
+                <div class="setting-label">{{ t("settings.ccsPreview") }}</div>
                 <div class="setting-help">
-                  明细 {{ fmtNum(ccsPreview.requests_total) }} 条：可导入
-                  {{ fmtNum(ccsPreview.requests_importable) }}、其他应用
-                  {{ fmtNum(ccsPreview.requests_skipped_other_app) }}、与代理日志重复
-                  {{ fmtNum(ccsPreview.requests_skipped_duplicate_of_proxy) }}、字段不合法
-                  {{ fmtNum(ccsPreview.requests_rejected) }}；日汇总
-                  {{ fmtNum(ccsPreview.rollups_total) }} 条（新增
-                  {{ fmtNum(ccsPreview.rollups_new) }}、已存在
-                  {{ fmtNum(ccsPreview.rollups_unchanged) }}、冲突
-                  {{ fmtNum(ccsPreview.rollups_conflicting) }}、不支持/不合法被拒
-                  {{ fmtNum(ccsPreview.rollups_rejected) }}）。
+                  {{
+                    t("settings.ccsPreviewDetail", {
+                      total: fmtNum(ccsPreview.requests_total),
+                      importable: fmtNum(ccsPreview.requests_importable),
+                      otherApp: fmtNum(ccsPreview.requests_skipped_other_app),
+                      duplicate: fmtNum(ccsPreview.requests_skipped_duplicate_of_proxy),
+                      rejected: fmtNum(ccsPreview.requests_rejected),
+                      rollups: fmtNum(ccsPreview.rollups_total),
+                      newRollups: fmtNum(ccsPreview.rollups_new),
+                      unchanged: fmtNum(ccsPreview.rollups_unchanged),
+                      conflicting: fmtNum(ccsPreview.rollups_conflicting),
+                      rollupsRejected: fmtNum(ccsPreview.rollups_rejected),
+                    })
+                  }}
                 </div>
               </div>
             </div>
             <div class="setting-row">
               <div class="setting-main">
-                <div class="setting-label">预计变化</div>
+                <div class="setting-label">{{ t("settings.ccsDelta") }}</div>
                 <div class="setting-help">
-                  新增 {{ fmtNum(ccsPreview.would_insert) }}、更新
-                  {{ fmtNum(ccsPreview.would_update) }}、已存在
-                  {{ fmtNum(ccsPreview.would_unchanged) }}、冲突保留现有值
-                  {{ fmtNum(ccsPreview.would_conflict) }}、过期跳过
-                  {{ fmtNum(ccsPreview.would_stale) }}（库内已有更晚观察的终值，已跳过）； 净新增
-                  token {{ fmtNum(netNewTokens) }}。无项目归属记录
-                  {{ fmtNum(ccsPreview.records_without_project) }} 条（项目视图显示为「未知」）。
-                  <span v-if="ccsPreview.unsupported_apps.length > 0"
-                    >不支持的应用：{{
-                      ccsPreview.unsupported_apps.map(([a, n]) => `${a}×${n}`).join("、")
-                    }}。</span
-                  >
+                  {{
+                    t("settings.ccsDeltaDetail", {
+                      insert: fmtNum(ccsPreview.would_insert),
+                      update: fmtNum(ccsPreview.would_update),
+                      unchanged: fmtNum(ccsPreview.would_unchanged),
+                      conflict: fmtNum(ccsPreview.would_conflict),
+                      stale: fmtNum(ccsPreview.would_stale),
+                      netTokens: fmtNum(netNewTokens),
+                      withoutProject: fmtNum(ccsPreview.records_without_project),
+                    })
+                  }}
+                  <span v-if="ccsPreview.unsupported_apps.length > 0">{{
+                    t("settings.ccsUnsupported", {
+                      list: ccsPreview.unsupported_apps
+                        .map(([a, n]) => `${a}×${n}`)
+                        .join(t("settings.listJoin")),
+                    })
+                  }}</span>
                   <span v-if="ccsPreview.rejected_reasons.length > 0">
-                    拒绝原因：{{ ccsPreview.rejected_reasons.join("；") }}。</span
+                    {{
+                      t("settings.ccsRejected", {
+                        list: ccsPreview.rejected_reasons.join(t("settings.listJoin")),
+                      })
+                    }}</span
                   >
                 </div>
               </div>
@@ -1538,46 +1645,49 @@ defineExpose({ priceColumns });
               class="setting-row"
             >
               <div class="setting-main">
-                <div class="setting-label">以来源快照为准</div>
-                <div class="setting-help">
-                  存在与已存值冲突的来源记录：默认保留 TokenScope
-                  已保存的值（不静默覆盖较新数据）。勾选后本批次改用来源快照。
-                </div>
+                <div class="setting-label">{{ t("settings.ccsTakeSource") }}</div>
+                <div class="setting-help">{{ t("settings.ccsTakeSourceHelp") }}</div>
               </div>
               <NSwitch v-model:value="ccsTakeSourceRollups" size="small" />
             </div>
             <div v-if="ccsPreview.overlap_unresolved" class="setting-row">
               <div class="setting-main">
-                <div class="setting-label">重叠候选</div>
+                <div class="setting-label">{{ t("settings.ccsOverlap") }}</div>
                 <div class="setting-help">
-                  有
-                  {{ fmtNum(ccsPreview.would_overlap) }}
-                  条来源记录与本地已有请求的时间与用量相同，但缺少可证实的请求身份；时间与用量相同只是线索，不能据此认定是同一次请求。默认不导入——确认它们是不同请求后再勾选。
+                  {{ t("settings.ccsOverlapHelp", { count: fmtNum(ccsPreview.would_overlap) }) }}
                   <template v-if="ccsPreview.overlap_examples.length > 0">
-                    <br />例：{{ ccsPreview.overlap_examples.join("；") }}
+                    <br />{{
+                      t("settings.ccsOverlapExamples", {
+                        list: ccsPreview.overlap_examples.join(t("settings.listJoin")),
+                      })
+                    }}
                   </template>
                 </div>
               </div>
               <NSwitch v-model:value="ccsAllowOverlap" size="small" />
             </div>
             <div class="rebuild-row">
-              <NButton size="small" type="primary" :loading="ccsBusy" @click="commitCcsImport"
-                >导入</NButton
-              >
-              <NButton size="small" :disabled="ccsBusy" @click="discardCcsImport">取消</NButton>
-              <span class="rebuild-hint"
-                >预览基于当前历史快照；期间若有新的采集或导入，提交会被拒绝并要求重新预览。</span
-              >
+              <NButton size="small" type="primary" :loading="ccsBusy" @click="commitCcsImport">{{
+                t("settings.ccsImportAction")
+              }}</NButton>
+              <NButton size="small" :disabled="ccsBusy" @click="discardCcsImport">{{
+                t("settings.cancel")
+              }}</NButton>
+              <span class="rebuild-hint">{{ t("settings.ccsStaleHint") }}</span>
             </div>
           </div>
 
           <div v-if="ccsReport" class="setting-help">
-            最近一次导入：新增 {{ fmtNum(ccsReport.requests_inserted) }}、更新
-            {{ fmtNum(ccsReport.requests_updated) }}、已存在
-            {{ fmtNum(ccsReport.requests_unchanged) }}、冲突
-            {{ fmtNum(ccsReport.requests_conflicted) }}；日汇总落盘
-            {{ fmtNum(ccsReport.rollups_snapshotted) }} 条；净新增 token
-            {{ fmtNum(reportNetTokens) }}。
+            {{
+              t("settings.ccsLastImport", {
+                inserted: fmtNum(ccsReport.requests_inserted),
+                updated: fmtNum(ccsReport.requests_updated),
+                unchanged: fmtNum(ccsReport.requests_unchanged),
+                conflicted: fmtNum(ccsReport.requests_conflicted),
+                rollups: fmtNum(ccsReport.rollups_snapshotted),
+                netTokens: fmtNum(reportNetTokens),
+              })
+            }}
           </div>
         </section>
       </section>
@@ -1587,7 +1697,7 @@ defineExpose({ priceColumns });
         v-show="activeSection === 'pricing'"
         data-section="pricing"
       >
-        <h2 class="group-title">价格</h2>
+        <h2 class="group-title">{{ t("settings.sectionPricing") }}</h2>
         <div v-if="pricingError" class="ts-notice ts-notice-inline block-error" role="alert">
           <svg
             class="ts-notice-icon is-error"
@@ -1601,33 +1711,38 @@ defineExpose({ priceColumns });
             <circle cx="12" cy="12" r="9" />
             <path d="m9 9 6 6M15 9l-6 6" />
           </svg>
-          <span class="ts-notice-content"
-            >价格列表读取失败{{ pricing ? "（保留上次数据）" : "" }}：{{ pricingError }}</span
-          >
-          <NButton size="tiny" :loading="pricingLoading" @click="loadPricing">重试</NButton>
+          <span class="ts-notice-content">{{
+            t("settings.priceReadFailed", {
+              suffix: pricing ? t("settings.priceKeepSuffix") : "",
+              message: pricingError,
+            })
+          }}</span>
+          <NButton size="tiny" :loading="pricingLoading" @click="loadPricing">{{
+            t("settings.retry")
+          }}</NButton>
         </div>
         <section class="ts-card settings-card">
           <div class="price-actions">
             <NButton size="small" type="primary" :loading="syncing" @click="syncPricing">
-              同步在线价格
+              {{ t("settings.syncOnline") }}
             </NButton>
-            <NButton size="small" @click="openPricing">打开 / 创建外置价格文件</NButton>
+            <NButton size="small" @click="openPricing">{{ t("settings.openPricingFile") }}</NButton>
           </div>
           <div class="setting-help">
-            候选来源：外置（{{ pricing?.external_count ?? 0 }} 条）+ models.dev（{{
-              pricing?.modelsdev_count ?? 0
+            {{
+              t("settings.candidateSources", {
+                external: pricing?.external_count ?? 0,
+                modelsdev: pricing?.modelsdev_count ?? 0,
+                openrouter: pricing?.openrouter_count ?? 0,
+              })
             }}
-            条，主源）+ OpenRouter（{{ pricing?.openrouter_count ?? 0 }} 条，补充源）；
-            同一模型的候选按本次请求条件计价，未收录模型按未知价格处理（无内置兜底）。
-            <HelpTooltip label="价格候选选择规则" content-label="价格候选选择规则">
-              <template #trigger>候选选择规则</template>
-              <div>
-                有完整四桶价格的候选优先，在其中取总费用最高者；没有完整候选时才回退到部分候选中已知费用最高者（并列按来源优先级
-                &gt; 完整匹配 &gt; 前缀更长打破），四桶单价取自同一候选、不跨候选拼价。
-              </div>
-              <div>
-                本地快照是离线缓存：断网时继续按上次同步数据计价；同步时间与快照路径见「用量数据」分区的技术详情。
-              </div>
+            <HelpTooltip
+              :label="t('settings.candidateRuleAria')"
+              :content-label="t('settings.candidateRuleAria')"
+            >
+              <template #trigger>{{ t("settings.candidateRule") }}</template>
+              <div>{{ t("settings.candidateRuleHelp1") }}</div>
+              <div>{{ t("settings.candidateRuleHelp2") }}</div>
             </HelpTooltip>
           </div>
           <!-- 任务 7：主源缺失/损坏与快照警告 = .ts-notice（不再用高饱和 NAlert） -->
@@ -1650,11 +1765,12 @@ defineExpose({ priceColumns });
               <path d="M12 10v4" />
               <path d="M12 17h.01" />
             </svg>
-            <span class="ts-notice-content">
-              主源（models.dev）尚未就绪{{ pricing.modelsdev_synced_at ? "或数据为空" : "" }}：
-              {{ pricing.modelsdev_path }}。点击上方「同步在线价格」获取定价； 外置价格表与
-              OpenRouter 快照中已有的价格仍参与估算，未被任何来源覆盖的模型显示为未知。
-            </span>
+            <span class="ts-notice-content">{{
+              t("settings.modelsdevNotReady", {
+                orEmpty: pricing.modelsdev_synced_at ? t("settings.modelsdevNotReadyOr") : "",
+                path: pricing.modelsdev_path,
+              })
+            }}</span>
           </div>
           <div
             v-for="(w, i) in pricing?.warnings ?? []"
@@ -1679,32 +1795,31 @@ defineExpose({ priceColumns });
           </div>
           <div class="setting-row">
             <div class="setting-main">
-              <div class="setting-label">自动同步价格（每 24h）</div>
+              <div class="setting-label">{{ t("settings.autoSyncPrice") }}</div>
             </div>
             <div class="setting-control">
               <NSwitch
                 :value="autoSync === true"
                 :disabled="autoSync == null || autoSyncBusy"
                 :loading="autoSyncBusy"
-                aria-label="自动同步价格"
+                :aria-label="t('settings.autoSyncPriceAria')"
                 @update:value="setAutoSync"
               />
             </div>
           </div>
           <div class="setting-help">
-            {{ pricing?.path ?? "—" }}（TOML；候选来源之一，同价并列时优先，保存后下次统计生效）
+            {{ t("settings.externalPricingHelp", { path: pricing?.path ?? "—" }) }}
           </div>
           <!-- RC07：单价量纲显式说明（列头同样标注 $/M）。 -->
           <div class="setting-help unit-note">
-            单价单位：{{ UNIT_PRICE_DENOMINATOR }}（每百万
-            token）；四桶单价来自同一选中候选（不跨候选拼价）。
+            {{ t("settings.unitNote", { unit: UNIT_PRICE_DENOMINATOR }) }}
           </div>
           <!-- U05：价格表只在首次进入「价格」分区时挂载（进入前不发价格表请求、
                不挂载价格表组件）。 -->
           <ScrollList
             v-if="pricingVisited"
             :rows="pricing?.entries ?? []"
-            label="价格列表"
+            :label="t('settings.priceList')"
             class="ts-auto-table-pricing"
           >
             <template #default="{ rows }">
@@ -1727,11 +1842,9 @@ defineExpose({ priceColumns });
         v-show="activeSection === 'appearance'"
         data-section="appearance"
       >
-        <h2 class="group-title">外观</h2>
+        <h2 class="group-title">{{ t("settings.sectionAppearance") }}</h2>
         <section class="ts-card settings-card">
-          <div class="setting-help">
-            用于趋势图、图例和用量比例条。修改即时生效并自动保存，自定义颜色在明暗模式下共用。
-          </div>
+          <div class="setting-help">{{ t("settings.appearanceHelp") }}</div>
           <div v-for="bucket in TOKEN_BUCKETS" :key="bucket.key" class="setting-row">
             <label :for="`token-color-${bucket.key}`" class="setting-label">{{
               bucket.label
@@ -1742,14 +1855,14 @@ defineExpose({ priceColumns });
                 :id="`token-color-${bucket.key}`"
                 type="color"
                 :value="tokenColors[bucket.key]"
-                :aria-label="`${bucket.label}显示颜色`"
+                :aria-label="t('settings.colorAria', { bucket: bucket.label })"
                 @input="setTokenColor(bucket.key, ($event.target as HTMLInputElement).value)"
               />
             </div>
           </div>
-          <NButton size="small" @click="resetColors">恢复默认颜色</NButton>
+          <NButton size="small" @click="resetColors">{{ t("settings.resetColors") }}</NButton>
           <div v-if="colorSaveError" class="setting-help" role="alert">
-            颜色已应用，但本机偏好保存失败；请重新选择颜色后重试。
+            {{ t("settings.colorSaveFailed") }}
           </div>
         </section>
       </section>
@@ -1760,14 +1873,12 @@ defineExpose({ priceColumns });
         v-show="activeSection === 'advanced'"
         data-section="advanced"
       >
-        <h2 class="group-title">高级</h2>
+        <h2 class="group-title">{{ t("settings.sectionAdvanced") }}</h2>
         <section class="ts-card settings-card">
-          <div class="setting-help">
-            设置配置文件：~/.tokenscope/settings.toml（TOML，带字段注释，可直接编辑）。
-            手动保存后对下一次读取立即生效；GUI 内的修改会重写整个文件，
-            自定义注释会丢失（字段说明以文件头为准）。
-          </div>
-          <NButton size="small" @click="openSettingsFile">打开设置配置文件</NButton>
+          <div class="setting-help">{{ t("settings.advancedHelp") }}</div>
+          <NButton size="small" @click="openSettingsFile">{{
+            t("settings.openSettingsFile")
+          }}</NButton>
         </section>
       </section>
     </div>

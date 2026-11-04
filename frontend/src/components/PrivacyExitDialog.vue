@@ -5,6 +5,9 @@
 // Escape / 遮罩 / 「返回隐私政策」= 取消（回到仍然阻断的政策界面）；
 // 「退出程序」由后端直接结束进程。
 import { NButton, NModal } from "naive-ui";
+import { useT } from "../lib/i18n";
+
+const t = useT();
 
 defineProps<{
   open: boolean;
@@ -30,15 +33,17 @@ const emit = defineEmits<{
       }
     "
   >
-    <div class="exit-dialog" role="dialog" aria-modal="true" aria-label="退出 TokenScope">
-      <div class="exit-title">退出 TokenScope？</div>
-      <div class="exit-desc">尚未同意隐私政策，应用不会开始读取使用数据或同步价格。</div>
+    <div class="exit-dialog" role="dialog" aria-modal="true" :aria-label="t('consent.exitAria')">
+      <div class="exit-title">{{ t("consent.exitTitle") }}</div>
+      <div class="exit-desc">{{ t("consent.exitDesc") }}</div>
       <div v-if="error" class="exit-error" role="alert">{{ error }}</div>
       <div class="exit-actions">
-        <NButton size="small" :disabled="busy" @click="emit('cancel')">返回隐私政策</NButton>
+        <NButton size="small" :disabled="busy" @click="emit('cancel')">{{
+          t("consent.exitBack")
+        }}</NButton>
         <span class="exit-actions-spacer" />
         <NButton size="small" type="error" :loading="busy" :disabled="busy" @click="emit('exit')">
-          退出程序
+          {{ t("consent.exitConfirm") }}
         </NButton>
       </div>
     </div>

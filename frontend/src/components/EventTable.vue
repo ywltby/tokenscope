@@ -7,6 +7,9 @@ import { tokenBucketLabel } from "../lib/tokenDisplay";
 import { totalInput } from "../lib/tokenUsage";
 import CostBreakdownTooltip from "./CostBreakdownTooltip.vue";
 import ScrollList from "./ScrollList.vue";
+import { useT } from "../lib/i18n";
+
+const t = useT();
 
 const props = defineProps<{
   list: EventList;
@@ -43,20 +46,20 @@ function fmtPrice(v: number): string {
 }
 
 const columns = computed<DataTableColumn[]>(() => [
-  { title: "时间", key: "ts", className: "ts-num" },
+  { title: t("dashboard.colTime"), key: "ts", className: "ts-num" },
   {
-    title: "应用",
+    title: t("dashboard.colAgent"),
     key: "agent",
     render: (r) => AGENT_LABEL[asRow(r).agent] ?? asRow(r).agent,
   },
   {
-    title: "模型",
+    title: t("dashboard.colModel"),
     key: "model",
     // 设计系统 Task 5：模型名可聚焦获取完整值（不只 hover）
     render: (r) => h("span", { tabindex: 0, class: "ts-focusable" }, asRow(r).model),
   },
   {
-    title: "项目",
+    title: t("dashboard.colProject"),
     key: "project",
     // 长项目名允许换行；悬浮/聚焦可见完整路径。
     // C2：明细项目显示末段（身份是完整路径），悬浮可见完整值。
@@ -72,14 +75,14 @@ const columns = computed<DataTableColumn[]>(() => [
     },
   },
   {
-    title: "输入",
+    title: t("dashboard.colInput"),
     key: "input",
     align: "center",
     className: "ts-num",
     render: (r) => fmtNum(totalInput(asRow(r))),
   },
   {
-    title: "输出",
+    title: t("dashboard.colOutput"),
     key: "output",
     align: "center",
     className: "ts-num",
@@ -100,7 +103,7 @@ const columns = computed<DataTableColumn[]>(() => [
     render: (r) => fmtNum(asRow(r).cache_read),
   },
   {
-    title: "费用",
+    title: t("dashboard.colCost"),
     key: "cost_usd",
     align: "center",
     className: "ts-num",
@@ -114,7 +117,7 @@ const columns = computed<DataTableColumn[]>(() => [
         return h(
           NTag,
           { size: "small", bordered: false, type: "warning" },
-          { default: () => "未知" },
+          { default: () => t("dashboard.unknownTag") },
         );
       }
       // 设计系统 Task 6 / UX03：breakdown 存在时展示"事实→公式→结果→
@@ -173,13 +176,13 @@ const rowKey = (r: object): string => asRow(r).cursor;
 <template>
   <section class="ts-card events-card">
     <div class="card-head">
-      <span class="card-title">请求明细</span>
+      <span class="card-title">{{ t("dashboard.eventsTitle") }}</span>
       <!-- 任务 5：下钻筛选标签（可关闭，键盘可达） -->
       <button
         v-if="filterClosable && props.filterLabel"
         type="button"
         class="filter-chip ts-focusable"
-        :aria-label="`清除筛选 ${props.filterLabel}`"
+        :aria-label="t('dashboard.clearFilterAria', { label: props.filterLabel })"
         @click="emit('clear-filter')"
       >
         {{ props.filterLabel }}
@@ -192,7 +195,7 @@ const rowKey = (r: object): string => asRow(r).cursor;
       :more="more"
       :loading="moreLoading"
       :blocked="moreBlockedHint"
-      label="请求明细列表"
+      :label="t('dashboard.eventsListAria')"
       class="ts-auto-table-events"
       @load-more="emit('load-more')"
     >
@@ -209,8 +212,15 @@ const rowKey = (r: object): string => asRow(r).cursor;
       </template>
     </ScrollList>
     <div class="table-hint">
-      共 {{ fmtNum(props.list.total) }} 条· 已加载 {{ fmtNum(props.list.rows.length) }} 条
-      <template v-if="props.filterLabel">· 筛选：{{ props.filterLabel }}</template>
+      {{
+        t("dashboard.eventsCount", {
+          total: fmtNum(props.list.total),
+          loaded: fmtNum(props.list.rows.length),
+        })
+      }}
+      <template v-if="props.filterLabel"
+        >· {{ t("dashboard.filterPrefix") }}{{ props.filterLabel }}</template
+      >
     </div>
   </section>
 </template>

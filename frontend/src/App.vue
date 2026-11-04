@@ -7,15 +7,7 @@
 // - 主应用经**动态 import** 挂载：静态 import 会执行模块级副作用
 //   （theme/tokenColors 在求值时就读取持久化偏好），v-if 拦不住。
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import {
-  darkTheme,
-  dateZhCN,
-  NButton,
-  NConfigProvider,
-  NGlobalStyle,
-  zhCN,
-  type GlobalTheme,
-} from "naive-ui";
+import { darkTheme, NButton, NConfigProvider, NGlobalStyle, type GlobalTheme } from "naive-ui";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import PrivacyConsentDialog from "./components/PrivacyConsentDialog.vue";
@@ -23,8 +15,26 @@ import PrivacyExitDialog from "./components/PrivacyExitDialog.vue";
 import { createMainAppLoader } from "./lib/mainAppLoader";
 import { createPrivacyGate } from "./lib/privacyGate";
 import { applyResolvedThemeAttribute } from "./lib/themePreference";
+import {
+  flushPendingOnConsent,
+  naiveDateLocale,
+  naiveLocale,
+  useAppLocale,
+  useT,
+} from "./lib/i18n";
+
+const { locale } = useAppLocale();
+const t = useT();
 
 const gate = createPrivacyGate(invoke);
+
+// ── 政策更新提示（i18n）────────────────────────────────────
+// 后端 `detail` 是简体中文常量，这里只把非空 detail 当作"需要重新同意"的
+// **信号**，展示文案从界面语言资源取词——英文界面不会再弹中文提示。同意
+// 规则不变（仍需重新明确点击同意），政策与协议正文仍是简体中文准据原文。
+const consentUpdateNotice = computed(() =>
+  gate.policyUpdated.value ? t("consent.updatedNotice") : null,
+);
 
 // ── 引导主题：只跟随系统 ────────────────────────────────────
 // 不读持久化偏好，也不读写 localStorage（未同意时保持"系统默认"）。
@@ -70,6 +80,9 @@ async function enterMainApp(): Promise<void> {
   // 业务持久化偏好的恢复点：先落首帧主题属性（显式函数，可证明时点），
   // 再导入主应用——主应用 import 链同样只在这里求值一次。
   applyResolvedThemeAttribute();
+  // i18n：同意成功后的语言持久化点——保存弹窗内的选择（若用户动过），
+  // 再读设置的权威值。失败不阻断进入主应用（persistError 由设置页承接）。
+  await flushPendingOnConsent().catch(() => {});
   await mainLoad.enter();
 }
 
@@ -97,7 +110,11 @@ function reloadPage(): void {
 </script>
 
 <template>
-  <NConfigProvider :theme="theme" :locale="zhCN" :date-locale="dateZhCN">
+  <NConfigProvider
+    :theme="theme"
+    :locale="naiveLocale(locale)"
+    :date-locale="naiveDateLocale(locale)"
+  >
     <!-- 全局样式只在这里注入一份：业务主应用 MainApp.vue 不再渲染它 -->
     <NGlobalStyle />
     <div class="privacy-shell" :data-boot-state="bootState">
@@ -107,23 +124,29 @@ function reloadPage(): void {
         <template v-if="gate.error.value">
           <div class="privacy-blocked" role="alert">
             <p class="privacy-blocked-text">{{ gate.error.value }}</p>
-            <NButton size="small" @click="gate.retry()">重新检查</NButton>
+            <NButton size="small" @click="gate.retry()">
+              {{ t("app.retryCheck") }}
+            </NButton>
           </div>
         </template>
         <div v-else class="privacy-checking-wrap" role="status">
-          <span class="privacy-checking">正在检查隐私设置…</span>
+          <span class="privacy-checking">{{ t("app.checking") }}</span>
           <!-- 耗时较长不是错误：不写 error、不取消原请求，响应到达照常应用 -->
           <template v-if="gate.slow.value">
-            <p class="privacy-slow-text">检查耗时较长，仍在等待结果；也可以重新检查。</p>
-            <NButton size="small" @click="gate.retry()">重新检查</NButton>
+            <p class="privacy-slow-text">{{ t("app.checkSlow") }}</p>
+            <NButton size="small" @click="gate.retry()">
+              {{ t("app.retryCheck") }}
+            </NButton>
           </template>
         </div>
       </div>
       <!-- 主界面导入失败：可见、可操作；恢复只能整页重新加载 -->
       <div v-if="mainLoad.error.value" class="privacy-center">
         <div class="privacy-blocked" role="alert">
-          <p class="privacy-blocked-text">主界面加载失败：{{ mainLoad.error.value }}</p>
-          <NButton size="small" @click="reloadPage()">重新加载</NButton>
+          <p class="privacy-blocked-text">
+            {{ t("app.mainLoadFailed", { message: mainLoad.error.value }) }}
+          </p>
+          <NButton size="small" @click="reloadPage()">{{ t("app.reload") }}</NButton>
         </div>
       </div>
       <PrivacyConsentDialog
@@ -132,7 +155,7 @@ function reloadPage(): void {
         :saving="gate.saving.value"
         :blocked="gate.blocked.value"
         :message="gate.error.value ?? gate.blockedDetail.value"
-        :update-notice="gate.policyUpdated.value"
+        :update-notice="consentUpdateNotice"
         @accept="gate.accept()"
         @reject="gate.reject()"
         @retry="gate.retry()"

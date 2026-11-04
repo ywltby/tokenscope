@@ -104,6 +104,7 @@ vi.mock("./views/Settings.vue", () => ({
 import App from "./App.vue";
 import { renderPolicyMarkdown } from "./lib/policyMarkdown";
 import { BOOTSTRAP_SLOW_MS } from "./lib/privacyGate";
+import { DEFAULT_LOCALE, setLocale } from "./lib/i18n";
 
 /// 打包进程序的政策全文（结构与 docs/privacy.md 同构：九章 + 列表 + 链接 +
 /// 粗体）。与源文件逐字一致由 Rust 侧 include_str! 契约
@@ -248,6 +249,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   localStorage.clear();
+  // i18n 语言是模块级状态：用例之间必须复位，否则英文会漏到后续断言。
+  setLocale(DEFAULT_LOCALE);
 });
 
 describe("P04 隐私同意引导壳", () => {
@@ -422,6 +425,71 @@ describe("P04 隐私同意引导壳", () => {
     expect(w.text()).not.toContain("记住我的选择");
     expect(w.text()).not.toContain("最小化到托盘");
     expect(commands()).toEqual(["privacy_bootstrap"]);
+    w.unmount();
+  });
+
+  // i18n（2026-11-04）：语言的持久化边界与"同意后保存"的行为。
+  it("language_choice_before_consent_is_saved_only_after_accept：同意前只在内存，同意后写设置", async () => {
+    mockGate({
+      privacy_accept: () => Promise.resolve(snapshot("ready")),
+      pricing_status: () => Promise.resolve(statusOk),
+      startup_diagnostics: () => Promise.resolve({ state: "ok", message: null }),
+      settings_get: () => Promise.resolve({ language: "en-US" }),
+      settings_set_language: () => Promise.resolve("en-US"),
+    });
+    const w = mount(App);
+    await flushPromises();
+    // 同意前：只有引导命令，没有任何设置读写
+    expect(commands()).toEqual(["privacy_bootstrap"]);
+    // 在弹窗里切换语言（内存）：App.test 用真实 NSelect，交互路径由
+    // PrivacyConsentDialog.english.test.ts 覆盖，这里直接调用同一入口。
+    setLocale("en-US");
+    await flushPromises();
+    expect(w.text()).toContain("Agree and continue");
+    expect(commands()).toEqual(["privacy_bootstrap"]);
+
+    await buttonByText(w, "Agree and continue").trigger("click");
+    await flushPromises();
+    await vi.dynamicImportSettled();
+    await flushPromises();
+    // 同意成功后才写语言、再读权威值
+    const after = commands();
+    expect(after).toContain("settings_set_language");
+    expect(after).toContain("settings_get");
+    expect(after.indexOf("privacy_accept")).toBeLessThan(after.indexOf("settings_set_language"));
+    w.unmount();
+  });
+
+  it("pre_consent_language_switch_never_reads_settings：未同意时切语言不发设置读取", async () => {
+    mockGate();
+    const w = mount(App);
+    await flushPromises();
+    setLocale("en-US");
+    await flushPromises();
+    expect(commands()).toEqual(["privacy_bootstrap"]);
+    w.unmount();
+  });
+
+  // i18n 漏译（修复 3）：后端 detail 是简体中文常量，只作"需要重新同意"的
+  // 信号；英文界面必须显示英文提示，且不能削弱重新同意机制。
+  it("policy_update_notice_follows_ui_language：政策更新提示按界面语言显示", async () => {
+    const backendDetail = "隐私政策或用户许可协议已更新，请阅读并确认后继续";
+    mockGate({
+      privacy_bootstrap: () =>
+        Promise.resolve(snapshot("needs_consent", { detail: backendDetail })),
+    });
+    setLocale("en-US");
+    const w = mount(App);
+    await flushPromises();
+    // 提示已英文化，弹窗仍在（重新同意机制不变）
+    expect(w.text()).toContain("has been updated");
+    expect(w.text()).not.toContain(backendDetail);
+    expect(w.text()).toContain("Agree and continue");
+
+    // 中文界面保持原有提示
+    setLocale("zh-CN");
+    await flushPromises();
+    expect(w.text()).toContain("已更新");
     w.unmount();
   });
 

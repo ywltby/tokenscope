@@ -628,6 +628,46 @@ sys.exit(37 if "--fail" in sys.argv else 0)
     Check (($result.pass -eq $false) -and (@($result.chain) -join "->" -eq "0.1.0->0.3.2->0.3.3")) "链路失败写出逐跳结果"
     Check (($result.jumps | Where-Object { -not $_.pass } | Select-Object -First 1).phase -eq "failed") "链路失败记录失败阶段"
 
+    # 2026-11-04 复核：真实登记表 → Python entries（resolved 视图）→
+    # PowerShell 装配链必须保留协议能力。曾因 supports_user_agreement
+    # 不认缩进、resolved_entry 白名单丢字段，真实 v0.6.1 条目缺
+    # agreement_revision——0.6.1 作为未来版本的历史起点会被误装配成
+    # 隐私-only，只有隐私同意也会被错误放行。
+    & {
+        $realEntries = Get-UpgradeBaselines -RepoRoot $repoRoot
+        $entry061 = Get-UpgradeBaseline -Entries $realEntries -Origin "0.6.1"
+        $entry060 = Get-UpgradeBaseline -Entries $realEntries -Origin "0.6.0"
+        Check ($entry061.agreement_revision -eq 3 -and $entry061.privacy_revision -eq 3) `
+            "真实登记表 0.6.1 条目经 resolved 视图仍带协议修订 3"
+        Check (-not ($entry060.PSObject.Properties['agreement_revision'] -and
+            $null -ne $entry060.agreement_revision)) `
+            "真实登记表 0.6.0 条目不带协议字段（隐私-only 口径不变）"
+        $agreementRoot = Join-Path $contractRoot "agreement-real-chain"
+        New-Item -ItemType Directory -Path $agreementRoot -Force | Out-Null
+        $agreementSettings = Join-Path $agreementRoot "settings.toml"
+        $encoding = [Text.UTF8Encoding]::new($false)
+        function New-RealChainCase([string]$Origin) {
+            [pscustomobject]@{ RepoRoot=$repoRoot; DataDir=$agreementRoot; JumpOrigin=$Origin
+                AppVersion="0.6.2"; JumpTargetSettingsFormat=3; Entries=$realEntries }
+        }
+        [IO.File]::WriteAllText($agreementSettings,
+            "privacy_policy_accepted = true`nprivacy_policy_revision = 3`n", $encoding)
+        Check (Test-ConsentGateApplies -Case (New-RealChainCase "0.6.1")) `
+            "真实链：0.6.1 历史起点只有隐私同意 → 门禁未通过"
+        [IO.File]::WriteAllText($agreementSettings,
+            "privacy_policy_accepted = true`nprivacy_policy_revision = 3`nuser_agreement_accepted = true`nuser_agreement_revision = 3`n", $encoding)
+        Check (-not (Test-ConsentGateApplies -Case (New-RealChainCase "0.6.1"))) `
+            "真实链：0.6.1 历史起点隐私+协议四项匹配 → 放行"
+        [IO.File]::WriteAllText($agreementSettings,
+            "privacy_policy_accepted = true`nprivacy_policy_revision = 2`n", $encoding)
+        Check (-not (Test-ConsentGateApplies -Case (New-RealChainCase "0.6.0"))) `
+            "真实链：0.6.0 历史起点隐私 rev2 已同意 → 放行（口径不变）"
+        [IO.File]::WriteAllText($agreementSettings,
+            "privacy_policy_accepted = true`n", $encoding)
+        Check (Test-ConsentGateApplies -Case (New-RealChainCase "0.6.0")) `
+            "真实链：0.6.0 历史起点布尔旧同意 → 门禁未通过（口径不变）"
+    }
+
     Write-Host "升级契约 $script:Assertions 项通过"
 }
 finally {

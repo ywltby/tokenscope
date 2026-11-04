@@ -11,6 +11,9 @@ import { fmtNum, type Group } from "../types";
 import { formatMoney } from "../lib/formatMoney";
 import { TOKEN_BUCKETS } from "../lib/tokenDisplay";
 import { totalInput, totalTokens } from "../lib/tokenUsage";
+import { useT } from "../lib/i18n";
+
+const t = useT();
 
 const props = defineProps<{ totals: Group }>();
 
@@ -69,25 +72,25 @@ const parts = computed(() =>
 </script>
 
 <template>
-  <section class="metric-card ts-card" aria-label="用量指标">
+  <section class="metric-card ts-card" :aria-label="t('dashboard.metricsAria')">
     <div class="metric-row">
       <!-- 主读数：估算费用 -->
       <div class="metric-main">
         <div class="metric-label">
-          估算费用
+          {{ t("dashboard.costLabel") }}
           <span v-if="totals.unknown_pricing" class="ts-pill ts-pill-warning">
-            含未计价 token
+            {{ t("dashboard.unpricedPill") }}
           </span>
           <span
             v-if="totals.cache_write_split_estimated"
             class="ts-pill ts-pill-warning"
-            title="部分请求缺少 5 分钟/1 小时写入分项，写费按合并价估算（非完整精确费用）"
+            :title="t('dashboard.tierEstimatedTitle')"
           >
-            含写入分档估算
+            {{ t("dashboard.tierPill") }}
           </span>
         </div>
         <div class="metric-value metric-value-main ts-num">
-          <template v-if="costUnknownOnly">未知†</template>
+          <template v-if="costUnknownOnly">{{ t("dashboard.costUnknownOnly") }}</template>
           <template v-else>{{ costText }}</template>
         </div>
       </div>
@@ -95,15 +98,15 @@ const parts = computed(() =>
       <!-- 次读数：总 token / 请求数 / 缓存命中率，发丝线分隔 -->
       <div class="metric-secondary">
         <div class="metric-item">
-          <div class="metric-label">总 token</div>
+          <div class="metric-label">{{ t("dashboard.totalTokens") }}</div>
           <div class="metric-value ts-num">{{ fmtNum(total) }}</div>
-          <div class="metric-unit">≈ {{ wan }} 万 tokens</div>
+          <div class="metric-unit">{{ t("dashboard.tokensWan", { wan }) }}</div>
         </div>
         <div class="metric-sep" aria-hidden="true" />
         <div class="metric-item">
-          <div class="metric-label">请求数</div>
+          <div class="metric-label">{{ t("dashboard.requests") }}</div>
           <div class="metric-value ts-num">{{ fmtNum(totals.requests) }}</div>
-          <div class="metric-unit">次请求</div>
+          <div class="metric-unit">{{ t("dashboard.requestsUnit") }}</div>
         </div>
         <div class="metric-sep" aria-hidden="true" />
         <div class="metric-item">
@@ -115,7 +118,7 @@ const parts = computed(() =>
                 ref="triggerRef"
                 type="button"
                 class="metric-label metric-label-help ts-focusable label-trigger"
-                aria-label="缓存命中率说明"
+                :aria-label="t('dashboard.hitRateAria')"
                 :aria-expanded="hitTipOpen"
                 :aria-describedby="hitTipOpen ? descId : undefined"
                 @mouseenter="hoverOpen = true"
@@ -125,7 +128,7 @@ const parts = computed(() =>
                 @click="pinned = !pinned"
                 @keydown.escape="closeHitTip"
               >
-                缓存命中率
+                {{ t("dashboard.hitRate") }}
               </button>
             </template>
             <div
@@ -134,22 +137,22 @@ const parts = computed(() =>
               @mouseenter="hoverOpen = true"
               @mouseleave="hoverOpen = false"
             >
-              命中率 = 缓存命中 ÷ 总输入（含缓存写入与缓存命中）。<br />
-              卡片上的「输入」是未缓存输入，与缓存写/缓存命中互斥；命中率分母是三者之和。
-              缓存命中直接复用上下文，消耗 token 数计入分母但费用通常为零或极低。
+              <template v-for="(line, i) in t('dashboard.hitRateFormula').split('\n')" :key="i">
+                <template v-if="i > 0"><br /></template>{{ line }}
+              </template>
             </div>
           </NTooltip>
           <div class="metric-value ts-num">
-            {{ hitRate == null ? "N/A" : `${hitRate.toFixed(1)}%` }}
+            {{ hitRate == null ? t("dashboard.na") : `${hitRate.toFixed(1)}%` }}
           </div>
-          <div class="metric-unit">缓存命中占比</div>
+          <div class="metric-unit">{{ t("dashboard.hitRateUnit") }}</div>
         </div>
       </div>
     </div>
 
     <!-- 分项比例条：6px 高、3px 圆角、按互斥四桶占比分段（全零为空槽） -->
     <div class="parts-bar-container">
-      <div v-if="total > 0" class="parts-bar" role="img" aria-label="token 分项比例条">
+      <div v-if="total > 0" class="parts-bar" role="img" :aria-label="t('dashboard.partsBarAria')">
         <span
           v-for="p in parts"
           :key="p.kind"
@@ -163,7 +166,7 @@ const parts = computed(() =>
     </div>
 
     <!-- 图例：色点 + 名称 + 数值（与比例条/图表同源 token） -->
-    <div class="parts-legend" aria-label="token 分项">
+    <div class="parts-legend" :aria-label="t('dashboard.partsLegendAria')">
       <span v-for="p in parts" :key="p.kind" class="legend-item">
         <span class="legend-dot" :class="`part-${p.kind}`" aria-hidden="true" />
         <span class="legend-label">{{ p.label }}</span>

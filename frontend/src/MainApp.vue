@@ -15,14 +15,7 @@ import {
   watch,
   watchEffect,
 } from "vue";
-import {
-  dateZhCN,
-  zhCN,
-  darkTheme,
-  NConfigProvider,
-  NMessageProvider,
-  type GlobalTheme,
-} from "naive-ui";
+import { darkTheme, NConfigProvider, NMessageProvider, type GlobalTheme } from "naive-ui";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useTheme, type ThemePreference } from "./composables/theme";
@@ -36,6 +29,10 @@ import { createSettingsPreload, SETTINGS_PRELOAD } from "./lib/settingsPreload";
 import { useTokenColors } from "./composables/tokenColors";
 import { useAutoHideScrollbars } from "./composables/autoHideScrollbars";
 import { initTimezone } from "./composables/timezone";
+import { naiveDateLocale, naiveLocale, useAppLocale, useT } from "./lib/i18n";
+
+const t = useT();
+const { locale } = useAppLocale();
 
 useAutoHideScrollbars();
 const tokenColors = useTokenColors();
@@ -97,18 +94,20 @@ watch(page, (next, prev) => {
   });
 });
 
-const pageOptions = [
-  { value: "summary" as const, label: "汇总" },
-  { value: "settings" as const, label: "设置" },
-];
+const pageOptions = computed(() => [
+  { value: "summary" as const, label: t("app.pageSummary") },
+  { value: "settings" as const, label: t("app.pageSettings") },
+]);
 
-const themeOptions: { value: ThemePreference; label: string; ariaLabel: string }[] = [
-  // UX02：字符图标（☀/☾）不合规范且语义不明——改用通用 SVG 插槽 +
-  // 显式语义名称（"浅色模式 / 深色模式 / 跟随系统"）。
-  { value: "light", label: "浅色", ariaLabel: "浅色模式" },
-  { value: "dark", label: "深色", ariaLabel: "深色模式" },
-  { value: "system", label: "跟随系统", ariaLabel: "跟随系统" },
-];
+const themeOptions = computed<{ value: ThemePreference; label: string; ariaLabel: string }[]>(
+  () => [
+    // UX02：字符图标（☀/☾）不合规范且语义不明——改用通用 SVG 插槽 +
+    // 显式语义名称（"浅色模式 / 深色模式 / 跟随系统"）。
+    { value: "light", label: t("app.themeLight"), ariaLabel: t("app.themeLightAria") },
+    { value: "dark", label: t("app.themeDark"), ariaLabel: t("app.themeDarkAria") },
+    { value: "system", label: t("app.themeSystem"), ariaLabel: t("app.themeSystemAria") },
+  ],
+);
 
 // ── 启动诊断（SF06）：日志初始化降级为非阻断通知 ───────────────
 // 文件日志不可用（state != ok）时提示用户；读取失败静默（非 Tauri
@@ -148,7 +147,7 @@ onMounted(() => {
   });
   register("close-action-failed", (ev) => {
     const reason = (ev as { payload?: CloseActionFailure } | null)?.payload?.reason ?? "";
-    closeSubmitError.value = `关闭操作失败，请重试或取消：${reason}`;
+    closeSubmitError.value = t("app.closeFailedRetry", { message: reason });
     closeDialogOpen.value = true;
   });
 });
@@ -170,7 +169,9 @@ async function onCloseResolve(v: { minimize: boolean; remember: boolean }): Prom
     await invoke("close_resolve", { minimize: v.minimize, remember: v.remember });
     closeDialogOpen.value = false;
   } catch (e) {
-    closeSubmitError.value = `关闭操作失败，请重试或取消：${e instanceof Error ? e.message : String(e)}`;
+    closeSubmitError.value = t("app.closeFailedRetry", {
+      message: e instanceof Error ? e.message : String(e),
+    });
   } finally {
     closeSubmitting.value = false;
   }
@@ -186,8 +187,8 @@ function onCloseCancel(): void {
   <NConfigProvider
     :theme="theme"
     :theme-overrides="themeOverrides"
-    :locale="zhCN"
-    :date-locale="dateZhCN"
+    :locale="naiveLocale(locale)"
+    :date-locale="naiveDateLocale(locale)"
   >
     <!-- NGlobalStyle 由引导壳 App.vue 统一提供（同一文档内只能有一份，
          否则 naive 会警告并只让第一个生效） -->
@@ -217,13 +218,17 @@ function onCloseCancel(): void {
               </svg>
               TokenScope
             </span>
-            <SegmentedControl v-model="page" :options="pageOptions" aria-label="页面切换" />
+            <SegmentedControl
+              v-model="page"
+              :options="pageOptions"
+              :aria-label="t('app.pageSwitch')"
+            />
             <div class="spacer" />
             <SegmentedControl
               v-model="preference"
               :options="themeOptions"
               icon-only
-              aria-label="主题偏好（浅色/深色/跟随系统）"
+              :aria-label="t('app.themeAria')"
               @update:model-value="setPreference"
             >
               <!-- 通用 SVG 图标插槽：装饰图形对读屏隐藏，真实名称由按钮
@@ -277,7 +282,7 @@ function onCloseCancel(): void {
           <!-- 全局状态横幅：渲染在内容之前，不遮挡主体 -->
           <div class="banner-slot">
             <div v-if="logWarning" class="ts-notice" role="status">
-              文件日志不可用，已退回备用输出：{{ logWarning }}
+              {{ t("app.logDegraded", { message: logWarning }) }}
             </div>
             <PricingStatusBanner />
           </div>

@@ -12,25 +12,60 @@
 import { computed, type Ref, type WritableComputedRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { createSettingQueue } from "../lib/settingQueue";
+import { t } from "../lib/translate";
 
 /** 缺省间隔（秒）：与后端 `collect_interval_secs` 缺省一致。 */
 export const DEFAULT_COLLECT_INTERVAL_SECS = 300;
 
 /** 可选值白名单 + 界面文案（后端只接受这六个值）。 */
+// i18n：`label` 是 getter，读取时按当前语言解析（值域与顺序不变）。
 export const COLLECT_INTERVAL_OPTIONS: { label: string; value: number }[] = [
-  { label: "5 秒", value: 5 },
-  { label: "10 秒", value: 10 },
-  { label: "30 秒", value: 30 },
-  { label: "1 分钟", value: 60 },
-  { label: "5 分钟", value: 300 },
-  { label: "10 分钟", value: 600 },
+  {
+    get label() {
+      return t("settings.intervalSecs", { secs: 5 });
+    },
+    value: 5,
+  },
+  {
+    get label() {
+      return t("settings.intervalSecs", { secs: 10 });
+    },
+    value: 10,
+  },
+  {
+    get label() {
+      return t("settings.intervalSecs", { secs: 30 });
+    },
+    value: 30,
+  },
+  {
+    get label() {
+      return t("settings.intervalMins", { mins: 1 });
+    },
+    value: 60,
+  },
+  {
+    get label() {
+      return t("settings.intervalMins", { mins: 5 });
+    },
+    value: 300,
+  },
+  {
+    get label() {
+      return t("settings.intervalMins", { mins: 10 });
+    },
+    value: 600,
+  },
 ];
 
 const ALLOWED_SECS: readonly number[] = COLLECT_INTERVAL_OPTIONS.map((o) => o.value);
 
 /** 间隔文案（状态胶囊的悬停提示与设置页下拉共用同一映射）。 */
 export function collectIntervalText(secs: number): string {
-  return COLLECT_INTERVAL_OPTIONS.find((o) => o.value === secs)?.label ?? `${secs} 秒`;
+  return (
+    COLLECT_INTERVAL_OPTIONS.find((o) => o.value === secs)?.label ??
+    t("settings.intervalSuffix", { secs })
+  );
 }
 
 /** 是否属于后端白名单（设置文件里的脏值不得带进请求）。 */

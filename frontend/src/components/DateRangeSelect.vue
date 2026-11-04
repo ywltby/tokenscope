@@ -3,6 +3,9 @@ import { computed, ref, watch } from "vue";
 import { NButton, NCheckbox, NDatePicker, NPopover } from "naive-ui";
 import { presetAriaLabel, presetKey, presetLabel, type RangePreset } from "../lib/rangePreset";
 import type { RangeView } from "../types";
+import { useT } from "../lib/i18n";
+
+const t = useT();
 
 /**
  * U01/U02（UI 调整计划 2026-10-13）：时间预设触发器与日期弹层。
@@ -46,14 +49,15 @@ const ariaLabel = computed(() => presetAriaLabel(props.preset, view.value, props
 const iconOnly = computed(() => !props.preset || props.preset.kind === "all");
 
 /// 快捷项顺序固定：当日 / 24h / 7d / 14d / 30d / 全部时间。
-const SHORTCUTS: { label: string; preset: RangePreset }[] = [
-  { label: "当日", preset: { kind: "days", days: 1 } },
+/// i18n：只有「当日 / 全部时间」需要翻译，`24h/7d/14d/30d` 是通用写法。
+const shortcuts = computed<{ label: string; preset: RangePreset }[]>(() => [
+  { label: t("range.today"), preset: { kind: "days", days: 1 } },
   { label: "24h", preset: { kind: "rolling", hours: 24 } },
   { label: "7d", preset: { kind: "days", days: 7 } },
   { label: "14d", preset: { kind: "days", days: 14 } },
   { label: "30d", preset: { kind: "days", days: 30 } },
-  { label: "全部时间", preset: { kind: "all" } },
-];
+  { label: t("range.all"), preset: { kind: "all" } },
+]);
 
 /// 自带操作行交给本组件的「清除 / 取消 / 确定」——不出现两套确认入口。
 const NO_ACTIONS: ("clear" | "confirm" | "now")[] = [];
@@ -178,7 +182,7 @@ const isTimeDisabled = (_ts: number, position: "start" | "end") =>
     <div class="range-panel" :style="{ maxHeight: panelMaxHeight }" @keydown.esc="close">
       <div class="shortcut-row">
         <button
-          v-for="s in SHORTCUTS"
+          v-for="s in shortcuts"
           :key="s.label"
           type="button"
           class="ts-btn ts-choice shortcut-btn"
@@ -204,18 +208,20 @@ const isTimeDisabled = (_ts: number, position: "start" | "end") =>
           :is-time-disabled="isTimeDisabled"
         />
         <div class="follow-row">
-          <NCheckbox v-model:checked="untilNow">结束于现在</NCheckbox>
-          <span class="follow-hint">统计到当前时刻，不使用右侧结束日期</span>
+          <NCheckbox v-model:checked="untilNow">{{ t("range.untilNow") }}</NCheckbox>
+          <span class="follow-hint">{{ t("range.untilNowHint") }}</span>
         </div>
       </div>
       <div class="actions-row">
         <!-- 清除入口：一键回"全部时间"并关闭 -->
-        <NButton v-if="!iconOnly" size="small" text @click="clearAll">清除</NButton>
+        <NButton v-if="!iconOnly" size="small" text @click="clearAll">{{
+          t("range.clear")
+        }}</NButton>
         <span v-else></span>
         <span class="actions-group">
-          <NButton size="small" @click="close">取消</NButton>
+          <NButton size="small" @click="close">{{ t("range.cancel") }}</NButton>
           <NButton size="small" type="primary" :disabled="!draftReady" @click="confirmCustom">
-            确定
+            {{ t("range.confirm") }}
           </NButton>
         </span>
       </div>

@@ -4,6 +4,9 @@
 // 遮罩 = 不关闭；勾选记忆后由后端 close_resolve 持久化（设置页可改回）。
 import { ref, watch } from "vue";
 import { NButton, NCheckbox, NModal } from "naive-ui";
+import { useT } from "../lib/i18n";
+
+const t = useT();
 
 const props = defineProps<{
   open: boolean;
@@ -43,11 +46,11 @@ function resolve(minimize: boolean): void {
       }
     "
   >
-    <div class="close-dialog" role="dialog" aria-modal="true" aria-label="关闭 TokenScope">
-      <div class="close-title">关闭 TokenScope</div>
-      <div class="close-desc">要最小化到托盘继续统计，还是直接退出程序？</div>
+    <div class="close-dialog" role="dialog" aria-modal="true" :aria-label="t('close.dialogAria')">
+      <div class="close-title">{{ t("close.title") }}</div>
+      <div class="close-desc">{{ t("close.desc") }}</div>
       <NCheckbox v-model:checked="remember" class="close-remember" :disabled="submitting">
-        记住我的选择，以后不再询问（可在设置页修改）
+        {{ t("close.remember") }}
       </NCheckbox>
       <div v-if="error" class="close-error" role="alert">
         <svg
@@ -65,13 +68,15 @@ function resolve(minimize: boolean): void {
         <span>{{ error }}</span>
       </div>
       <div class="close-actions">
-        <NButton size="small" :disabled="submitting" @click="emit('cancel')">取消</NButton>
+        <NButton size="small" :disabled="submitting" @click="emit('cancel')">{{
+          t("close.cancel")
+        }}</NButton>
         <span class="close-actions-spacer" />
         <NButton size="small" type="primary" :disabled="submitting" @click="resolve(true)">
-          最小化到托盘
+          {{ t("close.minimize") }}
         </NButton>
         <NButton size="small" type="error" :disabled="submitting" @click="resolve(false)">
-          直接退出
+          {{ t("close.quit") }}
         </NButton>
       </div>
     </div>

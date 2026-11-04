@@ -5,6 +5,7 @@
 /// views/*）；导入它们会在首屏就读持久化偏好。业务偏好恢复只发生在
 /// App.vue 收到后端 Ready 之后的显式调用里。
 import { computed, ref, type ComputedRef, type Ref } from "vue";
+import { t } from "./i18n";
 
 export type PrivacyPhase =
   | "checking"
@@ -45,7 +46,10 @@ const PHASES: readonly PrivacyPhase[] = [
 ];
 
 /** 后端不可用/响应异常时的兜底政策（保持标题与空正文，不伪造内容）。 */
-const EMPTY_POLICY: PolicyInfo = { title: "TokenScope 隐私政策", date: "", markdown: "" };
+function emptyPolicy(): PolicyInfo {
+  return { title: t("app.privacyTitleFallback"), date: "", markdown: "", terms: "" };
+}
+const EMPTY_POLICY: PolicyInfo = emptyPolicy();
 
 function normalize(raw: unknown): PrivacySnapshot {
   const value = (raw ?? {}) as Partial<PrivacySnapshot>;
@@ -179,7 +183,7 @@ export function createPrivacyGate(invoke: InvokeFn) {
     } catch (e) {
       if (gen !== generation) return; // 迟到的失败同样丢弃，不写入错误
       clearSlowTimer();
-      error.value = `无法检查隐私设置：${describe(e)}`;
+      error.value = t("app.cannotCheckPrivacy", { message: describe(e) });
     }
   }
 
@@ -196,7 +200,7 @@ export function createPrivacyGate(invoke: InvokeFn) {
       apply(normalize(await invoke("privacy_accept")));
     } catch (e) {
       // 保存失败：保留政策可见、显示原因、可重试或退出；业务闸门仍关闭。
-      error.value = `保存同意记录失败：${describe(e)}`;
+      error.value = t("app.saveConsentFailed", { message: describe(e) });
       snapshot.value = { ...(snapshot.value ?? normalize(null)), phase: "blocked_error" };
       syncExitPrompt();
     } finally {
@@ -232,7 +236,7 @@ export function createPrivacyGate(invoke: InvokeFn) {
     try {
       await invoke("privacy_exit_resolve", { exit: true });
     } catch (e) {
-      exitError.value = `退出失败，请重试：${describe(e)}`;
+      exitError.value = t("app.exitFailedRetry", { message: describe(e) });
     } finally {
       exitBusy.value = false;
     }

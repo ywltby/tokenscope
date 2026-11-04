@@ -7,6 +7,9 @@ import { tokenBucketLabel } from "../lib/tokenDisplay";
 import { displayTokens, totalTokens } from "../lib/tokenUsage";
 import { buildSourceLines } from "../lib/statsView";
 import ScrollList from "./ScrollList.vue";
+import { useT } from "../lib/i18n";
+
+const t = useT();
 
 const props = defineProps<{ report: SummaryReport }>();
 /// U04：合计行不是维度值——用**独立事件**通知父级，父级不再靠字面量「合计」
@@ -19,24 +22,26 @@ const TOTAL_ROW_KEY = "合计";
 /// Naive UI 表格行类型是 Record<string, unknown>，统一经 unknown 转 Group。
 const asGroup = (row: object): Group => row as unknown as Group;
 
-const DIM_LABEL: Record<string, string> = {
-  day: "日期",
-  model: "模型",
-  project: "项目",
-  agent: "Agent",
-};
+const DIM_LABEL = (): Record<string, string> => ({
+  day: t("dashboard.drillDay"),
+  model: t("dashboard.drillModel"),
+  project: t("dashboard.drillProject"),
+  agent: t("dashboard.colAgent"),
+});
 
 const columns = computed<DataTableColumn[]>(() => {
   const first: DataTableColumn = {
-    title: DIM_LABEL[props.report.by] ?? "维度",
+    title: DIM_LABEL()[props.report.by] ?? t("dashboard.colDim"),
     key: "key",
     // C2：项目身份是完整路径，展示用 label（末段），悬浮可见完整 key。
     // 任务 5：可点击行右侧 › 指示（合计行不可点，不带）。
     render: (row) => {
       const g = asGroup(row);
       const isTotal = g.key === TOTAL_ROW_KEY;
+      // i18n：合计行的**展示名**按当前语言显示，身份键仍是后端契约的
+      // `合计`（行样式、事件分流与下钻匹配都用它，绝不翻译）。
       return h("span", { class: "dim-cell" }, [
-        g.label ?? g.key,
+        isTotal ? t("dashboard.totalRow") : (g.label ?? g.key),
         ...(isTotal ? [] : [h("span", { class: "drill-arrow", "aria-hidden": "true" }, " ›")]),
       ]);
     },
@@ -61,13 +66,13 @@ const columns = computed<DataTableColumn[]>(() => {
   });
   const cols: DataTableColumn[] = [
     first,
-    num("请求", "requests"),
+    num(t("dashboard.colRequests"), "requests"),
     token(tokenBucketLabel("input"), "input"),
     token(tokenBucketLabel("output"), "output"),
     token(tokenBucketLabel("cache_write"), "cache_write"),
     token(tokenBucketLabel("cache_read"), "cache_read"),
     {
-      title: "合计",
+      title: t("dashboard.colTotal"),
       key: "total",
       align: "center",
       className: "ts-num",
@@ -75,7 +80,7 @@ const columns = computed<DataTableColumn[]>(() => {
     },
     {
       // 设计系统 Task 5：金额列使用估算语义表头
-      title: "费用",
+      title: t("dashboard.colCost"),
       key: "cost_usd",
       align: "center",
       className: "ts-num",
@@ -85,7 +90,7 @@ const columns = computed<DataTableColumn[]>(() => {
         //（缺价 ≠ 免费，G-P3-1）。
         const unknownOnly = g.unknown_pricing && g.cost_usd === 0;
         const text = unknownOnly
-          ? "未知†"
+          ? t("dashboard.costUnknown")
           : formatMoney(g.cost_usd, "summary") + (g.unknown_pricing ? "†" : "");
         // 未知标记用警告色显式呈现，不用 opacity 压低（DESIGN.md §1）
         // N18：分档估算组追加可访问的「分档估算」标记——与未计价†独立，
@@ -99,9 +104,9 @@ const columns = computed<DataTableColumn[]>(() => {
               "span",
               {
                 class: "ts-pill ts-pill-warning",
-                title: "该组含缺少 5 分钟/1 小时写入分项的请求，写费按合并价估算（非完整精确费用）",
+                title: t("dashboard.tierEstimatedTitle"),
               },
-              "分档估算",
+              t("dashboard.tierEstimated"),
             ),
           );
         }
@@ -112,7 +117,7 @@ const columns = computed<DataTableColumn[]>(() => {
   // C5：未计价 token 单列可追溯（无价格模型 / 部分计价的缺价分项）。
   if (props.report.totals.unknown_pricing) {
     cols.push({
-      title: "未知†",
+      title: t("dashboard.colUnknown"),
       key: "unknown_tokens",
       align: "center",
       render: (row) => {
@@ -143,7 +148,7 @@ const rowProps = (row: object) => ({
   role: "button",
   // 复核修订：可访问名称用展示名（模型维度是友好名），身份键只用于点击参数——
   // 屏幕阅读器不应读出 `claudeopus55` 这类压缩身份键。
-  "aria-label": `查看 ${asGroup(row).label ?? asGroup(row).key} 的请求明细`,
+  "aria-label": t("dashboard.viewEventsAria", { name: asGroup(row).label ?? asGroup(row).key }),
   onclick: () => activate(asGroup(row)),
   onkeydown: (e: KeyboardEvent) => {
     if (e.key === "Enter" || e.key === " ") {
@@ -167,9 +172,9 @@ const sourceLines = computed(() =>
 <template>
   <section class="ts-card usage-card">
     <div class="card-head">
-      <span class="card-title">聚合</span>
+      <span class="card-title">{{ t("dashboard.aggregateTitle") }}</span>
     </div>
-    <ScrollList :rows="rows" label="聚合列表">
+    <ScrollList :rows="rows" :label="t('dashboard.aggregateListAria')">
       <template #default="{ rows: visibleRows }">
         <NDataTable
           :columns="columns"
@@ -184,13 +189,12 @@ const sourceLines = computed(() =>
         />
       </template>
     </ScrollList>
-    <div class="table-hint">点击行查看请求明细</div>
+    <div class="table-hint">{{ t("dashboard.tableHint") }}</div>
     <div v-if="report.totals.unknown_pricing" class="table-note">
-      † 费用为估算，仅含已计价部分：无价格模型的全部用量、或价格快照缺分项价
-      （如缓存价未知）时该分项的用量，均不计入费用，其 token 数见"未知†"列。
+      {{ t("dashboard.tableNote") }}
     </div>
     <NCollapse class="source-collapse">
-      <NCollapseItem title="来源采集统计" name="sources">
+      <NCollapseItem :title="t('dashboard.sourceStats')" name="sources">
         <div v-for="s in sourceLines" :key="s.agent" class="source-line">
           <strong>{{ s.agent }}</strong
           >：{{ s.parts.join(" · ") }}

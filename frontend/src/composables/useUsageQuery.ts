@@ -48,6 +48,7 @@ import type { CollectionPillView } from "./collectionStatus";
 import { useTimezone } from "./timezone";
 import { collectIntervalText, useCollectInterval } from "./collectInterval";
 import { todayInTz, tzDate } from "../lib/dates";
+import { t } from "../lib/translate";
 
 export type { RollupsMode };
 
@@ -139,10 +140,10 @@ export interface UsageQueryOptions {
 const SEVERITY_ORDER: Record<NoticeSeverity, number> = { error: 0, warning: 1, info: 2 };
 
 /// 下钻提示用**中文类型名**（不再是 `model: xxx`）。
-const DRILL_TYPE_LABEL: Record<EventDrill["type"], string> = {
-  day: "日期",
-  model: "模型",
-  project: "项目",
+const DRILL_TYPE_KEY: Record<EventDrill["type"], string> = {
+  day: "dashboard.drillDay",
+  model: "dashboard.drillModel",
+  project: "dashboard.drillProject",
 };
 
 /** 时区身份：`local` 解析为本机 IANA 名后再与快照的统计时区比较。 */
@@ -602,8 +603,8 @@ export function useUsageQuery(opts: UsageQueryOptions) {
 
   /// U06：翻页保护下的提示按钮文案（时间窗口到期与有新数据两种原因）。
   const autoRefreshHint = computed<string | null>(() => {
-    if (refreshHint.value === "window") return "时间范围已更新 · 刷新";
-    if (refreshHint.value === "data") return "有新数据 · 刷新";
+    if (refreshHint.value === "window") return t("dashboard.hintWindowMoved");
+    if (refreshHint.value === "data") return t("dashboard.hintNewData");
     return null;
   });
 
@@ -652,7 +653,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   /// RC02：恢复视图 / 新批次首页未成功时没有分页资格——按钮禁用并说明原因，
   /// 不允许"点击无反馈"。
   const moreBlockedHint = computed<string | undefined>(() =>
-    hasMore.value && !liveFirstPage.value ? "刷新完成后可继续加载" : undefined,
+    hasMore.value && !liveFirstPage.value ? t("status.loadMoreReady") : undefined,
   );
 
   // ── 下钻 ────────────────────────────────────────────────
@@ -692,7 +693,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   }
 
   const drillLabel = (d: EventDrill): string =>
-    `${DRILL_TYPE_LABEL[d.type] ?? d.type}：${resolvedDrillLabel(d)}`;
+    `${t(DRILL_TYPE_KEY[d.type])}${t("cost.labelJoin")}${resolvedDrillLabel(d)}`;
 
   // ── 来源状态 ────────────────────────────────────────────
   // AP06：来源检测独立状态。读取失败**不**清空已成功的汇总数据，只标注
@@ -742,7 +743,9 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     spin: boolean;
     dot: boolean;
   }>(() => {
-    const baseTitle = `每 ${collectIntervalText(intervalSecs.value)}自动读取；无新用量时保持统计不变`;
+    const baseTitle = t("status.intervalTitle", {
+      interval: collectIntervalText(intervalSecs.value),
+    });
     const failed = summaryError.value || eventsError.value;
     const queryBusy = loading.value || eventsLoading.value;
     const collection = opts.collectionPill?.value ?? null;
@@ -760,7 +763,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     if (stale.value && failed)
       return {
         cls: "ts-pill-warning",
-        text: "缓存数据 · 刷新失败",
+        text: t("status.cachedFailed"),
         title: baseTitle,
         spin: false,
         dot: false,
@@ -768,7 +771,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     if (stale.value && queryBusy)
       return {
         cls: "ts-pill-warning",
-        text: "缓存数据 · 后台刷新中",
+        text: t("status.cachedRefreshing"),
         title: baseTitle,
         spin: false,
         dot: false,
@@ -777,22 +780,34 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     if (!report.value && failed)
       return {
         cls: "ts-pill-warning",
-        text: "刷新失败 · 暂无数据",
+        text: t("status.refreshFailedNoData"),
         title: baseTitle,
         spin: false,
         dot: false,
       };
     if (queryBusy || !report.value)
-      return { cls: "ts-pill-info", text: "刷新中…", title: baseTitle, spin: false, dot: false };
-    if (failed)
       return {
-        cls: "ts-pill-warning",
-        text: "刷新失败 · 显示上次数据",
+        cls: "ts-pill-info",
+        text: t("status.refreshing"),
         title: baseTitle,
         spin: false,
         dot: false,
       };
-    return { cls: "ts-pill-success", text: "已更新", title: baseTitle, spin: false, dot: true };
+    if (failed)
+      return {
+        cls: "ts-pill-warning",
+        text: t("status.refreshFailedStale"),
+        title: baseTitle,
+        spin: false,
+        dot: false,
+      };
+    return {
+      cls: "ts-pill-success",
+      text: t("status.updated"),
+      title: baseTitle,
+      spin: false,
+      dot: true,
+    };
   });
 
   // R08（Task 8）：采集诊断——空结果/部分结果都必须可见，不依赖表格挂载。
@@ -813,13 +828,13 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     const summaryText = clean
       ? null
       : [
-          warns.length > 0 ? `${warns.length} 条采集警告` : null,
-          ioErrors > 0 ? `${ioErrors} 个文件读取失败` : null,
-          badLines > 0 ? `${badLines} 行解析失败（已跳过）` : null,
-          rollupOnly ? "含只有日粒度的历史（这部分费用按未知披露）" : null,
+          warns.length > 0 ? t("status.warnCount", { count: warns.length }) : null,
+          ioErrors > 0 ? t("status.ioErrorCount", { count: ioErrors }) : null,
+          badLines > 0 ? t("status.badLineCount", { count: badLines }) : null,
+          rollupOnly ? t("dashboard.rollupOnly") : null,
         ]
           .filter(Boolean)
-          .join("，");
+          .join(t("dashboard.listJoin"));
     return {
       clean,
       summaryText,
@@ -836,7 +851,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   /// "这部分历史看不到"（进入合并通知，由界面写文案）。
   const instantRangeHint = computed<string | null>(() =>
     report.value?.rollup_coverage?.rollups_excluded_for_instant_range === true
-      ? "当前时间范围精确到时刻，只统计请求明细，不含只有日粒度的历史"
+      ? t("dashboard.instantRangeHint")
       : null,
   );
 
@@ -844,10 +859,10 @@ export function useUsageQuery(opts: UsageQueryOptions) {
 
   function sourceNoticeText(s: SourceStatus): string {
     if (s.state === "disabled")
-      return `${AGENT_LABEL[s.agent] ?? s.agent} 已在设置中停用，不参与统计。`;
+      return t("dashboard.sourceDisabled", { agent: AGENT_LABEL[s.agent] ?? s.agent });
     if (s.state === "missing")
-      return `${AGENT_LABEL[s.agent] ?? s.agent} 数据目录不存在（${s.dir}）。`;
-    return `${AGENT_LABEL[s.agent] ?? s.agent} 目录存在但没有发现会话日志（${s.dir}）。`;
+      return t("dashboard.sourceMissing", { agent: AGENT_LABEL[s.agent] ?? s.agent, dir: s.dir });
+    return t("dashboard.sourceNoLogs", { agent: AGENT_LABEL[s.agent] ?? s.agent, dir: s.dir });
   }
 
   /// U04 通知合并：页面上**只显示一条通知**（原来最多七条并存），展示最高
@@ -860,28 +875,31 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       list.push({
         id: "summary-error",
         severity: "error",
-        text: `汇总加载失败：${summaryError.value}`,
-        actions: [{ label: "重试", run: () => retryAfterFailure("summary") }],
+        text: t("dashboard.summaryLoadFailed", { message: summaryError.value }),
+        actions: [{ label: t("dashboard.retry"), run: () => retryAfterFailure("summary") }],
       });
     }
     if (eventsError.value) {
       list.push({
         id: "events-error",
         severity: "error",
-        text: `明细加载失败：${eventsError.value}`,
-        actions: [{ label: "重试", run: () => retryAfterFailure("events") }],
+        text: t("dashboard.eventsLoadFailed", { message: eventsError.value }),
+        actions: [{ label: t("dashboard.retry"), run: () => retryAfterFailure("events") }],
       });
     }
     if (sourceError.value) {
       list.push({
         id: "source-error",
         severity: "error",
-        text: `来源目录检测失败${
-          sourceStatus.value.length > 0 ? "（下方来源状态可能已过期）" : ""
-        }：${sourceError.value}`,
+        text:
+          t("dashboard.sourcesDetectFailed", {
+            suffix: sourceStatus.value.length > 0 ? t("dashboard.sourcesStaleSuffix") : "",
+          }) +
+          t("cost.labelJoin") +
+          sourceError.value,
         actions: [
           {
-            label: sourcesLoading.value ? "重试中…" : "重试",
+            label: sourcesLoading.value ? t("dashboard.retrying") : t("dashboard.retry"),
             disabled: sourcesLoading.value,
             run: () => void loadSources(),
           },
@@ -896,11 +914,11 @@ export function useUsageQuery(opts: UsageQueryOptions) {
         text:
           problems.length === 1
             ? sourceNoticeText(problems[0])
-            : `${problems.length} 个来源异常，统计可能不完整。`,
+            : t("dashboard.sourcesProblem", { count: problems.length }),
         details: problems.length > 1 ? problems.map((s) => sourceNoticeText(s)) : undefined,
         actions:
           problems.some((s) => s.state !== "disabled") && opts.goSettings
-            ? [{ label: "去设置 ›", run: () => opts.goSettings?.() }]
+            ? [{ label: t("dashboard.goSettings"), run: () => opts.goSettings?.() }]
             : [],
       });
     }
@@ -908,7 +926,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       list.push({
         id: "collection",
         severity: "warning",
-        text: `本轮采集存在部分问题（${collectionDiagnostics.value.summaryText}）；已采集数据仍有效。`,
+        text: t("dashboard.collectDiag", { summary: collectionDiagnostics.value.summaryText }),
         details:
           collectionDiagnostics.value.warns.length > 0
             ? [...collectionDiagnostics.value.warns]
@@ -929,14 +947,16 @@ export function useUsageQuery(opts: UsageQueryOptions) {
         id: "rollup-timezone",
         severity: "warning",
         text: collectionDiagnostics.value.timezoneMismatch,
-        actions: [{ label: "只看请求明细", run: () => setRollupsMode("detail_only") }],
+        actions: [
+          { label: t("dashboard.detailOnlyToggle"), run: () => setRollupsMode("detail_only") },
+        ],
       });
     } else if (rollupsMode.value === "detail_only") {
       list.push({
         id: "rollup-detail-only",
         severity: "info",
-        text: "当前只统计请求明细（不含只有日粒度的历史）；按日视图不受来源时区影响。",
-        actions: [{ label: "恢复自动参与", run: () => setRollupsMode("auto") }],
+        text: t("dashboard.detailOnlyOnly"),
+        actions: [{ label: t("dashboard.detailOnlyResume"), run: () => setRollupsMode("auto") }],
       });
     }
     // PR2：采集错误通知（读取失败 / 状态不可用）——独立通道，由页面桥接；
@@ -954,7 +974,10 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     return {
       severity: top.severity,
       count: list.length,
-      text: list.length === 1 ? top.text : `${top.text}（共 ${list.length} 条通知）`,
+      text:
+        list.length === 1
+          ? top.text
+          : top.text + t("dashboard.noticeCountSuffix", { count: list.length }),
       expandable: list.length > 1 || (top.details?.length ?? 0) > 0,
       // 折叠态保留**最高严重级别那条**的动作（"重试"不必先展开才能点到）；
       // 其余条目的动作在展开后各自出现。

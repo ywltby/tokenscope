@@ -18,7 +18,10 @@ import DateRangeSelect from "../components/DateRangeSelect.vue";
 import { useUsageQuery, type NoticeAction, type NoticeItem } from "../composables/useUsageQuery";
 import { useCollectionStatus, type CollectionPillView } from "../composables/collectionStatus";
 import { useTimezone } from "../composables/timezone";
+
+const t = useT();
 import { realGroups } from "../lib/chartData";
+import { useT } from "../lib/i18n";
 
 const props = defineProps<{ refreshKey: number }>();
 /// 任务 3：来源异常通知的「去设置 ›」动作——由应用壳切换到设置页。
@@ -144,20 +147,21 @@ const noticeDetailRows = computed<NoticeRow[]>(() => {
   return rows;
 });
 
-const dimOptions: { label: string; value: Dim }[] = [
-  { label: "按时间", value: "day" },
-  { label: "按模型", value: "model" },
-  { label: "按项目", value: "project" },
-  { label: "按应用", value: "agent" },
-];
+const dimOptions = computed<{ label: string; value: Dim }[]>(() => [
+  { label: t("dashboard.dimByDay"), value: "day" },
+  { label: t("dashboard.dimByModel"), value: "model" },
+  { label: t("dashboard.dimByProject"), value: "project" },
+  { label: t("dashboard.dimByAgent"), value: "agent" },
+]);
 
-const agentOptions: { label: string; value: AgentFilter; icon: string }[] = [
-  { label: "全部", value: "all", icon: "all" },
+// i18n：应用名（品牌）保持原文；「全部」是界面文案。
+const agentOptions = computed<{ label: string; value: AgentFilter; icon: string }[]>(() => [
+  { label: t("dashboard.agentAll"), value: "all", icon: "all" },
   { label: "Claude Code", value: "claude", icon: "claude" },
   { label: "Codex", value: "codex", icon: "openai" },
   { label: "WorkBuddy", value: "workbuddy", icon: "workbuddy" },
   { label: "WorkBuddy AI", value: "workbuddy-ai", icon: "workbuddy-ai" },
-];
+]);
 
 // UX05：真实可绘制类别（排除"合计"行）——用 computed 缓存，避免在模板里
 // 每次渲染都 filter 生成新数组；新数组会改变 TrendChart 的 groups 身份，
@@ -238,8 +242,10 @@ defineExpose({
     <!-- 页面标题行：先回答"覆盖什么时间"，右侧状态胶囊 + 刷新动作 -->
     <div class="page-head">
       <div class="head-left">
-        <h1 class="page-title">用量汇总</h1>
-        <div v-if="drill" class="page-sub">已筛选 {{ drillLabel(drill) }}</div>
+        <h1 class="page-title">{{ t("dashboard.title") }}</h1>
+        <div v-if="drill" class="page-sub">
+          {{ t("dashboard.filtered", { label: drillLabel(drill) }) }}
+        </div>
       </div>
       <div class="head-right">
         <!-- U06/PR2：正常态显示静态"已更新"（自带状态圆点，无常驻更新时间，
@@ -303,18 +309,23 @@ defineExpose({
               <path d="M20 4.2V9h-4.8" />
             </svg>
           </template>
-          刷新
+          {{ t("dashboard.refresh") }}
         </NButton>
       </div>
     </div>
     <!-- 固定两行：来源；日期 / 聚合维度。时区在设置页调整。 -->
     <div class="filter-row filter-controls">
       <div class="filter-line">
-        <SegmentedControl v-model="agent" :options="agentOptions" aria-label="数据来源" icon-only />
+        <SegmentedControl
+          v-model="agent"
+          :options="agentOptions"
+          :aria-label="t('dashboard.sourceAria')"
+          icon-only
+        />
       </div>
       <div class="filter-line">
         <DateRangeSelect v-model:preset="preset" :tz="tz" :range="batchRange" />
-        <SegmentedControl v-model="by" :options="dimOptions" aria-label="聚合维度" />
+        <SegmentedControl v-model="by" :options="dimOptions" :aria-label="t('dashboard.dimAria')" />
       </div>
     </div>
     <!-- U04：合并通知——页面上只显示一条（原来最多七种通知条并存），展示最高
@@ -364,7 +375,7 @@ defineExpose({
         :aria-expanded="showNoticeDetails"
         @click="showNoticeDetails = !showNoticeDetails"
       >
-        {{ showNoticeDetails ? "收起" : "详情" }}
+        {{ showNoticeDetails ? t("dashboard.collapse") : t("dashboard.details") }}
       </button>
       <button
         v-for="a in noticeHeadline.actions"
@@ -398,9 +409,9 @@ defineExpose({
       <div style="min-height: 380px">
         <!-- 设计系统 Task 7：空数据状态明确可见，并给出下一步指引 -->
         <div v-if="report && report.groups.length === 0" class="empty-state" role="status">
-          <div class="empty-title">暂无数据</div>
+          <div class="empty-title">{{ t("dashboard.emptyTitle") }}</div>
           <div class="empty-hint">
-            调整时间范围或来源后重试；若刚配置来源，先在设置页确认目录正确。
+            {{ t("dashboard.emptyHint") }}
           </div>
         </div>
         <template v-else-if="report">
@@ -408,7 +419,7 @@ defineExpose({
           <!-- UX05：以真实类别数判断——≥1 绘制图表；0 给明确空状态，不画无内容图 -->
           <TrendChart v-if="chartGroups.length >= 1" :groups="chartGroups" :by="report.by" />
           <div v-else class="chart-empty" role="status">
-            <span class="chart-empty-text">暂无可绘制的类别（仅有合计行）。</span>
+            <span class="chart-empty-text">{{ t("dashboard.chartEmpty") }}</span>
           </div>
           <UsageTable
             :report="report"
