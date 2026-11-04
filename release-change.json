@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
-  "kind": "minor",
-  "summary": "界面双语（简体中文/英语）与语言偏好持久化：vue-i18n 资源集中管理、设置页语言切换、托盘菜单双语；AC10 验收脚本的 SQLite 瞬时文件豁免收窄到受控历史库"
+  "kind": "patch",
+  "summary": "修复 Claude 同刻候选收敛与 Codex 重播时间不后移（历史库合并与去重层确定性规则，PARSE_RULES_REVISION 5）"
 }

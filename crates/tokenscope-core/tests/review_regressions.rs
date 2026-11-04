@@ -13,6 +13,10 @@
 //! 10 遗留迁移整批原子（失败保持事务前状态）；
 //! 11 "净新增 token"只统计本批真正新增的事件；
 //! 13 采集统一单飞：不同参数的采集也必须串行；
+//! 14 同刻候选收敛：同身份、相同事件时间的不同终值候选，完整采集与增量采集
+//!    （分批到达）必须收敛到同一事实，不由到达顺序决定（2026-11-05）；
+//! 15 Codex 重播族时间不后移：同保守身份的后到重播副本不得把已保存事件的
+//!    完成时间推到重播时刻，重扫必须幂等（2026-11-05）；
 //! 以及计划要求：仅明细查询、升级前备份、事务内 generation 校验。
 
 use std::path::{Path, PathBuf};
@@ -718,6 +722,157 @@ fn stale_claude_copy_cannot_lower_saved_terminal_value() {
     assert_eq!(history.totals().unwrap().output, 21, "期望 20 + 1");
     assert_eq!(history.event_count().unwrap(), 2);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+// ================================================================ 14：同刻候选收敛
+
+/// 审阅 #14：同 `(session, message.id)`、**相同事件时间**但 token 终值不同的
+/// 两份候选（跨文件副本），无论完整采集一次看到两份，还是增量采集分两轮先后
+/// 到达，历史库必须收敛到**同一**事实——终值选择不由到达顺序决定。
+#[test]
+fn claude_same_instant_candidates_converge_regardless_of_arrival_order() {
+    let _g = serial();
+    let ts = "2026-09-15T08:00:05Z";
+    // 文件 a（字典序靠前）：终值 20；文件 b：终值 50。
+    let lines_a = vec![
+        claude_context("s1", "2026-09-15T08:00:00Z", "/work/app"),
+        claude_assistant("s1", "m1", ts, "claude-opus-5-5", 100, 20),
+    ];
+    let lines_b = vec![
+        claude_context("s1", "2026-09-15T08:00:00Z", "/work/app"),
+        claude_assistant("s1", "m1", ts, "claude-opus-5-5", 100, 50),
+    ];
+
+    // 路径 1：完整采集一轮看到两份。
+    let dir = temp_dir("same-instant-full");
+    let claude = dir.join("claude");
+    write_lines(&claude.join("projects/p/a.jsonl"), &lines_a);
+    write_lines(&claude.join("projects/p/b.jsonl"), &lines_b);
+    let o = opts(&dir, Some(claude.clone()), None);
+    summary(&o).unwrap();
+    let history = history_of(&dir);
+    assert_eq!(history.event_count().unwrap(), 1);
+    let full_run_output = history.totals().unwrap().output;
+    assert_eq!(
+        full_run_output, 50,
+        "全量去重取同刻候选的确定性代表（四桶总量最大者）"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+
+    // 路径 2：增量到达——先 a 后 b；再反向先 b 后 a。终值必须与完整采集一致。
+    for (first, second, tag) in [
+        ("a.jsonl", "b.jsonl", "a-then-b"),
+        ("b.jsonl", "a.jsonl", "b-then-a"),
+    ] {
+        let dir = temp_dir(&format!("same-increment-{tag}"));
+        let claude = dir.join("claude");
+        let source_of = |name: &str| {
+            if name == "a.jsonl" {
+                lines_a.clone()
+            } else {
+                lines_b.clone()
+            }
+        };
+        write_lines(&claude.join("projects/p").join(first), &source_of(first));
+        let o = opts(&dir, Some(claude.clone()), None);
+        summary(&o).unwrap();
+        let history = history_of(&dir);
+        assert_eq!(history.event_count().unwrap(), 1, "{tag}: 首轮单候选");
+        let after_first = history.totals().unwrap().output;
+        write_lines(&claude.join("projects/p").join(second), &source_of(second));
+        summary(&o).unwrap();
+        assert_eq!(history.event_count().unwrap(), 1, "{tag}: 候选合并不新增");
+        let after_second = history.totals().unwrap().output;
+        assert_eq!(
+            after_second, full_run_output,
+            "{tag}: 增量收敛必须等于完整采集结果（先 {after_first} 后 {after_second}）"
+        );
+        // 重启幂等：再来一轮全量重扫，终值不漂移。
+        summary(&opts_with_refresh(&o)).unwrap();
+        assert_eq!(
+            history.totals().unwrap().output,
+            full_run_output,
+            "{tag}: 重扫后仍收敛到同一事实"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+fn opts_with_refresh(o: &SummaryOptions) -> SummaryOptions {
+    let mut r = o.clone();
+    r.refresh = true;
+    r
+}
+
+// ================================================================ 15：Codex 重播时间不后移
+
+/// 审阅 #15：同一保守重播身份（同 session/模型/四桶）的请求先以 t0 入库
+///（首条 = 请求完成时刻），随后 t1 > t0 的重播副本/重发增量到达。历史事件
+/// 的时间必须保持 t0——重播不得把完成时间推后（跨日重播会污染日期统计）；
+/// 之后重扫（含 refresh）也不得翻转回 t1，全量与增量收敛一致。
+#[test]
+fn codex_replay_keeps_earliest_event_time() {
+    let _g = serial();
+    let dir = temp_dir("codex-replay-time");
+    let codex = dir.join("codex");
+    let t0 = "2026-07-17T15:02:00.000Z";
+    let t1 = "2026-07-18T16:08:00.000Z";
+    let lines_a = vec![
+        codex_meta("sess-1", "/work/app"),
+        codex_context("gpt-5.6-sol", "/work/app"),
+        codex_token_count(t0, 750, 100),
+    ];
+    let lines_b = vec![
+        codex_meta("sess-1", "/work/app"),
+        codex_context("gpt-5.6-sol", "/work/app"),
+        codex_token_count(t1, 750, 100),
+    ];
+    let o = opts(&dir, None, Some(codex.clone()));
+
+    // 增量：t0 文件先到（归属日期 07-17），t1 重播副本后到。
+    codex_rollout(&codex, "sessions/2026/07/17/rollout-a.jsonl", &lines_a);
+    summary(&o).unwrap();
+    let history = history_of(&dir);
+    let after_first = history.stored_events().unwrap();
+    assert_eq!(after_first.len(), 1);
+    assert_eq!(after_first[0].ts.to_string(), "2026-07-17T15:02:00Z");
+
+    codex_rollout(&codex, "sessions/2026/07/17/rollout-b.jsonl", &lines_b);
+    summary(&o).unwrap();
+    assert_eq!(history.event_count().unwrap(), 1, "重播合并，不新增事件");
+    let stored = history.stored_events().unwrap();
+    assert_eq!(
+        stored[0].ts.to_string(),
+        "2026-07-17T15:02:00Z",
+        "重播副本不得把已保存事件的完成时间推后到重播时刻"
+    );
+    assert_eq!(history.totals().unwrap().input, 750, "用量不翻倍");
+
+    // 重扫（refresh）：事件时间不得翻转回重播时刻。
+    summary(&opts_with_refresh(&o)).unwrap();
+    let stored = history.stored_events().unwrap();
+    assert_eq!(
+        stored[0].ts.to_string(),
+        "2026-07-17T15:02:00Z",
+        "重扫不得翻转回重播时刻"
+    );
+
+    // 完整采集（两份同时可见）也收敛到最早完成时刻。
+    let dir2 = temp_dir("codex-replay-time-full");
+    let codex2 = dir2.join("codex");
+    codex_rollout(&codex2, "sessions/2026/07/17/rollout-a.jsonl", &lines_a);
+    codex_rollout(&codex2, "sessions/2026/07/17/rollout-b.jsonl", &lines_b);
+    summary(&opts(&dir2, None, Some(codex2))).unwrap();
+    let history2 = history_of(&dir2);
+    assert_eq!(history2.event_count().unwrap(), 1);
+    let stored2 = history2.stored_events().unwrap();
+    assert_eq!(
+        stored2[0].ts.to_string(),
+        "2026-07-17T15:02:00Z",
+        "完整采集同样收敛到最早事件时间"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&dir2).ok();
 }
 
 // ================================================================ 6：日汇总主键
@@ -2100,7 +2255,8 @@ fn batch_preview_matches_commit_for_same_fact_updates() {
         &[row("px-1", t), row("px-2", t + 1)],
         &[],
     );
-    // 首次导入：同保守身份合为一事实（px-2 时间更晚 → 更新胜出）。
+    // 首次导入：同保守身份合为一事实（Codex 重播族取最早事件时间——
+    // px-1（t）胜出，px-2（t+1）按陈旧保留）。
     {
         let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
         let first = ccs::preview(&source, &history, "UTC").unwrap();
@@ -2114,8 +2270,9 @@ fn batch_preview_matches_commit_for_same_fact_updates() {
     }
     assert_eq!(history.event_count().unwrap(), 1);
 
-    // px-1 的时间改为 t+2 后重新预览/提交：px-1 更新事实，px-2 经自己的
-    // 来源记录命中同一事实且观察时间更早 → 陈旧。两侧数字必须一致。
+    // px-1 的时间改为 t+2 后重新预览/提交：重播族的完成时刻以最早为准，
+    // 两条后到观察（t+2 / t+1）都按陈旧保留，事实保持最早完成时间。
+    // 预览与提交的处置数字必须一致（R01 的核心不变量）。
     // （先丢弃第一只读连接：其读事务会挡住本次 UPDATE。）
     {
         let conn = rusqlite::Connection::open(dir.join("cc-switch.db")).unwrap();
@@ -2128,11 +2285,14 @@ fn batch_preview_matches_commit_for_same_fact_updates() {
     let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
     let preview = ccs::preview(&source, &history, "UTC").unwrap();
     assert_eq!(preview.would_insert, 0);
-    assert_eq!(preview.would_update, 1, "px-1（t+2）更新事实");
+    assert_eq!(
+        preview.would_update, 0,
+        "更晚的重播观察不得更新最早完成时刻"
+    );
     assert_eq!(preview.would_unchanged, 0);
     assert_eq!(
-        preview.would_stale, 1,
-        "px-2（t+1）经自身来源记录命中同一事实"
+        preview.would_stale, 2,
+        "px-1（t+2）与 px-2（t+1）都按陈旧保留"
     );
     let report = ccs::commit(
         &preview.plan_id,
@@ -2142,9 +2302,9 @@ fn batch_preview_matches_commit_for_same_fact_updates() {
     )
     .unwrap();
     assert_eq!(report.requests_inserted, 0);
-    assert_eq!(report.requests_updated, 1, "预览与提交一致");
+    assert_eq!(report.requests_updated, 0, "预览与提交一致");
     assert_eq!(report.requests_unchanged, 0);
-    assert_eq!(report.requests_stale, 1);
+    assert_eq!(report.requests_stale, 2);
     assert_eq!(history.event_count().unwrap(), 1, "事实始终一条");
     assert_eq!(history.totals().unwrap().input, 100, "token 不变");
     std::fs::remove_dir_all(&dir).ok();

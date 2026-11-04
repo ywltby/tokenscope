@@ -636,7 +636,11 @@ static COLLECT_SERIAL: Mutex<()> = Mutex::new(());
 /// v4（N18）：解析 Claude `cache_creation` 的 5 分钟 / 1 小时写入分项——
 /// v3 及更早登记的指纹（`3|…`）代表"未读取分项"的旧解析结果，必须失配
 /// 重解析一次才能给同一事件补齐分档（源日志未变也不得跳过）。
-pub const PARSE_RULES_REVISION: u32 = 4;
+/// v5（2026-11-05）：同刻候选收敛与重播时间不后移——旧库把"同刻后到者/
+/// 更晚重播者"保存为终值，来源仍在的文件重解析后按新判定幂等收敛到
+/// 确定性代表（Claude 强身份）或最早完成时刻（Codex 重播族）；来源已
+/// 删除的事实保留原值（不猜造）。
+pub const PARSE_RULES_REVISION: u32 = 5;
 /// 观测：当前正在跑的采集管线数与历史峰值（测试断言"不同参数不并行"）。
 static COLLECT_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 static COLLECT_MAX_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);

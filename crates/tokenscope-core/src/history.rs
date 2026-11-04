@@ -2313,11 +2313,22 @@ fn lookup_overlap_candidate(conn: &Connection, w: &EventWrite) -> Result<Option<
 
 /// 库内处置判定（纯函数，预览与写入共用）。
 ///
-/// 优先级**先于**观察时间：原生日志比 CCS 导入更可信，同一条请求的原生记录
-/// 无论事件时间是否早于已存 CCS 值都要胜出（计划 §5.3：原生记录按原生终值
-/// 规则选取，与导入顺序无关）——否则 CCS 的 `created_at` 稍晚几秒时，后采集
-/// 的原生终值会被"观察时间更早"误判为过期。观察时间只在**同优先级**内区分
-/// 新旧（同请求的流式更新、旧副本回放）。
+/// 优先级**先于**新旧比较：原生日志比 CCS 导入更可信，同一条请求的原生记录
+/// 无论事件时间是否早于已存 CCS 值都胜出（计划 §5.3：原生记录按原生终值
+/// 规则选取，与导入顺序无关）；观察时间只在**同优先级**内区分。
+///
+/// 同优先级内的收敛规则与全局去重（`dedupe.rs`）一致，**与到达顺序无关**
+///（审阅 #14/#15）：
+/// - Claude / WorkBuddy（强身份）：更晚事件时间胜出（流式终值）；**相同
+///   时间**的不同内容候选取确定性代表——四桶总量更大者，总量并列取事件键
+///   更大者（原生键 = `native|app|路径|行序|指纹`，与去重层的
+///   `(source_path, line, 指纹)` 字典序同构）；
+/// - Codex（保守重播族）：**更早事件时间**胜出——同族（同 session/模型/
+///   四桶）的后到重播副本不得把已保存事件的完成时刻推后；相同时间取事件键
+///   更大者。
+///
+/// 两条规则都只依赖候选自身的稳定属性，重复采集、重启与全量/增量采集
+/// 收敛到同一事实；旧语义（同刻后到者覆盖）在增量采集下会随到达顺序翻转。
 fn classify_against(existing: &StoredEvent, w: &EventWrite) -> WriteClass {
     if content_equal(existing, w) {
         if w.precedence > existing.precedence {
@@ -2334,11 +2345,38 @@ fn classify_against(existing: &StoredEvent, w: &EventWrite) -> WriteClass {
         WriteClass::Update
     } else if existing.precedence > w.precedence {
         WriteClass::Conflict
-    } else if w.observed_at < existing.observed_at {
-        WriteClass::Stale
     } else {
-        WriteClass::Update
+        match w.ts.cmp(&existing.ts) {
+            std::cmp::Ordering::Equal => {
+                // 同刻：确定性代表胜出（总量大者优先，并列取事件键更大者）。
+                if same_instant_challenger_wins(existing, w) {
+                    WriteClass::Update
+                } else {
+                    WriteClass::Stale
+                }
+            }
+            // Codex 重播族：更早事件时间胜出；强身份（Claude/WB）：更晚胜出。
+            order if (order == std::cmp::Ordering::Less) == (w.app == AgentKind::Codex) => {
+                WriteClass::Update
+            }
+            _ => WriteClass::Stale,
+        }
     }
+}
+
+/// 同刻候选的胜负（内容已确认不同）：四桶总量更大者胜；总量并列时——
+/// 事件键相同 = **同一来源记录**在变化后的解析上下文（如换根重归属）下的
+/// 重新观察，挑战者胜出（键相同则行为恒定，幂等）；键不同取键更大者
+///（键是来源记录的稳定身份，比较结果与到达顺序无关）。
+fn same_instant_challenger_wins(existing: &StoredEvent, w: &EventWrite) -> bool {
+    let (w_total, e_total) = (w.tokens.total(), existing.tokens.total());
+    if w_total != e_total {
+        return w_total > e_total;
+    }
+    if w.event_key == existing.event_key {
+        return true;
+    }
+    w.event_key > existing.event_key
 }
 
 /// 库内同键日汇总快照的读取形态（含来源时区与批次归属，供诊断）。
