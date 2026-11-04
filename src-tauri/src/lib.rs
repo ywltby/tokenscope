@@ -1185,7 +1185,57 @@ mod tests {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
-    /// i18n：托盘菜单随语言切换；缺失/未知值回落简体中文（不因脏值失效）。
+    /// i18n：政策更新提示的中文原文必须与前端资源一致——后端 detail 只作
+    /// "需要重新同意"的信号，展示文案取自资源；两边措辞漂移会让同一提示出现
+    /// 两种说法（英文界面固定用 en-US 资源，不显示后端常量）。
+    ///
+    /// 运行期读取（不是 `include_str!`），沿用隐私政策契约测试的口径：只读
+    /// 仓库内源文件、不进入构建输入清单。
+    #[test]
+    fn policy_updated_notice_matches_frontend_catalog() {
+        let catalog = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../frontend/src/lib/locales/zh-CN.ts"
+        ))
+        .expect("前端简体中文资源必须存在");
+        let expected = format!("updatedNotice: \"{}\"", privacy::POLICY_UPDATED_DETAIL);
+        assert!(
+            catalog.contains(&expected),
+            "policy_updated_detail_drift：后端 {:?} 与 zh-CN.ts 不一致",
+            privacy::POLICY_UPDATED_DETAIL
+        );
+    }
+
+    /// i18n：安装器语言——中文在前（系统语言不在列表时回落中文），英文在后；
+    /// 不弹出语言选择框（`displayLanguageSelector` 缺省 false，由系统语言自动
+    /// 选择），因此交互安装与静默安装都不新增页面。
+    ///
+    /// 静默安装（`/S`）的生效语言仍未在本仓实跑取证：NSIS 在静默模式不显示
+    /// 语言框，实际语言取决于安装器默认 `$LANGUAGE`。这里只锁定"配置层"契约，
+    /// 不声称静默语言已验证。
+    #[test]
+    fn installer_offers_chinese_and_english_without_selector() {
+        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("壳配置必须是合法 JSON");
+        let nsis = &config["bundle"]["windows"]["nsis"];
+        let languages: Vec<&str> = nsis["languages"]
+            .as_array()
+            .expect("nsis.languages 必须是数组")
+            .iter()
+            .map(|v| v.as_str().expect("语言项必须是字符串"))
+            .collect();
+        assert_eq!(languages, vec!["SimpChinese", "English"]);
+        assert!(
+            nsis.get("displayLanguageSelector").is_none(),
+            "不得开启语言选择框：自动跟随系统语言，交互与静默安装都不新增页面"
+        );
+        assert_eq!(
+            nsis["installMode"].as_str(),
+            Some("currentUser"),
+            "安装模式不变（无人值守安装与升级依赖它）"
+        );
+    }
+
     #[test]
     fn tray_labels_follow_language_with_chinese_fallback() {
         assert_eq!(
