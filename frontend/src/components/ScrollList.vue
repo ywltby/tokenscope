@@ -1,5 +1,6 @@
 <script setup lang="ts" generic="T">
 import { computed, nextTick, ref, watch } from "vue";
+import { t } from "../lib/translate";
 
 const props = defineProps<{
   rows: T[];
@@ -78,7 +79,7 @@ watch(
   >
     <slot :rows="visibleRows" />
     <div v-if="hasMore || blocked" class="scroll-list-status" role="status">
-      {{ blocked || (loading ? "正在加载…" : "向下滚动自动加载更多") }}
+      {{ blocked || (loading ? t("dashboard.scrollLoading") : t("dashboard.scrollMore")) }}
     </div>
   </div>
 </template>

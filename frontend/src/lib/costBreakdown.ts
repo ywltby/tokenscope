@@ -4,6 +4,7 @@
 import { fmtNum } from "../types";
 import { formatMoney } from "./formatMoney";
 import { TOKEN_BUCKETS, UNIT_PRICE_SUFFIX_AFTER_AMOUNT, tokenBucketLabel } from "./tokenDisplay";
+import { t } from "./translate";
 import type { CostLine, CostLineKind, EventCostBreakdown, MatchMode } from "../types";
 
 /** 单行展示模型：label/value 两列；detail 为整行说明；divider 分组。 */
@@ -19,26 +20,27 @@ export interface BreakdownRow {
   total?: boolean;
 }
 
-const SOURCE_LABEL: Record<string, string> = {
-  external: "外置价格表",
-  "models.dev": "models.dev",
-  openrouter: "OpenRouter",
-};
+/** 计价来源显示名（`models.dev` / `OpenRouter` 是品牌名，不翻译）。 */
+function sourceLabel(source: string): string {
+  return source === "external" ? t("cost.sourceExternal") : source;
+}
 
-const MATCH_LABEL: Record<MatchMode, string> = {
-  full: "完整匹配",
-  full_variant_fallback: "完整匹配（变体回退）",
-  prefix: "前缀匹配",
-  prefix_variant_fallback: "前缀匹配（变体回退）",
+const MATCH_LABEL_KEY: Record<MatchMode, string> = {
+  full: "cost.matchFull",
+  full_variant_fallback: "cost.matchFullVariant",
+  prefix: "cost.matchPrefix",
+  prefix_variant_fallback: "cost.matchPrefixVariant",
 };
 
 // UX07：分项显示名消费 tokenDisplay 单一来源（U14：缓存命中）；
 // N18：5m/1h 分档行不在四桶清单里，标签在此补齐。
-export const KIND_LABEL: Record<CostLineKind, string> = Object.fromEntries([
-  ...TOKEN_BUCKETS.map((b) => [b.key, b.key === "input" ? "输入（扣除缓存）" : b.label]),
-  ["cache_write_5m", "缓存写（5 分钟档）"],
-  ["cache_write_1h", "缓存写（1 小时档）"],
-]) as Record<CostLineKind, string>;
+// i18n：改为**函数**（读取时才解析），调用点都在渲染期，语言切换后自然更新。
+export function kindLabel(kind: CostLineKind): string {
+  if (kind === "input") return t("buckets.inputNet");
+  if (kind === "cache_write_5m") return t("buckets.cacheWrite5m");
+  if (kind === "cache_write_1h") return t("buckets.cacheWrite1h");
+  return tokenBucketLabel(kind as (typeof TOKEN_BUCKETS)[number]["key"]);
+}
 
 /** USD/百万 token 单价（UX07：unit 场景单一入口）。 */
 function fmtUnit(v: number): string {
@@ -67,19 +69,24 @@ function factRows(bd: EventCostBreakdown): BreakdownRow[] {
   const cw = cacheWriteTokens(bd);
   const cr = bd.lines.find((l) => l.kind === "cache_read")?.tokens ?? 0;
   const rows: BreakdownRow[] = [
-    { label: "匹配模型", value: m.raw_key },
-    { label: "渠道", value: m.channel ?? "暂无数据" },
-    { label: "请求时间", value: m.request_at ?? "暂无数据" },
+    { label: t("cost.matchedModel"), value: m.raw_key },
+    { label: t("cost.channel"), value: m.channel ?? t("cost.noData") },
+    { label: t("cost.requestAt"), value: m.request_at ?? t("cost.noData") },
     {
-      label: "prompt tokens",
-      detail: `输入（扣除缓存） ${fmtNum(input)} + ${tokenBucketLabel("cache_write")} ${fmtNum(cw)} + ${tokenBucketLabel("cache_read")} ${fmtNum(cr)} = 总输入 ${fmtNum(bd.basis_value)}`,
+      label: t("cost.promptTokens"),
+      detail: t("cost.inputFormula", {
+        input: fmtNum(input),
+        cacheWrite: `${tokenBucketLabel("cache_write")} ${fmtNum(cw)}`,
+        cacheRead: `${tokenBucketLabel("cache_read")} ${fmtNum(cr)}`,
+        total: fmtNum(bd.basis_value),
+      }),
     },
-    { label: "命中档位", value: bd.segment_label ?? "基础价档" },
+    { label: t("cost.hitSegment"), value: bd.segment_label ?? t("cost.baseSegment") },
     {
-      label: "时间档",
+      label: t("cost.timeSegment"),
       value: m.schedule_label
-        ? `${m.schedule_label}（时区 ${m.schedule_timezone ?? "暂无数据"}）`
-        : "无峰谷规则",
+        ? `${m.schedule_label}${t("cost.tzSuffix", { tz: m.schedule_timezone ?? t("cost.noData") })}`
+        : t("cost.noPeakRule"),
     },
   ];
   return rows;
@@ -91,24 +98,26 @@ function formulaRows(lines: CostLine[]): BreakdownRow[] {
       // F04：单价已知但 token × 单价超出可表示范围——分项不计金额、
       // token 保留为未计价；不得显示为免费或 $0。
       return {
-        label: KIND_LABEL[l.kind],
-        value: `${fmtNum(l.tokens)} token，金额超出可表示范围`,
+        label: kindLabel(l.kind),
+        value: t("cost.overflowValue", { tokens: fmtNum(l.tokens) }),
         unknown: true,
       };
     }
     if (!l.priced || l.unit_price == null) {
       return {
-        label: KIND_LABEL[l.kind],
-        value: `${fmtNum(l.tokens)} token，缺少单价`,
+        label: kindLabel(l.kind),
+        value: t("cost.missingUnit", { tokens: fmtNum(l.tokens) }),
         unknown: l.tokens > 0,
       };
     }
     // same_as_input：单价来自同层输入价（unit_price 已由后端解析为实际数值），
     // 与普通固定价区分显示（缓存读取定价解析计划 Task 5）。
     const unit =
-      l.rate_kind === "same_as_input" ? `输入价 ${fmtUnit(l.unit_price)}` : fmtUnit(l.unit_price);
+      l.rate_kind === "same_as_input"
+        ? t("cost.inputPrice", { price: fmtUnit(l.unit_price) })
+        : fmtUnit(l.unit_price);
     return {
-      label: KIND_LABEL[l.kind],
+      label: kindLabel(l.kind),
       // RC07：单位来自 tokenDisplay 的单一来源（不再各处自造 "/M" 字面量），
       // 完整量纲在浮层内另有说明（USD / 1M token）。金额仍来自后端 DTO。
       value: `${fmtNum(l.tokens)} × ${unit}${UNIT_PRICE_SUFFIX_AFTER_AMOUNT} = ${fmtMoney(l.subtotal)}`,
@@ -122,20 +131,20 @@ function resultRows(bd: EventCostBreakdown): BreakdownRow[] {
   if (bd.cost_usd === 0 && !bd.complete && unpriced.length > 0) {
     // 完全未知：不得显示 $0.00
     rows.push({
-      label: "结果",
-      value: "无法估算（全部分项缺少单价）",
+      label: t("cost.result"),
+      value: t("cost.cannotEstimate"),
       unknown: true,
       total: true,
     });
   } else {
-    rows.push({ label: "估算合计", value: fmtMoney(bd.cost_usd), total: true });
+    rows.push({ label: t("cost.estimateTotal"), value: fmtMoney(bd.cost_usd), total: true });
   }
   if (bd.cache_write_split_estimated) {
     // N18：写入分项未知（旧日志/源日志已删）——金额是按写入总量单价的
     // 估算，不得当作完整精确费用；分档拆分见候选声明。
     rows.push({
-      label: "写入分档未知",
-      detail: "该请求缺少 5 分钟/1 小时写入分项，写费按写入总量单价估算（可能低估 1 小时写入）",
+      label: t("cost.writeTierUnknown"),
+      detail: t("cost.writeTierUnknownDetail"),
       unknown: true,
     });
   }
@@ -144,8 +153,8 @@ function resultRows(bd: EventCostBreakdown): BreakdownRow[] {
   // 含未计价 token（复核项 6）。
   if (unpriced.length > 0) {
     rows.push({
-      label: "未计价",
-      detail: "缺价 ≠ 免费：未计价 token 不计入合计，数量见上方各行",
+      label: t("cost.unpriced"),
+      detail: t("cost.unpricedDetail"),
       unknown: true,
     });
   }
@@ -162,18 +171,24 @@ function sourceRows(bd: EventCostBreakdown): BreakdownRow[] {
         ? // 复核项 3：只描述**所选候选**的已知事实——事件缺写入分档、
           // 写费按合并价估算。其他候选为何不完整由后端的排除披露逐条
           // 说明，这里不得一律归因为事件缺分档。
-          `候选 ${m.candidate_count} 条，未全部完整；所选候选因事件缺写入分档，写费按合并价估算（非完整精确费用）`
-        : `候选 ${m.candidate_count} 条（均不完整），取已知费用最高者；未计价 token 见未知行`
-      : `候选 ${m.candidate_count} 条（完整 ${m.complete_candidate_count ?? "?"}/不完整 ${
-          m.incomplete_candidate_count ?? "?"
-        }），在完整候选中取最高费用（保守估算，非服务器实际路由）`;
+          t("cost.pickHighestPartial", { count: m.candidate_count })
+        : t("cost.pickKnownHighest", { count: m.candidate_count })
+      : t("cost.pickHighestComplete", {
+          count: m.candidate_count,
+          complete: m.complete_candidate_count ?? "?",
+          incomplete: m.incomplete_candidate_count ?? "?",
+        });
   const rows: BreakdownRow[] = [
-    { label: "计价来源", value: SOURCE_LABEL[m.source] ?? m.source },
-    { label: "匹配方式", value: MATCH_LABEL[m.match_mode] ?? m.match_mode },
-    { label: "候选选择", detail: selection },
+    { label: t("cost.priceSource"), value: sourceLabel(m.source) },
+    { label: t("cost.matchMode"), value: t(MATCH_LABEL_KEY[m.match_mode]) },
+    { label: t("cost.candidatePick"), detail: selection },
   ];
   if (bd.excluded_candidate_warning) {
-    rows.push({ label: "估算范围", detail: bd.excluded_candidate_warning, unknown: true });
+    rows.push({
+      label: t("cost.estimateScope"),
+      detail: bd.excluded_candidate_warning,
+      unknown: true,
+    });
   }
   return rows;
 }
@@ -196,7 +211,7 @@ export function formatCostBreakdownText(bd: EventCostBreakdown): string {
   return formatCostBreakdownRows(bd)
     .map((r) => {
       if (r.divider) return "──────────";
-      if (r.detail != null) return [r.label, r.detail].filter(Boolean).join("：");
+      if (r.detail != null) return [r.label, r.detail].filter(Boolean).join(t("cost.labelJoin"));
       return [r.label, r.value].filter(Boolean).join(" ");
     })
     .join("\n");

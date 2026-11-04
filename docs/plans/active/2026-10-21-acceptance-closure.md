@@ -283,6 +283,7 @@ AC03–AC05 的 CI 接入：
 >
 > **CI 接线准备（未触发）**：新增 `scripts/check_native_single_instance_evidence.py`——`failed` 必须为空且每项都要在 `checks` 里 `ok=false`；`pending` 必须落在允许集合内；托盘三项必须明确出现在 `checks` 或 `pending`；`checks` 明细与 `failed`/`pending` 汇总不一致（`ok=false` 未计入 failed、`ok=true` 却计入 failed/pending、无结论项未计入 pending）一律阻断；关键项必须 `ok=true`。放行结论固定为 **部分验证**（`verdict=partial`、`ac10_conclusion=none`），并列出未验证项，**不得用作 AC10 已通过的结论**。`ui-e2e.yml` **本轮不改**（契约测试断言工作流仍不含 `ui-single-instance`），接线动作留待确认后在 CI 实跑。**未验证**：GitHub-hosted Runner 上的 `ui-single-instance` 实跑、Runner 上托盘可观测性、CI 步骤实际运行；AC10 因此保持开放，N12 继续开放。
 
+> **2026-11-04 豁免范围修正（PR #54）**：Native UI 实跑暴露 cceptance_root_isolated_from_real_data 误报——SQLite 回滚日志/-wal/-shm 在 eaddir 与 lstat 之间消失会被判成"路径无法检查"。修复分三步落地并经 CI 复核：①7f95a0b 在检查阶段按文件名后缀豁免 ENOENT；②9f7b9ce 让走查阶段行为一致；③63e701 把豁免**收窄到受控历史库**（<隔离根>/tokenscope/history.db 的 -journal/-wal/-shm，相对路径精确匹配），其他路径、其他错误码、存在时的链接与硬链接仍按原规则失败。定向回归覆盖：同后缀但不在受控库旁的 sources/…/foo.db-journal 消失仍拒绝、受控库三种后缀一致豁免、非 ENOENT 仍拒绝、走查已发现文件消失仍拒绝。AC10 的证据判定口径不变（托盘三项仍 pending，结论为部分验证），N12 继续开放。
 ### AC11 N12 人工签字批次（用户执行）
 
 - **受测物**：AC02 合入后当前最新 main 发布的 NSIS 安装包（以 Release 资产哈希为准）。

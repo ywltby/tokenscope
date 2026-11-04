@@ -23,6 +23,12 @@ N01–N09、N14–N16、N13、N18 已关闭；18 个责任编号中为 **14 项�
 
 [用户协议更新后的重新同意实施计划](archive/implemented/2026-10-28-consent-updates.md) 四个任务全部交付：共同同意修订 3（隐私政策 + 用户许可协议精确匹配、协议同意字段）、协议变更版本守卫、升级编排按目标版本能力装配与原生验收（含 `privacy-revision2-consent` 场景）随 [PR #52](https://github.com/ywltby/tokenscope/pull/52) 与 [PR #53](https://github.com/ywltby/tokenscope/pull/53) 合并 `3d11fa5`，并经 main Release 实跑发布 [v0.6.1](https://github.com/ywltby/tokenscope/releases/tag/v0.6.1)（预发布，2026-11-03，安装五场景、八组单跳、两条连续升级链、publish 全过）。AC07 暂缓、N10 开放与真实自启 D5 3.4 人工签字等边界由整合计划与收口计划承接。
 
+## 2026-11-04 界面双语（i18n）与 AC10 豁免范围修正（PR #54）
+
+[界面双语实施计划](active/2026-11-04-i18n.md) 的 I01–I08 已交付：`vue-i18n` 集中资源 + `lib/translate.ts`（纯函数库安全复用）、`settings.toml` 新增 `language` 与受闸门保护的 `settings_set_language`、界面/无障碍名称/Naive 组件语言/`html[lang]` 全量接入、托盘菜单双语且保存后重建。默认简体中文；同意前只允许内存切换（零持久化 IO，既有 `consent_screen_*` 断言不变），同意成功后先写后读权威值；语言与统计时区严格分离。隐私政策与用户许可协议正文仍是简体中文准据版本，英文界面显式标注，不声称已完成法律文本翻译。安装器双语经评估**未实施**（理由与重启条件见计划 §5）。
+
+AC10 验收脚本的 SQLite 瞬时文件豁免同时收窄：只在**受控历史库**（`<隔离根>/tokenscope/history.db`）的 `-journal` / `-wal` / `-shm` 且 `ENOENT` 时豁免，两个检查阶段行为一致；其他路径、其他错误、存在时的链接/硬链接仍按原规则检查，并由定向回归区分范围（见 `frontend/scripts/lib/native-single-instance.test.mjs`）。
+
 ## 2026-10-24/25 WorkBuddy 双来源（N17 已合并发布 v0.6.0）
 
 [WorkBuddy 国内版与 WorkBuddy AI 国际版接入计划](active/2026-10-21-workbuddy-adapters.md) 经用户 2026-10-24 确认修订并解除验收收口的串行依赖后，已在分支 `feat/workbuddy-adapters` 完成 WB01–WB09 实施（提交表、红绿摘要、十条不变量自审与对账结果见计划 §6.3）：现有来源等价泛化以冻结测试与变异证明行为不变；两版 WorkBuddy 以独立身份接入（设置格式 v3、隐私政策修订 2 与重新同意）；WB08 真实对账 Rust 与独立 Python 逐应用逐字段一致（国内版 2,881 条 / 国际版 656 条、坏行 0）；`ui-identity`、`ui-source-paths` 与新增 `privacy-policy-update` 原生场景本地通过。取号 minor 0.6.0。2026-10-25 用户经三轮外部评审后授权合并：**PR #49 普通合并 `44c026d`，main 的 CI / Native UI E2E / Release（构建、八组单跳、两条连续升级链、publish）全部实际成功，[v0.6.0](https://github.com/ywltby/tokenscope/releases/tag/v0.6.0) 已发布（预发布，4 资产）；运行链接见专项计划 §6.4。用户手动安装验证保留待验。** 原验收收口 B3 待修订、B4 / B5 未执行的状态保留，不改变 N01–N16 的历史结论。

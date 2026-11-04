@@ -6,6 +6,7 @@
 // 的精确形态（自然日区间、时刻区间、至今）取决于后端回传的 range。
 import type { RangeView } from "../types";
 import { fullDate, shortDate, todayInTz, yearOf } from "./dates";
+import { t } from "./translate";
 
 export type RangePreset =
   | { kind: "all" }
@@ -90,10 +91,11 @@ function isUntilNow(preset: RangePreset | null): boolean {
 
 /** 预设名（不依赖后端回传）。 */
 export function presetName(preset: RangePreset | null): string {
-  if (!preset || preset.kind === "all") return "全部时间";
-  if (preset.kind === "days") return preset.days === 1 ? "当日" : `近 ${preset.days} 天`;
-  if (preset.kind === "rolling") return "过去 24 小时";
-  return "自定义范围";
+  if (!preset || preset.kind === "all") return t("range.all");
+  if (preset.kind === "days")
+    return preset.days === 1 ? t("range.today") : t("range.lastDays", { days: preset.days });
+  if (preset.kind === "rolling") return t("range.rolling24h");
+  return t("range.custom");
 }
 
 const dayOf = (local: string): string => local.slice(0, 10);
@@ -118,17 +120,17 @@ export function presetLabel(
   range: RangeView | null | undefined,
   tz: string,
 ): string {
-  if (!preset || preset.kind === "all") return "全部时间";
-  if (preset.kind === "days") return preset.days === 1 ? "当日" : `${preset.days}d`;
+  if (!preset || preset.kind === "all") return t("range.all");
+  if (preset.kind === "days") return preset.days === 1 ? t("range.today") : `${preset.days}d`;
   if (preset.kind === "rolling") return "24h";
-  if (!range) return "自定义范围";
+  if (!range) return t("range.custom");
   const today = todayInTz(tz);
   if (range.granularity === "day") {
     const from = range.from;
-    if (!from) return "自定义范围";
+    if (!from) return t("range.custom");
     const untilNow = isUntilNow(preset);
     const full = needYear(from, untilNow ? null : range.to, today);
-    if (untilNow || !range.to) return `${dayLabel(from, full)} 起`;
+    if (untilNow || !range.to) return t("range.since", { date: dayLabel(from, full) });
     if (from === range.to) return dayLabel(from, full);
     return `${dayLabel(from, full)}–${dayLabel(range.to, full)}`;
   }
@@ -137,7 +139,7 @@ export function presetLabel(
   const untilNow = isUntilNow(preset);
   const full = needYear(startDay, untilNow ? null : endDay, today);
   const head = `${dayLabel(startDay, full)} ${clockOf(range.start_local)}`;
-  if (untilNow) return `${head} 起`;
+  if (untilNow) return t("range.since", { date: head });
   // 同年内的同一天省略重复日期，跨天两端都写（含年份时两端都写全）
   if (!full && startDay === endDay) return `${head}–${clockOf(range.end_local)}`;
   return `${head}–${dayLabel(endDay, full)} ${clockOf(range.end_local)}`;
@@ -159,15 +161,24 @@ export function presetAriaLabel(
     if (!range.from) return name;
     const untilNow = isUntilNow(preset);
     const full = needYear(range.from, untilNow ? null : range.to, today);
-    if (untilNow || !range.to) return `${name}：${dayLabel(range.from, full)} 起`;
+    if (untilNow || !range.to)
+      return t("range.nameSince", { name, date: dayLabel(range.from, full) });
     if (range.from === range.to) return `${name}：${dayLabel(range.from, full)}`;
-    return `${name}：${dayLabel(range.from, full)} – ${dayLabel(range.to, full)}`;
+    return t("range.nameSpan", {
+      name,
+      from: dayLabel(range.from, full),
+      to: dayLabel(range.to, full),
+    });
   }
   const startDay = dayOf(range.start_local);
   const endDay = dayOf(range.end_local);
   const untilNow = isUntilNow(preset);
   const full = needYear(startDay, untilNow ? null : endDay, today);
   const head = `${dayLabel(startDay, full)} ${clockOf(range.start_local)}`;
-  if (untilNow) return `${name}：${head} 起`;
-  return `${name}：${head} – ${dayLabel(endDay, full)} ${clockOf(range.end_local)}`;
+  if (untilNow) return t("range.nameSince", { name, date: head });
+  return t("range.nameSpan", {
+    name,
+    from: head,
+    to: `${dayLabel(endDay, full)} ${clockOf(range.end_local)}`,
+  });
 }

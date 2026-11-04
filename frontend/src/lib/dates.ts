@@ -2,6 +2,8 @@
 // 用 Intl 按所选 IANA 时区的**当日实际偏移**换算（DST 正确），替代
 // 修复前 "local 用本地格式化、其余硬编码 +8" 的实现（UTC 之外的固定
 // 偏移时区与非 +8 时区都会错日）。
+import { t } from "./translate";
+
 export function tzDate(ms: number, tz: string): string {
   if (tz === "local") return new Date(ms).toLocaleDateString("sv-SE");
   return new Intl.DateTimeFormat("sv-SE", { timeZone: tz }).format(new Date(ms));
@@ -54,7 +56,7 @@ export function rangeLabel(from: string, to: string, today: string): string {
   const currentYear = yearOf(today);
   const needYear = yearOf(from) !== currentYear || yearOf(to) !== currentYear;
   const fmt = (s: string): string => (needYear ? fullDate(s) : shortDate(s));
-  if (to >= today && from < today) return `${fmt(from)} ~ 今天`;
+  if (to >= today && from < today) return `${fmt(from)} ~ ${t("range.followToday")}`;
   if (from === to) return fmt(from);
   return `${fmt(from)} ~ ${fmt(to)}`;
 }

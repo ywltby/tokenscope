@@ -16,14 +16,16 @@
 //
 // 返回完整 USD 文本（含 $）——调用方不得再次拼接货币符号。
 
+import { t } from "./translate";
+
 export type MoneyScenario = "request" | "summary" | "unit";
 
 export function formatMoney(
   v: number | null | undefined,
   scenario: MoneyScenario = "request",
 ): string {
-  if (v == null || Number.isNaN(v)) return "未知";
-  if (!Number.isFinite(v)) return "未知";
+  if (v == null || Number.isNaN(v)) return t("dashboard.unknownTag");
+  if (!Number.isFinite(v)) return t("dashboard.unknownTag");
   if (v === 0) return "$0.00";
   const abs = Math.abs(v);
   const sign = v < 0 ? "-" : "";

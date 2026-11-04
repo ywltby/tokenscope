@@ -246,6 +246,34 @@ pub struct Settings {
     /// 写入必须经 [`validate_collect_interval_secs`] 校验：非法值在落盘前拒绝。
     #[serde(default)]
     pub collect_interval_secs: Option<u32>,
+    /// 界面语言（`zh-CN` / `en-US`；None = 未设置，等价默认 `zh-CN`）。
+    ///
+    /// i18n（2026-11-04）：语言偏好**只在隐私同意成立后**经
+    /// `settings_set_language` 写入（同意前前端只做内存选择，不落盘）。
+    /// 旧文件没有该字段时按默认 zh-CN 解释，缺失不算脏值；写入必须经
+    /// [`validate_language`] 校验，非法值在落盘前拒绝。
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+/// 界面语言的可选值（首批 zh-CN / en-US；后续新增语言在这里扩展）。
+pub const LANGUAGE_CHOICES: [&str; 2] = ["zh-CN", "en-US"];
+
+/// 界面语言的默认值（字段缺失、读取失败、非法值都回落到它）。
+pub fn default_language() -> &'static str {
+    "zh-CN"
+}
+
+/// 语言取值校验 + 归一化（trim）。非法值返回中文可读错误，调用方必须拒绝
+/// 保存（文件字节不动）。
+pub fn validate_language(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if LANGUAGE_CHOICES.contains(&trimmed) {
+        return Ok(trimmed.to_string());
+    }
+    Err(format!(
+        "界面语言 {trimmed:?} 不受支持：只接受 zh-CN / en-US"
+    ))
 }
 
 /// U06：JSONL 自动读取间隔的可选值（秒；界面显示为 5s、10s、30s、1m、5m、10m）。
@@ -346,6 +374,7 @@ impl Default for Settings {
             close_action: None,
             timezone: None,
             collect_interval_secs: None,
+            language: None,
         }
     }
 }
@@ -1065,6 +1094,7 @@ mod tests {
             close_action: Some(CloseAction::Minimize),
             timezone: None,
             collect_interval_secs: None,
+            language: None,
             sources: crate::settings::AgentSources {
                 claude: Some(SourceConfig {
                     enabled: false,

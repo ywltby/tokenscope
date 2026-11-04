@@ -11,7 +11,7 @@ import { formatMoney } from "./formatMoney";
 import { TOKEN_BUCKETS, tokenBucketLabel } from "./tokenDisplay";
 import { chartTokens } from "../styles/chartTheme";
 import { SERIES } from "./chartData";
-import { KIND_LABEL } from "./costBreakdown";
+import { kindLabel } from "./costBreakdown";
 
 describe("formatMoney（UX07 单一金额入口）", () => {
   it("request_amount_matches_breakdown_result：0.0126 四位精度", () => {
@@ -101,8 +101,8 @@ describe("all_token_views_share_labels_and_order（UX07 token 显示词同源）
     // 摘要（chartData.SERIES）
     expect(SERIES.map((s) => s.name)).toEqual(TOKEN_BUCKETS.map((b) => b.key));
     expect(SERIES.map((s) => s.label)).toEqual(TOKEN_BUCKETS.map((b) => b.label));
-    // 费用公式行（costBreakdown.KIND_LABEL）
-    expect(TOKEN_BUCKETS.map((b) => KIND_LABEL[b.key])).toEqual(
+    // 费用公式行（costBreakdown.kindLabel）
+    expect(TOKEN_BUCKETS.map((b) => kindLabel(b.key))).toEqual(
       TOKEN_BUCKETS.map((b) => (b.key === "input" ? "输入（扣除缓存）" : b.label)),
     );
   });

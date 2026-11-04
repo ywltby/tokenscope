@@ -9,6 +9,9 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { NButton } from "naive-ui";
+import { useT } from "../lib/i18n";
+
+const t = useT();
 import type { PricingStatus } from "../types";
 
 const status = ref<PricingStatus | null>(null);
@@ -44,7 +47,7 @@ const syncErrorText = computed(() => {
   const reason = syncError.value ?? "";
   return syncPartial.value
     ? `同步部分失败：${reason}（可重试；主源已可用时费用仍会正常显示）`
-    : `同步失败：${reason}（状态未知，重试同步后恢复）`;
+    : t("pricing.syncFailed", { reason });
 });
 
 async function refreshStatus(opts: { changed?: boolean } = {}): Promise<void> {
@@ -126,17 +129,17 @@ const bannerText = computed(() => {
   const s = status.value;
   if (!s) return "";
   if (!s.hasAnyPricing) {
-    return "尚未获取定价，需要联网同步价格；当前费用仅能显示为未知。";
+    return t("pricing.bannerNoPricing");
   }
   const external = s.externalValidCount ?? 0;
   const openrouter = s.openrouterValidCount ?? 0;
   const sources = [
-    external > 0 ? `外置价格表 ${external} 条` : null,
-    openrouter > 0 ? `OpenRouter ${openrouter} 条` : null,
+    external > 0 ? t("pricing.bannerPartialSources", { external }) : null,
+    openrouter > 0 ? t("pricing.bannerOpenrouter", { count: openrouter }) : null,
   ]
     .filter(Boolean)
     .join("、");
-  return `主源（models.dev）尚待同步，其定价暂不可用；当前费用按已有价格估算（${sources}有效候选），未收录的模型仍显示为未知。`;
+  return t("pricing.bannerModelsdevPending", { sources });
 });
 </script>
 
@@ -158,7 +161,9 @@ const bannerText = computed(() => {
       <path d="M12 17h.01" />
     </svg>
     <span class="ts-notice-content">{{ bannerText }}</span>
-    <NButton size="tiny" type="primary" :loading="syncing" @click="syncNow"> 立即同步 </NButton>
+    <NButton size="tiny" type="primary" :loading="syncing" @click="syncNow">{{
+      t("pricing.syncNow")
+    }}</NButton>
   </div>
   <!-- Task 3/审阅修复：同步失败原因独立展示——主源已可用横幅收敛后仍可见。
        RC04：补充失败可直接**重试同步**（复用 syncNow），不再是只有文案没有动作 -->
@@ -176,7 +181,7 @@ const bannerText = computed(() => {
       <path d="m9 9 6 6M15 9l-6 6" />
     </svg>
     <span class="ts-notice-content text-small">{{ syncErrorText }}</span>
-    <NButton size="tiny" :loading="syncing" @click="syncNow">重试同步</NButton>
+    <NButton size="tiny" :loading="syncing" @click="syncNow">{{ t("pricing.retrySync") }}</NButton>
   </div>
   <!-- pricing_status 读取失败 → 可重试提示而非静默空 DOM（审阅不变量 4）；
        UX06：与同步失败独立渲染（两类错误同时可见可操作） -->
@@ -193,8 +198,12 @@ const bannerText = computed(() => {
       <circle cx="12" cy="12" r="9" />
       <path d="m9 9 6 6M15 9l-6 6" />
     </svg>
-    <span class="ts-notice-content">定价状态读取失败，可重试：{{ statusError }}</span>
-    <NButton size="tiny" :loading="statusLoading" @click="refreshStatus()">重试</NButton>
+    <span class="ts-notice-content">{{
+      t("pricing.statusReadFailed", { message: statusError })
+    }}</span>
+    <NButton size="tiny" :loading="statusLoading" @click="refreshStatus()">{{
+      t("settings.retry")
+    }}</NButton>
   </div>
 </template>
 

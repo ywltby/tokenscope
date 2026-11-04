@@ -19,10 +19,20 @@ import { fmtNum, type Group } from "../types";
 import { buildBarChartData, tooltipLabels } from "../lib/chartData";
 import { buildTooltipNode } from "../lib/chartTooltip";
 import { chartTokens, POPOVER_BLUR_CSS } from "../styles/chartTheme";
+import { t, useAppLocale } from "../lib/i18n";
 
-/// 数值轴紧凑刻度（token 数：万/亿）
+const { locale } = useAppLocale();
+
+/// 数值轴紧凑刻度（token 数）：中文按万/亿，英文按 K/M/B。
+/// 只改刻度的显示单位，不改任何数值或统计口径。
 function fmtCompact(v: number): string {
   const a = Math.abs(v);
+  if (locale.value === "en-US") {
+    if (a >= 1e9) return `${Number((v / 1e9).toFixed(1))}B`;
+    if (a >= 1e6) return `${Number((v / 1e6).toFixed(1))}M`;
+    if (a >= 1e3) return `${Number((v / 1e3).toFixed(1))}K`;
+    return String(v);
+  }
   if (a >= 1e8) return `${Number((v / 1e8).toFixed(1))}亿`;
   if (a >= 1e4) return `${Number((v / 1e4).toFixed(0))}万`;
   return String(v);
@@ -40,8 +50,12 @@ let observer: ResizeObserver | null = null;
 const isDay = computed(() => props.by === "day");
 const titleText = computed(
   () =>
-    ({ day: "使用趋势", model: "模型用量", agent: "应用用量", project: "项目用量" })[props.by] ??
-    "用量分布",
+    ({
+      day: t("dashboard.chartDay"),
+      model: t("dashboard.chartModel"),
+      agent: t("dashboard.chartAgent"),
+      project: t("dashboard.chartProject"),
+    })[props.by] ?? t("dashboard.chartFallback"),
 );
 
 /// 画布始终适配容器；类别增多只调整轴标签密度，不撑开页面。
@@ -313,6 +327,9 @@ watch(
   },
 );
 watch(mode, () => rebuildForTheme());
+// i18n：语言切换后图例/坐标轴文案要跟着换——一次完整重建最省事且不会留下
+// 旧语言的系列名（键与颜色不变，只有显示名变）。
+watch(locale, () => rebuildForTheme());
 // 仅更新调色板，不重建实例或覆盖 dataZoom。
 watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.color) }));
 </script>
@@ -335,7 +352,7 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
       :class="{ 'chart-body-time': isDay }"
       tabindex="0"
       role="region"
-      :aria-label="`${titleText}，拖动范围滑块缩放，Ctrl 加滚轮缩放`"
+      :aria-label="t('dashboard.chartZoomAria', { title: titleText })"
     >
       <div
         ref="el"
@@ -345,7 +362,7 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
         :aria-label="titleText"
       />
       <button class="ts-btn ts-btn-sm chart-reset" type="button" @click="resetZoom">
-        显示全部
+        {{ t("dashboard.chartResetZoom") }}
       </button>
     </div>
   </section>
