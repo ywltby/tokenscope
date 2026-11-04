@@ -343,15 +343,43 @@ export function readAcceptanceManifest(
 
 /**
  * SQLite 瞬时副产物（delete 回滚日志 / WAL 影子文件）：只在写事务期间存在、
- * 提交或检查点后由 SQLite 自己删除。文件名固定为 `<数据库名>-journal` /
- * `-wal` / `-shm`（见 sqlite3 文档），如 history.db-journal。已发现路径的
- * ENOENT 若命中这份清单，按数据库正常生命周期豁免，不按"走查后被删除"拒绝。
+ * 提交或检查点后由 SQLite 自己删除，文件名固定为 `<数据库名>-journal` /
+ * `-wal` / `-shm`（见 sqlite3 文档）。已发现路径的 ENOENT 若属于**受控数据
+ * 库的预期 sidecar**，按数据库正常生命周期豁免，不按"走查后被删除"拒绝。
+ *
+ * "受控数据库" = 验收实例实际打开的历史库，位置由产品代码固定：
+ * `<隔离根>/tokenscope/history.db`（crates/tokenscope-core/src/history.rs
+ * `history_file_path` = `data_dir()/history.db`；acceptance.rs
+ * `data_dir_override` = `<root>/tokenscope`；与 prepare 脚本 manifest 的
+ * `data_dir` 声明一致）。后缀相同但不在这份库旁边的文件不是它的副产物，
+ * 不豁免。
  */
 const TRANSIENT_DB_ARTIFACT_RE = /-(?:journal|wal|shm)$/i;
 
-export function isTransientDbArtifact(code, filePath) {
-  if (code !== "ENOENT") return false;
-  return TRANSIENT_DB_ARTIFACT_RE.test(path.basename(String(filePath ?? "")));
+export function controlledDbSidecar(root, filePath) {
+  const raw = String(filePath ?? "");
+  if (!TRANSIENT_DB_ARTIFACT_RE.test(path.basename(raw))) return false;
+  // data_dir 是验收实例从环境变量 canonicalize 后冻结的路径；预检入口拿到
+  // 的 root 可能是短名/别名，统一走 comparePath（resolve + 小写化）比对，
+  // 与条目收集和去重同一套规范化。
+  const rootKey = comparePath(root);
+  if (!rootKey) return false;
+  const fileKey = comparePath(raw);
+  if (!fileKey.startsWith(rootKey + path.sep)) return false;
+  const relative = fileKey.slice(rootKey.length + path.sep.length);
+  return (
+    relative === path.join("tokenscope", "history.db-journal") ||
+    relative === path.join("tokenscope", "history.db-wal") ||
+    relative === path.join("tokenscope", "history.db-shm")
+  );
+}
+
+/**
+ * 豁免判定（两阶段共用）：仅当 ENOENT 且路径是受控历史库
+ * `<隔离根>/tokenscope/history.db` 的预期 sidecar 时为真。
+ */
+export function transientDbArtifactExempted(root, code, filePath) {
+  return code === "ENOENT" && controlledDbSidecar(root, filePath);
 }
 
 /**
@@ -402,9 +430,9 @@ export function collectAcceptanceTreePaths(
       } catch (error) {
         // 与后续检查阶段同一时序（2026-11-04 第二轮）：journal 等受控数据库
         // 的瞬时 sidecar 可能在 readdir 与本 lstat 之间被 SQLite 删除——
-        // ENOENT 且 basename 命中瞬时副产物时跳过该条目（已不存在，无从
-        // 核对链接/硬链接）；其余文件消失、其他读取错误仍 fail closed。
-        if (isTransientDbArtifact(error?.code, child)) continue;
+        // ENOENT 且属于受控历史库 sidecar 时跳过该条目（已不存在，无从核对
+        // 链接/硬链接）；其余文件消失、其他读取错误仍 fail closed。
+        if (transientDbArtifactExempted(root, error?.code, child)) continue;
         return {
           ok: false,
           paths,
@@ -513,23 +541,29 @@ export function validateAcceptancePaths({
     //     （竞态或篡改）→ 拒绝；其他错误（权限等）= 无法检查 → 拒绝；
     //   - 豁免一：从未发现（走查时不存在）的合法布局路径——全新隔离根里尚未
     //     创建的布局路径本来被 canonicalize 允许，不能误拒；
-    //   - 豁免二：走查发现但属于 SQLite 瞬时副产物（journal/wal/shm）的文件
-    //     ——数据库以 delete 回滚日志模式运行时，该文件只在写事务期间存在、
-    //     提交后由 SQLite 删除，"走查时在、lstat 时没了"是数据库的正常生命
-    //     周期而非证据清理（Runner 实测：ui-single-instance 主实例在历史库
-    //     迁移/写入窗口内被本防线误拒启动）。写入本来就落在隔离根内，无独立
-    //     性问题；这类文件也不做 nlink 检查（生命期毫秒级，硬链接通道无意义）。
+    //   - 豁免二：走查发现但属于**受控历史库**（<隔离根>/tokenscope/history.db）
+    //     的瞬时 sidecar（journal/wal/shm）——数据库以 WAL 模式运行时这些
+    //     文件只在写事务/检查点间隙存在，"走查时在、lstat 时没了"是数据库的
+    //     正常生命周期而非证据清理（Runner 实测：ui-single-instance 主实例
+    //     在历史库迁移/写入窗口内被本防线误拒启动）。写入本来就落在隔离根
+    //     内，无独立性问题；这类文件也不做 nlink 检查（生命期毫秒级，硬链接
+    //     通道无意义）。范围见 controlledDbSidecar——同后缀但不在受控库旁边
+    //     的文件不豁免。
     let entryStat = null;
     try {
       entryStat = lstat(entry.path);
     } catch (error) {
-      const transientArtifact = isTransientDbArtifact(error?.code, entry.path);
-      if (error?.code === "ENOENT" && (!entry.discovered || transientArtifact)) {
-        entryStat = null; // 未创建的布局路径，或 SQLite 已提交删除的瞬时副产物
+      // 豁免二限定受控数据库：只有 <隔离根>/tokenscope/history.db 的预期
+      // sidecar（-journal/-wal/-shm）在 ENOENT 时按 SQLite 正常生命周期放行；
+      // 后缀相同但位于其他路径的文件不是它的副产物，仍按"走查后发现被删"
+      // 拒绝（竞态或篡改）。
+      const exempted = transientDbArtifactExempted(rawRoot, error?.code, entry.path);
+      if (error?.code === "ENOENT" && (!entry.discovered || exempted)) {
+        entryStat = null; // 未创建的布局路径，或受控历史库已提交删除的瞬时 sidecar
       } else {
         return {
           ok: false,
-          reason: `验收路径 ${entry.path} 无法检查（${String(error?.message ?? error)}${entry.discovered && !transientArtifact ? "；该路径在走查时已被发现" : ""}），无法证明独立，拒绝启动`,
+          reason: `验收路径 ${entry.path} 无法检查（${String(error?.message ?? error)}${entry.discovered && !exempted ? "；该路径在走查时已被发现" : ""}），无法证明独立，拒绝启动`,
         };
       }
     }

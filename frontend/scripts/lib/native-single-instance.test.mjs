@@ -1009,6 +1009,86 @@ describe("路径布局与固定判定", () => {
         sandbox.cleanup();
       }
     });
+
+    it("同后缀但不在受控历史库旁边的文件不豁免：sources 下的 foo.db-journal 消失仍拒绝", () => {
+      // 豁免范围边界（先红）：isTransientDbArtifact 旧口径只看后缀，任意
+      // *-journal 消失都会放行。受控数据库只有 <root>/tokenscope/history.db
+      //（acceptance.rs data_dir_override + history.rs history_file_path），
+      // 两个检查阶段的豁免都收敛到 controlledDbSidecar 判定。
+      const sandbox = createRunSandbox("sidecar-out-of-scope");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      sandbox.dir("home", "workspace", "sources", "claude");
+      writeManifest(sandbox, root, acceptanceManifest(root));
+      const realLstat = fs.lstatSync.bind(fs);
+      const imposter = path.join(root, "sources", "claude", "foo.db-journal");
+      sandbox.file("home", "workspace", "sources", "claude", "foo.db-journal", "x");
+      const vanishingImposter = (p, opts) => {
+        if (path.resolve(String(p)) === path.resolve(imposter)) {
+          const e = new Error(`ENOENT: no such file or directory, lstat '${p}'`);
+          e.code = "ENOENT";
+          throw e;
+        }
+        return realLstat(p, opts);
+      };
+      try {
+        // 走查阶段：不豁免，fail closed
+        const tree = collectAcceptanceTreePaths(root, { lstatSync: vanishingImposter });
+        expect(tree.ok).toBe(false);
+        expect(tree.reason).toMatch(/无法检查验收根条目/);
+        // 后续检查阶段（条目已被走查登记后消失）：同样不豁免
+        sandbox.file("home", "workspace", "sources", "claude", "foo.db-journal", "x");
+        const result = validateAcceptancePaths({
+          root,
+          homeDir: home,
+          lstat: vanishingImposter,
+          collectTree: (r) => {
+            const tree2 = collectAcceptanceTreePaths(r);
+            fs.rmSync(imposter, { force: true });
+            return tree2;
+          },
+        });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/走查时已被发现/);
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
+    it("受控库 sidecar 的 -wal/-shm 与 -journal 同样豁免（三后缀一致）", () => {
+      // 范围正例：tokenscope/history.db-wal 与 -shm 命中受控库 sidecar 清单，
+      // 与 -journal 行为一致。
+      for (const suffix of ["-wal", "-shm", "-journal"]) {
+        const sandbox = createRunSandbox(`sidecar-scope-${suffix.slice(1)}`);
+        const home = sandbox.dir("home");
+        const root = sandbox.dir("home", "workspace");
+        sandbox.dir("home", "workspace", "tokenscope");
+        writeManifest(sandbox, root, acceptanceManifest(root));
+        const realLstat = fs.lstatSync.bind(fs);
+        const sidecar = path.join(root, "tokenscope", `history.db${suffix}`);
+        sandbox.file("home", "workspace", "tokenscope", `history.db${suffix}`, "x");
+        const racing = (p, opts) => {
+          if (path.resolve(String(p)) === path.resolve(sidecar)) {
+            const e = new Error(`ENOENT: no such file or directory, lstat '${p}'`);
+            e.code = "ENOENT";
+            throw e;
+          }
+          return realLstat(p, opts);
+        };
+        try {
+          const result = validateAcceptancePaths({
+            root,
+            homeDir: home,
+            lstat: racing,
+            collectTree: (r) => collectAcceptanceTreePaths(r, { lstatSync: racing }),
+          });
+          expect(result.ok).toBe(true);
+          expect(result.reason).toMatch(/互不包含/);
+        } finally {
+          sandbox.cleanup();
+        }
+      }
+    });
   });
 });
 
