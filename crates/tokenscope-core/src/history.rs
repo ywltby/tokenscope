@@ -1085,18 +1085,29 @@ impl HistoryDb {
             conn,
             path: path.to_path_buf(),
         };
-        // 迁移失败：Display 带出完整原因与保留位置，source 保留类型化错误链
-        //（打开层重试按类型判定瞬态错误，不得字符串化）。
-        db.migrate().map_err(|e| {
-            anyhow::Error::new(MigrateFailure {
-                detail: format!(
-                    "{:#}（历史库文件保留在 {}，可重试；不执行删表重建）",
-                    e,
-                    path.display()
-                ),
-                source: e,
-            })
-        })?;
+        // 2026-11-05：迁移段必须**进程内串行**——多路查询并发首次打开同一个
+        // 旧库时，两路会同时读到旧版本并各自尝试备份；`VACUUM INTO` 的目标
+        // 已存在时第二次会失败（真实升级验收里表现为 query_begin 打开失败，
+        // 汇总因此永远不出现）。锁只覆盖"读版本 + 备份 + 迁移"，最新库的
+        // 打开只多一次空锁。
+        {
+            static MIGRATE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+                std::sync::OnceLock::new();
+            let lock = MIGRATE_LOCK.get_or_init(|| std::sync::Mutex::new(()));
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            // 迁移失败：Display 带出完整原因与保留位置，source 保留类型化错误链
+            //（打开层重试按类型判定瞬态错误，不得字符串化）。
+            db.migrate().map_err(|e| {
+                anyhow::Error::new(MigrateFailure {
+                    detail: format!(
+                        "{:#}（历史库文件保留在 {}，可重试；不执行删表重建）",
+                        e,
+                        path.display()
+                    ),
+                    source: e,
+                })
+            })?;
+        }
         crate::retry::apply_busy_timeout(&db.conn, HISTORY_BUSY_TIMEOUT)?;
         Ok(db)
     }
@@ -1194,24 +1205,67 @@ impl HistoryDb {
     ///
     /// 已存在同名备份时不覆盖（升级重试不产生多份），失败即中止升级——
     /// 宁可这次不升级，也不在没有可恢复副本的情况下改结构。
+    ///
+    /// 2026-11-05：已存在的同名文件**必须校验为可用的同版本副本**才跳过；
+    /// 并发打开时另一路可能刚好写完备份，`VACUUM INTO` 会报"目标已存在"，
+    /// 此时校验通过就沿用它（不再让整个查询失败）。
     fn backup_before_upgrade(&self, from_version: i64) -> Result<()> {
         let target = self
             .path
             .with_extension(format!("db.backup-v{from_version}"));
         if target.exists() {
-            log::info!("升级前备份已存在，跳过：{}", target.display());
-            return Ok(());
+            if Self::backup_usable(&target, from_version) {
+                log::info!("升级前备份已存在，跳过：{}", target.display());
+                return Ok(());
+            }
+            bail!(
+                "升级前备份目标已存在但不是可用的 v{from_version} 副本：{}；\
+                 请移走该文件后重试（不覆盖、也不在没有备份的情况下改结构）",
+                target.display()
+            );
         }
         // VACUUM INTO 的路径参数不能用占位符，需内联；单引号按 SQL 规则转义。
         let escaped = target.display().to_string().replace('\'', "''");
-        self.conn
-            .execute_batch(&format!("VACUUM INTO '{escaped}'"))
-            .with_context(|| format!("升级前备份失败（目标 {}）", target.display()))?;
-        log::info!(
-            "历史库升级前备份完成：v{from_version} → {}",
-            target.display()
-        );
-        Ok(())
+        match self.conn.execute_batch(&format!("VACUUM INTO '{escaped}'")) {
+            Ok(()) => {
+                log::info!(
+                    "历史库升级前备份完成：v{from_version} → {}",
+                    target.display()
+                );
+                Ok(())
+            }
+            Err(e) => {
+                // 并发窗口：另一路在本连接检查之后创建了备份。校验通过就沿用。
+                if Self::backup_usable(&target, from_version) {
+                    log::warn!(
+                        "升级前备份由并发打开完成，沿用现有副本：{}（{e}）",
+                        target.display()
+                    );
+                    return Ok(());
+                }
+                Err(e).with_context(|| format!("升级前备份失败（目标 {}）", target.display()))
+            }
+        }
+    }
+
+    /// 目标文件是否已是**可用的**同版本备份（只读打开 + 能读 schema）。
+    fn backup_usable(target: &Path, from_version: i64) -> bool {
+        let Ok(conn) = Connection::open_with_flags(
+            target,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            return false;
+        };
+        let Ok(version) = conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+        else {
+            return false;
+        };
+        version == from_version
+            && conn
+                .query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .is_ok()
     }
 
     /// 读取元信息值。

@@ -577,3 +577,97 @@ fn v3_legacy_cache_without_later_columns_still_migrates() {
     // 迁移行的项目/目录：v3 没有这些列 → 兜底空值，不得猜测。
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// 2026-11-05：多路查询并发首次打开同一个旧库。迁移段必须进程内串行——
+/// 此前第二路会读到旧版本、再次尝试 `VACUUM INTO` 备份并因目标已存在而失败
+///（真实升级验收表现为 query_begin 打不开库、汇总永远不出现）。
+#[test]
+fn concurrent_first_open_of_legacy_library_migrates_once_with_one_backup() {
+    let dir = temp_dir("concurrent-open");
+    let path = dir.join("data").join("history.db");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(tokenscope::history::legacy_v1_schema_for_tests())
+            .unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+    }
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let p = path.clone();
+        handles.push(std::thread::spawn(move || {
+            HistoryDb::open(&p).map(|db| db.schema_version().unwrap())
+        }));
+    }
+    for h in handles {
+        let version = h.join().unwrap().expect("每一路并发打开都必须成功");
+        assert_eq!(version, tokenscope::history::HISTORY_SCHEMA_VERSION);
+    }
+    let backup = path.with_extension("db.backup-v1");
+    assert!(backup.exists(), "升级前必须留下可恢复备份");
+    let conn =
+        rusqlite::Connection::open_with_flags(&backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 1, "备份必须是升级前的 v1 副本");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 2026-11-05：已存在的同名备份**不可用**（空文件/损坏）时必须拒绝升级，
+/// 不能按"已存在"静默跳过——那等于在没有可恢复副本的情况下改结构。
+#[test]
+fn corrupt_existing_backup_blocks_upgrade_instead_of_silent_skip() {
+    let dir = temp_dir("corrupt-backup");
+    let path = dir.join("data").join("history.db");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(tokenscope::history::legacy_v1_schema_for_tests())
+            .unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+    }
+    let backup = path.with_extension("db.backup-v1");
+    std::fs::write(&backup, b"").unwrap();
+    let err = match HistoryDb::open(&path) {
+        Ok(_) => panic!("不可用的备份必须阻止升级"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("不是可用的 v1 副本"), "{err}");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 1, "拒绝升级时结构不变");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 2026-11-05：已存在的备份**可用**时沿用它（并发打开/上次中断留下的完整
+/// 副本），不重复生成、不覆盖。
+#[test]
+fn usable_existing_backup_is_reused_without_overwrite() {
+    let dir = temp_dir("reuse-backup");
+    let path = dir.join("data").join("history.db");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(tokenscope::history::legacy_v1_schema_for_tests())
+            .unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+    }
+    let backup = path.with_extension("db.backup-v1");
+    std::fs::copy(&path, &backup).unwrap();
+    let before = std::fs::read(&backup).unwrap();
+    let db = HistoryDb::open(&path).unwrap();
+    assert_eq!(
+        db.schema_version().unwrap(),
+        tokenscope::history::HISTORY_SCHEMA_VERSION
+    );
+    assert_eq!(
+        std::fs::read(&backup).unwrap(),
+        before,
+        "可用的既有备份不得被覆盖"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
