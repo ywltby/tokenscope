@@ -16,10 +16,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokenscope::aggregate::GroupBy;
 use tokenscope::history::{
-    EventAlias, EventOrigin, EventWrite, HistoryDb, RollupConflictPolicy, WritePrecedence,
+    DailyRollupWrite, EventAlias, EventOrigin, EventWrite, HistoryDb, ImportRunRecord,
+    ORIGIN_KIND_CCS_REQUEST, RollupConflictPolicy, WritePrecedence,
 };
 use tokenscope::import::ccs::{self, CcsSource};
 use tokenscope::model::{AgentKind, TokenCounts};
+use tokenscope::model_identity::ModelIdentity;
 use tokenscope::query;
 use tokenscope::report::{EventFilter, SummaryOptions, summary};
 
@@ -270,10 +272,10 @@ fn rollup_1000_over_partial_detail_100_counts_once() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 旧库迁移的日汇总没有导入批次时刻：无法确认覆盖 → 保留明细并提示；
-/// 再次导入同一 CCS 库会补上批次时刻，覆盖规则随即生效（无需重建历史库）。
+/// 旧库迁移的日汇总没有关联导入批次：覆盖判定改看**来源证据**后不再需要
+/// 导入时刻，旧汇总照常作为总量；重新导入仍幂等，并补写批次时刻（仅诊断）。
 #[test]
-fn legacy_rollup_without_import_time_gains_coverage_after_reimport() {
+fn legacy_rollup_without_import_run_is_still_covered_by_origin_evidence() {
     let dir = temp_dir("legacy-import-time");
     seed_ccs(
         &dir.join("cc-switch.db"),
@@ -301,17 +303,14 @@ fn legacy_rollup_without_import_time_gains_coverage_after_reimport() {
     );
     let before = summary(&o).unwrap();
     assert_eq!(
-        before.totals.tokens.input, 100,
-        "没有导入时刻时不凭汇总覆盖，保留明细"
+        before.totals.tokens.input, 1000,
+        "来源证据足够，不依赖导入时刻即可用汇总做总量"
     );
-    assert_eq!(before.rollup_coverage.unresolved_buckets, 1);
-    assert!(
-        before.warnings.iter().any(|w| w.contains("无法确认")),
-        "无法确认覆盖必须如实提示：{:?}",
-        before.warnings
-    );
+    assert_eq!(before.rollup_coverage.covered_buckets, 1);
+    assert_eq!(before.rollup_coverage.unresolved_buckets, 0);
+    assert!(!before.warnings.iter().any(|w| w.contains("无法确认")));
 
-    // 再次导入同一库：快照未变（幂等），但补写导入批次时刻。
+    // 再次导入同一库：快照未变（幂等），补写批次时刻（诊断字段）。
     let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
     let preview = ccs::preview(&source, &history, "Asia/Shanghai").unwrap();
     assert_eq!(preview.rollups_unchanged, 1);
@@ -322,10 +321,13 @@ fn legacy_rollup_without_import_time_gains_coverage_after_reimport() {
         true,
     )
     .unwrap();
+    assert!(
+        history.daily_rollups(None).unwrap()[0].import_at.is_some(),
+        "重新导入补写批次时刻（仅用于诊断来源快照建立时间）"
+    );
     let after = summary(&o).unwrap();
-    assert_eq!(after.totals.tokens.input, 1000, "补上导入时刻后按汇总统计");
+    assert_eq!(after.totals.tokens.input, 1000, "口径不变");
     assert_eq!(after.rollup_coverage.covered_buckets, 1);
-    assert_eq!(after.rollup_coverage.unresolved_buckets, 0);
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -755,5 +757,283 @@ fn grouped_view_uses_same_rollup_total() {
         .expect("按日分组必须包含该日");
     assert_eq!(group.tokens.input, 1000, "分组与总计同源");
     assert_eq!(group.requests, 10);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ── 2026-11-05：来源证据驱动的覆盖判定（缺陷 1 / 缺陷 2 / 多批次汇总） ──
+
+/// 直接写入一行来源日汇总（`started_utc` = 来源快照建立时刻，可任意指定）。
+fn write_rollup(
+    history: &HistoryDb,
+    provider: &str,
+    day: &str,
+    model: &str,
+    requests: u64,
+    input: u64,
+    started_utc: &str,
+) {
+    let tokens = TokenCounts {
+        input,
+        output: 0,
+        cache_write: 0,
+        cache_read: 0,
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
+    };
+    let rollup = DailyRollupWrite {
+        logical_source: "ccs".into(),
+        day: day.into(),
+        source_tz: "Asia/Shanghai".into(),
+        app: AgentKind::ClaudeCode,
+        provider_id: provider.into(),
+        model: model.into(),
+        request_model: String::new(),
+        pricing_model: String::new(),
+        request_count: requests,
+        tokens,
+        input_semantics: 2,
+        source_cost_usd: None,
+        revision: 0,
+    };
+    let run = ImportRunRecord {
+        logical_source: "ccs".into(),
+        source_path: "synthetic".into(),
+        source_schema: "test".into(),
+        started_utc: started_utc.into(),
+        status: "committed".into(),
+        detail: None,
+        import_revision: 1,
+    };
+    history
+        .apply_import_batch(
+            &[],
+            &[rollup],
+            RollupConflictPolicy::KeepExisting,
+            &run,
+            None,
+        )
+        .unwrap();
+}
+
+/// 直接写入一条 Claude 明细事件：`ccs = true` 表示带 CCS 导入来源证据。
+fn write_detail(history: &HistoryDb, key: &str, ts: &str, model: &str, input: u64, ccs: bool) {
+    let ts: jiff::Timestamp = ts.parse().unwrap();
+    let origins = if ccs {
+        vec![EventOrigin {
+            origin_kind: ORIGIN_KIND_CCS_REQUEST.into(),
+            origin_key: key.into(),
+            app: AgentKind::ClaudeCode,
+            import_run_id: None,
+            parser_revision: 3,
+            source_model_raw: Some(model.into()),
+            pricing_model: Some(model.into()),
+            source_cost_usd: None,
+            ts_precision_seconds: true,
+        }]
+    } else {
+        Vec::new()
+    };
+    history
+        .write_batch(&[EventWrite {
+            event_key: key.into(),
+            app: AgentKind::ClaudeCode,
+            ts,
+            model_raw: model.into(),
+            model_identity: ModelIdentity::parse(model).identity_key(),
+            session_id: Some("s1".into()),
+            record_id: None,
+            project_key: None,
+            session_initial_cwd: None,
+            event_cwd: None,
+            tokens: TokenCounts {
+                input,
+                output: 0,
+                cache_write: 0,
+                cache_read: 0,
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write_split_known: false,
+            },
+            precedence: if ccs {
+                WritePrecedence::CcsImport
+            } else {
+                WritePrecedence::NativeLog
+            },
+            observed_at: ts,
+            aliases: Vec::new(),
+            origins,
+        }])
+        .unwrap();
+}
+
+/// 缺陷 1：汇总 1,000 / 2 次请求，TS 有一条已覆盖的旧明细 100，快照之后
+/// 新增一条原生 200。旧判定拿“明细总数 2 == 汇总 2”当未解决，只剩 300；
+/// 新判定只把**带来源证据**的旧明细算进覆盖比较 → 1,000 + 200 = 1,200。
+#[test]
+fn covered_old_detail_plus_new_native_request_counts_rollup() {
+    let dir = temp_dir("snapshot-era-plus-new");
+    let history = history_of(&dir);
+    write_rollup(
+        &history,
+        "p1",
+        "2026-09-20",
+        "claude-opus-5-5",
+        2,
+        1000,
+        "2026-09-20T02:00:00Z",
+    );
+    // 已覆盖的旧明细（CCS 来源证据）与快照之后新增的原生请求。
+    write_detail(
+        &history,
+        "ccs|claude|proxy|c1",
+        "2026-09-20T01:00:00Z",
+        "claude-opus-5-5",
+        100,
+        true,
+    );
+    write_detail(
+        &history,
+        "native|claude|/logs/a.jsonl|0|fp",
+        "2026-09-20T03:00:00Z",
+        "claude-opus-5-5",
+        200,
+        false,
+    );
+
+    let o = opts(
+        &dir,
+        Some(dir.join("no-claude")),
+        GroupBy::Day,
+        "Asia/Shanghai",
+    );
+    let report = summary(&o).unwrap();
+    assert_eq!(
+        report.totals.tokens.input, 1200,
+        "汇总 1,000 覆盖旧明细，快照后新增 200 照常计入"
+    );
+    assert_eq!(report.totals.requests, 3, "2（汇总）+ 1（新增明细）");
+    assert_eq!(report.rollup_coverage.covered_buckets, 1);
+    assert_eq!(report.rollup_coverage.unresolved_buckets, 0);
+    assert_eq!(
+        report.rollup_coverage.covered_detail_tokens.input, 100,
+        "被替代的只有带证据的旧明细"
+    );
+    assert!(
+        !report.warnings.iter().any(|w| w.contains("无法确认")),
+        "证据充分时不再报未解决：{:?}",
+        report.warnings
+    );
+    assert_eq!(detail_rows(&o), 2, "明细视图仍可查看两条请求");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 缺陷 2：快照建立于 02:00（预览读取），提交发生在之后；03:00 的原生请求
+/// 不在快照里。旧实现用提交时刻当边界，把它当“已覆盖”静默排除 → 1,000；
+/// 新实现只跳过带 CCS 来源证据的明细 → 1,000 + 200 = 1,200。
+#[test]
+fn native_request_after_preview_is_not_swallowed() {
+    let dir = temp_dir("preview-window");
+    let history = history_of(&dir);
+    write_rollup(
+        &history,
+        "p1",
+        "2026-09-21",
+        "claude-opus-5-5",
+        2,
+        1000,
+        "2026-09-21T02:00:00Z",
+    );
+    write_detail(
+        &history,
+        "native|claude|/logs/b.jsonl|0|fp",
+        "2026-09-21T03:00:00Z",
+        "claude-opus-5-5",
+        200,
+        false,
+    );
+
+    let o = opts(
+        &dir,
+        Some(dir.join("no-claude")),
+        GroupBy::Day,
+        "Asia/Shanghai",
+    );
+    let report = summary(&o).unwrap();
+    assert_eq!(
+        report.totals.tokens.input, 1200,
+        "预览之后到达的原生请求必须计入"
+    );
+    assert_eq!(report.totals.requests, 3);
+    assert_eq!(report.rollup_coverage.covered_buckets, 1);
+
+    // 诊断字段取**来源快照建立时刻**（预览读取），不是提交时刻。
+    let rollups = history.daily_rollups(None).unwrap();
+    assert_eq!(
+        rollups[0].import_at,
+        Some("2026-09-21T02:00:00Z".parse().unwrap()),
+        "覆盖边界记录的是来源快照建立时刻"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 同一桶含**不同时刻导入**的多行汇总：覆盖判定按来源证据与请求数之和，
+/// 与导入时刻无关；带证据的明细被替代、原生新增照常计入。
+#[test]
+fn multi_batch_rollup_rows_use_origin_evidence_not_import_time() {
+    let dir = temp_dir("multi-batch");
+    let history = history_of(&dir);
+    // 两批导入的同桶汇总（provider 不同 → 两行），来源快照建立时刻不同。
+    write_rollup(
+        &history,
+        "p1",
+        "2026-09-22",
+        "claude-opus-5-5",
+        1,
+        400,
+        "2026-09-22T01:00:00Z",
+    );
+    write_rollup(
+        &history,
+        "p2",
+        "2026-09-22",
+        "claude-opus-5-5",
+        2,
+        600,
+        "2026-09-22T03:00:00Z",
+    );
+    // 早于第一批的 CCS 明细；晚于第二批的原生请求。
+    write_detail(
+        &history,
+        "ccs|claude|proxy|c2",
+        "2026-09-22T00:30:00Z",
+        "claude-opus-5-5",
+        80,
+        true,
+    );
+    write_detail(
+        &history,
+        "native|claude|/logs/c.jsonl|0|fp",
+        "2026-09-22T04:00:00Z",
+        "claude-opus-5-5",
+        300,
+        false,
+    );
+
+    let o = opts(
+        &dir,
+        Some(dir.join("no-claude")),
+        GroupBy::Day,
+        "Asia/Shanghai",
+    );
+    let report = summary(&o).unwrap();
+    assert_eq!(
+        report.totals.tokens.input, 1300,
+        "汇总 400 + 600 覆盖带证据的明细 80，原生 300 照常计入"
+    );
+    assert_eq!(report.totals.requests, 4, "1 + 2（汇总）+ 1（原生）");
+    assert_eq!(report.rollup_coverage.covered_buckets, 1);
+    assert_eq!(report.rollup_coverage.unresolved_buckets, 0);
+    assert_eq!(report.rollup_coverage.covered_detail_tokens.input, 80);
     std::fs::remove_dir_all(&dir).ok();
 }

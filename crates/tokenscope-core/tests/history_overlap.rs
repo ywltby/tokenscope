@@ -359,11 +359,22 @@ fn rollup_only_history_counts_with_unknown_cost_and_no_fake_requests() {
 fn partial_detail_under_rollup_uses_rollup_total() {
     let dir = temp_dir("covered");
     let root = dir.join("projects");
-    let file = root.join("proj-a").join("sess.jsonl");
-    // 明细：模型等价写法与日汇总不同（claude-opus-5.5 vs claude-opus-5-5），
-    // 归一小节后应落进同一桶；明细只有 1 个请求，而汇总声称 3 个 → 明细是
-    // 一部分，2026-11-05 口径：用汇总作为该范围总量，明细不重复计入。
-    write_claude(&file, "s-1", "m1", "2026-09-15T08:00:00.000Z", 100, 10);
+    std::fs::create_dir_all(&root).unwrap();
+    // 2026-11-05：覆盖判定看**来源证据**——只有来自 CCS 导入（同一来源库）的
+    // 明细才可能已被汇总包含；纯原生明细不在 CCS 汇总里，必须继续计入。
+    // 这里的明细是 CCS 会话行：模型写法与汇总不同（claude-opus-5.5 vs
+    // claude-opus-5-5），归一后落进同一桶；明细 1 个请求 < 汇总 3 个 →
+    // 汇总作为该范围总量，明细不重复计入。
+    seed_ccs_request(
+        &dir.join("cc-switch.db"),
+        "session:msg-1",
+        Some("sess-1"),
+        "claude-opus-5.5",
+        1_789_434_000,
+        100,
+        10,
+        "session_log",
+    );
     seed_ccs_rollup(
         &dir.join("cc-switch.db"),
         "2026-09-15",

@@ -122,23 +122,32 @@ impl QuerySnapshot {
 
     /// H07：**流式**遍历主过滤后的事件（按行序），不物化整份历史。
     /// 供汇总聚合使用；`f` 返回 Err 时立即中止并透传。
+    ///
+    /// 2026-11-05：回调同时给出该事件是否带 **CCS 导入来源证据**——日汇总
+    /// 覆盖判定只据此跳过已计入汇总的明细，纯原生事件永不被跳过。
     pub(crate) fn for_each_event(
         &self,
-        f: &mut dyn FnMut(&UsageEvent) -> Result<()>,
+        f: &mut dyn FnMut(&UsageEvent, bool) -> Result<()>,
     ) -> Result<()> {
         let ids: Vec<i64> = self.rows.iter().map(|r| r.event_id).collect();
-        let mut by_id: std::collections::HashMap<i64, UsageEvent> =
+        let mut by_id: std::collections::HashMap<i64, (UsageEvent, bool)> =
             std::collections::HashMap::with_capacity(ids.len().min(4096));
         for chunk in ids.chunks(4096) {
             by_id.clear();
             for stored in self.read.fetch_events(chunk)? {
-                by_id.insert(stored.id, report::usage_event_of(&stored));
+                by_id.insert(
+                    stored.id,
+                    (
+                        report::usage_event_of(&stored),
+                        stored.has_ccs_import_origin,
+                    ),
+                );
             }
             for id in chunk {
-                let e = by_id
+                let (e, has_ccs_import_origin) = by_id
                     .get(id)
                     .ok_or_else(|| anyhow::anyhow!("查询快照行 {id} 在库中不存在"))?;
-                f(e)?;
+                f(e, *has_ccs_import_origin)?;
             }
         }
         Ok(())
