@@ -764,11 +764,15 @@ pub fn staged_plan_count() -> usize {
     plans().lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 
-/// `app_type` 映射：本期只支持 Claude 与 Codex（其他应用在预览列出但不导入）。
+/// `app_type` 映射：**只接受 Claude**（2026-11-05 用户口径）。
+///
+/// CCS 在本项目的用途是补充 Claude Code 被清理的会话历史；Codex、WorkBuddy 等
+/// 其他应用以 TokenScope 自身采集与已保存的原生历史为准，不再由 CCS 导入
+/// 影响（其他应用的行在预览里列出但不导入）。已导入的旧数据保留在库中，
+/// 只是不参与统计（查询层按来源纯度过滤）。
 fn map_app(app_type: &str) -> Option<AgentKind> {
     match app_type {
         "claude" => Some(AgentKind::ClaudeCode),
-        "codex" => Some(AgentKind::Codex),
         _ => None,
     }
 }
@@ -1234,10 +1238,39 @@ mod tests {
     #[test]
     fn app_mapping_is_explicit() {
         assert_eq!(map_app("claude"), Some(AgentKind::ClaudeCode));
-        assert_eq!(map_app("codex"), Some(AgentKind::Codex));
-        for other in ["gemini", "opencode", "grokbuild", "mcode", "pi", "unknown"] {
-            assert_eq!(map_app(other), None, "{other} 本期不导入");
+        // 2026-11-05：CCS 只补充 Claude Code；其他应用（含 Codex）不导入。
+        for other in [
+            "codex",
+            "gemini",
+            "opencode",
+            "grokbuild",
+            "mcode",
+            "pi",
+            "unknown",
+        ] {
+            assert_eq!(map_app(other), None, "{other} 不由 CCS 导入");
         }
+    }
+
+    #[test]
+    fn codex_session_alias_uses_real_buckets() {
+        // 2026-11-05：Codex 不再由 CCS 导入；已导入旧数据的保守重播身份仍按
+        // 会话行的**真实四桶**构造（proxy 行可能缺报缓存写）。这里直接验证
+        // 该构造——集成层已不经过这条路径。
+        let mut raw = base_request();
+        raw.app_type = "codex".into();
+        raw.model = "gpt-5.6-sol".into();
+        raw.session_id = Some("sess-1".into());
+        raw.input_tokens = 110;
+        raw.output_tokens = 30;
+        raw.cache_read_tokens = 10;
+        raw.cache_creation_tokens = 40;
+        raw.input_token_semantics = INPUT_TOKEN_SEMANTICS_FRESH;
+        raw.data_source = "codex_session".into();
+        let aliases = session_row_aliases(AgentKind::Codex, &raw);
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].0, "codex-usage");
+        assert_eq!(aliases[0].1, "sess-1|gpt-5.6-sol|110|30|40|10");
     }
 
     #[test]

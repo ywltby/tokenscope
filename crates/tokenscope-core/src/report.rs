@@ -2051,8 +2051,20 @@ impl TimeBounds {
 ///
 /// 流式构建：内存只随**不同桶数**增长（而不是事件数），因此判定"某个日汇总桶
 /// 是否已被明细覆盖"不需要把历史读进内存。
-pub(crate) type DetailBuckets =
-    std::collections::HashMap<String, std::collections::HashSet<(String, String, String)>>;
+///
+/// 2026-11-05：每个桶保留**请求数与四桶合计**——只判断"是否存在明细"无法
+/// 区分"明细完整"与"明细只有一部分"，覆盖判定需要请求数这个可核对的证据。
+pub(crate) type DetailBuckets = std::collections::HashMap<
+    String,
+    std::collections::HashMap<(String, String, String), DetailBucketStat>,
+>;
+
+/// 单个明细桶的可核对统计（只累加，不回读事件）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DetailBucketStat {
+    pub requests: u64,
+    pub tokens: crate::model::TokenCounts,
+}
 
 pub(crate) fn collect_detail_buckets(
     read: &crate::history::ReadSnapshot,
@@ -2067,11 +2079,21 @@ pub(crate) fn collect_detail_buckets(
         let entry = out.entry(tz_name.clone()).or_default();
         read.for_each_chunk(app, 4096, &mut |events| {
             for e in events {
-                entry.insert((
+                let key = (
                     e.ts.to_zoned(source_tz.clone()).date().to_string(),
                     e.app.as_str().to_string(),
                     crate::model_identity::ModelIdentity::parse(&e.model_raw).identity_key(),
-                ));
+                );
+                let stat = entry.entry(key).or_default();
+                // SF08：聚合口径全链路受检——桶统计同样不回绕、不饱和。
+                stat.requests = stat
+                    .requests
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("明细桶请求数累计超出可表示范围"))?;
+                stat.tokens = stat
+                    .tokens
+                    .checked_add(&e.tokens)
+                    .ok_or_else(|| anyhow::anyhow!("明细桶 token 累计超出可表示范围"))?;
             }
             Ok(())
         })?;
@@ -2082,7 +2104,8 @@ pub(crate) fn collect_detail_buckets(
 /// H06：日汇总桶的统计来源策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RollupBucketPolicy {
-    /// 默认：桶内有明细就只统计明细（无法证明汇总被明细完整覆盖时不追加汇总）。
+    /// 默认：桶内没有明细时用汇总；明细请求数少于汇总请求数（明细只覆盖一部分）
+    /// 时以汇总为该范围总量，明细不重复计入；无法确认覆盖时保留明细并提示。
     #[default]
     PreferDetail,
     /// 用户在本轮明确选择"以 CCS 日汇总为准"：命中桶整桶替换为汇总值。
@@ -2095,6 +2118,25 @@ pub struct RollupSelection {
     pub(crate) contributions: Vec<crate::aggregate::RollupContribution>,
     pub(crate) coverage: crate::aggregate::RollupCoverage,
     pub(crate) warnings: Vec<String>,
+    /// 2026-11-05：明细被日汇总替代的桶。
+    ///
+    /// 聚合时跳过这些桶内**导入时刻之前**的明细事件（它们已计入汇总，不能再加
+    /// 一次）；明细视图仍照常展示这些请求。导入时刻之后新增的原生请求不跳过。
+    pub(crate) covered_detail: Vec<CoveredBucket>,
+}
+
+/// 一个被日汇总替代的明细桶（来源时区下的 `(日, 应用, 等价模型)`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoveredBucket {
+    pub source_tz: String,
+    pub day: String,
+    pub app: AgentKind,
+    pub model_identity: String,
+    /// 覆盖起点 = 该桶日汇总的导入批次时刻。
+    ///
+    /// 只有事件时间 **<=** 这个时刻才可能已被快照计入；更晚的事件（导入之后
+    /// 新增的原生请求）必须继续按明细计入，否则会被旧汇总盖掉。
+    pub since: jiff::Timestamp,
 }
 
 /// H06/H08：日粒度历史的参与方式。
@@ -2136,11 +2178,15 @@ fn rollup_in_bounds(r: &crate::history::StoredRollup, bounds: &TimeBounds) -> bo
 
 /// H06：按 `(CCS 原始统计日, 来源时区, 应用, 等价模型)` 桶决定统计来源。
 ///
-/// 规则（计划 §5.3）：
+/// 规则（2026-11-05 定稿，见 `docs/stats-semantics.md` §5.1）：
 /// - 桶内**没有**请求明细 → 使用已去重的日汇总（计入统计，费用未知）；
-/// - 桶内**有**请求明细 → 默认只统计明细；同时存在日汇总时记为「未解决覆盖」
-///   （仅总量相等不足以证明覆盖，不追加、不按差额造"剩余请求"）；
-/// - 用户显式选择以汇总为准时，命中桶整桶替换为汇总值；
+/// - 桶内明细请求数 **少于整桶汇总请求数**，且汇总有导入批次时刻 → 明细只
+///   覆盖其中一部分，**汇总作为该范围总量**；导入时刻之前的明细不重复计入
+///   （`covered_detail` 供聚合跳过），明细视图仍可查看；
+/// - 明细请求数不少于汇总，或没有导入时刻 → 无法确认覆盖：保留明细统计，
+///   汇总不追加，也不按差额造"剩余请求"，在报告中如实提示；
+/// - 用户显式选择以汇总为准时，命中桶整桶替换为汇总值（仍需导入时刻保护
+///   快照之后新增的请求）；
 /// - 按日筛选/分组而查询时区 ≠ 来源日时区时，日汇总**不参与**（返回可恢复
 ///   提示：切回来源时区或只看请求明细），绝不把来源日期当作午夜事件重切；
 /// - U01：时刻范围（滚动 24h / 自定义到分钟）**一律不选取**日汇总桶（日粒度
@@ -2157,15 +2203,16 @@ pub(crate) fn select_rollup_contributions(
     policy: RollupBucketPolicy,
     bounds: &TimeBounds,
     mode: RollupsMode,
-) -> RollupSelection {
+) -> Result<RollupSelection> {
     let mut selection = RollupSelection {
         contributions: Vec::new(),
         coverage: crate::aggregate::RollupCoverage::default(),
         warnings: Vec::new(),
+        covered_detail: Vec::new(),
     };
     if rollups.is_empty() || mode == RollupsMode::DetailOnly {
         // 仅明细模式：用户显式要求不看日粒度历史（不报"缺失"，这是他的选择）。
-        return selection;
+        return Ok(selection);
     }
     // U01：时刻范围（滚动 24h / 自定义到分钟）不选取任何日汇总桶——区间语义
     // 精确到分钟，日粒度历史无法对齐，也**不按比例估算**。只有粒度的历史
@@ -2181,9 +2228,25 @@ pub(crate) fn select_rollup_contributions(
                 .parse::<jiff::civil::Date>()
                 .is_ok_and(|day| day >= *covers_from && day <= *covers_to)
         });
-        return selection;
+        return Ok(selection);
     }
     let mut mismatched: Vec<String> = Vec::new();
+    // 2026-11-05：先按 `(日, 应用, 等价模型)` 归拢日汇总行。同一桶可能有多条
+    // （provider / request_model / pricing_model 不同），它们共同构成该桶的
+    // 汇总总量——覆盖判定必须用**整桶**请求数，逐行比较会把"明细只覆盖一个
+    // 分片"误判成"明细不完整"。
+    struct Bucket<'a> {
+        rows: Vec<&'a crate::history::StoredRollup>,
+        requests: u64,
+        tokens: crate::model::TokenCounts,
+        import_at: Option<jiff::Timestamp>,
+        source_tz: String,
+        day: String,
+        app: AgentKind,
+        model_identity: String,
+    }
+    let mut buckets: std::collections::BTreeMap<(String, String, String), Bucket<'_>> =
+        std::collections::BTreeMap::new();
     for r in rollups {
         // H08：主时间范围同样作用于日汇总——只按日粒度保存的历史也必须遵守
         // 用户选择的日期区间（早期实现让"只看 10 月 9 日"仍带出 6 月 1 日）。
@@ -2203,41 +2266,89 @@ pub(crate) fn select_rollup_contributions(
             }
             continue;
         }
-        let empty = std::collections::HashSet::new();
-        let buckets = detail_buckets.get(&r.source_tz).unwrap_or(&empty);
+        let model_identity = crate::model_identity::ModelIdentity::parse(&r.model).identity_key();
         let key = (
             r.day.clone(),
             r.app.as_str().to_string(),
-            crate::model_identity::ModelIdentity::parse(&r.model).identity_key(),
+            model_identity.clone(),
         );
-        let has_detail = buckets.contains(&key);
-        match (has_detail, policy) {
-            (true, RollupBucketPolicy::PreferDetail) => {
-                // 明细优先：汇总不追加，也不按差额造请求；缺口如实披露。
-                selection.coverage.detail_buckets += 1;
-                selection.coverage.unresolved_buckets += 1;
-                if let Some(t) = selection
+        let bucket = buckets.entry(key).or_insert_with(|| Bucket {
+            rows: Vec::new(),
+            requests: 0,
+            tokens: crate::model::TokenCounts::default(),
+            import_at: None,
+            source_tz: r.source_tz.clone(),
+            day: r.day.clone(),
+            app: r.app,
+            model_identity,
+        });
+        bucket.rows.push(r);
+        bucket.requests = bucket
+            .requests
+            .checked_add(r.request_count)
+            .ok_or_else(|| anyhow::anyhow!("日汇总请求数累计超出可表示范围"))?;
+        bucket.tokens = bucket
+            .tokens
+            .checked_add(&r.tokens)
+            .ok_or_else(|| anyhow::anyhow!("日汇总 token 累计超出可表示范围"))?;
+        // 同桶多行可能来自不同导入批次：取最晚的提交时刻作为覆盖起点。
+        if let Some(at) = r.import_at
+            && bucket.import_at.is_none_or(|cur| at > cur)
+        {
+            bucket.import_at = Some(at);
+        }
+    }
+    let prefer_rollup = policy == RollupBucketPolicy::PreferRollup;
+    for bucket in buckets.into_values() {
+        let empty: std::collections::HashMap<(String, String, String), DetailBucketStat> =
+            std::collections::HashMap::new();
+        let detail_map = detail_buckets.get(&bucket.source_tz).unwrap_or(&empty);
+        let detail = detail_map
+            .get(&(
+                bucket.day.clone(),
+                bucket.app.as_str().to_string(),
+                bucket.model_identity.clone(),
+            ))
+            .copied()
+            .unwrap_or_default();
+        if detail.requests == 0 {
+            // 桶内没有请求明细：直接用汇总（H06 既有行为）。
+            selection.coverage.rollup_buckets += 1;
+            push_rollup_rows(&mut selection, &bucket.rows);
+            continue;
+        }
+        match bucket.import_at {
+            // 明细请求数少于汇总请求数 = 明细只覆盖了该桶的一部分请求；
+            // 汇总是更完整的来源总量 → 用汇总作为该范围总量。
+            // 用户显式选择"以汇总为准"时无条件采用（仍需导入时刻来保护
+            // 快照之后新增的请求）。
+            Some(since) if prefer_rollup || detail.requests < bucket.requests => {
+                selection.coverage.covered_buckets += 1;
+                selection.coverage.covered_detail_tokens = selection
                     .coverage
-                    .unresolved_covered_tokens
-                    .checked_add(&r.tokens)
-                {
-                    selection.coverage.unresolved_covered_tokens = t;
-                }
+                    .covered_detail_tokens
+                    .checked_add(&detail.tokens)
+                    .ok_or_else(|| anyhow::anyhow!("被汇总替代的明细 token 累计超出可表示范围"))?;
+                push_rollup_rows(&mut selection, &bucket.rows);
+                selection.covered_detail.push(CoveredBucket {
+                    source_tz: bucket.source_tz,
+                    day: bucket.day,
+                    app: bucket.app,
+                    model_identity: bucket.model_identity,
+                    since,
+                });
             }
             _ => {
-                selection.coverage.rollup_buckets += 1;
-                selection
-                    .contributions
-                    .push(crate::aggregate::RollupContribution {
-                        day: r.day.clone(),
-                        source_tz: r.source_tz.clone(),
-                        app: r.app,
-                        model: r.model.clone(),
-                        tokens: r.tokens,
-                        requests: r.request_count,
-                        source_cost_usd: r.source_cost_usd,
-                        source: r.logical_source.clone(),
-                    });
+                // 明细请求数不少于汇总，或没有导入时刻：无法确认汇总是否已被
+                // 明细覆盖（也可能包含快照之后新增的请求）→ 保留明细并如实
+                // 提示；不猜造"剩余请求"，也不把两者相加。
+                selection.coverage.detail_buckets += 1;
+                selection.coverage.unresolved_buckets += 1;
+                selection.coverage.unresolved_covered_tokens = selection
+                    .coverage
+                    .unresolved_covered_tokens
+                    .checked_add(&bucket.tokens)
+                    .ok_or_else(|| anyhow::anyhow!("未解决覆盖的汇总 token 累计超出可表示范围"))?;
             }
         }
     }
@@ -2251,13 +2362,31 @@ pub(crate) fn select_rollup_contributions(
     }
     if selection.coverage.unresolved_buckets > 0 {
         selection.warnings.push(format!(
-            "有 {} 个日期/模型桶同时存在请求明细与日汇总，且无法证明明细已完整覆盖汇总；\
-             这些桶按请求明细统计，未纳入的汇总共 {} token（不直接相加，避免重复计费）",
+            "有 {} 个日期/模型桶同时存在请求明细与日汇总，但明细请求数不少于汇总或缺少导入时刻证据，\
+             无法确认汇总已被完整覆盖；这些桶按请求明细统计，汇总共 {} token 未纳入（不直接相加，避免重复计费）",
             selection.coverage.unresolved_buckets,
             selection.coverage.unresolved_covered_tokens.total()
         ));
     }
-    selection
+    Ok(selection)
+}
+
+/// 把一组日汇总行按原顺序转成聚合贡献。
+fn push_rollup_rows(selection: &mut RollupSelection, rows: &[&crate::history::StoredRollup]) {
+    for r in rows {
+        selection
+            .contributions
+            .push(crate::aggregate::RollupContribution {
+                day: r.day.clone(),
+                source_tz: r.source_tz.clone(),
+                app: r.app,
+                model: r.model.clone(),
+                tokens: r.tokens,
+                requests: r.request_count,
+                source_cost_usd: r.source_cost_usd,
+                source: r.logical_source.clone(),
+            });
+    }
 }
 
 /// H04：归一化事件 → 历史库写入形态。
@@ -2376,6 +2505,9 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
     let selection = snapshot.rollup_selection();
     let t_agg = std::time::Instant::now();
     let mut state = crate::aggregate::AggregateState::new(snapshot.by, snapshot.tz.clone());
+    // 2026-11-05：被日汇总替代的明细桶——导入时刻之前的事件已计入汇总，
+    // 聚合时跳过以免重复；导入之后新增的原生请求照常按明细计入。
+    state.set_covered_detail(&selection.covered_detail);
     let pricing = snapshot.pricing().clone();
     snapshot.for_each_event(&mut |e| state.push_event(e, &pricing))?;
     for r in &selection.contributions {

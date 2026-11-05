@@ -623,7 +623,7 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
         report::RollupBucketPolicy::default(),
         &time_bounds,
         opts.rollups,
-    );
+    )?;
 
     let snapshot = Arc::new(QuerySnapshot {
         // RC01：命名空间 + 序号 + generation。跨启动唯一性来自命名空间，

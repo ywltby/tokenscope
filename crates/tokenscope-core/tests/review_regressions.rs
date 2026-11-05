@@ -25,7 +25,8 @@ use std::time::Duration;
 
 use tokenscope::aggregate::GroupBy;
 use tokenscope::history::{
-    DailyRollupWrite, EventWrite, HistoryDb, RollupConflictPolicy, WritePrecedence, WriteSummary,
+    DailyRollupWrite, EventAlias, EventOrigin, EventWrite, HistoryDb, RollupConflictPolicy,
+    WriteClass, WritePrecedence, WriteSummary,
 };
 use tokenscope::import::ccs::{self, CcsSource};
 use tokenscope::model::{AgentKind, TokenCounts};
@@ -309,9 +310,10 @@ fn large_detail_plus_rollup_does_not_deadlock() {
             logical_source: "ccs".into(),
             day: format!("2026-06-0{}", i + 1),
             source_tz: "Asia/Shanghai".into(),
-            app: AgentKind::Codex,
-            provider_id: "_codex_session".into(),
-            model: "gpt-5.6-sol".into(),
+            // 2026-11-05：统计只选取 Claude 的日汇总（CCS 只补充 Claude）。
+            app: AgentKind::ClaudeCode,
+            provider_id: "_claude_session".into(),
+            model: "claude-opus-5-5".into(),
             request_model: String::new(),
             pricing_model: String::new(),
             request_count: 2,
@@ -378,26 +380,23 @@ fn large_detail_plus_rollup_does_not_deadlock() {
 
 // ================================================================ 3a：重叠候选
 
-/// 审阅 #3a：Codex 没有可证实身份——CCS 行与本地已有请求"同时间同用量"时，
-/// 必须列为未解决重叠候选：预览可见、默认拒绝提交（不静默重复计费），
-/// 用户显式确认后才按新增导入并留下审计计数。
-/// 审阅 #3a：**身份不足**（无 session_id，构造不出任何别名）的 Codex 来源行，
-/// 与本地已有请求同时间同用量 → 预览列为重叠候选（未解决）、默认拒绝提交；
-/// 显式确认后按新增导入并留审计。带 session_id 的行登记保守重播身份别名，
-/// 两侧直接命中同一事件（见 codex_import_and_collect_yield_the_same_union）。
+/// 审阅 #3a（2026-11-05 口径：CCS 只补充 Claude）：**身份不足**（无 session_id
+/// 的 proxy 行，构造不出任何别名）的 CCS 来源行，与本地已有请求同时间同用量
+/// → 预览列为重叠候选（未解决）、默认拒绝提交；显式确认后按新增导入并留审计。
+/// 带 session_id 的会话行登记可证实身份别名，两侧直接命中同一事件。
 #[test]
-fn codex_overlap_candidate_requires_explicit_confirmation() {
+fn ccs_overlap_candidate_requires_explicit_confirmation() {
     let _g = serial();
-    let dir = temp_dir("overlap-codex");
+    let dir = temp_dir("overlap-ccs");
     let history = history_of(&dir);
     let ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
     history
         .write_batch(&[EventWrite {
-            event_key: "native|codex|/logs/rollout.jsonl|3|fp".into(),
-            app: AgentKind::Codex,
+            event_key: "native|claude|/logs/s.jsonl|3|fp".into(),
+            app: AgentKind::ClaudeCode,
             ts,
-            model_raw: "gpt-5.6-sol".into(),
-            model_identity: "gpt56sol".into(),
+            model_raw: "claude-opus-5-5".into(),
+            model_identity: "claudeopus55".into(),
             session_id: Some("sess-1".into()),
             record_id: None,
             project_key: Some("/work/app".into()),
@@ -423,10 +422,10 @@ fn codex_overlap_candidate_requires_explicit_confirmation() {
         &dir.join("cc-switch.db"),
         &[CcsRow {
             request_id: "ccs-1".into(),
-            app_type: "codex".into(),
-            model: "gpt-5.6-sol".into(),
+            app_type: "claude".into(),
+            model: "claude-opus-5-5".into(),
             session_id: None,
-            data_source: "codex_session".into(),
+            data_source: "proxy".into(),
             created_at: ts.as_second(),
             input: 100,
             output: 30,
@@ -1432,13 +1431,13 @@ fn import_commit_rechecks_generation_inside_transaction() {
 
 // ================================================================ 第五轮复核 P2
 
-/// 第五轮 P2-1：proxy 行自带 codex-usage 别名（cache_write=0 变体）不得
-/// 阻断被剔除会话行捐献的真实值变体（cache_write=X）——否则原生采集因
-/// 别名不命中而重复入库。
+/// 第五轮 P2-1（2026-11-05 口径：CCS 只补充 Claude）：会话行与 proxy 行按
+/// 有效用量去重后，被剔除行捐献的 `claude-message` 身份让原生采集命中同一
+/// 事件；内容差异按原生优先级更新为原生值，不重复入库。
 #[test]
-fn codex_proxy_session_row_donates_real_cache_write_alias() {
+fn ccs_session_row_donates_identity_so_native_collection_merges() {
     let _g = serial();
-    let dir = temp_dir("p2-1-cw-donation");
+    let dir = temp_dir("p2-1-donation");
     let history = history_of(&dir);
     let ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
     seed_ccs(
@@ -1446,20 +1445,20 @@ fn codex_proxy_session_row_donates_real_cache_write_alias() {
         &[
             CcsRow {
                 request_id: "px-1".into(),
-                app_type: "codex".into(),
-                model: "gpt-5.6-sol".into(),
-                session_id: Some("sess-1".into()),
+                app_type: "claude".into(),
+                model: "claude-opus-5-5".into(),
+                session_id: None,
                 data_source: "proxy".into(),
                 created_at: ts.as_second(),
                 input: 110,
                 output: 30,
             },
             CcsRow {
-                request_id: "cs-1".into(),
-                app_type: "codex".into(),
-                model: "gpt-5.6-sol".into(),
+                request_id: "session:msg-9".into(),
+                app_type: "claude".into(),
+                model: "claude-opus-5-5".into(),
                 session_id: Some("sess-1".into()),
-                data_source: "codex_session".into(),
+                data_source: "session_log".into(),
                 created_at: ts.as_second(),
                 input: 110,
                 output: 30,
@@ -1467,24 +1466,6 @@ fn codex_proxy_session_row_donates_real_cache_write_alias() {
         ],
         &[],
     );
-    // 旧版 CCS 未记录 Codex 缓存写：proxy 行 cache_creation=0，
-    // 被剔除会话行记录真实值 40（分支 3 兼容形态，研究文档确认真实存在）。
-    {
-        let conn = rusqlite::Connection::open(dir.join("cc-switch.db")).unwrap();
-        conn.execute(
-            "UPDATE proxy_request_logs SET cache_creation_tokens = 40, cache_read_tokens = 10 WHERE request_id = 'cs-1'",
-            [],
-        )
-        .unwrap();
-    }
-    {
-        let conn = rusqlite::Connection::open(dir.join("cc-switch.db")).unwrap();
-        conn.execute(
-            "UPDATE proxy_request_logs SET cache_read_tokens = 10 WHERE request_id = 'px-1'",
-            [],
-        )
-        .unwrap();
-    }
     let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
     let preview = ccs::preview(&source, &history, "UTC").unwrap();
     assert_eq!(
@@ -1499,78 +1480,43 @@ fn codex_proxy_session_row_donates_real_cache_write_alias() {
     )
     .unwrap();
     assert_eq!(report.requests_inserted, 1);
+    assert_eq!(
+        history.alias_count().unwrap(),
+        1,
+        "被剔除会话行的身份必须转移给保留的 proxy 行"
+    );
 
-    // 原生采集同一 rollout：真实 cache_write=40 的别名必须命中捐献变体，
-    // 不重复入库；内容差异按终值规则更新为原生值。
-    let codex = dir.join("codex");
-    let lines = vec![
-        codex_meta("sess-1", "/work/app"),
-        codex_context("gpt-5.6-sol", "/work/app"),
-        serde_json::json!({
-            "timestamp": "2026-07-17T15:00:05.000Z",
-            "type": "event_msg",
-            "payload": {"type": "token_count", "info": {"last_token_usage": {
-                "input_tokens": 150, "output_tokens": 30,
-                "cached_input_tokens": 10, "cache_write_input_tokens": 40,
-                "reasoning_output_tokens": 0, "total_tokens": 180
-            }}}
-        })
-        .to_string(),
-    ];
-    codex_rollout(&codex, "sessions/2026/07/17/rollout-cw.jsonl", &lines);
-    let r = summary(&opts(&dir, None, Some(codex))).unwrap();
-    for src in &r.sources {
-        eprintln!(
-            "SRC {} files={} events={}",
-            src.agent.as_str(),
-            src.stats.files_scanned,
-            src.stats.events
-        );
-    }
+    // 原生采集同一 session/message：命中别名并入同一事件，内容以原生为准。
+    let claude = dir.join("claude");
+    write_lines(
+        &claude.join("proj/s.jsonl"),
+        &[
+            claude_context("sess-1", "2026-07-17T15:00:00Z", "/work/app"),
+            claude_assistant(
+                "sess-1",
+                "msg-9",
+                "2026-07-17T15:00:00Z",
+                "claude-opus-5-5",
+                110,
+                30,
+            ),
+        ],
+    );
+    summary(&opts(&dir, Some(claude), None)).unwrap();
     assert_eq!(
         history.event_count().unwrap(),
         1,
         "原生并入已导入事件，不新增"
     );
-    {
-        let conn = rusqlite::Connection::open(dir.join("data").join("history.db")).unwrap();
-        for row in conn
-            .prepare("SELECT identity_value FROM event_aliases")
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
-        {
-            eprintln!("ALIAS: {}", row.unwrap());
-        }
-    }
     let totals = history.totals().unwrap();
-    eprintln!(
-        "TOTALS: input={} cw={} cr={}",
-        totals.input, totals.cache_write, totals.cache_read
+    assert_eq!(totals.input, 110, "token 不翻倍");
+    assert_eq!(totals.output, 30);
+    let events = history.stored_events().unwrap();
+    assert_eq!(
+        events[0].project_key.as_deref(),
+        Some("/work/app"),
+        "原生优先级更高：项目归属由原生补齐"
     );
-    {
-        let conn = rusqlite::Connection::open(dir.join("data").join("history.db")).unwrap();
-        for row in conn
-            .prepare("SELECT record_id, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens FROM usage_events")
-            .unwrap()
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, Option<String>>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            })
-            .unwrap()
-        {
-            let (rid, i, o, cw, cr) = row.unwrap();
-            eprintln!("EVENT: {rid:?} in={i} out={o} cw={cw} cr={cr}");
-        }
-    }
-    assert_eq!(totals.input, 100, "原生 fresh 输入（150-10-40）");
-    assert_eq!(totals.cache_write, 40, "原生真实缓存写替换 proxy 的 0");
-    assert_eq!(totals.cache_read, 10);
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -1631,29 +1577,35 @@ fn native_confirmation_blocks_later_ccs_overwrite() {
 
 // ================================================================ 复审第二轮
 
-use tokenscope::history::EventAlias;
-
-/// 复审 #3：先导入 CCS、后采集 Codex 必须与反向顺序得到**相同并集**。
-/// CCS 侧现在登记与原生采集同构的保守重播身份（`codex-usage`），两侧命中
-/// 同一事件；缺 session_id 的行仍走重叠候选（见上一测试）。
+/// 复审 #3（2026-11-05 口径：CCS 只补充 Claude）：先导入 CCS、后采集必须与
+/// 反向顺序得到**相同并集**——会话行与原生采集共享可证实身份，两侧命中同一
+/// 事件；缺 session_id 的行仍走重叠候选（见上一测试）。
 #[test]
-fn codex_import_and_collect_yield_the_same_union() {
+fn ccs_import_and_collect_yield_the_same_union() {
     let _g = serial();
     let ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
+    // 2026-11-05 口径：CCS 只补充 Claude Code。会话行与原生采集共享可证实
+    // 身份 `session|message.id` → 两个顺序都必须得到同一并集。
     let ccs_row = CcsRow {
-        request_id: "ccs-1".into(),
-        app_type: "codex".into(),
-        model: "gpt-5.6-sol".into(),
+        request_id: "session:msg-9".into(),
+        app_type: "claude".into(),
+        model: "claude-opus-5-5".into(),
         session_id: Some("sess-1".into()),
-        data_source: "codex_session".into(),
+        data_source: "session_log".into(),
         created_at: ts.as_second(),
         input: 100,
         output: 30,
     };
     let lines = vec![
-        codex_meta("sess-1", "/work/app"),
-        codex_context("gpt-5.6-sol", "/work/app"),
-        codex_token_count("2026-07-17T15:00:00.000Z", 100, 30),
+        claude_context("sess-1", "2026-07-17T15:00:00Z", "/work/app"),
+        claude_assistant(
+            "sess-1",
+            "msg-9",
+            "2026-07-17T15:00:00Z",
+            "claude-opus-5-5",
+            100,
+            30,
+        ),
     ];
 
     // 顺序 A：先导入，后采集。
@@ -1666,7 +1618,7 @@ fn codex_import_and_collect_yield_the_same_union() {
     );
     let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
     let preview = ccs::preview(&source, &history, "UTC").unwrap();
-    assert_eq!(preview.would_overlap, 0, "重播身份命中，不再是重叠候选");
+    assert_eq!(preview.would_overlap, 0, "可证实身份命中，不是重叠候选");
     assert_eq!(preview.would_insert, 1);
     let report = ccs::commit(
         &preview.plan_id,
@@ -1676,9 +1628,9 @@ fn codex_import_and_collect_yield_the_same_union() {
     )
     .unwrap();
     assert_eq!(report.requests_inserted, 1);
-    let codex = dir.join("codex");
-    codex_rollout(&codex, "sessions/2026/07/17/rollout-u.jsonl", &lines);
-    summary(&opts(&dir, None, Some(codex))).unwrap();
+    let claude = dir.join("claude");
+    write_lines(&claude.join("proj/s.jsonl"), &lines);
+    summary(&opts(&dir, Some(claude), None)).unwrap();
     assert_eq!(
         history.event_count().unwrap(),
         1,
@@ -1691,9 +1643,9 @@ fn codex_import_and_collect_yield_the_same_union() {
     // 顺序 B：先采集，后导入。
     let dir = temp_dir("union-collect-first");
     let history = history_of(&dir);
-    let codex = dir.join("codex");
-    codex_rollout(&codex, "sessions/2026/07/17/rollout-u.jsonl", &lines);
-    summary(&opts(&dir, None, Some(codex))).unwrap();
+    let claude = dir.join("claude");
+    write_lines(&claude.join("proj/s.jsonl"), &lines);
+    summary(&opts(&dir, Some(claude), None)).unwrap();
     assert_eq!(history.event_count().unwrap(), 1);
     seed_ccs(&dir.join("cc-switch.db"), &[ccs_row], &[]);
     let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
@@ -1716,19 +1668,20 @@ fn codex_import_and_collect_yield_the_same_union() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 复审 #3 的会话行分支：Codex 会话行因"与 proxy 行重复"被剔除时，它的
-/// 保守重播身份必须转移给被保留的 proxy 行——否则先导入（留 proxy 行）后
-/// 采集（带 session_id）仍会为同一请求再建一条事件。
+/// 复审 #3 的会话行分支（2026-11-05 口径：CCS 只补充 Claude）：会话行因
+/// "与 proxy 行重复"被剔除时，它的可证实身份（`claude-message`）必须转移给
+/// 被保留的 proxy 行——否则先导入（留 proxy 行）后采集（带 session）仍会为
+/// 同一请求再建一条事件。
 #[test]
-fn deduped_codex_session_row_donates_replay_identity_to_proxy_row() {
+fn deduped_ccs_session_row_donates_identity_to_proxy_row() {
     let _g = serial();
-    let dir = temp_dir("codex-alias-donate");
+    let dir = temp_dir("ccs-alias-donate");
     let history = history_of(&dir);
     let ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
     let proxy = CcsRow {
         request_id: "px-1".into(),
-        app_type: "codex".into(),
-        model: "gpt-5.6-sol".into(),
+        app_type: "claude".into(),
+        model: "claude-opus-5-5".into(),
         session_id: None,
         data_source: "proxy".into(),
         created_at: ts.as_second(),
@@ -1736,9 +1689,9 @@ fn deduped_codex_session_row_donates_replay_identity_to_proxy_row() {
         output: 30,
     };
     let session = CcsRow {
-        request_id: "cs-1".into(),
+        request_id: "session:msg-9".into(),
         session_id: Some("sess-1".into()),
-        data_source: "codex_session".into(),
+        data_source: "session_log".into(),
         created_at: ts.as_second() + 10,
         ..proxy.clone()
     };
@@ -1761,21 +1714,26 @@ fn deduped_codex_session_row_donates_replay_identity_to_proxy_row() {
     assert_eq!(
         history.alias_count().unwrap(),
         1,
-        "被剔除会话行的重播身份必须转移给保留的 proxy 行"
+        "被剔除会话行的身份必须转移给保留的 proxy 行"
     );
 
-    // 原生采集带同一 session/模型/四桶 → 命中转移的别名，不新增事件。
-    let codex = dir.join("codex");
-    codex_rollout(
-        &codex,
-        "sessions/2026/07/17/rollout-d.jsonl",
+    // 原生采集带同一 session/message → 命中转移的别名，不新增事件。
+    let claude = dir.join("claude");
+    write_lines(
+        &claude.join("proj/s.jsonl"),
         &[
-            codex_meta("sess-1", "/work/app"),
-            codex_context("gpt-5.6-sol", "/work/app"),
-            codex_token_count("2026-07-17T15:00:00.000Z", 100, 30),
+            claude_context("sess-1", "2026-07-17T15:00:00Z", "/work/app"),
+            claude_assistant(
+                "sess-1",
+                "msg-9",
+                "2026-07-17T15:00:00Z",
+                "claude-opus-5-5",
+                100,
+                30,
+            ),
         ],
     );
-    summary(&opts(&dir, None, Some(codex))).unwrap();
+    summary(&opts(&dir, Some(claude), None)).unwrap();
     assert_eq!(history.event_count().unwrap(), 1, "采集并入 proxy 行事件");
     assert_eq!(history.totals().unwrap().input, 100, "token 不翻倍");
     std::fs::remove_dir_all(&dir).ok();
@@ -1832,7 +1790,7 @@ fn upgraded_v2_history_backfills_identity_time_and_rollup_key() {
                     model, request_model, pricing_model, request_count, input_tokens,
                     output_tokens, cache_write_tokens, cache_read_tokens, input_semantics,
                     source_cost_usd, import_run_id, revision)
-                 VALUES('ccs', '2026-06-01', ?1, 'codex', 'p1', 'gpt-5.6', '', '', 10,
+                 VALUES('ccs', '2026-06-01', ?1, 'claude-code', 'p1', 'claude-opus-5-5', '', '', 10,
                         '1000', '200', '0', '0', 2, '1.5', NULL, 1)",
                 [tz],
             )
@@ -1954,7 +1912,7 @@ fn changing_source_timezone_does_not_duplicate_rollups() {
     seed_ccs(
         &dir.join("cc-switch.db"),
         &[],
-        &[("2026-06-01", "codex", "gpt-5.6", "", 10, 1000, 200)],
+        &[("2026-06-01", "claude", "claude-opus-5-5", "", 10, 1000, 200)],
     );
     let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
     let preview = ccs::preview(&source, &history, "UTC").unwrap();
@@ -2094,31 +2052,35 @@ fn native_precedence_beats_observed_time() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// N02：并集身份矩阵（Codex 侧）——
-/// 1) 同时间同用量、**不同会话**：独立请求，两条都保留，CCS 导入各自命中；
-/// 2) 同会话/模型/四桶、**不同时间**：保守重播合并（§3.2 已披露的限制，
-///    与内存去重同口径，显式钉住）；
-/// 3) **不同来源请求标识**、同会话/模型/四桶：一条事件、两条来源证据。
+/// N02：并集身份矩阵（2026-11-05 口径：CCS 只补充 Claude）——
+/// 1) 不同会话、同时间同用量：独立请求，两条都保留，CCS 会话行各自命中；
+/// 2) 同 `(session, message.id)` 的流式重发：合并为一条（终值规则）；
+/// 3) 同一保守身份的不同来源记录：一条事件、两条来源证据（旧数据仍成立）。
 #[test]
-fn codex_union_identity_matrix() {
+fn ccs_union_identity_matrix() {
     let _g = serial();
     // 场景 1：独立请求不被并集吞掉。
     let dir = temp_dir("n02-distinct");
     let history = history_of(&dir);
     let ts: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
-    let codex = dir.join("codex");
-    for (name, session) in [("rollout-a", "sess-A"), ("rollout-b", "sess-B")] {
-        codex_rollout(
-            &codex,
-            &format!("sessions/2026/07/17/{name}.jsonl"),
+    let claude = dir.join("claude");
+    for (name, session, message) in [("s-a", "sess-A", "msg-A"), ("s-b", "sess-B", "msg-B")] {
+        write_lines(
+            &claude.join(format!("proj/{name}.jsonl")),
             &[
-                codex_meta(session, "/work/app"),
-                codex_context("gpt-5.6-sol", "/work/app"),
-                codex_token_count("2026-07-17T15:00:00.000Z", 100, 30),
+                claude_context(session, "2026-07-17T15:00:00Z", "/work/app"),
+                claude_assistant(
+                    session,
+                    message,
+                    "2026-07-17T15:00:00Z",
+                    "claude-opus-5-5",
+                    100,
+                    30,
+                ),
             ],
         );
     }
-    summary(&opts(&dir, None, Some(codex.clone()))).unwrap();
+    summary(&opts(&dir, Some(claude), None)).unwrap();
     assert_eq!(
         history.event_count().unwrap(),
         2,
@@ -2128,21 +2090,21 @@ fn codex_union_identity_matrix() {
         &dir.join("cc-switch.db"),
         &[
             CcsRow {
-                request_id: "px-a".into(),
-                app_type: "codex".into(),
-                model: "gpt-5.6-sol".into(),
+                request_id: "session:msg-A".into(),
+                app_type: "claude".into(),
+                model: "claude-opus-5-5".into(),
                 session_id: Some("sess-A".into()),
-                data_source: "proxy".into(),
+                data_source: "session_log".into(),
                 created_at: ts.as_second(),
                 input: 100,
                 output: 30,
             },
             CcsRow {
-                request_id: "px-b".into(),
-                app_type: "codex".into(),
-                model: "gpt-5.6-sol".into(),
+                request_id: "session:msg-B".into(),
+                app_type: "claude".into(),
+                model: "claude-opus-5-5".into(),
                 session_id: Some("sess-B".into()),
-                data_source: "proxy".into(),
+                data_source: "session_log".into(),
                 created_at: ts.as_second(),
                 input: 100,
                 output: 30,
@@ -2154,7 +2116,7 @@ fn codex_union_identity_matrix() {
     let preview = ccs::preview(&source, &history, "UTC").unwrap();
     assert_eq!(
         preview.would_overlap, 0,
-        "重播身份按会话区分，不产生重叠候选"
+        "可证实身份按消息区分，不产生重叠候选"
     );
     let report = ccs::commit(
         &preview.plan_id,
@@ -2171,56 +2133,88 @@ fn codex_union_identity_matrix() {
     assert_eq!(report.requests_conflicted + report.requests_unchanged, 2);
     std::fs::remove_dir_all(&dir).ok();
 
-    // 场景 2：同会话同模型同四桶、不同时间 → 保守合并（与内存去重一致）。
+    // 场景 2：同身份流式重发、不同时间 → 合并为一条（终值）。
     let dir = temp_dir("n02-replay");
     let history = history_of(&dir);
-    let codex = dir.join("codex");
-    codex_rollout(
-        &codex,
-        "sessions/2026/07/17/rollout-r.jsonl",
+    let claude = dir.join("claude");
+    write_lines(
+        &claude.join("proj/s.jsonl"),
         &[
-            codex_meta("sess-1", "/work/app"),
-            codex_context("gpt-5.6-sol", "/work/app"),
-            codex_token_count("2026-07-17T15:00:00.000Z", 100, 30),
-            codex_token_count("2026-07-17T16:00:00.000Z", 100, 30),
+            claude_context("sess-1", "2026-07-17T15:00:00Z", "/work/app"),
+            claude_assistant(
+                "sess-1",
+                "msg-1",
+                "2026-07-17T15:00:00Z",
+                "claude-opus-5-5",
+                100,
+                10,
+            ),
+            claude_assistant(
+                "sess-1",
+                "msg-1",
+                "2026-07-17T15:00:05Z",
+                "claude-opus-5-5",
+                100,
+                30,
+            ),
         ],
     );
-    summary(&opts(&dir, None, Some(codex))).unwrap();
+    summary(&opts(&dir, Some(claude), None)).unwrap();
     assert_eq!(
         history.event_count().unwrap(),
         1,
-        "重播/同用量独立请求按 §3.2 保守规则合并（已披露限制）"
+        "同一 (session, message.id) 的流式重发合并为一条"
     );
+    assert_eq!(history.totals().unwrap().output, 30, "保留终值");
     std::fs::remove_dir_all(&dir).ok();
 
-    // 场景 3：不同 request_id 的同一条请求 → 一个事件、两条来源证据。
+    // 场景 3：旧数据的两条 CCS 来源记录同身份 → 一个事件、两条来源证据。
     let dir = temp_dir("n02-two-origins");
     let history = history_of(&dir);
-    let rows = ["px-1", "px-2"]
-        .into_iter()
-        .map(|rid| CcsRow {
-            request_id: rid.into(),
-            app_type: "codex".into(),
-            model: "gpt-5.6-sol".into(),
-            session_id: Some("sess-1".into()),
-            data_source: "proxy".into(),
-            created_at: ts.as_second(),
+    let alias = EventAlias {
+        app: AgentKind::Codex,
+        scheme: "codex-usage".into(),
+        value: "sess-1|gpt-5.6-sol|100|30|0|0".into(),
+    };
+    let write = |rid: &str| EventWrite {
+        event_key: format!("ccs|codex|proxy|{rid}"),
+        app: AgentKind::Codex,
+        ts,
+        model_raw: "gpt-5.6-sol".into(),
+        model_identity: "gpt56sol".into(),
+        session_id: Some("sess-1".into()),
+        record_id: None,
+        project_key: None,
+        session_initial_cwd: None,
+        event_cwd: None,
+        tokens: TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
             input: 100,
             output: 30,
-        })
-        .collect::<Vec<_>>();
-    seed_ccs(&dir.join("cc-switch.db"), &rows, &[]);
-    let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
-    let preview = ccs::preview(&source, &history, "UTC").unwrap();
-    assert_eq!(preview.would_insert, 1, "同一条请求只新增一个事件");
-    ccs::commit(
-        &preview.plan_id,
-        &history,
-        RollupConflictPolicy::KeepExisting,
-        false,
-    )
-    .unwrap();
-    assert_eq!(history.event_count().unwrap(), 1);
+            cache_write: 0,
+            cache_read: 0,
+        },
+        precedence: WritePrecedence::CcsImport,
+        observed_at: ts,
+        aliases: vec![alias.clone()],
+        origins: vec![EventOrigin {
+            origin_kind: "ccs_request".into(),
+            origin_key: format!("ccs|codex|proxy|{rid}"),
+            app: AgentKind::Codex,
+            import_run_id: None,
+            parser_revision: 3,
+            source_model_raw: Some("gpt-5.6-sol".into()),
+            pricing_model: Some("gpt-5.6-sol".into()),
+            source_cost_usd: None,
+            ts_precision_seconds: true,
+        }],
+    };
+    history
+        .write_batch(&[write("px-1"), write("px-2")])
+        .unwrap();
+    assert_eq!(history.event_count().unwrap(), 1, "同一身份只新增一个事件");
     assert_eq!(
         history.origin_count().unwrap(),
         2,
@@ -2231,82 +2225,84 @@ fn codex_union_identity_matrix() {
 
 // ================================================================ R01：预览/提交对账
 
-/// R01 反例 1：同一事实经不同来源键先后更新时，预览与提交的处置数字必须
-/// 一致（此前预览 [更新, 未变]、提交 [更新, 陈旧]——同一事实经部分身份
-/// 看到旧终值）。事实始终一条，token 不变。
+/// R01 反例 1：同一事实经不同来源键先后更新时，预览（`classify_batch`）与
+/// 提交（`write_batch`）的处置必须一致；事实始终一条，token 不被拼接。
+/// （2026-11-05：CCS 只补充 Claude，这里用 `claude-message` 身份直接验证
+/// 库级判定，不依赖导入路径。）
 #[test]
 fn batch_preview_matches_commit_for_same_fact_updates() {
     let _g = serial();
     let dir = temp_dir("r01-parity");
     let history = history_of(&dir);
-    let t = 1_789_545_600i64;
-    let row = |rid: &'static str, at: i64| CcsRow {
-        request_id: rid.to_string(),
-        app_type: "codex".into(),
-        model: "gpt-5.6-sol".into(),
-        session_id: Some("sess-1".into()),
-        data_source: "proxy".into(),
-        created_at: at,
-        input: 100,
-        output: 10,
+    let t0: jiff::Timestamp = "2026-07-17T15:00:00Z".parse().unwrap();
+    let t1: jiff::Timestamp = "2026-07-17T15:00:01Z".parse().unwrap();
+    let alias = EventAlias {
+        app: AgentKind::ClaudeCode,
+        scheme: "claude-message".into(),
+        value: "sess-1|msg-1".into(),
     };
-    seed_ccs(
-        &dir.join("cc-switch.db"),
-        &[row("px-1", t), row("px-2", t + 1)],
-        &[],
-    );
-    // 首次导入：同保守身份合为一事实（Codex 重播族取最早事件时间——
-    // px-1（t）胜出，px-2（t+1）按陈旧保留）。
-    {
-        let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
-        let first = ccs::preview(&source, &history, "UTC").unwrap();
-        ccs::commit(
-            &first.plan_id,
-            &history,
-            RollupConflictPolicy::KeepExisting,
-            false,
-        )
-        .unwrap();
-    }
-    assert_eq!(history.event_count().unwrap(), 1);
+    let write = |rid: &'static str, ts: jiff::Timestamp, output: u64| EventWrite {
+        event_key: format!("ccs|claude|proxy|{rid}"),
+        app: AgentKind::ClaudeCode,
+        ts,
+        model_raw: "claude-opus-5-5".into(),
+        model_identity: "claudeopus55".into(),
+        session_id: Some("sess-1".into()),
+        record_id: Some("msg-1".into()),
+        project_key: None,
+        session_initial_cwd: None,
+        event_cwd: None,
+        tokens: TokenCounts {
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
+            input: 100,
+            output,
+            cache_write: 0,
+            cache_read: 0,
+        },
+        precedence: WritePrecedence::CcsImport,
+        observed_at: ts,
+        aliases: vec![alias.clone()],
+        origins: vec![EventOrigin {
+            origin_kind: "ccs_request".into(),
+            origin_key: format!("ccs|claude|proxy|{rid}"),
+            app: AgentKind::ClaudeCode,
+            import_run_id: None,
+            parser_revision: 3,
+            source_model_raw: Some("claude-opus-5-5".into()),
+            pricing_model: Some("claude-opus-5-5".into()),
+            source_cost_usd: None,
+            ts_precision_seconds: true,
+        }],
+    };
 
-    // px-1 的时间改为 t+2 后重新预览/提交：重播族的完成时刻以最早为准，
-    // 两条后到观察（t+2 / t+1）都按陈旧保留，事实保持最早完成时间。
-    // 预览与提交的处置数字必须一致（R01 的核心不变量）。
-    // （先丢弃第一只读连接：其读事务会挡住本次 UPDATE。）
-    {
-        let conn = rusqlite::Connection::open(dir.join("cc-switch.db")).unwrap();
-        conn.execute(
-            "UPDATE proxy_request_logs SET created_at = ?1 WHERE request_id = 'px-1'",
-            [t + 2],
-        )
-        .unwrap();
-    }
-    let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
-    let preview = ccs::preview(&source, &history, "UTC").unwrap();
-    assert_eq!(preview.would_insert, 0);
+    // 同一事实两条来源记录：先插入、后到更晚观察（内容不同）→ 更新。
+    let w1 = write("p1", t0, 10);
+    let w2 = write("p2", t1, 20);
     assert_eq!(
-        preview.would_update, 0,
-        "更晚的重播观察不得更新最早完成时刻"
+        history.classify_batch(&[w1.clone(), w2.clone()]).unwrap(),
+        vec![WriteClass::Insert, WriteClass::Update]
     );
-    assert_eq!(preview.would_unchanged, 0);
-    assert_eq!(
-        preview.would_stale, 2,
-        "px-1（t+2）与 px-2（t+1）都按陈旧保留"
-    );
-    let report = ccs::commit(
-        &preview.plan_id,
-        &history,
-        RollupConflictPolicy::KeepExisting,
-        false,
-    )
-    .unwrap();
-    assert_eq!(report.requests_inserted, 0);
-    assert_eq!(report.requests_updated, 0, "预览与提交一致");
-    assert_eq!(report.requests_unchanged, 0);
-    assert_eq!(report.requests_stale, 2);
+    let s = history.write_batch(&[w1, w2]).unwrap();
+    assert_eq!(s.inserted, 1);
+    assert_eq!(s.updated, 1, "预览与提交一致");
     assert_eq!(history.event_count().unwrap(), 1, "事实始终一条");
-    assert_eq!(history.totals().unwrap().input, 100, "token 不变");
+    assert_eq!(
+        history.totals().unwrap().output,
+        20,
+        "流式终值：更晚观察胜出"
+    );
+
+    // 更早的观察（内容不同）→ 预览与提交都按陈旧保留。
+    let w3 = write("p3", t0, 99);
+    assert_eq!(
+        history.classify_batch(std::slice::from_ref(&w3)).unwrap(),
+        vec![WriteClass::Stale]
+    );
+    let s = history.write_batch(&[w3]).unwrap();
+    assert_eq!(s.stale, 1, "预览与提交一致");
+    assert_eq!(history.totals().unwrap().output, 20, "不回退");
     std::fs::remove_dir_all(&dir).ok();
 }
 

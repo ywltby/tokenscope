@@ -33,6 +33,10 @@ export interface SourceStat {
 export interface RollupCoverage {
   detail_buckets: number;
   rollup_buckets: number;
+  /** 2026-11-05：明细少于汇总、已用日汇总作为该范围总量的桶数（明细仍可查看）。 */
+  covered_buckets?: number;
+  /** 上述被汇总替代的明细 token（不重复计入总量，仅作解释）。 */
+  covered_detail_tokens?: TokenCounts;
   unresolved_buckets: number;
   unresolved_covered_tokens: TokenCounts;
   timezone_mismatch?: string | null;

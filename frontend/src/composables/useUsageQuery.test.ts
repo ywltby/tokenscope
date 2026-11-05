@@ -582,6 +582,63 @@ describe("useUsageQuery 通知合并（U04）", () => {
     expect(api.collectionDiagnostics.value.clean, "时刻提示不是采集警告").toBe(true);
     w.unmount();
   });
+
+  it("rollup_only_history_is_info_not_collection_problem：日粒度历史不是采集问题", async () => {
+    // 2026-11-05：CCS 汇总 1000 覆盖部分明细时，统计已按规则处理完；
+    // 费用未知单独披露，不再笼统显示"本轮采集存在部分问题"。
+    okMock({
+      query_summary: () =>
+        Promise.resolve({
+          ...reportA,
+          totals: { ...reportA.totals, unknown_reason: "rollup_only" },
+          rollup_coverage: {
+            detail_buckets: 0,
+            rollup_buckets: 0,
+            covered_buckets: 2,
+            covered_detail_tokens: { input: 100, output: 0, cache_write: 0, cache_read: 0 },
+            unresolved_buckets: 0,
+            unresolved_covered_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+          },
+        }),
+    });
+    const w = mountHost();
+    await flushPromises();
+    const texts = api.notices.value.map((n) => n.text).join("\n");
+    expect(texts, "已按规则处理的覆盖不再显示为采集问题").not.toContain("本轮采集存在部分问题");
+    expect(texts, "费用未知单独披露").toContain("只有日粒度");
+    expect(api.collectionDiagnostics.value.clean, "统计口径不是采集脏").toBe(true);
+    w.unmount();
+  });
+
+  it("unresolved_rollup_coverage_still_warns：真实未解决的覆盖仍提示", async () => {
+    okMock({
+      query_summary: () =>
+        Promise.resolve({
+          ...reportA,
+          warnings: [
+            "有 1 个日期/模型桶同时存在请求明细与日汇总，但明细请求数不少于汇总或缺少导入时刻证据，无法确认汇总已被完整覆盖",
+          ],
+          rollup_coverage: {
+            detail_buckets: 1,
+            rollup_buckets: 0,
+            covered_buckets: 0,
+            covered_detail_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+            unresolved_buckets: 1,
+            unresolved_covered_tokens: { input: 500, output: 0, cache_write: 0, cache_read: 0 },
+          },
+        }),
+    });
+    const w = mountHost();
+    await flushPromises();
+    const texts = api.notices.value.map((n) => n.text).join("\n");
+    expect(texts, "无法确认的覆盖必须如实提示").toContain("本轮采集存在部分问题");
+    const notice = api.notices.value.find((n) => n.text.includes("本轮采集存在部分问题"))!;
+    expect(notice.details?.join("\n"), "原始警告保留在展开明细里").toContain(
+      "无法确认汇总已被完整覆盖",
+    );
+    expect(api.collectionDiagnostics.value.clean).toBe(false);
+    w.unmount();
+  });
 });
 
 // ── U06：自动刷新调度（变化通知 / 时间窗口到期 / 翻页保护 / 可见性） ──

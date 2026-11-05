@@ -757,46 +757,25 @@ impl ReadSnapshot {
     }
 
     /// 日汇总快照（按时间/应用过滤在调用方完成）。
+    ///
+    /// **统计口径（2026-11-05）**：只返回 Claude Code 的 CCS 日汇总——CCS 在
+    /// 本项目的用途是补充 Claude Code 被清理的会话历史；Codex/WorkBuddy 等
+    /// 其他应用以 TokenScope 自身采集与已保存的原生历史为准。非 Claude 的
+    /// 旧汇总行保留在库中（不删除事实），只是不参与统计。
     pub fn rollups(&self, app: Option<AgentKind>) -> Result<Vec<StoredRollup>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT logical_source, day, source_tz, app, provider_id, model, request_model,
-                    pricing_model, request_count, input_tokens, output_tokens,
-                    cache_write_tokens, cache_read_tokens, input_semantics, source_cost_usd
-             FROM ccs_daily_usage
-             WHERE (?1 IS NULL OR app = ?1)
-             ORDER BY day, app, model, provider_id",
+            "SELECT c.logical_source, c.day, c.source_tz, c.app, c.provider_id, c.model,
+                    c.request_model, c.pricing_model, c.request_count, c.input_tokens,
+                    c.output_tokens, c.cache_write_tokens, c.cache_read_tokens,
+                    c.input_semantics, c.source_cost_usd,
+                    COALESCE(ir.committed_utc, ir.started_utc)
+             FROM ccs_daily_usage c
+             LEFT JOIN import_runs ir ON ir.id = c.import_run_id
+             WHERE (?1 IS NULL OR c.app = ?1) AND c.app = 'claude-code'
+             ORDER BY c.day, c.app, c.model, c.provider_id",
         )?;
-        let rows = stmt.query_map(params![app.map(|a| a.as_str())], |r| {
-            let raw_app: String = r.get(3)?;
-            let app = parse_agent(&raw_app).map_err(|e| conversion_error(3, e))?;
-            Ok(StoredRollup {
-                logical_source: r.get(0)?,
-                day: r.get(1)?,
-                source_tz: r.get(2)?,
-                app,
-                provider_id: r.get(4)?,
-                model: r.get(5)?,
-                request_model: r.get(6)?,
-                pricing_model: r.get(7)?,
-                request_count: r.get::<_, i64>(8)?.max(0) as u64,
-                tokens: TokenCounts {
-                    input: u64_from_row(r, 9)?,
-                    output: u64_from_row(r, 10)?,
-                    cache_write: u64_from_row(r, 11)?,
-                    cache_read: u64_from_row(r, 12)?,
-                    // CCS 日汇总没有 5m/1h 分项：按分项未知处理。
-                    cache_write_5m: 0,
-                    cache_write_1h: 0,
-                    cache_write_split_known: false,
-                },
-                input_semantics: r.get(13)?,
-                source_cost_usd: r
-                    .get::<_, Option<String>>(14)?
-                    .and_then(|s| s.trim().parse::<f64>().ok())
-                    .filter(|v| v.is_finite()),
-            })
-        })?;
+        let rows = stmt.query_map(params![app.map(|a| a.as_str())], row_to_stored_rollup)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -807,6 +786,10 @@ impl ReadSnapshot {
     /// **分批**流式遍历行索引（keyset 分页）：每批在**锁内**只取数据，
     /// 回调在**锁外**执行——回调因此可以安全地再次读取本快照（早期实现
     /// 在持锁期间回调，`fetch_events` 会重复获取同一把非重入互斥量而死锁）。
+    ///
+    /// 2026-11-05：只遍历**参与统计**的事件——非 Claude 的纯 CCS 导入事实
+    ///（`origin_rank = 0`）不在此列；事实仍保留在库中（诊断/审计接口可读），
+    /// 同一事件一旦有原生来源（`origin_rank = 1`）就照常参与。
     pub fn for_each_row_batch(
         &self,
         app: Option<AgentKind>,
@@ -822,6 +805,7 @@ impl ReadSnapshot {
                     "SELECT id, ts_seconds, ts_nanos, record_id
                      FROM usage_events
                      WHERE (?1 IS NULL OR app = ?1)
+                       AND (app = 'claude-code' OR origin_rank >= 1)
                        AND (?2 IS NULL OR (ts_seconds, ts_nanos, id) > (?2, ?3, ?4))
                      ORDER BY ts_seconds, ts_nanos, id
                      LIMIT ?5",
@@ -970,6 +954,12 @@ pub struct StoredRollup {
     pub tokens: TokenCounts,
     pub input_semantics: i64,
     pub source_cost_usd: Option<f64>,
+    /// 该快照的导入批次提交时刻（`None` = 旧数据未关联导入批次）。
+    ///
+    /// 用途（2026-11-05）：判断"导入之后新增的原生请求"——事件时间晚于这个
+    /// 时刻的明细不可能被该快照覆盖，日汇总替换明细时必须保留它们。没有该
+    /// 时刻时不猜造覆盖关系，退回"按明细统计 + 如实提示"。
+    pub import_at: Option<jiff::Timestamp>,
 }
 
 /// TokenScope 数据目录下的历史库路径（`~/.tokenscope/history.db`）。
@@ -1710,43 +1700,17 @@ impl HistoryDb {
     /// 用明细还是用汇总（见 `aggregate::select_rollup_contributions`）。
     pub fn daily_rollups(&self, app: Option<AgentKind>) -> Result<Vec<StoredRollup>> {
         let mut stmt = self.conn.prepare(
-            "SELECT logical_source, day, source_tz, app, provider_id, model, request_model,
-                    pricing_model, request_count, input_tokens, output_tokens,
-                    cache_write_tokens, cache_read_tokens, input_semantics, source_cost_usd
-             FROM ccs_daily_usage
-             WHERE (?1 IS NULL OR app = ?1)
-             ORDER BY day, app, model, provider_id",
+            "SELECT c.logical_source, c.day, c.source_tz, c.app, c.provider_id, c.model,
+                    c.request_model, c.pricing_model, c.request_count, c.input_tokens,
+                    c.output_tokens, c.cache_write_tokens, c.cache_read_tokens,
+                    c.input_semantics, c.source_cost_usd,
+                    COALESCE(ir.committed_utc, ir.started_utc)
+             FROM ccs_daily_usage c
+             LEFT JOIN import_runs ir ON ir.id = c.import_run_id
+             WHERE (?1 IS NULL OR c.app = ?1) AND c.app = 'claude-code'
+             ORDER BY c.day, c.app, c.model, c.provider_id",
         )?;
-        let rows = stmt.query_map(params![app.map(|a| a.as_str())], |r| {
-            let raw_app: String = r.get(3)?;
-            let app = parse_agent(&raw_app).map_err(|e| conversion_error(3, e))?;
-            Ok(StoredRollup {
-                logical_source: r.get(0)?,
-                day: r.get(1)?,
-                source_tz: r.get(2)?,
-                app,
-                provider_id: r.get(4)?,
-                model: r.get(5)?,
-                request_model: r.get(6)?,
-                pricing_model: r.get(7)?,
-                request_count: r.get::<_, i64>(8)?.max(0) as u64,
-                tokens: TokenCounts {
-                    input: u64_from_row(r, 9)?,
-                    output: u64_from_row(r, 10)?,
-                    cache_write: u64_from_row(r, 11)?,
-                    cache_read: u64_from_row(r, 12)?,
-                    // CCS 日汇总没有 5m/1h 分项：按分项未知处理。
-                    cache_write_5m: 0,
-                    cache_write_1h: 0,
-                    cache_write_split_known: false,
-                },
-                input_semantics: r.get(13)?,
-                source_cost_usd: r
-                    .get::<_, Option<String>>(14)?
-                    .and_then(|s| s.trim().parse::<f64>().ok())
-                    .filter(|v| v.is_finite()),
-            })
-        })?;
+        let rows = stmt.query_map(params![app.map(|a| a.as_str())], row_to_stored_rollup)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -2983,6 +2947,44 @@ fn load_event(conn: &Connection, id: i64) -> Result<Option<StoredEvent>> {
             row_to_stored_event,
         )
         .optional()?)
+}
+
+/// 日汇总行映射（快照与管理读接口共用）：列序与
+/// [`ReadSnapshot::rollups`] 的 SELECT 一一对应——前 15 列为 CCS 快照字段，
+/// 第 16 列为导入批次时刻（`LEFT JOIN import_runs`，可空）。
+fn row_to_stored_rollup(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRollup> {
+    let raw_app: String = r.get(3)?;
+    let app = parse_agent(&raw_app).map_err(|e| conversion_error(3, e))?;
+    Ok(StoredRollup {
+        logical_source: r.get(0)?,
+        day: r.get(1)?,
+        source_tz: r.get(2)?,
+        app,
+        provider_id: r.get(4)?,
+        model: r.get(5)?,
+        request_model: r.get(6)?,
+        pricing_model: r.get(7)?,
+        request_count: r.get::<_, i64>(8)?.max(0) as u64,
+        tokens: TokenCounts {
+            input: u64_from_row(r, 9)?,
+            output: u64_from_row(r, 10)?,
+            cache_write: u64_from_row(r, 11)?,
+            cache_read: u64_from_row(r, 12)?,
+            // CCS 日汇总没有 5m/1h 分项：按分项未知处理。
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
+        },
+        input_semantics: r.get(13)?,
+        source_cost_usd: r
+            .get::<_, Option<String>>(14)?
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite()),
+        // 解析失败按"无导入时刻"处理：不据此推断覆盖关系（保守）。
+        import_at: r
+            .get::<_, Option<String>>(15)?
+            .and_then(|s| s.trim().parse::<jiff::Timestamp>().ok()),
+    })
 }
 
 fn row_to_stored_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredEvent> {

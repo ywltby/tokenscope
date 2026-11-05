@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "修复 Claude 同刻候选收敛与 Codex 重播时间不后移（历史库合并与去重层确定性规则，PARSE_RULES_REVISION 5）"
+  "summary": "修复历史合并的同刻候选与 Codex 重播时间；CCS 恢复为只补充 Claude Code，日汇总按整桶请求数覆盖部分明细（不再少算），其他 agent 不受 CCS 影响"
 }

@@ -356,12 +356,13 @@ fn rollup_only_history_counts_with_unknown_cost_and_no_fake_requests() {
 }
 
 #[test]
-fn rollup_bucket_covered_by_details_is_not_double_counted() {
+fn partial_detail_under_rollup_uses_rollup_total() {
     let dir = temp_dir("covered");
     let root = dir.join("projects");
     let file = root.join("proj-a").join("sess.jsonl");
     // 明细：模型等价写法与日汇总不同（claude-opus-5.5 vs claude-opus-5-5），
-    // 归一小节后应落进同一桶。
+    // 归一小节后应落进同一桶；明细只有 1 个请求，而汇总声称 3 个 → 明细是
+    // 一部分，2026-11-05 口径：用汇总作为该范围总量，明细不重复计入。
     write_claude(&file, "s-1", "m1", "2026-09-15T08:00:00.000Z", 100, 10);
     seed_ccs_rollup(
         &dir.join("cc-switch.db"),
@@ -375,23 +376,28 @@ fn rollup_bucket_covered_by_details_is_not_double_counted() {
     import_all(&dir, "Asia/Shanghai");
 
     let r = report(&dir, &root, "Asia/Shanghai");
-    assert_eq!(r.totals.requests, 1, "命中桶按明细统计，汇总不追加");
-    assert_eq!(r.totals.tokens.total(), 110);
+    assert_eq!(r.totals.requests, 3, "总量取汇总的请求数");
+    assert_eq!(r.totals.tokens.total(), 990, "汇总 990 是该范围总量");
     assert_eq!(
-        r.totals.unknown_reason, None,
-        "明细已覆盖的桶不引入「只有汇总」的未知原因"
+        r.totals.unknown_reason,
+        Some("rollup_only"),
+        "汇总 token 无法按当前价格重估，如实标记原因"
     );
     assert_eq!(
         r.totals.unknown_tokens.total(),
-        110,
-        "未知 token 只来自本测试未配置价格的明细，不含被排除的日汇总"
+        990,
+        "未知 token 来自被采用的日汇总"
     );
-    assert_eq!(r.rollup_coverage.detail_buckets, 1);
-    assert_eq!(r.rollup_coverage.unresolved_buckets, 1);
-    assert_eq!(r.rollup_coverage.unresolved_covered_tokens.total(), 990);
+    assert_eq!(r.rollup_coverage.covered_buckets, 1);
+    assert_eq!(r.rollup_coverage.unresolved_buckets, 0);
+    assert_eq!(
+        r.rollup_coverage.covered_detail_tokens.total(),
+        110,
+        "被替代的明细 token 如实披露（不重复计入）"
+    );
     assert!(
-        r.warnings.iter().any(|w| w.contains("未纳入的汇总")),
-        "未解决覆盖必须在报告里可见: {:?}",
+        !r.warnings.iter().any(|w| w.contains("未纳入的汇总")),
+        "已按规则处理的覆盖不再报未解决: {:?}",
         r.warnings
     );
     // 桶选择固定在快照建立时：同一次查询的明细与汇总口径一致。
@@ -400,7 +406,7 @@ fn rollup_bucket_covered_by_details_is_not_double_counted() {
             .iter()
             .find(|g| g.key == "2026-09-15")
             .map(|g| g.requests),
-        Some(1)
+        Some(3)
     );
     std::fs::remove_dir_all(&dir).ok();
 }

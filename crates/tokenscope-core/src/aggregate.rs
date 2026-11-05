@@ -138,10 +138,18 @@ pub struct RollupContribution {
 pub struct RollupCoverage {
     /// 明细覆盖的桶数。
     pub detail_buckets: u64,
-    /// 改用日汇总的桶数。
+    /// 改用日汇总的桶数（桶内没有明细）。
     pub rollup_buckets: u64,
-    /// 明细与日汇总同时存在、但**无法证明**汇总已被明细完整覆盖的桶数
-    /// （这些桶默认只统计明细，汇总不追加）。
+    /// 2026-11-05：明细请求数少于汇总请求数、已按日汇总作为该范围总量的桶数
+    /// （明细仍可查看，但不重复计入总量）。
+    #[serde(default)]
+    pub covered_buckets: u64,
+    /// 上述被汇总替代的明细 token（已计入统计的是汇总值；这些只是明细侧的
+    /// 观察量，用于向用户解释"明细看到了多少、为什么总量更大"）。
+    #[serde(default)]
+    pub covered_detail_tokens: TokenCounts,
+    /// 明细与日汇总同时存在、但**无法确认**汇总已被明细完整覆盖的桶数
+    /// （明细请求数不少于汇总或缺少导入时刻证据；这些桶按明细统计，汇总不追加）。
     pub unresolved_buckets: u64,
     /// 上述未解决桶里未纳入统计的汇总 token（如实披露缺口）。
     pub unresolved_covered_tokens: TokenCounts,
@@ -202,6 +210,12 @@ pub fn aggregate_with_rollups(
     state.finish(pricing)
 }
 
+/// 已被日汇总替代的明细桶：`来源时区 → (日, 应用, 等价模型) → 覆盖起点`。
+type CoveredDetailMap = std::collections::HashMap<
+    String,
+    std::collections::HashMap<(String, String, String), jiff::Timestamp>,
+>;
+
 /// 增量聚合状态（H07）：事件与日汇总贡献**逐条喂入**，内存只随**分组数**
 /// 增长（不随事件数）——冻结查询因此可以流式汇总整份历史，不必先把所有事件
 /// 物化进内存。
@@ -211,6 +225,9 @@ pub struct AggregateState {
     map: BTreeMap<String, GroupAccum>,
     /// 出现过的来源应用（只有多应用数据才在分组里标注 agents）。
     agent_seen: Vec<&'static str>,
+    /// 2026-11-05：已被日汇总替代的明细桶。命中且事件时间不晚于覆盖起点的
+    /// 事件已计入汇总，聚合时跳过以避免重复；更晚的事件（导入后新增）照常计入。
+    covered: Option<CoveredDetailMap>,
 }
 
 impl AggregateState {
@@ -220,11 +237,57 @@ impl AggregateState {
             tz,
             map: BTreeMap::new(),
             agent_seen: Vec::new(),
+            covered: None,
         }
+    }
+
+    /// 标记"明细已由日汇总替代"的桶（查询入口按覆盖判定结果一次性设置）。
+    ///
+    /// 这些桶里**导入时刻之前**的明细已经在汇总值中，不能重复累计；明细视图
+    /// 仍照常展示这些请求，只是不进入总量。
+    pub fn set_covered_detail(&mut self, buckets: &[crate::report::CoveredBucket]) {
+        if buckets.is_empty() {
+            return;
+        }
+        let mut map: CoveredDetailMap = std::collections::HashMap::new();
+        for b in buckets {
+            map.entry(b.source_tz.clone()).or_default().insert(
+                (
+                    b.day.clone(),
+                    b.app.as_str().to_string(),
+                    b.model_identity.clone(),
+                ),
+                b.since,
+            );
+        }
+        self.covered = Some(map);
+    }
+
+    /// 该事件是否已经计入日汇总（同桶、且不晚于覆盖起点）。
+    fn covered_by_rollup(&self, e: &UsageEvent) -> bool {
+        let Some(map) = &self.covered else {
+            return false;
+        };
+        let identity = ModelIdentity::parse(&e.model).identity_key();
+        for (tz_name, buckets) in map {
+            let Ok(tz) = TimeZone::get(tz_name) else {
+                continue;
+            };
+            let day = e.ts.to_zoned(tz).date().to_string();
+            if let Some(since) = buckets.get(&(day, e.agent.as_str().to_string(), identity.clone()))
+            {
+                return e.ts <= *since;
+            }
+        }
+        false
     }
 
     /// 喂入一条明细事件。
     pub fn push_event(&mut self, e: &UsageEvent, pricing: &Pricing) -> anyhow::Result<()> {
+        // 该事件是否已被日汇总计入：是则跳过（不重复累计），明细视图不受影响。
+        if self.covered_by_rollup(e) {
+            return Ok(());
+        }
         if !self.agent_seen.contains(&e.agent.as_str()) {
             self.agent_seen.push(e.agent.as_str());
         }

@@ -813,6 +813,10 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   // R08（Task 8）：采集诊断——空结果/部分结果都必须可见，不依赖表格挂载。
   // 分开命名：warnings（重叠/缓存降级等）、坏行、IO 错误——不声称所有
   // warning 都表示丢数据；干净空区间不误报。
+  //
+  // 2026-11-05：只有日粒度的历史（CCS 汇总）是**统计口径**选择，不是采集
+  // 问题——它的费用未知由明细/费用列与独立通知披露，不再计入「本轮采集存在
+  // 部分问题」；真实未解决的覆盖（无法确认是否已覆盖）仍作为 warning 出现。
   const collectionDiagnostics = computed(() => {
     // H06：日汇总的时区不匹配是「当前视图看不到这部分历史」的可恢复提示，
     // 由通知列表单独成条（不计入采集警告计数，免得把时区提示说成采集问题）。
@@ -824,14 +828,15 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     const badLines = statsList.reduce((a, st) => a + (st.bad_lines ?? 0), 0);
     // H06：含只有日粒度的历史时，费用按「未知」披露（不是模型未收录）。
     const rollupOnly = report.value?.totals.unknown_reason === "rollup_only";
-    const clean = warns.length === 0 && ioErrors === 0 && badLines === 0 && !rollupOnly;
+    // 已按规则用汇总覆盖部分明细的桶：统计已处理完毕，不再提示。
+    const covered = report.value?.rollup_coverage?.covered_buckets ?? 0;
+    const clean = warns.length === 0 && ioErrors === 0 && badLines === 0;
     const summaryText = clean
       ? null
       : [
           warns.length > 0 ? t("status.warnCount", { count: warns.length }) : null,
           ioErrors > 0 ? t("status.ioErrorCount", { count: ioErrors }) : null,
           badLines > 0 ? t("status.badLineCount", { count: badLines }) : null,
-          rollupOnly ? t("dashboard.rollupOnly") : null,
         ]
           .filter(Boolean)
           .join(t("dashboard.listJoin"));
@@ -842,6 +847,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       ioErrors,
       badLines,
       rollupOnly,
+      covered,
       timezoneMismatch,
       instantOnly,
     };
@@ -939,6 +945,16 @@ export function useUsageQuery(opts: UsageQueryOptions) {
         id: "instant-range",
         severity: "warning",
         text: instantRangeHint.value,
+        actions: [],
+      });
+    }
+    // 2026-11-05：只有日粒度的历史是统计口径（已计入总量），费用按未知披露——
+    // 这是信息项，不再并入"本轮采集存在部分问题"。
+    if (collectionDiagnostics.value.rollupOnly) {
+      list.push({
+        id: "rollup-only-cost",
+        severity: "info",
+        text: t("dashboard.rollupOnlyNotice"),
         actions: [],
       });
     }
