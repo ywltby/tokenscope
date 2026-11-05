@@ -106,8 +106,6 @@ const zhCN = {
     ioErrorCount: "{count} 个文件读取失败",
     badLineCount: "{count} 行解析失败（已跳过）",
     rollupOnly: "含只有日粒度的历史（这部分费用按未知披露）",
-    rollupOnlyNotice:
-      "部分历史只有日粒度（已按 CCS 日汇总计入总量）；这部分无法按当前价格重估，费用按未知披露。",
     totalRow: "合计",
     drillDay: "日期",
     drillModel: "模型",

@@ -114,8 +114,6 @@ const enUS: AppMessages = {
     ioErrorCount: "{count} file(s) failed to read",
     badLineCount: "{count} line(s) failed to parse (skipped)",
     rollupOnly: "Includes day-granularity-only history (its cost is disclosed as unknown)",
-    rollupOnlyNotice:
-      "Some history only has daily granularity (already counted via CCS daily rollups); its cost cannot be re-estimated and is disclosed as unknown.",
     totalRow: "Total",
     drillDay: "Date",
     drillModel: "Model",

@@ -190,6 +190,11 @@ const sourceLines = computed(() =>
       </template>
     </ScrollList>
     <div class="table-hint">{{ t("dashboard.tableHint") }}</div>
+    <!-- 2026-11-05：只有日粒度的历史是统计口径（已计入总量），费用按未知
+         披露——说明放在汇总区，不再出现在"本轮采集存在部分问题"里。 -->
+    <div v-if="report.totals.unknown_reason === 'rollup_only'" class="table-note">
+      {{ t("dashboard.rollupOnly") }}
+    </div>
     <div v-if="report.totals.unknown_pricing" class="table-note">
       {{ t("dashboard.tableNote") }}
     </div>

@@ -68,6 +68,21 @@ describe("UsageTable 费用可追溯（C5）", () => {
     expect(w.text()).toContain("未知†");
     expect(w.text()).not.toContain("$0.00†");
   });
+
+  it("rollup_only_totals_disclose_day_granularity：日粒度历史在汇总区披露", () => {
+    // 2026-11-05：只有日粒度的历史是统计口径（已计入总量），费用按未知
+    // 披露；说明放在汇总区，不再算作"本轮采集存在部分问题"。
+    const r = report([group("m-priced")], false);
+    r.totals.unknown_reason = "rollup_only";
+    const w = mount(UsageTable, { props: { report: r } });
+    expect(w.text()).toContain("日粒度");
+    expect(w.text()).toContain("未知");
+  });
+
+  it("no_rollup_disclosure_without_rollup_only_reason：纯明细不误报日粒度", () => {
+    const w = mount(UsageTable, { props: { report: report([group("m-priced")], false) } });
+    expect(w.text()).not.toContain("日粒度");
+  });
 });
 
 // 设计系统 Task 5：表格语义——列对齐/tabular 数字/估算表头/键盘下钻。

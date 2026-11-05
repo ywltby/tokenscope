@@ -948,16 +948,6 @@ export function useUsageQuery(opts: UsageQueryOptions) {
         actions: [],
       });
     }
-    // 2026-11-05：只有日粒度的历史是统计口径（已计入总量），费用按未知披露——
-    // 这是信息项，不再并入"本轮采集存在部分问题"。
-    if (collectionDiagnostics.value.rollupOnly) {
-      list.push({
-        id: "rollup-only-cost",
-        severity: "info",
-        text: t("dashboard.rollupOnlyNotice"),
-        actions: [],
-      });
-    }
     if (rollupsMode.value === "auto" && collectionDiagnostics.value.timezoneMismatch) {
       list.push({
         id: "rollup-timezone",
