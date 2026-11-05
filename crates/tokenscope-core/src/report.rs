@@ -4178,8 +4178,10 @@ cache_read = 0.0
             };
             collect_flighted_with(&o, &leader).unwrap();
         });
+        // 2026-11-05：握手超时从 5s 放宽到 30s——钩子/CI 在内存紧张的机器上
+        // 并行编译+测试时，领队线程可能几秒才拿到 CPU；真实死锁仍会超时。
         start_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(std::time::Duration::from_secs(30))
             .expect("领队必须先开始提交");
         assert_eq!(
             active_collection_submissions(),
