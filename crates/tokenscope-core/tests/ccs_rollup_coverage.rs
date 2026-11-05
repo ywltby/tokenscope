@@ -270,6 +270,65 @@ fn rollup_1000_over_partial_detail_100_counts_once() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// 旧库迁移的日汇总没有导入批次时刻：无法确认覆盖 → 保留明细并提示；
+/// 再次导入同一 CCS 库会补上批次时刻，覆盖规则随即生效（无需重建历史库）。
+#[test]
+fn legacy_rollup_without_import_time_gains_coverage_after_reimport() {
+    let dir = temp_dir("legacy-import-time");
+    seed_ccs(
+        &dir.join("cc-switch.db"),
+        &[Row {
+            request_id: "session:msg-1",
+            input: 100,
+            created_at: 1_789_866_000,
+            ..Default::default()
+        }],
+        &[("2026-09-20", "claude", "claude-opus-5-5", 10, 1000, 0)],
+    );
+    let history = history_of(&dir);
+    import_all(&dir, &history);
+    // 模拟 v1 迁移遗留：日汇总没有关联导入批次。
+    {
+        let conn = rusqlite::Connection::open(dir.join("data").join("history.db")).unwrap();
+        conn.execute("UPDATE ccs_daily_usage SET import_run_id = NULL", [])
+            .unwrap();
+    }
+    let o = opts(
+        &dir,
+        Some(dir.join("no-claude")),
+        GroupBy::Day,
+        "Asia/Shanghai",
+    );
+    let before = summary(&o).unwrap();
+    assert_eq!(
+        before.totals.tokens.input, 100,
+        "没有导入时刻时不凭汇总覆盖，保留明细"
+    );
+    assert_eq!(before.rollup_coverage.unresolved_buckets, 1);
+    assert!(
+        before.warnings.iter().any(|w| w.contains("无法确认")),
+        "无法确认覆盖必须如实提示：{:?}",
+        before.warnings
+    );
+
+    // 再次导入同一库：快照未变（幂等），但补写导入批次时刻。
+    let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
+    let preview = ccs::preview(&source, &history, "Asia/Shanghai").unwrap();
+    assert_eq!(preview.rollups_unchanged, 1);
+    ccs::commit(
+        &preview.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        true,
+    )
+    .unwrap();
+    let after = summary(&o).unwrap();
+    assert_eq!(after.totals.tokens.input, 1000, "补上导入时刻后按汇总统计");
+    assert_eq!(after.rollup_coverage.covered_buckets, 1);
+    assert_eq!(after.rollup_coverage.unresolved_buckets, 0);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// 仅 CCS 历史：没有明细时直接用汇总（既有行为不回归）。
 #[test]
 fn rollup_only_history_counts_rollup() {

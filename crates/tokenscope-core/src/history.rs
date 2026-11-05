@@ -2435,7 +2435,7 @@ fn write_rollups_in_tx(
                 summary.inserted += 1;
                 changed = true;
             }
-            Some((id, count, i, o, cw, cr, cost, existing_tz, _run)) => {
+            Some((id, count, i, o, cw, cr, cost, existing_tz, existing_run)) => {
                 let same = count == r.request_count as i64
                     && i == r.tokens.input.to_string()
                     && o == r.tokens.output.to_string()
@@ -2449,6 +2449,17 @@ fn write_rollups_in_tx(
                         tx.execute(
                             "UPDATE ccs_daily_usage SET source_tz = ?2 WHERE id = ?1",
                             params![id, r.source_tz],
+                        )?;
+                        changed = true;
+                    }
+                    // 2026-11-05：历史遗留的日汇总没有关联导入批次（v1 迁移或
+                    // 早期导入）——再次导入确认同一快照时补写本次批次，使
+                    // "用汇总覆盖部分明细"能拿到导入时刻。只补 NULL，不改已有关联，
+                    // 因此正常重复导入仍然幂等（generation 不变）。
+                    if existing_run.is_none() {
+                        tx.execute(
+                            "UPDATE ccs_daily_usage SET import_run_id = ?2 WHERE id = ?1",
+                            params![id, run_id],
                         )?;
                         changed = true;
                     }
