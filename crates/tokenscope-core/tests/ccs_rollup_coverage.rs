@@ -851,6 +851,35 @@ fn write_rollup(
     input: u64,
     started_utc: &str,
 ) {
+    // 2 = 快照建立时刻语义（新版批次）；旧版 v0.7.0 批次为 1，见
+    // `write_rollup_with_revision` 的定向用例。
+    write_rollup_with_revision(
+        history,
+        provider,
+        day,
+        model,
+        requests,
+        input,
+        started_utc,
+        2,
+        None,
+    );
+}
+
+/// 指定批次语义版本的日汇总写入：`import_revision` 1 = v0.7.0 旧语义
+/// （started_utc 在读取完成后生成，边界不可信），>= 2 = 快照建立时刻语义。
+#[allow(clippy::too_many_arguments)]
+fn write_rollup_with_revision(
+    history: &HistoryDb,
+    provider: &str,
+    day: &str,
+    model: &str,
+    requests: u64,
+    input: u64,
+    started_utc: &str,
+    import_revision: i64,
+    source_cost_usd: Option<f64>,
+) {
     let tokens = TokenCounts {
         input,
         output: 0,
@@ -872,7 +901,7 @@ fn write_rollup(
         request_count: requests,
         tokens,
         input_semantics: 2,
-        source_cost_usd: None,
+        source_cost_usd,
         revision: 0,
     };
     let run = ImportRunRecord {
@@ -882,7 +911,7 @@ fn write_rollup(
         started_utc: started_utc.into(),
         status: "committed".into(),
         detail: None,
-        import_revision: 1,
+        import_revision,
     };
     history
         .apply_import_batch(
@@ -1448,5 +1477,347 @@ fn request_between_two_import_snapshots_is_not_swallowed() {
     assert_eq!(report.totals.requests, 4, "1 + 2（汇总）+ 1（明细）");
     assert_eq!(report.rollup_coverage.covered_buckets, 1);
     assert_eq!(report.rollup_coverage.covered_detail_tokens.input, 0);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 更新来源库里的日汇总行（同主键 UPDATE），模拟 CCS 汇总随时间增长。
+fn update_ccs_rollup_row(
+    path: &Path,
+    day: &str,
+    provider: &str,
+    model: &str,
+    count: i64,
+    input: i64,
+    output: i64,
+) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let n = conn
+        .execute(
+            "UPDATE usage_daily_rollups SET request_count = ?5, input_tokens = ?6,
+                output_tokens = ?7
+             WHERE date = ?1 AND app_type = 'claude' AND provider_id = ?3 AND model = ?4
+               AND request_model = '' AND pricing_model = ''",
+            rusqlite::params![day, "claude", provider, model, count, input, output],
+        )
+        .unwrap();
+    assert_eq!(n, 1, "来源汇总行必须存在且被更新");
+}
+
+/// 重新导入且内容变化（用户明确"以来源为准"）：该行必须重新绑定到**本次**
+/// 批次，边界随新快照前移——已含于新汇总的 200 不再重复计入。
+#[test]
+fn reimport_replacing_rollup_content_rebinds_boundary_to_new_batch() {
+    let dir = temp_dir("reimport-rebind");
+    let history = history_of(&dir);
+    let tz = "Asia/Shanghai";
+    let day = jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::get(tz).unwrap())
+        .date()
+        .to_string();
+    let db = dir.join("cc-switch.db");
+    seed_ccs(
+        &db,
+        &[],
+        &[(day.as_str(), "claude", "claude-opus-5-5", 1, 1000, 0)],
+    );
+    // 第一次导入：汇总 1,000 / 1 请求。
+    let s1 = CcsSource::open(&db).unwrap();
+    let p1 = ccs::preview(&s1, &history, tz).unwrap();
+    ccs::commit(
+        &p1.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        true,
+    )
+    .unwrap();
+    drop(s1);
+    let first = history.daily_rollups(None).unwrap()[0].import_at.unwrap();
+    // 之后 TS 采集一条 200 的原生请求（晚于第一次快照）。
+    let after_first = jiff::Timestamp::now();
+    assert!(after_first > first, "事件时间必须晚于第一批快照");
+    let claude = dir.join("claude");
+    write_claude_log(
+        &claude,
+        "proj/s.jsonl",
+        &[claude_line(
+            "s1",
+            "m1",
+            &after_first.to_string(),
+            "claude-opus-5-5",
+            200,
+            0,
+        )],
+    );
+    // CCS 汇总增长为 1,200 / 2 请求（已包含这条请求），再次导入并选"以来源为准"。
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    update_ccs_rollup_row(&db, &day, "p1", "claude-opus-5-5", 2, 1200, 0);
+    let s2 = CcsSource::open(&db).unwrap();
+    let p2 = ccs::preview(&s2, &history, tz).unwrap();
+    ccs::commit(
+        &p2.plan_id,
+        &history,
+        RollupConflictPolicy::TakeSource,
+        true,
+    )
+    .unwrap();
+    drop(s2);
+
+    let rollups = history.daily_rollups(None).unwrap();
+    assert_eq!(rollups.len(), 1, "同主键替换，不新增行");
+    let second = rollups[0].import_at.unwrap();
+    assert!(
+        second > after_first,
+        "内容被替换后必须绑定本次批次（边界前移）：{first} / {second}"
+    );
+    let report = summary(&opts(&dir, Some(claude), GroupBy::Day, tz)).unwrap();
+    assert_eq!(
+        report.totals.tokens.input, 1200,
+        "新汇总已包含这条 200，不能再加一次（旧实现 1,400）"
+    );
+    assert_eq!(report.totals.requests, 2);
+    assert_eq!(report.rollup_coverage.covered_buckets, 1);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 内容未变的重复导入**不得**把旧汇总的边界改到更晚：否则批次之间到达的
+/// 请求会被新边界吞掉。边界保持第一次导入的时刻，200 仍按明细计入。
+#[test]
+fn reimport_with_same_content_keeps_original_boundary() {
+    let dir = temp_dir("reimport-same");
+    let history = history_of(&dir);
+    let tz = "Asia/Shanghai";
+    let day = jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::get(tz).unwrap())
+        .date()
+        .to_string();
+    let db = dir.join("cc-switch.db");
+    seed_ccs(
+        &db,
+        &[],
+        &[(day.as_str(), "claude", "claude-opus-5-5", 1, 1000, 0)],
+    );
+    let s1 = CcsSource::open(&db).unwrap();
+    let p1 = ccs::preview(&s1, &history, tz).unwrap();
+    ccs::commit(
+        &p1.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        true,
+    )
+    .unwrap();
+    drop(s1);
+    let first = history.daily_rollups(None).unwrap()[0].import_at.unwrap();
+    let after_first = jiff::Timestamp::now();
+    assert!(after_first > first);
+    let claude = dir.join("claude");
+    write_claude_log(
+        &claude,
+        "proj/s.jsonl",
+        &[claude_line(
+            "s1",
+            "m1",
+            &after_first.to_string(),
+            "claude-opus-5-5",
+            200,
+            0,
+        )],
+    );
+    // 原样再次导入（快照内容不变）：即便选"以来源为准"也不应改写边界。
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let s2 = CcsSource::open(&db).unwrap();
+    let p2 = ccs::preview(&s2, &history, tz).unwrap();
+    assert_eq!(p2.rollups_unchanged, 1, "内容未变应计入幂等");
+    ccs::commit(
+        &p2.plan_id,
+        &history,
+        RollupConflictPolicy::TakeSource,
+        true,
+    )
+    .unwrap();
+    drop(s2);
+
+    assert_eq!(
+        history.daily_rollups(None).unwrap()[0].import_at,
+        Some(first),
+        "内容未变时边界不能被改成更晚的批次时间"
+    );
+    let report = summary(&opts(&dir, Some(claude), GroupBy::Day, tz)).unwrap();
+    assert_eq!(
+        report.totals.tokens.input, 1200,
+        "批次之间到达的 200 仍按明细计入"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// v0.7.0 的批次 `started_utc` 在读取结束后才生成，语义与新版"快照建立时刻"
+/// 不同，而旧库无法事后区分 → 不能当可靠边界：整桶按信任口径统计并如实披露。
+#[test]
+fn legacy_v070_boundary_is_unknown_and_disclosed() {
+    let dir = temp_dir("legacy-boundary");
+    {
+        let history = history_of(&dir);
+        // 旧版批次：import_revision = 1，时刻是"读取完成"时间。
+        write_rollup_with_revision(
+            &history,
+            "p1",
+            "2026-10-03",
+            "claude-opus-5-5",
+            10,
+            1000,
+            "2026-10-03T02:00:00Z",
+            1,
+            None,
+        );
+    }
+    let claude = dir.join("claude");
+    write_claude_log(
+        &claude,
+        "proj/s.jsonl",
+        &[claude_line(
+            "s1",
+            "m1",
+            "2026-10-03T03:00:00Z",
+            "claude-opus-5-5",
+            200,
+            0,
+        )],
+    );
+    let report = summary(&opts(&dir, Some(claude), GroupBy::Day, "Asia/Shanghai")).unwrap();
+    assert_eq!(
+        report.totals.tokens.input, 1000,
+        "旧批次时间不是可靠边界：不拿它判定（旧实现会算成 1,200）"
+    );
+    assert_eq!(report.rollup_coverage.covered_buckets, 1);
+    let note = report
+        .rollup_coverage
+        .legacy_boundary
+        .as_deref()
+        .expect("旧版批次边界不可确认时必须披露");
+    assert!(note.contains("旧版导入"), "披露要说明来源：{note}");
+
+    // 重启（重新打开历史库）后结论与披露一致，不因进程重启漂移。
+    let again = summary(&opts(
+        &dir,
+        Some(dir.join("claude")),
+        GroupBy::Day,
+        "Asia/Shanghai",
+    ))
+    .unwrap();
+    assert_eq!(again.totals.tokens.input, 1000);
+    assert!(again.rollup_coverage.legacy_boundary.is_some());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 对照：同一时间布局但批次为新语义（`import_revision = 2`）→ 边界可靠，
+/// 快照之后到达的 200 照常计入、且不产生旧版披露。
+#[test]
+fn known_boundary_counts_request_after_snapshot() {
+    let dir = temp_dir("known-boundary");
+    let history = history_of(&dir);
+    write_rollup(
+        &history,
+        "p1",
+        "2026-10-03",
+        "claude-opus-5-5",
+        10,
+        1000,
+        "2026-10-03T02:00:00Z",
+    );
+    let claude = dir.join("claude");
+    write_claude_log(
+        &claude,
+        "proj/s.jsonl",
+        &[claude_line(
+            "s1",
+            "m1",
+            "2026-10-03T03:00:00Z",
+            "claude-opus-5-5",
+            200,
+            0,
+        )],
+    );
+    let report = summary(&opts(&dir, Some(claude), GroupBy::Day, "Asia/Shanghai")).unwrap();
+    assert_eq!(report.totals.tokens.input, 1200, "快照之后的 200 必须计入");
+    assert!(report.rollup_coverage.legacy_boundary.is_none());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 旧版批次只有在**来源内容真的变化**后才重新绑定批次（边界转为可确认）；
+/// 内容未变的重复导入不改写边界，披露继续存在。
+#[test]
+fn legacy_boundary_becomes_known_only_when_content_changes() {
+    let dir = temp_dir("legacy-repair");
+    let history = history_of(&dir);
+    let tz = "Asia/Shanghai";
+    let day = jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::get(tz).unwrap())
+        .date()
+        .to_string();
+    let db = dir.join("cc-switch.db");
+    // 来源行与历史行同形态（request_model / pricing_model 为空），才能被判定为
+    // 同一行、走"内容未变"分支。
+    seed_ccs(&db, &[], &[]);
+    add_ccs_rollup_row(&db, &day, "claude", "p1", "claude-opus-5-5", 1, 1000, 0);
+    // 历史库里先有同内容的旧版批次（v0.7.0 导入遗留）。
+    write_rollup_with_revision(
+        &history,
+        "p1",
+        &day,
+        "claude-opus-5-5",
+        1,
+        1000,
+        "2026-10-03T02:00:00Z",
+        1,
+        Some(1.5),
+    );
+    let claude = dir.join("claude");
+    let after = jiff::Timestamp::now();
+    write_claude_log(
+        &claude,
+        "proj/s.jsonl",
+        &[claude_line(
+            "s1",
+            "m1",
+            &after.to_string(),
+            "claude-opus-5-5",
+            200,
+            0,
+        )],
+    );
+    // 内容未变的重复导入：不改边界，仍是"不可确认"。
+    let s1 = CcsSource::open(&db).unwrap();
+    let p1 = ccs::preview(&s1, &history, tz).unwrap();
+    assert_eq!(p1.rollups_unchanged, 1);
+    ccs::commit(
+        &p1.plan_id,
+        &history,
+        RollupConflictPolicy::TakeSource,
+        true,
+    )
+    .unwrap();
+    drop(s1);
+    let same_content = summary(&opts(&dir, Some(claude.clone()), GroupBy::Day, tz)).unwrap();
+    assert_eq!(same_content.totals.tokens.input, 1000);
+    assert!(same_content.rollup_coverage.legacy_boundary.is_some());
+
+    // 来源内容更新后重新导入（以来源为准）：该行绑定新批次，边界可确认。
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    update_ccs_rollup_row(&db, &day, "p1", "claude-opus-5-5", 2, 1200, 0);
+    let s2 = CcsSource::open(&db).unwrap();
+    let p2 = ccs::preview(&s2, &history, tz).unwrap();
+    ccs::commit(
+        &p2.plan_id,
+        &history,
+        RollupConflictPolicy::TakeSource,
+        true,
+    )
+    .unwrap();
+    drop(s2);
+    let repaired = summary(&opts(&dir, Some(claude), GroupBy::Day, tz)).unwrap();
+    assert_eq!(repaired.totals.tokens.input, 1200, "新汇总已含 200");
+    assert!(
+        repaired.rollup_coverage.legacy_boundary.is_none(),
+        "重绑新批次后不再有旧版披露"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

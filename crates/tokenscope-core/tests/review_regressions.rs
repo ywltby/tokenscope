@@ -343,7 +343,7 @@ fn large_detail_plus_rollup_does_not_deadlock() {
                 started_utc: "2026-10-10T00:00:00Z".into(),
                 status: "committed".into(),
                 detail: None,
-                import_revision: 1,
+                import_revision: tokenscope::import::ccs::IMPORT_RUN_REVISION_SNAPSHOT_BOUNDARY,
             },
             None,
         )

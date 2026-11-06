@@ -261,4 +261,35 @@ describe("Dashboard 日粒度历史（H08）", () => {
     expect(w.text(), "批次之间的歧义必须出现在界面").toContain("不同时刻导入的批次");
     w.unmount();
   });
+
+  it("旧版导入的批次边界不可确认时如实披露（第四轮）", async () => {
+    const note =
+      "有 1 个日期/模型桶的日汇总来自旧版导入（批次时间在读取结束后才生成，不能代表来源快照建立时刻）：" +
+      "这些桶按整桶信任口径统计，快照之后到达的请求可能被少算。";
+    const report = reportWithMismatch();
+    report.rollup_coverage = {
+      ...report.rollup_coverage!,
+      timezone_mismatch: null,
+      legacy_boundary: note,
+    };
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(report);
+      if (cmd === "query_events")
+        return Promise.resolve({
+          query_id: "q-test-a",
+          pricing_revision: "rev-test",
+          rows: [],
+          total: 0,
+          warnings: [],
+        });
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(w.text(), "旧版批次边界必须可见").toContain("旧版导入");
+    w.unmount();
+  });
 });

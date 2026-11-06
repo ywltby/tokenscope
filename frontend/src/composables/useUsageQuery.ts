@@ -825,6 +825,8 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     // 2026-11-05：同桶汇总来自不同时刻导入的批次——覆盖边界只能取最早快照时刻，
     // 落在批次之间的明细已按明细计入，可能与较晚批次重复（后端给文案）。
     const multiBatchBoundary = report.value?.rollup_coverage?.multi_batch_boundary ?? null;
+    // 2026-11-05：旧版导入的批次时间语义不同、无法当可靠边界 → 后端给披露文案。
+    const legacyBoundary = report.value?.rollup_coverage?.legacy_boundary ?? null;
     const instantOnly = report.value?.rollup_coverage?.rollups_excluded_for_instant_range === true;
     const statsList = report.value?.sources.map((s) => s.stats) ?? [];
     const ioErrors = statsList.reduce((a, st) => a + (st.io_errors ?? 0), 0);
@@ -859,6 +861,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       coveredTokens,
       timezoneMismatch,
       multiBatchBoundary,
+      legacyBoundary,
       instantOnly,
     };
   });
@@ -966,6 +969,16 @@ export function useUsageQuery(opts: UsageQueryOptions) {
           count: collectionDiagnostics.value.covered,
           tokens: collectionDiagnostics.value.coveredTokens,
         }),
+        actions: [
+          { label: t("dashboard.detailOnlyToggle"), run: () => setRollupsMode("detail_only") },
+        ],
+      });
+    }
+    if (rollupsMode.value === "auto" && collectionDiagnostics.value.legacyBoundary) {
+      list.push({
+        id: "rollup-legacy-boundary",
+        severity: "warning",
+        text: collectionDiagnostics.value.legacyBoundary,
         actions: [
           { label: t("dashboard.detailOnlyToggle"), run: () => setRollupsMode("detail_only") },
         ],

@@ -53,6 +53,11 @@ export interface RollupCoverage {
    * 时刻；落在批次之间的明细已按明细计入，可能与较晚批次重复）。
    */
   multi_batch_boundary?: string | null;
+  /**
+   * 2026-11-05：日汇总来自旧版导入（批次时间是读取结束后生成的）时的披露
+   * ——边界不可确认，按整桶信任统计，快照之后的请求可能被少算。
+   */
+  legacy_boundary?: string | null;
 }
 
 /**

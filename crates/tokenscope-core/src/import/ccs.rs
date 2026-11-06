@@ -44,6 +44,14 @@ use crate::model::{AgentKind, TokenCounts};
 /// 身份，换成同一库的备份再导入仍更新同一逻辑来源（计划 §5.3）。
 pub const CCS_LOGICAL_SOURCE: &str = "ccs";
 
+/// 导入批次语义版本：`import_runs.import_revision`。
+///
+/// - `1`（v0.7.0 及更早）：`started_utc` 是**预览读取完成之后**生成的时间，
+///   晚于来源一致读快照的建立时刻，不能当作覆盖边界（会吞掉读取窗口内到达
+///   的请求）。旧库里的这一批数据无法事后判定，按"边界不可确认"处理。
+/// - `2`（2026-11-05 起）：`started_utc` 是 `CcsSource::open` 在开启读事务
+///   **之前**捕获的下界，可作为日汇总覆盖判定的边界。
+pub const IMPORT_RUN_REVISION_SNAPSHOT_BOUNDARY: i64 = 2;
 /// CCS `input_token_semantics` 取值。
 pub const INPUT_TOKEN_SEMANTICS_LEGACY: i64 = 0;
 pub const INPUT_TOKEN_SEMANTICS_TOTAL: i64 = 1;
@@ -734,7 +742,7 @@ pub fn commit(
         started_utc: plan.preview.snapshot_started_utc.clone(),
         status: "committed".to_string(),
         detail: None,
-        import_revision: 1,
+        import_revision: IMPORT_RUN_REVISION_SNAPSHOT_BOUNDARY,
     };
     // generation 在**事务内**再校验一次：预览之后、提交之前发生的任何采集或
     // 导入都会让整批拒绝（不拿过期预览插入重复请求）。

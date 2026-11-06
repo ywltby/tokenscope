@@ -769,7 +769,7 @@ impl ReadSnapshot {
                     c.request_model, c.pricing_model, c.request_count, c.input_tokens,
                     c.output_tokens, c.cache_write_tokens, c.cache_read_tokens,
                     c.input_semantics, c.source_cost_usd,
-                    COALESCE(NULLIF(ir.started_utc, ''), ir.committed_utc)
+                    COALESCE(NULLIF(ir.started_utc, ''), ir.committed_utc), ir.import_revision
              FROM ccs_daily_usage c
              LEFT JOIN import_runs ir ON ir.id = c.import_run_id
              WHERE (?1 IS NULL OR c.app = ?1) AND c.app = 'claude-code'
@@ -963,6 +963,14 @@ pub struct StoredRollup {
     /// 才生成的 `generated_at` 当边界，会把"快照建立之后、预览结束之前"到达的
     /// 请求静默排除；同桶多行时取**最早**的该时刻（见 `report` 的桶级判定）。
     pub import_at: Option<jiff::Timestamp>,
+    /// 该批次的时间是否可当作覆盖边界（`import_runs.import_revision >= 2`）。
+    ///
+    /// 2026-11-05（第四轮）：v0.7.0 及更早的批次把 `started_utc` 写成"预览读取
+    /// 完成之后"的时间，与新版"快照建立时刻的下界"语义不同，而两者都可能是
+    /// `import_revision = 1` 之前的历史值——无法事后区分，因此旧记录一律视为
+    /// **边界不可确认**：不拿它做覆盖判定（不猜造历史），改按整桶信任口径统计
+    /// 并如实披露。
+    pub boundary_known: bool,
 }
 
 /// TokenScope 数据目录下的历史库路径（`~/.tokenscope/history.db`）。
@@ -1761,7 +1769,7 @@ impl HistoryDb {
                     c.request_model, c.pricing_model, c.request_count, c.input_tokens,
                     c.output_tokens, c.cache_write_tokens, c.cache_read_tokens,
                     c.input_semantics, c.source_cost_usd,
-                    COALESCE(NULLIF(ir.started_utc, ''), ir.committed_utc)
+                    COALESCE(NULLIF(ir.started_utc, ''), ir.committed_utc), ir.import_revision
              FROM ccs_daily_usage c
              LEFT JOIN import_runs ir ON ir.id = c.import_run_id
              WHERE (?1 IS NULL OR c.app = ?1) AND c.app = 'claude-code'
@@ -2522,11 +2530,16 @@ fn write_rollups_in_tx(
                     }
                     summary.unchanged += 1;
                 } else if r.revision > 0 || policy == RollupConflictPolicy::TakeSource {
+                    // 2026-11-05（第四轮）：内容被替换 = 本批次读到的是**新快照**，
+                    // 必须在同一事务里把该行重新绑定到本次批次——否则它仍指向第一次
+                    // 导入的时刻，覆盖边界停留在旧快照，已含于新汇总的请求会被再算
+                    // 一次（实测 1,200 的汇总 + 200 明细 = 1,400）。内容未变的分支
+                    // 不这么做：那时边界必须保持旧时刻，才不会吞掉批次之间新增的请求。
                     tx.execute(
                         "UPDATE ccs_daily_usage SET request_count = ?2, input_tokens = ?3,
                             output_tokens = ?4, cache_write_tokens = ?5, cache_read_tokens = ?6,
                             input_semantics = ?7, source_cost_usd = ?8, revision = ?9,
-                            source_tz = ?10
+                            source_tz = ?10, import_run_id = ?11
                          WHERE id = ?1",
                         params![
                             id,
@@ -2539,6 +2552,7 @@ fn write_rollups_in_tx(
                             r.source_cost_usd.map(|v| v.to_string()),
                             r.revision,
                             r.source_tz,
+                            run_id,
                         ],
                     )?;
                     summary.replaced += 1;
@@ -3048,6 +3062,10 @@ fn row_to_stored_rollup(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRollup>
             .get::<_, Option<String>>(14)?
             .and_then(|s| s.trim().parse::<f64>().ok())
             .filter(|v| v.is_finite()),
+        // 2026-11-05（第四轮）：批次修订 >= 2 才代表"快照建立时刻"语义。
+        boundary_known: r
+            .get::<_, Option<i64>>(16)?
+            .is_some_and(|rev| rev >= crate::import::ccs::IMPORT_RUN_REVISION_SNAPSHOT_BOUNDARY),
         // 解析失败按"无导入时刻"处理：不据此推断覆盖关系（保守）。
         import_at: r
             .get::<_, Option<String>>(15)?
