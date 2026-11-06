@@ -6,7 +6,11 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { nativeSingleInstance } from "../contracts/native-single-instance.mjs";
-import { acceptanceIdentifier } from "./native-single-instance.mjs";
+import {
+  acceptanceIdentifier,
+  atomicWriteTmpExempted,
+  transientArtifactExempted,
+} from "./native-single-instance.mjs";
 
 const BASE = "io.github.ywltby.tokenscope";
 const ACCEPTANCE = acceptanceIdentifier(BASE);
@@ -452,5 +456,30 @@ describe("ui-single-instance 场景编排（假实例）", () => {
       },
     });
     expect(byName(rows, "first_instance_alive_after_second")?.ok).toBe(false);
+  });
+});
+
+describe("验收隔离走查的瞬时产物豁免（2026-11-05 竞态修复）", () => {
+  const root = path.join(os.tmpdir(), "tokenscope-ac10-root");
+
+  it("应用原子写临时文件在 rename 后消失属正常生命周期", () => {
+    const tmp = path.join(root, "tokenscope", ".pricing-index.json.tmp-2424-1");
+    expect(atomicWriteTmpExempted(root, "ENOENT", tmp)).toBe(true);
+    expect(transientArtifactExempted(root, "ENOENT", tmp)).toBe(true);
+  });
+
+  it("隔离根之外的同名残留、命名不符、非 ENOENT 都不豁免", () => {
+    const outside = path.join(os.tmpdir(), "elsewhere", ".pricing-index.json.tmp-1-0");
+    expect(atomicWriteTmpExempted(root, "ENOENT", outside)).toBe(false);
+    expect(atomicWriteTmpExempted(root, "ENOENT", path.join(root, ".settings.toml.tmp-x-1"))).toBe(
+      false,
+    );
+    expect(atomicWriteTmpExempted(root, "EACCES", path.join(root, ".a.tmp-1-2"))).toBe(false);
+    expect(transientArtifactExempted(root, "EACCES", path.join(root, ".a.tmp-1-2"))).toBe(false);
+  });
+
+  it("受控历史库 sidecar 的既有豁免保持不变", () => {
+    const wal = path.join(root, "tokenscope", "history.db-wal");
+    expect(transientArtifactExempted(root, "ENOENT", wal)).toBe(true);
   });
 });
