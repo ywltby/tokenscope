@@ -128,9 +128,7 @@ export function spawnSyncBounded(
     throw failure;
   }
   if (result.signal) {
-    throw new Error(
-      `同步命令被信号终止（超时上限 ${timeoutMs} ms）：${where} signal=${result.signal} status=${result.status}`,
-    );
+    throw new Error(`同步命令被信号终止（超时上限 ${timeoutMs} ms）：${where} signal=${result.signal} status=${result.status}`);
   }
   return result;
 }
@@ -154,10 +152,7 @@ export async function closeBrowserBounded(browser, { timeoutMs = BROWSER_CLOSE_T
           (error) => ({ closed: false, reason: `close error: ${String(error?.message ?? error)}` }),
         ),
       new Promise((resolve) => {
-        timer = setTimeout(
-          () => resolve({ closed: false, reason: "close timeout" }),
-          Math.max(1, timeoutMs),
-        );
+        timer = setTimeout(() => resolve({ closed: false, reason: "close timeout" }), Math.max(1, timeoutMs));
       }),
     ]);
   } finally {

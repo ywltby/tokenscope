@@ -219,11 +219,7 @@ describe("阶段记录（计划 §9.1 第 3 条）", () => {
     expect(lines).toEqual(["阶段 close-command", "阶段 relaunch"]);
     const list = tracker.list();
     expect(list).toHaveLength(2);
-    expect(list[0]).toMatchObject({
-      stage: "close-command",
-      launch: 2,
-      done_at: expect.any(String),
-    });
+    expect(list[0]).toMatchObject({ stage: "close-command", launch: 2, done_at: expect.any(String) });
     expect(list[1]).toMatchObject({ stage: "relaunch", done_at: null });
     expect(tracker.last()).toMatchObject({ stage: "relaunch", done_at: null });
   });
@@ -346,8 +342,8 @@ describe("场景看门狗（计划 §6 S00 第 3 条 / §9.1 第 4、6 条）", 
       fileURLToPath(new URL("../native-acceptance.mjs", import.meta.url)),
       "utf8",
     );
-    expect(source).toContain('ensureNotCanceled(this.opts.isCanceled, "launch")');
-    expect(source).toContain('ensureNotCanceled(this.opts.isCanceled, "stop")');
+    expect(source).toContain("ensureNotCanceled(this.opts.isCanceled, \"launch\")");
+    expect(source).toContain("ensureNotCanceled(this.opts.isCanceled, \"stop\")");
   });
 });
 
@@ -377,15 +373,12 @@ describe("超时后的有界收尾（计划 §9.1 第 4、6 条）", () => {
         calls.push({ record, reason });
         return { reason, pids: [100, 200] };
       },
-      closeBrowser: () =>
-        closeBrowserBounded({ close: () => new Promise(() => {}) }, { timeoutMs: 40 }),
+      closeBrowser: () => closeBrowserBounded({ close: () => new Promise(() => {}) }, { timeoutMs: 40 }),
       copyAppLogs: () => {
         throw new Error("日志目录不可读");
       },
     });
-    expect(calls).toEqual([
-      { record: { hostPid: 100, descendantPids: [200] }, reason: "scenario-timeout-cleanup" },
-    ]);
+    expect(calls).toEqual([{ record: { hostPid: 100, descendantPids: [200] }, reason: "scenario-timeout-cleanup" }]);
     expect(result.terminate).toEqual({ reason: "scenario-timeout-cleanup", pids: [100, 200] });
     expect(result.browser_close).toEqual({ closed: false, reason: "close timeout" });
     expect(result.app_logs_copied).toBe(false);
