@@ -642,13 +642,6 @@ pub struct StoredEvent {
     pub precedence: WritePrecedence,
     pub observed_at: Timestamp,
     pub parser_revision: i64,
-    /// 2026-11-05：该事件是否带**CCS 导入来源证据**（`ccs_request` origin）。
-    ///
-    /// 日汇总覆盖判定的唯一可能性依据：带该证据的事件一定在 CCS 自己的
-    /// 请求集合里（CCS 日汇总正是这份集合的聚合），因此可以被汇总替代；
-    /// 纯原生事件（不经 CCS 路由）不在任何 CCS 汇总里，必须继续按明细计入。
-    /// 时间戳与请求数量都不构成覆盖证明。
-    pub has_ccs_import_origin: bool,
 }
 
 /// 来源文件身份（`(app, root, path)` 唯一）。
@@ -893,10 +886,7 @@ impl ReadSnapshot {
                     identity_revision, session_id, record_id, project_key,
                     session_initial_cwd, event_cwd, input_tokens, output_tokens,
                     cache_write_tokens, cache_read_tokens, origin_rank, observed_at_seconds,
-                    observed_at_nanos, parser_revision, cache_write_5m, cache_write_1h,
-                    EXISTS(SELECT 1 FROM event_origins o
-                           WHERE o.event_id = usage_events.id
-                             AND o.origin_kind = '{ORIGIN_KIND_CCS_REQUEST}')
+                    observed_at_nanos, parser_revision, cache_write_5m, cache_write_1h
              FROM usage_events WHERE id IN ({placeholders})"
         );
         let conn = self.lock();
@@ -969,7 +959,7 @@ pub struct StoredRollup {
     ///
     /// 2026-11-05 修订：此前优先取提交时刻，会把"预览读取之后、用户确认之前
     /// 新增的原生请求"当成已覆盖而静默排除。覆盖判定本身不再依赖时间戳
-    /// （见 [`StoredEvent::has_ccs_import_origin`] 与 `report` 的桶级判定），
+    /// （见 `report` 的桶级覆盖判定），
     /// 该字段只用于诊断与人工核对来源快照建立时间。
     pub import_at: Option<jiff::Timestamp>,
 }
@@ -1806,10 +1796,7 @@ impl HistoryDb {
                     identity_revision, session_id, record_id, project_key,
                     session_initial_cwd, event_cwd, input_tokens, output_tokens,
                     cache_write_tokens, cache_read_tokens, origin_rank, observed_at_seconds,
-                    observed_at_nanos, parser_revision, cache_write_5m, cache_write_1h,
-                    EXISTS(SELECT 1 FROM event_origins o
-                           WHERE o.event_id = usage_events.id
-                             AND o.origin_kind = 'ccs_request')
+                    observed_at_nanos, parser_revision, cache_write_5m, cache_write_1h
              FROM usage_events
              WHERE (?1 IS NULL OR app = ?1)
              ORDER BY ts_seconds, ts_nanos, id",
@@ -2820,11 +2807,6 @@ fn sim_event(w: &EventWrite, fid: i64) -> StoredEvent {
         precedence: w.precedence,
         observed_at: w.observed_at,
         parser_revision: w.parser_revision(),
-        // 与读路径同义：该事实是否登记过 CCS 导入来源证据。
-        has_ccs_import_origin: w
-            .origins
-            .iter()
-            .any(|o| o.origin_kind == ORIGIN_KIND_CCS_REQUEST),
     }
 }
 
@@ -3026,10 +3008,7 @@ fn load_event(conn: &Connection, id: i64) -> Result<Option<StoredEvent>> {
                     identity_revision, session_id, record_id, project_key,
                     session_initial_cwd, event_cwd, input_tokens, output_tokens,
                     cache_write_tokens, cache_read_tokens, origin_rank, observed_at_seconds,
-                    observed_at_nanos, parser_revision, cache_write_5m, cache_write_1h,
-                    EXISTS(SELECT 1 FROM event_origins o
-                           WHERE o.event_id = usage_events.id
-                             AND o.origin_kind = 'ccs_request')
+                    observed_at_nanos, parser_revision, cache_write_5m, cache_write_1h
              FROM usage_events WHERE id = ?1",
             params![id],
             row_to_stored_event,
@@ -3129,8 +3108,6 @@ fn row_to_stored_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredEvent> {
         precedence: WritePrecedence::from_rank(r.get(17)?),
         observed_at: timestamp_from_parts(r.get(18)?, r.get(19)?),
         parser_revision: r.get(20)?,
-        // 第 23 列 = EXISTS(...)：SQLite 返回 0/1。
-        has_ccs_import_origin: r.get::<_, i64>(23)? != 0,
     })
 }
 

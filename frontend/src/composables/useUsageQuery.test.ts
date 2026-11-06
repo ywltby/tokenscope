@@ -617,7 +617,7 @@ describe("useUsageQuery 通知合并（U04）", () => {
         Promise.resolve({
           ...reportA,
           warnings: [
-            "有 1 个日期/模型桶同时存在请求明细与日汇总，但带 CCS 来源证据的明细请求数不少于汇总，无法确认汇总与明细一一对应",
+            "有 1 个日期/模型桶在来源快照范围内的明细超过了日汇总声称的数量，无法确认汇总能覆盖这些明细",
           ],
           rollup_coverage: {
             detail_buckets: 1,
@@ -635,7 +635,7 @@ describe("useUsageQuery 通知合并（U04）", () => {
     expect(texts, "无法确认的覆盖必须如实提示").toContain("本轮采集存在部分问题");
     const notice = api.notices.value.find((n) => n.text.includes("本轮采集存在部分问题"))!;
     expect(notice.details?.join("\n"), "原始警告保留在展开明细里").toContain(
-      "无法确认汇总与明细一一对应",
+      "无法确认汇总能覆盖这些明细",
     );
     expect(api.collectionDiagnostics.value.clean).toBe(false);
     w.unmount();

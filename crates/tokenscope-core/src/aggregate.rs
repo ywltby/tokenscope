@@ -210,12 +210,15 @@ pub fn aggregate_with_rollups(
     state.finish(pricing)
 }
 
-/// 已被日汇总替代的明细桶：`来源时区 → {(日, 应用, 等价模型)}`。
+/// 已被日汇总替代的明细桶：`来源时区 → {(日, 应用, 等价模型) → 覆盖起点}`。
 ///
-/// 2026-11-05：不再携带时间边界——覆盖由**来源证据**决定（`ccs_request`
-/// origin），同一桶在不同时刻导入多行汇总时语义不变。
-type CoveredDetailMap =
-    std::collections::HashMap<String, std::collections::HashSet<(String, String, String)>>;
+/// 2026-11-05（第二轮）：覆盖按"信任 CCS 日汇总"口径。`Some(since)` 表示
+/// 事件时间不晚于来源快照建立时刻的明细视为已含于汇总；`None` 表示该桶没有
+/// 可核对的快照时刻（旧库迁移遗留），整桶明细都按"可能已含于汇总"处理。
+type CoveredDetailMap = std::collections::HashMap<
+    String,
+    std::collections::HashMap<(String, String, String), Option<jiff::Timestamp>>,
+>;
 
 /// 增量聚合状态（H07）：事件与日汇总贡献**逐条喂入**，内存只随**分组数**
 /// 增长（不随事件数）——冻结查询因此可以流式汇总整份历史，不必先把所有事件
@@ -226,8 +229,8 @@ pub struct AggregateState {
     map: BTreeMap<String, GroupAccum>,
     /// 出现过的来源应用（只有多应用数据才在分组里标注 agents）。
     agent_seen: Vec<&'static str>,
-    /// 2026-11-05：已被日汇总替代的明细桶。命中且**带 CCS 来源证据**的事件
-    /// 已计入汇总，聚合时跳过以避免重复；纯原生事件照常计入。
+    /// 2026-11-05：已被日汇总替代的明细桶。命中且不晚于覆盖起点的事件已计入
+    /// 汇总，聚合时跳过以避免重复；起点之后的请求照常计入。
     covered: Option<CoveredDetailMap>,
 }
 
@@ -244,24 +247,27 @@ impl AggregateState {
 
     /// 标记"明细已由日汇总替代"的桶（查询入口按覆盖判定结果一次性设置）。
     ///
-    /// 这些桶里带 CCS 来源证据的明细已经在汇总值中，不能重复累计；明细视图
-    /// 仍照常展示这些请求，只是不进入总量。
+    /// 这些桶里快照范围内的明细已经在汇总值中，不能重复累计；明细视图仍照常
+    /// 展示这些请求，只是不进入总量。
     pub fn set_covered_detail(&mut self, buckets: &[crate::report::CoveredBucket]) {
         if buckets.is_empty() {
             return;
         }
         let mut map: CoveredDetailMap = std::collections::HashMap::new();
         for b in buckets {
-            map.entry(b.source_tz.clone()).or_default().insert((
-                b.day.clone(),
-                b.app.as_str().to_string(),
-                b.model_identity.clone(),
-            ));
+            map.entry(b.source_tz.clone()).or_default().insert(
+                (
+                    b.day.clone(),
+                    b.app.as_str().to_string(),
+                    b.model_identity.clone(),
+                ),
+                b.since,
+            );
         }
         self.covered = Some(map);
     }
 
-    /// 该事件是否落在"已由日汇总替代"的桶里（日期按来源时区解释）。
+    /// 该事件是否已计入日汇总（同桶、且不晚于覆盖起点；起点缺失视为整桶覆盖）。
     fn covered_by_rollup(&self, e: &UsageEvent) -> bool {
         let Some(map) = &self.covered else {
             return false;
@@ -272,37 +278,24 @@ impl AggregateState {
                 continue;
             };
             let day = e.ts.to_zoned(tz).date().to_string();
-            if buckets.contains(&(day, e.agent.as_str().to_string(), identity.clone())) {
-                return true;
+            if let Some(since) = buckets.get(&(day, e.agent.as_str().to_string(), identity.clone()))
+            {
+                return since.is_none_or(|at| e.ts <= at);
             }
         }
         false
     }
 
-    /// 喂入一条明细事件（不跳过任何事件；汇总入口用
-    /// [`Self::push_observed_event`] 表达来源证据）。
+    /// 喂入一条明细事件：落在已覆盖桶且不晚于覆盖起点的事件已计入日汇总，
+    /// 跳过以避免重复（明细视图不受影响）；起点之后的请求照常计入。
     pub fn push_event(&mut self, e: &UsageEvent, pricing: &Pricing) -> anyhow::Result<()> {
+        if self.covered_by_rollup(e) {
+            return Ok(());
+        }
         if !self.agent_seen.contains(&e.agent.as_str()) {
             self.agent_seen.push(e.agent.as_str());
         }
         push_event_into(&mut self.map, self.by, &self.tz, e, pricing)
-    }
-
-    /// 喂入一条**带来源证据标记**的明细事件：落在已覆盖桶且带 CCS 导入来源
-    /// 证据时跳过（它已计入日汇总，不能再加一次）；其余事件照常计入。
-    ///
-    /// 纯原生事件（无 `ccs_request` origin）永远不会被跳过——它不在任何 CCS
-    /// 汇总里，跳过就是漏算。
-    pub fn push_observed_event(
-        &mut self,
-        e: &UsageEvent,
-        pricing: &Pricing,
-        has_ccs_import_origin: bool,
-    ) -> anyhow::Result<()> {
-        if has_ccs_import_origin && self.covered_by_rollup(e) {
-            return Ok(());
-        }
-        self.push_event(e, pricing)
     }
 
     /// 喂入一条日汇总贡献。

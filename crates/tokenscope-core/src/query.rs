@@ -122,32 +122,23 @@ impl QuerySnapshot {
 
     /// H07：**流式**遍历主过滤后的事件（按行序），不物化整份历史。
     /// 供汇总聚合使用；`f` 返回 Err 时立即中止并透传。
-    ///
-    /// 2026-11-05：回调同时给出该事件是否带 **CCS 导入来源证据**——日汇总
-    /// 覆盖判定只据此跳过已计入汇总的明细，纯原生事件永不被跳过。
     pub(crate) fn for_each_event(
         &self,
-        f: &mut dyn FnMut(&UsageEvent, bool) -> Result<()>,
+        f: &mut dyn FnMut(&UsageEvent) -> Result<()>,
     ) -> Result<()> {
         let ids: Vec<i64> = self.rows.iter().map(|r| r.event_id).collect();
-        let mut by_id: std::collections::HashMap<i64, (UsageEvent, bool)> =
+        let mut by_id: std::collections::HashMap<i64, UsageEvent> =
             std::collections::HashMap::with_capacity(ids.len().min(4096));
         for chunk in ids.chunks(4096) {
             by_id.clear();
             for stored in self.read.fetch_events(chunk)? {
-                by_id.insert(
-                    stored.id,
-                    (
-                        report::usage_event_of(&stored),
-                        stored.has_ccs_import_origin,
-                    ),
-                );
+                by_id.insert(stored.id, report::usage_event_of(&stored));
             }
             for id in chunk {
-                let (e, has_ccs_import_origin) = by_id
+                let e = by_id
                     .get(id)
                     .ok_or_else(|| anyhow::anyhow!("查询快照行 {id} 在库中不存在"))?;
-                f(e, *has_ccs_import_origin)?;
+                f(e)?;
             }
         }
         Ok(())
@@ -615,15 +606,11 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
     // H06：日汇总桶选择在这里固定一次——按日筛选/分组且时区与来源时区不同时，
     // 日汇总不参与（返回可恢复提示），绝不把来源日期当午夜事件重切。
     // H07：明细桶集合由只读快照**流式**构建（内存随不同桶数增长，不随事件数）。
+    // 2026-11-05（第二轮）：桶统计需要日汇总的覆盖起点（来源快照建立时刻），
+    // 因此直接传入 rollups——起点来自同一份快照，不会与判定用的时间分叉。
     let day_sensitive = opts.by == crate::aggregate::GroupBy::Day || !time_bounds.is_unbounded();
     let rollups = read.rollups(opts.agent)?;
-    let source_tzs: Vec<String> = rollups
-        .iter()
-        .map(|r| r.source_tz.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let buckets = report::collect_detail_buckets(&read, opts.agent, &source_tzs)?;
+    let buckets = report::collect_detail_buckets(&read, opts.agent, &rollups)?;
     let rollup_selection = report::select_rollup_contributions(
         &buckets,
         &rollups,

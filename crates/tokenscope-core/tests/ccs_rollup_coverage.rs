@@ -272,10 +272,11 @@ fn rollup_1000_over_partial_detail_100_counts_once() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 旧库迁移的日汇总没有关联导入批次：覆盖判定改看**来源证据**后不再需要
-/// 导入时刻，旧汇总照常作为总量；重新导入仍幂等，并补写批次时刻（仅诊断）。
+/// 旧库迁移的日汇总没有关联导入批次：没有可核对的快照时刻，整桶明细按
+/// "信任 CCS 汇总"口径处理（明细不重复计入，总量取汇总）；重新导入仍幂等
+/// 并补写批次时刻（仅诊断，不改变已确定的统计口径）。
 #[test]
-fn legacy_rollup_without_import_run_is_still_covered_by_origin_evidence() {
+fn legacy_rollup_without_import_run_still_trusts_rollup_total() {
     let dir = temp_dir("legacy-import-time");
     seed_ccs(
         &dir.join("cc-switch.db"),
@@ -433,9 +434,10 @@ fn requests_added_after_import_are_not_swallowed_by_old_rollup() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 无法确认覆盖：明细请求数不少于汇总时保留明细、明确提示，不加也不猜。
+/// 快照范围内的明细不超过汇总声称的数量：按"信任 CCS 日汇总"口径以汇总为
+/// 总量，明细不重复计入（明细视图仍可查看）。
 #[test]
-fn detail_not_fewer_than_rollup_stays_unresolved_with_warning() {
+fn details_within_rollup_request_count_trust_rollup_total() {
     let dir = temp_dir("unresolved");
     let rows: Vec<Row> = ["r1", "r2", "r3"]
         .into_iter()
@@ -460,11 +462,88 @@ fn detail_not_fewer_than_rollup_stays_unresolved_with_warning() {
         "Asia/Shanghai",
     );
     let report = summary(&o).unwrap();
-    assert_eq!(report.totals.tokens.input, 300, "保留明细，不把汇总相加");
+    assert_eq!(
+        report.totals.tokens.input, 500,
+        "3 条明细不超过汇总声称的 3 个请求 → 取汇总总量"
+    );
+    assert_eq!(report.rollup_coverage.covered_buckets, 1);
+    assert_eq!(report.rollup_coverage.unresolved_buckets, 0);
+    assert_eq!(
+        report.rollup_coverage.covered_detail_tokens.input, 300,
+        "被替代的明细量如实披露"
+    );
+    assert_eq!(detail_rows(&o), 3, "明细视图仍可查看三条请求");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 快照范围内的明细**超过**汇总声称的数量：汇总装不下它们 → 保留明细并
+/// 如实提示（汇总未纳入），不猜造、不相加。
+#[test]
+fn snapshot_era_details_exceeding_rollup_stay_unresolved_with_warning() {
+    let dir = temp_dir("unresolved-exceed");
+    // 4 条原生明细（真实采集路径）vs 汇总声称 3 个请求。
+    let claude = dir.join("claude");
+    write_claude_log(
+        &claude,
+        "proj/s.jsonl",
+        &[
+            claude_line(
+                "s1",
+                "m1",
+                "2026-09-27T01:00:00Z",
+                "claude-opus-5-5",
+                100,
+                0,
+            ),
+            claude_line(
+                "s1",
+                "m2",
+                "2026-09-27T02:00:00Z",
+                "claude-opus-5-5",
+                100,
+                0,
+            ),
+            claude_line(
+                "s1",
+                "m3",
+                "2026-09-27T03:00:00Z",
+                "claude-opus-5-5",
+                100,
+                0,
+            ),
+            claude_line(
+                "s1",
+                "m4",
+                "2026-09-27T04:00:00Z",
+                "claude-opus-5-5",
+                100,
+                0,
+            ),
+        ],
+    );
+    let history = history_of(&dir);
+    write_rollup(
+        &history,
+        "p1",
+        "2026-09-27",
+        "claude-opus-5-5",
+        3,
+        500,
+        "2026-09-27T12:00:00Z",
+    );
+    let o = opts(&dir, Some(claude), GroupBy::Day, "Asia/Shanghai");
+    let report = summary(&o).unwrap();
+    assert_eq!(
+        report.totals.tokens.input, 400,
+        "保留明细统计，不把汇总相加"
+    );
     assert_eq!(report.rollup_coverage.unresolved_buckets, 1);
     assert_eq!(report.rollup_coverage.covered_buckets, 0);
     assert!(
-        report.warnings.iter().any(|w| w.contains("无法确认")),
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("无法确认汇总能覆盖这些明细")),
         "无法确认覆盖必须如实提示：{:?}",
         report.warnings
     );
@@ -977,13 +1056,13 @@ fn native_request_after_preview_is_not_swallowed() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 同一桶含**不同时刻导入**的多行汇总：覆盖判定按来源证据与请求数之和，
-/// 与导入时刻无关；带证据的明细被替代、原生新增照常计入。
+/// 同一桶含**不同时刻导入**的多行汇总：覆盖起点取最晚的来源快照建立时刻
+/// （晚于它的明细一定不在任何一行的快照里）；快照内明细被替代、快照后
+/// 新增照常计入。
 #[test]
-fn multi_batch_rollup_rows_use_origin_evidence_not_import_time() {
+fn multi_batch_rollup_rows_use_latest_snapshot_boundary() {
     let dir = temp_dir("multi-batch");
-    let history = history_of(&dir);
-    // 两批导入的同桶汇总（provider 不同 → 两行），来源快照建立时刻不同。
+    let history = history_of(&dir); // 两批导入的同桶汇总（provider 不同 → 两行），来源快照建立时刻不同。
     write_rollup(
         &history,
         "p1",
@@ -1029,11 +1108,167 @@ fn multi_batch_rollup_rows_use_origin_evidence_not_import_time() {
     let report = summary(&o).unwrap();
     assert_eq!(
         report.totals.tokens.input, 1300,
-        "汇总 400 + 600 覆盖带证据的明细 80，原生 300 照常计入"
+        "汇总 400 + 600 覆盖快照内明细 80，快照后新增 300 照常计入"
     );
     assert_eq!(report.totals.requests, 4, "1 + 2（汇总）+ 1（原生）");
     assert_eq!(report.rollup_coverage.covered_buckets, 1);
     assert_eq!(report.rollup_coverage.unresolved_buckets, 0);
     assert_eq!(report.rollup_coverage.covered_detail_tokens.input, 80);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ── 2026-11-05（第二轮）：信任 CCS 日汇总——原生明细也可能已在汇总里 ──
+//
+// CCS 清理逐条明细只留日汇总时，经 CCS 路由的请求在 TS 侧只剩**原生采集**
+// 的记录（没有 ccs_request 标记）。这类请求与"独立新增"在数据上不可区分，
+// 按用户约定**信任 CCS 日汇总**：以来源快照建立时刻（started_utc，预览读取）
+// 为界，界内的明细视为已包含在汇总中，界外的请求照常计入。
+
+/// 反例：CCS 只留日汇总 1,000；其中一条请求 TS 仍能从本地日志读到（原生
+/// 采集、无 CCS 标记）。总量应为 1,000，不是 1,100。
+#[test]
+fn native_detail_inside_snapshot_is_covered_by_trusted_rollup() {
+    let dir = temp_dir("trusted-snapshot-native");
+    let history = history_of(&dir);
+    write_rollup(
+        &history,
+        "p1",
+        "2026-09-25",
+        "claude-opus-5-5",
+        10,
+        1000,
+        "2026-09-25T02:00:00Z",
+    );
+    // 真实采集路径：本地会话日志里仍能读到这条请求（不经任何人工来源标记）。
+    let claude = dir.join("claude");
+    write_claude_log(
+        &claude,
+        "proj/s.jsonl",
+        &[claude_line(
+            "s1",
+            "m1",
+            "2026-09-25T01:00:00Z",
+            "claude-opus-5-5",
+            100,
+            0,
+        )],
+    );
+    let o = opts(&dir, Some(claude), GroupBy::Day, "Asia/Shanghai");
+    let report = summary(&o).unwrap();
+    assert_eq!(
+        report.totals.tokens.input, 1000,
+        "信任 CCS 汇总：快照建立之前的原生明细不与汇总相加"
+    );
+    assert_eq!(report.totals.requests, 10, "请求数取汇总口径");
+    assert_eq!(report.rollup_coverage.covered_buckets, 1);
+    assert_eq!(report.rollup_coverage.unresolved_buckets, 0);
+    assert_eq!(
+        report.rollup_coverage.covered_detail_tokens.input, 100,
+        "被汇总替代的明细量如实披露"
+    );
+    assert_eq!(report.totals.unknown_reason, Some("rollup_only"));
+    assert_eq!(detail_rows(&o), 1, "明细视图仍可查看该请求");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 对照：同一桶里快照建立之后的独立新增 200 照常计入 → 1,200。
+/// 两条明细都来自真实采集路径；边界只看来源快照建立时刻。
+#[test]
+fn snapshot_era_native_plus_post_snapshot_native_counts_rollup_plus_new() {
+    let dir = temp_dir("trusted-plus-new");
+    let history = history_of(&dir);
+    write_rollup(
+        &history,
+        "p1",
+        "2026-09-26",
+        "claude-opus-5-5",
+        2,
+        1000,
+        "2026-09-26T02:00:00Z",
+    );
+    let claude = dir.join("claude");
+    write_claude_log(
+        &claude,
+        "proj/s.jsonl",
+        &[
+            claude_line(
+                "s1",
+                "m1",
+                "2026-09-26T01:00:00Z",
+                "claude-opus-5-5",
+                100,
+                0,
+            ),
+            claude_line(
+                "s2",
+                "m2",
+                "2026-09-26T03:00:00Z",
+                "claude-opus-5-5",
+                200,
+                0,
+            ),
+        ],
+    );
+    let o = opts(&dir, Some(claude), GroupBy::Day, "Asia/Shanghai");
+    let report = summary(&o).unwrap();
+    assert_eq!(
+        report.totals.tokens.input, 1200,
+        "汇总 1,000（已含快照内原生 100）+ 快照后新增 200"
+    );
+    assert_eq!(report.totals.requests, 3, "2（汇总）+ 1（新增）");
+    assert_eq!(report.rollup_coverage.covered_buckets, 1);
+    assert_eq!(report.rollup_coverage.unresolved_buckets, 0);
+    assert_eq!(
+        report.rollup_coverage.covered_detail_tokens.input, 100,
+        "只有快照内的明细被替代"
+    );
+    assert_eq!(detail_rows(&o), 2, "两条明细都可在明细视图查看");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `ccs_request` 只证明请求曾从 CCS 导入，**不自动证明它属于当前日汇总**：
+/// 事件时间晚于该汇总的快照建立时刻时（例如来自更新的备份），即便带标记也
+/// 必须计入总量，不能被汇总吞掉。
+#[test]
+fn ccs_marked_detail_after_snapshot_is_counted_not_swallowed() {
+    let dir = temp_dir("ccs-marked-after-snapshot");
+    let history = history_of(&dir);
+    write_rollup(
+        &history,
+        "p1",
+        "2026-09-28",
+        "claude-opus-5-5",
+        2,
+        1000,
+        "2026-09-28T02:00:00Z",
+    );
+    // 带 CCS 导入来源标记，但事件时间晚于这份汇总的快照时刻。
+    write_detail(
+        &history,
+        "ccs|claude|proxy|c9",
+        "2026-09-28T03:00:00Z",
+        "claude-opus-5-5",
+        200,
+        true,
+    );
+
+    let o = opts(
+        &dir,
+        Some(dir.join("no-claude")),
+        GroupBy::Day,
+        "Asia/Shanghai",
+    );
+    let report = summary(&o).unwrap();
+    assert_eq!(
+        report.totals.tokens.input, 1200,
+        "晚于快照起点的明细不在汇总里，必须计入"
+    );
+    assert_eq!(report.totals.requests, 3, "2（汇总）+ 1（明细）");
+    assert_eq!(report.rollup_coverage.covered_buckets, 1);
+    assert_eq!(
+        report.rollup_coverage.covered_detail_tokens.input, 0,
+        "没有任何明细被替代"
+    );
+    assert_eq!(detail_rows(&o), 1);
     std::fs::remove_dir_all(&dir).ok();
 }
