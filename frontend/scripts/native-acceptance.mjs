@@ -91,6 +91,7 @@ import {
   createStageTracker,
   ensureNotCanceled,
   errorEvidenceFields,
+  readAppLogTail,
   finalizeScenarioTimeout,
   runScenarioBounded,
   scenarioBudgetMs,
@@ -103,7 +104,12 @@ const REPO = fileURLToPath(new URL("../../", import.meta.url));
 const EXE_DEFAULT = path.join(REPO, "target", "release", "tokenscope.exe");
 // AC10：acceptance 构建身份来自受控构建步骤写出的记录（构建命令 + 源提交 +
 // 产物 SHA-256）。没有记录就只有一次 acceptance 构建的证据，一律拒绝启动。
-const BUILD_RECORD_DEFAULT = path.join(REPO, "qa-artifacts", "acceptance-build", "build-record.json");
+const BUILD_RECORD_DEFAULT = path.join(
+  REPO,
+  "qa-artifacts",
+  "acceptance-build",
+  "build-record.json",
+);
 /** 当前共同同意修订号：复用 upgrade_baselines.py 的 Rust 常量提取
  * （剥离块注释/行注释/字符串，假声明不会命中），不在 JS 里另写正则。 */
 let currentConsentRevisionCache = null;
@@ -499,9 +505,7 @@ class Instance {
       : null;
     this.prelaunchSettings = {
       text: prelaunchStat ? fs.readFileSync(prelaunchSettingsPath, "utf8") : null,
-      bytesHex: prelaunchStat
-        ? fs.readFileSync(prelaunchSettingsPath).toString("hex")
-        : null,
+      bytesHex: prelaunchStat ? fs.readFileSync(prelaunchSettingsPath).toString("hex") : null,
       size: prelaunchStat ? prelaunchStat.size : null,
       mtimeMs: prelaunchStat ? prelaunchStat.mtimeMs : null,
     };
@@ -1154,7 +1158,8 @@ class Instance {
     if (wait.kind === "error" || wait.spawnError) {
       verdict = { status: "failed", reason: `第二个实例启动失败：${record.spawnError}` };
     }
-    record.hostExitCode = wait.exitConfirmed && Number.isInteger(wait.exitCode) ? wait.exitCode : null;
+    record.hostExitCode =
+      wait.exitConfirmed && Number.isInteger(wait.exitCode) ? wait.exitCode : null;
     record.hostSignal = wait.exitConfirmed ? (wait.signal ?? null) : null;
     record.exitElapsedMs = Math.round(wait.elapsedMs);
     record.exitConfirmed = wait.exitConfirmed === true;
@@ -1164,10 +1169,7 @@ class Instance {
     record.terminateError = wait.terminateError ?? null;
     record.terminateUnconfirmed = wait.terminateUnconfirmed === true;
     record.exitWithinBudget =
-      !wait.timedOut &&
-      !wait.canceled &&
-      wait.exitConfirmed &&
-      wait.elapsedMs <= timeoutMs;
+      !wait.timedOut && !wait.canceled && wait.exitConfirmed && wait.elapsedMs <= timeoutMs;
     record.exitTimedOut = wait.timedOut;
     record.exitCanceled = wait.canceled;
     record.hostExitDetected = wait.exitConfirmed
@@ -1787,10 +1789,14 @@ function preseedBusinessFiles(dataDir) {
     "import os",
     "os._exit(0)",
   ].join("; ");
-  const result = spawnSyncBounded("python", ["-c", seedScript, path.join(dataDir, "history.db"), schemaV1], {
-    action: "preseed-sqlite",
-    stage: "preseed-sqlite",
-  });
+  const result = spawnSyncBounded(
+    "python",
+    ["-c", seedScript, path.join(dataDir, "history.db"), schemaV1],
+    {
+      action: "preseed-sqlite",
+      stage: "preseed-sqlite",
+    },
+  );
   if (result.status !== 0) {
     throw new Error(`预置 SQLite 历史库失败：${result.stdout}${result.stderr}`);
   }
@@ -1848,9 +1854,7 @@ function snapshotDataDir(dataDir) {
       text: stat ? fs.readFileSync(settingsPath, "utf8") : null,
       // 十八轮复核 P2：字节快照（hex）——宽松解码会把非法字节变 U+FFFD，
       // 同 size/mtime 的非法字节改写在 text/size/mtime 上不可辨。
-      bytesHex: stat
-        ? fs.readFileSync(settingsPath).toString("hex")
-        : null,
+      bytesHex: stat ? fs.readFileSync(settingsPath).toString("hex") : null,
       size: stat ? stat.size : null,
       mtimeMs: stat ? stat.mtimeMs : null,
     },
@@ -3331,7 +3335,9 @@ const scenarios = {
                   target: {
                     tag: event.target.tagName,
                     cls: String(event.target.className || "").slice(0, 80),
-                    text: String(event.target.textContent || "").trim().slice(0, 40),
+                    text: String(event.target.textContent || "")
+                      .trim()
+                      .slice(0, 40),
                   },
                 });
               },
@@ -3342,9 +3348,7 @@ const scenarios = {
           // actions 内最后一个按钮=同意；保存中会变「正在保存…」而按钮
           // 仍在）——正常采集与失败取证共用这个标识，按文案过滤会失去
           // 保存中的按钮。
-          const consentButtons = Array.from(
-            document.querySelectorAll(".privacy-actions button"),
-          );
+          const consentButtons = Array.from(document.querySelectorAll(".privacy-actions button"));
           const consent = consentButtons[consentButtons.length - 1];
           if (consent) consent.dataset.ac06Consent = "1";
         }),
@@ -3406,8 +3410,7 @@ const scenarios = {
           : `事后位置查询失败=${ev.acceptClicks.buttonBoxAfterClickError}`;
       ck.add(
         "button_position_recorded",
-        ev.acceptClicks.buttonBoxAtClick !== undefined &&
-          "buttonBoxAfterClick" in ev.acceptClicks,
+        ev.acceptClicks.buttonBoxAtClick !== undefined && "buttonBoxAfterClick" in ev.acceptClicks,
         `点击时位置=${JSON.stringify(ev.acceptClicks.buttonBoxAtClick)}；${recordedAfter}`,
       );
     } catch (error) {
@@ -3423,9 +3426,7 @@ const scenarios = {
           .catch((diagError) => {
             diagnostics[`${label}Error`] = String(diagError).slice(0, 300);
           });
-      await bounded("capturedClicks", () =>
-        page.evaluate(() => window.__ac06ConsentClicks ?? []),
-      );
+      await bounded("capturedClicks", () => page.evaluate(() => window.__ac06ConsentClicks ?? []));
       await bounded("privacyDialogCount", () => page.locator(".privacy-dialog").count());
       // 八轮复核 P2：内层 .catch(() => []) 会把查询失败伪装成「没有文案」
       // ——吞错移除，失败交给外层 bounded 记 privacyBlockedDetailError。
@@ -3448,9 +3449,7 @@ const scenarios = {
         }),
       );
       await bounded("settingsSnapshot", async () =>
-        fs.existsSync(settingsPath)
-          ? fs.readFileSync(settingsPath, "utf8").slice(0, 800)
-          : null,
+        fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath, "utf8").slice(0, 800) : null,
       );
       await bounded("traceSoFar", async () =>
         readAcceptanceTrace(inst.root, { partial: true }).records.map((r) => ({
@@ -3561,17 +3560,14 @@ const scenarios = {
     const writesBeforeConsent = settingsWriteSeqs.filter((s) => s < consentSeqs[0]);
     const adjacentWrite =
       writesBeforeConsent.length === 1 &&
-      !trace.records.some(
-        (r) => r.seq > writesBeforeConsent[0] && r.seq < consentSeqs[0],
-      );
+      !trace.records.some((r) => r.seq > writesBeforeConsent[0] && r.seq < consentSeqs[0]);
     const captureBytes = (() => {
       const hex = consentRows[0]?.settings_bytes_hex;
       if (typeof hex !== "string" || hex.length === 0 || hex.length % 2 !== 0) return null;
       if (/[^0-9a-f]/.test(hex)) return null;
       return Buffer.from(hex, "hex");
     })();
-    const recomputed =
-      captureBytes === null ? null : settingsFingerprint(captureBytes).value;
+    const recomputed = captureBytes === null ? null : settingsFingerprint(captureBytes).value;
     const hashMatchesCapture =
       recomputed !== null &&
       consentRows[0]?.settings_hash?.algorithm === "fnv1a64" &&
@@ -3848,15 +3844,8 @@ const scenarios = {
     await page.waitForSelector(".app-nav", { timeout: 60000 });
     const afterAcceptBytes = fs.readFileSync(settingsPath);
     ev.settingsAfterAccept = afterAcceptBytes.toString("utf8");
-    const afterAcceptState = strictConsentState(
-      afterAcceptBytes,
-      currentConsentRevision(),
-    );
-    ck.add(
-      "reconsent_writes_current_revision",
-      afterAcceptState.ok,
-      afterAcceptState.detail,
-    );
+    const afterAcceptState = strictConsentState(afterAcceptBytes, currentConsentRevision());
+    ck.add("reconsent_writes_current_revision", afterAcceptState.ok, afterAcceptState.detail);
     // 同意后的业务初始化必须发生在同意落盘之后：business_ready 的 seq
     // 严格大于 consent_saved（顺序颠倒 = 同意前就有业务读取）。
     const traceAfterConsent = readAcceptanceTrace(inst.root, { partial: true });
@@ -3940,11 +3929,7 @@ const scenarios = {
         `agreement=${beforeToml.user_agreement_accepted}`,
     );
     const legacyState = strictConsentState(beforeBytes, currentConsentRevision());
-    ck.add(
-      "legacy_record_is_not_current_consent",
-      !legacyState.ok,
-      legacyState.detail,
-    );
+    ck.add("legacy_record_is_not_current_consent", !legacyState.ok, legacyState.detail);
     const dialogText = (await page.locator(".privacy-dialog").innerText()).replace(/\s+/g, " ");
     ck.add(
       "policy_updated_notice_visible",
@@ -3999,10 +3984,7 @@ const scenarios = {
     await page.waitForSelector(".app-nav", { timeout: 60000 });
     const afterAcceptBytes = fs.readFileSync(settingsPath);
     ev.settingsAfterAccept = afterAcceptBytes.toString("utf8");
-    const afterAcceptState = strictConsentState(
-      afterAcceptBytes,
-      currentConsentRevision(),
-    );
+    const afterAcceptState = strictConsentState(afterAcceptBytes, currentConsentRevision());
     ck.add(
       "revision2_user_click_writes_current_revision",
       afterAcceptState.ok,
@@ -4176,11 +4158,7 @@ async function main() {
     windows_version: windowsVersion,
     userprofile: process.env.USERPROFILE,
   };
-  ck.add(
-    "acceptance_root_isolated",
-    launchPreflight.paths.ok,
-    launchPreflight.paths.reason,
-  );
+  ck.add("acceptance_root_isolated", launchPreflight.paths.ok, launchPreflight.paths.reason);
   ck.add(
     "acceptance_executable_consistent_with_record",
     launchPreflight.exe.ok,
@@ -4264,119 +4242,121 @@ async function main() {
         ? prepareCacheTiersScenario
         : SCENARIO === "ui-pricing"
           ? preparePricingScenario
-        : SCENARIO === "fault-logs-file"
-          ? (r) => {
-              const p = path.join(r, "tokenscope", "logs");
-              fs.mkdirSync(path.dirname(p), { recursive: true });
-              if (fs.existsSync(p) && fs.statSync(p).isDirectory())
-                throw new Error("logs 已是目录，无法注入文件故障");
-              fs.writeFileSync(p, "not-a-directory\n");
-            }
-          : SCENARIO === "close-remember-failure"
+          : SCENARIO === "fault-logs-file"
             ? (r) => {
-                const p = path.join(r, "tokenscope", "settings.toml");
-                fs.writeFileSync(
-                  p,
-                  'close_action = "minimize"\n' + fs.readFileSync(p, "utf8"),
-                  "utf8",
-                );
+                const p = path.join(r, "tokenscope", "logs");
+                fs.mkdirSync(path.dirname(p), { recursive: true });
+                if (fs.existsSync(p) && fs.statSync(p).isDirectory())
+                  throw new Error("logs 已是目录，无法注入文件故障");
+                fs.writeFileSync(p, "not-a-directory\n");
               }
-            : SCENARIO === "privacy-consent-gate" ||
-                SCENARIO === "privacy-accept-restart" ||
-                SCENARIO === "privacy-policy-update" ||
-                SCENARIO === "privacy-preseeded" ||
-                SCENARIO === "privacy-revision2-consent" ||
-                SCENARIO === "privacy-denied-ipc" ||
-                SCENARIO === "privacy-accept-order" ||
-                SCENARIO === "privacy-variants-close"
+            : SCENARIO === "close-remember-failure"
               ? (r) => {
-                  // P06/WB05：privacy-consent-gate 与 privacy-accept-restart 要
-                  // "未同意"状态——删掉隔离根预置的同意记录与政策修订号（其余
-                  // 场景保留已同意基线，继续覆盖业务路径）。
-                  // privacy-policy-update 要"旧修订同意"——保留 true，只剥离
-                  // 修订号，让新程序触发「政策已更新」重新询问。
                   const p = path.join(r, "tokenscope", "settings.toml");
-                  const text = fs.readFileSync(p, "utf8");
-                  if (SCENARIO === "privacy-policy-update") {
-                    const downgraded = text.replace(
-                      /^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m,
-                      "",
-                    );
-                    if (downgraded === text)
-                      throw new Error("隔离根 settings.toml 未含修订号行，无法构造旧同意场景");
-                    const legacyOnly = downgraded
-                      .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
-                      .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
-                    fs.writeFileSync(p, legacyOnly, "utf8");
-                    return;
-                  }
-                  if (SCENARIO === "privacy-variants-close") {
-                    // AC06：记忆预设变体——剥离同意后追加 close_action，
-                    // 验证未同意时点关闭仍弹隐私退出确认而非最小化。
-                    // 2026-10-28：协议同意两项一并剥离（构造真实未同意状态）。
+                  fs.writeFileSync(
+                    p,
+                    'close_action = "minimize"\n' + fs.readFileSync(p, "utf8"),
+                    "utf8",
+                  );
+                }
+              : SCENARIO === "privacy-consent-gate" ||
+                  SCENARIO === "privacy-accept-restart" ||
+                  SCENARIO === "privacy-policy-update" ||
+                  SCENARIO === "privacy-preseeded" ||
+                  SCENARIO === "privacy-revision2-consent" ||
+                  SCENARIO === "privacy-denied-ipc" ||
+                  SCENARIO === "privacy-accept-order" ||
+                  SCENARIO === "privacy-variants-close"
+                ? (r) => {
+                    // P06/WB05：privacy-consent-gate 与 privacy-accept-restart 要
+                    // "未同意"状态——删掉隔离根预置的同意记录与政策修订号（其余
+                    // 场景保留已同意基线，继续覆盖业务路径）。
+                    // privacy-policy-update 要"旧修订同意"——保留 true，只剥离
+                    // 修订号，让新程序触发「政策已更新」重新询问。
+                    const p = path.join(r, "tokenscope", "settings.toml");
+                    const text = fs.readFileSync(p, "utf8");
+                    if (SCENARIO === "privacy-policy-update") {
+                      const downgraded = text.replace(
+                        /^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m,
+                        "",
+                      );
+                      if (downgraded === text)
+                        throw new Error("隔离根 settings.toml 未含修订号行，无法构造旧同意场景");
+                      const legacyOnly = downgraded
+                        .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
+                        .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
+                      fs.writeFileSync(p, legacyOnly, "utf8");
+                      return;
+                    }
+                    if (SCENARIO === "privacy-variants-close") {
+                      // AC06：记忆预设变体——剥离同意后追加 close_action，
+                      // 验证未同意时点关闭仍弹隐私退出确认而非最小化。
+                      // 2026-10-28：协议同意两项一并剥离（构造真实未同意状态）。
+                      const stripped = text
+                        .replace(/^[ \t]*privacy_policy_accepted[ \t]*=[ \t]*true[ \t]*\r?\n?/m, "")
+                        .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
+                        .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
+                      fs.writeFileSync(p, stripped + 'close_action = "minimize"\n', "utf8");
+                      return;
+                    }
                     const stripped = text
                       .replace(/^[ \t]*privacy_policy_accepted[ \t]*=[ \t]*true[ \t]*\r?\n?/m, "")
+                      .replace(/^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m, "")
                       .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
                       .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
-                    fs.writeFileSync(p, stripped + 'close_action = "minimize"\n', "utf8");
-                    return;
+                    if (stripped === text)
+                      throw new Error("隔离根 settings.toml 未含同意记录，无法构造未同意场景");
+                    fs.writeFileSync(p, stripped, "utf8");
+                    if (SCENARIO === "privacy-preseeded") {
+                      // 十七轮复核 P2：计划 §4b.1 要求预置「旧修订布尔同意」
+                      // （accepted=true + revision=1 → 新版 StaleRevision 重新
+                      // 询问），不是剥离同意——观察窗口证明旧修订同意状态下
+                      // 对预置业务数据零读取零写入。
+                      // 2026-10-28：真实旧用户只有隐私政策同意、没有协议同意
+                      // 记录——协议两项一并剥离，验证新版本不会把旧记录当作
+                      // 已同意协议而放行。
+                      const downgraded = text
+                        .replace(
+                          /^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m,
+                          "privacy_policy_revision = 1\n",
+                        )
+                        .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
+                        .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
+                      if (downgraded === text)
+                        throw new Error(
+                          "隔离根 settings.toml 未含修订号行，无法构造旧修订同意场景",
+                        );
+                      fs.writeFileSync(p, downgraded, "utf8");
+                      preseedBusinessFiles(path.join(r, "tokenscope"));
+                      return;
+                    }
+                    if (SCENARIO === "privacy-revision2-consent") {
+                      // 2026-10-29 复核：真实 0.6.0 旧用户形态——隐私政策同意
+                      // accepted=true + revision=2、没有协议同意字段；同时预置
+                      // 业务文件，证明门禁关闭期间对旧业务数据零读取零写入，
+                      // 之后由真实界面点击完成重新同意。
+                      const legacy = text
+                        .replace(
+                          /^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m,
+                          "privacy_policy_revision = 2\n",
+                        )
+                        .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
+                        .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
+                      if (legacy === text)
+                        throw new Error("隔离根 settings.toml 未含修订号行，无法构造修订 2 旧用户");
+                      fs.writeFileSync(p, legacy, "utf8");
+                      preseedBusinessFiles(path.join(r, "tokenscope"));
+                      return;
+                    }
                   }
-                  const stripped = text
-                    .replace(/^[ \t]*privacy_policy_accepted[ \t]*=[ \t]*true[ \t]*\r?\n?/m, "")
-                    .replace(/^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m, "")
-                    .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
-                    .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
-                  if (stripped === text)
-                    throw new Error("隔离根 settings.toml 未含同意记录，无法构造未同意场景");
-                  fs.writeFileSync(p, stripped, "utf8");
-                  if (SCENARIO === "privacy-preseeded") {
-                    // 十七轮复核 P2：计划 §4b.1 要求预置「旧修订布尔同意」
-                    // （accepted=true + revision=1 → 新版 StaleRevision 重新
-                    // 询问），不是剥离同意——观察窗口证明旧修订同意状态下
-                    // 对预置业务数据零读取零写入。
-                    // 2026-10-28：真实旧用户只有隐私政策同意、没有协议同意
-                    // 记录——协议两项一并剥离，验证新版本不会把旧记录当作
-                    // 已同意协议而放行。
-                    const downgraded = text
-                      .replace(
-                        /^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m,
-                        "privacy_policy_revision = 1\n",
-                      )
-                      .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
-                      .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
-                    if (downgraded === text)
-                      throw new Error("隔离根 settings.toml 未含修订号行，无法构造旧修订同意场景");
-                    fs.writeFileSync(p, downgraded, "utf8");
-                    preseedBusinessFiles(path.join(r, "tokenscope"));
-                    return;
-                  }
-                  if (SCENARIO === "privacy-revision2-consent") {
-                    // 2026-10-29 复核：真实 0.6.0 旧用户形态——隐私政策同意
-                    // accepted=true + revision=2、没有协议同意字段；同时预置
-                    // 业务文件，证明门禁关闭期间对旧业务数据零读取零写入，
-                    // 之后由真实界面点击完成重新同意。
-                    const legacy = text
-                      .replace(
-                        /^[ \t]*privacy_policy_revision[ \t]*=[ \t]*\d+[ \t]*\r?\n?/m,
-                        "privacy_policy_revision = 2\n",
-                      )
-                      .replace(/^[ \t]*user_agreement_accepted[ \t]*=.*\r?\n?/m, "")
-                      .replace(/^[ \t]*user_agreement_revision[ \t]*=.*\r?\n?/m, "");
-                    if (legacy === text)
-                      throw new Error("隔离根 settings.toml 未含修订号行，无法构造修订 2 旧用户");
-                    fs.writeFileSync(p, legacy, "utf8");
-                    preseedBusinessFiles(path.join(r, "tokenscope"));
-                    return;
-                  }
-                }
-              : SCENARIO === "privacy-variants-corrupt"
-                ? (r) => {
-                    // AC06：损坏 TOML 变体——启动必须进入阻断弹窗且原文件
-                    // 逐字节不变（prepare 产物整体替换为非法内容）。
-                    const p = path.join(r, "tokenscope", "settings.toml");
-                    fs.writeFileSync(p, "not [valid toml", "utf8");
-                  }
-                : undefined,
+                : SCENARIO === "privacy-variants-corrupt"
+                  ? (r) => {
+                      // AC06：损坏 TOML 变体——启动必须进入阻断弹窗且原文件
+                      // 逐字节不变（prepare 产物整体替换为非法内容）。
+                      const p = path.join(r, "tokenscope", "settings.toml");
+                      fs.writeFileSync(p, "not [valid toml", "utf8");
+                    }
+                  : undefined,
   });
 
   // S00（计划 §9.1）：场景取消标志 + 阶段记录 + 最小证据写盘点。
@@ -4536,6 +4516,18 @@ async function main() {
       // 但 launches[] 与宿主日志尾部仍要写出（§4.8 第 5 条）
       setupError = error;
       Object.assign(ev, errorEvidenceFields(error));
+      // 2026-11-05：宿主 stdout 可能完全为空（应用写文件日志），启动失败时
+      // 必须把隔离根内的应用日志尾部一并留下，否则"页面 target 没出现"这类
+      // 失败无法判断是环境冷启动还是产品缺陷。
+      // 应用日志目录整份留档（与看门狗收尾同一份复制逻辑），再取尾部进证据。
+      try {
+        const logs = path.join(root, "tokenscope", "logs");
+        if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
+      } catch (e) {
+        ev.app_logs_copy_error = String(e?.message ?? e);
+      }
+      const appLog = readAppLogTail(root);
+      if (appLog) ev.app_log_tail = appLog;
       hb(`启动阶段失败：${error?.message ?? error}`);
     }
   }
