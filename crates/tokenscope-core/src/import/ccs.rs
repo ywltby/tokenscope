@@ -107,11 +107,20 @@ pub fn source_exists(path: &Path) -> bool {
 pub struct CcsSource {
     conn: Connection,
     path: PathBuf,
+    /// 来源一致读快照**建立之前**捕获的时刻（覆盖判定的边界）。
+    ///
+    /// 2026-11-05（第三轮）：`preview.generated_at` 在读完请求与日汇总之后才
+    /// 生成，晚于快照真正建立的时刻；用它当边界会把"快照建立之后才到达的
+    /// 请求"当成已含于汇总而静默排除。这里在开启读事务之前取时刻，是快照
+    /// 建立时刻的**下界**：此后发生的请求一律按新请求计入（宁可多计，不吞）。
+    snapshot_started_utc: Timestamp,
 }
 
 impl CcsSource {
     /// 只读打开（不写入、不复制整库，也不读取账户/密钥表）。
     pub fn open(path: &Path) -> Result<Self> {
+        // 先取时刻再建立读快照：边界必须是快照建立时刻的下界。
+        let snapshot_started_utc = Timestamp::now();
         #[cfg(feature = "acceptance")]
         crate::acceptance::record_path("ccs_open", path, serde_json::json!({}))?;
         let conn = Connection::open_with_flags(
@@ -129,11 +138,17 @@ impl CcsSource {
         Ok(Self {
             conn,
             path: path.to_path_buf(),
+            snapshot_started_utc,
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 来源快照建立时刻的下界（覆盖判定用它做边界，见结构体字段说明）。
+    pub fn snapshot_started_utc(&self) -> Timestamp {
+        self.snapshot_started_utc
     }
 
     /// 结构探测：返回版本、表与缺失列（只读，不修改来源）。
@@ -383,6 +398,11 @@ pub struct ImportPreview {
     /// 预览基于的历史库 generation；提交时不一致即要求重新预览。
     pub history_generation: u64,
     pub generated_at: String,
+    /// 来源一致读快照建立时刻的下界（`CcsSource::open` 时捕获）。
+    ///
+    /// 2026-11-05（第三轮）：提交时用它写 `import_runs.started_utc`——覆盖判定
+    /// 的边界必须是**快照建立时刻**，不是读完数据之后才生成的 `generated_at`。
+    pub snapshot_started_utc: String,
     pub expires_in_seconds: u64,
     pub requests_total: u64,
     pub requests_importable: u64,
@@ -507,6 +527,7 @@ pub fn preview_with_limits(
         source_day_timezone: source_day_timezone.to_string(),
         history_generation: history.generation()?,
         generated_at: Timestamp::now().to_string(),
+        snapshot_started_utc: source.snapshot_started_utc().to_string(),
         expires_in_seconds: PLAN_TTL.as_secs(),
         requests_total: requests.len() as u64,
         requests_importable: 0,
@@ -707,7 +728,10 @@ pub fn commit(
         logical_source: CCS_LOGICAL_SOURCE.to_string(),
         source_path: plan.preview.source_path.clone(),
         source_schema: plan.preview.source_schema.clone(),
-        started_utc: plan.preview.generated_at.clone(),
+        // 覆盖边界 = 来源快照建立时刻的下界（见 `CcsSource`），不是预览读完
+        // 数据之后才生成的 `generated_at`：后者会把快照建立之后到达的请求
+        // 当成已含于汇总而静默排除。
+        started_utc: plan.preview.snapshot_started_utc.clone(),
         status: "committed".to_string(),
         detail: None,
         import_revision: 1,

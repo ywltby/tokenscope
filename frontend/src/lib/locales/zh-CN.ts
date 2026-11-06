@@ -95,6 +95,8 @@ const zhCN = {
     sourcesProblem: "{count} 个来源异常，统计可能不完整。",
     collectDiag: "本轮采集存在部分问题（{summary}）；已采集数据仍有效。",
     instantRangeHint: "当前时间范围精确到时刻，只统计请求明细，不含只有日粒度的历史。",
+    rollupCovered:
+      "有 {count} 个日期/模型桶的明细已由 CCS 日汇总替代（{tokens} token 未重复计入）。这些明细不一定全部包含在该汇总里：读取时刻只能证明拿到过来源库，不能证明汇总已覆盖此前的全部会话；明细仍可在请求明细视图核对。",
     tzMismatch: "{sourceTz}",
     detailOnlyOnly: "当前只统计请求明细（不含只有日粒度的历史）；按日视图不受来源时区影响。",
     noticeCountSuffix: "（共 {count} 条通知）",

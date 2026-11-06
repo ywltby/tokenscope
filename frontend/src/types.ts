@@ -48,6 +48,11 @@ export interface RollupCoverage {
   timezone_mismatch?: string | null;
   /** U01：时刻范围（24h/自定义到分钟）不取日汇总——所涉自然日确有日汇总时为 true。 */
   rollups_excluded_for_instant_range?: boolean;
+  /**
+   * 2026-11-05：同桶汇总来自不同时刻导入的批次时的披露（覆盖边界取最早快照
+   * 时刻；落在批次之间的明细已按明细计入，可能与较晚批次重复）。
+   */
+  multi_batch_boundary?: string | null;
 }
 
 /**
@@ -102,6 +107,8 @@ export interface CcsImportPreview {
   source_day_timezone: string;
   history_generation: number;
   generated_at: string;
+  /** 来源快照建立时刻的下界：提交时写入导入批次，供日汇总覆盖判定使用。 */
+  snapshot_started_utc: string;
   expires_in_seconds: number;
   requests_total: number;
   requests_importable: number;

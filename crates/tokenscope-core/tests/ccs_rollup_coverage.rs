@@ -1056,11 +1056,10 @@ fn native_request_after_preview_is_not_swallowed() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 同一桶含**不同时刻导入**的多行汇总：覆盖起点取最晚的来源快照建立时刻
-/// （晚于它的明细一定不在任何一行的快照里）；快照内明细被替代、快照后
-/// 新增照常计入。
+/// 同一桶含**不同时刻导入**的多行汇总：覆盖起点取**最早**的来源快照建立
+/// 时刻；早于两批的明细被替代、晚于两批的新增照常计入，中间的歧义另行披露。
 #[test]
-fn multi_batch_rollup_rows_use_latest_snapshot_boundary() {
+fn multi_batch_rollup_rows_use_earliest_snapshot_boundary() {
     let dir = temp_dir("multi-batch");
     let history = history_of(&dir); // 两批导入的同桶汇总（provider 不同 → 两行），来源快照建立时刻不同。
     write_rollup(
@@ -1114,6 +1113,15 @@ fn multi_batch_rollup_rows_use_latest_snapshot_boundary() {
     assert_eq!(report.rollup_coverage.covered_buckets, 1);
     assert_eq!(report.rollup_coverage.unresolved_buckets, 0);
     assert_eq!(report.rollup_coverage.covered_detail_tokens.input, 80);
+    let note = report
+        .rollup_coverage
+        .multi_batch_boundary
+        .as_deref()
+        .expect("多批次边界必须如实披露");
+    assert!(
+        note.contains("不同时刻导入的批次"),
+        "披露要说明边界来源：{note}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -1270,5 +1278,175 @@ fn ccs_marked_detail_after_snapshot_is_counted_not_swallowed() {
         "没有任何明细被替代"
     );
     assert_eq!(detail_rows(&o), 1);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ── 2026-11-05（第三轮）：覆盖边界必须是**来源快照真正建立**的时刻 ──
+
+/// 追加一行 CCS 日汇总（只插入，不重建库结构；模拟"稍后的第二个导入批次"）。
+#[allow(clippy::too_many_arguments)]
+fn add_ccs_rollup_row(
+    path: &Path,
+    day: &str,
+    app: &str,
+    provider: &str,
+    model: &str,
+    count: i64,
+    input: i64,
+    output: i64,
+) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute(
+        "INSERT INTO usage_daily_rollups(date, app_type, provider_id, model, request_model,
+            request_count, input_tokens, output_tokens, cache_read_tokens,
+            cache_creation_tokens, total_cost_usd, input_token_semantics)
+         VALUES(?1, ?2, ?3, ?4, '', ?5, ?6, ?7, 0, 0, '1.5', 0)",
+        rusqlite::params![day, app, provider, model, count, input, output],
+    )
+    .unwrap();
+}
+
+/// 缺陷：`preview.generated_at` 在**读完**来源请求与日汇总之后才生成，晚于
+/// 来源 SQLite 快照真正建立的时刻。快照建立之后才到达的原生请求不在已读汇总
+/// 里，却被这个更晚的时刻当成"快照内"静默排除。
+///
+/// 复现走真实 `CcsSource::open` → `ccs::preview` → `ccs::commit` 路径，并把
+/// 日志时间取在 `preview.generated_at`（旧口径声称的覆盖边界）上。
+#[test]
+fn request_arriving_after_snapshot_but_during_preview_is_not_swallowed() {
+    let dir = temp_dir("preview-boundary");
+    let history = history_of(&dir);
+    let tz = jiff::tz::TimeZone::get("Asia/Shanghai").unwrap();
+    let day = jiff::Timestamp::now()
+        .to_zoned(tz.clone())
+        .date()
+        .to_string();
+    seed_ccs(
+        &dir.join("cc-switch.db"),
+        &[],
+        &[(day.as_str(), "claude", "claude-opus-5-5", 10, 1000, 0)],
+    );
+    let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
+    let preview = ccs::preview(&source, &history, "Asia/Shanghai").unwrap();
+    let generated: jiff::Timestamp = preview.generated_at.parse().unwrap();
+    assert_eq!(
+        generated.to_zoned(tz).date().to_string(),
+        day,
+        "事件与汇总必须落在同一来源日"
+    );
+    // 真实采集路径：日志时间 = 预览读完才生成的时刻（快照建立之后）。
+    let claude = dir.join("claude");
+    write_claude_log(
+        &claude,
+        "proj/s.jsonl",
+        &[claude_line(
+            "s1",
+            "m1",
+            &preview.generated_at,
+            "claude-opus-5-5",
+            200,
+            0,
+        )],
+    );
+    ccs::commit(
+        &preview.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        true,
+    )
+    .unwrap();
+
+    let report = summary(&opts(&dir, Some(claude), GroupBy::Day, "Asia/Shanghai")).unwrap();
+    assert_eq!(
+        report.totals.tokens.input, 1200,
+        "快照建立之后到达的请求不在已读汇总里，必须计入（旧口径 1,000）"
+    );
+    assert_eq!(report.rollup_coverage.covered_buckets, 1);
+    assert_eq!(
+        report.rollup_coverage.covered_detail_tokens.input, 0,
+        "没有任何明细可以被这条更晚的时刻替代"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 缺陷：同一日期/模型有**不同时刻导入**的两条汇总时，整桶边界取最晚时刻，
+/// 会把落在两次快照之间、且不属于任一汇总的请求整桶吞掉。
+#[test]
+fn request_between_two_import_snapshots_is_not_swallowed() {
+    let dir = temp_dir("two-snapshots");
+    let history = history_of(&dir);
+    let tz = jiff::tz::TimeZone::get("Asia/Shanghai").unwrap();
+    let day = jiff::Timestamp::now()
+        .to_zoned(tz.clone())
+        .date()
+        .to_string();
+    let db = dir.join("cc-switch.db");
+    seed_ccs(
+        &db,
+        &[],
+        &[(day.as_str(), "claude", "claude-opus-5-5", 1, 400, 0)],
+    );
+    // 第一批：provider p1 的汇总。
+    let s1 = CcsSource::open(&db).unwrap();
+    let p1 = ccs::preview(&s1, &history, "Asia/Shanghai").unwrap();
+    ccs::commit(
+        &p1.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        true,
+    )
+    .unwrap();
+    // 释放第一批的只读事务，否则来源库无法写入第二批汇总。
+    drop(s1);
+    // 第一批快照建立之后：这条请求不属于第一批的汇总。
+    let between = jiff::Timestamp::now();
+    // 第二批：同日期/模型、另一个 provider 的行，稍后导入（第二个快照）。
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    add_ccs_rollup_row(&db, &day, "claude", "p2", "claude-opus-5-5", 2, 600, 0);
+    let s2 = CcsSource::open(&db).unwrap();
+    let p2 = ccs::preview(&s2, &history, "Asia/Shanghai").unwrap();
+    ccs::commit(
+        &p2.plan_id,
+        &history,
+        RollupConflictPolicy::KeepExisting,
+        true,
+    )
+    .unwrap();
+
+    let starts: Vec<jiff::Timestamp> = history
+        .daily_rollups(None)
+        .unwrap()
+        .iter()
+        .filter_map(|r| r.import_at)
+        .collect();
+    assert_eq!(starts.len(), 2, "两个批次的汇总各一行");
+    let first = *starts.iter().min().unwrap();
+    let last = *starts.iter().max().unwrap();
+    assert!(
+        first < between && between < last,
+        "事件必须落在两次快照之间：{first} < {between} < {last}"
+    );
+
+    let claude = dir.join("claude");
+    write_claude_log(
+        &claude,
+        "proj/s.jsonl",
+        &[claude_line(
+            "s1",
+            "m1",
+            &between.to_string(),
+            "claude-opus-5-5",
+            100,
+            0,
+        )],
+    );
+    let report = summary(&opts(&dir, Some(claude), GroupBy::Day, "Asia/Shanghai")).unwrap();
+    assert_eq!(
+        report.totals.tokens.input, 1100,
+        "两次快照之间到达的请求必须计入（旧口径 1,000）"
+    );
+    assert_eq!(report.totals.requests, 4, "1 + 2（汇总）+ 1（明细）");
+    assert_eq!(report.rollup_coverage.covered_buckets, 1);
+    assert_eq!(report.rollup_coverage.covered_detail_tokens.input, 0);
     std::fs::remove_dir_all(&dir).ok();
 }

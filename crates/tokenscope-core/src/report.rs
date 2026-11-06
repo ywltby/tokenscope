@@ -2083,10 +2083,11 @@ pub(crate) fn collect_detail_buckets(
     app: Option<AgentKind>,
     rollups: &[crate::history::StoredRollup],
 ) -> Result<DetailBuckets> {
-    // 每桶的覆盖起点 = 该桶全部汇总行中**最晚**的来源快照建立时刻：
-    // 每行的请求都发生在该行自己的快照之前，因此"晚于最晚起点"的明细一定
-    // 不在任何一行的快照里；"不晚于最晚起点"的明细可能已含于某一行。
-    // 同桶多行都没有起点（旧库迁移遗留）→ 起点缺失，整桶明细都算快照内。
+    // 每桶的覆盖起点 = 该桶全部汇总行中**最早**的来源快照建立时刻：单行时就是
+    // 该行自己的快照时刻；多行（不同批次）时只有"早于最早快照"的明细可以确定
+    // 已被所有行看到。取最晚会把落在两批快照之间的请求整桶吞掉——它们不在
+    // 先建立的那份快照里，因此必须按明细计入（可能与较晚批次重复，另行披露）。
+    // 同桶多行都取不到时刻（旧库迁移遗留）→ 起点缺失，整桶明细都算快照内。
     let mut starts: RollupStarts = std::collections::HashMap::new();
     for r in rollups {
         let identity = crate::model_identity::ModelIdentity::parse(&r.model).identity_key();
@@ -2096,7 +2097,7 @@ pub(crate) fn collect_detail_buckets(
             .entry((r.day.clone(), r.app.as_str().to_string(), identity))
             .or_insert(None);
         if let Some(at) = r.import_at
-            && entry.is_none_or(|cur| at > cur)
+            && entry.is_none_or(|cur| at < cur)
         {
             *entry = Some(at);
         }
@@ -2291,9 +2292,11 @@ pub(crate) fn select_rollup_contributions(
         rows: Vec<&'a crate::history::StoredRollup>,
         requests: u64,
         tokens: crate::model::TokenCounts,
-        /// 覆盖起点 = 该桶全部汇总行中**最晚**的来源快照建立时刻（`None` = 无
+        /// 覆盖起点 = 该桶全部汇总行中**最早**的来源快照建立时刻（`None` = 无
         /// 任何行带批次时刻，无法划分快照内外 → 整桶明细都算快照内）。
         since: Option<jiff::Timestamp>,
+        /// 该桶最晚的来源快照建立时刻：与 `since` 不同表示多批次边界，需披露。
+        since_latest: Option<jiff::Timestamp>,
         source_tz: String,
         day: String,
         app: AgentKind,
@@ -2331,6 +2334,7 @@ pub(crate) fn select_rollup_contributions(
             requests: 0,
             tokens: crate::model::TokenCounts::default(),
             since: None,
+            since_latest: None,
             source_tz: r.source_tz.clone(),
             day: r.day.clone(),
             app: r.app,
@@ -2345,14 +2349,21 @@ pub(crate) fn select_rollup_contributions(
             .tokens
             .checked_add(&r.tokens)
             .ok_or_else(|| anyhow::anyhow!("日汇总 token 累计超出可表示范围"))?;
-        // 同桶多行（不同 provider / 不同批次）：取最晚的来源快照建立时刻作为
-        // 覆盖起点——晚于它的明细一定不在任何一行的快照里。
-        if let Some(at) = r.import_at
-            && bucket.since.is_none_or(|cur| at > cur)
-        {
-            bucket.since = Some(at);
+        // 同桶多行（不同 provider / 不同批次）：覆盖起点取**最早**的来源快照
+        // 建立时刻——晚于它的明细可能不在先建立的快照里，按明细计入（不吞）；
+        // 同时记录最晚时刻，用于披露"批次之间可能与较晚汇总重复"。
+        if let Some(at) = r.import_at {
+            if bucket.since.is_none_or(|cur| at < cur) {
+                bucket.since = Some(at);
+            }
+            bucket.since_latest = bucket
+                .since_latest
+                .map_or(Some(at), |cur| Some(cur.max(at)));
         }
     }
+    // 同桶多批次（最早/最晚快照时刻不同）的桶数：边界只能取最早时刻，落在
+    // 批次之间的明细已按明细计入，可能与较晚批次重复——必须如实披露。
+    let mut multi_batch_buckets: u64 = 0;
     for bucket in buckets.into_values() {
         let empty: std::collections::HashMap<(String, String, String), DetailBucketStat> =
             std::collections::HashMap::new();
@@ -2371,8 +2382,9 @@ pub(crate) fn select_rollup_contributions(
             push_rollup_rows(&mut selection, &bucket.rows);
             continue;
         }
-        // 2026-11-05（第二轮）：按用户约定**信任 CCS 日汇总**。以来源快照建立
-        // 时刻（`started_utc` = 预览读取时刻）为界，把桶内明细分两类：
+        // 2026-11-05（第三轮）：按用户约定**信任 CCS 日汇总**。以**来源快照
+        // 建立时刻**（`CcsSource::open` 时捕获的下界，经 `import_runs.started_utc`
+        // 落库）为界，把桶内明细分两类：
         // - 快照内（事件时间 <= 起点）：可能已包含在汇总里。经 CCS 路由的请求
         //   在 TS 侧往往只剩原生采集记录（没有 `ccs_request` 标记），与"确实
         //   不在汇总里"无法区分——按信任口径视为已含于汇总，不重复计入；
@@ -2393,6 +2405,12 @@ pub(crate) fn select_rollup_contributions(
                 .covered_detail_tokens
                 .checked_add(&detail.snapshot_tokens)
                 .ok_or_else(|| anyhow::anyhow!("被汇总替代的明细 token 累计超出可表示范围"))?;
+            // 同桶多批次：最早与最晚快照时刻不同 → 批次之间可能重复，需披露。
+            if let (Some(first), Some(latest)) = (bucket.since, bucket.since_latest)
+                && latest > first
+            {
+                multi_batch_buckets += 1;
+            }
             push_rollup_rows(&mut selection, &bucket.rows);
             selection.covered_detail.push(CoveredBucket {
                 source_tz: bucket.source_tz,
@@ -2419,6 +2437,15 @@ pub(crate) fn select_rollup_contributions(
             "日汇总按来源统计时区（{list}）生成，与当前展示时区（{tz_label}）不同；\
              按日筛选或分组时不重切日期，这部分历史只在「不限日期」的总量视图计入。\
              可切换展示时区到来源时区，或只看请求明细。"
+        ));
+    }
+    if multi_batch_buckets > 0 {
+        // 多批次边界只能取最早快照时刻：落在批次之间的明细按明细计入了，可能
+        // 与较晚批次的汇总重复。这是数据上无法区分的固有歧义，必须如实披露。
+        selection.coverage.multi_batch_boundary = Some(format!(
+            "有 {multi_batch_buckets} 个日期/模型桶的日汇总来自不同时刻导入的批次：\
+             覆盖边界只能取最早的来源快照时刻，落在批次之间的明细已按明细计入，\
+             可能与较晚批次的汇总重复；这些桶请对照请求明细核对。"
         ));
     }
     if selection.coverage.unresolved_buckets > 0 {

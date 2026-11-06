@@ -162,6 +162,13 @@ pub struct RollupCoverage {
     /// 只在确有日汇总时为 true：没有日粒度历史就不提示。界面文案由前端写。
     #[serde(default)]
     pub rollups_excluded_for_instant_range: bool,
+    /// 2026-11-05（第三轮）：同桶汇总来自不同时刻导入的多批快照时的披露。
+    ///
+    /// 覆盖边界只能取**最早**的来源快照时刻（晚于它的明细不可能全在最早那份
+    /// 快照里）；落在两批之间的明细已按明细计入，可能与较晚批次的汇总重复。
+    /// 数据上无法区分，只能如实披露（`None` = 没有这种桶）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_batch_boundary: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

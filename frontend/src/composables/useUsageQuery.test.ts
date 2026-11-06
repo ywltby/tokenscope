@@ -586,7 +586,9 @@ describe("useUsageQuery 通知合并（U04）", () => {
   it("rollup_only_history_is_info_not_collection_problem：日粒度历史不是采集问题", async () => {
     // 2026-11-05：CCS 汇总 1000 覆盖部分明细时，统计已按规则处理完；
     // 费用未知的说明放在汇总区（UsageTable 脚注），不再笼统显示
-    // "本轮采集存在部分问题"，也不额外产生采集通知。
+    // "本轮采集存在部分问题"。
+    // 第三轮补充：覆盖本身仍是**统计口径**，但"汇总是否真的包含这些明细"
+    // 无法逐请求证实，因此保留一条 info 级披露（不是采集问题）。
     okMock({
       query_summary: () =>
         Promise.resolve({
@@ -606,8 +608,11 @@ describe("useUsageQuery 通知合并（U04）", () => {
     await flushPromises();
     const texts = api.notices.value.map((n) => n.text).join("\n");
     expect(texts, "已按规则处理的覆盖不再显示为采集问题").not.toContain("本轮采集存在部分问题");
-    expect(api.notices.value, "统计口径不产生采集通知").toEqual([]);
     expect(api.collectionDiagnostics.value.clean, "统计口径不是采集脏").toBe(true);
+    const coveredNote = api.notices.value.find((n) => n.id === "rollup-covered");
+    expect(coveredNote, "覆盖规模必须如实披露").toBeDefined();
+    expect(coveredNote!.severity, "披露是信息项，不是告警").toBe("info");
+    expect(coveredNote!.text, "要给出桶数与未重复计入的 token").toContain("100");
     w.unmount();
   });
 

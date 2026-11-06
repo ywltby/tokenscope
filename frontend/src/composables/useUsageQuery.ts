@@ -822,14 +822,22 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     // 由通知列表单独成条（不计入采集警告计数，免得把时区提示说成采集问题）。
     const warns = [...(report.value?.warnings ?? [])];
     const timezoneMismatch = report.value?.rollup_coverage?.timezone_mismatch ?? null;
+    // 2026-11-05：同桶汇总来自不同时刻导入的批次——覆盖边界只能取最早快照时刻，
+    // 落在批次之间的明细已按明细计入，可能与较晚批次重复（后端给文案）。
+    const multiBatchBoundary = report.value?.rollup_coverage?.multi_batch_boundary ?? null;
     const instantOnly = report.value?.rollup_coverage?.rollups_excluded_for_instant_range === true;
     const statsList = report.value?.sources.map((s) => s.stats) ?? [];
     const ioErrors = statsList.reduce((a, st) => a + (st.io_errors ?? 0), 0);
     const badLines = statsList.reduce((a, st) => a + (st.bad_lines ?? 0), 0);
     // H06：含只有日粒度的历史时，费用按「未知」披露（不是模型未收录）。
     const rollupOnly = report.value?.totals.unknown_reason === "rollup_only";
-    // 已按规则用汇总覆盖部分明细的桶：统计已处理完毕，不再提示。
+    // 已按规则用汇总覆盖部分明细的桶：统计口径已处理完（不算采集问题），但
+    // "汇总是否真的包含这些明细"无法逐请求证实——按披露要求给出规模。
     const covered = report.value?.rollup_coverage?.covered_buckets ?? 0;
+    const coveredTokens = (() => {
+      const t = report.value?.rollup_coverage?.covered_detail_tokens;
+      return t ? t.input + t.output + t.cache_write + t.cache_read : 0;
+    })();
     const clean = warns.length === 0 && ioErrors === 0 && badLines === 0;
     const summaryText = clean
       ? null
@@ -848,7 +856,9 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       badLines,
       rollupOnly,
       covered,
+      coveredTokens,
       timezoneMismatch,
+      multiBatchBoundary,
       instantOnly,
     };
   });
@@ -946,6 +956,29 @@ export function useUsageQuery(opts: UsageQueryOptions) {
         severity: "warning",
         text: instantRangeHint.value,
         actions: [],
+      });
+    }
+    if (rollupsMode.value === "auto" && collectionDiagnostics.value.covered > 0) {
+      list.push({
+        id: "rollup-covered",
+        severity: "info",
+        text: t("dashboard.rollupCovered", {
+          count: collectionDiagnostics.value.covered,
+          tokens: collectionDiagnostics.value.coveredTokens,
+        }),
+        actions: [
+          { label: t("dashboard.detailOnlyToggle"), run: () => setRollupsMode("detail_only") },
+        ],
+      });
+    }
+    if (rollupsMode.value === "auto" && collectionDiagnostics.value.multiBatchBoundary) {
+      list.push({
+        id: "rollup-multi-batch",
+        severity: "warning",
+        text: collectionDiagnostics.value.multiBatchBoundary,
+        actions: [
+          { label: t("dashboard.detailOnlyToggle"), run: () => setRollupsMode("detail_only") },
+        ],
       });
     }
     if (rollupsMode.value === "auto" && collectionDiagnostics.value.timezoneMismatch) {

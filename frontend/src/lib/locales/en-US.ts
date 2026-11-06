@@ -102,6 +102,8 @@ const enUS: AppMessages = {
     collectDiag: "This round had partial issues ({summary}); collected data remains valid.",
     instantRangeHint:
       "The current range is minute-precise and counts requests only, excluding day-granularity history.",
+    rollupCovered:
+      "Details in {count} day/model buckets were replaced by the CCS daily rollup ({tokens} tokens not double-counted). Those details are not necessarily all included in that rollup: reading the source database only proves it was available, not that the rollup covers every earlier session. Request details remain available for cross-checking.",
     tzMismatch: "{sourceTz}",
     detailOnlyOnly:
       "Counting requests only (day-granularity history excluded); the day view is unaffected by source time zones.",
