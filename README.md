@@ -2,7 +2,7 @@
 
 本地 AI agent 使用量统计的桌面工具：只读扫描各 AI 编程工具的会话日志，将精简用量长期保存在自己的数据库，统计 token、请求数与估算费用。Rust（Tauri 2）+ Vue 3 前端。对标 [cc-switch](https://github.com/farion1231/cc-switch) 的 Usage Statistics。
 
-当前实现与验收状态见 [计划总账](docs/plans/README.md)；剩余任务统一在 [整合计划](docs/plans/active/2026-10-11-consolidated-remaining-work.md)，包括历史升级与并集边界、当前原生和发布验收。
+当前实现与验收状态见 [计划总账](docs/plans/README.md)；剩余任务统一在 [整合计划](docs/plans/active/2026-10-11-consolidated-remaining-work.md)，当前已发布 v0.7.1（预发布）；功能主体已交付，剩余以人工验收、稳定性取证和明确暂缓项为主。
 
 ## 功能
 
@@ -44,7 +44,7 @@ pnpm --dir frontend install        # 首次安装前端依赖
 
 ## 统计口径
 
-- **去重**：Claude 按 `(sessionId, message.id)` 更新有效终值；Codex 使用 `(session, 原始模型, 四桶)` 的保守重播身份，文件副本/归档移动不改变身份。因此**同会话同模型同桶数值的不同请求可能被合并**，不能称为强请求身份。历史迁移与跨来源边界的未闭合项见整合计划 N01–N03。
+- **去重**：Claude 按 `(sessionId, message.id)` 更新有效终值；Codex 使用 `(session, 原始模型, 四桶)` 的保守重播身份，文件副本/归档移动不改变身份。因此**同会话同模型同桶数值的不同请求可能被合并**，不能称为强请求身份。N01–N03 已关闭；身份歧义、来源缺失及日汇总覆盖的已知限制见统计口径文档。
 - **归一化**：Codex 的 `input_tokens` 含缓存（`total = input + output`、`cached ⊆ input`），入账时拆为剔除缓存 input + cache_read，与 Claude 口径对齐。
 - **时间**：缓存与存储一律 UTC（RFC3339）；聚合与展示按解析出的单一时区一次性转换——默认 Asia/Shanghai，GUI 下拉可选本机或任意 IANA 时区，避免多次转换。一次查询冻结一个「今天」，预设近 N 天为统计时区下 `[起始自然日, 今天]` 闭区间，不含未来日期。
 - **全部代理用量**：有效主代理/子代理请求均纳入，不建立代理关系分类。`<synthetic>`、零分量占位与坏行跳过并计数；来源缺失不删除已保存历史。
@@ -87,7 +87,7 @@ pnpm --dir frontend build          # 生产构建
 
 ## 版本与发布
 
-初始开发阶段使用 `0.x.y`。每个准备合入 main 的批次递增一次版本：修复、文档或维护使用 patch，新功能或不兼容变化使用 minor 并将 patch 归零。混合改动取更高等级，同一个 PR 的补修提交不重复加号；暂不发布 `1.x`。
+初始开发阶段使用 `0.x.y`。只有进入安装包的产品输入变更要求递增版本：修复/维护使用 patch，新功能或不兼容变化使用 minor 并将 patch 归零；纯文档、测试及 CI 改动默认不递增、不发布。混合改动取更高等级，同一个 PR 的补修提交不重复加号；暂不发布 `1.x`。
 
 ```powershell
 git fetch origin main
@@ -96,9 +96,9 @@ python -B scripts/bump_version.py --bump minor --summary "本轮新增功能说�
 python -B scripts/bump_version.py --check --base-ref origin/main
 ```
 
-工具同步四份应用版本配置、唯一根 `Cargo.lock` 和 `release-change.json`；第三方依赖不随版本更新漂移。PR 的 CI 对比最新 main，拒绝未递增、版本不一致及过时基线；main push 再按实际 before 提交校验。main 通过检查、生产构建、五个安装场景及两项真实旧包升级后发布 `v0.x.y`，0.x Release 保持预发布标记，已发布标签和资产不覆盖。
+工具同步四份应用版本配置、唯一根 `Cargo.lock` 和 `release-change.json`；第三方依赖不随版本更新漂移。PR 的 CI 对比最新 main，按产品输入检查递增、版本一致性及基线；main push 再按实际 before 提交校验。版本未变时 Release 仅跑 gate；版本递增时，经生产构建、五个安装场景、动态旧版升级矩阵及两条连续升级链后发布 `v0.x.y`，0.x Release 保持预发布标记，已发布标签和资产不覆盖。
 
-历史 `0.1.0` 固定到 `8d1d90de29aa00d10b9a7e4b8f906d909726446b`，复用原 pre-* 发布的同一安装包、校验和和来源证明；本轮源码版本为 `0.2.0`。Actions 分别在原日志保留、原日志已删除的独立 Runner 中验证升级与再次启动，旧数据由真实 0.1.0 程序产生。基线在 `scripts/fixtures/upgrade_baseline.json`，无需 GitHub 旧包变量；版本标签与发布实跑状态见 [N12](docs/plans/active/2026-10-11-consolidated-remaining-work.md#n12-versioning-design)。真实安装脚本只允许一次性 GitHub-hosted Runner，本机只运行契约测试。
+历史 `0.1.0` 固定到 `8d1d90de29aa00d10b9a7e4b8f906d909726446b`，复用原 pre-* 发布的同一安装包、校验和和来源证明。Actions 分别在原日志保留、原日志已删除的独立 Runner 中验证升级与再次启动，旧数据由真实 0.1.0 程序产生。基线在 `scripts/fixtures/upgrade_baselines.json`，无需 GitHub 旧包变量；版本标签与发布实跑状态见 [N12](docs/plans/active/2026-10-11-consolidated-remaining-work.md#n12-versioning-design)。真实安装脚本只允许一次性 GitHub-hosted Runner，本机只运行契约测试。
 
 ## License 与法律免责声明
 

@@ -1,23 +1,24 @@
 # TokenScope 计划与完成状态总账
 
-> 更新日期：2026-11-04。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
+> 更新日期：2026-11-07。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
 > 唯一当前待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)。真实跨午夜、长时间休眠、跨显示器在[独立系统验收待办](system-acceptance-todo.md)维护，均未排期、未标通过。[审计索引](audits/README.md)保留历史时点结论。
 
-## 现在执行什么
+## 当前进度与路线图
 
-已实施的功能专项均已交付，不重做已关闭任务。2026-11-04 复核：N13 按 AC09 原验收口径判定关闭、N18 随 [v0.6.1](https://github.com/ywltby/tokenscope/releases/tag/v0.6.1) 预发布关闭；用户协议重新同意专项（PR #52/#53，v0.6.1）归档 implemented。当前责任状态如下，N14 已随 B1 关闭：
+**最新已发布：v0.7.1（预发布），PR #55 已合并。** WorkBuddy 双来源、方形图标、中英双语、Claude 缓存写分档、历史长期保存及 CCS 补充修复均已交付。主体开发已落地，不能把人工待验说成适配器或双语尚未实现。
 
-| 责任 | 当前状态与下一步 |
+N01–N18：**14 项关闭、4 项开放**。这是责任项计数，不是完成百分比。
+
+| 当前剩余 | 下一步 |
 | --- | --- |
-| N10 隐私强验收 | P01–P05 已实现；P06 未闭合。2026-10-25 分批实施：AC06 + AC08 已实施（提交 `0191f78`/`17fb37e`/`af784bf`，0.6.1，已随 PR #52/#53 合并），AC07 整项暂缓（进程内恢复保留待验），N10 不关闭 |
-| N11 原生统一验收 | B2 / PR #31 自动化通过，合并 `c9de40e` / v0.5.9，PR/main 门禁及发布验收全成功。安装后手动同步 OpenRouter 的人工尾项仍待验（最少操作清单见整合计划 §4 末尾），N11 不关闭 |
-| N12 系统与发布签字 | 最新 [v0.6.1](https://github.com/ywltby/tokenscope/releases/tag/v0.6.1) 的安装五场景、八组单跳（含 0.6.0→0.6.1 history v5 迁移）、两条连续链与发布成功（[Release run 41651288318](https://github.com/ywltby/tokenscope/actions/runs/41651288318)）；AC10 已接入 CI 并在 main 通过（`ui-single-instance` 19/19 + 3 项托盘展示层 pending，检查器「部分验证（放行）」，[run 41651288477](https://github.com/ywltby/tokenscope/actions/runs/41651288477)）；其余系统验收与人工签字待验（操作清单见整合计划 §4 末尾），N12 不关闭 |
-| N13 真实性能 | **已关闭（2026-11-04 按 AC09 原验收口径判定）**：真实测量（只读 `~/.claude`/`~/.codex`，写入全部隔离临时目录）111 文件 / 33240–33409 请求，冷/热四桶一致、重叠根不重复计数（第 1、2 轮来源未变化干净成立）、热查询 230–289 ms 远低于 1 秒参考值（不触发登记优化项）；三轮汇总数字均记录于计划，脱敏证据文件仅第三轮留存 `qa-artifacts/n13-real-perf/`（该轮重叠段受来源变化影响已标注，前两轮只有汇总数字）；测量边界如实保留为限度说明，不是未满足的验收条件；未设新门槛、未补测 |
-| N14 来源目录遗留 | 已完成；第 4 项共享冲突读取失败 fixture 随 PR #27 合并 `4198051`，PR/main 门禁通过，四项全部关闭 |
-| N17 WorkBuddy 双来源 | 开放（仅剩人工验证）：已合并发布（2026-10-25），PR #49 合并 `44c026d`，[v0.6.0](https://github.com/ywltby/tokenscope/releases/tag/v0.6.0) 预发布，main CI/原生/Release 与八组单跳+两条链全过；用户手动安装验证待执行（对账数字按当次样本基线比对；最少操作清单见整合计划 §4 末尾） |
-| N18 Claude 缓存写分档计价 | **已关闭（2026-11-04），随 [v0.6.1](https://github.com/ywltby/tokenscope/releases/tag/v0.6.1) 预发布交付**：PR #53 合并 `3d11fa5`，main CI/原生/Release 全成功；约定验收全部满足——定向测试、隔离端到端三用例（`n18_e2e_tiers.rs`）、真实界面验收（`ui-cache-tiers` 17/17 含汇总「分档估算」pill 截图）、旧库迁移由真实升级路径（0.6.0→0.6.1 单跳 + 两条连续链）覆盖；分档计价另由 pricing.rs 单测与 ui-pricing 场景覆盖。原缺陷（1h 写费低估 37.5%）已修复 |
+| N10 隐私强验收 | AC06/AC08 已交付；P06 未闭合、AC07 继续暂缓，不自行恢复排期 |
+| N11 原生统一验收 | 安装包手动同步 OpenRouter，确认同步信息和离线恢复 |
+| N12 系统与发布签字 | v0.7.1 安装、12 组单跳及两条连续链成功；AC10 托盘展示层 3 项 pending、D5/AC11 签字、i18n 桌面观感待验；原生启动 about:blank 根因未定位 |
+| N17 WorkBuddy | 双来源已发布；剩安装包人工验证，历史对账不代替当次签字 |
 
-N01–N09、N14–N16、N13、N18 已关闭；18 个责任编号中为 **14 项完成、4 项开放（N10–N12、N17）**：N10 的 AC07 继续暂缓，N11 剩安装后手动同步 OpenRouter 尾项，N12 剩其余系统验收与人工签字（AC10 自动化部分已接 CI 通过），N17 已合并发布 v0.6.0 但仅剩用户手动安装验证。
+N13 性能与 N18 分档计价已关闭；N13 前两轮仅保留汇总数字，第三轮留存脱敏 JSON 且重叠段受来源变化影响。CCS 日汇总缺少逐请求身份的限制不等于承诺全部统计误差已消除。
+
+**下一步顺序**：先合并执行安装包人工清单，再按复现证据处理稳定性；新来源、自动更新等没有排期。完整版本证据、下一步完成条件与所有 N 编号见[整合计划 §0–§3](active/2026-10-11-consolidated-remaining-work.md)。真实跨午夜、长休眠、跨显示器仍在独立系统待办。
 
 ## 2026-11-04 用户协议重新同意专项归档（随 v0.6.1 交付）
 
@@ -25,19 +26,19 @@ N01–N09、N14–N16、N13、N18 已关闭；18 个责任编号中为 **14 项�
 
 ## 2026-11-04 界面双语（i18n）与 AC10 豁免范围修正（PR #54）
 
-[界面双语实施计划](active/2026-11-04-i18n.md) 的 I01–I08 已交付：`vue-i18n` 集中资源 + `lib/translate.ts`（纯函数库安全复用）、`settings.toml` 新增 `language` 与受闸门保护的 `settings_set_language`、界面/无障碍名称/Naive 组件语言/`html[lang]` 全量接入、托盘菜单双语且保存后重建。默认简体中文；同意前只允许内存切换（零持久化 IO，既有 `consent_screen_*` 断言不变），同意成功后先写后读权威值；语言与统计时区严格分离。隐私政策与用户许可协议正文仍是简体中文准据版本，英文界面显式标注，不声称已完成法律文本翻译。安装器改为**自动跟随系统语言**（`SimpChinese` + `English`，不弹选择框；静默 `/S` 的生效语言仍未取证）。前端 1079 例、Rust workspace、clippy 双模式与 PR 必需检查（`gate`/`contracts`/`frontend`/`rust`/`rust-acceptance`/`native-ui`/`install-test`/`upgrade-test` 矩阵）通过；第二轮定向修复（重新同意保留弹窗最后选择、语言保存串行顺序、政策更新提示/费用浮层单位与无障碍名称英文化）已验证，前端全量 1079 例；`upgrade-chain` 按设计跳过。一次 `upgrade-test (0.4.0, present)` 因历史库 `VACUUM INTO` 备份目标已存在而失败、重跑通过，根因未定位，如实记录为竞态观察。
+[界面双语实施计划](active/2026-11-04-i18n.md) 的 I01–I08 已交付：`vue-i18n` 集中资源 + `lib/translate.ts`（纯函数库安全复用）、`settings.toml` 新增 `language` 与受闸门保护的 `settings_set_language`、界面/无障碍名称/Naive 组件语言/`html[lang]` 全量接入、托盘菜单双语且保存后重建。默认简体中文；同意前只允许内存切换（零持久化 IO，既有 `consent_screen_*` 断言不变），同意成功后先写后读权威值；语言与统计时区严格分离。隐私政策与用户许可协议正文仍是简体中文准据版本，英文界面显式标注，不声称已完成法律文本翻译。安装器改为**自动跟随系统语言**（`SimpChinese` + `English`，不弹选择框；静默 `/S` 的生效语言仍未取证）。前端 1079 例、Rust workspace、clippy 双模式与 PR 必需检查（`gate`/`contracts`/`frontend`/`rust`/`rust-acceptance`/`native-ui`/`install-test`/`upgrade-test` 矩阵）通过；第二轮定向修复（重新同意保留弹窗最后选择、语言保存串行顺序、政策更新提示/费用浮层单位与无障碍名称英文化）已验证，前端全量 1079 例；`upgrade-chain` 按设计跳过。一次 `upgrade-test (0.4.0, present)` 因历史库 `VACUUM INTO` 备份目标已存在而失败、重跑通过，当时根因未定位，如实记录为竞态观察；后续 PR #55 已复现并修复迁移备份并发缺陷，随 v0.7.1 交付，原始失败记录保留。
 
 AC10 验收脚本的 SQLite 瞬时文件豁免同时收窄：只在**受控历史库**（`<隔离根>/tokenscope/history.db`）的 `-journal` / `-wal` / `-shm` 且 `ENOENT` 时豁免，两个检查阶段行为一致；其他路径、其他错误、存在时的链接/硬链接仍按原规则检查，并由定向回归区分范围（见 `frontend/scripts/lib/native-single-instance.test.mjs`）。
 
 ## 2026-10-24/25 WorkBuddy 双来源（N17 已合并发布 v0.6.0）
 
-[WorkBuddy 国内版与 WorkBuddy AI 国际版接入计划](active/2026-10-21-workbuddy-adapters.md) 经用户 2026-10-24 确认修订并解除验收收口的串行依赖后，已在分支 `feat/workbuddy-adapters` 完成 WB01–WB09 实施（提交表、红绿摘要、十条不变量自审与对账结果见计划 §6.3）：现有来源等价泛化以冻结测试与变异证明行为不变；两版 WorkBuddy 以独立身份接入（设置格式 v3、隐私政策修订 2 与重新同意）；WB08 真实对账 Rust 与独立 Python 逐应用逐字段一致（国内版 2,881 条 / 国际版 656 条、坏行 0）；`ui-identity`、`ui-source-paths` 与新增 `privacy-policy-update` 原生场景本地通过。取号 minor 0.6.0。2026-10-25 用户经三轮外部评审后授权合并：**PR #49 普通合并 `44c026d`，main 的 CI / Native UI E2E / Release（构建、八组单跳、两条连续升级链、publish）全部实际成功，[v0.6.0](https://github.com/ywltby/tokenscope/releases/tag/v0.6.0) 已发布（预发布，4 资产）；运行链接见专项计划 §6.4。用户手动安装验证保留待验。** 原验收收口 B3 待修订、B4 / B5 未执行的状态保留，不改变 N01–N16 的历史结论。
+[WorkBuddy 国内版与 WorkBuddy AI 国际版接入计划](active/2026-10-21-workbuddy-adapters.md) 经用户 2026-10-24 确认修订并解除验收收口的串行依赖后，已在分支 `feat/workbuddy-adapters` 完成 WB01–WB09 实施（提交表、红绿摘要、十条不变量自审与对账结果见计划 §6.3）：现有来源等价泛化以冻结测试与变异证明行为不变；两版 WorkBuddy 以独立身份接入（设置格式 v3、隐私政策修订 2 与重新同意）；WB08 真实对账 Rust 与独立 Python 逐应用逐字段一致（国内版 2,881 条 / 国际版 656 条、坏行 0）；`ui-identity`、`ui-source-paths` 与新增 `privacy-policy-update` 原生场景本地通过。取号 minor 0.6.0。2026-10-25 用户经三轮外部评审后授权合并：**PR #49 普通合并 `44c026d`，main 的 CI / Native UI E2E / Release（构建、八组单跳、两条连续升级链、publish）全部实际成功，[v0.6.0](https://github.com/ywltby/tokenscope/releases/tag/v0.6.0) 已发布（预发布，4 资产）；运行链接见专项计划 §6.4。用户手动安装验证保留待验。** 2026-10-25 当时的验收收口 B3 待修订、B4 / B5 未执行记录作为历史保留，不改变 N01–N16 的历史结论。
 
 ## 2026-10-23 测试临时目录清理（已完成归档）
 
 [测试临时目录清理实施计划](archive/implemented/2026-10-23-test-temp-cleanup.md) 两个批次均已交付并经用户逐轮复核：B1（Vitest 用例遗漏修复 + 六条外层契约回归 + CI 接线）随 [PR #44](https://github.com/ywltby/tokenscope/pull/44) 合并 `fde7762`（三轮复审补修：失败证据保留、超时进程树收尾、挂起创建消除作业竞态、原预算内统一截止、日志直写文件）；前置 [PR #42](https://github.com/ywltby/tokenscope/pull/42)（Rust 独立临时根与进程级收尾）经用户批准合并 `4fc46c6`；B2（锁等待用例先 `drop(holder)` 再严格核实删除）随 [PR #46](https://github.com/ywltby/tokenscope/pull/46) 合并 `58d0d15`，发布 [v0.5.13](https://github.com/ywltby/tokenscope/releases/tag/v0.5.13)（构建、五场景安装、八组单跳（0.1.0 / 0.4.0 / 0.5.9 / 0.5.12 × present/deleted）、两条连续升级链全过）。两类历史失败（native-ui 页面 target 未出现、`latest_history_opens_without_writer_lock` 超限）根因未定位、仅记录；其余夹具的治理为后续候选，见归档计划 §6.2。本专项不占 N 编号，不改变 N09 等已完成项的历史状态。
 
-## 已交付与证据边界
+## 已交付与证据边界（历史批次）
 
 - PR #7–#13 已分别合入并发布 v0.3.0–v0.4.0，计划见下方第二批归档。
 - PR #14 来源目录功能已合入；v0.5.0 因发布测试架失败未公开，其功能由 PR #15 的 v0.5.1 首次公开。PR #15 合并 `9ea0c584`，[Release 39291272967](https://github.com/ywltby/tokenscope/actions/runs/39291272967) 的两条连续升级链成功，N14 第 1 项关闭。
@@ -48,7 +49,7 @@ AC10 验收脚本的 SQLite 瞬时文件豁免同时收窄：只在**受控历�
 - B1 / AC01 的 `69ce2f4` 随 [PR #27](https://github.com/ywltby/tokenscope/pull/27) 普通合并 `4198051`；两环境共享冲突探针、两个变异、普通/acceptance 采集各 17/17 与完整钩子通过，PR 的 CI/原生/安装/六组升级全成功。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39633188944)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39633188991)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39633189036) 全成功，Release 六个下游 skipped，最新发布仍为 v0.5.6；N14 第 4 项及 N14 全部关闭。
 - B2 / AC02–AC05 随 [PR #31](https://github.com/ywltby/tokenscope/pull/31) 普通合并 `c9de40e`，[v0.5.9](https://github.com/ywltby/tokenscope/releases/tag/v0.5.9) 已公开并下载核对四项原资产后登记基线。三个场景本地各三连跑与 29 条具名业务断言先红后绿，最终 PR 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39756585501)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/39756585449)、[Install test](https://github.com/ywltby/tokenscope/actions/runs/39756585577) 全成功。main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/39758431511)、[原生](https://github.com/ywltby/tokenscope/actions/runs/39758431422)、[Release](https://github.com/ywltby/tokenscope/actions/runs/39758431613) 全成功（安装五场景、六组单跳、两条连续链）；新增 CI 为 PR 116 秒 / main 68 秒。N11 人工尾项保留，B3 待修订，B4、B5 未执行。
 
-`active/` 保留整合计划与已确认的[剩余验收收口计划](active/2026-10-21-acceptance-closure.md)（AC01–AC12，B1 已关闭 N14；B2 自动化已合并，N11 人工尾项待验；B3 修订稿待用户确认（§4b），B4、B5 未执行），以及上述已确认、独立推进的 WorkBuddy 双来源计划（N17）；[合入与发布解耦](archive/implemented/2026-10-21-release-on-version-change.md)（N16）与测试临时目录清理专项（B1/B2 均交付）已完成并归档。归档共 **54 份：24 份已实现、28 份部分完成、2 份已被取代**。部分完成通常表示实现存在但自身验收有尾项；归档表示不再独立执行，不表示所有验收通过。
+`active/` 的整合计划维护唯一当前待办；验收收口、WorkBuddy 与 i18n 专项保留实现和证据，未验尾项归 N10/N11/N12/N17。B1/B2、B3 的 AC06/AC08、B4 已交付，B5/AC10 部分验证，AC07 暂缓。历史归档仍为 **54 份：24 份已实现、28 份部分完成、2 份已被取代**；本次另保留[整理前阶段表](audits/2026-11-07-task-ledger-history.md)，不新增责任编号。
 
 必须保持用户定稿：一个 `~/.tokenscope/history.db`，只保存精简 token/cwd 元数据；全部代理有效用量纳入；源日志删除或停用仍查得到历史；CCS 设置页只手动单次导入，导入与已有事实求并集。较新规则优先于旧“现存日志是唯一事实”等历史设计。
 
@@ -138,7 +139,7 @@ AC10 验收脚本的 SQLite 瞬时文件豁免同时收窄：只在**受控历�
 | [M8 桌面体验](archive/partial/2026-10-04-m8-desktop-experience.md) | 部分完成 | N12 |
 | [M9 models.dev 价格主源](archive/partial/2026-10-04-m9-modelsdev-source.md) | 部分完成 | N11 |
 | [M10 日期区间](archive/implemented/2026-10-04-m10-date-range.md) | 已实现 | N11 |
-| [M11 价格索引与自动同步](archive/partial/2026-10-04-m11-pricing-cache-autosync.md) | 部分完成 | N10、N12、N13 |
+| [M11 价格索引与自动同步](archive/partial/2026-10-04-m11-pricing-cache-autosync.md) | 部分完成 | N10、N12；N13 已关闭 |
 
 M1/M2/M6/M10 不因全产品 D5 未签字反向变成未实现。M3/M4/M5/M7/M8/M9/M11 的 partial 来自原计划自己的安装/操作/运行条件，不是泛泛要求每份计划重跑 D5；已合并成安装托盘、Settings 同步、下钻点击、窗口/单实例/自启、自动同步五组。
 

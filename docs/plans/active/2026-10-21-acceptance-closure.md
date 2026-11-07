@@ -1,5 +1,7 @@
 # 剩余验收收口：来源权限、原生统一验收、隐私强取证、真实性能与系统签字
 
+> 当前状态（2026-11-07）：B1/B2、B3 的 AC06/AC08 已交付；AC07 暂缓；B4/AC09 按原口径完成，N13 已关闭；B5/AC10 已接 CI，v0.7.1 main 仍为 failed=0、pending=3、ac10_conclusion=none。AC11/D5 人工签字未完成。最新发布与运行链接、下一步统一见整合计划 §0/§3；下文历史批次不当作当前未完成清单。
+
 > 状态：**用户 2026-10-21 确认，按 B1–B5 连续执行**。承接[整合计划](2026-10-11-consolidated-remaining-work.md)全部剩余开放项：N14 第 4 项、N11、N10、N13、N12。
 > 进度（2026-10-25，范围调整）：**用户授权 B3 分批实施——本批获准实施 AC06（四个隐私原生场景、自启隔离替身、回归与反例验证，以及满足预算后的 CI 接入）与 AC08（实际 fixture 覆盖记录、覆盖汇总与回归验证、本地完整浏览器矩阵取证）；AC07 整项暂缓（C/D 均不在本批执行，不新增其专用价格线程探针，不改变产品同步周期），进程内恢复目标继续保留 N10 待验。** 实施依据 a75de15 及后续最新版本的收口计划；AC06 含产品输入，实施 PR 递增 patch（若 main 仍为 0.6.0 则预期 0.6.1）。
 > 进度（2026-10-22）：**B1 / AC01 已交付，N14 关闭；B2 / AC02–AC05 随 PR #31（`c9de40e`）交付，main 三条运行全部成功，v0.5.9 已公开并登记原资产基线**。N11 的安装后人工同步尾项按用户决定保留待验；**B3 修订稿已拟并经三轮修订（2026-10-25，§4b；AC06 选 A、AC07 推荐 D 待用户确认、实施授权未给，未实施）**，B4、B5 未执行，不提前关闭 N10–N13。
@@ -283,7 +285,7 @@ AC03–AC05 的 CI 接入：
 >
 > **CI 接线准备（未触发）**：新增 `scripts/check_native_single_instance_evidence.py`——`failed` 必须为空且每项都要在 `checks` 里 `ok=false`；`pending` 必须落在允许集合内；托盘三项必须明确出现在 `checks` 或 `pending`；`checks` 明细与 `failed`/`pending` 汇总不一致（`ok=false` 未计入 failed、`ok=true` 却计入 failed/pending、无结论项未计入 pending）一律阻断；关键项必须 `ok=true`。放行结论固定为 **部分验证**（`verdict=partial`、`ac10_conclusion=none`），并列出未验证项，**不得用作 AC10 已通过的结论**。`ui-e2e.yml` **本轮不改**（契约测试断言工作流仍不含 `ui-single-instance`），接线动作留待确认后在 CI 实跑。**未验证**：GitHub-hosted Runner 上的 `ui-single-instance` 实跑、Runner 上托盘可观测性、CI 步骤实际运行；AC10 因此保持开放，N12 继续开放。
 
-> **2026-11-04 豁免范围修正（PR #54）**：Native UI 实跑暴露 cceptance_root_isolated_from_real_data 误报——SQLite 回滚日志/-wal/-shm 在 eaddir 与 lstat 之间消失会被判成"路径无法检查"。修复分三步落地并经 CI 复核：①7f95a0b 在检查阶段按文件名后缀豁免 ENOENT；②9f7b9ce 让走查阶段行为一致；③63e701 把豁免**收窄到受控历史库**（<隔离根>/tokenscope/history.db 的 -journal/-wal/-shm，相对路径精确匹配），其他路径、其他错误码、存在时的链接与硬链接仍按原规则失败。定向回归覆盖：同后缀但不在受控库旁的 sources/…/foo.db-journal 消失仍拒绝、受控库三种后缀一致豁免、非 ENOENT 仍拒绝、走查已发现文件消失仍拒绝。AC10 的证据判定口径不变（托盘三项仍 pending，结论为部分验证），N12 继续开放。
+> **2026-11-04 豁免范围修正（PR #54）**：Native UI 实跑暴露 acceptance_root_isolated_from_real_data 误报——SQLite 回滚日志/-wal/-shm 在 readdir 与 lstat 之间消失会被判成"路径无法检查"。修复分三步落地并经 CI 复核：①7f95a0b 在检查阶段按文件名后缀豁免 ENOENT；②9f7b9ce 让走查阶段行为一致；③a63e701 把豁免**收窄到受控历史库**（<隔离根>/tokenscope/history.db 的 -journal/-wal/-shm，相对路径精确匹配），其他路径、其他错误码、存在时的链接与硬链接仍按原规则失败。定向回归覆盖：同后缀但不在受控库旁的 sources/…/foo.db-journal 消失仍拒绝、受控库三种后缀一致豁免、非 ENOENT 仍拒绝、走查已发现文件消失仍拒绝。AC10 的证据判定口径不变（托盘三项仍 pending，结论为部分验证），N12 继续开放。
 ### AC11 N12 人工签字批次（用户执行）
 
 - **受测物**：AC02 合入后当前最新 main 发布的 NSIS 安装包（以 Release 资产哈希为准）。
