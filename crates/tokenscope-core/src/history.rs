@@ -757,46 +757,25 @@ impl ReadSnapshot {
     }
 
     /// 日汇总快照（按时间/应用过滤在调用方完成）。
+    ///
+    /// **统计口径（2026-11-05）**：只返回 Claude Code 的 CCS 日汇总——CCS 在
+    /// 本项目的用途是补充 Claude Code 被清理的会话历史；Codex/WorkBuddy 等
+    /// 其他应用以 TokenScope 自身采集与已保存的原生历史为准。非 Claude 的
+    /// 旧汇总行保留在库中（不删除事实），只是不参与统计。
     pub fn rollups(&self, app: Option<AgentKind>) -> Result<Vec<StoredRollup>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT logical_source, day, source_tz, app, provider_id, model, request_model,
-                    pricing_model, request_count, input_tokens, output_tokens,
-                    cache_write_tokens, cache_read_tokens, input_semantics, source_cost_usd
-             FROM ccs_daily_usage
-             WHERE (?1 IS NULL OR app = ?1)
-             ORDER BY day, app, model, provider_id",
+            "SELECT c.logical_source, c.day, c.source_tz, c.app, c.provider_id, c.model,
+                    c.request_model, c.pricing_model, c.request_count, c.input_tokens,
+                    c.output_tokens, c.cache_write_tokens, c.cache_read_tokens,
+                    c.input_semantics, c.source_cost_usd,
+                    COALESCE(NULLIF(ir.started_utc, ''), ir.committed_utc), ir.import_revision
+             FROM ccs_daily_usage c
+             LEFT JOIN import_runs ir ON ir.id = c.import_run_id
+             WHERE (?1 IS NULL OR c.app = ?1) AND c.app = 'claude-code'
+             ORDER BY c.day, c.app, c.model, c.provider_id",
         )?;
-        let rows = stmt.query_map(params![app.map(|a| a.as_str())], |r| {
-            let raw_app: String = r.get(3)?;
-            let app = parse_agent(&raw_app).map_err(|e| conversion_error(3, e))?;
-            Ok(StoredRollup {
-                logical_source: r.get(0)?,
-                day: r.get(1)?,
-                source_tz: r.get(2)?,
-                app,
-                provider_id: r.get(4)?,
-                model: r.get(5)?,
-                request_model: r.get(6)?,
-                pricing_model: r.get(7)?,
-                request_count: r.get::<_, i64>(8)?.max(0) as u64,
-                tokens: TokenCounts {
-                    input: u64_from_row(r, 9)?,
-                    output: u64_from_row(r, 10)?,
-                    cache_write: u64_from_row(r, 11)?,
-                    cache_read: u64_from_row(r, 12)?,
-                    // CCS 日汇总没有 5m/1h 分项：按分项未知处理。
-                    cache_write_5m: 0,
-                    cache_write_1h: 0,
-                    cache_write_split_known: false,
-                },
-                input_semantics: r.get(13)?,
-                source_cost_usd: r
-                    .get::<_, Option<String>>(14)?
-                    .and_then(|s| s.trim().parse::<f64>().ok())
-                    .filter(|v| v.is_finite()),
-            })
-        })?;
+        let rows = stmt.query_map(params![app.map(|a| a.as_str())], row_to_stored_rollup)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -807,6 +786,10 @@ impl ReadSnapshot {
     /// **分批**流式遍历行索引（keyset 分页）：每批在**锁内**只取数据，
     /// 回调在**锁外**执行——回调因此可以安全地再次读取本快照（早期实现
     /// 在持锁期间回调，`fetch_events` 会重复获取同一把非重入互斥量而死锁）。
+    ///
+    /// 2026-11-05：只遍历**参与统计**的事件——非 Claude 的纯 CCS 导入事实
+    ///（`origin_rank = 0`）不在此列；事实仍保留在库中（诊断/审计接口可读），
+    /// 同一事件一旦有原生来源（`origin_rank = 1`）就照常参与。
     pub fn for_each_row_batch(
         &self,
         app: Option<AgentKind>,
@@ -822,6 +805,7 @@ impl ReadSnapshot {
                     "SELECT id, ts_seconds, ts_nanos, record_id
                      FROM usage_events
                      WHERE (?1 IS NULL OR app = ?1)
+                       AND (app = 'claude-code' OR origin_rank >= 1)
                        AND (?2 IS NULL OR (ts_seconds, ts_nanos, id) > (?2, ?3, ?4))
                      ORDER BY ts_seconds, ts_nanos, id
                      LIMIT ?5",
@@ -970,6 +954,23 @@ pub struct StoredRollup {
     pub tokens: TokenCounts,
     pub input_semantics: i64,
     pub source_cost_usd: Option<f64>,
+    /// 该快照的**来源建立时刻**：`import_runs.started_utc`，即打开来源库、
+    /// 建立一致读快照**之前**捕获的时刻（`CcsSource::open`）；缺该值时回退
+    /// 提交时刻。`None` = 旧数据未关联导入批次。
+    ///
+    /// 2026-11-05（第三轮）：覆盖判定以它为边界——不晚于它的明细视为可能已含于
+    /// 汇总（信任 CCS 汇总口径），更晚的请求按明细计入。此前用预览读完数据之后
+    /// 才生成的 `generated_at` 当边界，会把"快照建立之后、预览结束之前"到达的
+    /// 请求静默排除；同桶多行时取**最早**的该时刻（见 `report` 的桶级判定）。
+    pub import_at: Option<jiff::Timestamp>,
+    /// 该批次的时间是否可当作覆盖边界（`import_runs.import_revision >= 2`）。
+    ///
+    /// 2026-11-05（第四轮）：v0.7.0 及更早的批次把 `started_utc` 写成"预览读取
+    /// 完成之后"的时间，与新版"快照建立时刻的下界"语义不同，而两者都可能是
+    /// `import_revision = 1` 之前的历史值——无法事后区分，因此旧记录一律视为
+    /// **边界不可确认**：不拿它做覆盖判定（不猜造历史），改按整桶信任口径统计
+    /// 并如实披露。
+    pub boundary_known: bool,
 }
 
 /// TokenScope 数据目录下的历史库路径（`~/.tokenscope/history.db`）。
@@ -1095,18 +1096,29 @@ impl HistoryDb {
             conn,
             path: path.to_path_buf(),
         };
-        // 迁移失败：Display 带出完整原因与保留位置，source 保留类型化错误链
-        //（打开层重试按类型判定瞬态错误，不得字符串化）。
-        db.migrate().map_err(|e| {
-            anyhow::Error::new(MigrateFailure {
-                detail: format!(
-                    "{:#}（历史库文件保留在 {}，可重试；不执行删表重建）",
-                    e,
-                    path.display()
-                ),
-                source: e,
-            })
-        })?;
+        // 2026-11-05：迁移段必须**进程内串行**——多路查询并发首次打开同一个
+        // 旧库时，两路会同时读到旧版本并各自尝试备份；`VACUUM INTO` 的目标
+        // 已存在时第二次会失败（真实升级验收里表现为 query_begin 打开失败，
+        // 汇总因此永远不出现）。锁只覆盖"读版本 + 备份 + 迁移"，最新库的
+        // 打开只多一次空锁。
+        {
+            static MIGRATE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+                std::sync::OnceLock::new();
+            let lock = MIGRATE_LOCK.get_or_init(|| std::sync::Mutex::new(()));
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            // 迁移失败：Display 带出完整原因与保留位置，source 保留类型化错误链
+            //（打开层重试按类型判定瞬态错误，不得字符串化）。
+            db.migrate().map_err(|e| {
+                anyhow::Error::new(MigrateFailure {
+                    detail: format!(
+                        "{:#}（历史库文件保留在 {}，可重试；不执行删表重建）",
+                        e,
+                        path.display()
+                    ),
+                    source: e,
+                })
+            })?;
+        }
         crate::retry::apply_busy_timeout(&db.conn, HISTORY_BUSY_TIMEOUT)?;
         Ok(db)
     }
@@ -1204,24 +1216,67 @@ impl HistoryDb {
     ///
     /// 已存在同名备份时不覆盖（升级重试不产生多份），失败即中止升级——
     /// 宁可这次不升级，也不在没有可恢复副本的情况下改结构。
+    ///
+    /// 2026-11-05：已存在的同名文件**必须校验为可用的同版本副本**才跳过；
+    /// 并发打开时另一路可能刚好写完备份，`VACUUM INTO` 会报"目标已存在"，
+    /// 此时校验通过就沿用它（不再让整个查询失败）。
     fn backup_before_upgrade(&self, from_version: i64) -> Result<()> {
         let target = self
             .path
             .with_extension(format!("db.backup-v{from_version}"));
         if target.exists() {
-            log::info!("升级前备份已存在，跳过：{}", target.display());
-            return Ok(());
+            if Self::backup_usable(&target, from_version) {
+                log::info!("升级前备份已存在，跳过：{}", target.display());
+                return Ok(());
+            }
+            bail!(
+                "升级前备份目标已存在但不是可用的 v{from_version} 副本：{}；\
+                 请移走该文件后重试（不覆盖、也不在没有备份的情况下改结构）",
+                target.display()
+            );
         }
         // VACUUM INTO 的路径参数不能用占位符，需内联；单引号按 SQL 规则转义。
         let escaped = target.display().to_string().replace('\'', "''");
-        self.conn
-            .execute_batch(&format!("VACUUM INTO '{escaped}'"))
-            .with_context(|| format!("升级前备份失败（目标 {}）", target.display()))?;
-        log::info!(
-            "历史库升级前备份完成：v{from_version} → {}",
-            target.display()
-        );
-        Ok(())
+        match self.conn.execute_batch(&format!("VACUUM INTO '{escaped}'")) {
+            Ok(()) => {
+                log::info!(
+                    "历史库升级前备份完成：v{from_version} → {}",
+                    target.display()
+                );
+                Ok(())
+            }
+            Err(e) => {
+                // 并发窗口：另一路在本连接检查之后创建了备份。校验通过就沿用。
+                if Self::backup_usable(&target, from_version) {
+                    log::warn!(
+                        "升级前备份由并发打开完成，沿用现有副本：{}（{e}）",
+                        target.display()
+                    );
+                    return Ok(());
+                }
+                Err(e).with_context(|| format!("升级前备份失败（目标 {}）", target.display()))
+            }
+        }
+    }
+
+    /// 目标文件是否已是**可用的**同版本备份（只读打开 + 能读 schema）。
+    fn backup_usable(target: &Path, from_version: i64) -> bool {
+        let Ok(conn) = Connection::open_with_flags(
+            target,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            return false;
+        };
+        let Ok(version) = conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+        else {
+            return false;
+        };
+        version == from_version
+            && conn
+                .query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .is_ok()
     }
 
     /// 读取元信息值。
@@ -1710,43 +1765,17 @@ impl HistoryDb {
     /// 用明细还是用汇总（见 `aggregate::select_rollup_contributions`）。
     pub fn daily_rollups(&self, app: Option<AgentKind>) -> Result<Vec<StoredRollup>> {
         let mut stmt = self.conn.prepare(
-            "SELECT logical_source, day, source_tz, app, provider_id, model, request_model,
-                    pricing_model, request_count, input_tokens, output_tokens,
-                    cache_write_tokens, cache_read_tokens, input_semantics, source_cost_usd
-             FROM ccs_daily_usage
-             WHERE (?1 IS NULL OR app = ?1)
-             ORDER BY day, app, model, provider_id",
+            "SELECT c.logical_source, c.day, c.source_tz, c.app, c.provider_id, c.model,
+                    c.request_model, c.pricing_model, c.request_count, c.input_tokens,
+                    c.output_tokens, c.cache_write_tokens, c.cache_read_tokens,
+                    c.input_semantics, c.source_cost_usd,
+                    COALESCE(NULLIF(ir.started_utc, ''), ir.committed_utc), ir.import_revision
+             FROM ccs_daily_usage c
+             LEFT JOIN import_runs ir ON ir.id = c.import_run_id
+             WHERE (?1 IS NULL OR c.app = ?1) AND c.app = 'claude-code'
+             ORDER BY c.day, c.app, c.model, c.provider_id",
         )?;
-        let rows = stmt.query_map(params![app.map(|a| a.as_str())], |r| {
-            let raw_app: String = r.get(3)?;
-            let app = parse_agent(&raw_app).map_err(|e| conversion_error(3, e))?;
-            Ok(StoredRollup {
-                logical_source: r.get(0)?,
-                day: r.get(1)?,
-                source_tz: r.get(2)?,
-                app,
-                provider_id: r.get(4)?,
-                model: r.get(5)?,
-                request_model: r.get(6)?,
-                pricing_model: r.get(7)?,
-                request_count: r.get::<_, i64>(8)?.max(0) as u64,
-                tokens: TokenCounts {
-                    input: u64_from_row(r, 9)?,
-                    output: u64_from_row(r, 10)?,
-                    cache_write: u64_from_row(r, 11)?,
-                    cache_read: u64_from_row(r, 12)?,
-                    // CCS 日汇总没有 5m/1h 分项：按分项未知处理。
-                    cache_write_5m: 0,
-                    cache_write_1h: 0,
-                    cache_write_split_known: false,
-                },
-                input_semantics: r.get(13)?,
-                source_cost_usd: r
-                    .get::<_, Option<String>>(14)?
-                    .and_then(|s| s.trim().parse::<f64>().ok())
-                    .filter(|v| v.is_finite()),
-            })
-        })?;
+        let rows = stmt.query_map(params![app.map(|a| a.as_str())], row_to_stored_rollup)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -2313,11 +2342,22 @@ fn lookup_overlap_candidate(conn: &Connection, w: &EventWrite) -> Result<Option<
 
 /// 库内处置判定（纯函数，预览与写入共用）。
 ///
-/// 优先级**先于**观察时间：原生日志比 CCS 导入更可信，同一条请求的原生记录
-/// 无论事件时间是否早于已存 CCS 值都要胜出（计划 §5.3：原生记录按原生终值
-/// 规则选取，与导入顺序无关）——否则 CCS 的 `created_at` 稍晚几秒时，后采集
-/// 的原生终值会被"观察时间更早"误判为过期。观察时间只在**同优先级**内区分
-/// 新旧（同请求的流式更新、旧副本回放）。
+/// 优先级**先于**新旧比较：原生日志比 CCS 导入更可信，同一条请求的原生记录
+/// 无论事件时间是否早于已存 CCS 值都胜出（计划 §5.3：原生记录按原生终值
+/// 规则选取，与导入顺序无关）；观察时间只在**同优先级**内区分。
+///
+/// 同优先级内的收敛规则与全局去重（`dedupe.rs`）一致，**与到达顺序无关**
+///（审阅 #14/#15）：
+/// - Claude / WorkBuddy（强身份）：更晚事件时间胜出（流式终值）；**相同
+///   时间**的不同内容候选取确定性代表——四桶总量更大者，总量并列取事件键
+///   更大者（原生键 = `native|app|路径|行序|指纹`，与去重层的
+///   `(source_path, line, 指纹)` 字典序同构）；
+/// - Codex（保守重播族）：**更早事件时间**胜出——同族（同 session/模型/
+///   四桶）的后到重播副本不得把已保存事件的完成时刻推后；相同时间取事件键
+///   更大者。
+///
+/// 两条规则都只依赖候选自身的稳定属性，重复采集、重启与全量/增量采集
+/// 收敛到同一事实；旧语义（同刻后到者覆盖）在增量采集下会随到达顺序翻转。
 fn classify_against(existing: &StoredEvent, w: &EventWrite) -> WriteClass {
     if content_equal(existing, w) {
         if w.precedence > existing.precedence {
@@ -2334,14 +2374,44 @@ fn classify_against(existing: &StoredEvent, w: &EventWrite) -> WriteClass {
         WriteClass::Update
     } else if existing.precedence > w.precedence {
         WriteClass::Conflict
-    } else if w.observed_at < existing.observed_at {
-        WriteClass::Stale
     } else {
-        WriteClass::Update
+        match w.ts.cmp(&existing.ts) {
+            std::cmp::Ordering::Equal => {
+                // 同刻：确定性代表胜出（总量大者优先，并列取事件键更大者）。
+                if same_instant_challenger_wins(existing, w) {
+                    WriteClass::Update
+                } else {
+                    WriteClass::Stale
+                }
+            }
+            // Codex 重播族：更早事件时间胜出；强身份（Claude/WB）：更晚胜出。
+            order if (order == std::cmp::Ordering::Less) == (w.app == AgentKind::Codex) => {
+                WriteClass::Update
+            }
+            _ => WriteClass::Stale,
+        }
     }
 }
 
-/// 库内同键日汇总快照的读取形态（含来源时区与批次归属，供诊断）。
+/// 同刻候选的胜负（内容已确认不同）：四桶总量更大者胜；总量并列时——
+/// 事件键相同 = **同一来源记录**在变化后的解析上下文（如换根重归属）下的
+/// 重新观察，挑战者胜出（键相同则行为恒定，幂等）；键不同取键更大者
+///（键是来源记录的稳定身份，比较结果与到达顺序无关）。
+fn same_instant_challenger_wins(existing: &StoredEvent, w: &EventWrite) -> bool {
+    let (w_total, e_total) = (w.tokens.total(), existing.tokens.total());
+    if w_total != e_total {
+        return w_total > e_total;
+    }
+    if w.event_key == existing.event_key {
+        return true;
+    }
+    w.event_key > existing.event_key
+}
+
+/// 库内同键日汇总快照的读取形态（含来源时区，供元数据修订）。
+///
+/// 批次归属不在此读取：内容未变的分支必须**原样保留**该行的 `import_run_id`，
+/// 没有批次关联的旧行也不会被补写（见 `write_rollups_in_tx`）。
 type RollupSnapshotRow = (
     i64,
     i64,
@@ -2351,12 +2421,12 @@ type RollupSnapshotRow = (
     String,
     Option<String>,
     String,
-    Option<i64>,
 );
 
 /// 日汇总快照写入：同键内容相同 → 跳过（仅来源时区假设不同时修订该元数据，
-/// 用量未变仍计未变化）；内容不同 → 按策略保留或替换（来源无可验证修订时
-/// 默认保留已存值并计冲突）。同键身份 = CCS 完整主键，**不含** `source_tz`。
+/// 用量未变仍计未变化；批次归属一律不动，旧行没有关联也不会被补写）；内容
+/// 不同 → 按策略保留或替换（替换时同一事务内重绑到本次批次；来源无可验证
+/// 修订时默认保留已存值并计冲突）。同键身份 = CCS 完整主键，**不含** `source_tz`。
 fn write_rollups_in_tx(
     tx: &Transaction<'_>,
     rollups: &[DailyRollupWrite],
@@ -2373,7 +2443,7 @@ fn write_rollups_in_tx(
         let existing: Option<RollupSnapshotRow> = tx
             .query_row(
                 "SELECT id, request_count, input_tokens, output_tokens, cache_write_tokens,
-                        cache_read_tokens, source_cost_usd, source_tz, import_run_id
+                        cache_read_tokens, source_cost_usd, source_tz
                  FROM ccs_daily_usage
                  WHERE logical_source = ?1 AND day = ?2 AND app = ?3
                    AND provider_id = ?4 AND model = ?5 AND request_model = ?6 AND pricing_model = ?7",
@@ -2396,7 +2466,6 @@ fn write_rollups_in_tx(
                         row.get(5)?,
                         row.get(6)?,
                         row.get(7)?,
-                        row.get(8)?,
                     ))
                 },
             )
@@ -2433,7 +2502,7 @@ fn write_rollups_in_tx(
                 summary.inserted += 1;
                 changed = true;
             }
-            Some((id, count, i, o, cw, cr, cost, existing_tz, _run)) => {
+            Some((id, count, i, o, cw, cr, cost, existing_tz)) => {
                 let same = count == r.request_count as i64
                     && i == r.tokens.input.to_string()
                     && o == r.tokens.output.to_string()
@@ -2450,13 +2519,24 @@ fn write_rollups_in_tx(
                         )?;
                         changed = true;
                     }
+                    // 2026-11-07：内容未变时**不**补写 `import_run_id`，即使该行
+                    // 还没有批次关联（v1 迁移或早期导入遗留）。重读同一数值只
+                    // 证明"此刻来源仍写着这个数"，不证明这份快照在本次读取时
+                    // 建立——旧覆盖边界仍无法确认，绑定只会把它当成新版可信边界
+                    // （边界随之后移，两次导入之间到达的原生请求被静默吞掉，
+                    // 不确定性的披露同时消失）。内容真的变了才会走下面的重绑。
                     summary.unchanged += 1;
                 } else if r.revision > 0 || policy == RollupConflictPolicy::TakeSource {
+                    // 2026-11-05（第四轮）：内容被替换 = 本批次读到的是**新快照**，
+                    // 必须在同一事务里把该行重新绑定到本次批次——否则它仍指向第一次
+                    // 导入的时刻，覆盖边界停留在旧快照，已含于新汇总的请求会被再算
+                    // 一次（实测 1,200 的汇总 + 200 明细 = 1,400）。内容未变的分支
+                    // 不这么做：那时边界必须保持旧时刻，才不会吞掉批次之间新增的请求。
                     tx.execute(
                         "UPDATE ccs_daily_usage SET request_count = ?2, input_tokens = ?3,
                             output_tokens = ?4, cache_write_tokens = ?5, cache_read_tokens = ?6,
                             input_semantics = ?7, source_cost_usd = ?8, revision = ?9,
-                            source_tz = ?10
+                            source_tz = ?10, import_run_id = ?11
                          WHERE id = ?1",
                         params![
                             id,
@@ -2469,6 +2549,7 @@ fn write_rollups_in_tx(
                             r.source_cost_usd.map(|v| v.to_string()),
                             r.revision,
                             r.source_tz,
+                            run_id,
                         ],
                     )?;
                     summary.replaced += 1;
@@ -2945,6 +3026,48 @@ fn load_event(conn: &Connection, id: i64) -> Result<Option<StoredEvent>> {
             row_to_stored_event,
         )
         .optional()?)
+}
+
+/// 日汇总行映射（快照与管理读接口共用）：列序与
+/// [`ReadSnapshot::rollups`] 的 SELECT 一一对应——前 15 列为 CCS 快照字段，
+/// 第 16 列为导入批次时刻（`LEFT JOIN import_runs`，可空）。
+fn row_to_stored_rollup(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRollup> {
+    let raw_app: String = r.get(3)?;
+    let app = parse_agent(&raw_app).map_err(|e| conversion_error(3, e))?;
+    Ok(StoredRollup {
+        logical_source: r.get(0)?,
+        day: r.get(1)?,
+        source_tz: r.get(2)?,
+        app,
+        provider_id: r.get(4)?,
+        model: r.get(5)?,
+        request_model: r.get(6)?,
+        pricing_model: r.get(7)?,
+        request_count: r.get::<_, i64>(8)?.max(0) as u64,
+        tokens: TokenCounts {
+            input: u64_from_row(r, 9)?,
+            output: u64_from_row(r, 10)?,
+            cache_write: u64_from_row(r, 11)?,
+            cache_read: u64_from_row(r, 12)?,
+            // CCS 日汇总没有 5m/1h 分项：按分项未知处理。
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
+        },
+        input_semantics: r.get(13)?,
+        source_cost_usd: r
+            .get::<_, Option<String>>(14)?
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite()),
+        // 2026-11-05（第四轮）：批次修订 >= 2 才代表"快照建立时刻"语义。
+        boundary_known: r
+            .get::<_, Option<i64>>(16)?
+            .is_some_and(|rev| rev >= crate::import::ccs::IMPORT_RUN_REVISION_SNAPSHOT_BOUNDARY),
+        // 解析失败按"无导入时刻"处理：不据此推断覆盖关系（保守）。
+        import_at: r
+            .get::<_, Option<String>>(15)?
+            .and_then(|s| s.trim().parse::<jiff::Timestamp>().ok()),
+    })
 }
 
 fn row_to_stored_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredEvent> {

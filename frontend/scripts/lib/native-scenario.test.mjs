@@ -3,6 +3,7 @@
 // 返回、失败取证永不返回、正常路径解除计时器、超时后迟到分支不重启、attach 不终止
 // 外部进程；至少一条用 Node 子进程跑共用收尾入口（父测试设上限，断言磁盘证据与非零退出）。
 import { spawnSync } from "node:child_process";
+import { readAppLogTail } from "./native-scenario.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -479,5 +480,54 @@ describe("waitStableQuery（PR3 补修复核：未稳定不得放行）", () => 
   it("汇总与明细不一致：不当作稳定基线", async () => {
     const error = await waitStableQuery(replay([q("q2", "q1")])).catch((e) => e);
     expect(error.kind).toBe("query-unstable");
+  });
+});
+
+describe("启动失败取证：应用日志尾部（2026-11-05）", () => {
+  const root = path.join(os.tmpdir(), "tokenscope-scenario-logs");
+
+  function fsStub({ files = [], bodies = {}, mtimes = {} } = {}) {
+    return {
+      readdirSync: () => files.map((f) => path.basename(f)),
+      statSync: (full) => ({ mtimeMs: mtimes[path.basename(full)] ?? 0 }),
+      readFileSync: (full) => bodies[path.basename(full)] ?? "",
+    };
+  }
+
+  it("目录不存在时返回 null，不伪造日志", () => {
+    expect(
+      readAppLogTail(root, {
+        readdirSync: () => {
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it("只取最新一份日志并按上限截断", () => {
+    const older = path.join(root, "tokenscope", "logs", "2026-11-05.log");
+    const newer = path.join(root, "tokenscope", "logs", "2026-11-06.log");
+    const long = Array.from({ length: 300 }, (_, i) => `第 ${i} 行`).join("\n");
+    const tail = readAppLogTail(root, {
+      maxLines: 5,
+      ...fsStub({
+        files: [older, newer],
+        bodies: { "2026-11-05.log": "旧日志", "2026-11-06.log": long },
+        mtimes: { "2026-11-05.log": 1, "2026-11-06.log": 2 },
+      }),
+    });
+    expect(tail).toContain("2026-11-06.log");
+    expect(tail, "最新一份的最后一行保留").toContain("第 299 行");
+    expect(tail, "行数上限生效").not.toContain("第 294 行");
+  });
+
+  it("读取失败给出原因而不是抛错", () => {
+    const tail = readAppLogTail(root, {
+      ...fsStub({ files: [path.join(root, "tokenscope", "logs", "a.log")] }),
+      readFileSync: () => {
+        throw new Error("EBUSY");
+      },
+    });
+    expect(tail).toContain("读取应用日志失败");
   });
 });

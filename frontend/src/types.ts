@@ -33,11 +33,32 @@ export interface SourceStat {
 export interface RollupCoverage {
   detail_buckets: number;
   rollup_buckets: number;
+  /**
+   * 2026-11-05：汇总吸收了快照范围内明细、已用日汇总作为该范围总量的桶数
+   * （明细仍可查看，不重复计入）。
+   */
+  covered_buckets?: number;
+  /** 上述被汇总替代的**快照范围内**明细 token（不重复计入总量，仅作解释）。 */
+  covered_detail_tokens?: TokenCounts;
+  /**
+   * 快照范围内明细超过汇总声称数量的桶数（汇总装不下 → 按明细统计并提示）。
+   */
   unresolved_buckets: number;
   unresolved_covered_tokens: TokenCounts;
   timezone_mismatch?: string | null;
   /** U01：时刻范围（24h/自定义到分钟）不取日汇总——所涉自然日确有日汇总时为 true。 */
   rollups_excluded_for_instant_range?: boolean;
+  /**
+   * 2026-11-05：同桶汇总来自不同时刻导入的批次时的披露（覆盖边界取最早快照
+   * 时刻；落在批次之间的明细已按明细计入，可能与较晚批次重复）。
+   */
+  multi_batch_boundary?: string | null;
+  /**
+   * 2026-11-05：日汇总**没有可核对的来源快照时刻**时的披露——旧版导入
+   * （批次时间是读取结束后生成的）或该行没有导入批次关联；边界不可确认，
+   * 按整桶信任统计，快照之后的请求可能被少算。内容未变的重导不会消除它。
+   */
+  legacy_boundary?: string | null;
 }
 
 /**
@@ -92,6 +113,8 @@ export interface CcsImportPreview {
   source_day_timezone: string;
   history_generation: number;
   generated_at: string;
+  /** 来源快照建立时刻的下界：提交时写入导入批次，供日汇总覆盖判定使用。 */
+  snapshot_started_utc: string;
   expires_in_seconds: number;
   requests_total: number;
   requests_importable: number;

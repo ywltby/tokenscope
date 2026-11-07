@@ -138,10 +138,18 @@ pub struct RollupContribution {
 pub struct RollupCoverage {
     /// 明细覆盖的桶数。
     pub detail_buckets: u64,
-    /// 改用日汇总的桶数。
+    /// 改用日汇总的桶数（桶内没有明细）。
     pub rollup_buckets: u64,
-    /// 明细与日汇总同时存在、但**无法证明**汇总已被明细完整覆盖的桶数
-    /// （这些桶默认只统计明细，汇总不追加）。
+    /// 2026-11-05：明细请求数少于汇总请求数、已按日汇总作为该范围总量的桶数
+    /// （明细仍可查看，但不重复计入总量）。
+    #[serde(default)]
+    pub covered_buckets: u64,
+    /// 上述被汇总替代的明细 token（已计入统计的是汇总值；这些只是明细侧的
+    /// 观察量，用于向用户解释"明细看到了多少、为什么总量更大"）。
+    #[serde(default)]
+    pub covered_detail_tokens: TokenCounts,
+    /// 明细与日汇总同时存在、但**无法确认**汇总已被明细完整覆盖的桶数
+    /// （明细请求数不少于汇总或缺少导入时刻证据；这些桶按明细统计，汇总不追加）。
     pub unresolved_buckets: u64,
     /// 上述未解决桶里未纳入统计的汇总 token（如实披露缺口）。
     pub unresolved_covered_tokens: TokenCounts,
@@ -154,6 +162,23 @@ pub struct RollupCoverage {
     /// 只在确有日汇总时为 true：没有日粒度历史就不提示。界面文案由前端写。
     #[serde(default)]
     pub rollups_excluded_for_instant_range: bool,
+    /// 2026-11-05（第三轮）：同桶汇总来自不同时刻导入的多批快照时的披露。
+    ///
+    /// 覆盖边界只能取**最早**的来源快照时刻（晚于它的明细不可能全在最早那份
+    /// 快照里）；落在两批之间的明细已按明细计入，可能与较晚批次的汇总重复。
+    /// 数据上无法区分，只能如实披露（`None` = 没有这种桶）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_batch_boundary: Option<String>,
+    /// 2026-11-05（第四轮）：日汇总**没有可核对的来源快照时刻**时的披露——
+    /// 旧版批次（`import_revision = 1`，批次时间是读取结束后生成的），或该行
+    /// 没有导入批次关联（v1 迁移 / 早期导入遗留）。
+    ///
+    /// 这类批次的时间不能代表来源快照建立时刻，也无法事后判定；统计上按整桶
+    /// 信任口径处理（不拿旧时间做边界、不猜造历史），并如实说明可能少算。
+    /// 2026-11-07：重导内容完全相同的快照**不**为该行补写批次——重读同一数值
+    /// 不能证明快照在本次读取时建立，披露必须保留。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_boundary: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -202,6 +227,16 @@ pub fn aggregate_with_rollups(
     state.finish(pricing)
 }
 
+/// 已被日汇总替代的明细桶：`来源时区 → {(日, 应用, 等价模型) → 覆盖起点}`。
+///
+/// 2026-11-05（第二轮）：覆盖按"信任 CCS 日汇总"口径。`Some(since)` 表示
+/// 事件时间不晚于来源快照建立时刻的明细视为已含于汇总；`None` 表示该桶没有
+/// 可核对的快照时刻（旧库迁移遗留），整桶明细都按"可能已含于汇总"处理。
+type CoveredDetailMap = std::collections::HashMap<
+    String,
+    std::collections::HashMap<(String, String, String), Option<jiff::Timestamp>>,
+>;
+
 /// 增量聚合状态（H07）：事件与日汇总贡献**逐条喂入**，内存只随**分组数**
 /// 增长（不随事件数）——冻结查询因此可以流式汇总整份历史，不必先把所有事件
 /// 物化进内存。
@@ -211,6 +246,9 @@ pub struct AggregateState {
     map: BTreeMap<String, GroupAccum>,
     /// 出现过的来源应用（只有多应用数据才在分组里标注 agents）。
     agent_seen: Vec<&'static str>,
+    /// 2026-11-05：已被日汇总替代的明细桶。命中且不晚于覆盖起点的事件已计入
+    /// 汇总，聚合时跳过以避免重复；起点之后的请求照常计入。
+    covered: Option<CoveredDetailMap>,
 }
 
 impl AggregateState {
@@ -220,11 +258,57 @@ impl AggregateState {
             tz,
             map: BTreeMap::new(),
             agent_seen: Vec::new(),
+            covered: None,
         }
     }
 
-    /// 喂入一条明细事件。
+    /// 标记"明细已由日汇总替代"的桶（查询入口按覆盖判定结果一次性设置）。
+    ///
+    /// 这些桶里快照范围内的明细已经在汇总值中，不能重复累计；明细视图仍照常
+    /// 展示这些请求，只是不进入总量。
+    pub fn set_covered_detail(&mut self, buckets: &[crate::report::CoveredBucket]) {
+        if buckets.is_empty() {
+            return;
+        }
+        let mut map: CoveredDetailMap = std::collections::HashMap::new();
+        for b in buckets {
+            map.entry(b.source_tz.clone()).or_default().insert(
+                (
+                    b.day.clone(),
+                    b.app.as_str().to_string(),
+                    b.model_identity.clone(),
+                ),
+                b.since,
+            );
+        }
+        self.covered = Some(map);
+    }
+
+    /// 该事件是否已计入日汇总（同桶、且不晚于覆盖起点；起点缺失视为整桶覆盖）。
+    fn covered_by_rollup(&self, e: &UsageEvent) -> bool {
+        let Some(map) = &self.covered else {
+            return false;
+        };
+        let identity = ModelIdentity::parse(&e.model).identity_key();
+        for (tz_name, buckets) in map {
+            let Ok(tz) = TimeZone::get(tz_name) else {
+                continue;
+            };
+            let day = e.ts.to_zoned(tz).date().to_string();
+            if let Some(since) = buckets.get(&(day, e.agent.as_str().to_string(), identity.clone()))
+            {
+                return since.is_none_or(|at| e.ts <= at);
+            }
+        }
+        false
+    }
+
+    /// 喂入一条明细事件：落在已覆盖桶且不晚于覆盖起点的事件已计入日汇总，
+    /// 跳过以避免重复（明细视图不受影响）；起点之后的请求照常计入。
     pub fn push_event(&mut self, e: &UsageEvent, pricing: &Pricing) -> anyhow::Result<()> {
+        if self.covered_by_rollup(e) {
+            return Ok(());
+        }
         if !self.agent_seen.contains(&e.agent.as_str()) {
             self.agent_seen.push(e.agent.as_str());
         }

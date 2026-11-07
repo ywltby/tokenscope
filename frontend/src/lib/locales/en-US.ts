@@ -102,6 +102,8 @@ const enUS: AppMessages = {
     collectDiag: "This round had partial issues ({summary}); collected data remains valid.",
     instantRangeHint:
       "The current range is minute-precise and counts requests only, excluding day-granularity history.",
+    rollupCovered:
+      "Details in {count} day/model buckets were replaced by the CCS daily rollup ({tokens} tokens not double-counted). Those details are not necessarily all included in that rollup: reading the source database only proves it was available, not that the rollup covers every earlier session. Request details remain available for cross-checking.",
     tzMismatch: "{sourceTz}",
     detailOnlyOnly:
       "Counting requests only (day-granularity history excluded); the day view is unaffected by source time zones.",
@@ -272,7 +274,7 @@ const enUS: AppMessages = {
     rebuildDone:
       "Logs re-scanned (re-parsed under the current source config; saved usage is unaffected)",
     ccsHelp:
-      "One-time manual import of cc-switch history (requests + daily rollups): the source database is opened {readonly} only after you click; no automatic sync and no retries. The result is merged into TokenScope history with deduplication; importing twice never double-counts.",
+      "One-time manual import of cc-switch Claude Code history (requests + daily rollups): the source database is opened {readonly} only after you click; no automatic sync and no retries. The result is merged into TokenScope history with deduplication; importing twice never double-counts. Other apps (Codex, WorkBuddy, ...) use TokenScope's own collection and saved native history, not CCS.",
     readonly: "read-only",
     ccsFound: "Default path found",
     ccsNotFound: "Default path not found (you can pick another copy)",
@@ -330,7 +332,7 @@ const enUS: AppMessages = {
     ccsDelta: "Expected changes",
     ccsDeltaDetail:
       'Insert {insert}, update {update}, unchanged {unchanged}, conflicts keeping existing values {conflict}, stale skipped {stale} (a later observation already exists in the DB); net new tokens {netTokens}. {withoutProject} records without project attribution (shown as "Unknown" in the project view).',
-    ccsUnsupported: "Unsupported apps: {list}.",
+    ccsUnsupported: "Apps not imported from CCS: {list} (TokenScope's own collection is used).",
     ccsRejected: "Rejection reasons: {list}.",
     ccsTakeSourceHelp:
       "Some source records conflict with stored values: by default TokenScope keeps its saved values (never silently overwriting newer data). Enable this to use the source snapshot for this batch.",

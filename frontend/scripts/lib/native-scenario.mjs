@@ -16,6 +16,8 @@
 //     当前这一次有界同步调用（30 秒）。
 
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
 /** 单次同步子进程上限（计划 §9.1 第 2 条）。 */
 export const SYNC_COMMAND_TIMEOUT_MS = 30000;
@@ -363,4 +365,55 @@ export async function waitStableQuery({
     }
     await sleep(intervalMs);
   }
+}
+
+/**
+ * 读取隔离根内应用日志的最新一份尾部（启动失败取证用）。
+ *
+ * 2026-11-05：应用把日志写进 `<root>/tokenscope/logs/`，宿主 stdout 可能完全
+ * 为空；启动阶段失败（例如 WebView2 没产生页面 target）时若不抓这份日志，
+ * 证据里只剩"没有页面 target"，无法判断是环境冷启动还是产品缺陷。
+ *
+ * 只读最新一份 `.log`，行数与字符数都有上限；目录/文件不存在返回 null。
+ */
+export function readAppLogTail(
+  root,
+  {
+    maxLines = 120,
+    maxChars = 8000,
+    readdirSync = fs.readdirSync,
+    statSync = fs.statSync,
+    readFileSync = fs.readFileSync,
+  } = {},
+) {
+  const logs = path.join(String(root ?? ""), "tokenscope", "logs");
+  let names;
+  try {
+    names = readdirSync(logs).filter((n) => String(n).toLowerCase().endsWith(".log"));
+  } catch {
+    return null;
+  }
+  if (names.length === 0) return null;
+  const newest = names
+    .map((name) => {
+      const full = path.join(logs, name);
+      try {
+        return { full, name, mtimeMs: Number(statSync(full).mtimeMs) || 0 };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)[0];
+  if (!newest) return null;
+  let text;
+  try {
+    text = String(readFileSync(newest.full, "utf8"));
+  } catch (e) {
+    return `读取应用日志失败：${String(e?.message ?? e)}`;
+  }
+  const lines = text.split(/\r?\n/);
+  let body = lines.slice(Math.max(0, lines.length - maxLines)).join("\n");
+  if (body.length > maxChars) body = `…${body.slice(body.length - maxChars)}`;
+  return `# ${newest.name}\n${body}`;
 }

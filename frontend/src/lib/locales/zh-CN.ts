@@ -95,6 +95,8 @@ const zhCN = {
     sourcesProblem: "{count} 个来源异常，统计可能不完整。",
     collectDiag: "本轮采集存在部分问题（{summary}）；已采集数据仍有效。",
     instantRangeHint: "当前时间范围精确到时刻，只统计请求明细，不含只有日粒度的历史。",
+    rollupCovered:
+      "有 {count} 个日期/模型桶的明细已由 CCS 日汇总替代（{tokens} token 未重复计入）。这些明细不一定全部包含在该汇总里：读取时刻只能证明拿到过来源库，不能证明汇总已覆盖此前的全部会话；明细仍可在请求明细视图核对。",
     tzMismatch: "{sourceTz}",
     detailOnlyOnly: "当前只统计请求明细（不含只有日粒度的历史）；按日视图不受来源时区影响。",
     noticeCountSuffix: "（共 {count} 条通知）",
@@ -262,7 +264,7 @@ const zhCN = {
       "重置采集指纹并按当前来源配置重新扫描日志，可能需要一段时间（已保存的历史用量不会被删除）。",
     rebuildDone: "已重扫日志（按当前来源配置重新解析，已保存的历史用量不受影响）",
     ccsHelp:
-      "手动一次性导入 cc-switch 的历史用量（请求明细 + 日汇总）：只在点击后{readonly}打开来源库，不自动同步、不重试；导入结果与 TokenScope 已有历史去重求并集，重复导入不会重复计费。",
+      "手动一次性导入 cc-switch 的 Claude Code 历史用量（请求明细 + 日汇总）：只在点击后{readonly}打开来源库，不自动同步、不重试；导入结果与 TokenScope 已有历史去重求并集，重复导入不会重复计费。其他应用（Codex、WorkBuddy 等）以 TokenScope 自身采集与已保存的原生历史为准，不由 CCS 导入。",
     readonly: "只读",
     ccsFound: "默认路径已找到",
     ccsNotFound: "默认路径未找到（可改选其它副本）",
@@ -309,7 +311,7 @@ const zhCN = {
     ccsDelta: "预计变化",
     ccsDeltaDetail:
       "新增 {insert}、更新 {update}、已存在 {unchanged}、冲突保留现有值 {conflict}、过期跳过 {stale}（库内已有更晚观察的终值，已跳过）；净新增 token {netTokens}。无项目归属记录 {withoutProject} 条（项目视图显示为「未知」）。",
-    ccsUnsupported: "不支持的应用：{list}。",
+    ccsUnsupported: "不由 CCS 导入的应用：{list}（以 TokenScope 自身采集为准）。",
     ccsRejected: "拒绝原因：{list}。",
     ccsTakeSourceHelp:
       "存在与已存值冲突的来源记录：默认保留 TokenScope 已保存的值（不静默覆盖较新数据）。勾选后本批次改用来源快照。",

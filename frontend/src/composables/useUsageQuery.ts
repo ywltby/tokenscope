@@ -813,25 +813,40 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   // R08（Task 8）：采集诊断——空结果/部分结果都必须可见，不依赖表格挂载。
   // 分开命名：warnings（重叠/缓存降级等）、坏行、IO 错误——不声称所有
   // warning 都表示丢数据；干净空区间不误报。
+  //
+  // 2026-11-05：只有日粒度的历史（CCS 汇总）是**统计口径**选择，不是采集
+  // 问题——它的费用未知由明细/费用列与独立通知披露，不再计入「本轮采集存在
+  // 部分问题」；真实未解决的覆盖（无法确认是否已覆盖）仍作为 warning 出现。
   const collectionDiagnostics = computed(() => {
     // H06：日汇总的时区不匹配是「当前视图看不到这部分历史」的可恢复提示，
     // 由通知列表单独成条（不计入采集警告计数，免得把时区提示说成采集问题）。
     const warns = [...(report.value?.warnings ?? [])];
     const timezoneMismatch = report.value?.rollup_coverage?.timezone_mismatch ?? null;
+    // 2026-11-05：同桶汇总来自不同时刻导入的批次——覆盖边界只能取最早快照时刻，
+    // 落在批次之间的明细已按明细计入，可能与较晚批次重复（后端给文案）。
+    const multiBatchBoundary = report.value?.rollup_coverage?.multi_batch_boundary ?? null;
+    // 2026-11-05：旧版导入的批次时间语义不同、无法当可靠边界 → 后端给披露文案。
+    const legacyBoundary = report.value?.rollup_coverage?.legacy_boundary ?? null;
     const instantOnly = report.value?.rollup_coverage?.rollups_excluded_for_instant_range === true;
     const statsList = report.value?.sources.map((s) => s.stats) ?? [];
     const ioErrors = statsList.reduce((a, st) => a + (st.io_errors ?? 0), 0);
     const badLines = statsList.reduce((a, st) => a + (st.bad_lines ?? 0), 0);
     // H06：含只有日粒度的历史时，费用按「未知」披露（不是模型未收录）。
     const rollupOnly = report.value?.totals.unknown_reason === "rollup_only";
-    const clean = warns.length === 0 && ioErrors === 0 && badLines === 0 && !rollupOnly;
+    // 已按规则用汇总覆盖部分明细的桶：统计口径已处理完（不算采集问题），但
+    // "汇总是否真的包含这些明细"无法逐请求证实——按披露要求给出规模。
+    const covered = report.value?.rollup_coverage?.covered_buckets ?? 0;
+    const coveredTokens = (() => {
+      const t = report.value?.rollup_coverage?.covered_detail_tokens;
+      return t ? t.input + t.output + t.cache_write + t.cache_read : 0;
+    })();
+    const clean = warns.length === 0 && ioErrors === 0 && badLines === 0;
     const summaryText = clean
       ? null
       : [
           warns.length > 0 ? t("status.warnCount", { count: warns.length }) : null,
           ioErrors > 0 ? t("status.ioErrorCount", { count: ioErrors }) : null,
           badLines > 0 ? t("status.badLineCount", { count: badLines }) : null,
-          rollupOnly ? t("dashboard.rollupOnly") : null,
         ]
           .filter(Boolean)
           .join(t("dashboard.listJoin"));
@@ -842,7 +857,11 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       ioErrors,
       badLines,
       rollupOnly,
+      covered,
+      coveredTokens,
       timezoneMismatch,
+      multiBatchBoundary,
+      legacyBoundary,
       instantOnly,
     };
   });
@@ -940,6 +959,39 @@ export function useUsageQuery(opts: UsageQueryOptions) {
         severity: "warning",
         text: instantRangeHint.value,
         actions: [],
+      });
+    }
+    if (rollupsMode.value === "auto" && collectionDiagnostics.value.covered > 0) {
+      list.push({
+        id: "rollup-covered",
+        severity: "info",
+        text: t("dashboard.rollupCovered", {
+          count: collectionDiagnostics.value.covered,
+          tokens: collectionDiagnostics.value.coveredTokens,
+        }),
+        actions: [
+          { label: t("dashboard.detailOnlyToggle"), run: () => setRollupsMode("detail_only") },
+        ],
+      });
+    }
+    if (rollupsMode.value === "auto" && collectionDiagnostics.value.legacyBoundary) {
+      list.push({
+        id: "rollup-legacy-boundary",
+        severity: "warning",
+        text: collectionDiagnostics.value.legacyBoundary,
+        actions: [
+          { label: t("dashboard.detailOnlyToggle"), run: () => setRollupsMode("detail_only") },
+        ],
+      });
+    }
+    if (rollupsMode.value === "auto" && collectionDiagnostics.value.multiBatchBoundary) {
+      list.push({
+        id: "rollup-multi-batch",
+        severity: "warning",
+        text: collectionDiagnostics.value.multiBatchBoundary,
+        actions: [
+          { label: t("dashboard.detailOnlyToggle"), run: () => setRollupsMode("detail_only") },
+        ],
       });
     }
     if (rollupsMode.value === "auto" && collectionDiagnostics.value.timezoneMismatch) {

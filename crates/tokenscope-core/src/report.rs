@@ -636,7 +636,11 @@ static COLLECT_SERIAL: Mutex<()> = Mutex::new(());
 /// v4（N18）：解析 Claude `cache_creation` 的 5 分钟 / 1 小时写入分项——
 /// v3 及更早登记的指纹（`3|…`）代表"未读取分项"的旧解析结果，必须失配
 /// 重解析一次才能给同一事件补齐分档（源日志未变也不得跳过）。
-pub const PARSE_RULES_REVISION: u32 = 4;
+/// v5（2026-11-05）：同刻候选收敛与重播时间不后移——旧库把"同刻后到者/
+/// 更晚重播者"保存为终值，来源仍在的文件重解析后按新判定幂等收敛到
+/// 确定性代表（Claude 强身份）或最早完成时刻（Codex 重播族）；来源已
+/// 删除的事实保留原值（不猜造）。
+pub const PARSE_RULES_REVISION: u32 = 5;
 /// 观测：当前正在跑的采集管线数与历史峰值（测试断言"不同参数不并行"）。
 static COLLECT_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 static COLLECT_MAX_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
@@ -2047,27 +2051,106 @@ impl TimeBounds {
 ///
 /// 流式构建：内存只随**不同桶数**增长（而不是事件数），因此判定"某个日汇总桶
 /// 是否已被明细覆盖"不需要把历史读进内存。
-pub(crate) type DetailBuckets =
-    std::collections::HashMap<String, std::collections::HashSet<(String, String, String)>>;
+///
+/// 2026-11-05：每个桶保留**请求数与四桶合计**——只判断"是否存在明细"无法
+/// 区分"明细完整"与"明细只有一部分"，覆盖判定需要请求数这个可核对的证据。
+pub(crate) type DetailBuckets = std::collections::HashMap<
+    String,
+    std::collections::HashMap<(String, String, String), DetailBucketStat>,
+>;
+
+/// 单个明细桶的可核对统计（只累加，不回读事件）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DetailBucketStat {
+    pub requests: u64,
+    pub tokens: crate::model::TokenCounts,
+    /// **快照范围内**的明细：事件时间不晚于该桶覆盖起点（来源快照建立时刻）
+    /// 的请求数与四桶合计。起点缺失时整桶明细都算快照内（信任 CCS 汇总口径，
+    /// 见 §5.1）——这类明细视为可能已包含在日汇总中。
+    pub snapshot_requests: u64,
+    pub snapshot_tokens: crate::model::TokenCounts,
+}
+
+/// 每桶覆盖起点的累积。
+#[derive(Debug, Clone, Copy, Default)]
+struct BucketStart {
+    /// 该桶**可确认**的来源快照建立时刻中最早的一个。
+    since: Option<jiff::Timestamp>,
+    /// 该桶存在无法确认边界的汇总行（v0.7.0 旧语义批次、缺批次关联或时刻）。
+    /// 一旦为真，整桶边界不可确认：不拿旧时间做判定（不猜造历史）。
+    unknown: bool,
+}
+
+/// 每桶覆盖起点：`来源时区 → {(日, 应用, 等价模型) → 起点累积}`。
+type RollupStarts = std::collections::HashMap<
+    String,
+    std::collections::HashMap<(String, String, String), BucketStart>,
+>;
 
 pub(crate) fn collect_detail_buckets(
     read: &crate::history::ReadSnapshot,
     app: Option<AgentKind>,
-    source_tzs: &[String],
+    rollups: &[crate::history::StoredRollup],
 ) -> Result<DetailBuckets> {
+    // 每桶的覆盖起点 = 该桶全部汇总行中**最早**的来源快照建立时刻：单行时就是
+    // 该行自己的快照时刻；多行（不同批次）时只有"早于最早快照"的明细可以确定
+    // 已被所有行看到。取最晚会把落在两批快照之间的请求整桶吞掉——它们不在
+    // 先建立的那份快照里，因此必须按明细计入（可能与较晚批次重复，另行披露）。
+    // 同桶多行都取不到时刻（旧库迁移遗留）→ 起点缺失，整桶明细都算快照内。
+    let mut starts: RollupStarts = std::collections::HashMap::new();
+    for r in rollups {
+        let identity = crate::model_identity::ModelIdentity::parse(&r.model).identity_key();
+        let entry = starts
+            .entry(r.source_tz.clone())
+            .or_default()
+            .entry((r.day.clone(), r.app.as_str().to_string(), identity))
+            .or_default();
+        match (r.boundary_known, r.import_at) {
+            (true, Some(at)) => entry.since = Some(entry.since.map_or(at, |cur| cur.min(at))),
+            // 旧版批次（读取完成后才写 started_utc）或缺时刻：边界不可确认。
+            _ => entry.unknown = true,
+        }
+    }
     let mut out: DetailBuckets = std::collections::HashMap::new();
-    for tz_name in source_tzs {
-        let Ok(source_tz) = jiff::tz::TimeZone::get(tz_name) else {
+    for (tz_name, starts_for_tz) in starts {
+        let Ok(source_tz) = jiff::tz::TimeZone::get(&tz_name) else {
             continue;
         };
         let entry = out.entry(tz_name.clone()).or_default();
         read.for_each_chunk(app, 4096, &mut |events| {
             for e in events {
-                entry.insert((
+                let key = (
                     e.ts.to_zoned(source_tz.clone()).date().to_string(),
                     e.app.as_str().to_string(),
                     crate::model_identity::ModelIdentity::parse(&e.model_raw).identity_key(),
-                ));
+                );
+                let stat = entry.entry(key.clone()).or_default();
+                // SF08：聚合口径全链路受检——桶统计同样不回绕、不饱和。
+                stat.requests = stat
+                    .requests
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("明细桶请求数累计超出可表示范围"))?;
+                stat.tokens = stat
+                    .tokens
+                    .checked_add(&e.tokens)
+                    .ok_or_else(|| anyhow::anyhow!("明细桶 token 累计超出可表示范围"))?;
+                // 快照内 = 事件时间不晚于覆盖起点；边界不可确认时整桶按快照内
+                // 处理（信任汇总、不重复计入，并另行披露可能的少算）。
+                let in_snapshot = match starts_for_tz.get(&key) {
+                    None => false,
+                    Some(start) if start.unknown => true,
+                    Some(start) => start.since.is_none_or(|at| e.ts <= at),
+                };
+                if in_snapshot {
+                    stat.snapshot_requests = stat
+                        .snapshot_requests
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!("明细桶快照内请求数累计超出可表示范围"))?;
+                    stat.snapshot_tokens = stat
+                        .snapshot_tokens
+                        .checked_add(&e.tokens)
+                        .ok_or_else(|| anyhow::anyhow!("明细桶快照内 token 累计超出可表示范围"))?;
+                }
             }
             Ok(())
         })?;
@@ -2076,12 +2159,18 @@ pub(crate) fn collect_detail_buckets(
 }
 
 /// H06：日汇总桶的统计来源策略。
+///
+/// 2026-11-05：两条分支合并为同一套**来源证据**判定——"整桶替换为汇总"会
+/// 丢掉不在 CCS 汇总里的纯原生请求（漏算），因此不再作为可选行为；枚举保留
+/// 以兼容既有调用方与前端参数映射。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RollupBucketPolicy {
-    /// 默认：桶内有明细就只统计明细（无法证明汇总被明细完整覆盖时不追加汇总）。
+    /// 默认（当前唯一行为）：桶内没有明细时用汇总；带 `ccs_request` 证据的
+    /// 明细请求数少于汇总请求数时以汇总为该范围总量，纯原生明细照常计入；
+    /// 无法确认时保留明细并提示。
     #[default]
     PreferDetail,
-    /// 用户在本轮明确选择"以 CCS 日汇总为准"：命中桶整桶替换为汇总值。
+    /// 保留取值以兼容旧参数；判定与 [`Self::PreferDetail`] 相同。
     PreferRollup,
 }
 
@@ -2091,6 +2180,25 @@ pub struct RollupSelection {
     pub(crate) contributions: Vec<crate::aggregate::RollupContribution>,
     pub(crate) coverage: crate::aggregate::RollupCoverage,
     pub(crate) warnings: Vec<String>,
+    /// 2026-11-05：明细被日汇总替代的桶。
+    ///
+    /// 聚合时只跳过这些桶内**带 CCS 来源证据**的明细事件（它们已计入汇总，
+    /// 不能再加一次）；纯原生明细与明细视图都不受影响。
+    pub(crate) covered_detail: Vec<CoveredBucket>,
+}
+
+/// 一个被日汇总替代的明细桶（来源时区下的 `(日, 应用, 等价模型)`）。
+///
+/// 覆盖按"信任 CCS 日汇总"的口径执行：`since`（来源快照建立时刻）之前的
+/// 明细视为可能已含于汇总、不重复计入；之后的请求照常计入。`since = None`
+/// 表示该桶没有任何带批次时刻的汇总行（旧库迁移遗留），整桶明细按快照内处理。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoveredBucket {
+    pub source_tz: String,
+    pub day: String,
+    pub app: AgentKind,
+    pub model_identity: String,
+    pub since: Option<jiff::Timestamp>,
 }
 
 /// H06/H08：日粒度历史的参与方式。
@@ -2132,11 +2240,15 @@ fn rollup_in_bounds(r: &crate::history::StoredRollup, bounds: &TimeBounds) -> bo
 
 /// H06：按 `(CCS 原始统计日, 来源时区, 应用, 等价模型)` 桶决定统计来源。
 ///
-/// 规则（计划 §5.3）：
+/// 规则（2026-11-05 定稿，见 `docs/stats-semantics.md` §5.1）：
 /// - 桶内**没有**请求明细 → 使用已去重的日汇总（计入统计，费用未知）；
-/// - 桶内**有**请求明细 → 默认只统计明细；同时存在日汇总时记为「未解决覆盖」
-///   （仅总量相等不足以证明覆盖，不追加、不按差额造"剩余请求"）；
-/// - 用户显式选择以汇总为准时，命中桶整桶替换为汇总值；
+/// - 桶内**带 `ccs_request` origin 的明细请求数** 少于整桶汇总请求数 → 汇总
+///   声称的请求比掌握来源证据的多，**汇总作为该范围总量**；带证据的明细不
+///   重复计入（`covered_detail` 供聚合跳过），纯原生明细与明细视图不受影响；
+/// - 带证据的明细请求数不少于汇总 → 无法确认覆盖关系：保留明细统计，汇总
+///   不追加，也不按差额造"剩余请求"，在报告中如实提示；
+/// - 覆盖判定**不使用**时间戳或"明细总数"作证明：快照之后新增的请求、恰好
+///   同数的不同请求集，都曾因此被误判（前者漏算、后者丢失汇总）；
 /// - 按日筛选/分组而查询时区 ≠ 来源日时区时，日汇总**不参与**（返回可恢复
 ///   提示：切回来源时区或只看请求明细），绝不把来源日期当作午夜事件重切；
 /// - U01：时刻范围（滚动 24h / 自定义到分钟）**一律不选取**日汇总桶（日粒度
@@ -2153,15 +2265,19 @@ pub(crate) fn select_rollup_contributions(
     policy: RollupBucketPolicy,
     bounds: &TimeBounds,
     mode: RollupsMode,
-) -> RollupSelection {
+) -> Result<RollupSelection> {
+    // 2026-11-05：策略枚举保留给调用方，但两条分支现在都是同一套证据判定
+    // ——"整桶替换为汇总"会丢掉不在 CCS 汇总里的纯原生请求（漏算），不再提供。
+    let _ = policy;
     let mut selection = RollupSelection {
         contributions: Vec::new(),
         coverage: crate::aggregate::RollupCoverage::default(),
         warnings: Vec::new(),
+        covered_detail: Vec::new(),
     };
     if rollups.is_empty() || mode == RollupsMode::DetailOnly {
         // 仅明细模式：用户显式要求不看日粒度历史（不报"缺失"，这是他的选择）。
-        return selection;
+        return Ok(selection);
     }
     // U01：时刻范围（滚动 24h / 自定义到分钟）不选取任何日汇总桶——区间语义
     // 精确到分钟，日粒度历史无法对齐，也**不按比例估算**。只有粒度的历史
@@ -2177,9 +2293,31 @@ pub(crate) fn select_rollup_contributions(
                 .parse::<jiff::civil::Date>()
                 .is_ok_and(|day| day >= *covers_from && day <= *covers_to)
         });
-        return selection;
+        return Ok(selection);
     }
     let mut mismatched: Vec<String> = Vec::new();
+    // 2026-11-05：先按 `(日, 应用, 等价模型)` 归拢日汇总行。同一桶可能有多条
+    // （provider / request_model / pricing_model 不同），它们共同构成该桶的
+    // 汇总总量——覆盖判定必须用**整桶**请求数，逐行比较会把"明细只覆盖一个
+    // 分片"误判成"明细不完整"。
+    struct Bucket<'a> {
+        rows: Vec<&'a crate::history::StoredRollup>,
+        requests: u64,
+        tokens: crate::model::TokenCounts,
+        /// 覆盖起点 = 该桶全部汇总行中**最早**的来源快照建立时刻（`None` = 无
+        /// 任何行带批次时刻，无法划分快照内外 → 整桶明细都算快照内）。
+        since: Option<jiff::Timestamp>,
+        /// 该桶最晚的来源快照建立时刻：与 `since` 不同表示多批次边界，需披露。
+        since_latest: Option<jiff::Timestamp>,
+        /// 该桶存在边界不可确认的汇总行（旧版批次 / 缺时刻）→ 整桶边界置空。
+        boundary_unknown: bool,
+        source_tz: String,
+        day: String,
+        app: AgentKind,
+        model_identity: String,
+    }
+    let mut buckets: std::collections::BTreeMap<(String, String, String), Bucket<'_>> =
+        std::collections::BTreeMap::new();
     for r in rollups {
         // H08：主时间范围同样作用于日汇总——只按日粒度保存的历史也必须遵守
         // 用户选择的日期区间（早期实现让"只看 10 月 9 日"仍带出 6 月 1 日）。
@@ -2199,42 +2337,128 @@ pub(crate) fn select_rollup_contributions(
             }
             continue;
         }
-        let empty = std::collections::HashSet::new();
-        let buckets = detail_buckets.get(&r.source_tz).unwrap_or(&empty);
+        let model_identity = crate::model_identity::ModelIdentity::parse(&r.model).identity_key();
         let key = (
             r.day.clone(),
             r.app.as_str().to_string(),
-            crate::model_identity::ModelIdentity::parse(&r.model).identity_key(),
+            model_identity.clone(),
         );
-        let has_detail = buckets.contains(&key);
-        match (has_detail, policy) {
-            (true, RollupBucketPolicy::PreferDetail) => {
-                // 明细优先：汇总不追加，也不按差额造请求；缺口如实披露。
-                selection.coverage.detail_buckets += 1;
-                selection.coverage.unresolved_buckets += 1;
-                if let Some(t) = selection
-                    .coverage
-                    .unresolved_covered_tokens
-                    .checked_add(&r.tokens)
-                {
-                    selection.coverage.unresolved_covered_tokens = t;
-                }
+        let bucket = buckets.entry(key).or_insert_with(|| Bucket {
+            rows: Vec::new(),
+            requests: 0,
+            tokens: crate::model::TokenCounts::default(),
+            since: None,
+            since_latest: None,
+            boundary_unknown: false,
+            source_tz: r.source_tz.clone(),
+            day: r.day.clone(),
+            app: r.app,
+            model_identity,
+        });
+        bucket.rows.push(r);
+        bucket.requests = bucket
+            .requests
+            .checked_add(r.request_count)
+            .ok_or_else(|| anyhow::anyhow!("日汇总请求数累计超出可表示范围"))?;
+        bucket.tokens = bucket
+            .tokens
+            .checked_add(&r.tokens)
+            .ok_or_else(|| anyhow::anyhow!("日汇总 token 累计超出可表示范围"))?;
+        // 同桶多行（不同 provider / 不同批次）：覆盖起点取**最早**的来源快照
+        // 建立时刻——晚于它的明细可能不在先建立的快照里，按明细计入（不吞）；
+        // 同时记录最晚时刻，用于披露"批次之间可能与较晚汇总重复"。
+        match (r.boundary_known, r.import_at) {
+            (true, Some(at)) => {
+                bucket.since = Some(bucket.since.map_or(at, |cur| cur.min(at)));
+                bucket.since_latest = bucket
+                    .since_latest
+                    .map_or(Some(at), |cur| Some(cur.max(at)));
             }
-            _ => {
-                selection.coverage.rollup_buckets += 1;
-                selection
-                    .contributions
-                    .push(crate::aggregate::RollupContribution {
-                        day: r.day.clone(),
-                        source_tz: r.source_tz.clone(),
-                        app: r.app,
-                        model: r.model.clone(),
-                        tokens: r.tokens,
-                        requests: r.request_count,
-                        source_cost_usd: r.source_cost_usd,
-                        source: r.logical_source.clone(),
-                    });
+            // v0.7.0 旧语义批次（或缺失时刻）：边界不可确认，整桶不做时间判定。
+            _ => bucket.boundary_unknown = true,
+        }
+    }
+    // 同桶多批次（最早/最晚快照时刻不同）的桶数：边界只能取最早时刻，落在
+    // 批次之间的明细已按明细计入，可能与较晚批次重复——必须如实披露。
+    let mut multi_batch_buckets: u64 = 0;
+    // 没有可核对快照时刻的桶（旧语义批次 / 缺批次关联）无法确认边界：整桶信任并披露。
+    let mut legacy_boundary_buckets: u64 = 0;
+    for bucket in buckets.into_values() {
+        let empty: std::collections::HashMap<(String, String, String), DetailBucketStat> =
+            std::collections::HashMap::new();
+        let detail_map = detail_buckets.get(&bucket.source_tz).unwrap_or(&empty);
+        let detail = detail_map
+            .get(&(
+                bucket.day.clone(),
+                bucket.app.as_str().to_string(),
+                bucket.model_identity.clone(),
+            ))
+            .copied()
+            .unwrap_or_default();
+        if detail.requests == 0 {
+            // 桶内没有请求明细：直接用汇总（H06 既有行为）。
+            selection.coverage.rollup_buckets += 1;
+            push_rollup_rows(&mut selection, &bucket.rows);
+            continue;
+        }
+        // 2026-11-05（第三轮）：按用户约定**信任 CCS 日汇总**。以**来源快照
+        // 建立时刻**（`CcsSource::open` 时捕获的下界，经 `import_runs.started_utc`
+        // 落库）为界，把桶内明细分两类：
+        // - 快照内（事件时间 <= 起点）：可能已包含在汇总里。经 CCS 路由的请求
+        //   在 TS 侧往往只剩原生采集记录（没有 `ccs_request` 标记），与"确实
+        //   不在汇总里"无法区分——按信任口径视为已含于汇总，不重复计入；
+        // - 快照之后（事件时间 > 起点）：不可能在快照里（快照在更早时刻已固定）
+        //   → 独立新增，照常计入。
+        // 只有"快照内明细"能被汇总吸收：请求数与用量都不超过汇总时才采用汇总；
+        // 超过说明明细里有汇总装不下的请求 → 保留明细并如实提示（不猜造、
+        // 不相加）。起点缺失（旧库没有导入批次）时整桶明细都按快照内处理。
+        let within_counts = detail.snapshot_requests <= bucket.requests;
+        let within_tokens = detail.snapshot_tokens.input <= bucket.tokens.input
+            && detail.snapshot_tokens.output <= bucket.tokens.output
+            && detail.snapshot_tokens.cache_write <= bucket.tokens.cache_write
+            && detail.snapshot_tokens.cache_read <= bucket.tokens.cache_read;
+        // 边界不可确认（v0.7.0 旧语义批次）→ 有效起点为 None：整桶按"可能已含于
+        // 汇总"处理，不拿旧时间做判定，并另行披露可能的少算。
+        let effective_since = if bucket.boundary_unknown {
+            None
+        } else {
+            bucket.since
+        };
+        if within_counts && within_tokens {
+            selection.coverage.covered_buckets += 1;
+            if bucket.boundary_unknown {
+                legacy_boundary_buckets += 1;
             }
+            selection.coverage.covered_detail_tokens = selection
+                .coverage
+                .covered_detail_tokens
+                .checked_add(&detail.snapshot_tokens)
+                .ok_or_else(|| anyhow::anyhow!("被汇总替代的明细 token 累计超出可表示范围"))?;
+            // 同桶多批次：最早与最晚快照时刻不同 → 批次之间可能重复，需披露。
+            if !bucket.boundary_unknown
+                && let (Some(first), Some(latest)) = (bucket.since, bucket.since_latest)
+                && latest > first
+            {
+                multi_batch_buckets += 1;
+            }
+            push_rollup_rows(&mut selection, &bucket.rows);
+            selection.covered_detail.push(CoveredBucket {
+                source_tz: bucket.source_tz,
+                day: bucket.day,
+                app: bucket.app,
+                model_identity: bucket.model_identity,
+                since: effective_since,
+            });
+        } else {
+            // 快照内的明细比汇总声称的更多/更大：汇总无法吸收它们 → 保留明细
+            // 并如实提示（汇总未纳入），不删除事实、不把两者相加。
+            selection.coverage.detail_buckets += 1;
+            selection.coverage.unresolved_buckets += 1;
+            selection.coverage.unresolved_covered_tokens = selection
+                .coverage
+                .unresolved_covered_tokens
+                .checked_add(&bucket.tokens)
+                .ok_or_else(|| anyhow::anyhow!("未解决覆盖的汇总 token 累计超出可表示范围"))?;
         }
     }
     if !mismatched.is_empty() {
@@ -2245,15 +2469,50 @@ pub(crate) fn select_rollup_contributions(
              可切换展示时区到来源时区，或只看请求明细。"
         ));
     }
+    if legacy_boundary_buckets > 0 {
+        selection.coverage.legacy_boundary = Some(format!(
+            "有 {legacy_boundary_buckets} 个日期/模型桶的日汇总没有可核对的来源快照时刻\
+             （旧版导入的批次时间在读取结束后才生成，或该行没有导入批次关联）：这些桶按\
+             整桶信任口径统计，快照之后到达的请求可能被少算。来源汇总内容更新后重新导入\
+             会写入可核对的快照时刻；也可以对照请求明细核对这段区间。"
+        ));
+    }
+    if multi_batch_buckets > 0 {
+        // 多批次边界只能取最早快照时刻：落在批次之间的明细按明细计入了，可能
+        // 与较晚批次的汇总重复。这是数据上无法区分的固有歧义，必须如实披露。
+        selection.coverage.multi_batch_boundary = Some(format!(
+            "有 {multi_batch_buckets} 个日期/模型桶的日汇总来自不同时刻导入的批次：\
+             覆盖边界只能取最早的来源快照时刻，落在批次之间的明细已按明细计入，\
+             可能与较晚批次的汇总重复；这些桶请对照请求明细核对。"
+        ));
+    }
     if selection.coverage.unresolved_buckets > 0 {
         selection.warnings.push(format!(
-            "有 {} 个日期/模型桶同时存在请求明细与日汇总，且无法证明明细已完整覆盖汇总；\
-             这些桶按请求明细统计，未纳入的汇总共 {} token（不直接相加，避免重复计费）",
+            "有 {} 个日期/模型桶在来源快照范围内的明细超过了日汇总声称的数量，\
+             无法确认汇总能覆盖这些明细；这些桶按请求明细统计，汇总共 {} token 未纳入（不直接相加，避免重复计费）",
             selection.coverage.unresolved_buckets,
             selection.coverage.unresolved_covered_tokens.total()
         ));
     }
-    selection
+    Ok(selection)
+}
+
+/// 把一组日汇总行按原顺序转成聚合贡献。
+fn push_rollup_rows(selection: &mut RollupSelection, rows: &[&crate::history::StoredRollup]) {
+    for r in rows {
+        selection
+            .contributions
+            .push(crate::aggregate::RollupContribution {
+                day: r.day.clone(),
+                source_tz: r.source_tz.clone(),
+                app: r.app,
+                model: r.model.clone(),
+                tokens: r.tokens,
+                requests: r.request_count,
+                source_cost_usd: r.source_cost_usd,
+                source: r.logical_source.clone(),
+            });
+    }
 }
 
 /// H04：归一化事件 → 历史库写入形态。
@@ -2372,6 +2631,9 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
     let selection = snapshot.rollup_selection();
     let t_agg = std::time::Instant::now();
     let mut state = crate::aggregate::AggregateState::new(snapshot.by, snapshot.tz.clone());
+    // 2026-11-05（第二轮）：被日汇总替代的明细桶——只有**快照范围内**
+    // （不晚于来源快照建立时刻）的明细被跳过；起点之后的请求照常计入。
+    state.set_covered_detail(&selection.covered_detail);
     let pricing = snapshot.pricing().clone();
     snapshot.for_each_event(&mut |e| state.push_event(e, &pricing))?;
     for r in &selection.contributions {
@@ -4042,8 +4304,10 @@ cache_read = 0.0
             };
             collect_flighted_with(&o, &leader).unwrap();
         });
+        // 2026-11-05：握手超时从 5s 放宽到 30s——钩子/CI 在内存紧张的机器上
+        // 并行编译+测试时，领队线程可能几秒才拿到 CPU；真实死锁仍会超时。
         start_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(std::time::Duration::from_secs(30))
             .expect("领队必须先开始提交");
         assert_eq!(
             active_collection_submissions(),

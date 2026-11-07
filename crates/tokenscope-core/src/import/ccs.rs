@@ -44,6 +44,14 @@ use crate::model::{AgentKind, TokenCounts};
 /// 身份，换成同一库的备份再导入仍更新同一逻辑来源（计划 §5.3）。
 pub const CCS_LOGICAL_SOURCE: &str = "ccs";
 
+/// 导入批次语义版本：`import_runs.import_revision`。
+///
+/// - `1`（v0.7.0 及更早）：`started_utc` 是**预览读取完成之后**生成的时间，
+///   晚于来源一致读快照的建立时刻，不能当作覆盖边界（会吞掉读取窗口内到达
+///   的请求）。旧库里的这一批数据无法事后判定，按"边界不可确认"处理。
+/// - `2`（2026-11-05 起）：`started_utc` 是 `CcsSource::open` 在开启读事务
+///   **之前**捕获的下界，可作为日汇总覆盖判定的边界。
+pub const IMPORT_RUN_REVISION_SNAPSHOT_BOUNDARY: i64 = 2;
 /// CCS `input_token_semantics` 取值。
 pub const INPUT_TOKEN_SEMANTICS_LEGACY: i64 = 0;
 pub const INPUT_TOKEN_SEMANTICS_TOTAL: i64 = 1;
@@ -107,11 +115,20 @@ pub fn source_exists(path: &Path) -> bool {
 pub struct CcsSource {
     conn: Connection,
     path: PathBuf,
+    /// 来源一致读快照**建立之前**捕获的时刻（覆盖判定的边界）。
+    ///
+    /// 2026-11-05（第三轮）：`preview.generated_at` 在读完请求与日汇总之后才
+    /// 生成，晚于快照真正建立的时刻；用它当边界会把"快照建立之后才到达的
+    /// 请求"当成已含于汇总而静默排除。这里在开启读事务之前取时刻，是快照
+    /// 建立时刻的**下界**：此后发生的请求一律按新请求计入（宁可多计，不吞）。
+    snapshot_started_utc: Timestamp,
 }
 
 impl CcsSource {
     /// 只读打开（不写入、不复制整库，也不读取账户/密钥表）。
     pub fn open(path: &Path) -> Result<Self> {
+        // 先取时刻再建立读快照：边界必须是快照建立时刻的下界。
+        let snapshot_started_utc = Timestamp::now();
         #[cfg(feature = "acceptance")]
         crate::acceptance::record_path("ccs_open", path, serde_json::json!({}))?;
         let conn = Connection::open_with_flags(
@@ -129,11 +146,17 @@ impl CcsSource {
         Ok(Self {
             conn,
             path: path.to_path_buf(),
+            snapshot_started_utc,
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 来源快照建立时刻的下界（覆盖判定用它做边界，见结构体字段说明）。
+    pub fn snapshot_started_utc(&self) -> Timestamp {
+        self.snapshot_started_utc
     }
 
     /// 结构探测：返回版本、表与缺失列（只读，不修改来源）。
@@ -383,6 +406,11 @@ pub struct ImportPreview {
     /// 预览基于的历史库 generation；提交时不一致即要求重新预览。
     pub history_generation: u64,
     pub generated_at: String,
+    /// 来源一致读快照建立时刻的下界（`CcsSource::open` 时捕获）。
+    ///
+    /// 2026-11-05（第三轮）：提交时用它写 `import_runs.started_utc`——覆盖判定
+    /// 的边界必须是**快照建立时刻**，不是读完数据之后才生成的 `generated_at`。
+    pub snapshot_started_utc: String,
     pub expires_in_seconds: u64,
     pub requests_total: u64,
     pub requests_importable: u64,
@@ -507,6 +535,7 @@ pub fn preview_with_limits(
         source_day_timezone: source_day_timezone.to_string(),
         history_generation: history.generation()?,
         generated_at: Timestamp::now().to_string(),
+        snapshot_started_utc: source.snapshot_started_utc().to_string(),
         expires_in_seconds: PLAN_TTL.as_secs(),
         requests_total: requests.len() as u64,
         requests_importable: 0,
@@ -707,10 +736,13 @@ pub fn commit(
         logical_source: CCS_LOGICAL_SOURCE.to_string(),
         source_path: plan.preview.source_path.clone(),
         source_schema: plan.preview.source_schema.clone(),
-        started_utc: plan.preview.generated_at.clone(),
+        // 覆盖边界 = 来源快照建立时刻的下界（见 `CcsSource`），不是预览读完
+        // 数据之后才生成的 `generated_at`：后者会把快照建立之后到达的请求
+        // 当成已含于汇总而静默排除。
+        started_utc: plan.preview.snapshot_started_utc.clone(),
         status: "committed".to_string(),
         detail: None,
-        import_revision: 1,
+        import_revision: IMPORT_RUN_REVISION_SNAPSHOT_BOUNDARY,
     };
     // generation 在**事务内**再校验一次：预览之后、提交之前发生的任何采集或
     // 导入都会让整批拒绝（不拿过期预览插入重复请求）。
@@ -764,11 +796,15 @@ pub fn staged_plan_count() -> usize {
     plans().lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 
-/// `app_type` 映射：本期只支持 Claude 与 Codex（其他应用在预览列出但不导入）。
+/// `app_type` 映射：**只接受 Claude**（2026-11-05 用户口径）。
+///
+/// CCS 在本项目的用途是补充 Claude Code 被清理的会话历史；Codex、WorkBuddy 等
+/// 其他应用以 TokenScope 自身采集与已保存的原生历史为准，不再由 CCS 导入
+/// 影响（其他应用的行在预览里列出但不导入）。已导入的旧数据保留在库中，
+/// 只是不参与统计（查询层按来源纯度过滤）。
 fn map_app(app_type: &str) -> Option<AgentKind> {
     match app_type {
         "claude" => Some(AgentKind::ClaudeCode),
-        "codex" => Some(AgentKind::Codex),
         _ => None,
     }
 }
@@ -1234,10 +1270,39 @@ mod tests {
     #[test]
     fn app_mapping_is_explicit() {
         assert_eq!(map_app("claude"), Some(AgentKind::ClaudeCode));
-        assert_eq!(map_app("codex"), Some(AgentKind::Codex));
-        for other in ["gemini", "opencode", "grokbuild", "mcode", "pi", "unknown"] {
-            assert_eq!(map_app(other), None, "{other} 本期不导入");
+        // 2026-11-05：CCS 只补充 Claude Code；其他应用（含 Codex）不导入。
+        for other in [
+            "codex",
+            "gemini",
+            "opencode",
+            "grokbuild",
+            "mcode",
+            "pi",
+            "unknown",
+        ] {
+            assert_eq!(map_app(other), None, "{other} 不由 CCS 导入");
         }
+    }
+
+    #[test]
+    fn codex_session_alias_uses_real_buckets() {
+        // 2026-11-05：Codex 不再由 CCS 导入；已导入旧数据的保守重播身份仍按
+        // 会话行的**真实四桶**构造（proxy 行可能缺报缓存写）。这里直接验证
+        // 该构造——集成层已不经过这条路径。
+        let mut raw = base_request();
+        raw.app_type = "codex".into();
+        raw.model = "gpt-5.6-sol".into();
+        raw.session_id = Some("sess-1".into());
+        raw.input_tokens = 110;
+        raw.output_tokens = 30;
+        raw.cache_read_tokens = 10;
+        raw.cache_creation_tokens = 40;
+        raw.input_token_semantics = INPUT_TOKEN_SEMANTICS_FRESH;
+        raw.data_source = "codex_session".into();
+        let aliases = session_row_aliases(AgentKind::Codex, &raw);
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].0, "codex-usage");
+        assert_eq!(aliases[0].1, "sess-1|gpt-5.6-sol|110|30|40|10");
     }
 
     #[test]

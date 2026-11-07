@@ -606,15 +606,11 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
     // H06：日汇总桶选择在这里固定一次——按日筛选/分组且时区与来源时区不同时，
     // 日汇总不参与（返回可恢复提示），绝不把来源日期当午夜事件重切。
     // H07：明细桶集合由只读快照**流式**构建（内存随不同桶数增长，不随事件数）。
+    // 2026-11-05（第二轮）：桶统计需要日汇总的覆盖起点（来源快照建立时刻），
+    // 因此直接传入 rollups——起点来自同一份快照，不会与判定用的时间分叉。
     let day_sensitive = opts.by == crate::aggregate::GroupBy::Day || !time_bounds.is_unbounded();
     let rollups = read.rollups(opts.agent)?;
-    let source_tzs: Vec<String> = rollups
-        .iter()
-        .map(|r| r.source_tz.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let buckets = report::collect_detail_buckets(&read, opts.agent, &source_tzs)?;
+    let buckets = report::collect_detail_buckets(&read, opts.agent, &rollups)?;
     let rollup_selection = report::select_rollup_contributions(
         &buckets,
         &rollups,
@@ -623,7 +619,7 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
         report::RollupBucketPolicy::default(),
         &time_bounds,
         opts.rollups,
-    );
+    )?;
 
     let snapshot = Arc::new(QuerySnapshot {
         // RC01：命名空间 + 序号 + generation。跨启动唯一性来自命名空间，

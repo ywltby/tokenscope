@@ -91,6 +91,7 @@ import {
   createStageTracker,
   ensureNotCanceled,
   errorEvidenceFields,
+  readAppLogTail,
   finalizeScenarioTimeout,
   runScenarioBounded,
   scenarioBudgetMs,
@@ -4536,6 +4537,17 @@ async function main() {
       // 但 launches[] 与宿主日志尾部仍要写出（§4.8 第 5 条）
       setupError = error;
       Object.assign(ev, errorEvidenceFields(error));
+      // 2026-11-05：宿主 stdout 可能完全为空（应用写文件日志），启动失败时
+      // 必须把隔离根内的应用日志一并留下，否则"页面 target 没出现"这类失败
+      // 无法判断是环境冷启动还是产品缺陷。
+      try {
+        const logs = path.join(root, "tokenscope", "logs");
+        if (fs.existsSync(logs)) copyDirSync(logs, path.join(stampDir, "app-logs"));
+      } catch (e) {
+        ev.app_logs_copy_error = String(e?.message ?? e);
+      }
+      const appLog = readAppLogTail(root);
+      if (appLog) ev.app_log_tail = appLog;
       hb(`启动阶段失败：${error?.message ?? error}`);
     }
   }

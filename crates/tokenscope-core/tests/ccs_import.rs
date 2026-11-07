@@ -165,7 +165,7 @@ fn preview_and_commit(dir: &Path, history: &HistoryDb) -> (ccs::ImportPreview, c
 }
 
 #[test]
-fn imports_both_granularities_with_normalized_buckets() {
+fn imports_claude_granularities_and_skips_other_agents() {
     let dir = temp_dir("basic");
     seed_ccs(
         &dir.join("cc-switch.db"),
@@ -177,7 +177,7 @@ fn imports_both_granularities_with_normalized_buckets() {
                 cache_read: 5000,
                 ..Default::default()
             },
-            // Codex proxy 行：legacy 语义，input 含缓存读 → 扣减。
+            // 2026-11-05：Codex 行不由 CCS 导入（其他应用以 TS 自身采集为准）。
             Row {
                 request_id: "codex-1",
                 app_type: "codex",
@@ -195,26 +195,38 @@ fn imports_both_granularities_with_normalized_buckets() {
                 ..Default::default()
             },
         ],
-        // 日汇总：codex legacy 语义同样归一化。
-        &[("2026-06-01", "codex", "mimo-v2.5-pro", 12, 1000, 40, 600, 0)],
+        // 日汇总：只导入 Claude 的。
+        &[(
+            "2026-06-01",
+            "claude",
+            "claude-opus-5-5",
+            12,
+            1000,
+            40,
+            0,
+            0,
+        )],
     );
     let history = db(&dir);
     let (preview, report) = preview_and_commit(&dir, &history);
 
     assert_eq!(preview.requests_total, 3);
-    assert_eq!(preview.requests_importable, 2);
-    assert_eq!(preview.requests_skipped_other_app, 1);
-    assert_eq!(preview.unsupported_apps, vec![("gemini".to_string(), 1)]);
-    assert_eq!(preview.would_insert, 2);
-    assert_eq!(preview.records_without_project, 2, "CCS 明细没有项目归属");
+    assert_eq!(preview.requests_importable, 1, "只有 Claude 行可导入");
+    assert_eq!(preview.requests_skipped_other_app, 2);
+    assert_eq!(
+        preview.unsupported_apps,
+        vec![("codex".to_string(), 1), ("gemini".to_string(), 1)]
+    );
+    assert_eq!(preview.would_insert, 1);
+    assert_eq!(preview.records_without_project, 1, "CCS 明细没有项目归属");
     assert_eq!(preview.rollups_total, 1);
     assert_eq!(preview.rollups_new, 1);
 
-    assert_eq!(report.requests_inserted, 2);
+    assert_eq!(report.requests_inserted, 1);
     assert_eq!(report.rollups_snapshotted, 1);
 
     let events = history.stored_events().unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     let claude = events
         .iter()
         .find(|e| e.app == AgentKind::ClaudeCode)
@@ -222,22 +234,21 @@ fn imports_both_granularities_with_normalized_buckets() {
     assert_eq!(claude.tokens.input, 100, "Claude 不再扣缓存读");
     assert_eq!(claude.tokens.cache_read, 5000);
     assert!(claude.project_key.is_none(), "项目保持未知");
-    let codex = events.iter().find(|e| e.app == AgentKind::Codex).unwrap();
-    assert_eq!(codex.tokens.input, 400, "legacy + cache-inclusive 扣缓存读");
-    assert_eq!(codex.tokens.cache_read, 600);
 
     // 日汇总单独保存且不与明细相加：这里只断言它确实落盘了。
     assert_eq!(history.rollup_count().unwrap(), 1);
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// 2026-11-05：CCS 只导入 Claude。Codex 的三种输入口径变体不再进入统计
+///（归一化逻辑本身仍由 `import::ccs` 的单元测试直接覆盖 `request_write`）。
 #[test]
-fn input_token_semantics_variants_are_normalized() {
+fn input_token_semantics_variants_of_other_agents_are_skipped() {
     let dir = temp_dir("semantics");
     seed_ccs(
         &dir.join("cc-switch.db"),
         &[
-            // legacy（0）：扣缓存读。
+            // legacy（0）/ total（1）/ fresh（2）：Codex 一律跳过。
             Row {
                 request_id: "c-legacy",
                 app_type: "codex",
@@ -247,7 +258,6 @@ fn input_token_semantics_variants_are_normalized() {
                 cache_read: 600,
                 ..Default::default()
             },
-            // total（1）：扣缓存读与写。
             Row {
                 request_id: "c-total",
                 app_type: "codex",
@@ -259,7 +269,6 @@ fn input_token_semantics_variants_are_normalized() {
                 semantics: 1,
                 ..Default::default()
             },
-            // fresh（2）：不扣。
             Row {
                 request_id: "c-fresh",
                 app_type: "codex",
@@ -271,20 +280,29 @@ fn input_token_semantics_variants_are_normalized() {
                 semantics: 2,
                 ..Default::default()
             },
+            // Claude 行：不扣缓存读（Anthropic 语义），与 semantics 字段无关。
+            Row {
+                request_id: "session:c-1",
+                app_type: "claude",
+                model: "claude-opus-5-5",
+                session_id: Some("sess-1"),
+                input: 500,
+                cache_read: 300,
+                cache_write: 200,
+                ..Default::default()
+            },
         ],
         &[],
     );
     let history = db(&dir);
-    let (_preview, report) = preview_and_commit(&dir, &history);
-    assert_eq!(report.requests_inserted, 3);
-    let mut inputs: Vec<u64> = history
-        .stored_events()
-        .unwrap()
-        .iter()
-        .map(|e| e.tokens.input)
-        .collect();
-    inputs.sort();
-    assert_eq!(inputs, vec![400, 500, 500]);
+    let (preview, report) = preview_and_commit(&dir, &history);
+    assert_eq!(preview.requests_skipped_other_app, 3);
+    assert_eq!(report.requests_inserted, 1);
+    let events = history.stored_events().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].tokens.input, 500, "Claude 不扣缓存读");
+    assert_eq!(events[0].tokens.cache_read, 300);
+    assert_eq!(events[0].tokens.cache_write, 200);
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -294,8 +312,8 @@ fn session_rows_overlapping_proxy_rows_are_not_double_counted() {
     // 同一次请求被 proxy 与会话日志各记一行（CCS 的有效用量口径只留一条）。
     let proxy = Row {
         request_id: "proxy-1",
-        app_type: "codex",
-        model: "gpt-5.6-sol",
+        app_type: "claude",
+        model: "claude-opus-5-5",
         session_id: None,
         input: 1000,
         output: 40,
@@ -303,11 +321,11 @@ fn session_rows_overlapping_proxy_rows_are_not_double_counted() {
         ..Default::default()
     };
     let session = Row {
-        request_id: "session:evt-1",
-        app_type: "codex",
-        model: "gpt-5.6-sol",
-        session_id: None,
-        data_source: "codex_session",
+        request_id: "session:msg-1",
+        app_type: "claude",
+        model: "claude-opus-5-5",
+        session_id: Some("sess-1"),
+        data_source: "session_log",
         input: 1000,
         output: 40,
         cache_read: 600,
@@ -327,8 +345,11 @@ fn session_rows_overlapping_proxy_rows_are_not_double_counted() {
     assert_eq!(history.event_count().unwrap(), 1);
 
     // 会话行的时间超出窗口 → 视为不同请求，两条都导入。
+    // （换成另一个消息身份，否则同一 claude-message 别名会拒绝改绑。）
     let dir2 = temp_dir("dedup-window");
     let mut far = session.clone();
+    far.request_id = "session:msg-2";
+    far.session_id = Some("sess-2");
     far.created_at = proxy.created_at + 3600;
     seed_ccs(&dir2.join("cc-switch.db"), &[proxy, far], &[]);
     let history2 = db(&dir2);
@@ -349,10 +370,8 @@ fn repeat_import_from_same_or_copied_database_is_idempotent() {
             ..Default::default()
         },
         Row {
-            request_id: "codex-a",
-            app_type: "codex",
-            model: "gpt-5.6-sol",
-            session_id: None,
+            request_id: "session:msg-b",
+            session_id: Some("s2"),
             input: 500,
             ..Default::default()
         },

@@ -2,20 +2,24 @@
 //! 文件排序 + 行序），这里按 agent 规则统一去重，保证「无缓存 / 缓存命中 /
 //! --refresh」三条路径数字一致。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::model::{AgentKind, UsageEvent};
 
-/// Claude：同 `(session, message.id)` 保留时间戳最晚的一条（相同则保行序靠后）。
-/// Codex：同 `(session, model, 用量五元组)` 保留首条（同请求重发逐字相同——
-/// 必然同模型（同一 turn_context），首条即请求完成时刻；原始五元组可由
-/// 归一化字段重建：raw_input = input + cache_read + cache_write）。
+/// Claude：同 `(session, message.id)` 保留时间戳最晚的一条（流式重发取终值）；
+/// **相同时间**的不同终值候选（会话续写/分支产生的跨文件同刻候选）取确定性
+/// 代表——四桶总量更大者，总量并列取 `(source_path, line)` 更大者——不再由
+/// 行序或文件发现顺序决定（审阅 #14）。
+/// Codex：同 `(session, model, 用量五元组)` 保留**事件时间最早**的一条
+///（首条即请求完成时刻；原始五元组可由归一化字段重建：raw_input = input +
+/// cache_read + cache_write）——重播副本/重发不得把完成时间推后，跨文件
+/// 也不再依赖发现顺序（审阅 #15）；相同时间同上取确定性代表。
 /// B2（R01）：键加入 model——不同模型同用量的真实请求不再误合并；
 /// 同模型同用量的两个真实请求仍无法与重播区分，保守合并（限制见
 /// docs/stats-semantics.md §3.2）。
 /// WB02：WorkBuddy 两应用同 `(session, messageId)` 强身份去重（messageId
-/// 跨文件全局唯一），同一身份行序靠后者胜，与 Claude 规则一致；键内含
-/// agent——两应用的同一身份互不合并，也不触发跨应用去重。
+/// 跨文件全局唯一），规则与 Claude 一致；键内含 agent——两应用的同一身份
+/// 互不合并，也不触发跨应用去重。
 ///
 /// 返回去重后事件（保持原相对顺序）与各 agent 的丢弃数（只列非零项）。
 pub fn dedupe_events(events: Vec<UsageEvent>) -> (Vec<UsageEvent>, Vec<(AgentKind, u64)>) {
@@ -23,22 +27,23 @@ pub fn dedupe_events(events: Vec<UsageEvent>) -> (Vec<UsageEvent>, Vec<(AgentKin
     let mut dropped: HashMap<AgentKind, u64> = HashMap::new();
     // 强身份组（Claude + 两版 WorkBuddy）：键含 agent，应用间互不合并
     let mut strong_best: HashMap<(AgentKind, String, String), usize> = HashMap::new();
-    let mut codex_seen: HashSet<(String, String, u64, u64, u64, u64)> = HashSet::new();
+    // Codex 保守重播组：键不含时间——重播/重发与首条同族
+    let mut codex_best: HashMap<(String, String, u64, u64, u64, u64), usize> = HashMap::new();
 
     for (i, e) in events.iter().enumerate() {
         match e.agent {
             AgentKind::ClaudeCode | AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => {
                 let key = (e.agent, e.session_id.clone(), e.record_id.clone());
-                match strong_best.get(&key) {
-                    Some(&best) if e.ts < events[best].ts => {
-                        keep[i] = false;
-                        *dropped.entry(e.agent).or_default() += 1;
-                    }
-                    Some(&best) => {
-                        // 时间戳相同或更晚：行序靠后者胜
-                        keep[best] = false;
-                        *dropped.entry(e.agent).or_default() += 1;
-                        strong_best.insert(key, i);
+                match strong_best.get(&key).copied() {
+                    Some(best) => {
+                        if strong_candidate_wins(e, &events[best]) {
+                            keep[best] = false;
+                            *dropped.entry(e.agent).or_default() += 1;
+                            strong_best.insert(key, i);
+                        } else {
+                            keep[i] = false;
+                            *dropped.entry(e.agent).or_default() += 1;
+                        }
                     }
                     None => {
                         strong_best.insert(key, i);
@@ -54,11 +59,21 @@ pub fn dedupe_events(events: Vec<UsageEvent>) -> (Vec<UsageEvent>, Vec<(AgentKin
                     e.cache_write_tokens,
                     e.cache_read_tokens,
                 );
-                if codex_seen.insert(key) {
-                    continue;
+                match codex_best.get(&key).copied() {
+                    Some(best) => {
+                        if replay_candidate_wins(e, &events[best]) {
+                            keep[best] = false;
+                            *dropped.entry(AgentKind::Codex).or_default() += 1;
+                            codex_best.insert(key, i);
+                        } else {
+                            keep[i] = false;
+                            *dropped.entry(AgentKind::Codex).or_default() += 1;
+                        }
+                    }
+                    None => {
+                        codex_best.insert(key, i);
+                    }
                 }
-                keep[i] = false;
-                *dropped.entry(AgentKind::Codex).or_default() += 1;
             }
         }
     }
@@ -76,6 +91,32 @@ pub fn dedupe_events(events: Vec<UsageEvent>) -> (Vec<UsageEvent>, Vec<(AgentKin
         AgentKind::WorkBuddyAi => 3,
     });
     (kept, dropped)
+}
+
+/// 同刻候选的确定性代表：四桶总量更大者胜；总量并列取 `(source_path, line)`
+/// 更大者（与历史库来源键 `native|app|路径|行序|指纹` 的字典序一致）。
+fn same_instant_rep_wins(cand: &UsageEvent, best: &UsageEvent) -> bool {
+    let (c_total, b_total) = (cand.total_tokens(), best.total_tokens());
+    if c_total != b_total {
+        return c_total > b_total;
+    }
+    (cand.source_path.as_str(), cand.line) > (best.source_path.as_str(), best.line)
+}
+
+/// Claude/WB 强身份：更晚事件时间胜出；相同时间取同刻代表。
+fn strong_candidate_wins(cand: &UsageEvent, best: &UsageEvent) -> bool {
+    if cand.ts != best.ts {
+        return cand.ts > best.ts;
+    }
+    same_instant_rep_wins(cand, best)
+}
+
+/// Codex 保守重播：更早事件时间胜出（保首条 = 请求完成时刻）；相同时间取同刻代表。
+fn replay_candidate_wins(cand: &UsageEvent, best: &UsageEvent) -> bool {
+    if cand.ts != best.ts {
+        return cand.ts < best.ts;
+    }
+    same_instant_rep_wins(cand, best)
 }
 
 #[cfg(test)]
@@ -225,6 +266,78 @@ mod tests {
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].input_tokens, 2, "跨批次仍保留最晚时间戳");
         assert_eq!(dropped, vec![(AgentKind::ClaudeCode, 1)]);
+    }
+
+    #[test]
+    fn test_dedupe_claude_same_instant_takes_deterministic_representative() {
+        // 审阅 #14：同刻不同终值候选不靠行序——总量大者胜，总量并列取
+        // (source_path, line) 更大者。两个输入顺序都收敛到同一结果。
+        let make = |ts: &'static str,
+                    session: &'static str,
+                    record: &'static str,
+                    input: u64,
+                    path: &'static str| {
+            let mut e = event(E {
+                ts,
+                session,
+                record_id: record,
+                input,
+                output: 1,
+                ..Default::default()
+            });
+            e.source_path = path.into();
+            e
+        };
+        let small = make("2026-07-17T10:00:00Z", "s1", "m1", 10, "C:\\logs\\a.jsonl");
+        let big = make("2026-07-17T10:00:00Z", "s1", "m1", 50, "C:\\logs\\b.jsonl");
+        let tie_low = make("2026-07-17T10:00:00Z", "s1", "m1", 20, "C:\\logs\\a.jsonl");
+        let mut tie_high = tie_low.clone();
+        tie_high.line = 7;
+
+        for order in [
+            vec![small.clone(), big.clone()],
+            vec![big.clone(), small.clone()],
+        ] {
+            let (kept, dropped) = dedupe_events(order);
+            assert_eq!(kept.len(), 1);
+            assert_eq!(kept[0].input_tokens, 50, "同刻候选取四桶总量更大者");
+            assert_eq!(dropped, vec![(AgentKind::ClaudeCode, 1)]);
+        }
+        let (kept, _) = dedupe_events(vec![tie_low, tie_high]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].line, 7, "总量并列取行序更大的来源记录");
+    }
+
+    #[test]
+    fn test_dedupe_codex_replay_takes_earliest_time() {
+        // 审阅 #15：重播副本不得把完成时间推后——同族候选取事件时间最早者，
+        // 与到达顺序无关（旧规则保"发现顺序首条"，文件排序变化会翻转结果）。
+        let make = |ts: &'static str, path: &'static str| {
+            let mut e = event(E {
+                agent: AgentKind::Codex,
+                ts,
+                session: "s1",
+                input: 750,
+                output: 100,
+                cw: 50,
+                cr: 200,
+                ..Default::default()
+            });
+            e.source_path = path.into();
+            e
+        };
+        let early = make("2026-07-17T15:59:00Z", "C:\\codex\\rollout-b.jsonl");
+        let late = make("2026-07-18T16:08:00Z", "C:\\codex\\rollout-a.jsonl");
+        for order in [vec![early.clone(), late.clone()], vec![late, early]] {
+            let (kept, dropped) = dedupe_events(order);
+            assert_eq!(kept.len(), 1);
+            assert_eq!(
+                kept[0].ts.to_string(),
+                "2026-07-17T15:59:00Z",
+                "重播族取最早事件时间（首条完成时刻）"
+            );
+            assert_eq!(dropped, vec![(AgentKind::Codex, 1)]);
+        }
     }
 
     #[test]

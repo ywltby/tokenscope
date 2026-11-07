@@ -383,6 +383,40 @@ export function transientDbArtifactExempted(root, code, filePath) {
 }
 
 /**
+ * 原子写临时文件的 ENOENT 豁免（2026-11-05 修复测试架竞态）。
+ *
+ * `fsutil::atomic_write` 的落盘顺序是"同目录临时文件 `.名称.tmp-<pid>-<序号>`
+ * → rename 到目标"。树走查可能在 rename 之前发现它，等逐条 lstat 时它已经被
+ * rename 掉——`ENOENT` 是这条路径的**正常生命周期**，不是"走查后被删除"的
+ * 竞态或篡改。此前只豁免受控历史库的 SQLite sidecar，于是验收在 CI 上偶发
+ * 失败（`.pricing-index.json.tmp-<pid>-<n>` 无法检查）。
+ *
+ * 收紧条件：只认**隔离根内**、文件名严格匹配该临时命名的路径；其他任何
+ * "走查后发现被删"的情形仍然拒绝。
+ */
+const ATOMIC_WRITE_TMP_RE = /^\..+\.tmp-\d+-\d+$/;
+
+export function atomicWriteTmpExempted(root, code, filePath) {
+  if (code !== "ENOENT") return false;
+  const raw = String(filePath ?? "");
+  if (!ATOMIC_WRITE_TMP_RE.test(path.basename(raw))) return false;
+  const rootKey = comparePath(root);
+  if (!rootKey) return false;
+  const fileKey = comparePath(raw);
+  return fileKey.startsWith(rootKey + path.sep);
+}
+
+/**
+ * 走查两阶段共用的瞬时产物豁免：受控历史库 sidecar 或应用原子写临时文件。
+ */
+export function transientArtifactExempted(root, code, filePath) {
+  return (
+    transientDbArtifactExempted(root, code, filePath) ||
+    atomicWriteTmpExempted(root, code, filePath)
+  );
+}
+
+/**
  * 走查隔离根现有条目：普通目录继续递归（每个目录都参与真实解析），符号链接/
  * junction 只解析不再深入（深入会走别名另一侧），硬链接（nlink>1）按可疑别名
  * 解析。条目超预算时 fail closed，不把"没走完"当成"没问题"。
@@ -430,9 +464,10 @@ export function collectAcceptanceTreePaths(
       } catch (error) {
         // 与后续检查阶段同一时序（2026-11-04 第二轮）：journal 等受控数据库
         // 的瞬时 sidecar 可能在 readdir 与本 lstat 之间被 SQLite 删除——
-        // ENOENT 且属于受控历史库 sidecar 时跳过该条目（已不存在，无从核对
-        // 链接/硬链接）；其余文件消失、其他读取错误仍 fail closed。
-        if (transientDbArtifactExempted(root, error?.code, child)) continue;
+        // ENOENT 且属于受控历史库 sidecar、或应用原子写临时文件时跳过该条目
+        // （已不存在，无从核对链接/硬链接）；其余文件消失、其他读取错误仍
+        // fail closed。
+        if (transientArtifactExempted(root, error?.code, child)) continue;
         return {
           ok: false,
           paths,
@@ -555,9 +590,10 @@ export function validateAcceptancePaths({
     } catch (error) {
       // 豁免二限定受控数据库：只有 <隔离根>/tokenscope/history.db 的预期
       // sidecar（-journal/-wal/-shm）在 ENOENT 时按 SQLite 正常生命周期放行；
-      // 后缀相同但位于其他路径的文件不是它的副产物，仍按"走查后发现被删"
-      // 拒绝（竞态或篡改）。
-      const exempted = transientDbArtifactExempted(rawRoot, error?.code, entry.path);
+      // 应用原子写的 `.名称.tmp-<pid>-<序号>` 在 rename 后消失同属正常生命周期
+      // （2026-11-05：此前只豁免 sidecar，CI 上偶发因 `.pricing-index.json.tmp-*`
+      // 被判"走查后发现被删"）。命名不符或落在隔离根外的路径仍按竞态/篡改拒绝。
+      const exempted = transientArtifactExempted(rawRoot, error?.code, entry.path);
       if (error?.code === "ENOENT" && (!entry.discovered || exempted)) {
         entryStat = null; // 未创建的布局路径，或受控历史库已提交删除的瞬时 sidecar
       } else {

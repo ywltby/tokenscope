@@ -9,6 +9,12 @@ export default defineConfig({
   test: {
     environment: "happy-dom",
     include: ["src/**/*.test.ts", "scripts/lib/**/*.test.mjs"],
+    // 2026-11-05：并发上限 4。本机 Windows 的提交内存/句柄有限，默认按 CPU
+    // 起 70+ 个 fork worker 时会 `spawn` 失败（errno -4094），表现为随机的
+    // "Test Files 73/75"。测试集合与断言不变，只降低并行度；CI runner 资源
+    // 充足，多花的时间在 frontend 作业预算内。
+    maxWorkers: 4,
+    minWorkers: 1,
     // 设计系统 Task 1：css: true 让 tokens.css 在测试中真实注入 DOM，
     // 断言语义 token 的两套主题与降级规则（默认空模块无法校验内容）。
     css: true,

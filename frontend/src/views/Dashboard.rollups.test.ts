@@ -230,4 +230,66 @@ describe("Dashboard 日粒度历史（H08）", () => {
     expect(last.rollups, "旧版快照不可信，按正常加载走 auto").toBeNull();
     w.unmount();
   });
+
+  it("同桶多批次汇总的边界歧义如实披露（第三轮）", async () => {
+    const note =
+      "有 1 个日期/模型桶的日汇总来自不同时刻导入的批次：覆盖边界只能取最早的来源快照时刻，" +
+      "落在批次之间的明细已按明细计入，可能与较晚批次的汇总重复；这些桶请对照请求明细核对。";
+    const report = reportWithMismatch();
+    report.rollup_coverage = {
+      ...report.rollup_coverage!,
+      timezone_mismatch: null,
+      multi_batch_boundary: note,
+    };
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(report);
+      if (cmd === "query_events")
+        return Promise.resolve({
+          query_id: "q-test-a",
+          pricing_revision: "rev-test",
+          rows: [],
+          total: 0,
+          warnings: [],
+        });
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(w.text(), "批次之间的歧义必须出现在界面").toContain("不同时刻导入的批次");
+    w.unmount();
+  });
+
+  it("旧版导入的批次边界不可确认时如实披露（第四轮）", async () => {
+    const note =
+      "有 1 个日期/模型桶的日汇总没有可核对的来源快照时刻（旧版导入的批次时间在读取结束后才生成，" +
+      "或该行没有导入批次关联）：这些桶按整桶信任口径统计，快照之后到达的请求可能被少算。";
+    const report = reportWithMismatch();
+    report.rollup_coverage = {
+      ...report.rollup_coverage!,
+      timezone_mismatch: null,
+      legacy_boundary: note,
+    };
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "query_summary") return Promise.resolve(report);
+      if (cmd === "query_events")
+        return Promise.resolve({
+          query_id: "q-test-a",
+          pricing_revision: "rev-test",
+          rows: [],
+          total: 0,
+          warnings: [],
+        });
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(w.text(), "旧版批次边界必须可见").toContain("旧版导入");
+    w.unmount();
+  });
 });

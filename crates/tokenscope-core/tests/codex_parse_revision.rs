@@ -804,7 +804,10 @@ fn old_model_ccs_alias_import_does_not_duplicate_or_revert_corrected_fact() {
     let history = HistoryDb::open(&fixture.history_path).unwrap();
     let source = CcsSource::open(&source_path).unwrap();
     let preview = ccs::preview(&source, &history, "UTC").unwrap();
-    assert_eq!(preview.requests_importable, 1);
+    // 2026-11-05 口径：CCS 只补充 Claude Code——Codex 行（含旧模型别名）
+    // 不再导入，已纠正的原生事实不受影响。
+    assert_eq!(preview.requests_importable, 0, "CCS 不再导入 Codex 行");
+    assert_eq!(preview.requests_skipped_other_app, 1);
     let report = ccs::commit(
         &preview.plan_id,
         &history,
@@ -989,43 +992,7 @@ fn replaying_old_native_alias_does_not_restore_the_incorrect_model() {
 #[test]
 fn occupied_new_model_alias_rejects_collection_and_rolls_back_both_facts() {
     let fixture = model_upgrade_fixture(1);
-    let source_path = fixture.temp.0.join("synthetic-new-model-cc-switch.db");
-    let connection = Connection::open(&source_path).unwrap();
-    connection.execute_batch(MODEL_CCS_SCHEMA).unwrap();
-    connection
-        .execute(
-            "INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,request_model,
-         input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,session_id,
-         created_at,data_source,pricing_model,input_token_semantics)
-         VALUES('codex_thread:synthetic:usage:new-model','synthetic','codex','model-b','model-b',
-         80,10,20,0,?1,?2,'codex_session','model-b',2)",
-            rusqlite::params![SESSION, fixture.old.ts.as_second()],
-        )
-        .unwrap();
-    drop(connection);
     let history = HistoryDb::open(&fixture.history_path).unwrap();
-    let source = CcsSource::open(&source_path).unwrap();
-    let preview = ccs::preview(&source, &history, "UTC").unwrap();
-    assert_eq!(preview.requests_importable, 1);
-    assert_eq!(preview.would_insert, 1);
-    let imported = ccs::commit(
-        &preview.plan_id,
-        &history,
-        tokenscope::history::RollupConflictPolicy::KeepExisting,
-        true,
-    )
-    .unwrap();
-    assert_eq!(imported.requests_inserted, 1);
-    let before = history.stored_events().unwrap();
-    assert_eq!(before.len(), 2, "预置旧原生 A 和单独导入的 CCS B");
-    let imported_b = before
-        .iter()
-        .find(|event| event.model_raw == "model-b")
-        .unwrap();
-    assert_ne!(imported_b.id, fixture.old_stored.id);
-    assert_eq!(imported_b.session_id.as_deref(), Some(SESSION));
-    assert_eq!(imported_b.ts, fixture.old.ts);
-    assert_eq!(imported_b.tokens, fixture.old_stored.tokens);
     let new_model_event = UsageEvent {
         cache_write_5m: 0,
         cache_write_1h: 0,
@@ -1034,6 +1001,52 @@ fn occupied_new_model_alias_rejects_collection_and_rolls_back_both_facts() {
         ..fixture.old.clone()
     };
     let new_alias = new_model_event.same_source_identity().unwrap().1;
+    // 2026-11-05 口径：CCS 不再导入 Codex。直接写入一条历史旧数据（模拟此前
+    // 已导入的 model-b 事实）占用新模型别名，其余断言与导入路径无关。
+    let imported = history
+        .write_batch(&[EventWrite {
+            event_key: "ccs|codex|proxy|synthetic-new-model".into(),
+            app: AgentKind::Codex,
+            ts: fixture.old.ts,
+            model_raw: "model-b".into(),
+            model_identity: ModelIdentity::parse("model-b").identity_key(),
+            session_id: Some(SESSION.into()),
+            record_id: None,
+            project_key: None,
+            session_initial_cwd: None,
+            event_cwd: None,
+            tokens: fixture.old_stored.tokens,
+            precedence: WritePrecedence::CcsImport,
+            observed_at: fixture.old.ts,
+            aliases: vec![EventAlias {
+                app: AgentKind::Codex,
+                scheme: "codex-usage".into(),
+                value: new_alias.clone(),
+            }],
+            origins: vec![EventOrigin {
+                origin_kind: "ccs_request".into(),
+                origin_key: "ccs|codex|proxy|synthetic-new-model".into(),
+                app: AgentKind::Codex,
+                import_run_id: None,
+                parser_revision: PARSER_REVISION,
+                source_model_raw: Some("model-b".into()),
+                pricing_model: Some("model-b".into()),
+                source_cost_usd: None,
+                ts_precision_seconds: true,
+            }],
+        }])
+        .unwrap();
+    assert_eq!(imported.inserted, 1);
+    let before = history.stored_events().unwrap();
+    assert_eq!(before.len(), 2, "预置旧原生 A 和单独写入的 CCS B");
+    let imported_b = before
+        .iter()
+        .find(|event| event.model_raw == "model-b")
+        .unwrap();
+    assert_ne!(imported_b.id, fixture.old_stored.id);
+    assert_eq!(imported_b.session_id.as_deref(), Some(SESSION));
+    assert_eq!(imported_b.ts, fixture.old.ts);
+    assert_eq!(imported_b.tokens, fixture.old_stored.tokens);
     let connection =
         Connection::open_with_flags(&fixture.history_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
