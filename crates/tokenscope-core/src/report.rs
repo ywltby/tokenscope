@@ -2381,7 +2381,7 @@ pub(crate) fn select_rollup_contributions(
     // 同桶多批次（最早/最晚快照时刻不同）的桶数：边界只能取最早时刻，落在
     // 批次之间的明细已按明细计入，可能与较晚批次重复——必须如实披露。
     let mut multi_batch_buckets: u64 = 0;
-    // v0.7.0 旧语义批次（`import_revision = 1`）无法确认边界：整桶信任并披露。
+    // 没有可核对快照时刻的桶（旧语义批次 / 缺批次关联）无法确认边界：整桶信任并披露。
     let mut legacy_boundary_buckets: u64 = 0;
     for bucket in buckets.into_values() {
         let empty: std::collections::HashMap<(String, String, String), DetailBucketStat> =
@@ -2471,10 +2471,10 @@ pub(crate) fn select_rollup_contributions(
     }
     if legacy_boundary_buckets > 0 {
         selection.coverage.legacy_boundary = Some(format!(
-            "有 {legacy_boundary_buckets} 个日期/模型桶的日汇总来自旧版导入（批次时间在读取\
-             结束后才生成，不能代表来源快照建立时刻）：这些桶按整桶信任口径统计，快照之后\
-             到达的请求可能被少算。来源汇总内容更新后重新导入会写入可核对的快照时刻；\
-             也可以对照请求明细核对这段区间。"
+            "有 {legacy_boundary_buckets} 个日期/模型桶的日汇总没有可核对的来源快照时刻\
+             （旧版导入的批次时间在读取结束后才生成，或该行没有导入批次关联）：这些桶按\
+             整桶信任口径统计，快照之后到达的请求可能被少算。来源汇总内容更新后重新导入\
+             会写入可核对的快照时刻；也可以对照请求明细核对这段区间。"
         ));
     }
     if multi_batch_buckets > 0 {

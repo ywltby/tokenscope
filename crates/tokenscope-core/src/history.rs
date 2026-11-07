@@ -2408,7 +2408,10 @@ fn same_instant_challenger_wins(existing: &StoredEvent, w: &EventWrite) -> bool 
     w.event_key > existing.event_key
 }
 
-/// 库内同键日汇总快照的读取形态（含来源时区与批次归属，供诊断）。
+/// 库内同键日汇总快照的读取形态（含来源时区，供元数据修订）。
+///
+/// 批次归属不在此读取：内容未变的分支必须**原样保留**该行的 `import_run_id`，
+/// 没有批次关联的旧行也不会被补写（见 `write_rollups_in_tx`）。
 type RollupSnapshotRow = (
     i64,
     i64,
@@ -2418,12 +2421,12 @@ type RollupSnapshotRow = (
     String,
     Option<String>,
     String,
-    Option<i64>,
 );
 
 /// 日汇总快照写入：同键内容相同 → 跳过（仅来源时区假设不同时修订该元数据，
-/// 用量未变仍计未变化）；内容不同 → 按策略保留或替换（来源无可验证修订时
-/// 默认保留已存值并计冲突）。同键身份 = CCS 完整主键，**不含** `source_tz`。
+/// 用量未变仍计未变化；批次归属一律不动，旧行没有关联也不会被补写）；内容
+/// 不同 → 按策略保留或替换（替换时同一事务内重绑到本次批次；来源无可验证
+/// 修订时默认保留已存值并计冲突）。同键身份 = CCS 完整主键，**不含** `source_tz`。
 fn write_rollups_in_tx(
     tx: &Transaction<'_>,
     rollups: &[DailyRollupWrite],
@@ -2440,7 +2443,7 @@ fn write_rollups_in_tx(
         let existing: Option<RollupSnapshotRow> = tx
             .query_row(
                 "SELECT id, request_count, input_tokens, output_tokens, cache_write_tokens,
-                        cache_read_tokens, source_cost_usd, source_tz, import_run_id
+                        cache_read_tokens, source_cost_usd, source_tz
                  FROM ccs_daily_usage
                  WHERE logical_source = ?1 AND day = ?2 AND app = ?3
                    AND provider_id = ?4 AND model = ?5 AND request_model = ?6 AND pricing_model = ?7",
@@ -2463,7 +2466,6 @@ fn write_rollups_in_tx(
                         row.get(5)?,
                         row.get(6)?,
                         row.get(7)?,
-                        row.get(8)?,
                     ))
                 },
             )
@@ -2500,7 +2502,7 @@ fn write_rollups_in_tx(
                 summary.inserted += 1;
                 changed = true;
             }
-            Some((id, count, i, o, cw, cr, cost, existing_tz, existing_run)) => {
+            Some((id, count, i, o, cw, cr, cost, existing_tz)) => {
                 let same = count == r.request_count as i64
                     && i == r.tokens.input.to_string()
                     && o == r.tokens.output.to_string()
@@ -2517,17 +2519,12 @@ fn write_rollups_in_tx(
                         )?;
                         changed = true;
                     }
-                    // 2026-11-05：历史遗留的日汇总没有关联导入批次（v1 迁移或
-                    // 早期导入）——再次导入确认同一快照时补写本次批次，使
-                    // "用汇总覆盖部分明细"能拿到导入时刻。只补 NULL，不改已有关联，
-                    // 因此正常重复导入仍然幂等（generation 不变）。
-                    if existing_run.is_none() {
-                        tx.execute(
-                            "UPDATE ccs_daily_usage SET import_run_id = ?2 WHERE id = ?1",
-                            params![id, run_id],
-                        )?;
-                        changed = true;
-                    }
+                    // 2026-11-07：内容未变时**不**补写 `import_run_id`，即使该行
+                    // 还没有批次关联（v1 迁移或早期导入遗留）。重读同一数值只
+                    // 证明"此刻来源仍写着这个数"，不证明这份快照在本次读取时
+                    // 建立——旧覆盖边界仍无法确认，绑定只会把它当成新版可信边界
+                    // （边界随之后移，两次导入之间到达的原生请求被静默吞掉，
+                    // 不确定性的披露同时消失）。内容真的变了才会走下面的重绑。
                     summary.unchanged += 1;
                 } else if r.revision > 0 || policy == RollupConflictPolicy::TakeSource {
                     // 2026-11-05（第四轮）：内容被替换 = 本批次读到的是**新快照**，

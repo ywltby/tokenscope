@@ -169,11 +169,14 @@ pub struct RollupCoverage {
     /// 数据上无法区分，只能如实披露（`None` = 没有这种桶）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_batch_boundary: Option<String>,
-    /// 2026-11-05（第四轮）：日汇总来自**旧版导入**（`import_revision = 1`，
-    /// 批次时间是读取结束后生成的）时的披露。
+    /// 2026-11-05（第四轮）：日汇总**没有可核对的来源快照时刻**时的披露——
+    /// 旧版批次（`import_revision = 1`，批次时间是读取结束后生成的），或该行
+    /// 没有导入批次关联（v1 迁移 / 早期导入遗留）。
     ///
     /// 这类批次的时间不能代表来源快照建立时刻，也无法事后判定；统计上按整桶
     /// 信任口径处理（不拿旧时间做边界、不猜造历史），并如实说明可能少算。
+    /// 2026-11-07：重导内容完全相同的快照**不**为该行补写批次——重读同一数值
+    /// 不能证明快照在本次读取时建立，披露必须保留。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_boundary: Option<String>,
 }

@@ -272,63 +272,118 @@ fn rollup_1000_over_partial_detail_100_counts_once() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 旧库迁移的日汇总没有关联导入批次：没有可核对的快照时刻，整桶明细按
-/// "信任 CCS 汇总"口径处理（明细不重复计入，总量取汇总）；重新导入仍幂等
-/// 并补写批次时刻（仅诊断，不改变已确定的统计口径）。
+/// 旧库迁移 / 早期导入留下的日汇总没有批次关联（`import_run_id` 为空）：没有
+/// 可核对的快照时刻，整桶明细按"信任 CCS 汇总"口径处理，并披露可能少算。
+///
+/// 2026-11-07：重导**内容完全相同**的快照不得把该行绑到新批次。重读同一数值
+/// 只证明"此刻来源仍写着这个数"，不证明该快照在本次读取时建立——绑定会把原本
+/// 无法确认的覆盖边界当成新版可信边界（边界随之后移，两次导入之间到达的原生
+/// 请求被静默吞掉，不确定性提示同时消失）。内容确实被替换时才重绑，见后半段。
 #[test]
-fn legacy_rollup_without_import_run_still_trusts_rollup_total() {
-    let dir = temp_dir("legacy-import-time");
-    seed_ccs(
-        &dir.join("cc-switch.db"),
-        &[Row {
-            request_id: "session:msg-1",
-            input: 100,
-            created_at: 1_789_866_000,
-            ..Default::default()
-        }],
-        &[("2026-09-20", "claude", "claude-opus-5-5", 10, 1000, 0)],
-    );
+fn legacy_rollup_without_import_run_keeps_unknown_boundary_after_identical_reimport() {
+    let dir = temp_dir("legacy-null-batch");
+    let tz = "Asia/Shanghai";
+    let day = "2026-09-20";
+    let db = dir.join("cc-switch.db");
+    // 来源只剩日汇总（10 请求 / 1,000 token），TS 侧没有与之对应的 CCS 明细。
+    seed_ccs(&db, &[], &[(day, "claude", "claude-opus-5-5", 10, 1000, 0)]);
     let history = history_of(&dir);
     import_all(&dir, &history);
-    // 模拟 v1 迁移遗留：日汇总没有关联导入批次。
+    // v1 迁移 / 早期导入遗留：该行没有批次关联 → 边界无法确认。
     {
         let conn = rusqlite::Connection::open(dir.join("data").join("history.db")).unwrap();
         conn.execute("UPDATE ccs_daily_usage SET import_run_id = NULL", [])
             .unwrap();
     }
-    let o = opts(
-        &dir,
-        Some(dir.join("no-claude")),
-        GroupBy::Day,
-        "Asia/Shanghai",
+    // TS 原生请求：日志里读得到，但是否曾被旧汇总包含无法证实。
+    let claude = dir.join("claude");
+    write_claude_log(
+        &claude,
+        "proj/s.jsonl",
+        &[claude_line(
+            "s1",
+            "m1",
+            "2026-09-20T09:00:00.000+08:00",
+            "claude-opus-5-5",
+            200,
+            0,
+        )],
     );
+    let o = opts(&dir, Some(claude), GroupBy::Day, tz);
     let before = summary(&o).unwrap();
     assert_eq!(
         before.totals.tokens.input, 1000,
-        "来源证据足够，不依赖导入时刻即可用汇总做总量"
+        "旧行边界不可确认：整桶按信任口径，不把明细再加一次"
     );
+    assert_eq!(before.totals.requests, 10);
     assert_eq!(before.rollup_coverage.covered_buckets, 1);
-    assert_eq!(before.rollup_coverage.unresolved_buckets, 0);
-    assert!(!before.warnings.iter().any(|w| w.contains("无法确认")));
+    let note = before
+        .rollup_coverage
+        .legacy_boundary
+        .clone()
+        .expect("边界不可确认时必须披露可能少算");
 
-    // 再次导入同一库：快照未变（幂等），补写批次时刻（诊断字段）。
-    let source = CcsSource::open(&dir.join("cc-switch.db")).unwrap();
-    let preview = ccs::preview(&source, &history, "Asia/Shanghai").unwrap();
-    assert_eq!(preview.rollups_unchanged, 1);
-    ccs::commit(
+    // 重新导入内容完全相同的汇总（真实 open → preview → commit）。
+    let generation_before = history.generation().unwrap();
+    let source = CcsSource::open(&db).unwrap();
+    let preview = ccs::preview(&source, &history, tz).unwrap();
+    assert_eq!(preview.rollups_unchanged, 1, "同一份快照：预览计未变化");
+    assert_eq!(preview.rollups_new, 0);
+    let report = ccs::commit(
         &preview.plan_id,
         &history,
         RollupConflictPolicy::KeepExisting,
         true,
     )
     .unwrap();
+    drop(source);
+    assert_eq!(report.rollups_snapshotted, 0, "内容未变：不计新增或替换");
+
+    // 重读同一数值不等于证实边界：该行仍无批次关联。
+    let stored = history.daily_rollups(None).unwrap();
+    assert_eq!(stored.len(), 1);
     assert!(
-        history.daily_rollups(None).unwrap()[0].import_at.is_some(),
-        "重新导入补写批次时刻（仅用于诊断来源快照建立时间）"
+        stored[0].import_at.is_none(),
+        "内容未变的重导不得把旧行绑定到新批次"
     );
+    assert!(!stored[0].boundary_known, "没有批次关联就不可能确认边界");
+    assert_eq!(
+        history.generation().unwrap(),
+        generation_before,
+        "重复导入仍幂等（不因重读而生成新版本）"
+    );
+
     let after = summary(&o).unwrap();
-    assert_eq!(after.totals.tokens.input, 1000, "口径不变");
-    assert_eq!(after.rollup_coverage.covered_buckets, 1);
+    assert_eq!(
+        after.totals.tokens.input, 1000,
+        "重导幂等：总量不因重读同一数值而变化"
+    );
+    assert_eq!(after.totals.requests, 10);
+    assert_eq!(
+        after.rollup_coverage.legacy_boundary.as_deref(),
+        Some(note.as_str()),
+        "不确定性提示必须保留"
+    );
+
+    // 对照：内容确实被替换（用户选择"以来源为准"）→ 重绑到本次批次。
+    update_ccs_rollup_row(&db, day, "p1", "claude-opus-5-5", 12, 1200, 0);
+    let source = CcsSource::open(&db).unwrap();
+    let preview = ccs::preview(&source, &history, tz).unwrap();
+    let report = ccs::commit(
+        &preview.plan_id,
+        &history,
+        RollupConflictPolicy::TakeSource,
+        true,
+    )
+    .unwrap();
+    drop(source);
+    assert_eq!(report.rollups_snapshotted, 1, "内容真的变了才计入替换");
+    let repaired = summary(&o).unwrap();
+    assert_eq!(repaired.totals.tokens.input, 1200, "新汇总已含那 200");
+    assert!(
+        repaired.rollup_coverage.legacy_boundary.is_none(),
+        "内容替换后边界可确认，旧版披露随之消失"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
