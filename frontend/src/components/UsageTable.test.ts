@@ -2,7 +2,7 @@
 // 存在未计价内容时出现"未知†"列并按行显示未计价 token；全部已计价时不出现。
 // （† 语义 = 估算费用仅含已计价部分：无价格模型 + 部分计价两种来源。）
 import { describe, expect, it } from "vitest";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import UsageTable from "./UsageTable.vue";
 // Vite ?raw：直接取 SFC 源文本做样式契约断言（项目无 @types/node）
 import usageTableSource from "./UsageTable.vue?raw";
@@ -82,6 +82,47 @@ describe("UsageTable 费用可追溯（C5）", () => {
   it("no_rollup_disclosure_without_rollup_only_reason：纯明细不误报日粒度", () => {
     const w = mount(UsageTable, { props: { report: report([group("m-priced")], false) } });
     expect(w.text()).not.toContain("日粒度");
+  });
+
+  it("source_selection_basis_is_in_expandable_statistics_note", async () => {
+    // 2026-11-07：正常来源选择（明细逐项覆盖汇总）不弹大段告警；依据放进
+    // 可展开的统计说明，且明确写出按请求明细统计、汇总不叠加、保留请求级信息。
+    const r = report([group("m-priced")], false);
+    r.rollup_coverage = {
+      detail_buckets: 1,
+      rollup_buckets: 0,
+      detail_selected_buckets: 1,
+      conflict_kinds: [],
+      unresolved_buckets: 0,
+      unresolved_covered_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    };
+    const w = mount(UsageTable, { props: { report: r } });
+    expect(w.text(), "可展开统计说明标题").toContain("统计说明");
+    // 依据默认收起（不堆在页面上），展开后方可核对。
+    const header = w
+      .findAll(".n-collapse-item__header-main")
+      .find((h) => h.text().includes("统计说明"));
+    expect(header, "统计说明是可展开条目").toBeDefined();
+    await header!.trigger("click");
+    await flushPromises();
+    const text = w.text();
+    expect(text, "依据写明按请求明细统计").toContain("按请求明细统计");
+    expect(text, "依据写明汇总不叠加").toContain("汇总不叠加");
+    expect(text, "依据不暗示数据丢失").not.toContain("未纳入");
+  });
+
+  it("no_source_selection_note_without_selected_buckets", () => {
+    const r = report([group("m-priced")], false);
+    r.rollup_coverage = {
+      detail_buckets: 0,
+      rollup_buckets: 0,
+      detail_selected_buckets: 0,
+      conflict_kinds: [],
+      unresolved_buckets: 0,
+      unresolved_covered_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    };
+    const w = mount(UsageTable, { props: { report: r } });
+    expect(w.text(), "无来源选择时不显示统计说明").not.toContain("统计说明");
   });
 });
 

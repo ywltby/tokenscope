@@ -616,19 +616,23 @@ describe("useUsageQuery 通知合并（U04）", () => {
     w.unmount();
   });
 
-  it("unresolved_rollup_coverage_still_warns：真实未解决的覆盖仍提示", async () => {
+  it("source_conflict_is_independent_not_collection_warning：统计来源冲突独立显示", async () => {
+    // 2026-11-07 语义变化（用户明确修正）：交叉冲突之前把"未纳入若干 token"
+    // 塞进 report.warnings，被算成"本轮采集存在部分问题 / N 条采集警告"。
+    // 现在后端给出**结构化冲突类型**（conflict_kinds），界面独立成条，
+    // 不再混入采集警告计数；真实交叉冲突仍必须可见，且给出明确类型。
     okMock({
       query_summary: () =>
         Promise.resolve({
           ...reportA,
-          warnings: [
-            "有 1 个日期/模型桶在来源快照范围内的明细超过了日汇总声称的数量，无法确认汇总能覆盖这些明细",
-          ],
+          warnings: [],
           rollup_coverage: {
             detail_buckets: 1,
             rollup_buckets: 0,
             covered_buckets: 0,
             covered_detail_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+            detail_selected_buckets: 0,
+            conflict_kinds: ["crossed_token_buckets"],
             unresolved_buckets: 1,
             unresolved_covered_tokens: { input: 500, output: 0, cache_write: 0, cache_read: 0 },
           },
@@ -636,13 +640,84 @@ describe("useUsageQuery 通知合并（U04）", () => {
     });
     const w = mountHost();
     await flushPromises();
+    const conflict = api.notices.value.find((n) => n.id === "rollup-source-conflict");
+    expect(conflict, "真实交叉冲突必须独立成条、不隐藏").toBeDefined();
+    expect(conflict!.severity).toBe("warning");
+    expect(conflict!.text, "必须给出明确冲突类型").toContain("四桶方向交叉");
+    expect(conflict!.text, "不再暗示同量数据全部丢失").not.toContain("未纳入");
     const texts = api.notices.value.map((n) => n.text).join("\n");
-    expect(texts, "无法确认的覆盖必须如实提示").toContain("本轮采集存在部分问题");
-    const notice = api.notices.value.find((n) => n.text.includes("本轮采集存在部分问题"))!;
-    expect(notice.details?.join("\n"), "原始警告保留在展开明细里").toContain(
-      "无法确认汇总能覆盖这些明细",
-    );
-    expect(api.collectionDiagnostics.value.clean).toBe(false);
+    expect(texts, "统计来源冲突不是采集失败").not.toContain("本轮采集存在部分问题");
+    expect(api.collectionDiagnostics.value.clean, "冲突不污染采集警告计数").toBe(true);
+    expect(api.collectionDiagnostics.value.warns).toEqual([]);
+    w.unmount();
+  });
+
+  it("real_io_errors_and_bad_lines_still_warn_with_source_conflict", async () => {
+    // 反例：真实采集 IO 错误 / 坏行仍须提示，且与统计来源冲突各自独立，
+    // 不得为了消掉冲突告警而把真实采集问题一起隐藏。
+    okMock({
+      query_summary: () =>
+        Promise.resolve({
+          ...reportA,
+          warnings: ["读取失败：来源目录不可读"],
+          sources: [{ agent: "claude-code", stats: { io_errors: 2, bad_lines: 3 } }],
+          rollup_coverage: {
+            detail_buckets: 1,
+            rollup_buckets: 0,
+            covered_buckets: 0,
+            covered_detail_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+            detail_selected_buckets: 0,
+            conflict_kinds: ["opposed_requests_tokens"],
+            unresolved_buckets: 1,
+            unresolved_covered_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+          },
+        }),
+    });
+    const w = mountHost();
+    await flushPromises();
+    const diag = api.collectionDiagnostics.value;
+    expect(diag.clean).toBe(false);
+    expect(diag.warns, "真实采集警告仍在采集诊断通道").toHaveLength(1);
+    expect(diag.ioErrors).toBe(2);
+    expect(diag.badLines).toBe(3);
+    expect(diag.summaryText).toContain("采集警告");
+    expect(diag.summaryText).toContain("文件读取失败");
+    expect(diag.summaryText).toContain("行解析失败");
+    const collection = api.notices.value.find((n) => n.id === "collection");
+    expect(collection, "采集诊断通知仍存在").toBeDefined();
+    const conflict = api.notices.value.find((n) => n.id === "rollup-source-conflict");
+    expect(conflict, "冲突独立成条，不并入采集通知").toBeDefined();
+    expect(conflict!.text).toContain("请求数与用量方向相反");
+    w.unmount();
+  });
+
+  it("normal_source_selection_has_no_alert_and_basis_is_expandable", async () => {
+    // A 类（明细逐项覆盖汇总，含完全相等）是正常来源选择：不弹告警；
+    // 依据放在可展开的统计说明里，由 UsageTable 渲染。
+    okMock({
+      query_summary: () =>
+        Promise.resolve({
+          ...reportA,
+          rollup_coverage: {
+            detail_buckets: 1,
+            rollup_buckets: 0,
+            covered_buckets: 0,
+            covered_detail_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+            detail_selected_buckets: 1,
+            conflict_kinds: [],
+            unresolved_buckets: 0,
+            unresolved_covered_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+          },
+        }),
+    });
+    const w = mountHost();
+    await flushPromises();
+    expect(api.collectionDiagnostics.value.clean).toBe(true);
+    expect(api.notices.value.find((n) => n.id === "rollup-source-conflict")).toBeUndefined();
+    expect(api.notices.value.find((n) => n.id === "collection")).toBeUndefined();
+    const texts = api.notices.value.map((n) => n.text).join("\n");
+    expect(texts, "正常来源选择不弹大段告警").not.toContain("本轮采集存在部分问题");
+    expect(api.collectionDiagnostics.value.selectionBasis).toContain("1");
     w.unmount();
   });
 });

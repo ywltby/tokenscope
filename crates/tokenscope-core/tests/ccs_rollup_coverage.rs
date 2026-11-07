@@ -531,8 +531,16 @@ fn details_within_rollup_request_count_trust_rollup_total() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 快照范围内的明细**超过**汇总声称的数量：汇总装不下它们 → 保留明细并
-/// 如实提示（汇总未纳入），不猜造、不相加。
+/// 快照范围内的明细与汇总**方向交叉**（请求数更多、用量更少）：保留明细并
+/// 给出明确冲突类型，不猜造、不相加。
+///
+/// 语义变化（2026-11-07）：这条用例过去断言 `report.warnings` 里出现
+/// "无法确认汇总能覆盖这些明细 / 汇总共 N token 未纳入"。该文案把统计来源
+/// 冲突塞进采集警告通道，前端会把它算成"本轮采集存在部分问题 / N 条采集
+/// 警告"，并用"未纳入若干 token"暗示同量数据全部丢失——这是本次修复的
+/// 误报。反例保留（保留明细、汇总不叠加、冲突仍须准确诊断），断言改为
+/// `RollupCoverage` 的结构化字段与明确冲突类型；界面独立显示，见
+/// `useUsageQuery.test.ts` 的 source_conflict_is_independent 用例。
 #[test]
 fn snapshot_era_details_exceeding_rollup_stay_unresolved_with_warning() {
     let dir = temp_dir("unresolved-exceed");
@@ -594,12 +602,18 @@ fn snapshot_era_details_exceeding_rollup_stay_unresolved_with_warning() {
     );
     assert_eq!(report.rollup_coverage.unresolved_buckets, 1);
     assert_eq!(report.rollup_coverage.covered_buckets, 0);
+    assert_eq!(
+        report.rollup_coverage.detail_selected_buckets, 0,
+        "交叉冲突不得被 A 类分支吞掉"
+    );
+    assert_eq!(
+        report.rollup_coverage.conflict_kinds,
+        vec!["opposed_requests_tokens".to_string()],
+        "4 请求多于 3、400 token 少于 500：请求数与用量方向相反"
+    );
     assert!(
-        report
-            .warnings
-            .iter()
-            .any(|w| w.contains("无法确认汇总能覆盖这些明细")),
-        "无法确认覆盖必须如实提示：{:?}",
+        report.warnings.is_empty(),
+        "统计来源冲突不并入采集警告：{:?}",
         report.warnings
     );
     std::fs::remove_dir_all(&dir).ok();
