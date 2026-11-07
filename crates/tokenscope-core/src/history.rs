@@ -1761,8 +1761,8 @@ impl HistoryDb {
     /// H06：读取日汇总快照（`None` = 全部应用）。
     ///
     /// 返回的是**已去重的来源快照**：CCS 已清理的请求明细在 TokenScope 仍可查，
-    /// 而日汇总只提供总量；查询侧据此决定每个 `(日, 应用, 等价模型)` 桶是
-    /// 用明细还是用汇总（见 `aggregate::select_rollup_contributions`）。
+    /// 而日汇总只提供总量；查询侧据此在 `(日, 应用, 等价模型, 来源时区)` 桶上
+    /// 做三向来源选择（见 `report::select_rollup_contributions` 与 §5.1）。
     pub fn daily_rollups(&self, app: Option<AgentKind>) -> Result<Vec<StoredRollup>> {
         let mut stmt = self.conn.prepare(
             "SELECT c.logical_source, c.day, c.source_tz, c.app, c.provider_id, c.model,

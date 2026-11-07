@@ -2160,14 +2160,11 @@ pub(crate) fn collect_detail_buckets(
 
 /// H06：日汇总桶的统计来源策略。
 ///
-/// 2026-11-05：两条分支合并为同一套**来源证据**判定——"整桶替换为汇总"会
-/// 丢掉不在 CCS 汇总里的纯原生请求（漏算），因此不再作为可选行为；枚举保留
-/// 以兼容既有调用方与前端参数映射。
+/// 桶级三向选择（2026-11-07）与这两个取值无关——"整桶替换为汇总"会丢掉
+/// 不在 CCS 汇总里的纯原生请求；枚举只保留给既有调用方与前端参数映射。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RollupBucketPolicy {
-    /// 默认（当前唯一行为）：桶内没有明细时用汇总；带 `ccs_request` 证据的
-    /// 明细请求数少于汇总请求数时以汇总为该范围总量，纯原生明细照常计入；
-    /// 无法确认时保留明细并提示。
+    /// 默认（当前唯一行为）：按桶在请求明细与日汇总之间做三向选择。
     #[default]
     PreferDetail,
     /// 保留取值以兼容旧参数；判定与 [`Self::PreferDetail`] 相同。
@@ -2175,15 +2172,17 @@ pub enum RollupBucketPolicy {
 }
 
 /// H06：桶选择结果——实际参与的汇总贡献 + 覆盖诊断。
+///
+/// 统计来源冲突一律走 [`crate::aggregate::RollupCoverage`] 的结构化字段，
+/// **不**写进 `SummaryReport.warnings`：后者由前端计入"采集警告"数，把
+/// 统计口径冲突说成采集失败是误报。
 #[derive(Debug)]
 pub struct RollupSelection {
     pub(crate) contributions: Vec<crate::aggregate::RollupContribution>,
     pub(crate) coverage: crate::aggregate::RollupCoverage,
-    pub(crate) warnings: Vec<String>,
-    /// 2026-11-05：明细被日汇总替代的桶。
-    ///
-    /// 聚合时只跳过这些桶内**带 CCS 来源证据**的明细事件（它们已计入汇总，
-    /// 不能再加一次）；纯原生明细与明细视图都不受影响。
+    /// B 类：日汇总补足了快照内明细的历史，这些桶内**不晚于覆盖起点**的
+    /// 明细已计入汇总，聚合时跳过以避免重复；起点之后的请求与明细视图
+    /// 都不受影响。跳过按来源快照时间边界，不看 `ccs_request` 来源标记。
     pub(crate) covered_detail: Vec<CoveredBucket>,
 }
 
@@ -2240,15 +2239,26 @@ fn rollup_in_bounds(r: &crate::history::StoredRollup, bounds: &TimeBounds) -> bo
 
 /// H06：按 `(CCS 原始统计日, 来源时区, 应用, 等价模型)` 桶决定统计来源。
 ///
-/// 规则（2026-11-05 定稿，见 `docs/stats-semantics.md` §5.1）：
+/// 规则（2026-11-07 三向选择，见 `docs/stats-semantics.md` §5.1）：
 /// - 桶内**没有**请求明细 → 使用已去重的日汇总（计入统计，费用未知）；
-/// - 桶内**带 `ccs_request` origin 的明细请求数** 少于整桶汇总请求数 → 汇总
-///   声称的请求比掌握来源证据的多，**汇总作为该范围总量**；带证据的明细不
-///   重复计入（`covered_detail` 供聚合跳过），纯原生明细与明细视图不受影响；
-/// - 带证据的明细请求数不少于汇总 → 无法确认覆盖关系：保留明细统计，汇总
-///   不追加，也不按差额造"剩余请求"，在报告中如实提示；
-/// - 覆盖判定**不使用**时间戳或"明细总数"作证明：快照之后新增的请求、恰好
-///   同数的不同请求集，都曾因此被误判（前者漏算、后者丢失汇总）；
+/// - 有明细时，比较**快照范围内明细**（`snapshot_requests` / 四桶）与整桶
+///   汇总（请求数 / 四桶），逐项比较而非只看 token 总和：
+///   - **A 明细逐项覆盖汇总**：请求数 ≥ 汇总且四桶每项 ≥ 汇总（含完全相等）
+///     → 按请求明细统计，汇总不叠加；完全相等也优先明细，保留项目、时间、
+///     分档与请求级计价。这是统计来源选择规则，**不**声称仅凭计数与总量就
+///     证明两侧是同一批请求。这类桶不计 `unresolved_buckets`、不产生
+///     `covered_detail`，也不产生只因未使用汇总而出现的
+///     `legacy_boundary` / `multi_batch_boundary` 提示。
+///   - **B 汇总补足明细**：请求数 ≤ 汇总且四桶每项 ≤ 汇总（但不完全相等）
+///     → 保留"信任 CCS 日汇总"规则，汇总补足被清理会话的历史；快照之后
+///     新增的请求按独立新增照常计入（1000 / 100 → 1000，再 +200 → 1200）。
+///   - **C 交叉冲突**：请求数与四桶方向交叉（如明细 input 更大、output 更小，
+///     或请求数更多而用量更少）→ 不用总 token 猜测、不逐字段取最大、不捏造
+///     差额请求；按请求明细回退，汇总不叠加，并给出**明确冲突类型**的独立
+///     统计诊断（`conflict_kinds`），不计入采集警告。
+/// - 判定只用**快照范围内**明细：快照之后新增的请求不用于证明旧汇总已被
+///   覆盖（它们本就不在那份汇总里）。来源标记（`ccs_request`）不参与判定——
+///   CCS 从文件取得用量，与是否承担路由无关。
 /// - 按日筛选/分组而查询时区 ≠ 来源日时区时，日汇总**不参与**（返回可恢复
 ///   提示：切回来源时区或只看请求明细），绝不把来源日期当作午夜事件重切；
 /// - U01：时刻范围（滚动 24h / 自定义到分钟）**一律不选取**日汇总桶（日粒度
@@ -2266,13 +2276,12 @@ pub(crate) fn select_rollup_contributions(
     bounds: &TimeBounds,
     mode: RollupsMode,
 ) -> Result<RollupSelection> {
-    // 2026-11-05：策略枚举保留给调用方，但两条分支现在都是同一套证据判定
-    // ——"整桶替换为汇总"会丢掉不在 CCS 汇总里的纯原生请求（漏算），不再提供。
+    // 策略枚举保留给调用方；桶级三向选择与取值无关（"整桶替换为汇总"会
+    // 丢掉不在 CCS 汇总里的纯原生请求，不再提供）。
     let _ = policy;
     let mut selection = RollupSelection {
         contributions: Vec::new(),
         coverage: crate::aggregate::RollupCoverage::default(),
-        warnings: Vec::new(),
         covered_detail: Vec::new(),
     };
     if rollups.is_empty() || mode == RollupsMode::DetailOnly {
@@ -2379,10 +2388,14 @@ pub(crate) fn select_rollup_contributions(
         }
     }
     // 同桶多批次（最早/最晚快照时刻不同）的桶数：边界只能取最早时刻，落在
-    // 批次之间的明细已按明细计入，可能与较晚批次重复——必须如实披露。
+    // 批次之间的明细已按明细计入，可能与较晚批次重复——只在**采用汇总**的
+    // 桶上披露（A/C 类没有使用汇总，不会因未使用汇总而产生这类提示）。
     let mut multi_batch_buckets: u64 = 0;
-    // 没有可核对快照时刻的桶（旧语义批次 / 缺批次关联）无法确认边界：整桶信任并披露。
+    // 没有可核对快照时刻的桶（旧语义批次 / 缺批次关联）无法确认边界：同上。
     let mut legacy_boundary_buckets: u64 = 0;
+    // C 类交叉冲突的明确类型（稳定键、去重排序，供界面独立显示）。
+    let mut conflict_kinds: std::collections::BTreeSet<&'static str> =
+        std::collections::BTreeSet::new();
     for bucket in buckets.into_values() {
         let empty: std::collections::HashMap<(String, String, String), DetailBucketStat> =
             std::collections::HashMap::new();
@@ -2401,30 +2414,46 @@ pub(crate) fn select_rollup_contributions(
             push_rollup_rows(&mut selection, &bucket.rows);
             continue;
         }
-        // 2026-11-05（第三轮）：按用户约定**信任 CCS 日汇总**。以**来源快照
-        // 建立时刻**（`CcsSource::open` 时捕获的下界，经 `import_runs.started_utc`
-        // 落库）为界，把桶内明细分两类：
-        // - 快照内（事件时间 <= 起点）：可能已包含在汇总里。经 CCS 路由的请求
-        //   在 TS 侧往往只剩原生采集记录（没有 `ccs_request` 标记），与"确实
-        //   不在汇总里"无法区分——按信任口径视为已含于汇总，不重复计入；
-        // - 快照之后（事件时间 > 起点）：不可能在快照里（快照在更早时刻已固定）
-        //   → 独立新增，照常计入。
-        // 只有"快照内明细"能被汇总吸收：请求数与用量都不超过汇总时才采用汇总；
-        // 超过说明明细里有汇总装不下的请求 → 保留明细并如实提示（不猜造、
-        // 不相加）。起点缺失（旧库没有导入批次）时整桶明细都按快照内处理。
-        let within_counts = detail.snapshot_requests <= bucket.requests;
-        let within_tokens = detail.snapshot_tokens.input <= bucket.tokens.input
-            && detail.snapshot_tokens.output <= bucket.tokens.output
-            && detail.snapshot_tokens.cache_write <= bucket.tokens.cache_write
-            && detail.snapshot_tokens.cache_read <= bucket.tokens.cache_read;
-        // 边界不可确认（v0.7.0 旧语义批次）→ 有效起点为 None：整桶按"可能已含于
-        // 汇总"处理，不拿旧时间做判定，并另行披露可能的少算。
-        let effective_since = if bucket.boundary_unknown {
-            None
-        } else {
-            bucket.since
-        };
-        if within_counts && within_tokens {
+        // 三向选择：只比较**快照范围内**明细（`snapshot_*`）与整桶汇总。
+        // 快照之后新增的请求不参与证明旧汇总已被覆盖——它们本就不在那份
+        // 汇总里，按独立新增照常计入（B 类由 `covered_detail` 的时间边界
+        // 保证）。逐项比较请求数与四桶，绝不用总 token 大小猜测。
+        let d = &detail.snapshot_tokens;
+        let r = &bucket.tokens;
+        let any_token_gt = d.input > r.input
+            || d.output > r.output
+            || d.cache_write > r.cache_write
+            || d.cache_read > r.cache_read;
+        let any_token_lt = d.input < r.input
+            || d.output < r.output
+            || d.cache_write < r.cache_write
+            || d.cache_read < r.cache_read;
+        let requests_ge = detail.snapshot_requests >= bucket.requests;
+        let requests_le = detail.snapshot_requests <= bucket.requests;
+        // A：请求数 ≥ 汇总且四桶逐项 ≥ 汇总（含完全相等）。
+        let detail_covers = requests_ge && !any_token_lt;
+        // B：请求数 ≤ 汇总且四桶逐项 ≤ 汇总，但**不是**完全相等（完全相等
+        // 归 A，优先保留请求明细及其项目/分档/请求级计价信息）。
+        let exactly_equal = requests_ge && requests_le && !any_token_gt && !any_token_lt;
+        let rollup_supplements = requests_le && !any_token_gt && !exactly_equal;
+        if detail_covers {
+            // A：按请求明细统计，汇总不叠加。不产生 covered_detail（聚合不会
+            // 跳过任何明细），不计 unresolved，也不产生只因未使用汇总而
+            // 出现的 legacy_boundary / multi_batch_boundary 提示。
+            // 这是来源选择规则，不声称已证明两侧请求集合完全相同。
+            selection.coverage.detail_buckets += 1;
+            selection.coverage.detail_selected_buckets += 1;
+            continue;
+        }
+        if rollup_supplements {
+            // B：保留"信任 CCS 日汇总"规则——汇总补足已被清理会话的历史。
+            // `covered_detail` 只跳过快照内（不晚于覆盖起点）的明细，快照
+            // 之后新增的请求照常计入（1000 / 100 → 1000，再 +200 → 1200）。
+            let effective_since = if bucket.boundary_unknown {
+                None
+            } else {
+                bucket.since
+            };
             selection.coverage.covered_buckets += 1;
             if bucket.boundary_unknown {
                 legacy_boundary_buckets += 1;
@@ -2434,7 +2463,6 @@ pub(crate) fn select_rollup_contributions(
                 .covered_detail_tokens
                 .checked_add(&detail.snapshot_tokens)
                 .ok_or_else(|| anyhow::anyhow!("被汇总替代的明细 token 累计超出可表示范围"))?;
-            // 同桶多批次：最早与最晚快照时刻不同 → 批次之间可能重复，需披露。
             if !bucket.boundary_unknown
                 && let (Some(first), Some(latest)) = (bucket.since, bucket.since_latest)
                 && latest > first
@@ -2449,18 +2477,28 @@ pub(crate) fn select_rollup_contributions(
                 model_identity: bucket.model_identity,
                 since: effective_since,
             });
-        } else {
-            // 快照内的明细比汇总声称的更多/更大：汇总无法吸收它们 → 保留明细
-            // 并如实提示（汇总未纳入），不删除事实、不把两者相加。
-            selection.coverage.detail_buckets += 1;
-            selection.coverage.unresolved_buckets += 1;
-            selection.coverage.unresolved_covered_tokens = selection
-                .coverage
-                .unresolved_covered_tokens
-                .checked_add(&bucket.tokens)
-                .ok_or_else(|| anyhow::anyhow!("未解决覆盖的汇总 token 累计超出可表示范围"))?;
+            continue;
         }
+        // C：请求数与四桶方向交叉，汇总与明细都不是对方的超集。按请求明细
+        // 回退（不逐字段取最大、不捏造差额请求、不把两者相加），并给出明确
+        // 冲突类型的独立统计诊断；不写进采集警告。
+        selection.coverage.detail_buckets += 1;
+        selection.coverage.unresolved_buckets += 1;
+        selection.coverage.unresolved_covered_tokens = selection
+            .coverage
+            .unresolved_covered_tokens
+            .checked_add(&bucket.tokens)
+            .ok_or_else(|| anyhow::anyhow!("交叉冲突的汇总 token 累计超出可表示范围"))?;
+        let kind = if any_token_gt && any_token_lt {
+            // 四桶方向交叉：例如明细 input 更大、output 更小。
+            "crossed_token_buckets"
+        } else {
+            // 请求数与用量呈相反关系：例如请求数更多而用量更少。
+            "opposed_requests_tokens"
+        };
+        conflict_kinds.insert(kind);
     }
+    selection.coverage.conflict_kinds = conflict_kinds.into_iter().map(|k| k.to_string()).collect();
     if !mismatched.is_empty() {
         let list = mismatched.join("、");
         selection.coverage.timezone_mismatch = Some(format!(
@@ -2486,14 +2524,9 @@ pub(crate) fn select_rollup_contributions(
              可能与较晚批次的汇总重复；这些桶请对照请求明细核对。"
         ));
     }
-    if selection.coverage.unresolved_buckets > 0 {
-        selection.warnings.push(format!(
-            "有 {} 个日期/模型桶在来源快照范围内的明细超过了日汇总声称的数量，\
-             无法确认汇总能覆盖这些明细；这些桶按请求明细统计，汇总共 {} token 未纳入（不直接相加，避免重复计费）",
-            selection.coverage.unresolved_buckets,
-            selection.coverage.unresolved_covered_tokens.total()
-        ));
-    }
+    // 交叉冲突的结构化诊断由 `RollupCoverage` 的 `unresolved_buckets` /
+    // `conflict_kinds` 承载，界面独立显示；**不**写进 `SummaryReport.warnings`
+    // （那会被计入"本轮采集存在部分问题 / N 条采集警告"，是误报）。
     Ok(selection)
 }
 
@@ -2661,8 +2694,9 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
         agg.totals.requests,
         t.elapsed().as_millis()
     );
-    let mut warnings = snapshot.warnings();
-    warnings.extend(selection.warnings.iter().cloned());
+    // 统计来源冲突不并入采集警告：后者由前端计入"采集警告数"，交叉冲突
+    // 是统计口径诊断，独立走 `rollup_coverage` 的结构化字段。
+    let warnings = snapshot.warnings();
     Ok(SummaryReport {
         query_id: snapshot.query_id.clone(),
         pricing_revision: snapshot.pricing_revision.clone(),

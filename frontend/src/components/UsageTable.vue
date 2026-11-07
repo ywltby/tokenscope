@@ -167,6 +167,20 @@ const sourceLines = computed(() =>
     parts: s.parts,
   })),
 );
+
+/** 可展开的统计来源说明：正常选择不是告警，依据只在这里给出。 */
+const selectionNotes = computed<string[]>(() => {
+  const coverage = props.report.rollup_coverage;
+  if (!coverage) return [];
+  const notes: string[] = [];
+  if ((coverage.detail_selected_buckets ?? 0) > 0) {
+    notes.push(t("dashboard.selectionBasis", { count: coverage.detail_selected_buckets }));
+  }
+  if ((coverage.conflict_kinds ?? []).length > 0) {
+    notes.push(t("dashboard.sourceConflictBasis"));
+  }
+  return notes;
+});
 </script>
 
 <template>
@@ -205,6 +219,17 @@ const sourceLines = computed(() =>
           >：{{ s.parts.join(" · ") }}
         </div>
         <!-- R08：warnings 已在页面级采集诊断通知展示，此处不再重复 -->
+      </NCollapseItem>
+      <!-- 2026-11-07：统计来源选择是正常统计口径，不弹告警；依据放在这层
+           可展开的统计说明里（A 类按明细、B 类按汇总补足）。 -->
+      <NCollapseItem
+        v-if="selectionNotes.length > 0"
+        :title="t('dashboard.selectionStatsNote')"
+        name="selection"
+      >
+        <div v-for="(note, i) in selectionNotes" :key="i" class="source-line">
+          {{ note }}
+        </div>
       </NCollapseItem>
     </NCollapse>
   </section>
