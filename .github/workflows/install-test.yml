@@ -63,7 +63,7 @@ jobs:
       - name: Build production Windows x64 NSIS (without acceptance)
         # Tauri CLI 下载 NSIS 工具包无重试：github.com 网关 504 抖动会让
         # 7 分钟构建整体报废。同一步骤最多重试 2 次（瞬断恢复，不绕验收）。
-        uses: nick-fields/retry@ce71cc2afa81f1a8e1cc3a1e5e5db3d6ea36a502 # v3
+        uses: nick-fields/retry@1c62e0697831d444be410bc770cc1576ab22de08 # v3
         with:
           timeout_minutes: 20
           max_attempts: 3
