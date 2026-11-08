@@ -694,6 +694,29 @@ class NetworkRetryCase(unittest.TestCase):
             baselines.with_network_retry(action, sleep=sleeps.append)
         self.assertEqual((len(calls), sleeps), (1, []))
 
+    def test_gateway_timeouts_retry_then_succeed(self):
+        calls, sleeps = [], []
+
+        def action():
+            calls.append(1)
+            if len(calls) < 3:
+                raise HTTPError("https://api.github.com/x", 504, "Gateway Timeout", None, None)
+            return "ok"
+
+        self.assertEqual(baselines.with_network_retry(action, sleep=sleeps.append), "ok")
+        self.assertEqual((len(calls), sleeps), (3, [1, 2]))
+
+    def test_gateway_timeout_exhausts_attempts_and_raises(self):
+        calls, sleeps = [], []
+
+        def action():
+            calls.append(1)
+            raise HTTPError("https://api.github.com/x", 503, "Service Unavailable", None, None)
+
+        with self.assertRaises(HTTPError):
+            baselines.with_network_retry(action, sleep=sleeps.append)
+        self.assertEqual((len(calls), sleeps), (baselines.NETWORK_ATTEMPTS, [1, 2]))
+
 
 class PrivacyRevisionLexerCase(RegistryCase):
     """二十轮复核 P3：修订号提取的 Rust 词法回归——调用**真实**提取函数
