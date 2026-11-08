@@ -68,7 +68,14 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
       - name: Build production Windows x64 NSIS (without acceptance)
-        run: node ./frontend/node_modules/@tauri-apps/cli/tauri.js build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
+        # 同 install-test：NSIS 工具包下载 504 网关抖动按瞬断重试。
+        uses: nick-fields/retry@ce71cc2afa81f1a8e1cc3a1e5e5db3d6ea36a502 # v3
+        with:
+          timeout_minutes: 20
+          max_attempts: 3
+          retry_wait_seconds: 30
+          shell: pwsh
+          command: node ./frontend/node_modules/@tauri-apps/cli/tauri.js build --ci --bundles nsis --target x86_64-pc-windows-msvc -- --locked
       - name: Collect installer and checksums
         run: |
           python -B scripts/release_assets.py print-persistent-format --output persistent-format.json
