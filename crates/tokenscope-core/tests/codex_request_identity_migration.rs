@@ -27,6 +27,8 @@ use tokenscope::aggregate::GroupBy;
 use tokenscope::history::{HistoryDb, PARSER_REVISION};
 use tokenscope::report::{SummaryOptions, SummaryReport, summary};
 
+use rusqlite::Connection;
+
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn temp_dir(tag: &str) -> PathBuf {
@@ -523,5 +525,290 @@ fn unmappable_legacy_fact_is_kept_when_source_missing() {
     let r = report(&dir, &root);
     assert_eq!(r.totals.requests, 1, "无证据不动旧事实");
     assert_eq!(history_rows(&dir), before, "库内容逐字段不变");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ── 复审反例 1（2026-11-08）：旧弱事实携带多个 count 来源 ─────────────────
+//
+// 旧库增量累计：两个同四桶响应在旧实现下各出一条旧事实，第二条因弱指纹
+// 相同被合并进第一条（真实写入 API 分两次批次，同一弱别名指向同一行，
+// 该行保留**两条** count 来源）。升级后两个响应的镜像键分别对应各自的
+// 来源行，但两键都指向同一条事实——第二个响应不得被已升级为第一个响应
+// 的行吸收。预期 2200/2；缺陷形态 1100/1（resp2 被 Stale 静默丢弃）。
+
+/// 构造旧库"一条弱事实 + 多条 count 来源"：按真实历史写入路径分多次
+/// `write_batch`——第一条建立事实，后续条目经弱别名命中同一条事实
+/// （Stale 不改值）并把各自的来源键登记到该行。
+fn seed_multi_origin_legacy_fact(dir: &Path, file: &Path, entries: &[(&str, u64)]) -> i64 {
+    let db = HistoryDb::open(&dir.join("data").join("history.db")).unwrap();
+    for (ts, line) in entries {
+        let write = legacy_write(&legacy_usage(ts, "s", file, *line));
+        db.write_batch(&[write]).unwrap();
+    }
+    let rows = history_rows(dir);
+    assert_eq!(rows.len(), 1, "旧弱身份把多条来源合并为一条事实");
+    drop(db);
+    rows[0].id
+}
+
+/// 两来源旧行升级拆分：断言请求/四桶/身份/来源归属。
+#[test]
+fn review_old_merged_fact_with_multiple_origins_splits() {
+    let dir = temp_dir("review-multi-origin");
+    let root = dir.join("codex");
+    let data = dir.join("data");
+    let ts = "2026-11-07T16:00:00Z";
+    let ts2 = offset_ms(ts, 1000);
+    let file = write_rollout(
+        &root,
+        "rollout-origins",
+        &[
+            meta("s", ts),
+            ctx(ts),
+            record("s", "t1", "r1", USAGE_1100, ts),
+            count(USAGE_1100, USAGE_1100, &offset_ms(ts, 1)),
+            record("s", "t2", "r2", USAGE_1100, &ts2),
+            count(USAGE_1100, USAGE_1100, &offset_ms(&ts2, 1)),
+        ],
+    );
+    let old_id = seed_multi_origin_legacy_fact(
+        &dir,
+        &file,
+        &[(&offset_ms(ts, 1), 3), (&offset_ms(&ts2, 1), 5)],
+    );
+    // 升级前旧事实确实带两条来源。
+    {
+        let connection = Connection::open(data.join("history.db")).unwrap();
+        let origins: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM event_origins WHERE event_id = ?1",
+                [old_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(origins, 2, "旧行保留两条 count 来源");
+    }
+    let out = report(&dir, &root);
+    assert_eq!(
+        out.totals.requests, 2,
+        "不同强响应必须拆分，尽管旧事实带两条来源"
+    );
+    assert_eq!(out.totals.tokens.total(), 2200);
+    let after = history_rows(&dir);
+    assert_eq!(after.len(), 2, "旧 1 条升级 + 新增 1 条 = 2 条，不残留");
+    let upgraded = after.iter().find(|e| e.id == old_id).expect("旧行 id 保留");
+    assert_eq!(upgraded.record_id.as_deref(), Some("r1"), "旧行升级为 r1");
+    assert_eq!(upgraded.tokens.total(), 1100, "升级不叠加 token");
+    let added = after.iter().find(|e| e.id != old_id).unwrap();
+    assert_eq!(added.record_id.as_deref(), Some("r2"), "r2 独立成事实");
+    assert_eq!(added.tokens.total(), 1100);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 三个响应的旧行（三条来源）升级拆分：3300/3。
+#[test]
+fn review_three_origins_old_fact_splits_into_three() {
+    let dir = temp_dir("review-three-origin");
+    let root = dir.join("codex");
+    let ts = "2026-11-07T16:00:00Z";
+    let ts2 = offset_ms(ts, 1000);
+    let ts3 = offset_ms(ts, 2000);
+    let file = write_rollout(
+        &root,
+        "rollout-three",
+        &[
+            meta("s", ts),
+            ctx(ts),
+            record("s", "t1", "r1", USAGE_1100, ts),
+            count(USAGE_1100, USAGE_1100, &offset_ms(ts, 1)),
+            record("s", "t2", "r2", USAGE_1100, &ts2),
+            count(USAGE_1100, USAGE_1100, &offset_ms(&ts2, 1)),
+            record("s", "t3", "r3", USAGE_1100, &ts3),
+            count(USAGE_1100, USAGE_1100, &offset_ms(&ts3, 1)),
+        ],
+    );
+    let old_id = seed_multi_origin_legacy_fact(
+        &dir,
+        &file,
+        &[
+            (&offset_ms(ts, 1), 3),
+            (&offset_ms(&ts2, 1), 5),
+            (&offset_ms(&ts3, 1), 7),
+        ],
+    );
+    let out = report(&dir, &root);
+    assert_eq!(out.totals.requests, 3);
+    assert_eq!(out.totals.tokens.total(), 3300);
+    let after = history_rows(&dir);
+    assert_eq!(after.len(), 3);
+    let upgraded = after.iter().find(|e| e.id == old_id).unwrap();
+    assert_eq!(upgraded.record_id.as_deref(), Some("r1"));
+    let mut ids: Vec<&str> = after
+        .iter()
+        .filter_map(|e| e.record_id.as_deref())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec!["r1", "r2", "r3"]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 镜像命中顺序反转（旧事实先被 r2 的镜像命中，r1 后到）：仍恰好 2 条。
+/// 分批升级（第一轮只写一半日志、第二轮写全）与重扫、重启幂等。
+#[test]
+fn review_reversed_upgrade_order_and_replays_stay_exact() {
+    let dir = temp_dir("review-reversed");
+    let root = dir.join("codex");
+    let ts = "2026-11-07T16:00:00Z";
+    let ts2 = offset_ms(ts, 1000);
+    let lines = vec![
+        meta("s", ts),
+        ctx(ts),
+        record("s", "t1", "r1", USAGE_1100, ts),
+        count(USAGE_1100, USAGE_1100, &offset_ms(ts, 1)),
+        record("s", "t2", "r2", USAGE_1100, &ts2),
+        count(USAGE_1100, USAGE_1100, &offset_ms(&ts2, 1)),
+    ];
+    let file = write_rollout(&root, "rollout-rev", &lines);
+    let old_id = seed_multi_origin_legacy_fact(
+        &dir,
+        &file,
+        &[(&offset_ms(ts, 1), 3), (&offset_ms(&ts2, 1), 5)],
+    );
+
+    // 分批：第一轮只写前半（meta/ctx/r1/count）——r2 的镜像不在场。
+    let first_half: Vec<String> = lines[..4]
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect();
+    std::fs::write(&file, first_half.join("\n") + "\n").unwrap();
+    let r1 = report(&dir, &root);
+    assert_eq!(r1.totals.requests, 1, "第一批只有 r1");
+    let mid = history_rows(&dir);
+    assert_eq!(mid.len(), 1);
+    assert_eq!(mid[0].record_id.as_deref(), Some("r1"), "旧行升级为 r1");
+
+    // 第二轮：写全量日志（r2 的 record/count 出现）。
+    write_rollout(&root, "rollout-rev", &lines);
+    let r2 = report(&dir, &root);
+    assert_eq!(r2.totals.requests, 2, "r2 独立入账，不被已升级行吸收");
+    assert_eq!(r2.totals.tokens.total(), 2200);
+    let after = history_rows(&dir);
+    assert_eq!(after.len(), 2);
+    let upgraded = after.iter().find(|e| e.id == old_id).unwrap();
+    assert_eq!(
+        upgraded.record_id.as_deref(),
+        Some("r1"),
+        "先到的 r1 保持代表"
+    );
+    let added = after.iter().find(|e| e.id != old_id).unwrap();
+    assert_eq!(added.record_id.as_deref(), Some("r2"));
+
+    // 重扫（refresh）与重启幂等：数字与库行不增长。
+    let mut refresh_opts = opts(&dir, &root);
+    refresh_opts.refresh = true;
+    let r3 = summary(&refresh_opts).unwrap();
+    assert_eq!(r3.totals.requests, 2);
+    assert_eq!(history_rows(&dir).len(), 2);
+    assert_eq!(report(&dir, &root).totals.requests, 2);
+    assert_eq!(history_rows(&dir).len(), 2);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ── 复审反例 2（2026-11-08）：compaction 的镜像行号 ────────────────────────
+//
+// 非零 record + 零 last 的 token_count：旧解析器从**挂起的 record** 出数，
+// 事件来源行号 = record 行；缺陷形态里 legacy_mirror 返回了 count 行号——
+// 镜像键错位 → 旧行不升级、新强记录另插一行 → 旧 1100/1 变 2200/2。
+// 正确行为：升级复用旧行（id 保留、来源行 = record 行），始终 1100/1。
+
+#[test]
+fn review_compaction_legacy_mapping_no_extra_fact() {
+    let dir = temp_dir("review-compaction");
+    let root = dir.join("codex");
+    let ts = "2026-11-07T16:00:00Z";
+    let zero = Usage {
+        input: 0,
+        cached: 0,
+        cache_write: 0,
+        output: 0,
+        reasoning: 0,
+        total: 0,
+    };
+    let file = write_rollout(
+        &root,
+        "rollout-compaction",
+        &[
+            meta("s", ts),
+            ctx(ts),
+            record("s", "t", "r", USAGE_1100, ts),
+            // compaction：last 全零，旧解析器按挂起 record 出数（来源行 2）。
+            count(zero, USAGE_1100, &offset_ms(ts, 1)),
+        ],
+    );
+    // 旧事实：ts = record 行时刻、来源行 = record 行（0-based 2）。
+    let db = HistoryDb::open(&dir.join("data").join("history.db")).unwrap();
+    let old_id = {
+        let seeded = db
+            .write_batch(&[legacy_write(&legacy_usage(ts, "s", &file, 2))])
+            .unwrap();
+        assert_eq!(seeded.inserted, 1);
+        history_rows(&dir)[0].id
+    };
+    drop(db);
+
+    let out = report(&dir, &root);
+    assert_eq!(out.totals.requests, 1, "compaction 升级后仍是一条事实");
+    assert_eq!(out.totals.tokens.total(), 1100);
+    let after = history_rows(&dir);
+    assert_eq!(after.len(), 1, "旧行升级复用，不残留第二条");
+    let upgraded = after.iter().find(|e| e.id == old_id).unwrap();
+    assert_eq!(upgraded.record_id.as_deref(), Some("r"), "旧行升级为强身份");
+    assert_eq!(
+        upgraded.ts,
+        ts.parse().unwrap(),
+        "升级后 ts = record 行时刻"
+    );
+
+    // 重复采集与重启：幂等，不增长。
+    assert_eq!(report(&dir, &root).totals.requests, 1);
+    assert_eq!(history_rows(&dir).len(), 1);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ── 对照：正常非零配对的镜像仍指向 count 行（不要全局替换行号规则）──────
+
+#[test]
+fn review_normal_pair_mapping_still_uses_count_line() {
+    let dir = temp_dir("review-normal-pair");
+    let root = dir.join("codex");
+    let ts = "2026-11-07T16:00:00Z";
+    let count_ts = offset_ms(ts, 1);
+    let file = write_rollout(
+        &root,
+        "rollout-normal",
+        &[
+            meta("s", ts),
+            ctx(ts),
+            record("s", "t", "r", USAGE_1100, ts),
+            count(USAGE_1100, USAGE_1100, &count_ts),
+        ],
+    );
+    // 旧事实形态：旧解析器按 count 出数（ts = count 行时刻、来源行 3）。
+    let db = HistoryDb::open(&dir.join("data").join("history.db")).unwrap();
+    let old_id = {
+        let seeded = db
+            .write_batch(&[legacy_write(&legacy_usage(&count_ts, "s", &file, 3))])
+            .unwrap();
+        assert_eq!(seeded.inserted, 1);
+        history_rows(&dir)[0].id
+    };
+    drop(db);
+    let out = report(&dir, &root);
+    assert_eq!(out.totals.requests, 1);
+    assert_eq!(out.totals.tokens.total(), 1100);
+    let after = history_rows(&dir);
+    assert_eq!(after.len(), 1, "正常配对：旧行经 count 行镜像升级，无新行");
+    let upgraded = after.iter().find(|e| e.id == old_id).unwrap();
+    assert_eq!(upgraded.record_id.as_deref(), Some("r"));
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -960,3 +960,126 @@ fn truncated_file_appended_recounts_consistently() {
     assert_eq!(report(&dir, &root).totals.requests, 2);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// 强 record A 后出现**新 turn_context**，随后是独立的 count-only 请求 B、C：
+/// 新 turn_context 终结 A 的配对窗口（其后不可能再出现 A 的配对 count——
+/// 同一响应的观察在下一 turn 开始前就已落盘），B、C 是无强记录旧格式的
+/// 独立请求，必须照常按 count 出数。
+///
+/// 复审反例（2026-11-08）：悬挂的 `last_strong_observation` 在遇到不同用量
+/// count 时既不消费也不清理，turn_context 也不终结配对状态——B、C 被持续
+/// 丢弃，实际 1100/1（应 6600/3）。
+#[test]
+fn dangling_strong_observation_does_not_swallow_followup_counts() {
+    let dir = temp_dir("dangling-obs");
+    let root = dir.join("codex");
+    let s = "sess-dangling";
+    let b = Usage {
+        input: 2000,
+        cached: 1200,
+        cache_write: 200,
+        output: 200,
+        reasoning: 80,
+        total: 2200,
+    };
+    let c = Usage {
+        input: 3000,
+        cached: 1800,
+        cache_write: 300,
+        output: 300,
+        reasoning: 120,
+        total: 3300,
+    };
+    let lines = vec![
+        meta(s),
+        ctx("2026-11-07T16:00:00.000Z"),
+        Record {
+            ts: "2026-11-07T16:00:01.000Z",
+            session: s,
+            turn: "turn-1",
+            response: "resp_synthetic_1",
+            usage: USAGE_1100,
+        }
+        .to_json(),
+        // A 的配对 count 缺席（截断/丢行等异常）；turn_context 之后的
+        // count 与 A 无关。
+        ctx("2026-11-07T16:00:02.000Z"),
+        Count {
+            ts: "2026-11-07T16:00:02.100Z",
+            last: b,
+            total: b,
+        }
+        .to_json(),
+        Count {
+            ts: "2026-11-07T16:00:03.100Z",
+            last: c,
+            total: c,
+        }
+        .to_json(),
+    ];
+    write_rollout(&root, "rollout-dangling", &lines);
+
+    let r = report(&dir, &root);
+    assert_eq!(
+        r.totals.requests, 3,
+        "A(强记录) + B/C(count-only) 各计一次；悬挂观察不得吞掉后续请求"
+    );
+    assert_eq!(r.totals.tokens.total(), 6600);
+    // 重启视角一致。
+    assert_eq!(report(&dir, &root).totals.requests, 3);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 强 record A 后，**另一响应 B 的 record+count 完整对**照常入账：B 的 count
+/// 与 A 的强观察用量不同，不得吞掉 B 的记录——但 B 自己的 record 已经出数，
+/// B 的配对 count 也不能二次出数（B 的 record 在 count 之前重置了观察）。
+#[test]
+fn new_response_pair_after_strong_record_without_count_counts_once() {
+    let dir = temp_dir("obs-reset");
+    let root = dir.join("codex");
+    let s = "sess-obs-reset";
+    let b = Usage {
+        input: 2000,
+        cached: 1200,
+        cache_write: 200,
+        output: 200,
+        reasoning: 80,
+        total: 2200,
+    };
+    let lines = vec![
+        meta(s),
+        ctx("2026-11-07T16:00:00.000Z"),
+        Record {
+            ts: "2026-11-07T16:00:01.000Z",
+            session: s,
+            turn: "turn-1",
+            response: "resp_synthetic_1",
+            usage: USAGE_1100,
+        }
+        .to_json(),
+        // A 的配对 count 缺席。
+        Record {
+            ts: "2026-11-07T16:00:02.000Z",
+            session: s,
+            turn: "turn-1",
+            response: "resp_synthetic_2",
+            usage: b,
+        }
+        .to_json(),
+        Count {
+            ts: "2026-11-07T16:00:02.001Z",
+            last: b,
+            total: b,
+        }
+        .to_json(),
+    ];
+    write_rollout(&root, "rollout-obs-reset", &lines);
+
+    let r = report(&dir, &root);
+    assert_eq!(
+        r.totals.requests, 2,
+        "A 与 B 各计一次，B 的配对 count 不重复"
+    );
+    assert_eq!(r.totals.tokens.total(), 3300);
+    std::fs::remove_dir_all(&dir).ok();
+}

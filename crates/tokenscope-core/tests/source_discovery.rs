@@ -35,23 +35,65 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 /// Windows 上创建目录符号链接需要 SeCreateSymbolicLinkPrivilege（管理员或
-/// 开发者模式）。无该特权的环境里这两类用例无法构造前置条件——显式跳过并
-/// 说明原因，不伪装通过；GitHub runner 有特权，照常执行真实断言。
+/// 开发者模式）。探针只把**确证的** `ERROR_PRIVILEGE_NOT_HELD`（os error
+/// 1314）归为"环境无特权"；其他错误（磁盘、防病毒、竞态等）如实失败，
+/// 不冒充"缺权限"。
+///
+/// 豁免边界（复审修订 2026-11-09）：
+/// - **本地**（`CI` 未设置）：无特权时允许跳过，但必须打印可识别的
+///   `SYMLINK-TESTS-SKIPPED:` 标记，本地结果可与世界区分；
+/// - **CI**（`CI` 设置，GitHub runner 必有特权）：无特权**直接 panic**——
+///   环境不满足就是失败，不允许静默放行，测试架不依赖"return 记为 pass"。
+///
+/// 探针只创建/清理自己本次新建且确认归属的路径；创建或清理失败如实报告。
 #[cfg(windows)]
 fn windows_symlink_privilege_available() -> bool {
-    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let probe_target = temp_dir("symlink-probe-target");
-        let probe_link = probe_target
-            .parent()
-            .unwrap()
-            .join(format!("symlink-probe-link-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&probe_link);
-        let ok = std::os::windows::fs::symlink_dir(&probe_target, &probe_link).is_ok();
-        let _ = std::fs::remove_dir_all(&probe_link);
-        let _ = std::fs::remove_dir_all(&probe_target);
-        ok
-    })
+    use std::io::ErrorKind;
+    static CACHED: std::sync::OnceLock<Result<(), std::io::Error>> = std::sync::OnceLock::new();
+    match CACHED.get_or_init(|| {
+        let workspace = temp_dir("symlink-probe");
+        let probe_target = workspace.join("target");
+        std::fs::create_dir_all(&probe_target)
+            .unwrap_or_else(|e| panic!("符号链接探针：无法创建目标目录 {:?}: {e}", probe_target));
+        let probe_link = workspace.join("link");
+        let created = std::os::windows::fs::symlink_dir(&probe_target, &probe_link);
+        match created {
+            Ok(()) => {
+                // 清理失败是真实问题：留下符号链接会污染后续轮次，如实失败。
+                if let Err(e) = std::fs::remove_dir_all(&workspace) {
+                    return Err(std::io::Error::other(format!(
+                        "符号链接探针清理失败（{:?}）：{e}",
+                        workspace
+                    )));
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&workspace);
+                Err(e)
+            }
+        }
+    }) {
+        Ok(()) => true,
+        Err(e) => {
+            let privilege_missing =
+                matches!(e.kind(), ErrorKind::PermissionDenied) || e.raw_os_error() == Some(1314);
+            if !privilege_missing {
+                panic!("符号链接能力探针失败（非权限问题，必须如实失败）：{e}");
+            }
+            if std::env::var_os("CI").is_some() {
+                panic!(
+                    "CI 环境缺少符号链接创建特权（os error 1314）：\
+                     runner 必须能真实构造 junction 并执行隔离断言"
+                );
+            }
+            eprintln!(
+                "SYMLINK-TESTS-SKIPPED: 本机无 SeCreateSymbolicLinkPrivilege（os error 1314），\
+                 symlink 前置用例未执行；GitHub runner 有特权会照常执行真实断言"
+            );
+            false
+        }
+    }
 }
 
 /// 假身份规范化：小写 + 分隔符折叠 + 去尾分隔符——跨平台确定性地模拟

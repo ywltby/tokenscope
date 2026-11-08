@@ -158,3 +158,47 @@
 - **边界（如实披露）**：record/count 非零不一致对、来源已删除且无既有映射
   的旧事实不升级不合并（保持原值）；旧格式弱记录的同模型同用量合并限制
   保留（§3.2）；`/btw` 遥测按用户决定继续暂缓（§4）。
+
+### 6. 复审修复（2026-11-09，PR #57 定向复核 88d0580 后）
+
+独立复核在 HEAD 88d0580 复现三个影响 token 数字的缺陷与一个测试架缺陷；
+先红后修，全部转为正式仓库测试（不依赖 qa-artifacts）：
+
+- **红测实录**：多来源旧事实 1100/1（应 2200/2，`review_old_merged_fact_
+  with_multiple_origins_splits`）；compaction 镜像错位 2200/2（应 1100/1，
+  `review_compaction_legacy_mapping_no_extra_fact`）；悬挂强观察 1100/1
+  （应 6600/3，`dangling_strong_observation_does_not_swallow_followup_
+  counts`）。实现修复后 8/8 + 16/16 全绿。
+- **修复 1（多来源拆分）**：`history.rs`——镜像键命中已升级为**其他响应**
+  的行时，镜像来源（属于本响应：旧解析器在本响应的 count 行记账）从该行
+  **转移**到本响应的新事实，旧行保持已升级表示；单命中与多命中两条路径都
+  禁止把异响应行并入合并组。覆盖两/三响应、顺序反转、分批升级、refresh
+  重扫、重启幂等（`review_three_origins_old_fact_splits_into_three`、
+  `review_reversed_upgrade_order_and_replays_stay_exact`）。
+- **修复 2（compaction 行号）**：`source/codex.rs` 的 `legacy_mirror` 零
+  last 分支返回 **record 行**（旧解析器从挂起记录本体出数，来源证据记在
+  record 行）；正常非零配对仍取 count 行（对照用例
+  `review_normal_pair_mapping_still_uses_count_line` 钉住）。
+- **修复 3（悬挂强观察）**：count 与最近强观察不一致 → 清除观察并照常出数；
+  `turn_context`（新 turn 开始）终结配对窗口。不引入时间窗口/累计差分；
+  相同响应 record/count 仍只计一次（`record_and_token_count_are_one_
+  observation` 等既有用例钉住），不同响应同四桶分别计入。边界如实披露：
+  强记录配对 count 缺席且后续出现同用量 count-only 时无法区分"迟到配对"
+  与"独立请求"，按旧解析器行为出数（`new_response_pair_after_strong_
+  record_counts_once` 钉住 B 的 record 重置观察的路径）。
+- **修复 4（symlink 探针）**：`tests/source_discovery.rs`——只把确证的
+  os error 1314 归为缺权限，其他错误如实 panic；CI（`CI` 已设置）无特权
+  直接失败（runner 必须真实构造 junction），本地无特权显式跳过并打印
+  `SYMLINK-TESTS-SKIPPED:` 可识别标记；探针只创建/清理本次自建且确认归属
+  的路径，清理失败如实报告。实测：本地 28/28（2 例显式跳过带标记），
+  模拟 `CI=1` 无特权 → 测试 FAILED（不再冒充通过）。
+- **同刻升级例外**：compaction 旧行与新事件同为 record 行时刻，旧代码落
+  入同刻键比较（字典序随机胜负）→ 随机丢弃升级。修正：镜像例外在**同刻**
+  也强制 Update（`classify_against` 提取 `codex_upgrade_forced`）。
+- **回归**：`cargo fmt --check` 干净；clippy -D warnings 干净；workspace
+  69 组 test result 全绿（含 Claude 跨会话 12 例、WorkBuddy、CCS、
+  codex_parse_revision 升级用例）；build-inputs 清单 --check 干净。本机
+  `cargo test --no-run` 全并行仍受页面文件限制（os 1455），CI 不受影响。
+- 已知限制（登记不扩修）：`nick-fields/retry` 包裹完整 tauri build，按
+  复审指出会重试任意构建失败而非仅 NSIS 下载 504——收窄到传输失败分类
+  需要更完整的日志解析，本轮不扩展；502/503/504 脚本层重试已按根因修复。

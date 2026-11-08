@@ -354,8 +354,9 @@ fn ingest_text(
 ///
 /// 旧实现把 `token_usage_record` 挂起，由下一条 token_count 决定产物：
 /// - 配对 count 的 last 四桶与记录一致 → 旧事件出在 count 行，
-///   事件时间 = count 行时间戳；
-/// - last 四桶全零（compaction）→ 旧事件出在挂起记录，事件时间 = 记录行；
+///   事件时间 = count 行时间戳，来源行 = count 行；
+/// - last 四桶全零（compaction）→ 旧事件出在挂起记录本体：事件时间与
+///   来源行都是记录行；
 /// - last 非零且不一致 → 旧解析器忽略记录、按 count 出另一份事实——该记录
 ///   没有旧对应物，不建立映射（边界：旧 count 事实与新强记录并存）；
 /// - 途中出现 session_meta / 下一条 token_usage_record → 挂起记录被丢弃，
@@ -395,8 +396,11 @@ fn legacy_mirror(
                     .and_then(|v| serde_json::from_value::<LastUsage>(v.clone()).ok())?;
                 let pair_line = (start + 1 + off) as u64;
                 if last.is_zero() {
-                    // compaction 分支：旧事件 = 挂起记录本体（记录行、记录时刻）。
-                    return Some((record_ts, pair_line));
+                    // compaction 分支：旧事件 = 挂起记录本体——事件时间与
+                    // **来源行号都是记录行**（复审修复 2026-11-09：旧实现把
+                    // 挂起记录直接产出，来源证据记在 record 行；此前误返回
+                    // count 行号导致镜像键错位、旧事实不升级而双计）。
+                    return Some((record_ts, start as u64));
                 }
                 if last.matches(usage) {
                     let ts = value
@@ -483,6 +487,9 @@ fn ingest_line(
             observe_cwd(state, payload.cwd());
         }
         "turn_context" => {
+            // 新 turn 开始：上一响应的配对窗口终结——其后出现的 count 与该
+            // 响应无关（同响应的观察在下一 turn 开始前落盘）。
+            state.last_strong_observation = None;
             if let Some(m) = payload.model().filter(|m| !m.trim().is_empty()) {
                 state.model = Some(m.to_string());
             }
@@ -583,22 +590,33 @@ fn ingest_line(
                 }
                 stats.ignored_token_usage_record += 1;
             }
-            // 强记录的配对观察（count 紧随同一响应的 record，1–3ms 内到达且
-            // last 四桶一致）不再出数——同一响应只有一条事实。与最近一次强
-            // 观察不一致的 count 属于另一个响应的观察：强记录已自带身份出数，
-            // 这里跳过计数，不得二次入账；弱记录路径（无 pending、无强观察）
-            // 照旧按 count 出数。
-            if let Some((observed_usage, response)) = &state.last_strong_observation {
+            // 强记录的配对观察（count 的 last 四桶与同一响应的 record 一致）
+            // 不再出数——同一响应只有一条事实，观察消费后清除标记。
+            //
+            // 与最近强观察**不一致**的 count：强记录的迟到配对与另一响应的
+            // count-only 在此无法区分——不猜测，按旧解析器行为照常出数并
+            // 清除悬挂标记（复审修复 2026-11-09：此前直接 return 且不清理，
+            // 一个悬挂观察会吞掉之后全部 count-only 请求）。若它真是迟到
+            // 配对，属于已披露的"record/count 非零不一致"边界；正常落盘
+            // 节奏（配对 count 紧随 record 1–3ms）不会走到这里。
+            if let Some((observed_usage, _)) = state.last_strong_observation.take() {
                 let same_usage = payload
                     .info
                     .as_ref()
                     .and_then(|info| info.last_token_usage.as_ref())
-                    .is_some_and(|u| u.matches(observed_usage));
+                    .is_some_and(|u| u.matches(&observed_usage));
                 if same_usage {
-                    state.last_strong_observation = None;
                     return;
                 }
-                let _ = response;
+                ingest_token_count(
+                    rec.timestamp.as_deref(),
+                    line_no,
+                    source_path,
+                    payload,
+                    state,
+                    stats,
+                    events,
+                );
                 return;
             }
             ingest_token_count(

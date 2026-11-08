@@ -2359,6 +2359,38 @@ fn write_events_in_tx(
                 // 只补来源与别名，**不改代表**（会话/项目保持既有事实）。
                 summary.unchanged += 1;
                 existing.id
+            } else if write_has_codex_legacy_origin(write)
+                && existing.app == AgentKind::Codex
+                && existing.record_id.is_some()
+                && existing.record_id.as_deref() != write.record_id.as_deref()
+            {
+                // 复审修复（2026-11-09）：镜像键命中的行已被升级为**另一个**
+                // 强响应——旧行上与镜像键相等的来源属于本响应（旧解析器在
+                // 各自 count 行记账，弱合并把来源聚到同一行），把该来源转移
+                // 到本响应的新事实；旧行保持已升级表示。同一响应的升级重放
+                // （record_id 相同）不走本分支，仍按既有 classify 幂等收敛。
+                if !allow_correction {
+                    bail!(
+                        "身份冲突：Codex 镜像键命中已升级为其他响应的事件 {}，\
+                         未开启纠错通道",
+                        existing.id
+                    );
+                }
+                let event_id = insert_event(tx, write)?;
+                summary.inserted += 1;
+                summary.inserted_tokens = summary
+                    .inserted_tokens
+                    .checked_add(&write.tokens)
+                    .ok_or_else(|| anyhow!("本批新增用量累计溢出可表示范围"))?;
+                changed = true;
+                let mirror =
+                    codex_mirror_origin(write).ok_or_else(|| anyhow!("升级映射缺少镜像来源键"))?;
+                tx.execute(
+                    "UPDATE event_origins SET event_id = ?1
+                     WHERE origin_kind = ?2 AND origin_key = ?3 AND event_id = ?4",
+                    params![event_id, mirror.origin_kind, mirror.origin_key, existing.id],
+                )?;
+                event_id
             } else {
                 merge_event(tx, existing, write, &mut summary, &mut changed)?
             }
@@ -2366,33 +2398,65 @@ fn write_events_in_tx(
             // Codex 强响应 + 镜像键多命中：镜像键命中旧弱事实行、新键/别名
             // 命中已升级行（或旧行）——同一响应的升级重放，把全部命中收敛到
             // 确定性代表（与跨会话纠错同一套固定规则），绝不多计。
+            //
+            // 复审修复（2026-11-09）：已升级为**其他响应**的行不并入合并组
+            // （它的 token 是别的请求的事实，合并即漏计）——它只让渡镜像
+            // 来源（该来源属于本响应：旧解析器在本响应的 count 行记账）。
             if !allow_correction {
                 bail!(
                     "身份冲突：Codex 强响应镜像键命中多条事实 {:?}，未开启纠错通道",
                     hits.ids
                 );
             }
-            let mut stored = Vec::with_capacity(hits.ids.len());
+            let mirror =
+                codex_mirror_origin(write).ok_or_else(|| anyhow!("升级映射缺少镜像来源键"))?;
+            let mut group = Vec::new();
+            let mut foreign = Vec::new();
             for id in &hits.ids {
                 let ev = load_event(tx, *id)?.ok_or_else(|| anyhow!("事件 {id} 在命中后消失"))?;
                 if ev.app != AgentKind::Codex {
                     bail!("身份冲突：Codex 升级映射指向了其他应用的事件 {id}");
                 }
-                stored.push(ev);
+                if ev.record_id.is_some() && ev.record_id.as_deref() != write.record_id.as_deref() {
+                    foreign.push(ev.id);
+                } else {
+                    group.push(ev);
+                }
             }
-            let keeper = correction_keeper(&stored);
-            let keeper_id = stored[keeper].id;
-            let losers: Vec<i64> = stored
-                .iter()
-                .filter(|e| e.id != keeper_id)
-                .map(|e| e.id)
-                .collect();
-            merge_facts_in_tx(tx, keeper_id, &losers)?;
-            summary.merged += losers.len() as u64;
-            changed = true;
-            let keeper_event = load_event(tx, keeper_id)?
-                .ok_or_else(|| anyhow!("代表事实 {keeper_id} 在合并后消失"))?;
-            merge_event(tx, keeper_event, write, &mut summary, &mut changed)?
+            let event_id = if group.is_empty() {
+                // 命中全是异响应行：本响应在此前从未入账，插入新事实。
+                let id = insert_event(tx, write)?;
+                summary.inserted += 1;
+                summary.inserted_tokens = summary
+                    .inserted_tokens
+                    .checked_add(&write.tokens)
+                    .ok_or_else(|| anyhow!("本批新增用量累计溢出可表示范围"))?;
+                changed = true;
+                id
+            } else {
+                let keeper = correction_keeper(&group);
+                let keeper_id = group[keeper].id;
+                let losers: Vec<i64> = group
+                    .iter()
+                    .filter(|e| e.id != keeper_id)
+                    .map(|e| e.id)
+                    .collect();
+                merge_facts_in_tx(tx, keeper_id, &losers)?;
+                summary.merged += losers.len() as u64;
+                changed = true;
+                let keeper_event = load_event(tx, keeper_id)?
+                    .ok_or_else(|| anyhow!("代表事实 {keeper_id} 在合并后消失"))?;
+                merge_event(tx, keeper_event, write, &mut summary, &mut changed)?
+            };
+            // 镜像来源归属本响应：从异响应行转移到本事件。
+            for fid in &foreign {
+                tx.execute(
+                    "UPDATE event_origins SET event_id = ?1
+                     WHERE origin_kind = ?2 AND origin_key = ?3 AND event_id = ?4",
+                    params![event_id, mirror.origin_kind, mirror.origin_key, fid],
+                )?;
+            }
+            event_id
         } else {
             // 多命中：同一请求的身份分别落在多条事实行上。只有携带跨会话
             // 复制证据才允许在同一事务内合并；其余情形维持既有的"不猜即拒绝"。
@@ -2576,26 +2640,28 @@ fn classify_against(existing: &StoredEvent, w: &EventWrite) -> WriteClass {
     } else if existing.precedence > w.precedence {
         WriteClass::Conflict
     } else {
+        // 2026-11-09 复审修正：带镜像来源键的强响应写入命中未升级的旧行
+        //（record_id 为空）时**升级必须完成**——包括同刻（compaction 分支
+        // 旧行与新事件同为 record 行时刻；若落入同刻键比较，字典序的随机
+        // 胜负会随机丢弃升级，漏计或双计均有可能）。例外优先于同刻代表与
+        // 重播时序两条通用规则。
+        let codex_upgrade_forced = write_has_codex_legacy_origin(w)
+            && (existing.record_id.is_none() || existing.record_id.as_deref() == Some(""))
+            && existing.app == AgentKind::Codex;
         match w.ts.cmp(&existing.ts) {
             std::cmp::Ordering::Equal => {
                 // 同刻：确定性代表胜出（总量大者优先，并列取事件键更大者）。
-                if same_instant_challenger_wins(existing, w) {
+                if codex_upgrade_forced || same_instant_challenger_wins(existing, w) {
                     WriteClass::Update
                 } else {
                     WriteClass::Stale
                 }
             }
             // Codex 重播族：更早事件时间胜出；强身份（Claude/WB）：更晚胜出。
-            // 2026-11-08 例外：带**镜像来源键**的强响应写入——镜像键命中的旧
-            // 行就是这条响应在旧解析器下的记账行，升级必须完成（把旧事实改写
-            // 为强表示），不受"更早胜出"的重播规则约束；时间差（record 与
-            // count 的 1–3ms）由映射本身消解，不比较先后。
-            order
-                if write_has_codex_legacy_origin(w)
-                    && (existing.record_id.is_none()
-                        || existing.record_id.as_deref() == Some(""))
-                    && existing.app == AgentKind::Codex =>
-            {
+            // 2026-11-08 例外：镜像键命中的旧行就是这条响应在旧解析器下的
+            // 记账行，升级必须完成，不受"更早胜出"的重播规则约束；时间差
+            //（record 与 count 的 1–3ms）由映射本身消解，不比较先后。
+            order if codex_upgrade_forced => {
                 let _ = order;
                 WriteClass::Update
             }
@@ -2610,6 +2676,15 @@ fn classify_against(existing: &StoredEvent, w: &EventWrite) -> WriteClass {
 /// 写入是否携带 Codex 旧事实升级映射（镜像来源键）。
 fn write_has_codex_legacy_origin(w: &EventWrite) -> bool {
     w.app == AgentKind::Codex && w.record_id.is_some() && w.origins.len() > 1
+}
+
+/// 升级映射的镜像来源键：origins 里除本响应解析位置（event_key）以外的
+/// native_file 来源。旧解析器在本响应的配对 count 行（或 compaction 的
+/// record 行）记账，该键与旧事实的来源键逐字节相等。
+fn codex_mirror_origin(w: &EventWrite) -> Option<&EventOrigin> {
+    w.origins
+        .iter()
+        .find(|o| o.origin_kind == ORIGIN_KIND_NATIVE_FILE && o.origin_key != w.event_key)
 }
 
 /// 同刻候选的胜负（内容已确认不同）：四桶总量更大者胜；总量并列时——
