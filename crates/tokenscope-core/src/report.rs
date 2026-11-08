@@ -640,7 +640,14 @@ static COLLECT_SERIAL: Mutex<()> = Mutex::new(());
 /// 更晚重播者"保存为终值，来源仍在的文件重解析后按新判定幂等收敛到
 /// 确定性代表（Claude 强身份）或最早完成时刻（Codex 重播族）；来源已
 /// 删除的事实保留原值（不猜造）。
-pub const PARSE_RULES_REVISION: u32 = 5;
+/// v6（2026-11-07）：Claude 跨会话复制证据——重解析读取顶层 `requestId` 与
+/// 消息 `uuid`，给**未变化的**文件补齐复制证据；这是旧库重复事实能在正常
+/// 采集里合并的前提（升常量但不重解析，证据永远补不上）。
+/// v7（2026-11-08）：Codex 强响应身份——`token_usage_record` 携带
+/// `(thread_id, response_id)` 时立即产出带命名空间响应身份的事件，配对
+/// `token_count` 不再二次出数；同时按旧解析器行为重建镜像来源键，旧库中
+/// 被弱指纹误合并的事实升级为对应响应（K04）。未变化的文件重解析一次。
+pub const PARSE_RULES_REVISION: u32 = 7;
 /// 观测：当前正在跑的采集管线数与历史峰值（测试断言"不同参数不并行"）。
 static COLLECT_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 static COLLECT_MAX_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
@@ -1571,31 +1578,52 @@ fn collect_all_with_sources(
         reports.push(SourceReport { agent: kind, stats });
     }
 
-    // 全局去重（跨文件、按 agent 规则）。去重结果既用于统计，也用于写库：
-    // 同一请求的流式重发在内存里就按终值收敛，库内不需要再处理这种重复。
+    // 全局去重（跨文件、按 agent 规则；Claude 额外合并跨会话复制副本）。
+    // 去重结果既用于统计，也用于写库：同一请求的流式重发在内存里就按终值
+    // 收敛，库内不需要再处理这种重复；副本的会话身份与来源位置随保留事件
+    // 一起写入，保证后续单文件增量重扫仍命中同一事实。
     let t_dedupe = std::time::Instant::now();
     let before = all_events.len();
-    let (mut events, dropped) = dedupe_events(all_events);
+    let dedupe = dedupe_events(all_events);
+    let dropped = dedupe.dropped;
+    let copy_count = dedupe.copies.len();
+    // 副本证据先按下标挂到保留事件上（此时仍是去重输出的原顺序）。
+    let mut events: Vec<(UsageEvent, Vec<UsageEvent>)> =
+        dedupe.events.into_iter().map(|e| (e, Vec::new())).collect();
+    for (kept, copy) in dedupe.copies {
+        events[kept].1.push(copy);
+    }
     path_info!(
         auto,
-        "去重：{} → {}（丢弃 {}），{} ms",
+        "去重：{} → {}（丢弃 {}，跨会话副本 {}），{} ms",
         before,
         events.len(),
         dropped.iter().map(|(_, n)| n).sum::<u64>(),
+        copy_count,
         t_dedupe.elapsed().as_millis()
     );
 
     // H04：按事件时间升序写入历史库——同一请求的多份来源记录在同一批内
     // 按"后写者胜出"合并，与全局去重"取时间戳最晚"的口径一致；写入按来源
     // 键 + 内容指纹去重；旧 Codex 唯一候选的模型纠正由采集写入入口单独处理。
-    events.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.line.cmp(&b.line)));
+    // 同一时刻按 `(session_id, source_path, line)` 排序：跨会话副本的库内
+    // 代表与内存去重共用同一固定规则，不随文件发现顺序漂移。
+    events.sort_by(|(a, _), (b, _)| {
+        a.ts.cmp(&b.ts)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+            .then_with(|| a.source_path.cmp(&b.source_path))
+            .then_with(|| a.line.cmp(&b.line))
+    });
     // 逐条预检 + 跳过不可写入的事件：单条坏记录（如模型名为空的遗留行）不得
     // 让整批回滚——否则一条坏事件会让**全部采集失败**，连已有历史都无法展示。
     // 跳过的条数进诊断，与适配器层的 bad_lines 口径一致（不静默吞掉）。
     let mut writes: Vec<crate::history::EventWrite> = Vec::with_capacity(events.len());
     let mut skipped_unwritable: Vec<(AgentKind, u64)> = Vec::new();
-    for ev in &events {
-        let write = event_write_of(ev);
+    for (ev, copies) in &events {
+        let mut write = event_write_of(ev);
+        for copy in copies {
+            append_copy_evidence(&mut write, copy);
+        }
         match history.can_write(&write) {
             Ok(true) => writes.push(write),
             Ok(false) => {
@@ -1639,12 +1667,13 @@ fn collect_all_with_sources(
     let changed = write_summary.changed_events() > 0;
     path_info!(
         auto && !changed && collected_write.ambiguous_models == 0,
-        "历史库写入：新增 {}，更新 {}，已存在 {}，冲突 {}，陈旧 {}；别名 +{}，来源 +{}；Codex 模型纠正 {}，歧义跳过 {}",
+        "历史库写入：新增 {}，更新 {}，已存在 {}，冲突 {}，陈旧 {}；合并旧重复 {}；别名 +{}，来源 +{}；Codex 模型纠正 {}，歧义跳过 {}",
         write_summary.inserted,
         write_summary.updated,
         write_summary.unchanged,
         write_summary.conflicts,
         write_summary.stale,
+        write_summary.merged,
         write_summary.aliases_added,
         write_summary.origins_added,
         collected_write.models_corrected,
@@ -2522,28 +2551,37 @@ fn push_rollup_rows(selection: &mut RollupSelection, rows: &[&crate::history::St
 /// - 同一行内容变化（文件被替换、新请求占用同一行）→ 新来源键 → 新事件，
 ///   旧事实保留，绝不用新值覆盖已保存的旧请求；
 /// - 流式终值更新由原生身份别名命中同一事件后按终值规则完成。
+///
+/// Codex 强响应事件（2026-11-08）：额外登记**弱镜像别名**——本文件里与该
+/// 响应四桶相同的弱指纹（`codex-usage`）。用途：旧库中被弱指纹误合并的
+/// 事实经由该别名找到升级入口；它由"同一文件、同一解析轮"的强观察背书，
+/// 不是凭数值猜身份。不同强响应**不共享**镜像别名（各自文件各自的行），
+/// 且镜像别名与强别名同时登记——升级后旧弱重扫仍命中同一事实。
 fn event_write_of(ev: &UsageEvent) -> crate::history::EventWrite {
-    use crate::history::{EventOrigin, EventWrite, ORIGIN_KIND_NATIVE_FILE, WritePrecedence};
-    let position = format!("{}|{}|{}", ev.agent.as_str(), ev.source_path, ev.line);
-    let key = format!("native|{position}|{}", ev.content_fingerprint());
-    // 身份别名两类都登记：
+    use crate::history::{EventWrite, WritePrecedence};
+    let key = event_key_of(ev);
+    // 身份别名：
     // - 可证实的跨来源身份（Claude 的 `(session, message.id)`）；
-    // - 保守重播身份（Codex 的 `(session, 原始模型, 四桶)`）——**同源**去重，
-    //   使文件归档移动、复制副本与遗留缓存迁移后的重扫都命中同一事件，
-    //   不会因为路径变化而重复累计。
+    // - Codex 强响应：`codex-response`（`(thread, response_id)` 命名空间）；
+    // - 保守重播身份（Codex 弱记录的 `(session, 原始模型, 四桶)`）——**同源**
+    //   去重，使文件归档移动、复制副本与遗留缓存迁移后的重扫都命中同一
+    //   事件，不会因为路径变化而重复累计；强响应事件的该别名是**弱镜像**
+    //   （仅同文件强观察背书），供旧事实升级映射；
+    // - 跨会话复制证据（Claude 的 `message.id + requestId + uuid + 内容摘要`）
+    //   ——同一次调用被复制到别的会话时只贡献一次（2026-11-07）。
     let mut aliases = Vec::new();
-    for identity in [ev.native_identity(), ev.same_source_identity()] {
-        if let Some((scheme, value)) = identity
-            && !aliases
-                .iter()
-                .any(|a: &crate::history::EventAlias| a.scheme == scheme)
-        {
-            aliases.push(crate::history::EventAlias {
-                app: ev.agent,
-                scheme: scheme.to_string(),
-                value,
-            });
-        }
+    for identity in [
+        ev.native_identity(),
+        ev.same_source_identity(),
+        ev.copy_identity(),
+    ] {
+        push_alias(&mut aliases, ev.agent, identity);
+    }
+    // 来源记录：本响应的解析位置 + 旧解析器镜像位置（K04 升级映射）。
+    // 镜像键与旧事实的来源键逐字节相等时，写入经由它命中旧行并原行升级。
+    let mut origins = vec![native_origin(ev, key.clone())];
+    if let Some(mirror) = &ev.codex_legacy_origin {
+        origins.push(native_origin(ev, mirror.clone()));
     }
     EventWrite {
         event_key: key.clone(),
@@ -2563,17 +2601,60 @@ fn event_write_of(ev: &UsageEvent) -> crate::history::EventWrite {
         // 仍按"更晚的事件时间胜出"，且与导入侧口径一致。
         observed_at: ev.ts,
         aliases,
-        origins: vec![EventOrigin {
-            origin_kind: ORIGIN_KIND_NATIVE_FILE.to_string(),
-            origin_key: key,
-            app: ev.agent,
-            import_run_id: None,
-            parser_revision: crate::history::PARSER_REVISION,
-            source_model_raw: None,
-            pricing_model: None,
-            source_cost_usd: None,
-            ts_precision_seconds: false,
-        }],
+        origins,
+    }
+}
+
+/// 来源键（H04）：`native|app|规范化路径|行序|内容指纹`。内容不变 → 同一
+/// 来源键 → 重复采集幂等；同行内容变化 → 新来源键 → 新事实，旧值保留。
+fn event_key_of(ev: &UsageEvent) -> String {
+    let position = format!("{}|{}|{}", ev.agent.as_str(), ev.source_path, ev.line);
+    format!("native|{position}|{}", ev.content_fingerprint())
+}
+
+fn native_origin(ev: &UsageEvent, key: String) -> crate::history::EventOrigin {
+    crate::history::EventOrigin {
+        origin_kind: crate::history::ORIGIN_KIND_NATIVE_FILE.to_string(),
+        origin_key: key,
+        app: ev.agent,
+        import_run_id: None,
+        parser_revision: crate::history::PARSER_REVISION,
+        source_model_raw: None,
+        pricing_model: None,
+        source_cost_usd: None,
+        ts_precision_seconds: false,
+    }
+}
+
+/// 身份别名去重规则：同一 scheme 只登记一次（不同 scheme 各自保留）。
+fn push_alias(
+    aliases: &mut Vec<crate::history::EventAlias>,
+    app: AgentKind,
+    identity: Option<(&'static str, String)>,
+) {
+    if let Some((scheme, value)) = identity
+        && !aliases
+            .iter()
+            .any(|a: &crate::history::EventAlias| a.scheme == scheme)
+    {
+        aliases.push(crate::history::EventAlias {
+            app,
+            scheme: scheme.to_string(),
+            value,
+        });
+    }
+}
+
+/// 把跨会话副本的会话内身份与来源位置补进保留事件的写入形态。
+///
+/// 内存去重丢弃副本展示项时，**不能**连它的会话别名和来源证据一起丢：否则
+/// 后续只重扫副本文件时找不到旧事实，重复会复活（计划 §2.8）。
+fn append_copy_evidence(w: &mut crate::history::EventWrite, copy: &UsageEvent) {
+    push_alias(&mut w.aliases, copy.agent, copy.native_identity());
+    push_alias(&mut w.aliases, copy.agent, copy.copy_identity());
+    let key = event_key_of(copy);
+    if !w.origins.iter().any(|o| o.origin_key == key) {
+        w.origins.push(native_origin(copy, key));
     }
 }
 
@@ -2592,6 +2673,9 @@ pub(crate) fn usage_event_of(s: &crate::history::StoredEvent) -> UsageEvent {
         session_initial_cwd: s.session_initial_cwd.clone(),
         event_cwd: s.event_cwd.clone(),
         record_id: s.record_id.clone().unwrap_or_default(),
+        claude_copy: None,
+        codex_response: None,
+        codex_legacy_origin: None,
         line: 0,
         source_path: String::new(),
         input_tokens: s.tokens.input,
@@ -3128,7 +3212,8 @@ mod tests {
         let r = summary(&opts(None, None, false)).unwrap();
         assert_eq!(r.by, "day");
         assert_eq!(r.sources.len(), 2);
-        assert_eq!(r.totals.requests, 8); // claude 4（含子代理）+ codex 4（去重后）
+        // claude 4（含子代理）+ codex 5（v7：resp-1 强记录按 thread 独立入账）
+        assert_eq!(r.totals.requests, 9);
         assert_eq!(r.groups.len(), 3); // 07-17、07-18、合计
         assert_eq!(r.groups[0].agents, ["claude-code", "codex"]);
         assert!(r.generated_at.contains('+'), "generated_at 带时区偏移");
@@ -3178,10 +3263,10 @@ mod tests {
         assert_eq!(cold, warm, "缓存命中必须与首次全量一致");
         assert_eq!(cold, refresh, "--refresh 重建后必须一致");
         // 历史库确实有数据：来源登记 4 个文件（claude 2 + codex 2），
-        // 用量事实为去重后的 8 条请求。
+        // 用量事实为去重后的 9 条请求（v7：resp-1 强记录独立入账）。
         let info = cache_stats(Some(dir.clone())).unwrap();
         assert_eq!(info.files, 4); // claude 2 + codex 2
-        assert_eq!(info.events, 8);
+        assert_eq!(info.events, 9);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3303,6 +3388,9 @@ cache_read = 0.4
             session_initial_cwd: None,
             event_cwd: None,
             record_id: String::new(),
+            claude_copy: None,
+            codex_response: None,
+            codex_legacy_origin: None,
             line: 0,
             source_path: String::new(),
             input_tokens: 1,
@@ -3452,13 +3540,14 @@ cache_read = 0.4
             tz: Some("Asia/Shanghai".to_string()),
             ..Default::default()
         };
-        // 全量：去重后 8 行（与汇总 requests 一致），按时间倒序
+        // 全量：去重后 9 行（与汇总 requests 一致；v7 起旧 fixture 的
+        // resp-1 强记录按 thread_id 独立入账，不再与 count 合并），按时间倒序
         let (all_ok, list) = {
             let l = list_events(&base, &EventFilter::default()).unwrap();
-            (l.total == 8, l)
+            (l.total == 9, l)
         };
         assert!(all_ok, "total={}", list.total);
-        assert_eq!(list.rows.len(), 8);
+        assert_eq!(list.rows.len(), 9);
         assert_eq!(list.warnings.len(), 0);
         let tss: Vec<&str> = list.rows.iter().map(|r| r.ts.as_str()).collect();
         let mut sorted = tss.clone();
@@ -3466,7 +3555,8 @@ cache_read = 0.4
         sorted.reverse();
         assert_eq!(tss, sorted, "必须按时间倒序");
 
-        // 模型过滤：gpt-5.6-sol 2 行
+        // 模型过滤：gpt-5.6-sol 2 行 + resp-1（thread 继承 fixture 会话模型）
+        // = 3 行
         let l = list_events(
             &base,
             &EventFilter {
@@ -3475,7 +3565,7 @@ cache_read = 0.4
             },
         )
         .unwrap();
-        assert_eq!(l.total, 2);
+        assert_eq!(l.total, 3);
         assert!(l.rows.iter().all(|r| r.model == "gpt-5.6-sol"));
 
         // 项目过滤（A04：项目身份 = 归一化 cwd）：codex e3 所在 beta 项目 1 行
@@ -3510,7 +3600,7 @@ cache_read = 0.4
         )
         .unwrap();
         assert_eq!(l.rows.len(), 3);
-        assert_eq!(l.total, 8);
+        assert_eq!(l.total, 9);
 
         // Task 1：该测试无任何定价来源 → 全部行 cost=None（unknown 语义）。
         let unknown: Vec<&EventRow> = list.rows.iter().filter(|r| r.cost_usd.is_none()).collect();
@@ -3672,7 +3762,7 @@ cache_read = 0.4
         // SF04：全量与分页取自同一查询会话（游标携带该会话 query_id）。
         let snap = crate::query::begin_query(&base).unwrap();
         let full = query_events_from(&snap, &EventFilter::default()).unwrap();
-        assert_eq!(full.rows.len(), 8);
+        assert_eq!(full.rows.len(), 9);
         let mut pages: Vec<Vec<String>> = Vec::new();
         let mut seen = 0usize;
         let mut cursor: Option<String> = None;
@@ -3683,7 +3773,7 @@ cache_read = 0.4
                 ..Default::default()
             };
             let page = query_events_from(&snap, &f).unwrap();
-            assert_eq!(page.total, 8, "total 恒为过滤后全量");
+            assert_eq!(page.total, 9, "total 恒为过滤后全量");
             if page.rows.is_empty() {
                 break;
             }
@@ -3693,7 +3783,7 @@ cache_read = 0.4
             let last = page.rows.last().unwrap();
             cursor = Some(last.cursor.clone());
         }
-        assert_eq!(seen, 8, "翻页覆盖全量");
+        assert_eq!(seen, 9, "翻页覆盖全量");
         let flat: Vec<String> = pages.into_iter().flatten().collect();
         let expect: Vec<String> = full.rows.iter().map(|r| r.cursor.clone()).collect();
         assert_eq!(flat, expect);
@@ -5161,6 +5251,9 @@ mod collect_stability_tests {
                     session_initial_cwd: None,
                     event_cwd: None,
                     record_id: String::new(),
+                    claude_copy: None,
+                    codex_response: None,
+                    codex_legacy_origin: None,
                     line: 0,
                     source_path: String::new(),
                     input_tokens: 1,
@@ -5251,6 +5344,9 @@ mod collect_stability_tests {
                     session_initial_cwd: None,
                     event_cwd: None,
                     record_id: String::new(),
+                    claude_copy: None,
+                    codex_response: None,
+                    codex_legacy_origin: None,
                     line: 0,
                     source_path: String::new(),
                     input_tokens: 1,

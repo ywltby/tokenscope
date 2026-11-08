@@ -244,11 +244,13 @@ fn v2_fingerprint_reparses_unchanged_codex_file_once_and_keeps_old_fact() {
         json!({"type":"turn_context", "timestamp":"2026-10-22T08:00:00Z",
             "payload":{"model":MODEL, "cwd":PROJECT}}),
         json!({"type":"token_usage_record", "timestamp":"2026-10-22T08:00:01Z",
-            "payload":{"response_id":"synthetic-normal", "usage":normal_usage}}),
+            "payload":{"thread_id":SESSION, "session_id":SESSION,
+                "response_id":"synthetic-normal", "usage":normal_usage}}),
         json!({"type":"event_msg", "timestamp":NORMAL_TS,
             "payload":{"type":"token_count", "info":{"last_token_usage":normal_usage}}}),
         json!({"type":"token_usage_record", "timestamp":COMPACTION_TS,
-            "payload":{"response_id":"synthetic-compaction", "usage":compaction_usage}}),
+            "payload":{"thread_id":SESSION, "session_id":SESSION,
+                "response_id":"synthetic-compaction", "usage":compaction_usage}}),
         json!({"type":"event_msg", "timestamp":"2026-10-22T08:00:04Z",
         "payload":{"type":"token_count", "info":{
             "last_token_usage":{"input_tokens":0, "output_tokens":0,
@@ -265,8 +267,10 @@ fn v2_fingerprint_reparses_unchanged_codex_file_once_and_keeps_old_fact() {
     std::fs::write(&file, text).unwrap();
     let source_before = file_snapshot(&file);
 
-    // 精确预置 v2 会保存的正常 token_count：0-based 第 3 行；压缩尚未入库。
-    // 不用新解析器的输出构造旧基线，以免新解析器的错误同步污染预期。
+    // 精确预置 v6 会保存的正常 token_count：0-based 第 3 行；压缩尚未入库。
+    // v7 起强响应事件以 record 行的身份出数（ts = record 行 08:00:01），
+    // 经镜像来源键命中并升级本行；镜像 ts = 旧出数行时刻 = count 行
+    //（NORMAL_TS = 08:00:02），因此预置 ts 也用 count 行时刻。
     let normal = UsageEvent {
         cache_write_5m: 0,
         cache_write_1h: 0,
@@ -279,6 +283,9 @@ fn v2_fingerprint_reparses_unchanged_codex_file_once_and_keeps_old_fact() {
         session_initial_cwd: Some(PROJECT.to_string()),
         event_cwd: Some(PROJECT.to_string()),
         record_id: String::new(),
+        claude_copy: None,
+        codex_response: None,
+        codex_legacy_origin: None,
         line: 3,
         source_path: file.display().to_string(),
         input_tokens: 80,
@@ -354,6 +361,7 @@ fn v2_fingerprint_reparses_unchanged_codex_file_once_and_keeps_old_fact() {
     let history = HistoryDb::open(&history_path).unwrap();
     let old_event = history.stored_events().unwrap().remove(0);
     assert_eq!(old_event.parser_revision, 1);
+    assert_eq!(old_event.ts, normal.ts, "预置基线已对齐 record 行时刻");
     let old_source = history.source_files().unwrap().remove(0);
     assert_eq!(old_source.context_revision, "2|");
     assert_eq!(old_source.state, "present");
@@ -389,16 +397,16 @@ fn v2_fingerprint_reparses_unchanged_codex_file_once_and_keeps_old_fact() {
         }) as Box<dyn Source>]
     };
     let first = collect_all_with_sources_for_test(sources(), &opts).unwrap();
-    // PARSE_RULES_REVISION 仍为 2 时，这里应因暖命中而缺少压缩事件，断言红。
+    // v7 重解析：normal 经镜像来源键升级（复用旧 id，身份变强），压缩经
+    // compaction 分支补回——仍是 2 条事实，无重复。
     assert_eq!(
         first.events.len(),
         2,
-        "内容未变的 v2 登记文件也必须补回压缩事件；真实 parse 调用数={}",
+        "内容未变的 v6 登记文件也必须补回压缩事件；真实 parse 调用数={}",
         parse_calls.load(Ordering::Relaxed)
     );
     assert_eq!(parse_calls.load(Ordering::Relaxed), 1);
     assert_eq!(file_snapshot(&file), source_before);
-    assert_eq!(fact_rows(&history_path, old_id), old_fact);
 
     let history = HistoryDb::open(&history_path).unwrap();
     assert_eq!(history.schema_version().unwrap(), schema_before);
@@ -408,12 +416,18 @@ fn v2_fingerprint_reparses_unchanged_codex_file_once_and_keeps_old_fact() {
     );
     let after_events = history.stored_events().unwrap();
     assert_eq!(after_events.len(), 2);
+    let upgraded = after_events.iter().find(|e| e.id == old_id).unwrap();
     assert_eq!(
-        after_events.iter().find(|e| e.id == old_id).unwrap(),
-        &old_event
+        upgraded.record_id.as_deref(),
+        Some("synthetic-normal"),
+        "旧 count 行事实升级为强响应身份"
     );
+    // 升级后事件时间 = record 行时刻（08:00:01）；旧表示的 ts（count 行
+    // 08:00:02）被强表示取代。
+    assert_eq!(upgraded.ts, "2026-10-22T08:00:01Z".parse().unwrap());
+    assert_eq!(upgraded.tokens, old_event.tokens, "升级不改四桶");
     let added = after_events.iter().find(|e| e.id != old_id).unwrap();
-    assert_eq!(added.event_key, native_key(&compaction));
+    assert_eq!(added.record_id.as_deref(), Some("synthetic-compaction"));
     assert_eq!(added.ts, compaction.ts);
     assert_eq!(added.model_raw, MODEL);
     assert_eq!(added.session_id.as_deref(), Some(SESSION));
@@ -479,7 +493,6 @@ fn v2_fingerprint_reparses_unchanged_codex_file_once_and_keeps_old_fact() {
     assert_eq!(second.events.len(), 2);
     assert_eq!(parse_calls.load(Ordering::Relaxed), 1);
     assert_eq!(file_snapshot(&file), source_before);
-    assert_eq!(fact_rows(&history_path, old_id), old_fact);
     let history = HistoryDb::open(&history_path).unwrap();
     assert_eq!(history.event_count().unwrap(), 2);
     assert_eq!(history.stored_events().unwrap(), after_events);
@@ -554,6 +567,9 @@ fn model_upgrade_fixture(parser_revision: i64) -> ModelUpgradeFixture {
         session_initial_cwd: Some(PROJECT.to_string()),
         event_cwd: Some(PROJECT.to_string()),
         record_id: String::new(),
+        claude_copy: None,
+        codex_response: None,
+        codex_legacy_origin: None,
         line: 3,
         source_path: file.display().to_string(),
         input_tokens: 80,

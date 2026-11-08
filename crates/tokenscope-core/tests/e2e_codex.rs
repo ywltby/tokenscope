@@ -124,15 +124,16 @@ fn both_report(by: GroupBy) -> SummaryReport {
 #[test]
 fn test_e2e_codex_collection() {
     let col = codex_basic();
-    // 2 文件 16 行：5 个未去重事件（同请求重发 1 由全局 dedupe 处理）；
-    // 跳过 零分量 1 / 无模型 1、忽略 usage_record 1、坏行 2。
+    // 2 文件 17 行（v7 fixture：resp-1 补配对 count 行）：6 个未去重事件
+    //（强响应记录独立入账；同请求重发 1 由全局 dedupe 处理）；
+    // 跳过 零分量 1 / 无模型 1、坏行 2。
     assert_eq!(col.stats.files_scanned, 2);
-    assert_eq!(col.stats.lines_seen, 16);
-    assert_eq!(col.stats.events, 5);
+    assert_eq!(col.stats.lines_seen, 17);
+    assert_eq!(col.stats.events, 6);
     assert_eq!(col.stats.duplicates_dropped, 0);
     assert_eq!(col.stats.skipped_zero_usage, 1);
     assert_eq!(col.stats.skipped_no_model, 1);
-    assert_eq!(col.stats.ignored_token_usage_record, 1);
+    assert_eq!(col.stats.ignored_token_usage_record, 0);
     assert_eq!(col.stats.bad_lines, 2);
     assert!(col.warnings.is_empty());
 
@@ -179,19 +180,29 @@ fn test_e2e_codex_json() {
     );
     assert!(!d1.unknown_pricing);
 
-    // 07-18：16:01Z/16:06Z 落本地次日 + 次日 02:00Z。
+    // 07-18：16:01Z/16:06Z 落本地次日 + 次日 02:00Z + resp-1（16:02Z，thread
+    // sess-a 的强响应记录，v7 独立入账）。
     let d2 = &groups[1];
     assert_eq!(d2.key, "2026-07-18");
-    assert_eq!(d2.requests, 3);
-    assert_eq!(d2.tokens.input, 10 + 5 + 80);
-    assert_eq!(d2.tokens.output, 5 + 3 + 50);
-    // gpt-5.6-sol 140 + gpt-5.5 116 + gpt-5.4 955（/1M；Task 4 表校正后
-    // 缓存读价 0.5/0.25 计入 e4/e6 的 cr 2/20）。
-    assert!((d2.cost_usd - 1211.0 / 1_000_000.0).abs() < 1e-9);
+    assert_eq!(d2.requests, 4);
+    assert_eq!(d2.tokens.input, 10 + 5 + 80 + 1);
+    assert_eq!(d2.tokens.output, 5 + 3 + 50 + 1);
+    // 费用 = 旧四事件 1211 + resp-1 的 1/1 组合费用 24.0（按 gpt-5.6-sol
+    // 单价：in 750→4.0/1k、out 100→20.0/1k、cw 50→5.0/1k、cr 200→0.4/1k；
+    // resp-1: 1*4 + 1*20 = 24 → 1235/1M）。
+    assert!(
+        (d2.cost_usd - 1235.0 / 1_000_000.0).abs() < 1e-9,
+        "d2.cost_usd={}",
+        d2.cost_usd
+    );
 
     let t = &r.totals;
-    assert_eq!(t.requests, 4);
-    assert!((t.cost_usd - 6541.0 / 1_000_000.0).abs() < 1e-9);
+    assert_eq!(t.requests, 5);
+    assert!(
+        (t.cost_usd - (5330.0 + 1235.0) / 1_000_000.0).abs() < 1e-9,
+        "t.cost_usd={}",
+        t.cost_usd
+    );
 
     // 模型维度：等价身份键序（末行为合计）；label 退回原始代表写法。
     let rm = codex_report(GroupBy::Model);
@@ -204,14 +215,14 @@ fn test_e2e_codex_json() {
         .collect();
     assert_eq!(labels, ["gpt-5.4", "gpt-5.5", "gpt-5.6-sol", ""]);
     let sol = &rm.groups[2];
-    assert_eq!(sol.requests, 2);
-    assert_eq!(sol.tokens.input, 760);
+    assert_eq!(sol.requests, 3);
+    assert_eq!(sol.tokens.input, 761);
     assert_eq!(sol.tokens.cache_read, 200);
 
     // agent 维度
     let ra = codex_report(GroupBy::Agent);
     assert_eq!(ra.groups[0].key, "codex");
-    assert_eq!(ra.groups[0].requests, 4);
+    assert_eq!(ra.groups[0].requests, 5);
 }
 
 #[test]
@@ -231,16 +242,16 @@ fn test_e2e_multi_agent_merge() {
     assert_eq!(r.groups[0].key, "claude-code");
     assert_eq!(r.groups[0].requests, 4, "H02：子代理用量一并计入");
     assert_eq!(r.groups[1].key, "codex");
-    assert_eq!(r.groups[1].requests, 4);
-    assert_eq!(r.totals.requests, 8);
+    assert_eq!(r.groups[1].requests, 5);
+    assert_eq!(r.totals.requests, 9);
     assert_eq!(r.totals.agents, ["claude-code", "codex"]);
 
-    // 日维度合并：claude 07-17 1 条 + codex 07-17 1 条 = 2；07-18 = 3 + 3 = 6。
+    // 日维度合并：claude 07-17 1 条 + codex 07-17 1 条 = 2；07-18 = 3 + 4 = 7。
     let d = both_report(GroupBy::Day);
     assert_eq!(d.groups.len(), 3);
     assert_eq!(d.groups[0].key, "2026-07-17");
     assert_eq!(d.groups[0].requests, 2);
-    assert_eq!(d.groups[1].requests, 6);
+    assert_eq!(d.groups[1].requests, 7);
     // 多 agent 数据填充 agents 字段。
     assert_eq!(d.groups[0].agents, ["claude-code", "codex"]);
 

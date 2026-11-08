@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "修复历史合并的同刻候选与 Codex 重播时间；CCS 恢复为只补充 Claude Code，日汇总按来源快照时刻覆盖部分明细并披露不确定性，旧库无批次的汇总不再被内容未变的重导误标为可信边界，其他 agent 不受 CCS 影响；升级迁移串行并校验既有备份"
+  "summary": "修复历史合并的同刻候选与 Codex 重播时间；CCS 恢复为只补充 Claude Code，日汇总按来源快照时刻覆盖部分明细并披露不确定性；修复 Codex 不同响应四桶相同被误去重的漏计——新格式 token_usage_record 建立 (thread_id, response_id) 强响应身份，record/token_count 两观察合计一条事实，工具循环、回退与 legacy fork 中不同响应同用量分别计入，旧库被弱指纹误合并的事实经镜像来源键在纠错备份+事务内原行升级，无法映射的保持原值并披露"
 }

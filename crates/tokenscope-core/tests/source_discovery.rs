@@ -34,6 +34,26 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// Windows 上创建目录符号链接需要 SeCreateSymbolicLinkPrivilege（管理员或
+/// 开发者模式）。无该特权的环境里这两类用例无法构造前置条件——显式跳过并
+/// 说明原因，不伪装通过；GitHub runner 有特权，照常执行真实断言。
+#[cfg(windows)]
+fn windows_symlink_privilege_available() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let probe_target = temp_dir("symlink-probe-target");
+        let probe_link = probe_target
+            .parent()
+            .unwrap()
+            .join(format!("symlink-probe-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&probe_link);
+        let ok = std::os::windows::fs::symlink_dir(&probe_target, &probe_link).is_ok();
+        let _ = std::fs::remove_dir_all(&probe_link);
+        let _ = std::fs::remove_dir_all(&probe_target);
+        ok
+    })
+}
+
 /// 假身份规范化：小写 + 分隔符折叠 + 去尾分隔符——跨平台确定性地模拟
 /// canonicalize 的"同根别名"（`join("a/b")` 与 `join("a").join("b")` 的
 /// 字符串分隔符不同，身份必须折叠）。
@@ -794,6 +814,14 @@ fn acceptance_isolated_rejects_outside_legacy_and_manual_roots() {
 /// 测试自建自拆，不触碰真实用户数据。
 #[test]
 fn acceptance_isolation_resolves_real_paths_and_rejects_escapes() {
+    #[cfg(windows)]
+    if !windows_symlink_privilege_available() {
+        eprintln!(
+            "跳过：Windows 无符号链接创建特权（SeCreateSymbolicLinkPrivilege），\
+             无法构造 junction/断链前置；GitHub runner 有特权照常执行"
+        );
+        return;
+    }
     let home = temp_dir("acceptance-real-home");
     let root = temp_dir("acceptance-real-root");
     std::fs::create_dir_all(root.join("sources/claude/projects")).unwrap();
@@ -1113,6 +1141,14 @@ fn acceptance_isolation_gates_fallback_roots_before_probing() {
 /// 隔离根内正例正常；普通产品模式（isolated=false）语义原样保留。
 #[test]
 fn acceptance_isolated_without_root_fails_closed() {
+    #[cfg(windows)]
+    if !windows_symlink_privilege_available() {
+        eprintln!(
+            "跳过：Windows 无符号链接创建特权（SeCreateSymbolicLinkPrivilege），\
+             无法构造断链 junction 前置；GitHub runner 有特权照常执行"
+        );
+        return;
+    }
     let home = temp_dir("acc8-home");
     let outside_default = temp_dir("acc8-outside");
     std::fs::create_dir_all(outside_default.join("projects")).unwrap();

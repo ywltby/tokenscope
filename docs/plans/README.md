@@ -1,9 +1,11 @@
 # TokenScope 计划与完成状态总账
 
-> 更新日期：2026-11-04。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
+> 更新日期：2026-11-07。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
 > 唯一当前待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)。真实跨午夜、长时间休眠、跨显示器在[独立系统验收待办](system-acceptance-todo.md)维护，均未排期、未标通过。[审计索引](audits/README.md)保留历史时点结论。
 
 ## 现在执行什么
+
+**2026-11-08 专项（已实施）**：[Codex 正常请求身份与漏计修复](active/2026-11-08-codex-request-identity.md) K01–K05 交付。新格式 `token_usage_record` 的 `(thread_id, response_id)` 建立强响应身份：普通会话/工具循环/回退/legacy fork 中不同响应同用量分别计入，同一响应副本只计一次，record/count 两观察合计一条事实；旧库误合并的弱事实经镜像来源键在纠错备份+事务内原行升级，无法映射的保持原值并披露。Codex `/btw` 用量获取按用户决定只登记为 **TODO / 暂缓**（见专项 §4），不实现遥测接入、不作为本批交付阻断；与既有 N01–N18 责任编号的历史计数分开记录。
 
 已实施的功能专项均已交付，不重做已关闭任务。2026-11-04 复核：N13 按 AC09 原验收口径判定关闭、N18 随 [v0.6.1](https://github.com/ywltby/tokenscope/releases/tag/v0.6.1) 预发布关闭；用户协议重新同意专项（PR #52/#53，v0.6.1）归档 implemented。当前责任状态如下，N14 已随 B1 关闭：
 
@@ -36,6 +38,10 @@ AC10 验收脚本的 SQLite 瞬时文件豁免同时收窄：只在**受控历�
 ## 2026-10-23 测试临时目录清理（已完成归档）
 
 [测试临时目录清理实施计划](archive/implemented/2026-10-23-test-temp-cleanup.md) 两个批次均已交付并经用户逐轮复核：B1（Vitest 用例遗漏修复 + 六条外层契约回归 + CI 接线）随 [PR #44](https://github.com/ywltby/tokenscope/pull/44) 合并 `fde7762`（三轮复审补修：失败证据保留、超时进程树收尾、挂起创建消除作业竞态、原预算内统一截止、日志直写文件）；前置 [PR #42](https://github.com/ywltby/tokenscope/pull/42)（Rust 独立临时根与进程级收尾）经用户批准合并 `4fc46c6`；B2（锁等待用例先 `drop(holder)` 再严格核实删除）随 [PR #46](https://github.com/ywltby/tokenscope/pull/46) 合并 `58d0d15`，发布 [v0.5.13](https://github.com/ywltby/tokenscope/releases/tag/v0.5.13)（构建、五场景安装、八组单跳（0.1.0 / 0.4.0 / 0.5.9 / 0.5.12 × present/deleted）、两条连续升级链全过）。两类历史失败（native-ui 页面 target 未出现、`latest_history_opens_without_writer_lock` 超限）根因未定位、仅记录；其余夹具的治理为后续候选，见归档计划 §6.2。本专项不占 N 编号，不改变 N09 等已完成项的历史状态。
+
+## 2026-11-07 Claude 跨会话复制去重与旧库纠错（0.7.2）
+
+[专项计划](active/2026-11-07-claude-cross-session-dedupe.md) 的 C01–C05 已交付：复制/分支会话把同一次模型调用抄进另一会话时，副本的 `message.id`、`requestId`、`uuid`、事件时间、模型与四桶完全一致，旧身份 `(session_id, message.id)` 让副本各成一条事实。现追加 `claude-copy` 证据身份作为第二个别名（不删除会话内身份、不按时间或 token 猜测），内存去重与历史写入共用同一判定；`PARSE_RULES_REVISION` 5 → 6 让未变化的文件重解析补证据，旧库中证据充分的重复事实在写入事务内按固定代表规则合并（先迁全部别名与来源，再删重复行），合并前生成 `history.db.correction-backup-<UTC>` 可恢复备份，无备份整批回滚、证据不足的旧行保留。定向测试 12 例（`claude_cross_session_dedupe.rs` 4 + `claude_cross_session_migration.rs` 8）加 `dedupe.rs` 三条单测；口径见 `docs/stats-semantics.md` §3.1、§3.3.1、§6、§6.5.4。**边界**：只抄到流式中间观察的副本、来源已删除的一侧不合并；不涉及 `/btw`、Codex fork 或 CCS 日汇总规则；代码修复不等于安装版已更新。
 
 ## 已交付与证据边界
 

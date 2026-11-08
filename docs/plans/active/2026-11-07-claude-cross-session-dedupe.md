@@ -1,6 +1,7 @@
 # Claude 跨会话复制请求去重与旧库纠错计划
 
-> 待用户确认，尚未实施。执行时使用 executing-plans，逐项先红后绿；本计划不授权修改用户真实数据库、自动合并或发布。
+> 已获批准并实施（2026-11-07）。执行记录见 §5：C01–C05 的落点、验证与未覆盖边界。
+> 本计划不授权修改用户真实数据库、自动合并或发布；真实历史库始终未被写入。
 
 **Goal:** 同一次 Claude 模型调用被复制到不同会话时只计一次，分支后的新调用照常计入，并安全纠正有充分证据的旧重复事实。
 
@@ -110,4 +111,87 @@ python -B scripts/run_rust_tests.py -- cargo test --locked -p tokenscope --test 
 - 仅新增标识缺失且证据无法补齐的边界，不扩展到 `/btw`、Codex fork 或全部代理的身份重设计。
 - 如发现现有数据无法支持拟定的严格证据判定，回到本计划修订，不放宽为“message.id 一样就合并”来求通过。
 
-本轮产物只有计划；所有 C01–C05 均未执行。
+## 5. 执行记录（2026-11-07）
+
+基线：分支自最新 `main`（`32bf7bc`）起，独立修复分支
+`fix/claude-cross-session-dedupe`；未创建 worktree，未混入 CCS PR #56
+（当时 OPEN）的改动，未改写已有提交。
+
+### C01 证据承载与合成反例（已实施）
+
+- `source/claude.rs`：读取顶层 `requestId` 与 `uuid`（只接受非空字符串；
+  缺失/空白/类型异常 → 无证据，不计坏行）。`model.rs` 新增
+  `ClaudeCopyEvidence`、`UsageEvent::claude_copy`、`copy_identity()`、
+  `observation_digest()`（时间 + 模型 + 四桶 + 分档，不含会话与路径）。
+- 先红：`tests/claude_cross_session_dedupe.rs` 的两会话复制用例在旧实现上
+  得 3 条请求（期望 2），四桶 38+6（期望 19+6）；修复后转绿。
+- 负例：同 token 不同身份不合并、缺 `requestId`/`uuid` 不合并、同标识不同
+  四桶不合并；解析层另有空白/`null`/非字符串/对象四类非法类型用例。
+
+### C02 内存与历史共用身份判定（已实施）
+
+- `dedupe.rs`：先按既有规则做会话内终值收敛，再按 `copy_identity` 合并
+  跨会话副本；代表取会话 ID 字典序最小（其次来源路径、行序），与文件发现
+  顺序无关。副本不丢弃证据——`DedupeResult.copies` 把副本事件带出，写入层
+  （`report::append_copy_evidence`）把副本的会话内身份、复制身份与来源位置
+  一并登记到保留事件。
+- `history.rs`：`lookup_hits` 返回全部命中及来源（自身位置 / 复制证据）；
+  仅由复制证据命中的写入只补证据、不改代表；命中多条事实时在同一事务内按
+  固定代表规则合并（`merge_facts_in_tx`：先迁别名与来源，再删重复行）。
+- 写入排序改为 `(ts, session_id, source_path, line)`：库内代表与内存代表
+  共用同一固定规则。
+
+### C03 旧库纠错与升级（已实施）
+
+- 无新增表/列：复用 `event_aliases`（新 `claude-copy` 方案）与
+  `event_origins`，`HISTORY_SCHEMA_VERSION` 保持 5，持久格式指纹不变。
+- `PARSE_RULES_REVISION` 5 → 6：未变化的来源文件在下次正常采集重解析一次；
+  实测（`unchanged_sources_are_reparsed_to_supply_evidence`）文件字节与
+  指纹不变时 `observations` 仍 +1，随后合并为一条。
+- 纠错前备份：`history.db.correction-backup-<UTC>`（`VACUUM INTO`），与升级
+  备份分开命名；无备份不允许合并，事务失败整批回滚（含已完成的合并）。
+- 未变内容的重观察也补来源证据；`WriteSummary.merged` 单独计数，不伪报新增。
+
+### C04 查询与兼容（已实施）
+
+- `tests/claude_cross_session_migration.rs`：旧库双份事实合一（别名/来源/
+  备份齐全）、来源删除与放回不复活、纠错失败整批回滚、CCS 前后顺序与合并后
+  重导、流式观察、三会话桥接冲突、旧查询快照冻结与新快照一致、项目分组代表。
+- 既有 Codex / 两版 WorkBuddy / CCS 三向选择用例保持通过（全量测试见 §5.5）。
+
+### C05 文档与交付（已实施）
+
+- `docs/stats-semantics.md`：§3.1（跨会话复制与代表规则）、§3.3.1
+  （`claude-copy` 身份）、§6（纠错、备份、证据边界）、新增 §6.5.4。
+- 版本：patch 递增（`0.7.1` → `0.7.2`），并登记上一版 `v0.7.1` 升级基线。
+- 持久格式未变，无需迁移 fixture 或格式指纹更新；构建输入清单无新增非 Rust
+  输入。
+
+### 验证结果与本地限制（2026-11-07）
+
+- 定向：`claude_cross_session_dedupe` 4/4、`claude_cross_session_migration` 8/8、
+  `history_overlap` 12/12；`cargo test -p tokenscope --lib source::claude` 21/21；
+  去重单测（`dedupe::tests`）全部通过。
+- 全量：`cargo test --locked --workspace --no-fail-fast` 共 66 个测试目标通过；
+  唯一失败是 `source_discovery` 的两条既有用例（`std::os::windows::fs::symlink_dir`
+  返回 OS 1314「客户端没有所需的特权」）——本进程未提权、`mklink /D` 同样失败，
+  属本机环境限制，与本次改动无关（干净 HEAD 复现同一错误）。
+  `history_storage::concurrent_writers_do_not_duplicate_events` 在本机出现一次
+  `SQLITE_READONLY` 竞态、重跑通过，同样在干净 HEAD 复现，非本次引入。
+- 门禁：`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets
+  -- -D warnings` 干净；未改任何非 Rust 构建输入（`scripts/build-inputs.json`
+  不变）。因上述符号链接权限限制，本机**未跑完**提交钩子的 full 模式（它会跑
+  两轮全量 workspace 测试），改由用户在本机决定提交方式；PR CI 不受影响。
+- 版本：0.7.1 → 0.7.2（patch）；`upgrade_baselines.py add --tag v0.7.1` 已登记，
+  `select --current-version 0.7.2` 给出 6 个起点（0.1.0/0.4.0/0.5.9/0.5.13/
+  0.6.0/0.7.1），未超上限。
+
+### 未覆盖 / 证据不足
+
+- 只抄到流式中间观察（终值不同的另一条 `uuid`）的副本、以及来源已被删除的
+  一侧：没有共同终值证据，按不同事实保留（不猜）。
+- 不扩展到 `/btw` 补采、Codex fork、WorkBuddy 身份或 CCS 日汇总三向选择。
+- 本机 174 组 / 41,051,595 token 只是 2026-11-07 的只读快照，不是验收阈值；
+  验收全部使用合成数据与隔离临时目录。
+- 代码修复不等于用户安装版已更新：需升级到含本修复的版本，并在正常采集
+  触发后才会重解析补证据。
