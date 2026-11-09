@@ -182,16 +182,29 @@
 - **修复 3（悬挂强观察）**：count 与最近强观察不一致 → 清除观察并照常出数；
   `turn_context`（新 turn 开始）终结配对窗口。不引入时间窗口/累计差分；
   相同响应 record/count 仍只计一次（`record_and_token_count_are_one_
-  observation` 等既有用例钉住），不同响应同四桶分别计入。边界如实披露：
-  强记录配对 count 缺席且后续出现同用量 count-only 时无法区分"迟到配对"
-  与"独立请求"，按旧解析器行为出数（`new_response_pair_after_strong_
-  record_counts_once` 钉住 B 的 record 重置观察的路径）。
+  observation` 等既有用例钉住），不同响应同四桶分别计入。
+  **同日二次更正（2026-11-09）**：同用量 count-only 的边界此前描述为
+  "照常出数、可能双计"有误——合成回归实测为**两层漏计**（解析层抑制 +
+  写库镜像 origin 吸收，机理见 stats-semantics §3.2"同用量配对的不可区分
+  边界"）。本轮不改算法（"全部保留"会把漏计换成正常配对双计），以**边界
+  行为测试**钉住两层抑制与两个对照（`same_usage_count_only_after_strong_
+  record_without_boundary_is_suppressed`、`same_usage_count_only_absorbed_
+  by_mirror_origin_despite_boundary`、`different_usage_count_only_after_
+  new_turn_boundary_counts`、`normal_same_usage_pair_still_counts_once`），
+  并删除"正常落盘节奏不会走到这里"的无证据保证。
 - **修复 4（symlink 探针）**：`tests/source_discovery.rs`——只把确证的
   os error 1314 归为缺权限，其他错误如实 panic；CI（`CI` 已设置）无特权
   直接失败（runner 必须真实构造 junction），本地无特权显式跳过并打印
   `SYMLINK-TESTS-SKIPPED:` 可识别标记；探针只创建/清理本次自建且确认归属
   的路径，清理失败如实报告。实测：本地 28/28（2 例显式跳过带标记），
   模拟 `CI=1` 无特权 → 测试 FAILED（不再冒充通过）。
+  **同日二次收窄（2026-11-09）**：判定此前把 `ErrorKind::PermissionDenied`
+  （如普通访问拒绝，原始码 5）也归为缺特权——与"只识别确证 1314"的口径
+  不符。修正：抽取纯判定函数 `symlink_exemption_decision(错误, CI 形态)`，
+  **仅原始码 1314** 进入本地豁免；探针拆为 `windows_symlink_probe_result`，
+  创建失败保留原始创建错误为主、清理错误附加打印不被覆盖。最小测试 5 例
+  （1314 本地豁免、原始码 5 失败、其他错误失败、CI 下 1314 失败、原始创建
+  错误不被清理覆盖），全部注入驱动，不改系统环境。
 - **同刻升级例外**：compaction 旧行与新事件同为 record 行时刻，旧代码落
   入同刻键比较（字典序随机胜负）→ 随机丢弃升级。修正：镜像例外在**同刻**
   也强制 Update（`classify_against` 提取 `codex_upgrade_forced`）。

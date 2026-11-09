@@ -596,9 +596,13 @@ fn ingest_line(
             // 与最近强观察**不一致**的 count：强记录的迟到配对与另一响应的
             // count-only 在此无法区分——不猜测，按旧解析器行为照常出数并
             // 清除悬挂标记（复审修复 2026-11-09：此前直接 return 且不清理，
-            // 一个悬挂观察会吞掉之后全部 count-only 请求）。若它真是迟到
-            // 配对，属于已披露的"record/count 非零不一致"边界；正常落盘
-            // 节奏（配对 count 紧随 record 1–3ms）不会走到这里。
+            // 一个悬挂观察会吞掉之后全部 count-only 请求）。
+            //
+            // 与最近强观察**一致**的 count（本分支抑制）：若它真是刚出数
+            // 响应的配对观察，正确；若是独立同四桶请求，则是漏计——两者无
+            // 身份证据可区分，不猜测，如实披露（docs/stats-semantics.md
+            // §3.2"同用量配对的不可区分边界"）。新 turn 边界已在
+            // turn_context 分支清除观察，边界后的 count 不进本分支。
             if let Some((observed_usage, _)) = state.last_strong_observation.take() {
                 let same_usage = payload
                     .info
@@ -857,7 +861,6 @@ mod tests {
         use super::*;
 
         const TS: &str = "2026-07-17T15:59:00Z";
-
         fn record(input: u64, output: u64, cached: u64, cw: u64) -> String {
             serde_json::json!({"type":"token_usage_record","timestamp":TS,"payload":{
             "response_id":"synthetic-response","usage":{

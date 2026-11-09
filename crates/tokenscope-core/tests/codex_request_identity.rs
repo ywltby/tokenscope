@@ -29,6 +29,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokenscope::aggregate::GroupBy;
 use tokenscope::report::{SummaryOptions, SummaryReport, summary};
+use tokenscope::source::Source;
+use tokenscope::source::codex::CodexSource;
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -1027,6 +1029,200 @@ fn dangling_strong_observation_does_not_swallow_followup_counts() {
     assert_eq!(r.totals.tokens.total(), 6600);
     // 重启视角一致。
     assert_eq!(report(&dir, &root).totals.requests, 3);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ── 同用量配对的不可区分边界（2026-11-09 复审更正）────────────────────────
+//
+// 形态：强 record A 已产出 → A 的配对 count 缺失 → 后续出现独立 count-only
+// B，四桶与 A 完全相同。B 与"A 的迟到配对 count"在没有额外可靠身份时**不可
+// 区分**：count 行没有请求标识，四桶一致也不构成身份证据（不同响应四桶相同
+// 是常态，见 §1 反例）。
+//
+// 当前实现在**两层**抑制 B，风险形态是**漏计**（此前描述"照常出数、可能双
+// 计"有误，实测为漏计）：
+// 1. 解析层：无新 turn 边界时，同用量 count 被当作 A 的配对观察抑制；
+// 2. 写库层：即使解析层出数（如已有新 turn 边界），A 的镜像来源键与同四桶
+//    弱 count 的事件键在"旧出数行 = 该 count 行"时逐字节相同（旧出数行、旧
+//    时间戳、四桶、空 record_id 全同），弱 count 经镜像 origin 命中 A 的
+//    行，按 Codex 重播"更早胜出"被 Stale 丢弃——旧表示下两者本就是同一条
+//    弱事实（旧库漏计的根源），新表示下 A 有强身份、B 是无身份独立请求，
+//    但没有证据可拆开。
+//
+// 本组用例是**边界行为测试**：钉住当前实现的可判定行为，不是"正确计量验收"
+// ——漏计形态在无新证据时无法修复，不引入模糊时间窗口、不凭猜测改算法
+//（"全部保留"会把漏计风险换成正常配对双计）。修复只有一条路：上游提供可
+// 配对的响应标识（如 count 行携带 response_id）后再拆分。
+
+/// 无边界标记的同用量 count-only B：被当作 A 的配对观察抑制（漏计形态，
+/// 边界行为测试，钉住当前实现）。
+#[test]
+fn same_usage_count_only_after_strong_record_without_boundary_is_suppressed() {
+    let dir = temp_dir("same-usage-noboundary");
+    let root = dir.join("codex");
+    let s = "sess-same-noboundary";
+    let lines = vec![
+        meta(s),
+        ctx("2026-11-07T16:00:00.000Z"),
+        Record {
+            ts: "2026-11-07T16:00:01.000Z",
+            session: s,
+            turn: "turn-1",
+            response: "resp_synthetic_1",
+            usage: USAGE_1100,
+        }
+        .to_json(),
+        // A 的配对 count 缺席；无 turn_context；随后独立的 count-only B
+        //（四桶与 A 完全相同）。
+        Count {
+            ts: "2026-11-07T16:00:02.000Z",
+            last: USAGE_1100,
+            total: USAGE_1100,
+        }
+        .to_json(),
+    ];
+    write_rollout(&root, "rollout-same-noboundary", &lines);
+
+    let r = report(&dir, &root);
+    assert_eq!(
+        r.totals.requests, 1,
+        "边界行为：同用量 count-only B 与 A 的迟到配对不可区分，\
+         按配对观察抑制（漏计形态，无身份证据时不猜测）"
+    );
+    assert_eq!(r.totals.tokens.total(), 1100);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 边界行为（写库层）：即使解析层把同用量 count-only B 出数（新 turn 边界
+/// 已终结 A 的配对观察），B 的事件键与 A 的镜像来源键逐字节相同（同一旧出
+/// 数行、同一旧指纹），写库经镜像 origin 命中 A 的行后按"更早胜出"被
+/// Stale 丢弃——仍漏计。旧表示下两者本就是同一条弱事实；无证据不拆分。
+#[test]
+fn same_usage_count_only_absorbed_by_mirror_origin_despite_boundary() {
+    let dir = temp_dir("same-usage-mirror");
+    let root = dir.join("codex");
+    let s = "sess-same-mirror";
+    let lines = vec![
+        meta(s),
+        ctx("2026-11-07T16:00:00.000Z"),
+        Record {
+            ts: "2026-11-07T16:00:01.000Z",
+            session: s,
+            turn: "turn-1",
+            response: "resp_synthetic_1",
+            usage: USAGE_1100,
+        }
+        .to_json(),
+        // A 的配对 count 缺席；新 turn 边界后出现同四桶 count-only B，
+        // ts 恰为旧解析器会记账的那一行（与 A 的镜像键同 ts）。
+        ctx("2026-11-07T16:00:02.000Z"),
+        Count {
+            ts: "2026-11-07T16:00:02.100Z",
+            last: USAGE_1100,
+            total: USAGE_1100,
+        }
+        .to_json(),
+    ];
+    write_rollout(&root, "rollout-same-mirror", &lines);
+
+    // 解析层确实出 2 条（turn_context 已终结配对观察）。
+    let parse = CodexSource::new(root.clone())
+        .parse_file(&root.join("sessions").join("rollout-same-mirror.jsonl"));
+    assert_eq!(
+        parse.events.len(),
+        2,
+        "解析层：新 turn 边界终结配对观察，A 与 B 各出一事件"
+    );
+
+    // 写库层：B 经镜像 origin 命中 A 的行被吸收（边界行为，漏计形态）。
+    let r = report(&dir, &root);
+    assert_eq!(
+        r.totals.requests, 1,
+        "边界行为：同四桶弱 count 的事件键与 A 的镜像键逐字节相同，\
+         写库按旧表示视为同一事实吸收（漏计形态，无身份证据不拆分）"
+    );
+    assert_eq!(r.totals.tokens.total(), 1100);
+    // 重启视角一致。
+    assert_eq!(report(&dir, &root).totals.requests, 1);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 对照 1：明确的**新 turn 边界** + **不同四桶**的 count-only 照常计入
+///（可区分：镜像键内容指纹随四桶不同而不同，不与 A 的镜像键碰撞）。
+#[test]
+fn different_usage_count_only_after_new_turn_boundary_counts() {
+    let dir = temp_dir("diff-usage-turn");
+    let root = dir.join("codex");
+    let s = "sess-diff-turn";
+    let b = Usage {
+        input: 2000,
+        cached: 1200,
+        cache_write: 200,
+        output: 200,
+        reasoning: 80,
+        total: 2200,
+    };
+    let lines = vec![
+        meta(s),
+        ctx("2026-11-07T16:00:00.000Z"),
+        Record {
+            ts: "2026-11-07T16:00:01.000Z",
+            session: s,
+            turn: "turn-1",
+            response: "resp_synthetic_1",
+            usage: USAGE_1100,
+        }
+        .to_json(),
+        // A 的配对 count 缺席；新 turn 开始 → 配对窗口终结；B 四桶与 A
+        // 不同 → B 的事件键与 A 的镜像键不碰撞，B 独立入账。
+        ctx("2026-11-07T16:00:02.000Z"),
+        Count {
+            ts: "2026-11-07T16:00:02.100Z",
+            last: b,
+            total: b,
+        }
+        .to_json(),
+    ];
+    write_rollout(&root, "rollout-diff-turn", &lines);
+
+    let r = report(&dir, &root);
+    assert_eq!(
+        r.totals.requests, 2,
+        "新 turn 边界后的不同四桶 count-only 照常计入"
+    );
+    assert_eq!(r.totals.tokens.total(), 3300);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 对照 2：正常的 record/count 配对（四桶一致、无边界插入）仍只计一次。
+#[test]
+fn normal_same_usage_pair_still_counts_once() {
+    let dir = temp_dir("same-usage-pair");
+    let root = dir.join("codex");
+    let s = "sess-same-pair";
+    let lines = vec![
+        meta(s),
+        ctx("2026-11-07T16:00:00.000Z"),
+        Record {
+            ts: "2026-11-07T16:00:01.000Z",
+            session: s,
+            turn: "turn-1",
+            response: "resp_synthetic_1",
+            usage: USAGE_1100,
+        }
+        .to_json(),
+        Count {
+            ts: "2026-11-07T16:00:01.001Z",
+            last: USAGE_1100,
+            total: USAGE_1100,
+        }
+        .to_json(),
+    ];
+    write_rollout(&root, "rollout-same-pair", &lines);
+
+    let r = report(&dir, &root);
+    assert_eq!(r.totals.requests, 1, "正常配对仍只计一次");
+    assert_eq!(r.totals.tokens.total(), 1100);
     std::fs::remove_dir_all(&dir).ok();
 }
 
