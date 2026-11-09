@@ -215,3 +215,47 @@
 - 已知限制（登记不扩修）：`nick-fields/retry` 包裹完整 tauri build，按
   复审指出会重试任意构建失败而非仅 NSIS 下载 504——收窄到传输失败分类
   需要更完整的日志解析，本轮不扩展；502/503/504 脚本层重试已按根因修复。
+
+### 7. 同用量 count-only 跨 turn 误合并修复（2026-11-09，PR #57 追加）
+
+本轮只修"旧解析映射跨越新 turn，导致独立同用量请求被误合并"，不扩展其他
+任务；`/btw` 继续暂缓。
+
+- **红测实录取证**：把 `same_usage_count_only_absorbed_by_mirror_origin_
+  despite_boundary` 的预期从 1100/1 改为 2200/2 后，在当前实现上失败于
+  数字断言：`requests left: 1, right: 2`。解析层已正确产出 A、B 两条事件，
+  问题在写库层。
+- **根因（准确位置）**：强记录 A 的镜像来源键 = 旧解析器记账的 count 行；
+  新 turn 后的独立同用量 count-only B 的事件键与它逐字节相同。`lookup_hits`
+  把该镜像 origin（以及旧行 `event_key`、升级后残留的 `codex-usage` 弱别名）
+  当作 B 的身份，命中已升级的 A 行；`classify_against` 按 Codex"更早胜出"
+  判 Stale，B 被丢弃。旧解析器在该行记账只证明"A 的旧表示在哪"，不证明
+  "B 与 A 同属一次调用"。
+- **修复条件**：
+  1. 镜像来源键只作**首次升级**的定位证据：本响应已有强身份（来源键/强
+     别名）命中时不再查镜像；插入时也不重复登记镜像 origin。
+  2. Codex 弱写（无 response_id）不得命中强事实——来源位置/弱别名重合
+     不构成请求同一性；旧事实升级时行键改为当前 record 行，旧弱别名与
+     来源由该位置的当前弱事实接手，旧事实保留强身份。
+  3. 解析器的 turn 配对边界与写库身份空间保持一致：新 turn 边界后的
+     同用量 count-only 是独立请求；无边界且无其他身份证据的歧义仍按
+     配对观察抑制，不引入时间窗口/累计差分。
+- **新增/更新回归**（合成日志 + 隔离数据库）：
+  - `same_usage_count_only_absorbed_by_mirror_origin_despite_boundary`
+    改为 2200/2（重启一致）；
+  - `same_usage_count_only_after_boundary_with_existing_unrelated_fact`
+    （已有无关事实库：额外贡献 2200/2，总计 3300/3）；
+  - `same_usage_count_only_after_boundary_batched_and_rescanned_stays_exact`
+    （先 A 后追加边界+B；重扫、重启均 2200/2）；
+  - `migration_same_usage_count_only_after_new_turn_restores_two_requests`
+    （旧库 1 条弱事实按镜像升级为 A，B 独立计入；2200/2，旧行 id 保留，
+    重扫/重启不增不减）；
+  - 既有多来源拆分、compaction 映射、legacy fork 复制去重与子请求计入、
+    正常 record/count 配对 1100/1、同一 turn 两个不同强响应 2200/2 均
+    保持通过；无边界抑制用例保留为诚实的边界说明。
+- **门禁**：`cargo fmt --all -- --check`、clippy `-D warnings`、全量
+  `cargo test --locked --workspace -j 2`（经 `scripts/run_rust_tests.py`）
+  通过；未新增持久格式/构建输入，不重复递增同一未发布批次版本（仍 0.7.2）。
+- **文档更正**：撤回 `stats-semantics` §3.2"该已分界场景只能等上游增加
+  response_id"的结论；保留真正缺证据（无新 turn 边界）的限制说明。历史
+  汇报不改写，本节为追加更正。

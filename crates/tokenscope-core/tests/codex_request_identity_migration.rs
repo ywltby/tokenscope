@@ -384,6 +384,84 @@ fn migration_with_record_count_time_gap_restores_three_requests() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// ── 场景 1b：旧库同用量事实 + 新 turn 后的独立 count-only ────────────────
+//
+// 旧解析器忽略 turn_context，会把强记录 A 与**新 turn 后**同用量的 count B
+// 配成一次调用，旧库因此只有 1 条弱事实（ts/来源行 = count 行）。新解析器
+// 已用 turn 边界把 A、B 区分为两个请求：旧事实是 A（镜像键证明旧解析器在
+// 该 count 行给 A 记账），B 必须额外计入。升级后 2200/2，不是保留 1100/1
+// 或叠成 3300/3；旧行 id 保留，B 是无强身份的独立弱事实。
+
+#[test]
+fn migration_same_usage_count_only_after_new_turn_restores_two_requests() {
+    let dir = temp_dir("boundary-split-mig");
+    let root = dir.join("codex");
+    let data = dir.join("data");
+    let s = "sess-boundary-mig";
+    let count_ts = offset_ms("2026-11-07T16:00:02.000Z", 100);
+    let file = write_rollout(
+        &root,
+        "rollout-boundary-mig",
+        &[
+            meta(s, "2026-11-07T16:00:00Z"),
+            ctx("2026-11-07T16:00:00Z"),
+            record(
+                s,
+                "turn-1",
+                "resp_synthetic_1",
+                USAGE_1100,
+                "2026-11-07T16:00:01.000Z",
+            ),
+            // 新 turn 边界：新解析器据此判定 A 的配对窗口已终结。
+            ctx("2026-11-07T16:00:02.000Z"),
+            count(USAGE_1100, USAGE_1100, &count_ts),
+        ],
+    );
+    // 旧库：v6 忽略 turn_context，把 A 配对到 B 的 count 行，只有 1 条
+    // 弱事实（0-based：meta=0, ctx=1, record=2, ctx=3, count=4）。
+    let history = HistoryDb::open(&data.join("history.db")).unwrap();
+    let old_id = {
+        let seeded = history
+            .write_batch(&[legacy_write(&legacy_usage(&count_ts, s, &file, 4))])
+            .unwrap();
+        assert_eq!(seeded.inserted, 1);
+        history_rows(&dir)[0].id
+    };
+    drop(history);
+
+    let out = report(&dir, &root);
+    assert_eq!(
+        out.totals.requests, 2,
+        "旧事实升级为 A，新 turn 后的 B 独立计入"
+    );
+    assert_eq!(out.totals.tokens.total(), 2200);
+    let after = history_rows(&dir);
+    assert_eq!(after.len(), 2, "旧 1 条升级 + B 新增 = 2 条，不残留");
+    let upgraded = after.iter().find(|e| e.id == old_id).expect("旧行 id 保留");
+    assert_eq!(
+        upgraded.record_id.as_deref(),
+        Some("resp_synthetic_1"),
+        "旧行升级为 A，保留强身份"
+    );
+    assert_eq!(upgraded.tokens.total(), 1100);
+    let added = after.iter().find(|e| e.id != old_id).unwrap();
+    assert_eq!(added.record_id, None, "B 是无强身份的独立弱事实");
+    assert_eq!(added.tokens.total(), 1100);
+
+    // 重扫与重启：不增不减。
+    let mut refresh_opts = opts(&dir, &root);
+    refresh_opts.refresh = true;
+    let rescanned = summary(&refresh_opts).unwrap();
+    assert_eq!(rescanned.totals.requests, 2);
+    assert_eq!(rescanned.totals.tokens.total(), 2200);
+    assert_eq!(history_rows(&dir).len(), 2);
+    let restarted = report(&dir, &root);
+    assert_eq!(restarted.totals.requests, 2);
+    assert_eq!(restarted.totals.tokens.total(), 2200);
+    assert_eq!(history_rows(&dir).len(), 2);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 // ── 场景 2：legacy fork 旧行错挂父会话 ──────────────────────────────────
 //
 // 真实形态：legacy fork 子文件 = session_meta(子) → session_meta(父) → 复制

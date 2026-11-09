@@ -2578,7 +2578,10 @@ fn event_write_of(ev: &UsageEvent) -> crate::history::EventWrite {
         push_alias(&mut aliases, ev.agent, identity);
     }
     // 来源记录：本响应的解析位置 + 旧解析器镜像位置（K04 升级映射）。
-    // 镜像键与旧事实的来源键逐字节相等时，写入经由它命中旧行并原行升级。
+    // 镜像键与旧事实的来源键逐字节相等时，写入经由它命中旧行并原行升级；
+    // 它只作**首次升级的定位证据**，命中已升级行/已有强身份时不再参与
+    // 身份判定，也不在插入时重复登记（2026-11-09：新 turn 边界后的独立
+    // 同用量 count-only 曾因镜像键与自身来源键重合被并入强响应）。
     let mut origins = vec![native_origin(ev, key.clone())];
     if let Some(mirror) = &ev.codex_legacy_origin {
         origins.push(native_origin(ev, mirror.clone()));

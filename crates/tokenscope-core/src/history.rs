@@ -2506,12 +2506,52 @@ fn write_events_in_tx(
                 .optional()?;
             match current {
                 Some(id) if id == event_id => {}
-                Some(id) => bail!(
-                    "别名冲突：{} / {} / {} 已绑定事件 {id}，不能改绑事件 {event_id}",
-                    alias.app.as_str(),
-                    alias.scheme,
-                    alias.value
-                ),
+                Some(id) => {
+                    if write.app == AgentKind::Codex && write.record_id.is_none() {
+                        // 旧事实升级后留下的弱别名代表旧合并表示的定位证据；
+                        // 当前位置的当前弱事实接管它，否则独立 count-only
+                        // 会被旧别名吸回已升级行（2026-11-09 修复）。
+                        if !allow_correction {
+                            bail!(
+                                "别名冲突：{} / {} / {} 已绑定已升级事件 {id}，\
+                                 未开启纠错通道",
+                                alias.app.as_str(),
+                                alias.scheme,
+                                alias.value
+                            );
+                        }
+                        if !identity_hit_allowed(tx, true, id)? {
+                            tx.execute(
+                                "UPDATE event_aliases SET event_id = ?1
+                                 WHERE app = ?2 AND identity_scheme = ?3
+                                   AND identity_value = ?4 AND event_id = ?5",
+                                params![
+                                    event_id,
+                                    alias.app.as_str(),
+                                    alias.scheme,
+                                    alias.value,
+                                    id
+                                ],
+                            )?;
+                            summary.aliases_added += 1;
+                            changed = true;
+                        } else {
+                            bail!(
+                                "别名冲突：{} / {} / {} 已绑定事件 {id}，不能改绑事件 {event_id}",
+                                alias.app.as_str(),
+                                alias.scheme,
+                                alias.value
+                            );
+                        }
+                    } else {
+                        bail!(
+                            "别名冲突：{} / {} / {} 已绑定事件 {id}，不能改绑事件 {event_id}",
+                            alias.app.as_str(),
+                            alias.scheme,
+                            alias.value
+                        );
+                    }
+                }
                 None => {
                     tx.execute(
                         "INSERT INTO event_aliases(event_id, app, identity_scheme,
@@ -2530,9 +2570,20 @@ fn write_events_in_tx(
                 }
             }
         }
+        // 镜像来源键只作首次升级的定位证据：旧事实自身的来源行已经存在，
+        // 新写入不再重复登记；否则当前解析在该行产出的独立弱事实会被
+        // 镜像来源占位挡住（2026-11-09 修复）。
+        let mirror_origin = codex_mirror_origin(write);
         for origin in &write.origins {
             if origin.origin_key.is_empty() {
                 bail!("来源记录键不得为空（{}）", origin.origin_kind);
+            }
+            if write.record_id.is_some()
+                && mirror_origin.is_some_and(|m| {
+                    m.origin_kind == origin.origin_kind && m.origin_key == origin.origin_key
+                })
+            {
+                continue;
             }
             let current: Option<i64> = tx
                 .query_row(
@@ -2544,11 +2595,43 @@ fn write_events_in_tx(
                 .optional()?;
             match current {
                 Some(id) if id == event_id => {}
-                Some(id) => bail!(
-                    "来源记录冲突：{} / {} 已指向事件 {id}，不能改指事件 {event_id}",
-                    origin.origin_kind,
-                    origin.origin_key
-                ),
+                Some(id) => {
+                    if write.app == AgentKind::Codex && write.record_id.is_none() {
+                        // 当前位置已成为一条独立弱事实：把旧事实升级后残留的
+                        // 来源证据转给它（旧事实的强身份不受影响）。该位置
+                        // 的当前解析表示确实是本事实，不是凭数值猜合并。
+                        if !allow_correction {
+                            bail!(
+                                "来源记录冲突：{} / {} 已指向已升级事件 {id}，\
+                                 未开启纠错通道",
+                                origin.origin_kind,
+                                origin.origin_key
+                            );
+                        }
+                        if !identity_hit_allowed(tx, true, id)? {
+                            tx.execute(
+                                "UPDATE event_origins SET event_id = ?1
+                                 WHERE origin_kind = ?2 AND origin_key = ?3
+                                   AND event_id = ?4",
+                                params![event_id, origin.origin_kind, origin.origin_key, id],
+                            )?;
+                            summary.origins_added += 1;
+                            changed = true;
+                        } else {
+                            bail!(
+                                "来源记录冲突：{} / {} 已指向事件 {id}，不能改指事件 {event_id}",
+                                origin.origin_kind,
+                                origin.origin_key
+                            );
+                        }
+                    } else {
+                        bail!(
+                            "来源记录冲突：{} / {} 已指向事件 {id}，不能改指事件 {event_id}",
+                            origin.origin_kind,
+                            origin.origin_key
+                        );
+                    }
+                }
                 None => {
                     tx.execute(
                         "INSERT INTO event_origins(event_id, origin_kind, origin_key, app,
@@ -2681,7 +2764,14 @@ fn write_has_codex_legacy_origin(w: &EventWrite) -> bool {
 /// 升级映射的镜像来源键：origins 里除本响应解析位置（event_key）以外的
 /// native_file 来源。旧解析器在本响应的配对 count 行（或 compaction 的
 /// record 行）记账，该键与旧事实的来源键逐字节相等。
+///
+/// 2026-11-09 起它只作**首次升级的定位证据**：本响应已有强身份时不再用
+/// 它命中（同位置的当前弱事实可能已接手该来源行），插入时也不重复登记；
+/// 参见 [`lookup_hits`] 与 [`write_events_in_tx`]。
 fn codex_mirror_origin(w: &EventWrite) -> Option<&EventOrigin> {
+    if w.app != AgentKind::Codex {
+        return None;
+    }
     w.origins
         .iter()
         .find(|o| o.origin_kind == ORIGIN_KIND_NATIVE_FILE && o.origin_key != w.event_key)
@@ -3005,6 +3095,17 @@ fn lookup_hits(conn: &Connection, w: &EventWrite) -> Result<LookupHits> {
             hits.ids.push(id);
         }
     };
+    // Codex 弱写（count-only）与强响应是两个身份空间：弱事件不携带响应
+    // 标识，它的来源位置/弱别名可能与旧事实升级后留下的镜像证据重合，
+    // 但那不证明两者是同一次调用（2026-11-09 修复：新 turn 边界后的
+    // 同用量 count-only 曾被已升级行经镜像来源键吸收）。弱写只允许命中
+    // 弱事实；强事件只由强身份/镜像升级路径命中。
+    let weak_codex = w.app == AgentKind::Codex && w.record_id.is_none();
+    // 镜像来源键只用于**首次升级**尚未有强表示的旧事实；本响应在库内
+    // 已有强身份（来源键/别名命中）时，镜像位置已属于当前弱事实或不再
+    // 需要升级，不能再次把它当作本响应的身份。
+    let mirror = codex_mirror_origin(w);
+    let mut has_own_hit = false;
     let by_key: Option<i64> = conn
         .query_row(
             "SELECT id FROM usage_events WHERE event_key = ?1",
@@ -3012,11 +3113,19 @@ fn lookup_hits(conn: &Connection, w: &EventWrite) -> Result<LookupHits> {
             |r| r.get::<_, i64>(0),
         )
         .optional()?;
-    if let Some(id) = by_key {
+    if let Some(id) = by_key
+        && identity_hit_allowed(conn, weak_codex, id)?
+    {
         push(id);
         hits.by_position = true;
+        has_own_hit = true;
     }
     for origin in &w.origins {
+        if mirror.is_some_and(|m| {
+            m.origin_kind == origin.origin_kind && m.origin_key == origin.origin_key
+        }) {
+            continue;
+        }
         let hit: Option<i64> = conn
             .query_row(
                 "SELECT event_id FROM event_origins WHERE origin_kind = ?1 AND origin_key = ?2",
@@ -3024,28 +3133,69 @@ fn lookup_hits(conn: &Connection, w: &EventWrite) -> Result<LookupHits> {
                 |r| r.get(0),
             )
             .optional()?;
-        if let Some(id) = hit {
+        if let Some(id) = hit
+            && identity_hit_allowed(conn, weak_codex, id)?
+        {
             push(id);
             hits.by_position = true;
+            has_own_hit = true;
         }
     }
     for alias in &w.aliases {
         let hit: Option<i64> = conn
             .query_row(
                 "SELECT event_id FROM event_aliases
-                 WHERE app = ?1 AND identity_scheme = ?2 AND identity_value = ?3",
+                  WHERE app = ?1 AND identity_scheme = ?2 AND identity_value = ?3",
                 params![alias.app.as_str(), alias.scheme, alias.value],
                 |r| r.get(0),
             )
             .optional()?;
-        if let Some(id) = hit {
+        if let Some(id) = hit
+            && identity_hit_allowed(conn, weak_codex, id)?
+        {
             push(id);
+            has_own_hit = true;
             if alias.scheme == ALIAS_CLAUDE_COPY {
                 hits.by_copy_alias = true;
             }
         }
     }
+    if !has_own_hit && let Some(mirror) = mirror {
+        let hit: Option<i64> = conn
+            .query_row(
+                "SELECT event_id FROM event_origins WHERE origin_kind = ?1 AND origin_key = ?2",
+                params![mirror.origin_kind, mirror.origin_key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = hit
+            && identity_hit_allowed(conn, weak_codex, id)?
+        {
+            push(id);
+            hits.by_position = true;
+        }
+    }
     Ok(hits)
+}
+
+/// 弱 Codex 写不得命中强事实：来源位置/弱别名重合只说明旧解析表示，
+/// 不构成请求同一性（强/弱两个键空间）。
+fn identity_hit_allowed(conn: &Connection, weak_codex: bool, id: i64) -> Result<bool> {
+    if !weak_codex {
+        return Ok(true);
+    }
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT app, record_id FROM usage_events WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(!matches!(
+        row,
+        Some((app, Some(record_id)))
+            if app == AgentKind::Codex.as_str() && !record_id.is_empty()
+    ))
 }
 
 fn same_fact_except_model(existing: &StoredEvent, write: &EventWrite) -> bool {
@@ -3180,9 +3330,17 @@ impl BatchSim {
 
     /// 解析本条写入命中的事实：与 [`lookup_event`] 的三级顺序与冲突语义
     /// 一致（来源键 → 来源记录 → 别名；本批声明优先于库内行，按事实归一）。
+    ///
+    /// Codex 强/弱分离与镜像升级条件同 [`lookup_hits`]：弱写不命中强事实；
+    /// 镜像来源只在本响应尚无强身份时用于首次升级。预览不得把这些边界
+    /// 判成与提交不同的结果。
     fn resolve(&mut self, conn: &Connection, w: &EventWrite) -> Result<Option<i64>> {
+        let weak_codex = w.app == AgentKind::Codex && w.record_id.is_none();
+        let mirror = codex_mirror_origin(w);
         // 1) 来源键。
-        if let Some(f) = self.claims.get(&format!("k|{}", w.event_key)) {
+        if let Some(f) = self.claims.get(&format!("k|{}", w.event_key))
+            && self.identity_hit_allowed(*f, weak_codex)
+        {
             return Ok(Some(*f));
         }
         let by_key: Option<i64> = conn
@@ -3193,12 +3351,25 @@ impl BatchSim {
             )
             .optional()?;
         if let Some(id) = by_key {
-            return self.fact_of(conn, id).map(Some);
+            let f = self.fact_of(conn, id)?;
+            // 模拟状态可能已把弱事实升级并改到当前记录行键；旧键不再属于它。
+            if self.state(f).event_key == w.event_key && self.identity_hit_allowed(f, weak_codex) {
+                return Ok(Some(f));
+            }
         }
-        // 2) 来源记录证据。
+        // 2) 来源记录证据（镜像键留到确认本响应尚无强身份后再查）。
         for origin in &w.origins {
-            if let Some(f) = self.claims.get(&origin_claim_key(origin)) {
-                return Ok(Some(*f));
+            if mirror.is_some_and(|m| {
+                m.origin_kind == origin.origin_kind && m.origin_key == origin.origin_key
+            }) {
+                continue;
+            }
+            let okey = origin_claim_key(origin);
+            if let Some(f) = self.claims.get(&okey) {
+                if self.identity_hit_allowed(*f, weak_codex) {
+                    return Ok(Some(*f));
+                }
+                continue;
             }
             let hit: Option<i64> = conn
                 .query_row(
@@ -3208,7 +3379,10 @@ impl BatchSim {
                 )
                 .optional()?;
             if let Some(id) = hit {
-                return self.fact_of(conn, id).map(Some);
+                let f = self.fact_of(conn, id)?;
+                if self.identity_hit_allowed(f, weak_codex) {
+                    return Ok(Some(f));
+                }
             }
         }
         // 3) 身份别名：可多命中，按事实去重；指向多个事实 → 与提交同口径冲突。
@@ -3216,7 +3390,7 @@ impl BatchSim {
         for alias in &w.aliases {
             let key = alias_claim_key(alias);
             if let Some(f) = self.claims.get(&key) {
-                if !hits.contains(f) {
+                if self.identity_hit_allowed(*f, weak_codex) && !hits.contains(f) {
                     hits.push(*f);
                 }
                 continue;
@@ -3231,16 +3405,48 @@ impl BatchSim {
                 .optional()?;
             if let Some(id) = hit {
                 let f = self.fact_of(conn, id)?;
-                if !hits.contains(&f) {
+                if self.identity_hit_allowed(f, weak_codex) && !hits.contains(&f) {
                     hits.push(f);
                 }
             }
         }
         match hits.len() {
-            0 => Ok(None),
-            1 => Ok(Some(hits[0])),
+            0 => {}
+            1 => return Ok(Some(hits[0])),
             _ => bail!("身份冲突：同一请求的多个别名分别指向不同事实，无法在不猜测的前提下合并"),
         }
+        // 4) 镜像来源：仅作首次升级定位（尚无强身份命中时）。
+        if let Some(mirror) = mirror {
+            let okey = origin_claim_key(mirror);
+            if let Some(f) = self.claims.get(&okey)
+                && self.identity_hit_allowed(*f, weak_codex)
+            {
+                return Ok(Some(*f));
+            }
+            let hit: Option<i64> = conn
+                .query_row(
+                    "SELECT event_id FROM event_origins WHERE origin_kind = ?1 AND origin_key = ?2",
+                    params![mirror.origin_kind, mirror.origin_key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(id) = hit {
+                let f = self.fact_of(conn, id)?;
+                if self.identity_hit_allowed(f, weak_codex) {
+                    return Ok(Some(f));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// 弱 Codex 写只命中弱事实（强/弱两个键空间）。
+    fn identity_hit_allowed(&self, fid: i64, weak_codex: bool) -> bool {
+        if !weak_codex {
+            return true;
+        }
+        let f = self.state(fid);
+        !(f.app == AgentKind::Codex && f.record_id.as_deref().is_some_and(|id| !id.is_empty()))
     }
 
     /// 新建事实（Insert）：模拟行 = 本条写入内容。
@@ -3251,13 +3457,32 @@ impl BatchSim {
         fid
     }
 
-    /// Update：统一终值前进为本次写入（事件键保持事实原值——提交路径的
-    /// UPDATE 不改 event_key）。
+    /// Update：统一终值前进为本次写入。事件键保持事实原值——提交路径的
+    /// UPDATE 不改 event_key；唯一例外是弱 Codex 事实升级为强响应：提交
+    /// 会把行键改为当前记录行（旧键让位给同位置的独立弱事实），模拟状态
+    /// 必须同步，否则同一批内后续弱写入的预览会与提交分叉（2026-11-09）。
     fn apply_update(&mut self, fid: i64, w: &EventWrite) {
+        let Some(old) = self.facts.get(&fid) else {
+            return;
+        };
+        let old_key = old.event_key.clone();
+        let rekey = old.app == AgentKind::Codex
+            && w.app == AgentKind::Codex
+            && old.record_id.is_none()
+            && w.record_id.is_some()
+            && old_key != w.event_key;
+        let new_key = if rekey {
+            w.event_key.clone()
+        } else {
+            old_key.clone()
+        };
         if let Some(f) = self.facts.get_mut(&fid) {
-            let key = f.event_key.clone();
             *f = sim_event(w, fid);
-            f.event_key = key;
+            f.event_key = new_key.clone();
+        }
+        if rekey {
+            self.claims.remove(&format!("k|{old_key}"));
+            self.claims.insert(format!("k|{new_key}"), fid);
         }
     }
 
@@ -3268,7 +3493,9 @@ impl BatchSim {
     ///   会整批失败，预览不得假装可行——R01 反例 1：来源记录缺冲突校验）；
     /// - 事件键**只在 Insert 时**登记（行的 event_key 列仅插入时写入；
     ///   Unchanged/Update/Conflict/Stale 不持久化本条的替代键——R01 反例 2：
-    ///   凭空登记会让后续同键写入错误命中旧事实）。
+    ///   凭空登记会让后续同键写入错误命中旧事实）。弱 Codex 事实升级为强
+    ///   响应时提交会改行键，此时由 [`Self::apply_update`] 同步登记新键；
+    /// - 镜像来源键只用于定位旧事实，不重复登记（同提交路径，2026-11-09）。
     fn register(
         &mut self,
         conn: &Connection,
@@ -3279,10 +3506,21 @@ impl BatchSim {
         if persist_key {
             self.claims.insert(format!("k|{}", w.event_key), fid);
         }
+        let mirror = codex_mirror_origin(w);
         for o in &w.origins {
+            if w.record_id.is_some()
+                && mirror
+                    .is_some_and(|m| m.origin_kind == o.origin_kind && m.origin_key == o.origin_key)
+            {
+                continue;
+            }
             let okey = origin_claim_key(o);
-            if let Some(other) = self.claims.get(&okey) {
-                if *other != fid {
+            if let Some(other) = self.claims.get(&okey).copied() {
+                if other != fid {
+                    if self.legacy_evidence_can_move(w, other) {
+                        self.claims.insert(okey, fid);
+                        continue;
+                    }
                     bail!("来源记录冲突：{okey} 已绑定其他事实，提交将整批失败");
                 }
                 continue;
@@ -3298,7 +3536,11 @@ impl BatchSim {
                 Some(id) => {
                     let other = self.fact_of(conn, id)?;
                     if other != fid {
-                        bail!("来源记录冲突：{okey} 已绑定其他事实，提交将整批失败");
+                        if self.legacy_evidence_can_move(w, other) {
+                            self.claims.insert(okey, fid);
+                        } else {
+                            bail!("来源记录冲突：{okey} 已绑定其他事实，提交将整批失败");
+                        }
                     }
                     // 已绑定同一事实：与提交路径的 no-op 一致。
                 }
@@ -3309,8 +3551,12 @@ impl BatchSim {
         }
         for a in &w.aliases {
             let key = alias_claim_key(a);
-            if let Some(other) = self.claims.get(&key) {
-                if *other != fid {
+            if let Some(other) = self.claims.get(&key).copied() {
+                if other != fid {
+                    if self.legacy_evidence_can_move(w, other) {
+                        self.claims.insert(key, fid);
+                        continue;
+                    }
                     bail!("别名冲突：{key} 已绑定其他事实，提交将整批失败");
                 }
                 continue;
@@ -3327,7 +3573,11 @@ impl BatchSim {
                 Some(id) => {
                     let other = self.fact_of(conn, id)?;
                     if other != fid {
-                        bail!("别名冲突：{key} 已绑定其他事实，提交将整批失败");
+                        if self.legacy_evidence_can_move(w, other) {
+                            self.claims.insert(key, fid);
+                        } else {
+                            bail!("别名冲突：{key} 已绑定其他事实，提交将整批失败");
+                        }
                     }
                     // 已绑定同一事实：与提交路径的 no-op 一致。
                 }
@@ -3337,6 +3587,16 @@ impl BatchSim {
             }
         }
         Ok(())
+    }
+
+    /// 旧事实升级后残留的来源/弱别名可由当前位置的独立弱事实接手
+    /// （与提交路径同口径；只对弱 Codex 写、其他事实已为强 Codex 时成立）。
+    fn legacy_evidence_can_move(&self, w: &EventWrite, other_fid: i64) -> bool {
+        w.app == AgentKind::Codex
+            && w.record_id.is_none()
+            && self.facts.get(&other_fid).is_some_and(|f| {
+                f.app == AgentKind::Codex && f.record_id.as_deref().is_some_and(|id| !id.is_empty())
+            })
     }
 }
 
@@ -3600,6 +3860,22 @@ fn merge_event(
             return Ok(existing.id);
         }
         WriteClass::Insert | WriteClass::Update | WriteClass::OverlapCandidate => {}
+    }
+    // 弱事实升级为强响应时，行的来源键改为当前解析表示（record 行）；
+    // 旧出数行位置仍由原 `event_origins` 保留，供该位置的当前弱事实
+    // （如新 turn 后的独立 count-only）接手。事件键只在插入时写入的
+    // 通用规则对这条升级例外不适用：不腾出旧键，同位置的独立弱事实会
+    // 因 UNIQUE 冲突无法入账。
+    if existing.app == AgentKind::Codex
+        && w.app == AgentKind::Codex
+        && existing.record_id.is_none()
+        && w.record_id.is_some()
+        && existing.event_key != w.event_key
+    {
+        tx.execute(
+            "UPDATE usage_events SET event_key = ?1 WHERE id = ?2",
+            params![w.event_key, existing.id],
+        )?;
     }
     tx.execute(
         "UPDATE usage_events SET
