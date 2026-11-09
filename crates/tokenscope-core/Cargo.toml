@@ -36,6 +36,7 @@ ureq = { version = "3.4.2", features = ["json"] }
 [dev-dependencies]
 # H01+：集成测试需要直接构造/检查 SQLite fixture（旧版历史库、CCS 来源库）。
 # 与主依赖同版本同 features，cargo 复用同一份构建，不引入新依赖树。
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+# backup：CCS 历史交付对账探针经 SQLite backup API 取得一致副本（主文件拷贝会丢 WAL）。
+rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
 # H02+：集成测试用真实 JSON 构造合成日志行（禁止字符串拼接伪造 JSON）。
 serde_json = { workspace = true }
