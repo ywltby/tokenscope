@@ -128,6 +128,14 @@ struct RolloutPayload {
     // 顶层 token_usage_record：在对应分支严格解码，不影响其他记录的元数据。
     #[serde(default)]
     usage: Option<serde_json::Value>,
+    // token_usage_record 的原始线程/响应身份（宽松类型：类型异常只表示
+    // 没有可信值，不让整条记录解析失败）。thread_id 是响应所属线程——
+    // legacy fork 复制历史后，它优先于文件内解析状态。turn_id 不参与身份：
+    // 一轮工具循环内可有多次模型调用，禁止按 turn 去重。
+    #[serde(default)]
+    thread_id: Option<serde_json::Value>,
+    #[serde(default)]
+    response_id: Option<serde_json::Value>,
     #[serde(default)]
     thread_settings: Option<serde_json::Value>,
 }
@@ -152,6 +160,19 @@ impl RolloutPayload {
     fn model(&self) -> Option<&str> {
         Self::as_str_field(&self.model)
     }
+
+    /// 非空字符串字段（空白按缺失处理）。
+    fn non_empty_str_field(v: &Option<serde_json::Value>) -> Option<&str> {
+        Self::as_str_field(v).filter(|s| !s.trim().is_empty())
+    }
+
+    fn thread_id(&self) -> Option<&str> {
+        Self::non_empty_str_field(&self.thread_id)
+    }
+
+    fn response_id(&self) -> Option<&str> {
+        Self::non_empty_str_field(&self.response_id)
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -160,7 +181,7 @@ struct TokenInfo {
     last_token_usage: Option<LastUsage>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Clone, Deserialize)]
 struct LastUsage {
     #[serde(default)]
     input_tokens: u64,
@@ -181,6 +202,15 @@ impl LastUsage {
             && self.cached_input_tokens == 0
             && self.cache_write_input_tokens == 0
     }
+
+    /// 四桶一致（total 逐桶守恒的产物，不参与比较——历史日志存在 total
+    /// 计入口径差异，以四桶为准）。
+    fn matches(&self, other: &LastUsage) -> bool {
+        self.input_tokens == other.input_tokens
+            && self.output_tokens == other.output_tokens
+            && self.cached_input_tokens == other.cached_input_tokens
+            && self.cache_write_input_tokens == other.cache_write_input_tokens
+    }
 }
 
 /// 文件内解析状态：session 边界、模型归属与项目根。
@@ -193,7 +223,15 @@ struct ScanState {
     /// 本会话首个有效 cwd（B02 的 `session_initial_cwd`）。
     initial_cwd: Option<String>,
     /// 记录位置的归一化用量与全部上下文；下一条 token_count 才决定是否产出。
+    /// 仅承载**弱记录**（缺线程/响应身份的旧格式）——强记录立即产出。
     pending_record: Option<UsageEvent>,
+    /// 挂起弱记录对应的 response_id（有则配对 token_count 时用于占位；
+    /// 身份不足的旧格式为 None）。
+    pending_response_id: Option<String>,
+    /// 最近一次强记录观察：`(单次 usage, response_id)`。紧随其后的配对
+    /// token_count（last 四桶一致）是同一响应的第二次观察，按此抑制；
+    /// 用量不一致或没有该标记时走旧路径。
+    last_strong_observation: Option<(LastUsage, String)>,
 }
 
 /// 观察一个（未归一化的）cwd：只接受可归一化的值；空值、类型异常与不可解释的
@@ -291,21 +329,99 @@ fn ingest_text(
     events: &mut Vec<UsageEvent>,
 ) {
     let mut state = ScanState::default();
-    for (line_no, line) in text.lines().enumerate() {
+    let lines: Vec<&str> = text.lines().collect();
+    for (idx, line) in lines.iter().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
         stats.lines_seen += 1;
-        ingest_line(line, line_no as u64, source_path, &mut state, stats, events);
+        ingest_line(
+            line,
+            idx as u64,
+            &lines,
+            source_path,
+            &mut state,
+            stats,
+            events,
+        );
     }
     if state.pending_record.take().is_some() {
         stats.ignored_token_usage_record += 1;
     }
 }
 
+/// 旧解析器镜像（K04 升级映射）：强记录在**旧解析器表示**里对应哪条来源行。
+///
+/// 旧实现把 `token_usage_record` 挂起，由下一条 token_count 决定产物：
+/// - 配对 count 的 last 四桶与记录一致 → 旧事件出在 count 行，
+///   事件时间 = count 行时间戳，来源行 = count 行；
+/// - last 四桶全零（compaction）→ 旧事件出在挂起记录本体：事件时间与
+///   来源行都是记录行；
+/// - last 非零且不一致 → 旧解析器忽略记录、按 count 出另一份事实——该记录
+///   没有旧对应物，不建立映射（边界：旧 count 事实与新强记录并存）；
+/// - 途中出现 session_meta / 下一条 token_usage_record → 挂起记录被丢弃，
+///   无产物，不映射；
+/// - 无关通知（非 token_count 的 event_msg 等）不打断配对；
+/// - 坏行（JSON 解析失败）→ 旧解析器按坏行消费挂起记录，无产物，不映射；
+/// - 文件结束 → 挂起记录被丢弃，不映射。
+///
+/// 返回 `(旧事件时间戳, 旧来源行号)`；行号为 0-based（与 line_no 一致）。
+fn legacy_mirror(
+    lines: &[&str],
+    start: usize,
+    record_ts: Timestamp,
+    usage: &LastUsage,
+) -> Option<(Timestamp, u64)> {
+    // start 是记录行自己的下标：从下一行开始向前看；返回的行号还原为全文件
+    // 0-based 下标（配对行 = start + 1 + off）。
+    for (off, raw) in lines[start + 1..].iter().enumerate() {
+        let value: serde_json::Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            // 坏行：旧解析器消费挂起记录并计坏行，无产物。
+            Err(_) => return None,
+        };
+        let kind = value.get("type").and_then(serde_json::Value::as_str);
+        match kind {
+            Some("session_meta") | Some("token_usage_record") => return None,
+            Some("event_msg") => {
+                let payload = value.get("payload")?;
+                let kind = payload.get("type").and_then(serde_json::Value::as_str);
+                if kind != Some("token_count") {
+                    // 无关通知：旧解析器不触碰挂起记录，继续等待。
+                    continue;
+                }
+                // 配对点：info 缺失或 last 非法都是坏行语义——无产物。
+                let last = payload
+                    .pointer("/info/last_token_usage")
+                    .and_then(|v| serde_json::from_value::<LastUsage>(v.clone()).ok())?;
+                let pair_line = (start + 1 + off) as u64;
+                if last.is_zero() {
+                    // compaction 分支：旧事件 = 挂起记录本体——事件时间与
+                    // **来源行号都是记录行**（复审修复 2026-11-09：旧实现把
+                    // 挂起记录直接产出，来源证据记在 record 行；此前误返回
+                    // count 行号导致镜像键错位、旧事实不升级而双计）。
+                    return Some((record_ts, start as u64));
+                }
+                if last.matches(usage) {
+                    let ts = value
+                        .get("timestamp")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|s| s.parse::<Timestamp>().ok())?;
+                    return Some((ts, pair_line));
+                }
+                // 非零不一致：旧解析器忽略记录、按 count 出另一份事实。
+                return None;
+            }
+            _ => continue,
+        }
+    }
+    None
+}
+
 fn ingest_line(
     line: &str,
     line_no: u64,
+    all_lines: &[&str],
     source_path: &str,
     state: &mut ScanState,
     stats: &mut CollectStats,
@@ -371,6 +487,9 @@ fn ingest_line(
             observe_cwd(state, payload.cwd());
         }
         "turn_context" => {
+            // 新 turn 开始：上一响应的配对窗口终结——其后出现的 count 与该
+            // 响应无关（同响应的观察在下一 turn 开始前落盘）。
+            state.last_strong_observation = None;
             if let Some(m) = payload.model().filter(|m| !m.trim().is_empty()) {
                 state.model = Some(m.to_string());
             }
@@ -380,6 +499,7 @@ fn ingest_line(
             if state.pending_record.take().is_some() {
                 stats.ignored_token_usage_record += 1;
             }
+            state.pending_response_id = None;
             let usage = payload
                 .usage
                 .clone()
@@ -390,10 +510,52 @@ fn ingest_line(
                 .and_then(|value| value.parse::<Timestamp>().ok());
             match (usage, timestamp) {
                 (Some(u), Some(ts)) if !u.is_zero() => {
-                    state.pending_record =
-                        event_from_usage(ts, line_no, source_path, &u, state, stats);
-                    if state.pending_record.is_none() {
-                        stats.ignored_token_usage_record += 1;
+                    // 强记录（thread_id + response_id 齐备）：立即产出，身份以
+                    // 记录的原始线程为准（优先于复制历史遗留的解析状态）；
+                    // 配对的 token_count 只是同一响应的第二次观察，不再出数。
+                    // 缺身份的记录走旧路径：挂起等待下一条 token_count 决定。
+                    let thread = payload.thread_id();
+                    let response = payload.response_id();
+                    match (thread, response) {
+                        (Some(thread), Some(response)) => {
+                            // 镜像：旧解析器会从哪条来源行给这个响应记账。
+                            // 行号以当前行为起点向前看（当前行在 all_lines 的
+                            // 下标即 line_no）。
+                            let mirror = legacy_mirror(all_lines, line_no as usize, ts, &u);
+                            match event_from_usage(
+                                ts,
+                                line_no,
+                                source_path,
+                                &u,
+                                Some((thread, response)),
+                                mirror,
+                                state,
+                                stats,
+                            ) {
+                                Some(event) => {
+                                    state.last_strong_observation =
+                                        Some((u.clone(), response.to_string()));
+                                    events.push(event);
+                                }
+                                None => stats.ignored_token_usage_record += 1,
+                            }
+                        }
+                        _ => {
+                            state.pending_response_id = response.map(str::to_string);
+                            state.pending_record = event_from_usage(
+                                ts,
+                                line_no,
+                                source_path,
+                                &u,
+                                None,
+                                None,
+                                state,
+                                stats,
+                            );
+                            if state.pending_record.is_none() {
+                                stats.ignored_token_usage_record += 1;
+                            }
+                        }
                     }
                 }
                 (Some(_), Some(_)) => stats.ignored_token_usage_record += 1,
@@ -416,6 +578,7 @@ fn ingest_line(
         }
         "event_msg" if payload.kind == "token_count" => {
             if let Some(record) = state.pending_record.take() {
+                state.pending_response_id = None;
                 if payload
                     .info
                     .as_ref()
@@ -426,6 +589,39 @@ fn ingest_line(
                     return;
                 }
                 stats.ignored_token_usage_record += 1;
+            }
+            // 强记录的配对观察（count 的 last 四桶与同一响应的 record 一致）
+            // 不再出数——同一响应只有一条事实，观察消费后清除标记。
+            //
+            // 与最近强观察**不一致**的 count：强记录的迟到配对与另一响应的
+            // count-only 在此无法区分——不猜测，按旧解析器行为照常出数并
+            // 清除悬挂标记（复审修复 2026-11-09：此前直接 return 且不清理，
+            // 一个悬挂观察会吞掉之后全部 count-only 请求）。
+            //
+            // 与最近强观察**一致**的 count（本分支抑制）：若它真是刚出数
+            // 响应的配对观察，正确；若是独立同四桶请求，则是漏计——两者无
+            // 身份证据可区分，不猜测，如实披露（docs/stats-semantics.md
+            // §3.2"同用量配对的不可区分边界"）。新 turn 边界已在
+            // turn_context 分支清除观察，边界后的 count 不进本分支。
+            if let Some((observed_usage, _)) = state.last_strong_observation.take() {
+                let same_usage = payload
+                    .info
+                    .as_ref()
+                    .and_then(|info| info.last_token_usage.as_ref())
+                    .is_some_and(|u| u.matches(&observed_usage));
+                if same_usage {
+                    return;
+                }
+                ingest_token_count(
+                    rec.timestamp.as_deref(),
+                    line_no,
+                    source_path,
+                    payload,
+                    state,
+                    stats,
+                    events,
+                );
+                return;
             }
             ingest_token_count(
                 rec.timestamp.as_deref(),
@@ -479,16 +675,19 @@ fn ingest_token_count(
         stats.bad_lines += 1;
         return;
     };
-    if let Some(event) = event_from_usage(ts, line_no, source_path, u, state, stats) {
+    if let Some(event) = event_from_usage(ts, line_no, source_path, u, None, None, state, stats) {
         events.push(event);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn event_from_usage(
     ts: Timestamp,
     line_no: u64,
     source_path: &str,
     u: &LastUsage,
+    strong: Option<(&str, &str)>,
+    mirror: Option<(Timestamp, u64)>,
     state: &ScanState,
     stats: &mut CollectStats,
 ) -> Option<UsageEvent> {
@@ -530,6 +729,18 @@ fn event_from_usage(
         stats.bad_lines += 1;
         return None;
     }
+    // 强记录：会话归属以**记录的原始线程**为准——legacy fork 子文件里复制的
+    // 父请求保留父线程，子线程新请求归子线程，不受复制历史遗留的解析状态
+    // 影响。线程未知时回退文件内解析状态（旧格式兼容）。模型缺省时请求无
+    // 从归属，按既有口径跳过。
+    let session = match strong {
+        Some((thread, _)) => thread.to_string(),
+        None => state.session_id.clone(),
+    };
+    if session.is_empty() {
+        stats.bad_lines += 1;
+        return None;
+    }
     // A04/B：项目身份 = 当前会话的项目根（子目录归并、越出当前根即新项目）；
     // 不同路径的同名目录不合并，同路径的跨工具会话共用同一 key；无有效 cwd 时
     // 沿用既有 "(未知)" 兜底，展示名（basename）由聚合层派生为 Group.label。
@@ -541,15 +752,57 @@ fn event_from_usage(
     let session_initial_cwd = state.initial_cwd.clone();
     // 守恒已受检确认 cached + cache_write ≤ input 且 total 可表示：
     // 非缓存输入一次减法得到（不再逐项减）。
+    // 镜像来源键：按旧解析器的产物形态重建内容指纹——事件时间取旧出数行、
+    // 会话取旧解析状态（强记录也在记录时刻的文件状态）、record_id 恒空、
+    // 四桶与本记录一致。逐字节相等才与旧事实建立映射。
+    let legacy_origin = mirror.map(|(old_ts, old_line)| {
+        let probe = UsageEvent {
+            ts: old_ts,
+            agent: AgentKind::Codex,
+            model: model.to_string(),
+            session_id: state.session_id.clone(),
+            project: String::new(),
+            session_initial_cwd: None,
+            event_cwd: None,
+            record_id: String::new(),
+            claude_copy: None,
+            codex_response: None,
+            codex_legacy_origin: None,
+            line: 0,
+            source_path: source_path.to_string(),
+            input_tokens: input - cached_plus_cw,
+            output_tokens: output,
+            cache_write_tokens: cache_write,
+            cache_read_tokens: cached,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_split_known: false,
+        };
+        format!(
+            "native|{}|{}|{}|{}",
+            AgentKind::Codex.as_str(),
+            source_path,
+            old_line,
+            probe.content_fingerprint()
+        )
+    });
     let event = UsageEvent {
         ts,
         agent: AgentKind::Codex,
         model: model.to_string(),
-        session_id: state.session_id.clone(),
+        session_id: session.clone(),
         project,
         session_initial_cwd,
         event_cwd,
-        record_id: String::new(),
+        record_id: strong
+            .map(|(_, response)| response.to_string())
+            .unwrap_or_default(),
+        claude_copy: None,
+        codex_legacy_origin: legacy_origin,
+        codex_response: strong.map(|(thread, response)| crate::model::CodexResponseIdentity {
+            thread_id: thread.to_string(),
+            response_id: response.to_string(),
+        }),
         line: line_no,
         source_path: source_path.to_string(),
         input_tokens: input - cached_plus_cw,
@@ -608,7 +861,6 @@ mod tests {
         use super::*;
 
         const TS: &str = "2026-07-17T15:59:00Z";
-
         fn record(input: u64, output: u64, cached: u64, cw: u64) -> String {
             serde_json::json!({"type":"token_usage_record","timestamp":TS,"payload":{
             "response_id":"synthetic-response","usage":{
@@ -834,9 +1086,9 @@ mod tests {
                 );
             }
             assert_eq!(events.len(), 2);
-            let (events, dropped) = crate::dedupe::dedupe_events(events);
-            assert_eq!(events.len(), 1);
-            assert_eq!(dropped, vec![(AgentKind::Codex, 1)]);
+            let deduped = crate::dedupe::dedupe_events(events);
+            assert_eq!(deduped.events.len(), 1);
+            assert_eq!(deduped.dropped, vec![(AgentKind::Codex, 1)]);
         }
 
         #[test]
@@ -1127,10 +1379,20 @@ mod tests {
 
     #[test]
     fn test_codex_token_usage_record_ignored() {
+        // v7：record 带 thread_id+response_id+合法 usage 时**立即出数**（强
+        // 响应身份），不再是"忽略"；缺 response_id 的记录保持旧挂起路径。
         let col = collect_lines(&[
             meta("s", "C:/w"),
             ctx("m", "C:/w"),
-            r#"{"timestamp":"2026-07-17T15:59:00.000Z","type":"token_usage_record","payload":{"session_id":"s","thread_id":"t","turn_id":"t","root_turn_id":"t","response_id":"r","usage":{"input_tokens":9,"output_tokens":9,"total_tokens":18},"turn_token_usage":{},"thread_token_usage":{}}}"#.to_string(),
+            r#"{"timestamp":"2026-07-17T15:59:00.000Z","type":"token_usage_record","payload":{"session_id":"s","thread_id":"s","turn_id":"t","root_turn_id":"t","response_id":"r","usage":{"input_tokens":9,"output_tokens":9,"total_tokens":18},"turn_token_usage":{},"thread_token_usage":{}}}"#.to_string(),
+        ]);
+        assert_eq!(col.events.len(), 1, "强记录立即出数");
+        assert_eq!(col.events[0].record_id, "r");
+        // 缺 response_id：旧行为——挂起无配对，忽略。
+        let col = collect_lines(&[
+            meta("s", "C:/w"),
+            ctx("m", "C:/w"),
+            r#"{"timestamp":"2026-07-17T15:59:00.000Z","type":"token_usage_record","payload":{"session_id":"s","thread_id":"t","turn_id":"t","root_turn_id":"t","usage":{"input_tokens":9,"output_tokens":9,"total_tokens":18},"turn_token_usage":{},"thread_token_usage":{}}}"#.to_string(),
         ]);
         assert!(col.events.is_empty());
         assert_eq!(col.stats.ignored_token_usage_record, 1);

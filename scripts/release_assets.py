@@ -13,6 +13,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from urllib.error import HTTPError
 from urllib.request import urlopen
 from urllib.parse import quote
 
@@ -59,18 +61,38 @@ def installer_of(entry):
 
 
 def download_entry(entry, directory):
-    """按登记表原样复用历史发布字节：文件名、地址与 SHA256 都取自登记值。"""
+    """按登记表原样复用历史发布字节：文件名、地址与 SHA256 都取自登记值。
+
+    下载对网关瞬断（HTTP 502/503/504、TLS/连接类 OSError）有限重试：
+    504 Gateway Timeout 是网关抖动而非服务端明确答复，CI 一次升级矩阵里
+    多个作业同时拉资产时容易成批触发（2026-11-08 实测）。SHA256 逐字节
+    校验保证重试不会引入坏数据。
+    """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
+    attempts = 3
     paths = []
     for asset in entry["assets"]:
         path = directory / safe_name(asset["name"])
         if not path.is_file() or digest(path) != asset["sha256"]:
             temporary = path.with_name(path.name + ".download")
             try:
-                with urlopen(asset["url"], timeout=180) as response, temporary.open("wb") as fh:
-                    while chunk := response.read(1024 * 1024):
-                        fh.write(chunk)
+                for attempt in range(1, attempts + 1):
+                    try:
+                        with urlopen(asset["url"], timeout=180) as response, temporary.open("wb") as fh:
+                            while chunk := response.read(1024 * 1024):
+                                fh.write(chunk)
+                        break
+                    except HTTPError as exc:
+                        if exc.code in (502, 503, 504) and attempt < attempts:
+                            time.sleep(attempt)
+                            continue
+                        raise
+                    except OSError:
+                        if attempt < attempts:
+                            time.sleep(attempt)
+                            continue
+                        raise
                 if digest(temporary) != asset["sha256"]:
                     raise ValueError(f"旧资产 SHA256 不一致，拒绝使用：{path.name}")
                 os.replace(temporary, path)
