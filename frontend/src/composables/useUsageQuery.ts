@@ -117,6 +117,15 @@ export interface NoticeItem {
   actions: NoticeAction[];
 }
 
+/**
+ * 统计来源交叉冲突的稳定类型键（后端 `RollupCoverage.conflict_kinds`）
+ * → 界面本地化文案。未知类型回落到通用键，不静默隐藏。
+ */
+const CONFLICT_KIND_KEY: Record<string, string> = {
+  crossed_token_buckets: "dashboard.conflictKindCrossed",
+  opposed_requests_tokens: "dashboard.conflictKindOpposed",
+};
+
 /** 折叠态头部：最高严重级别的文本 + 条数 + 可展开性。 */
 export interface NoticeHeadline {
   severity: NoticeSeverity;
@@ -816,7 +825,11 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   //
   // 2026-11-05：只有日粒度的历史（CCS 汇总）是**统计口径**选择，不是采集
   // 问题——它的费用未知由明细/费用列与独立通知披露，不再计入「本轮采集存在
-  // 部分问题」；真实未解决的覆盖（无法确认是否已覆盖）仍作为 warning 出现。
+  // 部分问题」。
+  // 2026-11-07：统计来源冲突同样**不**混入采集警告计数。后端已把冲突诊断
+  // 从 `SummaryReport.warnings` 移到 `rollup_coverage` 的结构化字段；这里
+  // 的 `warns` 只保留真实采集警告（IO 错误、缓存降级、重叠等），冲突由
+  // `notices` 独立成条显示并给出明确类型。
   const collectionDiagnostics = computed(() => {
     // H06：日汇总的时区不匹配是「当前视图看不到这部分历史」的可恢复提示，
     // 由通知列表单独成条（不计入采集警告计数，免得把时区提示说成采集问题）。
@@ -840,6 +853,13 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       const t = report.value?.rollup_coverage?.covered_detail_tokens;
       return t ? t.input + t.output + t.cache_write + t.cache_read : 0;
     })();
+    // 统计来源选择依据（A 类）与交叉冲突（C 类）：都是**统计口径**，
+    // 不参与 `clean` 判定，也不计入采集警告计数。
+    const detailSelected = report.value?.rollup_coverage?.detail_selected_buckets ?? 0;
+    const conflictKinds = report.value?.rollup_coverage?.conflict_kinds ?? [];
+    const conflictBuckets = report.value?.rollup_coverage?.unresolved_buckets ?? 0;
+    const selectionBasis =
+      detailSelected > 0 ? t("dashboard.selectionBasis", { count: detailSelected }) : null;
     const clean = warns.length === 0 && ioErrors === 0 && badLines === 0;
     const summaryText = clean
       ? null
@@ -859,6 +879,10 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       rollupOnly,
       covered,
       coveredTokens,
+      detailSelected,
+      selectionBasis,
+      conflictKinds,
+      conflictBuckets,
       timezoneMismatch,
       multiBatchBoundary,
       legacyBoundary,
@@ -969,6 +993,31 @@ export function useUsageQuery(opts: UsageQueryOptions) {
           count: collectionDiagnostics.value.covered,
           tokens: collectionDiagnostics.value.coveredTokens,
         }),
+        // 依据放在可展开的统计说明里，不在通知条上堆大段文字。
+        details: [t("dashboard.selectionBasisRollup")],
+        actions: [
+          { label: t("dashboard.detailOnlyToggle"), run: () => setRollupsMode("detail_only") },
+        ],
+      });
+    }
+    if (
+      rollupsMode.value === "auto" &&
+      collectionDiagnostics.value.conflictBuckets > 0 &&
+      collectionDiagnostics.value.conflictKinds.length > 0
+    ) {
+      // 真实交叉冲突：独立成条、给出明确类型，不是采集失败也不暗示数据丢失。
+      // 不进 `collectionDiagnostics.warns`，因此不计入采集警告计数。
+      const kinds = collectionDiagnostics.value.conflictKinds
+        .map((k) => t(CONFLICT_KIND_KEY[k] ?? "dashboard.conflictKindOther"))
+        .join(t("dashboard.listJoin"));
+      list.push({
+        id: "rollup-source-conflict",
+        severity: "warning",
+        text: t("dashboard.sourceConflict", {
+          count: collectionDiagnostics.value.conflictBuckets,
+          kinds,
+        }),
+        details: [t("dashboard.sourceConflictBasis")],
         actions: [
           { label: t("dashboard.detailOnlyToggle"), run: () => setRollupsMode("detail_only") },
         ],

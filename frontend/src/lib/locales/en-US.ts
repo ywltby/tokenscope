@@ -103,7 +103,19 @@ const enUS: AppMessages = {
     instantRangeHint:
       "The current range is minute-precise and counts requests only, excluding day-granularity history.",
     rollupCovered:
-      "Details in {count} day/model buckets were replaced by the CCS daily rollup ({tokens} tokens not double-counted). Those details are not necessarily all included in that rollup: reading the source database only proves it was available, not that the rollup covers every earlier session. Request details remain available for cross-checking.",
+      "The CCS daily rollup supplements {count} day/model bucket(s) whose session history was cleaned up ({tokens} tokens not double-counted). Request details remain available for cross-checking.",
+    selectionBasisRollup:
+      "Basis: within the source snapshot, request count and all four token buckets are below the daily rollup, so the established trusted-rollup rule fills in the cleaned-up history. Requests added after the snapshot are counted independently. Reading the source does not prove the rollup covers every earlier session; request details are always retained.",
+    selectionStatsNote: "Statistics notes",
+    selectionBasis:
+      "{count} day/model bucket(s) are counted from request details and the rollup is not added: within the source snapshot, request count and each of the four token buckets are at least the rollup's (including exact equality), so project, time, cache tiers and request-level pricing are retained. This is a statistical source decision and does not claim the two request sets are proven identical.",
+    sourceConflict:
+      "{count} day/model bucket(s) have conflicting statistical sources ({kinds}): request count and token buckets point in different directions, so neither source explains the other. These buckets are counted from request details; the rollup is not added and no difference requests are invented. This is a statistics conflict, not a collection failure.",
+    sourceConflictBasis:
+      "Basis: conflicts are not guessed from totals, not resolved by taking the maximum per field, and not added together. The two sources describe the same day at different granularities rather than two additive datasets; the buckets fall back to request details and the rollup figures are for reconciliation only. Cross-check the request details or switch to requests only.",
+    conflictKindCrossed: "token buckets diverge in both directions",
+    conflictKindOpposed: "request count and token usage diverge",
+    conflictKindOther: "inconsistent directions",
     tzMismatch: "{sourceTz}",
     detailOnlyOnly:
       "Counting requests only (day-granularity history excluded); the day view is unaffected by source time zones.",

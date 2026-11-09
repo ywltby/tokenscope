@@ -136,23 +136,36 @@ pub struct RollupContribution {
 /// 时区提示因此整段消失）。
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct RollupCoverage {
-    /// 明细覆盖的桶数。
+    /// 按**请求明细**统计的桶数（A 类 + C 类）。
     pub detail_buckets: u64,
     /// 改用日汇总的桶数（桶内没有明细）。
     pub rollup_buckets: u64,
-    /// 2026-11-05：明细请求数少于汇总请求数、已按日汇总作为该范围总量的桶数
-    /// （明细仍可查看，但不重复计入总量）。
+    /// B 类：快照内明细逐项小于汇总、已按日汇总补足被清理历史的桶数
+    /// （明细仍可查看，但不重复计入总量；快照之后新增的请求独立计入）。
     #[serde(default)]
     pub covered_buckets: u64,
     /// 上述被汇总替代的明细 token（已计入统计的是汇总值；这些只是明细侧的
     /// 观察量，用于向用户解释"明细看到了多少、为什么总量更大"）。
     #[serde(default)]
     pub covered_detail_tokens: TokenCounts,
-    /// 明细与日汇总同时存在、但**无法确认**汇总已被明细完整覆盖的桶数
-    /// （明细请求数不少于汇总或缺少导入时刻证据；这些桶按明细统计，汇总不追加）。
+    /// C 类：请求数与四桶方向**交叉**，既不能用明细逐项覆盖汇总、也不能用
+    /// 汇总吸收明细的桶数。这些桶按请求明细统计、汇总不叠加，不做逐字段取
+    /// 最大或捏造差额；诊断走本结构的独立字段，不进入 `SummaryReport.warnings`
+    /// （采集警告计数）。字段沿用旧名以兼容既有 IPC 契约与回归断言。
     pub unresolved_buckets: u64,
-    /// 上述未解决桶里未纳入统计的汇总 token（如实披露缺口）。
+    /// 上述交叉冲突桶中汇总侧的四桶合计（仅作对账规模，不表示"丢失了这么多
+    /// token"——两侧不是可以相加的同量数据）。
     pub unresolved_covered_tokens: TokenCounts,
+    /// A 类：快照范围内明细逐项覆盖汇总（含完全相等），已按请求明细统计、
+    /// 汇总不叠加的桶数。这是**统计来源选择**，不声称两侧请求集合已被证明
+    /// 完全相同；正常路径不产生告警，依据由界面放在可展开的统计说明里。
+    #[serde(default)]
+    pub detail_selected_buckets: u64,
+    /// C 类交叉冲突的明确类型（稳定键，去重后排序）：`crossed_token_buckets`
+    /// = 四桶方向有交叉；`opposed_requests_tokens` = 请求数与用量方向相反。
+    /// 供界面独立显示，不混入采集警告计数。
+    #[serde(default)]
+    pub conflict_kinds: Vec<String>,
     /// 查询时区与来源日时区不一致时的提示（不为 None 时，日汇总只在不按日
     /// 筛选/分组的查询里计入；按日视图需要切回来源时区或只看请求明细）。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -227,11 +240,13 @@ pub fn aggregate_with_rollups(
     state.finish(pricing)
 }
 
-/// 已被日汇总替代的明细桶：`来源时区 → {(日, 应用, 等价模型) → 覆盖起点}`。
+/// B 类桶（日汇总补足明细）：`来源时区 → {(日, 应用, 等价模型) → 覆盖起点}`。
 ///
-/// 2026-11-05（第二轮）：覆盖按"信任 CCS 日汇总"口径。`Some(since)` 表示
-/// 事件时间不晚于来源快照建立时刻的明细视为已含于汇总；`None` 表示该桶没有
-/// 可核对的快照时刻（旧库迁移遗留），整桶明细都按"可能已含于汇总"处理。
+/// 只含 `report::select_rollup_contributions` 判为 B 的桶；A/C 类不在此列，
+/// 因此它们的明细一条都不会被跳过。`Some(since)` 表示事件时间不晚于来源快照
+/// 建立时刻的明细视为已含于汇总；`None` 表示该桶没有可核对的快照时刻
+/// （旧库迁移遗留），整桶明细都按"可能已含于汇总"处理。跳过按时间边界，
+/// 不看 `ccs_request` 来源标记。
 type CoveredDetailMap = std::collections::HashMap<
     String,
     std::collections::HashMap<(String, String, String), Option<jiff::Timestamp>>,

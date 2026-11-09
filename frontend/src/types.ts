@@ -41,10 +41,23 @@ export interface RollupCoverage {
   /** 上述被汇总替代的**快照范围内**明细 token（不重复计入总量，仅作解释）。 */
   covered_detail_tokens?: TokenCounts;
   /**
-   * 快照范围内明细超过汇总声称数量的桶数（汇总装不下 → 按明细统计并提示）。
+   * C 类：请求数与四桶方向交叉、汇总与明细都不是对方超集的桶数。
+   * 这些桶按请求明细统计、汇总不叠加，诊断独立显示（不计入采集警告数）。
    */
   unresolved_buckets: number;
+  /** 上述交叉冲突桶中汇总侧四桶合计，仅作对账规模，不代表"丢失了这么多 token"。 */
   unresolved_covered_tokens: TokenCounts;
+  /**
+   * A 类：快照内明细逐项覆盖汇总（含完全相等），按请求明细统计、汇总不叠加
+   * 的桶数。正常来源选择，不是告警；依据放在可展开的统计说明里。
+   */
+  detail_selected_buckets?: number;
+  /**
+   * C 类交叉冲突的明确类型（稳定键，供界面独立显示）：
+   * `crossed_token_buckets` = 四桶方向交叉；
+   * `opposed_requests_tokens` = 请求数与用量方向相反。
+   */
+  conflict_kinds?: string[];
   timezone_mismatch?: string | null;
   /** U01：时刻范围（24h/自定义到分钟）不取日汇总——所涉自然日确有日汇总时为 true。 */
   rollups_excluded_for_instant_range?: boolean;
