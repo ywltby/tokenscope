@@ -195,3 +195,10 @@ python -B scripts/run_rust_tests.py -- cargo test --locked -p tokenscope --test 
   验收全部使用合成数据与隔离临时目录。
 - 代码修复不等于用户安装版已更新：需升级到含本修复的版本，并在正常采集
   触发后才会重解析补证据。
+
+### 合并与发布（2026-11-09）
+
+- 随 PR #57 合并到 main：`39f4478aed0fb4db470e1cae97dcb73298113df0`；
+  发布 `v0.7.2`（预发布）。标签实际指向该合并提交；Release 的 build、
+  install-test、12 个单跳升级矩阵、present/deleted 连续升级链与 publish 全绿。
+- `v0.7.2` 已登记为下一批升级基线；本次登记不改产品版本，不重复发布。
