@@ -23,9 +23,18 @@ use serde::Deserialize;
 use super::claude_projects::ProjectMapping;
 use super::project_path::{self, ProjectRootTracker};
 use super::{CollectStats, FileParse, Source, read_text};
-use crate::model::{AgentKind, UsageEvent};
+use crate::model::{AgentKind, ClaudeCopyEvidence, UsageEvent};
 
 pub const SYNTHETIC_MODEL: &str = "<synthetic>";
+
+/// 顶层标识读取（2026-11-07）：只接受非空字符串；缺失、空白、数字/对象等
+/// 类型异常都按"没有证据"处理，不产生坏行——旧日志照常入账。
+fn text_id(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+}
 
 #[derive(Default, Deserialize)]
 struct ClaudeLine {
@@ -37,6 +46,13 @@ struct ClaudeLine {
     timestamp: Option<String>,
     #[serde(rename = "sessionId", default)]
     session_id: String,
+    /// 2026-11-07：跨会话复制证据的原始请求标识。缺失、空值、类型异常一律
+    /// 视为"没有证据"——不阻断本行解析，也不参与任何猜测合并。
+    #[serde(rename = "requestId", default)]
+    request_id: Option<serde_json::Value>,
+    /// 2026-11-07：本行消息 UUID（同一条消息的多条流式观察各自不同）。
+    #[serde(default)]
+    uuid: Option<serde_json::Value>,
     /// A02：会话上下文里的 cwd（顶层字段）。缺失、空值、类型异常一律只是
     /// 「没有可信身份」——路径提取容错与 usage 校验分开，不产生坏行。
     #[serde(default)]
@@ -422,6 +438,14 @@ fn ingest_line(
         session_initial_cwd,
         event_cwd,
         record_id: msg.id.clone(),
+        // 复制证据：三元组缺一不可（message.id 在上面已校验非空），否则
+        // 只保留会话内身份，跨会话合并完全不发生。
+        claude_copy: match (text_id(rec.request_id.as_ref()), text_id(rec.uuid.as_ref())) {
+            (Some(request_id), Some(uuid)) => Some(ClaudeCopyEvidence { request_id, uuid }),
+            _ => None,
+        },
+        codex_response: None,
+        codex_legacy_origin: None,
         line: line_no,
         source_path: source_path.to_string(),
         input_tokens: usage.input_tokens,
@@ -761,5 +785,76 @@ mod tests {
         assert!(e.cache_write_split_known);
         assert_eq!(e.cache_write_5m, 0);
         assert_eq!(e.cache_write_1h, 0);
+    }
+
+    // ── 跨会话复制证据（2026-11-07） ────────────────────────────────
+    // 顶层 requestId + uuid 只有两者都可用时才成为证据；缺失、空白、类型
+    // 异常一律退回会话内身份（不阻断本行、不猜造合并）。
+
+    fn line_with_ids(request: &str, uuid: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"2026-07-17T08:00:01.000Z","sessionId":"s1",{request}{uuid}"message":{{"id":"m1","model":"m","usage":{{"input_tokens":10,"output_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn copy_evidence_kept_when_request_and_uuid_present() {
+        let col = collect_text(&line_with_ids(
+            r#""requestId":"req_1","#,
+            r#""uuid":"u-1","#,
+        ));
+        assert_eq!(col.events.len(), 1);
+        assert_eq!(
+            col.events[0].claude_copy,
+            Some(ClaudeCopyEvidence {
+                request_id: "req_1".to_string(),
+                uuid: "u-1".to_string(),
+            })
+        );
+        let (scheme, value) = col.events[0].copy_identity().expect("证据齐备即有复制身份");
+        assert_eq!(scheme, "claude-copy");
+        assert!(value.starts_with("m1|req_1|u-1|"), "{value}");
+        assert_eq!(col.stats.bad_lines, 0);
+    }
+
+    #[test]
+    fn copy_evidence_absent_when_ids_missing_blank_or_mistyped() {
+        for (request, uuid, tag) in [
+            ("", r#""uuid":"u-1","#, "缺 requestId"),
+            (r#""requestId":"req_1","#, "", "缺 uuid"),
+            (r#""requestId":"  ","#, r#""uuid":"u-1","#, "空白 requestId"),
+            (r#""requestId":"req_1","#, r#""uuid":null,"#, "uuid 为 null"),
+            (
+                r#""requestId":42,"#,
+                r#""uuid":"u-1","#,
+                "requestId 非字符串",
+            ),
+            (
+                r#""requestId":"req_1","#,
+                r#""uuid":{"v":"u-1"},"#,
+                "uuid 为对象",
+            ),
+        ] {
+            let col = collect_text(&line_with_ids(request, uuid));
+            assert_eq!(col.events.len(), 1, "{tag}: 事件照常解析");
+            assert_eq!(col.events[0].claude_copy, None, "{tag}: 无证据");
+            assert_eq!(col.events[0].copy_identity(), None, "{tag}");
+            assert_eq!(col.stats.bad_lines, 0, "{tag}: 不是坏行");
+        }
+    }
+
+    #[test]
+    fn copy_identity_digest_separates_different_observations() {
+        // 同一三元组但四桶不同 → 观察摘要不同 → 不是同一次观察的证据。
+        let a = collect_text(&line_with_ids(
+            r#""requestId":"req_1","#,
+            r#""uuid":"u-1","#,
+        ));
+        let b = collect_text(
+            r#"{"type":"assistant","timestamp":"2026-07-17T08:00:01.000Z","sessionId":"s2","requestId":"req_1","uuid":"u-1","message":{"id":"m1","model":"m","usage":{"input_tokens":99,"output_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}}"#,
+        );
+        let (_, va) = a.events[0].copy_identity().unwrap();
+        let (_, vb) = b.events[0].copy_identity().unwrap();
+        assert_ne!(va, vb, "标识相同但内容不同 → 不同观察身份");
     }
 }

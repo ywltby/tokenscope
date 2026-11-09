@@ -22,6 +22,9 @@ fn event(agent: AgentKind, ts: &str, session: &str, record: &str) -> UsageEvent 
         session_initial_cwd: None,
         event_cwd: None,
         record_id: record.into(),
+        claude_copy: None,
+        codex_response: None,
+        codex_legacy_origin: None,
         line: 0,
         source_path: String::new(),
         input_tokens: 10,
@@ -91,7 +94,8 @@ fn test_dedupe_workbuddy_strong_identity_same_app_keeps_last() {
         event(AgentKind::WorkBuddyAi, "2026-08-01T10:00:00Z", "s2", "m2"),
         event(AgentKind::WorkBuddyAi, "2026-08-01T10:05:00Z", "s2", "m2"),
     ];
-    let (kept, dropped) = dedupe_events(events);
+    let deduped = dedupe_events(events);
+    let (kept, dropped) = (deduped.events, deduped.dropped);
     assert_eq!(kept.len(), 2, "每个应用各保一条（末条）");
     let wb: Vec<&UsageEvent> = kept
         .iter()
@@ -125,7 +129,8 @@ fn test_dedupe_cross_app_same_identity_not_merged() {
             "same",
         ),
     ];
-    let (kept, dropped) = dedupe_events(events);
+    let deduped = dedupe_events(events);
+    let (kept, dropped) = (deduped.events, deduped.dropped);
     assert_eq!(kept.len(), 2, "跨应用同身份不得合并");
     assert!(dropped.is_empty());
 }
@@ -138,7 +143,8 @@ fn test_dedupe_workbuddy_identical_rows_still_merge_by_identity() {
     a.input_tokens = 100;
     let mut b = event(AgentKind::WorkBuddy, "2026-08-01T10:01:00Z", "s1", "m1");
     b.input_tokens = 200;
-    let (kept, dropped) = dedupe_events(vec![a, b]);
+    let deduped = dedupe_events(vec![a, b]);
+    let (kept, dropped) = (deduped.events, deduped.dropped);
     assert_eq!(kept.len(), 1, "同身份不同用量仍按强身份合并保末条");
     assert_eq!(kept[0].input_tokens, 200);
     assert_eq!(dropped, vec![(AgentKind::WorkBuddy, 1)]);

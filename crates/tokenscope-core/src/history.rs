@@ -56,6 +56,11 @@ pub const ORIGIN_KIND_CCS_REQUEST: &str = "ccs_request";
 /// 来源记录种类：遗留 `cache.db` 迁移过来的已缓存用量。
 pub const ORIGIN_KIND_LEGACY_CACHE: &str = "legacy_cache";
 
+/// 跨会话复制证据的别名方案（Claude，2026-11-07）：值 = `message.id |
+/// requestId | uuid | 观察内容摘要`。同一原始观察被复制到别的会话时命中
+/// 同一别名，因此只贡献一次用量；内容不同则摘要不同，不构成同一身份。
+pub const ALIAS_CLAUDE_COPY: &str = "claude-copy";
+
 const META_GENERATION: &str = "generation";
 const META_PARSER_REVISION: &str = "parser_revision";
 const META_IDENTITY_REVISION: &str = "identity_revision";
@@ -497,6 +502,9 @@ pub struct WriteSummary {
     /// 自动插入的新请求中，存在"同时间同用量但身份不足"重叠候选的记录数
     /// （仅供审计：调用方决定是否允许这类导入）。
     pub overlap_candidates: u64,
+    /// 因跨会话复制证据而**合并掉的旧事实数**（2026-11-07）：同一请求的多条
+    /// 历史重复行合成一条。不是新增消费，也不计入 `inserted`/`updated`。
+    pub merged: u64,
     /// 新增的别名行数。
     pub aliases_added: u64,
     /// 新增的来源证据行数。
@@ -1331,7 +1339,7 @@ impl HistoryDb {
     ) -> Result<WriteSummary> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let generation = self.generation_in_tx(&tx)?;
-        let (summary, changed) = write_events_in_tx(&tx, batch, generation)?;
+        let (summary, changed) = write_events_in_tx(&tx, batch, generation, false)?;
         if let Some(key) = marker_key {
             set_meta_in_tx(&tx, key, "done")?;
         }
@@ -1380,7 +1388,7 @@ impl HistoryDb {
         }
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let generation = self.generation()?;
-        let (summary, changed) = write_events_in_tx(&tx, batch, generation)?;
+        let (summary, changed) = write_events_in_tx(&tx, batch, generation, false)?;
         if changed {
             bump_generation(&tx)?;
         }
@@ -1390,10 +1398,24 @@ impl HistoryDb {
 
     /// 采集专用的升级例外：仅纠正唯一旧原生 Codex 事实的模型归属。
     /// CCS 预演/导入仍调用原写入内核，不进入这条候选匹配路径。
+    ///
+    /// 2026-11-07：跨会话复制证据可能把库内**已有的**多条重复事实连成一组。
+    /// 合并会改变历史事实，因此本入口在开启事务前先判定本轮是否需要纠错，
+    /// 需要时先生成一份可恢复备份（`VACUUM INTO`），再在同一事务内合并；
+    /// 没有备份就不合并（事务内明确报错、整批回滚）。
     pub fn write_collected_batch(&self, batch: &[EventWrite]) -> Result<CollectedWriteSummary> {
         let mut result = CollectedWriteSummary::default();
         if batch.is_empty() {
             return Ok(result);
+        }
+        let correction_groups = self.count_pending_corrections(batch)?;
+        if correction_groups > 0 {
+            let backup = self.backup_before_correction()?;
+            log::info!(
+                "跨会话去重/Codex 升级纠错：本轮改写 {correction_groups} 组旧事实；\
+                 纠错前备份：{}",
+                backup.display()
+            );
         }
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let generation = self.generation_in_tx(&tx)?;
@@ -1403,6 +1425,32 @@ impl HistoryDb {
             let mut protected_replay = None;
             let native_codex =
                 write.app == AgentKind::Codex && write.precedence == WritePrecedence::NativeLog;
+            // Codex 强响应升级（携带镜像来源键）：绕过模型纠正候选路径——
+            // 旧事实由镜像键精确命中后走 merge_event 原行升级。
+            if native_codex && write.record_id.is_some() {
+                let (summary, wrote) = write_events_in_tx(
+                    &tx,
+                    std::slice::from_ref(write),
+                    generation,
+                    correction_groups > 0,
+                )?;
+                result.events.inserted_tokens = result
+                    .events
+                    .inserted_tokens
+                    .checked_add(&summary.inserted_tokens)
+                    .ok_or_else(|| anyhow!("本批新增用量累计溢出可表示范围"))?;
+                result.events.inserted += summary.inserted;
+                result.events.updated += summary.updated;
+                result.events.unchanged += summary.unchanged;
+                result.events.conflicts += summary.conflicts;
+                result.events.stale += summary.stale;
+                result.events.overlap_candidates += summary.overlap_candidates;
+                result.events.merged += summary.merged;
+                result.events.aliases_added += summary.aliases_added;
+                result.events.origins_added += summary.origins_added;
+                changed |= wrote;
+                continue;
+            }
             if native_codex {
                 let existing = lookup_event(&tx, write)?;
                 match existing.as_ref() {
@@ -1489,8 +1537,12 @@ impl HistoryDb {
                 }
             }
             let write = protected_replay.as_ref().unwrap_or(write);
-            let (summary, wrote) =
-                write_events_in_tx(&tx, std::slice::from_ref(write), generation)?;
+            let (summary, wrote) = write_events_in_tx(
+                &tx,
+                std::slice::from_ref(write),
+                generation,
+                correction_groups > 0,
+            )?;
             // 分项复用原内核，批次累计仍受检；溢出时包含此前纠正在内全部回滚。
             result.events.inserted_tokens = result
                 .events
@@ -1503,6 +1555,7 @@ impl HistoryDb {
             result.events.conflicts += summary.conflicts;
             result.events.stale += summary.stale;
             result.events.overlap_candidates += summary.overlap_candidates;
+            result.events.merged += summary.merged;
             result.events.aliases_added += summary.aliases_added;
             result.events.origins_added += summary.origins_added;
             changed |= wrote;
@@ -1512,6 +1565,77 @@ impl HistoryDb {
         }
         tx.commit()?;
         Ok(result)
+    }
+
+    /// 本轮采集需要合并的旧重复事实组数（只读预扫，不改变库内容）。
+    ///
+    /// 判定与事务内完全同源（同一个 [`lookup_hits`]）：预扫为正才生成纠错前
+    /// 备份，事务内若出现预扫未覆盖的合并则整批拒绝（绝不无备份改事实）。
+    ///
+    /// 2026-11-08 起同时统计 Codex 强响应的**旧事实升级**：写入携带旧解析器
+    /// 镜像来源键，该键命中已存行即意味着本轮会把旧行改写为强表示（改历史
+    /// 事实）——同样需要纠错前备份。同一旧行只计一次。
+    fn count_pending_corrections(&self, batch: &[EventWrite]) -> Result<usize> {
+        let mut groups = 0usize;
+        let mut upgrade_rows: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for write in batch {
+            if copy_alias_value(write).is_some() && lookup_hits(&self.conn, write)?.ids.len() > 1 {
+                groups += 1;
+            }
+            if write.app != AgentKind::Codex {
+                continue;
+            }
+            for origin in &write.origins {
+                if origin.origin_kind != ORIGIN_KIND_NATIVE_FILE {
+                    continue;
+                }
+                let hit: Option<i64> = self
+                    .conn
+                    .query_row(
+                        "SELECT event_id FROM event_origins
+                         WHERE origin_kind = ?1 AND origin_key = ?2",
+                        params![origin.origin_kind, origin.origin_key],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(id) = hit
+                    && upgrade_rows.insert(id)
+                {
+                    groups += 1;
+                }
+            }
+        }
+        Ok(groups)
+    }
+
+    /// 事实纠错前的可恢复备份（`VACUUM INTO` 独立文件）。
+    ///
+    /// 与升级备份分开命名：升级备份是"改结构前"的快照，不能冒充"改事实前"
+    /// 的快照。每次实际发生纠错各生成一份，文件名带 UTC 时间戳；不覆盖既有
+    /// 文件，也不建立自动清理机制（与升级备份同一取舍）。
+    fn backup_before_correction(&self) -> Result<PathBuf> {
+        let stamp = Timestamp::now().strftime("%Y%m%dT%H%M%SZ").to_string();
+        for attempt in 0..100u32 {
+            let suffix = if attempt == 0 {
+                String::new()
+            } else {
+                format!("-{attempt}")
+            };
+            let target = self
+                .path
+                .with_extension(format!("db.correction-backup-{stamp}{suffix}"));
+            if target.exists() {
+                continue;
+            }
+            let escaped = target.display().to_string().replace('\'', "''");
+            self.conn
+                .execute_batch(&format!("VACUUM INTO '{escaped}'"))
+                .with_context(|| {
+                    format!("跨会话去重纠错前备份失败（目标 {}）", target.display())
+                })?;
+            return Ok(target);
+        }
+        bail!("跨会话去重纠错前备份失败：同秒内备份文件名已用尽")
     }
 
     /// 单条写入在库内的处置分类（**预览与提交共用同一判定**，因此预览数字
@@ -1694,7 +1818,7 @@ impl HistoryDb {
                 }
             }
         }
-        let (write_summary, events_changed) = write_events_in_tx(&tx, &writes, generation)?;
+        let (write_summary, events_changed) = write_events_in_tx(&tx, &writes, generation, false)?;
         let (rollup_summary, rollups_changed) = write_rollups_in_tx(&tx, rollups, policy, run_id)?;
         let changed = events_changed || rollups_changed;
         // 净新增 = **本批插入**事件的四桶之和（只补来源证据的记录不计）。
@@ -2127,6 +2251,9 @@ fn legacy_event_write(
         session_initial_cwd: ev.session_initial_cwd.clone(),
         event_cwd: ev.event_cwd.clone(),
         record_id: ev.record_id.clone(),
+        claude_copy: None,
+        codex_legacy_origin: None,
+        codex_response: None,
         line: 0,
         source_path: String::new(),
         input_tokens: ev.input,
@@ -2195,24 +2322,109 @@ fn non_empty(s: &str) -> Option<String> {
 
 /// 批次写入的**事务内**内核：写入事件、别名与来源证据，并回填统计。
 /// 返回 `(统计, 是否改变了任何行)`；是否递增 generation 与提交由调用方决定。
+///
+/// `allow_correction`：本次事务是否已具备"纠错前可恢复备份"。跨会话复制证据
+/// 连接多条历史重复事实时要在同一事务内合并；没有备份就不合并（明确报错、
+/// 整批回滚），绝不静默改事实。
 fn write_events_in_tx(
     tx: &Transaction<'_>,
     batch: &[EventWrite],
     generation: u64,
+    allow_correction: bool,
 ) -> Result<(WriteSummary, bool)> {
     let mut summary = WriteSummary::default();
     let mut changed = false;
     for write in batch {
         validate_write(write)?;
-        let existing = lookup_event(tx, write)?;
-        let event_id = match existing {
-            Some(stored) => merge_event(tx, stored, write, &mut summary, &mut changed)?,
-            None => {
-                // 身份不足（无别名）且库内有重叠候选时记录审计计数：调用方
-                // 可能在用户确认后按"新增"导入，这条计数让结果可核查。
-                if write.aliases.is_empty() && lookup_overlap_candidate(tx, write)?.is_some() {
-                    summary.overlap_candidates += 1;
+        let hits = lookup_hits(tx, write)?;
+        let event_id = if hits.ids.is_empty() {
+            // 身份不足（无别名）且库内有重叠候选时记录审计计数：调用方
+            // 可能在用户确认后按"新增"导入，这条计数让结果可核查。
+            if write.aliases.is_empty() && lookup_overlap_candidate(tx, write)?.is_some() {
+                summary.overlap_candidates += 1;
+            }
+            let id = insert_event(tx, write)?;
+            summary.inserted += 1;
+            summary.inserted_tokens = summary
+                .inserted_tokens
+                .checked_add(&write.tokens)
+                .ok_or_else(|| anyhow!("本批新增用量累计溢出可表示范围"))?;
+            changed = true;
+            id
+        } else if hits.ids.len() == 1 {
+            let existing = load_event(tx, hits.ids[0])?
+                .ok_or_else(|| anyhow!("事件 {} 在命中后消失", hits.ids[0]))?;
+            if hits.by_copy_alias && same_usage_content(&existing, write) {
+                // 跨会话副本：证据已证明是同一原始观察，终值逐字段相等。
+                // 只补来源与别名，**不改代表**（会话/项目保持既有事实）。
+                summary.unchanged += 1;
+                existing.id
+            } else if write_has_codex_legacy_origin(write)
+                && existing.app == AgentKind::Codex
+                && existing.record_id.is_some()
+                && existing.record_id.as_deref() != write.record_id.as_deref()
+            {
+                // 复审修复（2026-11-09）：镜像键命中的行已被升级为**另一个**
+                // 强响应——旧行上与镜像键相等的来源属于本响应（旧解析器在
+                // 各自 count 行记账，弱合并把来源聚到同一行），把该来源转移
+                // 到本响应的新事实；旧行保持已升级表示。同一响应的升级重放
+                // （record_id 相同）不走本分支，仍按既有 classify 幂等收敛。
+                if !allow_correction {
+                    bail!(
+                        "身份冲突：Codex 镜像键命中已升级为其他响应的事件 {}，\
+                         未开启纠错通道",
+                        existing.id
+                    );
                 }
+                let event_id = insert_event(tx, write)?;
+                summary.inserted += 1;
+                summary.inserted_tokens = summary
+                    .inserted_tokens
+                    .checked_add(&write.tokens)
+                    .ok_or_else(|| anyhow!("本批新增用量累计溢出可表示范围"))?;
+                changed = true;
+                let mirror =
+                    codex_mirror_origin(write).ok_or_else(|| anyhow!("升级映射缺少镜像来源键"))?;
+                tx.execute(
+                    "UPDATE event_origins SET event_id = ?1
+                     WHERE origin_kind = ?2 AND origin_key = ?3 AND event_id = ?4",
+                    params![event_id, mirror.origin_kind, mirror.origin_key, existing.id],
+                )?;
+                event_id
+            } else {
+                merge_event(tx, existing, write, &mut summary, &mut changed)?
+            }
+        } else if write_has_codex_legacy_origin(write) {
+            // Codex 强响应 + 镜像键多命中：镜像键命中旧弱事实行、新键/别名
+            // 命中已升级行（或旧行）——同一响应的升级重放，把全部命中收敛到
+            // 确定性代表（与跨会话纠错同一套固定规则），绝不多计。
+            //
+            // 复审修复（2026-11-09）：已升级为**其他响应**的行不并入合并组
+            // （它的 token 是别的请求的事实，合并即漏计）——它只让渡镜像
+            // 来源（该来源属于本响应：旧解析器在本响应的 count 行记账）。
+            if !allow_correction {
+                bail!(
+                    "身份冲突：Codex 强响应镜像键命中多条事实 {:?}，未开启纠错通道",
+                    hits.ids
+                );
+            }
+            let mirror =
+                codex_mirror_origin(write).ok_or_else(|| anyhow!("升级映射缺少镜像来源键"))?;
+            let mut group = Vec::new();
+            let mut foreign = Vec::new();
+            for id in &hits.ids {
+                let ev = load_event(tx, *id)?.ok_or_else(|| anyhow!("事件 {id} 在命中后消失"))?;
+                if ev.app != AgentKind::Codex {
+                    bail!("身份冲突：Codex 升级映射指向了其他应用的事件 {id}");
+                }
+                if ev.record_id.is_some() && ev.record_id.as_deref() != write.record_id.as_deref() {
+                    foreign.push(ev.id);
+                } else {
+                    group.push(ev);
+                }
+            }
+            let event_id = if group.is_empty() {
+                // 命中全是异响应行：本响应在此前从未入账，插入新事实。
                 let id = insert_event(tx, write)?;
                 summary.inserted += 1;
                 summary.inserted_tokens = summary
@@ -2221,7 +2433,60 @@ fn write_events_in_tx(
                     .ok_or_else(|| anyhow!("本批新增用量累计溢出可表示范围"))?;
                 changed = true;
                 id
+            } else {
+                let keeper = correction_keeper(&group);
+                let keeper_id = group[keeper].id;
+                let losers: Vec<i64> = group
+                    .iter()
+                    .filter(|e| e.id != keeper_id)
+                    .map(|e| e.id)
+                    .collect();
+                merge_facts_in_tx(tx, keeper_id, &losers)?;
+                summary.merged += losers.len() as u64;
+                changed = true;
+                let keeper_event = load_event(tx, keeper_id)?
+                    .ok_or_else(|| anyhow!("代表事实 {keeper_id} 在合并后消失"))?;
+                merge_event(tx, keeper_event, write, &mut summary, &mut changed)?
+            };
+            // 镜像来源归属本响应：从异响应行转移到本事件。
+            for fid in &foreign {
+                tx.execute(
+                    "UPDATE event_origins SET event_id = ?1
+                     WHERE origin_kind = ?2 AND origin_key = ?3 AND event_id = ?4",
+                    params![event_id, mirror.origin_kind, mirror.origin_key, fid],
+                )?;
             }
+            event_id
+        } else {
+            // 多命中：同一请求的身份分别落在多条事实行上。只有携带跨会话
+            // 复制证据才允许在同一事务内合并；其余情形维持既有的"不猜即拒绝"。
+            if !allow_correction || copy_alias_value(write).is_none() {
+                bail!(
+                    "身份冲突：同一请求的多个身份分别指向事件 {:?}，无法在不猜测的前提下合并",
+                    hits.ids
+                );
+            }
+            let mut stored = Vec::with_capacity(hits.ids.len());
+            for id in &hits.ids {
+                let ev = load_event(tx, *id)?.ok_or_else(|| anyhow!("事件 {id} 在命中后消失"))?;
+                if ev.app != write.app {
+                    bail!("身份冲突：跨会话复制证据指向了其他应用的事件 {id}，拒绝合并");
+                }
+                stored.push(ev);
+            }
+            let keeper = correction_keeper(&stored);
+            let keeper_id = stored[keeper].id;
+            let losers: Vec<i64> = stored
+                .iter()
+                .filter(|e| e.id != keeper_id)
+                .map(|e| e.id)
+                .collect();
+            merge_facts_in_tx(tx, keeper_id, &losers)?;
+            summary.merged += losers.len() as u64;
+            changed = true;
+            let keeper_event = load_event(tx, keeper_id)?
+                .ok_or_else(|| anyhow!("代表事实 {keeper_id} 在合并后消失"))?;
+            merge_event(tx, keeper_event, write, &mut summary, &mut changed)?
         };
         for alias in &write.aliases {
             if alias.scheme.is_empty() || alias.value.is_empty() {
@@ -2241,12 +2506,52 @@ fn write_events_in_tx(
                 .optional()?;
             match current {
                 Some(id) if id == event_id => {}
-                Some(id) => bail!(
-                    "别名冲突：{} / {} / {} 已绑定事件 {id}，不能改绑事件 {event_id}",
-                    alias.app.as_str(),
-                    alias.scheme,
-                    alias.value
-                ),
+                Some(id) => {
+                    if write.app == AgentKind::Codex && write.record_id.is_none() {
+                        // 旧事实升级后留下的弱别名代表旧合并表示的定位证据；
+                        // 当前位置的当前弱事实接管它，否则独立 count-only
+                        // 会被旧别名吸回已升级行（2026-11-09 修复）。
+                        if !allow_correction {
+                            bail!(
+                                "别名冲突：{} / {} / {} 已绑定已升级事件 {id}，\
+                                 未开启纠错通道",
+                                alias.app.as_str(),
+                                alias.scheme,
+                                alias.value
+                            );
+                        }
+                        if !identity_hit_allowed(tx, true, id)? {
+                            tx.execute(
+                                "UPDATE event_aliases SET event_id = ?1
+                                 WHERE app = ?2 AND identity_scheme = ?3
+                                   AND identity_value = ?4 AND event_id = ?5",
+                                params![
+                                    event_id,
+                                    alias.app.as_str(),
+                                    alias.scheme,
+                                    alias.value,
+                                    id
+                                ],
+                            )?;
+                            summary.aliases_added += 1;
+                            changed = true;
+                        } else {
+                            bail!(
+                                "别名冲突：{} / {} / {} 已绑定事件 {id}，不能改绑事件 {event_id}",
+                                alias.app.as_str(),
+                                alias.scheme,
+                                alias.value
+                            );
+                        }
+                    } else {
+                        bail!(
+                            "别名冲突：{} / {} / {} 已绑定事件 {id}，不能改绑事件 {event_id}",
+                            alias.app.as_str(),
+                            alias.scheme,
+                            alias.value
+                        );
+                    }
+                }
                 None => {
                     tx.execute(
                         "INSERT INTO event_aliases(event_id, app, identity_scheme,
@@ -2265,9 +2570,20 @@ fn write_events_in_tx(
                 }
             }
         }
+        // 镜像来源键只作首次升级的定位证据：旧事实自身的来源行已经存在，
+        // 新写入不再重复登记；否则当前解析在该行产出的独立弱事实会被
+        // 镜像来源占位挡住（2026-11-09 修复）。
+        let mirror_origin = codex_mirror_origin(write);
         for origin in &write.origins {
             if origin.origin_key.is_empty() {
                 bail!("来源记录键不得为空（{}）", origin.origin_kind);
+            }
+            if write.record_id.is_some()
+                && mirror_origin.is_some_and(|m| {
+                    m.origin_kind == origin.origin_kind && m.origin_key == origin.origin_key
+                })
+            {
+                continue;
             }
             let current: Option<i64> = tx
                 .query_row(
@@ -2279,11 +2595,43 @@ fn write_events_in_tx(
                 .optional()?;
             match current {
                 Some(id) if id == event_id => {}
-                Some(id) => bail!(
-                    "来源记录冲突：{} / {} 已指向事件 {id}，不能改指事件 {event_id}",
-                    origin.origin_kind,
-                    origin.origin_key
-                ),
+                Some(id) => {
+                    if write.app == AgentKind::Codex && write.record_id.is_none() {
+                        // 当前位置已成为一条独立弱事实：把旧事实升级后残留的
+                        // 来源证据转给它（旧事实的强身份不受影响）。该位置
+                        // 的当前解析表示确实是本事实，不是凭数值猜合并。
+                        if !allow_correction {
+                            bail!(
+                                "来源记录冲突：{} / {} 已指向已升级事件 {id}，\
+                                 未开启纠错通道",
+                                origin.origin_kind,
+                                origin.origin_key
+                            );
+                        }
+                        if !identity_hit_allowed(tx, true, id)? {
+                            tx.execute(
+                                "UPDATE event_origins SET event_id = ?1
+                                 WHERE origin_kind = ?2 AND origin_key = ?3
+                                   AND event_id = ?4",
+                                params![event_id, origin.origin_kind, origin.origin_key, id],
+                            )?;
+                            summary.origins_added += 1;
+                            changed = true;
+                        } else {
+                            bail!(
+                                "来源记录冲突：{} / {} 已指向事件 {id}，不能改指事件 {event_id}",
+                                origin.origin_kind,
+                                origin.origin_key
+                            );
+                        }
+                    } else {
+                        bail!(
+                            "来源记录冲突：{} / {} 已指向事件 {id}，不能改指事件 {event_id}",
+                            origin.origin_kind,
+                            origin.origin_key
+                        );
+                    }
+                }
                 None => {
                     tx.execute(
                         "INSERT INTO event_origins(event_id, origin_kind, origin_key, app,
@@ -2375,22 +2723,58 @@ fn classify_against(existing: &StoredEvent, w: &EventWrite) -> WriteClass {
     } else if existing.precedence > w.precedence {
         WriteClass::Conflict
     } else {
+        // 2026-11-09 复审修正：带镜像来源键的强响应写入命中未升级的旧行
+        //（record_id 为空）时**升级必须完成**——包括同刻（compaction 分支
+        // 旧行与新事件同为 record 行时刻；若落入同刻键比较，字典序的随机
+        // 胜负会随机丢弃升级，漏计或双计均有可能）。例外优先于同刻代表与
+        // 重播时序两条通用规则。
+        let codex_upgrade_forced = write_has_codex_legacy_origin(w)
+            && (existing.record_id.is_none() || existing.record_id.as_deref() == Some(""))
+            && existing.app == AgentKind::Codex;
         match w.ts.cmp(&existing.ts) {
             std::cmp::Ordering::Equal => {
                 // 同刻：确定性代表胜出（总量大者优先，并列取事件键更大者）。
-                if same_instant_challenger_wins(existing, w) {
+                if codex_upgrade_forced || same_instant_challenger_wins(existing, w) {
                     WriteClass::Update
                 } else {
                     WriteClass::Stale
                 }
             }
             // Codex 重播族：更早事件时间胜出；强身份（Claude/WB）：更晚胜出。
+            // 2026-11-08 例外：镜像键命中的旧行就是这条响应在旧解析器下的
+            // 记账行，升级必须完成，不受"更早胜出"的重播规则约束；时间差
+            //（record 与 count 的 1–3ms）由映射本身消解，不比较先后。
+            order if codex_upgrade_forced => {
+                let _ = order;
+                WriteClass::Update
+            }
             order if (order == std::cmp::Ordering::Less) == (w.app == AgentKind::Codex) => {
                 WriteClass::Update
             }
             _ => WriteClass::Stale,
         }
     }
+}
+
+/// 写入是否携带 Codex 旧事实升级映射（镜像来源键）。
+fn write_has_codex_legacy_origin(w: &EventWrite) -> bool {
+    w.app == AgentKind::Codex && w.record_id.is_some() && w.origins.len() > 1
+}
+
+/// 升级映射的镜像来源键：origins 里除本响应解析位置（event_key）以外的
+/// native_file 来源。旧解析器在本响应的配对 count 行（或 compaction 的
+/// record 行）记账，该键与旧事实的来源键逐字节相等。
+///
+/// 2026-11-09 起它只作**首次升级的定位证据**：本响应已有强身份时不再用
+/// 它命中（同位置的当前弱事实可能已接手该来源行），插入时也不重复登记；
+/// 参见 [`lookup_hits`] 与 [`write_events_in_tx`]。
+fn codex_mirror_origin(w: &EventWrite) -> Option<&EventOrigin> {
+    if w.app != AgentKind::Codex {
+        return None;
+    }
+    w.origins
+        .iter()
+        .find(|o| o.origin_kind == ORIGIN_KIND_NATIVE_FILE && o.origin_key != w.event_key)
 }
 
 /// 同刻候选的胜负（内容已确认不同）：四桶总量更大者胜；总量并列时——
@@ -2677,19 +3061,71 @@ fn validate_write(w: &EventWrite) -> Result<()> {
     Ok(())
 }
 
-/// 按来源键 → 来源记录证据 → 原生身份别名 三级查找已存在事件。
+/// 一次写入在库内的全部命中（多命中 = 库内已有重复事实，是否合并由证据决定）。
+#[derive(Debug, Default)]
+struct LookupHits {
+    /// 命中的事实 ID（去重，保持发现顺序：来源键 → 来源记录 → 别名）。
+    ids: Vec<i64>,
+    /// 命中包含该写入自己的位置（来源键或来源记录证据）。
+    by_position: bool,
+    /// 命中包含跨会话复制证据（`claude-copy` 别名）。
+    by_copy_alias: bool,
+}
+
+/// 按来源键 → 来源记录证据 → 原生身份别名三级查找已存在事件。
 fn lookup_event(conn: &Connection, w: &EventWrite) -> Result<Option<StoredEvent>> {
-    let by_key = conn
+    let hits = lookup_hits(conn, w)?;
+    match hits.ids.len() {
+        0 => Ok(None),
+        1 => load_event(conn, hits.ids[0]),
+        // 同一请求的多个身份各自绑定了不同事件：这是"库内已有重复事件"，
+        // 合并策略需按来源优先级决策（计划 §5.3 的冲突处理），此处不猜测，
+        // 明确拒绝整批，交由调用方呈现为未解决冲突。
+        _ => bail!(
+            "身份冲突：同一请求的多个身份分别指向事件 {:?}，无法在不猜测的前提下合并",
+            hits.ids
+        ),
+    }
+}
+
+fn lookup_hits(conn: &Connection, w: &EventWrite) -> Result<LookupHits> {
+    let mut hits = LookupHits::default();
+    let mut push = |id: i64| {
+        if !hits.ids.contains(&id) {
+            hits.ids.push(id);
+        }
+    };
+    // Codex 弱写（count-only）与强响应是两个身份空间：弱事件不携带响应
+    // 标识，它的来源位置/弱别名可能与旧事实升级后留下的镜像证据重合，
+    // 但那不证明两者是同一次调用（2026-11-09 修复：新 turn 边界后的
+    // 同用量 count-only 曾被已升级行经镜像来源键吸收）。弱写只允许命中
+    // 弱事实；强事件只由强身份/镜像升级路径命中。
+    let weak_codex = w.app == AgentKind::Codex && w.record_id.is_none();
+    // 镜像来源键只用于**首次升级**尚未有强表示的旧事实；本响应在库内
+    // 已有强身份（来源键/别名命中）时，镜像位置已属于当前弱事实或不再
+    // 需要升级，不能再次把它当作本响应的身份。
+    let mirror = codex_mirror_origin(w);
+    let mut has_own_hit = false;
+    let by_key: Option<i64> = conn
         .query_row(
             "SELECT id FROM usage_events WHERE event_key = ?1",
             params![w.event_key],
             |r| r.get::<_, i64>(0),
         )
         .optional()?;
-    if let Some(id) = by_key {
-        return load_event(conn, id);
+    if let Some(id) = by_key
+        && identity_hit_allowed(conn, weak_codex, id)?
+    {
+        push(id);
+        hits.by_position = true;
+        has_own_hit = true;
     }
     for origin in &w.origins {
+        if mirror.is_some_and(|m| {
+            m.origin_kind == origin.origin_kind && m.origin_key == origin.origin_key
+        }) {
+            continue;
+        }
         let hit: Option<i64> = conn
             .query_row(
                 "SELECT event_id FROM event_origins WHERE origin_kind = ?1 AND origin_key = ?2",
@@ -2697,34 +3133,69 @@ fn lookup_event(conn: &Connection, w: &EventWrite) -> Result<Option<StoredEvent>
                 |r| r.get(0),
             )
             .optional()?;
-        if let Some(id) = hit {
-            return load_event(conn, id);
+        if let Some(id) = hit
+            && identity_hit_allowed(conn, weak_codex, id)?
+        {
+            push(id);
+            hits.by_position = true;
+            has_own_hit = true;
         }
     }
-    let mut hits: Vec<i64> = Vec::new();
     for alias in &w.aliases {
         let hit: Option<i64> = conn
             .query_row(
                 "SELECT event_id FROM event_aliases
-                 WHERE app = ?1 AND identity_scheme = ?2 AND identity_value = ?3",
+                  WHERE app = ?1 AND identity_scheme = ?2 AND identity_value = ?3",
                 params![alias.app.as_str(), alias.scheme, alias.value],
                 |r| r.get(0),
             )
             .optional()?;
         if let Some(id) = hit
-            && !hits.contains(&id)
+            && identity_hit_allowed(conn, weak_codex, id)?
         {
-            hits.push(id);
+            push(id);
+            has_own_hit = true;
+            if alias.scheme == ALIAS_CLAUDE_COPY {
+                hits.by_copy_alias = true;
+            }
         }
     }
-    match hits.len() {
-        0 => Ok(None),
-        1 => load_event(conn, hits[0]),
-        // 同一请求的两个身份各自绑定了不同事件：这是"库内已有重复事件"，
-        // 合并策略需按来源优先级决策（计划 §5.3 的冲突处理），此处不猜测，
-        // 明确拒绝整批，交由调用方呈现为未解决冲突。
-        _ => bail!("身份冲突：同一请求的多个别名分别指向事件 {hits:?}，无法在不猜测的前提下合并"),
+    if !has_own_hit && let Some(mirror) = mirror {
+        let hit: Option<i64> = conn
+            .query_row(
+                "SELECT event_id FROM event_origins WHERE origin_kind = ?1 AND origin_key = ?2",
+                params![mirror.origin_kind, mirror.origin_key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = hit
+            && identity_hit_allowed(conn, weak_codex, id)?
+        {
+            push(id);
+            hits.by_position = true;
+        }
     }
+    Ok(hits)
+}
+
+/// 弱 Codex 写不得命中强事实：来源位置/弱别名重合只说明旧解析表示，
+/// 不构成请求同一性（强/弱两个键空间）。
+fn identity_hit_allowed(conn: &Connection, weak_codex: bool, id: i64) -> Result<bool> {
+    if !weak_codex {
+        return Ok(true);
+    }
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT app, record_id FROM usage_events WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(!matches!(
+        row,
+        Some((app, Some(record_id)))
+            if app == AgentKind::Codex.as_str() && !record_id.is_empty()
+    ))
 }
 
 fn same_fact_except_model(existing: &StoredEvent, write: &EventWrite) -> bool {
@@ -2746,8 +3217,14 @@ fn same_fact_except_model(existing: &StoredEvent, write: &EventWrite) -> bool {
 /// 同时间、同四桶但模型不同，也代表**另一个合法请求**——不得按旧记录
 /// 纠正去改写模型。判断依据是事件行版本（`usage_events.parser_revision`），
 /// 不是 `EventOrigin.parser_revision`（后者是来源证据元数据）。
+/// 2026-11-08：强响应写入（带 response_id）不走本候选路径——它们的旧事实
+/// 升级由镜像来源键精确驱动（`lookup_event` 命中后走 `merge_event`），
+/// 不能按"同刻同桶"再开第二条改写通道。
 fn old_codex_model_candidates(conn: &Connection, write: &EventWrite) -> Result<Vec<i64>> {
     const CORRECTABLE_MAX_REVISION: i64 = 2;
+    if write.record_id.is_some() {
+        return Ok(Vec::new());
+    }
     let mut statement = conn.prepare(
         "SELECT id FROM usage_events WHERE app='codex' AND origin_rank=?1
              AND parser_revision<?2 AND session_id=?3 AND ts_seconds=?4 AND ts_nanos=?5
@@ -2853,9 +3330,17 @@ impl BatchSim {
 
     /// 解析本条写入命中的事实：与 [`lookup_event`] 的三级顺序与冲突语义
     /// 一致（来源键 → 来源记录 → 别名；本批声明优先于库内行，按事实归一）。
+    ///
+    /// Codex 强/弱分离与镜像升级条件同 [`lookup_hits`]：弱写不命中强事实；
+    /// 镜像来源只在本响应尚无强身份时用于首次升级。预览不得把这些边界
+    /// 判成与提交不同的结果。
     fn resolve(&mut self, conn: &Connection, w: &EventWrite) -> Result<Option<i64>> {
+        let weak_codex = w.app == AgentKind::Codex && w.record_id.is_none();
+        let mirror = codex_mirror_origin(w);
         // 1) 来源键。
-        if let Some(f) = self.claims.get(&format!("k|{}", w.event_key)) {
+        if let Some(f) = self.claims.get(&format!("k|{}", w.event_key))
+            && self.identity_hit_allowed(*f, weak_codex)
+        {
             return Ok(Some(*f));
         }
         let by_key: Option<i64> = conn
@@ -2866,12 +3351,25 @@ impl BatchSim {
             )
             .optional()?;
         if let Some(id) = by_key {
-            return self.fact_of(conn, id).map(Some);
+            let f = self.fact_of(conn, id)?;
+            // 模拟状态可能已把弱事实升级并改到当前记录行键；旧键不再属于它。
+            if self.state(f).event_key == w.event_key && self.identity_hit_allowed(f, weak_codex) {
+                return Ok(Some(f));
+            }
         }
-        // 2) 来源记录证据。
+        // 2) 来源记录证据（镜像键留到确认本响应尚无强身份后再查）。
         for origin in &w.origins {
-            if let Some(f) = self.claims.get(&origin_claim_key(origin)) {
-                return Ok(Some(*f));
+            if mirror.is_some_and(|m| {
+                m.origin_kind == origin.origin_kind && m.origin_key == origin.origin_key
+            }) {
+                continue;
+            }
+            let okey = origin_claim_key(origin);
+            if let Some(f) = self.claims.get(&okey) {
+                if self.identity_hit_allowed(*f, weak_codex) {
+                    return Ok(Some(*f));
+                }
+                continue;
             }
             let hit: Option<i64> = conn
                 .query_row(
@@ -2881,7 +3379,10 @@ impl BatchSim {
                 )
                 .optional()?;
             if let Some(id) = hit {
-                return self.fact_of(conn, id).map(Some);
+                let f = self.fact_of(conn, id)?;
+                if self.identity_hit_allowed(f, weak_codex) {
+                    return Ok(Some(f));
+                }
             }
         }
         // 3) 身份别名：可多命中，按事实去重；指向多个事实 → 与提交同口径冲突。
@@ -2889,7 +3390,7 @@ impl BatchSim {
         for alias in &w.aliases {
             let key = alias_claim_key(alias);
             if let Some(f) = self.claims.get(&key) {
-                if !hits.contains(f) {
+                if self.identity_hit_allowed(*f, weak_codex) && !hits.contains(f) {
                     hits.push(*f);
                 }
                 continue;
@@ -2904,16 +3405,48 @@ impl BatchSim {
                 .optional()?;
             if let Some(id) = hit {
                 let f = self.fact_of(conn, id)?;
-                if !hits.contains(&f) {
+                if self.identity_hit_allowed(f, weak_codex) && !hits.contains(&f) {
                     hits.push(f);
                 }
             }
         }
         match hits.len() {
-            0 => Ok(None),
-            1 => Ok(Some(hits[0])),
+            0 => {}
+            1 => return Ok(Some(hits[0])),
             _ => bail!("身份冲突：同一请求的多个别名分别指向不同事实，无法在不猜测的前提下合并"),
         }
+        // 4) 镜像来源：仅作首次升级定位（尚无强身份命中时）。
+        if let Some(mirror) = mirror {
+            let okey = origin_claim_key(mirror);
+            if let Some(f) = self.claims.get(&okey)
+                && self.identity_hit_allowed(*f, weak_codex)
+            {
+                return Ok(Some(*f));
+            }
+            let hit: Option<i64> = conn
+                .query_row(
+                    "SELECT event_id FROM event_origins WHERE origin_kind = ?1 AND origin_key = ?2",
+                    params![mirror.origin_kind, mirror.origin_key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(id) = hit {
+                let f = self.fact_of(conn, id)?;
+                if self.identity_hit_allowed(f, weak_codex) {
+                    return Ok(Some(f));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// 弱 Codex 写只命中弱事实（强/弱两个键空间）。
+    fn identity_hit_allowed(&self, fid: i64, weak_codex: bool) -> bool {
+        if !weak_codex {
+            return true;
+        }
+        let f = self.state(fid);
+        !(f.app == AgentKind::Codex && f.record_id.as_deref().is_some_and(|id| !id.is_empty()))
     }
 
     /// 新建事实（Insert）：模拟行 = 本条写入内容。
@@ -2924,13 +3457,32 @@ impl BatchSim {
         fid
     }
 
-    /// Update：统一终值前进为本次写入（事件键保持事实原值——提交路径的
-    /// UPDATE 不改 event_key）。
+    /// Update：统一终值前进为本次写入。事件键保持事实原值——提交路径的
+    /// UPDATE 不改 event_key；唯一例外是弱 Codex 事实升级为强响应：提交
+    /// 会把行键改为当前记录行（旧键让位给同位置的独立弱事实），模拟状态
+    /// 必须同步，否则同一批内后续弱写入的预览会与提交分叉（2026-11-09）。
     fn apply_update(&mut self, fid: i64, w: &EventWrite) {
+        let Some(old) = self.facts.get(&fid) else {
+            return;
+        };
+        let old_key = old.event_key.clone();
+        let rekey = old.app == AgentKind::Codex
+            && w.app == AgentKind::Codex
+            && old.record_id.is_none()
+            && w.record_id.is_some()
+            && old_key != w.event_key;
+        let new_key = if rekey {
+            w.event_key.clone()
+        } else {
+            old_key.clone()
+        };
         if let Some(f) = self.facts.get_mut(&fid) {
-            let key = f.event_key.clone();
             *f = sim_event(w, fid);
-            f.event_key = key;
+            f.event_key = new_key.clone();
+        }
+        if rekey {
+            self.claims.remove(&format!("k|{old_key}"));
+            self.claims.insert(format!("k|{new_key}"), fid);
         }
     }
 
@@ -2941,7 +3493,9 @@ impl BatchSim {
     ///   会整批失败，预览不得假装可行——R01 反例 1：来源记录缺冲突校验）；
     /// - 事件键**只在 Insert 时**登记（行的 event_key 列仅插入时写入；
     ///   Unchanged/Update/Conflict/Stale 不持久化本条的替代键——R01 反例 2：
-    ///   凭空登记会让后续同键写入错误命中旧事实）。
+    ///   凭空登记会让后续同键写入错误命中旧事实）。弱 Codex 事实升级为强
+    ///   响应时提交会改行键，此时由 [`Self::apply_update`] 同步登记新键；
+    /// - 镜像来源键只用于定位旧事实，不重复登记（同提交路径，2026-11-09）。
     fn register(
         &mut self,
         conn: &Connection,
@@ -2952,10 +3506,21 @@ impl BatchSim {
         if persist_key {
             self.claims.insert(format!("k|{}", w.event_key), fid);
         }
+        let mirror = codex_mirror_origin(w);
         for o in &w.origins {
+            if w.record_id.is_some()
+                && mirror
+                    .is_some_and(|m| m.origin_kind == o.origin_kind && m.origin_key == o.origin_key)
+            {
+                continue;
+            }
             let okey = origin_claim_key(o);
-            if let Some(other) = self.claims.get(&okey) {
-                if *other != fid {
+            if let Some(other) = self.claims.get(&okey).copied() {
+                if other != fid {
+                    if self.legacy_evidence_can_move(w, other) {
+                        self.claims.insert(okey, fid);
+                        continue;
+                    }
                     bail!("来源记录冲突：{okey} 已绑定其他事实，提交将整批失败");
                 }
                 continue;
@@ -2971,7 +3536,11 @@ impl BatchSim {
                 Some(id) => {
                     let other = self.fact_of(conn, id)?;
                     if other != fid {
-                        bail!("来源记录冲突：{okey} 已绑定其他事实，提交将整批失败");
+                        if self.legacy_evidence_can_move(w, other) {
+                            self.claims.insert(okey, fid);
+                        } else {
+                            bail!("来源记录冲突：{okey} 已绑定其他事实，提交将整批失败");
+                        }
                     }
                     // 已绑定同一事实：与提交路径的 no-op 一致。
                 }
@@ -2982,8 +3551,12 @@ impl BatchSim {
         }
         for a in &w.aliases {
             let key = alias_claim_key(a);
-            if let Some(other) = self.claims.get(&key) {
-                if *other != fid {
+            if let Some(other) = self.claims.get(&key).copied() {
+                if other != fid {
+                    if self.legacy_evidence_can_move(w, other) {
+                        self.claims.insert(key, fid);
+                        continue;
+                    }
                     bail!("别名冲突：{key} 已绑定其他事实，提交将整批失败");
                 }
                 continue;
@@ -3000,7 +3573,11 @@ impl BatchSim {
                 Some(id) => {
                     let other = self.fact_of(conn, id)?;
                     if other != fid {
-                        bail!("别名冲突：{key} 已绑定其他事实，提交将整批失败");
+                        if self.legacy_evidence_can_move(w, other) {
+                            self.claims.insert(key, fid);
+                        } else {
+                            bail!("别名冲突：{key} 已绑定其他事实，提交将整批失败");
+                        }
                     }
                     // 已绑定同一事实：与提交路径的 no-op 一致。
                 }
@@ -3010,6 +3587,16 @@ impl BatchSim {
             }
         }
         Ok(())
+    }
+
+    /// 旧事实升级后残留的来源/弱别名可由当前位置的独立弱事实接手
+    /// （与提交路径同口径；只对弱 Codex 写、其他事实已为强 Codex 时成立）。
+    fn legacy_evidence_can_move(&self, w: &EventWrite, other_fid: i64) -> bool {
+        w.app == AgentKind::Codex
+            && w.record_id.is_none()
+            && self.facts.get(&other_fid).is_some_and(|f| {
+                f.app == AgentKind::Codex && f.record_id.as_deref().is_some_and(|id| !id.is_empty())
+            })
     }
 }
 
@@ -3164,6 +3751,83 @@ fn parse_agent(raw: &str) -> Result<AgentKind> {
     AgentKind::parse(raw).map_err(|e| anyhow!("{e}"))
 }
 
+/// 写入携带的跨会话复制身份值（别名方案见 [`ALIAS_CLAUDE_COPY`]）。
+fn copy_alias_value(w: &EventWrite) -> Option<&str> {
+    w.aliases
+        .iter()
+        .find(|a| a.scheme == ALIAS_CLAUDE_COPY)
+        .map(|a| a.value.as_str())
+}
+
+/// 统计内容是否逐字段相同（**不含**会话/项目身份与观察元数据）。
+/// 跨会话副本的终值必须完全一致才允许"只补证据、不改代表"。
+fn same_usage_content(existing: &StoredEvent, w: &EventWrite) -> bool {
+    existing.app == w.app
+        && existing.ts == w.ts
+        && existing.model_raw == w.model_raw
+        && existing.tokens == w.tokens
+}
+
+/// 合并组的确定性代表（与文件发现顺序、写入顺序无关）：
+/// 1. 来源优先级高者（原生 > CCS）；
+/// 2. 事件时间更晚者（Claude 强身份的终值规则）；
+/// 3. 四桶总量更大者；
+/// 4. 会话 ID 字典序更小者（空会话排最后）——**固定展示代表**，不推断父会话；
+/// 5. 事件键、主键更小者（最后的稳定次序）。
+fn correction_keeper(events: &[StoredEvent]) -> usize {
+    events
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| keeper_order(a, b))
+        .map(|(i, _)| i)
+        .expect("合并组至少一条事实")
+}
+
+fn keeper_order(a: &StoredEvent, b: &StoredEvent) -> std::cmp::Ordering {
+    b.precedence
+        .cmp(&a.precedence)
+        .then_with(|| b.ts.cmp(&a.ts))
+        .then_with(|| b.tokens.total().cmp(&a.tokens.total()))
+        .then_with(|| session_sort_key(a).cmp(&session_sort_key(b)))
+        .then_with(|| a.event_key.cmp(&b.event_key))
+        .then_with(|| a.id.cmp(&b.id))
+}
+
+/// 会话排序键：非空会话按字典序，空会话排最后。
+fn session_sort_key(e: &StoredEvent) -> (&str, u8) {
+    match e.session_id.as_deref() {
+        Some(s) if !s.is_empty() => (s, 0),
+        _ => ("", 1),
+    }
+}
+
+/// 把重复事实并入代表：先迁移**全部**别名与来源证据，再删除重复行。
+///
+/// 迁移顺序是关键——旧会话消息别名、CCS 请求别名以及 native/legacy/CCS
+/// 三类来源关联都必须先指到代表，否则后续采集或重导会再次创建重复。
+/// 单条事实的 token 值不做任何相加/取最大值：合并的是"同一请求的多条记录"，
+/// 不是把两次用量拼成一次。
+fn merge_facts_in_tx(tx: &Transaction<'_>, keeper: i64, losers: &[i64]) -> Result<()> {
+    for loser in losers {
+        if *loser == keeper {
+            continue;
+        }
+        tx.execute(
+            "UPDATE event_aliases SET event_id = ?1 WHERE event_id = ?2",
+            params![keeper, loser],
+        )?;
+        tx.execute(
+            "UPDATE event_origins SET event_id = ?1 WHERE event_id = ?2",
+            params![keeper, loser],
+        )?;
+        let removed = tx.execute("DELETE FROM usage_events WHERE id = ?1", params![loser])?;
+        if removed != 1 {
+            bail!("合并重复事实失败：事件 {loser} 不存在或已被删除");
+        }
+    }
+    Ok(())
+}
+
 /// 合并判定：内容完全相同 → 跳过；低优先级不覆盖高优先级；更旧的观察不覆盖
 /// 较新的终值；其余按本次观察更新该事件。判定与
 /// [`HistoryDb::classify_write`] 共用同一纯函数，预览数字因此与提交结果一致。
@@ -3196,6 +3860,22 @@ fn merge_event(
             return Ok(existing.id);
         }
         WriteClass::Insert | WriteClass::Update | WriteClass::OverlapCandidate => {}
+    }
+    // 弱事实升级为强响应时，行的来源键改为当前解析表示（record 行）；
+    // 旧出数行位置仍由原 `event_origins` 保留，供该位置的当前弱事实
+    // （如新 turn 后的独立 count-only）接手。事件键只在插入时写入的
+    // 通用规则对这条升级例外不适用：不腾出旧键，同位置的独立弱事实会
+    // 因 UNIQUE 冲突无法入账。
+    if existing.app == AgentKind::Codex
+        && w.app == AgentKind::Codex
+        && existing.record_id.is_none()
+        && w.record_id.is_some()
+        && existing.event_key != w.event_key
+    {
+        tx.execute(
+            "UPDATE usage_events SET event_key = ?1 WHERE id = ?2",
+            params![w.event_key, existing.id],
+        )?;
     }
     tx.execute(
         "UPDATE usage_events SET
@@ -3259,7 +3939,7 @@ fn insert_event(tx: &Transaction<'_>, w: &EventWrite) -> Result<i64> {
             cache_read_tokens, origin_rank, observed_at_utc, observed_at_seconds,
             observed_at_nanos, parser_revision, cache_write_5m, cache_write_1h)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                 ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         params![
             w.event_key,
             w.app.as_str(),

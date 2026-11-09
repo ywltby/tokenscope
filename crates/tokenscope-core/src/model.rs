@@ -50,6 +50,29 @@ impl AgentKind {
     }
 }
 
+/// Claude 跨会话复制证据：上游原始请求标识与该行消息 UUID（2026-11-07）。
+///
+/// 同一次模型调用被复制到另一个会话时，副本会原样保留 `message.id`、
+/// `requestId`、`uuid`、事件时间、模型与四桶，只有 `sessionId` 不同。三者
+/// 齐备（且内容一致）才构成"这是同一条原始观察"的证据；单独 `message.id`
+/// 或时间/用量相同都不足以合并不同会话的事实。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeCopyEvidence {
+    pub request_id: String,
+    pub uuid: String,
+}
+
+/// Codex 强响应身份（2026-11-08）：`token_usage_record` 的原始线程与响应
+/// 标识。新格式 rollout 每次模型响应各有一个 `response_id`，`thread_id`
+/// 指明响应所属线程——legacy fork 复制的父请求保留父线程身份，子线程的
+/// 新请求归子线程，不受解析状态（复制历史遗留的 session_meta）影响。
+/// 缺线程或缺响应 ID 的旧格式记录为 `None`，走弱身份兼容路径。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexResponseIdentity {
+    pub thread_id: String,
+    pub response_id: String,
+}
+
 /// 一条用量事件，agent 无关的归一形态（M4 起为**未去重**事件，去重在全局
 /// dedupe 步骤按 agent 规则执行）。
 #[derive(Debug, Clone)]
@@ -67,9 +90,24 @@ pub struct UsageEvent {
     /// B02：该请求作用域内最近观察到的结构化工作目录（归一化）；与
     /// `project` 的区别是它保留子目录细节，用于排查与后续规则演进。
     pub event_cwd: Option<String>,
-    /// agent 原生日志标识（Claude 的 message.id；Codex 无此标识记空串），
+    /// agent 原生日志标识（Claude 的 message.id；Codex 新格式为
+    /// `token_usage_record.response_id`，旧格式无此标识记空串），
     /// 供全局去重使用。
     pub record_id: String,
+    /// 跨会话复制证据（仅 Claude）：顶层 `requestId` 与消息 `uuid` 同时可用
+    /// 时才有值。缺失、空白或类型异常一律为 `None`——旧日志照常解析，
+    /// 只是没有跨会话证据（不猜测、不合并）。
+    pub claude_copy: Option<ClaudeCopyEvidence>,
+    /// Codex 强响应身份（2026-11-08）：`token_usage_record` 携带
+    /// `thread_id + response_id` 时有值。会话归属以记录的原始线程为准
+    /// （优先于复制历史遗留的解析状态）；`record_id` 同步保存 response_id。
+    /// 旧格式（缺线程或缺响应 ID）为 `None`，保持弱身份兼容路径。
+    pub codex_response: Option<CodexResponseIdentity>,
+    /// Codex 旧事实升级映射（仅解析期）：本响应在**旧解析器表示**中的来源键
+    /// （`native|codex|路径|配对 count 行|旧内容指纹`）。旧库中被弱指纹误合并
+    /// 的事实经由该键精确命中并原行升级；键逐字节相等才建立映射，四桶与模型
+    /// 等价只在命中后校验。缓存/历史恢复路径不携带（升级只发生在重解析轮）。
+    pub codex_legacy_origin: Option<String>,
     /// H02：源文件内 0-based 行序——历史库 origin key 的组成部分，使一条
     /// 请求能被精确定位到"哪个文件的第几行"。无法得知时记 0。
     pub line: u64,
@@ -166,15 +204,81 @@ impl UsageEvent {
         format!("{h:016x}")
     }
 
+    /// 跨会话复制的**观察身份**（Claude 专用，2026-11-07）：
+    /// `(message.id, requestId, 消息 uuid, 观察内容摘要)`。
+    ///
+    /// 只用可证实的三元组做证据，不按时间/用量猜测：同一次调用的副本会原样
+    /// 保留三者，而分支后新发出的调用必然带新的 `requestId` / `uuid`。内容
+    /// 摘要把"相同标识必须对应相同观察"写进身份本身——标识相同但模型、时间
+    /// 或四桶不同的记录得到不同身份，**不会被当成同一次请求合并**。
+    ///
+    /// 返回 `(scheme, value)`；scheme 与 `claude-message` 并列保存在
+    /// `event_aliases`，不改动会话内身份。
+    pub fn copy_identity(&self) -> Option<(&'static str, String)> {
+        if self.agent != AgentKind::ClaudeCode {
+            return None;
+        }
+        let evidence = self.claude_copy.as_ref()?;
+        if self.record_id.is_empty() || evidence.request_id.is_empty() || evidence.uuid.is_empty() {
+            return None;
+        }
+        Some((
+            "claude-copy",
+            format!(
+                "{}|{}|{}|{}",
+                self.record_id,
+                evidence.request_id,
+                evidence.uuid,
+                self.observation_digest()
+            ),
+        ))
+    }
+
+    /// 观察内容摘要（FNV-1a 64，跨进程稳定）：事件时间 + 模型 + 四桶 +
+    /// 缓存写分档。**不含**会话、项目与文件位置——副本之间只有这些字段
+    /// 相同才可能被认作同一条原始观察。
+    pub fn observation_digest(&self) -> String {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut write = |bytes: &[u8]| {
+            for b in bytes {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        write(self.ts.to_string().as_bytes());
+        write(b"\x1f");
+        write(self.model.as_bytes());
+        for v in [
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_write_tokens,
+            self.cache_read_tokens,
+            self.cache_write_5m,
+            self.cache_write_1h,
+        ] {
+            write(b"\x1f");
+            write(&v.to_le_bytes());
+        }
+        write(if self.cache_write_split_known {
+            b"\x1fknown"
+        } else {
+            b"\x1funknown"
+        });
+        format!("{h:016x}")
+    }
+
     /// H02：原生请求身份——跨来源（原生日志 ↔ CCS 导入）去重所依赖的
     /// **可证实**稳定标识。返回 `(scheme, value)`。
     ///
     /// - Claude：`(session_id, message.id)` 是上游稳定标识，同一请求的流式
     ///   更新与重复来源都指向同一条；
-    /// - Codex：rollout 的 `token_count` 记录不带请求标识（无 id / 无序号），
-    ///   身份不足时返回 `None`——**不猜测身份**，该来源的请求只按库内来源键
-    ///   与既有保守重播规则处理（跨来源合并需要的是可证实身份，故不给 Codex
-    ///   任何跨来源别名）。
+    /// - Codex（2026-11-08）：新格式 `token_usage_record` 带
+    ///   `(thread_id, response_id)`，构成本线程内可证实的响应身份
+    ///   （scheme 值含应用与身份版本，命名空间由值首段承担）；旧格式
+    ///   rollout 的 `token_count` 记录不带请求标识，身份不足时返回
+    ///   `None`——**不猜测身份**，该来源的请求只按库内来源键与既有保守
+    ///   重播规则处理（跨来源合并需要的是可证实身份，故不给弱记录任何
+    ///   跨来源别名）。
     pub fn native_identity(&self) -> Option<(&'static str, String)> {
         match self.agent {
             AgentKind::ClaudeCode => {
@@ -187,7 +291,7 @@ impl UsageEvent {
                     ))
                 }
             }
-            AgentKind::Codex => None,
+            AgentKind::Codex => self.codex_response_identity(),
             // WB02：WorkBuddy 转写带 providerData.messageId（跨文件全局唯一），
             // 身份方案与 Claude 同形（sessionId|messageId）；app 字段在库层
             // 区分国内版与国际版，两应用互不合并。
@@ -207,17 +311,27 @@ impl UsageEvent {
     /// 保守重播身份：文件被归档移动、复制成副本、或先经遗留缓存迁移后重扫时，
     /// 同一条请求必须仍映射到同一事件行——**与文件路径无关**。
     ///
-    /// 规则与全局去重（`dedupe.rs` §3.2）完全一致：Codex 的 `token_count`
-    /// 没有请求标识，但 `(session_id, 原始模型, 四桶)` 相同的记录按保守规则
-    /// 视为同一次请求的重播/副本。CCS 导入对 Codex 行登记**同一个**别名
-    /// （`import::ccs::request_write`），使"先导入后采集"与"先采集后导入"
-    /// 命中同一事件、得到相同并集；这是沿用既有保守规则（同模型同用量的
-    /// 独立请求可能被合并），不是宣称可证实的强跨来源身份——缺 session_id
-    /// 的 CCS 行仍按身份不足处理（重叠候选）。
+    /// 规则与全局去重（`dedupe.rs` §3.2）完全一致：
+    /// - Codex **强响应身份**（2026-11-08）：与
+    ///   [`Self::native_identity`] 同一条 `codex-response` 别名——同一响应
+    ///   的 record/count 两种观察、跨文件副本都命中同一身份；**不带**四桶，
+    ///   不同响应即使用量相同也不会合并。
+    /// - Codex **弱记录**（缺身份的旧格式）：`token_count` 没有请求标识，
+    ///   `(session_id, 原始模型, 四桶)` 相同的记录按保守规则视为同一次请求
+    ///   的重播/副本。CCS 导入对 Codex 行登记**同一个**别名
+    ///   （`import::ccs::request_write`），使"先导入后采集"与"先采集后导入"
+    ///   命中同一事件、得到相同并集；这是沿用既有保守规则（同模型同用量的
+    ///   独立请求可能被合并），不是宣称可证实的强跨来源身份——缺 session_id
+    ///   的 CCS 行仍按身份不足处理（重叠候选）。
+    /// - 强/弱是两条不同路径：强记录绝不携带弱别名（不同强身份之间不能通过
+    ///   同一个弱别名再次合并），弱记录也不伪造成强身份。
     pub fn same_source_identity(&self) -> Option<(&'static str, String)> {
         match self.agent {
             AgentKind::ClaudeCode => self.native_identity(),
             AgentKind::Codex => {
+                if let Some(identity) = self.codex_response_identity() {
+                    return Some(identity);
+                }
                 if self.session_id.is_empty() || self.model.is_empty() {
                     return None;
                 }
@@ -237,6 +351,26 @@ impl UsageEvent {
             // WB02：与 native_identity 同方案（messageId 全局唯一，强身份）
             AgentKind::WorkBuddy | AgentKind::WorkBuddyAi => self.native_identity(),
         }
+    }
+
+    /// Codex 强响应身份（仅 Codex 且证据齐备时）：`(thread_id, response_id)`
+    /// 加应用/版本命名空间。解析期以记录的原始线程为准；缓存/历史恢复路径
+    /// 不携带解析期结构，从 `record_id` 派生（解析器只为强记录填写
+    /// record_id，弱记录恒为空串；强记录的 session_id 即原始线程）。
+    /// 缺响应 ID 或会话为空返回 `None`。
+    fn codex_response_identity(&self) -> Option<(&'static str, String)> {
+        let thread = match self.codex_response.as_ref() {
+            Some(response) => response.thread_id.as_str(),
+            // 恢复路径派生：record_id 非空 ⇒ 强响应。
+            None => self.session_id.as_str(),
+        };
+        if thread.is_empty() || self.record_id.is_empty() || self.session_id.is_empty() {
+            return None;
+        }
+        Some((
+            "codex-response",
+            format!("codex|1|{thread}|{}", self.record_id),
+        ))
     }
 }
 
@@ -357,6 +491,9 @@ mod tests {
             ts: "2026-07-17T08:00:00.000Z".parse().unwrap(),
             agent: AgentKind::ClaudeCode,
             record_id: String::new(),
+            claude_copy: None,
+            codex_response: None,
+            codex_legacy_origin: None,
             line: 0,
             source_path: String::new(),
             model: "m".into(),

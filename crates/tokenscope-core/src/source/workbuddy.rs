@@ -392,6 +392,9 @@ fn ingest_line(
             .and_then(ProjectRootTracker::cwd)
             .map(str::to_string),
         record_id: message_id.to_string(),
+        claude_copy: None,
+        codex_legacy_origin: None,
+        codex_response: None,
         line: line_no,
         source_path: source_path.to_string(),
         input_tokens: input,

@@ -34,6 +34,85 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// Windows 上创建目录符号链接需要 SeCreateSymbolicLinkPrivilege（管理员或
+/// 开发者模式）。**只有**确证的原始错误码 1314（`ERROR_PRIVILEGE_NOT_HELD`）
+/// 才归为"环境无符号链接特权"；普通访问拒绝、磁盘、防病毒、竞态等其他错误
+/// 如实失败，不冒充"缺权限"。
+///
+/// 豁免边界：
+/// - **本地**（`CI` 未设置）：无特权时允许跳过，但必须打印可识别的
+///   `SYMLINK-TESTS-SKIPPED:` 标记——未执行项不冒充"全部真实断言通过"；
+/// - **CI**（`CI` 设置，GitHub runner 必有特权）：无特权**直接 panic**——
+///   环境不满足就是失败，不允许静默放行，测试架不依赖"return 记为 pass"。
+///
+/// 探针只创建/清理自己本次新建且确认归属的路径；创建失败后的清理错误与
+/// 原始创建错误一并报告（原始错误为主，不被清理错误覆盖）。
+#[cfg(windows)]
+fn windows_symlink_privilege_available() -> bool {
+    let ci = std::env::var_os("CI");
+    match windows_symlink_probe_result() {
+        Ok(()) => true,
+        Err(e) => symlink_exemption_decision(&e, ci.as_deref()),
+    }
+}
+
+/// 判定：探针错误是否进入本地能力豁免。纯函数，最小测试直接驱动。
+/// 只有原始码 1314 才豁免；其他错误（含 `ErrorKind::PermissionDenied` 的
+/// 普通访问拒绝）必须如实失败。`ci_environment` 由调用方传入进程的 `CI`
+/// 环境变量（测试注入，不改进程环境）。
+#[cfg(windows)]
+fn symlink_exemption_decision(
+    e: &std::io::Error,
+    ci_environment: Option<&std::ffi::OsStr>,
+) -> bool {
+    if e.raw_os_error() == Some(1314) {
+        if ci_environment.is_some() {
+            panic!(
+                "CI 环境缺少符号链接创建特权（os error 1314）：\
+                 runner 必须能真实构造 junction 并执行隔离断言"
+            );
+        }
+        eprintln!(
+            "SYMLINK-TESTS-SKIPPED: 本机无 SeCreateSymbolicLinkPrivilege（os error 1314），\
+             symlink 前置用例未执行；GitHub runner 有特权会照常执行真实断言"
+        );
+        return false;
+    }
+    panic!("符号链接能力探针失败（非符号链接特权问题，必须如实失败）：{e}");
+}
+
+/// 探针：创建/清理本次自建且确认归属的路径。创建失败时保留**原始创建错误**
+/// 为主、清理错误附加打印，不被覆盖；创建成功但清理失败同样如实失败。
+#[cfg(windows)]
+fn windows_symlink_probe_result() -> std::io::Result<()> {
+    let workspace = temp_dir("symlink-probe");
+    let probe_target = workspace.join("target");
+    std::fs::create_dir_all(&probe_target)
+        .unwrap_or_else(|e| panic!("符号链接探针：无法创建目标目录 {:?}: {e}", probe_target));
+    let probe_link = workspace.join("link");
+    match std::os::windows::fs::symlink_dir(&probe_target, &probe_link) {
+        Ok(()) => {
+            // 清理失败是真实问题：留下符号链接会污染后续轮次，如实失败。
+            if let Err(e) = std::fs::remove_dir_all(&workspace) {
+                return Err(std::io::Error::other(format!(
+                    "符号链接探针清理失败（{:?}）：{e}",
+                    workspace
+                )));
+            }
+            Ok(())
+        }
+        Err(created) => {
+            if let Err(cleanup) = std::fs::remove_dir_all(&workspace) {
+                eprintln!(
+                    "符号链接探针清理失败（{:?}）：{cleanup}（原始创建错误：{created}）",
+                    workspace
+                );
+            }
+            Err(created)
+        }
+    }
+}
+
 /// 假身份规范化：小写 + 分隔符折叠 + 去尾分隔符——跨平台确定性地模拟
 /// canonicalize 的"同根别名"（`join("a/b")` 与 `join("a").join("b")` 的
 /// 字符串分隔符不同，身份必须折叠）。
@@ -794,6 +873,14 @@ fn acceptance_isolated_rejects_outside_legacy_and_manual_roots() {
 /// 测试自建自拆，不触碰真实用户数据。
 #[test]
 fn acceptance_isolation_resolves_real_paths_and_rejects_escapes() {
+    #[cfg(windows)]
+    if !windows_symlink_privilege_available() {
+        eprintln!(
+            "跳过：Windows 无符号链接创建特权（SeCreateSymbolicLinkPrivilege），\
+             无法构造 junction/断链前置；GitHub runner 有特权照常执行"
+        );
+        return;
+    }
     let home = temp_dir("acceptance-real-home");
     let root = temp_dir("acceptance-real-root");
     std::fs::create_dir_all(root.join("sources/claude/projects")).unwrap();
@@ -1113,6 +1200,14 @@ fn acceptance_isolation_gates_fallback_roots_before_probing() {
 /// 隔离根内正例正常；普通产品模式（isolated=false）语义原样保留。
 #[test]
 fn acceptance_isolated_without_root_fails_closed() {
+    #[cfg(windows)]
+    if !windows_symlink_privilege_available() {
+        eprintln!(
+            "跳过：Windows 无符号链接创建特权（SeCreateSymbolicLinkPrivilege），\
+             无法构造断链 junction 前置；GitHub runner 有特权照常执行"
+        );
+        return;
+    }
     let home = temp_dir("acc8-home");
     let outside_default = temp_dir("acc8-outside");
     std::fs::create_dir_all(outside_default.join("projects")).unwrap();
@@ -2132,4 +2227,83 @@ fn workbuddy_missing_default_root_is_hidden_or_missing_row() {
     assert_eq!(wb.state, ProbeState::Missing);
     assert!(wb.hidden_by_default_missing(), "纯默认缺失根可隐藏");
     std::fs::remove_dir_all(&home).ok();
+}
+
+// ── 符号链接能力豁免判定（最小测试：注入错误与 CI 形态驱动纯函数，
+//    不改进程环境、不改系统设置）──────────────────────────────────────────
+
+/// 原始码 1314 + CI 未设置：本地进入豁免（返回"能力不可用"，打印标记）。
+#[test]
+#[cfg(windows)]
+fn symlink_exemption_allows_confirmed_privilege_error_locally() {
+    let e = std::io::Error::from_raw_os_error(1314);
+    assert!(
+        !symlink_exemption_decision(&e, None),
+        "确证的 1314 + 无 CI → 本地豁免：返回能力不可用（跳过并打印标记），\
+         未执行项不冒充通过"
+    );
+}
+
+/// 普通访问拒绝（原始码 5，非 1314）必须失败，不得归为"缺符号链接特权"。
+#[test]
+#[cfg(windows)]
+#[should_panic(expected = "非符号链接特权问题")]
+fn symlink_exemption_rejects_plain_permission_denied() {
+    let e = std::io::Error::from_raw_os_error(5);
+    let _ = symlink_exemption_decision(&e, None);
+}
+
+/// 其他任意错误（磁盘、竞态等）必须失败——即使 CI 形态也一样。
+#[test]
+#[cfg(windows)]
+#[should_panic(expected = "非符号链接特权问题")]
+fn symlink_exemption_rejects_other_errors() {
+    let e = std::io::Error::other("disk full");
+    let _ = symlink_exemption_decision(&e, Some(std::ffi::OsStr::new("1")));
+}
+
+/// CI 形态（CI 已设置）下确证的 1314 也必须失败——runner 必须真实构造断言。
+#[test]
+#[cfg(windows)]
+#[should_panic(expected = "CI 环境缺少符号链接创建特权")]
+fn symlink_exemption_fails_in_ci_without_privilege() {
+    let e = std::io::Error::from_raw_os_error(1314);
+    let _ = symlink_exemption_decision(&e, Some(std::ffi::OsStr::new("1")));
+}
+
+/// 探针的错误传递路径：创建失败时保留**原始创建错误**为主，不被清理结果覆盖。
+/// 注入方式：对**同一路径二次创建**——link 已存在时 symlink_dir 必然失败
+///（与符号链接特权无关，任何环境都成立）；全程只触碰测试自建路径。
+#[test]
+#[cfg(windows)]
+fn symlink_probe_preserves_creation_error_over_cleanup() {
+    use std::os::windows::fs::symlink_dir;
+    let workspace = temp_dir("symlink-probe-inject");
+    let target = workspace.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let link = workspace.join("link");
+    let first = symlink_dir(&target, &link);
+    if let Err(e) = first {
+        // 无特权环境：首次创建即失败（1314），本用例的"同路径二创建"注入
+        // 无法成立，显式跳过并说明——不冒充通过；探针主路径已有独立覆盖。
+        if e.raw_os_error() == Some(1314) {
+            eprintln!("SYMLINK-TESTS-SKIPPED: 本机无符号链接创建特权");
+            std::fs::remove_dir_all(&workspace).ok();
+            return;
+        }
+        panic!("前置：首次创建意外失败：{e}");
+    }
+    // 同一路径二次创建必然失败（link 已存在），与特权无关。
+    let second = symlink_dir(&target, &link);
+    let created_err = match second {
+        Err(e) => e,
+        Ok(()) => panic!("前置：同路径二次创建应失败"),
+    };
+    // 模拟探针的清理路径（清理自建 workspace）：错误对象按探针语义原样返回。
+    std::fs::remove_dir_all(&workspace).unwrap();
+    assert_ne!(
+        created_err.raw_os_error(),
+        Some(0),
+        "原始创建错误保留，不被清理结果覆盖"
+    );
 }

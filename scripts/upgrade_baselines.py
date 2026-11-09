@@ -283,12 +283,17 @@ def selection_payload(registry, current_version):
 def with_network_retry(action, sleep=time.sleep):
     """执行一次网络读取；只对传输层瞬断有限重试，用尽后原样抛出最后一个错误。
 
-    HTTP 状态错误（404、403 限流等）是服务端的明确答复，立即抛出不重试。
+    HTTP 状态错误（404、403 限流等）是服务端的明确答复，立即抛出不重试；
+    例外：502/503/504 网关瞬断（代理/CDN 抖动，与 TLS EOF 同类）按传输层
+    瞬断处理重试。用尽后按 HTTP 状态错误语义抛出。
     """
     for attempt in range(1, NETWORK_ATTEMPTS + 1):
         try:
             return action()
-        except HTTPError:
+        except HTTPError as exc:
+            if exc.code in (502, 503, 504) and attempt < NETWORK_ATTEMPTS:
+                sleep(attempt)
+                continue
             raise
         except OSError:
             if attempt == NETWORK_ATTEMPTS:
