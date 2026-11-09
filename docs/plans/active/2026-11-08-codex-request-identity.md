@@ -259,3 +259,23 @@
 - **文档更正**：撤回 `stats-semantics` §3.2"该已分界场景只能等上游增加
   response_id"的结论；保留真正缺证据（无新 turn 边界）的限制说明。历史
   汇报不改写，本节为追加更正。
+
+### 8. 合并与发布核验（2026-11-09）
+
+- PR #57 已用 merge commit 合并到 main：`39f4478aed0fb4db470e1cae97dcb73298113df0`
+  （PR HEAD `6c16ef7` 与合并前检查绑定）。
+- 发布版本 **0.7.2**（预发布），标签 `v0.7.2` 实际解引用到
+  `39f4478aed0fb4db470e1cae97dcb73298113df0`；`build-metadata.json` 记录
+  version 0.7.2、commit 同上。
+- Release 工作流全绿：`gate`、`plan-upgrades`、`build`、`install-test`、
+  12 个单跳升级矩阵（0.1.0/0.4.0/0.5.9/0.5.13/0.6.0/0.7.1 的
+  present/deleted）、`upgrade-chain (present)`、`upgrade-chain (deleted)`、
+  `publish`。PR 侧 `upgrade-chain` 跳过不代替本结果。
+- 资产核验：`TokenScope_v0.7.2_windows-x64-setup.exe` 的
+  SHA256 `24ae936fa2528d70388ee1abe2906247f1dc79177fd935fd32a1b111da85deca`
+  与 `SHA256SUMS.txt` 一致；`build-metadata.json`、`provenance.sigstore.json`、
+  `SHA256SUMS.txt`、安装包四项齐全，API digest 与下载文件逐项一致。
+- 已把 `v0.7.2` 登记进 `scripts/fixtures/upgrade_baselines.json`（下一批
+  升级矩阵起点）；登记提交不改变产品版本，不触发重复发布。
+- `/btw` 继续暂缓；无新 turn 且缺身份的歧义仍保留；无可靠来源证据的旧
+  事实仍不猜删、不伪称恢复。
