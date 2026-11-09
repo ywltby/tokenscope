@@ -876,10 +876,14 @@ SQLite backup API 取得一致副本；产品真实查询与独立核算（不�
 本节规则重算）逐项互证相等——无明细桶 61（24,100 请求 / 4,337,748,027 token）
 全部计入统计；三个 2026-10-05 重叠桶全部 A 类（含"明细 72 ≥ 汇总 69、四桶相等"
 的旧误报桶，现在按明细统计、无伪冲突、无 legacy_boundary 提示）；冻结 CCS 副本
-连续导入两次，第二次 preview/commit 全零（净 token 0、generation 与事件数不变）；
-6 条新汇总按桶选择去重后净计入 243 请求，不直接相加；65 条已导入日汇总与来源
-请求数/四桶 0 差异（`input_semantics` 27 行不同是导入侧归一化为 fresh(2) 的
-预期）。证据：`qa-artifacts/ccs-history-delivery/20261110T004210Z/`（gitignored），
+连续导入两次，第二次零增量（`requests_inserted=0`、`rollups_snapshotted=0`、
+净 token 0、generation 与事件数不变；请求级 `requests_unchanged=71` /
+`requests_conflicted=2,194` 是导入分类保留现存值，与桶级 C 类冲突是两个口径）；
+总请求数 26,924 → 26,995（净增 71）、token 净增 19,345,530；6 条新汇总涉及的
+5 个桶最终计入 249 请求（77+13+66+11+82，按桶选择去重，不直接相加——这是计入
+规模，不是净增量）；65 条已导入日汇总与来源请求数/四桶 0 差异
+（`input_semantics` 27 行不同是导入侧归一化为 fresh(2) 的预期）。证据：
+`qa-artifacts/ccs-history-delivery/20261110T004210Z/`（gitignored），
 探针 `tests/ccs_history_delivery_reconciliation.rs`（`#[ignore]` + 环境变量门控，
 本机本地）。
 
