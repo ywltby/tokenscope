@@ -2272,7 +2272,8 @@ fn symlink_exemption_fails_in_ci_without_privilege() {
 }
 
 /// 探针的错误传递路径：创建失败时保留**原始创建错误**为主，不被清理结果覆盖。
-/// 注入方式：目标目录不存在 → symlink_dir 必然失败，全程只触碰测试自建路径。
+/// 注入方式：对**同一路径二次创建**——link 已存在时 symlink_dir 必然失败
+///（与符号链接特权无关，任何环境都成立）；全程只触碰测试自建路径。
 #[test]
 #[cfg(windows)]
 fn symlink_probe_preserves_creation_error_over_cleanup() {
@@ -2281,14 +2282,27 @@ fn symlink_probe_preserves_creation_error_over_cleanup() {
     let target = workspace.join("target");
     std::fs::create_dir_all(&target).unwrap();
     let link = workspace.join("link");
-    std::fs::remove_dir(&target).unwrap();
-    let created = symlink_dir(&target, &link);
-    assert!(created.is_err(), "前置：目标不存在 → 创建失败");
+    let first = symlink_dir(&target, &link);
+    if let Err(e) = first {
+        // 无特权环境：首次创建即失败（1314），本用例的"同路径二创建"注入
+        // 无法成立，显式跳过并说明——不冒充通过；探针主路径已有独立覆盖。
+        if e.raw_os_error() == Some(1314) {
+            eprintln!("SYMLINK-TESTS-SKIPPED: 本机无符号链接创建特权");
+            std::fs::remove_dir_all(&workspace).ok();
+            return;
+        }
+        panic!("前置：首次创建意外失败：{e}");
+    }
+    // 同一路径二次创建必然失败（link 已存在），与特权无关。
+    let second = symlink_dir(&target, &link);
+    let created_err = match second {
+        Err(e) => e,
+        Ok(()) => panic!("前置：同路径二次创建应失败"),
+    };
     // 模拟探针的清理路径（清理自建 workspace）：错误对象按探针语义原样返回。
     std::fs::remove_dir_all(&workspace).unwrap();
-    let preserved = created.unwrap_err();
     assert_ne!(
-        preserved.raw_os_error(),
+        created_err.raw_os_error(),
         Some(0),
         "原始创建错误保留，不被清理结果覆盖"
     );
