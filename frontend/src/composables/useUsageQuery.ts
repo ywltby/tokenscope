@@ -49,6 +49,7 @@ import { useTimezone } from "./timezone";
 import { collectIntervalText, useCollectInterval } from "./collectInterval";
 import { todayInTz, tzDate } from "../lib/dates";
 import { t } from "../lib/translate";
+import { DATA_CHANGED_EVENT } from "../lib/dataEvents";
 
 export type { RollupsMode };
 
@@ -1242,6 +1243,21 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     if (wasVisible && visible.value && documentVisible) checkTimeWindow();
   }
 
+  /// 设置页写入完成（价格同步/来源保存/重扫/导入）的文档级通知。
+  /// 汇总页隐藏时 `refreshKey` prop 可能尚未更新，这里直接记录"下一批先采集"；
+  /// 可见时等价一次程序刷新，立即读取新上下文。
+  function onDataChangedEvent(): void {
+    collectRequestSeq += 1;
+    if (!visible.value) {
+      pendingRefresh.value = true;
+      pendingManual = true;
+      pendingFilter = false;
+      return;
+    }
+    void loadSources();
+    startRefreshBatch("manual");
+  }
+
   /// 历史库变化通知（U06）：非 Tauri 环境（测试 / 浏览器预览）没有事件系统，
   /// 必须静默降级——不得抛出、不得留下未处理 rejection。
   function attachUsageListener(): void {
@@ -1329,6 +1345,8 @@ export function useUsageQuery(opts: UsageQueryOptions) {
 
   // U06：时钟检查（60 秒）与休眠恢复（focus / visibilitychange）——
   // 只在这两处注册，卸载时一并拆除。
+  if (typeof window !== "undefined")
+    window.addEventListener(DATA_CHANGED_EVENT, onDataChangedEvent);
   if (typeof window !== "undefined") window.addEventListener("focus", onWindowResume);
   if (typeof document !== "undefined") {
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -1337,6 +1355,8 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   onUnmounted(() => {
     disposed = true;
     stopClockTimer();
+    if (typeof window !== "undefined")
+      window.removeEventListener(DATA_CHANGED_EVENT, onDataChangedEvent);
     if (typeof window !== "undefined") window.removeEventListener("focus", onWindowResume);
     if (typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", onVisibilityChange);

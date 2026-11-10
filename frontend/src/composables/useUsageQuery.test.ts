@@ -326,6 +326,29 @@ describe("useUsageQuery 单一查询身份（U04）", () => {
     w.unmount();
   });
 
+  it("hidden_data_changed_event_forces_collect_even_before_prop_update", async () => {
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    api.setVisible(false);
+    window.dispatchEvent(new Event("tokenscope-data-changed"));
+    await nextTick();
+    await flushPromises();
+    api.setVisible(true);
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin(), "隐藏期间的价格/来源写入必须在激活时先采集").toMatchObject({
+      collect: true,
+      trigger: "manual",
+    });
+
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin()).toMatchObject({ collect: false, trigger: "filter" });
+    w.unmount();
+  });
+
   it("program_refresh_forces_next_collection_even_when_it_is_a_filter_batch", async () => {
     okMock();
     const w = mountHost();
