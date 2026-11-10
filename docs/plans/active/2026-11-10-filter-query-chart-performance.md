@@ -1,7 +1,7 @@
 # 筛选等待、图表动画与重复纠错备份修复计划
 
 > 执行模型：使用 `executing-plans`、`systematic-debugging`、`test-driven-development` 和 `verification-before-completion`，逐项先红后绿。
-> 状态：**已实施（0.7.5），PR 检查待执行**。F01/F02/F03 的回归、真实浏览器中间帧与同规模基准已完成；未自动合并、未发布、未在本机安装。
+> 状态：**已实施（0.7.5），PR #61 检查全绿、停在可审查状态**。F01/F02/F03 的回归、真实浏览器中间帧与同规模基准已完成；未自动合并、未发布、未在本机安装。
 
 **Goal:** 消除无必要的整库纠错备份与图表动画截断，减少时间/应用/分组切换的查询等待，同时保持现有统计、计价与冻结分页语义。
 
@@ -140,13 +140,13 @@ pnpm --dir frontend test:e2e
 | F01 纠错备份触发 | **已实施**：普通强重放/追加无备份；弱升强、合并、镜像/来源/别名转移仍先备份，同批最多一份 |
 | F02 图表更新时序 | **已实施**：布局与数据同批更新；真实 ECharts 中间帧契约覆盖 20→4、模型→按日、7→14、空→有值、连续切换与容器 resize |
 | F03 筛选查询性能 | **已实施**：筛选走 `collect:false`，行索引按时间窗口收窄，覆盖桶按应用/模型收窄，汇总窄投影，明细首页只读当前页 |
-| F04/F05 集成与交付 | 定向回归与同规模基准完成；完整门禁、PR 检查与交付待执行 |
+| F04/F05 集成与交付 | 定向回归、同规模基准与完整门禁完成；PR #61 最新 HEAD 全部必需检查成功、`CLEAN`，未自动合并/发布/本机安装 |
 
 ## 9. 执行记录（2026-11-10）
 
 - **F01（`fix(历史)`）**：预判改为按写入索引记录真实纠错意图，事务内只对获准写入开放纠错通道；批内强升级会影响后续弱 count-only 的归属，按升级后的强事实保守判定。新增 `correction_backup_policy` 5 项：普通重放/追加 0 备份、弱升强 1 份、同批双升级 1 份、弱 count-only 接管 1 份、备份失败旧事实/别名/来源/generation 全不变。旧实现重放 4 次生成 4 份备份，现已为 0。
 - **F02（`fix(图表)`）**：一次布局后更新，先应用高度并量测，确实变尺寸时先 resize，再与数据/维度/轴标签一起下发；相同尺寸的 ResizeObserver 回调不再 resize/setOption。新增浏览器契约用真实 ECharts 采样 SVG 柱形几何，要求至少两个中间帧、首变帧不是终态。旧组件在模型 20→4、模型→按日、空→有值三个场景失败；新组件 15 条断言全通过。同高度/zoom/主题/空数据/reduced-motion 语义不变。
-- **F03（`perf(查询)`）**：筛选变化以 `filter` 批次 `collect:false` 读取已提交历史，启动/显式刷新/程序刷新仍采集；最近采集键不命中时后端退回采集。快速连点仍建新 query_id，旧响应由 epoch/seq 守卫丢弃，汇总与明细只在同一会话齐备后发布。后端：冻结时间范围先做 SQL 秒级窗口，覆盖桶只为已有日汇总的应用/等价模型读窄投影（无汇总/仅明细/时刻范围直接跳过），汇总复用存储等价模型键与窄事件，无下钻明细首页 total 取快照行数、只读当前页。
+- **F03（`perf(查询)`）**：筛选变化以 `filter` 批次 `collect:false` 读取已提交历史，启动/显式刷新/程序刷新仍采集；最近采集键不命中时后端退回采集。快速连点仍建新 query_id，旧响应由 epoch/seq 守卫丢弃，汇总与明细只在同一会话齐备后发布。后端：冻结时间范围先做 SQL 秒级窗口，覆盖桶只为已有日汇总的应用/等价模型读窄投影（无汇总/仅明细/时刻范围直接跳过），汇总复用存储等价模型键与窄事件，无下钻明细首页 total 取快照行数、只读当前页。**价格/来源变化**：采集键纳入三份价格输入实际路径的长度与 mtime（含 GUI 未显式注入时的默认路径），价格同步后旧快照立即失效；MainApp 同时广播文档级 `data-changed`，隐藏中的汇总页也记下“下一批先采集”，不依赖 KeepAlive 停用期间是否收到 prop 更新。
 - **同规模基准（release，50k 请求 / 四应用 / 9,000 价格条目 / 30 天 CCS 汇总，暖态 5 轮 p50）**：
 
   | 场景 | 改前（建快照+汇总+明细） | 改后 | 降幅 |
@@ -161,5 +161,6 @@ pnpm --dir frontend test:e2e
 
   启动采集（空合成来源）约 127–197 ms，与筛选路径分开报告；24h/单应用首次范围也因 SQL 窗口和窄投影下降。明细首页从 209–224 ms 降到约 2 ms。前端筛选选择后同 tick 进入「刷新中…」，保留旧的一致批次直到新批次齐备。
 - **定向回归**：`correction_backup_policy`、`codex_request_identity_migration`、`claude_cross_session_migration`、`filter_query_performance`、`ccs_rollup_coverage`、`ccs_rollup_source_selection`、`query_snapshot_contract`、`query_time_range`、`query_memory_budget`、`history_queries`、`history_storage` 全绿；前端 `useUsageQuery`、`Dashboard`、`TrendChart` 与浏览器图表契约通过。
-- **版本**：`bump_version.py --bump patch` 分配 **0.7.5**；上一版 **v0.7.4** 需在 PR 前登记为升级基线。
+- **版本**：`bump_version.py --bump patch` 分配 **0.7.5**；上一版 **v0.7.4** 已在 PR 前登记为升级基线（30 个版本全量 check、44 项单测通过）。
+- **PR #61**：F01–F03 代码 HEAD `2f9d061` 的 `gate`、`rust`、`rust-acceptance`、`contracts`、`frontend`、`native-ui`、`install-test`、`plan-upgrades` 与 12 组升级矩阵全部成功；PR 侧 `upgrade-chain` 按设计 skipped。此后仅本计划文档更新，仍停在可审查 PR。
 - **未自动合并、未发布、未在本机安装**；最终交付停在可审查 PR。
