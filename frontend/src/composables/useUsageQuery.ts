@@ -676,6 +676,10 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   /// U06：手动刷新始终重新采集（`collect: true`），不受翻页保护限制。
   function manualRefresh(): void {
     void loadSources();
+    // 一条在途：待执行**来源**可被后到的筛选覆盖（最终用最新筛选），但
+    // 手动要求的采集意图独立记账（`collectRequestSeq`），不被覆盖吞掉——
+    // 意图随批次的 `query_begin` 成功才消费，失败保留给重试。
+    if (batchInFlight > 0) collectRequestSeq += 1;
     startRefreshBatch("manual");
   }
 
@@ -1366,13 +1370,16 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   watch(tz, () => scheduleBatchRefresh("filter"));
   /// refreshKey 是程序触发（价格同步、设置保存成功等）：新批次但不算用户操作。
   /// 同一次写入已由文档事件调度过（token 相同）时，这里只是迟到回声——
-  /// 只同步基线，不再重复排批。
+  /// **同步 lastRefreshKey 基线**（事件分支未更新它），不再增加采集意图或
+  /// 排批；不同步会让下一次普通 begin 把同一次变更再当成未处理程序刷新，
+  /// 多加一次采集意图（collect:true 泄漏到普通筛选）。
   watch(
     () => opts.refreshKey(),
     () => {
       const key = opts.refreshKey();
       if (key === lastHandledChangeToken) {
         lastHandledChangeToken = null;
+        lastRefreshKey = key;
         return;
       }
       lastHandledChangeToken = key;

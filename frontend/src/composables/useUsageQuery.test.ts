@@ -351,6 +351,161 @@ describe("useUsageQuery 单一查询身份（U04）", () => {
     w.unmount();
   });
 
+  it("queued_manual_intent_survives_later_filter_and_collects_latest_selection", async () => {
+    // 反例（PR #61 独立复核）：collect:false 的筛选批在途 → 手动刷新 → 再切
+    // 筛选。待执行**来源**被后到的筛选覆盖是正确的（最终用最新筛选），但
+    // 手动要求的采集不得丢失：结算后的待执行批必须 collect:true。
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    expect(lastBegin()).toMatchObject({ collect: true, trigger: "startup" });
+
+    // 从筛选批起挂起，制造"筛选批在途"。
+    let releaseSummary!: (v: SummaryReport) => void;
+    let releaseEvents!: (v: EventList) => void;
+    let gateFirstRound = true;
+    okMock({
+      query_summary: () =>
+        gateFirstRound
+          ? new Promise<SummaryReport>((r) => (releaseSummary = r))
+          : Promise.resolve({ ...reportA, query_id: handle.queryId }),
+      query_events: () =>
+        gateFirstRound
+          ? new Promise<EventList>((r) => (releaseEvents = r))
+          : Promise.resolve({ ...emptyList, query_id: handle.queryId }),
+    });
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    const before = beginCalls();
+    expect(lastBegin(), "筛选批在途（collect:false）").toMatchObject({
+      collect: false,
+      trigger: "filter",
+    });
+
+    // 手动刷新进入待执行；随后的筛选覆盖待执行来源。
+    api.manualRefresh();
+    api.by.value = "agent";
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "在途期间不新增批次").toBe(before);
+
+    // 在途批结算 → 待执行批：最新筛选 + 未被吞掉的手动采集意图。
+    gateFirstRound = false;
+    releaseSummary({ ...reportA, query_id: handle.queryId });
+    releaseEvents({ ...emptyList, query_id: handle.queryId });
+    await flushPromises();
+    expect(beginCalls(), "结算后只执行一批（最新筛选）").toBe(before + 1);
+    expect(lastBegin(), "手动采集意图不被筛选覆盖").toMatchObject({
+      by: "agent",
+      collect: true,
+    });
+    w.unmount();
+  });
+
+  it("consumed_manual_intent_does_not_recollect_on_plain_filter", async () => {
+    // 手动采集意图随成功消费后，普通筛选回到 collect:false——意图恰好
+    // 消费一次，不向后续批次泄漏。
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    let releaseSummary!: (v: SummaryReport) => void;
+    let releaseEvents!: (v: EventList) => void;
+    let gateFirstRound = true;
+    okMock({
+      query_summary: () =>
+        gateFirstRound
+          ? new Promise<SummaryReport>((r) => (releaseSummary = r))
+          : Promise.resolve({ ...reportA, query_id: handle.queryId }),
+      query_events: () =>
+        gateFirstRound
+          ? new Promise<EventList>((r) => (releaseEvents = r))
+          : Promise.resolve({ ...emptyList, query_id: handle.queryId }),
+    });
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    api.manualRefresh();
+    api.by.value = "agent";
+    await nextTick();
+    gateFirstRound = false;
+    releaseSummary({ ...reportA, query_id: handle.queryId });
+    releaseEvents({ ...emptyList, query_id: handle.queryId });
+    await flushPromises();
+    expect(lastBegin(), "待执行批用最新筛选并采集").toMatchObject({
+      by: "agent",
+      collect: true,
+    });
+
+    api.by.value = "model";
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin(), "意图只消费一次").toMatchObject({
+      by: "model",
+      collect: false,
+      trigger: "filter",
+    });
+    w.unmount();
+  });
+
+  it("failed_pending_collection_keeps_intent_for_retry", async () => {
+    // 待执行批携带手动采集意图但 begin 失败：意图不被错误标为已消费，
+    // 后续筛选批仍先采集（失败保留给重试）。
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    let beginFails = false;
+    let gateFirstRound = true;
+    let releaseSummary!: (v: SummaryReport) => void;
+    let releaseEvents!: (v: EventList) => void;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") {
+        if (beginFails) return Promise.reject(new Error("begin boom"));
+        return Promise.resolve(handle);
+      }
+      if (cmd === "query_summary") {
+        return gateFirstRound
+          ? new Promise<SummaryReport>((r) => (releaseSummary = r))
+          : Promise.resolve({ ...reportA, query_id: handle.queryId });
+      }
+      if (cmd === "query_events") {
+        return gateFirstRound
+          ? new Promise<EventList>((r) => (releaseEvents = r))
+          : Promise.resolve({ ...emptyList, query_id: handle.queryId });
+      }
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    api.manualRefresh();
+    api.by.value = "agent";
+    await nextTick();
+
+    // 在途批结算 → 待执行批（采集意图在身）但 begin 失败。
+    beginFails = true;
+    gateFirstRound = false;
+    releaseSummary({ ...reportA, query_id: handle.queryId });
+    releaseEvents({ ...emptyList, query_id: handle.queryId });
+    await flushPromises();
+    expect(beginCalls(), "待执行批已尝试（startup+筛选+待执行 = 3 次 begin）").toBe(3);
+    expect(api.summaryError.value).toBe("begin boom");
+
+    // 失败未消费意图：下一次筛选批仍先采集。
+    beginFails = false;
+    api.by.value = "model";
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin(), "失败后意图保留给重试").toMatchObject({
+      by: "model",
+      collect: true,
+      trigger: "filter",
+    });
+    w.unmount();
+  });
+
   it("hidden_filter_change_reactivates_as_filter_batch_not_collect", async () => {
     okMock();
     const w = mountHost();
@@ -432,6 +587,48 @@ describe("useUsageQuery 单一查询身份（U04）", () => {
     await nextTick();
     await flushPromises();
     expect(beginCalls(), "同 token 的迟到 prop 回声不再排批").toBe(eventOnly + 1);
+
+    // 反例（PR #61 独立复核）：同 token 回声若不同步 lastRefreshKey，下一次
+    // 普通 begin 会把同一次变更再当成未处理程序刷新，多加一次采集意图——
+    // 普通筛选必须回到 collect:false。
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin(), "回声同步基线后普通筛选不重采集").toMatchObject({
+      by: "project",
+      collect: false,
+      trigger: "filter",
+    });
+    w.unmount();
+  });
+
+  it("prop_first_then_same_token_event_is_still_one_change", async () => {
+    // prop 先到（无事件）：正常调度；携带相同 token 的事件后到视为回声，
+    // 同一次变更仍只处理一次。
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    const before = beginCalls();
+    await w.setProps({ refreshKey: 1 });
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "prop 先到正常调度").toBe(before + 1);
+    expect(lastBegin()).toMatchObject({ collect: true, trigger: "manual" });
+
+    window.dispatchEvent(new CustomEvent("tokenscope-data-changed", { detail: 1 }));
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "同 token 事件回声不重复排批").toBe(before + 1);
+
+    // 同 token 回声同步基线后，普通筛选回到 collect:false。
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin(), "回声同步基线后普通筛选不重采集").toMatchObject({
+      by: "project",
+      collect: false,
+      trigger: "filter",
+    });
     w.unmount();
   });
 
