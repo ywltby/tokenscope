@@ -11,10 +11,12 @@
 // - 每个契约记录断言列表、输入 fixture、提交 hash、浏览器版本与截图路径；
 // - 未处理拒绝、未知 IPC command、外联请求都算硬失败。
 import { join } from "node:path";
+import { writeFileSync } from "node:fs";
 import { uiRefreshLifecycle, uiRefreshClock } from "./ui-refresh-contract.mjs";
 import { uiDateKeyboardMatrix } from "./ui-date-keyboard-contract.mjs";
 import { uiControlMaterial } from "./ui-control-material-contract.mjs";
 import { bootStallRecovery } from "./ui-boot-stall-contract.mjs";
+import { uiChartTransition } from "./ui-chart-transition-contract.mjs";
 
 import { PRIVACY_PROTECTED_COMMANDS } from "../fixtures/ui-contracts.mjs";
 import { captureContractFailure, trackSession } from "../lib/contract-failure.mjs";
@@ -36,6 +38,8 @@ export const REQUIRED_CONTRACTS = [
   "date_outer_surface_matches_contract",
   "reduced_motion_preserves_controls_and_layout",
   "chart_scroll_and_zoom_survive_supported_updates",
+  // F02：布局/数据同批更新后，真实 ECharts 柱形必须保留中间帧（不是首帧终态）。
+  "ui_chart_transition_preserves_animation",
   "real_app_scroll_keeps_navigation_visible",
   "prepaint_theme_has_correct_canvas",
   // AP08 扩充失败反例（写出失败的写、晚到的失败读、来源检测失败、定价 DTO 分态）
@@ -275,6 +279,7 @@ const IMPL = {
   ui_refresh_lifecycle: uiRefreshLifecycle,
   ui_refresh_clock: uiRefreshClock,
   boot_stall_recovery: bootStallRecovery,
+  ui_chart_transition_preserves_animation: uiChartTransition,
   async large_pricing_does_not_block_settings_navigation(ctx) {
     const name = "large_pricing_does_not_block_settings_navigation";
     const session = await ctx.open({ fixture: "large-pricing", viewport: VIEWPORTS.desktop });
@@ -2607,6 +2612,9 @@ export async function runContracts({ open, output, meta, only = REQUIRED_CONTRAC
       } catch (error) {
         ctx.record(contract, `截图保存 ${file}`, false, String(error));
       }
+    },
+    artifact(name, data) {
+      writeFileSync(join(output, name), JSON.stringify(data, null, 2));
     },
     finishSession(session) {
       // 每个会话收尾时的硬约束：无未知命令、无外联、无未处理拒绝

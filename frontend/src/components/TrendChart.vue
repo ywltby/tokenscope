@@ -46,6 +46,13 @@ const legendItems = computed(() => chartTokens(mode.value, overrides.value).seri
 const el = ref<HTMLDivElement | null>(null);
 let chart: echarts.ECharts | null = null;
 let observer: ResizeObserver | null = null;
+/// 最近一次真正应用到 ECharts 的画布尺寸。ResizeObserver 对相同尺寸不再
+/// 重复 resize——由数据更新改高度产生的回调不能打断刚开始的柱形动画。
+let appliedWidth = 0;
+let appliedHeight = 0;
+/// 布局/数据统一更新：同一轮内的数据、维度与尺寸变化只下发一次。
+type PendingKind = "data" | "dimension" | "layout";
+let disposed = false;
 
 const isDay = computed(() => props.by === "day");
 const titleText = computed(
@@ -72,6 +79,15 @@ function formatCategoryLabel(value: string): string {
   return props.by === "project"
     ? echarts.format.truncateText(value, categoryLabelWidth(), "12px sans-serif", "…")
     : value;
+}
+
+/// 系统减少动态效果时允许取消动画；数值与交互不受影响。
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
 }
 
 type ZoomRange = {
@@ -127,6 +143,8 @@ function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsO
     backgroundColor: "transparent",
     // 固定语义色（与图例/摘要文字对应），禁用 ECharts 默认调色板
     color: t.series.map((s) => s.color),
+    // 尊重系统减少动态效果；数据与交互仍完整更新。
+    animation: !prefersReducedMotion(),
     tooltip: {
       appendToBody: true,
       trigger: "axis",
@@ -234,17 +252,57 @@ function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsO
   };
 }
 
-function applyHeight(): void {
-  if (!el.value) return;
-  el.value.style.height = `${canvasHeight(props.groups.length)}px`;
+/// 应用目标高度并量测实际尺寸；宽度在极窄测试环境中为 0 时退回上次值。
+function applyHeight(): { width: number; height: number } {
+  if (!el.value) return { width: appliedWidth, height: appliedHeight };
+  const target = canvasHeight(props.groups.length);
+  el.value.style.height = `${target}px`;
   el.value.style.minWidth = "0px";
+  return {
+    width: el.value.clientWidth || appliedWidth,
+    height: el.value.clientHeight || target,
+  };
+}
+
+function resizeIfNeeded(size: { width: number; height: number }): boolean {
+  if (size.width === appliedWidth && size.height === appliedHeight) return false;
+  const options: { width?: number; height?: number } = {};
+  if (size.width > 0) options.width = size.width;
+  if (size.height > 0) options.height = size.height;
+  chart?.resize(options);
+  appliedWidth = size.width;
+  appliedHeight = size.height;
+  return true;
+}
+
+/// 单次布局后更新：先应用高度与尺寸，确实变尺寸时先 resize，再下发数据。
+/// 数据/维度/轴标签都在同一批内完成，ResizeObserver 不再补发第二次 resize。
+function flushChart(kind: PendingKind): void {
+  if (!el.value || !chart) return;
+  const size = applyHeight();
+  const resized = resizeIfNeeded(size);
+  if (kind === "dimension") {
+    chart.setOption(buildOption(), { notMerge: true });
+  } else if (kind === "data") {
+    // 同维更新不要重新下发百分比范围，否则离散类别边界会再次取整而漂移。
+    const option = buildOption();
+    delete option.dataZoom;
+    chart.setOption(option, { notMerge: false });
+  } else if (resized && !isDay.value) {
+    // 外部容器尺寸变化：轴标签宽度并入同一布局批次，不发独立空转 setOption。
+    chart.setOption({
+      yAxis: { axisLabel: { width: categoryLabelWidth(), formatter: formatCategoryLabel } },
+    });
+  }
 }
 
 /// 首次初始化（0 类别不建实例）。
 function initChart(): void {
   if (!el.value || props.groups.length === 0) return;
-  applyHeight();
+  const size = applyHeight();
   chart = echarts.init(el.value, null, { renderer: "svg" });
+  appliedWidth = size.width;
+  appliedHeight = size.height;
   chart.setOption(buildOption(), { notMerge: true });
 }
 
@@ -259,12 +317,7 @@ function updateData(): void {
     initChart();
     return;
   }
-  applyHeight();
-  chart.resize();
-  // 同维更新不要重新下发百分比范围，否则离散类别边界会再次取整而漂移。
-  const option = buildOption();
-  delete option.dataZoom;
-  chart.setOption(option, { notMerge: false });
+  flushChart("data");
 }
 
 /// 维度切换：完整替换（清掉旧轴 / series / dataZoom 残留）。
@@ -278,9 +331,7 @@ function switchDimension(): void {
     initChart();
     return;
   }
-  applyHeight();
-  chart.resize();
-  chart.setOption(buildOption(), { notMerge: true });
+  flushChart("dimension");
 }
 
 /// 主题切换：允许一次 dispose/init，保留外层滚动位置。
@@ -289,24 +340,28 @@ function rebuildForTheme(): void {
   const zoom = captureZoom();
   chart?.dispose();
   chart = null;
-  applyHeight();
+  const size = applyHeight();
   chart = echarts.init(el.value, null, { renderer: "svg" });
+  appliedWidth = size.width;
+  appliedHeight = size.height;
   chart.setOption(buildOption(zoom), { notMerge: true });
 }
 
 onMounted(() => {
+  disposed = false;
   initChart();
   observer = new ResizeObserver(() => {
-    chart?.resize();
-    if (chart && !isDay.value)
-      chart.setOption({
-        yAxis: { axisLabel: { width: categoryLabelWidth(), formatter: formatCategoryLabel } },
-      });
+    if (disposed || !el.value || !chart) return;
+    const width = el.value.clientWidth || appliedWidth;
+    const height = el.value.clientHeight || appliedHeight;
+    if (width === appliedWidth && height === appliedHeight) return;
+    flushChart("layout");
   });
   if (el.value) observer.observe(el.value);
 });
 
 onBeforeUnmount(() => {
+  disposed = true;
   observer?.disconnect();
   observer = null;
   chart?.dispose();
@@ -325,6 +380,7 @@ watch(
     if (curBy !== prevBy) switchDimension();
     else updateData();
   },
+  { flush: "post" },
 );
 watch(mode, () => rebuildForTheme());
 // i18n：语言切换后图例/坐标轴文案要跟着换——一次完整重建最省事且不会留下

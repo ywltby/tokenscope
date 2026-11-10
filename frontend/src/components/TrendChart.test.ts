@@ -22,16 +22,18 @@ const echartsMock = vi.hoisted(() => {
   return { setOption, dispose, resize, getOption, dispatchAction, init };
 });
 
+const resizeObservers = vi.hoisted(() => [] as ResizeObserverCallback[]);
+
 vi.mock("echarts", () => ({ init: echartsMock.init }));
 
-vi.stubGlobal(
-  "ResizeObserver",
-  class {
-    observe() {}
-    disconnect() {}
-    unobserve() {}
-  },
-);
+class TestResizeObserver {
+  constructor(callback: ResizeObserverCallback) {
+    resizeObservers.push(callback);
+  }
+  observe() {}
+  disconnect() {}
+  unobserve() {}
+}
 
 import TrendChart from "./TrendChart.vue";
 import { chartTokens } from "../styles/chartTheme";
@@ -63,12 +65,21 @@ beforeEach(() => {
   echartsMock.getOption.mockClear();
   echartsMock.getOption.mockReturnValue({});
   init.mockClear();
+  resizeObservers.length = 0;
+  vi.stubGlobal("ResizeObserver", TestResizeObserver);
   localStorage.removeItem("tokenscope-theme");
   useTheme().setPreference("system");
 });
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+/// 触发组件登记的 ResizeObserver 回调（模拟浏览器布局后的回调）。
+function fireResize(): void {
+  for (const callback of resizeObservers) {
+    callback([], {} as ResizeObserver);
+  }
+}
 
 describe("TrendChart（设计系统 Task 4）", () => {
   it.each([
@@ -366,6 +377,39 @@ describe("TrendChart 生命周期与数据更新（UX05）", () => {
     expect(dispose.mock.calls.length).toBe(disposeCount);
     expect(setOption.mock.calls[0][1]).toEqual({ notMerge: false });
     w.unmount();
+  });
+
+  it("布局与数据同批更新：高度变化只 resize 一次，observer 回调不二次打断动画", async () => {
+    const many = Array.from({ length: 20 }, (_, i) => group(`model-${i}`, 20 - i));
+    const w = mount(TrendChart, { props: { groups: many, by: "model" } });
+    try {
+      await flushPromises();
+      expect(resizeObservers.length).toBe(1);
+
+      echartsMock.resize.mockClear();
+      setOption.mockClear();
+      await w.setProps({ groups: many.slice(0, 4) });
+      await flushPromises();
+
+      // 数据更新先应用目标高度、量到尺寸变化后先 resize，再下发新数据。
+      expect(echartsMock.resize).toHaveBeenCalledTimes(1);
+      expect(setOption).toHaveBeenCalledTimes(1);
+      expect(echartsMock.resize.mock.invocationCallOrder[0]).toBeLessThan(
+        setOption.mock.invocationCallOrder[0],
+      );
+      expect(
+        Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.height, 10),
+      ).toBe(320);
+
+      // 浏览器在布局后补发的 observer 回调看到的是已应用尺寸：不得再 resize
+      // 或再 setOption 打断刚开始的柱形动画。
+      fireResize();
+      await flushPromises();
+      expect(echartsMock.resize).toHaveBeenCalledTimes(1);
+      expect(setOption).toHaveBeenCalledTimes(1);
+    } finally {
+      w.unmount();
+    }
   });
 
   it("0 类别不初始化实例（父级另给明确空状态）", async () => {
