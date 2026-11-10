@@ -294,6 +294,11 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   /// - `notifiedAtBatchStart`：本批次开始时的 `notifiedGeneration`——两者不同
   ///   即"批次执行期间历史库又有写入"，批次完成后补发一批。
   let batchSource: BatchSource = "startup";
+  /// 程序触发（价格同步、来源保存、重扫、导入）要求下一批**先采集**。
+  /// 即使下一批是筛选变化，也不能复用同步前的价格/来源快照；成功后消费，
+  /// 失败保留给重试。
+  let collectRequestSeq = 0;
+  let consumedCollectSeq = 0;
   let batchInFlight = 0;
   let batchSettled = true;
   let notifiedGeneration = 0;
@@ -371,7 +376,9 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     // `collect: false`，只基于已提交的历史建快照；最近采集键不命中时后端
     // 会退回采集，绝不返回空结果。
     beginPromise = (async () => {
-      const collect = batchSource === "startup" || batchSource === "manual";
+      const collectSeq = collectRequestSeq;
+      const collect =
+        batchSource === "startup" || batchSource === "manual" || collectSeq > consumedCollectSeq;
       const trigger = batchSource;
       try {
         const h = await invoke<QueryHandle>("query_begin", {
@@ -387,6 +394,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
           trigger,
         });
         if (epoch !== refreshEpoch || disposed) return null; // 旧 begin 晚到不接管
+        if (collect) consumedCollectSeq = Math.max(consumedCollectSeq, collectSeq);
         currentQuery.value = h;
         // U01：范围的唯一来源是后端冻结结果（标签只做展示，不参与查询）。
         // U06：句柄代次并入 latestGeneration（"历史库到哪一代"的最大值）。
@@ -1300,6 +1308,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   watch(
     () => opts.refreshKey(),
     () => {
+      collectRequestSeq += 1;
       void loadSources();
       scheduleBatchRefresh();
     },

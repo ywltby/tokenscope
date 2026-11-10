@@ -326,6 +326,34 @@ describe("useUsageQuery 单一查询身份（U04）", () => {
     w.unmount();
   });
 
+  it("program_refresh_forces_next_collection_even_when_it_is_a_filter_batch", async () => {
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    expect(lastBegin()).toMatchObject({ collect: true, trigger: "startup" });
+
+    // 价格同步/来源保存后的 refreshKey 在设置页（隐藏）到达：下一批即使
+    // 来自筛选变化也必须先采集，不能复用同步前的价格/来源快照。
+    api.setVisible(false);
+    await w.setProps({ refreshKey: 1 });
+    await nextTick();
+    await flushPromises();
+    api.setVisible(true);
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin(), "回到汇总页的程序刷新先采集").toMatchObject({ collect: true });
+
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin(), "消费后的普通筛选回到只读历史").toMatchObject({
+      by: "project",
+      collect: false,
+      trigger: "filter",
+    });
+    w.unmount();
+  });
+
   it("local_retry_resends_only_failed_side：局部重试只重发失败的一侧", async () => {
     let failEvents = true;
     let failSummary = false;
