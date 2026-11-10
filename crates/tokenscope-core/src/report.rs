@@ -685,10 +685,7 @@ pub fn take_max_concurrent_collections_for_tests() -> u64 {
 
 /// 价格输入文件的轻量指纹（长度 + 修改时间）。价格同步/用户改文件后
 /// `recent_collection` 必须失效，不能拿旧价格快照服务筛选查询。
-fn pricing_file_stamp(path: &Option<PathBuf>) -> String {
-    let Some(path) = path else {
-        return "none".to_string();
-    };
+fn pricing_file_stamp(path: &std::path::Path) -> String {
     match std::fs::metadata(path) {
         Ok(metadata) => {
             let modified = metadata
@@ -768,9 +765,9 @@ pub(crate) fn collection_key(opts: &SummaryOptions) -> String {
         opts.modelsdev_path,
         opts.pricing_index,
         mapping_rev,
-        pricing_file_stamp(&opts.pricing_path),
-        pricing_file_stamp(&opts.openrouter_path),
-        pricing_file_stamp(&opts.modelsdev_path),
+        pricing_file_stamp(&pricing_file_path(opts.pricing_path.as_ref())),
+        pricing_file_stamp(&openrouter_file_path(opts.openrouter_path.as_ref())),
+        pricing_file_stamp(&modelsdev_file_path(opts.modelsdev_path.as_ref())),
     )
 }
 
