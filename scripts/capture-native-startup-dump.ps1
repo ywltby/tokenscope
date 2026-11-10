@@ -57,7 +57,19 @@ public static class StartupDump {
 }
 '@
     $bytes = [StartupDump]::Capture($TargetPid, $ExpectedExe, $StartedAfterMs, $StartedBeforeMs, $OutputPath)
-    @{ status='captured'; file=[IO.Path]::GetFileName($OutputPath); bytes=$bytes; pid=$TargetPid } | ConvertTo-Json -Compress
+    $result = @{ status='captured'; file=[IO.Path]::GetFileName($OutputPath); bytes=$bytes; pid=$TargetPid }
+    # Offline x64 unwinding needs the matching PE image as well as its PDB.
+    # Copies stay in this bounded helper process, not synchronous Node filesystem calls.
+    foreach ($kind in @('exe','pdb')) {
+        $source = if ($kind -eq 'exe') { $ExpectedExe } else { [IO.Path]::ChangeExtension($ExpectedExe,'.pdb') }
+        $destination = [IO.Path]::ChangeExtension($OutputPath,".$kind")
+        try {
+            [IO.File]::Copy($source,$destination,$false)
+            $result[$kind] = [IO.Path]::GetFileName($destination)
+            $result["${kind}_sha256"] = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+        } catch { $result["${kind}_error"] = $_.Exception.Message }
+    }
+    $result | ConvertTo-Json -Compress
     exit 0
 } catch {
     @{ status='unavailable'; error=$_.Exception.Message; pid=$TargetPid } | ConvertTo-Json -Compress

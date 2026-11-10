@@ -15,6 +15,10 @@ try {
     if ($LASTEXITCODE -ne 0 -or $result.status -ne 'captured') { throw "Controlled dump failed: $($result | ConvertTo-Json -Compress)" }
     $header = [IO.File]::ReadAllBytes($file)
     if ($header.Length -le 32 -or [Text.Encoding]::ASCII.GetString($header,0,4) -ne 'MDMP') { throw 'Not a valid minidump header' }
+    $image = Join-Path $root 'startup-1.exe'
+    if ($result.exe -ne 'startup-1.exe' -or -not (Test-Path -LiteralPath $image) -or
+        $result.exe_sha256 -ne (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() -or
+        $result.exe_sha256 -ne (Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash.ToLowerInvariant()) { throw 'Matching executable was not preserved' }
     foreach ($wrong in @('parent','exe','time')) {
         $candidate = $argsForDump.Clone()
         if ($wrong -eq 'parent') { $candidate.ExpectedParentPid = 1 }

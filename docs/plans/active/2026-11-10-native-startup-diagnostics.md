@@ -21,7 +21,7 @@
 3. 未同意前不初始化业务日志、不读写真实用户文件；阶段标记仅 stderr，且只编译进 acceptance。
 4. HTTP/CDP 只读诊断仅访问本次已确认归属的本地端口；原始页面状态不用 Playwright 的缓存 URL 代替。
 5. 转储仅针对本次宿主，核对父 PID、可执行文件路径和进程创建时刻；进程已退出、归属不符或权限不足均记 unavailable，不碰其他进程。
-6. 转储采用最小栈/模块信息，不收取完整进程内存；保留匹配 PDB 与构建身份供故障后解析。诊断自身出错不得阻止原有清理。
+6. 转储采用最小栈/模块信息，不收取完整进程内存；保留匹配 EXE/PDB 与构建身份供故障后离线展开线程栈。产物复制/哈希也放在有界 helper 内，诊断自身出错不得阻止原有清理。
 7. 用户要求：人工文件/目录清理一律送入 Windows 回收站；失败保留现场，不回退永久删除。
 
 ## D01：有界快照与判定测试
@@ -66,4 +66,4 @@
 - 真实隔离验证：`privacy-preseeded` 10/10，阶段含 build 前后及 navigation/page-load，独立原始 frame/location 为 `http://tauri.localhost/`、readyState=complete、Tauri 注入存在；最小转储 187,465 字节且宿主 PID 匹配。证据在 gitignored `qa-artifacts/aboutblank-diagnostics/real-exercise-2/`。
 - 首轮独立端口复核超时记 unavailable，转储成功；调整诊断内部配额后第二轮快照成功。**没有改启动的 45/20/65 秒或诊断总计 8 秒上限**，首轮证据保留。
 - 该本地验收 EXE SHA256 `ba71c8243b7a80e1027bb7d9f072ab48a122d5c69dd9c3a6eb63014863af82c8`，构建时 HEAD 为 `7fe4c7a`、工作树含本批未提交改动，记录为 local/assumed、tree_clean=false，不称干净提交实跑；CI 将在提交后的树重建。
-- 上述实跑是正常场景的取证能力验证，**没有复现真实 about:blank，也不构成其根因修复证明**。完整本地门禁、PR 与 CI 结果待执行后追加。
+- 上述实跑是正常场景的取证能力验证，**没有复现真实 about:blank，也不构成其根因修复证明**。完整提交钩子已通过（普通/acceptance 两套 workspace、前端 1104、E2E、Python/PowerShell 契约）；自审另补两条状态红测，防止把 helper 明确返回 unavailable 的转储包装成 captured。PR 最新 HEAD 的检查与根因状态以 PR 描述/检查记录为准。

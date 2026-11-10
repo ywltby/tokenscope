@@ -556,22 +556,6 @@ class Instance {
         },
       );
     });
-    if (result.status === "captured" && !signal.aborted) {
-      const sourcePdb = path.join(path.dirname(path.resolve(EXE)), "tokenscope.pdb");
-      if (fs.existsSync(sourcePdb)) {
-        const pdbName = `startup-${record.index}.pdb`;
-        try {
-          fs.copyFileSync(sourcePdb, path.join(directory, pdbName), fs.constants.COPYFILE_EXCL);
-          result.pdb = pdbName;
-          result.pdb_sha256 = crypto
-            .createHash("sha256")
-            .update(fs.readFileSync(sourcePdb))
-            .digest("hex");
-        } catch (error) {
-          result.pdb_error = String(error?.message ?? error).slice(0, 1000);
-        }
-      } else result.pdb_error = "匹配构建的 PDB 不存在";
-    }
     return result;
   }
   async prepareRoot() {

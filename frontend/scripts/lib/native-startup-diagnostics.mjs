@@ -196,7 +196,10 @@ export async function captureStartupDiagnostics({
         result.browser_error = shortError(e);
       }),
       bounded(captureDump, controller.signal, Math.min(timeoutMs, 6000)).then((dump) => {
-        result.dump = dump;
+        result.dump =
+          dump.status === "captured" && dump.value?.status !== "captured"
+            ? { status: "unavailable", error: dump.value?.error ?? "转储未生成" }
+            : dump;
       }),
     ]);
     return result;

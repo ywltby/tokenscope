@@ -81,7 +81,8 @@ describe("启动取证", () => {
       });
       expect(result.runtime_version.value.Browser).toBe("Edg/fixture");
       expect(result.observation).toBe("observer-disagreement");
-      expect(result.dump.value.error).toContain("permission denied");
+      expect(result.dump.status).toBe("unavailable");
+      expect(result.dump.error).toContain("permission denied");
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -125,7 +126,8 @@ describe("启动取证", () => {
     });
     expect(requested).toBe(false);
     expect(result.raw_targets.status).toBe("unavailable");
-    expect(result.dump.value.error).toBe("host already exited");
+    expect(result.dump.status).toBe("unavailable");
+    expect(result.dump.error).toBe("host already exited");
   });
 
   it("只记录变化并限制页面观察数量", () => {
