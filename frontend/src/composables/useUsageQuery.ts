@@ -300,6 +300,9 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   /// 失败保留给重试。
   let collectRequestSeq = 0;
   let consumedCollectSeq = 0;
+  /// 同一次设置写入的两个信号（refreshKey prop 与文档事件）只排一批：
+  /// 先到者调度，后到者若 token 相同视为回声（只同步基线）。
+  let lastHandledChangeToken: number | null = null;
   /// 最近一次已处理的程序刷新键：KeepAlive 停用期间 props 更新不可靠，
   /// 激活帧还要再比较一次，避免漏掉价格同步/来源保存。
   let lastRefreshKey = opts.refreshKey();
@@ -578,7 +581,19 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   // F03：主刷新协调入口——同一 epoch 传给汇总与明细两条查询。
   // U06：批次来源决定 `collect`/`trigger`（见 `BatchSource`），并重置
   // 翻页保护与"批次期间是否有新写入"的判定。
+  // 待执行批：一条在途时后到的批次选择（后到覆盖先到，只保留最后一次），
+  // 当前批次结算后立即执行——在途查询不取消，但绝不堆积并发批。
+  let pendingBatchSource: Exclude<BatchSource, "startup" | "auto"> | null = null;
+
   function startRefreshBatch(source: BatchSource = "manual"): void {
+    // 一条在途：只记最后一次选择；结算后经 scheduleBatchRefresh / 批次来源
+    // 对应的入口执行（隐藏置标记、可见立即开始、翻页保护的合并语义保持不变）。
+    // `startup` 只在挂载时出现（此时必无在途批次），不会走到这里。
+    if (batchInFlight > 0) {
+      if (source === "auto") requestAutoRefresh("data");
+      else if (source !== "startup") pendingBatchSource = source;
+      return;
+    }
     stagedReport = null;
     stagedEvents = null;
     refreshEpoch++;
@@ -603,6 +618,14 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     if (batchInFlight > 0) batchInFlight -= 1;
     if (batchInFlight > 0 || batchSettled) return;
     batchSettled = true;
+    // 待执行批先执行：新批次开始时刷新 notifiedAtBatchStart，批次期间收到
+    // 的更高代次由新批次的快照覆盖，补发判定自然吸收（后到的选择一定比
+    // 本批次开始时的新）。
+    if (pendingBatchSource !== null) {
+      const source = pendingBatchSource;
+      pendingBatchSource = null;
+      scheduleBatchRefresh(source);
+    }
     maybeCatchUpAfterBatch();
   }
 
@@ -1246,7 +1269,16 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   /// 设置页写入完成（价格同步/来源保存/重扫/导入）的文档级通知。
   /// 汇总页隐藏时 `refreshKey` prop 可能尚未更新，这里直接记录"下一批先采集"；
   /// 可见时等价一次程序刷新，立即读取新上下文。
-  function onDataChangedEvent(): void {
+  /// 同一次变更的两个信号（事件先到、prop 随渲染后到）合并为一批：事件
+  /// 携带 token，refreshKey watcher 见到相同 token 只同步基线不再排批；
+  /// 无 token（旧来源）或 token 不同（另一次变更）仍独立调度。
+  function onDataChangedEvent(ev?: Event): void {
+    const token =
+      ev && "detail" in ev && typeof (ev as CustomEvent).detail === "number"
+        ? ((ev as CustomEvent<number>).detail as number)
+        : null;
+    if (token !== null && token === lastHandledChangeToken) return;
+    lastHandledChangeToken = token;
     collectRequestSeq += 1;
     if (!visible.value) {
       pendingRefresh.value = true;
@@ -1333,11 +1365,19 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   /// 时区不是偏好（唯一来源是 settings.toml），但影响统计口径；只重查历史。
   watch(tz, () => scheduleBatchRefresh("filter"));
   /// refreshKey 是程序触发（价格同步、设置保存成功等）：新批次但不算用户操作。
+  /// 同一次写入已由文档事件调度过（token 相同）时，这里只是迟到回声——
+  /// 只同步基线，不再重复排批。
   watch(
     () => opts.refreshKey(),
     () => {
+      const key = opts.refreshKey();
+      if (key === lastHandledChangeToken) {
+        lastHandledChangeToken = null;
+        return;
+      }
+      lastHandledChangeToken = key;
       collectRequestSeq += 1;
-      lastRefreshKey = opts.refreshKey();
+      lastRefreshKey = key;
       void loadSources();
       scheduleBatchRefresh();
     },

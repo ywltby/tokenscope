@@ -83,10 +83,12 @@ const page = ref<"summary" | "settings">("summary");
 // 汇总页可见时立刻刷新，隐藏时只置待刷新标记。
 const refreshKey = ref(0);
 /// 设置页写入完成：递增 prop（可见时刷新）+ 广播文档事件（KeepAlive 停用
-/// 期间也能让隐藏中的查询状态记号"下一批必须先采集"）。
+/// 期间也能让隐藏中的查询状态记号"下一批必须先采集"）。两个信号携带同一
+/// token（递增后的 refreshKey 值），查询侧据此把"同一次变更"合并为一批，
+/// 不再各自排批刷两次。
 function onDataChanged(): void {
   refreshKey.value += 1;
-  emitDataChanged();
+  emitDataChanged(refreshKey.value);
 }
 
 // U04 切页保留：滚动容器在应用壳里（汇总页与设置页共用），离开某页时记录

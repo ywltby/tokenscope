@@ -309,6 +309,48 @@ describe("useUsageQuery 单一查询身份（U04）", () => {
     w.unmount();
   });
 
+  it("in_flight_batch_coalesces_later_selections_into_one_pending_batch", async () => {
+    // “一条在途，待执行只保留最后一次选择”：首批评 gate 住，门内的后续触发
+    // 不得立即再发查询，只把最后的选择留给批次结算后执行。
+    let releaseSummary!: (v: SummaryReport) => void;
+    let releaseEvents!: (v: EventList) => void;
+    let firstRound = true;
+    okMock({
+      query_summary: () => {
+        if (!firstRound) return Promise.resolve({ ...reportA, query_id: handle.queryId });
+        return new Promise<SummaryReport>((r) => (releaseSummary = r));
+      },
+      query_events: () => {
+        if (!firstRound) return Promise.resolve({ ...emptyList, query_id: handle.queryId });
+        return new Promise<EventList>((r) => (releaseEvents = r));
+      },
+    });
+    const w = mountHost();
+    await flushPromises();
+    expect(beginCalls(), "首批已发出并悬在在途").toBe(1);
+
+    // 在途门内连续触发：两次筛选变化 + 一次手动刷新——立即只应有一条查询在途。
+    api.by.value = "project";
+    await nextTick();
+    api.by.value = "agent";
+    await nextTick();
+    api.manualRefresh();
+    await nextTick();
+
+    expect(beginCalls(), "在途期间不得再发新查询").toBe(1);
+    expect(api.loading.value, "在途状态不被后续触发清掉").toBe(true);
+
+    // 结算在途批次：随后只执行**最后一次选择**（manual），不是逐个补发三批。
+    firstRound = false;
+    releaseSummary({ ...reportA, query_id: handle.queryId });
+    releaseEvents({ ...emptyList, query_id: handle.queryId });
+    await flushPromises();
+    expect(beginCalls(), "结算后按最后选择执行一批").toBe(2);
+    expect(lastBegin()).toMatchObject({ collect: true, trigger: "manual" });
+    expect(api.loading.value).toBe(false);
+    w.unmount();
+  });
+
   it("hidden_filter_change_reactivates_as_filter_batch_not_collect", async () => {
     okMock();
     const w = mountHost();
@@ -346,6 +388,50 @@ describe("useUsageQuery 单一查询身份（U04）", () => {
     await nextTick();
     await flushPromises();
     expect(lastBegin()).toMatchObject({ collect: false, trigger: "filter" });
+    w.unmount();
+  });
+
+  it("same_change_via_prop_and_document_event_coalesces_into_one_batch", async () => {
+    // MainApp 的设置页写入会**同时**递增 refreshKey prop 并广播携带同一
+    // token 的文档事件（事件同步先到、prop 随渲染后到）——这是同一次变更的
+    // 两个信号，必须合并为一批；两条独立路径（只递增 prop 或只广播事件）
+    // 仍各自调度。
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    expect(lastBegin()).toMatchObject({ collect: true, trigger: "startup" });
+
+    const before = beginCalls();
+    // 同一次变更：事件先到（token = 递增后的 refreshKey 值），prop 后到。
+    window.dispatchEvent(new CustomEvent("tokenscope-data-changed", { detail: 1 }));
+    await w.setProps({ refreshKey: 1 });
+    await nextTick();
+    await flushPromises();
+
+    expect(beginCalls(), "同一次变更只排一批").toBe(before + 1);
+    expect(lastBegin(), "程序触发的批次先采集").toMatchObject({
+      collect: true,
+      trigger: "manual",
+    });
+
+    // 只递增 prop（无事件广播）：仍须调度。
+    const propOnly = beginCalls();
+    await w.setProps({ refreshKey: 2 });
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "prop-only 仍调度").toBe(propOnly + 1);
+
+    // 只广播事件（KeepAlive 停用期 prop 不可靠）：仍须调度；迟到的同 token
+    // prop 回声不再重复排批。
+    const eventOnly = beginCalls();
+    window.dispatchEvent(new CustomEvent("tokenscope-data-changed", { detail: 3 }));
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "event-only 仍调度").toBe(eventOnly + 1);
+    await w.setProps({ refreshKey: 3 });
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "同 token 的迟到 prop 回声不再排批").toBe(eventOnly + 1);
     w.unmount();
   });
 
