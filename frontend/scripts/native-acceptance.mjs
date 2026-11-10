@@ -11,7 +11,7 @@
 //   - 不安装、不写注册表、不改系统显示缩放。
 // UP09（升级测试补测计划 §4.8）：实例生命周期改为“端口不复用 + 归属核实 + 退出确认”，
 // 纯逻辑在 `lib/native-instance.mjs`（可单测），证据在 `evidence.json` 的 `launches[]`。
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import net from "node:net";
 import zlib from "node:zlib";
@@ -32,6 +32,11 @@ import { nativeCacheTiers, prepareCacheTiersScenario } from "./contracts/native-
 import { nativeUiRelaunch, nativeUiSystem } from "./contracts/native-ui-system.mjs";
 import { nativeSingleInstance, readTrayObservation } from "./contracts/native-single-instance.mjs";
 import { decodePng } from "./lib/png.mjs";
+import {
+  captureStartupDiagnostics,
+  parseStartupMarkers,
+  recordPageObservation,
+} from "./lib/native-startup-diagnostics.mjs";
 import {
   startAcceptanceIo,
   readAcceptanceTrace,
@@ -480,6 +485,78 @@ class Instance {
     // 宿主退出信号（§4.8 第 4 条）：仅启动阶段武装；attach / 收尾阶段为 null
     this.hostExit = null;
     this.budgetArmed = false;
+    this.observedStartupPages = new WeakSet();
+    this.observedStartupContexts = new WeakSet();
+  }
+  observeStartupPages(record) {
+    const remember = (event, detail = null) => {
+      record.pageEvents ??= [];
+      record.pageEvents.push({ at_ms: Date.now() - record.startedAtMs, event, detail: detail?.slice(0, 1000) ?? null });
+      if (record.pageEvents.length > 32) record.pageEvents.shift();
+    };
+    const observe = (page) => {
+      if (this.observedStartupPages.has(page)) return;
+      this.observedStartupPages.add(page);
+      page.on("console", (m) => {
+        this.console.push(`${m.type()}: ${m.text()}`);
+        if (["error", "warning"].includes(m.type())) remember(`console-${m.type()}`, m.text());
+        if (/Content Security Policy|Refused to/i.test(m.text())) this.violations.push(m.text());
+      });
+      page.on("pageerror", (e) => {
+        this.console.push(`pageerror: ${e.message}`);
+        remember("pageerror", e.message);
+      });
+      page.on("crash", () => remember("renderer-crash"));
+      page.on("requestfailed", (request) => {
+        if (request.isNavigationRequest()) remember("navigation-request-failed", request.failure()?.errorText ?? "unknown");
+      });
+    };
+    for (const page of this.ctx?.pages() ?? []) observe(page);
+    if (this.ctx && !this.observedStartupContexts.has(this.ctx)) {
+      this.observedStartupContexts.add(this.ctx);
+      this.ctx.on("page", observe);
+    }
+  }
+
+  async captureStartupDump(record, signal) {
+    if (!record.hostPid || !isProcessAlive(record.hostPid) || !record.spawnedAtMs)
+      return { status: "unavailable", error: "本次宿主已退出或未启动" };
+    const directory = path.dirname(this.logPath);
+    const output = path.join(directory, `startup-${record.index}.dmp`);
+    const result = await new Promise((resolve) => {
+      execFile(
+        "pwsh",
+        [
+          "-NoProfile",
+          "-File",
+          path.join(REPO, "scripts/capture-native-startup-dump.ps1"),
+          "-TargetPid",
+          String(record.hostPid),
+          "-ExpectedParentPid",
+          String(process.pid),
+          "-ExpectedExe",
+          path.resolve(EXE),
+          "-StartedAfterMs",
+          String(record.spawnedAtMs - 1000),
+          "-StartedBeforeMs",
+          String(record.spawnedAtMs + 5000),
+          "-OutputPath",
+          output,
+        ],
+        { timeout: 5500, signal, windowsHide: true, encoding: "utf8", maxBuffer: 65536 },
+        (error, stdout, stderr) => {
+          try {
+            resolve(JSON.parse(stdout));
+          } catch {
+            resolve({
+              status: "unavailable",
+              error: String(error?.message ?? stderr).slice(0, 1000),
+            });
+          }
+        },
+      );
+    });
+    return result;
   }
   async prepareRoot() {
     fs.mkdirSync(OUT, { recursive: true });
@@ -595,8 +672,43 @@ class Instance {
     const detail = String(error?.message ?? error);
     if (!record.failure) record.failure = detail;
     hb(`启动失败：${detail}`);
+    // 启动已经判失败。单独的短诊断预算不延长启动成功机会，失败也不阻断收尾。
+    this.disarmHostWatch();
+    try {
+      record.startupDiagnostics = await captureStartupDiagnostics({
+        port: record.port,
+        playwrightUrls: record.pageTargets,
+        confirmPortOwner: async () => {
+          const snap = await this.probe({ force: true, deadlineMs: Date.now() + 3000 });
+          if (!snap.ok || !isProcessAlive(record.hostPid)) return false;
+          const owner = classifyPortOwner({
+            listenerPids: listenersOnPort(snap.listeners, record.port),
+            hostPid: record.hostPid,
+            descendantPids: collectDescendants(snap.processes, record.hostPid),
+          });
+          return owner.kind === "host" || owner.kind === "descendant";
+        },
+        captureDump: (signal) => this.captureStartupDump(record, signal),
+      });
+    } catch (captureError) {
+      record.startupDiagnostics = {
+        observation: "unavailable",
+        error: String(captureError?.message ?? captureError),
+      };
+    }
+    this.readStartupEvents(record);
     await this.cleanupFailedLaunch(record);
     return error instanceof Error ? error : new Error(detail);
+  }
+  readStartupEvents(record) {
+    try {
+      const log = fs.readFileSync(record.logPath);
+      const markers = parseStartupMarkers(log.subarray(record.logStartByte ?? 0, record.logEndByte).toString("utf8"));
+      record.startupEvents = markers.events.filter((event) => event.pid === record.hostPid);
+      record.invalidStartupMarkers = markers.invalid;
+    } catch (error) {
+      record.startupEventsError = String(error?.message ?? error).slice(0, 1000);
+    }
   }
   /**
    * 进程表 + 监听表快照：`maxAgeMs` 内复用，避免每次重试都重启 PowerShell。
@@ -736,6 +848,7 @@ class Instance {
           deadlineMs: this.budgetDeadline(record),
           hostExit: this.armedHostExit(),
         });
+        record.runtimeVersion = version;
       } catch (error) {
         const message = errorChain(error);
         this.lastConnectError = message;
@@ -780,6 +893,7 @@ class Instance {
         });
         this.browser = browser;
         this.ctx = browser.contexts()[0];
+        this.observeStartupPages(record);
         this.lastConnectError = null;
         recordConnectAttempt(record, {
           atMs: elapsedMs,
@@ -928,6 +1042,11 @@ class Instance {
     }
     record.precheck = { port_free: true, occupier_pids: [], probe_ok: true };
 
+    record.logStartByte = fs.existsSync(this.logPath) ? fs.statSync(this.logPath).size : 0;
+    for (const previous of this.launches) {
+      if (previous !== record && previous.logPath === this.logPath && previous.logEndByte === undefined)
+        previous.logEndByte = record.logStartByte;
+    }
     const env = {
       ...process.env,
       // 固定隔离通道每次启动都装配；场景可以替换 env，不能因此丢失计数代理。
@@ -938,6 +1057,7 @@ class Instance {
     };
     const out = fs.openSync(this.logPath, "a");
     this.startedAt = Date.now();
+    record.spawnedAtMs = this.startedAt;
     this.proc = spawn(EXE, [], { env, stdio: ["ignore", out, out], detached: false });
     record.hostPid = this.proc.pid;
     record.stageMs.spawn = Date.now() - this.startedAt;
@@ -1012,6 +1132,7 @@ class Instance {
         }
       }
       record.pageTargets = urls;
+      recordPageObservation(record, urls);
       const decision = pageTargetDecision({
         hostExitCode: this.hostExitCodeOf(record),
         urls,
@@ -1038,12 +1159,6 @@ class Instance {
     this.page.setDefaultTimeout(20000);
     hb("已连接页面 " + this.page.url());
     this.cdp = await this.ctx.newCDPSession(this.page);
-    this.page.on("console", (m) => {
-      const t = `${m.type()}: ${m.text()}`;
-      this.console.push(t);
-      if (/Content Security Policy|Refused to/i.test(m.text())) this.violations.push(t);
-    });
-    this.page.on("pageerror", (e) => this.console.push(`pageerror: ${e.message}`));
     this.cdp.on("Log.entryAdded", (e) => {
       const t = `${e.entry.source}:${e.entry.level}: ${e.entry.text}`;
       this.console.push(t);
@@ -4780,6 +4895,7 @@ async function main() {
   ev.last_stage = stage.last();
   ev.stages = stage.list();
   ev.launch_count = inst.launches.length;
+  for (const launch of inst.launches) inst.readStartupEvents(launch);
   ev.launches = buildLaunchesEvidence(inst.launches);
   ev.checks = [...ck.rows, ...ck.pendingRows];
   ev.failed = ck.failures.map((f) => f.name);

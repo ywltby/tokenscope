@@ -438,6 +438,21 @@ describe("退出确认（§4.8 第 2 条）", () => {
 });
 
 describe("launches[] 证据（§4.8 第 5 条、§6.2 行 7）", () => {
+  it("启动失败仍保留独立页面诊断和实际运行时版本", () => {
+    const record = createLaunchRecord({ index: 1, port: 9452, startedAtMs: 0 });
+    record.runtimeVersion = { Browser: "Edg/157.0.fixture" };
+    record.startupDiagnostics = {
+      observation: "observer-disagreement",
+      raw_targets: [{ type: "page", url: "http://tauri.localhost/" }],
+      dump: { status: "unavailable", error: "fixture access denied" },
+    };
+    record.failure = "没有 tauri 页面 target";
+    const [evidence] = buildLaunchesEvidence([record]);
+    expect(evidence.runtime_version).toEqual(record.runtimeVersion);
+    expect(evidence.startup_diagnostics).toEqual(record.startupDiagnostics);
+    expect(evidence.failure).toBe("没有 tauri 页面 target");
+  });
+
   it("记录序号、端口、宿主 PID 与退出码、后代 PID、端口所属 PID、阶段耗时", () => {
     const record = createLaunchRecord({
       index: 1,

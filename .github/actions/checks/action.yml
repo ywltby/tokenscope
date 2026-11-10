@@ -153,6 +153,12 @@ runs:
       run: |
         pwsh -NoProfile -File scripts/test_read_tray_notification_area.ps1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - name: Native startup dump identity contract
+      if: inputs.group == 'contracts'
+      shell: pwsh
+      run: |
+        pwsh -NoProfile -File scripts/test_native_startup_dump.ps1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # 测试临时目录清理计划 TL02：外层契约在私有根运行真实 Vitest，观察子进程
     # 退出后的文件系统，防止「测试通过但目录残留」回归（前端 B1 批次）。
     - name: 原生场景契约临时目录清理回归
