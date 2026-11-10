@@ -710,6 +710,30 @@ impl std::fmt::Debug for ReadSnapshot {
     }
 }
 
+/// 一批采集写入中的真实纠错意图（只读预扫结果）。
+#[derive(Debug, Default)]
+struct CorrectionPlan {
+    /// 会被合并、升级、转移或改写的既有事实 ID（去重后计"组"）。
+    rows: std::collections::HashSet<i64>,
+    /// 获准走纠错通道的写入索引；未列入的写入若在事务内触发纠错则整批拒绝。
+    writes: std::collections::HashSet<usize>,
+}
+
+impl CorrectionPlan {
+    fn groups(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn allows(&self, index: usize) -> bool {
+        self.writes.contains(&index)
+    }
+
+    fn mark(&mut self, index: usize, ids: impl IntoIterator<Item = i64>) {
+        self.rows.extend(ids);
+        self.writes.insert(index);
+    }
+}
+
 impl HistoryDb {
     /// 建立一个只读快照（独立连接，不阻塞写入连接）。
     pub fn read_snapshot(&self) -> Result<ReadSnapshot> {
@@ -1408,19 +1432,23 @@ impl HistoryDb {
         if batch.is_empty() {
             return Ok(result);
         }
-        let correction_groups = self.count_pending_corrections(batch)?;
-        if correction_groups > 0 {
+        let corrections = self.pending_corrections(batch)?;
+        let correction_backup = if corrections.groups() > 0 {
             let backup = self.backup_before_correction()?;
             log::info!(
-                "跨会话去重/Codex 升级纠错：本轮改写 {correction_groups} 组旧事实；\
-                 纠错前备份：{}",
+                "计划纠错：本轮将改写 {} 组旧事实；纠错前备份：{}",
+                corrections.groups(),
                 backup.display()
             );
-        }
+            Some(backup)
+        } else {
+            None
+        };
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let generation = self.generation_in_tx(&tx)?;
         let mut changed = false;
-        for write in batch {
+        for (index, write) in batch.iter().enumerate() {
+            let allow_correction = corrections.allows(index);
             validate_write(write)?;
             let mut protected_replay = None;
             let native_codex =
@@ -1432,7 +1460,7 @@ impl HistoryDb {
                     &tx,
                     std::slice::from_ref(write),
                     generation,
-                    correction_groups > 0,
+                    allow_correction,
                 )?;
                 result.events.inserted_tokens = result
                     .events
@@ -1541,7 +1569,7 @@ impl HistoryDb {
                 &tx,
                 std::slice::from_ref(write),
                 generation,
-                correction_groups > 0,
+                allow_correction,
             )?;
             // 分项复用原内核，批次累计仍受检；溢出时包含此前纠正在内全部回滚。
             result.events.inserted_tokens = result
@@ -1564,48 +1592,106 @@ impl HistoryDb {
             bump_generation(&tx)?;
         }
         tx.commit()?;
+        if let Some(backup) = correction_backup {
+            log::info!(
+                "已完成纠错：本轮改写 {} 组旧事实；纠错前备份：{}",
+                corrections.groups(),
+                backup.display()
+            );
+        }
         Ok(result)
     }
 
-    /// 本轮采集需要合并的旧重复事实组数（只读预扫，不改变库内容）。
+    /// 本轮采集是否包含真实纠错意图，以及每一条写入是否获准走纠错通道。
     ///
-    /// 判定与事务内完全同源（同一个 [`lookup_hits`]）：预扫为正才生成纠错前
-    /// 备份，事务内若出现预扫未覆盖的合并则整批拒绝（绝不无备份改事实）。
-    ///
-    /// 2026-11-08 起同时统计 Codex 强响应的**旧事实升级**：写入携带旧解析器
-    /// 镜像来源键，该键命中已存行即意味着本轮会把旧行改写为强表示（改历史
-    /// 事实）——同样需要纠错前备份。同一旧行只计一次。
-    fn count_pending_corrections(&self, batch: &[EventWrite]) -> Result<usize> {
-        let mut groups = 0usize;
-        let mut upgrade_rows: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        for write in batch {
-            if copy_alias_value(write).is_some() && lookup_hits(&self.conn, write)?.ids.len() > 1 {
-                groups += 1;
+    /// 判定与事务内使用同一组事实：普通强身份重放（同一 `record_id` 的已有
+    /// 强事实）不算纠错；只有旧表示升级、多事实合并、镜像/别名/来源转移才
+    /// 需要纠错前备份。`writes` 为按索引获准的写入子集——一条写入需要备份
+    /// 不会顺带放开同批其它写入的纠错通道。
+    fn pending_corrections(&self, batch: &[EventWrite]) -> Result<CorrectionPlan> {
+        let mut plan = CorrectionPlan::default();
+        let hits: Vec<LookupHits> = batch
+            .iter()
+            .map(|write| lookup_hits(&self.conn, write))
+            .collect::<Result<_>>()?;
+        // 批内依赖：前面的强响应升级会把弱行改成强事实，后面的弱 count-only
+        // 即使预扫时仍看见弱归属，事务内也会遇到"已升级"的所有者。先收集本批
+        // 会被升级的既有行，弱写入据此保守地要求纠错通道。
+        let mut upgraded_rows: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for (write, hits) in batch.iter().zip(&hits) {
+            if write.app != AgentKind::Codex || write.record_id.is_none() {
+                continue;
+            }
+            for id in &hits.ids {
+                let record: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT record_id FROM usage_events WHERE id = ?1",
+                        params![id],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                if record.as_deref() != write.record_id.as_deref() {
+                    upgraded_rows.insert(*id);
+                }
+            }
+        }
+        for (index, (write, hits)) in batch.iter().zip(&hits).enumerate() {
+            if copy_alias_value(write).is_some() && hits.ids.len() > 1 {
+                plan.mark(index, hits.ids.iter().copied());
+                continue;
             }
             if write.app != AgentKind::Codex {
                 continue;
             }
-            for origin in &write.origins {
-                if origin.origin_kind != ORIGIN_KIND_NATIVE_FILE {
-                    continue;
+            if write.record_id.is_some() {
+                // 强响应命中已有行：只有同 record_id 的强事实是普通重放。
+                // 弱行（旧解析表示）或另一个强响应的行都意味着升级/转移。
+                let mut affected = Vec::new();
+                for id in &hits.ids {
+                    let record: Option<String> = self
+                        .conn
+                        .query_row(
+                            "SELECT record_id FROM usage_events WHERE id = ?1",
+                            params![id],
+                            |row| row.get(0),
+                        )
+                        .optional()?
+                        .flatten();
+                    if record.as_deref() != write.record_id.as_deref() {
+                        affected.push(*id);
+                    }
                 }
-                let hit: Option<i64> = self
-                    .conn
-                    .query_row(
-                        "SELECT event_id FROM event_origins
-                         WHERE origin_kind = ?1 AND origin_key = ?2",
-                        params![origin.origin_kind, origin.origin_key],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                if let Some(id) = hit
-                    && upgrade_rows.insert(id)
-                {
-                    groups += 1;
+                if !affected.is_empty() {
+                    plan.mark(index, affected);
+                }
+            } else {
+                // 弱 count-only：来源/弱别名仍指向已升级的强事实时，本次写入
+                // 会把证据转移到新的独立弱事实——真实纠错，必须先备份。
+                let mut affected = Vec::new();
+                for origin in &write.origins {
+                    if let Some(id) = origin_owner(&self.conn, origin)?
+                        && (upgraded_rows.contains(&id)
+                            || !identity_hit_allowed(&self.conn, true, id)?)
+                    {
+                        affected.push(id);
+                    }
+                }
+                for alias in &write.aliases {
+                    if let Some(id) = alias_owner(&self.conn, alias)?
+                        && (upgraded_rows.contains(&id)
+                            || !identity_hit_allowed(&self.conn, true, id)?)
+                    {
+                        affected.push(id);
+                    }
+                }
+                if !affected.is_empty() {
+                    plan.mark(index, affected);
                 }
             }
         }
-        Ok(groups)
+        Ok(plan)
     }
 
     /// 事实纠错前的可恢复备份（`VACUUM INTO` 独立文件）。
@@ -3086,6 +3172,29 @@ fn lookup_event(conn: &Connection, w: &EventWrite) -> Result<Option<StoredEvent>
             hits.ids
         ),
     }
+}
+
+/// 来源记录当前归属的事件 ID。
+fn origin_owner(conn: &Connection, origin: &EventOrigin) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT event_id FROM event_origins WHERE origin_kind = ?1 AND origin_key = ?2",
+            params![origin.origin_kind, origin.origin_key],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// 身份别名当前归属的事件 ID。
+fn alias_owner(conn: &Connection, alias: &EventAlias) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT event_id FROM event_aliases
+              WHERE app = ?1 AND identity_scheme = ?2 AND identity_value = ?3",
+            params![alias.app.as_str(), alias.scheme, alias.value],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 fn lookup_hits(conn: &Connection, w: &EventWrite) -> Result<LookupHits> {
