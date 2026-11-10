@@ -156,7 +156,7 @@ WAL）；产品走真实入口 `begin_query → query_summary`（`history_path` 
   `build`、`install-test`、12 个单跳升级矩阵（0.1.0/0.4.0/0.5.9/0.5.13/0.6.0/
   0.7.2 × present/deleted）、`upgrade-chain (present)`、`upgrade-chain (deleted)`、
   `publish`。合并提交的 CI 与 Native UI 也完成（Native UI 首跑
-  `ui-system` 场景因 WebView 只见 `about:blank` 的启动时序偶发失败——同作业
+  `ui-system` 场景启动阶段仅观察到 `about:blank` 而失败（根因未定位）——同作业
   首场景 25/25 通过、同内容提交在 PR 侧连过两次、历史 40 次同类失败 7 次；
   仅重跑该失败作业后通过，未改动任何代码或检查）。
 - **资产核验**：安装包 `TokenScope_v0.7.3_windows-x64-setup.exe` SHA256

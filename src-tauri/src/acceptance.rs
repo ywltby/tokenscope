@@ -11,6 +11,8 @@
 //!    acceptance 构建中可用，且需进程级环境变量显式开启。
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use tauri::Config;
 use tauri::utils::config::AppDirectoriesOverride;
@@ -53,6 +55,7 @@ pub fn start_with(raw: Option<String>) -> Result<PathBuf, String> {
 /// `identifier` 改名后，单实例互斥量/窗口类名与普通实例不同，两个实例可以
 /// 并存（验收脚本只关闭本次记录的那个 PID）。
 pub fn configure(config: &mut Config, root: &Path) {
+    startup_trace("acceptance_configured", "main", None);
     config.app.app_directories_override =
         Some(AppDirectoriesOverride::Root(webview_data_dir(root)));
     // 单实例互斥量/窗口类名由 identifier 派生——改 name 让验收实例与普通实例并存。
@@ -78,15 +81,69 @@ pub fn webview_data_dir(root: &Path) -> PathBuf {
 }
 
 pub fn create_windows(app: &tauri::App) -> tauri::Result<()> {
+    startup_trace("window_creation_entered", "main", None);
     let enabled = std::env::var("TOKENSCOPE_ACCEPTANCE_CSP").as_deref() == Ok("1");
     for config in &app.config().app.windows {
-        let mut builder = tauri::WebviewWindowBuilder::from_config(app, config)?;
+        startup_trace("window_build_started", &config.label, None);
+        let nav_label = config.label.clone();
+        let load_label = config.label.clone();
+        let mut builder = tauri::WebviewWindowBuilder::from_config(app, config)?
+            .on_navigation(move |url| {
+                startup_trace("navigation_requested", &nav_label, Some(url_kind(url)));
+                true
+            })
+            .on_page_load(move |_window, payload| {
+                let phase = match payload.event() {
+                    tauri::webview::PageLoadEvent::Started => "page_load_started",
+                    tauri::webview::PageLoadEvent::Finished => "page_load_finished",
+                };
+                startup_trace(phase, &load_label, Some(url_kind(payload.url())));
+            });
         if enabled {
             builder = builder.on_web_resource_request(probe_response);
         }
-        builder.build()?;
+        match builder.build() {
+            Ok(_) => startup_trace("window_build_finished", &config.label, None),
+            Err(error) => {
+                startup_trace("window_build_failed", &config.label, None);
+                return Err(error);
+            }
+        }
     }
+    startup_trace("window_creation_finished", "main", None);
     Ok(())
+}
+
+// 仅 acceptance 编译；未同意前不初始化日志、不打开文件。URL 只记类别，不记内容。
+fn url_kind(url: &tauri::Url) -> &'static str {
+    if url.as_str() == "about:blank" {
+        "blank"
+    } else if matches!(url.scheme(), "http" | "https" | "tauri")
+        && matches!(url.host_str(), Some("tauri.localhost" | "localhost"))
+    {
+        "app"
+    } else {
+        "other"
+    }
+}
+
+fn startup_event(
+    phase: &str,
+    label: &str,
+    kind: Option<&str>,
+    elapsed_ms: u128,
+) -> serde_json::Value {
+    serde_json::json!({"phase": phase, "label": label, "pid": std::process::id(),
+        "elapsed_ms": elapsed_ms, "url_kind": kind})
+}
+
+fn startup_trace(phase: &str, label: &str, kind: Option<&str>) {
+    use std::io::Write;
+    static STARTED: OnceLock<Instant> = OnceLock::new();
+    let elapsed = STARTED.get_or_init(Instant::now).elapsed().as_millis();
+    let event = startup_event(phase, label, kind, elapsed);
+    // stderr 失效也不改变应用行为，不用 eprintln! 的隐式 panic 路径。
+    let _ = writeln!(std::io::stderr().lock(), "[tokenscope-startup] {event}");
 }
 
 fn probe_response(
@@ -127,6 +184,25 @@ fn probe_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_markers_contain_only_phase_metadata() {
+        let event = startup_event("window_build_started", "main", None, 12);
+        assert_eq!(event["phase"], "window_build_started");
+        assert_eq!(event["elapsed_ms"], 12);
+        assert!(event.get("path").is_none());
+        assert!(event.get("url").is_none());
+        assert_eq!(event["pid"], std::process::id());
+        assert_eq!(
+            url_kind(&"http://tauri.localhost/?secret=fixture".parse().unwrap()),
+            "app"
+        );
+        assert_eq!(url_kind(&"about:blank".parse().unwrap()), "blank");
+        assert_eq!(
+            url_kind(&"https://example.com/private".parse().unwrap()),
+            "other"
+        );
+    }
 
     #[test]
     fn hide_failure_is_opt_in_and_consumed_once() {
