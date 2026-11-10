@@ -683,6 +683,26 @@ pub fn take_max_concurrent_collections_for_tests() -> u64 {
     COLLECT_MAX_IN_FLIGHT.swap(0, Ordering::SeqCst)
 }
 
+/// 价格输入文件的轻量指纹（长度 + 修改时间）。价格同步/用户改文件后
+/// `recent_collection` 必须失效，不能拿旧价格快照服务筛选查询。
+fn pricing_file_stamp(path: &Option<PathBuf>) -> String {
+    let Some(path) = path else {
+        return "none".to_string();
+    };
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            format!("{}:{modified}", metadata.len())
+        }
+        Err(_) => "absent".to_string(),
+    }
+}
+
 /// 采集键：只含影响**采集**的参数（by/tz/from/to/days 是采集后的过滤，
 /// 不参与——汇总与明细同参并发时必须合并为一次采集）。A03：Claude 项目映射
 /// 修订属于采集输入——配置变化后必须走新采集，不能复用旧航班结果。
@@ -737,7 +757,8 @@ pub(crate) fn collection_key(opts: &SummaryOptions) -> String {
         ),
     };
     format!(
-        "agent={:?}|{}|refresh={}|cache={:?}|pp={:?}|or={:?}|md={:?}|idx={:?}|map={}",
+        "agent={:?}|{}|refresh={}|cache={:?}|pp={:?}|or={:?}|md={:?}|idx={:?}|map={}|\
+         ps={}|os={}|ms={}",
         opts.agent,
         plans_key,
         opts.refresh,
@@ -746,7 +767,10 @@ pub(crate) fn collection_key(opts: &SummaryOptions) -> String {
         opts.openrouter_path,
         opts.modelsdev_path,
         opts.pricing_index,
-        mapping_rev
+        mapping_rev,
+        pricing_file_stamp(&opts.pricing_path),
+        pricing_file_stamp(&opts.openrouter_path),
+        pricing_file_stamp(&opts.modelsdev_path),
     )
 }
 
