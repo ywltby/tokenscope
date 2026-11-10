@@ -1,7 +1,7 @@
 # 筛选等待、图表动画与重复纠错备份修复计划
 
 > 执行模型：使用 `executing-plans`、`systematic-debugging`、`test-driven-development` 和 `verification-before-completion`，逐项先红后绿。
-> 状态：**已实施（0.7.5），PR #61 检查全绿、停在可审查状态**。F01/F02/F03 的回归、真实浏览器中间帧与同规模基准已完成；未自动合并、未发布、未在本机安装。
+> 状态：**已实施（0.7.5），PR #61 检查全绿、停在可审查状态**。F01/F02/F03 的回归、真实浏览器中间帧与同规模基准已完成；验收期另修两处调度缺陷（在途批次堆积、同一次设置写入刷两次）。未自动合并、未发布、未在本机安装。
 
 **Goal:** 消除无必要的整库纠错备份与图表动画截断，减少时间/应用/分组切换的查询等待，同时保持现有统计、计价与冻结分页语义。
 
@@ -163,4 +163,5 @@ pnpm --dir frontend test:e2e
 - **定向回归**：`correction_backup_policy`、`codex_request_identity_migration`、`claude_cross_session_migration`、`filter_query_performance`、`ccs_rollup_coverage`、`ccs_rollup_source_selection`、`query_snapshot_contract`、`query_time_range`、`query_memory_budget`、`history_queries`、`history_storage` 全绿；前端 `useUsageQuery`、`Dashboard`、`TrendChart` 与浏览器图表契约通过。
 - **版本**：`bump_version.py --bump patch` 分配 **0.7.5**；上一版 **v0.7.4** 已在 PR 前登记为升级基线（30 个版本全量 check、44 项单测通过）。
 - **PR #61**：F01–F03 代码 HEAD `2f9d061` 的 `gate`、`rust`、`rust-acceptance`、`contracts`、`frontend`、`native-ui`、`install-test`、`plan-upgrades` 与 12 组升级矩阵全部成功；PR 侧 `upgrade-chain` 按设计 skipped。此后仅本计划文档更新，仍停在可审查 PR。
+- **验收期补修（2026-11-11，HEAD `589d2e9`）**：两处调度缺陷——①快速切换堆积后台查询：`startRefreshBatch` 在途期间也立即开新批（后端工作不取消），改为一条在途、待执行只保留最后一次选择，批次结算后执行；`auto` 仍经 `requestAutoRefresh` 重入，翻页保护不被绕过。②同一次设置写入刷两次：`refreshKey` prop 与文档事件各排一批，改为同一 token（递增后的 refreshKey 值随事件 detail），先到者调度、后到者见相同 token 只同步基线；prop-only / event-only 仍各自调度。Dashboard 两个断言旧时序的用例改写为新时序（不变量保留：最新结果胜出、两侧齐备才落盘）；前端 1112 项 test、typecheck、format、build 与浏览器 E2E 契约全绿，PR #61 HEAD `589d2e9` 全部检查成功、`CLEAN`。
 - **未自动合并、未发布、未在本机安装**；最终交付停在可审查 PR。
