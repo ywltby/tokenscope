@@ -299,6 +299,9 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   /// 失败保留给重试。
   let collectRequestSeq = 0;
   let consumedCollectSeq = 0;
+  /// 最近一次已处理的程序刷新键：KeepAlive 停用期间 props 更新不可靠，
+  /// 激活帧还要再比较一次，避免漏掉价格同步/来源保存。
+  let lastRefreshKey = opts.refreshKey();
   let batchInFlight = 0;
   let batchSettled = true;
   let notifiedGeneration = 0;
@@ -376,6 +379,11 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     // `collect: false`，只基于已提交的历史建快照；最近采集键不命中时后端
     // 会退回采集，绝不返回空结果。
     beginPromise = (async () => {
+      const refreshKey = opts.refreshKey();
+      if (refreshKey !== lastRefreshKey) {
+        collectRequestSeq += 1;
+        lastRefreshKey = refreshKey;
+      }
       const collectSeq = collectRequestSeq;
       const collect =
         batchSource === "startup" || batchSource === "manual" || collectSeq > consumedCollectSeq;
@@ -1128,16 +1136,20 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       const manual = pendingManual;
       const filter = pendingFilter;
       const auto = pendingAuto;
+      const refreshKey = opts.refreshKey();
+      const refreshChanged = refreshKey !== lastRefreshKey;
+      lastRefreshKey = refreshKey;
+      if (refreshChanged) collectRequestSeq += 1;
       pendingRefresh.value = false;
       pendingManual = false;
       pendingFilter = false;
       pendingAuto = null;
       // 回到页面：只发起一批刷新，筛选、下钻与滚动位置都不动；顺带重查来源
       // 状态（隐藏期间可能改过来源目录）。隐藏期间的筛选变化复用已提交历史，
-      // 其他手动刷新仍先采集。
-      if (manual) {
+      // 其他手动/程序刷新仍先采集；程序刷新优先，避免复用同步前的价格快照。
+      if (manual || refreshChanged) {
         void loadSources();
-        startRefreshBatch(filter ? "filter" : "manual");
+        startRefreshBatch(refreshChanged || !filter ? "manual" : "filter");
       } else if (auto) {
         requestAutoRefresh(auto);
       } else {
@@ -1309,6 +1321,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     () => opts.refreshKey(),
     () => {
       collectRequestSeq += 1;
+      lastRefreshKey = opts.refreshKey();
       void loadSources();
       scheduleBatchRefresh();
     },
