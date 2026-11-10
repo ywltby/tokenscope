@@ -300,11 +300,11 @@ impl AggregateState {
     }
 
     /// 该事件是否已计入日汇总（同桶、且不晚于覆盖起点；起点缺失视为整桶覆盖）。
-    fn covered_by_rollup(&self, e: &UsageEvent) -> bool {
+    fn covered_by_rollup(&self, e: &EventView<'_>) -> bool {
         let Some(map) = &self.covered else {
             return false;
         };
-        let identity = ModelIdentity::parse(&e.model).identity_key();
+        let identity = e.model_identity.to_string();
         for (tz_name, buckets) in map {
             let Ok(tz) = TimeZone::get(tz_name) else {
                 continue;
@@ -321,6 +321,22 @@ impl AggregateState {
     /// 喂入一条明细事件：落在已覆盖桶且不晚于覆盖起点的事件已计入日汇总，
     /// 跳过以避免重复（明细视图不受影响）；起点之后的请求照常计入。
     pub fn push_event(&mut self, e: &UsageEvent, pricing: &Pricing) -> anyhow::Result<()> {
+        let view = EventView::from_usage(e);
+        self.push_view(&view, pricing)
+    }
+
+    /// 喂入库内事件（查询汇总热路径）：直接借用库字段，不构造带多份
+    /// `String` 的 `UsageEvent`；聚合与计价口径与 [`Self::push_event`] 相同。
+    pub(crate) fn push_stored_event(
+        &mut self,
+        e: &crate::history::SummaryEvent,
+        pricing: &Pricing,
+    ) -> anyhow::Result<()> {
+        let view = EventView::from_stored(e);
+        self.push_view(&view, pricing)
+    }
+
+    fn push_view(&mut self, e: &EventView<'_>, pricing: &Pricing) -> anyhow::Result<()> {
         if self.covered_by_rollup(e) {
             return Ok(());
         }
@@ -339,12 +355,47 @@ impl AggregateState {
     }
 }
 
+/// 聚合所需的最小事件视图：借用查询热路径中的库字段，避免逐事件克隆
+/// 模型/项目/会话字符串；计价仍收到完整的四桶与分项。
+struct EventView<'a> {
+    ts: jiff::Timestamp,
+    agent: AgentKind,
+    model: &'a str,
+    model_identity: std::borrow::Cow<'a, str>,
+    project: &'a str,
+    tokens: crate::model::TokenCounts,
+}
+
+impl<'a> EventView<'a> {
+    fn from_usage(e: &'a UsageEvent) -> Self {
+        Self {
+            ts: e.ts,
+            agent: e.agent,
+            model: &e.model,
+            model_identity: std::borrow::Cow::Owned(ModelIdentity::parse(&e.model).identity_key()),
+            project: &e.project,
+            tokens: crate::model::TokenCounts::from_event(e),
+        }
+    }
+
+    fn from_stored(e: &'a crate::history::SummaryEvent) -> Self {
+        Self {
+            ts: e.ts,
+            agent: e.app,
+            model: &e.model_raw,
+            model_identity: std::borrow::Cow::Borrowed(&e.model_identity),
+            project: e.project_key.as_deref().unwrap_or("(未知)"),
+            tokens: e.tokens,
+        }
+    }
+}
+
 /// 单条事件的合并逻辑（切片路径与流式路径共用同一实现）。
 fn push_event_into(
     map: &mut BTreeMap<String, GroupAccum>,
     by: GroupBy,
     tz: &TimeZone,
-    e: &UsageEvent,
+    e: &EventView<'_>,
     pricing: &Pricing,
 ) -> anyhow::Result<()> {
     // 逐条喂入时不知道最终是否多应用：先如实记录，`finish` 再按需清空
@@ -353,8 +404,8 @@ fn push_event_into(
     {
         let key = match by {
             GroupBy::Day => e.ts.to_zoned(tz.clone()).date().to_string(),
-            GroupBy::Model => ModelIdentity::parse(&e.model).identity_key(),
-            GroupBy::Project => e.project.clone(),
+            GroupBy::Model => e.model_identity.to_string(),
+            GroupBy::Project => e.project.to_string(),
             GroupBy::Agent => e.agent.as_str().to_string(),
         };
         let key_err = key.clone();
@@ -367,13 +418,8 @@ fn push_event_into(
             representative: None,
         });
         // MP04：无可信展示名时的代表写法 = 该组原始模型名的最小字典序（稳定）。
-        if by == GroupBy::Model
-            && acc
-                .representative
-                .as_deref()
-                .is_none_or(|r| e.model.as_str() < r)
-        {
-            acc.representative = Some(e.model.clone());
+        if by == GroupBy::Model && acc.representative.as_deref().is_none_or(|r| e.model < r) {
+            acc.representative = Some(e.model.to_string());
         }
         let g = &mut acc.group;
         // 临时值上全部成功才提交（requests/tokens/unknown/cost）。
@@ -381,7 +427,7 @@ fn push_event_into(
             .requests
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("分组 {} 的请求数累计超出可表示范围", key_err))?;
-        let event_tokens = TokenCounts::from_event(e);
+        let event_tokens = e.tokens;
         let mut new_tokens = g.tokens;
         let mut new_unknown = g.unknown_tokens;
         new_tokens = new_tokens
@@ -390,7 +436,7 @@ fn push_event_into(
         let mut new_cost = g.cost_usd;
         // 确定性计价只算一次（百万事件聚合下两次调用是纯浪费）；estimate
         // 不产生失败路径，求值先后不影响"临时值全部成功才提交"的纪律。
-        let estimate = pricing.estimate(&e.model, &event_tokens, e.ts);
+        let estimate = pricing.estimate(e.model, &event_tokens, e.ts);
         match &estimate {
             Some(est) => {
                 new_cost += est.cost;

@@ -631,6 +631,18 @@ pub struct ImportOutcome {
     pub rollups: RollupSummary,
 }
 
+/// 查询汇总所需的库内事件窄投影（不读取会话/cwd/事件键等宽字段）。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SummaryEvent {
+    pub id: i64,
+    pub app: AgentKind,
+    pub ts: Timestamp,
+    pub model_raw: String,
+    pub model_identity: String,
+    pub project_key: Option<String>,
+    pub tokens: TokenCounts,
+}
+
 /// 库内事件（读取形态）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredEvent {
@@ -680,6 +692,14 @@ pub struct RowRef {
     pub id: i64,
     pub ts: Timestamp,
     pub record_id: String,
+}
+
+/// 行读取的秒级粗时间窗口（含端点）。精确边界仍由调用方复核；这里只让
+/// SQLite 跳过明显在范围外的行，不改变任何统计口径。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RowWindow {
+    pub start_secs: Option<i64>,
+    pub end_secs: Option<i64>,
 }
 
 /// H07：只读快照——独立只读连接 + 显式读事务。
@@ -828,6 +848,18 @@ impl ReadSnapshot {
         batch: usize,
         f: &mut dyn FnMut(&[RowRef]) -> Result<()>,
     ) -> Result<()> {
+        self.for_each_row_batch_window(app, RowWindow::default(), batch, f)
+    }
+
+    /// 带时间窗口的分批行遍历。窗口按 `ts_seconds` 粗过滤（秒级含端点），
+    /// 调用方仍用精确时间边界复核；只减少范围外的 SQLite 行，不改变语义。
+    pub fn for_each_row_batch_window(
+        &self,
+        app: Option<AgentKind>,
+        window: RowWindow,
+        batch: usize,
+        f: &mut dyn FnMut(&[RowRef]) -> Result<()>,
+    ) -> Result<()> {
         let batch = batch.max(1) as i64;
         let mut after: Option<(i64, i64, i64)> = None;
         loop {
@@ -838,16 +870,27 @@ impl ReadSnapshot {
                      FROM usage_events
                      WHERE (?1 IS NULL OR app = ?1)
                        AND (app = 'claude-code' OR origin_rank >= 1)
-                       AND (?2 IS NULL OR (ts_seconds, ts_nanos, id) > (?2, ?3, ?4))
+                       AND (?2 IS NULL OR ts_seconds >= ?2)
+                       AND (?3 IS NULL OR ts_seconds <= ?3)
+                       AND (?4 IS NULL OR (ts_seconds, ts_nanos, id) > (?4, ?5, ?6))
                      ORDER BY ts_seconds, ts_nanos, id
-                     LIMIT ?5",
+                     LIMIT ?7",
                 )?;
                 let (s, n, i) = match after {
                     Some(v) => (Some(v.0), Some(v.1), Some(v.2)),
                     None => (None, None, None),
                 };
-                let mapped =
-                    stmt.query_map(params![app.map(|a| a.as_str()), s, n, i, batch], |row| {
+                let mapped = stmt.query_map(
+                    params![
+                        app.map(|a| a.as_str()),
+                        window.start_secs,
+                        window.end_secs,
+                        s,
+                        n,
+                        i,
+                        batch
+                    ],
+                    |row| {
                         let id: i64 = row.get(0)?;
                         let secs: i64 = row.get(1)?;
                         let nanos: i64 = row.get(2)?;
@@ -857,7 +900,8 @@ impl ReadSnapshot {
                             ts: timestamp_from_parts(secs, nanos),
                             record_id: record_id.unwrap_or_default(),
                         })
-                    })?;
+                    },
+                )?;
                 let mut out = Vec::new();
                 for r in mapped {
                     out.push(r?);
@@ -881,7 +925,17 @@ impl ReadSnapshot {
         app: Option<AgentKind>,
         f: &mut dyn FnMut(RowRef) -> Result<()>,
     ) -> Result<()> {
-        self.for_each_row_batch(app, 1024, &mut |rows| {
+        self.stream_rows_window(app, RowWindow::default(), f)
+    }
+
+    /// 带时间窗口的行索引遍历（窗口只作秒级粗过滤，精确边界由调用方复核）。
+    pub fn stream_rows_window(
+        &self,
+        app: Option<AgentKind>,
+        window: RowWindow,
+        f: &mut dyn FnMut(RowRef) -> Result<()>,
+    ) -> Result<()> {
+        self.for_each_row_batch_window(app, window, 1024, &mut |rows| {
             for r in rows {
                 f(r.clone())?;
             }
@@ -896,10 +950,35 @@ impl ReadSnapshot {
         chunk: usize,
         f: &mut dyn FnMut(&[StoredEvent]) -> Result<()>,
     ) -> Result<()> {
-        self.for_each_row_batch(app, chunk, &mut |rows| {
+        self.for_each_chunk_window(app, RowWindow::default(), chunk, f)
+    }
+
+    /// 带时间窗口的事件本体分批读取（窗口语义同 [`Self::stream_rows_window`]）。
+    pub fn for_each_chunk_window(
+        &self,
+        app: Option<AgentKind>,
+        window: RowWindow,
+        chunk: usize,
+        f: &mut dyn FnMut(&[StoredEvent]) -> Result<()>,
+    ) -> Result<()> {
+        self.for_each_row_batch_window(app, window, chunk, &mut |rows| {
             let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
             // 锁已释放：`fetch_events` 在这里取锁不会与行扫描互锁。
             let events = self.fetch_events(&ids)?;
+            f(&events)
+        })
+    }
+
+    /// 汇总/覆盖统计的窄投影分批读取（不读会话、cwd、事件键等宽字段）。
+    pub(crate) fn for_each_summary_chunk(
+        &self,
+        app: Option<AgentKind>,
+        chunk: usize,
+        f: &mut dyn FnMut(&[SummaryEvent]) -> Result<()>,
+    ) -> Result<()> {
+        self.for_each_row_batch_window(app, RowWindow::default(), chunk, &mut |rows| {
+            let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+            let events = self.fetch_summary_events(&ids)?;
             f(&events)
         })
     }
@@ -931,7 +1010,111 @@ impl ReadSnapshot {
         Ok(out)
     }
 
-    /// 释放读事务（闲置淘汰、TTL 到期或显式关闭时调用；Drop 时兜底）。
+    /// 汇总热路径：只取聚合与计价需要的列（不含事件键、会话、cwd 等宽字段）。
+    pub(crate) fn fetch_summary_events(&self, ids: &[i64]) -> Result<Vec<SummaryEvent>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, app, ts_seconds, ts_nanos, model_raw, model_identity, project_key,
+                    input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+                    cache_write_5m, cache_write_1h
+             FROM usage_events WHERE id IN ({placeholders})"
+        );
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), row_to_summary_event)?;
+        let mut out = Vec::with_capacity(ids.len());
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// 覆盖桶统计：按应用（可选）与等价模型集合读取窄投影，只为确有日汇总
+    /// 的模型读取事件；模型集合过大时退回完整窄投影，不改变正确性。
+    pub(crate) fn for_each_summary_chunk_for_models(
+        &self,
+        app: Option<AgentKind>,
+        models: &std::collections::HashSet<String>,
+        chunk: usize,
+        f: &mut dyn FnMut(&[SummaryEvent]) -> Result<()>,
+    ) -> Result<()> {
+        if models.is_empty() || models.len() > 256 {
+            return self.for_each_summary_chunk(app, chunk, f);
+        }
+        let models: Vec<&str> = models.iter().map(String::as_str).collect();
+        let model_placeholders = (0..models.len())
+            .map(|i| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(",");
+        let after_idx = 2 + models.len();
+        let after_next = after_idx + 1;
+        let after_last = after_idx + 2;
+        let limit_idx = after_idx + 3;
+        let sql = format!(
+            "SELECT id, app, ts_seconds, ts_nanos, model_raw, model_identity, project_key,
+                    input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+                    cache_write_5m, cache_write_1h
+             FROM usage_events
+             WHERE (?1 IS NULL OR app = ?1)
+               AND (app = 'claude-code' OR origin_rank >= 1)
+               AND model_identity IN ({model_placeholders})
+               AND (?{after_idx} IS NULL
+                    OR (ts_seconds, ts_nanos, id) > (?{after_idx}, ?{after_next}, ?{after_last}))
+             ORDER BY ts_seconds, ts_nanos, id
+             LIMIT ?{limit_idx}",
+        );
+        let batch = chunk.max(1) as i64;
+        let mut after: Option<(i64, i64, i64)> = None;
+        loop {
+            let rows = {
+                let conn = self.lock();
+                let mut stmt = conn.prepare(&sql)?;
+                let (s, n, i) = match after {
+                    Some(v) => (Some(v.0), Some(v.1), Some(v.2)),
+                    None => (None, None, None),
+                };
+                let mut args: Vec<rusqlite::types::Value> = Vec::with_capacity(limit_idx);
+                args.push(
+                    app.map(|a| rusqlite::types::Value::Text(a.as_str().to_string()))
+                        .unwrap_or(rusqlite::types::Value::Null),
+                );
+                args.extend(
+                    models
+                        .iter()
+                        .map(|m| rusqlite::types::Value::Text((*m).to_string())),
+                );
+                args.push(s.map_or(rusqlite::types::Value::Null, |v| {
+                    rusqlite::types::Value::Integer(v)
+                }));
+                args.push(n.map_or(rusqlite::types::Value::Null, |v| {
+                    rusqlite::types::Value::Integer(v)
+                }));
+                args.push(i.map_or(rusqlite::types::Value::Null, |v| {
+                    rusqlite::types::Value::Integer(v)
+                }));
+                args.push(rusqlite::types::Value::Integer(batch));
+                let mapped =
+                    stmt.query_map(rusqlite::params_from_iter(args), row_to_summary_event)?;
+                let mut out = Vec::new();
+                for r in mapped {
+                    out.push(r?);
+                }
+                out
+            };
+            if rows.is_empty() {
+                return Ok(());
+            }
+            after = rows
+                .last()
+                .map(|r| (r.ts.as_second(), r.ts.subsec_nanosecond() as i64, r.id));
+            f(&rows)?;
+        }
+    }
     pub fn close(&mut self) {
         if self.closed {
             return;
@@ -3763,6 +3946,61 @@ fn row_to_stored_rollup(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRollup>
         import_at: r
             .get::<_, Option<String>>(15)?
             .and_then(|s| s.trim().parse::<jiff::Timestamp>().ok()),
+    })
+}
+
+fn row_to_summary_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<SummaryEvent> {
+    let raw_app: String = r.get(1)?;
+    let app = parse_agent(&raw_app).map_err(|e| conversion_error(1, e))?;
+    Ok(SummaryEvent {
+        id: r.get(0)?,
+        app,
+        ts: timestamp_from_parts(r.get(2)?, r.get(3)?),
+        model_raw: r.get(4)?,
+        model_identity: r.get(5)?,
+        project_key: r.get(6)?,
+        tokens: token_counts_from_row(r, 7, 8, 9, 10, 11, 12)?,
+    })
+}
+
+/// 四桶 + N18 缓存写分档的统一读取：两列都非 NULL 才是可信分档（写入端
+/// 保证两键齐且和等于总量）；缺任一列 = 分项未知。
+fn token_counts_from_row(
+    r: &rusqlite::Row<'_>,
+    input_idx: usize,
+    output_idx: usize,
+    cache_write_idx: usize,
+    cache_read_idx: usize,
+    five_min_idx: usize,
+    one_hour_idx: usize,
+) -> rusqlite::Result<TokenCounts> {
+    let (five_min, one_hour) = (
+        r.get::<_, Option<String>>(five_min_idx)?,
+        r.get::<_, Option<String>>(one_hour_idx)?,
+    );
+    let cache_write = u64_from_row(r, cache_write_idx)?;
+    let split = match (five_min, one_hour) {
+        (Some(f), Some(o)) => {
+            let f = parse_u64_text(&f, "cache_write_5m")
+                .map_err(|e| conversion_error(five_min_idx, e))?;
+            let o = parse_u64_text(&o, "cache_write_1h")
+                .map_err(|e| conversion_error(one_hour_idx, e))?;
+            if f.checked_add(o) == Some(cache_write) {
+                (f, o, true)
+            } else {
+                (0, 0, false)
+            }
+        }
+        _ => (0, 0, false),
+    };
+    Ok(TokenCounts {
+        input: u64_from_row(r, input_idx)?,
+        output: u64_from_row(r, output_idx)?,
+        cache_write,
+        cache_read: u64_from_row(r, cache_read_idx)?,
+        cache_write_5m: split.0,
+        cache_write_1h: split.1,
+        cache_write_split_known: split.2,
     })
 }
 

@@ -254,6 +254,78 @@ describe("useUsageQuery 单一查询身份（U04）", () => {
     w.unmount();
   });
 
+  it("filter_changes_reuse_committed_history_while_manual_refresh_collects", async () => {
+    setPreferences({ kind: "days", days: 7 });
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    expect(lastBegin()).toMatchObject({ collect: true, trigger: "startup" });
+
+    const before = beginCalls();
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls()).toBe(before + 1);
+    expect(lastBegin(), "筛选变化只读已提交历史").toMatchObject({
+      by: "project",
+      collect: false,
+      trigger: "filter",
+    });
+
+    api.manualRefresh();
+    await flushPromises();
+    expect(lastBegin(), "显式刷新仍先采集").toMatchObject({
+      collect: true,
+      trigger: "manual",
+    });
+    w.unmount();
+  });
+
+  it("rapid_filter_changes_keep_only_latest_batch_and_never_collect", async () => {
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    const before = beginCalls();
+
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    api.by.value = "agent";
+    await nextTick();
+    await flushPromises();
+    api.agent.value = "claude";
+    await nextTick();
+    await flushPromises();
+
+    expect(beginCalls()).toBe(before + 3);
+    expect(lastBegin()).toMatchObject({
+      by: "agent",
+      agent: "claude",
+      collect: false,
+      trigger: "filter",
+    });
+    // 每个新批次都建新会话；旧响应由代次守卫丢弃（见 late_append 回归）。
+    expect(api.loading.value).toBe(false);
+    w.unmount();
+  });
+
+  it("hidden_filter_change_reactivates_as_filter_batch_not_collect", async () => {
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    api.setVisible(false);
+    api.by.value = "model";
+    await nextTick();
+    await flushPromises();
+    const before = beginCalls();
+    api.setVisible(true);
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls()).toBe(before + 1);
+    expect(lastBegin()).toMatchObject({ collect: false, trigger: "filter" });
+    w.unmount();
+  });
+
   it("local_retry_resends_only_failed_side：局部重试只重发失败的一侧", async () => {
     let failEvents = true;
     let failSummary = false;
@@ -830,7 +902,7 @@ describe("useUsageQuery 自动刷新调度（U06）", () => {
       api.preset.value = { kind: "days", days: 7 };
       await flushPromises();
       expect(beginCalls()).toBe(2);
-      expect(lastBegin()).toMatchObject({ days: 7, collect: true, trigger: "manual" });
+      expect(lastBegin()).toMatchObject({ days: 7, collect: false, trigger: "filter" });
 
       // 两个通知通道可能晚于这次查询完成；事务已经覆盖其代次。
       emitUsageUpdated(5);

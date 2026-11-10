@@ -173,9 +173,11 @@ const CLOCK_CHECK_INTERVAL_MS = 60_000;
 
 /// 批次来源：决定 `query_begin` 的 `collect` 与 `trigger`。
 /// - `startup`：启动首批查询，先采集（与既有行为一致）；
-/// - `manual`：用户操作（筛选变化、手动刷新、模式切换、回到页面），先采集；
+/// - `manual`：用户明确刷新/重抓，先采集；
+/// - `filter`：筛选/时间/时区变化，只读已提交历史；最近采集键不命中时由
+///   后端退回采集（应用范围扩展、来源或价格配置变化）；
 /// - `auto`：自动刷新（事件通知、时间窗口到期），**不重复采集**，只读已提交的历史。
-type BatchSource = "startup" | "manual" | "auto";
+type BatchSource = "startup" | "manual" | "filter" | "auto";
 
 /// 自动刷新被让位的原因：`data` = 有新数据；`window` = 时间范围到期。
 type AutoReason = "data" | "window";
@@ -274,6 +276,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   /// 待刷新标记：隐藏期间的所有刷新触发都只置位，回到页面时合并成一批。
   const pendingRefresh = ref(false);
   let pendingManual = false;
+  let pendingFilter = false;
   let pendingAuto: AutoReason | null = null;
   /// U06：最近一次已知的历史库代次——收到的 `usage-updated` 与查询句柄的
   /// `generation` 两者取最大（只反映"历史库到哪一代"）。
@@ -364,11 +367,11 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     sessionReady.value = false;
     batchRollups = rollupsMode.value;
     // 参数在 async 函数体首个 await 之前同步求值，与 epoch 一一对应。
-    // **U06 接入点**：按批次来源（启动/手动/自动）决定是否先采集——自动刷新
-    // 传 `collect: false, trigger: "auto"`，只基于已提交的历史建快照；缓存缺失
-    // 或来源配置身份不一致时后端会退回采集。
+    // **U06/F03 接入点**：启动与显式刷新先采集；筛选与自动刷新传
+    // `collect: false`，只基于已提交的历史建快照；最近采集键不命中时后端
+    // 会退回采集，绝不返回空结果。
     beginPromise = (async () => {
-      const collect = batchSource !== "auto";
+      const collect = batchSource === "startup" || batchSource === "manual";
       const trigger = batchSource;
       try {
         const h = await invoke<QueryHandle>("query_begin", {
@@ -618,13 +621,14 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   });
 
   /// U04：可见时立刻发起一批；隐藏时只置待刷新标记（回到页面时合并成一批）。
-  function scheduleBatchRefresh(): void {
+  function scheduleBatchRefresh(source: "manual" | "filter" = "manual"): void {
     if (!visible.value) {
       pendingRefresh.value = true;
       pendingManual = true;
+      pendingFilter = source === "filter";
       return;
     }
-    startRefreshBatch("manual");
+    startRefreshBatch(source);
   }
 
   /// C4/F03：手动刷新——以当前筛选重跑两条查询；也是用户操作。
@@ -1114,15 +1118,18 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     void nextTick(() => {
       if (disposed || !visible.value) return;
       const manual = pendingManual;
+      const filter = pendingFilter;
       const auto = pendingAuto;
       pendingRefresh.value = false;
       pendingManual = false;
+      pendingFilter = false;
       pendingAuto = null;
       // 回到页面：只发起一批刷新，筛选、下钻与滚动位置都不动；顺带重查来源
-      // 状态（隐藏期间可能改过来源目录）。
+      // 状态（隐藏期间可能改过来源目录）。隐藏期间的筛选变化复用已提交历史，
+      // 其他手动刷新仍先采集。
       if (manual) {
         void loadSources();
-        startRefreshBatch("manual");
+        startRefreshBatch(filter ? "filter" : "manual");
       } else if (auto) {
         requestAutoRefresh(auto);
       } else {
@@ -1274,7 +1281,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   /// 查询；隐藏时只标记）。
   watch([by, agent, preset, rollupsMode], () => {
     persistFilters();
-    scheduleBatchRefresh();
+    scheduleBatchRefresh("filter");
   });
   /// 下钻是同一 query_id 内的明细子查询：可见时重扫明细，隐藏时合并到待刷新。
   watch(drill, () => {
@@ -1282,12 +1289,13 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     if (!visible.value) {
       pendingRefresh.value = true;
       pendingManual = true;
+      pendingFilter = true;
       return;
     }
     void loadEvents();
   });
-  /// 时区不是偏好（唯一来源是 settings.toml），但影响统计口径。
-  watch(tz, () => scheduleBatchRefresh());
+  /// 时区不是偏好（唯一来源是 settings.toml），但影响统计口径；只重查历史。
+  watch(tz, () => scheduleBatchRefresh("filter"));
   /// refreshKey 是程序触发（价格同步、设置保存成功等）：新批次但不算用户操作。
   watch(
     () => opts.refreshKey(),

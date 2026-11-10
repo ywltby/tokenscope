@@ -2000,6 +2000,50 @@ impl TimeBounds {
     /// 事件是否落在冻结区间内。**两种模式都先排除晚于 `as_of` 的记录**——
     /// 采集/解析可能带来未来时间戳（时钟偏移、伪造行），范围查询不得把
     /// "还没发生"的用量算进来（U01）。全部时间不设范围。
+    /// SQLite 行读取的秒级粗窗口：自然日取本地午夜边界，时刻模式取精确端点。
+    /// 只用于让 SQL 跳过明显范围外的行；调用方仍用 [`Self::matches`] 复核。
+    pub(crate) fn row_window(&self, tz: &TimeZone) -> Result<crate::history::RowWindow> {
+        use crate::history::RowWindow;
+        match self {
+            Self::Unbounded => Ok(RowWindow::default()),
+            Self::Days { from, to, as_of } => {
+                let start_secs = from
+                    .map(|d| d.to_zoned(tz.clone()).map(|z| z.timestamp().as_second()))
+                    .transpose()
+                    .map_err(|e| anyhow::anyhow!("自然日窗口起点换算失败：{e}"))?;
+                let end_secs = match to {
+                    Some(d) => Some(
+                        d.tomorrow()
+                            .map_err(|e| anyhow::anyhow!("自然日窗口终点换算失败：{e}"))?
+                            .to_zoned(tz.clone())
+                            .map_err(|e| anyhow::anyhow!("自然日窗口终点换算失败：{e}"))?
+                            .timestamp()
+                            .as_second()
+                            - 1,
+                    ),
+                    None => Some(as_of.as_second()),
+                };
+                Ok(RowWindow {
+                    start_secs,
+                    end_secs: end_secs.map(|end| end.min(as_of.as_second())),
+                })
+            }
+            Self::Instant {
+                start,
+                end_exclusive,
+                as_of,
+                ..
+            } => Ok(RowWindow {
+                start_secs: Some(start.as_second()),
+                end_secs: Some(
+                    end_exclusive
+                        .map_or(as_of.as_second(), |end| end.as_second())
+                        .min(as_of.as_second()),
+                ),
+            }),
+        }
+    }
+
     pub(crate) fn matches(&self, ts: jiff::Timestamp, tz: &TimeZone) -> bool {
         match self {
             Self::Unbounded => true,
@@ -2088,6 +2132,23 @@ pub(crate) type DetailBuckets = std::collections::HashMap<
     std::collections::HashMap<(String, String, String), DetailBucketStat>,
 >;
 
+/// Acceptance：覆盖桶扫描实际看到的事件数（证明只为有日汇总的应用/桶扫描）。
+#[cfg(feature = "acceptance")]
+static DETAIL_BUCKET_EVENTS_SCANNED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Acceptance：取走并清零覆盖桶扫描事件数。
+#[cfg(feature = "acceptance")]
+#[doc(hidden)]
+pub fn take_detail_bucket_scan_count_for_tests() -> u64 {
+    DETAIL_BUCKET_EVENTS_SCANNED.swap(0, std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(feature = "acceptance")]
+fn note_detail_bucket_event_scanned() {
+    DETAIL_BUCKET_EVENTS_SCANNED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// 单个明细桶的可核对统计（只累加，不回读事件）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct DetailBucketStat {
@@ -2127,8 +2188,22 @@ pub(crate) fn collect_detail_buckets(
     // 先建立的那份快照里，因此必须按明细计入（可能与较晚批次重复，另行披露）。
     // 同桶多行都取不到时刻（旧库迁移遗留）→ 起点缺失，整桶明细都算快照内。
     let mut starts: RollupStarts = std::collections::HashMap::new();
+    let mut apps_for_tz: std::collections::HashMap<String, std::collections::HashSet<AgentKind>> =
+        std::collections::HashMap::new();
+    let mut day_app_for_tz: std::collections::HashMap<
+        String,
+        std::collections::HashSet<(String, AgentKind)>,
+    > = std::collections::HashMap::new();
     for r in rollups {
         let identity = crate::model_identity::ModelIdentity::parse(&r.model).identity_key();
+        apps_for_tz
+            .entry(r.source_tz.clone())
+            .or_default()
+            .insert(r.app);
+        day_app_for_tz
+            .entry(r.source_tz.clone())
+            .or_default()
+            .insert((r.day.clone(), r.app));
         let entry = starts
             .entry(r.source_tz.clone())
             .or_default()
@@ -2145,14 +2220,35 @@ pub(crate) fn collect_detail_buckets(
         let Ok(source_tz) = jiff::tz::TimeZone::get(&tz_name) else {
             continue;
         };
+        let apps = apps_for_tz.remove(&tz_name).unwrap_or_default();
+        let day_app = day_app_for_tz.remove(&tz_name).unwrap_or_default();
+        let models: std::collections::HashSet<String> = starts_for_tz
+            .keys()
+            .map(|(_, _, model)| model.clone())
+            .collect();
         let entry = out.entry(tz_name.clone()).or_default();
-        read.for_each_chunk(app, 4096, &mut |events| {
+        // 只为已有日汇总涉及的应用/等价模型读取事件；单一应用时在 SQL 层
+        // 收窄，多应用时在回调内跳过，避免为无关应用做日期/模型归一化。
+        let scan_app = if apps.len() == 1 {
+            apps.iter().next().copied()
+        } else {
+            app
+        };
+        read.for_each_summary_chunk_for_models(scan_app, &models, 4096, &mut |events| {
             for e in events {
-                let key = (
-                    e.ts.to_zoned(source_tz.clone()).date().to_string(),
-                    e.app.as_str().to_string(),
-                    crate::model_identity::ModelIdentity::parse(&e.model_raw).identity_key(),
-                );
+                #[cfg(feature = "acceptance")]
+                note_detail_bucket_event_scanned();
+                if !apps.contains(&e.app) {
+                    continue;
+                }
+                let day = e.ts.to_zoned(source_tz.clone()).date().to_string();
+                if !day_app.contains(&(day.clone(), e.app)) {
+                    continue;
+                }
+                let key = (day, e.app.as_str().to_string(), e.model_identity.clone());
+                let Some(start) = starts_for_tz.get(&key) else {
+                    continue;
+                };
                 let stat = entry.entry(key.clone()).or_default();
                 // SF08：聚合口径全链路受检——桶统计同样不回绕、不饱和。
                 stat.requests = stat
@@ -2165,10 +2261,9 @@ pub(crate) fn collect_detail_buckets(
                     .ok_or_else(|| anyhow::anyhow!("明细桶 token 累计超出可表示范围"))?;
                 // 快照内 = 事件时间不晚于覆盖起点；边界不可确认时整桶按快照内
                 // 处理（信任汇总、不重复计入，并另行披露可能的少算）。
-                let in_snapshot = match starts_for_tz.get(&key) {
-                    None => false,
-                    Some(start) if start.unknown => true,
-                    Some(start) => start.since.is_none_or(|at| e.ts <= at),
+                let in_snapshot = match start.unknown {
+                    true => true,
+                    false => start.since.is_none_or(|at| e.ts <= at),
                 };
                 if in_snapshot {
                     stat.snapshot_requests = stat
@@ -2755,7 +2850,7 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
     // （不晚于来源快照建立时刻）的明细被跳过；起点之后的请求照常计入。
     state.set_covered_detail(&selection.covered_detail);
     let pricing = snapshot.pricing().clone();
-    snapshot.for_each_event(&mut |e| state.push_event(e, &pricing))?;
+    snapshot.for_each_stored_event(&mut |e| state.push_stored_event(e, &pricing))?;
     for r in &selection.contributions {
         state.push_rollup(r)?;
     }
@@ -2920,74 +3015,39 @@ pub(crate) fn query_events_from(
     let mut total: u64 = 0;
     let mut rows: Vec<EventRow> = Vec::new();
     let pricing = snapshot.pricing().clone();
-    snapshot.for_each_row_event(PAGE_SCAN_BATCH, &mut |row, e| {
-        let day_ok = filter
-            .day
-            .as_ref()
-            .is_none_or(|d| e.ts.to_zoned(snapshot.tz.clone()).date().to_string() == *d);
-        let model_ok = model_key.as_ref().is_none_or(|k| {
-            crate::model_identity::ModelIdentity::parse(&e.model).identity_key() == *k
-        });
-        let project_ok = filter.project.as_ref().is_none_or(|p| e.project == *p);
-        if !(day_ok && model_ok && project_ok) {
-            return Ok(());
+    if filter.model.is_none() && filter.project.is_none() && filter.day.is_none() {
+        // 无下钻：total 是快照行数，只读取当前页的 200 条事件本体。
+        let total_rows = snapshot.row_count();
+        total = total_rows as u64;
+        if after < total_rows && limit > 0 {
+            let end = (after + limit).min(total_rows);
+            snapshot.for_each_row_event_range(after, end, PAGE_SCAN_BATCH, &mut |row, e| {
+                rows.push(build_event_row(snapshot, row, e, &drill_fp, &pricing)?);
+                Ok(())
+            })?;
         }
-        let position = row.index;
-        total += 1;
-        if position < after || rows.len() >= limit {
-            return Ok(());
-        }
-        // B3：部分计价模型的明细行展示已计价小计（unknown 分项随总计披露）。
-        // Task 6：同一次 estimate 同时产出 cost_usd 与 breakdown，前端不重算。
-        let estimate = pricing.estimate(&e.model, &TokenCounts::from_event(e), e.ts);
-        let cost_usd = estimate.as_ref().map(|est| est.cost);
-        let cost_breakdown = estimate.map(|est| EventCostBreakdown {
-            matched: est.matched.expect("estimate 命中必有候选元数据"),
-            basis: est.basis,
-            basis_value: est.basis_value,
-            segment_label: est.segment_label,
-            lines: est.lines,
-            cost_usd: est.cost,
-            unknown: est.unknown,
-            complete: est.complete,
-            excluded_candidate_warning: est.excluded_candidate_warning,
-            cache_write_split_estimated: est.cache_write_split_estimated,
-        });
-        let cursor = serde_json::to_string(&crate::query::PageCursor {
-            v: crate::query::CURSOR_VERSION,
-            qid: snapshot.query_id.clone(),
-            mfp: snapshot.main_fingerprint.clone(),
-            dfp: drill_fp.clone(),
-            ts: e.ts.to_string(),
-            rid: e.record_id.clone(),
-            seq: row.seq,
-        })
-        .unwrap_or_default();
-        rows.push(EventRow {
-            ts: e
-                .ts
-                .to_zoned(snapshot.tz.clone())
-                .strftime("%F %T")
-                .to_string(),
-            record_id: e.record_id.clone(),
-            cursor,
-            agent: e.agent.as_str(),
-            model: e.model.clone(),
-            session_id: e.session_id.clone(),
-            project: e.project.clone(),
-            session_initial_cwd: e.session_initial_cwd.clone(),
-            event_cwd: e.event_cwd.clone(),
-            input: e.input_tokens,
-            output: e.output_tokens,
-            cache_write: e.cache_write_tokens,
-            cache_read: e.cache_read_tokens,
-            cache_write_5m: e.cache_write_split_known.then_some(e.cache_write_5m),
-            cache_write_1h: e.cache_write_split_known.then_some(e.cache_write_1h),
-            cost_usd,
-            cost_breakdown,
-        });
-        Ok(())
-    })?;
+    } else {
+        snapshot.for_each_row_event(PAGE_SCAN_BATCH, &mut |row, e| {
+            let day_ok = filter
+                .day
+                .as_ref()
+                .is_none_or(|d| e.ts.to_zoned(snapshot.tz.clone()).date().to_string() == *d);
+            let model_ok = model_key.as_ref().is_none_or(|k| {
+                crate::model_identity::ModelIdentity::parse(&e.model).identity_key() == *k
+            });
+            let project_ok = filter.project.as_ref().is_none_or(|p| e.project == *p);
+            if !(day_ok && model_ok && project_ok) {
+                return Ok(());
+            }
+            let position = row.index;
+            total += 1;
+            if position < after || rows.len() >= limit {
+                return Ok(());
+            }
+            rows.push(build_event_row(snapshot, row, e, &drill_fp, &pricing)?);
+            Ok(())
+        })?;
+    }
     path_info!(
         snapshot.trigger.is_auto(),
         "明细完成（会话 {}）：筛选 模型={:?} 项目={:?} 日={:?}，返回 {} 行 / 共 {} 条，{} ms",
@@ -3005,6 +3065,64 @@ pub(crate) fn query_events_from(
         rows,
         total,
         warnings: snapshot.warnings(),
+    })
+}
+
+fn build_event_row(
+    snapshot: &crate::query::QuerySnapshot,
+    row: &crate::query::SnapshotRow,
+    e: &UsageEvent,
+    drill_fp: &str,
+    pricing: &crate::pricing::Pricing,
+) -> Result<EventRow> {
+    // B3：部分计价模型的明细行展示已计价小计（unknown 分项随总计披露）。
+    // Task 6：同一次 estimate 同时产出 cost_usd 与 breakdown，前端不重算。
+    let estimate = pricing.estimate(&e.model, &TokenCounts::from_event(e), e.ts);
+    let cost_usd = estimate.as_ref().map(|est| est.cost);
+    let cost_breakdown = estimate.map(|est| EventCostBreakdown {
+        matched: est.matched.expect("estimate 命中必有候选元数据"),
+        basis: est.basis,
+        basis_value: est.basis_value,
+        segment_label: est.segment_label,
+        lines: est.lines,
+        cost_usd: est.cost,
+        unknown: est.unknown,
+        complete: est.complete,
+        excluded_candidate_warning: est.excluded_candidate_warning,
+        cache_write_split_estimated: est.cache_write_split_estimated,
+    });
+    let cursor = serde_json::to_string(&crate::query::PageCursor {
+        v: crate::query::CURSOR_VERSION,
+        qid: snapshot.query_id.clone(),
+        mfp: snapshot.main_fingerprint.clone(),
+        dfp: drill_fp.to_string(),
+        ts: e.ts.to_string(),
+        rid: e.record_id.clone(),
+        seq: row.seq,
+    })
+    .unwrap_or_default();
+    Ok(EventRow {
+        ts: e
+            .ts
+            .to_zoned(snapshot.tz.clone())
+            .strftime("%F %T")
+            .to_string(),
+        record_id: e.record_id.clone(),
+        cursor,
+        agent: e.agent.as_str(),
+        model: e.model.clone(),
+        session_id: e.session_id.clone(),
+        project: e.project.clone(),
+        session_initial_cwd: e.session_initial_cwd.clone(),
+        event_cwd: e.event_cwd.clone(),
+        input: e.input_tokens,
+        output: e.output_tokens,
+        cache_write: e.cache_write_tokens,
+        cache_read: e.cache_read_tokens,
+        cache_write_5m: e.cache_write_split_known.then_some(e.cache_write_5m),
+        cache_write_1h: e.cache_write_split_known.then_some(e.cache_write_1h),
+        cost_usd,
+        cost_breakdown,
     })
 }
 
