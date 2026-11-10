@@ -1,7 +1,8 @@
 # CCS 历史补充与来源选择交付修复计划
 
 > 执行模型：使用 executing-plans 技能逐项实施。
-> 状态：**已实施（2026-11-10，待合并）**；T01–T03 完成，实测对账见 §5；产品发布状态见 §6，不代表用户已安装。
+> 状态：**已交付（2026-11-10）**：T01–T03 完成（实测对账见 §5），随 PR #56 合并
+> `58487a4` 发布 **v0.7.3**（核验记录见 §6）；"用户已安装"除外，见 §6。
 
 **Goal:** 补齐遗漏的 CCS 来源选择修复，验证会话删除后的已导入历史仍参与统计、重复导入幂等，并明确安装包实际包含哪些修复。
 
@@ -146,8 +147,24 @@ WAL）；产品走真实入口 `begin_query → query_summary`（`history_path` 
 
 ## 6. 交付状态
 
-- **PR 待合并**：`fix/ccs-rollup-source-selection`（整合最新 main + 0.7.3）。
-- **已合并 / 已发布 / 用户已安装**：均未发生（本轮不自动合并或发布）；v0.7.3 发布、
-  升级矩阵与标签核验在合并后由 Release 工作流执行，通过前不得记“已发布”。
-- 用户侧需升级到含本修复的版本并在正常采集后才会作用于其真实库；本机对账使用
-  只读副本，未修改任何真实数据。
+- **已合并**：PR #56 以 merge commit 合并到 main，合并提交
+  `58487a49a96bac9e7de053bd7affeb773e1199f8`（合并前 HEAD `8d19d8a` 的全部必需
+  检查成功、无 pending、`CLEAN`；PR 侧 `upgrade-chain` 按设计 skipped，不代替
+  发布验收）。
+- **已发布**：**v0.7.3**（预发布），标签 `v0.7.3` 实际解引用到
+  `58487a49a96bac9e7de053bd7affeb773e1199f8`；Release 工作流全绿：`gate`、
+  `build`、`install-test`、12 个单跳升级矩阵（0.1.0/0.4.0/0.5.9/0.5.13/0.6.0/
+  0.7.2 × present/deleted）、`upgrade-chain (present)`、`upgrade-chain (deleted)`、
+  `publish`。合并提交的 CI 与 Native UI 也完成（Native UI 首跑
+  `ui-system` 场景因 WebView 只见 `about:blank` 的启动时序偶发失败——同作业
+  首场景 25/25 通过、同内容提交在 PR 侧连过两次、历史 40 次同类失败 7 次；
+  仅重跑该失败作业后通过，未改动任何代码或检查）。
+- **资产核验**：安装包 `TokenScope_v0.7.3_windows-x64-setup.exe` SHA256
+  `0ea55b72f89a28f3210afe0c5e6f005a44005b311740a22b1219aec7d3afa2d2` 与
+  `SHA256SUMS.txt` 及 API digest 逐项一致；`build-metadata.json` 记录
+  version 0.7.3、commit `58487a4`，本地下载复算与 API digest 一致；四项资产
+  （安装包、SHA256SUMS、build-metadata、provenance.sigstore）齐全。
+- **用户已安装**：未发生，也无法由本仓库验证。升级到 v0.7.3 后已导入的 CCS
+  历史按三向选择规则直接参与统计，**无需清库或重新导入**；CCS 后续新增数据
+  可在设置页再次手动导入，已有事实按内容去重（同内容零增量）。
+- 本机对账全程使用只读副本，未修改任何真实数据；无需要用户介入的阻断。
