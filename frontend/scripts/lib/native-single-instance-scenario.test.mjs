@@ -10,6 +10,7 @@ import {
   acceptanceIdentifier,
   atomicWriteTmpExempted,
   transientArtifactExempted,
+  webviewDbtmpExempted,
 } from "./native-single-instance.mjs";
 
 const BASE = "io.github.ywltby.tokenscope";
@@ -481,5 +482,33 @@ describe("验收隔离走查的瞬时产物豁免（2026-11-05 竞态修复）",
   it("受控历史库 sidecar 的既有豁免保持不变", () => {
     const wal = path.join(root, "tokenscope", "history.db-wal");
     expect(transientArtifactExempted(root, "ENOENT", wal)).toBe(true);
+  });
+
+  // 2026-11-12 Runner 实测（run 43082991197）：WebView2 自身的 LevelDB 临时文件
+  // `webview\EBWebView\Default\Extension Scripts\000001.dbtmp` 在走查与 lstat 之间
+  // 被浏览器进程删除——与 SQLite sidecar / 原子写 tmp 同属"走查时在、lstat 时没了"
+  // 的正常生命周期。豁免只认隔离根内 webview 数据目录下的 *.dbtmp。
+  it("WebView2 的 *.dbtmp 临时文件在 webview 数据目录内消失属正常生命周期", () => {
+    const dbtmp = path.join(root, "webview", "EBWebView", "Default", "Extension Scripts", "000001.dbtmp");
+    expect(webviewDbtmpExempted(root, "ENOENT", dbtmp)).toBe(true);
+    expect(transientArtifactExempted(root, "ENOENT", dbtmp)).toBe(true);
+  });
+
+  it("dbtmp 豁免收紧：非 ENOENT、根外、非 webview 目录、其他扩展名都不豁免", () => {
+    const dbtmp = path.join(root, "webview", "EBWebView", "Default", "Extension Scripts", "000001.dbtmp");
+    expect(webviewDbtmpExempted(root, "EACCES", dbtmp)).toBe(false);
+    expect(
+      webviewDbtmpExempted(root, "ENOENT", path.join(os.tmpdir(), "elsewhere", "webview", "x.dbtmp")),
+    ).toBe(false);
+    expect(webviewDbtmpExempted(root, "ENOENT", path.join(root, "tokenscope", "x.dbtmp"))).toBe(
+      false,
+    );
+    expect(
+      webviewDbtmpExempted(root, "ENOENT", path.join(root, "webview", "EBWebView", "keep.json")),
+    ).toBe(false);
+    // dbtmp 在根外或别的目录里仍按"走查后被删"拒绝
+    expect(transientArtifactExempted(root, "ENOENT", path.join(root, "tokenscope", "x.dbtmp"))).toBe(
+      false,
+    );
   });
 });

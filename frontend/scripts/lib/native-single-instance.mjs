@@ -407,12 +407,37 @@ export function atomicWriteTmpExempted(root, code, filePath) {
 }
 
 /**
+ * WebView2 自身临时文件的 ENOENT 豁免（2026-11-12 Runner 实测竞态修复）。
+ *
+ * `webview\EBWebView\**\*.dbtmp` 是 WebView2/Chromium 的 LevelDB 临时文件，
+ * 生命周期毫秒级：树走查发现它、等逐条 lstat 时已被浏览器进程删除。这与受控
+ * 历史库 sidecar、应用原子写 tmp 同属"走查时在、lstat 时没了"的正常生命周期，
+ * 不是"走查后被删除"的竞态或篡改（run 43082991197：
+ * `Default\Extension Scripts\000001.dbtmp` 无法检查）。
+ *
+ * 收紧条件：只认**隔离根内 webview 数据目录**（`<root>\webview\`）下的
+ * `.dbtmp` 后缀；webview 目录外的 dbtmp、其他文件、其他错误仍 fail closed。
+ */
+export function webviewDbtmpExempted(root, code, filePath) {
+  if (code !== "ENOENT") return false;
+  const raw = String(filePath ?? "");
+  if (!raw.toLowerCase().endsWith(".dbtmp")) return false;
+  const rootKey = comparePath(root);
+  if (!rootKey) return false;
+  const fileKey = comparePath(raw);
+  if (!fileKey.startsWith(rootKey + path.sep)) return false;
+  const webviewKey = comparePath(path.join(root, "webview") + path.sep);
+  return fileKey.startsWith(webviewKey);
+}
+
+/**
  * 走查两阶段共用的瞬时产物豁免：受控历史库 sidecar 或应用原子写临时文件。
  */
 export function transientArtifactExempted(root, code, filePath) {
   return (
     transientDbArtifactExempted(root, code, filePath) ||
-    atomicWriteTmpExempted(root, code, filePath)
+    atomicWriteTmpExempted(root, code, filePath) ||
+    webviewDbtmpExempted(root, code, filePath)
   );
 }
 
