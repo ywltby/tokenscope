@@ -10,7 +10,7 @@ import {
   acceptanceIdentifier,
   atomicWriteTmpExempted,
   transientArtifactExempted,
-  webviewDbtmpExempted,
+  webviewTransientTmpExempted,
 } from "./native-single-instance.mjs";
 
 const BASE = "io.github.ywltby.tokenscope";
@@ -484,29 +484,39 @@ describe("验收隔离走查的瞬时产物豁免（2026-11-05 竞态修复）",
     expect(transientArtifactExempted(root, "ENOENT", wal)).toBe(true);
   });
 
-  // 2026-11-12 Runner 实测（run 43082991197）：WebView2 自身的 LevelDB 临时文件
-  // `webview\EBWebView\Default\Extension Scripts\000001.dbtmp` 在走查与 lstat 之间
-  // 被浏览器进程删除——与 SQLite sidecar / 原子写 tmp 同属"走查时在、lstat 时没了"
-  // 的正常生命周期。豁免只认隔离根内 webview 数据目录下的 *.dbtmp。
-  it("WebView2 的 *.dbtmp 临时文件在 webview 数据目录内消失属正常生命周期", () => {
+  // 2026-11-12 Runner 实测（run 43082991197 / 43090898923）：WebView2/Chromium 在
+  // EBWebView 用户数据目录下持续产生毫秒级临时文件——LevelDB 的 `*.dbtmp`
+  // （Default\Extension Scripts\000001.dbtmp）与 Variations 种子下载的
+  // `VariationsSeedV2<guid>.tmp` 均在走查与 lstat 之间被浏览器进程删除。与 SQLite
+  // sidecar / 原子写 tmp 同属"走查时在、lstat 时没了"的正常生命周期。豁免只认
+  // 隔离根内 webview\EBWebView 子树下的 *.tmp。
+  it("WebView2 EBWebView 子树内的 *.tmp 临时文件消失属正常生命周期", () => {
     const dbtmp = path.join(root, "webview", "EBWebView", "Default", "Extension Scripts", "000001.dbtmp");
-    expect(webviewDbtmpExempted(root, "ENOENT", dbtmp)).toBe(true);
+    const seed = path.join(root, "webview", "EBWebView", "VariationsSeedV2e754b8e3-4be1-4065-b5a8-291895fb48f3.tmp");
+    expect(webviewTransientTmpExempted(root, "ENOENT", dbtmp)).toBe(true);
+    expect(webviewTransientTmpExempted(root, "ENOENT", seed)).toBe(true);
     expect(transientArtifactExempted(root, "ENOENT", dbtmp)).toBe(true);
+    expect(transientArtifactExempted(root, "ENOENT", seed)).toBe(true);
   });
 
-  it("dbtmp 豁免收紧：非 ENOENT、根外、非 webview 目录、其他扩展名都不豁免", () => {
+  it("EBWebView 临时文件豁免收紧：非 ENOENT、根外、EBWebView 之外、非 .tmp 后缀都不豁免", () => {
     const dbtmp = path.join(root, "webview", "EBWebView", "Default", "Extension Scripts", "000001.dbtmp");
-    expect(webviewDbtmpExempted(root, "EACCES", dbtmp)).toBe(false);
+    expect(webviewTransientTmpExempted(root, "EACCES", dbtmp)).toBe(false);
     expect(
-      webviewDbtmpExempted(root, "ENOENT", path.join(os.tmpdir(), "elsewhere", "webview", "x.dbtmp")),
+      webviewTransientTmpExempted(root, "ENOENT", path.join(os.tmpdir(), "elsewhere", "webview", "x.dbtmp")),
     ).toBe(false);
-    expect(webviewDbtmpExempted(root, "ENOENT", path.join(root, "tokenscope", "x.dbtmp"))).toBe(
+    // webview 数据目录下但不在 EBWebView 子树的 .tmp 不豁免（EBWebView 才是 Chromium 托管的临时目录层）
+    expect(webviewTransientTmpExempted(root, "ENOENT", path.join(root, "webview", "other", "x.tmp"))).toBe(
       false,
     );
+    // EBWebView 内的非临时文件（LOCK、settings.dat 等）消失仍按"走查后被删"拒绝
     expect(
-      webviewDbtmpExempted(root, "ENOENT", path.join(root, "webview", "EBWebView", "keep.json")),
+      webviewTransientTmpExempted(root, "ENOENT", path.join(root, "webview", "EBWebView", "keep.json")),
     ).toBe(false);
-    // dbtmp 在根外或别的目录里仍按"走查后被删"拒绝
+    expect(
+      webviewTransientTmpExempted(root, "ENOENT", path.join(root, "webview", "EBWebView", "Crashpad", "settings.dat")),
+    ).toBe(false);
+    // tokenscope 数据目录下的 dbtmp 不属于 WebView2，仍拒绝
     expect(transientArtifactExempted(root, "ENOENT", path.join(root, "tokenscope", "x.dbtmp"))).toBe(
       false,
     );
