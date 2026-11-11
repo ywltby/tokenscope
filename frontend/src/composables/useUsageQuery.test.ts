@@ -254,6 +254,412 @@ describe("useUsageQuery 单一查询身份（U04）", () => {
     w.unmount();
   });
 
+  it("filter_changes_reuse_committed_history_while_manual_refresh_collects", async () => {
+    setPreferences({ kind: "days", days: 7 });
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    expect(lastBegin()).toMatchObject({ collect: true, trigger: "startup" });
+
+    const before = beginCalls();
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls()).toBe(before + 1);
+    expect(lastBegin(), "筛选变化只读已提交历史").toMatchObject({
+      by: "project",
+      collect: false,
+      trigger: "filter",
+    });
+
+    api.manualRefresh();
+    await flushPromises();
+    expect(lastBegin(), "显式刷新仍先采集").toMatchObject({
+      collect: true,
+      trigger: "manual",
+    });
+    w.unmount();
+  });
+
+  it("rapid_filter_changes_keep_only_latest_batch_and_never_collect", async () => {
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    const before = beginCalls();
+
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    api.by.value = "agent";
+    await nextTick();
+    await flushPromises();
+    api.agent.value = "claude";
+    await nextTick();
+    await flushPromises();
+
+    expect(beginCalls()).toBe(before + 3);
+    expect(lastBegin()).toMatchObject({
+      by: "agent",
+      agent: "claude",
+      collect: false,
+      trigger: "filter",
+    });
+    // 每个新批次都建新会话；旧响应由代次守卫丢弃（见 late_append 回归）。
+    expect(api.loading.value).toBe(false);
+    w.unmount();
+  });
+
+  it("in_flight_batch_coalesces_later_selections_into_one_pending_batch", async () => {
+    // “一条在途，待执行只保留最后一次选择”：首批评 gate 住，门内的后续触发
+    // 不得立即再发查询，只把最后的选择留给批次结算后执行。
+    let releaseSummary!: (v: SummaryReport) => void;
+    let releaseEvents!: (v: EventList) => void;
+    let firstRound = true;
+    okMock({
+      query_summary: () => {
+        if (!firstRound) return Promise.resolve({ ...reportA, query_id: handle.queryId });
+        return new Promise<SummaryReport>((r) => (releaseSummary = r));
+      },
+      query_events: () => {
+        if (!firstRound) return Promise.resolve({ ...emptyList, query_id: handle.queryId });
+        return new Promise<EventList>((r) => (releaseEvents = r));
+      },
+    });
+    const w = mountHost();
+    await flushPromises();
+    expect(beginCalls(), "首批已发出并悬在在途").toBe(1);
+
+    // 在途门内连续触发：两次筛选变化 + 一次手动刷新——立即只应有一条查询在途。
+    api.by.value = "project";
+    await nextTick();
+    api.by.value = "agent";
+    await nextTick();
+    api.manualRefresh();
+    await nextTick();
+
+    expect(beginCalls(), "在途期间不得再发新查询").toBe(1);
+    expect(api.loading.value, "在途状态不被后续触发清掉").toBe(true);
+
+    // 结算在途批次：随后只执行**最后一次选择**（manual），不是逐个补发三批。
+    firstRound = false;
+    releaseSummary({ ...reportA, query_id: handle.queryId });
+    releaseEvents({ ...emptyList, query_id: handle.queryId });
+    await flushPromises();
+    expect(beginCalls(), "结算后按最后选择执行一批").toBe(2);
+    expect(lastBegin()).toMatchObject({ collect: true, trigger: "manual" });
+    expect(api.loading.value).toBe(false);
+    w.unmount();
+  });
+
+  it("queued_manual_intent_survives_later_filter_and_collects_latest_selection", async () => {
+    // 反例（PR #61 独立复核）：collect:false 的筛选批在途 → 手动刷新 → 再切
+    // 筛选。待执行**来源**被后到的筛选覆盖是正确的（最终用最新筛选），但
+    // 手动要求的采集不得丢失：结算后的待执行批必须 collect:true。
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    expect(lastBegin()).toMatchObject({ collect: true, trigger: "startup" });
+
+    // 从筛选批起挂起，制造"筛选批在途"。
+    let releaseSummary!: (v: SummaryReport) => void;
+    let releaseEvents!: (v: EventList) => void;
+    let gateFirstRound = true;
+    okMock({
+      query_summary: () =>
+        gateFirstRound
+          ? new Promise<SummaryReport>((r) => (releaseSummary = r))
+          : Promise.resolve({ ...reportA, query_id: handle.queryId }),
+      query_events: () =>
+        gateFirstRound
+          ? new Promise<EventList>((r) => (releaseEvents = r))
+          : Promise.resolve({ ...emptyList, query_id: handle.queryId }),
+    });
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    const before = beginCalls();
+    expect(lastBegin(), "筛选批在途（collect:false）").toMatchObject({
+      collect: false,
+      trigger: "filter",
+    });
+
+    // 手动刷新进入待执行；随后的筛选覆盖待执行来源。
+    api.manualRefresh();
+    api.by.value = "agent";
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "在途期间不新增批次").toBe(before);
+
+    // 在途批结算 → 待执行批：最新筛选 + 未被吞掉的手动采集意图。
+    gateFirstRound = false;
+    releaseSummary({ ...reportA, query_id: handle.queryId });
+    releaseEvents({ ...emptyList, query_id: handle.queryId });
+    await flushPromises();
+    expect(beginCalls(), "结算后只执行一批（最新筛选）").toBe(before + 1);
+    expect(lastBegin(), "手动采集意图不被筛选覆盖").toMatchObject({
+      by: "agent",
+      collect: true,
+    });
+    w.unmount();
+  });
+
+  it("consumed_manual_intent_does_not_recollect_on_plain_filter", async () => {
+    // 手动采集意图随成功消费后，普通筛选回到 collect:false——意图恰好
+    // 消费一次，不向后续批次泄漏。
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    let releaseSummary!: (v: SummaryReport) => void;
+    let releaseEvents!: (v: EventList) => void;
+    let gateFirstRound = true;
+    okMock({
+      query_summary: () =>
+        gateFirstRound
+          ? new Promise<SummaryReport>((r) => (releaseSummary = r))
+          : Promise.resolve({ ...reportA, query_id: handle.queryId }),
+      query_events: () =>
+        gateFirstRound
+          ? new Promise<EventList>((r) => (releaseEvents = r))
+          : Promise.resolve({ ...emptyList, query_id: handle.queryId }),
+    });
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    api.manualRefresh();
+    api.by.value = "agent";
+    await nextTick();
+    gateFirstRound = false;
+    releaseSummary({ ...reportA, query_id: handle.queryId });
+    releaseEvents({ ...emptyList, query_id: handle.queryId });
+    await flushPromises();
+    expect(lastBegin(), "待执行批用最新筛选并采集").toMatchObject({
+      by: "agent",
+      collect: true,
+    });
+
+    api.by.value = "model";
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin(), "意图只消费一次").toMatchObject({
+      by: "model",
+      collect: false,
+      trigger: "filter",
+    });
+    w.unmount();
+  });
+
+  it("failed_pending_collection_keeps_intent_for_retry", async () => {
+    // 待执行批携带手动采集意图但 begin 失败：意图不被错误标为已消费，
+    // 后续筛选批仍先采集（失败保留给重试）。
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    let beginFails = false;
+    let gateFirstRound = true;
+    let releaseSummary!: (v: SummaryReport) => void;
+    let releaseEvents!: (v: EventList) => void;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") {
+        if (beginFails) return Promise.reject(new Error("begin boom"));
+        return Promise.resolve(handle);
+      }
+      if (cmd === "query_summary") {
+        return gateFirstRound
+          ? new Promise<SummaryReport>((r) => (releaseSummary = r))
+          : Promise.resolve({ ...reportA, query_id: handle.queryId });
+      }
+      if (cmd === "query_events") {
+        return gateFirstRound
+          ? new Promise<EventList>((r) => (releaseEvents = r))
+          : Promise.resolve({ ...emptyList, query_id: handle.queryId });
+      }
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    api.manualRefresh();
+    api.by.value = "agent";
+    await nextTick();
+
+    // 在途批结算 → 待执行批（采集意图在身）但 begin 失败。
+    beginFails = true;
+    gateFirstRound = false;
+    releaseSummary({ ...reportA, query_id: handle.queryId });
+    releaseEvents({ ...emptyList, query_id: handle.queryId });
+    await flushPromises();
+    expect(beginCalls(), "待执行批已尝试（startup+筛选+待执行 = 3 次 begin）").toBe(3);
+    expect(api.summaryError.value).toBe("begin boom");
+
+    // 失败未消费意图：下一次筛选批仍先采集。
+    beginFails = false;
+    api.by.value = "model";
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin(), "失败后意图保留给重试").toMatchObject({
+      by: "model",
+      collect: true,
+      trigger: "filter",
+    });
+    w.unmount();
+  });
+
+  it("hidden_filter_change_reactivates_as_filter_batch_not_collect", async () => {
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    api.setVisible(false);
+    api.by.value = "model";
+    await nextTick();
+    await flushPromises();
+    const before = beginCalls();
+    api.setVisible(true);
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls()).toBe(before + 1);
+    expect(lastBegin()).toMatchObject({ collect: false, trigger: "filter" });
+    w.unmount();
+  });
+
+  it("hidden_data_changed_event_forces_collect_even_before_prop_update", async () => {
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    api.setVisible(false);
+    window.dispatchEvent(new Event("tokenscope-data-changed"));
+    await nextTick();
+    await flushPromises();
+    api.setVisible(true);
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin(), "隐藏期间的价格/来源写入必须在激活时先采集").toMatchObject({
+      collect: true,
+      trigger: "manual",
+    });
+
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin()).toMatchObject({ collect: false, trigger: "filter" });
+    w.unmount();
+  });
+
+  it("same_change_via_prop_and_document_event_coalesces_into_one_batch", async () => {
+    // MainApp 的设置页写入会**同时**递增 refreshKey prop 并广播携带同一
+    // token 的文档事件（事件同步先到、prop 随渲染后到）——这是同一次变更的
+    // 两个信号，必须合并为一批；两条独立路径（只递增 prop 或只广播事件）
+    // 仍各自调度。
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    expect(lastBegin()).toMatchObject({ collect: true, trigger: "startup" });
+
+    const before = beginCalls();
+    // 同一次变更：事件先到（token = 递增后的 refreshKey 值），prop 后到。
+    window.dispatchEvent(new CustomEvent("tokenscope-data-changed", { detail: 1 }));
+    await w.setProps({ refreshKey: 1 });
+    await nextTick();
+    await flushPromises();
+
+    expect(beginCalls(), "同一次变更只排一批").toBe(before + 1);
+    expect(lastBegin(), "程序触发的批次先采集").toMatchObject({
+      collect: true,
+      trigger: "manual",
+    });
+
+    // 只递增 prop（无事件广播）：仍须调度。
+    const propOnly = beginCalls();
+    await w.setProps({ refreshKey: 2 });
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "prop-only 仍调度").toBe(propOnly + 1);
+
+    // 只广播事件（KeepAlive 停用期 prop 不可靠）：仍须调度；迟到的同 token
+    // prop 回声不再重复排批。
+    const eventOnly = beginCalls();
+    window.dispatchEvent(new CustomEvent("tokenscope-data-changed", { detail: 3 }));
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "event-only 仍调度").toBe(eventOnly + 1);
+    await w.setProps({ refreshKey: 3 });
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "同 token 的迟到 prop 回声不再排批").toBe(eventOnly + 1);
+
+    // 反例（PR #61 独立复核）：同 token 回声若不同步 lastRefreshKey，下一次
+    // 普通 begin 会把同一次变更再当成未处理程序刷新，多加一次采集意图——
+    // 普通筛选必须回到 collect:false。
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin(), "回声同步基线后普通筛选不重采集").toMatchObject({
+      by: "project",
+      collect: false,
+      trigger: "filter",
+    });
+    w.unmount();
+  });
+
+  it("prop_first_then_same_token_event_is_still_one_change", async () => {
+    // prop 先到（无事件）：正常调度；携带相同 token 的事件后到视为回声，
+    // 同一次变更仍只处理一次。
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    const before = beginCalls();
+    await w.setProps({ refreshKey: 1 });
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "prop 先到正常调度").toBe(before + 1);
+    expect(lastBegin()).toMatchObject({ collect: true, trigger: "manual" });
+
+    window.dispatchEvent(new CustomEvent("tokenscope-data-changed", { detail: 1 }));
+    await nextTick();
+    await flushPromises();
+    expect(beginCalls(), "同 token 事件回声不重复排批").toBe(before + 1);
+
+    // 同 token 回声同步基线后，普通筛选回到 collect:false。
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin(), "回声同步基线后普通筛选不重采集").toMatchObject({
+      by: "project",
+      collect: false,
+      trigger: "filter",
+    });
+    w.unmount();
+  });
+
+  it("program_refresh_forces_next_collection_even_when_it_is_a_filter_batch", async () => {
+    okMock();
+    const w = mountHost();
+    await flushPromises();
+    expect(lastBegin()).toMatchObject({ collect: true, trigger: "startup" });
+
+    // 价格同步/来源保存后的 refreshKey 在设置页（隐藏）到达：下一批即使
+    // 来自筛选变化也必须先采集，不能复用同步前的价格/来源快照。
+    api.setVisible(false);
+    await w.setProps({ refreshKey: 1 });
+    await nextTick();
+    await flushPromises();
+    api.setVisible(true);
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin(), "回到汇总页的程序刷新先采集").toMatchObject({ collect: true });
+
+    api.by.value = "project";
+    await nextTick();
+    await flushPromises();
+    expect(lastBegin(), "消费后的普通筛选回到只读历史").toMatchObject({
+      by: "project",
+      collect: false,
+      trigger: "filter",
+    });
+    w.unmount();
+  });
+
   it("local_retry_resends_only_failed_side：局部重试只重发失败的一侧", async () => {
     let failEvents = true;
     let failSummary = false;
@@ -830,7 +1236,7 @@ describe("useUsageQuery 自动刷新调度（U06）", () => {
       api.preset.value = { kind: "days", days: 7 };
       await flushPromises();
       expect(beginCalls()).toBe(2);
-      expect(lastBegin()).toMatchObject({ days: 7, collect: true, trigger: "manual" });
+      expect(lastBegin()).toMatchObject({ days: 7, collect: false, trigger: "filter" });
 
       // 两个通知通道可能晚于这次查询完成；事务已经覆盖其代次。
       emitUsageUpdated(5);

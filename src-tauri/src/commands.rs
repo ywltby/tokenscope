@@ -203,6 +203,8 @@ fn parse_rollups_mode(value: Option<&str>) -> Result<tokenscope::report::Rollups
 fn parse_trigger(value: Option<&str>) -> Result<tokenscope::report::Trigger, String> {
     match value.map(str::trim) {
         None | Some("") | Some("manual") => Ok(tokenscope::report::Trigger::Manual),
+        // 筛选变化不是自动后台读取：按用户操作分级，但不触发采集。
+        Some("filter") => Ok(tokenscope::report::Trigger::Manual),
         Some("startup") => Ok(tokenscope::report::Trigger::Startup),
         Some("auto") => Ok(tokenscope::report::Trigger::Auto),
         Some(other) => Err(format!("未知的查询触发来源：{other}")),

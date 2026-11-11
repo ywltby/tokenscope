@@ -30,6 +30,7 @@ import { useTokenColors } from "./composables/tokenColors";
 import { useAutoHideScrollbars } from "./composables/autoHideScrollbars";
 import { initTimezone } from "./composables/timezone";
 import { naiveDateLocale, naiveLocale, useAppLocale, useT } from "./lib/i18n";
+import { emitDataChanged } from "./lib/dataEvents";
 
 const t = useT();
 const { locale } = useAppLocale();
@@ -81,6 +82,14 @@ const page = ref<"summary" | "settings">("summary");
 // 设置页 data-changed 在来源保存、重扫、导入或价格同步后递增 refreshKey；
 // 汇总页可见时立刻刷新，隐藏时只置待刷新标记。
 const refreshKey = ref(0);
+/// 设置页写入完成：递增 prop（可见时刷新）+ 广播文档事件（KeepAlive 停用
+/// 期间也能让隐藏中的查询状态记号"下一批必须先采集"）。两个信号携带同一
+/// token（递增后的 refreshKey 值），查询侧据此把"同一次变更"合并为一批，
+/// 不再各自排批刷两次。
+function onDataChanged(): void {
+  refreshKey.value += 1;
+  emitDataChanged(refreshKey.value);
+}
 
 // U04 切页保留：滚动容器在应用壳里（汇总页与设置页共用），离开某页时记录
 // 它的 scrollTop，进入时恢复——否则切页会把新页面留在上一页的滚动位置。
@@ -297,7 +306,7 @@ function onCloseCancel(): void {
                   :refresh-key="refreshKey"
                   @go-settings="page = 'settings'"
                 />
-                <Settings v-else :refresh-key="0" @data-changed="refreshKey++" />
+                <Settings v-else :refresh-key="0" @data-changed="onDataChanged" />
               </KeepAlive>
             </template>
           </main>

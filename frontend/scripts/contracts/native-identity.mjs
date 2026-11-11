@@ -54,6 +54,26 @@ export async function nativeIdentity(context) {
     await dimension(nextQueryDimension(selected));
     return ui.querySnapshot();
   };
+  /// 删除来源文件后必须验证"显式刷新仍先采集"：筛选/维度变化现在只读已提交
+  /// 历史，不能再用切换维度冒充一次采集。
+  const manualRefreshSnapshot = async () => {
+    const beforeCalls = (await ui.readProbe()).invokes.length;
+    await ui.click(ui.page().getByRole("button", { name: "刷新", exact: true }));
+    await ui.waitUntil(
+      async () => {
+        const calls = (await ui.readProbe()).invokes.slice(beforeCalls);
+        return calls.some(
+          (call) =>
+            call.command === "query_begin" &&
+            call.status === "fulfilled" &&
+            call.args?.collect === true,
+        );
+      },
+      20000,
+      "删除来源文件后的显式刷新完成（collect=true）",
+    );
+    return ui.querySnapshot();
+  };
   const summaryLabels = () =>
     ui
       .page()
@@ -308,7 +328,7 @@ export async function nativeIdentity(context) {
       "删除合成日志后真实下一轮采集完成",
     );
     const queriedAtMs = await ui.page().evaluate(() => performance.now());
-    const after = await queryAfterUiChange();
+    const after = await manualRefreshSnapshot();
     const afterQueryCall = (await ui.readProbe()).invokes.findLast(
       (record) =>
         record.command === "query_begin" &&

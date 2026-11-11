@@ -120,19 +120,19 @@ impl QuerySnapshot {
     // `for_each_row_event` / `event_by_row`（按批读取，内存与批大小成正比），
     // 否则明细分页会绕过会话预算。
 
-    /// H07：**流式**遍历主过滤后的事件（按行序），不物化整份历史。
-    /// 供汇总聚合使用；`f` 返回 Err 时立即中止并透传。
-    pub(crate) fn for_each_event(
+    /// 汇总热路径：直接遍历库内事件的窄投影，避免逐条构造 `UsageEvent` 或
+    /// 读取会话/cwd 等宽字段。聚合只借用字段，口径与明细路径相同。
+    pub(crate) fn for_each_stored_event(
         &self,
-        f: &mut dyn FnMut(&UsageEvent) -> Result<()>,
+        f: &mut dyn FnMut(&crate::history::SummaryEvent) -> Result<()>,
     ) -> Result<()> {
         let ids: Vec<i64> = self.rows.iter().map(|r| r.event_id).collect();
-        let mut by_id: std::collections::HashMap<i64, UsageEvent> =
+        let mut by_id: std::collections::HashMap<i64, crate::history::SummaryEvent> =
             std::collections::HashMap::with_capacity(ids.len().min(4096));
         for chunk in ids.chunks(4096) {
             by_id.clear();
-            for stored in self.read.fetch_events(chunk)? {
-                by_id.insert(stored.id, report::usage_event_of(&stored));
+            for stored in self.read.fetch_summary_events(chunk)? {
+                by_id.insert(stored.id, stored);
             }
             for id in chunk {
                 let e = by_id
@@ -152,8 +152,24 @@ impl QuerySnapshot {
         batch: usize,
         f: &mut dyn FnMut(&SnapshotRow, &UsageEvent) -> Result<()>,
     ) -> Result<()> {
+        self.for_each_row_event_range(0, self.rows.len(), batch, f)
+    }
+
+    /// 固定行区间 `[start, end)` 的分批读取：无下钻的第一页只取实际返回的
+    /// 行，total 直接取快照行数，不再为计数读取全部事件本体。
+    pub(crate) fn for_each_row_event_range(
+        &self,
+        start: usize,
+        end: usize,
+        batch: usize,
+        f: &mut dyn FnMut(&SnapshotRow, &UsageEvent) -> Result<()>,
+    ) -> Result<()> {
         let batch = batch.max(1);
-        for chunk in self.rows.chunks(batch) {
+        let end = end.min(self.rows.len());
+        if start >= end {
+            return Ok(());
+        }
+        for chunk in self.rows[start..end].chunks(batch) {
             let ids: Vec<i64> = chunk.iter().map(|r| r.event_id).collect();
             let mut by_id: std::collections::HashMap<i64, UsageEvent> =
                 std::collections::HashMap::with_capacity(ids.len());
@@ -168,6 +184,11 @@ impl QuerySnapshot {
             }
         }
         Ok(())
+    }
+
+    /// 快照行数（明细 total 的冻结规模）。
+    pub(crate) fn row_count(&self) -> usize {
+        self.rows.len()
     }
 
     /// 冻结的时间边界（`days`/`from`/`to`/`rolling_hours`/自定义时刻在建快照
@@ -550,11 +571,13 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
 
     // 冻结的时间边界：days/from/to 只解析一次（SF05），汇总与分页共用。
     let time_bounds = report::TimeBounds::resolve(opts, &as_of)?;
+    let row_window = time_bounds.row_window(&tz)?;
 
-    // 主过滤（时间范围）在**流式读取**时应用：把通过过滤的行建成轻量索引
-    // （事件主键 + 时间戳 + 记录标识），不把事件本体读进内存。
+    // 主过滤（时间范围）在**流式读取**时应用：SQL 先按秒级窗口跳过范围外
+    // 的行，再把命中行建成轻量索引（事件主键 + 时间戳 + 记录标识），不把
+    // 事件本体读进内存；精确边界仍在下面复核。
     let mut keyed: Vec<(i64, jiff::Timestamp, String)> = Vec::new();
-    read.stream_rows(opts.agent, &mut |row| {
+    read.stream_rows_window(opts.agent, row_window, &mut |row| {
         if time_bounds.matches(row.ts, &tz) {
             keyed.push((row.id, row.ts, row.record_id));
         }
@@ -610,7 +633,16 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
     // 因此直接传入 rollups——起点来自同一份快照，不会与判定用的时间分叉。
     let day_sensitive = opts.by == crate::aggregate::GroupBy::Day || !time_bounds.is_unbounded();
     let rollups = read.rollups(opts.agent)?;
-    let buckets = report::collect_detail_buckets(&read, opts.agent, &rollups)?;
+    // 无汇总、仅明细模式或时刻范围都不需要覆盖桶统计：省掉对全部事件的
+    // 日期/模型归一化扫描；原有范围与时区诊断仍由 select 读取 rollups 给出。
+    let needs_detail_buckets = !rollups.is_empty()
+        && opts.rollups != report::RollupsMode::DetailOnly
+        && !matches!(time_bounds, report::TimeBounds::Instant { .. });
+    let buckets = if needs_detail_buckets {
+        report::collect_detail_buckets(&read, opts.agent, &rollups)?
+    } else {
+        report::DetailBuckets::new()
+    };
     let rollup_selection = report::select_rollup_contributions(
         &buckets,
         &rollups,

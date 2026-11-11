@@ -2,6 +2,8 @@
 
 > 用户已于 2026-11-10 确认继续推进。按任务顺序实施，先补失败测试再实现。
 
+> 交付状态：PR #60 已合并（`46f0dc7`），[v0.7.4](https://github.com/ywltby/tokenscope/releases/tag/v0.7.4) 已发布；[Release 42767766041](https://github.com/ywltby/tokenscope/actions/runs/42767766041) 的 19 个作业（含安装、12 组单跳与双链）成功，主线 CI/Native UI 最终通过。主线 contracts 首轮 tasklist 0.5 秒探针超时，仅重跑失败作业后恢复，探针稳定性未宣称修复。本轮没有复现真实启动空白，根因仍开放。当前用户优先任务见[筛选与图表修复](2026-11-10-filter-query-chart-performance.md)。
+
 **目标**：下一次启动空白时，在清理进程前留下足够证据，区分原生窗口创建挂起、真实导航失败与 Playwright 观察失同步；本批不宣称已修复空白根因。
 
 **架构**：仅验收构建向 stderr 输出阶段标记；Node 启动器在原失败判定之后、有界收取独立 HTTP/CDP 只读快照和所属宿主的最小线程转储，再执行原有清理。原始失败不被诊断成功或失败覆盖。

@@ -592,7 +592,7 @@ function rowsFor(kind) {
   }
 }
 
-function dimGroups(kind, by) {
+function dimGroups(kind, by, session) {
   const base =
     kind === "multi"
       ? MULTI_GROUPS
@@ -605,6 +605,62 @@ function dimGroups(kind, by) {
             : kind === "empty"
               ? []
               : NORMAL_GROUPS;
+  if (kind === "multi") {
+    // F02 浏览器契约：同一份真实组件随筛选状态产生 30/20/4/14/0 个类别，
+    // 用于验证高度变化、维度切换、按日 7→14 与空→有值时的柱形中间帧。
+    const range = session?.range ?? null;
+    const allTime = range == null;
+    const daySpan = (() => {
+      if (allTime) return 7;
+      if (range.granularity === "instant") return 0;
+      const from = Date.parse(`${range.from}T00:00:00Z`);
+      const to = Date.parse(`${range.to}T00:00:00Z`);
+      if (!Number.isFinite(from) || !Number.isFinite(to)) return 7;
+      return Math.max(1, Math.round((to - from) / 86_400_000) + 1);
+    })();
+    if (daySpan === 0) return [];
+    const picks = (indices) => indices.map((index) => base[index]).filter(Boolean);
+    if (by === "day") {
+      // 不同日期跨度使用不同取值，保证 7→14 也是真实数值过渡而不是只多几根柱。
+      const indices =
+        daySpan <= 1
+          ? [0]
+          : daySpan <= 7
+            ? [0, 2, 4, 6, 8, 10, 12]
+            : Array.from({ length: daySpan }, (_, i) => i);
+      return picks(indices)
+        .slice(0, daySpan)
+        .map((g, i) => ({
+          ...g,
+          key: `2026-09-${String(i + 1).padStart(2, "0")}`,
+          label: null,
+        }));
+    }
+    const modelIndices = allTime
+      ? Array.from({ length: 30 }, (_, i) => i)
+      : daySpan <= 1
+        ? [0, 8, 16, 24]
+        : daySpan <= 7
+          ? Array.from({ length: 30 }, (_, i) => i).filter((i) => i % 3 !== 2)
+          : daySpan <= 14
+            ? Array.from({ length: 14 }, (_, i) => i * 2)
+            : Array.from({ length: 30 }, (_, i) => i);
+    const modelSpan = picks(modelIndices);
+    if (by === "model")
+      return modelSpan.map((g, i) => ({ ...g, key: `multi-model-${i}`, label: null }));
+    if (by === "project")
+      return modelSpan.map((g, i) => ({
+        ...g,
+        key: `/proj/multi-${i}`,
+        label: `multi-project-${i}`,
+      }));
+    if (by === "agent")
+      return [
+        group("claude-code", 200000, { output: 100000, cost_usd: 0.8, requests: 30 }),
+        group("codex", 80000, { output: 40000, cost_usd: 0.3, requests: 12 }),
+      ];
+    return modelSpan;
+  }
   if (by === "model") return base.map((g, i) => ({ ...g, key: `${kind}-model-${i}`, label: null }));
   if (by === "project")
     return base.map((g, i) => ({ ...g, key: `/proj/${kind}-${i}`, label: `${kind}-project-${i}` }));
@@ -751,7 +807,7 @@ function createSessionTable(cfg) {
   function summary(id) {
     const s = sessions.get(id);
     if (!s) return reject(`query_expired: 会话 ${id} 不存在或已失效，请刷新重试`);
-    const real = cfg.groupsOf(s.by);
+    const real = cfg.groupsOf(s.by, s);
     const total = totals(real);
     return {
       query_id: id,
@@ -838,7 +894,7 @@ export function buildFixture(name) {
   const rows = rowsFor(cfg.kind);
   const table = createSessionTable({
     rows,
-    groupsOf: (by) => dimGroups(cfg.kind, by),
+    groupsOf: (by, session) => dimGroups(cfg.kind, by, session),
     pageSize: cfg.pageSize ?? 2,
     expireAfterPages: cfg.expireAfterPages ?? Infinity,
   });

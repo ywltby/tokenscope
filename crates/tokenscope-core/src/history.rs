@@ -631,6 +631,18 @@ pub struct ImportOutcome {
     pub rollups: RollupSummary,
 }
 
+/// 查询汇总所需的库内事件窄投影（不读取会话/cwd/事件键等宽字段）。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SummaryEvent {
+    pub id: i64,
+    pub app: AgentKind,
+    pub ts: Timestamp,
+    pub model_raw: String,
+    pub model_identity: String,
+    pub project_key: Option<String>,
+    pub tokens: TokenCounts,
+}
+
 /// 库内事件（读取形态）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredEvent {
@@ -682,6 +694,14 @@ pub struct RowRef {
     pub record_id: String,
 }
 
+/// 行读取的秒级粗时间窗口（含端点）。精确边界仍由调用方复核；这里只让
+/// SQLite 跳过明显在范围外的行，不改变任何统计口径。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RowWindow {
+    pub start_secs: Option<i64>,
+    pub end_secs: Option<i64>,
+}
+
 /// H07：只读快照——独立只读连接 + 显式读事务。
 ///
 /// WAL 模式下，读事务在第一次读取时建立一致视图：采集或导入提交之后，**旧
@@ -707,6 +727,30 @@ impl std::fmt::Debug for ReadSnapshot {
         f.debug_struct("ReadSnapshot")
             .field("closed", &self.closed)
             .finish()
+    }
+}
+
+/// 一批采集写入中的真实纠错意图（只读预扫结果）。
+#[derive(Debug, Default)]
+struct CorrectionPlan {
+    /// 会被合并、升级、转移或改写的既有事实 ID（去重后计"组"）。
+    rows: std::collections::HashSet<i64>,
+    /// 获准走纠错通道的写入索引；未列入的写入若在事务内触发纠错则整批拒绝。
+    writes: std::collections::HashSet<usize>,
+}
+
+impl CorrectionPlan {
+    fn groups(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn allows(&self, index: usize) -> bool {
+        self.writes.contains(&index)
+    }
+
+    fn mark(&mut self, index: usize, ids: impl IntoIterator<Item = i64>) {
+        self.rows.extend(ids);
+        self.writes.insert(index);
     }
 }
 
@@ -804,6 +848,18 @@ impl ReadSnapshot {
         batch: usize,
         f: &mut dyn FnMut(&[RowRef]) -> Result<()>,
     ) -> Result<()> {
+        self.for_each_row_batch_window(app, RowWindow::default(), batch, f)
+    }
+
+    /// 带时间窗口的分批行遍历。窗口按 `ts_seconds` 粗过滤（秒级含端点），
+    /// 调用方仍用精确时间边界复核；只减少范围外的 SQLite 行，不改变语义。
+    pub fn for_each_row_batch_window(
+        &self,
+        app: Option<AgentKind>,
+        window: RowWindow,
+        batch: usize,
+        f: &mut dyn FnMut(&[RowRef]) -> Result<()>,
+    ) -> Result<()> {
         let batch = batch.max(1) as i64;
         let mut after: Option<(i64, i64, i64)> = None;
         loop {
@@ -814,16 +870,27 @@ impl ReadSnapshot {
                      FROM usage_events
                      WHERE (?1 IS NULL OR app = ?1)
                        AND (app = 'claude-code' OR origin_rank >= 1)
-                       AND (?2 IS NULL OR (ts_seconds, ts_nanos, id) > (?2, ?3, ?4))
+                       AND (?2 IS NULL OR ts_seconds >= ?2)
+                       AND (?3 IS NULL OR ts_seconds <= ?3)
+                       AND (?4 IS NULL OR (ts_seconds, ts_nanos, id) > (?4, ?5, ?6))
                      ORDER BY ts_seconds, ts_nanos, id
-                     LIMIT ?5",
+                     LIMIT ?7",
                 )?;
                 let (s, n, i) = match after {
                     Some(v) => (Some(v.0), Some(v.1), Some(v.2)),
                     None => (None, None, None),
                 };
-                let mapped =
-                    stmt.query_map(params![app.map(|a| a.as_str()), s, n, i, batch], |row| {
+                let mapped = stmt.query_map(
+                    params![
+                        app.map(|a| a.as_str()),
+                        window.start_secs,
+                        window.end_secs,
+                        s,
+                        n,
+                        i,
+                        batch
+                    ],
+                    |row| {
                         let id: i64 = row.get(0)?;
                         let secs: i64 = row.get(1)?;
                         let nanos: i64 = row.get(2)?;
@@ -833,7 +900,8 @@ impl ReadSnapshot {
                             ts: timestamp_from_parts(secs, nanos),
                             record_id: record_id.unwrap_or_default(),
                         })
-                    })?;
+                    },
+                )?;
                 let mut out = Vec::new();
                 for r in mapped {
                     out.push(r?);
@@ -857,7 +925,17 @@ impl ReadSnapshot {
         app: Option<AgentKind>,
         f: &mut dyn FnMut(RowRef) -> Result<()>,
     ) -> Result<()> {
-        self.for_each_row_batch(app, 1024, &mut |rows| {
+        self.stream_rows_window(app, RowWindow::default(), f)
+    }
+
+    /// 带时间窗口的行索引遍历（窗口只作秒级粗过滤，精确边界由调用方复核）。
+    pub fn stream_rows_window(
+        &self,
+        app: Option<AgentKind>,
+        window: RowWindow,
+        f: &mut dyn FnMut(RowRef) -> Result<()>,
+    ) -> Result<()> {
+        self.for_each_row_batch_window(app, window, 1024, &mut |rows| {
             for r in rows {
                 f(r.clone())?;
             }
@@ -872,10 +950,35 @@ impl ReadSnapshot {
         chunk: usize,
         f: &mut dyn FnMut(&[StoredEvent]) -> Result<()>,
     ) -> Result<()> {
-        self.for_each_row_batch(app, chunk, &mut |rows| {
+        self.for_each_chunk_window(app, RowWindow::default(), chunk, f)
+    }
+
+    /// 带时间窗口的事件本体分批读取（窗口语义同 [`Self::stream_rows_window`]）。
+    pub fn for_each_chunk_window(
+        &self,
+        app: Option<AgentKind>,
+        window: RowWindow,
+        chunk: usize,
+        f: &mut dyn FnMut(&[StoredEvent]) -> Result<()>,
+    ) -> Result<()> {
+        self.for_each_row_batch_window(app, window, chunk, &mut |rows| {
             let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
             // 锁已释放：`fetch_events` 在这里取锁不会与行扫描互锁。
             let events = self.fetch_events(&ids)?;
+            f(&events)
+        })
+    }
+
+    /// 汇总/覆盖统计的窄投影分批读取（不读会话、cwd、事件键等宽字段）。
+    pub(crate) fn for_each_summary_chunk(
+        &self,
+        app: Option<AgentKind>,
+        chunk: usize,
+        f: &mut dyn FnMut(&[SummaryEvent]) -> Result<()>,
+    ) -> Result<()> {
+        self.for_each_row_batch_window(app, RowWindow::default(), chunk, &mut |rows| {
+            let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+            let events = self.fetch_summary_events(&ids)?;
             f(&events)
         })
     }
@@ -907,7 +1010,111 @@ impl ReadSnapshot {
         Ok(out)
     }
 
-    /// 释放读事务（闲置淘汰、TTL 到期或显式关闭时调用；Drop 时兜底）。
+    /// 汇总热路径：只取聚合与计价需要的列（不含事件键、会话、cwd 等宽字段）。
+    pub(crate) fn fetch_summary_events(&self, ids: &[i64]) -> Result<Vec<SummaryEvent>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, app, ts_seconds, ts_nanos, model_raw, model_identity, project_key,
+                    input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+                    cache_write_5m, cache_write_1h
+             FROM usage_events WHERE id IN ({placeholders})"
+        );
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), row_to_summary_event)?;
+        let mut out = Vec::with_capacity(ids.len());
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// 覆盖桶统计：按应用（可选）与等价模型集合读取窄投影，只为确有日汇总
+    /// 的模型读取事件；模型集合过大时退回完整窄投影，不改变正确性。
+    pub(crate) fn for_each_summary_chunk_for_models(
+        &self,
+        app: Option<AgentKind>,
+        models: &std::collections::HashSet<String>,
+        chunk: usize,
+        f: &mut dyn FnMut(&[SummaryEvent]) -> Result<()>,
+    ) -> Result<()> {
+        if models.is_empty() || models.len() > 256 {
+            return self.for_each_summary_chunk(app, chunk, f);
+        }
+        let models: Vec<&str> = models.iter().map(String::as_str).collect();
+        let model_placeholders = (0..models.len())
+            .map(|i| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(",");
+        let after_idx = 2 + models.len();
+        let after_next = after_idx + 1;
+        let after_last = after_idx + 2;
+        let limit_idx = after_idx + 3;
+        let sql = format!(
+            "SELECT id, app, ts_seconds, ts_nanos, model_raw, model_identity, project_key,
+                    input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+                    cache_write_5m, cache_write_1h
+             FROM usage_events
+             WHERE (?1 IS NULL OR app = ?1)
+               AND (app = 'claude-code' OR origin_rank >= 1)
+               AND model_identity IN ({model_placeholders})
+               AND (?{after_idx} IS NULL
+                    OR (ts_seconds, ts_nanos, id) > (?{after_idx}, ?{after_next}, ?{after_last}))
+             ORDER BY ts_seconds, ts_nanos, id
+             LIMIT ?{limit_idx}",
+        );
+        let batch = chunk.max(1) as i64;
+        let mut after: Option<(i64, i64, i64)> = None;
+        loop {
+            let rows = {
+                let conn = self.lock();
+                let mut stmt = conn.prepare(&sql)?;
+                let (s, n, i) = match after {
+                    Some(v) => (Some(v.0), Some(v.1), Some(v.2)),
+                    None => (None, None, None),
+                };
+                let mut args: Vec<rusqlite::types::Value> = Vec::with_capacity(limit_idx);
+                args.push(
+                    app.map(|a| rusqlite::types::Value::Text(a.as_str().to_string()))
+                        .unwrap_or(rusqlite::types::Value::Null),
+                );
+                args.extend(
+                    models
+                        .iter()
+                        .map(|m| rusqlite::types::Value::Text((*m).to_string())),
+                );
+                args.push(s.map_or(rusqlite::types::Value::Null, |v| {
+                    rusqlite::types::Value::Integer(v)
+                }));
+                args.push(n.map_or(rusqlite::types::Value::Null, |v| {
+                    rusqlite::types::Value::Integer(v)
+                }));
+                args.push(i.map_or(rusqlite::types::Value::Null, |v| {
+                    rusqlite::types::Value::Integer(v)
+                }));
+                args.push(rusqlite::types::Value::Integer(batch));
+                let mapped =
+                    stmt.query_map(rusqlite::params_from_iter(args), row_to_summary_event)?;
+                let mut out = Vec::new();
+                for r in mapped {
+                    out.push(r?);
+                }
+                out
+            };
+            if rows.is_empty() {
+                return Ok(());
+            }
+            after = rows
+                .last()
+                .map(|r| (r.ts.as_second(), r.ts.subsec_nanosecond() as i64, r.id));
+            f(&rows)?;
+        }
+    }
     pub fn close(&mut self) {
         if self.closed {
             return;
@@ -1408,19 +1615,23 @@ impl HistoryDb {
         if batch.is_empty() {
             return Ok(result);
         }
-        let correction_groups = self.count_pending_corrections(batch)?;
-        if correction_groups > 0 {
+        let corrections = self.pending_corrections(batch)?;
+        let correction_backup = if corrections.groups() > 0 {
             let backup = self.backup_before_correction()?;
             log::info!(
-                "跨会话去重/Codex 升级纠错：本轮改写 {correction_groups} 组旧事实；\
-                 纠错前备份：{}",
+                "计划纠错：本轮将改写 {} 组旧事实；纠错前备份：{}",
+                corrections.groups(),
                 backup.display()
             );
-        }
+            Some(backup)
+        } else {
+            None
+        };
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let generation = self.generation_in_tx(&tx)?;
         let mut changed = false;
-        for write in batch {
+        for (index, write) in batch.iter().enumerate() {
+            let allow_correction = corrections.allows(index);
             validate_write(write)?;
             let mut protected_replay = None;
             let native_codex =
@@ -1432,7 +1643,7 @@ impl HistoryDb {
                     &tx,
                     std::slice::from_ref(write),
                     generation,
-                    correction_groups > 0,
+                    allow_correction,
                 )?;
                 result.events.inserted_tokens = result
                     .events
@@ -1541,7 +1752,7 @@ impl HistoryDb {
                 &tx,
                 std::slice::from_ref(write),
                 generation,
-                correction_groups > 0,
+                allow_correction,
             )?;
             // 分项复用原内核，批次累计仍受检；溢出时包含此前纠正在内全部回滚。
             result.events.inserted_tokens = result
@@ -1564,48 +1775,106 @@ impl HistoryDb {
             bump_generation(&tx)?;
         }
         tx.commit()?;
+        if let Some(backup) = correction_backup {
+            log::info!(
+                "已完成纠错：本轮改写 {} 组旧事实；纠错前备份：{}",
+                corrections.groups(),
+                backup.display()
+            );
+        }
         Ok(result)
     }
 
-    /// 本轮采集需要合并的旧重复事实组数（只读预扫，不改变库内容）。
+    /// 本轮采集是否包含真实纠错意图，以及每一条写入是否获准走纠错通道。
     ///
-    /// 判定与事务内完全同源（同一个 [`lookup_hits`]）：预扫为正才生成纠错前
-    /// 备份，事务内若出现预扫未覆盖的合并则整批拒绝（绝不无备份改事实）。
-    ///
-    /// 2026-11-08 起同时统计 Codex 强响应的**旧事实升级**：写入携带旧解析器
-    /// 镜像来源键，该键命中已存行即意味着本轮会把旧行改写为强表示（改历史
-    /// 事实）——同样需要纠错前备份。同一旧行只计一次。
-    fn count_pending_corrections(&self, batch: &[EventWrite]) -> Result<usize> {
-        let mut groups = 0usize;
-        let mut upgrade_rows: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        for write in batch {
-            if copy_alias_value(write).is_some() && lookup_hits(&self.conn, write)?.ids.len() > 1 {
-                groups += 1;
+    /// 判定与事务内使用同一组事实：普通强身份重放（同一 `record_id` 的已有
+    /// 强事实）不算纠错；只有旧表示升级、多事实合并、镜像/别名/来源转移才
+    /// 需要纠错前备份。`writes` 为按索引获准的写入子集——一条写入需要备份
+    /// 不会顺带放开同批其它写入的纠错通道。
+    fn pending_corrections(&self, batch: &[EventWrite]) -> Result<CorrectionPlan> {
+        let mut plan = CorrectionPlan::default();
+        let hits: Vec<LookupHits> = batch
+            .iter()
+            .map(|write| lookup_hits(&self.conn, write))
+            .collect::<Result<_>>()?;
+        // 批内依赖：前面的强响应升级会把弱行改成强事实，后面的弱 count-only
+        // 即使预扫时仍看见弱归属，事务内也会遇到"已升级"的所有者。先收集本批
+        // 会被升级的既有行，弱写入据此保守地要求纠错通道。
+        let mut upgraded_rows: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for (write, hits) in batch.iter().zip(&hits) {
+            if write.app != AgentKind::Codex || write.record_id.is_none() {
+                continue;
+            }
+            for id in &hits.ids {
+                let record: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT record_id FROM usage_events WHERE id = ?1",
+                        params![id],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                if record.as_deref() != write.record_id.as_deref() {
+                    upgraded_rows.insert(*id);
+                }
+            }
+        }
+        for (index, (write, hits)) in batch.iter().zip(&hits).enumerate() {
+            if copy_alias_value(write).is_some() && hits.ids.len() > 1 {
+                plan.mark(index, hits.ids.iter().copied());
+                continue;
             }
             if write.app != AgentKind::Codex {
                 continue;
             }
-            for origin in &write.origins {
-                if origin.origin_kind != ORIGIN_KIND_NATIVE_FILE {
-                    continue;
+            if write.record_id.is_some() {
+                // 强响应命中已有行：只有同 record_id 的强事实是普通重放。
+                // 弱行（旧解析表示）或另一个强响应的行都意味着升级/转移。
+                let mut affected = Vec::new();
+                for id in &hits.ids {
+                    let record: Option<String> = self
+                        .conn
+                        .query_row(
+                            "SELECT record_id FROM usage_events WHERE id = ?1",
+                            params![id],
+                            |row| row.get(0),
+                        )
+                        .optional()?
+                        .flatten();
+                    if record.as_deref() != write.record_id.as_deref() {
+                        affected.push(*id);
+                    }
                 }
-                let hit: Option<i64> = self
-                    .conn
-                    .query_row(
-                        "SELECT event_id FROM event_origins
-                         WHERE origin_kind = ?1 AND origin_key = ?2",
-                        params![origin.origin_kind, origin.origin_key],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                if let Some(id) = hit
-                    && upgrade_rows.insert(id)
-                {
-                    groups += 1;
+                if !affected.is_empty() {
+                    plan.mark(index, affected);
+                }
+            } else {
+                // 弱 count-only：来源/弱别名仍指向已升级的强事实时，本次写入
+                // 会把证据转移到新的独立弱事实——真实纠错，必须先备份。
+                let mut affected = Vec::new();
+                for origin in &write.origins {
+                    if let Some(id) = origin_owner(&self.conn, origin)?
+                        && (upgraded_rows.contains(&id)
+                            || !identity_hit_allowed(&self.conn, true, id)?)
+                    {
+                        affected.push(id);
+                    }
+                }
+                for alias in &write.aliases {
+                    if let Some(id) = alias_owner(&self.conn, alias)?
+                        && (upgraded_rows.contains(&id)
+                            || !identity_hit_allowed(&self.conn, true, id)?)
+                    {
+                        affected.push(id);
+                    }
+                }
+                if !affected.is_empty() {
+                    plan.mark(index, affected);
                 }
             }
         }
-        Ok(groups)
+        Ok(plan)
     }
 
     /// 事实纠错前的可恢复备份（`VACUUM INTO` 独立文件）。
@@ -3088,6 +3357,29 @@ fn lookup_event(conn: &Connection, w: &EventWrite) -> Result<Option<StoredEvent>
     }
 }
 
+/// 来源记录当前归属的事件 ID。
+fn origin_owner(conn: &Connection, origin: &EventOrigin) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT event_id FROM event_origins WHERE origin_kind = ?1 AND origin_key = ?2",
+            params![origin.origin_kind, origin.origin_key],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// 身份别名当前归属的事件 ID。
+fn alias_owner(conn: &Connection, alias: &EventAlias) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT event_id FROM event_aliases
+              WHERE app = ?1 AND identity_scheme = ?2 AND identity_value = ?3",
+            params![alias.app.as_str(), alias.scheme, alias.value],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 fn lookup_hits(conn: &Connection, w: &EventWrite) -> Result<LookupHits> {
     let mut hits = LookupHits::default();
     let mut push = |id: i64| {
@@ -3654,6 +3946,61 @@ fn row_to_stored_rollup(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRollup>
         import_at: r
             .get::<_, Option<String>>(15)?
             .and_then(|s| s.trim().parse::<jiff::Timestamp>().ok()),
+    })
+}
+
+fn row_to_summary_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<SummaryEvent> {
+    let raw_app: String = r.get(1)?;
+    let app = parse_agent(&raw_app).map_err(|e| conversion_error(1, e))?;
+    Ok(SummaryEvent {
+        id: r.get(0)?,
+        app,
+        ts: timestamp_from_parts(r.get(2)?, r.get(3)?),
+        model_raw: r.get(4)?,
+        model_identity: r.get(5)?,
+        project_key: r.get(6)?,
+        tokens: token_counts_from_row(r, 7, 8, 9, 10, 11, 12)?,
+    })
+}
+
+/// 四桶 + N18 缓存写分档的统一读取：两列都非 NULL 才是可信分档（写入端
+/// 保证两键齐且和等于总量）；缺任一列 = 分项未知。
+fn token_counts_from_row(
+    r: &rusqlite::Row<'_>,
+    input_idx: usize,
+    output_idx: usize,
+    cache_write_idx: usize,
+    cache_read_idx: usize,
+    five_min_idx: usize,
+    one_hour_idx: usize,
+) -> rusqlite::Result<TokenCounts> {
+    let (five_min, one_hour) = (
+        r.get::<_, Option<String>>(five_min_idx)?,
+        r.get::<_, Option<String>>(one_hour_idx)?,
+    );
+    let cache_write = u64_from_row(r, cache_write_idx)?;
+    let split = match (five_min, one_hour) {
+        (Some(f), Some(o)) => {
+            let f = parse_u64_text(&f, "cache_write_5m")
+                .map_err(|e| conversion_error(five_min_idx, e))?;
+            let o = parse_u64_text(&o, "cache_write_1h")
+                .map_err(|e| conversion_error(one_hour_idx, e))?;
+            if f.checked_add(o) == Some(cache_write) {
+                (f, o, true)
+            } else {
+                (0, 0, false)
+            }
+        }
+        _ => (0, 0, false),
+    };
+    Ok(TokenCounts {
+        input: u64_from_row(r, input_idx)?,
+        output: u64_from_row(r, output_idx)?,
+        cache_write,
+        cache_read: u64_from_row(r, cache_read_idx)?,
+        cache_write_5m: split.0,
+        cache_write_1h: split.1,
+        cache_write_split_known: split.2,
     })
 }
 

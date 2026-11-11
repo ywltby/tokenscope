@@ -224,7 +224,7 @@ describe("Dashboard 查询编排", () => {
     expect(state(w)["loading"]).toBe(false);
   });
 
-  it("dashboard_latest_query_wins：乱序返回时只保留最新查询的结果", async () => {
+  it("dashboard_latest_query_wins：在途筛选变化合并为待执行批，最新结果胜出", async () => {
     const resolvers: ((v: SummaryReport) => void)[] = [];
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "query_begin") return Promise.resolve(queryInfo);
@@ -236,18 +236,21 @@ describe("Dashboard 查询编排", () => {
     });
     const w = mountDashboard();
     await flushPromises();
-    // 切换 agent 触发第二次汇总查询
+    // 切换 agent：首批在途（汇总挂起）→ 只记待执行，不立即发第二条汇总
     state(w)["agent"] = "claude";
     await nextTick();
     await flushPromises();
-    expect(resolvers.length).toBe(2);
-    resolvers[1](summaryB); // 新响应先回
+    expect(resolvers.length, "在途期间不发新查询").toBe(1);
+    // 首批结算 → 待执行批（claude）立即执行
+    resolvers[0](summaryA);
     await flushPromises();
-    resolvers[0](summaryA); // 旧响应后回，必须被丢弃
+    expect(resolvers.length, "结算后执行最后选择").toBe(2);
+    resolvers[1](summaryB); // 新响应先回
     await flushPromises();
     const report = state(w)["report"] as SummaryReport;
     expect(report.groups[0].key).toBe("2026-10-02");
     expect(state(w)["loading"]).toBe(false);
+    w.unmount();
   });
 
   it("ipc_error_visible：汇总失败有可见错误与重试，重试成功后恢复", async () => {
@@ -942,44 +945,48 @@ describe("视图快照查询身份（R04）", () => {
     return [promise, resolve];
   }
 
-  it("snapshot_waits_for_matching_summary_and_events：筛选不一致不落盘", async () => {
-    const [sumAll, resolveSumAll] = deferred<SummaryReport>();
-    const [evAll, resolveEvAll] = deferred<EventList>();
+  it("snapshot_waits_for_matching_summary_and_events：两侧齐备才落盘", async () => {
+    // 一条在途：首批原子完成后待执行批才发出，混代拼接不再由此路径产生；
+    // 不变量改为「批内两侧齐备才保存」——claude 明细先回、汇总未回时不落盘。
+    const [sumClaude, resolveSumClaude] = deferred<SummaryReport>();
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "query_begin") return Promise.resolve(queryInfo);
       if (cmd === "view_cache_load") return Promise.resolve(null);
       if (cmd === "query_summary") {
-        // 第一轮（all）挂起；切 claude 后的第二轮正常返回
+        // 第一轮（all）正常返回；结算后待执行批（claude）的汇总挂起
         return invokeMock.mock.calls.filter((c) => c[0] === "query_summary").length === 1
-          ? sumAll
-          : Promise.resolve(summaryB);
+          ? Promise.resolve(summaryA)
+          : sumClaude;
       }
-      if (cmd === "query_events") {
-        return invokeMock.mock.calls.filter((c) => c[0] === "query_events").length === 1
-          ? evAll
-          : Promise.resolve(events);
-      }
+      if (cmd === "query_events") return Promise.resolve(events);
       if (cmd === "source_status") return Promise.resolve([]);
       return Promise.resolve(null);
     });
     const w = mountDashboard();
     await flushPromises();
-    // 切 claude：触发第二轮查询（第一轮 all 汇总仍挂起）
+    // 切 claude：首批在途 → 只记待执行；首批（all+all）原子完成并保存
     state(w)["agent"] = "claude";
     await flushPromises();
-    // claude 明细先回（此时汇总键仍是挂起的 all）→ 不得落盘
-    resolveEvAll(events);
+    const savesAfterFirst = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save");
+    for (const call of savesAfterFirst) {
+      const p = call[1] as { value: { filters: { agent: string } } };
+      expect(p.value.filters.agent).toBe("all"); // 首批两侧同口径才允许保存
+    }
+    // 待执行批（claude）发出：明细先回、汇总仍挂起 → 不得落盘
     await flushPromises();
-    // all 汇总随后才回（其捕获键 agent=all，与 claude 明细键不一致）→ 不得落盘
-    resolveSumAll(summaryA);
+    const savesBeforeClaudeSummary = invokeMock.mock.calls.filter(
+      (c) => c[0] === "view_cache_save",
+    ).length;
+    // claude 汇总落地 → 两侧齐备，允许同口径保存
+    resolveSumClaude(summaryB);
     await flushPromises();
     const saves = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save");
     for (const call of saves) {
       const p = call[1] as { value: { filters: { agent: string } } };
-      expect(p.value.filters.agent).toBe("claude"); // 只允许同口径保存
+      expect(["all", "claude"]).toContain(p.value.filters.agent); // 各保存都同口径
     }
-    // 之后 claude 汇总落地（summaryB 已在第二轮返回）→ 允许同口径保存
-    expect(saves.length).toBeGreaterThanOrEqual(1);
+    expect(saves.length, "claude 两侧齐备后落盘").toBeGreaterThan(savesBeforeClaudeSummary);
+    w.unmount();
   });
 
   it("failed_refresh_does_not_save_mixed_snapshot：汇总失败不落盘", async () => {

@@ -379,6 +379,45 @@ fn recent_collection_hits_only_matching_key() {
     std::fs::remove_dir_all(&other_dir).ok();
 }
 
+/// 价格输入文件变化后，`collect=false` 不得复用旧采集快照。
+#[test]
+fn pricing_file_change_invalidates_recent_collection() {
+    let _serial = RECENT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tmp_dir("recent-pricing");
+    let opts = base_opts(&dir);
+    write_claude_session(&dir.join("claude"), "s1", &[("m1", 10)]);
+    let pricing = dir.join("data").join("pricing.toml");
+    std::fs::write(
+        &pricing,
+        "[[model]]\nprefix = \"claude-opus-5-5\"\ninput = 1.0\noutput = 2.0\ncache_write = 1.0\ncache_read = 0.5\n",
+    )
+    .unwrap();
+    report::collect_only(&opts).unwrap();
+    let first = query::begin_query_with(&opts, false).unwrap();
+    let first_rev = query::query_summary(&first.query_id)
+        .unwrap()
+        .pricing_revision;
+
+    std::fs::write(
+        &pricing,
+        "[[model]]\nprefix = \"claude-opus-5-5\"\ninput = 9.0\noutput = 18.0\ncache_write = 9.0\ncache_read = 4.5\n",
+    )
+    .unwrap();
+    let second = query::begin_query_with(&opts, false).unwrap();
+    let second_rev = query::query_summary(&second.query_id)
+        .unwrap()
+        .pricing_revision;
+    assert_ne!(
+        first_rev, second_rev,
+        "价格文件变化后必须重新采集，不能复用旧价格快照"
+    );
+    assert!(
+        second_rev.contains("pricing.toml:sha:"),
+        "新查询应使用文件内容修订：{second_rev}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// U06-4c：`begin_query` 仍等价于 `begin_query_with(_, true)`（既有调用点零改动），
 /// 且 `Trigger::Auto` 沿快照传递。
 #[test]
