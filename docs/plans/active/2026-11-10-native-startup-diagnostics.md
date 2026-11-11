@@ -3,6 +3,8 @@
 > 用户已于 2026-11-10 确认继续推进。按任务顺序实施，先补失败测试再实现。
 
 > 交付状态：PR #60 已合并（`46f0dc7`），[v0.7.4](https://github.com/ywltby/tokenscope/releases/tag/v0.7.4) 已发布；[Release 42767766041](https://github.com/ywltby/tokenscope/actions/runs/42767766041) 的 19 个作业（含安装、12 组单跳与双链）成功，主线 CI/Native UI 最终通过。主线 contracts 首轮 tasklist 0.5 秒探针超时，仅重跑失败作业后恢复，探针稳定性未宣称修复。本轮没有复现真实启动空白，根因仍开放。当前用户优先任务见[筛选与图表修复](2026-11-10-filter-query-chart-performance.md)。
+>
+> **2026-11-12 根因定位（PR #64，待审查）**：PR #62 失败轮 artifact 13822755444 的完整证据链给出同次故障时序——2209 ms 导航请求（NavigationStarting）、2012–22012 ms Playwright 只见 about:blank、20 秒页面预算耗尽判失败、~22.9 s 失败诊断显示 raw target url 已是应用地址而 frame 仍是 about:blank、**23953 ms 提交（ContentLoading）→ 24149 ms 完成 → 24159 ms 应用页 CSP console error**：提交比失败判定晚 1.9 秒，页面真实运行。最小转储（20 线程）显示主线程 GetMessage 泵正常、无线程停在 wry `wait_with_pump`、无 renderer 崩溃——**排除既有无限等待假设，排除观察器失同步，排除崩溃**。机制：WebView2 在 NavigationStarting 即改写 `/json/list` target url（暂挂提交），frame URL 等提交完成才更新；慢提交轮（实测 21.7 s）里 Playwright `page.url()` 全程 about:blank，驱动按 frame URL 归属在 20 秒预算处误杀健康启动。三次已知失败（58487a4、3eba0ba、09c71b8）同型。**修复（PR #64，驱动归属语义，预算与失败断言不变）**：页面阶段并行读取权威 `/json/list`（同一 `/tauri/i` 匹配、同一 20 秒预算），原始列表已挂应用地址时按 CDP `targetId` 定位 Playwright Page 附加（可先于提交）；target 不存在仍在预算内按原形态失败，列表请求失败回落 Playwright 判定。红→绿：`rawTargetDecision` 5 项反例先红后绿；前端全量 1121 项通过；PR #64 最新 HEAD `57aade9` 20 项检查全成功，且 CI 实跑证据显示 9 个场景中 6 个经新路径附加（`page_target_attachment.via=raw-target-list`、`attached_before_commit=true`）全部通过。版本不变（`release: false`）。**未自动合并**：PR 侧的通过不构成 main 上的修复完成宣告，合并后连续链与发布验证另按仓库约定执行。
 
 **目标**：下一次启动空白时，在清理进程前留下足够证据，区分原生窗口创建挂起、真实导航失败与 Playwright 观察失同步；本批不宣称已修复空白根因。
 
