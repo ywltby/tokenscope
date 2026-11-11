@@ -1,7 +1,7 @@
 # 筛选等待、图表动画与重复纠错备份修复计划
 
 > 执行模型：使用 `executing-plans`、`systematic-debugging`、`test-driven-development` 和 `verification-before-completion`，逐项先红后绿。
-> 状态：**已实施（0.7.5），PR #61 检查全绿、停在可审查状态**。F01/F02/F03 的回归、真实浏览器中间帧与同规模基准已完成；验收期另修两处调度缺陷（在途批次堆积、同一次设置写入刷两次）。未自动合并、未发布、未在本机安装。
+> 状态：**已发布（v0.7.5 预发布，2026-11-11）**。F01/F02/F03 已随 PR #61（合并提交 `aa134a1`）合入 main；验收期与独立复核的四处调度补修一并交付。Release 全作业通过：build、install-test、9 组单跳升级矩阵、`upgrade-chain` present/deleted 两条连续链、publish；资产身份与哈希已核对（安装包 SHA256 `b8be9c1c…648b9`，标签/提交/元数据一致）。未在本机安装；AC10 部分验证与 about:blank 根因仍未闭合，见下文与整合计划。
 
 **Goal:** 消除无必要的整库纠错备份与图表动画截断，减少时间/应用/分组切换的查询等待，同时保持现有统计、计价与冻结分页语义。
 
@@ -140,7 +140,7 @@ pnpm --dir frontend test:e2e
 | F01 纠错备份触发 | **已实施**：普通强重放/追加无备份；弱升强、合并、镜像/来源/别名转移仍先备份，同批最多一份 |
 | F02 图表更新时序 | **已实施**：布局与数据同批更新；真实 ECharts 中间帧契约覆盖 20→4、模型→按日、7→14、空→有值、连续切换与容器 resize |
 | F03 筛选查询性能 | **已实施**：筛选走 `collect:false`，行索引按时间窗口收窄，覆盖桶按应用/模型收窄，汇总窄投影，明细首页只读当前页 |
-| F04/F05 集成与交付 | 定向回归、同规模基准与完整门禁完成；PR #61 最新 HEAD 全部必需检查成功、`CLEAN`，未自动合并/发布/本机安装 |
+| F04/F05 集成与交付 | PR #61 已合并（`aa134a1`）、v0.7.5 预发布已发布；Release 全作业（含两条连续升级链）实跑通过，资产身份与哈希核对一致 |
 
 ## 9. 执行记录（2026-11-10）
 
@@ -166,3 +166,5 @@ pnpm --dir frontend test:e2e
 - **验收期补修（2026-11-11，HEAD `589d2e9`）**：两处调度缺陷——①快速切换堆积后台查询：`startRefreshBatch` 在途期间也立即开新批（后端工作不取消），改为一条在途、待执行只保留最后一次选择，批次结算后执行；`auto` 仍经 `requestAutoRefresh` 重入，翻页保护不被绕过。②同一次设置写入刷两次：`refreshKey` prop 与文档事件各排一批，改为同一 token（递增后的 refreshKey 值随事件 detail），先到者调度、后到者见相同 token 只同步基线；prop-only / event-only 仍各自调度。Dashboard 两个断言旧时序的用例改写为新时序（不变量保留：最新结果胜出、两侧齐备才落盘）；前端 1112 项 test、typecheck、format、build 与浏览器 E2E 契约全绿，PR #61 HEAD `589d2e9` 全部检查成功、`CLEAN`。
 - **独立复核补修（2026-11-11，HEAD `64b86a0`）**：两处调度反例——①在途排队的手动采集意图被后续筛选覆盖：`manualRefresh` 在批次在途时递增 `collectRequestSeq` 独立记账"仍需采集"，待执行来源照常被最新筛选覆盖，`query_begin` 按 `collectSeq > consumedCollectSeq` 判定，意图随 begin 成功才消费、失败保留给重试。②同 token 回声未同步 `lastRefreshKey` 基线：事件先到 + prop 后到合并后，下一次普通 begin 把同一次变更再当成未处理程序刷新，普通筛选错发 `collect:true`；回声分支现同步基线，事件先到与 prop 先到两个方向均只处理一次。回归 4 项（在途→手动→再筛选、意图消费一次、失败保留、两个方向回声后普通筛选 `collect:false`）先红后绿；前端 1116 项 test、typecheck、format、build 与浏览器 E2E（含图表动画契约）全绿，PR #61 HEAD `64b86a0` 全部检查成功、`CLEAN`。
 - **未自动合并、未发布、未在本机安装**；最终交付停在可审查 PR。
+- **合并与发布（2026-11-11）**：PR #61 以 merge commit 合入 main（合并提交 `aa134a16d9a65d838bef9bef038e9ca8966bcb4a`，合并前核对 HEAD `3ec1e90`、20 项检查全成功、`bump --check` release:true、v0.7.4 基线已登记）。main 触发的 [CI](https://github.com/ywltby/tokenscope/actions/runs/42930342835)、[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/42930342826)、[Release](https://github.com/ywltby/tokenscope/actions/runs/42930342874) 全部 success；Release 内部 gate、build、install-test、9 组单跳升级矩阵（0.1.0/0.4.0/0.5.9/0.5.13/0.6.0/0.7.4 × present/deleted）、`upgrade-chain` present/deleted 两条连续链与 publish 全部实跑通过（PR 侧 skipped 的 upgrade-chain 以 Release 实跑为准）。
+- **发布身份与资产**：[v0.7.5 预发布](https://github.com/ywltby/tokenscope/releases/tag/v0.7.5) 标签解引用 `aa134a1`（与 build-metadata.json 的 commit/version 一致）；资产 `TokenScope_v0.7.5_windows-x64-setup.exe`、`SHA256SUMS.txt`、`build-metadata.json`、`provenance.sigstore.json` 齐全。下载后重算安装包 SHA256 `b8be9c1c0fb64c780920bf5ff6acdbda20bbc586ce5a950cd827d76eb7e648b9`，与校验清单及 GitHub digest 三方一致。未在本机安装、未建立本地 release 目录（验证文件在系统临时目录）。
