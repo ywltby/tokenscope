@@ -786,6 +786,63 @@ export function pageTargetDecision({
   };
 }
 
+/** 原始 target 列表里的 page 候选（只认 type=page；iframe/service_worker 等不算页面归属）。 */
+function rawPageTargets(rawTargets) {
+  if (!Array.isArray(rawTargets)) return [];
+  return rawTargets.filter((t) => t && t.type === "page" && typeof t.url === "string");
+}
+
+/**
+ * 原始 target 列表（/json/list）判定：与 pageTargetDecision 同一失败语义，但归属依据是
+ * WebView2 的权威 target url，而不是 Playwright 的 frame 提交 URL。
+ *
+ * 背景（2026-11-11 run 42943893611 attempt 1 取证）：WebView2 在 NavigationStarting 就把
+ * target url 改成应用地址（提交尚未发生），frame 要等提交完成才更新；慢提交轮里
+ * Playwright 的 page.url() 全程只有 about:blank，驱动在 20 秒预算耗尽时误杀健康启动
+ * （实测提交在失败 1.9 秒后完成、页面正常运行）。原始列表与 Playwright 列表共用
+ * `/tauri/i` 匹配与同一 20 秒预算：target 不存在时照样在预算内失败，断言不放宽。
+ */
+export function rawTargetDecision({
+  hostExitCode = null,
+  rawTargets = null,
+  rawTargetsError = null,
+  elapsedMs = 0,
+  budgetMs = PAGE_TARGET_BUDGET_MS,
+} = {}) {
+  if (hostExitCode !== null && hostExitCode !== undefined) {
+    return {
+      action: "fail",
+      kind: "host-exited",
+      detail: `宿主在等待页面 target 时退出（退出码=${hostExitCode}）`,
+    };
+  }
+  const pages = rawPageTargets(rawTargets);
+  const urls = pages.map((t) => t.url);
+  const match = pickTauriTarget(urls);
+  if (match) {
+    const target = pages.find((t) => t.url === match);
+    return {
+      action: "found",
+      kind: "tauri-raw-target",
+      detail: match,
+      target: { id: target.id ?? null, url: target.url },
+    };
+  }
+  if (elapsedMs >= budgetMs) {
+    return {
+      action: "fail",
+      kind: "target-timeout",
+      detail: `没有 tauri 页面 target（等待 ${budgetMs} ms；原始 target：${describeTargets(urls)}${rawTargetsError ? `；列表请求失败：${rawTargetsError}` : ""}）`,
+      targets: urls,
+    };
+  }
+  return {
+    action: "retry",
+    kind: "waiting-target",
+    detail: `等待 tauri 页面 target（原始：${describeTargets(urls)}${rawTargetsError ? `；列表请求失败：${rawTargetsError}` : ""}）`,
+  };
+}
+
 /**
  * 退出确认决策（计划 §4.8 第 2 条）：宿主与全部已记录后代退出、端口不再监听才算结束，
  * 上限 20 秒；超时返回残留 PID 列表。
@@ -969,6 +1026,9 @@ export function buildLaunchesEvidence(records) {
     browser_args: record.browserArgs,
     page_target_url: record.pageTargetUrl,
     page_targets: [...record.pageTargets],
+    raw_targets: record.rawTargets ?? null,
+    raw_targets_error: record.rawTargetsError ?? null,
+    page_target_attachment: record.pageTargetAttachment ?? null,
     runtime_version: record.runtimeVersion ?? null,
     page_observations: record.pageObservations ?? [],
     startup_events: record.startupEvents ?? [],

@@ -73,6 +73,7 @@ import {
   listenersOnPort,
   mergePids,
   pageTargetDecision,
+  rawTargetDecision,
   recordConnectAttempt,
   recordOwnerCheck,
   recordProbe,
@@ -335,6 +336,38 @@ async function fetchJsonVersion(record, { deadlineMs, hostExit }) {
 }
 
 /**
+ * `/json/list`：页面阶段归属依据的原始 target 列表（与 fetchJsonVersion 同一套有界请求）。
+ * 超时/预算耗尽与宿主退出都立即中止；HTTP 错误按瞬断抛给调用方回落 Playwright 判定。
+ */
+async function fetchJsonList(record, { deadlineMs, hostExit }) {
+  const timeoutMs = clampTimeoutToBudget({ timeoutMs: 3000, deadlineMs, minMs: 300 });
+  if (timeoutMs <= 0) {
+    throw new BudgetExhaustedError({
+      detail: `本次启动剩余预算已耗尽，不再请求 /json/list（端口 ${record.port}）`,
+    });
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await awaitWithHostExit({
+      task: async () => {
+        const res = await fetch(`http://127.0.0.1:${record.port}/json/list`, {
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error(`/json/list 返回 HTTP ${res.status}`);
+        return await res.json();
+      },
+      hostExit,
+      timeoutMs,
+      timeoutDetail: `/json/list 超过剩余预算 ${timeoutMs} ms（端口 ${record.port}）`,
+      onCancel: () => controller.abort(),
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * 展开错误链：undici 的 `fetch failed` 把真实原因放在 `cause`
  * （如 `connect ECONNREFUSED 127.0.0.1:9601`、`operation was aborted due to timeout`），
  * 不展开就会把可重试瞬断误判成致命错误。
@@ -516,6 +549,32 @@ class Instance {
       this.observedStartupContexts.add(this.ctx);
       this.ctx.on("page", observe);
     }
+  }
+
+  /**
+   * 按 CDP targetId 找到对应的 Playwright Page：对每个页面建一次 CDP 会话读
+   * `Target.getTargetInfo`（页面数 1–2，成本有界）。找不到（Playwright 还没暴露该页）
+   * 返回 null，由调用方继续轮询——既不误判成功也不误判失败。
+   */
+  async findPageByTargetId(record, targetId) {
+    if (!targetId || !this.ctx) return null;
+    let sessions = this.cdpPageIdSessions ?? (this.cdpPageIdSessions = new Map());
+    for (const page of this.ctx.pages()) {
+      try {
+        let id = sessions.get(page);
+        if (!id) {
+          const session = await this.ctx.newCDPSession(page);
+          const info = await session.send("Target.getTargetInfo");
+          session.detach().catch(() => {});
+          id = info?.targetInfo?.targetId ?? null;
+          sessions.set(page, id);
+        }
+        if (id && id === targetId) return page;
+      } catch {
+        // 单个页面的会话失败（如 target 刚销毁）：跳过该页，下轮重查
+      }
+    }
+    return null;
   }
 
   async captureStartupDump(record, signal) {
@@ -1110,6 +1169,11 @@ class Instance {
     // 页面阶段的等待同样受该阶段上限与 65 秒总上限约束（§4.8 第 4 条）
     record.phaseDeadlineMs = pageDeadline;
     this.page = null;
+    // 归属还看原始 /json/list：WebView2 在 NavigationStarting 就把 target url 改成应用地址，
+    // 而 Playwright 的 page.url() 跟随 frame 提交 URL，慢提交轮（run 42943893611 取证：
+    // 提交 21.7 s）里全程只有 about:blank，20 秒预算会误杀健康启动。target 不存在时
+    // 失败语义不变（同预算、同 /tauri/i 匹配），断言不放宽。
+    this.cdpPageIdSessions = new Map();
     while (true) {
       let urls = [];
       try {
@@ -1126,6 +1190,7 @@ class Instance {
           await this.connectCdp(record, { deadlineMs: totalDeadline, phase: "reconnect" });
           // 重连会改写阶段截止；页面阶段仍按自己的上限计时
           record.phaseDeadlineMs = pageDeadline;
+          this.cdpPageIdSessions = new Map();
           continue;
         } catch (reconnectError) {
           throw await this.failLaunch(record, reconnectError);
@@ -1133,18 +1198,77 @@ class Instance {
       }
       record.pageTargets = urls;
       recordPageObservation(record, urls);
+      const elapsedMs = Date.now() - pagePhaseStartedAt;
+      const budgetMs = pageDeadline - pagePhaseStartedAt;
       const decision = pageTargetDecision({
         hostExitCode: this.hostExitCodeOf(record),
         urls,
-        elapsedMs: Date.now() - pagePhaseStartedAt,
-        budgetMs: pageDeadline - pagePhaseStartedAt,
+        elapsedMs,
+        budgetMs,
       });
       if (decision.action === "found") {
         this.page = this.ctx.pages().find((p) => p.url() === decision.target) ?? null;
         if (this.page) break;
       }
-      if (decision.action === "fail") {
-        throw await this.failLaunch(record, new Error(decision.detail));
+      // Playwright 只有 about:blank：查原始 /json/list（与 /json/version 同一套有界请求）。
+      // 列表请求失败按瞬断处理，回落 Playwright 判定，不作为成功依据。
+      let rawDecision = null;
+      if (decision.action !== "found") {
+        let rawTargets = null;
+        let rawTargetsError = null;
+        try {
+          rawTargets = await fetchJsonList(record, {
+            deadlineMs: pageDeadline,
+            hostExit: this.armedHostExit(),
+          });
+        } catch (error) {
+          if (error?.abortedBy) throw await this.failLaunch(record, error);
+          rawTargetsError = errorChain(error);
+        }
+        rawDecision = rawTargetDecision({
+          hostExitCode: this.hostExitCodeOf(record),
+          rawTargets,
+          rawTargetsError,
+          elapsedMs,
+          budgetMs,
+        });
+        if (rawTargets) {
+          record.rawTargets = rawTargets.slice(0, 16).map((t) => ({
+            id: t.id ?? null,
+            type: t.type ?? null,
+            url: typeof t.url === "string" ? t.url.slice(0, 1000) : null,
+          }));
+        } else if (rawTargetsError) {
+          record.rawTargetsError = rawTargetsError;
+        }
+        if (rawDecision.action === "found") {
+          // 原始列表已挂应用地址：按 targetId 找到对应的 Playwright Page（frame 可能尚未
+          // 提交——这是合法状态，场景步骤用各自的 20 秒有界等待覆盖提交与渲染）。
+          const match = await this.findPageByTargetId(record, rawDecision.target.id);
+          if (match) {
+            this.page = match;
+            record.pageTargetAttachment = {
+              via: "raw-target-list",
+              target_id: rawDecision.target.id,
+              target_url: rawDecision.target.url,
+              attached_before_commit: !pickTauriTarget(urls),
+              playwright_urls: urls,
+            };
+            break;
+          }
+          // 页面对象还没被 Playwright 暴露（罕见）：继续等下一轮，不算成功也不算失败
+        }
+      }
+      const finalDecision =
+        decision.action === "fail" && (!rawDecision || rawDecision.action !== "found")
+          ? decision
+          : rawDecision && rawDecision.action === "fail"
+            ? decision.action === "fail"
+              ? decision
+              : rawDecision
+            : decision;
+      if (finalDecision.action === "fail") {
+        throw await this.failLaunch(record, new Error(finalDecision.detail));
       }
       try {
         // 宿主退出时立刻抛出带退出码的错误，不等满这一轮（§4.8 第 4 条）
