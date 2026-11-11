@@ -73,6 +73,7 @@ import {
   listenersOnPort,
   mergePids,
   pageTargetDecision,
+  pickTauriTarget,
   rawTargetDecision,
   recordConnectAttempt,
   recordOwnerCheck,
