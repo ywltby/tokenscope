@@ -10,7 +10,7 @@
 > - 副作用：关于只调用 `plugin:app|version`；浏览器契约审计进入关于后新增 IPC，无设置写入、采集、导入或查询。
 > - 验证：前端全量 **1140 项通过**；typecheck / format:check / build 通过；浏览器契约 `settings_about_contract` **12 项断言通过**，覆盖明暗主题 × 宽窄窗口、英文切换、失败原因与重试；证据截图在 gitignored `qa-artifacts/ui-adjustment/ci-e2e/settings_about_contract--*.png`。
 > - 真实宿主：`native-ui-system` 新增 `about_runtime_version_matches_exe`，把界面显示的 `getVersion()` 与本次受测 EXE 的 `VersionInfo.FileVersion` 对照（fixture 模拟值 `9.8.7` 仅用于浏览器契约，不能替代真实 IPC）。PR #65 最新 HEAD `f30144f` 的 Native UI E2E 三个 ui-system 场景均输出 `ui=0.8.0; exe=0.8.0`。
-> - CI：PR #65 最新 HEAD `f30144f` 的 20 项检查成功、1 项按设计跳过（`upgrade-chain`），`CLEAN`；CI 日志确认前端 77 个测试文件通过、`settings_about_contract` 12 项断言通过；Install test 成功。
+> - CI：PR #65 最新 HEAD `e8649b0` 的 20 项检查成功、1 项按设计跳过（`upgrade-chain`），`CLEAN`；CI 日志确认前端 77 个测试文件通过、`settings_about_contract` 12 项断言通过；Install test 成功。Native UI 首轮在 `privacy-denied-ipc` 启动未就绪（30 秒内未见 `.privacy-dialog`，无 page-load 标记），重跑恢复；**具体原因未确认，不归因为环境抖动**，按独立问题记入[启动诊断计划](2026-11-10-native-startup-diagnostics.md)。
 > - 复核补修（2026-11-12，P3）：关于面板自带 `.setting-row/.setting-main/.setting-label/.setting-help` 局部样式（Settings.vue 的 scoped 样式不作用到子组件内部）；错误状态保存类型而不是读取时翻译好的字符串，切换语言后原因随界面翻译（后端原始诊断仍不翻译）。新增 2 项反例（先红后绿），前端全量 1142 项通过，浏览器契约 12 项保持通过。
 > - 版本：`bump_version.py --bump minor` 输出 `0.8.0` / `release: true`；升级起点含上一版 `0.7.5`；本机未安装、未发布。
 
