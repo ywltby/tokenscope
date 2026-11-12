@@ -18,7 +18,7 @@ import { uiControlMaterial } from "./ui-control-material-contract.mjs";
 import { bootStallRecovery } from "./ui-boot-stall-contract.mjs";
 import { uiChartTransition } from "./ui-chart-transition-contract.mjs";
 
-import { PRIVACY_PROTECTED_COMMANDS } from "../fixtures/ui-contracts.mjs";
+import { FIXTURE_APP_VERSION, PRIVACY_PROTECTED_COMMANDS } from "../fixtures/ui-contracts.mjs";
 import { captureContractFailure, trackSession } from "../lib/contract-failure.mjs";
 import { withTimeout } from "../lib/native-scenario.mjs";
 
@@ -57,6 +57,8 @@ export const REQUIRED_CONTRACTS = [
   // 静态「已更新」与自动读取提示（PR2）、合并通知唯一性、设置页读取间隔六档。
   "ui_adjustment_shapes",
   "ui_date_keyboard_matrix",
+  // 2026-11-12：设置 → 关于显示运行版本（宽/窄、明/暗、失败重试、零副作用）。
+  "settings_about_contract",
   // C06（控件材质与浮层可读性计划）：像素级边界对比度与焦点契约。
   "ui_control_material",
   // BS04（启动卡死取证与引导期恢复计划）：检查挂起可见可重查、迟到响应
@@ -574,6 +576,183 @@ const IMPL = {
       ctx.finishSession(session);
     } finally {
       await session.close();
+    }
+  },
+
+  /**
+   * 设置 → 关于（2026-11-12 计划，A03）：
+   * - 宽/窄窗口、明/暗主题都能在导航末尾进入关于；
+   * - 版本来自只读 `plugin:app|version`（fixture 9.8.7，与仓库版本不同）；
+   * - 成功后切换分区/语言不重复读取；
+   * - 不写设置、不触发采集/导入/查询；
+   * - 读取失败显示原因，重试后恢复。
+   */
+  async settings_about_contract(ctx) {
+    const name = "settings_about_contract";
+    const navItems = (page) =>
+      page.locator(".settings-nav-item, .settings-nav .ts-segmented-item");
+    const clickAbout = async (page, label) => {
+      const btn = navItems(page).filter({ hasText: label }).first();
+      await btn.waitFor({ state: "visible", timeout: 5000 });
+      await realClick(page, btn);
+      await page.waitForTimeout(300);
+    };
+
+    for (const theme of ["light", "dark"]) {
+      for (const vp of [VIEWPORTS.desktop, VIEWPORTS.small]) {
+        const session = await ctx.open({ fixture: "normal", viewport: vp, theme });
+        try {
+          await openSettings(session);
+          const page = session.page;
+          const tag = `${theme}-${vp.label}`;
+          const count = await navItems(page).count();
+          ctx.record(name, `${tag}:分区导航共 7 项（关于在末尾）`, count === 7, `导航项=${count}`);
+
+          const layout = await page.evaluate(() => {
+            const nav = document.querySelector(".settings-nav");
+            const items = [...nav.querySelectorAll("button")].map((b) => b.getBoundingClientRect());
+            const r = nav.getBoundingClientRect();
+            return {
+              overflow: nav.scrollWidth > nav.clientWidth + 1,
+              inside: items.every((b) => b.left >= r.left - 1 && b.right <= r.right + 1),
+              pageOverflow: document.documentElement.scrollWidth > innerWidth,
+            };
+          });
+          ctx.record(
+            name,
+            `${tag}:七个导航项不重叠、不裁切`,
+            !layout.overflow && layout.inside && !layout.pageOverflow,
+            JSON.stringify(layout),
+          );
+
+          // 只审计**进入关于之后**新增的 IPC：此前的汇总查询/设置预读不属于关于的副作用。
+          const callsBeforeAbout = await session.readIpcCalls();
+          await clickAbout(page, "关于");
+          await page.waitForSelector("[data-about-version]", { timeout: 5000 });
+          const version = (await page.locator("[data-about-version]").innerText()).trim();
+          ctx.record(
+            name,
+            `${tag}:显示运行时返回的版本 ${FIXTURE_APP_VERSION}（非仓库版本）`,
+            version === FIXTURE_APP_VERSION,
+            `显示=${version}`,
+          );
+          ctx.record(
+            name,
+            `${tag}:展示 TokenScope 品牌与名称`,
+            (await page.locator(".about-name").innerText()).trim() === "TokenScope",
+            await page.locator(".about-name").innerText(),
+          );
+
+          const calls = await session.readIpcCalls();
+          const aboutCalls = calls.slice(callsBeforeAbout.length);
+          const versionCalls = calls.filter((c) => c.cmd === "plugin:app|version").length;
+          ctx.record(name, `${tag}:进入关于只读取一次版本`, versionCalls === 1, `调用=${versionCalls}`);
+          const forbidden = [
+            "settings_set_language",
+            "settings_set_timezone",
+            "settings_set_collect_interval",
+            "settings_set_price_auto_sync",
+            "settings_set_close_action",
+            "refresh_cache",
+            "ccs_import_preview",
+            "ccs_import_commit",
+            "sync_pricing_openrouter",
+            "query_begin",
+            "source_path_add",
+            "source_config_set",
+          ].filter((cmd) => aboutCalls.some((c) => c.cmd === cmd));
+          ctx.record(
+            name,
+            `${tag}:关于不写设置、不触发采集/导入/查询`,
+            forbidden.length === 0,
+            `越界命令=${forbidden.join(",") || "无"}`,
+          );
+
+          // 切走再回来：版本保留且不重复请求。
+          await gotoSettingsSection(page, "通用");
+          await clickAbout(page, "关于");
+          const callsAfter = (await session.readIpcCalls()).filter(
+            (c) => c.cmd === "plugin:app|version",
+          ).length;
+          ctx.record(
+            name,
+            `${tag}:切分区后返回不重复读取版本`,
+            callsAfter === 1 &&
+              (await page.locator("[data-about-version]").innerText()).trim() ===
+                FIXTURE_APP_VERSION,
+            `版本调用=${callsAfter}`,
+          );
+
+          // 英文标签与版本可读（桌面浅色跑一次真实语言切换）。
+          if (theme === "light" && vp === VIEWPORTS.desktop) {
+            await gotoSettingsSection(page, "通用");
+            await realClick(page, page.locator('[aria-label="界面语言"]').first());
+            await page.waitForTimeout(200);
+            await realClick(
+              page,
+              page.locator(".n-base-select-option").filter({ hasText: /^English$/ }).first(),
+            );
+            await page.waitForTimeout(400);
+            await clickAbout(page, "About");
+            await page.waitForSelector("[data-about-version]", { timeout: 5000 });
+            const enText = await page.locator("#app").innerText();
+            const enVersionCalls = (await session.readIpcCalls()).filter(
+              (c) => c.cmd === "plugin:app|version",
+            ).length;
+            ctx.record(
+              name,
+              "英文界面：About 与 Installed version 可见，版本保留且不重复读取",
+              enText.includes("Installed version") &&
+                (await page.locator("[data-about-version]").innerText()).trim() ===
+                  FIXTURE_APP_VERSION &&
+                enVersionCalls === 1,
+              `调用=${enVersionCalls}`,
+            );
+            await ctx.shot(name, session, `${tag}-about-en`);
+          } else {
+            await ctx.shot(name, session, `${tag}-about`);
+          }
+          ctx.finishSession(session);
+        } finally {
+          await session.close();
+        }
+      }
+    }
+
+    // 失败 → 原因可见 → 重试成功（只重读一次，不并发）。
+    const failing = await ctx.open({
+      fixture: "about-version-failure",
+      viewport: VIEWPORTS.desktop,
+      theme: "light",
+    });
+    try {
+      await openSettings(failing);
+      await clickAbout(failing.page, "关于");
+      const alert = failing.page.locator("[role='alert']").filter({ hasText: "版本读取失败" });
+      await alert.waitFor({ state: "visible", timeout: 5000 });
+      ctx.record(
+        name,
+        "读取失败：错误原因可见且不显示伪版本",
+        (await alert.innerText()).includes("版本读取失败（合成）") &&
+          (await failing.page.locator("[data-about-version]").count()) === 0,
+        await alert.innerText(),
+      );
+      await retryButtonIn(failing, "版本读取失败").click();
+      await failing.page.waitForSelector("[data-about-version]", { timeout: 5000 });
+      const retried = (await failing.page.locator("[data-about-version]").innerText()).trim();
+      const readCount = (await failing.readIpcCalls()).filter(
+        (c) => c.cmd === "plugin:app|version",
+      ).length;
+      ctx.record(
+        name,
+        "重试后恢复运行版本，版本读取恰好两次",
+        retried === FIXTURE_APP_VERSION && readCount === 2,
+        `版本=${retried} 调用=${readCount}`,
+      );
+      await ctx.shot(name, failing, "about-retry");
+      ctx.finishSession(failing);
+    } finally {
+      await failing.close();
     }
   },
 

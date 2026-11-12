@@ -53,6 +53,7 @@ import {
   tokenBucketLabel,
   type TokenBucketKey,
 } from "../lib/tokenDisplay";
+import AboutPanel from "../components/AboutPanel.vue";
 import HelpTooltip from "../components/HelpTooltip.vue";
 import ScrollList from "../components/ScrollList.vue";
 import SegmentedControl from "../components/SegmentedControl.vue";
@@ -91,7 +92,15 @@ const msg = useMessage();
 // ── U05：分区导航 ────────────────────────────────────────────────
 // 一次只显示一个分区（v-show，未选中的分区保留挂载，未保存草稿不丢）；
 // 窗口 ≤ 1100px 时导航改为顶部分段控件（与 DESIGN.md §4 的边距断点一致）。
-const SECTION_IDS = ["general", "sources", "usage", "pricing", "appearance", "advanced"] as const;
+const SECTION_IDS = [
+  "general",
+  "sources",
+  "usage",
+  "pricing",
+  "appearance",
+  "advanced",
+  "about",
+] as const;
 type SectionId = (typeof SECTION_IDS)[number];
 const SECTION_LABEL_KEY: Record<SectionId, string> = {
   general: "settings.sectionGeneral",
@@ -100,6 +109,7 @@ const SECTION_LABEL_KEY: Record<SectionId, string> = {
   pricing: "settings.sectionPricing",
   appearance: "settings.sectionAppearance",
   advanced: "settings.sectionAdvanced",
+  about: "settings.sectionAbout",
 };
 // i18n：分区名在渲染期解析（getter），语言切换后导航与标题一起更新。
 const SECTIONS = SECTION_IDS.map((id) => ({
@@ -115,6 +125,8 @@ const sectionOptions = computed<{ value: SectionId; label: string }[]>(() =>
 const activeSection = ref<SectionId>("general");
 /** 首次进入「价格」分区才挂载价格表并发起首次读取（进入前不发价格表请求）。 */
 const pricingVisited = ref(false);
+/** 首次进入「关于」才挂载版本面板（进入前不请求运行时版本）。 */
+const aboutVisited = ref(false);
 
 const NARROW_NAV_QUERY = "(max-width: 1100px)";
 const narrowNav = ref(false);
@@ -132,6 +144,8 @@ function selectSection(id: SectionId): void {
     pricingVisited.value = true;
     void loadPricing();
   }
+  // 关于：首次进入才挂载面板（此前零版本请求），挂载后保留结果。
+  if (id === "about") aboutVisited.value = true;
 }
 
 const sourceRows = ref<SourcePathRow[]>([]);
@@ -1880,6 +1894,16 @@ defineExpose({ priceColumns });
             t("settings.openSettingsFile")
           }}</NButton>
         </section>
+      </section>
+
+      <!-- 2026-11-12 计划：关于（首次进入才挂载；之后切换分区保留已读版本）。 -->
+      <section
+        class="settings-group settings-panel"
+        v-show="activeSection === 'about'"
+        data-section="about"
+      >
+        <h2 class="group-title">{{ t("settings.sectionAbout") }}</h2>
+        <AboutPanel v-if="aboutVisited" />
       </section>
     </div>
   </div>

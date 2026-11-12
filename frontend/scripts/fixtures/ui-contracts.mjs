@@ -23,6 +23,14 @@ export const REJECT = Symbol("ui-contracts.reject");
 /** 命令需要挂起时的显式标记（脚本翻译为直到 settle 才结束的 Promise）。 */
 export const DEFER = Symbol("ui-contracts.defer");
 
+/**
+ * 浏览器 fixture 的运行时版本（只读 `plugin:app|version` 的合成响应）。
+ *
+ * 刻意与仓库/安装包版本不同：契约断言界面显示的是 API 返回值，而不是
+ * package.json 或写死常量；若实现偷用仓库版本，`9.8.7` 断言会失败。
+ */
+export const FIXTURE_APP_VERSION = "9.8.7";
+
 export function reject(message) {
   return { [REJECT]: true, message };
 }
@@ -932,6 +940,7 @@ export function buildFixture(name) {
     savedSources: {},
     closeWrites: 0,
     bootstrapCalls: 0,
+    aboutVersionReads: 0,
   };
 
   /** 设置读取响应（按 cfg.settings 模式）。
@@ -1020,6 +1029,14 @@ export function buildFixture(name) {
         return 1;
       case "plugin:event|unlisten":
         return null;
+      // 设置 → 关于：Tauri 只读 app API。只在真正进入关于时被调用；失败场景
+      // 首次拒绝、重试成功，用于验证错误原因与重试路径。
+      case "plugin:app|version": {
+        state.aboutVersionReads += 1;
+        if (cfg.aboutVersion === "fail-then-ok" && state.aboutVersionReads === 1)
+          return reject("版本读取失败（合成）");
+        return FIXTURE_APP_VERSION;
+      }
       case "collection_status":
         // PR2：只读采集状态快照——浏览器契约里等价"最近一轮成功、无警告"。
         // latestGeneration 为 null：不触发"有新数据"自动刷新，保持既有
@@ -1299,6 +1316,8 @@ const SCENARIOS = {
   "privacy-consent-pending": { kind: "normal", privacy: "pending" },
   // BS04：第 1 次 privacy_bootstrap 挂起（检查耗时长的现场），之后的调用返回 ready
   "privacy-bootstrap-deferred": { kind: "normal", privacy: "defer-first" },
+  // 关于：首次版本读取失败、重试成功（错误原因可见 + 重试恢复）。
+  "about-version-failure": { kind: "normal", aboutVersion: "fail-then-ok" },
 };
 
 export const FIXTURE_NAMES = Object.keys(SCENARIOS);

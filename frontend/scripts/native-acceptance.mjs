@@ -4484,6 +4484,8 @@ async function main() {
     acceptanceIdentifier: ACCEPTANCE_IDENTIFIER,
     realDataDir: REAL_DATA,
     homeDir: process.env.USERPROFILE || "",
+    // 关于分区：读取本次受测 EXE 的版本元数据，与运行时 getVersion() 对照。
+    exePath: EXE,
     // WB07：ui-source-paths 也用统一 fixture（两版 WorkBuddy 合成转写）。
     profile: [
       "ui-identity",

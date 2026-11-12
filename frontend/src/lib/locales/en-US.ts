@@ -209,6 +209,7 @@ const enUS: AppMessages = {
     sectionPricing: "Pricing",
     sectionAppearance: "Appearance",
     sectionAdvanced: "Advanced",
+    sectionAbout: "About",
     navAria: "Settings sections",
     retry: "Retry",
     saving: "Saving…",
@@ -388,6 +389,11 @@ const enUS: AppMessages = {
     advancedHelp:
       "Settings file: ~/.tokenscope/settings.toml (TOML with commented fields, directly editable). Manual saves apply to the next read; in-app changes rewrite the whole file and drop custom comments (see the file header).",
     openSettingsFile: "Open settings file",
+    aboutVersion: "Installed version",
+    aboutVersionHelp: "Read from the currently running app (read-only).",
+    aboutLoading: "Reading version…",
+    aboutVersionUnavailable: "Version unavailable",
+    aboutReadFailed: "Failed to read version: {message}",
     settingsOpened:
       "Settings file opened in the default editor (applies to the next read after saving): {path}",
     pricingFileOpened:

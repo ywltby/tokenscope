@@ -201,6 +201,7 @@ const zhCN = {
     sectionPricing: "价格",
     sectionAppearance: "外观",
     sectionAdvanced: "高级",
+    sectionAbout: "关于",
     navAria: "设置分区",
     retry: "重试",
     saving: "保存中…",
@@ -372,6 +373,12 @@ const zhCN = {
     advancedHelp:
       "设置配置文件：~/.tokenscope/settings.toml（TOML，带字段注释，可直接编辑）。手动保存后对下一次读取立即生效；GUI 内的修改会重写整个文件，自定义注释会丢失（字段说明以文件头为准）。",
     openSettingsFile: "打开设置配置文件",
+    // 关于
+    aboutVersion: "当前版本",
+    aboutVersionHelp: "来自当前运行的程序（只读）。",
+    aboutLoading: "正在读取版本…",
+    aboutVersionUnavailable: "版本不可用",
+    aboutReadFailed: "版本读取失败：{message}",
     settingsOpened: "已打开设置配置文件（可直接编辑，保存后对下一次读取生效）：{path}",
     pricingFileOpened: "已在系统默认编辑器打开（保存后下次统计生效）\n{path}",
     pricingSynced: "{list}",

@@ -7,6 +7,9 @@ import { flushPromises, mount, shallowMount, type VueWrapper } from "@vue/test-u
 
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+// 关于分区：只读运行时版本。模拟值与仓库版本（0.7.5/0.8.0）不同，防止写死。
+const getVersionMock = vi.hoisted(() => vi.fn());
+vi.mock("@tauri-apps/api/app", () => ({ getVersion: getVersionMock }));
 
 // 布局/表单组件打桩
 vi.mock("naive-ui", async (importOriginal) => {
@@ -257,6 +260,8 @@ async function openHelpTip(trigger: {
 beforeEach(() => {
   invokeMock.mockReset();
   mockBase();
+  getVersionMock.mockReset();
+  getVersionMock.mockResolvedValue("9.8.7");
   installLayoutMedia();
   // U06：自动读取间隔是模块级单例（缺省 5 分钟）——每个用例从缺省起步。
   resetCollectIntervalForTests();
@@ -642,11 +647,11 @@ describe("Settings 分段价格展示（Task 8）", () => {
 });
 
 describe("Settings 分组与状态（设计系统 Task 7）", () => {
-  it("设置页按 通用/数据源/用量数据/价格/外观/高级 分区渲染（U05）", async () => {
+  it("设置页按 通用/数据源/用量数据/价格/外观/高级/关于 分区渲染（U05）", async () => {
     const w = mount(Settings);
     await flushPromises();
     const titles = w.findAll(".group-title").map((t) => t.text());
-    for (const title of ["通用", "数据源", "用量数据", "价格", "外观", "高级"]) {
+    for (const title of ["通用", "数据源", "用量数据", "价格", "外观", "高级", "关于"]) {
       expect(titles, `分区 ${title} 应存在`).toContain(title);
     }
     // U05：旧「缓存」计数标签不再出现（改名「已采集文件 / 已保存请求」）
@@ -698,9 +703,11 @@ describe("Settings macOS 分组结构（设计系统 Task 7）", () => {
     await flushPromises();
     // U05：一次只显示一个分区——DOM 顺序即分区顺序（未选中的用 v-show 保留草稿）。
     const titles = w.findAll(".group-title").map((t) => t.text());
-    expect(titles).toEqual(["通用", "数据源", "用量数据", "价格", "外观", "高级"]);
+    expect(titles).toEqual(["通用", "数据源", "用量数据", "价格", "外观", "高级", "关于"]);
+    // 「关于」首次进入才挂载面板（进入前零版本请求）；量测卡片前先进入。
+    await openSection(w, "about");
     const cards = w.findAll("section.ts-card");
-    expect(cards.length).toBe(7);
+    expect(cards.length).toBe(8);
     for (const t of w.findAll(".group-title")) {
       expect(t.element.closest("section.ts-card"), "组标题必须在卡片外").toBeNull();
     }
@@ -795,7 +802,8 @@ describe("Settings 关闭行为与高级配置（关闭确认与配置文件计�
     const w = mount(Settings);
     await flushPromises();
     const titles = w.findAll(".group-title").map((t) => t.text());
-    expect(titles.at(-1)).toBe("高级");
+    expect(titles.at(-1)).toBe("关于");
+    await openSection(w, "advanced");
     expect(w.text()).toContain("settings.toml");
     const btn = w.findAll("button").find((b) => b.text().includes("打开设置配置文件"));
     expect(btn).toBeDefined();
@@ -1957,6 +1965,78 @@ describe("Settings 自动读取间隔（U06）", () => {
     expect(row.text()).toContain("磁盘不可写");
     // 局部错误：其他分区不出现该提示
     expect(w.find("[data-section='general']").text()).not.toContain("磁盘不可写");
+    w.unmount();
+  });
+});
+
+// ── 2026-11-12 计划：设置页「关于」与当前运行版本 ───────────────────
+// 行为契约：首次进入关于前零版本请求；进入后显示运行时返回的版本（模拟值
+// 9.8.7，与仓库版本无关）；切分区/语言不重复读取；关于不写设置、不触发采集。
+describe("Settings 关于分区（2026-11-12 计划）", () => {
+  function aboutNav(w: VueWrapper) {
+    return w.findAll(".settings-nav-item").find((b) => b.text() === "关于");
+  }
+
+  async function openAbout(w: VueWrapper): Promise<void> {
+    const btn = aboutNav(w);
+    expect(btn, "宽窗口侧栏必须有「关于」入口").toBeDefined();
+    await btn!.trigger("click");
+    await flushPromises();
+  }
+
+  it("首次进入前不读取版本；进入后显示运行时版本而非仓库版本", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    expect(getVersionMock, "进入关于前不得请求版本").not.toHaveBeenCalled();
+    await openAbout(w);
+    expect(getVersionMock, "进入关于只读取一次").toHaveBeenCalledTimes(1);
+    expect(w.find("[data-about-version]").text()).toBe("9.8.7");
+    // 版本可选中复制（不是只读装饰）
+    expect(w.find(".about-version").classes()).toContain("is-selectable");
+    w.unmount();
+  });
+
+  it("窄窗口顶部分段控件同样可进入关于并显示版本", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    layoutNarrow = true;
+    for (const cb of layoutListeners) cb({ matches: true });
+    await flushPromises();
+    const radio = w.findAll(".settings-nav .ts-segmented-item").find((b) => b.text() === "关于");
+    expect(radio, "窄窗口顶部分段控件必须有「关于」").toBeDefined();
+    await radio!.trigger("click");
+    await flushPromises();
+    expect(getVersionMock).toHaveBeenCalledTimes(1);
+    expect(w.find("[data-about-version]").text()).toBe("9.8.7");
+    w.unmount();
+  });
+
+  it("进入关于不派发 data-changed；返回原分区保留未保存草稿", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    const vm = w.vm as unknown as { addDrafts: Record<string, string> };
+    vm.addDrafts.codex = "D:/pending";
+    await openAbout(w);
+    expect(w.emitted("data-changed"), "关于是只读分区，不得通知数据变化").toBeUndefined();
+    const sources = w.findAll(".settings-nav-item").find((b) => b.text() === "数据源");
+    await sources!.trigger("click");
+    await flushPromises();
+    expect(vm.addDrafts.codex, "切分区不得清空未保存草稿").toBe("D:/pending");
+    w.unmount();
+  });
+
+  it("成功后切换分区不重复读取版本", async () => {
+    const w = mount(Settings);
+    await flushPromises();
+    await openAbout(w);
+    expect(getVersionMock).toHaveBeenCalledTimes(1);
+    const sources = w.findAll(".settings-nav-item").find((b) => b.text() === "数据源");
+    await sources!.trigger("click");
+    await flushPromises();
+    await openAbout(w);
+    expect(getVersionMock, "再次进入关于不得重复读取").toHaveBeenCalledTimes(1);
+    expect(w.find("[data-about-version]").text()).toBe("9.8.7");
+    // 语言切换只改标签、不重复读取由 AboutPanel 的行为用例覆盖。
     w.unmount();
   });
 });
