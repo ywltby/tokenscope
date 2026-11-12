@@ -31,6 +31,7 @@ import {
   parseProbeOutput,
   pickTauriTarget,
   probeSpawnArgs,
+  rawTargetDecision,
   recordConnectAttempt,
   recordOwnerCheck,
   recordProbe,
@@ -383,6 +384,81 @@ describe("启动预算与重试（§4.8 第 4 条）", () => {
     expect(timedOut.targets).toEqual(["about:blank", "devtools://devtools/bundled/x.html"]);
     expect(describeTargets([])).toContain("没有 target");
   });
+
+  // 2026-11-11 PR #62 ui-identity 失败取证（run 42943893611 attempt 1）：WebView2 在
+  // NavigationStarting 即把 /json/list 的 target url 改成应用地址（暂挂提交），frame 要等
+  // 提交完成才更新；慢提交轮（观测 21.7 s）里 Playwright 的 page.url() 全程只有 about:blank，
+  // 驱动在 20 秒页面预算耗尽时判失败——1.9 秒后应用实际完成提交并正常运行。原始 target 列表
+  // 是权威归属依据：同一次失败诊断在 22.9 s 取到 raw target url=app、frame=about:blank。
+  describe("原始 target 列表判定（rawTargetDecision）", () => {
+    const rawTauri = (id = "T1") => ({
+      id,
+      type: "page",
+      url: "http://tauri.localhost/",
+      title: "about:blank",
+    });
+
+    it("frame 未提交（Playwright 只有 about:blank）时，原始列表里的 tauri page target 即命中", () => {
+      const decision = rawTargetDecision({
+        rawTargets: [rawTauri()],
+        elapsedMs: 3000,
+        budgetMs: PAGE_TARGET_BUDGET_MS,
+      });
+      expect(decision.action).toBe("found");
+      expect(decision.kind).toBe("tauri-raw-target");
+      expect(decision.target).toEqual({ id: "T1", url: "http://tauri.localhost/" });
+    });
+
+    it("只匹配 type=page 的 target：iframe/service_worker 等同 URL 不作为页面归属", () => {
+      expect(
+        rawTargetDecision({
+          rawTargets: [{ id: "IF", type: "iframe", url: "http://tauri.localhost/" }],
+          elapsedMs: 3000,
+          budgetMs: PAGE_TARGET_BUDGET_MS,
+        }).action,
+      ).toBe("retry");
+    });
+
+    it("原始列表只有 about:blank 时继续等待，超时按原失败形态给出 target 列表", () => {
+      const retrying = rawTargetDecision({
+        rawTargets: [{ id: "B1", type: "page", url: "about:blank" }],
+        elapsedMs: 3000,
+        budgetMs: PAGE_TARGET_BUDGET_MS,
+      });
+      expect(retrying.action).toBe("retry");
+      const timedOut = rawTargetDecision({
+        rawTargets: [{ id: "B1", type: "page", url: "about:blank" }],
+        elapsedMs: PAGE_TARGET_BUDGET_MS,
+        budgetMs: PAGE_TARGET_BUDGET_MS,
+      });
+      expect(timedOut.action).toBe("fail");
+      expect(timedOut.kind).toBe("target-timeout");
+      expect(timedOut.detail).toContain("about:blank");
+    });
+
+    it("宿主退出优先于任何 target 判定（与 pageTargetDecision 同形态）", () => {
+      const decision = rawTargetDecision({
+        hostExitCode: 1,
+        rawTargets: [rawTauri()],
+        elapsedMs: 100,
+        budgetMs: PAGE_TARGET_BUDGET_MS,
+      });
+      expect(decision.action).toBe("fail");
+      expect(decision.kind).toBe("host-exited");
+    });
+
+    it("原始列表请求失败（fetch error）时回退为继续等待，不误判成功", () => {
+      expect(
+        rawTargetDecision({
+          rawTargets: null,
+          rawTargetsError: "connect ECONNREFUSED",
+          elapsedMs: 3000,
+          budgetMs: PAGE_TARGET_BUDGET_MS,
+        }).action,
+      ).toBe("retry");
+    });
+  });
+
 });
 
 describe("退出确认（§4.8 第 2 条）", () => {
@@ -472,6 +548,17 @@ describe("launches[] 证据（§4.8 第 5 条、§6.2 行 7）", () => {
     });
     record.pageTargetUrl = "tauri://localhost/index.html";
     record.pageTargets = ["about:blank", "tauri://localhost/index.html"];
+    record.rawTargets = [
+      { id: "T1", type: "page", url: "http://tauri.localhost/" },
+      { id: "B0", type: "page", url: "about:blank" },
+    ];
+    record.pageTargetAttachment = {
+      via: "raw-target-list",
+      target_id: "T1",
+      target_url: "http://tauri.localhost/",
+      attached_before_commit: true,
+      playwright_urls: ["about:blank"],
+    };
     record.stageMs = { spawn: 120, cdp_ready: 6400, page_target: 900, total: 7420 };
     record.hostExitCode = 0;
     const [evidence] = buildLaunchesEvidence([record]);
@@ -487,6 +574,18 @@ describe("launches[] 证据（§4.8 第 5 条、§6.2 行 7）", () => {
     });
     expect(evidence.owner_checks).toHaveLength(1);
     expect(evidence.probes).toEqual([{ at_ms: 100, ms: 1800, ok: true, error: null }]);
+    // 原始 target 归属证据：慢提交轮（PR #62 取证）必须能看到 targetId 与提交前附加事实
+    expect(evidence.raw_targets).toEqual([
+      { id: "T1", type: "page", url: "http://tauri.localhost/" },
+      { id: "B0", type: "page", url: "about:blank" },
+    ]);
+    expect(evidence.page_target_attachment).toEqual({
+      via: "raw-target-list",
+      target_id: "T1",
+      target_url: "http://tauri.localhost/",
+      attached_before_commit: true,
+      playwright_urls: ["about:blank"],
+    });
   });
 
   it("首次启动失败也留下 launches[] 与宿主日志尾部（§6.2 行 7）", () => {

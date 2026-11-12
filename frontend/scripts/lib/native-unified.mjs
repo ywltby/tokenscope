@@ -143,6 +143,22 @@ export function matchEventDom(events, domEvents) {
   });
 }
 
+/**
+ * 页面已挂 Tauri 注入的谓词：附加可先于提交（raw-target-list 路径），此时应用文档
+ * 可能还没开始加载。installProbe 先等这个谓词成立再 evaluate——与旧「frame 已提交
+ * 才附加」隐式提供的就绪保证等价；应用文档不加载时谓词不成立，场景按既有预算失败，
+ * 不是新增成功机会。
+ */
+export const TAURI_INTERNALS_READY_FN = "window.__TAURI_INTERNALS__ !== undefined";
+
+/** installProbe 注入的表达式（单一来源，供 installProbe 与单测共用）。 */
+export function unifiedProbeInstallExpression(observeFnSource) {
+  return `(() => {
+    window.__unifiedCallbacks?.dispose();
+    window.__unifiedCallbacks = (${observeFnSource})(window.__TAURI_INTERNALS__, () => performance.now());
+  })()`;
+}
+
 export function createUnifiedContext({
   inst,
   ev,
@@ -190,10 +206,8 @@ export function createUnifiedContext({
   const installProbe = async () => {
     invokeProbe?.dispose();
     invokeProbe = observeNativeInvokes(page());
-    await page().evaluate(`(() => {
-    window.__unifiedCallbacks?.dispose();
-    window.__unifiedCallbacks = (${observeCollectionCallbacks.toString()})(window.__TAURI_INTERNALS__, () => performance.now());
-  })()`);
+    await page().waitForFunction(TAURI_INTERNALS_READY_FN, null, { timeout: 20000 });
+    await page().evaluate(unifiedProbeInstallExpression(observeCollectionCallbacks.toString()));
   };
   const readProbe = async () => ({
     invokes: invokeProbe?.read() ?? [],

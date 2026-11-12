@@ -1,7 +1,14 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { EventEmitter } from "node:events";
-import { correlateNativeQuery, matchEventDom, nextQueryDimension, observeNativeInvokes } from "./native-unified.mjs";
+import {
+  TAURI_INTERNALS_READY_FN,
+  correlateNativeQuery,
+  matchEventDom,
+  nextQueryDimension,
+  observeNativeInvokes,
+  unifiedProbeInstallExpression,
+} from "./native-unified.mjs";
 
 it("重启后没有已捕获 DTO 也必须切离真实选中的按时间", () => {
   expect(nextQueryDimension("按时间")).toBe("project");
@@ -208,5 +215,44 @@ describe("真实 IPC 旁路观察", () => {
     expect(
       correlateNativeQuery({ summaryQuery: "absent", eventsQuery: "absent", records }).sameQuery,
     ).toBe(false);
+  });
+});
+
+describe("installProbe 的注入顺序（raw-target-list 附加可先于提交）", () => {
+  /** 假页面：记录 waitForFunction 与 evaluate 的调用次序；满足 observeNativeInvokes 所需接口。 */
+  function fakePage() {
+    const page = new EventEmitter();
+    const calls = [];
+    page.waitForFunction = async (fn) => {
+      calls.push(["wait", String(fn)]);
+    };
+    page.evaluate = async (script) => {
+      calls.push(["evaluate", String(script)]);
+    };
+    page.url = () => "about:blank";
+    page.calls = calls;
+    return page;
+  }
+
+  it("先等 __TAURI_INTERNALS__ 就绪再注入探测（run 43077893304 ui-identity 反例）", async () => {
+    const { createUnifiedContext } = await import("./native-unified.mjs");
+    const page = fakePage();
+    const inst = { page: page, proc: { exitCode: null }, root: "C:/tmp/unified-root", browser: null };
+    const ui = createUnifiedContext({ inst, ev: {} });
+    await ui.installProbe();
+    const kinds = page.calls.map(([kind]) => kind);
+    expect(kinds).toEqual(["wait", "evaluate"]);
+    expect(page.calls[0][1]).toBe(TAURI_INTERNALS_READY_FN);
+    expect(page.calls[1][1]).toContain("__unifiedCallbacks");
+    expect(page.calls[1][1]).toContain("__TAURI_INTERNALS__");
+  });
+
+  it("注入表达式与旧内联形态逐字等价（防漂移锚点）", async () => {
+    const { observeCollectionCallbacks } = await import("./collection-publish-window.mjs");
+    const expression = unifiedProbeInstallExpression(observeCollectionCallbacks.toString());
+    expect(expression).toContain("window.__unifiedCallbacks?.dispose();");
+    expect(expression).toContain(
+      `(${observeCollectionCallbacks.toString()})(window.__TAURI_INTERNALS__, () => performance.now());`,
+    );
   });
 });

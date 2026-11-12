@@ -786,6 +786,167 @@ export function pageTargetDecision({
   };
 }
 
+/** 原始 target 列表里的 page 候选（只认 type=page；iframe/service_worker 等不算页面归属）。 */
+function rawPageTargets(rawTargets) {
+  if (!Array.isArray(rawTargets)) return [];
+  return rawTargets.filter((t) => t && t.type === "page" && typeof t.url === "string");
+}
+
+/**
+ * 原始 target 列表（/json/list）判定：与 pageTargetDecision 同一失败语义，但归属依据是
+ * WebView2 的权威 target url，而不是 Playwright 的 frame 提交 URL。
+ *
+ * 背景（2026-11-11 run 42943893611 attempt 1 取证）：WebView2 在 NavigationStarting 就把
+ * target url 改成应用地址（提交尚未发生），frame 要等提交完成才更新；慢提交轮里
+ * Playwright 的 page.url() 全程只有 about:blank，驱动在 20 秒预算耗尽时误杀健康启动
+ * （实测提交在失败 1.9 秒后完成、页面正常运行）。原始列表与 Playwright 列表共用
+ * `/tauri/i` 匹配与同一 20 秒预算：target 不存在时照样在预算内失败，断言不放宽。
+ */
+export function rawTargetDecision({
+  hostExitCode = null,
+  rawTargets = null,
+  rawTargetsError = null,
+  elapsedMs = 0,
+  budgetMs = PAGE_TARGET_BUDGET_MS,
+} = {}) {
+  if (hostExitCode !== null && hostExitCode !== undefined) {
+    return {
+      action: "fail",
+      kind: "host-exited",
+      detail: `宿主在等待页面 target 时退出（退出码=${hostExitCode}）`,
+    };
+  }
+  const pages = rawPageTargets(rawTargets);
+  const urls = pages.map((t) => t.url);
+  const match = pickTauriTarget(urls);
+  if (match) {
+    const target = pages.find((t) => t.url === match);
+    return {
+      action: "found",
+      kind: "tauri-raw-target",
+      detail: match,
+      target: { id: target.id ?? null, url: target.url },
+    };
+  }
+  if (elapsedMs >= budgetMs) {
+    return {
+      action: "fail",
+      kind: "target-timeout",
+      detail: `没有 tauri 页面 target（等待 ${budgetMs} ms；原始 target：${describeTargets(urls)}${rawTargetsError ? `；列表请求失败：${rawTargetsError}` : ""}）`,
+      targets: urls,
+    };
+  }
+  return {
+    action: "retry",
+    kind: "waiting-target",
+    detail: `等待 tauri 页面 target（原始：${describeTargets(urls)}${rawTargetsError ? `；列表请求失败：${rawTargetsError}` : ""}）`,
+  };
+}
+
+/** 为单个页面建立 CDP 会话并读取 targetId；两次等待都受同一启动截止时刻约束。 */
+async function readCdpTargetId({
+  page,
+  newCDPSession,
+  hostExit = null,
+  deadlineMs,
+  now = Date.now,
+  timeoutDetail = "按 targetId 定位页面",
+}) {
+  const remaining = () => Math.max(0, Math.round(deadlineMs - now()));
+  let session = null;
+  let released = false;
+  const detach = (target) => {
+    try {
+      const pendingDetach = target?.detach?.();
+      if (pendingDetach && typeof pendingDetach.catch === "function")
+        pendingDetach.catch(() => {});
+    } catch {
+      /* 会话已断开：释放失败不改变既有结论 */
+    }
+  };
+  const release = () => {
+    if (released) return;
+    released = true;
+    detach(session);
+  };
+
+  session = await awaitWithHostExit({
+    task: () => newCDPSession(page),
+    hostExit,
+    timeoutMs: remaining(),
+    timeoutDetail: `${timeoutDetail}：建立 CDP 会话超过本次启动剩余预算`,
+    onCancel: release,
+    // 取消后才建成的会话立即释放，绝不再用于查询（`onCancel` 执行时会话还不存在）。
+    onLateResult: (lateSession) => detach(lateSession),
+  });
+  try {
+    const info = await awaitWithHostExit({
+      task: () => session.send("Target.getTargetInfo"),
+      hostExit,
+      timeoutMs: remaining(),
+      timeoutDetail: `${timeoutDetail}：Target.getTargetInfo 超过本次启动剩余预算`,
+      onCancel: release,
+      // 迟到结果只做收尾：不回到调用方，也不重复释放。
+      onLateResult: release,
+    });
+    return info?.targetInfo?.targetId ?? null;
+  } finally {
+    release();
+  }
+}
+
+/**
+ * 按 CDP targetId 找到对应的 Playwright Page（PR #64 复核缺口修复）。
+ *
+ * `newCDPSession` 与 `Target.getTargetInfo` 都可能不返回：两者各自接入
+ * `awaitWithHostExit`，共用调用方给定的启动截止时刻（页面阶段 20 秒与 65 秒总上限取严）。
+ * 预算耗尽或宿主退出时立即失败（错误带 `abortedBy`，由调用方走失败收尾），取消当下释放
+ * 已建立的会话；取消后迟到的会话/查询结果只做清理，不会被当成页面命中。
+ *
+ * 单个页面的普通会话错误（如 target 刚销毁）仍按瞬断跳过，返回 `null` 交给上层继续轮询。
+ */
+export async function findPageByTargetIdBounded({
+  pages = [],
+  targetId,
+  cache = new Map(),
+  newCDPSession,
+  hostExit = null,
+  deadlineMs = null,
+  now = Date.now,
+  timeoutDetail = "按 targetId 定位页面",
+} = {}) {
+  if (!targetId) return null;
+  const wanted = String(targetId);
+  const bounded =
+    deadlineMs !== null &&
+    deadlineMs !== undefined &&
+    deadlineMs !== "" &&
+    Number.isFinite(Number(deadlineMs));
+  // 未受启动预算约束时仍给页面阶段同一上限兜底，避免出现无界等待。
+  const deadline = bounded ? Number(deadlineMs) : now() + PAGE_TARGET_BUDGET_MS;
+  for (const page of pages) {
+    try {
+      let id = cache.get(page) ?? null;
+      if (!id) {
+        id = await readCdpTargetId({
+          page,
+          newCDPSession,
+          hostExit,
+          deadlineMs: deadline,
+          now,
+          timeoutDetail,
+        });
+        cache.set(page, id);
+      }
+      if (id && id === wanted) return page;
+    } catch (error) {
+      if (error?.abortedBy) throw error;
+      // 单个页面的会话失败（如 target 刚销毁）：跳过该页，下轮重查
+    }
+  }
+  return null;
+}
+
 /**
  * 退出确认决策（计划 §4.8 第 2 条）：宿主与全部已记录后代退出、端口不再监听才算结束，
  * 上限 20 秒；超时返回残留 PID 列表。
@@ -969,6 +1130,9 @@ export function buildLaunchesEvidence(records) {
     browser_args: record.browserArgs,
     page_target_url: record.pageTargetUrl,
     page_targets: [...record.pageTargets],
+    raw_targets: record.rawTargets ?? null,
+    raw_targets_error: record.rawTargetsError ?? null,
+    page_target_attachment: record.pageTargetAttachment ?? null,
     runtime_version: record.runtimeVersion ?? null,
     page_observations: record.pageObservations ?? [],
     startup_events: record.startupEvents ?? [],
