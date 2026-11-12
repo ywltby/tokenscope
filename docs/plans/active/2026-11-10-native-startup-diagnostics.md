@@ -71,3 +71,9 @@
 - 首轮独立端口复核超时记 unavailable，转储成功；调整诊断内部配额后第二轮快照成功。**没有改启动的 45/20/65 秒或诊断总计 8 秒上限**，首轮证据保留。
 - 该本地验收 EXE SHA256 `ba71c8243b7a80e1027bb7d9f072ab48a122d5c69dd9c3a6eb63014863af82c8`，构建时 HEAD 为 `7fe4c7a`、工作树含本批未提交改动，记录为 local/assumed、tree_clean=false，不称干净提交实跑；CI 将在提交后的树重建。
 - 上述实跑是正常场景的取证能力验证，**没有复现真实 about:blank，也不构成其根因修复证明**。完整提交钩子已通过（普通/acceptance 两套 workspace、前端 1104、E2E、Python/PowerShell 契约）；自审另补两条状态红测，防止把 helper 明确返回 unavailable 的转储包装成 captured。PR 最新 HEAD 的检查与根因状态以 PR 描述/检查记录为准。
+
+## 后续独立问题：PR #65 Native 首轮启动未就绪（2026-11-12）
+
+- PR #65（`feat/settings-about`）HEAD `e8649b0` 的 Native UI E2E 首轮在 `privacy-denied-ipc` 失败：`.privacy-dialog` 30 秒内未可见；该次 `process.log` 到失败时只有窗口构建与 `navigation_requested`（1759 ms），没有 `page_load_started` / `page_load_finished`；驱动经 raw-target-list 在 3.1 s 附加，宿主存活，无 renderer 错误。
+- 同提交重跑失败作业后通过（16 个场景零失败）。目前只能记为「**启动未就绪，重跑恢复，具体原因未确认**」；没有证据把它归因为环境抖动，也不据此声称测试架或产品缺陷。
+- 作为独立问题保留：下次出现时按本计划的阶段标记、独立 CDP 快照与最小转储继续取证；不增加等待、不以重跑代替定位。该失败与本计划已交付的 about:blank 归属修复无已证实关联。

@@ -112,6 +112,37 @@ export async function nativeUiSystem({ inst, ck, ev, markStage, markStageDone, i
   );
   await page().screenshot({ path: path.join(inst.opts.shots, "native-resized.png") });
   await navigate("设置");
+  // 2026-11-12 计划：关于显示运行时 getVersion()；与受测 EXE 的文件版本对照，
+  // 证明不是前端写死值或仓库版本。当前窗口 980×620，走顶部分段导航。
+  await page()
+    .locator(".settings-nav-item, .settings-nav .ts-segmented-item")
+    .filter({ hasText: "关于" })
+    .first()
+    .click();
+  await page().locator("[data-about-version]").waitFor({ state: "visible", timeout: 10000 });
+  const aboutUiVersion = (await page().locator("[data-about-version]").innerText()).trim();
+  const aboutExeVersion = spawnSyncBounded(
+    "pwsh",
+    [
+      "-NoProfile",
+      "-Command",
+      `(Get-Item -LiteralPath '${String(inst.opts.exePath).replace(/'/g, "''")}').VersionInfo.FileVersion`,
+    ],
+    { action: "about-exe-version" },
+  ).stdout.trim();
+  ev.aboutVersion = { ui: aboutUiVersion, exe: aboutExeVersion };
+  ck.add(
+    "about_runtime_version_matches_exe",
+    aboutUiVersion !== "" && aboutUiVersion === aboutExeVersion,
+    `ui=${aboutUiVersion}; exe=${aboutExeVersion}`,
+  );
+  await page().screenshot({ path: path.join(inst.opts.shots, "settings-about.png") });
+  await page()
+    .locator(".settings-nav-item, .settings-nav .ts-segmented-item")
+    .filter({ hasText: "通用" })
+    .first()
+    .click();
+  await page().waitForTimeout(300);
   await page().locator('[aria-label="聚合/展示时区"]').click();
   await page().locator(".n-base-select-option").filter({ hasText: /^UTC$/ }).click();
   await page().waitForFunction(() => !document.querySelector('[data-section="general"] .tz-state'));

@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
-  "kind": "patch",
-  "summary": "修复重复纠错备份、图表动画截断与筛选查询等待"
+  "kind": "minor",
+  "summary": "设置新增关于分区，显示当前运行版本"
 }
