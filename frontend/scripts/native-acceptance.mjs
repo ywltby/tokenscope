@@ -68,6 +68,7 @@ import {
   createLaunchRecord,
   createProbeFn,
   descendantsAliveByName,
+  findPageByTargetIdBounded,
   hostLogTail,
   launchPort,
   listenersOnPort,
@@ -556,26 +557,21 @@ class Instance {
    * 按 CDP targetId 找到对应的 Playwright Page：对每个页面建一次 CDP 会话读
    * `Target.getTargetInfo`（页面数 1–2，成本有界）。找不到（Playwright 还没暴露该页）
    * 返回 null，由调用方继续轮询——既不误判成功也不误判失败。
+   *
+   * 两次 CDP 等待都接入本次启动截止时刻与宿主退出信号（独立复核缺口）：预算耗尽或宿主
+   * 退出时抛出带 `abortedBy` 的错误，由调用方走失败收尾；取消当下释放会话，迟到结果被拒绝。
    */
   async findPageByTargetId(record, targetId) {
     if (!targetId || !this.ctx) return null;
-    let sessions = this.cdpPageIdSessions ?? (this.cdpPageIdSessions = new Map());
-    for (const page of this.ctx.pages()) {
-      try {
-        let id = sessions.get(page);
-        if (!id) {
-          const session = await this.ctx.newCDPSession(page);
-          const info = await session.send("Target.getTargetInfo");
-          session.detach().catch(() => {});
-          id = info?.targetInfo?.targetId ?? null;
-          sessions.set(page, id);
-        }
-        if (id && id === targetId) return page;
-      } catch {
-        // 单个页面的会话失败（如 target 刚销毁）：跳过该页，下轮重查
-      }
-    }
-    return null;
+    return findPageByTargetIdBounded({
+      pages: this.ctx.pages(),
+      targetId,
+      cache: this.cdpPageIdSessions ?? (this.cdpPageIdSessions = new Map()),
+      newCDPSession: (page) => this.ctx.newCDPSession(page),
+      hostExit: this.armedHostExit(),
+      deadlineMs: this.budgetDeadline(record),
+      timeoutDetail: `按 targetId 定位页面（${targetId}）`,
+    });
   }
 
   async captureStartupDump(record, signal) {
@@ -1245,7 +1241,15 @@ class Instance {
         if (rawDecision.action === "found") {
           // 原始列表已挂应用地址：按 targetId 找到对应的 Playwright Page（frame 可能尚未
           // 提交——这是合法状态，场景步骤用各自的 20 秒有界等待覆盖提交与渲染）。
-          const match = await this.findPageByTargetId(record, rawDecision.target.id);
+          // 查询本身受启动截止时刻与宿主退出约束：取消类错误直接走失败收尾（诊断/清理），
+          // 不再把迟到结果当成命中。
+          let match = null;
+          try {
+            match = await this.findPageByTargetId(record, rawDecision.target.id);
+          } catch (error) {
+            if (error?.abortedBy) throw await this.failLaunch(record, error);
+            throw error;
+          }
           if (match) {
             this.page = match;
             record.pageTargetAttachment = {

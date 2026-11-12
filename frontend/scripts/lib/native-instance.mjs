@@ -843,6 +843,110 @@ export function rawTargetDecision({
   };
 }
 
+/** 为单个页面建立 CDP 会话并读取 targetId；两次等待都受同一启动截止时刻约束。 */
+async function readCdpTargetId({
+  page,
+  newCDPSession,
+  hostExit = null,
+  deadlineMs,
+  now = Date.now,
+  timeoutDetail = "按 targetId 定位页面",
+}) {
+  const remaining = () => Math.max(0, Math.round(deadlineMs - now()));
+  let session = null;
+  let released = false;
+  const detach = (target) => {
+    try {
+      const pendingDetach = target?.detach?.();
+      if (pendingDetach && typeof pendingDetach.catch === "function")
+        pendingDetach.catch(() => {});
+    } catch {
+      /* 会话已断开：释放失败不改变既有结论 */
+    }
+  };
+  const release = () => {
+    if (released) return;
+    released = true;
+    detach(session);
+  };
+
+  session = await awaitWithHostExit({
+    task: () => newCDPSession(page),
+    hostExit,
+    timeoutMs: remaining(),
+    timeoutDetail: `${timeoutDetail}：建立 CDP 会话超过本次启动剩余预算`,
+    onCancel: release,
+    // 取消后才建成的会话立即释放，绝不再用于查询（`onCancel` 执行时会话还不存在）。
+    onLateResult: (lateSession) => detach(lateSession),
+  });
+  try {
+    const info = await awaitWithHostExit({
+      task: () => session.send("Target.getTargetInfo"),
+      hostExit,
+      timeoutMs: remaining(),
+      timeoutDetail: `${timeoutDetail}：Target.getTargetInfo 超过本次启动剩余预算`,
+      onCancel: release,
+      // 迟到结果只做收尾：不回到调用方，也不重复释放。
+      onLateResult: release,
+    });
+    return info?.targetInfo?.targetId ?? null;
+  } finally {
+    release();
+  }
+}
+
+/**
+ * 按 CDP targetId 找到对应的 Playwright Page（PR #64 复核缺口修复）。
+ *
+ * `newCDPSession` 与 `Target.getTargetInfo` 都可能不返回：两者各自接入
+ * `awaitWithHostExit`，共用调用方给定的启动截止时刻（页面阶段 20 秒与 65 秒总上限取严）。
+ * 预算耗尽或宿主退出时立即失败（错误带 `abortedBy`，由调用方走失败收尾），取消当下释放
+ * 已建立的会话；取消后迟到的会话/查询结果只做清理，不会被当成页面命中。
+ *
+ * 单个页面的普通会话错误（如 target 刚销毁）仍按瞬断跳过，返回 `null` 交给上层继续轮询。
+ */
+export async function findPageByTargetIdBounded({
+  pages = [],
+  targetId,
+  cache = new Map(),
+  newCDPSession,
+  hostExit = null,
+  deadlineMs = null,
+  now = Date.now,
+  timeoutDetail = "按 targetId 定位页面",
+} = {}) {
+  if (!targetId) return null;
+  const wanted = String(targetId);
+  const bounded =
+    deadlineMs !== null &&
+    deadlineMs !== undefined &&
+    deadlineMs !== "" &&
+    Number.isFinite(Number(deadlineMs));
+  // 未受启动预算约束时仍给页面阶段同一上限兜底，避免出现无界等待。
+  const deadline = bounded ? Number(deadlineMs) : now() + PAGE_TARGET_BUDGET_MS;
+  for (const page of pages) {
+    try {
+      let id = cache.get(page) ?? null;
+      if (!id) {
+        id = await readCdpTargetId({
+          page,
+          newCDPSession,
+          hostExit,
+          deadlineMs: deadline,
+          now,
+          timeoutDetail,
+        });
+        cache.set(page, id);
+      }
+      if (id && id === wanted) return page;
+    } catch (error) {
+      if (error?.abortedBy) throw error;
+      // 单个页面的会话失败（如 target 刚销毁）：跳过该页，下轮重查
+    }
+  }
+  return null;
+}
+
 /**
  * 退出确认决策（计划 §4.8 第 2 条）：宿主与全部已记录后代退出、端口不再监听才算结束，
  * 上限 20 秒；超时返回残留 PID 列表。

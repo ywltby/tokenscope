@@ -20,6 +20,7 @@ import {
   createHostExitSignal,
   createLaunchRecord,
   createProbeFn,
+  findPageByTargetIdBounded,
   hostExitDetail,
   recordConnectAttempt,
   remainingBudgetMs,
@@ -579,5 +580,164 @@ describe("取消动作在取消当下执行（复核 P2：onCancel 与 onLateRes
     expect(seen).toEqual([{ url: "http://127.0.0.1:9601", timeout: 50 }]);
     await sleep(250);
     expect(closed).toBe(1);
+  });
+});
+
+// PR #64 独立复核缺口（qa-artifacts/pr64-independent-review/target-id-budget-probe.json）：
+// findPageByTargetId 的 `newCDPSession` 与 `send("Target.getTargetInfo")` 原本没有接入
+// 启动剩余预算与宿主退出信号——CDP 不返回时等待会越过 65 秒总预算，释放后还会继续接受页面。
+// 这里用真实计时器与可控的挂起 Promise 验证：到期/退出必须失败收尾，迟到结果被拒绝，
+// 已建立的 CDP 会话必须释放。
+describe("按 targetId 定位页面的预算与宿主退出约束（独立复核缺口）", () => {
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  };
+
+  it("newCDPSession 不返回时在预算处失败，不进入成功分支", async () => {
+    const startedAt = Date.now();
+    let created = 0;
+    const error = await findPageByTargetIdBounded({
+      pages: [{}],
+      targetId: "T1",
+      newCDPSession: () => {
+        created++;
+        return new Promise(() => {});
+      },
+      deadlineMs: Date.now() + 80,
+    }).then(
+      () => null,
+      (e) => e,
+    );
+    expect(error).toBeInstanceOf(BudgetExhaustedError);
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+    expect(created).toBe(1);
+  });
+
+  it("Target.getTargetInfo 不返回时在预算处失败并释放会话；迟到结果不被接受", async () => {
+    let detached = 0;
+    const reply = deferred();
+    const session = {
+      send: () => reply.promise,
+      detach: async () => {
+        detached++;
+      },
+    };
+    const pending = findPageByTargetIdBounded({
+      pages: ["p1"],
+      targetId: "T1",
+      newCDPSession: async () => session,
+      deadlineMs: Date.now() + 100,
+    });
+    const error = await pending.then(
+      () => null,
+      (e) => e,
+    );
+    expect(error).toBeInstanceOf(BudgetExhaustedError);
+    expect(detached).toBe(1);
+    // 释放后才返回的查询结果：不得被当成成功，也不得再次释放会话
+    reply.resolve({ targetInfo: { targetId: "T1" } });
+    await sleep(20);
+    expect(detached).toBe(1);
+  });
+
+  it("宿主退出立即中止查询并释放会话，迟到结果不返回", async () => {
+    let detached = 0;
+    const reply = deferred();
+    const hostSignal = deferred();
+    const session = {
+      send: () => reply.promise,
+      detach: async () => {
+        detached++;
+      },
+    };
+    const pending = findPageByTargetIdBounded({
+      pages: ["p1"],
+      targetId: "T1",
+      newCDPSession: async () => session,
+      hostExit: { signal: hostSignal.promise },
+      deadlineMs: Date.now() + 5000,
+    });
+    await sleep(20);
+    hostSignal.resolve({ code: 0, atMs: 20, source: "exit-event" });
+    const error = await pending.then(
+      () => null,
+      (e) => e,
+    );
+    expect(error).toBeInstanceOf(HostExitError);
+    expect(error.abortedBy).toBe("host-exit");
+    expect(detached).toBe(1);
+    reply.resolve({ targetInfo: { targetId: "T1" } });
+    await sleep(20);
+    expect(detached).toBe(1);
+  });
+
+  it("成功读取 targetId 后释放会话并缓存结果", async () => {
+    const page = {};
+    const cache = new Map();
+    let sends = 0;
+    let detached = 0;
+    const match = await findPageByTargetIdBounded({
+      pages: [page],
+      targetId: "T1",
+      cache,
+      newCDPSession: async () => ({
+        send: async () => {
+          sends++;
+          return { targetInfo: { targetId: "T1" } };
+        },
+        detach: async () => {
+          detached++;
+        },
+      }),
+      deadlineMs: Date.now() + 2000,
+    });
+    expect(match).toBe(page);
+    expect(cache.get(page)).toBe("T1");
+    expect(sends).toBe(1);
+    expect(detached).toBe(1);
+  });
+
+  it("单个页面的会话失败按瞬断跳过，不影响后续页面命中", async () => {
+    const first = {};
+    const second = {};
+    const cache = new Map();
+    const match = await findPageByTargetIdBounded({
+      pages: [first, second],
+      targetId: "T2",
+      cache,
+      newCDPSession: async (page) => ({
+        send: async () => {
+          if (page === first) throw new Error("Target closed");
+          return { targetInfo: { targetId: "T2" } };
+        },
+        detach: async () => {},
+      }),
+      deadlineMs: Date.now() + 2000,
+    });
+    expect(match).toBe(second);
+    expect(cache.get(second)).toBe("T2");
+    expect(cache.has(first)).toBe(false);
+  });
+
+  it("预算在开始前已耗尽：直接失败且不建立会话", async () => {
+    let created = 0;
+    const error = await findPageByTargetIdBounded({
+      pages: [{}],
+      targetId: "T1",
+      newCDPSession: async () => {
+        created++;
+        return {};
+      },
+      deadlineMs: Date.now() - 1,
+    }).then(
+      () => null,
+      (e) => e,
+    );
+    expect(error).toBeInstanceOf(BudgetExhaustedError);
+    expect(created).toBe(0);
   });
 });
