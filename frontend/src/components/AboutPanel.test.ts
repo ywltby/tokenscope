@@ -10,6 +10,7 @@ const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 import AboutPanel from "./AboutPanel.vue";
+import aboutSource from "./AboutPanel.vue?raw";
 import { changeLocale, DEFAULT_LOCALE } from "../lib/i18n";
 
 function deferred<T>(): {
@@ -103,6 +104,32 @@ describe("AboutPanel 版本读取", () => {
     expect(w.find("[data-about-version]").text()).toBe("9.8.7");
     expect(getVersionMock).toHaveBeenCalledTimes(1);
     w.unmount();
+  });
+
+  it("失败后切换语言，原因随界面翻译，不残留读取时的中文", async () => {
+    getVersionMock.mockResolvedValue("   ");
+    const w = mount(AboutPanel);
+    await flushPromises();
+    expect(w.find("[role='alert']").text()).toContain("版本不可用");
+
+    changeLocale("en-US");
+    await flushPromises();
+    const alert = w.find("[role='alert']").text();
+    expect(alert).toContain("Failed to read version");
+    expect(alert).toContain("Version unavailable");
+    expect(alert).not.toContain("版本不可用");
+    w.unmount();
+  });
+
+  it("关于行复用设置行的局部样式（对齐、间距与辅助文字层级）", () => {
+    // Settings.vue 的 scoped 样式不会作用到子组件内部：AboutPanel 必须自带
+    // 同一组行样式，否则版本行缺少 flex 对齐/间距与 12px 辅助文字。
+    expect(aboutSource).toMatch(/\.setting-row\s*\{[^}]*display:\s*flex/);
+    expect(aboutSource).toMatch(/\.setting-row\s*\{[^}]*justify-content:\s*space-between/);
+    expect(aboutSource).toMatch(/\.setting-row\s*\{[^}]*padding:\s*var\(--ts-space-3\)\s+0/);
+    expect(aboutSource).toMatch(/\.setting-main\s*\{[^}]*min-width:\s*0/);
+    expect(aboutSource).toMatch(/\.setting-label\s*\{[^}]*font-size:\s*14px/);
+    expect(aboutSource).toMatch(/\.setting-help\s*\{[^}]*font-size:\s*12px/);
   });
 
   it("卸载后的迟到结果不写状态，也不产生未处理拒绝", async () => {
