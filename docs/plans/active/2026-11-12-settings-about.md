@@ -1,6 +1,6 @@
 # 设置页「关于」与当前安装版本实施计划
 
-> 状态：**已实施，PR 待审查**（2026-11-12）。产品版本已按新功能规则从 `0.7.5` 升至 `0.8.0`；尚未合并、发布或在本机安装。
+> 状态：**已实施，PR #65 待审查**（2026-11-12）。产品版本已按新功能规则从 `0.7.5` 升至 `0.8.0`；尚未合并、发布或在本机安装。
 > 执行模型：使用 `executing-plans`、`vue-best-practices`、`test-driven-development` 和 `verification-before-completion`，按下列步骤实施。
 >
 > **实施记录（2026-11-12）**：
@@ -9,7 +9,8 @@
 > - 语言与布局：zh-CN / en-US 键补齐（`locales.test` 守卫）；宽窗口侧栏与 980×620 顶部分段控件均可进入关于。
 > - 副作用：关于只调用 `plugin:app|version`；浏览器契约审计进入关于后新增 IPC，无设置写入、采集、导入或查询。
 > - 验证：前端全量 **1140 项通过**；typecheck / format:check / build 通过；浏览器契约 `settings_about_contract` **12 项断言通过**，覆盖明暗主题 × 宽窄窗口、英文切换、失败原因与重试；证据截图在 gitignored `qa-artifacts/ui-adjustment/ci-e2e/settings_about_contract--*.png`。
-> - 真实宿主：`native-ui-system` 新增 `about_runtime_version_matches_exe`，把界面显示的 `getVersion()` 与本次受测 EXE 的 `VersionInfo.FileVersion` 对照（fixture 模拟值 `9.8.7` 仅用于浏览器契约，不能替代真实 IPC）。该断言待 Runner 的 Native UI E2E 执行。
+> - 真实宿主：`native-ui-system` 新增 `about_runtime_version_matches_exe`，把界面显示的 `getVersion()` 与本次受测 EXE 的 `VersionInfo.FileVersion` 对照（fixture 模拟值 `9.8.7` 仅用于浏览器契约，不能替代真实 IPC）。PR #65 最新 HEAD `f30144f` 的 Native UI E2E 三个 ui-system 场景均输出 `ui=0.8.0; exe=0.8.0`。
+> - CI：PR #65 最新 HEAD `f30144f` 的 20 项检查成功、1 项按设计跳过（`upgrade-chain`），`CLEAN`；CI 日志确认前端 77 个测试文件通过、`settings_about_contract` 12 项断言通过；Install test 成功。
 > - 版本：`bump_version.py --bump minor` 输出 `0.8.0` / `release: true`；升级起点含上一版 `0.7.5`；本机未安装、未发布。
 
 **Goal:** 用户打开「设置 → 关于」即可看到正在运行的 TokenScope 的真实版本，不必查安装包文件名或发布页。
@@ -100,8 +101,8 @@
 ## 7. 完成判据（2026-11-12 实施状态）
 
 - [x] 设置存在中英文关于入口，两种导航布局均可达（单测 + 浏览器契约）。
-- [ ] 显示运行程序的真实版本，加载、失败、重试与无接口场景表现明确：面板行为与浏览器 fixture 已证；**真实 `getVersion()` 与受测 EXE 版本对照待 Runner Native UI**。
+- [x] 显示运行程序的真实版本，加载、失败、重试与无接口场景表现明确（单测、浏览器 fixture，以及 Native `ui=0.8.0; exe=0.8.0` 真实 IPC 对照）。
 - [x] 首次访问前零版本请求，成功后保留结果，无写设置或采集副作用（单测 + 浏览器 IPC 审计）。
 - [x] 相关单测、浏览器契约与真实 IPC 验证范围已分别记录（本节）。
-- [ ] 最新 HEAD 必要检查成功，版本与发布声明匹配：待 PR CI / Native UI / Install / 升级矩阵。
-- [ ] 计划和 PR 记录一致，未提前宣称已发布或用户已安装。
+- [x] 最新 HEAD 必要检查成功，版本与发布声明匹配（20 项成功、1 项按设计跳过，`CLEAN`）。
+- [x] 计划和 PR 记录一致，未提前宣称已发布或用户已安装。
