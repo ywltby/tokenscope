@@ -197,7 +197,7 @@ runs:
     # 状态与真实变更。证据不足 1MB，始终上传不影响检查结论。
     - name: Preserve build-input evidence
       if: always() && inputs.group == 'contracts'
-      uses: actions/upload-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
       with:
         name: build-input-evidence
         path: qa-artifacts/build-inputs/ci
