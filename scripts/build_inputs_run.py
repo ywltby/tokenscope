@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 from datetime import datetime, timezone
 
@@ -46,6 +47,27 @@ def evidence_dir(root, name=None):
     return path
 
 
+def _remove_local_package_artifacts(root, package):
+    """删除本地包的构建目录与指纹（两种 Cargo 布局）。
+
+    2026-11-13（CI 阻断修复）：`cargo clean -p` 在缓存恢复/新布局下可能
+    留下构建脚本指纹，Cargo 因「fresh」只回放而不写 `output`，检查器读不到
+    声明输入。显式删除 `target/*/build/<pkg>`、`<pkg>-*` 与 `.fingerprint`
+    对应目录，保证本轮构建脚本真实执行且输出可读。
+    """
+    targets = []
+    for base in Path(root).glob("target/*/build"):
+        targets.extend(
+            p for p in base.iterdir() if p.name == package or p.name.startswith(package + "-")
+        )
+    for base in Path(root).glob("target/*/.fingerprint"):
+        targets.extend(
+            p for p in base.iterdir() if p.name == package or p.name.startswith(package + "-")
+        )
+    for path in targets:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def clean_local_packages(root):
     """清理两个本地 package（不是整仓 clean），建立明确的干净构建区。"""
     command = ["cargo", "clean", "-p", "tokenscope", "-p", "tokenscope-app"]
@@ -53,6 +75,8 @@ def clean_local_packages(root):
                             text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         raise ManifestError(f"cargo clean -p 失败，无法建立干净构建区：{result.stderr.strip()}")
+    for package in LOCAL_PACKAGES:
+        _remove_local_package_artifacts(root, package)
 
 
 def run_cargo(root, mode, evidence):
@@ -125,6 +149,21 @@ def snapshot_build_script_output(messages, evidence):
                 output.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
 
 
+def _target_build_output_candidates(root, package):
+    """target 下同包构建脚本 `output` 的候选（兼容两种 Cargo 布局）。
+
+    旧布局 `build/<pkg>-<hash>/output`；较新 Cargo 使用
+    `build/<pkg>/<hash>/output`（2026-11-13 CI 证据中的 out_dir 即后者）。
+    只匹配包名边界，避免 tokenscope 误取 tokenscope-app 的输出。
+    """
+    candidates = []
+    for build in Path(root).glob("target/*/build"):
+        candidates.extend(build.glob(f"{package}-*/output"))
+        candidates.extend(build.glob(f"{package}/*/output"))
+        candidates.extend(build.glob(f"{package}/output"))
+    return candidates
+
+
 def _build_script_output_text(root, package, out_dir, evidence):
     """读取构建脚本输出：消息 out_dir → 证据快照 → target 下同包构建目录。
 
@@ -141,17 +180,27 @@ def _build_script_output_text(root, package, out_dir, evidence):
         candidates.extend(sorted(Path(evidence).glob(f"build-script-output-{package}-*.txt")))
     candidates.extend(
         sorted(
-            Path(root).glob(f"target/*/build/{package}-*/output"),
+            _target_build_output_candidates(root, package),
             key=lambda p: p.stat().st_mtime if p.is_file() else 0.0,
             reverse=True,
         )
     )
+    # 最后兜底：在 build 树下按包名边界搜索任意层级的 output（覆盖 Cargo
+    # 新布局与缓存恢复后的目录结构差异；不跨包误取 tokenscope 的输出）。
+    for build in Path(root).glob("target/*/build"):
+        for output in build.rglob("output"):
+            if not output.is_file():
+                continue
+            parts = output.relative_to(build).parts
+            if any(part == package or part.startswith(package + "-") for part in parts):
+                candidates.append(output)
     for candidate in candidates:
         if candidate.is_file():
             return candidate.read_text(encoding="utf-8", errors="replace")
     if evidence is not None:
         (Path(evidence) / f"build-script-output-missing-{package}.txt").write_text(
-            f"package={package}\nout_dir={out_dir}\n", encoding="utf-8"
+            f"package={package}\nout_dir={out_dir}\ntarget_candidates={len(candidates)}\n",
+            encoding="utf-8",
         )
     return None
 

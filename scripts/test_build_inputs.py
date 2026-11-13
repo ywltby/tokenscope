@@ -391,6 +391,21 @@ class BuildScriptEvidenceCase(unittest.TestCase):
             )
             self.assertEqual(text, "cargo:rerun-if-changed=capabilities\n")
 
+    def test_nested_cargo_layout_output_is_found(self):
+        # 2026-11-13 CI 证据：out_dir 形如 build/<pkg>/<hash>/out；即使消息
+        # 指向的兄弟 output 缺失，也要在包子树里找到实际输出。
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            nested = root / "target" / "debug" / "build" / "tokenscope-app" / "hash1"
+            nested.mkdir(parents=True)
+            (nested / "output").write_text(
+                "cargo:rerun-if-changed=tauri.conf.json\n", encoding="utf-8"
+            )
+            text = _build_script_output_text(
+                root, "tokenscope-app", nested / "missing-out", None
+            )
+            self.assertEqual(text, "cargo:rerun-if-changed=tauri.conf.json\n")
+
     def test_missing_output_preserves_evidence_and_falls_back_to_package_root(self):
         with tempfile.TemporaryDirectory() as parent:
             root = Path(parent)
@@ -431,6 +446,32 @@ class BuildScriptEvidenceCase(unittest.TestCase):
             )
             self.assertEqual(declared, {"tokenscope-app": {"src-tauri/capabilities"}})
             self.assertEqual(undeclared, {})
+
+    def test_clean_removes_both_build_layouts_and_fingerprints_only_for_package(self):
+        from build_inputs_run import _remove_local_package_artifacts
+
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            debug = root / "target" / "debug"
+            old = debug / "build" / "tokenscope-app-abc"
+            new = debug / "build" / "tokenscope-app" / "hash1"
+            other = debug / "build" / "tokenscope-abc"
+            keep = debug / "build" / "serde-abc"
+            for path in (old, new, other, keep):
+                path.mkdir(parents=True)
+            fp_old = debug / ".fingerprint" / "tokenscope-app-abc"
+            fp_new = debug / ".fingerprint" / "tokenscope-app-xyz"
+            fp_keep = debug / ".fingerprint" / "serde-abc"
+            for path in (fp_old, fp_new, fp_keep):
+                path.mkdir(parents=True)
+            _remove_local_package_artifacts(root, "tokenscope-app")
+            self.assertFalse(old.exists())
+            self.assertFalse(new.exists())
+            self.assertFalse(fp_old.exists())
+            self.assertFalse(fp_new.exists())
+            self.assertTrue(other.exists(), "同前缀的其他包不得误删")
+            self.assertTrue(keep.exists())
+            self.assertTrue(fp_keep.exists())
 
 
 if __name__ == "__main__":
