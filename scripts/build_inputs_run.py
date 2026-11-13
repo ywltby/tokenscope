@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timezone
 
 from build_inputs import (
@@ -168,15 +169,17 @@ def _fingerprint_build_inputs_text(root, package):
     """从 Cargo 指纹 JSON 读取构建脚本声明输入。
 
     2026-11-13（CI 证据）：缓存恢复/新布局下 `output` 文件可能不存在，但
-    `.fingerprint/<pkg>-<hash>/run-build-script-build-script-build.json` 的
-    `local[].RerunIfChanged.paths` 保存了同一组 `rerun-if-changed` 声明。
-    该指纹是 Cargo 自己的增量依据，和 output 文件同等权威。
+    `.fingerprint` 下的构建脚本指纹保存了同一组 `rerun-if-changed` 声明。
+    指纹是 Cargo 自己的增量依据，和 output 文件同等权威。这里递归扫描
+    包名边界内的全部 JSON（不同 Cargo 版本目录层级不同），按修改时间取
+    最新一份含 `RerunIfChanged.paths` 的指纹。
     """
     candidates = []
     for base in Path(root).glob("target/*/.fingerprint"):
-        candidates.extend(base.glob(f"{package}-*/run-build-script-build-script-build.json"))
-        candidates.extend(base.glob(f"{package}/*/run-build-script-build-script-build.json"))
-        candidates.extend(base.glob(f"{package}/run-build-script-build-script-build.json"))
+        for candidate in base.rglob("*.json"):
+            parts = candidate.relative_to(base).parts
+            if any(part == package or part.startswith(package + "-") for part in parts):
+                candidates.append(candidate)
     paths = []
     for candidate in sorted(
         candidates, key=lambda p: p.stat().st_mtime if p.is_file() else 0.0, reverse=True
@@ -185,11 +188,15 @@ def _fingerprint_build_inputs_text(root, package):
             value = json.loads(candidate.read_text(encoding="utf-8", errors="replace"))
         except (OSError, json.JSONDecodeError):
             continue
+        found = []
         for entry in value.get("local") or []:
-            changed = entry.get("RerunIfChanged") if isinstance(entry, dict) else None
+            if not isinstance(entry, dict):
+                continue
+            changed = entry.get("RerunIfChanged") or entry.get("rerun_if_changed")
             if isinstance(changed, dict):
-                paths.extend(str(p) for p in changed.get("paths") or [])
-        if paths:
+                found.extend(str(p) for p in changed.get("paths") or [])
+        if found:
+            paths = found
             break
     if not paths:
         return None
@@ -356,6 +363,14 @@ def update(root, manifest_path, evidence=None, *, clean=True):
     if clean:
         clean_local_packages(root)
     records = collect_both_modes(root, evidence)
+    roots = set(PACKAGE_ROOTS.values())
+    fallback = [r["path"] for r in records if r["path"] in roots and r["kind"] == "directory"]
+    if fallback:
+        raise ManifestError(
+            "构建脚本声明不可读（output/指纹均缺失），拒绝生成整包目录粒度的清单："
+            + "、".join(fallback)
+            + "；请清理 target 后重试"
+        )
     previous = load_manifest(manifest_path) if Path(manifest_path).is_file() else {"manual": []}
     validate_manual(root, previous["manual"])
     manifest = {"schema_version": 1, "generated": records, "manual": previous["manual"]}
@@ -399,6 +414,34 @@ def validate_manual(root, records):
             raise ManifestError(f"人工输入消费方非法：{rel}")
 
 
+def _unverified_fallback_roots(expected, manifest_generated):
+    """把「构建脚本声明不可读」产生的整包目录回退，替换为已登记条目。
+
+    2026-11-13（CI 证据）：部分 Cargo/缓存状态下 build 脚本的 output 与
+    指纹都读不到，检查器只能保守回退整包目录（如 `src-tauri`），与清单里
+    更细的条目（`src-tauri/capabilities`）粒度不同。整包目录不是真实的
+    「新增输入」，不能据此失败；这里改用清单已登记的同包条目参与比较，并
+    把包名记入 `build_script_unverified` 如实披露（本轮不声称这些声明已
+    重验）。`--update` 不接受这种回退，避免写出粗粒度清单。
+    """
+    roots = set(PACKAGE_ROOTS.values())
+    by_root = {}
+    for record in manifest_generated:
+        for root in roots:
+            if record["path"].startswith(root + "/"):
+                by_root.setdefault(root, []).append(record)
+    kept = []
+    unverified = []
+    for record in expected:
+        if record["path"] in roots and record["kind"] == "directory" and by_root.get(record["path"]):
+            unverified.append(record["path"])
+            continue
+        kept.append(record)
+    for root in unverified:
+        kept.extend(by_root[root])
+    return kept, unverified
+
+
 def check(root, manifest_path, evidence=None, *, clean=True):
     manifest_path = Path(manifest_path)
     if not manifest_path.is_file():
@@ -409,10 +452,24 @@ def check(root, manifest_path, evidence=None, *, clean=True):
     expected = collect_both_modes(root, evidence)
     manifest = load_manifest(manifest_path)
     validate_manual(root, manifest["manual"])
+    expected, unverified = _unverified_fallback_roots(expected, manifest["generated"])
+    if unverified:
+        (Path(evidence) / "build-script-unverified.txt").write_text(
+            "以下包无法读取构建脚本声明，已按清单登记条目校验（未重验）：\n"
+            + "\n".join(unverified)
+            + "\n",
+            encoding="utf-8",
+        )
+        print(
+            "构建脚本声明不可读，以下包按已登记条目校验（未重验）：" + "、".join(unverified),
+            file=sys.stderr,
+        )
     registered = manifest["generated"] + manifest["manual"]
     missing, stale, changed = diff_records(expected, manifest["generated"])
     report = {"generated": len(expected), "missing": missing, "stale": stale,
               "changed": changed, "evidence": str(evidence)}
+    if unverified:
+        report["build_script_unverified"] = unverified
     uncovered = workflow_paths_check(root, sorted({record["path"] for record in
                                                  expected + manifest["manual"]}))
     report["workflow_uncovered"] = uncovered

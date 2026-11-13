@@ -22,7 +22,12 @@ from build_inputs import (
     parse_dep_info,
     workflow_coverage,
 )
-from build_inputs_run import _build_script_output_text, build_script_inputs
+from build_inputs_run import (
+    _build_script_output_text,
+    _remove_local_package_artifacts,
+    _unverified_fallback_roots,
+    build_script_inputs,
+)
 
 REPO_POSIX = "/repo"
 
@@ -477,7 +482,6 @@ class BuildScriptEvidenceCase(unittest.TestCase):
             self.assertEqual(undeclared, {})
 
     def test_clean_removes_both_build_layouts_and_fingerprints_only_for_package(self):
-        from build_inputs_run import _remove_local_package_artifacts
 
         with tempfile.TemporaryDirectory() as parent:
             root = Path(parent)
@@ -501,6 +505,31 @@ class BuildScriptEvidenceCase(unittest.TestCase):
             self.assertTrue(other.exists(), "同前缀的其他包不得误删")
             self.assertTrue(keep.exists())
             self.assertTrue(fp_keep.exists())
+
+    def test_fallback_root_is_replaced_by_registered_entries_and_disclosed(self):
+        manifest = [
+            {"path": "src-tauri", "kind": "directory",
+             "consumers": [{"package": "tokenscope-app", "mode": "default"}]},
+            {"path": "src-tauri/capabilities", "kind": "directory",
+             "consumers": [{"package": "tokenscope-app", "mode": "default"}]},
+            {"path": "src-tauri/tauri.conf.json", "kind": "file",
+             "consumers": [{"package": "tokenscope-app", "mode": "default"}]},
+        ]
+        expected, unverified = _unverified_fallback_roots([manifest[0]], manifest)
+        self.assertEqual(unverified, ["src-tauri"])
+        self.assertEqual(
+            sorted(record["path"] for record in expected),
+            ["src-tauri/capabilities", "src-tauri/tauri.conf.json"],
+        )
+
+    def test_real_fallback_root_without_registered_children_is_not_hidden(self):
+        manifest = [
+            {"path": "src-tauri", "kind": "directory",
+             "consumers": [{"package": "tokenscope-app", "mode": "default"}]},
+        ]
+        expected, unverified = _unverified_fallback_roots([manifest[0]], manifest)
+        self.assertEqual(unverified, [])
+        self.assertEqual([record["path"] for record in expected], ["src-tauri"])
 
 
 if __name__ == "__main__":
