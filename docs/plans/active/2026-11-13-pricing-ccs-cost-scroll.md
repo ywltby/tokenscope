@@ -101,4 +101,17 @@
 
 - 版本 `0.9.0`（minor，`release: true`）；`v0.8.0` 升级基线已登记（资产哈希以
   下载核对为准）。
-- 待回填：完整本地门禁、PR 最新 HEAD 检查与证据。
+- PR #66。首轮最新 HEAD 检查：frontend / rust / rust-acceptance / native-ui /
+  install-test / 全部单跳升级均通过；`contracts` 在
+  `build_inputs --check` 失败，`gate` 随汇总失败。
+- **CI 阻断取证与修复（2026-11-13）**：失败报告为计算清单含 `src-tauri`
+  （整包目录）、提交清单含 `src-tauri/capabilities`，workflow 覆盖同时报
+  `install-test.yml: [src-tauri]`。原因是 rust-cache 恢复的构建里
+  `build-script-executed` 的 `out_dir` 可能缺少 `output` 文件，检查器把
+  「无声明输入」保守回退成整包目录，产生与提交清单不同的粒度；不是产品
+  输入变化。修复：构建脚本输出依次从消息 `out_dir`、证据快照、
+  `target/*/build/<pkg>-*/output` 读取；仍缺失时保留
+  `build-script-output-missing-<pkg>.txt` 证据再回退。另在 contracts 作业
+  失败时上传 `qa-artifacts/build-inputs/ci` 便于后续定位。新增 3 个纯函数
+  契约（target 输出回退、缺失证据、capabilities 目录保留），38 项通过；
+  本地 `build_inputs --check` 干净。

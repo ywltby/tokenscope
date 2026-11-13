@@ -22,6 +22,7 @@ from build_inputs import (
     parse_dep_info,
     workflow_coverage,
 )
+from build_inputs_run import _build_script_output_text, build_script_inputs
 
 REPO_POSIX = "/repo"
 
@@ -370,6 +371,66 @@ class CollectCase(unittest.TestCase):
         records = collect_records({("tokenscope-app", "default"): ["frontend/public/"]})
         self.assertEqual(records[0]["kind"], "directory")
         self.assertEqual(records[0]["path"], "frontend/public")
+
+
+class BuildScriptEvidenceCase(unittest.TestCase):
+    """2026-11-13（CI 阻断）：缓存构建缺 `output` 时从 target 读取输出。"""
+
+    def test_target_output_is_used_when_message_output_is_missing(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            build_dir = root / "target" / "debug" / "build" / "tokenscope-app-abc"
+            build_dir.mkdir(parents=True)
+            (build_dir / "output").write_text(
+                "cargo:rerun-if-changed=capabilities\n", encoding="utf-8"
+            )
+            evidence = root / "evidence"
+            evidence.mkdir()
+            text = _build_script_output_text(
+                root, "tokenscope-app", root / "missing" / "out", evidence
+            )
+            self.assertEqual(text, "cargo:rerun-if-changed=capabilities\n")
+
+    def test_missing_output_preserves_evidence_and_falls_back_to_package_root(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            (root / "src-tauri").mkdir()
+            (root / "src-tauri" / "build.rs").write_text("fn main() {}\n", encoding="utf-8")
+            evidence = root / "evidence"
+            evidence.mkdir()
+            messages = [{
+                "reason": "build-script-executed",
+                "package_id": "path+file:///repo/src-tauri#tokenscope-app@0.9.0",
+                "out_dir": str(root / "missing" / "out"),
+            }]
+            declared, undeclared = build_script_inputs(root, messages, evidence)
+            self.assertEqual(declared, {})
+            self.assertEqual(undeclared, {"tokenscope-app": "src-tauri"})
+            self.assertTrue(
+                (evidence / "build-script-output-missing-tokenscope-app.txt").is_file()
+            )
+
+    def test_declared_capabilities_directory_is_kept(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            build_dir = root / "target" / "debug" / "build" / "tokenscope-app-abc"
+            build_dir.mkdir(parents=True)
+            (build_dir / "output").write_text(
+                f"cargo:rerun-if-changed={root / 'src-tauri' / 'capabilities'}\n",
+                encoding="utf-8",
+            )
+            (root / "src-tauri" / "capabilities").mkdir(parents=True)
+            declared, undeclared = build_script_inputs(
+                root,
+                [{
+                    "reason": "build-script-executed",
+                    "package_id": "path+file:///repo/src-tauri#tokenscope-app@0.9.0",
+                    "out_dir": str(root / "missing" / "out"),
+                }],
+                None,
+            )
+            self.assertEqual(declared, {"tokenscope-app": {"src-tauri/capabilities"}})
+            self.assertEqual(undeclared, {})
 
 
 if __name__ == "__main__":

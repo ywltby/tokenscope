@@ -125,6 +125,37 @@ def snapshot_build_script_output(messages, evidence):
                 output.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
 
 
+def _build_script_output_text(root, package, out_dir, evidence):
+    """读取构建脚本输出：消息 out_dir → 证据快照 → target 下同包构建目录。
+
+    2026-11-13（CI 阻断修复）：rust-cache 恢复的构建可能让
+    `build-script-executed` 的 out_dir 缺少 `output` 文件。缺输出时若直接
+    按「无声明输入」回退整包目录，会得到与提交清单不同的粒度（`src-tauri`
+    对 `src-tauri/capabilities`），把缓存状态伪装成清单变更。这里先在
+    target 下查找同包构建脚本输出；仍找不到才由调用方保守回退，并落证据。
+    """
+    candidates = []
+    if out_dir:
+        candidates.append(Path(out_dir).parent / "output")
+    if evidence is not None:
+        candidates.extend(sorted(Path(evidence).glob(f"build-script-output-{package}-*.txt")))
+    candidates.extend(
+        sorted(
+            Path(root).glob(f"target/*/build/{package}-*/output"),
+            key=lambda p: p.stat().st_mtime if p.is_file() else 0.0,
+            reverse=True,
+        )
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8", errors="replace")
+    if evidence is not None:
+        (Path(evidence) / f"build-script-output-missing-{package}.txt").write_text(
+            f"package={package}\nout_dir={out_dir}\n", encoding="utf-8"
+        )
+    return None
+
+
 def build_script_inputs(root, messages, evidence=None):
     """`({package: [输入]}, {package: 包目录})`：后者用于无声明输入的保守登记。"""
     declared, undeclared = {}, {}
@@ -135,17 +166,8 @@ def build_script_inputs(root, messages, evidence=None):
         if package is None:
             continue
         out_dir = message.get("out_dir")
-        output = Path(out_dir).parent / "output" if out_dir else None
-        entries = []
-        text = None
-        if output is not None and output.is_file():
-            text = output.read_text(encoding="utf-8", errors="replace")
-        elif evidence is not None and output is not None:
-            snapshots = sorted(Path(evidence).glob(f"build-script-output-{package}-*.txt"))
-            if snapshots:
-                text = snapshots[-1].read_text(encoding="utf-8", errors="replace")
-        if text is not None:
-            entries = parse_build_script_output(text)
+        text = _build_script_output_text(root, package, out_dir, evidence)
+        entries = parse_build_script_output(text) if text is not None else []
         collected = []
         for _, value in entries:
             rel = normalize_repo_path(value, base=root / PACKAGE_ROOTS[package], repo=root)
@@ -156,6 +178,26 @@ def build_script_inputs(root, messages, evidence=None):
             declared.setdefault(package, set()).update(collected)
         else:
             undeclared[package] = PACKAGE_ROOTS[package]
+    # 2026-11-13（CI 阻断修复）：rust-cache 恢复时 Cargo 可能不再发出
+    # `build-script-executed`。对确有 build.rs 的本地包，从 target 读取最近
+    # 一次构建脚本输出，避免把「缺消息」误当成「无声明输入」而回退整包目录。
+    for package, package_root in PACKAGE_ROOTS.items():
+        if package in declared or package in undeclared:
+            continue
+        if not (root / package_root / "build.rs").is_file():
+            continue
+        text = _build_script_output_text(root, package, None, evidence)
+        entries = parse_build_script_output(text) if text is not None else []
+        collected = []
+        for _, value in entries:
+            rel = normalize_repo_path(value, base=root / package_root, repo=root)
+            if rel is None or is_excluded_input(rel, "file"):
+                continue
+            collected.append(rel)
+        if collected:
+            declared[package] = set(collected)
+        else:
+            undeclared[package] = package_root
     return declared, undeclared
 
 
