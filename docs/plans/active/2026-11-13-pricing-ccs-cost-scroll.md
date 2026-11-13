@@ -129,3 +129,16 @@
   $7.25 / $1.75 / $9.00」，估算列保留「未知†」，组件测试 49 项通过。
 - 修复后最新 HEAD 的 20 项检查成功、1 项按设计跳过（`upgrade-chain`），
   `CLEAN`；Native UI E2E、Install test、12 组单跳全部通过。
+- **发布（2026-11-13，用户独立复核通过后授权）**：PR #66 合并为
+  [873471c](https://github.com/ywltby/tokenscope/commit/873471cbf21e52ca95111652e7144e88530d85c9)
+  （merge commit，与 main 历史一致）；Release workflow（run
+  [43460535349](https://github.com/ywltby/tokenscope/actions/runs/43460535349)）
+  19 项作业全部成功，含只在 main 发布运行的 `upgrade-chain` 两项。
+  [v0.9.0](https://github.com/ywltby/tokenscope/releases/tag/v0.9.0) 预发布
+  （与 v0.8.0 惯例一致）已发布：`build-metadata.json` 确认 commit `873471cb`、
+  version `0.9.0`、`pricing_index: 11`（本批索引升级随发布）；安装包
+  SHA256 `86f8edfd…9321` 下载后与 `SHA256SUMS.txt` 核对一致。本机不安装
+  正式包，安装覆盖由 CI install-test / upgrade-test 完成。
+- AC10 的 ENOENT（隔离审计路径 `webview/EBWebView/SmartScreen/RemoteData/
+  edgeSettings_2.0-0` 瞬时消失）保持**独立未闭合**：有证据、重跑恢复、
+  未确认根因，不算已修复，留后续批次。
