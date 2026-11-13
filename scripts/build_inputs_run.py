@@ -164,6 +164,38 @@ def _target_build_output_candidates(root, package):
     return candidates
 
 
+def _fingerprint_build_inputs_text(root, package):
+    """从 Cargo 指纹 JSON 读取构建脚本声明输入。
+
+    2026-11-13（CI 证据）：缓存恢复/新布局下 `output` 文件可能不存在，但
+    `.fingerprint/<pkg>-<hash>/run-build-script-build-script-build.json` 的
+    `local[].RerunIfChanged.paths` 保存了同一组 `rerun-if-changed` 声明。
+    该指纹是 Cargo 自己的增量依据，和 output 文件同等权威。
+    """
+    candidates = []
+    for base in Path(root).glob("target/*/.fingerprint"):
+        candidates.extend(base.glob(f"{package}-*/run-build-script-build-script-build.json"))
+        candidates.extend(base.glob(f"{package}/*/run-build-script-build-script-build.json"))
+        candidates.extend(base.glob(f"{package}/run-build-script-build-script-build.json"))
+    paths = []
+    for candidate in sorted(
+        candidates, key=lambda p: p.stat().st_mtime if p.is_file() else 0.0, reverse=True
+    ):
+        try:
+            value = json.loads(candidate.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for entry in value.get("local") or []:
+            changed = entry.get("RerunIfChanged") if isinstance(entry, dict) else None
+            if isinstance(changed, dict):
+                paths.extend(str(p) for p in changed.get("paths") or [])
+        if paths:
+            break
+    if not paths:
+        return None
+    return "".join(f"cargo:rerun-if-changed={path}\n" for path in paths)
+
+
 def _build_script_output_text(root, package, out_dir, evidence):
     """读取构建脚本输出：消息 out_dir → 证据快照 → target 下同包构建目录。
 
@@ -197,6 +229,9 @@ def _build_script_output_text(root, package, out_dir, evidence):
     for candidate in candidates:
         if candidate.is_file():
             return candidate.read_text(encoding="utf-8", errors="replace")
+    fingerprint_text = _fingerprint_build_inputs_text(root, package)
+    if fingerprint_text is not None:
+        return fingerprint_text
     if evidence is not None:
         (Path(evidence) / f"build-script-output-missing-{package}.txt").write_text(
             f"package={package}\nout_dir={out_dir}\ntarget_candidates={len(candidates)}\n",

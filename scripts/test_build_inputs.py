@@ -406,6 +406,35 @@ class BuildScriptEvidenceCase(unittest.TestCase):
             )
             self.assertEqual(text, "cargo:rerun-if-changed=tauri.conf.json\n")
 
+    def test_fingerprint_rerun_if_changed_is_used_when_output_is_absent(self):
+        # CI 证据：output 文件不可得，但指纹 JSON 保留声明输入。
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            fp = (
+                root
+                / "target"
+                / "debug"
+                / ".fingerprint"
+                / "tokenscope-app-abc"
+            )
+            fp.mkdir(parents=True)
+            (fp / "run-build-script-build-script-build.json").write_text(
+                json.dumps({
+                    "local": [
+                        {"RerunIfChanged": {
+                            "output": "debug\\build\\tokenscope-app-abc\\output",
+                            "paths": ["tauri.conf.json", "capabilities", "..\\docs\\terms.md"],
+                        }},
+                        {"RerunIfEnvChanged": {"var": "TAURI_CONFIG", "val": None}},
+                    ]
+                }),
+                encoding="utf-8",
+            )
+            text = _build_script_output_text(root, "tokenscope-app", None, None)
+            self.assertIn("cargo:rerun-if-changed=tauri.conf.json", text)
+            self.assertIn("cargo:rerun-if-changed=capabilities", text)
+            self.assertIn("cargo:rerun-if-changed=..\\docs\\terms.md", text)
+
     def test_missing_output_preserves_evidence_and_falls_back_to_package_root(self):
         with tempfile.TemporaryDirectory() as parent:
             root = Path(parent)
