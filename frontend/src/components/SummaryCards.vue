@@ -88,10 +88,26 @@ const parts = computed(() =>
           >
             {{ t("dashboard.tierPill") }}
           </span>
+          <span
+            v-if="totals.cache_price_zero_estimated"
+            class="ts-pill ts-pill-warning"
+            :title="t('dashboard.cacheZeroPillTitle')"
+          >
+            {{ t("dashboard.cacheZeroPill") }}
+          </span>
         </div>
         <div class="metric-value metric-value-main ts-num">
           <template v-if="costUnknownOnly">{{ t("dashboard.costUnknownOnly") }}</template>
           <template v-else>{{ costText }}</template>
+        </div>
+        <!-- T2（2026-11-13）：CCS 来源记录费用与估算费用分开显示——
+             它来自日汇总的来源记录值，不是请求级估算，也不是实际账单。 -->
+        <div
+          v-if="totals.source_cost_usd != null"
+          class="metric-source-cost"
+          :title="t('dashboard.sourceCostHint')"
+        >
+          {{ t("dashboard.sourceCostLabel") }} {{ formatMoney(totals.source_cost_usd, "summary") }}
         </div>
       </div>
 
@@ -254,6 +270,15 @@ const parts = computed(() =>
 .metric-value-main {
   font-size: 44px;
   letter-spacing: -0.03em;
+}
+
+/* T2：来源记录费用独立行（估算费用下方），不得与主估算混同。 */
+.metric-source-cost {
+  margin-top: var(--ts-space-1);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ts-text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 
 .metric-unit {

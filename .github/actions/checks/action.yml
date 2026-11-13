@@ -192,6 +192,17 @@ runs:
       run: |
         python -B scripts/build_inputs.py --check --evidence qa-artifacts/build-inputs/ci
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # 2026-11-13：清单检查每次运行都保留证据（构建脚本输出/两种模式的
+    # cargo 消息），否则失败时只能看到 missing/stale 摘要，无法区分缓存
+    # 状态与真实变更。证据不足 1MB，始终上传不影响检查结论。
+    - name: Preserve build-input evidence
+      if: always() && inputs.group == 'contracts'
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+      with:
+        name: build-input-evidence
+        path: qa-artifacts/build-inputs/ci
+        if-no-files-found: ignore
+        retention-days: 7
     - name: Release metadata tests
       if: inputs.group == 'contracts'
       shell: pwsh

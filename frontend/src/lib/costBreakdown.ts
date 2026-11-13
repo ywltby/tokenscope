@@ -112,6 +112,18 @@ function formulaRows(lines: CostLine[]): BreakdownRow[] {
     }
     // same_as_input：单价来自同层输入价（unit_price 已由后端解析为实际数值），
     // 与普通固定价区分显示（缓存读取定价解析计划 Task 5）。
+    // T3：assumed_zero 是「线上来源确实未提供缓存价、按 0 估算」——与来源
+    // 显式 0（Fixed 免费）区分，展示估算依据而不是冒充官方免费。
+    if (l.rate_kind === "assumed_zero") {
+      return {
+        label: kindLabel(l.kind),
+        value: t("cost.assumedZeroLine", {
+          tokens: fmtNum(l.tokens),
+          amount: fmtMoney(l.subtotal),
+        }),
+        unknown: true,
+      };
+    }
     const unit =
       l.rate_kind === "same_as_input"
         ? t("cost.inputPrice", { price: fmtUnit(l.unit_price) })
@@ -145,6 +157,14 @@ function resultRows(bd: EventCostBreakdown): BreakdownRow[] {
     rows.push({
       label: t("cost.writeTierUnknown"),
       detail: t("cost.writeTierUnknownDetail"),
+      unknown: true,
+    });
+  }
+  if (bd.cache_price_zero_estimated || bd.lines.some((l) => l.rate_kind === "assumed_zero")) {
+    // T3：线上来源确实未提供缓存价 → 按 0 估算；不是官方免费价。
+    rows.push({
+      label: t("cost.cacheZeroAssumed"),
+      detail: t("cost.cacheZeroAssumedDetail"),
       unknown: true,
     });
   }

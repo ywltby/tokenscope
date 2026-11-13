@@ -2956,6 +2956,10 @@ pub struct EventCostBreakdown {
     /// 不得显示为完整精确费用（与 complete=false 同真）。
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub cache_write_split_estimated: bool,
+    /// T3（2026-11-13）：线上来源未提供缓存分项单价，已按 0 估算——
+    /// 费用明细展示估算依据（与来源显式 0 区分）。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cache_price_zero_estimated: bool,
 }
 
 /// 一条去重后的用量明细（展示行）。
@@ -3111,6 +3115,7 @@ fn build_event_row(
         complete: est.complete,
         excluded_candidate_warning: est.excluded_candidate_warning,
         cache_write_split_estimated: est.cache_write_split_estimated,
+        cache_price_zero_estimated: est.cache_price_zero_estimated,
     });
     let cursor = serde_json::to_string(&crate::query::PageCursor {
         v: crate::query::CURSOR_VERSION,

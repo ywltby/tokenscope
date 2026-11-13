@@ -79,6 +79,71 @@ describe("UsageTable 费用可追溯（C5）", () => {
     expect(w.text()).toContain("未知");
   });
 
+  // T2（2026-11-13）：CCS 来源记录费用单独披露——不是请求级估算也不是账单。
+  it("source_cost_disclosed_as_recorded_value_when_rollups_selected", () => {
+    const r = report([group("m-priced")], false);
+    r.totals.unknown_reason = "rollup_only";
+    r.totals.source_cost_usd = 9;
+    const w = mount(UsageTable, { props: { report: r } });
+    const text = w.text();
+    expect(text, "披露来源记录费用金额").toContain("$9.00");
+    expect(text, "写明是来源记录值").toContain("来源记录费用");
+    expect(text, "写明不是请求级估算").toContain("不是 TokenScope 请求级估算");
+  });
+
+  it("source_cost_absent_disclosed_when_rollups_have_no_cost", () => {
+    // 来源费用缺失（NULL）→ 如实说明"来源未提供费用"，不套按 0 规则。
+    const r = report([group("m-priced")], false);
+    r.totals.unknown_reason = "rollup_only";
+    r.rollup_coverage = {
+      detail_buckets: 0,
+      rollup_buckets: 2,
+      conflict_kinds: [],
+      unresolved_buckets: 0,
+      unresolved_covered_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    };
+    const w = mount(UsageTable, { props: { report: r } });
+    expect(w.text()).toContain("来源未提供费用");
+    expect(w.text()).not.toContain("$0.00 来自");
+  });
+
+  it("source_cost_not_shown_when_no_rollup_selected", () => {
+    // A 类/纯明细：没有采用任何汇总 → 不出现来源费用披露。
+    const r = report([group("m-priced")], false);
+    r.totals.source_cost_usd = null;
+    const w = mount(UsageTable, { props: { report: r } });
+    expect(w.text()).not.toContain("来源记录费用");
+    expect(w.text()).not.toContain("来源未提供费用");
+  });
+
+  // 用户复核反例：两个模型行各带来源费用时，行内与合计都必须单独显示
+  // 「CCS 来源记录费用」，不能只在大段脚注里出现，也不能把估算的「未知」
+  // 当成来源费用。
+  it("source_cost_is_shown_per_model_row_and_total", () => {
+    const a = group("m-a", { input: 100 });
+    a.cost_usd = 0;
+    a.unknown_pricing = true;
+    a.source_cost_usd = 7.25;
+    const b = group("m-b", { input: 50 });
+    b.cost_usd = 0;
+    b.unknown_pricing = true;
+    b.source_cost_usd = 1.75;
+    const r = report([a, b], true);
+    r.totals.unknown_reason = "rollup_only";
+    r.totals.source_cost_usd = 9;
+    // 后端 DTO 的 groups 含合计行（key=合计）；测试同构。
+    r.groups = [...r.groups, { ...r.totals }];
+    const w = mount(UsageTable, { props: { report: r } });
+    const text = w.text();
+    expect(text, "模型行 A 的来源费用").toContain("$7.25");
+    expect(text, "模型行 A 的标签与金额同处一行").toContain("CCS 来源记录费用 $7.25");
+    expect(text, "模型行 B 的来源费用").toContain("$1.75");
+    expect(text, "合计行的来源费用").toContain("$9.00");
+    expect(text.match(/CCS 来源记录费用/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    // 估算仍如实显示未知†，不被来源费用替代。
+    expect(text).toContain("未知†");
+  });
+
   it("no_rollup_disclosure_without_rollup_only_reason：纯明细不误报日粒度", () => {
     const w = mount(UsageTable, { props: { report: report([group("m-priced")], false) } });
     expect(w.text()).not.toContain("日粒度");

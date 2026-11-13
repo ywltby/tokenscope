@@ -261,3 +261,49 @@ describe("N18 写入分档估算披露", () => {
     expect(w.text()).not.toContain("含未计价 token");
   });
 });
+
+// T3（2026-11-13）：线上来源缺缓存价按 0 估算——已计入金额，但不是官方
+// 免费价，也不是未计价 token；必须用独立胶囊披露。
+describe("T3 缺失缓存价按 0 估算披露", () => {
+  it("按 0 估算：显示「含缓存价按零估算」，不显示未计价", () => {
+    const w = mountCards(totals({ cache_price_zero_estimated: true, unknown_pricing: false }));
+    expect(w.text()).toContain("含缓存价按零估算");
+    expect(w.text()).not.toContain("含未计价 token");
+  });
+
+  it("与未计价 token 同时出现时两个胶囊分开", () => {
+    const w = mountCards(totals({ cache_price_zero_estimated: true, unknown_pricing: true }));
+    expect(w.text()).toContain("含缓存价按零估算");
+    expect(w.text()).toContain("含未计价 token");
+  });
+
+  it("无按 0 估算时不显示该胶囊", () => {
+    const w = mountCards(totals({ cache_price_zero_estimated: false }));
+    expect(w.text()).not.toContain("含缓存价按零估算");
+  });
+});
+
+// T2（2026-11-13）：总览卡同样要单独显示 CCS 来源记录费用，不能只显示
+// 估算的「未知†」或把来源费用混进估算金额。
+describe("T2 CCS 来源记录费用（总览卡）", () => {
+  it("估算未知时来源费用单独显示 $9.00", () => {
+    const w = mountCards(
+      totals({
+        cost_usd: 0,
+        unknown_pricing: true,
+        source_cost_usd: 9,
+        unknown_reason: "rollup_only",
+      }),
+    );
+    const text = w.text();
+    expect(text).toContain("未知†");
+    expect(text).toContain("CCS 来源记录费用");
+    expect(text).toContain("$9.00");
+    expect(text).toContain("CCS 来源记录费用 $9.00");
+  });
+
+  it("无来源费用时不显示该行", () => {
+    const w = mountCards(totals({ source_cost_usd: null }));
+    expect(w.text()).not.toContain("CCS 来源记录费用");
+  });
+});

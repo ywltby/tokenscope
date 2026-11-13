@@ -22,6 +22,12 @@ from build_inputs import (
     parse_dep_info,
     workflow_coverage,
 )
+from build_inputs_run import (
+    _assert_no_fallback_roots,
+    _build_script_output_text,
+    _remove_local_package_artifacts,
+    build_script_inputs,
+)
 
 REPO_POSIX = "/repo"
 
@@ -370,6 +376,181 @@ class CollectCase(unittest.TestCase):
         records = collect_records({("tokenscope-app", "default"): ["frontend/public/"]})
         self.assertEqual(records[0]["kind"], "directory")
         self.assertEqual(records[0]["path"], "frontend/public")
+
+
+class BuildScriptEvidenceCase(unittest.TestCase):
+    """2026-11-13（CI 阻断）：缓存构建缺 `output` 时从 target 读取输出。"""
+
+    def test_target_output_is_used_when_message_output_is_missing(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            build_dir = root / "target" / "debug" / "build" / "tokenscope-app-abc"
+            build_dir.mkdir(parents=True)
+            (build_dir / "output").write_text(
+                "cargo:rerun-if-changed=capabilities\n", encoding="utf-8"
+            )
+            evidence = root / "evidence"
+            evidence.mkdir()
+            text = _build_script_output_text(
+                root, "tokenscope-app", root / "missing" / "out", evidence
+            )
+            self.assertEqual(text, "cargo:rerun-if-changed=capabilities\n")
+
+    def test_nested_cargo_layout_output_is_found(self):
+        # Cargo 1.100：out_dir 形如 build/<pkg>/<hash>/out，声明在
+        # 同 hash 的 run/stdout（不是 out 的兄弟 output）。
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            nested = root / "target" / "debug" / "build" / "tokenscope-app" / "hash1"
+            (nested / "run").mkdir(parents=True)
+            (nested / "run" / "stdout").write_text(
+                "cargo:rerun-if-changed=tauri.conf.json\n", encoding="utf-8"
+            )
+            text = _build_script_output_text(
+                root, "tokenscope-app", nested / "out", None
+            )
+            self.assertEqual(text, "cargo:rerun-if-changed=tauri.conf.json\n")
+
+    def test_new_layout_fingerprint_is_used_when_stdout_is_absent(self):
+        # Cargo 1.100：指纹在 build/<pkg>/<hash>/fingerprint，不在 .fingerprint。
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            fp = (
+                root
+                / "target"
+                / "debug"
+                / "build"
+                / "tokenscope-app"
+                / "hash1"
+                / "fingerprint"
+            )
+            fp.mkdir(parents=True)
+            (fp / "run-build-script-build-script-build.json").write_text(
+                json.dumps({
+                    "local": [
+                        {"RerunIfChanged": {
+                            "output": "debug\\build\\tokenscope-app/hash1\\run\\stdout",
+                            "paths": ["tauri.conf.json", "capabilities"],
+                        }},
+                    ]
+                }),
+                encoding="utf-8",
+            )
+            text = _build_script_output_text(
+                root, "tokenscope-app", root / "missing" / "out", None
+            )
+            self.assertIn("cargo:rerun-if-changed=tauri.conf.json", text)
+            self.assertIn("cargo:rerun-if-changed=capabilities", text)
+
+    def test_fingerprint_rerun_if_changed_is_used_when_output_is_absent(self):
+        # CI 证据：output 文件不可得，但指纹 JSON 保留声明输入。
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            fp = (
+                root
+                / "target"
+                / "debug"
+                / ".fingerprint"
+                / "tokenscope-app-abc"
+            )
+            fp.mkdir(parents=True)
+            (fp / "run-build-script-build-script-build.json").write_text(
+                json.dumps({
+                    "local": [
+                        {"RerunIfChanged": {
+                            "output": "debug\\build\\tokenscope-app-abc\\output",
+                            "paths": ["tauri.conf.json", "capabilities", "..\\docs\\terms.md"],
+                        }},
+                        {"RerunIfEnvChanged": {"var": "TAURI_CONFIG", "val": None}},
+                    ]
+                }),
+                encoding="utf-8",
+            )
+            text = _build_script_output_text(root, "tokenscope-app", None, None)
+            self.assertIn("cargo:rerun-if-changed=tauri.conf.json", text)
+            self.assertIn("cargo:rerun-if-changed=capabilities", text)
+            self.assertIn("cargo:rerun-if-changed=..\\docs\\terms.md", text)
+
+    def test_missing_output_preserves_evidence_and_falls_back_to_package_root(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            (root / "src-tauri").mkdir()
+            (root / "src-tauri" / "build.rs").write_text("fn main() {}\n", encoding="utf-8")
+            evidence = root / "evidence"
+            evidence.mkdir()
+            messages = [{
+                "reason": "build-script-executed",
+                "package_id": "path+file:///repo/src-tauri#tokenscope-app@0.9.0",
+                "out_dir": str(root / "missing" / "out"),
+            }]
+            declared, undeclared = build_script_inputs(root, messages, evidence)
+            self.assertEqual(declared, {})
+            self.assertEqual(undeclared, {"tokenscope-app": "src-tauri"})
+            self.assertTrue(
+                (evidence / "build-script-output-missing-tokenscope-app.txt").is_file()
+            )
+
+    def test_declared_capabilities_directory_is_kept(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            build_dir = root / "target" / "debug" / "build" / "tokenscope-app-abc"
+            build_dir.mkdir(parents=True)
+            (build_dir / "output").write_text(
+                f"cargo:rerun-if-changed={root / 'src-tauri' / 'capabilities'}\n",
+                encoding="utf-8",
+            )
+            (root / "src-tauri" / "capabilities").mkdir(parents=True)
+            declared, undeclared = build_script_inputs(
+                root,
+                [{
+                    "reason": "build-script-executed",
+                    "package_id": "path+file:///repo/src-tauri#tokenscope-app@0.9.0",
+                    "out_dir": str(root / "missing" / "out"),
+                }],
+                None,
+            )
+            self.assertEqual(declared, {"tokenscope-app": {"src-tauri/capabilities"}})
+            self.assertEqual(undeclared, {})
+
+    def test_clean_removes_both_build_layouts_and_fingerprints_only_for_package(self):
+
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            debug = root / "target" / "debug"
+            old = debug / "build" / "tokenscope-app-abc"
+            new = debug / "build" / "tokenscope-app" / "hash1"
+            other = debug / "build" / "tokenscope-abc"
+            keep = debug / "build" / "serde-abc"
+            for path in (old, new, other, keep):
+                path.mkdir(parents=True)
+            fp_old = debug / ".fingerprint" / "tokenscope-app-abc"
+            fp_new = debug / ".fingerprint" / "tokenscope-app-xyz"
+            fp_keep = debug / ".fingerprint" / "serde-abc"
+            for path in (fp_old, fp_new, fp_keep):
+                path.mkdir(parents=True)
+            _remove_local_package_artifacts(root, "tokenscope-app")
+            self.assertFalse(old.exists())
+            self.assertFalse(new.exists())
+            self.assertFalse(fp_old.exists())
+            self.assertFalse(fp_new.exists())
+            self.assertTrue(other.exists(), "同前缀的其他包不得误删")
+            self.assertTrue(keep.exists())
+            self.assertTrue(fp_keep.exists())
+
+    def test_fallback_root_is_rejected_instead_of_reusing_old_manifest(self):
+        manifest = [
+            {"path": "src-tauri", "kind": "directory",
+             "consumers": [{"package": "tokenscope-app", "mode": "default"}]},
+        ]
+        with self.assertRaises(ManifestError):
+            _assert_no_fallback_roots(manifest)
+
+    def test_recorded_inputs_pass_the_hard_requirement(self):
+        manifest = [
+            {"path": "src-tauri/capabilities", "kind": "directory",
+             "consumers": [{"package": "tokenscope-app", "mode": "default"}]},
+        ]
+        _assert_no_fallback_roots(manifest)
 
 
 if __name__ == "__main__":

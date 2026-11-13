@@ -110,7 +110,29 @@ const columns = computed<DataTableColumn[]>(() => {
             ),
           );
         }
-        return h("span", { style: g.unknown_pricing ? "color: var(--ts-warning)" : "" }, children);
+        const estimate = h(
+          "span",
+          { style: g.unknown_pricing ? "color: var(--ts-warning)" : "" },
+          children,
+        );
+        // T2（2026-11-13）：来源记录费用与 TokenScope 估算分开显示。
+        // 它可能出现在估算为未知的行（日汇总只有来源费用、没有请求级
+        // 价格），因此必须是独立行，不能并入主金额或 † 标记。
+        if (g.source_cost_usd != null) {
+          return h("span", { class: "cost-cell" }, [
+            estimate,
+            h("span", { class: "source-cost-cell", title: t("dashboard.sourceCostHint") }, [
+              h("span", { class: "source-cost-label" }, t("dashboard.sourceCostLabel")),
+              " ",
+              h(
+                "span",
+                { class: "source-cost-value ts-num" },
+                formatMoney(g.source_cost_usd, "summary"),
+              ),
+            ]),
+          ]);
+        }
+        return estimate;
       },
     },
   ];
@@ -181,6 +203,12 @@ const selectionNotes = computed<string[]>(() => {
   }
   return notes;
 });
+
+/** 确有 rollup 桶（费用未知披露的范围）但来源没给费用 → 显示"来源未提供费用"。 */
+const hasSourceCostRollupBuckets = computed<boolean>(() => {
+  const coverage = props.report.rollup_coverage;
+  return (coverage?.rollup_buckets ?? 0) > 0 || (coverage?.covered_buckets ?? 0) > 0;
+});
 </script>
 
 <template>
@@ -208,6 +236,15 @@ const selectionNotes = computed<string[]>(() => {
          披露——说明放在汇总区，不再出现在"本轮采集存在部分问题"里。 -->
     <div v-if="report.totals.unknown_reason === 'rollup_only'" class="table-note">
       {{ t("dashboard.rollupOnly") }}
+      <!-- T2：来源记录费用单独披露——只来自被统计采用的日汇总，不是请求级估算。 -->
+      <span v-if="report.totals.source_cost_usd != null" class="source-cost-note">{{
+        t("dashboard.sourceCostNote", {
+          cost: formatMoney(report.totals.source_cost_usd, "summary"),
+        })
+      }}</span>
+      <span v-else-if="hasSourceCostRollupBuckets" class="source-cost-note">{{
+        t("dashboard.sourceCostAbsentNote")
+      }}</span>
     </div>
     <div v-if="report.totals.unknown_pricing" class="table-note">
       {{ t("dashboard.tableNote") }}
@@ -274,6 +311,35 @@ const selectionNotes = computed<string[]>(() => {
   line-height: 1.5;
   color: var(--ts-text-secondary);
   margin-top: var(--ts-space-2);
+}
+/* T2：CCS 来源记录费用——独立于 TokenScope 估算与 † 未计价标记。 */
+.cost-cell {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.source-cost-cell {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ts-text-secondary);
+  white-space: nowrap;
+}
+.source-cost-label {
+  color: var(--ts-text-muted);
+}
+.source-cost-value {
+  color: var(--ts-text);
+  font-weight: 600;
+}
+/* T2：来源记录费用披露——次要色小字，与统计口径说明并列。 */
+.source-cost-note {
+  display: block;
+  margin-top: var(--ts-space-1);
+  color: var(--ts-text-muted);
 }
 .source-collapse {
   margin-top: var(--ts-space-2);

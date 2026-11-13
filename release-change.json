@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "minor",
-  "summary": "设置新增关于分区，显示当前运行版本"
+  "summary": "修复模型缓存分档定价、展示 CCS 来源费用、缺失缓存价按 0 估算与价格列表滚动"
 }

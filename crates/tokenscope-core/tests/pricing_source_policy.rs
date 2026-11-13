@@ -278,7 +278,7 @@ fn explicit_zero_is_valid_available_pricing() {
     assert!(!st.needs_sync);
     assert!(st.has_any_pricing);
 
-    // 部分估算：cache_read 未知 → 估算不完整但 input/output 计费。
+    // 部分估算：cache_read 未提供 → T3 按 0 估算，不完整但有估算标志。
     let p = Pricing::load_outcome(Some(&toml), Some(&md), Some(&or)).pricing;
     let est = p
         .estimate(
@@ -296,8 +296,9 @@ fn explicit_zero_is_valid_available_pricing() {
         )
         .unwrap();
     assert_eq!(est.cost, 0.0, "显式 0 计费为 0（免费）");
-    assert!(!est.complete, "cache_read 未知 → 不完整");
-    assert_eq!(est.unknown.cache_read, 100_000, "未知分项保留");
+    assert!(!est.complete, "缓存价按 0 估算 → 不完整");
+    assert!(est.cache_price_zero_estimated, "估算依据必须披露");
+    assert_eq!(est.unknown.cache_read, 0, "按 0 估算的 token 不进未知");
     std::fs::remove_dir_all(&dir).ok();
 }
 
