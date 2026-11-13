@@ -181,6 +181,12 @@ const selectionNotes = computed<string[]>(() => {
   }
   return notes;
 });
+
+/** 确有 rollup 桶（费用未知披露的范围）但来源没给费用 → 显示"来源未提供费用"。 */
+const hasSourceCostRollupBuckets = computed<boolean>(() => {
+  const coverage = props.report.rollup_coverage;
+  return (coverage?.rollup_buckets ?? 0) > 0 || (coverage?.covered_buckets ?? 0) > 0;
+});
 </script>
 
 <template>
@@ -208,6 +214,15 @@ const selectionNotes = computed<string[]>(() => {
          披露——说明放在汇总区，不再出现在"本轮采集存在部分问题"里。 -->
     <div v-if="report.totals.unknown_reason === 'rollup_only'" class="table-note">
       {{ t("dashboard.rollupOnly") }}
+      <!-- T2：来源记录费用单独披露——只来自被统计采用的日汇总，不是请求级估算。 -->
+      <span v-if="report.totals.source_cost_usd != null" class="source-cost-note">{{
+        t("dashboard.sourceCostNote", {
+          cost: formatMoney(report.totals.source_cost_usd, "summary"),
+        })
+      }}</span>
+      <span v-else-if="hasSourceCostRollupBuckets" class="source-cost-note">{{
+        t("dashboard.sourceCostAbsentNote")
+      }}</span>
     </div>
     <div v-if="report.totals.unknown_pricing" class="table-note">
       {{ t("dashboard.tableNote") }}
@@ -274,6 +289,12 @@ const selectionNotes = computed<string[]>(() => {
   line-height: 1.5;
   color: var(--ts-text-secondary);
   margin-top: var(--ts-space-2);
+}
+/* T2：来源记录费用披露——次要色小字，与统计口径说明并列。 */
+.source-cost-note {
+  display: block;
+  margin-top: var(--ts-space-1);
+  color: var(--ts-text-muted);
 }
 .source-collapse {
   margin-top: var(--ts-space-2);

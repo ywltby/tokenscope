@@ -120,6 +120,9 @@ const zhCN = {
     ioErrorCount: "{count} 个文件读取失败",
     badLineCount: "{count} 行解析失败（已跳过）",
     rollupOnly: "含只有日粒度的历史（这部分费用按未知披露）",
+    sourceCostNote:
+      "其中 {cost} 来自 CCS 导入日汇总的「来源记录费用」（来源工具自己记录的值，不是 TokenScope 请求级估算，也不是实际账单）。",
+    sourceCostAbsentNote: "含只有日粒度的历史，且来源未提供费用记录。",
     totalRow: "合计",
     drillDay: "日期",
     drillModel: "模型",
@@ -166,6 +169,9 @@ const zhCN = {
     costLabel: "估算费用",
     unpricedPill: "含未计价 token",
     tierPill: "含写入分档估算",
+    cacheZeroPill: "含缓存价按零估算",
+    cacheZeroPillTitle:
+      "该组含线上价格来源未提供缓存单价、已按 $0 估算的请求（不是官方免费价，费用明细可查看依据）",
     costUnknownOnly: "未知†",
     totalTokens: "总 token",
     tokensWan: "≈ {wan} 万 tokens",
@@ -441,6 +447,10 @@ const zhCN = {
       "该请求缺少 5 分钟/1 小时写入分项，写费按写入总量单价估算（可能低估 1 小时写入）",
     unpriced: "未计价",
     unpricedDetail: "缺价 ≠ 免费：未计价 token 不计入合计，数量见上方各行",
+    assumedZeroLine: "{tokens} token，来源未提供缓存价，按 {amount} 估算",
+    cacheZeroAssumed: "缺失缓存价按 0 估算",
+    cacheZeroAssumedDetail:
+      "线上价格来源（models.dev / OpenRouter）未提供该缓存分项单价，按 $0 参与估算；这不是来源明确给出的免费价，费用也不是完整官方价格。",
     priceSource: "计价来源",
     matchMode: "匹配方式",
     candidatePick: "候选选择",

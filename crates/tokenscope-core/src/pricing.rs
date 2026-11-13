@@ -551,6 +551,26 @@ fn modelsdev_segment_cache_write_tiers(
     anthropic_derived_tiers(s.input, s.cache_write)
 }
 
+/// T1（2026-11-13）：OpenRouter 条目基础层分档价——与 models.dev 的
+/// Anthropic 官方渠道同规则：仅官方渠道（条目 id 渠道前缀恰为
+/// `anthropic`，`anthropic/…:batch` 等变体随基础价走同一自证）且发布价
+/// 自证通过（`cache_write == 1.25 × prompt`，相对误差 1e-9）才派生
+/// 5m = cache_write、1h = 2 × prompt。自证不通过（第三方转售价）或
+/// 缺价 → None（分档价未知，保持既有口径），绝不按模型名猜价。
+///
+/// 背景：models.dev 快照可能落后（同步超时）而没有新模型，此时
+/// OpenRouter 快照的完整官方价不应因「候选未声明分档」整体失效。
+fn openrouter_cache_write_tiers(e: &crate::openrouter::SnapshotEntry) -> Option<CacheWriteTiers> {
+    if e.id.split_once('/').map(|(p, _)| p) != Some("anthropic") {
+        return None;
+    }
+    // 自证基准取 prompt（OpenRouter 侧的输入价）；换算后回到 USD/百万。
+    anthropic_derived_tiers(
+        e.prompt.map(|v| v * 1_000_000.0),
+        e.cache_write.map(|v| v * 1_000_000.0),
+    )
+}
+
 /// N18：某层分档价合法性（非法值 → 整条候选拒绝，与其他单价同规则）。
 fn rates_tiers_invalid(rates: &PriceRates) -> bool {
     rates
@@ -909,12 +929,17 @@ fn matching_time_rules(
 
 /// 分项单价来源（缓存读取定价解析计划 Task 5）：`fixed` = 明确数值单价；
 /// `same_as_input` = 沿用同一解析层的输入价（unit_price 已是解析后的实际
-/// 数值，金额仍由后端统一计算）；`unknown` = 无可用单价（缺价 ≠ 免费）。
+/// 数值，金额仍由后端统一计算）；`unknown` = 无可用单价（缺价 ≠ 免费）；
+/// `assumed_zero` = 线上来源（models.dev / OpenRouter）确实未提供该缓存
+/// 分项单价，按产品规则以 0 参与估算——金额计入 0 但不冒充完整官方价
+/// （与来源显式 0 的 `fixed` 免费、真缺价的 `unknown` 三者互不混淆）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RateKind {
     Fixed,
     SameAsInput,
+    /// T3：线上来源缺缓存价、按 0 估算（complete=false 保持不完整）。
+    AssumedZero,
     #[default]
     Unknown,
 }
@@ -985,17 +1010,36 @@ fn estimate_entry(
     // 浮点求和）。未知分项仅在实际产生 token 时才标记不完整——零 token
     // 的未知分项不影响完整性（不变量 5）。
     let input_price = rates.input.resolve_direct();
+    // T3（2026-11-13）：线上来源（models.dev / OpenRouter）确实未提供
+    // `cache_read` / `cache_write` 基础单价时，按产品规则以 0 参与估算：
+    // 金额计入 0、token 不再进 unknown，但整体保持不完整（complete=false）
+    // 且行 rate_kind=assumed_zero，与来源显式 0（Fixed 免费）区分。
+    // 仅作用于**线上来源**的基础合并价——外置 pricing.toml 的省略键仍是
+    // 「未声明」（分层回退，全部未声明 = 未知）；输入/输出价缺失、整个
+    // 模型无匹配、非法价、溢出与分档缺档（N18）都不套用本规则。
+    let online_source = e.tier == TIER_MODELSDEV || e.tier == TIER_OPENROUTER;
     // 分项单价解析：Fixed → (数值, fixed)；cache_read 的 SameAsInput →
-    // (输入价, same_as_input)；其余一律未知（非 cache_read 的 SameAsInput
-    // 在加载校验已被拒绝，这里防御性视为未知）。
-    let resolve = |spec: RateSpec, is_cache_read: bool| -> (Option<f64>, RateKind) {
+    // (输入价, same_as_input)；线上来源缺失的缓存合并价（cache_read 与
+    // cache_write 基础价）→ (0, assumed_zero)；其余一律未知（非 cache_read
+    // 的 SameAsInput 在加载校验已被拒绝，这里防御性视为未知）。
+    // `allow_assumed_zero` 只对合并价解析传 true——分档档位（five/one）
+    // 缺价保持 N18 口径（缺档进 unknown，不得按 0 冒充档位价）。
+    // 返回第三位 = 该分项是否按 0 估算（调用方按**实际产生 token** 决定
+    // 是否把估算计入披露/完整性——零 token 的缺价分项不影响完整性）。
+    let resolve = |spec: RateSpec,
+                   is_cache_read: bool,
+                   allow_assumed_zero: bool|
+     -> (Option<f64>, RateKind, bool) {
         match spec {
-            RateSpec::Fixed(v) => (Some(v), RateKind::Fixed),
+            RateSpec::Fixed(v) => (Some(v), RateKind::Fixed, false),
             RateSpec::SameAsInput if is_cache_read => match input_price {
-                Some(p) => (Some(p), RateKind::SameAsInput),
-                None => (None, RateKind::Unknown),
+                Some(p) => (Some(p), RateKind::SameAsInput, false),
+                None => (None, RateKind::Unknown, false),
             },
-            _ => (None, RateKind::Unknown),
+            RateSpec::Unknown if online_source && allow_assumed_zero => {
+                (Some(0.0), RateKind::AssumedZero, true)
+            }
+            _ => (None, RateKind::Unknown, false),
         }
     };
     let mut cost = 0.0;
@@ -1012,11 +1056,15 @@ fn estimate_entry(
     //   未知且合并写价实际计入金额时，按合并价估算并标示；未声明保持
     //   既有兼容口径（complete=true、无估算标志）。
     let tiers = tiers_resolution.declared_tiers();
-    let five_price = tiers.map(|tw| tw.five_min).map(|s| resolve(s, false));
-    let one_price = tiers.map(|tw| tw.one_hour).map(|s| resolve(s, false));
+    let five_price = tiers
+        .map(|tw| tw.five_min)
+        .map(|s| resolve(s, false, false));
+    let one_price = tiers
+        .map(|tw| tw.one_hour)
+        .map(|s| resolve(s, false, false));
     let split_known = t.cache_write_split_known && t.cache_write > 0;
     let mut split_estimated = false;
-    let (input_price, input_kind) = resolve(rates.input, false);
+    let (input_price, input_kind, _) = resolve(rates.input, false, false);
     push_cost_line(
         &mut cost,
         &mut complete,
@@ -1027,7 +1075,7 @@ fn estimate_entry(
         input_kind,
         &mut unknown.input,
     );
-    let (output_price, output_kind) = resolve(rates.output, false);
+    let (output_price, output_kind, _) = resolve(rates.output, false, false);
     push_cost_line(
         &mut cost,
         &mut complete,
@@ -1043,7 +1091,7 @@ fn estimate_entry(
             Some(_) => {
                 // 候选声明了分档（哪怕缺一档）：两档各自计价，缺档进 unknown
                 // ——不得用总量单价冒充，也不得跨层拼齐。
-                let (w5p, w5k) = five_price.unwrap();
+                let (w5p, w5k, _) = five_price.unwrap();
                 push_cost_line(
                     &mut cost,
                     &mut complete,
@@ -1054,7 +1102,7 @@ fn estimate_entry(
                     w5k,
                     &mut unknown.cache_write,
                 );
-                let (w1p, w1k) = one_price.unwrap();
+                let (w1p, w1k, _) = one_price.unwrap();
                 push_cost_line(
                     &mut cost,
                     &mut complete,
@@ -1067,8 +1115,18 @@ fn estimate_entry(
                 );
             }
             None => {
-                // 候选未声明分档：写总量按未知处理（不得猜档）。
-                let (wp, wk) = resolve(RateSpec::Unknown, false);
+                // 分档价不可用（被上层阻断或全部层未声明）：N18 契约——不得
+                // 用合并价冒充分档价。T1/T3 边界：候选**有**合并写价（Fixed，
+                // 含被阻断情形）= 网站有缓存价，只是缺分档 → 写 token 记未
+                // 计价，不按 0；候选**连合并写价都没有**（Unknown）才是线上
+                // 确实未提供任何缓存写单价 → 按 0 估算（T3）。
+                let (wp, wk, _) = match rates.cache_write {
+                    RateSpec::Fixed(_) => (None, RateKind::Unknown, false),
+                    _ if online_source && t.cache_write > 0 => {
+                        (Some(0.0), RateKind::AssumedZero, true)
+                    }
+                    _ => (None, RateKind::Unknown, false),
+                };
                 push_cost_line(
                     &mut cost,
                     &mut complete,
@@ -1082,7 +1140,7 @@ fn estimate_entry(
             }
         }
     } else {
-        let (wp, wk) = resolve(rates.cache_write, false);
+        let (wp, wk, _) = resolve(rates.cache_write, false, t.cache_write > 0);
         let write_priced = push_cost_line(
             &mut cost,
             &mut complete,
@@ -1103,7 +1161,7 @@ fn estimate_entry(
             complete = false;
         }
     }
-    let (read_price, read_kind) = resolve(rates.cache_read, true);
+    let (read_price, read_kind, _) = resolve(rates.cache_read, true, t.cache_read > 0);
     push_cost_line(
         &mut cost,
         &mut complete,
@@ -1114,6 +1172,15 @@ fn estimate_entry(
         read_kind,
         &mut unknown.cache_read,
     );
+    // T3：线上缺失缓存价按 0 估算——**只有实际产生 token 的**按 0 分项才
+    // 把估算计入披露并置不完整（零 token 的缺价分项不影响完整性，不变量 5；
+    // 否则完整候选会因一个未使用的缺价键被误判为不完整）。
+    let assumed_zero_tokens = lines
+        .iter()
+        .any(|l| l.rate_kind == RateKind::AssumedZero && l.tokens > 0);
+    if assumed_zero_tokens {
+        complete = false;
+    }
     CostEstimate {
         cost,
         unknown,
@@ -1127,6 +1194,7 @@ fn estimate_entry(
         excluded_candidate_warning: None,
         excluded_incomplete_schedules: 0,
         cache_write_split_estimated: split_estimated,
+        cache_price_zero_estimated: assumed_zero_tokens,
     }
 }
 
@@ -1325,6 +1393,11 @@ pub struct CostEstimate {
     /// N18：事件可信分档缺失（旧日志/源日志已删）而候选声明了分档价——
     /// 写费按写入总量单价**估算**，不得当作完整精确费用（complete=false）。
     pub cache_write_split_estimated: bool,
+    /// T3（2026-11-13）：线上来源（models.dev / OpenRouter）未提供缓存分项
+    /// 单价，已按产品规则以 0 参与估算——金额计入 0、token 不进 unknown，
+    /// 但 complete=false（不冒充完整官方价）。前端费用明细按行展示
+    /// 「缺失缓存价按 0 估算」。
+    pub cache_price_zero_estimated: bool,
 }
 
 /// GUI 悬浮对照用：该前缀在 OpenRouter 层的价格（无对应模型则 None）。
@@ -1869,7 +1942,10 @@ fn default_index_v1() -> u8 {
 /// 不从压扁后的键反推结构。
 /// v10：N18 缓存写分档进入 PricePlan（索引条目随计划序列化）；派生的
 /// Anthropic 官方分档也随重建生效——旧索引按 v9 拒读并整份重建。
-pub const INDEX_VERSION: u8 = 10;
+/// v11（2026-11-13）：T1 OpenRouter 官方渠道分档派生 + T3 线上缺失缓存价
+/// 按 0 估算——两处计价规则都改变派生产物与金额，旧 v10 索引**拒绝读取**，
+/// 按来源离线重建（升级后无需用户清库/重扫/手改价格文件）。
+pub const INDEX_VERSION: u8 = 11;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -2530,7 +2606,10 @@ impl Pricing {
                                 cache_read: RateSpec::fixed_or_unknown(
                                     e.cache_read.map(|v| v * 1_000_000.0),
                                 ),
-                                cache_write_tiers: None,
+                                // T1（2026-11-13）：官方渠道发布价自证派生
+                                // 5m/1h 分档（与 models.dev Anthropic 同规
+                                // 则）；其他渠道/自证不过 → None。
+                                cache_write_tiers: openrouter_cache_write_tiers(&e),
                             },
                             segments,
                             schedules: Vec::new(),
@@ -4164,19 +4243,26 @@ mod tests {
             .unwrap();
         assert!((est.cost - 999_999.0 * 6.0 / 1e6).abs() < 1e-9);
         // 1_000_000 → 第二档（8 USD/Mtok）；cache_read 第二档缺价 →
-        // unknown 不按 0（分项 token 为 0 时不影响完整性）。
+        // token 为 0 时不影响完整性。
         let est = p
             .estimate("prov/long", &counts(1_000_000, 0, 0, 0), at())
             .unwrap();
         assert!((est.cost - 1_000_000.0 * 8.0 / 1e6).abs() < 1e-9);
         assert!(est.complete);
-        // 第二档带 cache_read token：第一档有价（0.6 USD/Mtok），第二档缺价
-        // → 部分 unknown。
+        // 第二档带 cache_write token：各档均未提供 cache_write 价（线上
+        // 来源）→ T3 按 0 估算，不完整并带估算标志。
         let est = p
             .estimate("prov/long", &counts(1_000_000, 0, 500, 0), at())
             .unwrap();
-        assert!(!est.complete, "高档缺缓存读价 → 部分计价");
-        assert_eq!(est.unknown.cache_write, 500);
+        assert!(!est.complete, "按 0 估算不冒充完整官方价");
+        assert!(est.cache_price_zero_estimated);
+        assert_eq!(est.unknown.cache_write, 0);
+        let cw = est
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheWrite)
+            .unwrap();
+        assert_eq!(cw.rate_kind, RateKind::AssumedZero);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -4192,9 +4278,10 @@ mod tests {
     }
 
     #[test]
-    fn test_pricing_missing_component_not_free() {
-        // B3（F04）：models.dev cost 缺键 = 分项未知，不按 0——
-        // 非零缓存 token 不得被当成免费；显式 0 才是真免费。
+    fn test_pricing_missing_component_rules() {
+        // T3（2026-11-13）：线上来源缺缓存价按 0 估算（不完整 + 独立披露
+        // 标志），与显式 0（完整免费）区分；「缺价 ≠ 免费」的严格未知语义
+        // 由外置 pricing.toml / 缺输入价等边界守护（assumed_zero 测试）。
         use crate::modelsdev::{Snapshot, SnapshotEntry};
         let dir = std::env::temp_dir().join(format!("tokenscope-b3-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -4234,7 +4321,8 @@ mod tests {
         let (p, w) = Pricing::load(None, Some(&snap), None);
         assert!(w.is_empty());
 
-        // 部分计价：input/output 已知，cache 未知 → cost 只含已知部分。
+        // T3：缓存价缺失按 0 参与估算（金额只含 input/output），token 不再
+        // 进未知；但整体不完整（不冒充完整官方价）并带估算标志。
         let est = p
             .estimate(
                 "prov/partial",
@@ -4244,17 +4332,22 @@ mod tests {
             .unwrap();
         assert!((est.cost - 3.0).abs() < 1e-9, "只计已知分项: {est:?}");
         assert!(!est.complete);
-        assert_eq!(est.unknown.input, 0);
-        assert_eq!(est.unknown.output, 0);
-        assert_eq!(est.unknown.cache_write, 500);
-        assert_eq!(est.unknown.cache_read, 700);
+        assert!(est.cache_price_zero_estimated);
+        assert_eq!(est.unknown.total(), 0);
+        let cw = est
+            .lines
+            .iter()
+            .find(|l| l.kind == CostLineKind::CacheWrite)
+            .unwrap();
+        assert_eq!(cw.rate_kind, RateKind::AssumedZero);
 
-        // 显式零：缓存分项按 0 计价，complete=true。
+        // 显式零：缓存分项按 0 计价，complete=true（官方免费价）。
         let est = p
             .estimate("prov/free-cache", &counts(1_000_000, 0, 500, 700), at())
             .unwrap();
         assert!((est.cost - 1.0).abs() < 1e-9);
         assert!(est.complete, "显式 0 不是未知: {est:?}");
+        assert!(!est.cache_price_zero_estimated);
         assert_eq!(est.unknown.total(), 0);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4352,7 +4445,7 @@ mod tests {
     }
 
     #[test]
-    fn test_positive_token_unknown_price_is_partial() {
+    fn test_positive_token_missing_cache_price_is_assumed_zero() {
         let dir = std::env::temp_dir().join(format!("tokenscope-t5-p-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -4364,9 +4457,11 @@ mod tests {
                 at(),
             )
             .unwrap();
-        assert!(!est.complete, "正 token 的未知分项必须标记部分计价");
-        assert_eq!(est.unknown.cache_write, 500);
-        assert_eq!(est.unknown.cache_read, 700);
+        // T3：线上缺缓存价按 0 估算——不完整（不冒充完整官方价）、
+        // token 不再进未知、金额只含 input/output。
+        assert!(!est.complete, "按 0 估算必须标记不完整");
+        assert!(est.cache_price_zero_estimated);
+        assert_eq!(est.unknown.total(), 0);
         assert!((est.cost - 3.0).abs() < 1e-9, "费用仅含已计价部分");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4889,8 +4984,9 @@ cache_read = 1.0
             "highest_partial_cost"
         );
         assert!(!est_partial.complete);
-        assert_eq!(est_partial.unknown.cache_write, 10_000);
-        assert_eq!(est_partial.unknown.cache_read, 20_000);
+        // T3：线上缺缓存价按 0 估算——token 不再进未知，但整体不完整。
+        assert!(est_partial.cache_price_zero_estimated);
+        assert_eq!(est_partial.unknown.total(), 0);
         assert_eq!(est_partial.basis_value, 130_000, "basis = input+cw+cr");
         assert_eq!(
             est_partial
@@ -4901,7 +4997,7 @@ cache_read = 1.0
                 .as_deref(),
             Some("peak")
         );
-        // 四行明细：input 峰价 30、output 规则回退基础 2、缓存两项未计价。
+        // 四行明细：input 峰价 30、output 规则回退基础 2、缓存两项按 0 估算。
         let li = line_of(&est_partial, CostLineKind::Input);
         assert_eq!((li.tokens, li.unit_price), (100_000, Some(30.0)));
         assert!((li.subtotal - 3.0).abs() < 1e-9);
@@ -4910,7 +5006,8 @@ cache_read = 1.0
         assert!((lo.subtotal - 0.1).abs() < 1e-9);
         for kind in [CostLineKind::CacheWrite, CostLineKind::CacheRead] {
             let l = line_of(&est_partial, kind);
-            assert!(!l.priced && l.unit_price.is_none() && l.subtotal == 0.0);
+            assert!(l.priced && l.unit_price == Some(0.0) && l.subtotal == 0.0);
+            assert_eq!(l.rate_kind, RateKind::AssumedZero);
         }
         assert_eq!(est_partial.lines.len(), 4);
         assert!(est_partial.excluded_candidate_warning.is_none());
@@ -5837,7 +5934,9 @@ cache_read = "same_as_input"
             .estimate("gpt-5.4", &counts(1_000, 0, 0, 100_000), at())
             .unwrap();
         assert!(!est.complete, "未命中策略 → cache_read 仍未知");
-        assert_eq!(est.unknown.cache_read, 100_000);
+        // T3：线上来源确实未提供 cache_read 时按 0 估算（与策略无关）。
+        assert!(est.cache_price_zero_estimated);
+        assert_eq!(est.unknown.cache_read, 0);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5949,7 +6048,10 @@ cache_read = "free"
         assert_eq!(est.matched.as_ref().unwrap().channel.as_deref(), Some("a"));
         assert_eq!(est.matched.as_ref().unwrap().reason, "highest_partial_cost");
         assert!(!est.complete);
-        assert_eq!(est.unknown.cache_read, 100_000);
+        // T3：线上缺缓存价按 0 估算（token 已按 0 计入，不再进未知）。
+        assert!(est.cache_price_zero_estimated);
+        assert_eq!(est.unknown.cache_read, 0);
+        assert!((est.cost - 0.004).abs() < 1e-9, "{}", est.cost);
         // 无完整候选 → 无"排除"不确定性提示（部分候选本就参与了主估算）
         assert!(est.excluded_candidate_warning.is_none());
         assert_eq!(est.matched.as_ref().unwrap().complete_candidate_count, 0);

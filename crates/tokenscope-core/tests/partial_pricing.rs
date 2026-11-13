@@ -83,20 +83,19 @@ fn test_partial_cost_totals() {
     let r = summary(&opts).unwrap();
 
     // 07-17 组：gpt-5.6-sol 事件已知部分 950/1M + …该日 codex 仅此一条。
+    // T3（2026-11-13）：快照（models.dev）缺缓存价 → 缓存分项按 0 估算，
+    // token 不再进未知列（费用仍 950/1M，缓存贡献 0）。
     let d1 = r.groups.iter().find(|g| g.key == "2026-07-17").unwrap();
     assert!((d1.cost_usd - 950.0 / 1_000_000.0).abs() < 1e-9, "{d1:?}");
-    assert!(d1.unknown_pricing, "部分计价必须标记 †");
-    assert_eq!(d1.unknown_tokens.cache_write, 50);
-    assert_eq!(d1.unknown_tokens.cache_read, 200);
+    assert!(!d1.unknown_pricing, "缓存价按 0 估算后不再是未计价 token");
+    assert_eq!(d1.unknown_tokens.cache_write, 0);
+    assert_eq!(d1.unknown_tokens.cache_read, 0);
     assert_eq!(d1.unknown_tokens.input, 0);
     assert_eq!(d1.unknown_tokens.output, 0);
 
-    // 07-18 组：gpt-5.6-sol 走快照层（缺 cache 键 → 部分计价，†）已知部分
-    // 20/1M + resp-1（v7 强响应记录，in1+out1 → 1*1+1*2 = 3/1M）；
-    // gpt-5.5（115/1M）与 gpt-5.4（950/1M）由内置层完整兜底。
+    // 07-18 组：gpt-5.6-sol 走快照层（缺 cache 价按 0 估算，0 token 不涉及）；
+    // gpt-5.5/5.4 无任何价格来源 → 全部进未知（不变）。
     let d2 = r.groups.iter().find(|g| g.key == "2026-07-18").unwrap();
-    // Task 1 后无内置兜底：e2 走快照（缺 cache 价但 0 token → 完整），
-    // e4/e6（gpt-5.5/5.4）无任何来源 → 全 unknown。
     assert!(d2.unknown_pricing);
     assert!(
         (d2.cost_usd - 23.0 / 1_000_000.0).abs() < 1e-9,
@@ -108,11 +107,12 @@ fn test_partial_cost_totals() {
     assert_eq!(d2.unknown_tokens.cache_read, 22);
     assert_eq!(d2.unknown_tokens.cache_write, 0);
 
-    // 合计 = 分组之和；unknown 同样汇总（仅 d1 的快照缺键分项）。
+    // 合计 = 分组之和；未知只剩无来源模型的 input/output/cache_read
+    //（gpt-5.6-sol 的缓存分项已按 0 估算，不再进未知）。
     assert!((r.totals.cost_usd - (950.0 + 23.0) / 1_000_000.0).abs() < 1e-9);
     assert!(r.totals.unknown_pricing);
-    assert_eq!(r.totals.unknown_tokens.cache_write, 50);
-    assert_eq!(r.totals.unknown_tokens.cache_read, 222);
+    assert_eq!(r.totals.unknown_tokens.cache_write, 0);
+    assert_eq!(r.totals.unknown_tokens.cache_read, 22);
     assert_eq!(r.totals.unknown_tokens.input, 85);
     assert_eq!(r.totals.unknown_tokens.output, 53);
 

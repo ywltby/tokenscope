@@ -27,6 +27,9 @@ export const REQUIRED_CONTRACTS = [
   "ui_refresh_lifecycle",
   "ui_refresh_clock",
   "large_pricing_does_not_block_settings_navigation",
+  // T4（2026-11-13）：价格列表相同内容刷新/单价更新保留滚动锚点与已展开
+  // 批次；980×620 下按剩余窗口高度布局，无双层纵向滚动与滚轮转交。
+  "pricing_scroll_refresh_preserves_position",
   "token_colors_customize_persist_and_reset",
   "empty_unknown_partial_have_correct_content",
   "settings_failure_retry_restores_all_controls",
@@ -282,8 +285,7 @@ const IMPL = {
   ui_refresh_clock: uiRefreshClock,
   boot_stall_recovery: bootStallRecovery,
   ui_chart_transition_preserves_animation: uiChartTransition,
-  async large_pricing_does_not_block_settings_navigation(ctx) {
-    const name = "large_pricing_does_not_block_settings_navigation";
+  async large_pricing_does_not_block_settings_navigation(ctx) {    const name = "large_pricing_does_not_block_settings_navigation";
     const session = await ctx.open({ fixture: "large-pricing", viewport: VIEWPORTS.desktop });
     try {
       await openDashboard(session);
@@ -324,6 +326,75 @@ const IMPL = {
         );
         await ctx.shot(name, session, "page2");
       }
+    } finally {
+      await session.close();
+    }
+  },
+  // T4（2026-11-13）：价格列表刷新不归零 + 980×620 单层滚动。
+  async pricing_scroll_refresh_preserves_position(ctx) {
+    const name = "pricing_scroll_refresh_preserves_position";
+    const session = await ctx.open({ fixture: "large-pricing", viewport: VIEWPORTS.small });
+    try {
+      await openDashboard(session);
+      const page = session.page;
+      await gotoPage(page, "设置");
+      await gotoSettingsSection(page, "价格");
+      const region = page.getByRole("region", { name: "价格列表", exact: true });
+      await region.scrollIntoViewIfNeeded();
+      await region.waitFor({ state: "visible", timeout: 5000 });
+      const firstRows = await page.locator(".ts-auto-table-pricing tbody tr").count();
+      ctx.record(name, "首批只渲染 200 行", firstRows === 200, `rendered=${firstRows}`);
+      // 渐进追加：键盘 End 触底 → 追加到 400 行。
+      await region.focus();
+      await page.keyboard.press("Control+End");
+      await page.waitForTimeout(900);
+      const appended = await page.locator(".ts-auto-table-pricing tbody tr").count();
+      ctx.record(name, "渐进追加到 400 行", appended === 400, `rendered=${appended}`);
+      // 回到列表中部并记录锚点。
+      await region.evaluate((el) => {
+        el.scrollTop = 1500;
+      });
+      await page.waitForTimeout(120);
+      const before = await region.evaluate((el) => el.scrollTop);
+      ctx.record(name, "刷新前锚点非零", before > 0, `top=${before}`);
+      // 相同逻辑内容重新读取：同步在线价格成功后 loadPricing 用新对象重建
+      // entries（内容不变）——滚动位置与已展开批次必须原样保留。
+      const sync = page.getByRole("button", { name: "同步在线价格", exact: true });
+      await sync.scrollIntoViewIfNeeded();
+      await sync.click();
+      await page.waitForTimeout(1200);
+      const after = await region.evaluate((el) => el.scrollTop);
+      const afterRows = await page.locator(".ts-auto-table-pricing tbody tr").count();
+      ctx.record(
+        name,
+        "相同内容刷新保留滚动锚点（不归零）",
+        after === before && before > 0,
+        `before=${before}, after=${after}`,
+      );
+      ctx.record(name, "刷新不收回已展开批次", afterRows === 400, `rendered=${afterRows}`);
+      // 980×620：列表底边不超出窗口（页面无需第二层纵向滚动）。
+      const listBottom = await region.evaluate((el) => el.getBoundingClientRect().bottom);
+      const viewportHeight = await page.evaluate(() => window.innerHeight);
+      ctx.record(
+        name,
+        "980×620 列表底边不超出窗口（无双层纵向滚动）",
+        listBottom <= viewportHeight + 1,
+        `bottom=${Math.round(listBottom)}, viewport=${viewportHeight}`,
+      );
+      const scrollTopOf = () =>
+        page.evaluate(() => document.querySelector(".scroll-container")?.scrollTop ?? 0);
+      const outerBefore = await scrollTopOf();
+      await region.hover();
+      await page.mouse.wheel(0, -600);
+      await page.waitForTimeout(250);
+      const outerAfter = await scrollTopOf();
+      ctx.record(
+        name,
+        "列表内滚轮不转交外层页面",
+        outerAfter === outerBefore,
+        `outer=${outerBefore}->${outerAfter}`,
+      );
+      await ctx.shot(name, session, "pricing-scroll-980x620");
     } finally {
       await session.close();
     }

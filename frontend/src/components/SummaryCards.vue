@@ -88,6 +88,13 @@ const parts = computed(() =>
           >
             {{ t("dashboard.tierPill") }}
           </span>
+          <span
+            v-if="totals.cache_price_zero_estimated"
+            class="ts-pill ts-pill-warning"
+            :title="t('dashboard.cacheZeroPillTitle')"
+          >
+            {{ t("dashboard.cacheZeroPill") }}
+          </span>
         </div>
         <div class="metric-value metric-value-main ts-num">
           <template v-if="costUnknownOnly">{{ t("dashboard.costUnknownOnly") }}</template>

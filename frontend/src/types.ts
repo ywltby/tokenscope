@@ -18,9 +18,16 @@ export interface Group {
   unknown_pricing: boolean;
   /** N18：含「事件缺写入分档、按合并价估算」的请求（独立于 unknown_pricing） */
   cache_write_split_estimated?: boolean;
+  /** T3：含「线上来源缺缓存价、按 0 估算」的请求（已计入金额但不是完整官方价） */
+  cache_price_zero_estimated?: boolean;
   unknown_tokens: TokenCounts;
   /** H06：未知费用的原因（`rollup_only` = 该组含只有日粒度的历史）。 */
   unknown_reason?: "rollup_only" | null;
+  /**
+   * T2：本组含被统计采用的日汇总时，这些汇总携带的 CCS「来源记录费用」之和
+   * （来源工具记录值，非 TokenScope 请求级估算；null/缺省 = 未提供费用）。
+   */
+  source_cost_usd?: number | null;
   agents?: string[];
 }
 
@@ -309,7 +316,7 @@ export type CostLineKind =
   | "cache_write_1h";
 
 /** 单价来源（缓存读取定价解析计划 Task 5）：fixed / same_as_input / unknown。 */
-export type RateKind = "fixed" | "same_as_input" | "unknown";
+export type RateKind = "fixed" | "same_as_input" | "assumed_zero" | "unknown";
 
 export interface CostLine {
   kind: CostLineKind;
@@ -370,6 +377,8 @@ export interface EventCostBreakdown {
   excluded_candidate_warning?: string | null;
   /** N18：事件分项未知而候选声明了分档价 → 写费按总量单价估算（≠ 完整精确费用） */
   cache_write_split_estimated?: boolean;
+  /** T3：线上来源缺缓存价按 0 估算 → 费用明细展示估算依据 */
+  cache_price_zero_estimated?: boolean;
 }
 
 export interface EventRow {

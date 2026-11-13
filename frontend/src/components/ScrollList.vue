@@ -9,6 +9,13 @@ const props = defineProps<{
   loading?: boolean;
   blocked?: string;
   label: string;
+  /**
+   * T4（2026-11-13）：内容身份。提供时用它判定「列表内容是否真的变了」——
+   * 相同行集合的刷新（对象引用替换）或单价更新不重置滚动位置与已展开
+   * 批次；身份变化（真实筛选/行集合变化）才恢复首批并回到顶部。
+   * 未提供时保持既有「首行对象引用变化即重置」语义（明细/聚合表）。
+   */
+  resetKey?: string | null;
 }>();
 const emit = defineEmits<{ (e: "load-more"): void }>();
 const viewport = ref<HTMLElement | null>(null);
@@ -47,8 +54,11 @@ async function checkBottom(): Promise<void> {
 }
 
 // 追加保留首行对象；刷新/换筛选替换首行，恢复首批并清除旧请求资格。
+// T4（2026-11-13）：提供 resetKey 时按内容身份判定——价格表重新读取或
+// 单价更新会替换整份 entries（对象引用变化），但相同行集合必须保留当前
+// 可见行锚点、相对位置与已展开批次数量；只有行集合真的变化才重置。
 watch(
-  () => props.rows[0],
+  () => props.resetKey ?? props.rows[0],
   () => {
     limit.value = 200;
     requestedLength = -1;

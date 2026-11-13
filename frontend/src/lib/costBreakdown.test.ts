@@ -584,6 +584,61 @@ describe("N18 partial reason wording", () => {
   });
 });
 
+// T3（2026-11-13）：线上来源缺缓存价按 0 估算——公式行与结果行都要
+// 展示估算依据，且不得与来源显式 0（官方免费）或未计价混淆。
+describe("T3 assumed-zero cache pricing", () => {
+  const assumed = () => {
+    const base = bd({
+      lines: [
+        { kind: "input", tokens: 1_000_000, unit_price: 8, subtotal: 8, priced: true },
+        { kind: "output", tokens: 1_000_000, unit_price: 40, subtotal: 40, priced: true },
+        {
+          kind: "cache_write",
+          tokens: 1_000_000,
+          unit_price: 0,
+          subtotal: 0,
+          priced: true,
+          rate_kind: "assumed_zero",
+        },
+        {
+          kind: "cache_read",
+          tokens: 500_000,
+          unit_price: 0,
+          subtotal: 0,
+          priced: true,
+          rate_kind: "assumed_zero",
+        },
+      ],
+      cost_usd: 48,
+      unknown: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+      complete: false,
+      cache_price_zero_estimated: true,
+    });
+    return base;
+  };
+
+  it("公式行写明来源未提供缓存价、按 0 估算", () => {
+    const text = formatCostBreakdownText(assumed());
+    expect(text).toContain("来源未提供缓存价");
+    expect(text).toContain("按 $0.00 估算");
+    expect(text).toContain("缺失缓存价按 0 估算");
+    // 不是未计价：token 已经按 0 计入金额。
+    expect(text).not.toContain("缺价 ≠ 免费");
+    expect(text).not.toContain("缺少单价");
+  });
+
+  it("显式 0（来源免费）不触发按 0 估算披露", () => {
+    const free = assumed();
+    free.cache_price_zero_estimated = false;
+    free.lines = free.lines.map((l) => ({ ...l, rate_kind: "fixed" as const }));
+    free.complete = true;
+    const text = formatCostBreakdownText(free);
+    expect(text).not.toContain("缺失缓存价按 0 估算");
+    expect(text).not.toContain("来源未提供缓存价");
+    expect(text).toContain("估算合计 $48.00");
+  });
+});
+
 // N18 复核项 3：选择说明只按所选候选的已知事实描述；其他候选为何不完整
 // 由后端排除披露逐条说明，不得一律归因为事件缺分档。
 describe("N18 selection wording attributes only the selected candidate", () => {

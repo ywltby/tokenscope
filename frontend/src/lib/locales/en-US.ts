@@ -128,6 +128,10 @@ const enUS: AppMessages = {
     ioErrorCount: "{count} file(s) failed to read",
     badLineCount: "{count} line(s) failed to parse (skipped)",
     rollupOnly: "Includes day-granularity-only history (its cost is disclosed as unknown)",
+    sourceCostNote:
+      'Including {cost} recorded by the imported CCS daily rollups ("source-recorded cost" — a value recorded by the source tool itself; not a TokenScope per-request estimate and not an actual bill).',
+    sourceCostAbsentNote:
+      "Includes day-granularity-only history; the source did not provide a cost record.",
     totalRow: "Total",
     drillDay: "Date",
     drillModel: "Model",
@@ -173,6 +177,9 @@ const enUS: AppMessages = {
     costLabel: "Estimated cost",
     unpricedPill: "Includes unpriced tokens",
     tierPill: "Write-tier estimated",
+    cacheZeroPill: "Cache price at zero",
+    cacheZeroPillTitle:
+      "This group contains requests whose cache unit price was not provided by the online pricing source and is estimated at $0 (not an official free price; see cost details)",
     costUnknownOnly: "Unknown†",
     totalTokens: "Total tokens",
     tokensWan: "≈ {wan} × 10k tokens",
@@ -461,6 +468,11 @@ const enUS: AppMessages = {
     unpriced: "Unpriced",
     unpricedDetail:
       "Missing prices ≠ free: unpriced tokens are excluded from the total; see counts above",
+    assumedZeroLine:
+      "{tokens} tokens — the source did not provide a cache price; estimated at {amount}",
+    cacheZeroAssumed: "Missing cache price estimated at 0",
+    cacheZeroAssumedDetail:
+      "The online pricing source (models.dev / OpenRouter) did not provide this cache unit price, so $0 is used in the estimate. This is not an explicit free price from the source, and the result is not a complete official price.",
     priceSource: "Pricing source",
     matchMode: "Match mode",
     candidatePick: "Candidate selection",

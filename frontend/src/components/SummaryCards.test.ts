@@ -261,3 +261,24 @@ describe("N18 写入分档估算披露", () => {
     expect(w.text()).not.toContain("含未计价 token");
   });
 });
+
+// T3（2026-11-13）：线上来源缺缓存价按 0 估算——已计入金额，但不是官方
+// 免费价，也不是未计价 token；必须用独立胶囊披露。
+describe("T3 缺失缓存价按 0 估算披露", () => {
+  it("按 0 估算：显示「含缓存价按零估算」，不显示未计价", () => {
+    const w = mountCards(totals({ cache_price_zero_estimated: true, unknown_pricing: false }));
+    expect(w.text()).toContain("含缓存价按零估算");
+    expect(w.text()).not.toContain("含未计价 token");
+  });
+
+  it("与未计价 token 同时出现时两个胶囊分开", () => {
+    const w = mountCards(totals({ cache_price_zero_estimated: true, unknown_pricing: true }));
+    expect(w.text()).toContain("含缓存价按零估算");
+    expect(w.text()).toContain("含未计价 token");
+  });
+
+  it("无按 0 估算时不显示该胶囊", () => {
+    const w = mountCards(totals({ cache_price_zero_estimated: false }));
+    expect(w.text()).not.toContain("含缓存价按零估算");
+  });
+});

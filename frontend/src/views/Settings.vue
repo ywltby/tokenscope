@@ -3,6 +3,7 @@ import {
   computed,
   h,
   inject,
+  nextTick,
   onActivated,
   onDeactivated,
   onMounted,
@@ -466,6 +467,10 @@ async function loadPricing(): Promise<void> {
       if (!isCurrent()) return;
       pricing.value = fresh;
       pricingError.value = null;
+      // T4：错误条/警告行的高度会影响列表起点，重新读取后按剩余窗口
+      // 高度重算滚动区上限（相同内容刷新不会重置滚动位置）。
+      await nextTick();
+      updatePricingListHeight();
     } catch (e) {
       if (!isCurrent()) return;
       // RC04：读取失败是**未知**，保留旧价格列表，只记录原因（标签由错误条
@@ -1048,8 +1053,57 @@ const asEntry = (r: object): PricingEntry => r as unknown as PricingEntry;
 // 同前缀可能同时存在 models.dev/openrouter/外置行，键必须含来源
 const rowKey = (r: object): string => `${asEntry(r).source}|${asEntry(r).prefix}`;
 
+// T4（2026-11-13）：价格列表的「内容身份」= 行键序列（来源|前缀）。
+// 重新读取或单价更新会替换整份 entries 对象，但行集合不变——不得因此
+// 把滚动位置归零或收回已展开的批次；行集合真的变化才重置。
+const pricingListKey = computed<string>(() =>
+  (pricing.value?.entries ?? []).map((e) => rowKey(e)).join("\n"),
+);
+
+// T4：价格区按剩余窗口高度布局。列表不再固定 420px（980×620 时会把
+// 页面撑出第二层纵向滚动，滚轮还会被外层接管）：上限取「窗口高度 − 列表
+// 顶边 − 底部留白」，夹在 220–420px。工具区、错误提示与列表始终可访问。
+const pricingScroll = ref<{ $el?: unknown } | null>(null);
+const pricingListMaxHeight = ref<number>(420);
+const PRICING_LIST_MIN_HEIGHT = 220;
+const PRICING_LIST_MAX_HEIGHT = 420;
+
+function updatePricingListHeight(): void {
+  if (activeSection.value !== "pricing") return;
+  const el = (pricingScroll.value?.$el ?? null) as HTMLElement | null;
+  if (!el) return;
+  const viewport = window.innerHeight || 820;
+  const top = el.getBoundingClientRect().top;
+  if (top <= 0) {
+    // 分区隐藏或已滚出视口：保持常规上限，显示时再重算。
+    pricingListMaxHeight.value = PRICING_LIST_MAX_HEIGHT;
+    return;
+  }
+  const available = Math.floor(viewport - top - 24);
+  pricingListMaxHeight.value = Math.max(
+    PRICING_LIST_MIN_HEIGHT,
+    Math.min(PRICING_LIST_MAX_HEIGHT, available),
+  );
+}
+
+function onWindowResize(): void {
+  updatePricingListHeight();
+}
+
+onMounted(() => {
+  window.addEventListener("resize", onWindowResize);
+  updatePricingListHeight();
+});
+onUnmounted(() => {
+  window.removeEventListener("resize", onWindowResize);
+});
+watch([activeSection, pricingVisited], async () => {
+  await nextTick();
+  updatePricingListHeight();
+});
+
 // UX03：暴露价格列定义供真实浮层测试触达（NDataTable 测试环境不渲染行）。
-defineExpose({ priceColumns });
+defineExpose({ priceColumns, pricingListKey, pricingListMaxHeight });
 </script>
 
 <template>
@@ -1832,7 +1886,10 @@ defineExpose({ priceColumns });
                不挂载价格表组件）。 -->
           <ScrollList
             v-if="pricingVisited"
+            ref="pricingScroll"
             :rows="pricing?.entries ?? []"
+            :reset-key="pricingListKey"
+            :style="{ maxHeight: `${pricingListMaxHeight}px` }"
             :label="t('settings.priceList')"
             class="ts-auto-table-pricing"
           >

@@ -97,12 +97,23 @@ pub struct Group {
     /// `unknown_pricing`（后者只表示真有未计价 token）。UI 必须分开披露。
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub cache_write_split_estimated: bool,
+    /// T3（2026-11-13）：本组含「线上来源缺缓存价、按 0 估算」的请求——
+    /// 金额已按 0 计入、没有未计价 token，但不是完整官方价格（独立披露）。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cache_price_zero_estimated: bool,
     pub unknown_tokens: TokenCounts,
     /// H06：本组未知费用的**原因**（如 `rollup_only` = 该组含只有日粒度的历史，
     /// 不能按当前档位/峰谷重估）。缺价（模型未收录）时为 None，两者的处置同为
     /// "计入未知 token"，但原因不同，界面必须区分。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unknown_reason: Option<&'static str>,
+    /// T2（2026-11-13）：本组含**来源选择最终采用**的日汇总时，这些汇总行
+    /// 携带的 CCS 来源记录费用之和（受检累计；`None` = 组内没有任何带来源
+    /// 费用的汇总贡献）。这是来源记录值，不是 TokenScope 请求级估算，
+    /// 也不是实际账单——前端必须单独披露，不得与主估算 `cost_usd` 混同。
+    /// 缺失（来源未提供费用）时如实按无来源费用处理，不按 0 冒充。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_cost_usd: Option<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<&'static str>,
 }
@@ -473,6 +484,9 @@ fn push_event_into(
         g.cache_write_split_estimated |= estimate
             .as_ref()
             .is_some_and(|est| est.cache_write_split_estimated);
+        g.cache_price_zero_estimated |= estimate
+            .as_ref()
+            .is_some_and(|est| est.cache_price_zero_estimated);
         if RECORD_AGENTS && !g.agents.contains(&e.agent.as_str()) {
             g.agents.push(e.agent.as_str());
         }
@@ -529,6 +543,20 @@ fn push_rollup_into(
             .ok_or_else(|| anyhow::anyhow!("分组 {key_err} 的未知 token 累计超出可表示范围"))?;
         g.unknown_pricing = true;
         g.unknown_reason = Some("rollup_only");
+        // T2（2026-11-13）：只对来源选择**最终采用**的汇总贡献累计来源记录
+        // 费用（本函数只被 rollup_only 桶与 B 类桶调用——A/C 类明细优先，
+        // 汇总不进入聚合，因此不会重复计入）。来源费用是来源记录值，与主
+        // 估算 `cost_usd` 分开保存；受检累加，非法值（非有限）明确报错。
+        if let Some(cost) = r.source_cost_usd {
+            if !cost.is_finite() {
+                anyhow::bail!("分组 {key_err} 的来源费用出现非有限值");
+            }
+            let summed = g.source_cost_usd.unwrap_or(0.0) + cost;
+            if !summed.is_finite() {
+                anyhow::bail!("分组 {key_err} 的来源费用累计出现非有限值");
+            }
+            g.source_cost_usd = Some(summed);
+        }
         if RECORD_AGENTS && !g.agents.contains(&r.app.as_str()) {
             g.agents.push(r.app.as_str());
         }
@@ -591,8 +619,18 @@ impl AggregateState {
             if !totals.cost_usd.is_finite() {
                 anyhow::bail!("总计费用累计出现非有限值");
             }
+            // T2（2026-11-13）：来源费用与主估算同构受检累计；任一组携带
+            // 来源费用时总计也必须如实呈现（None 组不贡献）。
+            if let Some(cost) = g.source_cost_usd {
+                let summed = totals.source_cost_usd.unwrap_or(0.0) + cost;
+                if !summed.is_finite() {
+                    anyhow::bail!("总计来源费用累计出现非有限值");
+                }
+                totals.source_cost_usd = Some(summed);
+            }
             totals.unknown_pricing |= g.unknown_pricing;
             totals.cache_write_split_estimated |= g.cache_write_split_estimated;
+            totals.cache_price_zero_estimated |= g.cache_price_zero_estimated;
             if totals.unknown_reason.is_none() {
                 totals.unknown_reason = g.unknown_reason;
             }

@@ -79,6 +79,43 @@ describe("UsageTable 费用可追溯（C5）", () => {
     expect(w.text()).toContain("未知");
   });
 
+  // T2（2026-11-13）：CCS 来源记录费用单独披露——不是请求级估算也不是账单。
+  it("source_cost_disclosed_as_recorded_value_when_rollups_selected", () => {
+    const r = report([group("m-priced")], false);
+    r.totals.unknown_reason = "rollup_only";
+    r.totals.source_cost_usd = 9;
+    const w = mount(UsageTable, { props: { report: r } });
+    const text = w.text();
+    expect(text, "披露来源记录费用金额").toContain("$9.00");
+    expect(text, "写明是来源记录值").toContain("来源记录费用");
+    expect(text, "写明不是请求级估算").toContain("不是 TokenScope 请求级估算");
+  });
+
+  it("source_cost_absent_disclosed_when_rollups_have_no_cost", () => {
+    // 来源费用缺失（NULL）→ 如实说明"来源未提供费用"，不套按 0 规则。
+    const r = report([group("m-priced")], false);
+    r.totals.unknown_reason = "rollup_only";
+    r.rollup_coverage = {
+      detail_buckets: 0,
+      rollup_buckets: 2,
+      conflict_kinds: [],
+      unresolved_buckets: 0,
+      unresolved_covered_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    };
+    const w = mount(UsageTable, { props: { report: r } });
+    expect(w.text()).toContain("来源未提供费用");
+    expect(w.text()).not.toContain("$0.00 来自");
+  });
+
+  it("source_cost_not_shown_when_no_rollup_selected", () => {
+    // A 类/纯明细：没有采用任何汇总 → 不出现来源费用披露。
+    const r = report([group("m-priced")], false);
+    r.totals.source_cost_usd = null;
+    const w = mount(UsageTable, { props: { report: r } });
+    expect(w.text()).not.toContain("来源记录费用");
+    expect(w.text()).not.toContain("来源未提供费用");
+  });
+
   it("no_rollup_disclosure_without_rollup_only_reason：纯明细不误报日粒度", () => {
     const w = mount(UsageTable, { props: { report: report([group("m-priced")], false) } });
     expect(w.text()).not.toContain("日粒度");
