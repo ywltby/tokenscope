@@ -128,6 +128,9 @@ const enUS: AppMessages = {
     ioErrorCount: "{count} file(s) failed to read",
     badLineCount: "{count} line(s) failed to parse (skipped)",
     rollupOnly: "Includes day-granularity-only history (its cost is disclosed as unknown)",
+    sourceCostLabel: "CCS source-recorded cost",
+    sourceCostHint:
+      "Cost recorded by the source tool in daily rollups; not a TokenScope per-request estimate and not an actual bill.",
     sourceCostNote:
       'Including {cost} recorded by the imported CCS daily rollups ("source-recorded cost" — a value recorded by the source tool itself; not a TokenScope per-request estimate and not an actual bill).',
     sourceCostAbsentNote:

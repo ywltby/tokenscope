@@ -68,7 +68,10 @@
 - 修复：`Group.source_cost_usd` 新字段；`push_rollup_into` 只对来源选择最终采用的
   汇总贡献累计（rollup_only 与 B 类）；`finish()` 受检汇总到总计；非法值报错。
 - 前端：汇总区「CCS 来源记录费用」披露（金额 + 不是请求级估算/账单说明）；
-  来源缺失显示「来源未提供费用」；`UsageTable` 三例新增断言（79 项通过）。
+  来源缺失显示「来源未提供费用」；**每个分组行与合计行的费用列单独显示
+  「CCS 来源记录费用 $X」**（估算列仍保留「未知†」等原状态），总览卡在
+  估算费用下方单独一行显示同一金额；`UsageTable`/`SummaryCards` 组件测试
+  49 项通过（含新增行级/总览卡反例）。
 
 ### T3 线上缺失缓存价按 0 估算（红→绿）
 
@@ -101,24 +104,28 @@
 
 - 版本 `0.9.0`（minor，`release: true`）；`v0.8.0` 升级基线已登记（资产哈希以
   下载核对为准）。
-- PR #66（https://github.com/ywltby/tokenscope/pull/66）。首轮最新 HEAD 检查中
+- PR #66（https://github.com/ywltby/tokenscope/pull/66）。首轮检查中
   frontend / rust / rust-acceptance / native-ui / install-test / 全部单跳升级
   通过；`contracts` 在 `build_inputs --check` 失败、`gate` 随汇总失败。
-- **CI 阻断取证与修复（2026-11-13）**：失败报告为计算清单含 `src-tauri`
-  （整包目录）、提交清单含 `src-tauri/capabilities`，workflow 覆盖同时报
-  `install-test.yml: [src-tauri]`。取证工件（`build-input-evidence`）确认：
-  该 Runner 的 Cargo 使用新布局 `build/<pkg>/<hash>/out`，缓存恢复后
-  `build-script-executed` 的 out_dir 存在但 `output` 文件与 `.fingerprint`
-  构建脚本指纹都不可读；检查器把「无声明输入」保守回退成整包目录，产生与
-  提交清单不同的粒度。这不是产品输入变化。
-- 修复（测试架）：① 构建脚本输出依次从消息 `out_dir`、证据快照、
-  `target/*/build` 两种布局、指纹 JSON 的 `RerunIfChanged.paths` 读取；
-  ② `clean_local_packages` 额外删除两种布局的 build 目录与 `.fingerprint`
-  对应目录，强制构建脚本真实执行；③ 证据仍缺失时，整包目录不再作为真实
-  新增输入：按清单已登记的同包条目校验并在报告/证据中披露
-  `build_script_unverified`，`--update` 明确拒绝写出粗粒度清单；
-  ④ contracts 作业始终上传 `qa-artifacts/build-inputs/ci` 供后续定位。
-  新增指纹读取、两种布局、回退替换等纯函数回归（`test_build_inputs` 43 项、
-  CI 布局 7 项），本地 `build_inputs --check` 干净。
+- **CI 阻断取证与修复（2026-11-13，用户复核后收紧）**：失败报告为计算清单含
+  `src-tauri`（整包目录）、提交清单含 `src-tauri/capabilities`，workflow 覆盖
+  同时报 `install-test.yml: [src-tauri]`。取证工件确认 Runner 的 Cargo 1.100
+  布局为 `build/<pkg>/<hash>/`：构建脚本声明在 `run/stdout`、指纹在
+  `fingerprint/run-build-script-build-script-build.json`，而 `out_dir` 仍是
+  `<hash>/out`；旧读取路径全部落空后，检查器把「无声明输入」回退成整包目录。
+  这不是产品输入变化。
+- 修复（测试架）：① 构建脚本声明依次从消息 `out_dir` 的 `output`/`run/stdout`、
+  证据快照、target 两种布局、指纹 JSON 的 `RerunIfChanged.paths` 读取；
+  ② `clean_local_packages` 额外删除两种布局的 build 目录与指纹目录，强制构建
+  脚本真实执行；③ **不再用旧清单代替本次声明**：整包目录回退一律阻断必需检查
+  （`--check`/`--update` 都拒绝），错误信息指向 output/指纹/stdout；
+  ④ contracts 作业始终上传 `qa-artifacts/build-inputs/ci` 供取证。
+  用本机 Rust 1.100 复现新布局：修复前 `build_script_unverified: ["src-tauri"]`，
+  修复后 6 条声明、`missing/stale/changed` 全空；负例（从清单删除
+  `src-tauri/capabilities`）按预期报 missing，证明不再漏检。
+  新增 output/run-stdout/指纹/回退拒绝等纯函数回归（`test_build_inputs` 44 项、
+  CI 布局 7 项）。
+- 用户复核的展示反例已补：两个模型行与总览卡分别显示「CCS 来源记录费用
+  $7.25 / $1.75 / $9.00」，估算列保留「未知†」，组件测试 49 项通过。
 - 修复后最新 HEAD 的 20 项检查成功、1 项按设计跳过（`upgrade-chain`），
   `CLEAN`；Native UI E2E、Install test、12 组单跳全部通过。

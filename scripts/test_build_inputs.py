@@ -23,9 +23,9 @@ from build_inputs import (
     workflow_coverage,
 )
 from build_inputs_run import (
+    _assert_no_fallback_roots,
     _build_script_output_text,
     _remove_local_package_artifacts,
-    _unverified_fallback_roots,
     build_script_inputs,
 )
 
@@ -397,19 +397,50 @@ class BuildScriptEvidenceCase(unittest.TestCase):
             self.assertEqual(text, "cargo:rerun-if-changed=capabilities\n")
 
     def test_nested_cargo_layout_output_is_found(self):
-        # 2026-11-13 CI 证据：out_dir 形如 build/<pkg>/<hash>/out；即使消息
-        # 指向的兄弟 output 缺失，也要在包子树里找到实际输出。
+        # Cargo 1.100：out_dir 形如 build/<pkg>/<hash>/out，声明在
+        # 同 hash 的 run/stdout（不是 out 的兄弟 output）。
         with tempfile.TemporaryDirectory() as parent:
             root = Path(parent)
             nested = root / "target" / "debug" / "build" / "tokenscope-app" / "hash1"
-            nested.mkdir(parents=True)
-            (nested / "output").write_text(
+            (nested / "run").mkdir(parents=True)
+            (nested / "run" / "stdout").write_text(
                 "cargo:rerun-if-changed=tauri.conf.json\n", encoding="utf-8"
             )
             text = _build_script_output_text(
-                root, "tokenscope-app", nested / "missing-out", None
+                root, "tokenscope-app", nested / "out", None
             )
             self.assertEqual(text, "cargo:rerun-if-changed=tauri.conf.json\n")
+
+    def test_new_layout_fingerprint_is_used_when_stdout_is_absent(self):
+        # Cargo 1.100：指纹在 build/<pkg>/<hash>/fingerprint，不在 .fingerprint。
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            fp = (
+                root
+                / "target"
+                / "debug"
+                / "build"
+                / "tokenscope-app"
+                / "hash1"
+                / "fingerprint"
+            )
+            fp.mkdir(parents=True)
+            (fp / "run-build-script-build-script-build.json").write_text(
+                json.dumps({
+                    "local": [
+                        {"RerunIfChanged": {
+                            "output": "debug\\build\\tokenscope-app/hash1\\run\\stdout",
+                            "paths": ["tauri.conf.json", "capabilities"],
+                        }},
+                    ]
+                }),
+                encoding="utf-8",
+            )
+            text = _build_script_output_text(
+                root, "tokenscope-app", root / "missing" / "out", None
+            )
+            self.assertIn("cargo:rerun-if-changed=tauri.conf.json", text)
+            self.assertIn("cargo:rerun-if-changed=capabilities", text)
 
     def test_fingerprint_rerun_if_changed_is_used_when_output_is_absent(self):
         # CI 证据：output 文件不可得，但指纹 JSON 保留声明输入。
@@ -506,30 +537,20 @@ class BuildScriptEvidenceCase(unittest.TestCase):
             self.assertTrue(keep.exists())
             self.assertTrue(fp_keep.exists())
 
-    def test_fallback_root_is_replaced_by_registered_entries_and_disclosed(self):
+    def test_fallback_root_is_rejected_instead_of_reusing_old_manifest(self):
         manifest = [
             {"path": "src-tauri", "kind": "directory",
              "consumers": [{"package": "tokenscope-app", "mode": "default"}]},
+        ]
+        with self.assertRaises(ManifestError):
+            _assert_no_fallback_roots(manifest)
+
+    def test_recorded_inputs_pass_the_hard_requirement(self):
+        manifest = [
             {"path": "src-tauri/capabilities", "kind": "directory",
              "consumers": [{"package": "tokenscope-app", "mode": "default"}]},
-            {"path": "src-tauri/tauri.conf.json", "kind": "file",
-             "consumers": [{"package": "tokenscope-app", "mode": "default"}]},
         ]
-        expected, unverified = _unverified_fallback_roots([manifest[0]], manifest)
-        self.assertEqual(unverified, ["src-tauri"])
-        self.assertEqual(
-            sorted(record["path"] for record in expected),
-            ["src-tauri/capabilities", "src-tauri/tauri.conf.json"],
-        )
-
-    def test_real_fallback_root_without_registered_children_is_not_hidden(self):
-        manifest = [
-            {"path": "src-tauri", "kind": "directory",
-             "consumers": [{"package": "tokenscope-app", "mode": "default"}]},
-        ]
-        expected, unverified = _unverified_fallback_roots([manifest[0]], manifest)
-        self.assertEqual(unverified, [])
-        self.assertEqual([record["path"] for record in expected], ["src-tauri"])
+        _assert_no_fallback_roots(manifest)
 
 
 if __name__ == "__main__":

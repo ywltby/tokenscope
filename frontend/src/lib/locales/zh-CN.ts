@@ -120,6 +120,8 @@ const zhCN = {
     ioErrorCount: "{count} 个文件读取失败",
     badLineCount: "{count} 行解析失败（已跳过）",
     rollupOnly: "含只有日粒度的历史（这部分费用按未知披露）",
+    sourceCostLabel: "CCS 来源记录费用",
+    sourceCostHint: "来源工具记录的日汇总费用；不是 TokenScope 请求级估算，也不是实际账单。",
     sourceCostNote:
       "其中 {cost} 来自 CCS 导入日汇总的「来源记录费用」（来源工具自己记录的值，不是 TokenScope 请求级估算，也不是实际账单）。",
     sourceCostAbsentNote: "含只有日粒度的历史，且来源未提供费用记录。",
