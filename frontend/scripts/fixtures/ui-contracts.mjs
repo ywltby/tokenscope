@@ -182,6 +182,8 @@ function group(key, input, opts = {}) {
     // v0.9.1 缺陷 C：费用构成（rollup_only / mixed）；纯明细组缺省。
     cost_detail: opts.cost_detail,
     source_cost_usd: opts.source_cost_usd,
+    // 8.2（第二轮复核）：来源费用覆盖完整性（full / partial / absent）。
+    source_cost_state: opts.source_cost_state,
     unknown_reason: opts.unknown_reason,
     agents: opts.agents,
   };
@@ -194,6 +196,7 @@ function totals(groups) {
   let unknown = false;
   let costDetail = null;
   let sourceCost = null;
+  let sourceState = null;
   const ut = { input: 0, output: 0, cache_write: 0, cache_read: 0 };
   for (const g of groups) {
     requests += g.requests;
@@ -211,6 +214,15 @@ function totals(groups) {
       g.cost_detail === "mixed" || costDetail === "mixed"
         ? "mixed"
         : (g.cost_detail ?? costDetail);
+    // 8.2：totals 覆盖状态聚合（任一 partial → partial；full+absent →
+    // partial；全 absent → absent；全 full → full）。
+    sourceState =
+      g.source_cost_state === "partial" || sourceState === "partial"
+        ? "partial"
+        : (g.source_cost_state === "full" && sourceState === "absent") ||
+            (g.source_cost_state === "absent" && sourceState === "full")
+          ? "partial"
+          : (g.source_cost_state ?? sourceState);
     for (const k of ["input", "output", "cache_write", "cache_read"]) {
       ut[k] += g.unknown_tokens?.[k] ?? 0;
     }
@@ -223,6 +235,9 @@ function totals(groups) {
     unknown_pricing: unknown,
     unknown_tokens: ut,
     cost_detail: costDetail,
+    ...(sourceCost != null || sourceState != null
+      ? { source_cost_state: sourceState }
+      : {}),
     ...(sourceCost != null ? { source_cost_usd: sourceCost } : {}),
   };
 }
@@ -572,6 +587,8 @@ const MULTI_GROUPS = Array.from({ length: 30 }, (_, i) =>
 
 // v0.9.1 缺陷 B + C（2026-11-14）：费用列布局与费用状态 fixture——
 // 规则1 纯汇总+来源费用、规则2 显式 0、规则3 mixed、规则4 纯明细缺价。
+// 8.2（第二轮复核）：rollup-paid 带 source_cost_state（full/partial 两个
+// 变体由契约分别断言）；这里 partial 组披露覆盖不完整。
 const SOURCE_COST_GROUPS = [
   group("synthetic-rollup-paid", 100000, {
     output: 50000,
@@ -581,6 +598,7 @@ const SOURCE_COST_GROUPS = [
     unknown_tokens: { input: 100000, output: 50000, cache_write: 0, cache_read: 0 },
     source_cost_usd: 7.25,
     cost_detail: "rollup_only",
+    source_cost_state: "full",
     requests: 30,
   }),
   group("synthetic-rollup-zero", 40000, {
@@ -591,7 +609,19 @@ const SOURCE_COST_GROUPS = [
     unknown_tokens: { input: 40000, output: 20000, cache_write: 0, cache_read: 0 },
     source_cost_usd: 0,
     cost_detail: "rollup_only",
+    source_cost_state: "full",
     requests: 12,
+  }),
+  group("synthetic-rollup-partial", 20000, {
+    output: 10000,
+    cost_usd: 0,
+    unknown_pricing: true,
+    unknown_reason: "rollup_only",
+    unknown_tokens: { input: 20000, output: 10000, cache_write: 0, cache_read: 0 },
+    source_cost_usd: 7.25,
+    cost_detail: "rollup_only",
+    source_cost_state: "partial",
+    requests: 8,
   }),
   group("synthetic-mixed", 60000, {
     output: 30000,

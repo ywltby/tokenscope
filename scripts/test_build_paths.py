@@ -10,6 +10,7 @@
 from pathlib import Path
 import json
 import re
+import subprocess
 import tomllib
 import unittest
 
@@ -349,10 +350,15 @@ class LegacyReferenceCase(unittest.TestCase):
         self.assertEqual(offenders, [])
 
     def test_only_one_tracked_lockfile_remains(self):
-        locks = [str(path.relative_to(ROOT))
-                 for path in ROOT.rglob("Cargo.lock")
-                 if ".git" not in path.parts and "target" not in path.parts
-                 and "node_modules" not in path.parts]
+        # "tracked" 以 git 追踪为准：qa-artifacts/（gitignored 研究产物）里
+        # 的探针 crate 可能带自己的 Cargo.lock，不属于仓库锁文件（2026-11-14
+        # 复核材料首次触发该盲区——旧实现 rglob 全盘扫描把未跟踪文件也算进
+        # 来，与测试名声称的语义不一致）。
+        tracked = subprocess.run(
+            ["git", "ls-files", "*/Cargo.lock", "Cargo.lock"],
+            capture_output=True, text=True, check=True, cwd=ROOT,
+        ).stdout.split()
+        locks = sorted(set(tracked))
         self.assertEqual(locks, ["Cargo.lock"])
 
 

@@ -34,6 +34,13 @@ export interface Group {
    * 与日汇总并存（两部分分别标明）；缺省 = 纯明细组（展示与既有语义一致）。
    */
   cost_detail?: "rollup_only" | "mixed" | null;
+  /**
+   * 8.2（2026-11-14 第二轮复核）：来源费用覆盖完整性——`"full"` = 组内全部
+   * 采用的汇总都提供费用（含全部显式 0）；`"partial"` = 部分提供、部分缺失
+   * （已知金额照常累计，展示层必须披露覆盖不完整）；`"absent"` = 全部缺失
+   * （显示「来源未提供费用」）；缺省 = 无采用的日汇总（纯明细组）。
+   */
+  source_cost_state?: "full" | "partial" | "absent" | null;
   agents?: string[];
 }
 

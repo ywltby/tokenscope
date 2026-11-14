@@ -107,6 +107,103 @@ v0.9.0 把价格索引 v10→v11，登记表里 0.9.0 与 0.8.0 的持久格式�
 `build-inputs.json` 未涉及；即使按"非产品改动也可主动递增"的规则，
 本批已分配 0.9.1，同一批不重复递增）。
 
+## 8. 独立复核三处补修（2026-11-14 第二轮，用户批准实施）
+
+独立复核材料 `qa-artifacts/pr68-independent-review/`（review-notes.md +
+aggregate-probe 真实核心库探针 + frontend-probe.test.ts + 浏览器截图），
+仅作研究参考；正式回归全部自包含。
+
+### 8.1 跨分组合计费用构成丢失（aggregate.rs::finish）
+
+**复现**（复核探针实测）：模型 A 一条请求估算 $1.00 + 模型 B 一条采用汇总
+来源 $7.25 → 按模型/日期聚合 totals.cost_usd=1、source_cost_usd=7.25 但
+**cost_detail 错标 rollup_only** → CostCell/SummaryCards 只显示 $7.25、
+$1.00 被隐藏；按应用聚合（两贡献同组）正确 mixed。
+**根因**：groups 收口时先把内部占位 `"detail"` 清成 None（序列化约定），
+totals 归约只看 `g.cost_detail`——"纯明细组 + 纯汇总组"没有合成为 mixed。
+
+**修复**（按用户要求）：以**实际贡献构成**判定合计，与分组维度无关；
+判定不看金额是否 > 0；零用量请求也算明细贡献。实现：groups 收口时保留
+内部构成标记参与 totals 归约（`"detail"` 与 `"rollup_only"` 相遇 → mixed；
+任一 mixed → mixed；全 detail → 纯明细），归约完成后再清 `"detail"` 占位。
+请求数/四桶/来源选择/金额累计零改动；纯明细 JSON 兼容约定保持。
+
+### 8.2 来源费用覆盖完整性（partial coverage 披露）
+
+**复现**：同一模型两条采用汇总，一条 source_cost_usd=7.25、一条 NULL →
+聚合只有 Some(7.25)，前端显示"$7.25 来源记录"，无任何部分覆盖标识。
+**修复**（按用户要求）：新增最小覆盖元数据——`Group.source_cost_state`：
+- `"full"`：组内**全部**采用的汇总都提供费用（含全部显式 0 → 正常 $0.00）；
+- `"partial"`：部分提供部分 NULL → 行/合计/总览卡标「部分来源费用」，
+  已知金额照常累计、缺失不按 0 不猜造；
+- `"absent"`：全部 NULL → 维持「来源未提供费用」（不宣称模型没价格）；
+- 仅明细组无该字段（skip 序列化，JSON 兼容）。覆盖只统计**最终采用**的
+  汇总（A/C 类排除的汇总不参与——本函数只被采用桶调用，结构上保证）；
+  unknown_pricing/unknown_tokens 不动（不掩盖真实未计价）。
+
+### 8.3 图表尺寸校正被 applied 缓存短路（TrendChart.vue）
+
+**复现**：容器/applied 均 800×360、ECharts 实际输出 100 → maybeRestore
+检出失配并调 resizeIfNeeded，但后者因"容器 == applied 缓存"提前返回，
+resize 调用 0 次。**修复**：maybeRestore 的失配分支不再走
+`resizeIfNeeded` 的缓存短路——实例实际输出与容器不一致时**强制**下发
+`chart.resize({width, height})`（显式值）；正常尺寸一致仍走短路避免重复
+resize 打断动画。已有隐藏期延迟重建/主题语言合并/缩放保留全部不动。
+
+### 验证口径（三项共同）
+
+红测先行（金额/构成/覆盖/resize 行为断言失败取证，不以编译错当复现）；
+覆盖：明细与汇总跨模型/日期/项目及同组混合、不同分组维度合计一致、
+纯明细/纯汇总/零费用/零用量对照、来源费用全提供/部分 NULL/全 NULL/
+显式 0 混合、容器=applied 但实际输出失配 + 完全匹配不重复 resize；
+原有隐藏页切换/动画/费用排版回归不破。真实浏览器验证合计卡/模型行/
+合计行（明暗 × 两尺寸，逐张截图）。版本维持 0.9.1 不递增。
+
+### 交付状态（第二轮补修）
+
+- **红测取证（全部失败在行为断言上，无编译错当证据）**：
+  - T-8.1a/b/c（Rust）：`cross_group_totals_are_mixed…` 失败在
+    `Some("rollup_only") != Some("mixed")`（Model 维度 totals 错标）；
+    维度一致性用例红；零金额明细用例红。取证后 T-8.2 编译阻碍临时拆分，
+    保证 8.1 行为红可运行。
+  - T-8.2（Rust + CostCell）：字段编译错 + 前端 partial 用例失败在
+    `"$7.25来源记录"` 不含覆盖披露标记（真实断言红）。
+  - T-8.3（TrendChart）：临时还原旧实现（`resizeIfNeeded` 短路）跑红
+    （resize 0 次），恢复新实现转绿——红绿两态均有取证。
+- **修复 1（aggregate.rs::finish）**：内部占位 `"detail"` 的清除移到
+  totals 归约之后；归约合成规则补跨组分支（detail+rollup_only → mixed；
+  detail+detail 保持 detail 再清；判定不依赖金额）。22 项
+  ccs_rollup_source_cost 全过（新增 6 项：跨组三维度 mixed、维度一致性、
+  零金额贡献；既有 16 项零改动）。
+- **修复 2（Group.source_cost_state）**：push_rollup_into 逐条追踪
+  full/partial/absent（显式 0 = 已提供，与 NULL 严格区分；防御性兜底
+  未知状态按 partial 保守披露）；totals 聚合（任一 partial → partial，
+  full+absent → partial）。CostCell/SummaryCards 展示分流：partial 组以
+  警告色「部分来源记录」胶囊替换「来源记录」、mixed 行标签升级为
+  「部分 CCS 来源记录费用（其余汇总未提供费用）」、tooltip 写明缺失
+  原因；absent 维持「来源未提供费用」。locale 新增 3 键（中英同步）。
+  前端 CostCell 15 项全过（新增 5 项）。
+- **修复 3（TrendChart.maybeRestore）**：失配分支区分两类——applied ≠
+  容器（缓存错位，T-A3）与 applied == 容器但实例实际输出 ≠ 容器
+  （output > 0，8.3）都强制 `chart.resize(显式值)`；output == 0（mock/
+  过渡态）且缓存一致只更新缓存；正常一致不进分支（重复抑制不变）。
+  TrendChart 33 项全过（新增 T-8.3）。
+- **fixture/契约**：`source-cost` fixture 第 5 组
+  `synthetic-rollup-partial`（full/partial 状态）+ `group()` 构造器透传
+  `source_cost_state` + totals 聚合（修复了 fixture 丢字段的契约调试
+  缺陷）；`cost_cell_layout_not_concatenated` 契约增至 13 断言（新增
+  partial 披露、mixed 双金额、scope ≥5 组），明暗 × 两尺寸全过。
+- **浏览器逐张截图**：`qa-artifacts/v091-fix/cost-cell-4/`（1280×820
+  全景：paid/zero/partial/mixed/unpriced/合计 六行全部正确分层，partial
+  橙色胶囊、合计「部分 CCS 来源记录费用（其余汇总未提供费用）$23.50」；
+  980×620 窄窗不撑坏）+ `chart-rebuild-2/`（100px 修复未回归，10 断言
+  × 明暗 × 两尺寸全过）。
+- **全量门禁**：typecheck=0、format:check=0、前端 **1183 项**全过、
+  build=0、完整 e2e runner（11 契约 × 明暗 × 两尺寸）全过、clippy
+  -D warnings 干净、Rust 全 workspace 测试全过、`upgrade_baselines
+  select --current-version 0.9.1` 保持批准的六起点（方案 A 未动）。
+- **版本**：0.9.1 不变（PR #68 未发布，同一批不重复递增）。
+
 ## 0. 问题与根因（已由用户与 qa-artifacts/v090-installed-diagnosis 独立确认）
 
 ### A. 隐藏页面重建导致图表缩成 100px

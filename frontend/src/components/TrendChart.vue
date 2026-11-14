@@ -466,7 +466,24 @@ function maybeRestore(): void {
     return;
   }
   if (widthMismatch || heightMismatch) {
-    resizeIfNeeded(size);
+    // 8.3（第二轮复核）：失配校正**不能被 applied 缓存短路**——复核复现
+    // 容器/applied 均 800×360 但实例实际输出 100px，resizeIfNeeded 因
+    // "容器 == 缓存"提前返回，校正调用 0 次。判定分两类：
+    // - applied ≠ 容器（缺陷 A 缓存错位）：实例输出未知（mock/过渡态为 0）
+    //   时以容器为准校正——T-A3 场景；
+    // - applied == 容器但实例实际输出 ≠ 容器（output > 0，真实浏览器下
+    //   不会为 0）：实例输出错误，**强制**下发显式尺寸——8.3 场景。
+    // 正常尺寸一致时根本不进入本分支，重复 resize 抑制不变。
+    const outputMismatch =
+      outputWidth > 0 && outputWidth !== size.width
+        ? true
+        : outputHeight > 0 && outputHeight !== size.height;
+    const cacheMismatch = appliedWidth !== size.width || appliedHeight !== size.height;
+    if (outputMismatch || cacheMismatch) {
+      chart.resize({ width: size.width, height: size.height });
+    }
+    appliedWidth = size.width;
+    appliedHeight = size.height;
     if (!isDay.value) {
       chart.setOption({
         yAxis: { axisLabel: { width: categoryLabelWidth(), formatter: formatCategoryLabel } },

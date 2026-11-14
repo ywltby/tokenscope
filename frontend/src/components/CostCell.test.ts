@@ -188,3 +188,101 @@ describe("CostCell 费用状态（缺陷 C：展示规则）", () => {
     expect(w.text()).toContain("$3.00");
   });
 });
+
+// ── 8.1/8.2（2026-11-14 第二轮复核，自包含红测）────────────────────────
+// 场景数据对应 aggregate.rs 修复后的真实输出：
+// - 跨组合计（mixed）：cost=1.0 + source=7.25 → 两个金额都要可见；
+// - 部分覆盖（partial）：source=7.25 但有汇总未提供费用 → 必须披露覆盖
+//   不完整，不能当完整费用；
+// - 完整 0（full）：source=0 → $0.00 + 来源记录（不宣称免费）。
+describe("8.1 跨组合计的费用构成展示", () => {
+  it("mixed totals：请求估算与来源费用分别可见（$1.00 不被 $7.25 隐藏）", () => {
+    const w = mount(CostCell, {
+      props: {
+        group: group({
+          cost_usd: 1.0,
+          source_cost_usd: 7.25,
+          cost_detail: "mixed",
+          unknown_pricing: true,
+        }),
+      },
+    });
+    const text = w.text();
+    expect(text).toContain("$1.00");
+    expect(text).toContain("$7.25");
+    expect(text).toContain("CCS 来源记录费用");
+  });
+
+  it("对照：rollup_only totals 只显示来源读数（修复后合计不再误标）", () => {
+    const w = mount(CostCell, {
+      props: {
+        group: group({
+          cost_usd: 0,
+          unknown_pricing: true,
+          unknown_reason: "rollup_only",
+          source_cost_usd: 7.25,
+          cost_detail: "rollup_only",
+        }),
+      },
+    });
+    expect(w.text()).toContain("$7.25");
+    expect(w.text()).toContain("来源记录");
+    expect(w.text()).not.toContain("$1.00");
+  });
+});
+
+describe("8.2 来源费用覆盖完整性", () => {
+  it("partial：部分缺失必须披露覆盖不完整（不能只显示 $7.25）", () => {
+    const w = mount(CostCell, {
+      props: {
+        group: group({
+          cost_usd: 0,
+          unknown_pricing: true,
+          unknown_reason: "rollup_only",
+          source_cost_usd: 7.25,
+          cost_detail: "rollup_only",
+          source_cost_state: "partial",
+        }),
+      },
+    });
+    const text = w.text();
+    expect(text).toContain("$7.25");
+    // 覆盖披露标记（部分来源费用）。
+    expect(text).toMatch(/部分|未提供|缺失/);
+  });
+
+  it("full + 显式 0：正常 $0.00 来源记录，不显示部分标记", () => {
+    const w = mount(CostCell, {
+      props: {
+        group: group({
+          cost_usd: 0,
+          unknown_pricing: true,
+          unknown_reason: "rollup_only",
+          source_cost_usd: 0,
+          cost_detail: "rollup_only",
+          source_cost_state: "full",
+        }),
+      },
+    });
+    const text = w.text();
+    expect(text).toContain("$0.00");
+    expect(text).toContain("来源记录");
+    expect(text).not.toMatch(/部分来源|未提供/);
+  });
+
+  it("absent：全部缺失 → 来源未提供费用（不宣称模型没价格）", () => {
+    const w = mount(CostCell, {
+      props: {
+        group: group({
+          cost_usd: 0,
+          unknown_pricing: true,
+          unknown_reason: "rollup_only",
+          source_cost_usd: null,
+          cost_detail: "rollup_only",
+          source_cost_state: "absent",
+        }),
+      },
+    });
+    expect(w.text()).toContain("未知†");
+  });
+});

@@ -3000,7 +3000,7 @@ const IMPL = {
         ctx.record(
           name,
           `${viewport.label}:费用节点全部带组件 scope 标记`,
-          cells.length >= 4 && cells.every((c) => c.scopeAttr),
+          cells.length >= 5 && cells.every((c) => c.scopeAttr),
           `cells=${cells.length} scoped=${cells.filter((c) => c.scopeAttr).length}`,
         );
         // computed display 必须是（inline-)flex 列布局（旧实现 inline → 粘行）。
@@ -3055,6 +3055,26 @@ const IMPL = {
           `${viewport.label}:规则4 纯明细缺价维持未知†`,
           unpriced != null && unpriced.text.includes("未知†"),
           unpriced?.text ?? "missing",
+        );
+        // 8.2（第二轮复核）：partial 覆盖披露——已知金额照常显示，但必须
+        // 出现「部分来源记录」标识（警告色胶囊），不得当完整费用。
+        const partial = byLabel("synthetic-rollup-partial")[0];
+        ctx.record(
+          name,
+          `${viewport.label}:8.2 partial 组披露覆盖不完整`,
+          partial != null &&
+            partial.text.includes("$7.25") &&
+            partial.text.includes("部分来源记录"),
+          partial?.text ?? "missing",
+        );
+        // 8.1（第二轮复核）：mixed 组双金额在费用列并存（估算 + 来源行）。
+        ctx.record(
+          name,
+          `${viewport.label}:8.1 mixed 组双金额并存`,
+          mixed != null &&
+            mixed.text.includes("$0.2000") &&
+            mixed.text.includes("$9.00"),
+          mixed?.text ?? "missing",
         );
         // 缺陷 B：费用 cell 不得超出所在行宽（窄窗口不撑坏表格）。
         ctx.record(

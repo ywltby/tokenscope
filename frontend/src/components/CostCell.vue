@@ -41,6 +41,20 @@ const sourceAsPrimary = computed(
   () => props.group.cost_detail === "rollup_only" && props.group.source_cost_usd != null,
 );
 
+// 8.2（2026-11-14 第二轮复核）：来源费用的覆盖完整性——已知合计
+// （source_cost_usd）与「是否覆盖全部采用的汇总」（source_cost_state）是
+// 两件事。partial = 部分汇总未提供费用：金额照常显示，但必须披露覆盖
+// 不完整（悬停可见缺失原因）；full = 全部提供（含全部显式 0，正常
+// $0.00）；absent = 全部缺失（规则 4 的「来源未提供费用」）。
+const sourceState = computed(() => props.group.source_cost_state ?? null);
+const sourcePartial = computed(() => sourceState.value === "partial");
+const sourceTagText = computed(() =>
+  sourcePartial.value ? t("dashboard.sourceCostPartialTag") : t("dashboard.sourceCostTag"),
+);
+const sourceTagTitle = computed(() =>
+  sourcePartial.value ? t("dashboard.sourceCostPartialHint") : t("dashboard.sourceCostHint"),
+);
+
 const sourceText = computed(() => {
   const v = props.group.source_cost_usd;
   return v == null ? null : formatMoney(v, "summary");
@@ -49,12 +63,17 @@ const sourceText = computed(() => {
 
 <template>
   <span class="cost-cell">
-    <!-- 规则1：来源记录费用就是主读数（纯日汇总组） -->
+    <!-- 规则1：来源记录费用就是主读数（纯日汇总组）；partial 时标识升级为
+         「部分来源记录」并带覆盖缺失说明（8.2） -->
     <template v-if="sourceAsPrimary">
       <span class="cost-main source-primary ts-num">
         <span class="source-amount">{{ sourceText }}</span>
-        <span class="ts-pill ts-pill-info source-pill" :title="t('dashboard.sourceCostHint')">
-          {{ t("dashboard.sourceCostTag") }}
+        <span
+          class="ts-pill"
+          :class="sourcePartial ? 'ts-pill-warning source-pill' : 'ts-pill-info source-pill'"
+          :title="sourceTagTitle"
+        >
+          {{ sourceTagText }}
         </span>
       </span>
     </template>
@@ -73,13 +92,16 @@ const sourceText = computed(() => {
           {{ t("dashboard.tierEstimated") }}
         </span>
       </span>
-      <!-- 规则3：mixed（估算 + 来源费用并存）→ 来源费用独立一行，归属清晰 -->
+      <!-- 规则3：mixed（估算 + 来源费用并存）→ 来源费用独立一行，归属清晰；
+           partial 时标签升级为「部分 CCS 来源记录费用」并带覆盖说明（8.2） -->
       <span
         v-if="props.group.source_cost_usd != null"
         class="source-cost-cell"
-        :title="t('dashboard.sourceCostHint')"
+        :title="sourceTagTitle"
       >
-        <span class="source-cost-label">{{ t("dashboard.sourceCostLabel") }}</span>
+        <span class="source-cost-label">{{
+          sourcePartial ? t("dashboard.sourceCostPartialLabel") : t("dashboard.sourceCostLabel")
+        }}</span>
         <span class="source-cost-value ts-num">{{ sourceText }}</span>
       </span>
     </template>

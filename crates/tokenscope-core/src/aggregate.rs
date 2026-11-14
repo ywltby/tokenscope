@@ -130,6 +130,20 @@ pub struct Group {
     /// unknown 掩盖）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_detail: Option<&'static str>,
+    /// 8.2（2026-11-14 第二轮复核）：**来源费用的覆盖完整性**——区分「已知
+    /// 来源费用合计」（`source_cost_usd`）与「是否覆盖全部采用的日汇总」。
+    ///
+    /// - `Some("full")`：组内**全部**采用的汇总都提供费用（含全部显式 0）；
+    /// - `Some("partial")`：部分提供、部分缺失——已知金额照常累计，展示层
+    ///   必须标「部分来源费用」，不得表现为完整费用；
+    /// - `Some("absent")`：全部缺失——`source_cost_usd` 为 None，展示层
+    ///   显示「来源未提供费用」（不宣称模型没有价格）；
+    /// - `None`：组内没有采用的日汇总（纯明细组），不序列化输出。
+    ///
+    /// 显式 0 属于**已提供**费用，与 NULL 严格区分。覆盖只统计最终采用的
+    /// 汇总（本函数只被采用桶调用，A/C 类排除的汇总不参与）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_cost_state: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<&'static str>,
 }
@@ -579,6 +593,23 @@ fn push_rollup_into(
         // 费用（本函数只被 rollup_only 桶与 B 类桶调用——A/C 类明细优先，
         // 汇总不进入聚合，因此不会重复计入）。来源费用是来源记录值，与主
         // 估算 `cost_usd` 分开保存；受检累加，非法值（非有限）明确报错。
+        // 8.2（第二轮复核）：同步追踪**覆盖完整性**——每条采用的汇总都必然
+        // 是"已提供"或"缺失"之一；部分缺失时状态升为 partial，前端不得把
+        // 已知金额当完整费用展示。显式 0（Some(0.0)）属于已提供，与 NULL
+        // 严格区分。
+        let provided = r.source_cost_usd.is_some();
+        g.source_cost_state = Some(match (g.source_cost_state, provided) {
+            // 组内已有缺失记录，本条仍未提供 → 保持 absent 语义下的 partial 合成
+            (Some("partial"), _) => "partial",
+            (Some("full"), true) => "full",
+            (Some("full"), false) | (Some("absent"), true) => "partial",
+            (Some("absent"), false) => "absent",
+            (None, true) => "full",
+            (None, false) => "absent",
+            // 防御性兜底：未来若引入新的状态值，按 partial 保守处理（宁可
+            // 多披露不可漏披露），不 panic。
+            (Some(_), _) => "partial",
+        });
         if let Some(cost) = r.source_cost_usd {
             if !cost.is_finite() {
                 anyhow::bail!("分组 {key_err} 的来源费用出现非有限值");
@@ -624,11 +655,11 @@ impl AggregateState {
                     }
                     _ => other_label(&by, &g.key),
                 };
-                // v0.9.1 缺陷 C：纯明细组的内部占位 "detail" 不序列化输出
-                // （与旧契约逐字节一致）；只有 rollup_only / mixed 对外可见。
-                if g.cost_detail == Some("detail") {
-                    g.cost_detail = None;
-                }
+                // v0.9.1 缺陷 C：内部占位 "detail" 的序列化清除**移到 totals
+                // 归约之后**——第二轮复核（8.1）发现：明细与汇总分属不同分组
+                // 时，先清除会丢失"该组有明细贡献"的事实，totals 被错标
+                // rollup_only，请求估算金额在展示层被来源金额隐藏。归约期间
+                // 保留占位参与构成合成（见下方 totals 循环），归约后再清。
                 g
             })
             .collect();
@@ -668,11 +699,29 @@ impl AggregateState {
             totals.unknown_pricing |= g.unknown_pricing;
             totals.cache_write_split_estimated |= g.cache_write_split_estimated;
             totals.cache_price_zero_estimated |= g.cache_price_zero_estimated;
-            // v0.9.1 缺陷 C：费用构成聚合——任一组 mixed → totals mixed；
-            // 否则任一组 rollup_only → rollup_only；纯明细 → None。
+            // v0.9.1 缺陷 C；8.1（第二轮复核）修订：费用构成聚合以**实际贡献
+            // 构成**判定，与分组维度无关——内部占位 "detail"（该组有请求明细
+            // 贡献）与 "rollup_only"（该组有采用汇总）跨组合成 mixed；
+            // 判定不依赖金额是否 > 0（零用量/零费用请求仍是明细贡献）。
+            // 全部为纯明细（"detail"）时保持 None（既有 JSON 兼容）。
             totals.cost_detail = match (totals.cost_detail, g.cost_detail) {
                 (Some("mixed"), _) | (_, Some("mixed")) => Some("mixed"),
-                (Some("rollup_only"), _) | (_, Some("rollup_only")) => Some("rollup_only"),
+                // detail + detail = 仍是纯明细（保持占位，归约后清除）
+                (Some("detail"), Some("detail")) => Some("detail"),
+                (Some("rollup_only"), Some("detail")) | (Some("detail"), Some("rollup_only")) => {
+                    Some("mixed")
+                }
+                (Some("rollup_only"), Some("rollup_only")) => Some("rollup_only"),
+                (a, b) => a.or(b),
+            };
+            // 8.2（第二轮复核）：覆盖完整性聚合——任一组 partial → totals
+            // partial；full 与 absent/parial 相遇 → partial（合计覆盖必然
+            // 不完整）；全 absent → absent；全 full → full。
+            totals.source_cost_state = match (totals.source_cost_state, g.source_cost_state) {
+                (Some("partial"), _) | (_, Some("partial")) => Some("partial"),
+                (Some("full"), Some("absent")) | (Some("absent"), Some("full")) => Some("partial"),
+                (Some("absent"), Some("absent")) => Some("absent"),
+                (Some("full"), Some("full")) => Some("full"),
                 (a, b) => a.or(b),
             };
             if totals.unknown_reason.is_none() {
@@ -687,6 +736,16 @@ impl AggregateState {
                     totals.agents.push(a);
                 }
             }
+        }
+        // 8.1（第二轮复核）：归约完成后清除内部占位——纯明细组保持既有 JSON
+        // 兼容（None）；纯明细的 totals 同样清除。rollup_only / mixed 对外可见。
+        for g in &mut groups {
+            if g.cost_detail == Some("detail") {
+                g.cost_detail = None;
+            }
+        }
+        if totals.cost_detail == Some("detail") {
+            totals.cost_detail = None;
         }
         groups.push(totals.clone());
         Ok(Aggregated {

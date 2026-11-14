@@ -130,8 +130,12 @@ const enUS: AppMessages = {
     rollupOnly: "Includes day-granularity-only history (its cost is disclosed as unknown)",
     sourceCostLabel: "CCS source-recorded cost",
     sourceCostTag: "Source recorded",
+    sourceCostPartialLabel: "Partial CCS source-recorded cost (other rollups provided no fee)",
+    sourceCostPartialTag: "Partial source",
     sourceCostHint:
       "Cost recorded by the source tool in daily rollups; not a TokenScope per-request estimate and not an actual bill.",
+    sourceCostPartialHint:
+      "Only some of the selected daily rollups in this group carry a source fee (the rest provided none and are not included in the amount); the known part is accumulated as-is — not a complete cost and not an actual bill.",
     sourceCostNote:
       'Including {cost} recorded by the imported CCS daily rollups ("source-recorded cost" — a value recorded by the source tool itself; not a TokenScope per-request estimate and not an actual bill).',
     sourceCostAbsentNote:

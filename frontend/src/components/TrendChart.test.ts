@@ -591,6 +591,56 @@ describe("TrendChart 隐藏页面重建（v0.9.1 缺陷 A）", () => {
     }
   });
 
+  // 8.3（2026-11-14 第二轮复核）：容器/applied 缓存一致、但实例**实际输出**
+  // 失配（隐藏期 init 出来的 100px）——校正不能被 applied 缓存短路。
+  it("T-8.3 实际输出失配且容器等于 applied 缓存 → 强制 resize 校正", async () => {
+    const w = mount(TrendChart, { props: { groups: [group("a", 1)], by: "day" } });
+    try {
+      await flushPromises();
+      expect(init).toHaveBeenCalledTimes(1);
+      // 场景（复核探针原样）：容器 800×360；ECharts 实际输出 100×150
+      //（隐藏期错误 init 的产物）；applied 缓存与容器一致 → 旧实现
+      // resizeIfNeeded 因"尺寸 == 缓存"提前返回，resize 调用 0 次。
+      Object.defineProperty(w.find(".chart-canvas").element as HTMLElement, "clientWidth", {
+        value: 800,
+        configurable: true,
+      });
+      Object.defineProperty(w.find(".chart-canvas").element as HTMLElement, "clientHeight", {
+        value: 360,
+        configurable: true,
+      });
+      echartsMock.getWidth.mockReturnValue(800);
+      echartsMock.getHeight.mockReturnValue(360);
+      // 先让 applied 记下 800×360（模拟此前一次正确布局）。
+      fireResize();
+      await twoFrames();
+      echartsMock.resize.mockClear();
+      // 实例实际输出变成 100（错误初始化/外部破坏）。
+      echartsMock.getWidth.mockReturnValue(100);
+      echartsMock.getHeight.mockReturnValue(150);
+      fireResize();
+      await twoFrames();
+      // 修复前：resize 0 次（被缓存短路）。修复后：强制校正到容器 800×360。
+      const resizeCalls = echartsMock.resize.mock.calls as [{ width?: number; height?: number }?][];
+      const corrected = resizeCalls.some(
+        (c) =>
+          c.length > 0 &&
+          (c[0] as { width?: number })?.width === 800 &&
+          (c[0] as { height?: number })?.height === 360,
+      );
+      expect(corrected, "实际输出 ≠ 容器时必须强制 resize（不被 applied 缓存短路）").toBe(true);
+      // 校正后 applied 与容器一致：再次触发不重复 resize（不打断动画）。
+      echartsMock.getWidth.mockReturnValue(800);
+      echartsMock.getHeight.mockReturnValue(360);
+      echartsMock.resize.mockClear();
+      fireResize();
+      await twoFrames();
+      expect(echartsMock.resize).not.toHaveBeenCalled();
+    } finally {
+      await teardown(w);
+    }
+  });
+
   it("T-A4 隐藏期重建保留缩放范围", async () => {
     const w = mount(TrendChart, { props: { groups: [group("a", 10)], by: "model" } });
     try {
