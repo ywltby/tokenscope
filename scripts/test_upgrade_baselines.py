@@ -114,6 +114,29 @@ class SelectionCase(RegistryCase):
         selected = [e["version"] for e in baselines.select_origins(registry, "0.3.3")]
         self.assertEqual(selected, ["0.1.0", "0.2.1", "0.3.2"])
 
+    def test_pricing_index_only_difference_does_not_split_groups(self):
+        # 2026-11-14（用户批准的方案 A）：价格索引是升级时**自动重建**的派生
+        # 缓存（v10→v11 已验证拒绝读取后按来源重建），不产生需要升级夹具
+        # 覆盖的迁移差异——仅 pricing_index 不同的两个版本属于同一分组，取
+        # 最新一个作代表。分组键单独定义（ORIGIN_GROUP_KEYS），不从
+        # PERSISTENT_KEYS / 发布元数据 / 资产核验中删除 pricing_index。
+        registry = self.with_entry("0.3.2", persistent_format={**FINGERPRINT, "pricing_index": "10"})
+        selected = [e["version"] for e in baselines.select_origins(registry, "0.3.3")]
+        self.assertEqual(selected, ["0.1.0", "0.3.2"],
+                         "仅 pricing_index 不同不新增分组：仍取该组最新 0.3.2")
+
+    def test_other_format_fields_still_split_groups(self):
+        # 除 pricing_index 外的任何字段不同仍分别保留代表（迁移路径有差异，
+        # 必须各有起点）。
+        for field, value in (("cache_schema", "12"), ("history_schema", "5"),
+                             ("parser_revision", "2"), ("identity_revision", "2"),
+                             ("settings_format", "2")):
+            registry = self.with_entry("0.3.2", persistent_format={**FINGERPRINT, field: value})
+            selected = [e["version"] for e in baselines.select_origins(registry, "0.3.3")]
+            self.assertEqual(
+                selected, ["0.1.0", "0.3.1", "0.3.2"],
+                f"{field} 不同必须仍是独立分组")
+
     def test_missing_or_withdrawn_baseline_requires_review(self):
         for registry in (self.without("0.1.0"),
                          self.with_entry("0.1.0", status="withdrawn",
@@ -367,6 +390,25 @@ class CheckCase(RegistryCase):
         api = self.api_for_registry(registry)
         path = self.write(registry)
         metadata = {"schema_version": 2, "persistent_format": {**FINGERPRINT, "settings_format": "2"}}
+
+        def fake_download(url, sha256, directory, name):
+            self.metadata_file.write_text(json.dumps(metadata), encoding="utf-8")
+            return self.metadata_file, sha256 or "0" * 64
+
+        with patch.object(baselines, "base_version", return_value="0.3.2"), \
+                patch.object(baselines, "download", side_effect=fake_download):
+            with self.assertRaises(ValueError) as caught:
+                baselines.check_registry("origin/main", path=path, api=api)
+        self.assertIn("持久格式", str(caught.exception))
+
+    def test_metadata_pricing_index_mismatch_is_still_rejected(self):
+        # 2026-11-14（方案 A）：pricing_index 只从**选点分组键**排除——登记表
+        # 与发布元数据的一致性校验仍用完整指纹，任何一项（含 pricing_index）
+        # 不一致都拒绝，不因分组调整放松资产核验。
+        registry = copy.deepcopy(self.registry)
+        api = self.api_for_registry(registry)
+        path = self.write(registry)
+        metadata = {"schema_version": 2, "persistent_format": {**FINGERPRINT, "pricing_index": "10"}}
 
         def fake_download(url, sha256, directory, name):
             self.metadata_file.write_text(json.dumps(metadata), encoding="utf-8")

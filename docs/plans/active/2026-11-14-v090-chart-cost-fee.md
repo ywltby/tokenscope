@@ -59,6 +59,54 @@
   history.db/价格/设置；视图快照版本不递增（字段向后兼容）；AC10 ENOENT、
   /btw 等独立项不动。
 
+## 7. 升级起点分组规则修订（2026-11-14，用户批准的方案 A）
+
+PR #68 首轮 CI：9/10 通过、`plan-upgrades` 失败——起点数 7 超上限 6。根因：
+v0.9.0 把价格索引 v10→v11，登记表里 0.9.0 与 0.8.0 的持久格式指纹只有
+`pricing_index` 一项不同，`representation_key`（原用完整 `PERSISTENT_KEYS`）
+判成两种格式、各留代表。UP 计划设计为"超 6 报错、回到计划评审、不静默扩张"
+（`test_too_many_origins_stop_instead_of_expanding_silently` 锁定），按规则
+停下来向用户呈现决策。
+
+**用户批准方案 A**（7 条要求逐项落实）：
+1. 仅从选点分组键排除 `pricing_index`——新增独立常量
+   `ORIGIN_GROUP_KEYS`（五项，见 `upgrade_baselines.py:39` 注释）；
+   `PERSISTENT_KEYS`、`validate_persistent_format`、发布元数据一致性
+   （`validate_metadata_format`）、`add`/`check` 资产核验**全部不变**，
+   指纹照常登记与逐项核对。
+2. `MAX_ORIGINS = 6` 不变；其他格式字段（cache/history/parser/identity/
+   settings）继续参与分组；真实超限仍报错（`test_too_many_origins_stop_
+   instead_of_expanding_silently` 用 history_schema 变体验证，仍成立）。
+3. 合并分组后取该组**最新代表 0.9.0**（不是保留 0.8.0）。`select
+   --current-version 0.9.1` 实测输出 = 预期：
+   `0.1.0、0.4.0、0.5.9、0.5.13、0.6.0、0.9.0`（include 12 项）。
+4. 回归四条（`scripts/test_upgrade_baselines.py`，47 项全过）：
+   - `test_pricing_index_only_difference_does_not_split_groups`：仅
+     pricing_index 不同不新增分组、仍选最新；
+   - `test_other_format_fields_still_split_groups`：其余五字段各自成组；
+   - `test_metadata_pricing_index_mismatch_is_still_rejected`：登记表与
+     build-metadata.json 的 pricing_index 不一致仍拒绝（资产核验不放松）；
+   - 真实超 6 起点报错沿用既有用例（分组键调整后语义不变）。
+5. 隔离证明 v10 索引升级路径（`pricing_index_restart.rs` 新用例
+   `restart_rejects_v10_index_and_rebuilds_consistent_prices`，三个独立子
+   进程走真实磁盘）：伪造 v10 索引（0.9.0 用户升级后的真实磁盘格式）→
+   新进程拒读、按来源重建为 v11（价格来自来源快照而非旧条目）→ 再一个
+   新进程命中且价格一致。不修改历史事实、不要求用户清库（索引是派生
+   缓存）；既有 `restart_rejects_legacy_degraded_index`（v7）保留。
+6. UP 计划（`docs/plans/archive/implemented/2026-10-16-upgrade-matrix.md`
+   §2 G2）追加 2026-11-14 修订块：理由（派生缓存自动重建、无迁移差异）、
+   边界（登记/核验仍用完整指纹、MAX_ORIGINS 不变）、合并后代表为 0.9.0、
+   历史指纹与资产不改写；原 G2 文本保留。
+7. 全量验证：`test_upgrade_baselines` 47 项 + `test_upgrade_workflow`
+   等 80 项 Python 测试全过；`pricing_index_restart` 6 项全过；
+   `upgrade_baselines.py check --base-ref e9f5c33` 通过（GitHub 瞬断
+   10054 重试后恢复，与 PR #67 登记时的环境问题相同）；
+   clippy + Rust 全量 + 前端全量在本批既有验证之上复跑受影响部分。
+
+版本维持 `0.9.1` 不变（本规则修订是测试架/CI 维度，不改产品输入——
+`build-inputs.json` 未涉及；即使按"非产品改动也可主动递增"的规则，
+本批已分配 0.9.1，同一批不重复递增）。
+
 ## 0. 问题与根因（已由用户与 qa-artifacts/v090-installed-diagnosis 独立确认）
 
 ### A. 隐藏页面重建导致图表缩成 100px

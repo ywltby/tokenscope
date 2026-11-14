@@ -54,6 +54,21 @@
 - G4 起点由仓库内登记表决定，可复现；被撤回的版本不作为默认起点；含本计划检查的发布流水线拒绝重新发布撤回版本（更早的流水线不受约束，靠撤回流程禁止重跑，§4.4）。
 - G5 旧安装包始终是原发布资产，执行前校验写死的 SHA256，不重新构建历史包。
 
+**2026-11-14 规则修订（v0.9.1 批次，用户批准的方案 A；原决策保留如下）**：G2 的
+"持久格式"分组键修订为**不含 `pricing_index`** 的五项（`cache_schema` /
+`history_schema` / `parser_revision` / `identity_revision` / `settings_format`，
+`upgrade_baselines.py` 的 `ORIGIN_GROUP_KEYS`）。理由：价格索引是升级时**自动
+重建的派生缓存**——索引版本升级的语义就是"拒绝读取旧索引、按来源离线重建"
+（v10→v11 在 v0.9.0 升级中已验证：`pricing_index_restart.rs` 三个独立子进程
+走真实磁盘链路），不涉及 `history.db` / `settings.toml` 迁移，不产生需要升级
+夹具覆盖的迁移差异；v0.9.0 的 pricing_index 10→11 使起点数涨到 7、超过上限 6，
+阻断全部 PR 的 `plan-upgrades`。**登记表校验与发布元数据一致性核验仍用完整六项
+指纹**（`PERSISTENT_KEYS` / `validate_metadata_format` 不变）——指纹照常登记与
+核对，只是分组不再被派生缓存版本撑爆；`MAX_ORIGINS = 6` 不变，真正的格式组
+超限时 `select` 仍报错不静默扩张。合并分组后 v0.9.1 的起点为
+{0.1.0, 0.4.0, 0.5.9, 0.5.13, 0.6.0, **0.9.0**}（0.8.0 与 0.9.0 仅
+pricing_index 不同，同组取最新 0.9.0 作代表）。历史版本的指纹与资产**不改写**。
+
 **非目标**
 
 - 降级测试（NSIS 已设 `allowDowngrades: false`，较高结构版本拒绝打开已有单元测试）。

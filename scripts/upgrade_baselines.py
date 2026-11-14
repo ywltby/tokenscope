@@ -38,6 +38,16 @@ REGISTRY = ROOT / "scripts/fixtures/upgrade_baselines.json"
 DEFAULT_EXPECTED = "scripts/fixtures/upgrade-0.1.0/expected.json"
 PERSISTENT_KEYS = ("cache_schema", "history_schema", "parser_revision",
                    "identity_revision", "pricing_index", "settings_format")
+# 2026-11-14（用户批准的方案 A）：升级起点代表的**分组键**——价格索引是
+# 升级时自动重建的派生缓存（索引版本升级 = 拒绝读取旧索引、按来源重建，
+# 不涉及 history.db / settings 迁移），不产生需要升级夹具覆盖的迁移差异，
+# 因此不作为分组维度。它与 PERSISTENT_KEYS 的区别：登记表校验、发布元数据
+# 一致性核验（validate_metadata_format）仍用完整 PERSISTENT_KEYS——指纹
+# 照常登记与核对，只是不再把"仅价格索引版本不同"的两个版本当成两种需要
+# 各自起点的持久格式（v0.9.0 的 pricing_index 10→11 曾使起点数涨到 7、
+# 超过上限 6 而阻断全部 PR）。
+ORIGIN_GROUP_KEYS = ("cache_schema", "history_schema", "parser_revision",
+                     "identity_revision", "settings_format")
 STATUSES = ("published", "withdrawn", "unpublished")
 PROFILES = ("legacy-cache", "history")
 SOURCE_STATES = ("present", "deleted")
@@ -267,8 +277,12 @@ def select_origins(registry, current_version):
 
 
 def representation_key(entry):
-    return json.dumps({key: entry["persistent_format"][key] for key in PERSISTENT_KEYS},
-                      sort_keys=True)
+    """选点分组键：只含**需要迁移验证**的持久格式字段（ORIGIN_GROUP_KEYS）。
+
+    pricing_index 不参与分组（见其定义处的说明）；登记与核验仍用完整指纹。
+    """
+    return json.dumps({key: entry["persistent_format"][key]
+                       for key in ORIGIN_GROUP_KEYS}, sort_keys=True)
 
 
 def selection_payload(registry, current_version):
