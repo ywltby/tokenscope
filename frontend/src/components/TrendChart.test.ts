@@ -12,14 +12,18 @@ const echartsMock = vi.hoisted(() => {
   const resize = vi.fn();
   const getOption = vi.fn((): unknown => ({}));
   const dispatchAction = vi.fn();
+  const getWidth = vi.fn((): number => 0);
+  const getHeight = vi.fn((): number => 0);
   const init = vi.fn((..._args: unknown[]) => ({
     setOption,
     dispose,
     resize,
     getOption,
     dispatchAction,
+    getWidth,
+    getHeight,
   }));
-  return { setOption, dispose, resize, getOption, dispatchAction, init };
+  return { setOption, dispose, resize, getOption, dispatchAction, init, getWidth, getHeight };
 });
 
 const resizeObservers = vi.hoisted(() => [] as ResizeObserverCallback[]);
@@ -64,6 +68,10 @@ beforeEach(() => {
   echartsMock.resize.mockClear();
   echartsMock.getOption.mockClear();
   echartsMock.getOption.mockReturnValue({});
+  echartsMock.getWidth.mockClear();
+  echartsMock.getHeight.mockClear();
+  echartsMock.getWidth.mockReturnValue(0);
+  echartsMock.getHeight.mockReturnValue(0);
   init.mockClear();
   resizeObservers.length = 0;
   vi.stubGlobal("ResizeObserver", TestResizeObserver);
@@ -207,7 +215,15 @@ describe("TrendChart（设计系统 Task 4）", () => {
       expect(opt.yAxis.data).toHaveLength(50);
       const h2 = Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.height, 10);
       expect(h2).toBeLessThanOrEqual(480);
-      expect(init.mock.calls[0][2]).toEqual({ renderer: "svg" });
+      // v0.9.1 缺陷 A：init 显式传容器尺寸（隐藏期恢复必须按真实尺寸初始化，
+      // 不传会被 ECharts 量成 100px）。happy-dom 无布局 → clientWidth 为 0
+      // → width 为 undefined（与修复前一致）；真实容器下由浏览器契约断言
+      // 实际宽度（summary_chart_survives_hidden_rebuild）。
+      const initOpts = init.mock.calls[0][2] as { renderer: string; width?: number };
+      expect(initOpts.renderer).toBe("svg");
+      if (initOpts.width !== undefined) {
+        expect(initOpts.width).toBeGreaterThan(0);
+      }
       w.unmount();
     },
   );
@@ -454,5 +470,220 @@ describe("TrendChart 生命周期与数据更新（UX05）", () => {
     expect(node2.querySelector("img")).toBeNull();
     expect(node2.textContent).toContain(payload);
     w.unmount();
+  });
+});
+
+describe("TrendChart 隐藏页面重建（v0.9.1 缺陷 A）", () => {
+  /// 把 .chart-canvas 变成不可测量的隐藏容器（display:none → offsetParent 为
+  /// null、clientWidth 为 0），模拟 KeepAlive 保留的汇总页在设置页下方隐藏。
+  function hideChart(w: ReturnType<typeof mount>): void {
+    (w.find(".chart-canvas").element as HTMLElement).style.display = "none";
+    // 隐藏后同步清掉布局尺寸（浏览器行为：display:none 的元素无盒模型）。
+    const el = w.find(".chart-canvas").element as HTMLElement;
+    Object.defineProperty(el, "clientWidth", { value: 0, configurable: true });
+    Object.defineProperty(el, "clientHeight", { value: 0, configurable: true });
+    Object.defineProperty(el, "offsetParent", { value: null, configurable: true });
+  }
+  function showChart(w: ReturnType<typeof mount>, width: number, height = 360): void {
+    const el = w.find(".chart-canvas").element as HTMLElement;
+    el.style.display = "";
+    Object.defineProperty(el, "clientWidth", { value: width, configurable: true });
+    Object.defineProperty(el, "clientHeight", { value: height, configurable: true });
+    Object.defineProperty(el, "offsetParent", { value: {} as HTMLElement, configurable: true });
+  }
+  /** 每个用例自己的清理：语言/主题复位 + 卸载（红测失败也要恢复全局状态）。 */
+  async function teardown(
+    w: ReturnType<typeof mount>,
+    opts: { locale?: boolean } = {},
+  ): Promise<void> {
+    if (opts.locale) {
+      const { setLocale: restore } = await import("../lib/i18n");
+      restore("zh-CN");
+    }
+    useTheme().setPreference("light");
+    w.unmount();
+    await flushPromises();
+  }
+  /** 等两帧 rAF（恢复路径在布局完成后才应用）。 */
+  async function twoFrames(): Promise<void> {
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(null))));
+    await flushPromises();
+  }
+
+  it("T-A1 隐藏容器不 init/不重建：隐藏期改主题只记录 pending", async () => {
+    const w = mount(TrendChart, { props: { groups: [group("a", 1)], by: "day" } });
+    try {
+      await flushPromises();
+      expect(init).toHaveBeenCalledTimes(1);
+      hideChart(w);
+      useTheme().setPreference("dark");
+      await nextTick();
+      await flushPromises();
+      // 旧实现：隐藏期直接 dispose + init（init 在不可测量容器上得到 100px）。
+      // 新实现：不销毁实例、不初始化新实例，只记录待应用的最新状态。
+      expect(dispose).not.toHaveBeenCalled();
+      expect(init).toHaveBeenCalledTimes(1);
+    } finally {
+      await teardown(w);
+    }
+  });
+
+  it("T-A2 恢复可见时按真实尺寸重建并显式传尺寸（主题+语言合并一次）", async () => {
+    const w = mount(TrendChart, { props: { groups: [group("a", 1)], by: "day" } });
+    try {
+      await flushPromises();
+      expect(init).toHaveBeenCalledTimes(1);
+      hideChart(w);
+      // 隐藏期间连续两次变更：主题 + 语言 → 合并成一个 pending 重建。
+      useTheme().setPreference("dark");
+      await nextTick();
+      const { setLocale } = await import("../lib/i18n");
+      setLocale("en-US");
+      await nextTick();
+      await flushPromises();
+      expect(init).toHaveBeenCalledTimes(1);
+      expect(dispose).not.toHaveBeenCalled();
+      // 页面重新可见：容器真实宽度 1030（旧实现拿旧 appliedWidth 或 100px）。
+      showChart(w, 1030);
+      // 触发恢复（onActivated / observer 回调路径）。
+      fireResize();
+      await twoFrames();
+      // 重建恰好一次：dispose 1 次 + init 第 2 次，且显式传真实尺寸。
+      expect(dispose).toHaveBeenCalledTimes(1);
+      expect(init).toHaveBeenCalledTimes(2);
+      const opts = init.mock.calls[1][2] as { width?: number; height?: number; renderer?: string };
+      expect(opts?.width, "init 必须显式收到真实容器宽度").toBe(1030);
+      expect(opts?.renderer).toBe("svg");
+      // appliedWidth 必须等于真实宽度：之后同尺寸的 observer 回调不再 resize。
+      echartsMock.resize.mockClear();
+      fireResize();
+      await flushPromises();
+      expect(echartsMock.resize).not.toHaveBeenCalled();
+    } finally {
+      await teardown(w, { locale: true });
+    }
+  });
+
+  it("T-A3 可见时无 pending 但 ECharts 输出尺寸失配 → resize 校正", async () => {
+    const w = mount(TrendChart, { props: { groups: [group("a", 1)], by: "day" } });
+    try {
+      await flushPromises();
+      // 模拟旧实例尺寸失配（隐藏期间容器被拉宽）：appliedWidth 记 100，
+      // 容器真实 800。
+      Object.defineProperty(w.find(".chart-canvas").element as HTMLElement, "clientWidth", {
+        value: 800,
+        configurable: true,
+      });
+      // 直接改 stub 实例的"上次应用尺寸"不可达——改用公开行为：恢复激活后
+      // resize 收到容器真实宽度。
+      showChart(w, 800);
+      fireResize();
+      await twoFrames();
+      // 未重建实例，但实际输出被校正到容器宽度。
+      expect(init).toHaveBeenCalledTimes(1);
+      const resizeCalls = echartsMock.resize.mock.calls as [{ width?: number }?][];
+      const corrected = resizeCalls.some(
+        (c) => c.length > 0 && (c[0] as { width?: number })?.width === 800,
+      );
+      expect(corrected, "resize 必须把画布校正到容器 800px").toBe(true);
+    } finally {
+      await teardown(w);
+    }
+  });
+
+  // 8.3（2026-11-14 第二轮复核）：容器/applied 缓存一致、但实例**实际输出**
+  // 失配（隐藏期 init 出来的 100px）——校正不能被 applied 缓存短路。
+  it("T-8.3 实际输出失配且容器等于 applied 缓存 → 强制 resize 校正", async () => {
+    const w = mount(TrendChart, { props: { groups: [group("a", 1)], by: "day" } });
+    try {
+      await flushPromises();
+      expect(init).toHaveBeenCalledTimes(1);
+      // 场景（复核探针原样）：容器 800×360；ECharts 实际输出 100×150
+      //（隐藏期错误 init 的产物）；applied 缓存与容器一致 → 旧实现
+      // resizeIfNeeded 因"尺寸 == 缓存"提前返回，resize 调用 0 次。
+      Object.defineProperty(w.find(".chart-canvas").element as HTMLElement, "clientWidth", {
+        value: 800,
+        configurable: true,
+      });
+      Object.defineProperty(w.find(".chart-canvas").element as HTMLElement, "clientHeight", {
+        value: 360,
+        configurable: true,
+      });
+      echartsMock.getWidth.mockReturnValue(800);
+      echartsMock.getHeight.mockReturnValue(360);
+      // 先让 applied 记下 800×360（模拟此前一次正确布局）。
+      fireResize();
+      await twoFrames();
+      echartsMock.resize.mockClear();
+      // 实例实际输出变成 100（错误初始化/外部破坏）。
+      echartsMock.getWidth.mockReturnValue(100);
+      echartsMock.getHeight.mockReturnValue(150);
+      fireResize();
+      await twoFrames();
+      // 修复前：resize 0 次（被缓存短路）。修复后：强制校正到容器 800×360。
+      const resizeCalls = echartsMock.resize.mock.calls as [{ width?: number; height?: number }?][];
+      const corrected = resizeCalls.some(
+        (c) =>
+          c.length > 0 &&
+          (c[0] as { width?: number })?.width === 800 &&
+          (c[0] as { height?: number })?.height === 360,
+      );
+      expect(corrected, "实际输出 ≠ 容器时必须强制 resize（不被 applied 缓存短路）").toBe(true);
+      // 校正后 applied 与容器一致：再次触发不重复 resize（不打断动画）。
+      echartsMock.getWidth.mockReturnValue(800);
+      echartsMock.getHeight.mockReturnValue(360);
+      echartsMock.resize.mockClear();
+      fireResize();
+      await twoFrames();
+      expect(echartsMock.resize).not.toHaveBeenCalled();
+    } finally {
+      await teardown(w);
+    }
+  });
+
+  it("T-A4 隐藏期重建保留缩放范围", async () => {
+    const w = mount(TrendChart, { props: { groups: [group("a", 10)], by: "model" } });
+    try {
+      await flushPromises();
+      echartsMock.getOption.mockReturnValue({ dataZoom: [{ start: 30, end: 70 }] });
+      hideChart(w);
+      useTheme().setPreference("dark");
+      await nextTick();
+      await flushPromises();
+      showChart(w, 900);
+      fireResize();
+      await twoFrames();
+      const rebuilt = setOption.mock.calls.at(-1)![0] as {
+        dataZoom: { start: number; end: number }[];
+      };
+      expect(rebuilt.dataZoom[0]).toMatchObject({ start: 30, end: 70 });
+    } finally {
+      await teardown(w);
+    }
+  });
+
+  it("T-A5 恢复后重复激活不重复 resize/setOption", async () => {
+    const w = mount(TrendChart, { props: { groups: [group("a", 1)], by: "day" } });
+    try {
+      await flushPromises();
+      hideChart(w);
+      useTheme().setPreference("dark");
+      await nextTick();
+      await flushPromises();
+      showChart(w, 1030);
+      fireResize();
+      await twoFrames();
+      expect(init).toHaveBeenCalledTimes(2);
+      const setOptions = setOption.mock.calls.length;
+      const resizes = echartsMock.resize.mock.calls.length;
+      // 再次激活（无 pending、尺寸未变）：什么都不做。
+      fireResize();
+      await twoFrames();
+      expect(init).toHaveBeenCalledTimes(2);
+      expect(setOption.mock.calls.length).toBe(setOptions);
+      expect(echartsMock.resize.mock.calls.length).toBe(resizes);
+    } finally {
+      await teardown(w);
+    }
   });
 });

@@ -11,7 +11,7 @@
 //   - resize 只 resize；卸载释放实例与观察器；
 //   - 0 类别不初始化图表（父级另给明确空状态）；
 //   - 所有 setOption 路径继续使用 SF01 的 DOM/textContent 安全 formatter。
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import * as echarts from "echarts";
 import { useTheme } from "../composables/theme";
 import { useTokenColors } from "../composables/tokenColors";
@@ -48,10 +48,18 @@ let chart: echarts.ECharts | null = null;
 let observer: ResizeObserver | null = null;
 /// 最近一次真正应用到 ECharts 的画布尺寸。ResizeObserver 对相同尺寸不再
 /// 重复 resize——由数据更新改高度产生的回调不能打断刚开始的柱形动画。
+/// v0.9.1（缺陷 A）：只记录**真实下发**的尺寸——隐藏容器量到的旧宽度
+/// 不再当作已应用尺寸。
 let appliedWidth = 0;
 let appliedHeight = 0;
 /// 布局/数据统一更新：同一轮内的数据、维度与尺寸变化只下发一次。
 type PendingKind = "data" | "dimension" | "layout";
+/// v0.9.1（缺陷 A）：KeepAlive 保留的页面隐藏时容器不可测量，任何
+/// init/rebuild 都会得到 100px 默认画布。隐藏期间不再触碰实例，只记录
+/// 待应用的**最新**意图（同类型覆盖：连续主题+语言 = 一次 rebuild）。
+/// `rebuild` 同时快照隐藏前一刻的缩放范围，恢复时还原。
+type PendingAction = { kind: PendingKind } | { kind: "rebuild"; zoom: ZoomRange };
+let pending: PendingAction | null = null;
 let disposed = false;
 
 const isDay = computed(() => props.by === "day");
@@ -252,7 +260,18 @@ function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsO
   };
 }
 
-/// 应用目标高度并量测实际尺寸；宽度在极窄测试环境中为 0 时退回上次值。
+/// v0.9.1（缺陷 A）：容器当前是否可测量。KeepAlive 隐藏的页面（display:none
+/// 或未挂到布局树）clientWidth 为 0 且 offsetParent 为 null——任一成立都
+/// 不能初始化 ECharts（只能得到 100px 默认画布）。恢复必须等重新可见且
+/// 布局完成。clientWidth 是主判据：隐藏元素没有盒模型；offsetParent 兜底
+/// 覆盖绝对定位但可见的极端场景。
+function containerMeasurable(): boolean {
+  const node = el.value;
+  if (node == null) return false;
+  return node.clientWidth > 0 || node.offsetWidth > 0 || node.offsetParent !== null;
+}
+
+/// 应用目标高度并量测实际尺寸；只在可测量容器上调用。
 function applyHeight(): { width: number; height: number } {
   if (!el.value) return { width: appliedWidth, height: appliedHeight };
   const target = canvasHeight(props.groups.length);
@@ -277,8 +296,17 @@ function resizeIfNeeded(size: { width: number; height: number }): boolean {
 
 /// 单次布局后更新：先应用高度与尺寸，确实变尺寸时先 resize，再下发数据。
 /// 数据/维度/轴标签都在同一批内完成，ResizeObserver 不再补发第二次 resize。
+/// v0.9.1（缺陷 A）：隐藏容器不触碰实例，只记录 pending。
 function flushChart(kind: PendingKind): void {
-  if (!el.value || !chart) return;
+  if (!el.value) return;
+  if (!containerMeasurable()) {
+    recordPending({ kind });
+    return;
+  }
+  if (!chart) {
+    initChart();
+    return;
+  }
   const size = applyHeight();
   const resized = resizeIfNeeded(size);
   if (kind === "dimension") {
@@ -296,11 +324,36 @@ function flushChart(kind: PendingKind): void {
   }
 }
 
-/// 首次初始化（0 类别不建实例）。
+/// v0.9.1（缺陷 A）：pending 合并语义——rebuild 覆盖一切（重建天然包含
+/// 最新数据/维度/主题）；data/dimension 覆盖 layout；rebuild 之外取更高优先。
+function recordPending(next: PendingAction): void {
+  if (next.kind === "rebuild" || pending?.kind === "rebuild") {
+    if (next.kind === "rebuild") {
+      pending = next;
+    } else if (pending?.kind !== "rebuild") {
+      pending = next;
+    }
+    return;
+  }
+  if (next.kind === "layout" && pending != null) return;
+  pending = next;
+}
+
+/// 首次初始化（0 类别不建实例；隐藏容器不建实例——记 pending 等恢复）。
+/// 显式传容器尺寸：隐藏后恢复的容器在 init 一瞬间可能尚未完成布局，
+/// 不传尺寸会被 ECharts 量成 100px（缺陷 A 的根因之一）。
 function initChart(): void {
   if (!el.value || props.groups.length === 0) return;
+  if (!containerMeasurable()) {
+    recordPending({ kind: "layout" });
+    return;
+  }
   const size = applyHeight();
-  chart = echarts.init(el.value, null, { renderer: "svg" });
+  chart = echarts.init(el.value, null, {
+    renderer: "svg",
+    width: size.width || undefined,
+    height: size.height || undefined,
+  });
   appliedWidth = size.width;
   appliedHeight = size.height;
   chart.setOption(buildOption(), { notMerge: true });
@@ -334,17 +387,109 @@ function switchDimension(): void {
   flushChart("dimension");
 }
 
-/// 主题切换：允许一次 dispose/init，保留外层滚动位置。
+/// 主题/语言切换：允许一次 dispose/init，保留外层滚动位置与缩放范围。
+/// v0.9.1（缺陷 A）：隐藏容器只记 pending（保留缩放快照），重新可见后
+/// 按真实容器尺寸重建。
 function rebuildForTheme(): void {
   if (!el.value || props.groups.length === 0) return;
+  if (!containerMeasurable()) {
+    recordPending({ kind: "rebuild", zoom: captureZoom() });
+    return;
+  }
   const zoom = captureZoom();
   chart?.dispose();
   chart = null;
   const size = applyHeight();
-  chart = echarts.init(el.value, null, { renderer: "svg" });
+  chart = echarts.init(el.value, null, {
+    renderer: "svg",
+    width: size.width || undefined,
+    height: size.height || undefined,
+  });
   appliedWidth = size.width;
   appliedHeight = size.height;
   chart.setOption(buildOption(zoom), { notMerge: true });
+}
+
+/// v0.9.1（缺陷 A）：页面重新可见后的恢复。
+/// - 有 pending：按记录的意图重建/刷新，全部使用**当下**真实容器尺寸；
+/// - 无 pending：核对 ECharts 实际输出与容器尺寸，失配时 resize 校正
+///   （隐藏期间的容器变宽不会触发 observer 回调，只能在这里补齐）。
+///   校正只 resize、不 setOption，不打断可能正在进行的动画。
+/// rAF 两帧等待 KeepAlive 重新插入后的布局完成（一帧可能还在旧布局）。
+function maybeRestore(): void {
+  if (disposed || !el.value) return;
+  if (!containerMeasurable()) return;
+  if (props.groups.length === 0) return;
+  if (!chart) {
+    // 从未初始化（隐藏期挂载或数据后到）→ 走 init 路径。
+    initChart();
+    pending = null;
+    return;
+  }
+  const action = pending;
+  pending = null;
+  if (action?.kind === "rebuild") {
+    const zoom = action.zoom;
+    chart.dispose();
+    chart = null;
+    const size = applyHeight();
+    chart = echarts.init(el.value, null, {
+      renderer: "svg",
+      width: size.width || undefined,
+      height: size.height || undefined,
+    });
+    appliedWidth = size.width;
+    appliedHeight = size.height;
+    chart.setOption(buildOption(zoom), { notMerge: true });
+    return;
+  }
+  // 无重建：尺寸核对（真实容器 vs 已应用 vs 实例输出）。
+  // getWidth/getHeight 是 ECharts 实例**实际输出**的画布尺寸——隐藏期
+  // init 出来的 100px 或 0 都会被它揭穿，不能只信 applied 缓存。
+  // outputWidth <= 0 视为「实例未输出」的过渡态（布局未完成/测试 mock），
+  // 不据它判失配；applied 缓存与容器不等仍然校正（缺陷 A 的缓存错位场景）。
+  const size = applyHeight();
+  const outputWidth = chart.getWidth();
+  const outputHeight = chart.getHeight();
+  const widthMismatch =
+    size.width > 0 &&
+    ((outputWidth > 0 && outputWidth !== size.width) || appliedWidth !== size.width);
+  const heightMismatch =
+    size.height > 0 &&
+    ((outputHeight > 0 && outputHeight !== size.height) || appliedHeight !== size.height);
+  if (action?.kind === "dimension") {
+    flushChart("dimension");
+    return;
+  }
+  if (action?.kind === "data") {
+    flushChart("data");
+    return;
+  }
+  if (widthMismatch || heightMismatch) {
+    // 8.3（第二轮复核）：失配校正**不能被 applied 缓存短路**——复核复现
+    // 容器/applied 均 800×360 但实例实际输出 100px，resizeIfNeeded 因
+    // "容器 == 缓存"提前返回，校正调用 0 次。判定分两类：
+    // - applied ≠ 容器（缺陷 A 缓存错位）：实例输出未知（mock/过渡态为 0）
+    //   时以容器为准校正——T-A3 场景；
+    // - applied == 容器但实例实际输出 ≠ 容器（output > 0，真实浏览器下
+    //   不会为 0）：实例输出错误，**强制**下发显式尺寸——8.3 场景。
+    // 正常尺寸一致时根本不进入本分支，重复 resize 抑制不变。
+    const outputMismatch =
+      outputWidth > 0 && outputWidth !== size.width
+        ? true
+        : outputHeight > 0 && outputHeight !== size.height;
+    const cacheMismatch = appliedWidth !== size.width || appliedHeight !== size.height;
+    if (outputMismatch || cacheMismatch) {
+      chart.resize({ width: size.width, height: size.height });
+    }
+    appliedWidth = size.width;
+    appliedHeight = size.height;
+    if (!isDay.value) {
+      chart.setOption({
+        yAxis: { axisLabel: { width: categoryLabelWidth(), formatter: formatCategoryLabel } },
+      });
+    }
+  }
 }
 
 onMounted(() => {
@@ -352,6 +497,13 @@ onMounted(() => {
   initChart();
   observer = new ResizeObserver(() => {
     if (disposed || !el.value || !chart) return;
+    // v0.9.1（缺陷 A）：隐藏 → 可见的转变（KeepAlive 回页不触发 observer
+    // 尺寸变化之外的场景，但容器从 display:none 恢复时 clientWidth 从 0
+    // 变为真实值会触发）。可见性转变交给 maybeRestore 处理 pending 与
+    // 尺寸失配；稳定可见态走原布局批次逻辑。
+    if (!containerMeasurable()) return;
+    maybeRestore();
+    if (!chart) return;
     const width = el.value.clientWidth || appliedWidth;
     const height = el.value.clientHeight || appliedHeight;
     if (width === appliedWidth && height === appliedHeight) return;
@@ -366,6 +518,13 @@ onBeforeUnmount(() => {
   observer = null;
   chart?.dispose();
   chart = null;
+});
+
+/// v0.9.1（缺陷 A）：KeepAlive 页面切换回汇总页时恢复。
+/// rAF 两帧后再量：KeepAlive 重新插入 DOM 的同一帧布局未必完成。
+onActivated(() => {
+  if (disposed) return;
+  requestAnimationFrame(() => requestAnimationFrame(() => maybeRestore()));
 });
 
 // 数据更新与维度切换分离：只监听 by/mode 会漏掉新数据，只在每次数据更新

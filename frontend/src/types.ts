@@ -28,6 +28,19 @@ export interface Group {
    * （来源工具记录值，非 TokenScope 请求级估算；null/缺省 = 未提供费用）。
    */
   source_cost_usd?: number | null;
+  /**
+   * v0.9.1 缺陷 C：本组费用的构成——`"rollup_only"` = 全部用量来自最终采用
+   * 的日汇总（有来源费用时前端以来源值作为费用读数）；`"mixed"` = 请求明细
+   * 与日汇总并存（两部分分别标明）；缺省 = 纯明细组（展示与既有语义一致）。
+   */
+  cost_detail?: "rollup_only" | "mixed" | null;
+  /**
+   * 8.2（2026-11-14 第二轮复核）：来源费用覆盖完整性——`"full"` = 组内全部
+   * 采用的汇总都提供费用（含全部显式 0）；`"partial"` = 部分提供、部分缺失
+   * （已知金额照常累计，展示层必须披露覆盖不完整）；`"absent"` = 全部缺失
+   * （显示「来源未提供费用」）；缺省 = 无采用的日汇总（纯明细组）。
+   */
+  source_cost_state?: "full" | "partial" | "absent" | null;
   agents?: string[];
 }
 

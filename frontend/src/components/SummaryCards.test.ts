@@ -306,4 +306,83 @@ describe("T2 CCS 来源记录费用（总览卡）", () => {
     const w = mountCards(totals({ source_cost_usd: null }));
     expect(w.text()).not.toContain("CCS 来源记录费用");
   });
+
+  // v0.9.1 缺陷 C 规则1（总览卡）：全部组纯日汇总 + 有来源费用 → 主读数 =
+  // 来源金额 + 「来源记录」标识，不再显示「未知†」。
+  it("rollup_only 汇总以来源金额为主读数并带来源标识", () => {
+    const w = mountCards(
+      totals({
+        cost_usd: 0,
+        unknown_pricing: true,
+        unknown_reason: "rollup_only",
+        source_cost_usd: 9,
+        cost_detail: "rollup_only",
+      }),
+    );
+    const text = w.text();
+    expect(text).toContain("$9.00");
+    expect(text).toContain("来源记录");
+    expect(text).not.toContain("未知†");
+    // 独立来源行不再出现（金额已升级为主读数）。
+    expect(text).not.toContain("CCS 来源记录费用");
+  });
+
+  // v0.9.1 缺陷 C：mixed totals（估算 + 来源费用并存）→ 维持独立来源行。
+  it("mixed 汇总保留估算读数与独立来源行", () => {
+    const w = mountCards(
+      totals({
+        cost_usd: 0,
+        unknown_pricing: true,
+        unknown_reason: "rollup_only",
+        source_cost_usd: 9,
+        cost_detail: "mixed",
+      }),
+    );
+    const text = w.text();
+    expect(text).toContain("未知†");
+    expect(text).toContain("CCS 来源记录费用");
+    expect(text).toContain("$9.00");
+  });
+  // 8.2 总览卡接线（2026-11-14 第三轮复核反例）：表格行正确显示
+  // 「部分来源记录」，但总览卡没有读 totals.source_cost_state——两条
+  // 反例先失败在总览卡胶囊文案断言上（不整页搜"部分"，定位总览卡节点）。
+  it("反例：partial + 纯汇总 → 总览卡显示「部分来源记录」胶囊", () => {
+    const w = mountCards(
+      totals({
+        cost_usd: 0,
+        unknown_pricing: true,
+        unknown_reason: "rollup_only",
+        source_cost_usd: 7.25,
+        cost_detail: "rollup_only",
+        source_cost_state: "partial",
+      }),
+    );
+    // 定位总览卡的来源标识节点（不是整页文本搜索）。
+    const tag = w.find(".metric-source-tag .ts-pill");
+    expect(tag.exists()).toBe(true);
+    expect(tag.text()).toBe("部分来源记录");
+    expect(tag.classes()).toContain("ts-pill-warning");
+    // 主读数仍是来源金额。
+    expect(w.find(".metric-source-amount").text()).toBe("$7.25");
+  });
+
+  it("反例：partial + mixed → 总览卡来源独立行标为部分费用", () => {
+    const w = mountCards(
+      totals({
+        cost_usd: 0,
+        unknown_pricing: true,
+        unknown_reason: "rollup_only",
+        source_cost_usd: 9,
+        cost_detail: "mixed",
+        source_cost_state: "partial",
+      }),
+    );
+    const line = w.find(".metric-source-cost");
+    expect(line.exists()).toBe(true);
+    // 独立行标签升级为部分费用文案（复用 CostCell 同源 locale 键）。
+    expect(line.text()).toContain("部分 CCS 来源记录费用");
+    expect(line.text()).toContain("$9.00");
+    // 请求估算读数保留（mixed 主读数不消失）。
+    expect(w.find(".metric-value-main").text()).toContain("未知†");
+  });
 });

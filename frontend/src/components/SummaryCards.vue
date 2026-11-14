@@ -30,6 +30,29 @@ const costText = computed(() => formatMoney(props.totals.cost_usd, "summary"));
 /// 未知价格且已计价部分为 0：显示"未知†"而不是 $0.00（缺价 ≠ 免费）。
 const costUnknownOnly = computed(() => props.totals.unknown_pricing && props.totals.cost_usd === 0);
 
+// v0.9.1 缺陷 C：全部组都是纯日汇总（cost_detail=rollup_only）且有来源
+// 费用时，总览卡主读数 = 来源记录金额 + 标识——不再显示「未知†」。
+// mixed 或缺来源费用的纯汇总组维持原状（估算未知 + 来源费用独立行）。
+const sourceAsPrimary = computed(
+  () => props.totals.cost_detail === "rollup_only" && props.totals.source_cost_usd != null,
+);
+
+// 8.2 总览卡接线（2026-11-14 第三轮复核补漏）：表格行按
+// source_cost_state 区分完整/部分来源费用，总览卡必须同口径——
+// partial 显示「部分来源记录」警告胶囊（纯汇总）或「部分 CCS 来源记录
+// 费用」独立行（mixed），复用 CostCell 已有的文案与语义；full/absent/
+// 显式 0/纯明细行为不变。
+const sourcePartial = computed(() => props.totals.source_cost_state === "partial");
+const sourceTagText = computed(() =>
+  sourcePartial.value ? t("dashboard.sourceCostPartialTag") : t("dashboard.sourceCostTag"),
+);
+const sourceTagTitle = computed(() =>
+  sourcePartial.value ? t("dashboard.sourceCostPartialHint") : t("dashboard.sourceCostHint"),
+);
+const sourceLineLabel = computed(() =>
+  sourcePartial.value ? t("dashboard.sourceCostPartialLabel") : t("dashboard.sourceCostLabel"),
+);
+
 // R09/F08：命中率公式 tooltip 受控显示——hover/focus/pinned 三态分离、
 // 统一 show 计算：hover 随指针、focus 随键盘焦点（focus 在时鼠标离开不取消）、
 // click 固定切换；Escape 一律关闭。
@@ -97,17 +120,34 @@ const parts = computed(() =>
           </span>
         </div>
         <div class="metric-value metric-value-main ts-num">
-          <template v-if="costUnknownOnly">{{ t("dashboard.costUnknownOnly") }}</template>
+          <template v-if="sourceAsPrimary">
+            <span class="metric-source-amount">{{
+              formatMoney(totals.source_cost_usd ?? 0, "summary")
+            }}</span>
+          </template>
+          <template v-else-if="costUnknownOnly">{{ t("dashboard.costUnknownOnly") }}</template>
           <template v-else>{{ costText }}</template>
         </div>
+        <!-- v0.9.1 缺陷 C 规则1：纯日汇总汇总时主读数带「来源记录」标识；
+             partial 时升级为警告色「部分来源记录」并带费用缺失说明（8.2）。 -->
+        <div v-if="sourceAsPrimary" class="metric-source-tag">
+          <span
+            class="ts-pill"
+            :class="sourcePartial ? 'ts-pill-warning' : 'ts-pill-info'"
+            :title="sourceTagTitle"
+          >
+            {{ sourceTagText }}
+          </span>
+        </div>
         <!-- T2（2026-11-13）：CCS 来源记录费用与估算费用分开显示——
-             它来自日汇总的来源记录值，不是请求级估算，也不是实际账单。 -->
+             它来自日汇总的来源记录值，不是请求级估算，也不是实际账单。
+             partial 时标签升级为部分费用文案（8.2 总览卡接线）。 -->
         <div
-          v-if="totals.source_cost_usd != null"
+          v-if="!sourceAsPrimary && totals.source_cost_usd != null"
           class="metric-source-cost"
-          :title="t('dashboard.sourceCostHint')"
+          :title="sourceTagTitle"
         >
-          {{ t("dashboard.sourceCostLabel") }} {{ formatMoney(totals.source_cost_usd, "summary") }}
+          {{ sourceLineLabel }} {{ formatMoney(totals.source_cost_usd, "summary") }}
         </div>
       </div>
 
@@ -278,6 +318,15 @@ const parts = computed(() =>
   font-size: 12px;
   line-height: 1.4;
   color: var(--ts-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* v0.9.1 缺陷 C 规则1：主读数 = 来源记录金额时的「来源记录」标识行。 */
+.metric-source-tag {
+  margin-top: var(--ts-space-1);
+}
+
+.metric-source-amount {
   font-variant-numeric: tabular-nums;
 }
 

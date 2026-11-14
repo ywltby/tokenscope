@@ -121,7 +121,12 @@ const zhCN = {
     badLineCount: "{count} 行解析失败（已跳过）",
     rollupOnly: "含只有日粒度的历史（这部分费用按未知披露）",
     sourceCostLabel: "CCS 来源记录费用",
+    sourceCostTag: "来源记录",
+    sourceCostPartialLabel: "部分 CCS 来源记录费用（其余汇总未提供费用）",
+    sourceCostPartialTag: "部分来源记录",
     sourceCostHint: "来源工具记录的日汇总费用；不是 TokenScope 请求级估算，也不是实际账单。",
+    sourceCostPartialHint:
+      "本组只有部分日汇总携带来源费用（其余未提供，不计入金额）；已知部分照常累计，不是完整费用，也不是实际账单。",
     sourceCostNote:
       "其中 {cost} 来自 CCS 导入日汇总的「来源记录费用」（来源工具自己记录的值，不是 TokenScope 请求级估算，也不是实际账单）。",
     sourceCostAbsentNote: "含只有日粒度的历史，且来源未提供费用记录。",

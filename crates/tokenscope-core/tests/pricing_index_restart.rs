@@ -307,6 +307,100 @@ fn test_same_process_repeated_load_hits_memory() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 2026-11-14（升级起点分组方案 A 的配套证明）：v0.9.0 用户升级到当前版
+/// 后，磁盘上遗留的 **v10** 价格索引（pricing_index 10→11 的真实升级路径）
+/// 必须被拒绝读取、按来源离线重建为当前版索引，且重建价格与重启后价格
+/// 一致——用户不需要清库、重扫或手改价格文件。全程三个独立子进程走真实
+/// 磁盘链路；不改历史事实（索引文件是派生缓存，非历史库）。
+#[test]
+fn restart_rejects_v10_index_and_rebuilds_consistent_prices() {
+    match std::env::var(STAGE_ENV).ok().as_deref() {
+        None => {
+            let dir = fresh_dir("v10-upgrade");
+            write(&dir, "pricing-openrouter.json", OR_SNAPSHOT);
+            let index = dir.join("pricing-index.json");
+            // 父进程伪造 v10 索引（0.9.0 版本格式）：v=10、条目为 v10 时代
+            // 的合法语义（数值价齐全），签名按旧规则写（内容无关紧要——
+            // 版本不符即拒读）。缓存写分档在 v10 索引里已存在（N18 v10 起
+            // 进入 PricePlan），这里给 None 的扁平字段即可。
+            let v10 = PricingIndex {
+                v: 10,
+                sig: "v10-signature-from-previous-version".to_string(),
+                synced_at: "t".to_string(),
+                warnings: Vec::new(),
+                entries: vec![IndexEntry {
+                    prefix: "model".to_string(),
+                    display: "model".to_string(),
+                    name: None,
+                    tier: 0,
+                    plan: Some(PricePlan {
+                        base: PriceRates {
+                            input: RateSpec::Fixed(2.0),
+                            output: RateSpec::Fixed(3.0),
+                            cache_write: RateSpec::Fixed(0.0),
+                            cache_read: RateSpec::Fixed(0.5),
+                            cache_write_tiers: None,
+                        },
+                        ..Default::default()
+                    }),
+                    input: Some(2.0),
+                    output: Some(3.0),
+                    cache_write: Some(0.0),
+                    cache_read: Some(0.5),
+                }],
+            };
+            save_index(&index, &v10).unwrap();
+            let name = "restart_rejects_v10_index_and_rebuilds_consistent_prices";
+            // 阶段 1：升级后的首个新进程——拒读 v10、按来源重建 v11。
+            run_stage(name, "v10_rejected", &dir);
+            // 阶段 2：再一个新进程——v11 索引命中且价格与阶段 1 一致。
+            run_stage(name, "rebuild_hit", &dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        Some("v10_rejected") => {
+            let dir = child_dir();
+            let snap = dir.join("pricing-openrouter.json");
+            let index = dir.join("pricing-index.json");
+            let (p, warnings, hit) = Pricing::load_cached(None, None, Some(&snap), &index);
+            assert!(!hit, "v10 索引必须拒绝读取（版本失效重建）");
+            assert!(
+                warnings.is_empty(),
+                "按来源重建后不得残留降级告警: {warnings:?}"
+            );
+            // 价格来自来源快照（OR_SNAPSHOT），不是 v10 索引里的旧条目。
+            assert_eq!(
+                p.lookup("model").unwrap().plan.base.cache_read,
+                RateSpec::Fixed(0.5),
+                "重建后缓存读必须与来源一致（0.5 USD/M）"
+            );
+            assert_eq!(
+                p.lookup("model").unwrap().plan.base.cache_write,
+                RateSpec::Fixed(0.0),
+                "重建后缓存写必须与来源一致（显式 0）"
+            );
+            let reloaded = load_index(&index).unwrap().unwrap();
+            assert_eq!(reloaded.v, INDEX_VERSION, "重建必须写出当前版索引（v11）");
+        }
+        Some("rebuild_hit") => {
+            let dir = child_dir();
+            let snap = dir.join("pricing-openrouter.json");
+            let index = dir.join("pricing-index.json");
+            let (p, _, hit) = Pricing::load_cached(None, None, Some(&snap), &index);
+            assert!(hit, "重建出的 v11 索引在新进程中应命中");
+            // 重启后价格与重建时一致——升级路径不改变价格读数。
+            assert_eq!(
+                p.lookup("model").unwrap().plan.base.cache_read,
+                RateSpec::Fixed(0.5)
+            );
+            assert_eq!(
+                p.lookup("model").unwrap().plan.base.cache_write,
+                RateSpec::Fixed(0.0)
+            );
+        }
+        other => panic!("未知阶段 {other:?}"),
+    }
+}
+
 /// F05 冷启动回归：plan=null、**扁平字段**携带非法数值（input=-5）的当前
 /// 版索引不得被静默接受——恢复入口必须先把扁平字段归一成完整计划再校验，
 /// 任一条目非法 → 整份索引按来源重建；显式 0 的合法扁平条目不受影响。
