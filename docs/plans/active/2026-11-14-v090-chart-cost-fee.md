@@ -231,6 +231,25 @@ $23.50 + 主读数 $0.2000 保留；表格行与总览卡 partial 提示一致�
 「部分 CCS 来源记录费用（其余汇总未提供费用）$23.50」，与表格行同口径）。
 版本维持 0.9.1。
 
+### 交付状态（发布，2026-11-15 用户独立复核通过后授权）
+
+- 第三轮复核通过（七项反例全过、总览卡 26 项测试、真实浏览器八组合截图
+  逐张查看），PR #68 合并为
+  [0b9094d](https://github.com/ywltby/tokenscope/commit/0b9094da47a450986ee2c874d61013c708b6f40a)
+  （merge commit）；Release workflow（run
+  [43621926805](https://github.com/ywltby/tokenscope/actions/runs/43621926805)）
+  19 项作业全部成功，含两条连续升级链与 0.9.0 起点矩阵（方案 A 六起点）。
+- [v0.9.1](https://github.com/ywltby/tokenscope/releases/tag/v0.9.1) 预发布
+  已发布：`build-metadata.json` 确认 commit `0b9094da`、version `0.9.1`、
+  persistent_format 与 0.9.0 相同（pricing_index 11——本批不改持久格式）；
+  安装包 SHA256 `0c6180d2…fc5e` 下载后与 `SHA256SUMS.txt` 核对一致。
+  本机不安装正式包，安装覆盖由 CI install-test / upgrade-test 完成。
+- **v0.9.1 已登记升级基线**（`upgrade_baselines.py add --tag v0.9.1`，
+  资产逐个下载核对后写入）；`check --base-ref 0b9094da` 通过（GitHub
+  瞬断 10054 重试后恢复，与本仓库既往环境问题相同）。
+- 提交链：`3738bda`（三缺陷）→ `b460b1d`（升级分组方案 A）→ `670f220`
+  （第二轮复核三处补修）→ `53c903c`（总览卡接线）→ 合并 `0b9094d`。
+
 ## 0. 问题与根因（已由用户与 qa-artifacts/v090-installed-diagnosis 独立确认）
 
 ### A. 隐藏页面重建导致图表缩成 100px
