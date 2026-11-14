@@ -3076,6 +3076,46 @@ const IMPL = {
             mixed.text.includes("$9.00"),
           mixed?.text ?? "missing",
         );
+        // 8.2 总览卡接线（第三轮复核补漏）：汇总区 partial 时总览卡与表格
+        // 行同口径——定位总览卡节点断言（不整页搜"部分"）。
+        const cardState = await page.evaluate(() => {
+          const card = document.querySelector(".metric-card");
+          if (!card) return null;
+          const amount = card.querySelector(".metric-source-amount")?.textContent?.trim() ?? null;
+          const tag = card.querySelector(".metric-source-tag .ts-pill");
+          const line = card.querySelector(".metric-source-cost");
+          return {
+            amount,
+            tagText: tag?.textContent?.trim() ?? null,
+            tagWarning: tag?.classList.contains("ts-pill-warning") ?? false,
+            lineText: line?.textContent?.replace(/\s+/g, " ").trim() ?? null,
+            mainText: card.querySelector(".metric-value-main")?.textContent?.trim() ?? null,
+          };
+        });
+        // fixture totals：含 mixed 组与 partial 组 → totals cost_detail=mixed
+        // + source_cost_state=partial → 总览卡走独立行分支，标签为部分费用。
+        ctx.record(
+          name,
+          `${viewport.label}:8.2 总览卡独立行标为部分费用且估算保留`,
+          cardState != null &&
+            cardState.lineText != null &&
+            cardState.lineText.includes("部分 CCS 来源记录费用") &&
+            cardState.lineText.includes("$23.50") &&
+            cardState.mainText.includes("$0.2000"),
+          JSON.stringify(cardState),
+        );
+        // 表格行与总览卡的提示同口径：行内 partial 胶囊与总览卡 partial
+        // 标签同时存在（一致性断言）。
+        ctx.record(
+          name,
+          `${viewport.label}:8.2 表格行与总览卡 partial 提示一致`,
+          partial != null &&
+            partial.text.includes("部分来源记录") &&
+            cardState != null &&
+            cardState.lineText != null &&
+            cardState.lineText.includes("部分"),
+          `row=${partial?.text ?? "missing"} card=${JSON.stringify(cardState)}`,
+        );
         // 缺陷 B：费用 cell 不得超出所在行宽（窄窗口不撑坏表格）。
         ctx.record(
           name,
@@ -3089,6 +3129,10 @@ const IMPL = {
         await page.locator(".usage-card").scrollIntoViewIfNeeded();
         await page.waitForTimeout(300);
         await ctx.shot(name, session, `${viewport.label}-cost-cells`);
+        // 8.2 总览卡特写：滚回指标卡，核对 partial 独立行/胶囊与估算读数。
+        await page.locator(".metric-card").scrollIntoViewIfNeeded();
+        await page.waitForTimeout(300);
+        await ctx.shot(name, session, `${viewport.label}-overview-card`);
         await ctx.finishSession(session);
       } finally {
         await session.close();
