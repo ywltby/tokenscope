@@ -57,6 +57,8 @@ function parseArgs(argv) {
       "pricing-needs-sync-external-only",
       "pricing-needs-sync-openrouter-only",
       "pricing-none-available",
+      // v0.9.1 缺陷 B + C：费用列布局与费用状态 fixture。
+      "source-cost",
     ],
     themes: ["light", "dark"],
     contracts: REQUIRED_CONTRACTS,

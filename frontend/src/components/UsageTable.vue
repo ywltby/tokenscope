@@ -7,6 +7,7 @@ import { tokenBucketLabel } from "../lib/tokenDisplay";
 import { displayTokens, totalTokens } from "../lib/tokenUsage";
 import { buildSourceLines } from "../lib/statsView";
 import ScrollList from "./ScrollList.vue";
+import CostCell from "./CostCell.vue";
 import { useT } from "../lib/i18n";
 
 const t = useT();
@@ -84,56 +85,11 @@ const columns = computed<DataTableColumn[]>(() => {
       key: "cost_usd",
       align: "center",
       className: "ts-num",
-      render: (row) => {
-        const g = asGroup(row);
-        // 与 SummaryCards 同口径：完全未计价显示"未知†"而不是 $0.00
-        //（缺价 ≠ 免费，G-P3-1）。
-        const unknownOnly = g.unknown_pricing && g.cost_usd === 0;
-        const text = unknownOnly
-          ? t("dashboard.costUnknown")
-          : formatMoney(g.cost_usd, "summary") + (g.unknown_pricing ? "†" : "");
-        // 未知标记用警告色显式呈现，不用 opacity 压低（DESIGN.md §1）
-        // N18：分档估算组追加可访问的「分档估算」标记——与未计价†独立，
-        // 让估算组、完整组、未计价组在费用列即可区分。
-        const children: (string | ReturnType<typeof h>)[] = [text];
-        // N18：分档估算与未计价状态独立——金额 0 的估算组（显式 0 合并
-        // 价）与真未计价混合时，两个标记必须同时可见。
-        if (g.cache_write_split_estimated) {
-          children.push(
-            h(
-              "span",
-              {
-                class: "ts-pill ts-pill-warning",
-                title: t("dashboard.tierEstimatedTitle"),
-              },
-              t("dashboard.tierEstimated"),
-            ),
-          );
-        }
-        const estimate = h(
-          "span",
-          { style: g.unknown_pricing ? "color: var(--ts-warning)" : "" },
-          children,
-        );
-        // T2（2026-11-13）：来源记录费用与 TokenScope 估算分开显示。
-        // 它可能出现在估算为未知的行（日汇总只有来源费用、没有请求级
-        // 价格），因此必须是独立行，不能并入主金额或 † 标记。
-        if (g.source_cost_usd != null) {
-          return h("span", { class: "cost-cell" }, [
-            estimate,
-            h("span", { class: "source-cost-cell", title: t("dashboard.sourceCostHint") }, [
-              h("span", { class: "source-cost-label" }, t("dashboard.sourceCostLabel")),
-              " ",
-              h(
-                "span",
-                { class: "source-cost-value ts-num" },
-                formatMoney(g.source_cost_usd, "summary"),
-              ),
-            ]),
-          ]);
-        }
-        return estimate;
-      },
+      // v0.9.1 缺陷 B：render 回调创建的节点不带本组件 scope 标记，scoped
+      // CSS 永不命中（真实浏览器 computed display = inline，金额与来源费用
+      // 粘成一行）。费用列抽成独立组件 CostCell——SFC scoped 天然生效；
+      // 缺陷 C 的费用状态展示规则也收在该组件内。
+      render: (row) => h(CostCell, { group: asGroup(row) }),
     },
   ];
   // C5：未计价 token 单列可追溯（无价格模型 / 部分计价的缺价分项）。
@@ -312,29 +268,10 @@ const hasSourceCostRollupBuckets = computed<boolean>(() => {
   color: var(--ts-text-secondary);
   margin-top: var(--ts-space-2);
 }
-/* T2：CCS 来源记录费用——独立于 TokenScope 估算与 † 未计价标记。 */
-.cost-cell {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-.source-cost-cell {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--ts-text-secondary);
-  white-space: nowrap;
-}
-.source-cost-label {
-  color: var(--ts-text-muted);
-}
-.source-cost-value {
-  color: var(--ts-text);
-  font-weight: 600;
-}
+/* v0.9.1 缺陷 B：费用列排版移入 CostCell.vue（render 回调节点不带本组件
+   scope 标记，这里的 scoped 选择器永不命中——真实浏览器 computed display
+   是 inline，金额与来源费用粘成一行）。脚注 .source-cost-note 仍在模板
+   内渲染，保留在本组件。 */
 /* T2：来源记录费用披露——次要色小字，与统计口径说明并列。 */
 .source-cost-note {
   display: block;

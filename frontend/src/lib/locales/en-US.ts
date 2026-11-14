@@ -129,6 +129,7 @@ const enUS: AppMessages = {
     badLineCount: "{count} line(s) failed to parse (skipped)",
     rollupOnly: "Includes day-granularity-only history (its cost is disclosed as unknown)",
     sourceCostLabel: "CCS source-recorded cost",
+    sourceCostTag: "Source recorded",
     sourceCostHint:
       "Cost recorded by the source tool in daily rollups; not a TokenScope per-request estimate and not an actual bill.",
     sourceCostNote:

@@ -114,6 +114,22 @@ pub struct Group {
     /// 缺失（来源未提供费用）时如实按无来源费用处理，不按 0 冒充。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_cost_usd: Option<f64>,
+    /// v0.9.1 缺陷 C（2026-11-14）：本组费用的**构成**——把「没有请求级
+    /// 估算」「来源已提供费用」「模型真正缺价」三件事分开。
+    ///
+    /// - `Some("rollup_only")`：组内全部用量来自**最终采用的日汇总**（没有
+    ///   任何请求级明细贡献）。有来源费用时前端以来源值作为该行费用读数
+    ///   （配「来源记录」标识），不再并列「未知†」；
+    /// - `Some("mixed")`：请求明细与日汇总并存（B 类桶 + 快照后明细等）。
+    ///   估算读数与来源费用分别标明，不静默混合；
+    /// - `None`：纯明细组（含真缺价）——展示与既有语义完全一致。serde 跳过
+    ///   序列化，旧 IPC 消费方与旧快照读到的 JSON 逐字节不变。
+    ///
+    /// 本字段只描述构成，不改变 `unknown_pricing` / `unknown_tokens` /
+    /// `unknown_reason` 的任何语义：真缺价仍如实披露（规则 5，不靠清零
+    /// unknown 掩盖）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_detail: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<&'static str>,
 }
@@ -473,6 +489,11 @@ fn push_event_into(
         g.tokens = new_tokens;
         g.unknown_tokens = new_unknown;
         g.cost_usd = new_cost;
+        // v0.9.1 缺陷 C：请求明细贡献——占位 "detail"（不序列化，纯明细组
+        // 输出与旧契约逐字节一致）；日汇总贡献到来时由它升级 mixed。
+        if g.cost_detail.is_none() {
+            g.cost_detail = Some("detail");
+        }
         // unknown_pricing 是组内累积标记：只有**实际存在未计价 token** 或
         // 无价模型才置位。N18：「按合并价估算」虽然 complete=false，但
         // unknown token 为 0、金额来自真实单价，不得触发「含未计价 token」。
@@ -543,6 +564,17 @@ fn push_rollup_into(
             .ok_or_else(|| anyhow::anyhow!("分组 {key_err} 的未知 token 累计超出可表示范围"))?;
         g.unknown_pricing = true;
         g.unknown_reason = Some("rollup_only");
+        // v0.9.1 缺陷 C：费用构成——本组含最终采用的日汇总贡献。明细先喂
+        // （占位 "detail"）、汇总后喂：已有明细 → 升级 mixed（B 类桶 =
+        // 明细 + 汇总并存）；纯汇总组 → rollup_only（展示层以来源费用为
+        // 该行费用读数）。
+        g.cost_detail = Some(match g.cost_detail {
+            Some("mixed") | Some("rollup_only") => g.cost_detail.unwrap(),
+            // Some("detail") = 之前只有明细 → 明细 + 汇总并存（B 类桶）
+            Some(_) => "mixed",
+            // None = 之前没有明细贡献 → 纯汇总组
+            None => "rollup_only",
+        });
         // T2（2026-11-13）：只对来源选择**最终采用**的汇总贡献累计来源记录
         // 费用（本函数只被 rollup_only 桶与 B 类桶调用——A/C 类明细优先，
         // 汇总不进入聚合，因此不会重复计入）。来源费用是来源记录值，与主
@@ -592,6 +624,11 @@ impl AggregateState {
                     }
                     _ => other_label(&by, &g.key),
                 };
+                // v0.9.1 缺陷 C：纯明细组的内部占位 "detail" 不序列化输出
+                // （与旧契约逐字节一致）；只有 rollup_only / mixed 对外可见。
+                if g.cost_detail == Some("detail") {
+                    g.cost_detail = None;
+                }
                 g
             })
             .collect();
@@ -631,6 +668,13 @@ impl AggregateState {
             totals.unknown_pricing |= g.unknown_pricing;
             totals.cache_write_split_estimated |= g.cache_write_split_estimated;
             totals.cache_price_zero_estimated |= g.cache_price_zero_estimated;
+            // v0.9.1 缺陷 C：费用构成聚合——任一组 mixed → totals mixed；
+            // 否则任一组 rollup_only → rollup_only；纯明细 → None。
+            totals.cost_detail = match (totals.cost_detail, g.cost_detail) {
+                (Some("mixed"), _) | (_, Some("mixed")) => Some("mixed"),
+                (Some("rollup_only"), _) | (_, Some("rollup_only")) => Some("rollup_only"),
+                (a, b) => a.or(b),
+            };
             if totals.unknown_reason.is_none() {
                 totals.unknown_reason = g.unknown_reason;
             }

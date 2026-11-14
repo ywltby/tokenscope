@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
-  "kind": "minor",
-  "summary": "修复模型缓存分档定价、展示 CCS 来源费用、缺失缓存价按 0 估算与价格列表滚动"
+  "kind": "patch",
+  "summary": "修复隐藏页面重建导致图表缩成 100px、费用列 scoped 样式失配粘连、来源费用与未知费用混排三个缺陷（含 cost_detail 费用构成字段与两条浏览器契约）"
 }

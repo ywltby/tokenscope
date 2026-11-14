@@ -179,6 +179,10 @@ function group(key, input, opts = {}) {
     cost_usd: opts.cost_usd ?? 0,
     unknown_pricing: opts.unknown_pricing ?? false,
     unknown_tokens: opts.unknown_tokens ?? { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    // v0.9.1 缺陷 C：费用构成（rollup_only / mixed）；纯明细组缺省。
+    cost_detail: opts.cost_detail,
+    source_cost_usd: opts.source_cost_usd,
+    unknown_reason: opts.unknown_reason,
     agents: opts.agents,
   };
 }
@@ -188,6 +192,8 @@ function totals(groups) {
   let requests = 0;
   let cost = 0;
   let unknown = false;
+  let costDetail = null;
+  let sourceCost = null;
   const ut = { input: 0, output: 0, cache_write: 0, cache_read: 0 };
   for (const g of groups) {
     requests += g.requests;
@@ -197,6 +203,14 @@ function totals(groups) {
     t.cache_read += g.tokens.cache_read;
     cost += g.cost_usd;
     unknown = unknown || g.unknown_pricing;
+    if (g.source_cost_usd != null) {
+      sourceCost = (sourceCost ?? 0) + g.source_cost_usd;
+    }
+    // v0.9.1 缺陷 C：totals 构成聚合（与后端 finish 同规则）。
+    costDetail =
+      g.cost_detail === "mixed" || costDetail === "mixed"
+        ? "mixed"
+        : (g.cost_detail ?? costDetail);
     for (const k of ["input", "output", "cache_write", "cache_read"]) {
       ut[k] += g.unknown_tokens?.[k] ?? 0;
     }
@@ -208,6 +222,8 @@ function totals(groups) {
     cost_usd: cost,
     unknown_pricing: unknown,
     unknown_tokens: ut,
+    cost_detail: costDetail,
+    ...(sourceCost != null ? { source_cost_usd: sourceCost } : {}),
   };
 }
 
@@ -554,6 +570,45 @@ const MULTI_GROUPS = Array.from({ length: 30 }, (_, i) =>
   }),
 );
 
+// v0.9.1 缺陷 B + C（2026-11-14）：费用列布局与费用状态 fixture——
+// 规则1 纯汇总+来源费用、规则2 显式 0、规则3 mixed、规则4 纯明细缺价。
+const SOURCE_COST_GROUPS = [
+  group("synthetic-rollup-paid", 100000, {
+    output: 50000,
+    cost_usd: 0,
+    unknown_pricing: true,
+    unknown_reason: "rollup_only",
+    unknown_tokens: { input: 100000, output: 50000, cache_write: 0, cache_read: 0 },
+    source_cost_usd: 7.25,
+    cost_detail: "rollup_only",
+    requests: 30,
+  }),
+  group("synthetic-rollup-zero", 40000, {
+    output: 20000,
+    cost_usd: 0,
+    unknown_pricing: true,
+    unknown_reason: "rollup_only",
+    unknown_tokens: { input: 40000, output: 20000, cache_write: 0, cache_read: 0 },
+    source_cost_usd: 0,
+    cost_detail: "rollup_only",
+    requests: 12,
+  }),
+  group("synthetic-mixed", 60000, {
+    output: 30000,
+    cost_usd: 0.2,
+    source_cost_usd: 9,
+    cost_detail: "mixed",
+    requests: 18,
+  }),
+  group("synthetic-unpriced", 30000, {
+    output: 10000,
+    cost_usd: 0,
+    unknown_pricing: true,
+    unknown_tokens: { input: 30000, output: 10000, cache_write: 0, cache_read: 0 },
+    requests: 5,
+  }),
+];
+
 /** 明细行：与汇总同源（empty → 零行；unknown → 未知价行；partial → 混合）。 */
 function rowsFor(kind) {
   switch (kind) {
@@ -584,6 +639,13 @@ function rowsFor(kind) {
           cost_usd: 0.008,
         }),
       ];
+    case "source-cost":
+      // 明细与汇总同源：mixed 组的请求行可下钻核对；纯汇总组不发明请求行
+      // （日汇总没有请求时间——契约只看汇总页费用列）。
+      return [
+        eventRow(1, { model: "synthetic-mixed", cost_usd: 0.2 }),
+        eventRow(2, { model: "synthetic-unpriced", cost_usd: null, breakdown: null }),
+      ];
     case "multi":
       return Array.from({ length: 8 }, (_, i) =>
         eventRow(i + 1, { model: `model-${String(i).padStart(2, "0")}` }),
@@ -610,9 +672,11 @@ function dimGroups(kind, by, session) {
           ? PARTIAL_GROUPS
           : kind === "long"
             ? LONG_GROUPS
-            : kind === "empty"
-              ? []
-              : NORMAL_GROUPS;
+            : kind === "source-cost"
+              ? SOURCE_COST_GROUPS
+              : kind === "empty"
+                ? []
+                : NORMAL_GROUPS;
   if (kind === "multi") {
     // F02 浏览器契约：同一份真实组件随筛选状态产生 30/20/4/14/0 个类别，
     // 用于验证高度变化、维度切换、按日 7→14 与空→有值时的柱形中间帧。
@@ -669,7 +733,12 @@ function dimGroups(kind, by, session) {
       ];
     return modelSpan;
   }
-  if (by === "model") return base.map((g, i) => ({ ...g, key: `${kind}-model-${i}`, label: null }));
+  if (by === "model") {
+    // v0.9.1：source-cost fixture 的 key 是契约的身份锚点（synthetic-*），
+    // 不做 `${kind}-model-${i}` 重写。
+    if (kind === "source-cost") return base;
+    return base.map((g, i) => ({ ...g, key: `${kind}-model-${i}`, label: null }));
+  }
   if (by === "project")
     return base.map((g, i) => ({ ...g, key: `/proj/${kind}-${i}`, label: `${kind}-project-${i}` }));
   if (by === "day") {
@@ -1280,6 +1349,8 @@ const SCENARIOS = {
   empty: { kind: "empty" },
   "unknown-price": { kind: "unknown" },
   "partial-price": { kind: "partial" },
+  // v0.9.1 缺陷 B + C：费用列布局与费用状态（rollup_only/0/mixed/缺价）。
+  "source-cost": { kind: "source-cost" },
   // AC08 归因补修：长路径换行断言需要长路径行在列表里——PR3 起默认行
   // 是短路径（SOURCE_ROWS_DEFAULT），必须声明 merged 才含 LONG_SOURCE_DIR
   // 行；此前全矩阵未在本地跑过，该缺口未被察觉。

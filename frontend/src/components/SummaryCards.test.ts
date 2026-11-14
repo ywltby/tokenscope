@@ -306,4 +306,41 @@ describe("T2 CCS 来源记录费用（总览卡）", () => {
     const w = mountCards(totals({ source_cost_usd: null }));
     expect(w.text()).not.toContain("CCS 来源记录费用");
   });
+
+  // v0.9.1 缺陷 C 规则1（总览卡）：全部组纯日汇总 + 有来源费用 → 主读数 =
+  // 来源金额 + 「来源记录」标识，不再显示「未知†」。
+  it("rollup_only 汇总以来源金额为主读数并带来源标识", () => {
+    const w = mountCards(
+      totals({
+        cost_usd: 0,
+        unknown_pricing: true,
+        unknown_reason: "rollup_only",
+        source_cost_usd: 9,
+        cost_detail: "rollup_only",
+      }),
+    );
+    const text = w.text();
+    expect(text).toContain("$9.00");
+    expect(text).toContain("来源记录");
+    expect(text).not.toContain("未知†");
+    // 独立来源行不再出现（金额已升级为主读数）。
+    expect(text).not.toContain("CCS 来源记录费用");
+  });
+
+  // v0.9.1 缺陷 C：mixed totals（估算 + 来源费用并存）→ 维持独立来源行。
+  it("mixed 汇总保留估算读数与独立来源行", () => {
+    const w = mountCards(
+      totals({
+        cost_usd: 0,
+        unknown_pricing: true,
+        unknown_reason: "rollup_only",
+        source_cost_usd: 9,
+        cost_detail: "mixed",
+      }),
+    );
+    const text = w.text();
+    expect(text).toContain("未知†");
+    expect(text).toContain("CCS 来源记录费用");
+    expect(text).toContain("$9.00");
+  });
 });

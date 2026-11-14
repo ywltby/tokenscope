@@ -28,6 +28,12 @@ export interface Group {
    * （来源工具记录值，非 TokenScope 请求级估算；null/缺省 = 未提供费用）。
    */
   source_cost_usd?: number | null;
+  /**
+   * v0.9.1 缺陷 C：本组费用的构成——`"rollup_only"` = 全部用量来自最终采用
+   * 的日汇总（有来源费用时前端以来源值作为费用读数）；`"mixed"` = 请求明细
+   * 与日汇总并存（两部分分别标明）；缺省 = 纯明细组（展示与既有语义一致）。
+   */
+  cost_detail?: "rollup_only" | "mixed" | null;
   agents?: string[];
 }
 

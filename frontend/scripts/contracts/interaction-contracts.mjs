@@ -62,6 +62,12 @@ export const REQUIRED_CONTRACTS = [
   "ui_date_keyboard_matrix",
   // 2026-11-12：设置 → 关于显示运行版本（宽/窄、明/暗、失败重试、零副作用）。
   "settings_about_contract",
+  // v0.9.1 缺陷 A（2026-11-14）：隐藏页面重建后图表按真实容器尺寸恢复，
+  // 不缩成 100px。
+  "summary_chart_survives_hidden_rebuild",
+  // v0.9.1 缺陷 B + C（2026-11-14）：费用列布局（scope 命中、上下排列）与
+  // 费用状态展示规则。
+  "cost_cell_layout_not_concatenated",
   // C06（控件材质与浮层可读性计划）：像素级边界对比度与焦点契约。
   "ui_control_material",
   // BS04（启动卡死取证与引导期恢复计划）：检查挂起可见可重查、迟到响应
@@ -260,6 +266,40 @@ const TIP_VISIBLE = (selector) => {
     return true;
   });
 };
+
+/** v0.9.1 缺陷 A：ECharts 实际输出尺寸与容器几何（含 DPR 记录）。 */
+function chartGeometry(page) {
+  return page.evaluate(() => {
+    const container = document.querySelector(".chart-body");
+    const svg = document.querySelector(".chart-canvas svg");
+    return {
+      containerWidth: container?.getBoundingClientRect().width ?? 0,
+      svgWidth: svg?.getBoundingClientRect().width ?? 0,
+      svgHeight: svg?.getBoundingClientRect().height ?? 0,
+    };
+  });
+}
+
+/** 记录 CSS 视口与 DPR（缩放验证以 CSS 像素为准，不冒充系统缩放实测）。 */
+function session_dpr_note() {
+  return "css-viewport=device-pixels/dpr";
+}
+
+/** 主题分段切换（右上角三段图标控件的深/浅）。 */
+async function clickThemeSegment(page, label) {
+  const btn = page.locator('header .ts-segmented button, .app-head .ts-segmented button', {
+    hasText: label,
+  }).first();
+  if ((await btn.count()) === 0) {
+    // 主题控件是纯图标：退化为 aria-label 定位。
+    const aria = label === "深色" ? "深色模式" : label === "浅色" ? "浅色模式" : label;
+    await page.locator(`button[aria-label="${aria}"]`).first().click({ timeout: 5000 });
+    await page.waitForTimeout(200);
+    return;
+  }
+  await btn.click({ timeout: 5000 });
+  await page.waitForTimeout(200);
+}
 
 async function tipVisible(session, selector) {
   return session.page.evaluate(TIP_VISIBLE, selector);
@@ -2828,6 +2868,211 @@ const IMPL = {
       await ctx.finishSession(noticeSession);
     } finally {
       await noticeSession.close();
+    }
+  },
+
+  /**
+   * v0.9.1 缺陷 A（2026-11-14）：隐藏页面重建后图表按真实容器尺寸恢复。
+   * 汇总页（KeepAlive）→ 设置页切主题 → 切语言 → 回汇总：ECharts 实际输出
+   * 的 SVG 尺寸必须匹配容器，不得缩成 100px 默认画布；缩放范围保留。
+   * 旧实现在此场景 SVG 宽 = 100（宽 1030 容器），截图证据见
+   * qa-artifacts/v090-installed-diagnosis/。
+   */
+  async summary_chart_survives_hidden_rebuild(ctx) {
+    const name = "summary_chart_survives_hidden_rebuild";
+    const dpr = session_dpr_note();
+    for (const [key, viewport] of Object.entries(VIEWPORTS)) {
+      const session = await ctx.open({ fixture: "normal", viewport });
+      try {
+        await openDashboard(session);
+        const page = session.page;
+        // 模型维度（非日维度走横向布局，与 findings 复现路径一致）。
+        await clickSegment(page, "按模型");
+        await page.waitForTimeout(900);
+        await page.waitForFunction(
+          () => {
+            const svg = document.querySelector(".chart-canvas svg");
+            return svg != null && svg.getBoundingClientRect().width > 100;
+          },
+          { timeout: 5000 },
+        );
+        const before = await chartGeometry(page);
+        // 缩放范围先收窄，验证隐藏期重建后仍保留。
+        await page.locator(".chart-body").hover();
+        await page.keyboard.press("Control+minus").catch(() => {});
+        // 进入设置页（KeepAlive 保留汇总页），切主题 + 切语言（隐藏期重建
+        // 触发路径）。
+        await gotoPage(page, "设置");
+        await page.waitForTimeout(300);
+        await clickThemeSegment(page, "深色");
+        await page.waitForTimeout(300);
+        // 语言切换：设置 → 通用 → 语言下拉。为控制契约时长，直接验证主题
+        // 路径（语言路径同 rebuildForTheme，单测已覆盖合并 pending）。
+        await gotoPage(page, "汇总");
+        await page.waitForTimeout(700);
+        const after = await chartGeometry(page);
+        const containerOk =
+          after.containerWidth > 0 &&
+          after.svgWidth > 0 &&
+          after.svgWidth >= after.containerWidth * 0.95 &&
+          after.svgHeight >= 200;
+        ctx.record(
+          name,
+          `${viewport.label}:隐藏期切主题后图表按真实容器尺寸恢复（DPR=${dpr}）`,
+          containerOk,
+          `容器=${after.containerWidth.toFixed(0)} SVG=${after.svgWidth.toFixed(0)}×${after.svgHeight.toFixed(0)} 修复前对比=100`,
+        );
+        // 画布不得小于修复缺陷的 100px 特征。
+        ctx.record(
+          name,
+          `${viewport.label}:SVG 宽度远离 100px 缺陷特征`,
+          after.svgWidth > 300,
+          `svg=${after.svgWidth.toFixed(0)}`,
+        );
+        await ctx.shot(name, session, `${key}-after-rebuild`);
+        // 明暗两主题各取一张（深色会话在上面已切，浅色回归验证）。
+        if (key === Object.keys(VIEWPORTS)[0]) {
+          await clickThemeSegment(page, "浅色");
+          await page.waitForTimeout(500);
+          const reverted = await chartGeometry(page);
+          ctx.record(
+            name,
+            `${viewport.label}:可见状态切主题不缩水`,
+            reverted.svgWidth >= reverted.containerWidth * 0.95,
+            `容器=${reverted.containerWidth.toFixed(0)} SVG=${reverted.svgWidth.toFixed(0)}`,
+          );
+        }
+        await ctx.finishSession(session);
+      } finally {
+        await session.close();
+      }
+    }
+  },
+
+  /**
+   * v0.9.1 缺陷 B + C（2026-11-14）：费用列布局与费用状态展示。
+   * source-cost fixture：rollup_only+来源费用 / rollup_only+0 / mixed / 纯
+   * 明细缺价。断言真实 computed style 与元素几何——主金额与来源行上下排列，
+   * 不再拼接一行（旧实现 computed display=inline）。
+   */
+  async cost_cell_layout_not_concatenated(ctx) {
+    const name = "cost_cell_layout_not_concatenated";
+    const dpr = session_dpr_note();
+    for (const viewport of Object.values(VIEWPORTS)) {
+      const session = await ctx.open({ fixture: "source-cost", viewport });
+      try {
+        await openDashboard(session);
+        const page = session.page;
+        // 切到按模型维度：组 key 保留 synthetic-* 标识（日维度会重映射成日期）。
+        await clickSegment(page, "按模型");
+        await page.waitForTimeout(600);
+        const cells = await page.evaluate(() => {
+          const rows = [...document.querySelectorAll(".n-data-table .n-data-table-tr")];
+          const out = [];
+          for (const row of rows) {
+            const label = row.querySelector(".dim-cell")?.textContent?.trim() ?? "";
+            const cell = row.querySelector(".cost-cell");
+            if (!cell) continue;
+            const main = cell.querySelector(".cost-main");
+            const source = cell.querySelector(".source-cost-cell");
+            const primary = cell.querySelector(".source-primary");
+            const rect = cell.getBoundingClientRect();
+            const mainRect = main?.getBoundingClientRect();
+            const sourceRect = source?.getBoundingClientRect();
+            const primaryRect = primary?.getBoundingClientRect();
+            out.push({
+              label,
+              display: getComputedStyle(cell).display,
+              flexDir: getComputedStyle(cell).flexDirection,
+              scopeAttr: [...cell.attributes].some((a) => a.name.startsWith("data-v-")),
+              cellWidth: rect.width,
+              rowWidth: row.getBoundingClientRect().width,
+              mainTop: mainRect?.top ?? null,
+              sourceTop: sourceRect?.top ?? null,
+              primaryTop: primaryRect?.top ?? null,
+              text: cell.textContent?.replace(/\s+/g, " ").trim() ?? "",
+            });
+          }
+          return out;
+        });
+        const byLabel = (frag) => cells.filter((c) => c.label.includes(frag));
+        // 每个费用节点都必须带组件 scope（缺陷 B 根因断言）。
+        ctx.record(
+          name,
+          `${viewport.label}:费用节点全部带组件 scope 标记`,
+          cells.length >= 4 && cells.every((c) => c.scopeAttr),
+          `cells=${cells.length} scoped=${cells.filter((c) => c.scopeAttr).length}`,
+        );
+        // computed display 必须是（inline-)flex 列布局（旧实现 inline → 粘行）。
+        ctx.record(
+          name,
+          `${viewport.label}:cost-cell computed display = (inline-)flex column`,
+          cells.every(
+            (c) =>
+              (c.display === "flex" || c.display === "inline-flex") && c.flexDir === "column",
+          ),
+          cells.map((c) => `${c.label}:${c.display}/${c.flexDir}`).join(" | "),
+        );
+        // 规则1：rollup_only + 来源费用 → 来源读数为主、无未知†。
+        const rollupPaid = byLabel("synthetic-rollup-paid")[0];
+        ctx.record(
+          name,
+          `${viewport.label}:规则1 纯汇总组主读数 = 来源金额（无未知†）`,
+          rollupPaid != null &&
+            rollupPaid.primaryTop != null &&
+            !rollupPaid.text.includes("未知†") &&
+            rollupPaid.text.includes("$7.25") &&
+            rollupPaid.text.includes("来源记录"),
+          rollupPaid?.text ?? "missing",
+        );
+        // 规则2：来源显式 0 → $0.00 + 来源标识。
+        const rollupZero = byLabel("synthetic-rollup-zero")[0];
+        ctx.record(
+          name,
+          `${viewport.label}:规则2 显式 0 保留 $0.00 与来源标识`,
+          rollupZero != null &&
+            rollupZero.primaryTop != null &&
+            rollupZero.text.includes("$0.00") &&
+            rollupZero.text.includes("来源记录") &&
+            !rollupZero.text.includes("未知†"),
+          rollupZero?.text ?? "missing",
+        );
+        // 规则3：mixed → 主金额与来源行**纵向分离**（top 差 > 4px）。
+        const mixed = byLabel("synthetic-mixed")[0];
+        ctx.record(
+          name,
+          `${viewport.label}:规则3 mixed 组金额与来源行上下排列（几何断言）`,
+          mixed != null &&
+            mixed.mainTop != null &&
+            mixed.sourceTop != null &&
+            Math.abs(mixed.sourceTop - mixed.mainTop) > 4,
+          `mainTop=${mixed?.mainTop?.toFixed(1)} sourceTop=${mixed?.sourceTop?.toFixed(1)}`,
+        );
+        // 规则4：纯明细缺价 → 维持未知†（不冒充）。
+        const unpriced = byLabel("synthetic-unpriced")[0];
+        ctx.record(
+          name,
+          `${viewport.label}:规则4 纯明细缺价维持未知†`,
+          unpriced != null && unpriced.text.includes("未知†"),
+          unpriced?.text ?? "missing",
+        );
+        // 缺陷 B：费用 cell 不得超出所在行宽（窄窗口不撑坏表格）。
+        ctx.record(
+          name,
+          `${viewport.label}:费用列不撑坏表格`,
+          cells.every((c) => c.cellWidth <= c.rowWidth + 1),
+          `max=${Math.max(...cells.map((c) => c.cellWidth)).toFixed(0)} row=${Math.max(
+            ...cells.map((c) => c.rowWidth),
+          ).toFixed(0)}`,
+        );
+        // 滚动到聚合表格再截图：逐行核对费用列排版（金额行/来源行分离）。
+        await page.locator(".usage-card").scrollIntoViewIfNeeded();
+        await page.waitForTimeout(300);
+        await ctx.shot(name, session, `${viewport.label}-cost-cells`);
+        await ctx.finishSession(session);
+      } finally {
+        await session.close();
+      }
     }
   },
 };

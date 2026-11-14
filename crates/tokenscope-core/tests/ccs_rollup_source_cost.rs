@@ -562,3 +562,200 @@ fn detail_rows_are_unaffected_by_source_cost() {
     assert_eq!(list.rows[0].cost_usd, None);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ── T-C（2026-11-14，v0.9.1 缺陷 C）：cost_detail 费用构成字段 ─────────
+//
+// 用户指令：把「没有请求级估算」「来源已提供费用」「模型真正缺价」分开。
+// 展示层依据 cost_detail 分流；unknown_pricing/unknown_tokens/unknown_reason
+// 的既有语义不变（真缺价仍如实披露），本组测试锁这些不变量。
+
+/// T-C1：纯日汇总组 → cost_detail = "rollup_only"；未知语义照旧。
+#[test]
+fn cost_detail_rollup_only_for_pure_rollup_group() {
+    let dir = temp_dir("cd-rollup");
+    seed_rollups(
+        &dir.join("cc-switch.db"),
+        &[(
+            "2026-09-20",
+            "claude",
+            "claude-opus-4-7",
+            10,
+            1000,
+            0,
+            Some("7.25"),
+        )],
+    );
+    let history = history_of(&dir);
+    import_all(&dir, &history);
+    let o = opts(&dir, GroupBy::Day);
+    let report = summary(&o).unwrap();
+    let d1 = report
+        .groups
+        .iter()
+        .find(|g| g.key == "2026-09-20")
+        .unwrap();
+    assert_eq!(
+        d1.cost_detail,
+        Some("rollup_only"),
+        "纯汇总组的费用构成必须标为 rollup_only"
+    );
+    assert_eq!(report.totals.cost_detail, Some("rollup_only"));
+    // 未知语义不变（缺价披露不因 cost_detail 引入而消失）。
+    assert!(d1.unknown_pricing);
+    assert_eq!(d1.unknown_reason, Some("rollup_only"));
+    assert_eq!(d1.unknown_tokens.total(), 1000);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// T-C2：明细与汇总并存（B 类桶 + 快照后新增明细）→ cost_detail = "mixed"。
+#[test]
+fn cost_detail_mixed_when_detail_and_rollup_coexist() {
+    let dir = temp_dir("cd-mixed");
+    seed_rollups(
+        &dir.join("cc-switch.db"),
+        &[(
+            "2026-09-20",
+            "claude",
+            "claude-opus-4-7",
+            10,
+            1000,
+            0,
+            Some("7.25"),
+        )],
+    );
+    // 快照内 1 条明细（100 < 1000 → B 类汇总补足）+ 快照后新明细（独立计入）。
+    write_claude_lines(
+        &dir,
+        &[
+            claude_line("m1", "2026-09-20T10:00:00.000+08:00", 100),
+            claude_line("m2", "2026-09-22T10:00:00.000+08:00", 200),
+        ],
+    );
+    let history = history_of(&dir);
+    import_all(&dir, &history);
+    // 按模型分组：同一模型组同时含明细请求与汇总贡献 → mixed。
+    let o = opts(&dir, GroupBy::Model);
+    let report = summary(&o).unwrap();
+    let g = report
+        .groups
+        .iter()
+        .find(|g| g.key != "合计")
+        .expect("单模型组");
+    assert_eq!(g.cost_detail, Some("mixed"), "明细 + 汇总并存 → mixed");
+    assert_eq!(report.totals.cost_detail, Some("mixed"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// T-C3：纯明细组不输出 cost_detail（serde skip；旧 IPC 消费方逐字节兼容）。
+#[test]
+fn cost_detail_absent_for_pure_detail_group() {
+    let dir = temp_dir("cd-detail");
+    write_claude_lines(
+        &dir,
+        &[claude_line("m1", "2026-09-22T10:00:00.000+08:00", 200)],
+    );
+    let o = opts(&dir, GroupBy::Day);
+    let report = summary(&o).unwrap();
+    let d = report
+        .groups
+        .iter()
+        .find(|g| g.key == "2026-09-22")
+        .expect("明细组");
+    assert_eq!(d.cost_detail, None, "纯明细组无 cost_detail 字段");
+    // serde：序列化后不含该键（向前兼容旧前端/旧快照）。
+    let json = serde_json::to_value(d).unwrap();
+    assert!(
+        json.get("cost_detail").is_none(),
+        "纯明细组的 JSON 不得出现 cost_detail 键"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// T-C4：totals 聚合——全部组纯汇总 → rollup_only；混合 → mixed。
+#[test]
+fn cost_detail_totals_aggregate_over_groups() {
+    let dir = temp_dir("cd-totals");
+    // 模型 A（opus）：纯汇总（rollup_only）；模型 B（mimo）：汇总 + 快照后
+    // 明细（mixed）。
+    seed_rollups(
+        &dir.join("cc-switch.db"),
+        &[
+            (
+                "2026-09-20",
+                "claude",
+                "claude-opus-4-7",
+                10,
+                1000,
+                0,
+                Some("7.25"),
+            ),
+            ("2026-09-20", "claude", "mimo-v2-5", 4, 400, 0, Some("1.75")),
+        ],
+    );
+    // mimo 的快照后明细（2026-09-22）→ mimo 组 mixed；opus 无明细。
+    let path = dir.join("claude").join("proj").join("s2.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let line = serde_json::json!({
+        "type": "assistant",
+        "timestamp": "2026-09-22T11:00:00.000+08:00",
+        "sessionId": "s2",
+        "message": {
+            "id": "mm1",
+            "model": "mimo-v2-5",
+            "usage": {
+                "input_tokens": 50,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0
+            }
+        }
+    })
+    .to_string();
+    std::fs::write(&path, line).unwrap();
+    let history = history_of(&dir);
+    import_all(&dir, &history);
+    let o = opts(&dir, GroupBy::Model);
+    let report = summary(&o).unwrap();
+    let opus = report
+        .groups
+        .iter()
+        .find(|g| g.key.contains("opus"))
+        .expect("opus 组");
+    let mimo = report
+        .groups
+        .iter()
+        .find(|g| g.key.contains("mimo"))
+        .expect("mimo 组");
+    assert_eq!(opus.cost_detail, Some("rollup_only"));
+    assert_eq!(mimo.cost_detail, Some("mixed"));
+    assert_eq!(
+        report.totals.cost_detail,
+        Some("mixed"),
+        "任一组 mixed → totals mixed"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// T-C5：来源费用缺失的 rollup_only 组也标 rollup_only（展示层负责区分
+/// 「来源未提供」与「来源记录 0」——字段只描述构成，不描述费用值）。
+#[test]
+fn cost_detail_rollup_only_even_without_source_fee() {
+    let dir = temp_dir("cd-nofee");
+    seed_rollups(
+        &dir.join("cc-switch.db"),
+        &[("2026-09-20", "claude", "claude-opus-4-7", 10, 1000, 0, None)],
+    );
+    let history = history_of(&dir);
+    import_all(&dir, &history);
+    let o = opts(&dir, GroupBy::Day);
+    let report = summary(&o).unwrap();
+    let d1 = report
+        .groups
+        .iter()
+        .find(|g| g.key == "2026-09-20")
+        .unwrap();
+    assert_eq!(d1.cost_detail, Some("rollup_only"));
+    assert_eq!(d1.source_cost_usd, None, "费用缺失仍如实为 None");
+    assert!(d1.unknown_pricing);
+    std::fs::remove_dir_all(&dir).ok();
+}

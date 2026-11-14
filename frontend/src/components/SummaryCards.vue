@@ -30,6 +30,13 @@ const costText = computed(() => formatMoney(props.totals.cost_usd, "summary"));
 /// 未知价格且已计价部分为 0：显示"未知†"而不是 $0.00（缺价 ≠ 免费）。
 const costUnknownOnly = computed(() => props.totals.unknown_pricing && props.totals.cost_usd === 0);
 
+// v0.9.1 缺陷 C：全部组都是纯日汇总（cost_detail=rollup_only）且有来源
+// 费用时，总览卡主读数 = 来源记录金额 + 标识——不再显示「未知†」。
+// mixed 或缺来源费用的纯汇总组维持原状（估算未知 + 来源费用独立行）。
+const sourceAsPrimary = computed(
+  () => props.totals.cost_detail === "rollup_only" && props.totals.source_cost_usd != null,
+);
+
 // R09/F08：命中率公式 tooltip 受控显示——hover/focus/pinned 三态分离、
 // 统一 show 计算：hover 随指针、focus 随键盘焦点（focus 在时鼠标离开不取消）、
 // click 固定切换；Escape 一律关闭。
@@ -97,13 +104,24 @@ const parts = computed(() =>
           </span>
         </div>
         <div class="metric-value metric-value-main ts-num">
-          <template v-if="costUnknownOnly">{{ t("dashboard.costUnknownOnly") }}</template>
+          <template v-if="sourceAsPrimary">
+            <span class="metric-source-amount">{{
+              formatMoney(totals.source_cost_usd ?? 0, "summary")
+            }}</span>
+          </template>
+          <template v-else-if="costUnknownOnly">{{ t("dashboard.costUnknownOnly") }}</template>
           <template v-else>{{ costText }}</template>
+        </div>
+        <!-- v0.9.1 缺陷 C 规则1：纯日汇总汇总时主读数带「来源记录」标识。 -->
+        <div v-if="sourceAsPrimary" class="metric-source-tag">
+          <span class="ts-pill ts-pill-info" :title="t('dashboard.sourceCostHint')">
+            {{ t("dashboard.sourceCostTag") }}
+          </span>
         </div>
         <!-- T2（2026-11-13）：CCS 来源记录费用与估算费用分开显示——
              它来自日汇总的来源记录值，不是请求级估算，也不是实际账单。 -->
         <div
-          v-if="totals.source_cost_usd != null"
+          v-if="!sourceAsPrimary && totals.source_cost_usd != null"
           class="metric-source-cost"
           :title="t('dashboard.sourceCostHint')"
         >
@@ -278,6 +296,15 @@ const parts = computed(() =>
   font-size: 12px;
   line-height: 1.4;
   color: var(--ts-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* v0.9.1 缺陷 C 规则1：主读数 = 来源记录金额时的「来源记录」标识行。 */
+.metric-source-tag {
+  margin-top: var(--ts-space-1);
+}
+
+.metric-source-amount {
   font-variant-numeric: tabular-nums;
 }
 

@@ -119,29 +119,116 @@ describe("UsageTable 费用可追溯（C5）", () => {
   // 用户复核反例：两个模型行各带来源费用时，行内与合计都必须单独显示
   // 「CCS 来源记录费用」，不能只在大段脚注里出现，也不能把估算的「未知」
   // 当成来源费用。
+  // v0.9.1 缺陷 C：mixed 组（估算 + 来源费用并存）→ 两部分分别显示；
+  // 估算仍如实未知†。
   it("source_cost_is_shown_per_model_row_and_total", () => {
     const a = group("m-a", { input: 100 });
     a.cost_usd = 0;
     a.unknown_pricing = true;
     a.source_cost_usd = 7.25;
+    a.cost_detail = "mixed";
     const b = group("m-b", { input: 50 });
     b.cost_usd = 0;
     b.unknown_pricing = true;
     b.source_cost_usd = 1.75;
+    b.cost_detail = "mixed";
     const r = report([a, b], true);
     r.totals.unknown_reason = "rollup_only";
     r.totals.source_cost_usd = 9;
+    r.totals.cost_detail = "mixed";
     // 后端 DTO 的 groups 含合计行（key=合计）；测试同构。
     r.groups = [...r.groups, { ...r.totals }];
     const w = mount(UsageTable, { props: { report: r } });
     const text = w.text();
     expect(text, "模型行 A 的来源费用").toContain("$7.25");
-    expect(text, "模型行 A 的标签与金额同处一行").toContain("CCS 来源记录费用 $7.25");
     expect(text, "模型行 B 的来源费用").toContain("$1.75");
     expect(text, "合计行的来源费用").toContain("$9.00");
     expect(text.match(/CCS 来源记录费用/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    // v0.9.1 缺陷 B：标签与金额是 .source-cost-cell 行内的两个节点——
+    // computed 排版为同一行（flex baseline），文本拼接不再依赖空格分隔。
+    const sourceCells = w.findAll(".source-cost-cell");
+    expect(sourceCells.length).toBeGreaterThanOrEqual(3);
+    for (const cell of sourceCells) {
+      expect(cell.find(".source-cost-label").exists()).toBe(true);
+      expect(cell.find(".source-cost-value").exists()).toBe(true);
+    }
     // 估算仍如实显示未知†，不被来源费用替代。
     expect(text).toContain("未知†");
+  });
+
+  // v0.9.1 缺陷 C 规则1：纯日汇总组以来源金额为费用读数，不再并列未知†。
+  it("rollup_only_group_shows_source_amount_as_primary_without_unknown", () => {
+    const a = group("m-a", { input: 100 });
+    a.cost_usd = 0;
+    a.unknown_pricing = true;
+    a.unknown_tokens = { input: 100, output: 0, cache_write: 0, cache_read: 0 };
+    a.unknown_reason = "rollup_only";
+    a.source_cost_usd = 7.25;
+    a.cost_detail = "rollup_only";
+    const r = report([a], true);
+    r.totals.source_cost_usd = 7.25;
+    r.totals.cost_detail = "rollup_only";
+    r.groups = [...r.groups, { ...r.totals }];
+    const w = mount(UsageTable, { props: { report: r } });
+    const text = w.text();
+    expect(text).toContain("$7.25");
+    expect(text).toContain("来源记录");
+    // 规则1 的核心：该行不再并列主读数「未知†」（费用列内）。
+    const cellText = w.find(".cost-cell").text();
+    expect(cellText).not.toContain("未知†");
+    // 未知 token 列与统计说明仍如实披露（规则5：不掩盖真缺价/未估算）。
+    expect(text).toContain("100");
+  });
+
+  // v0.9.1 缺陷 C 规则2：来源显式 0 → $0.00 + 来源标识（缺失≠0，不宣称免费）。
+  it("rollup_only_group_with_zero_source_cost_keeps_zero_with_tag", () => {
+    const a = group("m-a", { input: 100 });
+    a.cost_usd = 0;
+    a.unknown_pricing = true;
+    a.unknown_reason = "rollup_only";
+    a.source_cost_usd = 0;
+    a.cost_detail = "rollup_only";
+    const r = report([a], true);
+    r.totals.source_cost_usd = 0;
+    r.totals.cost_detail = "rollup_only";
+    r.groups = [...r.groups, { ...r.totals }];
+    const w = mount(UsageTable, { props: { report: r } });
+    const cellText = w.find(".cost-cell").text();
+    expect(cellText).toContain("$0.00");
+    expect(cellText).toContain("来源记录");
+    expect(cellText).not.toContain("未知†");
+  });
+
+  // v0.9.1 缺陷 C 规则4：rollup_only 但来源未提供费用 → 维持未知†。
+  it("rollup_only_group_without_source_cost_stays_unknown", () => {
+    const a = group("m-a", { input: 100 });
+    a.cost_usd = 0;
+    a.unknown_pricing = true;
+    a.unknown_reason = "rollup_only";
+    a.source_cost_usd = null;
+    a.cost_detail = "rollup_only";
+    const r = report([a], true);
+    r.totals.cost_detail = "rollup_only";
+    r.groups = [...r.groups, { ...r.totals }];
+    const w = mount(UsageTable, { props: { report: r } });
+    const cellText = w.find(".cost-cell").text();
+    expect(cellText).toContain("未知†");
+    expect(cellText).not.toContain("来源记录");
+  });
+
+  // v0.9.1 缺陷 B 集成：费用列节点带组件 scope 标记（旧实现 render 回调
+  // 创建的节点没有 scope 属性，scoped CSS 永不命中 → 真实浏览器 inline
+  // 粘行）。scope 属性存在性只能在组件渲染树上断言。
+  it("cost_cell_nodes_carry_component_scope_attribute", () => {
+    const a = group("m-a", { input: 100 });
+    a.source_cost_usd = 7.25;
+    a.cost_detail = "mixed";
+    const r = report([a], false);
+    const w = mount(UsageTable, { props: { report: r } });
+    const cell = w.find(".cost-cell");
+    expect(cell.exists()).toBe(true);
+    const scopeAttr = Object.keys(cell.attributes()).some((a2) => a2.startsWith("data-v-"));
+    expect(scopeAttr, "render 输出的费用节点必须带 scope（缺陷 B 根因）").toBe(true);
   });
 
   it("no_rollup_disclosure_without_rollup_only_reason：纯明细不误报日粒度", () => {
@@ -329,22 +416,14 @@ describe("N18 分组费用列的分档估算标记", () => {
       }[];
     };
   }
+  void exposed;
   function costText(group: Group, totalsUnknown: boolean): string {
-    const w = mount(UsageTable, { props: { report: report([group], totalsUnknown) } });
-    const cols = exposed(w).columns;
-    const cost = cols.find((x) => x.key === "cost_usd");
-    const vnode = cost!.render!(group) as { children?: unknown };
-    // render 返回 h() 的 vnode：取文本内容（字符串或 children 数组）
-    const c = vnode as { children?: unknown; props?: { innerHTML?: string } };
-    if (typeof c.children === "string") return c.children;
-    if (Array.isArray(c.children)) {
-      return (c.children as unknown[])
-        .map((x) =>
-          typeof x === "string" ? x : String((x as { children?: string })?.children ?? ""),
-        )
-        .join("");
-    }
-    return String(c.children ?? "");
+    // v0.9.1 缺陷 B：render 返回 CostCell 组件 vnode（不再内联 h("span")），
+    // 文本断言走真实挂载渲染——顺带验证组件 scope 与排版结构。
+    const w = mount(UsageTable, {
+      props: { report: report([{ ...group }], totalsUnknown) },
+    });
+    return w.find(".cost-cell").text();
   }
 
   it("估算组费用旁出现可访问的「分档估算」标记，完整组不出现", () => {
@@ -387,25 +466,12 @@ describe("N18 分组费用列的分档估算标记", () => {
 // N18 复核项 2：零价估算与未计价混合组——「未知†」与「分档估算」须独立
 // 同时出现（金额 0 时原实现隐藏了分档估算标记）。
 describe("N18 分组费用列零价估算与未计价并存", () => {
-  function exposed(w: ReturnType<typeof mount>) {
-    return w.vm as unknown as {
-      columns: { key: string; render?: (row: object) => unknown }[];
-    };
-  }
   function costText(group: Group, totalsUnknown: boolean): string {
-    const w = mount(UsageTable, { props: { report: report([group], totalsUnknown) } });
-    const cols = exposed(w).columns;
-    const cost = cols.find((x) => x.key === "cost_usd");
-    const vnode = cost!.render!(group) as { children?: unknown };
-    if (typeof vnode.children === "string") return vnode.children;
-    if (Array.isArray(vnode.children)) {
-      return (vnode.children as unknown[])
-        .map((x) =>
-          typeof x === "string" ? x : String((x as { children?: string })?.children ?? ""),
-        )
-        .join("");
-    }
-    return String(vnode.children ?? "");
+    // v0.9.1 缺陷 B：render 返回 CostCell 组件 vnode，文本断言走真实渲染。
+    const w = mount(UsageTable, {
+      props: { report: report([{ ...group }], totalsUnknown) },
+    });
+    return w.find(".cost-cell").text();
   }
   it("cost=0 且 estimated=true、unknown_pricing=true：同时显示未知†与分档估算", () => {
     const mixed = group("g-zero-mix", { cache_write: 2_000_000 });
