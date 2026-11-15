@@ -22,14 +22,14 @@
 `push_rollup_into` 逐条判断：
 
 1. **来源费用已提供**（`Some(v)`，含 `Some(0)`）→ 该汇总的 token **不进 unknown_tokens**；费用走来源通道（`source_cost_usd` 累计不变）；组仍可标 `cost_detail`（rollup_only/mixed 语义不变——数据粒度披露，不等同缺价）。
-2. **来源费用缺失**（`None`）→ 尝试按模型价格**估算该汇总**（`pricing.estimate_flat(model, tokens)`——日汇总专用：禁用峰谷/时间规则、不按上下文档位切档，固定基础档位价；日汇总没有请求时间，一天的总量也不是单请求上下文长度）：
-   - 估算成功且 `complete` → 金额计入 `cost_usd`（依据标注为「按日汇总估算」），token 不进 unknown；**依据披露**进悬浮详情（不是历史精确费用——不编造请求时间/分档，不套用时段价与总量档位）；
-   - 估算成功但 `complete=false`（部分分项缺价）→ 已知分项金额计入 cost_usd，**实际未获覆盖的分项 token**（`est.unknown`）进 unknown_tokens；
+2. **来源费用缺失**（`None`）→ 按**可证明适用**的费率估算该汇总（`pricing.estimate_rollup(model, tokens)`——枚举所有可能的时段/上下文条件，同一分项在所有条件下都是同一显式单价才计价；始终生效的覆盖规则照常应用；分段档位/时段价依赖缺失的请求长度/时刻时，该分项真实未定价；不受缺失条件影响的平价分项照常计价）：
+   - 估算成功且 `complete` → 金额计入 `cost_usd`（依据标注为「按日汇总估算」），token 不进 unknown；**依据披露**进悬浮详情（不是历史精确费用——不编造请求时间/分档，不默认基础档位、不挑任意时刻）；
+   - 估算成功但 `complete=false`（部分分项缺价或条件不确定）→ 已知分项金额计入 cost_usd，**实际未获覆盖的分项 token**（`est.unknown`）进 unknown_tokens；
    - 无候选/估算失败 → 全部 token 进 unknown_tokens（真实未定价），悬浮详情写明缺项（无匹配价格/缺分项），不笼统说「模型没有价格」。
 3. **不双重计费**：有来源费用的汇总不再叠加估算（同一份用量只选一次费用依据）。
 4. `unknown_pricing` 语义不变：**只在实际存在未获费用覆盖的 token** 时置位——有来源费用的纯汇总组不再置位（unknown_reason 相应不再标 rollup_only 缺价含义；组内任何 token 未获覆盖时才置位并标原因）。
 5. 请求数、四桶原始 token、去重、来源选择、导入幂等零改动。
-6. **视图缓存失效**：`SNAPSHOT_VERSION` 12 → 13（unknown_tokens/unknown_pricing/cost 语义变化，旧快照的分组费用状态不可信，按仓库约定读不出即重建派生结果；不要求清库/重扫/重导）。
+6. **视图缓存失效**：`SNAPSHOT_VERSION` 12 → 13（第三轮：unknown_tokens/unknown_pricing/cost 语义变化）→ 14（第四轮：日汇总费率适用性与 `has_estimated_cost` 依据状态变化）；旧快照的分组费用状态不可信，按仓库约定读不出即重建派生结果；不要求清库/重扫/重导。
 
 ### 1.2 展示侧：单金额 + 悬浮详情（缺陷 A）
 
@@ -42,7 +42,7 @@
 
 ### 1.3 汇总估算的依据披露
 
-- 悬浮中显示「按模型当前基础档位价格与汇总 token 总量估算」与四分项小计；注明「日总量不当作单请求上下文长度、不套用峰谷时段价，估算不等于历史精确费用；未编造请求时间与缓存分档」。
+- 悬浮中显示「只采用可证明适用的费率」与各已知分项小计；注明「始终生效的覆盖规则照常应用；依赖缺失的请求时刻/上下文长度的分项保持未定价、不计入金额；估算不等于历史精确费用；未编造请求时间与分档」。
 - 有来源费用时显示「来源记录费用 $X（逐条明细）」。
 
 ## 2. 红测（先红，全部行为断言）
@@ -96,12 +96,12 @@
   AssumedZero 是现有产品规则的正确行为），改用外置 pricing.toml（未声明键
   = 未知）后行为红可复现。前端旧断言面（SummaryCards/UsageTable 42 项）
   按新规则重写。
-- **绿·B（aggregate.rs）**：push_rollup_into 费用覆盖逐条判定（有费用 →
-  token 不进 unknown 不叠加估算；缺失 → 按 `estimate_flat` 估算该汇总，
-  禁用时间规则与上下文档位、固定基础档位价；部分缺价只计实际未获覆盖
-  分项；无候选保留真实未定价）；`Group.total_cost_usd`/`cost_partially_unknown`
+- **绿·B（aggregate.rs，第三轮）**：push_rollup_into 费用覆盖逐条判定（有费用 →
+  token 不进 unknown 不叠加估算；缺失 → 第三轮曾用 `estimate_flat` 固定基础价，
+  **已被第四轮 `estimate_rollup` 取代**；部分缺价只计实际未获覆盖分项；无候选
+  保留真实未定价）；`Group.total_cost_usd`/`cost_partially_unknown`
   合并字段；SNAPSHOT_VERSION 12 → 13（旧快照费用状态不可信，读取时忽略
-  重建，不清库/重扫/重导）。既有旧规则断言更新 4 处
+  重建，不清库/重扫/重导；第四轮再升 14）。既有旧规则断言更新 4 处
   （ccs_rollup_coverage 1 + ccs_rollup_source_cost 2 + history_overlap 2，
   全部是「日汇总全部未定价」撤销后的语义修正）。
 - **绿·A（前端）**：CostCell 单金额重构（主读数 = total_cost_usd，† 由
@@ -132,12 +132,12 @@
    `zero_priced_estimate_shows_zero_not_unknown`（修复前 None / 修复后
    Some(0.0)）。
 2. **日汇总误用 UTC 零点与上下文档位**：旧路径 `estimate(rollup_ts=归属日
-   00:00 UTC)` 会命中峰谷时段，并按日 prompt 总量切高档段。修复：新增
-   `Pricing::estimate_flat`（禁用时间规则、清空分段按基础档位计价，
-   `schedule_label=None`），aggregate 改用它并移除 `rollup_ts`。回归
-   `rollup_estimate_ignores_time_rules_and_segments`（2M × $1.0/M = $2.0；
-   旧实现 $16）与 `estimate_flat_differs_from_request_estimate_on_peak_rules`
-   （请求级峰价 $99 对照，flat 恒 $1.0）。
+   00:00 UTC)` 会命中峰谷时段，并按日 prompt 总量切高档段。第三轮先改为
+   `Pricing::estimate_flat`（清空分段、忽略全部时间规则、固定基础价）——
+   **该中间版本已被第四轮取代**：它把「不能选档」错误扩大成「基础价一定
+   适用」，会低算大上下文日汇总、丢弃始终生效的覆盖规则。回归已改写为
+   `rollup_segment_pricing_not_guessed_from_day_total`（input 真实未定价）
+   与 `time_limited_rule_does_not_guess_day_time`。
 3. **悬浮层内部样式未生效**：`renderContent()` 的 `h()` 节点不带 SFC
    scope 属性，`<style scoped>` 的 `.gcb-section/.gcb-solid` 永不命中。
    修复：样式改全局作用域 + `gcb-` 前缀类名；契约新增
@@ -147,21 +147,53 @@
 
 **红取证（控制实验，不只靠“修完刚好通过”）**：
 
-- 反例 2：同一价格表下，旧路径 `pricing.estimate` 在 UTC 零点对 2M
-  prompt 返回 **$16**（按日总量切 >1M 高档段），`estimate_flat` 为 **$2**；
-  该对照断言已固化在 `rollup_estimate_ignores_time_rules_and_segments`，
-  2b 再用无分段价格表对照时间规则（请求级 $99 vs flat $1）。
+- 反例 2（第三轮控制实验，结论已被第四轮修正）：同一价格表下，旧路径
+  `pricing.estimate` 在 UTC 零点对 2M prompt 返回 **$16**（按日总量切
+  >1M 高档段）；第三轮 `estimate_flat` 的 **$2** 曾是当时的错误预期。
+  第四轮改为：单请求上下文缺失 → input 真实未定价，`total_cost_usd=None`。
 - 反例 3：临时把组件 `<style>` 改回 `<style scoped>` 复跑同一契约，
   `v092-tooltip-solid-style-applied` **失败**（background
   `rgba(0, 0, 0, 0)`、radius `0px`、padding `0px`，两个视口）；恢复全局
-  样式后 17 条断言全过。
+  样式后断言全过。
 
-**验证与状态**：Rust `rollup_fee_coverage` 13 项（10 既有 + 3 反例）全过，
-全 workspace 测试全过；前端 1150 项、typecheck/build=0；契约
-`cost_cell_layout_not_concatenated` 17 条断言明暗 × 1280×820/980×620
-全过（`qa-artifacts/v092-fix/cost-cell-8/` 截图同帧确认三项修复）；完整
-e2e runner（11 契约 × 明暗 × 两尺寸）在文档收口后复跑全过
-（`qa-artifacts/ui-adjustment/ci-e2e`）。
-PR #70 第三轮修复提交 `b7d5b15` 起每次 HEAD 的 20 项必需检查全过、
-`mergeStateStatus=CLEAN`；后续提交仅文档、死代码清理与回归对照断言，
-不改变运行行为。等待用户复核；不合并、不发布、不安装。
+**验证与状态（第三轮，后被第四轮扩展）**：Rust `rollup_fee_coverage` 13 项
+全过；全 workspace 测试全过；前端 1150 项、typecheck/build=0；契约
+`cost_cell_layout_not_concatenated` 明暗 × 1280×820/980×620 全过；完整
+e2e runner（11 契约 × 明暗 × 两尺寸）全过。
+
+### 第四轮复核修复（2026-11-16）：费率适用性 + 费用依据判定
+
+用户复核确认两类未闭合问题，批准在 PR #70 分支实施：
+
+1. **`estimate_flat` 强制基础价**：复制候选、删除分段、忽略规则后按 base
+   计价，把「不能选档」换成「基础价一定适用」。已复现：两个 250K 请求
+   请求路径 $5.00、日汇总 $0.50；始终生效的 $99/M 覆盖规则被丢弃、只算
+   $1.00。修复：`Pricing::estimate_rollup` 枚举所有可能的时段/上下文条件，
+   同一分项在**所有条件下都是同一显式单价**才计价；分段/时段依赖缺失
+   条件的分项保持真实未定价；始终生效的覆盖规则照常应用；平价分项照常
+   计价；不默认任何档位/时段。日总量只作为单请求规模的上界：低于阈值时
+   可证明不可能命中高档（不是拿日总量选档）。
+2. **「有候选」混同「有费用依据」**：`estimate.is_some()` 被当成依据，候选
+   只提供未使用分项价格时全部实际 token 在 unknown、却显示 `$0.00†`。
+   修复：`CostEstimate::covers_used_tokens` 按实际用量是否获得覆盖判定；
+   `Group.has_estimated_cost` / 合计同字段贯通；悬浮详情用它决定是否展示
+   估算构成，不再用 `cost_usd !== 0` 猜测。零元费率覆盖实际用量仍是
+   `$0.00`；全部实际用量缺价 → `total_cost_usd=None`（未知）；已知零元
+   + 缺价混合保留小计与 †；来源显式 0 与缺失 None 严格区分。
+
+**红测（先红，行为断言）**：新增 `rollup_rate_applicability.rs` 12 项；
+红取证时 4 项失败在金额/覆盖量/`total_cost_usd`（分段日汇总算出 $0.50、
+始终规则只算 $1.00、时段规则算出 $7.00、未使用分项价格显示 $0.00†）；
+前端零元悬浮红测失败在「本行没有可适用的费用依据」。修复后全部转绿。
+既有「flat 恒基础价」断言按用户更正的语义改写，不保留错误算法。
+
+**验证**：Rust 全 workspace 全过（新增 12 项 + 改写 2 项）；前端全量、
+typecheck、build、Prettier 全过；契约新增
+`v092-zero-tooltip-explains-basis` 与 `v092-unpriced-used-not-zero`，
+`cost_cell_layout_not_concatenated` 21 条断言明暗 × 1280×820/980×620
+全过；完整 e2e runner（11 契约 × 明暗 × 两尺寸）全过；真实浏览器复核
+零元/未定价金额节点与悬浮内容（截图
+`qa-artifacts/v092-fix/cost-cell-r4-2/` 与暗色 980×620 探针）。
+
+PR #70 每次 HEAD 的 20 项必需检查全过、`mergeStateStatus=CLEAN`；等待
+用户复核；不合并、不发布、不安装。

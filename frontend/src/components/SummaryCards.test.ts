@@ -116,7 +116,9 @@ describe("SummaryCards 指标条（设计系统 Task 3）", () => {
 
 describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
   it("单卡结构：左主读数费用，右三项次读数以发丝线分隔", () => {
-    const w = mountCards(totals({ cost_usd: 12.84 }));
+    const w = mountCards(
+      totals({ cost_usd: 12.84, total_cost_usd: 12.84, has_estimated_cost: true }),
+    );
     expect(w.find(".ts-card").exists()).toBe(true);
     const main = w.find(".metric-main");
     expect(main.text()).toContain("估算费用");
@@ -285,6 +287,7 @@ describe("v0.9.2 费用披露进悬浮（总览卡不再常驻）", () => {
         cost_usd: 1.0,
         source_cost_usd: 7.25,
         total_cost_usd: 8.25,
+        has_estimated_cost: true,
         cost_detail: "mixed",
       }),
     );

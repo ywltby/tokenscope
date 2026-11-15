@@ -1400,6 +1400,20 @@ pub struct CostEstimate {
     pub cache_price_zero_estimated: bool,
 }
 
+impl CostEstimate {
+    /// v0.9.2 第四轮复核：本估算是否**实际覆盖了任何使用中的 token**。
+    ///
+    /// `Some(estimate)` 只表示找到了候选，不表示有费用依据：候选可能只
+    /// 提供未使用分项的单价，全部实际用量仍在 `unknown`。只有实际用量
+    /// 大于 0、且并非全部落在 unknown 时才算有依据——零元费率覆盖了
+    /// 实际用量同样算依据（金额 0 不等于无依据）；零 token 的未使用分项
+    /// 既不制造已知小计，也不制造缺价。
+    pub fn covers_used_tokens(&self, used: &TokenCounts) -> bool {
+        let total = used.total();
+        total > 0 && self.unknown.total() < total
+    }
+}
+
 /// GUI 悬浮对照用：该前缀在 OpenRouter 层的价格（无对应模型则 None）。
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenRouterPrice {
@@ -3041,17 +3055,315 @@ impl Pricing {
         est.excluded_candidate_warning = excluded_candidate_warning;
         Some(est)
     }
+}
 
-    /// 日汇总估算（v0.9.2）：**禁用时间规则、按基础档位计价**——
+/// 日汇总费率适用性解析（v0.9.2 第四轮复核，2026-11-16）：枚举所有可能
+/// 的时段/上下文条件，只接受**所有条件下都相同**的显式单价。
+///
+/// 日汇总没有逐请求时刻，也没有单请求上下文长度：分段档位、时段价都可能
+/// 因缺失条件而不适用。旧 `estimate_flat` 清空分段、忽略规则、固定基础价，
+/// 等于把「不能选档」扩大成「基础价一定适用」——两个 250K 请求的日汇总会
+/// 被算成基础价，始终生效的覆盖规则会被丢弃。这里不做任何档位/时段猜测：
+/// 同一分项在所有可能条件下值相同才计价，否则该分项真实未定价；不受缺失
+/// 条件影响的平价分项照常计价。
+#[derive(Clone, Copy)]
+enum RollupRateItem {
+    Input,
+    Output,
+    CacheWrite,
+    CacheRead,
+}
+
+const ROLLUP_RATE_ITEMS: [RollupRateItem; 4] = [
+    RollupRateItem::Input,
+    RollupRateItem::Output,
+    RollupRateItem::CacheWrite,
+    RollupRateItem::CacheRead,
+];
+
+impl RollupRateItem {
+    fn spec(self, r: &PriceRates) -> RateSpec {
+        match self {
+            RollupRateItem::Input => r.input,
+            RollupRateItem::Output => r.output,
+            RollupRateItem::CacheWrite => r.cache_write,
+            RollupRateItem::CacheRead => r.cache_read,
+        }
+    }
+
+    fn used(self, t: &TokenCounts) -> u64 {
+        match self {
+            RollupRateItem::Input => t.input,
+            RollupRateItem::Output => t.output,
+            RollupRateItem::CacheWrite => t.cache_write,
+            RollupRateItem::CacheRead => t.cache_read,
+        }
+    }
+
+    fn unpriced(self, u: &TokenCounts) -> u64 {
+        match self {
+            RollupRateItem::Input => u.input,
+            RollupRateItem::Output => u.output,
+            RollupRateItem::CacheWrite => u.cache_write,
+            RollupRateItem::CacheRead => u.cache_read,
+        }
+    }
+
+    fn set_unpriced(self, u: &mut TokenCounts, n: u64) {
+        match self {
+            RollupRateItem::Input => u.input = n,
+            RollupRateItem::Output => u.output = n,
+            RollupRateItem::CacheWrite => u.cache_write = n,
+            RollupRateItem::CacheRead => u.cache_read = n,
+        }
+    }
+
+    fn matches_kind(self, kind: CostLineKind) -> bool {
+        match self {
+            RollupRateItem::Input => kind == CostLineKind::Input,
+            RollupRateItem::Output => kind == CostLineKind::Output,
+            RollupRateItem::CacheWrite => matches!(
+                kind,
+                CostLineKind::CacheWrite | CostLineKind::CacheWrite5m | CostLineKind::CacheWrite1h
+            ),
+            RollupRateItem::CacheRead => kind == CostLineKind::CacheRead,
+        }
+    }
+}
+
+/// 所有条件都取同一显式值 → 可证明；出现不同值（含部分条件缺价）→
+/// Unknown 并标记 ambiguous（调用方强制真实未定价，避免线上来源的
+/// assumed_zero 规则把「条件不确定」伪装成免费）。
+fn unified_rate(specs: &[RateSpec]) -> (RateSpec, bool) {
+    let Some(first) = specs.first().copied() else {
+        return (RateSpec::Unknown, false);
+    };
+    if specs.iter().all(|s| *s == first) {
+        (first, false)
+    } else {
+        (RateSpec::Unknown, true)
+    }
+}
+
+/// 分段是否覆盖所有**可能出现的**单请求 prompt 规模：每请求 prompt 不会
+/// 超过当天 prompt 总量（token 非负），因此只考虑 `min_tokens <= limit`
+/// 的分段；这些分段的并集若覆盖 `[0, limit]`，就不存在「未命中任何分段」
+/// 的条件。注意这不是拿日总量选档——只是用日总量作为单请求规模的上界，
+/// 排除**不可能**命中的档位。
+fn segments_cover_range(segments: &[&PriceSegment], limit: u64) -> bool {
+    if segments.is_empty() {
+        return false;
+    }
+    let mut ranges: Vec<(u64, Option<u64>)> = segments
+        .iter()
+        .map(|s| (s.min_tokens, s.max_tokens))
+        .collect();
+    ranges.sort_by_key(|r| r.0);
+    let mut cursor = 0u64;
+    for (min, max) in ranges {
+        if min > cursor || min > limit {
+            return false;
+        }
+        match max {
+            Some(end) => cursor = cursor.max(end),
+            None => return true,
+        }
+        if cursor > limit {
+            return true;
+        }
+    }
+    cursor > limit
+}
+
+/// period 价格逐字段回退规则级价格（与 `estimate_entry` 的时间层一致）。
+fn merged_schedule_rates(sched: &PriceSchedule, period: Option<&SchedulePeriod>) -> PriceRates {
+    match period {
+        Some(p) => PriceRates {
+            input: p.prices.input.or_explicit(sched.prices.input),
+            output: p.prices.output.or_explicit(sched.prices.output),
+            cache_write: p.prices.cache_write.or_explicit(sched.prices.cache_write),
+            cache_read: p.prices.cache_read.or_explicit(sched.prices.cache_read),
+            cache_write_tiers: p
+                .prices
+                .cache_write_tiers
+                .or(sched.prices.cache_write_tiers),
+        },
+        None => sched.prices,
+    }
+}
+
+/// 日汇总可能遇到的所有时段条件：无规则命中 + 每条规则的规则级价格 +
+/// 每条规则的每个时段。规则级价格已声明时，规则在**所有时刻**都有覆盖
+/// （时段内用 period、时段外回退规则价），因此「无规则命中」不可能。
+fn rollup_conditions(plan: &PricePlan) -> Vec<Option<(&PriceSchedule, Option<&SchedulePeriod>)>> {
+    let mut out = Vec::new();
+    let always_matched = plan.schedules.iter().any(|s| rates_declared(&s.prices));
+    if !always_matched {
+        out.push(None);
+    }
+    for sched in &plan.schedules {
+        if sched.periods.is_empty() {
+            out.push(Some((sched, None)));
+        } else {
+            if rates_declared(&sched.prices) {
+                out.push(Some((sched, None)));
+            }
+            for period in &sched.periods {
+                out.push(Some((sched, Some(period))));
+            }
+        }
+    }
+    out
+}
+
+fn collect_rollup_specs(
+    plan: &PricePlan,
+    conditions: &[Option<(&PriceSchedule, Option<&SchedulePeriod>)>],
+    item: RollupRateItem,
+    prompt_limit: u64,
+) -> Vec<RateSpec> {
+    let base = item.spec(&plan.base);
+    let mut specs = Vec::new();
+    for condition in conditions {
+        let (segments, time_rates): (&[PriceSegment], Option<PriceRates>) = match condition {
+            Some((sched, period)) => {
+                let segments = if sched.segments.is_empty() {
+                    &plan.segments
+                } else {
+                    &sched.segments
+                };
+                (segments, Some(merged_schedule_rates(sched, *period)))
+            }
+            None => (&plan.segments, None),
+        };
+        // 单请求 prompt 不可能超过当天总量：min_tokens 超过上界的档位不可能
+        // 命中，不参与「可能条件」。
+        let possible: Vec<&PriceSegment> = segments
+            .iter()
+            .filter(|s| s.min_tokens <= prompt_limit)
+            .collect();
+        let mut push = |seg: Option<&PriceSegment>| {
+            let seg_spec = seg
+                .map(|s| item.spec(&s.prices))
+                .unwrap_or(RateSpec::Unknown);
+            let time_spec = time_rates
+                .as_ref()
+                .map(|r| item.spec(r))
+                .unwrap_or(RateSpec::Unknown);
+            specs.push(seg_spec.or_explicit(time_spec).or_explicit(base));
+        };
+        if !segments_cover_range(&possible, prompt_limit) {
+            push(None);
+        }
+        for seg in possible {
+            push(Some(seg));
+        }
+    }
+    specs
+}
+
+/// 逐分项解析可证明费率；返回的 bool 数组顺序同 `ROLLUP_RATE_ITEMS`。
+fn resolve_rollup_rates(plan: &PricePlan, prompt_limit: u64) -> (PriceRates, [bool; 4]) {
+    let conditions = rollup_conditions(plan);
+    let specs_for = |item| collect_rollup_specs(plan, &conditions, item, prompt_limit);
+
+    let (input, input_amb) = unified_rate(&specs_for(RollupRateItem::Input));
+    let (output, output_amb) = unified_rate(&specs_for(RollupRateItem::Output));
+    let (cache_write, write_amb) = unified_rate(&specs_for(RollupRateItem::CacheWrite));
+
+    // cache_read 的 same_as_input 依赖可证明的输入价；输入价不确定时该分项
+    // 也不能按任一层猜测。
+    let mut read_dep_ambiguous = false;
+    let read_specs: Vec<RateSpec> = specs_for(RollupRateItem::CacheRead)
+        .into_iter()
+        .map(|spec| {
+            if spec != RateSpec::SameAsInput {
+                return spec;
+            }
+            match input {
+                RateSpec::Fixed(v) => RateSpec::Fixed(v),
+                _ => {
+                    read_dep_ambiguous = true;
+                    RateSpec::Unknown
+                }
+            }
+        })
+        .collect();
+    let (cache_read, read_amb) = unified_rate(&read_specs);
+
+    // 分档价（5m/1h）只在没有分段/时间规则时沿用基础层；复杂计划的档位
+    // 适用性同样依赖缺失条件，日汇总不据此制造「分档已计价」。
+    let cache_write_tiers = if plan.segments.is_empty() && plan.schedules.is_empty() {
+        plan.base.cache_write_tiers
+    } else {
+        None
+    };
+
+    (
+        PriceRates {
+            input,
+            output,
+            cache_write,
+            cache_read,
+            cache_write_tiers,
+        },
+        [
+            input_amb,
+            output_amb,
+            write_amb,
+            read_amb || read_dep_ambiguous,
+        ],
+    )
+}
+
+/// 把 ambiguous 分项强制回真实未定价：移除该分项已计小计（含线上来源
+/// assumed_zero 产生的 0 价覆盖），token 计入 unknown，complete=false。
+fn force_unpriced(est: &mut CostEstimate, used: &TokenCounts, item: RollupRateItem) {
+    let tokens = item.used(used);
+    if tokens == 0 {
+        return;
+    }
+    let mut removed = 0.0;
+    for line in &mut est.lines {
+        if item.matches_kind(line.kind) {
+            removed += line.subtotal;
+            line.subtotal = 0.0;
+            line.priced = false;
+            line.unit_price = None;
+            line.rate_kind = RateKind::Unknown;
+            line.overflow = false;
+        }
+    }
+    // 受检金额只减不加；浮点误差夹回 0。
+    est.cost = (est.cost - removed).max(0.0);
+    if item.unpriced(&est.unknown) < tokens {
+        item.set_unpriced(&mut est.unknown, tokens);
+    }
+    if matches!(item, RollupRateItem::CacheWrite) {
+        est.cache_write_split_estimated = false;
+    }
+    est.cache_price_zero_estimated = est
+        .lines
+        .iter()
+        .any(|line| line.rate_kind == RateKind::AssumedZero);
+    est.complete = false;
+}
+
+impl Pricing {
+    /// 日汇总估算（v0.9.2，第四轮复核修订）：**只使用能够证明适用的费率**。
     ///
-    /// 日汇总只有一天的 token 总量，没有请求时间，也没有真实的单请求上下文
-    /// 长度：走 [`Self::estimate`] 会按「UTC 零点」命中峰谷/时间规则（把一
-    /// 天的量记到某个时段价上），并按**日 prompt 总量**选择上下文档位（把一
-    /// 天的量当成一次请求的长度，高档位价冒充日常价）——两者都算错费用。
-    /// 这里固定用候选的**基础计划**（base 档位）计价，估算依据如实标注
-    /// 「按日汇总估算（当日 prompt 总量，无请求时间与分档依据）」。
+    /// 日汇总只有一天的 token 总量，没有请求时间，也没有单请求上下文长度。
+    /// 因此：
+    /// - 分段档位依赖缺失的请求长度 → 受影响分项真实未定价；
+    /// - 时段规则依赖缺失的请求时刻 → 受影响分项真实未定价；
+    /// - **始终生效**的覆盖规则（规则级价格已声明，任意时刻都匹配）正常应用，
+    ///   不退回已被覆盖的基础价；
+    /// - 不受缺失条件影响的平价分项照常计价，不因同模型其他分项不确定而
+    ///   一刀切未知；
+    /// - 不默认基础档、不默认任何档位/时段，不编造请求时刻。
+    ///
     /// 候选选择规则与 `estimate` 相同（完整优先 → 最高费用 → tie-break）。
-    pub fn estimate_flat(&self, model: &str, t: &TokenCounts) -> Option<CostEstimate> {
+    pub fn estimate_rollup(&self, model: &str, t: &TokenCounts) -> Option<CostEstimate> {
         let cands = self.collect_candidates(model);
         if cands.is_empty() {
             return None;
@@ -3061,13 +3373,21 @@ impl Pricing {
         let mut complete_set: Vec<Cand> = Vec::new();
         let mut partial_set: Vec<Cand> = Vec::new();
         for (e, mode) in cands {
-            // 无时间规则（None）：基础计划 + 基础档位。basis_value 仍传
-            // prompt 总量供 select_segment 使用，但 plan 无分段时分段选择
-            // 返回 None → 用 base；**有分段**的候选也会按总量切到高档段——
-            // 那同样把一天总量当单请求长度，因此显式把分段清空后计价。
-            let mut flat_entry = e.clone();
-            flat_entry.plan.segments = Vec::new();
-            let est = estimate_entry(&flat_entry, t.prompt_tokens(), t, None);
+            let (rates, ambiguous) = resolve_rollup_rates(&e.plan, t.prompt_tokens());
+            let mut flat = e.clone();
+            flat.plan = PricePlan {
+                basis: e.plan.basis,
+                application: e.plan.application,
+                base: rates,
+                segments: Vec::new(),
+                schedules: Vec::new(),
+            };
+            let mut est = estimate_entry(&flat, t.prompt_tokens(), t, None);
+            for (item, is_ambiguous) in ROLLUP_RATE_ITEMS.iter().zip(ambiguous.iter()) {
+                if *is_ambiguous {
+                    force_unpriced(&mut est, t, *item);
+                }
+            }
             if est.complete {
                 complete_set.push((est, mode, e));
             } else {
@@ -3105,7 +3425,7 @@ impl Pricing {
             reason: reason.to_string(),
             schedule_label: None,
             schedule_timezone: None,
-            // 依据标注：日汇总估算（无请求时刻）。
+            // 依据标注：日汇总估算（无请求时刻；只采用可证明适用的费率）。
             request_at: None,
             complete_candidate_count: complete_set.len(),
             incomplete_candidate_count: partial_set.len(),

@@ -185,6 +185,9 @@ function group(key, input, opts = {}) {
     // 8.2（第二轮复核）：来源费用覆盖完整性（full / partial / absent）。
     source_cost_state: opts.source_cost_state,
     // v0.9.2：费用列单一显示金额（互不重叠贡献合并）+ 部分缺失标记。
+    // v0.9.2（第四轮复核）：有实际用量获得估算覆盖（零元费率也算），
+    // 不能从金额或「找到候选」推断。
+    has_estimated_cost: opts.has_estimated_cost ?? ((opts.cost_usd ?? 0) > 0),
     total_cost_usd: opts.total_cost_usd,
     cost_partially_unknown: opts.cost_partially_unknown,
     unknown_reason: opts.unknown_reason,
@@ -200,6 +203,7 @@ function totals(groups) {
   let costDetail = null;
   let sourceCost = null;
   let sourceState = null;
+  let estimated = false;
   const ut = { input: 0, output: 0, cache_write: 0, cache_read: 0 };
   for (const g of groups) {
     requests += g.requests;
@@ -209,6 +213,7 @@ function totals(groups) {
     t.cache_read += g.tokens.cache_read;
     cost += g.cost_usd;
     unknown = unknown || g.unknown_pricing;
+    estimated = estimated || g.has_estimated_cost === true;
     if (g.source_cost_usd != null) {
       sourceCost = (sourceCost ?? 0) + g.source_cost_usd;
     }
@@ -238,11 +243,12 @@ function totals(groups) {
     unknown_pricing: unknown,
     unknown_tokens: ut,
     cost_detail: costDetail,
+    has_estimated_cost: estimated,
     ...(sourceCost != null || sourceState != null
       ? { source_cost_state: sourceState }
       : {}),
     ...(sourceCost != null ? { source_cost_usd: sourceCost } : {}),
-    ...(cost + (sourceCost ?? 0) !== 0 || cost !== 0 || sourceCost != null
+    ...(estimated || sourceCost != null
       ? { total_cost_usd: cost + (sourceCost ?? 0) }
       : {}),
     cost_partially_unknown:
@@ -651,6 +657,7 @@ const SOURCE_COST_GROUPS = [
   group("synthetic-free", 20000, {
     output: 10000,
     cost_usd: 0,
+    has_estimated_cost: true,
     unknown_pricing: false,
     unknown_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
     total_cost_usd: 0,
@@ -666,6 +673,18 @@ const SOURCE_COST_GROUPS = [
     total_cost_usd: null,
     cost_partially_unknown: true,
     requests: 5,
+  }),
+  // 找到候选但所有实际用量都缺价（候选只提供 output 价、本行只用 input）：
+  // 不是已知零元小计，必须显示未知†。放在 unpriced 之后，避免前缀匹配
+  // 误选（契约旧断言用 includes）。
+  group("synthetic-unpriced-used", 25000, {
+    output: 0,
+    cost_usd: 0,
+    unknown_pricing: true,
+    unknown_tokens: { input: 25000, output: 0, cache_write: 0, cache_read: 0 },
+    total_cost_usd: null,
+    cost_partially_unknown: true,
+    requests: 3,
   }),
 ];
 

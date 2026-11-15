@@ -11,9 +11,9 @@
 // - 日汇总来源记录费用（source_cost_usd，含逐条依据说明）；
 // - 覆盖完整性（source_cost_state：partial 说明部分汇总未提供费用）；
 // - 缺失部分（cost_partially_unknown → unknown_tokens 分项）；
-// - 估算依据：日汇总按价格估算时注明「按模型当前基础档位价格与汇总 token
-//   总量估算；日总量不当作单请求上下文长度、不套用峰谷时段价，不等于历史
-//   精确费用；未编造请求时间与缓存分档」。
+// - 估算依据：日汇总按价格估算时注明「只采用可证明适用的费率——始终生效
+//   的覆盖规则照常应用；依赖缺失的请求时刻/上下文长度的分项保持未定价，
+//   不计入金额；未编造请求时间与分档」。
 // 不称为实际账单，不放大段来源说明。
 import { computed, h, onBeforeUnmount, onMounted, ref, useId } from "vue";
 import { NTooltip } from "naive-ui";
@@ -67,7 +67,7 @@ const g = computed(() => props.group);
 const partialMark = computed(() =>
   props.unknownOnly || g.value.cost_partially_unknown ? (props.unknownOnly ? "" : "†") : "",
 );
-const hasEstimate = computed(() => g.value.cost_usd !== 0);
+const hasEstimate = computed(() => g.value.has_estimated_cost === true);
 const estimateText = computed(() => formatMoney(g.value.cost_usd, "summary"));
 const hasSource = computed(() => g.value.source_cost_usd != null);
 const sourceText = computed(() => formatMoney(g.value.source_cost_usd ?? 0, "summary"));

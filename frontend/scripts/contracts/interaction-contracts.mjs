@@ -3035,6 +3035,16 @@ const IMPL = {
           free != null && free.text.includes("$0.00"),
           free?.text ?? "missing",
         );
+        // v0.9.2 第四轮：找到候选但全部实际用量缺价 → 未知†（不是 $0.00†）。
+        const unpricedUsed = byLabel("synthetic-unpriced-used")[0];
+        ctx.record(
+          name,
+          `${viewport.label}:v092-unpriced-used-not-zero`,
+          unpricedUsed != null &&
+            unpricedUsed.text.includes("\u672a\u77e5\u2020") &&
+            !unpricedUsed.text.includes("$0.00"),
+          unpricedUsed?.text ?? "missing",
+        );
         const partial = byLabel("synthetic-rollup-partial")[0];
         ctx.record(
           name,
@@ -3045,8 +3055,12 @@ const IMPL = {
             !partial.text.includes("\u90e8\u5206\u6765\u6e90\u8bb0\u5f55"),
           partial?.text ?? "missing",
         );
-        // v0.9.2 悬浮详情：hover 第一个费用触发器 → 浮层内容含构成分区。
-        await page.locator(".n-data-table .gcb-trigger").first().hover();
+        // v0.9.2 悬浮详情：hover 零元行 → 浮层必须展示估算依据（$0.00），
+        // 不能错误显示「本行没有可适用的费用依据」。
+        await page
+          .locator(".n-data-table-tr", { hasText: "synthetic-free" })
+          .locator(".gcb-trigger")
+          .hover();
         await page.waitForTimeout(400);
         const tip = await page.evaluate(() => {
           const body = [...document.querySelectorAll(".gcb-tooltip")].find((el) => {
@@ -3066,6 +3080,8 @@ const IMPL = {
               text.includes("\u8bf7\u6c42\u660e\u7ec6\u4f30\u7b97") ||
               text.includes("\u6309\u65e5\u6c47\u603b\u4f30\u7b97"),
             hasSource: text.includes("\u65e5\u6c47\u603b\u6765\u6e90\u8bb0\u5f55\u8d39\u7528"),
+            hasNoBasis: text.includes("\u6ca1\u6709\u53ef\u9002\u7528\u7684\u8d39\u7528\u4f9d\u636e"),
+            hasZero: text.includes("$0.00"),
             text: text.slice(0, 300),
           };
         });
@@ -3073,6 +3089,12 @@ const IMPL = {
           name,
           `${viewport.label}:v092-tooltip-composition`,
           tip != null && tip.hasParts && (tip.hasEstimate || tip.hasSource),
+          JSON.stringify(tip),
+        );
+        ctx.record(
+          name,
+          `${viewport.label}:v092-zero-tooltip-explains-basis`,
+          tip != null && tip.hasEstimate && tip.hasZero && !tip.hasNoBasis,
           JSON.stringify(tip),
         );
         // v0.9.2 反例 3：悬浮层内部样式生效（实色衬底 + 发丝线分区）。

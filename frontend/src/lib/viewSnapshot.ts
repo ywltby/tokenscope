@@ -3,7 +3,10 @@
 // 合并待保存最新项 + 串行派发：绝不并发 fire-and-forget 让旧写覆盖新写。
 import { invoke } from "@tauri-apps/api/core";
 
-/** 快照格式版本：v13 = 日汇总费用覆盖判定（v0.9.2）——unknown_tokens/
+/** 快照格式版本：v14 = 日汇总费率适用性 + 费用依据状态（v0.9.2 第四轮）——
+ * 分段/时段依赖缺失条件的分项改为真实未定价，`has_estimated_cost` 取代
+ * 「找到候选」判定；v13 的费用读数与依据状态不再可信，读取时忽略重建；
+ * v13 = 日汇总费用覆盖判定（v0.9.2）——unknown_tokens/
  * unknown_pricing 的语义从「汇总 token 全部未定价」改为「实际未获费用
  * 覆盖」；旧快照的费用状态列与未知读数不再可信，读取时忽略重建；
  * v12 = 「时间预设」取代固定日期区间（`filters.preset`），
@@ -15,7 +18,7 @@ import { invoke } from "@tauri-apps/api/core";
  * session/project，v9 及更早快照的分组与下钻 key 不再可信；
  * v9 = 模型匹配规则（等价键）；v8 = 项目根归并；v7 = 统一项目身份；
  * v6 = 查询会话契约（SF04）；v5 及更早版本不含会话身份且游标为旧格式。 */
-export const SNAPSHOT_VERSION = 13;
+export const SNAPSHOT_VERSION = 14;
 
 export type SnapshotDispatch = (payload: unknown) => Promise<void>;
 

@@ -430,21 +430,24 @@ fn zero_priced_estimate_shows_zero_not_unknown() {
         "零元价格必须显示 $0.00——total_cost_usd 不得为 None"
     );
     assert!(!g.cost_partially_unknown);
+    assert!(g.has_estimated_cost, "零元费率覆盖实际用量是费用依据");
     // 合计行同规则。
     assert_eq!(result.totals.total_cost_usd, Some(0.0));
+    assert!(result.totals.has_estimated_cost);
     assert!(!result.totals.unknown_pricing);
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 反例 2：带峰谷时间规则 + 分段价的价格表——日汇总估算不得按 UTC 零点
-/// 命中时间规则，也不得按日 prompt 总量选择上下文档位。
+/// 反例 2：带峰谷时间规则 + 分段价的价格表——日汇总不得按日 prompt 总量
+/// 选档，也不得按某个臆造时刻命中时间规则；缺失条件的分项真实未定价。
 /// 价格表：base input = 1.0；分段：>1M prompt 时 input = 8.0（高档）；
 /// 峰时（UTC 08:00-12:00）input = 99.0。日汇总 2M input：
-/// - 旧实现（estimate + UTC 零点）：总量 2M 切到高档段 → $16（且零点不
-///   命中峰时，侥幸避开 99）；
-/// - estimate_flat：基础档位 → 2M × $1.0/M = **$2.0**。
+/// - 旧实现（estimate + UTC 零点）：总量 2M 切到高档段 → $16；
+/// - 固定基础价（已撤销的错误假设）：2M × $1.0/M = $2.0；
+/// - 正确口径：单请求上下文与时刻都缺失 → input 全部真实未定价，
+///   total = None（不从日汇总恢复精确金额）。
 #[test]
-fn rollup_estimate_ignores_time_rules_and_segments() {
+fn rollup_segment_pricing_not_guessed_from_day_total() {
     let dir = temp_dir("z2");
     let path = dir.join("pricing.toml");
     std::fs::write(
@@ -467,15 +470,19 @@ fn rollup_estimate_ignores_time_rules_and_segments() {
     let result = aggregate_with_rollups(&[], &r, GroupBy::Model, &tz, &pricing).unwrap();
     let g = result.groups.iter().find(|g| g.key != "合计").unwrap();
     assert!(
-        (g.cost_usd - 2.0).abs() < 1e-9,
-        "日汇总按基础档位计价（2M × $1.0/M = $2.0），不得按总量切高档段或按零点命中峰时，实际 {}",
+        g.cost_usd.abs() < 1e-9,
+        "不能按日总量选档（$16）或默认基础档（$2.0）；input 无可证明费率，实际 {}",
         g.cost_usd
     );
-    assert_eq!(g.unknown_tokens.total(), 0);
+    assert_eq!(
+        g.unknown_tokens.input, 2_000_000,
+        "单请求上下文缺失 → input 分项真实未定价"
+    );
+    assert_eq!(g.total_cost_usd, None);
+    assert!(g.unknown_pricing);
     // 对照（旧路径的可复现错误值，防回归锚点）：请求级 estimate 按 UTC 零点
-    // 计价时，2M 落入 >1M 高档段 → 2M × $8/M = $16；estimate_flat 必须避开
-    // 档位（上面断言的 $2.0 才是正确值）。这不是目标行为，只证明旧公式确实
-    // 算错；时间规则维度由 2b 用无分段价格表单独对照（$99/M）。
+    // 计价时，2M 落入 >1M 高档段 → 2M × $8/M = $16。这不是目标行为，只证明
+    // 按日总量交给请求级公式确实算错。
     let tokens = input_tok(2_000_000);
     let midnight: jiff::Timestamp = "2026-11-13T00:00:00Z".parse().unwrap();
     let old_midnight = pricing.estimate("peak-model", &tokens, midnight).unwrap();
@@ -487,10 +494,10 @@ fn rollup_estimate_ignores_time_rules_and_segments() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 反例 2b：estimate_flat 不命中时间规则——同价格表、请求级 estimate 在峰
-/// 时会命中 $99/M，而 estimate_flat 恒为基础价（对照证明路径已绕开时段）。
+/// 反例 2b：有适用时段但日汇总没有请求时刻——请求级 estimate 在峰时命中
+/// $99/M，但日汇总不能挑一个时刻；受影响分项真实未定价，不退回基础价。
 #[test]
-fn estimate_flat_differs_from_request_estimate_on_peak_rules() {
+fn time_limited_rule_does_not_guess_day_time() {
     let dir = temp_dir("z2b");
     let path = dir.join("pricing.toml");
     std::fs::write(
@@ -511,13 +518,22 @@ fn estimate_flat_differs_from_request_estimate_on_peak_rules() {
         "对照：请求级估算按时间规则命中峰价，实际 {}",
         est_request.cost
     );
-    // estimate_flat → 基础价 $1.0。
-    let est_flat = pricing.estimate_flat("peak-model", &tokens).unwrap();
+    // 日汇总：时刻缺失 → $1 与 $99 都可能，不能猜任何一个。
+    let est_rollup = pricing.estimate_rollup("peak-model", &tokens).unwrap();
     assert!(
-        (est_flat.cost - 1.0).abs() < 1e-9,
-        "estimate_flat 恒用基础价（忽略时间规则），实际 {}",
-        est_flat.cost
+        est_rollup.cost.abs() < 1e-9,
+        "时段依赖缺失 → 不计任意一侧价格，实际 {}",
+        est_rollup.cost
     );
-    assert!(est_flat.matched.as_ref().unwrap().schedule_label.is_none());
+    assert_eq!(est_rollup.unknown.input, 1_000_000);
+    assert!(!est_rollup.complete);
+    assert!(
+        est_rollup
+            .matched
+            .as_ref()
+            .unwrap()
+            .schedule_label
+            .is_none()
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

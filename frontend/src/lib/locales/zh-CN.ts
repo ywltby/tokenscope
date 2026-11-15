@@ -164,7 +164,7 @@ const zhCN = {
     groupCostPartsTitle: "构成",
     groupCostEstimateLabel: "请求明细估算",
     groupCostEstimateNote:
-      "含按日汇总估算的部分：按模型当前基础档位价格与汇总 token 总量估算（日总量不当作单请求上下文长度，也不套用峰谷时段价；不等于历史精确费用，未编造请求时间与缓存分档）。",
+      "含按日汇总估算的部分：只采用能够证明适用的费率（始终生效的覆盖规则照常应用；依赖缺失的请求时刻或上下文长度的分项保持未定价，不计入金额）。不是历史精确费用，未编造请求时间与分档。",
     groupCostSourceLabel: "日汇总来源记录费用",
     groupCostSourceNote: "来源工具（CCS）记录的日汇总费用；不是请求级估算，也不是实际账单。",
     groupCostSourcePartialNote:

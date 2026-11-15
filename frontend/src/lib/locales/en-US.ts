@@ -174,7 +174,7 @@ const enUS: AppMessages = {
     groupCostPartsTitle: "Composition",
     groupCostEstimateLabel: "Per-request estimates",
     groupCostEstimateNote:
-      "Includes parts estimated from daily rollups: current base-tier prices applied to each rollup's token totals (the day's total is not treated as a single request's context length and peak/off-peak schedules are not applied; not a historically exact bill; no request timestamps or cache tiers are fabricated).",
+      "Includes parts estimated from daily rollups: only rates that can be proven applicable are used (always-active overrides still apply; items whose request time or context length is missing stay unpriced and are excluded from the amount). Not a historically exact bill; no request timestamps or tiers are fabricated.",
     groupCostSourceLabel: "Rollup source-recorded cost",
     groupCostSourceNote:
       "Cost recorded by the source tool (CCS) for daily rollups; not a per-request estimate and not an actual bill.",

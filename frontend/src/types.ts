@@ -47,6 +47,12 @@ export interface Group {
    * 悬浮详情，不再常驻展示。`null` = 完全没有费用依据（显示未知）。
    */
   total_cost_usd?: number | null;
+  /**
+   * v0.9.2（第四轮复核）：本组有**实际使用中的 token 获得估算覆盖**（零元
+   * 费率覆盖也算 true；找到候选但全部实际用量缺价为 false）。悬浮详情用它
+   * 判断是否展示估算构成，不复用「金额非零」猜测。
+   */
+  has_estimated_cost?: boolean;
   /** v0.9.2：主金额之外仍有真实费用缺失（未知 token > 0）→ 短标记 †。 */
   cost_partially_unknown?: boolean;
   agents?: string[];

@@ -10,7 +10,9 @@
 // 悬浮详情（GroupCostBreakdownTooltip，hover/focus/click 固定）。
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
+import { nextTick } from "vue";
 import CostCell from "./CostCell.vue";
+import GroupCostBreakdownTooltip from "./GroupCostBreakdownTooltip.vue";
 import type { Group } from "../types";
 
 function group(opts: Partial<Group> = {}): Group {
@@ -136,6 +138,34 @@ describe("CostCell 悬浮详情（v0.9.2）", () => {
     });
     const trigger = w.find(".gcb-trigger");
     expect(trigger.exists()).toBe(true);
+    w.unmount();
+  });
+});
+
+describe("费用依据判定（v0.9.2 第四轮复核）", () => {
+  it("零元费率覆盖实际用量：悬浮显示 $0.00 估算依据，不说本行没有依据", async () => {
+    const w = mount(GroupCostBreakdownTooltip, {
+      attachTo: document.body,
+      props: {
+        group: group({
+          cost_usd: 0,
+          total_cost_usd: 0,
+          has_estimated_cost: true,
+          requests: 1,
+          tokens: { input: 1_000_000, output: 0, cache_write: 0, cache_read: 0 },
+          unknown_pricing: false,
+        }),
+        displayText: "$0.00",
+        unknownOnly: false,
+        open: true,
+        pinned: true,
+      },
+    });
+    await nextTick();
+    const bodyText = document.body.textContent ?? "";
+    expect(bodyText).toContain("请求明细估算");
+    expect(bodyText).toContain("$0.00");
+    expect(bodyText).not.toContain("本行没有可适用的费用依据");
     w.unmount();
   });
 });
