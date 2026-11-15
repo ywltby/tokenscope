@@ -647,6 +647,16 @@ const SOURCE_COST_GROUPS = [
     source_cost_state: "full",
     requests: 18,
   }),
+  // 零元价格（免费模型）：估算发生但金额 $0.00 → 显示 $0.00 而非未知†。
+  group("synthetic-free", 20000, {
+    output: 10000,
+    cost_usd: 0,
+    unknown_pricing: false,
+    unknown_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    total_cost_usd: 0,
+    cost_detail: "rollup_only",
+    requests: 6,
+  }),
   // 真实未定价：无候选（unknown 保留）。
   group("synthetic-unpriced", 30000, {
     output: 10000,

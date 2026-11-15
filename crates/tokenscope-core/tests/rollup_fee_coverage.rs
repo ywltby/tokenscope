@@ -391,3 +391,121 @@ fn cross_group_totals_merge_non_overlapping_costs() {
     assert!(!t.unknown_pricing);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ── 第三轮反例（2026-11-15 用户复核确认的三个缺陷）──────────────────────
+
+/// 反例 1：零元价格（免费模型 × token）→ 显示 $0.00 而不是未知†。
+/// 旧实现按「金额是否非零」判定 total_cost_usd → 估算结果恰为 0 时误显示
+/// 未知†（把免费当成缺价）。
+#[test]
+fn zero_priced_estimate_shows_zero_not_unknown() {
+    let dir = temp_dir("z1");
+    // 外置价格表：free-model 全部单价显式 0（免费）。
+    let path = dir.join("pricing.toml");
+    std::fs::write(
+        &path,
+        "[[model]]\nprefix = \"free-model\"\ninput = 0.0\noutput = 0.0\ncache_write = 0.0\ncache_read = 0.0\n",
+    )
+    .unwrap();
+    let (pricing, warnings) = Pricing::load(Some(&path), None, None);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let tz = jiff::tz::TimeZone::UTC;
+    // 日汇总缺失费用 → estimate_flat 发生（估算结果 $0.00）。
+    let r = [rollup(
+        "free-model",
+        "2026-11-13",
+        input_tok(2_000_000),
+        None,
+    )];
+    let result = aggregate_with_rollups(&[], &r, GroupBy::Model, &tz, &pricing).unwrap();
+    let g = result.groups.iter().find(|g| g.key != "合计").unwrap();
+    assert_eq!(g.cost_detail, Some("rollup_only"), "数据粒度披露不变");
+    assert_eq!(g.unknown_tokens.total(), 0, "免费价也覆盖 token");
+    assert!(!g.unknown_pricing);
+    assert!((g.cost_usd - 0.0).abs() < 1e-12, "估算金额为 0（免费）");
+    // 关键断言：total_cost_usd = Some(0.0)（有依据），不是 None（无依据）。
+    assert_eq!(
+        g.total_cost_usd,
+        Some(0.0),
+        "零元价格必须显示 $0.00——total_cost_usd 不得为 None"
+    );
+    assert!(!g.cost_partially_unknown);
+    // 合计行同规则。
+    assert_eq!(result.totals.total_cost_usd, Some(0.0));
+    assert!(!result.totals.unknown_pricing);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 反例 2：带峰谷时间规则 + 分段价的价格表——日汇总估算不得按 UTC 零点
+/// 命中时间规则，也不得按日 prompt 总量选择上下文档位。
+/// 价格表：base input = 1.0；分段：>1M prompt 时 input = 8.0（高档）；
+/// 峰时（UTC 08:00-12:00）input = 99.0。日汇总 2M input：
+/// - 旧实现（estimate + UTC 零点）：总量 2M 切到高档段 → $16（且零点不
+///   命中峰时，侥幸避开 99）；
+/// - estimate_flat：基础档位 → 2M × $1.0/M = **$2.0**。
+#[test]
+fn rollup_estimate_ignores_time_rules_and_segments() {
+    let dir = temp_dir("z2");
+    let path = dir.join("pricing.toml");
+    std::fs::write(
+        &path,
+        "[[model]]\nprefix = \"peak-model\"\ninput = 1.0\noutput = 0.0\n\
+         [[model.segment]]\nmin_tokens = 1000000\ninput = 8.0\noutput = 0.0\n\
+         [[model.schedule]]\nlabel = \"peak\"\ntimezone = \"UTC\"\n\
+         [[model.schedule.period]]\nstart_time = \"08:00\"\nend_time = \"12:00\"\ninput = 99.0\n",
+    )
+    .unwrap();
+    let (pricing, warnings) = Pricing::load(Some(&path), None, None);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let tz = jiff::tz::TimeZone::UTC;
+    let r = [rollup(
+        "peak-model",
+        "2026-11-13",
+        input_tok(2_000_000),
+        None,
+    )];
+    let result = aggregate_with_rollups(&[], &r, GroupBy::Model, &tz, &pricing).unwrap();
+    let g = result.groups.iter().find(|g| g.key != "合计").unwrap();
+    assert!(
+        (g.cost_usd - 2.0).abs() < 1e-9,
+        "日汇总按基础档位计价（2M × $1.0/M = $2.0），不得按总量切高档段或按零点命中峰时，实际 {}",
+        g.cost_usd
+    );
+    assert_eq!(g.unknown_tokens.total(), 0);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 反例 2b：estimate_flat 不命中时间规则——同价格表、请求级 estimate 在峰
+/// 时会命中 $99/M，而 estimate_flat 恒为基础价（对照证明路径已绕开时段）。
+#[test]
+fn estimate_flat_differs_from_request_estimate_on_peak_rules() {
+    let dir = temp_dir("z2b");
+    let path = dir.join("pricing.toml");
+    std::fs::write(
+        &path,
+        "[[model]]\nprefix = \"peak-model\"\ninput = 1.0\noutput = 0.0\n\
+         [[model.schedule]]\nlabel = \"peak\"\ntimezone = \"UTC\"\n\
+         [[model.schedule.period]]\nstart_time = \"00:00\"\nend_time = \"23:59\"\ninput = 99.0\n",
+    )
+    .unwrap();
+    let (pricing, warnings) = Pricing::load(Some(&path), None, None);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let tokens = input_tok(1_000_000);
+    // 请求级估算（UTC 08:00 命中全天峰时段）→ $99。
+    let at = "2026-11-13T08:00:00Z".parse().unwrap();
+    let est_request = pricing.estimate("peak-model", &tokens, at).unwrap();
+    assert!(
+        (est_request.cost - 99.0).abs() < 1e-9,
+        "对照：请求级估算按时间规则命中峰价，实际 {}",
+        est_request.cost
+    );
+    // estimate_flat → 基础价 $1.0。
+    let est_flat = pricing.estimate_flat("peak-model", &tokens).unwrap();
+    assert!(
+        (est_flat.cost - 1.0).abs() < 1e-9,
+        "estimate_flat 恒用基础价（忽略时间规则），实际 {}",
+        est_flat.cost
+    );
+    assert!(est_flat.matched.as_ref().unwrap().schedule_label.is_none());
+    std::fs::remove_dir_all(&dir).ok();
+}

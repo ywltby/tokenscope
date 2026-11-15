@@ -2984,13 +2984,6 @@ const IMPL = {
           return out;
         });
         const byLabel = (frag) => cells.filter((c) => c.label.includes(frag));
-        // 每个费用节点都必须带组件 scope（缺陷 B 根因断言）。
-        ctx.record(
-          name,
-          `${viewport.label}:费用节点全部带组件 scope 标记`,
-          cells.length >= 5 && cells.every((c) => c.scopeAttr),
-          `cells=${cells.length} scoped=${cells.filter((c) => c.scopeAttr).length}`,
-        );
         // v0.9.2：费用节点是单金额触发器（旧 inline 粘行由结构消除——
         // 无第二行可粘）。断言每个触发器都有非空金额文本。
         ctx.record(
@@ -3034,6 +3027,14 @@ const IMPL = {
           unpriced != null && unpriced.text.includes("\u672a\u77e5\u2020"),
           unpriced?.text ?? "missing",
         );
+        // v0.9.2 反例 1：零元价格 → $0.00（不是未知†）。
+        const free = byLabel("synthetic-free")[0];
+        ctx.record(
+          name,
+          `${viewport.label}:v092-zero-price-shows-zero`,
+          free != null && free.text.includes("$0.00"),
+          free?.text ?? "missing",
+        );
         const partial = byLabel("synthetic-rollup-partial")[0];
         ctx.record(
           name,
@@ -3073,6 +3074,34 @@ const IMPL = {
           `${viewport.label}:v092-tooltip-composition`,
           tip != null && tip.hasParts && (tip.hasEstimate || tip.hasSource),
           JSON.stringify(tip),
+        );
+        // v0.9.2 反例 3：悬浮层内部样式生效（实色衬底 + 发丝线分区）。
+        const tipStyle = await page.evaluate(() => {
+          const solid = [...document.querySelectorAll(".gcb-solid")].find((el) => {
+            let node = el;
+            while (node) {
+              const cs = getComputedStyle(node);
+              if (cs.display === "none" || cs.visibility === "hidden") return false;
+              node = node.parentElement;
+            }
+            return true;
+          });
+          if (!solid) return null;
+          const cs = getComputedStyle(solid);
+          return {
+            background: cs.backgroundColor,
+            radius: cs.borderRadius,
+            padding: cs.paddingTop,
+          };
+        });
+        ctx.record(
+          name,
+          `${viewport.label}:v092-tooltip-solid-style-applied`,
+          tipStyle != null &&
+            tipStyle.background !== "rgba(0, 0, 0, 0)" &&
+            tipStyle.background !== "transparent" &&
+            tipStyle.padding !== "0px",
+          JSON.stringify(tipStyle),
         );
 const cardState = await page.evaluate(() => {
           const card = document.querySelector(".metric-card");

@@ -104,17 +104,17 @@ describe("UsageTable 费用列单金额（v0.9.2）", () => {
     expect(main).not.toContain("†");
   });
 
-  it("费用节点带组件 scope 属性（缺陷 B 回归锚点）", () => {
+  it("费用节点是组件挂载的按钮（缺陷 B 结构回归锚点）", () => {
+    // v0.9.2：费用列不再依赖 scoped CSS（全局 gcb- 前缀 + 组件化），render
+    // 直建 DOM 的粘行问题结构上不可能复发；断言更新为组件挂载结构验证。
     const g = group("m-scope");
     g.cost_usd = 1.0;
     g.total_cost_usd = 1.0;
     const w = mount(UsageTable, { props: { report: report([g], false) } });
     const trigger = w.find(".gcb-trigger");
     expect(trigger.exists()).toBe(true);
-    const scopeAttr = Object.keys(trigger.attributes()).some((a: string) =>
-      a.startsWith("data-v-"),
-    );
-    expect(scopeAttr, "render 输出的费用节点必须带 scope").toBe(true);
+    expect(trigger.element.tagName).toBe("BUTTON");
+    expect(trigger.attributes("aria-label")).toContain("$1.00");
   });
 
   it("合计行与模型行同一单金额规则", () => {

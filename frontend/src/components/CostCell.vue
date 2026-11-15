@@ -62,6 +62,10 @@ function togglePin(): void {
 
 <style scoped>
 /* v0.9.2：费用列不再有本地排版——单金额 + 悬浮由 GroupCostBreakdownTooltip
-   承载；本组件保留为 UsageTable render 回调的 scope 载体（缺陷 B 的根因
-   修复依赖独立 SFC 的 scope 标记）。 */
+   承载。本组件保留 scoped 样式块以维持 SFC scope 标记（缺陷 B 的回归锚点：
+   UsageTable render 回调创建的节点不带 scope，scoped CSS 永不命中导致粘行；
+   独立 SFC 的 scope 属性是防回归断言的载体），规则作用于自身模板根节点。 */
+:where(section, span) {
+  /* 无实际样式——仅维持 scope id 生成。 */
+}
 </style>

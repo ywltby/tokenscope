@@ -15,6 +15,11 @@ use crate::pricing::Pricing;
 struct GroupAccum {
     group: Group,
     representative: Option<String>,
+    /// v0.9.2：本组是否发生过**费用依据**（明细估算发生——含估算结果为 0 的
+    /// 免费模型——或采用汇总带来源费用）。判定 total_cost_usd 用它而不是
+    /// 「金额是否非零」：估算结果恰为 0（免费价 × token）时金额为 0 但依据
+    /// 存在，必须显示 $0.00 而不是未知†。
+    has_cost_basis: bool,
 }
 
 /// MP04：Model 维度的展示名——优先可信 models.dev 模型名（按完整等价 ID
@@ -468,6 +473,7 @@ fn push_event_into(
                 ..Group::default()
             },
             representative: None,
+            has_cost_basis: false,
         });
         // MP04：无可信展示名时的代表写法 = 该组原始模型名的最小字典序（稳定）。
         if by == GroupBy::Model && acc.representative.as_deref().is_none_or(|r| e.model < r) {
@@ -489,6 +495,10 @@ fn push_event_into(
         // 确定性计价只算一次（百万事件聚合下两次调用是纯浪费）；estimate
         // 不产生失败路径，求值先后不影响"临时值全部成功才提交"的纪律。
         let estimate = pricing.estimate(e.model, &event_tokens, e.ts);
+        // v0.9.2：估算发生（含结果为 0 的免费模型）即费用依据。
+        if estimate.is_some() {
+            acc.has_cost_basis = true;
+        }
         match &estimate {
             Some(est) => {
                 new_cost += est.cost;
@@ -542,28 +552,16 @@ fn push_event_into(
 
 /// 喂入一条日汇总贡献（H06）：只有日粒度的历史不能按请求级重估——
 /// v0.9.2 起**费用覆盖逐条判定**（见函数内注释）：来源费用已提供的汇总
-/// token 不进 unknown；缺失费用按模型价格估算（时间取汇总归属日的
-/// 00:00 UTC——日汇总没有请求时间，估算依据如实标注，不编造时刻）；
-/// 无候选才整体真实未定价。
+/// token 不进 unknown；缺失费用按模型价格估算（[`Pricing::estimate_flat`]：
+/// 禁用时间规则与上下文档位——日汇总没有请求时间，一天的总量也不是单
+/// 请求上下文长度，按 UTC 零点/总量切档都会算错费用）；无候选才整体
+/// 真实未定价。
 fn push_rollup_into(
     map: &mut BTreeMap<String, GroupAccum>,
     by: GroupBy,
     r: &RollupContribution,
     pricing: &Pricing,
 ) -> anyhow::Result<()> {
-    // 估算时间：来源统计日的 00:00 UTC。日汇总没有请求时间/峰谷时段，
-    // 不编造时刻；峰谷规则若按时刻命中，这里取日首时刻为保守估算依据
-    //（悬浮详情披露估算口径）。日期解析失败（历史脏数据）时退回 Unix 纪元，
-    // 估算依据仍如实标注来源日。
-    let rollup_ts = r
-        .day
-        .parse::<jiff::civil::Date>()
-        .map(|d| {
-            d.to_zoned(jiff::tz::TimeZone::UTC)
-                .map(|z| z.timestamp())
-                .unwrap_or(jiff::Timestamp::MIN)
-        })
-        .unwrap_or(jiff::Timestamp::MIN);
     const RECORD_AGENTS: bool = true;
     {
         let key = match by {
@@ -581,6 +579,7 @@ fn push_rollup_into(
                 ..Group::default()
             },
             representative: None,
+            has_cost_basis: false,
         });
         if by == GroupBy::Model
             && acc
@@ -613,9 +612,14 @@ fn push_rollup_into(
         // 请求数/四桶原始 token/来源选择/导入幂等不受影响。
         if let Some(_fee) = r.source_cost_usd {
             // 已提供费用（含显式 0）：token 全覆盖，不进 unknown。
+            acc.has_cost_basis = true;
         } else {
-            // 缺失费用：尝试按价格估算。
-            let estimate = pricing.estimate(&r.model, &r.tokens, rollup_ts);
+            // 缺失费用：按价格估算（禁用时间规则与上下文档位——日汇总没有
+            // 请求时间，一天的总量不是单请求上下文长度）。
+            let estimate = pricing.estimate_flat(&r.model, &r.tokens);
+            if estimate.is_some() {
+                acc.has_cost_basis = true;
+            }
             match estimate {
                 Some(est) => {
                     // 已知分项金额计入主估算；未获覆盖的分项 token 进 unknown
@@ -717,7 +721,7 @@ impl AggregateState {
                     .to_string(),
             )
         }
-        let mut groups: Vec<Group> = map
+        let mut groups: Vec<(Group, bool)> = map
             .into_values()
             .map(|acc| {
                 let mut g = acc.group;
@@ -732,33 +736,36 @@ impl AggregateState {
                 // 时，先清除会丢失"该组有明细贡献"的事实，totals 被错标
                 // rollup_only，请求估算金额在展示层被来源金额隐藏。归约期间
                 // 保留占位参与构成合成（见下方 totals 循环），归约后再清。
-                g
+                (g, acc.has_cost_basis)
             })
             .collect();
         // 单应用数据不标注 agents（与 M1 起的输出保持一致）：喂入阶段如实记录，
         // 收口时按最终是否多应用决定保留。
         if !multi_agent {
-            for g in &mut groups {
+            for (g, _) in &mut groups {
                 g.agents.clear();
             }
         }
         // v0.9.2：费用列单一显示金额 + 部分缺失标记——逐组合并（互不重叠
         // 贡献：请求估算 cost_usd + 采用汇总来源费用 source_cost_usd；未舍
-        // 入原值相加，前端只格式化一次）。两者都缺 → None（纯未定价组）。
-        for g in &mut groups {
+        // 入原值相加，前端只格式化一次）。**判定按费用依据**（has_cost_basis
+        // ——估算发生含结果为 0 的免费模型、或来源费用存在），不是金额是否
+        // 非零：零元价格显示 $0.00 而不是未知†（第三轮复核反例 1）。
+        // 两者都缺 → None（纯未定价组）。
+        for (g, has_basis) in &mut groups {
             let unknown_total = g.unknown_tokens.total();
             match (g.cost_usd != 0.0, g.source_cost_usd) {
                 (_, Some(src)) => {
                     g.total_cost_usd = Some(g.cost_usd + src);
                     g.cost_partially_unknown = unknown_total > 0;
                 }
-                (true, None) => {
+                (_, None) if *has_basis => {
+                    // 估算发生但金额为 0（免费价 × token）→ $0.00 而非未知†。
                     g.total_cost_usd = Some(g.cost_usd);
                     g.cost_partially_unknown = unknown_total > 0;
                 }
-                (false, None) => {
-                    // 完全没有费用依据（cost=0 且无来源费用）→ None；
-                    // unknown 的零值边界：tokens=0 且 unknown=0 → 也是 None。
+                (_, None) => {
+                    // 完全没有费用依据 → None（纯未定价组）。
                     g.total_cost_usd = None;
                     g.cost_partially_unknown = unknown_total > 0;
                 }
@@ -768,7 +775,9 @@ impl AggregateState {
             key: "合计".to_string(),
             ..Group::default()
         };
-        for g in &groups {
+        let mut totals_has_basis = false;
+        for (g, has_basis) in &groups {
+            totals_has_basis = totals_has_basis || *has_basis;
             totals.requests = totals
                 .requests
                 .checked_add(g.requests)
@@ -833,7 +842,7 @@ impl AggregateState {
         }
         // 8.1（第二轮复核）：归约完成后清除内部占位——纯明细组保持既有 JSON
         // 兼容（None）；纯明细的 totals 同样清除。rollup_only / mixed 对外可见。
-        for g in &mut groups {
+        for (g, _) in &mut groups {
             if g.cost_detail == Some("detail") {
                 g.cost_detail = None;
             }
@@ -841,9 +850,10 @@ impl AggregateState {
         if totals.cost_detail == Some("detail") {
             totals.cost_detail = None;
         }
-        // v0.9.2：totals 的单一显示金额与部分缺失标记（与分组行同规则）。
+        // v0.9.2：totals 的单一显示金额与部分缺失标记（与分组行同规则——
+        // 判定按 totals_has_basis，零元价格显示 $0.00 而非未知†）。
         let totals_unknown = totals.unknown_tokens.total();
-        match (totals.cost_usd != 0.0, totals.source_cost_usd) {
+        match (totals_has_basis, totals.source_cost_usd) {
             (_, Some(src)) => {
                 totals.total_cost_usd = Some(totals.cost_usd + src);
                 totals.cost_partially_unknown = totals_unknown > 0;
@@ -857,7 +867,8 @@ impl AggregateState {
                 totals.cost_partially_unknown = totals_unknown > 0;
             }
         }
-        groups.push(totals.clone());
+        groups.push((totals.clone(), totals_has_basis));
+        let groups = groups.into_iter().map(|(g, _)| g).collect();
         Ok(Aggregated {
             by: by.as_str(),
             groups,

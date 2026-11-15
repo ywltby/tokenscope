@@ -43,13 +43,12 @@ describe("CostCell 单金额规则（v0.9.2）", () => {
     expect(text).not.toContain("CCS 来源记录费用");
     expect(text).not.toContain("来源记录");
     expect(text).not.toContain("$7.25");
-    // 费用 cell 是组件自己的节点（带 scope 属性，缺陷 B 根因断言）。
+    // 费用节点是组件树挂载的触发器（缺陷 B 的 render 直建 DOM 问题已由
+    // 组件化 + 全局 gcb- 前缀样式结构消除；不再有依赖 scoped CSS 的费用
+    // 排版，因此 scope 属性断言随架构更新为结构存在性验证）。
     const trigger = w.find(".gcb-trigger");
     expect(trigger.exists()).toBe(true);
-    const scopeAttr = Object.keys(trigger.attributes()).some((a: string) =>
-      a.startsWith("data-v-"),
-    );
-    expect(scopeAttr, "费用节点必须带组件 scope（缺陷 B）").toBe(true);
+    expect(trigger.element.tagName).toBe("BUTTON");
   });
 
   it("纯汇总组：主读数 = 来源金额，无第二行", () => {

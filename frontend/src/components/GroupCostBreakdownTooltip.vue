@@ -221,7 +221,10 @@ function renderContent(): ReturnType<typeof h> {
   </NTooltip>
 </template>
 
-<style scoped>
+<style>
+/* v0.9.2：renderContent() 用 h() 创建的节点不带 SFC scope 属性（与缺陷 B
+   同根因），scoped 选择器永不命中——样式改用全局作用域 + gcb- 前缀类名
+   （组件专属前缀已足够隔离，不使用泛用 span 标签选择器）。 */
 .gcb-trigger {
   /* 组件局部重置：保留数值对齐与焦点环（DESIGN.md §5 RC06 约定）。 */
   padding: 0;

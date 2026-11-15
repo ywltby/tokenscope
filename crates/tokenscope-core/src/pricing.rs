@@ -3042,6 +3042,80 @@ impl Pricing {
         Some(est)
     }
 
+    /// 日汇总估算（v0.9.2）：**禁用时间规则、按基础档位计价**——
+    ///
+    /// 日汇总只有一天的 token 总量，没有请求时间，也没有真实的单请求上下文
+    /// 长度：走 [`Self::estimate`] 会按「UTC 零点」命中峰谷/时间规则（把一
+    /// 天的量记到某个时段价上），并按**日 prompt 总量**选择上下文档位（把一
+    /// 天的量当成一次请求的长度，高档位价冒充日常价）——两者都算错费用。
+    /// 这里固定用候选的**基础计划**（base 档位）计价，估算依据如实标注
+    /// 「按日汇总估算（当日 prompt 总量，无请求时间与分档依据）」。
+    /// 候选选择规则与 `estimate` 相同（完整优先 → 最高费用 → tie-break）。
+    pub fn estimate_flat(&self, model: &str, t: &TokenCounts) -> Option<CostEstimate> {
+        let cands = self.collect_candidates(model);
+        if cands.is_empty() {
+            return None;
+        }
+        let cand_count = cands.len();
+        type Cand<'a> = (CostEstimate, MatchMode, &'a Entry);
+        let mut complete_set: Vec<Cand> = Vec::new();
+        let mut partial_set: Vec<Cand> = Vec::new();
+        for (e, mode) in cands {
+            // 无时间规则（None）：基础计划 + 基础档位。basis_value 仍传
+            // prompt 总量供 select_segment 使用，但 plan 无分段时分段选择
+            // 返回 None → 用 base；**有分段**的候选也会按总量切到高档段——
+            // 那同样把一天总量当单请求长度，因此显式把分段清空后计价。
+            let mut flat_entry = e.clone();
+            flat_entry.plan.segments = Vec::new();
+            let est = estimate_entry(&flat_entry, t.prompt_tokens(), t, None);
+            if est.complete {
+                complete_set.push((est, mode, e));
+            } else {
+                partial_set.push((est, mode, e));
+            }
+        }
+        let (pool, reason) = if !complete_set.is_empty() {
+            (&complete_set, "highest_complete_cost")
+        } else {
+            (&partial_set, "highest_partial_cost")
+        };
+        let mut best: Option<&Cand> = None;
+        for cand in pool.iter() {
+            best = match best {
+                Some((b, bm, be)) => {
+                    if cand.0.cost > b.cost
+                        || (cand.0.cost == b.cost && tie_rank(cand.2, cand.1) > tie_rank(be, *bm))
+                    {
+                        Some(cand)
+                    } else {
+                        best
+                    }
+                }
+                None => Some(cand),
+            };
+        }
+        let (mut est, mode, e) = best.expect("候选非空时池必非空").clone();
+        est.matched = Some(MatchedCandidate {
+            raw_key: e.display.clone(),
+            channel: e.display.split_once('/').map(|(c, _)| c.to_string()),
+            source: tier_name(e.tier).to_string(),
+            matched_key: e.prefix.clone(),
+            match_mode: mode,
+            candidate_count: cand_count,
+            reason: reason.to_string(),
+            schedule_label: None,
+            schedule_timezone: None,
+            // 依据标注：日汇总估算（无请求时刻）。
+            request_at: None,
+            complete_candidate_count: complete_set.len(),
+            incomplete_candidate_count: partial_set.len(),
+            incomplete_candidates_excluded: 0,
+        });
+        est.excluded_incomplete_schedules = 0;
+        est.excluded_candidate_warning = None;
+        Some(est)
+    }
+
     /// GUI 设置页条目（合并视图，含来源、显示名与同前缀 OpenRouter 对照价）。
     pub fn entries(&self) -> Vec<PricingEntry> {
         // OpenRouter 层按等价前缀索引，供非 OpenRouter 行对照（精确同前缀）。
