@@ -62,7 +62,10 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocumentClick));
 
 const g = computed(() => props.group);
 /// 主金额旁的短标记：真实费用缺失 → †（原因在悬浮详情内）。
-const partialMark = computed(() => (g.value.cost_partially_unknown ? "†" : ""));
+/// unknownOnly（完全无依据 → 「未知†」）时不再叠加——未知标记自身已含 †。
+const partialMark = computed(() =>
+  props.unknownOnly || g.value.cost_partially_unknown ? (props.unknownOnly ? "" : "†") : "",
+);
 const hasEstimate = computed(() => g.value.cost_usd !== 0);
 const estimateText = computed(() => formatMoney(g.value.cost_usd, "summary"));
 const hasSource = computed(() => g.value.source_cost_usd != null);
