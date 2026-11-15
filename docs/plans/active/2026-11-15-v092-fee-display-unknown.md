@@ -163,5 +163,5 @@
 e2e runner（11 契约 × 明暗 × 两尺寸）在文档收口后复跑全过
 （`qa-artifacts/ui-adjustment/ci-e2e`）。
 PR #70 第三轮修复提交 `b7d5b15` 起每次 HEAD 的 20 项必需检查全过、
-`mergeStateStatus=CLEAN`；其后仅有文档与死代码清理（`36c181f`、`9b54baa`），
-无行为变化。等待用户复核；不合并、不发布、不安装。
+`mergeStateStatus=CLEAN`；后续提交仅文档、死代码清理与回归对照断言，
+不改变运行行为。等待用户复核；不合并、不发布、不安装。
