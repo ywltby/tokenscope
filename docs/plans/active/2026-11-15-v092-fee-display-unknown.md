@@ -22,8 +22,8 @@
 `push_rollup_into` 逐条判断：
 
 1. **来源费用已提供**（`Some(v)`，含 `Some(0)`）→ 该汇总的 token **不进 unknown_tokens**；费用走来源通道（`source_cost_usd` 累计不变）；组仍可标 `cost_detail`（rollup_only/mixed 语义不变——数据粒度披露，不等同缺价）。
-2. **来源费用缺失**（`None`）→ 尝试按模型价格**估算该汇总**（`pricing.estimate(model, tokens, 汇总日)`）：
-   - 估算成功且 `complete` → 金额计入 `cost_usd`（依据标注为「按日汇总估算」），token 不进 unknown；**依据披露**进悬浮详情（不是历史精确费用——不编造请求时间/分档，估算时间取汇总归属日，`basis` 如实标注 prompt 总量）；
+2. **来源费用缺失**（`None`）→ 尝试按模型价格**估算该汇总**（`pricing.estimate_flat(model, tokens)`——日汇总专用：禁用峰谷/时间规则、不按上下文档位切档，固定基础档位价；日汇总没有请求时间，一天的总量也不是单请求上下文长度）：
+   - 估算成功且 `complete` → 金额计入 `cost_usd`（依据标注为「按日汇总估算」），token 不进 unknown；**依据披露**进悬浮详情（不是历史精确费用——不编造请求时间/分档，不套用时段价与总量档位）；
    - 估算成功但 `complete=false`（部分分项缺价）→ 已知分项金额计入 cost_usd，**实际未获覆盖的分项 token**（`est.unknown`）进 unknown_tokens；
    - 无候选/估算失败 → 全部 token 进 unknown_tokens（真实未定价），悬浮详情写明缺项（无匹配价格/缺分项），不笼统说「模型没有价格」。
 3. **不双重计费**：有来源费用的汇总不再叠加估算（同一份用量只选一次费用依据）。
@@ -42,8 +42,8 @@
 
 ### 1.3 汇总估算的依据披露
 
-- 悬浮中显示「按日汇总估算（YYYY-MM-DD，prompt N tokens）」与四分项小计；注明「日汇总无请求时间/缓存分档，估算不等于历史精确费用；未编造分档」。
-- 有来源费用时显示「来源记录费用 $X（YYYY-MM-DD 明细逐条）」。
+- 悬浮中显示「按模型当前基础档位价格与汇总 token 总量估算」与四分项小计；注明「日总量不当作单请求上下文长度、不套用峰谷时段价，估算不等于历史精确费用；未编造请求时间与缓存分档」。
+- 有来源费用时显示「来源记录费用 $X（逐条明细）」。
 
 ## 2. 红测（先红，全部行为断言）
 
@@ -97,9 +97,9 @@
   = 未知）后行为红可复现。前端旧断言面（SummaryCards/UsageTable 42 项）
   按新规则重写。
 - **绿·B（aggregate.rs）**：push_rollup_into 费用覆盖逐条判定（有费用 →
-  token 不进 unknown 不叠加估算；缺失 → 按价格估算该汇总，时间 = 归属日
-  00:00 UTC、basis 标注日 prompt 总量；部分缺价只计实际未获覆盖分项；
-  无候选保留真实未定价）；`Group.total_cost_usd`/`cost_partially_unknown`
+  token 不进 unknown 不叠加估算；缺失 → 按 `estimate_flat` 估算该汇总，
+  禁用时间规则与上下文档位、固定基础档位价；部分缺价只计实际未获覆盖
+  分项；无候选保留真实未定价）；`Group.total_cost_usd`/`cost_partially_unknown`
   合并字段；SNAPSHOT_VERSION 12 → 13（旧快照费用状态不可信，读取时忽略
   重建，不清库/重扫/重导）。既有旧规则断言更新 4 处
   （ccs_rollup_coverage 1 + ccs_rollup_source_cost 2 + history_overlap 2，
@@ -120,3 +120,34 @@
   build_inputs --check 干净、版本 0.9.2（patch，release: true）。
 - **文档**：stats-semantics §5.1 撤销旧规则并写入费用覆盖判定与单金额
   展示规则；DESIGN.md §5 费用明细补分组费用详情；本计划回填。
+
+### 第三轮复核反例修复（2026-11-15，`b7d5b15`）
+
+用户复核确认三个缺陷，按「红测先行」逐一修复并补回归：
+
+1. **零元价格显示「未知†」**：旧 `total_cost_usd` 判定看金额是否非零，
+   免费价 × token 估算结果恰为 0 时被当成无依据。修复：`GroupAccum.has_cost_basis`
+   （明细估算发生——含结果为 0——或采用汇总带来源费用即置位），分组行与
+   合计行按费用依据判定 → `$0.00`。回归
+   `zero_priced_estimate_shows_zero_not_unknown`（修复前 None / 修复后
+   Some(0.0)）。
+2. **日汇总误用 UTC 零点与上下文档位**：旧路径 `estimate(rollup_ts=归属日
+   00:00 UTC)` 会命中峰谷时段，并按日 prompt 总量切高档段。修复：新增
+   `Pricing::estimate_flat`（禁用时间规则、清空分段按基础档位计价，
+   `schedule_label=None`），aggregate 改用它并移除 `rollup_ts`。回归
+   `rollup_estimate_ignores_time_rules_and_segments`（2M × $1.0/M = $2.0；
+   旧实现 $16）与 `estimate_flat_differs_from_request_estimate_on_peak_rules`
+   （请求级峰价 $99 对照，flat 恒 $1.0）。
+3. **悬浮层内部样式未生效**：`renderContent()` 的 `h()` 节点不带 SFC
+   scope 属性，`<style scoped>` 的 `.gcb-section/.gcb-solid` 永不命中。
+   修复：样式改全局作用域 + `gcb-` 前缀类名；契约新增
+   `v092-tooltip-solid-style-applied`（真实浏览器 computed background/
+   padding 断言）。原节点级 scope 断言随架构更新为组件挂载结构验证
+   （费用列不再依赖 scoped CSS，render 直建 DOM 问题结构上不可能复发）。
+
+**验证与状态**：Rust `rollup_fee_coverage` 13 项（10 既有 + 3 反例）全过，
+全 workspace 测试全过；前端 1150 项、typecheck/build=0；契约
+`cost_cell_layout_not_concatenated` 17 条断言明暗 × 1280×820/980×620
+全过（`qa-artifacts/v092-fix/cost-cell-8/` 截图同帧确认三项修复）。
+PR #70 HEAD `b7d5b15`，20 项必需检查全过、`mergeStateStatus=CLEAN`。
+等待用户复核；不合并、不发布、不安装。

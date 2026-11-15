@@ -11,8 +11,9 @@
 // - 日汇总来源记录费用（source_cost_usd，含逐条依据说明）；
 // - 覆盖完整性（source_cost_state：partial 说明部分汇总未提供费用）；
 // - 缺失部分（cost_partially_unknown → unknown_tokens 分项）；
-// - 估算依据：日汇总按价格估算时注明「按日汇总估算（prompt 总量），
-//   不等于历史精确费用；未编造请求时间与缓存分档」。
+// - 估算依据：日汇总按价格估算时注明「按模型当前基础档位价格与汇总 token
+//   总量估算；日总量不当作单请求上下文长度、不套用峰谷时段价，不等于历史
+//   精确费用；未编造请求时间与缓存分档」。
 // 不称为实际账单，不放大段来源说明。
 import { computed, h, onBeforeUnmount, onMounted, ref, useId } from "vue";
 import { NTooltip } from "naive-ui";
