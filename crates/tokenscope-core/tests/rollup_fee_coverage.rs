@@ -472,6 +472,18 @@ fn rollup_estimate_ignores_time_rules_and_segments() {
         g.cost_usd
     );
     assert_eq!(g.unknown_tokens.total(), 0);
+    // 对照（旧路径的可复现错误值，防回归锚点）：请求级 estimate 按 UTC 零点
+    // 计价时，2M 落入 >1M 高档段 → 2M × $8/M = $16；estimate_flat 必须避开
+    // 档位（上面断言的 $2.0 才是正确值）。这不是目标行为，只证明旧公式确实
+    // 算错；时间规则维度由 2b 用无分段价格表单独对照（$99/M）。
+    let tokens = input_tok(2_000_000);
+    let midnight: jiff::Timestamp = "2026-11-13T00:00:00Z".parse().unwrap();
+    let old_midnight = pricing.estimate("peak-model", &tokens, midnight).unwrap();
+    assert!(
+        (old_midnight.cost - 16.0).abs() < 1e-9,
+        "对照：旧路径按日总量切高档段 → $16，实际 {}",
+        old_midnight.cost
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 

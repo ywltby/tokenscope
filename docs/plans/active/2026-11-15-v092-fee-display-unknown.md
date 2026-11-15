@@ -145,6 +145,17 @@
    padding 断言）。原节点级 scope 断言随架构更新为组件挂载结构验证
    （费用列不再依赖 scoped CSS，render 直建 DOM 问题结构上不可能复发）。
 
+**红取证（控制实验，不只靠“修完刚好通过”）**：
+
+- 反例 2：同一价格表下，旧路径 `pricing.estimate` 在 UTC 零点对 2M
+  prompt 返回 **$16**（按日总量切 >1M 高档段），`estimate_flat` 为 **$2**；
+  该对照断言已固化在 `rollup_estimate_ignores_time_rules_and_segments`，
+  2b 再用无分段价格表对照时间规则（请求级 $99 vs flat $1）。
+- 反例 3：临时把组件 `<style>` 改回 `<style scoped>` 复跑同一契约，
+  `v092-tooltip-solid-style-applied` **失败**（background
+  `rgba(0, 0, 0, 0)`、radius `0px`、padding `0px`，两个视口）；恢复全局
+  样式后 17 条断言全过。
+
 **验证与状态**：Rust `rollup_fee_coverage` 13 项（10 既有 + 3 反例）全过，
 全 workspace 测试全过；前端 1150 项、typecheck/build=0；契约
 `cost_cell_layout_not_concatenated` 17 条断言明暗 × 1280×820/980×620
