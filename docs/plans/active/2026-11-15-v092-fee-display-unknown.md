@@ -148,6 +148,9 @@
 **验证与状态**：Rust `rollup_fee_coverage` 13 项（10 既有 + 3 反例）全过，
 全 workspace 测试全过；前端 1150 项、typecheck/build=0；契约
 `cost_cell_layout_not_concatenated` 17 条断言明暗 × 1280×820/980×620
-全过（`qa-artifacts/v092-fix/cost-cell-8/` 截图同帧确认三项修复）。
-PR #70 HEAD `b7d5b15`，20 项必需检查全过、`mergeStateStatus=CLEAN`。
-等待用户复核；不合并、不发布、不安装。
+全过（`qa-artifacts/v092-fix/cost-cell-8/` 截图同帧确认三项修复）；完整
+e2e runner（11 契约 × 明暗 × 两尺寸）在文档收口后复跑全过
+（`qa-artifacts/ui-adjustment/ci-e2e`）。
+PR #70 第三轮修复提交 `b7d5b15` 起每次 HEAD 的 20 项必需检查全过、
+`mergeStateStatus=CLEAN`；其后仅有文档与死代码清理（`36c181f`、`9b54baa`），
+无行为变化。等待用户复核；不合并、不发布、不安装。
