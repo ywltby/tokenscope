@@ -220,10 +220,16 @@ fn rollup_source_costs_sum_per_group_and_total() {
         "总计来源费用 9.00，实际 {:?}",
         report.totals.source_cost_usd
     );
-    // 主估算不变：日汇总不按当前价格重估，费用仍是未知披露。
+    // 主估算不变：日汇总不按当前价格重估，费用走来源通道。
+    // v0.9.2 费用覆盖判定：来源费用已提供 → token 不再计入未定价
+    // （旧规则「汇总 token 全部计未知」已撤销）。
     assert_eq!(d1.cost_usd, 0.0);
-    assert!(d1.unknown_pricing);
-    assert_eq!(d1.unknown_reason, Some("rollup_only"));
+    assert!(
+        !d1.unknown_pricing,
+        "有来源费用的汇总不是未计价组（旧规则已撤销）"
+    );
+    assert_eq!(d1.unknown_reason, None);
+    assert_eq!(d1.unknown_tokens.total(), 0);
     // 来源费用缺失≠0：费用为 0 的组不允许来自「缺失按 0」。
     assert_eq!(report.rollup_coverage.rollup_buckets, 2);
     std::fs::remove_dir_all(&dir).ok();
@@ -602,10 +608,11 @@ fn cost_detail_rollup_only_for_pure_rollup_group() {
         "纯汇总组的费用构成必须标为 rollup_only"
     );
     assert_eq!(report.totals.cost_detail, Some("rollup_only"));
-    // 未知语义不变（缺价披露不因 cost_detail 引入而消失）。
-    assert!(d1.unknown_pricing);
-    assert_eq!(d1.unknown_reason, Some("rollup_only"));
-    assert_eq!(d1.unknown_tokens.total(), 1000);
+    // v0.9.2 费用覆盖判定：该汇总带来源费用（7.25）→ token 已获费用覆盖，
+    // 不再计入未定价（旧规则已撤销）；rollup_only 保留为数据粒度披露。
+    assert!(!d1.unknown_pricing);
+    assert_eq!(d1.unknown_reason, None);
+    assert_eq!(d1.unknown_tokens.total(), 0);
     std::fs::remove_dir_all(&dir).ok();
 }
 

@@ -41,6 +41,14 @@ export interface Group {
    * （显示「来源未提供费用」）；缺省 = 无采用的日汇总（纯明细组）。
    */
   source_cost_state?: "full" | "partial" | "absent" | null;
+  /**
+   * v0.9.2（2026-11-15）：费用列**单一显示金额**——互不重叠贡献的合计
+   * （请求估算 + 可估算日汇总 + 采用汇总来源费用），未舍入相加；构成进
+   * 悬浮详情，不再常驻展示。`null` = 完全没有费用依据（显示未知）。
+   */
+  total_cost_usd?: number | null;
+  /** v0.9.2：主金额之外仍有真实费用缺失（未知 token > 0）→ 短标记 †。 */
+  cost_partially_unknown?: boolean;
   agents?: string[];
 }
 

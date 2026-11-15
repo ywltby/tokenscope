@@ -80,7 +80,7 @@ describe("视图快照保存队列（R04）", () => {
     expect(warn).toHaveBeenCalled();
   });
 
-  it("SNAPSHOT_VERSION 为 12（预设取代固定日期区间、快照不再含时区；v11 及更旧快照读取时忽略）", () => {
-    expect(SNAPSHOT_VERSION).toBe(12);
+  it("SNAPSHOT_VERSION 为 13（v0.9.2 日汇总费用覆盖判定：未知语义变化，旧快照读取时忽略；v12 预设取代固定日期区间、快照不再含时区）", () => {
+    expect(SNAPSHOT_VERSION).toBe(13);
   });
 });

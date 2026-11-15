@@ -184,6 +184,9 @@ function group(key, input, opts = {}) {
     source_cost_usd: opts.source_cost_usd,
     // 8.2（第二轮复核）：来源费用覆盖完整性（full / partial / absent）。
     source_cost_state: opts.source_cost_state,
+    // v0.9.2：费用列单一显示金额（互不重叠贡献合并）+ 部分缺失标记。
+    total_cost_usd: opts.total_cost_usd,
+    cost_partially_unknown: opts.cost_partially_unknown,
     unknown_reason: opts.unknown_reason,
     agents: opts.agents,
   };
@@ -239,6 +242,11 @@ function totals(groups) {
       ? { source_cost_state: sourceState }
       : {}),
     ...(sourceCost != null ? { source_cost_usd: sourceCost } : {}),
+    ...(cost + (sourceCost ?? 0) !== 0 || cost !== 0 || sourceCost != null
+      ? { total_cost_usd: cost + (sourceCost ?? 0) }
+      : {}),
+    cost_partially_unknown:
+      ut.input + ut.output + ut.cache_write + ut.cache_read > 0,
   };
 }
 
@@ -590,51 +598,63 @@ const MULTI_GROUPS = Array.from({ length: 30 }, (_, i) =>
 // 8.2（第二轮复核）：rollup-paid 带 source_cost_state（full/partial 两个
 // 变体由契约分别断言）；这里 partial 组披露覆盖不完整。
 const SOURCE_COST_GROUPS = [
+  // 规则1（v0.9.2）：有来源费用的汇总 token 不再计未定价——单金额 = 来源值。
   group("synthetic-rollup-paid", 100000, {
     output: 50000,
     cost_usd: 0,
-    unknown_pricing: true,
-    unknown_reason: "rollup_only",
-    unknown_tokens: { input: 100000, output: 50000, cache_write: 0, cache_read: 0 },
+    unknown_pricing: false,
+    unknown_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
     source_cost_usd: 7.25,
+    total_cost_usd: 7.25,
     cost_detail: "rollup_only",
     source_cost_state: "full",
     requests: 30,
   }),
+  // 显式 0：零费用覆盖，token 也不进未知。
   group("synthetic-rollup-zero", 40000, {
     output: 20000,
     cost_usd: 0,
-    unknown_pricing: true,
-    unknown_reason: "rollup_only",
-    unknown_tokens: { input: 40000, output: 20000, cache_write: 0, cache_read: 0 },
+    unknown_pricing: false,
+    unknown_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
     source_cost_usd: 0,
+    total_cost_usd: 0,
     cost_detail: "rollup_only",
     source_cost_state: "full",
     requests: 12,
   }),
+  // 部分覆盖：已知 7.25 + 缺失部分 10k token 未定价 → 金额 + †。
   group("synthetic-rollup-partial", 20000, {
     output: 10000,
     cost_usd: 0,
     unknown_pricing: true,
-    unknown_reason: "rollup_only",
-    unknown_tokens: { input: 20000, output: 10000, cache_write: 0, cache_read: 0 },
+    unknown_tokens: { input: 10000, output: 0, cache_write: 0, cache_read: 0 },
     source_cost_usd: 7.25,
+    total_cost_usd: 7.25,
     cost_detail: "rollup_only",
     source_cost_state: "partial",
+    cost_partially_unknown: true,
     requests: 8,
   }),
+  // mixed：明细估算 0.2 + 来源费用 9 → 单金额 9.20。
   group("synthetic-mixed", 60000, {
     output: 30000,
     cost_usd: 0.2,
+    unknown_pricing: false,
+    unknown_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
     source_cost_usd: 9,
+    total_cost_usd: 9.2,
     cost_detail: "mixed",
+    source_cost_state: "full",
     requests: 18,
   }),
+  // 真实未定价：无候选（unknown 保留）。
   group("synthetic-unpriced", 30000, {
     output: 10000,
     cost_usd: 0,
     unknown_pricing: true,
     unknown_tokens: { input: 30000, output: 10000, cache_write: 0, cache_read: 0 },
+    total_cost_usd: null,
+    cost_partially_unknown: true,
     requests: 5,
   }),
 ];

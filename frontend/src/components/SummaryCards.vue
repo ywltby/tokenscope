@@ -12,6 +12,7 @@ import { formatMoney } from "../lib/formatMoney";
 import { TOKEN_BUCKETS } from "../lib/tokenDisplay";
 import { totalInput, totalTokens } from "../lib/tokenUsage";
 import { useT } from "../lib/i18n";
+import GroupCostBreakdownTooltip from "./GroupCostBreakdownTooltip.vue";
 
 const t = useT();
 
@@ -26,32 +27,28 @@ const hitRate = computed(() => {
 });
 
 // UX07：汇总金额走单一入口（含 $、微小非零保护）。
-const costText = computed(() => formatMoney(props.totals.cost_usd, "summary"));
-/// 未知价格且已计价部分为 0：显示"未知†"而不是 $0.00（缺价 ≠ 免费）。
-const costUnknownOnly = computed(() => props.totals.unknown_pricing && props.totals.cost_usd === 0);
+// v0.9.2：主读数 = 单一费用金额（total_cost_usd，后端合并互不重叠贡献，
+// 未舍入相加后这里只格式化一次）；构成与依据进悬浮详情，不再常驻展示。
+const costDisplay = computed(() => {
+  if (props.totals.total_cost_usd != null) {
+    return formatMoney(props.totals.total_cost_usd, "summary");
+  }
+  // 完全没有费用依据 → 未知†（缺价 ≠ 免费）。
+  return t("dashboard.costUnknownOnly");
+});
+/// 完全没有费用依据：显示"未知†"而不是 $0.00（缺价 ≠ 免费，G-P3-1）。
+const costUnknownOnly = computed(() => props.totals.total_cost_usd == null);
 
-// v0.9.1 缺陷 C：全部组都是纯日汇总（cost_detail=rollup_only）且有来源
-// 费用时，总览卡主读数 = 来源记录金额 + 标识——不再显示「未知†」。
-// mixed 或缺来源费用的纯汇总组维持原状（估算未知 + 来源费用独立行）。
-const sourceAsPrimary = computed(
-  () => props.totals.cost_detail === "rollup_only" && props.totals.source_cost_usd != null,
-);
-
-// 8.2 总览卡接线（2026-11-14 第三轮复核补漏）：表格行按
-// source_cost_state 区分完整/部分来源费用，总览卡必须同口径——
-// partial 显示「部分来源记录」警告胶囊（纯汇总）或「部分 CCS 来源记录
-// 费用」独立行（mixed），复用 CostCell 已有的文案与语义；full/absent/
-// 显式 0/纯明细行为不变。
-const sourcePartial = computed(() => props.totals.source_cost_state === "partial");
-const sourceTagText = computed(() =>
-  sourcePartial.value ? t("dashboard.sourceCostPartialTag") : t("dashboard.sourceCostTag"),
-);
-const sourceTagTitle = computed(() =>
-  sourcePartial.value ? t("dashboard.sourceCostPartialHint") : t("dashboard.sourceCostHint"),
-);
-const sourceLineLabel = computed(() =>
-  sourcePartial.value ? t("dashboard.sourceCostPartialLabel") : t("dashboard.sourceCostLabel"),
-);
+// v0.9.2：费用悬浮三态（RC06 同契约：hover/focus/pinned，Escape 关闭）。
+const costTipHover = ref(false);
+const costTipFocus = ref(false);
+const costTipPinned = ref(false);
+const costTipOpen = computed(() => costTipHover.value || costTipFocus.value || costTipPinned.value);
+function closeCostTip(): void {
+  costTipHover.value = false;
+  costTipFocus.value = false;
+  costTipPinned.value = false;
+}
 
 // R09/F08：命中率公式 tooltip 受控显示——hover/focus/pinned 三态分离、
 // 统一 show 计算：hover 随指针、focus 随键盘焦点（focus 在时鼠标离开不取消）、
@@ -101,53 +98,26 @@ const parts = computed(() =>
       <div class="metric-main">
         <div class="metric-label">
           {{ t("dashboard.costLabel") }}
-          <span v-if="totals.unknown_pricing" class="ts-pill ts-pill-warning">
-            {{ t("dashboard.unpricedPill") }}
-          </span>
-          <span
-            v-if="totals.cache_write_split_estimated"
-            class="ts-pill ts-pill-warning"
-            :title="t('dashboard.tierEstimatedTitle')"
-          >
-            {{ t("dashboard.tierPill") }}
-          </span>
-          <span
-            v-if="totals.cache_price_zero_estimated"
-            class="ts-pill ts-pill-warning"
-            :title="t('dashboard.cacheZeroPillTitle')"
-          >
-            {{ t("dashboard.cacheZeroPill") }}
-          </span>
+          <!-- v0.9.2：主金额旁只保留短标记 †（真实费用缺失），常驻来源胶囊
+               全部移除（构成与依据进悬浮详情）。 -->
+          <span v-if="totals.cost_partially_unknown" class="ts-mark-warning" title="">†</span>
         </div>
+        <!-- v0.9.2：主读数 = 单一费用金额（total_cost_usd，后端合并）；
+             悬浮/键盘聚焦打开构成详情（GroupCostBreakdownTooltip）。 -->
         <div class="metric-value metric-value-main ts-num">
-          <template v-if="sourceAsPrimary">
-            <span class="metric-source-amount">{{
-              formatMoney(totals.source_cost_usd ?? 0, "summary")
-            }}</span>
-          </template>
-          <template v-else-if="costUnknownOnly">{{ t("dashboard.costUnknownOnly") }}</template>
-          <template v-else>{{ costText }}</template>
-        </div>
-        <!-- v0.9.1 缺陷 C 规则1：纯日汇总汇总时主读数带「来源记录」标识；
-             partial 时升级为警告色「部分来源记录」并带费用缺失说明（8.2）。 -->
-        <div v-if="sourceAsPrimary" class="metric-source-tag">
-          <span
-            class="ts-pill"
-            :class="sourcePartial ? 'ts-pill-warning' : 'ts-pill-info'"
-            :title="sourceTagTitle"
-          >
-            {{ sourceTagText }}
-          </span>
-        </div>
-        <!-- T2（2026-11-13）：CCS 来源记录费用与估算费用分开显示——
-             它来自日汇总的来源记录值，不是请求级估算，也不是实际账单。
-             partial 时标签升级为部分费用文案（8.2 总览卡接线）。 -->
-        <div
-          v-if="!sourceAsPrimary && totals.source_cost_usd != null"
-          class="metric-source-cost"
-          :title="sourceTagTitle"
-        >
-          {{ sourceLineLabel }} {{ formatMoney(totals.source_cost_usd, "summary") }}
+          <GroupCostBreakdownTooltip
+            :group="totals"
+            :display-text="costDisplay"
+            :unknown-only="costUnknownOnly"
+            :open="costTipOpen"
+            :pinned="costTipPinned"
+            @hover-enter="costTipHover = true"
+            @hover-leave="costTipHover = false"
+            @focus-enter="costTipFocus = true"
+            @focus-leave="costTipFocus = false"
+            @toggle="costTipPinned = !costTipPinned"
+            @escape="closeCostTip"
+          />
         </div>
       </div>
 

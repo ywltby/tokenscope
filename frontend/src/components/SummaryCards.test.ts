@@ -44,7 +44,8 @@ describe("SummaryCards 指标条（设计系统 Task 3）", () => {
     expect(text).toContain("总 token");
     expect(text).toContain("请求数");
     expect(text).toContain("缓存命中率");
-    expect(text).toContain("估算");
+    // v0.9.2：费用旁不再有常驻来源/估算标注（构成进悬浮详情）。
+    expect(text).not.toContain("来源记录");
   });
 
   it("零值显示 0；无缓存基数时命中率为 N/A", () => {
@@ -53,6 +54,7 @@ describe("SummaryCards 指标条（设计系统 Task 3）", () => {
         requests: 0,
         tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
         cost_usd: 0,
+        total_cost_usd: 0,
       }),
     );
     const text = w.text();
@@ -63,14 +65,14 @@ describe("SummaryCards 指标条（设计系统 Task 3）", () => {
   });
 
   it("未知价格显示未知标记，不伪装成 0", () => {
-    const w = mountCards(totals({ cost_usd: 0, unknown_pricing: true }));
+    const w = mountCards(totals({ cost_usd: 0, total_cost_usd: null, unknown_pricing: true }));
     const text = w.text();
     expect(text).toContain("†");
     expect(text).not.toContain("$0.00");
   });
 
   it("极小非零金额不显示为 $0.00", () => {
-    const w = mountCards(totals({ cost_usd: 0.0000126 }));
+    const w = mountCards(totals({ cost_usd: 0.0000126, total_cost_usd: 0.0000126 }));
     const text = w.text();
     // "$0.000013" 包含子串 "$0.00"——用负向断言排除"恰为 $0.00 结尾"的显示
     expect(text).not.toMatch(/\$0\.00(?!\d)/);
@@ -155,11 +157,22 @@ describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
     expect(w.findAll(".bar-segment").length).toBe(0);
   });
 
-  it("未知价格在费用旁显示警告胶囊「含未计价 token」", () => {
-    const w = mountCards(totals({ cost_usd: 0.5, unknown_pricing: true }));
-    const pill = w.find(".ts-pill-warning");
-    expect(pill.exists()).toBe(true);
-    expect(pill.text()).toContain("含未计价 token");
+  it("未知价格在费用旁显示 † 短标记（v0.9.2：披露进悬浮）", () => {
+    const w = mountCards(
+      totals({
+        cost_usd: 0.5,
+        total_cost_usd: 0.5,
+        unknown_pricing: true,
+        cost_partially_unknown: true,
+        unknown_tokens: { input: 100, output: 0, cache_write: 0, cache_read: 0 },
+      }),
+    );
+    const main = w.find(".metric-value-main .gcb-amount-main");
+    expect(main.exists()).toBe(true);
+    // 主读数（触发器内）只有金额 + †；构成/缺失说明只在悬浮内容里。
+    expect(main.text()).toContain("†");
+    expect(main.text()).toContain("$0.50");
+    expect(main.text()).not.toContain("未定价 token 合计");
   });
 
   it("R09 hit_rate_tooltip_opens_on_focus：focus 打开、blur/Escape 关闭（受控状态切换）", async () => {
@@ -223,166 +236,105 @@ describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
   });
 });
 
-// N18 复核项 5：分档未知的「估算」与真正未计价必须分开披露。
-describe("N18 写入分档估算披露", () => {
-  it("纯估算：显示「含写入分档估算」但不显示「含未计价 token」", () => {
-    const w = mountCards(totals({ cache_write_split_estimated: true, unknown_pricing: false }));
-    expect(w.text()).toContain("含写入分档估算");
-    expect(w.text()).not.toContain("含未计价 token");
-  });
-
-  it("纯缺价：只显示未计价，不显示分档估算", () => {
+// v0.9.2（2026-11-15 用户产品决策）：N18/T3/来源费用三类披露**不再常驻**
+// ——总览卡费用区只显示单一金额 + 真实缺失的短标记 †；构成（分档估算、
+// 按 0 估算、来源费用、覆盖完整性）全部进悬浮详情（GroupCostBreakdownTooltip）。
+describe("v0.9.2 费用披露进悬浮（总览卡不再常驻）", () => {
+  it("N18/T3/来源胶囊均不常驻显示", () => {
     const w = mountCards(
       totals({
-        cache_write_split_estimated: false,
-        unknown_pricing: true,
-        unknown_tokens: { input: 0, output: 0, cache_write: 2_000_000, cache_read: 0 },
-      }),
-    );
-    expect(w.text()).toContain("含未计价 token");
-    expect(w.text()).not.toContain("含写入分档估算");
-  });
-
-  it("混合：两个胶囊同时出现", () => {
-    const w = mountCards(totals({ cache_write_split_estimated: true, unknown_pricing: true }));
-    expect(w.text()).toContain("含写入分档估算");
-    expect(w.text()).toContain("含未计价 token");
-  });
-
-  it("合并价为 0 的估算：仍披露估算，不标未计价", () => {
-    const w = mountCards(
-      totals({
-        cost_usd: 0,
         cache_write_split_estimated: true,
+        cache_price_zero_estimated: true,
         unknown_pricing: false,
-      }),
-    );
-    expect(w.text()).toContain("含写入分档估算");
-    expect(w.text()).not.toContain("含未计价 token");
-  });
-});
-
-// T3（2026-11-13）：线上来源缺缓存价按 0 估算——已计入金额，但不是官方
-// 免费价，也不是未计价 token；必须用独立胶囊披露。
-describe("T3 缺失缓存价按 0 估算披露", () => {
-  it("按 0 估算：显示「含缓存价按零估算」，不显示未计价", () => {
-    const w = mountCards(totals({ cache_price_zero_estimated: true, unknown_pricing: false }));
-    expect(w.text()).toContain("含缓存价按零估算");
-    expect(w.text()).not.toContain("含未计价 token");
-  });
-
-  it("与未计价 token 同时出现时两个胶囊分开", () => {
-    const w = mountCards(totals({ cache_price_zero_estimated: true, unknown_pricing: true }));
-    expect(w.text()).toContain("含缓存价按零估算");
-    expect(w.text()).toContain("含未计价 token");
-  });
-
-  it("无按 0 估算时不显示该胶囊", () => {
-    const w = mountCards(totals({ cache_price_zero_estimated: false }));
-    expect(w.text()).not.toContain("含缓存价按零估算");
-  });
-});
-
-// T2（2026-11-13）：总览卡同样要单独显示 CCS 来源记录费用，不能只显示
-// 估算的「未知†」或把来源费用混进估算金额。
-describe("T2 CCS 来源记录费用（总览卡）", () => {
-  it("估算未知时来源费用单独显示 $9.00", () => {
-    const w = mountCards(
-      totals({
-        cost_usd: 0,
-        unknown_pricing: true,
         source_cost_usd: 9,
-        unknown_reason: "rollup_only",
-      }),
-    );
-    const text = w.text();
-    expect(text).toContain("未知†");
-    expect(text).toContain("CCS 来源记录费用");
-    expect(text).toContain("$9.00");
-    expect(text).toContain("CCS 来源记录费用 $9.00");
-  });
-
-  it("无来源费用时不显示该行", () => {
-    const w = mountCards(totals({ source_cost_usd: null }));
-    expect(w.text()).not.toContain("CCS 来源记录费用");
-  });
-
-  // v0.9.1 缺陷 C 规则1（总览卡）：全部组纯日汇总 + 有来源费用 → 主读数 =
-  // 来源金额 + 「来源记录」标识，不再显示「未知†」。
-  it("rollup_only 汇总以来源金额为主读数并带来源标识", () => {
-    const w = mountCards(
-      totals({
-        cost_usd: 0,
-        unknown_pricing: true,
-        unknown_reason: "rollup_only",
-        source_cost_usd: 9,
+        total_cost_usd: 9,
         cost_detail: "rollup_only",
       }),
     );
-    const text = w.text();
-    expect(text).toContain("$9.00");
-    expect(text).toContain("来源记录");
-    expect(text).not.toContain("未知†");
-    // 独立来源行不再出现（金额已升级为主读数）。
-    expect(text).not.toContain("CCS 来源记录费用");
+    // 定位常驻区（主读数触发器 + 指标卡标签），悬浮内容挂 body 不算常驻。
+    const main = w.find(".metric-value-main .gcb-amount-main");
+    expect(main.exists()).toBe(true);
+    const mainText = main.text();
+    expect(mainText).toContain("$9.00");
+    expect(mainText).not.toContain("来源记录");
+    expect(mainText).not.toContain("含写入分档估算");
+    const cardLabel = w.find(".metric-label");
+    expect(cardLabel.text()).not.toContain("来源记录");
+    expect(cardLabel.text()).not.toContain("含未计价 token");
   });
 
-  // v0.9.1 缺陷 C：mixed totals（估算 + 来源费用并存）→ 维持独立来源行。
-  it("mixed 汇总保留估算读数与独立来源行", () => {
+  it("真实费用缺失 → 金额旁只保留 † 短标记", () => {
     const w = mountCards(
       totals({
-        cost_usd: 0,
+        cost_usd: 0.5,
+        total_cost_usd: 0.5,
+        cost_partially_unknown: true,
         unknown_pricing: true,
-        unknown_reason: "rollup_only",
-        source_cost_usd: 9,
-        cost_detail: "mixed",
+        unknown_tokens: { input: 300, output: 0, cache_write: 0, cache_read: 0 },
       }),
     );
     const text = w.text();
-    expect(text).toContain("未知†");
-    expect(text).toContain("CCS 来源记录费用");
-    expect(text).toContain("$9.00");
+    expect(text).toContain("$0.50");
+    expect(text).toContain("†");
+    expect(text).not.toContain("含未计价 token");
   });
-  // 8.2 总览卡接线（2026-11-14 第三轮复核反例）：表格行正确显示
-  // 「部分来源记录」，但总览卡没有读 totals.source_cost_state——两条
-  // 反例先失败在总览卡胶囊文案断言上（不整页搜"部分"，定位总览卡节点）。
-  it("反例：partial + 纯汇总 → 总览卡显示「部分来源记录」胶囊", () => {
+
+  it("混合构成 → 单一合并金额（未舍入相加后统一格式化）", () => {
     const w = mountCards(
       totals({
-        cost_usd: 0,
-        unknown_pricing: true,
-        unknown_reason: "rollup_only",
+        cost_usd: 1.0,
         source_cost_usd: 7.25,
-        cost_detail: "rollup_only",
-        source_cost_state: "partial",
+        total_cost_usd: 8.25,
+        cost_detail: "mixed",
       }),
     );
-    // 定位总览卡的来源标识节点（不是整页文本搜索）。
-    const tag = w.find(".metric-source-tag .ts-pill");
-    expect(tag.exists()).toBe(true);
-    expect(tag.text()).toBe("部分来源记录");
-    expect(tag.classes()).toContain("ts-pill-warning");
-    // 主读数仍是来源金额。
-    expect(w.find(".metric-source-amount").text()).toBe("$7.25");
+    const main = w.find(".metric-value-main .gcb-amount-main");
+    expect(main.exists()).toBe(true);
+    const mainText = main.text();
+    expect(mainText).toContain("$8.25");
+    expect(mainText).not.toContain("$7.25");
+    expect(mainText).not.toContain("$1.00");
+    // 悬浮详情里才有构成（$1.00 估算 / $7.25 来源）——挂在 body，不属常驻区。
+    expect(w.text()).toContain("$7.25");
   });
 
-  it("反例：partial + mixed → 总览卡来源独立行标为部分费用", () => {
+  it("完全没有费用依据 → 未知†", () => {
     const w = mountCards(
       totals({
         cost_usd: 0,
+        total_cost_usd: null,
         unknown_pricing: true,
-        unknown_reason: "rollup_only",
-        source_cost_usd: 9,
-        cost_detail: "mixed",
-        source_cost_state: "partial",
+        unknown_tokens: { input: 100, output: 0, cache_write: 0, cache_read: 0 },
       }),
     );
-    const line = w.find(".metric-source-cost");
-    expect(line.exists()).toBe(true);
-    // 独立行标签升级为部分费用文案（复用 CostCell 同源 locale 键）。
-    expect(line.text()).toContain("部分 CCS 来源记录费用");
-    expect(line.text()).toContain("$9.00");
-    // 请求估算读数保留（mixed 主读数不消失）。
-    expect(w.find(".metric-value-main").text()).toContain("未知†");
+    expect(w.text()).toContain("未知†");
+  });
+
+  it("费用悬浮触发器可键盘聚焦（aria-label 含金额）", () => {
+    const w = mountCards(totals({ total_cost_usd: 8.25, cost_usd: 8.25 }));
+    const trigger = w.find(".gcb-trigger");
+    expect(trigger.exists()).toBe(true);
+    expect((trigger.element as HTMLElement).tagName).toBe("BUTTON");
+    expect(trigger.attributes("aria-label")).toContain("$8.25");
+  });
+
+  it("partial 覆盖缺失 → 常驻区只有 †（部分说明进悬浮）", () => {
+    const w = mountCards(
+      totals({
+        cost_usd: 0,
+        source_cost_usd: 7.25,
+        total_cost_usd: 7.25,
+        cost_detail: "rollup_only",
+        source_cost_state: "partial",
+        cost_partially_unknown: true,
+        unknown_pricing: true,
+        unknown_tokens: { input: 500, output: 0, cache_write: 0, cache_read: 0 },
+      }),
+    );
+    const text = w.text();
+    expect(text).toContain("$7.25");
+    expect(text).toContain("†");
+    expect(text).not.toContain("部分来源记录");
+    expect(text).not.toContain("其余汇总未提供费用");
   });
 });
