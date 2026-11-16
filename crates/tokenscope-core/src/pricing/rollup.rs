@@ -1,4 +1,4 @@
-//! 日汇总费率适用性（v0.9.2 第四/五/六轮复核）：只采用**能够证明适用**的费率。
+//! 日汇总费率适用性（v0.9.2 第四/五/六/七轮复核）：只采用**能够证明适用**的费率。
 //!
 //! 与请求级 `estimate` 使用同一套 `estimate_entry` 语义（分段、时段、规则
 //! 择价、`same_as_input` 解析），差异只在「条件是否可能发生」：
@@ -6,12 +6,15 @@
 //!   时区下的真实绝对时间边界**切分为若干区间，每个区间取代表时刻，直接
 //!   调用请求级 `matching_time_rules` 得到该时刻**真正同时适用**的规则集。
 //!   这样既不把「部分重叠」当成整段同时生效，也不会拼出不存在的规则组合；
-//!   星期、半开边界、跨时区与 DST 都由同一套请求级逻辑统一处理。
+//!   星期、半开边界、跨时区与 DST（含回拨重复小时的两个映射）都由同一套
+//!   请求级逻辑统一处理，不假定自然日恒为 24 小时。
 //! - 没有单请求 token 配比 → prompt 规模只按分段边界枚举代表值；每个场景
-//!   内部择价用**支配判据**（见 `scenario_estimate`）：只有存在一条规则在
-//!   日总量实际使用的每个桶上单价都 ≥ 其他所有规则时，才以该规则为胜出
-//!   者整规则计价；交叉优势（各规则互有高低）无法从日总量证明唯一配比，
-//!   所有分项保持真实未定价。禁止逐字段取最高价，禁止把日汇总当一个请求。
+//!   先用支配关系筛出**可能胜出规则集合**（见 `scenario_estimate`：覆盖更少
+//!   桶或逐项价更低的规则永不被请求级选中），再**逐分项**判断可证明费率：
+//!   某分项在所有可能胜出规则中都有价且费率一致才计价，否则只清该分项。
+//!   于是一条部分定价规则的已知分项、或交叉优势规则共有的不变分项（如
+//!   两侧 cache_read 都是 $1）都能保留，而不因其他分项不确定被整体清零。
+//!   禁止逐字段取最高价、禁止编造组合价格、禁止把日汇总当一个请求。
 //! - 同一分项在所有场景中单价一致才计价；依赖缺失条件的分项保持真实
 //!   未定价。日期/时区不可解析时不作精确切分，退回保守的分支枚举。
 //!
@@ -302,7 +305,22 @@ fn day_instants(
                     for sec in [start_sec, end_sec] {
                         let h = (sec / 3600) as i8;
                         let m = ((sec % 3600) / 60) as i8;
-                        if let Ok(zoned) = local.at(h, m, 0, 0).to_zoned(tz.clone()) {
+                        let ambiguous = tz.to_ambiguous_zoned(local.at(h, m, 0, 0));
+                        // 回拨 fold：同一本地端点对应两个真实绝对时刻，必须
+                        // 都作为切分边界，否则第二次出现的价格窗口被漏掉。
+                        // Gap（前拨，本地时刻不存在）与无歧义时刻只有一个
+                        // compatible 映射（请求级 to_zoned 也是这个），只取一次。
+                        if matches!(ambiguous.offset(), jiff::tz::AmbiguousOffset::Fold { .. }) {
+                            for zoned in [ambiguous.clone().earlier(), ambiguous.later()]
+                                .into_iter()
+                                .flatten()
+                            {
+                                let ts = zoned.timestamp().as_second();
+                                if ts > start_ts && ts < end_ts {
+                                    cuts.push(ts);
+                                }
+                            }
+                        } else if let Ok(zoned) = ambiguous.compatible() {
                             let ts = zoned.timestamp().as_second();
                             if ts > start_ts && ts < end_ts {
                                 cuts.push(ts);
@@ -397,16 +415,19 @@ fn basis_reps(plan: &PricePlan, limit: u64) -> Vec<u64> {
 
 /// 一个场景：固定时段分支 + prompt 规模代表值。
 ///
-/// 择价用**支配判据**而非整桶 cost：日汇总没有单请求配比，整桶 cost 最高的
-/// 规则只是在"日总量配比"下胜出，不能代表每个请求都选它（反例2：$4 与 $6
-/// 的两种合法构成）。请求级 cost 是单请求 token 的线性函数 `Σ v[k]·p[i][k]`；
-/// 规则 A 在每个**实际使用桶**上单价 ≥ 规则 B ⟹ 对任意非负配比 v 都有
-/// `cost_A(v) ≥ cost_B(v)`。因此只有存在一条规则逐项支配其它每条适用规则时，
-/// 胜出规则才与配比无关、其单价可证明；找不到（交叉优势/互有高低）则所有
-/// 使用桶保持真实未定价。禁止逐字段拼价，单价始终来自同一条规则。
+/// 日汇总没有单请求配比，整桶 cost 最高的规则只是在"日总量配比"下胜出，
+/// 不能代表每个请求都选它（反例2：$4 与 $6 两种合法构成）。请求级 cost 是
+/// 单请求 token 的线性函数 `Σ v[k]·p[i][k]`（完整优先）。据此分两步：
 ///
-/// "其它规则在某桶未定价"不构成挑战：那样的规则对含该桶的请求不完整，
-/// 请求级完整优先会回退到覆盖该桶的支配规则。支配者本身必须覆盖所有使用桶。
+/// 1. **筛出可能胜出规则**：规则 a 支配 b，当 a 定价的使用桶集合 ⊇ b、
+///    且对 b 每个已定价桶 a 的价 ≥ b，且至少一处更优（含多覆盖一个桶）。
+///    被支配的 b 对任何配比 v 都不会在请求级胜出 → 从集合中剔除。保留的是
+///    Pareto 前沿（互不支配），即“在不同配比下可能胜出”的规则集合。
+/// 2. **逐分项判定**：对某分项 k，只有当**所有**可能胜出规则在 k 上都有价且
+///    费率一致时，k 才计为已定价。这样既保留单条部分定价规则的已知分项、
+///    也保留交叉优势规则共有的不变分项（两侧 cache_read 都是 $1）；不一致
+///    的分项只清自己，不牵连其它分项。禁止逐字段拼价、单价始终来自同一条
+///    可能胜出规则。
 fn scenario_estimate(e: &Entry, rules: &[Rule<'_>], basis: u64, t: &TokenCounts) -> CostEstimate {
     let used: Vec<Item> = ITEMS.iter().copied().filter(|it| it.used(t) > 0).collect();
     let mut cands: Vec<CostEstimate> = Vec::new();
@@ -424,36 +445,48 @@ fn scenario_estimate(e: &Entry, rules: &[Rule<'_>], basis: u64, t: &TokenCounts)
     }
 
     let price = |est: &CostEstimate, item: Item| item.line_meta(est).map(|(v, _)| v);
-    let dominates_all = |i: usize| -> bool {
-        // 支配者必须覆盖所有使用桶，否则无法证明完整费率。
-        if used.iter().any(|it| price(&cands[i], *it).is_none()) {
-            return false;
-        }
-        for (j, other) in cands.iter().enumerate() {
-            if i == j {
-                continue;
-            }
-            for it in &used {
-                if let Some(pj) = price(other, *it) {
-                    let pi = price(&cands[i], *it).unwrap();
-                    if pi + 1e-12 < pj {
+    // a 支配 b：a 覆盖所有 b 已定价的使用桶，逐个价 ≥ b，且至少有一处更优
+    //（价严格更高，或多覆盖一个使用桶 → 完整优先意义上更优）。
+    let dominates = |a: &CostEstimate, b: &CostEstimate| -> bool {
+        let mut strictly_better = false;
+        for it in &used {
+            let pa = price(a, *it);
+            let pb = price(b, *it);
+            match (pa, pb) {
+                (Some(x), Some(y)) => {
+                    if x + 1e-12 < y {
                         return false;
                     }
+                    if x > y + 1e-12 {
+                        strictly_better = true;
+                    }
                 }
-                // other 在该桶未定价 → 不构成挑战（请求级完整优先）。
+                (None, Some(_)) => return false, // a 缺 b 有的桶 → 不支配
+                (Some(_), None) => strictly_better = true, // a 多覆盖 → 完整优先更优
+                (None, None) => {}
             }
         }
-        true
+        strictly_better
     };
+    // Pareto 前沿 = 不被任何其他候选支配的规则（可能胜出者）。
+    let frontier: Vec<usize> = (0..cands.len())
+        .filter(|&i| !(0..cands.len()).any(|j| i != j && dominates(&cands[j], &cands[i])))
+        .collect();
+    let possible: Vec<&CostEstimate> = frontier.iter().map(|&i| &cands[i]).collect();
 
-    if let Some(win) = (0..cands.len()).find(|&i| dominates_all(i)) {
-        return cands[win].clone();
-    }
-
-    // 无可证明的单一胜出规则：所有使用桶保持真实未定价。
-    let mut est = cands[0].clone();
+    // 以集合内第一条规则为基准承载明细；逐分项判定是否可证明。
+    let mut est = possible[0].clone();
     for it in &used {
-        force_unpriced(&mut est, t, *it);
+        let Some(first) = price(possible[0], *it) else {
+            force_unpriced(&mut est, t, *it);
+            continue;
+        };
+        let invariant = possible
+            .iter()
+            .all(|cand| price(cand, *it).is_some_and(|v| (v - first).abs() < 1e-12));
+        if !invariant {
+            force_unpriced(&mut est, t, *it);
+        }
     }
     est
 }

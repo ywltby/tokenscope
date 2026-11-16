@@ -21,12 +21,13 @@ ROOT = Path(__file__).resolve().parent.parent
 
 class RustTempCleanupCase(unittest.TestCase):
     def setUp(self):
-        self.sandbox = tempfile.TemporaryDirectory(prefix="tokenscope-cleanup-contract-")
+        # 深路径回归会造出超过 MAX_PATH 的 sandbox；宿主删除保护层拒绝扩展长度
+        # 路径时它删不掉，这属于环境限制，用 ignore_cleanup_errors 让残留不伪装成
+        # 测试失败，同时由下面各用例逐条断言「成功必须真删、失败必须保留现场」。
+        self.sandbox = tempfile.TemporaryDirectory(
+            prefix="tokenscope-cleanup-contract-", ignore_cleanup_errors=True)
         self.addCleanup(self.sandbox.cleanup)
         self.root = Path(self.sandbox.name)
-        if os.name == "nt":
-            self.addCleanup(lambda: shutil.rmtree("\\\\?\\" + str(self.root))
-                            if self.root.exists() else None)
         self.parent = self.root / "临时 目录"
         self.parent.mkdir()
         self.observation = self.root / "observation.json"
@@ -110,18 +111,52 @@ class RustTempCleanupCase(unittest.TestCase):
         self.assertIn("synthetic lock", output)
         self.assertIn(str(Path(observed["root"])), output)
 
+    def test_protection_rejection_keeps_scene_and_is_not_success(self):
+        # 保护层以 ERROR_INVALID_NAME(123) 拒绝扩展长度路径时，不得改道搬运、也不得
+        # 换用别的删除方式，必须保留现场并让门禁报失败。
+        rejected = OSError(123, "synthetic invalid name", str(self.root))
+        with mock.patch.object(runner.shutil, "rmtree", side_effect=rejected):
+            status, observed, output = self.child("")
+        self.assertNotEqual(status, 0, "保护层拒绝时必须报失败")
+        self.assertTrue(Path(observed["root"]).exists(), "必须保留现场")
+        self.assertIn("synthetic invalid name", output)
+        self.assertIn("清理失败", output)
+
+    def test_extended_prefix_is_applied_exactly_once(self):
+        self.assertEqual(runner._extended(r"C:\Temp\x"), "\\\\?\\C:\\Temp\\x")
+        self.assertEqual(runner._extended("\\\\?\\C:\\Temp\\x"), "\\\\?\\C:\\Temp\\x")
+        self.assertEqual(runner._extended("\\\\server\\share\\x"),
+                         "\\\\?\\UNC\\server\\share\\x")
+        self.assertEqual(runner._extended("\\\\?\\UNC\\server\\share\\x"),
+                         "\\\\?\\UNC\\server\\share\\x")
+
+    def test_only_max_path_errors_are_retried(self):
+        self.assertTrue(runner._path_too_long(OSError(206, "synthetic")))
+        self.assertTrue(runner._path_too_long(OSError(None, "synthetic", None, 145)))
+        self.assertFalse(runner._path_too_long(OSError(123, "synthetic")))
+        self.assertFalse(runner._path_too_long(PermissionError(13, "synthetic")))
+        self.assertFalse(runner._path_too_long(OSError(32, "synthetic")))
+
     @unittest.skipUnless(os.name == "nt", "Windows 长路径回归")
-    def test_cleanup_removes_deep_paths_without_silently_skipping_them(self):
-        status, observed, _ = self.child("""
+    def test_cleanup_reports_deep_path_outcome_without_silently_skipping(self):
+        # 契约：要么在支持扩展长度删除的环境真的删掉，要么如实报失败并保留现场，
+        # 绝不允许静默跳过。宿主删除保护层拒绝扩展长度路径时属于后者。
+        status, observed, output = self.child("""
             deep = work.joinpath(*(['segment'] * 40))
             extended = pathlib.Path(chr(92) * 2 + '?' + chr(92) + str(deep))
             extended.mkdir(parents=True)
             (extended / 'fixture.txt').write_text('synthetic', encoding='utf-8')
             observed['deep_length'] = len(str(deep))
         """)
-        self.assertEqual(status, 0)
         self.assertGreater(observed["deep_length"], 260)
-        self.assertFalse(Path(observed["root"]).exists())
+        root = Path(observed["root"])
+        if status == 0:
+            self.assertFalse(root.exists(), "报告成功时临时根必须真的不存在")
+            self.assertIn("清理已核实", output)
+        else:
+            self.assertTrue(root.exists(), "清理失败必须保留现场，不得删一半")
+            self.assertIn("清理失败", output)
+            self.assertIn(str(root.resolve()), output)
 
     def test_launch_error_fails_and_reports_the_private_root(self):
         output = io.StringIO()

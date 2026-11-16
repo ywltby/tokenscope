@@ -13,6 +13,29 @@ import sys
 import tempfile
 
 
+def _extended(path):
+    """把路径规范成扩展长度形式，保证 `\\\\?\\` 只出现一次。
+
+    普通绝对路径加普通前缀，UNC 走 `\\\\?\\UNC\\`，已带前缀的原样返回。
+    """
+    if path.startswith("\\\\?\\"):
+        return path
+    if path.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + path[2:]
+    return "\\\\?\\" + path
+
+
+def _path_too_long(error):
+    """判断错误是否属于「普通路径受 MAX_PATH 限制」这一种。
+
+    WinError 206 = ERROR_FILENAME_EXCED_RANGE；145 = ERROR_DIR_NOT_EMPTY，是
+    长链中途删除失败后的收尾症状。123（保护层拒绝）、5/32（占用）、13（权限）
+    都不属于这一类，必须原样抛出并保留现场。
+    """
+    codes = {error.errno, getattr(error, "winerror", None)}
+    return bool(codes & {145, 206})
+
+
 def _cleanup(root, parent):
     # 删除前重新核对绝对边界与根的类型，拒绝被替换成链接/联接的根。
     if (root.parent != parent or root.is_symlink() or root.is_junction()
@@ -20,13 +43,18 @@ def _cleanup(root, parent):
         raise OSError(f"拒绝清理越界或被替换的临时根：{root}")
     if not root.exists():
         return
-    path = str(root)
-    if os.name == "nt":
-        # 深目录/长文件名是现有来源遍历回归的一部分，不能因 MAX_PATH 漏删。
-        path = "\\\\?\\UNC\\" + path[2:] if path.startswith("\\\\") else "\\\\?\\" + path
-    # Python >= 3.12 的 rmtree 不进入目录符号链接/Windows junction 的目标。
-    # 不忽略错误、不加等待补偿；句柄已释放后仍删不掉就让门禁失败。
-    shutil.rmtree(path)
+    # 先用普通路径：宿主删除保护层按绝对路径判定接管方式，扩展长度前缀会让
+    # 该判定失效并被拒绝（ERROR_INVALID_NAME 123）。深目录由用例自身清理，
+    # 这里只剩浅层路径与已释放句柄的数据库文件。
+    try:
+        shutil.rmtree(str(root))
+    except OSError as error:
+        if not _path_too_long(error):
+            raise
+        # 只有超长类失败才值得再试一次扩展长度路径，且只加一次前缀。
+        # Python >= 3.12 的 rmtree 不进入目录符号链接/Windows junction 的目标；
+        # 不忽略错误、不加等待补偿，仍删不掉就让门禁失败并保留现场。
+        shutil.rmtree(_extended(str(root)))
     if root.exists():
         raise OSError(f"清理后临时根仍存在：{root}")
 

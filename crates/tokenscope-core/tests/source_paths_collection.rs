@@ -20,13 +20,61 @@ use tokenscope::source::discovery::{DiscoveryContext, RootProbe, StartupEnv, res
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// 删除本用例创建的目录树，Windows 下必须显式使用扩展长度路径。
+///
+/// `std::fs::remove_dir_all` 在超过 MAX_PATH 的深链上会中途失败，失败一旦被
+/// 忽略就留下永久残留，进而挡住门禁对临时根的清理（清理会报「目录不是空的」）。
+fn remove_tree(dir: &Path) {
+    #[cfg(windows)]
+    {
+        fn prefixed(path: &Path) -> PathBuf {
+            let text = path.to_string_lossy();
+            if text.starts_with(r"\\?\") {
+                path.to_path_buf()
+            } else if let Some(rest) = text.strip_prefix(r"\\") {
+                PathBuf::from(format!(r"\\?\UNC\{rest}"))
+            } else {
+                PathBuf::from(format!(r"\\?\{text}"))
+            }
+        }
+
+        fn walk(path: &Path) {
+            let Ok(entries) = std::fs::read_dir(prefixed(path)) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let child = path.join(entry.file_name());
+                let Ok(meta) = std::fs::symlink_metadata(prefixed(&child)) else {
+                    continue;
+                };
+                if meta.is_dir() && !meta.file_type().is_symlink() {
+                    walk(&child);
+                } else if meta.is_dir() {
+                    // 目录联接/符号链接：只解除链接本身，不进入目标。
+                    let _ = std::fs::remove_dir(prefixed(&child));
+                } else {
+                    // 数据库文件可能仍被本进程的查询快照持有，留给进程退出后的门禁清理。
+                    let _ = std::fs::remove_file(prefixed(&child));
+                }
+            }
+            let _ = std::fs::remove_dir(prefixed(path));
+        }
+
+        walk(dir);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 fn temp_dir(tag: &str) -> PathBuf {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
         "tokenscope-sp-collection-{tag}-{}-{n}",
         std::process::id(),
     ));
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_tree(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -147,6 +195,9 @@ fn make_mapping(dir: &Path, name: &str, project_path: &str) -> PathBuf {
 
 #[cfg(windows)]
 fn make_junction(link: &Path, target: &Path) {
+    // 目录重解析点只能用 remove_dir 删除：remove_file 对目录必然失败，而失败一旦
+    // 被忽略，残留的失效联接会让后续 remove_dir_all 整体中止，临时根就清不干净。
+    let _ = std::fs::remove_dir(link);
     let _ = std::fs::remove_file(link);
     let out = std::process::Command::new("cmd")
         .args(["/C", "mklink", "/J"])
@@ -164,8 +215,8 @@ fn make_junction(link: &Path, target: &Path) {
 
 #[cfg(windows)]
 fn remove_junction(link: &Path) {
-    // 只解除链接本身，不沿链接清理目标
-    let _ = std::fs::remove_file(link);
+    // 只解除链接本身，不沿链接清理目标。junction 是目录，必须走 remove_dir。
+    let _ = std::fs::remove_dir(link);
 }
 
 // ── §4.2：祖先环、深目录、断链 ──────────────────────────────────
@@ -225,7 +276,12 @@ fn deep_tree_broken_junction_and_stray_files_terminate_with_diagnostics() {
         r.warnings
     );
     remove_junction(&root.join("dangling"));
-    std::fs::remove_dir_all(&dir).ok();
+    remove_tree(&dir);
+    assert!(
+        !root.exists(),
+        "深目录与失效联接必须清理干净，残留的长路径会挡住门禁清理临时根：{}",
+        root.display()
+    );
 }
 
 // ── §4.3：两层去重与稳定认领者 ──────────────────────────────────
