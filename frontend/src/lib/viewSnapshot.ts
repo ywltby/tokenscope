@@ -3,7 +3,12 @@
 // 合并待保存最新项 + 串行派发：绝不并发 fire-and-forget 让旧写覆盖新写。
 import { invoke } from "@tauri-apps/api/core";
 
-/** 快照格式版本：v15 = 日汇总日期可行性/规则择价/same_as_input（v0.9.2
+/** 快照格式版本：v16 = 日汇总时段区间划分 + 逐请求主导择价（v0.9.2
+ * 第六轮）——来源日按真实绝对时间边界切分、择价改用支配判据，部分汇总
+ * 的费用/未定价读数改变（部分重叠与交叉优势规则转为未定价、跨时区窗口
+ * 不可发生者转为可证明金额），v15 及更早快照的费用读数不再可信，读取时
+ * 忽略重建；
+ * v15 = 日汇总日期可行性/规则择价/same_as_input（v0.9.2
  * 第五轮）——部分此前误判为未定价的汇总会得到可证明金额，v14 的费用
  * 读数不再可信，读取时忽略重建；
  * v14 = 日汇总费率适用性 + 费用依据状态（v0.9.2 第四轮）——
@@ -21,7 +26,7 @@ import { invoke } from "@tauri-apps/api/core";
  * session/project，v9 及更早快照的分组与下钻 key 不再可信；
  * v9 = 模型匹配规则（等价键）；v8 = 项目根归并；v7 = 统一项目身份；
  * v6 = 查询会话契约（SF04）；v5 及更早版本不含会话身份且游标为旧格式。 */
-export const SNAPSHOT_VERSION = 15;
+export const SNAPSHOT_VERSION = 16;
 
 export type SnapshotDispatch = (payload: unknown) => Promise<void>;
 

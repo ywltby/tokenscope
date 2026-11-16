@@ -1,13 +1,19 @@
-//! 日汇总费率适用性（v0.9.2 第四/五轮复核）：只采用**能够证明适用**的费率。
+//! 日汇总费率适用性（v0.9.2 第四/五/六轮复核）：只采用**能够证明适用**的费率。
 //!
 //! 与请求级 `estimate` 使用同一套 `estimate_entry` 语义（分段、时段、规则
 //! 择价、`same_as_input` 解析），差异只在「条件是否可能发生」：
-//! - 日汇总有来源统计日与来源时区 → 排除该日不可能出现的星期规则；
-//! - 没有请求时刻/单请求上下文 → 枚举该日可能的时段分支与 prompt 规模
-//!   区间，每个场景内部先按现有规则择价（完整优先 → 最高费用 → 稳定
-//!   顺序），再比较各场景的分项单价；
+//! - 日汇总有来源统计日与来源时区 → 把来源日按**每条时段规则在每个规则
+//!   时区下的真实绝对时间边界**切分为若干区间，每个区间取代表时刻，直接
+//!   调用请求级 `matching_time_rules` 得到该时刻**真正同时适用**的规则集。
+//!   这样既不把「部分重叠」当成整段同时生效，也不会拼出不存在的规则组合；
+//!   星期、半开边界、跨时区与 DST 都由同一套请求级逻辑统一处理。
+//! - 没有单请求 token 配比 → prompt 规模只按分段边界枚举代表值；每个场景
+//!   内部择价用**支配判据**（见 `scenario_estimate`）：只有存在一条规则在
+//!   日总量实际使用的每个桶上单价都 ≥ 其他所有规则时，才以该规则为胜出
+//!   者整规则计价；交叉优势（各规则互有高低）无法从日总量证明唯一配比，
+//!   所有分项保持真实未定价。禁止逐字段取最高价，禁止把日汇总当一个请求。
 //! - 同一分项在所有场景中单价一致才计价；依赖缺失条件的分项保持真实
-//!   未定价。竞争规则绝不被逐字段拼成不存在的组合。
+//!   未定价。日期/时区不可解析时不作精确切分，退回保守的分支枚举。
 //!
 //! 候选选择仍遵循请求级原则（完整优先 → 最高费用 → tie-break）。
 
@@ -157,8 +163,8 @@ impl Pricing {
     }
 }
 
-/// 单个候选在日汇总条件下的可证明估算：枚举可能的时段分支 × prompt 规模
-/// 区间，每个场景先按请求规则择价，再逐分项比较结果。
+/// 单个候选在日汇总条件下的可证明估算：枚举该日真实时间片 × prompt 规模
+/// 区间，每个场景先按支配判据择价，再逐分项比较结果。
 fn candidate_rollup_estimate(
     e: &Entry,
     t: &TokenCounts,
@@ -166,12 +172,24 @@ fn candidate_rollup_estimate(
     source_tz: Option<&jiff::tz::TimeZone>,
 ) -> CostEstimate {
     let limit = t.prompt_tokens();
-    let worlds = time_worlds(&e.plan, day, source_tz);
     let bases = basis_reps(&e.plan, limit);
     let mut scenarios: Vec<CostEstimate> = Vec::new();
-    for rules in &worlds {
-        for &basis in &bases {
-            scenarios.push(scenario_estimate(e, rules, basis, t));
+    if let Some(instants) = day_instants(&e.plan, day, source_tz) {
+        // 精确路径：每个时间片代表时刻用请求级 matching_time_rules 求真实
+        // 同时适用的规则集，语义与请求级 estimate 完全一致。
+        for at in &instants {
+            for &basis in &bases {
+                let rules = matching_time_rules(&e.plan, *at, basis);
+                scenarios.push(scenario_estimate(e, &rules, basis, t));
+            }
+        }
+    } else {
+        // 保守路径：日期/时区不可解析，无法做真实时间切分，退回枚举分支。
+        let worlds = time_worlds(&e.plan);
+        for rules in &worlds {
+            for &basis in &bases {
+                scenarios.push(scenario_estimate(e, rules, basis, t));
+            }
         }
     }
     if scenarios.is_empty() {
@@ -231,17 +249,101 @@ fn candidate_rollup_estimate(
     est
 }
 
-/// 该日所有可能的时段分支。基准分支 = 每条规则的规则级价格（`None`）；
-/// 每个**该日可能发生**的 period 生成一个分支：目标规则换成 period 分支，
-/// 其他规则若无可证明的重叠时段则回到规则级。
-fn time_worlds<'a>(
-    plan: &'a PricePlan,
+/// 来源日按真实时间边界切分后的代表时刻列表。
+///
+/// 收集来源日绝对区间 `[day_start, day_end)` 内**所有 period 的实际切换
+/// 边界**（每条规则按其时区把 weekday 命中的本地时间窗换算成绝对时间），
+/// 连同来源日起止点排序去重；相邻边界构成半开区间，各取一个内部代表时刻。
+/// 每个代表时刻交给请求级 `matching_time_rules` 求真实同时适用规则集——
+/// 因此"部分重叠"会被切成独立区间、"不可能同时出现"的规则组合不会被构造。
+///
+/// 星期、半开边界、跨时区与 DST 都由 jiff 的日期/时区换算统一处理，不假定
+/// 自然日恒为 24 小时。来源日/时区不可解析时返回 `None` 走保守分支。
+fn day_instants(
+    plan: &PricePlan,
     day: Option<jiff::civil::Date>,
     source_tz: Option<&jiff::tz::TimeZone>,
-) -> Vec<Vec<Rule<'a>>> {
+) -> Option<Vec<jiff::Timestamp>> {
+    let day = day?;
+    let source_tz = source_tz?;
+    let day_start = day.at(0, 0, 0, 0).to_zoned(source_tz.clone()).ok()?;
+    let tomorrow = day.tomorrow().ok()?;
+    let day_end = tomorrow.at(0, 0, 0, 0).to_zoned(source_tz.clone()).ok()?;
+    let start_ts = day_start.timestamp().as_second();
+    let end_ts = day_end.timestamp().as_second();
+    if start_ts >= end_ts {
+        return None;
+    }
+
+    let mut cuts: Vec<i64> = vec![start_ts, end_ts];
+    for sched in &plan.schedules {
+        let Some(tz) = schedule_tz(sched) else {
+            continue;
+        };
+        for period in &sched.periods {
+            let (Some(start_sec), Some(end_sec)) =
+                (parse_hhmm(&period.start_time), parse_hhmm(&period.end_time))
+            else {
+                continue;
+            };
+            if start_sec >= end_sec {
+                continue;
+            }
+            // 来源日在规则时区下可能横跨两个本地日（跨时区），也可能因 DST
+            // 不足/超过 24 小时。逐本地日检查 weekday 并换算时间窗边界。
+            let first_local = day_start.timestamp().to_zoned(tz.clone()).date();
+            let mut local = first_local;
+            loop {
+                let weekday_ok = period
+                    .weekdays
+                    .as_ref()
+                    .is_none_or(|days| days.iter().any(|d| d == weekday_tag(local.weekday())));
+                if weekday_ok {
+                    for sec in [start_sec, end_sec] {
+                        let h = (sec / 3600) as i8;
+                        let m = ((sec % 3600) / 60) as i8;
+                        if let Ok(zoned) = local.at(h, m, 0, 0).to_zoned(tz.clone()) {
+                            let ts = zoned.timestamp().as_second();
+                            if ts > start_ts && ts < end_ts {
+                                cuts.push(ts);
+                            }
+                        }
+                    }
+                }
+                let next = local.tomorrow().ok()?;
+                // 下一个本地日的零点若已不早于来源日结束，则覆盖完整，停止。
+                let Ok(next_zero) = next.at(0, 0, 0, 0).to_zoned(tz.clone()) else {
+                    break;
+                };
+                if next_zero.timestamp().as_second() >= end_ts {
+                    break;
+                }
+                local = next;
+            }
+        }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut instants = Vec::with_capacity(cuts.len().saturating_sub(1));
+    for pair in cuts.windows(2) {
+        // 半开区间 [pair[0], pair[1])：取内部中点，不落在边界上。
+        let mid = pair[0] + (pair[1] - pair[0]) / 2;
+        if let Ok(ts) = jiff::Timestamp::from_second(mid) {
+            instants.push(ts);
+        }
+    }
+    if instants.is_empty() {
+        instants.push(day_start.timestamp());
+    }
+    Some(instants)
+}
+
+/// 日期/时区不可解析时的保守分支枚举：每条规则的规则级价格 + 每个 period
+/// 单独成分支，不做日期可行性过滤也不推断重叠——宁可多列条件让跨场景
+/// 一致性判定保持未定价，也不误报已定价。
+fn time_worlds<'a>(plan: &'a PricePlan) -> Vec<Vec<Rule<'a>>> {
     let mut base: Vec<Rule<'a>> = Vec::new();
     for sched in &plan.schedules {
-        // 时区非法的规则在 matching_time_rules 中整体跳过。
         if schedule_tz(sched).is_none() {
             continue;
         }
@@ -249,41 +351,19 @@ fn time_worlds<'a>(
     }
     let mut worlds = vec![base];
     for sched in &plan.schedules {
-        let Some(tz) = schedule_tz(sched) else {
-            continue;
-        };
-        if sched.periods.is_empty() {
+        if schedule_tz(sched).is_none() || sched.periods.is_empty() {
             continue;
         }
         for period in &sched.periods {
-            if !period_feasible(period, day, source_tz, &tz) {
-                continue;
-            }
             let mut rules: Vec<Rule<'a>> = Vec::new();
             for other in &plan.schedules {
-                let Some(other_tz) = schedule_tz(other) else {
+                if schedule_tz(other).is_none() {
                     continue;
-                };
+                }
                 if std::ptr::eq(other, sched) {
                     rules.push((other, Some(period)));
-                    continue;
-                }
-                if other.periods.is_empty() {
+                } else {
                     rules.push((other, None));
-                    continue;
-                }
-                let overlap = other.periods.iter().find(|p| {
-                    period_feasible(p, day, source_tz, &other_tz)
-                        && periods_overlap(
-                            period,
-                            sched.timezone.as_deref(),
-                            p,
-                            other.timezone.as_deref(),
-                        )
-                });
-                match overlap {
-                    Some(p) => rules.push((other, Some(p))),
-                    None => rules.push((other, None)),
                 }
             }
             worlds.push(rules);
@@ -315,29 +395,67 @@ fn basis_reps(plan: &PricePlan, limit: u64) -> Vec<u64> {
     bounds
 }
 
-/// 一个场景：固定时段分支 + prompt 规模代表值，按请求级规则择价
-/// （完整优先 → 最高费用 → 声明顺序稳定）。
+/// 一个场景：固定时段分支 + prompt 规模代表值。
+///
+/// 择价用**支配判据**而非整桶 cost：日汇总没有单请求配比，整桶 cost 最高的
+/// 规则只是在"日总量配比"下胜出，不能代表每个请求都选它（反例2：$4 与 $6
+/// 的两种合法构成）。请求级 cost 是单请求 token 的线性函数 `Σ v[k]·p[i][k]`；
+/// 规则 A 在每个**实际使用桶**上单价 ≥ 规则 B ⟹ 对任意非负配比 v 都有
+/// `cost_A(v) ≥ cost_B(v)`。因此只有存在一条规则逐项支配其它每条适用规则时，
+/// 胜出规则才与配比无关、其单价可证明；找不到（交叉优势/互有高低）则所有
+/// 使用桶保持真实未定价。禁止逐字段拼价，单价始终来自同一条规则。
+///
+/// "其它规则在某桶未定价"不构成挑战：那样的规则对含该桶的请求不完整，
+/// 请求级完整优先会回退到覆盖该桶的支配规则。支配者本身必须覆盖所有使用桶。
 fn scenario_estimate(e: &Entry, rules: &[Rule<'_>], basis: u64, t: &TokenCounts) -> CostEstimate {
-    let mut best: Option<CostEstimate> = None;
+    let used: Vec<Item> = ITEMS.iter().copied().filter(|it| it.used(t) > 0).collect();
+    let mut cands: Vec<CostEstimate> = Vec::new();
     for (sched, period) in rules {
         if !rule_applies(sched, *period, basis) {
             continue;
         }
-        let est = estimate_entry(e, basis, t, Some((*sched, *period)));
-        best = Some(match best {
-            None => est,
-            Some(b) => {
-                if (est.complete && !b.complete)
-                    || (est.complete == b.complete && est.cost > b.cost)
-                {
-                    est
-                } else {
-                    b
-                }
-            }
-        });
+        cands.push(estimate_entry(e, basis, t, Some((*sched, *period))));
     }
-    best.unwrap_or_else(|| estimate_entry(e, basis, t, None))
+    if cands.is_empty() {
+        return estimate_entry(e, basis, t, None);
+    }
+    if used.is_empty() {
+        return cands[0].clone();
+    }
+
+    let price = |est: &CostEstimate, item: Item| item.line_meta(est).map(|(v, _)| v);
+    let dominates_all = |i: usize| -> bool {
+        // 支配者必须覆盖所有使用桶，否则无法证明完整费率。
+        if used.iter().any(|it| price(&cands[i], *it).is_none()) {
+            return false;
+        }
+        for (j, other) in cands.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            for it in &used {
+                if let Some(pj) = price(other, *it) {
+                    let pi = price(&cands[i], *it).unwrap();
+                    if pi + 1e-12 < pj {
+                        return false;
+                    }
+                }
+                // other 在该桶未定价 → 不构成挑战（请求级完整优先）。
+            }
+        }
+        true
+    };
+
+    if let Some(win) = (0..cands.len()).find(|&i| dominates_all(i)) {
+        return cands[win].clone();
+    }
+
+    // 无可证明的单一胜出规则：所有使用桶保持真实未定价。
+    let mut est = cands[0].clone();
+    for it in &used {
+        force_unpriced(&mut est, t, *it);
+    }
+    est
 }
 
 /// 与 `matching_time_rules` 的非时间判定一致：period 命中即适用；规则级
@@ -354,107 +472,6 @@ fn schedule_tz(sched: &PriceSchedule) -> Option<jiff::tz::TimeZone> {
     match sched.timezone.as_deref() {
         Some(name) => jiff::tz::TimeZone::get(name).ok(),
         None => Some(jiff::tz::TimeZone::UTC),
-    }
-}
-
-/// 该 period 是否可能在来源统计日出现：先看时间窗合法，再按规则时区检查
-/// 来源日在规则时区覆盖的星期是否与 `weekdays` 相交。
-fn period_feasible(
-    period: &SchedulePeriod,
-    day: Option<jiff::civil::Date>,
-    source_tz: Option<&jiff::tz::TimeZone>,
-    sched_tz: &jiff::tz::TimeZone,
-) -> bool {
-    let (Some(start), Some(end)) = (parse_hhmm(&period.start_time), parse_hhmm(&period.end_time))
-    else {
-        return false;
-    };
-    if start >= end {
-        return false;
-    }
-    let Some(days) = &period.weekdays else {
-        return true;
-    };
-    if days.is_empty() {
-        return false;
-    }
-    let (Some(day), Some(source_tz)) = (day, source_tz) else {
-        // 日期/来源时区不可解析时不能排除，保持保守。
-        return true;
-    };
-    let Ok(start_source) = day.at(0, 0, 0, 0).to_zoned(source_tz.clone()) else {
-        return true;
-    };
-    let Ok(tomorrow) = day.tomorrow() else {
-        return true;
-    };
-    let Ok(end_source) = tomorrow.at(0, 0, 0, 0).to_zoned(source_tz.clone()) else {
-        return true;
-    };
-    // 星期限制按**规则时区**判断：来源日的起止时刻换算到规则时区后，
-    // 检查与该区间真正有交集的日期（不含恰好等于结束边界的次日零点）。
-    let start_ts = start_source.timestamp();
-    let end_ts = end_source.timestamp();
-    let mut date = start_ts.to_zoned(sched_tz.clone()).date();
-    let last = end_ts.to_zoned(sched_tz.clone()).date();
-    loop {
-        let Ok(day_start) = date.at(0, 0, 0, 0).to_zoned(sched_tz.clone()) else {
-            return true;
-        };
-        let Ok(next) = date.tomorrow() else {
-            return true;
-        };
-        let Ok(day_end) = next.at(0, 0, 0, 0).to_zoned(sched_tz.clone()) else {
-            return true;
-        };
-        if day_start.timestamp() < end_ts
-            && day_end.timestamp() > start_ts
-            && days
-                .iter()
-                .any(|d| d.as_str() == weekday_tag(date.weekday()))
-        {
-            return true;
-        }
-        if date == last {
-            break;
-        }
-        date = next;
-    }
-    false
-}
-
-fn periods_overlap(
-    a: &SchedulePeriod,
-    a_tz: Option<&str>,
-    b: &SchedulePeriod,
-    b_tz: Option<&str>,
-) -> bool {
-    let (Some(a_start), Some(a_end), Some(b_start), Some(b_end)) = (
-        parse_hhmm(&a.start_time),
-        parse_hhmm(&a.end_time),
-        parse_hhmm(&b.start_time),
-        parse_hhmm(&b.end_time),
-    ) else {
-        return false;
-    };
-    if a_start >= a_end || b_start >= b_end {
-        return false;
-    }
-    if !weekday_sets_intersect(a.weekdays.as_deref(), b.weekdays.as_deref()) {
-        return false;
-    }
-    // 规则时区一致（含 None = UTC）时才比较本地时间窗；时区不同则保守认为
-    // 可能重叠（换算后无法从日粒度确定）。
-    if a_tz.unwrap_or("UTC") != b_tz.unwrap_or("UTC") {
-        return true;
-    }
-    a_start < b_end && b_start < a_end
-}
-
-fn weekday_sets_intersect(a: Option<&[String]>, b: Option<&[String]>) -> bool {
-    match (a, b) {
-        (None, _) | (_, None) => true,
-        (Some(a), Some(b)) => a.iter().any(|d| b.iter().any(|e| e == d)),
     }
 }
 
