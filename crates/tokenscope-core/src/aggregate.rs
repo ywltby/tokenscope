@@ -632,8 +632,11 @@ fn push_rollup_into(
         } else {
             // 缺失费用：按可证明适用的费率估算（分段档位/时段价依赖缺失的
             // 请求长度/时刻时，受影响分项保持真实未定价；始终生效的覆盖
-            // 规则正常应用）。
-            let estimate = pricing.estimate_rollup(&r.model, &r.tokens);
+            // 规则正常应用）。来源统计日 + 来源时区用于排除该日不可能的
+            // 星期规则（如周一汇总不采用仅周日生效的折扣）。
+            let day = r.day.parse::<jiff::civil::Date>().ok();
+            let source_tz = jiff::tz::TimeZone::get(&r.source_tz).ok();
+            let estimate = pricing.estimate_rollup(&r.model, &r.tokens, day, source_tz.as_ref());
             if estimate
                 .as_ref()
                 .is_some_and(|est| est.covers_used_tokens(&r.tokens))

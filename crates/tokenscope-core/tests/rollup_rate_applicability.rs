@@ -258,6 +258,185 @@ fn sub_threshold_rollup_can_prove_base_rate() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// 第五轮反例 1：周一汇总不得采用仅周日生效的规则。来源日与来源时区
+/// 已知，星期限制可以确定性排除。
+#[test]
+fn weekday_rule_impossible_on_rollup_day_is_excluded() {
+    let dir = temp_dir("weekday-impossible");
+    let pricing = pricing_with(
+        &dir,
+        "[[model]]\nprefix = \"weekday-model\"\ninput = 1.0\noutput = 2.0\n\
+         [[model.schedule]]\ntimezone = \"UTC\"\n\
+         [[model.schedule.period]]\nstart_time = \"00:00\"\nend_time = \"12:00\"\n\
+         weekdays = [\"sun\"]\ninput = 0.1\n",
+    );
+    let tz = jiff::tz::TimeZone::UTC;
+    // 2026-11-16 是周一；仅周日的折扣不可能发生。
+    let mut monday_event = event("weekday-model", 1_000_000, 0);
+    monday_event.ts = "2026-11-16T12:00:00Z".parse().unwrap();
+    let request_path =
+        aggregate_with_rollups(&[monday_event], &[], GroupBy::Model, &tz, &pricing).unwrap();
+    assert!(
+        (request_path.totals.cost_usd - 1.0).abs() < 1e-9,
+        "对照：周一请求按基础价 $1.00，实际 {}",
+        request_path.totals.cost_usd
+    );
+    let mut monday_rollup = rollup("weekday-model", tok(1_000_000, 0), 1);
+    monday_rollup.day = "2026-11-16".into();
+    let daily =
+        aggregate_with_rollups(&[], &[monday_rollup], GroupBy::Model, &tz, &pricing).unwrap();
+    let g = daily.groups.iter().find(|g| g.key != "合计").unwrap();
+    assert!(
+        (g.cost_usd - 1.0).abs() < 1e-9,
+        "周一汇总应按基础价 $1.00，不得把仅周日的规则当可能条件，实际 {}",
+        g.cost_usd
+    );
+    assert_eq!(g.unknown_tokens.total(), 0);
+    assert_eq!(g.total_cost_usd, Some(1.0));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 第五轮反例 2：两条始终生效的规则在同一时刻同时适用，必须按现有
+/// 「完整优先 → 最高费用」择价，而不是当成互斥条件判未知。
+#[test]
+fn simultaneous_unconditional_rules_select_highest_price() {
+    let dir = temp_dir("simultaneous");
+    let pricing = pricing_with(
+        &dir,
+        "[[model]]\nprefix = \"full-day-model\"\ninput = 1.0\noutput = 2.0\n\
+         [[model.schedule]]\ntimezone = \"UTC\"\ninput = 3.0\n\
+         [[model.schedule]]\ntimezone = \"UTC\"\ninput = 2.0\n",
+    );
+    let tz = jiff::tz::TimeZone::UTC;
+    let request_path = aggregate_with_rollups(
+        &[event("full-day-model", 1_000_000, 0)],
+        &[],
+        GroupBy::Model,
+        &tz,
+        &pricing,
+    )
+    .unwrap();
+    assert!(
+        (request_path.totals.cost_usd - 3.0).abs() < 1e-9,
+        "对照：请求路径选最高规则 $3.00，实际 {}",
+        request_path.totals.cost_usd
+    );
+    let daily = aggregate_with_rollups(
+        &[],
+        &[rollup("full-day-model", tok(1_000_000, 0), 1)],
+        GroupBy::Model,
+        &tz,
+        &pricing,
+    )
+    .unwrap();
+    let g = daily.groups.iter().find(|g| g.key != "合计").unwrap();
+    assert!(
+        (g.cost_usd - 3.0).abs() < 1e-9,
+        "两条始终生效规则应选最高 $3.00，不得判未知，实际 {}",
+        g.cost_usd
+    );
+    assert_eq!(g.unknown_tokens.total(), 0);
+    assert_eq!(g.total_cost_usd, Some(3.0));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 第五轮反例 3：输入价随时段变化，但缓存读取价全天恒为 $1/M——必须先
+/// 在每个场景内部解析 `same_as_input`，再做跨场景一致性判断，不能先折叠
+/// 输入价而丢失分支相关性。
+#[test]
+fn same_as_input_keeps_provable_cache_read_rate() {
+    let dir = temp_dir("same-as-input");
+    let pricing = pricing_with(
+        &dir,
+        "[[model]]\nprefix = \"read-invariant-model\"\ninput = 1.0\noutput = 2.0\n\
+         cache_read = \"same_as_input\"\n\
+         [[model.schedule]]\ntimezone = \"UTC\"\n\
+         [[model.schedule.period]]\nstart_time = \"08:00\"\nend_time = \"20:00\"\n\
+         input = 2.0\ncache_read = 1.0\n",
+    );
+    let tz = jiff::tz::TimeZone::UTC;
+    let mut read_event = event("read-invariant-model", 0, 0);
+    read_event.cache_read_tokens = 1_000_000;
+    let request_path =
+        aggregate_with_rollups(&[read_event], &[], GroupBy::Model, &tz, &pricing).unwrap();
+    assert!(
+        (request_path.totals.cost_usd - 1.0).abs() < 1e-9,
+        "对照：请求路径缓存读取 $1.00，实际 {}",
+        request_path.totals.cost_usd
+    );
+    let read_tokens = TokenCounts {
+        cache_read: 1_000_000,
+        ..Default::default()
+    };
+    let daily = aggregate_with_rollups(
+        &[],
+        &[rollup("read-invariant-model", read_tokens, 1)],
+        GroupBy::Model,
+        &tz,
+        &pricing,
+    )
+    .unwrap();
+    let g = daily.groups.iter().find(|g| g.key != "合计").unwrap();
+    assert!(
+        (g.cost_usd - 1.0).abs() < 1e-9,
+        "缓存读取全天 $1/M，日汇总必须计价 $1.00，实际 {}",
+        g.cost_usd
+    );
+    assert_eq!(g.unknown_tokens.total(), 0);
+    assert_eq!(g.total_cost_usd, Some(1.0));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 来源日结束边界（次日零点）不属于该日：周日汇总不得把仅周一生效的
+/// 规则算作可能条件。
+#[test]
+fn weekday_rule_on_next_day_boundary_is_excluded() {
+    let dir = temp_dir("weekday-boundary");
+    let pricing = pricing_with(
+        &dir,
+        "[[model]]\nprefix = \"next-day-model\"\ninput = 1.0\noutput = 2.0\n\
+         [[model.schedule]]\ntimezone = \"UTC\"\n\
+         [[model.schedule.period]]\nstart_time = \"00:00\"\nend_time = \"01:00\"\n\
+         weekdays = [\"mon\"]\ninput = 0.1\n",
+    );
+    let tz = jiff::tz::TimeZone::UTC;
+    let mut sunday_rollup = rollup("next-day-model", tok(1_000_000, 0), 1);
+    sunday_rollup.day = "2026-11-15".into();
+    let daily =
+        aggregate_with_rollups(&[], &[sunday_rollup], GroupBy::Model, &tz, &pricing).unwrap();
+    let g = daily.groups.iter().find(|g| g.key != "合计").unwrap();
+    assert!(
+        (g.cost_usd - 1.0).abs() < 1e-9,
+        "周日汇总不应采用次日（周一）规则；按基础价 $1.00，实际 {}",
+        g.cost_usd
+    );
+    assert_eq!(g.unknown_tokens.total(), 0);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 星期规则在当天**可能**发生但时刻缺失：仍不得猜时段价（星期过滤不是
+/// 过度放行）。
+#[test]
+fn weekday_rule_possible_day_still_needs_request_time() {
+    let dir = temp_dir("weekday-possible");
+    let pricing = pricing_with(
+        &dir,
+        "[[model]]\nprefix = \"monday-model\"\ninput = 1.0\noutput = 2.0\n\
+         [[model.schedule]]\ntimezone = \"UTC\"\n\
+         [[model.schedule.period]]\nstart_time = \"00:00\"\nend_time = \"01:00\"\n\
+         weekdays = [\"mon\"]\ninput = 0.1\n",
+    );
+    let tz = jiff::tz::TimeZone::UTC;
+    let mut monday_rollup = rollup("monday-model", tok(1_000_000, 0), 1);
+    monday_rollup.day = "2026-11-16".into();
+    let daily =
+        aggregate_with_rollups(&[], &[monday_rollup], GroupBy::Model, &tz, &pricing).unwrap();
+    let g = daily.groups.iter().find(|g| g.key != "合计").unwrap();
+    assert_eq!(g.unknown_tokens.input, 1_000_000);
+    assert_eq!(g.total_cost_usd, None);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// 普通平价日汇总（无分段、无时间规则）继续正常估算。
 #[test]
 fn flat_rollup_still_estimates() {

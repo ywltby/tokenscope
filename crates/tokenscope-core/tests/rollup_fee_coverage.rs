@@ -519,7 +519,9 @@ fn time_limited_rule_does_not_guess_day_time() {
         est_request.cost
     );
     // 日汇总：时刻缺失 → $1 与 $99 都可能，不能猜任何一个。
-    let est_rollup = pricing.estimate_rollup("peak-model", &tokens).unwrap();
+    let est_rollup = pricing
+        .estimate_rollup("peak-model", &tokens, None, None)
+        .unwrap();
     assert!(
         est_rollup.cost.abs() < 1e-9,
         "时段依赖缺失 → 不计任意一侧价格，实际 {}",
