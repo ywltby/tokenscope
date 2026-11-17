@@ -371,3 +371,20 @@ PerformOperations/GetAnyOperationsAborted 任一步失败、取消、S_FALSE 都
 不可回收反例、长文件与枚举失败预检）；既有 round6/7/8、rate、fee、
 review_regressions 全绿。`SNAPSHOT_VERSION` 18 → 19。版本沿用 0.9.2
 （同一 PR 补修不重复递增）。停在可审查 PR，不合并、不发布、不安装。
+
+**R9-3 补齐 R9-1 的相邻误报（同日晚间自查发现）**。「支持集上没有完整候选」
+这一支原先直接跳过、不加约束，而更小的支持集已把分项登记为可证明——于是两条
+各只定价一个分项的规则（A 只定 input $1、B 只定 output $2）会被错误地同时
+判为可证明，日汇总给出 input $1 + output $2 = $3。但请求级在该支持集上按
+`highest_partial_cost` 回退：合并请求 A 已知 $1、B 已知 $2，选 B，input 整个
+落空；大 input 小 output 的请求反过来选 A，output 落空。选中哪条由配比决定，
+两个分项都不可由日总量确定。修复：该分支先用同一套线性可行性判定筛出**可能
+胜出的部分候选**，再登记——某个分项只要存在一条可能胜出的候选不给它定价，就
+标记为不可证明。不能简单「登记全部候选」：只定 cache_read 的基础层在已知费用
+比较里永远赢不了，那样会把可证明的 input 一并拖成未知（新增对照
+`non_competing_base_layer_keeps_provable_input` 锁定 input 仍为 $1）。单条部分
+规则的已知分项不受影响（唯一候选给它定了价，仍保留 $1）。红测
+`competing_partial_rules_leave_both_components_unknown` 先失败在
+`unknown.input=0`（应为 1M），修复后 `unknown.input=1M`/`unknown.output=1M`/
+`total=None`；round6/7/8/9、rate、fee、ccs_rollup_*、partial_pricing、
+review_regressions 共 148 项全绿。

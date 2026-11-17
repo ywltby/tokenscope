@@ -326,3 +326,75 @@ input = 1.0
     assert_eq!(t.unknown_tokens.output, 1_000_000, "output 真缺价");
     assert_eq!(t.total_cost_usd, Some(1.0), "实际 {:?}", t.total_cost_usd);
 }
+
+/// 两条各只定价一个分项的规则：合并请求没有完整候选，请求级回退到
+/// 「部分候选中已知费用最高者」，选中哪条取决于 input/output 配比。
+/// 因此这两个分项的费率都无法由日总量确定，必须保持未知。
+#[test]
+fn competing_partial_rules_leave_both_components_unknown() {
+    let dir = temp_dir("two-partials");
+    let pricing = pricing_with(
+        &dir,
+        r#"
+[[model]]
+prefix = "two-partials"
+[[model.schedule]]
+timezone = "UTC"
+input = 1.0
+[[model.schedule]]
+timezone = "UTC"
+output = 2.0
+"#,
+    );
+    let at: jiff::Timestamp = "2026-11-16T12:00:00Z".parse().unwrap();
+    // 请求级事实：合并请求时 A 已知 $1、B 已知 $2 → 选 B，input 落空。
+    let combined = pricing
+        .estimate(
+            "two-partials",
+            &TokenCounts {
+                input: 1_000_000,
+                output: 1_000_000,
+                ..Default::default()
+            },
+            at,
+        )
+        .unwrap();
+    assert!(!combined.complete, "合并请求没有完整候选");
+    assert!(
+        (combined.cost - 2.0).abs() < 1e-9,
+        "回退到部分候选的已知最高费用，实际 {}",
+        combined.cost
+    );
+    let t = rollup(&pricing, "two-partials");
+    assert_eq!(
+        t.unknown_tokens.input, 1_000_000,
+        "input 在合并请求里落空，费率不可确定"
+    );
+    assert_eq!(
+        t.unknown_tokens.output, 1_000_000,
+        "output 在大 input 请求里落空，费率不可确定"
+    );
+    assert_eq!(t.total_cost_usd, None, "实际 {:?}", t.total_cost_usd);
+}
+
+/// 对照：基础层只定 cache_read、完全不参与 input/output 竞争时，它在部分
+/// 候选回退里永远赢不了已知费用比较，不得把可证明的 input 拖成未知。
+#[test]
+fn non_competing_base_layer_keeps_provable_input() {
+    let dir = temp_dir("base-cache-only");
+    let pricing = pricing_with(
+        &dir,
+        r#"
+[[model]]
+prefix = "base-cache-only"
+cache_read = 1.0
+[[model.schedule]]
+timezone = "UTC"
+input = 1.0
+"#,
+    );
+    let t = rollup(&pricing, "base-cache-only");
+    assert_eq!(t.unknown_tokens.input, 0, "input 唯一价 $1，可证明");
+    assert_eq!(t.unknown_tokens.output, 1_000_000, "output 无任何候选定价");
+    assert_eq!(t.total_cost_usd, Some(1.0), "实际 {:?}", t.total_cost_usd);
+}

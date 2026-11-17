@@ -620,8 +620,10 @@ fn scenario_estimate(e: &Entry, rules: &[Rule<'_>], basis: u64, t: &TokenCounts)
         .collect();
 
     let n = used.len();
-    // 每个分项被「可能胜出规则」登记到的费率；全部一致才可证明。
-    let mut possible: Vec<Vec<f64>> = vec![Vec::new(); n];
+    // 每个分项被「可能被请求级选中」的规则登记到的费率；全部一致才可证明。
+    // `None` 表示该支持集下存在可能被选中的候选不给这个分项定价——请求级
+    // 会带着这个分项落空，因此该分项在此支持集上不可证明。
+    let mut possible: Vec<Vec<Option<f64>>> = vec![Vec::new(); n];
     for bits in 1u32..(1u32 << n) {
         let support: Vec<usize> = (0..n).filter(|&k| bits & (1 << k) != 0).collect();
         // 完整优先：只有对 S 内每个分项都有价的候选可能在请求级胜出。
@@ -629,8 +631,41 @@ fn scenario_estimate(e: &Entry, rules: &[Rule<'_>], basis: u64, t: &TokenCounts)
             .filter(|&ci| support.iter().all(|&k| prices[ci][k].is_some()))
             .collect();
         if complete.is_empty() {
-            // 无完整候选：请求级只能取部分候选的已知费用，费率不可证明；
-            // 保持这些分项未知，不整体清零其它子集已证明的分项。
+            // 无完整候选：请求级回退到「部分候选中已知费用最高者」，选中哪条
+            // 由实际配比决定（缺价分项按 0 参与比较，但该候选一旦胜出，它缺价
+            // 的分项就整体落空）。先用同一套线性可行性判定哪些部分候选可能
+            // 胜出，再登记：可能胜出者缺价的分项一律不可证明。
+            let known: Vec<Vec<f64>> = (0..cands.len())
+                .map(|ci| {
+                    support
+                        .iter()
+                        .map(|&k| prices[ci][k].unwrap_or(0.0))
+                        .collect()
+                })
+                .collect();
+            let winners: Vec<usize> = (0..known.len())
+                .filter(|&ci| {
+                    let rivals: Vec<Vec<f64>> = known
+                        .iter()
+                        .enumerate()
+                        .filter(|&(oi, _)| oi != ci)
+                        .map(|(_, v)| v.clone())
+                        .collect();
+                    could_win(&known[ci], &rivals)
+                })
+                .collect();
+            if winners.is_empty() {
+                continue;
+            }
+            for &k in &support {
+                if winners.iter().any(|&ci| prices[ci][k].is_none()) {
+                    possible[k].push(None);
+                } else {
+                    for &ci in &winners {
+                        possible[k].push(prices[ci][k]);
+                    }
+                }
+            }
             continue;
         }
         for &ci in &complete {
@@ -643,18 +678,34 @@ fn scenario_estimate(e: &Entry, rules: &[Rule<'_>], basis: u64, t: &TokenCounts)
             if could_win(&own, &rivals) {
                 for &k in &support {
                     let pos = support.iter().position(|&x| x == k).unwrap();
-                    possible[k].push(own[pos]);
+                    possible[k].push(Some(own[pos]));
                 }
             }
         }
     }
 
     let mut proved: Vec<Option<f64>> = vec![None; n];
-    for k in 0..n {
-        if let Some(&first) = possible[k].first()
-            && possible[k].iter().all(|&v| (v - first).abs() < 1e-12)
-        {
-            proved[k] = Some(first);
+    for (k, seen) in possible.iter().enumerate() {
+        let mut first: Option<f64> = None;
+        let mut provable = true;
+        for value in seen {
+            match value {
+                None => {
+                    provable = false;
+                    break;
+                }
+                Some(v) => match first {
+                    None => first = Some(*v),
+                    Some(f) if (f - v).abs() < 1e-12 => {}
+                    _ => {
+                        provable = false;
+                        break;
+                    }
+                },
+            }
+        }
+        if provable {
+            proved[k] = first;
         }
     }
 
