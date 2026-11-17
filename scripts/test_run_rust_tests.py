@@ -21,16 +21,22 @@ ROOT = Path(__file__).resolve().parent.parent
 
 class RustTempCleanupCase(unittest.TestCase):
     def setUp(self):
-        # 深路径回归会造出超过 MAX_PATH 的 sandbox；宿主删除保护层拒绝扩展长度
-        # 路径时它删不掉，这属于环境限制，用 ignore_cleanup_errors 让残留不伪装成
-        # 测试失败，同时由下面各用例逐条断言「成功必须真删、失败必须保留现场」。
-        self.sandbox = tempfile.TemporaryDirectory(
-            prefix="tokenscope-cleanup-contract-", ignore_cleanup_errors=True)
-        self.addCleanup(self.sandbox.cleanup)
-        self.root = Path(self.sandbox.name)
+        # sandbox 自身也走入口的回收链路，避免用例自己成为绕过入口的永久删除。
+        self.sandbox_parent = Path(tempfile.gettempdir()).resolve()
+        self.root = Path(tempfile.mkdtemp(
+            prefix="tokenscope-cleanup-contract-", dir=self.sandbox_parent))
+        self.addCleanup(self._discard_sandbox)
         self.parent = self.root / "临时 目录"
         self.parent.mkdir()
         self.observation = self.root / "observation.json"
+
+    def _discard_sandbox(self):
+        # 深路径回归会造出超过 MAX_PATH 的 sandbox；回收不了就保留现场并打印，
+        # 这属于环境限制，由各用例自己断言「成功必须真回收、失败必须保留现场」。
+        try:
+            runner._cleanup(self.root, self.sandbox_parent)
+        except OSError as error:
+            sys.stderr.write(f"[cleanup-contract] sandbox 未被回收：{error}\n")
 
     def child(self, body):
         program = "\n".join([
@@ -104,38 +110,28 @@ class RustTempCleanupCase(unittest.TestCase):
         self.assertIn("保留", output)
 
     def test_cleanup_failure_cannot_be_reported_as_success(self):
-        with mock.patch.object(runner.shutil, "rmtree", side_effect=PermissionError("synthetic lock")):
+        with mock.patch.object(runner, "_send_to_recycle_bin",
+                               return_value="synthetic recycle failure"):
             status, observed, output = self.child("")
-        self.assertNotEqual(status, 0, "子测试通过但清理失败时，门禁必须失败")
-        self.assertTrue(Path(observed["root"]).exists())
-        self.assertIn("synthetic lock", output)
+        self.assertNotEqual(status, 0, "子测试通过但回收失败时，门禁必须失败")
+        self.assertTrue(Path(observed["root"]).exists(), "回收失败必须保留现场")
+        self.assertIn("synthetic recycle failure", output)
         self.assertIn(str(Path(observed["root"])), output)
 
-    def test_protection_rejection_keeps_scene_and_is_not_success(self):
-        # 保护层以 ERROR_INVALID_NAME(123) 拒绝扩展长度路径时，不得改道搬运、也不得
-        # 换用别的删除方式，必须保留现场并让门禁报失败。
-        rejected = OSError(123, "synthetic invalid name", str(self.root))
-        with mock.patch.object(runner.shutil, "rmtree", side_effect=rejected):
+    def test_unconfirmed_recycle_is_not_success(self):
+        # 原路径消失不等于已回收：回收站里没有对应条目时（FOF_ALLOWUNDO 被降级成
+        # 永久删除就是这样），必须报失败，不能把「目录不见了」当成功。
+        with mock.patch.object(runner, "_recycle_bin_holds", return_value=False):
             status, observed, output = self.child("")
-        self.assertNotEqual(status, 0, "保护层拒绝时必须报失败")
-        self.assertTrue(Path(observed["root"]).exists(), "必须保留现场")
-        self.assertIn("synthetic invalid name", output)
-        self.assertIn("清理失败", output)
+        self.assertNotEqual(status, 0, "无法确认已回收时门禁必须失败")
+        self.assertIn("回收站", output)
+        self.assertIn("永久删除", output)
 
-    def test_extended_prefix_is_applied_exactly_once(self):
-        self.assertEqual(runner._extended(r"C:\Temp\x"), "\\\\?\\C:\\Temp\\x")
-        self.assertEqual(runner._extended("\\\\?\\C:\\Temp\\x"), "\\\\?\\C:\\Temp\\x")
-        self.assertEqual(runner._extended("\\\\server\\share\\x"),
-                         "\\\\?\\UNC\\server\\share\\x")
-        self.assertEqual(runner._extended("\\\\?\\UNC\\server\\share\\x"),
-                         "\\\\?\\UNC\\server\\share\\x")
-
-    def test_only_max_path_errors_are_retried(self):
-        self.assertTrue(runner._path_too_long(OSError(206, "synthetic")))
-        self.assertTrue(runner._path_too_long(OSError(None, "synthetic", None, 145)))
-        self.assertFalse(runner._path_too_long(OSError(123, "synthetic")))
-        self.assertFalse(runner._path_too_long(PermissionError(13, "synthetic")))
-        self.assertFalse(runner._path_too_long(OSError(32, "synthetic")))
+    def test_unreadable_recycle_bin_is_not_success(self):
+        with mock.patch.object(runner, "_recycle_bin_holds", return_value=None):
+            status, _, output = self.child("")
+        self.assertNotEqual(status, 0, "读不到回收站条目时不能算成功")
+        self.assertIn("无法核对回收站条目", output)
 
     @unittest.skipUnless(os.name == "nt", "Windows 长路径回归")
     def test_cleanup_reports_deep_path_outcome_without_silently_skipping(self):
@@ -152,10 +148,10 @@ class RustTempCleanupCase(unittest.TestCase):
         root = Path(observed["root"])
         if status == 0:
             self.assertFalse(root.exists(), "报告成功时临时根必须真的不存在")
-            self.assertIn("清理已核实", output)
+            self.assertIn("回收已核实", output)
         else:
-            self.assertTrue(root.exists(), "清理失败必须保留现场，不得删一半")
-            self.assertIn("清理失败", output)
+            self.assertTrue(root.exists(), "回收失败必须保留现场，不得删一半")
+            self.assertIn("回收失败", output)
             self.assertIn(str(root.resolve()), output)
 
     def test_launch_error_fails_and_reports_the_private_root(self):
