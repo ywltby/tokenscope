@@ -283,6 +283,42 @@ fn day_instants(
         let Some(tz) = schedule_tz(sched) else {
             continue;
         };
+        // 时区偏移切换点本身就是切分边界：只映射 period 端点覆盖不了前拨日
+        // —— 02:30 这个本地时刻不存在，compatible 会把它挪到 03:30，真实窗
+        // 口 [01:45, 02:00) 就落不进任何切片，整日被误判成恒定费率。
+        // 用 15 分钟粒度采样偏移、发现变化后二分到秒（DST 切换只落在整点
+        // 或半点，该粒度不会漏）。
+        let Some(mut prev_ts) = jiff::Timestamp::from_second(start_ts).ok() else {
+            continue;
+        };
+        let mut prev_off = tz.to_offset(prev_ts);
+        let mut probe = start_ts + 900;
+        while probe < end_ts {
+            let Ok(probe_ts) = jiff::Timestamp::from_second(probe) else {
+                break;
+            };
+            let off = tz.to_offset(probe_ts);
+            if off != prev_off {
+                let (mut lo, mut hi) = (prev_ts.as_second(), probe);
+                while hi - lo > 1 {
+                    let mid = lo + (hi - lo) / 2;
+                    let Ok(mid_ts) = jiff::Timestamp::from_second(mid) else {
+                        break;
+                    };
+                    if tz.to_offset(mid_ts) == prev_off {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                if hi > start_ts && hi < end_ts {
+                    cuts.push(hi);
+                }
+                prev_off = off;
+            }
+            prev_ts = probe_ts;
+            probe += 900;
+        }
         for period in &sched.periods {
             let (Some(start_sec), Some(end_sec)) =
                 (parse_hhmm(&period.start_time), parse_hhmm(&period.end_time))
@@ -445,47 +481,103 @@ fn scenario_estimate(e: &Entry, rules: &[Rule<'_>], basis: u64, t: &TokenCounts)
     }
 
     let price = |est: &CostEstimate, item: Item| item.line_meta(est).map(|(v, _)| v);
-    // a 支配 b：a 覆盖所有 b 已定价的使用桶，逐个价 ≥ b，且至少有一处更优
-    //（价严格更高，或多覆盖一个使用桶 → 完整优先意义上更优）。
-    let dominates = |a: &CostEstimate, b: &CostEstimate| -> bool {
-        let mut strictly_better = false;
-        for it in &used {
-            let pa = price(a, *it);
-            let pb = price(b, *it);
-            match (pa, pb) {
-                (Some(x), Some(y)) => {
-                    if x + 1e-12 < y {
-                        return false;
+
+    // 请求级语义是「完整优先 → 费用最高」，因此某分项能否证明，只能看
+    // 「实际用到了该分项的可行单请求」里哪些规则可能胜出。全局 Pareto
+    // 前沿不够：一条只在不含该分项的请求里才可能胜出的规则，也会被算进
+    // 可能胜出集合。这里对每个分项枚举 used 的子集（≤ 4 个 → ≤ 15 个掩码）
+    // 作为候选请求构成，逐条按请求级语义判定可行性。
+    let n = used.len();
+    let mut proved: Vec<Option<f64>> = vec![None; n];
+    for i in 0..n {
+        let mut winners: Vec<usize> = Vec::new();
+        for (ci, cand) in cands.iter().enumerate() {
+            // 缺该分项的规则在任何用到它的请求里都不完整，直接出局。
+            if price(cand, used[i]).is_none() {
+                continue;
+            }
+            let mut feasible = false;
+            for bits in 1u32..(1u32 << n) {
+                if bits & (1 << i) == 0 {
+                    continue; // 请求必须实际使用该分项
+                }
+                let mut own = 0.0;
+                let mut complete = true;
+                for (k, item) in used.iter().enumerate() {
+                    if bits & (1 << k) == 0 {
+                        continue;
                     }
-                    if x > y + 1e-12 {
-                        strictly_better = true;
+                    match price(cand, *item) {
+                        Some(v) => own += v,
+                        None => {
+                            complete = false;
+                            break;
+                        }
                     }
                 }
-                (None, Some(_)) => return false, // a 缺 b 有的桶 → 不支配
-                (Some(_), None) => strictly_better = true, // a 多覆盖 → 完整优先更优
-                (None, None) => {}
+                if !complete {
+                    continue;
+                }
+                // 存在更贵的完整竞争者 → 这种请求构成下它赢不了。
+                let beaten = (0..cands.len()).any(|oi| {
+                    if oi == ci {
+                        return false;
+                    }
+                    let mut sum = 0.0;
+                    for (k, item) in used.iter().enumerate() {
+                        if bits & (1 << k) == 0 {
+                            continue;
+                        }
+                        match price(&cands[oi], *item) {
+                            Some(v) => sum += v,
+                            None => return false,
+                        }
+                    }
+                    sum > own + 1e-12
+                });
+                if !beaten {
+                    feasible = true;
+                    break;
+                }
+            }
+            if feasible {
+                winners.push(ci);
             }
         }
-        strictly_better
-    };
-    // Pareto 前沿 = 不被任何其他候选支配的规则（可能胜出者）。
-    let frontier: Vec<usize> = (0..cands.len())
-        .filter(|&i| !(0..cands.len()).any(|j| i != j && dominates(&cands[j], &cands[i])))
-        .collect();
-    let possible: Vec<&CostEstimate> = frontier.iter().map(|&i| &cands[i]).collect();
+        if let Some(&first) = winners.first() {
+            let want = price(&cands[first], used[i]);
+            let consistent = winners.iter().all(|&ci| {
+                price(&cands[ci], used[i])
+                    .zip(want)
+                    .is_some_and(|(v, w)| (v - w).abs() < 1e-12)
+            });
+            if consistent {
+                proved[i] = want;
+            }
+        }
+    }
 
-    // 以集合内第一条规则为基准承载明细；逐分项判定是否可证明。
-    let mut est = possible[0].clone();
-    for it in &used {
-        let Some(first) = price(possible[0], *it) else {
-            force_unpriced(&mut est, t, *it);
-            continue;
-        };
-        let invariant = possible
-            .iter()
-            .all(|cand| price(cand, *it).is_some_and(|v| (v - first).abs() < 1e-12));
-        if !invariant {
-            force_unpriced(&mut est, t, *it);
+    // 基准承载明细：选对「已证明分项」覆盖最多且价格正确的候选，避免拿一条
+    // 恰好缺该分项价格的规则当底稿。
+    let mut base = 0usize;
+    let mut base_hits = usize::MIN;
+    for (ci, cand) in cands.iter().enumerate() {
+        let hits = (0..n)
+            .filter(|&i| {
+                proved[i].is_some_and(|want| {
+                    price(cand, used[i]).is_some_and(|v| (v - want).abs() < 1e-12)
+                })
+            })
+            .count();
+        if hits > base_hits {
+            base_hits = hits;
+            base = ci;
+        }
+    }
+    let mut est = cands[base].clone();
+    for (i, item) in used.iter().enumerate() {
+        if proved[i].is_none() {
+            force_unpriced(&mut est, t, *item);
         }
     }
     est

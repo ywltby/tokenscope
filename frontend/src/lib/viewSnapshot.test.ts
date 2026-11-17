@@ -80,7 +80,7 @@ describe("视图快照保存队列（R04）", () => {
     expect(warn).toHaveBeenCalled();
   });
 
-  it("SNAPSHOT_VERSION 为 17（v0.9.2 第七轮：日汇总分项保留/DST 回拨重复小时改变费用读数，旧快照读取时忽略）", () => {
-    expect(SNAPSHOT_VERSION).toBe(17);
+  it("SNAPSHOT_VERSION 为 18（v0.9.2 第八轮：时区偏移切换点与按请求构成判定改变费用读数，旧快照读取时忽略）", () => {
+    expect(SNAPSHOT_VERSION).toBe(18);
   });
 });

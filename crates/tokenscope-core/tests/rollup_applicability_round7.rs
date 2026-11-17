@@ -363,6 +363,7 @@ fn spring_forward_gap_does_not_fabricate_window() {
 
     let costs: Vec<f64> = [
         "2026-03-08T06:00:00Z",
+        "2026-03-08T07:15:00Z",
         "2026-03-08T08:00:00Z",
         "2026-03-08T12:00:00Z",
     ]
@@ -380,8 +381,14 @@ fn spring_forward_gap_does_not_fabricate_window() {
         .cost_usd
     })
     .collect();
-    // gap 调整后 03:30 EDT = 07:30Z，请求级在 08:00Z（纽约 04:00）已不命中。
-    assert_eq!(costs, vec![1.0, 1.0, 1.0], "请求级无窗口命中");
+    // 07:15Z = 03:15 EDT：起点 02:30 本身不存在，但前拨后 03:00-03:30 的本地
+    // tod 仍落在 [02:30, 03:30) 内，请求级确实命中 $10 —— 窗口没有消失，只是
+    // 变短了。08:00Z（04:00 EDT）与 12:00Z 已出窗。
+    assert_eq!(
+        costs,
+        vec![1.0, 10.0, 1.0, 1.0],
+        "请求级：前拨后仍有 03:00-03:30 落在窗口内"
+    );
 
     let r = aggregate_with_rollups(
         &[],
@@ -400,14 +407,18 @@ fn spring_forward_gap_does_not_fabricate_window() {
     )
     .unwrap();
     let t = r.totals;
-    // 若切分为 gap 制造了 02:30 的伪映射（05:30Z 或 06:30Z），会把 $10 窗口
-    // 带进日汇总导致未定价；正确实现下该窗口在本地不存在，全日可证明 $1。
-    assert_eq!(
-        t.total_cost_usd,
-        Some(1.0),
-        "gap 不存在 → 不引入伪 $10 窗口，实际 {:?}",
+    // 切分不得为不存在的 02:30 制造第二个伪窗口；但 03:00-03:30 是真实存在
+    // 且确实命中的时段，因此当日费率确有变化，必须保持未定价而非误报 $1。
+    assert!(
+        t.unknown_pricing,
+        "前拨日仍有真实 $10 时段，未定价才对，实际 {:?}",
         t.total_cost_usd
     );
-    assert_eq!(t.unknown_tokens.input, 0);
+    assert_eq!(t.unknown_tokens.input, 1_000_000);
+    assert_eq!(
+        t.total_cost_usd, None,
+        "不得误报完整 $1，实际 {:?}",
+        t.total_cost_usd
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
