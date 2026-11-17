@@ -34,7 +34,8 @@
    → 16（第六轮：来源日真实时间片切分 + 逐请求支配择价再次改变部分汇总的
    费用/未定价读数）→ 17（第七轮：逐分项可证明判定保留部分已知分项、DST
    回拨重复小时切分再次改变部分汇总读数）→ 18（第八轮：时区偏移切换点进入
-   切分、分项判定改按请求构成）；旧快照的分组费用状态不可信，
+   切分、分项判定改按请求构成）→ 19（第九轮：请求用量比例判定改变部分
+   汇总的费用/未定价读数）；旧快照的分组费用状态不可信，
    按仓库约定读不出即重建派生结果；不要求清库/重扫/重导。
 
 ### 1.2 展示侧：单金额 + 悬浮详情（缺陷 A）
@@ -333,3 +334,40 @@ input 1M 未定价、total=None。
 **验证**：`rollup_applicability_round8.rs` 2 项新测（先红后绿）；
 `scripts` 契约 17 项全过（含「原路径消失但回收站无条目必须失败」「读不到
 回收站不能算成功」）；`SNAPSHOT_VERSION` 17 → 18。版本沿用 0.9.2。
+
+### 第九轮复核修复（2026-11-17，基线 `f8f4a69`）：请求用量比例 + 回收意图前置
+
+独立复核 `qa-artifacts/pr70-r9-review/` 给出两项反例，均用真实核心库 / 注入
+模拟复现，红测先行（`rollup_applicability_round9.rs` 2 项失败在金额/unknown
+数字断言；`test_run_rust_tests.py` 长普通文件路径预检失败在行为断言），再修实现：
+
+**R9-1 择价必须考虑任意正配比，不能只测等权向量**。`scenario_estimate` 旧逻辑
+枚举使用分项子集后把各分项单价等权相加判断胜出，等价于只测试 v=(1,1)。
+请求级费用是配比的线性函数 `Σ v_k·p_k`：A(input3/output1) 与 B(input2/output1.5)
+常驻时，balanced（两次各 500k+500k）输入费 $3、skewed（900k+0 / 100k+1M）
+输入费 $2.90，两者日总量相同——输入单价本身不可由日总量确定。修复：对固定
+支持集取完整候选，按 Motzkin 传递定理用**线性可行性 / 凸包支配**判定每条候选
+是否可能在某个正配比下胜出（存在其它完整候选价格的非负组合逐项主导它则排除）；
+实现为小规模 LP 顶点枚举（n≤4），非等权采样、非经验配比、非逐字段取价。
+对照全过：交换规则声明顺序结果不变、逐项支配的全局优势规则仍计价（$4）、
+竞争规则共有的恒定 cache_read 仍保留（$1）、无完整候选时部分规则的已知 input
+保留（$1）。`unknown.input=1M`/`unknown.output=1M`/`total=None`。
+
+**R9-2 回收必须前置拒绝永久删除，不能事后才发现**。旧 `_send_to_recycle_bin`
+用 `SHFileOperationW(FOF_ALLOWUNDO)`，微软文档明确该标志只是 "if possible"、
+回收站禁用时静默永久删除，`_cleanup` 事后查 `$I` 只能发现、无法保住现场。
+修复：改用 `IFileOperation::SetOperationFlags(FOFX_RECYCLEONDELETE |
+FOFX_EARLYFAILURE | FOF_NOERRORUI | FOF_SILENT)`——`FOFX_RECYCLEONDELETE`
+明确要求回收站、不回退永久删除，`FOFX_EARLYFAILURE` 令任一子操作出错即整体
+停止。COM 初始化/CoCreateInstance/IShellItem/SetOperationFlags/DeleteItem/
+PerformOperations/GetAnyOperationsAborted 任一步失败、取消、S_FALSE 都返回
+非零并保留源内容；`$I` 核验降为附加证据。不回退 rmtree/DeleteFile，不用改名
+搬运，不改系统策略。后端经 `_file_operation` 注入模拟反例。长路径预检
+`_has_overlong_entry` 改为对每个条目（含普通文件）检查完整路径、不跟随链接、
+枚举失败按命中处理——修复「短目录 + 254 字符合法文件名」被漏检的漏洞。
+
+**验证**：`rollup_applicability_round9.rs` 6 项全过（含请求构成对照与全部
+对照）；`scripts` 契约 26 项全过（新增真实回收合成树入站核验、取消/接口失败/
+不可回收反例、长文件与枚举失败预检）；既有 round6/7/8、rate、fee、
+review_regressions 全绿。`SNAPSHOT_VERSION` 18 → 19。版本沿用 0.9.2
+（同一 PR 补修不重复递增）。停在可审查 PR，不合并、不发布、不安装。

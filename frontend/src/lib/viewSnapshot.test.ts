@@ -80,7 +80,7 @@ describe("视图快照保存队列（R04）", () => {
     expect(warn).toHaveBeenCalled();
   });
 
-  it("SNAPSHOT_VERSION 为 18（v0.9.2 第八轮：时区偏移切换点与按请求构成判定改变费用读数，旧快照读取时忽略）", () => {
-    expect(SNAPSHOT_VERSION).toBe(18);
+  it("SNAPSHOT_VERSION 为 19（v0.9.2 第九轮：请求用量比例判定改变费用读数，旧快照读取时忽略）", () => {
+    expect(SNAPSHOT_VERSION).toBe(19);
   });
 });

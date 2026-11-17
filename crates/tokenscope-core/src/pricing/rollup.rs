@@ -1,4 +1,5 @@
-//! 日汇总费率适用性（v0.9.2 第四/五/六/七轮复核）：只采用**能够证明适用**的费率。
+//! 日汇总费率适用性（v0.9.2 第四/五/六/七/九轮复核）：只采用**能够证明适用**
+//! 的费率。
 //!
 //! 与请求级 `estimate` 使用同一套 `estimate_entry` 语义（分段、时段、规则
 //! 择价、`same_as_input` 解析），差异只在「条件是否可能发生」：
@@ -9,8 +10,10 @@
 //!   星期、半开边界、跨时区与 DST（含回拨重复小时的两个映射）都由同一套
 //!   请求级逻辑统一处理，不假定自然日恒为 24 小时。
 //! - 没有单请求 token 配比 → prompt 规模只按分段边界枚举代表值；每个场景
-//!   先用支配关系筛出**可能胜出规则集合**（见 `scenario_estimate`：覆盖更少
-//!   桶或逐项价更低的规则永不被请求级选中），再**逐分项**判断可证明费率：
+//!   先按**任意正配比下的费用可行性**筛出**可能胜出规则集合**（见
+//!   `scenario_estimate`：对固定非零分项集合的完整候选，只有不存在其它完整
+//!   候选价格的非负组合逐项主导它时才可能胜出——等权配比不足以覆盖 skewed
+//!   请求），再**逐分项**判断可证明费率：
 //!   某分项在所有可能胜出规则中都有价且费率一致才计价，否则只清该分项。
 //!   于是一条部分定价规则的已知分项、或交叉优势规则共有的不变分项（如
 //!   两侧 cache_read 都是 $1）都能保留，而不因其他分项不确定被整体清零。
@@ -449,21 +452,151 @@ fn basis_reps(plan: &PricePlan, limit: u64) -> Vec<u64> {
     bounds
 }
 
+/// 小型线性规划：在 `{x : A x <= b}`（每行 `[a_0..a_{n-1}, b]`，n ≤ 4）上
+/// 最大化 `c·x`。多面体顶点必为 n 个线性独立边界等式之交，故枚举所有 n 元
+/// 约束子集、高斯消元求交点、验可行后取目标最大值；不可行返回 None。
+fn lp_max(n: usize, constraints: &[Vec<f64>], objective: &[f64], eps: f64) -> Option<f64> {
+    fn combinations(m: usize, k: usize) -> Vec<Vec<usize>> {
+        fn rec(
+            start: usize,
+            left: usize,
+            m: usize,
+            cur: &mut Vec<usize>,
+            out: &mut Vec<Vec<usize>>,
+        ) {
+            if left == 0 {
+                out.push(cur.clone());
+                return;
+            }
+            for i in start..=m - left {
+                cur.push(i);
+                rec(i + 1, left - 1, m, cur, out);
+                cur.pop();
+            }
+        }
+        let (mut out, mut cur) = (Vec::new(), Vec::new());
+        rec(0, k, m, &mut cur, &mut out);
+        out
+    }
+    fn solve(mat: &[Vec<f64>], rhs: &[f64], n: usize) -> Option<Vec<f64>> {
+        let mut a: Vec<Vec<f64>> = mat
+            .iter()
+            .zip(rhs)
+            .map(|(row, &r)| {
+                let mut v = row.clone();
+                v.push(r);
+                v
+            })
+            .collect();
+        for col in 0..n {
+            let mut piv = col;
+            for r in (col + 1)..n {
+                if a[r][col].abs() > a[piv][col].abs() {
+                    piv = r;
+                }
+            }
+            if a[piv][col].abs() < 1e-12 {
+                return None;
+            }
+            a.swap(col, piv);
+            let d = a[col][col];
+            for cell in a[col].iter_mut().skip(col) {
+                *cell /= d;
+            }
+            let pivot_row = a[col].clone();
+            for (r, row) in a.iter_mut().enumerate() {
+                if r == col {
+                    continue;
+                }
+                let f = row[col];
+                if f.abs() < 1e-15 {
+                    continue;
+                }
+                for (cell, &p) in row.iter_mut().skip(col).zip(pivot_row.iter().skip(col)) {
+                    *cell -= f * p;
+                }
+            }
+        }
+        Some((0..n).map(|i| a[i][n]).collect())
+    }
+    let m = constraints.len();
+    if n == 0 || m < n {
+        return None;
+    }
+    let mut best: Option<f64> = None;
+    for comb in combinations(m, n) {
+        let mat: Vec<Vec<f64>> = comb.iter().map(|&i| constraints[i][..n].to_vec()).collect();
+        let rhs: Vec<f64> = comb.iter().map(|&i| constraints[i][n]).collect();
+        let Some(x) = solve(&mat, &rhs, n) else {
+            continue;
+        };
+        if constraints
+            .iter()
+            .any(|row| (0..n).map(|j| row[j] * x[j]).sum::<f64>() > row[n] + eps)
+        {
+            continue;
+        }
+        let val = (0..n).map(|j| objective[j] * x[j]).sum::<f64>();
+        best = Some(best.map_or(val, |b| b.max(val)));
+    }
+    best
+}
+
+/// 判定候选 c（分项价格向量 `own`）是否**可能**成为请求级胜出者。
+///
+/// 请求级费用是配比 v（各使用分项 token 严格为正）的线性函数
+/// `cost_x(v) = Σ v_k·p_x(k)`，完整优先后只在完整候选里比费用。按 Motzkin
+/// 传递定理，c 不可能胜出 ⟺ 存在其它完整候选的非负组合 z（不全零）使
+/// `Σ_o z_o·(p_o(k) - p_c(k)) ≥ 0`（每个分项 k）且至少一处严格 > 0——即 c
+/// 的价格被对手价格的凸组合逐分量弱支配。这是可证明的可行性判定，不是
+/// 等权采样、经验配比或逐字段取最高价。
+fn could_win(own: &[f64], rivals: &[Vec<f64>]) -> bool {
+    let n = rivals.len();
+    if n == 0 {
+        return true;
+    }
+    let k = own.len();
+    let mut constraints: Vec<Vec<f64>> = Vec::new();
+    for o in 0..n {
+        let mut row = vec![0.0; n + 1];
+        row[o] = -1.0; // z_o >= 0
+        constraints.push(row);
+    }
+    let mut row = vec![1.0; n + 1];
+    row[n] = 1.0;
+    constraints.push(row); // Σz <= 1
+    let mut row = vec![-1.0; n + 1];
+    row[n] = -1.0;
+    constraints.push(row); // Σz >= 1
+    for j in 0..k {
+        let mut r = vec![0.0; n + 1];
+        for o in 0..n {
+            r[o] = -(rivals[o][j] - own[j]);
+        }
+        constraints.push(r); // -f_j(z) <= 0
+    }
+    let objective: Vec<f64> = (0..n)
+        .map(|o| (0..k).map(|j| rivals[o][j] - own[j]).sum::<f64>())
+        .collect();
+    match lp_max(n, &constraints, &objective, 1e-9) {
+        Some(best) => best <= 1e-9, // 无支配组合 → c 可能胜出
+        None => true,               // 系统不可行 → c 可能胜出
+    }
+}
+
 /// 一个场景：固定时段分支 + prompt 规模代表值。
 ///
-/// 日汇总没有单请求配比，整桶 cost 最高的规则只是在"日总量配比"下胜出，
-/// 不能代表每个请求都选它（反例2：$4 与 $6 两种合法构成）。请求级 cost 是
-/// 单请求 token 的线性函数 `Σ v[k]·p[i][k]`（完整优先）。据此分两步：
+/// 日汇总没有单请求配比。请求级费用是单请求 token 的线性函数
+/// `Σ v[k]·p[i][k]`（完整优先 → 费用最高 → 稳定决胜）；对固定的「实际使用
+/// 分项集合」S，只有对 S 全部有价的候选能胜出（完整优先）。据此分两步：
 ///
-/// 1. **筛出可能胜出规则**：规则 a 支配 b，当 a 定价的使用桶集合 ⊇ b、
-///    且对 b 每个已定价桶 a 的价 ≥ b，且至少一处更优（含多覆盖一个桶）。
-///    被支配的 b 对任何配比 v 都不会在请求级胜出 → 从集合中剔除。保留的是
-///    Pareto 前沿（互不支配），即“在不同配比下可能胜出”的规则集合。
-/// 2. **逐分项判定**：对某分项 k，只有当**所有**可能胜出规则在 k 上都有价且
-///    费率一致时，k 才计为已定价。这样既保留单条部分定价规则的已知分项、
-///    也保留交叉优势规则共有的不变分项（两侧 cache_read 都是 $1）；不一致
-///    的分项只清自己，不牵连其它分项。禁止逐字段拼价、单价始终来自同一条
-///    可能胜出规则。
+/// 1. 枚举 used 的非空子集作为 S，取 S 上的完整候选；对每条完整候选用
+///    `could_win` 判定它在**任意正配比**下是否可能胜出（线性可行性 / 凸包
+///    支配，非等权向量）。被支配者排除，其余为「可能胜出规则」。
+/// 2. 某分项 k 只有当**所有**可能胜出规则在 k 上都有价且费率一致时才计为
+///    已定价；这样既保留单条部分规则的已知分项，也保留交叉优势规则共有的
+///    不变分项（两侧 cache_read 都是 $1）；不一致的分项只清自己。禁止逐字段
+///    拼价、单价始终来自同一条可能胜出规则。
 fn scenario_estimate(e: &Entry, rules: &[Rule<'_>], basis: u64, t: &TokenCounts) -> CostEstimate {
     let used: Vec<Item> = ITEMS.iter().copied().filter(|it| it.used(t) > 0).collect();
     let mut cands: Vec<CostEstimate> = Vec::new();
@@ -481,79 +614,47 @@ fn scenario_estimate(e: &Entry, rules: &[Rule<'_>], basis: u64, t: &TokenCounts)
     }
 
     let price = |est: &CostEstimate, item: Item| item.line_meta(est).map(|(v, _)| v);
+    let prices: Vec<Vec<Option<f64>>> = cands
+        .iter()
+        .map(|cand| used.iter().map(|&it| price(cand, it)).collect())
+        .collect();
 
-    // 请求级语义是「完整优先 → 费用最高」，因此某分项能否证明，只能看
-    // 「实际用到了该分项的可行单请求」里哪些规则可能胜出。全局 Pareto
-    // 前沿不够：一条只在不含该分项的请求里才可能胜出的规则，也会被算进
-    // 可能胜出集合。这里对每个分项枚举 used 的子集（≤ 4 个 → ≤ 15 个掩码）
-    // 作为候选请求构成，逐条按请求级语义判定可行性。
     let n = used.len();
-    let mut proved: Vec<Option<f64>> = vec![None; n];
-    for i in 0..n {
-        let mut winners: Vec<usize> = Vec::new();
-        for (ci, cand) in cands.iter().enumerate() {
-            // 缺该分项的规则在任何用到它的请求里都不完整，直接出局。
-            if price(cand, used[i]).is_none() {
-                continue;
-            }
-            let mut feasible = false;
-            for bits in 1u32..(1u32 << n) {
-                if bits & (1 << i) == 0 {
-                    continue; // 请求必须实际使用该分项
+    // 每个分项被「可能胜出规则」登记到的费率；全部一致才可证明。
+    let mut possible: Vec<Vec<f64>> = vec![Vec::new(); n];
+    for bits in 1u32..(1u32 << n) {
+        let support: Vec<usize> = (0..n).filter(|&k| bits & (1 << k) != 0).collect();
+        // 完整优先：只有对 S 内每个分项都有价的候选可能在请求级胜出。
+        let complete: Vec<usize> = (0..cands.len())
+            .filter(|&ci| support.iter().all(|&k| prices[ci][k].is_some()))
+            .collect();
+        if complete.is_empty() {
+            // 无完整候选：请求级只能取部分候选的已知费用，费率不可证明；
+            // 保持这些分项未知，不整体清零其它子集已证明的分项。
+            continue;
+        }
+        for &ci in &complete {
+            let own: Vec<f64> = support.iter().map(|&k| prices[ci][k].unwrap()).collect();
+            let rivals: Vec<Vec<f64>> = complete
+                .iter()
+                .filter(|&&oi| oi != ci)
+                .map(|&oi| support.iter().map(|&k| prices[oi][k].unwrap()).collect())
+                .collect();
+            if could_win(&own, &rivals) {
+                for &k in &support {
+                    let pos = support.iter().position(|&x| x == k).unwrap();
+                    possible[k].push(own[pos]);
                 }
-                let mut own = 0.0;
-                let mut complete = true;
-                for (k, item) in used.iter().enumerate() {
-                    if bits & (1 << k) == 0 {
-                        continue;
-                    }
-                    match price(cand, *item) {
-                        Some(v) => own += v,
-                        None => {
-                            complete = false;
-                            break;
-                        }
-                    }
-                }
-                if !complete {
-                    continue;
-                }
-                // 存在更贵的完整竞争者 → 这种请求构成下它赢不了。
-                let beaten = (0..cands.len()).any(|oi| {
-                    if oi == ci {
-                        return false;
-                    }
-                    let mut sum = 0.0;
-                    for (k, item) in used.iter().enumerate() {
-                        if bits & (1 << k) == 0 {
-                            continue;
-                        }
-                        match price(&cands[oi], *item) {
-                            Some(v) => sum += v,
-                            None => return false,
-                        }
-                    }
-                    sum > own + 1e-12
-                });
-                if !beaten {
-                    feasible = true;
-                    break;
-                }
-            }
-            if feasible {
-                winners.push(ci);
             }
         }
-        if let Some(&first) = winners.first() {
-            let want = price(&cands[first], used[i]);
-            let consistent = winners.iter().all(|&ci| {
-                price(&cands[ci], used[i])
-                    .zip(want)
-                    .is_some_and(|(v, w)| (v - w).abs() < 1e-12)
-            });
-            if consistent {
-                proved[i] = want;
-            }
+    }
+
+    let mut proved: Vec<Option<f64>> = vec![None; n];
+    for k in 0..n {
+        if let Some(&first) = possible[k].first()
+            && possible[k].iter().all(|&v| (v - first).abs() < 1e-12)
+        {
+            proved[k] = Some(first);
         }
     }
 

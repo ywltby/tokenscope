@@ -3,7 +3,11 @@
 // 合并待保存最新项 + 串行派发：绝不并发 fire-and-forget 让旧写覆盖新写。
 import { invoke } from "@tauri-apps/api/core";
 
-/** 快照格式版本：v18 = 日汇总时区偏移切换点 + 按请求构成判定可能胜出规则
+/** 快照格式版本：v19 = 日汇总请求用量比例判定（v0.9.2 第九轮）——可能胜出
+ * 规则改按「任意正 token 配比下的线性费用可行性」判定（凸包支配），修正
+ * 等权配比漏掉 skewed 请求的问题，部分汇总的费用/未定价读数改变，v18 及
+ * 更早快照的费用读数不再可信，读取时忽略重建；
+ * v18 = 日汇总时区偏移切换点 + 按请求构成判定可能胜出规则
  * （v0.9.2 第八轮）——时段切分加入真实偏移切换点（前拨日的价格窗口不再被
  * 漏掉），分项判定改为「在用到该分项的可行请求里哪些规则可能胜出」，
  * 部分汇总的费用/未定价读数改变，v17 及更早快照的费用读数不再可信，读取
@@ -36,7 +40,7 @@ import { invoke } from "@tauri-apps/api/core";
  * session/project，v9 及更早快照的分组与下钻 key 不再可信；
  * v9 = 模型匹配规则（等价键）；v8 = 项目根归并；v7 = 统一项目身份；
  * v6 = 查询会话契约（SF04）；v5 及更早版本不含会话身份且游标为旧格式。 */
-export const SNAPSHOT_VERSION = 18;
+export const SNAPSHOT_VERSION = 19;
 
 export type SnapshotDispatch = (payload: unknown) => Promise<void>;
 
