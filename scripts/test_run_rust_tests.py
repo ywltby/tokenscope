@@ -367,5 +367,41 @@ class WiringCase(unittest.TestCase):
         self.assertIn('python -B -m unittest discover -s scripts -p "test_run_rust_tests.py" -v', action)
 
 
+class ComApartmentBalanceCase(unittest.TestCase):
+    """CoInitializeEx 每次成功调用（含 S_FALSE）都必须配对一次 CoUninitialize。
+
+    只注入模拟的 ole32/shell32，不触碰真实 COM、回收站或任何文件；CoCreateInstance
+    立即失败，保证执行在触碰 Shell 之前结束。
+    """
+
+    def _fail_during_create(self, init_hr):
+        ole = SimpleNamespace(
+            CoInitializeEx=mock.Mock(return_value=init_hr),
+            CoCreateInstance=mock.Mock(return_value=-2147467259),  # E_FAIL
+            CoUninitialize=mock.Mock(),
+        )
+        fake_windll = SimpleNamespace(ole32=ole, shell32=SimpleNamespace())
+        with mock.patch.object(runner.ctypes, "windll", fake_windll):
+            with self.assertRaises(OSError):
+                runner._default_file_operation(
+                    r"C:\synthetic-never-used", runner._RECYCLE_FLAGS)
+        return ole
+
+    def test_s_ok_is_balanced(self):
+        ole = self._fail_during_create(0)
+        self.assertEqual(ole.CoUninitialize.call_count, 1,
+                         "S_OK 初始化成功必须配对一次 CoUninitialize")
+
+    def test_s_false_is_also_balanced(self):
+        ole = self._fail_during_create(1)
+        self.assertEqual(ole.CoUninitialize.call_count, 1,
+                         "S_FALSE 也是成功调用（已初始化），必须配对一次 CoUninitialize")
+
+    def test_failed_initialization_does_not_uninitialize(self):
+        ole = self._fail_during_create(-2147467259)  # E_FAIL
+        self.assertEqual(ole.CoUninitialize.call_count, 0,
+                         "初始化失败没有获得 apartment，不得调用 CoUninitialize")
+
+
 if __name__ == "__main__":
     unittest.main()

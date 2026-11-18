@@ -103,7 +103,9 @@ def _default_file_operation(path, flags):
     shell32 = ctypes.windll.shell32
 
     apartment = _hr(ole32.CoInitializeEx(None, _COINIT_APARTMENTTHREADED))
-    # S_OK=0；S_FALSE=1 表示线程已初始化（仍是有效 STA，可用）。
+    # S_OK=0；S_FALSE=1 表示线程已在该套间初始化（仍是有效 STA，可用）。
+    # 两者都是成功调用：每次成功调用都会增加线程的 COM 初始化计数，必须各自
+    # 配对一次 CoUninitialize（微软 CoInitializeEx 文档）。
     if apartment not in (0x00000000, _S_FALSE):
         raise OSError(f"CoInitializeEx(STA) 失败 0x{apartment:08x}")
 
@@ -156,8 +158,10 @@ def _default_file_operation(path, flags):
     finally:
         _release(item, _ISHELL_ITEM_VTBL_RELEASE)
         _release(op)
-        # 只有本次成功初始化 apartment 才配对释放；S_FALSE 时外部已初始化。
-        if apartment == 0x00000000:
+        # 成功的 CoInitializeEx（S_OK 或 S_FALSE）都要配对一次 CoUninitialize。
+        # S_FALSE 只说明本次调用之前线程已在同一套间初始化过，不代表这次调用
+        # 不需要释放：初始化计数已经加一，少释放一次就会泄漏。
+        if apartment in (0x00000000, _S_FALSE):
             ole32.CoUninitialize()
 
 
