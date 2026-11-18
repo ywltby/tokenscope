@@ -36,8 +36,9 @@
    回拨重复小时切分再次改变部分汇总读数）→ 18（第八轮：时区偏移切换点进入
    切分、分项判定改按请求构成）→ 19（第九轮：请求用量比例判定改变部分
    汇总的费用/未定价读数）→ 20（第十轮：跨候选择价与语义完整性改变部分
-   汇总的费用/未定价/估算读数）；旧快照的分组费用状态不可信，
-   按仓库约定读不出即重建派生结果；不要求清库/重扫/重导。
+   汇总的费用/未定价/估算读数）→ 21（第十一轮：日汇总按 0 估算披露改变
+   `complete` 与 `cache_price_zero_estimated` 读数）；旧快照的分组费用状态
+   不可信，按仓库约定读不出即重建派生结果；不要求清库/重扫/重导。
 
 ### 1.2 展示侧：单金额 + 悬浮详情（缺陷 A）
 
@@ -422,3 +423,30 @@ B(input1/output3) 下 balanced（两次各 0.5M+0.5M）合计 $4、separated（1
 候选、无完整候选对照）；既有计价/日汇总 198 项全绿；scripts 契约 29 项全过
 （含真实回收合成树入站核验）。`SNAPSHOT_VERSION` 19 → 20：费用快照是独立轴，
 读数变化必须失效旧快照，不能用「同一 PR 不加发行号」代替。版本沿用 0.9.2。
+
+### 第十一轮复核修复（2026-11-18，基线 `feff517`）：日汇总保留「缓存缺价按 0 估算」标记
+
+独立复核 `qa-artifacts/pr70-r11-review/` 给出反例：同一模型两个候选，
+`external` 显式 `cache_read=$0`、`provider`（线上来源）缺缓存读价 → 按 0 估算；
+日总量 1M 缓存读 + 1M 缓存写有两种真实构成，合计都是 $2：
+分两次（1M 只读 + 1M 只写，两侧都完整）与两次各 0.5M 读 + 0.5M 写（无完整候选，
+回退到 provider，缓存读按 0 估算、complete=false）。旧实现金额正确（$2）却返回
+`cache_price_zero_estimated=false`、`complete=true`。
+
+**根因**：`Ledger::only_assumed_zero` 在任一可能胜出结果提供**显式**零价时变成
+false，于是重建费用时把「另一条路径使用估算」的事实一起丢掉。
+
+**修复**：把「金额是否确定」与「依据是否含假设」分开判断——`possible` 一致仍
+决定费率可证明；新增 `assumed_zero_used`，只要**任一可能胜出路径**按 0 估算过，
+就保留金额与 token（`unknown` 不变），同时置 `cache_price_zero_estimated=true`
+并保持 `complete=false`。只有所有可能胜出路径都用显式零价才保持完整计价；被排除
+的候选、零用量分项、最终未获覆盖的分项都不产生标记（前者不登记，中者不在 used
+里，后者 `proved` 为 `None`）。N18 分档估算标记与既有择价语义不变。
+
+**验证**：`rollup_applicability_round11.rs` 4 项——核心反例先失败在
+`cache_price_zero_estimated` 断言，修复后 `cost=2.0`、`unknown.cache_read=0`、
+`unknown.cache_write=0`、`complete=false`、`cache_price_zero_estimated=true`，
+`Group.total_cost_usd=Some(2.0)` 且标记与合计同步；显式零价对照保持完整计价，
+全按 0 估算对照保持不完整 + 标记。既有计价/日汇总 207 项全绿。
+`SNAPSHOT_VERSION` 20 → 21（`complete` 与估算标记读数改变，费用快照独立轴）。
+版本沿用 0.9.2。

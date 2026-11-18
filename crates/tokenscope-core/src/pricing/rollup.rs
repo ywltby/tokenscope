@@ -240,6 +240,21 @@ impl Pricing {
         if cache_write.is_some_and(|cw| proved[cw].is_some() && ledger.split_estimated[cw]) {
             est.cache_write_split_estimated = true;
         }
+        // T3：金额可确定 ≠ 依据无假设。只要**任一可能胜出路径**按 0 估算过，
+        // 金额可以照常保留、token 不记未知，但必须披露「按 0 估算」并保持
+        // 不完整。被排除的候选不登记、零用量分项不在 used 里、最终未获覆盖
+        // 的分项 proved 为 None——三者都不会产生估算标记。
+        let zero_estimated = used.iter().enumerate().any(|(k, &item)| {
+            proved[k].is_some()
+                && ledger.assumed_zero_used[k]
+                && est
+                    .lines
+                    .iter()
+                    .any(|line| item.matches_kind(line.kind) && line.priced)
+        });
+        if zero_estimated {
+            est.cache_price_zero_estimated = true;
+        }
         est.complete = est.unknown.total() == 0
             && !est.cache_price_zero_estimated
             && !est.cache_write_split_estimated;
@@ -372,9 +387,17 @@ impl UnitProbe {
 
 /// 跨场景累计的「可能被请求级选中」登记：分项费率只有在全部登记一致时
 /// 才可证明；`None` 表示存在可能被选中的单元不给该分项定价。
+///
+/// 「金额是否确定」与「依据是否含假设」是两个独立判断：
+/// - `possible` 一致 → 费率可证明（金额确定）；
+/// - `only_assumed_zero`：所有登记都是按 0 估算（用于决定是否需要让
+///   `estimate_entry` 重新产生 assumed_zero 行）；
+/// - `assumed_zero_used`：**任一**可能胜出路径按 0 估算过——金额可以一致，
+///   但依据含假设，必须披露且不得声称完整。
 struct Ledger {
     possible: Vec<Vec<Option<f64>>>,
     only_assumed_zero: Vec<bool>,
+    assumed_zero_used: Vec<bool>,
     split_estimated: Vec<bool>,
 }
 
@@ -383,6 +406,7 @@ impl Ledger {
         Self {
             possible: vec![Vec::new(); n],
             only_assumed_zero: vec![true; n],
+            assumed_zero_used: vec![false; n],
             split_estimated: vec![false; n],
         }
     }
@@ -390,7 +414,9 @@ impl Ledger {
     fn record(&mut self, k: usize, value: Option<f64>, assumed_zero: bool, split: bool) {
         self.possible[k].push(value);
         if value.is_some() {
-            if !assumed_zero {
+            if assumed_zero {
+                self.assumed_zero_used[k] = true;
+            } else {
                 self.only_assumed_zero[k] = false;
             }
             if split {
