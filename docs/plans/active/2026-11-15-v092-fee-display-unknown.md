@@ -472,3 +472,32 @@ unknown 全 0 的数据切换估算标记，分别断言浮层有无说明；金
 两条断言（浮层披露存在、金额区单金额），并补「显式零价无该说明」对照。前端
 79 文件 1155 项 + typecheck/format/build 全过。后端择价、金额、unknown 与
 `SNAPSHOT_VERSION`（21）均未改，版本仍 0.9.2。
+
+### 交付状态（发布，2026-11-18 用户授权合并）
+
+- PR #70 合并为
+  [fe9db2c](https://github.com/ywltby/tokenscope/commit/fe9db2c13e8d27ffb0e18c7fbaf43b875525954e)
+  （merge commit）；main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/44275498447)、
+  [Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/44275498346)、
+  [Release](https://github.com/ywltby/tokenscope/actions/runs/44275498484)
+  三条流水线在该合并提交上全部实际成功。
+- [v0.9.2](https://github.com/ywltby/tokenscope/releases/tag/v0.9.2) 预发布
+  已发布：Release 19 项作业全部成功且无跳过——gate、plan-upgrades、build、
+  五场景 install-test、12 组单跳升级矩阵（0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 /
+  0.6.0 / 0.9.1 × present/deleted）、present 与 deleted 两条连续升级链、
+  publish。
+- `build-metadata.json` 确认 commit `fe9db2c`、version `0.9.2`、
+  persistent_format 与 v0.9.1 相同（cache_schema 12 / history_schema 5 /
+  parser_revision 3 / identity_revision 1 / pricing_index 11 /
+  settings_format 3——本批不改持久格式）；安装包 SHA256
+  `f03e7f74cee3dfb7a7a822c87826489af2c4ce6e528eb558d953aca5bcb0ad78`
+  下载后本机重算，与 `SHA256SUMS.txt` 及 GitHub 资产 digest 三方一致。
+  本机不安装正式包，安装覆盖由 CI install-test / upgrade-test 完成。
+- **v0.9.2 已登记升级基线**（`upgrade_baselines.py add --tag v0.9.2`，资产
+  逐个下载核对后写入）；`check --base-ref` 由 CI contracts 作业在该 HEAD 上
+  实跑 `"ok": true`（base_version 0.9.1，本地直连 GitHub 大响应瞬断不影响
+  权威校验）。
+- 提交链：`f8f4a69`（第八轮回收）→ `267aa3b` / `552c583`（第九轮比例判定
+  与回收前置）→ `76dfcea`（第九轮补）→ `30322d1` / `feff517`（第十轮跨
+  候选与 COM 配对）→ `3ae04d9`（第十一轮零估算标记）→ `0641066`（第十二轮
+  浮层披露）→ 合并 `fe9db2c`。
