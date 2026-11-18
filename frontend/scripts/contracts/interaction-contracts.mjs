@@ -68,6 +68,8 @@ export const REQUIRED_CONTRACTS = [
   // v0.9.1 缺陷 B + C（2026-11-14）：费用列布局（scope 命中、上下排列）与
   // 费用状态展示规则。
   "cost_cell_layout_not_concatenated",
+  // v0.9.3（2026-11-18）：无 † / 独立未知列，颜色表达未定价，说明移到标题浮层。
+  "cost_display_consolidation",
   // C06（控件材质与浮层可读性计划）：像素级边界对比度与焦点契约。
   "ui_control_material",
   // BS04（启动卡死取证与引导期恢复计划）：检查挂起可见可重查、迟到响应
@@ -3024,10 +3026,12 @@ const IMPL = {
         ctx.record(
           name,
           `${viewport.label}:v092-rule4-unpriced-kept`,
-          unpriced != null && unpriced.text.includes("\u672a\u77e5\u2020"),
+          unpriced != null &&
+            unpriced.text.includes("\u672a\u77e5") &&
+            !unpriced.text.includes("\u2020"),
           unpriced?.text ?? "missing",
         );
-        // v0.9.2 反例 1：零元价格 → $0.00（不是未知†）。
+        // v0.9.3 反例 1：零元价格 → $0.00（不是「未知」，无脚注符号）。
         const free = byLabel("synthetic-free")[0];
         ctx.record(
           name,
@@ -3035,13 +3039,14 @@ const IMPL = {
           free != null && free.text.includes("$0.00"),
           free?.text ?? "missing",
         );
-        // v0.9.2 第四轮：找到候选但全部实际用量缺价 → 未知†（不是 $0.00†）。
+        // v0.9.3 第四轮：找到候选但全部实际用量缺价 → 「未知」（不是 $0.00）。
         const unpricedUsed = byLabel("synthetic-unpriced-used")[0];
         ctx.record(
           name,
           `${viewport.label}:v092-unpriced-used-not-zero`,
           unpricedUsed != null &&
-            unpricedUsed.text.includes("\u672a\u77e5\u2020") &&
+            unpricedUsed.text.includes("\u672a\u77e5") &&
+            !unpricedUsed.text.includes("\u2020") &&
             !unpricedUsed.text.includes("$0.00"),
           unpricedUsed?.text ?? "missing",
         );
@@ -3051,7 +3056,7 @@ const IMPL = {
           `${viewport.label}:v092-partial-amount-plus-mark`,
           partial != null &&
             partial.text.includes("$7.25") &&
-            partial.text.includes("\u2020") &&
+            !partial.text.includes("\u2020") &&
             !partial.text.includes("\u90e8\u5206\u6765\u6e90\u8bb0\u5f55"),
           partial?.text ?? "missing",
         );
@@ -3209,6 +3214,167 @@ const cardState = await page.evaluate(() => {
         await page.locator(".metric-card").scrollIntoViewIfNeeded();
         await page.waitForTimeout(300);
         await ctx.shot(name, session, `${viewport.label}-overview-card`);
+        await ctx.finishSession(session);
+      } finally {
+        await session.close();
+      }
+    }
+  },
+
+  /**
+   * v0.9.3（2026-11-18）：费用显示与说明入口收口——无 †/未知列，颜色表达
+   * 未定价，两个说明栏目移到「聚合」标题的同一个浮层。
+   */
+  async cost_display_consolidation(ctx) {
+    const name = "cost_display_consolidation";
+    for (const viewport of Object.values(VIEWPORTS)) {
+      const session = await ctx.open({ fixture: "source-cost", viewport });
+      const page = session.page;
+      // 夹具本身没有 rollup_coverage；按既有做法在 app 读之前注入确定性数据，
+      // 让「统计说明」有内容可验（不改组件、不绕过 UI 事件流）。
+      const originalIpc = session.fixture.ipc;
+      session.fixture.ipc = async (cmd, args) => {
+        const result = await originalIpc(cmd, args);
+        if (cmd === "query_summary" && result) {
+          result.rollup_coverage = { detail_selected_buckets: 2 };
+        }
+        return result;
+      };
+      try {
+        await openDashboard(session);
+        await clickSegment(page, "按模型");
+        await page.waitForTimeout(500);
+
+        // 表后两组栏目已移除（只在标题浮层内存在）。
+        const afterText = await page.evaluate(
+          () => document.querySelector(".usage-card")?.textContent ?? "",
+        );
+        ctx.record(
+          name,
+          `${viewport.label}:表后无重复说明栏目`,
+          !afterText.includes("\u6765\u6e90\u91c7\u96c6\u7edf\u8ba1") &&
+            !afterText.includes("\u7edf\u8ba1\u8bf4\u660e"),
+          afterText.slice(0, 200),
+        );
+
+        // 聚合标题浮层：两个小标题同层、限高内滚、Escape 关闭。
+        await page.locator(".agg-info-trigger").hover();
+        await page.waitForTimeout(300);
+        const agg = await page.evaluate(() => {
+          const body = document.querySelector(".agg-info-body");
+          if (!body) return null;
+          const cs = getComputedStyle(body);
+          return {
+            text: (body.textContent ?? "").replace(/\s+/g, " ").trim(),
+            overflowY: cs.overflowY,
+            maxHeight: cs.maxHeight,
+          };
+        });
+        ctx.record(
+          name,
+          `${viewport.label}:聚合浮层含两栏目`,
+          agg != null &&
+            agg.text.includes("\u6765\u6e90\u91c7\u96c6\u7edf\u8ba1") &&
+            agg.text.includes("\u7edf\u8ba1\u8bf4\u660e"),
+          JSON.stringify(agg)?.slice(0, 300),
+        );
+        ctx.record(
+          name,
+          `${viewport.label}:浮层限高内滚`,
+          agg != null && agg.overflowY === "auto" && parseFloat(agg.maxHeight) > 0,
+          JSON.stringify(agg),
+        );
+        await page.locator(".agg-info-trigger").focus();
+        await page.keyboard.press("Escape");
+        await page.waitForTimeout(200);
+        const closed = await page.evaluate(
+          () => document.querySelector(".agg-info-trigger")?.getAttribute("aria-describedby") == null,
+        );
+        ctx.record(name, `${viewport.label}:Escape 关闭标题浮层`, closed, String(closed));
+
+        // 费用色态：全部/部分未定价用警告色，零价与按零估算用普通文字色。
+        const tones = await page.evaluate(() => {
+          const rows = [...document.querySelectorAll(".n-data-table .n-data-table-tr")];
+          const out = {};
+          for (const row of rows) {
+            const label = (row.querySelector(".dim-cell")?.textContent ?? "")
+              .replace(/\s*›\s*$/, "")
+              .trim();
+            const amount = row.querySelector(".gcb-amount-main");
+            if (!label || !amount) continue;
+            out[label] = {
+              text: amount.textContent?.trim() ?? "",
+              warning: amount.classList.contains("gcb-warning"),
+            };
+          }
+          return out;
+        });
+        const allUnknown = tones["synthetic-unpriced"];
+        const partial = tones["synthetic-rollup-partial"];
+        const free = tones["synthetic-free"];
+        const zeroEstimated = tones["synthetic-cache-zero"];
+        ctx.record(
+          name,
+          `${viewport.label}:全部未定价橙色未知`,
+          allUnknown?.warning === true &&
+            allUnknown?.text === "\u672a\u77e5" &&
+            !allUnknown?.text.includes("\u2020"),
+          JSON.stringify(allUnknown),
+        );
+        ctx.record(
+          name,
+          `${viewport.label}:部分未定价橙色金额`,
+          partial?.warning === true && partial?.text.includes("$7.25"),
+          JSON.stringify(partial),
+        );
+        ctx.record(
+          name,
+          `${viewport.label}:显式零价普通色`,
+          free?.warning === false && free?.text === "$0.00",
+          JSON.stringify(free),
+        );
+        ctx.record(
+          name,
+          `${viewport.label}:按零估算普通色`,
+          zeroEstimated?.warning === false && zeroEstimated?.text === "$2.00",
+          JSON.stringify(zeroEstimated),
+        );
+        ctx.record(
+          name,
+          `${viewport.label}:无脚注符号`,
+          Object.values(tones).every((v) => !v.text.includes("\u2020")),
+          JSON.stringify(Object.values(tones).map((v) => v.text)),
+        );
+
+        // 费用浮层：构成 + 未定价 token 明细 + 来源/估算说明（部分未定价行）。
+        await page
+          .locator(".n-data-table-tr", { hasText: "synthetic-rollup-partial" })
+          .locator(".gcb-trigger")
+          .hover();
+        await page.waitForTimeout(300);
+        const feeTip = await page.evaluate(() => {
+          const body = [...document.querySelectorAll(".gcb-tooltip")].find((el) => {
+            let node = el;
+            while (node) {
+              const cs = getComputedStyle(node);
+              if (cs.display === "none" || cs.visibility === "hidden") return false;
+              node = node.parentElement;
+            }
+            return true;
+          });
+          return body ? (body.textContent ?? "").replace(/\s+/g, " ").trim() : null;
+        });
+        ctx.record(
+          name,
+          `${viewport.label}:费用浮层含构成与未定价明细`,
+          feeTip != null &&
+            feeTip.includes("\u6784\u6210") &&
+            feeTip.includes("\u65e5\u6c47\u603b\u6765\u6e90\u8bb0\u5f55\u8d39\u7528") &&
+            feeTip.includes("\u672a\u5b9a\u4ef7 token \u5408\u8ba1") &&
+            !feeTip.includes("\u2020"),
+          String(feeTip).slice(0, 300),
+        );
+        await ctx.shot(name, session, `${viewport.label}-consolidation`);
         await ctx.finishSession(session);
       } finally {
         await session.close();

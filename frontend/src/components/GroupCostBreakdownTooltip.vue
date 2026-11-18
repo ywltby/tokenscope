@@ -21,6 +21,7 @@
 import { computed, h, onBeforeUnmount, onMounted, ref, useId } from "vue";
 import { NTooltip } from "naive-ui";
 import { formatMoney } from "../lib/formatMoney";
+import { costDisplayTone } from "../lib/costDisplay";
 import { t } from "../lib/translate";
 import type { Group, TokenCounts } from "../types";
 
@@ -28,7 +29,7 @@ const props = defineProps<{
   group: Group;
   /** 主金额文本（CostCell/SummaryCards 已格式化好的同一字符串）。 */
   displayText: string;
-  /** 完全没有费用依据（显示未知†，无浮层内容价值时仍允许打开说明缺项）。 */
+  /** 完全没有费用依据（显示「未知」，无浮层内容价值时仍允许打开说明缺项）。 */
   unknownOnly: boolean;
   open: boolean;
   pinned: boolean;
@@ -65,10 +66,12 @@ onMounted(() => document.addEventListener("click", onDocumentClick));
 onBeforeUnmount(() => document.removeEventListener("click", onDocumentClick));
 
 const g = computed(() => props.group);
-/// 主金额旁的短标记：真实费用缺失 → †（原因在悬浮详情内）。
-/// unknownOnly（完全无依据 → 「未知†」）时不再叠加——未知标记自身已含 †。
-const partialMark = computed(() =>
-  props.unknownOnly || g.value.cost_partially_unknown ? (props.unknownOnly ? "" : "†") : "",
+/// 费用色态与费用列、合计行、总览卡同源：unknown_tokens 四桶之和 > 0 → 警告色。
+const tone = computed(() => costDisplayTone(g.value));
+/// 可用的缺价原因：后端明确给出 rollup_only 时复用既有说明；其它情况由
+/// 未获覆盖区的通用文案（无匹配价格或分项缺价）承担。
+const unknownReason = computed(() =>
+  g.value.unknown_reason === "rollup_only" ? t("dashboard.rollupOnly") : null,
 );
 const hasEstimate = computed(() => g.value.has_estimated_cost === true);
 const estimateText = computed(() => formatMoney(g.value.cost_usd, "summary"));
@@ -180,6 +183,9 @@ function renderContent(): ReturnType<typeof h> {
             h("span", { class: "gcb-amount ts-num" }, String(p.n)),
           ]),
         ),
+        ...(unknownReason.value
+          ? [h("div", { class: "gcb-note gcb-reason" }, unknownReason.value)]
+          : []),
         h("div", { class: "gcb-note" }, t("dashboard.groupCostUnknownNote")),
       ]),
     );
@@ -222,8 +228,8 @@ function renderContent(): ReturnType<typeof h> {
         @blur="emit('focus-leave')"
         @keydown.escape.prevent="emit('escape')"
       >
-        <span class="gcb-amount-main" :class="{ 'gcb-unknown': unknownOnly }">{{
-          displayText + partialMark
+        <span class="gcb-amount-main" :class="{ 'gcb-warning': tone === 'warning' }">{{
+          displayText
         }}</span>
       </button>
     </template>
@@ -253,7 +259,7 @@ function renderContent(): ReturnType<typeof h> {
   outline: 2px solid var(--ts-accent);
   outline-offset: 2px;
 }
-.gcb-unknown {
+.gcb-warning {
   color: var(--ts-warning);
 }
 .gcb-body {

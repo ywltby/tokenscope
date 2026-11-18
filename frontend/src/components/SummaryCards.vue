@@ -8,7 +8,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, useId } from "vue";
 import { NTooltip } from "naive-ui";
 import { fmtNum, type Group } from "../types";
-import { formatMoney } from "../lib/formatMoney";
+import { costDisplayText } from "../lib/costDisplay";
 import { TOKEN_BUCKETS } from "../lib/tokenDisplay";
 import { totalInput, totalTokens } from "../lib/tokenUsage";
 import { useT } from "../lib/i18n";
@@ -29,14 +29,8 @@ const hitRate = computed(() => {
 // UX07：汇总金额走单一入口（含 $、微小非零保护）。
 // v0.9.2：主读数 = 单一费用金额（total_cost_usd，后端合并互不重叠贡献，
 // 未舍入相加后这里只格式化一次）；构成与依据进悬浮详情，不再常驻展示。
-const costDisplay = computed(() => {
-  if (props.totals.total_cost_usd != null) {
-    return formatMoney(props.totals.total_cost_usd, "summary");
-  }
-  // 完全没有费用依据 → 未知†（缺价 ≠ 免费）。
-  return t("dashboard.costUnknownOnly");
-});
-/// 完全没有费用依据：显示"未知†"而不是 $0.00（缺价 ≠ 免费，G-P3-1）。
+const costDisplay = computed(() => costDisplayText(props.totals, t("dashboard.costUnknownOnly")));
+/// 完全没有费用依据：显示「未知」而不是 $0.00（缺价 ≠ 免费）。
 const costUnknownOnly = computed(() => props.totals.total_cost_usd == null);
 
 // v0.9.2：费用悬浮三态（RC06 同契约：hover/focus/pinned，Escape 关闭）。
@@ -96,12 +90,7 @@ const parts = computed(() =>
     <div class="metric-row">
       <!-- 主读数：估算费用 -->
       <div class="metric-main">
-        <div class="metric-label">
-          {{ t("dashboard.costLabel") }}
-          <!-- v0.9.2：主金额旁只保留短标记 †（真实费用缺失），常驻来源胶囊
-               全部移除（构成与依据进悬浮详情）。 -->
-          <span v-if="totals.cost_partially_unknown" class="ts-mark-warning" title="">†</span>
-        </div>
+        <div class="metric-label">{{ t("dashboard.costLabel") }}</div>
         <!-- v0.9.2：主读数 = 单一费用金额（total_cost_usd，后端合并）；
              悬浮/键盘聚焦打开构成详情（GroupCostBreakdownTooltip）。 -->
         <div class="metric-value metric-value-main ts-num">

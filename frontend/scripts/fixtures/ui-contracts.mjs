@@ -655,7 +655,7 @@ const SOURCE_COST_GROUPS = [
     source_cost_state: "full",
     requests: 18,
   }),
-  // 零元价格（免费模型）：估算发生但金额 $0.00 → 显示 $0.00 而非未知†。
+  // 零元价格（免费模型）：估算发生但金额 $0.00 → 显示 $0.00 而非「未知」。
   group("synthetic-free", 20000, {
     output: 10000,
     cost_usd: 0,
@@ -692,7 +692,7 @@ const SOURCE_COST_GROUPS = [
     requests: 5,
   }),
   // 找到候选但所有实际用量都缺价（候选只提供 output 价、本行只用 input）：
-  // 不是已知零元小计，必须显示未知†。放在 unpriced 之后，避免前缀匹配
+  // 不是已知零元小计，必须显示「未知」。放在 unpriced 之后，避免前缀匹配
   // 误选（契约旧断言用 includes）。
   group("synthetic-unpriced-used", 25000, {
     output: 0,

@@ -4,13 +4,14 @@
 // 主读数 = `total_cost_usd`（后端合并：请求估算 + 可估算日汇总 + 采用汇总
 // 的来源记录费用，互不重叠贡献未舍入相加，前端只格式化一次）。
 // 旧常驻元素全部移除：来源胶囊、第二行来源金额、大段来源/账单说明。
-// 真实费用缺失只保留短标记 `†`（cost_partially_unknown），缺项进悬浮详情。
+// v0.9.3：备注符号 `†` 与独立未知列移除——全部/部分未定价由金额色态表达，
+// 缺项与依据进悬浮详情。
 //
 // 悬浮详情（GroupCostBreakdownTooltip，复用请求级浮层配方与 RC06 交互）：
 // hover / focus / click 固定三态 + Escape + 外点关闭，键盘可达。
 import { computed, ref } from "vue";
 import type { Group } from "../types";
-import { formatMoney } from "../lib/formatMoney";
+import { costDisplayText } from "../lib/costDisplay";
 import { useT } from "../lib/i18n";
 import GroupCostBreakdownTooltip from "./GroupCostBreakdownTooltip.vue";
 
@@ -18,16 +19,9 @@ const t = useT();
 
 const props = defineProps<{ group: Group }>();
 
-/// 单一显示金额：后端合并值；None = 组内完全没有费用依据 → 未知。
-const hasTotal = computed(() => props.group.total_cost_usd != null);
-const totalText = computed(() =>
-  hasTotal.value ? formatMoney(props.group.total_cost_usd as number, "summary") : "",
-);
-/// 完全没有费用依据 → 未知†（缺价 ≠ 免费，G-P3-1）。
-const unknownOnly = computed(() => !hasTotal.value);
-const displayText = computed(() =>
-  unknownOnly.value ? t("dashboard.costUnknown") : totalText.value,
-);
+/// 完全没有费用依据 → 「未知」（缺价 ≠ 免费）；单一金额走共享入口。
+const unknownOnly = computed(() => props.group.total_cost_usd == null);
+const displayText = computed(() => costDisplayText(props.group, t("dashboard.costUnknown")));
 
 // RC06 三态：hover / focus / pinned（固定态外点关闭）；Escape 关闭。
 const hoverOpen = ref(false);
