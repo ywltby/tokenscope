@@ -1,9 +1,11 @@
 # TokenScope 计划与完成状态总账
 
-> 更新日期：2026-11-18。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
+> 更新日期：2026-11-19。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
 > 唯一当前待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)。真实跨午夜、长时间休眠、跨显示器在[独立系统验收待办](system-acceptance-todo.md)维护，均未排期、未标通过。[审计索引](audits/README.md)保留历史时点结论。
 
 ## 现在执行什么
+
+**2026-11-19 v0.9.3 已发布：汇总页费用显示与说明入口收口**：[实施计划](active/2026-11-18-v092-cost-display-consolidation.md)。移除 `†` 与独立未知列，费用完备性改用金额色态（全部未定价橙色「未知」、部分未定价橙色已计价小计、无未定价普通文字色，`lib/costDisplay.ts` 单一来源）；「来源采集统计」与「统计说明」移入「聚合」标题同一说明型浮层（宽 ≤ 480px、内部滚动），表后不再重复。三轮用户独立复核反例全部红→绿：hover/focus 状态隔离（鼠标离开与键盘失焦互不清除）、费用按钮 Enter/Space/点击与行下钻隔离（行处理器只响应行自身激活，金额按钮保留原生一次 click）、焦点不再取消鼠标离开定时器（关闭延迟内聚焦、随后失焦必须关闭）。PR #72 以 `--match-head-commit` 绑定复核 HEAD `33efbb2` 合并为 `bc92783`，[v0.9.3](https://github.com/ywltby/tokenscope/releases/tag/v0.9.3) 预发布已发布（Release 19 作业全成功无跳过，含 present/deleted 两条连续升级链与 12 组单跳矩阵），安装包 SHA256 `874a0021…a4ce` 下载后与 `SHA256SUMS.txt` 及 GitHub 资产 digest 三方核对一致，`build-metadata.json` 确认 commit/版本（persistent_format 与 v0.9.2 相同）；v0.9.3 已登记升级基线（`select --current-version 0.9.4` 起点含 0.9.3）。
 
 **2026-11-18 v0.9.2 已发布：费用列单金额加悬浮详情、日汇总只采用可证明费率**：[实施计划](active/2026-11-15-v092-fee-display-unknown.md)。费用列只显示一个合并金额（`total_cost_usd`），构成（请求估算 / 来源费用 / 汇总估算 / 缺失依据）全部进悬浮详情；日汇总费率经十二轮独立复核反例全部红→绿：来源日按真实绝对时间边界切分（DST 前拨/回拨、跨时区、半开边界）、逐分项可证明判定（部分定价规则的已知分项与交叉优势规则的公共不变分项保留）、任意正配比线性可行性择价（凸包支配，非等权采样）、价格候选 × 适用规则同池竞争（跨候选配比不按日总量猜）、语义完整性（缺价 / 按 0 估算 / 分档估算不冒充完整）、按 0 估算与 N18 分档估算标记保留并传到 Group 与浮层；测试临时根改为显式回收站清理（IFileOperation 强制回收、失败保留现场、COM 配对修正）。PR #70 合并 `fe9db2c`，[v0.9.2](https://github.com/ywltby/tokenscope/releases/tag/v0.9.2) 预发布已发布（Release 19 作业全成功，含 present/deleted 两条连续升级链与 12 组单跳矩阵），安装包 SHA256 `f03e7f74…ad78` 下载后与 `SHA256SUMS.txt` 及 GitHub 资产 digest 三方核对一致，`build-metadata.json` 确认 commit/版本（persistent_format 与 v0.9.1 相同）；v0.9.2 已登记升级基线（`select --current-version 0.9.3` 起点含 0.9.2）。
 

@@ -64,3 +64,41 @@
 - 版本按仓库工具递增 patch 至 **0.9.3**（`--check --base-ref origin/main`：
   version 0.9.3 / previous 0.9.2 / release true）。本批停在可审查 PR，不合并、
   不发布、不安装。
+
+### 交付状态（发布，2026-11-19 用户授权合并）
+
+- PR #72 经三轮独立复核补修后，以 `--match-head-commit` 绑定已复核 HEAD
+  `33efbb20cd1191147887f9d90ad465fa6c35e066` 合并为
+  [bc92783](https://github.com/ywltby/tokenscope/commit/bc92783363904976444f3e914338a3c0beebb3c6)
+  （merge commit）；main 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/44419334037)、
+  [Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/44419334087)、
+  [Release](https://github.com/ywltby/tokenscope/actions/runs/44419334105)
+  三条流水线在该合并提交上全部实际成功。
+- 三轮复核反例均先红后绿（正式组件回归 + 真实浏览器鼠标/键盘时序）：
+  ① 「聚合」浮层鼠标离开与键盘失焦共用定时器互相清除 → 离开定时器只清
+  hover、blur 只清 focus；② 费用按钮 Enter 冒泡到行处理器被 `preventDefault`
+  吞掉并误发 day 下钻 → 行处理器只响应行自身键盘激活与非按钮来源点击，
+  金额按钮保留原生一次 click；③ 关闭延迟内到达的焦点取消离开定时器致
+  hover 滞留、失焦后浮层永不关闭 → `@focus` 只更新焦点状态，仅鼠标重新
+  进入标题或浮层才取消待执行关闭。既有交互（间隙阅读、浮层内失焦、
+  Escape、点击固定、外点关闭、行下钻）回归全过。
+- [v0.9.3](https://github.com/ywltby/tokenscope/releases/tag/v0.9.3) 预发布
+  已公开：Release 19 项作业全部成功且无跳过——gate、plan-upgrades、build、
+  五场景 install-test、12 组单跳升级矩阵（0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 /
+  0.6.0 / 0.9.2 × present/deleted）、present 与 deleted 两条连续升级链、
+  publish。标签 `v0.9.3` 解引用即合并提交 `bc92783`。
+- `build-metadata.json` 确认 commit `bc92783`、version `0.9.3`、
+  persistent_format 与 v0.9.2 相同（cache_schema 12 / history_schema 5 /
+  parser_revision 3 / identity_revision 1 / pricing_index 11 /
+  settings_format 3——本批不改持久格式）；安装包 SHA256
+  `874a00216dad102ee6083a2e16b1f50ecc531be0537c533d066a9a3ff321a4ce`
+  下载后本机重算，与 `SHA256SUMS.txt` 及 GitHub 资产 digest 三方一致
+  （`build-metadata.json` 哈希 `d904432a…` 同样三方一致）。本机不安装
+  正式包，安装覆盖由 CI install-test / upgrade-test / upgrade-chain 完成。
+- **v0.9.3 已登记升级基线**（`upgrade_baselines.py add --tag v0.9.3`，资产
+  逐个下载核对后写入，status published）；`select --current-version 0.9.4`
+  起点集合含 0.9.3（替代 0.9.2 的上一版位置，MAX_ORIGINS=6 不变）。
+- 提交链：`e7857df`（批主体）→ `3a38f42`（第二轮：状态隔离与行/按钮隔离）
+  → `33efbb2`（第三轮：焦点不取消离开定时器）→ 合并 `bc92783`。
+- 版本保持 0.9.3，本记录合入不递增、不发布：`bump_version.py --check`
+  显示 release: false，合并后 Release 只跑 gate。
