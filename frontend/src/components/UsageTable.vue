@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, h } from "vue";
-import { NCollapse, NCollapseItem, NDataTable, type DataTableColumn } from "naive-ui";
+import { NDataTable, type DataTableColumn } from "naive-ui";
 import { AGENT_LABEL, fmtNum, type Group, type SummaryReport } from "../types";
 import { tokenBucketLabel } from "../lib/tokenDisplay";
 import { displayTokens, totalTokens } from "../lib/tokenUsage";
 import { buildSourceLines } from "../lib/statsView";
 import ScrollList from "./ScrollList.vue";
 import CostCell from "./CostCell.vue";
+import AggregateInfoTooltip from "./AggregateInfoTooltip.vue";
 import { useT } from "../lib/i18n";
 
 const t = useT();
@@ -91,19 +92,6 @@ const columns = computed<DataTableColumn[]>(() => {
       render: (row) => h(CostCell, { group: asGroup(row) }),
     },
   ];
-  // C5：未计价 token 单列可追溯（无价格模型 / 部分计价的缺价分项）。
-  if (props.report.totals.unknown_pricing) {
-    cols.push({
-      title: t("dashboard.colUnknown"),
-      key: "unknown_tokens",
-      align: "center",
-      render: (row) => {
-        const u = asGroup(row).unknown_tokens;
-        const n = u.input + u.output + u.cache_write + u.cache_read;
-        return n > 0 ? h("span", { style: "color: var(--ts-warning)" }, fmtNum(n)) : "—";
-      },
-    });
-  }
   return cols;
 });
 
@@ -126,8 +114,14 @@ const rowProps = (row: object) => ({
   // 复核修订：可访问名称用展示名（模型维度是友好名），身份键只用于点击参数——
   // 屏幕阅读器不应读出 `claudeopus55` 这类压缩身份键。
   "aria-label": t("dashboard.viewEventsAria", { name: asGroup(row).label ?? asGroup(row).key }),
-  onclick: () => activate(asGroup(row)),
+  // PR #72：行内金额按钮的点击/键盘只操作费用浮层——行处理器只响应落在
+  // 行自身的激活，冒泡自按钮的事件一律放行，保留原生 button 的一次 click。
+  onclick: (e: MouseEvent) => {
+    if ((e.target as Element | null)?.closest("button")) return;
+    activate(asGroup(row));
+  },
   onkeydown: (e: KeyboardEvent) => {
+    if (e.target !== e.currentTarget) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       activate(asGroup(row));
@@ -163,7 +157,9 @@ const selectionNotes = computed<string[]>(() => {
 <template>
   <section class="ts-card usage-card">
     <div class="card-head">
-      <span class="card-title">{{ t("dashboard.aggregateTitle") }}</span>
+      <AggregateInfoTooltip :source-lines="sourceLines" :selection-notes="selectionNotes">{{
+        t("dashboard.aggregateTitle")
+      }}</AggregateInfoTooltip>
     </div>
     <ScrollList :rows="rows" :label="t('dashboard.aggregateListAria')">
       <template #default="{ rows: visibleRows }">
@@ -181,31 +177,6 @@ const selectionNotes = computed<string[]>(() => {
       </template>
     </ScrollList>
     <div class="table-hint">{{ t("dashboard.tableHint") }}</div>
-    <!-- v0.9.2：来源费用/日粒度说明不再常驻（构成与依据进费用悬浮详情）；
-         未知费用说明只在实际存在未获覆盖 token 时显示一行简短提示。 -->
-    <div v-if="report.totals.unknown_pricing" class="table-note">
-      {{ t("dashboard.tableNote") }}
-    </div>
-    <NCollapse class="source-collapse">
-      <NCollapseItem :title="t('dashboard.sourceStats')" name="sources">
-        <div v-for="s in sourceLines" :key="s.agent" class="source-line">
-          <strong>{{ s.agent }}</strong
-          >：{{ s.parts.join(" · ") }}
-        </div>
-        <!-- R08：warnings 已在页面级采集诊断通知展示，此处不再重复 -->
-      </NCollapseItem>
-      <!-- 2026-11-07：统计来源选择是正常统计口径，不弹告警；依据放在这层
-           可展开的统计说明里（A 类按明细、B 类按汇总补足）。 -->
-      <NCollapseItem
-        v-if="selectionNotes.length > 0"
-        :title="t('dashboard.selectionStatsNote')"
-        name="selection"
-      >
-        <div v-for="(note, i) in selectionNotes" :key="i" class="source-line">
-          {{ note }}
-        </div>
-      </NCollapseItem>
-    </NCollapse>
   </section>
 </template>
 
@@ -217,13 +188,6 @@ const selectionNotes = computed<string[]>(() => {
   gap: var(--ts-space-3);
   margin-bottom: var(--ts-space-2);
 }
-.card-title {
-  font-size: 17px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--ts-text);
-}
-
 /* 可点击行右侧 › 指示（辅助信息，不承载唯一信息） */
 .drill-arrow {
   color: var(--ts-text-muted);
@@ -243,28 +207,9 @@ const selectionNotes = computed<string[]>(() => {
   color: var(--ts-text-muted);
   margin-top: var(--ts-space-1);
 }
-.table-note {
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--ts-text-secondary);
-  margin-top: var(--ts-space-2);
-}
 /* v0.9.1 缺陷 B：费用列排版移入 CostCell.vue（render 回调节点不带本组件
    scope 标记，这里的 scoped 选择器永不命中——真实浏览器 computed display
-   是 inline，金额与来源费用粘成一行）。脚注 .source-cost-note 仍在模板
-   内渲染，保留在本组件。 */
-/* T2：来源记录费用披露——次要色小字，与统计口径说明并列。 */
-.source-cost-note {
-  display: block;
-  margin-top: var(--ts-space-1);
-  color: var(--ts-text-muted);
-}
-.source-collapse {
-  margin-top: var(--ts-space-2);
-}
-.source-line {
-  font-size: 12px;
-  line-height: 1.9;
-  color: var(--ts-text-secondary);
-}
+   是 inline，金额与来源费用粘成一行）。 */
+/* v0.9.3：表格后的两组说明与独立未知列已移除——说明进「聚合」标题浮层，
+   未定价 token 明细进费用浮层。 */
 </style>

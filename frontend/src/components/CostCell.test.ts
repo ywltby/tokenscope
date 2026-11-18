@@ -6,8 +6,8 @@
 //
 // v0.9.2（2026-11-15 用户产品决策）：费用列**只显示一个金额**
 // （total_cost_usd，后端合并互不重叠贡献）——常驻来源胶囊、第二行来源
-// 金额、大段说明全部移除；真实费用缺失只保留短标记 †；构成与依据进
-// 悬浮详情（GroupCostBreakdownTooltip，hover/focus/click 固定）。
+// 金额、大段说明全部移除；v0.9.3 起用颜色（--ts-warning）表达未定价，
+// 不再显示 `†`；构成与依据进悬浮详情。
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import { nextTick } from "vue";
@@ -69,7 +69,7 @@ describe("CostCell 单金额规则（v0.9.2）", () => {
     expect(w.text()).not.toContain("来源记录");
   });
 
-  it("真实费用缺失 → 只保留短标记 †（无常驻说明）", () => {
+  it("部分未定价 → 橙色金额，无常驻脚注符号", () => {
     const w = mount(CostCell, {
       props: {
         group: group({
@@ -83,11 +83,12 @@ describe("CostCell 单金额规则（v0.9.2）", () => {
     });
     const text = w.text();
     expect(text).toContain("$0.50");
-    expect(text).toContain("†");
+    expect(text).not.toContain("†");
+    expect(w.find(".gcb-amount-main").classes()).toContain("gcb-warning");
     expect(text).not.toContain("来源");
   });
 
-  it("完全没有费用依据 → 未知†", () => {
+  it("完全没有费用依据 → 「未知」警告色，不伪装成零", () => {
     const w = mount(CostCell, {
       props: {
         group: group({
@@ -98,7 +99,9 @@ describe("CostCell 单金额规则（v0.9.2）", () => {
         }),
       },
     });
-    expect(w.text()).toContain("未知†");
+    expect(w.text()).toContain("未知");
+    expect(w.text()).not.toContain("未知†");
+    expect(w.find(".gcb-amount-main").classes()).toContain("gcb-warning");
   });
 });
 

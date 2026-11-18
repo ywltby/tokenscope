@@ -64,10 +64,11 @@ describe("SummaryCards 指标条（设计系统 Task 3）", () => {
     expect(text).toContain("N/A");
   });
 
-  it("未知价格显示未知标记，不伪装成 0", () => {
+  it("未知价格显示「未知」，不伪装成 0、不带脚注符号", () => {
     const w = mountCards(totals({ cost_usd: 0, total_cost_usd: null, unknown_pricing: true }));
     const text = w.text();
-    expect(text).toContain("†");
+    expect(text).toContain("未知");
+    expect(text).not.toContain("†");
     expect(text).not.toContain("$0.00");
   });
 
@@ -159,7 +160,7 @@ describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
     expect(w.findAll(".bar-segment").length).toBe(0);
   });
 
-  it("未知价格在费用旁显示 † 短标记（v0.9.2：披露进悬浮）", () => {
+  it("部分未定价 → 橙色金额、无常驻脚注（v0.9.3）", () => {
     const w = mountCards(
       totals({
         cost_usd: 0.5,
@@ -171,9 +172,10 @@ describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
     );
     const main = w.find(".metric-value-main .gcb-amount-main");
     expect(main.exists()).toBe(true);
-    // 主读数（触发器内）只有金额 + †；构成/缺失说明只在悬浮内容里。
-    expect(main.text()).toContain("†");
+    // 主读数（触发器内）只有金额；构成/缺失说明只在悬浮内容里。
     expect(main.text()).toContain("$0.50");
+    expect(main.text()).not.toContain("†");
+    expect(main.classes()).toContain("gcb-warning");
     expect(main.text()).not.toContain("未定价 token 合计");
   });
 
@@ -239,7 +241,7 @@ describe("SummaryCards 指标卡（设计系统 Task 4）", () => {
 });
 
 // v0.9.2（2026-11-15 用户产品决策）：N18/T3/来源费用三类披露**不再常驻**
-// ——总览卡费用区只显示单一金额 + 真实缺失的短标记 †；构成（分档估算、
+// ——总览卡费用区只显示单一金额（未定价用警告色表达，v0.9.3 起无脚注符号）；构成（分档估算、
 // 按 0 估算、来源费用、覆盖完整性）全部进悬浮详情（GroupCostBreakdownTooltip）。
 describe("v0.9.2 费用披露进悬浮（总览卡不再常驻）", () => {
   it("N18/T3/来源胶囊均不常驻显示", () => {
@@ -265,7 +267,7 @@ describe("v0.9.2 费用披露进悬浮（总览卡不再常驻）", () => {
     expect(cardLabel.text()).not.toContain("含未计价 token");
   });
 
-  it("真实费用缺失 → 金额旁只保留 † 短标记", () => {
+  it("部分未定价 → 橙色金额、无常驻说明", () => {
     const w = mountCards(
       totals({
         cost_usd: 0.5,
@@ -277,7 +279,8 @@ describe("v0.9.2 费用披露进悬浮（总览卡不再常驻）", () => {
     );
     const text = w.text();
     expect(text).toContain("$0.50");
-    expect(text).toContain("†");
+    expect(text).not.toContain("†");
+    expect(w.find(".gcb-amount-main").classes()).toContain("gcb-warning");
     expect(text).not.toContain("含未计价 token");
   });
 
@@ -301,7 +304,7 @@ describe("v0.9.2 费用披露进悬浮（总览卡不再常驻）", () => {
     expect(w.text()).toContain("$7.25");
   });
 
-  it("完全没有费用依据 → 未知†", () => {
+  it("完全没有费用依据 → 「未知」警告色，不伪装成零", () => {
     const w = mountCards(
       totals({
         cost_usd: 0,
@@ -310,7 +313,9 @@ describe("v0.9.2 费用披露进悬浮（总览卡不再常驻）", () => {
         unknown_tokens: { input: 100, output: 0, cache_write: 0, cache_read: 0 },
       }),
     );
-    expect(w.text()).toContain("未知†");
+    expect(w.text()).toContain("未知");
+    expect(w.text()).not.toContain("未知†");
+    expect(w.find(".gcb-amount-main").classes()).toContain("gcb-warning");
   });
 
   it("费用悬浮触发器可键盘聚焦（aria-label 含金额）", () => {
@@ -321,7 +326,7 @@ describe("v0.9.2 费用披露进悬浮（总览卡不再常驻）", () => {
     expect(trigger.attributes("aria-label")).toContain("$8.25");
   });
 
-  it("partial 覆盖缺失 → 常驻区只有 †（部分说明进悬浮）", () => {
+  it("partial 覆盖缺失 → 常驻区只有金额（部分说明进悬浮）", () => {
     const w = mountCards(
       totals({
         cost_usd: 0,
@@ -336,7 +341,7 @@ describe("v0.9.2 费用披露进悬浮（总览卡不再常驻）", () => {
     );
     const text = w.text();
     expect(text).toContain("$7.25");
-    expect(text).toContain("†");
+    expect(text).not.toContain("†");
     expect(text).not.toContain("部分来源记录");
     expect(text).not.toContain("其余汇总未提供费用");
   });

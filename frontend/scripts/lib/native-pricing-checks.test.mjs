@@ -26,7 +26,7 @@ const cases = [
 ];
 for (const [name, observed] of cases) {
   if (name === "first_run_banner_without_snapshots") Object.assign(observed,
-    { summaryCost: "未知†", eventCostTexts: ["未知", "未知"], groupCostTexts: ["未知†"] });
+    { summaryCost: "未知", eventCostTexts: ["未知", "未知"], groupCostTexts: ["未知"] });
   if (name === "manual_sync_both_sources") Object.assign(observed, { externalExists: false,
     pricedSources: ["models.dev", "openrouter"], settingsText: "models.dev（2 条，主源）+ OpenRouter（2 条，补充源）", summaryCostText: "$0.10†" });
   if (name === "single_source_failure_is_partial") Object.assign(observed,

@@ -79,6 +79,23 @@ describe("汇总费用浮层：缓存缺价按零估算", () => {
     w.unmount();
   });
 
+  it("未定价区显示总额、分项与可用原因，且无脚注符号", async () => {
+    const w = mountOpen({
+      total_cost_usd: 2,
+      unknown_tokens: { input: 300_000, output: 0, cache_write: 0, cache_read: 0 },
+      unknown_pricing: true,
+      unknown_reason: "rollup_only",
+    });
+    await nextTick();
+    const body = document.body.textContent ?? "";
+    expect(body).toContain("未获费用覆盖");
+    expect(body).toContain("未定价 token 合计");
+    expect(body).toContain("含只有日粒度的历史");
+    expect(body).not.toContain("†");
+    expect(body).toContain("$2.00");
+    w.unmount();
+  });
+
   it("交互不变：点击切换、Escape 关闭、聚焦上报", async () => {
     const w = mountOpen({ cache_price_zero_estimated: true });
     await nextTick();

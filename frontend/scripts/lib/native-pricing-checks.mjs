@@ -85,9 +85,9 @@ export function pricingVerdict(name, observed) {
         && o.status?.hasAnyPricing === false && o.status.needsSync === true
         && o.totals?.cost_usd === 0 && o.totals.unknown_pricing === true
         && Array.isArray(o.eventCosts) && o.eventCosts.length > 0 && o.eventCosts.every(value => value === null)
-        && o.summaryCost === "未知†" && Array.isArray(o.eventCostTexts) && o.eventCostTexts.length === o.eventCosts.length
+        && o.summaryCost === "未知" && Array.isArray(o.eventCostTexts) && o.eventCostTexts.length === o.eventCosts.length
         && o.eventCostTexts.every(value => value === "未知") && Array.isArray(o.groupCostTexts) && o.groupCostTexts.length > 0
-        && o.groupCostTexts.every(value => value === "未知†");
+        && o.groupCostTexts.every(value => value === "未知");
       break;
     case "manual_sync_both_sources": {
       const reports = o.call?.value;

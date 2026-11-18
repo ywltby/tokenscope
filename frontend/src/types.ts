@@ -53,7 +53,7 @@ export interface Group {
    * 判断是否展示估算构成，不复用「金额非零」猜测。
    */
   has_estimated_cost?: boolean;
-  /** v0.9.2：主金额之外仍有真实费用缺失（未知 token > 0）→ 短标记 †。 */
+  /** v0.9.2：主金额之外仍有真实费用缺失（未知 token > 0）；v0.9.3 起展示为金额警告色，无脚注符号。 */
   cost_partially_unknown?: boolean;
   agents?: string[];
 }
