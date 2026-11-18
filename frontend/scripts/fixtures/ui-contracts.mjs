@@ -190,6 +190,8 @@ function group(key, input, opts = {}) {
     has_estimated_cost: opts.has_estimated_cost ?? ((opts.cost_usd ?? 0) > 0),
     total_cost_usd: opts.total_cost_usd,
     cost_partially_unknown: opts.cost_partially_unknown,
+    // v0.9.2 第十一轮：费用依据含「线上缺缓存价按 0 估算」（金额可确定）。
+    cache_price_zero_estimated: opts.cache_price_zero_estimated ?? false,
     unknown_reason: opts.unknown_reason,
     agents: opts.agents,
   };
@@ -663,6 +665,21 @@ const SOURCE_COST_GROUPS = [
     total_cost_usd: 0,
     cost_detail: "rollup_only",
     requests: 6,
+  }),
+  // v0.9.2 第十一轮：金额可确定（$2.00）、未定价 token 全 0，但依据含
+  // 「线上缺缓存价按 0 估算」——浮层必须说明，金额区域仍只有一个金额。
+  group("synthetic-cache-zero", 0, {
+    output: 0,
+    cache_read: 1000000,
+    cache_write: 1000000,
+    cost_usd: 2,
+    has_estimated_cost: true,
+    unknown_pricing: false,
+    unknown_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    total_cost_usd: 2,
+    cost_detail: "rollup_only",
+    cache_price_zero_estimated: true,
+    requests: 2,
   }),
   // 真实未定价：无候选（unknown 保留）。
   group("synthetic-unpriced", 30000, {

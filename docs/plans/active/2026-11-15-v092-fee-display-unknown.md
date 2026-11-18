@@ -450,3 +450,25 @@ false，于是重建费用时把「另一条路径使用估算」的事实一起
 全按 0 估算对照保持不完整 + 标记。既有计价/日汇总 207 项全绿。
 `SNAPSHOT_VERSION` 20 → 21（`complete` 与估算标记读数改变，费用快照独立轴）。
 版本沿用 0.9.2。
+
+### 第十二轮补齐（2026-11-18，基线 `3ae04d9`）：汇总费用浮层展示「缓存缺价按零估算」
+
+后端在第十一轮已正确置 `Group.cache_price_zero_estimated=true`（合计 $2.00、
+未定价 token 全 0、`complete=false`），但共享浮层
+`frontend/src/components/GroupCostBreakdownTooltip.vue` 不读该字段，总览卡 /
+模型行 / 合计行的费用详情只显示通用估算说明。
+
+补齐：浮层构成区新增两行——`cost.cacheZeroAssumed`（缺失缓存价按 0 估算）与
+`cost.cacheZeroAssumedDetail`（线上价格来源未提供该缓存分项单价、按 $0 参与估算、
+不是来源明确给出的免费价）。只在 `cache_price_zero_estimated === true` 时显示；
+显式零价（标记 false）不显示。金额区域仍只有单一金额，说明只进浮层；悬浮、
+键盘聚焦、Escape 与外点关闭交互未改。总览卡、模型行与合计行都经 `CostCell`
+复用同一组件，一处修复全覆盖。
+
+**验证**：新增 `GroupCostBreakdownTooltip.test.ts` 4 项——同一份 $2.00、
+unknown 全 0 的数据切换估算标记，分别断言浮层有无说明；金额区只有 $2.00；
+点击切换 / Escape / 聚焦上报不变。先红（标记 true 时无说明）后绿。浏览器验收
+契约 `cost_cell_layout_not_concatenated` 增加 `synthetic-cache-zero` fixture 与
+两条断言（浮层披露存在、金额区单金额），并补「显式零价无该说明」对照。前端
+79 文件 1155 项 + typecheck/format/build 全过。后端择价、金额、unknown 与
+`SNAPSHOT_VERSION`（21）均未改，版本仍 0.9.2。

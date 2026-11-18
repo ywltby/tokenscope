@@ -13,7 +13,10 @@
 // - 缺失部分（cost_partially_unknown → unknown_tokens 分项）；
 // - 估算依据：日汇总按价格估算时注明「只采用可证明适用的费率——始终生效
 //   的覆盖规则照常应用；依赖缺失的请求时刻/上下文长度的分项保持未定价，
-//   不计入金额；未编造请求时间与分档」。
+//   不计入金额；未编造请求时间与分档」；
+// - 缓存缺价按零估算（T3）：Group.cache_price_zero_estimated=true 时说明线上
+//   价格来源未提供缓存单价、该分项按 $0 估算（金额可确定不等于依据无假设）。
+//   显式零价（标记为 false）不显示这条说明；说明只进浮层，金额区域不变。
 // 不称为实际账单，不放大段来源说明。
 import { computed, h, onBeforeUnmount, onMounted, ref, useId } from "vue";
 import { NTooltip } from "naive-ui";
@@ -105,6 +108,10 @@ const detailAbsent = computed(() => !hasEstimate.value && !hasSource.value && !h
 const hasRollupContribution = computed(
   () => g.value.cost_detail === "rollup_only" || g.value.cost_detail === "mixed",
 );
+/// T3：本组费用依据含「线上来源缺缓存价、按 0 估算」。金额仍可确定、token
+/// 不进 unknown，但依据不是完整官方价，必须在浮层里说明；显式零价为 false
+/// 时不显示。
+const cacheZeroEstimated = computed(() => g.value.cache_price_zero_estimated === true);
 
 function renderContent(): ReturnType<typeof h> {
   const sections: ReturnType<typeof h>[] = [];
@@ -130,6 +137,12 @@ function renderContent(): ReturnType<typeof h> {
     if (hasRollupContribution.value) {
       compRows.push(h("div", { class: "gcb-note" }, t("dashboard.groupCostEstimateNote")));
     }
+  }
+  // T3：金额可确定、但依据含「线上缺缓存价按 $0 估算」时的披露。放在构成区，
+  // 与估算金额同处一段；显式零价（标记为 false）不显示。
+  if (cacheZeroEstimated.value) {
+    compRows.push(h("div", { class: "gcb-note gcb-basis" }, t("cost.cacheZeroAssumed")));
+    compRows.push(h("div", { class: "gcb-note" }, t("cost.cacheZeroAssumedDetail")));
   }
   if (hasSource.value) {
     compRows.push(
@@ -286,5 +299,11 @@ function renderContent(): ReturnType<typeof h> {
   line-height: 1.5;
   color: var(--ts-text-muted);
   margin-top: var(--ts-space-1);
+}
+/* 估算依据的标题行：比普通说明略强，但不抢主金额。 */
+.gcb-basis {
+  color: var(--ts-text-secondary);
+  font-weight: 500;
+  margin-top: var(--ts-space-2);
 }
 </style>

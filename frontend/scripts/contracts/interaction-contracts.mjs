@@ -3082,6 +3082,7 @@ const IMPL = {
             hasSource: text.includes("\u65e5\u6c47\u603b\u6765\u6e90\u8bb0\u5f55\u8d39\u7528"),
             hasNoBasis: text.includes("\u6ca1\u6709\u53ef\u9002\u7528\u7684\u8d39\u7528\u4f9d\u636e"),
             hasZero: text.includes("$0.00"),
+            hasAssumed: text.includes("\u7f3a\u5931\u7f13\u5b58\u4ef7\u6309 0 \u4f30\u7b97"),
             text: text.slice(0, 300),
           };
         });
@@ -3096,6 +3097,53 @@ const IMPL = {
           `${viewport.label}:v092-zero-tooltip-explains-basis`,
           tip != null && tip.hasEstimate && tip.hasZero && !tip.hasNoBasis,
           JSON.stringify(tip),
+        );
+        // v0.9.2 第十一轮：显式零价（估算标记 false）不得出现按 0 估算说明。
+        ctx.record(
+          name,
+          `${viewport.label}:v092-explicit-zero-no-assumed-note`,
+          tip != null && !tip.hasAssumed,
+          JSON.stringify(tip),
+        );
+        // v0.9.2 第十一轮：缓存缺价按零估算的披露——金额可确定（$2.00）、
+        // 未定价 token 全 0，但依据含假设 → 浮层必须说明来源未提供缓存单价、
+        // 该分项按 $0 估算；金额区域仍只有一个金额。
+        const cacheZeroCell = byLabel("synthetic-cache-zero")[0];
+        await page
+          .locator(".n-data-table-tr", { hasText: "synthetic-cache-zero" })
+          .locator(".gcb-trigger")
+          .hover();
+        await page.waitForTimeout(400);
+        const zeroTip = await page.evaluate(() => {
+          const body = [...document.querySelectorAll(".gcb-tooltip")].find((el) => {
+            let node = el;
+            while (node) {
+              const cs = getComputedStyle(node);
+              if (cs.display === "none" || cs.visibility === "hidden") return false;
+              node = node.parentElement;
+            }
+            return true;
+          });
+          if (!body) return null;
+          const text = body.textContent?.replace(/\s+/g, " ").trim() ?? "";
+          return {
+            hasAssumed: text.includes("\u7f3a\u5931\u7f13\u5b58\u4ef7\u6309 0 \u4f30\u7b97"),
+            hasDetail: text.includes("\u672a\u63d0\u4f9b\u8be5\u7f13\u5b58\u5206\u9879\u5355\u4ef7"),
+            hasZeroNote: text.includes("\u6309 $0 \u53c2\u4e0e\u4f30\u7b97"),
+            text: text.slice(0, 300),
+          };
+        });
+        ctx.record(
+          name,
+          `${viewport.label}:cache-zero-tooltip-disclosure`,
+          zeroTip != null && zeroTip.hasAssumed && zeroTip.hasDetail && zeroTip.hasZeroNote,
+          JSON.stringify(zeroTip),
+        );
+        ctx.record(
+          name,
+          `${viewport.label}:cache-zero-amount-single`,
+          cacheZeroCell != null && cacheZeroCell.text === "$2.00",
+          cacheZeroCell?.text ?? "missing",
         );
         // v0.9.2 反例 3：悬浮层内部样式生效（实色衬底 + 发丝线分区）。
         const tipStyle = await page.evaluate(() => {
