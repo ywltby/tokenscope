@@ -1,6 +1,6 @@
 // v0.9.3：聚合标题浮层——表后两组说明移到「聚合」标题的同一个浮层。
 // 验证内容归属、鼠标移入、键盘固定/Escape、aria 关联与表格后无重复栏目。
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import AggregateInfoTooltip from "./AggregateInfoTooltip.vue";
@@ -63,6 +63,32 @@ describe("聚合标题浮层：鼠标与键盘状态隔离（PR #72 回归）", 
     await nextTick();
     expect(trigger.attributes("aria-describedby")).toBeUndefined();
     w.unmount();
+  });
+
+  it("mouseleave 排定的关闭不得被随后的焦点取消；焦点移走后关闭", async () => {
+    vi.useFakeTimers();
+    try {
+      const w = mountTip();
+      const trigger = w.find(".agg-info-trigger");
+      await trigger.trigger("mouseenter");
+      await nextTick();
+      expect(trigger.attributes("aria-expanded")).toBe("true");
+      // 鼠标离开排定 120ms 关闭；延迟内键盘焦点到达，不得取消该定时器。
+      await trigger.trigger("mouseleave");
+      await trigger.trigger("focus");
+      vi.advanceTimersByTime(180);
+      await nextTick();
+      // hover 已到期清除，焦点仍在 → 保持打开
+      expect(trigger.attributes("aria-expanded")).toBe("true");
+      await trigger.trigger("blur");
+      await nextTick();
+      // 鼠标与焦点都已离开、未固定 → 必须关闭
+      expect(trigger.attributes("aria-expanded")).toBe("false");
+      expect(trigger.attributes("aria-describedby")).toBeUndefined();
+      w.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("Escape 关闭、点击固定与固定态外点关闭不受隔离影响", async () => {

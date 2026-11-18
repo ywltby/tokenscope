@@ -82,10 +82,7 @@ onBeforeUnmount(() => {
           hover = true;
         "
         @mouseleave="scheduleHoverLeave"
-        @focus="
-          clearHoverLeave();
-          focus = true;
-        "
+        @focus="focus = true"
         @blur="focus = false"
         @keydown.escape.prevent="close"
       >
