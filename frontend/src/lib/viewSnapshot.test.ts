@@ -80,7 +80,7 @@ describe("视图快照保存队列（R04）", () => {
     expect(warn).toHaveBeenCalled();
   });
 
-  it("SNAPSHOT_VERSION 为 19（v0.9.2 第九轮：请求用量比例判定改变费用读数，旧快照读取时忽略）", () => {
-    expect(SNAPSHOT_VERSION).toBe(19);
+  it("SNAPSHOT_VERSION 为 20（v0.9.2 第十轮：跨候选择价与语义完整性改变费用读数，旧快照读取时忽略）", () => {
+    expect(SNAPSHOT_VERSION).toBe(20);
   });
 });
