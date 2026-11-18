@@ -2,6 +2,7 @@
 // 未定价 token 明细进费用浮层，金额用警告色表达；全部已计价时用普通文字色。
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
+import { nextTick } from "vue";
 import UsageTable from "./UsageTable.vue";
 // Vite ?raw：直接取 SFC 源文本做样式契约断言（项目无 @types/node）
 import type { Group, SummaryReport } from "../types";
@@ -223,5 +224,85 @@ describe("UsageTable N18/T3 披露进悬浮（v0.9.2）", () => {
     expect(main).not.toContain("按零估算");
     const w = mount(UsageTable, { props: { report: report([{ ...g }], false) } });
     expect(w.find(".gcb-amount-main").classes()).not.toContain("gcb-warning");
+  });
+});
+
+// PR #72 回归：金额按钮的 Enter/Space/点击只操作费用浮层，不冒泡触发行下钻。
+// 反例：日期行金额上按 Enter，行处理器 preventDefault 吞掉原生激活并下钻，
+// 浮层没有固定、明细被加上 day 筛选。行本身聚焦时 Enter/Space 仍须下钻。
+describe("费用按钮与表格行操作隔离（PR #72 回归）", () => {
+  function mountTable() {
+    const g = group("2026-09-01");
+    g.cost_usd = 0.01;
+    g.total_cost_usd = 0.01;
+    const r = report([g], false);
+    r.by = "day";
+    r.groups = [...r.groups, { ...r.totals }];
+    return mount(UsageTable, { props: { report: r }, attachTo: document.body });
+  }
+
+  it("金额按钮 Enter：不吞原生激活、不下钻，一次 click 只固定一次", async () => {
+    const w = mountTable();
+    const row = w.find("tbody tr:not(.total-row)");
+    const btn = row.find(".gcb-trigger");
+    const keydown = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    btn.element.dispatchEvent(keydown);
+    await nextTick();
+    expect(keydown.defaultPrevented).toBe(false);
+    expect(w.emitted("row-click")).toBeUndefined();
+    // 原生 button 的 Enter 等价于一次 click：只固定，不二次切换、不下钻。
+    btn.element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(btn.attributes("aria-describedby")).toBeTruthy();
+    expect(w.emitted("row-click")).toBeUndefined();
+    w.unmount();
+  });
+
+  it("金额按钮 Space：不吞原生激活、不下钻", async () => {
+    const w = mountTable();
+    const btn = w.find("tbody tr:not(.total-row) .gcb-trigger");
+    const keydown = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    btn.element.dispatchEvent(keydown);
+    await nextTick();
+    expect(keydown.defaultPrevented).toBe(false);
+    expect(w.emitted("row-click")).toBeUndefined();
+    w.unmount();
+  });
+
+  it("金额按钮鼠标点击：只切换固定态，一次点击不触发两次切换、不下钻", async () => {
+    const w = mountTable();
+    const btn = w.find("tbody tr:not(.total-row) .gcb-trigger");
+    btn.element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(btn.attributes("aria-describedby")).toBeTruthy();
+    expect(w.emitted("row-click")).toBeUndefined();
+    btn.element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(btn.attributes("aria-describedby")).toBeUndefined();
+    expect(w.emitted("row-click")).toBeUndefined();
+    w.unmount();
+  });
+
+  it("行本身聚焦时 Enter/Space 仍下钻；点击行内非按钮区域仍下钻", async () => {
+    const w = mountTable();
+    const row = w.find("tbody tr:not(.total-row)");
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    row.element.dispatchEvent(enter);
+    await nextTick();
+    expect(enter.defaultPrevented).toBe(true);
+    expect(w.emitted("row-click")).toEqual([["2026-09-01"]]);
+    const space = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    row.element.dispatchEvent(space);
+    await nextTick();
+    expect(space.defaultPrevented).toBe(true);
+    expect(w.emitted("row-click")?.length).toBe(2);
+    row.find(".dim-cell").element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await nextTick();
+    expect(w.emitted("row-click")?.length).toBe(3);
+    w.unmount();
   });
 });

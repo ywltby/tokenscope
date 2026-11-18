@@ -114,8 +114,14 @@ const rowProps = (row: object) => ({
   // 复核修订：可访问名称用展示名（模型维度是友好名），身份键只用于点击参数——
   // 屏幕阅读器不应读出 `claudeopus55` 这类压缩身份键。
   "aria-label": t("dashboard.viewEventsAria", { name: asGroup(row).label ?? asGroup(row).key }),
-  onclick: () => activate(asGroup(row)),
+  // PR #72：行内金额按钮的点击/键盘只操作费用浮层——行处理器只响应落在
+  // 行自身的激活，冒泡自按钮的事件一律放行，保留原生 button 的一次 click。
+  onclick: (e: MouseEvent) => {
+    if ((e.target as Element | null)?.closest("button")) return;
+    activate(asGroup(row));
+  },
   onkeydown: (e: KeyboardEvent) => {
+    if (e.target !== e.currentTarget) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       activate(asGroup(row));

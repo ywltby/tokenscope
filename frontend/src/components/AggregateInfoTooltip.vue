@@ -23,25 +23,25 @@ const pinned = ref(false);
 const open = computed(() => hover.value || focus.value || pinned.value);
 const descId = `ts-aggregate-info-${useId()}`;
 const triggerRef = ref<HTMLElement | null>(null);
-let leaveTimer: ReturnType<typeof setTimeout> | null = null;
+let hoverLeaveTimer: ReturnType<typeof setTimeout> | null = null;
 
-function clearLeave(): void {
-  if (leaveTimer != null) {
-    clearTimeout(leaveTimer);
-    leaveTimer = null;
+function clearHoverLeave(): void {
+  if (hoverLeaveTimer != null) {
+    clearTimeout(hoverLeaveTimer);
+    hoverLeaveTimer = null;
   }
 }
-/// 鼠标从标题移到浮层会经过一段间隙；给短暂宽限，避免中途闪关。固定态不受影响。
-function scheduleLeave(): void {
-  clearLeave();
-  leaveTimer = setTimeout(() => {
+/// 鼠标从标题移到浮层会经过一段间隙；给短暂宽限，避免中途闪关。
+/// 只清 hover：键盘焦点与固定态不受鼠标离开影响（PR #72）。
+function scheduleHoverLeave(): void {
+  clearHoverLeave();
+  hoverLeaveTimer = setTimeout(() => {
     hover.value = false;
-    focus.value = false;
-    leaveTimer = null;
+    hoverLeaveTimer = null;
   }, 120);
 }
 function close(): void {
-  clearLeave();
+  clearHoverLeave();
   hover.value = false;
   focus.value = false;
   pinned.value = false;
@@ -57,7 +57,7 @@ function onDocumentClick(e: MouseEvent): void {
 onMounted(() => document.addEventListener("click", onDocumentClick));
 onBeforeUnmount(() => {
   document.removeEventListener("click", onDocumentClick);
-  clearLeave();
+  clearHoverLeave();
 });
 </script>
 
@@ -78,15 +78,15 @@ onBeforeUnmount(() => {
         :aria-describedby="open ? descId : undefined"
         @click="pinned = !pinned"
         @mouseenter="
-          clearLeave();
+          clearHoverLeave();
           hover = true;
         "
-        @mouseleave="scheduleLeave"
+        @mouseleave="scheduleHoverLeave"
         @focus="
-          clearLeave();
+          clearHoverLeave();
           focus = true;
         "
-        @blur="scheduleLeave"
+        @blur="focus = false"
         @keydown.escape.prevent="close"
       >
         <slot />
@@ -96,10 +96,10 @@ onBeforeUnmount(() => {
       :id="descId"
       class="agg-info-body"
       @mouseenter="
-        clearLeave();
+        clearHoverLeave();
         hover = true;
       "
-      @mouseleave="scheduleLeave"
+      @mouseleave="scheduleHoverLeave"
     >
       <div class="agg-info-section">
         <div class="agg-info-title">{{ t("dashboard.sourceStats") }}</div>

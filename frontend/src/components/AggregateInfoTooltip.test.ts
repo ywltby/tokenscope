@@ -18,6 +18,74 @@ function mountTip() {
   });
 }
 
+// PR #72 回归：鼠标离开与键盘失焦必须各自只清除自己的状态。
+// 反例 1：标题仍持焦时移开鼠标，共享定时器把 focus 一并清掉，浮层误关。
+// 反例 2：指针仍在浮层内时移走键盘焦点，共享定时器把 hover 一并清掉，浮层误关。
+describe("聚合标题浮层：鼠标与键盘状态隔离（PR #72 回归）", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("标题仍持焦时移开鼠标，浮层保持打开", async () => {
+    const w = mountTip();
+    const trigger = w.find(".agg-info-trigger");
+    await trigger.trigger("focus");
+    await trigger.trigger("mouseenter");
+    await nextTick();
+    expect(trigger.attributes("aria-expanded")).toBe("true");
+    await trigger.trigger("mouseleave");
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    await nextTick();
+    expect(trigger.attributes("aria-expanded")).toBe("true");
+    expect(trigger.attributes("aria-describedby")).toBeTruthy();
+    w.unmount();
+  });
+
+  it("指针仍在浮层内时移走键盘焦点，浮层保持打开", async () => {
+    const w = mountTip();
+    const trigger = w.find(".agg-info-trigger");
+    await trigger.trigger("mouseenter");
+    await nextTick();
+    const bodyEl = document.querySelector(".agg-info-body") as HTMLElement | null;
+    expect(bodyEl).not.toBeNull();
+    // 鼠标从标题穿过间隙进入浮层
+    await trigger.trigger("mouseleave");
+    bodyEl?.dispatchEvent(new MouseEvent("mouseenter"));
+    await trigger.trigger("focus");
+    await trigger.trigger("blur");
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    await nextTick();
+    expect(trigger.attributes("aria-expanded")).toBe("true");
+    expect(trigger.attributes("aria-describedby")).toBeTruthy();
+    // 指针也离开后才关闭
+    bodyEl?.dispatchEvent(new MouseEvent("mouseleave"));
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    await nextTick();
+    expect(trigger.attributes("aria-describedby")).toBeUndefined();
+    w.unmount();
+  });
+
+  it("Escape 关闭、点击固定与固定态外点关闭不受隔离影响", async () => {
+    const w = mountTip();
+    const trigger = w.find(".agg-info-trigger");
+    await trigger.trigger("click"); // 固定
+    await trigger.trigger("blur");
+    await nextTick();
+    expect(trigger.attributes("aria-expanded")).toBe("true");
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await nextTick();
+    expect(trigger.attributes("aria-expanded")).toBe("false");
+    await trigger.trigger("focus");
+    await trigger.trigger("click"); // 再固定
+    await nextTick();
+    expect(trigger.attributes("aria-expanded")).toBe("true");
+    await trigger.trigger("keydown", { key: "Escape" });
+    await nextTick();
+    expect(trigger.attributes("aria-expanded")).toBe("false");
+    w.unmount();
+  });
+});
+
 describe("聚合标题浮层（v0.9.3）", () => {
   beforeEach(() => {
     document.body.innerHTML = "";
