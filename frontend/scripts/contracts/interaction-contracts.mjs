@@ -2971,150 +2971,226 @@ const IMPL = {
           const out = [];
           for (const row of rows) {
             const label = row.querySelector(".dim-cell")?.textContent?.trim() ?? "";
-            const cell = row.querySelector(".cost-cell");
+            const cell = row.querySelector(".gcb-trigger");
             if (!cell) continue;
-            const main = cell.querySelector(".cost-main");
-            const source = cell.querySelector(".source-cost-cell");
-            const primary = cell.querySelector(".source-primary");
-            const rect = cell.getBoundingClientRect();
-            const mainRect = main?.getBoundingClientRect();
-            const sourceRect = source?.getBoundingClientRect();
-            const primaryRect = primary?.getBoundingClientRect();
             out.push({
               label,
-              display: getComputedStyle(cell).display,
-              flexDir: getComputedStyle(cell).flexDirection,
               scopeAttr: [...cell.attributes].some((a) => a.name.startsWith("data-v-")),
-              cellWidth: rect.width,
+              cellWidth: cell.getBoundingClientRect().width,
               rowWidth: row.getBoundingClientRect().width,
-              mainTop: mainRect?.top ?? null,
-              sourceTop: sourceRect?.top ?? null,
-              primaryTop: primaryRect?.top ?? null,
               text: cell.textContent?.replace(/\s+/g, " ").trim() ?? "",
             });
           }
           return out;
         });
         const byLabel = (frag) => cells.filter((c) => c.label.includes(frag));
-        // 每个费用节点都必须带组件 scope（缺陷 B 根因断言）。
+        // v0.9.2：费用节点是单金额触发器（旧 inline 粘行由结构消除——
+        // 无第二行可粘）。断言每个触发器都有非空金额文本。
         ctx.record(
           name,
-          `${viewport.label}:费用节点全部带组件 scope 标记`,
-          cells.length >= 5 && cells.every((c) => c.scopeAttr),
-          `cells=${cells.length} scoped=${cells.filter((c) => c.scopeAttr).length}`,
+          `${viewport.label}:费用节点单金额（结构消除粘行）`,
+          cells.length >= 5 &&
+            cells.every((c) => c.text.length > 0),
+          `cells=${cells.length} empty=${cells.filter((c) => c.text.length === 0).length}`,
         );
-        // computed display 必须是（inline-)flex 列布局（旧实现 inline → 粘行）。
-        ctx.record(
-          name,
-          `${viewport.label}:cost-cell computed display = (inline-)flex column`,
-          cells.every(
-            (c) =>
-              (c.display === "flex" || c.display === "inline-flex") && c.flexDir === "column",
-          ),
-          cells.map((c) => `${c.label}:${c.display}/${c.flexDir}`).join(" | "),
-        );
-        // 规则1：rollup_only + 来源费用 → 来源读数为主、无未知†。
+        // v0.9.2 单金额规则：每个费用节点只有主金额，无来源长文/胶囊/第二行。
         const rollupPaid = byLabel("synthetic-rollup-paid")[0];
         ctx.record(
           name,
-          `${viewport.label}:规则1 纯汇总组主读数 = 来源金额（无未知†）`,
+          `${viewport.label}:v092-rule1-single-amount`,
           rollupPaid != null &&
-            rollupPaid.primaryTop != null &&
-            !rollupPaid.text.includes("未知†") &&
             rollupPaid.text.includes("$7.25") &&
-            rollupPaid.text.includes("来源记录"),
+            !rollupPaid.text.includes("\u6765\u6e90\u8bb0\u5f55") &&
+            !rollupPaid.text.includes("CCS"),
           rollupPaid?.text ?? "missing",
         );
-        // 规则2：来源显式 0 → $0.00 + 来源标识。
         const rollupZero = byLabel("synthetic-rollup-zero")[0];
         ctx.record(
           name,
-          `${viewport.label}:规则2 显式 0 保留 $0.00 与来源标识`,
-          rollupZero != null &&
-            rollupZero.primaryTop != null &&
-            rollupZero.text.includes("$0.00") &&
-            rollupZero.text.includes("来源记录") &&
-            !rollupZero.text.includes("未知†"),
+          `${viewport.label}:v092-rule2-explicit-zero`,
+          rollupZero != null && rollupZero.text.includes("$0.00"),
           rollupZero?.text ?? "missing",
         );
-        // 规则3：mixed → 主金额与来源行**纵向分离**（top 差 > 4px）。
         const mixed = byLabel("synthetic-mixed")[0];
         ctx.record(
           name,
-          `${viewport.label}:规则3 mixed 组金额与来源行上下排列（几何断言）`,
+          `${viewport.label}:v092-rule3-merged-amount`,
           mixed != null &&
-            mixed.mainTop != null &&
-            mixed.sourceTop != null &&
-            Math.abs(mixed.sourceTop - mixed.mainTop) > 4,
-          `mainTop=${mixed?.mainTop?.toFixed(1)} sourceTop=${mixed?.sourceTop?.toFixed(1)}`,
+            mixed.text.includes("$9.20") &&
+            !mixed.text.includes("\u6765\u6e90\u8bb0\u5f55"),
+          mixed?.text ?? "missing",
         );
-        // 规则4：纯明细缺价 → 维持未知†（不冒充）。
         const unpriced = byLabel("synthetic-unpriced")[0];
         ctx.record(
           name,
-          `${viewport.label}:规则4 纯明细缺价维持未知†`,
-          unpriced != null && unpriced.text.includes("未知†"),
+          `${viewport.label}:v092-rule4-unpriced-kept`,
+          unpriced != null && unpriced.text.includes("\u672a\u77e5\u2020"),
           unpriced?.text ?? "missing",
         );
-        // 8.2（第二轮复核）：partial 覆盖披露——已知金额照常显示，但必须
-        // 出现「部分来源记录」标识（警告色胶囊），不得当完整费用。
+        // v0.9.2 反例 1：零元价格 → $0.00（不是未知†）。
+        const free = byLabel("synthetic-free")[0];
+        ctx.record(
+          name,
+          `${viewport.label}:v092-zero-price-shows-zero`,
+          free != null && free.text.includes("$0.00"),
+          free?.text ?? "missing",
+        );
+        // v0.9.2 第四轮：找到候选但全部实际用量缺价 → 未知†（不是 $0.00†）。
+        const unpricedUsed = byLabel("synthetic-unpriced-used")[0];
+        ctx.record(
+          name,
+          `${viewport.label}:v092-unpriced-used-not-zero`,
+          unpricedUsed != null &&
+            unpricedUsed.text.includes("\u672a\u77e5\u2020") &&
+            !unpricedUsed.text.includes("$0.00"),
+          unpricedUsed?.text ?? "missing",
+        );
         const partial = byLabel("synthetic-rollup-partial")[0];
         ctx.record(
           name,
-          `${viewport.label}:8.2 partial 组披露覆盖不完整`,
+          `${viewport.label}:v092-partial-amount-plus-mark`,
           partial != null &&
             partial.text.includes("$7.25") &&
-            partial.text.includes("部分来源记录"),
+            partial.text.includes("\u2020") &&
+            !partial.text.includes("\u90e8\u5206\u6765\u6e90\u8bb0\u5f55"),
           partial?.text ?? "missing",
         );
-        // 8.1（第二轮复核）：mixed 组双金额在费用列并存（估算 + 来源行）。
-        ctx.record(
-          name,
-          `${viewport.label}:8.1 mixed 组双金额并存`,
-          mixed != null &&
-            mixed.text.includes("$0.2000") &&
-            mixed.text.includes("$9.00"),
-          mixed?.text ?? "missing",
-        );
-        // 8.2 总览卡接线（第三轮复核补漏）：汇总区 partial 时总览卡与表格
-        // 行同口径——定位总览卡节点断言（不整页搜"部分"）。
-        const cardState = await page.evaluate(() => {
-          const card = document.querySelector(".metric-card");
-          if (!card) return null;
-          const amount = card.querySelector(".metric-source-amount")?.textContent?.trim() ?? null;
-          const tag = card.querySelector(".metric-source-tag .ts-pill");
-          const line = card.querySelector(".metric-source-cost");
+        // v0.9.2 悬浮详情：hover 零元行 → 浮层必须展示估算依据（$0.00），
+        // 不能错误显示「本行没有可适用的费用依据」。
+        await page
+          .locator(".n-data-table-tr", { hasText: "synthetic-free" })
+          .locator(".gcb-trigger")
+          .hover();
+        await page.waitForTimeout(400);
+        const tip = await page.evaluate(() => {
+          const body = [...document.querySelectorAll(".gcb-tooltip")].find((el) => {
+            let node = el;
+            while (node) {
+              const cs = getComputedStyle(node);
+              if (cs.display === "none" || cs.visibility === "hidden") return false;
+              node = node.parentElement;
+            }
+            return true;
+          });
+          if (!body) return null;
+          const text = body.textContent?.replace(/\s+/g, " ").trim() ?? "";
           return {
-            amount,
-            tagText: tag?.textContent?.trim() ?? null,
-            tagWarning: tag?.classList.contains("ts-pill-warning") ?? false,
-            lineText: line?.textContent?.replace(/\s+/g, " ").trim() ?? null,
-            mainText: card.querySelector(".metric-value-main")?.textContent?.trim() ?? null,
+            hasParts: text.includes("\u6784\u6210"),
+            hasEstimate:
+              text.includes("\u8bf7\u6c42\u660e\u7ec6\u4f30\u7b97") ||
+              text.includes("\u6309\u65e5\u6c47\u603b\u4f30\u7b97"),
+            hasSource: text.includes("\u65e5\u6c47\u603b\u6765\u6e90\u8bb0\u5f55\u8d39\u7528"),
+            hasNoBasis: text.includes("\u6ca1\u6709\u53ef\u9002\u7528\u7684\u8d39\u7528\u4f9d\u636e"),
+            hasZero: text.includes("$0.00"),
+            hasAssumed: text.includes("\u7f3a\u5931\u7f13\u5b58\u4ef7\u6309 0 \u4f30\u7b97"),
+            text: text.slice(0, 300),
           };
         });
-        // fixture totals：含 mixed 组与 partial 组 → totals cost_detail=mixed
-        // + source_cost_state=partial → 总览卡走独立行分支，标签为部分费用。
         ctx.record(
           name,
-          `${viewport.label}:8.2 总览卡独立行标为部分费用且估算保留`,
-          cardState != null &&
-            cardState.lineText != null &&
-            cardState.lineText.includes("部分 CCS 来源记录费用") &&
-            cardState.lineText.includes("$23.50") &&
-            cardState.mainText.includes("$0.2000"),
-          JSON.stringify(cardState),
+          `${viewport.label}:v092-tooltip-composition`,
+          tip != null && tip.hasParts && (tip.hasEstimate || tip.hasSource),
+          JSON.stringify(tip),
         );
-        // 表格行与总览卡的提示同口径：行内 partial 胶囊与总览卡 partial
-        // 标签同时存在（一致性断言）。
         ctx.record(
           name,
-          `${viewport.label}:8.2 表格行与总览卡 partial 提示一致`,
-          partial != null &&
-            partial.text.includes("部分来源记录") &&
-            cardState != null &&
-            cardState.lineText != null &&
-            cardState.lineText.includes("部分"),
-          `row=${partial?.text ?? "missing"} card=${JSON.stringify(cardState)}`,
+          `${viewport.label}:v092-zero-tooltip-explains-basis`,
+          tip != null && tip.hasEstimate && tip.hasZero && !tip.hasNoBasis,
+          JSON.stringify(tip),
+        );
+        // v0.9.2 第十一轮：显式零价（估算标记 false）不得出现按 0 估算说明。
+        ctx.record(
+          name,
+          `${viewport.label}:v092-explicit-zero-no-assumed-note`,
+          tip != null && !tip.hasAssumed,
+          JSON.stringify(tip),
+        );
+        // v0.9.2 第十一轮：缓存缺价按零估算的披露——金额可确定（$2.00）、
+        // 未定价 token 全 0，但依据含假设 → 浮层必须说明来源未提供缓存单价、
+        // 该分项按 $0 估算；金额区域仍只有一个金额。
+        const cacheZeroCell = byLabel("synthetic-cache-zero")[0];
+        await page
+          .locator(".n-data-table-tr", { hasText: "synthetic-cache-zero" })
+          .locator(".gcb-trigger")
+          .hover();
+        await page.waitForTimeout(400);
+        const zeroTip = await page.evaluate(() => {
+          const body = [...document.querySelectorAll(".gcb-tooltip")].find((el) => {
+            let node = el;
+            while (node) {
+              const cs = getComputedStyle(node);
+              if (cs.display === "none" || cs.visibility === "hidden") return false;
+              node = node.parentElement;
+            }
+            return true;
+          });
+          if (!body) return null;
+          const text = body.textContent?.replace(/\s+/g, " ").trim() ?? "";
+          return {
+            hasAssumed: text.includes("\u7f3a\u5931\u7f13\u5b58\u4ef7\u6309 0 \u4f30\u7b97"),
+            hasDetail: text.includes("\u672a\u63d0\u4f9b\u8be5\u7f13\u5b58\u5206\u9879\u5355\u4ef7"),
+            hasZeroNote: text.includes("\u6309 $0 \u53c2\u4e0e\u4f30\u7b97"),
+            text: text.slice(0, 300),
+          };
+        });
+        ctx.record(
+          name,
+          `${viewport.label}:cache-zero-tooltip-disclosure`,
+          zeroTip != null && zeroTip.hasAssumed && zeroTip.hasDetail && zeroTip.hasZeroNote,
+          JSON.stringify(zeroTip),
+        );
+        ctx.record(
+          name,
+          `${viewport.label}:cache-zero-amount-single`,
+          cacheZeroCell != null && cacheZeroCell.text === "$2.00",
+          cacheZeroCell?.text ?? "missing",
+        );
+        // v0.9.2 反例 3：悬浮层内部样式生效（实色衬底 + 发丝线分区）。
+        const tipStyle = await page.evaluate(() => {
+          const solid = [...document.querySelectorAll(".gcb-solid")].find((el) => {
+            let node = el;
+            while (node) {
+              const cs = getComputedStyle(node);
+              if (cs.display === "none" || cs.visibility === "hidden") return false;
+              node = node.parentElement;
+            }
+            return true;
+          });
+          if (!solid) return null;
+          const cs = getComputedStyle(solid);
+          return {
+            background: cs.backgroundColor,
+            radius: cs.borderRadius,
+            padding: cs.paddingTop,
+          };
+        });
+        ctx.record(
+          name,
+          `${viewport.label}:v092-tooltip-solid-style-applied`,
+          tipStyle != null &&
+            tipStyle.background !== "rgba(0, 0, 0, 0)" &&
+            tipStyle.background !== "transparent" &&
+            tipStyle.padding !== "0px",
+          JSON.stringify(tipStyle),
+        );
+const cardState = await page.evaluate(() => {
+          const card = document.querySelector(".metric-card");
+          if (!card) return null;
+          const trigger = card.querySelector(".gcb-amount-main");
+          const residual = card.querySelector(".metric-source-cost");
+          return {
+            mainText: trigger?.textContent?.trim() ?? null,
+            residualSourceLine: residual?.textContent?.trim() ?? null,
+          };
+        });
+        ctx.record(
+          name,
+          `${viewport.label}:v0.9.2 总览卡单金额（无常驻来源行）`,
+          cardState != null &&
+            cardState.mainText != null &&
+            cardState.mainText.includes("$") &&
+            cardState.residualSourceLine == null,
+          JSON.stringify(cardState),
         );
         // 缺陷 B：费用 cell 不得超出所在行宽（窄窗口不撑坏表格）。
         ctx.record(

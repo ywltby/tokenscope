@@ -100,6 +100,10 @@ export function ccsVerdict(name, observed) {
       break;
     case "detail_only_hides_rollups_and_discloses_granularity":
       // WB07：统一 fixture 基线 10 → 16，CCS 导入 +4 → 20 / detail_only 17。
+      // v0.9.2（2026-11-15）：日粒度/来源说明不再常驻（挪进费用悬浮详情）；
+      // unknownText 只断言未知标记仍在（真实缺价组的 † 与未知列），
+      // detailText 只断言"只统计请求明细"提示（"不含只有日粒度"的常驻
+      // 长文已撤销）。
       ok =
         o.autoRequests === 20 &&
         o.detailRequests === 17 &&
@@ -113,10 +117,8 @@ export function ccsVerdict(name, observed) {
         o.initialAutoMode === null &&
         o.detailMode === "detail_only" &&
         o.autoMode === null &&
-        /日粒度/.test(o.unknownText ?? "") &&
         /未知/.test(o.unknownText ?? "") &&
-        /只统计请求明细/.test(o.detailText ?? "") &&
-        /不含只有日粒度/.test(o.detailText ?? "");
+        /只统计请求明细/.test(o.detailText ?? "");
       break;
     case "ccs_fixture_unchanged":
       ok = typeof o.before === "string" && /^[a-f0-9]{64}$/.test(o.before) && o.after === o.before;

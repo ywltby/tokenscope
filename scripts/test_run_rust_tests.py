@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -21,15 +22,22 @@ ROOT = Path(__file__).resolve().parent.parent
 
 class RustTempCleanupCase(unittest.TestCase):
     def setUp(self):
-        self.sandbox = tempfile.TemporaryDirectory(prefix="tokenscope-cleanup-contract-")
-        self.addCleanup(self.sandbox.cleanup)
-        self.root = Path(self.sandbox.name)
-        if os.name == "nt":
-            self.addCleanup(lambda: shutil.rmtree("\\\\?\\" + str(self.root))
-                            if self.root.exists() else None)
+        # sandbox 自身也走入口的回收链路，避免用例自己成为绕过入口的永久删除。
+        self.sandbox_parent = Path(tempfile.gettempdir()).resolve()
+        self.root = Path(tempfile.mkdtemp(
+            prefix="tokenscope-cleanup-contract-", dir=self.sandbox_parent))
+        self.addCleanup(self._discard_sandbox)
         self.parent = self.root / "临时 目录"
         self.parent.mkdir()
         self.observation = self.root / "observation.json"
+
+    def _discard_sandbox(self):
+        # 深路径回归会造出超过 MAX_PATH 的 sandbox；回收不了就保留现场并打印，
+        # 这属于环境限制，由各用例自己断言「成功必须真回收、失败必须保留现场」。
+        try:
+            runner._cleanup(self.root, self.sandbox_parent)
+        except OSError as error:
+            sys.stderr.write(f"[cleanup-contract] sandbox 未被回收：{error}\n")
 
     def child(self, body):
         program = "\n".join([
@@ -103,25 +111,49 @@ class RustTempCleanupCase(unittest.TestCase):
         self.assertIn("保留", output)
 
     def test_cleanup_failure_cannot_be_reported_as_success(self):
-        with mock.patch.object(runner.shutil, "rmtree", side_effect=PermissionError("synthetic lock")):
+        with mock.patch.object(runner, "_send_to_recycle_bin",
+                               return_value="synthetic recycle failure"):
             status, observed, output = self.child("")
-        self.assertNotEqual(status, 0, "子测试通过但清理失败时，门禁必须失败")
-        self.assertTrue(Path(observed["root"]).exists())
-        self.assertIn("synthetic lock", output)
+        self.assertNotEqual(status, 0, "子测试通过但回收失败时，门禁必须失败")
+        self.assertTrue(Path(observed["root"]).exists(), "回收失败必须保留现场")
+        self.assertIn("synthetic recycle failure", output)
         self.assertIn(str(Path(observed["root"])), output)
 
+    def test_unconfirmed_recycle_is_not_success(self):
+        # 原路径消失不等于已回收：回收站里没有对应条目时（FOF_ALLOWUNDO 被降级成
+        # 永久删除就是这样），必须报失败，不能把「目录不见了」当成功。
+        with mock.patch.object(runner, "_recycle_bin_holds", return_value=False):
+            status, observed, output = self.child("")
+        self.assertNotEqual(status, 0, "无法确认已回收时门禁必须失败")
+        self.assertIn("回收站", output)
+        self.assertIn("永久删除", output)
+
+    def test_unreadable_recycle_bin_is_not_success(self):
+        with mock.patch.object(runner, "_recycle_bin_holds", return_value=None):
+            status, _, output = self.child("")
+        self.assertNotEqual(status, 0, "读不到回收站条目时不能算成功")
+        self.assertIn("无法核对回收站条目", output)
+
     @unittest.skipUnless(os.name == "nt", "Windows 长路径回归")
-    def test_cleanup_removes_deep_paths_without_silently_skipping_them(self):
-        status, observed, _ = self.child("""
+    def test_cleanup_reports_deep_path_outcome_without_silently_skipping(self):
+        # 契约：要么在支持扩展长度删除的环境真的删掉，要么如实报失败并保留现场，
+        # 绝不允许静默跳过。宿主删除保护层拒绝扩展长度路径时属于后者。
+        status, observed, output = self.child("""
             deep = work.joinpath(*(['segment'] * 40))
             extended = pathlib.Path(chr(92) * 2 + '?' + chr(92) + str(deep))
             extended.mkdir(parents=True)
             (extended / 'fixture.txt').write_text('synthetic', encoding='utf-8')
             observed['deep_length'] = len(str(deep))
         """)
-        self.assertEqual(status, 0)
         self.assertGreater(observed["deep_length"], 260)
-        self.assertFalse(Path(observed["root"]).exists())
+        root = Path(observed["root"])
+        if status == 0:
+            self.assertFalse(root.exists(), "报告成功时临时根必须真的不存在")
+            self.assertIn("回收已核实", output)
+        else:
+            self.assertTrue(root.exists(), "回收失败必须保留现场，不得删一半")
+            self.assertIn("回收失败", output)
+            self.assertIn(str(root.resolve()), output)
 
     def test_launch_error_fails_and_reports_the_private_root(self):
         output = io.StringIO()
@@ -160,6 +192,134 @@ class RustTempCleanupCase(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
         self.assertEqual(list(self.parent.iterdir()), [])
+
+
+class OverlongEntryPreflightCase(unittest.TestCase):
+    """回收前置条件：普通文件与目录的完整路径都必须在调用 Shell 前检查。"""
+
+    def test_long_regular_file_is_checked_before_shell_operation(self):
+        # 短根目录下放一个 254 字符合法文件名，完整路径远超 260；旧实现
+        # 只检查目录栈里的路径，普通文件从不进栈，预检错误地返回 False。
+        root = Path(r"C:\synthetic-root")
+        entry = SimpleNamespace(
+            path=str(root / ("x" * 250 + ".txt")),
+            is_dir=lambda follow_symlinks=False: False,
+        )
+        self.assertGreater(len(entry.path), 260)
+        with mock.patch.object(runner.os, "scandir",
+                               return_value=contextlib.nullcontext([entry])):
+            self.assertTrue(
+                runner._has_overlong_entry(root),
+                "预检必须覆盖普通文件的完整路径，否则 Shell 会删一半再失败",
+            )
+
+    def test_enumeration_failure_is_treated_as_overlong(self):
+        root = Path(r"C:\synthetic-root")
+        with mock.patch.object(runner.os, "scandir",
+                               side_effect=OSError("synthetic scan failure")):
+            self.assertTrue(
+                runner._has_overlong_entry(root),
+                "枚举失败无法证明可安全回收，必须按命中处理保留现场",
+            )
+
+
+class RecycleIntentCase(unittest.TestCase):
+    """回收必须走明确要求回收、能拒绝永久删除的接口路径（注入模拟，不改系统策略）。"""
+
+    def test_recycle_flags_require_recycle_and_reject_permanent_delete(self):
+        flags = runner._RECYCLE_FLAGS
+        self.assertTrue(flags & runner._FOFX_RECYCLEONDELETE,
+                        "必须显式要求回收（FOFX_RECYCLEONDELETE）")
+        self.assertTrue(flags & runner._FOFX_EARLYFAILURE,
+                        "任一子操作失败必须整体停止")
+        self.assertFalse(hasattr(runner, "_FOF_ALLOWUNDO"),
+                         "不得依赖可静默降级成永久删除的 FOF_ALLOWUNDO")
+        self.assertFalse(hasattr(runner, "_FO_DELETE"),
+                         "不得保留 SHFileOperationW 删除意图")
+
+    @unittest.skipUnless(os.name == "nt", "真实回收站核验仅 Windows")
+    def test_real_recycle_places_synthetic_tree_in_recycle_bin(self):
+        """正常回收：合成目录（中文/空格标记 + 深目录 + 长文件名）确实进入回收站。"""
+        parent = Path(tempfile.gettempdir()).resolve()
+        root = Path(tempfile.mkdtemp(prefix="tokenscope-real-recycle-", dir=parent))
+        marker = root / "标记 文件 with space.txt"
+        marker.write_text("synthetic", encoding="utf-8")
+        deep = root / "目录 空格" / ("n" * 100 + ".txt")
+        deep.parent.mkdir(parents=True)
+        deep.write_text("deep-synthetic", encoding="utf-8")
+
+        # 用真实 IFileOperation 回收；核验回收站确实记载了该原路径。
+        problem = runner._send_to_recycle_bin(str(root))
+        self.assertIsNone(problem, f"真实回收应成功：{problem}")
+        self.assertFalse(root.exists(), "回收后原路径应消失")
+        self.assertTrue(runner._recycle_bin_holds(str(root)),
+                        "回收站 `$I` 必须记载本次合成目录原路径")
+        # addCleanup 无需再清理：已真实进入回收站；避免二次回收不存在的路径。
+
+    def test_disabled_recycle_preserves_source_and_fails(self):
+        # 回收被禁用：PerformOperations 返回失败 HRESULT。源目录必须原样保留，
+        # 且不发生任何永久删除回退。
+        self._assert_refusal(perform_hr=0x80070005)  # E_ACCESSDENIED
+
+    def test_cancelled_recycle_preserves_source_and_fails(self):
+        self._assert_refusal(perform_hr=0, aborted=True)
+
+    def test_noop_recycle_preserves_source_and_fails(self):
+        self._assert_refusal(perform_hr=runner._S_FALSE)
+
+    def test_interface_failure_preserves_source_and_fails(self):
+        def broken_backend(path, flags):
+            raise OSError("synthetic CoCreateInstance failure")
+
+        root, _ = self._make_source()
+        # 直接验证 backend 契约：接口失败 → 返回非零说明 → 源内容不变。
+        problem = self._direct_send(str(root), broken_backend)
+        self.assertIsNotNone(problem)
+        self.assertIn("CoCreateInstance", problem)
+        self.assertTrue((root / "标记 文件.txt").exists())
+
+    def test_backend_receives_recycle_flags_and_path(self):
+        seen = {}
+
+        def spy(path, flags):
+            seen["path"], seen["flags"] = path, flags
+            return 0, False
+
+        self.assertIsNone(runner._send_to_recycle_bin(r"C:\synthetic", _file_operation=spy))
+        self.assertEqual(seen["path"], r"C:\synthetic")
+        self.assertEqual(seen["flags"], runner._RECYCLE_FLAGS)
+
+    def _direct_send(self, path, backend):
+        return runner._send_to_recycle_bin(path, _file_operation=backend)
+
+    def _make_source(self):
+        parent = Path(tempfile.gettempdir()).resolve()
+        root = Path(tempfile.mkdtemp(prefix="tokenscope-recycle-intent-", dir=parent))
+        marker = root / "标记 文件.txt"
+        marker.write_text("synthetic", encoding="utf-8")
+        self.addCleanup(lambda: self._discard(root))
+        return root, io.StringIO()
+
+    def _discard(self, root):
+        try:
+            runner._cleanup(root, root.parent.resolve())
+        except OSError as error:
+            sys.stderr.write(f"[recycle-intent] sandbox 未回收：{error}\n")
+
+    def _assert_refusal(self, *, perform_hr=0, aborted=False):
+        calls = []
+
+        def refusing_backend(path, flags):
+            calls.append((path, flags))
+            return perform_hr, aborted
+
+        root, _ = self._make_source()
+        problem = self._direct_send(str(root), refusing_backend)
+        self.assertIsNotNone(problem, "不可回收时必须返回非零")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1], runner._RECYCLE_FLAGS)
+        self.assertTrue((root / "标记 文件.txt").exists(), "源内容必须保持")
+        self.assertEqual((root / "标记 文件.txt").read_text(encoding="utf-8"), "synthetic")
 
 
 class WiringCase(unittest.TestCase):
@@ -205,6 +365,42 @@ class WiringCase(unittest.TestCase):
         self.assertIn("run: python -B scripts/run_rust_tests.py -- cargo test --locked --workspace\n", action)
         self.assertIn("run: python -B scripts/run_rust_tests.py -- cargo test --locked --workspace --features acceptance\n", action)
         self.assertIn('python -B -m unittest discover -s scripts -p "test_run_rust_tests.py" -v', action)
+
+
+class ComApartmentBalanceCase(unittest.TestCase):
+    """CoInitializeEx 每次成功调用（含 S_FALSE）都必须配对一次 CoUninitialize。
+
+    只注入模拟的 ole32/shell32，不触碰真实 COM、回收站或任何文件；CoCreateInstance
+    立即失败，保证执行在触碰 Shell 之前结束。
+    """
+
+    def _fail_during_create(self, init_hr):
+        ole = SimpleNamespace(
+            CoInitializeEx=mock.Mock(return_value=init_hr),
+            CoCreateInstance=mock.Mock(return_value=-2147467259),  # E_FAIL
+            CoUninitialize=mock.Mock(),
+        )
+        fake_windll = SimpleNamespace(ole32=ole, shell32=SimpleNamespace())
+        with mock.patch.object(runner.ctypes, "windll", fake_windll):
+            with self.assertRaises(OSError):
+                runner._default_file_operation(
+                    r"C:\synthetic-never-used", runner._RECYCLE_FLAGS)
+        return ole
+
+    def test_s_ok_is_balanced(self):
+        ole = self._fail_during_create(0)
+        self.assertEqual(ole.CoUninitialize.call_count, 1,
+                         "S_OK 初始化成功必须配对一次 CoUninitialize")
+
+    def test_s_false_is_also_balanced(self):
+        ole = self._fail_during_create(1)
+        self.assertEqual(ole.CoUninitialize.call_count, 1,
+                         "S_FALSE 也是成功调用（已初始化），必须配对一次 CoUninitialize")
+
+    def test_failed_initialization_does_not_uninitialize(self):
+        ole = self._fail_during_create(-2147467259)  # E_FAIL
+        self.assertEqual(ole.CoUninitialize.call_count, 0,
+                         "初始化失败没有获得 apartment，不得调用 CoUninitialize")
 
 
 if __name__ == "__main__":

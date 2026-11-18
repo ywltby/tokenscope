@@ -15,6 +15,12 @@ use crate::pricing::Pricing;
 struct GroupAccum {
     group: Group,
     representative: Option<String>,
+    /// v0.9.2（第四轮复核）：本组是否有**实际使用中的 token 获得估算覆盖**。
+    /// 不能用「找到候选」（`estimate.is_some()`）代替：候选可能只提供未使用
+    /// 分项的单价，全部实际用量仍在 unknown。也不能用「金额非零」：零元
+    /// 费率覆盖实际用量时金额为 0 但依据存在。来源费用是独立通道，不置位
+    /// 本字段（`source_cost_usd.is_some()` 单独判定）。
+    has_estimated_cost: bool,
 }
 
 /// MP04：Model 维度的展示名——优先可信 models.dev 模型名（按完整等价 ID
@@ -107,6 +113,24 @@ pub struct Group {
     /// "计入未知 token"，但原因不同，界面必须区分。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unknown_reason: Option<&'static str>,
+    /// v0.9.2（2026-11-15）：费用列的**单一显示金额**——互不重叠贡献的合计
+    /// （请求估算 + 可估算日汇总 + 采用汇总的来源记录费用），未舍入原值相加、
+    /// 前端只做一次格式化。一行只显示这一个金额；构成（请求估算/来源费用/
+    /// 汇总估算/缺失依据）全部进悬浮详情，不再常驻展示。`None` = 组内完全
+    /// 没有费用依据（纯未定价组，显示未知）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_cost_usd: Option<f64>,
+    /// v0.9.2（第四轮复核）：本组有**实际使用中的 token 获得估算覆盖**——
+    /// 与金额是否为零无关（零元费率覆盖实际用量 = true），也与「找到候选」
+    /// 无关（全部实际用量缺价 = false）。前端悬浮详情用它判断是否展示
+    /// 估算构成，不靠 `cost_usd !== 0` 猜测。来源费用走
+    /// `source_cost_usd`，不置位本字段。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub has_estimated_cost: bool,
+    /// v0.9.2：主金额之外**仍有**真实费用缺失（未知 token > 0）——费用列
+    /// 只保留短标记 `†`，具体缺项进悬浮详情。`false` = 金额即全部费用。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cost_partially_unknown: bool,
     /// T2（2026-11-13）：本组含**来源选择最终采用**的日汇总时，这些汇总行
     /// 携带的 CCS 来源记录费用之和（受检累计；`None` = 组内没有任何带来源
     /// 费用的汇总贡献）。这是来源记录值，不是 TokenScope 请求级估算，
@@ -276,7 +300,7 @@ pub fn aggregate_with_rollups(
         state.push_event(e, pricing)?;
     }
     for r in rollups {
-        state.push_rollup(r)?;
+        state.push_rollup(r, pricing)?;
     }
     state.finish(pricing)
 }
@@ -388,11 +412,11 @@ impl AggregateState {
     }
 
     /// 喂入一条日汇总贡献。
-    pub fn push_rollup(&mut self, r: &RollupContribution) -> anyhow::Result<()> {
+    pub fn push_rollup(&mut self, r: &RollupContribution, pricing: &Pricing) -> anyhow::Result<()> {
         if !self.agent_seen.contains(&r.app.as_str()) {
             self.agent_seen.push(r.app.as_str());
         }
-        push_rollup_into(&mut self.map, self.by, r)
+        push_rollup_into(&mut self.map, self.by, r, pricing)
     }
 }
 
@@ -457,6 +481,7 @@ fn push_event_into(
                 ..Group::default()
             },
             representative: None,
+            has_estimated_cost: false,
         });
         // MP04：无可信展示名时的代表写法 = 该组原始模型名的最小字典序（稳定）。
         if by == GroupBy::Model && acc.representative.as_deref().is_none_or(|r| e.model < r) {
@@ -478,6 +503,15 @@ fn push_event_into(
         // 确定性计价只算一次（百万事件聚合下两次调用是纯浪费）；estimate
         // 不产生失败路径，求值先后不影响"临时值全部成功才提交"的纪律。
         let estimate = pricing.estimate(e.model, &event_tokens, e.ts);
+        // v0.9.2（第四轮复核）：只有**实际用量获得覆盖**才算费用依据；
+        // 找到候选但全部实际 token 都缺价 → 仍是完全未定价。零元费率覆盖
+        // 实际用量 → 金额 0 但有依据。
+        if estimate
+            .as_ref()
+            .is_some_and(|est| est.covers_used_tokens(&event_tokens))
+        {
+            acc.has_estimated_cost = true;
+        }
         match &estimate {
             Some(est) => {
                 new_cost += est.cost;
@@ -529,13 +563,17 @@ fn push_event_into(
     Ok(())
 }
 
-/// 喂入一条日汇总贡献（H06）：只有日粒度的历史不能按当前价格与档位重估，
-/// 也不代表「剩余的独立请求」：四桶整体计入未知 token，原因标注为
-/// 「历史数据只有汇总」。
+/// 喂入一条日汇总贡献（H06）：只有日粒度的历史不能按请求级重估——
+/// v0.9.2 起**费用覆盖逐条判定**（见函数内注释）：来源费用已提供的汇总
+/// token 不进 unknown；缺失费用按**可证明适用的费率**估算
+/// （[`Pricing::estimate_rollup`]）：分段档位/时段价依赖缺失的请求长度/
+/// 时刻时，受影响分项保持真实未定价；始终生效的覆盖规则正常应用，不默认
+/// 基础档也不编造请求时刻；无候选才整体真实未定价。
 fn push_rollup_into(
     map: &mut BTreeMap<String, GroupAccum>,
     by: GroupBy,
     r: &RollupContribution,
+    pricing: &Pricing,
 ) -> anyhow::Result<()> {
     const RECORD_AGENTS: bool = true;
     {
@@ -554,6 +592,7 @@ fn push_rollup_into(
                 ..Group::default()
             },
             representative: None,
+            has_estimated_cost: false,
         });
         if by == GroupBy::Model
             && acc
@@ -572,16 +611,76 @@ fn push_rollup_into(
             .tokens
             .checked_add(&r.tokens)
             .ok_or_else(|| anyhow::anyhow!("分组 {key_err} 的 token 累计超出可表示范围"))?;
-        g.unknown_tokens = g
-            .unknown_tokens
-            .checked_add(&r.tokens)
-            .ok_or_else(|| anyhow::anyhow!("分组 {key_err} 的未知 token 累计超出可表示范围"))?;
-        g.unknown_pricing = true;
-        g.unknown_reason = Some("rollup_only");
+        // v0.9.2（2026-11-15，用户更正旧规则）：**费用覆盖逐条判定**——
+        // 旧实现把每条汇总的全部 token 无条件计入 unknown_tokens 并置
+        // unknown_pricing=true；即使模型已有价格、CCS 已完整提供费用也显示
+        // 大量未定价。rollup_only 只表示数据粒度，不等同缺价：
+        // 1. 来源费用已提供（Some(v)，含 Some(0)）→ 该汇总 token 不进
+        //    unknown，费用走来源通道，不叠加估算（同一份用量只选一次依据）；
+        // 2. 缺失费用 → 用 `estimate_rollup` 按**可证明适用**的费率估算该
+        //    汇总：分段档位依赖缺失的单请求长度、时段价依赖缺失的请求时刻
+        //    → 受影响分项真实未定价；始终生效的覆盖规则正常应用；不受缺失
+        //    条件影响的平价分项照常计价：
+        //    完整估算计入 cost_usd；部分缺价只把实际未获覆盖的分项 token
+        //    （est.unknown）进 unknown；无候选才整体进 unknown（真实未定价）。
+        // 3. 不把一天 token 总量当单请求上下文，不默认基础档、不编造请求
+        //    时刻/分档/历史价格。
+        // 请求数/四桶原始 token/来源选择/导入幂等不受影响。
+        if let Some(_fee) = r.source_cost_usd {
+            // 已提供费用（含显式 0）：token 全覆盖，不进 unknown；来源费用
+            // 是独立通道，不置位估算依据。
+        } else {
+            // 缺失费用：按可证明适用的费率估算（分段档位/时段价依赖缺失的
+            // 请求长度/时刻时，受影响分项保持真实未定价；始终生效的覆盖
+            // 规则正常应用）。来源统计日 + 来源时区用于排除该日不可能的
+            // 星期规则（如周一汇总不采用仅周日生效的折扣）。
+            let day = r.day.parse::<jiff::civil::Date>().ok();
+            let source_tz = jiff::tz::TimeZone::get(&r.source_tz).ok();
+            let estimate = pricing.estimate_rollup(&r.model, &r.tokens, day, source_tz.as_ref());
+            if estimate
+                .as_ref()
+                .is_some_and(|est| est.covers_used_tokens(&r.tokens))
+            {
+                acc.has_estimated_cost = true;
+            }
+            match estimate {
+                Some(est) => {
+                    // 已知分项金额计入主估算；未获覆盖的分项 token 进 unknown
+                    //（est.unknown 只含实际产生 token 且缺价的分项）。
+                    g.cost_usd += est.cost;
+                    if !g.cost_usd.is_finite() {
+                        anyhow::bail!("分组 {key_err} 的费用累计出现非有限值");
+                    }
+                    if !est.complete {
+                        g.unknown_tokens =
+                            g.unknown_tokens.checked_add(&est.unknown).ok_or_else(|| {
+                                anyhow::anyhow!("分组 {key_err} 的未知 token 累计超出可表示范围")
+                            })?;
+                    }
+                    g.cache_write_split_estimated |= est.cache_write_split_estimated;
+                    g.cache_price_zero_estimated |= est.cache_price_zero_estimated;
+                }
+                None => {
+                    // 无候选：全部 token 真实未定价。
+                    g.unknown_tokens =
+                        g.unknown_tokens.checked_add(&r.tokens).ok_or_else(|| {
+                            anyhow::anyhow!("分组 {key_err} 的未知 token 累计超出可表示范围")
+                        })?;
+                }
+            }
+        }
+        // unknown_pricing 只在实际存在未获费用覆盖的 token 时置位；纯明细
+        // 的缺价由 push_event_into 置位。这里按本组 unknown 是否增长判定。
+        if g.unknown_tokens.total() > 0 {
+            g.unknown_pricing = true;
+            if g.unknown_reason.is_none() {
+                g.unknown_reason = Some("rollup_only");
+            }
+        }
         // v0.9.1 缺陷 C：费用构成——本组含最终采用的日汇总贡献。明细先喂
         // （占位 "detail"）、汇总后喂：已有明细 → 升级 mixed（B 类桶 =
-        // 明细 + 汇总并存）；纯汇总组 → rollup_only（展示层以来源费用为
-        // 该行费用读数）。
+        // 明细 + 汇总并存）；纯汇总组 → rollup_only（数据粒度披露，不等同
+        // 缺价——费用覆盖判定见上）。
         g.cost_detail = Some(match g.cost_detail {
             Some("mixed") | Some("rollup_only") => g.cost_detail.unwrap(),
             // Some("detail") = 之前只有明细 → 明细 + 汇总并存（B 类桶）
@@ -649,6 +748,7 @@ impl AggregateState {
             .into_values()
             .map(|acc| {
                 let mut g = acc.group;
+                g.has_estimated_cost = acc.has_estimated_cost;
                 g.label = match by {
                     GroupBy::Model => {
                         Some(model_label(&g.key, acc.representative.as_deref(), pricing))
@@ -670,11 +770,26 @@ impl AggregateState {
                 g.agents.clear();
             }
         }
+        // v0.9.2（第四轮复核）：费用列单一显示金额 + 部分缺失标记——逐组合并
+        // （互不重叠贡献：估算 cost_usd + 采用汇总来源费用 source_cost_usd；
+        // 未舍入原值相加，前端只格式化一次）。**判定按实际覆盖**：
+        // `has_estimated_cost`（有使用中的 token 获得估算覆盖，含零元费率）
+        // 或来源费用存在；「找到候选」和「金额非零」都不算依据。
+        for g in &mut groups {
+            let unknown_total = g.unknown_tokens.total();
+            g.total_cost_usd = match (g.has_estimated_cost, g.source_cost_usd) {
+                (_, Some(src)) => Some(g.cost_usd + src),
+                (true, None) => Some(g.cost_usd),
+                (false, None) => None,
+            };
+            g.cost_partially_unknown = unknown_total > 0;
+        }
         let mut totals = Group {
             key: "合计".to_string(),
             ..Group::default()
         };
         for g in &groups {
+            totals.has_estimated_cost |= g.has_estimated_cost;
             totals.requests = totals
                 .requests
                 .checked_add(g.requests)
@@ -747,6 +862,15 @@ impl AggregateState {
         if totals.cost_detail == Some("detail") {
             totals.cost_detail = None;
         }
+        // v0.9.2（第四轮复核）：totals 的单一显示金额与部分缺失标记（与分组
+        // 行同规则——按实际覆盖判定，零元费率覆盖显示 $0.00，全部实际用量
+        // 缺价显示 None）。
+        totals.total_cost_usd = match (totals.has_estimated_cost, totals.source_cost_usd) {
+            (_, Some(src)) => Some(totals.cost_usd + src),
+            (true, None) => Some(totals.cost_usd),
+            (false, None) => None,
+        };
+        totals.cost_partially_unknown = totals.unknown_tokens.total() > 0;
         groups.push(totals.clone());
         Ok(Aggregated {
             by: by.as_str(),

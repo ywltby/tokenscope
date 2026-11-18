@@ -23,6 +23,8 @@ use serde::{Deserialize, Serialize};
 use crate::model::TokenCounts;
 use crate::openrouter;
 
+mod rollup;
+
 const TIER_EXTERNAL: u8 = 0;
 const TIER_MODELSDEV: u8 = 1;
 const TIER_OPENROUTER: u8 = 2;
@@ -1398,6 +1400,20 @@ pub struct CostEstimate {
     /// 但 complete=false（不冒充完整官方价）。前端费用明细按行展示
     /// 「缺失缓存价按 0 估算」。
     pub cache_price_zero_estimated: bool,
+}
+
+impl CostEstimate {
+    /// v0.9.2 第四轮复核：本估算是否**实际覆盖了任何使用中的 token**。
+    ///
+    /// `Some(estimate)` 只表示找到了候选，不表示有费用依据：候选可能只
+    /// 提供未使用分项的单价，全部实际用量仍在 `unknown`。只有实际用量
+    /// 大于 0、且并非全部落在 unknown 时才算有依据——零元费率覆盖了
+    /// 实际用量同样算依据（金额 0 不等于无依据）；零 token 的未使用分项
+    /// 既不制造已知小计，也不制造缺价。
+    pub fn covers_used_tokens(&self, used: &TokenCounts) -> bool {
+        let total = used.total();
+        total > 0 && self.unknown.total() < total
+    }
 }
 
 /// GUI 悬浮对照用：该前缀在 OpenRouter 层的价格（无对应模型则 None）。
@@ -3041,7 +3057,9 @@ impl Pricing {
         est.excluded_candidate_warning = excluded_candidate_warning;
         Some(est)
     }
+}
 
+impl Pricing {
     /// GUI 设置页条目（合并视图，含来源、显示名与同前缀 OpenRouter 对照价）。
     pub fn entries(&self) -> Vec<PricingEntry> {
         // OpenRouter 层按等价前缀索引，供非 OpenRouter 行对照（精确同前缀）。

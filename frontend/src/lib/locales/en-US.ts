@@ -167,6 +167,24 @@ const enUS: AppMessages = {
     tierEstimatedTitle:
       "Some requests in this group lack the 5-minute/1-hour write buckets; write cost is estimated with the merged price (not exact)",
     costUnknown: "Unknown†",
+    groupCostAria: "Cost {cost}; view composition and basis",
+    groupCostAriaUnknown: "Cost unknown; view missing basis",
+    groupCostResultTitle: "Cost",
+    groupCostMainLabel: "This row",
+    groupCostPartsTitle: "Composition",
+    groupCostEstimateLabel: "Per-request estimates",
+    groupCostEstimateNote:
+      "Includes parts estimated from daily rollups: only rates that can be proven applicable are used (always-active overrides still apply; items whose request time or context length is missing stay unpriced and are excluded from the amount). Not a historically exact bill; no request timestamps or tiers are fabricated.",
+    groupCostSourceLabel: "Rollup source-recorded cost",
+    groupCostSourceNote:
+      "Cost recorded by the source tool (CCS) for daily rollups; not a per-request estimate and not an actual bill.",
+    groupCostSourcePartialNote:
+      "Only some daily rollups in this group carry a source fee (the rest provided none; missing parts are described below); the known part is accumulated as-is.",
+    groupCostUnknownTitle: "Not covered by any fee",
+    groupCostUnknownTotal: "Unpriced tokens",
+    groupCostUnknownNote:
+      "These tokens have no applicable fee basis (no matching price or missing per-bucket prices) and are excluded from the amount.",
+    groupCostNoBasis: "This row has no applicable fee basis.",
     eventsTitle: "Requests",
     eventsListAria: "Request list",
     clearFilterAria: "Clear filter {label}",

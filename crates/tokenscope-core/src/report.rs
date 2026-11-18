@@ -2873,7 +2873,7 @@ pub(crate) fn query_summary_from(snapshot: &crate::query::QuerySnapshot) -> Resu
     let pricing = snapshot.pricing().clone();
     snapshot.for_each_stored_event(&mut |e| state.push_stored_event(e, &pricing))?;
     for r in &selection.contributions {
-        state.push_rollup(r)?;
+        state.push_rollup(r, &pricing)?;
     }
     let agg = state.finish(&pricing)?;
     // U06：自动刷新（`Trigger::Auto`）的查询路径日志降级为 debug。

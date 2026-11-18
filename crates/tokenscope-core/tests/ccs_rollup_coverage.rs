@@ -252,10 +252,20 @@ fn rollup_1000_over_partial_detail_100_counts_once() {
     let report = summary(&o).unwrap();
     assert_eq!(report.totals.tokens.input, 1000, "汇总 1000 是该范围总量");
     assert_eq!(report.totals.requests, 10, "请求数取汇总口径");
-    assert_eq!(report.totals.unknown_reason, Some("rollup_only"));
+    // v0.9.2（费用覆盖判定）：该汇总带来源费用（fixture total_cost_usd=1.5）
+    // → token 已获费用覆盖，不再计入未定价（旧规则「汇总 token 无法按当前
+    // 价格重估 → 计未知」已撤销）；费用走来源通道。
     assert_eq!(
-        report.totals.unknown_tokens.input, 1000,
-        "汇总 token 无法按当前价格重估 → 计未知"
+        report.totals.unknown_reason, None,
+        "费用已覆盖的汇总不是未计价"
+    );
+    assert_eq!(
+        report.totals.unknown_tokens.input, 0,
+        "有来源费用的汇总 token 不计入未定价"
+    );
+    assert!(
+        (report.totals.source_cost_usd.unwrap() - 1.5).abs() < 1e-9,
+        "来源费用照常累计"
     );
     assert_eq!(report.rollup_coverage.covered_buckets, 1);
     assert_eq!(report.rollup_coverage.unresolved_buckets, 0);

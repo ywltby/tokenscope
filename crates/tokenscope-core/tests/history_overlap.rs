@@ -333,19 +333,15 @@ fn rollup_only_history_counts_with_unknown_cost_and_no_fake_requests() {
     assert_eq!(r.totals.requests, 120, "请求数来自来源汇总的 request_count");
     assert_eq!(r.totals.tokens.input, 1_000_000);
     assert_eq!(r.totals.tokens.output, 50_000);
+    // v0.9.2 费用覆盖判定：该汇总带来源费用（fixture total_cost_usd=9.0）
+    // → token 已获费用覆盖，不再计入未定价（旧规则「汇总费用必须标记未知」
+    // 已撤销）；费用走来源通道，请求数与四桶不变。
+    assert!(!r.totals.unknown_pricing, "有来源费用的汇总不是未计价组");
+    assert_eq!(r.totals.unknown_reason, None);
+    assert_eq!(r.totals.unknown_tokens.total(), 0);
     assert!(
-        r.totals.unknown_pricing,
-        "日汇总没有逐请求规模，费用必须标记未知"
-    );
-    assert_eq!(
-        r.totals.unknown_reason,
-        Some("rollup_only"),
-        "未知原因必须明确为「历史数据只有汇总」，不能误报模型价格未收录"
-    );
-    assert_eq!(
-        r.totals.unknown_tokens.total(),
-        1_050_000,
-        "未知 token 计入整块汇总"
+        (r.totals.source_cost_usd.unwrap() - 9.0).abs() < 1e-9,
+        "来源费用照常累计"
     );
     assert_eq!(r.rollup_coverage.rollup_buckets, 1);
     // 明细视图里没有伪造的请求事件。
@@ -389,15 +385,13 @@ fn partial_detail_under_rollup_uses_rollup_total() {
     let r = report(&dir, &root, "Asia/Shanghai");
     assert_eq!(r.totals.requests, 3, "总量取汇总的请求数");
     assert_eq!(r.totals.tokens.total(), 990, "汇总 990 是该范围总量");
-    assert_eq!(
-        r.totals.unknown_reason,
-        Some("rollup_only"),
-        "汇总 token 无法按当前价格重估，如实标记原因"
-    );
-    assert_eq!(
-        r.totals.unknown_tokens.total(),
-        990,
-        "未知 token 来自被采用的日汇总"
+    // v0.9.2 费用覆盖判定：该汇总带来源费用（fixture total_cost_usd=9.0）
+    // → token 已获费用覆盖，不再计入未定价（旧规则已撤销）。
+    assert_eq!(r.totals.unknown_reason, None);
+    assert_eq!(r.totals.unknown_tokens.total(), 0);
+    assert!(
+        (r.totals.source_cost_usd.unwrap() - 9.0).abs() < 1e-9,
+        "来源费用照常累计"
     );
     assert_eq!(r.rollup_coverage.covered_buckets, 1);
     assert_eq!(r.rollup_coverage.unresolved_buckets, 0);

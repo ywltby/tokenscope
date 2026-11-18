@@ -157,6 +157,22 @@ const zhCN = {
     tierEstimatedTitle:
       "该组含缺少 5 分钟/1 小时写入分项的请求，写费按合并价估算（非完整精确费用）",
     costUnknown: "未知†",
+    groupCostAria: "费用 {cost}，查看费用构成与依据",
+    groupCostAriaUnknown: "费用未知，查看缺失依据",
+    groupCostResultTitle: "费用",
+    groupCostMainLabel: "本行费用",
+    groupCostPartsTitle: "构成",
+    groupCostEstimateLabel: "请求明细估算",
+    groupCostEstimateNote:
+      "含按日汇总估算的部分：只采用能够证明适用的费率（始终生效的覆盖规则照常应用；依赖缺失的请求时刻或上下文长度的分项保持未定价，不计入金额）。不是历史精确费用，未编造请求时间与分档。",
+    groupCostSourceLabel: "日汇总来源记录费用",
+    groupCostSourceNote: "来源工具（CCS）记录的日汇总费用；不是请求级估算，也不是实际账单。",
+    groupCostSourcePartialNote:
+      "本组只有部分日汇总携带来源费用（其余未提供，缺失部分按下方说明处理）；已知部分照常累计。",
+    groupCostUnknownTitle: "未获费用覆盖",
+    groupCostUnknownTotal: "未定价 token 合计",
+    groupCostUnknownNote: "这些 token 没有可适用的费用依据（无匹配价格或分项缺价），不计入金额。",
+    groupCostNoBasis: "本行没有可适用的费用依据。",
     eventsTitle: "请求明细",
     eventsListAria: "请求明细列表",
     clearFilterAria: "清除筛选 {label}",
