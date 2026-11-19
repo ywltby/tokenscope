@@ -568,9 +568,27 @@ requests 7 / 3 行由新结果替换。该用例在修复前后都通过（用�
 
 ### 9.5 提交 / PR / CI（回填）
 
-- 提交链（正常 pre-commit 钩子，无 `--no-verify`）：（回填）
-- PR [#74](https://github.com/ywltby/tokenscope/pull/74) 最新 HEAD：（回填）
-- 必需 CI：（回填）
+- 提交（正常 pre-commit 钩子，无 `--no-verify`）：**`f174373`**
+  「fix(界面): 视图快照升到 v22，升级后拒读 v0.9.3 旧快照（v0.9.4）」
+  —— 快照常量 + 5 例升级回归 + 口径/计划回填，6 文件 392 插入；
+  钩子 `模式=selected 检查=docs、frontend-build、frontend-format、
+  frontend-test、frontend-typecheck` 全过。
+- PR [#74](https://github.com/ywltby/tokenscope/pull/74)
+  （`fix/v094-model-identity-rollup-drilldown` → `main`）推送后 HEAD
+  = **`f174373`**（基线 `fe67e31` 之上一个提交）；
+  `bump_version.py --check --base-ref origin/main` = {version **0.9.4**,
+  previous 0.9.3, kind patch, base_sha 2a48ea9, release true}。
+- 必需 CI 于 `f174373` **全绿**（`gh pr checks 74` → CHECKS_EXIT=0，
+  三个 workflow 的 headSha 均为 `f174373`）：
+  [CI](https://github.com/ywltby/tokenscope/actions/runs/44550036246)
+  rust 5m13s / rust-acceptance 6m43s / frontend 6m28s / contracts 9m20s / gate 3s；
+  [Install test](https://github.com/ywltby/tokenscope/actions/runs/44550036362)
+  install-test 11m5s / plan-upgrades 12s / **12 组单跳升级矩阵**
+  （0.1.0、0.4.0、0.5.9、0.5.13、0.6.0、**0.9.3** × present/deleted）全 pass，
+  upgrade-chain 按规则 skipped；
+  [Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/44550036388)
+  native-ui 11m28s（一次通过，无重跑）。
+- 本回填提交仅改文档；推送后必需 CI 以 PR 最新 HEAD 实跑为准，结论在最终汇报贴出。
 - 停在可审查状态：不合并、不发布、不安装（另行授权）。
 
 ### 9.6 未验证项
