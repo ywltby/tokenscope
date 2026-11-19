@@ -92,6 +92,9 @@ pub struct QuerySnapshot {
     /// H06：本次查询固定的日汇总桶选择——只有日粒度的外部历史按桶决定统计
     /// 来源（明细覆盖 / 汇总口径），在建快照时**算一次**后冻结。
     rollup_selection: report::RollupSelection,
+    /// v0.9.4 补修三：下钻日行的分组/顺序/游标定位索引——建快照时算一次
+    /// （不含计价），分页共享；每行费用按需填充并在会话内复用。
+    rollup_drill: report::RollupDrillIndex,
     collection: Arc<report::CollectionSnapshot>,
     /// H07：只读事务快照——汇总与分页都从它读取，采集/导入提交后旧查询不变。
     read: Arc<crate::history::ReadSnapshot>,
@@ -227,6 +230,11 @@ impl QuerySnapshot {
     /// 下钻读同一份结果，不因筛选条件改变统计优先级）。
     pub fn rollup_selection(&self) -> &report::RollupSelection {
         &self.rollup_selection
+    }
+
+    /// v0.9.4 补修三：冻结的下钻日行索引（分组与顺序只算一次，分页共享）。
+    pub(crate) fn rollup_drill(&self) -> &report::RollupDrillIndex {
+        &self.rollup_drill
     }
 }
 
@@ -480,8 +488,8 @@ fn register(snapshot: Arc<QuerySnapshot>) {
 }
 
 /// RC05：一个会话保留的字节 = 采集快照（事件/字符串/价格/诊断）+ 快照行
-/// 索引 + 查询身份/价格修订/时区/主指纹元数据 + 快照结构自身。
-/// 计算全程受检，溢出显式报错。
+/// 索引 + 下钻日行索引（含按需费用单元）+ 查询身份/价格修订/时区/主指纹
+/// 元数据 + 快照结构自身。计算全程受检，溢出显式报错。
 ///
 /// 采集快照与价格表按 Arc **共享**，但这里仍逐会话完整计账（保守、简单，
 /// 宁可重复计账也不漏账）；快照自身持有的 `pricing_revision` 是采集修订号
@@ -489,6 +497,7 @@ fn register(snapshot: Arc<QuerySnapshot>) {
 fn snapshot_retained_bytes(
     collection: &report::CollectionSnapshot,
     rows: &[SnapshotRow],
+    rollup_drill: &report::RollupDrillIndex,
     query_id: &str,
     tz_label: &str,
     main_fingerprint: &str,
@@ -497,6 +506,7 @@ fn snapshot_retained_bytes(
     let mut n = ByteCount::default();
     n.add(report::collection_retained_bytes(collection)?)?;
     n.add(rows_retained_bytes(rows)?)?;
+    n.add(rollup_drill.retained_bytes()?)?;
     n.add(string_bytes(&query_id.to_string())?)?;
     n.add(string_bytes(&tz_label.to_string())?)?;
     n.add(string_bytes(&main_fingerprint.to_string())?)?;
@@ -606,27 +616,7 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
         prev = Some((ts, rid));
     }
 
-    // RC05：按**会话实际保留的数据**记账——H07 起事件本体不再随会话常驻
-    // （汇总与明细分页都按批流式读取），因此这里计的是行索引、元数据与价格表。
     let query_id = format!("q{namespace}-{qseq}-g{history_generation}");
-    let charge =
-        snapshot_retained_bytes(&collection, &rows, &query_id, &tz_label, &main_fingerprint)
-            .map_err(|e| anyhow!(e))?;
-    let limit = quota_limit();
-    if charge > limit {
-        // RC05：单会话超预算——明确失败、不截断数据；建议必须真实有效。
-        anyhow::bail!(
-            "查询保留数据 {}（约合 {:.2} MiB）超出单会话预算 {}：可缩小时间范围后重试，\
-             或稍后重试等待闲置会话回收（不按要求截断数据）",
-            display_bytes(charge),
-            charge as f64 / MIB as f64,
-            display_bytes(limit)
-        );
-    }
-    // 准入：额度原子占用（失败会按 LRU 淘汰后重试）；失败时 reservation
-    // 未建立、快照未注册，额度不泄漏。
-    let reservation =
-        acquire_with_eviction(charge, opts.trigger.is_auto()).map_err(|e| anyhow!(e))?;
 
     // H06：日汇总桶选择在这里固定一次——按日筛选/分组且时区与来源时区不同时，
     // 日汇总不参与（返回可恢复提示），绝不把来源日期当午夜事件重切。
@@ -655,6 +645,37 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
         opts.rollups,
         &collection.pricing,
     )?;
+    // 补修三：日行分组/顺序/游标定位在这里算一次并冻结（不计价）——分页
+    // 不再每页重建，费用只对真正落到当前页的行按需计算。
+    let rollup_drill = report::build_rollup_drill_index(&rollup_selection, &collection.pricing)?;
+
+    // RC05：按**会话实际保留的数据**记账——H07 起事件本体不再随会话常驻
+    // （汇总与明细分页都按批流式读取），因此这里计的是行索引、日行索引、
+    // 元数据与价格表。日行索引的费用单元随行一次性分配，无未记账的懒增长。
+    let charge = snapshot_retained_bytes(
+        &collection,
+        &rows,
+        &rollup_drill,
+        &query_id,
+        &tz_label,
+        &main_fingerprint,
+    )
+    .map_err(|e| anyhow!(e))?;
+    let limit = quota_limit();
+    if charge > limit {
+        // RC05：单会话超预算——明确失败、不截断数据；建议必须真实有效。
+        anyhow::bail!(
+            "查询保留数据 {}（约合 {:.2} MiB）超出单会话预算 {}：可缩小时间范围后重试，\
+             或稍后重试等待闲置会话回收（不按要求截断数据）",
+            display_bytes(charge),
+            charge as f64 / MIB as f64,
+            display_bytes(limit)
+        );
+    }
+    // 准入：额度原子占用（失败会按 LRU 淘汰后重试）；失败时 reservation
+    // 未建立、快照未注册，额度不泄漏。
+    let reservation =
+        acquire_with_eviction(charge, opts.trigger.is_auto()).map_err(|e| anyhow!(e))?;
 
     let snapshot = Arc::new(QuerySnapshot {
         // RC01：命名空间 + 序号 + generation。跨启动唯一性来自命名空间，
@@ -671,6 +692,7 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
         rows,
         time_bounds,
         rollup_selection,
+        rollup_drill,
         collection,
         read,
         _reservation: reservation,
@@ -808,7 +830,8 @@ pub fn locate_cursor(snapshot: &QuerySnapshot, cursor_str: &str, drill_fp: &str)
         let ridx = c
             .ridx
             .ok_or_else(|| anyhow!("游标缺少日汇总行位置，请刷新重试"))?;
-        let count = crate::report::drill_rollup_rows(snapshot)?.len();
+        // 补修三：行数取冻结索引——定位游标不重建日行、也不触发计价。
+        let count = snapshot.rollup_drill().len();
         if ridx >= count {
             return Err(anyhow!("游标位置在当前查询中不存在，请刷新重试"));
         }

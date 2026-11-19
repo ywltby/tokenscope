@@ -165,6 +165,8 @@ function dayMinus(day, n) {
 const ROLLING_START_LOCAL = `${dayMinus(AS_OF_DAY, 1)}T${AS_OF.slice(11, 16)}`;
 const ROLLING_START_UTC = `${dayMinus(AS_OF_DAY, 1)}T14:00:00Z`;
 const PRICING_REVISION = "rev-synthetic-1";
+// 后端 model::UNKNOWN_PROJECT：聚合分组键、明细行兜底与下钻筛选共用同一判定。
+const UNKNOWN_PROJECT = "(未知)";
 
 /** 构造一个合成 Group。 */
 function group(key, input, opts = {}) {
@@ -285,6 +287,10 @@ function eventRow(i, opts = {}) {
  */
 function rollupRow(day, opts = {}) {
   const cost = opts.cost_usd ?? 0;
+  const sourceCost = opts.source_cost_usd ?? null;
+  // 后端 rollup_cost_parts：来源费用已给出时不再估算（估算部分为 0），
+  // 行金额 = 估算 + 来源，与分组费用列同一口径。
+  const estimated = sourceCost != null ? 0 : cost;
   const meta = {
     day,
     source_tz: opts.source_tz ?? "Asia/Shanghai",
@@ -292,22 +298,23 @@ function rollupRow(day, opts = {}) {
     requests: opts.requests ?? 1,
     label: opts.label ?? "Claude Opus 4.7",
     models: opts.models ?? ["anthropic/claude-opus-4-7", "claude-opus-4-7"],
-    cost_usd: cost,
+    cost_usd: estimated,
     total_cost_usd: opts.total_cost_usd ?? cost,
-    source_cost_usd: opts.source_cost_usd ?? null,
-    source_cost_state: opts.source_cost_state ?? "absent",
+    source_cost_usd: sourceCost,
+    source_cost_state: opts.source_cost_state ?? (sourceCost != null ? "full" : "absent"),
     cost_detail: "rollup_only",
     unknown_pricing: opts.unknown_pricing ?? false,
     unknown_reason: opts.unknown_reason ?? null,
     unknown_tokens: opts.unknown_tokens ?? { input: 0, output: 0, cache_write: 0, cache_read: 0 },
     cost_partially_unknown: opts.cost_partially_unknown ?? false,
-    has_estimated_cost: opts.has_estimated_cost ?? cost > 0,
+    has_estimated_cost: opts.has_estimated_cost ?? estimated > 0,
     cache_write_split_estimated: false,
     cache_price_zero_estimated: opts.cache_price_zero_estimated ?? false,
   };
   return {
     ts: day,
-    record_id: `rollup-${day}`,
+    // 日汇总没有请求 ID/会话/项目（后端一律空串），不补造。
+    record_id: "",
     cursor: `rollup|${opts.model ?? "claudeopus47"}|${day}`,
     agent: "claude-code",
     model: opts.model ?? "claudeopus47",
@@ -784,6 +791,31 @@ const ROLLUP_DRILL_GROUPS = [
   }),
 ];
 
+// v0.9.4 补修二：同一批行按项目聚合——CCS 日汇总没有项目归属，与无项目
+// 请求同入「未知」组；被覆盖请求的用量已在日行里，不重复计入具体项目组。
+// 两组之和与按模型视图逐项相等（请求 289 / 总输入 100,155,338 / 费用 808.08）。
+const ROLLUP_DRILL_PROJECT_GROUPS = [
+  group(UNKNOWN_PROJECT, 50102405, {
+    label: UNKNOWN_PROJECT,
+    output: 10051285,
+    cache_write: 20030000,
+    cache_read: 30018123,
+    cost_usd: 801.68,
+    source_cost_usd: 5,
+    total_cost_usd: 806.68,
+    cost_detail: "mixed",
+    source_cost_state: "full",
+    requests: 285,
+  }),
+  group("/home/dev/projects/tokenscope", 4810, {
+    label: "tokenscope",
+    output: 2570,
+    cost_usd: 1.4,
+    total_cost_usd: 1.4,
+    requests: 4,
+  }),
+];
+
 /** 明细行：与汇总同源（empty → 零行；unknown → 未知价行；partial → 混合）。 */
 function rowsFor(kind) {
   switch (kind) {
@@ -842,23 +874,21 @@ function rowsFor(kind) {
         }),
         eventRow(4, { model: "claude-fable-5-2", identity: "claudefable52", cost_usd: 0.2 }),
         // Sonnet mixed：原生 + 被覆盖请求（事件段），随后日汇总行（汇总段）。
-        eventRow(5, { model: "claude-sonnet-4-5", identity: "claudesonnet45", cost_usd: 0.18 }),
+        // 原生那条无项目归属 → 与 CCS 日行同属「未知」项目组（补修二）。
+        eventRow(5, {
+          model: "claude-sonnet-4-5",
+          identity: "claudesonnet45",
+          cost_usd: 0.18,
+          project: UNKNOWN_PROJECT,
+        }),
         eventRow(6, {
           model: "claude-sonnet-4-5",
           identity: "claudesonnet45",
           cost_usd: 0.12,
           covered_by_rollup: "2026-05-28",
         }),
-        rollupRow("2026-05-28", {
-          model: "claudesonnet45",
-          label: "Claude Sonnet 4.5",
-          models: ["claude-sonnet-4-5"],
-          requests: 50,
-          input: 1200,
-          output: 640,
-          cost_usd: 5,
-        }),
-        // Opus 纯日汇总：两天两条 CCS 行（日降序），无逐请求记录。
+        // 汇总段按后端冻结索引排序：日降序，同日按规范身份键升序。
+        // Opus 纯日汇总：两天两条 CCS 行，无逐请求记录。
         rollupRow("2026-05-29", {
           requests: 11,
           input: 100000,
@@ -874,6 +904,16 @@ function rowsFor(kind) {
           cache_write: 20000000,
           cache_read: 30000000,
           cost_usd: 800,
+        }),
+        rollupRow("2026-05-28", {
+          model: "claudesonnet45",
+          label: "Claude Sonnet 4.5",
+          models: ["claude-sonnet-4-5"],
+          requests: 50,
+          input: 1200,
+          output: 640,
+          cost_usd: 5,
+          source_cost_usd: 5,
         }),
       ];
     default:
@@ -967,8 +1007,12 @@ function dimGroups(kind, by, session) {
     if (kind === "source-cost" || kind === "rollup-drill") return base;
     return base.map((g, i) => ({ ...g, key: `${kind}-model-${i}`, label: null }));
   }
-  if (by === "project")
+  if (by === "project") {
+    // v0.9.4 补修二：rollup-drill 的项目视图保留真实身份键（含「未知」），
+    // 不做 `/proj/${kind}-${i}` 重写——否则契约无法点击「未知」组下钻。
+    if (kind === "rollup-drill") return ROLLUP_DRILL_PROJECT_GROUPS;
     return base.map((g, i) => ({ ...g, key: `/proj/${kind}-${i}`, label: `${kind}-project-${i}` }));
+  }
   if (by === "day") {
     // 日维度的类别必须是日期——否则"切维后不残留旧类别"会被 fixture 自己满足。
     return base.map((g, i) => ({
@@ -1144,7 +1188,12 @@ function createSessionTable(cfg) {
     // （identity 缺省退回 model），明细行仍保留原始渠道 ID 供展示。
     let scoped = rows;
     if (args?.model) scoped = scoped.filter((r) => (r.identity ?? r.model) === args.model);
-    if (args?.project) scoped = scoped.filter((r) => r.project === args.project);
+    // v0.9.4 补修二：日汇总行没有项目归属，只命中「未知」筛选（与聚合分组
+    // 同一判定）；具体项目仍只匹配有该项目归属的请求行。
+    if (args?.project)
+      scoped = scoped.filter((r) =>
+        r.rollup ? args.project === UNKNOWN_PROJECT : r.project === args.project,
+      );
     if (args?.day) scoped = scoped.filter((r) => r.ts.startsWith(args.day));
     // 翻页偏移在**当前筛选后的行序**内定位（与后端游标按筛选指纹定位一致）；
     // 用全量行序的下标切筛选后的列表会漏掉跨页的日汇总行。

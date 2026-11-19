@@ -3402,7 +3402,9 @@ const IMPL = {
    * - 两个 Fable 渠道 ID 在表格与图表都只出现一次，下钻见两侧原始 ID 的请求；
    * - 纯日汇总模型（Opus）下钻按两天返回两条 CCS 行：日粒度时间、CCS 应用列、
    *   无项目归属（—）、真实请求数、分组费用浮层；
-   * - mixed 模型（Sonnet）下钻含原生请求 + 被覆盖标记 + 日汇总行，跨页无漏/重。
+   * - mixed 模型（Sonnet）下钻含原生请求 + 被覆盖标记 + 日汇总行，跨页无漏/重；
+   * - 补修二：按项目聚合时 CCS 日行与无项目请求同入「未知」组，下钻可见并
+   *   逐项对账；具体项目下钻仍只有请求行（被覆盖请求可见但不重复计入）。
    */
   async rollup_drilldown_rows(ctx) {
     const name = "rollup_drilldown_rows";
@@ -3429,22 +3431,67 @@ const IMPL = {
       }
     };
     // 按列读取明细行（ts/应用/模型/项目）+ 日汇总/被覆盖标记。
+    // 补修二对账还需要四桶与费用：数字列去千分位，金额去 `$`，日汇总行的
+    // 请求数取自模型列「N 次请求」（逐请求行恒为 1）。
     const readEvents = () =>
       page.evaluate(() => {
+        const num = (text) => {
+          const cleaned = (text ?? "").replace(/[$,\s]/g, "");
+          const v = Number(cleaned);
+          return Number.isFinite(v) ? v : null;
+        };
         const trs = [
           ...document.querySelectorAll(".events-card .n-data-table-tbody .n-data-table-tr"),
         ];
         return trs.map((tr) => {
           const td = [...tr.querySelectorAll("td")];
-          const time = (td[0]?.textContent ?? "").trim();
+          const text = (i) => (td[i]?.textContent ?? "").trim();
+          const time = text(0);
+          const model = text(2);
+          const isRollup = time.includes("日汇总");
+          const req = model.match(/([\d,]+)\s*次请求/);
           return {
             time,
-            agent: (td[1]?.textContent ?? "").trim(),
-            model: (td[2]?.textContent ?? "").trim(),
-            project: (td[3]?.textContent ?? "").trim(),
-            isRollup: time.includes("日汇总"),
+            agent: text(1),
+            model,
+            project: text(3),
+            isRollup,
             covered: time.includes("已计入汇总"),
             dayOnly: /^\d{4}-\d{2}-\d{2}/.test(time) && !time.includes(":"),
+            requests: isRollup ? (req ? Number(req[1].replace(/,/g, "")) : null) : 1,
+            input: num(text(4)),
+            output: num(text(5)),
+            cacheWrite: num(text(6)),
+            cacheRead: num(text(7)),
+            cost: num(text(8)),
+          };
+        });
+      });
+    // 汇总行（含合计）按列读取：维度/请求/四桶/总计/费用。
+    const readSummary = () =>
+      page.evaluate(() => {
+        const num = (text) => {
+          const cleaned = (text ?? "").replace(/[$,\s›]/g, "");
+          const v = Number(cleaned);
+          return Number.isFinite(v) ? v : null;
+        };
+        const trs = [
+          ...document.querySelectorAll(".usage-card .n-data-table-tbody .n-data-table-tr"),
+        ];
+        return trs.map((tr) => {
+          const td = [...tr.querySelectorAll("td")];
+          const text = (i) => (td[i]?.textContent ?? "").trim();
+          return {
+            label: text(0)
+              .replace(/\s*›\s*$/, "")
+              .trim(),
+            requests: num(text(1)),
+            input: num(text(2)),
+            output: num(text(3)),
+            cacheWrite: num(text(4)),
+            cacheRead: num(text(5)),
+            total: num(text(6)),
+            cost: num(text(7)),
           };
         });
       });
@@ -3588,6 +3635,95 @@ const IMPL = {
       await page.waitForTimeout(500);
       const chipGone = (await page.locator(".events-card .filter-chip").count()) === 0;
       ctx.record(name, "下钻筛选标签可关闭", chipGone, `残留标签=${!chipGone}`);
+
+      // 6. 补修二：按项目聚合——CCS 日汇总与无项目请求同入「未知」组，
+      //    合计与按模型视图逐项相等（切维不改变总量）。
+      const modelTotal = (await readSummary()).find((g) => g.label === "合计");
+      await clickSegment(page, "按项目");
+      await page.waitForTimeout(600);
+      const projectGroups = await readSummary();
+      const projectTotal = projectGroups.find((g) => g.label === "合计");
+      const sameTotal =
+        modelTotal != null &&
+        projectTotal != null &&
+        ["requests", "input", "output", "cacheWrite", "cacheRead", "total", "cost"].every(
+          (k) => Math.abs((modelTotal[k] ?? 0) - (projectTotal[k] ?? 0)) < 1e-6,
+        );
+      ctx.record(
+        name,
+        "按项目与按模型合计逐项相等",
+        sameTotal,
+        JSON.stringify({ modelTotal, projectTotal }),
+      );
+      const unknownGroup = projectGroups.find((g) => g.label === "(未知)");
+      const specificGroup = projectGroups.find((g) => g.label === "tokenscope");
+      ctx.record(
+        name,
+        "项目视图出现「未知」组（285 请求 / $806.68）",
+        unknownGroup != null &&
+          unknownGroup.requests === 285 &&
+          Math.abs((unknownGroup.cost ?? 0) - 806.68) < 1e-6 &&
+          specificGroup != null &&
+          specificGroup.requests === 4,
+        JSON.stringify(projectGroups),
+      );
+      await ctx.shot(name, session, "project-groups");
+
+      // 7. 「未知」组下钻：无项目请求 + 三条 CCS 日行，日期/请求/四桶/费用对账。
+      await drillInto("(未知)");
+      const unknownRows = await readEvents();
+      const unknownRollups = unknownRows.filter((r) => r.isRollup);
+      const unknownDays = unknownRollups.map((r) => r.time.slice(0, 10)).sort();
+      ctx.record(
+        name,
+        "「未知」下钻含 1 条无项目请求 + 3 条 CCS 日行",
+        unknownRows.length === 4 &&
+          unknownRollups.length === 3 &&
+          unknownRows.filter((r) => !r.isRollup && !r.covered).length === 1 &&
+          unknownRollups.every((r) => r.dayOnly && r.agent === "CCS" && r.project === "—") &&
+          JSON.stringify(unknownDays) ===
+            JSON.stringify(["2026-05-28", "2026-05-28", "2026-05-29"]),
+        JSON.stringify(unknownRows),
+      );
+      const unknownRequests = unknownRows.reduce((s, r) => s + (r.requests ?? 0), 0);
+      ctx.record(
+        name,
+        "「未知」下钻请求数对账（223+11+50 日行 + 1 原生 = 285）",
+        unknownRequests === 285 && unknownRequests === unknownGroup?.requests,
+        JSON.stringify(unknownRows.map((r) => r.requests)),
+      );
+      const sumOf = (rows, k) => rows.reduce((s, r) => s + (r[k] ?? 0), 0);
+      const bucketKeys = ["input", "output", "cacheWrite", "cacheRead"];
+      const bucketsMatch = bucketKeys.every(
+        (k) => Math.abs(sumOf(unknownRows, k) - (unknownGroup?.[k] ?? 0)) < 1e-6,
+      );
+      const costMatch = Math.abs(sumOf(unknownRows, "cost") - (unknownGroup?.cost ?? 0)) < 1e-6;
+      ctx.record(
+        name,
+        "「未知」下钻四桶与费用对账（$806.68）",
+        bucketsMatch && costMatch,
+        JSON.stringify({
+          rows: bucketKeys.map((k) => sumOf(unknownRows, k)),
+          group: bucketKeys.map((k) => unknownGroup?.[k]),
+          rowCost: sumOf(unknownRows, "cost"),
+          groupCost: unknownGroup?.cost,
+        }),
+      );
+      await ctx.shot(name, session, "unknown-project-drill");
+
+      // 8. 具体项目下钻：只有该项目归属的请求行，被覆盖请求可见但不重复计入。
+      await drillInto("tokenscope");
+      const specificRows = await readEvents();
+      ctx.record(
+        name,
+        "具体项目下钻无 CCS 日行（4 请求 + 1 被覆盖 = 5 行）",
+        specificRows.length === 5 &&
+          specificRows.every((r) => !r.isRollup && r.project === "tokenscope") &&
+          specificRows.filter((r) => r.covered).length === 1 &&
+          specificGroup?.requests === 4,
+        JSON.stringify(specificRows),
+      );
+      await ctx.shot(name, session, "specific-project-drill");
 
       await ctx.finishSession(session);
     } finally {

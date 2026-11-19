@@ -29,6 +29,19 @@ const TIER_EXTERNAL: u8 = 0;
 const TIER_MODELSDEV: u8 = 1;
 const TIER_OPENROUTER: u8 = 2;
 
+/// v0.9.4 补修一：**已核实**的跨渠道别名对（结构身份键 → 规范身份键）。
+///
+/// 真实 models.dev 快照里同一末段可能有数十个渠道候选（本机 `claudefable52`
+/// 有 24 个），「末段精确命中唯一可信模型才确认」会因歧义放弃归一。这一对
+/// 经人工核实为同一模型，映射**先于**价格目录判断，因此候选增删、排序变化
+/// 或完全没有价格快照时仍归一组。
+///
+/// 按完整结构键**精确**匹配（含 `/` 渠道与 `: 变体` 结构），所以 `:free` /
+/// `:thinking` / 显式空变体 / 日期后缀 / 未确认渠道前缀都不命中，仍各自独立。
+/// 规范写法映射到自身，故 `canonical` 幂等。新增条目必须先核实两侧确为同一
+/// 模型版本——宁可少合并，不可误合并。
+const CONFIRMED_MODEL_ALIASES: &[(&str, &str)] = &[("claudefable52", "anthropic/claudefable52")];
+
 /// 归一化模型标识（键与查询共用同一函数，MP01）：按 `ModelIdentity` 解析结构后
 /// 做等价化——ASCII 转小写、删除 `-` / `.` / `_`，保留 `/` 渠道结构与 `: 变体`
 /// 结构。渠道名等**元数据展示**仍用原文，不走本函数。
@@ -3155,22 +3168,32 @@ impl Pricing {
 
     /// v0.9.4：规范模型身份（查询时派生，升级零迁移）。
     ///
-    /// 在结构身份键之上，用**可信 models.dev 完整标识**确认渠道别名，使同一
-    /// 模型版本的不同写法（`anthropic/claude-fable-5.2` 与 `claude-fable-5-2`）
-    /// 共享同一分组/覆盖/下钻身份。确认边界（宁可少合并，不可误合并）：
-    /// - 结构键本身等于某 models.dev 条目的完整 ID → 原样（本身即规范写法）；
-    /// - **无渠道前缀**的裸标识，其末段键（含变体结构）**精确**命中**唯一**
-    ///   models.dev 模型 → 采用该模型的完整身份键；
-    /// - 其余一律保持结构键：不同版本（前缀回退不参与确认）、不同变体、
-    ///   未确认渠道前缀、歧义裸末段（命中多个模型）、空基名。
+    /// 在结构身份键之上确认渠道别名，使同一模型版本的不同写法
+    /// （`anthropic/claude-fable-5.2` 与 `claude-fable-5-2`）共享同一
+    /// 分组/覆盖/下钻身份。确认关系有三类，按优先级：
+    /// - (c) [`CONFIRMED_MODEL_ALIASES`] 里**已核实的别名对**：与价格目录
+    ///   无关，候选增删/乱序/缺少快照都成立；
+    /// - (a) 结构键本身等于某 models.dev 条目的完整 ID → 原样（本身即规范）；
+    /// - (b) **无渠道前缀**的裸标识，其末段键（含变体结构）**精确**命中
+    ///   **唯一** models.dev 模型 → 采用该模型的完整身份键。
     ///
-    /// 只从查询会话冻结的价格表派生：不改写历史库任何列；快照缺失时退化为
-    /// 结构身份（与旧行为一致）。幂等：`canonical(raw) == canonical(identity_key(raw))`。
+    /// 其余一律保持结构键（宁可少合并，不可误合并）：不同版本（前缀回退不
+    /// 参与确认）、不同变体、未确认渠道前缀、歧义裸末段（命中多个模型）、
+    /// 空基名。
+    ///
+    /// 只从查询会话冻结的价格表派生：不改写历史库任何列；除 (c) 外快照缺失
+    /// 时退化为结构身份。幂等：`canonical(raw) == canonical(identity_key(raw))`。
     pub fn canonical_identity_key(&self, model: &str) -> String {
         let id = crate::model_identity::ModelIdentity::parse(model);
         let structural = id.identity_key();
         if id.is_empty_key() {
             return structural;
+        }
+        if let Some((_, canonical)) = CONFIRMED_MODEL_ALIASES
+            .iter()
+            .find(|(alias, _)| *alias == structural)
+        {
+            return (*canonical).to_string();
         }
         let Some(group) = self.by_prefix.get(id.leaf_key().as_bytes()) else {
             return structural;
@@ -5906,7 +5929,8 @@ output = 10.0
         assert_eq!(plan.base.cache_read, RateSpec::Unknown);
     }
 
-    /// v0.9.4：规范身份只确认「裸别名 ↔ 唯一可信完整 ID」，边界一律保守。
+    /// v0.9.4：目录规则只确认「裸别名 ↔ 唯一可信完整 ID」，边界一律保守。
+    /// 用**不在确认映射里**的模型，以免 (c) 类关系掩盖目录分支。
     #[test]
     fn canonical_identity_confirms_unique_bare_alias_only() {
         let dir = std::env::temp_dir().join(format!(
@@ -5922,18 +5946,18 @@ output = 10.0
             &dir,
             "md.json",
             r#"{"v":4,"synced_at":"t","entries":[
-                {"id":"anthropic/claude-fable-5.2","name":"Claude Fable 5.2","input":3.0,"output":15.0}
+                {"id":"anthropic/claude-opus-4-7","name":"Claude Opus 4.7","input":3.0,"output":15.0}
             ]}"#,
         );
         let (p, warnings) = Pricing::load(None, Some(&snap), None);
         assert!(warnings.is_empty(), "{warnings:?}");
-        let canonical = "anthropic/claudefable52";
+        let canonical = "anthropic/claudeopus47";
         for spelling in [
-            "claude-fable-5-2",
-            "Claude_Fable_5.2",
-            "claudefable52",
-            "anthropic/claude-fable-5.2",
-            "Anthropic/Claude-Fable-5.2",
+            "claude-opus-4-7",
+            "Claude_Opus_4.7",
+            "claudeopus47",
+            "anthropic/claude-opus-4-7",
+            "Anthropic/Claude-Opus-4.7",
         ] {
             assert_eq!(p.canonical_identity_key(spelling), canonical, "{spelling}");
         }
@@ -5941,28 +5965,144 @@ output = 10.0
         assert_eq!(p.canonical_identity_key(canonical), canonical);
         // 版本（前缀回退可命中同价也不合并）、变体、未确认渠道、空基名。
         assert_eq!(
-            p.canonical_identity_key("claude-fable-5-2-20261101"),
-            "claudefable5220261101"
+            p.canonical_identity_key("claude-opus-4-7-20261101"),
+            "claudeopus4720261101"
         );
         assert_eq!(
-            p.canonical_identity_key("claude-fable-5-2:free"),
-            "claudefable52:free"
+            p.canonical_identity_key("claude-opus-4-7:free"),
+            "claudeopus47:free"
         );
         assert_eq!(
-            p.canonical_identity_key("claude-fable-5-2:"),
-            "claudefable52:"
+            p.canonical_identity_key("claude-opus-4-7:"),
+            "claudeopus47:"
         );
         assert_eq!(
-            p.canonical_identity_key("zenmux/claude-fable-5-2"),
-            "zenmux/claudefable52"
+            p.canonical_identity_key("zenmux/claude-opus-4-7"),
+            "zenmux/claudeopus47"
         );
         assert_eq!(p.canonical_identity_key("provider/---"), "provider/");
-        // 无快照 → 结构身份（旧行为）。
+        // 无快照 → 结构身份（未确认别名保持旧行为）。
         let empty = Pricing::empty();
         assert_eq!(
-            empty.canonical_identity_key("claude-fable-5-2"),
-            "claudefable52"
+            empty.canonical_identity_key("claude-opus-4-7"),
+            "claudeopus47"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// v0.9.4 补修一：已核实别名对**先于**目录唯一候选判断——真实快照里
+    /// 同末段有 24 个渠道候选（歧义）时仍归一；候选删减/乱序/无快照同样成立。
+    #[test]
+    fn canonical_identity_confirmed_alias_precedes_catalog() {
+        let dir = std::env::temp_dir().join(format!(
+            "tokenscope-canonical-confirmed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let channels = [
+            "anthropic",
+            "openrouter",
+            "zenmux",
+            "deepinfra",
+            "bedrock",
+            "vertex",
+            "azure",
+            "groq",
+            "together",
+            "fireworks",
+            "perplexity",
+            "xai",
+            "mistral",
+            "cohere",
+            "ai21",
+            "nlpcloud",
+            "replicate",
+            "huggingface",
+            "sambanova",
+            "cerebras",
+            "lambda",
+            "ovhcloud",
+            "scaleway",
+            "upstage",
+        ];
+        let entries: Vec<String> = channels
+            .iter()
+            .map(|c| {
+                format!(
+                    r#"{{"id":"{c}/claude-fable-5.2","name":"Claude Fable 5.2","input":3.0,"output":15.0}}"#
+                )
+            })
+            .collect();
+        let canonical = "anthropic/claudefable52";
+        let spellings = [
+            "claude-fable-5-2",
+            "Claude_Fable_5.2",
+            "claudefable52",
+            "anthropic/claude-fable-5.2",
+            "Anthropic/Claude-Fable-5.2",
+        ];
+        // (a) 24 候选：目录判歧义，但确认映射优先。
+        let snap = write(
+            &dir,
+            "md.json",
+            &format!(
+                r#"{{"v":4,"synced_at":"t","entries":[{}]}}"#,
+                entries.join(",")
+            ),
+        );
+        let (p, _) = Pricing::load(None, Some(&snap), None);
+        for s in spellings {
+            assert_eq!(p.canonical_identity_key(s), canonical, "24 候选 {s}");
+        }
+        assert_eq!(p.canonical_identity_key(canonical), canonical, "幂等");
+        // (b) 候选删减到不含 anthropic 的 3 个渠道。
+        let few: Vec<String> = entries.iter().skip(2).take(3).cloned().collect();
+        let snap = write(
+            &dir,
+            "md.json",
+            &format!(r#"{{"v":4,"synced_at":"t","entries":[{}]}}"#, few.join(",")),
+        );
+        let (p, _) = Pricing::load(None, Some(&snap), None);
+        for s in spellings {
+            assert_eq!(p.canonical_identity_key(s), canonical, "候选删减 {s}");
+        }
+        // (c) 乱序（anthropic 不在首位）。
+        let mut shuffled = entries.clone();
+        shuffled.rotate_left(7);
+        shuffled.reverse();
+        let snap = write(
+            &dir,
+            "md.json",
+            &format!(
+                r#"{{"v":4,"synced_at":"t","entries":[{}]}}"#,
+                shuffled.join(",")
+            ),
+        );
+        let (p, _) = Pricing::load(None, Some(&snap), None);
+        for s in spellings {
+            assert_eq!(p.canonical_identity_key(s), canonical, "乱序 {s}");
+        }
+        // (d) 完全没有价格快照：确认映射仍生效。
+        let empty = Pricing::empty();
+        for s in spellings {
+            assert_eq!(empty.canonical_identity_key(s), canonical, "无快照 {s}");
+        }
+        // 精确键匹配：变体/日期后缀/未确认渠道前缀不命中映射。
+        for (raw, expected) in [
+            ("claude-fable-5-2:free", "claudefable52:free"),
+            ("claude-fable-5-2:thinking", "claudefable52:thinking"),
+            ("claude-fable-5-2:", "claudefable52:"),
+            ("claude-fable-5-2-20261101", "claudefable5220261101"),
+            ("zenmux/claude-fable-5-2", "zenmux/claudefable52"),
+            ("claude-fable-5-3", "claudefable53"),
+        ] {
+            assert_eq!(empty.canonical_identity_key(raw), expected, "{raw}");
+            assert_eq!(p.canonical_identity_key(raw), expected, "{raw}");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5982,22 +6122,19 @@ output = 10.0
             &dir,
             "md.json",
             r#"{"v":4,"synced_at":"t","entries":[
-                {"id":"anthropic/claude-fable-5.2","name":"A","input":3.0,"output":15.0},
-                {"id":"mirror/claude-fable-5.2","name":"B","input":1.0,"output":5.0}
+                {"id":"anthropic/claude-opus-4-7","name":"A","input":3.0,"output":15.0},
+                {"id":"mirror/claude-opus-4-7","name":"B","input":1.0,"output":5.0}
             ]}"#,
         );
         let (p, _) = Pricing::load(None, Some(&snap), None);
+        assert_eq!(p.canonical_identity_key("claude-opus-4-7"), "claudeopus47");
         assert_eq!(
-            p.canonical_identity_key("claude-fable-5-2"),
-            "claudefable52"
+            p.canonical_identity_key("anthropic/claude-opus-4-7"),
+            "anthropic/claudeopus47"
         );
         assert_eq!(
-            p.canonical_identity_key("anthropic/claude-fable-5.2"),
-            "anthropic/claudefable52"
-        );
-        assert_eq!(
-            p.canonical_identity_key("mirror/claude-fable-5.2"),
-            "mirror/claudefable52"
+            p.canonical_identity_key("mirror/claude-opus-4-7"),
+            "mirror/claudeopus47"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

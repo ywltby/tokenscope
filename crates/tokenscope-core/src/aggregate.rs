@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
-use crate::model::{AgentKind, TokenCounts, UsageEvent};
+use crate::model::{AgentKind, TokenCounts, UNKNOWN_PROJECT, UsageEvent};
 use crate::pricing::Pricing;
 
 /// MP04：聚合中间态——分组累计 + 该组原始模型名的稳定代表写法。
@@ -460,7 +460,7 @@ impl<'a> EventView<'a> {
             ts: e.ts,
             agent: e.app,
             model: &e.model_raw,
-            project: e.project_key.as_deref().unwrap_or("(未知)"),
+            project: e.project_key.as_deref().unwrap_or(UNKNOWN_PROJECT),
             tokens: e.tokens,
         }
     }
@@ -590,6 +590,16 @@ pub(crate) struct RollupCostParts {
     pub cache_price_zero_estimated: bool,
 }
 
+/// 补修三：日汇总贡献计价的实际调用次数——证明分页只为落到当前页的日行
+/// 计价，且同一快照内复用已算结果（取走即清零，便于逐段断言）。
+static ROLLUP_COST_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 测试专用（#[doc(hidden)]）：取走并清零日汇总计价调用计数。
+#[doc(hidden)]
+pub fn take_rollup_cost_calls_for_tests() -> u64 {
+    ROLLUP_COST_CALLS.swap(0, std::sync::atomic::Ordering::SeqCst)
+}
+
 /// 费用覆盖逐条判定（v0.9.2，2026-11-15 用户更正旧规则）：
 /// 1. 来源费用已提供（Some(v)，含 Some(0)）→ token 不进 unknown，费用走
 ///    来源通道，不叠加估算；
@@ -600,6 +610,7 @@ pub(crate) struct RollupCostParts {
 /// 3. 不把一天 token 总量当单请求上下文，不默认基础档、不编造请求时刻/
 ///    分档/历史价格。来源统计日 + 来源时区用于排除该日不可能的星期规则。
 pub(crate) fn rollup_cost_parts(r: &RollupContribution, pricing: &Pricing) -> RollupCostParts {
+    ROLLUP_COST_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut parts = RollupCostParts {
         cost_usd: 0.0,
         unknown_tokens: TokenCounts::default(),
@@ -651,7 +662,7 @@ fn push_rollup_into(
             GroupBy::Day => r.day.clone(),
             GroupBy::Model => pricing.canonical_identity_key(&r.model),
             // 日汇总没有 cwd/project：与明细侧同一约定，保持「未知」。
-            GroupBy::Project => "(未知)".to_string(),
+            GroupBy::Project => UNKNOWN_PROJECT.to_string(),
             GroupBy::Agent => r.app.as_str().to_string(),
         };
         let key_err = key.clone();

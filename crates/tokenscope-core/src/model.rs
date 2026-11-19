@@ -3,6 +3,12 @@
 use jiff::Timestamp;
 use serde::Serialize;
 
+/// 「无项目归属」哨兵：聚合分组键、明细行兜底与下钻筛选共用同一判定。
+///
+/// CCS 日汇总没有项目归属，按项目聚合时归入本组；点该组下钻必须同时返回
+/// 无归属请求与已采用的日汇总行（具体项目仍只匹配有该项目归属的请求）。
+pub const UNKNOWN_PROJECT: &str = "(未知)";
+
 /// 已接入的 agent 种类；新增适配器时在此扩枚举。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize)]
 pub enum AgentKind {

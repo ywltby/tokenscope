@@ -2839,7 +2839,7 @@ pub(crate) fn usage_event_of(s: &crate::history::StoredEvent) -> UsageEvent {
         project: s
             .project_key
             .clone()
-            .unwrap_or_else(|| "(未知)".to_string()),
+            .unwrap_or_else(|| crate::model::UNKNOWN_PROJECT.to_string()),
         session_initial_cwd: s.session_initial_cwd.clone(),
         event_cwd: s.event_cwd.clone(),
         record_id: s.record_id.clone().unwrap_or_default(),
@@ -3059,7 +3059,11 @@ pub struct RollupRowMeta {
 
 /// 合并后的一条下钻日汇总行（内部形态）：按 `(统计日, 来源时区, 应用,
 /// 规范模型身份)` 归并同日多渠道贡献，排序 = 日降序 → 身份升序。
-#[derive(Debug, Clone)]
+///
+/// v0.9.4 补修三：分组、顺序与游标定位在建快照时算一次并冻结（**不含计价**）；
+/// 估算费用放在按需填充的单元里，只有真正落到当前页的行才计价，同一快照内
+/// 已算结果直接复用。来源费用来自贡献数据本身（不计价），随分组一起冻结。
+#[derive(Debug)]
 pub(crate) struct DrillRollupRow {
     day: String,
     source_tz: String,
@@ -3070,30 +3074,106 @@ pub(crate) struct DrillRollupRow {
     tokens: TokenCounts,
     models: Vec<String>,
     representative: String,
+    source_cost_usd: Option<f64>,
+    source_cost_state: Option<&'static str>,
+    /// 本行合并的贡献在 `RollupSelection.contributions` 里的下标——选择结果
+    /// 随快照冻结，下标在会话内恒定。
+    contributions: Vec<usize>,
+    /// 按需计价单元：`Err` 保存受检累加失败的诊断（与旧实现同样显式报错）。
+    cost: std::sync::OnceLock<Result<DrillRollupCost, String>>,
+}
+
+/// 日行的估算费用构成：逐条走 [`crate::aggregate::rollup_cost_parts`] 后受检
+/// 累加，与聚合 `push_rollup_into`/`finish` 同口径（不另写一套计价）。
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DrillRollupCost {
     cost_usd: f64,
     unknown_tokens: TokenCounts,
     has_estimated_cost: bool,
     cache_write_split_estimated: bool,
     cache_price_zero_estimated: bool,
-    source_cost_usd: Option<f64>,
-    source_cost_state: Option<&'static str>,
 }
 
-/// v0.9.4：从冻结快照的**最终采用**贡献构建下钻日汇总行。
+impl DrillRollupRow {
+    /// 取本行估算费用：首次访问才计价，之后复用同一快照内的结果。
+    fn cost(
+        &self,
+        selection: &RollupSelection,
+        pricing: &crate::pricing::Pricing,
+    ) -> Result<DrillRollupCost> {
+        let indices = &self.contributions;
+        let cell = self.cost.get_or_init(|| {
+            let mut acc = DrillRollupCost::default();
+            for &i in indices {
+                let parts =
+                    crate::aggregate::rollup_cost_parts(&selection.contributions[i], pricing);
+                acc.cost_usd += parts.cost_usd;
+                if !acc.cost_usd.is_finite() {
+                    return Err("日汇总行费用累计出现非有限值".to_string());
+                }
+                acc.unknown_tokens = acc
+                    .unknown_tokens
+                    .checked_add(&parts.unknown_tokens)
+                    .ok_or_else(|| "日汇总行未知 token 累计超出可表示范围".to_string())?;
+                acc.has_estimated_cost |= parts.has_estimated_cost;
+                acc.cache_write_split_estimated |= parts.cache_write_split_estimated;
+                acc.cache_price_zero_estimated |= parts.cache_price_zero_estimated;
+            }
+            Ok(acc)
+        });
+        cell.as_ref().copied().map_err(|e| anyhow!("{e}"))
+    }
+}
+
+/// v0.9.4 补修三：下钻日行的冻结索引——分组与顺序只算一次，分页共享。
+#[derive(Debug, Default)]
+pub(crate) struct RollupDrillIndex {
+    rows: Vec<DrillRollupRow>,
+}
+
+impl RollupDrillIndex {
+    pub(crate) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub(crate) fn row(&self, ridx: usize) -> &DrillRollupRow {
+        &self.rows[ridx]
+    }
+
+    /// RC05：索引堆占用（行缓冲含内联费用单元 + 各行字符串/下标缓冲）。
+    /// 费用单元容量随行一次性分配，按需填充不产生未记账的懒增长。
+    pub(crate) fn retained_bytes(&self) -> Result<usize, String> {
+        use retained::{ByteCount, string_bytes, strings_bytes, vec_bytes};
+        let mut n = ByteCount::default();
+        n.add(vec_bytes(&self.rows)?)?;
+        for r in &self.rows {
+            n.add(string_bytes(&r.day)?)?;
+            n.add(string_bytes(&r.source_tz)?)?;
+            n.add(string_bytes(&r.model_key)?)?;
+            n.add(string_bytes(&r.source)?)?;
+            n.add(string_bytes(&r.representative)?)?;
+            n.add(strings_bytes(&r.models)?)?;
+            n.add(vec_bytes(&r.contributions)?)?;
+        }
+        Ok(n.get())
+    }
+}
+
+/// v0.9.4：从冻结快照的**最终采用**贡献构建下钻日行索引（只分组，不计价）。
 ///
 /// 只取 `rollup_selection.contributions`（三向选择后的采用集）——A/C 类
 /// 排除的汇总不出现，与聚合计入完全同源；同日多渠道（provider）按规范
-/// 身份合并一行。费用逐条走 [`crate::aggregate::rollup_cost_parts`]，再按
-/// 与 `push_rollup_into`/`finish` 相同的规则合成组级字段。
-pub(crate) fn drill_rollup_rows(
-    snapshot: &crate::query::QuerySnapshot,
-) -> Result<Vec<DrillRollupRow>> {
-    let pricing = snapshot.pricing();
+/// 身份合并一行。请求数/四桶/来源费用受检累加；估算费用留到行真正落到
+/// 当前页时再算（[`DrillRollupRow::cost`]）。
+pub(crate) fn build_rollup_drill_index(
+    selection: &RollupSelection,
+    pricing: &crate::pricing::Pricing,
+) -> Result<RollupDrillIndex> {
     let mut map: std::collections::BTreeMap<
         (std::cmp::Reverse<String>, String, String, &'static str),
         DrillRollupRow,
     > = std::collections::BTreeMap::new();
-    for r in &snapshot.rollup_selection().contributions {
+    for (i, r) in selection.contributions.iter().enumerate() {
         let model_key = pricing.canonical_identity_key(&r.model);
         let key = (
             std::cmp::Reverse(r.day.clone()),
@@ -3101,7 +3181,6 @@ pub(crate) fn drill_rollup_rows(
             r.source_tz.clone(),
             r.app.as_str(),
         );
-        let parts = crate::aggregate::rollup_cost_parts(r, pricing);
         let row = map.entry(key).or_insert_with(|| DrillRollupRow {
             day: r.day.clone(),
             source_tz: r.source_tz.clone(),
@@ -3112,14 +3191,12 @@ pub(crate) fn drill_rollup_rows(
             tokens: TokenCounts::default(),
             models: Vec::new(),
             representative: r.model.clone(),
-            cost_usd: 0.0,
-            unknown_tokens: TokenCounts::default(),
-            has_estimated_cost: false,
-            cache_write_split_estimated: false,
-            cache_price_zero_estimated: false,
             source_cost_usd: None,
             source_cost_state: None,
+            contributions: Vec::new(),
+            cost: std::sync::OnceLock::new(),
         });
+        row.contributions.push(i);
         row.requests = row
             .requests
             .checked_add(r.requests)
@@ -3134,17 +3211,6 @@ pub(crate) fn drill_rollup_rows(
         if r.model < row.representative {
             row.representative = r.model.clone();
         }
-        row.cost_usd += parts.cost_usd;
-        if !row.cost_usd.is_finite() {
-            anyhow::bail!("日汇总行费用累计出现非有限值");
-        }
-        row.unknown_tokens = row
-            .unknown_tokens
-            .checked_add(&parts.unknown_tokens)
-            .ok_or_else(|| anyhow!("日汇总行未知 token 累计超出可表示范围"))?;
-        row.has_estimated_cost |= parts.has_estimated_cost;
-        row.cache_write_split_estimated |= parts.cache_write_split_estimated;
-        row.cache_price_zero_estimated |= parts.cache_price_zero_estimated;
         let provided = r.source_cost_usd.is_some();
         row.source_cost_state = Some(match (row.source_cost_state, provided) {
             (Some("partial"), _) => "partial",
@@ -3170,22 +3236,23 @@ pub(crate) fn drill_rollup_rows(
     for row in &mut rows {
         row.models.sort();
     }
-    Ok(rows)
+    Ok(RollupDrillIndex { rows })
 }
 
 /// 日汇总行 → 展示行：ts 停留在统计日（不补造时分秒），请求 ID/会话/项目
 /// 留空（不补造归属），费用列 = 显示金额（与聚合行同值）。
 fn build_rollup_event_row(
     snapshot: &crate::query::QuerySnapshot,
-    r: &DrillRollupRow,
     ridx: usize,
     drill_fp: &str,
 ) -> Result<EventRow> {
     let pricing = snapshot.pricing();
-    let unknown_total = r.unknown_tokens.total();
-    let total_cost_usd = match (r.has_estimated_cost, r.source_cost_usd) {
-        (_, Some(src)) => Some(r.cost_usd + src),
-        (true, None) => Some(r.cost_usd),
+    let r = snapshot.rollup_drill().row(ridx);
+    let cost = r.cost(snapshot.rollup_selection(), pricing)?;
+    let unknown_total = cost.unknown_tokens.total();
+    let total_cost_usd = match (cost.has_estimated_cost, r.source_cost_usd) {
+        (_, Some(src)) => Some(cost.cost_usd + src),
+        (true, None) => Some(cost.cost_usd),
         (false, None) => None,
     };
     let meta = RollupRowMeta {
@@ -3195,18 +3262,18 @@ fn build_rollup_event_row(
         requests: r.requests,
         label: crate::aggregate::model_label(&r.model_key, Some(&r.representative), pricing),
         models: r.models.clone(),
-        cost_usd: r.cost_usd,
+        cost_usd: cost.cost_usd,
         total_cost_usd,
         source_cost_usd: r.source_cost_usd,
         source_cost_state: r.source_cost_state,
         cost_detail: "rollup_only",
         unknown_pricing: unknown_total > 0,
         unknown_reason: (unknown_total > 0).then_some("rollup_only"),
-        unknown_tokens: r.unknown_tokens,
+        unknown_tokens: cost.unknown_tokens,
         cost_partially_unknown: unknown_total > 0,
-        has_estimated_cost: r.has_estimated_cost,
-        cache_write_split_estimated: r.cache_write_split_estimated,
-        cache_price_zero_estimated: r.cache_price_zero_estimated,
+        has_estimated_cost: cost.has_estimated_cost,
+        cache_write_split_estimated: cost.cache_write_split_estimated,
+        cache_price_zero_estimated: cost.cache_price_zero_estimated,
     };
     let cursor = serde_json::to_string(&crate::query::PageCursor {
         v: crate::query::CURSOR_VERSION,
@@ -3291,7 +3358,8 @@ pub(crate) fn query_events_from(
     let limit = filter.limit.unwrap_or(200).min(1000);
     // v0.9.4：日汇总行来自同一冻结快照的采用贡献（与聚合同源），合并后
     // 按日降序 → 身份升序排在事件段之后；两段拼接分页，游标携带段别。
-    let rollups = drill_rollup_rows(snapshot)?;
+    // 补修三：分组/顺序取建快照时冻结的索引，费用只为落到本页的行按需计算。
+    let rollups = snapshot.rollup_drill();
     let event_count = snapshot.row_count();
     let mut total: u64 = 0;
     let mut rows: Vec<EventRow> = Vec::new();
@@ -3306,11 +3374,11 @@ pub(crate) fn query_events_from(
             })?;
         }
         let rstart = after.saturating_sub(event_count);
-        for (i, r) in rollups.iter().enumerate().skip(rstart) {
+        for i in rstart..rollups.len() {
             if rows.len() >= limit {
                 break;
             }
-            rows.push(build_rollup_event_row(snapshot, r, i, &drill_fp)?);
+            rows.push(build_rollup_event_row(snapshot, i, &drill_fp)?);
         }
     } else {
         snapshot.for_each_row_event(PAGE_SCAN_BATCH, &mut |row, e| {
@@ -3333,12 +3401,18 @@ pub(crate) fn query_events_from(
             rows.push(build_event_row(snapshot, row, e, &drill_fp, &pricing)?);
             Ok(())
         })?;
-        // 汇总段：模型/日筛选与聚合同规则；日汇总没有项目归属，项目下钻
-        // 一律不含汇总行。ridx 用合并序绝对下标（游标跨页稳定）。
-        for (i, r) in rollups.iter().enumerate() {
+        // 汇总段：模型/日筛选与聚合同规则；日汇总没有项目归属，按项目聚合
+        // 时归入「未知」组，因此这里用**同一判定**：无项目筛选或筛选值就是
+        // UNKNOWN_PROJECT 才返回日行；具体项目仍只匹配有该项目归属的请求。
+        // ridx 用合并序绝对下标（游标跨页稳定）。
+        for i in 0..rollups.len() {
+            let r = rollups.row(i);
             let matched = model_key.as_ref().is_none_or(|k| r.model_key == *k)
                 && filter.day.as_ref().is_none_or(|d| r.day == *d)
-                && filter.project.is_none();
+                && filter
+                    .project
+                    .as_deref()
+                    .is_none_or(|p| p == crate::model::UNKNOWN_PROJECT);
             if !matched {
                 continue;
             }
@@ -3347,7 +3421,7 @@ pub(crate) fn query_events_from(
             if position < after || rows.len() >= limit {
                 continue;
             }
-            rows.push(build_rollup_event_row(snapshot, r, i, &drill_fp)?);
+            rows.push(build_rollup_event_row(snapshot, i, &drill_fp)?);
         }
     }
     path_info!(
