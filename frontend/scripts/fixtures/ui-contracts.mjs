@@ -756,12 +756,13 @@ const SOURCE_COST_GROUPS = [
 ];
 
 // v0.9.4：跨渠道别名合并 + CCS 日汇总下钻 fixture。
-// - claudefable52：两个渠道 ID（anthropic/claude-fable-5.2 与 claude-fable-5-2）
-//   经唯一可信模型确认归一为**一行**，下钻仍见两侧原始 ID 的请求。
+// - anthropic/claudefable52：两个渠道 ID（anthropic/claude-fable-5.2 与
+//   claude-fable-5-2）经**已核实别名映射**归一为**一行**（补修一：真实快照
+//   有 24 个同末段候选，不再依赖「目录唯一候选」），下钻仍见两侧原始 ID。
 // - claudeopus47：纯日汇总（无逐请求记录），下钻按两天返回两条 CCS 行。
 // - claudesonnet45：mixed——原生请求 + 被覆盖请求 + 日汇总行，验证混合分页。
 const ROLLUP_DRILL_GROUPS = [
-  group("claudefable52", 4810, {
+  group("anthropic/claudefable52", 4810, {
     label: "Claude Fable 5.2",
     output: 2570,
     cost_usd: 1.4,
@@ -863,16 +864,24 @@ function rowsFor(kind) {
         // Fable：两侧渠道原始 ID，identity 同为规范键（下钻按身份命中两侧）。
         eventRow(1, {
           model: "anthropic/claude-fable-5.2",
-          identity: "claudefable52",
+          identity: "anthropic/claudefable52",
           cost_usd: 0.5,
         }),
-        eventRow(2, { model: "claude-fable-5-2", identity: "claudefable52", cost_usd: 0.4 }),
+        eventRow(2, {
+          model: "claude-fable-5-2",
+          identity: "anthropic/claudefable52",
+          cost_usd: 0.4,
+        }),
         eventRow(3, {
           model: "anthropic/claude-fable-5.2",
-          identity: "claudefable52",
+          identity: "anthropic/claudefable52",
           cost_usd: 0.3,
         }),
-        eventRow(4, { model: "claude-fable-5-2", identity: "claudefable52", cost_usd: 0.2 }),
+        eventRow(4, {
+          model: "claude-fable-5-2",
+          identity: "anthropic/claudefable52",
+          cost_usd: 0.2,
+        }),
         // Sonnet mixed：原生 + 被覆盖请求（事件段），随后日汇总行（汇总段）。
         // 原生那条无项目归属 → 与 CCS 日行同属「未知」项目组（补修二）。
         eventRow(5, {
