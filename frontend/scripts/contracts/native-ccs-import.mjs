@@ -165,6 +165,7 @@ export async function nativeCcsImport(context) {
       ).length,
       ccsOnlyRows: importedQuery.events.rows.filter((row) => row.session_id === "ccs-only-session")
         .length,
+      rollupDayRows: importedQuery.events.rows.filter((row) => row.rollup).length,
       detailTotal: importedQuery.events.total,
     });
     await u.page().screenshot({ path: path.join(inst.opts.shots, "ccs-union.png") });

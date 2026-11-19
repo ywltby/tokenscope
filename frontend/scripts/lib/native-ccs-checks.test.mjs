@@ -61,7 +61,8 @@ const cases = [
       commits: 1,
       nativeOverlapRows: 1,
       ccsOnlyRows: 1,
-      detailTotal: 11,
+      rollupDayRows: 1,
+      detailTotal: 12,
     },
     (o) => {
       o.nativeOverlapRows = 2;

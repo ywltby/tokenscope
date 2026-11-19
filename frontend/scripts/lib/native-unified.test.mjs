@@ -70,6 +70,65 @@ describe("真实 IPC 旁路观察", () => {
     }
     expect(matchEventDom(events, null)).toBe(false);
   });
+  it("matchEventDom 识别日汇总行与被覆盖请求行的渲染差异", () => {
+    const events = {
+      total: 2,
+      rows: [
+        {
+          ts: "2026-05-28",
+          agent: "claude-code",
+          model: "anthropic/claudeopus47",
+          project: "",
+          input: 50000000,
+          output: 10000000,
+          cache_write: 20000000,
+          cache_read: 30000000,
+          rollup: { source: "ccs", label: "Claude Opus 4.7", requests: 223 },
+        },
+        {
+          ts: "2026-05-28T09:00:00Z",
+          agent: "claude-code",
+          model: "claude-opus-4-7",
+          project: "C:/workspace/tokenscope",
+          input: 100,
+          output: 20,
+          cache_write: 0,
+          cache_read: 0,
+          covered_by_rollup: "2026-05-28",
+        },
+      ],
+    };
+    const dom = {
+      total: 2,
+      loaded: 2,
+      rows: [
+        [
+          "2026-05-28日汇总",
+          "CCS",
+          "Claude Opus 4.7 · 223 次请求",
+          "—",
+          "100,000,000",
+          "10,000,000",
+          "20,000,000",
+          "30,000,000",
+        ],
+        [
+          "2026-05-28T09:00:00Z已计入汇总",
+          "Claude Code",
+          "claude-opus-4-7",
+          "tokenscope",
+          "100",
+          "20",
+          "0",
+          "0",
+        ],
+      ],
+    };
+    expect(matchEventDom(events, dom)).toBe(true);
+    const wrong = structuredClone(dom);
+    wrong.rows[0][1] = "Claude Code";
+    expect(matchEventDom(events, wrong)).toBe(false);
+  });
   it("Tauri 真实只读描述符不阻碍旁路观察，保护属性不被修改", () => {
     const page = new EventEmitter();
     const invoke = () => Promise.resolve("real");
