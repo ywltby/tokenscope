@@ -190,11 +190,16 @@ fn detach_batch(dir: &Path) {
         .unwrap();
 }
 
-fn detail_rows(o: &SummaryOptions) -> u64 {
+fn detail_rows(o: &SummaryOptions) -> usize {
     let snapshot = query::begin_query(o).unwrap();
+    // v0.9.4：无下钻视图的 total 含被采用的日汇总行（E + R）；本助手只数
+    // **明细行**（rollup.is_none()），验证明细请求照常保留/可查看。
     query::query_events(&snapshot.query_id, &EventFilter::default())
         .unwrap()
-        .total
+        .rows
+        .iter()
+        .filter(|r| r.rollup.is_none())
+        .count()
 }
 
 /// 1. 请求数相同、明细四桶逐项不低于汇总且部分更大 → 采用明细，无冲突警告。

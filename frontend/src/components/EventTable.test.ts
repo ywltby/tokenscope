@@ -6,8 +6,17 @@ import { afterEach, describe, expect, it } from "vitest";
 import { nextTick } from "vue";
 import { mount } from "@vue/test-utils";
 import { defineComponent, h, type VNode } from "vue";
+import { NTag, NTooltip } from "naive-ui";
 import EventTable from "./EventTable.vue";
-import { projectLabel, type EventCostBreakdown, type EventList, type EventRow } from "../types";
+import GroupCostBreakdownTooltip from "./GroupCostBreakdownTooltip.vue";
+import {
+  projectLabel,
+  type EventCostBreakdown,
+  type EventList,
+  type EventRow,
+  type Group,
+  type RollupRowMeta,
+} from "../types";
 import { formatCostBreakdownRows, formatCostBreakdownText } from "../lib/costBreakdown";
 import { UNIT_PRICE_SUFFIX_AFTER_AMOUNT } from "../lib/tokenDisplay";
 
@@ -547,5 +556,177 @@ describe("EventTable 费用触发器可访问性（UX03）", () => {
     expect(document.body.innerHTML).toContain("bd-formula");
     expect(document.body.innerHTML).toContain("ts-card-solid");
     host.unmount();
+  });
+});
+
+// v0.9.4：CCS 日汇总下钻行——日粒度展示、来源列、合并渠道说明、被覆盖
+// 请求标记，费用列复用分组浮层（与聚合行同一依据）。行渲染在测试环境
+// 不可达，与既有用例同口径直接调列渲染函数。
+describe("EventTable 日汇总下钻行（v0.9.4）", () => {
+  function rollupMeta(over: Partial<RollupRowMeta> = {}): RollupRowMeta {
+    return {
+      day: "2026-05-28",
+      source_tz: "Asia/Shanghai",
+      source: "ccs",
+      requests: 223,
+      label: "Claude Opus 4.7",
+      models: ["anthropic/claude-opus-4-7", "claude-opus-4-7"],
+      cost_usd: 1.5,
+      total_cost_usd: 1.5,
+      source_cost_usd: null,
+      source_cost_state: "absent",
+      cost_detail: "rollup_only",
+      unknown_pricing: false,
+      unknown_reason: null,
+      unknown_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+      cost_partially_unknown: false,
+      has_estimated_cost: true,
+      cache_write_split_estimated: false,
+      cache_price_zero_estimated: false,
+      ...over,
+    };
+  }
+
+  function rollupRow(over: Partial<EventRow> = {}): EventRow {
+    return row({
+      ts: "2026-05-28",
+      record_id: "",
+      cursor:
+        '{"v":2,"qid":"q","mfp":"m","dfp":"d","ts":"2026-05-28","rid":"","seq":0,"kind":"rollup","ridx":0}',
+      agent: "claude-code",
+      model: "claudeopus47",
+      session_id: "",
+      project: "",
+      input: 100,
+      output: 200,
+      cache_write: 300,
+      cache_read: 400,
+      cost_usd: 1.5,
+      cost_breakdown: null,
+      rollup: rollupMeta(),
+      ...over,
+    });
+  }
+
+  function mountWith(r: EventRow) {
+    return mount(EventTable, { props: { list: list([r], 1), filterLabel: "" } });
+  }
+
+  function renderOf(w: ReturnType<typeof mount>, key: string, r: EventRow): VNode | string {
+    const cols = (
+      w.vm as unknown as { columns: { key: string; render?: (r: object) => unknown }[] }
+    ).columns;
+    return cols.find((c) => c.key === key)!.render!(r) as VNode | string;
+  }
+
+  it("rollup_row_stays_day_granularity：时间列只到统计日 + 日汇总标签，应用列 = 来源名，项目不补造", () => {
+    const r = rollupRow();
+    const w = mountWith(r);
+    const ts = renderOf(w, "ts", r) as VNode;
+    expect(ts.type).toBe("span");
+    expect((ts.props as { class: string }).class).toContain("ts-rollup-time");
+    const kids = ts.children as unknown[];
+    expect(kids[0], "不补造时分秒").toBe("2026-05-28");
+    const tag = kids[1] as VNode;
+    expect(tag.type).toBe(NTag);
+    expect((tag.children as { default: () => string }).default()).toBe("日汇总");
+    expect(renderOf(w, "agent", r)).toBe("CCS");
+    expect(renderOf(w, "project", r)).toBe("—");
+  });
+
+  it("rollup_model_shows_label_requests_and_merged_channels：展示名 + 真实请求数，悬浮见合并渠道与时区", () => {
+    const r = rollupRow();
+    const w = mountWith(r);
+    const tip = renderOf(w, "model", r) as VNode;
+    expect(tip.type).toBe(NTooltip);
+    const slots = tip.children as { trigger: () => VNode; default: () => string };
+    const trigger = slots.trigger();
+    const kids = trigger.children as unknown[];
+    expect(kids[0]).toBe("Claude Opus 4.7");
+    const req = kids[1] as VNode;
+    expect((req.props as { class: string }).class).toContain("ts-rollup-requests");
+    expect(String(req.children)).toContain("223 次请求");
+    const content = slots.default();
+    expect(content).toContain("anthropic/claude-opus-4-7");
+    expect(content).toContain("claude-opus-4-7");
+    expect(content).toContain("Asia/Shanghai");
+  });
+
+  it("rollup_cost_reuses_group_tooltip：费用列走分组浮层，构成与聚合行同源，三态协调一致", async () => {
+    const r = rollupRow();
+    const w = mountWith(r);
+    const cell = renderOf(w, "cost_usd", r) as VNode;
+    expect(cell.type).toBe(GroupCostBreakdownTooltip);
+    const p = cell.props as Record<string, unknown>;
+    expect(p.displayText).toBe("$1.50");
+    expect(p.unknownOnly).toBe(false);
+    const g = p.group as Group;
+    expect(g.key).toBe("claudeopus47");
+    expect(g.cost_usd).toBe(1.5);
+    expect(g.total_cost_usd).toBe(1.5);
+    expect(g.has_estimated_cost).toBe(true);
+    expect(g.source_cost_state).toBe("absent");
+    expect(g.cost_detail).toBe("rollup_only");
+    expect(g.tokens).toEqual({ input: 100, output: 200, cache_write: 300, cache_read: 400 });
+    // 三态协调：toggle 打开、Escape 关闭（与请求级浮层共用 openKey）。
+    (p.onToggle as () => void)();
+    await nextTick();
+    expect((renderOf(w, "cost_usd", r) as VNode).props!.open).toBe(true);
+    ((renderOf(w, "cost_usd", r) as VNode).props!.onEscape as () => void)();
+    await nextTick();
+    expect((renderOf(w, "cost_usd", r) as VNode).props!.open).toBe(false);
+  });
+
+  it("rollup_unknown_cost_still_opens_basis：无费用依据显示「未知」，浮层仍可查缺项", () => {
+    const r = rollupRow({
+      cost_usd: null,
+      rollup: rollupMeta({
+        cost_usd: 0,
+        total_cost_usd: null,
+        has_estimated_cost: false,
+        unknown_pricing: true,
+        unknown_reason: "rollup_only",
+        unknown_tokens: { input: 100, output: 200, cache_write: 300, cache_read: 400 },
+        cost_partially_unknown: true,
+      }),
+    });
+    const w = mountWith(r);
+    const cell = renderOf(w, "cost_usd", r) as VNode;
+    expect(cell.type).toBe(GroupCostBreakdownTooltip);
+    const p = cell.props as Record<string, unknown>;
+    expect(p.displayText).toBe("未知");
+    expect(p.unknownOnly).toBe(true);
+    const g = p.group as Group;
+    expect(g.unknown_tokens).toEqual({
+      input: 100,
+      output: 200,
+      cache_write: 300,
+      cache_read: 400,
+    });
+    expect(g.unknown_reason).toBe("rollup_only");
+  });
+
+  it("covered_request_marks_day：被汇总覆盖的请求保留明细并标记已计入当日汇总", () => {
+    const r = row({ covered_by_rollup: "2026-05-28" });
+    const w = mountWith(r);
+    const tip = renderOf(w, "ts", r) as VNode;
+    expect(tip.type).toBe(NTooltip);
+    const slots = tip.children as { trigger: () => VNode; default: () => string };
+    const kids = slots.trigger().children as unknown[];
+    expect(kids[0]).toBe(r.ts);
+    const tag = kids[1] as VNode;
+    expect(tag.type).toBe(NTag);
+    expect((tag.children as { default: () => string }).default()).toBe("已计入汇总");
+    expect(slots.default()).toContain("2026-05-28");
+    expect(slots.default()).toContain("不重复计入");
+  });
+
+  it("plain_rows_keep_existing_render：普通请求行不受日汇总分支影响", () => {
+    const r = row({ project: "slug" });
+    const w = mountWith(r);
+    expect(renderOf(w, "ts", r)).toBe(r.ts);
+    expect(renderOf(w, "agent", r)).toBe("Codex");
+    expect((renderOf(w, "model", r) as VNode).children).toBe("gpt-x");
+    expect(renderOf(w, "project", r)).toBe("slug");
   });
 });

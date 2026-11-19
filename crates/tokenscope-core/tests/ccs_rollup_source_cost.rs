@@ -565,9 +565,12 @@ fn detail_rows_are_unaffected_by_source_cost() {
     let snapshot = tokenscope::query::begin_query(&o).unwrap();
     let list =
         tokenscope::query::query_events(&snapshot.query_id, &EventFilter::default()).unwrap();
-    assert_eq!(list.rows.len(), 1, "明细视图照常列出请求");
+    // v0.9.4：无下钻视图现在同时返回被采用的日汇总行；本用例只验证**明细行**
+    // 不受来源费用影响，按 rollup.is_none() 过滤出明细行再断言。
+    let details: Vec<_> = list.rows.iter().filter(|r| r.rollup.is_none()).collect();
+    assert_eq!(details.len(), 1, "明细视图照常列出请求");
     // 该明细模型无价格来源 → 行费用 None（未知），不受来源费用影响。
-    assert_eq!(list.rows[0].cost_usd, None);
+    assert_eq!(details[0].cost_usd, None);
     std::fs::remove_dir_all(&dir).ok();
 }
 

@@ -59,6 +59,8 @@ function parseArgs(argv) {
       "pricing-none-available",
       // v0.9.1 缺陷 B + C：费用列布局与费用状态 fixture。
       "source-cost",
+      // v0.9.4：跨渠道别名合并 + CCS 日汇总下钻 fixture。
+      "rollup-drill",
     ],
     themes: ["light", "dark"],
     contracts: REQUIRED_CONTRACTS,

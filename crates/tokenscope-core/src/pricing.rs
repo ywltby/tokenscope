@@ -3153,6 +3153,51 @@ impl Pricing {
         best.and_then(|e| e.name.clone())
     }
 
+    /// v0.9.4：规范模型身份（查询时派生，升级零迁移）。
+    ///
+    /// 在结构身份键之上，用**可信 models.dev 完整标识**确认渠道别名，使同一
+    /// 模型版本的不同写法（`anthropic/claude-fable-5.2` 与 `claude-fable-5-2`）
+    /// 共享同一分组/覆盖/下钻身份。确认边界（宁可少合并，不可误合并）：
+    /// - 结构键本身等于某 models.dev 条目的完整 ID → 原样（本身即规范写法）；
+    /// - **无渠道前缀**的裸标识，其末段键（含变体结构）**精确**命中**唯一**
+    ///   models.dev 模型 → 采用该模型的完整身份键；
+    /// - 其余一律保持结构键：不同版本（前缀回退不参与确认）、不同变体、
+    ///   未确认渠道前缀、歧义裸末段（命中多个模型）、空基名。
+    ///
+    /// 只从查询会话冻结的价格表派生：不改写历史库任何列；快照缺失时退化为
+    /// 结构身份（与旧行为一致）。幂等：`canonical(raw) == canonical(identity_key(raw))`。
+    pub fn canonical_identity_key(&self, model: &str) -> String {
+        let id = crate::model_identity::ModelIdentity::parse(model);
+        let structural = id.identity_key();
+        if id.is_empty_key() {
+            return structural;
+        }
+        let Some(group) = self.by_prefix.get(id.leaf_key().as_bytes()) else {
+            return structural;
+        };
+        let mut trusted: Option<String> = None;
+        for e in group {
+            if e.tier != TIER_MODELSDEV {
+                continue;
+            }
+            let key = crate::model_identity::ModelIdentity::parse(&e.display).identity_key();
+            match &trusted {
+                None => trusted = Some(key),
+                Some(prev) if *prev == key => {}
+                // 同末段命中多个可信模型：歧义，不确认。
+                Some(_) => return structural,
+            }
+        }
+        let Some(trusted) = trusted else {
+            return structural;
+        };
+        if structural == trusted || id.namespace().is_none() {
+            trusted
+        } else {
+            structural
+        }
+    }
+
     pub fn openrouter_count(&self) -> usize {
         self.count_tier(TIER_OPENROUTER)
     }
@@ -5859,6 +5904,102 @@ output = 10.0
         assert_eq!(plan.base.input, RateSpec::Fixed(2.0));
         assert_eq!(plan.base.output, RateSpec::Unknown);
         assert_eq!(plan.base.cache_read, RateSpec::Unknown);
+    }
+
+    /// v0.9.4：规范身份只确认「裸别名 ↔ 唯一可信完整 ID」，边界一律保守。
+    #[test]
+    fn canonical_identity_confirms_unique_bare_alias_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "tokenscope-canonical-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let snap = write(
+            &dir,
+            "md.json",
+            r#"{"v":4,"synced_at":"t","entries":[
+                {"id":"anthropic/claude-fable-5.2","name":"Claude Fable 5.2","input":3.0,"output":15.0}
+            ]}"#,
+        );
+        let (p, warnings) = Pricing::load(None, Some(&snap), None);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let canonical = "anthropic/claudefable52";
+        for spelling in [
+            "claude-fable-5-2",
+            "Claude_Fable_5.2",
+            "claudefable52",
+            "anthropic/claude-fable-5.2",
+            "Anthropic/Claude-Fable-5.2",
+        ] {
+            assert_eq!(p.canonical_identity_key(spelling), canonical, "{spelling}");
+        }
+        // 幂等：对规范键/结构键再归一结果不变。
+        assert_eq!(p.canonical_identity_key(canonical), canonical);
+        // 版本（前缀回退可命中同价也不合并）、变体、未确认渠道、空基名。
+        assert_eq!(
+            p.canonical_identity_key("claude-fable-5-2-20261101"),
+            "claudefable5220261101"
+        );
+        assert_eq!(
+            p.canonical_identity_key("claude-fable-5-2:free"),
+            "claudefable52:free"
+        );
+        assert_eq!(
+            p.canonical_identity_key("claude-fable-5-2:"),
+            "claudefable52:"
+        );
+        assert_eq!(
+            p.canonical_identity_key("zenmux/claude-fable-5-2"),
+            "zenmux/claudefable52"
+        );
+        assert_eq!(p.canonical_identity_key("provider/---"), "provider/");
+        // 无快照 → 结构身份（旧行为）。
+        let empty = Pricing::empty();
+        assert_eq!(
+            empty.canonical_identity_key("claude-fable-5-2"),
+            "claudefable52"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// v0.9.4：裸末段命中多个可信模型 = 歧义，不确认；各完整写法保持自身。
+    #[test]
+    fn canonical_identity_ambiguous_leaf_stays_structural() {
+        let dir = std::env::temp_dir().join(format!(
+            "tokenscope-canonical-amb-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let snap = write(
+            &dir,
+            "md.json",
+            r#"{"v":4,"synced_at":"t","entries":[
+                {"id":"anthropic/claude-fable-5.2","name":"A","input":3.0,"output":15.0},
+                {"id":"mirror/claude-fable-5.2","name":"B","input":1.0,"output":5.0}
+            ]}"#,
+        );
+        let (p, _) = Pricing::load(None, Some(&snap), None);
+        assert_eq!(
+            p.canonical_identity_key("claude-fable-5-2"),
+            "claudefable52"
+        );
+        assert_eq!(
+            p.canonical_identity_key("anthropic/claude-fable-5.2"),
+            "anthropic/claudefable52"
+        );
+        assert_eq!(
+            p.canonical_identity_key("mirror/claude-fable-5.2"),
+            "mirror/claudefable52"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -234,11 +234,13 @@ impl QuerySnapshot {
 /// MP04：模型筛选按**等价身份**归一——同一模型的两种写法（`claude-opus-5-5`
 /// 与 `claude-opus-5.5`）视为同一子查询，游标可在其间续用；不同模型（含
 /// 变体）仍是不同指纹。
-pub(crate) fn drill_fingerprint(filter: &EventFilter) -> String {
+/// v0.9.4：归一再经渠道别名确认（与聚合分组同一规则）——跨渠道写法
+/// 也共享同一子查询指纹。
+pub(crate) fn drill_fingerprint(filter: &EventFilter, pricing: &crate::pricing::Pricing) -> String {
     let model = filter
         .model
         .as_deref()
-        .map(|m| crate::model_identity::ModelIdentity::parse(m).identity_key());
+        .map(|m| pricing.canonical_identity_key(m));
     format!(
         "model={:?}|project={:?}|day={:?}",
         model, filter.project, filter.day
@@ -639,7 +641,7 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
         && opts.rollups != report::RollupsMode::DetailOnly
         && !matches!(time_bounds, report::TimeBounds::Instant { .. });
     let buckets = if needs_detail_buckets {
-        report::collect_detail_buckets(&read, opts.agent, &rollups)?
+        report::collect_detail_buckets(&read, opts.agent, &rollups, &collection.pricing)?
     } else {
         report::DetailBuckets::new()
     };
@@ -651,6 +653,7 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
         report::RollupBucketPolicy::default(),
         &time_bounds,
         opts.rollups,
+        &collection.pricing,
     )?;
 
     let snapshot = Arc::new(QuerySnapshot {
@@ -749,6 +752,8 @@ pub fn query_events(query_id: &str, filter: &EventFilter) -> Result<report::Even
 }
 
 /// 游标 v2：绑定 query_id、主查询指纹、下钻过滤指纹与快照内行位置。
+/// v0.9.4：行集分两段——事件段 `[0, E)` + 日汇总段 `[E, E+R)`。`kind`/`ridx`
+/// 带 serde 默认值：旧格式游标（无这两字段）仍按事件行定位，逐字节兼容。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PageCursor {
@@ -759,10 +764,31 @@ pub struct PageCursor {
     pub ts: String,
     pub rid: String,
     pub seq: u64,
+    #[serde(default, skip_serializing_if = "CursorKind::is_event")]
+    pub kind: CursorKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ridx: Option<usize>,
+}
+
+/// 游标行段：事件行（默认，兼容旧游标）或日汇总行（v0.9.4）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorKind {
+    #[default]
+    Event,
+    Rollup,
+}
+
+impl CursorKind {
+    fn is_event(&self) -> bool {
+        matches!(self, Self::Event)
+    }
 }
 
 /// 校验游标归属（版本/query_id/主指纹/下钻指纹）并返回其行在快照固定
 /// 行序中的绝对位置。任何不匹配都是显式错误——绝不静默换第一页。
+/// v0.9.4：日汇总游标按合并后汇总行序定位（`ridx` = 段内绝对下标），
+/// 事件游标规则不变。
 pub fn locate_cursor(snapshot: &QuerySnapshot, cursor_str: &str, drill_fp: &str) -> Result<usize> {
     let c: PageCursor =
         serde_json::from_str(cursor_str).map_err(|e| anyhow!("游标格式非法: {e}"))?;
@@ -777,6 +803,16 @@ pub fn locate_cursor(snapshot: &QuerySnapshot, cursor_str: &str, drill_fp: &str)
     }
     if c.dfp != drill_fp {
         return Err(anyhow!("query_expired: 明细筛选已变化，请刷新重试"));
+    }
+    if c.kind == CursorKind::Rollup {
+        let ridx = c
+            .ridx
+            .ok_or_else(|| anyhow!("游标缺少日汇总行位置，请刷新重试"))?;
+        let count = crate::report::drill_rollup_rows(snapshot)?.len();
+        if ridx >= count {
+            return Err(anyhow!("游标位置在当前查询中不存在，请刷新重试"));
+        }
+        return Ok(snapshot.row_count() + ridx);
     }
     let ts: jiff::Timestamp = c.ts.parse().map_err(|_| anyhow!("游标时间戳非法"))?;
     snapshot

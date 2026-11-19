@@ -183,6 +183,12 @@ const zhCN = {
     colInput: "输入",
     colOutput: "输出",
     unknownTag: "未知",
+    // v0.9.4：CCS 日汇总下钻行
+    rollupRowTag: "日汇总",
+    rollupRequests: "{n} 次请求",
+    rollupCoveredTag: "已计入汇总",
+    rollupCoveredTip: "该请求的用量已计入 {day} 的日汇总，总量不重复计入；明细仍可查看。",
+    rollupModelsTip: "合并的渠道模型：{models}\n统计时区：{tz}",
     scrollMore: "向下滚动自动加载更多",
     scrollLoading: "正在加载…",
     // 指标卡

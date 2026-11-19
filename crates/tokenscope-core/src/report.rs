@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
@@ -2202,6 +2202,7 @@ pub(crate) fn collect_detail_buckets(
     read: &crate::history::ReadSnapshot,
     app: Option<AgentKind>,
     rollups: &[crate::history::StoredRollup],
+    pricing: &crate::pricing::Pricing,
 ) -> Result<DetailBuckets> {
     // 每桶的覆盖起点 = 该桶全部汇总行中**最早**的来源快照建立时刻：单行时就是
     // 该行自己的快照时刻；多行（不同批次）时只有"早于最早快照"的明细可以确定
@@ -2216,7 +2217,9 @@ pub(crate) fn collect_detail_buckets(
         std::collections::HashSet<(String, AgentKind)>,
     > = std::collections::HashMap::new();
     for r in rollups {
-        let identity = crate::model_identity::ModelIdentity::parse(&r.model).identity_key();
+        // v0.9.4：桶键用规范身份——渠道别名（裸名 vs 渠道前缀）必须落同一桶，
+        // 否则汇总桶被误判「无明细」而整桶采用，原生明细又照常计入 → 双计。
+        let identity = pricing.canonical_identity_key(&r.model);
         apps_for_tz
             .entry(r.source_tz.clone())
             .or_default()
@@ -2255,7 +2258,16 @@ pub(crate) fn collect_detail_buckets(
         } else {
             app
         };
-        read.for_each_summary_chunk_for_models(scan_app, &models, 4096, &mut |events| {
+        // v0.9.4：SQL 收窄集合按**存储键**扩展——库内明细可能以别名写法存储
+        //（结构键 ≠ 汇总规范键），逐一经同一归一规则映射后保留命中汇总桶者。
+        // 不同写法的事件因此都能被读到并归入同一桶。
+        let mut scan_models = models.clone();
+        for stored in read.distinct_model_identities(scan_app)? {
+            if models.contains(&pricing.canonical_identity_key(&stored)) {
+                scan_models.insert(stored);
+            }
+        }
+        read.for_each_summary_chunk_for_models(scan_app, &scan_models, 4096, &mut |events| {
             for e in events {
                 #[cfg(feature = "acceptance")]
                 note_detail_bucket_event_scanned();
@@ -2266,7 +2278,11 @@ pub(crate) fn collect_detail_buckets(
                 if !day_app.contains(&(day.clone(), e.app)) {
                     continue;
                 }
-                let key = (day, e.app.as_str().to_string(), e.model_identity.clone());
+                let key = (
+                    day,
+                    e.app.as_str().to_string(),
+                    pricing.canonical_identity_key(&e.model_raw),
+                );
                 let Some(start) = starts_for_tz.get(&key) else {
                     continue;
                 };
@@ -2412,6 +2428,7 @@ fn rollup_in_bounds(r: &crate::history::StoredRollup, bounds: &TimeBounds) -> bo
 ///
 /// 桶选择在建快照时固定一次，因此不同视图（汇总/明细/下钻）不会因筛选条件
 /// 改变统计优先级。
+#[allow(clippy::too_many_arguments)] // 桶选择需同时携带时间上下文与冻结价格表（规范桶键）
 pub(crate) fn select_rollup_contributions(
     detail_buckets: &DetailBuckets,
     rollups: &[crate::history::StoredRollup],
@@ -2420,6 +2437,7 @@ pub(crate) fn select_rollup_contributions(
     policy: RollupBucketPolicy,
     bounds: &TimeBounds,
     mode: RollupsMode,
+    pricing: &crate::pricing::Pricing,
 ) -> Result<RollupSelection> {
     // 策略枚举保留给调用方；桶级三向选择与取值无关（"整桶替换为汇总"会
     // 丢掉不在 CCS 汇总里的纯原生请求，不再提供）。
@@ -2491,7 +2509,7 @@ pub(crate) fn select_rollup_contributions(
             }
             continue;
         }
-        let model_identity = crate::model_identity::ModelIdentity::parse(&r.model).identity_key();
+        let model_identity = pricing.canonical_identity_key(&r.model);
         let key = (
             r.day.clone(),
             r.app.as_str().to_string(),
@@ -2997,6 +3015,238 @@ pub struct EventRow {
     /// Task 6：请求级费用计算明细（与 cost_usd 同一次 estimate 产出）；
     /// None = 未收录模型。
     pub cost_breakdown: Option<EventCostBreakdown>,
+    /// v0.9.4：Some = 本行是 CCS 日汇总行（日粒度，非逐请求事件）——
+    /// 携带与聚合同源的请求数/费用构成；None = 普通请求明细（JSON 不变）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollup: Option<RollupRowMeta>,
+    /// v0.9.4：Some(来源统计日) = 该请求的用量已计入当日汇总（聚合不重复
+    /// 计入，明细仍可查看）；None = 独立计入。仅请求明细行可能携带。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_by_rollup: Option<String>,
+}
+
+/// v0.9.4：下钻日汇总行的元数据——与聚合分组同一冻结快照、同一费用函数
+/// （[`crate::aggregate::rollup_cost_parts`]）产出，两个视图金额逐项一致。
+/// 展示停留在日粒度：不补造时分秒、请求 ID 或项目归属。
+#[derive(Debug, Clone, Serialize)]
+pub struct RollupRowMeta {
+    /// CCS 统计日（来源时区自然日，"YYYY-MM-DD"）。
+    pub day: String,
+    pub source_tz: String,
+    /// 逻辑来源标识（如 "ccs"）——应用列展示为来源名而非逐请求应用。
+    pub source: String,
+    pub requests: u64,
+    /// 可信模型展示名（与聚合行同一规则）；缺失时确定性原始 ID。
+    pub label: String,
+    /// 合并的原始渠道模型 ID（去重排序）——浮层披露「算的是谁」。
+    pub models: Vec<String>,
+    /// 估算部分金额（来源费用已提供时为 0）。
+    pub cost_usd: f64,
+    /// 单一显示金额（与 Group.total_cost_usd 同规则）；None = 无费用依据。
+    pub total_cost_usd: Option<f64>,
+    pub source_cost_usd: Option<f64>,
+    pub source_cost_state: Option<&'static str>,
+    /// 恒为 "rollup_only"：本行全部用量来自采用的日汇总。
+    pub cost_detail: &'static str,
+    pub unknown_pricing: bool,
+    pub unknown_reason: Option<&'static str>,
+    pub unknown_tokens: TokenCounts,
+    pub cost_partially_unknown: bool,
+    pub has_estimated_cost: bool,
+    pub cache_write_split_estimated: bool,
+    pub cache_price_zero_estimated: bool,
+}
+
+/// 合并后的一条下钻日汇总行（内部形态）：按 `(统计日, 来源时区, 应用,
+/// 规范模型身份)` 归并同日多渠道贡献，排序 = 日降序 → 身份升序。
+#[derive(Debug, Clone)]
+pub(crate) struct DrillRollupRow {
+    day: String,
+    source_tz: String,
+    app: AgentKind,
+    model_key: String,
+    source: String,
+    requests: u64,
+    tokens: TokenCounts,
+    models: Vec<String>,
+    representative: String,
+    cost_usd: f64,
+    unknown_tokens: TokenCounts,
+    has_estimated_cost: bool,
+    cache_write_split_estimated: bool,
+    cache_price_zero_estimated: bool,
+    source_cost_usd: Option<f64>,
+    source_cost_state: Option<&'static str>,
+}
+
+/// v0.9.4：从冻结快照的**最终采用**贡献构建下钻日汇总行。
+///
+/// 只取 `rollup_selection.contributions`（三向选择后的采用集）——A/C 类
+/// 排除的汇总不出现，与聚合计入完全同源；同日多渠道（provider）按规范
+/// 身份合并一行。费用逐条走 [`crate::aggregate::rollup_cost_parts`]，再按
+/// 与 `push_rollup_into`/`finish` 相同的规则合成组级字段。
+pub(crate) fn drill_rollup_rows(
+    snapshot: &crate::query::QuerySnapshot,
+) -> Result<Vec<DrillRollupRow>> {
+    let pricing = snapshot.pricing();
+    let mut map: std::collections::BTreeMap<
+        (std::cmp::Reverse<String>, String, String, &'static str),
+        DrillRollupRow,
+    > = std::collections::BTreeMap::new();
+    for r in &snapshot.rollup_selection().contributions {
+        let model_key = pricing.canonical_identity_key(&r.model);
+        let key = (
+            std::cmp::Reverse(r.day.clone()),
+            model_key.clone(),
+            r.source_tz.clone(),
+            r.app.as_str(),
+        );
+        let parts = crate::aggregate::rollup_cost_parts(r, pricing);
+        let row = map.entry(key).or_insert_with(|| DrillRollupRow {
+            day: r.day.clone(),
+            source_tz: r.source_tz.clone(),
+            app: r.app,
+            model_key,
+            source: r.source.clone(),
+            requests: 0,
+            tokens: TokenCounts::default(),
+            models: Vec::new(),
+            representative: r.model.clone(),
+            cost_usd: 0.0,
+            unknown_tokens: TokenCounts::default(),
+            has_estimated_cost: false,
+            cache_write_split_estimated: false,
+            cache_price_zero_estimated: false,
+            source_cost_usd: None,
+            source_cost_state: None,
+        });
+        row.requests = row
+            .requests
+            .checked_add(r.requests)
+            .ok_or_else(|| anyhow!("日汇总行请求数累计超出可表示范围"))?;
+        row.tokens = row
+            .tokens
+            .checked_add(&r.tokens)
+            .ok_or_else(|| anyhow!("日汇总行 token 累计超出可表示范围"))?;
+        if !row.models.contains(&r.model) {
+            row.models.push(r.model.clone());
+        }
+        if r.model < row.representative {
+            row.representative = r.model.clone();
+        }
+        row.cost_usd += parts.cost_usd;
+        if !row.cost_usd.is_finite() {
+            anyhow::bail!("日汇总行费用累计出现非有限值");
+        }
+        row.unknown_tokens = row
+            .unknown_tokens
+            .checked_add(&parts.unknown_tokens)
+            .ok_or_else(|| anyhow!("日汇总行未知 token 累计超出可表示范围"))?;
+        row.has_estimated_cost |= parts.has_estimated_cost;
+        row.cache_write_split_estimated |= parts.cache_write_split_estimated;
+        row.cache_price_zero_estimated |= parts.cache_price_zero_estimated;
+        let provided = r.source_cost_usd.is_some();
+        row.source_cost_state = Some(match (row.source_cost_state, provided) {
+            (Some("partial"), _) => "partial",
+            (Some("full"), true) => "full",
+            (Some("full"), false) | (Some("absent"), true) => "partial",
+            (Some("absent"), false) => "absent",
+            (None, true) => "full",
+            (None, false) => "absent",
+            (Some(_), _) => "partial",
+        });
+        if let Some(cost) = r.source_cost_usd {
+            if !cost.is_finite() {
+                anyhow::bail!("日汇总行来源费用出现非有限值");
+            }
+            let summed = row.source_cost_usd.unwrap_or(0.0) + cost;
+            if !summed.is_finite() {
+                anyhow::bail!("日汇总行来源费用累计出现非有限值");
+            }
+            row.source_cost_usd = Some(summed);
+        }
+    }
+    let mut rows: Vec<DrillRollupRow> = map.into_values().collect();
+    for row in &mut rows {
+        row.models.sort();
+    }
+    Ok(rows)
+}
+
+/// 日汇总行 → 展示行：ts 停留在统计日（不补造时分秒），请求 ID/会话/项目
+/// 留空（不补造归属），费用列 = 显示金额（与聚合行同值）。
+fn build_rollup_event_row(
+    snapshot: &crate::query::QuerySnapshot,
+    r: &DrillRollupRow,
+    ridx: usize,
+    drill_fp: &str,
+) -> Result<EventRow> {
+    let pricing = snapshot.pricing();
+    let unknown_total = r.unknown_tokens.total();
+    let total_cost_usd = match (r.has_estimated_cost, r.source_cost_usd) {
+        (_, Some(src)) => Some(r.cost_usd + src),
+        (true, None) => Some(r.cost_usd),
+        (false, None) => None,
+    };
+    let meta = RollupRowMeta {
+        day: r.day.clone(),
+        source_tz: r.source_tz.clone(),
+        source: r.source.clone(),
+        requests: r.requests,
+        label: crate::aggregate::model_label(&r.model_key, Some(&r.representative), pricing),
+        models: r.models.clone(),
+        cost_usd: r.cost_usd,
+        total_cost_usd,
+        source_cost_usd: r.source_cost_usd,
+        source_cost_state: r.source_cost_state,
+        cost_detail: "rollup_only",
+        unknown_pricing: unknown_total > 0,
+        unknown_reason: (unknown_total > 0).then_some("rollup_only"),
+        unknown_tokens: r.unknown_tokens,
+        cost_partially_unknown: unknown_total > 0,
+        has_estimated_cost: r.has_estimated_cost,
+        cache_write_split_estimated: r.cache_write_split_estimated,
+        cache_price_zero_estimated: r.cache_price_zero_estimated,
+    };
+    let cursor = serde_json::to_string(&crate::query::PageCursor {
+        v: crate::query::CURSOR_VERSION,
+        qid: snapshot.query_id.clone(),
+        mfp: snapshot.main_fingerprint.clone(),
+        dfp: drill_fp.to_string(),
+        ts: r.day.clone(),
+        rid: String::new(),
+        seq: 0,
+        kind: crate::query::CursorKind::Rollup,
+        ridx: Some(ridx),
+    })
+    .unwrap_or_default();
+    Ok(EventRow {
+        ts: r.day.clone(),
+        record_id: String::new(),
+        cursor,
+        agent: r.app.as_str(),
+        model: r.model_key.clone(),
+        session_id: String::new(),
+        project: String::new(),
+        session_initial_cwd: None,
+        event_cwd: None,
+        input: r.tokens.input,
+        output: r.tokens.output,
+        cache_write: r.tokens.cache_write,
+        cache_read: r.tokens.cache_read,
+        cache_write_5m: r
+            .tokens
+            .cache_write_split_known
+            .then_some(r.tokens.cache_write_5m),
+        cache_write_1h: r
+            .tokens
+            .cache_write_split_known
+            .then_some(r.tokens.cache_write_1h),
+        cost_usd: total_cost_usd,
+        cost_breakdown: None,
+        rollup: Some(meta),
+        covered_by_rollup: None,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3023,33 +3273,44 @@ pub(crate) fn query_events_from(
 ) -> Result<EventList> {
     const PAGE_SCAN_BATCH: usize = 256;
     let t = std::time::Instant::now();
-    let drill_fp = crate::query::drill_fingerprint(filter);
+    let pricing = snapshot.pricing().clone();
+    let drill_fp = crate::query::drill_fingerprint(filter, &pricing);
     // 下钻过滤：在固定行序上筛匹配行（绝对位置），total 在同一快照内恒定。
     // MP04：模型筛选按**等价身份**匹配——前端传身份键（Group.key）或原始
     // 写法都能命中，规则与聚合分组完全一致。
+    // v0.9.4：匹配同样经渠道别名确认，跨渠道写法的明细都归入同一子查询。
     let model_key: Option<String> = filter
         .model
         .as_deref()
-        .map(|m| crate::model_identity::ModelIdentity::parse(m).identity_key());
+        .map(|m| pricing.canonical_identity_key(m));
     // 游标定位：返回严格位于游标行之后的匹配行（排序位次语义不变）。
     let after = match &filter.before {
         Some(cur) => crate::query::locate_cursor(snapshot, cur, &drill_fp)? + 1,
         None => 0,
     };
     let limit = filter.limit.unwrap_or(200).min(1000);
+    // v0.9.4：日汇总行来自同一冻结快照的采用贡献（与聚合同源），合并后
+    // 按日降序 → 身份升序排在事件段之后；两段拼接分页，游标携带段别。
+    let rollups = drill_rollup_rows(snapshot)?;
+    let event_count = snapshot.row_count();
     let mut total: u64 = 0;
     let mut rows: Vec<EventRow> = Vec::new();
-    let pricing = snapshot.pricing().clone();
     if filter.model.is_none() && filter.project.is_none() && filter.day.is_none() {
-        // 无下钻：total 是快照行数，只读取当前页的 200 条事件本体。
-        let total_rows = snapshot.row_count();
-        total = total_rows as u64;
-        if after < total_rows && limit > 0 {
-            let end = (after + limit).min(total_rows);
+        // 无下钻：total = 快照事件数 + 汇总行数，只读取当前页本体。
+        total = (event_count + rollups.len()) as u64;
+        if after < event_count && limit > 0 {
+            let end = (after + limit).min(event_count);
             snapshot.for_each_row_event_range(after, end, PAGE_SCAN_BATCH, &mut |row, e| {
                 rows.push(build_event_row(snapshot, row, e, &drill_fp, &pricing)?);
                 Ok(())
             })?;
+        }
+        let rstart = after.saturating_sub(event_count);
+        for (i, r) in rollups.iter().enumerate().skip(rstart) {
+            if rows.len() >= limit {
+                break;
+            }
+            rows.push(build_rollup_event_row(snapshot, r, i, &drill_fp)?);
         }
     } else {
         snapshot.for_each_row_event(PAGE_SCAN_BATCH, &mut |row, e| {
@@ -3057,9 +3318,9 @@ pub(crate) fn query_events_from(
                 .day
                 .as_ref()
                 .is_none_or(|d| e.ts.to_zoned(snapshot.tz.clone()).date().to_string() == *d);
-            let model_ok = model_key.as_ref().is_none_or(|k| {
-                crate::model_identity::ModelIdentity::parse(&e.model).identity_key() == *k
-            });
+            let model_ok = model_key
+                .as_ref()
+                .is_none_or(|k| pricing.canonical_identity_key(&e.model) == *k);
             let project_ok = filter.project.as_ref().is_none_or(|p| e.project == *p);
             if !(day_ok && model_ok && project_ok) {
                 return Ok(());
@@ -3072,6 +3333,22 @@ pub(crate) fn query_events_from(
             rows.push(build_event_row(snapshot, row, e, &drill_fp, &pricing)?);
             Ok(())
         })?;
+        // 汇总段：模型/日筛选与聚合同规则；日汇总没有项目归属，项目下钻
+        // 一律不含汇总行。ridx 用合并序绝对下标（游标跨页稳定）。
+        for (i, r) in rollups.iter().enumerate() {
+            let matched = model_key.as_ref().is_none_or(|k| r.model_key == *k)
+                && filter.day.as_ref().is_none_or(|d| r.day == *d)
+                && filter.project.is_none();
+            if !matched {
+                continue;
+            }
+            total += 1;
+            let position = event_count + i;
+            if position < after || rows.len() >= limit {
+                continue;
+            }
+            rows.push(build_rollup_event_row(snapshot, r, i, &drill_fp)?);
+        }
     }
     path_info!(
         snapshot.trigger.is_auto(),
@@ -3125,8 +3402,26 @@ fn build_event_row(
         ts: e.ts.to_string(),
         rid: e.record_id.clone(),
         seq: row.seq,
+        kind: crate::query::CursorKind::Event,
+        ridx: None,
     })
     .unwrap_or_default();
+    // v0.9.4：标记已计入日汇总的请求——与聚合跳过同一规则（同桶且不晚于
+    // 覆盖起点），让明细视图能解释「为什么总量大于未覆盖明细之和」。
+    let covered_by_rollup = snapshot
+        .rollup_selection()
+        .covered_detail
+        .iter()
+        .find_map(|b| {
+            if b.app != e.agent || pricing.canonical_identity_key(&e.model) != b.model_identity {
+                return None;
+            }
+            let tz = jiff::tz::TimeZone::get(&b.source_tz).ok()?;
+            if e.ts.to_zoned(tz).date().to_string() != b.day {
+                return None;
+            }
+            b.since.is_none_or(|at| e.ts <= at).then(|| b.day.clone())
+        });
     Ok(EventRow {
         ts: e
             .ts
@@ -3149,6 +3444,8 @@ fn build_event_row(
         cache_write_1h: e.cache_write_split_known.then_some(e.cache_write_1h),
         cost_usd,
         cost_breakdown,
+        rollup: None,
+        covered_by_rollup,
     })
 }
 

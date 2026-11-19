@@ -217,10 +217,19 @@ fn write_claude_log(root: &Path, rel: &str, lines: &[String]) {
     std::fs::write(&path, lines.join("\n")).unwrap();
 }
 
+/// 请求明细行数（v0.9.4 起下钻还返回独立的「日汇总」行——本套件断言的
+/// 是逐请求明细的可见性，汇总行单独计数，见 model_alias_rollup_drilldown）。
 fn detail_rows(opts: &SummaryOptions) -> usize {
     let snapshot = query::begin_query(opts).unwrap();
     let list = query::query_events(&snapshot.query_id, &EventFilter::default()).unwrap();
-    list.rows.len()
+    list.rows.iter().filter(|r| r.rollup.is_none()).count()
+}
+
+/// 下钻中的日汇总行数（v0.9.4）。
+fn rollup_rows(opts: &SummaryOptions) -> usize {
+    let snapshot = query::begin_query(opts).unwrap();
+    let list = query::query_events(&snapshot.query_id, &EventFilter::default()).unwrap();
+    list.rows.iter().filter(|r| r.rollup.is_some()).count()
 }
 
 /// 验收例：CCS 汇总 1,000 token / 10 请求，TS 只有 1 条 100 token 明细。
@@ -421,6 +430,7 @@ fn rollup_only_history_counts_rollup() {
     assert_eq!(report.rollup_coverage.covered_buckets, 0);
     assert_eq!(report.rollup_coverage.unresolved_buckets, 0);
     assert_eq!(detail_rows(&o), 0, "没有明细行可展示");
+    assert_eq!(rollup_rows(&o), 1, "v0.9.4：纯汇总历史下钻显示一条日汇总行");
     std::fs::remove_dir_all(&dir).ok();
 }
 

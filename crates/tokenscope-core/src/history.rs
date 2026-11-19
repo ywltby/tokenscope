@@ -1115,6 +1115,29 @@ impl ReadSnapshot {
             f(&rows)?;
         }
     }
+    /// v0.9.4：快照内事件的去重结构身份键集合（按应用，可见性与覆盖桶扫描
+    /// 同一过滤）。用于扩展覆盖桶的 SQL 收窄集合——渠道别名归一后，不同
+    /// 写法的原生明细也能命中汇总桶。走 `idx_usage_model_time` 前导列。
+    pub(crate) fn distinct_model_identities(
+        &self,
+        app: Option<AgentKind>,
+    ) -> Result<std::collections::HashSet<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT model_identity FROM usage_events
+             WHERE (?1 IS NULL OR app = ?1)
+               AND (app = 'claude-code' OR origin_rank >= 1)",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![app.map(|a| a.as_str())], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut out = std::collections::HashSet::new();
+        for r in rows {
+            out.insert(r?);
+        }
+        Ok(out)
+    }
+
     pub fn close(&mut self) {
         if self.closed {
             return;

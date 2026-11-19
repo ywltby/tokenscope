@@ -70,6 +70,9 @@ export const REQUIRED_CONTRACTS = [
   "cost_cell_layout_not_concatenated",
   // v0.9.3（2026-11-18）：无 † / 独立未知列，颜色表达未定价，说明移到标题浮层。
   "cost_display_consolidation",
+  // v0.9.4（2026-11-19）：跨渠道别名合并为一行 + CCS 日汇总下钻行（日粒度、
+  // CCS 应用列、被覆盖标记、混合分页稳定）。
+  "rollup_drilldown_rows",
   // C06（控件材质与浮层可读性计划）：像素级边界对比度与焦点契约。
   "ui_control_material",
   // BS04（启动卡死取证与引导期恢复计划）：检查挂起可见可重查、迟到响应
@@ -289,9 +292,11 @@ function session_dpr_note() {
 
 /** 主题分段切换（右上角三段图标控件的深/浅）。 */
 async function clickThemeSegment(page, label) {
-  const btn = page.locator('header .ts-segmented button, .app-head .ts-segmented button', {
-    hasText: label,
-  }).first();
+  const btn = page
+    .locator("header .ts-segmented button, .app-head .ts-segmented button", {
+      hasText: label,
+    })
+    .first();
   if ((await btn.count()) === 0) {
     // 主题控件是纯图标：退化为 aria-label 定位。
     const aria = label === "深色" ? "深色模式" : label === "浅色" ? "浅色模式" : label;
@@ -327,7 +332,8 @@ const IMPL = {
   ui_refresh_clock: uiRefreshClock,
   boot_stall_recovery: bootStallRecovery,
   ui_chart_transition_preserves_animation: uiChartTransition,
-  async large_pricing_does_not_block_settings_navigation(ctx) {    const name = "large_pricing_does_not_block_settings_navigation";
+  async large_pricing_does_not_block_settings_navigation(ctx) {
+    const name = "large_pricing_does_not_block_settings_navigation";
     const session = await ctx.open({ fixture: "large-pricing", viewport: VIEWPORTS.desktop });
     try {
       await openDashboard(session);
@@ -702,8 +708,7 @@ const IMPL = {
    */
   async settings_about_contract(ctx) {
     const name = "settings_about_contract";
-    const navItems = (page) =>
-      page.locator(".settings-nav-item, .settings-nav .ts-segmented-item");
+    const navItems = (page) => page.locator(".settings-nav-item, .settings-nav .ts-segmented-item");
     const clickAbout = async (page, label) => {
       const btn = navItems(page).filter({ hasText: label }).first();
       await btn.waitFor({ state: "visible", timeout: 5000 });
@@ -759,7 +764,12 @@ const IMPL = {
           const calls = await session.readIpcCalls();
           const aboutCalls = calls.slice(callsBeforeAbout.length);
           const versionCalls = calls.filter((c) => c.cmd === "plugin:app|version").length;
-          ctx.record(name, `${tag}:进入关于只读取一次版本`, versionCalls === 1, `调用=${versionCalls}`);
+          ctx.record(
+            name,
+            `${tag}:进入关于只读取一次版本`,
+            versionCalls === 1,
+            `调用=${versionCalls}`,
+          );
           const forbidden = [
             "settings_set_language",
             "settings_set_timezone",
@@ -803,7 +813,10 @@ const IMPL = {
             await page.waitForTimeout(200);
             await realClick(
               page,
-              page.locator(".n-base-select-option").filter({ hasText: /^English$/ }).first(),
+              page
+                .locator(".n-base-select-option")
+                .filter({ hasText: /^English$/ })
+                .first(),
             );
             await page.waitForTimeout(400);
             await clickAbout(page, "About");
@@ -1570,9 +1583,7 @@ const IMPL = {
         const floating = [measured.panel, ...measured.ancestors];
         const elevatedLayers = floating.filter((l) => alpha(l.bg) < 1 && blurred(l.blur));
         const solidLayers = floating.filter((l) => alpha(l.bg) === 1 && !blurred(l.blur));
-        const nonSolidLayers = floating.filter(
-          (l) => !(alpha(l.bg) === 1 && !blurred(l.blur)),
-        );
+        const nonSolidLayers = floating.filter((l) => !(alpha(l.bg) === 1 && !blurred(l.blur)));
         ctx.record(
           "date_outer_surface_matches_contract",
           `${theme}:量测边界为浮层本体（止于页面背景前）`,
@@ -2991,8 +3002,7 @@ const IMPL = {
         ctx.record(
           name,
           `${viewport.label}:费用节点单金额（结构消除粘行）`,
-          cells.length >= 5 &&
-            cells.every((c) => c.text.length > 0),
+          cells.length >= 5 && cells.every((c) => c.text.length > 0),
           `cells=${cells.length} empty=${cells.filter((c) => c.text.length === 0).length}`,
         );
         // v0.9.2 单金额规则：每个费用节点只有主金额，无来源长文/胶囊/第二行。
@@ -3085,7 +3095,9 @@ const IMPL = {
               text.includes("\u8bf7\u6c42\u660e\u7ec6\u4f30\u7b97") ||
               text.includes("\u6309\u65e5\u6c47\u603b\u4f30\u7b97"),
             hasSource: text.includes("\u65e5\u6c47\u603b\u6765\u6e90\u8bb0\u5f55\u8d39\u7528"),
-            hasNoBasis: text.includes("\u6ca1\u6709\u53ef\u9002\u7528\u7684\u8d39\u7528\u4f9d\u636e"),
+            hasNoBasis: text.includes(
+              "\u6ca1\u6709\u53ef\u9002\u7528\u7684\u8d39\u7528\u4f9d\u636e",
+            ),
             hasZero: text.includes("$0.00"),
             hasAssumed: text.includes("\u7f3a\u5931\u7f13\u5b58\u4ef7\u6309 0 \u4f30\u7b97"),
             text: text.slice(0, 300),
@@ -3133,7 +3145,9 @@ const IMPL = {
           const text = body.textContent?.replace(/\s+/g, " ").trim() ?? "";
           return {
             hasAssumed: text.includes("\u7f3a\u5931\u7f13\u5b58\u4ef7\u6309 0 \u4f30\u7b97"),
-            hasDetail: text.includes("\u672a\u63d0\u4f9b\u8be5\u7f13\u5b58\u5206\u9879\u5355\u4ef7"),
+            hasDetail: text.includes(
+              "\u672a\u63d0\u4f9b\u8be5\u7f13\u5b58\u5206\u9879\u5355\u4ef7",
+            ),
             hasZeroNote: text.includes("\u6309 $0 \u53c2\u4e0e\u4f30\u7b97"),
             text: text.slice(0, 300),
           };
@@ -3178,7 +3192,7 @@ const IMPL = {
             tipStyle.padding !== "0px",
           JSON.stringify(tipStyle),
         );
-const cardState = await page.evaluate(() => {
+        const cardState = await page.evaluate(() => {
           const card = document.querySelector(".metric-card");
           if (!card) return null;
           const trigger = card.querySelector(".gcb-amount-main");
@@ -3288,7 +3302,8 @@ const cardState = await page.evaluate(() => {
         await page.keyboard.press("Escape");
         await page.waitForTimeout(200);
         const closed = await page.evaluate(
-          () => document.querySelector(".agg-info-trigger")?.getAttribute("aria-describedby") == null,
+          () =>
+            document.querySelector(".agg-info-trigger")?.getAttribute("aria-describedby") == null,
         );
         ctx.record(name, `${viewport.label}:Escape 关闭标题浮层`, closed, String(closed));
 
@@ -3379,6 +3394,204 @@ const cardState = await page.evaluate(() => {
       } finally {
         await session.close();
       }
+    }
+  },
+
+  /**
+   * v0.9.4：跨渠道别名合并 + CCS 日汇总下钻。
+   * - 两个 Fable 渠道 ID 在表格与图表都只出现一次，下钻见两侧原始 ID 的请求；
+   * - 纯日汇总模型（Opus）下钻按两天返回两条 CCS 行：日粒度时间、CCS 应用列、
+   *   无项目归属（—）、真实请求数、分组费用浮层；
+   * - mixed 模型（Sonnet）下钻含原生请求 + 被覆盖标记 + 日汇总行，跨页无漏/重。
+   */
+  async rollup_drilldown_rows(ctx) {
+    const name = "rollup_drilldown_rows";
+    const session = await ctx.open({
+      fixture: "rollup-drill",
+      viewport: VIEWPORTS.desktop,
+      theme: "light",
+    });
+    const page = session.page;
+    // 滚动加载当前下钻的全部页（明细区到底触发 load-more），按提示总数判停。
+    const loadAllEvents = async () => {
+      const region = page.getByRole("region", { name: "请求明细列表", exact: true });
+      for (let i = 0; i < 8; i++) {
+        const hint = await page.locator(".events-card .table-hint").innerText();
+        const m = hint.match(/共\s*([\d,]+)\s*条/);
+        const total = m ? Number(m[1].replace(/,/g, "")) : 0;
+        const loaded = await page
+          .locator(".events-card .n-data-table-tbody .n-data-table-tr")
+          .count();
+        if (loaded >= total) return;
+        await region.focus();
+        await page.keyboard.press("End");
+        await page.waitForTimeout(450);
+      }
+    };
+    // 按列读取明细行（ts/应用/模型/项目）+ 日汇总/被覆盖标记。
+    const readEvents = () =>
+      page.evaluate(() => {
+        const trs = [
+          ...document.querySelectorAll(".events-card .n-data-table-tbody .n-data-table-tr"),
+        ];
+        return trs.map((tr) => {
+          const td = [...tr.querySelectorAll("td")];
+          const time = (td[0]?.textContent ?? "").trim();
+          return {
+            time,
+            agent: (td[1]?.textContent ?? "").trim(),
+            model: (td[2]?.textContent ?? "").trim(),
+            project: (td[3]?.textContent ?? "").trim(),
+            isRollup: time.includes("日汇总"),
+            covered: time.includes("已计入汇总"),
+            dayOnly: /^\d{4}-\d{2}-\d{2}/.test(time) && !time.includes(":"),
+          };
+        });
+      });
+    const drillInto = async (label) => {
+      await realClick(
+        page,
+        page.locator(".usage-card .n-data-table-tr", { hasText: label }).locator(".dim-cell"),
+      );
+      await page.waitForTimeout(500);
+      await loadAllEvents();
+    };
+    try {
+      await openDashboard(session);
+      await clickSegment(page, "按模型");
+      await page.waitForTimeout(600);
+
+      // 1. 合并：表格一行、图表一个 Fable 类别。
+      const fableTable = await page
+        .locator(".usage-card .n-data-table-tr", { hasText: "Claude Fable 5.2" })
+        .count();
+      ctx.record(name, "表格：两渠道 ID 合并为一行", fableTable === 1, `Fable 行数=${fableTable}`);
+      const fableChart = await page.evaluate(
+        () =>
+          [...document.querySelectorAll(".trend-card svg text")].filter((t) =>
+            (t.textContent ?? "").includes("Fable"),
+          ).length,
+      );
+      ctx.record(
+        name,
+        "图表：Fable 类别只出现一次",
+        fableChart === 1,
+        `含 Fable 轴标签数=${fableChart}`,
+      );
+      await ctx.shot(name, session, "merged-summary");
+
+      // 2. Fable 下钻：两侧渠道原始 ID 的请求都可见（跨页），无日汇总行。
+      await drillInto("Claude Fable 5.2");
+      const fable = await readEvents();
+      const fableModels = fable.map((r) => r.model);
+      ctx.record(
+        name,
+        "Fable 下钻见两侧渠道原始 ID（4 请求）",
+        fable.length === 4 &&
+          fableModels.filter((m) => m === "anthropic/claude-fable-5.2").length === 2 &&
+          fableModels.filter((m) => m === "claude-fable-5-2").length === 2 &&
+          fable.every((r) => !r.isRollup),
+        JSON.stringify(fableModels),
+      );
+      await ctx.shot(name, session, "fable-drill");
+
+      // 3. Opus 下钻：两条 CCS 日汇总行（日粒度 / CCS / — / 请求数 / 费用浮层）。
+      await drillInto("Claude Opus 4.7");
+      const opus = await readEvents();
+      const opusDays = opus.map((r) => r.time.slice(0, 10)).sort();
+      ctx.record(
+        name,
+        "Opus 下钻两条 CCS 日汇总行（两天）",
+        opus.length === 2 &&
+          opus.every((r) => r.isRollup && r.dayOnly && r.agent === "CCS" && r.project === "—") &&
+          JSON.stringify(opusDays) === JSON.stringify(["2026-05-28", "2026-05-29"]),
+        JSON.stringify(opus),
+      );
+      ctx.record(
+        name,
+        "日汇总行展示真实请求数（223 / 11）",
+        opus.some((r) => r.model.includes("223 次请求")) &&
+          opus.some((r) => r.model.includes("11 次请求")),
+        JSON.stringify(opus.map((r) => r.model)),
+      );
+      // 费用浮层复用分组依据（构成可见）。
+      await page.locator(".events-card .n-data-table-tr .gcb-trigger").first().hover();
+      await page.waitForTimeout(350);
+      const opusFeeTip = await page.evaluate(() => {
+        const body = [...document.querySelectorAll(".gcb-tooltip")].find((el) => {
+          let node = el;
+          while (node) {
+            const cs = getComputedStyle(node);
+            if (cs.display === "none" || cs.visibility === "hidden") return false;
+            node = node.parentElement;
+          }
+          return true;
+        });
+        return body ? (body.textContent ?? "").replace(/\s+/g, " ").trim() : null;
+      });
+      ctx.record(
+        name,
+        "日汇总行费用浮层含构成依据",
+        opusFeeTip != null && opusFeeTip.includes("构成"),
+        String(opusFeeTip).slice(0, 200),
+      );
+      await page.mouse.move(5, 5);
+      await ctx.shot(name, session, "opus-rollup-drill");
+
+      // 4. Sonnet mixed 下钻：原生 + 被覆盖标记 + 日汇总行，跨页无漏/重。
+      await drillInto("Claude Sonnet 4.5");
+      const sonnet = await readEvents();
+      const times = sonnet.map((r) => r.time);
+      ctx.record(
+        name,
+        "mixed 下钻含原生/被覆盖/日汇总三类行（共 3）",
+        sonnet.length === 3 &&
+          sonnet.filter((r) => r.isRollup).length === 1 &&
+          sonnet.filter((r) => r.covered).length === 1 &&
+          sonnet.filter((r) => !r.isRollup && !r.covered).length === 1,
+        JSON.stringify(sonnet),
+      );
+      ctx.record(
+        name,
+        "混合分页无重复行（行时间互异）",
+        new Set(times).size === times.length,
+        JSON.stringify(times),
+      );
+      // 被覆盖请求悬浮说明用量已计入当日汇总。
+      await page.locator(".events-card .ts-rollup-time.ts-focusable").first().hover();
+      await page.waitForTimeout(350);
+      const coveredTip = await page.evaluate(() => {
+        const body = [...document.querySelectorAll(".n-tooltip")].find((el) => {
+          let node = el;
+          while (node) {
+            const cs = getComputedStyle(node);
+            if (cs.display === "none" || cs.visibility === "hidden") return false;
+            node = node.parentElement;
+          }
+          return true;
+        });
+        return body ? (body.textContent ?? "").replace(/\s+/g, " ").trim() : null;
+      });
+      ctx.record(
+        name,
+        "被覆盖请求标记说明计入当日汇总",
+        coveredTip != null &&
+          coveredTip.includes("2026-05-28") &&
+          coveredTip.includes("不重复计入"),
+        String(coveredTip).slice(0, 200),
+      );
+      await ctx.shot(name, session, "sonnet-mixed-drill");
+
+      // 5. 关闭下钻筛选回到主批次（筛选标签可关闭）。
+      await page.mouse.move(5, 5);
+      await page.locator(".events-card .filter-chip").click();
+      await page.waitForTimeout(500);
+      const chipGone = (await page.locator(".events-card .filter-chip").count()) === 0;
+      ctx.record(name, "下钻筛选标签可关闭", chipGone, `残留标签=${!chipGone}`);
+
+      await ctx.finishSession(session);
+    } finally {
+      await session.close();
     }
   },
 };
